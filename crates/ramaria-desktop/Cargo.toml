@@ -1,0 +1,19 @@
+[package]
+name = "ramaria-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "ramaria_desktop_lib"
+
+[dependencies]
+ramaria-app = { path = "../ramaria-app" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+# Tauri 依赖在 Phase 5 启用，当前仅占位
+# tauri = { workspace = true }
+# tauri-build = { workspace = true }

@@ -1,0 +1,26 @@
+﻿# Cargo缓存
+/target/
+/target-*/
+
+# 本地数据库文件
+/.ramaria-dev/
+*.db
+*.sqlite
+*.sqlite3
+
+# 环境与隐私配置
+.env
+.env.*
+!.env.example
+*.key
+
+# 日志文件
+*.log
+/logs/
+
+# 系统与编译器文件
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/

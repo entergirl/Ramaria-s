@@ -1,0 +1,42 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/ramaria-core",
+    "crates/ramaria-storage",
+    "crates/ramaria-memory",
+    "crates/ramaria-llm",
+    "crates/ramaria-app",
+    "crates/ramaria-cli",
+    "crates/ramaria-desktop",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+# ---------- 异步运行时 ----------
+tokio = { version = "1", features = ["full"] }
+
+# ---------- 序列化 ----------
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# ---------- 数据库 ----------
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate", "uuid"] }
+
+# ---------- 工具 ----------
+uuid = { version = "1", features = ["v4", "serde"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+thiserror = "2"
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+
+# ---------- CLI ----------
+clap = { version = "4", features = ["derive"] }
+
+# ---------- Desktop ----------
+tauri = "2"
+tauri-build = "2"
