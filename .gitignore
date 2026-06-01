@@ -25,5 +25,10 @@ desktop.ini
 .vscode/
 .idea/
 
+# 开发数据库（本地数据，不上传）
+*.db-journal
+*.db-wal
+*.db-shm
+
 # 项目私有文档
 /docs/
