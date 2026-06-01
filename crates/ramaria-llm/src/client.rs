@@ -105,14 +105,14 @@ impl LlmClient {
                 if data == "[DONE]" {
                     break;
                 }
-                if let Ok(chunk) = serde_json::from_str::<StreamChunk>(data) {
-                    if let Some(choice) = chunk.choices.first() {
-                        if let Some(ref content) = choice.delta.content {
-                            on_delta(content.clone());
-                        }
-                        if choice.finish_reason.is_some() {
-                            break;
-                        }
+                if let Ok(chunk) = serde_json::from_str::<StreamChunk>(data)
+                    && let Some(choice) = chunk.choices.first()
+                {
+                    if let Some(ref content) = choice.delta.content {
+                        on_delta(content.clone());
+                    }
+                    if choice.finish_reason.is_some() {
+                        break;
                     }
                 }
             }
