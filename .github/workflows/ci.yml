@@ -1,0 +1,79 @@
+# Ramaria Rust CI
+# 规则：
+#   - 三平台编译 + 单元测试
+#   - 不跑真实 LLM，不下 embedding 模型，不打包 Tauri
+#   - 阻塞条件：cargo build / test / clippy / fmt 全部通过
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      # --------------------------------------------------
+      # 1. 检出代码
+      # --------------------------------------------------
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # --------------------------------------------------
+      # 2. 安装 Rust 工具链
+      # --------------------------------------------------
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+
+      # --------------------------------------------------
+      # 3. 缓存依赖（加速后续构建）
+      # --------------------------------------------------
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # --------------------------------------------------
+      # 4. 编译（不指定 --release，debug 模式更快）
+      # --------------------------------------------------
+      - name: Build
+        run: cargo build --workspace
+
+      # --------------------------------------------------
+      # 5. 单元测试
+      # --------------------------------------------------
+      - name: Test
+        run: cargo test --workspace
+
+      # --------------------------------------------------
+      # 6. Clippy（-D warnings = 任何警告视为错误）
+      # --------------------------------------------------
+      - name: Lint (clippy)
+        run: cargo clippy --workspace -- -D warnings
+
+      # --------------------------------------------------
+      # 7. 格式检查
+      # --------------------------------------------------
+      - name: Format check
+        run: cargo fmt --all --check
