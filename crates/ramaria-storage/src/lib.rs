@@ -33,13 +33,12 @@ mod tests {
             .expect("插入失败");
 
         // 4. 查询回来
-        let row: (String, String, i64) = sqlx::query_as(
-            "SELECT id, name, created_at FROM poc_test WHERE id = ?"
-        )
-            .bind(&id)
-            .fetch_one(&pool)
-            .await
-            .expect("查询失败");
+        let row: (String, String, i64) =
+            sqlx::query_as("SELECT id, name, created_at FROM poc_test WHERE id = ?")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .expect("查询失败");
 
         // 5. 断言数据一致
         assert_eq!(row.0, id, "ID 不一致");
