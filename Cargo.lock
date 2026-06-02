@@ -1347,6 +1347,8 @@ dependencies = [
  "anyhow",
  "clap",
  "ramaria-app",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
