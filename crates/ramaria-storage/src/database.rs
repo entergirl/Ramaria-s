@@ -128,10 +128,10 @@ fn resolve_db_path(db_path: Option<PathBuf>) -> PathBuf {
         return p;
     }
 
-    if let Ok(env_path) = std::env::var(ENV_DB_PATH) {
-        if !env_path.is_empty() {
-            return PathBuf::from(env_path);
-        }
+    if let Ok(env_path) = std::env::var(ENV_DB_PATH)
+        && !env_path.is_empty()
+    {
+        return PathBuf::from(env_path);
     }
 
     // 开发模式默认路径：相对 Cargo workspace 根

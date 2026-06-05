@@ -47,17 +47,12 @@ pub fn now_ms() -> i64 {
 /// 职责:
 /// - 标记一条消息来自本地 provider 还是线上 provider。
 /// - 供隐私提示、日志脱敏和 UI 状态展示使用。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum MessageSource {
+    #[default]
     Local,
     Online,
-}
-
-impl Default for MessageSource {
-    fn default() -> Self {
-        Self::Local
-    }
 }
 
 impl std::fmt::Display for MessageSource {
@@ -131,6 +126,12 @@ pub struct Session {
     pub started_at: i64,
     /// Session 结束时间，None 表示未关闭
     pub ended_at: Option<i64>,
+}
+
+impl Default for Session {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Session {
@@ -429,10 +430,11 @@ impl std::fmt::Display for ProfileField {
 /// 职责:
 /// - 表示画像条目的审核或生效状态。
 /// - v1.0 默认直接 approved，后续可扩展用户确认流程。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ProfileStatus {
     /// 已生效
+    #[default]
     Approved,
     /// 待用户确认
     Pending,
@@ -440,9 +442,14 @@ pub enum ProfileStatus {
     Rejected,
 }
 
-impl Default for ProfileStatus {
-    fn default() -> Self {
-        Self::Approved
+impl ProfileStatus {
+    /// 返回状态的稳定字符串标识。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Approved => "approved",
+            Self::Pending => "pending",
+            Self::Rejected => "rejected",
+        }
     }
 }
 
@@ -514,6 +521,7 @@ impl UserProfile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LlmProvider {
+    #[serde(rename = "lm_studio")]
     LmStudio,
     DeepSeek,
     OpenAI,

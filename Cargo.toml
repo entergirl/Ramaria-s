@@ -34,6 +34,10 @@ thiserror = "2"
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 
+# ---------- 异步抽象（纯类型，无 I/O 依赖）----------
+async-trait = "0.1"
+futures = "0.3"
+
 # ---------- 网络 ----------
 reqwest = { version = "0.12", features = ["json", "stream"] }
 
