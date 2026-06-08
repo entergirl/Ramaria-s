@@ -1,16 +1,19 @@
-//! rust/crates/ramaria-storage/src/lib.rs - Ramaria SQLite 存储层
+//! rust/crates/ramaria-storage/src/lib.rs - Ramaria SQLite 存储层（v1.0 完整版）
 //!
 //! 设计特点:
-//! - 封装 SqlitePool，实现 `StorageBackend` trait 的所有业务 CRUD 方法
+//! - 封装 SqlitePool，实现 `StorageBackend` trait 的全部方法（覆盖 23 张表）
 //! - Repository 模式：每个子模块负责一类实体的 SQL 操作与行映射
 //! - 所有可恢复错误统一转换为 RamariaError::Storage
 //! - 手动行映射避免 sqlx derive 侵入 core 层，保持零 I/O 约束
 //! - 公共 API 与 `StorageBackend` trait 一致，供 app/memory 层依赖注入使用
+//! - ID 类型对齐: TEXT 主键表用 Uuid，INTEGER AUTOINCREMENT 表用 i64
 
 use ramaria_core::error::RamariaResult;
 use ramaria_core::traits::StorageBackend;
 use ramaria_core::types::{
-    BackendConfig, MemoryL1, MemoryL2, Message, PrivacyConsent, Session, UserProfile,
+    BackendConfig, ClusterSnapshot, EventRelation, MemoryEvent, MemoryL1, Message, Persona,
+    PersonaExample, PersonaFact, PersonalityTrait, PrivacyConsent, Session, TraitEvidence,
+    TraitStatus,
 };
 use sqlx::SqlitePool;
 use uuid::Uuid;
@@ -18,264 +21,697 @@ use uuid::Uuid;
 pub mod database;
 pub mod repo;
 
-// =========================================================
-// SqliteStorage - StorageBackend 实现
-// =========================================================
-
 /// SQLite 存储后端。
-///
-/// 职责:
-/// - 持有 SqlitePool，负责所有数据持久化操作。
-/// - 实现 StorageBackend trait，供 app 和 memory 层通过 trait object 注入。
-///
-/// 使用:
-/// - `SqliteStorage::new(pool)` 创建实例。
-/// - 所有方法委托给 `repo` 子模块的对应函数。
 pub struct SqliteStorage {
     pool: SqlitePool,
 }
 
 impl SqliteStorage {
-    /// 创建新的 SqliteStorage 实例。
-    ///
-    /// 参数:
-    /// - `pool`: 已初始化的 SqlitePool。
-    ///
-    /// 返回:
-    /// - SqliteStorage 实例。
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
 }
 
-// =========================================================
-// StorageBackend trait 实现
-// =========================================================
-
 #[async_trait::async_trait]
 impl StorageBackend for SqliteStorage {
     // -- Session --
-
     async fn create_session(&self) -> RamariaResult<Session> {
-        let session = Session::new();
-        repo::sessions::create_session(&self.pool, &session).await?;
-        Ok(session)
+        repo::sessions::create(&self.pool).await
     }
-
     async fn close_session(&self, session_id: Uuid) -> RamariaResult<()> {
-        repo::sessions::close_session(&self.pool, session_id).await
+        repo::sessions::close(&self.pool, session_id).await
     }
-
     async fn get_session(&self, session_id: Uuid) -> RamariaResult<Option<Session>> {
-        repo::sessions::get_session(&self.pool, session_id).await
+        repo::sessions::get(&self.pool, session_id).await
     }
-
     async fn list_active_sessions(&self) -> RamariaResult<Vec<Session>> {
-        repo::sessions::list_active_sessions(&self.pool).await
+        repo::sessions::list_active(&self.pool).await
     }
-
     async fn list_sessions(&self) -> RamariaResult<Vec<Session>> {
-        repo::sessions::list_sessions(&self.pool).await
+        repo::sessions::list_all(&self.pool).await
     }
-
     async fn delete_session(&self, session_id: Uuid) -> RamariaResult<()> {
-        repo::sessions::delete_session(&self.pool, session_id).await
+        repo::sessions::delete(&self.pool, session_id).await
     }
 
     // -- Message (L0) --
-
     async fn save_message(&self, message: &Message) -> RamariaResult<()> {
-        repo::messages::save_message(&self.pool, message).await
+        repo::messages::save(&self.pool, message).await
     }
-
     async fn list_messages(&self, session_id: Uuid) -> RamariaResult<Vec<Message>> {
-        repo::messages::list_messages(&self.pool, session_id).await
+        repo::messages::list_by_session(&self.pool, session_id).await
     }
-
     async fn find_message_by_fingerprint(
         &self,
         fingerprint: &str,
     ) -> RamariaResult<Option<Message>> {
-        repo::messages::find_message_by_fingerprint(&self.pool, fingerprint).await
+        repo::messages::find_by_fingerprint(&self.pool, fingerprint).await
     }
 
     // -- Memory L1 --
-
     async fn save_memory_l1(&self, memory: &MemoryL1) -> RamariaResult<()> {
-        repo::memory_l1::save_memory_l1(&self.pool, memory).await
+        repo::memory_l1::save(&self.pool, memory).await
     }
-
     async fn list_memory_l1(&self, session_id: Uuid) -> RamariaResult<Vec<MemoryL1>> {
-        repo::memory_l1::list_memory_l1(&self.pool, session_id).await
+        repo::memory_l1::list_by_session(&self.pool, session_id).await
     }
-
     async fn get_memory_l1(&self, id: Uuid) -> RamariaResult<Option<MemoryL1>> {
-        repo::memory_l1::get_memory_l1(&self.pool, id).await
+        repo::memory_l1::get(&self.pool, id).await
     }
-
     async fn mark_l1_absorbed(&self, l1_ids: &[Uuid]) -> RamariaResult<()> {
-        repo::memory_l1::mark_l1_absorbed(&self.pool, l1_ids).await
+        repo::memory_l1::mark_absorbed(&self.pool, l1_ids).await
+    }
+    async fn list_unabsorbed_l1(&self, persona_uid: &str) -> RamariaResult<Vec<MemoryL1>> {
+        repo::memory_l1::list_unabsorbed(&self.pool, persona_uid).await
     }
 
-    async fn list_unabsorbed_l1(&self) -> RamariaResult<Vec<MemoryL1>> {
-        repo::memory_l1::list_unabsorbed_l1(&self.pool).await
+    // -- Personas --
+    async fn create_persona(&self, persona: &Persona) -> RamariaResult<i64> {
+        repo::personas::create(&self.pool, persona).await
+    }
+    async fn get_persona_by_uid(&self, uid: &str) -> RamariaResult<Option<Persona>> {
+        repo::personas::get_by_uid(&self.pool, uid).await
+    }
+    async fn list_personas(&self) -> RamariaResult<Vec<Persona>> {
+        repo::personas::list_all(&self.pool).await
     }
 
-    // -- Memory L2 --
-
-    async fn save_memory_l2(&self, memory: &MemoryL2) -> RamariaResult<()> {
-        repo::memory_l2::save_memory_l2(&self.pool, memory).await
+    // -- Memory Events --
+    async fn save_event(&self, event: &MemoryEvent) -> RamariaResult<i64> {
+        repo::events::save_event(&self.pool, event).await
+    }
+    async fn list_events_by_persona(
+        &self,
+        persona_uid: &str,
+        offset: i64,
+        limit: i64,
+    ) -> RamariaResult<Vec<MemoryEvent>> {
+        repo::events::list_events_by_persona(&self.pool, persona_uid, offset, limit).await
+    }
+    async fn list_unabsorbed_events(&self, persona_uid: &str) -> RamariaResult<Vec<MemoryEvent>> {
+        repo::events::list_unabsorbed_events(&self.pool, persona_uid).await
     }
 
-    async fn save_l2_sources(&self, l2_id: Uuid, l1_ids: &[Uuid]) -> RamariaResult<()> {
-        repo::memory_l2::save_l2_sources(&self.pool, l2_id, l1_ids).await
+    // -- Event Relations --
+    async fn save_event_relation(&self, rel: &EventRelation) -> RamariaResult<i64> {
+        repo::events::save_relation(&self.pool, rel).await
     }
 
-    async fn list_memory_l2(&self) -> RamariaResult<Vec<MemoryL2>> {
-        repo::memory_l2::list_memory_l2(&self.pool).await
+    // -- Event Sources --
+    async fn save_event_source(
+        &self,
+        event_id: i64,
+        l1_id: Uuid,
+        weight: f64,
+    ) -> RamariaResult<()> {
+        repo::events::save_source(&self.pool, event_id, l1_id, weight).await
     }
 
-    async fn get_l2_sources(&self, l2_id: Uuid) -> RamariaResult<Vec<Uuid>> {
-        repo::memory_l2::get_l2_sources(&self.pool, l2_id).await
+    // -- Persona Facts --
+    async fn save_fact(&self, fact: &PersonaFact) -> RamariaResult<i64> {
+        repo::facts::save(&self.pool, fact).await
+    }
+    async fn list_facts_by_persona(
+        &self,
+        persona_uid: &str,
+        field: &str,
+    ) -> RamariaResult<Vec<PersonaFact>> {
+        repo::facts::list_by_persona(&self.pool, persona_uid, field).await
     }
 
-    // -- User Profile (L3) --
-
-    async fn save_user_profile(&self, profile: &UserProfile) -> RamariaResult<()> {
-        repo::user_profile::save_user_profile(&self.pool, profile).await
+    // -- Personality Traits --
+    async fn save_trait(&self, t: &PersonalityTrait) -> RamariaResult<i64> {
+        repo::traits::save_trait(&self.pool, t).await
+    }
+    async fn list_traits_by_persona(
+        &self,
+        persona_uid: &str,
+    ) -> RamariaResult<Vec<PersonalityTrait>> {
+        repo::traits::list_traits_by_persona(&self.pool, persona_uid).await
+    }
+    async fn update_trait_confidence(
+        &self,
+        id: i64,
+        confidence: f64,
+        evidence: f64,
+        consistency: f64,
+    ) -> RamariaResult<()> {
+        repo::traits::update_confidence(&self.pool, id, confidence, evidence, consistency).await
+    }
+    async fn update_trait_status(&self, id: i64, status: TraitStatus) -> RamariaResult<()> {
+        repo::traits::update_status(&self.pool, id, status).await
     }
 
-    async fn get_current_profile(&self) -> RamariaResult<Vec<UserProfile>> {
-        repo::user_profile::get_current_profile(&self.pool).await
+    // -- Trait Evidence --
+    async fn save_evidence(&self, e: &TraitEvidence) -> RamariaResult<i64> {
+        repo::traits::save_evidence(&self.pool, e).await
+    }
+    async fn list_evidence_by_trait(&self, trait_id: i64) -> RamariaResult<Vec<TraitEvidence>> {
+        repo::traits::list_evidence_by_trait(&self.pool, trait_id).await
     }
 
-    async fn mark_profile_historical(&self, field: &str) -> RamariaResult<()> {
-        repo::user_profile::mark_profile_historical(&self.pool, field).await
+    // -- Persona Examples --
+    async fn save_example(&self, e: &PersonaExample) -> RamariaResult<i64> {
+        repo::examples::save(&self.pool, e).await
+    }
+    async fn list_selected_examples(
+        &self,
+        persona_uid: &str,
+    ) -> RamariaResult<Vec<PersonaExample>> {
+        repo::examples::list_selected(&self.pool, persona_uid).await
+    }
+
+    // -- Persona Cluster Snapshots --
+    async fn save_cluster_snapshot(&self, s: &ClusterSnapshot) -> RamariaResult<i64> {
+        repo::cluster::save(&self.pool, s).await
+    }
+    async fn get_current_snapshots(
+        &self,
+        persona_uid: &str,
+        category: &str,
+    ) -> RamariaResult<Vec<ClusterSnapshot>> {
+        repo::cluster::get_current(&self.pool, persona_uid, category).await
+    }
+
+    // -- Keyword Pool --
+    async fn upsert_keyword(&self, keyword: &str) -> RamariaResult<()> {
+        repo::keyword::upsert(&self.pool, keyword).await
+    }
+    async fn list_keywords(&self) -> RamariaResult<Vec<String>> {
+        repo::keyword::list_all(&self.pool).await
     }
 
     // -- Privacy Consent --
-
     async fn save_privacy_consent(&self, consent: &PrivacyConsent) -> RamariaResult<()> {
-        repo::privacy_consent::save_privacy_consent(&self.pool, consent).await
+        repo::privacy_consent::save(&self.pool, consent).await
     }
-
     async fn get_privacy_consent(
         &self,
         provider: &str,
         base_url: &str,
     ) -> RamariaResult<Option<PrivacyConsent>> {
-        repo::privacy_consent::get_privacy_consent(&self.pool, provider, base_url).await
+        repo::privacy_consent::get_by_provider(&self.pool, provider, base_url).await
     }
 
     // -- Backend Config --
-
     async fn save_backend_config(&self, config: &BackendConfig) -> RamariaResult<()> {
-        repo::backend_config::save_backend_config(&self.pool, config).await
+        repo::backend_config::upsert(&self.pool, config).await
     }
-
     async fn get_backend_config(&self) -> RamariaResult<Option<BackendConfig>> {
-        repo::backend_config::get_backend_config(&self.pool).await
+        repo::backend_config::get(&self.pool).await
     }
 
     // -- 索引一致性 --
-
     async fn get_schema_version(&self) -> RamariaResult<i32> {
         repo::schema_meta::get_schema_version(&self.pool).await
     }
-
     async fn get_index_version(&self) -> RamariaResult<i32> {
         repo::schema_meta::get_index_version(&self.pool).await
     }
-
     async fn set_index_version(&self, version: i32) -> RamariaResult<()> {
         repo::schema_meta::set_index_version(&self.pool, version).await
+    }
+
+    // -- Background Jobs --
+    async fn create_background_job(
+        &self,
+        job_type: &str,
+        payload: Option<&str>,
+    ) -> RamariaResult<i64> {
+        repo::background_jobs::create(&self.pool, job_type, payload).await
+    }
+    async fn update_job_status(
+        &self,
+        id: i64,
+        status: &str,
+        error: Option<&str>,
+    ) -> RamariaResult<()> {
+        repo::background_jobs::update_status(&self.pool, id, status, error).await
+    }
+    async fn list_pending_jobs(&self) -> RamariaResult<Vec<(i64, String, Option<String>)>> {
+        repo::background_jobs::list_pending(&self.pool).await
+    }
+
+    // -- Conflict Queue --
+    async fn create_conflict(
+        &self,
+        field: &str,
+        conflict_type: &str,
+        old_content: Option<&str>,
+        new_content: Option<&str>,
+        desc: Option<&str>,
+    ) -> RamariaResult<i64> {
+        repo::conflict_queue::create(
+            &self.pool,
+            field,
+            conflict_type,
+            old_content,
+            new_content,
+            desc,
+        )
+        .await
+    }
+    async fn list_pending_conflicts(&self) -> RamariaResult<Vec<(i64, String, String, String)>> {
+        repo::conflict_queue::list_pending(&self.pool).await
+    }
+    async fn resolve_conflict(&self, id: i64) -> RamariaResult<()> {
+        repo::conflict_queue::resolve(&self.pool, id).await
+    }
+
+    // -- Pending Push --
+    async fn create_push(&self, content: &str) -> RamariaResult<i64> {
+        repo::pending_push::create(&self.pool, content).await
+    }
+    async fn list_pending_pushes(&self) -> RamariaResult<Vec<(i64, String)>> {
+        repo::pending_push::list_pending(&self.pool).await
+    }
+    async fn mark_push_sent(&self, id: i64) -> RamariaResult<()> {
+        repo::pending_push::mark_sent(&self.pool, id).await
+    }
+
+    // -- Settings --
+    async fn get_setting(&self, key: &str) -> RamariaResult<Option<String>> {
+        repo::settings::get(&self.pool, key).await
+    }
+    async fn set_setting(&self, key: &str, value: &str) -> RamariaResult<()> {
+        repo::settings::set(&self.pool, key, value).await
+    }
+    async fn list_settings(&self) -> RamariaResult<Vec<(String, String)>> {
+        repo::settings::list_all(&self.pool).await
+    }
+
+    // -- BM25 Index --
+    async fn save_bm25(&self, doc_id: i64, layer: &str, tokens_json: &str) -> RamariaResult<()> {
+        repo::bm25_index::save(&self.pool, doc_id, layer, tokens_json).await
+    }
+    async fn list_bm25_by_doc(&self, doc_id: i64) -> RamariaResult<Vec<(String, String)>> {
+        repo::bm25_index::list_by_doc(&self.pool, doc_id).await
+    }
+    async fn delete_bm25_by_doc(&self, doc_id: i64) -> RamariaResult<()> {
+        repo::bm25_index::delete_by_doc(&self.pool, doc_id).await
+    }
+
+    // -- Graph --
+    async fn insert_graph_node(
+        &self,
+        entity_name: &str,
+        entity_type: &str,
+        source_l1_id: Option<Uuid>,
+    ) -> RamariaResult<i64> {
+        repo::graph::insert_node(&self.pool, entity_name, entity_type, source_l1_id).await
+    }
+    async fn get_graph_node(
+        &self,
+        entity_name: &str,
+    ) -> RamariaResult<Option<(i64, String, String)>> {
+        repo::graph::get_node(&self.pool, entity_name).await
+    }
+    async fn insert_graph_edge(
+        &self,
+        source_id: i64,
+        target_id: i64,
+        relation_type: &str,
+        detail: Option<&str>,
+        source_l1_id: Option<Uuid>,
+    ) -> RamariaResult<i64> {
+        repo::graph::insert_edge(
+            &self.pool,
+            source_id,
+            target_id,
+            relation_type,
+            detail,
+            source_l1_id,
+        )
+        .await
+    }
+    async fn list_graph_edges(
+        &self,
+        source_id: i64,
+    ) -> RamariaResult<Vec<(i64, i64, i64, String)>> {
+        repo::graph::list_edges(&self.pool, source_id).await
     }
 }
 
 // =========================================================
-// 集成测试（StorageBackend trait 级别）
+// 集成测试
 // =========================================================
 
 #[cfg(test)]
-mod integration_tests {
+mod tests {
     use super::*;
-    use crate::database::test_pool;
-    use ramaria_core::types::{MessageRole, MessageSource};
+    use ramaria_core::types::{
+        EventRelationKind, EvidenceDirection, FactSource, MessageRole, MessageSource, PersonaKind,
+        TraitLayer, TraitSource, TraitStatus, now_ms,
+    };
 
-    /// 验证 SqliteStorage 可以作为 `dyn StorageBackend` 使用。
-    #[tokio::test]
-    async fn storage_backend_works_as_trait_object() {
-        let pool = test_pool().await.unwrap();
-        let storage: Box<dyn StorageBackend> = Box::new(SqliteStorage::new(pool));
-
-        let session = storage.create_session().await.unwrap();
-        assert!(session.is_active());
+    async fn setup() -> SqliteStorage {
+        let pool = database::init_test_pool()
+            .await
+            .expect("测试数据库初始化失败");
+        SqliteStorage::new(pool)
     }
 
-    /// 验证完整的 send_message 闭环：session 创建 → 消息保存 → 查询 → 关闭。
     #[tokio::test]
-    async fn full_send_message_cycle() {
-        let pool = test_pool().await.unwrap();
-        let storage = SqliteStorage::new(pool);
-
-        // 1. 创建 session
+    async fn session_crud() {
+        let storage = setup().await;
         let session = storage.create_session().await.unwrap();
+        assert!(session.ended_at.is_none());
 
-        // 2. 保存用户消息
-        let user_msg = Message::new(
-            session.id,
-            MessageRole::User,
-            "你好，今天天气如何？".into(),
-            MessageSource::Local,
-        );
-        storage.save_message(&user_msg).await.unwrap();
+        let got = storage.get_session(session.id).await.unwrap().unwrap();
+        assert_eq!(got.id, session.id);
 
-        // 3. 保存助手回复
-        let assistant_msg = Message::new(
-            session.id,
-            MessageRole::Assistant,
-            "今天的天气很好！".into(),
-            MessageSource::Local,
-        );
-        storage.save_message(&assistant_msg).await.unwrap();
-
-        // 4. 查询消息
-        let messages = storage.list_messages(session.id).await.unwrap();
-        assert_eq!(messages.len(), 2);
-
-        // 5. 关闭 session
         storage.close_session(session.id).await.unwrap();
         let closed = storage.get_session(session.id).await.unwrap().unwrap();
-        assert!(!closed.is_active());
+        assert!(closed.ended_at.is_some());
     }
 
-    /// 验证 L0 → L1 → L2 记忆生命周期。
     #[tokio::test]
-    async fn memory_lifecycle_cycle() {
-        let pool = test_pool().await.unwrap();
-        let storage = SqliteStorage::new(pool);
-
-        // 创建 session + L1
+    async fn message_crud() {
+        let storage = setup().await;
         let session = storage.create_session().await.unwrap();
-        let l1 = MemoryL1::new(session.id, "关于天气的对话摘要".into(), Some("下午".into()));
+        let msg = Message::new(
+            session.id,
+            MessageRole::User,
+            "测试消息".into(),
+            MessageSource::Local,
+        );
+        storage.save_message(&msg).await.unwrap();
+
+        let msgs = storage.list_messages(session.id).await.unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].content, "测试消息");
+    }
+
+    #[tokio::test]
+    async fn message_with_persona_uid() {
+        let storage = setup().await;
+        // 先创建 persona，否则 FK 约束会失败
+        let p = Persona::new(
+            "user-0001".into(),
+            "用户".into(),
+            PersonaKind::User,
+            1,
+            "local".into(),
+        );
+        storage.create_persona(&p).await.unwrap();
+
+        let session = storage.create_session().await.unwrap();
+        let mut msg = Message::new(
+            session.id,
+            MessageRole::User,
+            "你好".into(),
+            MessageSource::Local,
+        );
+        msg.persona_uid = Some("user-0001".into());
+        storage.save_message(&msg).await.unwrap();
+
+        let msgs = storage.list_messages(session.id).await.unwrap();
+        assert_eq!(msgs[0].persona_uid.as_deref(), Some("user-0001"));
+    }
+
+    #[tokio::test]
+    async fn memory_l1_crud() {
+        let storage = setup().await;
+        let session = storage.create_session().await.unwrap();
+        let l1 = MemoryL1::new(session.id, "摘要".into(), Some("上午".into()));
         storage.save_memory_l1(&l1).await.unwrap();
 
-        // 确认 L1 存在
-        let l1_list = storage.list_memory_l1(session.id).await.unwrap();
-        assert_eq!(l1_list.len(), 1);
+        let list = storage.list_memory_l1(session.id).await.unwrap();
+        assert_eq!(list.len(), 1);
+    }
 
-        // 创建 L2 + 溯源
-        let now = ramaria_core::types::now_ms();
-        let l2 = MemoryL2::new("周内对话聚合".into(), now - 604_800_000, now);
-        storage.save_memory_l2(&l2).await.unwrap();
-        storage.save_l2_sources(l2.id, &[l1.id]).await.unwrap();
+    #[tokio::test]
+    async fn persona_crud() {
+        let storage = setup().await;
+        let p = Persona::new(
+            "user-0001".into(),
+            "测试用户".into(),
+            PersonaKind::User,
+            1,
+            "local".into(),
+        );
+        let id = storage.create_persona(&p).await.unwrap();
+        assert!(id > 0, "INSERT 后应返回有效的自增 id");
 
-        // 标记 L1 已吸收
-        storage.mark_l1_absorbed(&[l1.id]).await.unwrap();
+        let got = storage
+            .get_persona_by_uid("user-0001")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.name, "测试用户");
+        assert_eq!(got.id, id);
 
-        // 验证 L2 溯源
-        let sources = storage.get_l2_sources(l2.id).await.unwrap();
-        assert_eq!(sources.len(), 1);
-        assert_eq!(sources[0], l1.id);
+        let all = storage.list_personas().await.unwrap();
+        assert!(!all.is_empty());
+    }
+
+    #[tokio::test]
+    async fn memory_event_crud() {
+        let storage = setup().await;
+        let p = Persona::new(
+            "user-0001".into(),
+            "用户".into(),
+            PersonaKind::User,
+            1,
+            "local".into(),
+        );
+        storage.create_persona(&p).await.unwrap();
+
+        let now = now_ms();
+        let ev = MemoryEvent::new(
+            "user-0001".into(),
+            "事件".into(),
+            "描述".into(),
+            now - 1000,
+            now,
+        );
+        let ev_id = storage.save_event(&ev).await.unwrap();
+        assert!(ev_id > 0);
+
+        let events = storage
+            .list_events_by_persona("user-0001", 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].title, "事件");
+        assert_eq!(events[0].id, ev_id);
+    }
+
+    #[tokio::test]
+    async fn event_relation_crud() {
+        let storage = setup().await;
+        let p = Persona::new(
+            "user-0001".into(),
+            "用户".into(),
+            PersonaKind::User,
+            1,
+            "local".into(),
+        );
+        storage.create_persona(&p).await.unwrap();
+        let now = now_ms();
+        let e1 = MemoryEvent::new("user-0001".into(), "A".into(), "desc".into(), now, now);
+        let e2 = MemoryEvent::new("user-0001".into(), "B".into(), "desc".into(), now, now);
+        let id1 = storage.save_event(&e1).await.unwrap();
+        let id2 = storage.save_event(&e2).await.unwrap();
+
+        let rel = EventRelation::new(id1, id2, EventRelationKind::CausedBy);
+        let rel_id = storage.save_event_relation(&rel).await.unwrap();
+        assert!(rel_id > 0);
+    }
+
+    #[tokio::test]
+    async fn event_source_crud() {
+        let storage = setup().await;
+        let session = storage.create_session().await.unwrap();
+        let l1 = MemoryL1::new(session.id, "摘要".into(), None);
+        storage.save_memory_l1(&l1).await.unwrap();
+        let p = Persona::new(
+            "user-0001".into(),
+            "用户".into(),
+            PersonaKind::User,
+            1,
+            "local".into(),
+        );
+        storage.create_persona(&p).await.unwrap();
+        let now = now_ms();
+        let ev = MemoryEvent::new("user-0001".into(), "E".into(), "desc".into(), now, now);
+        let ev_id = storage.save_event(&ev).await.unwrap();
+
+        storage.save_event_source(ev_id, l1.id, 1.0).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn persona_fact_crud() {
+        let storage = setup().await;
+        let p = Persona::new(
+            "user-0001".into(),
+            "用户".into(),
+            PersonaKind::User,
+            1,
+            "local".into(),
+        );
+        storage.create_persona(&p).await.unwrap();
+
+        let fact = PersonaFact::new(
+            "user-0001".into(),
+            ramaria_core::types::ProfileField::BasicInfo,
+            "姓名：小明".into(),
+            FactSource::L1,
+        );
+        let fact_id = storage.save_fact(&fact).await.unwrap();
+        assert!(fact_id > 0);
+
+        let facts = storage
+            .list_facts_by_persona("user-0001", "basic_info")
+            .await
+            .unwrap();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].id, fact_id);
+    }
+
+    #[tokio::test]
+    async fn personality_trait_crud() {
+        let storage = setup().await;
+        let p = Persona::new(
+            "user-0001".into(),
+            "用户".into(),
+            PersonaKind::User,
+            1,
+            "local".into(),
+        );
+        storage.create_persona(&p).await.unwrap();
+
+        let pt = PersonalityTrait::new(
+            "user-0001".into(),
+            TraitLayer::Base,
+            "温和".into(),
+            "待人温和".into(),
+            TraitSource::Inferred,
+            0,
+        );
+        let pt_id = storage.save_trait(&pt).await.unwrap();
+        assert!(pt_id > 0);
+
+        let traits = storage.list_traits_by_persona("user-0001").await.unwrap();
+        assert_eq!(traits.len(), 1);
+        assert_eq!(traits[0].trait_label, "温和");
+        assert_eq!(traits[0].id, pt_id);
+
+        // 更新置信度
+        storage
+            .update_trait_confidence(pt_id, 0.8, 5.0, 0.9)
+            .await
+            .unwrap();
+        // 更新状态
+        storage
+            .update_trait_status(pt_id, TraitStatus::Deprecated)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn trait_evidence_crud() {
+        let storage = setup().await;
+        let p = Persona::new(
+            "user-0001".into(),
+            "用户".into(),
+            PersonaKind::User,
+            1,
+            "local".into(),
+        );
+        storage.create_persona(&p).await.unwrap();
+        let pt = PersonalityTrait::new(
+            "user-0001".into(),
+            TraitLayer::Base,
+            "温和".into(),
+            "待人温和".into(),
+            TraitSource::Inferred,
+            0,
+        );
+        let pt_id = storage.save_trait(&pt).await.unwrap();
+        let now = now_ms();
+        let ev = MemoryEvent::new("user-0001".into(), "事件".into(), "描述".into(), now, now);
+        let ev_id = storage.save_event(&ev).await.unwrap();
+
+        let evidence = TraitEvidence::new(pt_id, ev_id, EvidenceDirection::Support, 0.8);
+        let evd_id = storage.save_evidence(&evidence).await.unwrap();
+        assert!(evd_id > 0);
+
+        let list = storage.list_evidence_by_trait(pt_id).await.unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, evd_id);
+        assert_eq!(list[0].trait_id, pt_id);
+        assert_eq!(list[0].event_id, ev_id);
+    }
+
+    #[tokio::test]
+    async fn keyword_upsert() {
+        let storage = setup().await;
+        storage.upsert_keyword("工作").await.unwrap();
+        storage.upsert_keyword("工作").await.unwrap();
+        let keywords = storage.list_keywords().await.unwrap();
+        assert!(keywords.contains(&"工作".to_string()));
+    }
+
+    #[tokio::test]
+    async fn schema_version() {
+        let storage = setup().await;
+        let v = storage.get_schema_version().await.unwrap();
+        assert!(v >= 1);
+    }
+
+    #[tokio::test]
+    async fn privacy_consent_crud() {
+        let storage = setup().await;
+        let consent = PrivacyConsent::new(
+            ramaria_core::types::LlmProvider::DeepSeek,
+            "https://api.deepseek.com/v1".into(),
+            true,
+        );
+        storage.save_privacy_consent(&consent).await.unwrap();
+        let got = storage
+            .get_privacy_consent("deepseek", "https://api.deepseek.com/v1")
+            .await
+            .unwrap();
+        assert!(got.is_some());
+        assert_eq!(
+            got.unwrap().provider,
+            ramaria_core::types::LlmProvider::DeepSeek
+        );
+    }
+
+    #[tokio::test]
+    async fn settings_crud() {
+        let storage = setup().await;
+        storage.set_setting("profile_mode", "full").await.unwrap();
+        let val = storage.get_setting("profile_mode").await.unwrap();
+        assert_eq!(val.as_deref(), Some("full"));
+        let all = storage.list_settings().await.unwrap();
+        assert!(!all.is_empty());
+    }
+
+    #[tokio::test]
+    async fn graph_node_and_edge() {
+        let storage = setup().await;
+        let nid = storage
+            .insert_graph_node("Python", "module", None)
+            .await
+            .unwrap();
+        assert!(nid > 0);
+
+        let nid2 = storage
+            .insert_graph_node("Rust", "module", None)
+            .await
+            .unwrap();
+
+        let eid = storage
+            .insert_graph_edge(nid, nid2, "RelatedTo", None, None)
+            .await
+            .unwrap();
+        assert!(eid > 0);
+
+        let edges = storage.list_graph_edges(nid).await.unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].2, nid2);
     }
 }
