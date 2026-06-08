@@ -20,7 +20,9 @@ pub use traits::{
     LlmProvider as LlmProviderTrait, StorageBackend, StreamDelta,
 };
 pub use types::{
-    AppState, BackendConfig, L2Source, LlmProvider, MemoryL1, MemoryL2, Message, MessageRole,
-    MessageSource, ModelCapability, PrivacyConsent, ProfileField, ProfileStatus, Session,
-    TIME_PERIOD_OPTIONS, UserProfile, new_id, now_ms,
+    AppState, BackendConfig, ClusterSnapshot, EventRelation, EventRelationKind, EventSource,
+    EvidenceDirection, FactSource, LlmProvider, MemoryEvent, MemoryL1, Message, MessageRole,
+    MessageSource, ModelCapability, Persona, PersonaExample, PersonaFact, PersonaKind,
+    PersonalityTrait, Presentation, PrivacyConsent, ProfileField, Session, TIME_PERIOD_OPTIONS,
+    TraitEvidence, TraitLayer, TraitSource, TraitStatus, new_id, now_ms, uuid_from_db, uuid_to_db,
 };

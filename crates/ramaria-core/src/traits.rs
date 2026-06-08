@@ -5,7 +5,7 @@
 //! - 上层 crate 依赖 trait，不依赖具体数据库、模型服务或向量实现
 //! - 支持流式 LLM 响应，统一 request_id、delta、done 和 metadata 语义
 //! - 支持 embedding 模型下载、进度查询、可用性校验和批量向量化
-//! - Storage trait 暴露业务级 CRUD，不泄露 sqlx 连接池或具体表结构
+//! - Storage trait 暴露业务级 CRUD + 基础设施 CRUD，不泄露 sqlx 连接池或具体表结构
 
 use std::pin::Pin;
 
@@ -15,8 +15,9 @@ use uuid::Uuid;
 
 use crate::error::RamariaResult;
 use crate::types::{
-    BackendConfig, MemoryL1, MemoryL2, Message, MessageRole, ModelCapability, PrivacyConsent,
-    Session, UserProfile,
+    BackendConfig, ClusterSnapshot, EventRelation, MemoryEvent, MemoryL1, Message, MessageRole,
+    ModelCapability, Persona, PersonaExample, PersonaFact, PersonalityTrait, PrivacyConsent,
+    Session, TraitEvidence, TraitStatus,
 };
 
 // =========================================================
@@ -234,104 +235,126 @@ pub trait EmbeddingProvider: Send + Sync {
 }
 
 // =========================================================
-// Storage Backend 抽象
+// Storage Backend 抽象（v1.0 完整版——替换旧 API）
 // =========================================================
 
 /// 存储后端抽象 trait。
 ///
 /// 职责:
-/// - 定义 app 和 memory 层需要的业务级 CRUD。
+/// - 定义 app 和 memory 层需要的业务级 CRUD + 基础设施 CRUD，覆盖全部 23 张表。
 /// - 隔离 SQLite/sqlx 细节，避免上层持有连接池或拼接 SQL。
-/// - 统一 Session、L0 消息、L1/L2/L3 记忆、隐私确认和索引版本的存取边界。
 ///
 /// 实现要求:
 /// - 具体实现位于 `ramaria-storage`。
 /// - 所有可恢复错误应转换为 `RamariaError::Storage` 或更精确分类。
-/// - 删除操作必须明确处理关联数据，避免悬挂引用。
+///
+/// ID 类型约定:
+/// - TEXT 主键表（sessions/messages/memory_l1）使用 Uuid
+/// - INTEGER AUTOINCREMENT 表使用 i64
+/// - FK 列类型与目标表 PK 类型一致
+///
+/// 破坏性变更（vs 旧 StorageBackend）:
+/// - 删除: save_memory_l2, save_l2_sources, get_l2_sources, save_user_profile,
+///   get_current_profile, mark_profile_historical
+/// - 新增: personas, memory_events, event_relations, event_sources, persona_facts,
+///   personality_traits, trait_evidence, persona_examples, persona_cluster_snapshots,
+///   keyword_pool 十组方法
 #[async_trait]
 pub trait StorageBackend: Send + Sync {
     // -- Session --
-
-    /// 创建新 session。
     async fn create_session(&self) -> RamariaResult<Session>;
-
-    /// 关闭 session。
     async fn close_session(&self, session_id: Uuid) -> RamariaResult<()>;
-
-    /// 获取单个 session。
     async fn get_session(&self, session_id: Uuid) -> RamariaResult<Option<Session>>;
-
-    /// 列出活跃 session（未关闭的）。
     async fn list_active_sessions(&self) -> RamariaResult<Vec<Session>>;
-
-    /// 列出所有 session。
     async fn list_sessions(&self) -> RamariaResult<Vec<Session>>;
-
-    /// 删除 session 及其关联消息。
     async fn delete_session(&self, session_id: Uuid) -> RamariaResult<()>;
 
     // -- Message (L0) --
-
-    /// 保存消息。
     async fn save_message(&self, message: &Message) -> RamariaResult<()>;
-
-    /// 获取 session 的所有消息（按时间升序）。
     async fn list_messages(&self, session_id: Uuid) -> RamariaResult<Vec<Message>>;
-
-    /// 按指纹检查消息是否已存在（去重用）。
     async fn find_message_by_fingerprint(
         &self,
         fingerprint: &str,
     ) -> RamariaResult<Option<Message>>;
 
     // -- Memory L1 --
-
-    /// 保存 L1 记忆。
     async fn save_memory_l1(&self, memory: &MemoryL1) -> RamariaResult<()>;
-
-    /// 获取指定 session 的 L1 记忆列表。
     async fn list_memory_l1(&self, session_id: Uuid) -> RamariaResult<Vec<MemoryL1>>;
-
-    /// 获取单个 L1 记忆。
     async fn get_memory_l1(&self, id: Uuid) -> RamariaResult<Option<MemoryL1>>;
-
-    /// 标记 L1 已被 L2 吸收。
     async fn mark_l1_absorbed(&self, l1_ids: &[Uuid]) -> RamariaResult<()>;
+    async fn list_unabsorbed_l1(&self, persona_uid: &str) -> RamariaResult<Vec<MemoryL1>>;
 
-    /// 查询所有未吸收的 L1 记忆。
-    async fn list_unabsorbed_l1(&self) -> RamariaResult<Vec<MemoryL1>>;
+    // -- Personas (id: i64) --
+    async fn create_persona(&self, persona: &Persona) -> RamariaResult<i64>;
+    async fn get_persona_by_uid(&self, uid: &str) -> RamariaResult<Option<Persona>>;
+    async fn list_personas(&self) -> RamariaResult<Vec<Persona>>;
 
-    // -- Memory L2 --
+    // -- Memory Events (L2 事件层, id: i64) --
+    async fn save_event(&self, event: &MemoryEvent) -> RamariaResult<i64>;
+    async fn list_events_by_persona(
+        &self,
+        persona_uid: &str,
+        offset: i64,
+        limit: i64,
+    ) -> RamariaResult<Vec<MemoryEvent>>;
+    async fn list_unabsorbed_events(&self, persona_uid: &str) -> RamariaResult<Vec<MemoryEvent>>;
 
-    /// 保存 L2 记忆。
-    async fn save_memory_l2(&self, memory: &MemoryL2) -> RamariaResult<()>;
+    // -- Event Relations (from_id/to_id: i64) --
+    async fn save_event_relation(&self, rel: &EventRelation) -> RamariaResult<i64>;
 
-    /// 保存 L2 → L1 溯源关系。
-    async fn save_l2_sources(&self, l2_id: Uuid, l1_ids: &[Uuid]) -> RamariaResult<()>;
+    // -- Event Sources (event_id: i64, l1_id: Uuid) --
+    async fn save_event_source(&self, event_id: i64, l1_id: Uuid, weight: f64)
+    -> RamariaResult<()>;
 
-    /// 列出所有 L2 记忆。
-    async fn list_memory_l2(&self) -> RamariaResult<Vec<MemoryL2>>;
+    // -- Persona Facts (id: i64) --
+    async fn save_fact(&self, fact: &PersonaFact) -> RamariaResult<i64>;
+    async fn list_facts_by_persona(
+        &self,
+        persona_uid: &str,
+        field: &str,
+    ) -> RamariaResult<Vec<PersonaFact>>;
 
-    /// 获取 L2 的来源 L1 列表。
-    async fn get_l2_sources(&self, l2_id: Uuid) -> RamariaResult<Vec<Uuid>>;
+    // -- Personality Traits (L3 性格层, id: i64) --
+    async fn save_trait(&self, t: &PersonalityTrait) -> RamariaResult<i64>;
+    async fn list_traits_by_persona(
+        &self,
+        persona_uid: &str,
+    ) -> RamariaResult<Vec<PersonalityTrait>>;
+    /// `id` 为 personality_traits 表的 INTEGER 主键。
+    async fn update_trait_confidence(
+        &self,
+        id: i64,
+        confidence: f64,
+        evidence: f64,
+        consistency: f64,
+    ) -> RamariaResult<()>;
+    /// `id` 为 personality_traits 表的 INTEGER 主键。
+    async fn update_trait_status(&self, id: i64, status: TraitStatus) -> RamariaResult<()>;
 
-    // -- User Profile (L3) --
+    // -- Trait Evidence (trait_id/event_id: i64) --
+    async fn save_evidence(&self, e: &TraitEvidence) -> RamariaResult<i64>;
+    /// `trait_id` 为 personality_traits 表的 INTEGER 主键。
+    async fn list_evidence_by_trait(&self, trait_id: i64) -> RamariaResult<Vec<TraitEvidence>>;
 
-    /// 保存画像条目。
-    async fn save_user_profile(&self, profile: &UserProfile) -> RamariaResult<()>;
+    // -- Persona Examples (id: i64) --
+    async fn save_example(&self, e: &PersonaExample) -> RamariaResult<i64>;
+    async fn list_selected_examples(&self, persona_uid: &str)
+    -> RamariaResult<Vec<PersonaExample>>;
 
-    /// 获取当前生效的画像（is_current = true）。
-    async fn get_current_profile(&self) -> RamariaResult<Vec<UserProfile>>;
+    // -- Persona Cluster Snapshots (id: i64) --
+    async fn save_cluster_snapshot(&self, s: &ClusterSnapshot) -> RamariaResult<i64>;
+    async fn get_current_snapshots(
+        &self,
+        persona_uid: &str,
+        category: &str,
+    ) -> RamariaResult<Vec<ClusterSnapshot>>;
 
-    /// 将旧版本标记为非 current。
-    async fn mark_profile_historical(&self, field: &str) -> RamariaResult<()>;
+    // -- Keyword Pool --
+    async fn upsert_keyword(&self, keyword: &str) -> RamariaResult<()>;
+    async fn list_keywords(&self) -> RamariaResult<Vec<String>>;
 
     // -- Privacy Consent --
-
-    /// 保存隐私确认记录。
     async fn save_privacy_consent(&self, consent: &PrivacyConsent) -> RamariaResult<()>;
-
-    /// 获取某 provider + base_url 的确认记录。
     async fn get_privacy_consent(
         &self,
         provider: &str,
@@ -339,23 +362,80 @@ pub trait StorageBackend: Send + Sync {
     ) -> RamariaResult<Option<PrivacyConsent>>;
 
     // -- Backend Config --
-
-    /// 保存非敏感后端配置。
     async fn save_backend_config(&self, config: &BackendConfig) -> RamariaResult<()>;
-
-    /// 获取当前后端配置。
     async fn get_backend_config(&self) -> RamariaResult<Option<BackendConfig>>;
 
     // -- 索引一致性 --
-
-    /// 获取 schema 版本。
     async fn get_schema_version(&self) -> RamariaResult<i32>;
-
-    /// 获取索引版本。
     async fn get_index_version(&self) -> RamariaResult<i32>;
-
-    /// 更新索引版本。
     async fn set_index_version(&self, version: i32) -> RamariaResult<()>;
+
+    // =========================================================
+    // 基础设施方法 — 后台任务 / 冲突队列 / 推送 / 设置 / BM25 / 图谱
+    // =========================================================
+
+    // -- Background Jobs --
+    async fn create_background_job(
+        &self,
+        job_type: &str,
+        payload: Option<&str>,
+    ) -> RamariaResult<i64>;
+    async fn update_job_status(
+        &self,
+        id: i64,
+        status: &str,
+        error: Option<&str>,
+    ) -> RamariaResult<()>;
+    async fn list_pending_jobs(&self) -> RamariaResult<Vec<(i64, String, Option<String>)>>;
+
+    // -- Conflict Queue --
+    async fn create_conflict(
+        &self,
+        field: &str,
+        conflict_type: &str,
+        old_content: Option<&str>,
+        new_content: Option<&str>,
+        desc: Option<&str>,
+    ) -> RamariaResult<i64>;
+    async fn list_pending_conflicts(&self) -> RamariaResult<Vec<(i64, String, String, String)>>;
+    async fn resolve_conflict(&self, id: i64) -> RamariaResult<()>;
+
+    // -- Pending Push --
+    async fn create_push(&self, content: &str) -> RamariaResult<i64>;
+    async fn list_pending_pushes(&self) -> RamariaResult<Vec<(i64, String)>>;
+    async fn mark_push_sent(&self, id: i64) -> RamariaResult<()>;
+
+    // -- Settings --
+    async fn get_setting(&self, key: &str) -> RamariaResult<Option<String>>;
+    async fn set_setting(&self, key: &str, value: &str) -> RamariaResult<()>;
+    async fn list_settings(&self) -> RamariaResult<Vec<(String, String)>>;
+
+    // -- BM25 Index --
+    async fn save_bm25(&self, doc_id: i64, layer: &str, tokens_json: &str) -> RamariaResult<()>;
+    async fn list_bm25_by_doc(&self, doc_id: i64) -> RamariaResult<Vec<(String, String)>>;
+    async fn delete_bm25_by_doc(&self, doc_id: i64) -> RamariaResult<()>;
+
+    // -- Graph --
+    async fn insert_graph_node(
+        &self,
+        entity_name: &str,
+        entity_type: &str,
+        source_l1_id: Option<Uuid>,
+    ) -> RamariaResult<i64>;
+    async fn get_graph_node(
+        &self,
+        entity_name: &str,
+    ) -> RamariaResult<Option<(i64, String, String)>>;
+    async fn insert_graph_edge(
+        &self,
+        source_id: i64,
+        target_id: i64,
+        relation_type: &str,
+        detail: Option<&str>,
+        source_l1_id: Option<Uuid>,
+    ) -> RamariaResult<i64>;
+    async fn list_graph_edges(&self, source_id: i64)
+    -> RamariaResult<Vec<(i64, i64, i64, String)>>;
 }
 
 // =========================================================
