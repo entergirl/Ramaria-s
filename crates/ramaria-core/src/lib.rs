@@ -24,5 +24,6 @@ pub use types::{
     EvidenceDirection, FactSource, LlmProvider, MemoryEvent, MemoryL1, Message, MessageRole,
     MessageSource, ModelCapability, Persona, PersonaExample, PersonaFact, PersonaKind,
     PersonalityTrait, Presentation, PrivacyConsent, ProfileField, Session, TIME_PERIOD_OPTIONS,
-    TraitEvidence, TraitLayer, TraitSource, TraitStatus, new_id, now_ms, uuid_from_db, uuid_to_db,
+    TraitEvidence, TraitLayer, TraitSource, TraitStatus, is_nil_uuid, new_id, now_ms, uuid_from_db,
+    uuid_to_db,
 };

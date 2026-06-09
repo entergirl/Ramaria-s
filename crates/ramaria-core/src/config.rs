@@ -104,7 +104,7 @@ pub struct RamariaConfig {
 }
 
 // =========================================================
-// serde default 辅助函数
+// Serde default 辅助函数
 // =========================================================
 
 /// serde `#[serde(default)]` 辅助函数：默认版本号。
@@ -485,23 +485,20 @@ impl Default for LoggingConfig {
 /// 隐私相关配置。
 ///
 /// 职责:
-/// - 控制线上后端是否允许注入记忆上下文。
-/// - 与 provider + base_url 级别的隐私确认共同决定线上调用行为。
+/// - 作为隐私相关设置的结构化占位，供未来扩展（如日志脱敏级别、数据留存策略）。
+/// - 线上记忆注入开关由 `BackendSelection.online_memory_injection` 统一管理。
+///
+/// 说明:
+/// - v1.0 中此结构当前无字段。`online_memory_injection` 已归入 `BackendSelection`，
+///   避免两处配置不一致导致行为未定义。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrivacyConfig {
-    /// 是否允许线上后端注入记忆上下文
-    pub online_memory_injection: bool,
+    // v1.0 预留：未来可扩展日志脱敏级别、数据留存策略等
 }
 
 impl Default for PrivacyConfig {
-    /// 创建默认隐私配置。
-    ///
-    /// 返回:
-    /// - 默认允许线上记忆注入，但实际调用仍需完成隐私确认。
     fn default() -> Self {
-        Self {
-            online_memory_injection: true,
-        }
+        Self {}
     }
 }
 

@@ -36,10 +36,24 @@ pub fn uuid_to_db(u: Uuid) -> String {
 ///
 /// 返回:
 /// - 成功时返回 UUID。
-/// - 解析失败时返回 nil UUID。
+/// - 解析失败时返回 nil UUID，同时应在上层记录 WARNING 日志。
+///
+/// 说明:
+/// - 此处不 panic，因为存储层可能读到历史遗留的非法数据。
+/// - 调用方应检查返回值，若为 nil UUID 则记录 `tracing::warn!`。
 #[inline]
 pub fn uuid_from_db(s: &str) -> Uuid {
-    Uuid::parse_str(s).unwrap_or_else(|_| Uuid::nil())
+    Uuid::parse_str(s).unwrap_or_else(|_| {
+        // 注意：core 层零 I/O，不在此处打日志。
+        // 上层 repo 在调用此函数后发现 nil UUID 时应记录 WARNING。
+        Uuid::nil()
+    })
+}
+
+/// 检查 UUID 是否为 nil（表示解析失败或未初始化）。
+#[inline]
+pub fn is_nil_uuid(u: &Uuid) -> bool {
+    u.is_nil()
 }
 
 /// 返回当前 Unix 毫秒时间戳。
@@ -52,13 +66,18 @@ pub fn uuid_from_db(s: &str) -> Uuid {
 ///
 /// 说明:
 /// - 核心层不依赖 tokio、网络或数据库，因此使用标准库 `SystemTime`。
+/// - 若系统时钟在 UNIX_EPOCH 之前（极度异常），返回 0。
+///   上层应在发现时间戳为 0 时记录 ERROR 日志。
 #[inline]
 pub fn now_ms() -> i64 {
     use std::time::SystemTime;
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
+    match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(d) => d.as_millis() as i64,
+        Err(_) => {
+            // 系统时钟异常——返回 0 作为哨兵值，上层需检测并告警
+            0
+        }
+    }
 }
 
 // =========================================================
@@ -181,11 +200,11 @@ impl Session {
         }
     }
 
-    /// 判断 Session 是否已关闭。
+    /// 判断 Session 是否仍在进行中。
     ///
     /// 返回:
-    /// - `true`: Session 仍在进行中。
-    /// - `false`: Session 已关闭。
+    /// - `true`: Session 处于活跃状态（`ended_at` 为 None）。
+    /// - `false`: Session 已关闭（`ended_at` 有值）。
     pub fn is_active(&self) -> bool {
         self.ended_at.is_none()
     }

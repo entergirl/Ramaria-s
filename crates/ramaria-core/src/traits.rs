@@ -17,11 +17,11 @@ use crate::error::RamariaResult;
 use crate::types::{
     BackendConfig, ClusterSnapshot, EventRelation, MemoryEvent, MemoryL1, Message, MessageRole,
     ModelCapability, Persona, PersonaExample, PersonaFact, PersonalityTrait, PrivacyConsent,
-    Session, TraitEvidence, TraitStatus,
+    ProfileField, Session, TraitEvidence, TraitStatus,
 };
 
 // =========================================================
-// LLM Provider 抽象
+// LLM Provider 抽象层
 // =========================================================
 
 /// 流式响应的单个增量片段。
@@ -149,7 +149,7 @@ pub trait LlmProvider: Send + Sync {
 }
 
 // =========================================================
-// Embedding Provider 抽象
+// Embedding Provider 抽象层
 // =========================================================
 
 /// Embedding 模型信息。
@@ -235,7 +235,7 @@ pub trait EmbeddingProvider: Send + Sync {
 }
 
 // =========================================================
-// Storage Backend 抽象（v1.0 完整版——替换旧 API）
+// 存储后端抽象层（v1.0 完整版——替换旧 API）
 // =========================================================
 
 /// 存储后端抽象 trait。
@@ -272,6 +272,8 @@ pub trait StorageBackend: Send + Sync {
     // -- Message (L0) --
     async fn save_message(&self, message: &Message) -> RamariaResult<()>;
     async fn list_messages(&self, session_id: Uuid) -> RamariaResult<Vec<Message>>;
+    /// 按发言人查询消息（Persona-Aware RAG 的原话过滤）。
+    async fn list_messages_by_persona(&self, persona_uid: &str) -> RamariaResult<Vec<Message>>;
     async fn find_message_by_fingerprint(
         &self,
         fingerprint: &str,
@@ -288,6 +290,15 @@ pub trait StorageBackend: Send + Sync {
     async fn create_persona(&self, persona: &Persona) -> RamariaResult<i64>;
     async fn get_persona_by_uid(&self, uid: &str) -> RamariaResult<Option<Persona>>;
     async fn list_personas(&self) -> RamariaResult<Vec<Persona>>;
+    /// 更新 persona 的可变字段（name/avatar/config）。
+    /// uid 为业务标识，不可变更。
+    async fn update_persona(
+        &self,
+        uid: &str,
+        name: &str,
+        avatar: Option<&str>,
+        config: Option<&str>,
+    ) -> RamariaResult<()>;
 
     // -- Memory Events (L2 事件层, id: i64) --
     async fn save_event(&self, event: &MemoryEvent) -> RamariaResult<i64>;
@@ -308,10 +319,12 @@ pub trait StorageBackend: Send + Sync {
 
     // -- Persona Facts (id: i64) --
     async fn save_fact(&self, fact: &PersonaFact) -> RamariaResult<i64>;
+    /// 按 persona_uid 和字段分类查询事实。
+    /// `field` 使用 `ProfileField` 枚举以确保类型安全，避免传入非法字段名。
     async fn list_facts_by_persona(
         &self,
         persona_uid: &str,
-        field: &str,
+        field: ProfileField,
     ) -> RamariaResult<Vec<PersonaFact>>;
 
     // -- Personality Traits (L3 性格层, id: i64) --
