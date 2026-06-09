@@ -1,0 +1,294 @@
+{
+  "description": "固定中文对话 fixture，用于记忆和检索测试。覆盖日常闲聊、技术讨论、情绪表达、知识问答等场景。",
+  "fixtures": [
+    {
+      "id": "conv-001",
+      "scenario": "日常闲聊——周末计划",
+      "persona_uid": "user-0001",
+      "messages": [
+        {
+          "role": "user",
+          "content": "周末快到了，你有什么安排吗？"
+        },
+        {
+          "role": "assistant",
+          "content": "这周末打算去西湖边走走||最近太忙了好久没出门了||你呢，有安排吗"
+        },
+        {
+          "role": "user",
+          "content": "我可能在家看看书吧，最近在看一本关于认知心理学的书"
+        },
+        {
+          "role": "assistant",
+          "content": "认知心理学挺有意思的||我之前也看过一些||讲到记忆那块特别有启发"
+        },
+        {
+          "role": "user",
+          "content": "是啊，才发现人的记忆其实很不靠谱，容易被暗示影响"
+        },
+        {
+          "role": "assistant",
+          "content": "对，尤其是目击证人的研究||真是颠覆了日常认知||所以做笔记很重要"
+        }
+      ],
+      "expected_l1": {
+        "summary": "烧酒和助手讨论了周末计划和认知心理学，烧酒对记忆的可塑性感到惊讶",
+        "keywords": "周末,认知心理学,记忆",
+        "time_period": "下午",
+        "atmosphere": "轻松闲聊",
+        "valence": 0.5,
+        "salience": 0.25
+      }
+    },
+    {
+      "id": "conv-002",
+      "scenario": "技术讨论——学习编程",
+      "persona_uid": "user-0001",
+      "messages": [
+        {
+          "role": "user",
+          "content": "我在学Rust，感觉所有权系统好难理解"
+        },
+        {
+          "role": "assistant",
+          "content": "所有权确实需要一些时间来适应||可以想象成图书馆借书的规则||每本书同一时间只能有一个人持有"
+        },
+        {
+          "role": "user",
+          "content": "这个比喻挺形象的！那借用borrow呢？"
+        },
+        {
+          "role": "assistant",
+          "content": "借用就像你去图书馆看书但不借走||可以多人同时看同一本书||但不能在上面写字"
+        },
+        {
+          "role": "user",
+          "content": "明白了，那生命周期lifetime是不是就是借书的时间限制？"
+        },
+        {
+          "role": "assistant",
+          "content": "对就是这个意思||书不能被还回去了还有人拿着看||编译器会帮你检查这个"
+        }
+      ],
+      "expected_l1": {
+        "summary": "烧酒在学习Rust所有权系统，助手用图书馆借书的比喻帮助理解",
+        "keywords": "Rust,所有权,编程学习,比喻教学",
+        "time_period": "夜间",
+        "atmosphere": "专注学习",
+        "valence": 0.5,
+        "salience": 0.5
+      }
+    },
+    {
+      "id": "conv-003",
+      "scenario": "情绪表达——工作压力",
+      "persona_uid": "user-0001",
+      "messages": [
+        {
+          "role": "user",
+          "content": "今天好累，项目deadline快到了，感觉压力很大"
+        },
+        {
+          "role": "assistant",
+          "content": "辛苦了||deadline前的压力确实很难受||要不要先休息五分钟深呼吸一下"
+        },
+        {
+          "role": "user",
+          "content": "我怕休息了就做不完了，还有好多bug要修"
+        },
+        {
+          "role": "assistant",
+          "content": "磨刀不误砍柴工||大脑累了反而效率更低||哪怕只休息十分钟也会不一样的"
+        },
+        {
+          "role": "user",
+          "content": "你说得对...我就是有点焦虑，担心搞不定"
+        },
+        {
+          "role": "assistant",
+          "content": "你已经做了很多了||先列出剩下的任务排个优先级||一个一个来总能做完的"
+        },
+        {
+          "role": "user",
+          "content": "谢谢你，感觉好多了"
+        },
+        {
+          "role": "assistant",
+          "content": "不用谢||需要的时候随时找我||你比你想象的要厉害"
+        }
+      ],
+      "expected_l1": {
+        "summary": "烧酒因项目deadline感到压力大和焦虑，助手安抚情绪并建议休息和任务优先级管理",
+        "keywords": "工作压力,deadline,情绪安抚,时间管理",
+        "time_period": "下午",
+        "atmosphere": "情绪安抚",
+        "valence": -0.5,
+        "salience": 0.75
+      }
+    },
+    {
+      "id": "conv-004",
+      "scenario": "知识问答——历史话题",
+      "persona_uid": "user-0001",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你知道宋朝的科举制度有什么特点吗？"
+        },
+        {
+          "role": "assistant",
+          "content": "宋朝的科举有几个重要的改革||首先取消了门第限制||真正实现了不论出身以才取士"
+        },
+        {
+          "role": "user",
+          "content": "具体是怎么做到的？"
+        },
+        {
+          "role": "assistant",
+          "content": "主要是糊名法和誊录法||考官看不到考生名字||而且答卷要重新抄写防止认笔迹||比之前公平了很多"
+        },
+        {
+          "role": "user",
+          "content": "那录取人数有什么变化吗？"
+        },
+        {
+          "role": "assistant",
+          "content": "大幅增加了||唐代每次只录几十人||宋太宗时一次录了五百多人||读书人的出路一下子宽了"
+        }
+      ],
+      "expected_l1": {
+        "summary": "烧酒询问宋朝科举制度特点，助手介绍了糊名法、誊录法和录取人数的大幅增加",
+        "keywords": "宋朝,科举制度,糊名法,历史知识",
+        "time_period": "夜间",
+        "atmosphere": "知识分享",
+        "valence": 0.0,
+        "salience": 0.25
+      }
+    },
+    {
+      "id": "conv-005",
+      "scenario": "情绪表达——开心分享",
+      "persona_uid": "user-0001",
+      "messages": [
+        {
+          "role": "user",
+          "content": "好消息！！我那个项目终于上线了，客户反馈特别好！"
+        },
+        {
+          "role": "assistant",
+          "content": "太棒了！||就知道你能行||这段时间的辛苦都值得了"
+        },
+        {
+          "role": "user",
+          "content": "是啊，熬了好几个通宵，但看到结果真的很开心"
+        },
+        {
+          "role": "assistant",
+          "content": "这种成就感是最真实的||好好庆祝一下||今晚就别加班了早点回去休息"
+        },
+        {
+          "role": "user",
+          "content": "嗯！我要去吃顿好的犒劳自己"
+        },
+        {
+          "role": "assistant",
+          "content": "这个主意好||你值得的||下一阶段也继续加油"
+        }
+      ],
+      "expected_l1": {
+        "summary": "烧酒的项目成功上线获得好评，非常开心和满足，决定犒劳自己",
+        "keywords": "项目上线,成就感,庆祝,正面情绪",
+        "time_period": "傍晚",
+        "atmosphere": "兴奋庆祝",
+        "valence": 1.0,
+        "salience": 0.75
+      }
+    },
+    {
+      "id": "conv-006",
+      "scenario": "人生困惑——职业选择",
+      "persona_uid": "user-0001",
+      "messages": [
+        {
+          "role": "user",
+          "content": "最近在想要不要转行，现在的工作虽然稳定但感觉没什么成长了"
+        },
+        {
+          "role": "assistant",
+          "content": "这种感觉我理解||在一个地方待久了确实会到瓶颈期||你心里有没有想去的方向"
+        },
+        {
+          "role": "user",
+          "content": "我想做AI相关的，但是感觉要从头学好多东西，有点没信心"
+        },
+        {
+          "role": "assistant",
+          "content": "不用从头学完所有东西才开始||可以先找一个切入点||比如你现在的技能和AI有什么结合点"
+        },
+        {
+          "role": "user",
+          "content": "我现在的后端开发经验应该能用到，但数学基础不太好"
+        },
+        {
+          "role": "assistant",
+          "content": "做工程的话数学要求没那么高||你可以先学应用层的||像API调用和模型部署这些"
+        },
+        {
+          "role": "user",
+          "content": "嗯...那我先考个证或者做个项目试试水"
+        },
+        {
+          "role": "assistant",
+          "content": "这个思路好||小步快跑比一步到位更靠谱||做了才知道合不合适"
+        }
+      ],
+      "expected_l1": {
+        "summary": "烧酒考虑职业转型到AI领域但缺乏信心，助手建议利用现有后端经验从小切入点开始尝试",
+        "keywords": "职业转型,AI,信心不足,职业规划",
+        "time_period": "夜间",
+        "atmosphere": "深度思考",
+        "valence": -0.5,
+        "salience": 0.75
+      }
+    },
+    {
+      "id": "conv-007",
+      "scenario": "日常分享——阅读体验",
+      "persona_uid": "user-0001",
+      "messages": [
+        {
+          "role": "user",
+          "content": "刚看完《三体》第三部，结局太震撼了，整个人都不好了"
+        },
+        {
+          "role": "assistant",
+          "content": "哈哈死神永生的结尾确实让人难以平静||程心的选择你怎么看"
+        },
+        {
+          "role": "user",
+          "content": "我觉得她太优柔寡断了，但想想又没法怪她，那种情况下谁也做不了完美的选择"
+        },
+        {
+          "role": "assistant",
+          "content": "对这就是大刘厉害的地方||没有绝对的善恶||只有不同立场下的取舍"
+        },
+        {
+          "role": "user",
+          "content": "相比之下我更喜欢罗辑，那种沉默的坚持太酷了"
+        },
+        {
+          "role": "assistant",
+          "content": "罗辑从玩世不恭到守护文明||这个转变太精彩了||而且他的办法也最符合博弈论"
+        }
+      ],
+      "expected_l1": {
+        "summary": "烧酒读完《三体》第三部，与助手讨论程心和罗辑的角色，对结局感到震撼",
+        "keywords": "三体,科幻小说,程心,罗辑,阅读体验",
+        "time_period": "夜间",
+        "atmosphere": "沉浸共鸣",
+        "valence": 0.5,
+        "salience": 0.5
+      }
+    }
+  ]
+}
