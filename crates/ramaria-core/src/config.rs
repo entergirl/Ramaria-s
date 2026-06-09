@@ -491,15 +491,9 @@ impl Default for LoggingConfig {
 /// 说明:
 /// - v1.0 中此结构当前无字段。`online_memory_injection` 已归入 `BackendSelection`，
 ///   避免两处配置不一致导致行为未定义。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PrivacyConfig {
     // v1.0 预留：未来可扩展日志脱敏级别、数据留存策略等
-}
-
-impl Default for PrivacyConfig {
-    fn default() -> Self {
-        Self {}
-    }
 }
 
 // =========================================================

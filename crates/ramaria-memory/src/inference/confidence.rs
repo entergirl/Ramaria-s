@@ -329,8 +329,8 @@ pub fn run_confidence_update(
     let n = trait_states.len();
     let mut updates = Vec::with_capacity(n);
 
-    for i in 0..n {
-        let (trait_id, conf_before, ref old_evidence) = trait_states[i];
+    for (i, state) in trait_states.iter().enumerate() {
+        let (trait_id, conf_before, ref old_evidence) = *state;
         let new_data = new_event_data_by_trait
             .get(i)
             .map(|v| v.as_slice())

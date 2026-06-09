@@ -191,6 +191,7 @@ pub fn shrink_share(
 ///
 /// 返回:
 /// - 收缩后的 (objective_ratio, subjective_ratio, mixed_ratio)，和为 1。
+#[allow(clippy::too_many_arguments)]
 pub fn shrink_presentation(
     cat_obj: f64,
     cat_sub: f64,

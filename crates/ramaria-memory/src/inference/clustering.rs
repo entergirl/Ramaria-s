@@ -234,16 +234,16 @@ pub fn simple_density_cluster(
     let mut cluster_sizes: Vec<usize> = vec![0; cluster_count];
 
     for (i, label) in labels.iter().enumerate() {
-        if let Some(cid) = label {
-            if *cid < cluster_count {
-                for (d, &val) in cluster_centroids[*cid]
-                    .iter_mut()
-                    .zip(samples[i].embedding.iter())
-                {
-                    *d += val;
-                }
-                cluster_sizes[*cid] += 1;
+        if let Some(cid) = label
+            && *cid < cluster_count
+        {
+            for (d, &val) in cluster_centroids[*cid]
+                .iter_mut()
+                .zip(samples[i].embedding.iter())
+            {
+                *d += val;
             }
+            cluster_sizes[*cid] += 1;
         }
     }
 
@@ -303,13 +303,13 @@ pub fn simple_density_cluster(
         };
 
         // 收集核心/边界文本
-        if let Some(cid) = primary {
-            if cid < cluster_count {
-                if tier == "core" {
-                    cluster_core[cid].push(samples[i].paraphrase.clone());
-                } else {
-                    cluster_edge[cid].push(samples[i].paraphrase.clone());
-                }
+        if let Some(cid) = primary
+            && cid < cluster_count
+        {
+            if tier == "core" {
+                cluster_core[cid].push(samples[i].paraphrase.clone());
+            } else {
+                cluster_edge[cid].push(samples[i].paraphrase.clone());
             }
         }
 

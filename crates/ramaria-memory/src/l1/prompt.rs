@@ -137,7 +137,7 @@ pub const KEYWORD_INJECT_LIMIT: usize = 50;
 /// 参数:
 /// - `conversation_text`: 格式化后的完整对话文本。
 /// - `keyword_candidates`: 从 keyword_pool 读取的关键词候选列表（逗号分隔字符串）。
-///    传 `None` 或空字符串时使用基础版 prompt。
+///   传 `None` 或空字符串时使用基础版 prompt。
 ///
 /// 返回:
 /// - 完整 prompt 字符串，可直接作为 LLM user message 发送。

@@ -112,9 +112,7 @@ pub fn extract_first_json_array(text: &str) -> Option<String> {
                 }
                 '{' => depth += 1,
                 '}' => {
-                    if depth > 0 {
-                        depth -= 1;
-                    }
+                    depth = depth.saturating_sub(1);
                 }
                 _ => {}
             }

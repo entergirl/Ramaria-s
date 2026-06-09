@@ -284,17 +284,17 @@ pub fn build_step3_prompt(
     for label in &analysis.base_candidates {
         prompt.push_str(&format!("  - {}\n", label));
     }
-    prompt.push_str(&format!("\n## 主色调候选\n"));
+    prompt.push_str("\n## 主色调候选\n");
     for label in &analysis.primary_candidates {
         prompt.push_str(&format!("  - {}\n", label));
     }
-    prompt.push_str(&format!("\n## 点缀候选\n"));
+    prompt.push_str("\n## 点缀候选\n");
     for label in &analysis.accent_candidates {
         prompt.push_str(&format!("  - {}\n", label));
     }
     prompt.push('\n');
 
-    prompt.push_str(&format!(
+    prompt.push_str(
         "## 任务\n\
 为每层的每个标签生成完整的 trait 记录。输出 JSON 数组，每元素包含:\n\
 - layer: \"base\" / \"primary\" / \"accent\"\n\
@@ -312,7 +312,7 @@ pub fn build_step3_prompt(
 - 只输出 JSON 数组，不要任何其他文字\n\n\
 格式示例:\n\
 [\n  {{\"layer\":\"primary\",\"trait_label\":\"温和\",\"meaning\":\"xxx\",\"not_meaning\":null,\"trigger\":null,\"suppress\":null,\"related\":null,\"seq\":0}},\n  ...\n]\n"
-    ));
+    );
 
     prompt
 }
@@ -391,10 +391,10 @@ pub fn mock_infer(stats: &StatsSummary, persona_uid: &str) -> InferenceResult {
     }
 
     // 最高权重分类 → 主色调
-    if let Some(top) = stats.categories.first() {
-        if let Some(sig) = category_signals.iter().find(|s| s.category == top.category) {
-            primary_candidates.push(sig.signal_label.clone());
-        }
+    if let Some(top) = stats.categories.first()
+        && let Some(sig) = category_signals.iter().find(|s| s.category == top.category)
+    {
+        primary_candidates.push(sig.signal_label.clone());
     }
 
     // 矛盾检测 → 点缀
@@ -403,10 +403,11 @@ pub fn mock_infer(stats: &StatsSummary, persona_uid: &str) -> InferenceResult {
     }
     // n_eff 很小的分类 → 点缀
     for sig in &category_signals {
-        if !sig.sufficient_evidence && sig.signal_label != "insufficient_data" {
-            if !accent_candidates.contains(&sig.signal_label) {
-                accent_candidates.push(sig.signal_label.clone());
-            }
+        if !sig.sufficient_evidence
+            && sig.signal_label != "insufficient_data"
+            && !accent_candidates.contains(&sig.signal_label)
+        {
+            accent_candidates.push(sig.signal_label.clone());
         }
     }
 

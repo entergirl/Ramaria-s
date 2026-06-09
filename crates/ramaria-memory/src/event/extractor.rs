@@ -271,15 +271,15 @@ impl<'a> EventExtractor<'a> {
             let mut event = Self::build_event(persona_uid, ej, time_range.0, time_range.1, now);
 
             // 如果有 attitude 且非空，生成 paraphrase
-            if let Some(ref attitude) = event.attitude {
-                if !attitude.trim().is_empty() {
-                    let context = format!("{} {}", event.title, event.summary);
-                    let paraphrase =
-                        generate_paraphrase(self.llm, attitude, &context, &self.config.paraphrase)
-                            .await;
-                    // paraphrase 失败时保持 None（不阻断主流程）
-                    event.paraphrase = paraphrase;
-                }
+            if let Some(ref attitude) = event.attitude
+                && !attitude.trim().is_empty()
+            {
+                let context = format!("{} {}", event.title, event.summary);
+                let paraphrase =
+                    generate_paraphrase(self.llm, attitude, &context, &self.config.paraphrase)
+                        .await;
+                // paraphrase 失败时保持 None（不阻断主流程）
+                event.paraphrase = paraphrase;
             }
 
             // 8. 写入事件
@@ -479,17 +479,17 @@ impl<'a> EventExtractor<'a> {
 
         // 步骤 2: 剥离 think 标签
         let stripped = utils::strip_thinking(raw);
-        if stripped != raw {
-            if let Ok(response) = serde_json::from_str::<EventResponse>(&stripped) {
-                return response.into_events();
-            }
+        if stripped != raw
+            && let Ok(response) = serde_json::from_str::<EventResponse>(&stripped)
+        {
+            return response.into_events();
         }
 
         // 步骤 3: 正则提取
-        if let Some(array_str) = utils::extract_first_json_array(raw) {
-            if let Ok(response) = serde_json::from_str::<EventResponse>(&array_str) {
-                return response.into_events();
-            }
+        if let Some(array_str) = utils::extract_first_json_array(raw)
+            && let Ok(response) = serde_json::from_str::<EventResponse>(&array_str)
+        {
+            return response.into_events();
         }
 
         Err(RamariaError::validation(format!(

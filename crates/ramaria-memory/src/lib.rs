@@ -8,18 +8,23 @@
 //! - 所有 LLM 依赖通过 `LlmProvider` trait 注入，便于 mock 测试
 //! - 纯数学模块（decay/rrf）零 I/O，不依赖数据库或异步运行时
 
+pub mod bm25;
 pub mod decay;
 pub mod event;
+pub mod graph_retriever;
 pub mod inference;
+pub mod init;
+pub mod job;
 pub mod l1;
+pub mod rag;
+pub mod rebuild;
+pub mod retriever;
 pub mod rrf;
-mod utils; // 内部共享工具（不暴露到公共 API）
+mod utils;
+pub mod vector; // 内部共享工具（不暴露到公共 API）
 
 // 后续 Phase 2 子模块在此添加:
 // pub mod prompt;
-// pub mod rag;
-// pub mod retriever;
-// pub mod init;
 
 // =========================================================
 // 公共 re-export
@@ -34,6 +39,33 @@ pub use decay::{
 // RRF
 pub use rrf::{
     ChannelResult, FusedResult, RrfConfig, rrf_fuse, rrf_single_channel, rrf_two_channels,
+};
+
+// BM25 全文检索
+pub use bm25::{
+    Bm25Config, Bm25Index, Bm25IndexBuilder, DocId, tokenize, tokenize_fields, tokenize_with_freq,
+};
+
+// Vector 向量检索
+pub use vector::{
+    BruteForceIndex, VectorEntry, VectorHit, VectorIndex, VectorIndexConfig, VectorIndexError,
+    make_vector_label, parse_vector_label,
+};
+
+// Graph 图谱检索
+pub use graph_retriever::{
+    GraphEdge, GraphHit, GraphNode, GraphRetriever, GraphRetrieverConfig, graph_hits_to_rrf_pairs,
+};
+
+// Retriever 三通道组合检索
+pub use retriever::{
+    L1DocView, L2DocView, Retriever, RetrieverConfig, SearchRequest, SearchResult,
+};
+
+// RAG Persona-Aware 检索增强生成
+pub use rag::{
+    PersonaKind as RagPersonaKind, RagConfig, assemble_rag_context, filter_by_persona,
+    format_context_text, format_graph_context,
 };
 
 // L1 Summarizer
@@ -127,6 +159,17 @@ pub use inference::{
     weighted_ratio,
     weighted_variance,
 };
+
+// Init 冷启动
+pub use init::{
+    ColdStartConfig, ColdStartResult, PersonaToml, initialize_rama_persona, parse_persona_toml,
+};
+
+// Job 后台任务管理
+pub use job::{JobManager, JobManagerConfig, JobResult, JobType, status as job_status};
+
+// Rebuild 索引重建
+pub use rebuild::{IndexRebuilder, RebuildConfig, RebuildStats, events_to_views, l1_list_to_views};
 
 /// 模块存活检查 (Phase 0 占位，可后续移除)
 pub fn hello_memory() -> &'static str {
