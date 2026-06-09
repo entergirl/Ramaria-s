@@ -1,7 +1,14 @@
 //! rust/crates/ramaria-storage/src/repo/conflict_queue.rs - 冲突检测队列
+//!
+//! 设计特点:
+//! - 管理画像矛盾与实体别名冲突的待确认队列
+//! - create 写入新冲突，list_pending 查询待处理项，resolve 标记已解决
+//! - 所有错误统一转换为 RamariaError::Storage
 
 use ramaria_core::error::{RamariaError, RamariaResult};
 use sqlx::SqlitePool;
+
+use super::last_insert_id;
 
 pub async fn create(
     pool: &SqlitePool,
@@ -18,11 +25,7 @@ pub async fn create(
     ).bind(field).bind(conflict_type).bind(old_content).bind(new_content).bind(desc).bind(now)
         .execute(pool).await
         .map_err(|e| RamariaError::storage_with_source("创建冲突记录失败", e))?;
-    let id = sqlx::query_scalar::<_, i64>("SELECT last_insert_rowid()")
-        .fetch_one(pool)
-        .await
-        .unwrap_or(0);
-    Ok(id)
+    last_insert_id(pool).await
 }
 
 pub async fn list_pending(pool: &SqlitePool) -> RamariaResult<Vec<(i64, String, String, String)>> {

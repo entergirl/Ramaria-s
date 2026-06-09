@@ -1,8 +1,15 @@
 //! rust/crates/ramaria-storage/src/repo/graph.rs - GraphNodes / GraphEdges CRUD
+//!
+//! 设计特点:
+//! - 管理知识图谱实体节点和关系边
+//! - insert_node 使用 INSERT OR IGNORE 幂等创建
+//! - insert_edge 使用 AUTOINCREMENT 主键
 
 use ramaria_core::error::{RamariaError, RamariaResult};
 use sqlx::SqlitePool;
 use uuid::Uuid;
+
+use super::last_insert_id;
 
 pub async fn insert_node(
     pool: &SqlitePool,
@@ -62,11 +69,7 @@ pub async fn insert_edge(
       .execute(pool).await
     .map_err(|e| RamariaError::storage_with_source("插入图谱边失败", e))?;
 
-    let id = sqlx::query_scalar::<_, i64>("SELECT last_insert_rowid()")
-        .fetch_one(pool)
-        .await
-        .map_err(|e| RamariaError::storage_with_source("获取图谱边 id 失败", e))?;
-    Ok(id)
+    last_insert_id(pool).await
 }
 
 pub async fn list_edges(

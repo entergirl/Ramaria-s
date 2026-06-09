@@ -1,4 +1,10 @@
-//! rust/crates/ramaria-storage/src/repo/schema_meta.rs - Schema/Index 版本管理
+//! rust/crates/ramaria-storage/src/repo/schema_meta.rs - Schema 与索引版本管理模块
+//!
+//! 设计特点:
+//! - 通过 key-value 表管理 schema_version 和 index_version
+//! - schema_version 在 migration 时写入，启动时校验——不匹配则阻止启动
+//! - index_version 由应用层管理，索引重建后递增
+//! - 版本值统一解析为 i32，非法值时返回 Storage 错误而非静默回退
 
 use ramaria_core::error::{RamariaError, RamariaResult};
 use sqlx::SqlitePool;

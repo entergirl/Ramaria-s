@@ -1,7 +1,13 @@
 //! rust/crates/ramaria-storage/src/repo/pending_push.rs - 主动推送暂存
+//!
+//! 设计特点:
+//! - 缓冲用户离线时触发的主动消息，上线后按时间顺序推送
+//! - create 写入待推送消息，mark_sent 标记已发送
 
 use ramaria_core::error::{RamariaError, RamariaResult};
 use sqlx::SqlitePool;
+
+use super::last_insert_id;
 
 pub async fn create(pool: &SqlitePool, content: &str) -> RamariaResult<i64> {
     let now = ramaria_core::types::now_ms();
@@ -11,11 +17,7 @@ pub async fn create(pool: &SqlitePool, content: &str) -> RamariaResult<i64> {
         .execute(pool)
         .await
         .map_err(|e| RamariaError::storage_with_source("创建推送失败", e))?;
-    let id = sqlx::query_scalar::<_, i64>("SELECT last_insert_rowid()")
-        .fetch_one(pool)
-        .await
-        .unwrap_or(0);
-    Ok(id)
+    last_insert_id(pool).await
 }
 
 pub async fn list_pending(pool: &SqlitePool) -> RamariaResult<Vec<(i64, String)>> {

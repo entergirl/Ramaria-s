@@ -1,8 +1,14 @@
 //! rust/crates/ramaria-storage/src/repo/cluster.rs - ClusterSnapshot CRUD
+//!
+//! 设计特点:
+//! - 管理态度聚类快照，支撑跨版本簇匹配（语义标签→embedding 相似度）
+//! - get_current 按 (persona_uid, category) 查询最新版本快照
 
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::types::ClusterSnapshot;
 use sqlx::SqlitePool;
+
+use super::last_insert_id;
 
 #[derive(sqlx::FromRow)]
 struct ClusterRow {
@@ -41,11 +47,7 @@ pub async fn save(pool: &SqlitePool, s: &ClusterSnapshot) -> RamariaResult<i64> 
     .execute(pool).await
     .map_err(|e| RamariaError::storage_with_source("保存聚类快照失败", e))?;
 
-    let id = sqlx::query_scalar::<_, i64>("SELECT last_insert_rowid()")
-        .fetch_one(pool)
-        .await
-        .map_err(|e| RamariaError::storage_with_source("获取快照 id 失败", e))?;
-    Ok(id)
+    last_insert_id(pool).await
 }
 
 pub async fn get_current(

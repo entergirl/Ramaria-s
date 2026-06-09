@@ -1,16 +1,26 @@
-//! rust/crates/ramaria-storage/src/repo/privacy_consent.rs - PrivacyConsent CRUD
+//! rust/crates/ramaria-storage/src/repo/privacy_consent.rs - 隐私确认存取模块
+//!
+//! 设计特点:
+//! - 按 provider + base_url 粒度记录用户的线上调用隐私确认
+//! - persistent 字段控制是否跨重启持久化（勾选"下次不再提醒"）
+//! - get_by_provider 取最新一条记录，按 timestamp DESC 排序
+//! - provider 解析失败时保守回退为 LmStudio（本地，不需要 API key）
 
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::types::{LlmProvider, PrivacyConsent};
 use sqlx::SqlitePool;
 
 /// 将存储的 provider 字符串解析为 LlmProvider 枚举。
+/// 未知值回退为 LmStudio（本地，不需 API key）并记录 WARNING。
 fn parse_provider(s: &str) -> LlmProvider {
     match s {
         "lm_studio" => LlmProvider::LmStudio,
         "deepseek" => LlmProvider::DeepSeek,
         "openai" => LlmProvider::OpenAI,
-        _ => LlmProvider::LmStudio, // 未知值保守回退为本地
+        other => {
+            tracing::warn!(%other, "privacy_consent.provider 值非法，保守回退为 LmStudio（本地）");
+            LlmProvider::LmStudio
+        }
     }
 }
 

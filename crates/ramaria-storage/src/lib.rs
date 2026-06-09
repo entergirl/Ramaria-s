@@ -12,8 +12,8 @@ use ramaria_core::error::RamariaResult;
 use ramaria_core::traits::StorageBackend;
 use ramaria_core::types::{
     BackendConfig, ClusterSnapshot, EventRelation, MemoryEvent, MemoryL1, Message, Persona,
-    PersonaExample, PersonaFact, PersonalityTrait, PrivacyConsent, Session, TraitEvidence,
-    TraitStatus,
+    PersonaExample, PersonaFact, PersonalityTrait, PrivacyConsent, ProfileField, Session,
+    TraitEvidence, TraitStatus,
 };
 use sqlx::SqlitePool;
 use uuid::Uuid;
@@ -34,7 +34,9 @@ impl SqliteStorage {
 
 #[async_trait::async_trait]
 impl StorageBackend for SqliteStorage {
-    // -- Session --
+    // =========================================================
+    // Session 管理（会话生命周期）
+    // =========================================================
     async fn create_session(&self) -> RamariaResult<Session> {
         repo::sessions::create(&self.pool).await
     }
@@ -54,12 +56,17 @@ impl StorageBackend for SqliteStorage {
         repo::sessions::delete(&self.pool, session_id).await
     }
 
-    // -- Message (L0) --
+    // =========================================================
+    // Message（L0 原始消息）
+    // =========================================================
     async fn save_message(&self, message: &Message) -> RamariaResult<()> {
         repo::messages::save(&self.pool, message).await
     }
     async fn list_messages(&self, session_id: Uuid) -> RamariaResult<Vec<Message>> {
         repo::messages::list_by_session(&self.pool, session_id).await
+    }
+    async fn list_messages_by_persona(&self, persona_uid: &str) -> RamariaResult<Vec<Message>> {
+        repo::messages::list_by_persona(&self.pool, persona_uid).await
     }
     async fn find_message_by_fingerprint(
         &self,
@@ -68,7 +75,9 @@ impl StorageBackend for SqliteStorage {
         repo::messages::find_by_fingerprint(&self.pool, fingerprint).await
     }
 
-    // -- Memory L1 --
+    // =========================================================
+    // Memory L1（单次会话摘要）
+    // =========================================================
     async fn save_memory_l1(&self, memory: &MemoryL1) -> RamariaResult<()> {
         repo::memory_l1::save(&self.pool, memory).await
     }
@@ -85,7 +94,9 @@ impl StorageBackend for SqliteStorage {
         repo::memory_l1::list_unabsorbed(&self.pool, persona_uid).await
     }
 
-    // -- Personas --
+    // =========================================================
+    // Persona（人格注册）
+    // =========================================================
     async fn create_persona(&self, persona: &Persona) -> RamariaResult<i64> {
         repo::personas::create(&self.pool, persona).await
     }
@@ -95,8 +106,19 @@ impl StorageBackend for SqliteStorage {
     async fn list_personas(&self) -> RamariaResult<Vec<Persona>> {
         repo::personas::list_all(&self.pool).await
     }
+    async fn update_persona(
+        &self,
+        uid: &str,
+        name: &str,
+        avatar: Option<&str>,
+        config: Option<&str>,
+    ) -> RamariaResult<()> {
+        repo::personas::update(&self.pool, uid, name, avatar, config).await
+    }
 
-    // -- Memory Events --
+    // =========================================================
+    // Memory Events（L2 事件层）
+    // =========================================================
     async fn save_event(&self, event: &MemoryEvent) -> RamariaResult<i64> {
         repo::events::save_event(&self.pool, event).await
     }
@@ -112,12 +134,13 @@ impl StorageBackend for SqliteStorage {
         repo::events::list_unabsorbed_events(&self.pool, persona_uid).await
     }
 
-    // -- Event Relations --
+    // =========================================================
+    // Event Relations（事件关系）+ Event Sources（事件溯源）
+    // =========================================================
     async fn save_event_relation(&self, rel: &EventRelation) -> RamariaResult<i64> {
         repo::events::save_relation(&self.pool, rel).await
     }
 
-    // -- Event Sources --
     async fn save_event_source(
         &self,
         event_id: i64,
@@ -127,19 +150,23 @@ impl StorageBackend for SqliteStorage {
         repo::events::save_source(&self.pool, event_id, l1_id, weight).await
     }
 
-    // -- Persona Facts --
+    // =========================================================
+    // Persona Facts（人物事实）
+    // =========================================================
     async fn save_fact(&self, fact: &PersonaFact) -> RamariaResult<i64> {
         repo::facts::save(&self.pool, fact).await
     }
     async fn list_facts_by_persona(
         &self,
         persona_uid: &str,
-        field: &str,
+        field: ProfileField,
     ) -> RamariaResult<Vec<PersonaFact>> {
         repo::facts::list_by_persona(&self.pool, persona_uid, field).await
     }
 
-    // -- Personality Traits --
+    // =========================================================
+    // Personality Traits（L3 性格层）+ Trait Evidence（证据链）
+    // =========================================================
     async fn save_trait(&self, t: &PersonalityTrait) -> RamariaResult<i64> {
         repo::traits::save_trait(&self.pool, t).await
     }
@@ -162,7 +189,6 @@ impl StorageBackend for SqliteStorage {
         repo::traits::update_status(&self.pool, id, status).await
     }
 
-    // -- Trait Evidence --
     async fn save_evidence(&self, e: &TraitEvidence) -> RamariaResult<i64> {
         repo::traits::save_evidence(&self.pool, e).await
     }
@@ -170,7 +196,9 @@ impl StorageBackend for SqliteStorage {
         repo::traits::list_evidence_by_trait(&self.pool, trait_id).await
     }
 
-    // -- Persona Examples --
+    // =========================================================
+    // Persona Examples（Few-shot 示例）
+    // =========================================================
     async fn save_example(&self, e: &PersonaExample) -> RamariaResult<i64> {
         repo::examples::save(&self.pool, e).await
     }
@@ -181,7 +209,9 @@ impl StorageBackend for SqliteStorage {
         repo::examples::list_selected(&self.pool, persona_uid).await
     }
 
-    // -- Persona Cluster Snapshots --
+    // =========================================================
+    // Cluster Snapshots（聚类快照）
+    // =========================================================
     async fn save_cluster_snapshot(&self, s: &ClusterSnapshot) -> RamariaResult<i64> {
         repo::cluster::save(&self.pool, s).await
     }
@@ -193,7 +223,9 @@ impl StorageBackend for SqliteStorage {
         repo::cluster::get_current(&self.pool, persona_uid, category).await
     }
 
-    // -- Keyword Pool --
+    // =========================================================
+    // Keyword Pool（关键词词典）
+    // =========================================================
     async fn upsert_keyword(&self, keyword: &str) -> RamariaResult<()> {
         repo::keyword::upsert(&self.pool, keyword).await
     }
@@ -201,7 +233,9 @@ impl StorageBackend for SqliteStorage {
         repo::keyword::list_all(&self.pool).await
     }
 
-    // -- Privacy Consent --
+    // =========================================================
+    // Privacy Consent（隐私确认）
+    // =========================================================
     async fn save_privacy_consent(&self, consent: &PrivacyConsent) -> RamariaResult<()> {
         repo::privacy_consent::save(&self.pool, consent).await
     }
@@ -213,7 +247,9 @@ impl StorageBackend for SqliteStorage {
         repo::privacy_consent::get_by_provider(&self.pool, provider, base_url).await
     }
 
-    // -- Backend Config --
+    // =========================================================
+    // Backend Config（后端配置）
+    // =========================================================
     async fn save_backend_config(&self, config: &BackendConfig) -> RamariaResult<()> {
         repo::backend_config::upsert(&self.pool, config).await
     }
@@ -221,7 +257,9 @@ impl StorageBackend for SqliteStorage {
         repo::backend_config::get(&self.pool).await
     }
 
-    // -- 索引一致性 --
+    // =========================================================
+    // 索引一致性（schema / index 版本）
+    // =========================================================
     async fn get_schema_version(&self) -> RamariaResult<i32> {
         repo::schema_meta::get_schema_version(&self.pool).await
     }
@@ -232,7 +270,9 @@ impl StorageBackend for SqliteStorage {
         repo::schema_meta::set_index_version(&self.pool, version).await
     }
 
-    // -- Background Jobs --
+    // =========================================================
+    // Background Jobs（后台任务）
+    // =========================================================
     async fn create_background_job(
         &self,
         job_type: &str,
@@ -252,7 +292,9 @@ impl StorageBackend for SqliteStorage {
         repo::background_jobs::list_pending(&self.pool).await
     }
 
-    // -- Conflict Queue --
+    // =========================================================
+    // Conflict Queue（冲突队列）
+    // =========================================================
     async fn create_conflict(
         &self,
         field: &str,
@@ -278,7 +320,9 @@ impl StorageBackend for SqliteStorage {
         repo::conflict_queue::resolve(&self.pool, id).await
     }
 
-    // -- Pending Push --
+    // =========================================================
+    // Pending Push（待推送消息）
+    // =========================================================
     async fn create_push(&self, content: &str) -> RamariaResult<i64> {
         repo::pending_push::create(&self.pool, content).await
     }
@@ -289,7 +333,9 @@ impl StorageBackend for SqliteStorage {
         repo::pending_push::mark_sent(&self.pool, id).await
     }
 
-    // -- Settings --
+    // =========================================================
+    // Settings（全局运行配置）
+    // =========================================================
     async fn get_setting(&self, key: &str) -> RamariaResult<Option<String>> {
         repo::settings::get(&self.pool, key).await
     }
@@ -300,7 +346,9 @@ impl StorageBackend for SqliteStorage {
         repo::settings::list_all(&self.pool).await
     }
 
-    // -- BM25 Index --
+    // =========================================================
+    // BM25 Index（全文索引）
+    // =========================================================
     async fn save_bm25(&self, doc_id: i64, layer: &str, tokens_json: &str) -> RamariaResult<()> {
         repo::bm25_index::save(&self.pool, doc_id, layer, tokens_json).await
     }
@@ -311,7 +359,9 @@ impl StorageBackend for SqliteStorage {
         repo::bm25_index::delete_by_doc(&self.pool, doc_id).await
     }
 
-    // -- Graph --
+    // =========================================================
+    // Graph（知识图谱）
+    // =========================================================
     async fn insert_graph_node(
         &self,
         entity_name: &str,
@@ -562,7 +612,7 @@ mod tests {
         assert!(fact_id > 0);
 
         let facts = storage
-            .list_facts_by_persona("user-0001", "basic_info")
+            .list_facts_by_persona("user-0001", ramaria_core::types::ProfileField::BasicInfo)
             .await
             .unwrap();
         assert_eq!(facts.len(), 1);

@@ -1,8 +1,14 @@
 //! rust/crates/ramaria-storage/src/repo/examples.rs - PersonaExample CRUD
+//!
+//! 设计特点:
+//! - 管理对话 Few-shot 示例（partner→reply），用于 System Prompt 注入
+//! - list_selected 仅返回 selected=1 的示例，最多 5 条
 
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::types::PersonaExample;
 use sqlx::SqlitePool;
+
+use super::last_insert_id;
 
 #[derive(sqlx::FromRow)]
 struct ExampleRow {
@@ -50,11 +56,7 @@ pub async fn save(pool: &SqlitePool, e: &PersonaExample) -> RamariaResult<i64> {
     .execute(pool).await
     .map_err(|e| RamariaError::storage_with_source("保存示例失败", e))?;
 
-    let id = sqlx::query_scalar::<_, i64>("SELECT last_insert_rowid()")
-        .fetch_one(pool)
-        .await
-        .map_err(|e| RamariaError::storage_with_source("获取示例 id 失败", e))?;
-    Ok(id)
+    last_insert_id(pool).await
 }
 
 pub async fn list_selected(

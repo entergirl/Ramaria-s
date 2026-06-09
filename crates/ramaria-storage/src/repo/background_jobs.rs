@@ -1,7 +1,14 @@
 //! rust/crates/ramaria-storage/src/repo/background_jobs.rs - 后台任务管理
+//!
+//! 设计特点:
+//! - 管理 L1→L2 事件提取、索引重建等后台异步任务的状态
+//! - status 默认 'pending'，完成时更新为 'done'/'failed'
+//! - 支持重试计数（DDL 层控制，max_retries=3）
 
 use ramaria_core::error::{RamariaError, RamariaResult};
 use sqlx::SqlitePool;
+
+use super::last_insert_id;
 
 pub async fn create(
     pool: &SqlitePool,
@@ -12,11 +19,7 @@ pub async fn create(
     sqlx::query("INSERT INTO background_jobs (job_type, status, payload, created_at) VALUES (?, 'pending', ?, ?)")
         .bind(job_type).bind(payload).bind(now).execute(pool).await
         .map_err(|e| RamariaError::storage_with_source("创建后台任务失败", e))?;
-    let id = sqlx::query_scalar::<_, i64>("SELECT last_insert_rowid()")
-        .fetch_one(pool)
-        .await
-        .unwrap_or(0);
-    Ok(id)
+    last_insert_id(pool).await
 }
 
 pub async fn update_status(

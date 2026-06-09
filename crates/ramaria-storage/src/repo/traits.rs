@@ -1,4 +1,9 @@
 //! rust/crates/ramaria-storage/src/repo/traits.rs - PersonalityTrait / TraitEvidence CRUD
+//!
+//! 设计特点:
+//! - 管理 L3 性格标签（三层模型：base/primary/accent）及其证据链
+//! - 所有枚举解析失败时回退到合理默认值并记录 WARNING
+//! - list_traits_by_persona 仅返回 active 状态的标签（System Prompt 构建用）
 
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::types::{
@@ -6,38 +11,56 @@ use ramaria_core::types::{
 };
 use sqlx::SqlitePool;
 
+use super::last_insert_id;
+
 fn parse_layer(s: &str) -> TraitLayer {
     match s {
+        "base" => TraitLayer::Base,
         "primary" => TraitLayer::Primary,
         "accent" => TraitLayer::Accent,
-        _ => TraitLayer::Base,
+        other => {
+            tracing::warn!(%other, "personality_traits.layer 值非法，回退为 Base");
+            TraitLayer::Base
+        }
     }
 }
 fn parse_trait_source(s: &str) -> TraitSource {
     match s {
+        "l1" => TraitSource::L1,
         "event" => TraitSource::Event,
         "manual" => TraitSource::Manual,
         "inferred" => TraitSource::Inferred,
-        _ => TraitSource::L1,
+        other => {
+            tracing::warn!(%other, "personality_traits.source 值非法，回退为 L1");
+            TraitSource::L1
+        }
     }
 }
 fn parse_trait_status(s: &str) -> TraitStatus {
     match s {
+        "active" => TraitStatus::Active,
         "deprecated" => TraitStatus::Deprecated,
         "historical" => TraitStatus::Historical,
-        _ => TraitStatus::Active,
+        other => {
+            tracing::warn!(%other, "personality_traits.status 值非法，回退为 Active");
+            TraitStatus::Active
+        }
     }
 }
 fn parse_evidence_dir(s: &str) -> EvidenceDirection {
     match s {
+        "support" => EvidenceDirection::Support,
         "contradict" => EvidenceDirection::Contradict,
         "neutral" => EvidenceDirection::Neutral,
-        _ => EvidenceDirection::Support,
+        other => {
+            tracing::warn!(%other, "trait_evidence.direction 值非法，回退为 Support");
+            EvidenceDirection::Support
+        }
     }
 }
 
 // =========================================================
-// PersonalityTrait
+// L3 性格标签
 // =========================================================
 
 #[derive(sqlx::FromRow)]
@@ -120,11 +143,7 @@ pub async fn save_trait(pool: &SqlitePool, t: &PersonalityTrait) -> RamariaResul
     .await
     .map_err(|e| RamariaError::storage_with_source("保存性格标签失败", e))?;
 
-    let id = sqlx::query_scalar::<_, i64>("SELECT last_insert_rowid()")
-        .fetch_one(pool)
-        .await
-        .map_err(|e| RamariaError::storage_with_source("获取性格标签 id 失败", e))?;
-    Ok(id)
+    last_insert_id(pool).await
 }
 
 pub async fn list_traits_by_persona(
@@ -169,7 +188,7 @@ pub async fn update_status(pool: &SqlitePool, id: i64, status: TraitStatus) -> R
 }
 
 // =========================================================
-// TraitEvidence (trait_id/event_id: i64)
+// 性格证据链（trait_id/event_id 均为 i64）
 // =========================================================
 
 pub async fn save_evidence(pool: &SqlitePool, e: &TraitEvidence) -> RamariaResult<i64> {
@@ -187,11 +206,7 @@ pub async fn save_evidence(pool: &SqlitePool, e: &TraitEvidence) -> RamariaResul
     .await
     .map_err(|e| RamariaError::storage_with_source("保存证据失败", e))?;
 
-    let id = sqlx::query_scalar::<_, i64>("SELECT last_insert_rowid()")
-        .fetch_one(pool)
-        .await
-        .map_err(|e| RamariaError::storage_with_source("获取证据 id 失败", e))?;
-    Ok(id)
+    last_insert_id(pool).await
 }
 
 pub async fn list_evidence_by_trait(

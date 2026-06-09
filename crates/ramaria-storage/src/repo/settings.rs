@@ -1,4 +1,10 @@
-//! rust/crates/ramaria-storage/src/repo/settings.rs - 全局设置 key-value
+//! rust/crates/ramaria-storage/src/repo/settings.rs - 全局运行配置存取模块
+//!
+//! 设计特点:
+//! - key-value 结构，value 统一存储为 TEXT
+//! - set 使用 INSERT OR REPLACE 确保幂等写入，自动刷新 updated_at
+//! - 配置项包括 profile_mode、l2_trigger_count、push_enabled 等运行时参数
+//! - 不存储敏感信息（API key 等），仅保存非敏感运行参数
 
 use ramaria_core::error::{RamariaError, RamariaResult};
 use sqlx::SqlitePool;

@@ -1,4 +1,9 @@
 //! rust/crates/ramaria-storage/src/repo/sessions.rs - Session CRUD
+//!
+//! 设计特点:
+//! - 管理对话会话生命周期：创建、关闭、查询、删除
+//! - id 使用 UUID v4（TEXT 主键），时间字段为 Unix 毫秒
+//! - UUID 解析失败时记录 WARNING 日志
 
 use ramaria_core::error::RamariaResult;
 use ramaria_core::types::Session;
@@ -91,8 +96,12 @@ struct SessionRow {
 
 impl SessionRow {
     fn into_session(self) -> RamariaResult<Session> {
+        let id = ramaria_core::types::uuid_from_db(&self.id);
+        if ramaria_core::types::is_nil_uuid(&id) {
+            tracing::warn!(raw_id = %self.id, "sessions.id UUID 解析失败");
+        }
         Ok(Session {
-            id: ramaria_core::types::uuid_from_db(&self.id),
+            id,
             started_at: self.started_at,
             ended_at: self.ended_at,
         })

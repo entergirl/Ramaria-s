@@ -1,19 +1,31 @@
 //! rust/crates/ramaria-storage/src/repo/events.rs - MemoryEvent / EventRelation / EventSource CRUD
+//!
+//! 设计特点:
+//! - 管理 L2 事件主表及其关系和溯源
+//! - MemoryEvent 使用 AUTOINCREMENT id；EventRelation/EventSource 同理
+//! - presentation 解析失败时回退为 Mixed 并记录 WARNING
+//! - event_sources 使用 ON CONFLICT 幂等写入（同一 (event_id, l1_id) 不重复）
 
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::types::{EventRelation, MemoryEvent, Presentation};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+use super::last_insert_id;
+
 // =========================================================
-// MemoryEvent
+// MemoryEvent（事件主表）
 // =========================================================
 
 fn parse_presentation(s: &str) -> Presentation {
     match s {
         "objective" => Presentation::Objective,
         "subjective" => Presentation::Subjective,
-        _ => Presentation::Mixed,
+        "mixed" => Presentation::Mixed,
+        other => {
+            tracing::warn!(%other, "memory_events.presentation 值非法，回退为 Mixed");
+            Presentation::Mixed
+        }
     }
 }
 
@@ -85,11 +97,7 @@ pub async fn save_event(pool: &SqlitePool, ev: &MemoryEvent) -> RamariaResult<i6
     .execute(pool).await
     .map_err(|e| RamariaError::storage_with_source("保存事件失败", e))?;
 
-    let id = sqlx::query_scalar::<_, i64>("SELECT last_insert_rowid()")
-        .fetch_one(pool)
-        .await
-        .map_err(|e| RamariaError::storage_with_source("获取事件 id 失败", e))?;
-    Ok(id)
+    last_insert_id(pool).await
 }
 
 pub async fn list_events_by_persona(
@@ -131,7 +139,7 @@ pub async fn list_unabsorbed_events(
 }
 
 // =========================================================
-// EventRelation (from_id/to_id: i64)
+// 事件关系（from_id/to_id 均为 i64）
 // =========================================================
 
 pub async fn save_relation(pool: &SqlitePool, rel: &EventRelation) -> RamariaResult<i64> {
@@ -142,15 +150,11 @@ pub async fn save_relation(pool: &SqlitePool, rel: &EventRelation) -> RamariaRes
     .execute(pool).await
     .map_err(|e| RamariaError::storage_with_source("保存事件关系失败", e))?;
 
-    let id = sqlx::query_scalar::<_, i64>("SELECT last_insert_rowid()")
-        .fetch_one(pool)
-        .await
-        .map_err(|e| RamariaError::storage_with_source("获取关系 id 失败", e))?;
-    Ok(id)
+    last_insert_id(pool).await
 }
 
 // =========================================================
-// EventSource (event_id: i64, l1_id: Uuid)
+// 事件溯源（event_id 为 i64，l1_id 为 Uuid）
 // =========================================================
 
 pub async fn save_source(

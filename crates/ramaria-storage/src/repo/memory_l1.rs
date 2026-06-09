@@ -1,4 +1,11 @@
-//! rust/crates/ramaria-storage/src/repo/memory_l1.rs - L1 记忆 CRUD
+//! rust/crates/ramaria-storage/src/repo/memory_l1.rs - L1 单次会话摘要存取模块
+//!
+//! 设计特点:
+//! - id 使用 UUID v4（TEXT 主键），与 sessions/messages 保持 ID 类型一致
+//! - 支持按 session_id 查询、按 persona_uid 过滤未吸收记录
+//! - mark_absorbed 在事务中批量执行，确保 L1→L2 吸收操作的原子性
+//! - absorbed 字段在 SQLite 中存为 INTEGER（0/1），读取时还原为 bool
+//! - persona_uid 和 context_json 为 Phase 1.5 新增列，支持人格关联和分组键
 
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::types::MemoryL1;
@@ -24,9 +31,17 @@ struct L1Row {
 
 impl L1Row {
     fn into_l1(self) -> RamariaResult<MemoryL1> {
+        let id = ramaria_core::types::uuid_from_db(&self.id);
+        let session_id = ramaria_core::types::uuid_from_db(&self.session_id);
+        if ramaria_core::types::is_nil_uuid(&id) {
+            tracing::warn!(raw_id = %self.id, "memory_l1.id UUID 解析失败");
+        }
+        if ramaria_core::types::is_nil_uuid(&session_id) {
+            tracing::warn!(raw_id = %self.session_id, "memory_l1.session_id UUID 解析失败");
+        }
         Ok(MemoryL1 {
-            id: ramaria_core::types::uuid_from_db(&self.id),
-            session_id: ramaria_core::types::uuid_from_db(&self.session_id),
+            id,
+            session_id,
             summary: self.summary,
             keywords: self.keywords,
             time_period: self.time_period,
@@ -96,13 +111,24 @@ pub async fn get(pool: &SqlitePool, id: Uuid) -> RamariaResult<Option<MemoryL1>>
 }
 
 pub async fn mark_absorbed(pool: &SqlitePool, l1_ids: &[Uuid]) -> RamariaResult<()> {
+    if l1_ids.is_empty() {
+        return Ok(());
+    }
+    // 事务包裹：确保批量标记的原子性——全部成功或全部回滚
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| RamariaError::storage_with_source("开启吸收标记事务失败", e))?;
     for id in l1_ids {
         sqlx::query("UPDATE memory_l1 SET absorbed = 1 WHERE id = ?")
             .bind(id.to_string())
-            .execute(pool)
+            .execute(&mut *tx)
             .await
             .map_err(|e| RamariaError::storage_with_source("标记 L1 已吸收失败", e))?;
     }
+    tx.commit()
+        .await
+        .map_err(|e| RamariaError::storage_with_source("提交吸收标记事务失败", e))?;
     Ok(())
 }
 

@@ -1,4 +1,10 @@
-//! rust/crates/ramaria-storage/src/repo/bm25_index.rs - BM25 索引 CRUD
+//! rust/crates/ramaria-storage/src/repo/bm25_index.rs - BM25 全文索引存取模块
+//!
+//! 设计特点:
+//! - 以 (doc_id, layer) 为复合主键，存储 tokens 的 JSON 序列化结果
+//! - save 使用 INSERT OR REPLACE 实现增量更新幂等
+//! - 不在此层执行分词或检索——仅负责原始 token 数据的持久化
+//! - 上层 ramaria-memory 负责 jieba-rs 分词、BM25 评分和 RRF 融合
 
 use ramaria_core::error::{RamariaError, RamariaResult};
 use sqlx::SqlitePool;

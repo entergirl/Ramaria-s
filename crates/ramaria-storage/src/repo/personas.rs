@@ -1,8 +1,15 @@
 //! rust/crates/ramaria-storage/src/repo/personas.rs - Persona CRUD
+//!
+//! 设计特点:
+//! - 管理 personas 表的创建、查询、更新和软删除
+//! - uid 为全局业务标识（user-0001/rama-0001 等），id 为 AUTOINCREMENT 内部索引
+//! - kind 解析失败时回退到 Hist 并记录 WARNING 日志
 
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::types::{Persona, PersonaKind};
 use sqlx::SqlitePool;
+
+use super::last_insert_id;
 
 fn parse_kind(s: &str) -> PersonaKind {
     match s {
@@ -11,7 +18,11 @@ fn parse_kind(s: &str) -> PersonaKind {
         "char" => PersonaKind::Char,
         "anim" => PersonaKind::Anim,
         "oc" => PersonaKind::Oc,
-        _ => PersonaKind::Hist,
+        "hist" => PersonaKind::Hist,
+        other => {
+            tracing::warn!(%other, "personas.kind 值非法，回退为 Hist");
+            PersonaKind::Hist
+        }
     }
 }
 
@@ -71,11 +82,7 @@ pub async fn create(pool: &SqlitePool, p: &Persona) -> RamariaResult<i64> {
     .await
     .map_err(|e| RamariaError::storage_with_source("创建 persona 失败", e))?;
 
-    let id = sqlx::query_scalar::<_, i64>("SELECT last_insert_rowid()")
-        .fetch_one(pool)
-        .await
-        .map_err(|e| RamariaError::storage_with_source("获取 persona id 失败", e))?;
-    Ok(id)
+    last_insert_id(pool).await
 }
 
 pub async fn get_by_uid(pool: &SqlitePool, uid: &str) -> RamariaResult<Option<Persona>> {
@@ -99,4 +106,32 @@ pub async fn list_all(pool: &SqlitePool) -> RamariaResult<Vec<Persona>> {
     .await
     .map_err(|e| RamariaError::storage_with_source("查询 persona 列表失败", e))?;
     Ok(rows.into_iter().map(|r| r.into_persona()).collect())
+}
+
+/// 更新 persona 的可变字段（name / avatar / config）。
+/// uid 不可变更，updated_at 自动刷新。
+pub async fn update(
+    pool: &SqlitePool,
+    uid: &str,
+    name: &str,
+    avatar: Option<&str>,
+    config: Option<&str>,
+) -> RamariaResult<()> {
+    let now = ramaria_core::types::now_ms();
+    let rows = sqlx::query(
+        "UPDATE personas SET name = ?, avatar = ?, config = ?, updated_at = ? WHERE uid = ?",
+    )
+    .bind(name)
+    .bind(avatar)
+    .bind(config)
+    .bind(now)
+    .bind(uid)
+    .execute(pool)
+    .await
+    .map_err(|e| RamariaError::storage_with_source("更新 persona 失败", e))?;
+
+    if rows.rows_affected() == 0 {
+        return Err(RamariaError::storage(format!("persona 不存在: uid={uid}")));
+    }
+    Ok(())
 }

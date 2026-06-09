@@ -1,8 +1,15 @@
 //! rust/crates/ramaria-storage/src/repo/facts.rs - PersonaFact CRUD
+//!
+//! 设计特点:
+//! - 管理原子化人物事实（替代旧 user_profile 表）
+//! - field 和 source 解析失败时回退到合理默认值并记录 WARNING
+//! - ref_event_id 和 ref_l1_id 为独立可空列，避免一列指两张表
 
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::types::{FactSource, PersonaFact, ProfileField};
 use sqlx::SqlitePool;
+
+use super::last_insert_id;
 
 fn parse_field(s: &str) -> ProfileField {
     match s {
@@ -12,7 +19,11 @@ fn parse_field(s: &str) -> ProfileField {
         "social" => ProfileField::Social,
         "history" => ProfileField::History,
         "recent_context" => ProfileField::RecentContext,
-        _ => ProfileField::SpeakingStyle,
+        "speaking_style" => ProfileField::SpeakingStyle,
+        other => {
+            tracing::warn!(%other, "persona_facts.field 值非法，回退为 SpeakingStyle");
+            ProfileField::SpeakingStyle
+        }
     }
 }
 
@@ -20,7 +31,11 @@ fn parse_fact_source(s: &str) -> FactSource {
     match s {
         "event" => FactSource::Event,
         "manual" => FactSource::Manual,
-        _ => FactSource::L1,
+        "l1" => FactSource::L1,
+        other => {
+            tracing::warn!(%other, "persona_facts.source 值非法，回退为 L1");
+            FactSource::L1
+        }
     }
 }
 
@@ -66,22 +81,18 @@ pub async fn save(pool: &SqlitePool, f: &PersonaFact) -> RamariaResult<i64> {
     .execute(pool).await
     .map_err(|e| RamariaError::storage_with_source("保存事实失败", e))?;
 
-    let id = sqlx::query_scalar::<_, i64>("SELECT last_insert_rowid()")
-        .fetch_one(pool)
-        .await
-        .map_err(|e| RamariaError::storage_with_source("获取事实 id 失败", e))?;
-    Ok(id)
+    last_insert_id(pool).await
 }
 
 pub async fn list_by_persona(
     pool: &SqlitePool,
     persona_uid: &str,
-    field: &str,
+    field: ProfileField,
 ) -> RamariaResult<Vec<PersonaFact>> {
     let rows = sqlx::query_as::<_, FactRow>(
         "SELECT id, persona_uid, field, content, source, ref_event_id, ref_l1_id, created_at, updated_at
          FROM persona_facts WHERE persona_uid = ? AND field = ? ORDER BY created_at DESC"
-    ).bind(persona_uid).bind(field)
+    ).bind(persona_uid).bind(field.as_str())
         .fetch_all(pool).await
         .map_err(|e| RamariaError::storage_with_source("查询事实列表失败", e))?;
     Ok(rows.into_iter().map(|r| r.into_fact()).collect())

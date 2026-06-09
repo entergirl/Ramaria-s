@@ -1,4 +1,10 @@
-//! rust/crates/ramaria-storage/src/repo/backend_config.rs - BackendConfig CRUD
+//! rust/crates/ramaria-storage/src/repo/backend_config.rs - 后端配置存取模块
+//!
+//! 设计特点:
+//! - 单行存储（id=1），将整个 BackendConfig 序列化为 JSON 存入 data 列
+//! - upsert 使用 INSERT OR REPLACE 确保幂等写入
+//! - 不存储 API key（密钥由 OS keychain 管理）
+//! - get 返回 Option<BackendConfig>，未配置时返回 None 供上层决策
 
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::types::BackendConfig;

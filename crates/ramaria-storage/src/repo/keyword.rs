@@ -1,4 +1,9 @@
 //! rust/crates/ramaria-storage/src/repo/keyword.rs - KeywordPool CRUD
+//!
+//! 设计特点:
+//! - 管理关键词词典，防止摘要关键词随时间发散为大量同义词
+//! - upsert 在冲突时递增 use_count，实现复用计数
+//! - list_all 按使用频率降序排列，供 L1 摘要生成时作为候选列表
 
 use ramaria_core::error::{RamariaError, RamariaResult};
 use sqlx::SqlitePool;
