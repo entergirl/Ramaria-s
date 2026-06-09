@@ -1424,12 +1424,15 @@ name = "ramaria-memory"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "futures",
  "ramaria-core",
  "ramaria-storage",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
