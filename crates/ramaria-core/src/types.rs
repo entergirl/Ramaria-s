@@ -35,22 +35,26 @@ pub fn uuid_to_db(u: Uuid) -> String {
 /// 从 SQLite TEXT 解析 UUID。
 ///
 /// 返回:
-/// - 成功时返回 UUID。
-/// - 解析失败时返回 nil UUID，同时应在上层记录 WARNING 日志。
+/// - 成功时返回 Ok(UUID)。
+/// - 解析失败时返回 `Err(RamariaError::Validation)`，携带 trace_id 和原始值。
 ///
 /// 说明:
-/// - 此处不 panic，因为存储层可能读到历史遗留的非法数据。
-/// - 调用方应检查返回值，若为 nil UUID 则记录 `tracing::warn!`。
+/// - 存储层可能读到历史遗留的非法数据，此处返回明确的错误而非静默降级。
+/// - 调用方应记录 WARNING 日志并传播错误，以便上层统一处理数据一致性问题。
 #[inline]
-pub fn uuid_from_db(s: &str) -> Uuid {
-    Uuid::parse_str(s).unwrap_or_else(|_| {
-        // 注意：core 层零 I/O，不在此处打日志。
-        // 上层 repo 在调用此函数后发现 nil UUID 时应记录 WARNING。
-        Uuid::nil()
+pub fn uuid_from_db(s: &str) -> crate::error::RamariaResult<Uuid> {
+    Uuid::parse_str(s).map_err(|_| {
+        crate::error::RamariaError::validation(format!(
+            "UUID 解析失败: 数据库中存储了非法 UUID 值 '{s}'，可能由历史数据损坏或 bug 引起"
+        ))
     })
 }
 
 /// 检查 UUID 是否为 nil（表示解析失败或未初始化）。
+///
+/// 注意:
+/// - 自 Phase 3.0 起，`uuid_from_db` 已返回 `Result`，nil UUID 不应再出现。
+/// - 此函数保留用于向后兼容和防御性检查。
 #[inline]
 pub fn is_nil_uuid(u: &Uuid) -> bool {
     u.is_nil()
@@ -398,6 +402,48 @@ impl PersonaKind {
             Self::Anim => "anim",
             Self::Oc => "oc",
             Self::Hist => "hist",
+        }
+    }
+
+    /// 从 persona_uid 推断人格类型。
+    ///
+    /// 规则: uid 前缀匹配，未知前缀保守回退为 `Char`。
+    /// - `"rama-"` → `Rama`
+    /// - `"user-"` → `User`
+    /// - `"char-"` → `Char`
+    /// - `"anim-"` → `Anim`
+    /// - `"oc-"` → `Oc`
+    /// - `"hist-"` → `Hist`
+    /// - 其他前缀 / 无前缀 → `Char`
+    pub fn from_uid(uid: &str) -> Self {
+        if uid.starts_with("rama-") {
+            Self::Rama
+        } else if uid.starts_with("user-") {
+            Self::User
+        } else if uid.starts_with("char-") {
+            Self::Char
+        } else if uid.starts_with("anim-") {
+            Self::Anim
+        } else if uid.starts_with("oc-") {
+            Self::Oc
+        } else if uid.starts_with("hist-") {
+            Self::Hist
+        } else {
+            Self::Char
+        }
+    }
+
+    /// 获取当前 persona 类型在 Persona-Aware RAG 中使用的 share 阈值。
+    ///
+    /// 规则:
+    /// - `Rama`: 助手自身，不设阈值（由调用方决定，默认 0.0 全量）
+    /// - `User`: 用户本人，较宽松过滤
+    /// - `Char`/`Anim`/`Oc`/`Hist`: 角色类型，需严格过滤
+    pub fn min_share(&self, rama_threshold: f64, user_threshold: f64, char_threshold: f64) -> f64 {
+        match self {
+            Self::Rama => rama_threshold,
+            Self::User => user_threshold,
+            Self::Char | Self::Anim | Self::Oc | Self::Hist => char_threshold,
         }
     }
 }
@@ -1163,12 +1209,12 @@ pub struct ModelCapability {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackendConfig {
     pub provider: LlmProvider,
-    pub model_id: String,
     pub base_url: String,
     /// embedding 模型标识
     pub embedding_model_id: Option<String>,
     pub temperature: f64,
     pub max_tokens: u32,
+    /// 模型能力描述——`capability.model_id` 为 model_id 单一来源
     pub capability: ModelCapability,
 }
 
@@ -1180,7 +1226,6 @@ impl BackendConfig {
     pub fn lm_studio_default() -> Self {
         Self {
             provider: LlmProvider::LmStudio,
-            model_id: String::new(),
             base_url: "http://localhost:1234/v1".to_string(),
             embedding_model_id: None,
             temperature: 0.3,
@@ -1204,7 +1249,6 @@ impl BackendConfig {
     pub fn deepseek_default() -> Self {
         Self {
             provider: LlmProvider::DeepSeek,
-            model_id: "deepseek-chat".to_string(),
             base_url: "https://api.deepseek.com/v1".to_string(),
             embedding_model_id: None,
             temperature: 0.3,
@@ -1228,7 +1272,6 @@ impl BackendConfig {
     pub fn openai_default() -> Self {
         Self {
             provider: LlmProvider::OpenAI,
-            model_id: "gpt-4o".to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
             embedding_model_id: None,
             temperature: 0.3,
@@ -1355,8 +1398,17 @@ mod tests {
     fn uuid_to_db_and_back() {
         let id = new_id();
         let s = uuid_to_db(id);
-        let back = uuid_from_db(&s);
+        let back = uuid_from_db(&s).expect("合法 UUID 应解析成功");
         assert_eq!(id, back);
+    }
+
+    #[test]
+    fn uuid_from_db_invalid_returns_error() {
+        let result = uuid_from_db("not-a-valid-uuid");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.category(), "validation");
+        assert!(err.context().contains("not-a-valid-uuid"));
     }
 
     #[test]
@@ -1790,7 +1842,7 @@ mod tests {
 
         let ds = BackendConfig::deepseek_default();
         assert_eq!(ds.provider, LlmProvider::DeepSeek);
-        assert_eq!(ds.model_id, "deepseek-chat");
+        assert_eq!(ds.capability.model_id, "deepseek-chat");
 
         let oa = BackendConfig::openai_default();
         assert_eq!(oa.provider, LlmProvider::OpenAI);

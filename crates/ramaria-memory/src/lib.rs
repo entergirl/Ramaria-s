@@ -63,9 +63,9 @@ pub use retriever::{
 };
 
 // RAG Persona-Aware 检索增强生成
+// 注：PersonaKind 已统一到 ramaria_core::types，不再从此模块 re-export
 pub use rag::{
-    PersonaKind as RagPersonaKind, RagConfig, assemble_rag_context, filter_by_persona,
-    format_context_text, format_graph_context,
+    RagConfig, assemble_rag_context, filter_by_persona, format_context_text, format_graph_context,
 };
 
 // L1 Summarizer

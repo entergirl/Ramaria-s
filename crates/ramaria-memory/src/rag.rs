@@ -17,6 +17,7 @@
 //! - Block E (参考信息): 图谱实体关系描述
 
 use crate::retriever::SearchResult;
+use ramaria_core::types::PersonaKind;
 
 // =========================================================
 // 配置
@@ -56,45 +57,6 @@ impl Default for RagConfig {
 }
 
 // =========================================================
-// Persona 类型识别
-// =========================================================
-
-/// Persona 类型——用于确定过滤策略。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PersonaKind {
-    /// 助手自身（rama-0001），全量检索权
-    Rama,
-    /// 用户本人
-    User,
-    /// 角色/复刻/虚拟/历史人物
-    Character,
-}
-
-impl PersonaKind {
-    /// 从 persona_uid 推断类型。
-    ///
-    /// 规则: uid 前缀 "rama-" → Rama, "user-" → User, 其他 → Character
-    pub fn from_uid(uid: &str) -> Self {
-        if uid.starts_with("rama-") {
-            PersonaKind::Rama
-        } else if uid.starts_with("user-") {
-            PersonaKind::User
-        } else {
-            PersonaKind::Character
-        }
-    }
-
-    /// 获取该 persona 类型的最低 share 阈值。
-    pub fn min_share(&self, config: &RagConfig) -> f64 {
-        match self {
-            PersonaKind::Rama => config.share_threshold_rama,
-            PersonaKind::User => config.share_threshold_user,
-            PersonaKind::Character => config.share_threshold_char,
-        }
-    }
-}
-
-// =========================================================
 // 过滤与上下文构建
 // =========================================================
 
@@ -115,7 +77,11 @@ pub fn filter_by_persona<'a>(
         return results.iter().collect();
     }
 
-    let min_share = persona_kind.min_share(config);
+    let min_share = persona_kind.min_share(
+        config.share_threshold_rama,
+        config.share_threshold_user,
+        config.share_threshold_char,
+    );
 
     results
         .iter()
@@ -274,17 +240,52 @@ mod tests {
     fn persona_kind_from_uid() {
         assert_eq!(PersonaKind::from_uid("rama-0001"), PersonaKind::Rama);
         assert_eq!(PersonaKind::from_uid("user-0001"), PersonaKind::User);
-        assert_eq!(PersonaKind::from_uid("char-0003"), PersonaKind::Character);
-        assert_eq!(PersonaKind::from_uid("oc-0001"), PersonaKind::Character);
-        assert_eq!(PersonaKind::from_uid("hist-0002"), PersonaKind::Character);
+        assert_eq!(PersonaKind::from_uid("char-0003"), PersonaKind::Char);
+        assert_eq!(PersonaKind::from_uid("oc-0001"), PersonaKind::Oc);
+        assert_eq!(PersonaKind::from_uid("hist-0002"), PersonaKind::Hist);
+        // 未知前缀保守回退为 Char
+        assert_eq!(PersonaKind::from_uid("unknown-0001"), PersonaKind::Char);
     }
 
     #[test]
     fn persona_min_share() {
         let config = RagConfig::default();
-        assert!((PersonaKind::Rama.min_share(&config) - 0.0).abs() < f64::EPSILON);
-        assert!((PersonaKind::User.min_share(&config) - 0.3).abs() < f64::EPSILON);
-        assert!((PersonaKind::Character.min_share(&config) - 0.5).abs() < f64::EPSILON);
+        // Rama 全量 by default (0.0)
+        assert!(
+            (PersonaKind::Rama.min_share(
+                config.share_threshold_rama,
+                config.share_threshold_user,
+                config.share_threshold_char
+            ) - 0.0)
+                .abs()
+                < f64::EPSILON
+        );
+        assert!(
+            (PersonaKind::User.min_share(
+                config.share_threshold_rama,
+                config.share_threshold_user,
+                config.share_threshold_char
+            ) - 0.3)
+                .abs()
+                < f64::EPSILON
+        );
+        // Char/Anim/Oc/Hist all use char_threshold
+        for kind in [
+            PersonaKind::Char,
+            PersonaKind::Anim,
+            PersonaKind::Oc,
+            PersonaKind::Hist,
+        ] {
+            assert!(
+                (kind.min_share(
+                    config.share_threshold_rama,
+                    config.share_threshold_user,
+                    config.share_threshold_char
+                ) - 0.5)
+                    .abs()
+                    < f64::EPSILON
+            );
+        }
     }
 
     // ---- filter_by_persona ----
@@ -321,7 +322,7 @@ mod tests {
             make_test_result("私密", "l2", Some(0.3), 0.9), // 0.3 < 0.5 → 过滤
             make_test_result("公开", "l2", Some(0.7), 0.8), // 0.7 ≥ 0.5 → 保留
         ];
-        let filtered = filter_by_persona(&results, PersonaKind::Character, &config);
+        let filtered = filter_by_persona(&results, PersonaKind::Char, &config);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].doc_summary, "公开");
     }
@@ -332,7 +333,7 @@ mod tests {
         config.persona_aware = false;
 
         let results = vec![make_test_result("超私密", "l2", Some(0.01), 0.9)];
-        let filtered = filter_by_persona(&results, PersonaKind::Character, &config);
+        let filtered = filter_by_persona(&results, PersonaKind::Char, &config);
         assert_eq!(filtered.len(), 1);
     }
 
