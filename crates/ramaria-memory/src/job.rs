@@ -20,6 +20,7 @@ use tracing::{debug, error, info, warn};
 /// - 将自由文本 job_type 约束为已知任务类型，避免拼写错误和魔法字符串。
 /// - 每种类型对应唯一的字符串标识（存入 background_jobs.job_type 列）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum JobType {
     /// L0→L1 摘要生成
     L1Summary,
@@ -105,6 +106,7 @@ impl Default for JobManagerConfig {
 
 /// 单次任务执行结果。
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum JobResult {
     /// 执行成功
     Success,

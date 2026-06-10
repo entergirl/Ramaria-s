@@ -29,14 +29,31 @@ pub async fn update_status(
     error: Option<&str>,
 ) -> RamariaResult<()> {
     let now = ramaria_core::types::now_ms();
-    sqlx::query("UPDATE background_jobs SET status = ?, finished_at = ?, error = ? WHERE id = ?")
-        .bind(status)
-        .bind(now)
-        .bind(error)
-        .bind(id)
-        .execute(pool)
-        .await
-        .map_err(|e| RamariaError::storage_with_source("更新后台任务失败", e))?;
+    let result = sqlx::query(
+        "UPDATE background_jobs SET status = ?, finished_at = ?, error = ? WHERE id = ?",
+    )
+    .bind(status)
+    .bind(now)
+    .bind(error)
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(|e| RamariaError::storage_with_source("更新后台任务失败", e))?;
+
+    // 防御性检查：确保目标 job 确实存在
+    if result.rows_affected() == 0 {
+        return Err(RamariaError::storage(format!(
+            "后台任务不存在 (id={id})，无法更新状态为 {status}"
+        )));
+    }
+
+    tracing::info!(
+        job_id = id,
+        %status,
+        error = error.unwrap_or(""),
+        "后台任务状态已更新"
+    );
+
     Ok(())
 }
 

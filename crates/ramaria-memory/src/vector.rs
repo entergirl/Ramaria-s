@@ -46,6 +46,7 @@ pub struct VectorHit {
 
 /// 向量索引特质的错误类型。
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum VectorIndexError {
     /// 向量维度不匹配
     DimensionMismatch { expected: usize, got: usize },

@@ -151,6 +151,15 @@ impl App {
         &self.keychain
     }
 
+    /// 获取存储后端引用。
+    ///
+    /// 职责:
+    /// - 供 CLI 等上层模块直接查询 sessions / memories / events 等数据。
+    /// - 所有业务写操作应通过 App 方法执行，读操作可直接使用此引用。
+    pub fn storage(&self) -> &Arc<dyn StorageBackend> {
+        &self.storage
+    }
+
     // =========================================================
     // 设置流程
     // =========================================================
@@ -285,10 +294,23 @@ impl App {
         // ---- Step 1: 状态检查 ----
         {
             let state = self.current_state();
-            if state != AppState::Ready {
-                return Err(RamariaError::validation(format!(
-                    "应用尚未就绪（当前状态: {state}）。请先完成设置流程。"
-                )));
+            match state {
+                AppState::Ready => { /* 正常，继续 */ }
+                AppState::Degraded => {
+                    return Err(RamariaError::validation(
+                        "应用处于降级状态：部分功能不可用。请检查 LLM 连接或等待服务恢复。",
+                    ));
+                }
+                AppState::FatalError => {
+                    return Err(RamariaError::validation(
+                        "应用发生严重错误，请查看日志后重启应用。",
+                    ));
+                }
+                _ => {
+                    return Err(RamariaError::validation(format!(
+                        "应用尚未就绪（当前状态: {state}）。请先完成设置流程。"
+                    )));
+                }
             }
         }
 
@@ -346,7 +368,24 @@ impl App {
         );
 
         // ---- Step 8: 调用 LLM ----
-        let raw_stream = self.llm.chat_stream(&chat_request).await?;
+        // 注意：此处不使用 `?`，LLM 调用失败时需返回含 Error 事件的流，
+        // 而非直接返回 Err——上游（CLI/Desktop）统一消费流事件，不应感知底层错误。
+        let raw_stream = match self.llm.chat_stream(&chat_request).await {
+            Ok(stream) => stream,
+            Err(e) => {
+                tracing::error!(
+                    %e,
+                    request_id = %request_id,
+                    session_id = %session.id,
+                    "LLM chat_stream 调用失败，构造 Error 事件流"
+                );
+                // 构造仅含单个 Error 事件的流（无 Done，符合 T-FIX-013）
+                let (tx, rx) = mpsc::unbounded::<RamariaResult<StreamEvent>>();
+                let error_event = StreamEvent::error(request_id, e.to_string());
+                let _ = tx.unbounded_send(Ok(error_event));
+                return Ok(Box::pin(rx));
+            }
+        };
 
         // ---- Step 9-10: 后台任务转发事件 + 保存消息 ----
         let storage = Arc::clone(&self.storage);
@@ -621,9 +660,11 @@ async fn stream_forward_task(
         }
     }
 
-    // 4. 发送 Done 事件
-    let done_event = StreamEvent::done(request_id, backend_id, full_reply.chars().count());
-    let _ = tx.unbounded_send(Ok(done_event));
+    // 4. 发送 Done 事件（仅在无错误时——错误已通过 Error 事件发送，无需再发 Done）
+    if !has_error {
+        let done_event = StreamEvent::done(request_id, backend_id, full_reply.chars().count());
+        let _ = tx.unbounded_send(Ok(done_event));
+    }
 
     tracing::info!(
         request_id = %request_id,

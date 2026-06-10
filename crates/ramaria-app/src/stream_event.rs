@@ -27,6 +27,7 @@ use uuid::Uuid;
 /// - `Done`: 流式输出完成信号（含总字符数和 provider 元数据）
 /// - `Error`: 流式输出中的可恢复错误（上层可选择重试或显示）
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum StreamEvent {
     /// LLM 增量文本输出。
     Delta {

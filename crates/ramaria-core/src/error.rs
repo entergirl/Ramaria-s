@@ -24,6 +24,7 @@ use thiserror::Error;
 /// - `Config`: 配置解析、配置值非法或缺少必需字段。
 /// - `Storage`: SQLite 连接、migration、查询和事务错误。
 /// - `Llm`: provider 连接、HTTP 状态码、流式解析和模型响应错误。
+/// - `Serialization`: JSON/二进制序列化与反序列化错误。
 /// - `Privacy`: 隐私确认未完成、keychain 存取失败或线上调用被阻止。
 /// - `Index`: 向量、BM25、图谱索引读写和重建错误。
 /// - `Validation`: 用户输入、模型输出或内部数据结构校验失败。
@@ -52,6 +53,18 @@ pub enum RamariaError {
     /// LLM 相关错误。
     #[error("llm error: {context}")]
     Llm {
+        context: String,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+        trace_id: Option<String>,
+    },
+
+    /// 序列化/反序列化错误（JSON、MessagePack 等）。
+    ///
+    /// 与 `Config` 不同：`Config` 指配置语义层面的错误，
+    /// 而 `Serialization` 专指 serde 序列化/反序列化技术层面的错误。
+    #[error("serialization error: {context}")]
+    Serialization {
         context: String,
         #[source]
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
@@ -201,6 +214,36 @@ impl RamariaError {
         }
     }
 
+    // -- Serialization --
+
+    /// 创建序列化/反序列化错误。
+    ///
+    /// 参数:
+    /// - `context`: serde 或二进制序列化操作的错误上下文。
+    pub fn serialization(context: impl Into<String>) -> Self {
+        Self::Serialization {
+            context: context.into(),
+            source: None,
+            trace_id: None,
+        }
+    }
+
+    /// 创建带 source 的序列化错误。
+    ///
+    /// 参数:
+    /// - `context`: 当前序列化操作的错误描述。
+    /// - `source`: serde_json、serde 或其他格式库的底层错误。
+    pub fn serialization_with_source(
+        context: impl Into<String>,
+        source: impl Into<Box<dyn std::error::Error + Send + Sync>>,
+    ) -> Self {
+        Self::Serialization {
+            context: context.into(),
+            source: Some(source.into()),
+            trace_id: None,
+        }
+    }
+
     // -- Privacy --
 
     /// 创建隐私错误。
@@ -321,6 +364,7 @@ impl RamariaError {
             Self::Config { trace_id, .. } => *trace_id = tid,
             Self::Storage { trace_id, .. } => *trace_id = tid,
             Self::Llm { trace_id, .. } => *trace_id = tid,
+            Self::Serialization { trace_id, .. } => *trace_id = tid,
             Self::Privacy { trace_id, .. } => *trace_id = tid,
             Self::Index { trace_id, .. } => *trace_id = tid,
             Self::Validation { trace_id, .. } => *trace_id = tid,
@@ -340,6 +384,7 @@ impl RamariaError {
             Self::Config { trace_id, .. }
             | Self::Storage { trace_id, .. }
             | Self::Llm { trace_id, .. }
+            | Self::Serialization { trace_id, .. }
             | Self::Privacy { trace_id, .. }
             | Self::Index { trace_id, .. }
             | Self::Validation { trace_id, .. }
@@ -357,6 +402,7 @@ impl RamariaError {
             Self::Config { .. } => "config",
             Self::Storage { .. } => "storage",
             Self::Llm { .. } => "llm",
+            Self::Serialization { .. } => "serialization",
             Self::Privacy { .. } => "privacy",
             Self::Index { .. } => "index",
             Self::Validation { .. } => "validation",
@@ -374,6 +420,7 @@ impl RamariaError {
             Self::Config { context, .. }
             | Self::Storage { context, .. }
             | Self::Llm { context, .. }
+            | Self::Serialization { context, .. }
             | Self::Privacy { context, .. }
             | Self::Index { context, .. }
             | Self::Validation { context, .. }
@@ -399,7 +446,7 @@ impl From<std::io::Error> for RamariaError {
 
 impl From<serde_json::Error> for RamariaError {
     fn from(err: serde_json::Error) -> Self {
-        Self::Config {
+        Self::Serialization {
             context: format!("JSON 序列化/反序列化失败: {err}"),
             source: Some(Box::new(err)),
             trace_id: None,
@@ -427,6 +474,7 @@ mod tests {
         assert_eq!(RamariaError::config("x").category(), "config");
         assert_eq!(RamariaError::storage("x").category(), "storage");
         assert_eq!(RamariaError::llm("x").category(), "llm");
+        assert_eq!(RamariaError::serialization("x").category(), "serialization");
         assert_eq!(RamariaError::privacy("x").category(), "privacy");
         assert_eq!(RamariaError::index("x").category(), "index");
         assert_eq!(RamariaError::validation("x").category(), "validation");
@@ -471,8 +519,16 @@ mod tests {
     fn from_serde_json_error() {
         let json_err = serde_json::from_str::<serde_json::Value>("invalid json").unwrap_err();
         let err: RamariaError = json_err.into();
-        assert_eq!(err.category(), "config");
+        assert_eq!(err.category(), "serialization");
         assert!(err.to_string().contains("JSON"));
+    }
+
+    #[test]
+    fn serialization_error_display() {
+        let err = RamariaError::serialization("反序列化 MessageFormat 失败");
+        assert!(err.to_string().contains("serialization error"));
+        assert!(err.to_string().contains("反序列化 MessageFormat 失败"));
+        assert_eq!(err.category(), "serialization");
     }
 
     #[test]

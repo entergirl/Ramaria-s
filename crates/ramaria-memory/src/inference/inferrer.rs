@@ -512,6 +512,7 @@ pub fn mock_infer(stats: &StatsSummary, persona_uid: &str) -> InferenceResult {
 
 /// 推断后处理的差异类型。
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum DiffAction {
     /// 新增——旧画像中不存在
     Add,

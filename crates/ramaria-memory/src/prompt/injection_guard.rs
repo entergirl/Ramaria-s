@@ -19,6 +19,7 @@ use ramaria_core::types::LlmProvider;
 /// - `Disabled`: 用户禁用了线上记忆注入。
 /// - `NotApplicable`: 无需考虑（无记忆上下文可注入）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MemoryInjectionStatus {
     /// 允许注入记忆上下文
     Allowed,

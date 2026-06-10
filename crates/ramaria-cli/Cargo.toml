@@ -10,6 +10,9 @@ path = "src/main.rs"
 
 [dependencies]
 ramaria-app = { path = "../ramaria-app" }
+ramaria-core = { path = "../ramaria-core" }
+ramaria-storage = { path = "../ramaria-storage" }
+ramaria-llm = { path = "../ramaria-llm" }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -17,4 +20,6 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
+chrono.workspace = true
+uuid.workspace = true
 windows.workspace = true

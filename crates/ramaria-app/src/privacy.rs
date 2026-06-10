@@ -26,6 +26,7 @@ use ramaria_core::types::{LlmProvider, PrivacyConsent};
 /// - `Confirmed`: 已有有效确认记录
 /// - `NeedsConfirmation`: 需要用户确认（首次使用或 base_url 变更）
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PrivacyStatus {
     /// 本地服务，不需要隐私确认
     NotNeeded,

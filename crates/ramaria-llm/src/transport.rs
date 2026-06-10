@@ -30,7 +30,7 @@ use std::pin::Pin;
 /// 安全约束:
 /// - `api_key` 仅在 `Authorization: Bearer` header 中使用，不进入日志
 /// - 请求体和响应体不自动记录（由上层决定是否记录 prompt）
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OpenAiTransport {
     /// 不含尾随 `/` 的 base URL，例如 `https://api.deepseek.com/v1`
     base_url: String,
@@ -38,6 +38,24 @@ pub struct OpenAiTransport {
     api_key: Option<String>,
     /// HTTP 客户端
     http: reqwest::Client,
+}
+
+// 手动实现 Debug：遮蔽 API key，仅显示 base_url 和 key 是否存在
+impl std::fmt::Debug for OpenAiTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAiTransport")
+            .field("base_url", &self.base_url)
+            .field(
+                "api_key",
+                &if self.api_key.is_some() {
+                    "***"
+                } else {
+                    "None"
+                },
+            )
+            .field("http", &self.http)
+            .finish()
+    }
 }
 
 impl OpenAiTransport {
@@ -301,19 +319,27 @@ async fn sse_read_loop(
         }
     }
 
-    // 流意外结束（未收到 [DONE]）：发送剩余内容 + 合成 done 信号
+    // 流意外结束（未收到 [DONE]）：发送剩余内容
+    let mut done_already_sent = false;
     if !buffer.is_empty() {
         let leftover = String::from_utf8_lossy(&buffer);
         if let Some(delta_result) = parse_sse_line(&leftover) {
+            // 检查残余缓冲区解析结果是否已包含 done 信号
+            // 例如最后一个 chunk 恰好包含 finish_reason，则无需再发合成 Done
+            if let Ok(ref delta) = delta_result {
+                done_already_sent = delta.done;
+            }
             let _ = tx.unbounded_send(delta_result);
         }
     }
-    // 确保流始终以 done 信号结束
-    let _ = tx.unbounded_send(Ok(StreamDelta {
-        content: String::new(),
-        done: true,
-        metadata: Some("stream_ended_without_done".to_string()),
-    }));
+    // 仅当流中未发送 done 时才发送合成 done 信号，避免双重 Done
+    if !done_already_sent {
+        let _ = tx.unbounded_send(Ok(StreamDelta {
+            content: String::new(),
+            done: true,
+            metadata: Some("stream_ended_without_done".to_string()),
+        }));
+    }
 }
 
 // =========================================================
@@ -337,8 +363,10 @@ fn parse_sse_line(line: &str) -> Option<RamariaResult<StreamDelta>> {
         return None;
     }
 
-    // 提取 "data: " 前缀后的内容
-    let data = line.strip_prefix("data: ")?;
+    // 提取 "data:" 或 "data: " 前缀后的内容（兼容 W3C SSE 规范）
+    let data = line
+        .strip_prefix("data: ")
+        .or_else(|| line.strip_prefix("data:"))?;
 
     // [DONE] 标记
     if data == "[DONE]" {
@@ -475,6 +503,26 @@ mod tests {
         let result = parse_sse_line(line).expect("应解析");
         let delta = result.expect("应为 Ok");
         assert!(delta.done);
+    }
+
+    #[test]
+    fn parse_data_prefix_without_space() {
+        // W3C SSE 规范允许 "data:" 无空格
+        let line = "data:[DONE]";
+        let result = parse_sse_line(line).expect("应解析");
+        let delta = result.expect("应为 Ok");
+        assert!(delta.done);
+        assert_eq!(delta.metadata.as_deref(), Some("[DONE]"));
+    }
+
+    #[test]
+    fn parse_content_delta_without_space_after_data() {
+        // 某些 server 发送 "data:" 不带空格
+        let line = r#"data:{"choices":[{"delta":{"content":"测试"},"finish_reason":null}]}"#;
+        let result = parse_sse_line(line).expect("应解析");
+        let delta = result.expect("应为 Ok");
+        assert_eq!(delta.content, "测试");
+        assert!(!delta.done);
     }
 
     // ---- http_error ----

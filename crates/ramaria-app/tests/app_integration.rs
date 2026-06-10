@@ -31,6 +31,21 @@ use ramaria_llm::keychain::Keychain;
 
 use mock_backend::{MockLlm, MockStorage};
 
+// 辅助: 创建使用 MockFailingLlm 的 App
+fn make_failing_app(error_msg: &str) -> (Arc<MockStorage>, Arc<mock_backend::MockFailingLlm>, App) {
+    let storage = Arc::new(MockStorage::new());
+    let llm = Arc::new(MockLlm::failing(error_msg));
+    let config = RamariaConfig::default();
+    let keychain = Arc::new(Keychain::new());
+    let app = App::new(
+        Arc::clone(&storage) as Arc<dyn ramaria_core::traits::StorageBackend>,
+        Arc::clone(&llm) as Arc<dyn ramaria_core::traits::LlmProvider>,
+        config,
+        keychain,
+    );
+    (storage, llm, app)
+}
+
 // =========================================================
 // 辅助函数
 // =========================================================
@@ -204,6 +219,8 @@ async fn send_message_flow_success() {
             Ok(StreamEvent::Delta { .. }) => delta_count += 1,
             Ok(StreamEvent::Done { .. }) => done_seen = true,
             Ok(StreamEvent::Error { .. }) => {}
+            // StreamEvent 为 #[non_exhaustive]，处理未来新增事件类型
+            Ok(_) => {}
             Err(_) => {}
         }
     }
@@ -313,4 +330,96 @@ async fn backend_config_accessible() {
     let (_, _, app) = make_app();
     let cfg = app.backend_config();
     assert_eq!(cfg.provider, LlmProviderKind::LmStudio);
+}
+
+// =========================================================
+// T-FIX-015: MockFailingLlm 错误路径集成测试
+// =========================================================
+// 验证 LLM 失败时:
+//  1. 流中包含 Error 事件（用户可感知错误）
+//  2. 流中不包含 Done 事件（修复 T-FIX-013: Error 后不发 Done）
+//  3. 错误事件内容与 MockFailingLlm 的错误消息一致
+
+#[tokio::test]
+async fn send_message_failing_llm_produces_error_no_done() {
+    let (storage, _, app) = make_failing_app("LLM 服务返回 500 内部错误");
+
+    // 准备: 设置 → Ready
+    storage
+        .save_backend_config(&BackendConfig::lm_studio_default())
+        .await
+        .unwrap();
+    storage.set_index_version(1).await.unwrap();
+    app.refresh_setup_state().await.unwrap();
+    assert_eq!(app.current_state(), AppState::Ready);
+
+    // 发送消息（LLM 将失败）
+    let mut stream = app.send_message("测试消息", None, None).await.unwrap();
+
+    let mut error_seen = false;
+    let mut done_seen = false;
+    let mut delta_count = 0usize;
+
+    while let Some(event_result) = stream.next().await {
+        match event_result {
+            Ok(StreamEvent::Delta { .. }) => delta_count += 1,
+            Ok(StreamEvent::Done { .. }) => done_seen = true,
+            Ok(StreamEvent::Error { error, .. }) => {
+                error_seen = true;
+                assert!(
+                    error.contains("500"),
+                    "错误事件应包含原始错误信息，实际: {error}"
+                );
+            }
+            // StreamEvent 为 #[non_exhaustive]，处理未来新增事件类型
+            Ok(_) => {}
+            Err(_) => {}
+        }
+    }
+
+    assert!(error_seen, "LLM 失败时应产生 Error 事件");
+    assert!(!done_seen, "LLM 失败时不应产生 Done 事件（T-FIX-013）");
+    assert_eq!(delta_count, 0, "LLM 失败时不应有 Delta 事件");
+}
+
+#[tokio::test]
+async fn send_message_failing_llm_connection_error() {
+    // 测试连接超时场景
+    let (storage, _, app) = make_failing_app("无法连接到 LLM 服务: 连接被拒绝");
+
+    // 准备: 设置 → Ready
+    storage
+        .save_backend_config(&BackendConfig::lm_studio_default())
+        .await
+        .unwrap();
+    storage.set_index_version(1).await.unwrap();
+    app.refresh_setup_state().await.unwrap();
+
+    let mut stream = app.send_message("ping", None, None).await.unwrap();
+
+    let mut events: Vec<String> = Vec::new();
+    while let Some(event_result) = stream.next().await {
+        match event_result {
+            Ok(StreamEvent::Delta { content, .. }) => events.push(format!("delta:{}", content)),
+            Ok(StreamEvent::Done { .. }) => events.push("done".into()),
+            Ok(StreamEvent::Error { error, .. }) => events.push(format!("error:{}", error)),
+            // StreamEvent 为 #[non_exhaustive]，处理未来新增事件类型
+            Ok(other) => events.push(format!("unknown:{:?}", other)),
+            Err(e) => events.push(format!("stream_err:{}", e)),
+        }
+    }
+
+    // 应有一个 Error 事件，无 Done
+    assert!(
+        events.iter().any(|e| e.starts_with("error:")),
+        "应包含 Error 事件，实际事件: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| e == "done"),
+        "不应包含 Done 事件，实际事件: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| e.starts_with("delta:")),
+        "不应包含 Delta 事件，实际事件: {events:?}"
+    );
 }

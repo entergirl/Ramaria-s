@@ -95,6 +95,7 @@ pub fn now_ms() -> i64 {
 /// - 供隐私提示、日志脱敏和 UI 状态展示使用。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum MessageSource {
     #[default]
     Local,
@@ -122,6 +123,7 @@ impl std::fmt::Display for MessageSource {
 /// - 预留 `tool` 用于未来工具调用和插件调用结果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum MessageRole {
     User,
     Assistant,
@@ -377,6 +379,7 @@ pub const TIME_PERIOD_OPTIONS: &[&str] = &["清晨", "上午", "下午", "傍晚
 /// - `uid` 值按 `{kind}-{seq}` 格式自动生成，如 `user-0001`、`char-0003`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum PersonaKind {
     /// 用户本人
     User,
@@ -461,6 +464,7 @@ impl std::fmt::Display for PersonaKind {
 /// - 避免画像无限扩张为任意 key-value。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ProfileField {
     /// 基础信息
     BasicInfo,
@@ -520,6 +524,7 @@ impl std::fmt::Display for ProfileField {
 /// - `Accent`: 点缀——仅在特定条件下浮现的隐藏性格（2-4 条）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum TraitLayer {
     Base,
     Primary,
@@ -545,6 +550,7 @@ impl std::fmt::Display for TraitLayer {
 /// 性格来源。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum TraitSource {
     L1,
     Event,
@@ -566,6 +572,7 @@ impl TraitSource {
 /// 事实来源。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum FactSource {
     L1,
     Event,
@@ -588,6 +595,7 @@ impl FactSource {
 /// - `Contradicts` 是点缀层（Accent）性格的重要信号源。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
+#[non_exhaustive]
 pub enum EventRelationKind {
     /// 前因 → 后果
     CausedBy,
@@ -619,6 +627,7 @@ impl EventRelationKind {
 /// 陈述方式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum Presentation {
     /// 客观
     Objective,
@@ -641,6 +650,7 @@ impl Presentation {
 /// 证据方向——事件对性格标签的支撑/矛盾关系。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum EvidenceDirection {
     /// 支撑
     Support,
@@ -668,6 +678,7 @@ impl EvidenceDirection {
 /// - `Historical`: 旧版本（全量校准时覆盖）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum TraitStatus {
     Active,
     Deprecated,
@@ -1152,6 +1163,7 @@ impl ClusterSnapshot {
 /// - 区分本地和线上 provider，决定是否需要隐私确认。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum LlmProvider {
     #[serde(rename = "lm_studio")]
     LmStudio,
@@ -1336,6 +1348,7 @@ impl PrivacyConsent {
 /// - 不可恢复故障进入 `FatalError`
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum AppState {
     /// 首次配置未完成，需进入配置向导
     NeedsSetup,

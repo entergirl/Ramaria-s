@@ -67,11 +67,24 @@ impl RetryConfig {
 
     /// 判断 `RamariaError` 是否应重试。
     ///
-    /// 可重试: Llm 错误（通常为网络或服务端问题）
-    /// 不重试: Config / Validation / Privacy（配置或鉴权问题，重试无意义）
+    /// 可重试: Llm 错误中的网络/服务端/限流问题（5xx、429、连接超时等）
+    /// 不重试: Config / Validation / Privacy 错误 + Llm 中的鉴权错误 (401/403)
+    ///
+    /// 鉴权错误通过 context 文本中的 "HTTP 401" 或 "HTTP 403" 识别。
+    /// 当 API key 无效或过期时，重试无意义且浪费配额。
     pub fn should_retry_error(&self, err: &RamariaError) -> bool {
         let _ = self; // 保持方法签名一致性，供 RetryConfig 实例调用
-        matches!(err, RamariaError::Llm { .. })
+        match err {
+            RamariaError::Llm { context, .. } => {
+                // 鉴权错误 (401/403) 不应重试——无效的 API key 重试多少次也不会变
+                if context.contains("HTTP 401") || context.contains("HTTP 403") {
+                    return false;
+                }
+                true
+            }
+            // 非 Llm 错误（Config / Validation / Privacy 等）一律不重试
+            _ => false,
+        }
     }
 
     /// 计算第 n 次重试的退避时长。
@@ -162,6 +175,7 @@ impl ProviderBase {
             ramaria_core::types::LlmProvider::LmStudio => "LM Studio",
             ramaria_core::types::LlmProvider::DeepSeek => "DeepSeek",
             ramaria_core::types::LlmProvider::OpenAI => "OpenAI",
+            _ => "Unknown",
         }
     }
 
@@ -417,6 +431,7 @@ pub fn build_messages(request: &ChatRequest) -> Vec<serde_json::Value> {
             MessageRole::Assistant => "assistant",
             MessageRole::System => "system",
             MessageRole::Tool => "tool",
+            _ => "user", // 未来新增角色安全降级为 user
         };
         messages.push(serde_json::json!({
             "role": role,
@@ -647,5 +662,33 @@ mod tests {
     fn retry_does_retry_llm_errors() {
         let cfg = RetryConfig::default();
         assert!(cfg.should_retry_error(&RamariaError::llm("connection reset")));
+        assert!(cfg.should_retry_error(&RamariaError::llm("LLM 服务端错误 (HTTP 500)")));
+        assert!(cfg.should_retry_error(&RamariaError::llm("LLM 请求频率超限 (HTTP 429)")));
+    }
+
+    #[test]
+    fn retry_does_not_retry_auth_errors() {
+        let cfg = RetryConfig::default();
+        // 401 鉴权失败 → 不应重试（API key 无效，重试无意义）
+        assert!(
+            !cfg.should_retry_error(&RamariaError::llm(
+                "LLM 鉴权失败 (HTTP 401): API key 无效或过期。请检查 keychain 中的密钥是否正确"
+            )),
+            "401 鉴权错误不应重试"
+        );
+        // 403 权限不足 → 不应重试
+        assert!(
+            !cfg.should_retry_error(&RamariaError::llm(
+                "LLM 访问被拒绝 (HTTP 403): 请检查 API key 权限或账户状态"
+            )),
+            "403 权限错误不应重试"
+        );
+    }
+
+    #[test]
+    fn retry_does_not_retry_config_privacy_errors() {
+        let cfg = RetryConfig::default();
+        assert!(!cfg.should_retry_error(&RamariaError::config("缺少模型 ID")));
+        assert!(!cfg.should_retry_error(&RamariaError::privacy("API key 缺失")));
     }
 }

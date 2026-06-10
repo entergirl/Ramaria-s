@@ -150,9 +150,7 @@ pub async fn update(
         .map_err(|e| RamariaError::storage_with_source("更新 persona 失败", e))?;
 
     if rows.rows_affected() == 0 {
-        return Err(RamariaError::storage(format!(
-            "persona 不存在: uid={uid}"
-        )));
+        return Err(RamariaError::storage(format!("persona 不存在: uid={uid}")));
     }
     Ok(())
 }

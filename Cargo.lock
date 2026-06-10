@@ -1377,13 +1377,18 @@ name = "ramaria-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "ramaria-app",
+ "ramaria-core",
+ "ramaria-llm",
+ "ramaria-storage",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "windows",
 ]
 

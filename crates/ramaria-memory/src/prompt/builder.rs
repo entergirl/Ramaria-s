@@ -179,6 +179,8 @@ fn build_block_a(context: &PromptContext, config: &PromptConfig) -> String {
             ramaria_core::types::PersonaKind::Anim => "你正在扮演一个动画角色。",
             ramaria_core::types::PersonaKind::Oc => "你正在扮演一个原创角色（OC）。",
             ramaria_core::types::PersonaKind::Hist => "你正在扮演一个历史人物。",
+            // PersonaKind 为 #[non_exhaustive]，需处理未来新增类型
+            _ => "你正在扮演一个角色。",
         };
         parts.push(kind_desc.to_string());
 
@@ -235,6 +237,8 @@ fn format_traits_for_prompt(traits: &[PersonalityTrait], max_per_layer: usize) -
             TraitLayer::Base => "基础性格",
             TraitLayer::Primary => "主要特征",
             TraitLayer::Accent => "次要特征",
+            // TraitLayer 为 #[non_exhaustive]，需处理未来新增层次
+            _ => "其他特征",
         };
         by_layer.entry(layer_name).or_default().push(t);
     }
@@ -274,6 +278,8 @@ fn format_facts_for_prompt(facts: &[PersonaFact]) -> String {
             ProfileField::History => "历史事件",
             ProfileField::RecentContext => "近期背景",
             ProfileField::SpeakingStyle => "说话风格",
+            // ProfileField 为 #[non_exhaustive]，需处理未来新增字段
+            _ => "其他",
         };
         lines.push(format!("  [{field_label}] {}", fact.content));
     }
