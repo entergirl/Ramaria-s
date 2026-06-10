@@ -8,6 +8,7 @@
 //! - 敏感信息遮蔽（API key 显示为 "***"）
 //! - 无外部依赖，仅使用标准库 + tracing
 
+use std::error::Error;
 use std::io::{self, Write};
 
 // =========================================================
@@ -105,8 +106,10 @@ pub fn mask_key(key: &str) -> String {
 }
 
 /// 遮蔽 Option<String> 中的值。
+#[allow(dead_code)]
 pub fn mask_optional_key(key: &Option<String>) -> String {
-    key.as_deref().map_or_else(|| "(未设置)".to_string(), mask_key)
+    key.as_deref()
+        .map_or_else(|| "(未设置)".to_string(), mask_key)
 }
 
 // =========================================================
