@@ -12,3 +12,10 @@ serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
+futures.workspace = true
+async-trait.workspace = true
+uuid.workspace = true
+bytes = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true

@@ -1,0 +1,651 @@
+//! rust/crates/ramaria-llm/src/provider.rs - Provider 共享基础设施
+//!
+//! 设计特点:
+//! - `ProviderBase`: 封装 HTTP 传输、消息组装、重试/超时策略
+//! - `RetryConfig`: 指数退避重试配置（网络错误 + 5xx 重试，鉴权错误不重试）
+//! - `build_messages`: 将 `ChatRequest` 组装为 OpenAI 兼容消息数组
+//! - 三个 provider 通过组合 `ProviderBase` + keychain 实现 `LlmProvider` trait
+//!
+//! 重试策略:
+//! - 最大 3 次重试
+//! - 初始退避 500ms，每次乘 2，最大 10s
+//! - 可重试: 网络错误、HTTP 5xx、rate limit (429)
+//! - 不重试: HTTP 4xx（除 429）、鉴权错误 (401/403)
+
+use futures::Stream;
+use ramaria_core::error::{RamariaError, RamariaResult};
+use ramaria_core::traits::{ChatRequest, StreamDelta};
+use ramaria_core::types::{BackendConfig, MessageRole, ModelCapability};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
+
+use crate::transport::OpenAiTransport;
+
+// =========================================================
+// 重试配置
+// =========================================================
+
+/// 指数退避重试配置。
+///
+/// 字段约定:
+/// - `max_retries`: 最大重试次数（不含首次尝试）。默认 3。
+/// - `initial_backoff_ms`: 首次重试等待毫秒数。默认 500。
+/// - `max_backoff_ms`: 最大等待毫秒数上限。默认 10000。
+/// - `backoff_multiplier`: 退避倍数。默认 2.0。
+#[derive(Debug, Clone)]
+pub struct RetryConfig {
+    /// 最大重试次数
+    pub max_retries: u32,
+    /// 首次退避等待（毫秒）
+    pub initial_backoff_ms: u64,
+    /// 最大退避等待（毫秒）
+    pub max_backoff_ms: u64,
+    /// 退避倍数
+    pub backoff_multiplier: f64,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: 3,
+            initial_backoff_ms: 500,
+            max_backoff_ms: 10_000,
+            backoff_multiplier: 2.0,
+        }
+    }
+}
+
+impl RetryConfig {
+    /// 判断 HTTP 状态码是否应重试。
+    ///
+    /// 可重试: 5xx（服务端临时故障）、429（速率限制）
+    /// 不重试: 4xx（除 429，含 401/403 鉴权错误）
+    pub fn should_retry_http(status: u16) -> bool {
+        status >= 500 || status == 429
+    }
+
+    /// 判断 `RamariaError` 是否应重试。
+    ///
+    /// 可重试: Llm 错误（通常为网络或服务端问题）
+    /// 不重试: Config / Validation / Privacy（配置或鉴权问题，重试无意义）
+    pub fn should_retry_error(&self, err: &RamariaError) -> bool {
+        let _ = self; // 保持方法签名一致性，供 RetryConfig 实例调用
+        matches!(err, RamariaError::Llm { .. })
+    }
+
+    /// 计算第 n 次重试的退避时长。
+    ///
+    /// 公式: min(initial * multiplier^n, max_backoff_ms)
+    fn backoff_ms(&self, attempt: u32) -> u64 {
+        let ms =
+            (self.initial_backoff_ms as f64 * self.backoff_multiplier.powi(attempt as i32)) as u64;
+        ms.min(self.max_backoff_ms)
+    }
+}
+
+// =========================================================
+// ProviderBase
+// =========================================================
+
+/// Provider 共享基础设施。
+///
+/// 职责:
+/// - 持有 `BackendConfig`（非敏感配置）和 `ModelCapability`（能力描述）
+/// - 通过 `OpenAiTransport` 发送 HTTP 请求
+/// - 实现重试逻辑（`with_retry`）
+/// - 将 `ChatRequest`（trait 格式）组装为 OpenAI 消息数组
+///
+/// 安全约束:
+/// - 不持有 API key（由 keychain 在调用时实时获取）
+#[derive(Debug, Clone)]
+pub struct ProviderBase {
+    /// 非敏感后端配置
+    pub config: BackendConfig,
+    /// HTTP 传输层
+    transport: Arc<OpenAiTransport>,
+    /// 重试配置
+    retry_config: RetryConfig,
+}
+
+impl ProviderBase {
+    /// 创建新的 ProviderBase。
+    ///
+    /// 参数:
+    /// - `config`: 后端配置（含 capability）。
+    /// - `api_key`: 可选 API key（LM Studio 为 None）。
+    /// - `timeout_secs`: HTTP 超时秒数（默认 120）。
+    ///
+    /// 返回:
+    /// - 成功时返回 ProviderBase 实例。
+    pub fn new(config: BackendConfig, api_key: Option<String>) -> RamariaResult<Self> {
+        let transport = Arc::new(OpenAiTransport::new(config.base_url.clone(), api_key, 120)?);
+        Ok(Self {
+            config,
+            transport,
+            retry_config: RetryConfig::default(),
+        })
+    }
+
+    /// 创建带自定义超时和重试配置的 ProviderBase。
+    pub fn with_retry_config(
+        config: BackendConfig,
+        api_key: Option<String>,
+        timeout_secs: u64,
+        retry_config: RetryConfig,
+    ) -> RamariaResult<Self> {
+        let transport = Arc::new(OpenAiTransport::new(
+            config.base_url.clone(),
+            api_key,
+            timeout_secs,
+        )?);
+        Ok(Self {
+            config,
+            transport,
+            retry_config,
+        })
+    }
+
+    /// 返回 ModelCapability 引用（供 `LlmProvider::capability()` 使用）。
+    pub fn capability(&self) -> &ModelCapability {
+        &self.config.capability
+    }
+
+    /// 返回 BackendConfig 引用（供 `LlmProvider::config()` 使用）。
+    pub fn backend_config(&self) -> &BackendConfig {
+        &self.config
+    }
+
+    /// 返回 provider 名称。
+    pub fn provider_name(&self) -> &'static str {
+        match self.config.provider {
+            ramaria_core::types::LlmProvider::LmStudio => "LM Studio",
+            ramaria_core::types::LlmProvider::DeepSeek => "DeepSeek",
+            ramaria_core::types::LlmProvider::OpenAI => "OpenAI",
+        }
+    }
+
+    /// 返回 HTTP 传输引用（供 validate 使用）。
+    pub fn transport(&self) -> &OpenAiTransport {
+        &self.transport
+    }
+
+    // =========================================================
+    // 非流式聊天
+    // =========================================================
+
+    /// 执行非流式聊天（带重试）。
+    ///
+    /// 参数:
+    /// - `request`: 组装好的聊天请求。
+    ///
+    /// 返回:
+    /// - 完整 assistant 回复文本。
+    pub async fn chat(&self, request: &ChatRequest) -> RamariaResult<String> {
+        let messages = build_messages(request);
+        let model = &self.config.capability.model_id;
+        let temperature = self.config.temperature;
+        let max_tokens = self.config.max_tokens;
+
+        self.with_retry(|| async {
+            self.transport
+                .chat(&messages, model, temperature, max_tokens)
+                .await
+        })
+        .await
+    }
+
+    // =========================================================
+    // 流式聊天
+    // =========================================================
+
+    /// 执行流式聊天（带重试，仅对连接建立阶段重试）。
+    ///
+    /// 说明:
+    /// - 连接建立成功后，流内错误通过流本身传播，不再触发外层重试。
+    /// - 重试仅针对 `chat_stream` 返回的外层 `Err`（即连接/HTTP 状态码错误）。
+    ///
+    /// 参数:
+    /// - `request`: 组装好的聊天请求。
+    ///
+    /// 返回:
+    /// - 成功时返回异步流。
+    pub async fn chat_stream(
+        &self,
+        request: &ChatRequest,
+    ) -> RamariaResult<Pin<Box<dyn Stream<Item = RamariaResult<StreamDelta>> + Send>>> {
+        let messages = build_messages(request);
+        let model = &self.config.capability.model_id;
+        let temperature = self.config.temperature;
+        let max_tokens = self.config.max_tokens;
+
+        self.with_retry(|| async {
+            self.transport
+                .chat_stream(&messages, model, temperature, max_tokens)
+                .await
+        })
+        .await
+    }
+
+    // =========================================================
+    // 验证
+    // =========================================================
+
+    /// 验证 provider 可用性。
+    ///
+    /// 检查内容:
+    /// - base_url 是否可连接（发送 GET 或 HEAD 到 /models 端点）。
+    /// - 模型 ID 是否非空（LM Studio 场景允许空字符串，用户后续选择）。
+    pub async fn validate(&self) -> RamariaResult<()> {
+        // 1. 检查 base_url 可连接
+        let models_url = format!("{}/models", self.transport.base_url());
+        let response = self
+            .transport
+            .http_client()
+            .get(&models_url)
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_connect() {
+                    RamariaError::llm(format!(
+                        "无法连接到 {} (provider: {})。请确认服务已启动且 base_url 正确。",
+                        self.transport.base_url(),
+                        self.provider_name(),
+                    ))
+                } else if e.is_timeout() {
+                    RamariaError::llm(format!(
+                        "连接 {} 超时 (provider: {})。请检查网络或增加超时时间。",
+                        self.transport.base_url(),
+                        self.provider_name(),
+                    ))
+                } else {
+                    RamariaError::llm_with_source(
+                        format!(
+                            "验证 {} 连接失败 (provider: {}): {}",
+                            self.transport.base_url(),
+                            self.provider_name(),
+                            e
+                        ),
+                        e,
+                    )
+                }
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(RamariaError::llm(format!(
+                "{} 模型列表查询失败 (HTTP {}): 请检查 base_url 和服务配置",
+                self.provider_name(),
+                status.as_u16(),
+            )));
+        }
+
+        // 2. 线上 provider 需检查模型 ID 非空
+        if self.config.provider.is_online() && self.config.capability.model_id.is_empty() {
+            return Err(RamariaError::validation(format!(
+                "{} 的模型 ID 未配置，请在设置中指定模型",
+                self.provider_name(),
+            )));
+        }
+
+        tracing::info!(
+            provider = self.provider_name(),
+            base_url = %self.transport.base_url(),
+            model = %self.config.capability.model_id,
+            "Provider 验证通过"
+        );
+
+        Ok(())
+    }
+
+    // =========================================================
+    // 重试执行器
+    // =========================================================
+
+    /// 带指数退避重试执行异步操作。
+    ///
+    /// 参数:
+    /// - `f`: 返回 `RamariaResult<T>` 的异步闭包。
+    ///
+    /// 行为:
+    /// - 首次调用 `f`。
+    /// - 若返回 `Err` 且 `RetryConfig::should_retry_error` 为 true，等待后退避后重试。
+    /// - 最多重试 `max_retries` 次。
+    /// - 非可重试错误立即返回。
+    async fn with_retry<F, Fut, T>(&self, mut f: F) -> RamariaResult<T>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = RamariaResult<T>>,
+    {
+        let mut last_err: Option<RamariaError> = None;
+
+        for attempt in 0..=self.retry_config.max_retries {
+            if attempt > 0 {
+                let backoff = self.retry_config.backoff_ms(attempt - 1);
+                tracing::warn!(
+                    attempt,
+                    backoff_ms = backoff,
+                    provider = self.provider_name(),
+                    "LLM 请求重试"
+                );
+                tokio::time::sleep(Duration::from_millis(backoff)).await;
+            }
+
+            match f().await {
+                Ok(value) => {
+                    if attempt > 0 {
+                        tracing::info!(
+                            attempt,
+                            provider = self.provider_name(),
+                            "LLM 请求重试成功"
+                        );
+                    }
+                    return Ok(value);
+                }
+                Err(err) => {
+                    if !self.retry_config.should_retry_error(&err) {
+                        tracing::debug!(
+                            %err,
+                            provider = self.provider_name(),
+                            "不可重试错误，立即返回"
+                        );
+                        return Err(err);
+                    }
+                    tracing::warn!(
+                        attempt,
+                        %err,
+                        provider = self.provider_name(),
+                        "LLM 请求失败，准备重试"
+                    );
+                    last_err = Some(err);
+                }
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| {
+            RamariaError::llm(format!(
+                "{} 请求失败：已达最大重试次数 ({})",
+                self.provider_name(),
+                self.retry_config.max_retries,
+            ))
+        }))
+    }
+}
+
+// =========================================================
+// 消息组装
+// =========================================================
+
+/// 将 `ChatRequest` 组装为 OpenAI 兼容消息数组。
+///
+/// 组装规则:
+/// 1. `system` 消息 = `system_prompt` + `memory_context`（若有，以分隔符拼接）
+/// 2. `history` 中的消息按序映射 role
+/// 3. `user` 消息 = `user_message`
+///
+/// 参数:
+/// - `request`: 业务层聊天请求。
+///
+/// 返回:
+/// - `Vec<serde_json::Value>`，可直接序列化到 OpenAI API 的 `messages` 字段。
+pub fn build_messages(request: &ChatRequest) -> Vec<serde_json::Value> {
+    let mut messages: Vec<serde_json::Value> = Vec::new();
+
+    // Block A: System Prompt（含记忆上下文）
+    let system_content = if let Some(ref ctx) = request.memory_context {
+        if ctx.trim().is_empty() {
+            request.system_prompt.clone()
+        } else {
+            format!(
+                "{}\n\n--- 关于用户与本段对话的记忆上下文 ---\n{}",
+                request.system_prompt, ctx
+            )
+        }
+    } else {
+        request.system_prompt.clone()
+    };
+
+    messages.push(serde_json::json!({
+        "role": "system",
+        "content": system_content,
+    }));
+
+    // Block B: 对话历史
+    for msg in &request.history {
+        let role = match msg.role {
+            MessageRole::User => "user",
+            MessageRole::Assistant => "assistant",
+            MessageRole::System => "system",
+            MessageRole::Tool => "tool",
+        };
+        messages.push(serde_json::json!({
+            "role": role,
+            "content": msg.content,
+        }));
+    }
+
+    // Block C: 当前用户消息
+    messages.push(serde_json::json!({
+        "role": "user",
+        "content": request.user_message,
+    }));
+
+    messages
+}
+
+// =========================================================
+// 单元测试
+// =========================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ramaria_core::traits::ChatMessage;
+    use ramaria_core::types::LlmProvider;
+    use uuid::Uuid;
+
+    // ---- RetryConfig ----
+
+    #[test]
+    fn retry_config_defaults() {
+        let cfg = RetryConfig::default();
+        assert_eq!(cfg.max_retries, 3);
+        assert_eq!(cfg.initial_backoff_ms, 500);
+        assert_eq!(cfg.max_backoff_ms, 10_000);
+        assert!((cfg.backoff_multiplier - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn retry_config_backoff_progression() {
+        let cfg = RetryConfig::default();
+        // attempt 0: 500 * 2^0 = 500
+        assert_eq!(cfg.backoff_ms(0), 500);
+        // attempt 1: 500 * 2^1 = 1000
+        assert_eq!(cfg.backoff_ms(1), 1000);
+        // attempt 2: 500 * 2^2 = 2000
+        assert_eq!(cfg.backoff_ms(2), 2000);
+    }
+
+    #[test]
+    fn retry_config_backoff_capped() {
+        let cfg = RetryConfig {
+            max_backoff_ms: 1000,
+            ..Default::default()
+        };
+        // attempt 2: min(2000, 1000) = 1000
+        assert_eq!(cfg.backoff_ms(2), 1000);
+        // attempt 3: min(4000, 1000) = 1000
+        assert_eq!(cfg.backoff_ms(3), 1000);
+    }
+
+    #[test]
+    fn should_retry_http_status() {
+        assert!(RetryConfig::should_retry_http(500));
+        assert!(RetryConfig::should_retry_http(502));
+        assert!(RetryConfig::should_retry_http(503));
+        assert!(RetryConfig::should_retry_http(429));
+        assert!(!RetryConfig::should_retry_http(400));
+        assert!(!RetryConfig::should_retry_http(401));
+        assert!(!RetryConfig::should_retry_http(403));
+        assert!(!RetryConfig::should_retry_http(404));
+    }
+
+    #[test]
+    fn should_retry_error_type() {
+        let cfg = RetryConfig::default();
+        assert!(cfg.should_retry_error(&RamariaError::llm("网络超时")));
+        assert!(cfg.should_retry_error(&RamariaError::llm("服务端错误")));
+        assert!(!cfg.should_retry_error(&RamariaError::validation("模型 ID 为空")));
+        assert!(!cfg.should_retry_error(&RamariaError::privacy("API key 缺失")));
+        assert!(!cfg.should_retry_error(&RamariaError::config("配置错误")));
+    }
+
+    // ---- build_messages ----
+
+    #[test]
+    fn build_messages_basic() {
+        let request = ChatRequest {
+            system_prompt: "你是一个助手".into(),
+            memory_context: None,
+            history: vec![],
+            user_message: "你好".into(),
+            temperature: 0.3,
+            max_tokens: 1024,
+            request_id: Uuid::new_v4(),
+        };
+
+        let messages = build_messages(&request);
+        assert_eq!(messages.len(), 2); // system + user
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "你是一个助手");
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[1]["content"], "你好");
+    }
+
+    #[test]
+    fn build_messages_with_memory_context() {
+        let request = ChatRequest {
+            system_prompt: "你是一个助手".into(),
+            memory_context: Some("用户喜欢猫，讨厌狗。".into()),
+            history: vec![],
+            user_message: "推荐宠物".into(),
+            temperature: 0.3,
+            max_tokens: 1024,
+            request_id: Uuid::new_v4(),
+        };
+
+        let messages = build_messages(&request);
+        let system_content = messages[0]["content"].as_str().unwrap();
+        assert!(system_content.contains("你是一个助手"));
+        assert!(system_content.contains("记忆上下文"));
+        assert!(system_content.contains("用户喜欢猫"));
+    }
+
+    #[test]
+    fn build_messages_with_empty_memory_context() {
+        let request = ChatRequest {
+            system_prompt: "你是一个助手".into(),
+            memory_context: Some("   ".into()), // 空白
+            history: vec![],
+            user_message: "你好".into(),
+            temperature: 0.3,
+            max_tokens: 1024,
+            request_id: Uuid::new_v4(),
+        };
+
+        let messages = build_messages(&request);
+        assert_eq!(messages[0]["content"], "你是一个助手");
+    }
+
+    #[test]
+    fn build_messages_with_history() {
+        let request = ChatRequest {
+            system_prompt: "你是一个助手".into(),
+            memory_context: None,
+            history: vec![
+                ChatMessage {
+                    role: MessageRole::User,
+                    content: "天气怎样？".into(),
+                },
+                ChatMessage {
+                    role: MessageRole::Assistant,
+                    content: "今天晴天".into(),
+                },
+            ],
+            user_message: "谢谢".into(),
+            temperature: 0.3,
+            max_tokens: 1024,
+            request_id: Uuid::new_v4(),
+        };
+
+        let messages = build_messages(&request);
+        assert_eq!(messages.len(), 4); // system + user + assistant + user
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[1]["content"], "天气怎样？");
+        assert_eq!(messages[2]["role"], "assistant");
+        assert_eq!(messages[2]["content"], "今天晴天");
+        assert_eq!(messages[3]["role"], "user");
+        assert_eq!(messages[3]["content"], "谢谢");
+    }
+
+    // ---- ProviderBase (without network) ----
+
+    #[test]
+    fn provider_base_construction() {
+        let config = BackendConfig::lm_studio_default();
+        let base = ProviderBase::new(config, None);
+        assert!(base.is_ok());
+    }
+
+    #[test]
+    fn provider_base_capability() {
+        let config = BackendConfig::deepseek_default();
+        let base = ProviderBase::new(config, None).expect("构造应成功");
+        let cap = base.capability();
+        assert_eq!(cap.provider, LlmProvider::DeepSeek);
+        // model_id 来自 capability（Phase 3.0 修复后为单一来源）
+        assert_eq!(cap.model_id, "deepseek-chat");
+    }
+
+    #[test]
+    fn provider_base_backend_config() {
+        let config = BackendConfig::openai_default();
+        let base = ProviderBase::new(config, None).expect("构造应成功");
+        assert_eq!(base.backend_config().provider, LlmProvider::OpenAI);
+    }
+
+    #[test]
+    fn provider_name_deepseek() {
+        let config = BackendConfig::deepseek_default();
+        let base = ProviderBase::new(config, None).expect("构造应成功");
+        assert_eq!(base.provider_name(), "DeepSeek");
+    }
+
+    #[test]
+    fn provider_name_lm_studio() {
+        let config = BackendConfig::lm_studio_default();
+        let base = ProviderBase::new(config, None).expect("构造应成功");
+        assert_eq!(base.provider_name(), "LM Studio");
+    }
+
+    #[test]
+    fn provider_name_openai() {
+        let config = BackendConfig::openai_default();
+        let base = ProviderBase::new(config, None).expect("构造应成功");
+        assert_eq!(base.provider_name(), "OpenAI");
+    }
+
+    // ---- RetryConfig error discrimination ----
+
+    #[test]
+    fn retry_does_not_retry_validation_errors() {
+        let cfg = RetryConfig::default();
+        assert!(!cfg.should_retry_error(&RamariaError::validation("test")));
+    }
+
+    #[test]
+    fn retry_does_retry_llm_errors() {
+        let cfg = RetryConfig::default();
+        assert!(cfg.should_retry_error(&RamariaError::llm("connection reset")));
+    }
+}

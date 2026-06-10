@@ -1,7 +1,11 @@
-//! OpenAI-compatible 流式客户端（Phase 0 POC）
+//! OpenAI-compatible 流式客户端（Phase 0 POC — 已废弃）
 //!
-//! 支持 LM Studio、DeepSeek、OpenAI 三个后端。
-//! 仅验证 streaming 通路，不包含重试、token budget 等。
+//! Phase 3.1 已重构为正式 provider：
+//! - `transport.rs`: 真正的 SSE 流式传输（不一次性读取响应体）
+//! - `provider.rs`: ProviderBase + RetryConfig（重试/超时/消息组装）
+//! - `lm_studio.rs` / `deepseek.rs` / `openai.rs`: LlmProvider trait 实现
+//!
+//! 此文件保留供参考，Phase 3 完成后可删除。
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};

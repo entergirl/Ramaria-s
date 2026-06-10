@@ -1,1 +1,24 @@
+//! rust/crates/ramaria-llm/src/lib.rs - Ramaria LLM Provider 层入口
+//!
+//! 设计特点:
+//! - 实现 `ramaria_core::traits::LlmProvider` trait，支持 LM Studio / DeepSeek / OpenAI
+//! - 真正的 SSE 流式传输（不一次性读取响应体），通过 futures channel + tokio spawn 实现
+//! - 统一重试策略：网络错误和 5xx 重试（指数退避），鉴权错误不重试
+//! - API key 通过 OS keychain 读取，不进入日志或配置文件
+//! - 共享 transport 层抽象，避免三个 provider 重复实现 HTTP/SSE 逻辑
+
+pub mod keychain;
+pub mod provider;
+pub mod transport;
+
+// Provider 实现
+pub mod deepseek;
+pub mod lm_studio;
+pub mod openai;
+
+// 保留 Phase 0 POC 代码供参考（Phase 3 完成后可删除）
 pub mod client;
+
+// 重新导出常用类型
+pub use provider::ProviderBase;
+pub use transport::OpenAiTransport;
