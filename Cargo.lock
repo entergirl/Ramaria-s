@@ -1359,12 +1359,17 @@ name = "ramaria-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "chrono",
+ "futures",
  "ramaria-core",
  "ramaria-llm",
  "ramaria-memory",
  "ramaria-storage",
+ "serde_json",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -1430,6 +1435,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "chrono",
  "futures",
  "ramaria-core",
  "ramaria-storage",
