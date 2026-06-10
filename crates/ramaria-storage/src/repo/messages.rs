@@ -26,15 +26,11 @@ struct MessageRow {
 
 impl MessageRow {
     fn into_message(self) -> RamariaResult<Message> {
-        let id = ramaria_core::types::uuid_from_db(&self.id);
-        let session_id = ramaria_core::types::uuid_from_db(&self.session_id);
-        // 检测 UUID 解析异常并记录日志
-        if ramaria_core::types::is_nil_uuid(&id) {
-            tracing::warn!(raw_id = %self.id, "messages.id UUID 解析失败，得到 nil UUID");
-        }
-        if ramaria_core::types::is_nil_uuid(&session_id) {
-            tracing::warn!(raw_id = %self.session_id, "messages.session_id UUID 解析失败，得到 nil UUID");
-        }
+        let id = ramaria_core::types::uuid_from_db(&self.id)
+            .inspect_err(|_| tracing::warn!(raw_id = %self.id, "messages.id UUID 解析失败"))?;
+        let session_id = ramaria_core::types::uuid_from_db(&self.session_id).inspect_err(
+            |_| tracing::warn!(raw_id = %self.session_id, "messages.session_id UUID 解析失败"),
+        )?;
 
         let role = match self.role.as_str() {
             "user" => MessageRole::User,

@@ -31,14 +31,11 @@ struct L1Row {
 
 impl L1Row {
     fn into_l1(self) -> RamariaResult<MemoryL1> {
-        let id = ramaria_core::types::uuid_from_db(&self.id);
-        let session_id = ramaria_core::types::uuid_from_db(&self.session_id);
-        if ramaria_core::types::is_nil_uuid(&id) {
-            tracing::warn!(raw_id = %self.id, "memory_l1.id UUID 解析失败");
-        }
-        if ramaria_core::types::is_nil_uuid(&session_id) {
-            tracing::warn!(raw_id = %self.session_id, "memory_l1.session_id UUID 解析失败");
-        }
+        let id = ramaria_core::types::uuid_from_db(&self.id)
+            .inspect_err(|_| tracing::warn!(raw_id = %self.id, "memory_l1.id UUID 解析失败"))?;
+        let session_id = ramaria_core::types::uuid_from_db(&self.session_id).inspect_err(
+            |_| tracing::warn!(raw_id = %self.session_id, "memory_l1.session_id UUID 解析失败"),
+        )?;
         Ok(MemoryL1 {
             id,
             session_id,
@@ -114,21 +111,43 @@ pub async fn mark_absorbed(pool: &SqlitePool, l1_ids: &[Uuid]) -> RamariaResult<
     if l1_ids.is_empty() {
         return Ok(());
     }
+
+    // 分批处理：每批最多 100 条，避免 SQL 语句过长（SQLite 默认参数限制 999 个）
+    const BATCH_SIZE: usize = 100;
+
     // 事务包裹：确保批量标记的原子性——全部成功或全部回滚
     let mut tx = pool
         .begin()
         .await
         .map_err(|e| RamariaError::storage_with_source("开启吸收标记事务失败", e))?;
-    for id in l1_ids {
-        sqlx::query("UPDATE memory_l1 SET absorbed = 1 WHERE id = ?")
-            .bind(id.to_string())
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| RamariaError::storage_with_source("标记 L1 已吸收失败", e))?;
+
+    for chunk in l1_ids.chunks(BATCH_SIZE) {
+        let placeholders: Vec<String> = (0..chunk.len()).map(|i| format!("?{}", i + 1)).collect();
+        let sql = format!(
+            "UPDATE memory_l1 SET absorbed = 1 WHERE id IN ({})",
+            placeholders.join(", ")
+        );
+
+        let mut query = sqlx::query(&sql);
+        for id in chunk {
+            query = query.bind(id.to_string());
+        }
+
+        query.execute(&mut *tx).await.map_err(|e| {
+            RamariaError::storage_with_source(format!("标记 {} 条 L1 已吸收失败", chunk.len()), e)
+        })?;
     }
+
     tx.commit()
         .await
         .map_err(|e| RamariaError::storage_with_source("提交吸收标记事务失败", e))?;
+
+    tracing::info!(
+        total = l1_ids.len(),
+        batches = l1_ids.len().div_ceil(BATCH_SIZE),
+        "批量标记 L1 已吸收完成"
+    );
+
     Ok(())
 }
 

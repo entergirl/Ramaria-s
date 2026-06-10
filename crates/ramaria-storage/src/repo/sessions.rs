@@ -96,10 +96,8 @@ struct SessionRow {
 
 impl SessionRow {
     fn into_session(self) -> RamariaResult<Session> {
-        let id = ramaria_core::types::uuid_from_db(&self.id);
-        if ramaria_core::types::is_nil_uuid(&id) {
-            tracing::warn!(raw_id = %self.id, "sessions.id UUID 解析失败");
-        }
+        let id = ramaria_core::types::uuid_from_db(&self.id)
+            .inspect_err(|_| tracing::warn!(raw_id = %self.id, "sessions.id UUID 解析失败"))?;
         Ok(Session {
             id,
             started_at: self.started_at,

@@ -87,8 +87,14 @@ struct TraitRow {
 }
 
 impl TraitRow {
-    fn into_trait(self) -> PersonalityTrait {
-        PersonalityTrait {
+    fn into_trait(self) -> RamariaResult<PersonalityTrait> {
+        let ref_l1_id = self
+            .ref_l1_id
+            .as_deref()
+            .map(ramaria_core::types::uuid_from_db)
+            .transpose()
+            .inspect_err(|_| tracing::warn!(raw_id = %self.ref_l1_id.as_deref().unwrap_or("nil"), "personality_traits.ref_l1_id UUID 解析失败"))?;
+        Ok(PersonalityTrait {
             id: self.id,
             persona_uid: self.persona_uid,
             layer: parse_layer(&self.layer),
@@ -101,16 +107,14 @@ impl TraitRow {
             seq: self.seq as i32,
             source: parse_trait_source(&self.source),
             ref_event_id: self.ref_event_id,
-            ref_l1_id: self
-                .ref_l1_id
-                .map(|s| ramaria_core::types::uuid_from_db(&s)),
+            ref_l1_id,
             confidence: self.confidence,
             evidence: self.evidence,
             consistency: self.consistency,
             status: parse_trait_status(&self.status),
             created_at: self.created_at,
             updated_at: self.updated_at,
-        }
+        })
     }
 }
 
@@ -157,7 +161,9 @@ pub async fn list_traits_by_persona(
          FROM personality_traits WHERE persona_uid = ? AND status = 'active' ORDER BY layer, seq"
     ).bind(persona_uid).fetch_all(pool).await
         .map_err(|e| RamariaError::storage_with_source("查询性格标签列表失败", e))?;
-    Ok(rows.into_iter().map(|r| r.into_trait()).collect())
+    rows.into_iter()
+        .map(|r| r.into_trait())
+        .collect::<RamariaResult<Vec<_>>>()
 }
 
 pub async fn update_confidence(

@@ -53,20 +53,24 @@ struct FactRow {
 }
 
 impl FactRow {
-    fn into_fact(self) -> PersonaFact {
-        PersonaFact {
+    fn into_fact(self) -> RamariaResult<PersonaFact> {
+        let ref_l1_id = self
+            .ref_l1_id
+            .as_deref()
+            .map(ramaria_core::types::uuid_from_db)
+            .transpose()
+            .inspect_err(|_| tracing::warn!(raw_id = %self.ref_l1_id.as_deref().unwrap_or("nil"), "persona_facts.ref_l1_id UUID 解析失败"))?;
+        Ok(PersonaFact {
             id: self.id,
             persona_uid: self.persona_uid,
             field: parse_field(&self.field),
             content: self.content,
             source: parse_fact_source(&self.source),
             ref_event_id: self.ref_event_id,
-            ref_l1_id: self
-                .ref_l1_id
-                .map(|s| ramaria_core::types::uuid_from_db(&s)),
+            ref_l1_id,
             created_at: self.created_at,
             updated_at: self.updated_at,
-        }
+        })
     }
 }
 
@@ -95,5 +99,7 @@ pub async fn list_by_persona(
     ).bind(persona_uid).bind(field.as_str())
         .fetch_all(pool).await
         .map_err(|e| RamariaError::storage_with_source("查询事实列表失败", e))?;
-    Ok(rows.into_iter().map(|r| r.into_fact()).collect())
+    rows.into_iter()
+        .map(|r| r.into_fact())
+        .collect::<RamariaResult<Vec<_>>>()
 }

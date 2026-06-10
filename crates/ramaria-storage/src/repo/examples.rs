@@ -26,22 +26,26 @@ struct ExampleRow {
 }
 
 impl ExampleRow {
-    fn into_example(self) -> PersonaExample {
-        PersonaExample {
+    fn into_example(self) -> RamariaResult<PersonaExample> {
+        let session_id = self
+            .session_id
+            .as_deref()
+            .map(ramaria_core::types::uuid_from_db)
+            .transpose()
+            .inspect_err(|_| tracing::warn!(raw_id = %self.session_id.as_deref().unwrap_or("nil"), "persona_examples.session_id UUID 解析失败"))?;
+        Ok(PersonaExample {
             id: self.id,
             persona_uid: self.persona_uid,
             partner: self.partner,
             reply: self.reply,
-            session_id: self
-                .session_id
-                .map(|s| ramaria_core::types::uuid_from_db(&s)),
+            session_id,
             context: self.context,
             valence: self.valence,
             tags: self.tags,
             selected: self.selected != 0,
             length: self.length as i32,
             created_at: self.created_at,
-        }
+        })
     }
 }
 
@@ -68,5 +72,7 @@ pub async fn list_selected(
          FROM persona_examples WHERE persona_uid = ? AND selected = 1 ORDER BY created_at DESC LIMIT 5"
     ).bind(persona_uid).fetch_all(pool).await
         .map_err(|e| RamariaError::storage_with_source("查询示例列表失败", e))?;
-    Ok(rows.into_iter().map(|r| r.into_example()).collect())
+    rows.into_iter()
+        .map(|r| r.into_example())
+        .collect::<RamariaResult<Vec<_>>>()
 }

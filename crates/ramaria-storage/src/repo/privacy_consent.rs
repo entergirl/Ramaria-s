@@ -4,22 +4,29 @@
 //! - 按 provider + base_url 粒度记录用户的线上调用隐私确认
 //! - persistent 字段控制是否跨重启持久化（勾选"下次不再提醒"）
 //! - get_by_provider 取最新一条记录，按 timestamp DESC 排序
-//! - provider 解析失败时保守回退为 LmStudio（本地，不需要 API key）
+//! - provider 存储时使用 `LlmProvider::as_str()`，读取时解析回枚举
+//! - 非法 provider 值 → `RamariaError::Validation`（DeserializationError），不再静默回退
 
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::types::{LlmProvider, PrivacyConsent};
 use sqlx::SqlitePool;
 
 /// 将存储的 provider 字符串解析为 LlmProvider 枚举。
-/// 未知值回退为 LmStudio（本地，不需 API key）并记录 WARNING。
-fn parse_provider(s: &str) -> LlmProvider {
+///
+/// 合法值: `"lm_studio"`, `"deepseek"`, `"openai"`
+///
+/// 非法值 → `RamariaError::Validation`，携带原始字符串以供排查。
+/// 不再静默回退为 LmStudio，因为数据损坏需要明确的上层处理。
+fn parse_provider(s: &str) -> RamariaResult<LlmProvider> {
     match s {
-        "lm_studio" => LlmProvider::LmStudio,
-        "deepseek" => LlmProvider::DeepSeek,
-        "openai" => LlmProvider::OpenAI,
+        "lm_studio" => Ok(LlmProvider::LmStudio),
+        "deepseek" => Ok(LlmProvider::DeepSeek),
+        "openai" => Ok(LlmProvider::OpenAI),
         other => {
-            tracing::warn!(%other, "privacy_consent.provider 值非法，保守回退为 LmStudio（本地）");
-            LlmProvider::LmStudio
+            tracing::error!(%other, "privacy_consent.provider 值非法，数据库可能存在数据损坏");
+            Err(RamariaError::validation(format!(
+                "privacy_consent.provider 值非法: '{other}'，合法值仅限 lm_studio/deepseek/openai"
+            )))
         }
     }
 }
@@ -49,10 +56,16 @@ pub async fn get_by_provider(
         "SELECT provider, base_url, timestamp, persistent FROM privacy_consent WHERE provider = ? AND base_url = ? ORDER BY timestamp DESC LIMIT 1"
     ).bind(provider).bind(base_url).fetch_optional(pool).await
         .map_err(|e| RamariaError::storage_with_source("查询隐私确认失败", e))?;
-    Ok(row.map(|r| PrivacyConsent {
-        provider: parse_provider(&r.provider),
-        base_url: r.base_url,
-        timestamp: r.timestamp,
-        persistent: r.persistent != 0,
-    }))
+    match row {
+        Some(r) => {
+            let parsed_provider = parse_provider(&r.provider)?;
+            Ok(Some(PrivacyConsent {
+                provider: parsed_provider,
+                base_url: r.base_url,
+                timestamp: r.timestamp,
+                persistent: r.persistent != 0,
+            }))
+        }
+        None => Ok(None),
+    }
 }
