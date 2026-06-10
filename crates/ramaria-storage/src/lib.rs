@@ -764,4 +764,166 @@ mod tests {
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].2, nid2);
     }
+
+    // =========================================================
+    // T-FIX-006: list_unabsorbed_events & update_persona 补充测试
+    // =========================================================
+
+    /// 辅助：创建含 persona 和 L1 的完整测试上下文。
+    async fn setup_with_persona() -> (SqliteStorage, String, i64, uuid::Uuid) {
+        let storage = setup().await;
+        let p = Persona::new(
+            "user-test".into(),
+            "测试角色".into(),
+            PersonaKind::User,
+            1,
+            "local".into(),
+        );
+        let persona_id = storage.create_persona(&p).await.unwrap();
+
+        let session = storage.create_session().await.unwrap();
+        let l1 = MemoryL1::new(session.id, "测试摘要".into(), Some("上午".into()));
+        storage.save_memory_l1(&l1).await.unwrap();
+
+        (storage, "user-test".to_string(), persona_id, l1.id)
+    }
+
+    /// 辅助：创建 MemoryEvent 并关联到 persona。
+    async fn create_test_event(storage: &SqliteStorage, persona_uid: &str, title: &str) -> i64 {
+        let now = now_ms();
+        let ev = MemoryEvent::new(
+            persona_uid.into(),
+            title.into(),
+            "测试描述".into(),
+            now - 1000,
+            now,
+        );
+        storage.save_event(&ev).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn list_unabsorbed_events_empty() {
+        // 新建 persona 尚未有任何事件
+        let (storage, persona_uid, _, _) = setup_with_persona().await;
+
+        let events = storage.list_unabsorbed_events(&persona_uid).await.unwrap();
+        assert!(events.is_empty(), "新 persona 应该没有未吸收事件");
+    }
+
+    #[tokio::test]
+    async fn list_unabsorbed_events_some() {
+        let (storage, persona_uid, _, _) = setup_with_persona().await;
+
+        // 创建 3 个事件
+        let id1 = create_test_event(&storage, &persona_uid, "事件A").await;
+        let id2 = create_test_event(&storage, &persona_uid, "事件B").await;
+        let id3 = create_test_event(&storage, &persona_uid, "事件C").await;
+
+        let events = storage.list_unabsorbed_events(&persona_uid).await.unwrap();
+        assert_eq!(events.len(), 3, "应返回全部 3 个未吸收事件");
+        let ids: Vec<i64> = events.iter().map(|e| e.id).collect();
+        assert!(ids.contains(&id1));
+        assert!(ids.contains(&id2));
+        assert!(ids.contains(&id3));
+    }
+
+    #[tokio::test]
+    async fn list_unabsorbed_events_only_matching_persona() {
+        let (storage, persona_uid, _, _) = setup_with_persona().await;
+
+        // 创建第二个 persona
+        let p2 = Persona::new(
+            "char-test".into(),
+            "角色".into(),
+            PersonaKind::Char,
+            1,
+            "local".into(),
+        );
+        storage.create_persona(&p2).await.unwrap();
+
+        create_test_event(&storage, &persona_uid, "用户事件").await;
+        create_test_event(&storage, "char-test", "角色事件").await;
+
+        let events = storage.list_unabsorbed_events(&persona_uid).await.unwrap();
+        assert_eq!(events.len(), 1, "只应返回 user-test 的事件");
+        assert_eq!(events[0].title, "用户事件");
+    }
+
+    #[tokio::test]
+    async fn update_persona_name() {
+        let (storage, persona_uid, _, _) = setup_with_persona().await;
+
+        // 更新名称
+        storage
+            .update_persona(&persona_uid, "新名称", None, None)
+            .await
+            .unwrap();
+
+        let updated = storage
+            .get_persona_by_uid(&persona_uid)
+            .await
+            .unwrap()
+            .expect("persona 应存在");
+        assert_eq!(updated.name, "新名称");
+    }
+
+    #[tokio::test]
+    async fn update_persona_avatar_and_config() {
+        let (storage, persona_uid, _, _) = setup_with_persona().await;
+
+        // 更新头像和 config JSON
+        storage
+            .update_persona(
+                &persona_uid,
+                "测试角色", // name 不变
+                Some("avatar_url_here"),
+                Some(r#"{"description":"更新后的描述"}"#),
+            )
+            .await
+            .unwrap();
+
+        let updated = storage
+            .get_persona_by_uid(&persona_uid)
+            .await
+            .unwrap()
+            .expect("persona 应存在");
+        assert_eq!(updated.avatar.as_deref(), Some("avatar_url_here"));
+        assert!(updated.config.is_some());
+        assert!(updated.config.unwrap().contains("更新后的描述"));
+    }
+
+    #[tokio::test]
+    async fn update_persona_partial_fields() {
+        // 只更新部分字段，验证未指定的字段不被覆盖
+        let (storage, persona_uid, _, _) = setup_with_persona().await;
+
+        // 先设置头像
+        storage
+            .update_persona(&persona_uid, "测试角色", Some("old_avatar"), None)
+            .await
+            .unwrap();
+
+        // 再只更新 config，头像应保持不变
+        storage
+            .update_persona(
+                &persona_uid,
+                "测试角色",
+                None, // avatar 传 None 不更新
+                Some(r#"{"key":"value"}"#),
+            )
+            .await
+            .unwrap();
+
+        let updated = storage
+            .get_persona_by_uid(&persona_uid)
+            .await
+            .unwrap()
+            .expect("persona 应存在");
+        assert_eq!(
+            updated.avatar.as_deref(),
+            Some("old_avatar"),
+            "未传入 avatar 时应保持旧值"
+        );
+        assert!(updated.config.is_some());
+    }
 }

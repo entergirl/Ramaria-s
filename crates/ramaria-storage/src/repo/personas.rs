@@ -109,7 +109,14 @@ pub async fn list_all(pool: &SqlitePool) -> RamariaResult<Vec<Persona>> {
 }
 
 /// 更新 persona 的可变字段（name / avatar / config）。
-/// uid 不可变更，updated_at 自动刷新。
+///
+/// 部分更新语义:
+/// - `name`: 必填，始终更新。
+/// - `avatar`: `Some(val)` 更新为 val，`None` **保持旧值不变**（不设 NULL）。
+/// - `config`: `Some(val)` 更新为 val，`None` **保持旧值不变**。
+/// - `uid` 不可变更，`updated_at` 自动刷新。
+///
+/// 使用 `sqlx::QueryBuilder` 动态构建 SET 子句，避免将 `None` 绑定为 SQL NULL。
 pub async fn update(
     pool: &SqlitePool,
     uid: &str,
@@ -118,20 +125,34 @@ pub async fn update(
     config: Option<&str>,
 ) -> RamariaResult<()> {
     let now = ramaria_core::types::now_ms();
-    let rows = sqlx::query(
-        "UPDATE personas SET name = ?, avatar = ?, config = ?, updated_at = ? WHERE uid = ?",
-    )
-    .bind(name)
-    .bind(avatar)
-    .bind(config)
-    .bind(now)
-    .bind(uid)
-    .execute(pool)
-    .await
-    .map_err(|e| RamariaError::storage_with_source("更新 persona 失败", e))?;
+
+    let mut builder = sqlx::QueryBuilder::new("UPDATE personas SET name = ");
+    builder.push_bind(name);
+
+    if let Some(av) = avatar {
+        builder.push(", avatar = ");
+        builder.push_bind(av);
+    }
+    if let Some(cfg) = config {
+        builder.push(", config = ");
+        builder.push_bind(cfg);
+    }
+
+    builder.push(", updated_at = ");
+    builder.push_bind(now);
+    builder.push(" WHERE uid = ");
+    builder.push_bind(uid);
+
+    let rows = builder
+        .build()
+        .execute(pool)
+        .await
+        .map_err(|e| RamariaError::storage_with_source("更新 persona 失败", e))?;
 
     if rows.rows_affected() == 0 {
-        return Err(RamariaError::storage(format!("persona 不存在: uid={uid}")));
+        return Err(RamariaError::storage(format!(
+            "persona 不存在: uid={uid}"
+        )));
     }
     Ok(())
 }
