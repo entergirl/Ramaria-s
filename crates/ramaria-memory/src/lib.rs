@@ -23,8 +23,7 @@ pub mod rrf;
 mod utils;
 pub mod vector; // 内部共享工具（不暴露到公共 API）
 
-// 后续 Phase 2 子模块在此添加:
-// pub mod prompt;
+pub mod prompt;
 
 // =========================================================
 // 公共 re-export
@@ -170,6 +169,13 @@ pub use job::{JobManager, JobManagerConfig, JobResult, JobType, status as job_st
 
 // Rebuild 索引重建
 pub use rebuild::{IndexRebuilder, RebuildConfig, RebuildStats, events_to_views, l1_list_to_views};
+
+// Prompt System Prompt 构建
+pub use prompt::{
+    builder::{PromptConfig, PromptContext, assemble_prompt},
+    example_selector::{ExampleSelector, ExampleSelectorConfig, extract_keywords},
+    injection_guard::{MemoryInjectionStatus, apply_injection_guard, check_injection},
+};
 
 /// 模块存活检查 (Phase 0 占位，可后续移除)
 pub fn hello_memory() -> &'static str {
