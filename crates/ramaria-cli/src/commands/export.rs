@@ -9,7 +9,6 @@
 //! - 敏感信息不出现在导出中（API key 等）
 
 use anyhow::Context;
-use chrono::TimeZone;
 use std::io::Write;
 use std::sync::Arc;
 
@@ -52,27 +51,31 @@ async fn export_json(app: &Arc<ramaria_app::App>, args: &ExportArgs) -> anyhow::
             .await
             .unwrap_or_default();
 
-        // Persona 筛选
-        if let Some(ref _persona_filter) = args.persona {
-            let has_relevant = messages.iter().any(|m| {
-                m.role == ramaria_core::types::MessageRole::User
-                    || m.role == ramaria_core::types::MessageRole::Assistant
-            });
-            if !has_relevant {
+        // Persona 筛选：仅保留含指定 persona_uid 的消息所属的会话
+        if let Some(ref persona_filter) = args.persona {
+            let has_matching = messages
+                .iter()
+                .any(|m| m.persona_uid.as_deref() == Some(persona_filter.as_str()));
+            if !has_matching {
+                tracing::debug!(
+                    session_id = %session.id,
+                    persona = %persona_filter,
+                    "跳过无匹配 persona 的会话"
+                );
                 continue;
             }
         }
 
         let session_json = serde_json::json!({
             "session_id": session.id.to_string(),
-            "started_at": format_timestamp(session.started_at),
-            "ended_at": format_timestamp(session.ended_at.unwrap_or(0)),
+            "started_at": crate::util::format_timestamp(session.started_at),
+            "ended_at": crate::util::format_timestamp(session.ended_at.unwrap_or(0)),
             "messages": messages.iter().map(|m| {
                 serde_json::json!({
                     "role": m.role.as_str(),
                     "content": m.content,
                     "source": m.source.to_string(),
-                    "created_at": format_timestamp(m.created_at),
+                    "created_at": crate::util::format_timestamp(m.created_at),
                 })
             }).collect::<Vec<_>>(),
         });
@@ -99,7 +102,7 @@ async fn export_json(app: &Arc<ramaria_app::App>, args: &ExportArgs) -> anyhow::
                     "summary": m.summary,
                     "valence": m.valence,
                     "salience": m.salience,
-                    "created_at": format_timestamp(m.created_at),
+                    "created_at": crate::util::format_timestamp(m.created_at),
                 })
             }).collect::<Vec<_>>(),
         });
@@ -115,7 +118,7 @@ async fn export_json(app: &Arc<ramaria_app::App>, args: &ExportArgs) -> anyhow::
         }
     }))?;
 
-    write_output(&json_output, args.output.as_deref())?;
+    write_output(&json_output, args.output.as_deref(), "json")?;
 
     crate::ui::success(&format!("已导出 {} 个会话", sessions.len()));
     Ok(())
@@ -153,14 +156,19 @@ async fn export_markdown(app: &Arc<ramaria_app::App>, args: &ExportArgs) -> anyh
             continue;
         }
 
-        // Persona 筛选
-        if let Some(ref _persona_filter) = args.persona {
-            // Markdown 导出暂不做严格 persona 筛选，导出所有对话
+        // Persona 筛选：仅保留含指定 persona_uid 消息的会话
+        if let Some(ref persona_filter) = args.persona {
+            let has_matching = messages
+                .iter()
+                .any(|m| m.persona_uid.as_deref() == Some(persona_filter.as_str()));
+            if !has_matching {
+                continue;
+            }
         }
 
         exported_count += 1;
         md.push_str(&format!("## 会话 {}\n\n", session.id));
-        if let Some(ts) = format_timestamp(session.started_at) {
+        if let Some(ts) = crate::util::format_timestamp(session.started_at) {
             md.push_str(&format!("*创建时间: {ts}*\n\n"));
         }
 
@@ -182,7 +190,7 @@ async fn export_markdown(app: &Arc<ramaria_app::App>, args: &ExportArgs) -> anyh
         return Ok(());
     }
 
-    write_output(&md, args.output.as_deref())?;
+    write_output(&md, args.output.as_deref(), "md")?;
 
     crate::ui::success(&format!("已导出 {} 个会话为 Markdown 格式", exported_count));
     Ok(())
@@ -192,30 +200,59 @@ async fn export_markdown(app: &Arc<ramaria_app::App>, args: &ExportArgs) -> anyh
 // 辅助函数
 // =========================================================
 
-/// 将内容写入输出（文件或 stdout）。
-fn write_output(content: &str, output: Option<&str>) -> anyhow::Result<()> {
-    match output {
-        Some(path) => {
-            let mut file =
-                std::fs::File::create(path).with_context(|| format!("无法创建输出文件: {path}"))?;
-            file.write_all(content.as_bytes())
-                .with_context(|| format!("写入文件失败: {path}"))?;
-            crate::ui::info(&format!("已写入: {path}"));
-        }
-        None => {
+/// 将内容写入输出。
+///
+/// - `output` 为 `None` → 自动生成默认路径 `exports/export_<timestamp>.<ext>`。
+/// - `output` 为 `Some("-")` → 输出到 stdout。
+/// - `output` 为 `Some(path)` → 写入指定文件。
+///
+/// 安全约束:
+/// - 拒绝包含 `..` 路径组件的输出路径（防止路径穿越攻击）。
+/// - 自动创建父目录。
+fn write_output(content: &str, output: Option<&str>, format: &str) -> anyhow::Result<()> {
+    let path = match output {
+        Some("-") => {
             println!("{content}");
+            crate::ui::info("已输出到 stdout");
+            return Ok(());
         }
+        Some(p) => {
+            // 路径穿越防护：拒绝包含 `..` 的路径
+            let path_obj = std::path::Path::new(p);
+            if path_obj
+                .components()
+                .any(|c| c == std::path::Component::ParentDir)
+            {
+                return Err(anyhow::anyhow!(
+                    "不安全的输出路径: '{p}'。路径中不允许包含 '..' 组件。\
+                     \n请使用当前目录下的路径（如 './exports/my_export.json'）。"
+                ));
+            }
+            p.to_string()
+        }
+        None => default_export_path(format),
+    };
+
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("无法创建输出目录: {}", parent.display()))?;
     }
+    let mut file =
+        std::fs::File::create(&path).with_context(|| format!("无法创建输出文件: {path}"))?;
+    file.write_all(content.as_bytes())
+        .with_context(|| format!("写入文件失败: {path}"))?;
+    crate::ui::info(&format!("已写入: {path}"));
+
     Ok(())
 }
 
-fn format_timestamp(ms: i64) -> Option<String> {
-    if ms <= 0 {
-        return None;
-    }
-    let secs = ms / 1000;
-    chrono::Utc
-        .timestamp_opt(secs, ((ms % 1000) * 1_000_000) as u32)
-        .single()
-        .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+/// 生成默认导出文件路径: `exports/export_<timestamp>.<ext>`
+fn default_export_path(format: &str) -> String {
+    let ext = match format {
+        "json" => "json",
+        "markdown" | "md" => "md",
+        _ => "json",
+    };
+    let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    format!("exports/export_{ts}.{ext}")
 }

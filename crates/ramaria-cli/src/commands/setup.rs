@@ -5,10 +5,12 @@
 //! - 委托 ramaria-app 进行设置保存和状态刷新
 //! - 验证 provider 连接可用性（可选）
 //! - 本地 LM Studio 跳过 API key 步骤
+//! - 人格初始化: 扫描 config/personas/ 目录下所有 .toml 文件，批量创建 persona
 //! - 错误信息清晰，每步可重试
 
 use anyhow::Context;
-use ramaria_core::types::BackendConfig;
+use ramaria_core::types::{BackendConfig, PersonaKind};
+use std::path::Path;
 use std::sync::Arc;
 
 /// 运行首次配置向导。
@@ -70,7 +72,7 @@ pub async fn run(app: &Arc<ramaria_app::App>, skip_validate: bool) -> anyhow::Re
 
     crate::ui::success("后端配置已保存");
 
-    // ---- Step 5: 创建初始 persona（user-0001 和 rama-0001）----
+    // ---- Step 5: 创建初始 persona（扫描 personas/ 目录批量初始化）----
     create_initial_personas(app).await?;
 
     // ---- Step 6: 刷新应用状态 ----
@@ -220,48 +222,15 @@ fn default_model_id(provider: ramaria_core::types::LlmProvider) -> &'static str 
     }
 }
 
-/// 创建初始 persona（user-0001 和 rama-0001）。
+/// 创建初始 persona：user-0001（系统默认） + 扫描 config/personas/ 目录下所有 .toml 文件。
+///
+/// 说明:
+/// - user-0001 始终创建（代表当前用户本人）。
+/// - 扫描 `../config/personas/` 下的 .toml 文件，文件名 = persona UID。
+/// - 每个文件的完整 TOML 内容存入 `persona.config` 字段，供 `build_system_prompt()` 加载。
+/// - 已存在的 persona 跳过不重复创建。
 async fn create_initial_personas(app: &Arc<ramaria_app::App>) -> anyhow::Result<()> {
-    use ramaria_core::types::PersonaKind;
-
-    // 检查是否已存在
-    if app
-        .storage()
-        .get_persona_by_uid("rama-0001")
-        .await?
-        .is_some()
-        && app
-            .storage()
-            .get_persona_by_uid("user-0001")
-            .await?
-            .is_some()
-    {
-        tracing::debug!("初始 persona 已存在，跳过创建");
-        return Ok(());
-    }
-
-    // 创建 rama-0001
-    if app
-        .storage()
-        .get_persona_by_uid("rama-0001")
-        .await?
-        .is_none()
-    {
-        let rama = ramaria_core::types::Persona::new(
-            "rama-0001".to_string(),
-            "Ramaria".to_string(),
-            PersonaKind::Rama,
-            1,
-            "system".to_string(),
-        );
-        app.storage()
-            .create_persona(&rama)
-            .await
-            .context("创建 rama-0001 失败")?;
-        crate::ui::info("已创建 persona: rama-0001 (Ramaria)");
-    }
-
-    // 创建 user-0001
+    // 确保 user-0001 存在
     if app
         .storage()
         .get_persona_by_uid("user-0001")
@@ -282,5 +251,117 @@ async fn create_initial_personas(app: &Arc<ramaria_app::App>) -> anyhow::Result<
         crate::ui::info("已创建 persona: user-0001 (用户)");
     }
 
+    // 扫描 personas/ 目录
+    let persona_files = scan_personas_directory();
+
+    if persona_files.is_empty() {
+        crate::ui::warn("未找到人格文件，请将 .toml 文件放入 config/personas/ 目录");
+        crate::ui::info("示例: config/personas/rama-0001.toml");
+        return Ok(());
+    }
+
+    for (uid, name, config) in persona_files {
+        if app.storage().get_persona_by_uid(&uid).await?.is_some() {
+            tracing::debug!(%uid, "persona 已存在，跳过创建");
+            continue;
+        }
+
+        let kind = PersonaKind::from_uid(&uid);
+        let mut persona = ramaria_core::types::Persona::new(
+            uid.clone(),
+            name.clone(),
+            kind,
+            1,
+            "file".to_string(),
+        );
+        persona.config = Some(config);
+        app.storage()
+            .create_persona(&persona)
+            .await
+            .with_context(|| format!("创建 persona 失败: {uid}"))?;
+        crate::ui::info(&format!("已创建 persona: {uid} ({name})"));
+    }
+
     Ok(())
 }
+
+/// 扫描 config/personas/ 目录，返回所有 .toml 文件的信息。
+///
+/// 注: `extract_toml_value` 使用共享的 `crate::util::extract_toml_value()`。
+///
+/// 返回:
+/// - `Vec<(uid, assistant_name, raw_toml_content)>`。
+///
+/// 降级策略:
+/// - 目录不存在 → 返回空 Vec，记录 warn 日志。
+/// - 单文件读取失败 → 跳过该文件，继续处理其他文件。
+/// - 所有文件为空 → 尝试旧路径 `../config/persona.toml` 作为兼容回退。
+fn scan_personas_directory() -> Vec<(String, String, String)> {
+    let dir = Path::new("../config/personas");
+    let mut results: Vec<(String, String, String)> = Vec::new();
+
+    if dir.exists() && dir.is_dir() {
+        match std::fs::read_dir(dir) {
+            Ok(entries) => {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if !path
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("toml"))
+                    {
+                        continue;
+                    }
+
+                    let uid = match path.file_stem().and_then(|s| s.to_str()) {
+                        Some(s) => s.to_string(),
+                        None => {
+                            tracing::warn!(path = %path.display(), "无法从文件名提取 UID，跳过");
+                            continue;
+                        }
+                    };
+
+                    let content = match std::fs::read_to_string(&path) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            tracing::warn!(%e, path = %path.display(), "读取 persona 文件失败，跳过");
+                            continue;
+                        }
+                    };
+
+                    let name = crate::util::extract_toml_value(&content, "assistant_name")
+                        .unwrap_or_else(|| uid.clone());
+
+                    tracing::info!(%uid, %name, path = %path.display(), "发现人格文件");
+                    results.push((uid, name, content));
+                }
+            }
+            Err(e) => {
+                tracing::warn!(%e, dir = %dir.display(), "读取 personas 目录失败");
+            }
+        }
+    } else {
+        tracing::warn!(dir = %dir.display(), "personas 目录不存在");
+    }
+
+    // 兼容回退：如果新目录没有文件，尝试旧单文件路径
+    if results.is_empty() {
+        let old_path = Path::new("../config/persona.toml");
+        if old_path.exists() {
+            match std::fs::read_to_string(old_path) {
+                Ok(content) => {
+                    let name = crate::util::extract_toml_value(&content, "assistant_name")
+                        .unwrap_or_else(|| "Ramaria".to_string());
+                    tracing::info!(%name, path = %old_path.display(), "从旧路径加载 persona.toml（兼容回退）");
+                    results.push(("rama-0001".to_string(), name, content));
+                }
+                Err(e) => {
+                    tracing::warn!(%e, path = %old_path.display(), "读取旧 persona.toml 失败");
+                }
+            }
+        }
+    }
+
+    results
+}
+
+// `extract_toml_value` 已提取至 `crate::util` 模块。

@@ -248,7 +248,7 @@ mod tests {
 
     #[test]
     fn keychain_default_creates_instance() {
-        let kc = Keychain::default();
+        let kc = Keychain;
         let _ = kc;
     }
 }

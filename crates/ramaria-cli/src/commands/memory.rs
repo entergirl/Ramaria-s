@@ -8,7 +8,6 @@
 //! - 表格化展示关键字段
 
 use anyhow::Context;
-use chrono::TimeZone;
 use std::sync::Arc;
 
 /// memory 命令参数。
@@ -62,8 +61,8 @@ async fn show_l1(app: &Arc<ramaria_app::App>, args: &MemoryArgs) -> anyhow::Resu
         println!();
         println!("  [{i}] {}", mem.id);
         crate::ui::labeled("会话", &mem.session_id.to_string());
-        crate::ui::labeled("摘要", &truncate(&mem.summary, 120));
-        if let Some(ts) = format_timestamp(mem.created_at) {
+        crate::ui::labeled("摘要", &crate::util::truncate(&mem.summary, 120));
+        if let Some(ts) = crate::util::format_timestamp(mem.created_at) {
             crate::ui::labeled("时间", &ts);
         }
         crate::ui::labeled("效价", &format!("{:.2}", mem.valence));
@@ -107,9 +106,9 @@ async fn show_l2(app: &Arc<ramaria_app::App>, args: &MemoryArgs) -> anyhow::Resu
     for (i, event) in events.iter().enumerate() {
         println!();
         println!("  [{i}] #{}", event.id);
-        crate::ui::labeled("标题", &truncate(&event.title, 80));
-        crate::ui::labeled("摘要", &truncate(&event.summary, 120));
-        if let Some(ts) = format_timestamp(event.start) {
+        crate::ui::labeled("标题", &crate::util::truncate(&event.title, 80));
+        crate::ui::labeled("摘要", &crate::util::truncate(&event.summary, 120));
+        if let Some(ts) = crate::util::format_timestamp(event.start) {
             crate::ui::labeled("时间", &ts);
         }
         crate::ui::labeled("确凿度", &format!("{:.2}", event.confidence));
@@ -201,28 +200,6 @@ fn print_trait_group(label: &str, traits: &[&ramaria_core::types::PersonalityTra
     }
 }
 
-// =========================================================
-// 辅助函数
-// =========================================================
-
-/// 格式化 Unix 毫秒时间戳为可读字符串。
-fn format_timestamp(ms: i64) -> Option<String> {
-    if ms <= 0 {
-        return None;
-    }
-    let secs = ms / 1000;
-    chrono::Utc
-        .timestamp_opt(secs, ((ms % 1000) * 1_000_000) as u32)
-        .single()
-        .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-}
-
-/// 截断字符串到指定长度，超出部分用 "..." 替代。
-fn truncate(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max_chars - 3).collect();
-        format!("{truncated}...")
-    }
-}
+// 辅助函数已提取至 crate::util 模块：
+//   - crate::util::format_timestamp()
+//   - crate::util::truncate()

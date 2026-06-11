@@ -68,15 +68,19 @@ pub async fn run(app: &Arc<ramaria_app::App>, yes: bool) -> anyhow::Result<()> {
             }
         };
 
-        // 流式输出 AI 回复
+        // 流式输出 AI 回复（|| 自动替换为换行）
         print!("\n\x1b[32mAI:\x1b[0m ");
         let mut has_content = false;
+        let mut formatter = crate::ui::PersonaFormatter::new();
 
         while let Some(event_result) = stream.next().await {
             match event_result {
                 Ok(event) => match event {
                     ramaria_app::stream_event::StreamEvent::Delta { content, .. } => {
-                        crate::ui::write_delta(&content);
+                        let formatted = formatter.feed(&content);
+                        if !formatted.is_empty() {
+                            crate::ui::write_delta(&formatted);
+                        }
                         has_content = true;
                     }
                     ramaria_app::stream_event::StreamEvent::Done { .. } => {}
@@ -91,6 +95,11 @@ pub async fn run(app: &Arc<ramaria_app::App>, yes: bool) -> anyhow::Result<()> {
                     crate::ui::print_error(&e);
                 }
             }
+        }
+
+        // 刷新残留字符
+        if let Some(remnant) = formatter.flush() {
+            crate::ui::write_delta(&remnant);
         }
 
         if has_content {

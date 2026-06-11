@@ -7,7 +7,6 @@
 //! - 表格化展示，支持截断长消息
 
 use anyhow::Context;
-use chrono::TimeZone;
 use std::sync::Arc;
 
 /// session 命令的子命令。
@@ -56,7 +55,8 @@ async fn list_sessions(app: &Arc<ramaria_app::App>) -> anyhow::Result<()> {
         } else {
             "进行中"
         };
-        let time = format_timestamp(s.started_at).unwrap_or_else(|| "未知".to_string());
+        let time =
+            crate::util::format_timestamp(s.started_at).unwrap_or_else(|| "未知".to_string());
         println!("  {}  {:<12}  {}", s.id, status, time);
     }
 
@@ -91,7 +91,7 @@ async fn show_session(app: &Arc<ramaria_app::App>, session_id: &str) -> anyhow::
             "进行中"
         },
     );
-    if let Some(ts) = format_timestamp(session.started_at) {
+    if let Some(ts) = crate::util::format_timestamp(session.started_at) {
         crate::ui::labeled("创建时间", &ts);
     }
     crate::ui::labeled("消息数", &messages.len().to_string());
@@ -114,7 +114,7 @@ async fn show_session(app: &Arc<ramaria_app::App>, session_id: &str) -> anyhow::
         println!("  {role_icon}");
 
         // 截断长消息
-        let content = truncate(&msg.content, 200);
+        let content = crate::util::truncate(&msg.content, 200);
         for line in content.lines() {
             println!("    {line}");
         }
@@ -143,26 +143,6 @@ async fn delete_session(app: &Arc<ramaria_app::App>, session_id: &str) -> anyhow
     Ok(())
 }
 
-// =========================================================
-// 辅助函数
-// =========================================================
-
-fn format_timestamp(ms: i64) -> Option<String> {
-    if ms <= 0 {
-        return None;
-    }
-    let secs = ms / 1000;
-    chrono::Utc
-        .timestamp_opt(secs, ((ms % 1000) * 1_000_000) as u32)
-        .single()
-        .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-}
-
-fn truncate(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max_chars - 3).collect();
-        format!("{truncated}...")
-    }
-}
+// 辅助函数已提取至 crate::util 模块：
+//   - crate::util::format_timestamp()
+//   - crate::util::truncate()

@@ -59,16 +59,21 @@ pub async fn run(app: &Arc<ramaria_app::App>, args: AskArgs) -> anyhow::Result<(
     }
 }
 
-/// 流式输出：逐字打印到 stdout。
+/// 流式输出：逐字打印到 stdout，`||` 自动替换为换行（人格短句渲染）。
 async fn consume_streaming(mut stream: SendMessageStream) -> anyhow::Result<()> {
     let mut total_chars = 0usize;
     let mut has_error = false;
+    let mut formatter = crate::ui::PersonaFormatter::new();
 
     while let Some(event_result) = stream.next().await {
         match event_result {
             Ok(event) => match event {
                 ramaria_app::stream_event::StreamEvent::Delta { content, .. } => {
-                    crate::ui::write_delta(&content);
+                    // 通过 PersonaFormatter 处理 || → 换行
+                    let formatted = formatter.feed(&content);
+                    if !formatted.is_empty() {
+                        crate::ui::write_delta(&formatted);
+                    }
                     total_chars += content.chars().count();
                 }
                 ramaria_app::stream_event::StreamEvent::Done {
@@ -92,6 +97,11 @@ async fn consume_streaming(mut stream: SendMessageStream) -> anyhow::Result<()> 
         }
     }
 
+    // 刷新 formatter 中可能残留的孤 | 字符
+    if let Some(remnant) = formatter.flush() {
+        crate::ui::write_delta(&remnant);
+    }
+
     if !has_error {
         crate::ui::finish_delta();
     }
@@ -103,7 +113,7 @@ async fn consume_streaming(mut stream: SendMessageStream) -> anyhow::Result<()> 
     Ok(())
 }
 
-/// 非流式输出：等待完整回复后一次性打印。
+/// 非流式输出：等待完整回复后一次性打印。`||` 替换为换行。
 async fn consume_full(mut stream: SendMessageStream) -> anyhow::Result<()> {
     let mut full_reply = String::new();
     let mut has_error = false;
@@ -130,7 +140,8 @@ async fn consume_full(mut stream: SendMessageStream) -> anyhow::Result<()> {
     }
 
     if !has_error {
-        println!("{full_reply}");
+        // 完整回复直接替换 || → 换行
+        println!("{}", full_reply.replace("||", "\n"));
     }
 
     if full_reply.is_empty() && !has_error {

@@ -23,4 +23,9 @@ anyhow.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 futures.workspace = true
-windows.workspace = true
+windows = { workspace = true, features = ["Win32_System_Console"] }
+
+[dev-dependencies]
+async-trait.workspace = true
+tokio.workspace = true
+reqwest = { workspace = true, features = ["json"] }

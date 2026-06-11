@@ -9,9 +9,9 @@
 //! - --db 指定数据库路径
 //! - --yes 在线隐私自动确认（T-CLI-010 规则：需显式指定 provider）
 
-mod commands;
-mod privacy;
-mod ui;
+// 命令模块通过 lib.rs 暴露（pub mod），以供集成测试使用
+use ramaria_cli::commands;
+use ramaria_cli::ui;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
@@ -31,8 +31,8 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
 
-    /// 数据库文件路径（默认: ./ramaria_assistant.db，可通过 RAMARIA_DB_PATH 环境变量覆盖）
-    #[arg(long, global = true, default_value = "ramaria_assistant.db")]
+    /// 数据库文件路径（默认: ./data/ramaria_assistant.db，可通过 RAMARIA_DB_PATH 环境变量覆盖）
+    #[arg(long, global = true, default_value = "data/ramaria_assistant.db")]
     db: PathBuf,
 
     /// 跳过隐私确认（仅线上 provider 生效，需显式配置 provider）
@@ -84,8 +84,8 @@ enum Commands {
         #[arg(long)]
         persona: Option<String>,
 
-        /// 输出条数上限
-        #[arg(long, default_value = "20")]
+        /// 输出条数上限（1-500）
+        #[arg(long, default_value = "20", value_parser = parse_limit)]
         limit: usize,
     },
 
@@ -96,6 +96,10 @@ enum Commands {
     /// 配置管理
     #[command(subcommand)]
     Config(ConfigCmd),
+
+    /// 人格文件管理（查看/重新加载）
+    #[command(subcommand)]
+    Persona(PersonaCmd),
 
     /// 索引管理
     #[command(subcommand)]
@@ -148,6 +152,18 @@ enum ConfigCmd {
         key: String,
         /// 配置项值
         value: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum PersonaCmd {
+    /// 显示所有人格摘要
+    Show,
+    /// 从 personas/ 目录重新加载人格文件到 DB
+    Reload {
+        /// 指定要重新加载的 persona UID（默认加载全部）
+        #[arg(long)]
+        uid: Option<String>,
     },
 }
 
@@ -331,6 +347,13 @@ async fn dispatch(app: &Arc<ramaria_app::App>, cli: Cli) -> anyhow::Result<()> {
                 commands::index_cmd::run(app).await?;
             }
         },
+        Commands::Persona(sub) => {
+            let cmd = match sub {
+                PersonaCmd::Show => commands::persona::PersonaCmd::Show,
+                PersonaCmd::Reload { uid } => commands::persona::PersonaCmd::Reload { uid },
+            };
+            commands::persona::run(app, cmd).await?;
+        }
         Commands::Export {
             format,
             persona,
@@ -346,6 +369,26 @@ async fn dispatch(app: &Arc<ramaria_app::App>, cli: Cli) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+// =========================================================
+// 参数校验
+// =========================================================
+
+/// 校验 `--limit` 参数: 必须在 1..=500 范围内。
+///
+/// 参数:
+/// - `s`: 用户输入的 limit 字符串。
+///
+/// 返回:
+/// - `Ok(limit)`: 有效的 limit 值。
+/// - `Err(msg)`: 无效输入（非数字 / 超出范围）。
+fn parse_limit(s: &str) -> Result<usize, String> {
+    let n: usize = s.parse().map_err(|_| format!("'{s}' 不是有效的正整数"))?;
+    if !(1..=500).contains(&n) {
+        return Err(format!("limit 必须在 1-500 之间，当前值: {n}"));
+    }
+    Ok(n)
 }
 
 // =========================================================

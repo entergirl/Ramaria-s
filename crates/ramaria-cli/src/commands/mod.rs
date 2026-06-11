@@ -11,5 +11,6 @@ pub mod config;
 pub mod export;
 pub mod index_cmd;
 pub mod memory;
+pub mod persona;
 pub mod session;
 pub mod setup;
