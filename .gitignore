@@ -4,9 +4,13 @@
 
 # 本地数据库文件
 /.ramaria-dev/
+/data/
 *.db
 *.sqlite
 *.sqlite3
+
+# 导出数据
+/exports/
 
 # 环境与隐私配置
 .env

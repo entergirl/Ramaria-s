@@ -49,6 +49,12 @@ pub struct MockStorage {
     examples: Mutex<HashMap<String, Vec<PersonaExample>>>,
 }
 
+impl Default for MockStorage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MockStorage {
     pub fn new() -> Self {
         Self {
@@ -627,6 +633,12 @@ impl LlmProvider for MockFailingLlm {
 #[allow(dead_code)]
 pub struct MockEmbedding {
     model_info: EmbeddingModelInfo,
+}
+
+impl Default for MockEmbedding {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[allow(dead_code)]

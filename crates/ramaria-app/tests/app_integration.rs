@@ -101,7 +101,7 @@ async fn setup_status_needs_backend() {
     let status = check_setup_status(&storage).await.unwrap();
     assert!(!status.backend_configured);
     assert!(!status.is_complete());
-    assert!(status.missing_items().len() >= 1);
+    assert!(!status.missing_items().is_empty());
 }
 
 #[tokio::test]
@@ -250,7 +250,7 @@ async fn send_message_preserves_session() {
         .send_message("你好", None, Some(session_id))
         .await
         .unwrap();
-    while let Some(_) = stream.next().await {}
+    while stream.next().await.is_some() {}
 
     // 验证: 会话中有消息
     let messages = storage.list_messages(session_id).await.unwrap();
@@ -277,7 +277,7 @@ async fn send_message_creates_new_session() {
 
     // 发送消息（不指定会话，应自动创建）
     let mut stream = app.send_message("测试", None, None).await.unwrap();
-    while let Some(_) = stream.next().await {}
+    while stream.next().await.is_some() {}
 
     // 验证: 有活跃会话
     let sessions = storage.list_active_sessions().await.unwrap();

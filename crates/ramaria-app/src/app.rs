@@ -24,6 +24,7 @@ use ramaria_core::types::{
     new_id, now_ms,
 };
 use ramaria_llm::keychain::Keychain;
+use ramaria_memory::parse_persona_toml;
 use ramaria_memory::prompt::builder::{PromptConfig, PromptContext, assemble_prompt};
 use ramaria_memory::rag::{RagConfig, filter_by_persona, format_context_text};
 use ramaria_memory::retriever::{L1DocView, Retriever, SearchRequest};
@@ -539,6 +540,16 @@ impl App {
                     Vec::new()
                 });
 
+            // 冷启动兜底：facts/traits 均为空时，尝试加载 persona.toml
+            // 优先从 DB persona.config 读取，其次回退到文件系统
+            if facts.is_empty()
+                && traits.is_empty()
+                && let Some(prompt) = load_persona_toml_prompt(p.config.as_deref())
+            {
+                tracing::info!("使用 persona.toml 加载的系统 prompt（无结构化画像）");
+                return prompt;
+            }
+
             let ctx = PromptContext {
                 persona: Some(p.clone()),
                 facts,
@@ -572,6 +583,92 @@ impl App {
              当前时间：{}",
             chrono::Local::now().format("%Y-%m-%d %H:%M")
         )
+    }
+}
+
+// =========================================================
+// persona.toml 直接加载（冷启动兜底，不依赖 LLM 结构化拆解）
+// =========================================================
+
+/// 尝试加载 persona.toml 并构建有温度的基础 system prompt。
+///
+/// 数据来源优先级:
+/// 1. `db_config`: 从 DB persona.config 中读取的 TOML 内容（setup 时写入）
+/// 2. 文件系统回退: `../config/persona.toml`（开发/迁移场景）
+///
+/// 成功时返回由 `A_persona` + `E_rules` 组装的基础系统 prompt。
+/// 失败时返回 `None`，由上层降级到通用 prompt。
+fn load_persona_toml_prompt(db_config: Option<&str>) -> Option<String> {
+    let content = if let Some(cfg) = db_config {
+        // 优先使用 DB 中的 persona.toml 内容
+        if cfg.contains("[identity]") || cfg.contains("[blocks]") {
+            tracing::debug!("从 DB persona.config 加载 persona.toml");
+            cfg.to_string()
+        } else {
+            // config 字段是其他 JSON 格式，回退到文件系统
+            fallback_read_persona_toml()?
+        }
+    } else {
+        fallback_read_persona_toml()?
+    };
+
+    let parsed = match parse_persona_toml(&content) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(%e, "persona.toml 解析失败");
+            return None;
+        }
+    };
+
+    let persona_block = parsed
+        .blocks
+        .iter()
+        .find(|(k, _)| k == "A_persona")
+        .map(|(_, v)| v.as_str())
+        .unwrap_or("");
+
+    let rules_block = parsed
+        .blocks
+        .iter()
+        .find(|(k, _)| k == "E_rules")
+        .map(|(_, v)| v.as_str())
+        .unwrap_or("");
+
+    let name = &parsed.assistant_name;
+    let time_str = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
+
+    Some(format!(
+        "你的名字是{name}。\n\n{persona_block}\n\n回复规则:\n{rules_block}\n\n\
+         当前时间：{time_str}\n\n\
+         你可以记住与用户的对话历史。如果用户提到之前聊过的内容，\
+         请结合记忆上下文给出更有针对性的回复。"
+    ))
+}
+
+/// 文件系统回退: 优先尝试新路径 `../config/personas/rama-0001.toml`，其次旧路径 `../config/persona.toml`。
+///
+/// 说明:
+/// - 新路径为目录扫描模式（Phase 4.2），每文件 = 一个 persona。
+/// - 旧路径保留作为兼容回退，供未迁移的旧安装使用。
+fn fallback_read_persona_toml() -> Option<String> {
+    // 优先尝试新路径
+    let new_path = "../config/personas/rama-0001.toml";
+    if let Ok(c) = std::fs::read_to_string(new_path) {
+        tracing::debug!(%new_path, "从文件系统加载 persona.toml (新路径)");
+        return Some(c);
+    }
+
+    // 回退到旧路径（兼容旧版安装）
+    let old_path = "../config/persona.toml";
+    match std::fs::read_to_string(old_path) {
+        Ok(c) => {
+            tracing::debug!(%old_path, "从文件系统加载 persona.toml (旧路径兼容)");
+            Some(c)
+        }
+        Err(e) => {
+            tracing::debug!(%old_path, %e, "persona.toml 文件系统回退失败");
+            None
+        }
     }
 }
 

@@ -1395,6 +1395,7 @@ name = "ramaria-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "clap",
  "futures",
@@ -1402,6 +1403,7 @@ dependencies = [
  "ramaria-core",
  "ramaria-llm",
  "ramaria-storage",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",
