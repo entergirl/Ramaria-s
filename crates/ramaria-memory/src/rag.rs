@@ -329,8 +329,10 @@ mod tests {
 
     #[test]
     fn filter_disabled_persona_aware() {
-        let mut config = RagConfig::default();
-        config.persona_aware = false;
+        let config = RagConfig {
+            persona_aware: false,
+            ..Default::default()
+        };
 
         let results = vec![make_test_result("超私密", "l2", Some(0.01), 0.9)];
         let filtered = filter_by_persona(&results, PersonaKind::Char, &config);
@@ -372,8 +374,10 @@ mod tests {
 
     #[test]
     fn format_context_max_memories() {
-        let mut config = RagConfig::default();
-        config.max_memories = 2;
+        let config = RagConfig {
+            max_memories: 2,
+            ..Default::default()
+        };
 
         let results: Vec<SearchResult> = (0..5)
             .map(|i| make_test_result(&format!("文档{}", i), "l1", None, 1.0 - i as f64 * 0.1))
@@ -389,8 +393,10 @@ mod tests {
 
     #[test]
     fn format_context_long_summary_truncation() {
-        let mut config = RagConfig::default();
-        config.max_summary_chars = 10;
+        let config = RagConfig {
+            max_summary_chars: 10,
+            ..Default::default()
+        };
 
         let long = "这是一段非常长的描述文本需要被截断";
         let r = make_test_result(long, "l1", None, 0.9);
@@ -438,8 +444,10 @@ mod tests {
 
     #[test]
     fn format_graph_context_disabled() {
-        let mut config = RagConfig::default();
-        config.include_graph_entities = false;
+        let config = RagConfig {
+            include_graph_entities: false,
+            ..Default::default()
+        };
 
         let r = SearchResult {
             doc_id: DocId::Graph("Python".to_string()),
@@ -485,8 +493,10 @@ mod tests {
 
     #[test]
     fn assemble_rag_context_includes_graph() {
-        let mut config = RagConfig::default();
-        config.max_memories = 5;
+        let config = RagConfig {
+            max_memories: 5,
+            ..Default::default()
+        };
 
         let mut results: Vec<SearchResult> = (0..3)
             .map(|i| make_test_result(&format!("文档{}", i), "l1", None, 0.9))

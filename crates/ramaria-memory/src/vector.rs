@@ -444,8 +444,10 @@ mod tests {
             idx.add(&format!("doc{}", i), v, 1000);
         }
 
-        let mut config = VectorIndexConfig::default();
-        config.top_k = 3;
+        let config = VectorIndexConfig {
+            top_k: 3,
+            ..Default::default()
+        };
         let mut query = vec![0.0_f32; 10];
         query[0] = 1.0;
 
@@ -459,8 +461,10 @@ mod tests {
         idx.add("a", vec![1.0, 0.0], 1000);
         idx.add("b", vec![0.0, 1.0], 1000);
 
-        let mut config = VectorIndexConfig::default();
-        config.min_similarity = 0.9;
+        let config = VectorIndexConfig {
+            min_similarity: 0.9,
+            ..Default::default()
+        };
 
         // 查询与 "a" 非常相似
         let hits = idx.search(&[0.99, 0.14], &config).unwrap();

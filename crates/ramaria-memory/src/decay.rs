@@ -411,8 +411,10 @@ mod tests {
     #[test]
     fn access_boost_disabled() {
         let now = 1_000_000_000_000;
-        let mut config = DecayConfig::default();
-        config.access_boost_enabled = false;
+        let config = DecayConfig {
+            access_boost_enabled: false,
+            ..Default::default()
+        };
         let r = 0.2;
         let last_accessed = Some(days_ago_ms(now, 1));
         let result = apply_access_boost(r, last_accessed, now, &config);

@@ -424,7 +424,7 @@ mod tests {
         assert!(l1.is_finite());
         // sigmoid 应在 [0,1]
         let s0 = sigmoid(l0);
-        assert!(s0 >= 0.0 && s0 <= 1.0);
+        assert!((0.0..=1.0).contains(&s0));
     }
 
     #[test]
@@ -513,8 +513,8 @@ mod tests {
         let (gv, gs, go, gsu, gm, n_total) = compute_global_stats(&cats);
         assert!(n_total > 0.0);
         // 全局值应在各分类值之间
-        assert!(gv >= -0.2 && gv <= 0.5);
-        assert!(gs >= 0.5 && gs <= 0.9);
+        assert!((-0.2..=0.5).contains(&gv));
+        assert!((0.5..=0.9).contains(&gs));
         let pres_sum = go + gsu + gm;
         assert!((pres_sum - 1.0).abs() < 1e-10, "全局 presentation 和应为1");
     }

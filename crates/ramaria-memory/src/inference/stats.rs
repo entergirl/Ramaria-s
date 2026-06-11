@@ -711,6 +711,7 @@ mod tests {
     use ramaria_core::types::{Presentation, now_ms};
 
     /// 构造测试用 MemoryEvent。
+    #[allow(clippy::too_many_arguments)]
     fn make_event(
         title: &str,
         summary: &str,

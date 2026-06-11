@@ -496,8 +496,10 @@ mod tests {
 
     #[test]
     fn search_max_entities_limit() {
-        let mut config = GraphRetrieverConfig::default();
-        config.max_entities = 1;
+        let config = GraphRetrieverConfig {
+            max_entities: 1,
+            ..Default::default()
+        };
 
         let r = make_test_retriever();
         let hits = r.search("Python 机器学习 数据清洗", &config);

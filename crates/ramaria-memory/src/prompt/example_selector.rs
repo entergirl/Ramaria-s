@@ -453,7 +453,7 @@ mod tests {
     }
 
     // 辅助: Vec<String> → Vec<&str>
-    fn str_to_refs<'a>(strings: &'a [String]) -> Vec<&'a str> {
+    fn str_to_refs(strings: &[String]) -> Vec<&str> {
         strings.iter().map(|s| s.as_str()).collect()
     }
 }
