@@ -1,10 +1,10 @@
 /* ═══════════════════════════════════════════════════════════
-   fonts.css — Ramaria 字体声明（构建期自动下载 .ttf）
+   fonts.css — Ramaria 字体声明
    设计特点:
-   - 字体文件由 build.rs 在 cargo build 时自动从 Google Fonts /
-     JetBrains Mono 官方仓库下载到本地 fonts/ 目录
-   - 下载使用 TTF 格式（所有现代浏览器和 WebView2 均支持）
-   - 下载失败不阻断构建，系统字体回退自动生效
+   - 字体文件一次性手动下载后提交 Git，构建期零网络依赖
+   - TTF 格式，所有现代浏览器和 WebView2 均支持
+   - DM Sans 使用可变字体（1 个文件覆盖 300-600 全字重）
+   - DM Serif Display / JetBrains Mono 使用静态 TTF
    - @font-face 使用 local() 优先查找本地已安装字体
    - font-display: swap 确保文字立即可见（避免 FOIT）
    ═══════════════════════════════════════════════════════════ */
@@ -30,45 +30,14 @@
        url('./dm-serif-display-italic.ttf') format('truetype');
 }
 
-/* ── DM Sans ── */
+/* ── DM Sans（可变字体：一个文件覆盖 300-600 全部字重）── */
 @font-face {
   font-family: 'DM Sans';
   font-style: normal;
-  font-weight: 300;
-  font-display: swap;
-  src: local('DM Sans Light'),
-       local('DMSans-Light'),
-       url('./dm-sans-300.ttf') format('truetype');
-}
-
-@font-face {
-  font-family: 'DM Sans';
-  font-style: normal;
-  font-weight: 400;
+  font-weight: 300 600;
   font-display: swap;
   src: local('DM Sans'),
-       local('DMSans-Regular'),
-       url('./dm-sans-400.ttf') format('truetype');
-}
-
-@font-face {
-  font-family: 'DM Sans';
-  font-style: normal;
-  font-weight: 500;
-  font-display: swap;
-  src: local('DM Sans Medium'),
-       local('DMSans-Medium'),
-       url('./dm-sans-500.ttf') format('truetype');
-}
-
-@font-face {
-  font-family: 'DM Sans';
-  font-style: normal;
-  font-weight: 600;
-  font-display: swap;
-  src: local('DM Sans SemiBold'),
-       local('DMSans-SemiBold'),
-       url('./dm-sans-600.ttf') format('truetype');
+       url('./dm-sans.ttf') format('truetype');
 }
 
 /* ── JetBrains Mono ── */

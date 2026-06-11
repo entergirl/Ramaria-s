@@ -5,7 +5,7 @@
 //! - 通过 Tauri managed state (`DesktopState`) 注入 `Arc<App>` 到所有 Command
 //! - 初始化失败时优雅降级：窗口仍可显示，但状态为 FatalError
 //! - 系统托盘在 Tauri setup 钩子中初始化
-//! - 所有 Command 只做参数转换 + 委托 ramaria-app，不写业务逻辑度
+//! - 所有 Command 只做参数转换 + 委托 ramaria-app，不写业务逻辑
 
 mod commands;
 mod events;

@@ -1231,6 +1231,40 @@ pub struct BackendConfig {
 }
 
 impl BackendConfig {
+    /// 根据 provider + base_url + model_id 创建配置，自动填充合理的默认值。
+    ///
+    /// 职责:
+    /// - 消除 setup.rs 和 config.rs 中重复的 BackendConfig 构造逻辑。
+    /// - 为各 provider 提供一致的默认 temperature / max_tokens / context_window。
+    ///
+    /// 参数:
+    /// - `provider`: LLM 提供商。
+    /// - `base_url`: API 基础地址。
+    /// - `model_id`: 模型标识（LM Studio 可为空字符串）。
+    ///
+    /// 返回:
+    /// - 带合理默认值的 BackendConfig 实例。
+    pub fn new_with_defaults(provider: LlmProvider, base_url: String, model_id: String) -> Self {
+        let is_lm_studio = provider == LlmProvider::LmStudio;
+
+        Self {
+            provider,
+            base_url: base_url.clone(),
+            embedding_model_id: None,
+            temperature: 0.3,
+            max_tokens: 2048,
+            capability: ModelCapability {
+                provider,
+                model_id,
+                base_url,
+                supports_streaming: true,
+                supports_json_mode: !is_lm_studio,
+                context_window: if is_lm_studio { 4096 } else { 65536 },
+                max_output_tokens: 8192,
+            },
+        }
+    }
+
     /// LM Studio 默认配置。
     ///
     /// 返回:

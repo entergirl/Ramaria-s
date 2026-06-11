@@ -37,7 +37,7 @@ use tokio_stream::StreamExt;
 /// - 此命令不会阻塞等待 LLM 完整回复，而是立即返回
 /// - 前端应监听上述三个事件来渲染回复内容
 #[tauri::command]
-#[tracing::instrument(skip(state, app_handle), fields(%message))]
+#[tracing::instrument(skip(state, app_handle, message), fields(msg_len))]
 pub async fn send_message(
     state: State<'_, DesktopState>,
     app_handle: AppHandle,
@@ -55,10 +55,12 @@ pub async fn send_message(
     let request_id = uuid::Uuid::new_v4().to_string();
     let rid_for_task = request_id.clone();
 
+    // 仅记录消息长度，不记录完整用户消息内容（隐私安全）
     tracing::info!(
         request_id = %request_id,
         persona_uid = ?persona_uid,
         session_id = ?session_id,
+        msg_len = trimmed.chars().count(),
         "收到 send_message 请求"
     );
 

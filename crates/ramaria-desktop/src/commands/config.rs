@@ -100,27 +100,9 @@ pub async fn update_backend_config(
         other => return Err(format!("不支持的 provider: {}", other)),
     };
 
-    // 构建新的 BackendConfig
-    let new_config = BackendConfig {
-        provider: llm_provider,
-        base_url: base_url.clone(),
-        embedding_model_id: None,
-        temperature: 0.3,
-        max_tokens: 2048,
-        capability: ramaria_core::types::ModelCapability {
-            provider: llm_provider,
-            model_id: model_id.clone(),
-            base_url: base_url.clone(),
-            supports_streaming: true,
-            supports_json_mode: llm_provider != ramaria_core::types::LlmProvider::LmStudio,
-            context_window: if llm_provider == ramaria_core::types::LlmProvider::LmStudio {
-                4096
-            } else {
-                65536
-            },
-            max_output_tokens: 8192,
-        },
-    };
+    // 构建新的 BackendConfig（使用统一构造器，消除重复）
+    let new_config =
+        BackendConfig::new_with_defaults(llm_provider, base_url.clone(), model_id.clone());
 
     // 保存到 storage
     state

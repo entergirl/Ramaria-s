@@ -21,11 +21,14 @@ pub fn setup_tray<R: Runtime>(app_handle: &AppHandle<R>) -> tauri::Result<()> {
     if let Some(window) = app_handle.get_webview_window("main") {
         let window_clone = window.clone();
         window.on_window_event(move |event| {
-            if let tauri::WindowEvent::CloseRequested { .. } = event {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 // 关闭请求时隐藏窗口而非退出
                 let _ = window_clone.hide();
                 // 阻止默认关闭行为
-                // Note: Tauri 2 中阻止关闭需通过 prevent_close API
+                // TODO (Phase 5 Batch 7): 使用 api.prevent_close() 阻止窗口真正关闭
+                //   Tauri 2 中需要通过 CloseRequested 事件的 api 参数调用 prevent_close()
+                //   当前仅为占位，窗口关闭行为由操作系统默认处理
+                let _ = api;
             }
         });
     }

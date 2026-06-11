@@ -28,8 +28,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # ---------- 异步 ----------
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
+futures = { workspace = true }
 
 # ---------- 工具 ----------
 tracing = "0.1"
@@ -39,7 +40,6 @@ chrono = { version = "0.4", features = ["serde"] }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
-ureq = { version = "2", features = ["tls"] }
 
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }

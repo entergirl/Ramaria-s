@@ -48,6 +48,7 @@ struct ExportMessage {
 ///
 /// 说明:
 /// - 导出结构：sessions[] 含 messages[]，每消息含 role/content/persona_uid/created_at
+/// - 路径安全检查：对父目录做 canonicalize（文件可能尚不存在，仅目录必须存在）
 #[tauri::command]
 #[tracing::instrument(skip(state))]
 pub async fn export_sessions_json(
@@ -56,10 +57,17 @@ pub async fn export_sessions_json(
 ) -> Result<String, String> {
     let path = PathBuf::from(&output_path);
 
-    // 安全检查：确保路径不以不安全的方式访问
-    let canonical = path
+    // 安全检查：规范化父目录（文件可能尚不存在，不能 canonicalize 文件路径本身）
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("无法解析导出路径: 路径 '{}' 无父目录", output_path))?;
+    let canonical_parent = parent
         .canonicalize()
-        .map_err(|e| format!("无法解析导出路径: {}", e))?;
+        .map_err(|e| format!("导出目录不存在或无法访问 ({}): {}", parent.display(), e))?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| format!("无效的导出路径: 缺少文件名 ({})", output_path))?;
+    let canonical = canonical_parent.join(file_name);
 
     let sessions = state
         .app
@@ -121,6 +129,7 @@ pub async fn export_sessions_json(
 ///
 /// 说明:
 /// - 按会话分组，消息按角色标注（👤 用户 / 🤖 助手 / 🔧 系统）
+/// - 路径安全检查：对父目录做 canonicalize（文件可能尚不存在）
 #[tauri::command]
 #[tracing::instrument(skip(state))]
 pub async fn export_sessions_markdown(
@@ -128,9 +137,17 @@ pub async fn export_sessions_markdown(
     output_path: String,
 ) -> Result<String, String> {
     let path = PathBuf::from(&output_path);
-    let canonical = path
+    // 规范化父目录（文件可能尚不存在，仅目录必须存在）
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("无法解析导出路径: 路径 '{}' 无父目录", output_path))?;
+    let canonical_parent = parent
         .canonicalize()
-        .map_err(|e| format!("无法解析导出路径: {}", e))?;
+        .map_err(|e| format!("导出目录不存在或无法访问 ({}): {}", parent.display(), e))?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| format!("无效的导出路径: 缺少文件名 ({})", output_path))?;
+    let canonical = canonical_parent.join(file_name);
 
     let sessions = state
         .app

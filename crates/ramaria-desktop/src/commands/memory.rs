@@ -5,8 +5,10 @@
 //! - 返回值经过简化序列化，移除内部字段（如 INTEGER id），仅暴露业务字段
 //! - 支持 limit 参数控制返回条数，默认 50
 //! - 不写业务逻辑，纯委托 StorageBackend
+//! - 使用 futures::future::join_all 并发查询，避免串行 N+1 问题
 
 use crate::DesktopState;
+use futures::future::join_all;
 use serde::Serialize;
 use tauri::State;
 
@@ -134,15 +136,18 @@ pub async fn get_l1_memories(
         .await
         .map_err(|e| format!("查询会话列表失败: {}", e))?;
 
-    // 遍历会话，收集 L1 摘要
-    let mut all_l1: Vec<MemoryL1View> = Vec::new();
-    for session in sessions.iter().take(50) {
-        // 限制最多遍历 50 个会话，避免性能问题
-        let l1_list = storage
-            .list_memory_l1(session.id)
-            .await
-            .map_err(|e| format!("查询 L1 记忆失败 ({}): {}", session.id, e))?;
+    // 并发查询最近 50 个会话的 L1 摘要（避免串行 N+1）
+    let session_limit = sessions.len().min(50);
+    let l1_futures: Vec<_> = sessions[..session_limit]
+        .iter()
+        .map(|s| storage.list_memory_l1(s.id))
+        .collect();
+    let l1_results = join_all(l1_futures).await;
 
+    // 收集结果，按 persona_uid 过滤
+    let mut all_l1: Vec<MemoryL1View> = Vec::new();
+    for result in l1_results {
+        let l1_list = result.map_err(|e| format!("查询 L1 记忆失败: {}", e))?;
         for m in l1_list {
             // 按 persona_uid 可选过滤
             if let Some(ref uid) = persona_uid {
@@ -162,7 +167,6 @@ pub async fn get_l1_memories(
                 created_at: m.created_at,
             });
         }
-
         if all_l1.len() >= limit {
             break;
         }
@@ -206,7 +210,7 @@ pub async fn get_l2_events(
             .await
             .map_err(|e| format!("查询 L2 事件失败: {}", e))?
     } else {
-        // 获取所有 persona 的事件
+        // 获取所有 persona 的事件（并发查询，避免串行 N+1）
         let all_personas = state
             .app
             .storage()
@@ -214,14 +218,20 @@ pub async fn get_l2_events(
             .await
             .map_err(|e| format!("查询 persona 列表失败: {}", e))?;
 
+        let storage = state.app.storage();
+        let event_futures: Vec<_> = all_personas
+            .iter()
+            .map(|p| {
+                let s = storage.clone();
+                let uid = p.uid.clone();
+                async move { s.list_events_by_persona(&uid, 0, limit).await }
+            })
+            .collect();
+        let event_results = join_all(event_futures).await;
+
         let mut all_events = Vec::new();
-        for p in &all_personas {
-            let mut events = state
-                .app
-                .storage()
-                .list_events_by_persona(&p.uid, 0, limit)
-                .await
-                .map_err(|e| format!("查询 L2 事件失败 ({}): {}", p.uid, e))?;
+        for result in event_results {
+            let mut events = result.map_err(|e| format!("查询 L2 事件失败: {}", e))?;
             all_events.append(&mut events);
         }
         // 按创建时间倒序排列，截取 limit 条
@@ -277,7 +287,7 @@ pub async fn get_l3_traits(
             .await
             .map_err(|e| format!("查询 L3 性格标签失败: {}", e))?
     } else {
-        // 获取所有 persona 的性格标签
+        // 获取所有 persona 的性格标签（并发查询，避免串行 N+1）
         let all_personas = state
             .app
             .storage()
@@ -285,14 +295,20 @@ pub async fn get_l3_traits(
             .await
             .map_err(|e| format!("查询 persona 列表失败: {}", e))?;
 
+        let storage = state.app.storage();
+        let trait_futures: Vec<_> = all_personas
+            .iter()
+            .map(|p| {
+                let s = storage.clone();
+                let uid = p.uid.clone();
+                async move { s.list_traits_by_persona(&uid).await }
+            })
+            .collect();
+        let trait_results = join_all(trait_futures).await;
+
         let mut all_traits = Vec::new();
-        for p in &all_personas {
-            let mut t = state
-                .app
-                .storage()
-                .list_traits_by_persona(&p.uid)
-                .await
-                .map_err(|e| format!("查询 L3 性格标签失败 ({}): {}", p.uid, e))?;
+        for result in trait_results {
+            let mut t = result.map_err(|e| format!("查询 L3 性格标签失败: {}", e))?;
             all_traits.append(&mut t);
         }
         all_traits

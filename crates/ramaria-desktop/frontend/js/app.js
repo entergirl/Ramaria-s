@@ -248,7 +248,7 @@
      * 返回: 'dark' | 'light'
      */
     function getCurrentTheme() {
-        return document.documentElement.getAttribute('data-theme') || 'dark';
+        return document.documentElement.getAttribute('data-theme') || 'light';
     }
 
     /**
