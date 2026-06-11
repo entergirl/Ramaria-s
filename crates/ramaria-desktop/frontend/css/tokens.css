@@ -1,0 +1,198 @@
+/* ═══════════════════════════════════════════════════════════
+   css/tokens.css — Ramaria 粉蓝双色设计令牌
+   设计特点:
+   - 完整 OKLCH 色彩空间粉/蓝/灰三色阶（8+8+10 级）
+   - 语义映射层：禁止直接使用色阶变量，始终通过语义变量引用
+   - 暗色主题默认（data-theme="dark"），浅色备选（data-theme="light"）
+   - 4px 基准 8pt 网格间距系统（space-1 ~ space-16）
+   - 五级圆角（sm→full）+ 五级阴影（含品牌粉蓝色影）
+   - 三段缓动曲线 + 三档时长 + 字体三元组
+   - 严格对齐 ui-design-reference.html §1-4
+   ═══════════════════════════════════════════════════════════ */
+
+/* ═══════════════════════════════════════════════
+   1. 原始色阶（OKLCH 色彩空间）
+   ═══════════════════════════════════════════════ */
+
+:root {
+  /* ── 粉色阶（品牌主色）── */
+  --pink-50:  oklch(0.97 0.008 25);   /* #fdf7f6 · 极浅粉底 */
+  --pink-100: oklch(0.90 0.045 25);   /* #ffd1cc · 主背景 / 卡片底色 */
+  --pink-200: oklch(0.83 0.075 20);   /* #fbbfb6 · 边框 / 选中态 */
+  --pink-300: oklch(0.74 0.12 15);    /* #f09a94 · 装饰 / 状态指示 */
+  --pink-400: oklch(0.63 0.17 12);    /* #dc7378 · 悬停态 */
+  --pink-500: oklch(0.53 0.19 10);    /* #c44d5a · 核心操作 ★ */
+  --pink-600: oklch(0.42 0.14 10);    /* #9a3442 · 按压态 / 深色强调 */
+  --pink-700: oklch(0.30 0.10 10);    /* #6b1e2a · 极深（慎用） */
+
+  /* ── 蓝色阶（辅助主色）── */
+  --blue-50:  oklch(0.97 0.02 225);   /* #f0f7fd · 极浅蓝底 */
+  --blue-100: oklch(0.85 0.08 225);   /* #9addff · 第二主色 / 信息底色 */
+  --blue-200: oklch(0.77 0.10 225);   /* #7ec8f2 · 蓝色边框 */
+  --blue-300: oklch(0.67 0.14 225);   /* #54a8e0 · 状态指示 */
+  --blue-400: oklch(0.57 0.17 225);   /* #2e88cc · 悬停态 */
+  --blue-500: oklch(0.48 0.17 225);   /* #1a6fb5 · 辅助操作 ★ */
+  --blue-600: oklch(0.38 0.13 228);   /* #0e4f8a · 按压态 */
+  --blue-700: oklch(0.26 0.08 228);   /* #0a2e52 · 极深（慎用） */
+
+  /* ── 中性灰阶（文字与结构）── */
+  --gray-0:   oklch(1 0 0);           /* #ffffff · 纯白 */
+  --gray-50:  oklch(0.97 0 0);        /* #f7f7f7 · 极浅灰底 */
+  --gray-100: oklch(0.92 0 0);        /* #eaeaea · 浅灰背景 */
+  --gray-200: oklch(0.85 0 0);        /* #d6d6d6 · 禁用态 / 边框浅 */
+  --gray-300: oklch(0.72 0 0);        /* #b3b3b3 · 默认边框 */
+  --gray-400: oklch(0.58 0 0);        /* #8c8c8c · 占位文字 / 三级文字 */
+  --gray-500: oklch(0.45 0 0);        /* #6b6b6b · 次要文字 */
+  --gray-600: oklch(0.32 0 0);        /* #494949 · 主文字（浅底） */
+  --gray-700: oklch(0.20 0 0);        /* #2d2d2d · 标题色 / 主文字（暗底）*/
+  --gray-800: oklch(0.12 0 0);        /* #1a1a1a · 最深强调 */
+
+  /* ═══════════════════════════════════════════════
+     2. 语义映射（始终通过此层引用，切勿直引原始色阶）
+     ═══════════════════════════════════════════════ */
+
+  /* ── 主色与辅助色 ── */
+  --color-primary:        var(--pink-500);
+  --color-primary-hover:  var(--pink-400);
+  --color-primary-active: var(--pink-600);
+  --color-secondary:        var(--blue-500);
+  --color-secondary-hover:  var(--blue-400);
+  --color-secondary-active: var(--blue-600);
+
+  /* ═══════════════════════════════════════════════
+     3. 字体
+     ═══════════════════════════════════════════════ */
+
+  --font-display: 'DM Serif Display', Georgia, 'Times New Roman', serif;
+  --font-body:    'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI',
+                  'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --font-mono:    'JetBrains Mono', 'Fira Code', 'Cascadia Code',
+                  'Consolas', monospace;
+
+  /* ═══════════════════════════════════════════════
+     4. 间距（4px 基准 · 8pt 网格）
+     ═══════════════════════════════════════════════ */
+
+  --space-1:  4px;
+  --space-2:  8px;
+  --space-3:  12px;
+  --space-4:  16px;
+  --space-5:  20px;
+  --space-6:  24px;
+  --space-8:  32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+  --space-24: 96px;
+
+  /* ═══════════════════════════════════════════════
+     5. 圆角
+     ═══════════════════════════════════════════════ */
+
+  --radius-sm:   6px;     /* 标签 / 徽章 / 小按钮 */
+  --radius-md:   12px;    /* 输入框 / Alert / Toast */
+  --radius-lg:   20px;    /* 卡片 / 面板 / Modal */
+  --radius-xl:   32px;    /* 大型容器 / Hero */
+  --radius-full: 9999px;  /* 按钮 / 头像 / Chip */
+
+  /* ═══════════════════════════════════════════════
+     6. 阴影
+     ═══════════════════════════════════════════════ */
+
+  --shadow-sm:   0 1px 3px  oklch(0 0 0 / 0.06);
+  --shadow-md:   0 4px 12px oklch(0 0 0 / 0.08);
+  --shadow-lg:   0 8px 32px oklch(0 0 0 / 0.10);
+  --shadow-pink: 0 8px 24px oklch(0.53 0.19 10 / 0.18);
+  --shadow-blue: 0 8px 24px oklch(0.48 0.17 225 / 0.18);
+
+  /* ═══════════════════════════════════════════════
+     7. 动效变量
+     ═══════════════════════════════════════════════ */
+
+  --ease-out:    cubic-bezier(0.0, 0.0, 0.2, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --dur-fast:    120ms;   /* 微交互：颜色过渡 */
+  --dur-normal:  220ms;   /* 按钮悬停 / 面板展开 */
+  --dur-slow:    380ms;   /* 视图切换 / 消息入场 */
+}
+
+/* ═══════════════════════════════════════════════════════════
+   8. 浅色主题（默认）
+   ═══════════════════════════════════════════════════════════ */
+
+:root,
+[data-theme="light"] {
+  /* ── 背景层级 ── */
+  --bg-page:        var(--pink-50);        /* 温暖粉底 */
+  --bg-card:        var(--gray-0);         /* 纯白卡片 */
+  --bg-card-pink:   var(--pink-100);       /* 粉色卡片 */
+  --bg-card-blue:   var(--blue-50);        /* 蓝色卡片 */
+  --bg-subtle:      var(--gray-50);        /* 次级灰底 */
+  --bg-glass:       oklch(1 0 0 / 0.75);  /* 白色毛玻璃 */
+
+  /* ── 文字层级 ── */
+  --text-primary:   var(--gray-700);       /* 深色主文字 */
+  --text-secondary: var(--gray-500);       /* 中灰次要 */
+  --text-tertiary:  var(--gray-400);       /* 浅灰三级 */
+  --text-inverse:   var(--gray-0);         /* 白字（深底） */
+
+  /* ── 边框层级 ── */
+  --border-default: var(--gray-200);       /* 浅灰边框 */
+  --border-light:   var(--gray-100);       /* 极浅分隔 */
+  --border-pink:    var(--pink-200);       /* 粉色边框 */
+  --border-blue:    var(--blue-200);       /* 蓝色边框 */
+
+  /* ── 滚动条（WebKit）── */
+  --scrollbar-thumb: var(--gray-300);
+  --scrollbar-track: var(--gray-50);
+
+  /* ── 选中文字 ── */
+  --selection-bg: var(--pink-200);
+  --selection-text: var(--gray-700);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   9. 暗色主题（备选）
+   ═══════════════════════════════════════════════════════════ */
+
+[data-theme="dark"] {
+  /* ── 背景层级 ── */
+  --bg-page:        oklch(0.14 0.008 25);   /* 最深页面底色 */
+  --bg-card:        oklch(0.18 0.006 25);   /* 卡片 / 面板 */
+  --bg-card-pink:   oklch(0.20 0.015 25);   /* 粉色氛围卡片 */
+  --bg-card-blue:   oklch(0.18 0.015 225);  /* 蓝色氛围卡片 */
+  --bg-subtle:      oklch(0.16 0.004 25);   /* 次级背景（hover / stripe） */
+  --bg-glass:       oklch(0.18 0.006 25 / 0.75); /* 毛玻璃面板 */
+
+  /* ── 文字层级 ── */
+  --text-primary:   oklch(0.94 0 0);        /* 主文字 */
+  --text-secondary: oklch(0.70 0 0);        /* 次要文字 */
+  --text-tertiary:  oklch(0.52 0 0);        /* 三级文字 / 占位 */
+  --text-inverse:   oklch(0.12 0 0);        /* 反色文字（浅底深字） */
+
+  /* ── 边框层级 ── */
+  --border-default: oklch(0.28 0.005 25);   /* 默认边框 */
+  --border-light:   oklch(0.22 0.005 25);   /* 浅分隔线 */
+  --border-pink:    oklch(0.35 0.04 15);    /* 粉色强调边框 */
+  --border-blue:    oklch(0.32 0.04 225);   /* 蓝色强调边框 */
+
+  /* ── 滚动条（WebKit）── */
+  --scrollbar-thumb: oklch(0.28 0.005 25);
+  --scrollbar-track: oklch(0.16 0.004 25);
+
+  /* ── 选中文字 ── */
+  --selection-bg: oklch(0.53 0.19 10 / 0.35);
+  --selection-text: oklch(0.94 0 0);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   10. 主题过渡（切换不闪烁）
+   ═══════════════════════════════════════════════════════════ */
+
+html {
+  /* 色彩属性平滑过渡（不支持 OKLCH 的浏览器优雅降级为无过渡） */
+  transition: color var(--dur-normal) var(--ease-out),
+              background-color var(--dur-normal) var(--ease-out),
+              border-color var(--dur-normal) var(--ease-out);
+}

@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+        http-equiv="Content-Security-Policy"
+        content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: https://api.deepseek.com https://api.openai.com; img-src 'self' data:; font-src 'self'"
+    />
+    <title>Ramaria - 个人AI陪伴记忆系统</title>
+
+    <!-- ── 字体声明 ── -->
+    <link rel="stylesheet" href="fonts/fonts.css" />
+
+    <!-- ── 设计系统 CSS ── -->
+    <link rel="stylesheet" href="css/tokens.css" />
+    <link rel="stylesheet" href="css/reset.css" />
+    <link rel="stylesheet" href="css/layout.css" />
+    <link rel="stylesheet" href="css/utilities.css" />
+
+    <!--
+      Phase 5 后续批次将加载：
+      - css/components.css   (Batch 4)
+      - css/animations.css   (Batch 6)
+      - css/views/*.css      (Batch 5)
+    -->
+</head>
+<body>
+
+    <!-- ═══════════════════════════════════════════════════════
+         SPA 根容器
+         所有视图均在此容器内切换渲染
+         ═══════════════════════════════════════════════════════ -->
+    <div id="app">
+
+        <!-- ── Sidebar（毛玻璃导航栏）── -->
+        <nav class="sidebar" id="sidebar" role="navigation" aria-label="主导航">
+            <!-- 品牌区 -->
+            <div class="sidebar-brand">
+                <div class="sidebar-brand-mark">
+                    <div class="sidebar-brand-dots">
+                        <div class="sidebar-brand-dot"></div>
+                        <div class="sidebar-brand-dot"></div>
+                    </div>
+                    <span class="sidebar-brand-name">Ramaria</span>
+                </div>
+                <div class="sidebar-brand-version">v0.1.0</div>
+            </div>
+
+            <!-- 导航链接 -->
+            <div class="sidebar-section">
+                <div class="sidebar-section-label">功能</div>
+                <ul class="sidebar-nav" role="menubar">
+                    <li role="none">
+                        <button class="sidebar-nav-link active"
+                                data-view="chat"
+                                role="menuitem"
+                                aria-current="page">
+                            <span class="sidebar-nav-icon" aria-hidden="true">💬</span>
+                            <span>对话</span>
+                        </button>
+                    </li>
+                    <li role="none">
+                        <button class="sidebar-nav-link"
+                                data-view="memory"
+                                role="menuitem">
+                            <span class="sidebar-nav-icon" aria-hidden="true">🧠</span>
+                            <span>记忆</span>
+                        </button>
+                    </li>
+                    <li role="none">
+                        <button class="sidebar-nav-link"
+                                data-view="settings"
+                                role="menuitem">
+                            <span class="sidebar-nav-icon" aria-hidden="true">⚙️</span>
+                            <span>设置</span>
+                        </button>
+                    </li>
+                </ul>
+            </div>
+
+            <!-- 底部 -->
+            <div class="sidebar-footer">
+                <button class="sidebar-nav-link"
+                        id="btn-toggle-theme"
+                        title="切换深色/浅色主题"
+                        aria-label="切换主题">
+                    <span class="sidebar-nav-icon" aria-hidden="true">☀️</span>
+                    <span>主题</span>
+                </button>
+            </div>
+        </nav>
+
+        <!-- ── 内容主区域 ── -->
+        <main class="content-area" id="content-area">
+
+            <!-- 内容区头部 -->
+            <header class="content-header" id="content-header">
+                <h2 class="content-header-title" id="content-title">对话</h2>
+                <div class="content-header-actions" id="content-actions">
+                    <!-- 视图特定操作按钮（由各视图注入） -->
+                </div>
+            </header>
+
+            <!-- Degraded 警告条（默认隐藏） -->
+            <div class="degraded-banner hidden" id="degraded-banner" role="alert">
+                <span class="degraded-banner-icon" aria-hidden="true">⚠️</span>
+                <span id="degraded-banner-text">部分功能不可用</span>
+            </div>
+
+            <!-- 视图容器（在此内部切换视图） -->
+            <div class="view-container" id="view-container">
+
+                <!--
+                  所有视图默认隐藏，通过 .active 类切换
+                  未来 Batch 5 将实现：
+                  - #view-setup     (全屏首次配置向导)
+                  - #view-progress  (全屏进度页)
+                  - #view-chat      (对话页)
+                  - #view-memory    (记忆查看页)
+                  - #view-settings  (设置页)
+                  - #view-error     (全屏错误页)
+                -->
+
+                <!-- 对话视图 -->
+                <div class="view" id="view-chat" data-view="chat">
+                    <div class="flex items-center justify-center" style="height:100%;min-height:300px">
+                        <div class="text-center text-tertiary">
+                            <div style="font-size:48px;margin-bottom:var(--space-4)">💬</div>
+                            <div class="text-lg font-medium mb-2">对话界面</div>
+                            <div class="text-sm">将在 Batch 5 中实现</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 记忆视图 -->
+                <div class="view" id="view-memory" data-view="memory">
+                    <div class="flex items-center justify-center" style="height:100%;min-height:300px">
+                        <div class="text-center text-tertiary">
+                            <div style="font-size:48px;margin-bottom:var(--space-4)">🧠</div>
+                            <div class="text-lg font-medium mb-2">记忆查看</div>
+                            <div class="text-sm">将在 Batch 5 中实现</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 设置视图 -->
+                <div class="view" id="view-settings" data-view="settings">
+                    <div class="flex items-center justify-center" style="height:100%;min-height:300px">
+                        <div class="text-center text-tertiary">
+                            <div style="font-size:48px;margin-bottom:var(--space-4)">⚙️</div>
+                            <div class="text-lg font-medium mb-2">设置</div>
+                            <div class="text-sm">将在 Batch 5 中实现</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 首次配置全屏视图 -->
+                <div class="view view--fullscreen" id="view-setup" data-view="setup">
+                    <div class="text-center text-tertiary">
+                        <div style="font-size:64px;margin-bottom:var(--space-6)">🍄</div>
+                        <div class="text-2xl font-display text-primary mb-3">欢迎使用 Ramaria</div>
+                        <div class="text-lg mb-2">首次配置向导</div>
+                        <div class="text-sm">将在 Batch 5 中实现</div>
+                    </div>
+                </div>
+
+                <!-- 进度页全屏视图 -->
+                <div class="view view--fullscreen" id="view-progress" data-view="progress">
+                    <div class="text-center text-tertiary">
+                        <div id="progress-spinner" style="margin-bottom:var(--space-6)">
+                            <!-- 后续替换为动画 spinner -->
+                            <div style="font-size:48px">⏳</div>
+                        </div>
+                        <div class="text-xl font-medium mb-2" id="progress-title">正在处理...</div>
+                        <div class="text-sm" id="progress-desc">请稍候</div>
+                    </div>
+                </div>
+
+                <!-- 错误全屏视图 -->
+                <div class="view view--fullscreen" id="view-error" data-view="error">
+                    <div class="text-center" style="max-width:400px;padding:var(--space-8)">
+                        <div style="font-size:64px;margin-bottom:var(--space-6)">❌</div>
+                        <div class="text-xl font-semibold text-pink mb-3" id="error-title">严重错误</div>
+                        <div class="text-base text-secondary" id="error-detail">应用遇到不可恢复的错误，请查看日志后重启。</div>
+                    </div>
+                </div>
+
+            </div><!-- /view-container -->
+
+            <!-- 底部状态栏 -->
+            <div class="status-bar" id="status-bar">
+                <div class="status-bar-item">
+                    <div class="status-bar-dot ready" id="status-indicator-dot"></div>
+                    <span id="status-indicator-text">就绪</span>
+                </div>
+                <div class="status-bar-item">
+                    <span id="status-session-info"></span>
+                </div>
+            </div>
+
+        </main><!-- /content-area -->
+
+    </div><!-- /#app -->
+
+    <!-- ═══════════════════════════════════════════════════════
+         JavaScript 模块加载
+         ═══════════════════════════════════════════════════════ -->
+
+    <!-- Tauri IPC 桥接层（Batch 1 产出，必须最先加载） -->
+    <script src="js/tauri-bridge.js"></script>
+
+    <!-- 应用入口（Batch 2 交付） -->
+    <script src="js/app.js"></script>
+
+    <!--
+      Phase 5 后续批次将加载：
+      - js/store.js         (Batch 3)
+      - js/api.js           (Batch 3)
+      - js/router.js        (Batch 3)
+      - js/components/*.js  (Batch 4)
+      - js/utils/*.js       (Batch 4)
+      - js/views/*.js       (Batch 5)
+    -->
+
+</body>
+</html>

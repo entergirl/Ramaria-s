@@ -1,0 +1,93 @@
+/* ═══════════════════════════════════════════════════════════
+   fonts.css — Ramaria 字体声明（构建期自动下载 .ttf）
+   设计特点:
+   - 字体文件由 build.rs 在 cargo build 时自动从 Google Fonts /
+     JetBrains Mono 官方仓库下载到本地 fonts/ 目录
+   - 下载使用 TTF 格式（所有现代浏览器和 WebView2 均支持）
+   - 下载失败不阻断构建，系统字体回退自动生效
+   - @font-face 使用 local() 优先查找本地已安装字体
+   - font-display: swap 确保文字立即可见（避免 FOIT）
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── DM Serif Display ── */
+@font-face {
+  font-family: 'DM Serif Display';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: local('DM Serif Display'),
+       local('DMSerifDisplay-Regular'),
+       url('./dm-serif-display.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'DM Serif Display';
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: local('DM Serif Display Italic'),
+       local('DMSerifDisplay-Italic'),
+       url('./dm-serif-display-italic.ttf') format('truetype');
+}
+
+/* ── DM Sans ── */
+@font-face {
+  font-family: 'DM Sans';
+  font-style: normal;
+  font-weight: 300;
+  font-display: swap;
+  src: local('DM Sans Light'),
+       local('DMSans-Light'),
+       url('./dm-sans-300.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'DM Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: local('DM Sans'),
+       local('DMSans-Regular'),
+       url('./dm-sans-400.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'DM Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: local('DM Sans Medium'),
+       local('DMSans-Medium'),
+       url('./dm-sans-500.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'DM Sans';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: local('DM Sans SemiBold'),
+       local('DMSans-SemiBold'),
+       url('./dm-sans-600.ttf') format('truetype');
+}
+
+/* ── JetBrains Mono ── */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: local('JetBrains Mono'),
+       local('JetBrainsMono-Regular'),
+       url('./jetbrains-mono-400.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: local('JetBrains Mono Medium'),
+       local('JetBrainsMono-Medium'),
+       url('./jetbrains-mono-500.ttf') format('truetype');
+}

@@ -1,0 +1,200 @@
+/* ═══════════════════════════════════════════════════════════
+   css/reset.css — Ramaria 全局重置 + 有机渐变背景
+   设计特点:
+   - 统一 box-sizing: border-box（全元素覆盖）
+   - body 相对定位承载有机渐变 ::before 光晕层
+   - 三团径向渐变：左上粉色 + 右下蓝色 + 中间暖光过渡
+   - bgBreathe 呼吸动画（20s 周期，极低频不引人注意）
+   - 自定义细滚动条（暗/亮主题自适应，WebKit）
+   - 文字选中粉蓝色调
+   - 聚焦环（focus-visible）使用品牌粉色，无障碍友好
+   - prefers-reduced-motion 支持
+   ═══════════════════════════════════════════════════════════ */
+
+/* =========================================================
+   1. 盒模型重置
+   ========================================================= */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+/* =========================================================
+   2. HTML 根元素
+   ========================================================= */
+
+html {
+  -webkit-text-size-adjust: 100%;
+  -moz-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  scroll-behavior: smooth;
+}
+
+/* =========================================================
+   3. Body 基础样式 + 有机渐变背景
+   ========================================================= */
+
+body {
+  font-family: var(--font-body);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.65;
+  color: var(--text-primary);
+  background-color: var(--bg-page);
+  min-height: 100vh;
+  overflow: hidden;        /* Tauri 窗口不应出现双滚动条 */
+  position: relative;
+}
+
+/*
+ * 有机渐变光晕层
+ * 三团径向渐变模拟「暗室中三盏柔光灯」效果
+ * 覆盖整个视口，固定在背后不随内容滚动
+ * 20s 极慢呼吸动画，营造「活着的界面」感
+ */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;    /* 光晕层不阻挡任何交互 */
+
+  background:
+    /* 左上：粉色温暖光晕 */
+    radial-gradient(
+      ellipse 600px 400px at 10% 20%,
+      oklch(0.53 0.19 10 / 0.06) 0%,
+      transparent 70%
+    ),
+    /* 右下：蓝色冷静光晕 */
+    radial-gradient(
+      ellipse 500px 500px at 85% 75%,
+      oklch(0.48 0.17 225 / 0.05) 0%,
+      transparent 70%
+    ),
+    /* 中间：暖光过渡 */
+    radial-gradient(
+      circle 300px at 50% 50%,
+      oklch(0.63 0.17 12 / 0.03) 0%,
+      transparent 100%
+    );
+
+  /* 20s 极慢呼吸：几乎不被察觉，但让界面有"活着"的感觉 */
+  animation: bgBreathe 20s ease-in-out infinite alternate;
+}
+
+@keyframes bgBreathe {
+  0%   { opacity: 0.7; }
+  100% { opacity: 1.0; }
+}
+
+/* =========================================================
+   4. 自定义滚动条（WebKit 内核）
+   ========================================================= */
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: var(--radius-full);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-tertiary);
+}
+
+/* =========================================================
+   5. 文字选中
+   ========================================================= */
+
+::selection {
+  background: var(--selection-bg);
+  color: var(--selection-text);
+}
+
+/* =========================================================
+   6. 聚焦环（无障碍）
+   ========================================================= */
+
+:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* 对按钮类使用更柔和的聚焦环 */
+button:focus-visible,
+.btn:focus-visible,
+[role="button"]:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+/* =========================================================
+   7. 基础元素归一化
+   ========================================================= */
+
+img, svg, video, canvas {
+  display: block;
+  max-width: 100%;
+}
+
+a {
+  color: var(--color-secondary);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--color-secondary-hover);
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+input, textarea, select {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+}
+
+/* 移除 input 的默认 search 样式 */
+input[type="search"]::-webkit-search-decoration,
+input[type="search"]::-webkit-search-cancel-button,
+input[type="search"]::-webkit-search-results-button,
+input[type="search"]::-webkit-search-results-decoration {
+  -webkit-appearance: none;
+}
+
+/* =========================================================
+   8. 减弱动效（无障碍）
+   ========================================================= */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  html {
+    scroll-behavior: auto;
+  }
+}

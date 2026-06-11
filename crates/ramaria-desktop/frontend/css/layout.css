@@ -1,0 +1,401 @@
+/* ═══════════════════════════════════════════════════════════
+   css/layout.css — Ramaria Sidebar + ContentArea 布局系统
+   设计特点:
+   - Flexbox 水平布局：Sidebar（固定 200px） + ContentArea（flex-1）
+   - Sidebar 毛玻璃效果（backdrop-filter: blur + saturate）
+   - 小屏（≤640px）Sidebar 收窄为 56px 仅图标
+   - ContentArea 分 Header + View Content + StatusBar 三层
+   - 视图容器（.view）通过 display 切换实现路由
+   - 响应式断点：sm(640) / md(900) / lg(1280)
+   - 全屏视图（SetupWizard / ProgressPage / ErrorPage）独立 .view--fullscreen
+   ═══════════════════════════════════════════════════════════ */
+
+/* =========================================================
+   1. 应用根容器
+   ========================================================= */
+
+#app {
+  position: relative;
+  z-index: 1;                    /* 在 body::before 渐变层之上 */
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+}
+
+/* =========================================================
+   2. Sidebar（毛玻璃导航栏）
+   ========================================================= */
+
+.sidebar {
+  width: 200px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  z-index: 10;
+
+  /* 毛玻璃效果 */
+  background: var(--bg-glass);
+  backdrop-filter: blur(20px) saturate(1.2);
+  -webkit-backdrop-filter: blur(20px) saturate(1.2);
+
+  /* 右侧精细分割线 */
+  border-right: 1px solid oklch(1 0 0 / 0.06);
+}
+
+/* Sidebar 品牌区 */
+.sidebar-brand {
+  padding: var(--space-6) var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--border-light);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.sidebar-brand-mark {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.sidebar-brand-dots {
+  display: flex;
+  gap: 4px;
+}
+
+.sidebar-brand-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: var(--radius-full);
+}
+
+.sidebar-brand-dot:first-child {
+  background: var(--pink-300);
+}
+
+.sidebar-brand-dot:last-child {
+  background: var(--blue-300);
+}
+
+.sidebar-brand-name {
+  font-family: var(--font-display);
+  font-size: 15px;
+  color: var(--text-primary);
+  line-height: 1;
+}
+
+.sidebar-brand-version {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  letter-spacing: 0.05em;
+  padding-left: calc(10px + 4px + var(--space-2));
+  /* 对齐 logo dots 宽度 */
+}
+
+/* Sidebar 导航分区 */
+.sidebar-section {
+  padding: var(--space-4) var(--space-3) var(--space-2);
+}
+
+.sidebar-section-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin-bottom: var(--space-2);
+  padding-left: var(--space-2);
+}
+
+/* Sidebar 导航链接 */
+.sidebar-nav {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sidebar-nav-link {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  font-size: 13.5px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out),
+              color var(--dur-fast) var(--ease-out);
+  border: none;
+  background: none;
+  width: 100%;
+  text-align: left;
+  font-family: var(--font-body);
+  line-height: 1.4;
+}
+
+.sidebar-nav-link:hover {
+  background: oklch(0.53 0.19 10 / 0.08);
+  color: var(--color-primary);
+}
+
+.sidebar-nav-link.active {
+  background: oklch(0.53 0.19 10 / 0.12);
+  color: var(--color-primary);
+  font-weight: 500;
+}
+
+/* Sidebar 导航图标 */
+.sidebar-nav-icon {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  line-height: 1;
+  opacity: 0.8;
+}
+
+.sidebar-nav-link.active .sidebar-nav-icon {
+  opacity: 1;
+}
+
+/* Sidebar 底部区 */
+.sidebar-footer {
+  margin-top: auto;
+  padding: var(--space-3);
+  border-top: 1px solid var(--border-light);
+}
+
+/* =========================================================
+   3. 内容主区域
+   ========================================================= */
+
+.content-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;              /* 防止 flex 子元素溢出 */
+  overflow: hidden;
+}
+
+/* 内容区头部 */
+.content-header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-4) var(--space-6);
+  border-bottom: 1px solid var(--border-light);
+  min-height: 52px;
+  background: var(--bg-glass);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  z-index: 5;
+}
+
+.content-header-title {
+  font-family: var(--font-display);
+  font-size: 18px;
+  color: var(--text-primary);
+  line-height: 1.2;
+}
+
+.content-header-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* 视图容器（可滚动内容区） */
+.view-container {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  position: relative;
+}
+
+/* 视图切换 */
+.view {
+  display: none;             /* 默认隐藏所有视图 */
+  min-height: 100%;
+}
+
+.view.active {
+  display: flex;
+  flex-direction: column;
+}
+
+/* 全屏视图（无 Sidebar 场景） */
+.view--fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: var(--bg-page);
+}
+
+.view--fullscreen.active {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 内容区底部状态栏 */
+.status-bar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-1) var(--space-4);
+  border-top: 1px solid var(--border-light);
+  font-size: 11px;
+  color: var(--text-tertiary);
+  background: var(--bg-subtle);
+  min-height: 28px;
+}
+
+.status-bar-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.status-bar-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+}
+
+.status-bar-dot.ready {
+  background: #4caf78;
+}
+
+.status-bar-dot.degraded {
+  background: #f0d888;
+}
+
+.status-bar-dot.error {
+  background: var(--pink-500);
+}
+
+/* Degraded 状态警告条 */
+.degraded-banner {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  background: oklch(0.15 0.02 80);
+  border-bottom: 1px solid oklch(0.25 0.03 80);
+  color: var(--text-primary);
+  font-size: 12.5px;
+}
+
+.degraded-banner-icon {
+  font-size: 14px;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   4. 响应式布局
+   ═══════════════════════════════════════════════════════════ */
+
+/*
+ * 小屏断点 ≤640px（手机横屏 / 极窄窗口）
+ * Sidebar 收窄为 56px，仅显示图标
+ * 导航文字隐藏，品牌名称隐藏
+ */
+@media (max-width: 640px) {
+  .sidebar {
+    width: 56px;
+    padding: 0;
+  }
+
+  .sidebar-brand {
+    padding: var(--space-3) var(--space-2);
+    align-items: center;
+  }
+
+  .sidebar-brand-name,
+  .sidebar-brand-version,
+  .sidebar-section-label,
+  .sidebar-nav-link span:not(.sidebar-nav-icon),
+  .sidebar-footer {
+    display: none;
+  }
+
+  .sidebar-nav-link {
+    justify-content: center;
+    padding: var(--space-2);
+  }
+
+  .sidebar-section {
+    padding: var(--space-2) var(--space-1);
+  }
+
+  .content-header {
+    padding: var(--space-3) var(--space-4);
+  }
+
+  .content-header-title {
+    font-size: 16px;
+  }
+
+  .status-bar {
+    font-size: 10px;
+    padding: var(--space-1) var(--space-3);
+  }
+}
+
+/*
+ * 中屏断点 641–900px
+ * Sidebar 保持完整，内容区适度收窄
+ */
+@media (min-width: 641px) and (max-width: 900px) {
+  .sidebar {
+    width: 180px;
+  }
+
+  .content-header {
+    padding: var(--space-4) var(--space-5);
+  }
+}
+
+/*
+ * 宽屏断点 >1280px
+ * 内容区最大宽度限制，居中更舒适
+ */
+@media (min-width: 1281px) {
+  .content-area {
+    max-width: 960px;
+    margin: 0 auto;
+    border-left: 1px solid var(--border-light);
+    border-right: 1px solid var(--border-light);
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   5. 隐藏 Sidebar（全屏视图场景）
+   ═══════════════════════════════════════════════════════════ */
+
+#app.has-fullscreen-view .sidebar {
+  display: none;
+}
+
+#app.has-fullscreen-view .content-area {
+  max-width: none;
+  margin: 0;
+  border: none;
+}
+
+/* 全屏视图时显示右上角最小化标识 */
+#app.has-fullscreen-view .content-header {
+  display: none;
+}
+
+#app.has-fullscreen-view .status-bar {
+  display: none;
+}
