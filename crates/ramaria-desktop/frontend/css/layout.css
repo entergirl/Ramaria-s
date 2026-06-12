@@ -210,23 +210,26 @@
   gap: var(--space-2);
 }
 
-/* 视图容器（可滚动内容区） */
+/* 视图容器（flex 列布局，约束子视图高度） */
 .view-container {
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
   position: relative;
+  display: flex;
+  flex-direction: column;
 }
 
 /* 视图切换 */
 .view {
-  display: none;             /* 默认隐藏所有视图 */
-  min-height: 100%;
+  display: none;             /* 默认隐藏所有视图，不参与 flex 布局 */
 }
 
 .view.active {
   display: flex;
   flex-direction: column;
+  flex: 1;
+  min-height: 0;             /* 允许 flex 子元素收缩，防止溢出 */
 }
 
 /* 全屏视图（无 Sidebar 场景） */

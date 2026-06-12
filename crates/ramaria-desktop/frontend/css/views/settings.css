@@ -1,0 +1,291 @@
+/* ═══════════════════════════════════════════════════════════
+   css/views/settings.css — Ramaria 设置页样式
+   设计特点:
+   - 纵向滚动单页布局，按功能分组（后端配置 / 隐私 / 数据 / 关于）
+   - 每个设置区块使用 glass-panel 卡片 + 区块标题
+   - 表单输入框与 setup.css 共享风格（pink focus ring）
+   - Toggle 开关复用 components.css 中的 .toggle 类
+   - 危险操作（重建索引/清除数据）使用 Alert 警告框包裹
+   - 版本号使用等宽字体灰底标签
+   ═══════════════════════════════════════════════════════════ */
+
+/* =========================================================
+   1. 设置视图整体布局
+   ========================================================= */
+
+#view-settings {
+  display: none;
+  /* flex-direction / min-height 由 .view.active 统一提供 */
+}
+
+#view-settings.active {
+  display: flex;
+}
+
+.settings-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-6) var(--space-6);
+}
+
+/* =========================================================
+   2. 设置区块
+   ========================================================= */
+
+.settings-section {
+  margin-bottom: var(--space-8);
+}
+
+.settings-section-title {
+  font-family: var(--font-display);
+  font-size: 16px;
+  color: var(--text-primary);
+  margin-bottom: var(--space-3);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--border-light);
+}
+
+.settings-section-desc {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  margin-bottom: var(--space-4);
+  line-height: 1.5;
+}
+
+/* 设置卡片 */
+.settings-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: var(--space-5);
+  margin-bottom: var(--space-3);
+}
+
+/* =========================================================
+   3. 表单项
+   ========================================================= */
+
+.settings-form-group {
+  margin-bottom: var(--space-4);
+}
+
+.settings-form-group:last-child {
+  margin-bottom: 0;
+}
+
+.settings-form-label {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  margin-bottom: var(--space-1);
+}
+
+.settings-form-input {
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 1.5px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-family: var(--font-body);
+  color: var(--text-primary);
+  background: var(--bg-card);
+  outline: none;
+  transition: border-color var(--dur-fast) var(--ease-out),
+              box-shadow var(--dur-fast) var(--ease-out);
+}
+
+.settings-form-input:focus {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px oklch(0.53 0.19 10 / 0.08);
+}
+
+.settings-form-input::placeholder {
+  color: var(--text-tertiary);
+}
+
+.settings-form-input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.settings-form-select {
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 1.5px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-family: var(--font-body);
+  color: var(--text-primary);
+  background: var(--bg-card);
+  outline: none;
+  cursor: pointer;
+}
+
+.settings-form-select:focus {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px oklch(0.53 0.19 10 / 0.08);
+}
+
+.settings-form-hint {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-top: var(--space-1);
+  line-height: 1.4;
+}
+
+/* =========================================================
+   4. 设置行（key-value 展示）
+   ========================================================= */
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.settings-row:last-child {
+  border-bottom: none;
+}
+
+.settings-row-label {
+  font-size: 13px;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.settings-row-value {
+  font-size: 13px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+}
+
+.settings-row-meta {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+/* =========================================================
+   5. 操作按钮
+   ========================================================= */
+
+.settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+}
+
+.settings-actions .btn {
+  min-width: 120px;
+}
+
+/* 危险操作警告框 */
+.settings-danger-zone {
+  border: 1.5px solid var(--pink-300);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  margin-top: var(--space-3);
+  background: oklch(0.53 0.19 10 / 0.03);
+}
+
+.settings-danger-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--pink-500);
+  margin-bottom: var(--space-2);
+}
+
+.settings-danger-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin-bottom: var(--space-3);
+}
+
+/* =========================================================
+   6. 关于区
+   ========================================================= */
+
+.settings-about {
+  text-align: center;
+  padding: var(--space-6) 0;
+  color: var(--text-tertiary);
+  font-size: 13px;
+}
+
+.settings-about-logo {
+  font-size: 36px;
+  margin-bottom: var(--space-3);
+  opacity: 0.7;
+}
+
+.settings-about-name {
+  font-family: var(--font-display);
+  font-size: 18px;
+  color: var(--color-primary);
+  margin-bottom: var(--space-1);
+}
+
+.settings-about-version {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-tertiary);
+  background: var(--bg-subtle);
+  padding: 2px 10px;
+  border-radius: var(--radius-full);
+  display: inline-block;
+  margin-bottom: var(--space-4);
+}
+
+.settings-about-links {
+  display: flex;
+  justify-content: center;
+  gap: var(--space-4);
+}
+
+.settings-about-link {
+  font-size: 12px;
+  color: var(--color-secondary);
+  text-decoration: none;
+}
+
+.settings-about-link:hover {
+  text-decoration: underline;
+}
+
+/* =========================================================
+   7. 保存提示
+   ========================================================= */
+
+.settings-save-hint {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-3) 0;
+}
+
+/* =========================================================
+   8. 响应式
+   ========================================================= */
+
+@media (max-width: 640px) {
+  .settings-scroll {
+    padding: var(--space-4) var(--space-4);
+  }
+
+  .settings-card {
+    padding: var(--space-4);
+  }
+
+  .settings-actions {
+    flex-direction: column;
+  }
+
+  .settings-actions .btn {
+    width: 100%;
+  }
+}

@@ -1,0 +1,643 @@
+/* ═══════════════════════════════════════════════════════════
+   css/views/setup.css — Ramaria 配置向导样式
+   设计参考: Python static/setup.html（居中卡片 + 步骤指示器 + 模式切换）
+   设计特点:
+   - 居中白色卡片（max 540px），带阴影，slideUp 入场动画
+   - 步骤指示器：圆点 + 连接线 + 标签在下方（mono 字体）
+   - 模式切换：双按钮（本地部署 / 线上 API），选中态 coral 边框 + 浅粉底
+   - 表单输入：mono 字体、coral 聚焦环，placeholder 灰色
+   - 测试按钮：dot 状态指示 + 测试中脉冲动画
+   - 底部：上一步 ← → 下一步，中间步骤计数
+   - 暗色/浅色双主题全面适配
+   ═══════════════════════════════════════════════════════════ */
+
+/* =========================================================
+   1. 全屏背景与居中布局
+   ========================================================= */
+
+.setup-wizard {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 40px 20px 60px;
+  min-height: 100vh;
+  overflow-y: auto;
+}
+
+/* ── 顶部品牌 ── */
+.setup-top-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 32px;
+}
+
+.setup-top-brand .setup-brand-icon {
+  font-size: 24px;
+  line-height: 1;
+}
+
+.setup-top-brand .setup-brand-name {
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--color-primary);
+  letter-spacing: 0.06em;
+}
+
+/* ── 主卡片 ── */
+.setup-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: 32px 36px;
+  width: 540px;
+  max-width: 94vw;
+  box-shadow: var(--shadow-md);
+}
+
+/* =========================================================
+   2. 步骤指示器（标签在圆圈下方）
+   ========================================================= */
+
+.setup-stepper {
+  display: flex;
+  align-items: flex-start;
+  gap: 0;
+  margin-bottom: 32px;
+}
+
+.setup-step-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  position: relative;
+}
+
+.setup-step-circle {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 2px solid var(--border-default);
+  background: var(--bg-page);
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.3s ease;
+  position: relative;
+  z-index: 1;
+}
+
+.setup-step-circle.active {
+  border-color: var(--color-primary);
+  background: var(--color-primary);
+  color: var(--text-inverse);
+}
+
+.setup-step-circle.done {
+  border-color: #4caf78;
+  background: #4caf78;
+  color: #fff;
+}
+
+.setup-step-label {
+  position: absolute;
+  top: 34px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  pointer-events: none;
+  transition: color 0.3s ease;
+}
+
+.setup-step-item.active .setup-step-label {
+  color: var(--color-primary);
+}
+
+.setup-step-line {
+  width: 40px;
+  height: 2px;
+  background: var(--border-default);
+  margin: 13px 0 0 0;
+  flex-shrink: 0;
+  transition: background 0.3s ease;
+}
+
+.setup-step-line.done {
+  background: #4caf78;
+}
+
+/* =========================================================
+   3. 步骤面板
+   ========================================================= */
+
+.setup-panel {
+  display: none;
+}
+
+.setup-panel.active {
+  display: block;
+}
+
+.setup-panel-title {
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--text-primary);
+  letter-spacing: 0.02em;
+  margin-bottom: 6px;
+  font-family: var(--font-display);
+}
+
+.setup-panel-desc {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  line-height: 1.7;
+  margin-bottom: 24px;
+}
+
+/* =========================================================
+   4. 模式选择器（本地 / 线上）
+   ========================================================= */
+
+.setup-mode-selector {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.setup-mode-option {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 18px 14px 16px;
+  background: var(--bg-subtle);
+  border: 2px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.25s ease;
+  font-family: var(--font-body);
+  color: var(--text-secondary);
+  text-align: center;
+  position: relative;
+}
+
+.setup-mode-option:hover {
+  border-color: var(--border-pink);
+}
+
+.setup-mode-option.active {
+  border-color: var(--color-primary);
+  background: oklch(0.53 0.19 10 / 0.06);
+  color: var(--text-primary);
+  box-shadow: 0 0 0 1px oklch(0.53 0.19 10 / 0.15);
+}
+
+.setup-mode-option.active::after {
+  content: '✓';
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  font-size: 11px;
+  color: var(--color-primary);
+  font-family: var(--font-mono);
+}
+
+.setup-mode-option-icon {
+  font-size: 1.5rem;
+  line-height: 1;
+}
+
+.setup-mode-option-title {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.setup-mode-option-desc {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  line-height: 1.4;
+}
+
+.setup-mode-option.active .setup-mode-option-desc {
+  color: var(--text-secondary);
+}
+
+/* =========================================================
+   5. 表单字段
+   ========================================================= */
+
+.setup-field-group {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.setup-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.setup-field-label {
+  font-size: 12.5px;
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.setup-field-label .setup-required {
+  color: var(--color-primary);
+  font-size: 11px;
+}
+
+.setup-field-label .setup-optional {
+  color: var(--text-tertiary);
+  font-size: 10px;
+  margin-left: 2px;
+}
+
+.setup-field-input {
+  padding: 10px 14px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.setup-field-input:focus {
+  border-color: var(--border-pink);
+  box-shadow: 0 0 0 3px oklch(0.53 0.19 10 / 0.08);
+}
+
+.setup-field-input::placeholder {
+  color: var(--text-tertiary);
+}
+
+.setup-field-input.valid {
+  border-color: #7cad7c;
+}
+
+.setup-field-input.invalid {
+  border-color: var(--pink-500);
+}
+
+.setup-field-hint {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  line-height: 1.6;
+}
+
+.setup-field-status {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  min-height: 1.2em;
+  transition: color 0.2s ease;
+}
+
+.setup-field-status.ok     { color: #4caf78; }
+.setup-field-status.fail   { color: var(--pink-500); }
+.setup-field-status.checking { color: var(--text-tertiary); }
+
+/* ── 服务提示 ── */
+.setup-service-hint {
+  background: oklch(0.53 0.19 10 / 0.04);
+  border: 1px solid var(--border-pink);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  margin-top: 12px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  font-family: var(--font-mono);
+}
+
+.setup-service-hint strong {
+  color: var(--text-primary);
+}
+
+/* ── 隐私提示 ── */
+.setup-privacy-hint {
+  background: oklch(0.53 0.19 10 / 0.04);
+  border: 1px solid var(--border-pink);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  margin-top: 12px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.setup-privacy-hint strong {
+  color: var(--color-primary);
+}
+
+/* =========================================================
+   6. 测试按钮
+   ========================================================= */
+
+.setup-test-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border: 1px solid var(--border-default);
+  border-radius: 20px;
+  background: none;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  margin-top: 6px;
+}
+
+.setup-test-btn:hover {
+  border-color: var(--border-pink);
+  color: var(--color-primary);
+}
+
+.setup-test-btn .setup-test-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+  transition: background 0.2s;
+}
+
+.setup-test-btn.testing .setup-test-dot {
+  background: var(--color-primary);
+  animation: setupPulse 1s infinite;
+}
+
+.setup-test-btn.ok .setup-test-dot   { background: #4caf78; }
+.setup-test-btn.fail .setup-test-dot { background: var(--pink-500); }
+
+@keyframes setupPulse {
+  0%, 100% { opacity: 0.4; }
+  50%      { opacity: 1; }
+}
+
+/* =========================================================
+   7. 完成步骤
+   ========================================================= */
+
+.setup-finish-icon {
+  text-align: center;
+  font-size: 40px;
+  margin-bottom: 16px;
+  color: var(--text-primary);
+}
+
+.setup-finish-title {
+  text-align: center;
+  font-size: 18px;
+  font-weight: 500;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+
+.setup-finish-desc {
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.7;
+  margin-bottom: 24px;
+}
+
+/* 配置摘要 */
+.setup-summary-box {
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  padding: 12px 16px;
+  margin-bottom: 20px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  line-height: 1.9;
+}
+
+.setup-summary-box .setup-summary-dim {
+  color: var(--text-tertiary);
+}
+
+/* 初始化进度 */
+.setup-init-status {
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  padding: 12px 16px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  line-height: 1.9;
+  margin-bottom: 20px;
+  display: none;
+}
+
+.setup-init-status.visible {
+  display: block;
+}
+
+.setup-init-line {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.setup-init-line .setup-mark-ok   { color: #4caf78; }
+.setup-init-line .setup-mark-fail { color: var(--pink-500); }
+.setup-init-line .setup-mark-wait { color: var(--text-tertiary); animation: setupPulse 1s infinite; }
+
+/* =========================================================
+   8. 底部操作区
+   ========================================================= */
+
+.setup-card-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 28px;
+  gap: 12px;
+}
+
+.setup-btn {
+  padding: 10px 24px;
+  border-radius: var(--radius-sm);
+  border: none;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.setup-btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.setup-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.setup-btn-prev {
+  background: none;
+  border: 1px solid var(--border-default);
+  color: var(--text-secondary);
+}
+
+.setup-btn-prev:hover:not(:disabled) {
+  border-color: var(--border-pink);
+  color: var(--color-primary);
+}
+
+.setup-btn-next {
+  background: var(--color-primary);
+  color: var(--text-inverse);
+  box-shadow: 0 2px 10px oklch(0.53 0.19 10 / 0.3);
+}
+
+.setup-btn-next:hover:not(:disabled) {
+  background: var(--color-primary-hover);
+}
+
+.setup-step-indicator {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-tertiary);
+}
+
+/* =========================================================
+   9. 暗色模式适配
+   ========================================================= */
+
+[data-theme="dark"] .setup-mode-option {
+  background: oklch(0.22 0.005 25);
+  border-color: oklch(0.4 0.005 25);
+}
+
+[data-theme="dark"] .setup-mode-option:hover {
+  border-color: oklch(0.35 0.04 15);
+}
+
+[data-theme="dark"] .setup-mode-option.active {
+  border-color: var(--color-primary);
+  background: oklch(0.53 0.19 10 / 0.12);
+  box-shadow: 0 0 0 1px oklch(0.53 0.19 10 / 0.25);
+}
+
+[data-theme="dark"] .setup-step-circle {
+  border-color: oklch(0.5 0 0);
+  background: oklch(0.2 0.005 25);
+}
+
+[data-theme="dark"] .setup-step-label {
+  color: oklch(0.55 0 0);
+}
+
+[data-theme="dark"] .setup-step-item.active .setup-step-label {
+  color: var(--pink-300);
+}
+
+[data-theme="dark"] .setup-step-line {
+  background: oklch(0.4 0.005 25);
+}
+
+[data-theme="dark"] .setup-field-input {
+  border-color: oklch(0.4 0.005 25);
+  background: oklch(0.22 0.005 25);
+}
+
+[data-theme="dark"] .setup-field-input:focus {
+  border-color: var(--border-pink);
+  box-shadow: 0 0 0 3px oklch(0.53 0.19 10 / 0.15);
+}
+
+[data-theme="dark"] .setup-field-input::placeholder {
+  color: oklch(0.5 0 0);
+}
+
+[data-theme="dark"] .setup-service-hint {
+  background: oklch(0.53 0.19 10 / 0.06);
+  border-color: oklch(0.35 0.04 15);
+}
+
+[data-theme="dark"] .setup-privacy-hint {
+  background: oklch(0.53 0.19 10 / 0.08);
+  border-color: oklch(0.35 0.04 15);
+}
+
+[data-theme="dark"] .setup-summary-box {
+  background: oklch(0.2 0.005 25);
+  border-color: oklch(0.32 0.005 25);
+}
+
+[data-theme="dark"] .setup-init-status {
+  background: oklch(0.2 0.005 25);
+  border-color: oklch(0.32 0.005 25);
+}
+
+[data-theme="dark"] .setup-btn-prev {
+  border-color: oklch(0.45 0.005 25);
+  color: oklch(0.65 0 0);
+}
+
+[data-theme="dark"] .setup-btn-prev:hover:not(:disabled) {
+  border-color: var(--border-pink);
+  color: var(--pink-300);
+}
+
+[data-theme="dark"] .setup-test-btn {
+  border-color: oklch(0.45 0.005 25);
+}
+
+/* =========================================================
+   10. 响应式
+   ========================================================= */
+
+@media (max-width: 600px) {
+  .setup-card {
+    padding: 24px 20px;
+  }
+
+  .setup-card-footer {
+    flex-wrap: wrap;
+  }
+
+  .setup-step-indicator {
+    display: none;
+  }
+
+  .setup-mode-selector {
+    flex-direction: column;
+  }
+
+  .setup-step-line {
+    width: 20px;
+  }
+}
+
+/* prefers-reduced-motion */
+@media (prefers-reduced-motion: reduce) {
+  .setup-test-btn.testing .setup-test-dot {
+    animation: none;
+  }
+  .setup-init-line .setup-mark-wait {
+    animation: none;
+  }
+}

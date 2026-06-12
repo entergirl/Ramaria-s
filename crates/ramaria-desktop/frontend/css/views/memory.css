@@ -1,0 +1,469 @@
+/* ═══════════════════════════════════════════════════════════
+   css/views/memory.css — Ramaria 记忆查看视图样式
+   设计特点:
+   - 三 Tab 布局：L1 摘要（Bento Grid 卡片）/ L2 事件（蓝色列表）/ L3 性格（标签云）
+   - Tab 切换使用 .active 类，粉底线指示
+   - L1：粉色渐变卡片网格，响应式列数（sm:1 / md:2 / lg:3）
+   - L2：蓝色标记事件列表，每项可展开详情
+   - L3：渐变色标签（粉=base / 蓝=primary / 灰=accent），hover 放大
+   - 人格筛选下拉和加载状态骨架屏
+   - salience 强度条（0%~100% 粉色渐变）
+   ═══════════════════════════════════════════════════════════ */
+
+/* =========================================================
+   1. 记忆视图整体布局
+   ========================================================= */
+
+#view-memory {
+  display: none;
+  /* flex-direction / min-height 由 .view.active 统一提供 */
+}
+
+#view-memory.active {
+  display: flex;
+}
+
+.memory-view-inner {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 0 var(--space-4) var(--space-4);
+}
+
+/* =========================================================
+   2. 记忆工具栏
+   ========================================================= */
+
+.memory-toolbar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--border-light);
+  margin-bottom: var(--space-3);
+}
+
+.memory-toolbar select {
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-default);
+  background: var(--bg-card);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: var(--font-body);
+  cursor: pointer;
+  outline: none;
+  min-width: 160px;
+}
+
+.memory-toolbar select:focus {
+  border-color: var(--color-primary);
+}
+
+/* =========================================================
+   3. Tab 切换
+   ========================================================= */
+
+.memory-tabs {
+  flex-shrink: 0;
+  display: flex;
+  gap: 0;
+  border-bottom: 2px solid var(--border-light);
+  margin-bottom: var(--space-4);
+}
+
+.memory-tab {
+  padding: var(--space-2) var(--space-4);
+  border: none;
+  background: none;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  font-family: var(--font-body);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+  transition: color var(--dur-fast) var(--ease-out),
+              border-color var(--dur-fast) var(--ease-out);
+}
+
+.memory-tab:hover {
+  color: var(--text-secondary);
+}
+
+.memory-tab.active {
+  color: var(--color-primary);
+  border-bottom-color: var(--color-primary);
+}
+
+.memory-tab-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: var(--radius-full);
+  font-size: 10px;
+  font-weight: 600;
+  margin-left: var(--space-1);
+  background: var(--bg-subtle);
+  color: var(--text-tertiary);
+}
+
+.memory-tab.active .memory-tab-badge {
+  background: oklch(0.53 0.19 10 / 0.12);
+  color: var(--color-primary);
+}
+
+/* =========================================================
+   4. 面板内容区
+   ========================================================= */
+
+.memory-panel {
+  flex: 1;
+  overflow-y: auto;
+  display: none;
+}
+
+.memory-panel.active {
+  display: block;
+}
+
+/* ── 空状态 ── */
+.memory-empty {
+  text-align: center;
+  padding: var(--space-12) var(--space-6);
+  color: var(--text-tertiary);
+}
+
+.memory-empty-icon {
+  font-size: 40px;
+  margin-bottom: var(--space-3);
+  opacity: 0.5;
+}
+
+.memory-empty-text {
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+/* =========================================================
+   5. L1 摘要 — Bento Grid
+   ========================================================= */
+
+.memory-l1-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: var(--space-4);
+  padding-bottom: var(--space-4);
+}
+
+.memory-l1-card {
+  background: linear-gradient(135deg,
+    oklch(0.97 0.008 25) 0%,
+    oklch(0.90 0.045 25 / 0.4) 100%);
+  border: 1px solid var(--border-pink);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  cursor: pointer;
+  transition: box-shadow var(--dur-fast) var(--ease-out),
+              transform var(--dur-fast) var(--ease-out);
+  min-height: 140px;
+  display: flex;
+  flex-direction: column;
+}
+
+.memory-l1-card:hover {
+  box-shadow: var(--shadow-pink);
+  transform: translateY(-2px);
+}
+
+.memory-l1-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: var(--space-2);
+}
+
+.memory-l1-card-title {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text-primary);
+  line-height: 1.4;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.memory-l1-card-badge {
+  flex-shrink: 0;
+  font-size: 10px;
+  padding: 1px 8px;
+  border-radius: var(--radius-full);
+  font-weight: 500;
+  background: var(--pink-200);
+  color: var(--pink-700);
+  white-space: nowrap;
+}
+
+.memory-l1-card-summary {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  line-height: 1.55;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+
+.memory-l1-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: var(--space-3);
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+/* salience 强度条 */
+.memory-salience-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.memory-salience-track {
+  width: 48px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border-default);
+  overflow: hidden;
+}
+
+.memory-salience-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--pink-300), var(--pink-500));
+  transition: width var(--dur-slow) var(--ease-out);
+}
+
+/* =========================================================
+   6. L2 事件列表
+   ========================================================= */
+
+.memory-l2-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding-bottom: var(--space-4);
+}
+
+.memory-l2-item {
+  border: 1px solid var(--border-blue);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card-blue);
+  cursor: pointer;
+  transition: box-shadow var(--dur-fast) var(--ease-out);
+}
+
+.memory-l2-item:hover {
+  box-shadow: var(--shadow-blue);
+}
+
+.memory-l2-item-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+}
+
+.memory-l2-item-marker {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  background: var(--blue-500);
+  flex-shrink: 0;
+}
+
+.memory-l2-item-title {
+  flex: 1;
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--text-primary);
+  line-height: 1.4;
+}
+
+.memory-l2-item-meta {
+  display: flex;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+.memory-l2-item-tag {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: var(--radius-full);
+  background: var(--blue-100);
+  color: var(--blue-600);
+}
+
+.memory-l2-item-detail {
+  display: none;
+  padding: 0 var(--space-4) var(--space-4);
+  border-top: 1px solid var(--border-blue);
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
+.memory-l2-item.expanded .memory-l2-item-detail {
+  display: block;
+}
+
+.memory-l2-detail-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-1) 0;
+}
+
+.memory-l2-detail-label {
+  font-weight: 500;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+  width: 60px;
+}
+
+.memory-l2-detail-value {
+  color: var(--text-primary);
+  line-height: 1.5;
+}
+
+/* =========================================================
+   7. L3 性格标签云
+   ========================================================= */
+
+.memory-l3-cloud {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding: var(--space-4) 0;
+  align-items: flex-start;
+  justify-content: center;
+}
+
+.memory-l3-tag {
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-full);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: transform var(--dur-fast) var(--ease-out),
+              box-shadow var(--dur-fast) var(--ease-out);
+  border: 1.5px solid transparent;
+  font-family: var(--font-body);
+  background: none;
+  color: var(--text-primary);
+}
+
+.memory-l3-tag:hover {
+  transform: scale(1.08);
+  box-shadow: var(--shadow-md);
+}
+
+/* 人格层颜色 */
+.memory-l3-tag.layer-base {
+  background: oklch(0.53 0.19 10 / 0.14);
+  border-color: oklch(0.53 0.19 10 / 0.25);
+  color: var(--pink-700);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.memory-l3-tag.layer-primary {
+  background: oklch(0.48 0.17 225 / 0.10);
+  border-color: oklch(0.48 0.17 225 / 0.2);
+  color: var(--blue-700);
+  font-size: 14px;
+}
+
+.memory-l3-tag.layer-accent {
+  background: var(--bg-subtle);
+  border-color: var(--border-default);
+  color: var(--text-secondary);
+  font-size: 12.5px;
+}
+
+/* L3 分组标签 */
+.memory-l3-section {
+  margin-bottom: var(--space-6);
+}
+
+.memory-l3-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-tertiary);
+  margin-bottom: var(--space-3);
+  padding-left: var(--space-1);
+}
+
+.memory-l3-empty-group {
+  text-align: center;
+  padding: var(--space-6);
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+/* =========================================================
+   8. 加载状态
+   ========================================================= */
+
+.memory-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-10);
+  color: var(--text-tertiary);
+  font-size: 13px;
+  gap: var(--space-2);
+}
+
+.memory-loading-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--color-primary);
+  animation: typingBlink 1.2s step-end infinite;
+}
+
+.memory-loading-dot:nth-child(2) { animation-delay: 0.2s; }
+.memory-loading-dot:nth-child(3) { animation-delay: 0.4s; }
+
+/* =========================================================
+   9. 响应式
+   ========================================================= */
+
+@media (max-width: 640px) {
+  .memory-l1-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .memory-toolbar {
+    flex-wrap: wrap;
+  }
+
+  .memory-l3-tag {
+    font-size: 11.5px;
+    padding: var(--space-1) var(--space-3);
+  }
+}

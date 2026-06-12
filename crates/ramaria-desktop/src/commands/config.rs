@@ -9,13 +9,14 @@
 use crate::DesktopState;
 use ramaria_core::types::BackendConfig;
 use serde::Serialize;
+use std::sync::Arc;
 use tauri::State;
 
 // =========================================================
 // 前端展示用结构体
 // =========================================================
 
-/// 后端配置视图（不包含 API key）。
+/// 后端配置视图（API key 仅返回遮罩版本：前 4 位 + ... + 后 4 位）。
 #[derive(Debug, Clone, Serialize)]
 pub struct BackendConfigView {
     pub provider: String,
@@ -25,6 +26,8 @@ pub struct BackendConfigView {
     pub supports_json_mode: bool,
     pub context_window: u32,
     pub max_output_tokens: u32,
+    /// API key 遮罩版本，如 "sk-a...b1c2"；本地 provider 或读取失败时为 None
+    pub api_key_masked: Option<String>,
 }
 
 /// 设置项视图。
@@ -50,7 +53,37 @@ pub struct SettingView {
 pub async fn get_backend_config(
     state: State<'_, DesktopState>,
 ) -> Result<BackendConfigView, String> {
-    let config = state.app.backend_config();
+    // 从 storage 读取最新配置（而非启动时缓存的 in-memory 值），
+    // 确保 setup / update_backend_config 后的配置能正确回显。
+    let config = state
+        .app
+        .storage()
+        .get_backend_config()
+        .await
+        .map_err(|e| format!("读取后端配置失败: {}", e))?
+        .unwrap_or_else(ramaria_core::types::BackendConfig::lm_studio_default);
+
+    // 读取并遮罩 API key（仅线上 provider 有此字段）
+    let api_key_masked = if config.provider.is_online() {
+        let service = match config.provider {
+            ramaria_core::types::LlmProvider::DeepSeek => "deepseek",
+            ramaria_core::types::LlmProvider::OpenAI => "openai",
+            _ => "",
+        };
+        if service.is_empty() {
+            None
+        } else {
+            state
+                .app
+                .keychain()
+                .get_api_key(service)
+                .ok()
+                .flatten()
+                .map(|key| mask_api_key(&key))
+        }
+    } else {
+        None
+    };
 
     let view = BackendConfigView {
         provider: config.provider.as_str().to_string(),
@@ -60,10 +93,19 @@ pub async fn get_backend_config(
         supports_json_mode: config.capability.supports_json_mode,
         context_window: config.capability.context_window,
         max_output_tokens: config.capability.max_output_tokens,
+        api_key_masked,
     };
 
     tracing::debug!(provider = %view.provider, "get_backend_config 完成");
     Ok(view)
+}
+
+/// 遮罩 API key：保留前 4 位和后 4 位，中间替换为 "..."
+fn mask_api_key(key: &str) -> String {
+    if key.len() <= 8 {
+        return format!("{}...", &key[..key.len().min(3)]);
+    }
+    format!("{}...{}", &key[..4], &key[key.len() - 4..])
 }
 
 // =========================================================
@@ -120,19 +162,42 @@ pub async fn update_backend_config(
                 ramaria_core::types::LlmProvider::OpenAI => "openai",
                 _ => {
                     tracing::warn!("本地 provider 不需要 API key，跳过写入");
-                    return Ok("updated".to_string());
+                    "" // 返回空串，下方 is_empty() 检查会跳过写入
                 }
             };
-            state
-                .app
-                .keychain()
-                .set_api_key(service, &key)
-                .map_err(|e| format!("保存 API key 到 keychain 失败: {}", e))?;
-            tracing::info!(provider = %provider, "API key 已写入 keychain");
+            if !service.is_empty() {
+                state
+                    .app
+                    .keychain()
+                    .set_api_key(service, &key)
+                    .map_err(|e| format!("保存 API key 到 keychain 失败: {}", e))?;
+                tracing::info!(provider = %provider, "API key 已写入 keychain");
+            }
         }
     }
 
-    tracing::info!(provider = %provider, model_id = %model_id, "后端配置已更新");
+    // ★ 热更新内存中的 LLM provider，确保后续对话使用新配置
+    let new_llm: Arc<dyn ramaria_core::traits::LlmProvider> = match llm_provider {
+        ramaria_core::types::LlmProvider::LmStudio => Arc::new(
+            ramaria_llm::lm_studio::LmStudioProvider::new(new_config.clone())
+                .map_err(|e| format!("创建 LM Studio provider 失败: {}", e))?,
+        ),
+        ramaria_core::types::LlmProvider::DeepSeek => Arc::new(
+            ramaria_llm::deepseek::DeepSeekProvider::new(
+                new_config.clone(),
+                state.app.keychain_arc(),
+            )
+            .map_err(|e| format!("创建 DeepSeek provider 失败: {}", e))?,
+        ),
+        ramaria_core::types::LlmProvider::OpenAI => Arc::new(
+            ramaria_llm::openai::OpenAIProvider::new(new_config.clone(), state.app.keychain_arc())
+                .map_err(|e| format!("创建 OpenAI provider 失败: {}", e))?,
+        ),
+        _ => return Err(format!("不支持的 provider: {}", provider)),
+    };
+    state.app.update_llm(new_llm);
+
+    tracing::info!(provider = %provider, model_id = %model_id, "后端配置已更新并热加载");
     Ok("updated".to_string())
 }
 

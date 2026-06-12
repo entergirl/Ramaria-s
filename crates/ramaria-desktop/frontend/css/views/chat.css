@@ -1,0 +1,357 @@
+/* ═══════════════════════════════════════════════════════════
+   css/views/chat.css — Ramaria 对话视图样式
+   设计特点:
+   - 纵向 Flex 布局：SessionBar（横向滚动）→ MessageList（flex-1 滚动）→ InputArea（固定底部）
+   - 消息气泡：用户右对齐粉底、助手左对齐蓝底
+   - SessionBar 横向排列会话标签，当前会话实底粉高亮
+   - PersonaSelector 下拉嵌在 InputArea 上方
+   - 空状态：有机渐变浮动装饰球 + 引导文案
+   - 流式渲染：打字光标（blink animation）
+   ═══════════════════════════════════════════════════════════ */
+
+/* =========================================================
+   1. 对话视图整体布局
+   ========================================================= */
+
+#view-chat {
+  display: none;
+  /* flex: 1 / min-height: 0 / flex-direction: column 由 .view.active 统一提供 */
+}
+
+#view-chat.active {
+  display: flex;
+}
+
+/* =========================================================
+   2. SessionBar（会话标签栏）
+   ========================================================= */
+
+.chat-session-bar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--border-light);
+  overflow-x: auto;
+  overflow-y: hidden;
+  min-height: 40px;
+  background: var(--bg-subtle);
+}
+
+.chat-session-tab {
+  flex-shrink: 0;
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border: 1px solid transparent;
+  background: none;
+  font-family: var(--font-body);
+  white-space: nowrap;
+  transition: background var(--dur-fast) var(--ease-out),
+              color var(--dur-fast) var(--ease-out),
+              border-color var(--dur-fast) var(--ease-out);
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-session-tab:hover {
+  background: var(--bg-card-pink);
+  color: var(--color-primary);
+}
+
+.chat-session-tab.active {
+  background: var(--pink-100);
+  color: var(--pink-600);
+  font-weight: 500;
+  border-color: var(--pink-200);
+}
+
+.chat-session-new-btn {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  border: 1px dashed var(--border-default);
+  background: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  color: var(--text-tertiary);
+  transition: border-color var(--dur-fast) var(--ease-out),
+              color var(--dur-fast) var(--ease-out);
+}
+
+.chat-session-new-btn:hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+/* =========================================================
+   3. 消息列表
+   ========================================================= */
+
+.chat-message-list {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: var(--space-4) 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 消息气泡 wrapper */
+.msg-bubble-wrapper {
+  flex-shrink: 0;
+  animation: msgFadeIn 220ms var(--ease-out);
+}
+
+@keyframes msgFadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* 打字光标闪烁 */
+@keyframes typingBlink {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0; }
+}
+
+/* 空状态 */
+.chat-empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-4);
+  padding: var(--space-8);
+  text-align: center;
+  color: var(--text-tertiary);
+}
+
+.chat-empty-icon {
+  font-size: 56px;
+  margin-bottom: var(--space-2);
+  animation: chatFloatAnim 4s ease-in-out infinite;
+}
+
+@keyframes chatFloatAnim {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-8px); }
+}
+
+.chat-empty-title {
+  font-family: var(--font-display);
+  font-size: 18px;
+  color: var(--text-secondary);
+}
+
+.chat-empty-hint {
+  font-size: 13px;
+  max-width: 320px;
+  line-height: 1.6;
+}
+
+/* 聊天快捷提示按钮 */
+.chat-empty-prompts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  justify-content: center;
+  margin-top: var(--space-3);
+}
+
+.chat-empty-prompt {
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-pink);
+  background: var(--bg-card);
+  color: var(--color-primary);
+  font-size: 12.5px;
+  cursor: pointer;
+  font-family: var(--font-body);
+  transition: background var(--dur-fast) var(--ease-out);
+}
+
+.chat-empty-prompt:hover {
+  background: var(--bg-card-pink);
+}
+
+/* 流式渲染期间：消息列表自动滚动到底部 */
+.chat-message-list.is-streaming {
+  /* JS 中判断，无额外样式 */
+}
+
+/* =========================================================
+   4. 输入区域
+   ========================================================= */
+
+.chat-input-area {
+  flex-shrink: 0;
+  border-top: 1px solid var(--border-light);
+  padding: var(--space-3) var(--space-4);
+  background: var(--bg-glass);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.chat-input-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.chat-input-toolbar label {
+  flex-shrink: 0;
+}
+
+.chat-input-toolbar select {
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-default);
+  background: var(--bg-card);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: var(--font-body);
+  cursor: pointer;
+  outline: none;
+}
+
+.chat-input-toolbar select:focus {
+  border-color: var(--color-primary);
+}
+
+.chat-input-row {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+}
+
+.chat-input-textarea {
+  flex: 1;
+  resize: none;
+  overflow-y: hidden;           /* 高度由 JS 管理，禁用浏览器原生滚动条 */
+  padding: var(--space-2) var(--space-3);
+  border: 1.5px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  font-size: 13.5px;
+  font-family: var(--font-body);
+  color: var(--text-primary);
+  background: var(--bg-card);
+  outline: none;
+  min-height: 36px;
+  max-height: 120px;
+  line-height: 1.5;
+  transition: border-color var(--dur-fast) var(--ease-out),
+              box-shadow var(--dur-fast) var(--ease-out);
+}
+
+.chat-input-textarea:focus {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px oklch(0.53 0.19 10 / 0.08);
+}
+
+.chat-input-textarea::placeholder {
+  color: var(--text-tertiary);
+}
+
+.chat-input-textarea:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.chat-send-btn {
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-sm);
+  border: none;
+  background: var(--color-primary);
+  color: var(--text-inverse);
+  font-size: 18px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--dur-fast) var(--ease-out),
+              box-shadow var(--dur-fast) var(--ease-out),
+              transform var(--dur-fast) var(--ease-out);
+}
+
+.chat-send-btn:hover:not(:disabled) {
+  background: var(--color-primary-hover);
+  box-shadow: var(--shadow-pink);
+  transform: translateY(-1px);
+}
+
+.chat-send-btn:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.chat-send-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.chat-streaming-hint {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  text-align: center;
+  margin-top: var(--space-1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
+}
+
+.chat-streaming-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--color-primary);
+  animation: typingBlink 1.2s step-end infinite;
+}
+
+.chat-streaming-dot:nth-child(2) { animation-delay: 0.2s; }
+.chat-streaming-dot:nth-child(3) { animation-delay: 0.4s; }
+
+/* =========================================================
+   5. 响应式
+   ========================================================= */
+
+@media (max-width: 640px) {
+  .chat-session-bar {
+    padding: var(--space-1) var(--space-2);
+  }
+
+  .chat-session-tab {
+    font-size: 11px;
+    padding: var(--space-1) var(--space-2);
+    max-width: 100px;
+  }
+
+  .chat-input-area {
+    padding: var(--space-2) var(--space-3);
+  }
+
+  .chat-input-textarea {
+    font-size: 13px;
+  }
+}
+
+/* prefers-reduced-motion */
+@media (prefers-reduced-motion: reduce) {
+  .msg-bubble-wrapper {
+    animation: none;
+  }
+  .chat-empty-icon {
+    animation: none;
+  }
+}

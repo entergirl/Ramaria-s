@@ -139,7 +139,10 @@ var RamariaRouter = (function () {
             return;
         }
 
-        if (_currentView === viewName) {
+        // 允许强制重新进入（用于视图模块延迟加载后手动触发渲染）
+        var forceReenter = options && options.forceReenter === true;
+
+        if (_currentView === viewName && !forceReenter) {
             console.log('[Router] 视图未变化，跳过: ' + viewName);
             return;
         }

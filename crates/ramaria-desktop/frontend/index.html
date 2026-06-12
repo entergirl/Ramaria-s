@@ -10,12 +10,12 @@
     <title>Ramaria - 个人AI陪伴记忆系统</title>
 
     <!--
-      同步设置 data-theme，消除主题闪烁（FOUC）。
-      必须在任何 CSS 加载前执行：如果用户曾选择暗色模式，CSS 加载后再切主题会导致白闪。
-      无保存偏好时默认浅色（与设计文档一致）。
+      始终以浅色模式启动，消除主题闪烁（FOUC）。
+      必须在任何 CSS 加载前执行：浏览器默认可能因缓存读取深色偏好。
+      深色模式不持久化，每次启动默认浅色。
     -->
     <script>
-      (function(){try{var t=localStorage.getItem('ramaria-theme');if(t==='dark'||t==='light'){document.documentElement.setAttribute('data-theme',t);}else{document.documentElement.setAttribute('data-theme','light');}}catch(e){document.documentElement.setAttribute('data-theme','light');}})();
+      document.documentElement.setAttribute('data-theme', 'light');
     </script>
 
     <!-- ── 字体声明 ── -->
@@ -28,10 +28,15 @@
     <link rel="stylesheet" href="css/utilities.css" />
     <link rel="stylesheet" href="css/components.css" />
 
+    <!-- Batch 5：视图样式 -->
+    <link rel="stylesheet" href="css/views/setup.css" />
+    <link rel="stylesheet" href="css/views/chat.css" />
+    <link rel="stylesheet" href="css/views/memory.css" />
+    <link rel="stylesheet" href="css/views/settings.css" />
+
     <!--
       Phase 5 后续批次将加载：
       - css/animations.css   (Batch 6)
-      - css/views/*.css      (Batch 5)
     -->
 </head>
 <body>
@@ -121,58 +126,26 @@
             <div class="view-container" id="view-container">
 
                 <!--
-                  所有视图默认隐藏，通过 .active 类切换
-                  未来 Batch 5 将实现：
-                  - #view-setup     (全屏首次配置向导)
-                  - #view-progress  (全屏进度页)
-                  - #view-chat      (对话页)
-                  - #view-memory    (记忆查看页)
-                  - #view-settings  (设置页)
-                  - #view-error     (全屏错误页)
+                  所有视图默认隐藏，通过 .active 类切换（Router 管理）
+                  - #view-setup     (全屏首次配置向导)  — Batch 5 已实现
+                  - #view-progress  (全屏进度页)        — Router 管理
+                  - #view-chat      (对话页)            — Batch 5 已实现
+                  - #view-memory    (记忆查看页)        — Batch 5 已实现
+                  - #view-settings  (设置页)            — Batch 5 已实现
+                  - #view-error     (全屏错误页)        — Router 管理
                 -->
 
-                <!-- 对话视图 -->
-                <div class="view" id="view-chat" data-view="chat">
-                    <div class="flex items-center justify-center" style="height:100%;min-height:300px">
-                        <div class="text-center text-tertiary">
-                            <div style="font-size:48px;margin-bottom:var(--space-4)">💬</div>
-                            <div class="text-lg font-medium mb-2">对话界面</div>
-                            <div class="text-sm">将在 Batch 5 中实现</div>
-                        </div>
-                    </div>
-                </div>
+                <!-- 对话视图（由 js/views/chat.js 动态渲染） -->
+                <div class="view" id="view-chat" data-view="chat"></div>
 
-                <!-- 记忆视图 -->
-                <div class="view" id="view-memory" data-view="memory">
-                    <div class="flex items-center justify-center" style="height:100%;min-height:300px">
-                        <div class="text-center text-tertiary">
-                            <div style="font-size:48px;margin-bottom:var(--space-4)">🧠</div>
-                            <div class="text-lg font-medium mb-2">记忆查看</div>
-                            <div class="text-sm">将在 Batch 5 中实现</div>
-                        </div>
-                    </div>
-                </div>
+                <!-- 记忆视图（由 js/views/memory.js 动态渲染） -->
+                <div class="view" id="view-memory" data-view="memory"></div>
 
-                <!-- 设置视图 -->
-                <div class="view" id="view-settings" data-view="settings">
-                    <div class="flex items-center justify-center" style="height:100%;min-height:300px">
-                        <div class="text-center text-tertiary">
-                            <div style="font-size:48px;margin-bottom:var(--space-4)">⚙️</div>
-                            <div class="text-lg font-medium mb-2">设置</div>
-                            <div class="text-sm">将在 Batch 5 中实现</div>
-                        </div>
-                    </div>
-                </div>
+                <!-- 设置视图（由 js/views/settings.js 动态渲染） -->
+                <div class="view" id="view-settings" data-view="settings"></div>
 
-                <!-- 首次配置全屏视图 -->
-                <div class="view view--fullscreen" id="view-setup" data-view="setup">
-                    <div class="text-center text-tertiary">
-                        <div style="font-size:64px;margin-bottom:var(--space-6)">🍄</div>
-                        <div class="text-2xl font-display text-primary mb-3">欢迎使用 Ramaria</div>
-                        <div class="text-lg mb-2">首次配置向导</div>
-                        <div class="text-sm">将在 Batch 5 中实现</div>
-                    </div>
-                </div>
+                <!-- 首次配置全屏视图（由 js/views/setup.js 动态渲染） -->
+                <div class="view view--fullscreen" id="view-setup" data-view="setup"></div>
 
                 <!-- 进度页全屏视图 -->
                 <div class="view view--fullscreen" id="view-progress" data-view="progress">
@@ -236,10 +209,14 @@
     <script src="js/utils/markdown.js"></script>
     <script src="js/utils/format.js"></script>
 
-    <!--
-      Phase 5 后续批次将加载：
-      - js/views/*.js       (Batch 5)
-    -->
+    <!-- Batch 5：消息气泡组件 -->
+    <script src="js/components/message-bubble.js"></script>
+
+    <!-- Batch 5：视图模块 -->
+    <script src="js/views/setup.js"></script>
+    <script src="js/views/chat.js"></script>
+    <script src="js/views/memory.js"></script>
+    <script src="js/views/settings.js"></script>
 
 </body>
 </html>

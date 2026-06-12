@@ -9,6 +9,7 @@
 use crate::DesktopState;
 use ramaria_core::types::BackendConfig;
 use serde::Serialize;
+use std::sync::Arc;
 use tauri::State;
 
 // =========================================================
@@ -104,11 +105,29 @@ pub async fn run_setup(
         .await
         .map_err(|e| format!("设置流程失败: {}", e))?;
 
+    // ---- ★ 热更新 LLM provider，确保后续对话使用新配置 ----
+    let new_llm: Arc<dyn ramaria_core::traits::LlmProvider> = match llm_provider {
+        ramaria_core::types::LlmProvider::LmStudio => Arc::new(
+            ramaria_llm::lm_studio::LmStudioProvider::new(config.clone())
+                .map_err(|e| format!("创建 LM Studio provider 失败: {}", e))?,
+        ),
+        ramaria_core::types::LlmProvider::DeepSeek => Arc::new(
+            ramaria_llm::deepseek::DeepSeekProvider::new(config.clone(), state.app.keychain_arc())
+                .map_err(|e| format!("创建 DeepSeek provider 失败: {}", e))?,
+        ),
+        ramaria_core::types::LlmProvider::OpenAI => Arc::new(
+            ramaria_llm::openai::OpenAIProvider::new(config.clone(), state.app.keychain_arc())
+                .map_err(|e| format!("创建 OpenAI provider 失败: {}", e))?,
+        ),
+        _ => return Err(format!("不支持的 provider: {}", provider)),
+    };
+    state.app.update_llm(new_llm);
+
     tracing::info!(
         provider = %provider,
         model_id = %model_id,
         new_state = %new_state.as_str(),
-        "首次配置完成"
+        "首次配置完成，LLM provider 已热加载"
     );
 
     Ok(format!("setup_complete:{}", new_state.as_str()))

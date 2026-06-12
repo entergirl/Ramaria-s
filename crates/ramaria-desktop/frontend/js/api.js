@@ -81,8 +81,8 @@ var RamariaApi = (function () {
         _require(message, '消息内容');
 
         var args = { message: message };
-        if (personaUid) args.persona_uid = personaUid;
-        if (sessionId) args.session_id = sessionId;
+        if (personaUid) args.personaUid = personaUid;
+        if (sessionId) args.sessionId = sessionId;
 
         var requestId = await _invoke('send_message', args, '发送消息');
         return { request_id: requestId };
@@ -144,7 +144,7 @@ var RamariaApi = (function () {
      */
     async function getSession(sessionId) {
         _require(sessionId, '会话 ID');
-        return await _invoke('get_session', { session_id: sessionId }, '查询会话详情');
+        return await _invoke('get_session', { sessionId: sessionId }, '查询会话详情');
     }
 
     /**
@@ -165,7 +165,7 @@ var RamariaApi = (function () {
      */
     async function deleteSession(sessionId) {
         _require(sessionId, '会话 ID');
-        return await _invoke('delete_session', { session_id: sessionId }, '删除会话');
+        return await _invoke('delete_session', { sessionId: sessionId }, '删除会话');
     }
 
     // =========================================================
@@ -194,7 +194,7 @@ var RamariaApi = (function () {
      */
     async function getL1Memories(personaUid, limit) {
         var args = {};
-        if (personaUid) args.persona_uid = personaUid;
+        if (personaUid) args.personaUid = personaUid;
         if (limit !== undefined && limit !== null) args.limit = limit;
         return await _invoke('get_l1_memories', args, '查询 L1 记忆');
     }
@@ -211,7 +211,7 @@ var RamariaApi = (function () {
      */
     async function getL2Events(personaUid, limit) {
         var args = {};
-        if (personaUid) args.persona_uid = personaUid;
+        if (personaUid) args.personaUid = personaUid;
         if (limit !== undefined && limit !== null) args.limit = limit;
         return await _invoke('get_l2_events', args, '查询 L2 事件');
     }
@@ -227,7 +227,7 @@ var RamariaApi = (function () {
      */
     async function getL3Traits(personaUid) {
         var args = {};
-        if (personaUid) args.persona_uid = personaUid;
+        if (personaUid) args.personaUid = personaUid;
         return await _invoke('get_l3_traits', args, '查询 L3 性格标签');
     }
 
@@ -260,10 +260,10 @@ var RamariaApi = (function () {
 
         var args = {
             provider: provider,
-            model_id: modelId || '',
-            base_url: baseUrl,
+            modelId: modelId || '',
+            baseUrl: baseUrl,
         };
-        if (apiKey) args.api_key = apiKey;
+        if (apiKey) args.apiKey = apiKey;
 
         return await _invoke('update_backend_config', args, '更新后端配置');
     }
@@ -312,10 +312,10 @@ var RamariaApi = (function () {
 
         var args = {
             provider: provider,
-            model_id: modelId || '',
-            base_url: baseUrl,
+            modelId: modelId || '',
+            baseUrl: baseUrl,
         };
-        if (apiKey) args.api_key = apiKey;
+        if (apiKey) args.apiKey = apiKey;
 
         return await _invoke('run_setup', args, '执行首次配置');
     }

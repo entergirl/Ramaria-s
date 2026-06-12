@@ -115,11 +115,8 @@
 
         document.documentElement.setAttribute('data-theme', theme);
 
-        try {
-            localStorage.setItem('ramaria-theme', theme);
-        } catch (_) {
-            /* localStorage 不可用（隐私模式等），静默降级 */
-        }
+        // 深色模式不持久化，每次启动默认浅色
+        // 不写入 localStorage
 
         // 更新主题按钮图标
         if (dom.btnToggleTheme) {
@@ -133,20 +130,10 @@
     }
 
     /**
-     * 从 localStorage 恢复主题偏好。
-     * 如果无保存偏好，默认浅色。
+     * 初始化主题为浅色（不再从 localStorage 恢复）。
      */
     function restoreTheme() {
-        try {
-            var saved = localStorage.getItem('ramaria-theme');
-            if (saved === 'dark' || saved === 'light') {
-                setTheme(saved);
-                return;
-            }
-        } catch (_) {
-            /* 静默降级 */
-        }
-        // 默认浅色（与 HTML 内联脚本一致）
+        // 始终默认浅色，不读取 localStorage
         setTheme('light');
     }
 

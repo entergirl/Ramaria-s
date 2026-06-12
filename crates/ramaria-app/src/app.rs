@@ -61,8 +61,8 @@ pub type SendMessageStream = Pin<Box<dyn Stream<Item = RamariaResult<StreamEvent
 pub struct App {
     /// 存储后端（23 张表 CRUD）
     storage: Arc<dyn StorageBackend>,
-    /// 当前 LLM provider
-    llm: Arc<dyn LlmProvider>,
+    /// 当前 LLM provider（Mutex 包裹，支持配置热更新）
+    llm: Mutex<Arc<dyn LlmProvider>>,
     /// 内存检索器（BM25 + 向量 + 图谱）
     retriever: Mutex<Retriever>,
     /// 应用配置
@@ -100,7 +100,7 @@ impl App {
 
         Self {
             storage,
-            llm,
+            llm: Mutex::new(llm),
             retriever: Mutex::new(retriever),
             config,
             state: Mutex::new(AppState::NeedsSetup),
@@ -143,13 +143,33 @@ impl App {
     }
 
     /// 获取后端配置引用。
-    pub fn backend_config(&self) -> &BackendConfig {
-        self.llm.config()
+    pub fn backend_config(&self) -> BackendConfig {
+        self.llm
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .config()
+            .clone()
+    }
+
+    /// 热更新 LLM provider（配置修改后调用，替换内存中的 provider 实例）。
+    pub fn update_llm(&self, new_llm: Arc<dyn LlmProvider>) {
+        let mut guard = self.llm.lock().unwrap_or_else(|e| e.into_inner());
+        tracing::info!(
+            old_provider = guard.name(),
+            new_provider = %new_llm.name(),
+            "LLM provider 热更新"
+        );
+        *guard = new_llm;
     }
 
     /// 获取 keychain 引用。
     pub fn keychain(&self) -> &Keychain {
         &self.keychain
+    }
+
+    /// 获取 keychain Arc 引用（供 provider 构造使用）。
+    pub fn keychain_arc(&self) -> Arc<Keychain> {
+        Arc::clone(&self.keychain)
     }
 
     /// 获取存储后端引用。
@@ -192,7 +212,12 @@ impl App {
 
     /// 检查当前 provider 的隐私确认状态。
     pub async fn check_privacy(&self) -> RamariaResult<crate::privacy::PrivacyStatus> {
-        let cfg = self.llm.config();
+        let cfg = self
+            .llm
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .config()
+            .clone();
         privacy::check_privacy(self.storage.as_ref(), cfg.provider, &cfg.base_url).await
     }
 
@@ -201,7 +226,12 @@ impl App {
     /// 参数:
     /// - `persistent`: 是否跨重启持久化。
     pub async fn confirm_privacy(&self, persistent: bool) -> RamariaResult<()> {
-        let cfg = self.llm.config();
+        let cfg = self
+            .llm
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .config()
+            .clone();
         privacy::confirm_privacy(
             self.storage.as_ref(),
             cfg.provider,
@@ -316,7 +346,12 @@ impl App {
         }
 
         // ---- Step 2: 隐私确认 ----
-        let cfg = self.llm.config();
+        let cfg = self
+            .llm
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .config()
+            .clone();
         if cfg.provider.is_online() {
             privacy::require_privacy(self.storage.as_ref(), cfg.provider, &cfg.base_url).await?;
         }
@@ -371,7 +406,9 @@ impl App {
         // ---- Step 8: 调用 LLM ----
         // 注意：此处不使用 `?`，LLM 调用失败时需返回含 Error 事件的流，
         // 而非直接返回 Err——上游（CLI/Desktop）统一消费流事件，不应感知底层错误。
-        let raw_stream = match self.llm.chat_stream(&chat_request).await {
+        // ★ 先 clone Arc 出锁再 await，避免 MutexGuard 跨 .await（std::sync::MutexGuard 非 Send）
+        let llm = { self.llm.lock().unwrap_or_else(|e| e.into_inner()).clone() };
+        let raw_stream = match llm.chat_stream(&chat_request).await {
             Ok(stream) => stream,
             Err(e) => {
                 tracing::error!(
