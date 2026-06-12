@@ -138,6 +138,9 @@ pub fn send_chat_notification<R: Runtime>(
 /// 返回:
 /// - 截断后的字符串（如果原字符串 ≤ max_len 则返回原样的 &str）
 fn truncate_str(s: &str, max_len: usize) -> &str {
+    if max_len == 0 {
+        return "";
+    }
     let char_count = s.chars().count();
     if char_count <= max_len {
         return s;

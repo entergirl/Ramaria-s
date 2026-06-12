@@ -28,7 +28,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["msi", "nsis"],
+    "targets": ["nsis"],
     "icon": [
       "icons/icon.ico"
     ],
@@ -36,9 +36,6 @@
       "../../config/personas/*.toml"
     ],
     "windows": {
-      "wix": {
-        "language": "zh-CN"
-      },
       "nsis": {
         "languages": ["SimpChinese"],
         "installMode": "currentUser",
