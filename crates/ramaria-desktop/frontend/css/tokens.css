@@ -3,7 +3,7 @@
    设计特点:
    - 完整 OKLCH 色彩空间粉/蓝/灰三色阶（8+8+10 级）
    - 语义映射层：禁止直接使用色阶变量，始终通过语义变量引用
-   - 暗色主题默认（data-theme="dark"），浅色备选（data-theme="light"）
+   - 浅色主题默认（data-theme="light"），暗色备选（data-theme="dark"）
    - 4px 基准 8pt 网格间距系统（space-1 ~ space-16）
    - 五级圆角（sm→full）+ 五级阴影（含品牌粉蓝色影）
    - 三段缓动曲线 + 三档时长 + 字体三元组

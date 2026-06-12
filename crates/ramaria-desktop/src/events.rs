@@ -79,7 +79,8 @@ pub struct ChatErrorPayload {
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize)]
 pub struct AppStatePayload {
-    /// 状态字符串："NeedsSetup" | "DownloadingModel" | "Indexing" | "Ready" | "Degraded" | "FatalError"
+    /// 状态字符串（来自 AppState::as_str()，snake_case）：
+    /// "needs_setup" | "downloading_model" | "indexing" | "ready" | "degraded" | "fatal_error"
     pub state: String,
 }
 

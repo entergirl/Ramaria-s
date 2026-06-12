@@ -2,22 +2,32 @@
  * js/app.js — Ramaria 桌面应用入口
  *
  * 职责:
- * - 检测 Tauri 环境可用性
- * - 查询当前 AppState 并路由到对应视图
- * - 管理暗/亮主题切换（data-theme 属性）
- * - 监听 app-state-changed 事件自动更新 UI 状态
- * - Sidebar 导航切换（对话/记忆/设置）
- * - 为后续 Batch 3 Router 提供基础钩子
+ * - 应用启动初始化：按序加载 Store → Router → 查询 AppState → 首次路由
+ * - 管理暗/亮主题切换（data-theme + localStorage 持久化）
+ * - 处理非 Tauri 环境的降级展示
+ * - 为后续 Batch 5 视图模块提供全局挂载点
  *
- * 安全:
- * - 不在 console 输出任何敏感信息（API key、用户消息）
- * - 不在 DOM 中渲染未 sanitize 的 HTML（后续 markdown.js 负责）
+ * 设计特点:
+ * - 不直接管理视图切换（由 Router 负责）
+ * - 不直接管理状态（由 Store 负责）
+ * - 不直接调用 TauriBridge（由 Api 负责）
+ * - 仅做编排：初始化 → 查询初始状态 → 触发首次路由 → 监听后续变更
+ * - 保留 RamariaApp 全局命名空间供外部调试和后续扩展
+ *
+ * 初始化流程:
+ *   1. cacheDom → 恢复主题
+ *   2. Router.init() → 订阅 Store + Tauri 事件
+ *   3. 绑定主题切换按钮
+ *   4. 查询 get_app_state → Store.set('appState', ...) → Router 自动路由
+ *   5. 非 Tauri 环境降级展示
  *
  * 依赖:
- * - TauriBridge（js/tauri-bridge.js，必须先于本文件加载）
- * - 设计系统 CSS（tokens.css / reset.css / layout.css / utilities.css）
+ * - TauriBridge（js/tauri-bridge.js）
+ * - RamariaStore（js/store.js）
+ * - RamariaApi（js/api.js）
+ * - RamariaRouter（js/router.js）
+ * - CSS: tokens.css / reset.css / layout.css / utilities.css
  */
-
 (function () {
     'use strict';
 
@@ -25,25 +35,15 @@
     // 常量
     // =========================================================
 
-    /** 视图名称与标题映射 */
-    var VIEW_TITLES = {
-        chat: '对话',
-        memory: '记忆',
-        settings: '设置',
-        setup: '首次配置',
-        progress: '处理中',
-        error: '错误',
-    };
+    /** 版本号（与 Cargo.toml 保持同步） */
+    var APP_VERSION = '0.1.0';
 
-    /** 需要隐藏 Sidebar 的视图（全屏视图） */
-    var FULLSCREEN_VIEWS = ['setup', 'progress', 'error'];
-
-    /** 状态指示灯颜色类 */
-    var STATUS_DOT_CLASS = {
-        Ready: 'ready',
-        Degraded: 'degraded',
-        FatalError: 'error',
-    };
+    /** 开发模式标志（通过 URL 参数 ?dev 启用） */
+    var IS_DEV = (function () {
+        try {
+            return window.location.search.indexOf('dev') !== -1;
+        } catch (_) { return false; }
+    })();
 
     // =========================================================
     // 环境检测
@@ -51,13 +51,17 @@
 
     var isTauri = false;
     try {
-        isTauri = TauriBridge && TauriBridge.isTauri && TauriBridge.isTauri();
+        isTauri = !!(TauriBridge && TauriBridge.isTauri && TauriBridge.isTauri());
     } catch (_) {
         /* TauriBridge 可能未加载 */
     }
 
     if (!isTauri) {
-        console.warn('[App] 未检测到 Tauri 环境。部分功能不可用。');
+        console.warn('[App] 未检测到 Tauri 环境。将以浏览器预览模式运行。');
+    }
+
+    if (IS_DEV) {
+        console.log('[App] 开发模式已启用（?dev），将输出更多调试信息');
     }
 
     // =========================================================
@@ -70,177 +74,14 @@
 
     var dom = {
         app: $('app'),
-        sidebar: $('sidebar'),
         contentTitle: $('content-title'),
-        contentActions: $('content-actions'),
-        degradedBanner: $('degraded-banner'),
-        degradedBannerText: $('degraded-banner-text'),
-        statusDot: $('status-indicator-dot'),
         statusText: $('status-indicator-text'),
         statusSession: $('status-session-info'),
-        progressTitle: $('progress-title'),
-        progressDesc: $('progress-desc'),
-        errorTitle: $('error-title'),
-        errorDetail: $('error-detail'),
         btnToggleTheme: $('btn-toggle-theme'),
     };
 
     // =========================================================
-    // 视图管理
-    // =========================================================
-
-    /** 当前显示的视图名称 */
-    var currentView = null;
-
-    /**
-     * 切换到指定视图。
-     *
-     * 参数:
-     * - `viewName`: 视图名称（'chat' | 'memory' | 'settings' | 'setup' | 'progress' | 'error'）
-     * - `options`: 可选。{ title, subInfo } 用于进度页/错误页
-     */
-    function showView(viewName, options) {
-        if (!viewName) return;
-
-        options = options || {};
-
-        // 1. 关闭所有视图
-        var allViews = document.querySelectorAll('.view');
-        for (var i = 0; i < allViews.length; i++) {
-            allViews[i].classList.remove('active');
-        }
-
-        // 2. 激活目标视图
-        var targetView = document.querySelector('.view[data-view="' + viewName + '"]');
-        if (!targetView) {
-            console.error('[App] 未找到视图: ' + viewName);
-            return;
-        }
-        targetView.classList.add('active');
-
-        // 3. 处理全屏视图
-        var isFullscreen = FULLSCREEN_VIEWS.indexOf(viewName) !== -1;
-        if (isFullscreen) {
-            dom.app.classList.add('has-fullscreen-view');
-        } else {
-            dom.app.classList.remove('has-fullscreen-view');
-        }
-
-        // 4. 更新标题
-        dom.contentTitle.textContent = VIEW_TITLES[viewName] || viewName;
-
-        // 5. 更新 Sidebar 激活态
-        var allNavLinks = document.querySelectorAll('.sidebar-nav-link[data-view]');
-        for (var j = 0; j < allNavLinks.length; j++) {
-            allNavLinks[j].classList.remove('active');
-            allNavLinks[j].removeAttribute('aria-current');
-        }
-
-        if (!isFullscreen) {
-            var activeNav = document.querySelector('.sidebar-nav-link[data-view="' + viewName + '"]');
-            if (activeNav) {
-                activeNav.classList.add('active');
-                activeNav.setAttribute('aria-current', 'page');
-            }
-        }
-
-        // 6. 进度页特殊处理
-        if (viewName === 'progress') {
-            if (dom.progressTitle) dom.progressTitle.textContent = options.title || '正在处理...';
-            if (dom.progressDesc) dom.progressDesc.textContent = options.subInfo || '请稍候';
-        }
-
-        // 7. 错误页特殊处理
-        if (viewName === 'error') {
-            if (dom.errorTitle) dom.errorTitle.textContent = options.title || '严重错误';
-            if (dom.errorDetail) dom.errorDetail.textContent = options.subInfo || '应用遇到不可恢复的错误，请查看日志后重启。';
-        }
-
-        currentView = viewName;
-        console.log('[App] 视图切换: ' + viewName);
-    }
-
-    // =========================================================
-    // 状态指示与 UI 更新
-    // =========================================================
-
-    /**
-     * 根据 Rust AppState 更新 UI 状态指示。
-     *
-     * 状态映射（对齐 ramaria-core AppState 枚举）:
-     * - NeedsSetup       → 首次配置向导（全屏）
-     * - DownloadingModel → 进度页（全屏）
-     * - Indexing         → 进度页（全屏）
-     * - Ready            → 对话页（默认）
-     * - Degraded         → 对话页 + 顶部警告条
-     * - FatalError       → 错误页（全屏）
-     */
-    function updateAppState(state) {
-        if (!state) return;
-
-        // 清除 Degraded 警告条
-        dom.degradedBanner.classList.add('hidden');
-
-        // 更新状态指示灯
-        var dotClass = STATUS_DOT_CLASS[state] || '';
-        dom.statusDot.className = 'status-bar-dot ' + dotClass;
-
-        switch (state) {
-            case 'NeedsSetup':
-                dom.statusText.textContent = '需要配置';
-                showView('setup');
-                break;
-
-            case 'DownloadingModel':
-                dom.statusText.textContent = '下载模型中';
-                showView('progress', {
-                    title: '正在下载 Embedding 模型',
-                    subInfo: '首次启动需要下载模型文件，请耐心等待...',
-                });
-                break;
-
-            case 'Indexing':
-                dom.statusText.textContent = '索引构建中';
-                showView('progress', {
-                    title: '正在重建记忆索引',
-                    subInfo: '正在处理历史数据，完成后将自动进入对话界面。',
-                });
-                break;
-
-            case 'Ready':
-                dom.statusText.textContent = '就绪';
-                // 如果当前是全屏视图，切回对话页
-                if (!currentView || FULLSCREEN_VIEWS.indexOf(currentView) !== -1) {
-                    showView('chat');
-                }
-                break;
-
-            case 'Degraded':
-                dom.statusText.textContent = '部分功能不可用';
-                dom.degradedBanner.classList.remove('hidden');
-                dom.degradedBannerText.textContent = '部分功能不可用 — 请检查 LLM 后端连接后重试';
-                showView('chat');
-                break;
-
-            case 'FatalError':
-                dom.statusText.textContent = '严重错误';
-                showView('error', {
-                    title: '严重错误',
-                    subInfo: '应用遇到不可恢复的错误，请查看日志后重启。',
-                });
-                break;
-
-            default:
-                dom.statusText.textContent = state;
-                console.warn('[App] 未知状态: ' + state);
-                break;
-        }
-
-        console.log('[App] 状态更新: ' + state);
-    }
-
-    // =========================================================
-    // 主题切换
+    // 主题管理
     // =========================================================
 
     /**
@@ -253,7 +94,6 @@
 
     /**
      * 切换暗/亮主题。
-     * 同时更新 localStorage 和 UI 按钮图标。
      */
     function toggleTheme() {
         var current = getCurrentTheme();
@@ -263,17 +103,25 @@
 
     /**
      * 设置主题。
-     * 参数: 'dark' | 'light'
+     *
+     * 参数:
+     * - `theme`: 'dark' | 'light'
      */
     function setTheme(theme) {
+        if (theme !== 'dark' && theme !== 'light') {
+            console.warn('[App] 无效主题: ' + theme + '，使用 light');
+            theme = 'light';
+        }
+
         document.documentElement.setAttribute('data-theme', theme);
+
         try {
             localStorage.setItem('ramaria-theme', theme);
         } catch (_) {
             /* localStorage 不可用（隐私模式等），静默降级 */
         }
 
-        // 更新按钮图标
+        // 更新主题按钮图标
         if (dom.btnToggleTheme) {
             var iconEl = dom.btnToggleTheme.querySelector('.sidebar-nav-icon');
             if (iconEl) {
@@ -286,61 +134,83 @@
 
     /**
      * 从 localStorage 恢复主题偏好。
+     * 如果无保存偏好，默认浅色。
      */
     function restoreTheme() {
         try {
             var saved = localStorage.getItem('ramaria-theme');
-            if (saved === 'light' || saved === 'dark') {
+            if (saved === 'dark' || saved === 'light') {
                 setTheme(saved);
                 return;
             }
         } catch (_) {
             /* 静默降级 */
         }
-        // 默认浅色
+        // 默认浅色（与 HTML 内联脚本一致）
         setTheme('light');
     }
 
     // =========================================================
-    // Sidebar 导航事件
+    // 非 Tauri 环境降级
     // =========================================================
 
-    function initSidebarNavigation() {
-        var navLinks = document.querySelectorAll('.sidebar-nav-link[data-view]');
-        for (var i = 0; i < navLinks.length; i++) {
-            navLinks[i].addEventListener('click', function () {
-                var viewName = this.getAttribute('data-view');
-                if (viewName) {
-                    showView(viewName);
-                }
-            });
+    /**
+     * 非 Tauri 环境时显示浏览器预览模式提示。
+     */
+    function showBrowserFallback() {
+        console.log('[App] 浏览器预览模式：Tauri IPC 不可用');
+
+        if (dom.statusText) {
+            dom.statusText.textContent = '浏览器预览模式';
+        }
+
+        // 直接显示对话视图，Sidebar 可用
+        RamariaStore.set('appState', 'ready', true);
+
+        // 手动触发路由（Router 的 subscribe 可能收不到初始值，取决于初始化顺序）
+        try {
+            if (RamariaRouter && RamariaRouter.isInitialized && RamariaRouter.isInitialized()) {
+                // Router 已初始化，通过 Store 触发
+                RamariaStore.set('appState', 'ready');
+            } else {
+                // Router 尚未初始化，直接操作 DOM
+                _fallbackShowChat();
+            }
+        } catch (_) {
+            _fallbackShowChat();
         }
     }
 
-    // =========================================================
-    // Tauri 事件监听
-    // =========================================================
-
-    function initTauriEvents() {
-        if (!isTauri) return;
-
-        // 监听 Rust 推送的 app-state-changed 事件
-        TauriBridge.listen('app-state-changed', function (event) {
-            var payload = event.payload;
-            if (payload && payload.state) {
-                updateAppState(payload.state);
-            }
-        }).catch(function (err) {
-            console.error('[App] 无法监听 app-state-changed 事件:', err);
-        });
+    /**
+     * 降级显示对话视图（不依赖 Router）。
+     */
+    function _fallbackShowChat() {
+        var chatView = document.querySelector('.view[data-view="chat"]');
+        if (chatView) {
+            chatView.classList.add('active');
+        }
+        if (dom.contentTitle) {
+            dom.contentTitle.textContent = '对话（预览）';
+        }
     }
 
     // =========================================================
     // 初始化
     // =========================================================
 
+    /**
+     * 主初始化流程。
+     *
+     * 执行顺序:
+     *   1. 恢复主题偏好
+     *   2. 绑定主题切换按钮
+     *   3. 初始化 Router（注册 Store 订阅 + Tauri 事件）
+     *   4. Tauri 环境：查询 get_app_state → 触发首次路由
+     *   5. 非 Tauri 环境：降级展示
+     */
     async function init() {
-        console.log('[App] Ramaria 桌面应用启动中...');
+        console.log('[App] Ramaria v' + APP_VERSION + ' 桌面应用启动中...');
+        console.log('[App] 环境: ' + (isTauri ? 'Tauri WebView' : '浏览器预览'));
 
         // 1. 恢复主题
         restoreTheme();
@@ -350,56 +220,161 @@
             dom.btnToggleTheme.addEventListener('click', toggleTheme);
         }
 
-        // 3. 绑定 Sidebar 导航
-        initSidebarNavigation();
+        // 3. 初始化 Router（Router 内部会订阅 Store + Tauri 事件）
+        try {
+            RamariaRouter.init();
+            console.log('[App] Router 已初始化');
+        } catch (err) {
+            console.error('[App] Router 初始化失败:', err);
+        }
 
-        // 4. 绑定 Tauri 事件
-        initTauriEvents();
-
-        // 5. 查询应用状态并路由
+        // 4. 查询初始应用状态
         if (isTauri) {
             try {
-                var state = await TauriBridge.invoke('get_app_state');
-                updateAppState(state);
+                console.log('[App] 正在查询应用状态...');
+                var state = await RamariaApi.chat.getAppState();
+                console.log('[App] 初始状态: ' + state);
+
+                // 同步到 Store，Router 订阅的 'appState' 事件会自动触发首次路由
+                RamariaStore.set('appState', state);
+
+                // 如果状态是 ready/degraded，预加载会话列表和配置
+                if (state === 'ready' || state === 'degraded') {
+                    _preloadData();
+                }
             } catch (err) {
                 console.error('[App] 无法获取应用状态:', err);
-                // 降级：显示错误页
-                dom.statusText.textContent = '连接失败';
-                showView('error', {
+                // 无法连接后端 → 显示错误
+                RamariaStore.set('appState', 'fatal_error', true);
+                RamariaRouter.showView('error', {
                     title: '无法连接后端',
                     subInfo: '请确认应用已正确启动。错误详情：' + (err.message || String(err)),
                 });
+                if (dom.statusText) {
+                    dom.statusText.textContent = '连接失败';
+                }
             }
         } else {
-            // 非 Tauri 环境（浏览器直接打开），显示占位页
-            console.log('[App] 非 Tauri 环境，显示占位视图');
-            dom.statusText.textContent = '浏览器预览模式';
-            showView('chat');
+            // 非 Tauri 环境降级
+            showBrowserFallback();
+        }
+
+        // 5. 开发模式下暴露调试接口
+        if (IS_DEV) {
+            window.__RAMARIA_DEV__ = {
+                store: RamariaStore,
+                api: RamariaApi,
+                router: RamariaRouter,
+                version: APP_VERSION,
+                isTauri: isTauri,
+            };
+            console.log('[App] 开发调试接口已挂载到 window.__RAMARIA_DEV__');
         }
 
         console.log('[App] 初始化完成');
     }
 
+    /**
+     * 预加载应用数据（会话列表、配置、人格列表）。
+     * 并行请求，失败不影响主流程。
+     */
+    async function _preloadData() {
+        console.log('[App] 预加载应用数据...');
+
+        // 并行请求（使用 Promise.allSettled 兼容旧浏览器）
+        var tasks = [
+            RamariaApi.session.list().then(function (sessions) {
+                RamariaStore.set('sessions', sessions);
+                console.log('[App] 会话列表已加载 (' + sessions.length + ' 个)');
+            }).catch(function (err) {
+                console.warn('[App] 加载会话列表失败:', err.message || err);
+            }),
+
+            RamariaApi.config.getBackend().then(function (config) {
+                RamariaStore.set('backendConfig', config);
+                console.log('[App] 后端配置已加载 (' + config.provider + ')');
+            }).catch(function (err) {
+                console.warn('[App] 加载后端配置失败:', err.message || err);
+            }),
+
+            RamariaApi.memory.getPersonas().then(function (personas) {
+                RamariaStore.set('personas', personas);
+                console.log('[App] 人格列表已加载 (' + personas.length + ' 个)');
+            }).catch(function (err) {
+                console.warn('[App] 加载人格列表失败:', err.message || err);
+            }),
+
+            RamariaApi.config.getSettings().then(function (settings) {
+                RamariaStore.set('settings', settings);
+                console.log('[App] 全局设置已加载 (' + settings.length + ' 项)');
+            }).catch(function (err) {
+                console.warn('[App] 加载全局设置失败:', err.message || err);
+            }),
+        ];
+
+        // 兼容性：使用 then/catch 代替 Promise.allSettled
+        var results = [];
+        for (var i = 0; i < tasks.length; i++) {
+            try {
+                await tasks[i];
+                results.push({ status: 'fulfilled' });
+            } catch (_) {
+                results.push({ status: 'rejected' });
+            }
+        }
+
+        var loaded = results.filter(function (r) { return r.status === 'fulfilled'; }).length;
+        console.log('[App] 预加载完成: ' + loaded + '/' + tasks.length + ' 成功');
+    }
+
     // =========================================================
-    // 公开 API（供后续 Batch 3 Router 使用）
+    // 公开 API（保持 Batch 2 的 RamariaApp 接口兼容性）
     // =========================================================
 
     window.RamariaApp = {
-        /** 切换到指定视图 */
-        showView: showView,
-        /** 更新应用状态 */
-        updateAppState: updateAppState,
-        /** 获取当前视图 */
-        getCurrentView: function () { return currentView; },
-        /** 获取当前主题 */
-        getCurrentTheme: getCurrentTheme,
-        /** 设置主题 */
-        setTheme: setTheme,
-        /** 切换主题 */
-        toggleTheme: toggleTheme,
+        /** 版本号 */
+        version: APP_VERSION,
+
         /** 是否在 Tauri 环境中 */
         isTauri: function () { return isTauri; },
+
+        /** 获取当前主题 */
+        getCurrentTheme: getCurrentTheme,
+
+        /** 设置主题 */
+        setTheme: setTheme,
+
+        /** 切换主题 */
+        toggleTheme: toggleTheme,
+
+        /** 获取当前视图（委托给 Router） */
+        getCurrentView: function () {
+            return RamariaRouter ? RamariaRouter.getCurrentView() : null;
+        },
+
+        /** 切换到指定视图（委托给 Router） */
+        showView: function (viewName, options) {
+            if (RamariaRouter) {
+                RamariaRouter.showView(viewName, options);
+            }
+        },
+
+        /** Store 引用（调试用） */
+        getStore: function () { return RamariaStore; },
+
+        /** Api 引用（调试用） */
+        getApi: function () { return RamariaApi; },
+
+        /** Router 引用（调试用） */
+        getRouter: function () { return RamariaRouter; },
     };
+
+    // 防止意外覆盖
+    Object.defineProperty(window, 'RamariaApp', {
+        value: window.RamariaApp,
+        writable: false,
+        configurable: false,
+    });
 
     // =========================================================
     // 启动

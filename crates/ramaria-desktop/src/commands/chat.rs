@@ -232,7 +232,8 @@ fn emit_chat_error(handle: &AppHandle, request_id: &str, err: &ramaria_core::err
 /// 获取当前应用状态。
 ///
 /// 返回:
-/// - 状态字符串："NeedsSetup" | "DownloadingModel" | "Indexing" | "Ready" | "Degraded" | "FatalError"
+/// - 状态字符串（来自 AppState::as_str()，snake_case）：
+///   "needs_setup" | "downloading_model" | "indexing" | "ready" | "degraded" | "fatal_error"
 ///
 /// 说明:
 /// - 前端在加载时调用此命令，根据返回值决定显示哪个页面
