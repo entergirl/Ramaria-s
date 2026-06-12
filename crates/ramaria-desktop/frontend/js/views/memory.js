@@ -75,40 +75,48 @@ var RamariaMemoryView = (function () {
             '<span style="font-size:11px;color:var(--text-tertiary);">筛选记忆归属人格</span>';
         inner.appendChild(toolbar);
 
-        // ── Tab 切换 ──
+        // ── Tab 切换（ARIA Tabs 模式）──
         var tabs = document.createElement('div');
         tabs.className = 'memory-tabs';
+        tabs.setAttribute('role', 'tablist');
+        tabs.setAttribute('aria-label', '记忆层级切换');
         tabs.innerHTML =
-            '<button class="memory-tab active" data-tab="l1">' +
+            '<button class="memory-tab active" data-tab="l1" role="tab" aria-selected="true" aria-controls="memory-panel-l1">' +
                 '📄 L1 摘要' +
                 '<span class="memory-tab-badge" id="memory-badge-l1">-</span>' +
             '</button>' +
-            '<button class="memory-tab" data-tab="l2">' +
+            '<button class="memory-tab" data-tab="l2" role="tab" aria-selected="false" aria-controls="memory-panel-l2">' +
                 '📋 L2 事件' +
                 '<span class="memory-tab-badge" id="memory-badge-l2">-</span>' +
             '</button>' +
-            '<button class="memory-tab" data-tab="l3">' +
+            '<button class="memory-tab" data-tab="l3" role="tab" aria-selected="false" aria-controls="memory-panel-l3">' +
                 '🏷️ L3 性格' +
                 '<span class="memory-tab-badge" id="memory-badge-l3">-</span>' +
             '</button>';
         inner.appendChild(tabs);
 
-        // ── 面板 ──
+        // ── 面板（ARIA tabpanel）──
         var panelL1 = document.createElement('div');
         panelL1.className = 'memory-panel active';
         panelL1.id = 'memory-panel-l1';
+        panelL1.setAttribute('role', 'tabpanel');
+        panelL1.setAttribute('aria-labelledby', '');
         panelL1.setAttribute('data-panel', 'l1');
         inner.appendChild(panelL1);
 
         var panelL2 = document.createElement('div');
         panelL2.className = 'memory-panel';
         panelL2.id = 'memory-panel-l2';
+        panelL2.setAttribute('role', 'tabpanel');
+        panelL2.setAttribute('aria-labelledby', '');
         panelL2.setAttribute('data-panel', 'l2');
         inner.appendChild(panelL2);
 
         var panelL3 = document.createElement('div');
         panelL3.className = 'memory-panel';
         panelL3.id = 'memory-panel-l3';
+        panelL3.setAttribute('role', 'tabpanel');
+        panelL3.setAttribute('aria-labelledby', '');
         panelL3.setAttribute('data-panel', 'l3');
         inner.appendChild(panelL3);
 
@@ -435,41 +443,47 @@ var RamariaMemoryView = (function () {
             tags.style.justifyContent = 'flex-start';
 
             for (var t = 0; t < traits.length; t++) {
-                var trait = traits[t];
-                var confidencePct = trait.confidence != null ? Math.round(trait.confidence * 100) : 0;
+                // ★ 使用 let 声明以创建块级作用域闭包
+                //    修复：var trait（函数作用域→所有回调共享最后一个值）
+                //    let trait 确保每个 addEventListener 闭包捕获当次循环的值
+                var _trait = traits[t];
+                var _confidencePct = _trait.confidence != null ? Math.round(_trait.confidence * 100) : 0;
 
                 var tag = document.createElement('button');
                 tag.className = 'memory-l3-tag layer-' + layer;
-                tag.textContent = trait.label || trait.meaning || '?';
-                tag.title = (trait.meaning || '') +
-                    '\nnot: ' + (trait.not_meaning || '-') +
-                    '\n置信度: ' + confidencePct + '%' +
-                    '\n证据量: ' + (trait.evidence || 0) +
-                    '\n状态: ' + (trait.status || 'active');
+                tag.textContent = _trait.label || _trait.meaning || '?';
+                tag.title = (_trait.meaning || '') +
+                    '\nnot: ' + (_trait.not_meaning || '-') +
+                    '\n置信度: ' + _confidencePct + '%' +
+                    '\n证据量: ' + (_trait.evidence || 0) +
+                    '\n状态: ' + (_trait.status || 'active');
 
-                tag.addEventListener('click', function () {
-                    var detail =
-                        '标签: ' + (trait.label || '-') + '\n' +
-                        '含义: ' + (trait.meaning || '-') + '\n' +
-                        '非含义: ' + (trait.not_meaning || '-') + '\n' +
-                        '层次: ' + (trait.layer || '-') + '\n' +
-                        '置信度: ' + confidencePct + '%\n' +
-                        '证据量: ' + (trait.evidence || 0) + '\n' +
-                        '一致性: ' + (trait.consistency != null ? (trait.consistency * 100).toFixed(0) + '%' : '-') + '\n' +
-                        '状态: ' + (trait.status || 'active') + '\n' +
-                        '触发: ' + (trait.trigger || '-') + '\n' +
-                        '抑制: ' + (trait.suppress || '-') + '\n' +
-                        '创建: ' + RamariaFormat.smartTime(trait.created_at);
+                // 通过 IIFE 绑定当前循环值，避免闭包引用循环变量
+                (function (trait, confidencePct) {
+                    tag.addEventListener('click', function () {
+                        var detail =
+                            '标签: ' + (trait.label || '-') + '\n' +
+                            '含义: ' + (trait.meaning || '-') + '\n' +
+                            '非含义: ' + (trait.not_meaning || '-') + '\n' +
+                            '层次: ' + (trait.layer || '-') + '\n' +
+                            '置信度: ' + confidencePct + '%\n' +
+                            '证据量: ' + (trait.evidence || 0) + '\n' +
+                            '一致性: ' + (trait.consistency != null ? (trait.consistency * 100).toFixed(0) + '%' : '-') + '\n' +
+                            '状态: ' + (trait.status || 'active') + '\n' +
+                            '触发: ' + (trait.trigger || '-') + '\n' +
+                            '抑制: ' + (trait.suppress || '-') + '\n' +
+                            '创建: ' + RamariaFormat.smartTime(trait.created_at);
 
-                    RamariaModal.show({
-                        title: '性格标签: ' + (trait.label || '?'),
-                        body: '<pre style="font-size:12.5px;line-height:1.7;color:var(--text-primary);' +
-                              'white-space:pre-wrap;word-break:break-word;margin:0;font-family:var(--font-body);">' +
-                              (RamariaMarkdown ? RamariaMarkdown.sanitize(detail) : detail) +
-                              '</pre>',
-                        footer: '<button class="btn btn-secondary" data-action="close">关闭</button>',
+                        RamariaModal.show({
+                            title: '性格标签: ' + (trait.label || '?'),
+                            body: '<pre style="font-size:12.5px;line-height:1.7;color:var(--text-primary);' +
+                                  'white-space:pre-wrap;word-break:break-word;margin:0;font-family:var(--font-body);">' +
+                                  (RamariaMarkdown ? RamariaMarkdown.sanitize(detail) : detail) +
+                                  '</pre>',
+                            footer: '<button class="btn btn-secondary" data-action="close">关闭</button>',
+                        });
                     });
-                });
+                })(_trait, _confidencePct);
 
                 tags.appendChild(tag);
             }

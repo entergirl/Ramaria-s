@@ -627,12 +627,21 @@ var RamariaSetupView = (function () {
             }, 1500);
 
         } catch (err) {
-            var msg = err.message || String(err);
-            console.error('[SetupView] 配置保存失败:', msg);
+            var rawMsg = err.message || String(err);
+            console.error('[SetupView] 配置保存失败:', rawMsg);
 
-            _updateInitLine('setup-init-save', 'fail', '保存失败：' + msg);
+            // 构建上下文相关的错误提示
+            // 如果用户跳过了连接测试，失败很可能是连接问题
+            var hint = '';
+            if (!_testPassed) {
+                hint = '\n\n💡 您跳过了连接测试，这可能是服务不可达导致的。'
+                     + '\n建议返回第一步点击「测试连接」确认配置正确。';
+            }
 
-            RamariaToast.show('error', '配置失败', msg);
+            _updateInitLine('setup-init-save', 'fail', '保存失败：' + rawMsg);
+
+            RamariaToast.show('error', '配置失败', rawMsg + hint,
+                { duration: hint ? 8000 : 4000 });
 
             if (btnNext) btnNext.disabled = false;
             if (btnPrev) btnPrev.disabled = false;

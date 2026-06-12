@@ -9,6 +9,7 @@
 
 use crate::DesktopState;
 use crate::events::{ChatDeltaPayload, ChatDonePayload, ChatErrorPayload};
+use crate::notification;
 use ramaria_app::error_hint;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
@@ -118,11 +119,14 @@ async fn process_message_stream(
 
     // 逐事件消费流（send_message 已返回 Pin<Box<dyn Stream>>）
     let mut total_chars: usize = 0;
+    // 累积完整回复文本（用于通知预览）
+    let mut accumulated_text = String::new();
 
     while let Some(event_result) = stream.next().await {
         match event_result {
             Ok(ramaria_app::StreamEvent::Delta { content, .. }) => {
                 total_chars += content.chars().count();
+                accumulated_text.push_str(&content);
                 let payload = ChatDeltaPayload::new(request_id.clone(), content);
                 if let Err(e) = handle.emit(crate::events::EVENT_CHAT_DELTA, &payload) {
                     tracing::error!(
@@ -151,6 +155,10 @@ async fn process_message_stream(
                     total_chars = total_chars,
                     "对话完成"
                 );
+
+                // ---- 发送桌面通知（窗口不可见时） ----
+                notification::send_chat_notification(&handle, &accumulated_text, total_chars);
+
                 return;
             }
             Ok(ramaria_app::StreamEvent::Error { error, .. }) => {
@@ -205,6 +213,11 @@ async fn process_message_stream(
         total_chars = total_chars,
         "流在 Done 事件前意外结束，已发送合成 Done"
     );
+
+    // 流意外结束时也发送通知（如果有累积文本）
+    if !accumulated_text.is_empty() {
+        notification::send_chat_notification(&handle, &accumulated_text, total_chars);
+    }
 }
 
 /// 辅助函数：将 RamariaError 转换为 ChatErrorPayload 并发射 `chat-error` 事件。

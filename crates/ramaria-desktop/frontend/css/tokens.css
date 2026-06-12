@@ -150,6 +150,12 @@
   /* ── 选中文字 ── */
   --selection-bg: var(--pink-200);
   --selection-text: var(--gray-700);
+
+  /* ── 下拉箭头 ──
+     箭头颜色需与 --text-tertiary 保持一致的视觉权重。
+     data: URI 中的 stroke 色为 URL 编码 hex：%23 + 六位 hex。
+     亮色: #6b6b6b  ≈ oklch(0.52 0 0)；暗色: #b3b3b3 ≈ oklch(0.70 0 0)。 */
+  --select-arrow-svg: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236b6b6b' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -184,6 +190,9 @@
   /* ── 选中文字 ── */
   --selection-bg: oklch(0.53 0.19 10 / 0.35);
   --selection-text: oklch(0.94 0 0);
+
+  /* ── 下拉箭头（暗色）── */
+  --select-arrow-svg: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23b3b3b3' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
 
   /* ── 浅色阶暗色映射（修复表面/背景色在暗色模式下过亮）──
      这些色阶在原 :root 中定义为浅色（用于亮底界面的背景/表面），

@@ -12,7 +12,9 @@
  * - 流式追加使用 RamariaMessageBubble.updateContent，打字光标 CSS 驱动
  * - PersonaSelector 下拉联动 Store.personas，默认选中 rama-0001
  * - 空状态显示引导文案和快捷提示词
- * - rAF 批量更新 DOM（16ms 防抖），防止高频流式卡顿
+ * - 双层刷新策略：rAF（16ms/帧） + maxBatchTimer（32ms 安全网）防止标签页后台卡顿
+ * - scrollToBottom rAF 批量化（单帧内多次调用合并为一次）
+ * - 流式期间 GPU 层提示 + content-visibility:auto 加速渲染
  * - Enter 发送 / Shift+Enter 换行
  *
  * 依赖:
@@ -21,7 +23,7 @@
  * - RamariaToast（js/components/toast.js）
  * - RamariaFormat（js/utils/format.js）
  * - TauriBridge（js/tauri-bridge.js）
- * - CSS: css/views/chat.css
+ * - CSS: css/views/chat.css + css/animations.css
  */
 
 var RamariaChatView = (function () {
@@ -38,12 +40,31 @@ var RamariaChatView = (function () {
     /** Store 订阅取消函数 */
     var _unsubs = [];
 
+    /**
+     * 消息自增计数器（用于防止同一毫秒内多条消息 ID 碰撞）。
+     * Date.now() 在人类交互场景下几乎不可能碰撞，但作为防御性编程，
+     * 计数器确保即使极端情况（脚本批量发送）下每条消息 ID 唯一。
+     */
+    var _msgCounter = 0;
+
     /** 流式追加文本缓冲（用于 rAF 批量更新） */
     var _pendingDelta = '';
     /** 流式消息 ID */
     var _streamingMsgId = null;
-    /** rAF 句柄 */
+    /** rAF 句柄（16ms 一帧，与显示器刷新率同步） */
     var _rafHandle = null;
+    /**
+     * 最大批量间隔定时器句柄（安全网）。
+     *
+     * rAF 在标签页不可见时可能被浏览器节流（降到 1fps 甚至暂停），
+     * 纯 rAF 方案在后台标签页中可能导致 delta 堆积。
+     * 此定时器作为安全网：无论 rAF 是否触发，最多 32ms（2帧）必须刷新。
+     */
+    var _maxBatchTimer = null;
+    /** 最大批量间隔（毫秒）。32ms ≈ 2 帧 @60Hz，足够快且不造成 jank */
+    var MAX_BATCH_MS = 32;
+    /** 滚动操作防抖 rAF 句柄 */
+    var _scrollRafHandle = null;
 
     // =========================================================
     // DOM 快捷查询
@@ -92,6 +113,10 @@ var RamariaChatView = (function () {
         var msgList = document.createElement('div');
         msgList.className = 'chat-message-list';
         msgList.id = 'chat-message-list';
+        msgList.setAttribute('role', 'log');              // 动态消息区域
+        msgList.setAttribute('aria-live', 'polite');      // 屏幕阅读器：新消息时朗读
+        msgList.setAttribute('aria-label', '对话消息列表');
+        msgList.setAttribute('tabindex', '0');            // 可聚焦以支持键盘滚动
         container.appendChild(msgList);
 
         // 初始空状态
@@ -392,9 +417,10 @@ var RamariaChatView = (function () {
         var personaSelect = $('chat-persona-select');
         var personaUid = personaSelect ? personaSelect.value : 'rama-0001';
 
-        // 生成用户消息 ID
-        var userMsgId = 'msg-' + Date.now() + '-u';
+        // 生成用户消息 ID（时间戳 + 自增计数器防碰撞）
         var now = Date.now();
+        _msgCounter++;
+        var userMsgId = 'msg-' + now + '-' + _msgCounter + '-u';
 
         // 1. 追加用户消息到 Store（Store.appendMessage 触发订阅者 → _renderAllMessages 全量渲染，
         //    不需要额外调用 _appendBubble，否则会重复插入第二条气泡）
@@ -420,7 +446,10 @@ var RamariaChatView = (function () {
             RamariaStore.set('isStreaming', true);
             RamariaStore.set('streamingRequestId', requestId);
 
-            // 6. 创建流式气泡
+            // 6. 启用流式性能优化（GPU 层 + content-visibility）
+            _enableStreamOptimizations();
+
+            // 7. 创建流式气泡
             var streamingId = 'msg-' + requestId;
             _streamingMsgId = streamingId;
             _pendingDelta = '';
@@ -469,16 +498,35 @@ var RamariaChatView = (function () {
 
             _pendingDelta += delta;
 
-            // rAF 批量更新（16ms 防抖）
+            /*
+             * 双层刷新策略：
+             *
+             * 第 1 层：rAF（16ms 一帧 @60Hz）
+             *   与显示器刷新率同步，在 GPU 垂直同步间隙批量提交 DOM 更新。
+             *   这是主力机制——高频 delta（每 5-10ms 一条）会被合并到一帧。
+             *
+             * 第 2 层：maxBatchTimer（32ms 安全网）
+             *   防止 rAF 节流导致文本长时间不显示。
+             *   场景：标签页后台（rAF 降到 1fps）、极慢流（delta 间隔 >16ms）。
+             *   两个定时器互斥：任一触发后清除另一个。
+             */
+
+            // 第 1 层：rAF
             if (!_rafHandle) {
-                _rafHandle = requestAnimationFrame(function () {
-                    _rafHandle = null;
-                    if (_streamingMsgId && _pendingDelta) {
-                        RamariaMessageBubble.updateContent(_streamingMsgId, _pendingDelta);
-                        _pendingDelta = '';
-                        _scrollToBottom();
+                _rafHandle = requestAnimationFrame(_flushDelta);
+            }
+
+            // 第 2 层：max batch timer（安全网）
+            if (!_maxBatchTimer) {
+                _maxBatchTimer = setTimeout(function () {
+                    // 如果 rAF 还没触发，强制刷新
+                    if (_rafHandle) {
+                        cancelAnimationFrame(_rafHandle);
+                        _rafHandle = null;
                     }
-                });
+                    _maxBatchTimer = null;
+                    _flushDelta();
+                }, MAX_BATCH_MS);
             }
         }).then(function (unlisten) {
             _unlistenFns.push(unlisten);
@@ -497,15 +545,11 @@ var RamariaChatView = (function () {
 
             console.log('[ChatView] 流式完成: ' + payload.request_id);
 
-            // 刷新 pending delta
-            if (_rafHandle) {
-                cancelAnimationFrame(_rafHandle);
-                _rafHandle = null;
-            }
-            if (_streamingMsgId && _pendingDelta) {
-                RamariaMessageBubble.updateContent(_streamingMsgId, _pendingDelta);
-                _pendingDelta = '';
-            }
+            // 强制刷新所有待处理 delta（清空 rAF + maxBatchTimer）
+            _flushDelta();
+
+            // 卸载流式性能优化
+            _disableStreamOptimizations();
 
             var completedMsgId = _streamingMsgId;  // 在置空前保存
 
@@ -569,12 +613,11 @@ var RamariaChatView = (function () {
             var detail = payload.error_detail || '请稍后重试';
             console.error('[ChatView] 流式错误: ' + payload.request_id, title, detail);
 
-            // 取消 pending
-            if (_rafHandle) {
-                cancelAnimationFrame(_rafHandle);
-                _rafHandle = null;
-            }
-            _pendingDelta = '';
+            // 强制刷新所有待处理 delta 后清理
+            _flushDelta();
+
+            // 卸载流式性能优化
+            _disableStreamOptimizations();
 
             // 标记气泡错误
             RamariaMessageBubble.markError(_streamingMsgId, title);
@@ -606,11 +649,23 @@ var RamariaChatView = (function () {
         }
         _unlistenFns = [];
 
-        // 清理 rAF
+        // 清理 rAF 和 maxBatchTimer
         if (_rafHandle) {
             cancelAnimationFrame(_rafHandle);
             _rafHandle = null;
         }
+        if (_maxBatchTimer) {
+            clearTimeout(_maxBatchTimer);
+            _maxBatchTimer = null;
+        }
+        if (_scrollRafHandle) {
+            cancelAnimationFrame(_scrollRafHandle);
+            _scrollRafHandle = null;
+        }
+
+        // 卸载流式优化
+        _disableStreamOptimizations();
+
         _pendingDelta = '';
         _streamingMsgId = null;
     }
@@ -668,9 +723,62 @@ var RamariaChatView = (function () {
     }
 
     // =========================================================
+    // 流式辅助
+    // =========================================================
+
+    /**
+     * 刷新待处理的 delta 到 DOM（rAF / maxBatchTimer 双路径调用）。
+     *
+     * 说明:
+     * - 由 rAF 回调和 maxBatchTimer 回调共享
+     * - 清空 _pendingDelta 和两个定时器句柄
+     * - 调用 RamariaMessageBubble.updateContent 写入 DOM
+     * - 触发滚动（通过 rAF 批量化，避免 layout thrashing）
+     */
+    function _flushDelta() {
+        // 清除两个定时器
+        if (_rafHandle) {
+            cancelAnimationFrame(_rafHandle);
+            _rafHandle = null;
+        }
+        if (_maxBatchTimer) {
+            clearTimeout(_maxBatchTimer);
+            _maxBatchTimer = null;
+        }
+
+        if (_streamingMsgId && _pendingDelta) {
+            RamariaMessageBubble.updateContent(_streamingMsgId, _pendingDelta);
+            _pendingDelta = '';
+            _scrollToBottomBathed();
+        }
+    }
+
+    // =========================================================
     // 辅助
     // =========================================================
 
+    /**
+     * 滚动到消息列表底部（rAF 批量化）。
+     *
+     * 说明:
+     * - 在单帧内多次调用 _scrollToBottom 只执行最后一次（合并写操作）。
+     * - 避免在高频 delta 场景下每 delta 都触发 layout→paint 循环。
+     * - scrollTop 赋值触发同步 layout，必须限制频率。
+     */
+    function _scrollToBottomBathed() {
+        if (_scrollRafHandle) return;  // 已有待处理的滚动，跳过
+        _scrollRafHandle = requestAnimationFrame(function () {
+            _scrollRafHandle = null;
+            var msgList = _msgListEl();
+            if (msgList) {
+                msgList.scrollTop = msgList.scrollHeight;
+            }
+        });
+    }
+
+    /**
+     * 立即滚动到底部（非流式场景：消息完成、切换会话等）。
+     */
     function _scrollToBottom() {
         var msgList = _msgListEl();
         if (msgList) {
@@ -686,6 +794,34 @@ var RamariaChatView = (function () {
 
         if (input) input.disabled = !enabled;
         if (sendBtn) sendBtn.disabled = !enabled;
+    }
+
+    /**
+     * 流式开始时：添加 GPU 加速提示层（will-change）
+     * 和 content-visibility 优化。
+     */
+    function _enableStreamOptimizations() {
+        var msgList = _msgListEl();
+        if (msgList) {
+            // GPU 合成层提示：告知浏览器此区域将频繁重绘
+            msgList.classList.add('gpu-layer');
+            // content-visibility: auto 跳过屏幕外气泡渲染
+            msgList.classList.add('content-optimized');
+            // 标记流式状态供 CSS 使用
+            msgList.classList.add('is-streaming');
+        }
+    }
+
+    /**
+     * 流式结束时：移除性能优化提示层。
+     */
+    function _disableStreamOptimizations() {
+        var msgList = _msgListEl();
+        if (msgList) {
+            msgList.classList.remove('gpu-layer');
+            msgList.classList.remove('content-optimized');
+            msgList.classList.remove('is-streaming');
+        }
     }
 
     // =========================================================

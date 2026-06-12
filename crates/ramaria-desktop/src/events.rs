@@ -19,6 +19,8 @@ pub const EVENT_CHAT_DELTA: &str = "chat-delta";
 pub const EVENT_CHAT_DONE: &str = "chat-done";
 /// 聊天错误事件名
 pub const EVENT_CHAT_ERROR: &str = "chat-error";
+/// 关闭窗口确认事件名（前端弹窗后用户选择操作）
+pub const EVENT_CLOSE_REQUESTED: &str = "close-requested";
 /// 应用状态变更事件名（预留，Phase 5 后续批次启用）
 #[allow(dead_code)]
 pub const EVENT_APP_STATE: &str = "app-state-changed";

@@ -160,10 +160,11 @@ var RamariaSkeleton = (function () {
         // 数据行
         for (var i = 0; i < 5; i++) {
             html += '<div style="display:flex;gap:12px;padding:9px 12px;border-bottom:1px solid var(--border-light)">';
+            // 使用 inline style 控制列宽（w-* class 适合文本行百分比，不适合 flex 列布局）
             html += '<div class="skeleton skeleton-line" style="width:30%"></div>';
-            html += '<div class="skeleton skeleton-line w-80" style="width:20%"></div>';
-            html += '<div class="skeleton skeleton-line w-60" style="width:25%"></div>';
-            html += '<div class="skeleton skeleton-line w-40" style="width:15%"></div>';
+            html += '<div class="skeleton skeleton-line" style="width:20%"></div>';
+            html += '<div class="skeleton skeleton-line" style="width:25%"></div>';
+            html += '<div class="skeleton skeleton-line" style="width:15%"></div>';
             html += '</div>';
         }
 

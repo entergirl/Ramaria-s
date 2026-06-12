@@ -285,11 +285,13 @@ pub fn run() {
             commands::export::export_sessions_markdown,
             // ---- Index ----
             commands::index_cmd::rebuild_index,
+            // ---- System ----
+            tray::confirm_close_action,
         ])
         .setup(move |app| {
             // 初始化系统托盘
             if let Err(e) = tray::setup_tray(app.handle()) {
-                tracing::error!(error = %e, "系统托盘初始化失败");
+                tracing::error!(error = %e, "系统托盘初始化失败，应用继续运行");
                 // 托盘失败不是致命错误，应用仍可运行
             }
 

@@ -105,22 +105,19 @@
   flex-direction: column;
 }
 
-/* 消息气泡 wrapper */
+/*
+ * 消息气泡 wrapper
+ * 注意：fadeInUp 关键帧定义在 css/animations.css（集中管理）
+ */
 .msg-bubble-wrapper {
   flex-shrink: 0;
-  animation: msgFadeIn 220ms var(--ease-out);
+  animation: fadeInUp var(--dur-normal) var(--ease-out) both;
 }
 
-@keyframes msgFadeIn {
-  from { opacity: 0; transform: translateY(8px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
-
-/* 打字光标闪烁 */
-@keyframes typingBlink {
-  0%, 100% { opacity: 1; }
-  50%      { opacity: 0; }
-}
+/*
+ * 打字光标闪烁
+ * 注意：typingBlink 关键帧定义在 css/animations.css
+ */
 
 /* 空状态 */
 .chat-empty-state {
@@ -135,15 +132,14 @@
   color: var(--text-tertiary);
 }
 
+/*
+ * 空状态图标浮动
+ * 注意：floatBreathe 关键帧定义在 css/animations.css
+ */
 .chat-empty-icon {
   font-size: 56px;
   margin-bottom: var(--space-2);
-  animation: chatFloatAnim 4s ease-in-out infinite;
-}
-
-@keyframes chatFloatAnim {
-  0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(-8px); }
+  animation: floatBreathe 4s ease-in-out infinite;
 }
 
 .chat-empty-title {
@@ -311,16 +307,20 @@
   gap: var(--space-1);
 }
 
+/*
+ * 流式提示跳动点
+ * dotBounce 关键帧由 css/animations.css 集中提供
+ */
 .chat-streaming-dot {
   width: 6px;
   height: 6px;
   border-radius: var(--radius-full);
   background: var(--color-primary);
-  animation: typingBlink 1.2s step-end infinite;
+  animation: dotBounce 1.2s ease-in-out infinite;
 }
 
-.chat-streaming-dot:nth-child(2) { animation-delay: 0.2s; }
-.chat-streaming-dot:nth-child(3) { animation-delay: 0.4s; }
+.chat-streaming-dot:nth-child(2) { animation-delay: 0.15s; }
+.chat-streaming-dot:nth-child(3) { animation-delay: 0.3s; }
 
 /* =========================================================
    5. 响应式
@@ -346,12 +346,7 @@
   }
 }
 
-/* prefers-reduced-motion */
-@media (prefers-reduced-motion: reduce) {
-  .msg-bubble-wrapper {
-    animation: none;
-  }
-  .chat-empty-icon {
-    animation: none;
-  }
-}
+/*
+ * prefers-reduced-motion：由 css/animations.css §14 统一处理，
+ * 此处不需要额外覆盖。
+ */

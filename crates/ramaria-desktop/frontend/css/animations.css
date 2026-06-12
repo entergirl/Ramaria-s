@@ -1,0 +1,376 @@
+/* ═══════════════════════════════════════════════════════════
+   css/animations.css — Ramaria 动效系统
+   设计特点:
+   - 集中管理所有 UI 关键帧动画，零分散到视图文件
+   - 严格对齐 phase5-design-plan.md §6 动效规范
+   - 五档时长（120/180/220/250/1800ms） + 三段缓动（ease-out/ease-in-out/spring）
+   - 消息入场：fadeInUp（opacity 0→1 + translateY 8px→0）
+   - 视图切换：crossfade（旧视图 120ms 淡出 + 新视图 120ms 淡入）
+   - Toast 通知：slideInUp / slideOutDown
+   - 骨架屏：shimmer（background-position 位移，1800ms 循环）
+   - Loading spinner：spin（360° rotate，800ms 匀速）
+   - 打字光标：typingBlink（step-end 闪烁）
+   - 浮动装饰：floatBreathe（空状态图标呼吸感浮动）
+   - 弹窗入场：scaleIn（scale 0.95→1 + opacity 0→1）
+   - prefers-reduced-motion：全关闭（duration 0.01ms），跨所有动效
+   - 与 tokens.css 动效变量联动（--ease-out / --dur-fast 等）
+   ═══════════════════════════════════════════════════════════ */
+
+/* =========================================================
+   1. 消息入场（fadeInUp）
+   ========================================================= */
+
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* 应用类：消息气泡入场 */
+.anim-fade-in-up {
+  animation: fadeInUp var(--dur-normal) var(--ease-out) both;
+}
+
+/* 延迟入场（交错效果，供批量渲染使用） */
+.anim-fade-in-up--delay-1 { animation-delay: 40ms; }
+.anim-fade-in-up--delay-2 { animation-delay: 80ms; }
+.anim-fade-in-up--delay-3 { animation-delay: 120ms; }
+
+/* =========================================================
+   2. 视图切换（crossfade）
+   ========================================================= */
+
+@keyframes fadeOutQuick {
+  from { opacity: 1; }
+  to   { opacity: 0; }
+}
+
+@keyframes fadeInQuick {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* 离开动画：旧视图快速淡出 */
+.view--leaving {
+  animation: fadeOutQuick var(--dur-fast) var(--ease-out) forwards;
+  pointer-events: none;            /* 离开中的视图不可交互 */
+}
+
+/* 进入动画：新视图快速淡入 */
+.view--entering {
+  animation: fadeInQuick var(--dur-fast) var(--ease-out) both;
+}
+
+/* =========================================================
+   3. Toast 通知入场/退场
+   ========================================================= */
+
+@keyframes slideInUp {
+  from {
+    opacity: 0;
+    transform: translateY(16px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes slideOutDown {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(16px) scale(0.96);
+  }
+}
+
+/* Toast 入场（由 toast.js 创建时自动触发） */
+.toast {
+  animation: slideInUp var(--dur-normal) var(--ease-spring) both;
+}
+
+/* Toast 退场（由 toast.js 添加 .removing 类触发） */
+.toast.removing {
+  animation: slideOutDown var(--dur-fast) var(--ease-out) forwards;
+}
+
+/* =========================================================
+   4. 骨架屏 shimmer
+   ========================================================= */
+
+@keyframes shimmer {
+  0% {
+    background-position: -400px 0;
+  }
+  100% {
+    background-position: 400px 0;
+  }
+}
+
+/* 骨架屏动画（由 components.css 的 .skeleton 基础样式 + 此动画组合） */
+.anim-shimmer {
+  animation: shimmer 1.8s linear infinite;
+}
+
+/* =========================================================
+   5. Loading spinner
+   ========================================================= */
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+/* 旋转图标（用于进度页和加载按钮） */
+.anim-spin {
+  animation: spin 0.8s linear infinite;
+}
+
+/* ---- 进度页专用 spinner（替换占位 emoji） ---- */
+
+.spinner-ring {
+  display: inline-block;
+  width: 48px;
+  height: 48px;
+  border: 3px solid var(--border-light);
+  border-top-color: var(--color-primary);
+  border-radius: var(--radius-full);
+  animation: spin 0.8s linear infinite;
+}
+
+.spinner-ring--sm {
+  width: 20px;
+  height: 20px;
+  border-width: 2px;
+}
+
+.spinner-ring--lg {
+  width: 64px;
+  height: 64px;
+  border-width: 4px;
+}
+
+/* =========================================================
+   6. 打字光标闪烁
+   ========================================================= */
+
+@keyframes typingBlink {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0; }
+}
+
+/* 打字光标（由 message-bubble.js 内联使用） */
+.typing-cursor {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  background: var(--color-primary);
+  margin-left: 1px;
+  vertical-align: text-bottom;
+  animation: typingBlink 0.8s step-end infinite;
+}
+
+/* =========================================================
+   7. 浮动装饰动画
+   ========================================================= */
+
+@keyframes floatBreathe {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-8px); }
+}
+
+/* 空状态图标浮动（chat / memory 共用） */
+.anim-float {
+  animation: floatBreathe 4s ease-in-out infinite;
+}
+
+/* =========================================================
+   8. 弹窗入场（scaleIn）
+   ========================================================= */
+
+@keyframes scaleIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* 弹窗/Modal 入场 */
+.modal.anim-scale-in {
+  animation: scaleIn var(--dur-normal) var(--ease-spring) both;
+}
+
+/* =========================================================
+   9. 按钮点击反馈
+   ========================================================= */
+
+@keyframes btnPulse {
+  0%   { box-shadow: 0 0 0 0 oklch(0.53 0.19 10 / 0.4); }
+  70%  { box-shadow: 0 0 0 8px oklch(0.53 0.19 10 / 0); }
+  100% { box-shadow: 0 0 0 0 oklch(0.53 0.19 10 / 0); }
+}
+
+/* 按钮点击涟漪（可选增强） */
+.btn-pulse:active {
+  animation: btnPulse 0.3s var(--ease-out);
+}
+
+/* =========================================================
+   10. 警告条脉动
+   ========================================================= */
+
+@keyframes alertPulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.7; }
+}
+
+/* Degraded 状态下的状态指示灯脉动 */
+.status-bar-dot.degraded {
+  animation: alertPulse 2s ease-in-out infinite;
+}
+
+/* =========================================================
+   11. 流式渲染的「正在生成」三点跳动
+   ========================================================= */
+
+@keyframes dotBounce {
+  0%, 60%, 100% {
+    transform: translateY(0);
+    opacity: 0.4;
+  }
+  30% {
+    transform: translateY(-4px);
+    opacity: 1;
+  }
+}
+
+/*
+ * 三点跳动由 chat.css 的 .chat-streaming-dot 触发，
+ * 此处仅定义关键帧动画 dotBounce。
+ * 点的基础样式（大小/颜色）在 chat.css 中声明。
+ */
+
+/* =========================================================
+   12. Tab 切换指示器滑动
+   ========================================================= */
+
+@keyframes tabIndicatorSlide {
+  from { transform: scaleX(0.6); opacity: 0; }
+  to   { transform: scaleX(1); opacity: 1; }
+}
+
+/* Tab 下划线指示器入场 */
+.tab-indicator {
+  animation: tabIndicatorSlide var(--dur-normal) var(--ease-out);
+}
+
+/* =========================================================
+   13. 性能优化提示
+   ========================================================= */
+
+/*
+ * 以下容器在流式渲染时获得 GPU 合成层提升。
+ * 由 chat.js 在 isStreaming 时添加 .gpu-layer 类。
+ */
+.gpu-layer {
+  will-change: transform;
+}
+
+/*
+ * 消息列表滚动容器优化：
+ * 通过 content-visibility: auto 跳过屏幕外气泡的渲染。
+ * 消息气泡数量多时显著减少布局耗时。
+ */
+.chat-message-list.content-optimized .msg-bubble-wrapper {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 80px;   /* 估算气泡高度 80px */
+}
+
+/* =========================================================
+   14. 无障碍：关闭所有动效
+   ========================================================= */
+
+/*
+ * 全局 prefers-reduced-motion 覆盖。
+ * 注意：reset.css 已有基础覆盖，此处仅补充动画特定规则。
+ * 使用 !important 确保覆盖所有内联和外部动画声明。
+ */
+@media (prefers-reduced-motion: reduce) {
+  /* 关闭所有关键帧动画 */
+  .anim-fade-in-up,
+  .anim-float,
+  .anim-spin,
+  .anim-shimmer,
+  .toast,
+  .toast.removing,
+  .modal.anim-scale-in,
+  .btn-pulse:active,
+  .typing-cursor,
+  .chat-streaming-dot,
+  .spinner-ring,
+  .msg-bubble-wrapper,
+  .chat-empty-icon,
+  .status-bar-dot.degraded,
+  .tab-indicator {
+    animation: none !important;
+  }
+
+  /* 关闭视图切换过渡 */
+  .view--leaving,
+  .view--entering {
+    animation: none !important;
+  }
+
+  /* 降级为即时显示 */
+  .view--leaving {
+    opacity: 0;
+  }
+
+  .view--entering {
+    opacity: 1;
+  }
+
+  /* 骨架屏 shimmer 改为静态占位 */
+  .skeleton {
+    background: var(--bg-subtle) !important;
+    background-image: none !important;
+  }
+
+  /* GPU 层不再需要 */
+  .gpu-layer {
+    will-change: auto;
+  }
+}
+
+/* =========================================================
+   15. 调试辅助（生产环境注释掉）
+   ========================================================= */
+
+/*
+ * 开发阶段取消注释以可视化动画边界。
+ * 所有动画元素显示 1px 粉色虚线边框。
+ */
+
+/*
+.anim-fade-in-up,
+.anim-float,
+.anim-spin,
+.anim-shimmer,
+.toast,
+.modal.anim-scale-in {
+  outline: 1px dashed oklch(0.53 0.19 10 / 0.4) !important;
+  outline-offset: -1px;
+}
+*/

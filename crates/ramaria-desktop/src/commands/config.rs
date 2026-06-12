@@ -17,7 +17,12 @@ use tauri::State;
 // =========================================================
 
 /// 后端配置视图（API key 仅返回遮罩版本：前 4 位 + ... + 后 4 位）。
+///
+/// 序列化约定：camelCase 以对齐前端 JS 访问（config.baseUrl / config.modelId）。
+/// 默认 serde 序列化为 snake_case，但前端 JS 代码全部使用 camelCase，
+/// 如不显式重命名会导致 `config.baseUrl` 始终为 undefined → 回退到默认值。
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BackendConfigView {
     pub provider: String,
     pub model_id: String,

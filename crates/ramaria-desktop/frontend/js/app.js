@@ -221,6 +221,11 @@
                 if (state === 'ready' || state === 'degraded') {
                     _preloadData();
                 }
+
+                // ★ 监听关闭窗口确认事件
+                // Rust 端拦截 CloseRequested → 发送 close-requested 事件 →
+                // 前端弹窗让用户选择「最小化到托盘」或「退出 Ramaria」
+                _listenCloseRequested();
             } catch (err) {
                 console.error('[App] 无法获取应用状态:', err);
                 // 无法连接后端 → 显示错误
@@ -287,6 +292,67 @@
             console.log('[App] 全局设置已加载 (' + settings.length + ' 项)');
         }).catch(function (err) {
             console.warn('[App] 加载全局设置失败:', err.message || err);
+        });
+    }
+
+    /**
+     * 监听 Rust 端 close-requested 事件，弹窗让用户确认关闭操作。
+     *
+     * 弹窗选项:
+     * - 「最小化到托盘」：调用 confirm_close_action("minimize") → 窗口隐藏
+     * - 「退出 Ramaria」：调用 confirm_close_action("exit") → 应用退出
+     *
+     * 说明:
+     * - 事件由 tray.rs 的 intercept_close_event 在用户点击 × 按钮时发送
+     * - 弹窗不可关闭（无 × 按钮、ESC 不生效、遮罩点击不关闭），
+     *   强制用户二选一，防止误操作关闭窗口
+     */
+    function _listenCloseRequested() {
+        if (!TauriBridge || !TauriBridge.isTauri || !TauriBridge.isTauri()) {
+            return; // 非 Tauri 环境，不需要监听
+        }
+
+        TauriBridge.listen('close-requested', function () {
+            console.log('[App] 收到关闭请求，显示确认弹窗');
+
+            RamariaModal.show({
+                title: '关闭 Ramaria',
+                body: '<p style="font-size:13px;color:var(--text-secondary);line-height:1.7;">' +
+                    '请选择关闭方式：</p>' +
+                    '<div style="margin-top:8px;font-size:12px;color:var(--text-tertiary);line-height:1.6;">' +
+                    '• <strong>最小化到托盘</strong>：窗口隐藏，应用在后台继续运行。<br>' +
+                    '   可通过系统托盘图标恢复窗口。<br>' +
+                    '• <strong>退出 Ramaria</strong>：完全关闭应用，停止所有后台任务。' +
+                    '</div>',
+                footer:
+                    '<button class="btn btn-secondary" data-action="minimize" style="flex:1;">' +
+                        '最小化到托盘' +
+                    '</button>' +
+                    '<button class="btn btn-primary" data-action="exit" ' +
+                        'style="flex:1;background:var(--pink-500);">' +
+                        '退出 Ramaria' +
+                    '</button>',
+                closable: false,        // 禁止 × 关闭
+                closeOnOverlay: false,  // 禁止点击遮罩关闭
+                closeOnEsc: false,      // 禁止 ESC 关闭
+                size: 'sm',
+                onAction: function (action) {
+                    console.log('[App] 用户选择关闭操作: ' + action);
+                    // 根据用户选择调用后端命令
+                    TauriBridge.invoke('confirm_close_action', { action: action })
+                        .then(function () {
+                            // "minimize" 后前端暂停渲染，"exit" 后应用已退出
+                            console.log('[App] 关闭操作已执行: ' + action);
+                        })
+                        .catch(function (err) {
+                            console.error('[App] 关闭操作失败:', err);
+                            // 操作失败时关闭弹窗，恢复窗口正常状态
+                            RamariaModal.close();
+                        });
+                },
+            });
+        }).catch(function (err) {
+            console.error('[App] close-requested 事件监听注册失败:', err);
         });
     }
 

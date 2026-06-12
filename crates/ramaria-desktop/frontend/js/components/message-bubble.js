@@ -10,10 +10,11 @@
  * 设计特点:
  * - 工厂函数 createBubble(msg) 返回气泡 DOM 元素
  * - 通过 data-message-id 属性标记，支持后续查找和更新
- * - 打字光标使用 CSS animation（blinking cursor），零 JS 定时器
+ * - 打字光标使用 CSS animation（typing-cursor 类，由 animations.css 定义），零 JS 定时器
+ * - 消息气泡入场动画（fadeInUp）由 chat.css 的 .msg-bubble-wrapper 驱动
  * - 角色映射：user → 右对齐粉底 / assistant → 左对齐蓝底 / system → 居中灰底
  * - role 仅内部使用，不随 Markdown 内容暴露给用户
- *
+ * 
  * 用法:
  *   var bubble = RamariaMessageBubble.create({ id, role, content, persona_uid, created_at });
  *   var bubble = RamariaMessageBubble.createStreaming({ id: 'temp', role: 'assistant' });
@@ -183,9 +184,7 @@ var RamariaMessageBubble = (function () {
             'position:relative;';
         bubble.innerHTML =
             '<span class="msg-bubble-text"></span>' +
-            '<span class="msg-typing-cursor" style="display:inline-block;width:2px;height:1em;' +
-            'background:var(--color-primary);margin-left:1px;vertical-align:text-bottom;' +
-            'animation:typingBlink 0.8s step-end infinite;"></span>';
+            '<span class="typing-cursor" aria-hidden="true"></span>';
 
         wrapper.appendChild(bubble);
 
