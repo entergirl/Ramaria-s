@@ -508,6 +508,14 @@ var RamariaRouter = (function () {
             console.warn('[Router] Tauri 事件监听设置失败（可能非 Tauri 环境）:', err);
         }
 
+        // 6. 执行初始路由（基于 Store 中当前的 appState）
+        //    必须主动触发，因为 app.js 后续 set 可能因值相等(===)被跳过
+        var currentState = RamariaStore.get('appState');
+        if (currentState) {
+            console.log('[Router] 执行初始路由: ' + currentState);
+            _routeByAppState(currentState, null);
+        }
+
         _initialized = true;
         console.log('[Router] 路由系统初始化完成');
     }
@@ -576,7 +584,7 @@ var RamariaRouter = (function () {
             if (_dom.contentTitle) _dom.contentTitle.textContent = title;
         },
 
-        /** 更新内容区操作按钮区（由视图模块注入 HTML） */
+        /** 更新内容区操作按钮区（由内部视图模块注入，调用方保证 HTML 可信） */
         setContentActions: function (html) {
             if (_dom.contentActions) _dom.contentActions.innerHTML = html || '';
         },

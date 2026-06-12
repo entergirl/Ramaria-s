@@ -164,19 +164,11 @@
             dom.statusText.textContent = '浏览器预览模式';
         }
 
-        // 直接显示对话视图，Sidebar 可用
-        RamariaStore.set('appState', 'ready', true);
-
-        // 手动触发路由（Router 的 subscribe 可能收不到初始值，取决于初始化顺序）
-        try {
-            if (RamariaRouter && RamariaRouter.isInitialized && RamariaRouter.isInitialized()) {
-                // Router 已初始化，通过 Store 触发
-                RamariaStore.set('appState', 'ready');
-            } else {
-                // Router 尚未初始化，直接操作 DOM
-                _fallbackShowChat();
-            }
-        } catch (_) {
+        // 通过 Router 触发路由到对话视图（Router 在 init 流程中已先初始化）
+        if (RamariaRouter && RamariaRouter.isInitialized && RamariaRouter.isInitialized()) {
+            RamariaStore.set('appState', 'ready');
+        } else {
+            // 极端情况：Router 未初始化，直接操作 DOM
             _fallbackShowChat();
         }
     }
@@ -275,56 +267,40 @@
     }
 
     /**
-     * 预加载应用数据（会话列表、配置、人格列表）。
-     * 并行请求，失败不影响主流程。
+     * 预加载应用数据（会话列表、配置、人格列表、全局设置）。
+     * 并行发起 4 个请求，各自独立处理成功/失败，不阻塞主流程。
      */
-    async function _preloadData() {
+    function _preloadData() {
         console.log('[App] 预加载应用数据...');
 
-        // 并行请求（使用 Promise.allSettled 兼容旧浏览器）
-        var tasks = [
-            RamariaApi.session.list().then(function (sessions) {
-                RamariaStore.set('sessions', sessions);
-                console.log('[App] 会话列表已加载 (' + sessions.length + ' 个)');
-            }).catch(function (err) {
-                console.warn('[App] 加载会话列表失败:', err.message || err);
-            }),
+        // 并行发起，各自 .catch 保证不抛异常
+        RamariaApi.session.list().then(function (sessions) {
+            RamariaStore.set('sessions', sessions);
+            console.log('[App] 会话列表已加载 (' + sessions.length + ' 个)');
+        }).catch(function (err) {
+            console.warn('[App] 加载会话列表失败:', err.message || err);
+        });
 
-            RamariaApi.config.getBackend().then(function (config) {
-                RamariaStore.set('backendConfig', config);
-                console.log('[App] 后端配置已加载 (' + config.provider + ')');
-            }).catch(function (err) {
-                console.warn('[App] 加载后端配置失败:', err.message || err);
-            }),
+        RamariaApi.config.getBackend().then(function (config) {
+            RamariaStore.set('backendConfig', config);
+            console.log('[App] 后端配置已加载 (' + config.provider + ')');
+        }).catch(function (err) {
+            console.warn('[App] 加载后端配置失败:', err.message || err);
+        });
 
-            RamariaApi.memory.getPersonas().then(function (personas) {
-                RamariaStore.set('personas', personas);
-                console.log('[App] 人格列表已加载 (' + personas.length + ' 个)');
-            }).catch(function (err) {
-                console.warn('[App] 加载人格列表失败:', err.message || err);
-            }),
+        RamariaApi.memory.getPersonas().then(function (personas) {
+            RamariaStore.set('personas', personas);
+            console.log('[App] 人格列表已加载 (' + personas.length + ' 个)');
+        }).catch(function (err) {
+            console.warn('[App] 加载人格列表失败:', err.message || err);
+        });
 
-            RamariaApi.config.getSettings().then(function (settings) {
-                RamariaStore.set('settings', settings);
-                console.log('[App] 全局设置已加载 (' + settings.length + ' 项)');
-            }).catch(function (err) {
-                console.warn('[App] 加载全局设置失败:', err.message || err);
-            }),
-        ];
-
-        // 兼容性：使用 then/catch 代替 Promise.allSettled
-        var results = [];
-        for (var i = 0; i < tasks.length; i++) {
-            try {
-                await tasks[i];
-                results.push({ status: 'fulfilled' });
-            } catch (_) {
-                results.push({ status: 'rejected' });
-            }
-        }
-
-        var loaded = results.filter(function (r) { return r.status === 'fulfilled'; }).length;
-        console.log('[App] 预加载完成: ' + loaded + '/' + tasks.length + ' 成功');
+        RamariaApi.config.getSettings().then(function (settings) {
+            RamariaStore.set('settings', settings);
+            console.log('[App] 全局设置已加载 (' + settings.length + ' 项)');
+        }).catch(function (err) {
+            console.warn('[App] 加载全局设置失败:', err.message || err);
+        });
     }
 
     // =========================================================
