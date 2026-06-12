@@ -28,7 +28,7 @@ pub const EVENT_EXTRACTION_PROMPT: &str = r#"你是一个事件提取助手。�
 [
   {
     "title": "≤20字标题，概括事件核心",
-    "summary": "2-3句话描述事件经过，用'烧酒'指代当前分析的人物",
+    "summary": "2-3句话描述事件经过，用'用户'指代当前分析的人物",
     "keywords": "逗号分隔的名词标签（含分类标签+地点），5-8个",
     "participants": ["其他参与者的名称或角色", "如无则返回空数组"],
     "confidence": 0.8,
@@ -42,16 +42,16 @@ pub const EVENT_EXTRACTION_PROMPT: &str = r#"你是一个事件提取助手。�
 
 【字段说明】
 - title: ≤20字，用中文概括事件的核心内容
-- summary: 2-3句话，从当前分析的人物的视角描述事件；用"烧酒"指代此人
+- summary: 2-3句话，从当前分析的人物的视角描述事件；用"用户"指代此人
 - keywords: 5-8个名词标签，用英文逗号分隔；优先使用能描述事件分类和地点的标签
-- participants: JSON 字符串数组；列出事件中除"烧酒"以外的其他参与者角色或名称
-- confidence: 事实确凿度，0.0..1.0。确凿=1.0（如"烧酒明确说了..."），推测=0.5（如"可能发生了..."），<0.6不参与性格推断
+- participants: JSON 字符串数组；列出事件中除"用户"以外的其他参与者角色或名称
+- confidence: 事实确凿度，0.0..1.0。确凿=1.0（如"用户明确说了..."），推测=0.5（如"可能发生了..."），<0.6不参与性格推断
 
 - salience: 情感显著性，0.0..1.0。只能从以下五个值中选一个：
   0.0   平淡（纯事务，无情感投入）
   0.25  轻微（有轻微情绪但不重要）
   0.5   中等（正常事件，有情感内容）
-  0.75  较高（情绪明显，或对"烧酒"有重要意义）
+  0.75  较高（情绪明显，或对"用户"有重要意义）
   1.0   极高（强烈情绪，或人生重要节点/里程碑）
 
 - valence: 情绪效价，-1.0..1.0。只能从以下五个值中选一个：
@@ -62,8 +62,8 @@ pub const EVENT_EXTRACTION_PROMPT: &str = r#"你是一个事件提取助手。�
    1.0  非常积极（兴奋、强烈成就感、里程碑）
 
 - presentation: 陈述方式。三选一：
-  "objective"  - 客观事实（"烧酒今天去了医院"）
-  "subjective" - 主观感受（"烧酒觉得很难过"）
+  "objective"  - 客观事实（"用户今天去了医院"）
+  "subjective" - 主观感受（"用户觉得很难过"）
   "mixed"      - 混合（兼有事实和感受）
 
 - share: 分享意愿 0.0..1.0。该事件内容是否适合告诉他人。
@@ -171,7 +171,7 @@ mod tests {
 
     #[test]
     fn event_prompt_injects_l1_text() {
-        let l1_text = "[1] 2025-06-01 烧酒去看了电影";
+        let l1_text = "[1] 2025-06-01 用户去看了电影";
         let prompt = build_event_extraction_prompt(l1_text);
         assert!(prompt.contains(l1_text));
     }
@@ -195,7 +195,7 @@ mod tests {
     #[test]
     fn paraphrase_prompt_injects_both_fields() {
         let attitude = "被批评后很沮丧";
-        let context = "烧酒在工作汇报后被领导批评了PPT做得不好";
+        let context = "用户在工作汇报后被领导批评了PPT做得不好";
         let prompt = build_paraphrase_prompt(attitude, context);
         assert!(prompt.contains(attitude));
         assert!(prompt.contains(context));

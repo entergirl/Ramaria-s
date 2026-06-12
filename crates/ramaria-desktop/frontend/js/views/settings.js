@@ -467,7 +467,7 @@ var RamariaSettingsView = (function () {
         var about = document.createElement('div');
         about.className = 'settings-about';
         about.innerHTML =
-            '<div class="settings-about-logo" aria-hidden="true">🍄</div>' +
+            '<div class="settings-about-logo" aria-hidden="true">🪸</div>' +
             '<div class="settings-about-name">Ramaria</div>' +
             '<div class="settings-about-version">v0.1.0</div>' +
             '<div style="font-size:12px;color:var(--text-secondary);line-height:1.6;margin-bottom:var(--space-3);">' +
@@ -475,7 +475,7 @@ var RamariaSettingsView = (function () {
                 'Rust + Tauri 2 重构版' +
             '</div>' +
             '<div class="settings-about-links">' +
-                '<a class="settings-about-link" href="https://github.com" target="_blank" rel="noopener">GitHub</a>' +
+                '<a class="settings-about-link" href="https://github.com/entergirl/Ramaria-s" target="_blank" rel="noopener">GitHub</a>' +
                 '<span style="color:var(--text-tertiary);">·</span>' +
                 '<a class="settings-about-link" href="#" target="_blank" rel="noopener">MIT License</a>' +
             '</div>';

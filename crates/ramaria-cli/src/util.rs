@@ -168,14 +168,14 @@ mod tests {
 
     #[test]
     fn toml_value_double_quotes() {
-        let toml = "[identity]\nassistant_name = \"黎杋枫\"\nuser_name = \"烧酒\"";
+        let toml = "[identity]\nassistant_name = \"黎杋枫\"\nuser_name = \"用户\"";
         assert_eq!(
             extract_toml_value(toml, "assistant_name"),
             Some("黎杋枫".to_string())
         );
         assert_eq!(
             extract_toml_value(toml, "user_name"),
-            Some("烧酒".to_string())
+            Some("用户".to_string())
         );
     }
 

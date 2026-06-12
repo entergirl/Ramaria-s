@@ -1,0 +1,295 @@
+# Ramaria CLI 使用指南
+
+> 版本：v1.0  
+> 适用平台：Windows / macOS / Linux
+
+## 概述
+
+`ramaria` 是 Ramaria 的命令行入口，支持对话、记忆查询、会话管理、配置修改、人格管理和数据导出。
+
+首次使用前需运行首次配置向导，CLI 与桌面应用共享同一数据目录（`%APPDATA%\Ramaria\`）。
+
+---
+
+## 安装
+
+### 从安装包
+
+Windows 安装包将 `ramaria.exe` 安装到系统 PATH。
+
+### 从源码编译
+
+```bash
+cd rust
+cargo build --release -p ramaria-cli
+# 二进制位于 target/release/ramaria.exe
+```
+
+---
+
+## 全局选项
+
+所有子命令都支持以下全局选项：
+
+| 选项 | 说明 |
+|------|------|
+| `--db <PATH>` | 数据库文件路径。默认 `data/ramaria_assistant.db`，可通过 `RAMARIA_DB_PATH` 环境变量覆盖 |
+| `--yes` | 跳过隐私确认对话框（仅线上 provider 生效） |
+| `--skip-validate` | 跳过 LLM 后端连接验证（仅 `setup` 命令生效） |
+
+---
+
+## 子命令
+
+### `ramaria setup` — 首次配置向导
+
+运行交互式三步配置：选择 Provider → 填写 Base URL / API Key → 确认并保存。
+
+```
+ramaria setup
+ramaria setup --skip-validate    # 跳过 LLM 连接验证
+```
+
+**流程**：
+1. 选择 LLM Provider：`lm-studio` / `deepseek` / `openai`
+2. 输入 Base URL（预填默认值）和 API Key（线上 provider 必填）
+3. 自动扫描 `personas/` 目录注册人格文件
+4. 可选 LLM 连接验证（检测后端连通性）
+5. 完成配置后标记状态为 Ready
+
+**注意**：
+- LM Studio 不需 API Key，但需手动启动 LM Studio 并加载模型
+- DeepSeek / OpenAI 的 API Key 保存在 OS keychain，不写入配置文件
+- 配置完成后，CLI 可立即进行对话
+
+---
+
+### `ramaria ask` — 单条消息
+
+发送单条消息并获取回复。默认流式输出。
+
+```
+ramaria ask "今天天气怎么样"
+ramaria ask "介绍一下你自己" --persona rama-0001
+ramaria ask "你好" --session "abc-123"
+ramaria ask "用一行话解释什么是Rust" --no-stream
+ramaria ask "今天心情如何" --json
+```
+
+| 参数 | 说明 |
+|------|------|
+| `<MESSAGE>` | 用户消息文本（支持多词，无需引号也可） |
+| `--persona <UID>` | 指定对话人格（默认 `rama-0001`）。可用 `ramaria persona show` 查看可用人格 |
+| `--session <UUID>` | 复用已有会话 ID。不指定则自动创建新会话 |
+| `--no-stream` | 非流式输出：等待完整回复后一次性打印 |
+| `--json` | JSON 事件流输出：每行输出一个 StreamEvent JSON，包含 `request_id`/`delta`/`done`/`error` 字段 |
+
+**示例输出**（默认流式）：
+```
+🤖 助手 > 今天天气不错，挺风和日丽的。你打算出门吗？
+```
+
+---
+
+### `ramaria chat` — 交互式对话
+
+启动 REPL 交互模式，连续对话直到输入 `/exit`。
+
+```
+ramaria chat
+```
+
+**内置命令**：
+
+| 命令 | 说明 |
+|------|------|
+| `/exit` 或 `/quit` | 退出对话 |
+| `/clear` | 开始新会话（自动保存旧会话） |
+| `/help` | 显示帮助信息 |
+
+**行为**：
+- 每次启动自动创建新会话
+- 会话结束时自动生成 L1 摘要（触发记忆管线）
+- 支持流式输出，逐字显示回复
+- 不使用 ratatui TUI（v1.0 仅简单 REPL）
+
+---
+
+### `ramaria memory` — 记忆查看
+
+按层级查看系统记忆。
+
+```
+ramaria memory                    # 查看 L1 摘要（默认）
+ramaria memory --layer l2         # 查看 L2 事件
+ramaria memory --layer l3         # 查看 L3 性格画像
+ramaria memory --persona rama-0001  # 筛选特定人格
+ramaria memory --limit 20         # 限制返回条数
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--layer <l1/l2/l3>` | 记忆层级（默认 `l1`） |
+| `--persona <UID>` | 按人格筛选 |
+| `--limit <N>` | 返回条数限制 |
+
+**输出格式**：
+- **L1**：摘要卡片，含 `summary` / `atmosphere` / `valence` / `salience`
+- **L2**：事件列表，含 `title` / `confidence` / `keywords` / `attitude`
+- **L3**：性格标签表，含 `layer` / `trait` / `meaning` / `confidence`
+
+---
+
+### `ramaria session` — 会话管理
+
+管理对话会话。
+
+```
+ramaria session list              # 列出所有会话
+ramaria session show <ID>         # 查看会话消息历史
+ramaria session delete <ID>       # 删除会话及其关联记忆
+```
+
+| 子命令 | 说明 |
+|--------|------|
+| `list` | 显示全部会话：ID、开始时间、结束时间、消息数 |
+| `show <ID>` | 按时间顺序展示该会话的全部消息（含 role 标记） |
+| `delete <ID>` | 删除会话及其全部消息。**不可逆**，需交互确认 |
+
+---
+
+### `ramaria config` — 配置管理
+
+查看和修改后端配置。
+
+```
+ramaria config list               # 列出当前配置
+ramaria config get provider       # 查看当前 provider
+ramaria config set provider deepseek     # 切换后端
+ramaria config set base-url https://api.deepseek.com  # 修改 Base URL
+ramaria config set temperature 0.7       # 修改温度参数
+ramaria config set max-tokens 2048       # 修改最大输出 token
+```
+
+| 子命令 | 说明 |
+|--------|------|
+| `list` | 显示全部配置项（API Key 遮蔽显示为 `****`） |
+| `get <KEY>` | 查看单项配置 |
+| `set <KEY> <VALUE>` | 修改配置项。支持：`provider` / `base-url` / `temperature` / `max-tokens` |
+
+**注意**：
+- API Key 不可通过 `config set` 修改（需使用 keychain）
+- 切换 provider 后，如为线上 provider，需重新确认隐私
+- 配置变更立即生效，无需重启
+
+---
+
+### `ramaria persona` — 人格管理
+
+管理对话人格。
+
+```
+ramaria persona show              # 显示所有的人格的名称/类型/状态
+ramaria persona reload            # 重新扫描 personas/ 目录并同步到数据库
+ramaria persona reload --uid rama-0001   # 仅重新加载指定人格
+```
+
+| 子命令 | 说明 |
+|--------|------|
+| `show` | 列出所有人格：UID、名称、类型（user/rama/char 等）、是否激活 |
+| `reload` | 扫描 `personas/` 目录下所有 `.toml` 文件，同步名称/配置到数据库。新人格自动创建，已存在的跳过（幂等操作） |
+
+**人格文件**：
+- 源码目录：`config/personas/*.toml`
+- 运行期目录：`%APPDATA%\Ramaria\personas\*.toml`
+- 文件名即为 persona UID（如 `rama-0001.toml` → UID `rama-0001`）
+- 用户可直接用文本编辑器编辑 `.toml` 文件，然后运行 `reload` 同步
+
+---
+
+### `ramaria index` — 索引管理
+
+管理 BM25 和向量索引。
+
+```
+ramaria index rebuild             # 重建全部索引
+```
+
+- 读取所有 L1/L2 记忆 → 重建 BM25 倒排索引 + 图谱数据
+- 显示重建文档数、耗时
+- 索引版本不一致时应用会自动进入 Indexing 状态，也可手动触发
+
+---
+
+### `ramaria export` — 数据导出
+
+导出记忆和对话数据。
+
+```
+ramaria export                    # 导出为 JSON（默认）
+ramaria export --format markdown  # 导出为 Markdown
+ramaria export --output ./my-memories.json  # 指定输出文件
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--format <json/markdown>` | 导出格式（默认 `json`） |
+| `--output <PATH>` | 输出文件路径（默认 `./ramaria-export.{json,md}` 带时间戳） |
+
+**导出内容**：
+- **JSON**：完整结构化数据 — `sessions` → `messages` → `memory_l1` → `memory_events` → `personality_traits`
+- **Markdown**：人类可读格式 — 按会话分组，包含消息对话、L1 摘要、L2 事件等
+
+---
+
+## 环境变量
+
+| 变量 | 说明 |
+|------|------|
+| `RAMARIA_DATA_DIR` | 数据目录（覆盖默认 `%APPDATA%\Ramaria\`） |
+| `RAMARIA_DB_PATH` | 数据库文件路径（覆盖 `--db` 选项） |
+| `RUST_LOG` | 日志级别：`error` / `warn` / `info` / `debug` / `trace` |
+
+---
+
+## 错误处理
+
+CLI 根据错误类型显示不同提示：
+
+| 错误类别 | 典型提示 |
+|----------|----------|
+| `Config` | 配置缺失或格式错误，请运行 `ramaria setup` |
+| `Storage` | 数据库不可用，请检查磁盘空间和权限 |
+| `Llm` | LLM 调用失败，可重试 |
+| `Privacy` | 线上 provider 需完成隐私确认 |
+| `Index` | 索引损坏，请运行 `ramaria index rebuild` |
+| `Validation` | 参数不合法 |
+| `Io` | 文件读写失败 |
+
+---
+
+## 快速开始示例
+
+```bash
+# 1. 首次配置（选择 LM Studio 本地模型）
+ramaria setup
+
+# 2. 快速提问
+ramaria ask "用一句话介绍自己"
+
+# 3. 交互对话
+ramaria chat
+
+# 4. 查看记忆
+ramaria memory --layer l1
+
+# 5. 导出
+ramaria export --format markdown --output memories.md
+```
+
+---
+
+## 参考
+
+- 完整架构说明：`rust/docs/dev/rust-rewrite-analysis.md`
+- 数据模型说明：`rust/docs/dev/personality/database-tables-overview.md`

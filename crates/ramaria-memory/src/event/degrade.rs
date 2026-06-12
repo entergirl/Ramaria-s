@@ -241,10 +241,10 @@ mod tests {
     #[test]
     fn degraded_event_single_l1() {
         let sid = Uuid::new_v4();
-        let l1_list = vec![make_l1(sid, "烧酒去了医院", Some("医院, 健康"), -0.5, 0.75)];
+        let l1_list = vec![make_l1(sid, "用户去了医院", Some("医院, 健康"), -0.5, 0.75)];
         let event = build_degraded_event("user-0001", &l1_list, &DegradeConfig::default());
 
-        assert!(event.summary.contains("烧酒去了医院"));
+        assert!(event.summary.contains("用户去了医院"));
         assert_eq!(event.absorbed, 1);
         assert!(event.salience > 0.5); // 平均 0.75 钳制到 0.75
         assert!(event.valence < 0.0); // -0.5 钳制到 -0.5
@@ -257,9 +257,9 @@ mod tests {
         let sid1 = Uuid::new_v4();
         let sid2 = Uuid::new_v4();
         let l1_list = vec![
-            make_l1(sid1, "烧酒去看了电影", Some("电影, 娱乐"), 0.5, 0.5),
-            make_l1(sid2, "烧酒完成了工作报告", Some("工作, 报告"), 0.0, 0.25),
-            make_l1(sid1, "烧酒和朋友聚餐", Some("社交, 聚餐"), 0.5, 0.75),
+            make_l1(sid1, "用户去看了电影", Some("电影, 娱乐"), 0.5, 0.5),
+            make_l1(sid2, "用户完成了工作报告", Some("工作, 报告"), 0.0, 0.25),
+            make_l1(sid1, "用户和朋友聚餐", Some("社交, 聚餐"), 0.5, 0.75),
         ];
         let event = build_degraded_event("user-0001", &l1_list, &DegradeConfig::default());
 

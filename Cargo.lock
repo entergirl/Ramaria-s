@@ -3198,7 +3198,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "ramaria-app"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3216,7 +3216,7 @@ dependencies = [
 
 [[package]]
 name = "ramaria-cli"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3239,7 +3239,7 @@ dependencies = [
 
 [[package]]
 name = "ramaria-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3252,7 +3252,7 @@ dependencies = [
 
 [[package]]
 name = "ramaria-desktop"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "futures",
@@ -3276,7 +3276,7 @@ dependencies = [
 
 [[package]]
 name = "ramaria-llm"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3294,7 +3294,7 @@ dependencies = [
 
 [[package]]
 name = "ramaria-memory"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3311,7 +3311,7 @@ dependencies = [
 
 [[package]]
 name = "ramaria-storage"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "chrono",

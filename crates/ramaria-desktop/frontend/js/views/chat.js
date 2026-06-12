@@ -159,7 +159,7 @@ var RamariaChatView = (function () {
         if (!msgList) return;
         msgList.innerHTML =
             '<div class="chat-empty-state">' +
-                '<div class="chat-empty-icon" aria-hidden="true">🍄</div>' +
+                '<div class="chat-empty-icon" aria-hidden="true">🪸</div>' +
                 '<div class="chat-empty-title">开始一段对话</div>' +
                 '<div class="chat-empty-hint">' +
                     'Ramaria 会记住你们的对话，并从中了解你的性格和偏好。<br>' +

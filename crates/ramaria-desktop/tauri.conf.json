@@ -1,10 +1,11 @@
 {
   "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-config-schema/schema.json",
   "productName": "Ramaria",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "identifier": "com.ramaria.app",
   "build": {
-    "frontendDist": "./frontend"
+    "frontendDist": "./frontend",
+    "devUrl": "http://localhost:1420"
   },
   "app": {
     "withGlobalTauri": true,
@@ -27,11 +28,32 @@
   },
   "bundle": {
     "active": true,
-    "targets": "msi",
+    "targets": ["msi", "nsis"],
+    "icon": [
+      "icons/icon.ico"
+    ],
+    "resources": [
+      "../../config/personas/*.toml"
+    ],
     "windows": {
       "wix": {
         "language": "zh-CN"
+      },
+      "nsis": {
+        "languages": ["SimpChinese"],
+        "installMode": "currentUser",
+        "displayLanguageSelector": false
       }
-    }
+    },
+    "publisher": "Ramaria",
+    "shortDescription": "个人AI陪伴记忆系统",
+    "longDescription": "Ramaria（珊瑚菌）是一个本地运行的个人AI陪伴记忆系统。具备分层记忆体系（L0-L3）、自动人格画像推断、混合RAG检索能力。支持LM Studio本地模型和DeepSeek/OpenAI云端API。",
+    "category": "Utility",
+    "licenseFile": "../../LICENSE"
+  },
+  "plugins": {
+    "dialog": {},
+    "notification": {},
+    "store": {}
   }
 }

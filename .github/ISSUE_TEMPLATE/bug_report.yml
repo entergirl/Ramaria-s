@@ -1,0 +1,125 @@
+name: "🐛 问题反馈"
+description: "遇到 bug 了？一起来解决！"
+title: "[BUG] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 👋 你好！
+
+        感谢反馈！提交前请确认：
+
+        - [ ] 查看 [已有 issue](https://github.com/entergirl/Ramaria-s/issues)
+        - [ ] 确认使用的是最新版本
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: "💻 操作系统"
+      options:
+        - Windows 11
+        - Windows 10
+        - Windows (其他版本)
+        - Linux
+        - macOS
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: "📦 Ramaria 版本"
+      description: "桌面设置页 → 关于，或 CLI `ramaria --version`"
+      placeholder: "v1.0.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: "📥 安装方式"
+      options:
+        - "MSI 安装包"
+        - "cargo build 编译"
+        - "其他"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: llm-provider
+    attributes:
+      label: "🤖 LLM 后端"
+      options:
+        - "LM Studio（本地）"
+        - "DeepSeek（云端）"
+        - "OpenAI（云端）"
+        - "未配置 / 其他"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: "🤔 发生了什么？"
+      placeholder: |
+        清楚描述问题。
+
+        例如：
+        安装完成后双击桌面快捷方式，窗口一闪而过没有正常启动。
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: "🔄 复现步骤"
+      placeholder: |
+        1. 安装 Ramaria v1.0.0
+        2. 双击桌面快捷方式
+        3. 配置向导中选择 DeepSeek，输入 API Key
+        4. 点击"完成配置"
+        5. 窗口关闭，无法进入对话界面
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: "✨ 期望结果"
+      placeholder: |
+        应该发生什么？
+
+  - type: dropdown
+    id: entry
+    attributes:
+      label: "🖥️ 使用入口"
+      options:
+        - "桌面应用（Tauri）"
+        - "CLI（ramaria ask/chat）"
+        - "两者都用"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: "📋 错误日志"
+      description: "来自 %APPDATA%\\Ramaria\\logs\\ramaria.log 或终端输出"
+      render: shell
+      placeholder: |
+        [ERROR] ...
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: "📸 截图"
+      description: "拖拽图片到这里（如有）"
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: "✅ 检查清单"
+      options:
+        - label: "如使用 LM Studio：LM Studio 已启动并加载模型"
+        - label: "如使用 DeepSeek/OpenAI：API Key 已正确输入且有效"
+        - label: "尝试过重启应用"
+        - label: "日志中能找到相关错误信息"

@@ -1,0 +1,18 @@
+# Issue 表单配置 — Ramaria Rust v1.0
+blank_issues_enabled: false
+contact_links:
+  - name: "📖 桌面使用指南"
+    url: "https://github.com/entergirl/Ramaria-s/blob/main/docs/desktop-user-guide.md"
+    about: "桌面应用安装、配置、对话相关问题先看这里！"
+
+  - name: "📖 CLI 使用指南"
+    url: "https://github.com/entergirl/Ramaria-s/blob/main/docs/cli-user-guide.md"
+    about: "命令行使用相关问题先看这里！"
+
+  - name: "📖 隐私说明"
+    url: "https://github.com/entergirl/Ramaria-s/blob/main/docs/privacy-notice.md"
+    about: "数据存储与传输说明"
+
+  - name: "📋 已有问题汇总"
+    url: "https://github.com/entergirl/Ramaria-s/issues"
+    about: "提交前先搜索已有 issue"

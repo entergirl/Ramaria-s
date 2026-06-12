@@ -767,7 +767,7 @@ mod tests {
     #[test]
     fn parse_valid_event_array() {
         let raw = r#"[
-            {"title": "跳槽", "summary": "烧酒换了新工作", "confidence": 0.9, "salience": 0.75}
+            {"title": "跳槽", "summary": "用户换了新工作", "confidence": 0.9, "salience": 0.75}
         ]"#;
         let events = EventExtractor::parse_event_response(raw).unwrap();
         assert_eq!(events.len(), 1);
@@ -815,7 +815,7 @@ mod tests {
     fn build_event_with_all_fields() {
         let json = ExtractedEventJson {
             title: Some("跳槽".into()),
-            summary: Some("烧酒换了新工作".into()),
+            summary: Some("用户换了新工作".into()),
             keywords: Some("工作, 跳槽, 职业".into()),
             participants: Some(serde_json::json!(["老板", "同事"])),
             confidence: Some(0.9),

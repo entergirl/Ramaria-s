@@ -648,7 +648,7 @@ async fn persona_show_with_data() {
     // 添加一个带完整 TOML config 的 persona
     let config = r#"[identity]
 assistant_name = "黎杋枫"
-user_name = "烧酒"
+user_name = "用户"
 
 [blocks]
 A_persona = """

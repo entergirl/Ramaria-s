@@ -612,7 +612,7 @@ mod tests {
     fn test_parse_basic_persona_toml() {
         let content = r#"[identity]
 assistant_name = "黎杋枫"
-user_name = "烧酒"
+user_name = "用户"
 
 [blocks]
 A_persona = "你是黎杋枫。性格知性稳重。"
@@ -621,7 +621,7 @@ E_rules = "用||分隔回复。"
 
         let parsed = parse_persona_toml(content).expect("解析失败");
         assert_eq!(parsed.assistant_name, "黎杋枫");
-        assert_eq!(parsed.user_name, "烧酒");
+        assert_eq!(parsed.user_name, "用户");
         assert_eq!(parsed.blocks.len(), 2);
         assert_eq!(parsed.blocks[0].0, "A_persona");
         assert_eq!(parsed.blocks[0].1, "你是黎杋枫。性格知性稳重。");
@@ -903,13 +903,13 @@ A_persona = '你是黎杋枫。被问及"是否是AI"时温柔回避。'
         // 使用真实的 config/persona.toml 简化版
         let content = r#"[identity]
 assistant_name = "黎杋枫"
-user_name = "烧酒"
+user_name = "用户"
 
 [blocks]
 
 A_persona = """
 你是黎杋枫。女，生日3月21日。
-你是烧酒的学习伙伴和生活挚友。
+你是用户的学习伙伴和生活挚友。
 性格：知性稳重，情绪稳定，偶有冷幽默。
 """
 
@@ -921,7 +921,7 @@ E_rules = """
 
         let parsed = parse_persona_toml(content).expect("真实配置解析失败");
         assert_eq!(parsed.assistant_name, "黎杋枫");
-        assert_eq!(parsed.user_name, "烧酒");
+        assert_eq!(parsed.user_name, "用户");
         assert!(parsed.blocks.len() >= 2);
 
         let prompt = COLD_START_PROMPT.replace(

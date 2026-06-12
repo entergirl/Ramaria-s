@@ -34,5 +34,5 @@ desktop.ini
 *.db-wal
 *.db-shm
 
-# 项目私有文档
-/docs/
+# 项目私有文档（开发、设计、决策）
+/docs/dev/
