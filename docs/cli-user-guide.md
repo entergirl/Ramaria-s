@@ -292,4 +292,3 @@ ramaria export --format markdown --output memories.md
 ## 参考
 
 - 完整架构说明：`rust/docs/dev/rust-rewrite-analysis.md`
-- 数据模型说明：`rust/docs/dev/personality/database-tables-overview.md`

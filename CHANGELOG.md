@@ -39,7 +39,7 @@
 #### LLM Provider 层
 
 - LM Studio 适配器：无 API Key，完全本地推理
-- DeepSeek 适配器：支持 deepseek-v3.2
+- DeepSeek 适配器：支持 deepseek-v4
 - OpenAI 适配器：兼容所有 OpenAI API 格式服务
 - SSE 流式传输：futures channel + tokio spawn 异步架构
 - OS 凭据管理器：Windows Credential Manager 安全存储 API Key

@@ -36,3 +36,5 @@ desktop.ini
 
 # 项目私有文档（开发、设计、决策）
 /docs/dev/
+/docs/dev-1.0/
+/docs/dev-1.1/

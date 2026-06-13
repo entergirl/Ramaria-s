@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-config-schema/schema.json",
+  "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/v2/crates/tauri-config-schema/schema.json",
   "productName": "Ramaria",
   "version": "1.0.0",
   "identifier": "com.ramaria.app",
@@ -49,8 +49,8 @@
     "licenseFile": "../../LICENSE"
   },
   "plugins": {
-    "dialog": {},
-    "notification": {},
-    "store": {}
+    "dialog": null,
+    "notification": null,
+    "store": null
   }
 }
