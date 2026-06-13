@@ -27,6 +27,8 @@ use crate::utils;
 /// 字段:
 /// - 所有字段均为 `Option`，以容忍 LLM 输出缺失字段。
 /// - 校验阶段再填充默认值，避免解析阶段 panic。
+/// - `situation_strength` 为 Phase 1.1.2 新增字段，当前 LLM prompt 尚未包含此输出，
+///   因此大部分情况下为 None（等效 3）。
 #[derive(Debug, Deserialize)]
 struct L1SummaryResponse {
     summary: Option<String>,
@@ -35,6 +37,9 @@ struct L1SummaryResponse {
     atmosphere: Option<String>,
     valence: Option<f64>,
     salience: Option<f64>,
+    /// Phase 1.1.2: 情境强度 1-5，None 时按默认值 3 处理
+    #[serde(default)]
+    situation_strength: Option<i32>,
 }
 
 // =========================================================
@@ -50,6 +55,7 @@ struct L1SummaryResponse {
 /// - `conversation_format_assistant`: 助手消息格式化前缀。
 /// - `persona_uid`: 本条摘要描述的对象（人格标识），None 表示描述默认用户。
 /// - `context_json`: 分组上下文，含 chat_partners 列表。
+/// - `situation_strength`: Phase 1.1.2 情境强度（1-5），None 时 LLM 输出缺失则默认 3。
 #[derive(Debug, Clone)]
 pub struct L1SummarizerConfig {
     /// LLM 生成温度 0.0..2.0
@@ -64,6 +70,8 @@ pub struct L1SummarizerConfig {
     pub persona_uid: Option<String>,
     /// 分组上下文——JSON 格式 `{"chat_partners": ["user-0001", "char-0003"]}`
     pub context_json: Option<String>,
+    /// Phase 1.1.2: 情境强度默认值（1-5），None 时使用 3
+    pub situation_strength: Option<i32>,
 }
 
 impl Default for L1SummarizerConfig {
@@ -75,6 +83,7 @@ impl Default for L1SummarizerConfig {
             assistant_prefix: "助手：".to_string(),
             persona_uid: None,
             context_json: None,
+            situation_strength: None,
         }
     }
 }
@@ -181,9 +190,14 @@ impl<'a> L1Summarizer<'a> {
         // 7. 校验并修正字段
         let (mut l1, keywords) = Self::validate_and_build(&parsed, session_id);
 
-        // 注入 persona_uid 和 context_json
+        // 注入 config 中的上下文字段
         l1.persona_uid = self.config.persona_uid.clone();
         l1.context_json = self.config.context_json.clone();
+        // Phase 1.1.2: 优先使用 LLM 输出的 situation_strength，缺失时回退 config 默认值
+        l1.situation_strength = parsed
+            .situation_strength
+            .or(self.config.situation_strength)
+            .or(Some(3)); // 最终默认值：中性情境
 
         // 8. 写入存储
         self.storage.save_memory_l1(&l1).await.map_err(|e| {
@@ -392,8 +406,9 @@ impl<'a> L1Summarizer<'a> {
             absorbed: false,
             created_at: ramaria_core::types::now_ms(),
             last_accessed_at: None,
-            persona_uid: None,  // 由调用方在 construct 阶段通过 config 注入
-            context_json: None, // 由调用方在 construct 阶段通过 config 注入
+            persona_uid: None,        // 由调用方在 construct 阶段通过 config 注入
+            context_json: None,       // 由调用方在 construct 阶段通过 config 注入
+            situation_strength: None, // Phase 1.1.2: 由 LLM 输出或 config 注入
         };
 
         (l1, keywords_list)
@@ -535,6 +550,7 @@ mod tests {
             atmosphere: None,
             valence: Some(0.5),
             salience: Some(0.5),
+            situation_strength: None,
         };
         let sid = ramaria_core::types::new_id();
         let (l1, _keywords) = L1Summarizer::validate_and_build(&parsed, sid);
@@ -550,6 +566,7 @@ mod tests {
             atmosphere: None,
             valence: Some(0.0),
             salience: Some(0.5),
+            situation_strength: None,
         };
         let sid = ramaria_core::types::new_id();
         let (l1, _) = L1Summarizer::validate_and_build(&parsed, sid);
@@ -565,6 +582,7 @@ mod tests {
             atmosphere: Some("非常轻松愉快的一天".into()), // 9字
             valence: Some(0.5),
             salience: Some(0.5),
+            situation_strength: None,
         };
         let sid = ramaria_core::types::new_id();
         let (l1, _) = L1Summarizer::validate_and_build(&parsed, sid);
@@ -581,6 +599,7 @@ mod tests {
             atmosphere: Some("专注高效".into()),
             valence: Some(0.0),
             salience: Some(0.5),
+            situation_strength: None,
         };
         let sid = ramaria_core::types::new_id();
         let (_l1, keywords) = L1Summarizer::validate_and_build(&parsed, sid);

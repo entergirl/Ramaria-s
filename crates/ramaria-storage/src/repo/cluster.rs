@@ -8,8 +8,6 @@ use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::types::ClusterSnapshot;
 use sqlx::SqlitePool;
 
-use super::last_insert_id;
-
 #[derive(sqlx::FromRow)]
 struct ClusterRow {
     id: i64,
@@ -38,16 +36,14 @@ impl ClusterRow {
 }
 
 pub async fn save(pool: &SqlitePool, s: &ClusterSnapshot) -> RamariaResult<i64> {
-    sqlx::query(
+    sqlx::query_scalar::<_, i64>(
         "INSERT INTO persona_cluster_snapshots (persona_uid, category, cluster_label, samples, count, is_current, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
     )
     .bind(&s.persona_uid).bind(&s.category).bind(&s.cluster_label)
     .bind(&s.samples).bind(s.count).bind(s.is_current as i64).bind(s.created_at)
-    .execute(pool).await
-    .map_err(|e| RamariaError::storage_with_source("保存聚类快照失败", e))?;
-
-    last_insert_id(pool).await
+    .fetch_one(pool).await
+    .map_err(|e| RamariaError::storage_with_source("保存聚类快照失败", e))
 }
 
 pub async fn get_current(

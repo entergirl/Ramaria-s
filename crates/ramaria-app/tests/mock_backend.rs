@@ -145,6 +145,18 @@ impl StorageBackend for MockStorage {
     }
 
     async fn save_message(&self, message: &Message) -> RamariaResult<()> {
+        // v1.1: 只读约束——已关闭 session 不可写入新消息
+        let sessions = self.sessions.lock().unwrap();
+        if let Some(session) = sessions.get(&message.session_id) {
+            if session.ended_at.is_some() {
+                return Err(RamariaError::validation(format!(
+                    "session {} 已关闭，不可写入新消息",
+                    message.session_id
+                )));
+            }
+        }
+        drop(sessions);
+
         self.messages
             .lock()
             .unwrap()

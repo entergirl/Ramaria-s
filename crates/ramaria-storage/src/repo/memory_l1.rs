@@ -6,6 +6,8 @@
 //! - mark_absorbed 在事务中批量执行，确保 L1→L2 吸收操作的原子性
 //! - absorbed 字段在 SQLite 中存为 INTEGER（0/1），读取时还原为 bool
 //! - persona_uid 和 context_json 为 Phase 1.5 新增列，支持人格关联和分组键
+//! - situation_strength 为 Phase 1.1.2 新增列（默认 NULL，等效 3），
+//!   避免存量 NULL 值使加权逻辑跳过记录
 
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::types::MemoryL1;
@@ -27,6 +29,7 @@ struct L1Row {
     last_accessed_at: Option<i64>,
     persona_uid: Option<String>,
     context_json: Option<String>,
+    situation_strength: Option<i64>,
 }
 
 impl L1Row {
@@ -50,6 +53,7 @@ impl L1Row {
             last_accessed_at: self.last_accessed_at,
             persona_uid: self.persona_uid,
             context_json: self.context_json,
+            situation_strength: self.situation_strength.map(|v| v as i32),
         })
     }
 }
@@ -57,8 +61,9 @@ impl L1Row {
 pub async fn save(pool: &SqlitePool, l1: &MemoryL1) -> RamariaResult<()> {
     sqlx::query(
         "INSERT INTO memory_l1 (id, session_id, summary, keywords, time_period, atmosphere,
-         valence, salience, absorbed, created_at, last_accessed_at, persona_uid, context_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         valence, salience, absorbed, created_at, last_accessed_at, persona_uid, context_json,
+         situation_strength)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(l1.id.to_string())
     .bind(l1.session_id.to_string())
@@ -73,6 +78,7 @@ pub async fn save(pool: &SqlitePool, l1: &MemoryL1) -> RamariaResult<()> {
     .bind(l1.last_accessed_at)
     .bind(&l1.persona_uid)
     .bind(&l1.context_json)
+    .bind(l1.situation_strength.map(|v| v as i64))
     .execute(pool)
     .await
     .map_err(|e| RamariaError::storage_with_source("保存 L1 记忆失败", e))?;
@@ -82,7 +88,7 @@ pub async fn save(pool: &SqlitePool, l1: &MemoryL1) -> RamariaResult<()> {
 pub async fn list_by_session(pool: &SqlitePool, session_id: Uuid) -> RamariaResult<Vec<MemoryL1>> {
     let rows = sqlx::query_as::<_, L1Row>(
         "SELECT id, session_id, summary, keywords, time_period, atmosphere, valence, salience,
-         absorbed, created_at, last_accessed_at, persona_uid, context_json
+         absorbed, created_at, last_accessed_at, persona_uid, context_json, situation_strength
          FROM memory_l1 WHERE session_id = ? ORDER BY created_at ASC",
     )
     .bind(session_id.to_string())
@@ -97,7 +103,7 @@ pub async fn list_by_session(pool: &SqlitePool, session_id: Uuid) -> RamariaResu
 pub async fn get(pool: &SqlitePool, id: Uuid) -> RamariaResult<Option<MemoryL1>> {
     let row = sqlx::query_as::<_, L1Row>(
         "SELECT id, session_id, summary, keywords, time_period, atmosphere, valence, salience,
-         absorbed, created_at, last_accessed_at, persona_uid, context_json
+         absorbed, created_at, last_accessed_at, persona_uid, context_json, situation_strength
          FROM memory_l1 WHERE id = ?",
     )
     .bind(id.to_string())
@@ -154,7 +160,7 @@ pub async fn mark_absorbed(pool: &SqlitePool, l1_ids: &[Uuid]) -> RamariaResult<
 pub async fn list_unabsorbed(pool: &SqlitePool, persona_uid: &str) -> RamariaResult<Vec<MemoryL1>> {
     let rows = sqlx::query_as::<_, L1Row>(
         "SELECT id, session_id, summary, keywords, time_period, atmosphere, valence, salience,
-         absorbed, created_at, last_accessed_at, persona_uid, context_json
+         absorbed, created_at, last_accessed_at, persona_uid, context_json, situation_strength
          FROM memory_l1 WHERE absorbed = 0 AND persona_uid = ? ORDER BY created_at ASC",
     )
     .bind(persona_uid)

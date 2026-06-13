@@ -9,8 +9,6 @@ use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::types::{FactSource, PersonaFact, ProfileField};
 use sqlx::SqlitePool;
 
-use super::last_insert_id;
-
 fn parse_field(s: &str) -> ProfileField {
     match s {
         "basic_info" => ProfileField::BasicInfo,
@@ -75,17 +73,15 @@ impl FactRow {
 }
 
 pub async fn save(pool: &SqlitePool, f: &PersonaFact) -> RamariaResult<i64> {
-    sqlx::query(
+    sqlx::query_scalar::<_, i64>(
         "INSERT INTO persona_facts (persona_uid, field, content, source, ref_event_id, ref_l1_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
     )
     .bind(&f.persona_uid).bind(f.field.as_str()).bind(&f.content)
     .bind(f.source.as_str()).bind(f.ref_event_id).bind(f.ref_l1_id.map(|u| u.to_string()))
     .bind(f.created_at).bind(f.updated_at)
-    .execute(pool).await
-    .map_err(|e| RamariaError::storage_with_source("保存事实失败", e))?;
-
-    last_insert_id(pool).await
+    .fetch_one(pool).await
+    .map_err(|e| RamariaError::storage_with_source("保存事实失败", e))
 }
 
 pub async fn list_by_persona(

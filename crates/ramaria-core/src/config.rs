@@ -394,14 +394,19 @@ impl Default for SessionConfig {
 /// 记忆层触发阈值。
 ///
 /// 职责:
-/// - 控制何时将未吸收 L1 合并为 L2。
-/// - 通过数量和时间两个条件避免记忆长期停留在 L1。
+/// - 控制何时将未吸收 L1 合并为 L2（路径 A 计数触发 + 路径 B 时间触发）。
+/// - 控制何时触发 L3 性格推断（路径 A 计数触发 + 路径 B 时间触发）。
+/// - 对齐 Python `MergerConfig` + `ProfileConfig` 的触发策略。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThresholdConfig {
-    /// 未吸收 L1 触发 L2 合并的条数阈值
+    /// 未吸收 L1 触发 L2 合并的条数阈值（路径 A）
     pub l2_trigger_count: u32,
-    /// 最早未吸收 L1 触发 L2 的天数阈值
+    /// 最早未吸收 L1 触发 L2 的天数阈值（路径 B）
     pub l2_trigger_days: u32,
+    /// 未吸收事件触发 L3 推断的条数阈值（路径 A）
+    pub l3_trigger_count: u32,
+    /// 最早未吸收事件触发 L3 推断的天数阈值（路径 B）
+    pub l3_trigger_days: u32,
 }
 
 impl Default for ThresholdConfig {
@@ -409,10 +414,13 @@ impl Default for ThresholdConfig {
     ///
     /// 返回:
     /// - 5 条未吸收 L1 或最早未吸收 L1 超过 7 天时触发 L2 检查。
+    /// - 10 条未吸收事件或最早事件超过 30 天时触发 L3 推断。
     fn default() -> Self {
         Self {
             l2_trigger_count: 5,
             l2_trigger_days: 7,
+            l3_trigger_count: 10,
+            l3_trigger_days: 30,
         }
     }
 }

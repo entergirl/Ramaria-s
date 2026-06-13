@@ -89,6 +89,40 @@ var RamariaApi = (function () {
     }
 
     /**
+     * 手动保存当前活跃会话（关闭 → 生成 L1 摘要）。
+     *
+     * 参数:
+     * - `personaUid`: 当前对话人格 UID，用于 L1 摘要归属。
+     *
+     * 对齐 v1.1 save_current_session Tauri Command。
+     *
+     * 返回:
+     * - "ok" 表示保存成功
+     */
+    async function saveCurrentSession(personaUid) {
+        var args = {};
+        if (personaUid) args.personaUid = personaUid;
+        return await _invoke('save_current_session', args, '保存当前会话');
+    }
+
+    /**
+     * 为指定 session 重新生成 L1 摘要（手动重试）。
+     *
+     * 参数:
+     * - `sessionId`: 目标 session UUID。
+     * - `personaUid`: 可选人格标识。
+     *
+     * 返回:
+     * - { l1_generated: bool, summary?: string, session_id: string }
+     */
+    async function generateL1(sessionId, personaUid) {
+        _require(sessionId, '会话 ID');
+        var args = { sessionId: sessionId };
+        if (personaUid) args.personaUid = personaUid;
+        return await _invoke('generate_l1', args, '重新生成 L1 摘要');
+    }
+
+    /**
      * 获取当前应用状态。
      *
      * 返回:
@@ -393,6 +427,8 @@ var RamariaApi = (function () {
     return {
         chat: {
             send: sendMessage,
+            save: saveCurrentSession,
+            generateL1: generateL1,
             getAppState: getAppState,
             checkPrivacy: checkPrivacy,
             confirmPrivacy: confirmPrivacy,

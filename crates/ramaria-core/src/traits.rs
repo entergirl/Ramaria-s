@@ -278,6 +278,18 @@ pub trait StorageBackend: Send + Sync {
         &self,
         fingerprint: &str,
     ) -> RamariaResult<Option<Message>>;
+    /// 获取指定 session 最后一条消息的时间（Unix 毫秒）。
+    ///
+    /// 职责:
+    /// - 供空闲检测线程判断 session 是否超过空闲阈值。
+    /// - 默认实现返回 `Ok(None)`，子 crate 应覆写为高效 SQL（`SELECT MAX(created_at)`）。
+    ///
+    /// 返回:
+    /// - `Ok(Some(ms))`: 最后消息时间戳。
+    /// - `Ok(None)`: session 无消息或未实现。
+    async fn get_last_message_time(&self, _session_id: Uuid) -> RamariaResult<Option<i64>> {
+        Ok(None)
+    }
 
     // -- Memory L1 --
     async fn save_memory_l1(&self, memory: &MemoryL1) -> RamariaResult<()>;

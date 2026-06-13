@@ -66,6 +66,15 @@ impl MessageRow {
 }
 
 pub async fn save(pool: &SqlitePool, msg: &Message) -> RamariaResult<()> {
+    // 写入前检查 session 是否已关闭（只读约束）
+    // 对齐 Python：已关闭 session 不可再编辑
+    if !is_session_active(pool, msg.session_id).await? {
+        return Err(RamariaError::validation(format!(
+            "session {} 已关闭，不可写入新消息",
+            msg.session_id
+        )));
+    }
+
     sqlx::query(
         "INSERT INTO messages (id, session_id, role, content, created_at, source, import_fingerprint, persona_uid)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
@@ -82,6 +91,55 @@ pub async fn save(pool: &SqlitePool, msg: &Message) -> RamariaResult<()> {
         .await
         .map_err(|e| RamariaError::storage_with_source("保存消息失败", e))?;
     Ok(())
+}
+
+/// 检查 session 是否处于活跃状态（ended_at IS NULL）。
+///
+/// 职责:
+/// - 防止向已关闭 session 写入消息（只读约束）。
+/// - 对齐 Python `SessionManager` 的只读保护行为。
+///
+/// 返回:
+/// - `Ok(true)`: session 存在且未关闭。
+/// - `Ok(false)`: session 不存在或已关闭。
+pub async fn is_session_active(pool: &SqlitePool, session_id: Uuid) -> RamariaResult<bool> {
+    let row: Option<(i64,)> =
+        sqlx::query_as("SELECT 1 FROM sessions WHERE id = ? AND ended_at IS NULL")
+            .bind(session_id.to_string())
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| RamariaError::storage_with_source("检查 session 活跃状态失败", e))?;
+    Ok(row.is_some())
+}
+
+/// 获取指定 session 最后一条消息的时间。
+///
+/// 职责:
+/// - 供空闲检测线程判断 session 是否超过空闲阈值。
+/// - 对齐 Python `database.get_last_message_time()`。
+///
+/// 返回:
+/// - `Ok(Some(ms))`: 最后消息的 Unix 毫秒时间戳。
+/// - `Ok(None)`: session 无消息。
+pub async fn get_last_message_time(
+    pool: &SqlitePool,
+    session_id: Uuid,
+) -> RamariaResult<Option<i64>> {
+    // SQLite MAX 聚合在无行时返回 NULL，使用 Option<i64> 安全解码
+    #[derive(sqlx::FromRow)]
+    struct LastTimeRow {
+        max_time: Option<i64>,
+    }
+
+    let row: Option<LastTimeRow> =
+        sqlx::query_as("SELECT MAX(created_at) AS max_time FROM messages WHERE session_id = ?")
+            .bind(session_id.to_string())
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| RamariaError::storage_with_source("查询最后消息时间失败", e))?;
+
+    // SQLite 在无匹配行时也返回一行（含 NULL），所以 row 通常为 Some
+    Ok(row.and_then(|r| r.max_time))
 }
 
 pub async fn list_by_session(pool: &SqlitePool, session_id: Uuid) -> RamariaResult<Vec<Message>> {

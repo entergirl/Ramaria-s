@@ -315,6 +315,12 @@ pub struct MemoryL1 {
     pub persona_uid: Option<String>,
     /// 分组上下文——JSON 格式 `{"chat_partners": ["user-0001", "char-0003"]}`
     pub context_json: Option<String>,
+    /// 情境强度 1-5（Phase 1.1.2 启用）：
+    /// - 1-2: 弱情境（闲聊、日常寒暄）→ Phase A 加权 ×1.5
+    /// - 3: 中性情境（默认值）→ Phase A 加权 ×1.0
+    /// - 4-5: 强情境（冲突、关键决策）→ Phase A 加权 ×0.5
+    /// - None: Phase 1.1.2 前的存量数据，等同于 3
+    pub situation_strength: Option<i32>,
 }
 
 impl MemoryL1 {
@@ -326,7 +332,7 @@ impl MemoryL1 {
     /// - `time_period`: 可选时间段，如"上午""夜间"。
     ///
     /// 返回:
-    /// - 默认 valence=0.0、salience=0.5、未吸收的 L1 记忆。
+    /// - 默认 valence=0.0、salience=0.5、未吸收、situation_strength=None（等效 3）的 L1 记忆。
     pub fn new(session_id: Uuid, summary: String, time_period: Option<String>) -> Self {
         Self {
             id: new_id(),
@@ -342,6 +348,7 @@ impl MemoryL1 {
             last_accessed_at: None,
             persona_uid: None,
             context_json: None,
+            situation_strength: None,
         }
     }
 

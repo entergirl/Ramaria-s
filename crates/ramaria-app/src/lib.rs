@@ -4,6 +4,7 @@
 //! - CLI 和 Desktop 共用的应用编排层，不直接处理 UI 展示
 //! - `App` 结构体持有一切运行时依赖，提供核心对话用例 `send_message`
 //! - 管理应用状态机: NeedsSetup → Indexing → Ready
+//! - 管理 session 生命周期: 手动关闭、空闲自动关闭、L0→L3 管线触发
 //! - 流式事件模型 `StreamEvent` 统一增量文本、完成信号和错误
 //! - 错误提示映射 `ErrorHint` 将内部错误翻译为用户友好文本
 //! - 隐私确认按 provider+base_url 粒度管理
@@ -11,12 +12,13 @@
 //! 依赖方向:
 //! - ramaria-core: 类型、trait、错误模型
 //! - ramaria-storage: 持久化（通过 StorageBackend trait）
-//! - ramaria-memory: 检索、RAG、衰减、摘要
+//! - ramaria-memory: 检索、RAG、衰减、摘要、推断
 //! - ramaria-llm: LLM provider + keychain
 
 pub mod app;
 pub mod error_hint;
 pub mod privacy;
+pub mod session_lifecycle;
 pub mod setup;
 pub mod stream_event;
 
@@ -24,6 +26,7 @@ pub mod stream_event;
 pub use app::{App, SendMessageStream};
 pub use error_hint::{ErrorHint, error_detail, error_title, is_retryable};
 pub use privacy::{PrivacyStatus, check_privacy, confirm_privacy, require_privacy};
+pub use session_lifecycle::SessionLifecycle;
 pub use setup::{SetupStatus, check_setup_status, determine_state, run_setup};
 pub use stream_event::StreamEvent;
 

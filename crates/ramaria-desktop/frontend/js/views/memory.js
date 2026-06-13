@@ -180,6 +180,17 @@ var RamariaMemoryView = (function () {
             var l2Data = results[1].status === 'fulfilled' ? results[1].value : [];
             var l3Data = results[2].status === 'fulfilled' ? results[2].value : [];
 
+            // v1.1 降级：若按 persona 过滤无结果，尝试不过滤再查一次
+            if (l1Data.length === 0 && _currentPersonaUid) {
+                try {
+                    var l1Fallback = await RamariaApi.memory.getL1(null, 100);
+                    if (l1Fallback && l1Fallback.length > 0) {
+                        console.warn('[MemoryView] L1 按 persona=' + _currentPersonaUid + ' 查询为空，降级为全量查询，找到 ' + l1Fallback.length + ' 条');
+                        l1Data = l1Fallback;
+                    }
+                } catch (_) { /* 降级查询失败，保持空结果 */ }
+            }
+
             // 缓存
             _cache[_currentPersonaUid] = { l1: l1Data, l2: l2Data, l3: l3Data };
 

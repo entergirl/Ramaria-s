@@ -193,6 +193,12 @@ async fn init_app(data_dir: &PathBuf) -> Result<(Arc<ramaria_app::App>, PathBuf)
         .await
         .map_err(|e| format!("刷新应用状态失败: {}", e))?;
 
+    // Step 7: 如果状态为 Ready，启动后台任务（空闲检测 + L2/L3 定时检查）
+    if app.current_state() == ramaria_core::AppState::Ready {
+        app.start_background_tasks();
+        tracing::info!("后台任务已启动");
+    }
+
     tracing::info!(
         state = %app.current_state().as_str(),
         provider = %backend_config.provider.as_str(),
@@ -258,6 +264,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // ---- Chat ----
             commands::chat::send_message,
+            commands::chat::save_current_session,
+            commands::chat::generate_l1,
             commands::chat::get_app_state,
             commands::chat::check_privacy,
             commands::chat::confirm_privacy,

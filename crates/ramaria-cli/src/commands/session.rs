@@ -17,6 +17,12 @@ pub enum SessionCmd {
     Show { session_id: String },
     /// 删除指定会话
     Delete { session_id: String },
+    /// v1.1: 为指定 session 重新生成 L1 摘要
+    Summarize {
+        session_id: String,
+        /// 可选的人格标识
+        persona_uid: Option<String>,
+    },
 }
 
 /// 执行 session 命令。
@@ -25,6 +31,10 @@ pub async fn run(app: &Arc<ramaria_app::App>, cmd: SessionCmd) -> anyhow::Result
         SessionCmd::List => list_sessions(app).await,
         SessionCmd::Show { session_id } => show_session(app, &session_id).await,
         SessionCmd::Delete { session_id } => delete_session(app, &session_id).await,
+        SessionCmd::Summarize {
+            session_id,
+            persona_uid,
+        } => summarize_session(app, &session_id, persona_uid.as_deref()).await,
     }
 }
 
@@ -140,6 +150,69 @@ async fn delete_session(app: &Arc<ramaria_app::App>, session_id: &str) -> anyhow
         .context("删除会话失败")?;
 
     crate::ui::success(&format!("会话 {sid} 已删除"));
+    Ok(())
+}
+
+/// v1.1: 为指定 session 重新生成 L1 摘要（手动重试）。
+///
+/// 使用场景:
+/// - save_and_close 中 L1 生成失败后的补救。
+/// - LLM 服务恢复后的批量补救。
+async fn summarize_session(
+    app: &Arc<ramaria_app::App>,
+    session_id: &str,
+    persona_uid: Option<&str>,
+) -> anyhow::Result<()> {
+    let sid = uuid::Uuid::parse_str(session_id).context("无效的 session UUID")?;
+
+    // 检查 session 存在
+    let _session = app
+        .storage()
+        .get_session(sid)
+        .await
+        .context("查询会话失败")?
+        .ok_or_else(|| anyhow::anyhow!("会话不存在: {session_id}"))?;
+
+    let messages = app
+        .storage()
+        .list_messages(sid)
+        .await
+        .context("查询消息失败")?;
+
+    if messages.is_empty() {
+        crate::ui::info("该会话无消息，无法生成摘要");
+        return Ok(());
+    }
+
+    crate::ui::info(&format!(
+        "正在为会话 {} 生成 L1 摘要（{} 条消息）...",
+        session_id,
+        messages.len()
+    ));
+
+    match app.regenerate_l1(sid, persona_uid).await {
+        Ok(Some(l1)) => {
+            crate::ui::success("L1 摘要生成成功");
+            println!();
+            crate::ui::labeled("摘要", &l1.summary);
+            if let Some(ref kw) = l1.keywords {
+                crate::ui::labeled("关键词", kw);
+            }
+            if let Some(ref atm) = l1.atmosphere {
+                crate::ui::labeled("氛围", atm);
+            }
+            crate::ui::labeled("效价", &format!("{:.2}", l1.valence));
+            crate::ui::labeled("显著性", &format!("{:.2}", l1.salience));
+        }
+        Ok(None) => {
+            crate::ui::warn("该会话无消息，无法生成摘要");
+        }
+        Err(e) => {
+            crate::ui::print_error(&e);
+            anyhow::bail!("L1 摘要生成失败: {e}");
+        }
+    }
+
     Ok(())
 }
 

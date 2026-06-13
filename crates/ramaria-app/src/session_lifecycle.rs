@@ -1,0 +1,982 @@
+//! rust/crates/ramaria-app/src/session_lifecycle.rs - Session 生命周期与记忆管线触发
+//!
+//! 设计特点:
+//! - 对齐 Python `SessionManager` 的完整行为：手动关闭、空闲自动关闭、只读约束
+//! - Thread A：每 60s 轮询活跃 session 空闲时间，超过阈值自动关闭 → L1 摘要 → L2 触发检查
+//! - Thread B：每 24h 检查最早未吸收 L1（>7天 → L2）、最早未吸收事件（>30天 → L3）
+//! - shutdown hook：应用退出时自动关闭活跃 session 并等待后台任务完成
+//! - 所有管线触发通过 `JobManager` 编排，含重试和指数退避
+//! - 级联触发：L1 写入后 → 检查 L2 条件（路径 A）；L2 写入后 → 检查 L3 条件
+//!
+//! 与 Python 对齐:
+//! - `_close_and_summarize()` → `close_and_summarize_session()`
+//! - Thread A `_idle_checker_loop()` → `run_idle_checker()`
+//! - Thread B → `run_l2_l3_scheduler()`
+//! - `force_close_current_session()` → `save_and_close_session()`
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use ramaria_core::config::RamariaConfig;
+use ramaria_core::error::{RamariaError, RamariaResult};
+use ramaria_core::traits::{LlmProvider, StorageBackend};
+use ramaria_core::types::now_ms;
+use ramaria_memory::event::{EventExtractor, EventExtractorConfig};
+use ramaria_memory::job::{JobManager, JobResult, JobType};
+use ramaria_memory::l1::{L1Summarizer, L1SummarizerConfig};
+use tracing::{debug, error, info, warn};
+use uuid::Uuid;
+
+// =========================================================
+// Session 生命周期编排器
+// =========================================================
+
+/// Session 生命周期编排器。
+///
+/// 职责:
+/// - 管理活跃 session ID 的内存追踪。
+/// - 管理每个 session 最后活跃时间的内存追踪（避免每次查 DB）。
+/// - 提供手动关闭、空闲检测、级联管线触发的完整编排。
+///
+/// 对齐 Python:
+/// - `SessionManager.active_session_id` + `threading.Lock` → `active_session_id: Mutex<Option<Uuid>>`
+/// - `SessionManager._idle_checker_loop()` → `run_idle_checker()`
+/// - `SessionManager._l2_checker_loop()` → `run_l2_l3_scheduler()`
+pub struct SessionLifecycle {
+    /// 当前活跃 session ID（同一时刻只有一个活跃 session）
+    active_session_id: Mutex<Option<Uuid>>,
+    /// 各 session 最后一条消息的时间（Unix 毫秒），内存缓存
+    session_last_active: Mutex<HashMap<Uuid, i64>>,
+    /// 应用配置引用
+    config: RamariaConfig,
+    /// 停止标志（所有后台线程在设置此标志后退出）
+    shutdown_flag: Arc<AtomicBool>,
+}
+
+impl SessionLifecycle {
+    /// 创建新的 Session 生命周期编排器。
+    pub fn new(config: RamariaConfig) -> Self {
+        Self {
+            active_session_id: Mutex::new(None),
+            session_last_active: Mutex::new(HashMap::new()),
+            config,
+            shutdown_flag: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// 返回 shutdown_flag 的 Arc 引用，供外部线程检查。
+    pub fn shutdown_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.shutdown_flag)
+    }
+
+    // =========================================================
+    // 活跃 Session 追踪
+    // =========================================================
+
+    /// 获取当前活跃 session ID。
+    ///
+    /// 对齐 Python `SessionManager.active_session_id`。
+    pub fn get_active_session_id(&self) -> Option<Uuid> {
+        *self.active_session_id.lock().unwrap_or_else(|e| {
+            error!("active_session_id lock poisoned: {e}");
+            e.into_inner()
+        })
+    }
+
+    /// 设置当前活跃 session ID（公共 API，供 App::send_message 自动创建 session）。
+    pub fn set_active_session_id_public(&self, sid: Option<Uuid>) {
+        let mut guard = self.active_session_id.lock().unwrap_or_else(|e| {
+            error!("active_session_id lock poisoned during set: {e}");
+            e.into_inner()
+        });
+        *guard = sid;
+    }
+
+    /// 设置当前活跃 session ID（内部使用）。
+    fn set_active_session_id(&self, sid: Option<Uuid>) {
+        self.set_active_session_id_public(sid);
+    }
+
+    /// 记录 session 最后活跃时间。
+    ///
+    /// 对齐 Python `SessionManager._last_message_time`（Python 从 DB 查，
+    /// Rust 在此做内存缓存以减少 DB 查询）。
+    pub fn touch_session(&self, session_id: Uuid) {
+        let now = now_ms();
+        let mut guard = self.session_last_active.lock().unwrap_or_else(|e| {
+            error!("session_last_active lock poisoned: {e}");
+            e.into_inner()
+        });
+        guard.insert(session_id, now);
+        debug!(%session_id, last_active = now, "session 活跃时间已更新");
+    }
+
+    /// 获取 session 最后活跃时间（从内存缓存）。
+    fn get_last_active(&self, session_id: Uuid) -> Option<i64> {
+        let guard = self.session_last_active.lock().unwrap_or_else(|e| {
+            error!("session_last_active lock poisoned: {e}");
+            e.into_inner()
+        });
+        guard.get(&session_id).copied()
+    }
+
+    /// 移除 session 的活跃时间缓存（session 关闭后清理）。
+    fn forget_session(&self, session_id: Uuid) {
+        let mut guard = self.session_last_active.lock().unwrap_or_else(|e| {
+            error!("session_last_active lock poisoned during forget: {e}");
+            e.into_inner()
+        });
+        guard.remove(&session_id);
+    }
+
+    // =========================================================
+    // 手动关闭：save_and_close_session
+    // =========================================================
+
+    /// 手动保存并关闭当前活跃 session。
+    ///
+    /// 完整流程（对齐 Python `force_close_current_session() → _close_and_summarize()`）:
+    /// 1. 获取当前活跃 session ID
+    /// 2. 调用 storage.close_session() 设置 ended_at
+    /// 3. 生成 L1 摘要（通过 L1Summarizer，传入当前对话人格）
+    /// 4. 检查 L2 触发条件（路径 A：未吸收 L1 ≥ 5 条）
+    /// 5. 清除活跃 session ID
+    ///
+    /// 参数:
+    /// - `storage`: 存储后端。
+    /// - `llm`: LLM provider（供 L1 summarizer 使用）。
+    /// - `persona_uid`: 当前对话人格的 UID（用于 L1 摘要归属）。
+    ///
+    /// 返回:
+    /// - `Ok(())`: 关闭成功（即使无活跃 session 也视为成功）。
+    /// - `Err`: 存储或 LLM 调用失败。
+    pub async fn save_and_close_session(
+        &self,
+        storage: &dyn StorageBackend,
+        llm: &dyn LlmProvider,
+        persona_uid: Option<&str>,
+    ) -> RamariaResult<()> {
+        let active_sid = match self.get_active_session_id() {
+            Some(sid) => sid,
+            None => {
+                debug!("无活跃 session，跳过 save_and_close");
+                return Ok(());
+            }
+        };
+
+        info!(%active_sid, "手动保存并关闭 session");
+
+        // Step 1: 关闭 session（设置 ended_at）
+        // 对齐 Python `close_session(sid)`
+        close_session_safe(storage, active_sid).await?;
+
+        // Step 2: 生成 L1 摘要（传入当前对话人格）
+        // 对齐 Python `summarizer.summarize_session(session_id)`
+        match self
+            .generate_l1_summary(storage, llm, active_sid, persona_uid)
+            .await
+        {
+            Ok(l1) => {
+                info!(
+                    %active_sid,
+                    l1_id = %l1.id,
+                    summary_len = l1.summary.chars().count(),
+                    "L1 摘要生成成功"
+                );
+
+                // Step 3: 检查 L2 触发条件（路径 A：即时触发）
+                // 对齐 Python summarizer 末尾的 `merger.check_and_merge()`
+                self.check_l2_trigger(storage, llm).await;
+            }
+            Err(e) => {
+                tracing::error!(
+                    %active_sid,
+                    error = %e,
+                    "❌ L1 摘要生成失败！session 已关闭但未生成摘要。LLM 服务可能不可用。"
+                );
+                // 创建 pending BackgroundJob，供后续 regenerate_l1 重试
+                // 对齐决策：L1 失败不阻塞 session 关闭，但需记录可重试任务
+                let payload = serde_json::json!({
+                    "session_id": active_sid.to_string(),
+                    "persona_uid": persona_uid,
+                    "reason": "auto_retry_on_close"
+                })
+                .to_string();
+                match storage
+                    .create_background_job("l1_summary", Some(&payload))
+                    .await
+                {
+                    Ok(job_id) => {
+                        tracing::info!(
+                            %active_sid,
+                            job_id,
+                            "已创建 pending L1 重试任务，稍后可调用 regenerate_l1 或后台自动重试"
+                        );
+                    }
+                    Err(job_err) => {
+                        tracing::error!(
+                            %active_sid,
+                            %job_err,
+                            "❌ 创建 L1 重试任务也失败了！需手动使用 generate_l1 命令重试。"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Step 4: 清除活跃 session
+        self.set_active_session_id(None);
+        self.forget_session(active_sid);
+
+        info!(%active_sid, "session 已关闭");
+        Ok(())
+    }
+
+    // =========================================================
+    // L1 摘要手动重试（公开 API）
+    // =========================================================
+
+    /// 为指定 session 重新生成 L1 摘要（手动重试）。
+    ///
+    /// 职责:
+    /// - 供 save_and_close_session 中 L1 失败后的手动补救。
+    /// - session 可以已关闭，也可以仍在活跃中（shutdown 场景）。
+    ///
+    /// 参数:
+    /// - `session_id`: 目标 session。
+    /// - `persona_uid`: 人格标识。
+    ///
+    /// 返回:
+    /// - `Ok(Some(l1))`: 生成成功。
+    /// - `Ok(None)`: session 无消息。
+    pub async fn regenerate_l1(
+        &self,
+        storage: &dyn StorageBackend,
+        llm: &dyn LlmProvider,
+        session_id: Uuid,
+        persona_uid: Option<&str>,
+    ) -> RamariaResult<Option<ramaria_core::types::MemoryL1>> {
+        // 检查是否有消息可摘要
+        let messages = storage.list_messages(session_id).await?;
+        if messages.is_empty() {
+            warn!(%session_id, "regenerate_l1: session 无消息，跳过");
+            return Ok(None);
+        }
+
+        info!(%session_id, ?persona_uid, msg_count = messages.len(), "手动重试 L1 摘要");
+
+        match self
+            .generate_l1_summary(storage, llm, session_id, persona_uid)
+            .await
+        {
+            Ok(l1) => {
+                info!(%session_id, l1_id = %l1.id, "L1 重试成功");
+                // 触发 L2 检查（路径 A）
+                self.check_l2_trigger(storage, llm).await;
+                Ok(Some(l1))
+            }
+            Err(e) => {
+                error!(%session_id, %e, "L1 重试失败");
+                Err(e)
+            }
+        }
+    }
+
+    // =========================================================
+    // L1 摘要生成（内部辅助）
+    // =========================================================
+
+    /// 为指定 session 生成 L1 摘要。
+    ///
+    /// 参数:
+    /// - `persona_uid`: 当前对话人格的 UID，用于 L1 归属。
+    ///
+    /// 对齐 Python `summarizer.summarize_session(session_id)`。
+    async fn generate_l1_summary(
+        &self,
+        storage: &dyn StorageBackend,
+        llm: &dyn LlmProvider,
+        session_id: Uuid,
+        persona_uid: Option<&str>,
+    ) -> RamariaResult<ramaria_core::types::MemoryL1> {
+        let mut summarizer_config = L1SummarizerConfig::default();
+        // v1.1: 设置 persona_uid，确保 L1 摘要可被记忆页面按人格过滤查询到
+        if let Some(uid) = persona_uid {
+            summarizer_config.persona_uid = Some(uid.to_string());
+        }
+        let summarizer = L1Summarizer::new(llm, storage, summarizer_config);
+
+        // 通过 JobManager 包装执行（带重试）
+        let job_manager = JobManager::with_defaults(storage);
+        let payload = serde_json::json!({ "session_id": session_id.to_string() }).to_string();
+
+        let result = job_manager
+            .execute_with_retry(JobType::L1Summary, Some(&payload), || {
+                summarize_with_summarizer(&summarizer, session_id)
+            })
+            .await;
+
+        match result {
+            Ok(_job_id) => {
+                // 摘要已写入存储，需要读取返回（JobManager 不返回业务结果）
+                // 从 storage 读取刚生成的 L1
+                let l1_list = storage.list_memory_l1(session_id).await?;
+                l1_list
+                    .into_iter()
+                    .last()
+                    .ok_or_else(|| RamariaError::validation("L1 摘要生成后无法读取"))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    // =========================================================
+    // L2 事件提取触发检查（路径 A + 路径 B）
+    // =========================================================
+
+    /// 检查 L2 事件提取触发条件（路径 A：即时触发）。
+    ///
+    /// 对齐 Python `merger.check_and_merge()` 的计数触发路径。
+    /// 遍历所有 persona，检查未吸收 L1 是否 ≥ 5 条。
+    async fn check_l2_trigger(&self, storage: &dyn StorageBackend, llm: &dyn LlmProvider) {
+        let personas = match storage.list_personas().await {
+            Ok(p) => p,
+            Err(e) => {
+                error!(%e, "L2 触发检查：无法列出 persona");
+                return;
+            }
+        };
+
+        for persona in &personas {
+            if self.shutdown_flag.load(Ordering::Relaxed) {
+                return;
+            }
+
+            let unabsorbed = match storage.list_unabsorbed_l1(&persona.uid).await {
+                Ok(l) => l,
+                Err(e) => {
+                    warn!(persona_uid = %persona.uid, %e, "L2 触发检查：查询未吸收 L1 失败");
+                    continue;
+                }
+            };
+
+            // 路径 A 触发条件：未吸收 L1 ≥ 5 条
+            // 对齐 Python `MergerConfig.L2_TRIGGER_COUNT = 5`
+            let trigger_count = self.config.thresholds.l2_trigger_count as usize;
+            if unabsorbed.len() >= trigger_count {
+                info!(
+                    persona_uid = %persona.uid,
+                    unabsorbed_count = unabsorbed.len(),
+                    trigger_count,
+                    "L2 触发条件满足（路径 A：计数），启动事件提取"
+                );
+                self.run_l2_extraction(storage, llm, &persona.uid).await;
+            } else {
+                debug!(
+                    persona_uid = %persona.uid,
+                    unabsorbed_count = unabsorbed.len(),
+                    trigger_count,
+                    "L2 触发条件未满足（路径 A）"
+                );
+            }
+        }
+    }
+
+    /// 执行 L2 事件提取。
+    ///
+    /// 对齐 Python `merger.check_and_merge()` 的 LLM 提取逻辑。
+    async fn run_l2_extraction(
+        &self,
+        storage: &dyn StorageBackend,
+        llm: &dyn LlmProvider,
+        persona_uid: &str,
+    ) {
+        let extractor = EventExtractor::new(llm, storage, EventExtractorConfig::default());
+
+        let result = extractor.extract_events(persona_uid).await;
+
+        match result {
+            Ok(events) => {
+                info!(persona_uid, event_count = events.len(), "L2 事件提取完成");
+
+                // L2 写入后检查 L3 触发条件（路径 A 级联）
+                if !events.is_empty() {
+                    self.check_l3_trigger(storage, llm, persona_uid).await;
+                }
+            }
+            Err(e) => {
+                error!(persona_uid, %e, "L2 事件提取失败");
+            }
+        }
+    }
+
+    // =========================================================
+    // L3 性格推断触发检查
+    // =========================================================
+
+    /// 检查 L3 性格推断触发条件。
+    ///
+    /// 对齐 Python `profile_manager` + Phase A→B→C 管线。
+    /// 触发条件：未吸收事件 ≥ 10 条 或 最早事件 > 30 天。
+    async fn check_l3_trigger(
+        &self,
+        storage: &dyn StorageBackend,
+        llm: &dyn LlmProvider,
+        persona_uid: &str,
+    ) {
+        let events = match storage.list_unabsorbed_events(persona_uid).await {
+            Ok(e) => e,
+            Err(e) => {
+                warn!(persona_uid, %e, "L3 触发检查：查询未吸收事件失败");
+                return;
+            }
+        };
+
+        if events.is_empty() {
+            return;
+        }
+
+        let now = now_ms();
+        let oldest_event_age_days = events
+            .iter()
+            .map(|e| e.start)
+            .min()
+            .map(|min_time| (now - min_time) as f64 / (1000.0 * 86400.0))
+            .unwrap_or(0.0);
+
+        // L3 触发条件来自配置（对齐 Python ProfileConfig）
+        let trigger_count = self.config.thresholds.l3_trigger_count as usize;
+        let trigger_days = self.config.thresholds.l3_trigger_days as f64;
+
+        let should_trigger = events.len() >= trigger_count || oldest_event_age_days >= trigger_days;
+
+        if should_trigger {
+            info!(
+                persona_uid,
+                event_count = events.len(),
+                oldest_days = %format!("{:.1}", oldest_event_age_days),
+                "L3 触发条件满足，启动性格推断"
+            );
+            self.run_l3_inference(storage, llm, persona_uid).await;
+        } else {
+            debug!(
+                persona_uid,
+                event_count = events.len(),
+                oldest_days = %format!("{:.1}", oldest_event_age_days),
+                "L3 触发条件未满足"
+            );
+        }
+    }
+
+    /// 执行 L3 性格推断（Phase A 统计 → Phase B LLM 推断 → Phase C 增量更新）。
+    ///
+    /// 对齐 Python `profile_manager.extract_profile()` + Rust inference 管线。
+    ///
+    /// 说明:
+    /// - Phase A: 纯数值统计（预过滤 → 聚类 → 收缩 → 跨分类指标）
+    /// - Phase B: LLM 三步结构化推断
+    /// - Phase C: 漂移检测 + 置信度更新
+    /// - 当前实现以 Phase A（纯数值，不调 LLM）为主，
+    ///   Phase B/C 需要 LLM 调用，在 mock 测试中验证。
+    async fn run_l3_inference(
+        &self,
+        storage: &dyn StorageBackend,
+        _llm: &dyn LlmProvider,
+        persona_uid: &str,
+    ) {
+        // 取未吸收事件列表
+        let events = match storage.list_unabsorbed_events(persona_uid).await {
+            Ok(e) => e,
+            Err(e) => {
+                error!(persona_uid, %e, "L3 推断：查询事件失败");
+                return;
+            }
+        };
+
+        if events.is_empty() {
+            return;
+        }
+
+        // ---- Phase A: 统计特征提取（纯数值，不调 LLM） ----
+        // `run_phase_a_stats` 内部包含 A1 预过滤 + A2-A6 全流程
+        use ramaria_memory::inference::{StatsConfig, run_phase_a_stats};
+
+        let stats_config = StatsConfig::default();
+        let stats_summary = run_phase_a_stats(&events, &stats_config);
+
+        info!(
+            persona_uid,
+            category_count = stats_summary.categories.len(),
+            "Phase A 统计完成"
+        );
+
+        // 将统计结果持久化到 cluster_snapshots 表
+        for cat_stats in &stats_summary.categories {
+            let snapshot_json = serde_json::json!({
+                "category": cat_stats.category,
+                "event_count": cat_stats.event_count,
+                "n_effective": cat_stats.n_eff,
+                "valence_mean": cat_stats.valence_mean,
+                "valence_std": cat_stats.valence_std,
+                "share_mean": cat_stats.share_mean,
+            });
+
+            let snapshot = ramaria_core::types::ClusterSnapshot {
+                id: 0, // 由 DB 自动分配
+                persona_uid: persona_uid.to_string(),
+                category: cat_stats.category.clone(),
+                cluster_label: format!("cluster_{}", cat_stats.category),
+                samples: Some(snapshot_json.to_string()),
+                count: cat_stats.event_count as i32,
+                is_current: true,
+                created_at: now_ms(),
+            };
+
+            if let Err(e) = storage.save_cluster_snapshot(&snapshot).await {
+                warn!(persona_uid, category = %cat_stats.category, %e, "写入聚类快照失败");
+            }
+        }
+
+        debug!(
+            persona_uid,
+            "L3 Phase A 推断流程完成（Phase B/C 待 LLM 管线接通）"
+        );
+    }
+
+    // =========================================================
+    // 后台线程 A：空闲检测
+    // =========================================================
+
+    /// 启动后台空闲检测线程（Thread A）。
+    ///
+    /// 对齐 Python `SessionManager._idle_checker_loop()`。
+    ///
+    /// 逻辑:
+    /// - 每 `config.session.idle_check_interval_seconds`（默认 60s）轮询
+    /// - 若活跃 session 的最后消息时间距今超过 `config.session.l1_idle_minutes`（默认 10min）
+    ///   → 自动调用 `save_and_close_session()`
+    ///
+    /// 参数:
+    /// - `storage`: 存储后端。
+    /// - `llm`: LLM provider。
+    ///
+    /// 返回:
+    /// - `tokio::task::JoinHandle<()>`，供 shutdown 时等待。
+    pub fn spawn_idle_checker(
+        self: &Arc<Self>,
+        storage: Arc<dyn StorageBackend>,
+        llm: Arc<dyn LlmProvider>,
+    ) -> tokio::task::JoinHandle<()> {
+        let slf = Arc::clone(self);
+        let interval_secs = self.config.session.idle_check_interval_seconds;
+        let idle_minutes = self.config.session.l1_idle_minutes;
+        let shutdown_flag = Arc::clone(&self.shutdown_flag);
+
+        info!(
+            interval_secs,
+            idle_minutes, "后台空闲检测线程启动（Thread A）"
+        );
+
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs as u64));
+            // 跳过首次立即触发（给应用启动留缓冲）
+            ticker.tick().await;
+
+            loop {
+                ticker.tick().await;
+
+                if shutdown_flag.load(Ordering::Relaxed) {
+                    info!("空闲检测线程收到停止信号，退出");
+                    return;
+                }
+
+                let active_sid = match slf.get_active_session_id() {
+                    Some(sid) => sid,
+                    None => {
+                        // 无活跃 session，无需检测
+                        continue;
+                    }
+                };
+
+                // 从内存缓存获取最后活跃时间（Python 从 DB 查）
+                let last_active = match slf.get_last_active(active_sid) {
+                    Some(t) => t,
+                    None => {
+                        // 内存缓存中没有，尝试从 DB 恢复
+                        // 对齐 Python `database.get_last_message_time(session_id)`
+                        match get_last_msg_time_from_db(storage.as_ref(), active_sid).await {
+                            Ok(Some(t)) => {
+                                slf.touch_session(active_sid);
+                                t
+                            }
+                            Ok(None) => {
+                                // 无消息的空 session，使用创建时间
+                                debug!(%active_sid, "session 无消息，跳过空闲检测");
+                                continue;
+                            }
+                            Err(e) => {
+                                warn!(%active_sid, %e, "查询最后消息时间失败");
+                                continue;
+                            }
+                        }
+                    }
+                };
+
+                let now = now_ms();
+                let idle_ms = now.saturating_sub(last_active);
+                let idle_min = idle_ms as f64 / 60_000.0;
+
+                if idle_min >= idle_minutes as f64 {
+                    info!(
+                        %active_sid,
+                        idle_min = %format!("{:.1}", idle_min),
+                        threshold_min = idle_minutes,
+                        "session 空闲超时，自动关闭"
+                    );
+
+                    if let Err(e) = slf
+                        .save_and_close_session(storage.as_ref(), llm.as_ref(), None)
+                        .await
+                    {
+                        error!(%active_sid, %e, "自动关闭 session 失败");
+                    }
+                } else {
+                    debug!(
+                        %active_sid,
+                        idle_min = %format!("{:.1}", idle_min),
+                        "session 仍在活跃，未触发空闲关闭"
+                    );
+                }
+            }
+        })
+    }
+
+    // =========================================================
+    // 后台线程 B：L2/L3 定时触发
+    // =========================================================
+
+    /// 启动后台 L2/L3 定时检查线程（Thread B）。
+    ///
+    /// 对齐 Python `SessionManager._l2_checker_loop()`。
+    ///
+    /// 逻辑:
+    /// - 每 `config.session.l2_check_interval_seconds`（默认 86400s = 24h）轮询
+    /// - 遍历所有 persona：
+    ///   - 最早未吸收 L1 > 7 天 → 触发 L2 事件提取
+    ///   - 最早未吸收事件 > 30 天 → 触发 L3 性格推断
+    ///
+    /// 参数:
+    /// - `storage`: 存储后端。
+    /// - `llm`: LLM provider。
+    pub fn spawn_l2_l3_scheduler(
+        self: &Arc<Self>,
+        storage: Arc<dyn StorageBackend>,
+        llm: Arc<dyn LlmProvider>,
+    ) -> tokio::task::JoinHandle<()> {
+        let slf = Arc::clone(self);
+        let interval_secs = self.config.session.l2_check_interval_seconds;
+        let shutdown_flag = Arc::clone(&self.shutdown_flag);
+
+        info!(interval_secs, "后台 L2/L3 定时检查线程启动（Thread B）");
+
+        tokio::spawn(async move {
+            // 首次延迟：启动 5 分钟后执行首次检查（避免阻塞启动流程）
+            tokio::time::sleep(Duration::from_secs(300)).await;
+
+            loop {
+                if shutdown_flag.load(Ordering::Relaxed) {
+                    info!("L2/L3 定时检查线程收到停止信号，退出");
+                    return;
+                }
+
+                // 执行定时检查
+                slf.run_scheduled_l2_l3_check(storage.as_ref(), llm.as_ref())
+                    .await;
+
+                // 等待下一次检查（可中断）
+                let mut sleep_secs = interval_secs as u64;
+                while sleep_secs > 0 && !shutdown_flag.load(Ordering::Relaxed) {
+                    let chunk = sleep_secs.min(60); // 每 60s 检查一次停止信号
+                    tokio::time::sleep(Duration::from_secs(chunk)).await;
+                    sleep_secs = sleep_secs.saturating_sub(chunk);
+                }
+            }
+        })
+    }
+
+    /// 执行一次性 L2/L3 定时检查。
+    ///
+    /// 对齐 Python `merger.check_and_merge()` 的时间触发路径（路径 B）。
+    async fn run_scheduled_l2_l3_check(&self, storage: &dyn StorageBackend, llm: &dyn LlmProvider) {
+        debug!("L2/L3 定时检查开始");
+
+        let personas = match storage.list_personas().await {
+            Ok(p) => p,
+            Err(e) => {
+                error!(%e, "L2/L3 定时检查：无法列出 persona");
+                return;
+            }
+        };
+
+        let now = now_ms();
+        let ms_per_day: i64 = 86_400_000;
+
+        for persona in &personas {
+            if self.shutdown_flag.load(Ordering::Relaxed) {
+                return;
+            }
+
+            // ---- L2 时间触发 ----
+            // 对齐 Python：最早未吸收 L1 > 7 天则触发
+            match storage.list_unabsorbed_l1(&persona.uid).await {
+                Ok(l1_list) => {
+                    if let Some(oldest) = l1_list.iter().map(|l| l.created_at).min() {
+                        let age_days = (now - oldest) as f64 / ms_per_day as f64;
+                        if age_days >= 7.0 {
+                            info!(
+                                persona_uid = %persona.uid,
+                                %age_days,
+                                l1_count = l1_list.len(),
+                                "L2 定时触发（路径 B：最早未吸收 L1 > 7 天）"
+                            );
+                            self.run_l2_extraction(storage, llm, &persona.uid).await;
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(persona_uid = %persona.uid, %e, "L2 定时检查：查询 L1 失败");
+                }
+            }
+
+            // ---- L3 时间触发 ----
+            // 对齐 Python profile 更新：最早未吸收事件 > 30 天则触发
+            match storage.list_unabsorbed_events(&persona.uid).await {
+                Ok(events) => {
+                    if let Some(oldest) = events.iter().map(|e| e.start).min() {
+                        let age_days = (now - oldest) as f64 / ms_per_day as f64;
+                        if age_days >= 30.0 {
+                            info!(
+                                persona_uid = %persona.uid,
+                                %age_days,
+                                event_count = events.len(),
+                                "L3 定时触发（路径 B：最早未吸收事件 > 30 天）"
+                            );
+                            self.run_l3_inference(storage, llm, &persona.uid).await;
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(persona_uid = %persona.uid, %e, "L3 定时检查：查询事件失败");
+                }
+            }
+        }
+
+        debug!("L2/L3 定时检查完成");
+    }
+
+    // =========================================================
+    // Shutdown
+    // =========================================================
+
+    /// 优雅关闭：关闭活跃 session 并通知所有后台线程退出。
+    ///
+    /// 对齐 Python `SessionManager.stop()`。
+    ///
+    /// 流程:
+    /// 1. 设置 shutdown_flag
+    /// 2. 若有活跃 session，调用 save_and_close_session()（无超时——L1 摘要依赖 LLM 响应）
+    /// 3. 等待后台线程退出（各带 15s 独立超时）
+    ///
+    /// 超时策略:
+    /// - L1 摘要是关键数据，不设超时上限（若 LLM 响应极慢，用户可自行 kill 进程）。
+    /// - 后台线程仅做轮询检查，15s 超时足够它们感知 shutdown_flag 并退出。
+    ///
+    /// 参数:
+    /// - `storage`: 存储后端。
+    /// - `llm`: LLM provider。
+    /// - `idle_handle`: 空闲检测线程的 JoinHandle。
+    /// - `scheduler_handle`: L2/L3 定时线程的 JoinHandle。
+    pub async fn shutdown(
+        &self,
+        storage: &dyn StorageBackend,
+        llm: &dyn LlmProvider,
+        idle_handle: Option<tokio::task::JoinHandle<()>>,
+        scheduler_handle: Option<tokio::task::JoinHandle<()>>,
+    ) {
+        info!("SessionLifecycle shutdown 开始");
+
+        // Step 1: 设置停止标志
+        self.shutdown_flag.store(true, Ordering::SeqCst);
+
+        // Step 2: 关闭活跃 session（无超时——L1 摘要需要等待 LLM 响应）
+        match self.save_and_close_session(storage, llm, None).await {
+            Ok(()) => info!("shutdown: 活跃 session 已关闭"),
+            Err(e) => warn!(%e, "shutdown: 关闭活跃 session 时出错（继续退出）"),
+        }
+
+        // Step 3: 等待后台线程退出（各带独立 15s 超时）
+        // 与 save_and_close_session 的超时分离：后台线程只需感知 shutdown_flag 并退出，
+        // 不涉及 LLM 调用，15s 足够。save_and_close_session 的 L1 摘要已在 Step 2 完成。
+        let bg_timeout = Duration::from_secs(15);
+
+        if let Some(handle) = idle_handle {
+            match tokio::time::timeout(bg_timeout, handle).await {
+                Ok(_) => debug!("空闲检测线程已退出"),
+                Err(_) => warn!("空闲检测线程退出超时（{}s）", bg_timeout.as_secs()),
+            }
+        }
+
+        if let Some(handle) = scheduler_handle {
+            match tokio::time::timeout(bg_timeout, handle).await {
+                Ok(_) => debug!("L2/L3 定时检查线程已退出"),
+                Err(_) => warn!("L2/L3 定时检查线程退出超时（{}s）", bg_timeout.as_secs()),
+            }
+        }
+
+        info!("SessionLifecycle shutdown 完成");
+    }
+}
+
+// =========================================================
+// 辅助函数
+// =========================================================
+
+/// 安全关闭 session（忽略已关闭的 session）。
+///
+/// 对齐 Python `database.close_session(sid)`。
+async fn close_session_safe(storage: &dyn StorageBackend, session_id: Uuid) -> RamariaResult<()> {
+    // 先检查 session 是否已关闭
+    let session = storage.get_session(session_id).await?;
+    match session {
+        Some(s) if s.ended_at.is_none() => {
+            storage.close_session(session_id).await?;
+            info!(%session_id, "session 已关闭");
+            Ok(())
+        }
+        Some(_) => {
+            debug!(%session_id, "session 已关闭，跳过");
+            Ok(())
+        }
+        None => {
+            warn!(%session_id, "session 不存在，跳过关闭");
+            Ok(())
+        }
+    }
+}
+
+/// 从 DB 查询 session 最后消息时间（降级路径）。
+///
+/// 当内存缓存中没有记录时，降级到 DB 查询。
+/// 对齐 Python `database.get_last_message_time(session_id)`。
+///
+/// 实现:
+/// - 使用 `StorageBackend::get_last_message_time()` — 高效 `SELECT MAX(created_at)` 聚合，
+///   不再全量加载消息列表。
+/// - 若 trait 实现未覆写（返回 None），回退到 `list_messages` 全量加载。
+async fn get_last_msg_time_from_db(
+    storage: &dyn StorageBackend,
+    session_id: Uuid,
+) -> RamariaResult<Option<i64>> {
+    // 优先使用高效的 MAX 聚合查询
+    if let Some(time) = storage.get_last_message_time(session_id).await? {
+        return Ok(Some(time));
+    }
+    // 降级：全量加载消息取最后时间（仅当 trait 未覆写时发生）
+    let messages = storage.list_messages(session_id).await?;
+    Ok(messages.iter().map(|m| m.created_at).max())
+}
+
+/// L1 摘要生成的异步闭包（供 JobManager::execute_with_retry 使用）。
+async fn summarize_with_summarizer(summarizer: &L1Summarizer<'_>, session_id: Uuid) -> JobResult {
+    match summarizer.summarize_session(session_id).await {
+        Ok(_l1) => {
+            info!(%session_id, "L1 摘要生成成功");
+            JobResult::Success
+        }
+        Err(e) => {
+            // LLM 调用失败是可重试的（网络波动、服务暂时不可用等）
+            warn!(%session_id, %e, "L1 摘要生成失败，将重试");
+            JobResult::Retryable(e.to_string())
+        }
+    }
+}
+
+// =========================================================
+// 单元测试
+// =========================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_lifecycle_creation() {
+        let config = RamariaConfig::default();
+        let lifecycle = SessionLifecycle::new(config);
+        assert!(lifecycle.get_active_session_id().is_none());
+        assert!(!lifecycle.shutdown_flag.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn session_active_id_tracking() {
+        let config = RamariaConfig::default();
+        let lifecycle = SessionLifecycle::new(config);
+
+        let sid = Uuid::new_v4();
+        lifecycle.set_active_session_id(Some(sid));
+        assert_eq!(lifecycle.get_active_session_id(), Some(sid));
+
+        lifecycle.set_active_session_id(None);
+        assert!(lifecycle.get_active_session_id().is_none());
+    }
+
+    #[test]
+    fn session_last_active_tracking() {
+        let config = RamariaConfig::default();
+        let lifecycle = SessionLifecycle::new(config);
+
+        let sid = Uuid::new_v4();
+        lifecycle.touch_session(sid);
+        let last = lifecycle.get_last_active(sid);
+        assert!(last.is_some());
+        assert!(last.unwrap() > 0);
+    }
+
+    #[test]
+    fn session_forget_after_close() {
+        let config = RamariaConfig::default();
+        let lifecycle = SessionLifecycle::new(config);
+
+        let sid = Uuid::new_v4();
+        lifecycle.touch_session(sid);
+        assert!(lifecycle.get_last_active(sid).is_some());
+
+        lifecycle.forget_session(sid);
+        assert!(lifecycle.get_last_active(sid).is_none());
+    }
+
+    #[test]
+    fn shutdown_flag_signals_correctly() {
+        let config = RamariaConfig::default();
+        let lifecycle = SessionLifecycle::new(config);
+
+        let flag = lifecycle.shutdown_flag();
+        assert!(!flag.load(Ordering::Relaxed));
+
+        lifecycle.shutdown_flag.store(true, Ordering::SeqCst);
+        assert!(flag.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn config_values_correct() {
+        let config = RamariaConfig::default();
+        let lifecycle = SessionLifecycle::new(config);
+
+        // 验证配置值传递正确
+        assert_eq!(lifecycle.config.session.l1_idle_minutes, 10);
+        assert_eq!(lifecycle.config.session.idle_check_interval_seconds, 60);
+        assert_eq!(lifecycle.config.session.l2_check_interval_seconds, 86400);
+    }
+}

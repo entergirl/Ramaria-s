@@ -8,8 +8,6 @@ use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::types::PersonaExample;
 use sqlx::SqlitePool;
 
-use super::last_insert_id;
-
 #[derive(sqlx::FromRow)]
 struct ExampleRow {
     id: i64,
@@ -50,17 +48,15 @@ impl ExampleRow {
 }
 
 pub async fn save(pool: &SqlitePool, e: &PersonaExample) -> RamariaResult<i64> {
-    sqlx::query(
+    sqlx::query_scalar::<_, i64>(
         "INSERT INTO persona_examples (persona_uid, partner, reply, session_id, context, valence, tags, selected, length, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
     )
     .bind(&e.persona_uid).bind(&e.partner).bind(&e.reply)
     .bind(e.session_id.map(|u| u.to_string())).bind(&e.context)
     .bind(e.valence).bind(&e.tags).bind(e.selected as i64).bind(e.length).bind(e.created_at)
-    .execute(pool).await
-    .map_err(|e| RamariaError::storage_with_source("保存示例失败", e))?;
-
-    last_insert_id(pool).await
+    .fetch_one(pool).await
+    .map_err(|e| RamariaError::storage_with_source("保存示例失败", e))
 }
 
 pub async fn list_selected(

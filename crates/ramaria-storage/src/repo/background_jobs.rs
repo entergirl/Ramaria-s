@@ -8,18 +8,24 @@
 use ramaria_core::error::{RamariaError, RamariaResult};
 use sqlx::SqlitePool;
 
-use super::last_insert_id;
-
 pub async fn create(
     pool: &SqlitePool,
     job_type: &str,
     payload: Option<&str>,
 ) -> RamariaResult<i64> {
     let now = ramaria_core::types::now_ms();
-    sqlx::query("INSERT INTO background_jobs (job_type, status, payload, created_at) VALUES (?, 'pending', ?, ?)")
-        .bind(job_type).bind(payload).bind(now).execute(pool).await
-        .map_err(|e| RamariaError::storage_with_source("创建后台任务失败", e))?;
-    last_insert_id(pool).await
+    // 使用 RETURNING 子句替代 last_insert_rowid()：
+    // last_insert_rowid() 是 per-connection 的，连接池中不同连接可能拿到 0。
+    // RETURNING 在同一条 SQL 中返回自增 ID，不受连接池影响。
+    sqlx::query_scalar::<_, i64>(
+        "INSERT INTO background_jobs (job_type, status, payload, created_at) VALUES (?, 'pending', ?, ?) RETURNING id"
+    )
+        .bind(job_type)
+        .bind(payload)
+        .bind(now)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| RamariaError::storage_with_source("创建后台任务失败", e))
 }
 
 pub async fn update_status(

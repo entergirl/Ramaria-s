@@ -4,8 +4,7 @@
   "version": "1.0.1",
   "identifier": "com.ramaria.app",
   "build": {
-    "frontendDist": "./frontend",
-    "devUrl": "http://localhost:1420"
+    "frontendDist": "./frontend"
   },
   "app": {
     "withGlobalTauri": true,

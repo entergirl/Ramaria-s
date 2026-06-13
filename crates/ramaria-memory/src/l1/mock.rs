@@ -508,6 +508,7 @@ pub fn make_valid_l1(summary: &str) -> MemoryL1 {
         last_accessed_at: None,
         persona_uid: None,
         context_json: None,
+        situation_strength: None,
     }
 }
 

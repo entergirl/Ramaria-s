@@ -8,8 +8,6 @@
 use ramaria_core::error::{RamariaError, RamariaResult};
 use sqlx::SqlitePool;
 
-use super::last_insert_id;
-
 pub async fn create(
     pool: &SqlitePool,
     field: &str,
@@ -19,13 +17,12 @@ pub async fn create(
     desc: Option<&str>,
 ) -> RamariaResult<i64> {
     let now = ramaria_core::types::now_ms();
-    sqlx::query(
+    sqlx::query_scalar::<_, i64>(
         "INSERT INTO conflict_queue (field, conflict_type, old_content, new_content, conflict_desc, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)"
+         VALUES (?, ?, ?, ?, ?, ?) RETURNING id"
     ).bind(field).bind(conflict_type).bind(old_content).bind(new_content).bind(desc).bind(now)
-        .execute(pool).await
-        .map_err(|e| RamariaError::storage_with_source("创建冲突记录失败", e))?;
-    last_insert_id(pool).await
+        .fetch_one(pool).await
+        .map_err(|e| RamariaError::storage_with_source("创建冲突记录失败", e))
 }
 
 pub async fn list_pending(pool: &SqlitePool) -> RamariaResult<Vec<(i64, String, String, String)>> {

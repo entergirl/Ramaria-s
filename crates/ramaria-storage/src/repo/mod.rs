@@ -40,6 +40,9 @@ use sqlx::SqlitePool;
 /// 说明:
 /// - 必须在同一连接上紧接 INSERT 之后调用。
 /// - 不适用 TEXT 主键表（sessions/messages/memory_l1）。
+// 注意：此函数已废弃。SQLite 连接池中 `last_insert_rowid()` 是 per-connection 的，
+// INSERT 和此函数可能拿到不同连接导致返回 0。全部仓库已改用 `RETURNING id` 子句。
+#[allow(dead_code)]
 pub(crate) async fn last_insert_id(pool: &SqlitePool) -> RamariaResult<i64> {
     sqlx::query_scalar::<_, i64>("SELECT last_insert_rowid()")
         .fetch_one(pool)

@@ -30,6 +30,7 @@ pub fn command_names() -> Vec<&'static str> {
     vec![
         // chat
         "send_message",
+        "save_current_session",
         "get_app_state",
         "check_privacy",
         "confirm_privacy",

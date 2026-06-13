@@ -11,8 +11,6 @@ use ramaria_core::types::{
 };
 use sqlx::SqlitePool;
 
-use super::last_insert_id;
-
 fn parse_layer(s: &str) -> TraitLayer {
     match s {
         "base" => TraitLayer::Base,
@@ -119,11 +117,11 @@ impl TraitRow {
 }
 
 pub async fn save_trait(pool: &SqlitePool, t: &PersonalityTrait) -> RamariaResult<i64> {
-    sqlx::query(
+    sqlx::query_scalar::<_, i64>(
         "INSERT INTO personality_traits (persona_uid, layer, trait, meaning, not_meaning,
          trigger, suppress, related, seq, source, ref_event_id, ref_l1_id,
          confidence, evidence, consistency, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
     )
     .bind(&t.persona_uid)
     .bind(t.layer.as_str())
@@ -143,11 +141,9 @@ pub async fn save_trait(pool: &SqlitePool, t: &PersonalityTrait) -> RamariaResul
     .bind(t.status.as_str())
     .bind(t.created_at)
     .bind(t.updated_at)
-    .execute(pool)
+    .fetch_one(pool)
     .await
-    .map_err(|e| RamariaError::storage_with_source("保存性格标签失败", e))?;
-
-    last_insert_id(pool).await
+    .map_err(|e| RamariaError::storage_with_source("保存性格标签失败", e))
 }
 
 pub async fn list_traits_by_persona(
@@ -198,9 +194,9 @@ pub async fn update_status(pool: &SqlitePool, id: i64, status: TraitStatus) -> R
 // =========================================================
 
 pub async fn save_evidence(pool: &SqlitePool, e: &TraitEvidence) -> RamariaResult<i64> {
-    sqlx::query(
+    sqlx::query_scalar::<_, i64>(
         "INSERT INTO trait_evidence (trait_id, event_id, direction, score, decay, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
     )
     .bind(e.trait_id)
     .bind(e.event_id)
@@ -208,11 +204,9 @@ pub async fn save_evidence(pool: &SqlitePool, e: &TraitEvidence) -> RamariaResul
     .bind(e.score)
     .bind(e.decay)
     .bind(e.created_at)
-    .execute(pool)
+    .fetch_one(pool)
     .await
-    .map_err(|e| RamariaError::storage_with_source("保存证据失败", e))?;
-
-    last_insert_id(pool).await
+    .map_err(|e| RamariaError::storage_with_source("保存证据失败", e))
 }
 
 pub async fn list_evidence_by_trait(

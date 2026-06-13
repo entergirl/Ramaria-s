@@ -6,6 +6,7 @@
 //! - 流式输出通过 `futures::channel::mpsc` 桥接 LLM 流与上层 StreamEvent 流
 //! - 消息保存与会话管理通过 `StorageBackend` trait 进行，不依赖具体数据库
 //! - `rebuild_retriever` 从存储层加载 L1 数据，增量构建内存检索索引
+//! - SessionLifecycle 管理 session 生命周期：手动关闭、空闲自动关闭、只读约束、L0→L3 管线
 //!
 //! 安全约束:
 //! - 不记录完整 prompt 或用户消息（日志仅记录 request_id + 字符数）
@@ -13,6 +14,7 @@
 //! - API key 仅在 keychain 读取时出现，不缓存
 
 use std::pin::Pin;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use futures::Stream;
@@ -31,6 +33,7 @@ use ramaria_memory::retriever::{L1DocView, Retriever, SearchRequest};
 use uuid::Uuid;
 
 use crate::privacy;
+use crate::session_lifecycle::SessionLifecycle;
 use crate::stream_event::StreamEvent;
 
 // =========================================================
@@ -50,12 +53,15 @@ pub type SendMessageStream = Pin<Box<dyn Stream<Item = RamariaResult<StreamEvent
 /// - 持有所有运行时依赖：存储、LLM provider、检索器、配置、keychain
 /// - 管理应用状态机（NeedsSetup → Indexing → Ready）
 /// - 提供 `send_message` 核心对话用例
+/// - 管理 session 生命周期：手动关闭、空闲自动关闭、只读约束
+/// - 后台线程 A（空闲检测）+ 后台线程 B（L2/L3 定时触发）
 /// - 支持检索器重建（从存储层加载 L1/L2 索引数据）
 ///
 /// 用法:
 /// ```ignore
-/// let app = App::new(storage, llm, config, keychain)?;
+/// let mut app = App::new(storage, llm, config, keychain)?;
 /// app.run_setup(&backend_config).await?;
+/// app.start_background_tasks();
 /// let stream = app.send_message("你好", None, None).await?;
 /// ```
 pub struct App {
@@ -71,6 +77,12 @@ pub struct App {
     state: Mutex<AppState>,
     /// OS keychain（供隐私确认和 provider 验证使用）
     keychain: Arc<Keychain>,
+    /// Session 生命周期编排器（活跃 session 追踪、空闲检测、管线触发）
+    lifecycle: Arc<SessionLifecycle>,
+    /// 后台空闲检测线程句柄
+    idle_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// 后台 L2/L3 定时检查线程句柄
+    scheduler_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl App {
@@ -85,6 +97,10 @@ impl App {
     /// 返回:
     /// - 初始状态为 `NeedsSetup` 的 App 实例。
     /// - 检索器为空，需调用 `rebuild_retriever` 填充。
+    /// - 后台任务需调用 `start_background_tasks()` 启动。
+    ///
+    /// 注意:
+    /// - 构造时不启动后台线程，由调用方在完成 setup 后调用 `start_background_tasks()`。
     pub fn new(
         storage: Arc<dyn StorageBackend>,
         llm: Arc<dyn LlmProvider>,
@@ -92,6 +108,7 @@ impl App {
         keychain: Arc<Keychain>,
     ) -> Self {
         let retriever = Retriever::new();
+        let lifecycle = Arc::new(SessionLifecycle::new(config.clone()));
 
         tracing::info!(
             provider = llm.name(),
@@ -105,7 +122,56 @@ impl App {
             config,
             state: Mutex::new(AppState::NeedsSetup),
             keychain,
+            lifecycle,
+            idle_handle: Mutex::new(None),
+            scheduler_handle: Mutex::new(None),
         }
+    }
+
+    /// 启动后台任务（空闲检测 + L2/L3 定时检查）。
+    ///
+    /// 调用时机:
+    /// - 在 `run_setup()` 完成后调用。
+    /// - 只能调用一次（重复调用会被忽略）。
+    ///
+    /// 说明:
+    /// - Thread A：每 60s 检查活跃 session 空闲时间，超时自动关闭。
+    /// - Thread B：每 24h 检查 L2/L3 定时触发条件。
+    /// - 异常时记录 error 日志并继续（不阻塞主流程）。
+    pub fn start_background_tasks(&self) {
+        // 检查是否已启动
+        {
+            let guard = self.idle_handle.lock().unwrap_or_else(|e| e.into_inner());
+            if guard.is_some() {
+                tracing::info!("后台任务已启动，跳过重复调用");
+                return;
+            }
+        }
+
+        let storage = Arc::clone(&self.storage);
+        let llm = self.llm.lock().unwrap_or_else(|e| e.into_inner()).clone();
+
+        // 启动空闲检测线程
+        let idle = self
+            .lifecycle
+            .spawn_idle_checker(Arc::clone(&storage), Arc::clone(&llm));
+
+        // 启动 L2/L3 定时检查线程
+        let scheduler = self.lifecycle.spawn_l2_l3_scheduler(storage, llm);
+
+        {
+            let mut guard = self.idle_handle.lock().unwrap_or_else(|e| e.into_inner());
+            *guard = Some(idle);
+        }
+        {
+            let mut guard = self
+                .scheduler_handle
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *guard = Some(scheduler);
+        }
+
+        tracing::info!("后台任务已全部启动");
     }
 
     // =========================================================
@@ -179,6 +245,89 @@ impl App {
     /// - 所有业务写操作应通过 App 方法执行，读操作可直接使用此引用。
     pub fn storage(&self) -> &Arc<dyn StorageBackend> {
         &self.storage
+    }
+
+    // =========================================================
+    // Session 生命周期（v1.1 新增）
+    // =========================================================
+
+    /// 获取当前活跃 session ID。
+    ///
+    /// 对齐 Python `SessionManager.active_session_id`。
+    pub fn get_active_session_id(&self) -> Option<Uuid> {
+        self.lifecycle.get_active_session_id()
+    }
+
+    /// 手动保存并关闭当前活跃 session。
+    ///
+    /// 流程（对齐 Python `force_close_current_session()`）:
+    /// 1. 关闭 session（设置 ended_at）。
+    /// 2. 生成 L1 摘要（传入当前对话人格，确保记忆页面可查询）。
+    /// 3. 检查 L2 触发条件（路径 A：即时）。
+    /// 4. 清除活跃 session ID。
+    ///
+    /// 参数:
+    /// - `persona_uid`: 当前对话人格的 UID，用于 L1 归属。
+    ///
+    /// 返回:
+    /// - `Ok(())`: 成功（无活跃 session 时也视为成功）。
+    pub async fn save_and_close_session(&self, persona_uid: Option<&str>) -> RamariaResult<()> {
+        let llm = self.llm.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        self.lifecycle
+            .save_and_close_session(self.storage.as_ref(), llm.as_ref(), persona_uid)
+            .await
+    }
+
+    /// 为已关闭的 session 重新生成 L1 摘要（手动重试）。
+    ///
+    /// 职责:
+    /// - 当 save_and_close_session 中 L1 生成失败后，用户可手动重试。
+    /// - 适用于 LLM 服务暂时不可用后恢复的场景。
+    ///
+    /// 参数:
+    /// - `session_id`: 目标 session（通常是已关闭但缺少 L1 的 session）。
+    /// - `persona_uid`: 人格标识，用于 L1 归属。
+    ///
+    /// 返回:
+    /// - `Ok(Some(l1))`: L1 生成成功。
+    /// - `Ok(None)`: session 无消息，无法生成。
+    /// - `Err`: 存储或 LLM 调用失败。
+    pub async fn regenerate_l1(
+        &self,
+        session_id: Uuid,
+        persona_uid: Option<&str>,
+    ) -> RamariaResult<Option<ramaria_core::types::MemoryL1>> {
+        let llm = self.llm.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        self.lifecycle
+            .regenerate_l1(self.storage.as_ref(), llm.as_ref(), session_id, persona_uid)
+            .await
+    }
+
+    /// 优雅关闭应用：关闭活跃 session 并停止后台线程。
+    ///
+    /// 对齐 Python `SessionManager.stop()`。
+    ///
+    /// 说明:
+    /// - 在 Drop 中自动调用，也可显式调用。
+    /// - 关闭活跃 session → 设置 shutdown_flag → 等待后台线程退出（最长 30s）。
+    pub async fn shutdown(&self) {
+        let llm = self.llm.lock().unwrap_or_else(|e| e.into_inner()).clone();
+
+        let idle = self
+            .idle_handle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+
+        let scheduler = self
+            .scheduler_handle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+
+        self.lifecycle
+            .shutdown(self.storage.as_ref(), llm.as_ref(), idle, scheduler)
+            .await;
     }
 
     // =========================================================
@@ -357,14 +506,43 @@ impl App {
         }
 
         // ---- Step 3: 会话管理 ----
+        // v1.1: 自动创建 session + 只读约束
         let session = match session_id {
-            Some(sid) => self
-                .storage
-                .get_session(sid)
-                .await?
-                .ok_or_else(|| RamariaError::validation(format!("会话不存在: {sid}")))?,
-            None => self.storage.create_session().await?,
+            Some(sid) => {
+                // 使用指定 session（前端传入的 session_id）
+                let s = self
+                    .storage
+                    .get_session(sid)
+                    .await?
+                    .ok_or_else(|| RamariaError::validation(format!("会话不存在: {sid}")))?;
+
+                // 只读约束：已关闭的 session 不可发送消息
+                // 对齐 Python：ended_at IS NOT NULL → 拒绝
+                if s.ended_at.is_some() {
+                    return Err(RamariaError::validation(format!(
+                        "会话已关闭（session {}），请开启新对话。",
+                        sid
+                    )));
+                }
+
+                // v1.1 修复：无论前端传入还是后端创建，都同步追踪活跃 session
+                // 否则 save_and_close_session 找不到活跃 session → 返回 "无活跃对话"
+                self.lifecycle.set_active_session_id_public(Some(s.id));
+
+                s
+            }
+            None => {
+                // 自动创建新 session
+                // 对齐 Python `on_message()`: 无活跃 session 时自动创建
+                let s = self.storage.create_session().await?;
+                self.lifecycle.set_active_session_id_public(Some(s.id));
+                tracing::info!(session_id = %s.id, "自动创建新 session");
+                s
+            }
         };
+
+        // 记录 session 活跃时间（供空闲检测使用）
+        self.lifecycle.touch_session(session.id);
 
         // ---- Step 4: 加载历史 ----
         let history = self.storage.list_messages(session.id).await?;
@@ -808,6 +986,24 @@ async fn stream_forward_task(
         duration_ms = now_ms() - now,
         "send_message 完成"
     );
+}
+
+// =========================================================
+// Drop 实现（优雅关闭兜底）
+// =========================================================
+
+impl Drop for App {
+    /// App 销毁时设置 shutdown_flag，通知所有后台线程退出。
+    ///
+    /// 注意:
+    /// - Drop 是同步方法，不能调用 async 代码。
+    /// - 完整的优雅关闭应通过 `shutdown()` 方法执行（关闭活跃 session + 等待线程退出）。
+    /// - 此 Drop 实现仅设置停止标志，让后台线程自行退出。
+    fn drop(&mut self) {
+        // 设置停止标志
+        self.lifecycle.shutdown_flag().store(true, Ordering::SeqCst);
+        tracing::info!("App Drop: shutdown_flag 已设置，后台线程将在下次轮询时退出");
+    }
 }
 
 // =========================================================

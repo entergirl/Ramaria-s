@@ -135,6 +135,14 @@ enum SessionCmd {
         /// 会话 UUID
         session_id: String,
     },
+    /// v1.1: 为指定会话重新生成 L1 摘要（手动重试）
+    Summarize {
+        /// 会话 UUID
+        session_id: String,
+        /// 可选的人格标识
+        #[arg(long)]
+        persona: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -331,6 +339,13 @@ async fn dispatch(app: &Arc<ramaria_app::App>, cli: Cli) -> anyhow::Result<()> {
                 SessionCmd::Delete { session_id } => {
                     commands::session::SessionCmd::Delete { session_id }
                 }
+                SessionCmd::Summarize {
+                    session_id,
+                    persona,
+                } => commands::session::SessionCmd::Summarize {
+                    session_id,
+                    persona_uid: persona,
+                },
             };
             commands::session::run(app, cmd).await?;
         }

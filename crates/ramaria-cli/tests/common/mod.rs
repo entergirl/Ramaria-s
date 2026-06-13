@@ -815,6 +815,7 @@ pub fn make_test_l1(session_id: Uuid, summary: &str) -> MemoryL1 {
         absorbed: false,
         created_at: 1_717_977_600_000,
         last_accessed_at: None,
+        situation_strength: None,
     }
 }
 

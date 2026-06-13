@@ -9,8 +9,6 @@ use ramaria_core::error::{RamariaError, RamariaResult};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
-use super::last_insert_id;
-
 pub async fn insert_node(
     pool: &SqlitePool,
     entity_name: &str,
@@ -61,15 +59,13 @@ pub async fn insert_edge(
     source_l1_id: Option<Uuid>,
 ) -> RamariaResult<i64> {
     let now = ramaria_core::types::now_ms();
-    sqlx::query(
+    sqlx::query_scalar::<_, i64>(
         "INSERT INTO graph_edges (source_node_id, target_node_id, relation_type, relation_detail, source_l1_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)"
+         VALUES (?, ?, ?, ?, ?, ?) RETURNING id"
     ).bind(source_id).bind(target_id).bind(relation_type)
       .bind(detail).bind(source_l1_id.map(|u| u.to_string())).bind(now)
-      .execute(pool).await
-    .map_err(|e| RamariaError::storage_with_source("插入图谱边失败", e))?;
-
-    last_insert_id(pool).await
+      .fetch_one(pool).await
+    .map_err(|e| RamariaError::storage_with_source("插入图谱边失败", e))
 }
 
 pub async fn list_edges(

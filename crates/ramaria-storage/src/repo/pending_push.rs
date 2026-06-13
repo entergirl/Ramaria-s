@@ -7,17 +7,16 @@
 use ramaria_core::error::{RamariaError, RamariaResult};
 use sqlx::SqlitePool;
 
-use super::last_insert_id;
-
 pub async fn create(pool: &SqlitePool, content: &str) -> RamariaResult<i64> {
     let now = ramaria_core::types::now_ms();
-    sqlx::query("INSERT INTO pending_push (content, created_at) VALUES (?, ?)")
-        .bind(content)
-        .bind(now)
-        .execute(pool)
-        .await
-        .map_err(|e| RamariaError::storage_with_source("创建推送失败", e))?;
-    last_insert_id(pool).await
+    sqlx::query_scalar::<_, i64>(
+        "INSERT INTO pending_push (content, created_at) VALUES (?, ?) RETURNING id",
+    )
+    .bind(content)
+    .bind(now)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| RamariaError::storage_with_source("创建推送失败", e))
 }
 
 pub async fn list_pending(pool: &SqlitePool) -> RamariaResult<Vec<(i64, String)>> {

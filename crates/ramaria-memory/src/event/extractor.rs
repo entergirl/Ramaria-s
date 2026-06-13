@@ -711,6 +711,7 @@ mod tests {
             last_accessed_at: None,
             persona_uid: None,
             context_json: None,
+            situation_strength: None,
         };
         let formatted = EventExtractor::format_l1_list(&[&l1]);
         assert!(formatted.contains("[1]"));
@@ -737,6 +738,7 @@ mod tests {
                 last_accessed_at: None,
                 persona_uid: None,
                 context_json: None,
+                situation_strength: None,
             },
             MemoryL1 {
                 id: Uuid::new_v4(),
@@ -752,6 +754,7 @@ mod tests {
                 last_accessed_at: None,
                 persona_uid: None,
                 context_json: None,
+                situation_strength: None,
             },
         ];
         let refs: Vec<&MemoryL1> = l1_list.iter().collect();

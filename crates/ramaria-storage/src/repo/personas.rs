@@ -9,8 +9,6 @@ use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::types::{Persona, PersonaKind};
 use sqlx::SqlitePool;
 
-use super::last_insert_id;
-
 fn parse_kind(s: &str) -> PersonaKind {
     match s {
         "user" => PersonaKind::User,
@@ -63,9 +61,9 @@ impl PersonaRow {
 
 pub async fn create(pool: &SqlitePool, p: &Persona) -> RamariaResult<i64> {
     let kind_str = p.kind.as_str();
-    sqlx::query(
+    sqlx::query_scalar::<_, i64>(
         "INSERT INTO personas (uid, name, kind, seq, source, ref_id, avatar, config, active, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
     )
     .bind(&p.uid)
     .bind(&p.name)
@@ -78,11 +76,9 @@ pub async fn create(pool: &SqlitePool, p: &Persona) -> RamariaResult<i64> {
     .bind(p.active as i64)
     .bind(p.created_at)
     .bind(p.updated_at)
-    .execute(pool)
+    .fetch_one(pool)
     .await
-    .map_err(|e| RamariaError::storage_with_source("创建 persona 失败", e))?;
-
-    last_insert_id(pool).await
+    .map_err(|e| RamariaError::storage_with_source("创建 persona 失败", e))
 }
 
 pub async fn get_by_uid(pool: &SqlitePool, uid: &str) -> RamariaResult<Option<Persona>> {

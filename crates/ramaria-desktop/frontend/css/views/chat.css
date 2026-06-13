@@ -1,9 +1,9 @@
 /* ═══════════════════════════════════════════════════════════
    css/views/chat.css — Ramaria 对话视图样式
    设计特点:
-   - 纵向 Flex 布局：SessionBar（横向滚动）→ MessageList（flex-1 滚动）→ InputArea（固定底部）
+   - 纵向 Flex 布局：ChatHeader（Persona+保存）→ MessageList（flex-1 滚动）→ InputArea（固定底部）
+   - v1.1: ChatHeader 替代旧 SessionBar，显示当前对话人格名称和保存按钮
    - 消息气泡：用户右对齐粉底、助手左对齐蓝底
-   - SessionBar 横向排列会话标签，当前会话实底粉高亮
    - PersonaSelector 下拉嵌在 InputArea 上方
    - 空状态：有机渐变浮动装饰球 + 引导文案
    - 流式渲染：打字光标（blink animation）
@@ -23,74 +23,43 @@
 }
 
 /* =========================================================
-   2. SessionBar（会话标签栏）
+   2. 聊天页眉（v1.1: Persona 名称 + 保存按钮，替代旧 SessionBar）
    ========================================================= */
 
-.chat-session-bar {
+.chat-header {
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  justify-content: space-between;
   padding: var(--space-2) var(--space-4);
   border-bottom: 1px solid var(--border-light);
-  overflow-x: auto;
-  overflow-y: hidden;
-  min-height: 40px;
+  min-height: 44px;
   background: var(--bg-subtle);
 }
 
-.chat-session-tab {
-  flex-shrink: 0;
-  padding: var(--space-1) var(--space-3);
-  border-radius: var(--radius-sm);
-  font-size: 12px;
-  color: var(--text-secondary);
-  cursor: pointer;
-  border: 1px solid transparent;
-  background: none;
-  font-family: var(--font-body);
-  white-space: nowrap;
-  transition: background var(--dur-fast) var(--ease-out),
-              color var(--dur-fast) var(--ease-out),
-              border-color var(--dur-fast) var(--ease-out);
-  max-width: 140px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.chat-session-tab:hover {
-  background: var(--bg-card-pink);
-  color: var(--color-primary);
-}
-
-.chat-session-tab.active {
-  background: var(--pink-100);
-  color: var(--pink-600);
-  font-weight: 500;
-  border-color: var(--pink-200);
-}
-
-.chat-session-new-btn {
-  flex-shrink: 0;
-  width: 28px;
-  height: 28px;
-  border-radius: var(--radius-sm);
-  border: 1px dashed var(--border-default);
-  background: none;
-  cursor: pointer;
+.chat-header-left {
   display: flex;
   align-items: center;
-  justify-content: center;
-  font-size: 16px;
-  color: var(--text-tertiary);
-  transition: border-color var(--dur-fast) var(--ease-out),
-              color var(--dur-fast) var(--ease-out);
+  gap: var(--space-2);
 }
 
-.chat-session-new-btn:hover {
-  border-color: var(--color-primary);
-  color: var(--color-primary);
+.chat-header-persona-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-family: var(--font-display);
 }
+
+.chat-header-right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* 保留旧类名兼容（JS 不再引用 .chat-session-bar/.chat-session-tab） */
+.chat-session-bar { display: none; }
+.chat-session-tab { display: none; }
+.chat-session-new-btn { display: none; }
 
 /* =========================================================
    3. 消息列表
@@ -327,14 +296,8 @@
    ========================================================= */
 
 @media (max-width: 640px) {
-  .chat-session-bar {
+  .chat-header {
     padding: var(--space-1) var(--space-2);
-  }
-
-  .chat-session-tab {
-    font-size: 11px;
-    padding: var(--space-1) var(--space-2);
-    max-width: 100px;
   }
 
   .chat-input-area {
@@ -344,6 +307,86 @@
   .chat-input-textarea {
     font-size: 13px;
   }
+}
+
+/* ═══════════════════════════════════════════════
+ * v1.1: Session 状态指示器（活跃绿色圆点 / 关闭灰色圆点）
+ * ═══════════════════════════════════════════════ */
+
+.session-status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  flex-shrink: 0;
+  vertical-align: middle;
+}
+
+.session-status-dot.active {
+  background: #22c55e;  /* Tailwind green-500 — 与中性灰阶形成明确区分 */
+  box-shadow: 0 0 4px rgba(34, 197, 94, 0.4);
+}
+
+.session-status-dot.closed {
+  background: var(--text-tertiary);  /* 灰色，跟随主题 */
+}
+
+/* ═══════════════════════════════════════════════
+ * v1.1: 系统分隔线（保存对话后插入）
+ * ═══════════════════════════════════════════════ */
+
+.chat-system-separator {
+  text-align: center;
+  padding: var(--space-4) 0;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  user-select: none;
+  pointer-events: none;
+}
+
+/* ═══════════════════════════════════════════════
+ * v1.1: 只读模式提示条
+ * ═══════════════════════════════════════════════ */
+
+.chat-readonly-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-2) var(--space-4);
+  margin: 0 var(--space-3) var(--space-2);
+  background: var(--bg-card);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.chat-readonly-banner.hidden {
+  display: none;
+}
+
+.chat-readonly-banner span {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+/* 页眉中保存按钮 */
+#chat-save-btn {
+  font-size: 12px;
+  padding: 4px 14px;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.18s ease;
+  border: 1px solid var(--border-default);
+}
+
+#chat-save-btn:hover {
+  color: var(--pink-600);
+  background: var(--bg-card-pink);
+  border-color: var(--pink-200);
 }
 
 /*

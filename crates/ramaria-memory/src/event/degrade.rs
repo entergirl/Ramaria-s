@@ -224,6 +224,7 @@ mod tests {
             last_accessed_at: None,
             persona_uid: None,
             context_json: None,
+            situation_strength: None,
         }
     }
 

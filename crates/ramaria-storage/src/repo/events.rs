@@ -11,8 +11,6 @@ use ramaria_core::types::{EventRelation, MemoryEvent, Presentation};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
-use super::last_insert_id;
-
 // =========================================================
 // MemoryEvent（事件主表）
 // =========================================================
@@ -82,11 +80,11 @@ impl EventRow {
 
 pub async fn save_event(pool: &SqlitePool, ev: &MemoryEvent) -> RamariaResult<i64> {
     let pres = ev.presentation.as_str();
-    sqlx::query(
+    sqlx::query_scalar::<_, i64>(
         "INSERT INTO memory_events (persona_uid, title, summary, keywords, participants, start, \"end\",
          confidence, salience, valence, presentation, share, attitude, paraphrase,
          absorbed, created_at, last_accessed_at, indexed_at, index_version)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
     )
     .bind(&ev.persona_uid).bind(&ev.title).bind(&ev.summary)
     .bind(&ev.keywords).bind(&ev.participants).bind(ev.start).bind(ev.end)
@@ -94,10 +92,8 @@ pub async fn save_event(pool: &SqlitePool, ev: &MemoryEvent) -> RamariaResult<i6
     .bind(ev.share).bind(&ev.attitude).bind(&ev.paraphrase)
     .bind(ev.absorbed).bind(ev.created_at).bind(ev.last_accessed_at)
     .bind(ev.indexed_at).bind(ev.index_version)
-    .execute(pool).await
-    .map_err(|e| RamariaError::storage_with_source("保存事件失败", e))?;
-
-    last_insert_id(pool).await
+    .fetch_one(pool).await
+    .map_err(|e| RamariaError::storage_with_source("保存事件失败", e))
 }
 
 pub async fn list_events_by_persona(
@@ -143,14 +139,12 @@ pub async fn list_unabsorbed_events(
 // =========================================================
 
 pub async fn save_relation(pool: &SqlitePool, rel: &EventRelation) -> RamariaResult<i64> {
-    sqlx::query(
-        "INSERT INTO event_relations (from_id, to_id, kind, weight, created_at) VALUES (?, ?, ?, ?, ?)"
+    sqlx::query_scalar::<_, i64>(
+        "INSERT INTO event_relations (from_id, to_id, kind, weight, created_at) VALUES (?, ?, ?, ?, ?) RETURNING id"
     )
     .bind(rel.from_id).bind(rel.to_id).bind(rel.kind.as_str()).bind(rel.weight).bind(rel.created_at)
-    .execute(pool).await
-    .map_err(|e| RamariaError::storage_with_source("保存事件关系失败", e))?;
-
-    last_insert_id(pool).await
+    .fetch_one(pool).await
+    .map_err(|e| RamariaError::storage_with_source("保存事件关系失败", e))
 }
 
 // =========================================================

@@ -74,6 +74,9 @@ impl StorageBackend for SqliteStorage {
     ) -> RamariaResult<Option<Message>> {
         repo::messages::find_by_fingerprint(&self.pool, fingerprint).await
     }
+    async fn get_last_message_time(&self, session_id: Uuid) -> RamariaResult<Option<i64>> {
+        repo::messages::get_last_message_time(&self.pool, session_id).await
+    }
 
     // =========================================================
     // Memory L1（单次会话摘要）
