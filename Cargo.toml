@@ -51,6 +51,14 @@ windows = { version = "0.58", features = [
     "Win32_Foundation",
 ] }
 
+# ---------- Embedding (ONNX) ----------
+ort = { version = "2.0.0-rc.12", features = ["download-binaries"] }
+tokenizers = "0.21"
+ndarray = "0.16"
+
+# ---------- 工具 ----------
+sha2 = "0.10"
+
 # ---------- Desktop ----------
 tauri = "2"
 tauri-build = "2"

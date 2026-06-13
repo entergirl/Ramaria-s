@@ -24,6 +24,7 @@ pub struct SetupStatusView {
     pub backend_configured: bool,
     pub model_selected: bool,
     pub needs_indexing: bool,
+    pub embedding_available: bool,
     pub is_complete: bool,
     pub missing_items: Vec<String>,
     pub current_state: String,
@@ -154,8 +155,9 @@ pub async fn run_setup(
 #[tracing::instrument(skip(state))]
 pub async fn get_setup_status(state: State<'_, DesktopState>) -> Result<SetupStatusView, String> {
     let storage = state.app.storage();
+    let embedding_available = state.app.is_embedding_available();
 
-    let status = ramaria_app::setup::check_setup_status(storage.as_ref())
+    let status = ramaria_app::setup::check_setup_status(storage.as_ref(), embedding_available)
         .await
         .map_err(|e| format!("查询设置状态失败: {}", e))?;
 
@@ -165,6 +167,7 @@ pub async fn get_setup_status(state: State<'_, DesktopState>) -> Result<SetupSta
         backend_configured: status.backend_configured,
         model_selected: status.model_selected,
         needs_indexing: status.needs_indexing,
+        embedding_available: status.embedding_available,
         is_complete: status.is_complete(),
         missing_items: status
             .missing_items()
@@ -201,6 +204,36 @@ pub async fn refresh_setup_state(state: State<'_, DesktopState>) -> Result<Strin
 
     tracing::info!(new_state = %new_state.as_str(), "应用状态已刷新");
     Ok(new_state.as_str().to_string())
+}
+
+// =========================================================
+// test_llm_connection — 测试 LLM 连接（v1.1 新增）
+// =========================================================
+
+/// 测试 LLM 后端连接是否可达。
+///
+/// 说明:
+/// - 此命令独立于应用状态机，仅测试 LLM provider 的 `validate()` 方法。
+/// - 与 `refresh_setup_state` 不同：不检查嵌入模型、不检查索引状态。
+/// - 前端首次配置向导 Step 1 的「测试连接」按钮使用此命令。
+///
+/// 返回:
+/// - `"ok"`: LLM 连接正常。
+/// - 否则返回错误信息（含可操作的故障排查提示）。
+///
+/// 注意:
+/// - LM Studio 场景：验证 base_url 可达 + /models 端点可访问。
+/// - DeepSeek/OpenAI 场景：额外验证 API key 非空。
+#[tauri::command]
+#[tracing::instrument(skip(state))]
+pub async fn test_llm_connection(state: State<'_, DesktopState>) -> Result<String, String> {
+    // ★ 先 clone Arc 出锁再 await，避免 MutexGuard 跨 .await
+    let llm = state.app.llm_clone();
+
+    llm.validate()
+        .await
+        .map(|_| "ok".to_string())
+        .map_err(|e| format!("LLM 连接测试失败: {}", e))
 }
 
 // =========================================================

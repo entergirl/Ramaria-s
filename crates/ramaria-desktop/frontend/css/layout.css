@@ -285,17 +285,26 @@
   background: var(--pink-500);
 }
 
-/* Degraded 状态警告条 */
+/* Degraded 状态警告条（亮/暗主题均可见） */
 .degraded-banner {
   flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: var(--space-2);
   padding: var(--space-2) var(--space-4);
-  background: oklch(0.15 0.02 80);
-  border-bottom: 1px solid oklch(0.25 0.03 80);
-  color: var(--text-primary);
+  /* 琥珀色警告背景 — 亮色主题浅、暗色主题半透明 */
+  background: oklch(0.93 0.04 85);
+  border-bottom: 1px solid oklch(0.80 0.10 85);
+  /* 固定深琥珀色文字，确保在亮/暗背景下均清晰可读 */
+  color: oklch(0.32 0.08 80);
   font-size: 12.5px;
+  font-weight: 500;
+}
+
+[data-theme="dark"] .degraded-banner {
+  background: oklch(0.18 0.025 85);
+  border-bottom-color: oklch(0.30 0.04 85);
+  color: oklch(0.90 0.04 85);
 }
 
 .degraded-banner-icon {

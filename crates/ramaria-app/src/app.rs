@@ -20,16 +20,19 @@ use std::sync::{Arc, Mutex};
 use futures::Stream;
 use futures::channel::mpsc;
 use ramaria_core::error::{RamariaError, RamariaResult};
-use ramaria_core::traits::{ChatMessage, ChatRequest, LlmProvider, StorageBackend};
+use ramaria_core::traits::{
+    ChatMessage, ChatRequest, EmbeddingProvider, LlmProvider, StorageBackend,
+};
 use ramaria_core::types::{
     AppState, BackendConfig, Message, MessageRole, MessageSource, PersonaKind, ProfileField,
     new_id, now_ms,
 };
 use ramaria_llm::keychain::Keychain;
+use ramaria_memory::VectorIndex;
 use ramaria_memory::parse_persona_toml;
 use ramaria_memory::prompt::builder::{PromptConfig, PromptContext, assemble_prompt};
 use ramaria_memory::rag::{RagConfig, filter_by_persona, format_context_text};
-use ramaria_memory::retriever::{L1DocView, Retriever, SearchRequest};
+use ramaria_memory::retriever::{L1DocView, L2DocView, Retriever, SearchRequest};
 use uuid::Uuid;
 
 use crate::privacy;
@@ -59,7 +62,7 @@ pub type SendMessageStream = Pin<Box<dyn Stream<Item = RamariaResult<StreamEvent
 ///
 /// 用法:
 /// ```ignore
-/// let mut app = App::new(storage, llm, config, keychain)?;
+/// let mut app = App::new(storage, llm, None, config, keychain)?;
 /// app.run_setup(&backend_config).await?;
 /// app.start_background_tasks();
 /// let stream = app.send_message("你好", None, None).await?;
@@ -69,6 +72,8 @@ pub struct App {
     storage: Arc<dyn StorageBackend>,
     /// 当前 LLM provider（Mutex 包裹，支持配置热更新）
     llm: Mutex<Arc<dyn LlmProvider>>,
+    /// 嵌入模型 provider（Mutex 包裹，None 表示未配置）
+    embedding: Mutex<Option<Arc<dyn EmbeddingProvider>>>,
     /// 内存检索器（BM25 + 向量 + 图谱）
     retriever: Mutex<Retriever>,
     /// 应用配置
@@ -91,6 +96,7 @@ impl App {
     /// 参数:
     /// - `storage`: 存储后端（通常为 `ramaria-storage` 的 `SqliteStorage`）。
     /// - `llm`: LLM provider（LmStudio / DeepSeek / OpenAI 之一）。
+    /// - `embedding`: 可选的嵌入模型 provider（OnnxEmbeddingProvider 或 NoopEmbeddingProvider）。
     /// - `config`: 应用配置。
     /// - `keychain`: OS keychain 实例。
     ///
@@ -104,20 +110,34 @@ impl App {
     pub fn new(
         storage: Arc<dyn StorageBackend>,
         llm: Arc<dyn LlmProvider>,
+        embedding: Option<Arc<dyn EmbeddingProvider>>,
         config: ramaria_core::config::RamariaConfig,
         keychain: Arc<Keychain>,
     ) -> Self {
         let retriever = Retriever::new();
         let lifecycle = Arc::new(SessionLifecycle::new(config.clone()));
 
+        let emb_info = embedding
+            .as_ref()
+            .map(|e| {
+                format!(
+                    "{} (dim={})",
+                    e.model_info().model_id,
+                    e.model_info().dimension
+                )
+            })
+            .unwrap_or_else(|| "未配置".to_string());
+
         tracing::info!(
             provider = llm.name(),
+            embedding = %emb_info,
             "App 实例已创建，初始状态: NeedsSetup"
         );
 
         Self {
             storage,
             llm: Mutex::new(llm),
+            embedding: Mutex::new(embedding),
             retriever: Mutex::new(retriever),
             config,
             state: Mutex::new(AppState::NeedsSetup),
@@ -126,6 +146,19 @@ impl App {
             idle_handle: Mutex::new(None),
             scheduler_handle: Mutex::new(None),
         }
+    }
+
+    /// 不带嵌入模型的便捷构造函数（向后兼容）。
+    ///
+    /// 等效于 `App::new(storage, llm, None, config, keychain)`。
+    /// 嵌入模型缺失时将进入 Degraded 状态，BM25+图谱仍可用。
+    pub fn new_without_embedding(
+        storage: Arc<dyn StorageBackend>,
+        llm: Arc<dyn LlmProvider>,
+        config: ramaria_core::config::RamariaConfig,
+        keychain: Arc<Keychain>,
+    ) -> Self {
+        Self::new(storage, llm, None, config, keychain)
     }
 
     /// 启动后台任务（空闲检测 + L2/L3 定时检查）。
@@ -228,6 +261,14 @@ impl App {
         *guard = new_llm;
     }
 
+    /// 克隆当前 LLM provider 的 Arc（用于在锁外调用异步方法）。
+    ///
+    /// 返回:
+    /// - 当前 LLM provider 的 `Arc<dyn LlmProvider>` 克隆。
+    pub fn llm_clone(&self) -> Arc<dyn LlmProvider> {
+        self.llm.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
     /// 获取 keychain 引用。
     pub fn keychain(&self) -> &Keychain {
         &self.keychain
@@ -236,6 +277,91 @@ impl App {
     /// 获取 keychain Arc 引用（供 provider 构造使用）。
     pub fn keychain_arc(&self) -> Arc<Keychain> {
         Arc::clone(&self.keychain)
+    }
+
+    /// 获取当前嵌入模型 provider 的克隆。
+    ///
+    /// 返回:
+    /// - `Some(Arc<dyn EmbeddingProvider>)`: 嵌入模型已配置且可用。
+    /// - `None`: 未配置或不可用。
+    pub fn embedding_provider(&self) -> Option<Arc<dyn EmbeddingProvider>> {
+        self.embedding
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// 检查嵌入模型是否可用。
+    ///
+    /// 返回:
+    /// - `true`: 嵌入模型已配置且 `is_available()` 返回 true。
+    pub fn is_embedding_available(&self) -> bool {
+        self.embedding
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|e| e.is_available())
+            .unwrap_or(false)
+    }
+
+    /// 热更新嵌入模型 provider。
+    ///
+    /// 参数:
+    /// - `new_embedding`: 新的嵌入 provider（Some 或 None 表示卸载）。
+    pub fn update_embedding(&self, new_embedding: Option<Arc<dyn EmbeddingProvider>>) {
+        let mut guard = self.embedding.lock().unwrap_or_else(|e| e.into_inner());
+        match &new_embedding {
+            Some(e) => tracing::info!(
+                model = %e.model_info().model_id,
+                dim = e.model_info().dimension,
+                "嵌入模型热更新"
+            ),
+            None => tracing::info!("嵌入模型已卸载"),
+        }
+        *guard = new_embedding;
+    }
+
+    /// 尝试加载嵌入模型并更新应用状态。
+    ///
+    /// 说明:
+    /// - 如果嵌入模型可用：状态保持不变（Ready 或继续 setup 流程）。
+    /// - 如果嵌入模型缺失或不可用：进入 Degraded 状态，BM25+图谱仍可用。
+    /// - 仅在 Ready 状态下调用此方法（索引构建完成后）。
+    ///
+    /// 返回:
+    /// - `Ok(true)`: 嵌入模型可用，向量通道就绪。
+    /// - `Ok(false)`: 嵌入模型不可用，已进入 Degraded。
+    pub async fn try_load_embedding(&self) -> RamariaResult<bool> {
+        let emb = {
+            let guard = self.embedding.lock().unwrap_or_else(|e| e.into_inner());
+            guard.clone()
+        };
+
+        match emb {
+            Some(ref provider) if provider.is_available() => {
+                // 验证模型可用性
+                match provider.validate().await {
+                    Ok(()) => {
+                        tracing::info!(
+                            model = %provider.model_info().model_id,
+                            dim = provider.model_info().dimension,
+                            "嵌入模型验证通过，向量通道可用"
+                        );
+                        Ok(true)
+                    }
+                    Err(e) => {
+                        tracing::warn!(%e, "嵌入模型验证失败，进入降级模式");
+                        self.set_state(AppState::Degraded);
+                        Ok(false)
+                    }
+                }
+            }
+            _ => {
+                tracing::info!("嵌入模型未配置，进入降级模式（BM25 + 图谱可用）");
+                self.set_state(AppState::Degraded);
+                Ok(false)
+            }
+        }
     }
 
     /// 获取存储后端引用。
@@ -347,9 +473,11 @@ impl App {
         Ok(state)
     }
 
-    /// 检查并更新设置状态。
+    /// 检查并更新设置状态（含嵌入模型状态检查）。
     pub async fn refresh_setup_state(&self) -> RamariaResult<AppState> {
-        let status = crate::setup::check_setup_status(self.storage.as_ref()).await?;
+        let embedding_available = self.is_embedding_available();
+        let status =
+            crate::setup::check_setup_status(self.storage.as_ref(), embedding_available).await?;
         let state = crate::setup::determine_state(&status);
         self.set_state(state);
         Ok(state)
@@ -397,19 +525,26 @@ impl App {
     /// 从存储层重建检索器索引。
     ///
     /// 说明:
-    /// - 加载所有 L1 记忆条目，转换为 `L1DocView` 并索引到 Retriever。
+    /// - 加载所有 L1 记忆条目和 L2 事件，转换为视图并索引到 Retriever。
+    /// - 如果嵌入模型可用，为文档生成向量索引（向量通道）。
     /// - 此操作会清空现有索引并重建。
     /// - 建议在应用启动和后台定期执行。
+    ///
+    /// 返回:
+    /// - 成功时返回索引的文档总数（L1 + L2）。
     pub async fn rebuild_retriever(&self) -> RamariaResult<usize> {
         // 1. 获取所有 persona
         let personas = self.storage.list_personas().await?;
 
         // 2. 从存储层收集所有 L1 数据（在锁外执行 I/O）
-        let mut all_docs: Vec<L1DocView> = Vec::new();
+        let mut all_l1: Vec<L1DocView> = Vec::new();
+        let mut all_l2: Vec<L2DocView> = Vec::new();
+
         for persona in &personas {
+            // L1
             let l1_list = self.storage.list_unabsorbed_l1(&persona.uid).await?;
             for l1 in &l1_list {
-                all_docs.push(L1DocView {
+                all_l1.push(L1DocView {
                     id: l1.id,
                     summary: l1.summary.clone(),
                     keywords: l1.keywords.clone(),
@@ -418,22 +553,116 @@ impl App {
                     persona_uid: l1.persona_uid.clone(),
                 });
             }
+
+            // L2 events
+            let events = self
+                .storage
+                .list_events_by_persona(&persona.uid, 0, 1000)
+                .await
+                .unwrap_or_default();
+            for ev in &events {
+                all_l2.push(L2DocView {
+                    id: ev.id,
+                    title: ev.title.clone(),
+                    summary: ev.summary.clone(),
+                    keywords: ev.keywords.clone(),
+                    attitude: ev.attitude.clone(),
+                    paraphrase: ev.paraphrase.clone(),
+                    persona_uid: ev.persona_uid.clone(),
+                    share: ev.share,
+                    confidence: ev.confidence,
+                    created_at: ev.created_at,
+                    salience: ev.salience,
+                });
+            }
         }
 
-        // 3. 锁定检索器并批量索引（纯同步操作，不跨越 .await）
-        let total = all_docs.len();
+        let total = all_l1.len() + all_l2.len();
+
+        // 3. 生成向量（如果嵌入模型可用）
+        let embeddings_available = self.is_embedding_available();
+        let mut l1_vectors: Vec<(uuid::Uuid, Vec<f32>, i64)> = Vec::new();
+        let mut l2_vectors: Vec<(i64, Vec<f32>, i64)> = Vec::new();
+
+        if embeddings_available {
+            let emb = self.embedding_provider();
+            if let Some(ref provider) = emb {
+                // 批量生成 L1 摘要向量
+                let l1_texts: Vec<&str> = all_l1.iter().map(|d| d.summary.as_str()).collect();
+                if !l1_texts.is_empty() {
+                    match provider.embed_batch(&l1_texts).await {
+                        Ok(vectors) => {
+                            for (doc, vec) in all_l1.iter().zip(vectors) {
+                                l1_vectors.push((doc.id, vec, doc.created_at));
+                            }
+                            tracing::info!(count = l1_vectors.len(), "L1 批量向量化完成");
+                        }
+                        Err(e) => {
+                            tracing::warn!(%e, "L1 批量向量化失败，向量通道将不可用");
+                        }
+                    }
+                }
+
+                // 批量生成 L2 标题向量
+                let l2_texts: Vec<&str> = all_l2.iter().map(|d| d.title.as_str()).collect();
+                if !l2_texts.is_empty() {
+                    match provider.embed_batch(&l2_texts).await {
+                        Ok(vectors) => {
+                            for (doc, vec) in all_l2.iter().zip(vectors) {
+                                l2_vectors.push((doc.id, vec, doc.created_at));
+                            }
+                            tracing::info!(count = l2_vectors.len(), "L2 批量向量化完成");
+                        }
+                        Err(e) => {
+                            tracing::warn!(%e, "L2 批量向量化失败，向量通道将不可用");
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. 锁定检索器并批量索引（纯同步操作，不跨越 .await）
         {
             let mut retriever = self.retriever.lock().unwrap_or_else(|e| {
                 tracing::error!("Retriever lock poisoned during rebuild: {e}");
                 e.into_inner()
             });
             retriever.clear();
-            for doc in &all_docs {
+
+            // BM25 + 内存文档索引
+            for doc in &all_l1 {
                 retriever.index_l1(doc);
+            }
+            for doc in &all_l2 {
+                retriever.index_l2(doc);
+            }
+
+            // 向量索引
+            if embeddings_available {
+                for (id, vec, created_at) in &l1_vectors {
+                    let label = format!("L1:{}", id);
+                    retriever.vector_mut().add(&label, vec.clone(), *created_at);
+                }
+                for (id, vec, created_at) in &l2_vectors {
+                    let label = format!("L2:{}", id);
+                    retriever.vector_mut().add(&label, vec.clone(), *created_at);
+                }
+                tracing::info!(
+                    l1 = l1_vectors.len(),
+                    l2 = l2_vectors.len(),
+                    "向量索引构建完成"
+                );
+            } else {
+                tracing::info!("嵌入模型不可用，跳过向量索引");
             }
         } // MutexGuard 在此释放
 
-        tracing::info!(total, personas = personas.len(), "检索器索引重建完成");
+        tracing::info!(
+            total,
+            personas = personas.len(),
+            embeddings_available,
+            "检索器索引重建完成"
+        );
         Ok(total)
     }
 
@@ -477,9 +706,8 @@ impl App {
             match state {
                 AppState::Ready => { /* 正常，继续 */ }
                 AppState::Degraded => {
-                    return Err(RamariaError::validation(
-                        "应用处于降级状态：部分功能不可用。请检查 LLM 连接或等待服务恢复。",
-                    ));
+                    // v1.1: Degraded 允许对话（仅向量通道不可用，BM25+图谱仍工作）
+                    tracing::warn!("应用处于降级状态，对话功能可用但向量检索已降级");
                 }
                 AppState::FatalError => {
                     return Err(RamariaError::validation(
@@ -639,11 +867,42 @@ impl App {
     /// 返回:
     /// - `Some(formatted_text)`: 有记忆上下文。
     /// - `None`: 检索器为空或无相关记忆。
+    ///
+    /// 说明:
+    /// - v1.1: 尝试使用嵌入模型生成 query 向量；
+    ///   若嵌入模型不可用（未配置或加载失败），
+    ///   向量通道自动降级为权重 0，BM25 + 图谱仍正常工作。
     async fn search_and_assemble_context(
         &self,
         query: &str,
         persona_uid: Option<&str>,
     ) -> Option<String> {
+        // ---- 尝试生成查询向量 ----
+        // 注：先克隆 Arc<dyn EmbeddingProvider> 出锁，再 await，避免 MutexGuard 跨 .await
+        let query_vec: Option<Vec<f32>> = {
+            let provider_opt = {
+                let emb_guard = self.embedding.lock().unwrap_or_else(|e| e.into_inner());
+                emb_guard.clone()
+            }; // MutexGuard 在此释放
+
+            match provider_opt {
+                Some(provider) if provider.is_available() => match provider.embed(query).await {
+                    Ok(vec) => {
+                        tracing::debug!(dim = vec.len(), "查询向量已生成");
+                        Some(vec)
+                    }
+                    Err(e) => {
+                        tracing::warn!(%e, "查询向量生成失败，向量通道降级");
+                        None
+                    }
+                },
+                _ => {
+                    tracing::debug!("嵌入模型不可用，跳过向量通道");
+                    None
+                }
+            }
+        };
+
         // 锁定检索器执行搜索（纯同步操作，不跨越 .await）
         let results = {
             let retriever = match self.retriever.lock() {
@@ -661,8 +920,11 @@ impl App {
                 filter_share: true,
             };
 
-            // 无 query_vec 时跳过向量通道（v1.0 暂不接入 embedding provider）
-            retriever.search(&request, None)
+            // 有查询向量 → 向量通道可用；无查询向量 → 仅 BM25 + 图谱
+            match &query_vec {
+                Some(qv) => retriever.search(&request, Some(qv)),
+                None => retriever.search(&request, None),
+            }
         };
 
         if results.is_empty() {

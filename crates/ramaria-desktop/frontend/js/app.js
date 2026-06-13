@@ -217,6 +217,16 @@
                 // 同步到 Store，Router 订阅的 'appState' 事件会自动触发首次路由
                 RamariaStore.set('appState', state);
 
+                // v1.1: 如果是 degraded，查询具体原因以显示准确提示
+                if (state === 'degraded') {
+                    try {
+                        var reason = await RamariaApi.setup.getDegradedReason();
+                        RamariaStore.set('degradedReason', reason || '');
+                    } catch (_) {
+                        RamariaStore.set('degradedReason', '');
+                    }
+                }
+
                 // 如果状态是 ready/degraded，预加载会话列表和配置
                 if (state === 'ready' || state === 'degraded') {
                     _preloadData();

@@ -374,6 +374,65 @@ var RamariaApi = (function () {
         return await _invoke('refresh_setup_state', {}, '刷新应用状态');
     }
 
+    /**
+     * 校验嵌入模型路径（v1.1 新增）。
+     *
+     * 参数:
+     * - `path`: 模型文件夹绝对路径
+     *
+     * 返回:
+     * - { valid: bool, dimension?: number, reason?: string }
+     */
+    async function validateEmbeddingModel(path) {
+        _require(path, '模型路径');
+        return await _invoke('validate_embedding_model', { path: path }, '校验嵌入模型');
+    }
+
+    /**
+     * 保存嵌入模型配置（v1.1 新增）。
+     *
+     * 参数:
+     * - `path`: 模型文件夹绝对路径（空字符串表示移除）
+     */
+    async function saveEmbeddingModel(path) {
+        return await _invoke('save_embedding_model', { path: path || '' }, '保存嵌入模型配置');
+    }
+
+    /**
+     * 获取嵌入模型配置（v1.1 新增）。
+     *
+     * 返回:
+     * - { modelPath?: string, valid?: bool, dimension?: number } | null
+     */
+    async function getEmbeddingModel() {
+        return await _invoke('get_embedding_model', {}, '查询嵌入模型配置');
+    }
+
+    /**
+     * 获取当前 Degraded 状态的详细原因（v1.1 新增）。
+     *
+     * 返回:
+     * - "embedding_missing" | "llm_unavailable" | "unknown" | null
+     */
+    async function getDegradedReason() {
+        return await _invoke('get_degraded_reason', {}, '查询降级原因');
+    }
+
+    /**
+     * 测试 LLM 连接是否可达（v1.1 新增）。
+     *
+     * 说明:
+     * - 与 refreshSetupState 不同：此方法真正测试 LLM 端点可达性。
+     * - 调用前需先通过 updateBackendConfig 或 update_backend_config 保存配置。
+     *
+     * 返回:
+     * - "ok": LLM 连接正常
+     * - 否则抛出 Error
+     */
+    async function testLlmConnection() {
+        return await _invoke('test_llm_connection', {}, '测试 LLM 连接');
+    }
+
     // =========================================================
     // 6. 数据导出 (export)
     // =========================================================
@@ -455,6 +514,11 @@ var RamariaApi = (function () {
             run: runSetup,
             getStatus: getSetupStatus,
             refresh: refreshSetupState,
+            validateEmbeddingModel: validateEmbeddingModel,
+            saveEmbeddingModel: saveEmbeddingModel,
+            getEmbeddingModel: getEmbeddingModel,
+            getDegradedReason: getDegradedReason,
+            testLlmConnection: testLlmConnection,
         },
         export: {
             json: exportSessionsJson,

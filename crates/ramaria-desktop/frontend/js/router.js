@@ -353,7 +353,19 @@ var RamariaRouter = (function () {
             case 'degraded':
                 // 显示对话界面 + 警告条
                 showView('chat');
-                _showDegradedBanner('部分功能不可用 — 请检查 LLM 后端连接后重试');
+                // 根据 Store 中的 degradedReason 显示具体原因（v1.1 增强）
+                var reason = RamariaStore.get('degradedReason') || '';
+                var msg;
+                if (reason === 'embedding_missing') {
+                    msg = '⚠ 嵌入模型未配置 — 向量检索不可用，仅 BM25 + 图谱通道可用。请在「设置 → 嵌入模型」中配置或通过首次配置向导完成。';
+                } else if (reason === 'llm_unavailable') {
+                    msg = '⚠ LLM 后端暂不可用 — 请检查 LLM 后端服务连接后重试';
+                } else if (reason === 'both_unavailable') {
+                    msg = '⚠ LLM 后端与嵌入模型均不可用 — 请检查配置后重试';
+                } else {
+                    msg = '⚠ 部分功能不可用 — 请检查「设置」中各配置项状态';
+                }
+                _showDegradedBanner(msg);
                 break;
 
             case 'fatal_error':

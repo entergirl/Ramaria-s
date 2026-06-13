@@ -267,7 +267,7 @@ async fn init_app(db_path: PathBuf) -> anyhow::Result<Arc<ramaria_app::App>> {
 
     // Step 5: 构造 App
     let config = ramaria_core::config::RamariaConfig::default();
-    let app = ramaria_app::App::new(storage, llm, config, keychain);
+    let app = ramaria_app::App::new(storage, llm, None, config, keychain);
     let app = Arc::new(app);
 
     // Step 6: 刷新状态

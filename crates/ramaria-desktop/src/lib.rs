@@ -186,7 +186,7 @@ async fn init_app(data_dir: &PathBuf) -> Result<(Arc<ramaria_app::App>, PathBuf)
 
     // Step 5: 构造 App
     let config = ramaria_core::config::RamariaConfig::default();
-    let app = ramaria_app::App::new(storage, llm, config, keychain);
+    let app = ramaria_app::App::new(storage, llm, None, config, keychain);
 
     // Step 6: 刷新状态
     app.refresh_setup_state()
@@ -273,6 +273,7 @@ pub fn run() {
             commands::setup::run_setup,
             commands::setup::get_setup_status,
             commands::setup::refresh_setup_state,
+            commands::setup::test_llm_connection,
             // ---- Session ----
             commands::session::list_sessions,
             commands::session::get_session,

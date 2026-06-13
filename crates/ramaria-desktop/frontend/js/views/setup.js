@@ -29,8 +29,8 @@ var RamariaSetupView = (function () {
     // 常量
     // =========================================================
 
-    var STEP_LABELS = ['对话模型', '确认信息', '完成'];
-    var TOTAL_STEPS = 3;
+    var STEP_LABELS = ['对话模型', '嵌入模型', '确认信息', '完成'];
+    var TOTAL_STEPS = 4;
 
     // =========================================================
     // 内部状态
@@ -40,6 +40,8 @@ var RamariaSetupView = (function () {
     var _currentStep = 1;
     var _currentMode = 'local'; // 'local' | 'api'
     var _testPassed = false;
+    var _embeddingTestPassed = false;
+    var _embeddingPath = '';
     var _submitting = false;
 
     function $(id) { return document.getElementById(id); }
@@ -55,6 +57,8 @@ var RamariaSetupView = (function () {
         _currentStep = 1;
         _currentMode = 'local';
         _testPassed = false;
+        _embeddingTestPassed = false;
+        _embeddingPath = '';
         _submitting = false;
 
         container.innerHTML = '';
@@ -88,16 +92,22 @@ var RamariaSetupView = (function () {
                 _panel1Html() +
             '</div>';
 
-        // 面板 2：确认
+        // 面板 2：嵌入模型配置（v1.1 新增）
         card.innerHTML +=
             '<div class="setup-panel" id="setup-panel-2">' +
                 _panel2Html() +
             '</div>';
 
-        // 面板 3：完成
+        // 面板 3：确认
         card.innerHTML +=
             '<div class="setup-panel" id="setup-panel-3">' +
                 _panel3Html() +
+            '</div>';
+
+        // 面板 4：完成
+        card.innerHTML +=
+            '<div class="setup-panel" id="setup-panel-4">' +
+                _panel4Html() +
             '</div>';
 
         // ── 底部操作区 ──
@@ -125,7 +135,7 @@ var RamariaSetupView = (function () {
             '<div class="setup-panel-title">对话模型配置</div>' +
             '<div class="setup-panel-desc">' +
                 '选择珊瑚菌对话模型的运行方式。<br>' +
-                '嵌入模型（向量检索）始终本地运行，不受此选择影响。' +
+                '下一步将配置嵌入模型（向量检索），请继续。' +
             '</div>' +
 
             // 模式选择器
@@ -199,6 +209,65 @@ var RamariaSetupView = (function () {
 
     function _panel2Html() {
         return '' +
+            '<div class="setup-panel-title">嵌入模型配置</div>' +
+            '<div class="setup-panel-desc">' +
+                '嵌入模型将对话文本转换为语义向量，是记忆检索（RAG）功能的基础。<br>' +
+                '请指定已下载的本地嵌入模型文件夹路径。' +
+            '</div>' +
+
+            // 推荐模型提示
+            '<div class="setup-embedding-recommend">' +
+                '<div class="setup-embedding-recommend-title">推荐模型</div>' +
+                '<div class="setup-embedding-recommend-body">' +
+                    '<code>BAAI/bge-small-zh-v1.5</code> （约 100MB，384 维向量）<br>' +
+                    '下载地址：<a href="https://hf-mirror.com/BAAI/bge-small-zh-v1.5" target="_blank" rel="noopener" ' +
+                    'style="color:var(--color-primary);">hf-mirror.com/BAAI/bge-small-zh-v1.5</a>' +
+                '</div>' +
+            '</div>' +
+
+            // 模型路径字段
+            '<div class="setup-field-group">' +
+                '<div class="setup-field">' +
+                    '<div class="setup-field-label">模型文件夹路径 <span class="setup-required">*</span></div>' +
+                    '<input class="setup-field-input" id="setup-embedding-path" type="text" ' +
+                        'placeholder="D:/models/bge-small-zh-v1.5" autocomplete="off">' +
+                    '<div class="setup-field-hint">' +
+                        '填写包含 <code>onnx/model.onnx</code> 或 <code>model.safetensors</code> 的模型文件夹<strong>完整绝对路径</strong>。<br>' +
+                        '路径分隔符请统一使用正斜杠 /，兼容所有操作系统。' +
+                    '</div>' +
+                '</div>' +
+            '</div>' +
+
+            // 校验按钮
+            '<div style="margin-top:12px">' +
+                '<button class="setup-test-btn" id="setup-embedding-test-btn">' +
+                    '<span class="setup-test-dot"></span> 校验模型路径' +
+                '</button>' +
+                '<div class="setup-field-status" id="setup-embedding-test-status"></div>' +
+            '</div>' +
+
+            // 跳过说明
+            '<div class="setup-skip-hint" id="setup-embedding-skip-hint" style="display:none">' +
+                '<div class="setup-skip-hint-title">⚠ 暂不配置嵌入模型</div>' +
+                '<div class="setup-skip-hint-body">' +
+                    '您可以跳过此步骤，但部分功能将受限：<br>' +
+                    '• <strong>向量检索不可用</strong> — 无法按语义相似度搜索记忆<br>' +
+                    '• <strong>仅 BM25 关键词 + 知识图谱</strong> 通道可用<br>' +
+                    '• 应用将处于 <strong>降级模式</strong>，对话页顶部会显示警告条<br>' +
+                    '• 您可以在「设置 → 嵌入模型」中随时补配' +
+                '</div>' +
+            '</div>' +
+
+            // 跳过按钮
+            '<div style="margin-top:12px">' +
+                '<button class="setup-btn setup-btn-ghost" id="setup-embedding-skip-btn">' +
+                    '跳过，稍后配置（进入降级模式）' +
+                '</button>' +
+            '</div>';
+    }
+
+    function _panel3Html() {
+        return '' +
             '<div class="setup-panel-title">配置确认</div>' +
             '<div class="setup-panel-desc">请核对以下配置信息，无误后点击「完成并启动」</div>' +
             '<div class="setup-summary-box" id="setup-summary-box">' +
@@ -206,7 +275,7 @@ var RamariaSetupView = (function () {
             '</div>';
     }
 
-    function _panel3Html() {
+    function _panel4Html() {
         return '' +
             '<div class="setup-finish-icon">✓</div>' +
             '<div class="setup-finish-title">配置完成</div>' +
@@ -292,6 +361,8 @@ var RamariaSetupView = (function () {
                 btnNext.textContent = '进入 Ramaria';
             } else if (step === TOTAL_STEPS - 1) {
                 btnNext.textContent = '完成并启动';
+            } else if (step === 2) {
+                btnNext.textContent = '下一步 →';
             } else {
                 btnNext.textContent = '下一步 →';
             }
@@ -327,6 +398,14 @@ var RamariaSetupView = (function () {
         // 测试连接
         var testBtn = $('setup-test-btn');
         if (testBtn) testBtn.addEventListener('click', _testConnection);
+
+        // 嵌入模型校验按钮（v1.1 新增）
+        var embeddingTestBtn = $('setup-embedding-test-btn');
+        if (embeddingTestBtn) embeddingTestBtn.addEventListener('click', _testEmbeddingPath);
+
+        // 嵌入模型跳过按钮（v1.1 新增）
+        var embeddingSkipBtn = $('setup-embedding-skip-btn');
+        if (embeddingSkipBtn) embeddingSkipBtn.addEventListener('click', _skipEmbeddingModel);
 
         // 键盘 Enter 在表单中触发下一步
         document.addEventListener('keydown', function (e) {
@@ -397,7 +476,7 @@ var RamariaSetupView = (function () {
         status.className = 'setup-field-status checking';
 
         try {
-            // 先保存临时配置
+            // 先保存临时配置（写入 storage + keychain + 热更新 LLM provider）
             var config = _collectConfig();
             await RamariaApi.config.updateBackend(
                 config.provider,
@@ -406,41 +485,123 @@ var RamariaSetupView = (function () {
                 _currentMode === 'api' ? config.apiKey : ''
             );
 
-            // 调用 refresh 来验证
-            var newState = await RamariaApi.setup.refresh();
+            // 真正测试 LLM 连接可达性（调用 llm.validate()，实际发请求到端点）
+            // 注意：不使用 refresh_setup_state，因为它会检查嵌入模型/索引状态。
+            await RamariaApi.setup.testLlmConnection();
 
-            // 检查状态
-            if (newState === 'ready' || newState === 'downloading_model' || newState === 'indexing') {
-                // LLM 连接正常
-                btn.className = 'setup-test-btn ok';
-                btn.innerHTML = '<span class="setup-test-dot"></span> 连接成功';
-                status.textContent = '✓ ' + (_currentMode === 'api' ? '线上 API' : '本地推理服务') + ' 可达';
-                status.className = 'setup-field-status ok';
-                _testPassed = true;
+            // 连接成功
+            btn.className = 'setup-test-btn ok';
+            btn.innerHTML = '<span class="setup-test-dot"></span> 连接成功';
+            status.textContent = '✓ ' + (_currentMode === 'api' ? '线上 API' : '本地推理服务') + ' 可达';
+            status.className = 'setup-field-status ok';
+            _testPassed = true;
 
-                // 高亮输入框
-                _highlightInputs(true);
-            } else if (newState === 'degraded') {
-                btn.className = 'setup-test-btn fail';
-                btn.innerHTML = '<span class="setup-test-dot"></span> 连接失败';
-                status.textContent = '✗ 服务连接异常，请检查配置';
-                status.className = 'setup-field-status fail';
-                _testPassed = false;
-            } else {
-                btn.className = 'setup-test-btn fail';
-                btn.innerHTML = '<span class="setup-test-dot"></span> 测试失败';
-                status.textContent = '✗ 无法确定服务状态: ' + newState;
-                status.className = 'setup-field-status fail';
-                _testPassed = false;
-            }
+            // 高亮输入框
+            _highlightInputs(true);
         } catch (err) {
             var msg = err.message || String(err);
             btn.className = 'setup-test-btn fail';
             btn.innerHTML = '<span class="setup-test-dot"></span> 测试失败';
-            status.textContent = '✗ ' + msg;
+
+            // 提供更具体的错误提示
+            if (msg.indexOf('无法连接到') !== -1 || msg.indexOf('connect') !== -1) {
+                status.textContent = '✗ 无法连接服务，请确认地址和端口正确且服务已启动';
+            } else if (msg.indexOf('API key') !== -1 || msg.indexOf('api_key') !== -1 || msg.indexOf('keychain') !== -1) {
+                status.textContent = '✗ API Key 未配置或无效';
+            } else {
+                status.textContent = '✗ ' + msg;
+            }
             status.className = 'setup-field-status fail';
             _testPassed = false;
         }
+    }
+
+    // =========================================================
+    // 嵌入模型路径校验（v1.1 新增）
+    // =========================================================
+
+    /**
+     * 测试嵌入模型路径是否有效。
+     *
+     * 流程: 收集路径 → 调用后端校验 API → 显示结果
+     * 参考: Python static/setup.html Step 2 的 validateModelPath/checkModelPath
+     */
+    async function _testEmbeddingPath() {
+        var btn = $('setup-embedding-test-btn');
+        var status = $('setup-embedding-test-status');
+        var pathInput = $('setup-embedding-path');
+        if (!btn || !status || !pathInput) return;
+
+        var path = pathInput.value.trim();
+
+        // 基本校验
+        if (!path) {
+            status.textContent = '✗ 请填写模型文件夹路径';
+            status.className = 'setup-field-status fail';
+            pathInput.classList.add('invalid');
+            return;
+        }
+
+        // 统一正斜杠
+        if (path.indexOf('\\') !== -1) {
+            path = path.replace(/\\/g, '/');
+            pathInput.value = path;
+        }
+
+        btn.className = 'setup-test-btn testing';
+        btn.innerHTML = '<span class="setup-test-dot"></span> 校验中…';
+        status.textContent = '';
+        status.className = 'setup-field-status checking';
+        pathInput.classList.remove('valid', 'invalid');
+
+        try {
+            // 调用后端校验嵌入模型路径
+            var result = await RamariaApi.setup.validateEmbeddingModel(path);
+
+            if (result && result.valid) {
+                btn.className = 'setup-test-btn ok';
+                btn.innerHTML = '<span class="setup-test-dot"></span> 校验通过';
+                status.textContent = '✓ 模型文件完整，维度: ' + (result.dimension || '未知');
+                status.className = 'setup-field-status ok';
+                pathInput.classList.add('valid');
+                _embeddingTestPassed = true;
+                _embeddingPath = path;
+            } else {
+                btn.className = 'setup-test-btn fail';
+                btn.innerHTML = '<span class="setup-test-dot"></span> 校验失败';
+                status.textContent = '✗ ' + ((result && result.reason) || '模型路径无效或文件不完整');
+                status.className = 'setup-field-status fail';
+                pathInput.classList.add('invalid');
+                _embeddingTestPassed = false;
+            }
+        } catch (err) {
+            var msg = err.message || String(err);
+            btn.className = 'setup-test-btn fail';
+            btn.innerHTML = '<span class="setup-test-dot"></span> 校验失败';
+            status.textContent = '✗ ' + msg;
+            status.className = 'setup-field-status fail';
+            pathInput.classList.add('invalid');
+            _embeddingTestPassed = false;
+        }
+    }
+
+    /**
+     * 跳过嵌入模型配置，进入降级模式。
+     *
+     * 显示跳过说明后直接进入下一步。
+     */
+    function _skipEmbeddingModel() {
+        _embeddingTestPassed = false;
+        _embeddingPath = '';
+
+        // 显示跳过说明
+        var skipHint = $('setup-embedding-skip-hint');
+        if (skipHint) skipHint.style.display = 'block';
+
+        // 延迟后自动前进，给用户阅读说明的时间
+        setTimeout(function () {
+            _showStep(3);
+        }, 1500);
     }
 
     function _highlightInputs(ok) {
@@ -533,7 +694,7 @@ var RamariaSetupView = (function () {
         if (_submitting) return;
 
         if (_currentStep === 1) {
-            // 校验字段
+            // Step 1 → Step 2: 校验 LLM 字段
             if (!_validateModeFields(true)) return;
 
             // 检查测试状态
@@ -556,6 +717,33 @@ var RamariaSetupView = (function () {
             }
 
             _showStep(2);
+        } else if (_currentStep === 2) {
+            // Step 2 → Step 3: 嵌入模型配置（v1.1 新增）
+            // 不强制要求——用户可跳过
+            if (_embeddingTestPassed) {
+                _showStep(3);
+                return;
+            }
+
+            // 未校验：提示可跳过
+            RamariaModal.show({
+                title: '未校验嵌入模型',
+                body: '<p style="font-size:13px;color:var(--text-secondary);line-height:1.6;">' +
+                      '您还没有校验嵌入模型路径，跳过将进入<strong>降级模式</strong>：</p>' +
+                      '<ul style="font-size:12px;color:var(--text-secondary);line-height:1.8;padding-left:16px;margin-top:8px;">' +
+                      '<li>向量检索不可用</li>' +
+                      '<li>仅 BM25 关键词 + 知识图谱通道可用</li>' +
+                      '<li>对话页顶部会显示警告条</li>' +
+                      '</ul>' +
+                      '<p style="font-size:12px;color:var(--text-tertiary);margin-top:8px;">您可以在「设置 → 嵌入模型」中随时补配。</p>',
+                footer: '<button class="btn btn-secondary" data-action="cancel">返回校验</button>' +
+                        '<button class="btn btn-primary" data-action="skip">跳过，继续</button>',
+                onAction: function (action) {
+                    if (action === 'skip') {
+                        _showStep(3);
+                    }
+                },
+            });
         } else if (_currentStep === TOTAL_STEPS - 1) {
             // 确认 → 完成
             await _finishSetup();
@@ -591,6 +779,15 @@ var RamariaSetupView = (function () {
         var config = _collectConfig();
 
         try {
+            // 如果嵌入模型已校验通过，先保存嵌入模型配置
+            if (_embeddingTestPassed && _embeddingPath) {
+                try {
+                    await RamariaApi.setup.saveEmbeddingModel(_embeddingPath);
+                } catch (embedErr) {
+                    console.warn('[SetupView] 嵌入模型配置保存失败（非致命）:', embedErr);
+                }
+            }
+
             // 保存配置 + 运行首次设置
             var result = await RamariaApi.setup.run(
                 config.provider,
@@ -688,6 +885,13 @@ var RamariaSetupView = (function () {
             lines.push('<div><span class="setup-summary-dim">API Key：</span>' + apiKeyDisplay + '</div>');
         }
 
+        // 嵌入模型状态（v1.1 新增）
+        if (_embeddingTestPassed) {
+            lines.push('<div><span class="setup-summary-dim">嵌入模型：</span>✓ 已配置（' + (_embeddingPath || '-') + '）</div>');
+        } else {
+            lines.push('<div style="color:var(--pink-500)"><span class="setup-summary-dim">嵌入模型：</span>⚠ 未配置（降级模式：仅 BM25 + 图谱）</div>');
+        }
+
         box.innerHTML = lines.join('');
     }
 
@@ -709,6 +913,8 @@ var RamariaSetupView = (function () {
             _currentStep = 1;
             _currentMode = 'local';
             _testPassed = false;
+            _embeddingTestPassed = false;
+            _embeddingPath = '';
             _submitting = false;
         });
         _unregisterFns.push(unreg);

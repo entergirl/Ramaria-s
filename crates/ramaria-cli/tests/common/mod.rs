@@ -1,4 +1,4 @@
-//! tests/common/mod.rs - CLI 集成测试共享 Mock 基础设施
+﻿//! tests/common/mod.rs - CLI 集成测试共享 Mock 基础设施
 //!
 //! 设计特点:
 //! - MockStorage: 内存 HashMap 实现的 StorageBackend，支持预填充测试数据
@@ -758,7 +758,7 @@ pub fn build_test_app() -> (Arc<ramaria_app::App>, Arc<MockStorage>) {
     let keychain = Arc::new(ramaria_llm::keychain::Keychain::new());
     let config = RamariaConfig::default();
 
-    let app = App::new(
+    let app = App::new_without_embedding(
         Arc::clone(&storage) as Arc<dyn StorageBackend>,
         llm,
         config,

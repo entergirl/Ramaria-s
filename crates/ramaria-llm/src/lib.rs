@@ -6,6 +6,7 @@
 //! - 统一重试策略：网络错误和 5xx 重试（指数退避），鉴权错误不重试
 //! - API key 通过 OS keychain 读取，不进入日志或配置文件
 //! - 共享 transport 层抽象，避免三个 provider 重复实现 HTTP/SSE 逻辑
+//! - 通过 feature `embedding-onnx` 支持 ONNX 嵌入模型（ort + tokenizers）
 
 pub mod keychain;
 pub mod provider;
@@ -15,6 +16,9 @@ pub mod transport;
 pub mod deepseek;
 pub mod lm_studio;
 pub mod openai;
+
+// Embedding Provider 实现（可选 feature）
+pub mod embedding;
 
 // 保留 Phase 0 POC 代码供参考（Phase 3 完成后可删除）
 pub mod client;

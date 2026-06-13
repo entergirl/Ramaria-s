@@ -607,7 +607,113 @@
 }
 
 /* =========================================================
-   10. 响应式
+   10. 嵌入模型配置（v1.1 新增）
+   ========================================================= */
+
+/* 推荐模型提示 */
+.setup-embedding-recommend {
+  background: oklch(0.48 0.17 225 / 0.05);
+  border: 1px solid var(--border-blue);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  margin-bottom: 16px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.7;
+  font-family: var(--font-mono);
+}
+
+.setup-embedding-recommend-title {
+  font-weight: 600;
+  color: var(--color-secondary);
+  margin-bottom: 4px;
+  font-family: var(--font-body);
+}
+
+.setup-embedding-recommend-body code {
+  background: oklch(0.48 0.17 225 / 0.1);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--color-secondary);
+}
+
+/* 跳过说明 */
+.setup-skip-hint {
+  background: oklch(0.97 0.02 75);
+  border: 1.5px solid #e8c87a;
+  border-radius: var(--radius-sm);
+  padding: 12px 16px;
+  margin-top: 12px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.7;
+}
+
+.setup-skip-hint-title {
+  font-weight: 600;
+  color: #8a6d14;
+  margin-bottom: 6px;
+}
+
+.setup-skip-hint-body {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.setup-skip-hint-body strong {
+  color: var(--text-primary);
+}
+
+/* 幽灵按钮（跳过用） */
+.setup-btn-ghost {
+  padding: 6px 14px;
+  border: 1px solid var(--border-default);
+  border-radius: 20px;
+  background: none;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.setup-btn-ghost:hover {
+  border-color: #e8c87a;
+  color: #8a6d14;
+}
+
+/* 暗色适配 */
+[data-theme="dark"] .setup-embedding-recommend {
+  background: oklch(0.48 0.17 225 / 0.08);
+  border-color: oklch(0.32 0.04 225);
+}
+
+[data-theme="dark"] .setup-embedding-recommend-body code {
+  background: oklch(0.48 0.17 225 / 0.15);
+}
+
+[data-theme="dark"] .setup-skip-hint {
+  background: oklch(0.18 0.03 75);
+  border-color: oklch(0.4 0.08 75);
+}
+
+[data-theme="dark"] .setup-skip-hint-title {
+  color: oklch(0.7 0.1 75);
+}
+
+[data-theme="dark"] .setup-btn-ghost {
+  border-color: oklch(0.45 0.005 25);
+}
+
+[data-theme="dark"] .setup-btn-ghost:hover {
+  border-color: oklch(0.4 0.08 75);
+  color: oklch(0.7 0.1 75);
+}
+
+/* =========================================================
+   11. 响应式
    ========================================================= */
 
 @media (max-width: 600px) {

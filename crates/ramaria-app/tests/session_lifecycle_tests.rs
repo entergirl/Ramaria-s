@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/tests/session_lifecycle_tests.rs - Session 生命周期集成测试
+﻿//! rust/crates/ramaria-app/tests/session_lifecycle_tests.rs - Session 生命周期集成测试
 //!
 //! 设计特点:
 //! - 使用 MockStorage + MockLlm 验证 session 生命周期的完整行为
@@ -35,7 +35,7 @@ fn build_ready_app() -> App {
     let config = RamariaConfig::default();
     let keychain = Arc::new(Keychain::new());
 
-    let app = App::new(storage, llm, config, keychain);
+    let app = App::new_without_embedding(storage, llm, config, keychain);
 
     // 模拟设置完成：写入后端配置 + 设置状态为 Ready
     // 注意：由于 run_setup 需要 async，这里直接设置状态
@@ -62,7 +62,7 @@ async fn manual_save_and_close_session() {
     let llm = Arc::new(MockLlm::new("测试回复"));
     let config = RamariaConfig::default();
     let keychain = Arc::new(Keychain::new());
-    let app = App::new(
+    let app = App::new_without_embedding(
         Arc::clone(&storage) as Arc<dyn StorageBackend>,
         Arc::clone(&llm) as Arc<dyn LlmProvider>,
         config,
@@ -99,7 +99,7 @@ async fn save_and_close_without_active_session_is_noop() {
     let llm = Arc::new(MockLlm::new("测试回复"));
     let config = RamariaConfig::default();
     let keychain = Arc::new(Keychain::new());
-    let app = App::new(storage, llm, config, keychain);
+    let app = App::new_without_embedding(storage, llm, config, keychain);
 
     app.set_state(AppState::Ready);
 
@@ -118,7 +118,7 @@ async fn new_message_auto_creates_session() {
     let llm = Arc::new(MockLlm::new("自动创建测试"));
     let config = RamariaConfig::default();
     let keychain = Arc::new(Keychain::new());
-    let app = App::new(
+    let app = App::new_without_embedding(
         Arc::clone(&storage) as Arc<dyn StorageBackend>,
         llm,
         config,
@@ -159,7 +159,7 @@ async fn cannot_send_message_to_closed_session() {
     let llm = Arc::new(MockLlm::new("测试回复"));
     let config = RamariaConfig::default();
     let keychain = Arc::new(Keychain::new());
-    let app = App::new(
+    let app = App::new_without_embedding(
         Arc::clone(&storage) as Arc<dyn StorageBackend>,
         llm,
         config,
@@ -235,7 +235,7 @@ async fn shutdown_closes_active_session() {
     let llm = Arc::new(MockLlm::new("shutdown 测试"));
     let config = RamariaConfig::default();
     let keychain = Arc::new(Keychain::new());
-    let app = App::new(
+    let app = App::new_without_embedding(
         Arc::clone(&storage) as Arc<dyn StorageBackend>,
         llm,
         config,
@@ -277,7 +277,7 @@ async fn send_message_rejected_in_needs_setup() {
     let llm = Arc::new(MockLlm::new("测试"));
     let config = RamariaConfig::default();
     let keychain = Arc::new(Keychain::new());
-    let app = App::new(storage, llm, config, keychain);
+    let app = App::new_without_embedding(storage, llm, config, keychain);
 
     // 状态为 NeedsSetup（默认）
     let result = app.send_message("你好", None, None).await;
@@ -302,7 +302,7 @@ async fn background_tasks_start_only_once() {
     let llm = Arc::new(MockLlm::new("测试"));
     let config = RamariaConfig::default();
     let keychain = Arc::new(Keychain::new());
-    let app = App::new(storage, llm, config, keychain);
+    let app = App::new_without_embedding(storage, llm, config, keychain);
 
     app.set_state(AppState::Ready);
 
@@ -327,7 +327,7 @@ fn active_session_id_default_is_none() {
     let llm = Arc::new(MockLlm::new("测试"));
     let config = RamariaConfig::default();
     let keychain = Arc::new(Keychain::new());
-    let app = App::new(storage, llm, config, keychain);
+    let app = App::new_without_embedding(storage, llm, config, keychain);
 
     assert!(
         app.get_active_session_id().is_none(),
@@ -345,7 +345,7 @@ async fn new_session_created_after_save_and_close() {
     let llm = Arc::new(MockLlm::new("创建新 session 测试"));
     let config = RamariaConfig::default();
     let keychain = Arc::new(Keychain::new());
-    let app = App::new(
+    let app = App::new_without_embedding(
         Arc::clone(&storage) as Arc<dyn StorageBackend>,
         llm,
         config,
@@ -380,7 +380,7 @@ async fn send_message_with_explicit_session_id() {
     let llm = Arc::new(MockLlm::new("显式 session 测试"));
     let config = RamariaConfig::default();
     let keychain = Arc::new(Keychain::new());
-    let app = App::new(
+    let app = App::new_without_embedding(
         Arc::clone(&storage) as Arc<dyn StorageBackend>,
         llm,
         config,

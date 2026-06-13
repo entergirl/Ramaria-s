@@ -63,6 +63,9 @@ var RamariaSettingsView = (function () {
         // ── 后端配置 ──
         _renderBackendSection(scroll);
 
+        // ── 嵌入模型配置（v1.1 新增）──
+        _renderEmbeddingSection(scroll);
+
         // ── 隐私设置 ──
         _renderPrivacySection(scroll);
 
@@ -222,6 +225,174 @@ var RamariaSettingsView = (function () {
             if (saveBtn) {
                 saveBtn.disabled = false;
                 saveBtn.textContent = '保存后端配置';
+            }
+        }
+    }
+
+    // =========================================================
+    // 嵌入模型配置区块（v1.1 新增）
+    // =========================================================
+
+    function _renderEmbeddingSection(parent) {
+        var section = document.createElement('div');
+        section.className = 'settings-section';
+        section.innerHTML =
+            '<div class="settings-section-title">🧲 嵌入模型</div>' +
+            '<div class="settings-section-desc">配置本地嵌入模型，用于记忆语义检索（向量搜索）。</div>';
+
+        var card = document.createElement('div');
+        card.className = 'settings-card';
+        card.id = 'settings-embedding-card';
+        card.innerHTML =
+            '<div class="settings-form-group">' +
+                '<label class="settings-form-label">模型文件夹路径</label>' +
+                '<input class="settings-form-input" id="settings-embedding-path" type="text" ' +
+                    'placeholder="D:/models/bge-small-zh-v1.5" />' +
+                '<div class="settings-form-hint">' +
+                    '推荐模型：<code style="font-size:10px;background:var(--bg-subtle);padding:1px 4px;border-radius:3px;">BAAI/bge-small-zh-v1.5</code>（约 100MB）。' +
+                    '留空则使用 BM25 + 图谱降级模式，不进行向量检索。' +
+                '</div>' +
+            '</div>' +
+            '<div class="settings-form-group" id="settings-embedding-status-group" style="display:none">' +
+                '<div class="settings-row">' +
+                    '<div>' +
+                        '<div class="settings-row-label">当前状态</div>' +
+                        '<div class="settings-row-meta" id="settings-embedding-status">加载中...</div>' +
+                    '</div>' +
+                    '<span class="settings-row-value" id="settings-embedding-valid-badge">-</span>' +
+                '</div>' +
+            '</div>' +
+            '<div class="settings-save-hint">' +
+                '<button class="btn btn-secondary btn-sm" id="settings-validate-embedding">校验路径</button>' +
+                '<button class="btn btn-primary btn-sm" id="settings-save-embedding">保存</button>' +
+            '</div>';
+
+        section.appendChild(card);
+        parent.appendChild(section);
+
+        // 绑定事件
+        var validateBtn = $('settings-validate-embedding');
+        var saveBtn = $('settings-save-embedding');
+        if (validateBtn) validateBtn.addEventListener('click', _handleValidateEmbedding);
+        if (saveBtn) saveBtn.addEventListener('click', _handleSaveEmbedding);
+    }
+
+    /**
+     * 填充嵌入模型配置表单。
+     */
+    function _fillEmbeddingForm(config) {
+        var pathEl = $('settings-embedding-path');
+        var statusGroup = $('settings-embedding-status-group');
+        var statusEl = $('settings-embedding-status');
+        var badgeEl = $('settings-embedding-valid-badge');
+
+        if (pathEl) pathEl.value = (config && config.modelPath) || '';
+
+        if (statusGroup && config && config.modelPath) {
+            statusGroup.style.display = 'block';
+            if (statusEl) {
+                statusEl.textContent = config.valid
+                    ? '嵌入模型就绪（' + (config.dimension || '?') + ' 维）'
+                    : '嵌入模型路径无效或文件不完整';
+            }
+            if (badgeEl) {
+                badgeEl.textContent = config.valid ? '✓ 可用' : '✗ 不可用';
+                badgeEl.style.color = config.valid ? '#4caf78' : 'var(--pink-500)';
+            }
+        } else if (statusGroup) {
+            statusGroup.style.display = 'none';
+        }
+    }
+
+    /**
+     * 校验嵌入模型路径。
+     */
+    async function _handleValidateEmbedding() {
+        var pathEl = $('settings-embedding-path');
+        var path = pathEl ? pathEl.value.trim() : '';
+        if (!path) {
+            RamariaToast.show('warning', '请先填写模型文件夹路径');
+            return;
+        }
+
+        // 统一正斜杠
+        if (path.indexOf('\\') !== -1) {
+            path = path.replace(/\\/g, '/');
+            if (pathEl) pathEl.value = path;
+        }
+
+        var validateBtn = $('settings-validate-embedding');
+        if (validateBtn) {
+            validateBtn.disabled = true;
+            validateBtn.textContent = '校验中...';
+        }
+
+        try {
+            var result = await RamariaApi.setup.validateEmbeddingModel(path);
+            var statusGroup = $('settings-embedding-status-group');
+            var statusEl = $('settings-embedding-status');
+            var badgeEl = $('settings-embedding-valid-badge');
+
+            if (statusGroup) statusGroup.style.display = 'block';
+
+            if (result && result.valid) {
+                if (statusEl) statusEl.textContent = '嵌入模型就绪（' + (result.dimension || '?') + ' 维）';
+                if (badgeEl) {
+                    badgeEl.textContent = '✓ 可用';
+                    badgeEl.style.color = '#4caf78';
+                }
+                RamariaToast.show('success', '模型校验通过');
+            } else {
+                if (statusEl) statusEl.textContent = (result && result.reason) || '模型路径无效或文件不完整';
+                if (badgeEl) {
+                    badgeEl.textContent = '✗ 不可用';
+                    badgeEl.style.color = 'var(--pink-500)';
+                }
+                RamariaToast.show('error', '校验失败', (result && result.reason) || '路径无效');
+            }
+        } catch (err) {
+            RamariaToast.show('error', '校验失败', err.message || '未知错误');
+        } finally {
+            if (validateBtn) {
+                validateBtn.disabled = false;
+                validateBtn.textContent = '校验路径';
+            }
+        }
+    }
+
+    /**
+     * 保存嵌入模型配置。
+     */
+    async function _handleSaveEmbedding() {
+        var pathEl = $('settings-embedding-path');
+        var path = pathEl ? pathEl.value.trim() : '';
+
+        var saveBtn = $('settings-save-embedding');
+        if (saveBtn) {
+            saveBtn.disabled = true;
+            saveBtn.textContent = '保存中...';
+        }
+
+        try {
+            await RamariaApi.setup.saveEmbeddingModel(path);
+
+            if (path) {
+                RamariaToast.show('success', '嵌入模型配置已保存，重启后生效');
+            } else {
+                RamariaToast.show('info', '嵌入模型已移除，应用将进入降级模式');
+            }
+
+            // 刷新应用状态
+            try {
+                var newState = await RamariaApi.setup.refresh();
+                if (newState) RamariaStore.set('appState', newState);
+            } catch (_) { /* ignore */ }
+        } catch (err) {
+            RamariaToast.show('error', '保存失败', err.message || '未知错误');
+        } finally {
+            if (saveBtn) {
+                saveBtn.disabled = false;
+                saveBtn.textContent = '保存';
             }
         }
     }
@@ -502,6 +673,14 @@ var RamariaSettingsView = (function () {
                 RamariaStore.set('backendConfig', _backendConfig);
             } catch (err) {
                 console.error('[SettingsView] 加载后端配置失败:', err);
+            }
+
+            // 加载嵌入模型配置（v1.1 新增）
+            try {
+                var embeddingConfig = await RamariaApi.setup.getEmbeddingModel();
+                _fillEmbeddingForm(embeddingConfig);
+            } catch (err) {
+                console.error('[SettingsView] 加载嵌入模型配置失败:', err);
             }
 
             // 加载隐私状态

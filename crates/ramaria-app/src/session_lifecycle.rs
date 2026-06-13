@@ -384,30 +384,71 @@ impl SessionLifecycle {
         }
     }
 
-    /// 执行 L2 事件提取。
+    /// 执行 L2 事件提取（通过 JobManager 包裹，带重试和可观测性）。
     ///
     /// 对齐 Python `merger.check_and_merge()` 的 LLM 提取逻辑。
+    ///
+    /// 重试策略:
+    /// - LLM 调用失败 → 可重试（JobResult::Retryable），最多 3 次，指数退避。
+    /// - 存储写入失败 → 同上可重试。
+    /// - 成功但无事件 → 视为 Success（正常情况，非错误）。
     async fn run_l2_extraction(
         &self,
         storage: &dyn StorageBackend,
         llm: &dyn LlmProvider,
         persona_uid: &str,
     ) {
-        let extractor = EventExtractor::new(llm, storage, EventExtractorConfig::default());
+        let persona_owned = persona_uid.to_string();
+        let job_manager = JobManager::with_defaults(storage);
+        let payload = serde_json::json!({ "persona_uid": &persona_owned }).to_string();
 
-        let result = extractor.extract_events(persona_uid).await;
-
-        match result {
-            Ok(events) => {
-                info!(persona_uid, event_count = events.len(), "L2 事件提取完成");
-
-                // L2 写入后检查 L3 触发条件（路径 A 级联）
-                if !events.is_empty() {
-                    self.check_l3_trigger(storage, llm, persona_uid).await;
+        // 通过 JobManager 包裹执行：create → running → execute → completed/failed
+        // 重试由 JobManager 内部处理（指数退避，最大 3 次）
+        let job_result = job_manager
+            .execute_with_retry(JobType::EventExtract, Some(&payload), || {
+                // 每次尝试都新建 EventExtractor（提取器创建代价低，且避免重试时复用状态）
+                let extractor = EventExtractor::new(llm, storage, EventExtractorConfig::default());
+                let uid = persona_owned.clone();
+                async move {
+                    match extractor.extract_events(&uid).await {
+                        Ok(events) if events.is_empty() => {
+                            info!(persona_uid = %uid, "L2 提取完成，无新事件");
+                            JobResult::Success
+                        }
+                        Ok(events) => {
+                            info!(
+                                persona_uid = %uid,
+                                event_count = events.len(),
+                                "L2 事件提取完成"
+                            );
+                            JobResult::Success
+                        }
+                        Err(e) => {
+                            // LLM 调用失败或存储写入失败，标记为可重试
+                            warn!(
+                                persona_uid = %uid,
+                                error = %e,
+                                "L2 事件提取失败，将重试"
+                            );
+                            JobResult::Retryable(e.to_string())
+                        }
+                    }
                 }
+            })
+            .await;
+
+        match job_result {
+            Ok(job_id) => {
+                info!(persona_uid = %persona_owned, job_id, "L2 事件提取任务完成");
+                // L2 成功后级联检查 L3（路径 A）
+                self.check_l3_trigger(storage, llm, &persona_owned).await;
             }
             Err(e) => {
-                error!(persona_uid, %e, "L2 事件提取失败");
+                error!(
+                    persona_uid = %persona_owned,
+                    error = %e,
+                    "L2 事件提取失败（已达最大重试次数），L3 级联跳过"
+                );
             }
         }
     }
@@ -474,29 +515,61 @@ impl SessionLifecycle {
     ///
     /// 对齐 Python `profile_manager.extract_profile()` + Rust inference 管线。
     ///
+    /// 可观测性:
+    /// - 通过 JobManager 创建 `PersonalityInference` 任务记录，
+    ///   记录开始/完成/failed 时间，便于运维排查"何时对谁做了推断"。
+    /// - Phase A 为纯数值计算（不调 LLM），确定性执行，因此不启用 JobManager 重试；
+    ///   存储写入失败逐条 warn 记录。
+    ///
     /// 说明:
     /// - Phase A: 纯数值统计（预过滤 → 聚类 → 收缩 → 跨分类指标）
-    /// - Phase B: LLM 三步结构化推断
-    /// - Phase C: 漂移检测 + 置信度更新
-    /// - 当前实现以 Phase A（纯数值，不调 LLM）为主，
-    ///   Phase B/C 需要 LLM 调用，在 mock 测试中验证。
+    /// - Phase B: LLM 三步结构化推断（待 LLM 管线接通）
+    /// - Phase C: 漂移检测 + 置信度更新（待 LLM 管线接通）
     async fn run_l3_inference(
         &self,
         storage: &dyn StorageBackend,
         _llm: &dyn LlmProvider,
         persona_uid: &str,
     ) {
+        let persona_owned = persona_uid.to_string();
+
         // 取未吸收事件列表
-        let events = match storage.list_unabsorbed_events(persona_uid).await {
+        let events = match storage.list_unabsorbed_events(&persona_owned).await {
             Ok(e) => e,
             Err(e) => {
-                error!(persona_uid, %e, "L3 推断：查询事件失败");
+                error!(persona_uid = %persona_owned, %e, "L3 推断：查询事件失败");
                 return;
             }
         };
 
         if events.is_empty() {
+            debug!(persona_uid = %persona_owned, "L3 推断：无未吸收事件，跳过");
             return;
+        }
+
+        // ---- 创建 JobManager 任务记录（可观测性） ----
+        let job_manager = JobManager::with_defaults(storage);
+        let payload = serde_json::json!({
+            "persona_uid": &persona_owned,
+            "event_count": events.len(),
+            "phase": "A"
+        })
+        .to_string();
+
+        let job_id = match job_manager
+            .create(JobType::PersonalityInference, Some(&payload))
+            .await
+        {
+            Ok(id) => id,
+            Err(e) => {
+                error!(persona_uid = %persona_owned, %e, "创建 L3 推断任务记录失败，继续执行");
+                // 任务记录创建失败不阻塞推断流程
+                0 // 哨兵值：表示无有效 job_id
+            }
+        };
+
+        if job_id > 0 {
+            let _ = job_manager.mark_running(job_id).await;
         }
 
         // ---- Phase A: 统计特征提取（纯数值，不调 LLM） ----
@@ -507,12 +580,15 @@ impl SessionLifecycle {
         let stats_summary = run_phase_a_stats(&events, &stats_config);
 
         info!(
-            persona_uid,
+            persona_uid = %persona_owned,
+            event_count = events.len(),
             category_count = stats_summary.categories.len(),
-            "Phase A 统计完成"
+            job_id,
+            "L3 Phase A 统计完成"
         );
 
         // 将统计结果持久化到 cluster_snapshots 表
+        let mut snapshot_count = 0usize;
         for cat_stats in &stats_summary.categories {
             let snapshot_json = serde_json::json!({
                 "category": cat_stats.category,
@@ -525,7 +601,7 @@ impl SessionLifecycle {
 
             let snapshot = ramaria_core::types::ClusterSnapshot {
                 id: 0, // 由 DB 自动分配
-                persona_uid: persona_uid.to_string(),
+                persona_uid: persona_owned.clone(),
                 category: cat_stats.category.clone(),
                 cluster_label: format!("cluster_{}", cat_stats.category),
                 samples: Some(snapshot_json.to_string()),
@@ -534,13 +610,31 @@ impl SessionLifecycle {
                 created_at: now_ms(),
             };
 
-            if let Err(e) = storage.save_cluster_snapshot(&snapshot).await {
-                warn!(persona_uid, category = %cat_stats.category, %e, "写入聚类快照失败");
+            match storage.save_cluster_snapshot(&snapshot).await {
+                Ok(_) => snapshot_count += 1,
+                Err(e) => {
+                    warn!(
+                        persona_uid = %persona_owned,
+                        category = %cat_stats.category,
+                        error = %e,
+                        "写入聚类快照失败（单条跳过，不影响其他分类）"
+                    );
+                }
             }
         }
 
-        debug!(
-            persona_uid,
+        // 标记任务完成
+        if job_id > 0
+            && let Err(e) = job_manager.mark_completed(job_id).await
+        {
+            warn!(job_id, %e, "标记 L3 推断任务完成失败（已执行，仅状态未更新）");
+        }
+
+        info!(
+            persona_uid = %persona_owned,
+            job_id,
+            snapshot_count,
+            total_categories = stats_summary.categories.len(),
             "L3 Phase A 推断流程完成（Phase B/C 待 LLM 管线接通）"
         );
     }

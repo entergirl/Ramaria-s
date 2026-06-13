@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# 启用 ONNX 嵌入模型支持（需要 ONNX Runtime 共享库）
+embedding-onnx = ["dep:ort", "dep:tokenizers", "dep:ndarray"]
+
 [dependencies]
 ramaria-core = { path = "../ramaria-core" }
 reqwest.workspace = true
@@ -16,6 +21,11 @@ futures.workspace = true
 async-trait.workspace = true
 uuid.workspace = true
 bytes = "1"
+
+# Embedding 支持（可选 feature）
+ort = { workspace = true, optional = true }
+tokenizers = { workspace = true, optional = true }
+ndarray = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true

@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/tests/app_integration.rs - App 编排集成测试
+﻿//! rust/crates/ramaria-app/tests/app_integration.rs - App 编排集成测试
 //!
 //! 测试覆盖:
 //! - App 构造与初始状态
@@ -37,7 +37,7 @@ fn make_failing_app(error_msg: &str) -> (Arc<MockStorage>, Arc<mock_backend::Moc
     let llm = Arc::new(MockLlm::failing(error_msg));
     let config = RamariaConfig::default();
     let keychain = Arc::new(Keychain::new());
-    let app = App::new(
+    let app = App::new_without_embedding(
         Arc::clone(&storage) as Arc<dyn ramaria_core::traits::StorageBackend>,
         Arc::clone(&llm) as Arc<dyn ramaria_core::traits::LlmProvider>,
         config,
@@ -55,7 +55,7 @@ fn make_app() -> (Arc<MockStorage>, Arc<MockLlm>, App) {
     let llm = Arc::new(MockLlm::new("好的，我记住了。"));
     let config = RamariaConfig::default();
     let keychain = Arc::new(Keychain::new());
-    let app = App::new(
+    let app = App::new_without_embedding(
         Arc::clone(&storage) as Arc<dyn ramaria_core::traits::StorageBackend>,
         Arc::clone(&llm) as Arc<dyn ramaria_core::traits::LlmProvider>,
         config,
@@ -75,7 +75,7 @@ async fn app_starts_in_needs_setup() {
 }
 
 #[tokio::test]
-async fn app_state_transitions_to_ready() {
+async fn app_state_transitions_to_degraded_without_embedding() {
     let (storage, _, app) = make_app();
 
     // 保存后端配置
@@ -85,10 +85,10 @@ async fn app_state_transitions_to_ready() {
     // 设置索引版本
     storage.set_index_version(1).await.unwrap();
 
-    // 刷新状态
+    // 刷新状态（无嵌入模型 → Degraded，但对话仍可用）
     let state = app.refresh_setup_state().await.unwrap();
-    assert_eq!(state, AppState::Ready);
-    assert_eq!(app.current_state(), AppState::Ready);
+    assert_eq!(state, AppState::Degraded);
+    assert_eq!(app.current_state(), AppState::Degraded);
 }
 
 // =========================================================
@@ -98,7 +98,7 @@ async fn app_state_transitions_to_ready() {
 #[tokio::test]
 async fn setup_status_needs_backend() {
     let storage = MockStorage::new();
-    let status = check_setup_status(&storage).await.unwrap();
+    let status = check_setup_status(&storage, false).await.unwrap();
     assert!(!status.backend_configured);
     assert!(!status.is_complete());
     assert!(!status.missing_items().is_empty());
@@ -111,7 +111,7 @@ async fn setup_status_complete_after_config() {
     storage.save_backend_config(&config).await.unwrap();
     storage.set_index_version(1).await.unwrap();
 
-    let status = check_setup_status(&storage).await.unwrap();
+    let status = check_setup_status(&storage, true).await.unwrap();
     assert!(status.is_complete());
     assert_eq!(determine_state(&status), AppState::Ready);
 }
@@ -125,7 +125,8 @@ async fn run_setup_full_flow() {
     storage.set_index_version(1).await.unwrap();
 
     let state = run_setup(&storage, &config).await.unwrap();
-    assert_eq!(state, AppState::Ready);
+    // run_setup 内部传入 embedding_available=false，返回 Degraded（v1.1 语义）
+    assert_eq!(state, AppState::Degraded);
 }
 
 // =========================================================
@@ -206,9 +207,9 @@ async fn send_message_flow_success() {
         .unwrap();
     storage.set_index_version(1).await.unwrap();
     app.refresh_setup_state().await.unwrap();
-    assert_eq!(app.current_state(), AppState::Ready);
+    assert_eq!(app.current_state(), AppState::Degraded);
 
-    // 发送消息
+    // 发送消息（Degraded 状态下对话仍可用，仅向量通道降级）
     let mut stream = app.send_message("你好", None, None).await.unwrap();
 
     // 收集事件并验证
@@ -240,6 +241,7 @@ async fn send_message_preserves_session() {
         .unwrap();
     storage.set_index_version(1).await.unwrap();
     app.refresh_setup_state().await.unwrap();
+    // Degraded 状态下 session 操作仍可用
 
     // 创建已知会话
     let session = storage.create_session().await.unwrap();
@@ -275,7 +277,7 @@ async fn send_message_creates_new_session() {
     storage.set_index_version(1).await.unwrap();
     app.refresh_setup_state().await.unwrap();
 
-    // 发送消息（不指定会话，应自动创建）
+    // 发送消息（Degraded 状态下仍自动创建会话）
     let mut stream = app.send_message("测试", None, None).await.unwrap();
     while stream.next().await.is_some() {}
 
@@ -351,7 +353,7 @@ async fn send_message_failing_llm_produces_error_no_done() {
         .unwrap();
     storage.set_index_version(1).await.unwrap();
     app.refresh_setup_state().await.unwrap();
-    assert_eq!(app.current_state(), AppState::Ready);
+    assert_eq!(app.current_state(), AppState::Degraded);
 
     // 发送消息（LLM 将失败）
     let mut stream = app.send_message("测试消息", None, None).await.unwrap();

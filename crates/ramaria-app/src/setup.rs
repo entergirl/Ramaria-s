@@ -22,7 +22,8 @@ use ramaria_core::types::{AppState, BackendConfig};
 ///
 /// 职责:
 /// - 供 CLI/Desktop 展示设置向导步骤。
-/// - `is_complete` 为 true 时表示可进入 Ready 状态。
+/// - `is_complete` 为 true 时表示核心配置完成（可对话）。
+/// - 嵌入模型缺失不阻塞核心功能（v1.1: 降级为 Degraded）。
 #[derive(Debug, Clone)]
 pub struct SetupStatus {
     /// 后端配置是否已保存
@@ -31,10 +32,12 @@ pub struct SetupStatus {
     pub model_selected: bool,
     /// 索引是否需要构建
     pub needs_indexing: bool,
+    /// 嵌入模型是否已配置且可用
+    pub embedding_available: bool,
 }
 
 impl SetupStatus {
-    /// 所有必需项是否已就绪。
+    /// 核心配置是否就绪（嵌入模型缺失不影响此结果）。
     pub fn is_complete(&self) -> bool {
         self.backend_configured && self.model_selected && !self.needs_indexing
     }
@@ -51,6 +54,9 @@ impl SetupStatus {
         if self.needs_indexing {
             items.push("记忆索引待构建");
         }
+        if !self.embedding_available {
+            items.push("嵌入模型未配置（向量检索不可用，BM25+图谱仍可用）");
+        }
         items
     }
 }
@@ -63,6 +69,7 @@ impl SetupStatus {
 ///
 /// 参数:
 /// - `storage`: 存储后端。
+/// - `embedding_available`: 嵌入模型是否可用（由调用方传入）。
 ///
 /// 返回:
 /// - `SetupStatus` 描述当前配置完整度。
@@ -71,8 +78,10 @@ impl SetupStatus {
 /// 1. 后端配置：`storage.get_backend_config()` 是否有记录
 /// 2. 模型选择：线上 provider 检查 model_id 非空；本地 provider（LM Studio）自动通过
 /// 3. 索引状态：`storage.get_index_version()` 是否为 0（0 表示未构建）
+/// 4. 嵌入模型：由调用方检查后传入（是否已配置且 ONNX 模型文件存在）
 pub async fn check_setup_status(
     storage: &(dyn StorageBackend + Send + Sync),
+    embedding_available: bool,
 ) -> RamariaResult<SetupStatus> {
     let backend_config = storage.get_backend_config().await?;
 
@@ -98,6 +107,7 @@ pub async fn check_setup_status(
         model_selected,
         index_version,
         needs_indexing,
+        embedding_available,
         "设置状态检查完成"
     );
 
@@ -105,6 +115,7 @@ pub async fn check_setup_status(
         backend_configured,
         model_selected,
         needs_indexing,
+        embedding_available,
     })
 }
 
@@ -116,12 +127,16 @@ pub async fn check_setup_status(
 /// 返回:
 /// - `NeedsSetup`: 后端配置或模型选择未完成。
 /// - `Indexing`: 索引待构建。
-/// - `Ready`: 全部就绪。
+/// - `Ready`: 核心配置就绪且嵌入模型可用。
+/// - `Degraded`: 核心配置就绪但嵌入模型缺失（v1.1 降级模式）。
 pub fn determine_state(status: &SetupStatus) -> AppState {
     if !status.backend_configured || !status.model_selected {
         AppState::NeedsSetup
     } else if status.needs_indexing {
         AppState::Indexing
+    } else if !status.embedding_available {
+        // v1.1: 嵌入模型缺失 → Degraded（非阻塞，BM25+图谱可用）
+        AppState::Degraded
     } else {
         AppState::Ready
     }
@@ -174,18 +189,19 @@ pub async fn mark_index_ready(
     Ok(())
 }
 
-/// 完整设置流程：保存后端配置 → 标记索引。
+/// 完整设置流程：保存后端配置 → 检查状态。
 ///
 /// 参数:
 /// - `storage`: 存储后端。
 /// - `config`: 用户选择的后端配置。
 ///
 /// 返回:
-/// - `Ok(AppState::Ready)`: 设置完成。
+/// - `Ok(AppState)`: 设置后的状态（可能为 Indexing/Ready/Degraded）。
 ///
 /// 说明:
-/// - 调用后状态从 `NeedsSetup` → `Ready`。
-/// - 实际索引构建由 memory 层的 `IndexRebuilder` 另行执行。
+/// - 调用后状态从 `NeedsSetup` 迁移。
+/// - 实际索引构建和嵌入模型加载由 App 层的其他方法执行。
+/// - 嵌入模型缺失时返回 Degraded 而非阻塞。
 pub async fn run_setup(
     storage: &(dyn StorageBackend + Send + Sync),
     config: &BackendConfig,
@@ -193,8 +209,8 @@ pub async fn run_setup(
     // Step 1: 保存后端配置
     save_backend_config(storage, config).await?;
 
-    // Step 2: 检查索引状态
-    let status = check_setup_status(storage).await?;
+    // Step 2: 检查索引状态（嵌入模型状态由上层传入，此处默认 false）
+    let status = check_setup_status(storage, false).await?;
 
     if status.needs_indexing {
         tracing::info!("索引待构建，建议运行 rebuild_index");
@@ -221,6 +237,7 @@ mod tests {
             backend_configured: true,
             model_selected: true,
             needs_indexing: false,
+            embedding_available: true,
         };
         assert!(status.is_complete());
         assert!(status.missing_items().is_empty());
@@ -232,9 +249,10 @@ mod tests {
             backend_configured: false,
             model_selected: false,
             needs_indexing: false,
+            embedding_available: false,
         };
         assert!(!status.is_complete());
-        assert_eq!(status.missing_items().len(), 2);
+        assert_eq!(status.missing_items().len(), 3); // backend + model + embedding
     }
 
     #[test]
@@ -243,10 +261,24 @@ mod tests {
             backend_configured: true,
             model_selected: true,
             needs_indexing: true,
+            embedding_available: true,
         };
         assert!(!status.is_complete());
         assert_eq!(status.missing_items().len(), 1);
         assert!(status.missing_items()[0].contains("索引"));
+    }
+
+    #[test]
+    fn setup_status_missing_embedding() {
+        let status = SetupStatus {
+            backend_configured: true,
+            model_selected: true,
+            needs_indexing: false,
+            embedding_available: false,
+        };
+        assert!(status.is_complete()); // 核心功能就绪
+        assert_eq!(status.missing_items().len(), 1);
+        assert!(status.missing_items()[0].contains("嵌入"));
     }
 
     #[test]
@@ -255,6 +287,7 @@ mod tests {
             backend_configured: false,
             model_selected: false,
             needs_indexing: false,
+            embedding_available: false,
         };
         assert_eq!(determine_state(&status), AppState::NeedsSetup);
     }
@@ -265,6 +298,7 @@ mod tests {
             backend_configured: true,
             model_selected: true,
             needs_indexing: true,
+            embedding_available: true,
         };
         assert_eq!(determine_state(&status), AppState::Indexing);
     }
@@ -275,7 +309,20 @@ mod tests {
             backend_configured: true,
             model_selected: true,
             needs_indexing: false,
+            embedding_available: true,
         };
         assert_eq!(determine_state(&status), AppState::Ready);
+    }
+
+    #[test]
+    fn determine_state_degraded_missing_embedding() {
+        let status = SetupStatus {
+            backend_configured: true,
+            model_selected: true,
+            needs_indexing: false,
+            embedding_available: false,
+        };
+        // 嵌入模型缺失 → Degraded（非阻塞）
+        assert_eq!(determine_state(&status), AppState::Degraded);
     }
 }
