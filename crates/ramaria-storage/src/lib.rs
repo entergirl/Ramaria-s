@@ -118,8 +118,9 @@ impl StorageBackend for SqliteStorage {
         name: &str,
         avatar: Option<&str>,
         config: Option<&str>,
+        description: Option<&str>,
     ) -> RamariaResult<()> {
-        repo::personas::update(&self.pool, uid, name, avatar, config).await
+        repo::personas::update(&self.pool, uid, name, avatar, config, description).await
     }
 
     // =========================================================
@@ -861,7 +862,7 @@ mod tests {
 
         // 更新名称
         storage
-            .update_persona(&persona_uid, "新名称", None, None)
+            .update_persona(&persona_uid, "新名称", None, None, None)
             .await
             .unwrap();
 
@@ -884,6 +885,7 @@ mod tests {
                 "测试角色", // name 不变
                 Some("avatar_url_here"),
                 Some(r#"{"description":"更新后的描述"}"#),
+                None, // Phase 6: description 保持旧值
             )
             .await
             .unwrap();
@@ -905,7 +907,7 @@ mod tests {
 
         // 先设置头像
         storage
-            .update_persona(&persona_uid, "测试角色", Some("old_avatar"), None)
+            .update_persona(&persona_uid, "测试角色", Some("old_avatar"), None, None)
             .await
             .unwrap();
 
@@ -916,6 +918,7 @@ mod tests {
                 "测试角色",
                 None, // avatar 传 None 不更新
                 Some(r#"{"key":"value"}"#),
+                None, // Phase 6: description 保持旧值
             )
             .await
             .unwrap();

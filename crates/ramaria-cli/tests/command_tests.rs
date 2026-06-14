@@ -744,7 +744,7 @@ async fn persona_storage_update_works() {
 
     // 通过 storage trait 更新
     app.storage()
-        .update_persona("rama-0001", "新名称", None, Some("new config"))
+        .update_persona("rama-0001", "新名称", None, Some("new config"), None)
         .await
         .expect("update_persona 应成功");
 
@@ -766,7 +766,7 @@ async fn persona_storage_update_nonexistent_fails() {
 
     let result = app
         .storage()
-        .update_persona("nonexistent-uid", "name", None, None)
+        .update_persona("nonexistent-uid", "name", None, None, None)
         .await;
     assert!(result.is_err());
 }

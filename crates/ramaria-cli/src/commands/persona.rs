@@ -283,7 +283,7 @@ async fn reload_single_file(app: &Arc<ramaria_app::App>, path: &Path) -> anyhow:
     if existing.is_some() {
         // 更新已有 persona 的 name 和 config
         app.storage()
-            .update_persona(&uid, &name, None, Some(&content))
+            .update_persona(&uid, &name, None, Some(&content), None)
             .await
             .with_context(|| format!("更新 persona 失败: {uid}"))?;
         tracing::info!(%uid, %name, "reload: 已更新 persona");

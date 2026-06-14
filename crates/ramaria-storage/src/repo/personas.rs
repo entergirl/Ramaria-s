@@ -35,6 +35,7 @@ struct PersonaRow {
     ref_id: Option<String>,
     avatar: Option<String>,
     config: Option<String>,
+    description: Option<String>, // Phase 6 新增
     active: i64,
     created_at: i64,
     updated_at: i64,
@@ -52,6 +53,7 @@ impl PersonaRow {
             ref_id: self.ref_id,
             avatar: self.avatar,
             config: self.config,
+            description: self.description,
             active: self.active != 0,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -62,8 +64,8 @@ impl PersonaRow {
 pub async fn create(pool: &SqlitePool, p: &Persona) -> RamariaResult<i64> {
     let kind_str = p.kind.as_str();
     sqlx::query_scalar::<_, i64>(
-        "INSERT INTO personas (uid, name, kind, seq, source, ref_id, avatar, config, active, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+        "INSERT INTO personas (uid, name, kind, seq, source, ref_id, avatar, config, description, active, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
     )
     .bind(&p.uid)
     .bind(&p.name)
@@ -73,6 +75,7 @@ pub async fn create(pool: &SqlitePool, p: &Persona) -> RamariaResult<i64> {
     .bind(&p.ref_id)
     .bind(&p.avatar)
     .bind(&p.config)
+    .bind(&p.description)
     .bind(p.active as i64)
     .bind(p.created_at)
     .bind(p.updated_at)
@@ -83,7 +86,7 @@ pub async fn create(pool: &SqlitePool, p: &Persona) -> RamariaResult<i64> {
 
 pub async fn get_by_uid(pool: &SqlitePool, uid: &str) -> RamariaResult<Option<Persona>> {
     let row = sqlx::query_as::<_, PersonaRow>(
-        "SELECT id, uid, name, kind, seq, source, ref_id, avatar, config, active, created_at, updated_at
+        "SELECT id, uid, name, kind, seq, source, ref_id, avatar, config, description, active, created_at, updated_at
          FROM personas WHERE uid = ?",
     )
     .bind(uid)
@@ -95,7 +98,7 @@ pub async fn get_by_uid(pool: &SqlitePool, uid: &str) -> RamariaResult<Option<Pe
 
 pub async fn list_all(pool: &SqlitePool) -> RamariaResult<Vec<Persona>> {
     let rows = sqlx::query_as::<_, PersonaRow>(
-        "SELECT id, uid, name, kind, seq, source, ref_id, avatar, config, active, created_at, updated_at
+        "SELECT id, uid, name, kind, seq, source, ref_id, avatar, config, description, active, created_at, updated_at
          FROM personas WHERE active = 1 ORDER BY kind, seq",
     )
     .fetch_all(pool)
@@ -104,12 +107,13 @@ pub async fn list_all(pool: &SqlitePool) -> RamariaResult<Vec<Persona>> {
     Ok(rows.into_iter().map(|r| r.into_persona()).collect())
 }
 
-/// 更新 persona 的可变字段（name / avatar / config）。
+/// 更新 persona 的可变字段（name / avatar / config / description）。
 ///
 /// 部分更新语义:
 /// - `name`: 必填，始终更新。
 /// - `avatar`: `Some(val)` 更新为 val，`None` **保持旧值不变**（不设 NULL）。
 /// - `config`: `Some(val)` 更新为 val，`None` **保持旧值不变**。
+/// - `description`: `Some(val)` 更新为 val，`None` **保持旧值不变**。
 /// - `uid` 不可变更，`updated_at` 自动刷新。
 ///
 /// 使用 `sqlx::QueryBuilder` 动态构建 SET 子句，避免将 `None` 绑定为 SQL NULL。
@@ -119,6 +123,7 @@ pub async fn update(
     name: &str,
     avatar: Option<&str>,
     config: Option<&str>,
+    description: Option<&str>,
 ) -> RamariaResult<()> {
     let now = ramaria_core::types::now_ms();
 
@@ -132,6 +137,10 @@ pub async fn update(
     if let Some(cfg) = config {
         builder.push(", config = ");
         builder.push_bind(cfg);
+    }
+    if let Some(desc) = description {
+        builder.push(", description = ");
+        builder.push_bind(desc);
     }
 
     builder.push(", updated_at = ");

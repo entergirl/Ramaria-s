@@ -35,6 +35,9 @@
     <!-- v1.1：导入视图样式 -->
     <link rel="stylesheet" href="css/views/import.css" />
 
+    <!-- v1.1 Phase 6：人格管理视图样式 -->
+    <link rel="stylesheet" href="css/views/persona.css" />
+
     <!-- Batch 6：动效系统（集中所有 keyframes，必须在视图 CSS 之后加载） -->
     <link rel="stylesheet" href="css/animations.css" />
 </head>
@@ -86,6 +89,14 @@
                                 role="menuitem">
                             <span class="sidebar-nav-icon" aria-hidden="true">🧠</span>
                             <span>记忆</span>
+                        </button>
+                    </li>
+                    <li role="none">
+                        <button class="sidebar-nav-link"
+                                data-view="persona"
+                                role="menuitem">
+                            <span class="sidebar-nav-icon" aria-hidden="true">👥</span>
+                            <span>人格</span>
                         </button>
                     </li>
                     <li role="none">
@@ -157,6 +168,9 @@
 
                 <!-- 设置视图（由 js/views/settings.js 动态渲染） -->
                 <div class="view" id="view-settings" data-view="settings"></div>
+
+                <!-- 人格管理视图（v1.1 Phase 6 新增，由 js/views/persona.js 动态渲染） -->
+                <div class="view" id="view-persona" data-view="persona"></div>
 
                 <!-- 导入视图（v1.1 新增，由 js/views/import.js 动态渲染） -->
                 <div class="view" id="view-import" data-view="import"></div>
@@ -239,6 +253,9 @@
 
     <!-- v1.1：导入视图模块 -->
     <script src="js/views/import.js"></script>
+
+    <!-- v1.1 Phase 6：人格管理视图模块 -->
+    <script src="js/views/persona.js"></script>
 
 </body>
 </html>

@@ -494,7 +494,50 @@ var RamariaApi = (function () {
     }
 
     // =========================================================
-    // 8. 数据导入 (import) — v1.1 新增
+    // 8. 人格管理 (persona) — Phase 6 新增
+    // =========================================================
+
+    /**
+     * 列出所有已注册人格的完整信息（含全字段）。
+     *
+     * 返回:
+     * - [{ uid, name, kind, source, ref_id, avatar, config, description, is_active, created_at, updated_at }]
+     */
+    async function listPersonasFull() {
+        return await _invoke('list_personas_full', {}, '查询人格完整列表');
+    }
+
+    /**
+     * 更新指定人格的基本信息。
+     *
+     * 参数:
+     * - `uid`: 人格业务标识
+     * - `request`: { name?, avatar?, description? } — 所有字段可选，传入 null/undefined 表示不更新
+     *
+     * 返回:
+     * - 更新后的 PersonaFullView
+     */
+    async function updatePersonaInfo(uid, request) {
+        _require(uid, '人格 UID');
+        return await _invoke('update_persona_info', { uid: uid, request: request || {} }, '更新人格信息');
+    }
+
+    /**
+     * 刷新指定人格的记忆管线（L2 事件提取 → L3 性格推断）。
+     *
+     * 参数:
+     * - `uid`: 目标人格业务标识
+     *
+     * 返回:
+     * - "ok": 管线已触发（后台异步执行）
+     */
+    async function refreshPersona(uid) {
+        _require(uid, '人格 UID');
+        return await _invoke('refresh_persona', { uid: uid }, '刷新人格管线');
+    }
+
+    // =========================================================
+    // 9. 数据导入 (import) — v1.1 新增
     // =========================================================
 
     /**
@@ -608,6 +651,11 @@ var RamariaApi = (function () {
             detectFormat: detectQQFormat,
             analyzeFile: analyzeQQFile,
             importQQ: importQQChat,
+        },
+        persona: {
+            listFull: listPersonasFull,
+            updateInfo: updatePersonaInfo,
+            refresh: refreshPersona,
         },
     };
 })();

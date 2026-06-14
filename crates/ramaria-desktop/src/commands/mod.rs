@@ -11,6 +11,7 @@ pub mod export;
 pub mod import_cmd;
 pub mod index_cmd;
 pub mod memory;
+pub mod persona;
 pub mod session;
 pub mod setup;
 
@@ -63,5 +64,9 @@ pub fn command_names() -> Vec<&'static str> {
         // import (v1.1)
         "import_qq_chat",
         "detect_qq_format",
+        // persona (v1.1 Phase 6)
+        "list_personas_full",
+        "update_persona_info",
+        "refresh_persona",
     ]
 }

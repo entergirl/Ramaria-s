@@ -211,6 +211,7 @@ impl StorageBackend for MockStorage {
         _: &str,
         _: Option<&str>,
         _: Option<&str>,
+        _: Option<&str>,
     ) -> RamariaResult<()> {
         unimplemented!()
     }

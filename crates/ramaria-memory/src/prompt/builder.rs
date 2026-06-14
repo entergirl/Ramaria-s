@@ -392,6 +392,7 @@ mod tests {
                 r#"{"description":"一个喜欢编程的大学生","speaking_style":"热情活泼，喜欢用emoji"}"#
                     .into(),
             ),
+            description: None,  // Phase 6 新增
             created_at: 1000,
             updated_at: 1000,
         }

@@ -45,6 +45,7 @@ var RamariaStore = (function () {
      * - `backendConfig`: 后端配置 { provider, model_id, base_url, supports_streaming, ... }
      * - `settings`: 全局设置 [{ key, value }]
      * - `personas`: 已注册人格列表 [{ uid, name, kind, is_active, created_at }]
+     * - `defaultPersonaUid`: 默认对话人格 UID（Phase 6 新增）
      */
     var _state = {
         appState: 'needs_setup',
@@ -57,6 +58,7 @@ var RamariaStore = (function () {
         backendConfig: null,
         settings: [],
         personas: [],
+        defaultPersonaUid: null,
     };
 
     // =========================================================
@@ -310,6 +312,7 @@ var RamariaStore = (function () {
             backendConfig: null,
             settings: [],
             personas: [],
+            defaultPersonaUid: null,
         };
         _subscribers = {};
         console.log('[Store] 状态已重置');

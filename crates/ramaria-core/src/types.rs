@@ -736,6 +736,8 @@ pub struct Persona {
     pub avatar: Option<String>,
     /// JSON 个性配置
     pub config: Option<String>,
+    /// 人格简要描述（面向用户的短文本，Phase 6 新增）
+    pub description: Option<String>,
     /// 1=启用，0=停用
     pub active: bool,
     pub created_at: i64,
@@ -757,6 +759,7 @@ impl Persona {
             ref_id: None,
             avatar: None,
             config: None,
+            description: None,
             active: true,
             created_at: now,
             updated_at: now,

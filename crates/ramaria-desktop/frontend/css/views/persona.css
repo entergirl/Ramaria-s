@@ -1,0 +1,370 @@
+/* ============================================================
+   css/views/persona.css — 人格管理视图样式 (Phase 6)
+
+   设计系统:
+   - 品牌色: 粉色系 (--color-primary / --pink-xxx)
+   - 辅助色: 蓝色系 (--color-secondary / --blue-xxx)
+   - 中性灰阶: (--gray-xxx)
+   - 圆角: --radius-md / --radius-lg
+   - 阴影: --shadow-sm / --shadow-md
+   - 间距: 8px 基准 (--space-1 ~ --space-24)
+   ============================================================ */
+
+/* ════════════════════════════════════════════════════════════
+   列表页
+   ════════════════════════════════════════════════════════════ */
+
+.persona-list-page {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+    padding: var(--space-4) var(--space-5);
+    height: 100%;
+    overflow-y: auto;
+}
+
+/* ── 工具栏 ── */
+.persona-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-2) 0;
+}
+
+.persona-toolbar-title {
+    font-size: 12px;
+    color: var(--text-tertiary);
+}
+
+/* ── 卡片网格 ── */
+.persona-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: var(--space-4);
+}
+
+/* ── 单张卡片 ── */
+.persona-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-lg);
+    padding: var(--space-4);
+    cursor: pointer;
+    transition:
+        transform 150ms ease,
+        box-shadow 150ms ease,
+        border-color 150ms ease;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+}
+
+.persona-card:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-md);
+    border-color: var(--color-primary);
+}
+
+.persona-card:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+}
+
+/* ── 卡片：骨架屏占位 ── */
+.persona-card--skeleton {
+    cursor: default;
+    pointer-events: none;
+}
+
+.persona-card--skeleton:hover {
+    transform: none;
+    box-shadow: none;
+    border-color: var(--border-default);
+}
+
+/* ── 卡片头部（图标 + 信息） ── */
+.persona-card-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+}
+
+.persona-card-icon {
+    width: 44px;
+    height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 24px;
+    background: var(--bg-subtle);
+    border-radius: var(--radius-md);
+    flex-shrink: 0;
+}
+
+.persona-card-meta {
+    flex: 1;
+    min-width: 0;
+}
+
+.persona-card-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.persona-card-kind {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-top: var(--space-1);
+}
+
+.persona-card-badge-default {
+    font-size: 14px;
+    vertical-align: middle;
+    margin-left: var(--space-1);
+}
+
+/* ── 类型标签 ──
+   使用 width: fit-content 防止 flex 父容器拉伸标签宽度，
+   确保标签底板始终紧贴文字长度。 */
+.persona-tag {
+    display: inline-flex;
+    align-items: center;
+    width: fit-content;
+    padding: 1px 6px;
+    font-size: 11px;
+    font-weight: 500;
+    border-radius: var(--radius-sm);
+    line-height: 1.6;
+}
+
+.persona-tag--user  { background: var(--blue-100);  color: var(--blue-700); }
+.persona-tag--rama  { background: var(--pink-100);  color: var(--pink-700); }
+.persona-tag--char  { background: var(--blue-50);   color: var(--blue-600); }
+.persona-tag--anim  { background: var(--pink-50);   color: var(--pink-600); }
+.persona-tag--oc    { background: var(--gray-100);  color: var(--gray-600); }
+.persona-tag--hist  { background: var(--gray-100);  color: var(--gray-600); }
+
+.persona-card-source {
+    font-size: 12px;
+    color: var(--text-tertiary);
+}
+
+/* ── 卡片正文（描述预览） ── */
+.persona-card-body {
+    flex: 1;
+    min-height: 2.5em;
+}
+
+.persona-card-desc {
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.6;
+    margin: 0;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.persona-card-desc-empty {
+    font-style: italic;
+    color: var(--text-tertiary);
+}
+
+/* ── 卡片底部（时间） ── */
+.persona-card-footer {
+    padding-top: var(--space-2);
+    border-top: 1px solid var(--border-light);
+}
+
+.persona-card-time {
+    font-size: 12px;
+    color: var(--text-tertiary);
+}
+
+/* ════════════════════════════════════════════════════════════
+   详情页
+   ════════════════════════════════════════════════════════════ */
+
+.persona-detail-page {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-5);
+    padding: var(--space-4) var(--space-5);
+    max-width: 640px;
+    height: 100%;
+    overflow-y: auto;
+}
+
+/* ── 表单 ── */
+.persona-detail-form {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+}
+
+/* ── 字段组 ── */
+.persona-field {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+}
+
+.persona-field-label {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.persona-field-required {
+    color: var(--pink-500);
+    font-weight: 400;
+}
+
+.persona-field-input {
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    background: var(--bg-card);
+    color: var(--text-primary);
+    font-size: 14px;
+    font-family: inherit;
+    transition: border-color 150ms ease, box-shadow 150ms ease;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.persona-field-input:focus {
+    outline: none;
+    border-color: var(--color-primary);
+    box-shadow: 0 0 0 2px var(--pink-100);
+}
+
+.persona-field-input::placeholder {
+    color: var(--text-tertiary);
+}
+
+/* textarea 特有样式 */
+textarea.persona-field-input {
+    resize: vertical;
+    min-height: 80px;
+}
+
+.persona-field-counter {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    text-align: right;
+}
+
+/* ── 操作按钮区 ── */
+.persona-detail-actions {
+    display: flex;
+    gap: var(--space-3);
+    padding-top: var(--space-2);
+}
+
+.persona-detail-actions .btn {
+    min-width: 100px;
+}
+
+/* ── 扩展操作 ── */
+.persona-detail-extras {
+    display: flex;
+    gap: var(--space-3);
+    padding-top: var(--space-1);
+}
+
+/* ── 元数据区 ── */
+.persona-detail-meta {
+    padding-top: var(--space-4);
+    border-top: 1px solid var(--border-light);
+}
+
+.persona-meta-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: var(--space-3);
+}
+
+.persona-meta-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.persona-meta-label {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.persona-meta-value {
+    font-size: 13px;
+    color: var(--text-secondary);
+    word-break: break-all;
+}
+
+/* ════════════════════════════════════════════════════════════
+   空状态 & 错误状态
+   ════════════════════════════════════════════════════════════ */
+
+.persona-empty,
+.persona-error {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: var(--space-12) var(--space-4);
+    text-align: center;
+    gap: var(--space-3);
+}
+
+.persona-empty-icon,
+.persona-error-icon {
+    font-size: 48px;
+    margin-bottom: var(--space-2);
+}
+
+.persona-empty-title,
+.persona-error-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0;
+}
+
+.persona-empty-desc,
+.persona-error-desc {
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin: 0;
+}
+
+.persona-error-retry {
+    margin-top: var(--space-2);
+}
+
+/* ════════════════════════════════════════════════════════════
+   响应式
+   ════════════════════════════════════════════════════════════ */
+
+@media (max-width: 640px) {
+    .persona-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .persona-detail-page {
+        padding: var(--space-3) var(--space-4);
+    }
+
+    .persona-meta-grid {
+        grid-template-columns: 1fr;
+    }
+}

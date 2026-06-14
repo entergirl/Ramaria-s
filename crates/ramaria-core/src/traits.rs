@@ -314,14 +314,16 @@ pub trait StorageBackend: Send + Sync {
     async fn create_persona(&self, persona: &Persona) -> RamariaResult<i64>;
     async fn get_persona_by_uid(&self, uid: &str) -> RamariaResult<Option<Persona>>;
     async fn list_personas(&self) -> RamariaResult<Vec<Persona>>;
-    /// 更新 persona 的可变字段（name/avatar/config）。
+    /// 更新 persona 的可变字段（name/avatar/config/description）。
     /// uid 为业务标识，不可变更。
+    /// 所有可选字段：`None` 表示保持旧值不变，不设为 NULL。
     async fn update_persona(
         &self,
         uid: &str,
         name: &str,
         avatar: Option<&str>,
         config: Option<&str>,
+        description: Option<&str>,
     ) -> RamariaResult<()>;
 
     // -- Memory Events (L2 事件层, id: i64) --

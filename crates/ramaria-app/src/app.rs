@@ -458,9 +458,7 @@ impl App {
         tracing::info!("trigger_l2_check: 开始遍历 persona...");
 
         // Phase 1: L1 → L2（仅检查未吸收 L1）
-        self.lifecycle
-            .check_l2_trigger(storage, llm_ref)
-            .await;
+        self.lifecycle.check_l2_trigger(storage, llm_ref).await;
 
         // Phase 2: L2 → L3（独立检查未吸收事件，即使 L1 已全部吸收）
         let personas = match storage.list_personas().await {

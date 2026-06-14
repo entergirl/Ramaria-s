@@ -310,6 +310,10 @@ pub fn run() {
             commands::import_cmd::analyze_qq_chat,
             commands::import_cmd::import_qq_chat,
             commands::import_cmd::detect_qq_format,
+            // ---- Persona (v1.1 Phase 6) ----
+            commands::persona::list_personas_full,
+            commands::persona::update_persona_info,
+            commands::persona::refresh_persona,
             // ---- System ----
             tray::confirm_close_action,
         ])

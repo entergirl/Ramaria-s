@@ -231,6 +231,7 @@ impl StorageBackend for MockStorage {
         _name: &str,
         _avatar: Option<&str>,
         _config: Option<&str>,
+        _description: Option<&str>,
     ) -> RamariaResult<()> {
         Ok(())
     }

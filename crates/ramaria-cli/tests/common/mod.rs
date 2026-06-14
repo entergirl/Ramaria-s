@@ -297,6 +297,7 @@ impl StorageBackend for MockStorage {
         name: &str,
         avatar: Option<&str>,
         config: Option<&str>,
+        _description: Option<&str>,
     ) -> RamariaResult<()> {
         let mut personas = self.personas.lock().unwrap();
         if let Some(p) = personas.get_mut(uid) {
