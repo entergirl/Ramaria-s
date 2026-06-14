@@ -21,7 +21,7 @@ pub struct SessionSummary {
     pub id: String,
     pub started_at: i64,
     pub ended_at: Option<i64>,
-    /// 消息数量（当前实现为 0，后续可通过 JOIN 优化）
+    /// 消息数量（通过 `SELECT COUNT(*)` 实时查询）
     pub message_count: u32,
 }
 
@@ -66,15 +66,16 @@ pub async fn list_sessions(state: State<'_, DesktopState>) -> Result<Vec<Session
     let mut sorted = sessions;
     sorted.sort_by_key(|b| std::cmp::Reverse(b.started_at));
 
-    let summaries: Vec<SessionSummary> = sorted
-        .into_iter()
-        .map(|s| SessionSummary {
+    let mut summaries = Vec::with_capacity(sorted.len());
+    for s in sorted {
+        let message_count = state.app.storage().count_messages(s.id).await.unwrap_or(0);
+        summaries.push(SessionSummary {
             id: s.id.to_string(),
             started_at: s.started_at,
             ended_at: s.ended_at,
-            message_count: 0, // 后续可通过 JOIN 优化
-        })
-        .collect();
+            message_count,
+        });
+    }
 
     tracing::debug!(count = summaries.len(), "list_sessions 完成");
     Ok(summaries)

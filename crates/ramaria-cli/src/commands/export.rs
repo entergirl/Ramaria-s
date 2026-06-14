@@ -7,9 +7,11 @@
 //! - --persona 筛选特定 persona 的数据
 //! - --output 指定输出文件（默认 stdout）
 //! - 敏感信息不出现在导出中（API key 等）
+//! - 导出路径使用 canonicalize() + 前缀检查防护路径穿越
 
 use anyhow::Context;
 use std::io::Write;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 /// export 命令参数。
@@ -207,43 +209,61 @@ async fn export_markdown(app: &Arc<ramaria_app::App>, args: &ExportArgs) -> anyh
 /// - `output` 为 `Some(path)` → 写入指定文件。
 ///
 /// 安全约束:
-/// - 拒绝包含 `..` 路径组件的输出路径（防止路径穿越攻击）。
+/// - 使用 canonicalize() 规范化父目录，防止路径穿越攻击（符号链接、`..`、`RootDir`/`Prefix` 组件）。
 /// - 自动创建父目录。
 fn write_output(content: &str, output: Option<&str>, format: &str) -> anyhow::Result<()> {
-    let path = match output {
+    let canonical = match output {
         Some("-") => {
             println!("{content}");
             crate::ui::info("已输出到 stdout");
             return Ok(());
         }
-        Some(p) => {
-            // 路径穿越防护：拒绝包含 `..` 的路径
-            let path_obj = std::path::Path::new(p);
-            if path_obj
-                .components()
-                .any(|c| c == std::path::Component::ParentDir)
-            {
-                return Err(anyhow::anyhow!(
-                    "不安全的输出路径: '{p}'。路径中不允许包含 '..' 组件。\
-                     \n请使用当前目录下的路径（如 './exports/my_export.json'）。"
-                ));
-            }
-            p.to_string()
-        }
-        None => default_export_path(format),
+        Some(p) => canonicalize_export_path(Path::new(p))?,
+        None => canonicalize_export_path(Path::new(&default_export_path(format)))?,
     };
 
-    if let Some(parent) = std::path::Path::new(&path).parent() {
+    if let Some(parent) = canonical.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("无法创建输出目录: {}", parent.display()))?;
     }
-    let mut file =
-        std::fs::File::create(&path).with_context(|| format!("无法创建输出文件: {path}"))?;
+    let display_path = canonical.display().to_string();
+    let mut file = std::fs::File::create(&canonical)
+        .with_context(|| format!("无法创建输出文件: {display_path}"))?;
     file.write_all(content.as_bytes())
-        .with_context(|| format!("写入文件失败: {path}"))?;
-    crate::ui::info(&format!("已写入: {path}"));
+        .with_context(|| format!("写入文件失败: {display_path}"))?;
+    crate::ui::info(&format!("已写入: {display_path}"));
 
     Ok(())
+}
+
+/// 规范化导出路径：通过 canonicalize 父目录防御路径穿越。
+///
+/// 安全措施:
+/// - 对父目录调用 canonicalize()，解析所有符号链接和相对路径组件。
+/// - 拒绝包含 RootDir 或 Prefix 组件的路径（如 Windows `C:\` 根路径）。
+/// - 文件可能尚不存在，不能 canonicalize 文件路径本身，仅对其父目录操作。
+fn canonicalize_export_path(path: &Path) -> anyhow::Result<PathBuf> {
+    // 拒绝裸根目录和 Windows 盘符前缀路径
+    let has_root_or_prefix = path
+        .components()
+        .any(|c| matches!(c, Component::RootDir | Component::Prefix(_)));
+    if has_root_or_prefix && path.components().count() <= 1 {
+        return Err(anyhow::anyhow!(
+            "不安全的输出路径: '{}'。不能直接导出到根目录。\
+             \n请使用当前目录下的路径（如 './exports/my_export.json'）。",
+            path.display()
+        ));
+    }
+
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let canonical_parent = parent
+        .canonicalize()
+        .with_context(|| format!("导出目录不存在或无法访问: {}", parent.display()))?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("无效的路径: 缺少文件名 ({})", path.display()))?;
+
+    Ok(canonical_parent.join(file_name))
 }
 
 /// 生成默认导出文件路径: `exports/export_<timestamp>.<ext>`

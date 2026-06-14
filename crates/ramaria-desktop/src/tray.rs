@@ -186,6 +186,14 @@ fn toggle_main_window<R: Runtime>(app_handle: &AppHandle<R>) {
     }
 }
 
+/// 前端未响应关闭确认的超时秒数。
+///
+/// 说明:
+/// - 用户点击关闭按钮后，后端发送 `close-requested` 事件给前端。
+/// - 前端弹出确认对话框让用户选择「最小化到托盘」或「退出」。
+/// - 若前端在超时内未响应（如页面冻结或事件丢失），自动回退为隐藏到托盘。
+const CLOSE_CONFIRM_TIMEOUT_SECS: u64 = 5;
+
 /// 拦截主窗口关闭事件。
 ///
 /// 说明:
@@ -193,6 +201,11 @@ fn toggle_main_window<R: Runtime>(app_handle: &AppHandle<R>) {
 /// - 我们拦截 CloseRequested 事件，改为发送 `close-requested` 事件给前端
 /// - 前端弹窗让用户选择「最小化到托盘」或「退出 Ramaria」
 /// - 前端选择后调用 `confirm_close_action` 命令执行对应操作
+///
+/// 恢复机制:
+/// - 若前端在 `CLOSE_CONFIRM_TIMEOUT_SECS` 秒内未响应（`confirm_close_action` 未被调用），
+///   超时任务自动将窗口隐藏到托盘，防止窗口永久可见但无法操作。
+/// - 用户始终可通过托盘菜单「显示主窗口」恢复窗口。
 fn intercept_close_event<R: Runtime>(app_handle: &AppHandle<R>) {
     if let Some(window) = app_handle.get_webview_window("main") {
         let window_clone = window.clone();
@@ -213,7 +226,31 @@ fn intercept_close_event<R: Runtime>(app_handle: &AppHandle<R>) {
                     if let Err(e2) = window_clone.hide() {
                         tracing::error!(error = %e2, "隐藏窗口失败（CloseRequested 回退）");
                     }
+                    return; // 已处理，不启动超时任务
                 }
+
+                // ★ 超时恢复机制：前端 N 秒未响应 → 自动隐藏到托盘
+                let window_for_timeout = window_clone.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(CLOSE_CONFIRM_TIMEOUT_SECS));
+                    // 检查窗口是否仍可见（前端可能已通过 confirm_close_action 处理）
+                    match window_for_timeout.is_visible() {
+                        Ok(true) => {
+                            tracing::warn!(
+                                "前端 {} 秒未响应关闭确认，自动隐藏到托盘",
+                                CLOSE_CONFIRM_TIMEOUT_SECS
+                            );
+                            let _ = window_for_timeout.hide();
+                        }
+                        Ok(false) => {
+                            tracing::debug!("窗口已隐藏（前端已处理关闭确认）");
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "查询窗口可见状态失败，回退隐藏");
+                            let _ = window_for_timeout.hide();
+                        }
+                    }
+                });
             }
         });
     }

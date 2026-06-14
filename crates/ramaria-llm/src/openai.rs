@@ -57,13 +57,13 @@ impl OpenAIProvider {
     /// - 成功时返回 provider 实例。
     /// - API key 不存在不在此处报错（延迟到 `chat`/`validate` 时检查）。
     pub fn new(config: BackendConfig, keychain: Arc<Keychain>) -> RamariaResult<Self> {
-        let key_status = match keychain.get_api_key("openai") {
-            Ok(Some(_)) => "已配置",
-            Ok(None) => "未配置",
-            Err(_) => "读取失败",
+        // 单次 keychain 调用，消除 TOCTOU 窗口
+        let result = keychain.get_api_key("openai");
+        let api_key = result.unwrap_or(None);
+        let key_status = match &api_key {
+            Some(_) => "已配置",
+            None => "未配置",
         };
-
-        let api_key = keychain.get_api_key("openai").unwrap_or(None);
 
         let base = ProviderBase::new(config, api_key)?;
 

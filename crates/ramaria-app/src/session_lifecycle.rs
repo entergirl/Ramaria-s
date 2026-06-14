@@ -313,7 +313,7 @@ impl SessionLifecycle {
         let payload = serde_json::json!({ "session_id": session_id.to_string() }).to_string();
 
         let result = job_manager
-            .execute_with_retry(JobType::L1Summary, Some(&payload), || {
+            .execute_with_retry(JobType::L1Summary, Some(&payload), None, || {
                 summarize_with_summarizer(&summarizer, session_id)
             })
             .await;
@@ -405,7 +405,7 @@ impl SessionLifecycle {
         // 通过 JobManager 包裹执行：create → running → execute → completed/failed
         // 重试由 JobManager 内部处理（指数退避，最大 3 次）
         let job_result = job_manager
-            .execute_with_retry(JobType::EventExtract, Some(&payload), || {
+            .execute_with_retry(JobType::EventExtract, Some(&payload), None, || {
                 // 每次尝试都新建 EventExtractor（提取器创建代价低，且避免重试时复用状态）
                 let extractor = EventExtractor::new(llm, storage, EventExtractorConfig::default());
                 let uid = persona_owned.clone();

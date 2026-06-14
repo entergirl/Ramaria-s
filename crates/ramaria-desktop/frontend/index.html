@@ -5,18 +5,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
         http-equiv="Content-Security-Policy"
-        content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self' ipc: https://api.deepseek.com https://api.openai.com; img-src 'self' data:; font-src 'self'"
+        content="default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self' ipc: https://api.deepseek.com https://api.openai.com; img-src 'self' data:; font-src 'self'"
     />
     <title>Ramaria - 个人AI陪伴记忆系统</title>
 
     <!--
       始终以浅色模式启动，消除主题闪烁（FOUC）。
-      必须在任何 CSS 加载前执行：浏览器默认可能因缓存读取深色偏好。
-      深色模式不持久化，每次启动默认浅色。
+      必须在任何 CSS 加载前执行，不可 defer/async。
+      外部化到 js/theme-init.js 以支持严格 CSP（无 'unsafe-inline'）。
     -->
-    <script>
-      document.documentElement.setAttribute('data-theme', 'light');
-    </script>
+    <script src="js/theme-init.js"></script>
 
     <!-- ── 字体声明 ── -->
     <link rel="stylesheet" href="fonts/fonts.css" />

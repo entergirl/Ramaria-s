@@ -105,12 +105,25 @@ pub async fn get_backend_config(
     Ok(view)
 }
 
-/// 遮罩 API key：保留前 4 位和后 4 位，中间替换为 "..."
+/// 遮罩 API key：统一策略——显示前 3 和后 3 字符，中间 `****`。
+///
+/// 安全约束:
+/// - 短密钥（≤6 字符）只显示首字符 + `****`。
+/// - 不再泄露前缀长度信息（如 `sk-` 前缀在旧策略下可被推断）。
+/// - 与 deepseek/openai provider 的日志遮蔽策略保持一致。
+///
+/// 示例:
+/// - `"sk-abc123def456"` → `"sk-****456"`
+/// - `"short"` → `"s****"`
 fn mask_api_key(key: &str) -> String {
-    if key.len() <= 8 {
-        return format!("{}...", &key[..key.len().min(3)]);
+    let len = key.len();
+    if len <= 6 {
+        // 短密钥：仅首字符 + ****
+        format!("{}****", &key[..1])
+    } else {
+        // 标准策略：前 3 + **** + 后 3
+        format!("{}****{}", &key[..3], &key[len - 3..])
     }
-    format!("{}...{}", &key[..4], &key[key.len() - 4..])
 }
 
 // =========================================================

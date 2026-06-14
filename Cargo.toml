@@ -19,6 +19,7 @@ license = "MIT"
 [workspace.dependencies]
 # ---------- 异步运行时 ----------
 tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 
 # ---------- 序列化 ----------
 serde = { version = "1", features = ["derive"] }

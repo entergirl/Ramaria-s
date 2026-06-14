@@ -291,6 +291,18 @@ pub trait StorageBackend: Send + Sync {
         Ok(None)
     }
 
+    /// 统计指定 session 的消息数量。
+    ///
+    /// 职责:
+    /// - 供前端 session 列表展示每条 session 的真实消息数。
+    /// - 默认实现通过 `list_messages` 的 len() 计算，子 crate 应覆写为 `SELECT COUNT(*)`。
+    ///
+    /// 返回:
+    /// - 消息数量（无消息时为 0）。
+    async fn count_messages(&self, session_id: Uuid) -> RamariaResult<u32> {
+        Ok(self.list_messages(session_id).await?.len() as u32)
+    }
+
     // -- Memory L1 --
     async fn save_memory_l1(&self, memory: &MemoryL1) -> RamariaResult<()>;
     async fn list_memory_l1(&self, session_id: Uuid) -> RamariaResult<Vec<MemoryL1>>;

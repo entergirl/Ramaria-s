@@ -77,6 +77,9 @@ impl StorageBackend for SqliteStorage {
     async fn get_last_message_time(&self, session_id: Uuid) -> RamariaResult<Option<i64>> {
         repo::messages::get_last_message_time(&self.pool, session_id).await
     }
+    async fn count_messages(&self, session_id: Uuid) -> RamariaResult<u32> {
+        repo::messages::count_by_session(&self.pool, session_id).await
+    }
 
     // =========================================================
     // Memory L1（单次会话摘要）

@@ -142,6 +142,29 @@ pub async fn get_last_message_time(
     Ok(row.and_then(|r| r.max_time))
 }
 
+/// 统计指定 session 的消息数量（使用 SELECT COUNT(*) 避免全表拉取）。
+///
+/// 职责:
+/// - 供前端 session 列表展示真实消息数，代替硬编码 0。
+/// - SQLite COUNT 直接返回行数，无需遍历。
+///
+/// 返回:
+/// - 消息数量（无消息时为 0）。
+pub async fn count_by_session(pool: &SqlitePool, session_id: Uuid) -> RamariaResult<u32> {
+    #[derive(sqlx::FromRow)]
+    struct CountRow {
+        cnt: i64,
+    }
+
+    let row: CountRow = sqlx::query_as("SELECT COUNT(*) AS cnt FROM messages WHERE session_id = ?")
+        .bind(session_id.to_string())
+        .fetch_one(pool)
+        .await
+        .map_err(|e| RamariaError::storage_with_source("统计消息数量失败", e))?;
+
+    Ok(row.cnt as u32)
+}
+
 pub async fn list_by_session(pool: &SqlitePool, session_id: Uuid) -> RamariaResult<Vec<Message>> {
     let rows = sqlx::query_as::<_, MessageRow>(
         "SELECT id, session_id, role, content, created_at, source, import_fingerprint, persona_uid

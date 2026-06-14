@@ -4,10 +4,13 @@
 //! - 封装 StorageBackend 的 background_jobs CRUD，提供类型安全的 JobType 枚举
 //! - 支持 create → running → completed/failed 完整生命周期
 //! - 内置重试逻辑: 最大重试次数、指数退避、错误记录
+//! - 支持 CancellationToken：应用关闭时可优雅取消正在执行的任务
+//! - 状态标记（mark_running/mark_retrying）失败时立即终止任务，标记为 fatal
 //! - 所有操作通过 tracing 记录观测日志（info/warn/error 分级）
 //! - 纯编排层，不直接访问数据库——通过 &dyn StorageBackend 注入
 
 use ramaria_core::{RamariaError, RamariaResult, StorageBackend};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 // =========================================================
@@ -72,6 +75,8 @@ pub mod status {
     pub const FAILED: &str = "failed";
     /// 等待重试
     pub const RETRYING: &str = "retrying";
+    /// 致命错误（存储不可用，无法继续执行）
+    pub const FATAL: &str = "fatal";
 }
 
 // =========================================================
@@ -226,6 +231,19 @@ impl<'a> JobManager<'a> {
         Ok(())
     }
 
+    /// 将任务状态标记为 fatal（存储不可用等致命错误，无法继续）。
+    ///
+    /// 与 `mark_failed` 的区别:
+    /// - `failed`: 任务逻辑执行失败（如 LLM 超时），可重试或告警。
+    /// - `fatal`: 状态标记本身失败（如 storage 不可用），任务无法正常追踪，立即终止。
+    pub async fn mark_fatal(&self, job_id: i64, error_msg: &str) -> RamariaResult<()> {
+        self.storage
+            .update_job_status(job_id, status::FATAL, Some(error_msg))
+            .await?;
+        error!(job_id = job_id, error = %error_msg, "后台任务遇到致命错误，已终止");
+        Ok(())
+    }
+
     /// 将任务状态标记为 retrying（含错误信息）。
     async fn mark_retrying(&self, job_id: i64, error_msg: &str) -> RamariaResult<()> {
         self.storage
@@ -243,29 +261,32 @@ impl<'a> JobManager<'a> {
     // 重试逻辑
     // =========================================================
 
-    /// 带自动重试的任务执行包装器。
+    /// 带自动重试的任务执行包装器（支持 CancellationToken）。
     ///
     /// 流程:
     /// 1. 创建任务
-    /// 2. 标记 running
-    /// 3. 执行闭包 f()
-    /// 4. 若成功 → 标记 completed
-    /// 5. 若失败 → 按 (Retryable/Fatal) 分类：
-    ///    - Retryable: 指数退避等待 → 重试（最多 max_retries 次）
+    /// 2. 标记 running（失败 → 标记 fatal 并终止）
+    /// 3. 检查取消令牌
+    /// 4. 执行闭包 f()
+    /// 5. 若成功 → 标记 completed
+    /// 6. 若失败 → 按 (Retryable/Fatal) 分类：
+    ///    - Retryable: 标记 retrying（失败 → fatal 终止）→ 检查取消令牌 → 指数退避等待 → 检查取消令牌 → 标记 running（失败 → fatal 终止）→ 重试
     ///    - Fatal: 立即标记 failed
     ///
     /// 参数:
     /// - `job_type`: 任务类型。
     /// - `payload`: 可选的任务参数。
+    /// - `cancel_token`: 可选取消令牌，`is_cancelled()` 时优雅退出。
     /// - `f`: 异步闭包，返回 `JobResult`。
     ///
     /// 返回:
     /// - 成功时返回 job_id。
-    /// - 所有重试耗尽或致命错误时返回 `RamariaError`。
+    /// - 取消或致命错误时返回 `RamariaError`。
     pub async fn execute_with_retry<F, Fut>(
         &self,
         job_type: JobType,
         payload: Option<&str>,
+        cancel_token: Option<CancellationToken>,
         f: F,
     ) -> RamariaResult<i64>
     where
@@ -273,11 +294,26 @@ impl<'a> JobManager<'a> {
         Fut: std::future::Future<Output = JobResult>,
     {
         let job_id = self.create(job_type, payload).await?;
-        self.mark_running(job_id).await?;
+
+        // 标记 running，失败时标记 fatal 并终止
+        if let Err(e) = self.mark_running(job_id).await {
+            let msg = format!("标记 running 失败 (storage 不可用): {}", e);
+            let _ = self.mark_fatal(job_id, &msg).await;
+            return Err(self.error_for_job(job_type, msg));
+        }
 
         let mut attempts = 0u32;
 
         loop {
+            // 检查取消令牌（每次循环开始前检查）
+            if let Some(ref token) = cancel_token
+                && token.is_cancelled()
+            {
+                let msg = "任务已被取消（应用正在关闭）".to_string();
+                self.mark_failed(job_id, &msg).await?;
+                return Err(self.error_for_job(job_type, msg));
+            }
+
             attempts += 1;
             debug!(job_id = job_id, attempt = attempts, "执行任务尝试");
 
@@ -305,7 +341,15 @@ impl<'a> JobManager<'a> {
                         ));
                     }
 
-                    self.mark_retrying(job_id, &err).await?;
+                    // 标记 retrying，失败时标记 fatal 并终止
+                    if let Err(e) = self.mark_retrying(job_id, &err).await {
+                        let msg = format!(
+                            "标记 retrying 失败 (storage 不可用): {} (原始错误: {})",
+                            e, err
+                        );
+                        let _ = self.mark_fatal(job_id, &msg).await;
+                        return Err(self.error_for_job(job_type, msg));
+                    }
 
                     // 指数退避: delay = base * 2^(attempt-1)
                     let delay_ms =
@@ -318,8 +362,36 @@ impl<'a> JobManager<'a> {
                         delay_ms = delay_ms,
                         "指数退避等待后重试"
                     );
+
+                    // 检查取消令牌（sleep 前）
+                    if let Some(ref token) = cancel_token
+                        && token.is_cancelled()
+                    {
+                        let msg = "任务在重试等待前被取消（应用正在关闭）".to_string();
+                        self.mark_failed(job_id, &msg).await?;
+                        return Err(self.error_for_job(job_type, msg));
+                    }
+
                     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                    self.mark_running(job_id).await?;
+
+                    // 检查取消令牌（sleep 后，标记 running 前）
+                    if let Some(ref token) = cancel_token
+                        && token.is_cancelled()
+                    {
+                        let msg = "任务在重试等待后被取消（应用正在关闭）".to_string();
+                        self.mark_failed(job_id, &msg).await?;
+                        return Err(self.error_for_job(job_type, msg));
+                    }
+
+                    // 标记 running，失败时标记 fatal 并终止
+                    if let Err(e) = self.mark_running(job_id).await {
+                        let msg = format!(
+                            "标记 running 失败 (storage 不可用，重试 #{}/{}): {}",
+                            attempts, self.config.max_retries, e
+                        );
+                        let _ = self.mark_fatal(job_id, &msg).await;
+                        return Err(self.error_for_job(job_type, msg));
+                    }
                 }
             }
         }
@@ -379,6 +451,7 @@ mod tests {
         assert_eq!(status::COMPLETED, "completed");
         assert_eq!(status::FAILED, "failed");
         assert_eq!(status::RETRYING, "retrying");
+        assert_eq!(status::FATAL, "fatal");
     }
 
     #[test]
@@ -404,5 +477,23 @@ mod tests {
         let _ = JobResult::Success;
         let _ = JobResult::Retryable("network timeout".into());
         let _ = JobResult::Fatal("disk full".into());
+    }
+
+    /// 验证 CancellationToken::cancel() 后 is_cancelled() 返回 true。
+    #[test]
+    fn test_cancellation_token_basic() {
+        let token = CancellationToken::new();
+        assert!(!token.is_cancelled());
+        token.cancel();
+        assert!(token.is_cancelled());
+    }
+
+    /// 验证 CancellationToken clone 共享同一取消状态。
+    #[test]
+    fn test_cancellation_token_clone_shares_state() {
+        let token = CancellationToken::new();
+        let clone = token.clone();
+        token.cancel();
+        assert!(clone.is_cancelled());
     }
 }

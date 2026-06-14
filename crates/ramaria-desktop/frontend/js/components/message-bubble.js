@@ -287,7 +287,8 @@ var RamariaMessageBubble = (function () {
         errorEl.style.cssText =
             'margin-top:var(--space-2);font-size:11px;color:var(--pink-500);' +
             'display:flex;align-items:center;gap:var(--space-1);';
-        errorEl.innerHTML = '⚠️ ' + (errorText || '生成失败');
+        // 使用 textContent 防止 LLM 返回的 HTML 特殊字符被注入执行
+        errorEl.textContent = '⚠️ ' + (errorText || '生成失败');
         wrapper.appendChild(errorEl);
     }
 
