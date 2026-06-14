@@ -8,6 +8,7 @@
 //! - init_default_personas: 创建 user-0001 + 扫描 personas/ 目录批量注册人格
 
 use crate::DesktopState;
+use ramaria_core::traits::EmbeddingProvider;
 use ramaria_core::types::{BackendConfig, Persona, PersonaKind};
 use serde::Serialize;
 use std::path::Path;
@@ -234,6 +235,252 @@ pub async fn test_llm_connection(state: State<'_, DesktopState>) -> Result<Strin
         .await
         .map(|_| "ok".to_string())
         .map_err(|e| format!("LLM 连接测试失败: {}", e))
+}
+
+// =========================================================
+// Embedding 模型命令（v1.1 新增）
+// =========================================================
+
+/// 嵌入模型校验结果（前端展示用）。
+#[derive(Debug, Clone, Serialize)]
+pub struct EmbeddingValidationResult {
+    pub valid: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dimension: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// 嵌入模型配置视图（前端展示用）。
+#[derive(Debug, Clone, Serialize)]
+pub struct EmbeddingModelView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_path: Option<String>,
+    pub valid: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dimension: Option<usize>,
+}
+
+/// 降级原因枚举。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DegradedReason {
+    EmbeddingMissing,
+    LlmUnavailable,
+    Unknown,
+}
+
+// ---- validate_embedding_model ----
+
+/// 校验嵌入模型路径是否有效。
+///
+/// 参数:
+/// - `path`: 模型文件夹绝对路径。
+///
+/// 返回:
+/// - `EmbeddingValidationResult`: valid=true 且 dimension 有值表示校验通过。
+///
+/// 说明:
+/// - 创建 NativeEmbeddingProvider 并调用 `validate()` 方法。
+/// - 若目录不存在或模型文件缺失，返回 valid=false + 原因说明。
+#[tauri::command]
+#[tracing::instrument]
+pub async fn validate_embedding_model(path: String) -> Result<EmbeddingValidationResult, String> {
+    let model_dir = Path::new(&path);
+
+    // 检查目录是否存在
+    if !model_dir.exists() {
+        return Ok(EmbeddingValidationResult {
+            valid: false,
+            dimension: None,
+            reason: Some(format!("模型目录不存在: {}", path)),
+        });
+    }
+
+    if !model_dir.is_dir() {
+        return Ok(EmbeddingValidationResult {
+            valid: false,
+            dimension: None,
+            reason: Some(format!("路径不是目录: {}", path)),
+        });
+    }
+
+    // 尝试创建 provider 并校验
+    match ramaria_llm::embedding::native::create_native_provider(model_dir) {
+        Ok(provider) => {
+            let dim = provider.model_info().dimension;
+            match provider.validate().await {
+                Ok(()) => {
+                    tracing::info!(path = %path, dimension = dim, "嵌入模型校验通过");
+                    Ok(EmbeddingValidationResult {
+                        valid: true,
+                        dimension: Some(dim),
+                        reason: None,
+                    })
+                }
+                Err(e) => {
+                    tracing::warn!(path = %path, error = %e, "嵌入模型校验失败");
+                    Ok(EmbeddingValidationResult {
+                        valid: false,
+                        dimension: Some(dim),
+                        reason: Some(format!("模型文件存在但推理失败: {}", e)),
+                    })
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(path = %path, error = %e, "嵌入模型加载失败");
+            Ok(EmbeddingValidationResult {
+                valid: false,
+                dimension: None,
+                reason: Some(format!("模型加载失败: {}", e)),
+            })
+        }
+    }
+}
+
+// ---- save_embedding_model ----
+
+/// 保存嵌入模型配置并热加载到应用。
+///
+/// 参数:
+/// - `path`: 模型文件夹绝对路径（空字符串表示卸载嵌入模型）。
+///
+/// 返回:
+/// - `"ok"`: 保存成功。
+///
+/// 说明:
+/// - path 非空时创建 NativeEmbeddingProvider 并通过 `app.update_embedding()` 热加载。
+/// - path 为空时卸载嵌入模型（传入 None）。
+/// - 同时将路径持久化到 storage settings，下次启动自动加载。
+#[tauri::command]
+#[tracing::instrument(skip(state))]
+pub async fn save_embedding_model(
+    state: State<'_, DesktopState>,
+    path: String,
+) -> Result<String, String> {
+    let path_trimmed = path.trim();
+
+    if path_trimmed.is_empty() {
+        // 卸载嵌入模型
+        state.app.update_embedding(None);
+        state
+            .app
+            .storage()
+            .set_setting("embedding_model_path", "")
+            .await
+            .map_err(|e| format!("保存嵌入模型路径失败: {}", e))?;
+        tracing::info!("嵌入模型已卸载");
+        return Ok("ok".to_string());
+    }
+
+    let model_dir = Path::new(path_trimmed);
+    if !model_dir.exists() {
+        return Err(format!("模型目录不存在: {}", path_trimmed));
+    }
+
+    // 创建 provider
+    let provider = ramaria_llm::embedding::native::create_native_provider(model_dir)
+        .map_err(|e| format!("加载嵌入模型失败: {}", e))?;
+
+    tracing::info!(
+        path = %path_trimmed,
+        dimension = provider.model_info().dimension,
+        "嵌入模型已加载，准备热更新"
+    );
+
+    let provider: Arc<dyn EmbeddingProvider> = Arc::new(provider);
+    state.app.update_embedding(Some(provider));
+
+    // 持久化路径
+    state
+        .app
+        .storage()
+        .set_setting("embedding_model_path", path_trimmed)
+        .await
+        .map_err(|e| format!("保存嵌入模型路径失败: {}", e))?;
+
+    tracing::info!(path = %path_trimmed, "嵌入模型路径已持久化");
+    Ok("ok".to_string())
+}
+
+// ---- get_embedding_model ----
+
+/// 获取当前嵌入模型配置。
+///
+/// 返回:
+/// - `EmbeddingModelView | null`: 当前嵌入模型信息，未配置时返回 null。
+#[tauri::command]
+#[tracing::instrument(skip(state))]
+pub async fn get_embedding_model(
+    state: State<'_, DesktopState>,
+) -> Result<Option<EmbeddingModelView>, String> {
+    let provider_opt = state.app.embedding_provider();
+
+    match provider_opt {
+        Some(provider) => {
+            let info = provider.model_info();
+            let is_avail = provider.is_available();
+            Ok(Some(EmbeddingModelView {
+                model_path: None, // model_id 通常不暴露本地路径
+                valid: is_avail,
+                dimension: Some(info.dimension),
+            }))
+        }
+        None => {
+            // 尝试从 storage 读取是否曾保存过路径（用于 UI 预填）
+            let saved_path: String = state
+                .app
+                .storage()
+                .get_setting("embedding_model_path")
+                .await
+                .map_err(|e| format!("读取嵌入模型路径失败: {}", e))?
+                .unwrap_or_default();
+
+            if saved_path.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(EmbeddingModelView {
+                    model_path: Some(saved_path),
+                    valid: false,
+                    dimension: None,
+                }))
+            }
+        }
+    }
+}
+
+// ---- get_degraded_reason ----
+
+/// 获取当前 Degraded 状态的详细原因。
+///
+/// 返回:
+/// - `"embedding_missing"`: 嵌入模型缺失，向量搜索不可用。
+/// - `"llm_unavailable"`: LLM provider 不可用。
+/// - `"unknown"`: 其他未知原因。
+/// - `null`: 当前未处于 Degraded 状态。
+#[tauri::command]
+#[tracing::instrument(skip(state))]
+pub async fn get_degraded_reason(
+    state: State<'_, DesktopState>,
+) -> Result<Option<DegradedReason>, String> {
+    let current_state = state.app.current_state();
+
+    if current_state != ramaria_core::types::AppState::Degraded {
+        return Ok(None);
+    }
+
+    let embedding_ok = state.app.is_embedding_available();
+    let llm = state.app.llm_clone();
+
+    // 检查 LLM 是否可用
+    let llm_ok = llm.validate().await.is_ok();
+
+    match (llm_ok, embedding_ok) {
+        (false, _) => Ok(Some(DegradedReason::LlmUnavailable)),
+        (true, false) => Ok(Some(DegradedReason::EmbeddingMissing)),
+        _ => Ok(Some(DegradedReason::Unknown)),
+    }
 }
 
 // =========================================================

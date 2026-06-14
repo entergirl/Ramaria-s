@@ -137,6 +137,7 @@ pub fn build_degraded_event(
         attitude: None,
         paraphrase: None,
         absorbed,
+        situation_strength: None, // 降级事件无 L1 情境信息，等效 3
         created_at: now,
         last_accessed_at: None,
         indexed_at: None,

@@ -61,8 +61,9 @@ fn model_ready_when_files_exist() {
 
     let model_dir = mgr.model_dir("bge-small-zh-v1.5");
     fs::create_dir_all(&model_dir).unwrap();
-    fs::write(model_dir.join("model.onnx"), b"dummy onnx data").unwrap();
-    fs::write(model_dir.join("tokenizer.json"), b"dummy tokenizer data").unwrap();
+    fs::write(model_dir.join("config.json"), b"{}").unwrap();
+    fs::write(model_dir.join("model.safetensors"), b"dummy weights").unwrap();
+    fs::write(model_dir.join("tokenizer.json"), b"{}").unwrap();
 
     assert!(mgr.is_model_ready("bge-small-zh-v1.5"));
 
@@ -81,8 +82,8 @@ fn model_not_ready_when_missing_files() {
 
     let model_dir = mgr.model_dir("bge-small-zh-v1.5");
     fs::create_dir_all(&model_dir).unwrap();
-    // 只创建 model.onnx，缺少 tokenizer.json
-    fs::write(model_dir.join("model.onnx"), b"dummy").unwrap();
+    // 只创建 config.json，缺少 model.safetensors 和 tokenizer.json
+    fs::write(model_dir.join("config.json"), b"{}").unwrap();
 
     assert!(!mgr.is_model_ready("bge-small-zh-v1.5"));
     cleanup(&root);
@@ -95,8 +96,9 @@ fn remove_model_deletes_directory() {
 
     let model_dir = mgr.model_dir("test-model");
     fs::create_dir_all(&model_dir).unwrap();
-    fs::write(model_dir.join("model.onnx"), b"dummy").unwrap();
-    fs::write(model_dir.join("tokenizer.json"), b"dummy").unwrap();
+    fs::write(model_dir.join("config.json"), b"{}").unwrap();
+    fs::write(model_dir.join("model.safetensors"), b"dummy").unwrap();
+    fs::write(model_dir.join("tokenizer.json"), b"{}").unwrap();
 
     assert!(mgr.is_model_ready("test-model"));
 
@@ -114,11 +116,12 @@ fn model_size_calculation() {
 
     let model_dir = mgr.model_dir("test-model");
     fs::create_dir_all(&model_dir).unwrap();
-    fs::write(model_dir.join("model.onnx"), vec![0u8; 1024]).unwrap();
+    fs::write(model_dir.join("config.json"), vec![0u8; 1024]).unwrap();
+    fs::write(model_dir.join("model.safetensors"), vec![0u8; 2048]).unwrap();
     fs::write(model_dir.join("tokenizer.json"), vec![0u8; 512]).unwrap();
 
     let size = mgr.model_size("test-model");
-    assert!(size >= 1536); // at least 1024 + 512
+    assert!(size >= 3584); // at least 1024 + 2048 + 512
     cleanup(&root);
 }
 

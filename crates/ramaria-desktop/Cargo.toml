@@ -17,7 +17,7 @@ path = "src/main.rs"
 ramaria-app = { path = "../ramaria-app" }
 ramaria-core = { path = "../ramaria-core" }
 ramaria-storage = { path = "../ramaria-storage" }
-ramaria-llm = { path = "../ramaria-llm" }
+ramaria-llm = { path = "../ramaria-llm", features = ["embedding-native"] }
 
 # ---------- Tauri 2 ----------
 tauri = { version = "2", features = ["tray-icon"] }

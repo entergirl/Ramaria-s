@@ -856,6 +856,8 @@ pub struct MemoryEvent {
     pub paraphrase: Option<String>,
     /// 合并了多少条 L1
     pub absorbed: i64,
+    /// Phase 1.1.2: 情境强度 1-5（从源 L1 传播），None 等效 3
+    pub situation_strength: Option<i32>,
     pub created_at: i64,
     pub last_accessed_at: Option<i64>,
     pub indexed_at: Option<i64>,
@@ -883,6 +885,7 @@ impl MemoryEvent {
             attitude: None,
             paraphrase: None,
             absorbed: 0,
+            situation_strength: None,
             created_at: now,
             last_accessed_at: None,
             indexed_at: None,

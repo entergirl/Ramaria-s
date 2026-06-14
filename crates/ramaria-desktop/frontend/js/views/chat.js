@@ -23,6 +23,7 @@
  * 依赖:
  * - RamariaApi / RamariaStore / RamariaRouter
  * - RamariaMessageBubble（js/components/message-bubble.js）
+ * - RamariaProgressBar（js/components/progress-bar.js, Phase 1.1.1）
  * - RamariaToast（js/components/toast.js）
  * - RamariaFormat（js/utils/format.js）
  * - TauriBridge（js/tauri-bridge.js）
@@ -935,6 +936,16 @@ var RamariaChatView = (function () {
         unreg = RamariaRouter.registerHook('chat', 'enter', function () {
             console.log('[ChatView] enter');
 
+            // Phase 1.1.1: 初始化非阻塞进度条（嵌入模型下载 / 索引重建）
+            if (typeof RamariaProgressBar !== 'undefined') {
+                try {
+                    RamariaProgressBar.init();
+                    console.log('[ChatView] 进度条组件已初始化');
+                } catch (err) {
+                    console.warn('[ChatView] 进度条初始化失败:', err);
+                }
+            }
+
             // 首次渲染
             render();
 
@@ -986,6 +997,16 @@ var RamariaChatView = (function () {
 
         unreg = RamariaRouter.registerHook('chat', 'leave', function () {
             console.log('[ChatView] leave');
+
+            // Phase 1.1.1: 销毁进度条组件，释放事件监听
+            if (typeof RamariaProgressBar !== 'undefined') {
+                try {
+                    RamariaProgressBar.destroy();
+                    console.log('[ChatView] 进度条组件已销毁');
+                } catch (err) {
+                    console.warn('[ChatView] 进度条销毁失败:', err);
+                }
+            }
 
             // 清理 Tauri 事件监听
             _unlistenAll();

@@ -95,6 +95,37 @@ impl OpenAiTransport {
         &self.http
     }
 
+    /// 发送带认证的 GET 请求（v1.1 新增）。
+    ///
+    /// 用于 validate() 中测试 `/models` 端点可达性。
+    /// 与 `send_request()` 不同：使用 GET 而非 POST，无 JSON body。
+    ///
+    /// 参数:
+    /// - `url`: 完整请求 URL（如 `https://api.deepseek.com/v1/models`）。
+    ///
+    /// 返回:
+    /// - `Ok(Response)`: 请求成功（含 HTTP 状态码）。
+    /// - `Err`: 连接/超时等网络错误。
+    pub async fn send_authenticated_get(&self, url: &str) -> RamariaResult<reqwest::Response> {
+        let mut req = self.http.get(url);
+
+        if let Some(ref key) = self.api_key {
+            req = req.header("Authorization", format!("Bearer {}", key));
+        }
+
+        req.send().await.map_err(|e| {
+            if e.is_timeout() {
+                RamariaError::llm(format!("验证请求超时: {url}"))
+            } else if e.is_connect() {
+                RamariaError::llm(format!(
+                    "无法连接到服务: {url} — 请检查 base_url 和网络连接"
+                ))
+            } else {
+                RamariaError::llm_with_source(format!("验证请求失败: {url}"), e)
+            }
+        })
+    }
+
     // =========================================================
     // 非流式请求
     // =========================================================

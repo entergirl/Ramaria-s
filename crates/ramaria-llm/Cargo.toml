@@ -6,7 +6,16 @@ license.workspace = true
 
 [features]
 default = []
-# 启用 ONNX 嵌入模型支持（需要 ONNX Runtime 共享库）
+# 启用原生 safetensors 嵌入模型支持（candle 推理引擎）
+# 支持 bge-small-zh-v1.5（BERT 架构）和 Qwen3-Embedding-0.6B（LLaMA 架构）
+embedding-native = [
+    "dep:candle-core",
+    "dep:candle-nn",
+    "dep:candle-transformers",
+    "dep:safetensors",
+    "dep:tokenizers",
+]
+# 旧 ONNX 路径（保留兼容，Phase 2 后移除）
 embedding-onnx = ["dep:ort", "dep:tokenizers", "dep:ndarray"]
 
 [dependencies]
@@ -22,9 +31,13 @@ async-trait.workspace = true
 uuid.workspace = true
 bytes = "1"
 
-# Embedding 支持（可选 feature）
-ort = { workspace = true, optional = true }
+# Embedding 支持（可选 feature — 推荐使用 embedding-native）
+candle-core = { workspace = true, optional = true }
+candle-nn = { workspace = true, optional = true }
+candle-transformers = { workspace = true, optional = true }
+safetensors = { workspace = true, optional = true }
 tokenizers = { workspace = true, optional = true }
+ort = { workspace = true, optional = true }
 ndarray = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]

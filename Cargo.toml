@@ -51,10 +51,25 @@ windows = { version = "0.58", features = [
     "Win32_Foundation",
 ] }
 
-# ---------- Embedding (ONNX) ----------
+candle-core = "0.10"
+candle-nn = "0.10"
+candle-transformers = "0.10"
+safetensors = "0.7"
+tokenizers = "0.22"
 ort = { version = "2.0.0-rc.12", features = ["download-binaries"] }
-tokenizers = "0.21"
 ndarray = "0.16"
+
+# candle 继承依赖
+candle = { package = "candle-core", version = "0.10" }
+byteorder = "1"
+fancy-regex = "0.18"
+num-traits = "0.2"
+rand = "0.9"
+rayon = "1"
+serde_plain = "1"
+accelerate-src = "0.3"
+intel-mkl-src = "0.8"
+candle-flash-attn = "0.10"
 
 # ---------- 工具 ----------
 sha2 = "0.10"
@@ -62,3 +77,7 @@ sha2 = "0.10"
 # ---------- Desktop ----------
 tauri = "2"
 tauri-build = "2"
+
+# candle-transformers 本地 patch：qwen2.rs head_dim + 禁用 qwen3/smol 模块
+[patch.crates-io]
+candle-transformers = { path = "lib/candle/candle-transformers" }

@@ -33,6 +33,7 @@ use ramaria_memory::parse_persona_toml;
 use ramaria_memory::prompt::builder::{PromptConfig, PromptContext, assemble_prompt};
 use ramaria_memory::rag::{RagConfig, filter_by_persona, format_context_text};
 use ramaria_memory::retriever::{L1DocView, L2DocView, Retriever, SearchRequest};
+use ramaria_memory::token_budget::{self, TokenBudgetConfig};
 use uuid::Uuid;
 
 use crate::privacy;
@@ -96,7 +97,7 @@ impl App {
     /// 参数:
     /// - `storage`: 存储后端（通常为 `ramaria-storage` 的 `SqliteStorage`）。
     /// - `llm`: LLM provider（LmStudio / DeepSeek / OpenAI 之一）。
-    /// - `embedding`: 可选的嵌入模型 provider（OnnxEmbeddingProvider 或 NoopEmbeddingProvider）。
+    /// - `embedding`: 可选的嵌入模型 provider（NativeEmbeddingProvider 或 NoopEmbeddingProvider）。
     /// - `config`: 应用配置。
     /// - `keychain`: OS keychain 实例。
     ///
@@ -790,11 +791,40 @@ impl App {
         // ---- Step 6: 构建 System Prompt（5-Block 装配器） ----
         let system_prompt = self.build_system_prompt(persona_uid).await;
 
+        // ---- Step 6.5: Token 预算管理（Phase 1.1.2） ----
+        // 按 provider 的 context_window 限制上下文大小，在句子边界截断
+        let context_window = cfg.capability.context_window as usize;
+        let budget_config = TokenBudgetConfig::new(context_window, cfg.max_tokens);
+        let budgeted = token_budget::apply_token_budget(
+            &system_prompt,
+            memory_context.as_deref(),
+            &history_messages,
+            user_input,
+            &budget_config,
+        );
+
+        if budgeted.estimated_tokens > context_window {
+            tracing::warn!(
+                request_id = %request_id,
+                estimated = budgeted.estimated_tokens,
+                window = context_window,
+                "token 预算超出上下文窗口，可能发生截断"
+            );
+        }
+        tracing::debug!(
+            request_id = %request_id,
+            estimated_tokens = budgeted.estimated_tokens,
+            context_window = context_window,
+            history_kept = budgeted.history.len(),
+            history_original = history_messages.len(),
+            "token 预算已应用"
+        );
+
         // ---- Step 7: 构建 ChatRequest ----
         let chat_request = ChatRequest {
-            system_prompt,
-            memory_context,
-            history: history_messages,
+            system_prompt: budgeted.system_prompt,
+            memory_context: budgeted.memory_context,
+            history: budgeted.history,
             user_message: user_input.to_string(),
             temperature: cfg.temperature,
             max_tokens: cfg.max_tokens,

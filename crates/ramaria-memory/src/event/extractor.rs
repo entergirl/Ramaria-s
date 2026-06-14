@@ -267,8 +267,29 @@ impl<'a> EventExtractor<'a> {
         let time_range = Self::compute_time_range(&batch);
         let mut saved_events: Vec<MemoryEvent> = Vec::with_capacity(events.len());
 
+        // Phase 1.1.2: 从源 L1 计算平均情境强度（None 等效 3）
+        let avg_situation: Option<i32> = {
+            let values: Vec<i32> = batch
+                .iter()
+                .filter_map(|l1| l1.situation_strength)
+                .collect();
+            if values.is_empty() {
+                None
+            } else {
+                let sum: i32 = values.iter().sum();
+                Some(sum / values.len() as i32)
+            }
+        };
+
         for (idx, ej) in events.into_iter().enumerate() {
-            let mut event = Self::build_event(persona_uid, ej, time_range.0, time_range.1, now);
+            let mut event = Self::build_event(
+                persona_uid,
+                ej,
+                time_range.0,
+                time_range.1,
+                now,
+                avg_situation,
+            );
 
             // 如果有 attitude 且非空，生成 paraphrase
             if let Some(ref attitude) = event.attitude
@@ -499,12 +520,17 @@ impl<'a> EventExtractor<'a> {
     }
 
     /// 从 ExtractedEventJson 构建 MemoryEvent。
+    ///
+    /// 参数:
+    /// - `situation_strength`: Phase 1.1.2 从源 L1 传播的情境强度（1-5），
+    ///   None 时等效 3（中性情境，Phase A 加权 ×1.0）。
     fn build_event(
         persona_uid: &str,
         json: ExtractedEventJson,
         start: i64,
         end: i64,
         now: i64,
+        situation_strength: Option<i32>,
     ) -> MemoryEvent {
         let title = json.title.as_deref().unwrap_or("").trim().to_string();
         let title = if title.is_empty() || title.chars().count() > 20 {
@@ -579,6 +605,7 @@ impl<'a> EventExtractor<'a> {
             attitude,
             paraphrase: None, // 后续异步生成
             absorbed: 0,
+            situation_strength,
             created_at: now,
             last_accessed_at: None,
             indexed_at: None,
@@ -829,12 +856,13 @@ mod tests {
             attitude: Some("既兴奋又不安".into()),
         };
         let now = now_ms();
-        let event = EventExtractor::build_event("user-0001", json, now - 1000, now, now);
+        let event = EventExtractor::build_event("user-0001", json, now - 1000, now, now, None);
 
         assert_eq!(event.title, "跳槽");
         assert_eq!(event.persona_uid, "user-0001");
         assert!((event.confidence - 0.9).abs() < f64::EPSILON);
         assert_eq!(event.presentation, Presentation::Subjective);
+        assert!(event.situation_strength.is_none());
         assert!(event.attitude.is_some());
     }
 
@@ -853,7 +881,7 @@ mod tests {
             attitude: None,
         };
         let now = now_ms();
-        let event = EventExtractor::build_event("user-0001", json, now, now, now);
+        let event = EventExtractor::build_event("user-0001", json, now, now, now, None);
         assert!(event.title.chars().count() <= 20);
     }
 
@@ -872,12 +900,13 @@ mod tests {
             attitude: None,
         };
         let now = now_ms();
-        let event = EventExtractor::build_event("user-0001", json, now, now, now);
+        let event = EventExtractor::build_event("user-0001", json, now, now, now, None);
 
         assert!((event.confidence - 0.5).abs() < f64::EPSILON);
         assert!((event.salience - 0.5).abs() < f64::EPSILON);
         assert!((event.valence - 0.0).abs() < f64::EPSILON);
         assert_eq!(event.presentation, Presentation::Mixed);
+        assert!(event.situation_strength.is_none());
         assert_eq!(event.share, 0.5);
     }
 

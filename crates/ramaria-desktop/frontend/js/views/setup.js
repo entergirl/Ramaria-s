@@ -232,7 +232,7 @@ var RamariaSetupView = (function () {
                     '<input class="setup-field-input" id="setup-embedding-path" type="text" ' +
                         'placeholder="D:/models/bge-small-zh-v1.5" autocomplete="off">' +
                     '<div class="setup-field-hint">' +
-                        '填写包含 <code>onnx/model.onnx</code> 或 <code>model.safetensors</code> 的模型文件夹<strong>完整绝对路径</strong>。<br>' +
+                        '填写包含 <code>config.json</code>、<code>model.safetensors</code>、<code>tokenizer.json</code> 的模型文件夹<strong>完整绝对路径</strong>。<br>' +
                         '路径分隔符请统一使用正斜杠 /，兼容所有操作系统。' +
                     '</div>' +
                 '</div>' +

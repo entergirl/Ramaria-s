@@ -48,13 +48,13 @@ impl NoopEmbeddingProvider {
 impl EmbeddingProvider for NoopEmbeddingProvider {
     async fn embed(&self, _text: &str) -> RamariaResult<Vec<f32>> {
         Err(ramaria_core::error::RamariaError::unsupported(
-            "嵌入模型未启用（未编译 embedding-onnx feature）",
+            "嵌入模型未启用（编译时未启用 embedding-native 或 embedding-onnx feature）",
         ))
     }
 
     async fn embed_batch(&self, _texts: &[&str]) -> RamariaResult<Vec<Vec<f32>>> {
         Err(ramaria_core::error::RamariaError::unsupported(
-            "嵌入模型未启用（未编译 embedding-onnx feature）",
+            "嵌入模型未启用（编译时未启用 embedding-native 或 embedding-onnx feature）",
         ))
     }
 
@@ -70,7 +70,7 @@ impl EmbeddingProvider for NoopEmbeddingProvider {
 
     async fn download_model(&self) -> RamariaResult<()> {
         Err(ramaria_core::error::RamariaError::unsupported(
-            "嵌入模型下载不可用（未编译 embedding-onnx feature）",
+            "嵌入模型下载不可用（编译时未启用嵌入支持 feature）",
         ))
     }
 

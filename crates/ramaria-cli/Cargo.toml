@@ -12,7 +12,7 @@ path = "src/main.rs"
 ramaria-app = { path = "../ramaria-app" }
 ramaria-core = { path = "../ramaria-core" }
 ramaria-storage = { path = "../ramaria-storage" }
-ramaria-llm = { path = "../ramaria-llm" }
+ramaria-llm = { path = "../ramaria-llm", features = ["embedding-native"] }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -3,6 +3,7 @@
 //! 设计特点:
 //! - A1 预过滤: confidence < 0.6 的事件排除（唯一硬截断），salience 作为全链路连续权重
 //! - A3 按领域分类聚合: 按 keywords 主分类分组，计算 salience 加权均值/方差/有效样本量
+//! - 情境强度加权（Phase 1.1.2）: 弱情境(1-2)→×1.5，中性(3)/None→×1.0，强情境(4-5)→×0.5
 //! - A6 跨分类高阶指标: 情绪稳定性、叙事一致性、态度矛盾检测、社交开放性
 //! - A7 代表性事件选取: 每分类取 salience 最高的 2-3 条事件
 //! - 纯数值计算，零 I/O，不依赖数据库或异步运行时，所有输入由调用方传入
@@ -185,6 +186,30 @@ pub fn prefilter_events(events: &[MemoryEvent], config: &StatsConfig) -> (Vec<Me
 }
 
 // =========================================================
+// 情境强度加权（Phase 1.1.2）
+// =========================================================
+
+/// 根据情境强度计算 salience 乘数。
+///
+/// 公式（对齐决策列表 §5）:
+/// - 弱情境（1-2）: ×1.5 — 日常琐事中流露的性格信号更强
+/// - 中性（3 或 None）: ×1.0 — 常规权重
+/// - 强情境（4-5）: ×0.5 — 强情境中行为更多由环境驱动，非性格
+///
+/// 参数:
+/// - `strength`: 情境强度 1-5 或 None（等效 3）。
+///
+/// 返回:
+/// - salience 权重乘数（0.5 / 1.0 / 1.5）。
+pub fn situation_multiplier(strength: Option<i32>) -> f64 {
+    match strength {
+        Some(1) | Some(2) => 1.5,
+        Some(4) | Some(5) => 0.5,
+        _ => 1.0, // None 或 3 均为中性
+    }
+}
+
+// =========================================================
 // A3: 按分类聚合
 // =========================================================
 
@@ -303,7 +328,11 @@ pub fn weighted_ratio(indicators: &[f64], weights: &[f64]) -> f64 {
 /// - 包含所有 salience 加权统计量的 CategoryStats。
 pub fn compute_category_stats(category: &str, events: &[MemoryEvent]) -> CategoryStats {
     let event_count = events.len();
-    let weights: Vec<f64> = events.iter().map(|e| e.salience).collect();
+    // Phase 1.1.2: salience × situation_multiplier → 有效权重
+    let weights: Vec<f64> = events
+        .iter()
+        .map(|e| e.salience * situation_multiplier(e.situation_strength))
+        .collect();
     let n_eff: f64 = weights.iter().sum();
 
     // 效价特征
@@ -410,7 +439,10 @@ fn normalize_group_weights(categories: &mut [CategoryStats]) {
 /// - 全局加权 valence 标准差。
 pub fn compute_emotional_stability(events: &[MemoryEvent]) -> f64 {
     let valences: Vec<f64> = events.iter().map(|e| e.valence).collect();
-    let weights: Vec<f64> = events.iter().map(|e| e.salience).collect();
+    let weights: Vec<f64> = events
+        .iter()
+        .map(|e| e.salience * situation_multiplier(e.situation_strength))
+        .collect();
     let mean = weighted_mean(&valences, &weights);
     weighted_variance(&valences, &weights, mean).sqrt()
 }
@@ -472,7 +504,10 @@ pub fn compute_narrative_consistency(categories: &[CategoryStats]) -> f64 {
 /// - 偏度系数。正值=右偏（少数事件 share 很高），负值=左偏。
 pub fn compute_share_skewness(events: &[MemoryEvent]) -> f64 {
     let shares: Vec<f64> = events.iter().map(|e| e.share).collect();
-    let weights: Vec<f64> = events.iter().map(|e| e.salience).collect();
+    let weights: Vec<f64> = events
+        .iter()
+        .map(|e| e.salience * situation_multiplier(e.situation_strength))
+        .collect();
     let total_weight: f64 = weights.iter().sum();
     if total_weight <= 0.0 {
         return 0.0;
@@ -503,7 +538,10 @@ pub fn compute_share_skewness(events: &[MemoryEvent]) -> f64 {
 /// - 峰度系数。正值=尖峰分布，负值=扁平分布。
 pub fn compute_share_kurtosis(events: &[MemoryEvent]) -> f64 {
     let shares: Vec<f64> = events.iter().map(|e| e.share).collect();
-    let weights: Vec<f64> = events.iter().map(|e| e.salience).collect();
+    let weights: Vec<f64> = events
+        .iter()
+        .map(|e| e.salience * situation_multiplier(e.situation_strength))
+        .collect();
     let total_weight: f64 = weights.iter().sum();
     if total_weight <= 0.0 {
         return 0.0;
@@ -739,6 +777,101 @@ mod tests {
         ev.presentation = presentation;
         ev.attitude = attitude.map(|s| s.into());
         ev
+    }
+
+    // ---- 情境强度乘数（Phase 1.1.2） ----
+
+    #[test]
+    fn situation_multiplier_none_is_neutral() {
+        assert!((situation_multiplier(None) - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn situation_multiplier_3_is_neutral() {
+        assert!((situation_multiplier(Some(3)) - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn situation_multiplier_weak_amplifies() {
+        assert!((situation_multiplier(Some(1)) - 1.5).abs() < 1e-10);
+        assert!((situation_multiplier(Some(2)) - 1.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn situation_multiplier_strong_dampens() {
+        assert!((situation_multiplier(Some(4)) - 0.5).abs() < 1e-10);
+        assert!((situation_multiplier(Some(5)) - 0.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn situation_multiplier_invalid_fallsback_to_neutral() {
+        // 非法值（0 或 6+）应退回到中性
+        assert!((situation_multiplier(Some(0)) - 1.0).abs() < 1e-10);
+        assert!((situation_multiplier(Some(6)) - 1.0).abs() < 1e-10);
+        assert!((situation_multiplier(Some(100)) - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn category_stats_respects_situation_multiplier() {
+        // 两条事件：相同 salience 但不同情境 → 权重应不同
+        let weak_ev = make_event(
+            "弱情境事件",
+            "摘要",
+            Some("工作"),
+            0.9,
+            0.8, // salience
+            0.5,
+            0.5,
+            Presentation::Mixed,
+            None,
+        );
+        let strong_ev = make_event(
+            "强情境事件",
+            "摘要",
+            Some("工作"),
+            0.9,
+            0.8, // same salience
+            0.5,
+            0.5,
+            Presentation::Mixed,
+            None,
+        );
+
+        // Manually set situation_strength
+        let events = vec![
+            {
+                let mut e = weak_ev;
+                e.situation_strength = Some(2); // 弱情境 ×1.5
+                e
+            },
+            {
+                let mut e = strong_ev;
+                e.situation_strength = Some(5); // 强情境 ×0.5
+                e
+            },
+        ];
+
+        let stats = compute_category_stats("工作", &events);
+        // n_eff = 0.8*1.5 + 0.8*0.5 = 1.2 + 0.4 = 1.6
+        assert!((stats.n_eff - 1.6).abs() < 1e-10);
+    }
+
+    #[test]
+    fn category_stats_default_situation_neutral() {
+        let events = vec![make_event(
+            "默认情境",
+            "摘要",
+            Some("工作"),
+            0.9,
+            0.8,
+            0.5,
+            0.5,
+            Presentation::Mixed,
+            None,
+        )];
+        // situation_strength = None → ×1.0
+        let stats = compute_category_stats("工作", &events);
+        assert!((stats.n_eff - 0.8).abs() < 1e-10);
     }
 
     // ---- A1 预过滤 ----

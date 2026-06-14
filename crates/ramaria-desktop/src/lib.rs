@@ -274,6 +274,11 @@ pub fn run() {
             commands::setup::get_setup_status,
             commands::setup::refresh_setup_state,
             commands::setup::test_llm_connection,
+            // ---- Embedding ----
+            commands::setup::validate_embedding_model,
+            commands::setup::save_embedding_model,
+            commands::setup::get_embedding_model,
+            commands::setup::get_degraded_reason,
             // ---- Session ----
             commands::session::list_sessions,
             commands::session::get_session,

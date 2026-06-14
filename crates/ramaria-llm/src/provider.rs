@@ -248,47 +248,21 @@ impl ProviderBase {
     /// 验证 provider 可用性。
     ///
     /// 检查内容:
-    /// - base_url 是否可连接（发送 GET 或 HEAD 到 /models 端点）。
+    /// - base_url 是否可连接（发送带 Authorization 的 GET 到 `/models` 端点）。
     /// - 模型 ID 是否非空（LM Studio 场景允许空字符串，用户后续选择）。
+    ///
+    /// 注意:
+    /// - v1.1 修复：使用 `send_authenticated_get()` 携带 API key header，
+    ///   避免线上 provider（DeepSeek/OpenAI）的 /models 端点返回 401。
     pub async fn validate(&self) -> RamariaResult<()> {
-        // 1. 检查 base_url 可连接
+        // 1. 检查 base_url 可连接（带 Authorization header）
         let models_url = format!("{}/models", self.transport.base_url());
-        let response = self
-            .transport
-            .http_client()
-            .get(&models_url)
-            .send()
-            .await
-            .map_err(|e| {
-                if e.is_connect() {
-                    RamariaError::llm(format!(
-                        "无法连接到 {} (provider: {})。请确认服务已启动且 base_url 正确。",
-                        self.transport.base_url(),
-                        self.provider_name(),
-                    ))
-                } else if e.is_timeout() {
-                    RamariaError::llm(format!(
-                        "连接 {} 超时 (provider: {})。请检查网络或增加超时时间。",
-                        self.transport.base_url(),
-                        self.provider_name(),
-                    ))
-                } else {
-                    RamariaError::llm_with_source(
-                        format!(
-                            "验证 {} 连接失败 (provider: {}): {}",
-                            self.transport.base_url(),
-                            self.provider_name(),
-                            e
-                        ),
-                        e,
-                    )
-                }
-            })?;
+        let response = self.transport.send_authenticated_get(&models_url).await?;
 
         let status = response.status();
         if !status.is_success() {
             return Err(RamariaError::llm(format!(
-                "{} 模型列表查询失败 (HTTP {}): 请检查 base_url 和服务配置",
+                "{} 模型列表查询失败 (HTTP {}): 请检查 base_url 和 API key 是否正确",
                 self.provider_name(),
                 status.as_u16(),
             )));

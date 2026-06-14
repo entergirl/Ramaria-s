@@ -838,6 +838,7 @@ pub fn make_test_event(id: i64, title: &str) -> MemoryEvent {
         attitude: None,
         paraphrase: None,
         absorbed: 0,
+        situation_strength: None,
         created_at: 1_717_977_600_000,
         last_accessed_at: None,
         indexed_at: None,

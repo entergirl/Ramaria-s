@@ -34,7 +34,8 @@ pub const L1_SUMMARY_PROMPT_BASE: &str = r#"你是一个对话摘要助手。请
   "time_period": "从以下六个选项中选一个：清晨、上午、下午、傍晚、夜间、深夜",
   "atmosphere": "四字以内描述对话整体氛围，例如：专注高效、轻松愉快、情绪低落",
   "valence": 0.0,
-  "salience": 0.5
+  "salience": 0.5,
+  "situation_strength": 3
 }
 
 【valence 情绪效价说明】
@@ -52,6 +53,14 @@ pub const L1_SUMMARY_PROMPT_BASE: &str = r#"你是一个对话摘要助手。请
 0.5   中等（正常对话，有情感内容）
 0.75  较高（情绪明显，或话题对用户有重要意义）
 1.0   极高（强烈情绪，或人生重要节点/里程碑）
+
+【situation_strength 情境强度说明】
+用于描述对话发生的情境强度，只能选 1-5 的整数：
+1  很弱情境（纯粹闲聊、寒暄、无实质内容）
+2  较弱情境（日常琐事、随性聊天）
+3  中性情境（普通对话、一般交流）
+4  较强情境（重要对话、关键决策、正式场合）
+5  强情境（危机处理、重大人生事件、强烈冲突）
 
 【其他字段说明】
 - summary：只记结论，不记过程；用"用户"指代用户；客观陈述，不加主观评价
@@ -85,7 +94,8 @@ pub const L1_SUMMARY_PROMPT_WITH_KEYWORDS: &str = r#"你是一个对话摘要助
   "time_period": "从以下六个选项中选一个：清晨、上午、下午、傍晚、夜间、深夜",
   "atmosphere": "四字以内描述对话整体氛围，例如：专注高效、轻松愉快、情绪低落",
   "valence": 0.0,
-  "salience": 0.5
+  "salience": 0.5,
+  "situation_strength": 3
 }
 
 【valence 情绪效价说明】
@@ -103,6 +113,14 @@ pub const L1_SUMMARY_PROMPT_WITH_KEYWORDS: &str = r#"你是一个对话摘要助
 0.5   中等（正常对话，有情感内容）
 0.75  较高（情绪明显，或话题对用户有重要意义）
 1.0   极高（强烈情绪，或人生重要节点/里程碑）
+
+【situation_strength 情境强度说明】
+用于描述对话发生的情境强度，只能选 1-5 的整数：
+1  很弱情境（纯粹闲聊、寒暄、无实质内容）
+2  较弱情境（日常琐事、随性聊天）
+3  中性情境（普通对话、一般交流）
+4  较强情境（重要对话、关键决策、正式场合）
+5  强情境（危机处理、重大人生事件、强烈冲突）
 
 【其他字段说明】
 - summary：只记结论，不记过程；用"用户"指代用户；客观陈述，不加主观评价
@@ -208,6 +226,10 @@ mod tests {
         assert!(prompt.contains("atmosphere"));
         assert!(prompt.contains("valence"));
         assert!(prompt.contains("salience"));
+        assert!(
+            prompt.contains("situation_strength"),
+            "Phase 1.1.2: prompt 应包含 situation_strength 字段"
+        );
     }
 
     #[test]
@@ -224,5 +246,15 @@ mod tests {
         for val in &["-1.0", "-0.5", "0.0", "0.5", "1.0"] {
             assert!(prompt.contains(val), "prompt should mention valence {val}");
         }
+    }
+
+    #[test]
+    fn keyword_prompt_also_contains_situation_strength() {
+        let prompt = build_l1_prompt("test", Some("天气, 心情"));
+        assert!(
+            prompt.contains("situation_strength"),
+            "关键词注入版 prompt 也应包含 situation_strength"
+        );
+        assert!(prompt.contains("关键词候选"));
     }
 }

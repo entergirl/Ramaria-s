@@ -105,6 +105,15 @@ pub enum RamariaError {
         trace_id: Option<String>,
     },
 
+    /// 嵌入模型相关错误（模型加载、推理、架构检测等）。
+    #[error("embedding error: {context}")]
+    Embedding {
+        context: String,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+        trace_id: Option<String>,
+    },
+
     /// 不支持的功能。
     #[error("unsupported: {context}")]
     Unsupported {
@@ -332,6 +341,36 @@ impl RamariaError {
         }
     }
 
+    // -- Embedding --
+
+    /// 创建嵌入模型错误。
+    ///
+    /// 参数:
+    /// - `context`: 模型加载、推理或架构检测相关的错误上下文。
+    pub fn embedding(context: impl Into<String>) -> Self {
+        Self::Embedding {
+            context: context.into(),
+            source: None,
+            trace_id: None,
+        }
+    }
+
+    /// 创建带 source 的嵌入模型错误。
+    ///
+    /// 参数:
+    /// - `context`: 当前嵌入操作的错误描述。
+    /// - `source`: candle、safetensors、tokenizers 等底层错误。
+    pub fn embedding_with_source(
+        context: impl Into<String>,
+        source: impl Into<Box<dyn std::error::Error + Send + Sync>>,
+    ) -> Self {
+        Self::Embedding {
+            context: context.into(),
+            source: Some(source.into()),
+            trace_id: None,
+        }
+    }
+
     // -- Unsupported --
 
     /// 创建不支持功能错误。
@@ -367,6 +406,7 @@ impl RamariaError {
             Self::Serialization { trace_id, .. } => *trace_id = tid,
             Self::Privacy { trace_id, .. } => *trace_id = tid,
             Self::Index { trace_id, .. } => *trace_id = tid,
+            Self::Embedding { trace_id, .. } => *trace_id = tid,
             Self::Validation { trace_id, .. } => *trace_id = tid,
             Self::Io { trace_id, .. } => *trace_id = tid,
             Self::Unsupported { trace_id, .. } => *trace_id = tid,
@@ -387,6 +427,7 @@ impl RamariaError {
             | Self::Serialization { trace_id, .. }
             | Self::Privacy { trace_id, .. }
             | Self::Index { trace_id, .. }
+            | Self::Embedding { trace_id, .. }
             | Self::Validation { trace_id, .. }
             | Self::Io { trace_id, .. }
             | Self::Unsupported { trace_id, .. } => trace_id.as_deref(),
@@ -405,6 +446,7 @@ impl RamariaError {
             Self::Serialization { .. } => "serialization",
             Self::Privacy { .. } => "privacy",
             Self::Index { .. } => "index",
+            Self::Embedding { .. } => "embedding",
             Self::Validation { .. } => "validation",
             Self::Io { .. } => "io",
             Self::Unsupported { .. } => "unsupported",
@@ -423,6 +465,7 @@ impl RamariaError {
             | Self::Serialization { context, .. }
             | Self::Privacy { context, .. }
             | Self::Index { context, .. }
+            | Self::Embedding { context, .. }
             | Self::Validation { context, .. }
             | Self::Io { context, .. }
             | Self::Unsupported { context, .. } => context.as_str(),
@@ -477,6 +520,7 @@ mod tests {
         assert_eq!(RamariaError::serialization("x").category(), "serialization");
         assert_eq!(RamariaError::privacy("x").category(), "privacy");
         assert_eq!(RamariaError::index("x").category(), "index");
+        assert_eq!(RamariaError::embedding("x").category(), "embedding");
         assert_eq!(RamariaError::validation("x").category(), "validation");
         assert_eq!(RamariaError::io("x", None).category(), "io");
         assert_eq!(RamariaError::unsupported("x").category(), "unsupported");

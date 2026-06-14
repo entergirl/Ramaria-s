@@ -20,6 +20,7 @@ pub mod rag;
 pub mod rebuild;
 pub mod retriever;
 pub mod rrf;
+pub mod token_budget;
 mod utils;
 pub mod vector; // 内部共享工具（不暴露到公共 API）
 
@@ -151,6 +152,7 @@ pub use inference::{
     shrink_valence,
     sigmoid,
     simple_density_cluster,
+    situation_multiplier,
     time_decay_weight,
     update_trait_confidence,
     wasserstein_1d,
@@ -175,6 +177,11 @@ pub use prompt::{
     builder::{PromptConfig, PromptContext, assemble_prompt},
     example_selector::{ExampleSelector, ExampleSelectorConfig, extract_keywords},
     injection_guard::{MemoryInjectionStatus, apply_injection_guard, check_injection},
+};
+
+// Token Budget 管理（Phase 1.1.2）
+pub use token_budget::{
+    BudgetedContext, TokenBudgetConfig, apply_token_budget, estimate_tokens, truncate_at_boundary,
 };
 
 /// 模块存活检查 (Phase 0 占位，可后续移除)

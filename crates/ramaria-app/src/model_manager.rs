@@ -2,19 +2,20 @@
 //!
 //! 设计特点:
 //! - 管理嵌入模型的下载、SHA-256 校验、断点续传和目录管理
+//! - 支持 BERT 架构（bge-small-zh-v1.5）和 LLaMA/Qwen3 架构（Qwen3-Embedding-0.6B）
 //! - 下载进度通过回调函数实时推送，供前端进度条展示
-//! - 支持用户自行放置模型文件（跳过下载），自动检测 model.onnx + tokenizer.json
+//! - 支持用户自行放置模型文件（跳过下载），自动检测 config.json + model.safetensors + tokenizer.json
 //! - 下载使用 reqwest 流式传输，写入临时文件后原子重命名
 //! - 所有 I/O 错误有明确日志，包含文件路径和具体原因
 //!
 //! 模型目录约定:
-//! - Windows: `%APPDATA%\Ramaria\models\bge-small-zh-v1.5\`
+//! - Windows: `%APPDATA%\Ramaria\models\{model_id}\`
 //! - 开发模式: 通过 `RAMARIA_DATA_DIR` 覆盖
-//! - 模型文件: model.onnx, tokenizer.json
+//! - 必需文件: config.json, model.safetensors, tokenizer.json
 //!
 //! 下载源:
-//! - 默认从 HuggingFace 镜像下载（可通过配置覆盖）
-//! - 下载 URL 格式: {base_url}/{model_name}/resolve/main/{file}
+//! - 默认从 HuggingFace 下载（可通过 `RAMARIA_MODEL_DOWNLOAD_URL` 覆盖）
+//! - 下载 URL 格式: {base_url}/resolve/main/{file}
 
 use std::fs;
 use std::io::Write;
@@ -22,6 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use futures::StreamExt;
 use ramaria_core::error::{RamariaError, RamariaResult};
 use sha2::{Digest, Sha256};
 
@@ -32,21 +34,58 @@ use sha2::{Digest, Sha256};
 /// 默认嵌入模型标识
 pub const DEFAULT_MODEL_ID: &str = "bge-small-zh-v1.5";
 
-/// 默认模型下载基础 URL（HuggingFace 镜像）
-const DEFAULT_DOWNLOAD_BASE: &str = "https://huggingface.co/BAAI/bge-small-zh-v1.5/resolve/main";
+/// 支持的模型清单
+///
+/// 每个模型包含:
+/// - model_id: 模型目录名
+/// - hf_repo: HuggingFace 仓库路径（org/repo）
+/// - files: 需要下载的文件列表（文件名, SHA-256 校验和，空字符串跳过）
+#[derive(Debug, Clone)]
+pub struct ModelPreset {
+    pub model_id: &'static str,
+    pub hf_repo: &'static str,
+    pub files: &'static [(&'static str, &'static str)],
+    /// 模型预估大小（字节），用于 UI 展示
+    pub estimated_size: u64,
+}
 
-/// 预期模型文件名及其 SHA-256 校验和
-/// 校验和为空表示跳过校验
-const MODEL_FILES: &[(&str, &str)] = &[
-    ("model.onnx", ""),     // ONNX 模型文件（SHA-256 需用户提供）
-    ("tokenizer.json", ""), // 分词器配置文件
+/// 预置模型配置。
+pub const MODEL_PRESETS: &[ModelPreset] = &[
+    // ---- bge-small-zh-v1.5 (BERT 架构, 384维, ~100MB) ----
+    ModelPreset {
+        model_id: "bge-small-zh-v1.5",
+        hf_repo: "BAAI/bge-small-zh-v1.5",
+        files: &[
+            ("config.json", ""),
+            ("tokenizer.json", ""),
+            ("model.safetensors", ""),
+        ],
+        estimated_size: 100_000_000,
+    },
+    // ---- Qwen3-Embedding-0.6B (LLaMA/Qwen3 架构, 1024维, ~1.2GB) ----
+    ModelPreset {
+        model_id: "Qwen3-Embedding-0.6B",
+        hf_repo: "Qwen/Qwen3-Embedding-0.6B",
+        files: &[
+            ("config.json", ""),
+            ("tokenizer.json", ""),
+            ("model.safetensors", ""), // ⚠ 注意：Qwen3-Embedding-0.6B 可能为分片 safetensors
+        ],
+        estimated_size: 1_200_000_000,
+    },
 ];
 
-/// 下载缓冲区大小（64KB）
+/// 默认 HuggingFace 域名
+const HF_DOMAIN: &str = "https://huggingface.co";
+
+/// 下载缓冲区大小（64KB）— 供未来手动缓冲实现使用
 const _DOWNLOAD_BUF_SIZE: usize = 64 * 1024;
 
 /// 下载临时文件后缀
 const TEMP_SUFFIX: &str = ".part";
+
+/// 必需文件列表（用于就绪检查）
+const REQUIRED_FILES: &[&str] = &["config.json", "model.safetensors", "tokenizer.json"];
 
 // =========================================================
 // 下载进度
@@ -142,21 +181,19 @@ impl ModelManager {
     /// - `model_id`: 模型标识。
     ///
     /// 返回:
-    /// - `true`: model.onnx 和 tokenizer.json 均存在。
+    /// - `true`: config.json, model.safetensors, tokenizer.json 均存在。
     pub fn is_model_ready(&self, model_id: &str) -> bool {
         let dir = self.model_dir(model_id);
-        let model_ok = dir.join("model.onnx").exists();
-        let tokenizer_ok = dir.join("tokenizer.json").exists();
+        let all_ok = REQUIRED_FILES.iter().all(|f| dir.join(f).exists());
 
         tracing::debug!(
             model_id,
-            model_ok,
-            tokenizer_ok,
+            ready = all_ok,
             model_dir = %dir.display(),
             "模型就绪检查"
         );
 
-        model_ok && tokenizer_ok
+        all_ok
     }
 
     /// 列出所有已安装的模型。
@@ -188,8 +225,7 @@ impl ModelManager {
             }
 
             let dir = entry.path();
-            if dir.join("model.onnx").exists()
-                && dir.join("tokenizer.json").exists()
+            if REQUIRED_FILES.iter().all(|f| dir.join(f).exists())
                 && let Some(name) = dir.file_name().and_then(|n| n.to_str())
             {
                 models.push(name.to_string());
@@ -200,10 +236,42 @@ impl ModelManager {
         Ok(models)
     }
 
-    /// 下载模型文件。
+    /// 获取模型预置信息。
     ///
     /// 参数:
     /// - `model_id`: 模型标识。
+    ///
+    /// 返回:
+    /// - `Some(&ModelPreset)`: 预置模型信息。
+    /// - `None`: 不在预置列表中。
+    pub fn get_preset(model_id: &str) -> Option<&'static ModelPreset> {
+        MODEL_PRESETS.iter().find(|p| p.model_id == model_id)
+    }
+
+    /// 获取模型的 HuggingFace 下载基础 URL。
+    ///
+    /// 参数:
+    /// - `model_id`: 模型标识。
+    ///
+    /// 返回:
+    /// - 下载基础 URL（如 `https://huggingface.co/BAAI/bge-small-zh-v1.5/resolve/main`）。
+    ///   如果不在预置列表中，返回错误。
+    pub fn download_base_url(model_id: &str) -> RamariaResult<String> {
+        let preset = Self::get_preset(model_id).ok_or_else(|| {
+            RamariaError::config(format!(
+                "不支持的模型标识: {}。支持列表: {:?}",
+                model_id,
+                MODEL_PRESETS.iter().map(|p| p.model_id).collect::<Vec<_>>()
+            ))
+        })?;
+
+        Ok(format!("{}/{}/resolve/main", HF_DOMAIN, preset.hf_repo))
+    }
+
+    /// 下载模型文件。
+    ///
+    /// 参数:
+    /// - `model_id`: 模型标识（如 "bge-small-zh-v1.5"）。
     /// - `progress_callback`: 可选的进度回调（每下载一个 chunk 触发一次）。
     ///
     /// 返回:
@@ -214,17 +282,28 @@ impl ModelManager {
     /// - 每个文件下载完成后做 SHA-256 校验（若提供了校验和）。
     /// - 全部文件下载完成后原子地将临时文件重命名为正式文件。
     /// - 可通过 `cancel_download()` 取消进行中的下载。
+    /// - 下载 URL 格式: `https://huggingface.co/{org}/{repo}/resolve/main/{file}`
     ///
     /// 错误场景:
     /// - 网络不可达。
     /// - 服务器返回非 200。
     /// - SHA-256 校验失败。
     /// - 磁盘写入失败。
+    /// - model_id 不在预置列表中。
     pub async fn download_model(
         &self,
         model_id: &str,
         progress_callback: Option<ProgressCallback>,
     ) -> RamariaResult<()> {
+        // 获取模型预置信息
+        let preset = Self::get_preset(model_id).ok_or_else(|| {
+            RamariaError::config(format!(
+                "不支持的模型: {}。可用模型: {:?}",
+                model_id,
+                MODEL_PRESETS.iter().map(|p| p.model_id).collect::<Vec<_>>()
+            ))
+        })?;
+
         // 重置状态
         self.cancelled.store(false, Ordering::SeqCst);
         self.downloaded.store(0, Ordering::SeqCst);
@@ -237,13 +316,21 @@ impl ModelManager {
             RamariaError::io(format!("无法创建模型子目录: {}", dir.display()), Some(e))
         })?;
 
-        tracing::info!(model_id, model_dir = %dir.display(), "开始下载嵌入模型");
+        tracing::info!(
+            model_id,
+            model_dir = %dir.display(),
+            repo = preset.hf_repo,
+            file_count = preset.files.len(),
+            estimated_size_mb = preset.estimated_size / 1_000_000,
+            "开始下载嵌入模型"
+        );
 
+        // 构建下载 base URL
         let base_url = std::env::var("RAMARIA_MODEL_DOWNLOAD_URL")
-            .unwrap_or_else(|_| DEFAULT_DOWNLOAD_BASE.to_string());
+            .unwrap_or_else(|_| format!("{}/{}/resolve/main", HF_DOMAIN, preset.hf_repo));
 
         // 下载每个文件
-        for (filename, expected_sha256) in MODEL_FILES {
+        for (filename, expected_sha256) in preset.files {
             if self.cancelled.load(Ordering::SeqCst) {
                 tracing::info!("下载已被取消");
                 return Err(RamariaError::validation("模型下载已取消"));
@@ -251,18 +338,17 @@ impl ModelManager {
 
             let url = format!("{}/{}", base_url, filename);
             let dest_path = dir.join(filename);
-            let temp_path = dest_path.with_extension(
+
+            // 临时文件名 = 原文件名 + ".part"
+            let temp_name = format!(
+                "{}{}",
                 dest_path
-                    .extension()
-                    .map(|e| {
-                        format!(
-                            "{}{}",
-                            e.to_string_lossy(),
-                            TEMP_SUFFIX.trim_start_matches('.')
-                        )
-                    })
-                    .unwrap_or_else(|| TEMP_SUFFIX.trim_start_matches('.').to_string()),
+                    .file_name()
+                    .map(|n| n.to_string_lossy())
+                    .unwrap_or_else(|| std::borrow::Cow::Borrowed(filename)),
+                TEMP_SUFFIX
             );
+            let temp_path = dest_path.with_file_name(temp_name);
 
             // 如果正式文件已存在且校验通过，跳过
             if dest_path.exists() && (!expected_sha256.is_empty()) {
@@ -271,6 +357,9 @@ impl ModelManager {
                     continue;
                 }
                 tracing::warn!(file = %filename, "文件校验失败，重新下载");
+            } else if dest_path.exists() {
+                tracing::debug!(file = %filename, "文件已存在，跳过下载（无校验和）");
+                continue;
             }
 
             tracing::info!(file = %filename, url = %url, "下载文件");
@@ -320,9 +409,14 @@ impl ModelManager {
 
         // 验证模型完整性
         if !self.is_model_ready(model_id) {
+            let missing: Vec<&str> = REQUIRED_FILES
+                .iter()
+                .filter(|f| !dir.join(f).exists())
+                .copied()
+                .collect();
             return Err(RamariaError::validation(format!(
-                "模型 {} 下载后仍不完整（缺少必需文件）",
-                model_id
+                "模型 {} 下载后仍不完整。缺失文件: {:?}",
+                model_id, missing
             )));
         }
 
@@ -354,7 +448,7 @@ impl ModelManager {
         }
     }
 
-    /// 验证文件的 SHA-256 校验和。
+    /// 验证文件的 SHA-256 校验和（流式读取，支持大文件）。
     ///
     /// 参数:
     /// - `path`: 文件路径。
@@ -363,13 +457,31 @@ impl ModelManager {
     /// 返回:
     /// - `Ok(true)`: 校验通过。
     /// - `Ok(false)`: 校验不匹配。
+    ///
+    /// 说明:
+    /// - 使用 `BufReader` 分块读取，每块 64KB，避免将整个文件加载到内存。
+    /// - 对于 Qwen3-Embedding-0.6B（~1.2GB）等大文件安全无害。
     pub fn verify_checksum(&self, path: &Path, expected_hex: &str) -> RamariaResult<bool> {
-        let data = fs::read(path).map_err(|e| {
-            RamariaError::io(format!("无法读取文件以校验: {}", path.display()), Some(e))
+        use std::io::Read;
+
+        let file = fs::File::open(path).map_err(|e| {
+            RamariaError::io(format!("无法打开文件以校验: {}", path.display()), Some(e))
         })?;
 
+        let mut reader = std::io::BufReader::with_capacity(64 * 1024, file);
         let mut hasher = Sha256::new();
-        hasher.update(&data);
+        let mut buf = [0u8; 64 * 1024];
+
+        loop {
+            let bytes_read = reader.read(&mut buf).map_err(|e| {
+                RamariaError::io(format!("校验文件时读取失败: {}", path.display()), Some(e))
+            })?;
+            if bytes_read == 0 {
+                break;
+            }
+            hasher.update(&buf[..bytes_read]);
+        }
+
         let hash = hasher.finalize();
         let hash_hex = format!("{:x}", hash);
 
@@ -480,7 +592,6 @@ impl ModelManager {
 
         // 流式下载
         let mut stream = response.bytes_stream();
-        use futures::StreamExt;
 
         while let Some(chunk) = stream.next().await {
             if self.cancelled.load(Ordering::SeqCst) {
@@ -641,6 +752,70 @@ mod tests {
 
         // Wrong hash
         assert!(!mgr.verify_checksum(&test_file, "deadbeef").unwrap());
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// 测试获取模型预置信息
+    #[test]
+    fn model_preset_lookup() {
+        let preset = ModelManager::get_preset("bge-small-zh-v1.5");
+        assert!(preset.is_some());
+        let p = preset.unwrap();
+        assert_eq!(p.hf_repo, "BAAI/bge-small-zh-v1.5");
+        assert_eq!(p.files.len(), 3);
+    }
+
+    /// 测试不支持的模型 ID
+    #[test]
+    fn unsupported_model_id() {
+        let preset = ModelManager::get_preset("nonexistent-model");
+        assert!(preset.is_none());
+    }
+
+    /// 测试 Qwen3 预置
+    #[test]
+    fn qwen3_preset_exists() {
+        let preset = ModelManager::get_preset("Qwen3-Embedding-0.6B");
+        assert!(preset.is_some());
+        let p = preset.unwrap();
+        assert!(p.estimated_size > 1_000_000_000); // >1GB
+    }
+
+    /// 测试模型就绪：创建完整文件后返回 true
+    #[test]
+    fn is_model_ready_returns_true_when_files_exist() {
+        let tmp = std::env::temp_dir().join("ramaria_test_model_ready");
+        let _ = fs::remove_dir_all(&tmp);
+
+        let mgr = ModelManager::new(&tmp).unwrap();
+        let model_dir = mgr.model_dir("bge-small-zh-v1.5");
+        fs::create_dir_all(&model_dir).unwrap();
+
+        // 创建必需文件
+        fs::write(model_dir.join("config.json"), b"{}").unwrap();
+        fs::write(model_dir.join("model.safetensors"), b"dummy").unwrap();
+        fs::write(model_dir.join("tokenizer.json"), b"{}").unwrap();
+
+        assert!(mgr.is_model_ready("bge-small-zh-v1.5"));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// 测试模型就绪：部分文件缺失
+    #[test]
+    fn is_model_ready_false_when_incomplete() {
+        let tmp = std::env::temp_dir().join("ramaria_test_model_incomplete");
+        let _ = fs::remove_dir_all(&tmp);
+
+        let mgr = ModelManager::new(&tmp).unwrap();
+        let model_dir = mgr.model_dir("bge-small-zh-v1.5");
+        fs::create_dir_all(&model_dir).unwrap();
+
+        // 只创建 config.json，缺少其他文件
+        fs::write(model_dir.join("config.json"), b"{}").unwrap();
+
+        assert!(!mgr.is_model_ready("bge-small-zh-v1.5"));
 
         let _ = fs::remove_dir_all(&tmp);
     }

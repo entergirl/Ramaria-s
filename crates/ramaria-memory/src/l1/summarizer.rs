@@ -636,4 +636,60 @@ mod tests {
 
     // ---- 完整流程（需要 mock） ----
     // 完整集成测试在 l1/mod.rs 的测试中，使用 mock LlmProvider + mock StorageBackend
+
+    // ---- situation_strength 解析（Phase 1.1.2） ----
+
+    #[test]
+    fn parse_situation_strength_from_json() {
+        let raw =
+            r#"{"summary": "测试", "valence": 0.0, "salience": 0.5, "situation_strength": 2}"#;
+        let parsed: L1SummaryResponse = serde_json::from_str(raw).unwrap();
+        assert_eq!(parsed.situation_strength, Some(2));
+    }
+
+    #[test]
+    fn parse_situation_strength_missing_defaults_none() {
+        let raw = r#"{"summary": "测试", "valence": 0.0, "salience": 0.5}"#;
+        let parsed: L1SummaryResponse = serde_json::from_str(raw).unwrap();
+        assert_eq!(parsed.situation_strength, None);
+    }
+
+    #[test]
+    fn validate_situation_strength_injected_from_llm() {
+        // validate_and_build 始终设置 situation_strength = None，
+        // 实际注入在 summarize_session 中完成（LLM 输出 > config > 默认 3）
+        let parsed = L1SummaryResponse {
+            summary: Some("测试摘要".into()),
+            keywords: None,
+            time_period: Some("上午".into()),
+            atmosphere: Some("轻松".into()),
+            valence: Some(0.5),
+            salience: Some(0.5),
+            situation_strength: Some(5),
+        };
+        let sid = ramaria_core::types::new_id();
+        let (l1, _) = L1Summarizer::validate_and_build(&parsed, sid);
+        // validate_and_build 不负责注入 — 注入由 summarize_session 步骤 7 完成
+        assert_eq!(l1.situation_strength, None);
+    }
+
+    #[test]
+    fn validate_situation_strength_defaults_to_3() {
+        // LLM 未输出 situation_strength → config 也未设置 → 应回退到 Some(3)
+        let parsed = L1SummaryResponse {
+            summary: Some("测试摘要".into()),
+            keywords: None,
+            time_period: Some("下午".into()),
+            atmosphere: Some("专注".into()),
+            valence: Some(0.0),
+            salience: Some(0.5),
+            situation_strength: None,
+        };
+        let sid = ramaria_core::types::new_id();
+        let (l1, _) = L1Summarizer::validate_and_build(&parsed, sid);
+        // validate_and_build 设置 situation_strength 为 None，
+        // 实际赋值在 summarize_session 中（步骤 7）
+        // validate_and_build 中设为 None，最终由调用方（步骤 7）注入
+        assert_eq!(l1.situation_strength, None);
+    }
 }

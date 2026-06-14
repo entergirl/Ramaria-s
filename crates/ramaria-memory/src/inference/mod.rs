@@ -50,5 +50,6 @@ pub use stats::{
     compute_category_stats, compute_cross_category_metrics, compute_emotional_stability,
     compute_narrative_consistency, compute_share_kurtosis, compute_share_skewness,
     extract_primary_category, group_by_category, prefilter_events, run_phase_a_stats,
-    select_representative_events, weighted_mean, weighted_ratio, weighted_variance,
+    select_representative_events, situation_multiplier, weighted_mean, weighted_ratio,
+    weighted_variance,
 };

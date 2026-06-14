@@ -27,7 +27,9 @@ pub mod stream_event;
 // 重新导出核心类型
 pub use app::{App, SendMessageStream};
 pub use error_hint::{ErrorHint, error_detail, error_title, is_retryable};
-pub use model_manager::{DownloadProgress, ModelManager, default_models_root};
+pub use model_manager::{
+    DownloadProgress, MODEL_PRESETS, ModelManager, ModelPreset, default_models_root,
+};
 pub use privacy::{PrivacyStatus, check_privacy, confirm_privacy, require_privacy};
 pub use session_lifecycle::SessionLifecycle;
 pub use setup::{SetupStatus, check_setup_status, determine_state, run_setup};

@@ -45,6 +45,7 @@ struct EventRow {
     attitude: Option<String>,
     paraphrase: Option<String>,
     absorbed: i64,
+    situation_strength: Option<i64>,
     created_at: i64,
     last_accessed_at: Option<i64>,
     indexed_at: Option<i64>,
@@ -70,6 +71,7 @@ impl EventRow {
             attitude: self.attitude,
             paraphrase: self.paraphrase,
             absorbed: self.absorbed,
+            situation_strength: self.situation_strength.map(|v| v as i32),
             created_at: self.created_at,
             last_accessed_at: self.last_accessed_at,
             indexed_at: self.indexed_at,
@@ -83,14 +85,15 @@ pub async fn save_event(pool: &SqlitePool, ev: &MemoryEvent) -> RamariaResult<i6
     sqlx::query_scalar::<_, i64>(
         "INSERT INTO memory_events (persona_uid, title, summary, keywords, participants, start, \"end\",
          confidence, salience, valence, presentation, share, attitude, paraphrase,
-         absorbed, created_at, last_accessed_at, indexed_at, index_version)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+         absorbed, situation_strength, created_at, last_accessed_at, indexed_at, index_version)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
     )
     .bind(&ev.persona_uid).bind(&ev.title).bind(&ev.summary)
     .bind(&ev.keywords).bind(&ev.participants).bind(ev.start).bind(ev.end)
     .bind(ev.confidence).bind(ev.salience).bind(ev.valence).bind(pres)
     .bind(ev.share).bind(&ev.attitude).bind(&ev.paraphrase)
-    .bind(ev.absorbed).bind(ev.created_at).bind(ev.last_accessed_at)
+    .bind(ev.absorbed).bind(ev.situation_strength.map(|v| v as i64))
+    .bind(ev.created_at).bind(ev.last_accessed_at)
     .bind(ev.indexed_at).bind(ev.index_version)
     .fetch_one(pool).await
     .map_err(|e| RamariaError::storage_with_source("保存事件失败", e))
@@ -105,7 +108,7 @@ pub async fn list_events_by_persona(
     let rows = sqlx::query_as::<_, EventRow>(
         "SELECT id, persona_uid, title, summary, keywords, participants, start, \"end\",
          confidence, salience, valence, presentation, share, attitude, paraphrase,
-         absorbed, created_at, last_accessed_at, indexed_at, index_version
+         absorbed, situation_strength, created_at, last_accessed_at, indexed_at, index_version
          FROM memory_events WHERE persona_uid = ? ORDER BY start DESC LIMIT ? OFFSET ?",
     )
     .bind(persona_uid)
@@ -124,7 +127,7 @@ pub async fn list_unabsorbed_events(
     let rows = sqlx::query_as::<_, EventRow>(
         "SELECT id, persona_uid, title, summary, keywords, participants, start, \"end\",
          confidence, salience, valence, presentation, share, attitude, paraphrase,
-         absorbed, created_at, last_accessed_at, indexed_at, index_version
+         absorbed, situation_strength, created_at, last_accessed_at, indexed_at, index_version
          FROM memory_events WHERE persona_uid = ? AND absorbed = 0 ORDER BY start ASC",
     )
     .bind(persona_uid)

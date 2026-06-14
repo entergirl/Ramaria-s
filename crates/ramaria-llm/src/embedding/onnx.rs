@@ -435,7 +435,7 @@ impl OnnxSession {
 /// 职责:
 /// - 实现 `EmbeddingProvider` trait，提供 ONNX 推理能力
 /// - 惰性加载模型（首次 `embed()` 调用时才加载 ONNX 模型到内存）
-/// - 线程安全：内部状态通过 `Mutex` 保护
+/// - 线程安全：内部状态通过 `Mutex` 保护；`model_info` 构造时确定后不可变
 ///
 /// 用法:
 /// ```ignore
@@ -447,7 +447,7 @@ impl OnnxSession {
 pub struct OnnxEmbeddingProvider {
     /// 模型目录路径
     model_dir: PathBuf,
-    /// 模型信息（在模型加载前使用默认值）
+    /// 模型信息（构造时从 config.json 读取维度，之后不可变——无数据竞争）
     model_info: EmbeddingModelInfo,
     /// 惰性加载的 ONNX 会话
     session: Mutex<Option<OnnxSession>>,
@@ -465,20 +465,25 @@ impl OnnxEmbeddingProvider {
     /// - 成功时返回 provider 实例（模型尚未加载，首次调用 embed() 时加载）。
     ///
     /// 说明:
-    /// - 构造时不加载模型，避免启动延迟。
+    /// - 构造时尝试从 config.json 读取 `hidden_size` 确定维度；若无则默认 384。
+    /// - `model_info` 构造后不可变（无数据竞争）。
     /// - 模型是否存在通过 `is_available()` 检查（检查文件是否存在）。
     pub fn new(model_dir: impl Into<PathBuf>) -> Self {
         let dir = model_dir.into();
         let model_exists = dir.join(MODEL_FILE).exists() && dir.join(TOKENIZER_FILE).exists();
 
+        // 构造时确定维度：从 config.json 读取（如有），否则默认 384
+        let dimension = Self::read_dimension_from_config(&dir).unwrap_or(384);
+
         let info = EmbeddingModelInfo {
             model_id: format!("onnx:{}", dir.display()),
-            dimension: 384, // BGE small 默认维度；模型加载后可从输出推断
+            dimension,
         };
 
         tracing::info!(
             model_dir = %dir.display(),
             model_exists,
+            dimension,
             "OnnxEmbeddingProvider 已创建"
         );
 
@@ -490,11 +495,30 @@ impl OnnxEmbeddingProvider {
         }
     }
 
+    /// 从 config.json 读取 `hidden_size` 作为向量维度。
+    ///
+    /// 说明:
+    /// - 仅用于构造时确定 `model_info.dimension`。
+    /// - 读取失败（文件缺失、JSON 无效、字段缺失）返回 None，由调用方使用默认值。
+    fn read_dimension_from_config(dir: &Path) -> Option<usize> {
+        let config_path = dir.join("config.json");
+        if !config_path.exists() {
+            return None;
+        }
+
+        let file = std::fs::File::open(&config_path).ok()?;
+        let raw: serde_json::Value = serde_json::from_reader(file).ok()?;
+        raw.get("hidden_size")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize)
+    }
+
     /// 确保 ONNX 会话已加载（惰性初始化）。
     ///
     /// 说明:
     /// - 首次调用时加载模型，后续调用直接返回已缓存的会话。
     /// - 加载失败时返回错误，不缓存失败状态（下次调用会重试）。
+    /// - **不再修改 `self.model_info`**——维度已在构造时从 config.json 确定。
     fn ensure_loaded(&self) -> RamariaResult<()> {
         let mut guard = self.session.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -506,12 +530,18 @@ impl OnnxEmbeddingProvider {
 
         let session = OnnxSession::load(&self.model_dir)?;
 
-        // 更新模型信息
+        // 验证实际维度与构造时检测的维度一致
         let actual_dim = session.dimension;
-        self.model_info = EmbeddingModelInfo {
-            model_id: format!("onnx:{}", self.model_dir.display()),
-            dimension: actual_dim,
-        };
+        let expected_dim = self.model_info.dimension;
+        if actual_dim != expected_dim {
+            tracing::warn!(
+                actual = actual_dim,
+                expected = expected_dim,
+                "ONNX 模型实际维度与 config.json 不一致，以实际维度为准"
+            );
+            // 注意：这里不修改 self.model_info（保持构造时不可变语义），
+            // 后续 validate() 会检测维度不匹配并报错。
+        }
 
         *guard = Some(session);
 
@@ -532,12 +562,17 @@ impl EmbeddingProvider for OnnxEmbeddingProvider {
 
         self.ensure_loaded()?;
 
-        let guard = self.session.lock().unwrap_or_else(|e| e.into_inner());
-        let session = guard
-            .as_ref()
-            .ok_or_else(|| RamariaError::validation("ONNX 会话未初始化"))?;
-
-        session.embed_text(text)
+        // ONNX 推理是 CPU 密集型操作（50-200ms/条），
+        // 使用 block_in_place 将当前任务移出 tokio 工作线程，
+        // 避免阻塞同线程上的其他异步任务（如流式 LLM 响应处理）。
+        let text = text.to_string();
+        tokio::task::block_in_place(|| {
+            let guard = self.session.lock().unwrap_or_else(|e| e.into_inner());
+            let session = guard
+                .as_ref()
+                .ok_or_else(|| RamariaError::validation("ONNX 会话未初始化"))?;
+            session.embed_text(&text)
+        })
     }
 
     async fn embed_batch(&self, texts: &[&str]) -> RamariaResult<Vec<Vec<f32>>> {
@@ -547,12 +582,18 @@ impl EmbeddingProvider for OnnxEmbeddingProvider {
 
         self.ensure_loaded()?;
 
-        let guard = self.session.lock().unwrap_or_else(|e| e.into_inner());
-        let session = guard
-            .as_ref()
-            .ok_or_else(|| RamariaError::validation("ONNX 会话未初始化"))?;
+        // 将所有文本 clone 为自有 String（block_in_place 闭包要求 'static 或自有数据）
+        let texts: Vec<String> = texts.iter().map(|t| t.to_string()).collect();
 
-        session.embed_batch_texts(texts)
+        // 批量 ONNX 推理同样使用 block_in_place 避免阻塞 tokio 工作线程
+        tokio::task::block_in_place(|| {
+            let guard = self.session.lock().unwrap_or_else(|e| e.into_inner());
+            let session = guard
+                .as_ref()
+                .ok_or_else(|| RamariaError::validation("ONNX 会话未初始化"))?;
+            let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+            session.embed_batch_texts(&text_refs)
+        })
     }
 
     fn model_info(&self) -> &EmbeddingModelInfo {
