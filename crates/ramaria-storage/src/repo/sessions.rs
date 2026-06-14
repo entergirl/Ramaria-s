@@ -87,6 +87,41 @@ pub async fn delete(pool: &SqlitePool, session_id: Uuid) -> RamariaResult<()> {
     Ok(())
 }
 
+/// 创建一条历史 session（导入专用）。
+///
+/// 职责:
+/// - 与 `create()` 不同，此函数使用外部提供的时间戳，而非当前时间。
+/// - 创建时即设置 `ended_at`，表示这是一个已完成的历史会话。
+/// - 供 ramaria-importer 在快速/深度导入模式中使用。
+///
+/// 参数:
+/// - `started_at`: Session 开始时间（Unix 毫秒）。
+/// - `ended_at`: Session 结束时间（Unix 毫秒）。
+///
+/// 返回:
+/// - 带指定时间范围、已关闭的 Session。
+pub async fn create_historical(
+    pool: &SqlitePool,
+    started_at: i64,
+    ended_at: i64,
+) -> RamariaResult<Session> {
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO sessions (id, started_at, ended_at) VALUES (?, ?, ?)")
+        .bind(id.to_string())
+        .bind(started_at)
+        .bind(ended_at)
+        .execute(pool)
+        .await
+        .map_err(|e| {
+            ramaria_core::error::RamariaError::storage_with_source("创建历史 session 失败", e)
+        })?;
+    Ok(Session {
+        id,
+        started_at,
+        ended_at: Some(ended_at),
+    })
+}
+
 #[derive(sqlx::FromRow)]
 struct SessionRow {
     id: String,

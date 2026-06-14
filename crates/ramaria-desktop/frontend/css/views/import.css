@@ -1,0 +1,508 @@
+/**
+ * css/views/import.css — 数据导入视图样式
+ *
+ * 设计特点:
+ * - 粉蓝双色系统：粉色主操作（确认导入），蓝色信息展示（报告摘要）
+ * - 三步向导流程：选择文件 → 预览报告 → 确认导入
+ * - 响应式布局：卡片式内容区域，移动端适配
+ * - 遵循 8pt 网格系统，圆角、间距与设计系统一致
+ * - 状态指示：进度条动画、成功/失败消息样式
+ */
+
+/* ═════════════════════════════════════════════════
+   导入容器整体布局
+   ═════════════════════════════════════════════════ */
+.import-container {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-6);
+    padding: var(--space-4);
+    max-width: 720px;
+    margin: 0 auto;
+}
+
+/* ═════════════════════════════════════════════════
+   步骤引导区
+   ═════════════════════════════════════════════════ */
+.import-steps {
+    display: flex;
+    justify-content: center;
+    gap: var(--space-2);
+    margin-bottom: var(--space-4);
+    padding-top: var(--space-4);
+}
+
+.import-step {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-4);
+    border-radius: var(--radius-full);
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-tertiary);
+    background: var(--gray-50);
+    border: 1px solid var(--border-light);
+    transition: all 0.2s ease;
+}
+
+.import-step.active {
+    background: var(--pink-100);
+    color: var(--color-primary);
+    border-color: var(--border-pink);
+}
+
+.import-step.done {
+    background: var(--blue-50);
+    color: var(--color-secondary);
+    border-color: var(--blue-200);
+}
+
+.import-step-number {
+    width: 20px;
+    height: 20px;
+    border-radius: var(--radius-full);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    font-weight: 600;
+    background: var(--gray-200);
+    color: var(--text-tertiary);
+}
+
+.import-step.active .import-step-number {
+    background: var(--color-primary);
+    color: var(--text-inverse);
+}
+
+.import-step.done .import-step-number {
+    background: var(--color-secondary);
+    color: var(--text-inverse);
+}
+
+/* ═════════════════════════════════════════════════
+   文件选择区 (Step 1)
+   ═════════════════════════════════════════════════ */
+.import-file-zone {
+    background: var(--gray-0);
+    border: 2px dashed var(--border-default);
+    border-radius: var(--radius-lg);
+    padding: var(--space-8) var(--space-6);
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.import-file-zone:hover {
+    border-color: var(--color-primary);
+    background: var(--pink-50);
+}
+
+.import-file-zone.has-file {
+    border-style: solid;
+    border-color: var(--color-secondary);
+    background: var(--blue-50);
+    cursor: default;
+}
+
+.import-file-zone-icon {
+    font-size: 48px;
+    margin-bottom: var(--space-3);
+    opacity: 0.6;
+}
+
+.import-file-zone-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: var(--space-1);
+}
+
+.import-file-zone-desc {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    margin-bottom: var(--space-4);
+}
+
+.import-file-info {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    background: var(--gray-0);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-md);
+    max-width: 400px;
+    margin: 0 auto;
+}
+
+.import-file-info-icon {
+    font-size: 24px;
+}
+
+.import-file-info-details {
+    text-align: left;
+    flex: 1;
+}
+
+.import-file-info-name {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-primary);
+    word-break: break-all;
+}
+
+.import-file-info-size {
+    font-size: 11px;
+    color: var(--text-tertiary);
+}
+
+/* ═════════════════════════════════════════════════
+   配置选项区
+   ═════════════════════════════════════════════════ */
+.import-options {
+    background: var(--gray-0);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-lg);
+    padding: var(--space-5);
+}
+
+.import-option-group {
+    margin-bottom: var(--space-4);
+}
+
+.import-option-group:last-child {
+    margin-bottom: 0;
+}
+
+.import-option-label {
+    display: block;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: var(--space-2);
+}
+
+.import-option-desc {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-bottom: var(--space-2);
+}
+
+.import-mode-selector {
+    display: flex;
+    gap: var(--space-3);
+}
+
+.import-mode-card {
+    flex: 1;
+    padding: var(--space-4);
+    border: 1.5px solid var(--border-light);
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    transition: all 0.18s ease;
+}
+
+.import-mode-card:hover {
+    border-color: var(--border-pink);
+}
+
+.import-mode-card.selected {
+    border-color: var(--color-primary);
+    background: var(--pink-50);
+}
+
+.import-mode-card-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: var(--space-1);
+}
+
+.import-mode-card-desc {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    line-height: 1.5;
+}
+
+.import-mode-card-tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: var(--radius-full);
+    font-size: 10px;
+    font-weight: 500;
+    margin-top: var(--space-2);
+}
+
+.import-mode-card-tag.fast {
+    background: var(--blue-100);
+    color: var(--blue-600);
+}
+
+.import-mode-card-tag.deep {
+    background: var(--pink-100);
+    color: var(--pink-600);
+}
+
+/* ═════════════════════════════════════════════════
+   解析报告区 (Step 2)
+   ═════════════════════════════════════════════════ */
+.import-report {
+    background: var(--gray-0);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+}
+
+.import-report-header {
+    padding: var(--space-4) var(--space-5);
+    background: linear-gradient(135deg, var(--pink-100), var(--blue-100));
+    border-bottom: 1px solid var(--border-light);
+}
+
+.import-report-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.import-report-subtitle {
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-top: var(--space-1);
+}
+
+.import-report-body {
+    padding: var(--space-5);
+}
+
+.import-stat-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: var(--space-3);
+    margin-bottom: var(--space-4);
+}
+
+.import-stat-card {
+    padding: var(--space-3) var(--space-4);
+    border-radius: var(--radius-md);
+    text-align: center;
+}
+
+.import-stat-card.success {
+    background: #f0faf4;
+    border: 1px solid #b7dfc8;
+}
+
+.import-stat-card.degraded {
+    background: #fffbf0;
+    border: 1px solid #f0d888;
+}
+
+.import-stat-card.skipped {
+    background: var(--gray-50);
+    border: 1px solid var(--border-light);
+}
+
+.import-stat-number {
+    font-family: var(--font-mono);
+    font-size: 24px;
+    font-weight: 600;
+    line-height: 1.2;
+}
+
+.import-stat-number.success {
+    color: #1e6b40;
+}
+
+.import-stat-number.degraded {
+    color: #7a5c10;
+}
+
+.import-stat-number.skipped {
+    color: var(--text-tertiary);
+}
+
+.import-stat-label {
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-top: var(--space-1);
+}
+
+.import-report-details {
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.8;
+}
+
+.import-report-details strong {
+    color: var(--text-primary);
+}
+
+.import-report-section {
+    margin-bottom: var(--space-3);
+    padding-bottom: var(--space-3);
+    border-bottom: 1px solid var(--border-light);
+}
+
+.import-report-section:last-child {
+    margin-bottom: 0;
+    padding-bottom: 0;
+    border-bottom: none;
+}
+
+/* ═════════════════════════════════════════════════
+   导入进度 (Step 3)
+   ═════════════════════════════════════════════════ */
+.import-progress {
+    background: var(--gray-0);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-lg);
+    padding: var(--space-6);
+    text-align: center;
+}
+
+.import-progress-spinner {
+    margin-bottom: var(--space-4);
+}
+
+.import-progress-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: var(--space-2);
+}
+
+.import-progress-desc {
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.import-progress-bar {
+    margin-top: var(--space-4);
+}
+
+/* ═════════════════════════════════════════════════
+   导入完成结果
+   ═════════════════════════════════════════════════ */
+.import-result {
+    background: var(--gray-0);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+}
+
+.import-result-header {
+    padding: var(--space-5);
+    text-align: center;
+    background: linear-gradient(135deg, var(--blue-100), var(--pink-100));
+}
+
+.import-result-icon {
+    font-size: 48px;
+    margin-bottom: var(--space-2);
+}
+
+.import-result-title {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.import-result-body {
+    padding: var(--space-5);
+}
+
+.import-result-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: var(--space-3);
+    margin-bottom: var(--space-4);
+}
+
+.import-result-stat {
+    padding: var(--space-3);
+    text-align: center;
+}
+
+.import-result-stat-value {
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--color-secondary);
+    font-family: var(--font-mono);
+}
+
+.import-result-stat-label {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-top: var(--space-1);
+}
+
+.import-result-summary {
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.8;
+    padding: var(--space-4);
+    background: var(--gray-50);
+    border-radius: var(--radius-md);
+    white-space: pre-wrap;
+    font-family: var(--font-mono);
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+/* ═════════════════════════════════════════════════
+   错误展示
+   ═════════════════════════════════════════════════ */
+.import-error {
+    padding: var(--space-4);
+    background: var(--pink-50);
+    border: 1px solid var(--pink-200);
+    border-radius: var(--radius-md);
+    color: var(--pink-700);
+    font-size: 13px;
+    line-height: 1.6;
+}
+
+.import-error-title {
+    font-weight: 600;
+    margin-bottom: var(--space-1);
+}
+
+/* ═════════════════════════════════════════════════
+   操作按钮区
+   ═════════════════════════════════════════════════ */
+.import-actions {
+    display: flex;
+    gap: var(--space-3);
+    justify-content: flex-end;
+    margin-top: var(--space-4);
+}
+
+/* ═════════════════════════════════════════════════
+   响应式：移动端
+   ═════════════════════════════════════════════════ */
+@media (max-width: 640px) {
+    .import-container {
+        padding: var(--space-3);
+    }
+
+    .import-steps {
+        flex-direction: column;
+        align-items: center;
+    }
+
+    .import-mode-selector {
+        flex-direction: column;
+    }
+
+    .import-stat-grid,
+    .import-result-stats {
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    .import-file-zone {
+        padding: var(--space-6) var(--space-4);
+    }
+}

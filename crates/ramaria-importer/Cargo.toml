@@ -1,0 +1,25 @@
+[package]
+name = "ramaria-importer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ramaria-core = { path = "../ramaria-core" }
+ramaria-storage = { path = "../ramaria-storage" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+sqlx.workspace = true
+
+# GBK/多编码支持（导入器专用）
+encoding_rs = "0.8"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

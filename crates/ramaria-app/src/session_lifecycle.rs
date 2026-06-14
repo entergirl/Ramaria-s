@@ -284,6 +284,41 @@ impl SessionLifecycle {
         }
     }
 
+    /// 生成 L1 摘要但不触发 L2 级联（用于批量导入场景，全部 L1 完成后统一触发）。
+    ///
+    /// 说明:
+    /// - 与 `regenerate_l1` 功能相同，但跳过末尾的 `check_l2_trigger` 调用。
+    /// - 调用方应在全部 L1 生成完成后手动调用 `check_l2_trigger`。
+    pub async fn regenerate_l1_no_cascade(
+        &self,
+        storage: &dyn StorageBackend,
+        llm: &dyn LlmProvider,
+        session_id: Uuid,
+        persona_uid: Option<&str>,
+    ) -> RamariaResult<Option<ramaria_core::types::MemoryL1>> {
+        let messages = storage.list_messages(session_id).await?;
+        if messages.is_empty() {
+            warn!(%session_id, "regenerate_l1_no_cascade: session 无消息，跳过");
+            return Ok(None);
+        }
+
+        info!(%session_id, ?persona_uid, msg_count = messages.len(), "批量 L1 摘要（无级联）");
+
+        match self
+            .generate_l1_summary(storage, llm, session_id, persona_uid)
+            .await
+        {
+            Ok(l1) => {
+                info!(%session_id, l1_id = %l1.id, "L1 生成成功（无级联）");
+                Ok(Some(l1))
+            }
+            Err(e) => {
+                error!(%session_id, %e, "L1 生成失败");
+                Err(e)
+            }
+        }
+    }
+
     // =========================================================
     // L1 摘要生成（内部辅助）
     // =========================================================
@@ -340,7 +375,11 @@ impl SessionLifecycle {
     ///
     /// 对齐 Python `merger.check_and_merge()` 的计数触发路径。
     /// 遍历所有 persona，检查未吸收 L1 是否 ≥ 5 条。
-    async fn check_l2_trigger(&self, storage: &dyn StorageBackend, llm: &dyn LlmProvider) {
+    pub(crate) async fn check_l2_trigger(
+        &self,
+        storage: &dyn StorageBackend,
+        llm: &dyn LlmProvider,
+    ) {
         let personas = match storage.list_personas().await {
             Ok(p) => p,
             Err(e) => {
@@ -349,7 +388,13 @@ impl SessionLifecycle {
             }
         };
 
+        let mut total_personas = 0usize;
+        let mut checked = 0usize;
+        let mut triggered = 0usize;
+        let mut skipped = 0usize;
+
         for persona in &personas {
+            total_personas += 1;
             if self.shutdown_flag.load(Ordering::Relaxed) {
                 return;
             }
@@ -362,26 +407,42 @@ impl SessionLifecycle {
                 }
             };
 
-            // 路径 A 触发条件：未吸收 L1 ≥ 5 条
-            // 对齐 Python `MergerConfig.L2_TRIGGER_COUNT = 5`
+            checked += 1;
             let trigger_count = self.config.thresholds.l2_trigger_count as usize;
             if unabsorbed.len() >= trigger_count {
+                triggered += 1;
                 info!(
                     persona_uid = %persona.uid,
                     unabsorbed_count = unabsorbed.len(),
                     trigger_count,
-                    "L2 触发条件满足（路径 A：计数），启动事件提取"
+                    "L2 触发条件满足，启动事件提取"
                 );
                 self.run_l2_extraction(storage, llm, &persona.uid).await;
             } else {
-                debug!(
+                skipped += 1;
+                // 使用 info! 而非 debug!，确保用户能看到未触发的原因
+                info!(
                     persona_uid = %persona.uid,
+                    persona_name = %persona.name,
                     unabsorbed_count = unabsorbed.len(),
                     trigger_count,
-                    "L2 触发条件未满足（路径 A）"
+                    "L2 触发条件未满足（需要 {} 条未吸收 L1，当前 {} 条）",
+                    trigger_count,
+                    unabsorbed.len()
                 );
             }
         }
+
+        info!(
+            total_personas,
+            checked,
+            triggered,
+            skipped,
+            "L2 触发检查完成: {} 个 persona 中 {} 个触发 L2，{} 个条件未满足",
+            checked,
+            triggered,
+            skipped
+        );
     }
 
     /// 执行 L2 事件提取（通过 JobManager 包裹，带重试和可观测性）。
@@ -461,7 +522,7 @@ impl SessionLifecycle {
     ///
     /// 对齐 Python `profile_manager` + Phase A→B→C 管线。
     /// 触发条件：未吸收事件 ≥ 10 条 或 最早事件 > 30 天。
-    async fn check_l3_trigger(
+    pub(crate) async fn check_l3_trigger(
         &self,
         storage: &dyn StorageBackend,
         llm: &dyn LlmProvider,
@@ -502,11 +563,14 @@ impl SessionLifecycle {
             );
             self.run_l3_inference(storage, llm, persona_uid).await;
         } else {
-            debug!(
+            info!(
                 persona_uid,
                 event_count = events.len(),
+                trigger_count,
                 oldest_days = %format!("{:.1}", oldest_event_age_days),
-                "L3 触发条件未满足"
+                trigger_days,
+                "L3 触发条件未满足（需要 {} 条未吸收事件或最早事件 > {} 天，当前 {} 条 {:.1} 天）",
+                trigger_count, trigger_days, events.len(), oldest_event_age_days
             );
         }
     }

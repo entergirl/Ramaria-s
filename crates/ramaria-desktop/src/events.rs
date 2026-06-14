@@ -24,6 +24,8 @@ pub const EVENT_CLOSE_REQUESTED: &str = "close-requested";
 /// 应用状态变更事件名（预留，Phase 5 后续批次启用）
 #[allow(dead_code)]
 pub const EVENT_APP_STATE: &str = "app-state-changed";
+/// 导入进度事件名（v1.1）
+pub const EVENT_IMPORT_PROGRESS: &str = "import-progress";
 
 // =========================================================
 // 聊天流式事件负载
@@ -133,6 +135,34 @@ impl AppStatePayload {
     /// 创建应用状态变更事件负载。
     pub fn new(state: String) -> Self {
         Self { state }
+    }
+}
+
+// =========================================================
+// 导入进度事件（v1.1）
+// =========================================================
+
+/// 导入深度处理进度事件负载。
+#[derive(Debug, Clone, Serialize)]
+pub struct ImportProgressPayload {
+    /// 阶段: "l1" | "l2" | "l3" | "done"
+    pub phase: String,
+    /// 当前进度（已处理数）
+    pub current: usize,
+    /// 总数（-1 表示未知）
+    pub total: usize,
+    /// 人类可读的阶段描述
+    pub message: String,
+}
+
+impl ImportProgressPayload {
+    pub fn new(phase: &str, current: usize, total: usize, message: &str) -> Self {
+        Self {
+            phase: phase.to_string(),
+            current,
+            total,
+            message: message.to_string(),
+        }
     }
 }
 

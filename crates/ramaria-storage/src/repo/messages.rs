@@ -207,3 +207,56 @@ pub async fn list_by_persona(pool: &SqlitePool, persona_uid: &str) -> RamariaRes
         .map(|r| r.into_message())
         .collect::<RamariaResult<Vec<_>>>()
 }
+
+/// 保存导入消息（跳过 session 活跃状态检查）。
+///
+/// 职责:
+/// - 与 `save()` 不同，此函数不检查目标 session 是否已关闭。
+/// - 历史导入的 session 在创建时即已关闭（`ended_at` 不为 NULL），
+///   而 `save()` 会因只读约束拒绝写入。导入专用函数绕过此检查。
+/// - 供 ramaria-importer 在快速/深度导入模式中使用。
+///
+/// 参数:
+/// - `msg`: 待写入的消息，含 fingerprint 和 persona_uid。
+pub async fn save_import(pool: &SqlitePool, msg: &Message) -> RamariaResult<()> {
+    sqlx::query(
+        "INSERT INTO messages (id, session_id, role, content, created_at, source, import_fingerprint, persona_uid)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+        .bind(msg.id.to_string())
+        .bind(msg.session_id.to_string())
+        .bind(msg.role.as_str())
+        .bind(&msg.content)
+        .bind(msg.created_at)
+        .bind(msg.source.to_string())
+        .bind(&msg.fingerprint)
+        .bind(&msg.persona_uid)
+        .execute(pool)
+        .await
+        .map_err(|e| RamariaError::storage_with_source("导入消息写入失败", e))?;
+    Ok(())
+}
+
+/// 获取所有已导入消息的指纹集合（去重预检专用）。
+///
+/// 职责:
+/// - 供导入器在写入前批量比对，避免重复导入。
+/// - 仅查询 `import_fingerprint IS NOT NULL` 的消息（正常对话消息不含指纹）。
+///
+/// 返回:
+/// - 所有已导入 fingerprint 的集合。
+pub async fn list_all_fingerprints(pool: &SqlitePool) -> RamariaResult<Vec<String>> {
+    #[derive(sqlx::FromRow)]
+    struct FpRow {
+        import_fingerprint: String,
+    }
+
+    let rows = sqlx::query_as::<_, FpRow>(
+        "SELECT import_fingerprint FROM messages WHERE import_fingerprint IS NOT NULL",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| RamariaError::storage_with_source("查询指纹列表失败", e))?;
+
+    Ok(rows.into_iter().map(|r| r.import_fingerprint).collect())
+}

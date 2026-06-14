@@ -430,6 +430,69 @@ impl App {
             .await
     }
 
+    /// 生成 L1 摘要但跳过 L2 级联（批量导入用）。
+    pub async fn regenerate_l1_no_cascade(
+        &self,
+        session_id: Uuid,
+        persona_uid: Option<&str>,
+    ) -> RamariaResult<Option<ramaria_core::types::MemoryL1>> {
+        let llm = self.llm.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        self.lifecycle
+            .regenerate_l1_no_cascade(self.storage.as_ref(), llm.as_ref(), session_id, persona_uid)
+            .await
+    }
+
+    /// 手动触发完整记忆管线：L1→L2 事件提取 + L2→L3 性格推断。
+    ///
+    /// 说明:
+    /// - 遍历所有 persona，分别检查未吸收 L1 和未吸收 L2 事件。
+    /// - L1→L2: 未吸收 L1 ≥ 5 条时触发事件提取。
+    /// - L2→L3: 未吸收事件 ≥ 10 条（或最早 > 30 天）时触发性格推断。
+    /// - 两者独立检查，即使 L1 已全部吸收，仍会检查 L3。
+    /// - 用于批量导入等场景，在全部 L1 生成后统一触发一次级联。
+    pub async fn trigger_l2_check(&self) {
+        let llm = self.llm.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let storage = self.storage.as_ref();
+        let llm_ref = llm.as_ref();
+
+        tracing::info!("trigger_l2_check: 开始遍历 persona...");
+
+        // Phase 1: L1 → L2（仅检查未吸收 L1）
+        self.lifecycle
+            .check_l2_trigger(storage, llm_ref)
+            .await;
+
+        // Phase 2: L2 → L3（独立检查未吸收事件，即使 L1 已全部吸收）
+        let personas = match storage.list_personas().await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, "trigger_l2_check: 查询 persona 列表失败，跳过 L3");
+                return;
+            }
+        };
+
+        for persona in &personas {
+            let unabsorbed_events = match storage.list_unabsorbed_events(&persona.uid).await {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!(persona_uid = %persona.uid, error = %e, "查询未吸收事件失败");
+                    continue;
+                }
+            };
+
+            tracing::info!(
+                persona_uid = %persona.uid,
+                persona_name = %persona.name,
+                unabsorbed_event_count = unabsorbed_events.len(),
+                "检查 L3 触发条件"
+            );
+
+            self.lifecycle
+                .check_l3_trigger(storage, llm_ref, &persona.uid)
+                .await;
+        }
+    }
+
     /// 优雅关闭应用：关闭活跃 session 并停止后台线程。
     ///
     /// 对齐 Python `SessionManager.stop()`。

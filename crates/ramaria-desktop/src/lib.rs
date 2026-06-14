@@ -13,6 +13,7 @@ mod notification;
 mod tray;
 
 use ramaria_core::StorageBackend;
+use sqlx::SqlitePool;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
@@ -33,6 +34,8 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 pub struct DesktopState {
     /// 应用核心实例
     pub app: Arc<ramaria_app::App>,
+    /// 数据库连接池（供导入器等直接访问 SQLite）
+    pub pool: SqlitePool,
     /// 数据库文件路径（诊断用）
     pub db_path: PathBuf,
 }
@@ -128,7 +131,9 @@ fn ensure_data_dir(path: &PathBuf) -> std::io::Result<()> {
 /// 返回:
 /// - `Ok(App)` 初始化成功
 /// - `Err(String)` 初始化失败（含用户友好的错误描述）
-async fn init_app(data_dir: &PathBuf) -> Result<(Arc<ramaria_app::App>, PathBuf), String> {
+async fn init_app(
+    data_dir: &PathBuf,
+) -> Result<(Arc<ramaria_app::App>, SqlitePool, PathBuf), String> {
     let db_path = data_dir.join("assistant.db");
 
     // 确保数据目录存在
@@ -141,7 +146,7 @@ async fn init_app(data_dir: &PathBuf) -> Result<(Arc<ramaria_app::App>, PathBuf)
         .await
         .map_err(|e| format!("数据库初始化失败: {}", e))?;
 
-    let storage = Arc::new(ramaria_storage::SqliteStorage::new(pool));
+    let storage = Arc::new(ramaria_storage::SqliteStorage::new(pool.clone()));
 
     // Step 2: 读取已保存的后端配置（如有）
     let backend_config = storage
@@ -205,7 +210,7 @@ async fn init_app(data_dir: &PathBuf) -> Result<(Arc<ramaria_app::App>, PathBuf)
         "App 初始化完成"
     );
 
-    Ok((Arc::new(app), db_path))
+    Ok((Arc::new(app), pool, db_path))
 }
 
 // =========================================================
@@ -238,7 +243,7 @@ pub fn run() {
         .expect("创建 tokio 运行时失败");
 
     // 执行应用初始化
-    let (app, db_path) = match rt.block_on(init_app(&data_dir)) {
+    let (app, pool, db_path) = match rt.block_on(init_app(&data_dir)) {
         Ok(result) => result,
         Err(e) => {
             tracing::error!(error = %e, "应用初始化失败");
@@ -253,6 +258,7 @@ pub fn run() {
 
     let state = DesktopState {
         app,
+        pool,
         db_path: db_path.clone(),
     };
 
@@ -289,6 +295,7 @@ pub fn run() {
             commands::memory::get_l1_memories,
             commands::memory::get_l2_events,
             commands::memory::get_l3_traits,
+            commands::memory::trigger_memory_pipeline,
             // ---- Config ----
             commands::config::get_backend_config,
             commands::config::update_backend_config,
@@ -299,6 +306,10 @@ pub fn run() {
             commands::export::export_sessions_markdown,
             // ---- Index ----
             commands::index_cmd::rebuild_index,
+            // ---- Import (v1.1) ----
+            commands::import_cmd::analyze_qq_chat,
+            commands::import_cmd::import_qq_chat,
+            commands::import_cmd::detect_qq_format,
             // ---- System ----
             tray::confirm_close_action,
         ])

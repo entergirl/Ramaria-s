@@ -8,6 +8,7 @@
 pub mod chat;
 pub mod config;
 pub mod export;
+pub mod import_cmd;
 pub mod index_cmd;
 pub mod memory;
 pub mod session;
@@ -48,6 +49,7 @@ pub fn command_names() -> Vec<&'static str> {
         "get_l1_memories",
         "get_l2_events",
         "get_l3_traits",
+        "trigger_memory_pipeline",
         // config
         "get_backend_config",
         "update_backend_config",
@@ -58,5 +60,8 @@ pub fn command_names() -> Vec<&'static str> {
         "export_sessions_markdown",
         // index
         "rebuild_index",
+        // import (v1.1)
+        "import_qq_chat",
+        "detect_qq_format",
     ]
 }

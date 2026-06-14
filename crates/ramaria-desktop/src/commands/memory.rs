@@ -68,6 +68,7 @@ pub struct PersonaView {
     pub uid: String,
     pub name: String,
     pub kind: String,
+    pub source: String,
     pub is_active: bool,
     pub created_at: i64,
 }
@@ -96,6 +97,7 @@ pub async fn get_personas(state: State<'_, DesktopState>) -> Result<Vec<PersonaV
             uid: p.uid,
             name: p.name,
             kind: p.kind.as_str().to_string(),
+            source: p.source,
             is_active: p.active,
             created_at: p.created_at,
         })
@@ -127,7 +129,7 @@ pub async fn get_l1_memories(
     persona_uid: Option<String>,
     limit: Option<i64>,
 ) -> Result<Vec<MemoryL1View>, String> {
-    let limit = limit.unwrap_or(50).min(200) as usize;
+    let limit = limit.unwrap_or(200).min(1000) as usize;
     let storage = state.app.storage();
 
     // 获取所有会话
@@ -136,8 +138,8 @@ pub async fn get_l1_memories(
         .await
         .map_err(|e| format!("查询会话列表失败: {}", e))?;
 
-    // 并发查询最近 50 个会话的 L1 摘要（避免串行 N+1）
-    let session_limit = sessions.len().min(50);
+    // 并发查询最近 N 个会话的 L1 摘要
+    let session_limit = sessions.len().min(500);
     let l1_futures: Vec<_> = sessions[..session_limit]
         .iter()
         .map(|s| storage.list_memory_l1(s.id))
@@ -199,7 +201,7 @@ pub async fn get_l2_events(
     persona_uid: Option<String>,
     limit: Option<i64>,
 ) -> Result<Vec<MemoryEventView>, String> {
-    let limit = limit.unwrap_or(50).min(200);
+    let limit = limit.unwrap_or(200).min(1000);
 
     // 如果有 persona_uid 过滤，使用带过滤的查询；否则获取全部
     let events = if let Some(ref uid) = persona_uid {
@@ -332,4 +334,31 @@ pub async fn get_l3_traits(
 
     tracing::debug!(count = views.len(), "get_l3_traits 完成");
     Ok(views)
+}
+
+// =========================================================
+// trigger_memory_pipeline — 手动触发记忆管线（v1.1 新增）
+// =========================================================
+
+/// 手动触发 L2 事件提取和 L3 性格推断管线。
+///
+/// 说明:
+/// - 遍历所有 persona，检查未吸收 L1 是否 ≥ 5 条 → 触发 L2 事件提取。
+/// - L2 提取成功后自动级联 L3 性格推断。
+/// - 适用于快速导入后，用户手动启动深度处理。
+/// - 此操作为异步后台任务，返回"已启动"即表示成功提交。
+///
+/// 返回:
+/// - `"ok"`: 管线已触发，后台异步执行。
+#[tauri::command]
+#[tracing::instrument(skip(state))]
+pub async fn trigger_memory_pipeline(state: State<'_, DesktopState>) -> Result<String, String> {
+    tracing::info!("手动触发记忆管线（L2→L3）");
+
+    let app = state.app.clone();
+    tokio::spawn(async move {
+        app.trigger_l2_check().await;
+    });
+
+    Ok("ok".to_string())
 }

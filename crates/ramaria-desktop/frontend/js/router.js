@@ -46,6 +46,7 @@ var RamariaRouter = (function () {
     var VIEW_TITLES = {
         chat: '对话',
         memory: '记忆',
+        import: '数据导入',
         settings: '设置',
         setup: '首次配置',
         progress: '处理中',

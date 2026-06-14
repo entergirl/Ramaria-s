@@ -265,6 +265,20 @@ var RamariaApi = (function () {
         return await _invoke('get_l3_traits', args, '查询 L3 性格标签');
     }
 
+    /**
+     * 手动触发记忆管线（L2 事件提取 → L3 性格推断）。
+     *
+     * 说明:
+     * - 遍历所有 persona，对满足条件的触发 L2/L3 处理。
+     * - 适用于快速导入后手动启动深度处理。
+     *
+     * 返回:
+     * - "ok" 表示管线已触发（后台异步执行）
+     */
+    async function triggerMemoryPipeline() {
+        return await _invoke('trigger_memory_pipeline', {}, '触发记忆管线');
+    }
+
     // =========================================================
     // 4. 配置管理 (config)
     // =========================================================
@@ -480,6 +494,68 @@ var RamariaApi = (function () {
     }
 
     // =========================================================
+    // 8. 数据导入 (import) — v1.1 新增
+    // =========================================================
+
+    /**
+     * 检测文件是否为 QQ 聊天记录格式。
+     *
+     * 参数:
+     * - `filePath`: 文件绝对路径
+     *
+     * 返回:
+     * - true 表示文件可以解析，false 表示格式不匹配
+     */
+    async function detectQQFormat(filePath) {
+        _require(filePath, '文件路径');
+        return await _invoke('detect_qq_format', { filePath: filePath }, '检测 QQ 格式');
+    }
+
+    /**
+     * 解析 QQ 聊天记录文件并返回分析报告（不导入数据）。
+     *
+     * 参数:
+     * - `filePath`: 文件绝对路径
+     * - `gapMinutes`: session 切割间隔（分钟），默认 10
+     *
+     * 返回:
+     * - { selfName, selfId, chatName, timeRange, totalSuccess, totalDegraded, totalSkipped, sessionCount, ... }
+     */
+    async function analyzeQQFile(filePath, gapMinutes) {
+        _require(filePath, '文件路径');
+        var args = { filePath: filePath };
+        if (gapMinutes !== undefined && gapMinutes !== null) {
+            args.gapMinutes = gapMinutes;
+        }
+        return await _invoke('analyze_qq_chat', args, '分析 QQ 文件');
+    }
+
+    /**
+     * 执行 QQ 聊天记录导入。
+     *
+     * 参数:
+     * - `filePath`: 文件绝对路径
+     * - `mode`: 导入模式，"fast"（仅 L0）或 "deep"（全管线）
+     * - `personaName`: 可选，关联的 persona 显示名称
+     * - `gapMinutes`: 可选，session 切割间隔（分钟），默认 10
+     *
+     * 返回:
+     * - ImportResult: { success, mode, report_summary, sessions_written, messages_written, persona_uid, persona_name, ... }
+     */
+    async function importQQChat(filePath, mode, personaName, gapMinutes) {
+        _require(filePath, '文件路径');
+        var args = {
+            filePath: filePath,
+            mode: mode || 'fast',
+        };
+        if (personaName) args.personaName = personaName;
+        if (gapMinutes !== undefined && gapMinutes !== null) {
+            args.gapMinutes = gapMinutes;
+        }
+        return await _invoke('import_qq_chat', args, '导入 QQ 聊天记录');
+    }
+
+    // =========================================================
     // 公开 API
     // =========================================================
 
@@ -503,6 +579,7 @@ var RamariaApi = (function () {
             getL1: getL1Memories,
             getL2: getL2Events,
             getL3: getL3Traits,
+            triggerPipeline: triggerMemoryPipeline,
         },
         config: {
             getBackend: getBackendConfig,
@@ -526,6 +603,11 @@ var RamariaApi = (function () {
         },
         index: {
             rebuild: rebuildIndex,
+        },
+        import: {
+            detectFormat: detectQQFormat,
+            analyzeFile: analyzeQQFile,
+            importQQ: importQQChat,
         },
     };
 })();

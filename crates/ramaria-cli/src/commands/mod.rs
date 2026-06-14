@@ -9,6 +9,7 @@ pub mod ask;
 pub mod chat;
 pub mod config;
 pub mod export;
+pub mod import_cmd;
 pub mod index_cmd;
 pub mod memory;
 pub mod persona;

@@ -16,6 +16,7 @@ use ramaria_cli::ui;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use ramaria_core::StorageBackend;
+use sqlx::SqlitePool;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -119,6 +120,33 @@ enum Commands {
         #[arg(short, long)]
         output: Option<String>,
     },
+
+    /// 导入外部聊天记录（QQ）
+    #[command(subcommand)]
+    Import(ImportCmd),
+}
+
+/// 导入子命令（v1.1 新增）。
+#[derive(Subcommand)]
+enum ImportCmd {
+    /// 导入 QQ 聊天记录
+    Qq {
+        /// 聊天记录文件路径（JSON 或 .txt 格式）
+        #[arg(short, long)]
+        file: String,
+
+        /// 深度导入模式（触发完整 L0→L1→L2→L3 记忆管线）
+        #[arg(long)]
+        deep: bool,
+
+        /// 导入关联的 persona 名称（默认使用导出者名称）
+        #[arg(long)]
+        persona: Option<String>,
+
+        /// session 切割时间间隔（分钟），默认 10
+        #[arg(long, default_value = "10")]
+        gap: u32,
+    },
 }
 
 #[derive(Subcommand)]
@@ -193,15 +221,15 @@ async fn main() {
     let cli = Cli::parse();
 
     // 初始化 App
-    let app = match init_app(cli.db.clone()).await {
-        Ok(a) => a,
+    let (app, pool) = match init_app(cli.db.clone()).await {
+        Ok((a, p)) => (a, p),
         Err(e) => {
             ui::fatal_anyhow(&e, 1);
         }
     };
 
     // 调度命令
-    let result = dispatch(&app, cli).await;
+    let result = dispatch(&app, &pool, cli).await;
 
     if let Err(e) = result {
         // 检查是否有 RamariaError source
@@ -217,7 +245,9 @@ async fn main() {
 // =========================================================
 
 /// 初始化 App：连接数据库 → 迁移 → 创建 LLM → 构造 App。
-async fn init_app(db_path: PathBuf) -> anyhow::Result<Arc<ramaria_app::App>> {
+///
+/// 返回 (App实例, 数据库连接池)。连接池供导入器等需要直接访问 SQLite 的命令使用。
+async fn init_app(db_path: PathBuf) -> anyhow::Result<(Arc<ramaria_app::App>, sqlx::SqlitePool)> {
     tracing::info!(db = %db_path.display(), "初始化 App");
 
     // Step 1: 初始化数据库连接池 + 执行 migration
@@ -225,7 +255,7 @@ async fn init_app(db_path: PathBuf) -> anyhow::Result<Arc<ramaria_app::App>> {
         .await
         .context("数据库初始化失败")?;
 
-    let storage = Arc::new(ramaria_storage::SqliteStorage::new(pool));
+    let storage = Arc::new(ramaria_storage::SqliteStorage::new(pool.clone()));
 
     // Step 2: 读取已保存的后端配置（如有）
     let backend_config = storage
@@ -281,14 +311,14 @@ async fn init_app(db_path: PathBuf) -> anyhow::Result<Arc<ramaria_app::App>> {
         "App 初始化完成"
     );
 
-    Ok(app)
+    Ok((app, pool))
 }
 
 // =========================================================
 // 命令调度
 // =========================================================
 
-async fn dispatch(app: &Arc<ramaria_app::App>, cli: Cli) -> anyhow::Result<()> {
+async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Commands::Setup => {
             commands::setup::run(app, cli.skip_validate).await?;
@@ -381,6 +411,24 @@ async fn dispatch(app: &Arc<ramaria_app::App>, cli: Cli) -> anyhow::Result<()> {
             };
             commands::export::run(app, args).await?;
         }
+        Commands::Import(sub) => match sub {
+            ImportCmd::Qq {
+                file,
+                deep,
+                persona,
+                gap,
+            } => {
+                let args = commands::import_cmd::ImportArgs {
+                    file,
+                    deep,
+                    persona,
+                    gap,
+                    yes: cli.yes,
+                };
+                // 导入命令需要 App（触发 L1 摘要）和数据库连接池
+                commands::import_cmd::run(app, pool, args).await?;
+            }
+        },
     }
 
     Ok(())

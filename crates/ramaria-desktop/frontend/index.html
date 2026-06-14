@@ -32,6 +32,9 @@
     <link rel="stylesheet" href="css/views/memory.css" />
     <link rel="stylesheet" href="css/views/settings.css" />
 
+    <!-- v1.1：导入视图样式 -->
+    <link rel="stylesheet" href="css/views/import.css" />
+
     <!-- Batch 6：动效系统（集中所有 keyframes，必须在视图 CSS 之后加载） -->
     <link rel="stylesheet" href="css/animations.css" />
 </head>
@@ -83,6 +86,14 @@
                                 role="menuitem">
                             <span class="sidebar-nav-icon" aria-hidden="true">🧠</span>
                             <span>记忆</span>
+                        </button>
+                    </li>
+                    <li role="none">
+                        <button class="sidebar-nav-link"
+                                data-view="import"
+                                role="menuitem">
+                            <span class="sidebar-nav-icon" aria-hidden="true">📥</span>
+                            <span>导入</span>
                         </button>
                     </li>
                     <li role="none">
@@ -146,6 +157,9 @@
 
                 <!-- 设置视图（由 js/views/settings.js 动态渲染） -->
                 <div class="view" id="view-settings" data-view="settings"></div>
+
+                <!-- 导入视图（v1.1 新增，由 js/views/import.js 动态渲染） -->
+                <div class="view" id="view-import" data-view="import"></div>
 
                 <!-- 首次配置全屏视图（由 js/views/setup.js 动态渲染） -->
                 <div class="view view--fullscreen" id="view-setup" data-view="setup"></div>
@@ -222,6 +236,9 @@
     <script src="js/views/chat.js"></script>
     <script src="js/views/memory.js"></script>
     <script src="js/views/settings.js"></script>
+
+    <!-- v1.1：导入视图模块 -->
+    <script src="js/views/import.js"></script>
 
 </body>
 </html>

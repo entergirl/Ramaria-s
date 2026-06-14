@@ -9,6 +9,7 @@ ramaria-core = { path = "../ramaria-core" }
 ramaria-storage = { path = "../ramaria-storage" }
 ramaria-memory = { path = "../ramaria-memory" }
 ramaria-llm = { path = "../ramaria-llm" }
+ramaria-importer = { path = "../ramaria-importer", optional = true }
 tokio.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
@@ -19,3 +20,7 @@ async-trait.workspace = true
 chrono.workspace = true
 reqwest.workspace = true
 sha2.workspace = true
+
+[features]
+default = []
+importer = ["dep:ramaria-importer"]

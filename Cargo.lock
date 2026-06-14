@@ -3912,6 +3912,7 @@ dependencies = [
  "chrono",
  "futures",
  "ramaria-core",
+ "ramaria-importer",
  "ramaria-llm",
  "ramaria-memory",
  "ramaria-storage",
@@ -3934,11 +3935,13 @@ dependencies = [
  "futures",
  "ramaria-app",
  "ramaria-core",
+ "ramaria-importer",
  "ramaria-llm",
  "ramaria-storage",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sqlx",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -3967,10 +3970,12 @@ dependencies = [
  "futures",
  "ramaria-app",
  "ramaria-core",
+ "ramaria-importer",
  "ramaria-llm",
  "ramaria-storage",
  "serde",
  "serde_json",
+ "sqlx",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
@@ -3980,6 +3985,25 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "ramaria-importer"
+version = "1.0.1"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "encoding_rs",
+ "ramaria-core",
+ "ramaria-storage",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 

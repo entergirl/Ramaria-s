@@ -72,7 +72,12 @@ var RamariaMemoryView = (function () {
             '<select id="memory-persona-select" aria-label="选择人格">' +
                 '<option value="rama-0001">默认 (rama-0001)</option>' +
             '</select>' +
-            '<span style="font-size:11px;color:var(--text-tertiary);">筛选记忆归属人格</span>';
+            '<span style="font-size:11px;color:var(--text-tertiary);">筛选记忆归属人格</span>' +
+            // 深度处理按钮（仅导入人格时显示，默认隐藏）
+            '<button class="btn btn-secondary btn-sm hidden" id="btn-trigger-pipeline" ' +
+            'title="对此导入人格的消息执行 L2 事件提取和 L3 性格画像生成" ' +
+            'style="margin-left:auto;">' +
+            '🔬 深度处理导入的消息</button>';
         inner.appendChild(toolbar);
 
         // ── Tab 切换（ARIA Tabs 模式）──
@@ -140,6 +145,7 @@ var RamariaMemoryView = (function () {
             personaSelect.addEventListener('change', function () {
                 _currentPersonaUid = this.value;
                 _loadAllData();
+                _updatePipelineButton();
             });
         }
     }
@@ -171,8 +177,8 @@ var RamariaMemoryView = (function () {
         try {
             // 并行加载三层数据
             var results = await Promise.allSettled([
-                RamariaApi.memory.getL1(_currentPersonaUid, 100),
-                RamariaApi.memory.getL2(_currentPersonaUid, 200),
+                RamariaApi.memory.getL1(_currentPersonaUid, 500),
+                RamariaApi.memory.getL2(_currentPersonaUid, 500),
                 RamariaApi.memory.getL3(_currentPersonaUid),
             ]);
 
@@ -183,7 +189,7 @@ var RamariaMemoryView = (function () {
             // v1.1 降级：若按 persona 过滤无结果，尝试不过滤再查一次
             if (l1Data.length === 0 && _currentPersonaUid) {
                 try {
-                    var l1Fallback = await RamariaApi.memory.getL1(null, 100);
+                    var l1Fallback = await RamariaApi.memory.getL1(null, 500);
                     if (l1Fallback && l1Fallback.length > 0) {
                         console.warn('[MemoryView] L1 按 persona=' + _currentPersonaUid + ' 查询为空，降级为全量查询，找到 ' + l1Fallback.length + ' 条');
                         l1Data = l1Fallback;
@@ -524,6 +530,9 @@ var RamariaMemoryView = (function () {
     // 人格选择器刷新
     // =========================================================
 
+    /** 缓存的 persona 列表（含 source 字段，用于判断是否导入人格） */
+    var _allPersonas = [];
+
     async function _refreshPersonaSelector() {
         var select = $('memory-persona-select');
         if (!select) return;
@@ -531,26 +540,106 @@ var RamariaMemoryView = (function () {
         try {
             var personas = await RamariaApi.memory.getPersonas();
             RamariaStore.set('personas', personas || []);
+            _allPersonas = personas || [];
 
             select.innerHTML = '';
-            for (var i = 0; i < personas.length; i++) {
+            for (var i = 0; i < _allPersonas.length; i++) {
                 var opt = document.createElement('option');
-                opt.value = personas[i].uid;
-                opt.textContent = personas[i].name + ' (' + personas[i].uid + ')';
+                opt.value = _allPersonas[i].uid;
+                opt.textContent = _allPersonas[i].name + ' (' + _allPersonas[i].uid + ')';
                 select.appendChild(opt);
             }
 
             // 默认 rama-0001
             var def = select.querySelector('option[value="rama-0001"]');
-            if (!def && personas.length > 0) {
-                select.value = personas[0].uid;
-                _currentPersonaUid = personas[0].uid;
+            if (!def && _allPersonas.length > 0) {
+                select.value = _allPersonas[0].uid;
+                _currentPersonaUid = _allPersonas[0].uid;
             } else if (def) {
                 select.value = 'rama-0001';
                 _currentPersonaUid = 'rama-0001';
             }
         } catch (err) {
             console.error('[MemoryView] 加载人格列表失败:', err);
+        }
+    }
+
+    // =========================================================
+    // 深度处理按钮
+    // =========================================================
+
+    /** 管道是否正在执行中（防止重复点击） */
+    var _pipelineRunning = false;
+    /** 按钮事件是否已绑定 */
+    var _pipelineBtnBound = false;
+
+    /**
+     * 根据当前选中的 persona 决定是否显示"深度处理"按钮。
+     * 仅当 persona.source === "qq"（导入人格）时显示。
+     */
+    function _updatePipelineButton() {
+        var btn = document.getElementById('btn-trigger-pipeline');
+        if (!btn) return;
+
+        // 查找当前选中 persona 的 source
+        var currentPersona = null;
+        for (var i = 0; i < _allPersonas.length; i++) {
+            if (_allPersonas[i].uid === _currentPersonaUid) {
+                currentPersona = _allPersonas[i];
+                break;
+            }
+        }
+
+        var isImported = currentPersona && currentPersona.source === 'qq';
+        if (isImported) {
+            btn.classList.remove('hidden');
+        } else {
+            btn.classList.add('hidden');
+        }
+
+        // 首次绑定点-击事件
+        if (!_pipelineBtnBound) {
+            btn.addEventListener('click', _handleTriggerPipeline);
+            _pipelineBtnBound = true;
+        }
+    }
+
+    /**
+     * 处理"深度处理导入的消息"按钮点击。
+     * 调用后端 trigger_memory_pipeline 触发 L2→L3 级联。
+     */
+    async function _handleTriggerPipeline() {
+        if (_pipelineRunning) {
+            RamariaToast.show('深度处理正在进行中，请稍候...', 'warning');
+            return;
+        }
+
+        var btn = document.getElementById('btn-trigger-pipeline');
+        _pipelineRunning = true;
+        if (btn) {
+            btn.disabled = true;
+            btn.textContent = '⏳ 处理中...';
+        }
+
+        try {
+            await RamariaApi.memory.triggerPipeline();
+            RamariaToast.show('深度处理已启动！L2 事件提取和 L3 性格画像将在后台异步执行。', 'success');
+            setTimeout(function () {
+                _loadAllData();
+                _pipelineRunning = false;
+                if (btn) {
+                    btn.disabled = false;
+                    btn.textContent = '🔬 深度处理导入的消息';
+                }
+            }, 3000);
+        } catch (err) {
+            _pipelineRunning = false;
+            if (btn) {
+                btn.disabled = false;
+                btn.textContent = '🔬 深度处理导入的消息';
+            }
+            console.error('[MemoryView] 深度处理失败:', err);
+            RamariaToast.show('深度处理失败: ' + (err.message || String(err)), 'error');
         }
     }
 
@@ -566,6 +655,7 @@ var RamariaMemoryView = (function () {
             render();
             _refreshPersonaSelector().then(function () {
                 _loadAllData();
+                _updatePipelineButton();
             });
         });
         _unregisterFns.push(unreg);
