@@ -22,6 +22,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 use futures::StreamExt;
 use ramaria_core::error::{RamariaError, RamariaResult};
@@ -107,6 +108,27 @@ pub struct DownloadProgress {
 /// 下载进度回调类型。
 pub type ProgressCallback = Arc<dyn Fn(DownloadProgress) + Send + Sync>;
 
+/// HTTP 客户端默认连接超时（秒）。
+const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 30;
+/// HTTP 客户端默认请求总超时（秒）。
+const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 3600; // 1 小时，适应大型模型文件下载
+
+/// 创建一个配置了合理超时的 reqwest Client。
+///
+/// - 连接超时: `connect_timeout(30s)`——建立 TCP/TLS 连接的超时
+/// - 请求超时: `timeout(3600s)`——整体请求的超时（含下载）
+///
+/// 说明: timeout 覆盖 download_single_file 中的流式下载，
+/// 确保网络卡住时不会永久挂起。3600 秒足够下载 1.2GB 文件（~350KB/s）。
+fn build_http_client() -> RamariaResult<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS))
+        .timeout(Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS))
+        .user_agent(format!("Ramaria/{}", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| RamariaError::validation(format!("创建 HTTP 客户端失败: {e}")))
+}
+
 // =========================================================
 // ModelManager
 // =========================================================
@@ -135,6 +157,8 @@ pub struct ModelManager {
     downloaded: AtomicU64,
     /// 当前下载的总字节数
     total_size: AtomicU64,
+    /// 可复用的 HTTP 客户端（连接池 + TLS 会话重用 + 超时配置）
+    http_client: reqwest::Client,
 }
 
 impl ModelManager {
@@ -157,6 +181,9 @@ impl ModelManager {
             RamariaError::io(format!("无法创建模型目录: {}", root.display()), Some(e))
         })?;
 
+        // 构建可复用的 HTTP 客户端（连接池、TLS 会话重用、超时配置）
+        let http_client = build_http_client()?;
+
         tracing::info!(models_root = %root.display(), "ModelManager 已初始化");
 
         Ok(Self {
@@ -164,6 +191,7 @@ impl ModelManager {
             cancelled: AtomicBool::new(false),
             downloaded: AtomicU64::new(0),
             total_size: AtomicU64::new(0),
+            http_client,
         })
     }
 
@@ -522,6 +550,12 @@ impl ModelManager {
     // ---- 内部方法 ----
 
     /// 下载单个文件（支持断点续传）。
+    ///
+    /// 使用 `self.http_client`（在 `ModelManager::new()` 中创建的可复用实例），
+    /// 而非每次调用创建新 Client。好处:
+    /// - 连接池复用，减少 TCP/TLS 握手开销（尤其是多文件下载时）
+    /// - 超时设置在构造时统一配置（connect_timeout: 30s, timeout: 3600s）
+    /// - 请求级超时由 tokio::time::timeout 包裹（见 `download_model()` 的调用处）
     async fn download_single_file(
         &self,
         url: &str,
@@ -529,8 +563,6 @@ impl ModelManager {
         filename: &str,
         cb: Option<&ProgressCallback>,
     ) -> RamariaResult<()> {
-        let client = reqwest::Client::new();
-
         // 检查是否有断点续传的临时文件
         let existing_size = if dest.exists() {
             fs::metadata(dest).map(|m| m.len()).unwrap_or(0)
@@ -539,7 +571,7 @@ impl ModelManager {
         };
 
         // 构建请求（支持 Range 头用于断点续传）
-        let mut request = client.get(url);
+        let mut request = self.http_client.get(url);
         if existing_size > 0 {
             request = request.header("Range", format!("bytes={}-", existing_size));
             tracing::debug!(file = %filename, existing_bytes = existing_size, "断点续传");

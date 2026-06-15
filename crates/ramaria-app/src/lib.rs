@@ -17,15 +17,21 @@
 //! - ramaria-llm: LLM provider + keychain + embedding provider
 
 pub mod app;
+pub mod app_chat;
+pub mod app_retriever;
+pub mod app_state;
+pub mod diagnostics;
 pub mod error_hint;
 pub mod model_manager;
 pub mod privacy;
 pub mod session_lifecycle;
 pub mod setup;
 pub mod stream_event;
+pub mod update;
 
 // 重新导出核心类型
 pub use app::{App, SendMessageStream};
+pub use diagnostics::{DiagnosticsReport, export_diagnostics};
 pub use error_hint::{ErrorHint, error_detail, error_title, is_retryable};
 pub use model_manager::{
     DownloadProgress, MODEL_PRESETS, ModelManager, ModelPreset, default_models_root,
@@ -34,6 +40,7 @@ pub use privacy::{PrivacyStatus, check_privacy, confirm_privacy, require_privacy
 pub use session_lifecycle::SessionLifecycle;
 pub use setup::{SetupStatus, check_setup_status, determine_state, run_setup};
 pub use stream_event::StreamEvent;
+pub use update::{UpdateStatus, check_update};
 
 // 保留旧占位函数（向后兼容，后续可移除）
 pub use ramaria_core;

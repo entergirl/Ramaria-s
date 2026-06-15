@@ -46,13 +46,13 @@ use uuid::Uuid;
 /// - `SessionManager._l2_checker_loop()` → `run_l2_l3_scheduler()`
 pub struct SessionLifecycle {
     /// 当前活跃 session ID（同一时刻只有一个活跃 session）
-    active_session_id: Mutex<Option<Uuid>>,
+    pub(crate) active_session_id: Mutex<Option<Uuid>>,
     /// 各 session 最后一条消息的时间（Unix 毫秒），内存缓存
-    session_last_active: Mutex<HashMap<Uuid, i64>>,
+    pub(crate) session_last_active: Mutex<HashMap<Uuid, i64>>,
     /// 应用配置引用
-    config: RamariaConfig,
+    pub(crate) config: RamariaConfig,
     /// 停止标志（所有后台线程在设置此标志后退出）
-    shutdown_flag: Arc<AtomicBool>,
+    pub(crate) shutdown_flag: Arc<AtomicBool>,
 }
 
 impl SessionLifecycle {
