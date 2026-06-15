@@ -141,6 +141,7 @@
 .text-secondary { color: var(--text-secondary); }
 .text-tertiary  { color: var(--text-tertiary); }
 .text-pink      { color: var(--color-primary); }
+.text-green     { color: #4caf78; }
 .text-blue      { color: var(--color-secondary); }
 
 /* 字重 */
@@ -270,3 +271,135 @@
 
 .select-none { user-select: none; }
 .select-all  { user-select: all; }
+
+/* =========================================================
+   13. 排版类型比例（对齐 UI 设计参考 §2 Type Scale）
+   用于非组件场景的文字层级控制。
+   组件内部优先使用各自的 CSS 类（.card-title 等）。
+   ========================================================= */
+
+.t-display-lg {
+  font-family: var(--font-display);
+  font-size: 40px;
+  line-height: 1.1;
+  color: var(--gray-800);
+}
+
+.t-display {
+  font-family: var(--font-display);
+  font-size: 28px;
+  line-height: 1.2;
+  color: var(--gray-800);
+}
+
+.t-h1 {
+  font-size: 22px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--gray-700);
+}
+
+.t-h2 {
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--gray-700);
+}
+
+.t-h3 {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--gray-700);
+}
+
+.t-body-lg {
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 1.65;
+  color: var(--gray-600);
+}
+
+.t-body {
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.65;
+  color: var(--gray-600);
+}
+
+.t-small {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--gray-500);
+}
+
+.t-caption {
+  font-size: 11px;
+  color: var(--gray-400);
+  letter-spacing: 0.02em;
+}
+
+.t-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--gray-500);
+}
+
+.t-code {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--color-primary);
+  background: var(--pink-50);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+/* 暗色模式下 code 标签适配 */
+[data-theme="dark"] .t-code {
+  background: oklch(0.26 0.035 15);
+  color: var(--pink-300);
+}
+
+/* =========================================================
+   14. Note 提示块（对齐 UI 设计参考 §Utilities）
+   粉色/蓝色左侧边框强调提示块，用于文档/设置页。
+   ========================================================= */
+
+.note {
+  background: var(--pink-50);
+  border-left: 3px solid var(--pink-300);
+  padding: 12px 16px;
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  font-size: 13px;
+  color: var(--gray-600);
+  margin: 16px 0;
+  line-height: 1.65;
+}
+
+.note.blue {
+  background: var(--blue-50);
+  border-color: var(--blue-300);
+}
+
+.note strong {
+  color: var(--gray-700);
+  font-weight: 600;
+}
+
+/* 暗色模式 */
+[data-theme="dark"] .note {
+  background: oklch(0.22 0.01 20);
+  border-color: oklch(0.35 0.06 15);
+  color: oklch(0.72 0 0);
+}
+
+[data-theme="dark"] .note.blue {
+  background: oklch(0.21 0.018 222);
+  border-color: oklch(0.32 0.05 224);
+}
+
+[data-theme="dark"] .note strong {
+  color: oklch(0.88 0 0);
+}

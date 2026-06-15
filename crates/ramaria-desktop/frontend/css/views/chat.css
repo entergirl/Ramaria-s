@@ -75,12 +75,108 @@
 }
 
 /*
- * 消息气泡 wrapper
+ * 消息气泡 wrapper（CSP-safe: 所有样式走 CSS 类，零内联 style）
  * 注意：fadeInUp 关键帧定义在 css/animations.css（集中管理）
  */
 .msg-bubble-wrapper {
   flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  margin-bottom: var(--space-3);
+  padding: 0 var(--space-4);
   animation: fadeInUp var(--dur-normal) var(--ease-out) both;
+}
+
+/* 按角色控制水平对齐 */
+.msg-bubble-wrapper[data-role="user"]      { align-items: flex-end; }
+.msg-bubble-wrapper[data-role="assistant"] { align-items: flex-start; }
+.msg-bubble-wrapper[data-role="system"]    { align-items: center; }
+
+/* ── 消息气泡本体 ── */
+.msg-bubble {
+  max-width: 75%;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  font-size: 13.5px;
+  line-height: 1.65;
+  color: var(--text-primary);
+  word-break: break-word;
+  overflow-wrap: break-word;
+  border: 1px solid;
+}
+
+/* 按角色控制气泡底色 */
+.msg-bubble-wrapper[data-role="user"]      .msg-bubble { background: oklch(0.53 0.19 10 / 0.08);  border-color: oklch(0.53 0.19 10 / 0.18); }
+.msg-bubble-wrapper[data-role="assistant"] .msg-bubble { background: oklch(0.48 0.17 225 / 0.06); border-color: oklch(0.48 0.17 225 / 0.14); }
+.msg-bubble-wrapper[data-role="system"]    .msg-bubble { background: var(--bg-subtle);            border-color: var(--border-default); }
+
+/* 流式气泡 */
+.msg-bubble--streaming {
+  position: relative;
+}
+
+/* 错误状态 */
+.msg-bubble--error {
+  border-color: var(--pink-400) !important;
+}
+
+/* ── 元数据行（角色标签 + 人格 + 时间） ── */
+.msg-bubble-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-1);
+  font-size: 11px;
+}
+
+.msg-bubble-meta--system {
+  justify-content: center;
+  font-size: 10px;
+  color: var(--text-tertiary);
+  margin-bottom: var(--space-1);
+}
+
+.msg-bubble-label {
+  font-weight: 500;
+}
+
+.msg-bubble-wrapper[data-role="user"]      .msg-bubble-label { color: var(--pink-500); }
+.msg-bubble-wrapper[data-role="assistant"] .msg-bubble-label { color: var(--blue-500); }
+
+.msg-bubble-persona {
+  color: var(--text-tertiary);
+}
+
+.msg-bubble-time {
+  color: var(--text-tertiary);
+}
+
+/* ── 错误提示条 ── */
+.msg-bubble-error {
+  margin-top: var(--space-2);
+  font-size: 11px;
+  color: var(--pink-500);
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+/* ── 占位提示 ── */
+.msg-bubble-placeholder {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: var(--space-3);
+  padding: 0 var(--space-4);
+  text-align: center;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  align-items: center;
+}
+
+/* ── 流式"正在生成"标签 ── */
+.msg-bubble-streaming-label {
+  color: var(--blue-500);
+  font-weight: 500;
 }
 
 /*
@@ -177,6 +273,18 @@
   flex-shrink: 0;
 }
 
+.chat-input-persona-label {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+/* L1 重试按钮 */
+.msg-retry-btn {
+  margin-top: 6px;
+  padding: 2px 12px;
+  font-size: 12px;
+}
+
 .chat-input-toolbar select {
   padding: var(--space-1) var(--space-2);
   border-radius: var(--radius-sm);
@@ -220,7 +328,7 @@
 
 .chat-input-textarea:focus {
   border-color: var(--color-primary);
-  box-shadow: 0 0 0 3px oklch(0.53 0.19 10 / 0.08);
+  box-shadow: 0 0 0 var(--focus-ring-width) oklch(0.53 0.19 10 / 0.12);
 }
 
 .chat-input-textarea::placeholder {

@@ -291,12 +291,24 @@ var RamariaPersonaView = (function () {
         _page = 'detail';
         _detailUid = p.uid;
         RamariaRouter.setContentTitle(p.name);
+        // 在内容头部注入返回按钮
+        RamariaRouter.setContentActions(
+            '<button class="btn btn-ghost btn-sm" id="persona-back-btn">← 返回列表</button>'
+        );
 
         var container = document.getElementById('view-persona');
         if (!container) return;
 
         container.innerHTML = '';
         container.appendChild(_buildDetailPage(p));
+
+        // 绑定返回按钮事件
+        setTimeout(function () {
+            var backBtn = document.getElementById('persona-back-btn');
+            if (backBtn) {
+                backBtn.addEventListener('click', _backToList);
+            }
+        }, 0);
     }
 
     /**
@@ -304,6 +316,7 @@ var RamariaPersonaView = (function () {
      */
     function _backToList() {
         RamariaRouter.setContentTitle('人格管理');
+        RamariaRouter.setContentActions(''); // 清除头部返回按钮
         _page = 'list';
         _detailUid = null;
 
@@ -649,7 +662,7 @@ var RamariaPersonaView = (function () {
     // =========================================================
 
     /**
-     * 构建加载态骨架屏。
+     * 构建加载态骨架屏（CSP-safe: 零内联 style）。
      */
     function _buildSkeleton() {
         var wrapper = document.createElement('div');
@@ -663,12 +676,21 @@ var RamariaPersonaView = (function () {
             var card = document.createElement('div');
             card.className = 'persona-card persona-card--skeleton';
             card.setAttribute('aria-hidden', 'true');
-            card.innerHTML =
-                '<div class="skeleton-line skeleton-line--lg" style="width:60%"></div>' +
-                '<div class="skeleton-line" style="width:40%;margin-top:var(--space-2)"></div>' +
-                '<div class="skeleton-line" style="width:90%;margin-top:var(--space-3)"></div>' +
-                '<div class="skeleton-line" style="width:80%;margin-top:var(--space-1)"></div>' +
-                '<div class="skeleton-line" style="width:30%;margin-top:var(--space-3)"></div>';
+
+            // 使用 CSS 宽度工具类替代内联 style（w-60 / w-40 / w-90 / w-80 / w-30）
+            var lines = [
+                { cls: 'skeleton-line skeleton-line--lg w-60', mt: '' },
+                { cls: 'skeleton-line w-40', mt: 'mt-2' },
+                { cls: 'skeleton-line w-90', mt: 'mt-3' },
+                { cls: 'skeleton-line w-80', mt: 'mt-1' },
+                { cls: 'skeleton-line w-30', mt: 'mt-3' },
+            ];
+            for (var j = 0; j < lines.length; j++) {
+                var div = document.createElement('div');
+                div.className = lines[j].cls + (lines[j].mt ? ' ' + lines[j].mt : '');
+                card.appendChild(div);
+            }
+
             grid.appendChild(card);
         }
 
@@ -778,6 +800,13 @@ var RamariaPersonaView = (function () {
         reload: _loadAndRender,
     };
 })();
+
+// 防止意外覆盖
+Object.defineProperty(window, 'RamariaPersonaView', {
+    value: RamariaPersonaView,
+    writable: false,
+    configurable: false,
+});
 
 // =========================================================
 // 自动初始化

@@ -57,6 +57,9 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-3);
+
+    /* 渲染隔离：卡片内容变更不触发外部重绘 */
+    contain: content;
 }
 
 .persona-card:hover {
@@ -197,6 +200,8 @@
     gap: var(--space-5);
     padding: var(--space-4) var(--space-5);
     max-width: 640px;
+    margin: 0 auto;               /* 居中，避免右侧大空白 */
+    width: 100%;                  /* 小屏自适应 */
     height: 100%;
     overflow-y: auto;
 }
@@ -242,7 +247,7 @@
 .persona-field-input:focus {
     outline: none;
     border-color: var(--color-primary);
-    box-shadow: 0 0 0 2px var(--pink-100);
+    box-shadow: 0 0 0 var(--focus-ring-width) oklch(0.53 0.19 10 / 0.12);
 }
 
 .persona-field-input::placeholder {
@@ -367,4 +372,40 @@ textarea.persona-field-input {
     .persona-meta-grid {
         grid-template-columns: 1fr;
     }
+}
+
+/* ════════════════════════════════════════════════════════════
+   暗色模式（Dark Theme Overrides）
+   修复类型标签文字在暗色背景下无法辨识的问题。
+   ════════════════════════════════════════════════════════════ */
+
+/* 类型标签：各类型文字从深色 → 亮色，背景加深 */
+[data-theme="dark"] .persona-tag--user {
+  background: oklch(0.28 0.05 222);
+  color: oklch(0.82 0.10 225);
+}
+
+[data-theme="dark"] .persona-tag--rama {
+  background: oklch(0.28 0.055 12);
+  color: oklch(0.82 0.12 15);
+}
+
+[data-theme="dark"] .persona-tag--char {
+  background: oklch(0.26 0.04 222);
+  color: oklch(0.78 0.10 225);
+}
+
+[data-theme="dark"] .persona-tag--anim {
+  background: oklch(0.26 0.04 12);
+  color: oklch(0.78 0.10 15);
+}
+
+[data-theme="dark"] .persona-tag--oc {
+  background: oklch(0.30 0.003 25);
+  color: oklch(0.78 0 0);
+}
+
+[data-theme="dark"] .persona-tag--hist {
+  background: oklch(0.30 0.003 25);
+  color: oklch(0.78 0 0);
 }

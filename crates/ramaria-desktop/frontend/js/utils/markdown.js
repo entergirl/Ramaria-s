@@ -486,3 +486,10 @@ var RamariaMarkdown = (function () {
         plainText: plainText
     };
 })();
+
+// 防止意外覆盖
+Object.defineProperty(window, 'RamariaMarkdown', {
+    value: RamariaMarkdown,
+    writable: false,
+    configurable: false,
+});

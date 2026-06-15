@@ -113,7 +113,7 @@ var RamariaSetupView = (function () {
         // ── 底部操作区 ──
         card.innerHTML +=
             '<div class="setup-card-footer">' +
-                '<button class="setup-btn setup-btn-prev" id="setup-btn-prev" style="visibility:hidden">← 上一步</button>' +
+                '<button class="setup-btn setup-btn-prev hidden" id="setup-btn-prev">← 上一步</button>' +
                 '<span class="setup-step-indicator" id="setup-step-indicator">1 / ' + TOTAL_STEPS + '</span>' +
                 '<button class="setup-btn setup-btn-next" id="setup-btn-next">下一步 →</button>' +
             '</div>';
@@ -173,7 +173,7 @@ var RamariaSetupView = (function () {
             '</div>' +
 
             // 线上字段
-            '<div class="setup-field-group" id="setup-api-fields" style="display:none">' +
+            '<div class="setup-field-group hidden" id="setup-api-fields">' +
                 '<div class="setup-field">' +
                     '<div class="setup-field-label">API Key <span class="setup-required">*</span></div>' +
                     '<input class="setup-field-input" id="setup-api-key" type="password" ' +
@@ -199,7 +199,7 @@ var RamariaSetupView = (function () {
             '</div>' +
 
             // 连接测试按钮
-            '<div style="margin-top:12px">' +
+            '<div class="mt-3">' +
                 '<button class="setup-test-btn" id="setup-test-btn">' +
                     '<span class="setup-test-dot"></span> 测试连接' +
                 '</button>' +
@@ -221,7 +221,7 @@ var RamariaSetupView = (function () {
                 '<div class="setup-embedding-recommend-body">' +
                     '<code>BAAI/bge-small-zh-v1.5</code> （约 100MB，384 维向量）<br>' +
                     '下载地址：<a href="https://hf-mirror.com/BAAI/bge-small-zh-v1.5" target="_blank" rel="noopener" ' +
-                    'style="color:var(--color-primary);">hf-mirror.com/BAAI/bge-small-zh-v1.5</a>' +
+                    'class="text-pink">hf-mirror.com/BAAI/bge-small-zh-v1.5</a>' +
                 '</div>' +
             '</div>' +
 
@@ -239,7 +239,7 @@ var RamariaSetupView = (function () {
             '</div>' +
 
             // 校验按钮
-            '<div style="margin-top:12px">' +
+            '<div class="mt-3">' +
                 '<button class="setup-test-btn" id="setup-embedding-test-btn">' +
                     '<span class="setup-test-dot"></span> 校验模型路径' +
                 '</button>' +
@@ -247,7 +247,7 @@ var RamariaSetupView = (function () {
             '</div>' +
 
             // 跳过说明
-            '<div class="setup-skip-hint" id="setup-embedding-skip-hint" style="display:none">' +
+            '<div class="setup-skip-hint hidden" id="setup-embedding-skip-hint">' +
                 '<div class="setup-skip-hint-title">⚠ 暂不配置嵌入模型</div>' +
                 '<div class="setup-skip-hint-body">' +
                     '您可以跳过此步骤，但部分功能将受限：<br>' +
@@ -259,7 +259,7 @@ var RamariaSetupView = (function () {
             '</div>' +
 
             // 跳过按钮
-            '<div style="margin-top:12px">' +
+            '<div class="mt-3">' +
                 '<button class="setup-btn setup-btn-ghost" id="setup-embedding-skip-btn">' +
                     '跳过，稍后配置（进入降级模式）' +
                 '</button>' +
@@ -287,7 +287,7 @@ var RamariaSetupView = (function () {
                 '<div class="setup-init-line" id="setup-init-save">' +
                     '<span class="setup-mark-wait">⏳</span> 保存配置中…' +
                 '</div>' +
-                '<div class="setup-init-line" id="setup-init-done" style="display:none">' +
+                '<div class="setup-init-line hidden" id="setup-init-done">' +
                     '<span class="setup-mark-ok">✓</span> 完成，正在进入对话界面…' +
                 '</div>' +
             '</div>';
@@ -354,7 +354,7 @@ var RamariaSetupView = (function () {
         var btnNext = $('setup-btn-next');
         var indicator = $('setup-step-indicator');
 
-        if (btnPrev) btnPrev.style.visibility = step > 1 ? 'visible' : 'hidden';
+        if (btnPrev) btnPrev.classList.toggle('hidden', step <= 1);
 
         if (btnNext) {
             if (step === TOTAL_STEPS) {
@@ -429,8 +429,8 @@ var RamariaSetupView = (function () {
         // 切换字段组
         var localFields = $('setup-local-fields');
         var apiFields = $('setup-api-fields');
-        if (localFields) localFields.style.display = mode === 'local' ? '' : 'none';
-        if (apiFields) apiFields.style.display = mode === 'api' ? '' : 'none';
+        if (localFields) localFields.classList.toggle('hidden', mode !== 'local');
+        if (apiFields) apiFields.classList.toggle('hidden', mode !== 'api');
 
         // 重置测试状态
         _resetTestState();
@@ -596,7 +596,7 @@ var RamariaSetupView = (function () {
 
         // 显示跳过说明
         var skipHint = $('setup-embedding-skip-hint');
-        if (skipHint) skipHint.style.display = 'block';
+        if (skipHint) skipHint.classList.remove('hidden');
 
         // 延迟后自动前进，给用户阅读说明的时间
         setTimeout(function () {
@@ -702,9 +702,9 @@ var RamariaSetupView = (function () {
                 var modeLabel = _currentMode === 'api' ? '线上 API' : '推理服务';
                 RamariaModal.show({
                     title: '未测试连接',
-                    body: '<p style="font-size:13px;color:var(--text-secondary);line-height:1.6;">' +
+                    body: '<p class="setup-modal-body">' +
                           '您还没有测试' + modeLabel + '连接，可能无法正常对话。</p>' +
-                          '<p style="font-size:12px;color:var(--text-tertiary);">建议先点击「测试连接」按钮确认配置正确。</p>',
+                          '<p class="setup-modal-body-sm">建议先点击「测试连接」按钮确认配置正确。</p>',
                     footer: '<button class="btn btn-secondary" data-action="cancel">取消</button>' +
                             '<button class="btn btn-primary" data-action="skip">跳过测试，继续</button>',
                     onAction: function (action) {
@@ -728,14 +728,14 @@ var RamariaSetupView = (function () {
             // 未校验：提示可跳过
             RamariaModal.show({
                 title: '未校验嵌入模型',
-                body: '<p style="font-size:13px;color:var(--text-secondary);line-height:1.6;">' +
+                body: '<p class="setup-modal-body">' +
                       '您还没有校验嵌入模型路径，跳过将进入<strong>降级模式</strong>：</p>' +
-                      '<ul style="font-size:12px;color:var(--text-secondary);line-height:1.8;padding-left:16px;margin-top:8px;">' +
+                      '<ul class="setup-modal-list">' +
                       '<li>向量检索不可用</li>' +
                       '<li>仅 BM25 关键词 + 知识图谱通道可用</li>' +
                       '<li>对话页顶部会显示警告条</li>' +
                       '</ul>' +
-                      '<p style="font-size:12px;color:var(--text-tertiary);margin-top:8px;">您可以在「设置 → 嵌入模型」中随时补配。</p>',
+                      '<p class="setup-modal-body-sm mt-2">您可以在「设置 → 嵌入模型」中随时补配。</p>',
                 footer: '<button class="btn btn-secondary" data-action="cancel">返回校验</button>' +
                         '<button class="btn btn-primary" data-action="skip">跳过，继续</button>',
                 onAction: function (action) {
@@ -808,7 +808,7 @@ var RamariaSetupView = (function () {
 
             // 显示完成行
             var doneLine = $('setup-init-done');
-            if (doneLine) doneLine.style.display = 'flex';
+            if (doneLine) doneLine.classList.remove('hidden');
             _updateInitLine('setup-init-done', 'ok', '配置已保存，正在进入对话界面…');
 
             _showStep(TOTAL_STEPS);
@@ -855,7 +855,7 @@ var RamariaSetupView = (function () {
         var icon = state === 'ok' ? '✓' : state === 'fail' ? '✗' : '⏳';
         var cls = state === 'ok' ? 'setup-mark-ok' : state === 'fail' ? 'setup-mark-fail' : 'setup-mark-wait';
         el.innerHTML = '<span class="' + cls + '">' + icon + '</span> ' + text;
-        el.style.display = 'flex';
+        el.classList.remove('hidden');
     }
 
     // =========================================================
@@ -889,7 +889,7 @@ var RamariaSetupView = (function () {
         if (_embeddingTestPassed) {
             lines.push('<div><span class="setup-summary-dim">嵌入模型：</span>✓ 已配置（' + (_embeddingPath || '-') + '）</div>');
         } else {
-            lines.push('<div style="color:var(--pink-500)"><span class="setup-summary-dim">嵌入模型：</span>⚠ 未配置（降级模式：仅 BM25 + 图谱）</div>');
+            lines.push('<div class="text-pink"><span class="setup-summary-dim">嵌入模型：</span>⚠ 未配置（降级模式：仅 BM25 + 图谱）</div>');
         }
 
         box.innerHTML = lines.join('');
@@ -903,13 +903,13 @@ var RamariaSetupView = (function () {
         var unreg;
 
         unreg = RamariaRouter.registerHook('setup', 'enter', function () {
-            console.log('[SetupView] enter');
+            console.log('[SetupView] 进入视图');
             render();
         });
         _unregisterFns.push(unreg);
 
         unreg = RamariaRouter.registerHook('setup', 'leave', function () {
-            console.log('[SetupView] leave');
+            console.log('[SetupView] 离开视图');
             _currentStep = 1;
             _currentMode = 'local';
             _testPassed = false;

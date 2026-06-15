@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
         http-equiv="Content-Security-Policy"
-        content="default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self' ipc: https://api.deepseek.com https://api.openai.com; img-src 'self' data:; font-src 'self'"
+        content="default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost https://ipc.localhost https://api.deepseek.com https://api.openai.com; img-src 'self' data:; font-src 'self'"
     />
     <title>Ramaria - 个人AI陪伴记忆系统</title>
 
@@ -181,7 +181,7 @@
                 <!-- 进度页全屏视图 -->
                 <div class="view view--fullscreen" id="view-progress" data-view="progress" role="status" aria-live="polite">
                     <div class="text-center text-tertiary">
-                        <div id="progress-spinner" style="margin-bottom:var(--space-6)">
+                        <div id="progress-spinner" class="view-progress-spinner">
                             <div class="spinner-ring spinner-ring--lg" aria-label="加载中"></div>
                         </div>
                         <div class="text-xl font-medium mb-2" id="progress-title">正在处理...</div>
@@ -191,8 +191,8 @@
 
                 <!-- 错误全屏视图 -->
                 <div class="view view--fullscreen" id="view-error" data-view="error" role="alert" aria-live="assertive">
-                    <div class="text-center" style="max-width:400px;padding:var(--space-8)"> 
-                        <div style="font-size:64px;margin-bottom:var(--space-6)">❌</div>
+                    <div class="text-center view-error-box"> 
+                        <div class="view-error-icon">❌</div>
                         <div class="text-xl font-semibold text-pink mb-3" id="error-title">严重错误</div>
                         <div class="text-base text-secondary" id="error-detail">应用遇到不可恢复的错误，请查看日志后重启。</div>
                     </div>

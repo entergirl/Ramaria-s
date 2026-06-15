@@ -6,10 +6,13 @@
 //! - 返回值经过序列化，隐藏内部 id，暴露业务字段
 //! - 与 memory 模块的 `get_personas` 互补：前者返回摘要，本模块返回全字段
 //! - `refresh_persona` 触发指定 persona 的记忆管线（L2→L3），用于"重载"性格画像
+//! - `regenerate_import_pipeline` 重新生成导入 session 的 L1 摘要 + 级联 L2/L3（v1.1 修复）
 
 use crate::DesktopState;
 use serde::Serialize;
+use std::collections::HashSet;
 use tauri::State;
+use uuid::Uuid;
 
 // =========================================================
 // 前端展示用结构体
@@ -269,4 +272,185 @@ pub async fn refresh_persona(
     });
 
     Ok("ok".to_string())
+}
+
+// =========================================================
+// regenerate_import_pipeline — 重新生成导入消息的 L1 摘要并级联 L2/L3（v1.1 修复）
+// =========================================================
+
+/// 对导入 persona 的所有 session 重新生成 L1 摘要，然后触发 L2→L3 级联。
+///
+/// 动机:
+/// - 导入时若 LLM 不可用，L1 摘要生成会失败（静默 WARN）。
+///   用户连接 LLM 后，可通过记忆页面的"深度处理导入的消息"按钮调用本命令。
+/// - 与 `trigger_memory_pipeline` 的区别：本命令先重新生成 L1（persona_uid=NULL），
+///   再触发 L2 检查，确保 LLM 失败场景下的 L0→L1→L2→L3 全管线可恢复。
+///
+/// 参数:
+/// - `persona_uid`: 目标导入 persona 的 UID（如 "char-123456789"）。
+///
+/// 返回:
+/// - JSON: `{ "l1_regenerated": N, "l1_failed": N, "message": "..." }`
+///
+/// 说明:
+/// - 幂等：已存在的 L1 摘要会被覆盖（regenerate_l1_no_cascade 内部删除旧 L1）。
+/// - 导入 session 的 L1 摘要 persona_uid 存 NULL（对话来自两人）。  
+/// - 此操作为异步后台任务：返回后 L1 已生成，L2/L3 后台继续执行。
+///
+/// 日志:
+/// - INFO: 记录触发操作的目标 persona_uid 和 session 数
+/// - WARN: 单条 L1 生成失败时记录（非阻塞）
+/// - ERROR: persona 不存在或存储查询失败
+#[tauri::command]
+#[tracing::instrument(skip(state))]
+pub async fn regenerate_import_pipeline(
+    state: State<'_, DesktopState>,
+    persona_uid: String,
+) -> Result<serde_json::Value, String> {
+    // 参数校验
+    if persona_uid.trim().is_empty() {
+        return Err("人格 UID 不能为空".to_string());
+    }
+
+    // 验证 persona 存在
+    let _persona = state
+        .app
+        .storage()
+        .get_persona_by_uid(&persona_uid)
+        .await
+        .map_err(|e| format!("查询 persona 失败: {}", e))?
+        .ok_or_else(|| format!("人格不存在: uid={persona_uid}"))?;
+
+    tracing::info!(%persona_uid, "重新生成导入 session 的 L1 摘要并级联 L2/L3");
+
+    // Step 1: 查找该 persona 所有消息所属的 session
+    let messages = state
+        .app
+        .storage()
+        .list_messages_by_persona(&persona_uid)
+        .await
+        .map_err(|e| format!("查询 persona 消息失败: {}", e))?;
+
+    // 提取唯一的 session_id 集合
+    let session_ids: Vec<Uuid> = messages
+        .iter()
+        .map(|m| m.session_id)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    if session_ids.is_empty() {
+        return Ok(serde_json::json!({
+            "l1_regenerated": 0,
+            "l1_failed": 0,
+            "message": "该人格没有关联的导入消息，无需处理。"
+        }));
+    }
+
+    tracing::info!(
+        %persona_uid,
+        session_count = session_ids.len(),
+        message_count = messages.len(),
+        "找到关联的导入 session，开始重新生成 L1"
+    );
+
+    // Step 2: 对每个 session 重新生成 L1 摘要（persona_uid=NULL，因为导入对话来自两人）
+    //
+    // 重试策略（对齐深度导入模式）:
+    // - 单个 session 内部由 JobManager 负责 3 次重试（指数退避 1s/2s/4s）。
+    // - 外层循环追踪连续失败次数：若连续 3 个 session 的 L1 全部失败，
+    //   则判定 LLM 不可用，提前终止剩余 session 的处理，避免无意义的重试等待。
+    // - 每个 session 的 JobManager 内部失败（已达 3 次重试上限）才会计入 l1_failed，
+    //   因此 "连续失败" 意味着 LLM 确实无法连接。
+    const MAX_CONSECUTIVE_L1_FAILURES: u32 = 3;
+
+    let app = state.app.clone();
+    let total = session_ids.len();
+    let mut l1_regenerated = 0usize;
+    let mut l1_failed = 0usize;
+    let mut consecutive_failures: u32 = 0;
+    let mut early_terminated = false;
+    let mut remaining_skipped = 0usize;
+
+    for (idx, sid) in session_ids.iter().enumerate() {
+        match app.regenerate_l1_no_cascade(*sid, None).await {
+            Ok(Some(_)) => {
+                l1_regenerated += 1;
+                consecutive_failures = 0; // 重置连续失败计数
+                tracing::debug!(%sid, "L1 重新生成成功");
+            }
+            Ok(None) => {
+                // session 无消息，不计入成功/失败，不影响连续失败计数
+                tracing::debug!(%sid, "session 无消息，跳过 L1");
+            }
+            Err(e) => {
+                l1_failed += 1;
+                consecutive_failures += 1;
+                tracing::warn!(%sid, error = %e, consecutive_failures, "L1 重新生成失败");
+
+                // 连续失败达到上限 → 判定 LLM 不可用，提前终止
+                if consecutive_failures >= MAX_CONSECUTIVE_L1_FAILURES {
+                    remaining_skipped = total.saturating_sub(idx + 1);
+                    tracing::warn!(
+                        %persona_uid,
+                        consecutive_failures,
+                        l1_failed,
+                        l1_regenerated,
+                        remaining_skipped,
+                        "L1 连续失败 {} 次，判定 LLM 不可用。跳过剩余 {} 个 session。",
+                        MAX_CONSECUTIVE_L1_FAILURES,
+                        remaining_skipped,
+                    );
+                    early_terminated = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    tracing::info!(
+        %persona_uid,
+        l1_regenerated,
+        l1_failed,
+        total,
+        early_terminated,
+        remaining_skipped,
+        "L1 重新生成完成（early_terminated={}），触发 L2→L3 级联",
+        early_terminated,
+    );
+
+    // Step 3: 触发 L2→L3 级联（后台异步，避免阻塞前端）
+    // 注意：即使 L1 全部失败或提前终止，仍触发 L2→L3——已有 L2/L3 数据不受影响。
+    let persona_uid_clone = persona_uid.clone();
+    tokio::spawn(async move {
+        app.trigger_l2_check().await;
+        tracing::info!(%persona_uid_clone, "导入消息深度处理管线（L2→L3）已触发");
+    });
+
+    // 构造差异化的用户提示消息
+    let message = if early_terminated {
+        format!(
+            "L1 连续失败 {} 次，已提前终止。成功 {}/{}, 失败 {}。请确认 LLM 模型已连接后重试。剩余 {} 个 session 未处理。",
+            MAX_CONSECUTIVE_L1_FAILURES, l1_regenerated, total, l1_failed, remaining_skipped
+        )
+    } else if l1_failed > 0 {
+        format!(
+            "L1 重新生成完成: 成功 {}/{}, 失败 {}。请确认 LLM 模型已连接。L2/L3 正在后台处理中...",
+            l1_regenerated, total, l1_failed
+        )
+    } else {
+        format!(
+            "L1 全部重新生成成功 ({}/{})。L2/L3 正在后台处理中...",
+            l1_regenerated, total
+        )
+    };
+
+    Ok(serde_json::json!({
+        "l1_regenerated": l1_regenerated,
+        "l1_failed": l1_failed,
+        "total_sessions": total,
+        "early_terminated": early_terminated,
+        "remaining_skipped": remaining_skipped,
+        "message": message,
+    }))
 }

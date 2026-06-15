@@ -62,6 +62,12 @@
   border-color: var(--color-primary);
 }
 
+/* 工具栏提示文字 */
+.memory-toolbar-hint {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
 /* =========================================================
    3. Tab 切换
    ========================================================= */
@@ -174,6 +180,9 @@
   min-height: 140px;
   display: flex;
   flex-direction: column;
+
+  /* 渲染隔离：卡片之间互不影响 */
+  contain: content;
 }
 
 .memory-l1-card:hover {
@@ -255,6 +264,24 @@
   background: linear-gradient(90deg, var(--pink-300), var(--pink-500));
   transition: width var(--dur-slow) var(--ease-out);
 }
+
+/* 强度标签 */
+.memory-salience-label {
+  font-size: 10px;
+}
+
+/* salience 百分比宽度（CSP-safe: 替代内联 style="width:X%"）*/
+.memory-salience-fill-w0   { width: 0%; }
+.memory-salience-fill-w10  { width: 10%; }
+.memory-salience-fill-w20  { width: 20%; }
+.memory-salience-fill-w30  { width: 30%; }
+.memory-salience-fill-w40  { width: 40%; }
+.memory-salience-fill-w50  { width: 50%; }
+.memory-salience-fill-w60  { width: 60%; }
+.memory-salience-fill-w70  { width: 70%; }
+.memory-salience-fill-w80  { width: 80%; }
+.memory-salience-fill-w90  { width: 90%; }
+.memory-salience-fill-w100 { width: 100%; }
 
 /* =========================================================
    6. L2 事件列表
@@ -352,6 +379,8 @@
    ========================================================= */
 
 .memory-l3-cloud {
+  justify-content: flex-start;
+
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
@@ -404,6 +433,7 @@
 
 /* L3 分组标签 */
 .memory-l3-section {
+  width: 100%;
   margin-bottom: var(--space-6);
 }
 
@@ -449,6 +479,17 @@
 .memory-loading-dot:nth-child(2) { animation-delay: 0.2s; }
 .memory-loading-dot:nth-child(3) { animation-delay: 0.4s; }
 
+/* Modal 详情 <pre> 块（CSP-safe: 替代内联 style） */
+.memory-modal-pre {
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+  font-family: var(--font-body);
+}
+
 /* =========================================================
    9. 响应式
    ========================================================= */
@@ -466,4 +507,47 @@
     font-size: 11.5px;
     padding: var(--space-1) var(--space-3);
   }
+}
+
+/* ═══════════════════════════════════════════════
+   10. 暗色模式（Dark Theme Overrides）
+   修复 L1 卡片渐变、L2/L3 标签文字在暗色下无法辨识的问题。
+   ═══════════════════════════════════════════════ */
+
+/* L1 卡片：浅粉渐变 → 深色粉底渐变 */
+[data-theme="dark"] .memory-l1-card {
+  background: linear-gradient(135deg,
+    oklch(0.22 0.01 20) 0%,
+    oklch(0.26 0.035 15 / 0.5) 100%);
+}
+
+/* L1 卡片徽章：深红字 → 亮粉字 */
+[data-theme="dark"] .memory-l1-card-badge {
+  background: oklch(0.53 0.19 10 / 0.25);
+  color: oklch(0.78 0.12 15);
+}
+
+/* L2 事件标签：深蓝字 → 亮蓝字 */
+[data-theme="dark"] .memory-l2-item-tag {
+  background: oklch(0.48 0.17 225 / 0.20);
+  color: oklch(0.78 0.12 225);
+}
+
+/* L3 性格标签：各层级文字从深色 → 亮色 */
+[data-theme="dark"] .memory-l3-tag.layer-base {
+  background: oklch(0.53 0.19 10 / 0.20);
+  border-color: oklch(0.53 0.19 10 / 0.35);
+  color: oklch(0.78 0.14 15);
+}
+
+[data-theme="dark"] .memory-l3-tag.layer-primary {
+  background: oklch(0.48 0.17 225 / 0.15);
+  border-color: oklch(0.48 0.17 225 / 0.30);
+  color: oklch(0.76 0.12 225);
+}
+
+[data-theme="dark"] .memory-l3-tag.layer-accent {
+  background: oklch(0.25 0.003 25);
+  border-color: oklch(0.38 0.004 25);
+  color: oklch(0.72 0 0);
 }

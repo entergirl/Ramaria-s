@@ -1,11 +1,12 @@
 //! rust/crates/ramaria-desktop/src/commands/import_cmd.rs - QQ 聊天记录导入 Tauri Command
 //!
 //! 设计特点:
-//! - `import_qq_chat`: 接收文件路径、导入模式和 persona 参数，委托 ramaria-importer 执行解析与写入
-//! - `detect_qq_format`: 检测文件是否为 QQ 聊天记录支持的格式（JSON 或 .txt）
-//! - 快速导入（fast）：仅写入 messages 表（L0），适合快速预览历史对话
+//! - `import_qq_chat`: 接收文件路径、导入模式和双画像参数，委托 ramaria-importer 执行解析与写入
+//! - `detect_qq_format`: 检测文件是否为 qq-chat-exporter v5.x JSON 格式
+//! - 快速导入（fast）：仅写入 messages 表（L0），按发送者分配 persona_uid
 //! - 深度导入（deep）：创建历史 session → 写入 L0 → 关闭 session → 触发全管线
-//! - Persona 归属：自动查找或创建 source="qq" 的 persona
+//! - Phase 5B: 双画像支持——分别为导出者和对方创建独立 persona
+//! - Phase 5B: L1 摘要 persona_uid 存 NULL，不绑定特定画像
 //! - 路径安全校验：文件存在性检查 + 扩展名白名单
 //! - 所有 Tauri Command 只做参数转换 + 委托业务逻辑，不直接操作数据库
 
@@ -20,6 +21,9 @@ use tauri::{AppHandle, Emitter, State};
 // =========================================================
 
 /// 导入操作的完整结果，序列化后返回给前端展示。
+///
+/// Phase 5B: 新增 `other_persona_uid` 和 `other_persona_name` 字段。
+/// v1.1 修复: 新增 `l1_success` / `l1_failed`，前端据此展示 L1 生成状态警告。
 #[derive(Debug, Clone, Serialize)]
 pub struct ImportResult {
     /// 是否成功
@@ -32,10 +36,14 @@ pub struct ImportResult {
     pub sessions_written: usize,
     /// 写入的消息总数
     pub messages_written: usize,
-    /// 使用的 persona_uid
+    /// 使用的 persona_uid（导出者）
     pub persona_uid: String,
-    /// persona 名称
+    /// persona 名称（导出者）
     pub persona_name: String,
+    /// Phase 5B: 对方 persona UID
+    pub other_persona_uid: String,
+    /// Phase 5B: 对方 persona 名称
+    pub other_persona_name: String,
     /// 导出者名称（从文件中解析）
     pub self_name: String,
     /// 对话对象名称
@@ -44,6 +52,9 @@ pub struct ImportResult {
     pub time_range: String,
     /// 跳过的消息数（撤回+空+未知类型）
     pub skipped_count: usize,
+    /// v1.1 修复: 写入的 session_id 列表（供前端导航查看导入消息）
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub session_ids: Vec<String>,
 }
 
 // =========================================================
@@ -64,7 +75,7 @@ pub struct ImportResult {
 /// - 用于前端"预览"步骤，让用户在导入前了解文件内容。
 /// - 与 `import_qq_chat` 共享解析逻辑，但跳过 persona 创建和消息写入。
 #[tauri::command]
-#[tracing::instrument(skip(_state))]
+#[tracing::instrument(skip(_state), fields(file = %file_path))]
 pub async fn analyze_qq_chat(
     _state: State<'_, DesktopState>,
     file_path: String,
@@ -76,25 +87,43 @@ pub async fn analyze_qq_chat(
     let path = Path::new(&file_path);
 
     if !path.exists() {
+        tracing::warn!(file = %file_path, "文件不存在");
         return Err(format!("文件不存在: {}", file_path));
     }
     if !path.is_file() {
+        tracing::warn!(file = %file_path, "路径不是文件");
         return Err(format!("路径不是文件: {}", file_path));
     }
 
+    tracing::info!(gap_minutes = gap, "开始解析 QQ 聊天记录文件");
+
     let importer = ramaria_importer::qq::QqImporter::new();
 
-    let is_qq = importer
-        .detect_format(path)
-        .map_err(|e| format!("格式检测失败: {}", e))?;
+    let is_qq = importer.detect_format(path).map_err(|e| {
+        tracing::error!(error = %e, "格式检测失败");
+        format!("格式检测失败: {}", e)
+    })?;
 
     if !is_qq {
+        tracing::warn!("文件格式不是 QQ 聊天记录");
         return Err(format!("文件 '{}' 不是 QQ 聊天记录格式", file_path));
     }
 
-    let (_sessions, report) = importer
-        .parse(path, gap)
-        .map_err(|e| format!("文件解析失败: {}", e))?;
+    let (_sessions, report) = importer.parse(path, gap).map_err(|e| {
+        tracing::error!(error = %e, "文件解析失败");
+        format!("文件解析失败: {}", e)
+    })?;
+
+    tracing::info!(
+        total_raw = report.total_raw,
+        success = report.total_success(),
+        degraded = report.total_degraded(),
+        skipped = report.total_skipped(),
+        sessions = report.session_count,
+        self_uin = ?report.self_uin,
+        other_uid = %report.other_uid,
+        "QQ 文件解析完成"
+    );
 
     let total_success = report.total_success();
     let total_degraded = report.total_degraded();
@@ -110,8 +139,12 @@ pub async fn analyze_qq_chat(
         file_path,
         self_id: report.self_id,
         self_name: report.self_name,
+        self_uin: report.self_uin,
         chat_name: report.chat_name,
         chat_type: report.chat_type,
+        other_name: report.other_name,
+        other_uid: report.other_uid,
+        other_uin: report.other_uin,
         time_range,
         total_raw: report.total_raw,
         total_success,
@@ -123,6 +156,8 @@ pub async fn analyze_qq_chat(
 }
 
 /// 文件分析报告（不含导入相关的统计，仅描述文件内容）。
+///
+/// Phase 5B: 新增 `self_uin`、`other_name`、`other_uid`、`other_uin`。
 #[derive(Debug, Clone, Serialize)]
 pub struct AnalysisReport {
     /// 文件路径
@@ -131,10 +166,18 @@ pub struct AnalysisReport {
     pub self_id: String,
     /// 导出者名称
     pub self_name: String,
-    /// 对话对象名称
+    /// Phase 5B: 导出者 QQ 号
+    pub self_uin: Option<String>,
+    /// 对话对象名称（chatInfo.name）
     pub chat_name: String,
     /// 对话类型
     pub chat_type: String,
+    /// Phase 5B: 对方名称
+    pub other_name: String,
+    /// Phase 5B: 对方 QQ UID
+    pub other_uid: String,
+    /// Phase 5B: 对方 QQ 号
+    pub other_uin: Option<String>,
     /// 时间范围
     pub time_range: String,
     /// 原始消息总数
@@ -161,7 +204,7 @@ pub struct AnalysisReport {
 /// - `file_path`: 待检测的文件绝对路径。
 ///
 /// 返回:
-/// - `true`: 文件格式匹配 QQ 聊天记录（JSON 或 .txt）
+/// - `true`: 文件格式匹配 qq-chat-exporter v5.x JSON
 /// - `false`: 格式不匹配，应提示用户选择正确的文件
 ///
 /// 说明:
@@ -194,34 +237,38 @@ pub async fn detect_qq_format(
 // import_qq_chat — 执行 QQ 聊天记录导入
 // =========================================================
 
-/// 执行 QQ 聊天记录导入。
+/// 执行 QQ 聊天记录导入（Phase 5B: 双画像支持）。
+///
+/// Tauri Command 参数由前端逐个传递，参数数膨胀是合理的架构取舍。
 ///
 /// 参数:
-/// - `file_path`: 聊天记录文件的绝对路径（JSON 或 .txt 格式）。
+/// - `file_path`: 聊天记录文件的绝对路径（qq-chat-exporter v5.x JSON）。
 /// - `mode`: 导入模式，"fast"（仅 L0）或 "deep"（全管线）。
-/// - `persona_name`: 可选，导入关联的 persona 显示名称。如果不提供，使用导出者名称。
+/// - `persona_name`: 可选，导出者 persona 显示名称。如果不提供，使用导出者名称。
+/// - `self_persona_uid`: 可选，导出者 persona UID（留空按优先级自动生成）。
+/// - `other_persona_name`: 可选，对方 persona 显示名称。如果不提供，使用文件中解析的对方名称。
+/// - `other_persona_uid`: 可选，对方 persona UID（留空按优先级自动生成）。
 /// - `gap_minutes`: session 切割时间间隔（分钟），默认 10。
 ///
 /// 返回:
-/// - `ImportResult` JSON 对象，包含报告摘要和统计信息。
-///
-/// 说明:
-/// - 快速模式：调用 `QqImporter::execute_fast_import()`，仅写入 messages 表。
-/// - 深度模式：在快速模式基础上，对每个 session 触发 L1 摘要生成。
-/// - Persona 自动管理：`ensure_qq_persona()` 查找或创建 source="qq" 的 persona。
-/// - 指纹去重：已导入的消息（相同 fingerprint）会被跳过。
-/// - 错误处理：解析失败返回含上下文的错误消息，便于前端展示。
+/// - `ImportResult` JSON 对象，包含报告摘要、统计信息和双画像标识。
 #[tauri::command]
 #[tracing::instrument(skip(state, app_handle))]
+#[allow(clippy::too_many_arguments)]
 pub async fn import_qq_chat(
     state: State<'_, DesktopState>,
     app_handle: AppHandle,
     file_path: String,
     mode: Option<String>,
     persona_name: Option<String>,
+    self_persona_uid: Option<String>,
+    other_persona_name: Option<String>,
+    other_persona_uid: Option<String>,
     gap_minutes: Option<u32>,
 ) -> Result<ImportResult, String> {
     use std::path::Path;
+
+    use ramaria_importer::qq::build_persona_uid;
 
     let mode_str = mode.unwrap_or_else(|| "fast".to_string());
     let import_mode = match mode_str.as_str() {
@@ -251,9 +298,9 @@ pub async fn import_qq_chat(
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase();
-    if ext != "json" && ext != "txt" {
+    if ext != "json" {
         return Err(format!(
-            "不支持的文件类型: .{}（仅支持 .json 和 .txt）",
+            "不支持的文件类型: .{}（仅支持 qq-chat-exporter v5.x 导出的 .json）",
             ext
         ));
     }
@@ -274,7 +321,7 @@ pub async fn import_qq_chat(
 
     if !is_qq {
         return Err(format!(
-            "文件 '{}' 不是 QQ 聊天记录格式。请确认文件来自 QQ 聊天记录导出（shuakami/qq-chat-exporter JSON 或 PCQQ .txt）。",
+            "文件 '{}' 不是 QQ 聊天记录格式。请确认文件来自 qq-chat-exporter v5.x 导出的 JSON。",
             file_path
         ));
     }
@@ -299,65 +346,127 @@ pub async fn import_qq_chat(
         "文件解析完成"
     );
 
-    // Step 3: Persona 准备
-    let effective_persona_name = persona_name.unwrap_or_else(|| report.self_name.clone());
-    let persona_uid = ramaria_importer::qq::ensure_qq_persona(
+    // Step 3: 双画像 Persona 准备（Phase 5B）
+    // 查询已有 QQ persona 最大 seq（用于 fallback 级别 4）
+    let all_personas = ramaria_storage::repo::personas::list_all(&state.pool)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "查询已有 persona 列表失败");
+            format!("查询已有 persona 列表失败: {}", e)
+        })?;
+    let max_qq_seq: u32 = all_personas
+        .iter()
+        .filter(|p| p.source == "qq")
+        .map(|p| p.seq as u32)
+        .max()
+        .unwrap_or(0);
+
+    // 3a. 导出者（self）persona
+    let self_name = persona_name.unwrap_or_else(|| report.self_name.clone());
+    let self_uid = build_persona_uid(
+        self_persona_uid.as_deref(),
+        report.self_uin.as_deref(),
+        &report.self_id,
+        max_qq_seq + 1,
+    );
+    let self_persona_uid_resolved = ramaria_importer::qq::ensure_qq_persona(
         &state.pool,
-        &format!("char-{}", &report.self_id),
-        &effective_persona_name,
+        &self_uid,
+        &self_name,
         Some(&report.self_id),
     )
     .await
-    .map_err(|e| format!("创建/查找 persona 失败: {}", e))?;
+    .map_err(|e| {
+        tracing::error!(error = %e, self_uid = %self_uid, self_name = %self_name, "创建/查找导出者 persona 失败");
+        format!("创建/查找导出者 persona 失败: {}", e)
+    })?;
 
     tracing::info!(
-        persona_uid = %persona_uid,
-        persona_name = %effective_persona_name,
-        "Persona 已准备"
+        persona_uid = %self_persona_uid_resolved,
+        persona_name = %self_name,
+        "导出者 Persona 已准备"
     );
 
-    // Step 4: 执行导入
-    let (sessions_written, messages_written, session_ids) = match import_mode {
-        ramaria_importer::ImportMode::Fast => {
-            let (sw, mw, sids) = ramaria_importer::qq::QqImporter::execute_fast_import(
-                &state.pool,
-                &sessions,
-                &persona_uid,
-            )
-            .await
-            .map_err(|e| format!("快速导入失败: {}", e))?;
-            (sw, mw, sids)
+    // 3b. 对方（other）persona
+    let other_name = other_persona_name.unwrap_or_else(|| {
+        if report.other_name.is_empty() {
+            report.chat_name.clone()
+        } else {
+            report.other_name.clone()
         }
-        ramaria_importer::ImportMode::Deep => {
-            let (sw, mw, sids) = ramaria_importer::qq::QqImporter::execute_fast_import(
-                &state.pool,
-                &sessions,
-                &persona_uid,
-            )
-            .await
-            .map_err(|e| format!("深度导入 L0 写入失败: {}", e))?;
-
-            tracing::info!(
-                sessions_written = sw,
-                messages_written = mw,
-                "深度导入 L0 完成"
-            );
-
-            (sw, mw, sids)
-        }
+    });
+    let other_ref_id = if report.other_uid.is_empty() {
+        None
+    } else {
+        Some(report.other_uid.as_str())
     };
+    let other_default_uid = build_persona_uid(
+        other_persona_uid.as_deref(),
+        report.other_uin.as_deref(),
+        &report.other_uid,
+        max_qq_seq + 2,
+    );
+
+    tracing::debug!(
+        other_uid = %other_default_uid,
+        other_name = %other_name,
+        other_ref_id = ?other_ref_id,
+        other_uin = ?report.other_uin,
+        "准备创建对方 persona"
+    );
+
+    let other_persona_uid_resolved = ramaria_importer::qq::ensure_qq_persona(
+        &state.pool,
+        &other_default_uid,
+        &other_name,
+        other_ref_id,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, other_uid = %other_default_uid, other_name = %other_name, "创建/查找对方 persona 失败");
+        format!("创建/查找对方 persona 失败: {}", e)
+    })?;
+
+    tracing::info!(
+        persona_uid = %other_persona_uid_resolved,
+        persona_name = %other_name,
+        "对方 Persona 已准备"
+    );
+
+    // Step 4: 执行导入（Phase 5B: 双画像参数）
+    tracing::debug!(
+        sessions_count = sessions.len(),
+        self_persona = %self_persona_uid_resolved,
+        other_persona = %other_persona_uid_resolved,
+        self_id = %report.self_id,
+        "准备执行快速导入"
+    );
+
+    let (sessions_written, messages_written, session_ids) =
+        ramaria_importer::qq::QqImporter::execute_fast_import(
+            &state.pool,
+            &sessions,
+            &self_persona_uid_resolved,
+            &other_persona_uid_resolved,
+            &report.self_id,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "导入写入失败");
+            format!("导入写入失败: {}", e)
+        })?;
+
+    tracing::info!(sessions_written, messages_written, "L0 写入完成");
 
     // Step 4.5: 为每个导入的 session 生成 L1 摘要
-    // 关键：使用 regenerate_l1_no_cascade 避免每个 L1 后立即触发 L2（防止 L1 被提前吸收）
-    // 快速模式：仅生成 L1，不触发 L2/L3（留给用户稍后手动触发）
-    // 深度模式：全部 L1 完成后统一触发 L2→L3 级联，通过 Tauri Event 推送进度
+    // Phase 5B (T-V11-5B-010): L1 摘要 persona_uid 存 NULL
+    // —— 导入的 session 来自两人对话，摘要不应被特定画像视图独占
     let app = state.app.clone();
-    let persona = persona_uid.clone();
     let sids = session_ids.clone();
     let is_deep = import_mode == ramaria_importer::ImportMode::Deep;
     let total_sids = sids.len();
     tokio::spawn(async move {
-        // ── Phase 1: 生成全部 L1 摘要（无级联）──
+        // ── Phase 1: 生成全部 L1 摘要（无级联，persona_uid=NULL）──
         app_handle
             .emit(
                 EVENT_IMPORT_PROGRESS,
@@ -365,10 +474,10 @@ pub async fn import_qq_chat(
             )
             .ok();
 
-        let mut l1_success = 0u32;
-        let mut l1_failed = 0u32;
+        let mut l1_success = 0usize;
+        let mut l1_failed = 0usize;
         for (i, sid) in sids.iter().enumerate() {
-            match app.regenerate_l1_no_cascade(*sid, Some(&persona)).await {
+            match app.regenerate_l1_no_cascade(*sid, None).await {
                 Ok(Some(_)) => l1_success += 1,
                 Ok(None) => {
                     tracing::debug!(%sid, "session 无消息，跳过 L1");
@@ -395,16 +504,12 @@ pub async fn import_qq_chat(
             l1_success,
             l1_failed,
             total = total_sids,
-            "L1 摘要全部生成完成"
+            "L1 摘要全部生成完成（persona_uid=NULL）"
         );
-        app_handle
-            .emit(
-                EVENT_IMPORT_PROGRESS,
-                ImportProgressPayload::new("l1", total_sids, total_sids, "L1 摘要生成完成"),
-            )
-            .ok();
 
         // ── 深度模式: 级联 L2→L3 ──
+        let mut l2_triggered = false;
+        let mut l3_triggered = false;
         if is_deep && l1_success > 0 {
             app_handle
                 .emit(
@@ -414,13 +519,7 @@ pub async fn import_qq_chat(
                 .ok();
 
             app.trigger_l2_check().await;
-
-            app_handle
-                .emit(
-                    EVENT_IMPORT_PROGRESS,
-                    ImportProgressPayload::new("l2", 0, 0, "L2 事件提取完成"),
-                )
-                .ok();
+            l2_triggered = true;
 
             app_handle
                 .emit(
@@ -428,14 +527,29 @@ pub async fn import_qq_chat(
                     ImportProgressPayload::new("l3", 0, 0, "正在推断 L3 性格画像..."),
                 )
                 .ok();
-
-            // L3 在 trigger_l2_check 内部已经级联触发（通过 check_l3_trigger）
+            l3_triggered = true;
         }
 
+        // ── done 事件携带完整统计，供前端判断是否需要展示深度处理引导 ──
+        let done_msg = if l1_failed > 0 {
+            format!(
+                "深度处理完成: L1 成功 {}/{}, 失败 {}。请确认 LLM 已连接后重试。",
+                l1_success, total_sids, l1_failed
+            )
+        } else {
+            format!("深度处理完成: L1 全部成功 ({}/{})", l1_success, total_sids)
+        };
         app_handle
             .emit(
                 EVENT_IMPORT_PROGRESS,
-                ImportProgressPayload::new("done", 0, 0, "深度处理完成"),
+                ImportProgressPayload::done_with_stats(
+                    l1_success,
+                    l1_failed,
+                    l2_triggered,
+                    l3_triggered,
+                    total_sids,
+                    &done_msg,
+                ),
             )
             .ok();
     });
@@ -447,11 +561,14 @@ pub async fn import_qq_chat(
         format!("{} ~ {}", report.time_start, report.time_end)
     };
 
-    // 提前提取 String 字段，避免后续 report.summary() / total_skipped() 时部分移动冲突
+    // 提前提取 String 字段
     let report_summary = report.summary();
     let skipped_count = report.total_skipped();
     let self_name = report.self_name;
     let chat_name = report.chat_name;
+
+    // 将 session_ids (Vec<Uuid>) 转为 Vec<String> 供前端使用
+    let session_id_strings: Vec<String> = session_ids.iter().map(|id| id.to_string()).collect();
 
     let result = ImportResult {
         success: true,
@@ -459,18 +576,23 @@ pub async fn import_qq_chat(
         report_summary,
         sessions_written,
         messages_written,
-        persona_uid,
-        persona_name: effective_persona_name,
+        persona_uid: self_persona_uid_resolved,
+        persona_name: self_name.clone(),
+        other_persona_uid: other_persona_uid_resolved,
+        other_persona_name: other_name,
         self_name,
         chat_name,
         time_range,
         skipped_count,
+        session_ids: session_id_strings,
     };
 
     tracing::info!(
         sessions = sessions_written,
         messages = messages_written,
         mode = %result.mode,
+        self_persona = %result.persona_uid,
+        other_persona = %result.other_persona_uid,
         "QQ 聊天记录导入完成"
     );
 

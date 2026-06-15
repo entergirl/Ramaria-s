@@ -115,7 +115,7 @@ var RamariaSettingsView = (function () {
                 '<label class="settings-form-label">API Key</label>' +
                 '<input class="settings-form-input" id="settings-api-key" type="password" ' +
                     'placeholder="填入新 key 以更换，留空保持不变" />' +
-                '<div class="settings-form-hint">密钥存储于系统凭证管理器。当前 key：<span id="settings-api-key-hint" style="font-family:var(--font-mono);">加载中...</span></div>' +
+                '<div class="settings-form-hint">密钥存储于系统凭证管理器。当前 key：<span id="settings-api-key-hint" class="font-mono">加载中...</span></div>' +
             '</div>' +
             '<div class="settings-save-hint">' +
                 '<button class="btn btn-primary btn-sm" id="settings-save-backend">保存后端配置</button>' +
@@ -137,7 +137,7 @@ var RamariaSettingsView = (function () {
         if (providerSelect && apiKeyGroup && baseUrlInput) {
             providerSelect.addEventListener('change', function () {
                 var isLocal = this.value === 'lm_studio';
-                apiKeyGroup.style.display = isLocal ? 'none' : 'block';
+                apiKeyGroup.classList.toggle('hidden', isLocal);
 
                 // 自动填充默认 URL
                 if (!baseUrlInput.value || baseUrlInput.value === _getDefaultUrl(_backendConfig ? _backendConfig.provider : '')) {
@@ -180,7 +180,7 @@ var RamariaSettingsView = (function () {
 
         // 本地 provider 隐藏 API Key 输入组
         var isLocal = (config.provider === 'lm_studio');
-        if (apiKeyGroup) apiKeyGroup.style.display = isLocal ? 'none' : 'block';
+        if (apiKeyGroup) apiKeyGroup.classList.toggle('hidden', isLocal);
     }
 
     async function _handleSaveBackend() {
@@ -249,11 +249,11 @@ var RamariaSettingsView = (function () {
                 '<input class="settings-form-input" id="settings-embedding-path" type="text" ' +
                     'placeholder="D:/models/bge-small-zh-v1.5" />' +
                 '<div class="settings-form-hint">' +
-                    '推荐模型：<code style="font-size:10px;background:var(--bg-subtle);padding:1px 4px;border-radius:3px;">BAAI/bge-small-zh-v1.5</code>（约 100MB）。' +
+                    '推荐模型：<code class="settings-code-inline">BAAI/bge-small-zh-v1.5</code>（约 100MB）。' +
                     '留空则使用 BM25 + 图谱降级模式，不进行向量检索。' +
                 '</div>' +
             '</div>' +
-            '<div class="settings-form-group" id="settings-embedding-status-group" style="display:none">' +
+            '<div class="settings-form-group hidden" id="settings-embedding-status-group">' +
                 '<div class="settings-row">' +
                     '<div>' +
                         '<div class="settings-row-label">当前状态</div>' +
@@ -289,7 +289,7 @@ var RamariaSettingsView = (function () {
         if (pathEl) pathEl.value = (config && config.modelPath) || '';
 
         if (statusGroup && config && config.modelPath) {
-            statusGroup.style.display = 'block';
+            statusGroup.classList.remove('hidden');
             if (statusEl) {
                 statusEl.textContent = config.valid
                     ? '嵌入模型就绪（' + (config.dimension || '?') + ' 维）'
@@ -297,10 +297,11 @@ var RamariaSettingsView = (function () {
             }
             if (badgeEl) {
                 badgeEl.textContent = config.valid ? '✓ 可用' : '✗ 不可用';
-                badgeEl.style.color = config.valid ? '#4caf78' : 'var(--pink-500)';
+                badgeEl.classList.toggle('text-green', config.valid);
+                badgeEl.classList.toggle('text-pink', !config.valid);
             }
         } else if (statusGroup) {
-            statusGroup.style.display = 'none';
+            statusGroup.classList.add('hidden');
         }
     }
 
@@ -333,20 +334,22 @@ var RamariaSettingsView = (function () {
             var statusEl = $('settings-embedding-status');
             var badgeEl = $('settings-embedding-valid-badge');
 
-            if (statusGroup) statusGroup.style.display = 'block';
+            if (statusGroup) statusGroup.classList.remove('hidden');
 
             if (result && result.valid) {
                 if (statusEl) statusEl.textContent = '嵌入模型就绪（' + (result.dimension || '?') + ' 维）';
                 if (badgeEl) {
                     badgeEl.textContent = '✓ 可用';
-                    badgeEl.style.color = '#4caf78';
+                    badgeEl.classList.add('text-green');
+                    badgeEl.classList.remove('text-pink');
                 }
                 RamariaToast.show('success', '模型校验通过');
             } else {
                 if (statusEl) statusEl.textContent = (result && result.reason) || '模型路径无效或文件不完整';
                 if (badgeEl) {
                     badgeEl.textContent = '✗ 不可用';
-                    badgeEl.style.color = 'var(--pink-500)';
+                    badgeEl.classList.remove('text-green');
+                    badgeEl.classList.add('text-pink');
                 }
                 RamariaToast.show('error', '校验失败', (result && result.reason) || '路径无效');
             }
@@ -498,14 +501,13 @@ var RamariaSettingsView = (function () {
                 '<button class="btn btn-secondary btn-sm" id="settings-export-json">导出 JSON</button>' +
                 '<button class="btn btn-secondary btn-sm" id="settings-export-md">导出 Markdown</button>' +
             '</div>' +
-            '<div class="settings-danger-zone" style="margin-top:var(--space-4)">' +
+            '<div class="settings-danger-zone mt-4">' +
                 '<div class="settings-danger-title">⚠ 重建索引</div>' +
                 '<div class="settings-danger-desc">' +
                     '重建全部记忆检索索引。在索引数据异常或检索结果不准确时可以执行此操作。' +
                     '重建期间无法正常对话。<br>重建不会丢失任何记忆数据。' +
                 '</div>' +
-                '<button class="btn btn-primary btn-sm" id="settings-rebuild-index" ' +
-                    'style="background:var(--pink-500);">重建索引</button>' +
+                '<button class="btn btn-primary btn-sm" id="settings-rebuild-index">重建索引</button>' +
             '</div>';
 
         section.appendChild(card);
@@ -587,7 +589,7 @@ var RamariaSettingsView = (function () {
                 });
                 if (invokeResult) return invokeResult;
             } catch (err) {
-                console.warn('[SettingsView] invoke save_file_dialog 失败:', err);
+                console.warn('[SettingsView] 调用 save_file_dialog 失败:', err);
             }
         }
 
@@ -599,11 +601,11 @@ var RamariaSettingsView = (function () {
     async function _handleRebuildIndex() {
         RamariaModal.show({
             title: '确认重建索引',
-            body: '<p style="font-size:13px;color:var(--text-secondary);line-height:1.6;">' +
+            body: '<p class="settings-modal-body">' +
                   '重建索引将重新扫描全部记忆数据并构建检索索引。<br><br>' +
                   '<strong>注意：</strong>重建期间无法进行对话。此操作不会丢失数据，但可能需要几分钟时间。</p>',
             footer: '<button class="btn btn-secondary" data-action="cancel">取消</button>' +
-                    '<button class="btn btn-primary" data-action="confirm" style="background:var(--pink-500);">确认重建</button>',
+                    '<button class="btn btn-primary" data-action="confirm">确认重建</button>',
             onAction: async function (action) {
                 if (action !== 'confirm') return;
 
@@ -641,13 +643,13 @@ var RamariaSettingsView = (function () {
             '<div class="settings-about-logo" aria-hidden="true">🪸</div>' +
             '<div class="settings-about-name">Ramaria</div>' +
             '<div class="settings-about-version">v0.1.0</div>' +
-            '<div style="font-size:12px;color:var(--text-secondary);line-height:1.6;margin-bottom:var(--space-3);">' +
+            '<div class="settings-about-desc">' +
                 '个人 AI 陪伴记忆系统<br>' +
                 'Rust + Tauri 2 重构版' +
             '</div>' +
             '<div class="settings-about-links">' +
                 '<a class="settings-about-link" href="https://github.com/entergirl/Ramaria-s" target="_blank" rel="noopener">GitHub</a>' +
-                '<span style="color:var(--text-tertiary);">·</span>' +
+                '<span class="text-tertiary">·</span>' +
                 '<a class="settings-about-link" href="#" target="_blank" rel="noopener">MIT License</a>' +
             '</div>';
 
@@ -663,7 +665,7 @@ var RamariaSettingsView = (function () {
         var unreg;
 
         unreg = RamariaRouter.registerHook('settings', 'enter', async function () {
-            console.log('[SettingsView] enter');
+            console.log('[SettingsView] 进入视图');
             render();
 
             // 加载配置
@@ -689,7 +691,7 @@ var RamariaSettingsView = (function () {
         _unregisterFns.push(unreg);
 
         unreg = RamariaRouter.registerHook('settings', 'leave', function () {
-            console.log('[SettingsView] leave');
+            console.log('[SettingsView] 离开视图');
             for (var i = 0; i < _unsubs.length; i++) {
                 try { _unsubs[i](); } catch (_) { /* ignore */ }
             }

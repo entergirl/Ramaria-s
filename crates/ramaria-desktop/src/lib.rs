@@ -314,6 +314,7 @@ pub fn run() {
             commands::persona::list_personas_full,
             commands::persona::update_persona_info,
             commands::persona::refresh_persona,
+            commands::persona::regenerate_import_pipeline,
             // ---- System ----
             tray::confirm_close_action,
         ])

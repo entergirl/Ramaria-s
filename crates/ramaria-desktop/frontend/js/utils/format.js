@@ -436,3 +436,10 @@ var RamariaFormat = (function () {
         truncate: truncate
     };
 })();
+
+// 防止意外覆盖
+Object.defineProperty(window, 'RamariaFormat', {
+    value: RamariaFormat,
+    writable: false,
+    configurable: false,
+});

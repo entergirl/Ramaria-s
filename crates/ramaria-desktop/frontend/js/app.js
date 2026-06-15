@@ -214,10 +214,9 @@
                 var state = await RamariaApi.chat.getAppState();
                 console.log('[App] 初始状态: ' + state);
 
-                // 同步到 Store，Router 订阅的 'appState' 事件会自动触发首次路由
-                RamariaStore.set('appState', state);
-
-                // v1.1: 如果是 degraded，查询具体原因以显示准确提示
+                // v1.1: 如果是 degraded，先查询具体原因再设置状态
+                // 必须在 set('appState') 之前完成，否则 Router 响应 appState 变化时
+                // degradedReason 还是 null，导致永远走默认提示分支
                 if (state === 'degraded') {
                     try {
                         var reason = await RamariaApi.setup.getDegradedReason();
@@ -226,6 +225,9 @@
                         RamariaStore.set('degradedReason', '');
                     }
                 }
+
+                // 同步到 Store，Router 订阅的 'appState' 事件会自动触发首次路由
+                RamariaStore.set('appState', state);
 
                 // 如果状态是 ready/degraded，预加载会话列表和配置
                 if (state === 'ready' || state === 'degraded') {
@@ -327,21 +329,15 @@
 
             RamariaModal.show({
                 title: '关闭 Ramaria',
-                body: '<p style="font-size:13px;color:var(--text-secondary);line-height:1.7;">' +
-                    '请选择关闭方式：</p>' +
-                    '<div style="margin-top:8px;font-size:12px;color:var(--text-tertiary);line-height:1.6;">' +
+                body: '<p class="app-close-body">请选择关闭方式：</p>' +
+                    '<div class="app-close-detail">' +
                     '• <strong>最小化到托盘</strong>：窗口隐藏，应用在后台继续运行。<br>' +
                     '   可通过系统托盘图标恢复窗口。<br>' +
                     '• <strong>退出 Ramaria</strong>：完全关闭应用，停止所有后台任务。' +
                     '</div>',
                 footer:
-                    '<button class="btn btn-secondary" data-action="minimize" style="flex:1;">' +
-                        '最小化到托盘' +
-                    '</button>' +
-                    '<button class="btn btn-primary" data-action="exit" ' +
-                        'style="flex:1;background:var(--pink-500);">' +
-                        '退出 Ramaria' +
-                    '</button>',
+                    '<button class="btn btn-secondary flex-1" data-action="minimize">最小化到托盘</button>' +
+                    '<button class="btn btn-primary flex-1" data-action="exit">退出 Ramaria</button>',
                 closable: false,        // 禁止 × 关闭
                 closeOnOverlay: false,  // 禁止点击遮罩关闭
                 closeOnEsc: false,      // 禁止 ESC 关闭

@@ -59,6 +59,12 @@ var RamariaMemoryView = (function () {
             return;
         }
 
+        // ── v1.1 修复: render() 会重建 DOM，旧的按钮监听器随之销毁 ──
+        // 重置标志确保 _updatePipelineButton() 在新 DOM 上重新绑定 click 事件。
+        _pipelineBtnBound = false;
+        // 同时重置运行态，避免上次未完成的任务阻塞新按钮操作。
+        _pipelineRunning = false;
+
         viewEl.innerHTML = '';
 
         var inner = document.createElement('div');
@@ -72,11 +78,10 @@ var RamariaMemoryView = (function () {
             '<select id="memory-persona-select" aria-label="选择人格">' +
                 '<option value="rama-0001">默认 (rama-0001)</option>' +
             '</select>' +
-            '<span style="font-size:11px;color:var(--text-tertiary);">筛选记忆归属人格</span>' +
+            '<span class="memory-toolbar-hint">筛选记忆归属人格</span>' +
             // 深度处理按钮（仅导入人格时显示，默认隐藏）
-            '<button class="btn btn-secondary btn-sm hidden" id="btn-trigger-pipeline" ' +
-            'title="对此导入人格的消息执行 L2 事件提取和 L3 性格画像生成" ' +
-            'style="margin-left:auto;">' +
+            '<button class="btn btn-secondary btn-sm hidden ml-auto" id="btn-trigger-pipeline" ' +
+            'title="对此导入人格的消息执行 L2 事件提取和 L3 性格画像生成">' +
             '🔬 深度处理导入的消息</button>';
         inner.appendChild(toolbar);
 
@@ -297,10 +302,10 @@ var RamariaMemoryView = (function () {
                 '<div class="memory-l1-card-footer">' +
                     '<span>' + RamariaFormat.smartTime(item.created_at) + '</span>' +
                     '<div class="memory-salience-bar">' +
-                        '<span style="font-size:10px;">强度</span>' +
+                        '<span class="memory-salience-label">强度</span>' +
                         '<div class="memory-salience-track">' +
-                            '<div class="memory-salience-fill" style="width:' +
-                                Math.round((item.salience || 0) * 100) + '%"></div>' +
+                            '<div class="memory-salience-fill memory-salience-fill-w' +
+                                (Math.round((item.salience || 0) * 10) * 10) + '"></div>' +
                         '</div>' +
                     '</div>' +
                 '</div>';
@@ -316,9 +321,8 @@ var RamariaMemoryView = (function () {
 
                 RamariaModal.show({
                     title: 'L1 摘要详情',
-                    body: '<pre style="font-size:12.5px;line-height:1.7;color:var(--text-primary);' +
-                          'white-space:pre-wrap;word-break:break-word;margin:0;font-family:var(--font-body);">' +
-                          RamariaMarkdown ? RamariaMarkdown.sanitize(detail) : detail +
+                    body: '<pre class="memory-modal-pre">' +
+                          (RamariaMarkdown ? RamariaMarkdown.sanitize(detail) : detail) +
                           '</pre>',
                     footer: '<button class="btn btn-secondary" data-action="close">关闭</button>',
                 });
@@ -452,12 +456,10 @@ var RamariaMemoryView = (function () {
 
             var section = document.createElement('div');
             section.className = 'memory-l3-section';
-            section.style.width = '100%';
             section.innerHTML = '<div class="memory-l3-section-title">' + layerNames[layer] + '</div>';
 
             var tags = document.createElement('div');
             tags.className = 'memory-l3-cloud';
-            tags.style.justifyContent = 'flex-start';
 
             for (var t = 0; t < traits.length; t++) {
                 // ★ 使用 let 声明以创建块级作用域闭包
@@ -493,8 +495,7 @@ var RamariaMemoryView = (function () {
 
                         RamariaModal.show({
                             title: '性格标签: ' + (trait.label || '?'),
-                            body: '<pre style="font-size:12.5px;line-height:1.7;color:var(--text-primary);' +
-                                  'white-space:pre-wrap;word-break:break-word;margin:0;font-family:var(--font-body);">' +
+                            body: '<pre class="memory-modal-pre">' +
                                   (RamariaMarkdown ? RamariaMarkdown.sanitize(detail) : detail) +
                                   '</pre>',
                             footer: '<button class="btn btn-secondary" data-action="close">关闭</button>',
@@ -550,14 +551,29 @@ var RamariaMemoryView = (function () {
                 select.appendChild(opt);
             }
 
-            // 默认 rama-0001
-            var def = select.querySelector('option[value="rama-0001"]');
-            if (!def && _allPersonas.length > 0) {
-                select.value = _allPersonas[0].uid;
-                _currentPersonaUid = _allPersonas[0].uid;
-            } else if (def) {
-                select.value = 'rama-0001';
-                _currentPersonaUid = 'rama-0001';
+            // ── v1.1 修复: 检查是否有预设的 persona（来自导入完成页的导航）──
+            var preselectUid = RamariaStore.get('preselectPersonaUid');
+            if (preselectUid) {
+                var preselectOpt = select.querySelector('option[value="' + preselectUid + '"]');
+                if (preselectOpt) {
+                    select.value = preselectUid;
+                    _currentPersonaUid = preselectUid;
+                    console.log('[MemoryView] 预设 persona 选择器: ' + preselectUid);
+                } else if (_allPersonas.length > 0) {
+                    _currentPersonaUid = _allPersonas[0].uid;
+                }
+                // 清除预设标志（仅生效一次）
+                RamariaStore.set('preselectPersonaUid', null);
+            } else {
+                // 默认 rama-0001
+                var def = select.querySelector('option[value="rama-0001"]');
+                if (def) {
+                    select.value = 'rama-0001';
+                    _currentPersonaUid = 'rama-0001';
+                } else if (_allPersonas.length > 0) {
+                    select.value = _allPersonas[0].uid;
+                    _currentPersonaUid = _allPersonas[0].uid;
+                }
             }
         } catch (err) {
             console.error('[MemoryView] 加载人格列表失败:', err);
@@ -606,11 +622,23 @@ var RamariaMemoryView = (function () {
 
     /**
      * 处理"深度处理导入的消息"按钮点击。
-     * 调用后端 trigger_memory_pipeline 触发 L2→L3 级联。
+     *
+     * v1.1 修复: 调用新命令 `regenerate_import_pipeline`，先重新生成 L1 摘要，
+     * 再自动级联 L2→L3。覆盖导入时 LLM 不可用导致 L1 失败的场景。
+     *
+     * 流程:
+     * 1. 后端查找该 persona 的所有关联 session
+     * 2. 对每个 session 重新生成 L1 摘要（persona_uid=NULL，幂等覆盖）
+     * 3. L1 全部完成后触发 L2→L3 级联（后台异步）
      */
     async function _handleTriggerPipeline() {
         if (_pipelineRunning) {
-            RamariaToast.show('深度处理正在进行中，请稍候...', 'warning');
+            RamariaToast.show('warning', '提示', '深度处理正在进行中，请稍候...');
+            return;
+        }
+
+        if (!_currentPersonaUid) {
+            RamariaToast.show('warning', '提示', '请先选择一个导入人格');
             return;
         }
 
@@ -622,8 +650,43 @@ var RamariaMemoryView = (function () {
         }
 
         try {
-            await RamariaApi.memory.triggerPipeline();
-            RamariaToast.show('深度处理已启动！L2 事件提取和 L3 性格画像将在后台异步执行。', 'success');
+            var result = await RamariaApi.memory.regenerateImportPipeline(_currentPersonaUid);
+
+            // 解析结果
+            var l1Regenerated = (result && result.l1_regenerated) ? result.l1_regenerated : 0;
+            var l1Failed = (result && result.l1_failed) ? result.l1_failed : 0;
+            var totalSessions = (result && result.total_sessions) ? result.total_sessions : 0;
+            var earlyTerminated = !!(result && result.early_terminated);
+            var remainingSkipped = (result && result.remaining_skipped) ? result.remaining_skipped : 0;
+
+            // ── v1.1 修复: 区分提前终止 vs 部分失败 vs 全部成功 ──
+            if (earlyTerminated) {
+                // 连续失败达上限，已提前终止 → 用 error 级 toast 强调需要用户操作
+                RamariaToast.show(
+                    'error', 'LLM 不可用，已提前终止',
+                    '连续失败 ' + l1Failed + ' 次，已跳过剩余 ' + remainingSkipped + ' 个 session。' +
+                    '请确认 LLM 模型已连接后重试。',
+                    { duration: 10000 }
+                );
+            } else if (l1Failed > 0) {
+                RamariaToast.show(
+                    'warning', '部分失败',
+                    'L1 重新生成: 成功 ' + l1Regenerated + '/' + totalSessions +
+                    '，失败 ' + l1Failed + '。请确认 LLM 模型连接正常后重试。L2/L3 将在后台继续处理。',
+                    { duration: 8000 }
+                );
+            } else if (l1Regenerated > 0) {
+                RamariaToast.show(
+                    'success', '处理完成',
+                    'L1 全部重新生成成功 (' + l1Regenerated + '/' + totalSessions +
+                    ')。L2 事件提取和 L3 性格画像将在后台异步执行。',
+                    { duration: 5000 }
+                );
+            } else {
+                RamariaToast.show('info', '提示', '该人格没有关联的消息需要处理。');
+            }
+
+            // 延迟刷新记忆数据
             setTimeout(function () {
                 _loadAllData();
                 _pipelineRunning = false;
@@ -631,7 +694,7 @@ var RamariaMemoryView = (function () {
                     btn.disabled = false;
                     btn.textContent = '🔬 深度处理导入的消息';
                 }
-            }, 3000);
+            }, 5000);
         } catch (err) {
             _pipelineRunning = false;
             if (btn) {
@@ -639,7 +702,7 @@ var RamariaMemoryView = (function () {
                 btn.textContent = '🔬 深度处理导入的消息';
             }
             console.error('[MemoryView] 深度处理失败:', err);
-            RamariaToast.show('深度处理失败: ' + (err.message || String(err)), 'error');
+            RamariaToast.show('error', '处理失败', err.message || String(err));
         }
     }
 
@@ -651,7 +714,7 @@ var RamariaMemoryView = (function () {
         var unreg;
 
         unreg = RamariaRouter.registerHook('memory', 'enter', function () {
-            console.log('[MemoryView] enter');
+            console.log('[MemoryView] 进入视图');
             render();
             _refreshPersonaSelector().then(function () {
                 _loadAllData();
@@ -661,7 +724,7 @@ var RamariaMemoryView = (function () {
         _unregisterFns.push(unreg);
 
         unreg = RamariaRouter.registerHook('memory', 'leave', function () {
-            console.log('[MemoryView] leave');
+            console.log('[MemoryView] 离开视图');
             for (var i = 0; i < _unsubs.length; i++) {
                 try { _unsubs[i](); } catch (_) { /* ignore */ }
             }

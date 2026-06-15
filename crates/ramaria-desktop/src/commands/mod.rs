@@ -68,5 +68,6 @@ pub fn command_names() -> Vec<&'static str> {
         "list_personas_full",
         "update_persona_info",
         "refresh_persona",
+        "regenerate_import_pipeline",
     ]
 }

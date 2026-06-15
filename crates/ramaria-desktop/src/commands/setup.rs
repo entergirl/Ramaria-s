@@ -267,6 +267,7 @@ pub struct EmbeddingModelView {
 pub enum DegradedReason {
     EmbeddingMissing,
     LlmUnavailable,
+    BothUnavailable,
     Unknown,
 }
 
@@ -477,7 +478,8 @@ pub async fn get_degraded_reason(
     let llm_ok = llm.validate().await.is_ok();
 
     match (llm_ok, embedding_ok) {
-        (false, _) => Ok(Some(DegradedReason::LlmUnavailable)),
+        (false, false) => Ok(Some(DegradedReason::BothUnavailable)),
+        (false, true) => Ok(Some(DegradedReason::LlmUnavailable)),
         (true, false) => Ok(Some(DegradedReason::EmbeddingMissing)),
         _ => Ok(Some(DegradedReason::Unknown)),
     }

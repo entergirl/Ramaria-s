@@ -41,6 +41,9 @@
 
   /* 右侧精细分割线 */
   border-right: 1px solid oklch(1 0 0 / 0.06);
+
+  /* 渲染隔离：Sidebar 内容不会触发外部重绘 */
+  contain: layout style;
 }
 
 /* Sidebar 品牌区 */
@@ -410,4 +413,39 @@
 
 #app.has-fullscreen-view .status-bar {
   display: none;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   6. 全屏视图内部样式（CSP-safe，零内联 style）
+   ═══════════════════════════════════════════════════════════ */
+
+/* 进度页 spinner 容器 */
+.view-progress-spinner {
+  margin-bottom: var(--space-6);
+}
+
+/* 错误页内容容器 */
+.view-error-box {
+  max-width: 400px;
+  padding: var(--space-8);
+}
+
+/* 错误页图标 */
+.view-error-icon {
+  font-size: 64px;
+  margin-bottom: var(--space-6);
+}
+
+/* 关闭确认弹窗（CSP-safe: 替代内联 style） */
+.app-close-body {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.7;
+}
+
+.app-close-detail {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  line-height: 1.6;
 }

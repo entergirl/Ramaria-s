@@ -53,6 +53,9 @@
   width: 540px;
   max-width: 94vw;
   box-shadow: var(--shadow-md);
+
+  /* 渲染隔离：卡片内部变更不会触发兄弟元素重绘 */
+  contain: content;
 }
 
 /* =========================================================
@@ -279,8 +282,8 @@
 }
 
 .setup-field-input:focus {
-  border-color: var(--border-pink);
-  box-shadow: 0 0 0 3px oklch(0.53 0.19 10 / 0.08);
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 var(--focus-ring-width) oklch(0.53 0.19 10 / 0.12);
 }
 
 .setup-field-input::placeholder {
@@ -436,6 +439,30 @@
   color: var(--text-tertiary);
 }
 
+/* ── Modal 正文样式（CSP-safe） ── */
+.setup-modal-body {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.setup-modal-body-sm {
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+.setup-modal-body-sm.mt-2 {
+  margin-top: var(--space-2);
+}
+
+.setup-modal-list {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.8;
+  padding-left: 16px;
+  margin-top: 8px;
+}
+
 /* 初始化进度 */
 .setup-init-status {
   background: var(--bg-subtle);
@@ -564,8 +591,8 @@
 }
 
 [data-theme="dark"] .setup-field-input:focus {
-  border-color: var(--border-pink);
-  box-shadow: 0 0 0 3px oklch(0.53 0.19 10 / 0.15);
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 var(--focus-ring-width) oklch(0.53 0.19 10 / 0.15);
 }
 
 [data-theme="dark"] .setup-field-input::placeholder {

@@ -279,6 +279,25 @@ var RamariaApi = (function () {
         return await _invoke('trigger_memory_pipeline', {}, '触发记忆管线');
     }
 
+    /**
+     * 重新生成导入 persona 的 L1 摘要并级联 L2/L3（v1.1 修复）。
+     *
+     * 说明:
+     * - 对指定 persona 的所有导入 session 重新生成 L1 摘要（persona_uid=NULL）。
+     * - L1 生成完成后自动触发 L2→L3 级联（后台异步）。
+     * - 适用于导入时 LLM 不可用导致 L1 失败的场景。
+     *
+     * 参数:
+     * - `personaUid`: 目标导入 persona 的 UID（如 "char-123456789"）
+     *
+     * 返回:
+     * - `{ l1_regenerated: N, l1_failed: N, total_sessions: N, message: "..." }`
+     */
+    async function regenerateImportPipeline(personaUid) {
+        _require(personaUid, 'persona UID');
+        return await _invoke('regenerate_import_pipeline', { personaUid: personaUid }, '重新生成导入管线');
+    }
+
     // =========================================================
     // 4. 配置管理 (config)
     // =========================================================
@@ -579,22 +598,30 @@ var RamariaApi = (function () {
      * 参数:
      * - `filePath`: 文件绝对路径
      * - `mode`: 导入模式，"fast"（仅 L0）或 "deep"（全管线）
-     * - `personaName`: 可选，关联的 persona 显示名称
+     * - `personaName`: 可选，导出者 persona 显示名称
+     * - `selfPersonaUid`: Phase 5B 可选，导出者 persona UID（留空自动生成）
+     * - `otherPersonaName`: Phase 5B 可选，对方 persona 显示名称
+     * - `otherPersonaUid`: Phase 5B 可选，对方 persona UID（留空自动生成）
      * - `gapMinutes`: 可选，session 切割间隔（分钟），默认 10
      *
      * 返回:
-     * - ImportResult: { success, mode, report_summary, sessions_written, messages_written, persona_uid, persona_name, ... }
+     * - ImportResult: { success, mode, report_summary, sessions_written, messages_written,
+     *                    persona_uid, persona_name, other_persona_uid, other_persona_name, ... }
      */
-    async function importQQChat(filePath, mode, personaName, gapMinutes) {
+    async function importQQChat(filePath, mode, personaName, selfPersonaUid, otherPersonaName, otherPersonaUid, gapMinutes) {
         _require(filePath, '文件路径');
         var args = {
             filePath: filePath,
             mode: mode || 'fast',
         };
         if (personaName) args.personaName = personaName;
+        if (selfPersonaUid) args.selfPersonaUid = selfPersonaUid;
+        if (otherPersonaName) args.otherPersonaName = otherPersonaName;
+        if (otherPersonaUid) args.otherPersonaUid = otherPersonaUid;
         if (gapMinutes !== undefined && gapMinutes !== null) {
             args.gapMinutes = gapMinutes;
         }
+        console.log('[Api] 调用 importQQChat，参数:', JSON.stringify(args, null, 2));
         return await _invoke('import_qq_chat', args, '导入 QQ 聊天记录');
     }
 
@@ -623,6 +650,7 @@ var RamariaApi = (function () {
             getL2: getL2Events,
             getL3: getL3Traits,
             triggerPipeline: triggerMemoryPipeline,
+            regenerateImportPipeline: regenerateImportPipeline,
         },
         config: {
             getBackend: getBackendConfig,

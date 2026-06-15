@@ -97,7 +97,7 @@
 
 .settings-form-input:focus {
   border-color: var(--color-primary);
-  box-shadow: 0 0 0 3px oklch(0.53 0.19 10 / 0.08);
+  box-shadow: 0 0 0 var(--focus-ring-width) oklch(0.53 0.19 10 / 0.12);
 }
 
 .settings-form-input::placeholder {
@@ -124,7 +124,7 @@
 
 .settings-form-select:focus {
   border-color: var(--color-primary);
-  box-shadow: 0 0 0 3px oklch(0.53 0.19 10 / 0.08);
+  box-shadow: 0 0 0 var(--focus-ring-width) oklch(0.53 0.19 10 / 0.12);
 }
 
 .settings-form-hint {
@@ -216,6 +216,13 @@
   font-size: 13px;
 }
 
+.settings-about-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  margin-bottom: var(--space-3);
+}
+
 .settings-about-logo {
   font-size: 36px;
   margin-bottom: var(--space-3);
@@ -266,6 +273,22 @@
   justify-content: flex-end;
   gap: var(--space-2);
   padding: var(--space-3) 0;
+}
+
+/* 嵌入模型推荐代码标签 */
+.settings-code-inline {
+  font-size: 10px;
+  background: var(--bg-subtle);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+}
+
+/* Modal 正文段落 */
+.settings-modal-body {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.6;
 }
 
 /* =========================================================

@@ -456,3 +456,10 @@ var RamariaToast = (function () {
         }
     };
 })();
+
+// 防止意外覆盖
+Object.defineProperty(window, 'RamariaToast', {
+    value: RamariaToast,
+    writable: false,
+    configurable: false,
+});

@@ -59,6 +59,13 @@ var RamariaStore = (function () {
         settings: [],
         personas: [],
         defaultPersonaUid: null,
+        degradedReason: null,
+        /// v1.1: 导入完成页 → 记忆页导航预设 persona UID（一次性消费，读取后清除）
+        preselectPersonaUid: null,
+        /// v1.1: 导入完成页 → 聊天页"查看导入消息"模式标志（一次性消费）
+        viewingImportedSession: false,
+        /// v1.1: 导入消息的导出者 persona 名称（聊天页页眉展示用）
+        viewingImportedName: '',
     };
 
     // =========================================================
@@ -313,6 +320,7 @@ var RamariaStore = (function () {
             settings: [],
             personas: [],
             defaultPersonaUid: null,
+            degradedReason: null,
         };
         _subscribers = {};
         console.log('[Store] 状态已重置');

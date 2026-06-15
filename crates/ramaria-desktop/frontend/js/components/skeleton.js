@@ -127,13 +127,13 @@ var RamariaSkeleton = (function () {
         // 字段 3（稍短）
         html += '<div class="skeleton-form">';
         html += '<div class="skeleton skeleton-line w-30"></div>';
-        html += '<div class="skeleton skeleton-line w-full" style="height:80px"></div>';
+        html += '<div class="skeleton skeleton-line w-full skeleton-h-80"></div>';
         html += '</div>';
 
         // 按钮区
-        html += '<div style="display:flex;gap:8px;margin-top:16px">';
-        html += '<div class="skeleton" style="width:100px;height:38px;border-radius:9999px"></div>';
-        html += '<div class="skeleton" style="width:120px;height:38px;border-radius:9999px"></div>';
+        html += '<div class="skeleton-btn-row">';
+        html += '<div class="skeleton skeleton-btn"></div>';
+        html += '<div class="skeleton skeleton-btn-lg"></div>';
         html += '</div>';
 
         return html;
@@ -150,21 +150,20 @@ var RamariaSkeleton = (function () {
         var html = '';
 
         // 表头
-        html += '<div style="display:flex;gap:12px;padding:10px 12px;border-bottom:2px solid var(--border-light);margin-bottom:8px">';
-        html += '<div class="skeleton" style="width:30%;height:14px"></div>';
-        html += '<div class="skeleton" style="width:20%;height:14px"></div>';
-        html += '<div class="skeleton" style="width:25%;height:14px"></div>';
-        html += '<div class="skeleton" style="width:15%;height:14px"></div>';
+        html += '<div class="skeleton-table-header">';
+        html += '<div class="skeleton skeleton-cell-w30"></div>';
+        html += '<div class="skeleton skeleton-cell-w20"></div>';
+        html += '<div class="skeleton skeleton-cell-w25"></div>';
+        html += '<div class="skeleton skeleton-cell-w15"></div>';
         html += '</div>';
 
         // 数据行
         for (var i = 0; i < 5; i++) {
-            html += '<div style="display:flex;gap:12px;padding:9px 12px;border-bottom:1px solid var(--border-light)">';
-            // 使用 inline style 控制列宽（w-* class 适合文本行百分比，不适合 flex 列布局）
-            html += '<div class="skeleton skeleton-line" style="width:30%"></div>';
-            html += '<div class="skeleton skeleton-line" style="width:20%"></div>';
-            html += '<div class="skeleton skeleton-line" style="width:25%"></div>';
-            html += '<div class="skeleton skeleton-line" style="width:15%"></div>';
+            html += '<div class="skeleton-table-row">';
+            html += '<div class="skeleton skeleton-line skeleton-cell-w30"></div>';
+            html += '<div class="skeleton skeleton-line skeleton-cell-w20"></div>';
+            html += '<div class="skeleton skeleton-line skeleton-cell-w25"></div>';
+            html += '<div class="skeleton skeleton-line skeleton-cell-w15"></div>';
             html += '</div>';
         }
 
@@ -296,3 +295,10 @@ var RamariaSkeleton = (function () {
         render: render
     };
 })();
+
+// 防止意外覆盖
+Object.defineProperty(window, 'RamariaSkeleton', {
+    value: RamariaSkeleton,
+    writable: false,
+    configurable: false,
+});

@@ -46,6 +46,7 @@ var RamariaRouter = (function () {
     var VIEW_TITLES = {
         chat: '对话',
         memory: '记忆',
+        persona: '人格管理',
         import: '数据导入',
         settings: '设置',
         setup: '首次配置',
@@ -127,7 +128,7 @@ var RamariaRouter = (function () {
      * 切换到指定视图。
      *
      * 参数:
-     * - `viewName`: 视图名称（'chat' | 'memory' | 'settings' | 'setup' | 'progress' | 'error'）
+     * - `viewName`: 视图名称（'chat' | 'memory' | 'persona' | 'import' | 'settings' | 'setup' | 'progress' | 'error'）
      * - `options`: 可选。{ title, subInfo } 用于进度页/错误页的自定义文案
      *
      * 说明:
@@ -136,7 +137,7 @@ var RamariaRouter = (function () {
      */
     function showView(viewName, options) {
         if (!viewName) {
-            console.warn('[Router] showView: viewName 为空');
+            console.warn('[Router] showView 参数 viewName 为空');
             return;
         }
 

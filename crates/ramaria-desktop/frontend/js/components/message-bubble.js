@@ -13,8 +13,8 @@
  * - 打字光标使用 CSS animation（typing-cursor 类，由 animations.css 定义），零 JS 定时器
  * - 消息气泡入场动画（fadeInUp）由 chat.css 的 .msg-bubble-wrapper 驱动
  * - 角色映射：user → 右对齐粉底 / assistant → 左对齐蓝底 / system → 居中灰底
- * - role 仅内部使用，不随 Markdown 内容暴露给用户
- * 
+ * - CSP-safe: 全部样式走 CSS 类，零内联 style（包括 innerHTML 中的 style 属性）
+ *
  * 用法:
  *   var bubble = RamariaMessageBubble.create({ id, role, content, persona_uid, created_at });
  *   var bubble = RamariaMessageBubble.createStreaming({ id: 'temp', role: 'assistant' });
@@ -24,7 +24,7 @@
  * 依赖:
  * - RamariaMarkdown（js/utils/markdown.js）
  * - RamariaFormat（js/utils/format.js）
- * - CSS: 内联使用 tokens.css 变量
+ * - CSS: chat.css（消息气泡样式）
  */
 
 var RamariaMessageBubble = (function () {
@@ -34,30 +34,68 @@ var RamariaMessageBubble = (function () {
     // 常量
     // =========================================================
 
-    /** 角色样式映射 */
-    var ROLE_STYLES = {
-        user: {
-            align: 'flex-end',
-            bg: 'oklch(0.53 0.19 10 / 0.08)',
-            border: 'oklch(0.53 0.19 10 / 0.18)',
-            label: '你',
-            labelColor: 'var(--pink-500)',
-        },
-        assistant: {
-            align: 'flex-start',
-            bg: 'oklch(0.48 0.17 225 / 0.06)',
-            border: 'oklch(0.48 0.17 225 / 0.14)',
-            label: '助手',
-            labelColor: 'var(--blue-500)',
-        },
-        system: {
-            align: 'center',
-            bg: 'var(--bg-subtle)',
-            border: 'var(--border-default)',
-            label: '系统',
-            labelColor: 'var(--text-tertiary)',
-        },
+    /** 角色标签文案（回退值，当无法解析 persona name 时使用） */
+    var ROLE_LABELS = {
+        user: '你',
+        assistant: '助手',
+        system: '系统',
     };
+
+    // =========================================================
+    // 辅助函数
+    // =========================================================
+
+    /**
+     * 从 Store 缓存的 persona 列表中查找 persona 名称。
+     *
+     * 参数:
+     * - `personaUid`: persona 业务标识（如 "char-123456789"）
+     *
+     * 返回:
+     * - persona 的 `name` 字段；找不到则返回空字符串。
+     *
+     * 说明:
+     * - 用于气泡元数据行中显示发送者真实昵称，替代硬编码的 "你"/"助手"。
+     * - 仅在 `persona_uid` 存在且非 `rama-0001`（默认 AI）时尝试解析。
+     */
+    function _lookupPersonaName(personaUid) {
+        if (!personaUid || !RamariaStore) return '';
+        try {
+            var personas = RamariaStore.get('personas') || [];
+            for (var i = 0; i < personas.length; i++) {
+                if (personas[i].uid === personaUid) {
+                    return personas[i].name || '';
+                }
+            }
+        } catch (_) { /* ignore */ }
+        return '';
+    }
+
+    /**
+     * 剥离导入消息的 [{name}] 前缀（纯展示层）。
+     *
+     * 导入时 parser.rs 的 make_role_content() 在 content 前拼接了
+     * `[{sender_name}] ` 格式的前缀（v2.1 双前缀模式）。
+     * 此函数在渲染前剥离该前缀，避免对话框中重复显示昵称。
+     *
+     * 参数:
+     * - `content`: 原始消息内容
+     *
+     * 返回:
+     * - 剥离前缀后的内容；若内容仅剩空白则返回 "[空消息]"。
+     *
+     * 说明:
+     * - 不修改数据库内容，保持 L1 摘要可访问完整上下文。
+     * - 正常 AI 对话不会产生 `[{name}] ` 前缀，此操作安全无副作用。
+     */
+    function _stripImportPrefix(content) {
+        if (!content) return '';
+        // 匹配行首的 [{任意字符}] 后跟可选空格
+        var stripped = content.replace(/^\[[^\]]+\]\s*/, '');
+        // 极端情况：消息本身只有前缀无正文
+        if (!stripped.trim()) return '[空消息]';
+        return stripped;
+    }
 
     // =========================================================
     // 工厂函数
@@ -70,7 +108,7 @@ var RamariaMessageBubble = (function () {
      * - `msg`: { id, role, content, persona_uid?, created_at? }
      *
      * 返回:
-     * - DOM 元素（.message-bubble-wrapper），可直接插入消息列表
+     * - DOM 元素（.msg-bubble-wrapper），可直接插入消息列表
      */
     function create(msg) {
         if (!msg || !msg.role) {
@@ -78,61 +116,78 @@ var RamariaMessageBubble = (function () {
             return _createPlaceholder('消息数据异常');
         }
 
-        var style = ROLE_STYLES[msg.role] || ROLE_STYLES.system;
+        var role = msg.role;
+
+        // ── v1.1 修复: 角色标签优先使用 persona name ──
+        var personaName = _lookupPersonaName(msg.persona_uid);
+        var label;
+        if (personaName && msg.persona_uid && msg.persona_uid.indexOf('rama-0001') !== 0) {
+            // 导入的 persona 或非默认 AI —— 使用真实昵称
+            label = personaName;
+        } else {
+            // 回退到硬编码标签
+            label = ROLE_LABELS[role] || ROLE_LABELS.system;
+        }
+
+        // ── v1.1 修复: 剥离导入消息的 [{name}] 前缀（纯展示层）──
+        var displayContent = _stripImportPrefix(msg.content || '');
+
+        // wrapper
         var wrapper = document.createElement('div');
         wrapper.className = 'msg-bubble-wrapper';
         wrapper.setAttribute('data-message-id', msg.id || '');
-        wrapper.setAttribute('data-role', msg.role);
-        wrapper.style.cssText =
-            'display:flex;flex-direction:column;align-items:' + style.align + ';' +
-            'margin-bottom:var(--space-3);padding:0 var(--space-4);';
+        wrapper.setAttribute('data-role', role);
 
-        // 角色标签 + 时间戳
-        var metaHtml = '';
-        if (msg.role !== 'system') {
-            var timeStr = msg.created_at ? RamariaFormat.smartTime(msg.created_at) : '';
-            metaHtml =
-                '<div style="display:flex;align-items:center;gap:var(--space-2);margin-bottom:var(--space-1);' +
-                'font-size:11px;">' +
-                '<span style="color:' + style.labelColor + ';font-weight:500;">' + style.label + '</span>' +
-                (msg.persona_uid
-                    ? '<span style="color:var(--text-tertiary);" title="人格: ' + msg.persona_uid + '">' +
-                      '@' + msg.persona_uid + '</span>'
-                    : '') +
-                (timeStr ? '<span style="color:var(--text-tertiary);">' + timeStr + '</span>' : '') +
-                '</div>';
+        // 元数据行（角色标签 + 人格 + 时间戳）
+        if (role !== 'system') {
+            var meta = document.createElement('div');
+            meta.className = 'msg-bubble-meta';
+
+            var labelSpan = document.createElement('span');
+            labelSpan.className = 'msg-bubble-label';
+            labelSpan.textContent = label;
+            meta.appendChild(labelSpan);
+
+            if (msg.persona_uid) {
+                var personaSpan = document.createElement('span');
+                personaSpan.className = 'msg-bubble-persona';
+                // 如果已解析出 persona name，使用 name 作为 title；否则显示 uid
+                var personaDisplay = personaName || msg.persona_uid;
+                personaSpan.title = '人格: ' + personaDisplay;
+                personaSpan.textContent = '@' + personaDisplay;
+                meta.appendChild(personaSpan);
+            }
+
+            if (msg.created_at) {
+                var timeSpan = document.createElement('span');
+                timeSpan.className = 'msg-bubble-time';
+                timeSpan.textContent = RamariaFormat.smartTime(msg.created_at);
+                meta.appendChild(timeSpan);
+            }
+
+            wrapper.appendChild(meta);
         } else {
-            metaHtml =
-                '<div style="text-align:center;font-size:10px;color:var(--text-tertiary);margin-bottom:var(--space-1);">' +
-                (msg.created_at ? RamariaFormat.smartTime(msg.created_at) : '') +
-                '</div>';
+            var sysMeta = document.createElement('div');
+            sysMeta.className = 'msg-bubble-meta--system';
+            if (msg.created_at) {
+                sysMeta.textContent = RamariaFormat.smartTime(msg.created_at);
+            }
+            wrapper.appendChild(sysMeta);
         }
 
-        // 气泡内容
+        // 气泡内容（使用剥离前缀后的 displayContent）
         var bubble = document.createElement('div');
         bubble.className = 'msg-bubble';
-        bubble.style.cssText =
-            'max-width:75%;padding:var(--space-3) var(--space-4);' +
-            'border-radius:var(--radius-md);' +
-            'background:' + style.bg + ';' +
-            'border:1px solid ' + style.border + ';' +
-            'font-size:13.5px;line-height:1.65;' +
-            'color:var(--text-primary);' +
-            'word-break:break-word;overflow-wrap:break-word;';
 
-        // Markdown 渲染
-        var contentHtml = '';
         try {
-            contentHtml = RamariaMarkdown.render(msg.content || '');
+            bubble.innerHTML = RamariaMarkdown.render(displayContent);
         } catch (err) {
             console.error('[MessageBubble] Markdown 渲染失败:', err);
-            contentHtml = RamariaMarkdown.sanitize
-                ? RamariaMarkdown.sanitize(msg.content || '')
-                : _escHtml(msg.content || '');
+            bubble.innerHTML = RamariaMarkdown.sanitize
+                ? RamariaMarkdown.sanitize(displayContent)
+                : _escHtml(displayContent);
         }
-        bubble.innerHTML = contentHtml;
 
-        wrapper.innerHTML = metaHtml;
         wrapper.appendChild(bubble);
 
         return wrapper;
@@ -150,7 +205,7 @@ var RamariaMessageBubble = (function () {
     function createStreaming(opts) {
         opts = opts || {};
         var role = opts.role || 'assistant';
-        var style = ROLE_STYLES[role] || ROLE_STYLES.assistant;
+        var label = ROLE_LABELS[role] || ROLE_LABELS.assistant;
         var id = opts.id || ('streaming-' + Date.now());
 
         var wrapper = document.createElement('div');
@@ -158,30 +213,26 @@ var RamariaMessageBubble = (function () {
         wrapper.setAttribute('data-message-id', id);
         wrapper.setAttribute('data-role', role);
         wrapper.setAttribute('data-streaming', 'true');
-        wrapper.style.cssText =
-            'display:flex;flex-direction:column;align-items:' + style.align + ';' +
-            'margin-bottom:var(--space-3);padding:0 var(--space-4);';
 
-        // 角色标签
-        wrapper.innerHTML =
-            '<div style="display:flex;align-items:center;gap:var(--space-2);margin-bottom:var(--space-1);' +
-            'font-size:11px;">' +
-            '<span style="color:' + style.labelColor + ';font-weight:500;">' + style.label + '</span>' +
-            '<span style="color:var(--text-tertiary);">正在生成...</span>' +
-            '</div>';
+        // 元数据行
+        var meta = document.createElement('div');
+        meta.className = 'msg-bubble-meta';
 
-        // 气泡内容
+        var labelSpan = document.createElement('span');
+        labelSpan.className = 'msg-bubble-label';
+        labelSpan.textContent = label;
+        meta.appendChild(labelSpan);
+
+        var streamingSpan = document.createElement('span');
+        streamingSpan.className = 'msg-bubble-streaming-label';
+        streamingSpan.textContent = '正在生成...';
+        meta.appendChild(streamingSpan);
+
+        wrapper.appendChild(meta);
+
+        // 气泡内容（流式）
         var bubble = document.createElement('div');
         bubble.className = 'msg-bubble msg-bubble--streaming';
-        bubble.style.cssText =
-            'max-width:75%;padding:var(--space-3) var(--space-4);' +
-            'border-radius:var(--radius-md);' +
-            'background:' + style.bg + ';' +
-            'border:1px solid ' + style.border + ';' +
-            'font-size:13.5px;line-height:1.65;' +
-            'color:var(--text-primary);' +
-            'word-break:break-word;overflow-wrap:break-word;' +
-            'position:relative;';
         bubble.innerHTML =
             '<span class="msg-bubble-text"></span>' +
             '<span class="typing-cursor" aria-hidden="true"></span>';
@@ -226,7 +277,7 @@ var RamariaMessageBubble = (function () {
      * 说明:
      * - 移除 typing cursor CSS 和 data-streaming 属性
      * - 将文本内容替换为 Markdown 渲染结果
-     * - 更新元数据（时间戳、"正在生成..." → 实际时间）
+     * - 更新元数据（"正在生成..." → 实际时间）
      */
     function finalize(msgId, finalContent, createdAt) {
         var wrapper = document.querySelector('.msg-bubble-wrapper[data-message-id="' + msgId + '"]');
@@ -249,16 +300,11 @@ var RamariaMessageBubble = (function () {
 
         // 更新时间戳
         if (createdAt) {
-            var metaSpan = wrapper.querySelector('span');
-            if (metaSpan) {
-                // 找到"正在生成..."并替换
-                var children = wrapper.querySelectorAll('span');
-                for (var i = 0; i < children.length; i++) {
-                    if (children[i].textContent === '正在生成...') {
-                        children[i].textContent = RamariaFormat.smartTime(createdAt);
-                        break;
-                    }
-                }
+            var streamingLabels = wrapper.querySelectorAll('.msg-bubble-streaming-label');
+            for (var i = 0; i < streamingLabels.length; i++) {
+                streamingLabels[i].classList.remove('msg-bubble-streaming-label');
+                streamingLabels[i].classList.add('msg-bubble-time');
+                streamingLabels[i].textContent = RamariaFormat.smartTime(createdAt);
             }
         }
     }
@@ -279,16 +325,14 @@ var RamariaMessageBubble = (function () {
         var bubble = wrapper.querySelector('.msg-bubble');
         if (bubble) {
             bubble.classList.remove('msg-bubble--streaming');
-            bubble.style.borderColor = 'var(--pink-400)';
+            bubble.classList.add('msg-bubble--error');
         }
 
         // 追加错误提示
         var errorEl = document.createElement('div');
-        errorEl.style.cssText =
-            'margin-top:var(--space-2);font-size:11px;color:var(--pink-500);' +
-            'display:flex;align-items:center;gap:var(--space-1);';
+        errorEl.className = 'msg-bubble-error';
         // 使用 textContent 防止 LLM 返回的 HTML 特殊字符被注入执行
-        errorEl.textContent = '⚠️ ' + (errorText || '生成失败');
+        errorEl.textContent = '\u26A0\uFE0F ' + (errorText || '生成失败');
         wrapper.appendChild(errorEl);
     }
 
@@ -304,9 +348,7 @@ var RamariaMessageBubble = (function () {
 
     function _createPlaceholder(text) {
         var el = document.createElement('div');
-        el.className = 'msg-bubble-wrapper';
-        el.style.cssText =
-            'text-align:center;padding:var(--space-4);color:var(--text-tertiary);font-size:12px;';
+        el.className = 'msg-bubble-placeholder';
         el.textContent = text;
         return el;
     }

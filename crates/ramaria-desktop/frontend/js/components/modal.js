@@ -459,3 +459,10 @@ var RamariaModal = (function () {
         getModalEl: getModalEl
     };
 })();
+
+// 防止意外覆盖
+Object.defineProperty(window, 'RamariaModal', {
+    value: RamariaModal,
+    writable: false,
+    configurable: false,
+});

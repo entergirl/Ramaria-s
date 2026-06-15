@@ -28,8 +28,8 @@
     display: flex;
     justify-content: center;
     gap: var(--space-2);
-    margin-bottom: var(--space-4);
-    padding-top: var(--space-4);
+    margin-bottom: var(--space-6);    /* 与下方内容拉开，区隔页眉区域 */
+    padding-top: var(--space-2);      /* 紧贴 content-header，避免过大空白 */
 }
 
 .import-step {
@@ -85,7 +85,7 @@
    文件选择区 (Step 1)
    ═════════════════════════════════════════════════ */
 .import-file-zone {
-    background: var(--gray-0);
+    background: var(--bg-card);
     border: 2px dashed var(--border-default);
     border-radius: var(--radius-lg);
     padding: var(--space-8) var(--space-6);
@@ -130,7 +130,7 @@
     align-items: center;
     gap: var(--space-3);
     padding: var(--space-3) var(--space-4);
-    background: var(--gray-0);
+    background: var(--bg-card);
     border: 1px solid var(--border-light);
     border-radius: var(--radius-md);
     max-width: 400px;
@@ -162,7 +162,7 @@
    配置选项区
    ═════════════════════════════════════════════════ */
 .import-options {
-    background: var(--gray-0);
+    background: var(--bg-card);
     border: 1px solid var(--border-light);
     border-radius: var(--radius-lg);
     padding: var(--space-5);
@@ -202,6 +202,7 @@
     border-radius: var(--radius-md);
     cursor: pointer;
     transition: all 0.18s ease;
+    background: var(--bg-subtle);
 }
 
 .import-mode-card:hover {
@@ -249,15 +250,18 @@
    解析报告区 (Step 2)
    ═════════════════════════════════════════════════ */
 .import-report {
-    background: var(--gray-0);
+    background: var(--bg-card);
     border: 1px solid var(--border-light);
     border-radius: var(--radius-lg);
     overflow: hidden;
+
+    /* 渲染隔离：报告内容变更不触发外部重绘 */
+    contain: content;
 }
 
 .import-report-header {
     padding: var(--space-4) var(--space-5);
-    background: linear-gradient(135deg, var(--pink-100), var(--blue-100));
+    background: linear-gradient(135deg, var(--bg-card-pink), var(--bg-card-blue));
     border-bottom: 1px solid var(--border-light);
 }
 
@@ -301,8 +305,13 @@
 }
 
 .import-stat-card.skipped {
-    background: var(--gray-50);
+    background: var(--bg-subtle);
     border: 1px solid var(--border-light);
+}
+
+.import-stat-card.info {
+    background: var(--blue-50);
+    border: 1px solid var(--blue-200);
 }
 
 .import-stat-number {
@@ -322,6 +331,10 @@
 
 .import-stat-number.skipped {
     color: var(--text-tertiary);
+}
+
+.import-stat-number.info {
+    color: var(--color-secondary);
 }
 
 .import-stat-label {
@@ -356,7 +369,7 @@
    导入进度 (Step 3)
    ═════════════════════════════════════════════════ */
 .import-progress {
-    background: var(--gray-0);
+    background: var(--bg-card);
     border: 1px solid var(--border-light);
     border-radius: var(--radius-lg);
     padding: var(--space-6);
@@ -387,7 +400,7 @@
    导入完成结果
    ═════════════════════════════════════════════════ */
 .import-result {
-    background: var(--gray-0);
+    background: var(--bg-card);
     border: 1px solid var(--border-light);
     border-radius: var(--radius-lg);
     overflow: hidden;
@@ -396,7 +409,7 @@
 .import-result-header {
     padding: var(--space-5);
     text-align: center;
-    background: linear-gradient(135deg, var(--blue-100), var(--pink-100));
+    background: linear-gradient(135deg, var(--bg-card-blue), var(--bg-card-pink));
 }
 
 .import-result-icon {
@@ -444,7 +457,7 @@
     color: var(--text-secondary);
     line-height: 1.8;
     padding: var(--space-4);
-    background: var(--gray-50);
+    background: var(--bg-subtle);
     border-radius: var(--radius-md);
     white-space: pre-wrap;
     font-family: var(--font-mono);
@@ -480,6 +493,86 @@
     margin-top: var(--space-4);
 }
 
+/* v1.1 修复: 完成页导航按钮 —— 主操作靠右，辅助操作靠左 */
+.import-actions #btn-new-import {
+    margin-right: auto; /* 将"导入另一个文件"推到最左侧 */
+}
+
+/* ═════════════════════════════════════════════════
+   v1.1 修复: 完成页警告条 / 信息条
+   ═════════════════════════════════════════════════ */
+.import-warning-banner {
+    display: flex;
+    gap: var(--space-3);
+    padding: var(--space-4);
+    background: var(--pink-50);
+    border: 1px solid var(--pink-200);
+    border-radius: var(--radius-md);
+    margin-bottom: var(--space-4);
+    align-items: flex-start;
+}
+
+.import-warning-icon {
+    font-size: 20px;
+    flex-shrink: 0;
+    line-height: 1.4;
+}
+
+.import-warning-content {
+    flex: 1;
+    min-width: 0;
+}
+
+.import-warning-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--pink-700);
+    margin-bottom: var(--space-1);
+}
+
+.import-warning-desc {
+    font-size: 12px;
+    color: var(--pink-600);
+    line-height: 1.6;
+}
+
+.import-info-banner {
+    display: flex;
+    gap: var(--space-3);
+    padding: var(--space-4);
+    background: var(--blue-50);
+    border: 1px solid var(--blue-200);
+    border-radius: var(--radius-md);
+    margin-bottom: var(--space-4);
+    align-items: flex-start;
+}
+
+.import-info-icon {
+    font-size: 20px;
+    flex-shrink: 0;
+    line-height: 1.4;
+}
+
+.import-info-content {
+    flex: 1;
+    min-width: 0;
+}
+
+.import-info-desc {
+    font-size: 12px;
+    color: var(--blue-600);
+    line-height: 1.6;
+}
+
+/* v1.1 修复: 导入进度百分比 */
+.import-progress-pct {
+    text-align: center;
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-top: var(--space-2);
+    font-family: var(--font-mono);
+}
+
 /* ═════════════════════════════════════════════════
    响应式：移动端
    ═════════════════════════════════════════════════ */
@@ -505,4 +598,25 @@
     .import-file-zone {
         padding: var(--space-6) var(--space-4);
     }
+}
+
+/* ═════════════════════════════════════════════════
+   暗色模式覆盖（成功/降级统计卡硬编码色适配）
+   ═════════════════════════════════════════════════ */
+[data-theme="dark"] .import-stat-card.success {
+    background: oklch(0.22 0.035 150);
+    border-color: oklch(0.30 0.05 148);
+}
+
+[data-theme="dark"] .import-stat-card.degraded {
+    background: oklch(0.24 0.045 85);
+    border-color: oklch(0.32 0.06 82);
+}
+
+[data-theme="dark"] .import-stat-number.success {
+    color: oklch(0.72 0.12 155);
+}
+
+[data-theme="dark"] .import-stat-number.degraded {
+    color: oklch(0.75 0.14 85);
 }
