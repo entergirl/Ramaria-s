@@ -3,6 +3,7 @@
 #   - Windows 编译 + 单元测试（v1.0 首发 Windows，macOS/Linux 延后）
 #   - 不跑真实 LLM，不下 embedding 模型，不打包 Tauri
 #   - 阻塞条件：cargo build / test / clippy / fmt 全部通过
+#   - 非阻塞条件：coverage / cargo-deny / cargo-audit 仅报告，不阻塞 PR
 
 name: CI
 
@@ -19,7 +20,7 @@ env:
 
 jobs:
   build-and-test:
-    name: windows-latest
+    name: Build & Test (Windows)
     runs-on: windows-latest
 
     steps:
@@ -53,3 +54,88 @@ jobs:
 
       - name: Format check
         run: cargo fmt --all --check
+
+  # ---- 覆盖率报告（非阻塞） ----
+  # 使用 cargo-llvm-cov 生成行覆盖率报告。
+  # 仅适用于 Windows（llvm-tools-preview 组件可用）。
+  coverage:
+    name: Coverage (llvm-cov)
+    runs-on: windows-latest
+    continue-on-error: true  # 非阻塞：覆盖率不达标不阻止 PR 合并
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-cov-${{ hashFiles('Cargo.toml') }}
+          restore-keys: windows-cov-
+
+      - name: Run coverage
+        run: cargo llvm-cov --workspace --summary-only --lcov --output-path lcov.info
+        # 注：--lcov --output-path 生成 lcov 格式报告，可上传到 Codecov/Coveralls
+        # 当前仅输出摘要到 CI 日志
+
+      - name: Show coverage summary
+        run: cargo llvm-cov --workspace --summary-only
+
+  # ---- 依赖许可证检查（非阻塞） ----
+  # 使用 cargo-deny 检查依赖树的许可证兼容性。
+  # 拒绝列表: 禁止 GPL/AGPL 等强制开源的许可证（Ramaria 独立分发）。
+  cargo-deny:
+    name: License Check (cargo-deny)
+    runs-on: ubuntu-latest
+    continue-on-error: true  # 非阻塞
+    strategy:
+      matrix:
+        checks:
+          - advisories
+          - bans licenses sources
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check ${{ matrix.checks }}
+          # 注: 首次运行可能缺少 deny.toml 配置文件，cargo-deny 会使用内置默认规则。
+          # 后续可在仓库根目录添加 deny.toml 以自定义许可证策略。
+
+  # ---- 安全漏洞审计（非阻塞） ----
+  # 使用 cargo-audit 检查已知的 RustSec 安全漏洞。
+  security-audit:
+    name: Security Audit (cargo-audit)
+    runs-on: ubuntu-latest
+    continue-on-error: true  # 非阻塞：发现漏洞时仅报告，由项目负责人评估
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+
+      - name: Run security audit
+        run: cargo audit
+        # 注：若有已知漏洞，此步骤会输出 CVE 编号和受影响版本，
+        # 但因 continue-on-error: true，不会阻塞 CI。

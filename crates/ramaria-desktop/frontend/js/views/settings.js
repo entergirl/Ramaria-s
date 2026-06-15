@@ -5,6 +5,7 @@
  * - 后端配置（Provider / Base URL / Model ID / API Key）
  * - 隐私设置（隐私确认状态查看 / 记忆注入开关）
  * - 数据管理（导出 JSON / 导出 Markdown / 重建索引）
+ * - 诊断与更新（检查更新 / 导出诊断信息）
  * - 关于信息（版本号 / 许可证）
  *
  * 设计特点:
@@ -71,6 +72,9 @@ var RamariaSettingsView = (function () {
 
         // ── 数据管理 ──
         _renderDataSection(scroll);
+
+        // ── 诊断与更新（v1.1 Phase 7 新增）──
+        _renderDiagnosticsSection(scroll);
 
         // ── 关于 ──
         _renderAboutSection(scroll);
@@ -628,6 +632,165 @@ var RamariaSettingsView = (function () {
     }
 
     // =========================================================
+    // 诊断与更新区块（v1.1 Phase 7 新增）
+    // =========================================================
+
+    function _renderDiagnosticsSection(parent) {
+        var section = document.createElement('div');
+        section.className = 'settings-section';
+        section.innerHTML =
+            '<div class="settings-section-title">🔧 诊断与更新</div>' +
+            '<div class="settings-section-desc">检查新版本或导出诊断信息以排查问题。</div>';
+
+        var card = document.createElement('div');
+        card.className = 'settings-card';
+        card.innerHTML =
+            '<div class="settings-row">' +
+                '<div>' +
+                    '<div class="settings-row-label">当前版本</div>' +
+                    '<div class="settings-row-meta" id="settings-current-version">加载中...</div>' +
+                '</div>' +
+                '<span class="settings-row-value" id="settings-update-badge">-</span>' +
+            '</div>' +
+            '<div id="settings-update-detail" class="hidden" style="margin-top:8px;">' +
+                '<div class="settings-row-meta" id="settings-update-message"></div>' +
+            '</div>' +
+            '<div class="settings-actions" style="margin-top:12px;">' +
+                '<button class="btn btn-secondary btn-sm" id="settings-check-update">检查更新</button>' +
+                '<button class="btn btn-secondary btn-sm" id="settings-export-diagnostics">导出诊断信息</button>' +
+            '</div>';
+
+        section.appendChild(card);
+        parent.appendChild(section);
+
+        // 绑定事件
+        var checkBtn = $('settings-check-update');
+        if (checkBtn) checkBtn.addEventListener('click', _handleCheckUpdate);
+
+        var exportDiagBtn = $('settings-export-diagnostics');
+        if (exportDiagBtn) exportDiagBtn.addEventListener('click', _handleExportDiagnostics);
+    }
+
+    /**
+     * 处理"检查更新"按钮点击。
+     *
+     * 流程:
+     * 1. 调用 RamariaApi.diagnostics.checkUpdate()。
+     * 2. 根据返回结果显示状态：最新版本 / 新版本可用 / 检查失败。
+     * 3. 有新版本时显示 Release URL（点击可打开浏览器）。
+     */
+    async function _handleCheckUpdate() {
+        var checkBtn = $('settings-check-update');
+        var badgeEl = $('settings-update-badge');
+        var detailEl = $('settings-update-detail');
+        var msgEl = $('settings-update-message');
+
+        if (checkBtn) {
+            checkBtn.disabled = true;
+            checkBtn.textContent = '检查中...';
+        }
+
+        try {
+            var result = await RamariaApi.diagnostics.checkUpdate();
+
+            // 更新版本显示
+            var versionEl = $('settings-current-version');
+            if (versionEl) versionEl.textContent = 'v' + (result.currentVersion || '?');
+
+            if (result.error) {
+                // 检查失败
+                if (badgeEl) {
+                    badgeEl.textContent = '⚠ 检查失败';
+                    badgeEl.className = 'settings-row-value text-pink';
+                }
+                if (detailEl) detailEl.classList.remove('hidden');
+                if (msgEl) msgEl.textContent = result.error;
+                RamariaToast.show('warning', '检查更新失败', result.error);
+            } else if (result.updateAvailable) {
+                // 新版本可用
+                if (badgeEl) {
+                    badgeEl.textContent = '↑ 可更新';
+                    badgeEl.className = 'settings-row-value text-green';
+                }
+                if (detailEl) detailEl.classList.remove('hidden');
+                if (msgEl) {
+                    var releaseHtml = '发现新版本: <strong>' + (result.latestVersion || '?') + '</strong>';
+                    if (result.releaseUrl) {
+                        releaseHtml += ' — <a href="' + result.releaseUrl + '" target="_blank" rel="noopener" class="settings-about-link">前往下载</a>';
+                    }
+                    if (result.releaseNotesPreview) {
+                        releaseHtml += '<br><small class="text-tertiary">' +
+                            result.releaseNotesPreview.replace(/\n/g, '<br>') + '</small>';
+                    }
+                    msgEl.innerHTML = releaseHtml;
+                }
+                RamariaToast.show('info', '发现新版本 ' + (result.latestVersion || ''));
+            } else {
+                // 已是最新
+                if (badgeEl) {
+                    badgeEl.textContent = '✓ 已是最新';
+                    badgeEl.className = 'settings-row-value text-green';
+                }
+                if (detailEl) detailEl.classList.add('hidden');
+                RamariaToast.show('success', '已是最新版本');
+            }
+        } catch (err) {
+            console.error('[SettingsView] 检查更新失败:', err);
+            if (badgeEl) {
+                badgeEl.textContent = '⚠ 检查失败';
+                badgeEl.className = 'settings-row-value text-pink';
+            }
+            if (detailEl) detailEl.classList.remove('hidden');
+            if (msgEl) msgEl.textContent = err.message || '未知错误';
+            RamariaToast.show('error', '检查更新失败', err.message || '');
+        } finally {
+            if (checkBtn) {
+                checkBtn.disabled = false;
+                checkBtn.textContent = '检查更新';
+            }
+        }
+    }
+
+    /**
+     * 处理"导出诊断信息"按钮点击。
+     *
+     * 流程:
+     * 1. 调用 RamariaApi.diagnostics.exportDiagnostics()。
+     * 2. 后端弹出原生保存对话框。
+     * 3. 用户确认后收集并打包 zip 文件。
+     */
+    async function _handleExportDiagnostics() {
+        var exportBtn = $('settings-export-diagnostics');
+        if (exportBtn) {
+            exportBtn.disabled = true;
+            exportBtn.textContent = '收集中...';
+        }
+
+        try {
+            var result = await RamariaApi.diagnostics.exportDiagnostics();
+
+            RamariaToast.show(
+                'success',
+                '诊断信息已导出',
+                (result.fileSizeDisplay || '') + ' — ' + (result.outputPath || '完成')
+            );
+        } catch (err) {
+            // 用户取消操作时静默忽略
+            if (err.message && err.message.indexOf('取消') !== -1) {
+                console.log('[SettingsView] 用户取消了诊断导出');
+                return;
+            }
+            console.error('[SettingsView] 诊断导出失败:', err);
+            RamariaToast.show('error', '导出失败', err.message || '未知错误');
+        } finally {
+            if (exportBtn) {
+                exportBtn.disabled = false;
+                exportBtn.textContent = '导出诊断信息';
+            }
+        }
+    }
+
+    // =========================================================
     // 关于区块
     // =========================================================
 
@@ -642,7 +805,7 @@ var RamariaSettingsView = (function () {
         about.innerHTML =
             '<div class="settings-about-logo" aria-hidden="true">🪸</div>' +
             '<div class="settings-about-name">Ramaria</div>' +
-            '<div class="settings-about-version">v0.1.0</div>' +
+            '<div class="settings-about-version" id="settings-about-version">v1.0.1</div>' +
             '<div class="settings-about-desc">' +
                 '个人 AI 陪伴记忆系统<br>' +
                 'Rust + Tauri 2 重构版' +

@@ -212,20 +212,27 @@ async fn export_markdown(app: &Arc<ramaria_app::App>, args: &ExportArgs) -> anyh
 /// - 使用 canonicalize() 规范化父目录，防止路径穿越攻击（符号链接、`..`、`RootDir`/`Prefix` 组件）。
 /// - 自动创建父目录。
 fn write_output(content: &str, output: Option<&str>, format: &str) -> anyhow::Result<()> {
-    let canonical = match output {
+    // → v1.1 修复: 在 canonicalize 前先确保父目录存在，避免导出目录尚不存在时 canonicalize 报错。
+    let path = match output {
         Some("-") => {
             println!("{content}");
             crate::ui::info("已输出到 stdout");
             return Ok(());
         }
-        Some(p) => canonicalize_export_path(Path::new(p))?,
-        None => canonicalize_export_path(Path::new(&default_export_path(format)))?,
+        Some(p) => PathBuf::from(p),
+        None => PathBuf::from(default_export_path(format)),
     };
 
-    if let Some(parent) = canonical.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("无法创建输出目录: {}", parent.display()))?;
+    if let Some(parent) = path.parent() {
+        // 跳过空父路径（如当前目录下的裸文件名），避免 create_dir_all("") 报错
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("无法创建输出目录: {}", parent.display()))?;
+        }
     }
+
+    let canonical = canonicalize_export_path(&path)?;
+
     let display_path = canonical.display().to_string();
     let mut file = std::fs::File::create(&canonical)
         .with_context(|| format!("无法创建输出文件: {display_path}"))?;

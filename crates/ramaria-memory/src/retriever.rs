@@ -156,7 +156,12 @@ pub struct L2DocView {
 /// - L1/L2 文档视图完整存储在内存 HashMap 中，用于 BM25 搜索结果的文档解析。
 /// - 在 10k 文档规模下（v1.0/v1.1 典型用户场景），内存占用约 5-15 MB，
 ///   完全在 200MB 空闲目标范围内。
-/// - 100k+ 文档时（v1.2+ 压力场景）需考虑 LRU 淘汰或 mmap 二级存储。
+/// - 超过 LRU 容量上限时，按文档创建时间淘汰最旧条目，同时清理对应的 BM25 索引。
+///
+/// LRU 驱逐策略:
+/// - 当文档数超过 `lru_max_entries`（默认 50_000）时触发驱逐。
+/// - 驱逐从 BM25 索引和内存 HashMap 中同步移除最早创建的文档。
+/// - 驱逐阈值远高于典型场景（10k），在不影响常规使用的前提下防止内存无限增长。
 #[derive(Debug)]
 pub struct Retriever {
     /// 检索配置
@@ -167,11 +172,19 @@ pub struct Retriever {
     vector_index: BruteForceIndex,
     /// 图谱检索器
     graph_retriever: GraphRetriever,
+    /// LRU 容量上限：超过此值时驱逐最旧文档（0 表示不限制）
+    lru_max_entries: usize,
     /// doc_id → L1 视图（BM25 结果解析用）
     l1_docs: std::collections::HashMap<uuid::Uuid, L1DocView>,
     /// doc_id → L2 视图（BM25 结果解析用）
     l2_docs: std::collections::HashMap<i64, L2DocView>,
 }
+
+/// 默认 LRU 容量上限：50,000 条文档。
+///
+/// 此值远超 v1.0/v1.1 典型场景（~10k 文档），仅在长期大量导入场景下才会触发驱逐，
+/// 确保常规使用不受影响。
+pub const DEFAULT_LRU_MAX_ENTRIES: usize = 50_000;
 
 impl Retriever {
     /// 使用默认配置创建检索器。
@@ -181,6 +194,7 @@ impl Retriever {
             bm25_index: Bm25Index::new(),
             vector_index: BruteForceIndex::new(),
             graph_retriever: GraphRetriever::new(),
+            lru_max_entries: DEFAULT_LRU_MAX_ENTRIES,
             l1_docs: std::collections::HashMap::new(),
             l2_docs: std::collections::HashMap::new(),
         }
@@ -193,9 +207,23 @@ impl Retriever {
             bm25_index: Bm25Index::new(),
             vector_index: BruteForceIndex::new(),
             graph_retriever: GraphRetriever::new(),
+            lru_max_entries: DEFAULT_LRU_MAX_ENTRIES,
             l1_docs: std::collections::HashMap::new(),
             l2_docs: std::collections::HashMap::new(),
         }
+    }
+
+    /// 设置 LRU 容量上限（0 表示不限制）。
+    ///
+    /// 当 L1+L2 总文档数超过此值时，按 `created_at` 驱逐最早创建的文档。
+    /// 默认值: [`DEFAULT_LRU_MAX_ENTRIES`]（50,000）。
+    pub fn set_lru_max_entries(&mut self, max_entries: usize) {
+        self.lru_max_entries = max_entries;
+    }
+
+    /// 获取当前 LRU 容量上限。
+    pub fn lru_max_entries(&self) -> usize {
+        self.lru_max_entries
     }
 
     /// 获取内部 BM25 索引的可变引用。
@@ -228,6 +256,8 @@ impl Retriever {
     /// 将 L1 文档添加到所有启用通道的索引中。
     ///
     /// 接受引用以避免调用方不必要的 clone；内部仅在存入 HashMap 时做一次 clone。
+    ///
+    /// LRU 驱逐: 添加后若总文档数超过 `lru_max_entries`，按 `created_at` 驱逐最旧文档。
     pub fn index_l1(&mut self, doc: &L1DocView) {
         // BM25 索引
         if self.config.enable_bm25 {
@@ -235,19 +265,24 @@ impl Retriever {
                 &doc.summary,
                 doc.keywords.as_deref().unwrap_or(""),
             ]);
-            self.bm25_index.add(DocId::L1(doc.id), &tokens);
+            self.bm25_index.add(DocId::L1(doc.id), tokens);
         }
 
         // 向量索引（L1 文档暂不添加向量，需要 EmbeddingProvider）
         // Phase 3 接入真实 embedding 后，在此生成向量并添加到 vector_index
 
         self.l1_docs.insert(doc.id, doc.clone());
+
+        // LRU 驱逐: 总文档数超过上限时，从 BM25 和内存 HashMap 中同步清理最早文档
+        self.evict_if_needed();
     }
 
     /// 将 L2 事件添加到所有启用通道的索引中。
     ///
     /// 接受引用以避免调用方不必要的 clone；内部仅在存入 HashMap 时做一次 clone。
     /// 同时消除了之前因 borrow checker 限制而产生的临时 String 分配。
+    ///
+    /// LRU 驱逐: 添加后若总文档数超过 `lru_max_entries`，按 `created_at` 驱逐最旧文档。
     pub fn index_l2(&mut self, doc: &L2DocView) {
         // BM25 索引
         if self.config.enable_bm25 {
@@ -262,11 +297,92 @@ impl Retriever {
                 fields.push(par.as_str());
             }
             let tokens = crate::bm25::tokenize_fields(&fields);
-            self.bm25_index.add(DocId::L2(doc.id), &tokens);
+            self.bm25_index.add(DocId::L2(doc.id), tokens);
         }
 
         // 向量索引（同 L1，Phase 3 接入 embedding）
         self.l2_docs.insert(doc.id, doc.clone());
+
+        // LRU 驱逐
+        self.evict_if_needed();
+    }
+
+    /// 从整个检索器中移除一个 L1 文档（BM25 + HashMap）。
+    ///
+    /// 用于会话删除、记忆清理等场景，保持内存和索引一致性。
+    pub fn remove_l1(&mut self, doc_id: &uuid::Uuid) {
+        let bm25_doc_id = DocId::L1(*doc_id);
+        self.bm25_index.remove(&bm25_doc_id);
+        self.l1_docs.remove(doc_id);
+    }
+
+    /// 从整个检索器中移除一个 L2 文档（BM25 + HashMap）。
+    ///
+    /// 用于事件删除、记忆清理等场景，保持内存和索引一致性。
+    pub fn remove_l2(&mut self, doc_id: &i64) {
+        let bm25_doc_id = DocId::L2(*doc_id);
+        self.bm25_index.remove(&bm25_doc_id);
+        self.l2_docs.remove(doc_id);
+    }
+
+    /// LRU 驱逐: 当总文档数超过 `lru_max_entries` 时，按 `created_at` 驱逐最早创建的文档。
+    ///
+    /// 策略:
+    /// - 从所有文档中按 created_at 升序排列，移除最早的条目
+    /// - 同时从 BM25 索引和 HashMap 中同步删除，保持一致性
+    /// - 每次只驱逐超出部分（(l1 + l2) - lru_max_entries 条）
+    /// - `lru_max_entries == 0` 时跳过驱逐（无限制模式）
+    ///
+    /// 复杂度: O(n log n) 其中 n = l1_docs.len() + l2_docs.len()。
+    /// 仅在高文档数且超出上限时触发，性能影响可控。
+    fn evict_if_needed(&mut self) {
+        if self.lru_max_entries == 0 {
+            return; // 无限制模式
+        }
+
+        let total = self.l1_docs.len() + self.l2_docs.len();
+        let evict_count = total.saturating_sub(self.lru_max_entries);
+
+        if evict_count == 0 {
+            return;
+        }
+
+        // 收集所有 (doc_id_string, created_at, is_l1, key_L1_uuid, key_L2_i64) 并按时间排序
+        let mut entries: Vec<(i64, bool, uuid::Uuid, i64)> = Vec::with_capacity(total);
+
+        for (uid, doc) in self.l1_docs.iter() {
+            entries.push((doc.created_at, true, *uid, 0));
+        }
+        for (id, doc) in self.l2_docs.iter() {
+            entries.push((doc.created_at, false, uuid::Uuid::nil(), *id));
+        }
+
+        // 按 created_at 升序排列，驱逐最早创建的
+        entries.sort_by_key(|e| e.0);
+
+        let to_evict = if evict_count >= entries.len() {
+            &entries[..]
+        } else {
+            &entries[..evict_count]
+        };
+
+        // 同步驱逐：BM25 + HashMap
+        for (_, is_l1, l1_uid, l2_id) in to_evict {
+            if *is_l1 {
+                self.bm25_index.remove(&DocId::L1(*l1_uid));
+                self.l1_docs.remove(l1_uid);
+            } else {
+                self.bm25_index.remove(&DocId::L2(*l2_id));
+                self.l2_docs.remove(l2_id);
+            }
+        }
+
+        tracing::warn!(
+            l1_remaining = self.l1_docs.len(),
+            l2_remaining = self.l2_docs.len(),
+            evicted = to_evict.len(),
+            "Retriever LRU 驱逐完成——文档数超过容量上限"
+        );
     }
 
     /// 从 BM25 索引中移除一篇文档。

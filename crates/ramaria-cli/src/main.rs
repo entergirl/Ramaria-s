@@ -124,6 +124,13 @@ enum Commands {
     /// 导入外部聊天记录（QQ）
     #[command(subcommand)]
     Import(ImportCmd),
+
+    /// 导出诊断信息（打包日志、配置、系统信息为 .zip）
+    Diagnostics {
+        /// 输出文件路径（默认: ramaria-diagnostics-{timestamp}.zip）
+        #[arg(short, long)]
+        output: Option<String>,
+    },
 }
 
 /// 导入子命令（v1.1 新增）。
@@ -454,6 +461,10 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
                 commands::import_cmd::run(app, pool, args).await?;
             }
         },
+        Commands::Diagnostics { output } => {
+            let args = commands::diagnostics::DiagnosticsArgs { output };
+            commands::diagnostics::run(app, pool, args).await?;
+        }
     }
 
     Ok(())

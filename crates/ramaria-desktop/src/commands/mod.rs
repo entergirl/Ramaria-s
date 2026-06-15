@@ -7,6 +7,7 @@
 
 pub mod chat;
 pub mod config;
+pub mod diagnostics;
 pub mod export;
 pub mod import_cmd;
 pub mod index_cmd;
@@ -69,5 +70,8 @@ pub fn command_names() -> Vec<&'static str> {
         "update_persona_info",
         "refresh_persona",
         "regenerate_import_pipeline",
+        // diagnostics (v1.1 Phase 7)
+        "check_update",
+        "export_diagnostics",
     ]
 }

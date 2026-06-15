@@ -626,6 +626,40 @@ var RamariaApi = (function () {
     }
 
     // =========================================================
+    // 10. 诊断与更新 (diagnostics) — v1.1 Phase 7 新增
+    // =========================================================
+
+    /**
+     * 检查是否有新版本可用。
+     *
+     * 说明:
+     * - 调用 GitHub Release API 查询最新版本标签。
+     * - 与当前运行版本做 semver 比较。
+     * - 网络异常时返回 currentVersion + error 字段，不抛出异常。
+     *
+     * 返回:
+     * - { currentVersion, latestVersion?, updateAvailable, releaseUrl?, releaseNotesPreview?, error? }
+     */
+    async function checkUpdate() {
+        return await _invoke('check_update', {}, '检查更新');
+    }
+
+    /**
+     * 导出诊断信息为 .zip 文件。
+     *
+     * 说明:
+     * - 弹出原生保存对话框，默认文件名为 ramaria-diagnostics-{日期}.zip。
+     * - 收集：最近 1000 行日志 + 配置文件（API Key 已脱敏）+ 系统信息 + schema 版本。
+     * - 用户选择保存路径后开始打包，完成后返回文件信息。
+     *
+     * 返回:
+     * - { outputPath, fileSizeBytes, fileSizeDisplay }
+     */
+    async function exportDiagnostics() {
+        return await _invoke('export_diagnostics', {}, '导出诊断信息');
+    }
+
+    // =========================================================
     // 公开 API
     // =========================================================
 
@@ -685,7 +719,11 @@ var RamariaApi = (function () {
             updateInfo: updatePersonaInfo,
             refresh: refreshPersona,
         },
-    };
+        diagnostics: {
+            checkUpdate: checkUpdate,
+            exportDiagnostics: exportDiagnostics,
+        },
+    }; 
 })();
 
 // 防止意外覆盖

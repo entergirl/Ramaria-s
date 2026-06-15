@@ -191,21 +191,31 @@ impl Bm25Index {
     /// 增量添加一篇文档。
     ///
     /// 若 doc_id 已存在，旧记录被替换（覆盖语义）。
-    pub fn add(&mut self, doc_id: DocId, tokens: &[String]) {
+    ///
+    /// 接收 `Vec<String>` 的所有权以消除 clone 开销：
+    /// 调用方（通常是 `tokenize_fields()`）产出 tokens 后直接移动至此方法，
+    /// 避免 `for token in tokens { token.clone() }` 的逐项复制。
+    pub fn add(&mut self, doc_id: DocId, tokens: Vec<String>) {
         // 移除旧文档（若存在）
         self.remove(&doc_id);
 
         let mut term_freq = HashMap::with_capacity(tokens.len());
         let mut doc_len = 0u32;
 
+        // 消费 tokens 所有权，按 token 分组计数
+        let mut unique_tokens: Vec<String> = Vec::with_capacity(tokens.len());
         for token in tokens {
-            *term_freq.entry(token.clone()).or_insert(0u32) += 1;
+            // 首次出现时记录到 unique_tokens（用于后续 df 更新）
+            if !term_freq.contains_key(&token) {
+                unique_tokens.push(token.clone());
+            }
+            *term_freq.entry(token).or_insert(0u32) += 1;
             doc_len += 1;
         }
 
-        // 更新 document frequency
-        for token in term_freq.keys() {
-            *self.df.entry(token.clone()).or_insert(0u32) += 1;
+        // 更新 document frequency —— 仅对唯一的 token 操作
+        for token in unique_tokens {
+            *self.df.entry(token).or_insert(0u32) += 1;
         }
 
         self.total_tokens += doc_len;
@@ -213,9 +223,12 @@ impl Bm25Index {
     }
 
     /// 通过分词后的 token 列表添加文档。
+    ///
+    /// `tokenize_fields` 的输出 `Vec<String>` 直接移动所有权到 `add()`，
+    /// 消除中间 clone 开销。
     pub fn add_tokenized(&mut self, doc_id: DocId, fields: &[&str]) {
         let tokens = tokenize_fields(fields);
-        self.add(doc_id, &tokens);
+        self.add(doc_id, tokens);
     }
 
     /// 移除一篇文档。
@@ -568,10 +581,11 @@ mod tests {
         // 空索引 avg = 1.0
         assert!((index.avg_doc_len() - 1.0).abs() < f64::EPSILON);
 
-        // 添加 10 token 的文档
+        // 添加 8 token 的文档（按字符拆分作为 tokens）
+        let token_count = "机器学习很有意思".chars().count() as u32;
         let tokens: Vec<String> = "机器学习很有意思".chars().map(|c| c.to_string()).collect();
-        index.add(DocId::L1(uuid::Uuid::new_v4()), &tokens);
-        assert!((index.avg_doc_len() - tokens.len() as f64).abs() < 0.01);
+        index.add(DocId::L1(uuid::Uuid::new_v4()), tokens);
+        assert!((index.avg_doc_len() - token_count as f64).abs() < 0.01);
     }
 
     #[test]

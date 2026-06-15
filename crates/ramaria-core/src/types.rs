@@ -1235,8 +1235,10 @@ pub struct ModelCapability {
 pub struct BackendConfig {
     pub provider: LlmProvider,
     pub base_url: String,
-    /// embedding 模型标识
+    /// embedding 模型标识（远程模型 ID）
     pub embedding_model_id: Option<String>,
+    /// embedding 模型本地路径（与 `base_url` 对应，同为 locator）
+    pub embedding_model_path: Option<String>,
     pub temperature: f64,
     pub max_tokens: u32,
     /// 模型能力描述——`capability.model_id` 为 model_id 单一来源
@@ -1264,6 +1266,7 @@ impl BackendConfig {
             provider,
             base_url: base_url.clone(),
             embedding_model_id: None,
+            embedding_model_path: None,
             temperature: 0.3,
             max_tokens: 2048,
             capability: ModelCapability {
@@ -1287,6 +1290,7 @@ impl BackendConfig {
             provider: LlmProvider::LmStudio,
             base_url: "http://localhost:1234/v1".to_string(),
             embedding_model_id: None,
+            embedding_model_path: None,
             temperature: 0.3,
             max_tokens: 1024,
             capability: ModelCapability {
@@ -1310,6 +1314,7 @@ impl BackendConfig {
             provider: LlmProvider::DeepSeek,
             base_url: "https://api.deepseek.com/v1".to_string(),
             embedding_model_id: None,
+            embedding_model_path: None,
             temperature: 0.3,
             max_tokens: 2048,
             capability: ModelCapability {
@@ -1333,6 +1338,7 @@ impl BackendConfig {
             provider: LlmProvider::OpenAI,
             base_url: "https://api.openai.com/v1".to_string(),
             embedding_model_id: None,
+            embedding_model_path: None,
             temperature: 0.3,
             max_tokens: 2048,
             capability: ModelCapability {

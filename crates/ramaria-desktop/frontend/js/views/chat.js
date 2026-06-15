@@ -53,6 +53,16 @@ var RamariaChatView = (function () {
 
     /** 流式追加文本缓冲（用于 rAF 批量更新） */
     var _pendingDelta = '';
+    /**
+     * _pendingDelta 缓冲区最大字节数。
+     *
+     * 当浏览器标签页被后台挂起时，rAF 回调可能长时间不触发，
+     * 导致 _pendingDelta 持续累积。此上限防止极端场景下内存无限增长
+     * （如用户切换到其他标签页后长时间不返回）。
+     *
+     * 超过上限时强制刷新，无论 rAF 是否触发。
+     */
+    var MAX_PENDING_DELTA_BYTES = 10240; // 10 KB
     /** 流式消息 ID */
     var _streamingMsgId = null;
     /** rAF 句柄（16ms 一帧，与显示器刷新率同步） */
@@ -578,6 +588,21 @@ var RamariaChatView = (function () {
             if (!delta) return;
 
             _pendingDelta += delta;
+
+            // 上限保护：_pendingDelta 超过阈值时强制刷新，防止标签页后台时内存无限增长
+            if (_pendingDelta.length > MAX_PENDING_DELTA_BYTES) {
+                // 取消所有待处理的定时器，直接强制刷新
+                if (_rafHandle) {
+                    cancelAnimationFrame(_rafHandle);
+                    _rafHandle = null;
+                }
+                if (_maxBatchTimer) {
+                    clearTimeout(_maxBatchTimer);
+                    _maxBatchTimer = null;
+                }
+                _flushDelta();
+                return;
+            }
 
             /*
              * 双层刷新策略：

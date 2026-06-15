@@ -42,6 +42,7 @@ pub async fn run(app: &Arc<ramaria_app::App>, skip_validate: bool) -> anyhow::Re
         provider,
         base_url: base_url.clone(),
         embedding_model_id: None,
+        embedding_model_path: None,
         temperature: 0.3,
         max_tokens: 1024,
         capability: ramaria_core::types::ModelCapability {

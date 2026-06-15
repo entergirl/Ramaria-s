@@ -463,12 +463,13 @@ async fn memory_with_persona_filter() {
 async fn export_json_empty() {
     let (app, _storage) = build_test_app();
 
+    // → v1.1 修复: output: Some("-") 输出到 stdout，避免依赖 exports/ 目录存在。
     let result = ramaria_cli::commands::export::run(
         &app,
         ramaria_cli::commands::export::ExportArgs {
             format: "json".to_string(),
             persona: None,
-            output: None, // stdout
+            output: Some("-".to_string()),
         },
     )
     .await;
@@ -484,7 +485,7 @@ async fn export_json_with_data() {
         ramaria_cli::commands::export::ExportArgs {
             format: "json".to_string(),
             persona: None,
-            output: None,
+            output: Some("-".to_string()),
         },
     )
     .await;
@@ -500,7 +501,7 @@ async fn export_json_with_persona() {
         ramaria_cli::commands::export::ExportArgs {
             format: "json".to_string(),
             persona: Some("user-0001".to_string()),
-            output: None,
+            output: Some("-".to_string()),
         },
     )
     .await;
@@ -516,7 +517,7 @@ async fn export_markdown_empty() {
         ramaria_cli::commands::export::ExportArgs {
             format: "markdown".to_string(),
             persona: None,
-            output: None,
+            output: Some("-".to_string()),
         },
     )
     .await;
@@ -532,7 +533,7 @@ async fn export_markdown_with_data() {
         ramaria_cli::commands::export::ExportArgs {
             format: "markdown".to_string(),
             persona: None,
-            output: None,
+            output: Some("-".to_string()),
         },
     )
     .await;

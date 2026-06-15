@@ -353,7 +353,7 @@ pub async fn validate_embedding_model(path: String) -> Result<EmbeddingValidatio
 /// 说明:
 /// - path 非空时创建 NativeEmbeddingProvider 并通过 `app.update_embedding()` 热加载。
 /// - path 为空时卸载嵌入模型（传入 None）。
-/// - 同时将路径持久化到 storage settings，下次启动自动加载。
+/// - 路径持久化到 BackendConfig（与 base_url 一致），下次启动自动加载。
 #[tauri::command]
 #[tracing::instrument(skip(state))]
 pub async fn save_embedding_model(
@@ -362,46 +362,53 @@ pub async fn save_embedding_model(
 ) -> Result<String, String> {
     let path_trimmed = path.trim();
 
+    // ---- 读当前 BackendConfig ----
+    let mut config = state
+        .app
+        .storage()
+        .get_backend_config()
+        .await
+        .map_err(|e| format!("读取后端配置失败: {}", e))?
+        .unwrap_or_else(BackendConfig::lm_studio_default);
+
     if path_trimmed.is_empty() {
         // 卸载嵌入模型
         state.app.update_embedding(None);
-        state
-            .app
-            .storage()
-            .set_setting("embedding_model_path", "")
-            .await
-            .map_err(|e| format!("保存嵌入模型路径失败: {}", e))?;
+        config.embedding_model_path = None;
         tracing::info!("嵌入模型已卸载");
-        return Ok("ok".to_string());
+    } else {
+        let model_dir = Path::new(path_trimmed);
+        if !model_dir.exists() {
+            return Err(format!("模型目录不存在: {}", path_trimmed));
+        }
+
+        // 创建 provider
+        let provider = ramaria_llm::embedding::native::create_native_provider(model_dir)
+            .map_err(|e| format!("加载嵌入模型失败: {}", e))?;
+
+        tracing::info!(
+            path = %path_trimmed,
+            dimension = provider.model_info().dimension,
+            "嵌入模型已加载，准备热更新"
+        );
+
+        let provider: Arc<dyn EmbeddingProvider> = Arc::new(provider);
+        state.app.update_embedding(Some(provider));
+        config.embedding_model_path = Some(path_trimmed.to_string());
     }
 
-    let model_dir = Path::new(path_trimmed);
-    if !model_dir.exists() {
-        return Err(format!("模型目录不存在: {}", path_trimmed));
-    }
-
-    // 创建 provider
-    let provider = ramaria_llm::embedding::native::create_native_provider(model_dir)
-        .map_err(|e| format!("加载嵌入模型失败: {}", e))?;
-
-    tracing::info!(
-        path = %path_trimmed,
-        dimension = provider.model_info().dimension,
-        "嵌入模型已加载，准备热更新"
-    );
-
-    let provider: Arc<dyn EmbeddingProvider> = Arc::new(provider);
-    state.app.update_embedding(Some(provider));
-
-    // 持久化路径
+    // ---- 持久化到 BackendConfig（复用 LLM 的 save_backend_config 模式） ----
     state
         .app
         .storage()
-        .set_setting("embedding_model_path", path_trimmed)
+        .save_backend_config(&config)
         .await
-        .map_err(|e| format!("保存嵌入模型路径失败: {}", e))?;
+        .map_err(|e| format!("保存后端配置失败: {}", e))?;
 
-    tracing::info!(path = %path_trimmed, "嵌入模型路径已持久化");
+    tracing::info!(
+        path = %config.embedding_model_path.as_deref().unwrap_or("(无)"),
+        "嵌入模型配置已持久化"
+    );
     Ok("ok".to_string())
 }
 
@@ -429,23 +436,22 @@ pub async fn get_embedding_model(
             }))
         }
         None => {
-            // 尝试从 storage 读取是否曾保存过路径（用于 UI 预填）
-            let saved_path: String = state
+            // 从 BackendConfig 读取已保存路径（用于 UI 预填，复用 LLM base_url 模式）
+            let config = state
                 .app
                 .storage()
-                .get_setting("embedding_model_path")
+                .get_backend_config()
                 .await
-                .map_err(|e| format!("读取嵌入模型路径失败: {}", e))?
-                .unwrap_or_default();
+                .map_err(|e| format!("读取后端配置失败: {}", e))?
+                .unwrap_or_else(BackendConfig::lm_studio_default);
 
-            if saved_path.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(EmbeddingModelView {
+            match config.embedding_model_path {
+                Some(saved_path) if !saved_path.is_empty() => Ok(Some(EmbeddingModelView {
                     model_path: Some(saved_path),
                     valid: false,
                     dimension: None,
-                }))
+                })),
+                _ => Ok(None),
             }
         }
     }

@@ -257,12 +257,19 @@ pub fn read_secret(prompt: &str) -> io::Result<String> {
     io::stdout().flush()?;
 
     // 获取标准输入句柄
+    //
+    // SAFETY: GetStdHandle(STD_INPUT_HANDLE) 是 Windows 标准 API，始终返回有效句柄或错误。
+    // 句柄的有效性由 Windows 控制台子系统保证，在当前进程中不会失效。
     let handle = unsafe {
         GetStdHandle(STD_INPUT_HANDLE)
             .map_err(|e| io::Error::other(format!("GetStdHandle 失败: {e}")))?
     };
 
     // 保存原始控制台模式
+    //
+    // SAFETY: GetConsoleMode 仅读取控制台模式标志，不修改任何状态。
+    // handle 是从 GetStdHandle 获取的有效句柄。
+    // CONSOLE_MODE::default() 在 windows crate 中为零初始化，内存布局与 Windows API 预期一致。
     let original_mode: CONSOLE_MODE = unsafe {
         let mut mode = CONSOLE_MODE::default();
         GetConsoleMode(handle, &mut mode)
@@ -271,6 +278,10 @@ pub fn read_secret(prompt: &str) -> io::Result<String> {
     };
 
     // 关闭回显
+    //
+    // SAFETY: SetConsoleMode 修改控制台输入模式。
+    // handle 是有效句柄。mode_no_echo 是 original_mode 去掉 ENABLE_ECHO_INPUT 标志，
+    // 不会设置非法标志位。original_mode 已在下方的恢复代码中重新设置。
     let mode_no_echo = original_mode & !ENABLE_ECHO_INPUT;
     unsafe {
         SetConsoleMode(handle, mode_no_echo)
@@ -286,6 +297,11 @@ pub fn read_secret(prompt: &str) -> io::Result<String> {
     })();
 
     // 恢复原始控制台模式（无论读取成功或失败）
+    //
+    // SAFETY: SetConsoleMode 恢复之前保存的 original_mode。
+    // handle 和 original_mode 在函数作用域内始终有效。
+    // 使用 let _ = 吞掉错误：恢复操作失败意味着控制台可能已关闭或进程即将退出，
+    // 此时无需传播错误——回显恢复是 best-effort 操作。
     unsafe {
         let _ = SetConsoleMode(handle, original_mode);
     }

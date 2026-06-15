@@ -1,7 +1,7 @@
 //! rust/crates/ramaria-desktop/src/lib.rs - Ramaria Tauri 桌面应用入口
 //!
 //! 设计特点:
-//! - 管理应用初始化全流程：数据库 → 配置 → LLM Provider → App 构造
+//! - 管理应用初始化全流程：数据库 → 配置 → LLM Provider → Embedding 恢复 → App 构造
 //! - 通过 Tauri managed state (`DesktopState`) 注入 `Arc<App>` 到所有 Command
 //! - 初始化失败时优雅降级：窗口仍可显示，但状态为 FatalError
 //! - 系统托盘在 Tauri setup 钩子中初始化
@@ -13,6 +13,7 @@ mod notification;
 mod tray;
 
 use ramaria_core::StorageBackend;
+use ramaria_core::traits::EmbeddingProvider;
 use sqlx::SqlitePool;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -125,8 +126,9 @@ fn ensure_data_dir(path: &PathBuf) -> std::io::Result<()> {
 /// 2. 读取已保存的后端配置（如有）
 /// 3. 创建 Keychain
 /// 4. 根据配置创建 LLM Provider
-/// 5. 构造 App 实例
-/// 6. 刷新应用状态
+/// 5. 尝试恢复已保存的嵌入模型（如有）
+/// 6. 构造 App 实例
+/// 7. 刷新应用状态
 ///
 /// 返回:
 /// - `Ok(App)` 初始化成功
@@ -189,16 +191,57 @@ async fn init_app(
         }
     };
 
-    // Step 5: 构造 App
-    let config = ramaria_core::config::RamariaConfig::default();
-    let app = ramaria_app::App::new(storage, llm, None, config, keychain);
+    // Step 5: 尝试恢复已保存的嵌入模型（复用 BackendConfig，与 base_url 一致）
+    let embedding: Option<Arc<dyn EmbeddingProvider>> = {
+        match &backend_config.embedding_model_path {
+            Some(saved_path) if !saved_path.is_empty() => {
+                let model_dir = std::path::Path::new(saved_path);
+                if !model_dir.exists() {
+                    tracing::warn!(
+                        path = %saved_path,
+                        "已保存的嵌入模型目录不存在，启动后将以降级模式运行"
+                    );
+                    None
+                } else {
+                    match ramaria_llm::embedding::native::create_native_provider(model_dir) {
+                        Ok(provider) => {
+                            let info = provider.model_info();
+                            tracing::info!(
+                                path = %saved_path,
+                                model_id = %info.model_id,
+                                dim = info.dimension,
+                                "已恢复嵌入模型"
+                            );
+                            Some(Arc::new(provider) as Arc<dyn EmbeddingProvider>)
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                path = %saved_path,
+                                error = %e,
+                                "加载已保存的嵌入模型失败，启动后将以降级模式运行"
+                            );
+                            None
+                        }
+                    }
+                }
+            }
+            _ => {
+                tracing::debug!("无已保存的嵌入模型，跳过恢复");
+                None
+            }
+        }
+    };
 
-    // Step 6: 刷新状态
+    // Step 6: 构造 App
+    let config = ramaria_core::config::RamariaConfig::default();
+    let app = ramaria_app::App::new(storage, llm, embedding, config, keychain);
+
+    // Step 7: 刷新状态
     app.refresh_setup_state()
         .await
         .map_err(|e| format!("刷新应用状态失败: {}", e))?;
 
-    // Step 7: 如果状态为 Ready，启动后台任务（空闲检测 + L2/L3 定时检查）
+    // Step 8: 如果状态为 Ready，启动后台任务（空闲检测 + L2/L3 定时检查）
     if app.current_state() == ramaria_core::AppState::Ready {
         app.start_background_tasks();
         tracing::info!("后台任务已启动");
@@ -315,6 +358,9 @@ pub fn run() {
             commands::persona::update_persona_info,
             commands::persona::refresh_persona,
             commands::persona::regenerate_import_pipeline,
+            // ---- Diagnostics (v1.1 Phase 7) ----
+            commands::diagnostics::check_update,
+            commands::diagnostics::export_diagnostics,
             // ---- System ----
             tray::confirm_close_action,
         ])

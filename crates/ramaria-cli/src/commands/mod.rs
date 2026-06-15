@@ -8,6 +8,7 @@
 pub mod ask;
 pub mod chat;
 pub mod config;
+pub mod diagnostics;
 pub mod export;
 pub mod import_cmd;
 pub mod index_cmd;
