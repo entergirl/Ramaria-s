@@ -131,7 +131,7 @@ enum Commands {
 enum ImportCmd {
     /// 导入 QQ 聊天记录
     Qq {
-        /// 聊天记录文件路径（JSON 或 .txt 格式）
+        /// 聊天记录文件路径（QQ Chat Exporter v5.x JSON 格式）
         #[arg(short, long)]
         file: String,
 
@@ -139,9 +139,25 @@ enum ImportCmd {
         #[arg(long)]
         deep: bool,
 
-        /// 导入关联的 persona 名称（默认使用导出者名称）
+        /// Phase 5B: 导出者 persona 名称（向后兼容，默认使用文件中解析的导出者名称）
         #[arg(long)]
         persona: Option<String>,
+
+        /// Phase 5B: 导出者 persona 名称（功能同 --persona，用于语义明确场景）
+        #[arg(long)]
+        persona_self_name: Option<String>,
+
+        /// Phase 5B: 导出者 persona UID（可选，留空按优先级自动生成: uin > uid > seq）
+        #[arg(long)]
+        persona_self_uid: Option<String>,
+
+        /// Phase 5B: 对话对方 persona 名称（默认使用文件中解析的对方名称）
+        #[arg(long)]
+        persona_other_name: Option<String>,
+
+        /// Phase 5B: 对话对方 persona UID（可选，留空按优先级自动生成）
+        #[arg(long)]
+        persona_other_uid: Option<String>,
 
         /// session 切割时间间隔（分钟），默认 10
         #[arg(long, default_value = "10")]
@@ -416,12 +432,21 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
                 file,
                 deep,
                 persona,
+                persona_self_name,
+                persona_self_uid,
+                persona_other_name,
+                persona_other_uid,
                 gap,
             } => {
+                // Phase 5B: --persona 向后兼容（映射为 self_name）
+                let effective_self_name = persona_self_name.or(persona);
                 let args = commands::import_cmd::ImportArgs {
                     file,
                     deep,
-                    persona,
+                    persona_self_name: effective_self_name,
+                    persona_self_uid,
+                    persona_other_name,
+                    persona_other_uid,
                     gap,
                     yes: cli.yes,
                 };

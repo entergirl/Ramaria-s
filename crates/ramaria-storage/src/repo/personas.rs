@@ -96,6 +96,37 @@ pub async fn get_by_uid(pool: &SqlitePool, uid: &str) -> RamariaResult<Option<Pe
     Ok(row.map(|r| r.into_persona()))
 }
 
+/// 按 (kind, source, ref_id) 查找已存在的 persona。
+///
+/// 用于防止 `idx_personas_kind_source_ref` UNIQUE 索引冲突：
+/// 同一个来源方（如 QQ 账号）可能以不同 uid 多次导入，但 ref_id 相同。
+///
+/// 参数:
+/// - `kind_str`: persona 类型（如 "char"）
+/// - `source`: 来源（如 "qq"）
+/// - `ref_id`: 来源方原始 ID（如 QQ UID）
+///
+/// 返回:
+/// - 匹配的 persona 或 None。
+pub async fn get_by_kind_source_ref(
+    pool: &SqlitePool,
+    kind_str: &str,
+    source: &str,
+    ref_id: &str,
+) -> RamariaResult<Option<Persona>> {
+    let row = sqlx::query_as::<_, PersonaRow>(
+        "SELECT id, uid, name, kind, seq, source, ref_id, avatar, config, description, active, created_at, updated_at
+         FROM personas WHERE kind = ? AND source = ? AND ref_id = ?",
+    )
+    .bind(kind_str)
+    .bind(source)
+    .bind(ref_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| RamariaError::storage_with_source("按 ref_id 查询 persona 失败", e))?;
+    Ok(row.map(|r| r.into_persona()))
+}
+
 pub async fn list_all(pool: &SqlitePool) -> RamariaResult<Vec<Persona>> {
     let rows = sqlx::query_as::<_, PersonaRow>(
         "SELECT id, uid, name, kind, seq, source, ref_id, avatar, config, description, active, created_at, updated_at

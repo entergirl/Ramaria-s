@@ -1,0 +1,7 @@
+# 复制此文件为 .cargo/config.toml 以启用本地 candle 补丁。
+# CI 不需要此文件（构建默认 features 时使用 crates.io 版本即可）。
+#
+# 补丁内容：candle-transformers（qwen2.rs head_dim + 禁用 qwen3/smol 模块）
+# 前置条件：lib/candle/ 目录已就绪（被 .gitignore 排除，需手动准备）
+[patch.crates-io]
+candle-transformers = { path = "lib/candle/candle-transformers" }

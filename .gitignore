@@ -28,6 +28,7 @@ Thumbs.db
 desktop.ini
 .vscode/
 .idea/
+.codebuddy/
 
 # 开发数据库（本地数据，不上传）
 *.db-journal
@@ -41,3 +42,6 @@ desktop.ini
 
 # candle 本地 patch（用于 Qwen3 head_dim 支持）
 /lib/candle/
+
+# 本地 Cargo 配置（含 candle patch，CI 不使用）
+/.cargo/config.toml

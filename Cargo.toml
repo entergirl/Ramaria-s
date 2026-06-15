@@ -80,6 +80,8 @@ sha2 = "0.10"
 tauri = "2"
 tauri-build = "2"
 
-# candle-transformers 本地 patch：qwen2.rs head_dim + 禁用 qwen3/smol 模块
-[patch.crates-io]
-candle-transformers = { path = "lib/candle/candle-transformers" }
+# NOTE: candle-transformers 本地 patch 已移至 .cargo/config.toml（gitignored）
+#       首次 clone 后若要启用 embedding-native feature：
+#         1. 将 candle 源码放到 lib/candle/
+#         2. 复制 .cargo/config.toml.example → .cargo/config.toml
+#       CI 不需要上述步骤（默认 features 使用 crates.io 版本）
