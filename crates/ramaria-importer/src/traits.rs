@@ -5,6 +5,8 @@
 //! - `ParsedMessage` 为解析后的中间表示，与存储层的 `Message` 解耦
 //! - `ImportReport` 提供完整的诊断信息：成功/降级/跳过 三类统计
 //! - `ImportMode` 区分快速导入（仅 L0）和深度导入（全管线）
+//! - Phase 5B: ParsedMessage 新增 sender 标识字段，支持双画像导入
+//! - Phase 5B: ImportReport 新增双方 QQ 号及对方标识字段，支持 UID 生成策略
 
 use ramaria_core::error::RamariaResult;
 use std::path::Path;
@@ -43,13 +45,16 @@ impl std::fmt::Display for ImportMode {
 ///
 /// 职责:
 /// - 保存解析后的标准化字段，与存储层 `Message` 解耦。
-/// - `original_ts` 用于 session 切割和时间排序。
+/// - `created_at` 用于 session 切割和时间排序。
 /// - `fingerprint` 用于跨导入批次的重复检测。
+/// - Phase 5B: 新增 sender 标识字段（uid/uin/name），支持按发送者分配画像。
 ///
 /// 字段约定:
 /// - `role`: "user" 表示导出者本人，"assistant" 表示对方。
 /// - `content`: 已经过占位符替换和前缀处理的最终文本。
-/// - `created_at`: Unix 毫秒时间戳，写入 messages.created_at。
+/// - `sender_uid`: QQ 内部用户标识（如 `u_RSOI7gG2LaRiP64W8ayLDA`）。
+/// - `sender_uin`: QQ 号（如 `123456789`），不存在时为 None。
+/// - `sender_name`: 发送者显示昵称/群名片。
 #[derive(Debug, Clone)]
 pub struct ParsedMessage {
     /// 消息角色：user / assistant
@@ -60,6 +65,12 @@ pub struct ParsedMessage {
     pub created_at: i64,
     /// SHA-256 前 16 位 hex，用于去重
     pub fingerprint: String,
+    /// Phase 5B: 发送者的 QQ 内部 UID
+    pub sender_uid: String,
+    /// Phase 5B: 发送者的 QQ 号（uin），不存在时为 None
+    pub sender_uin: Option<String>,
+    /// Phase 5B: 发送者的显示名称
+    pub sender_name: String,
 }
 
 /// 解析后的 session（一组消息）。
@@ -84,21 +95,30 @@ pub struct ImportedSession {
 ///
 /// 职责:
 /// - 提供完整的文件解析结果概览，供 CLI 和前端展示。
-/// - 记录文件信息、时间跨度和 session 切割结果。
-/// - 跳过和降级的详细列表最多保留 50 条，防止报告过大。
+/// - 记录文件信息（含双画像标识）、时间跨度和 session 切割结果。
+/// - 覆盖 qce v5.x 全部 11 种消息类型（见 qq-chat-exporter-json-schema.md §8）。
+/// - Phase 5B: 新增导出者 QQ 号和对方标识，支持双画像导入。
 #[derive(Debug, Clone)]
 pub struct ImportReport {
     // -- 文件信息 --
     /// 解析的文件路径
     pub file_path: String,
-    /// 导出者标识（QQ UID 或用户名）
+    /// 导出者标识（QQ UID）
     pub self_id: String,
     /// 导出者名称
     pub self_name: String,
-    /// 对话对象名称
+    /// Phase 5B: 导出者 QQ 号（chatInfo.selfUin），不存在时为 None
+    pub self_uin: Option<String>,
+    /// 对话对象名称（chatInfo.name）
     pub chat_name: String,
-    /// 对话类型（friend / group）
+    /// 对话类型（private / group）
     pub chat_type: String,
+    /// Phase 5B: 对话对方 QQ UID（从第一条非 self 消息的 sender.uid 提取）
+    pub other_uid: String,
+    /// Phase 5B: 对话对方 QQ 号（从第一条非 self 消息的 sender.uin 提取），不存在时为 None
+    pub other_uin: Option<String>,
+    /// Phase 5B: 对话对方名称（从第一条非 self 消息的 sender.name 提取）
+    pub other_name: String,
 
     // -- 时间范围 --
     /// 最早消息日期（YYYY-MM-DD）
@@ -113,16 +133,16 @@ pub struct ImportReport {
     pub dedup_removed: usize,
 
     // -- 成功解析 --
-    /// 纯文本消息数
+    /// 纯文本消息数（含表情、emoji）
     pub success_text: usize,
     /// 含图片消息数
     pub success_image: usize,
     /// 回复消息数
     pub success_reply: usize,
-    /// 对方发言消息数
+    /// 对方发言消息数（仅 type_1 和 type_3）
     pub success_other_sender: usize,
 
-    // -- 降级处理 --
+    // -- 降级处理（非文本消息→文本占位符） --
     /// 无 reply 元素的回复消息（降级提取正文）
     pub degraded_reply_fallback: usize,
     /// 合并转发消息 → [转发消息]
@@ -133,11 +153,19 @@ pub struct ImportReport {
     pub degraded_audio: usize,
     /// 视频消息 → [视频]
     pub degraded_video: usize,
+    /// 文件消息 → [文件: filename]  ← v1.1 新增 (P0)
+    pub degraded_file: usize,
+    /// 红包/转账消息 → [红包/转账]  ← v1.1 新增 (P0)
+    pub degraded_red_envelope: usize,
+    /// qce 未解析的消息类型降级（如 type_19 通话记录） ← v1.1 新增 (P0)
+    pub degraded_qce_unsupported: usize,
 
     // -- 完全跳过 --
     /// 撤回消息
     pub skipped_recalled: usize,
-    /// content.text 为空的消息
+    /// 系统消息（system == true） ← v1.1 新增 (P0)
+    pub skipped_system: usize,
+    /// content.text 为空且无法从 elements 提取有效文本的消息
     pub skipped_empty: usize,
     /// 未知 type 的消息
     pub skipped_unknown: usize,
@@ -162,34 +190,54 @@ pub struct ImportReport {
 }
 
 impl ImportReport {
-    /// 成功解析的消息总数。
+    /// 成功解析的消息总数（纯文本 + 图片 + 回复）。
     pub fn total_success(&self) -> usize {
         self.success_text + self.success_image + self.success_reply
     }
 
-    /// 降级处理的消息总数。
+    /// 降级处理的消息总数（含 v1.1 新增的 3 种降级类型）。
     pub fn total_degraded(&self) -> usize {
         self.degraded_reply_fallback
             + self.degraded_forward
             + self.degraded_card
             + self.degraded_audio
             + self.degraded_video
+            + self.degraded_file
+            + self.degraded_red_envelope
+            + self.degraded_qce_unsupported
     }
 
-    /// 完全跳过的消息总数。
+    /// 完全跳过的消息总数（含 v1.1 新增的 system 消息跳过）。
     pub fn total_skipped(&self) -> usize {
-        self.skipped_recalled + self.skipped_empty + self.skipped_unknown
+        self.skipped_recalled + self.skipped_system + self.skipped_empty + self.skipped_unknown
     }
 
     /// 生成人类可读的摘要文本。
+    ///
+    /// Phase 5B: 新增导出者 QQ 号和对方标识信息。
     pub fn summary(&self) -> String {
         let mut s = String::new();
         s.push_str(&format!("文件: {}\n", self.file_path));
-        s.push_str(&format!("导出者: {}（{}）\n", self.self_name, self.self_id));
-        s.push_str(&format!(
-            "对话对象: {}（{}）\n",
-            self.chat_name, self.chat_type
-        ));
+        s.push_str(&format!("导出者: {}（UID={}", self.self_name, self.self_id));
+        if let Some(ref uin) = self.self_uin {
+            s.push_str(&format!(", QQ号={}", uin));
+        }
+        s.push_str(")\n");
+        if !self.other_uid.is_empty() {
+            s.push_str(&format!(
+                "对话对象: {}（UID={}",
+                self.other_name, self.other_uid
+            ));
+            if let Some(ref uin) = self.other_uin {
+                s.push_str(&format!(", QQ号={}", uin));
+            }
+            s.push_str(")\n");
+        } else {
+            s.push_str(&format!(
+                "对话对象: {}（{}）\n",
+                self.chat_name, self.chat_type
+            ));
+        }
         s.push_str(&format!(
             "时间范围: {} ~ {}\n",
             self.time_start, self.time_end
@@ -216,18 +264,22 @@ impl ImportReport {
             self.success_reply,
         ));
         s.push_str(&format!(
-            "⚠️  降级: {} 条（回复降级 {}，转发 {}，卡片 {}，语音 {}，视频 {}）\n",
+            "⚠️  降级: {} 条（回复降级 {}，转发 {}，卡片 {}，语音 {}，视频 {}，文件 {}，红包/转账 {}，qce未解析 {}）\n",
             self.total_degraded(),
             self.degraded_reply_fallback,
             self.degraded_forward,
             self.degraded_card,
             self.degraded_audio,
             self.degraded_video,
+            self.degraded_file,
+            self.degraded_red_envelope,
+            self.degraded_qce_unsupported,
         ));
         s.push_str(&format!(
-            "❌ 跳过: {} 条（撤回 {}，空内容 {}，未知type {}）\n",
+            "❌ 跳过: {} 条（撤回 {}，系统 {}，空内容 {}，未知type {}）\n",
             self.total_skipped(),
             self.skipped_recalled,
+            self.skipped_system,
             self.skipped_empty,
             self.skipped_unknown,
         ));
@@ -244,8 +296,12 @@ impl Default for ImportReport {
             file_path: String::new(),
             self_id: String::new(),
             self_name: String::new(),
+            self_uin: None,
             chat_name: String::new(),
             chat_type: String::new(),
+            other_uid: String::new(),
+            other_uin: None,
+            other_name: String::new(),
             time_start: String::new(),
             time_end: String::new(),
             total_raw: 0,
@@ -259,7 +315,11 @@ impl Default for ImportReport {
             degraded_card: 0,
             degraded_audio: 0,
             degraded_video: 0,
+            degraded_file: 0,
+            degraded_red_envelope: 0,
+            degraded_qce_unsupported: 0,
             skipped_recalled: 0,
+            skipped_system: 0,
             skipped_empty: 0,
             skipped_unknown: 0,
             unknown_types: Vec::new(),
