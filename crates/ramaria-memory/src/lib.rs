@@ -183,8 +183,3 @@ pub use prompt::{
 pub use token_budget::{
     BudgetedContext, TokenBudgetConfig, apply_token_budget, estimate_tokens, truncate_at_boundary,
 };
-
-/// 模块存活检查 (Phase 0 占位，可后续移除)
-pub fn hello_memory() -> &'static str {
-    "ramaria-memory is ready"
-}

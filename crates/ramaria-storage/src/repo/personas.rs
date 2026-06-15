@@ -5,24 +5,21 @@
 //! - uid 为全局业务标识（user-0001/rama-0001 等），id 为 AUTOINCREMENT 内部索引
 //! - kind 解析失败时回退到 Hist 并记录 WARNING 日志
 
+use crate::parse_enum_fallback;
+use crate::repo::StorageResultExt;
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::types::{Persona, PersonaKind};
 use sqlx::SqlitePool;
 
-fn parse_kind(s: &str) -> PersonaKind {
-    match s {
-        "user" => PersonaKind::User,
-        "rama" => PersonaKind::Rama,
-        "char" => PersonaKind::Char,
-        "anim" => PersonaKind::Anim,
-        "oc" => PersonaKind::Oc,
-        "hist" => PersonaKind::Hist,
-        other => {
-            tracing::warn!(%other, "personas.kind 值非法，回退为 Hist");
-            PersonaKind::Hist
-        }
-    }
-}
+parse_enum_fallback!(
+    parse_kind, PersonaKind, PersonaKind::Hist, "personas", "kind",
+    "user" => User,
+    "rama" => Rama,
+    "char" => Char,
+    "anim" => Anim,
+    "oc"   => Oc,
+    "hist" => Hist,
+);
 
 #[derive(sqlx::FromRow)]
 struct PersonaRow {
@@ -81,7 +78,7 @@ pub async fn create(pool: &SqlitePool, p: &Persona) -> RamariaResult<i64> {
     .bind(p.updated_at)
     .fetch_one(pool)
     .await
-    .map_err(|e| RamariaError::storage_with_source("创建 persona 失败", e))
+    .storage_err("创建 persona 失败")
 }
 
 pub async fn get_by_uid(pool: &SqlitePool, uid: &str) -> RamariaResult<Option<Persona>> {
@@ -92,7 +89,7 @@ pub async fn get_by_uid(pool: &SqlitePool, uid: &str) -> RamariaResult<Option<Pe
     .bind(uid)
     .fetch_optional(pool)
     .await
-    .map_err(|e| RamariaError::storage_with_source("查询 persona 失败", e))?;
+    .storage_err("查询 persona 失败")?;
     Ok(row.map(|r| r.into_persona()))
 }
 
@@ -123,7 +120,7 @@ pub async fn get_by_kind_source_ref(
     .bind(ref_id)
     .fetch_optional(pool)
     .await
-    .map_err(|e| RamariaError::storage_with_source("按 ref_id 查询 persona 失败", e))?;
+    .storage_err("按 ref_id 查询 persona 失败")?;
     Ok(row.map(|r| r.into_persona()))
 }
 
@@ -134,7 +131,7 @@ pub async fn list_all(pool: &SqlitePool) -> RamariaResult<Vec<Persona>> {
     )
     .fetch_all(pool)
     .await
-    .map_err(|e| RamariaError::storage_with_source("查询 persona 列表失败", e))?;
+    .storage_err("查询 persona 列表失败")?;
     Ok(rows.into_iter().map(|r| r.into_persona()).collect())
 }
 
@@ -183,7 +180,7 @@ pub async fn update(
         .build()
         .execute(pool)
         .await
-        .map_err(|e| RamariaError::storage_with_source("更新 persona 失败", e))?;
+        .storage_err("更新 persona 失败")?;
 
     if rows.rows_affected() == 0 {
         return Err(RamariaError::storage(format!("persona 不存在: uid={uid}")));

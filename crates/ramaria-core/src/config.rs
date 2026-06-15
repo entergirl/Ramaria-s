@@ -94,11 +94,7 @@ pub struct RamariaConfig {
     #[serde(default)]
     pub logging: LoggingConfig,
 
-    /// 隐私
-    #[serde(default)]
-    pub privacy: PrivacyConfig,
-
-    /// 杂项
+    /// 杂项（预留扩展位，当前无字段）
     #[serde(default)]
     pub misc: MiscConfig,
 }
@@ -137,7 +133,6 @@ impl Default for RamariaConfig {
             thresholds: ThresholdConfig::default(),
             index: IndexConfig::default(),
             logging: LoggingConfig::default(),
-            privacy: PrivacyConfig::default(),
             misc: MiscConfig::default(),
         }
     }
@@ -487,25 +482,7 @@ impl Default for LoggingConfig {
 }
 
 // =========================================================
-// 隐私配置
-// =========================================================
-
-/// 隐私相关配置。
-///
-/// 职责:
-/// - 作为隐私相关设置的结构化占位，供未来扩展（如日志脱敏级别、数据留存策略）。
-/// - 线上记忆注入开关由 `BackendSelection.online_memory_injection` 统一管理。
-///
-/// 说明:
-/// - v1.0 中此结构当前无字段。`online_memory_injection` 已归入 `BackendSelection`，
-///   避免两处配置不一致导致行为未定义。
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct PrivacyConfig {
-    // v1.0 预留：未来可扩展日志脱敏级别、数据留存策略等
-}
-
-// =========================================================
-// 杂项配置
+// 杂项配置（预留扩展位）
 // =========================================================
 
 /// 杂项配置。
@@ -513,20 +490,13 @@ pub struct PrivacyConfig {
 /// 职责:
 /// - 放置尚未形成独立配置域的轻量选项。
 /// - 避免临时字段散落到多个不相关结构中。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// 说明:
+/// - v1.1 中此结构当前无字段，作为序列化占位保留以确保配置文件向后兼容。
+/// - 线上隐私相关开关已归入 `BackendSelection` 和 `LoggingConfig`。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MiscConfig {
-    /// 天气查询城市（可选）
-    pub weather_city: Option<String>,
-}
-
-impl Default for MiscConfig {
-    /// 创建默认杂项配置。
-    ///
-    /// 返回:
-    /// - 天气城市为空，表示未配置天气偏好。
-    fn default() -> Self {
-        Self { weather_city: None }
-    }
+    // 预留：未来可扩展天气查询城市、通知偏好等轻量选项
 }
 
 // =========================================================

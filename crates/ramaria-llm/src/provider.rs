@@ -361,6 +361,106 @@ impl ProviderBase {
 }
 
 // =========================================================
+// 在线 Provider 实现宏（消除 DeepSeek/OpenAI 间的 ~97% 重复）
+// =========================================================
+
+/// 为在线 LLM provider 生成完整的 `LlmProvider` trait 实现。
+///
+/// DeepSeek 和 OpenAI 的实现逻辑完全相同，差异仅在于字符串常量。
+/// 此宏消除 ~150 行重复代码。
+///
+/// 用法:
+/// ```ignore
+/// impl_online_provider!(DeepSeekProvider, "deepseek", "DeepSeek");
+/// impl_online_provider!(OpenAIProvider, "openai", "OpenAI");
+/// ```
+///
+/// 参数:
+/// - `$struct_name`: provider 结构体名
+/// - `$service`: keychain service name（如 `"deepseek"`）
+/// - `$display`: 人类可读名称（如 `"DeepSeek"`）
+#[macro_export]
+macro_rules! impl_online_provider {
+    ($struct_name:ident, $service:literal, $display:literal) => {
+        #[async_trait::async_trait]
+        impl ramaria_core::traits::LlmProvider for $struct_name {
+            async fn chat(
+                &self,
+                request: &ramaria_core::traits::ChatRequest,
+            ) -> ramaria_core::error::RamariaResult<String> {
+                let api_key = self.resolve_api_key()?;
+                if api_key.is_none() {
+                    return Err(ramaria_core::error::RamariaError::privacy(format!(
+                        concat!(
+                            $display,
+                            " API key 未配置。请在设置中配置 ",
+                            $display,
+                            " API key 后再试。"
+                        )
+                    )));
+                }
+                self.base.chat(request).await
+            }
+
+            async fn chat_stream(
+                &self,
+                request: &ramaria_core::traits::ChatRequest,
+            ) -> ramaria_core::error::RamariaResult<
+                std::pin::Pin<
+                    Box<
+                        dyn futures::Stream<
+                                Item = ramaria_core::error::RamariaResult<
+                                    ramaria_core::traits::StreamDelta,
+                                >,
+                            > + Send,
+                    >,
+                >,
+            > {
+                let api_key = self.resolve_api_key()?;
+                if api_key.is_none() {
+                    return Err(ramaria_core::error::RamariaError::privacy(format!(
+                        concat!(
+                            $display,
+                            " API key 未配置。请在设置中配置 ",
+                            $display,
+                            " API key 后再试。"
+                        )
+                    )));
+                }
+                self.base.chat_stream(request).await
+            }
+
+            fn capability(&self) -> &ramaria_core::types::ModelCapability {
+                self.base.capability()
+            }
+
+            fn config(&self) -> &ramaria_core::types::BackendConfig {
+                self.base.backend_config()
+            }
+
+            async fn validate(&self) -> ramaria_core::error::RamariaResult<()> {
+                let api_key = self.resolve_api_key()?;
+                if api_key.is_none() {
+                    return Err(ramaria_core::error::RamariaError::privacy(format!(
+                        concat!(
+                            $display,
+                            " API key 未配置。请先在 keychain 中设置 ",
+                            $display,
+                            " API key。"
+                        )
+                    )));
+                }
+                self.base.validate().await
+            }
+
+            fn name(&self) -> &'static str {
+                $display
+            }
+        }
+    };
+}
+
+// =========================================================
 // 消息组装
 // =========================================================
 

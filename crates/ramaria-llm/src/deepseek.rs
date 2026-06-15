@@ -2,9 +2,8 @@
 //!
 //! 设计特点:
 //! - 线上 LLM 后端，API key 从 OS keychain 实时读取
-//! - 实现 `ramaria_core::traits::LlmProvider` trait
 //! - 通过 `ProviderBase` 组合实现，共享 HTTP 传输和重试逻辑
-//! - `validate()` 检查 keychain 中 API key 存在、base_url 可连接
+//! - `LlmProvider` trait 实现由 `impl_online_provider!` 宏生成，消除与 OpenAI 的 97% 重复
 //! - 支持 streaming + JSON mode，context_window 65536
 //!
 //! 安全约束:
@@ -12,14 +11,11 @@
 //! - 线上 provider 需要隐私确认后方可调用（由 app 层在调用前检查）
 //! - 鉴权错误 (401/403) 不触发重试
 
-use async_trait::async_trait;
-use futures::Stream;
-use ramaria_core::error::{RamariaError, RamariaResult};
-use ramaria_core::traits::{ChatRequest, LlmProvider, StreamDelta};
-use ramaria_core::types::{BackendConfig, ModelCapability};
-use std::pin::Pin;
+use ramaria_core::error::RamariaResult;
+use ramaria_core::types::BackendConfig;
 use std::sync::Arc;
 
+use crate::impl_online_provider;
 use crate::keychain::Keychain;
 use crate::provider::{ProviderBase, RetryConfig};
 
@@ -32,6 +28,7 @@ use crate::provider::{ProviderBase, RetryConfig};
 /// 职责:
 /// - 封装 DeepSeek OpenAI-compatible API（base_url: `https://api.deepseek.com/v1`）。
 /// - API key 从 OS keychain 读取（service name: `"deepseek"`）。
+/// - `LlmProvider` trait 由 `impl_online_provider!` 宏自动生成。
 ///
 /// 用法:
 /// ```ignore
@@ -57,7 +54,6 @@ impl DeepSeekProvider {
     /// - 成功时返回 provider 实例。
     /// - API key 不存在不在此处报错（延迟到 `chat`/`validate` 时检查）。
     pub fn new(config: BackendConfig, keychain: Arc<Keychain>) -> RamariaResult<Self> {
-        // 单次 keychain 调用，消除 TOCTOU 窗口
         let result = keychain.get_api_key("deepseek");
         let api_key = result.unwrap_or(None);
         let key_status = match &api_key {
@@ -84,77 +80,18 @@ impl DeepSeekProvider {
         retry_config: RetryConfig,
     ) -> RamariaResult<Self> {
         let api_key = keychain.get_api_key("deepseek").unwrap_or(None);
-
         let base = ProviderBase::with_retry_config(config, api_key, timeout_secs, retry_config)?;
         Ok(Self { base, keychain })
     }
 
     /// 从 keychain 获取 API key。
-    ///
-    /// 返回:
-    /// - `Ok(Some(key))`: key 存在。
-    /// - `Ok(None)`: key 未配置。
-    /// - `Err`: keychain 读取失败。
     fn resolve_api_key(&self) -> RamariaResult<Option<String>> {
         self.keychain.get_api_key("deepseek")
     }
 }
 
-#[async_trait]
-impl LlmProvider for DeepSeekProvider {
-    async fn chat(&self, request: &ChatRequest) -> RamariaResult<String> {
-        // 调用前检查 API key
-        let api_key = self.resolve_api_key()?;
-        if api_key.is_none() {
-            return Err(RamariaError::privacy(
-                "DeepSeek API key 未配置。请在设置中配置 DeepSeek API key 后再试。",
-            ));
-        }
-
-        // 重新创建带 key 的 transport（或接受当前 key）
-        // 注意：当前 base 创建时已尝试读取 key，若创建后 key 变更则需重建
-        // 为简化，当前接受创建时的 key。若需要动态刷新，可后续扩展。
-        self.base.chat(request).await
-    }
-
-    async fn chat_stream(
-        &self,
-        request: &ChatRequest,
-    ) -> RamariaResult<Pin<Box<dyn Stream<Item = RamariaResult<StreamDelta>> + Send>>> {
-        let api_key = self.resolve_api_key()?;
-        if api_key.is_none() {
-            return Err(RamariaError::privacy(
-                "DeepSeek API key 未配置。请在设置中配置 DeepSeek API key 后再试。",
-            ));
-        }
-        self.base.chat_stream(request).await
-    }
-
-    fn capability(&self) -> &ModelCapability {
-        self.base.capability()
-    }
-
-    fn config(&self) -> &BackendConfig {
-        self.base.backend_config()
-    }
-
-    async fn validate(&self) -> RamariaResult<()> {
-        // 1. 检查 API key 是否配置
-        let api_key = self.resolve_api_key()?;
-        if api_key.is_none() {
-            return Err(RamariaError::privacy(
-                "DeepSeek API key 未配置。请先在 keychain 中设置 DeepSeek API key。",
-            ));
-        }
-
-        // 2. 检查 base_url 连接和模型可用性
-        self.base.validate().await
-    }
-
-    fn name(&self) -> &'static str {
-        "DeepSeek"
-    }
-}
+// 由宏生成 LlmProvider trait 实现（chat/chat_stream/capability/config/validate/name）
+impl_online_provider!(DeepSeekProvider, "deepseek", "DeepSeek");
 
 // =========================================================
 // 单元测试
@@ -163,6 +100,7 @@ impl LlmProvider for DeepSeekProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ramaria_core::traits::LlmProvider;
     use ramaria_core::types::LlmProvider as ProviderKind;
 
     #[test]

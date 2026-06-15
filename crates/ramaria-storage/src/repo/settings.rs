@@ -6,7 +6,8 @@
 //! - 配置项包括 profile_mode、l2_trigger_count、push_enabled 等运行时参数
 //! - 不存储敏感信息（API key 等），仅保存非敏感运行参数
 
-use ramaria_core::error::{RamariaError, RamariaResult};
+use crate::repo::StorageResultExt;
+use ramaria_core::error::RamariaResult;
 use sqlx::SqlitePool;
 
 pub async fn get(pool: &SqlitePool, key: &str) -> RamariaResult<Option<String>> {
@@ -14,7 +15,7 @@ pub async fn get(pool: &SqlitePool, key: &str) -> RamariaResult<Option<String>> 
         .bind(key)
         .fetch_optional(pool)
         .await
-        .map_err(|e| RamariaError::storage_with_source("查询设置失败", e))?;
+        .storage_err("查询设置失败")?;
     Ok(val)
 }
 
@@ -26,7 +27,7 @@ pub async fn set(pool: &SqlitePool, key: &str, value: &str) -> RamariaResult<()>
         .bind(now)
         .execute(pool)
         .await
-        .map_err(|e| RamariaError::storage_with_source("保存设置失败", e))?;
+        .storage_err("保存设置失败")?;
     Ok(())
 }
 
@@ -39,6 +40,6 @@ pub async fn list_all(pool: &SqlitePool) -> RamariaResult<Vec<(String, String)>>
     let rows = sqlx::query_as::<_, Row>("SELECT key, value FROM settings ORDER BY key")
         .fetch_all(pool)
         .await
-        .map_err(|e| RamariaError::storage_with_source("查询设置列表失败", e))?;
+        .storage_err("查询设置列表失败")?;
     Ok(rows.into_iter().map(|r| (r.key, r.value)).collect())
 }

@@ -5,7 +5,8 @@
 //! - create 写入新冲突，list_pending 查询待处理项，resolve 标记已解决
 //! - 所有错误统一转换为 RamariaError::Storage
 
-use ramaria_core::error::{RamariaError, RamariaResult};
+use crate::repo::StorageResultExt;
+use ramaria_core::error::RamariaResult;
 use sqlx::SqlitePool;
 
 pub async fn create(
@@ -22,7 +23,7 @@ pub async fn create(
          VALUES (?, ?, ?, ?, ?, ?) RETURNING id"
     ).bind(field).bind(conflict_type).bind(old_content).bind(new_content).bind(desc).bind(now)
         .fetch_one(pool).await
-        .map_err(|e| RamariaError::storage_with_source("创建冲突记录失败", e))
+        .storage_err("创建冲突记录失败")
 }
 
 pub async fn list_pending(pool: &SqlitePool) -> RamariaResult<Vec<(i64, String, String, String)>> {
@@ -36,7 +37,7 @@ pub async fn list_pending(pool: &SqlitePool) -> RamariaResult<Vec<(i64, String, 
     let rows = sqlx::query_as::<_, Row>(
         "SELECT id, field, conflict_type, COALESCE(conflict_desc, '') as conflict_desc FROM conflict_queue WHERE status = 'pending'"
     ).fetch_all(pool).await
-        .map_err(|e| RamariaError::storage_with_source("查询待解决冲突失败", e))?;
+        .storage_err("查询待解决冲突失败")?;
     Ok(rows
         .into_iter()
         .map(|r| (r.id, r.field, r.conflict_type, r.conflict_desc))
@@ -50,6 +51,6 @@ pub async fn resolve(pool: &SqlitePool, id: i64) -> RamariaResult<()> {
         .bind(id)
         .execute(pool)
         .await
-        .map_err(|e| RamariaError::storage_with_source("解决冲突失败", e))?;
+        .storage_err("解决冲突失败")?;
     Ok(())
 }

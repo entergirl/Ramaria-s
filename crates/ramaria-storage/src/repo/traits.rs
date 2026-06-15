@@ -5,57 +5,41 @@
 //! - 所有枚举解析失败时回退到合理默认值并记录 WARNING
 //! - list_traits_by_persona 仅返回 active 状态的标签（System Prompt 构建用）
 
-use ramaria_core::error::{RamariaError, RamariaResult};
+use crate::parse_enum_fallback;
+use crate::repo::StorageResultExt;
+use crate::repo::parse_uuid_optional;
+use ramaria_core::error::RamariaResult;
 use ramaria_core::types::{
     EvidenceDirection, PersonalityTrait, TraitEvidence, TraitLayer, TraitSource, TraitStatus,
 };
 use sqlx::SqlitePool;
 
-fn parse_layer(s: &str) -> TraitLayer {
-    match s {
-        "base" => TraitLayer::Base,
-        "primary" => TraitLayer::Primary,
-        "accent" => TraitLayer::Accent,
-        other => {
-            tracing::warn!(%other, "personality_traits.layer 值非法，回退为 Base");
-            TraitLayer::Base
-        }
-    }
-}
-fn parse_trait_source(s: &str) -> TraitSource {
-    match s {
-        "l1" => TraitSource::L1,
-        "event" => TraitSource::Event,
-        "manual" => TraitSource::Manual,
-        "inferred" => TraitSource::Inferred,
-        other => {
-            tracing::warn!(%other, "personality_traits.source 值非法，回退为 L1");
-            TraitSource::L1
-        }
-    }
-}
-fn parse_trait_status(s: &str) -> TraitStatus {
-    match s {
-        "active" => TraitStatus::Active,
-        "deprecated" => TraitStatus::Deprecated,
-        "historical" => TraitStatus::Historical,
-        other => {
-            tracing::warn!(%other, "personality_traits.status 值非法，回退为 Active");
-            TraitStatus::Active
-        }
-    }
-}
-fn parse_evidence_dir(s: &str) -> EvidenceDirection {
-    match s {
-        "support" => EvidenceDirection::Support,
-        "contradict" => EvidenceDirection::Contradict,
-        "neutral" => EvidenceDirection::Neutral,
-        other => {
-            tracing::warn!(%other, "trait_evidence.direction 值非法，回退为 Support");
-            EvidenceDirection::Support
-        }
-    }
-}
+// 使用共享宏生成枚举解析函数，消除 4 个手写 match 链的重复
+parse_enum_fallback!(
+    parse_layer, TraitLayer, TraitLayer::Base, "personality_traits", "layer",
+    "base"    => Base,
+    "primary" => Primary,
+    "accent"  => Accent,
+);
+parse_enum_fallback!(
+    parse_trait_source, TraitSource, TraitSource::L1, "personality_traits", "source",
+    "l1"       => L1,
+    "event"    => Event,
+    "manual"   => Manual,
+    "inferred" => Inferred,
+);
+parse_enum_fallback!(
+    parse_trait_status, TraitStatus, TraitStatus::Active, "personality_traits", "status",
+    "active"     => Active,
+    "deprecated" => Deprecated,
+    "historical" => Historical,
+);
+parse_enum_fallback!(
+    parse_evidence_dir, EvidenceDirection, EvidenceDirection::Support, "trait_evidence", "direction",
+    "support"    => Support,
+    "contradict" => Contradict,
+    "neutral"    => Neutral,
+);
 
 // =========================================================
 // L3 性格标签
@@ -86,12 +70,7 @@ struct TraitRow {
 
 impl TraitRow {
     fn into_trait(self) -> RamariaResult<PersonalityTrait> {
-        let ref_l1_id = self
-            .ref_l1_id
-            .as_deref()
-            .map(ramaria_core::types::uuid_from_db)
-            .transpose()
-            .inspect_err(|_| tracing::warn!(raw_id = %self.ref_l1_id.as_deref().unwrap_or("nil"), "personality_traits.ref_l1_id UUID 解析失败"))?;
+        let ref_l1_id = parse_uuid_optional(&self.ref_l1_id, "personality_traits", "ref_l1_id")?;
         Ok(PersonalityTrait {
             id: self.id,
             persona_uid: self.persona_uid,
@@ -143,7 +122,7 @@ pub async fn save_trait(pool: &SqlitePool, t: &PersonalityTrait) -> RamariaResul
     .bind(t.updated_at)
     .fetch_one(pool)
     .await
-    .map_err(|e| RamariaError::storage_with_source("保存性格标签失败", e))
+    .storage_err("保存性格标签失败")
 }
 
 pub async fn list_traits_by_persona(
@@ -155,8 +134,8 @@ pub async fn list_traits_by_persona(
          related, seq, source, ref_event_id, ref_l1_id, confidence, evidence, consistency,
          status, created_at, updated_at
          FROM personality_traits WHERE persona_uid = ? AND status = 'active' ORDER BY layer, seq"
-    ).bind(persona_uid).fetch_all(pool).await
-        .map_err(|e| RamariaError::storage_with_source("查询性格标签列表失败", e))?;
+    )    .bind(persona_uid).fetch_all(pool).await
+        .storage_err("查询性格标签列表失败")?;
     rows.into_iter()
         .map(|r| r.into_trait())
         .collect::<RamariaResult<Vec<_>>>()
@@ -173,7 +152,7 @@ pub async fn update_confidence(
     sqlx::query("UPDATE personality_traits SET confidence = ?, evidence = ?, consistency = ?, updated_at = ? WHERE id = ?")
         .bind(confidence).bind(evidence).bind(consistency).bind(now).bind(id)
         .execute(pool).await
-        .map_err(|e| RamariaError::storage_with_source("更新性格置信度失败", e))?;
+        .storage_err("更新性格置信度失败")?;
     Ok(())
 }
 
@@ -185,7 +164,7 @@ pub async fn update_status(pool: &SqlitePool, id: i64, status: TraitStatus) -> R
         .bind(id)
         .execute(pool)
         .await
-        .map_err(|e| RamariaError::storage_with_source("更新性格状态失败", e))?;
+        .storage_err("更新性格状态失败")?;
     Ok(())
 }
 
@@ -206,7 +185,7 @@ pub async fn save_evidence(pool: &SqlitePool, e: &TraitEvidence) -> RamariaResul
     .bind(e.created_at)
     .fetch_one(pool)
     .await
-    .map_err(|e| RamariaError::storage_with_source("保存证据失败", e))
+    .storage_err("保存证据失败")
 }
 
 pub async fn list_evidence_by_trait(
@@ -230,7 +209,7 @@ pub async fn list_evidence_by_trait(
     .bind(trait_id)
     .fetch_all(pool)
     .await
-    .map_err(|e| RamariaError::storage_with_source("查询证据列表失败", e))?;
+    .storage_err("查询证据列表失败")?;
     Ok(rows
         .into_iter()
         .map(|r| TraitEvidence {

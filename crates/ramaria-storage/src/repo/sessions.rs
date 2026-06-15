@@ -5,6 +5,8 @@
 //! - id 使用 UUID v4（TEXT 主键），时间字段为 Unix 毫秒
 //! - UUID 解析失败时记录 WARNING 日志
 
+use crate::repo::StorageResultExt;
+use crate::repo::parse_uuid_required;
 use ramaria_core::error::RamariaResult;
 use ramaria_core::types::Session;
 use sqlx::SqlitePool;
@@ -18,9 +20,7 @@ pub async fn create(pool: &SqlitePool) -> RamariaResult<Session> {
         .bind(now)
         .execute(pool)
         .await
-        .map_err(|e| {
-            ramaria_core::error::RamariaError::storage_with_source("创建 session 失败", e)
-        })?;
+        .storage_err("创建 session 失败")?;
     Ok(Session {
         id,
         started_at: now,
@@ -35,9 +35,7 @@ pub async fn close(pool: &SqlitePool, session_id: Uuid) -> RamariaResult<()> {
         .bind(session_id.to_string())
         .execute(pool)
         .await
-        .map_err(|e| {
-            ramaria_core::error::RamariaError::storage_with_source("关闭 session 失败", e)
-        })?;
+        .storage_err("关闭 session 失败")?;
     Ok(())
 }
 
@@ -48,7 +46,7 @@ pub async fn get(pool: &SqlitePool, session_id: Uuid) -> RamariaResult<Option<Se
     .bind(session_id.to_string())
     .fetch_optional(pool)
     .await
-    .map_err(|e| ramaria_core::error::RamariaError::storage_with_source("查询 session 失败", e))?;
+    .storage_err("查询 session 失败")?;
     row.map(|r| r.into_session()).transpose()
 }
 
@@ -56,7 +54,7 @@ pub async fn list_active(pool: &SqlitePool) -> RamariaResult<Vec<Session>> {
     let rows = sqlx::query_as::<_, SessionRow>("SELECT id, started_at, ended_at FROM sessions WHERE ended_at IS NULL ORDER BY started_at DESC")
         .fetch_all(pool)
         .await
-        .map_err(|e| ramaria_core::error::RamariaError::storage_with_source("查询活跃 session 失败", e))?;
+        .storage_err("查询活跃 session 失败")?;
     rows.into_iter()
         .map(|r| r.into_session())
         .collect::<Result<Vec<_>, _>>()
@@ -68,9 +66,7 @@ pub async fn list_all(pool: &SqlitePool) -> RamariaResult<Vec<Session>> {
     )
     .fetch_all(pool)
     .await
-    .map_err(|e| {
-        ramaria_core::error::RamariaError::storage_with_source("查询全部 session 失败", e)
-    })?;
+    .storage_err("查询全部 session 失败")?;
     rows.into_iter()
         .map(|r| r.into_session())
         .collect::<Result<Vec<_>, _>>()
@@ -81,9 +77,7 @@ pub async fn delete(pool: &SqlitePool, session_id: Uuid) -> RamariaResult<()> {
         .bind(session_id.to_string())
         .execute(pool)
         .await
-        .map_err(|e| {
-            ramaria_core::error::RamariaError::storage_with_source("删除 session 失败", e)
-        })?;
+        .storage_err("删除 session 失败")?;
     Ok(())
 }
 
@@ -112,9 +106,7 @@ pub async fn create_historical(
         .bind(ended_at)
         .execute(pool)
         .await
-        .map_err(|e| {
-            ramaria_core::error::RamariaError::storage_with_source("创建历史 session 失败", e)
-        })?;
+        .storage_err("创建历史 session 失败")?;
     Ok(Session {
         id,
         started_at,
@@ -131,8 +123,7 @@ struct SessionRow {
 
 impl SessionRow {
     fn into_session(self) -> RamariaResult<Session> {
-        let id = ramaria_core::types::uuid_from_db(&self.id)
-            .inspect_err(|_| tracing::warn!(raw_id = %self.id, "sessions.id UUID 解析失败"))?;
+        let id = parse_uuid_required(&self.id, "sessions", "id")?;
         Ok(Session {
             id,
             started_at: self.started_at,

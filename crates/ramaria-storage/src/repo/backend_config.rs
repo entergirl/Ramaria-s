@@ -6,6 +6,7 @@
 //! - 不存储 API key（密钥由 OS keychain 管理）
 //! - get 返回 Option<BackendConfig>，未配置时返回 None 供上层决策
 
+use crate::repo::StorageResultExt;
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::types::BackendConfig;
 use sqlx::SqlitePool;
@@ -17,7 +18,7 @@ pub async fn upsert(pool: &SqlitePool, config: &BackendConfig) -> RamariaResult<
         .bind(&json)
         .execute(pool)
         .await
-        .map_err(|e| RamariaError::storage_with_source("保存后端配置失败", e))?;
+        .storage_err("保存后端配置失败")?;
     Ok(())
 }
 
@@ -25,7 +26,7 @@ pub async fn get(pool: &SqlitePool) -> RamariaResult<Option<BackendConfig>> {
     let json: Option<String> = sqlx::query_scalar("SELECT data FROM backend_config WHERE id = 1")
         .fetch_optional(pool)
         .await
-        .map_err(|e| RamariaError::storage_with_source("查询后端配置失败", e))?;
+        .storage_err("查询后端配置失败")?;
     match json {
         Some(s) => {
             let cfg: BackendConfig = serde_json::from_str(&s)

@@ -4,7 +4,8 @@
 //! - 缓冲用户离线时触发的主动消息，上线后按时间顺序推送
 //! - create 写入待推送消息，mark_sent 标记已发送
 
-use ramaria_core::error::{RamariaError, RamariaResult};
+use crate::repo::StorageResultExt;
+use ramaria_core::error::RamariaResult;
 use sqlx::SqlitePool;
 
 pub async fn create(pool: &SqlitePool, content: &str) -> RamariaResult<i64> {
@@ -16,7 +17,7 @@ pub async fn create(pool: &SqlitePool, content: &str) -> RamariaResult<i64> {
     .bind(now)
     .fetch_one(pool)
     .await
-    .map_err(|e| RamariaError::storage_with_source("创建推送失败", e))
+    .storage_err("创建推送失败")
 }
 
 pub async fn list_pending(pool: &SqlitePool) -> RamariaResult<Vec<(i64, String)>> {
@@ -30,7 +31,7 @@ pub async fn list_pending(pool: &SqlitePool) -> RamariaResult<Vec<(i64, String)>
     )
     .fetch_all(pool)
     .await
-    .map_err(|e| RamariaError::storage_with_source("查询待推送失败", e))?;
+    .storage_err("查询待推送失败")?;
     Ok(rows.into_iter().map(|r| (r.id, r.content)).collect())
 }
 
@@ -41,6 +42,6 @@ pub async fn mark_sent(pool: &SqlitePool, id: i64) -> RamariaResult<()> {
         .bind(id)
         .execute(pool)
         .await
-        .map_err(|e| RamariaError::storage_with_source("标记推送已发送失败", e))?;
+        .storage_err("标记推送已发送失败")?;
     Ok(())
 }

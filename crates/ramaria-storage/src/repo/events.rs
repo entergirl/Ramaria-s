@@ -6,7 +6,9 @@
 //! - presentation 解析失败时回退为 Mixed 并记录 WARNING
 //! - event_sources 使用 ON CONFLICT 幂等写入（同一 (event_id, l1_id) 不重复）
 
-use ramaria_core::error::{RamariaError, RamariaResult};
+use crate::parse_enum_fallback;
+use crate::repo::StorageResultExt;
+use ramaria_core::error::RamariaResult;
 use ramaria_core::types::{EventRelation, MemoryEvent, Presentation};
 use sqlx::SqlitePool;
 use uuid::Uuid;
@@ -15,17 +17,12 @@ use uuid::Uuid;
 // MemoryEvent（事件主表）
 // =========================================================
 
-fn parse_presentation(s: &str) -> Presentation {
-    match s {
-        "objective" => Presentation::Objective,
-        "subjective" => Presentation::Subjective,
-        "mixed" => Presentation::Mixed,
-        other => {
-            tracing::warn!(%other, "memory_events.presentation 值非法，回退为 Mixed");
-            Presentation::Mixed
-        }
-    }
-}
+parse_enum_fallback!(
+    parse_presentation, Presentation, Presentation::Mixed, "memory_events", "presentation",
+    "objective"  => Objective,
+    "subjective" => Subjective,
+    "mixed"      => Mixed,
+);
 
 #[derive(sqlx::FromRow)]
 struct EventRow {
@@ -96,7 +93,7 @@ pub async fn save_event(pool: &SqlitePool, ev: &MemoryEvent) -> RamariaResult<i6
     .bind(ev.created_at).bind(ev.last_accessed_at)
     .bind(ev.indexed_at).bind(ev.index_version)
     .fetch_one(pool).await
-    .map_err(|e| RamariaError::storage_with_source("保存事件失败", e))
+    .storage_err("保存事件失败")
 }
 
 pub async fn list_events_by_persona(
@@ -116,7 +113,7 @@ pub async fn list_events_by_persona(
     .bind(offset)
     .fetch_all(pool)
     .await
-    .map_err(|e| RamariaError::storage_with_source("查询事件列表失败", e))?;
+    .storage_err("查询事件列表失败")?;
     Ok(rows.into_iter().map(|r| r.into_event()).collect())
 }
 
@@ -133,7 +130,7 @@ pub async fn list_unabsorbed_events(
     .bind(persona_uid)
     .fetch_all(pool)
     .await
-    .map_err(|e| RamariaError::storage_with_source("查询未吸收事件失败", e))?;
+    .storage_err("查询未吸收事件失败")?;
     Ok(rows.into_iter().map(|r| r.into_event()).collect())
 }
 
@@ -147,7 +144,7 @@ pub async fn save_relation(pool: &SqlitePool, rel: &EventRelation) -> RamariaRes
     )
     .bind(rel.from_id).bind(rel.to_id).bind(rel.kind.as_str()).bind(rel.weight).bind(rel.created_at)
     .fetch_one(pool).await
-    .map_err(|e| RamariaError::storage_with_source("保存事件关系失败", e))
+    .storage_err("保存事件关系失败")
 }
 
 // =========================================================
@@ -169,6 +166,6 @@ pub async fn save_source(
     .bind(weight)
     .execute(pool)
     .await
-    .map_err(|e| RamariaError::storage_with_source("保存事件溯源失败", e))?;
+    .storage_err("保存事件溯源失败")?;
     Ok(())
 }

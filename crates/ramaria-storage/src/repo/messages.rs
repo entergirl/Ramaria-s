@@ -7,10 +7,26 @@
 //! - role/source 解析失败时记录 WARNING 日志并回退到安全默认值
 //! - UUID 解析异常时记录 WARNING，不静默吞错
 
+use crate::parse_enum_fallback;
+use crate::repo::StorageResultExt;
+use crate::repo::parse_uuid_required;
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::types::{Message, MessageRole, MessageSource};
 use sqlx::SqlitePool;
 use uuid::Uuid;
+
+parse_enum_fallback!(
+    parse_role, MessageRole, MessageRole::Tool, "messages", "role",
+    "user"      => User,
+    "assistant" => Assistant,
+    "system"    => System,
+    "tool"      => Tool,
+);
+parse_enum_fallback!(
+    parse_source, MessageSource, MessageSource::Local, "messages", "source",
+    "online" => Online,
+    "local"  => Local,
+);
 
 #[derive(sqlx::FromRow)]
 struct MessageRow {
@@ -26,39 +42,16 @@ struct MessageRow {
 
 impl MessageRow {
     fn into_message(self) -> RamariaResult<Message> {
-        let id = ramaria_core::types::uuid_from_db(&self.id)
-            .inspect_err(|_| tracing::warn!(raw_id = %self.id, "messages.id UUID 解析失败"))?;
-        let session_id = ramaria_core::types::uuid_from_db(&self.session_id).inspect_err(
-            |_| tracing::warn!(raw_id = %self.session_id, "messages.session_id UUID 解析失败"),
-        )?;
-
-        let role = match self.role.as_str() {
-            "user" => MessageRole::User,
-            "assistant" => MessageRole::Assistant,
-            "system" => MessageRole::System,
-            "tool" => MessageRole::Tool,
-            other => {
-                tracing::warn!(%other, "messages.role 值非法，回退为 Tool");
-                MessageRole::Tool
-            }
-        };
-
-        let source = match self.source.as_str() {
-            "online" => MessageSource::Online,
-            "local" => MessageSource::Local,
-            other => {
-                tracing::warn!(%other, "messages.source 值非法，回退为 Local");
-                MessageSource::Local
-            }
-        };
+        let id = parse_uuid_required(&self.id, "messages", "id")?;
+        let session_id = parse_uuid_required(&self.session_id, "messages", "session_id")?;
 
         Ok(Message {
             id,
             session_id,
-            role,
+            role: parse_role(&self.role),
             content: self.content,
             created_at: self.created_at,
-            source,
+            source: parse_source(&self.source),
             fingerprint: self.import_fingerprint,
             persona_uid: self.persona_uid,
         })
@@ -89,7 +82,7 @@ pub async fn save(pool: &SqlitePool, msg: &Message) -> RamariaResult<()> {
         .bind(&msg.persona_uid)
         .execute(pool)
         .await
-        .map_err(|e| RamariaError::storage_with_source("保存消息失败", e))?;
+        .storage_err("保存消息失败")?;
     Ok(())
 }
 
@@ -108,7 +101,7 @@ pub async fn is_session_active(pool: &SqlitePool, session_id: Uuid) -> RamariaRe
             .bind(session_id.to_string())
             .fetch_optional(pool)
             .await
-            .map_err(|e| RamariaError::storage_with_source("检查 session 活跃状态失败", e))?;
+            .storage_err("检查 session 活跃状态失败")?;
     Ok(row.is_some())
 }
 
@@ -136,7 +129,7 @@ pub async fn get_last_message_time(
             .bind(session_id.to_string())
             .fetch_optional(pool)
             .await
-            .map_err(|e| RamariaError::storage_with_source("查询最后消息时间失败", e))?;
+            .storage_err("查询最后消息时间失败")?;
 
     // SQLite 在无匹配行时也返回一行（含 NULL），所以 row 通常为 Some
     Ok(row.and_then(|r| r.max_time))
@@ -160,7 +153,7 @@ pub async fn count_by_session(pool: &SqlitePool, session_id: Uuid) -> RamariaRes
         .bind(session_id.to_string())
         .fetch_one(pool)
         .await
-        .map_err(|e| RamariaError::storage_with_source("统计消息数量失败", e))?;
+        .storage_err("统计消息数量失败")?;
 
     Ok(row.cnt as u32)
 }
@@ -173,7 +166,7 @@ pub async fn list_by_session(pool: &SqlitePool, session_id: Uuid) -> RamariaResu
     .bind(session_id.to_string())
     .fetch_all(pool)
     .await
-    .map_err(|e| RamariaError::storage_with_source("查询消息列表失败", e))?;
+    .storage_err("查询消息列表失败")?;
     rows.into_iter()
         .map(|r| r.into_message())
         .collect::<RamariaResult<Vec<_>>>()
@@ -190,7 +183,7 @@ pub async fn find_by_fingerprint(
     .bind(fingerprint)
     .fetch_optional(pool)
     .await
-    .map_err(|e| RamariaError::storage_with_source("指纹查询失败", e))?;
+    .storage_err("指纹查询失败")?;
     row.map(|r| r.into_message()).transpose()
 }
 
@@ -202,7 +195,7 @@ pub async fn list_by_persona(pool: &SqlitePool, persona_uid: &str) -> RamariaRes
     .bind(persona_uid)
     .fetch_all(pool)
     .await
-    .map_err(|e| RamariaError::storage_with_source("按 persona 查询消息失败", e))?;
+    .storage_err("按 persona 查询消息失败")?;
     rows.into_iter()
         .map(|r| r.into_message())
         .collect::<RamariaResult<Vec<_>>>()
@@ -233,7 +226,7 @@ pub async fn save_import(pool: &SqlitePool, msg: &Message) -> RamariaResult<()> 
         .bind(&msg.persona_uid)
         .execute(pool)
         .await
-        .map_err(|e| RamariaError::storage_with_source("导入消息写入失败", e))?;
+        .storage_err("导入消息写入失败")?;
     Ok(())
 }
 
@@ -256,7 +249,7 @@ pub async fn list_all_fingerprints(pool: &SqlitePool) -> RamariaResult<Vec<Strin
     )
     .fetch_all(pool)
     .await
-    .map_err(|e| RamariaError::storage_with_source("查询指纹列表失败", e))?;
+    .storage_err("查询指纹列表失败")?;
 
     Ok(rows.into_iter().map(|r| r.import_fingerprint).collect())
 }
@@ -287,10 +280,7 @@ pub async fn save_import_batch(pool: &SqlitePool, msgs: &[Message]) -> RamariaRe
         return Ok(0);
     }
 
-    let mut txn = pool
-        .begin()
-        .await
-        .map_err(|e| RamariaError::storage_with_source("开启批量导入事务失败", e))?;
+    let mut txn = pool.begin().await.storage_err("开启批量导入事务失败")?;
 
     let mut written = 0usize;
 
@@ -309,18 +299,11 @@ pub async fn save_import_batch(pool: &SqlitePool, msgs: &[Message]) -> RamariaRe
             .bind(&msg.persona_uid)
             .execute(&mut *txn)
             .await
-            .map_err(|e| {
-                RamariaError::storage_with_source(
-                    format!("批量导入消息写入失败 (第 {} 条)", written + 1),
-                    e,
-                )
-            })?;
+            .storage_err(format!("批量导入消息写入失败 (第 {} 条)", written + 1))?;
         written += 1;
     }
 
-    txn.commit()
-        .await
-        .map_err(|e| RamariaError::storage_with_source("提交批量导入事务失败", e))?;
+    txn.commit().await.storage_err("提交批量导入事务失败")?;
 
     tracing::debug!(count = written, "批量导入消息写入完成");
     Ok(written)

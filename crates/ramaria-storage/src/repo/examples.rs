@@ -4,7 +4,9 @@
 //! - 管理对话 Few-shot 示例（partner→reply），用于 System Prompt 注入
 //! - list_selected 仅返回 selected=1 的示例，最多 5 条
 
-use ramaria_core::error::{RamariaError, RamariaResult};
+use crate::repo::StorageResultExt;
+use crate::repo::parse_uuid_optional;
+use ramaria_core::error::RamariaResult;
 use ramaria_core::types::PersonaExample;
 use sqlx::SqlitePool;
 
@@ -25,12 +27,7 @@ struct ExampleRow {
 
 impl ExampleRow {
     fn into_example(self) -> RamariaResult<PersonaExample> {
-        let session_id = self
-            .session_id
-            .as_deref()
-            .map(ramaria_core::types::uuid_from_db)
-            .transpose()
-            .inspect_err(|_| tracing::warn!(raw_id = %self.session_id.as_deref().unwrap_or("nil"), "persona_examples.session_id UUID 解析失败"))?;
+        let session_id = parse_uuid_optional(&self.session_id, "persona_examples", "session_id")?;
         Ok(PersonaExample {
             id: self.id,
             persona_uid: self.persona_uid,
@@ -56,7 +53,7 @@ pub async fn save(pool: &SqlitePool, e: &PersonaExample) -> RamariaResult<i64> {
     .bind(e.session_id.map(|u| u.to_string())).bind(&e.context)
     .bind(e.valence).bind(&e.tags).bind(e.selected as i64).bind(e.length).bind(e.created_at)
     .fetch_one(pool).await
-    .map_err(|e| RamariaError::storage_with_source("保存示例失败", e))
+    .storage_err("保存示例失败")
 }
 
 pub async fn list_selected(
@@ -67,7 +64,7 @@ pub async fn list_selected(
         "SELECT id, persona_uid, partner, reply, session_id, context, valence, tags, selected, length, created_at
          FROM persona_examples WHERE persona_uid = ? AND selected = 1 ORDER BY created_at DESC LIMIT 5"
     ).bind(persona_uid).fetch_all(pool).await
-        .map_err(|e| RamariaError::storage_with_source("查询示例列表失败", e))?;
+        .storage_err("查询示例列表失败")?;
     rows.into_iter()
         .map(|r| r.into_example())
         .collect::<RamariaResult<Vec<_>>>()

@@ -5,7 +5,8 @@
 //! - insert_node 使用 INSERT OR IGNORE 幂等创建
 //! - insert_edge 使用 AUTOINCREMENT 主键
 
-use ramaria_core::error::{RamariaError, RamariaResult};
+use crate::repo::StorageResultExt;
+use ramaria_core::error::RamariaResult;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
@@ -20,13 +21,13 @@ pub async fn insert_node(
         .bind(entity_name).bind(entity_type)
         .bind(source_l1_id.map(|u| u.to_string())).bind(now)
         .execute(pool).await
-        .map_err(|e| RamariaError::storage_with_source("插入图谱节点失败", e))?;
+        .storage_err("插入图谱节点失败")?;
 
     let id = sqlx::query_scalar::<_, i64>("SELECT id FROM graph_nodes WHERE entity_name = ?")
         .bind(entity_name)
         .fetch_one(pool)
         .await
-        .map_err(|e| RamariaError::storage_with_source("查询图谱节点 id 失败", e))?;
+        .storage_err("查询图谱节点 id 失败")?;
     Ok(id)
 }
 
@@ -46,7 +47,7 @@ pub async fn get_node(
     .bind(entity_name)
     .fetch_optional(pool)
     .await
-    .map_err(|e| RamariaError::storage_with_source("查询图谱节点失败", e))?;
+    .storage_err("查询图谱节点失败")?;
     Ok(row.map(|r| (r.id, r.entity_name, r.entity_type)))
 }
 
@@ -65,7 +66,7 @@ pub async fn insert_edge(
     ).bind(source_id).bind(target_id).bind(relation_type)
       .bind(detail).bind(source_l1_id.map(|u| u.to_string())).bind(now)
       .fetch_one(pool).await
-    .map_err(|e| RamariaError::storage_with_source("插入图谱边失败", e))
+    .storage_err("插入图谱边失败")
 }
 
 pub async fn list_edges(
@@ -82,7 +83,7 @@ pub async fn list_edges(
     let rows = sqlx::query_as::<_, Row>(
         "SELECT id, source_node_id, target_node_id, relation_type FROM graph_edges WHERE source_node_id = ?"
     ).bind(source_id).fetch_all(pool).await
-        .map_err(|e| RamariaError::storage_with_source("查询图谱边失败", e))?;
+        .storage_err("查询图谱边失败")?;
     Ok(rows
         .into_iter()
         .map(|r| (r.id, r.source_node_id, r.target_node_id, r.relation_type))

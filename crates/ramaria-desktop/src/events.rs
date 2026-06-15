@@ -21,9 +21,6 @@ pub const EVENT_CHAT_DONE: &str = "chat-done";
 pub const EVENT_CHAT_ERROR: &str = "chat-error";
 /// 关闭窗口确认事件名（前端弹窗后用户选择操作）
 pub const EVENT_CLOSE_REQUESTED: &str = "close-requested";
-/// 应用状态变更事件名（预留，Phase 5 后续批次启用）
-#[allow(dead_code)]
-pub const EVENT_APP_STATE: &str = "app-state-changed";
 /// 导入进度事件名（v1.1）
 pub const EVENT_IMPORT_PROGRESS: &str = "import-progress";
 
@@ -76,19 +73,6 @@ pub struct ChatErrorPayload {
 }
 
 // =========================================================
-// 应用状态事件负载
-// =========================================================
-
-/// 应用状态变更事件负载（预留，Phase 5 后续批次启用）。
-#[allow(dead_code)]
-#[derive(Debug, Clone, Serialize)]
-pub struct AppStatePayload {
-    /// 状态字符串（来自 AppState::as_str()，snake_case）：
-    /// "needs_setup" | "downloading_model" | "indexing" | "ready" | "degraded" | "fatal_error"
-    pub state: String,
-}
-
-// =========================================================
 // 构造辅助函数
 // =========================================================
 
@@ -127,14 +111,6 @@ impl ChatErrorPayload {
             error_detail,
             retryable,
         }
-    }
-}
-
-#[allow(dead_code)]
-impl AppStatePayload {
-    /// 创建应用状态变更事件负载。
-    pub fn new(state: String) -> Self {
-        Self { state }
     }
 }
 
@@ -259,12 +235,5 @@ mod tests {
         assert!(json.contains("连接失败"));
         assert!(json.contains("请检查网络"));
         assert!(json.contains("true"));
-    }
-
-    #[test]
-    fn app_state_payload_serialization() {
-        let payload = AppStatePayload::new("Ready".to_string());
-        let json = serde_json::to_string(&payload).expect("序列化失败");
-        assert!(json.contains("Ready"));
     }
 }

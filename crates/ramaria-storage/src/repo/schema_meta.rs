@@ -6,6 +6,7 @@
 //! - index_version 由应用层管理，索引重建后递增
 //! - 版本值统一解析为 i32，非法值时返回 Storage 错误而非静默回退
 
+use crate::repo::StorageResultExt;
 use ramaria_core::error::{RamariaError, RamariaResult};
 use sqlx::SqlitePool;
 
@@ -14,7 +15,7 @@ pub async fn get_schema_version(pool: &SqlitePool) -> RamariaResult<i32> {
         sqlx::query_scalar("SELECT value FROM schema_meta WHERE key = 'schema_version'")
             .fetch_optional(pool)
             .await
-            .map_err(|e| RamariaError::storage_with_source("查询 schema 版本失败", e))?
+            .storage_err("查询 schema 版本失败")?
             .unwrap_or_else(|| "1".to_string());
     val.parse()
         .map_err(|_| RamariaError::storage("schema_version 值非法"))
@@ -25,7 +26,7 @@ pub async fn get_index_version(pool: &SqlitePool) -> RamariaResult<i32> {
         sqlx::query_scalar("SELECT value FROM schema_meta WHERE key = 'index_version'")
             .fetch_optional(pool)
             .await
-            .map_err(|e| RamariaError::storage_with_source("查询索引版本失败", e))?
+            .storage_err("查询索引版本失败")?
             .unwrap_or_else(|| "1".to_string());
     val.parse()
         .map_err(|_| RamariaError::storage("index_version 值非法"))
@@ -36,6 +37,6 @@ pub async fn set_index_version(pool: &SqlitePool, version: i32) -> RamariaResult
         .bind(version.to_string())
         .execute(pool)
         .await
-        .map_err(|e| RamariaError::storage_with_source("更新索引版本失败", e))?;
+        .storage_err("更新索引版本失败")?;
     Ok(())
 }

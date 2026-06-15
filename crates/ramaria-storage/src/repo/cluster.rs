@@ -4,7 +4,8 @@
 //! - 管理态度聚类快照，支撑跨版本簇匹配（语义标签→embedding 相似度）
 //! - get_current 按 (persona_uid, category) 查询最新版本快照
 
-use ramaria_core::error::{RamariaError, RamariaResult};
+use crate::repo::StorageResultExt;
+use ramaria_core::error::RamariaResult;
 use ramaria_core::types::ClusterSnapshot;
 use sqlx::SqlitePool;
 
@@ -43,7 +44,7 @@ pub async fn save(pool: &SqlitePool, s: &ClusterSnapshot) -> RamariaResult<i64> 
     .bind(&s.persona_uid).bind(&s.category).bind(&s.cluster_label)
     .bind(&s.samples).bind(s.count).bind(s.is_current as i64).bind(s.created_at)
     .fetch_one(pool).await
-    .map_err(|e| RamariaError::storage_with_source("保存聚类快照失败", e))
+    .storage_err("保存聚类快照失败")
 }
 
 pub async fn get_current(
@@ -60,6 +61,6 @@ pub async fn get_current(
     .bind(category)
     .fetch_all(pool)
     .await
-    .map_err(|e| RamariaError::storage_with_source("查询聚类快照失败", e))?;
+    .storage_err("查询聚类快照失败")?;
     Ok(rows.into_iter().map(|r| r.into_snapshot()).collect())
 }

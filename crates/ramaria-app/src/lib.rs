@@ -41,11 +41,3 @@ pub use session_lifecycle::SessionLifecycle;
 pub use setup::{SetupStatus, check_setup_status, determine_state, run_setup};
 pub use stream_event::StreamEvent;
 pub use update::{UpdateStatus, check_update};
-
-// 保留旧占位函数（向后兼容，后续可移除）
-pub use ramaria_core;
-
-/// 模块存活检查 (Phase 1 占位，可后续移除)
-pub fn hello_app() -> &'static str {
-    "ramaria-app is ready"
-}

@@ -6,7 +6,8 @@
 //! - 不在此层执行分词或检索——仅负责原始 token 数据的持久化
 //! - 上层 ramaria-memory 负责 jieba-rs 分词、BM25 评分和 RRF 融合
 
-use ramaria_core::error::{RamariaError, RamariaResult};
+use crate::repo::StorageResultExt;
+use ramaria_core::error::RamariaResult;
 use sqlx::SqlitePool;
 
 pub async fn save(
@@ -21,7 +22,7 @@ pub async fn save(
         .bind(tokens_json)
         .execute(pool)
         .await
-        .map_err(|e| RamariaError::storage_with_source("保存 BM25 索引失败", e))?;
+        .storage_err("保存 BM25 索引失败")?;
     Ok(())
 }
 
@@ -36,7 +37,7 @@ pub async fn list_by_doc(pool: &SqlitePool, doc_id: i64) -> RamariaResult<Vec<(S
             .bind(doc_id)
             .fetch_all(pool)
             .await
-            .map_err(|e| RamariaError::storage_with_source("查询 BM25 索引失败", e))?;
+            .storage_err("查询 BM25 索引失败")?;
     Ok(rows.into_iter().map(|r| (r.layer, r.tokens_json)).collect())
 }
 
@@ -45,6 +46,6 @@ pub async fn delete_by_doc(pool: &SqlitePool, doc_id: i64) -> RamariaResult<()> 
         .bind(doc_id)
         .execute(pool)
         .await
-        .map_err(|e| RamariaError::storage_with_source("删除 BM25 索引失败", e))?;
+        .storage_err("删除 BM25 索引失败")?;
     Ok(())
 }

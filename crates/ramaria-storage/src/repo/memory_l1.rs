@@ -9,7 +9,9 @@
 //! - situation_strength 为 Phase 1.1.2 新增列（默认 NULL，等效 3），
 //!   避免存量 NULL 值使加权逻辑跳过记录
 
-use ramaria_core::error::{RamariaError, RamariaResult};
+use crate::repo::StorageResultExt;
+use crate::repo::parse_uuid_required;
+use ramaria_core::error::RamariaResult;
 use ramaria_core::types::MemoryL1;
 use sqlx::SqlitePool;
 use uuid::Uuid;
@@ -34,11 +36,8 @@ struct L1Row {
 
 impl L1Row {
     fn into_l1(self) -> RamariaResult<MemoryL1> {
-        let id = ramaria_core::types::uuid_from_db(&self.id)
-            .inspect_err(|_| tracing::warn!(raw_id = %self.id, "memory_l1.id UUID 解析失败"))?;
-        let session_id = ramaria_core::types::uuid_from_db(&self.session_id).inspect_err(
-            |_| tracing::warn!(raw_id = %self.session_id, "memory_l1.session_id UUID 解析失败"),
-        )?;
+        let id = parse_uuid_required(&self.id, "memory_l1", "id")?;
+        let session_id = parse_uuid_required(&self.session_id, "memory_l1", "session_id")?;
         Ok(MemoryL1 {
             id,
             session_id,
@@ -81,7 +80,7 @@ pub async fn save(pool: &SqlitePool, l1: &MemoryL1) -> RamariaResult<()> {
     .bind(l1.situation_strength.map(|v| v as i64))
     .execute(pool)
     .await
-    .map_err(|e| RamariaError::storage_with_source("保存 L1 记忆失败", e))?;
+    .storage_err("保存 L1 记忆失败")?;
     Ok(())
 }
 
@@ -94,7 +93,7 @@ pub async fn list_by_session(pool: &SqlitePool, session_id: Uuid) -> RamariaResu
     .bind(session_id.to_string())
     .fetch_all(pool)
     .await
-    .map_err(|e| RamariaError::storage_with_source("查询 L1 列表失败", e))?;
+    .storage_err("查询 L1 列表失败")?;
     rows.into_iter()
         .map(|r| r.into_l1())
         .collect::<RamariaResult<Vec<_>>>()
@@ -109,7 +108,7 @@ pub async fn get(pool: &SqlitePool, id: Uuid) -> RamariaResult<Option<MemoryL1>>
     .bind(id.to_string())
     .fetch_optional(pool)
     .await
-    .map_err(|e| RamariaError::storage_with_source("查询 L1 失败", e))?;
+    .storage_err("查询 L1 失败")?;
     row.map(|r| r.into_l1()).transpose()
 }
 
@@ -122,10 +121,7 @@ pub async fn mark_absorbed(pool: &SqlitePool, l1_ids: &[Uuid]) -> RamariaResult<
     const BATCH_SIZE: usize = 100;
 
     // 事务包裹：确保批量标记的原子性——全部成功或全部回滚
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| RamariaError::storage_with_source("开启吸收标记事务失败", e))?;
+    let mut tx = pool.begin().await.storage_err("开启吸收标记事务失败")?;
 
     for chunk in l1_ids.chunks(BATCH_SIZE) {
         let placeholders: Vec<String> = (0..chunk.len()).map(|i| format!("?{}", i + 1)).collect();
@@ -139,14 +135,13 @@ pub async fn mark_absorbed(pool: &SqlitePool, l1_ids: &[Uuid]) -> RamariaResult<
             query = query.bind(id.to_string());
         }
 
-        query.execute(&mut *tx).await.map_err(|e| {
-            RamariaError::storage_with_source(format!("标记 {} 条 L1 已吸收失败", chunk.len()), e)
-        })?;
+        query
+            .execute(&mut *tx)
+            .await
+            .storage_err(format!("标记 {} 条 L1 已吸收失败", chunk.len()))?;
     }
 
-    tx.commit()
-        .await
-        .map_err(|e| RamariaError::storage_with_source("提交吸收标记事务失败", e))?;
+    tx.commit().await.storage_err("提交吸收标记事务失败")?;
 
     tracing::info!(
         total = l1_ids.len(),
@@ -166,7 +161,7 @@ pub async fn list_unabsorbed(pool: &SqlitePool, persona_uid: &str) -> RamariaRes
     .bind(persona_uid)
     .fetch_all(pool)
     .await
-    .map_err(|e| RamariaError::storage_with_source("查询未吸收 L1 失败", e))?;
+    .storage_err("查询未吸收 L1 失败")?;
     rows.into_iter()
         .map(|r| r.into_l1())
         .collect::<RamariaResult<Vec<_>>>()

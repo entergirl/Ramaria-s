@@ -7,6 +7,7 @@
 //! - provider 存储时使用 `LlmProvider::as_str()`，读取时解析回枚举
 //! - 非法 provider 值 → `RamariaError::Validation`（DeserializationError），不再静默回退
 
+use crate::repo::StorageResultExt;
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::types::{LlmProvider, PrivacyConsent};
 use sqlx::SqlitePool;
@@ -36,7 +37,7 @@ pub async fn save(pool: &SqlitePool, consent: &PrivacyConsent) -> RamariaResult<
         .bind(consent.provider.as_str()).bind(&consent.base_url)
         .bind(consent.timestamp).bind(consent.persistent as i64)
         .execute(pool).await
-        .map_err(|e| RamariaError::storage_with_source("保存隐私确认失败", e))?;
+        .storage_err("保存隐私确认失败")?;
     Ok(())
 }
 
@@ -55,7 +56,7 @@ pub async fn get_by_provider(
     let row = sqlx::query_as::<_, Row>(
         "SELECT provider, base_url, timestamp, persistent FROM privacy_consent WHERE provider = ? AND base_url = ? ORDER BY timestamp DESC LIMIT 1"
     ).bind(provider).bind(base_url).fetch_optional(pool).await
-        .map_err(|e| RamariaError::storage_with_source("查询隐私确认失败", e))?;
+        .storage_err("查询隐私确认失败")?;
     match row {
         Some(r) => {
             let parsed_provider = parse_provider(&r.provider)?;

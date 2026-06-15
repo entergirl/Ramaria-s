@@ -22,9 +22,6 @@ pub mod openai;
 // Embedding Provider 实现（可选 feature）
 pub mod embedding;
 
-// 保留 Phase 0 POC 代码供参考（Phase 3 完成后可删除）
-pub mod client;
-
 // 重新导出常用类型
 pub use provider::ProviderBase;
 pub use transport::OpenAiTransport;

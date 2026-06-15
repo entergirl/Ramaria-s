@@ -209,13 +209,6 @@ pub fn mask_key(key: &str) -> String {
     format!("{prefix}****{suffix}")
 }
 
-/// 遮蔽 Option<String> 中的值。
-#[allow(dead_code)]
-pub fn mask_optional_key(key: &Option<String>) -> String {
-    key.as_deref()
-        .map_or_else(|| "(未设置)".to_string(), mask_key)
-}
-
 // =========================================================
 // 用户输入
 // =========================================================
