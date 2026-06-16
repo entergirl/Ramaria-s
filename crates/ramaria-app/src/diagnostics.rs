@@ -449,7 +449,7 @@ mod tests {
             os: "windows".into(),
             arch: "x86_64".into(),
             family: "windows".into(),
-            app_version: "1.0.1".into(),
+            app_version: "1.1.0".into(),
             schema_version: "1".into(),
             collected_at: "2026-06-15T12:00:00Z".into(),
         };
@@ -458,7 +458,7 @@ mod tests {
 
         assert!(content.contains("os = windows"));
         assert!(content.contains("arch = x86_64"));
-        assert!(content.contains("app_version = 1.0.1"));
+        assert!(content.contains("app_version = 1.1.0"));
         assert!(content.contains("schema_version = 1"));
         assert!(content.contains("2026-06-15T12:00:00Z"));
     }

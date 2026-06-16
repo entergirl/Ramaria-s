@@ -7,6 +7,122 @@
 
 ---
 
+## [1.1.0] - 2026-06-16
+
+### 核心特性
+
+#### Session 生命周期与记忆管线全自动触发
+
+- 手动关闭：用户点击"保存对话"→ session 关闭 → L1 摘要 → 级联检查 L2/L3 触发。同一窗口继续对话，不清屏
+- 空闲自动关闭：后台线程每 60s 轮询，空闲 > 10min 自动关闭 session 并触发记忆管线
+- 只读约束：已关闭 session 禁止写入（DB 层拒绝 + 前端隐藏输入框），显示"此对话已关闭"提示
+- shutdown hook：应用退出时自动关闭活跃 session，取消后台任务
+
+#### 本地嵌入模型
+
+- 集成 ONNX Runtime（`ort` v2.0-rc.12），运行 `bge-small-zh-v1.5`（384 维），feature gate `embedding-onnx`
+- 模型下载管理：进度回调 + SHA-256 校验 + 断点续传
+- BM25-only 降级模式：未配置嵌入模型时自动切到 `Degraded` 状态，RAG 仅用 BM25+图谱通道
+- 对话页顶部进度条：下载/索引进度展示，5s 无事件自动隐藏
+- RAG 检索适配 8 种通道组合（BM25/向量/图谱任意组合）
+
+#### 情境强度加权 + Token Budgeting
+
+- `memory_l1` / `memory_events` 新增 `situation_strength` 字段（1-5 级，默认 3）
+- Phase A 统计推断加权：弱情境(1-2)×1.5、中性(3)×1.0、强情境(4-5)×0.5
+- Token 预算分配：字符数估算(CJK≈len/2, 拉丁≈len/4) → System Prompt(1000) → RAG → History(新→旧)
+- 句子边界优雅截断（`。！？\n`），不硬切
+
+#### QQ 聊天记录导入器
+
+- 新建 `ramaria-importer` crate（workspace 第 8 个 crate），compile-time feature gate
+- 双格式支持：JSON（`qq-chat-exporter` v5.x）+ TXT（经典 PCQQ 导出）
+- 多编码兼容：UTF-8 / UTF-8 BOM / UTF-16 LE / GBK
+- 快速导入：仅写 `messages` 表 + `import_fingerprint` 去重
+- 深度导入：历史 session → L0→L1→L2→L3 全管线
+- 双画像自动创建：导出者和聊天对象各自独立 persona，UID 优先使用 QQ 号
+- 角色前缀：`[烧酒] xxxx` / `[omkidaso] yyyy`，消除"用户 vs 助手"误导
+- CLI: `ramaria import qq --file <PATH> [--deep] [--persona-self-name ...]`
+- 桌面端：三步导入向导（文件选择→预览报告→确认导入）
+
+#### 多角色管理 GUI
+
+- Sidebar 新增 👥"人格"导航页，人格卡片网格展示
+- 详情页在线编辑基本信息（名称/头像 URL/描述）
+- 设为默认对话人格 / 重载性格按钮
+
+#### 自动更新检查 + 诊断导出
+
+- `check_update()`：GitHub Release API `/latest` + 语义版本号比较
+- 设置页"诊断与更新"：版本号显示 + 检查更新按钮
+- 诊断导出：日志(1000行) + config(脱敏) + schema_meta + OS 信息 → `.zip`
+- CLI: `ramaria diagnostics --output <PATH>`
+
+---
+
+### 安全修复
+
+- **CSP 收紧**：移除 `'unsafe-inline'`，行内脚本外部化到外部 JS 文件
+- **errorText XSS**：`innerHTML` → `textContent`，防止 LLM 错误消息注入
+- **路径穿越统一规范化**：CLI/Desktop 统一 `canonicalize()` + RootDir/Prefix 检查
+- **窗口关闭超时恢复**：前端 N 秒未响应 → 自动回退 `hide()`，托盘始终可恢复
+- **JobManager CancellationToken**：应用关闭时 `execute_with_retry` 优雅取消
+- **job 状态标记失败终止**：不再静默继续执行
+- **session list 真实查询 message_count**：SQL JOIN 替代硬编码
+- **API Key 统一遮蔽**：前端显示 + 诊断导出统一 `[REDACTED]`
+
+---
+
+### 工程改善
+
+#### 性能优化
+
+- Retriever `l1_docs`/`l2_docs` 添加 LRU 淘汰（1500/1500 cap），防止内存无限增长
+- storage 批量写入添加显式事务（`save_import_batch()`），减少 SQLite fsync 开销
+- 前端 `_pendingDelta` 添加上限保护（超 10KB 强制刷新）
+- BM25 `add()` 改为移动所有权 + `degrade` 使用 HashSet 去重 O(n)
+- 模型下载 HTTP 客户端添加超时（30s connect + 3600s total）
+
+#### 代码组织
+
+- `app.rs` 大文件拆分：提取 `app_chat.rs`（644行）、`app_retriever.rs`（156行）、`app_state.rs`（209行）
+- `app.rs` 从 1270→492 行（-61%）
+- CLI `unsafe` 块补全 4 处 SAFETY 注释
+
+#### 测试
+
+- 总计 546 个测试函数（v1.0: ~530），覆盖全部 8 个 crate
+- 新增集成测试 `tests/integration_tests.rs`（13 个跨 crate 测试）
+- `ramaria-importer` 17 个单元测试 + 8 个双画像测试
+
+#### CI
+
+- 新增 `cargo llvm-cov` / `cargo deny` / `cargo audit` 三个非阻塞检查（仅报告）
+
+#### 文档
+
+- 桌面使用指南全文重写（新增人格管理/导入功能/诊断与更新/故障排除扩充）
+- CLI 使用指南全文重写（新增 `ramaria import` / `ramaria diagnostics`）
+- 隐私说明全文重写（新增导入数据/诊断脱敏/修正 CSP）
+- 新建 `config/default.toml` 配置模板（9 节 130 行）
+- README 数据库表清单修正（移除 5 个 ghost 表，补全 23 张表完整清单）
+
+#### Schema 变更
+
+- 3 个增量 migration（`situation_strength` / `event_situation` / `persona_description`），均可空、向后兼容
+- 不创建新表，不修改既有列
+
+---
+
+### 已知限制
+
+- 仅支持 Windows 平台（桌面应用），Linux/macOS 可通过 CLI 使用
+- 应用图标为占位文件，正式图标待设计师提供
+- 不支持 LLM 对话"重新生成"功能
+- ONNX 模型需用户手动下载或配置
+
+---
+
 ## [1.0.1] - 2026-06-13
 
 ### 修复
@@ -154,6 +270,7 @@
 
 | 版本 | 日期 | 说明 |
 |------|------|------|
+| [v1.1.0](#110---2026-06-16) | 2026-06-16 | 首个增量版本：记忆管线接通 + 嵌入模型 + QQ 导入器 |
 | [v1.0.1](#101---2026-06-13) | 2026-06-13 | 紧急修复：全新安装无法启动 |
 | [v1.0.0](#100---2026-06-12) | 2026-06-12 | Rust 重写完成，首个正式发布版本 |
 | v0.7.0 | 2026-05-09 | Python 版最终功能版本（维护模式） |

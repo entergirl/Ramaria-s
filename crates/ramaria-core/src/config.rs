@@ -27,7 +27,7 @@ use crate::types::LlmProvider;
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 
 /// 当前 Ramaria 应用版本号（与 workspace Cargo.toml 保持同步）。
-pub const CURRENT_APP_VERSION: &str = "0.1.0";
+pub const CURRENT_APP_VERSION: &str = "1.1.0";
 
 // =========================================================
 // 应用配置根结构
