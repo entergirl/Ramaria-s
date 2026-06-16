@@ -84,7 +84,7 @@ pub async fn delete(pool: &SqlitePool, session_id: Uuid) -> RamariaResult<()> {
 /// 创建一条历史 session（导入专用）。
 ///
 /// 职责:
-/// - 与 `create()` 不同，此函数使用外部提供的时间戳，而非当前时间。
+/// - 与 `create` 不同，此函数使用外部提供的时间戳，而非当前时间。
 /// - 创建时即设置 `ended_at`，表示这是一个已完成的历史会话。
 /// - 供 ramaria-importer 在快速/深度导入模式中使用。
 ///

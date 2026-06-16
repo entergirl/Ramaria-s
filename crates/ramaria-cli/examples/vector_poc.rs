@@ -1,4 +1,4 @@
-//! Phase 0 POC: 验证本地向量存储 + 检索 + 持久化
+//! POC: 验证本地向量存储 + 检索 + 持久化
 //!
 //! 纯 Rust 实现，无外部向量库依赖。
 //! `cargo run --example vector_poc -p ramaria-cli`

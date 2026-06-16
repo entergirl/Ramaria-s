@@ -1,7 +1,7 @@
 //! rust/crates/ramaria-app/src/error_hint.rs - 错误到 UI/CLI 提示映射
 //!
 //! 设计特点:
-//! - 将 `RamariaError::category()` 映射为面向最终用户的友好提示
+//! - 将 `RamariaError::category` 映射为面向最终用户的友好提示
 //! - 每条提示包含: 简短摘要（title）+ 详细建议（detail）
 //! - 支持可重试标记（retryable），供 UI 决定是否显示"重试"按钮
 //! - 未识别类别保守提示"查看日志"，不泄露内部错误细节

@@ -5,8 +5,8 @@
 //! - `detect_qq_format`: 检测文件是否为 qq-chat-exporter v5.x JSON 格式
 //! - 快速导入（fast）：仅写入 messages 表（L0），按发送者分配 persona_uid
 //! - 深度导入（deep）：创建历史 session → 写入 L0 → 关闭 session → 触发全管线
-//! - Phase 5B: 双画像支持——分别为导出者和对方创建独立 persona
-//! - Phase 5B: L1 摘要 persona_uid 存 NULL，不绑定特定画像
+//! - 双画像支持——分别为导出者和对方创建独立 persona
+//! - L1 摘要 persona_uid 存 NULL，不绑定特定画像
 //! - 路径安全校验：文件存在性检查 + 扩展名白名单
 //! - 所有 Tauri Command 只做参数转换 + 委托业务逻辑，不直接操作数据库
 
@@ -22,8 +22,8 @@ use tauri::{AppHandle, Emitter, State};
 
 /// 导入操作的完整结果，序列化后返回给前端展示。
 ///
-/// Phase 5B: 新增 `other_persona_uid` 和 `other_persona_name` 字段。
-/// v1.1 修复: 新增 `l1_success` / `l1_failed`，前端据此展示 L1 生成状态警告。
+/// 新增 `other_persona_uid` 和 `other_persona_name` 字段。
+/// 新增 `l1_success` / `l1_failed`，前端据此展示 L1 生成状态警告。
 #[derive(Debug, Clone, Serialize)]
 pub struct ImportResult {
     /// 是否成功
@@ -40,9 +40,9 @@ pub struct ImportResult {
     pub persona_uid: String,
     /// persona 名称（导出者）
     pub persona_name: String,
-    /// Phase 5B: 对方 persona UID
+    /// 对方 persona UID
     pub other_persona_uid: String,
-    /// Phase 5B: 对方 persona 名称
+    /// 对方 persona 名称
     pub other_persona_name: String,
     /// 导出者名称（从文件中解析）
     pub self_name: String,
@@ -52,7 +52,7 @@ pub struct ImportResult {
     pub time_range: String,
     /// 跳过的消息数（撤回+空+未知类型）
     pub skipped_count: usize,
-    /// v1.1 修复: 写入的 session_id 列表（供前端导航查看导入消息）
+    /// 写入的 session_id 列表（供前端导航查看导入消息）
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub session_ids: Vec<String>,
 }
@@ -157,7 +157,7 @@ pub async fn analyze_qq_chat(
 
 /// 文件分析报告（不含导入相关的统计，仅描述文件内容）。
 ///
-/// Phase 5B: 新增 `self_uin`、`other_name`、`other_uid`、`other_uin`。
+/// 新增 `self_uin`、`other_name`、`other_uid`、`other_uin`。
 #[derive(Debug, Clone, Serialize)]
 pub struct AnalysisReport {
     /// 文件路径
@@ -166,17 +166,17 @@ pub struct AnalysisReport {
     pub self_id: String,
     /// 导出者名称
     pub self_name: String,
-    /// Phase 5B: 导出者 QQ 号
+    /// 导出者 QQ 号
     pub self_uin: Option<String>,
     /// 对话对象名称（chatInfo.name）
     pub chat_name: String,
     /// 对话类型
     pub chat_type: String,
-    /// Phase 5B: 对方名称
+    /// 对方名称
     pub other_name: String,
-    /// Phase 5B: 对方 QQ UID
+    /// 对方 QQ UID
     pub other_uid: String,
-    /// Phase 5B: 对方 QQ 号
+    /// 对方 QQ 号
     pub other_uin: Option<String>,
     /// 时间范围
     pub time_range: String,
@@ -237,7 +237,7 @@ pub async fn detect_qq_format(
 // import_qq_chat — 执行 QQ 聊天记录导入
 // =========================================================
 
-/// 执行 QQ 聊天记录导入（Phase 5B: 双画像支持）。
+/// 执行 QQ 聊天记录导入。
 ///
 /// Tauri Command 参数由前端逐个传递，参数数膨胀是合理的架构取舍。
 ///
@@ -346,7 +346,7 @@ pub async fn import_qq_chat(
         "文件解析完成"
     );
 
-    // Step 3: 双画像 Persona 准备（Phase 5B）
+    // Step 3: 双画像 Persona 准备
     // 查询已有 QQ persona 最大 seq（用于 fallback 级别 4）
     let all_personas = ramaria_storage::repo::personas::list_all(&state.pool)
         .await
@@ -433,7 +433,7 @@ pub async fn import_qq_chat(
         "对方 Persona 已准备"
     );
 
-    // Step 4: 执行导入（Phase 5B: 双画像参数）
+    // Step 4: 执行导入
     tracing::debug!(
         sessions_count = sessions.len(),
         self_persona = %self_persona_uid_resolved,
@@ -459,14 +459,14 @@ pub async fn import_qq_chat(
     tracing::info!(sessions_written, messages_written, "L0 写入完成");
 
     // Step 4.5: 为每个导入的 session 生成 L1 摘要
-    // Phase 5B (T-V11-5B-010): L1 摘要 persona_uid 存 NULL
+    // (T-V11-5B-010): L1 摘要 persona_uid 存 NULL
     // —— 导入的 session 来自两人对话，摘要不应被特定画像视图独占
     let app = state.app.clone();
     let sids = session_ids.clone();
     let is_deep = import_mode == ramaria_importer::ImportMode::Deep;
     let total_sids = sids.len();
     tokio::spawn(async move {
-        // ── Phase 1: 生成全部 L1 摘要（无级联，persona_uid=NULL）──
+        // ── 生成全部 L1 摘要（无级联，persona_uid=NULL）──
         app_handle
             .emit(
                 EVENT_IMPORT_PROGRESS,

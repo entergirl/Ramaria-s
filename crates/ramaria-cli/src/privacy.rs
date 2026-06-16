@@ -16,7 +16,7 @@ use ramaria_core::error::RamariaResult;
 /// - `auto_yes`: 是否使用 `--yes` 跳过交互确认。
 ///
 /// 返回:
-/// - `Ok(())`: 确认完成或非线上 provider。
+/// - `Ok()`: 确认完成或非线上 provider。
 /// - `Err`: 用户拒绝确认或确认操作失败。
 ///
 /// 说明:

@@ -29,6 +29,8 @@ desktop.ini
 .vscode/
 .idea/
 .codebuddy/
+.reasonix/
+.codegraph/
 
 # 开发数据库（本地数据，不上传）
 *.db-journal

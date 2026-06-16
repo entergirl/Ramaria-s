@@ -1,8 +1,9 @@
 //! rust/crates/ramaria-llm/src/transport.rs - OpenAI-compatible HTTP 传输层
 //!
 //! 设计特点:
-//! - 真正的 SSE 流式处理：使用 `reqwest::Response::bytes_stream()` + `futures::channel::mpsc`
-//!   逐块读取、逐行解析，不一次性读取响应体
+//! - 真正的 SSE 流式处理：使用 `reqwest::Response::bytes_stream` + `futures::channel::mpsc`
+//!
+//! 逐块读取、逐行解析，不一次性读取响应体
 //! - SSE 解析器支持缓冲区拼接跨 chunk 的不完整行
 //! - 错误分类：HTTP 4xx → Validation/Llm 错误，5xx → Llm 错误，网络错误 → Llm 错误
 //! - 非流式请求（`stream: false`）直接解析完整 JSON 响应
@@ -24,7 +25,7 @@ use std::pin::Pin;
 ///
 /// 职责:
 /// - 封装 base_url + API key，构造 `/chat/completions` 请求
-/// - 提供 `chat()` 非流式和 `chat_stream()` 流式两种调用模式
+/// - 提供 `chat` 非流式和 `chat_stream` 流式两种调用模式
 /// - 管理 reqwest HTTP 客户端（连接池、超时）
 ///
 /// 安全约束:
@@ -95,10 +96,10 @@ impl OpenAiTransport {
         &self.http
     }
 
-    /// 发送带认证的 GET 请求（v1.1 新增）。
+    /// 发送带认证的 GET 请求。
     ///
-    /// 用于 validate() 中测试 `/models` 端点可达性。
-    /// 与 `send_request()` 不同：使用 GET 而非 POST，无 JSON body。
+    /// 用于 validate 中测试 `/models` 端点可达性。
+    /// 与 `send_request` 不同：使用 GET 而非 POST，无 JSON body。
     ///
     /// 参数:
     /// - `url`: 完整请求 URL（如 `https://api.deepseek.com/v1/models`）。
@@ -211,8 +212,8 @@ impl OpenAiTransport {
     /// - 流中解析错误 → 流内的 `RamariaResult::Err`（不中断流）。
     ///
     /// 实现:
-    /// - 使用 `futures::channel::mpsc::unbounded()` 桥接 tokio 后台任务与返回流。
-    /// - 后台任务逐块从 `bytes_stream()` 读取、拼接不完整行、逐行解析 SSE。
+    /// - 使用 `futures::channel::mpsc::unbounded` 桥接 tokio 后台任务与返回流。
+    /// - 后台任务逐块从 `bytes_stream` 读取、拼接不完整行、逐行解析 SSE。
     /// - 当接收端丢弃 stream 时，后台任务自动退出（`tx.unbounded_send` 返回错误）。
     pub async fn chat_stream(
         &self,

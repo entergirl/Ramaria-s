@@ -1,7 +1,6 @@
 //! rust/crates/ramaria-importer/tests/qq_parser_tests.rs - QQ JSON 解析器集成测试
-//!
 //! 设计特点:
-//! - 仅测试 qq-chat-exporter v5.x JSON 格式（v1.1 移除 TXT 支持）
+//! - 仅测试 qq-chat-exporter v5.x JSON 格式
 //! - 完整覆盖 11 种消息类型：type_1/3/6/7/8/9/10/11/19 + system + recalled
 //! - 测试 session 切割逻辑
 //! - 测试格式检测功能
@@ -136,7 +135,7 @@ fn parse_json_basic() {
     assert_eq!(report.self_name, "我自己");
     assert_eq!(report.chat_name, "好友A");
 
-    // 第一条是自己发的（Phase 5B: 双前缀模式下自我消息也有 [name] 前缀）
+    // 第一条是自己发的
     assert_eq!(sessions[0].messages[0].role, "user");
     assert_eq!(sessions[0].messages[0].content, "[我自己] 你好！");
 
@@ -231,7 +230,7 @@ fn parse_json_degraded_types() {
 }
 
 // =========================================================
-// P0 降级类型测试 — v1.1 新增 (type_8 文件/type_10 红包/type_19 通话)
+// P0 降级类型测试 — (type_8 文件/type_10 红包/type_19 通话)
 // =========================================================
 
 #[test]
@@ -539,7 +538,7 @@ fn import_report_summary_contains_key_info() {
     assert!(summary.contains("成功"));
 }
 
-/// 验证 v1.1 新增字段出现在 summary 中。
+/// 验证 新增字段出现在 summary 中。
 #[test]
 fn import_report_summary_contains_v11_fields() {
     let content = r#"{
@@ -559,7 +558,7 @@ fn import_report_summary_contains_v11_fields() {
     let (_sessions, report) = result.unwrap();
     let summary = report.summary();
 
-    // 应有 v1.1 新增字段
+    // 应有 新增字段
     assert!(summary.contains("文件"));
     assert!(summary.contains("红包/转账"));
     assert!(summary.contains("qce未解析"));
@@ -573,7 +572,7 @@ fn import_report_summary_contains_v11_fields() {
 }
 
 // =========================================================
-// Phase 5B: uin 提取测试（T-V11-5B-001）
+// uin 提取测试（T-V11-5B-001）
 // =========================================================
 
 #[test]
@@ -660,7 +659,7 @@ fn parse_json_sender_uin_missing_is_none() {
 }
 
 // =========================================================
-// Phase 5B: 双前缀角色映射测试（T-V11-5B-004）
+// 双前缀角色映射测试（T-V11-5B-004）
 // =========================================================
 
 #[test]
@@ -718,7 +717,7 @@ fn parse_json_dual_prefix_export_with_empty_self_name_uses_wo() {
 }
 
 // =========================================================
-// Phase 5B: ImportReport other_* 字段测试（T-V11-5B-003）
+// ImportReport other_* 字段测试（T-V11-5B-003）
 // =========================================================
 
 #[test]
@@ -757,7 +756,7 @@ fn parse_json_report_populates_other_fields() {
 }
 
 // =========================================================
-// Phase 5B: 指纹——双前缀不影响跨批次一致性
+// 指纹——双前缀不影响跨批次一致性
 // =========================================================
 
 #[test]

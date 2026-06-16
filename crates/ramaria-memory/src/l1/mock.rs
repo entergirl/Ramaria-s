@@ -4,7 +4,7 @@
 //! - 仅 #[cfg(test)] 编译，零运行时开销
 //! - MockLlmProvider: 可预设 chat 返回值，用于模拟 LLM 响应
 //! - MockStorage: 内存 HashMap 存储 messages / l1 / keywords
-//! - 未实现的方法返回 `unimplemented!()`，确保测试仅覆盖声明路径
+//! - 未实现的方法返回 `unimplemented!`，确保测试仅覆盖声明路径
 //! - 所有存储操作为同步（直接插入 HashMap），不需要真实数据库
 
 #![allow(dead_code)]
@@ -30,8 +30,8 @@ use uuid::Uuid;
 /// 测试用 mock LLM Provider。
 ///
 /// 用法:
-/// - 通过 `set_response()` 预设下次 `chat()` 返回的文本。
-/// - `chat_stream()` 返回 unimplemented（摘要管线不使用流式）。
+/// - 通过 `set_response` 预设下次 `chat` 返回的文本。
+/// - `chat_stream` 返回 unimplemented（摘要管线不使用流式）。
 pub struct MockLlmProvider {
     name: &'static str,
     response: Mutex<Option<String>>,
@@ -45,7 +45,7 @@ impl MockLlmProvider {
         }
     }
 
-    /// 预设下次 chat() 的返回值。
+    /// 预设下次 chat 的返回值。
     pub fn set_response(&self, text: impl Into<String>) {
         *self.response.lock().unwrap() = Some(text.into());
     }
@@ -95,7 +95,7 @@ impl LlmProviderTrait for MockLlmProvider {
 /// 仅实现 L1 摘要管线需要的方法:
 /// - `list_messages`, `list_keywords`, `save_memory_l1`, `upsert_keyword`
 ///
-/// 其余方法返回 `unimplemented!()`，确保测试边界清晰。
+/// 其余方法返回 `unimplemented!`，确保测试边界清晰。
 pub struct MockStorage {
     messages: Mutex<HashMap<Uuid, Vec<Message>>>,
     l1_entries: Mutex<Vec<MemoryL1>>,

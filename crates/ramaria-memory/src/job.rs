@@ -29,7 +29,7 @@ pub enum JobType {
     L1Summary,
     /// L1→L2 事件提取
     EventExtract,
-    /// L2→L3 性格推断（Phase A+B）
+    /// L2→L3 性格推断（+B）
     PersonalityInference,
     /// L3 画像全量校准
     Calibration,
@@ -134,7 +134,7 @@ pub enum JobResult {
 ///
 /// 用法:
 /// ```ignore
-/// let manager = JobManager::new(storage, JobManagerConfig::default());
+/// let manager = JobManager::new(storage, JobManagerConfig::default);
 /// let job_id = manager.create(JobType::IndexRebuild, None).await?;
 /// manager.mark_running(job_id).await?;
 /// // ... 执行实际工作 ...
@@ -267,16 +267,16 @@ impl<'a> JobManager<'a> {
     /// 1. 创建任务
     /// 2. 标记 running（失败 → 标记 fatal 并终止）
     /// 3. 检查取消令牌
-    /// 4. 执行闭包 f()
+    /// 4. 执行闭包 f
     /// 5. 若成功 → 标记 completed
     /// 6. 若失败 → 按 (Retryable/Fatal) 分类：
-    ///    - Retryable: 标记 retrying（失败 → fatal 终止）→ 检查取消令牌 → 指数退避等待 → 检查取消令牌 → 标记 running（失败 → fatal 终止）→ 重试
-    ///    - Fatal: 立即标记 failed
+    /// - Retryable: 标记 retrying（失败 → fatal 终止）→ 检查取消令牌 → 指数退避等待 → 检查取消令牌 → 标记 running（失败 → fatal 终止）→ 重试
+    /// - Fatal: 立即标记 failed
     ///
     /// 参数:
     /// - `job_type`: 任务类型。
     /// - `payload`: 可选的任务参数。
-    /// - `cancel_token`: 可选取消令牌，`is_cancelled()` 时优雅退出。
+    /// - `cancel_token`: 可选取消令牌，`is_cancelled` 时优雅退出。
     /// - `f`: 异步闭包，返回 `JobResult`。
     ///
     /// 返回:
@@ -479,7 +479,7 @@ mod tests {
         let _ = JobResult::Fatal("disk full".into());
     }
 
-    /// 验证 CancellationToken::cancel() 后 is_cancelled() 返回 true。
+    /// 验证 CancellationToken::cancel 后 is_cancelled 返回 true。
     #[test]
     fn test_cancellation_token_basic() {
         let token = CancellationToken::new();

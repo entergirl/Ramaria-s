@@ -39,7 +39,7 @@ pub fn fatal(err: &ramaria_core::error::RamariaError, exit_code: i32) -> ! {
 pub fn fatal_anyhow(err: &anyhow::Error, exit_code: i32) -> ! {
     let mut stderr = io::stderr().lock();
     let _ = writeln!(stderr, "\x1b[31m✗ 错误:\x1b[0m {err}");
-    // anyhow 支持 chain()
+    // anyhow 支持 chain
     for cause in err.chain().skip(1) {
         let _ = writeln!(stderr, "      原因: {cause}");
     }
@@ -110,12 +110,12 @@ pub fn finish_delta() {
 ///
 /// ```
 /// # use ramaria_cli::ui::PersonaFormatter;
-/// let mut fmt = PersonaFormatter::new();
+/// let mut fmt = PersonaFormatter::new;
 /// assert_eq!(fmt.feed("那挺好的||摸鱼"), "那挺好的\n摸鱼");
 /// assert_eq!(fmt.feed("就摸鱼"), "就摸鱼");
 /// assert_eq!(fmt.feed("||聊天也"), "\n聊天也");
 /// assert_eq!(fmt.feed("是正事"), "是正事");
-/// assert_eq!(fmt.flush(), None);
+/// assert_eq!(fmt.flush, None);
 /// ```
 pub struct PersonaFormatter {
     /// 上一个 chunk 末尾的未决 `|` 字符。
@@ -262,7 +262,7 @@ pub fn read_secret(prompt: &str) -> io::Result<String> {
     //
     // SAFETY: GetConsoleMode 仅读取控制台模式标志，不修改任何状态。
     // handle 是从 GetStdHandle 获取的有效句柄。
-    // CONSOLE_MODE::default() 在 windows crate 中为零初始化，内存布局与 Windows API 预期一致。
+    // CONSOLE_MODE::default 在 windows crate 中为零初始化，内存布局与 Windows API 预期一致。
     let original_mode: CONSOLE_MODE = unsafe {
         let mut mode = CONSOLE_MODE::default();
         GetConsoleMode(handle, &mut mode)
@@ -310,7 +310,7 @@ pub fn read_secret(prompt: &str) -> io::Result<String> {
 #[cfg(not(windows))]
 pub fn read_secret(prompt: &str) -> io::Result<String> {
     // Unix 平台：标准输入读取。
-    // 大多数 Unix 终端驱动在 isatty() 模式下默认不回显密码行，
+    // 大多数 Unix 终端驱动在 isatty 模式下默认不回显密码行，
     // 但若需 100% 保证可引入 `rpassword` crate 替换此实现。
     read_line(prompt)
 }

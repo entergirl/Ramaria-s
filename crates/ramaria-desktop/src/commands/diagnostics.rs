@@ -29,7 +29,7 @@ use crate::DesktopState;
 pub struct UpdateStatusView {
     /// 当前版本号
     pub current_version: String,
-    /// 远程最新版本标签（如 "v1.1.0"），null 表示无法获取
+    /// 远程最新版本标签（如 ""），null 表示无法获取
     pub latest_version: Option<String>,
     /// 是否有新版本可用
     pub update_available: bool,
@@ -89,7 +89,7 @@ impl From<DiagnosticsReport> for DiagnosticsExportView {
 
 /// 检查是否有新版本可用。
 ///
-/// 调用 ramaria_app::check_update()，将结果转换为前端友好的视图结构。
+/// 调用 ramaria_app::check_update，将结果转换为前端友好的视图结构。
 ///
 /// 返回:
 /// - `UpdateStatusView`: 含当前版本、最新版本、是否可更新、Release URL 和错误信息。
@@ -124,7 +124,7 @@ pub fn get_version() -> String {
 ///
 /// 流程:
 /// 1. 弹出原生保存对话框，默认文件名为 `ramaria-diagnostics-{日期}.zip`。
-/// 2. 用户确认后，调用 `ramaria_app::export_diagnostics()` 收集并打包。
+/// 2. 用户确认后，调用 `ramaria_app::export_diagnostics` 收集并打包。
 /// 3. 返回导出结果视图（文件路径 + 大小）。
 ///
 /// 参数:

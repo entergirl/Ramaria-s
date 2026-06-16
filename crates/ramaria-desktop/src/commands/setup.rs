@@ -115,7 +115,7 @@ pub async fn run_setup(
 
     // ---- ★ 初始化默认人格（user-0001 + 扫描 personas/ 目录） ----
     // 桌面端此前缺失此步骤，导致对话页/记忆页的人格选择器为空。
-    // 对齐 CLI 的 create_initial_personas() 行为。
+    // 对齐 CLI 的 create_initial_personas 行为。
     init_default_personas(&state)
         .await
         .map_err(|e| format!("初始化人格失败: {}", e))?;
@@ -219,13 +219,13 @@ pub async fn refresh_setup_state(state: State<'_, DesktopState>) -> Result<Strin
 }
 
 // =========================================================
-// test_llm_connection — 测试 LLM 连接（v1.1 新增）
+// test_llm_connection — 测试 LLM 连接
 // =========================================================
 
 /// 测试 LLM 后端连接是否可达。
 ///
 /// 说明:
-/// - 此命令独立于应用状态机，仅测试 LLM provider 的 `validate()` 方法。
+/// - 此命令独立于应用状态机，仅测试 LLM provider 的 `validate` 方法。
 /// - 与 `refresh_setup_state` 不同：不检查嵌入模型、不检查索引状态。
 /// - 前端首次配置向导 Step 1 的「测试连接」按钮使用此命令。
 ///
@@ -249,7 +249,7 @@ pub async fn test_llm_connection(state: State<'_, DesktopState>) -> Result<Strin
 }
 
 // =========================================================
-// Embedding 模型命令（v1.1 新增）
+// Embedding 模型命令
 // =========================================================
 
 /// 嵌入模型校验结果（前端展示用）。
@@ -293,7 +293,7 @@ pub enum DegradedReason {
 /// - `EmbeddingValidationResult`: valid=true 且 dimension 有值表示校验通过。
 ///
 /// 说明:
-/// - 创建 NativeEmbeddingProvider 并调用 `validate()` 方法。
+/// - 创建 NativeEmbeddingProvider 并调用 `validate` 方法。
 /// - 若目录不存在或模型文件缺失，返回 valid=false + 原因说明。
 #[tauri::command]
 #[tracing::instrument]
@@ -362,7 +362,7 @@ pub async fn validate_embedding_model(path: String) -> Result<EmbeddingValidatio
 /// - `"ok"`: 保存成功。
 ///
 /// 说明:
-/// - path 非空时创建 NativeEmbeddingProvider 并通过 `app.update_embedding()` 热加载。
+/// - path 非空时创建 NativeEmbeddingProvider 并通过 `app.update_embedding` 热加载。
 /// - path 为空时卸载嵌入模型（传入 None）。
 /// - 路径持久化到 BackendConfig（与 base_url 一致），下次启动自动加载。
 #[tauri::command]

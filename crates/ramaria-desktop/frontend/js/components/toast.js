@@ -16,12 +16,12 @@
  * - 屏幕阅读器友好：role="status" + aria-live="polite"
  *
  * 用法:
- *   RamariaToast.success('操作成功');
- *   RamariaToast.error('连接失败', '请检查网络后重试');
- *   RamariaToast.warning('索引版本过期', '建议重建索引');
- *   RamariaToast.info('正在处理中...');
- *   var id = RamariaToast.show('success', '标题', '消息', { duration: 5000 });
- *   RamariaToast.close(id);
+ * RamariaToast.success('操作成功');
+ * RamariaToast.error('连接失败', '请检查网络后重试');
+ * RamariaToast.warning('索引版本过期', '建议重建索引');
+ * RamariaToast.info('正在处理中...');
+ * var id = RamariaToast.show('success', '标题', '消息', { duration: 5000 });
+ * RamariaToast.close(id);
  *
  * 依赖: 无（零外部依赖；需 components.css 提供 .toast-* 样式类）
  */
@@ -29,46 +29,46 @@
 var RamariaToast = (function () {
     'use strict';
 
-    // =========================================================
-    // 常量
-    // =========================================================
+ // =========================================================
+ // 常量
+ // =========================================================
 
-    /** 默认自动关闭时间（毫秒） */
+ /** 默认自动关闭时间（毫秒） */
     var DEFAULT_DURATION = 4000;
 
-    /** 最大同时显示数 */
+ /** 最大同时显示数 */
     var MAX_VISIBLE = 5;
 
-    /** 移除动画时长（毫秒），需与 CSS animation 对齐 */
+ /** 移除动画时长（毫秒），需与 CSS animation 对齐 */
     var REMOVE_ANIMATION_MS = 200;
 
-    // =========================================================
-    // 内部状态
-    // =========================================================
+ // =========================================================
+ // 内部状态
+ // =========================================================
 
-    /** toast 自增 id */
+ /** toast 自增 id */
     var _nextId = 1;
 
-    /** 当前显示的 toast 列表 [{ id, el, timer, config }] */
+ /** 当前显示的 toast 列表 [{ id, el, timer, config }] */
     var _activeToasts = [];
 
-    /** 待显示的队列 [{ type, title, message, config }] */
+ /** 待显示的队列 [{ type, title, message, config }] */
     var _queue = [];
 
-    /** Toast 容器 DOM 元素（懒创建） */
+ /** Toast 容器 DOM 元素（懒创建） */
     var _container = null;
 
-    // =========================================================
-    // 类型配置
-    // =========================================================
+ // =========================================================
+ // 类型配置
+ // =========================================================
 
-    /**
-     * 四种类型的图标和 CSS 类映射。
-     * - `success`: 绿色对勾
-     * - `warning`: 黄色警告三角
-     * - `error`: 红色叉号
-     * - `info`: 蓝色信息圆圈
-     */
+ /**
+ * 四种类型的图标和 CSS 类映射。
+ * - `success`: 绿色对勾
+ * - `warning`: 黄色警告三角
+ * - `error`: 红色叉号
+ * - `info`: 蓝色信息圆圈
+ */
     var TYPE_CONFIG = {
         success: {
             icon: '\u2714',   /* ✔ */
@@ -92,18 +92,18 @@ var RamariaToast = (function () {
         }
     };
 
-    // =========================================================
-    // DOM 操作
-    // =========================================================
+ // =========================================================
+ // DOM 操作
+ // =========================================================
 
-    /**
-     * 获取或创建 Toast 容器。
-     *
-     * 说明:
-     * - 首次调用时创建 <div id="toast-container" class="toast-container"> 并挂载到 body
-     * - 设置 role="status" + aria-live="polite" 供屏幕阅读器使用
-     * - 后续调用直接返回已有容器
-     */
+ /**
+ * 获取或创建 Toast 容器。
+ *
+ * 说明:
+ * - 首次调用时创建 <div id="toast-container" class="toast-container"> 并挂载到 body
+ * - 设置 role="status" + aria-live="polite" 供屏幕阅读器使用
+ * - 后续调用直接返回已有容器
+ */
     function _getContainer() {
         if (_container) {
             return _container;
@@ -116,7 +116,7 @@ var RamariaToast = (function () {
         _container.setAttribute('aria-live', 'polite');
         _container.setAttribute('aria-atomic', 'false');
 
-        // 事件委托：处理关闭按钮点击
+ // 事件委托：处理关闭按钮点击
         _container.addEventListener('click', function (e) {
             var closeBtn = e.target.closest('.toast-close');
             if (!closeBtn) return;
@@ -134,15 +134,15 @@ var RamariaToast = (function () {
         return _container;
     }
 
-    /**
-     * 从 DOM 元素上读取 toast id。
-     *
-     * 参数:
-     * - `el`: toast 的 DOM 元素
-     *
-     * 返回:
-     * - 数字 id，或 null（解析失败）
-     */
+ /**
+ * 从 DOM 元素上读取 toast id。
+ *
+ * 参数:
+ * - `el`: toast 的 DOM 元素
+ *
+ * 返回:
+ * - 数字 id，或 null（解析失败）
+ */
     function _getToastId(el) {
         var raw = el.getAttribute('data-toast-id');
         if (raw === null) return null;
@@ -150,19 +150,19 @@ var RamariaToast = (function () {
         return isNaN(id) ? null : id;
     }
 
-    /**
-     * 创建并挂载一条 toast DOM。
-     *
-     * 参数:
-     * - `id`: toast 唯一编号
-     * - `type`: 'success' | 'warning' | 'error' | 'info'
-     * - `title`: 标题文本
-     * - `message`: 详细消息（可选，null 时仅显示标题）
-     * - `closable`: 是否显示关闭按钮
-     *
-     * 返回:
-     * - 创建的 DOM 元素（已插入容器）
-     */
+ /**
+ * 创建并挂载一条 toast DOM。
+ *
+ * 参数:
+ * - `id`: toast 唯一编号
+ * - `type`: 'success' | 'warning' | 'error' | 'info'
+ * - `title`: 标题文本
+ * - `message`: 详细消息（可选，null 时仅显示标题）
+ * - `closable`: 是否显示关闭按钮
+ *
+ * 返回:
+ * - 创建的 DOM 元素（已插入容器）
+ */
     function _createToastEl(id, type, title, message, closable) {
         var cfg = TYPE_CONFIG[type] || TYPE_CONFIG.info;
         var container = _getContainer();
@@ -172,10 +172,10 @@ var RamariaToast = (function () {
         el.setAttribute('data-toast-id', String(id));
         el.setAttribute('role', 'status');
 
-        // 图标
+ // 图标
         var iconSpan = '<span class="toast-icon" aria-hidden="true">' + _escHtml(cfg.icon) + '</span>';
 
-        // 正文
+ // 正文
         var bodyHtml = '<div class="toast-body">';
         bodyHtml += '<div class="toast-title">' + _escHtml(title || cfg.defaultTitle) + '</div>';
         if (message) {
@@ -183,7 +183,7 @@ var RamariaToast = (function () {
         }
         bodyHtml += '</div>';
 
-        // 关闭按钮
+ // 关闭按钮
         var closeHtml = '';
         if (closable) {
             closeHtml = '<button class="toast-close" aria-label="关闭通知" type="button">\u00D7</button>';
@@ -195,13 +195,13 @@ var RamariaToast = (function () {
         return el;
     }
 
-    /**
-     * 基本的 HTML 转义。
-     *
-     * 说明:
-     * - 仅转义 & < > " ' 五个字符，防止 XSS
-     * - 不引入完整 HTML sanitizer（Markdown 渲染走 markdown.js）
-     */
+ /**
+ * 基本的 HTML 转义。
+ *
+ * 说明:
+ * - 仅转义 & < > " ' 五个字符，防止 XSS
+ * - 不引入完整 HTML sanitizer（Markdown 渲染走 markdown.js）
+ */
     function _escHtml(str) {
         if (typeof str !== 'string') return '';
         return str
@@ -212,22 +212,22 @@ var RamariaToast = (function () {
             .replace(/'/g, '&#39;');
     }
 
-    // =========================================================
-    // Toast 生命周期
-    // =========================================================
+ // =========================================================
+ // Toast 生命周期
+ // =========================================================
 
-    /**
-     * 从 DOM 中移除一条 toast（带动画）。
-     *
-     * 说明:
-     * - 给 toast 添加 .removing 类触发 CSS 滑出动画
-     * - 动画结束后从 DOM 移除
-     * - 清除关联的自动关闭定时器
-     * - 从 _activeToasts 移除该项
-     * - 检查队列是否有等待项
-     */
+ /**
+ * 从 DOM 中移除一条 toast（带动画）。
+ *
+ * 说明:
+ * - 给 toast 添加 .removing 类触发 CSS 滑出动画
+ * - 动画结束后从 DOM 移除
+ * - 清除关联的自动关闭定时器
+ * - 从 _activeToasts 移除该项
+ * - 检查队列是否有等待项
+ */
     function _remove(id) {
-        // 查找对应的 active toast
+ // 查找对应的 active toast
         var index = -1;
         for (var i = 0; i < _activeToasts.length; i++) {
             if (_activeToasts[i].id === id) {
@@ -240,13 +240,13 @@ var RamariaToast = (function () {
         var item = _activeToasts[index];
         _activeToasts.splice(index, 1);
 
-        // 清除定时器
+ // 清除定时器
         if (item.timer) {
             clearTimeout(item.timer);
             item.timer = null;
         }
 
-        // 触发移除动画
+ // 触发移除动画
         var el = item.el;
         if (el && el.parentNode) {
             el.classList.add('removing');
@@ -257,13 +257,13 @@ var RamariaToast = (function () {
             }, REMOVE_ANIMATION_MS);
         }
 
-        // 处理队列
+ // 处理队列
         _drainQueue();
     }
 
-    /**
-     * 消费队列中的下一个 toast（如果有）。
-     */
+ /**
+ * 消费队列中的下一个 toast（如果有）。
+ */
     function _drainQueue() {
         if (_queue.length === 0) return;
         if (_activeToasts.length >= MAX_VISIBLE) return;
@@ -272,15 +272,15 @@ var RamariaToast = (function () {
         _show(next.type, next.title, next.message, next.config);
     }
 
-    /**
-     * 创建并显示一条 toast（内部，不检查队列）。
-     *
-     * 参数:
-     * - `type`: 类型字符串
-     * - `title`: 标题
-     * - `message`: 可选消息体
-     * - `config`: { duration, closable }
-     */
+ /**
+ * 创建并显示一条 toast（内部，不检查队列）。
+ *
+ * 参数:
+ * - `type`: 类型字符串
+ * - `title`: 标题
+ * - `message`: 可选消息体
+ * - `config`: { duration, closable }
+ */
     function _show(type, title, message, config) {
         config = config || {};
 
@@ -299,14 +299,14 @@ var RamariaToast = (function () {
             config: config
         };
 
-        // 设置自动关闭定时器
+ // 设置自动关闭定时器
         if (duration > 0 && duration !== Infinity) {
             item.timer = setTimeout(function () {
                 _remove(id);
             }, duration);
         }
 
-        // hover 时暂停计时
+ // hover 时暂停计时
         el.addEventListener('mouseenter', function () {
             if (item.timer) {
                 clearTimeout(item.timer);
@@ -326,35 +326,35 @@ var RamariaToast = (function () {
         return id;
     }
 
-    // =========================================================
-    // 公开 API
-    // =========================================================
+ // =========================================================
+ // 公开 API
+ // =========================================================
 
-    /**
-     * 显示一条 Toast 通知。
-     *
-     * 参数:
-     * - `type`: 'success' | 'warning' | 'error' | 'info'
-     * - `title`: 标题文本（必填）
-     * - `message`: 详细消息文本（可选）
-     * - `config`: 可选配置
-     *     - `duration`: 自动关闭毫秒数（默认 4000，Infinity 不自动关闭）
-     *     - `closable`: 是否显示关闭按钮（默认 true）
-     *
-     * 返回:
-     * - toast id（可用于提前关闭）
-     *
-     * 说明:
-     * - 如果当前显示 toast 已达上限（5条），加入队列等待
-     * - 队列 FIFO，前面的关闭后自动显示下一个
-     */
+ /**
+ * 显示一条 Toast 通知。
+ *
+ * 参数:
+ * - `type`: 'success' | 'warning' | 'error' | 'info'
+ * - `title`: 标题文本（必填）
+ * - `message`: 详细消息文本（可选）
+ * - `config`: 可选配置
+ * - `duration`: 自动关闭毫秒数（默认 4000，Infinity 不自动关闭）
+ * - `closable`: 是否显示关闭按钮（默认 true）
+ *
+ * 返回:
+ * - toast id（可用于提前关闭）
+ *
+ * 说明:
+ * - 如果当前显示 toast 已达上限（5条），加入队列等待
+ * - 队列 FIFO，前面的关闭后自动显示下一个
+ */
     function show(type, title, message, config) {
         if (!TYPE_CONFIG[type]) {
             console.warn('[RamariaToast] 未知类型 "' + type + '"，回退为 info');
             type = 'info';
         }
 
-        // 如果已满，加入队列
+ // 如果已满，加入队列
         if (_activeToasts.length >= MAX_VISIBLE) {
             _queue.push({
                 type: type,
@@ -368,25 +368,25 @@ var RamariaToast = (function () {
         return _show(type, title, message, config);
     }
 
-    /**
-     * 提前关闭指定 toast。
-     *
-     * 参数:
-     * - `id`: show() 返回的 toast id。若传递 -1（排队中），方法静默忽略。
-     */
+ /**
+ * 提前关闭指定 toast。
+ *
+ * 参数:
+ * - `id`: show 返回的 toast id。若传递 -1（排队中），方法静默忽略。
+ */
     function close(id) {
         if (id == null || id === -1) return;
         _remove(id);
     }
 
-    /**
-     * 关闭所有 toast（显示中的和排队的全部清除）。
-     */
+ /**
+ * 关闭所有 toast（显示中的和排队的全部清除）。
+ */
     function closeAll() {
-        // 清空队列
+ // 清空队列
         _queue.length = 0;
 
-        // 关闭所有活跃 toast（从后往前遍历，避免 splice 干扰）
+ // 关闭所有活跃 toast（从后往前遍历，避免 splice 干扰）
         var ids = [];
         for (var i = 0; i < _activeToasts.length; i++) {
             ids.push(_activeToasts[i].id);
@@ -396,41 +396,41 @@ var RamariaToast = (function () {
         }
     }
 
-    /**
-     * 成功通知快捷方法。
-     *
-     * 用法:
-     *   RamariaToast.success('操作完成');
-     *   RamariaToast.success('导出成功', '文件已保存到桌面');
-     */
+ /**
+ * 成功通知快捷方法。
+ *
+ * 用法:
+ * RamariaToast.success('操作完成');
+ * RamariaToast.success('导出成功', '文件已保存到桌面');
+ */
     function success(title, message, config) {
         return show('success', title, message, config);
     }
 
-    /**
-     * 错误通知快捷方法。
-     */
+ /**
+ * 错误通知快捷方法。
+ */
     function error(title, message, config) {
         return show('error', title, message, config);
     }
 
-    /**
-     * 警告通知快捷方法。
-     */
+ /**
+ * 警告通知快捷方法。
+ */
     function warning(title, message, config) {
         return show('warning', title, message, config);
     }
 
-    /**
-     * 信息通知快捷方法。
-     */
+ /**
+ * 信息通知快捷方法。
+ */
     function info(title, message, config) {
         return show('info', title, message, config);
     }
 
-    // =========================================================
-    // 导出
-    // =========================================================
+ // =========================================================
+ // 导出
+ // =========================================================
 
     return {
         show: show,
@@ -441,16 +441,16 @@ var RamariaToast = (function () {
         warning: warning,
         info: info,
 
-        /**
-         * 获取当前活跃 toast 数量（调试用）。
-         */
+ /**
+ * 获取当前活跃 toast 数量（调试用）。
+ */
         count: function () {
             return _activeToasts.length;
         },
 
-        /**
-         * 获取队列中等待的 toast 数量（调试用）。
-         */
+ /**
+ * 获取队列中等待的 toast 数量（调试用）。
+ */
         queueCount: function () {
             return _queue.length;
         }

@@ -1,7 +1,7 @@
 //! rust/crates/ramaria-app/src/app_state.rs - 应用状态管理
 //!
 //! 设计特点:
-//! - 从 `app.rs` 提取的状态管理方法（Phase 8 文件拆分）
+//! - 从 `app.rs` 提取的状态管理方法
 //! - 所有方法通过 `impl App` 关联，访问 `pub(crate)` 字段
 //! - 涵盖状态读写、LLM/Embedding provider 热更新、嵌入模型加载
 //! - 降级策略：嵌入模型缺失或验证失败 → `AppState::Degraded`
@@ -116,7 +116,7 @@ impl App {
     /// 检查嵌入模型是否可用。
     ///
     /// 返回:
-    /// - `true`: 嵌入模型已配置且 `is_available()` 返回 true。
+    /// - `true`: 嵌入模型已配置且 `is_available` 返回 true。
     pub fn is_embedding_available(&self) -> bool {
         self.embedding
             .lock()

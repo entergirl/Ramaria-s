@@ -4,14 +4,14 @@
 //! - 基于 `ort` (ONNX Runtime v2) 实现高效推理，支持 BGE/BERT 等嵌入模型
 //! - 使用 HuggingFace `tokenizers` 进行 BERT 分词（加载 tokenizer.json）
 //! - Mean Pooling + L2 归一化，对齐 standard BERT embedding pipeline
-//! - 支持 `embed()` 单条和 `embed_batch()` 批量推理
-//! - 惰性加载：`Session` 和 `Tokenizer` 仅在首次 `embed()` 调用时初始化
+//! - 支持 `embed` 单条和 `embed_batch` 批量推理
+//! - 惰性加载：`Session` 和 `Tokenizer` 仅在首次 `embed` 调用时初始化
 //! - 完整的错误日志：模型加载失败、tokenizer 缺失、推理异常均有明确错误信息
 //!
 //! BGE 模型格式要求:
 //! - 模型目录需包含: `model.onnx`（ONNX 模型）和 `tokenizer.json`（分词器配置）
 //! - 模型输入: input_ids (i64[batch, seq_len]), attention_mask (i64[batch, seq_len]),
-//!   token_type_ids (i64[batch, seq_len])
+//! token_type_ids (i64[batch, seq_len])
 //! - 模型输出: last_hidden_state (f32[batch, seq_len, hidden_size])
 
 use std::path::{Path, PathBuf};
@@ -434,14 +434,14 @@ impl OnnxSession {
 ///
 /// 职责:
 /// - 实现 `EmbeddingProvider` trait，提供 ONNX 推理能力
-/// - 惰性加载模型（首次 `embed()` 调用时才加载 ONNX 模型到内存）
+/// - 惰性加载模型（首次 `embed` 调用时才加载 ONNX 模型到内存）
 /// - 线程安全：内部状态通过 `Mutex` 保护；`model_info` 构造时确定后不可变
 ///
 /// 用法:
 /// ```ignore
 /// let provider = OnnxEmbeddingProvider::new("/path/to/bge-model")?;
-/// if provider.is_available() {
-///     let vec = provider.embed("你好世界").await?;
+/// if provider.is_available {
+/// let vec = provider.embed("你好世界").await?;
 /// }
 /// ```
 pub struct OnnxEmbeddingProvider {
@@ -462,12 +462,12 @@ impl OnnxEmbeddingProvider {
     /// - `model_dir`: 模型目录路径，应包含 model.onnx 和 tokenizer.json。
     ///
     /// 返回:
-    /// - 成功时返回 provider 实例（模型尚未加载，首次调用 embed() 时加载）。
+    /// - 成功时返回 provider 实例（模型尚未加载，首次调用 embed 时加载）。
     ///
     /// 说明:
     /// - 构造时尝试从 config.json 读取 `hidden_size` 确定维度；若无则默认 384。
     /// - `model_info` 构造后不可变（无数据竞争）。
-    /// - 模型是否存在通过 `is_available()` 检查（检查文件是否存在）。
+    /// - 模型是否存在通过 `is_available` 检查（检查文件是否存在）。
     pub fn new(model_dir: impl Into<PathBuf>) -> Self {
         let dir = model_dir.into();
         let model_exists = dir.join(MODEL_FILE).exists() && dir.join(TOKENIZER_FILE).exists();
@@ -540,7 +540,7 @@ impl OnnxEmbeddingProvider {
                 "ONNX 模型实际维度与 config.json 不一致，以实际维度为准"
             );
             // 注意：这里不修改 self.model_info（保持构造时不可变语义），
-            // 后续 validate() 会检测维度不匹配并报错。
+            // 后续 validate 会检测维度不匹配并报错。
         }
 
         *guard = Some(session);

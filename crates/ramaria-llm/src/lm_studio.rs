@@ -4,7 +4,7 @@
 //! - 本地 LLM 后端，不需要 API key 认证
 //! - 实现 `ramaria_core::traits::LlmProvider` trait
 //! - 通过 `ProviderBase` 组合实现，共享 HTTP 传输和重试逻辑
-//! - `validate()` 检查 base_url 可连接，不要求模型 ID 非空（用户可后续选择）
+//! - `validate` 检查 base_url 可连接，不要求模型 ID 非空（用户可后续选择）
 //! - LM Studio 默认不支持 JSON mode，context_window 取决于加载的模型
 //!
 //! 安全约束:
@@ -33,9 +33,9 @@ use crate::provider::{ProviderBase, RetryConfig};
 ///
 /// 用法:
 /// ```ignore
-/// let config = BackendConfig::lm_studio_default();
+/// let config = BackendConfig::lm_studio_default;
 /// let provider = LmStudioProvider::new(config)?;
-/// provider.validate().await?;
+/// provider.validate.await?;
 /// let reply = provider.chat(&request).await?;
 /// ```
 pub struct LmStudioProvider {

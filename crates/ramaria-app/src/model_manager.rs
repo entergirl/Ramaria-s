@@ -144,7 +144,7 @@ fn build_http_client() -> RamariaResult<reqwest::Client> {
 /// ```ignore
 /// let manager = ModelManager::new(models_dir)?;
 /// if !manager.is_model_ready("bge-small-zh-v1.5") {
-///     manager.download_model("bge-small-zh-v1.5", Some(progress_callback)).await?;
+/// manager.download_model("bge-small-zh-v1.5", Some(progress_callback)).await?;
 /// }
 /// let model_path = manager.model_dir("bge-small-zh-v1.5");
 /// ```
@@ -303,13 +303,13 @@ impl ModelManager {
     /// - `progress_callback`: 可选的进度回调（每下载一个 chunk 触发一次）。
     ///
     /// 返回:
-    /// - `Ok(())`: 下载完成。
+    /// - `Ok()`: 下载完成。
     ///
     /// 说明:
     /// - 支持断点续传：如果 .part 临时文件存在，从已下载位置继续。
     /// - 每个文件下载完成后做 SHA-256 校验（若提供了校验和）。
     /// - 全部文件下载完成后原子地将临时文件重命名为正式文件。
-    /// - 可通过 `cancel_download()` 取消进行中的下载。
+    /// - 可通过 `cancel_download` 取消进行中的下载。
     /// - 下载 URL 格式: `https://huggingface.co/{org}/{repo}/resolve/main/{file}`
     ///
     /// 错误场景:
@@ -551,11 +551,11 @@ impl ModelManager {
 
     /// 下载单个文件（支持断点续传）。
     ///
-    /// 使用 `self.http_client`（在 `ModelManager::new()` 中创建的可复用实例），
+    /// 使用 `self.http_client`（在 `ModelManager::new` 中创建的可复用实例），
     /// 而非每次调用创建新 Client。好处:
     /// - 连接池复用，减少 TCP/TLS 握手开销（尤其是多文件下载时）
     /// - 超时设置在构造时统一配置（connect_timeout: 30s, timeout: 3600s）
-    /// - 请求级超时由 tokio::time::timeout 包裹（见 `download_model()` 的调用处）
+    /// - 请求级超时由 tokio::time::timeout 包裹（见 `download_model` 的调用处）
     async fn download_single_file(
         &self,
         url: &str,

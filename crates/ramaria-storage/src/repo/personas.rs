@@ -32,7 +32,7 @@ struct PersonaRow {
     ref_id: Option<String>,
     avatar: Option<String>,
     config: Option<String>,
-    description: Option<String>, // Phase 6 新增
+    description: Option<String>,
     active: i64,
     created_at: i64,
     updated_at: i64,

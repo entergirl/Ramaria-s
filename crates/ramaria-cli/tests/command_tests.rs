@@ -463,7 +463,7 @@ async fn memory_with_persona_filter() {
 async fn export_json_empty() {
     let (app, _storage) = build_test_app();
 
-    // → v1.1 修复: output: Some("-") 输出到 stdout，避免依赖 exports/ 目录存在。
+    // → output: Some("-") 输出到 stdout，避免依赖 exports/ 目录存在。
     let result = ramaria_cli::commands::export::run(
         &app,
         ramaria_cli::commands::export::ExportArgs {

@@ -1,0 +1,169 @@
+# Ramaria v1.1 默认配置模板
+#
+# 使用说明:
+# - 将此文件复制到 %APPDATA%\Ramaria\config.toml 后编辑
+# - 所有配置项均有合理默认值，无需全部修改
+# - API Key 不在此文件中配置，使用 OS keychain 管理
+# - 环境变量优先级高于此文件
+# - 修改后重启 Ramaria 生效
+
+# 版本控制（请勿手动修改）
+version = "1.1.0"
+schema_version = 1
+
+# =========================================================
+# 路径配置
+# =========================================================
+# 所有路径均可留空，留空时使用平台默认值:
+#   Windows: %APPDATA%\Ramaria\
+# 可通过环境变量 RAMARIA_DATA_DIR 覆盖数据根目录
+
+[paths]
+# SQLite 数据库路径。默认 %APPDATA%\Ramaria\data\assistant.db
+data_dir = ""
+# 配置文件目录。默认 %APPDATA%\Ramaria\
+config_dir = ""
+# 日志目录。默认 %APPDATA%\Ramaria\logs\
+log_dir = ""
+# 向量索引目录。默认 %APPDATA%\Ramaria\vectors\
+vector_index_dir = ""
+
+# =========================================================
+# LLM 后端配置
+# =========================================================
+# provider 可选: lm-studio / deepseek / openai
+# 线上 provider 的 API Key 通过 OS keychain 管理，不在此处填写
+
+[backend]
+# 当前 LLM 后端
+provider = "lm-studio"
+# 模型标识（LM Studio 留空自动检测，DeepSeek 填 "deepseek-chat"）
+model_id = ""
+# OpenAI-compatible API 基础地址
+# LM Studio 默认: http://localhost:1234/v1
+# DeepSeek 默认: https://api.deepseek.com/v1
+# OpenAI 默认: https://api.openai.com/v1
+base_url = "http://localhost:1234/v1"
+# Embedding 模型标识（可选，未配置时降级为 BM25-only）
+# embedding_model_id = "bge-small-zh-v1.5"
+# 生成温度 (0.0-2.0)，越高越随机
+temperature = 0.3
+# 最大输出 token 数
+max_tokens = 1024
+# 是否允许线上后端注入 L1/L2/L3 记忆上下文
+# true = 对话时附带相关记忆（首次使用线上 API 需隐私确认）
+# false = 仅发送当前对话消息
+online_memory_injection = true
+
+# =========================================================
+# 记忆检索参数
+# =========================================================
+# 控制混合 RAG 三通道（向量/BM25/图谱）的检索行为
+
+[retrieval]
+# L0 滑动窗口大小（每次检索包含最近 N 条消息）
+l0_window_size = 3
+# L0 检索返回条数
+l0_retrieve_top_k = 3
+# L1 摘要检索返回条数
+l1_retrieve_top_k = 4
+# L2 事件检索返回条数
+l2_retrieve_top_k = 2
+# 语义相似度过滤阈值（余弦距离，低于此值视为不相关被过滤）
+similarity_threshold = 0.6
+# RRF 融合平滑系数（值越大各通道权重越平均）
+rrf_k = 60
+# BM25 关键词通道权重
+bm25_weight = 1.0
+# 知识图谱通道权重
+graph_weight = 0.8
+# L2 结果排序权重（<1.0 表示 L2 优先展示）
+retrieval_weight_l2 = 0.8
+# L1 结果排序权重
+retrieval_weight_l1 = 1.0
+
+# =========================================================
+# Ebbinghaus 遗忘曲线衰减参数
+# =========================================================
+# 记忆的检索权重随时间衰减，但受显著性（salience）调制
+# 衰减公式: R = e^(-t / S)
+#   R = 保留率 0..1
+#   t = 距生成的天数
+#   S = 稳定性系数，越大衰减越慢
+# S_adjusted = S × (1 + salience × multiplier)
+
+[decay]
+# L0 稳定性系数（细节信息衰减最快）
+s_l0 = 10
+# L1 稳定性系数
+s_l1 = 30
+# L2 稳定性系数（聚合摘要衰减最慢）
+s_l2 = 60
+# 是否启用近期访问加成
+enable_access_boost = true
+# 近期访问加成有效天数
+recent_boost_days = 7
+# 近期访问保留率下限（加成后不低于此值）
+recent_boost_floor = 0.5
+# salience 对稳定性的加成系数
+salience_multiplier = 0.5
+
+# =========================================================
+# Session 生命周期管理
+# =========================================================
+# 控制会话的自动关闭和记忆管线触发节奏
+
+[session]
+# 空闲超过此时长（分钟）自动关闭 session 并触发 L1 摘要
+l1_idle_minutes = 10
+# 空闲检测轮询间隔（秒）
+idle_check_interval_seconds = 60
+# L2/L3 定时检查间隔（秒）
+l2_check_interval_seconds = 86400
+# 对话历史最大保留消息数（供 System Prompt 上下文使用）
+max_history_messages = 40
+
+# =========================================================
+# 记忆层触发阈值
+# =========================================================
+# 控制 L1→L2 事件提取和 L2→L3 性格推断的自动触发条件
+# 双路径设计: 路径 A = 数量触发（即时），路径 B = 时间触发（定时）
+
+[thresholds]
+# 未吸收 L1 触发 L2 事件提取的条数阈值（路径 A）
+l2_trigger_count = 5
+# 最早未吸收 L1 触发 L2 的天数阈值（路径 B）
+l2_trigger_days = 7
+# 未吸收事件触发 L3 性格推断的条数阈值（路径 A）
+l3_trigger_count = 10
+# 最早未吸收事件触发 L3 推断的天数阈值（路径 B）
+l3_trigger_days = 30
+
+# =========================================================
+# 索引管理
+# =========================================================
+
+[index]
+# BM25 增量合并阈值（缓冲区积累超过此条数触发合并）
+bm25_incremental_threshold = 10
+# BM25 定时重建检查间隔（秒）
+bm25_rebuild_interval = 300
+
+# =========================================================
+# 日志
+# =========================================================
+# 日志文件位于 log_dir/ramaria.log
+# 默认不记录完整用户消息、记忆内容、Prompt 内容
+# 用户消息截断前 80 字符并附 SHA-256 哈希值
+
+[logging]
+# 是否记录完整 Prompt（默认关闭，开启时会有隐私警告）
+# ⚠ 仅用于调试，包含你的对话内容和系统提示，调试完成后请关闭
+log_full_prompt = false
+
+# =========================================================
+# 杂项（预留扩展位）
+# =========================================================
+
+[misc]
+# 当前无配置项，为未来扩展预留

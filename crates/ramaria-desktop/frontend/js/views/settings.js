@@ -26,27 +26,27 @@
 var RamariaSettingsView = (function () {
     'use strict';
 
-    // =========================================================
-    // 内部状态
-    // =========================================================
+ // =========================================================
+ // 内部状态
+ // =========================================================
 
     var _unregisterFns = [];
     var _unsubs = [];
 
-    /** 当前后端配置缓存 */
+ /** 当前后端配置缓存 */
     var _backendConfig = null;
-    /** 当前隐私状态 */
+ /** 当前隐私状态 */
     var _privacyStatus = null;
 
-    // =========================================================
-    // DOM 快捷查询
-    // =========================================================
+ // =========================================================
+ // DOM 快捷查询
+ // =========================================================
 
     function $(id) { return document.getElementById(id); }
 
-    // =========================================================
-    // 渲染
-    // =========================================================
+ // =========================================================
+ // 渲染
+ // =========================================================
 
     function render() {
         var viewEl = $('view-settings');
@@ -61,28 +61,28 @@ var RamariaSettingsView = (function () {
         scroll.className = 'settings-scroll';
         viewEl.appendChild(scroll);
 
-        // ── 后端配置 ──
+ // ── 后端配置 ──
         _renderBackendSection(scroll);
 
-        // ── 嵌入模型配置（v1.1 新增）──
+ // ── 嵌入模型配置──
         _renderEmbeddingSection(scroll);
 
-        // ── 隐私设置 ──
+ // ── 隐私设置 ──
         _renderPrivacySection(scroll);
 
-        // ── 数据管理 ──
+ // ── 数据管理 ──
         _renderDataSection(scroll);
 
-        // ── 诊断与更新（v1.1 Phase 7 新增）──
+ // ── 诊断与更新──
         _renderDiagnosticsSection(scroll);
 
-        // ── 关于 ──
+ // ── 关于 ──
         _renderAboutSection(scroll);
     }
 
-    // =========================================================
-    // 后端配置区块
-    // =========================================================
+ // =========================================================
+ // 后端配置区块
+ // =========================================================
 
     function _renderBackendSection(parent) {
         var section = document.createElement('div');
@@ -128,12 +128,12 @@ var RamariaSettingsView = (function () {
         section.appendChild(card);
         parent.appendChild(section);
 
-        // 事件绑定
+ // 事件绑定
         _bindBackendEvents();
     }
 
     function _bindBackendEvents() {
-        // Provider 变化时调整 API Key 可见性和默认 URL
+ // Provider 变化时调整 API Key 可见性和默认 URL
         var providerSelect = $('settings-provider');
         var apiKeyGroup = $('settings-api-key-group');
         var baseUrlInput = $('settings-base-url');
@@ -143,14 +143,14 @@ var RamariaSettingsView = (function () {
                 var isLocal = this.value === 'lm_studio';
                 apiKeyGroup.classList.toggle('hidden', isLocal);
 
-                // 自动填充默认 URL
+ // 自动填充默认 URL
                 if (!baseUrlInput.value || baseUrlInput.value === _getDefaultUrl(_backendConfig ? _backendConfig.provider : '')) {
                     baseUrlInput.value = _getDefaultUrl(this.value);
                 }
             });
         }
 
-        // 保存按钮
+ // 保存按钮
         var saveBtn = $('settings-save-backend');
         if (saveBtn) {
             saveBtn.addEventListener('click', _handleSaveBackend);
@@ -167,22 +167,22 @@ var RamariaSettingsView = (function () {
     function _fillBackendForm(config) {
         if (!config) return;
 
-        // Tauri 2 将 Rust snake_case 字段序列化为 camelCase
+ // Tauri 2 将 Rust snake_case 字段序列化为 camelCase
         var providerEl = $('settings-provider');
         var baseUrlEl = $('settings-base-url');
         var modelIdEl = $('settings-model-id');
         var apiKeyHint = $('settings-api-key-hint');
         var apiKeyGroup = $('settings-api-key-group');
 
-        // provider 值匹配下拉选项（as_str() 返回 snake_case：lm_studio / deepseek / openai）
+ // provider 值匹配下拉选项（as_str 返回 snake_case：lm_studio / deepseek / openai）
         if (providerEl) providerEl.value = config.provider || 'lm_studio';
         if (baseUrlEl) baseUrlEl.value = config.baseUrl || _getDefaultUrl(config.provider);
         if (modelIdEl) modelIdEl.value = config.modelId || '';
 
-        // 遮罩 key 显示在 hint 中，输入框留给用户填新 key
+ // 遮罩 key 显示在 hint 中，输入框留给用户填新 key
         if (apiKeyHint) apiKeyHint.textContent = config.apiKeyMasked || '未配置';
 
-        // 本地 provider 隐藏 API Key 输入组
+ // 本地 provider 隐藏 API Key 输入组
         var isLocal = (config.provider === 'lm_studio');
         if (apiKeyGroup) apiKeyGroup.classList.toggle('hidden', isLocal);
     }
@@ -198,7 +198,7 @@ var RamariaSettingsView = (function () {
             return;
         }
 
-        // 线上 API Key 检查
+ // 线上 API Key 检查
         if (provider !== 'lm_studio' && (!apiKey || apiKey.trim().length < 5)) {
             RamariaToast.show('warning', '线上后端需要提供 API Key');
             return;
@@ -214,11 +214,11 @@ var RamariaSettingsView = (function () {
             await RamariaApi.config.updateBackend(provider, modelId || '', baseUrl, apiKey || '');
             RamariaToast.show('success', '后端配置已保存');
 
-            // 刷新本地缓存
+ // 刷新本地缓存
             _backendConfig = await RamariaApi.config.getBackend();
             RamariaStore.set('backendConfig', _backendConfig);
 
-            // 清空 API Key 输入
+ // 清空 API Key 输入
             var keyInput = $('settings-api-key');
             if (keyInput) keyInput.value = '';
 
@@ -233,9 +233,9 @@ var RamariaSettingsView = (function () {
         }
     }
 
-    // =========================================================
-    // 嵌入模型配置区块（v1.1 新增）
-    // =========================================================
+ // =========================================================
+ // 嵌入模型配置区块
+ // =========================================================
 
     function _renderEmbeddingSection(parent) {
         var section = document.createElement('div');
@@ -274,16 +274,16 @@ var RamariaSettingsView = (function () {
         section.appendChild(card);
         parent.appendChild(section);
 
-        // 绑定事件
+ // 绑定事件
         var validateBtn = $('settings-validate-embedding');
         var saveBtn = $('settings-save-embedding');
         if (validateBtn) validateBtn.addEventListener('click', _handleValidateEmbedding);
         if (saveBtn) saveBtn.addEventListener('click', _handleSaveEmbedding);
     }
 
-    /**
-     * 填充嵌入模型配置表单。
-     */
+ /**
+ * 填充嵌入模型配置表单。
+ */
     function _fillEmbeddingForm(config) {
         var pathEl = $('settings-embedding-path');
         var statusGroup = $('settings-embedding-status-group');
@@ -309,9 +309,9 @@ var RamariaSettingsView = (function () {
         }
     }
 
-    /**
-     * 校验嵌入模型路径。
-     */
+ /**
+ * 校验嵌入模型路径。
+ */
     async function _handleValidateEmbedding() {
         var pathEl = $('settings-embedding-path');
         var path = pathEl ? pathEl.value.trim() : '';
@@ -320,7 +320,7 @@ var RamariaSettingsView = (function () {
             return;
         }
 
-        // 统一正斜杠
+ // 统一正斜杠
         if (path.indexOf('\\') !== -1) {
             path = path.replace(/\\/g, '/');
             if (pathEl) pathEl.value = path;
@@ -367,9 +367,9 @@ var RamariaSettingsView = (function () {
         }
     }
 
-    /**
-     * 保存嵌入模型配置。
-     */
+ /**
+ * 保存嵌入模型配置。
+ */
     async function _handleSaveEmbedding() {
         var pathEl = $('settings-embedding-path');
         var path = pathEl ? pathEl.value.trim() : '';
@@ -389,7 +389,7 @@ var RamariaSettingsView = (function () {
                 RamariaToast.show('info', '嵌入模型已移除，应用将进入降级模式');
             }
 
-            // 刷新应用状态
+ // 刷新应用状态
             try {
                 var newState = await RamariaApi.setup.refresh();
                 if (newState) RamariaStore.set('appState', newState);
@@ -404,9 +404,9 @@ var RamariaSettingsView = (function () {
         }
     }
 
-    // =========================================================
-    // 隐私设置区块
-    // =========================================================
+ // =========================================================
+ // 隐私设置区块
+ // =========================================================
 
     function _renderPrivacySection(parent) {
         var section = document.createElement('div');
@@ -440,7 +440,7 @@ var RamariaSettingsView = (function () {
         section.appendChild(card);
         parent.appendChild(section);
 
-        // 绑定
+ // 绑定
         var confirmBtn = $('settings-confirm-privacy');
         if (confirmBtn) {
             confirmBtn.addEventListener('click', async function () {
@@ -487,9 +487,9 @@ var RamariaSettingsView = (function () {
         }
     }
 
-    // =========================================================
-    // 数据管理区块
-    // =========================================================
+ // =========================================================
+ // 数据管理区块
+ // =========================================================
 
     function _renderDataSection(parent) {
         var section = document.createElement('div');
@@ -517,19 +517,19 @@ var RamariaSettingsView = (function () {
         section.appendChild(card);
         parent.appendChild(section);
 
-        // 导出 JSON
+ // 导出 JSON
         var exportJsonBtn = $('settings-export-json');
         if (exportJsonBtn) {
             exportJsonBtn.addEventListener('click', _handleExportJson);
         }
 
-        // 导出 Markdown
+ // 导出 Markdown
         var exportMdBtn = $('settings-export-md');
         if (exportMdBtn) {
             exportMdBtn.addEventListener('click', _handleExportMarkdown);
         }
 
-        // 重建索引
+ // 重建索引
         var rebuildBtn = $('settings-rebuild-index');
         if (rebuildBtn) {
             rebuildBtn.addEventListener('click', _handleRebuildIndex);
@@ -567,7 +567,7 @@ var RamariaSettingsView = (function () {
     }
 
     async function _pickSavePath(defaultName, filterName) {
-        // 使用 Tauri dialog plugin 的原生保存对话框
+ // 使用 Tauri dialog plugin 的原生保存对话框
         if (window.__TAURI__ && window.__TAURI__.dialog && window.__TAURI__.dialog.save) {
             try {
                 var result = await window.__TAURI__.dialog.save({
@@ -577,14 +577,14 @@ var RamariaSettingsView = (function () {
                         extensions: [defaultName.split('.').pop() || 'txt'],
                     }],
                 });
-                // 用户取消时 result 为 null
+ // 用户取消时 result 为 null
                 return result || null;
             } catch (err) {
                 console.warn('[SettingsView] 原生文件对话框失败:', err);
             }
         }
 
-        // 尝试通过 Tauri invoke 调用
+ // 尝试通过 Tauri invoke 调用
         if (TauriBridge && TauriBridge.invoke) {
             try {
                 var invokeResult = await TauriBridge.invoke('save_file_dialog', {
@@ -597,7 +597,7 @@ var RamariaSettingsView = (function () {
             }
         }
 
-        // 最终降级：浏览器 prompt
+ // 最终降级：浏览器 prompt
         var path = prompt('请输入导出文件路径（例：C:\\Users\\YourName\\Desktop\\' + defaultName + ')', defaultName);
         return path;
     }
@@ -618,7 +618,7 @@ var RamariaSettingsView = (function () {
                     var count = await RamariaApi.index.rebuild();
                     RamariaToast.show('success', '索引重建完成', '处理了 ' + (count || '?') + ' 篇文档');
 
-                    // 刷新应用状态
+ // 刷新应用状态
                     try {
                         var newState = await RamariaApi.setup.refresh();
                         if (newState) RamariaStore.set('appState', newState);
@@ -631,18 +631,18 @@ var RamariaSettingsView = (function () {
         });
     }
 
-    // =========================================================
-    // 版本加载（页面进入时静默调用）
-    // =========================================================
+ // =========================================================
+ // 版本加载（页面进入时静默调用）
+ // =========================================================
 
-    /**
-     * 静默加载当前版本信息。
-     *
-     * 行为:
-     * - 调用 getVersion API（纯本地，无网络请求，不消耗 GitHub API 配额）。
-     * - 更新页面上的版本显示。
-     * - 不显示 toast，不改变按钮状态。
-     */
+ /**
+ * 静默加载当前版本信息。
+ *
+ * 行为:
+ * - 调用 getVersion API（纯本地，无网络请求，不消耗 GitHub API 配额）。
+ * - 更新页面上的版本显示。
+ * - 不显示 toast，不改变按钮状态。
+ */
     async function _loadVersion() {
         try {
             var version = await RamariaApi.diagnostics.getVersion();
@@ -650,17 +650,17 @@ var RamariaSettingsView = (function () {
             var versionEl = $('settings-current-version');
             if (versionEl) versionEl.textContent = 'v' + (version || '?');
 
-            // 同步更新"关于"区块的版本号
+ // 同步更新"关于"区块的版本号
             var aboutVersionEl = $('settings-about-version');
             if (aboutVersionEl) aboutVersionEl.textContent = 'v' + (version || '?');
         } catch (_) {
-            // 静默忽略加载失败
+ // 静默忽略加载失败
         }
     }
 
-    // =========================================================
-    // 诊断与更新区块（v1.1 Phase 7 新增）
-    // =========================================================
+ // =========================================================
+ // 诊断与更新区块
+ // =========================================================
 
     function _renderDiagnosticsSection(parent) {
         var section = document.createElement('div');
@@ -690,7 +690,7 @@ var RamariaSettingsView = (function () {
         section.appendChild(card);
         parent.appendChild(section);
 
-        // 绑定事件
+ // 绑定事件
         var checkBtn = $('settings-check-update');
         if (checkBtn) checkBtn.addEventListener('click', _handleCheckUpdate);
 
@@ -698,14 +698,14 @@ var RamariaSettingsView = (function () {
         if (exportDiagBtn) exportDiagBtn.addEventListener('click', _handleExportDiagnostics);
     }
 
-    /**
-     * 处理"检查更新"按钮点击。
-     *
-     * 流程:
-     * 1. 调用 RamariaApi.diagnostics.checkUpdate()。
-     * 2. 根据返回结果显示状态：最新版本 / 新版本可用 / 检查失败。
-     * 3. 有新版本时显示 Release URL（点击可打开浏览器）。
-     */
+ /**
+ * 处理"检查更新"按钮点击。
+ *
+ * 流程:
+ * 1. 调用 RamariaApi.diagnostics.checkUpdate。
+ * 2. 根据返回结果显示状态：最新版本 / 新版本可用 / 检查失败。
+ * 3. 有新版本时显示 Release URL（点击可打开浏览器）。
+ */
     async function _handleCheckUpdate() {
         var checkBtn = $('settings-check-update');
         var badgeEl = $('settings-update-badge');
@@ -720,26 +720,26 @@ var RamariaSettingsView = (function () {
         try {
             var result = await RamariaApi.diagnostics.checkUpdate();
 
-            // 更新版本显示
+ // 更新版本显示
             var versionEl = $('settings-current-version');
             if (versionEl) versionEl.textContent = 'v' + (result.currentVersion || '?');
 
             if (result.error) {
-                // 检查失败
+ // 检查失败
                 if (badgeEl) {
                     badgeEl.textContent = '⚠ 检查失败';
                     badgeEl.className = 'settings-row-value text-pink';
                 }
                 if (detailEl) detailEl.classList.remove('hidden');
                 if (msgEl) {
-                    // 多行错误消息转为带换行的 HTML（安全：后端错误消息不含用户输入）
+ // 多行错误消息转为带换行的 HTML（安全：后端错误消息不含用户输入）
                     msgEl.innerHTML = result.error.replace(/\n/g, '<br>');
                 }
-                // Toast 只显示首行摘要
+ // Toast 只显示首行摘要
                 var firstLine = result.error.split('\n')[0];
                 RamariaToast.show('warning', '检查更新失败', firstLine);
             } else if (result.updateAvailable) {
-                // 新版本可用
+ // 新版本可用
                 if (badgeEl) {
                     badgeEl.textContent = '↑ 可更新';
                     badgeEl.className = 'settings-row-value text-green';
@@ -758,7 +758,7 @@ var RamariaSettingsView = (function () {
                 }
                 RamariaToast.show('info', '发现新版本 ' + (result.latestVersion || ''));
             } else {
-                // 已是最新
+ // 已是最新
                 if (badgeEl) {
                     badgeEl.textContent = '✓ 已是最新';
                     badgeEl.className = 'settings-row-value text-green';
@@ -786,14 +786,14 @@ var RamariaSettingsView = (function () {
         }
     }
 
-    /**
-     * 处理"导出诊断信息"按钮点击。
-     *
-     * 流程:
-     * 1. 调用 RamariaApi.diagnostics.exportDiagnostics()。
-     * 2. 后端弹出原生保存对话框。
-     * 3. 用户确认后收集并打包 zip 文件。
-     */
+ /**
+ * 处理"导出诊断信息"按钮点击。
+ *
+ * 流程:
+ * 1. 调用 RamariaApi.diagnostics.exportDiagnostics。
+ * 2. 后端弹出原生保存对话框。
+ * 3. 用户确认后收集并打包 zip 文件。
+ */
     async function _handleExportDiagnostics() {
         var exportBtn = $('settings-export-diagnostics');
         if (exportBtn) {
@@ -804,9 +804,9 @@ var RamariaSettingsView = (function () {
         try {
             var result = await RamariaApi.diagnostics.exportDiagnostics();
 
-            // 检查是否有收集警告
+ // 检查是否有收集警告
             if (result.warnings && result.warnings.length > 0) {
-                // 有部分数据未能收集，显示警告
+ // 有部分数据未能收集，显示警告
                 var warningText = result.warnings.join('\n');
                 RamariaToast.show(
                     'warning',
@@ -821,7 +821,7 @@ var RamariaSettingsView = (function () {
                 );
             }
         } catch (err) {
-            // 用户取消操作时静默忽略
+ // 用户取消操作时静默忽略
             if (err.message && err.message.indexOf('取消') !== -1) {
                 console.log('[SettingsView] 用户取消了诊断导出');
                 return;
@@ -836,9 +836,9 @@ var RamariaSettingsView = (function () {
         }
     }
 
-    // =========================================================
-    // 关于区块
-    // =========================================================
+ // =========================================================
+ // 关于区块
+ // =========================================================
 
     function _renderAboutSection(parent) {
         var section = document.createElement('div');
@@ -866,9 +866,9 @@ var RamariaSettingsView = (function () {
         parent.appendChild(section);
     }
 
-    // =========================================================
-    // 生命周期
-    // =========================================================
+ // =========================================================
+ // 生命周期
+ // =========================================================
 
     function _registerHooks() {
         var unreg;
@@ -877,10 +877,10 @@ var RamariaSettingsView = (function () {
             console.log('[SettingsView] 进入视图');
             render();
 
-            // 加载版本信息（静默调用，不显示 toast）
+ // 加载版本信息（静默调用，不显示 toast）
             _loadVersion();
 
-            // 加载配置
+ // 加载配置
             try {
                 _backendConfig = await RamariaApi.config.getBackend();
                 _fillBackendForm(_backendConfig);
@@ -889,7 +889,7 @@ var RamariaSettingsView = (function () {
                 console.error('[SettingsView] 加载后端配置失败:', err);
             }
 
-            // 加载嵌入模型配置（v1.1 新增）
+ // 加载嵌入模型配置
             try {
                 var embeddingConfig = await RamariaApi.setup.getEmbeddingModel();
                 _fillEmbeddingForm(embeddingConfig);
@@ -897,7 +897,7 @@ var RamariaSettingsView = (function () {
                 console.error('[SettingsView] 加载嵌入模型配置失败:', err);
             }
 
-            // 加载隐私状态
+ // 加载隐私状态
             await _refreshPrivacyStatus();
         });
         _unregisterFns.push(unreg);
@@ -917,9 +917,9 @@ var RamariaSettingsView = (function () {
         _registerHooks();
     }
 
-    // =========================================================
-    // 公开 API
-    // =========================================================
+ // =========================================================
+ // 公开 API
+ // =========================================================
 
     return {
         init: init,

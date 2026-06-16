@@ -159,12 +159,12 @@ impl ProviderBase {
         })
     }
 
-    /// 返回 ModelCapability 引用（供 `LlmProvider::capability()` 使用）。
+    /// 返回 ModelCapability 引用（供 `LlmProvider::capability` 使用）。
     pub fn capability(&self) -> &ModelCapability {
         &self.config.capability
     }
 
-    /// 返回 BackendConfig 引用（供 `LlmProvider::config()` 使用）。
+    /// 返回 BackendConfig 引用（供 `LlmProvider::config` 使用）。
     pub fn backend_config(&self) -> &BackendConfig {
         &self.config
     }
@@ -252,7 +252,7 @@ impl ProviderBase {
     /// - 模型 ID 是否非空（LM Studio 场景允许空字符串，用户后续选择）。
     ///
     /// 注意:
-    /// - v1.1 修复：使用 `send_authenticated_get()` 携带 API key header，
+    /// - 修复：使用 `send_authenticated_get` 携带 API key header，
     ///   避免线上 provider（DeepSeek/OpenAI）的 /models 端点返回 401。
     pub async fn validate(&self) -> RamariaResult<()> {
         // 1. 检查 base_url 可连接（带 Authorization header）
@@ -692,7 +692,7 @@ mod tests {
         let base = ProviderBase::new(config, None).expect("构造应成功");
         let cap = base.capability();
         assert_eq!(cap.provider, LlmProvider::DeepSeek);
-        // model_id 来自 capability（Phase 3.0 修复后为单一来源）
+        // model_id 来自 capability（.0 修复后为单一来源）
         assert_eq!(cap.model_id, "deepseek-chat");
     }
 

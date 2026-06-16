@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/inference/shrink.rs - Phase A 经验贝叶斯小样本收缩
+//! rust/crates/ramaria-memory/src/inference/shrink.rs - 经验贝叶斯小样本收缩
 //!
 //! 设计特点:
 //! - A5 小样本收缩估计: 当分类有效样本量 n_eff 过小时，将极端估计值向全局均值收缩

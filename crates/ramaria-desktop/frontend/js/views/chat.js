@@ -6,9 +6,9 @@
  * - 注册 Router enter/leave 钩子：enter 时加载会话和人格、leave 时清理事件监听
  * - 发送消息流程：追加用户消息 → 调用 API → 创建流式气泡 → 监听 chat-delta/chat-done/chat-error
  * - 会话管理：新建/切换/删除，自动保存和恢复
- * - v1.1: SessionBar 区分活跃/已关闭（绿色圆点 / 灰色时间戳）
- * - v1.1: 已关闭 session 只读模式（隐藏输入框 + "此对话已关闭"提示）
- * - v1.1: "保存对话"按钮（关闭 session → 不清屏 → 下次消息自动创建新 session）
+ * - : SessionBar 区分活跃/已关闭（绿色圆点 / 灰色时间戳）
+ * - : 已关闭 session 只读模式（隐藏输入框 + "此对话已关闭"提示）
+ * - : "保存对话"按钮（关闭 session → 不清屏 → 下次消息自动创建新 session）
  *
  * 设计特点:
  * - 所有 Tauri Event 监听在 enter 时注册、leave 时注销，防止事件泄漏
@@ -19,14 +19,14 @@
  * - scrollToBottom rAF 批量化（单帧内多次调用合并为一次）
  * - 流式期间 GPU 层提示 + content-visibility:auto 加速渲染
  * - Enter 发送 / Shift+Enter 换行
- * - v1.1.1: 人格独立会话——每个人格拥有独立 Session，切换人格=切换好友
- * - v1.1.1: 人格会话映射持久化（Store.personaSessions → 后端 settings）
- * - v1.1.1: 修复人格昵称/头像位置（助手消息=左侧对话人，用户消息=右侧自己）
+ * - 人格独立会话——每个人格拥有独立 Session，切换人格=切换好友
+ * - 人格会话映射持久化（Store.personaSessions → 后端 settings）
+ * - 修复人格昵称/头像位置（助手消息=左侧对话人，用户消息=右侧自己）
  *
  * 依赖:
  * - RamariaApi / RamariaStore / RamariaRouter
  * - RamariaMessageBubble（js/components/message-bubble.js）
- * - RamariaProgressBar（js/components/progress-bar.js, Phase 1.1.1）
+ * - RamariaProgressBar（js/components/progress-bar.js, .1.1）
  * - RamariaToast（js/components/toast.js）
  * - RamariaFormat（js/utils/format.js）
  * - TauriBridge（js/tauri-bridge.js）
@@ -36,77 +36,77 @@
 var RamariaChatView = (function () {
     'use strict';
 
-    // =========================================================
-    // 内部状态
-    // =========================================================
+ // =========================================================
+ // 内部状态
+ // =========================================================
 
-    /** 取消 Tauri 事件监听的函数列表 */
+ /** 取消 Tauri 事件监听的函数列表 */
     var _unlistenFns = [];
-    /** Router 钩子取消注册函数列表 */
+ /** Router 钩子取消注册函数列表 */
     var _unregisterFns = [];
-    /** Store 订阅取消函数 */
+ /** Store 订阅取消函数 */
     var _unsubs = [];
 
-    /**
-     * 消息自增计数器（用于防止同一毫秒内多条消息 ID 碰撞）。
-     * Date.now() 在人类交互场景下几乎不可能碰撞，但作为防御性编程，
-     * 计数器确保即使极端情况（脚本批量发送）下每条消息 ID 唯一。
-     */
+ /**
+ * 消息自增计数器（用于防止同一毫秒内多条消息 ID 碰撞）。
+ * Date.now 在人类交互场景下几乎不可能碰撞，但作为防御性编程，
+ * 计数器确保即使极端情况（脚本批量发送）下每条消息 ID 唯一。
+ */
     var _msgCounter = 0;
 
-    /** 流式追加文本缓冲（用于 rAF 批量更新） */
+ /** 流式追加文本缓冲（用于 rAF 批量更新） */
     var _pendingDelta = '';
-    /**
-     * _pendingDelta 缓冲区最大字节数。
-     *
-     * 当浏览器标签页被后台挂起时，rAF 回调可能长时间不触发，
-     * 导致 _pendingDelta 持续累积。此上限防止极端场景下内存无限增长
-     * （如用户切换到其他标签页后长时间不返回）。
-     *
-     * 超过上限时强制刷新，无论 rAF 是否触发。
-     */
+ /**
+ * _pendingDelta 缓冲区最大字节数。
+ *
+ * 当浏览器标签页被后台挂起时，rAF 回调可能长时间不触发，
+ * 导致 _pendingDelta 持续累积。此上限防止极端场景下内存无限增长
+ * （如用户切换到其他标签页后长时间不返回）。
+ *
+ * 超过上限时强制刷新，无论 rAF 是否触发。
+ */
     var MAX_PENDING_DELTA_BYTES = 10240; // 10 KB
-    /** 流式消息 ID */
+ /** 流式消息 ID */
     var _streamingMsgId = null;
-    /** rAF 句柄（16ms 一帧，与显示器刷新率同步） */
+ /** rAF 句柄（16ms 一帧，与显示器刷新率同步） */
     var _rafHandle = null;
-    /**
-     * 最大批量间隔定时器句柄（安全网）。
-     *
-     * rAF 在标签页不可见时可能被浏览器节流（降到 1fps 甚至暂停），
-     * 纯 rAF 方案在后台标签页中可能导致 delta 堆积。
-     * 此定时器作为安全网：无论 rAF 是否触发，最多 32ms（2帧）必须刷新。
-     */
+ /**
+ * 最大批量间隔定时器句柄（安全网）。
+ *
+ * rAF 在标签页不可见时可能被浏览器节流（降到 1fps 甚至暂停），
+ * 纯 rAF 方案在后台标签页中可能导致 delta 堆积。
+ * 此定时器作为安全网：无论 rAF 是否触发，最多 32ms（2帧）必须刷新。
+ */
     var _maxBatchTimer = null;
-    /** 最大批量间隔（毫秒）。32ms ≈ 2 帧 @60Hz，足够快且不造成 jank */
+ /** 最大批量间隔（毫秒）。32ms ≈ 2 帧 @60Hz，足够快且不造成 jank */
     var MAX_BATCH_MS = 32;
-    /** 滚动操作防抖 rAF 句柄 */
+ /** 滚动操作防抖 rAF 句柄 */
     var _scrollRafHandle = null;
 
-    // =========================================================
-    // DOM 快捷查询
-    // =========================================================
+ // =========================================================
+ // DOM 快捷查询
+ // =========================================================
 
     function $(id) { return document.getElementById(id); }
 
-    /** 获取对话视图中的消息列表容器 */
+ /** 获取对话视图中的消息列表容器 */
     function _msgListEl() {
         return document.querySelector('#view-chat .chat-message-list');
     }
 
-    /** 获取输入框 */
+ /** 获取输入框 */
     function _inputEl() {
         return document.querySelector('#view-chat .chat-input-textarea');
     }
 
-    /** 获取发送按钮 */
+ /** 获取发送按钮 */
     function _sendBtnEl() {
         return document.querySelector('#view-chat .chat-send-btn');
     }
 
-    // =========================================================
-    // 渲染
-    // =========================================================
+ // =========================================================
+ // 渲染
+ // =========================================================
 
     function render() {
         var container = $('view-chat');
@@ -117,11 +117,11 @@ var RamariaChatView = (function () {
 
         container.innerHTML = '';
 
-        // ── 聊天页眉（Persona 头像 + 名称 + 保存按钮）──
-        // v1.1: 替代旧 SessionBar（tab 并行切换），改为社交平台风格页眉
-        // 左：当前对话人格头像 + 名称 + 状态指示  右：保存对话按钮
-        // v1.1 修复: 初始值不再硬编码 "Rama"，改为空字符串；
-        //   _loadInitialData() 完成 persona 加载后由 _updateHeaderPersona() 动态填充。
+ // ── 聊天页眉（Persona 头像 + 名称 + 保存按钮）──
+ // 替代旧 SessionBar（tab 并行切换），改为社交平台风格页眉
+ // 左：当前对话人格头像 + 名称 + 状态指示 右：保存对话按钮
+ // 初始值不再硬编码 "Rama"，改为空字符串；
+ // _loadInitialData 完成 persona 加载后由 _updateHeaderPersona 动态填充。
         var header = document.createElement('div');
         header.className = 'chat-header';
         header.id = 'chat-header';
@@ -140,7 +140,7 @@ var RamariaChatView = (function () {
             '</div>';
         container.appendChild(header);
 
-        // ── 消息列表 ──
+ // ── 消息列表 ──
         var msgList = document.createElement('div');
         msgList.className = 'chat-message-list';
         msgList.id = 'chat-message-list';
@@ -150,10 +150,10 @@ var RamariaChatView = (function () {
         msgList.setAttribute('tabindex', '0');
         container.appendChild(msgList);
 
-        // 初始空状态
+ // 初始空状态
         _showEmptyState(msgList);
 
-        // ── 输入区域 ──
+ // ── 输入区域 ──
         var inputArea = document.createElement('div');
         inputArea.className = 'chat-input-area';
         inputArea.id = 'chat-input-area';
@@ -171,7 +171,7 @@ var RamariaChatView = (function () {
                     '<option value="rama-0001">默认 (rama-0001)</option>' +
                 '</select>' +
             '</div>' +
-            // v1.1: 已关闭 session 的只读提示
+ // 已关闭 session 的只读提示
             '<div class="chat-readonly-banner hidden" id="chat-readonly-banner">' +
                 '<span>🔒 此对话已关闭</span>' +
                 '<button class="btn btn-primary btn-sm" id="chat-new-session-btn">开始新对话</button>' +
@@ -184,18 +184,18 @@ var RamariaChatView = (function () {
             '</div>';
         container.appendChild(inputArea);
 
-        // ── 事件绑定 ──
+ // ── 事件绑定 ──
         _bindInputEvents();
         _bindSessionEvents();
 
-        // v1.1.1: 人格选择器变更 → 切换人格会话（独立对话栏）
+ // 人格选择器变更 → 切换人格会话（独立对话栏）
         var personaSelect = $('chat-persona-select');
         if (personaSelect) {
             personaSelect.addEventListener('change', _handlePersonaChange);
         }
     }
 
-    /** 空状态展示 */
+ /** 空状态展示 */
     function _showEmptyState(msgList) {
         if (!msgList) msgList = _msgListEl();
         if (!msgList) return;
@@ -214,7 +214,7 @@ var RamariaChatView = (function () {
                 '</div>' +
             '</div>';
 
-        // 点击快捷提示词
+ // 点击快捷提示词
         var prompts = msgList.querySelectorAll('.chat-empty-prompt');
         for (var i = 0; i < prompts.length; i++) {
             prompts[i].addEventListener('click', function () {
@@ -230,9 +230,9 @@ var RamariaChatView = (function () {
         }
     }
 
-    // =========================================================
-    // 输入框事件
-    // =========================================================
+ // =========================================================
+ // 输入框事件
+ // =========================================================
 
     function _bindInputEvents() {
         var input = _inputEl();
@@ -240,7 +240,7 @@ var RamariaChatView = (function () {
 
         if (!input || !sendBtn) return;
 
-        // Enter 发送 / Shift+Enter 换行
+ // Enter 发送 / Shift+Enter 换行
         input.addEventListener('keydown', function (e) {
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
@@ -248,7 +248,7 @@ var RamariaChatView = (function () {
             }
         });
 
-        // 自动调整高度，空内容时回退到 min-height
+ // 自动调整高度，空内容时回退到 min-height
         input.addEventListener('input', function () {
             if (!this.value) {
                 this.style.height = '36px';
@@ -258,34 +258,34 @@ var RamariaChatView = (function () {
             this.style.height = Math.min(this.scrollHeight, 120) + 'px';
         });
 
-        // 发送按钮
+ // 发送按钮
         sendBtn.addEventListener('click', _handleSend);
     }
 
-    // =========================================================
-    // 页眉事件（v1.1 重构：SessionBar → Persona 页眉）
-    // =========================================================
+ // =========================================================
+ // 页眉事件（重构：SessionBar → Persona 页眉）
+ // =========================================================
 
     function _bindSessionEvents() {
-        // 保存对话按钮
+ // 保存对话按钮
         var saveBtn = $('chat-save-btn');
         if (saveBtn) {
             saveBtn.addEventListener('click', _handleSaveSession);
         }
 
-        // 已关闭 session 只读模式下的"开始新对话"按钮
+ // 已关闭 session 只读模式下的"开始新对话"按钮
         var newSessionBtn = $('chat-new-session-btn');
         if (newSessionBtn) {
             newSessionBtn.addEventListener('click', _handleNewSessionFromReadonly);
         }
     }
 
-    /**
-     * 同步页眉 persona 头像和名称。
-     *
-     * 对齐需求：页眉显示当前聊天对象头像+昵称，类似社交平台对话框。
-     * v1.1.1: 新增头像渲染（首字母圆形 + 背景色由 uid hash 决定）。
-     */
+ /**
+ * 同步页眉 persona 头像和名称。
+ *
+ * 对齐需求：页眉显示当前聊天对象头像+昵称，类似社交平台对话框。
+ * 新增头像渲染（首字母圆形 + 背景色由 uid hash 决定）。
+ */
     function _updateHeaderPersona() {
         var select = $('chat-persona-select');
         var nameEl = $('chat-header-persona-name');
@@ -294,29 +294,29 @@ var RamariaChatView = (function () {
 
         var selectedOpt = select.options[select.selectedIndex];
         if (selectedOpt) {
-            // 提取纯名称（去掉 "(uid)" 后缀）
+ // 提取纯名称（去掉 "(uid)" 后缀）
             var fullText = selectedOpt.textContent || '';
             var name = fullText.split(' (')[0] || fullText;
             nameEl.textContent = name;
 
-            // 更新头像（首字母圆形）
+ // 更新头像（首字母圆形）
             if (avatarEl) {
                 var initial = name.charAt(0).toUpperCase() || '?';
                 avatarEl.textContent = initial;
-                // 根据 uid hash 分配稳定颜色
+ // 根据 uid hash 分配稳定颜色
                 var uid = selectedOpt.value || '';
                 avatarEl.style.backgroundColor = _avatarColor(uid);
             }
         }
     }
 
-    /**
-     * 根据 uid 生成稳定的头像背景色。
-     *
-     * 说明:
-     * - 简单 hash 算法确保同一 uid 始终得到相同颜色。
-     * - 使用 HSL 色调轮（0-360），饱和度/亮度固定，视觉柔和。
-     */
+ /**
+ * 根据 uid 生成稳定的头像背景色。
+ *
+ * 说明:
+ * - 简单 hash 算法确保同一 uid 始终得到相同颜色。
+ * - 使用 HSL 色调轮（0-360），饱和度/亮度固定，视觉柔和。
+ */
     function _avatarColor(uid) {
         if (!uid) return 'hsl(220, 25%, 55%)';
         var hash = 0;
@@ -327,23 +327,23 @@ var RamariaChatView = (function () {
         return 'hsl(' + hue + ', 45%, 55%)';
     }
 
-    // =========================================================
-    // v1.1.1: 人格切换（独立对话栏）
-    // =========================================================
+ // =========================================================
+ // 人格切换（独立对话栏）
+ // =========================================================
 
-    /**
-     * 处理人格选择器变更——切换到目标人格的独立会话。
-     *
-     * 对齐需求：类似切换好友——每个人格拥有独立对话栏，
-     * 切换人格时切换到对应会话，消息历史互相隔离。
-     *
-     * 流程:
-     * 1. 获取当前和目标人格 UID。
-     * 2. 如果相同则跳过。
-     * 3. 查找目标人格的已有 session。
-     * 4. 有则加载历史消息，无则显示空状态（下次发送自动创建）。
-     * 5. 更新 Store.currentPersonaUid + 同步页眉。
-     */
+ /**
+ * 处理人格选择器变更——切换到目标人格的独立会话。
+ *
+ * 对齐需求：类似切换好友——每个人格拥有独立对话栏，
+ * 切换人格时切换到对应会话，消息历史互相隔离。
+ *
+ * 流程:
+ * 1. 获取当前和目标人格 UID。
+ * 2. 如果相同则跳过。
+ * 3. 查找目标人格的已有 session。
+ * 4. 有则加载历史消息，无则显示空状态（下次发送自动创建）。
+ * 5. 更新 Store.currentPersonaUid + 同步页眉。
+ */
     async function _handlePersonaChange() {
         var select = $('chat-persona-select');
         if (!select) return;
@@ -351,39 +351,39 @@ var RamariaChatView = (function () {
         var newPersonaUid = select.value;
         var oldPersonaUid = RamariaStore.get('currentPersonaUid');
 
-        // 相同人格不处理
+ // 相同人格不处理
         if (newPersonaUid === oldPersonaUid) return;
 
         console.log('[ChatView] 切换人格: ' + (oldPersonaUid || '(none)') + ' → ' + newPersonaUid);
 
-        // 不能切换时正在流式接收
+ // 不能切换时正在流式接收
         if (RamariaStore.get('isStreaming')) {
             RamariaToast.show('warning', '请等待当前回复完成后再切换');
             select.value = oldPersonaUid || '';
             return;
         }
 
-        // 切换到目标人格
+ // 切换到目标人格
         await _switchToPersona(newPersonaUid);
     }
 
-    /**
-     * 切换到指定人格的会话。
-     *
-     * 参数:
-     * - `personaUid`: 目标人格 UID。
-     * - `silent`: 可选，true 时跳过 Toast 提示（初始加载用）。
-     */
+ /**
+ * 切换到指定人格的会话。
+ *
+ * 参数:
+ * - `personaUid`: 目标人格 UID。
+ * - `silent`: 可选，true 时跳过 Toast 提示（初始加载用）。
+ */
     async function _switchToPersona(personaUid, silent) {
-        // 1. 更新 Store
+ // 1. 更新 Store
         RamariaStore.set('currentPersonaUid', personaUid);
 
-        // 2. 查找该人格的已有 session
+ // 2. 查找该人格的已有 session
         var existingSessionId = RamariaStore.getPersonaSession(personaUid);
         var messagesLoaded = false;
 
         if (existingSessionId) {
-            // 尝试加载已有 session 的消息
+ // 尝试加载已有 session 的消息
             try {
                 var session = await RamariaApi.session.get(existingSessionId);
                 if (session && session.messages && session.messages.length > 0) {
@@ -392,21 +392,18 @@ var RamariaChatView = (function () {
                     _renderAllMessages();
                     messagesLoaded = true;
 
-                    // 检查 session 是否已关闭
-                    if (session.ended_at) {
-                        _setReadonlyMode(true);
-                    } else {
-                        _setReadonlyMode(false);
-                    }
+ // ★ 不启用只读模式：用户切换人格是为了继续聊，不是浏览历史。
+ // 即使 session 已关闭，输入框保持可用——下次发送自动创建新 session。
+                    _setReadonlyMode(false);
                 } else {
-                    // session 存在但无消息（可能被清空），移除映射
+ // session 存在但无消息（可能被清空），移除映射
                     RamariaStore.set('activeSessionId', null);
                     RamariaStore.set('messages', []);
                     _clearMessages();
                 }
             } catch (err) {
                 console.warn('[ChatView] 加载人格会话失败:', err);
-                // 会话可能已被删除，清除映射
+ // 会话可能已被删除，清除映射
                 RamariaStore.set('activeSessionId', null);
                 RamariaStore.set('messages', []);
                 _clearMessages();
@@ -414,18 +411,18 @@ var RamariaChatView = (function () {
         }
 
         if (!messagesLoaded) {
-            // 无已有会话，显示空状态
+ // 无已有会话，显示空状态
             RamariaStore.set('activeSessionId', null);
             RamariaStore.set('messages', []);
             _clearMessages();
             _setReadonlyMode(false);
         }
 
-        // 3. 同步页眉（头像+名称）
+ // 3. 同步页眉（头像+名称）
         _updateHeaderPersona();
 
-        // 4. 持久化映射
-        _persistPersonaSessions();
+ // 4. 持久化映射（await 确保不被后续 navigate-away 中断）
+        await _persistPersonaSessions();
 
         if (!silent) {
             var personas = RamariaStore.get('personas') || [];
@@ -440,18 +437,18 @@ var RamariaChatView = (function () {
         }
     }
 
-    // =========================================================
-    // v1.1.1: 人格会话映射持久化
-    // =========================================================
+ // =========================================================
+ // 人格会话映射持久化
+ // =========================================================
 
-    /**
-     * 将 personaSessions 映射持久化到后端 settings。
-     *
-     * 说明:
-     * - 每次 session 创建/切换时调用。
-     * - 使用 RamariaApi.config.updateSetting 写入。
-     * - 失败时仅打印 warn（非关键路径，下次正常写入即可覆盖）。
-     */
+ /**
+ * 将 personaSessions 映射持久化到后端 settings。
+ *
+ * 说明:
+ * - 每次 session 创建/切换时调用。
+ * - 使用 RamariaApi.config.updateSetting 写入。
+ * - 失败时仅打印 warn（非关键路径，下次正常写入即可覆盖）。
+ */
     async function _persistPersonaSessions() {
         try {
             var map = RamariaStore.get('personaSessions') || {};
@@ -462,14 +459,24 @@ var RamariaChatView = (function () {
         }
     }
 
-    /**
-     * 从后端 settings 恢复 personaSessions 映射。
-     *
-     * 说明:
-     * - 在 _loadInitialData() 中调用。
-     * - 解析失败或不存在时回退到空映射。
-     */
+ /**
+ * 从后端 settings 恢复 personaSessions 映射。
+ *
+ * 说明:
+ * - 在 _loadInitialData 中调用。
+ * - 解析失败或不存在时回退到空映射。
+ */
     async function _restorePersonaSessions() {
+ // ★ 修复: 仅在 cold start（personaSessions 为空）时从后端恢复。
+ // 若内存中已有映射，说明应用运行期间已通过 _handleSend 建立过映射，
+ // 后端 settings 可能因 fire-and-forget 持久化未完成而处于过期状态，
+ // 强制覆盖会导致"离开再返回看不到当前 session 内容"的问题。
+        var existingMap = RamariaStore.get('personaSessions');
+        if (existingMap && Object.keys(existingMap).length > 0) {
+            console.log('[ChatView] persona_sessions 已在内存中（' + Object.keys(existingMap).length + ' 条），跳过后端恢复');
+            return;
+        }
+
         try {
             var settings = await RamariaApi.config.getSettings();
             if (settings && Array.isArray(settings)) {
@@ -487,16 +494,16 @@ var RamariaChatView = (function () {
         }
     }
 
-    // =========================================================
-    // v1.1: 只读模式 + 保存对话
-    // =========================================================
+ // =========================================================
+ // 只读模式 + 保存对话
+ // =========================================================
 
-    /**
-     * 设置对话视图的只读模式。
-     *
-     * 对齐 T-V11-0-011: 已关闭 session 时隐藏输入框，
-     * 显示"此对话已关闭"提示和"开始新对话"按钮。
-     */
+ /**
+ * 设置对话视图的只读模式。
+ *
+ * 对齐 T-V11-0-011: 已关闭 session 时隐藏输入框，
+ * 显示"此对话已关闭"提示和"开始新对话"按钮。
+ */
     function _setReadonlyMode(isReadonly) {
         var inputArea = document.querySelector('#view-chat .chat-input-area');
         var readonlyBanner = $('chat-readonly-banner');
@@ -504,43 +511,53 @@ var RamariaChatView = (function () {
         var sendBtn = _sendBtnEl();
 
         if (isReadonly) {
-            // 隐藏输入区域
+ // 隐藏输入区域
             if (inputArea) inputArea.classList.add('hidden');
-            // 显示只读提示
+ // 显示只读提示
             if (readonlyBanner) readonlyBanner.classList.remove('hidden');
-            // 禁用输入
+ // 禁用输入
             if (inputEl) inputEl.disabled = true;
             if (sendBtn) sendBtn.disabled = true;
         } else {
-            // 恢复输入区域
+ // 恢复输入区域
             if (inputArea) inputArea.classList.remove('hidden');
-            // 隐藏只读提示
+ // 隐藏只读提示
             if (readonlyBanner) readonlyBanner.classList.add('hidden');
-            // 恢复输入
+ // 恢复输入
             if (inputEl) inputEl.disabled = false;
             if (sendBtn) sendBtn.disabled = false;
         }
     }
 
-    /**
-     * 处理"保存对话"按钮点击。
-     *
-     * 对齐 T-V11-0-012 + Python `force_close_current_session()`:
-     * - 调用 save_current_session Tauri Command
-     * - 不清屏（保留当前消息）
-     * - 插入系统分隔线"── 对话已保存 ──"
-     * - 清除 activeSessionId（下次消息自动创建新 session）
-     */
+ /**
+ * 处理"保存对话"按钮点击。
+ *
+ * 对齐 T-V11-0-012 + Python `force_close_current_session`:
+ * - 调用 save_current_session Tauri Command
+ * - 不清屏（保留当前消息）
+ * - 插入系统分隔线"── 对话已保存 ──"
+ * - 清除 activeSessionId（下次消息自动创建新 session）
+ */
     async function _handleSaveSession() {
         try {
-            // 获取当前选中的人格 UID
+ // 获取当前选中的人格 UID
             var personaSelect = $('chat-persona-select');
             var personaUid = personaSelect ? personaSelect.value : null;
 
-            // 调用后端保存（传入 persona_uid，确保 L1 摘要可被记忆页面查询）
+ // ★ 关键修复: 在 await 之前立即清除 activeSessionId + 禁用输入。
+ // 否则 await RamariaApi.chat.save 期间 JavaScript 事件循环可被其他事件中断，
+ // 用户若在此窗口内按下 Enter → _handleSend 会读到旧 session ID → 后端拒绝"会话已关闭"。
+ // 将 clear 操作前置到异步 I/O 之前，消除竞态窗口。
+            RamariaStore.set('activeSessionId', null);
+            _setInputEnabled(false);
+
+ // 调用后端保存（传入 persona_uid，确保 L1 摘要可被记忆页面查询）
             var result = await RamariaApi.chat.save(personaUid);
 
-            // 解析返回值：{ status: "ok"|"no_active_session", l1_generated: bool, session_id: string }
+ // 保存完成后恢复输入
+            _setInputEnabled(true);
+
+ // 解析返回值：{ status: "ok"|"no_active_session", l1_generated: bool, session_id: string }
             var parsed;
             try {
                 parsed = typeof result === 'string' ? JSON.parse(result) : result;
@@ -550,7 +567,7 @@ var RamariaChatView = (function () {
 
             var savedSessionId = parsed.session_id || null;
 
-            // 仅在成功关闭 session 时插入系统分隔线（no_active_session 时不插入）
+ // 仅在成功关闭 session 时插入系统分隔线（no_active_session 时不插入）
             if (parsed.status === 'ok') {
                 var msgList = _msgListEl();
                 if (msgList) {
@@ -561,15 +578,11 @@ var RamariaChatView = (function () {
                 }
             }
 
-            // 清除活跃 session（不清屏，下次消息自动创建新 session）
-            RamariaStore.set('activeSessionId', null);
-            // v1.1.1: 清除当前人格的会话映射（下次发送会自动创建新 session 并建立映射）
-            if (personaUid) {
-                RamariaStore.setPersonaSession(personaUid, null);
-                _persistPersonaSessions();
-            }
+ // 不清屏——保留当前消息。不删除 personaSessions 映射——已关闭的 session
+ // 仍保留在映射中，确保用户退出重进后能通过 _loadInitialData 恢复并查看历史消息。
+ // _handleSend 在下一次发送时会自动创建新 session 并覆盖映射。
 
-            // 根据 L1 生成结果给出不同提示
+ // 根据 L1 生成结果给出不同提示
             if (parsed.l1_generated) {
                 RamariaToast.show('success', '对话已保存',
                     'L1 摘要已生成（' + (parsed.l1_count || 1) + ' 条），可前往「记忆」页面查看');
@@ -582,17 +595,19 @@ var RamariaChatView = (function () {
             }
         } catch (err) {
             console.error('[ChatView] 保存对话失败:', err);
+ // 保存失败时恢复输入（activeSessionId 已在 await 前清除，无需回滚）
+            _setInputEnabled(true);
             RamariaToast.show('error', '保存失败', err.message || '未知错误');
         }
     }
 
-    /**
-     * L1 生成失败时显示带"重试"按钮的 Toast。
-     *
-     * 参数:
-     * - `sessionId`: 刚关闭的 session（用于重试）。
-     * - `personaUid`: 当前人格。
-     */
+ /**
+ * L1 生成失败时显示带"重试"按钮的 Toast。
+ *
+ * 参数:
+ * - `sessionId`: 刚关闭的 session（用于重试）。
+ * - `personaUid`: 当前人格。
+ */
     function _showL1RetryToast(sessionId, personaUid, detailMsg) {
         if (!sessionId) {
             RamariaToast.show('error', '❌ L1 摘要失败',
@@ -600,9 +615,9 @@ var RamariaChatView = (function () {
             return;
         }
 
-        // 使用 error 级别让用户注意到
+ // 使用 error 级别让用户注意到
         RamariaToast.show('error', '❌ L1 摘要生成失败', detailMsg || '');
-        // 延迟追加重试按钮到 toast 容器
+ // 延迟追加重试按钮到 toast 容器
         setTimeout(function () {
             var toastContainer = document.querySelector('.ramaria-toast-container');
             if (toastContainer) {
@@ -642,31 +657,24 @@ var RamariaChatView = (function () {
         }
     }
 
-    /**
-     * 处理"开始新对话"按钮点击（已关闭 session 只读模式下）。
-     */
+ /**
+ * 处理"开始新对话"按钮点击（已关闭 session 只读模式下）。
+ */
     async function _handleNewSessionFromReadonly() {
         _setReadonlyMode(false);
 
-        // 清除当前消息和活跃 session
+ // 清除当前消息和活跃 session（不清除 personaSessions 映射）
         RamariaStore.set('messages', []);
         RamariaStore.set('activeSessionId', null);
         _clearMessages();
         _showEmptyState(_msgListEl());
 
-        // v1.1.1: 清除当前人格的会话映射（下次发送会自动创建新 session）
-        var personaUid = RamariaStore.get('currentPersonaUid');
-        if (personaUid) {
-            RamariaStore.setPersonaSession(personaUid, null);
-            _persistPersonaSessions();
-        }
-
         RamariaToast.show('info', '已就绪', '开始输入即可创建新对话');
     }
 
-    // =========================================================
-    // 发送消息
-    // =========================================================
+ // =========================================================
+ // 发送消息
+ // =========================================================
 
     async function _handleSend() {
         var input = _inputEl();
@@ -675,40 +683,42 @@ var RamariaChatView = (function () {
         var text = input.value.trim();
         if (!text) return;
 
-        // 检查流式状态
+ // 检查流式状态
         if (RamariaStore.get('isStreaming')) {
             RamariaToast.show('warning', '请等待当前回复完成');
             return;
         }
 
-        // 检查应用状态
+ // 检查应用状态
         var appState = RamariaStore.get('appState');
         if (appState !== 'ready' && appState !== 'degraded') {
             RamariaToast.show('warning', '应用尚未就绪');
             return;
         }
 
-        // 清空输入框并重置高度到最小值，防止滚动条残留
+ // 清空输入框并重置高度到最小值，防止滚动条残留
         input.value = '';
-        // 高度重置由 CSS 的 .chat-input-textarea { min-height:36px } 保证，不设内联 style
+ // 高度重置由 CSS 的 .chat-input-textarea { min-height:36px } 保证，不设内联 style
 
-        // 禁用输入
+ // 禁用输入
         _setInputEnabled(false);
 
-        // 当前人格
+ // 当前人格
         var personaSelect = $('chat-persona-select');
         var personaUid = personaSelect ? personaSelect.value : 'rama-0001';
 
-        // 确保有活跃会话
+ // 确保有活跃会话
         var sessionId = RamariaStore.get('activeSessionId');
         if (!sessionId) {
             try {
                 var session = await RamariaApi.session.create();
                 sessionId = session.id;
                 RamariaStore.set('activeSessionId', sessionId);
-                // v1.1.1: 建立人格→会话映射并持久化
+ // 建立人格→会话映射并持久化
+ // ★ 修复: await 确保映射在 send 之前已持久化到后端，
+ // 避免"离开再返回时 person_sessions 过期"的问题。
                 RamariaStore.setPersonaSession(personaUid, sessionId);
-                _persistPersonaSessions();
+                await _persistPersonaSessions();
             } catch (err) {
                 console.error('[ChatView] 自动创建会话失败:', err);
                 RamariaToast.show('error', '创建会话失败', '无法自动创建会话');
@@ -717,17 +727,17 @@ var RamariaChatView = (function () {
             }
         }
 
-        // v1.1.1: 保存当前人格 UID（供 chat-done 事件使用）
+ // 保存当前人格 UID（供 chat-done 事件使用）
         RamariaStore.set('currentPersonaUid', personaUid);
 
-        // 生成用户消息 ID（时间戳 + 自增计数器防碰撞）
+ // 生成用户消息 ID（时间戳 + 自增计数器防碰撞）
         var now = Date.now();
         _msgCounter++;
         var userMsgId = 'msg-' + now + '-' + _msgCounter + '-u';
 
-        // 1. 追加用户消息到 Store
-        // ★ 修复: 用户消息不设置 persona_uid（发言人是用户自己，气泡在右侧）
-        //    persona_uid 仅用于助手消息，标识"谁在回复"（气泡在左侧）
+ // 1. 追加用户消息到 Store
+ // ★ 修复: 用户消息不设置 persona_uid（发言人是用户自己，气泡在右侧）
+ // persona_uid 仅用于助手消息，标识"谁在回复"（气泡在左侧）
         RamariaStore.appendMessage({
             id: userMsgId,
             role: 'user',
@@ -736,24 +746,24 @@ var RamariaChatView = (function () {
             created_at: now,
         });
 
-        // 2. 自动滚动到底部
+ // 2. 自动滚动到底部
         _scrollToBottom();
 
-        // 4. 发送 API 请求
+ // 4. 发送 API 请求
         try {
             var result = await RamariaApi.chat.send(text, personaUid, sessionId);
             var requestId = result.request_id;
 
             console.log('[ChatView] 消息已发送, request_id: ' + requestId);
 
-            // 5. 设置流式状态
+ // 5. 设置流式状态
             RamariaStore.set('isStreaming', true);
             RamariaStore.set('streamingRequestId', requestId);
 
-            // 6. 启用流式性能优化（GPU 层 + content-visibility）
+ // 6. 启用流式性能优化（GPU 层 + content-visibility）
             _enableStreamOptimizations();
 
-            // 7. 创建流式气泡
+ // 7. 创建流式气泡
             var streamingId = 'msg-' + requestId;
             _streamingMsgId = streamingId;
             _pendingDelta = '';
@@ -766,7 +776,7 @@ var RamariaChatView = (function () {
             if (msgList) msgList.appendChild(bubble);
             _scrollToBottom();
 
-            // 7. 显示流式提示
+ // 7. 显示流式提示
             var hint = $('chat-streaming-hint');
             if (hint) hint.classList.remove('hidden');
 
@@ -777,18 +787,18 @@ var RamariaChatView = (function () {
         }
     }
 
-    // =========================================================
-    // 流式事件监听
-    // =========================================================
+ // =========================================================
+ // 流式事件监听
+ // =========================================================
 
     function _listenStreamEvents() {
-        // 检查 Tauri 可用性
+ // 检查 Tauri 可用性
         if (!TauriBridge || !TauriBridge.isTauri || !TauriBridge.isTauri()) {
             console.warn('[ChatView] 非 Tauri 环境，跳过流式事件监听');
             return;
         }
 
-        // chat-delta（Rust 字段名: content）
+ // chat-delta（Rust 字段名: content）
         TauriBridge.listen('chat-delta', function (event) {
             var payload = event.payload;
             if (!payload || !payload.request_id) return;
@@ -796,15 +806,15 @@ var RamariaChatView = (function () {
             var reqId = RamariaStore.get('streamingRequestId');
             if (payload.request_id !== reqId) return;
 
-            // Rust ChatDeltaPayload 字段为 content，不是 content_delta/delta
+ // Rust ChatDeltaPayload 字段为 content，不是 content_delta/delta
             var delta = payload.content || '';
             if (!delta) return;
 
             _pendingDelta += delta;
 
-            // 上限保护：_pendingDelta 超过阈值时强制刷新，防止标签页后台时内存无限增长
+ // 上限保护：_pendingDelta 超过阈值时强制刷新，防止标签页后台时内存无限增长
             if (_pendingDelta.length > MAX_PENDING_DELTA_BYTES) {
-                // 取消所有待处理的定时器，直接强制刷新
+ // 取消所有待处理的定时器，直接强制刷新
                 if (_rafHandle) {
                     cancelAnimationFrame(_rafHandle);
                     _rafHandle = null;
@@ -817,28 +827,28 @@ var RamariaChatView = (function () {
                 return;
             }
 
-            /*
-             * 双层刷新策略：
-             *
-             * 第 1 层：rAF（16ms 一帧 @60Hz）
-             *   与显示器刷新率同步，在 GPU 垂直同步间隙批量提交 DOM 更新。
-             *   这是主力机制——高频 delta（每 5-10ms 一条）会被合并到一帧。
-             *
-             * 第 2 层：maxBatchTimer（32ms 安全网）
-             *   防止 rAF 节流导致文本长时间不显示。
-             *   场景：标签页后台（rAF 降到 1fps）、极慢流（delta 间隔 >16ms）。
-             *   两个定时器互斥：任一触发后清除另一个。
-             */
+ /*
+ * 双层刷新策略：
+ *
+ * 第 1 层：rAF（16ms 一帧 @60Hz）
+ * 与显示器刷新率同步，在 GPU 垂直同步间隙批量提交 DOM 更新。
+ * 这是主力机制——高频 delta（每 5-10ms 一条）会被合并到一帧。
+ *
+ * 第 2 层：maxBatchTimer（32ms 安全网）
+ * 防止 rAF 节流导致文本长时间不显示。
+ * 场景：标签页后台（rAF 降到 1fps）、极慢流（delta 间隔 >16ms）。
+ * 两个定时器互斥：任一触发后清除另一个。
+ */
 
-            // 第 1 层：rAF
+ // 第 1 层：rAF
             if (!_rafHandle) {
                 _rafHandle = requestAnimationFrame(_flushDelta);
             }
 
-            // 第 2 层：max batch timer（安全网）
+ // 第 2 层：max batch timer（安全网）
             if (!_maxBatchTimer) {
                 _maxBatchTimer = setTimeout(function () {
-                    // 如果 rAF 还没触发，强制刷新
+ // 如果 rAF 还没触发，强制刷新
                     if (_rafHandle) {
                         cancelAnimationFrame(_rafHandle);
                         _rafHandle = null;
@@ -853,8 +863,8 @@ var RamariaChatView = (function () {
             console.error('[ChatView] 注册 chat-delta 监听失败:', err);
         });
 
-        // chat-done（Rust 字段: request_id, backend_id, total_chars，无 content；
-        //   完整内容已通过 chat-delta 送达 DOM，此处读 DOM 文本作为 finalContent）
+ // chat-done（Rust 字段: request_id, backend_id, total_chars，无 content；
+ // 完整内容已通过 chat-delta 送达 DOM，此处读 DOM 文本作为 finalContent）
         TauriBridge.listen('chat-done', function (event) {
             var payload = event.payload;
             if (!payload || !payload.request_id) return;
@@ -864,15 +874,15 @@ var RamariaChatView = (function () {
 
             console.log('[ChatView] 流式完成: ' + payload.request_id);
 
-            // 强制刷新所有待处理 delta（清空 rAF + maxBatchTimer）
+ // 强制刷新所有待处理 delta（清空 rAF + maxBatchTimer）
             _flushDelta();
 
-            // 卸载流式性能优化
+ // 卸载流式性能优化
             _disableStreamOptimizations();
 
             var completedMsgId = _streamingMsgId;  // 在置空前保存
 
-            // 从 DOM 读取已累积的完整文本（chat-delta 已逐字写入 .msg-bubble-text）
+ // 从 DOM 读取已累积的完整文本（chat-delta 已逐字写入 .msg-bubble-text）
             var finalContent = '';
             if (completedMsgId) {
                 var textEl = document.querySelector(
@@ -884,14 +894,14 @@ var RamariaChatView = (function () {
             var createdAt = Date.now();
             RamariaMessageBubble.finalize(completedMsgId, finalContent, createdAt);
 
-            // ★ 先重置 isStreaming，再 appendMessage，确保订阅者能正常渲染
+ // ★ 先重置 isStreaming，再 appendMessage，确保订阅者能正常渲染
             RamariaStore.set('isStreaming', false);
             RamariaStore.set('streamingRequestId', null);
             _streamingMsgId = null;
             _pendingDelta = '';
 
-            // 追加助手消息到 Store
-            // ★ 修复: 助手消息携带当前人格 UID，前端据此在左侧气泡显示"谁在回复"
+ // 追加助手消息到 Store
+ // ★ 修复: 助手消息携带当前人格 UID，前端据此在左侧气泡显示"谁在回复"
             var currentPersona = RamariaStore.get('currentPersonaUid') || '';
             RamariaStore.appendMessage({
                 id: completedMsgId,
@@ -901,11 +911,11 @@ var RamariaChatView = (function () {
                 created_at: createdAt,
             });
 
-            // 隐藏流式提示
+ // 隐藏流式提示
             var hint = $('chat-streaming-hint');
             if (hint) hint.classList.add('hidden');
 
-            // 重新启用输入
+ // 重新启用输入
             _setInputEnabled(true);
 
             _scrollToBottom();
@@ -915,7 +925,7 @@ var RamariaChatView = (function () {
             console.error('[ChatView] 注册 chat-done 监听失败:', err);
         });
 
-        // chat-error（Rust 字段: error_title, error_detail, retryable）
+ // chat-error（Rust 字段: error_title, error_detail, retryable）
         TauriBridge.listen('chat-error', function (event) {
             var payload = event.payload;
             if (!payload || !payload.request_id) return;
@@ -923,30 +933,30 @@ var RamariaChatView = (function () {
             var reqId = RamariaStore.get('streamingRequestId');
             if (payload.request_id !== reqId) return;
 
-            // Rust ChatErrorPayload 字段为 error_title / error_detail，没有 error
+ // Rust ChatErrorPayload 字段为 error_title / error_detail，没有 error
             var title = payload.error_title || '生成失败';
             var detail = payload.error_detail || '请稍后重试';
             console.error('[ChatView] 流式错误: ' + payload.request_id, title, detail);
 
-            // 强制刷新所有待处理 delta 后清理
+ // 强制刷新所有待处理 delta 后清理
             _flushDelta();
 
-            // 卸载流式性能优化
+ // 卸载流式性能优化
             _disableStreamOptimizations();
 
-            // 标记气泡错误
+ // 标记气泡错误
             RamariaMessageBubble.markError(_streamingMsgId, title);
 
-            // 重置状态
+ // 重置状态
             RamariaStore.set('isStreaming', false);
             RamariaStore.set('streamingRequestId', null);
             _streamingMsgId = null;
 
-            // 隐藏流式提示
+ // 隐藏流式提示
             var hint = $('chat-streaming-hint');
             if (hint) hint.classList.add('hidden');
 
-            // 重新启用输入
+ // 重新启用输入
             _setInputEnabled(true);
 
             RamariaToast.show('error', title, detail);
@@ -957,14 +967,14 @@ var RamariaChatView = (function () {
         });
     }
 
-    /** 清理 Tauri 事件监听 */
+ /** 清理 Tauri 事件监听 */
     function _unlistenAll() {
         for (var i = 0; i < _unlistenFns.length; i++) {
             try { _unlistenFns[i](); } catch (_) { /* ignore */ }
         }
         _unlistenFns = [];
 
-        // 清理 rAF 和 maxBatchTimer
+ // 清理 rAF 和 maxBatchTimer
         if (_rafHandle) {
             cancelAnimationFrame(_rafHandle);
             _rafHandle = null;
@@ -978,22 +988,22 @@ var RamariaChatView = (function () {
             _scrollRafHandle = null;
         }
 
-        // 卸载流式优化
+ // 卸载流式优化
         _disableStreamOptimizations();
 
         _pendingDelta = '';
         _streamingMsgId = null;
     }
 
-    // =========================================================
-    // 消息渲染
-    // =========================================================
+ // =========================================================
+ // 消息渲染
+ // =========================================================
 
     function _appendBubble(msg) {
         var msgList = _msgListEl();
         if (!msgList) return;
 
-        // 移除空状态
+ // 移除空状态
         var emptyState = msgList.querySelector('.chat-empty-state');
         if (emptyState) emptyState.remove();
 
@@ -1008,7 +1018,7 @@ var RamariaChatView = (function () {
 
         var messages = RamariaStore.get('messages') || [];
 
-        // 移除空状态和现有气泡（保留空状态类元素以外的所有气泡）
+ // 移除空状态和现有气泡（保留空状态类元素以外的所有气泡）
         var bubbles = msgList.querySelectorAll('.msg-bubble-wrapper');
         for (var i = 0; i < bubbles.length; i++) {
             bubbles[i].remove();
@@ -1037,21 +1047,21 @@ var RamariaChatView = (function () {
         _showEmptyState(msgList);
     }
 
-    // =========================================================
-    // 流式辅助
-    // =========================================================
+ // =========================================================
+ // 流式辅助
+ // =========================================================
 
-    /**
-     * 刷新待处理的 delta 到 DOM（rAF / maxBatchTimer 双路径调用）。
-     *
-     * 说明:
-     * - 由 rAF 回调和 maxBatchTimer 回调共享
-     * - 清空 _pendingDelta 和两个定时器句柄
-     * - 调用 RamariaMessageBubble.updateContent 写入 DOM
-     * - 触发滚动（通过 rAF 批量化，避免 layout thrashing）
-     */
+ /**
+ * 刷新待处理的 delta 到 DOM（rAF / maxBatchTimer 双路径调用）。
+ *
+ * 说明:
+ * - 由 rAF 回调和 maxBatchTimer 回调共享
+ * - 清空 _pendingDelta 和两个定时器句柄
+ * - 调用 RamariaMessageBubble.updateContent 写入 DOM
+ * - 触发滚动（通过 rAF 批量化，避免 layout thrashing）
+ */
     function _flushDelta() {
-        // 清除两个定时器
+ // 清除两个定时器
         if (_rafHandle) {
             cancelAnimationFrame(_rafHandle);
             _rafHandle = null;
@@ -1068,18 +1078,18 @@ var RamariaChatView = (function () {
         }
     }
 
-    // =========================================================
-    // 辅助
-    // =========================================================
+ // =========================================================
+ // 辅助
+ // =========================================================
 
-    /**
-     * 滚动到消息列表底部（rAF 批量化）。
-     *
-     * 说明:
-     * - 在单帧内多次调用 _scrollToBottom 只执行最后一次（合并写操作）。
-     * - 避免在高频 delta 场景下每 delta 都触发 layout→paint 循环。
-     * - scrollTop 赋值触发同步 layout，必须限制频率。
-     */
+ /**
+ * 滚动到消息列表底部（rAF 批量化）。
+ *
+ * 说明:
+ * - 在单帧内多次调用 _scrollToBottom 只执行最后一次（合并写操作）。
+ * - 避免在高频 delta 场景下每 delta 都触发 layout→paint 循环。
+ * - scrollTop 赋值触发同步 layout，必须限制频率。
+ */
     function _scrollToBottomBathed() {
         if (_scrollRafHandle) return;  // 已有待处理的滚动，跳过
         _scrollRafHandle = requestAnimationFrame(function () {
@@ -1091,9 +1101,9 @@ var RamariaChatView = (function () {
         });
     }
 
-    /**
-     * 立即滚动到底部（非流式场景：消息完成、切换会话等）。
-     */
+ /**
+ * 立即滚动到底部（非流式场景：消息完成、切换会话等）。
+ */
     function _scrollToBottom() {
         var msgList = _msgListEl();
         if (msgList) {
@@ -1111,25 +1121,25 @@ var RamariaChatView = (function () {
         if (sendBtn) sendBtn.disabled = !enabled;
     }
 
-    /**
-     * 流式开始时：添加 GPU 加速提示层（will-change）
-     * 和 content-visibility 优化。
-     */
+ /**
+ * 流式开始时：添加 GPU 加速提示层（will-change）
+ * 和 content-visibility 优化。
+ */
     function _enableStreamOptimizations() {
         var msgList = _msgListEl();
         if (msgList) {
-            // GPU 合成层提示：告知浏览器此区域将频繁重绘
+ // GPU 合成层提示：告知浏览器此区域将频繁重绘
             msgList.classList.add('gpu-layer');
-            // content-visibility: auto 跳过屏幕外气泡渲染
+ // content-visibility: auto 跳过屏幕外气泡渲染
             msgList.classList.add('content-optimized');
-            // 标记流式状态供 CSS 使用
+ // 标记流式状态供 CSS 使用
             msgList.classList.add('is-streaming');
         }
     }
 
-    /**
-     * 流式结束时：移除性能优化提示层。
-     */
+ /**
+ * 流式结束时：移除性能优化提示层。
+ */
     function _disableStreamOptimizations() {
         var msgList = _msgListEl();
         if (msgList) {
@@ -1139,9 +1149,9 @@ var RamariaChatView = (function () {
         }
     }
 
-    // =========================================================
-    // 人格选择器刷新
-    // =========================================================
+ // =========================================================
+ // 人格选择器刷新
+ // =========================================================
 
     async function _refreshPersonaSelector() {
         var select = $('chat-persona-select');
@@ -1159,7 +1169,7 @@ var RamariaChatView = (function () {
                 select.appendChild(opt);
             }
 
-            // 默认选中 rama-0001
+ // 默认选中 rama-0001
             var defaultOpt = select.querySelector('option[value="rama-0001"]');
             if (defaultOpt) select.value = 'rama-0001';
         } catch (err) {
@@ -1167,9 +1177,9 @@ var RamariaChatView = (function () {
         }
     }
 
-    // =========================================================
-    // 生命周期
-    // =========================================================
+ // =========================================================
+ // 生命周期
+ // =========================================================
 
     function _registerHooks() {
         var unreg;
@@ -1177,7 +1187,7 @@ var RamariaChatView = (function () {
         unreg = RamariaRouter.registerHook('chat', 'enter', function () {
             console.log('[ChatView] 进入视图');
 
-            // Phase 1.1.1: 初始化非阻塞进度条（嵌入模型下载 / 索引重建）
+ // 初始化非阻塞进度条（嵌入模型下载 / 索引重建）
             if (typeof RamariaProgressBar !== 'undefined') {
                 try {
                     RamariaProgressBar.init();
@@ -1187,25 +1197,25 @@ var RamariaChatView = (function () {
                 }
             }
 
-            // 首次渲染
+ // 首次渲染
             render();
 
-            // 加载数据
+ // 加载数据
             _loadInitialData();
 
-            // 注册流式事件监听
+ // 注册流式事件监听
             _listenStreamEvents();
 
-            // 订阅 messages 变更（用于外部触发渲染）
+ // 订阅 messages 变更（用于外部触发渲染）
             var unsub = RamariaStore.subscribe('messages', function (newMsgs) {
-                // 仅在非流式状态下全量重渲染（流式由 chat-delta 驱动）
+ // 仅在非流式状态下全量重渲染（流式由 chat-delta 驱动）
                 if (!RamariaStore.get('isStreaming')) {
                     _renderAllMessages();
                 }
             });
             _unsubs.push(unsub);
 
-            // 订阅会话变更
+ // 订阅会话变更
             unsub = RamariaStore.subscribe('activeSessionId', function (newId) {
                 if (newId) {
                     RamariaRouter.setSessionInfo('会话: ' + newId.substring(0, 8) + '...');
@@ -1215,14 +1225,14 @@ var RamariaChatView = (function () {
             });
             _unsubs.push(unsub);
 
-            // 更新内容区操作按钮
+ // 更新内容区操作按钮
             RamariaRouter.setContentActions(
                 '<button class="btn btn-ghost btn-sm" id="chat-clear-btn" title="清除当前会话消息">' +
                     '清空' +
                 '</button>'
             );
 
-            // 绑定清空按钮
+ // 绑定清空按钮
             setTimeout(function () {
                 var clearBtn = $('chat-clear-btn') || document.getElementById('chat-clear-btn');
                 if (clearBtn) {
@@ -1239,7 +1249,7 @@ var RamariaChatView = (function () {
         unreg = RamariaRouter.registerHook('chat', 'leave', function () {
             console.log('[ChatView] 离开视图');
 
-            // Phase 1.1.1: 销毁进度条组件，释放事件监听
+ // 销毁进度条组件，释放事件监听
             if (typeof RamariaProgressBar !== 'undefined') {
                 try {
                     RamariaProgressBar.destroy();
@@ -1249,16 +1259,16 @@ var RamariaChatView = (function () {
                 }
             }
 
-            // 清理 Tauri 事件监听
+ // 清理 Tauri 事件监听
             _unlistenAll();
 
-            // 清理 Store 订阅
+ // 清理 Store 订阅
             for (var i = 0; i < _unsubs.length; i++) {
                 try { _unsubs[i](); } catch (_) { /* ignore */ }
             }
             _unsubs = [];
 
-            // 清理内容区操作按钮
+ // 清理内容区操作按钮
             RamariaRouter.setContentActions('');
         });
         _unregisterFns.push(unreg);
@@ -1266,13 +1276,13 @@ var RamariaChatView = (function () {
 
     async function _loadInitialData() {
         try {
-            // ── v1.1.1: 先恢复人格会话映射（从后端 settings 读取）──
+ // ── 先恢复人格会话映射（从后端 settings 读取）──
             await _restorePersonaSessions();
 
-            // 加载人格列表（联动页眉名称）
+ // 加载人格列表（联动页眉名称）
             await _refreshPersonaSelector();
 
-            // 加载会话列表
+ // 加载会话列表
             var sessions = [];
             try {
                 sessions = await RamariaApi.session.list();
@@ -1281,7 +1291,7 @@ var RamariaChatView = (function () {
                 console.warn('[ChatView] 加载会话列表失败:', err);
             }
 
-            // ── v1.1 修复: 检查是否从导入完成页导航过来 ──
+ // ── 检查是否从导入完成页导航过来 ──
             var viewingImported = RamariaStore.get('viewingImportedSession');
             if (viewingImported) {
                 var importedName = RamariaStore.get('viewingImportedName') || '';
@@ -1314,12 +1324,12 @@ var RamariaChatView = (function () {
                 return;
             }
 
-            // ── v1.1.1: 恢复上次对话 ──
-            // 获取当前选中的 persona（默认 rama-0001）
+ // ── 恢复上次对话 ──
+ // 获取当前选中的 persona（默认 rama-0001）
             var personaSelect = $('chat-persona-select');
             var currentPersona = personaSelect ? personaSelect.value : 'rama-0001';
 
-            // 尝试从持久化映射中恢复该人格的 session
+ // 尝试从持久化映射中恢复该人格的 session
             var savedSessionId = RamariaStore.getPersonaSession(currentPersona);
             var loaded = false;
 
@@ -1333,9 +1343,8 @@ var RamariaChatView = (function () {
                         _renderAllMessages();
                         loaded = true;
 
-                        if (session.ended_at) {
-                            _setReadonlyMode(true);
-                        }
+ // ★ 不启用只读模式：用户回到对话页就是要继续聊的。
+ // 即使 session 已关闭，输入框保持可用——下次发送自动创建新 session。
                         RamariaRouter.setSessionInfo('会话: ' + savedSessionId.substring(0, 8) + '...');
                         console.log('[ChatView] 恢复会话: ' + savedSessionId + ' (' + session.messages.length + ' 条消息)');
                     }
@@ -1345,7 +1354,7 @@ var RamariaChatView = (function () {
             }
 
             if (!loaded) {
-                // 无持久化映射或 session 已失效，显示空状态
+ // 无持久化映射或 session 已失效，显示空状态
                 RamariaStore.set('activeSessionId', null);
                 RamariaStore.set('messages', []);
                 RamariaStore.set('currentPersonaUid', currentPersona);
@@ -1354,14 +1363,14 @@ var RamariaChatView = (function () {
                 console.log('[ChatView] 无历史会话，显示空状态');
             }
 
-            // 同步页眉
+ // 同步页眉
             _updateHeaderPersona();
         } catch (err) {
             console.error('[ChatView] 加载初始数据失败:', err);
         }
     }
 
-    /** HTML 实体转义（内联辅助函数，避免跨文件依赖） */
+ /** HTML 实体转义（内联辅助函数，避免跨文件依赖） */
     function _escHtml(text) {
         if (!text) return '';
         return String(text)
@@ -1371,18 +1380,18 @@ var RamariaChatView = (function () {
             .replace(/"/g, '&quot;');
     }
 
-    // =========================================================
-    // 初始化
-    // =========================================================
+ // =========================================================
+ // 初始化
+ // =========================================================
 
     function init() {
         console.log('[ChatView] 初始化对话视图...');
         _registerHooks();
     }
 
-    // =========================================================
-    // 公开 API
-    // =========================================================
+ // =========================================================
+ // 公开 API
+ // =========================================================
 
     return {
         init: init,
@@ -1409,7 +1418,7 @@ var RamariaChatView = (function () {
     }
     RamariaChatView.init();
 
-    // 若当前视图已激活（Router 已提前路由但钩子尚未注册），强制重新进入
+ // 若当前视图已激活（Router 已提前路由但钩子尚未注册），强制重新进入
     var currentView = RamariaRouter.getCurrentView();
     if (currentView === 'chat') {
         setTimeout(function () {

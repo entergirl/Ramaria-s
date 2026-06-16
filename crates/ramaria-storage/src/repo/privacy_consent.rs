@@ -4,7 +4,7 @@
 //! - 按 provider + base_url 粒度记录用户的线上调用隐私确认
 //! - persistent 字段控制是否跨重启持久化（勾选"下次不再提醒"）
 //! - get_by_provider 取最新一条记录，按 timestamp DESC 排序
-//! - provider 存储时使用 `LlmProvider::as_str()`，读取时解析回枚举
+//! - provider 存储时使用 `LlmProvider::as_str`，读取时解析回枚举
 //! - 非法 provider 值 → `RamariaError::Validation`（DeserializationError），不再静默回退
 
 use crate::repo::StorageResultExt;

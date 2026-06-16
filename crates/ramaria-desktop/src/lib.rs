@@ -62,13 +62,7 @@ fn init_tracing(log_dir: &std::path::Path) {
         .truncate(true)
         .write(true)
         .open(&log_file_path)
-        .unwrap_or_else(|e| {
-            panic!(
-                "无法创建日志文件 '{}': {}",
-                log_file_path.display(),
-                e
-            )
-        });
+        .unwrap_or_else(|e| panic!("无法创建日志文件 '{}': {}", log_file_path.display(), e));
 
     let stdout_layer = fmt::layer()
         .with_target(true)
@@ -395,16 +389,16 @@ pub fn run() {
             commands::export::export_sessions_markdown,
             // ---- Index ----
             commands::index_cmd::rebuild_index,
-            // ---- Import (v1.1) ----
+            // ---- Import ----
             commands::import_cmd::analyze_qq_chat,
             commands::import_cmd::import_qq_chat,
             commands::import_cmd::detect_qq_format,
-            // ---- Persona (v1.1 Phase 6) ----
+            // ---- Persona ----
             commands::persona::list_personas_full,
             commands::persona::update_persona_info,
             commands::persona::refresh_persona,
             commands::persona::regenerate_import_pipeline,
-            // ---- Diagnostics (v1.1 Phase 7) ----
+            // ---- Diagnostics ----
             commands::diagnostics::check_update,
             commands::diagnostics::get_version,
             commands::diagnostics::export_diagnostics,

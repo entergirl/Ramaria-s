@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-storage/src/lib.rs - Ramaria SQLite 存储层（v1.0 完整版）
+//! rust/crates/ramaria-storage/src/lib.rs - Ramaria SQLite 存储层
 //!
 //! 设计特点:
 //! - 封装 SqlitePool，实现 `StorageBackend` trait 的全部方法（覆盖 23 张表）
@@ -98,6 +98,13 @@ impl StorageBackend for SqliteStorage {
     }
     async fn list_unabsorbed_l1(&self, persona_uid: &str) -> RamariaResult<Vec<MemoryL1>> {
         repo::memory_l1::list_unabsorbed(&self.pool, persona_uid).await
+    }
+    async fn list_recent_l1_by_persona(
+        &self,
+        persona_uid: &str,
+        limit: u32,
+    ) -> RamariaResult<Vec<MemoryL1>> {
+        repo::memory_l1::list_recent_by_persona(&self.pool, persona_uid, limit).await
     }
 
     // =========================================================
@@ -885,7 +892,7 @@ mod tests {
                 "测试角色", // name 不变
                 Some("avatar_url_here"),
                 Some(r#"{"description":"更新后的描述"}"#),
-                None, // Phase 6: description 保持旧值
+                None, // description 保持旧值
             )
             .await
             .unwrap();
@@ -918,7 +925,7 @@ mod tests {
                 "测试角色",
                 None, // avatar 传 None 不更新
                 Some(r#"{"key":"value"}"#),
-                None, // Phase 6: description 保持旧值
+                None, // description 保持旧值
             )
             .await
             .unwrap();

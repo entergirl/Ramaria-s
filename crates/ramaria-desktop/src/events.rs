@@ -21,7 +21,7 @@ pub const EVENT_CHAT_DONE: &str = "chat-done";
 pub const EVENT_CHAT_ERROR: &str = "chat-error";
 /// 关闭窗口确认事件名（前端弹窗后用户选择操作）
 pub const EVENT_CLOSE_REQUESTED: &str = "close-requested";
-/// 导入进度事件名（v1.1）
+/// 导入进度事件名
 pub const EVENT_IMPORT_PROGRESS: &str = "import-progress";
 
 // =========================================================
@@ -115,7 +115,7 @@ impl ChatErrorPayload {
 }
 
 // =========================================================
-// 导入进度事件（v1.1）
+// 导入进度事件
 // =========================================================
 
 /// 导入深度处理进度事件负载。

@@ -2,8 +2,8 @@
 //!
 //! 设计特点:
 //! - list: 显示当前完整配置（API key 遮蔽为 "***"）
-//! - get:  获取单个配置项
-//! - set:  设置单个配置项（provider/base_url/temperature/max_tokens）
+//! - get: 获取单个配置项
+//! - set: 设置单个配置项（provider/base_url/temperature/max_tokens）
 //! - 写操作自动保存到存储层
 //! - 敏感信息（API key）只通过 keychain 操作，config 命令不直接读写
 

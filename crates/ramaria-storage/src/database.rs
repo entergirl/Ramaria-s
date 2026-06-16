@@ -19,8 +19,8 @@ const DEV_DB_RELATIVE_PATH: &str = ".ramaria-dev/assistant.db";
 ///
 /// 参数:
 /// - `db_path`: 可选显式数据库路径。为 None 时按优先级查找：
-///   1. `RAMARIA_DATA_DIR` 环境变量 + `/assistant.db`
-///   2. 开发模式默认路径 `rust/.ramaria-dev/assistant.db`
+/// 1. `RAMARIA_DATA_DIR` 环境变量 + `/assistant.db`
+/// 2. 开发模式默认路径 `rust/.ramaria-dev/assistant.db`
 ///
 /// 返回:
 /// - 成功时返回已连接且已执行 migration 的连接池。

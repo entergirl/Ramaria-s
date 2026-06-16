@@ -1,14 +1,14 @@
 //! rust/crates/ramaria-importer/src/qq/mod.rs - QQ 聊天记录导入模块
 //!
 //! 设计特点:
-//! - 仅支持 shuakami/qq-chat-exporter v5.x JSON 格式（TXT 已从 v1.1 移除）
-//! - `QqImporter` 实现 `ImportSource` trait，通过 `detect_format()` 检测 JSON 格式
+//! - 仅支持 shuakami/qq-chat-exporter v5.x JSON 格式（TXT 已从 移除）
+//! - `QqImporter` 实现 `ImportSource` trait，通过 `detect_format` 检测 JSON 格式
 //! - 快速导入：仅写 messages 表，标记 fingerprint 去重
 //! - 深度导入：创建 session → 写入 L0 → 关闭 session → 触发全管线
-//! - Phase 5B: 双画像支持——按发送者分别关联 persona（self_persona_uid vs other_persona_uid）
-//! - Phase 5B: `build_persona_uid()` 提供 4 级优先级的 UID 生成策略
-//! - Phase 5B: `ensure_qq_persona()` 复用原有逻辑，每次调用创建/查找单个 persona
-//! - 完整覆盖 qce v5.x 全部 11 种消息类型（含 v1.1 新增的 type_8/10/19 和 system 过滤）
+//! - 双画像支持——按发送者分别关联 persona（self_persona_uid vs other_persona_uid）
+//! - `build_persona_uid` 提供 4 级优先级的 UID 生成策略
+//! - `ensure_qq_persona` 复用原有逻辑，每次调用创建/查找单个 persona
+//! - 完整覆盖 qce v5.x 全部 11 种消息类型（含 type_8/10/19 和 system 过滤）
 
 pub mod parser;
 
@@ -29,7 +29,7 @@ use crate::traits::{ImportReport, ImportSource, ImportedSession};
 /// 职责:
 /// - 实现 `ImportSource` trait，提供 QQ 聊天记录的格式检测和解析能力。
 /// - 仅支持 qq-chat-exporter v5.x JSON 格式。
-/// - 提供 `execute_fast_import()` 方法，执行完整的 L0 导入流程。
+/// - 提供 `execute_fast_import` 方法，执行完整的 L0 导入流程。
 pub struct QqImporter;
 
 impl QqImporter {
@@ -40,7 +40,7 @@ impl QqImporter {
 
     /// 执行快速导入：仅写入 messages 表（L0）。
     ///
-    /// Phase 5B 双画像支持：
+    /// 双画像支持：
     /// - 根据每条消息的发送者（`sender_uid == self_uid`）区分画像归属。
     /// - 导出者本人的消息关联 `self_persona_uid`，对方消息关联 `other_persona_uid`。
     ///
@@ -56,7 +56,7 @@ impl QqImporter {
     ///
     /// 说明:
     /// - 每个 session 创建为已关闭的历史 session。
-    /// - 消息使用 `save_import()` 写入，绕过 session 活跃状态检查。
+    /// - 消息使用 `save_import` 写入，绕过 session 活跃状态检查。
     /// - 返回的 session_ids 供调用方触发 L1 摘要等后处理。
     pub async fn execute_fast_import(
         pool: &SqlitePool,
@@ -92,7 +92,7 @@ impl QqImporter {
             // 逐条写入消息，按发送者分配 persona_uid
             let mut msg_count = 0usize;
             for parsed in &session.messages {
-                // Phase 5B: 按发送者决定使用哪个 persona_uid
+                // 按发送者决定使用哪个 persona_uid
                 let persona_for_msg = if parsed.sender_uid == self_uid {
                     self_msg_count += 1;
                     self_persona_uid
@@ -177,7 +177,7 @@ impl ImportSource for QqImporter {
 }
 
 // =========================================================
-// Persona UID 生成策略（Phase 5B）
+// Persona UID 生成策略
 // =========================================================
 
 /// 按优先级生成 persona UID。
@@ -190,7 +190,7 @@ impl ImportSource for QqImporter {
 /// 1. **用户显式指定** — `user_provided_uid` 非空时使用；若不以 `char-` 开头则自动补全。
 /// 2. **QQ 号（uin）** — 格式 `char-{uin}`，如 `char-123456789`。简洁且对用户可读。
 /// 3. **QQ 内部 UID** — 格式 `char-{uid}`，回退方案。
-/// 4. **自动递增序号** — 格式 `char-{seq:04}`，如 `char-0003`。通过 `next_seq()` 查询已有 QQ persona 的最大 seq+1。
+/// 4. **自动递增序号** — 格式 `char-{seq:04}`，如 `char-0003`。通过 `next_seq` 查询已有 QQ persona 的最大 seq+1。
 ///
 /// 安全约束:
 /// - `char-` 前缀作为固定格式不可被修改或截断，所有返回的 UID 均以 `char-` 开头。
@@ -282,7 +282,7 @@ pub async fn ensure_qq_persona(
     }
 
     // 优先级 2: 按 (kind, source, ref_id) 查找，防止 UNIQUE 索引冲突
-    //   idx_personas_kind_source_ref ON personas(kind, source, ref_id) WHERE ref_id IS NOT NULL
+    // idx_personas_kind_source_ref ON personas(kind, source, ref_id) WHERE ref_id IS NOT NULL
     if let Some(rid) = ref_id {
         let kind = PersonaKind::from_uid(persona_uid);
         let by_ref =
@@ -334,14 +334,14 @@ pub async fn ensure_qq_persona(
 }
 
 // =========================================================
-// 单元测试（Phase 5B: T-V11-5B-013）
+// 单元测试
 // =========================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // ── build_persona_uid() 4 级优先级测试 ──
+    // ── build_persona_uid 4 级优先级测试 ──
 
     #[test]
     fn build_persona_uid_level_1_user_provided() {

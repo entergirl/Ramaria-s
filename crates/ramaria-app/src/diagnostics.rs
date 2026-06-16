@@ -83,11 +83,11 @@ struct SystemInfo {
 /// 示例:
 /// ```ignore
 /// let report = export_diagnostics(
-///     &app.config,
-///     "1",
-///     Path::new("C:/Users/me/Desktop/ramaria-diagnostics.zip"),
+/// &app.config,
+/// "1",
+/// Path::new("C:/Users/me/Desktop/ramaria-diagnostics.zip"),
 /// ).await?;
-/// println!("诊断信息已导出到: {}", report.output_path.display());
+/// println!("诊断信息已导出到: {}", report.output_path.display);
 /// ```
 pub async fn export_diagnostics(
     config: &RamariaConfig,
@@ -243,7 +243,9 @@ fn collect_config(config: &RamariaConfig, status: &mut HashMap<String, String>) 
                 "skipped: 未使用配置文件（配置存储在数据库中）".to_string(),
             );
             tracing::debug!("配置文件不存在（预期：配置存储在数据库中），跳过收集");
-            String::from("# 配置文件不存在（Ramaria 将配置存储在数据库中，不使用 config.toml 文件）\n")
+            String::from(
+                "# 配置文件不存在（Ramaria 将配置存储在数据库中，不使用 config.toml 文件）\n",
+            )
         }
         Err(e) => {
             let msg = format!("# 无法读取配置文件 ({}): {}\n", config_path.display(), e);

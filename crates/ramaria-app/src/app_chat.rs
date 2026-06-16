@@ -1,7 +1,7 @@
 //! rust/crates/ramaria-app/src/app_chat.rs - 核心对话管线
 //!
 //! 设计特点:
-//! - 从 `app.rs` 提取的 `send_message` 完整对话管线（Phase 8 文件拆分）
+//! - 从 `app.rs` 提取的 `send_message` 完整对话管线
 //! - 包含记忆检索、System Prompt 装配、Token Budget、LLM 流式调用、消息保存
 //! - 自由函数: `load_persona_toml_prompt`（冷启动兜底）、`stream_forward_task`（流式转发）
 //! - 降级策略: 嵌入模型不可用 → 仅 BM25+图谱检索；persona.toml 缺失 → 默认 Ramaria prompt
@@ -18,6 +18,7 @@ use ramaria_core::traits::{ChatMessage, ChatRequest, StorageBackend};
 use ramaria_core::types::{
     AppState, Message, MessageRole, MessageSource, PersonaKind, ProfileField, new_id, now_ms,
 };
+use ramaria_memory::decay::{DecayConfig, calc_decay_r};
 use ramaria_memory::parse_persona_toml;
 use ramaria_memory::prompt::builder::{PromptConfig, PromptContext, assemble_prompt};
 use ramaria_memory::rag::{RagConfig, filter_by_persona, format_context_text};
@@ -45,7 +46,7 @@ impl App {
     /// 6. 构建 System Prompt（5-Block 装配器）
     /// 7. Token 预算管理
     /// 8. 构建 ChatRequest
-    /// 9. 调用 LLM provider.chat_stream()
+    /// 9. 调用 LLM provider.chat_stream
     /// 10. 后台任务收集完整回复 + 保存消息 + 转发 StreamEvent
     ///
     /// 参数:
@@ -70,7 +71,7 @@ impl App {
             match state {
                 AppState::Ready => { /* 正常，继续 */ }
                 AppState::Degraded => {
-                    // v1.1: Degraded 允许对话（仅向量通道不可用，BM25+图谱仍工作）
+                    // Degraded 允许对话（仅向量通道不可用，BM25+图谱仍工作）
                     tracing::warn!("应用处于降级状态，对话功能可用但向量检索已降级");
                 }
                 AppState::FatalError => {
@@ -98,7 +99,7 @@ impl App {
         }
 
         // ---- Step 3: 会话管理 ----
-        // v1.1: 自动创建 session + 只读约束
+        // 自动创建 session + 只读约束
         let session = match session_id {
             Some(sid) => {
                 // 使用指定 session（前端传入的 session_id）
@@ -117,7 +118,7 @@ impl App {
                     )));
                 }
 
-                // v1.1 修复：无论前端传入还是后端创建，都同步追踪活跃 session
+                // 修复：无论前端传入还是后端创建，都同步追踪活跃 session
                 // 否则 save_and_close_session 找不到活跃 session → 返回 "无活跃对话"
                 self.lifecycle.set_active_session_id_public(Some(s.id));
 
@@ -125,7 +126,7 @@ impl App {
             }
             None => {
                 // 自动创建新 session
-                // 对齐 Python `on_message()`: 无活跃 session 时自动创建
+                // 对齐 Python `on_message`: 无活跃 session 时自动创建
                 let s = self.storage.create_session().await?;
                 self.lifecycle.set_active_session_id_public(Some(s.id));
                 tracing::info!(session_id = %s.id, "自动创建新 session");
@@ -146,15 +147,52 @@ impl App {
             })
             .collect();
 
+        // ---- Step 4.5: 预加载近期 L1 摘要（跨 session 上下文注入） ----
+        // 解决新 session 发"你好"时 LLM 完全不知道上次聊了什么的问题。
+        // 不依赖关键词匹配——近期摘要无条件注入 System Prompt Block C1。
+        let actual_uid = persona_uid.unwrap_or("rama-0001");
+        let recent_l1 = self
+            .storage
+            .list_recent_l1_by_persona(actual_uid, 3)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    persona_uid = actual_uid,
+                    %e,
+                    "加载近期 L1 摘要失败，跨 session 上下文降级为空"
+                );
+                Vec::new()
+            });
+
+        // 格式化近期摘要为可读文本
+        let recent_summaries: Vec<String> =
+            recent_l1.iter().map(format_l1_as_context_line).collect();
+
+        // 获取最后活跃时间（取最近一条 L1 的创建时间）
+        let last_active_at: Option<String> = recent_l1.first().map(|l1| {
+            // Unix 毫秒 → 可读日期时间
+            let secs = l1.created_at / 1000;
+            match chrono::DateTime::from_timestamp(secs, 0) {
+                Some(dt) => dt.format("%Y-%m-%d %H:%M").to_string(),
+                None => String::new(),
+            }
+        });
+
         // ---- Step 5: 记忆检索 + RAG ----
         let memory_context = self
             .search_and_assemble_context(user_input, persona_uid)
             .await;
 
         // ---- Step 6: 构建 System Prompt（5-Block 装配器） ----
-        let system_prompt = self.build_system_prompt(persona_uid).await;
+        let system_prompt = self
+            .build_system_prompt_with_context(
+                persona_uid,
+                &recent_summaries,
+                last_active_at.as_deref(),
+            )
+            .await;
 
-        // ---- Step 6.5: Token 预算管理（Phase 1.1.2） ----
+        // ---- Step 6.5: Token 预算管理 ----
         // 按 provider 的 context_window 限制上下文大小，在句子边界截断
         let context_window = cfg.capability.context_window as usize;
         let budget_config = TokenBudgetConfig::new(context_window, cfg.max_tokens);
@@ -264,9 +302,11 @@ impl App {
     /// - `None`: 检索器为空或无相关记忆。
     ///
     /// 说明:
-    /// - v1.1: 尝试使用嵌入模型生成 query 向量；
+    /// - : 尝试使用嵌入模型生成 query 向量；
     ///   若嵌入模型不可用（未配置或加载失败），
     ///   向量通道自动降级为权重 0，BM25 + 图谱仍正常工作。
+    /// - v1.2: 检索结果应用 Ebbinghaus 时间衰减，
+    ///   使近期记忆的排序优于同样相关但更旧的记忆。
     async fn search_and_assemble_context(
         &self,
         query: &str,
@@ -299,7 +339,7 @@ impl App {
         };
 
         // 锁定检索器执行搜索（纯同步操作，不跨越 .await）
-        let results = {
+        let mut results = {
             let retriever = match self.retriever.lock() {
                 Ok(guard) => guard,
                 Err(e) => {
@@ -327,6 +367,43 @@ impl App {
             return None;
         }
 
+        // ---- 时间衰减：rrf_score × Ebbinghaus decay ----
+        // 根据记忆层级选择衰减参数：L2 事件比 L1 摘要衰减更慢。
+        let now = now_ms();
+        let decay_config_l1 = DecayConfig::l1(); // S=30
+        let decay_config_l2 = DecayConfig::l2(); // S=60
+
+        for r in &mut results {
+            let decay_config = if r.layer == "l2" {
+                &decay_config_l2
+            } else {
+                &decay_config_l1
+            };
+
+            // salience: SearchResult 当前不携带此字段（后续可从 L1DocView/L2DocView 回填）。
+            // 使用中性值 0.5，确保时间衰减生效但不过度偏向。
+            let salience = 0.5;
+
+            let decay_factor = calc_decay_r(r.created_at, now, salience, decay_config);
+            r.rrf_score *= decay_factor;
+
+            tracing::trace!(
+                doc_id = %r.doc_id,
+                layer = %r.layer,
+                rrf_original = r.rrf_score / decay_factor,
+                decay_factor = format!("{:.4}", decay_factor),
+                rrf_adjusted = format!("{:.4}", r.rrf_score),
+                "时间衰减已应用"
+            );
+        }
+
+        // 重新按衰减后的 rrf_score 排序
+        results.sort_by(|a, b| {
+            b.rrf_score
+                .partial_cmp(&a.rrf_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
         // Persona-Aware 过滤
         let persona_kind = persona_uid
             .map(PersonaKind::from_uid)
@@ -346,27 +423,39 @@ impl App {
             total_results = results.len(),
             filtered = filtered.len(),
             context_chars = context.chars().count(),
-            "记忆上下文已组装"
+            "记忆上下文已组装（含时间衰减）"
         );
 
         Some(context)
     }
 
-    /// 构建 System Prompt（使用 5-Block 装配器）。
+    /// 构建 System Prompt（使用 5-Block 装配器，含跨 session 上下文）。
     ///
     /// 流程:
     /// 1. 从 storage 加载当前 persona 的数据（persona/facts/traits/examples）。
-    /// 2. 调用 `assemble_prompt()` 组装 5-Block System Prompt。
-    /// 3. 无 persona 数据时降级为基础 Ramaria 默认 prompt。
+    /// 2. 注入近期 L1 摘要（跨 session 上下文）和最后活跃时间。
+    /// 3. 调用 `assemble_prompt` 组装 5-Block System Prompt。
+    /// 4. 无 persona 数据时降级为基础 Ramaria 默认 prompt。
+    ///
+    /// 参数:
+    /// - `persona_uid`: 人格标识。
+    /// - `recent_summaries`: 近期 L1 摘要列表（预格式化文本）。
+    /// - `last_active_at`: 最后活跃时间字符串（YYYY-MM-DD HH:MM 格式）。
     ///
     /// 降级策略:
     /// - storage 读取失败 → 记录 warn 日志，使用空数据继续。
     /// - persona 不存在 → 使用默认 Ramaria 身份 prompt。
     /// - facts/traits/examples 为空 → 对应 Block 自动省略（由 builder 处理）。
+    /// - recent_summaries 为空 → Block C1 显示"首次对话"提示。
     ///
     /// 安全约束:
     /// - 不在此处写入 system prompt 到日志（完整 prompt 仅发送到 LLM）。
-    async fn build_system_prompt(&self, persona_uid: Option<&str>) -> String {
+    async fn build_system_prompt_with_context(
+        &self,
+        persona_uid: Option<&str>,
+        recent_summaries: &[String],
+        last_active_at: Option<&str>,
+    ) -> String {
         let actual_uid = persona_uid.unwrap_or("rama-0001");
 
         // 尝试加载 persona 数据
@@ -429,6 +518,9 @@ impl App {
                 examples,
                 // memory_context 由 send_message 在 ChatRequest 中单独注入，不在此处拼入
                 memory_context: None,
+                // 跨 session 上下文: 近期 L1 摘要 + 最后活跃时间
+                recent_session_summaries: recent_summaries.to_vec(),
+                last_active_at: last_active_at.map(|s| s.to_string()),
                 knowledge_boundary: None,
                 current_time_str: Some(chrono::Local::now().format("%Y-%m-%d %H:%M").to_string()),
                 weather: None,
@@ -520,7 +612,7 @@ fn load_persona_toml_prompt(db_config: Option<&str>) -> Option<String> {
 /// 文件系统回退: 优先尝试新路径 `../config/personas/rama-0001.toml`，其次旧路径 `../config/persona.toml`。
 ///
 /// 说明:
-/// - 新路径为目录扫描模式（Phase 4.2），每文件 = 一个 persona。
+/// - 新路径为目录扫描模式，每文件 = 一个 persona。
 /// - 旧路径保留作为兼容回退，供未迁移的旧安装使用。
 fn fallback_read_persona_toml() -> Option<String> {
     // 优先尝试新路径
@@ -541,6 +633,45 @@ fn fallback_read_persona_toml() -> Option<String> {
             tracing::debug!(%old_path, %e, "persona.toml 文件系统回退失败");
             None
         }
+    }
+}
+
+// =========================================================
+// 辅助: 格式化 L1 摘要为上下文行
+// =========================================================
+
+/// 将 MemoryL1 格式化为一行上下文文本，供 Block C1 [近期对话摘要] 使用。
+///
+/// 格式:
+/// - 含时间段: "上午 — 讨论了Python异步编程的线程安全问题。氛围融洽。"
+/// - 无时间段: "讨论了Python异步编程的线程安全问题。氛围融洽。"
+///
+/// 截断规则:
+/// - 单条摘要最多 120 字符（与 RAG 格式化一致），超出加省略号。
+///
+/// 安全约束:
+/// - 不在此处记录完整摘要到 INFO 日志（仅 DEBUG 级别可记录）。
+fn format_l1_as_context_line(l1: &ramaria_core::types::MemoryL1) -> String {
+    let time_label = l1.time_period.as_deref().unwrap_or("");
+
+    let atmosphere = l1.atmosphere.as_deref().unwrap_or("");
+
+    let base = if !time_label.is_empty() && !atmosphere.is_empty() {
+        format!("{time_label} — {}。氛围{atmosphere}。", l1.summary)
+    } else if !time_label.is_empty() {
+        format!("{time_label} — {}", l1.summary)
+    } else if !atmosphere.is_empty() {
+        format!("{}。氛围{atmosphere}。", l1.summary)
+    } else {
+        l1.summary.clone()
+    };
+
+    // 截断到 120 字符
+    if base.chars().count() > 120 {
+        let truncated: String = base.chars().take(120).collect();
+        truncated + "…"
+    } else {
+        base
     }
 }
 

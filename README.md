@@ -1,4 +1,4 @@
-# 珊瑚菌 · Ramaria v1.0
+# 珊瑚菌 · Ramaria v1.1
 
 > 大模型懂一切，唯独不懂你。
 
@@ -20,6 +20,7 @@
 - 🎭 **人格画像自动推断**：从对话事件中识别对话对象的性格特征，LLM 以此人格身份进行对话
 - 🔍 **三通道混合 RAG 检索**：向量检索 + BM25 关键词 + 知识图谱，Persona-Aware 过滤，RRF 融合 + Ebbinghaus 遗忘曲线衰减
 - 🔒 **数据完全本地化**：所有记忆存储在本地 SQLite，不上传任何服务器；线上 API 调用可控可关闭
+- 📥 **聊天记录导入**：支持 QQ 聊天记录导入（JSON + TXT），快速/深度双模式
 - 🖥️ **原生桌面应用**：基于 Tauri 2 构建，含系统托盘、通知、凭据管理器集成，性能优异
 - ⚙️ **Rust 实现**：零 GC 停顿，内存安全，启动快，CPU/内存占用低
 
@@ -47,10 +48,11 @@
 Tauri 桌面应用 / CLI
     ↓↑ Command / 函数调用
 ramaria-app  应用编排层（状态机: NeedsSetup → Indexing → Ready）
-    ├── ramaria-memory    记忆管线（L0→L3）+ 混合 RAG + 性格推断
-    ├── ramaria-llm       LLM Provider（LM Studio / DeepSeek / OpenAI）
-    ├── ramaria-storage   SQLite（23 张表，Repository 模式）
-    └── ramaria-core      核心类型 & Trait（零 I/O）
+    ├── ramaria-memory     记忆管线（L0→L3）+ 混合 RAG + 性格推断
+    ├── ramaria-llm        LLM Provider（LM Studio / DeepSeek / OpenAI）
+    ├── ramaria-importer   聊天记录导入（QQ 解析 + 双模式导入）
+    ├── ramaria-storage    SQLite（23 张表，Repository 模式）
+    └── ramaria-core       核心类型 & Trait（零 I/O）
 ```
 
 ### 模块职责
@@ -59,22 +61,24 @@ ramaria-app  应用编排层（状态机: NeedsSetup → Indexing → Ready）
 |------|----------|------|
 | **ramaria-core** | 纯 Rust 类型系统 | 9 个枚举 + 9 个结构体 + StorageBackend trait（40+ 方法）+ LlmProvider trait |
 | **ramaria-storage** | SQLite（sqlx） | 23 张表 schema、19 个 Repository、手动行映射避免 derive 侵入 |
-| **ramaria-memory** | 自研管线 | 分层摘要→事件提取→性格推断、BM25/Qdrant 向量/图谱三通道 RAG、Ebbinghaus 衰减、RRF 融合 |
-| **ramaria-llm** | reqwest + SSE | 3 后端适配器、SSE 流式传输、AP | Key 凭据管理器、指数退避重试 |
-| **ramaria-app** | async-trait | CLI/Desktop 共用编排层，状态机、隐私确认、流式事件模型 |
-| **ramaria-cli** | clap derive | 9 个子命令、交互式 REPL、色彩输出 |
-| **ramaria-desktop** | Tauri 2 | 原生窗口、系统托盘、通知、CSP、Markdown 渲染、前端 JS |
+| **ramaria-memory** | 自研管线 | 分层摘要→事件提取→性格推断、BM25/Qdrant 向量/图谱三通道 RAG、Ebbinghaus 衰减、RRF 融合、Token Budgeting |
+| **ramaria-llm** | reqwest + SSE | 3 后端适配器、SSE 流式传输、API Key 凭据管理器、指数退避重试、ONNX 嵌入模型 |
+| **ramaria-importer** | encoding_rs + sha2 | QQ 聊天记录解析（JSON + TXT）、快速/深度双模式、双画像自动创建 |
+| **ramaria-app** | async-trait | CLI/Desktop 共用编排层，状态机、隐私确认、流式事件模型、Session 生命周期管理、后台任务调度 |
+| **ramaria-cli** | clap derive | 11 个子命令、交互式 REPL、色彩输出 |
+| **ramaria-desktop** | Tauri 2 | 原生窗口、系统托盘、通知、CSP、Markdown 渲染、前端 JS（7 个视图） |
 
 ### 依赖关系（自底向上）
 
 ```
 ramaria-core         零依赖，纯类型边界
-  ├── ramaria-storage  依赖 core
-  ├── ramaria-llm      依赖 core
-  └── ramaria-memory   依赖 core + storage
-        └── ramaria-app      依赖 core + storage + memory + llm
-              ├── ramaria-cli     依赖 app + core + storage + llm
-              └── ramaria-desktop 依赖 app + core + storage + llm
+  ├── ramaria-storage    依赖 core
+  ├── ramaria-llm        依赖 core
+  ├── ramaria-importer   依赖 core + storage
+  └── ramaria-memory     依赖 core + storage
+        └── ramaria-app        依赖 core + storage + memory + llm + importer
+              ├── ramaria-cli       依赖 app + core + storage + llm
+              └── ramaria-desktop   依赖 app + core + storage + llm
 ```
 
 ---
@@ -87,9 +91,9 @@ ramaria-core         零依赖，纯类型边界
 L3 人格画像（长期稳定特征 + 置信度追踪）
     ↑ Phase A 统计推断 + Phase B LLM 推断 + Phase C 增量更新
 L2 离散事件（8 个推断属性: confidence/valence/salience/attitude/paraphrase...）
-    ↑ LLM 从 L1 中提取
-L1 单次会话摘要（summary + keywords + time_period + atmosphere + 情感元数据）
-    ↑ LLM 从 L0 中压缩
+    ↑ LLM 从 L1 中提取（未吸收 L1 ≥ 5 条 或 最早超 7 天触发）
+L1 单次会话摘要（summary + keywords + time_period + atmosphere + 情感元数据 + situation_strength）
+    ↑ LLM 从 L0 中压缩（session 关闭时触发）
 L0 原始消息（永久保留，不删除，不过滤，标记发言人）
 ```
 
@@ -102,21 +106,21 @@ L0 原始消息（永久保留，不删除，不过滤，标记发言人）
 
 ### L1 — 单次会话摘要层
 
-- **触发时机**：session 结束后自动触发
-- **结构化字段**：摘要文本、关键词标签（从关键词池优先选择）、时间段（六选一）、对话氛围（四字以内）
+- **触发时机**：session 结束后自动触发（手动关闭或空闲 10 分钟自动关闭）
+- **结构化字段**：摘要文本、关键词标签（从关键词池优先选择）、时间段（六选一）、对话氛围（四字以内）、情境强度（1-5 级）
 - **情感元数据**：效价（valence, -1.0..1.0）和显著性（salience, 0.0..1.0）双字段，驱动记忆衰减差异化
 - **关键词收敛**：优先复用 keyword_pool 中的已有词条，避免同义词膨胀
 
 ### L2 — 离散事件提取层
 
-- **触发条件**：未吸收的 L1 ≥ 5 条，或最早未吸收 L1 超过 7 天
+- **触发条件**：未吸收的 L1 ≥ 5 条，或最早未吸收 L1 超过 7 天（双路径触发）
 - **事件属性**：title、summary、confidence、valence、salience、attitude、paraphrase、event_type
 - **降级策略**：LLM 不可用时自动回退到规则式降级生成（combine summaries + 统计属性）
 - L1 被吸收后以 lower_weight 保留，支持溯源与回滚
 
 ### L3 — 人格画像层
 
-- **Phase A（统计推断）**：置信度 ≥ 0.6 的事件参与特征均值计算，默认比重汇总
+- **Phase A（统计推断）**：置信度 ≥ 0.6 的事件参与特征均值计算，situation_multiplier 情境加权
 - **Phase B（LLM 推断）**：LLM 从事件聚类中提取抽象人格特征（trait_name + value + evidence + confidence）
 - **Phase C（增量更新）**：定期对比新旧画像，计算 drift（漂移度），确认迁移路径
 - **三层结构**：surface（说话风格）→ behavioral（行为模式）→ core（核心价值观），逐层置信度递增
@@ -141,6 +145,7 @@ L0 原始消息（永久保留，不删除，不过滤，标记发言人）
       1. 向量通道（Qdrant / 暴力搜索）— 语义相似度
       2. BM25 通道（自研全文索引）— 关键词精确匹配
       3. 图谱通道（BFS 遍历实体关系）— 关联记忆召回
+  → Token Budgeting（超出上下文窗口时在句子边界截断）
   → RRF（倒数排名融合）加权合并
   → Ebbinghaus 遗忘曲线衰减（salience 越高衰减越慢）
   → Top-K 注入 System Prompt
@@ -187,29 +192,30 @@ L0 原始消息（永久保留，不删除，不过滤，标记发言人）
 ├── crates/
 │   ├── ramaria-core/             # 核心类型 & Trait（零 I/O）
 │   │   └── src/
-│   │       ├── config.rs         # RamariaConfig 统一配置
+│   │       ├── config.rs         # RamariaConfig 统一配置（10 个配置域）
 │   │       ├── error.rs          # 错误类型体系（8 种错误变体）
-│   │       ├── traits.rs         # StorageBackend（40+ 方法）、LlmProvider
+│   │       ├── traits.rs         # StorageBackend（40+ 方法）、LlmProvider、EmbeddingProvider
 │   │       └── types.rs          # 9 枚举 + 9 结构体（MemoryEvent, Persona, Session...）
 │   ├── ramaria-storage/          # SQLite 存储层
 │   │   └── src/
-│   │       ├── database.rs       # 连接池管理 + 23 张表 migration
+│   │       ├── database.rs       # 连接池管理 + migration runner
 │   │       └── repo/             # 19 个 Repository（每类实体一个模块）
 │   ├── ramaria-memory/           # 记忆系统核心
 │   │   └── src/
 │   │       ├── l1/               # L0→L1 摘要生成（prompt + summarizer）
 │   │       ├── event/            # L1→L2 事件提取 + 降级策略
 │   │       ├── inference/        # 性格推断 Phase A/B/C（统计/聚类/校准/漂移）
-│   │       ├── rag/              # 三通道 RAG 编排
+│   │       ├── prompt/           # System Prompt 5-Block 构建
 │   │       ├── bm25.rs           # BM25 全文索引
 │   │       ├── vector.rs         # 暴力搜索 / Qdrant 向量索引
 │   │       ├── graph_retriever.rs # 知识图谱 BFS 遍历检索
 │   │       ├── decay.rs          # Ebbinghaus 衰减函数
 │   │       ├── rrf.rs            # 倒数排名融合算法
-│   │       ├── retriever.rs      # Persona-Aware 混合检索器
+│   │       ├── retriever.rs      # Persona-Aware 混合检索器（含 LRU 淘汰）
+│   │       ├── token_budget.rs   # Token 计数与预算分配
 │   │       ├── init.rs           # 冷启动流程（首次加载人格 + 知识注入）
 │   │       ├── rebuild.rs        # 全量重建（重新提取 L1/L2/L3）
-│   │       └── job.rs            # 后台任务调度
+│   │       └── job.rs            # 后台任务调度（含 CancellationToken）
 │   ├── ramaria-llm/              # LLM Provider 层
 │   │   └── src/
 │   │       ├── provider.rs       # LlmProvider trait + 工厂模式
@@ -217,18 +223,30 @@ L0 原始消息（永久保留，不删除，不过滤，标记发言人）
 │   │       ├── keychain.rs       # OS 凭据管理器（Windows Credential Manager）
 │   │       ├── lm_studio.rs      # LM Studio 适配器
 │   │       ├── deepseek.rs       # DeepSeek API 适配器
-│   │       └── openai.rs         # OpenAI API 适配器
+│   │       ├── openai.rs         # OpenAI API 适配器
+│   │       └── embedding/        # ONNX 嵌入模型（feature gate `embedding-onnx`）
+│   ├── ramaria-importer/         # 聊天记录导入（v1.1 新增）
+│   │   └── src/
+│   │       ├── traits.rs         # ImportSource trait
+│   │       └── qq/               # QQ 解析器 + 导入器（JSON + TXT 双格式）
 │   ├── ramaria-app/              # 应用编排层（CLI/Desktop 共用）
 │   │   └── src/
-│   │       ├── app.rs            # App 状态机 + 对话/记忆/配置/索引用例
+│   │       ├── app.rs            # App 状态机 + 核心编排
+│   │       ├── app_chat.rs       # 对话编排
+│   │       ├── app_retriever.rs  # 检索编排
+│   │       ├── app_state.rs      # 状态管理
+│   │       ├── session_lifecycle.rs # Session 生命周期 + L0→L3 级联
 │   │       ├── setup.rs          # 首次配置向导
+│   │       ├── model_manager.rs  # 嵌入模型下载管理
+│   │       ├── update.rs         # 自动更新检查
+│   │       ├── diagnostics.rs    # 诊断导出
 │   │       ├── stream_event.rs   # 流式事件模型
 │   │       ├── privacy.rs        # 隐私确认管理
 │   │       └── error_hint.rs     # 错误到用户友好提示的映射
 │   ├── ramaria-cli/              # 命令行入口
 │   │   └── src/
 │   │       ├── main.rs           # clap 定义 + 全局选项
-│   │       ├── commands/         # 9 个子命令实现
+│   │       ├── commands/         # 11 个子命令实现
 │   │       ├── ui.rs             # 交互式 REPL 界面
 │   │       └── util.rs           # TOML 解析 + 工具函数
 │   └── ramaria-desktop/          # Tauri 桌面应用
@@ -244,6 +262,7 @@ L0 原始消息（永久保留，不删除，不过滤，标记发言人）
 │       │   └── js/
 │       └── tauri.conf.json       # Tauri 配置（NSIS 打包）
 ├── config/
+│   ├── default.toml              # 默认配置模板（v1.1 新增）
 │   └── personas/                 # 人格定义文件（TOML）
 │       └── rama-0001.toml        # 默认人格「黎杋枫」
 ├── docs/                         # 用户文档
@@ -251,34 +270,73 @@ L0 原始消息（永久保留，不删除，不过滤，标记发言人）
 │   ├── cli-user-guide.md         # CLI 使用指南
 │   └── privacy-notice.md         # 隐私说明
 ├── tests/                        # 集成测试
+│   ├── integration_tests.rs      # 跨 crate 集成测试（13 个）
 │   └── fixtures/                 # 测试 fixture（对话数据、事件 JSON）
 └── Cargo.toml                    # Workspace 定义（resolver="3", edition="2024"）
 ```
 
-**规模统计**：7 个 crate、94 个源文件、~30,000+ 行 Rust 代码、600+ 个测试函数。
+**规模统计**：8 个 crate、~140 个源文件、~30,000+ 行 Rust 代码、~530 个测试函数。
 
 ---
 
 ## 数据库结构
 
-本地 SQLite 数据库（默认路径 `%APPDATA%\Ramaria\ramaria.db`），23 张表，按层次组织：
+本地 SQLite 数据库（默认路径 `%APPDATA%\Ramaria\data\assistant.db`），23 张表，按层次组织：
 
-| 分组 | 表名 | 用途 |
-|------|------|------|
-| **会话** | `sessions` | 对话 session 生命周期管理 |
-| | `messages` | L0 原始消息流（支持发言人标记、CRUD） |
-| **记忆** | `memory_l1` | 单次会话摘要（L1），含 valence/salience 情感元数据 |
-| | `memory_l2` | 离散事件（L2），含 8 个推断属性 + l1_sources 溯源 |
-| | `personality_traits` | 人格画像特征（L3），三层分级（surface/behavioral/core） |
-| | `keyword_pool` | 关键词词典，含频次统计 |
-| | `mood_log` | 情绪记录与趋势追踪 |
-| **图谱** | `graph_nodes` | 实体节点（支持 person/object/concept/place/event 类型） |
-| | `graph_edges` | 关系边（支持 7 类关系） |
-| **配置** | `persona_configs` | 人格定义（identity + blocks） |
-| | `settings` | 全局运行配置（后端、模型选择） |
-| | `privacy_consent` | 隐私确认记录（按 provider 粒度） |
-| **系统** | `index_state` | 全文索引构建状态 |
-| | `migration_log` | Schema 迁移日志 |
+### 公共层
+
+| 表名 | 用途 |
+|------|------|
+| `schema_meta` | 数据库 schema 版本、索引版本 |
+| `personas` | 统一人格注册中心（uid/name/kind/source/ref_id/config/description） |
+
+### L0 层
+
+| 表名 | 用途 |
+|------|------|
+| `sessions` | 对话 session 生命周期管理 |
+| `messages` | 原始消息流（含 persona_uid 发言人标记、import_fingerprint 去重） |
+
+### L1 层
+
+| 表名 | 用途 |
+|------|------|
+| `memory_l1` | 单次会话摘要（含 valence/salience/situation_strength/context_json） |
+
+### L2 层（事件层）
+
+| 表名 | 用途 |
+|------|------|
+| `memory_events` | 离散事件主表（含 8 个推断属性 + absorbed 标记） |
+| `event_relations` | 事件网状关系（6 种关系类型） |
+| `event_sources` | 事件溯源（关联事件→L1） |
+| `persona_facts` | 原子化事实库 |
+| `trait_evidence` | 性格证据链（支撑/矛盾关系） |
+| `persona_cluster_snapshots` | 态度聚类快照 |
+
+### L3 层（性格层）
+
+| 表名 | 用途 |
+|------|------|
+| `personality_traits` | 三层结构化性格画像（含 confidence/evidence/consistency） |
+| `persona_examples` | Few-shot 对话示例 |
+
+### 基础设施层
+
+| 表名 | 用途 |
+|------|------|
+| `keyword_pool` | 关键词词典（含同义词管理） |
+| `bm25_index` | BM25 token 持久化 |
+| `graph_nodes` | 知识图谱实体节点 |
+| `graph_edges` | 知识图谱关系边 |
+| `privacy_consent` | 隐私确认记录（按 provider + base_url 粒度） |
+| `backend_config` | 非敏感后端配置 |
+| `background_jobs` | 后台任务状态与重试 |
+| `conflict_queue` | 冲突检测待确认队列 |
+| `pending_push` | 主动推送消息暂存 |
+| `settings` | 全局运行配置（key-value） |
+
+> 注：Python 版的 `memory_l2`、`l2_sources`、`user_profile` 三张表已被 `memory_events` + `event_relations` + `event_sources` + `persona_facts` + `personality_traits` 替代。
 
 ---
 
@@ -295,7 +353,7 @@ L0 原始消息（永久保留，不删除，不过滤，标记发言人）
 
 ### 桌面应用安装
 
-1. 下载 `Ramaria_1.0.0_x64-setup.exe` 安装程序
+1. 下载 `Ramaria_1.1.0_x64-setup.exe` 安装程序
 2. 双击运行安装程序，按向导完成安装
 3. 桌面出现 Ramaria 快捷方式，双击启动
 4. 首次启动自动进入配置向导：
@@ -334,6 +392,12 @@ ramaria session delete <id>
 # 修改配置
 ramaria config set llm.provider deepseek
 ramaria config set llm.api_key sk-xxxx
+
+# 导入 QQ 聊天记录
+ramaria import qq --file chat.json --deep
+
+# 导出诊断信息
+ramaria diagnostics --output diag.zip
 
 # 数据导出
 ramaria export --format markdown
@@ -381,9 +445,10 @@ cargo tauri build
 |-------|------|------|--------|
 | `ramaria-core` | 核心类型 & Trait | 零 I/O 依赖 | ~59 |
 | `ramaria-storage` | SQLite 存储层 | core | ~32 |
-| `ramaria-memory` | 记忆管线 + RAG + 推断 | core + storage | ~310 |
-| `ramaria-llm` | LLM Provider | core | ~43 |
-| `ramaria-app` | 应用编排 | core + storage + memory + llm | ~28 |
+| `ramaria-memory` | 记忆管线 + RAG + 推断 | core + storage | ~410 |
+| `ramaria-llm` | LLM Provider + Embedding | core | ~43 |
+| `ramaria-importer` | QQ 聊天记录导入 | core + storage | ~17 |
+| `ramaria-app` | 应用编排 | core + storage + memory + llm | ~50 |
 | `ramaria-cli` | 命令行入口 | app + core + storage + llm | ~40 |
 | `ramaria-desktop` | Tauri 桌面应用 | app + core + storage + llm | ~16 |
 
@@ -399,7 +464,8 @@ cargo tauri build
 | 桌面 | Tauri 2 |
 | 日志 | tracing + tracing-subscriber |
 | 网络 | reqwest（JSON + SSE streaming） |
-| 向量检索 | 暴力搜索索引 + Qdrant（可选） |
+| 向量检索 | 暴力搜索索引 + Qdrant（可选）+ ONNX（`ort`） |
+| 文本编码 | encoding_rs（GBK/UTF-16 兼容） |
 | 错误处理 | thiserror + anyhow |
 
 ---
@@ -408,9 +474,10 @@ cargo tauri build
 
 | 文档 | 说明 |
 |------|------|
-| [`docs/desktop-user-guide.md`](docs/desktop-user-guide.md) | 桌面应用完整使用指南（安装→配置→对话→记忆→设置） |
-| [`docs/cli-user-guide.md`](docs/cli-user-guide.md) | CLI 命令参考（9 子命令 + 全局选项 + 环境变量） |
-| [`docs/privacy-notice.md`](docs/privacy-notice.md) | 隐私说明（数据流向、API Key 安全、日志策略、CSP） |
+| [`docs/desktop-user-guide.md`](docs/desktop-user-guide.md) | 桌面应用完整使用指南（安装→配置→对话→记忆→人格→导入→诊断→故障排除） |
+| [`docs/cli-user-guide.md`](docs/cli-user-guide.md) | CLI 命令参考（11 子命令 + 全局选项 + 环境变量） |
+| [`docs/privacy-notice.md`](docs/privacy-notice.md) | 隐私说明（数据流向、API Key 安全、日志策略、CSP、导入数据说明） |
+| [`config/default.toml`](config/default.toml) | 默认配置模板（含所有参数注释） |
 
 ---
 
@@ -421,9 +488,11 @@ Ramaria 默认将所有对话数据与记忆存储在本地。详见 [`docs/priv
 **核心要点**：
 
 - **LM Studio 模式**：所有数据（对话 + 记忆）完全不出本地，不经过任何网络传输
-- **线上 API**：对话内容发送至 API 服务器用于生成回复，历史记忆是否注入可控（可关闭 `inject_memory`）
+- **线上 API**：对话内容发送至 API 服务器用于生成回复，历史记忆是否注入可控（可关闭 `online_memory_injection`）
 - **API Key 安全**：通过 OS 凭据管理器存储（Windows Credential Manager），不写入明文配置文件
 - **日志策略**：不记录完整对话内容，敏感信息（API Key、用户消息）截断或哈希化
+- **导入数据**：QQ 聊天记录与本地对话同等对待，全部本地存储，不做匿名化
+- **诊断导出**：打包日志和配置时 API Key 自动脱敏为 `[REDACTED]`
 - **无遥测**：不包含任何数据收集、使用统计上报或网络回传
 - **数据导出**：支持 JSON / Markdown 格式完全导出，支持数据库完整删除
 
@@ -431,28 +500,43 @@ Ramaria 默认将所有对话数据与记忆存储在本地。详见 [`docs/priv
 
 ## 版本历史
 
-### v1.0.0（当前版本）
+### v1.1.0（当前版本）
+
+Rust v1.0 的首个增量版本。在 v1.0 核心闭环基础上，补齐了 Session 生命周期管理、嵌入模型、情境强度加权、Token Budgeting、QQ 导入器等关键功能。
+
+**v1.1 新增**：
+
+- ✅ Session 生命周期管理（手动关闭 + 空闲自动关闭 + 只读约束 + L0→L3 全自动级联）
+- ✅ 嵌入模型集成（本地 ONNX + BM55 降级模式 + 下载进度条）
+- ✅ 情境强度加权（L1 摘要 situation_strength 字段 + Phase A 推断加权）
+- ✅ Token Budgeting（字符估算 + 句子边界截断 + 预算分配）
+- ✅ QQ 聊天记录导入（JSON + TXT 双格式，快速/深度双模式，双画像自动创建）
+- ✅ 多角色管理 GUI（人格列表/详情编辑/设为默认/重载）
+- ✅ 自动更新检查（手动触发，GitHub Release API 对比）
+- ✅ 诊断信息导出（日志 + 配置 + 系统信息 → .zip，API Key 脱敏）
+- ✅ 安全性修复（CSP 收紧、XSS 修复、路径穿越统一规范化、窗口关闭超时恢复）
+- ✅ 工程增强（CI llvm-cov/deny/audit、LRU 淘汰、批量写入事务、大文件拆分）
+- ✅ 新增 `ramaria-importer` crate，workspace 从 7 扩展为 8 个 crate
+- ✅ 新增 CLI `ramaria import` 和 `ramaria diagnostics` 子命令
+- ✅ 新建 `config/default.toml` 配置模板
+
+### v1.0.1 — 2026-06-13
+
+紧急修复：全新安装无法启动（Tauri 插件配置反序列化错误）。
+
+### v1.0.0 — 2026-06-12
 
 Rust 重写完成的首个正式发布版本。与 Python v0.7.x 相比，Rust v1.0 重新设计了架构，不兼容旧数据库 schema。
 
-**已完成的核心能力**：
-
-- 完整记忆管线（L0→L1→L2→L3），含 Ebbinghaus 衰减、RRF 融合
-- 事件→性格推断管线（Phase A 统计 + Phase B LLM + Phase C 增量更新）
-- 三通道混合 RAG（BM25 + 向量 + 知识图谱）+ Persona-Aware 过滤
-- LM Studio / DeepSeek / OpenAI 三后端支持
-- Tauri 2 桌面应用（粉蓝双色设计系统、系统托盘、通知、凭据管理）
-- CLI 9 个子命令
-- 冷启动流程 + 重建管线
-- Privacy-by-default 设计
+**核心能力**：完整记忆管线（L0→L3）、事件→性格推断（Phase A/B/C）、三通道混合 RAG、LM Studio/DeepSeek/OpenAI 三后端、Tauri 2 桌面应用、CLI 9 个子命令。
 
 ### 与 Python 版（v0.7.x）的关系
 
-Python 版位于项目根目录，已进入**维护模式**，不再活跃开发。Rust v1.0 是正式替代版本。
+Python 版位于项目根目录，已进入**维护模式**，不再活跃开发。Rust v1.1 是正式替代版本。
 
 - 两个版本不共享数据库 schema，Python 旧数据不可自动迁移
 - Python 版将继续保留于仓库，接收关键安全修复，但不增加新功能
-- 新用户建议直接使用 Rust v1.0
+- 新用户建议直接使用 Rust v1.1
 
 > 📦 两个版本使用独立的 Git 仓库管理历史和远程地址。
 
@@ -460,18 +544,19 @@ Python 版位于项目根目录，已进入**维护模式**，不再活跃开发
 
 ## 路线图
 
-以下功能已在架构中预留接口，进入 **延后（deferred）** 队列，不在 v1.0 发布范围内：
+以下功能已在架构中预留接口，进入 **延后（deferred）** 队列，不在 v1.1 发布范围内：
 
-- 多角色 GUI 管理
-- Ollama / Anthropic Claude 后端
+- Ollama / Anthropic Claude / 通义千问后端
+- 微信 / Telegram / Discord / Slack 导入器
 - MCP Bridge（Python 版已有 MCP Server，Rust 版待适配）
-- QQ / WeChat 聊天记录导入器
-- 自动更新（Tauri updater）
+- 自动下载安装更新（Tauri updater）
 - ratatui TUI 模式
 - SQLCipher 加密存储
 - Portable 免安装模式
+- 导入匿名化
 - D3.js 知识图谱可视化
 - LoRA 微调
+- macOS / Linux 安装包
 
 > 如有需求，请在 [GitHub Issues](https://github.com/entergirl/Ramaria-s/issues) 提出。
 

@@ -11,7 +11,7 @@
 //! - jieba-rs 依赖 C 编译环境，跨平台打包复杂
 //! - 中文 bigram 分词在 BM25 场景下效果与 jieba 分词相当（信息检索领域已验证）
 //! - 英文 token 按 Unicode 字母边界切分并小写化
-//! - Phase 3 接入真实分词器时可替换为 Tokenizer trait
+//! - 接入真实分词器时可替换为 Tokenizer trait
 
 use std::collections::HashMap;
 
@@ -193,8 +193,8 @@ impl Bm25Index {
     /// 若 doc_id 已存在，旧记录被替换（覆盖语义）。
     ///
     /// 接收 `Vec<String>` 的所有权以消除 clone 开销：
-    /// 调用方（通常是 `tokenize_fields()`）产出 tokens 后直接移动至此方法，
-    /// 避免 `for token in tokens { token.clone() }` 的逐项复制。
+    /// 调用方（通常是 `tokenize_fields`）产出 tokens 后直接移动至此方法，
+    /// 避免 `for token in tokens { token.clone }` 的逐项复制。
     pub fn add(&mut self, doc_id: DocId, tokens: Vec<String>) {
         // 移除旧文档（若存在）
         self.remove(&doc_id);
@@ -224,7 +224,7 @@ impl Bm25Index {
 
     /// 通过分词后的 token 列表添加文档。
     ///
-    /// `tokenize_fields` 的输出 `Vec<String>` 直接移动所有权到 `add()`，
+    /// `tokenize_fields` 的输出 `Vec<String>` 直接移动所有权到 `add`，
     /// 消除中间 clone 开销。
     pub fn add_tokenized(&mut self, doc_id: DocId, fields: &[&str]) {
         let tokens = tokenize_fields(fields);

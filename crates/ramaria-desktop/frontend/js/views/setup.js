@@ -25,16 +25,16 @@
 var RamariaSetupView = (function () {
     'use strict';
 
-    // =========================================================
-    // 常量
-    // =========================================================
+ // =========================================================
+ // 常量
+ // =========================================================
 
     var STEP_LABELS = ['对话模型', '嵌入模型', '确认信息', '完成'];
     var TOTAL_STEPS = 4;
 
-    // =========================================================
-    // 内部状态
-    // =========================================================
+ // =========================================================
+ // 内部状态
+ // =========================================================
 
     var _unregisterFns = [];
     var _currentStep = 1;
@@ -46,9 +46,9 @@ var RamariaSetupView = (function () {
 
     function $(id) { return document.getElementById(id); }
 
-    // =========================================================
-    // 渲染
-    // =========================================================
+ // =========================================================
+ // 渲染
+ // =========================================================
 
     function render() {
         var container = $('view-setup');
@@ -63,12 +63,12 @@ var RamariaSetupView = (function () {
 
         container.innerHTML = '';
 
-        // ── 全屏滚动容器 ──
+ // ── 全屏滚动容器 ──
         var wizard = document.createElement('div');
         wizard.className = 'setup-wizard';
         container.appendChild(wizard);
 
-        // ── 顶部品牌 ──
+ // ── 顶部品牌 ──
         var brand = document.createElement('div');
         brand.className = 'setup-top-brand';
         brand.innerHTML =
@@ -76,41 +76,41 @@ var RamariaSetupView = (function () {
             '<span class="setup-brand-name">珊瑚菌 · 配置向导</span>';
         wizard.appendChild(brand);
 
-        // ── 步骤指示器（占位，后续动态渲染）──
+ // ── 步骤指示器（占位，后续动态渲染）──
         var stepper = document.createElement('div');
         stepper.className = 'setup-stepper';
         stepper.id = 'setup-stepper';
         wizard.appendChild(stepper);
 
-        // ── 主卡片 ──
+ // ── 主卡片 ──
         var card = document.createElement('div');
         card.className = 'setup-card';
 
-        // 面板 1：LLM 模型配置
+ // 面板 1：LLM 模型配置
         card.innerHTML +=
             '<div class="setup-panel active" id="setup-panel-1">' +
                 _panel1Html() +
             '</div>';
 
-        // 面板 2：嵌入模型配置（v1.1 新增）
+ // 面板 2：嵌入模型配置
         card.innerHTML +=
             '<div class="setup-panel" id="setup-panel-2">' +
                 _panel2Html() +
             '</div>';
 
-        // 面板 3：确认
+ // 面板 3：确认
         card.innerHTML +=
             '<div class="setup-panel" id="setup-panel-3">' +
                 _panel3Html() +
             '</div>';
 
-        // 面板 4：完成
+ // 面板 4：完成
         card.innerHTML +=
             '<div class="setup-panel" id="setup-panel-4">' +
                 _panel4Html() +
             '</div>';
 
-        // ── 底部操作区 ──
+ // ── 底部操作区 ──
         card.innerHTML +=
             '<div class="setup-card-footer">' +
                 '<button class="setup-btn setup-btn-prev hidden" id="setup-btn-prev">← 上一步</button>' +
@@ -120,15 +120,15 @@ var RamariaSetupView = (function () {
 
         wizard.appendChild(card);
 
-        // 绑定事件
+ // 绑定事件
         _bindEvents();
         _renderStepper();
         _showStep(1);
     }
 
-    // =========================================================
-    // 面板 HTML
-    // =========================================================
+ // =========================================================
+ // 面板 HTML
+ // =========================================================
 
     function _panel1Html() {
         return '' +
@@ -138,7 +138,7 @@ var RamariaSetupView = (function () {
                 '下一步将配置嵌入模型（向量检索），请继续。' +
             '</div>' +
 
-            // 模式选择器
+ // 模式选择器
             '<div class="setup-mode-selector" id="setup-mode-selector">' +
                 '<button class="setup-mode-option active" data-mode="local">' +
                     '<span class="setup-mode-option-icon">🖥</span>' +
@@ -152,7 +152,7 @@ var RamariaSetupView = (function () {
                 '</button>' +
             '</div>' +
 
-            // 本地字段
+ // 本地字段
             '<div class="setup-field-group" id="setup-local-fields">' +
                 '<div class="setup-field">' +
                     '<div class="setup-field-label">推理服务地址 <span class="setup-required">*</span></div>' +
@@ -172,7 +172,7 @@ var RamariaSetupView = (function () {
                 '</div>' +
             '</div>' +
 
-            // 线上字段
+ // 线上字段
             '<div class="setup-field-group hidden" id="setup-api-fields">' +
                 '<div class="setup-field">' +
                     '<div class="setup-field-label">API Key <span class="setup-required">*</span></div>' +
@@ -198,7 +198,7 @@ var RamariaSetupView = (function () {
                 '</div>' +
             '</div>' +
 
-            // 连接测试按钮
+ // 连接测试按钮
             '<div class="mt-3">' +
                 '<button class="setup-test-btn" id="setup-test-btn">' +
                     '<span class="setup-test-dot"></span> 测试连接' +
@@ -215,7 +215,7 @@ var RamariaSetupView = (function () {
                 '请指定已下载的本地嵌入模型文件夹路径。' +
             '</div>' +
 
-            // 推荐模型提示
+ // 推荐模型提示
             '<div class="setup-embedding-recommend">' +
                 '<div class="setup-embedding-recommend-title">推荐模型</div>' +
                 '<div class="setup-embedding-recommend-body">' +
@@ -225,7 +225,7 @@ var RamariaSetupView = (function () {
                 '</div>' +
             '</div>' +
 
-            // 模型路径字段
+ // 模型路径字段
             '<div class="setup-field-group">' +
                 '<div class="setup-field">' +
                     '<div class="setup-field-label">模型文件夹路径 <span class="setup-required">*</span></div>' +
@@ -238,7 +238,7 @@ var RamariaSetupView = (function () {
                 '</div>' +
             '</div>' +
 
-            // 校验按钮
+ // 校验按钮
             '<div class="mt-3">' +
                 '<button class="setup-test-btn" id="setup-embedding-test-btn">' +
                     '<span class="setup-test-dot"></span> 校验模型路径' +
@@ -246,7 +246,7 @@ var RamariaSetupView = (function () {
                 '<div class="setup-field-status" id="setup-embedding-test-status"></div>' +
             '</div>' +
 
-            // 跳过说明
+ // 跳过说明
             '<div class="setup-skip-hint hidden" id="setup-embedding-skip-hint">' +
                 '<div class="setup-skip-hint-title">⚠ 暂不配置嵌入模型</div>' +
                 '<div class="setup-skip-hint-body">' +
@@ -258,7 +258,7 @@ var RamariaSetupView = (function () {
                 '</div>' +
             '</div>' +
 
-            // 跳过按钮
+ // 跳过按钮
             '<div class="mt-3">' +
                 '<button class="setup-btn setup-btn-ghost" id="setup-embedding-skip-btn">' +
                     '跳过，稍后配置（进入降级模式）' +
@@ -271,7 +271,7 @@ var RamariaSetupView = (function () {
             '<div class="setup-panel-title">配置确认</div>' +
             '<div class="setup-panel-desc">请核对以下配置信息，无误后点击「完成并启动」</div>' +
             '<div class="setup-summary-box" id="setup-summary-box">' +
-                // 由 JS 填充
+ // 由 JS 填充
             '</div>';
     }
 
@@ -293,9 +293,9 @@ var RamariaSetupView = (function () {
             '</div>';
     }
 
-    // =========================================================
-    // 步骤指示器
-    // =========================================================
+ // =========================================================
+ // 步骤指示器
+ // =========================================================
 
     function _renderStepper() {
         var container = $('setup-stepper');
@@ -336,20 +336,20 @@ var RamariaSetupView = (function () {
         }
     }
 
-    // =========================================================
-    // 面板切换
-    // =========================================================
+ // =========================================================
+ // 面板切换
+ // =========================================================
 
     function _showStep(step) {
         _currentStep = step;
 
-        // 切换面板
+ // 切换面板
         var panels = document.querySelectorAll('.setup-panel');
         for (var i = 0; i < panels.length; i++) {
             panels[i].classList.toggle('active', panels[i].id === 'setup-panel-' + step);
         }
 
-        // 更新导航按钮
+ // 更新导航按钮
         var btnPrev = $('setup-btn-prev');
         var btnNext = $('setup-btn-next');
         var indicator = $('setup-step-indicator');
@@ -370,18 +370,18 @@ var RamariaSetupView = (function () {
 
         if (indicator) indicator.textContent = step + ' / ' + TOTAL_STEPS;
 
-        // 进入确认步骤时填充摘要
+ // 进入确认步骤时填充摘要
         if (step === TOTAL_STEPS - 1) _fillSummary();
 
         _renderStepper();
     }
 
-    // =========================================================
-    // 事件绑定
-    // =========================================================
+ // =========================================================
+ // 事件绑定
+ // =========================================================
 
     function _bindEvents() {
-        // 模式切换
+ // 模式切换
         var modeOptions = document.querySelectorAll('.setup-mode-option');
         for (var i = 0; i < modeOptions.length; i++) {
             modeOptions[i].addEventListener('click', function () {
@@ -389,25 +389,25 @@ var RamariaSetupView = (function () {
             });
         }
 
-        // 上一步 / 下一步
+ // 上一步 / 下一步
         var btnPrev = $('setup-btn-prev');
         var btnNext = $('setup-btn-next');
         if (btnPrev) btnPrev.addEventListener('click', _goPrev);
         if (btnNext) btnNext.addEventListener('click', _goNext);
 
-        // 测试连接
+ // 测试连接
         var testBtn = $('setup-test-btn');
         if (testBtn) testBtn.addEventListener('click', _testConnection);
 
-        // 嵌入模型校验按钮（v1.1 新增）
+ // 嵌入模型校验按钮
         var embeddingTestBtn = $('setup-embedding-test-btn');
         if (embeddingTestBtn) embeddingTestBtn.addEventListener('click', _testEmbeddingPath);
 
-        // 嵌入模型跳过按钮（v1.1 新增）
+ // 嵌入模型跳过按钮
         var embeddingSkipBtn = $('setup-embedding-skip-btn');
         if (embeddingSkipBtn) embeddingSkipBtn.addEventListener('click', _skipEmbeddingModel);
 
-        // 键盘 Enter 在表单中触发下一步
+ // 键盘 Enter 在表单中触发下一步
         document.addEventListener('keydown', function (e) {
             if (e.key === 'Enter' && e.target && e.target.closest('.setup-field-input')) {
                 e.preventDefault();
@@ -420,19 +420,19 @@ var RamariaSetupView = (function () {
         _currentMode = mode;
         _testPassed = false;
 
-        // 更新按钮选中态
+ // 更新按钮选中态
         var options = document.querySelectorAll('.setup-mode-option');
         for (var i = 0; i < options.length; i++) {
             options[i].classList.toggle('active', options[i].getAttribute('data-mode') === mode);
         }
 
-        // 切换字段组
+ // 切换字段组
         var localFields = $('setup-local-fields');
         var apiFields = $('setup-api-fields');
         if (localFields) localFields.classList.toggle('hidden', mode !== 'local');
         if (apiFields) apiFields.classList.toggle('hidden', mode !== 'api');
 
-        // 重置测试状态
+ // 重置测试状态
         _resetTestState();
     }
 
@@ -450,23 +450,23 @@ var RamariaSetupView = (function () {
         }
         _testPassed = false;
 
-        // 清除输入框高亮
+ // 清除输入框高亮
         var inputs = document.querySelectorAll('.setup-field-input.valid, .setup-field-input.invalid');
         for (var i = 0; i < inputs.length; i++) {
             inputs[i].classList.remove('valid', 'invalid');
         }
     }
 
-    // =========================================================
-    // 测试连接
-    // =========================================================
+ // =========================================================
+ // 测试连接
+ // =========================================================
 
     async function _testConnection() {
         var btn = $('setup-test-btn');
         var status = $('setup-test-status');
         if (!btn || !status) return;
 
-        // 校验必填字段
+ // 校验必填字段
         var valid = _validateModeFields(true);
         if (!valid) return;
 
@@ -476,7 +476,7 @@ var RamariaSetupView = (function () {
         status.className = 'setup-field-status checking';
 
         try {
-            // 先保存临时配置（写入 storage + keychain + 热更新 LLM provider）
+ // 先保存临时配置（写入 storage + keychain + 热更新 LLM provider）
             var config = _collectConfig();
             await RamariaApi.config.updateBackend(
                 config.provider,
@@ -485,25 +485,25 @@ var RamariaSetupView = (function () {
                 _currentMode === 'api' ? config.apiKey : ''
             );
 
-            // 真正测试 LLM 连接可达性（调用 llm.validate()，实际发请求到端点）
-            // 注意：不使用 refresh_setup_state，因为它会检查嵌入模型/索引状态。
+ // 真正测试 LLM 连接可达性（调用 llm.validate，实际发请求到端点）
+ // 注意：不使用 refresh_setup_state，因为它会检查嵌入模型/索引状态。
             await RamariaApi.setup.testLlmConnection();
 
-            // 连接成功
+ // 连接成功
             btn.className = 'setup-test-btn ok';
             btn.innerHTML = '<span class="setup-test-dot"></span> 连接成功';
             status.textContent = '✓ ' + (_currentMode === 'api' ? '线上 API' : '本地推理服务') + ' 可达';
             status.className = 'setup-field-status ok';
             _testPassed = true;
 
-            // 高亮输入框
+ // 高亮输入框
             _highlightInputs(true);
         } catch (err) {
             var msg = err.message || String(err);
             btn.className = 'setup-test-btn fail';
             btn.innerHTML = '<span class="setup-test-dot"></span> 测试失败';
 
-            // 提供更具体的错误提示
+ // 提供更具体的错误提示
             if (msg.indexOf('无法连接到') !== -1 || msg.indexOf('connect') !== -1) {
                 status.textContent = '✗ 无法连接服务，请确认地址和端口正确且服务已启动';
             } else if (msg.indexOf('API key') !== -1 || msg.indexOf('api_key') !== -1 || msg.indexOf('keychain') !== -1) {
@@ -516,16 +516,16 @@ var RamariaSetupView = (function () {
         }
     }
 
-    // =========================================================
-    // 嵌入模型路径校验（v1.1 新增）
-    // =========================================================
+ // =========================================================
+ // 嵌入模型路径校验
+ // =========================================================
 
-    /**
-     * 测试嵌入模型路径是否有效。
-     *
-     * 流程: 收集路径 → 调用后端校验 API → 显示结果
-     * 参考: Python static/setup.html Step 2 的 validateModelPath/checkModelPath
-     */
+ /**
+ * 测试嵌入模型路径是否有效。
+ *
+ * 流程: 收集路径 → 调用后端校验 API → 显示结果
+ * 参考: Python static/setup.html Step 2 的 validateModelPath/checkModelPath
+ */
     async function _testEmbeddingPath() {
         var btn = $('setup-embedding-test-btn');
         var status = $('setup-embedding-test-status');
@@ -534,7 +534,7 @@ var RamariaSetupView = (function () {
 
         var path = pathInput.value.trim();
 
-        // 基本校验
+ // 基本校验
         if (!path) {
             status.textContent = '✗ 请填写模型文件夹路径';
             status.className = 'setup-field-status fail';
@@ -542,7 +542,7 @@ var RamariaSetupView = (function () {
             return;
         }
 
-        // 统一正斜杠
+ // 统一正斜杠
         if (path.indexOf('\\') !== -1) {
             path = path.replace(/\\/g, '/');
             pathInput.value = path;
@@ -555,7 +555,7 @@ var RamariaSetupView = (function () {
         pathInput.classList.remove('valid', 'invalid');
 
         try {
-            // 调用后端校验嵌入模型路径
+ // 调用后端校验嵌入模型路径
             var result = await RamariaApi.setup.validateEmbeddingModel(path);
 
             if (result && result.valid) {
@@ -585,20 +585,20 @@ var RamariaSetupView = (function () {
         }
     }
 
-    /**
-     * 跳过嵌入模型配置，进入降级模式。
-     *
-     * 显示跳过说明后直接进入下一步。
-     */
+ /**
+ * 跳过嵌入模型配置，进入降级模式。
+ *
+ * 显示跳过说明后直接进入下一步。
+ */
     function _skipEmbeddingModel() {
         _embeddingTestPassed = false;
         _embeddingPath = '';
 
-        // 显示跳过说明
+ // 显示跳过说明
         var skipHint = $('setup-embedding-skip-hint');
         if (skipHint) skipHint.classList.remove('hidden');
 
-        // 延迟后自动前进，给用户阅读说明的时间
+ // 延迟后自动前进，给用户阅读说明的时间
         setTimeout(function () {
             _showStep(3);
         }, 1500);
@@ -616,9 +616,9 @@ var RamariaSetupView = (function () {
         }
     }
 
-    // =========================================================
-    // 表单校验
-    // =========================================================
+ // =========================================================
+ // 表单校验
+ // =========================================================
 
     function _validateModeFields(showToast) {
         if (_currentMode === 'local') {
@@ -680,9 +680,9 @@ var RamariaSetupView = (function () {
         }
     }
 
-    // =========================================================
-    // 导航
-    // =========================================================
+ // =========================================================
+ // 导航
+ // =========================================================
 
     function _goPrev() {
         if (_currentStep > 1) {
@@ -694,10 +694,10 @@ var RamariaSetupView = (function () {
         if (_submitting) return;
 
         if (_currentStep === 1) {
-            // Step 1 → Step 2: 校验 LLM 字段
+ // Step 1 → Step 2: 校验 LLM 字段
             if (!_validateModeFields(true)) return;
 
-            // 检查测试状态
+ // 检查测试状态
             if (!_testPassed) {
                 var modeLabel = _currentMode === 'api' ? '线上 API' : '推理服务';
                 RamariaModal.show({
@@ -718,14 +718,14 @@ var RamariaSetupView = (function () {
 
             _showStep(2);
         } else if (_currentStep === 2) {
-            // Step 2 → Step 3: 嵌入模型配置（v1.1 新增）
-            // 不强制要求——用户可跳过
+ // Step 2 → Step 3: 嵌入模型配置
+ // 不强制要求——用户可跳过
             if (_embeddingTestPassed) {
                 _showStep(3);
                 return;
             }
 
-            // 未校验：提示可跳过
+ // 未校验：提示可跳过
             RamariaModal.show({
                 title: '未校验嵌入模型',
                 body: '<p class="setup-modal-body">' +
@@ -745,10 +745,10 @@ var RamariaSetupView = (function () {
                 },
             });
         } else if (_currentStep === TOTAL_STEPS - 1) {
-            // 确认 → 完成
+ // 确认 → 完成
             await _finishSetup();
         } else if (_currentStep === TOTAL_STEPS) {
-            // 最终完成：刷新状态，Router 自动路由到对话页
+ // 最终完成：刷新状态，Router 自动路由到对话页
             try {
                 var newState = await RamariaApi.setup.refresh();
                 RamariaStore.set('appState', newState);
@@ -760,9 +760,9 @@ var RamariaSetupView = (function () {
         }
     }
 
-    // =========================================================
-    // 完成配置
-    // =========================================================
+ // =========================================================
+ // 完成配置
+ // =========================================================
 
     async function _finishSetup() {
         _submitting = true;
@@ -772,14 +772,14 @@ var RamariaSetupView = (function () {
         if (btnNext) btnNext.disabled = true;
         if (btnPrev) btnPrev.disabled = true;
 
-        // 显示进度
+ // 显示进度
         var initStatus = $('setup-init-status');
         if (initStatus) initStatus.classList.add('visible');
 
         var config = _collectConfig();
 
         try {
-            // 如果嵌入模型已校验通过，先保存嵌入模型配置
+ // 如果嵌入模型已校验通过，先保存嵌入模型配置
             if (_embeddingTestPassed && _embeddingPath) {
                 try {
                     await RamariaApi.setup.saveEmbeddingModel(_embeddingPath);
@@ -788,7 +788,7 @@ var RamariaSetupView = (function () {
                 }
             }
 
-            // 保存配置 + 运行首次设置
+ // 保存配置 + 运行首次设置
             var result = await RamariaApi.setup.run(
                 config.provider,
                 config.modelId,
@@ -798,22 +798,22 @@ var RamariaSetupView = (function () {
 
             console.log('[SetupView] 配置完成: ' + result);
 
-            // 线上 provider 记录隐私确认
+ // 线上 provider 记录隐私确认
             if (_currentMode === 'api') {
                 try { await RamariaApi.chat.confirmPrivacy(true); } catch (_) { /* ignore */ }
             }
 
-            // 更新进度：保存成功
+ // 更新进度：保存成功
             _updateInitLine('setup-init-save', 'ok', '配置已保存');
 
-            // 显示完成行
+ // 显示完成行
             var doneLine = $('setup-init-done');
             if (doneLine) doneLine.classList.remove('hidden');
             _updateInitLine('setup-init-done', 'ok', '配置已保存，正在进入对话界面…');
 
             _showStep(TOTAL_STEPS);
 
-            // 延迟自动进入
+ // 延迟自动进入
             setTimeout(async function () {
                 try {
                     var newState = await RamariaApi.setup.refresh();
@@ -827,8 +827,8 @@ var RamariaSetupView = (function () {
             var rawMsg = err.message || String(err);
             console.error('[SetupView] 配置保存失败:', rawMsg);
 
-            // 构建上下文相关的错误提示
-            // 如果用户跳过了连接测试，失败很可能是连接问题
+ // 构建上下文相关的错误提示
+ // 如果用户跳过了连接测试，失败很可能是连接问题
             var hint = '';
             if (!_testPassed) {
                 hint = '\n\n💡 您跳过了连接测试，这可能是服务不可达导致的。'
@@ -858,9 +858,9 @@ var RamariaSetupView = (function () {
         el.classList.remove('hidden');
     }
 
-    // =========================================================
-    // 摘要填充
-    // =========================================================
+ // =========================================================
+ // 摘要填充
+ // =========================================================
 
     function _fillSummary() {
         var box = $('setup-summary-box');
@@ -885,7 +885,7 @@ var RamariaSetupView = (function () {
             lines.push('<div><span class="setup-summary-dim">API Key：</span>' + apiKeyDisplay + '</div>');
         }
 
-        // 嵌入模型状态（v1.1 新增）
+ // 嵌入模型状态
         if (_embeddingTestPassed) {
             lines.push('<div><span class="setup-summary-dim">嵌入模型：</span>✓ 已配置（' + (_embeddingPath || '-') + '）</div>');
         } else {
@@ -895,9 +895,9 @@ var RamariaSetupView = (function () {
         box.innerHTML = lines.join('');
     }
 
-    // =========================================================
-    // 生命周期
-    // =========================================================
+ // =========================================================
+ // 生命周期
+ // =========================================================
 
     function _registerHooks() {
         var unreg;
@@ -925,9 +925,9 @@ var RamariaSetupView = (function () {
         _registerHooks();
     }
 
-    // =========================================================
-    // 公开 API
-    // =========================================================
+ // =========================================================
+ // 公开 API
+ // =========================================================
 
     return {
         init: init,

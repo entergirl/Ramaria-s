@@ -1,8 +1,7 @@
-//! rust/crates/ramaria-importer/src/lib.rs - Ramaria 聊天记录导入器（v1.1）
-//!
+//! rust/crates/ramaria-importer/src/lib.rs - Ramaria 聊天记录导入器
 //! 设计特点:
 //! - 通过 `ImportSource` trait 抽象导入源，支持 QQ/微信/Telegram 等格式扩展
-//! - 当前版本仅支持 qq-chat-exporter v5.x JSON 格式（v1.1 移除 TXT 支持）
+//! - 当前版本仅支持 qq-chat-exporter v5.x JSON 格式
 //! - 完整覆盖 qce v5.x 全部 11 种消息类型（含 type_8 文件/type_10 红包/type_19 通话/system 过滤）
 //! - 快速导入模式：仅写入 L0 messages 表，适合快速查看历史对话
 //! - 深度导入模式：逐 session 执行 L0→L1→L2→L3 全管线，生成完整记忆和性格画像

@@ -127,10 +127,10 @@ impl LlamaEncoder {
 
         // SAFETY: from_mmaped_safetensors 通过内存映射读取本地模型文件。
         // 调用者需保证:
-        //   (1) 模型文件来自可信来源（HuggingFace 官方仓库，通过 ModelManager 下载）。
-        //   (2) 在 mmap 期间文件不会被外部修改（Ramaria 进程独占写权限）。
-        //   (3) tensor 数据类型为 F32（DType::F32），与 candle 期望一致。
-        //   (4) 文件大小可能很大（Qwen3-Embedding-0.6B ≈ 1.2GB），需确保系统内存充足。
+        // (1) 模型文件来自可信来源（HuggingFace 官方仓库，通过 ModelManager 下载）。
+        // (2) 在 mmap 期间文件不会被外部修改（Ramaria 进程独占写权限）。
+        // (3) tensor 数据类型为 F32（DType::F32），与 candle 期望一致。
+        // (4) 文件大小可能很大（Qwen3-Embedding-0.6B ≈ 1.2GB），需确保系统内存充足。
         // 若文件被外部截断或修改，mmap 会触发 SIGBUS。此风险由用户承担。
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(&[model_path.as_path()], DType::F32, &device)
@@ -324,7 +324,7 @@ impl LlamaEncoder {
 
     /// 读取 safetensors 文件中所有的 tensor 键名。
     ///
-    /// 委托给共享工具 `common::read_safetensors_header()` 读取 header 原始字节，
+    /// 委托给共享工具 `common::read_safetensors_header` 读取 header 原始字节，
     /// 然后解析 JSON object 提取键名列表。只读 header（通常 < 100KB），不加载权重。
     fn read_safetensors_keys(model_path: &Path) -> RamariaResult<Vec<String>> {
         let header_bytes = super::common::read_safetensors_header(model_path)?;

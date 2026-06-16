@@ -201,5 +201,5 @@ fn print_trait_group(label: &str, traits: &[&ramaria_core::types::PersonalityTra
 }
 
 // 辅助函数已提取至 crate::util 模块：
-//   - crate::util::format_timestamp()
-//   - crate::util::truncate()
+// - crate::util::format_timestamp
+// - crate::util::truncate

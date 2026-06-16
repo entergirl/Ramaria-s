@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/inference/drift.rs - Phase C 性格漂移检测
+//! rust/crates/ramaria-memory/src/inference/drift.rs - 性格漂移检测
 //!
 //! 设计特点:
 //! - C1: 1D Wasserstein 距离 + 蒙特卡洛置换检验动态阈值

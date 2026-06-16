@@ -3,7 +3,7 @@
 //! 设计特点:
 //! - 每个命令一个子模块，职责单一
 //! - 所有命令接收 `Arc<ramaria_app::App>` 作为统一依赖
-//! - 命令函数返回 `anyhow::Result<()>`，错误由 main.rs 统一处理
+//! - 命令函数返回 `anyhow::Result<>`，错误由 main.rs 统一处理
 
 pub mod ask;
 pub mod chat;

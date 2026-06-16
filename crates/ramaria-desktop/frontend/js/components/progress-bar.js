@@ -14,7 +14,7 @@
  * - 错误时显示红色警告
  *
  * 用法:
- *   RamariaProgressBar.init(); // 在 chat view enter 钩子中调用
+ * RamariaProgressBar.init; // 在 chat view enter 钩子中调用
  */
 var RamariaProgressBar = (function () {
     'use strict';
@@ -28,19 +28,19 @@ var RamariaProgressBar = (function () {
     var _unlistenDownload = null;
     var _unlistenIndex = null;
 
-    // =========================================================
-    // DOM 构建
-    // =========================================================
+ // =========================================================
+ // DOM 构建
+ // =========================================================
 
     function _createDom() {
-        // 查找对话视图的内容区头部
+ // 查找对话视图的内容区头部
         var contentHeader = document.querySelector('.content-header');
         if (!contentHeader) {
             console.warn('[ProgressBar] 未找到 .content-header 元素');
             return;
         }
 
-        // 创建进度条容器
+ // 创建进度条容器
         _container = document.createElement('div');
         _container.id = 'inline-progress-bar';
         _container.className = 'inline-progress-bar hidden';
@@ -49,7 +49,7 @@ var RamariaProgressBar = (function () {
         _container.setAttribute('aria-valuemax', '100');
         _container.setAttribute('aria-valuenow', '0');
 
-        // 进度文本行
+ // 进度文本行
         var row = document.createElement('div');
         row.className = 'inline-progress-row';
 
@@ -64,7 +64,7 @@ var RamariaProgressBar = (function () {
         row.appendChild(_text);
         row.appendChild(_detail);
 
-        // 进度条轨道
+ // 进度条轨道
         var track = document.createElement('div');
         track.className = 'inline-progress-track';
 
@@ -77,29 +77,29 @@ var RamariaProgressBar = (function () {
         _container.appendChild(row);
         _container.appendChild(track);
 
-        // 插入到 content-header 之后
+ // 插入到 content-header 之后
         contentHeader.parentNode.insertBefore(_container, contentHeader.nextSibling);
     }
 
-    // =========================================================
-    // 进度更新
-    // =========================================================
+ // =========================================================
+ // 进度更新
+ // =========================================================
 
-    /**
-     * 显示进度条并更新状态。
-     *
-     * 参数:
-     * - `title`: 进度标题（如 "正在下载嵌入模型"）
-     * - `detail`: 详细信息（如 "45% · 12.3 MB / 27.3 MB"）
-     * - `percent`: 进度百分比 0..100（-1 表示不确定）
-     */
+ /**
+ * 显示进度条并更新状态。
+ *
+ * 参数:
+ * - `title`: 进度标题（如 "正在下载嵌入模型"）
+ * - `detail`: 详细信息（如 "45% · 12.3 MB / 27.3 MB"）
+ * - `percent`: 进度百分比 0..100（-1 表示不确定）
+ */
     function show(title, detail, percent) {
         if (!_container) {
             console.warn('[ProgressBar] 容器未初始化');
             return;
         }
 
-        // 清除自动隐藏定时器
+ // 清除自动隐藏定时器
         if (_hideTimer) {
             clearTimeout(_hideTimer);
             _hideTimer = null;
@@ -113,16 +113,16 @@ var RamariaProgressBar = (function () {
             _bar.style.width = percent + '%';
             _container.setAttribute('aria-valuenow', String(Math.round(percent)));
         } else {
-            // 不确定进度（动画）
+ // 不确定进度（动画）
             _bar.style.width = '30%';
             _bar.style.animation = 'progress-indeterminate 2s ease-in-out infinite';
             _container.setAttribute('aria-valuenow', '0');
         }
     }
 
-    /**
-     * 显示错误状态（红色）。
-     */
+ /**
+ * 显示错误状态（红色）。
+ */
     function showError(title, detail) {
         if (!_container) return;
 
@@ -136,13 +136,13 @@ var RamariaProgressBar = (function () {
         _text.textContent = title || '操作失败';
         _detail.textContent = detail || '';
 
-        // 5 秒后自动隐藏
+ // 5 秒后自动隐藏
         _hideTimer = setTimeout(hide, 5000);
     }
 
-    /**
-     * 隐藏进度条。
-     */
+ /**
+ * 隐藏进度条。
+ */
     function hide() {
         if (_container) {
             _container.classList.add('hidden');
@@ -158,12 +158,12 @@ var RamariaProgressBar = (function () {
         }
     }
 
-    // =========================================================
-    // Tauri 事件处理
-    // =========================================================
+ // =========================================================
+ // Tauri 事件处理
+ // =========================================================
 
     function _onDownloadProgress(payload) {
-        // payload: { progress: 0.0..1.0, downloaded_bytes: u64, total_bytes: u64, current_file: str }
+ // payload: { progress: 0.0..1.0, downloaded_bytes: u64, total_bytes: u64, current_file: str }
         if (!payload) return;
 
         var percent = (payload.progress || 0) * 100;
@@ -175,7 +175,7 @@ var RamariaProgressBar = (function () {
     }
 
     function _onIndexProgress(payload) {
-        // payload: { phase: str, current: u64, total: u64 }
+ // payload: { phase: str, current: u64, total: u64 }
         if (!payload) return;
 
         var phase = payload.phase || '索引构建中';
@@ -194,9 +194,9 @@ var RamariaProgressBar = (function () {
         return (bytes / Math.pow(1024, i)).toFixed(1) + ' ' + units[i];
     }
 
-    // =========================================================
-    // 初始化与销毁
-    // =========================================================
+ // =========================================================
+ // 初始化与销毁
+ // =========================================================
 
     function init() {
         if (_initialized) {
@@ -208,7 +208,7 @@ var RamariaProgressBar = (function () {
 
         _createDom();
 
-        // 监听 Tauri 事件
+ // 监听 Tauri 事件
         try {
             if (typeof TauriBridge !== 'undefined' && TauriBridge.isTauri && TauriBridge.isTauri()) {
                 TauriBridge.listen('download-progress', function (event) {
@@ -259,9 +259,9 @@ var RamariaProgressBar = (function () {
         _initialized = false;
     }
 
-    // =========================================================
-    // 公开 API
-    // =========================================================
+ // =========================================================
+ // 公开 API
+ // =========================================================
 
     return {
         init: init,

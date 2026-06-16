@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 /// 启动交互式对话 REPL。
 ///
-/// v1.1 增强:
+/// 增强:
 /// - 启动后台空闲检测 + L2/L3 定时检查
 /// - 支持 `/save` 手动保存并关闭当前 session
 /// - 退出时自动关闭活跃 session
@@ -26,13 +26,13 @@ pub async fn run(app: &Arc<ramaria_app::App>, yes: bool) -> anyhow::Result<()> {
     // 隐私确认
     crate::privacy::ensure_privacy(app, yes).await?;
 
-    // v1.1: 启动后台任务（空闲检测 + L2/L3 定时检查）
-    // 对齐 Python `SessionManager.start()` 启动 Thread A + Thread B
+    // 启动后台任务（空闲检测 + L2/L3 定时检查）
+    // 对齐 Python `SessionManager.start` 启动 Thread A + Thread B
     app.start_background_tasks();
 
     println!();
     crate::ui::separator();
-    println!("  Ramaria 对话模式 (v1.1)");
+    println!("  Ramaria 对话模式 ");
     println!("  输入消息开始对话，/help 查看命令");
     println!(
         "  空闲 {} 分钟后自动保存对话",
@@ -128,8 +128,8 @@ pub async fn run(app: &Arc<ramaria_app::App>, yes: bool) -> anyhow::Result<()> {
 
     println!();
 
-    // v1.1: 退出时自动保存并关闭活跃 session
-    // 对齐 Python `SessionManager.stop()` 的 shutdown hook
+    // 退出时自动保存并关闭活跃 session
+    // 对齐 Python `SessionManager.stop` 的 shutdown hook
     if let Err(e) = app.save_and_close_session(None).await {
         crate::ui::warn(&format!("退出时保存对话失败: {e}"));
     } else {
@@ -208,7 +208,7 @@ enum CommandAction {
 
 /// 处理 REPL 内置命令。
 ///
-/// v1.1 新增 `/save` 命令：手动保存并关闭当前对话。
+/// `/save` 命令：手动保存并关闭当前对话。
 /// `/save` 后 session 被更新为待重建状态（id 不变但已关闭），
 /// 下次发消息时 `try_send_or_recreate` 自动创建新 session。
 async fn handle_command(
@@ -227,7 +227,7 @@ async fn handle_command(
             CommandAction::Continue
         }
         "/save" => {
-            // v1.1: 手动保存对话（不清屏，next 消息自动创建新 session）
+            // 手动保存对话（不清屏，next 消息自动创建新 session）
             let old_sid = session.id;
             match app.save_and_close_session(None).await {
                 Ok(()) => {

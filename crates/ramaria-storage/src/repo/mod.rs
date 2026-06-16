@@ -39,10 +39,10 @@ use ramaria_core::error::RamariaResult;
 /// 用法:
 /// ```ignore
 /// parse_enum_fallback!(
-///     parse_layer, TraitLayer, TraitLayer::Base, "personality_traits", "layer",
-///     "base"    => Base,
-///     "primary" => Primary,
-///     "accent"  => Accent,
+/// parse_layer, TraitLayer, TraitLayer::Base, "personality_traits", "layer",
+/// "base" => Base,
+/// "primary" => Primary,
+/// "accent" => Accent,
 /// );
 /// ```
 ///
@@ -52,7 +52,8 @@ use ramaria_core::error::RamariaResult;
 /// 3. 默认回退变体（非法值时的 fallback）
 /// 4. 表名（仅用于日志）
 /// 5. 列名（仅用于日志）
-///    6.. 映射: "db_value" => EnumVariant
+///
+/// 6.. 映射: "db_value" => EnumVariant
 #[macro_export]
 macro_rules! parse_enum_fallback {
     ($fn_name:ident, $enum_ty:ty, $default:expr, $table:expr, $column:expr,
@@ -113,7 +114,7 @@ pub fn parse_uuid_required(raw: &str, table: &str, column: &str) -> RamariaResul
 
 /// 从数据库 Option<String> 列解析 Option<Uuid>，解析失败时记录 warn 并传播错误。
 ///
-/// 替代各 repo 文件中重复的 `.as_deref().map(uuid_from_db).transpose().inspect_err(...)` 模式。
+/// 替代各 repo 文件中重复的 `.as_deref.map(uuid_from_db).transpose.inspect_err(...)` 模式。
 ///
 /// 返回:
 /// - `Ok(None)`: 数据库列为 NULL。

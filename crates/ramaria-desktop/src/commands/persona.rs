@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-desktop/src/commands/persona.rs - 人格管理 Tauri Commands (Phase 6)
+//! rust/crates/ramaria-desktop/src/commands/persona.rs - 人格管理 Tauri Commands
 //!
 //! 设计特点:
 //! - 提供完整的 Persona CRUD 前端接口：列表（全字段）、编辑、刷新
@@ -6,7 +6,7 @@
 //! - 返回值经过序列化，隐藏内部 id，暴露业务字段
 //! - 与 memory 模块的 `get_personas` 互补：前者返回摘要，本模块返回全字段
 //! - `refresh_persona` 触发指定 persona 的记忆管线（L2→L3），用于"重载"性格画像
-//! - `regenerate_import_pipeline` 重新生成导入 session 的 L1 摘要 + 级联 L2/L3（v1.1 修复）
+//! - `regenerate_import_pipeline` 重新生成导入 session 的 L1 摘要 + 级联 L2/L3
 
 use crate::DesktopState;
 use serde::Serialize;
@@ -18,7 +18,7 @@ use uuid::Uuid;
 // 前端展示用结构体
 // =========================================================
 
-/// Persona 完整信息视图（Phase 6 新增）。
+/// Persona 完整信息视图。
 ///
 /// 与 `memory::PersonaView` 的区别:
 /// - 包含 `ref_id`、`avatar`、`config`、`description`、`updated_at` 等完整字段
@@ -39,7 +39,7 @@ pub struct PersonaFullView {
     pub avatar: Option<String>,
     /// JSON 个性配置（完整内容）
     pub config: Option<String>,
-    /// 人格简要描述文本（Phase 6 新增）
+    /// 人格简要描述文本
     pub description: Option<String>,
     /// 是否启用
     pub is_active: bool,
@@ -275,16 +275,16 @@ pub async fn refresh_persona(
 }
 
 // =========================================================
-// regenerate_import_pipeline — 重新生成导入消息的 L1 摘要并级联 L2/L3（v1.1 修复）
+// regenerate_import_pipeline — 重新生成导入消息的 L1 摘要并级联 L2/L3
 // =========================================================
 
 /// 对导入 persona 的所有 session 重新生成 L1 摘要，然后触发 L2→L3 级联。
 ///
 /// 动机:
 /// - 导入时若 LLM 不可用，L1 摘要生成会失败（静默 WARN）。
-///   用户连接 LLM 后，可通过记忆页面的"深度处理导入的消息"按钮调用本命令。
+/// 用户连接 LLM 后，可通过记忆页面的"深度处理导入的消息"按钮调用本命令。
 /// - 与 `trigger_memory_pipeline` 的区别：本命令先重新生成 L1（persona_uid=NULL），
-///   再触发 L2 检查，确保 LLM 失败场景下的 L0→L1→L2→L3 全管线可恢复。
+/// 再触发 L2 检查，确保 LLM 失败场景下的 L0→L1→L2→L3 全管线可恢复。
 ///
 /// 参数:
 /// - `persona_uid`: 目标导入 persona 的 UID（如 "char-123456789"）。
@@ -294,7 +294,7 @@ pub async fn refresh_persona(
 ///
 /// 说明:
 /// - 幂等：已存在的 L1 摘要会被覆盖（regenerate_l1_no_cascade 内部删除旧 L1）。
-/// - 导入 session 的 L1 摘要 persona_uid 存 NULL（对话来自两人）。  
+/// - 导入 session 的 L1 摘要 persona_uid 存 NULL（对话来自两人）。
 /// - 此操作为异步后台任务：返回后 L1 已生成，L2/L3 后台继续执行。
 ///
 /// 日志:
@@ -359,9 +359,9 @@ pub async fn regenerate_import_pipeline(
     // 重试策略（对齐深度导入模式）:
     // - 单个 session 内部由 JobManager 负责 3 次重试（指数退避 1s/2s/4s）。
     // - 外层循环追踪连续失败次数：若连续 3 个 session 的 L1 全部失败，
-    //   则判定 LLM 不可用，提前终止剩余 session 的处理，避免无意义的重试等待。
+    // 则判定 LLM 不可用，提前终止剩余 session 的处理，避免无意义的重试等待。
     // - 每个 session 的 JobManager 内部失败（已达 3 次重试上限）才会计入 l1_failed，
-    //   因此 "连续失败" 意味着 LLM 确实无法连接。
+    // 因此 "连续失败" 意味着 LLM 确实无法连接。
     const MAX_CONSECUTIVE_L1_FAILURES: u32 = 3;
 
     let app = state.app.clone();

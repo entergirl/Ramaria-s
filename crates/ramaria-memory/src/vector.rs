@@ -4,7 +4,7 @@
 //! - 定义 `VectorIndex` trait：统一的向量存储与检索接口
 //! - 提供 `BruteForceIndex`：暴力余弦相似度检索（无外部依赖）
 //! - 支持时间衰减加权（对接 `decay.rs` 的调整距离公式）
-//! - Phase 3 接入真实 EmbeddingProvider 后可替换为 HNSW/Annoy 等高维索引
+//! - 接入真实 EmbeddingProvider 后可替换为 HNSW/Annoy 等高维索引
 //! - 纯内存实现，不依赖数据库或异步运行时
 //!
 //! 设计决策:
@@ -156,7 +156,7 @@ pub trait VectorIndex: Send + Sync {
 ///
 /// 时间复杂度: O(N·D)，N=文档数，D=维度
 ///
-/// Phase 3 替换方案:
+/// 替换方案:
 /// - 文档数 > 10000 → 替换为 HNSW (hnsw_rs crate)
 /// - 内存敏感 → 替换为 Annoy (annoy-rs crate)
 #[derive(Debug, Clone)]

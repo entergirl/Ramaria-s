@@ -1,4 +1,4 @@
-//! Phase 0 POC: 验证 Windows Credential Manager 存取 API key
+//! POC: 验证 Windows Credential Manager 存取 API key
 //!
 //! `cargo run --example keychain_poc -p ramaria-cli`
 

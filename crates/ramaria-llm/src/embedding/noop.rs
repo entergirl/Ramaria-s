@@ -2,7 +2,7 @@
 //!
 //! 设计特点:
 //! - 当 `embedding-onnx` feature 未启用时编译，避免上层条件编译散落
-//! - `is_available()` 始终返回 false，`embed()` 返回 Unsupported 错误
+//! - `is_available` 始终返回 false，`embed` 返回 Unsupported 错误
 //! - 用于测试和降级场景
 
 use async_trait::async_trait;
@@ -22,7 +22,7 @@ use ramaria_core::traits::{EmbeddingModelInfo, EmbeddingProvider};
 /// 用法:
 /// ```ignore
 /// let provider = NoopEmbeddingProvider::new(384);
-/// assert!(!provider.is_available());
+/// assert!(!provider.is_available);
 /// ```
 pub struct NoopEmbeddingProvider {
     /// 模型信息（dimension 可配置）

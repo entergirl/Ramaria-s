@@ -32,10 +32,10 @@ use crate::provider::{ProviderBase, RetryConfig};
 ///
 /// 用法:
 /// ```ignore
-/// let keychain = Arc::new(Keychain::new());
-/// let config = BackendConfig::openai_default();
+/// let keychain = Arc::new(Keychain::new);
+/// let config = BackendConfig::openai_default;
 /// let provider = OpenAIProvider::new(config, keychain)?;
-/// provider.validate().await?;
+/// provider.validate.await?;
 /// let reply = provider.chat(&request).await?;
 /// ```
 pub struct OpenAIProvider {

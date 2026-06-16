@@ -1,4 +1,4 @@
-﻿//! rust/crates/ramaria-app/tests/session_lifecycle_tests.rs - Session 生命周期集成测试
+//! rust/crates/ramaria-app/tests/session_lifecycle_tests.rs - Session 生命周期集成测试
 //!
 //! 设计特点:
 //! - 使用 MockStorage + MockLlm 验证 session 生命周期的完整行为

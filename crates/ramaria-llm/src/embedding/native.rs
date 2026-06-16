@@ -4,7 +4,7 @@
 //! - 取代旧的 ONNX 方案，直接从 HuggingFace safetensors 格式加载嵌入模型
 //! - 支持 BERT 架构（bge-small-zh-v1.5，mean pooling）和 LLaMA/Qwen3 架构（last token pooling）
 //! - 架构通过 config.json 自动检测，维度在构造时确定（不依赖模型加载）
-//! - 惰性加载：首次 `embed()` 调用时才加载模型权重到内存
+//! - 惰性加载：首次 `embed` 调用时才加载模型权重到内存
 //! - 线程安全：内部状态通过 `Mutex` 保护，满足 `EmbeddingProvider: Send + Sync`
 //! - CPU 密集型推理使用 `tokio::task::block_in_place` 避免阻塞 async 运行时
 //! - 超时保护：单条 30s、批量 120s，防止模型加载/推理卡死
@@ -99,14 +99,14 @@ impl Encoder {
 /// 字段:
 /// - `model_dir`: 模型目录路径
 /// - `model_info`: 模型元信息（构造时从 config.json 确定，之后不可变）
-/// - `encoder`: 惰性加载的编码器（Mutex 保护，首次 embed() 时初始化）
+/// - `encoder`: 惰性加载的编码器（Mutex 保护，首次 embed 时初始化）
 /// - `progress`: 模型就绪进度（文件齐全时 = 1.0，否则 = 0.0）
 ///
 /// 用法:
 /// ```ignore
 /// let provider = NativeEmbeddingProvider::new("/path/to/model")?;
-/// // model_info() 此时已可用（维度从 config.json 读取）
-/// let vec = provider.embed("你好世界").await?;  // 首次调用触发权重加载
+/// // model_info 此时已可用（维度从 config.json 读取）
+/// let vec = provider.embed("你好世界").await?; // 首次调用触发权重加载
 /// ```
 pub struct NativeEmbeddingProvider {
     /// 模型目录路径
@@ -131,7 +131,7 @@ impl NativeEmbeddingProvider {
     /// 说明:
     /// - 构造时读取 config.json 检测架构和维度。
     /// - 如果 config.json 不可用（模型未下载），使用默认维度 384。
-    /// - 模型权重的实际加载延迟到首次 `embed()` 调用。
+    /// - 模型权重的实际加载延迟到首次 `embed` 调用。
     pub fn new(model_dir: impl Into<PathBuf>) -> RamariaResult<Self> {
         let dir: PathBuf = model_dir.into();
         let model_exists = Self::check_files_exist(&dir);

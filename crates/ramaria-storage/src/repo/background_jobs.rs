@@ -15,8 +15,8 @@ pub async fn create(
     payload: Option<&str>,
 ) -> RamariaResult<i64> {
     let now = ramaria_core::types::now_ms();
-    // 使用 RETURNING 子句替代 last_insert_rowid()：
-    // last_insert_rowid() 是 per-connection 的，连接池中不同连接可能拿到 0。
+    // 使用 RETURNING 子句替代 last_insert_rowid：
+    // last_insert_rowid 是 per-connection 的，连接池中不同连接可能拿到 0。
     // RETURNING 在同一条 SQL 中返回自增 ID，不受连接池影响。
     sqlx::query_scalar::<_, i64>(
         "INSERT INTO background_jobs (job_type, status, payload, created_at) VALUES (?, 'pending', ?, ?) RETURNING id"

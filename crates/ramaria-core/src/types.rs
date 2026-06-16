@@ -53,7 +53,7 @@ pub fn uuid_from_db(s: &str) -> crate::error::RamariaResult<Uuid> {
 /// 检查 UUID 是否为 nil（表示解析失败或未初始化）。
 ///
 /// 注意:
-/// - 自 Phase 3.0 起，`uuid_from_db` 已返回 `Result`，nil UUID 不应再出现。
+/// - 自 .0 起，`uuid_from_db` 已返回 `Result`，nil UUID 不应再出现。
 /// - 此函数保留用于向后兼容和防御性检查。
 #[inline]
 pub fn is_nil_uuid(u: &Uuid) -> bool {
@@ -325,11 +325,11 @@ pub struct MemoryL1 {
     pub persona_uid: Option<String>,
     /// 分组上下文——JSON 格式 `{"chat_partners": ["user-0001", "char-0003"]}`
     pub context_json: Option<String>,
-    /// 情境强度 1-5（Phase 1.1.2 启用）：
-    /// - 1-2: 弱情境（闲聊、日常寒暄）→ Phase A 加权 ×1.5
-    /// - 3: 中性情境（默认值）→ Phase A 加权 ×1.0
-    /// - 4-5: 强情境（冲突、关键决策）→ Phase A 加权 ×0.5
-    /// - None: Phase 1.1.2 前的存量数据，等同于 3
+    /// 情境强度 1-5（ 启用）：
+    /// - 1-2: 弱情境（闲聊、日常寒暄）→ 加权 ×1.5
+    /// - 3: 中性情境（默认值）→ 加权 ×1.0
+    /// - 4-5: 强情境（冲突、关键决策）→ 加权 ×0.5
+    /// - None: 前的存量数据，等同于 3
     pub situation_strength: Option<i32>,
 }
 
@@ -715,9 +715,9 @@ impl TraitStatus {
 // =========================================================
 // Persona 结构体体系（9 个结构体）
 // ID 类型约定:
-//   - INTEGER AUTOINCREMENT 表 → i64（内部索引）
-//   - TEXT/UUID 表 → Uuid（业务标识）
-//   - FK 列类型与目标表 PK 类型一致
+// - INTEGER AUTOINCREMENT 表 → i64（内部索引）
+// - TEXT/UUID 表 → Uuid（业务标识）
+// - FK 列类型与目标表 PK 类型一致
 // =========================================================
 
 /// 统一人格注册表条目。
@@ -725,10 +725,10 @@ impl TraitStatus {
 /// 职责:
 /// - `personas` 表对应的业务类型，是所有记忆主体的统一注册中心。
 /// - `uid` 为全局业务标识（格式 `{kind}-{seq}`），`id` 仅内部索引(i64)。
-/// - v1.0 仅自动创建 `user-0001` 和 `rama-0001`。
+/// - 仅自动创建 `user-0001` 和 `rama-0001`。
 ///
 /// 字段约定:
-/// - `source` + `ref_id`: 为 v1.1+ 导入器预留的跨渠道身份去重键。
+/// - `source` + `ref_id`: 为 + 导入器预留的跨渠道身份去重键。
 /// - `config`: JSON 格式的个性配置（温度、模型偏好等）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Persona {
@@ -746,7 +746,7 @@ pub struct Persona {
     pub avatar: Option<String>,
     /// JSON 个性配置
     pub config: Option<String>,
-    /// 人格简要描述（面向用户的短文本，Phase 6 新增）
+    /// 人格简要描述（面向用户的短文本， 新增）
     pub description: Option<String>,
     /// 1=启用，0=停用
     pub active: bool,
@@ -869,7 +869,7 @@ pub struct MemoryEvent {
     pub paraphrase: Option<String>,
     /// 合并了多少条 L1
     pub absorbed: i64,
-    /// Phase 1.1.2: 情境强度 1-5（从源 L1 传播），None 等效 3
+    /// 情境强度 1-5（从源 L1 传播），None 等效 3
     pub situation_strength: Option<i32>,
     pub created_at: i64,
     pub last_accessed_at: Option<i64>,
@@ -1182,7 +1182,7 @@ impl ClusterSnapshot {
 /// LLM Provider 标识。
 ///
 /// 职责:
-/// - 枚举 v1.0 支持的 LLM provider。
+/// - 枚举 支持的 LLM provider。
 /// - 区分本地和线上 provider，决定是否需要隐私确认。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -1423,7 +1423,7 @@ pub enum AppState {
     Ready,
     /// 可恢复故障（LLM 暂不可用 或 嵌入模型未配置/不可用）
     ///
-    /// v1.1 语义扩大：不再仅限 LLM 故障。当嵌入模型缺失时也进入此状态，
+    /// 语义扩大：不再仅限 LLM 故障。当嵌入模型缺失时也进入此状态，
     /// 对话功能可用（BM25 + 图谱通道仍工作），但向量检索通道不可用。
     /// 前端应在对话页顶部显示具体原因的警告条。
     Degraded,

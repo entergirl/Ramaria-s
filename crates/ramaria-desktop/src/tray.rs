@@ -6,7 +6,8 @@
 //! - 右键菜单：显示主窗口 / 退出应用
 //! - 左键点击托盘图标：切换主窗口显示/隐藏
 //! - 窗口关闭按钮行为：拦截 CloseRequested → 通过事件通知前端弹窗确认
-//!   （前端提供「最小化到托盘」和「退出 Ramaria」两个选项）
+//!
+//! （前端提供「最小化到托盘」和「退出 Ramaria」两个选项）
 //! - 托盘图标 tooltip 显示 "Ramaria - 个人AI陪伴记忆系统"
 //! - 错误处理：托盘创建失败记录错误日志但不阻断应用启动
 //!
@@ -46,7 +47,7 @@ const MENU_ID_QUIT: &str = "tray_quit";
 /// - `app_handle`: Tauri AppHandle，用于获取窗口和注册事件
 ///
 /// 返回:
-/// - `Ok(())` 初始化成功
+/// - `Ok()` 初始化成功
 /// - `Err(String)` 初始化失败（图标加载、菜单构建等错误）
 pub fn setup_tray<R: Runtime>(app_handle: &AppHandle<R>) -> Result<(), Box<dyn std::error::Error>> {
     // ---- 创建托盘图标（32×32 RGBA 粉色 Brand 色方块） ----
@@ -215,7 +216,7 @@ fn intercept_close_event<R: Runtime>(app_handle: &AppHandle<R>) {
                 api.prevent_close();
 
                 // ★ 发送事件给前端，触发确认弹窗
-                // 不在此处直接 hide()——将选择权交给用户
+                // 不在此处直接 hide——将选择权交给用户
                 tracing::debug!("拦截关闭请求 → 通知前端弹窗确认");
                 let payload = serde_json::json!({
                     "action": "close-requested"
@@ -297,8 +298,8 @@ pub fn handle_close_action<R: Runtime>(app_handle: &AppHandle<R>, action: &str) 
 /// - `action`: "minimize" | "exit"
 ///
 /// 用法（前端）:
-///   TauriBridge.invoke('confirm_close_action', { action: 'minimize' });
-///   TauriBridge.invoke('confirm_close_action', { action: 'exit' });
+/// TauriBridge.invoke('confirm_close_action', { action: 'minimize' });
+/// TauriBridge.invoke('confirm_close_action', { action: 'exit' });
 #[tauri::command]
 #[tracing::instrument(skip(app_handle))]
 pub fn confirm_close_action(app_handle: AppHandle, action: String) -> Result<String, String> {
@@ -314,7 +315,7 @@ pub fn confirm_close_action(app_handle: AppHandle, action: String) -> Result<Str
 /// 判断主窗口当前是否可见。
 ///
 /// 用途：notification.rs 据此决定是否发送桌面通知。
-///       窗口可见时无需通知，窗口隐藏时才弹 toast。
+/// 窗口可见时无需通知，窗口隐藏时才弹 toast。
 ///
 /// 返回:
 /// - `true`: 窗口当前可见（含最小化状态）

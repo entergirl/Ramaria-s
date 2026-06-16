@@ -174,7 +174,7 @@ fn build_degraded_summary(l1_list: &[MemoryL1], max_chars: usize) -> String {
 ///
 /// 格式: 去重后的逗号分隔列表。
 ///
-/// 使用 `HashSet` 进行 O(1) 去重，替代原来的 `Vec::contains()` O(n²) 实现。
+/// 使用 `HashSet` 进行 O(1) 去重，替代原来的 `Vec::contains` O(n²) 实现。
 /// 降级路径仅在 LLM JSON 解析失败时调用，每次最多约 20 条 L1 记录，
 /// 性能影响极小，但 HashSet 语义更清晰。
 fn build_degraded_keywords(l1_list: &[MemoryL1]) -> Option<String> {

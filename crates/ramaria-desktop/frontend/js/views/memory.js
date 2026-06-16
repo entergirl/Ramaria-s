@@ -26,31 +26,31 @@
 var RamariaMemoryView = (function () {
     'use strict';
 
-    // =========================================================
-    // 内部状态
-    // =========================================================
+ // =========================================================
+ // 内部状态
+ // =========================================================
 
     var _unregisterFns = [];
     var _unsubs = [];
 
-    /** 当前选中的人格 UID */
+ /** 当前选中的人格 UID */
     var _currentPersonaUid = 'rama-0001';
 
-    /** 缓存已加载数据（key: persona_uid） */
+ /** 缓存已加载数据（key: persona_uid） */
     var _cache = {};
 
-    /** 当前激活的 Tab: 'l1' | 'l2' | 'l3' */
+ /** 当前激活的 Tab: 'l1' | 'l2' | 'l3' */
     var _activeTab = 'l1';
 
-    // =========================================================
-    // DOM 快捷查询
-    // =========================================================
+ // =========================================================
+ // DOM 快捷查询
+ // =========================================================
 
     function $(id) { return document.getElementById(id); }
 
-    // =========================================================
-    // 渲染
-    // =========================================================
+ // =========================================================
+ // 渲染
+ // =========================================================
 
     function render() {
         var viewEl = $('view-memory');
@@ -59,10 +59,10 @@ var RamariaMemoryView = (function () {
             return;
         }
 
-        // ── v1.1 修复: render() 会重建 DOM，旧的按钮监听器随之销毁 ──
-        // 重置标志确保 _updatePipelineButton() 在新 DOM 上重新绑定 click 事件。
+ // ── render 会重建 DOM，旧的按钮监听器随之销毁 ──
+ // 重置标志确保 _updatePipelineButton 在新 DOM 上重新绑定 click 事件。
         _pipelineBtnBound = false;
-        // 同时重置运行态，避免上次未完成的任务阻塞新按钮操作。
+ // 同时重置运行态，避免上次未完成的任务阻塞新按钮操作。
         _pipelineRunning = false;
 
         viewEl.innerHTML = '';
@@ -71,7 +71,7 @@ var RamariaMemoryView = (function () {
         inner.className = 'memory-view-inner';
         viewEl.appendChild(inner);
 
-        // ── 工具栏 ──
+ // ── 工具栏 ──
         var toolbar = document.createElement('div');
         toolbar.className = 'memory-toolbar';
         toolbar.innerHTML =
@@ -79,13 +79,13 @@ var RamariaMemoryView = (function () {
                 '<option value="rama-0001">默认 (rama-0001)</option>' +
             '</select>' +
             '<span class="memory-toolbar-hint">筛选记忆归属人格</span>' +
-            // 深度处理按钮（仅导入人格时显示，默认隐藏）
+ // 深度处理按钮（仅导入人格时显示，默认隐藏）
             '<button class="btn btn-secondary btn-sm hidden ml-auto" id="btn-trigger-pipeline" ' +
             'title="对此导入人格的消息执行 L2 事件提取和 L3 性格画像生成">' +
             '🔬 深度处理导入的消息</button>';
         inner.appendChild(toolbar);
 
-        // ── Tab 切换（ARIA Tabs 模式）──
+ // ── Tab 切换（ARIA Tabs 模式）──
         var tabs = document.createElement('div');
         tabs.className = 'memory-tabs';
         tabs.setAttribute('role', 'tablist');
@@ -105,7 +105,7 @@ var RamariaMemoryView = (function () {
             '</button>';
         inner.appendChild(tabs);
 
-        // ── 面板（ARIA tabpanel）──
+ // ── 面板（ARIA tabpanel）──
         var panelL1 = document.createElement('div');
         panelL1.className = 'memory-panel active';
         panelL1.id = 'memory-panel-l1';
@@ -130,12 +130,12 @@ var RamariaMemoryView = (function () {
         panelL3.setAttribute('data-panel', 'l3');
         inner.appendChild(panelL3);
 
-        // ── 事件绑定 ──
+ // ── 事件绑定 ──
         _bindEvents();
     }
 
     function _bindEvents() {
-        // Tab 切换
+ // Tab 切换
         var tabBtns = document.querySelectorAll('#view-memory .memory-tab');
         for (var i = 0; i < tabBtns.length; i++) {
             tabBtns[i].addEventListener('click', function () {
@@ -144,7 +144,7 @@ var RamariaMemoryView = (function () {
             });
         }
 
-        // 人格筛选
+ // 人格筛选
         var personaSelect = $('memory-persona-select');
         if (personaSelect) {
             personaSelect.addEventListener('change', function () {
@@ -158,29 +158,29 @@ var RamariaMemoryView = (function () {
     function _switchTab(tab) {
         _activeTab = tab;
 
-        // 更新 Tab 激活态
+ // 更新 Tab 激活态
         var allTabs = document.querySelectorAll('#view-memory .memory-tab');
         for (var i = 0; i < allTabs.length; i++) {
             allTabs[i].classList.toggle('active', allTabs[i].getAttribute('data-tab') === tab);
         }
 
-        // 切换面板
+ // 切换面板
         var allPanels = document.querySelectorAll('#view-memory .memory-panel');
         for (var j = 0; j < allPanels.length; j++) {
             allPanels[j].classList.toggle('active', allPanels[j].getAttribute('data-panel') === tab);
         }
     }
 
-    // =========================================================
-    // 数据加载
-    // =========================================================
+ // =========================================================
+ // 数据加载
+ // =========================================================
 
     async function _loadAllData() {
-        // 显示加载状态（直接在各面板内展示，不用骨架屏避免 innerHTML 覆盖问题）
+ // 显示加载状态（直接在各面板内展示，不用骨架屏避免 innerHTML 覆盖问题）
         _showPanelLoading();
 
         try {
-            // 并行加载三层数据
+ // 并行加载三层数据
             var results = await Promise.allSettled([
                 RamariaApi.memory.getL1(_currentPersonaUid, 500),
                 RamariaApi.memory.getL2(_currentPersonaUid, 500),
@@ -191,7 +191,7 @@ var RamariaMemoryView = (function () {
             var l2Data = results[1].status === 'fulfilled' ? results[1].value : [];
             var l3Data = results[2].status === 'fulfilled' ? results[2].value : [];
 
-            // v1.1 降级：若按 persona 过滤无结果，尝试不过滤再查一次
+ // 若按 persona 过滤无结果，尝试不过滤再查一次
             if (l1Data.length === 0 && _currentPersonaUid) {
                 try {
                     var l1Fallback = await RamariaApi.memory.getL1(null, 500);
@@ -202,18 +202,18 @@ var RamariaMemoryView = (function () {
                 } catch (_) { /* 降级查询失败，保持空结果 */ }
             }
 
-            // 缓存
+ // 缓存
             _cache[_currentPersonaUid] = { l1: l1Data, l2: l2Data, l3: l3Data };
 
-            // 渲染
+ // 渲染
             _renderL1(l1Data || []);
             _renderL2(l2Data || []);
             _renderL3(l3Data || []);
 
-            // 更新 badge 数量
+ // 更新 badge 数量
             _updateBadges(l1Data, l2Data, l3Data);
 
-            // 错误日志
+ // 错误日志
             if (results[0].status === 'rejected') console.error('[MemoryView] L1 加载失败:', results[0].reason);
             if (results[1].status === 'rejected') console.error('[MemoryView] L2 加载失败:', results[1].reason);
             if (results[2].status === 'rejected') console.error('[MemoryView] L3 加载失败:', results[2].reason);
@@ -221,12 +221,12 @@ var RamariaMemoryView = (function () {
         } catch (err) {
             console.error('[MemoryView] 加载数据失败:', err);
             RamariaToast.show('error', '加载记忆失败', err.message || '未知错误');
-            // 加载失败时在各面板显示错误提示
+ // 加载失败时在各面板显示错误提示
             _showPanelError(err.message || '未知错误');
         }
     }
 
-    /** 在各面板显示加载中状态 */
+ /** 在各面板显示加载中状态 */
     function _showPanelLoading() {
         var panels = ['memory-panel-l1', 'memory-panel-l2', 'memory-panel-l3'];
         for (var i = 0; i < panels.length; i++) {
@@ -243,7 +243,7 @@ var RamariaMemoryView = (function () {
         }
     }
 
-    /** 在各面板显示错误提示 */
+ /** 在各面板显示错误提示 */
     function _showPanelError(msg) {
         var panels = ['memory-panel-l1', 'memory-panel-l2', 'memory-panel-l3'];
         for (var i = 0; i < panels.length; i++) {
@@ -258,9 +258,9 @@ var RamariaMemoryView = (function () {
         }
     }
 
-    // =========================================================
-    // L1 渲染 — Bento Grid
-    // =========================================================
+ // =========================================================
+ // L1 渲染 — Bento Grid
+ // =========================================================
 
     function _renderL1(items) {
         var panel = $('memory-panel-l1');
@@ -341,9 +341,9 @@ var RamariaMemoryView = (function () {
         return '😐';
     }
 
-    // =========================================================
-    // L2 渲染 — 事件列表
-    // =========================================================
+ // =========================================================
+ // L2 渲染 — 事件列表
+ // =========================================================
 
     function _renderL2(items) {
         var panel = $('memory-panel-l2');
@@ -416,9 +416,9 @@ var RamariaMemoryView = (function () {
         panel.appendChild(list);
     }
 
-    // =========================================================
-    // L3 渲染 — 性格标签云
-    // =========================================================
+ // =========================================================
+ // L3 渲染 — 性格标签云
+ // =========================================================
 
     function _renderL3(items) {
         var panel = $('memory-panel-l3');
@@ -434,7 +434,7 @@ var RamariaMemoryView = (function () {
             return;
         }
 
-        // 按 layer 分组
+ // 按 layer 分组
         var groups = { base: [], primary: [], accent: [] };
         for (var i = 0; i < items.length; i++) {
             var layer = items[i].layer || 'accent';
@@ -442,7 +442,7 @@ var RamariaMemoryView = (function () {
             groups[layer].push(items[i]);
         }
 
-        // 排序：base → primary → accent
+ // 排序：base → primary → accent
         var layerOrder = ['base', 'primary', 'accent'];
         var layerNames = { base: '底色（Base）', primary: '基调（Primary）', accent: '点缀（Accent）' };
 
@@ -462,9 +462,9 @@ var RamariaMemoryView = (function () {
             tags.className = 'memory-l3-cloud';
 
             for (var t = 0; t < traits.length; t++) {
-                // ★ 使用 let 声明以创建块级作用域闭包
-                //    修复：var trait（函数作用域→所有回调共享最后一个值）
-                //    let trait 确保每个 addEventListener 闭包捕获当次循环的值
+ // ★ 使用 let 声明以创建块级作用域闭包
+ // 修复：var trait（函数作用域→所有回调共享最后一个值）
+ // let trait 确保每个 addEventListener 闭包捕获当次循环的值
                 var _trait = traits[t];
                 var _confidencePct = _trait.confidence != null ? Math.round(_trait.confidence * 100) : 0;
 
@@ -477,7 +477,7 @@ var RamariaMemoryView = (function () {
                     '\n证据量: ' + (_trait.evidence || 0) +
                     '\n状态: ' + (_trait.status || 'active');
 
-                // 通过 IIFE 绑定当前循环值，避免闭包引用循环变量
+ // 通过 IIFE 绑定当前循环值，避免闭包引用循环变量
                 (function (trait, confidencePct) {
                     tag.addEventListener('click', function () {
                         var detail =
@@ -513,9 +513,9 @@ var RamariaMemoryView = (function () {
         panel.appendChild(cloud);
     }
 
-    // =========================================================
-    // 辅助
-    // =========================================================
+ // =========================================================
+ // 辅助
+ // =========================================================
 
     function _updateBadges(l1, l2, l3) {
         var badgeL1 = $('memory-badge-l1');
@@ -527,11 +527,11 @@ var RamariaMemoryView = (function () {
         if (badgeL3) badgeL3.textContent = l3 ? l3.length : '0';
     }
 
-    // =========================================================
-    // 人格选择器刷新
-    // =========================================================
+ // =========================================================
+ // 人格选择器刷新
+ // =========================================================
 
-    /** 缓存的 persona 列表（含 source 字段，用于判断是否导入人格） */
+ /** 缓存的 persona 列表（含 source 字段，用于判断是否导入人格） */
     var _allPersonas = [];
 
     async function _refreshPersonaSelector() {
@@ -551,7 +551,7 @@ var RamariaMemoryView = (function () {
                 select.appendChild(opt);
             }
 
-            // ── v1.1 修复: 检查是否有预设的 persona（来自导入完成页的导航）──
+ // ── 检查是否有预设的 persona（来自导入完成页的导航）──
             var preselectUid = RamariaStore.get('preselectPersonaUid');
             if (preselectUid) {
                 var preselectOpt = select.querySelector('option[value="' + preselectUid + '"]');
@@ -562,10 +562,10 @@ var RamariaMemoryView = (function () {
                 } else if (_allPersonas.length > 0) {
                     _currentPersonaUid = _allPersonas[0].uid;
                 }
-                // 清除预设标志（仅生效一次）
+ // 清除预设标志（仅生效一次）
                 RamariaStore.set('preselectPersonaUid', null);
             } else {
-                // 默认 rama-0001
+ // 默认 rama-0001
                 var def = select.querySelector('option[value="rama-0001"]');
                 if (def) {
                     select.value = 'rama-0001';
@@ -580,24 +580,24 @@ var RamariaMemoryView = (function () {
         }
     }
 
-    // =========================================================
-    // 深度处理按钮
-    // =========================================================
+ // =========================================================
+ // 深度处理按钮
+ // =========================================================
 
-    /** 管道是否正在执行中（防止重复点击） */
+ /** 管道是否正在执行中（防止重复点击） */
     var _pipelineRunning = false;
-    /** 按钮事件是否已绑定 */
+ /** 按钮事件是否已绑定 */
     var _pipelineBtnBound = false;
 
-    /**
-     * 根据当前选中的 persona 决定是否显示"深度处理"按钮。
-     * 仅当 persona.source === "qq"（导入人格）时显示。
-     */
+ /**
+ * 根据当前选中的 persona 决定是否显示"深度处理"按钮。
+ * 仅当 persona.source === "qq"（导入人格）时显示。
+ */
     function _updatePipelineButton() {
         var btn = document.getElementById('btn-trigger-pipeline');
         if (!btn) return;
 
-        // 查找当前选中 persona 的 source
+ // 查找当前选中 persona 的 source
         var currentPersona = null;
         for (var i = 0; i < _allPersonas.length; i++) {
             if (_allPersonas[i].uid === _currentPersonaUid) {
@@ -613,24 +613,24 @@ var RamariaMemoryView = (function () {
             btn.classList.add('hidden');
         }
 
-        // 首次绑定点-击事件
+ // 首次绑定点-击事件
         if (!_pipelineBtnBound) {
             btn.addEventListener('click', _handleTriggerPipeline);
             _pipelineBtnBound = true;
         }
     }
 
-    /**
-     * 处理"深度处理导入的消息"按钮点击。
-     *
-     * v1.1 修复: 调用新命令 `regenerate_import_pipeline`，先重新生成 L1 摘要，
-     * 再自动级联 L2→L3。覆盖导入时 LLM 不可用导致 L1 失败的场景。
-     *
-     * 流程:
-     * 1. 后端查找该 persona 的所有关联 session
-     * 2. 对每个 session 重新生成 L1 摘要（persona_uid=NULL，幂等覆盖）
-     * 3. L1 全部完成后触发 L2→L3 级联（后台异步）
-     */
+ /**
+ * 处理"深度处理导入的消息"按钮点击。
+ *
+ * 调用新命令 `regenerate_import_pipeline`，先重新生成 L1 摘要，
+ * 再自动级联 L2→L3。覆盖导入时 LLM 不可用导致 L1 失败的场景。
+ *
+ * 流程:
+ * 1. 后端查找该 persona 的所有关联 session
+ * 2. 对每个 session 重新生成 L1 摘要（persona_uid=NULL，幂等覆盖）
+ * 3. L1 全部完成后触发 L2→L3 级联（后台异步）
+ */
     async function _handleTriggerPipeline() {
         if (_pipelineRunning) {
             RamariaToast.show('warning', '提示', '深度处理正在进行中，请稍候...');
@@ -652,16 +652,16 @@ var RamariaMemoryView = (function () {
         try {
             var result = await RamariaApi.memory.regenerateImportPipeline(_currentPersonaUid);
 
-            // 解析结果
+ // 解析结果
             var l1Regenerated = (result && result.l1_regenerated) ? result.l1_regenerated : 0;
             var l1Failed = (result && result.l1_failed) ? result.l1_failed : 0;
             var totalSessions = (result && result.total_sessions) ? result.total_sessions : 0;
             var earlyTerminated = !!(result && result.early_terminated);
             var remainingSkipped = (result && result.remaining_skipped) ? result.remaining_skipped : 0;
 
-            // ── v1.1 修复: 区分提前终止 vs 部分失败 vs 全部成功 ──
+ // ── 区分提前终止 vs 部分失败 vs 全部成功 ──
             if (earlyTerminated) {
-                // 连续失败达上限，已提前终止 → 用 error 级 toast 强调需要用户操作
+ // 连续失败达上限，已提前终止 → 用 error 级 toast 强调需要用户操作
                 RamariaToast.show(
                     'error', 'LLM 不可用，已提前终止',
                     '连续失败 ' + l1Failed + ' 次，已跳过剩余 ' + remainingSkipped + ' 个 session。' +
@@ -686,7 +686,7 @@ var RamariaMemoryView = (function () {
                 RamariaToast.show('info', '提示', '该人格没有关联的消息需要处理。');
             }
 
-            // 延迟刷新记忆数据
+ // 延迟刷新记忆数据
             setTimeout(function () {
                 _loadAllData();
                 _pipelineRunning = false;
@@ -706,9 +706,9 @@ var RamariaMemoryView = (function () {
         }
     }
 
-    // =========================================================
-    // 生命周期
-    // =========================================================
+ // =========================================================
+ // 生命周期
+ // =========================================================
 
     function _registerHooks() {
         var unreg;
@@ -738,9 +738,9 @@ var RamariaMemoryView = (function () {
         _registerHooks();
     }
 
-    // =========================================================
-    // 公开 API
-    // =========================================================
+ // =========================================================
+ // 公开 API
+ // =========================================================
 
     return {
         init: init,

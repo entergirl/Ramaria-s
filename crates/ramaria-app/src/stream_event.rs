@@ -6,7 +6,8 @@
 //! - 每个事件携带 request_id 和 created_at，便于前端串联和日志追踪
 //! - backend_id 记录 provider 返回的 finish_reason 或 error 类型
 //! - 与 `ramaria_core::traits::StreamDelta` 互补：StreamDelta 是 provider 层协议，
-//!   StreamEvent 是 app 层领域事件（增加 request_id/created_at/语义化错误）
+//!
+//! StreamEvent 是 app 层领域事件（增加 request_id/created_at/语义化错误）
 
 use ramaria_core::types::now_ms;
 use uuid::Uuid;

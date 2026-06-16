@@ -154,9 +154,9 @@ impl LlamaHeadDimEncoder {
 
         // SAFETY: from_mmaped_safetensors 通过内存映射读取本地模型文件。
         // 调用者需保证:
-        //   (1) 模型文件来自可信来源（HuggingFace 官方仓库）。
-        //   (2) 在 mmap 期间文件不会被外部修改。
-        //   (3) tensor 数据类型为 F32（DType::F32），与 candle 期望一致。
+        // (1) 模型文件来自可信来源（HuggingFace 官方仓库）。
+        // (2) 在 mmap 期间文件不会被外部修改。
+        // (3) tensor 数据类型为 F32（DType::F32），与 candle 期望一致。
         // 若文件被外部截断或修改，mmap 会触发 SIGBUS。
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(&[model_path.as_path()], DType::F32, &device)

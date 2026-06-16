@@ -93,9 +93,9 @@ impl BertEncoder {
 
         // SAFETY: from_mmaped_safetensors 通过内存映射读取本地模型文件。
         // 调用者需保证:
-        //   (1) 模型文件来自可信来源（用户自行下载或通过 ModelManager 校验的 HuggingFace 文件）。
-        //   (2) 在 mmap 期间文件不会被外部修改（Ramaria 进程独占模型文件写权限）。
-        //   (3) tensor 数据类型为 F32（DType::F32），与 candle 期望一致。
+        // (1) 模型文件来自可信来源（用户自行下载或通过 ModelManager 校验的 HuggingFace 文件）。
+        // (2) 在 mmap 期间文件不会被外部修改（Ramaria 进程独占模型文件写权限）。
+        // (3) tensor 数据类型为 F32（DType::F32），与 candle 期望一致。
         // 若文件被外部截断或修改，mmap 会触发 SIGBUS。此风险由用户操作模型文件的行为承担，
         // 属于本地部署场景的可接受边界。
         let vb = unsafe {
@@ -532,7 +532,7 @@ impl BertEncoder {
     /// 单条 Mean pooling（批量处理时逐条调用）。
     ///
     /// hidden: [seq_len, hidden_size]
-    /// mask: [seq_len]  (f32 tensor)
+    /// mask: [seq_len] (f32 tensor)
     fn mean_pooling_single(
         hidden: &Tensor,
         mask: &Tensor,

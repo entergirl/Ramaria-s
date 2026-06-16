@@ -60,7 +60,7 @@ impl Keychain {
     /// - `key`: API key 明文。
     ///
     /// 返回:
-    /// - `Ok(())`: 写入成功。
+    /// - `Ok()`: 写入成功。
     /// - `Err(RamariaError::Privacy)`: 写入失败。
     pub fn set_api_key(&self, service: &str, key: &str) -> RamariaResult<()> {
         write_credential(service, key)
@@ -72,7 +72,7 @@ impl Keychain {
     /// - `service`: 服务标识。
     ///
     /// 返回:
-    /// - `Ok(())`: 删除成功或 key 本就不存在。
+    /// - `Ok()`: 删除成功或 key 本就不存在。
     /// - `Err(RamariaError::Privacy)`: 删除失败（权限不足等）。
     pub fn delete_api_key(&self, service: &str) -> RamariaResult<()> {
         delete_credential(service)

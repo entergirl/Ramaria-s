@@ -23,7 +23,7 @@ use ramaria_core::types::{AppState, BackendConfig};
 /// 职责:
 /// - 供 CLI/Desktop 展示设置向导步骤。
 /// - `is_complete` 为 true 时表示核心配置完成（可对话）。
-/// - 嵌入模型缺失不阻塞核心功能（v1.1: 降级为 Degraded）。
+/// - 嵌入模型缺失不阻塞核心功能。
 #[derive(Debug, Clone)]
 pub struct SetupStatus {
     /// 后端配置是否已保存
@@ -75,9 +75,9 @@ impl SetupStatus {
 /// - `SetupStatus` 描述当前配置完整度。
 ///
 /// 检查项:
-/// 1. 后端配置：`storage.get_backend_config()` 是否有记录
+/// 1. 后端配置：`storage.get_backend_config` 是否有记录
 /// 2. 模型选择：线上 provider 检查 model_id 非空；本地 provider（LM Studio）自动通过
-/// 3. 索引状态：`storage.get_index_version()` 是否为 0（0 表示未构建）
+/// 3. 索引状态：`storage.get_index_version` 是否为 0（0 表示未构建）
 /// 4. 嵌入模型：由调用方检查后传入（是否已配置且 ONNX 模型文件存在）
 pub async fn check_setup_status(
     storage: &(dyn StorageBackend + Send + Sync),
@@ -128,14 +128,14 @@ pub async fn check_setup_status(
 /// - `NeedsSetup`: 后端配置或模型选择未完成。
 /// - `Indexing`: 索引待构建。
 /// - `Ready`: 核心配置就绪且嵌入模型可用。
-/// - `Degraded`: 核心配置就绪但嵌入模型缺失（v1.1 降级模式）。
+/// - `Degraded`: 核心配置就绪但嵌入模型缺失。
 pub fn determine_state(status: &SetupStatus) -> AppState {
     if !status.backend_configured || !status.model_selected {
         AppState::NeedsSetup
     } else if status.needs_indexing {
         AppState::Indexing
     } else if !status.embedding_available {
-        // v1.1: 嵌入模型缺失 → Degraded（非阻塞，BM25+图谱可用）
+        // 嵌入模型缺失 → Degraded（非阻塞，BM25+图谱可用）
         AppState::Degraded
     } else {
         AppState::Ready
@@ -149,7 +149,7 @@ pub fn determine_state(status: &SetupStatus) -> AppState {
 /// - `config`: 要保存的后端配置（不含 API key）。
 ///
 /// 返回:
-/// - `Ok(())`: 保存成功。
+/// - `Ok()`: 保存成功。
 ///
 /// 说明:
 /// - 重复调用会覆盖已有配置。

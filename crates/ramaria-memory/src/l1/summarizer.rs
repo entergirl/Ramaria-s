@@ -27,7 +27,7 @@ use crate::utils;
 /// 字段:
 /// - 所有字段均为 `Option`，以容忍 LLM 输出缺失字段。
 /// - 校验阶段再填充默认值，避免解析阶段 panic。
-/// - `situation_strength` 为 Phase 1.1.2 新增字段，当前 LLM prompt 尚未包含此输出，
+/// - `situation_strength` 为 新增字段，当前 LLM prompt 尚未包含此输出，
 ///   因此大部分情况下为 None（等效 3）。
 #[derive(Debug, Deserialize)]
 struct L1SummaryResponse {
@@ -37,7 +37,7 @@ struct L1SummaryResponse {
     atmosphere: Option<String>,
     valence: Option<f64>,
     salience: Option<f64>,
-    /// Phase 1.1.2: 情境强度 1-5，None 时按默认值 3 处理
+    /// 情境强度 1-5，None 时按默认值 3 处理
     #[serde(default)]
     situation_strength: Option<i32>,
 }
@@ -55,7 +55,7 @@ struct L1SummaryResponse {
 /// - `conversation_format_assistant`: 助手消息格式化前缀。
 /// - `persona_uid`: 本条摘要描述的对象（人格标识），None 表示描述默认用户。
 /// - `context_json`: 分组上下文，含 chat_partners 列表。
-/// - `situation_strength`: Phase 1.1.2 情境强度（1-5），None 时 LLM 输出缺失则默认 3。
+/// - `situation_strength`: 情境强度（1-5），None 时 LLM 输出缺失则默认 3。
 #[derive(Debug, Clone)]
 pub struct L1SummarizerConfig {
     /// LLM 生成温度 0.0..2.0
@@ -70,7 +70,7 @@ pub struct L1SummarizerConfig {
     pub persona_uid: Option<String>,
     /// 分组上下文——JSON 格式 `{"chat_partners": ["user-0001", "char-0003"]}`
     pub context_json: Option<String>,
-    /// Phase 1.1.2: 情境强度默认值（1-5），None 时使用 3
+    /// 情境强度默认值（1-5），None 时使用 3
     pub situation_strength: Option<i32>,
 }
 
@@ -102,7 +102,7 @@ impl Default for L1SummarizerConfig {
 ///
 /// 用法:
 /// ```ignore
-/// let summarizer = L1Summarizer::new(&llm, &storage, L1SummarizerConfig::default());
+/// let summarizer = L1Summarizer::new(&llm, &storage, L1SummarizerConfig::default);
 /// let l1 = summarizer.summarize_session(session_id).await?;
 /// ```
 pub struct L1Summarizer<'a> {
@@ -193,7 +193,7 @@ impl<'a> L1Summarizer<'a> {
         // 注入 config 中的上下文字段
         l1.persona_uid = self.config.persona_uid.clone();
         l1.context_json = self.config.context_json.clone();
-        // Phase 1.1.2: 优先使用 LLM 输出的 situation_strength，缺失时回退 config 默认值
+        // 优先使用 LLM 输出的 situation_strength，缺失时回退 config 默认值
         l1.situation_strength = parsed
             .situation_strength
             .or(self.config.situation_strength)
@@ -408,7 +408,7 @@ impl<'a> L1Summarizer<'a> {
             last_accessed_at: None,
             persona_uid: None,        // 由调用方在 construct 阶段通过 config 注入
             context_json: None,       // 由调用方在 construct 阶段通过 config 注入
-            situation_strength: None, // Phase 1.1.2: 由 LLM 输出或 config 注入
+            situation_strength: None, // 由 LLM 输出或 config 注入
         };
 
         (l1, keywords_list)
@@ -637,7 +637,7 @@ mod tests {
     // ---- 完整流程（需要 mock） ----
     // 完整集成测试在 l1/mod.rs 的测试中，使用 mock LlmProvider + mock StorageBackend
 
-    // ---- situation_strength 解析（Phase 1.1.2） ----
+    // ---- situation_strength 解析 ----
 
     #[test]
     fn parse_situation_strength_from_json() {

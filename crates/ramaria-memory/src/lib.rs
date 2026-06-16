@@ -77,17 +77,17 @@ pub use event::{
     generate_paraphrase,
 };
 
-// Inference (Phase A + Phase B + Phase C — 性格推断全管线)
+// Inference ( + + — 性格推断全管线)
 pub use inference::{
-    // Phase A: 统计 + 聚类 + 收缩
+    // 统计 + 聚类 + 收缩
     AttitudeSample,
-    // Phase C: 漂移检测 + 置信度更新
+    // 漂移检测 + 置信度更新
     CalibrationConfig,
     CalibrationDiff,
     CalibrationTracker,
     CategoryDriftResult,
     CategoryEventData,
-    // Phase B: LLM 推断 + 后处理
+    // LLM 推断 + 后处理
     CategorySignal,
     CategoryStats,
     ClusterAssignment,
@@ -174,12 +174,12 @@ pub use rebuild::{IndexRebuilder, RebuildConfig, RebuildStats, events_to_views, 
 
 // Prompt System Prompt 构建
 pub use prompt::{
-    builder::{PromptConfig, PromptContext, assemble_prompt},
+    builder::{PromptConfig, PromptContext, assemble_prompt, build_cross_session_narrative},
     example_selector::{ExampleSelector, ExampleSelectorConfig, extract_keywords},
     injection_guard::{MemoryInjectionStatus, apply_injection_guard, check_injection},
 };
 
-// Token Budget 管理（Phase 1.1.2）
+// Token Budget 管理
 pub use token_budget::{
     BudgetedContext, TokenBudgetConfig, apply_token_budget, estimate_tokens, truncate_at_boundary,
 };

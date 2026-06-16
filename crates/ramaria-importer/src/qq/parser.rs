@@ -1,14 +1,13 @@
 //! rust/crates/ramaria-importer/src/qq/parser.rs - QQ 聊天记录解析核心
-//!
 //! 设计特点:
 //! - 仅支持 shuakami/qq-chat-exporter v5.x JSON 格式（TXT 已移除）
 //! - 完整覆盖 qce v5.x 全部 11 种消息类型（type_1/3/6/7/8/9/10/11/19 + system）
 //! - 消息指纹: SHA-256 前 16 位 hex，用于跨导入批次的重复检测
 //! - 编码兼容: 支持 UTF-8/UTF-8-BOM/UTF-16-LE/GBK/Latin-1 多编码自动检测
-//! - Phase 5B 角色映射: 双前缀模式——导出者也加 [{self_name}] 前缀，消除"用户 vs 助手"误导
-//! - Phase 5B uin 提取: 解析 chatInfo.selfUin 和每条消息 sender.uin，用于简版 UID 生成
+//! - 角色映射: 双前缀模式——导出者也加 [{self_name}] 前缀，消除"用户 vs 助手"误导
+//! - uin 提取: 解析 chatInfo.selfUin 和每条消息 sender.uin，用于简版 UID 生成
 //! - Session 切割: 按 gap_minutes 时间间隔将消息流切割为独立会话
-//! - 完整诊断: 报告包含成功/降级/跳过 三类统计（含 v1.1 新增的 4 种 P0 类型 + 5B 双方标识）
+//! - 完整诊断: 报告包含成功/降级/跳过 三类统计（含 4 种 P0 类型 + 5B 双方标识）
 
 use std::collections::HashSet;
 use std::fs;
@@ -32,15 +31,15 @@ const TYPE_REPLY: &str = "type_3";
 const TYPE_AUDIO: &str = "type_6";
 /// 卡片消息（名片、位置、小程序等）。 qce 内部名: card
 const TYPE_CARD: &str = "type_7";
-/// 文件消息。 qce 内部名: file  ← v1.1 新增支持
+/// 文件消息。 qce 内部名: file
 const TYPE_FILE: &str = "type_8";
 /// 视频消息。 qce 内部名: video
 const TYPE_VIDEO: &str = "type_9";
-/// 红包/转账消息（qce 将其标记为 UNKNOWN_9）。 ← v1.1 新增支持
+/// 红包/转账消息（qce 将其标记为 UNKNOWN_9）。
 const TYPE_RED_ENVELOPE: &str = "type_10";
 /// 合并转发消息。 qce 内部名: forward
 const TYPE_FORWARD: &str = "type_11";
-/// 通话记录（qce 无法解析其内容）。 ← v1.1 新增支持
+/// 通话记录（qce 无法解析其内容）。
 const TYPE_CALL: &str = "type_19";
 
 /// 图片元素类型标识。
@@ -53,12 +52,10 @@ const ELEM_REPLY: &str = "reply";
 // =========================================================
 
 /// 检测文件是否为 qq-chat-exporter 导出的 JSON 格式 QQ 聊天记录。
-///
 /// 检测方式:
 /// - 读取文件内容（多编码尝试），判断是否以 `{` 开头且同时包含 `"chatInfo"` 和 `"messages"` 字段。
-/// - 不再检测 TXT 格式（v1.1 起已移除 TXT 支持）。
-///
-/// 返回:
+/// - 不再检测 TXT 格式。
+///   返回:
 /// - `true`: 文件是 qce v5.x JSON 格式。
 /// - `false`: 文件格式不匹配。
 pub fn detect_qq_format(file_path: &Path) -> RamariaResult<bool> {
@@ -103,7 +100,6 @@ pub fn detect_qq_format(file_path: &Path) -> RamariaResult<bool> {
 // =========================================================
 
 /// 将 Unix 毫秒时间戳格式化为日期字符串（YYYY-MM-DD）。
-///
 /// 说明:
 /// - 基于自 epoch（1970-01-01）以来的天数手动计算年月日，不依赖 chrono 时区。
 /// - 严格按公历闰年规则计算。
@@ -166,12 +162,10 @@ fn get_reply_element(elements: &[serde_json::Value]) -> Option<serde_json::Value
 }
 
 /// 将导出工具生成的图片占位符统一替换为 [图片]。
-///
 /// 动机:
 /// - qce 将图片替换为 `[图片: HASH.jpg]` 格式的占位符，文件名因导出批次不同而变化。
 /// - 统一为 [图片] 后，跨批次指纹一致，去重更准确。
-///
-/// 示例:
+///   示例:
 /// - `[图片: abc123]` → `[图片]`
 /// - `[图片: 1234567890abcdef.jpg]` → `[图片]`
 fn clean_image_placeholders(text: &str) -> String {
@@ -201,9 +195,7 @@ fn clean_image_placeholders(text: &str) -> String {
 }
 
 /// 从 type_3 消息的 content.text 中提取回复正文（去掉引用头部）。
-///
 /// 作为降级处理，当 elements 里找不到 reply 元素时调用。
-///
 /// 策略（按优先级）:
 /// 1. 按 '\n' 分割取第二行及之后 → 非空则返回
 /// 2. 去掉 "[回复...]" 前缀取 ']' 后内容 → 非空且不等于原文则返回
@@ -231,20 +223,16 @@ fn extract_reply_body(content_text: &str) -> String {
 }
 
 /// 计算消息唯一指纹（SHA-256 前 16 位 hex）。
-///
 /// 输入: `{original_ts}|{role}|{content}`
-///
 /// 设计考量:
 /// - 取前 8 字节（16 hex 字符）减少存储开销，碰撞概率极低
 /// - 包含 role 维度，同一消息不同角色（自己/对方）的指纹不同
 /// - 图片占位符已在调用前统一为 [图片]，确保跨批次一致
-///
-/// 参数:
+///   参数:
 /// - `original_ts`: 原始 Unix 毫秒时间戳。
 /// - `role`: 消息角色。
 /// - `content`: 消息正文。
-///
-/// 返回:
+///   返回:
 /// - 16 位 hex 字符串。
 fn make_fingerprint(original_ts: i64, role: &str, content: &str) -> String {
     let mut hasher = Sha256::new();
@@ -262,32 +250,31 @@ fn make_fingerprint(original_ts: i64, role: &str, content: &str) -> String {
 // =========================================================
 
 /// 解析单条 JSON 原始消息，返回 ParsedMessage 或 None（跳过时）。
-///
 /// 解析规则（按优先级，严格按照 schema §11 适配矩阵）:
 /// 1. `recalled == true` → 跳过（skipped_recalled）
-/// 2. `system == true`  → 跳过（skipped_system）← v1.1 新增
+/// 2. `system == true` → 跳过（skipped_system）
 /// 3. `content.text` 为空 → 进一步检查 elements 和 type（见下方空文本处理逻辑）
 /// 4. 根据 type 分流处理（覆盖全部 11 种类型）:
-///    - type_1: 纯文本（可能含图片/表情元素）
-///    - type_3: 回复/引用消息（有 reply element → 格式化；无 → 降级提取）
-///    - type_6: 语音 → [语音]
-///    - type_7: 卡片 → [卡片消息]
-///    - type_8: 文件 → [文件: filename]  ← v1.1 新增
-///    - type_9: 视频 → [视频]
-///    - type_10: 红包/转账 → [红包/转账]  ← v1.1 新增
-///    - type_11: 转发 → [转发消息]
-///    - type_19: 通话记录 → [通话记录]  ← v1.1 新增
-///    - 未知 type → 跳过（skipped_unknown）
+/// - type_1: 纯文本（可能含图片/表情元素）
+/// - type_3: 回复/引用消息（有 reply element → 格式化；无 → 降级提取）
+/// - type_6: 语音 → [语音]
+/// - type_7: 卡片 → [卡片消息]
+/// - type_8: 文件 → [文件: filename]
+/// - type_9: 视频 → [视频]
+/// - type_10: 红包/转账 → [红包/转账]
+/// - type_11: 转发 → [转发消息]
+/// - type_19: 通话记录 → [通话记录]
+/// - 未知 type → 跳过（skipped_unknown）
 /// 5. 角色映射: 发送者==导出者→user，否则→assistant+[名称]前缀
 ///
-/// 空文本处理逻辑（v1.1 修订）:
+/// 空文本处理逻辑:
 /// ```text
-/// raw_text.is_empty()?
-///   ├─ elements 非空? → 尝试从 elements 提取有意义文本
-///   │                  → 仍无法提取 → skipped_empty
-///   └─ elements 也为空? → 检查 type:
-///       type_19 → degraded_qce_unsupported, "[通话记录]"
-///       其他    → skipped_empty
+/// raw_text.is_empty?
+/// ├─ elements 非空? → 尝试从 elements 提取有意义文本
+/// │ → 仍无法提取 → skipped_empty
+/// └─ elements 也为空? → 检查 type:
+/// type_19 → degraded_qce_unsupported, "[通话记录]"
+/// 其他 → skipped_empty
 /// ```
 fn parse_json_message(
     raw_msg: &serde_json::Value,
@@ -309,7 +296,7 @@ fn parse_json_message(
         .get("recalled")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    // system 字段：v1.1 新增检测，用于过滤 QQ 系统消息
+    // system 字段： 新增检测，用于过滤 QQ 系统消息
     let is_system = raw_msg
         .get("system")
         .and_then(|v| v.as_bool())
@@ -333,7 +320,7 @@ fn parse_json_message(
         .and_then(|s| s.get("uid"))
         .and_then(|u| u.as_str())
         .unwrap_or("");
-    // Phase 5B: 提取发送者 QQ 号（uin），可能为数字字符串或不存在
+    // 提取发送者 QQ 号（uin），可能为数字字符串或不存在
     let sender_uin = sender
         .and_then(|s| s.get("uin"))
         .and_then(|u| u.as_str())
@@ -350,7 +337,7 @@ fn parse_json_message(
         return None;
     }
 
-    // ── 规则2：系统消息直接跳过（v1.1 新增，插入在 recalled 之后、空文本之前）──
+    // ── 规则2：系统消息直接跳过──
     // system 消息的特征: sender.uin="0", sender.name="0"，但 sender.uid 仍为实际用户
     // 必须仅依赖 system==true 判断，不可依赖 sender 字段
     if is_system {
@@ -359,7 +346,7 @@ fn parse_json_message(
         return None;
     }
 
-    // ── 规则3：content.text 空消息处理（v1.1 修订，区分 type_19 和其他）──
+    // ── 规则3：content.text 空消息处理──
     if raw_text.is_empty() {
         // 如果 elements 非空，尝试从 elements 中提取有意义文本
         if !elements.is_empty() {
@@ -467,7 +454,7 @@ fn parse_json_message(
             "[卡片消息]".to_string()
         }
 
-        // type_8: 文件消息（v1.1 新增）→ 降级为 [文件: filename]
+        // type_8: 文件消息→ 降级为 [文件: filename]
         // content.text 格式: [文件: filename.ext]
         TYPE_FILE => {
             report.degraded_file += 1;
@@ -483,7 +470,7 @@ fn parse_json_message(
             "[视频]".to_string()
         }
 
-        // type_10: 红包/转账消息（v1.1 新增）→ 降级为 [红包/转账]
+        // type_10: 红包/转账消息→ 降级为 [红包/转账]
         // qce v5.5.0 中 content.text = "[UNKNOWN_9消息]"
         TYPE_RED_ENVELOPE => {
             report.degraded_red_envelope += 1;
@@ -517,7 +504,7 @@ fn parse_json_message(
         }
     };
 
-    // ── 规则5：角色映射（Phase 5B: 双前缀模式）──
+    // ── 规则5：角色映射──
     let (role, content_final) = make_role_content(
         sender_uid,
         sender_name,
@@ -543,13 +530,11 @@ fn parse_json_message(
 }
 
 /// 根据发送者信息计算角色映射和最终内容。
-///
-/// Phase 5B 双前缀模式规则:
+/// 双前缀模式规则:
 /// - `sender_uid == self_uid` → role="user"，加 `[{self_name}]` 前缀（消除"用户 vs 助手"的误导性角色映射）
 /// - `sender_uid != self_uid` → role="assistant"，加 `[{sender_name}]` 前缀
 /// - 对方纯文本/回复消息额外计入 `success_other_sender`
-///
-/// 设计动机:
+///   设计动机:
 /// - 原版仅给对方消息加前缀，导致对话呈现为"用户（无标签） vs 助手（对方名）"。
 /// - 双前缀模式下双方均按姓名显示，更准确地反映两个独立人格之间的对话。
 #[allow(clippy::too_many_arguments)]
@@ -564,7 +549,7 @@ fn make_role_content(
     final_text: &str,
 ) -> (String, String) {
     if sender_uid == self_uid {
-        // 自己的消息：Phase 5B 新增前缀
+        // 自己的消息： 新增前缀
         let prefix = if self_name.is_empty() {
             "[我] ".to_string()
         } else {
@@ -593,19 +578,15 @@ fn make_role_content(
 // =========================================================
 
 /// 按时间间隔将消息列表切割为若干 session。
-///
 /// 算法: 单次遍历 O(n)，严守时间阈值语义。
-///
 /// 关键性质:
 /// - **单调性**：输入已排序，输出 session 时间不重叠。
 /// - **无回溯**：不跨 session 合并。
 /// - **空安全**：输入为空返回空 Vec，不 panic。
-///
-/// 参数:
+///   参数:
 /// - `messages`: 已按时间排序的消息列表。
 /// - `gap_ms`: 时间间隔阈值（毫秒），超出此间隔即切断为新 session。
-///
-/// 返回:
+///   返回:
 /// - 切割后的 session 列表。
 fn split_into_sessions(messages: &[ParsedMessage], gap_ms: i64) -> Vec<ImportedSession> {
     if messages.is_empty() {
@@ -651,20 +632,16 @@ fn split_into_sessions(messages: &[ParsedMessage], gap_ms: i64) -> Vec<ImportedS
 // =========================================================
 
 /// 解析 qq-chat-exporter v5.x JSON 聊天记录文件。
-///
-/// 这是 QQ 导入器的唯一对外解析接口（v1.1 起仅支持 JSON）。
-///
+/// 这是 QQ 导入器的唯一对外解析接口。
 /// 参数:
 /// - `file_path`: 文件路径。
 /// - `gap_minutes`: session 切割时间间隔阈值（分钟），默认 10。
-///
-/// 返回:
+///   返回:
 /// - `(sessions, report)`: 解析后的 session 列表和诊断报告。
-///
-/// 错误:
-/// - 文件不存在 → `file_not_found()`
-/// - JSON 解析失败 → `json_parse_error()`
-/// - 格式不匹配 → `format_mismatch()`
+///   错误:
+/// - 文件不存在 → `file_not_found`
+/// - JSON 解析失败 → `json_parse_error`
+/// - 格式不匹配 → `format_mismatch`
 pub fn parse_qq_export(
     file_path: &Path,
     gap_minutes: u32,
@@ -711,7 +688,7 @@ pub fn parse_qq_export(
         .get("selfName")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    // Phase 5B: 提取导出者 QQ 号（uin），可能为数字字符串或不存在
+    // 提取导出者 QQ 号（uin），可能为数字字符串或不存在
     let self_uin = chat_info
         .get("selfUin")
         .and_then(|v| v.as_str())
@@ -773,7 +750,7 @@ pub fn parse_qq_export(
         }
     }
 
-    // ── Phase 5B: 从第一条非 self 消息提取对方标识 ──
+    // ── : 从第一条非 self 消息提取对方标识 ──
     for msg in &parsed_messages {
         if msg.sender_uid != self_uid && !msg.sender_uid.is_empty() {
             report.other_uid = msg.sender_uid.clone();
@@ -813,7 +790,6 @@ pub fn parse_qq_export(
 }
 
 /// 多编码尝试解码字节数组为字符串。
-///
 /// 五级降级链（按优先级）:
 /// 1. UTF-8 ── 绝大多数 qce 导出文件的编码
 /// 2. UTF-8 BOM ── 部分编辑器添加 BOM 头

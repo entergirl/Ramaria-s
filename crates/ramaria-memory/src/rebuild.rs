@@ -88,13 +88,13 @@ impl std::fmt::Display for RebuildStats {
 ///
 /// 用法:
 /// ```ignore
-/// let mut rebuilder = IndexRebuilder::new(RebuildConfig::default());
+/// let mut rebuilder = IndexRebuilder::new(RebuildConfig::default);
 /// let stats = rebuilder.rebuild_all(
-///     &mut retriever,
-///     &l1_docs,
-///     &l2_docs,
-///     &graph_nodes,
-///     &graph_edges,
+/// &mut retriever,
+/// &l1_docs,
+/// &l2_docs,
+/// &graph_nodes,
+/// &graph_edges,
 /// );
 /// ```
 pub struct IndexRebuilder {

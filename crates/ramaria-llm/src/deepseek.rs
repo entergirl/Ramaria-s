@@ -32,10 +32,10 @@ use crate::provider::{ProviderBase, RetryConfig};
 ///
 /// 用法:
 /// ```ignore
-/// let keychain = Arc::new(Keychain::new());
-/// let config = BackendConfig::deepseek_default();
+/// let keychain = Arc::new(Keychain::new);
+/// let config = BackendConfig::deepseek_default;
 /// let provider = DeepSeekProvider::new(config, keychain)?;
-/// provider.validate().await?;
+/// provider.validate.await?;
 /// let reply = provider.chat(&request).await?;
 /// ```
 pub struct DeepSeekProvider {

@@ -5,8 +5,8 @@
 //! - 支持按 session_id 查询、按 persona_uid 过滤未吸收记录
 //! - mark_absorbed 在事务中批量执行，确保 L1→L2 吸收操作的原子性
 //! - absorbed 字段在 SQLite 中存为 INTEGER（0/1），读取时还原为 bool
-//! - persona_uid 和 context_json 为 Phase 1.5 新增列，支持人格关联和分组键
-//! - situation_strength 为 Phase 1.1.2 新增列（默认 NULL，等效 3），
+//! - persona_uid 和 context_json 为 新增列，支持人格关联和分组键
+//! - situation_strength 为 新增列（默认 NULL，等效 3），
 //!   避免存量 NULL 值使加权逻辑跳过记录
 
 use crate::repo::StorageResultExt;
@@ -162,6 +162,38 @@ pub async fn list_unabsorbed(pool: &SqlitePool, persona_uid: &str) -> RamariaRes
     .fetch_all(pool)
     .await
     .storage_err("查询未吸收 L1 失败")?;
+    rows.into_iter()
+        .map(|r| r.into_l1())
+        .collect::<RamariaResult<Vec<_>>>()
+}
+
+/// 按创建时间降序获取指定 persona 的最近 N 条 L1 摘要。
+///
+/// 用法:
+/// - 供跨 session 上下文注入：新 session 创建时自动加载最近对话摘要。
+/// - 不区分 absorbed 状态——即使已被 L2 吸收，近期摘要仍有叙事价值。
+///
+/// 参数:
+/// - `persona_uid`: 人格标识。
+/// - `limit`: 最多返回条数。
+///
+/// 返回:
+/// - 按 `created_at DESC` 排序的 MemoryL1 列表。
+pub async fn list_recent_by_persona(
+    pool: &SqlitePool,
+    persona_uid: &str,
+    limit: u32,
+) -> RamariaResult<Vec<MemoryL1>> {
+    let rows = sqlx::query_as::<_, L1Row>(
+        "SELECT id, session_id, summary, keywords, time_period, atmosphere, valence, salience,
+         absorbed, created_at, last_accessed_at, persona_uid, context_json, situation_strength
+         FROM memory_l1 WHERE persona_uid = ? ORDER BY created_at DESC LIMIT ?",
+    )
+    .bind(persona_uid)
+    .bind(limit as i64)
+    .fetch_all(pool)
+    .await
+    .storage_err("查询最近 L1 摘要失败")?;
     rows.into_iter()
         .map(|r| r.into_l1())
         .collect::<RamariaResult<Vec<_>>>()

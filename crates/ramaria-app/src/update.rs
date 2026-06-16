@@ -26,7 +26,7 @@ use serde::Deserialize;
 pub struct UpdateStatus {
     /// 当前运行的版本（来自 CARGO_PKG_VERSION）
     pub current_version: String,
-    /// 远程最新版本标签（如 "v1.1.0"），None 表示无法获取
+    /// 远程最新版本标签（如 ""），None 表示无法获取
     pub latest_version: Option<String>,
     /// 是否有新版本可用
     pub update_available: bool,
@@ -41,7 +41,7 @@ pub struct UpdateStatus {
 /// GitHub Release API 响应（仅提取我们需要的字段）。
 #[derive(Debug, Deserialize)]
 struct GitHubRelease {
-    /// 版本标签，如 "v1.1.0"
+    /// 版本标签，如 ""
     tag_name: String,
     /// Release 页面 URL
     html_url: String,
@@ -70,9 +70,9 @@ struct GitHubRelease {
 ///
 /// 示例:
 /// ```ignore
-/// let status = check_update().await;
+/// let status = check_update.await;
 /// if status.update_available {
-///     println!("新版本可用: {}", status.latest_version.unwrap_or_default());
+/// println!("新版本可用: {}", status.latest_version.unwrap_or_default);
 /// }
 /// ```
 pub async fn check_update() -> UpdateStatus {
@@ -184,7 +184,7 @@ async fn fetch_latest_release(url: &str) -> Result<GitHubRelease, String> {
                     .to_string())
             }
             403 if rate_remaining == "0" => {
-                // 明确的限流信息
+ // 明确的限流信息
                 Err(format!(
                     "GitHub API 请求频率已达上限（60次/小时）。\n\
                      请在 {rate_reset} 之后重试，或配置 GitHub Token 以获得更高限额。"

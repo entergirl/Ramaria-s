@@ -1,7 +1,7 @@
 # Ramaria 隐私说明
 
-> 版本：v1.0  
-> 最后更新：2026-06-12
+> 版本：v1.1  
+> 最后更新：2026-06-16
 
 ## 概述
 
@@ -69,6 +69,7 @@ Ramaria 是一个**本地优先**的个人 AI 陪伴记忆系统。本说明解�
 - API Key 存储在 **Windows 凭据管理器**（Credential Manager），不写入配置文件或日志
 - Key 通过 HTTPS 加密传输到 API 服务器
 - 切换 provider 后可随时在设置中更新 API Key
+- Key 在日志和诊断导出文件中不出现（遮蔽显示为 `前3后3****`）
 
 ---
 
@@ -95,6 +96,49 @@ Ramaria 是一个**本地优先**的个人 AI 陪伴记忆系统。本说明解�
 - 修改 Base URL
 
 切换回本地模型（LM Studio）不会撤销已持久化的线上确认记录。
+
+---
+
+## 导入数据
+
+### QQ 聊天记录导入
+
+Ramaria v1.1 支持导入 QQ 聊天记录：
+
+| 方面 | 说明 |
+|------|------|
+| **存储位置** | 导入的消息存储在本地 SQLite 数据库，与日常对话数据同等对待 |
+| **不上传** | 导入数据不会自动发送到任何服务器 |
+| **不匿名化** | 导入数据保留原始消息内容和发送者信息（QQ 号、昵称等），不做匿名化处理 |
+| **去重** | 使用文件指纹（SHA-256）检测重复导入，不会重复写入数据 |
+| **画像创建** | 导入时为聊天参与者自动创建人格画像（`source="qq"`），可像普通人格一样管理和删除 |
+| **记忆管线** | 深度导入模式会触发全套记忆管线（L0→L1→L2→L3），提取的记忆与日常对话记忆同等待遇 |
+
+**注意**：如果你使用线上 LLM 后端且在导入后使用对话功能，相关记忆上下文可能随对话 API 请求发送到服务器。建议在使用线上 API 时关闭"线上记忆注入"开关，或使用 LM Studio 本地模式处理导入后的记忆。
+
+---
+
+## 诊断数据导出
+
+Ramaria v1.1 提供诊断信息导出功能（设置页 → 诊断与更新 → 导出诊断信息），用于故障排查。
+
+### 导出内容
+
+| 数据类别 | 内容 | 是否脱敏 |
+|----------|------|----------|
+| 日志文件 | 最近 1000 行运行日志 | 用户消息截断 + 哈希化 |
+| 配置文件 | `config.toml` 完整内容 | ✅ API Key 替换为 `[REDACTED]` |
+| Schema 信息 | 数据库版本、索引版本 | — |
+| 系统信息 | OS 名称、版本、架构 | — |
+
+### 安全保证
+
+- **API Key 不泄露**：配置文件中的 API Key 通过模式匹配检测并替换为 `[REDACTED]`
+- **用户消息保护**：日志中的用户消息已被截断（前 80 字符）和哈希化
+- **本地打包**：导出的 `.zip` 文件在本地创建，不自动上传
+- **用户掌控**：导出前弹出原生保存对话框，由用户选择保存位置
+
+> ⚠ 诊断 `.zip` 文件可能包含敏感信息（如对话时间戳、关键词标签、人格画像名称等）。请妥善保管该文件，仅发送给可信的开发者进行故障诊断。
 
 ---
 
@@ -142,25 +186,28 @@ Ramaria 桌面应用使用 WebView 渲染界面，采取以下安全措施：
 
 ```
 default-src 'self';
-style-src 'self' 'unsafe-inline';
-script-src 'self' 'unsafe-inline';
+style-src 'self';
+script-src 'self';
 connect-src 'self' ipc: https://api.deepseek.com https://api.openai.com;
 img-src 'self' data:;
 font-src 'self'
 ```
 
 **要点**：
+- 禁止内联脚本和内联样式（`'unsafe-inline'` 已移除）
 - 禁止加载任何远程脚本（`script-src 'self'`）
 - 禁止加载远程图片（`img-src 'self' data:`）
 - 字体自托管，不依赖外部 CDN（`font-src 'self'`）
 - 网络连接仅允许 Tauri IPC 和配置的 API 端点
+- 所有行内脚本已外部化到独立 JS 文件
 
 ### Markdown 安全
 
 LLM 回复中的 Markdown 经过白名单过滤：
 - 允许：标题、粗体/斜体、代码块、列表、链接
-- **禁止**：原始 HTML、`<script>`、事件处理器、`javascript:` / `data:` 协议
+- **禁止**：原始 HTML、`<script>`、事件处理器（`onclick`/`onerror` 等）、`javascript:` / `data:` 协议
 - 所有输出在渲染前 sanitize
+- 错误消息使用 `textContent` 而非 `innerHTML` 渲染，防止 XSS 注入
 
 ### Tauri 权限
 
@@ -168,7 +215,7 @@ LLM 回复中的 Markdown 经过白名单过滤：
 
 | 权限 | 用途 |
 |------|------|
-| `dialog` | 保存文件对话框（导出）、打开文件夹 |
+| `dialog` | 保存文件对话框（导出、诊断）、打开文件对话框（导入） |
 | `notification` | Windows Toast 桌面通知 |
 | `store` | 非敏感配置本地存储 |
 | `core:window` | 窗口显示/隐藏/关闭 |
@@ -190,7 +237,9 @@ LLM 回复中的 Markdown 经过白名单过滤：
 | 操作 | 范围 | 方法 |
 |------|------|------|
 | 删除会话 | 单个会话 + 关联消息 | 对话页 SessionBar → 右键删除；CLI `ramaria session delete <ID>` |
-| 删除全部记忆 | 所有 L1/L2/L3 | 删除 `assistant.db` 文件后重启 |
+| 删除人格 | 指定人格 + 关联记忆 | 人格详情页编辑（标记 inactive）；手动执行 |
+| 删除导入数据 | 指定导入批次的消息 | 通过 session 删除（导入数据按 session 组织） |
+| 删除全部记忆 | 所有 L0/L1/L2/L3 | 删除 `assistant.db` 文件后重启 |
 
 ### 非收集声明
 
@@ -200,7 +249,7 @@ Ramaria **不收集、不上传**以下信息：
 - 用户行为分析
 - 设备信息
 
-崩溃日志保存在本地，用户可手动发送给开发者用于问题诊断。
+崩溃日志保存在本地，用户可手动通过诊断导出功能打包发送给开发者用于问题诊断。
 
 ---
 
@@ -221,5 +270,7 @@ Ramaria **不收集、不上传**以下信息：
 ## 参考
 
 - 桌面使用指南：`rust/docs/desktop-user-guide.md`
+- CLI 使用指南：`rust/docs/cli-user-guide.md`
 - 完整架构说明：`rust/docs/dev/rust-rewrite-analysis.md`
+- 默认配置模板：`rust/config/default.toml`
 - 项目主页：`https://github.com/entergirl/Ramaria-s`

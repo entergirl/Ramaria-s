@@ -2,7 +2,7 @@
 //!
 //! 设计特点:
 //! - T-INF-014: 增量更新累积 10 轮后（或事件量翻倍）触发全量冷启动推断
-//! - 校准触发后重置计数器，重新跑 Phase A + Phase B
+//! - 校准触发后重置计数器，重新跑 +
 //! - 与旧画像做全量差异对比，差异超过阈值时提示人工确认
 //! - 纯逻辑，零 I/O，仅维护计数器状态
 
@@ -47,10 +47,10 @@ impl Default for CalibrationConfig {
 /// 用法:
 /// ```ignore
 /// let mut tracker = CalibrationTracker::new(config);
-/// tracker.record_incremental_update();  // 每次增量更新后调用
+/// tracker.record_incremental_update; // 每次增量更新后调用
 /// if tracker.should_calibrate(current_event_count) {
-///     // 执行全量校准...
-///     tracker.mark_calibrated(current_event_count);
+/// // 执行全量校准...
+/// tracker.mark_calibrated(current_event_count);
 /// }
 /// ```
 #[derive(Debug, Clone)]
@@ -79,7 +79,7 @@ impl CalibrationTracker {
     /// 记录一次增量更新。
     ///
     /// 用法:
-    /// - 每次 Phase C 增量更新完成后调用。
+    /// - 每次 增量更新完成后调用。
     pub fn record_incremental_update(&mut self) {
         self.incremental_rounds += 1;
     }

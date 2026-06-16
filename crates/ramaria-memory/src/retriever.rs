@@ -10,7 +10,7 @@
 //! 1. BM25 通道: 对 L1/L2 文本字段执行 BM25 评分
 //! 2. 向量通道: 使用 EmbeddingProvider 生成 query 向量，执行余弦检索
 //! 3. 图谱通道: 从查询提取实体，执行 1-hop 图谱遍历
-//! 4. RRF 融合: 三个通道结果通过 rrf_fuse() 合并排序
+//! 4. RRF 融合: 三个通道结果通过 rrf_fuse 合并排序
 //! 5. 解析 doc_id → 加载实际文档 → 返回检索结果
 
 use crate::bm25::{Bm25Config, Bm25Index, DocId};
@@ -149,12 +149,12 @@ pub struct L2DocView {
 ///
 /// 职责:
 /// - 持有各通道的索引（BM25 / 向量 / 图谱）
-/// - 提供统一的 `search()` 入口
+/// - 提供统一的 `search` 入口
 /// - 管理索引的构建和增量更新
 ///
 /// 内存假设:
 /// - L1/L2 文档视图完整存储在内存 HashMap 中，用于 BM25 搜索结果的文档解析。
-/// - 在 10k 文档规模下（v1.0/v1.1 典型用户场景），内存占用约 5-15 MB，
+/// - 在 10k 文档规模下，内存占用约 5-15 MB，
 ///   完全在 200MB 空闲目标范围内。
 /// - 超过 LRU 容量上限时，按文档创建时间淘汰最旧条目，同时清理对应的 BM25 索引。
 ///
@@ -182,7 +182,7 @@ pub struct Retriever {
 
 /// 默认 LRU 容量上限：50,000 条文档。
 ///
-/// 此值远超 v1.0/v1.1 典型场景（~10k 文档），仅在长期大量导入场景下才会触发驱逐，
+/// 此值远超 / 典型场景（~10k 文档），仅在长期大量导入场景下才会触发驱逐，
 /// 确保常规使用不受影响。
 pub const DEFAULT_LRU_MAX_ENTRIES: usize = 50_000;
 
@@ -269,7 +269,7 @@ impl Retriever {
         }
 
         // 向量索引（L1 文档暂不添加向量，需要 EmbeddingProvider）
-        // Phase 3 接入真实 embedding 后，在此生成向量并添加到 vector_index
+        // 接入真实 embedding 后，在此生成向量并添加到 vector_index
 
         self.l1_docs.insert(doc.id, doc.clone());
 
@@ -300,7 +300,7 @@ impl Retriever {
             self.bm25_index.add(DocId::L2(doc.id), tokens);
         }
 
-        // 向量索引（同 L1，Phase 3 接入 embedding）
+        // 向量索引（同 L1， 接入 embedding）
         self.l2_docs.insert(doc.id, doc.clone());
 
         // LRU 驱逐
@@ -333,7 +333,7 @@ impl Retriever {
     /// - 每次只驱逐超出部分（(l1 + l2) - lru_max_entries 条）
     /// - `lru_max_entries == 0` 时跳过驱逐（无限制模式）
     ///
-    /// 复杂度: O(n log n) 其中 n = l1_docs.len() + l2_docs.len()。
+    /// 复杂度: O(n log n) 其中 n = l1_docs.len + l2_docs.len。
     /// 仅在高文档数且超出上限时触发，性能影响可控。
     fn evict_if_needed(&mut self) {
         if self.lru_max_entries == 0 {

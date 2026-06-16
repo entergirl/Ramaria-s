@@ -1,17 +1,16 @@
 //! rust/crates/ramaria-cli/src/commands/import_cmd.rs - 数据导入命令
-//!
 //! 设计特点:
 //! - `ramaria import qq --file <PATH> [--deep] [--persona-self-name <NAME>] [--persona-other-name <NAME>] [--gap <MINUTES>]`
 //! - 快速导入（默认）：仅写入 messages 表（L0），适合快速预览历史对话
 //! - 深度导入（--deep）：创建历史 session → 写入 L0 → 关闭 session（L1/L2/L3 由后台线程触发）
-//! - Phase 5B: 双画像支持——分别为导出者和对方创建独立 persona
-//! - Phase 5B: `--persona` 向后兼容，行为等同于 `--persona-self-name`
-//! - Phase 5B: L1 摘要 persona_uid 存 NULL，不绑定特定画像（避免记忆视图污染）
+//! - 双画像支持——分别为导出者和对方创建独立 persona
+//! - `--persona` 向后兼容，行为等同于 `--persona-self-name`
+//! - L1 摘要 persona_uid 存 NULL，不绑定特定画像（避免记忆视图污染）
 //! - Persona 自动管理：查找或创建 source="qq" 的 persona（UID 生成策略: uin > uid > seq）
 //! - 解析报告输出到 stdout，含成功/降级/跳过统计
 //! - 支持 `--yes` 全局参数跳过确认提示
 //! - 使用 ramaria-importer crate 做格式检测、解析和写入
-//! - 仅支持 qq-chat-exporter v5.x JSON 格式（v1.1 起移除 TXT 支持）
+//! - 仅支持 qq-chat-exporter v5.x JSON 格式
 
 use anyhow::Context;
 use ramaria_importer::ImportSource;
@@ -24,20 +23,19 @@ use std::sync::Arc;
 // =========================================================
 
 /// CLI 导入命令的参数。
-///
-/// Phase 5B: 新增双画像参数（self/other 两方独立命名和 UID 指定）。
+/// 新增双画像参数（self/other 两方独立命名和 UID 指定）。
 pub struct ImportArgs {
     /// QQ 聊天记录文件路径（qq-chat-exporter v5.x JSON 格式）
     pub file: String,
     /// 导入模式：fast（默认，仅 L0）或 deep（全管线）
     pub deep: bool,
-    /// Phase 5B: 导出者 persona 显示名称（向后兼容 `--persona`，不提供则使用文件中解析的导出者名称）
+    /// 导出者 persona 显示名称（向后兼容 `--persona`，不提供则使用文件中解析的导出者名称）
     pub persona_self_name: Option<String>,
-    /// Phase 5B: 导出者 persona UID（可选，留空则按优先级自动生成）
+    /// 导出者 persona UID（可选，留空则按优先级自动生成）
     pub persona_self_uid: Option<String>,
-    /// Phase 5B: 对方 persona 显示名称（不提供则使用文件中解析的对方名称）
+    /// 对方 persona 显示名称（不提供则使用文件中解析的对方名称）
     pub persona_other_name: Option<String>,
-    /// Phase 5B: 对方 persona UID（可选，留空则按优先级自动生成）
+    /// 对方 persona UID（可选，留空则按优先级自动生成）
     pub persona_other_uid: Option<String>,
     /// session 切割时间间隔（分钟），默认 10
     pub gap: u32,
@@ -49,14 +47,12 @@ pub struct ImportArgs {
 // run — 导入命令入口
 // =========================================================
 
-/// 执行 QQ 聊天记录导入（Phase 5B: 双画像支持）。
-///
+/// 执行 QQ 聊天记录导入。
 /// 参数:
 /// - `app`: 应用实例（用于触发 L1 摘要生成）。
 /// - `pool`: 数据库连接池引用。
 /// - `args`: 导入参数（含双画像选项）。
-///
-/// 流程:
+///   流程:
 /// 1. 校验文件路径和扩展名
 /// 2. 格式检测（qq-chat-exporter JSON）
 /// 3. 文件解析 → 诊断报告输出（含双方标识信息）
@@ -137,7 +133,7 @@ pub async fn run(
         }
     }
 
-    // Step 5: 双画像 Persona 准备（Phase 5B）
+    // Step 5: 双画像 Persona 准备
     use ramaria_importer::qq::build_persona_uid;
 
     // 5a. 查询 QQ persona 当前最大 seq（用于 fallback 级别 4）
@@ -204,7 +200,7 @@ pub async fn run(
         other_name, other_persona_uid
     ));
 
-    // Step 6: 执行导入（Phase 5B: 双画像参数）
+    // Step 6: 执行导入
     if args.deep {
         crate::ui::info("🔄 执行深度导入（L0 → 触发 L1 摘要生成）...");
     } else {
@@ -223,7 +219,7 @@ pub async fn run(
         .context("导入写入失败")?;
 
     // Step 6.5: 为每个导入的 session 触发 L1 摘要生成
-    // Phase 5B (T-V11-5B-010): L1 摘要 persona_uid 存 NULL
+    // (T-V11-5B-010): L1 摘要 persona_uid 存 NULL
     // —— 导入的 session 来自多人对话，摘要不应被特定画像视图独占
     let mut l1_ok = 0u32;
     let mut l1_skip = 0u32;

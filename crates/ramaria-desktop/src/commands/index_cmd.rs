@@ -2,7 +2,7 @@
 //!
 //! 设计特点:
 //! - rebuild_index: 触发检索索引全量重建
-//! - 委托 ramaria_app::App::rebuild_retriever()
+//! - 委托 ramaria_app::App::rebuild_retriever
 
 use crate::DesktopState;
 use tauri::State;

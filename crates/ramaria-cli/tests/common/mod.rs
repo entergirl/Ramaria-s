@@ -1,9 +1,9 @@
-﻿//! tests/common/mod.rs - CLI 集成测试共享 Mock 基础设施
+//! tests/common/mod.rs - CLI 集成测试共享 Mock 基础设施
 //!
 //! 设计特点:
 //! - MockStorage: 内存 HashMap 实现的 StorageBackend，支持预填充测试数据
 //! - MockLlm: 返回预设回复的 LlmProvider
-//! - build_test_app(): 一键构造 ready 状态的 App 实例供 CLI 命令测试
+//! - build_test_app: 一键构造 ready 状态的 App 实例供 CLI 命令测试
 //! - 不调用真实 LLM、不触碰文件系统、不访问 OS keychain
 //!
 //! 安全约束:

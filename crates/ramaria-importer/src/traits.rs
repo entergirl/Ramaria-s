@@ -5,8 +5,8 @@
 //! - `ParsedMessage` 为解析后的中间表示，与存储层的 `Message` 解耦
 //! - `ImportReport` 提供完整的诊断信息：成功/降级/跳过 三类统计
 //! - `ImportMode` 区分快速导入（仅 L0）和深度导入（全管线）
-//! - Phase 5B: ParsedMessage 新增 sender 标识字段，支持双画像导入
-//! - Phase 5B: ImportReport 新增双方 QQ 号及对方标识字段，支持 UID 生成策略
+//! - ParsedMessage 新增 sender 标识字段，支持双画像导入
+//! - ImportReport 新增双方 QQ 号及对方标识字段，支持 UID 生成策略
 
 use ramaria_core::error::RamariaResult;
 use std::path::Path;
@@ -47,7 +47,7 @@ impl std::fmt::Display for ImportMode {
 /// - 保存解析后的标准化字段，与存储层 `Message` 解耦。
 /// - `created_at` 用于 session 切割和时间排序。
 /// - `fingerprint` 用于跨导入批次的重复检测。
-/// - Phase 5B: 新增 sender 标识字段（uid/uin/name），支持按发送者分配画像。
+/// - : 新增 sender 标识字段（uid/uin/name），支持按发送者分配画像。
 ///
 /// 字段约定:
 /// - `role`: "user" 表示导出者本人，"assistant" 表示对方。
@@ -65,11 +65,11 @@ pub struct ParsedMessage {
     pub created_at: i64,
     /// SHA-256 前 16 位 hex，用于去重
     pub fingerprint: String,
-    /// Phase 5B: 发送者的 QQ 内部 UID
+    /// 发送者的 QQ 内部 UID
     pub sender_uid: String,
-    /// Phase 5B: 发送者的 QQ 号（uin），不存在时为 None
+    /// 发送者的 QQ 号（uin），不存在时为 None
     pub sender_uin: Option<String>,
-    /// Phase 5B: 发送者的显示名称
+    /// 发送者的显示名称
     pub sender_name: String,
 }
 
@@ -97,7 +97,7 @@ pub struct ImportedSession {
 /// - 提供完整的文件解析结果概览，供 CLI 和前端展示。
 /// - 记录文件信息（含双画像标识）、时间跨度和 session 切割结果。
 /// - 覆盖 qce v5.x 全部 11 种消息类型（见 qq-chat-exporter-json-schema.md §8）。
-/// - Phase 5B: 新增导出者 QQ 号和对方标识，支持双画像导入。
+/// - : 新增导出者 QQ 号和对方标识，支持双画像导入。
 #[derive(Debug, Clone)]
 pub struct ImportReport {
     // -- 文件信息 --
@@ -107,17 +107,17 @@ pub struct ImportReport {
     pub self_id: String,
     /// 导出者名称
     pub self_name: String,
-    /// Phase 5B: 导出者 QQ 号（chatInfo.selfUin），不存在时为 None
+    /// 导出者 QQ 号（chatInfo.selfUin），不存在时为 None
     pub self_uin: Option<String>,
     /// 对话对象名称（chatInfo.name）
     pub chat_name: String,
     /// 对话类型（private / group）
     pub chat_type: String,
-    /// Phase 5B: 对话对方 QQ UID（从第一条非 self 消息的 sender.uid 提取）
+    /// 对话对方 QQ UID（从第一条非 self 消息的 sender.uid 提取）
     pub other_uid: String,
-    /// Phase 5B: 对话对方 QQ 号（从第一条非 self 消息的 sender.uin 提取），不存在时为 None
+    /// 对话对方 QQ 号（从第一条非 self 消息的 sender.uin 提取），不存在时为 None
     pub other_uin: Option<String>,
-    /// Phase 5B: 对话对方名称（从第一条非 self 消息的 sender.name 提取）
+    /// 对话对方名称（从第一条非 self 消息的 sender.name 提取）
     pub other_name: String,
 
     // -- 时间范围 --
@@ -153,17 +153,17 @@ pub struct ImportReport {
     pub degraded_audio: usize,
     /// 视频消息 → [视频]
     pub degraded_video: usize,
-    /// 文件消息 → [文件: filename]  ← v1.1 新增 (P0)
+    /// 文件消息 → [文件: filename]
     pub degraded_file: usize,
-    /// 红包/转账消息 → [红包/转账]  ← v1.1 新增 (P0)
+    /// 红包/转账消息 → [红包/转账]
     pub degraded_red_envelope: usize,
-    /// qce 未解析的消息类型降级（如 type_19 通话记录） ← v1.1 新增 (P0)
+    /// qce 未解析的消息类型降级（如 type_19 通话记录）
     pub degraded_qce_unsupported: usize,
 
     // -- 完全跳过 --
     /// 撤回消息
     pub skipped_recalled: usize,
-    /// 系统消息（system == true） ← v1.1 新增 (P0)
+    /// 系统消息（system == true）
     pub skipped_system: usize,
     /// content.text 为空且无法从 elements 提取有效文本的消息
     pub skipped_empty: usize,
@@ -195,7 +195,7 @@ impl ImportReport {
         self.success_text + self.success_image + self.success_reply
     }
 
-    /// 降级处理的消息总数（含 v1.1 新增的 3 种降级类型）。
+    /// 降级处理的消息总数（含 3 种降级类型）。
     pub fn total_degraded(&self) -> usize {
         self.degraded_reply_fallback
             + self.degraded_forward
@@ -207,14 +207,14 @@ impl ImportReport {
             + self.degraded_qce_unsupported
     }
 
-    /// 完全跳过的消息总数（含 v1.1 新增的 system 消息跳过）。
+    /// 完全跳过的消息总数（含 system 消息跳过）。
     pub fn total_skipped(&self) -> usize {
         self.skipped_recalled + self.skipped_system + self.skipped_empty + self.skipped_unknown
     }
 
     /// 生成人类可读的摘要文本。
     ///
-    /// Phase 5B: 新增导出者 QQ 号和对方标识信息。
+    /// 新增导出者 QQ 号和对方标识信息。
     pub fn summary(&self) -> String {
         let mut s = String::new();
         s.push_str(&format!("文件: {}\n", self.file_path));
@@ -343,9 +343,9 @@ impl Default for ImportReport {
 /// - 每个平台实现自己的格式检测、解析和消息转换逻辑。
 ///
 /// 实现要求:
-/// - `name()` 返回静态名称，用于日志和 UI 展示。
-/// - `detect_format()` 检测文件是否为当前平台支持的格式。
-/// - `parse()` 解析文件，返回标准化消息列表和诊断报告。
+/// - `name` 返回静态名称，用于日志和 UI 展示。
+/// - `detect_format` 检测文件是否为当前平台支持的格式。
+/// - `parse` 解析文件，返回标准化消息列表和诊断报告。
 /// - 不在此 trait 中定义数据库写入逻辑（由 importer 模块负责）。
 #[async_trait::async_trait]
 pub trait ImportSource: Send + Sync {
@@ -358,7 +358,7 @@ pub trait ImportSource: Send + Sync {
     /// - `file_path`: 待检测的文件路径。
     ///
     /// 返回:
-    /// - `true`: 文件格式匹配，可以使用 `parse()` 解析。
+    /// - `true`: 文件格式匹配，可以使用 `parse` 解析。
     /// - `false`: 格式不匹配，应尝试其他 parser。
     fn detect_format(&self, file_path: &Path) -> RamariaResult<bool>;
 

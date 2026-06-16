@@ -23,7 +23,7 @@ use crate::types::LlmProvider;
 /// - 当配置结构发生不兼容变更时递增此值，加载层据此触发迁移。
 ///
 /// 版本历史:
-/// - 1: v1.0 初始 schema
+/// - 1: 初始 schema
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 
 /// 当前 Ramaria 应用版本号（与 workspace Cargo.toml 保持同步）。
@@ -33,7 +33,7 @@ pub const CURRENT_APP_VERSION: &str = "0.1.0";
 // 应用配置根结构
 // =========================================================
 
-/// Ramaria v1.0 完整应用配置。
+/// Ramaria 完整应用配置。
 ///
 /// 职责:
 /// - 聚合所有非敏感配置项，作为 CLI、Desktop 和 app 编排层的统一配置入口。
@@ -352,7 +352,7 @@ impl Default for DecayConfig {
 /// - 描述后台检查间隔和对话历史保留规模。
 ///
 /// 说明:
-/// - v1.0 优先沿用现有 Python session 行为。
+/// - 优先沿用现有 Python session 行为。
 /// - 上层 app 编排层负责解释这些参数。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionConfig {
@@ -492,7 +492,7 @@ impl Default for LoggingConfig {
 /// - 避免临时字段散落到多个不相关结构中。
 ///
 /// 说明:
-/// - v1.1 中此结构当前无字段，作为序列化占位保留以确保配置文件向后兼容。
+/// - 中此结构当前无字段，作为序列化占位保留以确保配置文件向后兼容。
 /// - 线上隐私相关开关已归入 `BackendSelection` 和 `LoggingConfig`。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MiscConfig {

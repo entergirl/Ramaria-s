@@ -94,7 +94,7 @@ pub const EVENT_EXTRACTION_PROMPT: &str = r#"你是一个事件提取助手。�
 /// 态度去情境化重述 Prompt。
 ///
 /// 用途: 将态度的自然语言原文（如"被老板批评后很沮丧"）剥离具体实体，
-///       转为通用模式描述（如"面对权威批评时倾向于沮丧"）。
+/// 转为通用模式描述（如"面对权威批评时倾向于沮丧"）。
 ///
 /// 结果: 缓存到 `memory_events.paraphrase` 列，避免每次 System Prompt 构建时重调 LLM。
 pub const PARAPHRASE_PROMPT: &str = r#"你是一个心理分析助手。请将以下态度描述进行去情境化重述。

@@ -1,11 +1,11 @@
 # Ramaria CLI 使用指南
 
-> 版本：v1.0  
+> 版本：v1.1  
 > 适用平台：Windows / macOS / Linux
 
 ## 概述
 
-`ramaria` 是 Ramaria 的命令行入口，支持对话、记忆查询、会话管理、配置修改、人格管理和数据导出。
+`ramaria` 是 Ramaria 的命令行入口，支持对话、记忆查询、会话管理、配置修改、人格管理、数据导入、诊断导出和数据导出。
 
 首次使用前需运行首次配置向导，CLI 与桌面应用共享同一数据目录（`%APPDATA%\Ramaria\`）。
 
@@ -104,14 +104,16 @@ ramaria chat
 | 命令 | 说明 |
 |------|------|
 | `/exit` 或 `/quit` | 退出对话 |
+| `/save` | 保存当前会话（自动关闭并触发 L1 摘要），开始新会话 |
 | `/clear` | 开始新会话（自动保存旧会话） |
 | `/help` | 显示帮助信息 |
 
 **行为**：
 - 每次启动自动创建新会话
-- 会话结束时自动生成 L1 摘要（触发记忆管线）
+- 会话结束时自动生成 L1 摘要（触发记忆管线 L0→L1→L2→L3 级联）
+- 后台空闲检测关闭 session 后，下次发消息自动创建新 session 并重试
 - 支持流式输出，逐字显示回复
-- 不使用 ratatui TUI（v1.0 仅简单 REPL）
+- 不使用 ratatui TUI（v1.1 仅简单 REPL）
 
 ---
 
@@ -134,7 +136,7 @@ ramaria memory --limit 20         # 限制返回条数
 | `--limit <N>` | 返回条数限制 |
 
 **输出格式**：
-- **L1**：摘要卡片，含 `summary` / `atmosphere` / `valence` / `salience`
+- **L1**：摘要卡片，含 `summary` / `atmosphere` / `valence` / `salience` / `situation_strength`
 - **L2**：事件列表，含 `title` / `confidence` / `keywords` / `attitude`
 - **L3**：性格标签表，含 `layer` / `trait` / `meaning` / `confidence`
 
@@ -152,7 +154,7 @@ ramaria session delete <ID>       # 删除会话及其关联记忆
 
 | 子命令 | 说明 |
 |--------|------|
-| `list` | 显示全部会话：ID、开始时间、结束时间、消息数 |
+| `list` | 显示全部会话：ID、开始时间、结束时间、消息数。活跃会话标注"活跃" |
 | `show <ID>` | 按时间顺序展示该会话的全部消息（含 role 标记） |
 | `delete <ID>` | 删除会话及其全部消息。**不可逆**，需交互确认 |
 
@@ -196,7 +198,7 @@ ramaria persona reload --uid rama-0001   # 仅重新加载指定人格
 
 | 子命令 | 说明 |
 |--------|------|
-| `show` | 列出所有人格：UID、名称、类型（user/rama/char 等）、是否激活 |
+| `show` | 列出所有人格：UID、名称、类型（user/rama/char 等）、是否激活、来源 |
 | `reload` | 扫描 `personas/` 目录下所有 `.toml` 文件，同步名称/配置到数据库。新人格自动创建，已存在的跳过（幂等操作） |
 
 **人格文件**：
@@ -218,6 +220,81 @@ ramaria index rebuild             # 重建全部索引
 - 读取所有 L1/L2 记忆 → 重建 BM25 倒排索引 + 图谱数据
 - 显示重建文档数、耗时
 - 索引版本不一致时应用会自动进入 Indexing 状态，也可手动触发
+
+---
+
+### `ramaria import` — 聊天记录导入
+
+导入外部聊天记录到 Ramaria。
+
+```
+# 快速导入 QQ 聊天记录
+ramaria import qq --file chat.txt
+
+# 深度导入（含 L2 事件提取和 L3 性格推断）
+ramaria import qq --file chat.txt --deep
+
+# 为导入的双方指定画像名称和 UID
+ramaria import qq --file chat.txt \
+  --persona-self-name "烧酒" \
+  --persona-other-name "omkidaso" \
+  --persona-other-uid "char-342215559"
+
+# 跳过确认直接导入
+ramaria import qq --file chat.txt --yes
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--file <PATH>` | QQ 聊天记录文件路径（`.txt` 或 `.json`） |
+| `--deep` | 深度导入模式：L0→L1→L2→L3 全管线 |
+| `--persona <NAME>` | 导出者画像名称（向后兼容，等同于 `--persona-self-name`） |
+| `--persona-self-name <NAME>` | 导出者画像名称 |
+| `--persona-self-uid <UID>` | 导出者画像 UID（默认自动生成如 `char-{QQ号}`） |
+| `--persona-other-name <NAME>` | 对方画像名称 |
+| `--persona-other-uid <UID>` | 对方画像 UID |
+| `--gap <MINUTES>` | 会话切割间隔（分钟），默认 1440（1 天） |
+| `--yes` | 跳过诊断报告确认直接执行导入 |
+
+**导入流程**：
+1. 解析聊天记录文件（JSON 或 TXT 格式）
+2. 显示诊断报告：消息数量、时间范围、参与者信息
+3. 用户确认后执行导入：
+   - 为双方自动创建 persona（source=`qq`）
+   - 消息按发送者标记 `persona_uid`
+   - 快速模式：仅写入 L0 + 生成 L1 摘要
+   - 深度模式：L0→L1→L2→L3 全管线执行
+4. 导入完成后显示统计报告
+
+**支持的格式**：
+- **JSON**：qq-chat-exporter v5.x 导出格式
+- **TXT**：经典 PCQQ 导出 `.txt` 格式（GBK/UTF-8/UTF-16 多编码兼容）
+
+---
+
+### `ramaria diagnostics` — 诊断导出
+
+导出诊断信息压缩包用于故障排查。
+
+```
+ramaria diagnostics
+ramaria diagnostics --output ./my-diagnostics.zip
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--output <PATH>` | 输出文件路径（默认 `ramaria-diagnostics-{时间戳}.zip`） |
+
+**导出内容**：
+- 最近 1000 行日志（`ramaria.log`）
+- 配置文件（`config.toml`，API Key 已脱敏为 `[REDACTED]`）
+- Schema 版本信息
+- 操作系统信息（OS 名称、架构、内存等）
+
+**安全保证**：
+- API Key 在导出文件中不出现（全部替换为 `[REDACTED]`）
+- 日志中的用户消息已截断和哈希化
+- 输出路径有路径穿越防护（拒绝写入数据目录之外的路径）
 
 ---
 
@@ -263,8 +340,9 @@ CLI 根据错误类型显示不同提示：
 | `Llm` | LLM 调用失败，可重试 |
 | `Privacy` | 线上 provider 需完成隐私确认 |
 | `Index` | 索引损坏，请运行 `ramaria index rebuild` |
-| `Validation` | 参数不合法 |
+| `Validation` | 参数不合法（如 session 已关闭只读） |
 | `Io` | 文件读写失败 |
+| `Unsupported` | 不支持的导入格式 |
 
 ---
 
@@ -283,7 +361,13 @@ ramaria chat
 # 4. 查看记忆
 ramaria memory --layer l1
 
-# 5. 导出
+# 5. 导入 QQ 聊天记录
+ramaria import qq --file chat.json --deep
+
+# 6. 导出诊断信息
+ramaria diagnostics --output diag.zip
+
+# 7. 导出数据
 ramaria export --format markdown --output memories.md
 ```
 
@@ -291,4 +375,7 @@ ramaria export --format markdown --output memories.md
 
 ## 参考
 
+- 桌面使用指南：`rust/docs/desktop-user-guide.md`
+- 隐私说明：`rust/docs/privacy-notice.md`
 - 完整架构说明：`rust/docs/dev/rust-rewrite-analysis.md`
+- 默认配置模板：`rust/config/default.toml`

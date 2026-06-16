@@ -3,7 +3,8 @@
 //! 设计特点:
 //! - 从 HuggingFace `config.json` 自动检测模型架构（BERT / LLaMA / Qwen2）
 //! - 若 config.json 不够明确，回退检查 safetensors 文件中的 tensor 名称前缀
-//!   （BERT 键以 `bert.` 开头，LLaMA/Qwen 键以 `model.` 开头）
+//!
+//! （BERT 键以 `bert.` 开头，LLaMA/Qwen 键以 `model.` 开头）
 //! - 每种架构对应一个独立的编码器实现，方便扩展新架构
 //! - 池化策略与架构绑定：BERT → mean pooling，LLaMA → last token pooling
 //! - 提供统一 `TextEncoder` trait，上层代码无需关心具体架构
@@ -237,7 +238,7 @@ fn detect_from_config(
 /// - BERT 模型的 tensor 键以 `bert.` 开头
 /// - LLaMA/Qwen 模型的 tensor 键以 `model.` 开头
 ///
-/// 此方法复用 `common::read_safetensors_header()` 只读取 header（不加载权重），非常快。
+/// 此方法复用 `common::read_safetensors_header` 只读取 header（不加载权重），非常快。
 fn detect_from_safetensors(config_path: &Path) -> Option<ModelArchitecture> {
     let model_dir = config_path.parent()?;
     let st_path = model_dir.join("model.safetensors");
@@ -253,7 +254,7 @@ fn detect_from_safetensors(config_path: &Path) -> Option<ModelArchitecture> {
     let header_str = String::from_utf8_lossy(&header_bytes);
 
     // 检查第一个 tensor 键的前缀
-    // BERT: "bert.embeddings..."  → 前缀 "bert."
+    // BERT: "bert.embeddings..." → 前缀 "bert."
     // LLaMA: "model.embed_tokens..." → 前缀 "model."
     if header_str.contains("\"bert.") {
         return Some(ModelArchitecture::Bert);

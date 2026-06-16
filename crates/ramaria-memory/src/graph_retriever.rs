@@ -8,9 +8,9 @@
 //! - 对接 retriever.rs：返回 (label, score) 供 RRF 融合
 //!
 //! 图检索评分公式:
-//!   score = entity_match_score × relation_boost
-//!   entity_match_score = matched_chars / max(entity_chars, query_chars)  (Jaccard-like)
-//!   relation_boost = 基础权重 × (1 + 0.5 × 边数量)
+//! score = entity_match_score × relation_boost
+//! entity_match_score = matched_chars / max(entity_chars, query_chars) (Jaccard-like)
+//! relation_boost = 基础权重 × (1 + 0.5 × 边数量)
 
 use std::collections::HashMap;
 

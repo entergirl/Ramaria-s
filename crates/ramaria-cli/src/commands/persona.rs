@@ -60,7 +60,7 @@ pub async fn run(app: &Arc<ramaria_app::App>, cmd: PersonaCmd) -> anyhow::Result
 /// 展示所有已注册人格的基本信息。
 ///
 /// 说明:
-/// - 从 storage.list_personas() 读取全部活跃 persona。
+/// - 从 storage.list_personas 读取全部活跃 persona。
 /// - 解析 config 字段中的 TOML 内容，提取 assistant_name 和人设/规则摘要。
 /// - 无 persona 时输出引导提示。
 async fn run_show(app: &Arc<ramaria_app::App>) -> anyhow::Result<()> {

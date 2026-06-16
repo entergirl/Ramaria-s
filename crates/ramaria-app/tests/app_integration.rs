@@ -1,4 +1,4 @@
-﻿//! rust/crates/ramaria-app/tests/app_integration.rs - App 编排集成测试
+//! rust/crates/ramaria-app/tests/app_integration.rs - App 编排集成测试
 //!
 //! 测试覆盖:
 //! - App 构造与初始状态
@@ -125,7 +125,7 @@ async fn run_setup_full_flow() {
     storage.set_index_version(1).await.unwrap();
 
     let state = run_setup(&storage, &config).await.unwrap();
-    // run_setup 内部传入 embedding_available=false，返回 Degraded（v1.1 语义）
+    // run_setup 内部传入 embedding_available=false，返回 Degraded
     assert_eq!(state, AppState::Degraded);
 }
 
@@ -338,9 +338,9 @@ async fn backend_config_accessible() {
 // T-FIX-015: MockFailingLlm 错误路径集成测试
 // =========================================================
 // 验证 LLM 失败时:
-//  1. 流中包含 Error 事件（用户可感知错误）
-//  2. 流中不包含 Done 事件（修复 T-FIX-013: Error 后不发 Done）
-//  3. 错误事件内容与 MockFailingLlm 的错误消息一致
+// 1. 流中包含 Error 事件（用户可感知错误）
+// 2. 流中不包含 Done 事件（修复 T-FIX-013: Error 后不发 Done）
+// 3. 错误事件内容与 MockFailingLlm 的错误消息一致
 
 #[tokio::test]
 async fn send_message_failing_llm_produces_error_no_done() {

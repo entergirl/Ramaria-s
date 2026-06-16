@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/inference/inferrer.rs - Phase B 三步 LLM 结构化性格推断
+//! rust/crates/ramaria-memory/src/inference/inferrer.rs - 三步 LLM 结构化性格推断
 //!
 //! 设计特点:
 //! - Step 1: 逐分类个性模式提取 — 统计指标 + 态度聚类结果 → 分类级性格信号
@@ -19,7 +19,7 @@ use crate::inference::stats::{
 // 配置类型
 // =========================================================
 
-/// Phase B 推断器配置。
+/// 推断器配置。
 #[derive(Debug, Clone)]
 pub struct InferrerConfig {
     /// LLM 生成温度
@@ -88,7 +88,7 @@ pub struct InferredTrait {
     pub seq: i32,
 }
 
-/// Phase B 完整推断结果。
+/// 完整推断结果。
 #[derive(Debug, Clone)]
 pub struct InferenceResult {
     /// Step 1 逐分类信号
@@ -329,7 +329,7 @@ pub fn build_step3_prompt(
 /// - 推断逻辑透明可审计。
 ///
 /// 参数:
-/// - `stats`: Phase A 统计摘要。
+/// - `stats`: 统计摘要。
 /// - `persona_uid`: 目标人格标识。
 ///
 /// 返回:
@@ -558,7 +558,7 @@ pub struct PostProcessResult {
 /// - 旧 accent trait 在新推断中消失 → Deprecate
 /// - 其他 → Keep
 ///
-/// 注意: Phase 3 接入 embedding 后应替换为语义匹配。
+/// 注意: 接入 embedding 后应替换为语义匹配。
 ///
 /// 参数:
 /// - `new_traits`: 新推断的 trait 列表。
@@ -647,7 +647,7 @@ pub fn compute_trait_diff(
 /// 对推断结果执行后处理。
 ///
 /// 参数:
-/// - `result`: Phase B 推断结果。
+/// - `result`: 推断结果。
 /// - `old_traits`: 已存在的 trait 列表。
 /// - `persona_uid`: 目标人格标识。
 ///
@@ -873,7 +873,7 @@ mod tests {
         assert!(post.to_deprecate.contains(&99));
     }
 
-    // ---- InferrerConfig  ----
+    // ---- InferrerConfig ----
 
     #[test]
     fn inferrer_config_defaults() {

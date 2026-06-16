@@ -8,7 +8,7 @@
 //! - 无合适示例时返回空列表（不强制凑数）
 //!
 //! 评分公式:
-//!   score = tag_bonus * 0.5 + valence_match * 0.3 + length_score * 0.2
+//! score = tag_bonus * 0.5 + valence_match * 0.3 + length_score * 0.2
 //!
 //! 依赖:
 //! - ramaria_core::types::PersonaExample: 对话示例结构体
@@ -238,7 +238,7 @@ impl ExampleSelector {
 /// - 去重后的小写关键词列表，按字典序排列。
 ///
 /// 说明:
-/// - Phase 3 接入真实分词器后可替换为 jieba-rs 等实现。
+/// - 接入真实分词器后可替换为 jieba-rs 等实现。
 pub fn extract_keywords(input: &str) -> Vec<String> {
     let mut keywords: Vec<String> = Vec::new();
     let chars: Vec<char> = input.chars().collect();

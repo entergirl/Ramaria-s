@@ -138,7 +138,7 @@ pub trait LlmProvider: Send + Sync {
     /// 检查内容:
     /// - base_url 是否可连接。
     /// - 模型是否可用。
-    /// - v1.0 必需的 streaming 能力是否可用。
+    /// - 必需的 streaming 能力是否可用。
     async fn validate(&self) -> RamariaResult<()>;
 
     /// 返回 provider 名称。
@@ -235,7 +235,7 @@ pub trait EmbeddingProvider: Send + Sync {
 }
 
 // =========================================================
-// 存储后端抽象层（v1.0 完整版——替换旧 API）
+// 存储后端抽象层
 // =========================================================
 
 /// 存储后端抽象 trait。
@@ -255,10 +255,10 @@ pub trait EmbeddingProvider: Send + Sync {
 ///
 /// 破坏性变更（vs 旧 StorageBackend）:
 /// - 删除: save_memory_l2, save_l2_sources, get_l2_sources, save_user_profile,
-///   get_current_profile, mark_profile_historical
+/// get_current_profile, mark_profile_historical
 /// - 新增: personas, memory_events, event_relations, event_sources, persona_facts,
-///   personality_traits, trait_evidence, persona_examples, persona_cluster_snapshots,
-///   keyword_pool 十组方法
+/// personality_traits, trait_evidence, persona_examples, persona_cluster_snapshots,
+/// keyword_pool 十组方法
 #[async_trait]
 pub trait StorageBackend: Send + Sync {
     // -- Session --
@@ -295,7 +295,7 @@ pub trait StorageBackend: Send + Sync {
     ///
     /// 职责:
     /// - 供前端 session 列表展示每条 session 的真实消息数。
-    /// - 默认实现通过 `list_messages` 的 len() 计算，子 crate 应覆写为 `SELECT COUNT(*)`。
+    /// - 默认实现通过 `list_messages` 的 len 计算，子 crate 应覆写为 `SELECT COUNT(*)`。
     ///
     /// 返回:
     /// - 消息数量（无消息时为 0）。
@@ -309,6 +309,29 @@ pub trait StorageBackend: Send + Sync {
     async fn get_memory_l1(&self, id: Uuid) -> RamariaResult<Option<MemoryL1>>;
     async fn mark_l1_absorbed(&self, l1_ids: &[Uuid]) -> RamariaResult<()>;
     async fn list_unabsorbed_l1(&self, persona_uid: &str) -> RamariaResult<Vec<MemoryL1>>;
+
+    /// 按创建时间降序获取指定 persona 的最近 N 条 L1 摘要。
+    ///
+    /// 职责:
+    /// - 供跨 session 上下文注入：新 session 创建时自动加载最近对话摘要。
+    /// - 不区分 absorbed 状态——即使已被 L2 吸收，近期摘要仍有叙事价值。
+    ///
+    /// 参数:
+    /// - `persona_uid`: 人格标识。
+    /// - `limit`: 最多返回条数（建议 3-5）。
+    ///
+    /// 返回:
+    /// - 按 `created_at DESC` 排序的 MemoryL1 列表。
+    ///
+    /// 默认实现:
+    /// - 返回空 Vec，子 crate 应覆写为高效 SQL（`ORDER BY created_at DESC LIMIT ?`）。
+    async fn list_recent_l1_by_persona(
+        &self,
+        _persona_uid: &str,
+        _limit: u32,
+    ) -> RamariaResult<Vec<MemoryL1>> {
+        Ok(Vec::new())
+    }
 
     // -- Personas (id: i64) --
     async fn create_persona(&self, persona: &Persona) -> RamariaResult<i64>;

@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/inference/confidence.rs - Phase C 证据累积式置信度更新
+//! rust/crates/ramaria-memory/src/inference/confidence.rs - 证据累积式置信度更新
 //!
 //! 设计特点:
 //! - C2: 有效证据量 E_total + 一致度 C → conf = C × (1 - 1/(1 + E_total))

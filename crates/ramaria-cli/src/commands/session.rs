@@ -17,7 +17,7 @@ pub enum SessionCmd {
     Show { session_id: String },
     /// 删除指定会话
     Delete { session_id: String },
-    /// v1.1: 为指定 session 重新生成 L1 摘要
+    /// 为指定 session 重新生成 L1 摘要
     Summarize {
         session_id: String,
         /// 可选的人格标识
@@ -153,7 +153,7 @@ async fn delete_session(app: &Arc<ramaria_app::App>, session_id: &str) -> anyhow
     Ok(())
 }
 
-/// v1.1: 为指定 session 重新生成 L1 摘要（手动重试）。
+/// 为指定 session 重新生成 L1 摘要（手动重试）。
 ///
 /// 使用场景:
 /// - save_and_close 中 L1 生成失败后的补救。
@@ -217,5 +217,5 @@ async fn summarize_session(
 }
 
 // 辅助函数已提取至 crate::util 模块：
-//   - crate::util::format_timestamp()
-//   - crate::util::truncate()
+// - crate::util::format_timestamp
+// - crate::util::truncate

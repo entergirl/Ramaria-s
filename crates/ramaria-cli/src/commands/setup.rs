@@ -228,7 +228,7 @@ fn default_model_id(provider: ramaria_core::types::LlmProvider) -> &'static str 
 /// 说明:
 /// - user-0001 始终创建（代表当前用户本人）。
 /// - 扫描 `../config/personas/` 下的 .toml 文件，文件名 = persona UID。
-/// - 每个文件的完整 TOML 内容存入 `persona.config` 字段，供 `build_system_prompt()` 加载。
+/// - 每个文件的完整 TOML 内容存入 `persona.config` 字段，供 `build_system_prompt` 加载。
 /// - 已存在的 persona 跳过不重复创建。
 async fn create_initial_personas(app: &Arc<ramaria_app::App>) -> anyhow::Result<()> {
     // 确保 user-0001 存在
@@ -288,7 +288,7 @@ async fn create_initial_personas(app: &Arc<ramaria_app::App>) -> anyhow::Result<
 
 /// 扫描 config/personas/ 目录，返回所有 .toml 文件的信息。
 ///
-/// 注: `extract_toml_value` 使用共享的 `crate::util::extract_toml_value()`。
+/// 注: `extract_toml_value` 使用共享的 `crate::util::extract_toml_value`。
 ///
 /// 返回:
 /// - `Vec<(uid, assistant_name, raw_toml_content)>`。

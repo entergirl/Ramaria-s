@@ -1,11 +1,11 @@
-//! rust/crates/ramaria-memory/src/inference/clustering.rs - Phase A 态度语义聚类
+//! rust/crates/ramaria-memory/src/inference/clustering.rs - 态度语义聚类
 //!
 //! 设计特点:
 //! - 对去情境化后的 attitude（paraphrase）embedding 进行密度聚类
 //! - 使用余弦相似度作为距离度量（文本 embedding 的相似度体现在方向而非绝对距离）
 //! - min_cluster_size=3 锁定，不暴露为可配置项
 //! - 软聚类: 每条态度按归属强度分为核心样本(≥0.7)、边界样本(<0.7)、噪声样本
-//! - 当前为简化实现（基于余弦相似度的密度聚类），Phase 3 接入真实 embedding 后可替换为 UMAP+HDBSCAN
+//! - 当前为简化实现（基于余弦相似度的密度聚类）， 接入真实 embedding 后可替换为 UMAP+HDBSCAN
 //! - 纯数值计算，零 I/O，不依赖数据库或异步运行时
 
 // =========================================================
@@ -50,7 +50,7 @@ impl Default for ClusteringConfig {
 pub struct AttitudeSample {
     /// 去情境化态度文本
     pub paraphrase: String,
-    /// 文本 embedding（Phase 2 使用 mock 随机向量，Phase 3 接入真实模型）
+    /// 文本 embedding
     pub embedding: Vec<f32>,
     /// 原始事件在输入列表中的索引
     pub source_index: usize,
@@ -75,7 +75,7 @@ pub struct ClusterAssignment {
 /// 单个簇的描述。
 ///
 /// 职责:
-/// - 记录簇的结构信息，供 Phase B LLM 推断时参考。
+/// - 记录簇的结构信息，供 LLM 推断时参考。
 #[derive(Debug, Clone)]
 pub struct ClusterDescription {
     /// 簇索引（0-based）

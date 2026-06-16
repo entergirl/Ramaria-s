@@ -117,7 +117,7 @@ impl Default for EventExtractorConfig {
 ///
 /// 用法:
 /// ```ignore
-/// let extractor = EventExtractor::new(&llm, &storage, EventExtractorConfig::default());
+/// let extractor = EventExtractor::new(&llm, &storage, EventExtractorConfig::default);
 /// let events = extractor.extract_events("user-0001").await?;
 /// ```
 pub struct EventExtractor<'a> {
@@ -267,7 +267,7 @@ impl<'a> EventExtractor<'a> {
         let time_range = Self::compute_time_range(&batch);
         let mut saved_events: Vec<MemoryEvent> = Vec::with_capacity(events.len());
 
-        // Phase 1.1.2: 从源 L1 计算平均情境强度（None 等效 3）
+        // 从源 L1 计算平均情境强度（None 等效 3）
         let avg_situation: Option<i32> = {
             let values: Vec<i32> = batch
                 .iter()
@@ -522,8 +522,8 @@ impl<'a> EventExtractor<'a> {
     /// 从 ExtractedEventJson 构建 MemoryEvent。
     ///
     /// 参数:
-    /// - `situation_strength`: Phase 1.1.2 从源 L1 传播的情境强度（1-5），
-    ///   None 时等效 3（中性情境，Phase A 加权 ×1.0）。
+    /// - `situation_strength`: 从源 L1 传播的情境强度（1-5），
+    ///   None 时等效 3（中性情境， 加权 ×1.0）。
     fn build_event(
         persona_uid: &str,
         json: ExtractedEventJson,

@@ -31,7 +31,7 @@ use ramaria_core::types::{
 /// - `include_facts`: 是否包含事实信息（Block A）。默认 true。
 /// - `include_examples`: 是否包含 Few-shot 示例（Block B）。默认 true。
 /// - `include_knowledge_boundary`: 是否包含知识边界（Block D）。默认 true。
-/// - `current_time_str`: 当前时间的格式化字符串（Block E）。空则自动使用 now_ms()。
+/// - `current_time_str`: 当前时间的格式化字符串（Block E）。空则自动使用 now_ms。
 #[derive(Debug, Clone)]
 pub struct PromptConfig {
     /// Block B 最大示例对数
@@ -73,6 +73,11 @@ impl Default for PromptConfig {
 /// 职责:
 /// - 将分散的 persona 数据聚合为一次 System Prompt 构建的输入。
 /// - 所有字段均可选：缺失时对应 Block 自动省略。
+///
+/// 跨 session 上下文:
+/// - `recent_session_summaries`: 无条件注入的近期 L1 摘要（最近 1-3 条），
+///   解决"新 session 发'你好'时 LLM 完全不知道上次聊了什么"的问题。
+/// - `last_active_at`: 该 persona 最后活跃时间，供 LLM 判断对话连续性。
 #[derive(Debug, Clone, Default)]
 pub struct PromptContext {
     /// 人格基本信息
@@ -87,13 +92,24 @@ pub struct PromptContext {
     /// Few-shot 示例（Block B）
     pub examples: Vec<PersonaExample>,
 
-    /// RAG 记忆上下文文本（Block C，由上层组装好传入）
+    /// RAG 记忆上下文文本（Block C 子段 [相关记忆]，由检索结果格式化传入）
     pub memory_context: Option<String>,
+
+    /// 近期 session 摘要（Block C 子段 [近期对话摘要]，无条件注入）
+    ///
+    /// 字段约定:
+    /// - 按时间降序排列（最近在前）。
+    /// - 每条为格式化好的摘要文本（含时间段和氛围）。
+    /// - 为空时 [近期对话摘要] 显示"（这是你与用户的首次对话）"。
+    pub recent_session_summaries: Vec<String>,
+
+    /// 该 persona 最近一次活跃时间（Block E 可选扩展）
+    pub last_active_at: Option<String>,
 
     /// 知识边界描述（Block D）
     pub knowledge_boundary: Option<String>,
 
-    /// 当前时间字符串（Block E，空则使用 now_ms()）
+    /// 当前时间字符串（Block E，空则使用 now_ms）
     pub current_time_str: Option<String>,
 
     /// 天气信息（Block E 可选）
@@ -118,9 +134,9 @@ pub struct PromptContext {
 /// - 无 traits 时省略性格段。
 /// - 无 facts 时省略事实段。
 /// - 无 examples 时省略 Block B。
-/// - 无 memory_context 时 Block C 显示"（无）"。
+/// - Block C 拆分为两层: [近期对话摘要] (无条件) + [相关记忆] (RAG 结果)。
 pub fn assemble_prompt(context: &PromptContext, config: &PromptConfig) -> String {
-    let mut blocks: Vec<String> = Vec::with_capacity(5);
+    let mut blocks: Vec<String> = Vec::with_capacity(6); // +1 for split Block C
 
     // ---- Block A: 角色定义 ----
     blocks.push(build_block_a(context, config));
@@ -133,20 +149,8 @@ pub fn assemble_prompt(context: &PromptContext, config: &PromptConfig) -> String
         }
     }
 
-    // ---- Block C: 记忆上下文 ----
-    // 由上层决定是否注入（受 online_memory_injection 开关控制）
-    match &context.memory_context {
-        Some(ctx) if !ctx.trim().is_empty() => {
-            blocks.push(format!(
-                "[相关记忆]\n\
-                 以下是与当前对话相关的历史记忆，请结合这些信息回复：\n\
-                 {ctx}"
-            ));
-        }
-        _ => {
-            blocks.push("[相关记忆]\n（暂无相关历史记忆）".to_string());
-        }
-    }
+    // ---- Block C: 记忆上下文（拆分为两层） ----
+    blocks.push(build_block_c(context));
 
     // ---- Block D: 知识边界 ----
     if config.include_knowledge_boundary {
@@ -318,6 +322,129 @@ fn build_block_b(examples: &[PersonaExample], max_examples: usize) -> String {
 }
 
 // =========================================================
+// Block C: 记忆上下文（两层结构）
+// =========================================================
+
+/// 组装 Block C：近期对话摘要 + 相关记忆。
+///
+/// 两层结构:
+/// 1. [近期对话摘要] — 无条件注入最近 1-3 条 L1 摘要，即使与当前查询不匹配。
+///
+/// 解决"新 session 发'你好'时 LLM 完全不知道上次聊了什么"的问题。
+/// 2. [相关记忆] — RAG 检索结果，按关键词/向量/图谱匹配。
+///
+/// 为空时显示"（暂无与当前话题直接相关的历史记忆）"。
+///
+/// 跨 session 叙事:
+/// - 若 `recent_session_summaries` 非空，调用 `build_cross_session_narrative` 生成引导句。
+/// - 该引导句告诉 LLM 此前对话的总体脉络，便于自然地衔接。
+fn build_block_c(context: &PromptContext) -> String {
+    let mut parts: Vec<String> = Vec::with_capacity(2);
+
+    // C1: [近期对话摘要] — 无条件注入
+    if context.recent_session_summaries.is_empty() {
+        parts.push("[近期对话摘要]\n（这是你与用户的首次对话）".to_string());
+    } else {
+        let mut lines = Vec::with_capacity(context.recent_session_summaries.len() + 1);
+        lines.push("[近期对话摘要]".to_string());
+
+        // 生成跨 session 叙事引导句
+        let narrative = build_cross_session_narrative(&context.recent_session_summaries);
+        lines.push(narrative);
+        lines.push(String::new()); // 空行分隔
+
+        // 逐条列出近期对话摘要
+        for (i, summary) in context.recent_session_summaries.iter().enumerate() {
+            // 截断过长摘要到 120 字符（与 RAG 格式化保持一致）
+            let display: String = if summary.chars().count() > 120 {
+                summary.chars().take(120).collect::<String>() + "…"
+            } else {
+                summary.clone()
+            };
+            lines.push(format!("  {}. {}", i + 1, display));
+        }
+
+        parts.push(lines.join("\n"));
+    }
+
+    // C2: [相关记忆] — RAG 检索结果（条件注入）
+    match &context.memory_context {
+        Some(ctx) if !ctx.trim().is_empty() => {
+            parts.push(format!(
+                "[相关记忆]\n\
+                 以下是与当前话题相关的历史记忆，请结合这些信息回复：\n\
+                 {ctx}"
+            ));
+        }
+        _ => {
+            parts.push("[相关记忆]\n（暂无与当前话题直接相关的历史记忆）".to_string());
+        }
+    }
+
+    parts.join("\n\n")
+}
+
+/// 从近期 L1 摘要构建跨 session 叙事引导句。
+///
+/// 职责:
+/// - 将孤立的 L1 摘要串联为连贯的叙事脉络，告知 LLM"此前对话的总体进展"。
+/// - 使 LLM 能自然地引用此前对话，而非每次从零开始。
+///
+/// 算法:
+/// - 取最近 3 条摘要，提取前 30 字符作为话题锚点。
+/// - 按时间顺序串联为"你此前与用户讨论了 A、B、C 等话题"格式。
+/// - 添加时间提示（"最近一次对话发生在 XX"）。
+///
+/// 参数:
+/// - `summaries`: 按时间降序排列的 L1 摘要文本列表。
+///
+/// 返回:
+/// - 叙事引导句字符串，如:
+///   "你此前与用户进行了 3 次对话：讨论了 Python 学习计划、完成了 FastAPI 项目、\
+///   探讨了 Rust 异步编程。最近一次对话发生在不久前。"
+pub fn build_cross_session_narrative(summaries: &[String]) -> String {
+    if summaries.is_empty() {
+        return String::new();
+    }
+
+    // 取最近 3 条
+    let recent: Vec<&String> = summaries.iter().take(3).collect();
+
+    // 提取每条摘要的前 30 字符作为话题锚点
+    let topics: Vec<String> = recent
+        .iter()
+        .map(|s| {
+            let anchor: String = s.chars().take(30).collect();
+            // 去除末尾可能的不完整字符
+            anchor.trim().to_string()
+        })
+        .collect();
+
+    // 反转为主题时间线（最早→最近）
+    let mut timeline = topics.clone();
+    timeline.reverse();
+
+    let count = timeline.len();
+    let topic_list = timeline.join("、");
+
+    // 生成引导句
+    let narrative = if count == 1 {
+        format!("你此前与用户讨论过「{topic_list}」。")
+    } else {
+        format!("你此前与用户进行了 {count} 次对话：讨论了「{topic_list}」。")
+    };
+
+    // 追加时间提示
+    let time_hint = if count >= 2 {
+        " 最近一次对话发生在不久前，用户可能希望继续之前的话题。"
+    } else {
+        " 用户可能希望继续之前的话题。"
+    };
+
+    narrative + time_hint
+}
+
+// =========================================================
 // Block D: 知识边界
 // =========================================================
 
@@ -344,11 +471,15 @@ fn build_block_d(context: &PromptContext) -> String {
 // Block E: 当前语境
 // =========================================================
 
-/// 组装 Block E：当前时间 + 可选天气。
+/// 组装 Block E：当前时间 + 可选天气 + 可选最后活跃时间。
 ///
 /// 时间格式：
 /// - 若 `context.current_time_str` 有值，直接使用（由上层 App 传入格式化字符串）。
-/// - 否则使用 `chrono::Local::now()` 生成可读日期时间（`%Y-%m-%d %H:%M`）。
+/// - 否则使用 `chrono::Local::now` 生成可读日期时间（`%Y-%m-%d %H:%M`）。
+///
+/// 跨 session 提示：
+/// - 若 `context.last_active_at` 有值，追加"上次对话时间"行，
+///   帮助 LLM 判断对话间隔（如"两周前"→ 需要寒暄；"几分钟前"→ 无缝继续）。
 fn build_block_e(context: &PromptContext) -> String {
     let time_str = context
         .current_time_str
@@ -361,6 +492,13 @@ fn build_block_e(context: &PromptContext) -> String {
         && !weather.trim().is_empty()
     {
         lines.push(format!("天气：{weather}"));
+    }
+
+    // 跨 session 上下文: 告知 LLM 上次对话是什么时候
+    if let Some(ref last_active) = context.last_active_at
+        && !last_active.is_empty()
+    {
+        lines.push(format!("上次对话时间：{last_active}"));
     }
 
     lines.join("\n")
@@ -392,7 +530,7 @@ mod tests {
                 r#"{"description":"一个喜欢编程的大学生","speaking_style":"热情活泼，喜欢用emoji"}"#
                     .into(),
             ),
-            description: None,  // Phase 6 新增
+            description: None,
             created_at: 1000,
             updated_at: 1000,
         }
@@ -453,6 +591,9 @@ mod tests {
         assert!(result.contains("虚构角色"));
         assert!(result.contains("编程"));
         assert!(result.contains("emoji"));
+        // Block C 现在拆分为两层：C1 近期对话摘要 + C2 相关记忆
+        assert!(result.contains("[近期对话摘要]"));
+        assert!(result.contains("首次对话")); // 无近期摘要时显示首次对话提示
         assert!(result.contains("[相关记忆]"));
         assert!(result.contains("[知识边界]"));
         assert!(result.contains("[当前语境]"));
@@ -585,7 +726,7 @@ mod tests {
     // ---- Block C 测试 ----
 
     #[test]
-    fn block_c_with_memory() {
+    fn block_c_with_memory_only() {
         let ctx = PromptContext {
             persona: Some(make_test_persona()),
             memory_context: Some("用户之前提到喜欢猫。".into()),
@@ -594,7 +735,11 @@ mod tests {
         let config = PromptConfig::default();
         let result = assemble_prompt(&ctx, &config);
 
+        // C1: 无近期摘要 → 首次对话提示
+        assert!(result.contains("首次对话"));
+        // C2: 有 RAG 结果
         assert!(result.contains("喜欢猫"));
+        assert!(result.contains("[相关记忆]"));
     }
 
     #[test]
@@ -607,7 +752,81 @@ mod tests {
         let config = PromptConfig::default();
         let result = assemble_prompt(&ctx, &config);
 
-        assert!(result.contains("暂无相关历史记忆"));
+        // C1: 首次对话
+        assert!(result.contains("首次对话"));
+        // C2: RAG 无结果占位
+        assert!(result.contains("暂无与当前话题直接相关的历史记忆"));
+    }
+
+    #[test]
+    fn block_c_with_recent_summaries_and_memory() {
+        let ctx = PromptContext {
+            persona: Some(make_test_persona()),
+            recent_session_summaries: vec![
+                "讨论了Python异步编程和FastAPI的使用".to_string(),
+                "完成了Rust项目的第一个crate发布".to_string(),
+                "探讨了AI助手的记忆系统设计".to_string(),
+            ],
+            memory_context: Some("用户：喜欢猫，养了一只橘猫".into()),
+            ..Default::default()
+        };
+        let config = PromptConfig::default();
+        let result = assemble_prompt(&ctx, &config);
+
+        // C1: 近期对话摘要应出现
+        assert!(result.contains("[近期对话摘要]"));
+        assert!(result.contains("Python异步编程"));
+        assert!(result.contains("Rust项目"));
+        // C2: RAG 相关记忆
+        assert!(result.contains("[相关记忆]"));
+        assert!(result.contains("橘猫"));
+        // 跨 session 叙事引导句应出现
+        assert!(result.contains("此前与用户进行了"));
+    }
+
+    #[test]
+    fn block_c_single_recent_summary() {
+        let ctx = PromptContext {
+            persona: Some(make_test_persona()),
+            recent_session_summaries: vec!["讨论了天气和出行计划，决定周末去爬山".to_string()],
+            ..Default::default()
+        };
+        let config = PromptConfig::default();
+        let result = assemble_prompt(&ctx, &config);
+
+        assert!(result.contains("[近期对话摘要]"));
+        assert!(result.contains("你此前与用户讨论过"));
+        assert!(result.contains("爬山"));
+    }
+
+    // ---- 跨 session 叙事引导句测试 ----
+
+    #[test]
+    fn cross_session_narrative_single() {
+        let summaries = vec!["用户今天学习了Rust编程语言".to_string()];
+        let narrative = build_cross_session_narrative(&summaries);
+        assert!(narrative.contains("你此前与用户讨论过"));
+        assert!(narrative.contains("Rust编程"));
+        assert!(!narrative.contains("次对话"));
+    }
+
+    #[test]
+    fn cross_session_narrative_multiple() {
+        let summaries = vec![
+            "探讨了AI助手的记忆系统".to_string(),
+            "完成了Rust项目发布".to_string(),
+            "讨论了Python异步编程".to_string(),
+        ];
+        let narrative = build_cross_session_narrative(&summaries);
+        assert!(narrative.contains("你此前与用户进行了 3 次对话"));
+        assert!(narrative.contains("不久前"));
+    }
+
+    #[test]
+    fn cross_session_narrative_empty() {
+        let summaries: Vec<String> = vec![];
+        let narrative = build_cross_session_narrative(&summaries);
+        assert!(narrative.is_empty());
     }
 
     // ---- Block D 测试 ----
@@ -681,6 +900,21 @@ mod tests {
         assert!(time_part.contains(':'), "应包含时间冒号: {time_part}");
     }
 
+    #[test]
+    fn block_e_with_last_active() {
+        let ctx = PromptContext {
+            persona: Some(make_test_persona()),
+            current_time_str: Some("2026-06-16".into()),
+            last_active_at: Some("2026-06-13 14:30".into()),
+            ..Default::default()
+        };
+        let config = PromptConfig::default();
+        let result = assemble_prompt(&ctx, &config);
+
+        assert!(result.contains("上次对话时间"));
+        assert!(result.contains("2026-06-13"));
+    }
+
     // ---- 完整装配 ----
 
     #[test]
@@ -700,20 +934,26 @@ mod tests {
             }],
             traits: vec![make_test_trait("乐观", TraitLayer::Base, "积极")],
             examples: vec![make_test_example("你好", "嗨！")],
+            recent_session_summaries: vec!["之前讨论了Rust编程".to_string()],
             memory_context: Some("用户：喜欢猫".into()),
             knowledge_boundary: Some("知识边界测试".into()),
             current_time_str: Some("2026-06-10".into()),
+            last_active_at: Some("2026-06-08".into()),
             weather: Some("晴".into()),
         };
         let config = PromptConfig::default();
         let result = assemble_prompt(&ctx, &config);
 
-        // 所有 5 个 Block 都应存在
+        // 所有 Block 都应存在（Block C 拆为两层）
         assert!(result.contains("小明"), "Block A 缺失");
         assert!(result.contains("[回复示例]"), "Block B 缺失");
-        assert!(result.contains("[相关记忆]"), "Block C 缺失");
+        assert!(result.contains("[近期对话摘要]"), "Block C1 缺失");
+        assert!(result.contains("[相关记忆]"), "Block C2 缺失");
         assert!(result.contains("[知识边界]"), "Block D 缺失");
         assert!(result.contains("[当前语境]"), "Block E 缺失");
+        // 跨 session 上下文
+        assert!(result.contains("Rust编程"), "近期摘要未注入");
+        assert!(result.contains("上次对话时间"), "最后活跃时间未注入");
     }
 
     #[test]
@@ -724,6 +964,6 @@ mod tests {
 
         assert!(!result.is_empty());
         assert!(result.contains("Ramaria"));
-        assert!(result.contains("暂无"));
+        assert!(result.contains("首次对话")); // C1 首次对话提示
     }
 }

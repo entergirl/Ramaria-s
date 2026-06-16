@@ -70,9 +70,59 @@ pub async fn send_message(
     let handle = app_handle.clone();
 
     let persona_uid_owned = persona_uid.clone();
-    let session_id_parsed: Option<uuid::Uuid> = session_id
+    let mut session_id_parsed: Option<uuid::Uuid> = session_id
         .as_ref()
         .and_then(|s| uuid::Uuid::parse_str(s).ok());
+
+    // ---- 会话关闭自动重建 ----
+    // 对齐 CLI `try_send_or_recreate`:
+    // 若前端传入的 session 已被关闭（手动保存或空闲超时），自动创建新 session 并重试，
+    // 避免前端竞态窗口导致"会话已关闭，请开启新对话"错误。
+    if let Some(sid) = session_id_parsed {
+        match app.storage().get_session(sid).await {
+            Ok(Some(s)) if s.ended_at.is_some() => {
+                // Session 已关闭 → 自动创建新 session
+                match app.storage().create_session().await {
+                    Ok(new_s) => {
+                        tracing::info!(
+                            old_session_id = %sid,
+                            new_session_id = %new_s.id,
+                            "检测到已关闭 session，自动创建新 session 并重试"
+                        );
+                        session_id_parsed = Some(new_s.id);
+                    }
+                    Err(e) => {
+                        tracing::error!(%sid, %e, "自动创建新 session 失败");
+                        return Err(format!("会话已关闭且无法自动创建新会话: {e}"));
+                    }
+                }
+            }
+            Ok(Some(_)) => {
+                // Session 仍活跃，正常使用
+            }
+            Ok(None) => {
+                // Session 不存在（可能被删除），也创建新 session
+                match app.storage().create_session().await {
+                    Ok(new_s) => {
+                        tracing::info!(
+                            old_session_id = %sid,
+                            new_session_id = %new_s.id,
+                            "session 不存在，自动创建新 session"
+                        );
+                        session_id_parsed = Some(new_s.id);
+                    }
+                    Err(e) => {
+                        tracing::error!(%sid, %e, "自动创建新 session 失败（session 不存在）");
+                        return Err(format!("会话不存在且无法自动创建新会话: {e}"));
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(%sid, %e, "查询 session 状态失败，尝试使用原 session");
+                // 保守策略：无法确认状态时仍使用原 session，让 App::send_message 做最终校验
+            }
+        }
+    }
 
     // ---- 启动后台流处理任务 ----
     tokio::spawn(async move {
@@ -245,8 +295,8 @@ fn emit_chat_error(handle: &AppHandle, request_id: &str, err: &ramaria_core::err
 /// 获取当前应用状态。
 ///
 /// 返回:
-/// - 状态字符串（来自 AppState::as_str()，snake_case）：
-///   "needs_setup" | "downloading_model" | "indexing" | "ready" | "degraded" | "fatal_error"
+/// - 状态字符串（来自 AppState::as_str，snake_case）：
+/// "needs_setup" | "downloading_model" | "indexing" | "ready" | "degraded" | "fatal_error"
 ///
 /// 说明:
 /// - 前端在加载时调用此命令，根据返回值决定显示哪个页面
@@ -266,7 +316,7 @@ pub async fn get_app_state(state: State<'_, DesktopState>) -> Result<String, Str
 /// 参数:
 /// - `persona_uid`: 当前对话人格 UID，用于 L1 摘要归属（可选，默认不限定）。
 ///
-/// 对齐 Python `POST /save` 路由和 `SessionManager.force_close_current_session()`。
+/// 对齐 Python `POST /save` 路由和 `SessionManager.force_close_current_session`。
 ///
 /// 返回:
 /// - `{ status: "ok" | "no_active_session", l1_generated: bool }` JSON 字符串。
@@ -403,9 +453,9 @@ pub async fn generate_l1(
 ///
 /// 返回:
 /// - JSON 对象，包含 status 字段：
-///   - `"NotNeeded"`: 本地服务，无需确认
-///   - `"Confirmed"`: 已确认（含 persistent 标志和确认时间）
-///   - `"NeedsConfirmation"`: 需要用户确认（含 provider_name 和 base_url）
+/// - `"NotNeeded"`: 本地服务，无需确认
+/// - `"Confirmed"`: 已确认（含 persistent 标志和确认时间）
+/// - `"NeedsConfirmation"`: 需要用户确认（含 provider_name 和 base_url）
 #[tauri::command]
 pub async fn check_privacy(state: State<'_, DesktopState>) -> Result<serde_json::Value, String> {
     let status = state

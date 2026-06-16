@@ -133,7 +133,7 @@ enum Commands {
     },
 }
 
-/// 导入子命令（v1.1 新增）。
+/// 导入子命令。
 #[derive(Subcommand)]
 enum ImportCmd {
     /// 导入 QQ 聊天记录
@@ -146,23 +146,23 @@ enum ImportCmd {
         #[arg(long)]
         deep: bool,
 
-        /// Phase 5B: 导出者 persona 名称（向后兼容，默认使用文件中解析的导出者名称）
+        /// 导出者 persona 名称（向后兼容，默认使用文件中解析的导出者名称）
         #[arg(long)]
         persona: Option<String>,
 
-        /// Phase 5B: 导出者 persona 名称（功能同 --persona，用于语义明确场景）
+        /// 导出者 persona 名称（功能同 --persona，用于语义明确场景）
         #[arg(long)]
         persona_self_name: Option<String>,
 
-        /// Phase 5B: 导出者 persona UID（可选，留空按优先级自动生成: uin > uid > seq）
+        /// 导出者 persona UID（可选，留空按优先级自动生成: uin > uid > seq）
         #[arg(long)]
         persona_self_uid: Option<String>,
 
-        /// Phase 5B: 对话对方 persona 名称（默认使用文件中解析的对方名称）
+        /// 对话对方 persona 名称（默认使用文件中解析的对方名称）
         #[arg(long)]
         persona_other_name: Option<String>,
 
-        /// Phase 5B: 对话对方 persona UID（可选，留空按优先级自动生成）
+        /// 对话对方 persona UID（可选，留空按优先级自动生成）
         #[arg(long)]
         persona_other_uid: Option<String>,
 
@@ -186,7 +186,7 @@ enum SessionCmd {
         /// 会话 UUID
         session_id: String,
     },
-    /// v1.1: 为指定会话重新生成 L1 摘要（手动重试）
+    /// 为指定会话重新生成 L1 摘要（手动重试）
     Summarize {
         /// 会话 UUID
         session_id: String,
@@ -453,7 +453,7 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
                 persona_other_uid,
                 gap,
             } => {
-                // Phase 5B: --persona 向后兼容（映射为 self_name）
+                // --persona 向后兼容（映射为 self_name）
                 let effective_self_name = persona_self_name.or(persona);
                 let args = commands::import_cmd::ImportArgs {
                     file,

@@ -2,7 +2,7 @@
 //!
 //! 设计特点:
 //! - `ramaria diagnostics --output <PATH>`: 收集诊断信息并打包为 .zip。
-//! - 使用 canonicalize() + 前缀检查防护路径穿越。
+//! - 使用 canonicalize + 前缀检查防护路径穿越。
 //! - 输出路径默认为当前目录下的 `ramaria-diagnostics-{timestamp}.zip`。
 //! - 所有错误使用 anyhow::Result，由 main.rs 统一处理。
 //!
@@ -24,7 +24,7 @@ pub struct DiagnosticsArgs {
 ///
 /// 流程:
 /// 1. 确定输出路径（用户指定 → 默认 `ramaria-diagnostics-{timestamp}.zip`）。
-/// 2. 调用 `ramaria_app::export_diagnostics()` 收集系统信息、日志、配置。
+/// 2. 调用 `ramaria_app::export_diagnostics` 收集系统信息、日志、配置。
 /// 3. 打包为 .zip 文件。
 ///
 /// 参数:
@@ -101,7 +101,7 @@ fn default_diagnostics_path() -> String {
 /// 规范化导出路径，防护路径穿越。
 ///
 /// 安全措施:
-/// - 对父目录调用 canonicalize()，解析符号链接和相对路径。
+/// - 对父目录调用 canonicalize，解析符号链接和相对路径。
 /// - 拒绝包含 RootDir 或 Prefix 组件的裸路径。
 fn canonicalize_diagnostics_path(path: &Path) -> anyhow::Result<PathBuf> {
     // 拒绝裸根目录和 Windows 盘符前缀路径

@@ -1,9 +1,9 @@
-//! rust/crates/ramaria-memory/src/inference/stats.rs - Phase A 统计特征提取
+//! rust/crates/ramaria-memory/src/inference/stats.rs - 统计特征提取
 //!
 //! 设计特点:
 //! - A1 预过滤: confidence < 0.6 的事件排除（唯一硬截断），salience 作为全链路连续权重
 //! - A3 按领域分类聚合: 按 keywords 主分类分组，计算 salience 加权均值/方差/有效样本量
-//! - 情境强度加权（Phase 1.1.2）: 弱情境(1-2)→×1.5，中性(3)/None→×1.0，强情境(4-5)→×0.5
+//! - 情境强度加权: 弱情境(1-2)→×1.5，中性(3)/None→×1.0，强情境(4-5)→×0.5
 //! - A6 跨分类高阶指标: 情绪稳定性、叙事一致性、态度矛盾检测、社交开放性
 //! - A7 代表性事件选取: 每分类取 salience 最高的 2-3 条事件
 //! - 纯数值计算，零 I/O，不依赖数据库或异步运行时，所有输入由调用方传入
@@ -15,7 +15,7 @@ use ramaria_core::types::{MemoryEvent, Presentation};
 // 配置类型
 // =========================================================
 
-/// Phase A 统计配置。
+/// 统计配置。
 ///
 /// 职责:
 /// - 集中管理预过滤阈值、代表性事件数量和分组策略参数。
@@ -48,7 +48,7 @@ impl Default for StatsConfig {
 ///
 /// 职责:
 /// - 封装一个关键词分类下的全部 salience 加权统计量。
-/// - 作为 Phase B LLM 推断的逐分类输入。
+/// - 作为 LLM 推断的逐分类输入。
 ///
 /// 字段约定:
 /// - `category`: 主分类标签，如"工作""社交""家庭"，从事件 keywords 的第一个标签提取。
@@ -93,12 +93,12 @@ pub struct CategoryStats {
 ///
 /// 职责:
 /// - 汇总跨分类的比较性统计特征。
-/// - 为 Phase B 的"区分底色/点缀"提供数值依据。
+/// - 为 的"区分底色/点缀"提供数值依据。
 ///
 /// 字段约定:
 /// - `emotional_stability`: 全局 valence 加权标准差。值越小情绪越平稳。
 /// - `narrative_consistency`: 跨分类 presentation 分布相似度的均值（Jensen-Shannon 散度的补数）。
-/// - `attitude_contradiction_count`: 态度矛盾指示器（当前为占位：≥2 分类时标记 1，精确计数待 Phase 3 接入真实 embedding 后通过 cross-cluster centroid cosine similarity 计算）。
+/// - `attitude_contradiction_count`: 态度矛盾指示器（当前为占位：≥2 分类时标记 1，精确计数待 接入真实 embedding 后通过 cross-cluster centroid cosine similarity 计算）。
 /// - `share_skewness`: 全局 share 分布的偏度。正值=右偏（少数事件 share 很高），负值=左偏。
 /// - `share_kurtosis`: 全局 share 分布的峰度。正值=尖峰分布，负值=扁平分布。
 #[derive(Debug, Clone)]
@@ -118,7 +118,7 @@ pub struct CrossCategoryMetrics {
 /// 代表性事件的精简视图（A7 输出）。
 ///
 /// 职责:
-/// - 保留事件的核心字段，供 Phase B LLM 推断时注入 Prompt 作为具体示例。
+/// - 保留事件的核心字段，供 LLM 推断时注入 Prompt 作为具体示例。
 /// - 只包含对性格推断有信息价值的字段，不泄露内部 ID。
 #[derive(Debug, Clone)]
 pub struct RepresentativeEvent {
@@ -136,11 +136,11 @@ pub struct RepresentativeEvent {
     pub category: String,
 }
 
-/// Phase A 完整统计摘要。
+/// 完整统计摘要。
 ///
 /// 职责:
-/// - 聚合 A1/A3/A6/A7 的全部输出，作为 Phase B LLM 推断的完整输入。
-/// - 所有字段由 `run_phase_a_stats()` 一次性计算。
+/// - 聚合 A1/A3/A6/A7 的全部输出，作为 LLM 推断的完整输入。
+/// - 所有字段由 `run_phase_a_stats` 一次性计算。
 #[derive(Debug, Clone)]
 pub struct StatsSummary {
     /// 输入事件总数（预过滤前）
@@ -164,7 +164,7 @@ pub struct StatsSummary {
 /// 预过滤事件：排除 confidence 低于阈值的推测性事件。
 ///
 /// 说明:
-/// - 这是 Phase A 中唯一的硬截断。
+/// - 这是 中唯一的硬截断。
 /// - salience 不做截断，作为连续权重贯穿后续全部计算。
 /// - 被排除的事件保留在存储中，待未来交叉验证提升置信度后重新吸收。
 ///
@@ -186,7 +186,7 @@ pub fn prefilter_events(events: &[MemoryEvent], config: &StatsConfig) -> (Vec<Me
 }
 
 // =========================================================
-// 情境强度加权（Phase 1.1.2）
+// 情境强度加权
 // =========================================================
 
 /// 根据情境强度计算 salience 乘数。
@@ -328,7 +328,7 @@ pub fn weighted_ratio(indicators: &[f64], weights: &[f64]) -> f64 {
 /// - 包含所有 salience 加权统计量的 CategoryStats。
 pub fn compute_category_stats(category: &str, events: &[MemoryEvent]) -> CategoryStats {
     let event_count = events.len();
-    // Phase 1.1.2: salience × situation_multiplier → 有效权重
+    // salience × situation_multiplier → 有效权重
     let weights: Vec<f64> = events
         .iter()
         .map(|e| e.salience * situation_multiplier(e.situation_strength))
@@ -575,7 +575,7 @@ pub fn compute_cross_category_metrics(
 ) -> CrossCategoryMetrics {
     let emotional_stability = compute_emotional_stability(events);
     let narrative_consistency = compute_narrative_consistency(categories);
-    // 态度矛盾检测在 Phase A 中基于分类对做标记，具体计数由 Phase B 语义判断
+    // 态度矛盾检测在 中基于分类对做标记，具体计数由 语义判断
     // 此处预留基础指标：分类数 >= 2 时标记可能存在矛盾
     let attitude_contradiction_count = if categories.len() >= 2 { 1 } else { 0 };
     let share_skewness = compute_share_skewness(events);
@@ -672,7 +672,7 @@ pub fn select_representative_events(
 // 主编排函数
 // =========================================================
 
-/// 执行完整的 Phase A 统计管线。
+/// 执行完整的 统计管线。
 ///
 /// 管线步骤:
 /// 1. A1: 预过滤（排除 confidence < 0.6 的事件）
@@ -779,7 +779,7 @@ mod tests {
         ev
     }
 
-    // ---- 情境强度乘数（Phase 1.1.2） ----
+    // ---- 情境强度乘数 ----
 
     #[test]
     fn situation_multiplier_none_is_neutral() {

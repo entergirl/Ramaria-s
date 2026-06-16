@@ -228,7 +228,7 @@ mod tests {
         assert!(prompt.contains("salience"));
         assert!(
             prompt.contains("situation_strength"),
-            "Phase 1.1.2: prompt 应包含 situation_strength 字段"
+            "prompt 应包含 situation_strength 字段"
         );
     }
 

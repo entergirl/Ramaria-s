@@ -1,5 +1,5 @@
 /**
- * js/views/persona.js — 人格管理视图 (Phase 6)
+ * js/views/persona.js — 人格管理视图
  *
  * 功能:
  * - 卡片网格展示所有人格（名称/类型/来源/描述/活跃时间）
@@ -20,29 +20,29 @@
 var RamariaPersonaView = (function () {
     'use strict';
 
-    // =========================================================
-    // 内部状态
-    // =========================================================
+ // =========================================================
+ // 内部状态
+ // =========================================================
 
-    /** 当前展示页：'list' | 'detail' */
+ /** 当前展示页：'list' | 'detail' */
     var _page = 'list';
-    /** 当前详情页的人格 UID */
+ /** 当前详情页的人格 UID */
     var _detailUid = null;
-    /** 人格完整列表缓存 */
+ /** 人格完整列表缓存 */
     var _personasFull = [];
-    /** 是否正在加载 */
+ /** 是否正在加载 */
     var _loading = false;
-    /** Router 钩子取消注册函数 */
+ /** Router 钩子取消注册函数 */
     var _unregisterHooks = null;
 
-    // =========================================================
-    // 初始化与销毁
-    // =========================================================
+ // =========================================================
+ // 初始化与销毁
+ // =========================================================
 
-    /**
-     * 初始化视图：注册 Router 生命周期钩子。
-     * 由自动检测逻辑调用（等待 RamariaRouter 就绪）。
-     */
+ /**
+ * 初始化视图：注册 Router 生命周期钩子。
+ * 由自动检测逻辑调用（等待 RamariaRouter 就绪）。
+ */
     function init() {
         if (!window.RamariaRouter) {
             console.warn('[PersonaView] RamariaRouter 未就绪，延迟初始化');
@@ -57,9 +57,9 @@ var RamariaPersonaView = (function () {
         console.log('[PersonaView] 初始化完成');
     }
 
-    /**
-     * 销毁视图：取消 Router 钩子和事件监听。
-     */
+ /**
+ * 销毁视图：取消 Router 钩子和事件监听。
+ */
     function destroy() {
         if (_unregisterHooks) {
             for (var i = 0; i < _unregisterHooks.length; i++) {
@@ -73,38 +73,38 @@ var RamariaPersonaView = (function () {
         console.log('[PersonaView] 已销毁');
     }
 
-    // =========================================================
-    // Router 钩子
-    // =========================================================
+ // =========================================================
+ // Router 钩子
+ // =========================================================
 
-    /**
-     * enter 钩子：进入视图时加载数据并渲染。
-     */
+ /**
+ * enter 钩子：进入视图时加载数据并渲染。
+ */
     function _onEnter() {
         RamariaRouter.setContentTitle('人格管理');
         RamariaRouter.setContentActions(''); // 清空头部操作区
         _loadAndRender();
     }
 
-    /**
-     * leave 钩子：离开视图时清理。
-     */
+ /**
+ * leave 钩子：离开视图时清理。
+ */
     function _onLeave() {
-        // 内存状态清理，DOM 由 Router 自动管理
+ // 内存状态清理，DOM 由 Router 自动管理
         _page = 'list';
         _detailUid = null;
-        // 不清空 _personasFull，下次进入时刷新
+ // 不清空 _personasFull，下次进入时刷新
         _loading = false;
     }
 
-    // =========================================================
-    // 数据加载
-    // =========================================================
+ // =========================================================
+ // 数据加载
+ // =========================================================
 
-    /**
-     * 加载人格完整列表并渲染。
-     * 实现加载态骨架屏、错误兜底和空状态。
-     */
+ /**
+ * 加载人格完整列表并渲染。
+ * 实现加载态骨架屏、错误兜底和空状态。
+ */
     async function _loadAndRender() {
         if (_loading) return;
         _loading = true;
@@ -115,14 +115,14 @@ var RamariaPersonaView = (function () {
             return;
         }
 
-        // 显示骨架屏
+ // 显示骨架屏
         container.innerHTML = _buildSkeleton();
 
         try {
-            // 1. 加载人格完整数据
+ // 1. 加载人格完整数据
             _personasFull = await RamariaApi.persona.listFull();
 
-            // 2. 加载 Store 中的 personas（用于记忆查询等现有功能）
+ // 2. 加载 Store 中的 personas（用于记忆查询等现有功能）
             try {
                 var storePersonas = await RamariaApi.memory.getPersonas();
                 RamariaStore.set('personas', storePersonas, true); // 静默更新
@@ -130,7 +130,7 @@ var RamariaPersonaView = (function () {
                 console.warn('[PersonaView] 加载 Store personas 失败:', e.message);
             }
 
-            // 3. 加载默认人格 UID（从 settings 中读取）
+ // 3. 加载默认人格 UID（从 settings 中读取）
             try {
                 var settings = await RamariaApi.config.getSettings();
                 for (var i = 0; i < settings.length; i++) {
@@ -143,7 +143,7 @@ var RamariaPersonaView = (function () {
                 console.warn('[PersonaView] 加载默认人格设置失败:', e.message);
             }
 
-            // 4. 渲染列表
+ // 4. 渲染列表
             _page = 'list';
             _detailUid = null;
             container.innerHTML = '';
@@ -161,25 +161,25 @@ var RamariaPersonaView = (function () {
         }
     }
 
-    // =========================================================
-    // 页面构建：列表页
-    // =========================================================
+ // =========================================================
+ // 页面构建：列表页
+ // =========================================================
 
-    /**
-     * 构建人格卡片网格列表页。
-     *
-     * 布局: 类 Bento Grid 自适应列，每张卡片包含:
-     * - 人格名称 + 类型标签
-     * - 来源渠道 + 简要描述预览
-     * - 最后活跃时间
-     * - 默认对话人格标记（⭐）
-     * - hover 时高亮
-     */
+ /**
+ * 构建人格卡片网格列表页。
+ *
+ * 布局: 类 Bento Grid 自适应列，每张卡片包含:
+ * - 人格名称 + 类型标签
+ * - 来源渠道 + 简要描述预览
+ * - 最后活跃时间
+ * - 默认对话人格标记（⭐）
+ * - hover 时高亮
+ */
     function _buildListPage() {
         var wrapper = document.createElement('div');
         wrapper.className = 'persona-list-page';
 
-        // ---- 工具栏 ----
+ // ---- 工具栏 ----
         var toolbar = document.createElement('div');
         toolbar.className = 'persona-toolbar';
         toolbar.innerHTML =
@@ -188,7 +188,7 @@ var RamariaPersonaView = (function () {
             '</div>';
         wrapper.appendChild(toolbar);
 
-        // ---- 卡片网格 ----
+ // ---- 卡片网格 ----
         var grid = document.createElement('div');
         grid.className = 'persona-grid';
 
@@ -204,15 +204,15 @@ var RamariaPersonaView = (function () {
         return wrapper;
     }
 
-    /**
-     * 构建单张人格卡片。
-     *
-     * 参数:
-     * - `p`: PersonaFullView 对象
-     * - `defaultUid`: 当前默认对话人格 UID
-     *
-     * 返回: DOM 元素
-     */
+ /**
+ * 构建单张人格卡片。
+ *
+ * 参数:
+ * - `p`: PersonaFullView 对象
+ * - `defaultUid`: 当前默认对话人格 UID
+ *
+ * 返回: DOM 元素
+ */
     function _buildPersonaCard(p, defaultUid) {
         var card = document.createElement('div');
         card.className = 'persona-card';
@@ -220,13 +220,13 @@ var RamariaPersonaView = (function () {
         card.setAttribute('tabindex', '0');
         card.setAttribute('aria-label', '查看人格 ' + p.name);
 
-        // 是否为默认人格
+ // 是否为默认人格
         var isDefault = defaultUid && defaultUid === p.uid;
 
-        // 类型标签样式
+ // 类型标签样式
         var kindLabel = _kindLabel(p.kind);
 
-        // 描述预览（截断至 80 字）
+ // 描述预览（截断至 80 字）
         var descPreview = '';
         if (p.description && p.description.trim()) {
             descPreview = p.description.length > 80
@@ -236,10 +236,10 @@ var RamariaPersonaView = (function () {
             descPreview = '<span class="persona-card-desc-empty">暂无描述</span>';
         }
 
-        // 格式化时间
+ // 格式化时间
         var updatedStr = _formatTime(p.updated_at);
 
-        // 构建 HTML
+ // 构建 HTML
         card.innerHTML =
             '<div class="persona-card-header">' +
                 '<div class="persona-card-icon" aria-hidden="true">' + _personaIcon(p.kind) + '</div>' +
@@ -261,12 +261,12 @@ var RamariaPersonaView = (function () {
                 '<span class="persona-card-time">' + updatedStr + '</span>' +
             '</div>';
 
-        // 点击进入详情
+ // 点击进入详情
         card.addEventListener('click', function () {
             _openDetail(p);
         });
 
-        // 键盘无障碍：Enter/Space 触发
+ // 键盘无障碍：Enter/Space 触发
         card.addEventListener('keydown', function (e) {
             if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault();
@@ -277,21 +277,21 @@ var RamariaPersonaView = (function () {
         return card;
     }
 
-    // =========================================================
-    // 页面构建：详情页
-    // =========================================================
+ // =========================================================
+ // 页面构建：详情页
+ // =========================================================
 
-    /**
-     * 打开人格详情页。
-     *
-     * 参数:
-     * - `p`: PersonaFullView 对象
-     */
+ /**
+ * 打开人格详情页。
+ *
+ * 参数:
+ * - `p`: PersonaFullView 对象
+ */
     function _openDetail(p) {
         _page = 'detail';
         _detailUid = p.uid;
         RamariaRouter.setContentTitle(p.name);
-        // 在内容头部注入返回按钮
+ // 在内容头部注入返回按钮
         RamariaRouter.setContentActions(
             '<button class="btn btn-ghost btn-sm" id="persona-back-btn">← 返回列表</button>'
         );
@@ -302,7 +302,7 @@ var RamariaPersonaView = (function () {
         container.innerHTML = '';
         container.appendChild(_buildDetailPage(p));
 
-        // 绑定返回按钮事件
+ // 绑定返回按钮事件
         setTimeout(function () {
             var backBtn = document.getElementById('persona-back-btn');
             if (backBtn) {
@@ -311,9 +311,9 @@ var RamariaPersonaView = (function () {
         }, 0);
     }
 
-    /**
-     * 返回列表页。
-     */
+ /**
+ * 返回列表页。
+ */
     function _backToList() {
         RamariaRouter.setContentTitle('人格管理');
         RamariaRouter.setContentActions(''); // 清除头部返回按钮
@@ -332,15 +332,15 @@ var RamariaPersonaView = (function () {
         }
     }
 
-    /**
-     * 构建人格详情页。
-     *
-     * 包含区域:
-     * - 返回按钮 + 标题
-     * - 基本信息编辑表单（名称 / 头像 / 描述）
-     * - 操作按钮区（保存 / 取消 / 设为默认 / 重载性格）
-     * - 元数据区（uid / kind / source / ref_id / 时间）
-     */
+ /**
+ * 构建人格详情页。
+ *
+ * 包含区域:
+ * - 返回按钮 + 标题
+ * - 基本信息编辑表单（名称 / 头像 / 描述）
+ * - 操作按钮区（保存 / 取消 / 设为默认 / 重载性格）
+ * - 元数据区（uid / kind / source / ref_id / 时间）
+ */
     function _buildDetailPage(p) {
         var defaultUid = RamariaStore.get('defaultPersonaUid');
         var isDefault = defaultUid && defaultUid === p.uid;
@@ -348,7 +348,7 @@ var RamariaPersonaView = (function () {
         var wrapper = document.createElement('div');
         wrapper.className = 'persona-detail-page';
 
-        // ---- 表单 ----
+ // ---- 表单 ----
         var form = document.createElement('form');
         form.className = 'persona-detail-form';
         form.addEventListener('submit', function (e) {
@@ -356,26 +356,26 @@ var RamariaPersonaView = (function () {
             _handleSave(p.uid);
         });
 
-        // 名称字段
+ // 名称字段
         form.appendChild(_buildField('名称', 'persona-name', 'text', p.name, '必填，人格显示名称', true));
 
-        // 头像字段
+ // 头像字段
         form.appendChild(_buildField('头像', 'persona-avatar', 'text', p.avatar || '', 'URL 或本地路径（可选）'));
 
-        // 描述字段
+ // 描述字段
         form.appendChild(_buildField('描述', 'persona-desc', 'textarea', p.description || '', '人格简要介绍（可选，最长 500 字）'));
 
-        // ---- 操作按钮 ----
+ // ---- 操作按钮 ----
         var actions = document.createElement('div');
         actions.className = 'persona-detail-actions';
 
-        // 保存按钮
+ // 保存按钮
         var saveBtn = document.createElement('button');
         saveBtn.type = 'submit';
         saveBtn.className = 'btn btn-primary';
         saveBtn.textContent = '保存修改';
 
-        // 取消/返回按钮
+ // 取消/返回按钮
         var cancelBtn = document.createElement('button');
         cancelBtn.type = 'button';
         cancelBtn.className = 'btn btn-secondary';
@@ -385,7 +385,7 @@ var RamariaPersonaView = (function () {
         actions.appendChild(saveBtn);
         actions.appendChild(cancelBtn);
 
-        // 设为默认 / 重载
+ // 设为默认 / 重载
         var extras = document.createElement('div');
         extras.className = 'persona-detail-extras';
 
@@ -410,7 +410,7 @@ var RamariaPersonaView = (function () {
         });
         extras.appendChild(refreshBtn);
 
-        // ---- 元数据 ----
+ // ---- 元数据 ----
         var meta = document.createElement('div');
         meta.className = 'persona-detail-meta';
         meta.innerHTML =
@@ -431,17 +431,17 @@ var RamariaPersonaView = (function () {
         return wrapper;
     }
 
-    /**
-     * 构建表单字段。
-     *
-     * 参数:
-     * - `label`: 字段标签
-     * - `id`: 元素 ID
-     * - `type`: 'text' | 'textarea'
-     * - `value`: 当前值
-     * - `placeholder`: 占位提示
-     * - `required`: 是否必填
-     */
+ /**
+ * 构建表单字段。
+ *
+ * 参数:
+ * - `label`: 字段标签
+ * - `id`: 元素 ID
+ * - `type`: 'text' | 'textarea'
+ * - `value`: 当前值
+ * - `placeholder`: 占位提示
+ * - `required`: 是否必填
+ */
     function _buildField(label, id, type, value, placeholder, required) {
         var group = document.createElement('div');
         group.className = 'persona-field';
@@ -477,7 +477,7 @@ var RamariaPersonaView = (function () {
 
         group.appendChild(input);
 
-        // 描述字数计数器
+ // 描述字数计数器
         if (type === 'textarea') {
             var counter = document.createElement('span');
             counter.className = 'persona-field-counter';
@@ -492,21 +492,21 @@ var RamariaPersonaView = (function () {
         return group;
     }
 
-    // =========================================================
-    // 操作处理
-    // =========================================================
+ // =========================================================
+ // 操作处理
+ // =========================================================
 
-    /**
-     * 保存人格信息。
-     *
-     * 参数:
-     * - `uid`: 人格 UID
-     *
-     * 说明:
-     * - 收集表单数据 → 调用 API → 刷新缓存 → 局部更新 DOM
-     * - 保存按钮进入 loading 态防重复提交
-     * - 失败时显示错误提示
-     */
+ /**
+ * 保存人格信息。
+ *
+ * 参数:
+ * - `uid`: 人格 UID
+ *
+ * 说明:
+ * - 收集表单数据 → 调用 API → 刷新缓存 → 局部更新 DOM
+ * - 保存按钮进入 loading 态防重复提交
+ * - 失败时显示错误提示
+ */
     async function _handleSave(uid) {
         var nameInput = document.getElementById('persona-name');
         var avatarInput = document.getElementById('persona-avatar');
@@ -519,19 +519,19 @@ var RamariaPersonaView = (function () {
             return;
         }
 
-        // 构建更新请求
+ // 构建更新请求
         var request = {};
         if (name) request.name = name;
         var avatarVal = avatarInput ? avatarInput.value.trim() : '';
         if (avatarVal) {
             request.avatar = avatarVal;
         }
-        // description: 传空字符串表示清空
+ // description: 传空字符串表示清空
         if (descInput !== null) {
             request.description = descInput.value;
         }
 
-        // loading 态
+ // loading 态
         var saveBtn = document.querySelector('.persona-detail-actions .btn-primary');
         if (saveBtn) {
             saveBtn.disabled = true;
@@ -541,7 +541,7 @@ var RamariaPersonaView = (function () {
         try {
             var updated = await RamariaApi.persona.updateInfo(uid, request);
 
-            // 刷新缓存
+ // 刷新缓存
             for (var i = 0; i < _personasFull.length; i++) {
                 if (_personasFull[i].uid === uid) {
                     _personasFull[i] = updated;
@@ -549,7 +549,7 @@ var RamariaPersonaView = (function () {
                 }
             }
 
-            // 同步 Store 中的 personas
+ // 同步 Store 中的 personas
             try {
                 var storePersonas = await RamariaApi.memory.getPersonas();
                 RamariaStore.set('personas', storePersonas, true);
@@ -557,7 +557,7 @@ var RamariaPersonaView = (function () {
 
             _showToast('修改已保存', 'success');
 
-            // 刷新详情页展示
+ // 刷新详情页展示
             var container = document.getElementById('view-persona');
             if (container && _page === 'detail' && _detailUid === uid) {
                 container.innerHTML = '';
@@ -574,18 +574,18 @@ var RamariaPersonaView = (function () {
         }
     }
 
-    /**
-     * 设为默认对话人格。
-     *
-     * 参数:
-     * - `uid`: 目标人格 UID
-     * - `btn`: 按钮元素（用于更新 UI 状态）
-     *
-     * 说明:
-     * - 将 `default_persona_uid` 写入 settings 表
-     * - 更新 Store.defaultPersonaUid
-     * - 列表页卡片上显示 ⭐ 标记
-     */
+ /**
+ * 设为默认对话人格。
+ *
+ * 参数:
+ * - `uid`: 目标人格 UID
+ * - `btn`: 按钮元素（用于更新 UI 状态）
+ *
+ * 说明:
+ * - 将 `default_persona_uid` 写入 settings 表
+ * - 更新 Store.defaultPersonaUid
+ * - 列表页卡片上显示 ⭐ 标记
+ */
     async function _handleSetDefault(uid, btn) {
         if (btn) {
             btn.disabled = true;
@@ -603,7 +603,7 @@ var RamariaPersonaView = (function () {
 
             _showToast('已设为默认对话人格', 'success');
 
-            // 返回列表时卡片会刷新标记
+ // 返回列表时卡片会刷新标记
         } catch (err) {
             console.error('[PersonaView] 设置默认人格失败:', err);
             _showToast('设置失败: ' + (err.message || '未知错误'), 'error');
@@ -614,13 +614,13 @@ var RamariaPersonaView = (function () {
         }
     }
 
-    /**
-     * 重载性格画像（触发 L2→L3 管线）。
-     *
-     * 参数:
-     * - `p`: PersonaFullView 对象
-     * - `btn`: 按钮元素
-     */
+ /**
+ * 重载性格画像（触发 L2→L3 管线）。
+ *
+ * 参数:
+ * - `p`: PersonaFullView 对象
+ * - `btn`: 按钮元素
+ */
     async function _handleRefresh(p, btn) {
         if (btn) {
             btn.disabled = true;
@@ -641,14 +641,14 @@ var RamariaPersonaView = (function () {
         }
     }
 
-    // =========================================================
-    // UI 辅助：Toast
-    // =========================================================
+ // =========================================================
+ // UI 辅助：Toast
+ // =========================================================
 
-    /**
-     * 显示 Toast 通知。
-     * 兼容 RamariaToast（如果已加载），否则 fallback 到 console。
-     */
+ /**
+ * 显示 Toast 通知。
+ * 兼容 RamariaToast（如果已加载），否则 fallback 到 console。
+ */
     function _showToast(message, type) {
         if (window.RamariaToast && typeof RamariaToast.show === 'function') {
             RamariaToast.show(message, type || 'info');
@@ -657,13 +657,13 @@ var RamariaPersonaView = (function () {
         }
     }
 
-    // =========================================================
-    // 状态页面构建
-    // =========================================================
+ // =========================================================
+ // 状态页面构建
+ // =========================================================
 
-    /**
-     * 构建加载态骨架屏（CSP-safe: 零内联 style）。
-     */
+ /**
+ * 构建加载态骨架屏（CSP-safe: 零内联 style）。
+ */
     function _buildSkeleton() {
         var wrapper = document.createElement('div');
         wrapper.className = 'persona-list-page';
@@ -671,13 +671,13 @@ var RamariaPersonaView = (function () {
         var grid = document.createElement('div');
         grid.className = 'persona-grid';
 
-        // 生成 4 个骨架卡片占位
+ // 生成 4 个骨架卡片占位
         for (var i = 0; i < 4; i++) {
             var card = document.createElement('div');
             card.className = 'persona-card persona-card--skeleton';
             card.setAttribute('aria-hidden', 'true');
 
-            // 使用 CSS 宽度工具类替代内联 style（w-60 / w-40 / w-90 / w-80 / w-30）
+ // 使用 CSS 宽度工具类替代内联 style（w-60 / w-40 / w-90 / w-80 / w-30）
             var lines = [
                 { cls: 'skeleton-line skeleton-line--lg w-60', mt: '' },
                 { cls: 'skeleton-line w-40', mt: 'mt-2' },
@@ -698,9 +698,9 @@ var RamariaPersonaView = (function () {
         return wrapper.innerHTML; // 返回 HTML 字符串用于 innerHTML
     }
 
-    /**
-     * 构建空状态。
-     */
+ /**
+ * 构建空状态。
+ */
     function _buildEmptyState() {
         var div = document.createElement('div');
         div.className = 'persona-empty';
@@ -711,9 +711,9 @@ var RamariaPersonaView = (function () {
         return div;
     }
 
-    /**
-     * 构建错误状态。
-     */
+ /**
+ * 构建错误状态。
+ */
     function _buildErrorState(message) {
         var div = document.createElement('div');
         div.className = 'persona-error';
@@ -728,13 +728,13 @@ var RamariaPersonaView = (function () {
         return div;
     }
 
-    // =========================================================
-    // 格式化辅助
-    // =========================================================
+ // =========================================================
+ // 格式化辅助
+ // =========================================================
 
-    /**
-     * 格式化 Unix 毫秒时间为可读字符串。
-     */
+ /**
+ * 格式化 Unix 毫秒时间为可读字符串。
+ */
     function _formatTime(ms) {
         if (!ms) return '—';
         var d = new Date(ms);
@@ -746,9 +746,9 @@ var RamariaPersonaView = (function () {
         return y + '-' + M + '-' + day + ' ' + h + ':' + min;
     }
 
-    /**
-     * 人格类型中文标签。
-     */
+ /**
+ * 人格类型中文标签。
+ */
     function _kindLabel(kind) {
         var map = {
             'user': '用户',
@@ -761,9 +761,9 @@ var RamariaPersonaView = (function () {
         return map[kind] || kind;
     }
 
-    /**
-     * 人格类型对应图标。
-     */
+ /**
+ * 人格类型对应图标。
+ */
     function _personaIcon(kind) {
         var map = {
             'user': '👤',
@@ -776,9 +776,9 @@ var RamariaPersonaView = (function () {
         return map[kind] || '👤';
     }
 
-    /**
-     * 简单 HTML 转义（防 XSS）。
-     */
+ /**
+ * 简单 HTML 转义（防 XSS）。
+ */
     function _escapeHtml(str) {
         if (!str) return '';
         return str
@@ -789,14 +789,14 @@ var RamariaPersonaView = (function () {
             .replace(/'/g, '&#39;');
     }
 
-    // =========================================================
-    // 公开 API
-    // =========================================================
+ // =========================================================
+ // 公开 API
+ // =========================================================
 
     return {
         init: init,
         destroy: destroy,
-        /** 暴露 _loadAndRender 供外部强制刷新 */
+ /** 暴露 _loadAndRender 供外部强制刷新 */
         reload: _loadAndRender,
     };
 })();
@@ -816,7 +816,7 @@ Object.defineProperty(window, 'RamariaPersonaView', {
     if (window.RamariaRouter) {
         RamariaPersonaView.init();
     } else {
-        // 轮询等待 RamariaRouter 就绪
+ // 轮询等待 RamariaRouter 就绪
         var attempts = 0;
         var maxAttempts = 50;
         var interval = setInterval(function () {

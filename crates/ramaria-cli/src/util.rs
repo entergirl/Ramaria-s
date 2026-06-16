@@ -46,11 +46,11 @@ pub fn format_timestamp(ms: i64) -> Option<String> {
 /// - `max_chars`: 最大字符数。
 ///
 /// 返回:
-/// - 若 `s.chars().count() <= max_chars`，返回原字符串的 clone。
+/// - 若 `s.chars.count <= max_chars`，返回原字符串的 clone。
 /// - 否则截取前 `max_chars - 3` 字符，追加 `"..."`。
 ///
 /// 说明:
-/// - 使用 `.chars()` 迭代器保证不截断多字节 UTF-8 字符中间。
+/// - 使用 `.chars` 迭代器保证不截断多字节 UTF-8 字符中间。
 pub fn truncate(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
         s.to_string()

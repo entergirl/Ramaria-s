@@ -54,7 +54,7 @@ pub type SendMessageStream = Pin<Box<dyn Stream<Item = RamariaResult<StreamEvent
 /// ```ignore
 /// let mut app = App::new(storage, llm, None, config, keychain)?;
 /// app.run_setup(&backend_config).await?;
-/// app.start_background_tasks();
+/// app.start_background_tasks;
 /// let stream = app.send_message("你好", None, None).await?;
 /// ```
 pub struct App {
@@ -93,10 +93,10 @@ impl App {
     /// 返回:
     /// - 初始状态为 `NeedsSetup` 的 App 实例。
     /// - 检索器为空，需调用 `rebuild_retriever` 填充。
-    /// - 后台任务需调用 `start_background_tasks()` 启动。
+    /// - 后台任务需调用 `start_background_tasks` 启动。
     ///
     /// 注意:
-    /// - 构造时不启动后台线程，由调用方在完成 setup 后调用 `start_background_tasks()`。
+    /// - 构造时不启动后台线程，由调用方在完成 setup 后调用 `start_background_tasks`。
     pub fn new(
         storage: Arc<dyn StorageBackend>,
         llm: Arc<dyn LlmProvider>,
@@ -154,7 +154,7 @@ impl App {
     /// 启动后台任务（空闲检测 + L2/L3 定时检查）。
     ///
     /// 调用时机:
-    /// - 在 `run_setup()` 完成后调用。
+    /// - 在 `run_setup` 完成后调用。
     /// - 只能调用一次（重复调用会被忽略）。
     ///
     /// 说明:
@@ -201,11 +201,11 @@ impl App {
     // 状态管理
     // =========================================================
     //
-    // 已提取至 `app_state.rs`（Phase 8 文件拆分）。
+    // 已提取至 `app_state.rs`。
     // 对外 API 不变，通过 `impl App` 块关联。
 
     // =========================================================
-    // Session 生命周期（v1.1 新增）
+    // Session 生命周期
     // =========================================================
 
     /// 获取当前活跃 session ID。
@@ -217,7 +217,7 @@ impl App {
 
     /// 手动保存并关闭当前活跃 session。
     ///
-    /// 流程（对齐 Python `force_close_current_session()`）:
+    /// 流程（对齐 Python `force_close_current_session`）:
     /// 1. 关闭 session（设置 ended_at）。
     /// 2. 生成 L1 摘要（传入当前对话人格，确保记忆页面可查询）。
     /// 3. 检查 L2 触发条件（路径 A：即时）。
@@ -227,7 +227,7 @@ impl App {
     /// - `persona_uid`: 当前对话人格的 UID，用于 L1 归属。
     ///
     /// 返回:
-    /// - `Ok(())`: 成功（无活跃 session 时也视为成功）。
+    /// - `Ok()`: 成功（无活跃 session 时也视为成功）。
     pub async fn save_and_close_session(&self, persona_uid: Option<&str>) -> RamariaResult<()> {
         let llm = self.llm.lock().unwrap_or_else(|e| e.into_inner()).clone();
         self.lifecycle
@@ -287,10 +287,10 @@ impl App {
 
         tracing::info!("trigger_l2_check: 开始遍历 persona...");
 
-        // Phase 1: L1 → L2（仅检查未吸收 L1）
+        // L1 → L2（仅检查未吸收 L1）
         self.lifecycle.check_l2_trigger(storage, llm_ref).await;
 
-        // Phase 2: L2 → L3（独立检查未吸收事件，即使 L1 已全部吸收）
+        // L2 → L3（独立检查未吸收事件，即使 L1 已全部吸收）
         let personas = match storage.list_personas().await {
             Ok(p) => p,
             Err(e) => {
@@ -323,7 +323,7 @@ impl App {
 
     /// 优雅关闭应用：关闭活跃 session 并停止后台线程。
     ///
-    /// 对齐 Python `SessionManager.stop()`。
+    /// 对齐 Python `SessionManager.stop`。
     ///
     /// 说明:
     /// - 在 Drop 中自动调用，也可显式调用。
@@ -414,14 +414,14 @@ impl App {
     // 检索器管理
     // =========================================================
     //
-    // `rebuild_retriever` 方法已提取至 `app_retriever.rs`（Phase 8 文件拆分）。
+    // `rebuild_retriever` 方法已提取至 `app_retriever.rs`。
     // 对外 API 不变，内部通过 `impl App` 块关联。
 
     // =========================================================
     // 核心对话方法：send_message
     // =========================================================
     //
-    // 已提取至 `app_chat.rs`（Phase 8 文件拆分）。
+    // 已提取至 `app_chat.rs`。
     // 对外 API 不变，通过 `impl App` 块关联。
     //
     // 同时提取的自由函数：
@@ -439,7 +439,7 @@ impl Drop for App {
     ///
     /// 注意:
     /// - Drop 是同步方法，不能调用 async 代码。
-    /// - 完整的优雅关闭应通过 `shutdown()` 方法执行（关闭活跃 session + 等待线程退出）。
+    /// - 完整的优雅关闭应通过 `shutdown` 方法执行（关闭活跃 session + 等待线程退出）。
     /// - 此 Drop 实现仅设置停止标志，让后台线程自行退出。
     fn drop(&mut self) {
         // 设置停止标志

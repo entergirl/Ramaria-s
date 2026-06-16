@@ -113,7 +113,7 @@ mod tests {
         assert!(!fixtures.fixtures.is_empty(), "对话 fixtures 不应为空");
         assert_eq!(fixtures.fixtures.len(), 7);
 
-        // 验证第一条 fixture
+ // 验证第一条 fixture
         let f = &fixtures.fixtures[0];
         assert_eq!(f.id, "conv-001");
         assert!(f.messages.len() >= 6);
@@ -126,7 +126,7 @@ mod tests {
         assert!(!fixtures.events.is_empty(), "记忆事件 fixtures 不应为空");
         assert_eq!(fixtures.events.len(), 10);
 
-        // 验证第一条事件
+ // 验证第一条事件
         let ev = &fixtures.events[0];
         assert_eq!(ev.id, 1);
         assert_eq!(ev.persona_uid, "user-0001");

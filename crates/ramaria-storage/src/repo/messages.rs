@@ -109,7 +109,7 @@ pub async fn is_session_active(pool: &SqlitePool, session_id: Uuid) -> RamariaRe
 ///
 /// 职责:
 /// - 供空闲检测线程判断 session 是否超过空闲阈值。
-/// - 对齐 Python `database.get_last_message_time()`。
+/// - 对齐 Python `database.get_last_message_time`。
 ///
 /// 返回:
 /// - `Ok(Some(ms))`: 最后消息的 Unix 毫秒时间戳。
@@ -204,9 +204,9 @@ pub async fn list_by_persona(pool: &SqlitePool, persona_uid: &str) -> RamariaRes
 /// 保存导入消息（跳过 session 活跃状态检查）。
 ///
 /// 职责:
-/// - 与 `save()` 不同，此函数不检查目标 session 是否已关闭。
+/// - 与 `save` 不同，此函数不检查目标 session 是否已关闭。
 /// - 历史导入的 session 在创建时即已关闭（`ended_at` 不为 NULL），
-///   而 `save()` 会因只读约束拒绝写入。导入专用函数绕过此检查。
+///   而 `save` 会因只读约束拒绝写入。导入专用函数绕过此检查。
 /// - 供 ramaria-importer 在快速/深度导入模式中使用。
 ///
 /// 参数:
@@ -257,13 +257,13 @@ pub async fn list_all_fingerprints(pool: &SqlitePool) -> RamariaResult<Vec<Strin
 /// 批量保存导入消息，包裹在显式 SQLite 事务中。
 ///
 /// 职责:
-/// - 替代循环调用 `save_import()` 的模式，将多条 INSERT 包裹在单个事务中。
+/// - 替代循环调用 `save_import` 的模式，将多条 INSERT 包裹在单个事务中。
 /// - 减少 SQLite 的隐式事务→fsync→提交开销，显著提升导入性能。
 ///
 /// 事务行为:
-/// - 使用 `pool.begin()` 创建显式事务。
+/// - 使用 `pool.begin` 创建显式事务。
 /// - 若任一条写入失败，事务自动回滚（通过 `?` 运算符传播错误后 Drop 触发）。
-/// - 所有消息成功写入后，调用 `txn.commit()` 提交。
+/// - 所有消息成功写入后，调用 `txn.commit` 提交。
 /// - 含 `created_at` 时间戳顺序校验——消息必须按时间升序排列（调用方负责排序）。
 ///
 /// 参数:

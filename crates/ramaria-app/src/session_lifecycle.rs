@@ -9,10 +9,10 @@
 //! - 级联触发：L1 写入后 → 检查 L2 条件（路径 A）；L2 写入后 → 检查 L3 条件
 //!
 //! 与 Python 对齐:
-//! - `_close_and_summarize()` → `close_and_summarize_session()`
-//! - Thread A `_idle_checker_loop()` → `run_idle_checker()`
-//! - Thread B → `run_l2_l3_scheduler()`
-//! - `force_close_current_session()` → `save_and_close_session()`
+//! - `_close_and_summarize` → `close_and_summarize_session`
+//! - Thread A `_idle_checker_loop` → `run_idle_checker`
+//! - Thread B → `run_l2_l3_scheduler`
+//! - `force_close_current_session` → `save_and_close_session`
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -42,8 +42,8 @@ use uuid::Uuid;
 ///
 /// 对齐 Python:
 /// - `SessionManager.active_session_id` + `threading.Lock` → `active_session_id: Mutex<Option<Uuid>>`
-/// - `SessionManager._idle_checker_loop()` → `run_idle_checker()`
-/// - `SessionManager._l2_checker_loop()` → `run_l2_l3_scheduler()`
+/// - `SessionManager._idle_checker_loop` → `run_idle_checker`
+/// - `SessionManager._l2_checker_loop` → `run_l2_l3_scheduler`
 pub struct SessionLifecycle {
     /// 当前活跃 session ID（同一时刻只有一个活跃 session）
     pub(crate) active_session_id: Mutex<Option<Uuid>>,
@@ -137,9 +137,9 @@ impl SessionLifecycle {
 
     /// 手动保存并关闭当前活跃 session。
     ///
-    /// 完整流程（对齐 Python `force_close_current_session() → _close_and_summarize()`）:
+    /// 完整流程（对齐 Python `force_close_current_session → _close_and_summarize`）:
     /// 1. 获取当前活跃 session ID
-    /// 2. 调用 storage.close_session() 设置 ended_at
+    /// 2. 调用 storage.close_session 设置 ended_at
     /// 3. 生成 L1 摘要（通过 L1Summarizer，传入当前对话人格）
     /// 4. 检查 L2 触发条件（路径 A：未吸收 L1 ≥ 5 条）
     /// 5. 清除活跃 session ID
@@ -150,7 +150,7 @@ impl SessionLifecycle {
     /// - `persona_uid`: 当前对话人格的 UID（用于 L1 摘要归属）。
     ///
     /// 返回:
-    /// - `Ok(())`: 关闭成功（即使无活跃 session 也视为成功）。
+    /// - `Ok()`: 关闭成功（即使无活跃 session 也视为成功）。
     /// - `Err`: 存储或 LLM 调用失败。
     pub async fn save_and_close_session(
         &self,
@@ -187,7 +187,7 @@ impl SessionLifecycle {
                 );
 
                 // Step 3: 检查 L2 触发条件（路径 A：即时触发）
-                // 对齐 Python summarizer 末尾的 `merger.check_and_merge()`
+                // 对齐 Python summarizer 末尾的 `merger.check_and_merge`
                 self.check_l2_trigger(storage, llm).await;
             }
             Err(e) => {
@@ -337,7 +337,7 @@ impl SessionLifecycle {
         persona_uid: Option<&str>,
     ) -> RamariaResult<ramaria_core::types::MemoryL1> {
         let mut summarizer_config = L1SummarizerConfig::default();
-        // v1.1: 设置 persona_uid，确保 L1 摘要可被记忆页面按人格过滤查询到
+        // 设置 persona_uid，确保 L1 摘要可被记忆页面按人格过滤查询到
         if let Some(uid) = persona_uid {
             summarizer_config.persona_uid = Some(uid.to_string());
         }
@@ -373,7 +373,7 @@ impl SessionLifecycle {
 
     /// 检查 L2 事件提取触发条件（路径 A：即时触发）。
     ///
-    /// 对齐 Python `merger.check_and_merge()` 的计数触发路径。
+    /// 对齐 Python `merger.check_and_merge` 的计数触发路径。
     /// 遍历所有 persona，检查未吸收 L1 是否 ≥ 5 条。
     pub(crate) async fn check_l2_trigger(
         &self,
@@ -447,7 +447,7 @@ impl SessionLifecycle {
 
     /// 执行 L2 事件提取（通过 JobManager 包裹，带重试和可观测性）。
     ///
-    /// 对齐 Python `merger.check_and_merge()` 的 LLM 提取逻辑。
+    /// 对齐 Python `merger.check_and_merge` 的 LLM 提取逻辑。
     ///
     /// 重试策略:
     /// - LLM 调用失败 → 可重试（JobResult::Retryable），最多 3 次，指数退避。
@@ -520,7 +520,7 @@ impl SessionLifecycle {
 
     /// 检查 L3 性格推断触发条件。
     ///
-    /// 对齐 Python `profile_manager` + Phase A→B→C 管线。
+    /// 对齐 Python `profile_manager` + →B→C 管线。
     /// 触发条件：未吸收事件 ≥ 10 条 或 最早事件 > 30 天。
     pub(crate) async fn check_l3_trigger(
         &self,
@@ -575,20 +575,20 @@ impl SessionLifecycle {
         }
     }
 
-    /// 执行 L3 性格推断（Phase A 统计 → Phase B LLM 推断 → Phase C 增量更新）。
+    /// 执行 L3 性格推断（ 统计 → LLM 推断 → 增量更新）。
     ///
-    /// 对齐 Python `profile_manager.extract_profile()` + Rust inference 管线。
+    /// 对齐 Python `profile_manager.extract_profile` + Rust inference 管线。
     ///
     /// 可观测性:
     /// - 通过 JobManager 创建 `PersonalityInference` 任务记录，
     ///   记录开始/完成/failed 时间，便于运维排查"何时对谁做了推断"。
-    /// - Phase A 为纯数值计算（不调 LLM），确定性执行，因此不启用 JobManager 重试；
+    /// - 为纯数值计算（不调 LLM），确定性执行，因此不启用 JobManager 重试；
     ///   存储写入失败逐条 warn 记录。
     ///
     /// 说明:
-    /// - Phase A: 纯数值统计（预过滤 → 聚类 → 收缩 → 跨分类指标）
-    /// - Phase B: LLM 三步结构化推断（待 LLM 管线接通）
-    /// - Phase C: 漂移检测 + 置信度更新（待 LLM 管线接通）
+    /// - : 纯数值统计（预过滤 → 聚类 → 收缩 → 跨分类指标）
+    /// - : LLM 三步结构化推断（待 LLM 管线接通）
+    /// - : 漂移检测 + 置信度更新（待 LLM 管线接通）
     async fn run_l3_inference(
         &self,
         storage: &dyn StorageBackend,
@@ -636,7 +636,7 @@ impl SessionLifecycle {
             let _ = job_manager.mark_running(job_id).await;
         }
 
-        // ---- Phase A: 统计特征提取（纯数值，不调 LLM） ----
+        // ---- : 统计特征提取（纯数值，不调 LLM） ----
         // `run_phase_a_stats` 内部包含 A1 预过滤 + A2-A6 全流程
         use ramaria_memory::inference::{StatsConfig, run_phase_a_stats};
 
@@ -709,19 +709,19 @@ impl SessionLifecycle {
 
     /// 启动后台空闲检测线程（Thread A）。
     ///
-    /// 对齐 Python `SessionManager._idle_checker_loop()`。
+    /// 对齐 Python `SessionManager._idle_checker_loop`。
     ///
     /// 逻辑:
     /// - 每 `config.session.idle_check_interval_seconds`（默认 60s）轮询
     /// - 若活跃 session 的最后消息时间距今超过 `config.session.l1_idle_minutes`（默认 10min）
-    ///   → 自动调用 `save_and_close_session()`
+    ///   → 自动调用 `save_and_close_session`
     ///
     /// 参数:
     /// - `storage`: 存储后端。
     /// - `llm`: LLM provider。
     ///
     /// 返回:
-    /// - `tokio::task::JoinHandle<()>`，供 shutdown 时等待。
+    /// - `tokio::task::JoinHandle<>`，供 shutdown 时等待。
     pub fn spawn_idle_checker(
         self: &Arc<Self>,
         storage: Arc<dyn StorageBackend>,
@@ -817,13 +817,13 @@ impl SessionLifecycle {
 
     /// 启动后台 L2/L3 定时检查线程（Thread B）。
     ///
-    /// 对齐 Python `SessionManager._l2_checker_loop()`。
+    /// 对齐 Python `SessionManager._l2_checker_loop`。
     ///
     /// 逻辑:
     /// - 每 `config.session.l2_check_interval_seconds`（默认 86400s = 24h）轮询
     /// - 遍历所有 persona：
-    ///   - 最早未吸收 L1 > 7 天 → 触发 L2 事件提取
-    ///   - 最早未吸收事件 > 30 天 → 触发 L3 性格推断
+    /// - 最早未吸收 L1 > 7 天 → 触发 L2 事件提取
+    /// - 最早未吸收事件 > 30 天 → 触发 L3 性格推断
     ///
     /// 参数:
     /// - `storage`: 存储后端。
@@ -866,7 +866,7 @@ impl SessionLifecycle {
 
     /// 执行一次性 L2/L3 定时检查。
     ///
-    /// 对齐 Python `merger.check_and_merge()` 的时间触发路径（路径 B）。
+    /// 对齐 Python `merger.check_and_merge` 的时间触发路径（路径 B）。
     async fn run_scheduled_l2_l3_check(&self, storage: &dyn StorageBackend, llm: &dyn LlmProvider) {
         debug!("L2/L3 定时检查开始");
 
@@ -940,11 +940,11 @@ impl SessionLifecycle {
 
     /// 优雅关闭：关闭活跃 session 并通知所有后台线程退出。
     ///
-    /// 对齐 Python `SessionManager.stop()`。
+    /// 对齐 Python `SessionManager.stop`。
     ///
     /// 流程:
     /// 1. 设置 shutdown_flag
-    /// 2. 若有活跃 session，调用 save_and_close_session()（无超时——L1 摘要依赖 LLM 响应）
+    /// 2. 若有活跃 session，调用 save_and_close_session（无超时——L1 摘要依赖 LLM 响应）
     /// 3. 等待后台线程退出（各带 15s 独立超时）
     ///
     /// 超时策略:
@@ -1030,7 +1030,7 @@ async fn close_session_safe(storage: &dyn StorageBackend, session_id: Uuid) -> R
 /// 对齐 Python `database.get_last_message_time(session_id)`。
 ///
 /// 实现:
-/// - 使用 `StorageBackend::get_last_message_time()` — 高效 `SELECT MAX(created_at)` 聚合，
+/// - 使用 `StorageBackend::get_last_message_time` — 高效 `SELECT MAX(created_at)` 聚合，
 ///   不再全量加载消息列表。
 /// - 若 trait 实现未覆写（返回 None），回退到 `list_messages` 全量加载。
 async fn get_last_msg_time_from_db(
