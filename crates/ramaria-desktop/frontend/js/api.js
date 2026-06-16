@@ -636,12 +636,27 @@ var RamariaApi = (function () {
      * - 调用 GitHub Release API 查询最新版本标签。
      * - 与当前运行版本做 semver 比较。
      * - 网络异常时返回 currentVersion + error 字段，不抛出异常。
+     * - ⚠️ 此命令会消耗 GitHub API 配额（60次/小时），仅应在用户手动点击时调用。
      *
      * 返回:
      * - { currentVersion, latestVersion?, updateAvailable, releaseUrl?, releaseNotesPreview?, error? }
      */
     async function checkUpdate() {
         return await _invoke('check_update', {}, '检查更新');
+    }
+
+    /**
+     * 获取当前应用版本号（纯本地，无网络请求）。
+     *
+     * 说明:
+     * - 直接返回编译时嵌入的版本号。
+     * - 不消耗 GitHub API 配额。
+     *
+     * 返回:
+     * - 版本号字符串，如 "1.0.1"
+     */
+    async function getVersion() {
+        return await _invoke('get_version', {}, '获取版本号');
     }
 
     /**
@@ -721,6 +736,7 @@ var RamariaApi = (function () {
         },
         diagnostics: {
             checkUpdate: checkUpdate,
+            getVersion: getVersion,
             exportDiagnostics: exportDiagnostics,
         },
     }; 

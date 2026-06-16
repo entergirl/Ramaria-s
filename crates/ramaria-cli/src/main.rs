@@ -318,8 +318,16 @@ async fn init_app(db_path: PathBuf) -> anyhow::Result<(Arc<ramaria_app::App>, sq
         }
     };
 
-    // Step 5: 构造 App
-    let config = ramaria_core::config::RamariaConfig::default();
+    // Step 5: 构造 App（填充实际路径到配置中，供诊断导出等模块使用）
+    let data_dir = db_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let mut config = ramaria_core::config::RamariaConfig::default();
+    config.paths.data_dir = data_dir.to_string_lossy().to_string();
+    config.paths.log_dir = data_dir.join("logs").to_string_lossy().to_string();
+    config.paths.config_dir = data_dir.to_string_lossy().to_string();
+    config.paths.vector_index_dir = data_dir.join("vectors").to_string_lossy().to_string();
     let app = ramaria_app::App::new(storage, llm, None, config, keychain);
     let app = Arc::new(app);
 

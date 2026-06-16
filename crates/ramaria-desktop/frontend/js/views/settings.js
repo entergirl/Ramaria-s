@@ -632,6 +632,33 @@ var RamariaSettingsView = (function () {
     }
 
     // =========================================================
+    // 版本加载（页面进入时静默调用）
+    // =========================================================
+
+    /**
+     * 静默加载当前版本信息。
+     *
+     * 行为:
+     * - 调用 getVersion API（纯本地，无网络请求，不消耗 GitHub API 配额）。
+     * - 更新页面上的版本显示。
+     * - 不显示 toast，不改变按钮状态。
+     */
+    async function _loadVersion() {
+        try {
+            var version = await RamariaApi.diagnostics.getVersion();
+
+            var versionEl = $('settings-current-version');
+            if (versionEl) versionEl.textContent = 'v' + (version || '?');
+
+            // 同步更新"关于"区块的版本号
+            var aboutVersionEl = $('settings-about-version');
+            if (aboutVersionEl) aboutVersionEl.textContent = 'v' + (version || '?');
+        } catch (_) {
+            // 静默忽略加载失败
+        }
+    }
+
+    // =========================================================
     // 诊断与更新区块（v1.1 Phase 7 新增）
     // =========================================================
 
@@ -704,8 +731,13 @@ var RamariaSettingsView = (function () {
                     badgeEl.className = 'settings-row-value text-pink';
                 }
                 if (detailEl) detailEl.classList.remove('hidden');
-                if (msgEl) msgEl.textContent = result.error;
-                RamariaToast.show('warning', '检查更新失败', result.error);
+                if (msgEl) {
+                    // 多行错误消息转为带换行的 HTML（安全：后端错误消息不含用户输入）
+                    msgEl.innerHTML = result.error.replace(/\n/g, '<br>');
+                }
+                // Toast 只显示首行摘要
+                var firstLine = result.error.split('\n')[0];
+                RamariaToast.show('warning', '检查更新失败', firstLine);
             } else if (result.updateAvailable) {
                 // 新版本可用
                 if (badgeEl) {
@@ -741,8 +773,11 @@ var RamariaSettingsView = (function () {
                 badgeEl.className = 'settings-row-value text-pink';
             }
             if (detailEl) detailEl.classList.remove('hidden');
-            if (msgEl) msgEl.textContent = err.message || '未知错误';
-            RamariaToast.show('error', '检查更新失败', err.message || '');
+            if (msgEl) {
+                var errText = err.message || '未知错误';
+                msgEl.innerHTML = errText.replace(/\n/g, '<br>');
+            }
+            RamariaToast.show('error', '检查更新失败', (err.message || '未知错误').split('\n')[0]);
         } finally {
             if (checkBtn) {
                 checkBtn.disabled = false;
@@ -769,11 +804,22 @@ var RamariaSettingsView = (function () {
         try {
             var result = await RamariaApi.diagnostics.exportDiagnostics();
 
-            RamariaToast.show(
-                'success',
-                '诊断信息已导出',
-                (result.fileSizeDisplay || '') + ' — ' + (result.outputPath || '完成')
-            );
+            // 检查是否有收集警告
+            if (result.warnings && result.warnings.length > 0) {
+                // 有部分数据未能收集，显示警告
+                var warningText = result.warnings.join('\n');
+                RamariaToast.show(
+                    'warning',
+                    '诊断已导出（部分信息缺失）',
+                    (result.fileSizeDisplay || '') + ' — ' + (result.outputPath || '完成') + '\n\n' + warningText
+                );
+            } else {
+                RamariaToast.show(
+                    'success',
+                    '诊断信息已导出',
+                    (result.fileSizeDisplay || '') + ' — ' + (result.outputPath || '完成')
+                );
+            }
         } catch (err) {
             // 用户取消操作时静默忽略
             if (err.message && err.message.indexOf('取消') !== -1) {
@@ -830,6 +876,9 @@ var RamariaSettingsView = (function () {
         unreg = RamariaRouter.registerHook('settings', 'enter', async function () {
             console.log('[SettingsView] 进入视图');
             render();
+
+            // 加载版本信息（静默调用，不显示 toast）
+            _loadVersion();
 
             // 加载配置
             try {

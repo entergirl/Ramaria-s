@@ -236,6 +236,15 @@ fn collect_config(config: &RamariaConfig, status: &mut HashMap<String, String>) 
                 config_path.display()
             )
         }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // config.toml 不存在是预期行为：Ramaria 将配置存储在数据库中，不使用文件配置
+            status.insert(
+                "config".to_string(),
+                "skipped: 未使用配置文件（配置存储在数据库中）".to_string(),
+            );
+            tracing::debug!("配置文件不存在（预期：配置存储在数据库中），跳过收集");
+            String::from("# 配置文件不存在（Ramaria 将配置存储在数据库中，不使用 config.toml 文件）\n")
+        }
         Err(e) => {
             let msg = format!("# 无法读取配置文件 ({}): {}\n", config_path.display(), e);
             status.insert("config".to_string(), format!("error: {e}"));

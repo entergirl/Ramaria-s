@@ -14,6 +14,8 @@
  * - 消息气泡入场动画（fadeInUp）由 chat.css 的 .msg-bubble-wrapper 驱动
  * - 角色映射：user → 右对齐粉底 / assistant → 左对齐蓝底 / system → 居中灰底
  * - CSP-safe: 全部样式走 CSS 类，零内联 style（包括 innerHTML 中的 style 属性）
+ * - v1.1.1: 助手气泡左侧显示人格头像（首字母圆形），用户气泡右侧无头像
+ * - v1.1.1: persona_uid 为 null/空时按角色回退标签（user→"你"，assistant→"助手"）
  *
  * 用法:
  *   var bubble = RamariaMessageBubble.create({ id, role, content, persona_uid, created_at });
@@ -118,14 +120,16 @@ var RamariaMessageBubble = (function () {
 
         var role = msg.role;
 
-        // ── v1.1 修复: 角色标签优先使用 persona name ──
-        var personaName = _lookupPersonaName(msg.persona_uid);
+        // ── v1.1.1: 角色标签逻辑 ──
+        // assistant 消息带 persona_uid → 显示 persona 昵称（对话人，在左侧）
+        // assistant 消息无 persona_uid → 回退 "助手"
+        // user 消息 → 始终显示 "你"（用户自己，在右侧）
+        var personaName = '';
         var label;
-        if (personaName && msg.persona_uid && msg.persona_uid.indexOf('rama-0001') !== 0) {
-            // 导入的 persona 或非默认 AI —— 使用真实昵称
-            label = personaName;
+        if (role === 'assistant' && msg.persona_uid) {
+            personaName = _lookupPersonaName(msg.persona_uid);
+            label = personaName || '助手';
         } else {
-            // 回退到硬编码标签
             label = ROLE_LABELS[role] || ROLE_LABELS.system;
         }
 
@@ -138,6 +142,17 @@ var RamariaMessageBubble = (function () {
         wrapper.setAttribute('data-message-id', msg.id || '');
         wrapper.setAttribute('data-role', role);
 
+        // ── v1.1.1: 助手气泡左侧显示人格头像 ──
+        if (role === 'assistant' && personaName) {
+            var avatarEl = document.createElement('div');
+            avatarEl.className = 'msg-bubble-avatar';
+            avatarEl.setAttribute('aria-hidden', 'true');
+            avatarEl.textContent = personaName.charAt(0).toUpperCase();
+            // 稳定的头像背景色（由 persona_uid hash 决定）
+            avatarEl.style.backgroundColor = _avatarColor(msg.persona_uid || '');
+            wrapper.appendChild(avatarEl);
+        }
+
         // 元数据行（角色标签 + 人格 + 时间戳）
         if (role !== 'system') {
             var meta = document.createElement('div');
@@ -148,13 +163,11 @@ var RamariaMessageBubble = (function () {
             labelSpan.textContent = label;
             meta.appendChild(labelSpan);
 
-            if (msg.persona_uid) {
+            // v1.1.1: 仅 assistant 消息且 persona 非 rama-0001 时显示 @persona 标注
+            if (role === 'assistant' && msg.persona_uid && personaName && msg.persona_uid.indexOf('rama-0001') !== 0) {
                 var personaSpan = document.createElement('span');
                 personaSpan.className = 'msg-bubble-persona';
-                // 如果已解析出 persona name，使用 name 作为 title；否则显示 uid
-                var personaDisplay = personaName || msg.persona_uid;
-                personaSpan.title = '人格: ' + personaDisplay;
-                personaSpan.textContent = '@' + personaDisplay;
+                personaSpan.title = '人格: ' + personaName;
                 meta.appendChild(personaSpan);
             }
 
@@ -191,6 +204,19 @@ var RamariaMessageBubble = (function () {
         wrapper.appendChild(bubble);
 
         return wrapper;
+    }
+
+    /**
+     * 根据 uid 生成稳定的头像背景色。
+     */
+    function _avatarColor(uid) {
+        if (!uid) return '#9ca3af';
+        var hash = 0;
+        for (var i = 0; i < uid.length; i++) {
+            hash = uid.charCodeAt(i) + ((hash << 5) - hash);
+        }
+        var hue = Math.abs(hash) % 360;
+        return 'hsl(' + hue + ', 40%, 55%)';
     }
 
     /**

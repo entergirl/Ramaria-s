@@ -92,8 +92,19 @@ pub async fn run_setup(
         }
     }
 
-    // ---- 构建并保存后端配置（使用统一构造器，消除重复）----
-    let config = BackendConfig::new_with_defaults(llm_provider, base_url.clone(), model_id.clone());
+    // ---- 构建后端配置（保留已保存的嵌入模型路径）----
+    // 先读取当前配置中的 embedding_model_path，防止被 overwrite
+    let existing_embedding_path = state
+        .app
+        .storage()
+        .get_backend_config()
+        .await
+        .map_err(|e| format!("读取后端配置失败: {}", e))?
+        .and_then(|c| c.embedding_model_path);
+
+    let mut config =
+        BackendConfig::new_with_defaults(llm_provider, base_url.clone(), model_id.clone());
+    config.embedding_model_path = existing_embedding_path;
 
     state
         .app

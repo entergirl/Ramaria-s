@@ -40,7 +40,30 @@
 .chat-header-left {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--space-3);
+}
+
+/* v1.1.1: 页眉头像（圆形，首字母） */
+.chat-header-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-full);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  font-weight: 700;
+  color: #fff;
+  background: var(--blue-500);
+  flex-shrink: 0;
+  user-select: none;
+}
+
+/* v1.1.1: 页眉信息区（名称 + 状态点） */
+.chat-header-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .chat-header-persona-name {
@@ -91,6 +114,23 @@
 .msg-bubble-wrapper[data-role="user"]      { align-items: flex-end; }
 .msg-bubble-wrapper[data-role="assistant"] { align-items: flex-start; }
 .msg-bubble-wrapper[data-role="system"]    { align-items: center; }
+
+/* v1.1.1: 助手消息气泡左侧头像（圆形，首字母） */
+.msg-bubble-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-full);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  color: #fff;
+  background: var(--blue-500);
+  flex-shrink: 0;
+  margin-bottom: 2px;
+  user-select: none;
+}
 
 /* ── 消息气泡本体 ── */
 .msg-bubble {

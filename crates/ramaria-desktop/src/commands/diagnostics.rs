@@ -64,14 +64,21 @@ pub struct DiagnosticsExportView {
     pub file_size_bytes: u64,
     /// 人类可读的文件大小（如 "45.2 KB"）
     pub file_size_display: String,
+    /// 各收集步骤的状态（供前端展示警告）
+    pub collection_status: std::collections::HashMap<String, String>,
+    /// 人类可读的警告信息列表（空数组表示全部成功）
+    pub warnings: Vec<String>,
 }
 
 impl From<DiagnosticsReport> for DiagnosticsExportView {
     fn from(r: DiagnosticsReport) -> Self {
+        let warnings = generate_warnings(&r.collection_status);
         Self {
             output_path: r.output_path.display().to_string(),
             file_size_bytes: r.file_size_bytes,
             file_size_display: format_file_size(r.file_size_bytes),
+            collection_status: r.collection_status,
+            warnings,
         }
     }
 }
@@ -98,6 +105,19 @@ pub async fn check_update() -> Result<UpdateStatusView, String> {
     }
 
     Ok(UpdateStatusView::from(status))
+}
+
+/// 获取当前应用版本号（纯本地，无网络请求）。
+///
+/// 用途:
+/// - 设置页展示当前版本号，无需消耗 GitHub API 配额。
+/// - 与 `check_update` 不同，此命令不访问网络。
+///
+/// 返回:
+/// - 当前版本号字符串，如 "1.0.1"。
+#[tauri::command]
+pub fn get_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
 }
 
 /// 导出诊断信息为 .zip 文件。
@@ -216,4 +236,34 @@ fn format_file_size(bytes: u64) -> String {
     } else {
         format!("{:.1} MB", bytes as f64 / MB)
     }
+}
+
+/// 根据收集状态生成人类可读的警告信息。
+///
+/// 规则:
+/// - 只有 `ok` 和空字符串视为成功。
+/// - `skipped` 和 `error` 生成中文警告。
+/// - 全部成功时返回空数组。
+fn generate_warnings(status: &std::collections::HashMap<String, String>) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    for (key, value) in status {
+        if value.starts_with("skipped:") {
+            let reason = value.strip_prefix("skipped:").unwrap_or(value).trim();
+            warnings.push(match key.as_str() {
+                "logs" => format!("日志未收集: {reason}"),
+                "config" => format!("配置未收集: {reason}"),
+                _ => format!("{key} 未收集: {reason}"),
+            });
+        } else if value.starts_with("error:") {
+            let reason = value.strip_prefix("error:").unwrap_or(value).trim();
+            warnings.push(match key.as_str() {
+                "logs" => format!("日志收集失败: {reason}"),
+                "config" => format!("配置收集失败: {reason}"),
+                _ => format!("{key} 收集失败: {reason}"),
+            });
+        }
+    }
+
+    warnings
 }

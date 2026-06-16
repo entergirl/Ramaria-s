@@ -154,13 +154,63 @@ async fn fetch_latest_release(url: &str) -> Result<GitHubRelease, String> {
     let status = response.status();
 
     if !status.is_success() {
-        return match status.as_u16() {
-            // 403 多为 API 限流，也可能是访问被拒
+        // 检查 rate limit 头（先复制为 owned String，避免后续移动 response 时借用冲突）
+        let rate_remaining = response
+            .headers()
+            .get("x-ratelimit-remaining")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("?")
+            .to_string();
+        let rate_reset = response
+            .headers()
+            .get("x-ratelimit-reset")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("?")
+            .to_string();
+
+        // 读取响应体（最多 4KB）以获取具体错误信息
+        let status_code = status.as_u16();
+        let body_preview = read_body_preview(response).await;
+
+        // 检测是否是 HTML 响应（防火墙/代理拦截的典型特征）
+        let is_html = body_preview.trim_start().starts_with("<!DOCTYPE")
+            || body_preview.trim_start().starts_with("<html")
+            || body_preview.trim_start().starts_with("<HTML");
+
+        return match status_code {
+            403 if is_html => {
+                Err("无法访问 GitHub API（网络环境可能阻止了对 api.github.com 的请求）。\n\
+                     建议：检查代理/防火墙设置，或手动访问 https://github.com/entergirl/Ramaria-s/releases 查看更新"
+                    .to_string())
+            }
+            403 if rate_remaining == "0" => {
+                // 明确的限流信息
+                Err(format!(
+                    "GitHub API 请求频率已达上限（60次/小时）。\n\
+                     请在 {rate_reset} 之后重试，或配置 GitHub Token 以获得更高限额。"
+                ))
+            }
             403 => {
-                Err("GitHub API 访问受限（可能触发了限流，或网络环境无法访问 GitHub）".to_string())
+                Err("GitHub API 访问受限（HTTP 403）。\n\
+                     可能原因：IP 被限制、需要认证，或网络环境无法访问 GitHub API。\n\
+                     可尝试：使用代理、配置个人访问令牌，或手动访问 Release 页面。"
+                    .to_string())
             }
             404 => Err("未找到最新版本信息（仓库可能不存在或没有 Release）".to_string()),
-            code => Err(format!("GitHub API 返回错误状态码: {code}")),
+            code => {
+                if is_html {
+                    Err(format!(
+                        "GitHub API 返回 HTML 页面（HTTP {code}），\n\
+                         请求可能被代理/防火墙拦截。响应预览: {}",
+                        body_preview.chars().take(200).collect::<String>()
+                    ))
+                } else {
+                    Err(format!(
+                        "GitHub API 返回错误状态码: {code}\n响应: {}",
+                        body_preview.chars().take(200).collect::<String>()
+                    ))
+                }
+            }
         };
     }
 
@@ -169,9 +219,16 @@ async fn fetch_latest_release(url: &str) -> Result<GitHubRelease, String> {
         .headers()
         .get("content-type")
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
+        .unwrap_or("")
+        .to_string();
     if !content_type.contains("application/json") {
-        return Err(format!("GitHub API 返回非 JSON 内容类型: {content_type}"));
+        // 非 JSON 响应 — 读取 body 帮助诊断
+        let body_preview = read_body_preview(response).await;
+        return Err(format!(
+            "GitHub API 返回非 JSON 内容类型: {content_type}\n\
+             响应预览: {}",
+            body_preview.chars().take(200).collect::<String>()
+        ));
     }
 
     let release: GitHubRelease = response
@@ -180,6 +237,25 @@ async fn fetch_latest_release(url: &str) -> Result<GitHubRelease, String> {
         .map_err(|e| format!("解析 GitHub API 响应失败: {e}"))?;
 
     Ok(release)
+}
+
+/// 读取响应体预览（最多 4KB），用于错误诊断。
+///
+/// 说明:
+/// - 在非 200 状态码或非 JSON 响应时调用，帮助判断是限流、代理拦截还是其他问题。
+/// - 限制读取 4096 字节，防止恶意大响应撑爆内存。
+/// - 读取失败时返回空字符串，不阻塞错误报告流程。
+async fn read_body_preview(response: reqwest::Response) -> String {
+    match response.text().await {
+        Ok(body) => {
+            if body.len() > 4096 {
+                format!("{}... [截断，总长 {} 字节]", &body[..4096], body.len())
+            } else {
+                body
+            }
+        }
+        Err(_) => String::new(),
+    }
 }
 
 /// 简易 semver 版本比较。

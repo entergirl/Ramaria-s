@@ -1,0 +1,99 @@
+# Ramaria cargo-deny 配置
+# 
+# 策略：
+#   - 允许 MIT / Apache-2.0 / BSD / ISC / Unicode 等宽松许可证
+#   - 拒绝 GPL / AGPL / LGPL 等 copyleft 许可证（Ramaria 独立分发，不强制开源）
+#   - 安全公告：跳过未维护但无明显漏洞的 crate
+#   - crate 来源：仅允许 crates.io 注册表
+
+# ──────────────────────────────────────────
+# 安全公告 (advisories)
+# ──────────────────────────────────────────
+[advisories]
+# 忽略特定公告（按需添加，需注明原因）
+ignore = [
+    # 示例：若某 crate 存在已知但本项目不受影响的漏洞
+    # "RUSTSEC-2024-XXXX",
+]
+# 不认为未维护自身就是漏洞（很多小 crate 功能完整无需更新）
+unmaintained = "warn"
+# 不阻塞 yanked crate（如果当前版本无已知漏洞）
+yanked = "warn"
+# 漏洞严重度最低阈值（None = 全部报告）
+severity-threshold = "medium"
+
+# ──────────────────────────────────────────
+# 许可证检查 (licenses)
+# ──────────────────────────────────────────
+[licenses]
+# 允许的许可证列表
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "BSL-1.0",       # Boost Software License
+    "CC0-1.0",       # 公共领域
+    "OpenSSL",
+    "MPL-2.0",       # Mozilla Public License (弱 copyleft，文件级，可接受)
+]
+# 明确拒绝的许可证
+deny = [
+    "GPL-2.0",
+    "GPL-3.0",
+    "AGPL-3.0",
+    "LGPL-2.0",
+    "LGPL-3.0",
+]
+# 对 copyleft 许可证设为拒绝
+copyleft = "deny"
+# 未在 allow/deny 列表中的许可证：警告但不阻塞
+unknown = "warn"
+# 默认许可证（对无 LICENSE 文件的 crate 的假设）
+confidence-threshold = 0.8
+
+# 例外：特定 crate 的许可证覆盖
+[[licenses.exceptions]]
+name = "ring"           # ring 使用 ISC + OpenSSL 双许可，cargo-deny 可能误判
+allow = ["ISC", "OpenSSL"]
+
+# ──────────────────────────────────────────
+# 依赖来源 (sources)
+# ──────────────────────────────────────────
+[sources]
+# 仅允许来自 crates.io 的依赖
+unknown-registry = "deny"
+unknown-git = "deny"
+# 允许的 crate 来源
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# 允许的 git 源（本项目不使用 git 依赖）
+allow-git = []
+
+# ──────────────────────────────────────────
+# 依赖禁令 (bans)
+# ──────────────────────────────────────────
+[bans]
+# 禁止重复依赖（同一 crate 的多个版本）
+multiple-versions = "warn"
+# 通配符版本依赖（如 "*"）
+wildcards = "deny"
+# 高亮显示（仅日志输出，不拒绝）
+highlight = "all"
+# 允许特定 crate 有多个版本
+[[bans.skip]]
+name = "windows-sys"        # Windows API 绑定常有多个版本共存
+[[bans.skip]]
+name = "windows-targets"
+[[bans.skip]]
+name = "syn"                # proc-macro 生态常有多版本
+[[bans.skip]]
+name = "hashbrown"
+[[bans.skip]]
+name = "getrandom"
+[[bans.skip]]
+name = "libc"

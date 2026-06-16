@@ -229,6 +229,7 @@ impl App {
         let session_id = session.id;
         let user_msg = user_input.to_string();
         let input_request_id = request_id;
+        let persona_for_save = persona_uid.map(|s| s.to_string());
 
         let (tx, rx) = mpsc::unbounded::<RamariaResult<StreamEvent>>();
 
@@ -240,6 +241,7 @@ impl App {
                 session_id,
                 user_msg,
                 input_request_id,
+                persona_for_save,
             )
             .await;
         });
@@ -564,6 +566,7 @@ async fn stream_forward_task(
     session_id: Uuid,
     user_message: String,
     request_id: Uuid,
+    persona_uid: Option<String>,
 ) {
     use futures::StreamExt;
 
@@ -574,13 +577,14 @@ async fn stream_forward_task(
     let mut has_error = false;
     let now = now_ms();
 
-    // 1. 保存用户消息
+    // 1. 保存用户消息（用户发言不关联 persona——发言人是用户自己）
     let user_msg = Message::new(
         session_id,
         MessageRole::User,
         user_message,
         MessageSource::Local,
     );
+    // 用户消息不设 persona_uid（用户即自己），前端据此将气泡渲染在右侧
     if let Err(e) = storage.save_message(&user_msg).await {
         tracing::error!(%e, "保存用户消息失败");
         let _ = tx.unbounded_send(Err(e));
@@ -615,13 +619,15 @@ async fn stream_forward_task(
     }
 
     // 3. 保存 assistant 消息（仅在非错误时）
+    // 助手消息携带 persona_uid，用于前端在左侧气泡显示"谁在回复"
     if !has_error && !full_reply.is_empty() {
         let assistant_msg = Message::new(
             session_id,
             MessageRole::Assistant,
             full_reply.clone(),
             MessageSource::Online,
-        );
+        )
+        .with_persona_uid(persona_uid.clone());
         if let Err(e) = storage.save_message(&assistant_msg).await {
             tracing::error!(%e, "保存 assistant 消息失败");
         }

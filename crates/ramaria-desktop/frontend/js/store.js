@@ -66,6 +66,11 @@ var RamariaStore = (function () {
         viewingImportedSession: false,
         /// v1.1: 导入消息的导出者 persona 名称（聊天页页眉展示用）
         viewingImportedName: '',
+        /// v1.1.1: 人格→会话映射 { persona_uid: session_id }
+        /// 每个人格拥有独立对话栏，切换人格时自动切换对应会话。
+        personaSessions: {},
+        /// v1.1.1: 当前选中的人格 UID（用于消息归属和页眉显示）
+        currentPersonaUid: null,
     };
 
     // =========================================================
@@ -321,6 +326,8 @@ var RamariaStore = (function () {
             personas: [],
             defaultPersonaUid: null,
             degradedReason: null,
+            personaSessions: {},
+            currentPersonaUid: null,
         };
         _subscribers = {};
         console.log('[Store] 状态已重置');
@@ -329,6 +336,38 @@ var RamariaStore = (function () {
     // =========================================================
     // 公开 API
     // =========================================================
+
+    // =========================================================
+    // 人格会话映射（v1.1.1）
+    // =========================================================
+
+    /**
+     * 获取指定人格的活跃 session ID。
+     *
+     * 参数:
+     * - `personaUid`: 人格业务标识。
+     *
+     * 返回:
+     * - session_id 或 null。
+     */
+    function getPersonaSession(personaUid) {
+        if (!personaUid) return null;
+        return _state.personaSessions[personaUid] || null;
+    }
+
+    /**
+     * 设置指定人格的活跃 session ID（立即写入 Store + 通知订阅者）。
+     *
+     * 参数:
+     * - `personaUid`: 人格业务标识。
+     * - `sessionId`: 会话 UUID。
+     */
+    function setPersonaSession(personaUid, sessionId) {
+        if (!personaUid) return;
+        var map = Object.assign({}, _state.personaSessions);
+        map[personaUid] = sessionId;
+        set('personaSessions', map);
+    }
 
     return {
         get: get,
@@ -343,6 +382,9 @@ var RamariaStore = (function () {
         reset: reset,
         /** 获取完整状态快照（只读，调试用） */
         snapshot: function () { return Object.assign({}, _state); },
+        /** 人格会话映射 */
+        getPersonaSession: getPersonaSession,
+        setPersonaSession: setPersonaSession,
     };
 })();
 

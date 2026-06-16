@@ -272,6 +272,16 @@ impl Message {
             persona_uid: None,
         }
     }
+
+    /// 设置发言人 persona_uid（链式调用）。
+    ///
+    /// 说明:
+    /// - 用户消息通常不设（发言人是用户自己）。
+    /// - 助手消息设为当前对话的人格 uid，用于前端显示"谁在回复"。
+    pub fn with_persona_uid(mut self, uid: Option<String>) -> Self {
+        self.persona_uid = uid;
+        self
+    }
 }
 
 // =========================================================

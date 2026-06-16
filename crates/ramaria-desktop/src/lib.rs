@@ -48,60 +48,92 @@ pub struct DesktopState {
 /// 初始化 tracing 日志系统。
 ///
 /// 说明:
-/// - 开发模式：输出到 stdout，RUST_LOG 环境变量控制级别
-/// - 生产模式：后续添加文件日志（%APPDATA%\Ramaria\logs\）
-fn init_tracing() {
+/// - 始终输出到 stdout（控制台/终端）。
+/// - 同时写入文件日志 `{log_dir}/ramaria.log`（每次启动覆盖旧日志）。
+/// - 使用 `Mutex<File>` 保证线程安全，文件在初始化时立即创建，无后台线程延迟。
+fn init_tracing(log_dir: &std::path::Path) {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,ramaria_desktop=debug"));
 
-    let subscriber = fmt::layer()
+    // 日志文件：立即创建（create + truncate），避免异步写延迟
+    let log_file_path = log_dir.join("ramaria.log");
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&log_file_path)
+        .unwrap_or_else(|e| {
+            panic!(
+                "无法创建日志文件 '{}': {}",
+                log_file_path.display(),
+                e
+            )
+        });
+
+    let stdout_layer = fmt::layer()
         .with_target(true)
         .with_thread_ids(false)
         .with_file(false)
         .with_line_number(false);
 
+    let file_layer = fmt::layer()
+        .with_target(true)
+        .with_thread_ids(false)
+        .with_ansi(false)
+        .with_writer(std::sync::Mutex::new(log_file));
+
     tracing_subscriber::registry()
         .with(filter)
-        .with(subscriber)
+        .with(stdout_layer)
+        .with(file_layer)
         .init();
 
+    // 注意：需手动添加换行，因为 tracing_subscriber 的 layer 不会自动在每条日志后加换行
+    // 实际上 fmt::layer 会自动处理，但直接写 File 时需要确认。
+    // tracing_subscriber 的 fmt layer 通过 MakeWriter 写入时会自动添加换行符。
+
     tracing::info!("Ramaria Desktop v{} 启动", env!("CARGO_PKG_VERSION"));
+    tracing::info!(path = %log_file_path.display(), "日志文件已创建");
 }
 
 // =========================================================
 // 数据目录
 // =========================================================
 
-/// 确定应用数据目录。
+/// 确定应用数据目录（返回绝对路径）。
 ///
 /// 返回:
-/// - 开发模式（debug_assertions）：项目根目录下的 `.ramaria-dev/`
+/// - 开发模式（debug_assertions）：编译时 crate 目录下的 `.ramaria-dev/`
+///   （使用 `CARGO_MANIFEST_DIR` 编译时常量，不依赖运行时 CWD）
 /// - 生产模式：`%APPDATA%\Ramaria\data\`
 /// - 可通过 `RAMARIA_DATA_DIR` 环境变量覆盖
 fn determine_data_dir() -> PathBuf {
     // 优先使用环境变量
     if let Ok(dir) = std::env::var("RAMARIA_DATA_DIR") {
         let p = PathBuf::from(&dir);
-        if p.is_absolute() || p.exists() {
-            tracing::info!(data_dir = %dir, "使用环境变量 RAMARIA_DATA_DIR");
+        if p.is_absolute() {
             return p;
         }
-        tracing::warn!(data_dir = %dir, "RAMARIA_DATA_DIR 路径无效，回退默认值");
+        // 尝试相对于当前 exe 所在目录解析
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(exe_dir) = exe.parent() {
+                let abs = exe_dir.join(&p);
+                if abs.exists() {
+                    return abs;
+                }
+            }
+        }
     }
 
-    // 开发模式：使用项目本地目录
+    // 开发模式：使用编译时常量定位 crate 目录（绝对路径，不依赖 CWD）
     if cfg!(debug_assertions) {
-        // 从当前可执行文件位置推断项目根目录
-        let dev_dir = PathBuf::from(".ramaria-dev");
-        tracing::info!(data_dir = %dev_dir.display(), "开发模式数据目录");
-        return dev_dir;
+        // CARGO_MANIFEST_DIR 在编译时即为绝对路径
+        return PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".ramaria-dev");
     }
 
     // 生产模式：使用 %APPDATA%
     let appdata = std::env::var("APPDATA").unwrap_or_default();
-    let prod_dir = PathBuf::from(&appdata).join("Ramaria").join("data");
-    tracing::info!(data_dir = %prod_dir.display(), "生产模式数据目录");
-    prod_dir
+    PathBuf::from(&appdata).join("Ramaria").join("data")
 }
 
 /// 确保数据目录存在。
@@ -232,8 +264,12 @@ async fn init_app(
         }
     };
 
-    // Step 6: 构造 App
-    let config = ramaria_core::config::RamariaConfig::default();
+    // Step 6: 构造 App（填充实际路径到配置中，供诊断导出等模块使用）
+    let mut config = ramaria_core::config::RamariaConfig::default();
+    config.paths.data_dir = data_dir.to_string_lossy().to_string();
+    config.paths.log_dir = data_dir.join("logs").to_string_lossy().to_string();
+    config.paths.config_dir = data_dir.to_string_lossy().to_string();
+    config.paths.vector_index_dir = data_dir.join("vectors").to_string_lossy().to_string();
     let app = ramaria_app::App::new(storage, llm, embedding, config, keychain);
 
     // Step 7: 刷新状态
@@ -263,21 +299,31 @@ async fn init_app(
 /// 构建并运行 Tauri 桌面应用。
 ///
 /// 流程:
-/// 1. 初始化日志
-/// 2. 确定数据目录
-/// 3. 初始化 ramaria-app（异步）
-/// 4. 构建 Tauri Builder 并注入状态和命令
-/// 5. 在 setup 钩子中初始化系统托盘
-/// 6. 运行应用
+/// 1. 确定数据目录
+/// 2. 确保目录存在（含 logs/ 子目录）
+/// 3. 初始化日志（stdout + 文件）
+/// 4. 初始化 ramaria-app（异步）
+/// 5. 构建 Tauri Builder 并注入状态和命令
+/// 6. 在 setup 钩子中初始化系统托盘
+/// 7. 运行应用
 ///
 /// 说明:
 /// - 该函数由 main.rs 调用
 /// - 不返回（由 Tauri 事件循环接管控制权）
 pub fn run() {
-    init_tracing();
-
-    // 确定数据目录
+    // Step 1: 确定数据目录
     let data_dir = determine_data_dir();
+
+    // Step 2: 确保数据目录存在（含 logs/ 等子目录）
+    // 必须在 init_tracing 之前，因为文件日志写入 logs/
+    if let Err(e) = ensure_data_dir(&data_dir) {
+        eprintln!("致命错误: 无法创建数据目录 '{}': {}", data_dir.display(), e);
+        std::process::exit(1);
+    }
+
+    // Step 3: 初始化日志（输出到 stdout + 文件，文件立即创建）
+    init_tracing(&data_dir.join("logs"));
+    tracing::info!(data_dir = %data_dir.display(), "数据目录已就绪");
 
     // 创建 tokio 运行时用于初始化
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -360,6 +406,7 @@ pub fn run() {
             commands::persona::regenerate_import_pipeline,
             // ---- Diagnostics (v1.1 Phase 7) ----
             commands::diagnostics::check_update,
+            commands::diagnostics::get_version,
             commands::diagnostics::export_diagnostics,
             // ---- System ----
             tray::confirm_close_action,
