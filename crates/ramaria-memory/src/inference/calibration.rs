@@ -45,13 +45,12 @@ impl Default for CalibrationConfig {
 /// - 记录上次全量校准时的事件数（用于翻倍检测）。
 ///
 /// 用法:
-/// ```ignore
-/// let mut tracker = CalibrationTracker::new(config);
-/// tracker.record_incremental_update; // 每次增量更新后调用
-/// if tracker.should_calibrate(current_event_count) {
-/// // 执行全量校准...
-/// tracker.mark_calibrated(current_event_count);
-/// }
+/// ```rust
+/// use ramaria_memory::inference::calibration::{CalibrationTracker, CalibrationConfig};
+/// let config = CalibrationConfig::default();
+/// let mut tracker = CalibrationTracker::new(config, 100);
+/// tracker.record_incremental_update();
+/// assert!(!tracker.should_calibrate(105));
 /// ```
 #[derive(Debug, Clone)]
 pub struct CalibrationTracker {

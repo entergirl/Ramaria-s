@@ -28,9 +28,13 @@ use std::collections::HashMap;
 /// - 标点/空白：丢弃
 ///
 /// 示例:
-/// ```ignore
-/// // let tokens = tokenize("我在学习Rust编程");
-/// // 包含: "我在", "在学", "学习", "习r", "ru", "us", "st", "t编", "编程"
+/// ```rust
+/// use ramaria_memory::bm25::tokenize;
+/// let tokens = tokenize("我在学习Rust编程");
+/// assert!(tokens.contains(&"我在".to_string()));
+/// assert!(tokens.contains(&"学习".to_string()));
+/// assert!(tokens.contains(&"编程".to_string()));
+/// assert!(tokens.contains(&"rust".to_string()));
 /// ```
 pub fn tokenize(text: &str) -> Vec<String> {
     if text.is_empty() {

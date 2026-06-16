@@ -20,9 +20,11 @@ use ramaria_core::traits::{EmbeddingModelInfo, EmbeddingProvider};
 /// - 所有嵌入操作返回 `Unsupported` 错误。
 ///
 /// 用法:
-/// ```ignore
+/// ```rust
+/// use ramaria_llm::embedding::noop::NoopEmbeddingProvider;
+/// use ramaria_core::traits::EmbeddingProvider;
 /// let provider = NoopEmbeddingProvider::new(384);
-/// assert!(!provider.is_available);
+/// assert!(!provider.is_available());
 /// ```
 pub struct NoopEmbeddingProvider {
     /// 模型信息（dimension 可配置）

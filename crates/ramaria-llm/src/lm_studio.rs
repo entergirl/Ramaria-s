@@ -33,9 +33,9 @@ use crate::provider::{ProviderBase, RetryConfig};
 ///
 /// 用法:
 /// ```ignore
-/// let config = BackendConfig::lm_studio_default;
+/// let config = BackendConfig::lm_studio_default();
 /// let provider = LmStudioProvider::new(config)?;
-/// provider.validate.await?;
+/// provider.validate().await?;
 /// let reply = provider.chat(&request).await?;
 /// ```
 pub struct LmStudioProvider {

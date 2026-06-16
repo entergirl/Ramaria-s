@@ -70,7 +70,7 @@ struct GitHubRelease {
 ///
 /// 示例:
 /// ```ignore
-/// let status = check_update.await;
+/// let status = check_update().await;
 /// if status.update_available {
 /// println!("新版本可用: {}", status.latest_version.unwrap_or_default);
 /// }

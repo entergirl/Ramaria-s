@@ -110,12 +110,12 @@ pub fn finish_delta() {
 ///
 /// ```
 /// # use ramaria_cli::ui::PersonaFormatter;
-/// let mut fmt = PersonaFormatter::new;
+/// let mut fmt = PersonaFormatter::new();
 /// assert_eq!(fmt.feed("那挺好的||摸鱼"), "那挺好的\n摸鱼");
 /// assert_eq!(fmt.feed("就摸鱼"), "就摸鱼");
 /// assert_eq!(fmt.feed("||聊天也"), "\n聊天也");
 /// assert_eq!(fmt.feed("是正事"), "是正事");
-/// assert_eq!(fmt.flush, None);
+/// assert_eq!(fmt.flush(), None);
 /// ```
 pub struct PersonaFormatter {
     /// 上一个 chunk 末尾的未决 `|` 字符。
