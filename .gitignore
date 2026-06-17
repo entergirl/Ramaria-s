@@ -41,6 +41,7 @@ desktop.ini
 /docs/dev/
 /docs/dev-1.0/
 /docs/dev-1.1/
+/docs/dev-1.2/
 
 # candle 本地 patch（用于 Qwen3 head_dim 支持）
 /lib/candle/

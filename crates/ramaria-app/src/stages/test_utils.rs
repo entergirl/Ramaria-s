@@ -1,14 +1,10 @@
-//! rust/crates/ramaria-app/tests/mock_backend.rs - Mock StorageBackend + Mock LlmProvider
+//! rust/crates/ramaria-app/src/stages/test_utils.rs - Stage 单元测试共享 Mock 工具
 //!
 //! 设计特点:
-//! - `MockStorage`: 内存 HashMap 实现的 StorageBackend，用于 app 集成测试
-//! - `MockLlm`: 返回预设回复的 LlmProvider，支持流式和非流式
-//! - 所有 mock 都是 Send + Sync，可直接用于 Arc<dyn Trait>
-//! - 支持测试场景：空存储、已有会话/消息、LLM 正常/错误回复
-//!
-//! 安全约束:
-//! - 不使用真实 API key 或网络请求
-//! - 不触碰文件系统
+//! - 提供功能完整的 MockStorage（HashMap 实现，支持 session/message/L1 增删查改）
+//! - 提供可配置的 MockLlm（支持自定义回复、流式输出、隐私确认状态）
+//! - 提供 test_context() 快速构建 PipelineContext
+//! - 所有 Mock 均为 Send + Sync，可直接用于 Arc<dyn Trait>
 
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -21,33 +17,34 @@ use ramaria_core::traits::{
     ChatRequest, EmbeddingModelInfo, EmbeddingProvider, LlmProvider, StorageBackend, StreamDelta,
 };
 use ramaria_core::types::{
-    BackendConfig, ClusterSnapshot, EventRelation, LlmProvider as LlmProviderKind, MemoryEvent,
-    MemoryL1, Message, ModelCapability, Persona, PersonaExample, PersonaFact, PersonalityTrait,
-    PrivacyConsent, ProfileField, Session, TraitEvidence, TraitStatus,
+    BackendConfig, ClusterSnapshot, EventRelation, MemoryEvent, MemoryL1, Message, ModelCapability,
+    Persona, PersonaExample, PersonaFact, PersonalityTrait, PrivacyConsent, ProfileField, Session,
+    TraitEvidence, TraitStatus,
 };
+use ramaria_memory::retriever::Retriever;
 use uuid::Uuid;
 
+use std::sync::{Arc, Mutex as StdMutex};
+
+use crate::pipeline::PipelineContext;
+use crate::session_lifecycle::SessionLifecycle;
+
 // =========================================================
-// MockStorage
+// MockStorage — 功能完整的内存 StorageBackend
 // =========================================================
 
-/// 内存 Mock StorageBackend 实现。
+/// 内存 Mock StorageBackend，支持 session/message/L1/privacy 的增删查改。
 ///
-/// 职责:
-/// - 替代真实的 SQLite storage，支持 app 层集成测试
+/// 设计:
 /// - 所有数据存于 HashMap，测试间完全隔离
+/// - 支持配置预填充数据（session、message、L1、privacy_consent）
+/// - 适配 Stage 3-4 测试需求
 pub struct MockStorage {
     sessions: Mutex<HashMap<Uuid, Session>>,
     messages: Mutex<HashMap<Uuid, Vec<Message>>>,
-    #[allow(dead_code)]
-    l1_list: Mutex<HashMap<Uuid, Vec<MemoryL1>>>,
     l1_by_persona: Mutex<HashMap<String, Vec<MemoryL1>>>,
-    personas: Mutex<HashMap<String, Persona>>,
-    persona_seq: Mutex<i64>,
     privacy_consents: Mutex<Vec<PrivacyConsent>>,
     backend_config: Mutex<Option<BackendConfig>>,
-    index_version: Mutex<i32>,
-    examples: Mutex<HashMap<String, Vec<PersonaExample>>>,
 }
 
 impl Default for MockStorage {
@@ -61,45 +58,13 @@ impl MockStorage {
         Self {
             sessions: Mutex::new(HashMap::new()),
             messages: Mutex::new(HashMap::new()),
-            l1_list: Mutex::new(HashMap::new()),
             l1_by_persona: Mutex::new(HashMap::new()),
-            personas: Mutex::new(HashMap::new()),
-            persona_seq: Mutex::new(0),
             privacy_consents: Mutex::new(Vec::new()),
             backend_config: Mutex::new(None),
-            index_version: Mutex::new(0),
-            examples: Mutex::new(HashMap::new()),
         }
     }
 
-    /// 便捷方法：创建会话并预填充消息。
-    #[allow(dead_code)]
-    pub fn create_session_with_messages(&self, session_id: Uuid, messages: Vec<Message>) {
-        self.sessions.lock().unwrap().insert(
-            session_id,
-            Session {
-                id: session_id,
-                started_at: 1000,
-                ended_at: None,
-            },
-        );
-        self.messages.lock().unwrap().insert(session_id, messages);
-    }
-
-    /// 便捷方法：添加隐私确认。
-    #[allow(dead_code)]
-    pub fn add_privacy_consent(&self, consent: PrivacyConsent) {
-        self.privacy_consents.lock().unwrap().push(consent);
-    }
-
-    /// 便捷方法：设置后端配置。
-    #[allow(dead_code)]
-    pub fn set_backend_config(&self, config: BackendConfig) {
-        *self.backend_config.lock().unwrap() = Some(config);
-    }
-
-    /// 便捷方法：添加活跃 session。
-    #[allow(dead_code)]
+    /// 预填充一个活跃 session 并返回其 ID。
     pub fn add_active_session(&self, session_id: Uuid) {
         self.sessions.lock().unwrap().insert(
             session_id,
@@ -111,30 +76,41 @@ impl MockStorage {
         );
     }
 
-    /// 便捷方法：添加消息。
-    #[allow(dead_code)]
-    pub fn add_messages(&self, session_id: Uuid, msgs: Vec<Message>) {
-        self.messages.lock().unwrap().insert(session_id, msgs);
+    /// 预填充一个已关闭 session 并返回其 ID。
+    pub fn add_closed_session(&self, session_id: Uuid) {
+        self.sessions.lock().unwrap().insert(
+            session_id,
+            Session {
+                id: session_id,
+                started_at: 1000,
+                ended_at: Some(2000),
+            },
+        );
     }
 
-    /// 便捷方法：按 persona 添加 L1 摘要。
-    #[allow(dead_code)]
+    /// 预填充消息到指定 session。
+    pub fn add_messages(&self, session_id: Uuid, messages: Vec<Message>) {
+        self.messages.lock().unwrap().insert(session_id, messages);
+    }
+
+    /// 预填充 L1 摘要到指定 persona。
     pub fn add_l1_summaries(&self, persona_uid: &str, summaries: Vec<MemoryL1>) {
         self.l1_by_persona
             .lock()
             .unwrap()
             .insert(persona_uid.to_string(), summaries);
     }
+
+    /// 预填充隐私确认记录。
+    pub fn add_privacy_consent(&self, consent: PrivacyConsent) {
+        self.privacy_consents.lock().unwrap().push(consent);
+    }
 }
 
 #[async_trait]
 impl StorageBackend for MockStorage {
     async fn create_session(&self) -> RamariaResult<Session> {
-        let session = Session {
-            id: Uuid::new_v4(),
-            started_at: 1000,
-            ended_at: None,
-        };
+        let session = Session::new();
         self.sessions
             .lock()
             .unwrap()
@@ -175,7 +151,6 @@ impl StorageBackend for MockStorage {
     }
 
     async fn save_message(&self, message: &Message) -> RamariaResult<()> {
-        // 只读约束——已关闭 session 不可写入新消息
         let sessions = self.sessions.lock().unwrap();
         if let Some(session) = sessions.get(&message.session_id) {
             if session.ended_at.is_some() {
@@ -206,18 +181,15 @@ impl StorageBackend for MockStorage {
             .unwrap_or_default())
     }
 
-    async fn list_messages_by_persona(&self, _persona_uid: &str) -> RamariaResult<Vec<Message>> {
+    async fn list_messages_by_persona(&self, _uid: &str) -> RamariaResult<Vec<Message>> {
         Ok(Vec::new())
     }
 
-    async fn find_message_by_fingerprint(
-        &self,
-        _fingerprint: &str,
-    ) -> RamariaResult<Option<Message>> {
+    async fn find_message_by_fingerprint(&self, _fp: &str) -> RamariaResult<Option<Message>> {
         Ok(None)
     }
 
-    async fn save_memory_l1(&self, _memory: &MemoryL1) -> RamariaResult<()> {
+    async fn save_memory_l1(&self, _m: &MemoryL1) -> RamariaResult<()> {
         Ok(())
     }
 
@@ -229,11 +201,11 @@ impl StorageBackend for MockStorage {
         Ok(None)
     }
 
-    async fn mark_l1_absorbed(&self, _l1_ids: &[Uuid]) -> RamariaResult<()> {
+    async fn mark_l1_absorbed(&self, _ids: &[Uuid]) -> RamariaResult<()> {
         Ok(())
     }
 
-    async fn list_unabsorbed_l1(&self, _persona_uid: &str) -> RamariaResult<Vec<MemoryL1>> {
+    async fn list_unabsorbed_l1(&self, _uid: &str) -> RamariaResult<Vec<MemoryL1>> {
         Ok(Vec::new())
     }
 
@@ -254,22 +226,16 @@ impl StorageBackend for MockStorage {
             .collect())
     }
 
-    async fn create_persona(&self, persona: &Persona) -> RamariaResult<i64> {
-        let mut seq = self.persona_seq.lock().unwrap();
-        *seq += 1;
-        let id = *seq;
-        let mut p = persona.clone();
-        p.id = id;
-        self.personas.lock().unwrap().insert(persona.uid.clone(), p);
-        Ok(id)
+    async fn create_persona(&self, _p: &Persona) -> RamariaResult<i64> {
+        Ok(1)
     }
 
-    async fn get_persona_by_uid(&self, uid: &str) -> RamariaResult<Option<Persona>> {
-        Ok(self.personas.lock().unwrap().get(uid).cloned())
+    async fn get_persona_by_uid(&self, _uid: &str) -> RamariaResult<Option<Persona>> {
+        Ok(None)
     }
 
     async fn list_personas(&self) -> RamariaResult<Vec<Persona>> {
-        Ok(self.personas.lock().unwrap().values().cloned().collect())
+        Ok(Vec::new())
     }
 
     async fn update_persona(
@@ -278,48 +244,43 @@ impl StorageBackend for MockStorage {
         _name: &str,
         _avatar: Option<&str>,
         _config: Option<&str>,
-        _description: Option<&str>,
+        _desc: Option<&str>,
     ) -> RamariaResult<()> {
         Ok(())
     }
 
-    async fn save_event(&self, _event: &MemoryEvent) -> RamariaResult<i64> {
+    async fn save_event(&self, _e: &MemoryEvent) -> RamariaResult<i64> {
         Ok(1)
     }
 
     async fn list_events_by_persona(
         &self,
-        _persona_uid: &str,
+        _uid: &str,
         _offset: i64,
         _limit: i64,
     ) -> RamariaResult<Vec<MemoryEvent>> {
         Ok(Vec::new())
     }
 
-    async fn list_unabsorbed_events(&self, _persona_uid: &str) -> RamariaResult<Vec<MemoryEvent>> {
+    async fn list_unabsorbed_events(&self, _uid: &str) -> RamariaResult<Vec<MemoryEvent>> {
         Ok(Vec::new())
     }
 
-    async fn save_event_relation(&self, _rel: &EventRelation) -> RamariaResult<i64> {
+    async fn save_event_relation(&self, _r: &EventRelation) -> RamariaResult<i64> {
         Ok(1)
     }
 
-    async fn save_event_source(
-        &self,
-        _event_id: i64,
-        _l1_id: Uuid,
-        _weight: f64,
-    ) -> RamariaResult<()> {
+    async fn save_event_source(&self, _eid: i64, _l1: Uuid, _w: f64) -> RamariaResult<()> {
         Ok(())
     }
 
-    async fn save_fact(&self, _fact: &PersonaFact) -> RamariaResult<i64> {
+    async fn save_fact(&self, _f: &PersonaFact) -> RamariaResult<i64> {
         Ok(1)
     }
 
     async fn list_facts_by_persona(
         &self,
-        _persona_uid: &str,
+        _uid: &str,
         _field: ProfileField,
     ) -> RamariaResult<Vec<PersonaFact>> {
         Ok(Vec::new())
@@ -329,24 +290,21 @@ impl StorageBackend for MockStorage {
         Ok(1)
     }
 
-    async fn list_traits_by_persona(
-        &self,
-        _persona_uid: &str,
-    ) -> RamariaResult<Vec<PersonalityTrait>> {
+    async fn list_traits_by_persona(&self, _uid: &str) -> RamariaResult<Vec<PersonalityTrait>> {
         Ok(Vec::new())
     }
 
     async fn update_trait_confidence(
         &self,
         _id: i64,
-        _confidence: f64,
-        _evidence: f64,
-        _consistency: f64,
+        _c: f64,
+        _e: f64,
+        _cons: f64,
     ) -> RamariaResult<()> {
         Ok(())
     }
 
-    async fn update_trait_status(&self, _id: i64, _status: TraitStatus) -> RamariaResult<()> {
+    async fn update_trait_status(&self, _id: i64, _s: TraitStatus) -> RamariaResult<()> {
         Ok(())
     }
 
@@ -354,7 +312,7 @@ impl StorageBackend for MockStorage {
         Ok(1)
     }
 
-    async fn list_evidence_by_trait(&self, _trait_id: i64) -> RamariaResult<Vec<TraitEvidence>> {
+    async fn list_evidence_by_trait(&self, _id: i64) -> RamariaResult<Vec<TraitEvidence>> {
         Ok(Vec::new())
     }
 
@@ -362,17 +320,8 @@ impl StorageBackend for MockStorage {
         Ok(1)
     }
 
-    async fn list_selected_examples(
-        &self,
-        persona_uid: &str,
-    ) -> RamariaResult<Vec<PersonaExample>> {
-        Ok(self
-            .examples
-            .lock()
-            .unwrap()
-            .get(persona_uid)
-            .cloned()
-            .unwrap_or_default())
+    async fn list_selected_examples(&self, _uid: &str) -> RamariaResult<Vec<PersonaExample>> {
+        Ok(Vec::new())
     }
 
     async fn save_cluster_snapshot(&self, _s: &ClusterSnapshot) -> RamariaResult<i64> {
@@ -381,13 +330,13 @@ impl StorageBackend for MockStorage {
 
     async fn get_current_snapshots(
         &self,
-        _persona_uid: &str,
-        _category: &str,
+        _uid: &str,
+        _cat: &str,
     ) -> RamariaResult<Vec<ClusterSnapshot>> {
         Ok(Vec::new())
     }
 
-    async fn upsert_keyword(&self, _keyword: &str) -> RamariaResult<()> {
+    async fn upsert_keyword(&self, _k: &str) -> RamariaResult<()> {
         Ok(())
     }
 
@@ -429,30 +378,18 @@ impl StorageBackend for MockStorage {
     }
 
     async fn get_index_version(&self) -> RamariaResult<i32> {
-        Ok(*self.index_version.lock().unwrap())
-    }
-
-    async fn set_index_version(&self, version: i32) -> RamariaResult<()> {
-        *self.index_version.lock().unwrap() = version;
-        Ok(())
-    }
-
-    // ---- 基础设施方法 ----
-
-    async fn create_background_job(
-        &self,
-        _job_type: &str,
-        _payload: Option<&str>,
-    ) -> RamariaResult<i64> {
         Ok(1)
     }
 
-    async fn update_job_status(
-        &self,
-        _id: i64,
-        _status: &str,
-        _error: Option<&str>,
-    ) -> RamariaResult<()> {
+    async fn set_index_version(&self, _v: i32) -> RamariaResult<()> {
+        Ok(())
+    }
+
+    async fn create_background_job(&self, _t: &str, _p: Option<&str>) -> RamariaResult<i64> {
+        Ok(1)
+    }
+
+    async fn update_job_status(&self, _id: i64, _s: &str, _e: Option<&str>) -> RamariaResult<()> {
         Ok(())
     }
 
@@ -462,11 +399,11 @@ impl StorageBackend for MockStorage {
 
     async fn create_conflict(
         &self,
-        _field: &str,
-        _conflict_type: &str,
-        _old_content: Option<&str>,
-        _new_content: Option<&str>,
-        _desc: Option<&str>,
+        _f: &str,
+        _t: &str,
+        _o: Option<&str>,
+        _n: Option<&str>,
+        _d: Option<&str>,
     ) -> RamariaResult<i64> {
         Ok(1)
     }
@@ -479,7 +416,7 @@ impl StorageBackend for MockStorage {
         Ok(())
     }
 
-    async fn create_push(&self, _content: &str) -> RamariaResult<i64> {
+    async fn create_push(&self, _c: &str) -> RamariaResult<i64> {
         Ok(1)
     }
 
@@ -491,11 +428,11 @@ impl StorageBackend for MockStorage {
         Ok(())
     }
 
-    async fn get_setting(&self, _key: &str) -> RamariaResult<Option<String>> {
+    async fn get_setting(&self, _k: &str) -> RamariaResult<Option<String>> {
         Ok(None)
     }
 
-    async fn set_setting(&self, _key: &str, _value: &str) -> RamariaResult<()> {
+    async fn set_setting(&self, _k: &str, _v: &str) -> RamariaResult<()> {
         Ok(())
     }
 
@@ -503,142 +440,90 @@ impl StorageBackend for MockStorage {
         Ok(Vec::new())
     }
 
-    async fn save_bm25(&self, _doc_id: i64, _layer: &str, _tokens_json: &str) -> RamariaResult<()> {
+    async fn save_bm25(&self, _d: i64, _l: &str, _t: &str) -> RamariaResult<()> {
         Ok(())
     }
 
-    async fn list_bm25_by_doc(&self, _doc_id: i64) -> RamariaResult<Vec<(String, String)>> {
+    async fn list_bm25_by_doc(&self, _d: i64) -> RamariaResult<Vec<(String, String)>> {
         Ok(Vec::new())
     }
 
-    async fn delete_bm25_by_doc(&self, _doc_id: i64) -> RamariaResult<()> {
+    async fn delete_bm25_by_doc(&self, _d: i64) -> RamariaResult<()> {
         Ok(())
     }
 
-    async fn insert_graph_node(
-        &self,
-        _entity_name: &str,
-        _entity_type: &str,
-        _source_l1_id: Option<Uuid>,
-    ) -> RamariaResult<i64> {
+    async fn insert_graph_node(&self, _n: &str, _t: &str, _l: Option<Uuid>) -> RamariaResult<i64> {
         Ok(1)
     }
 
-    async fn get_graph_node(
-        &self,
-        _entity_name: &str,
-    ) -> RamariaResult<Option<(i64, String, String)>> {
+    async fn get_graph_node(&self, _n: &str) -> RamariaResult<Option<(i64, String, String)>> {
         Ok(None)
     }
 
     async fn insert_graph_edge(
         &self,
-        _source_id: i64,
-        _target_id: i64,
-        _relation_type: &str,
-        _detail: Option<&str>,
-        _source_l1_id: Option<Uuid>,
+        _s: i64,
+        _t: i64,
+        _r: &str,
+        _d: Option<&str>,
+        _l: Option<Uuid>,
     ) -> RamariaResult<i64> {
         Ok(1)
     }
 
-    async fn list_graph_edges(
-        &self,
-        _source_id: i64,
-    ) -> RamariaResult<Vec<(i64, i64, i64, String)>> {
+    async fn list_graph_edges(&self, _s: i64) -> RamariaResult<Vec<(i64, i64, i64, String)>> {
         Ok(Vec::new())
     }
 }
 
 // =========================================================
-// MockLlm
+// MockLlm — 可配置的 LLM Provider
 // =========================================================
 
-/// Mock LLM Provider，返回预设回复。
+/// 可配置 Mock LLM Provider。
+///
+/// 设计:
+/// - `config` 字段决定 provider 类型（LM Studio / DeepSeek / OpenAI）
+/// - 用于 Stage 2 隐私检查测试：线上 provider 触发隐私确认
 pub struct MockLlm {
-    reply: String,
-    model_capability: ModelCapability,
     config: BackendConfig,
 }
 
 impl MockLlm {
-    /// 创建返回固定回复的 Mock LLM。
-    pub fn new(reply: &str) -> Self {
+    /// 创建 LM Studio 本地 provider 的 Mock。
+    pub fn local() -> Self {
         Self {
-            reply: reply.to_string(),
-            model_capability: ModelCapability {
-                provider: LlmProviderKind::LmStudio,
-                model_id: "mock-model".into(),
-                base_url: "http://localhost:1234/v1".into(),
-                supports_streaming: true,
-                supports_json_mode: false,
-                context_window: 4096,
-                max_output_tokens: 4096,
-            },
             config: BackendConfig::lm_studio_default(),
         }
     }
 
-    /// 使用自定义 BackendConfig 创建 Mock LLM（支持线上 provider 测试）。
-    #[allow(dead_code)]
-    pub fn with_config(reply: &str, config: BackendConfig) -> Self {
-        let capability = config.capability.clone();
+    /// 创建 DeepSeek 线上 provider 的 Mock。
+    pub fn online_deepseek() -> Self {
         Self {
-            reply: reply.to_string(),
-            model_capability: capability,
-            config,
-        }
-    }
-
-    /// 创建返回错误的 Mock LLM。
-    #[allow(dead_code)]
-    pub fn failing(error_msg: &str) -> MockFailingLlm {
-        MockFailingLlm {
-            error_msg: error_msg.to_string(),
-            model_capability: ModelCapability {
-                provider: LlmProviderKind::LmStudio,
-                model_id: "mock-model".into(),
-                base_url: "http://localhost:1234/v1".into(),
-                supports_streaming: true,
-                supports_json_mode: false,
-                context_window: 4096,
-                max_output_tokens: 4096,
-            },
-            config: BackendConfig::lm_studio_default(),
+            config: BackendConfig::deepseek_default(),
         }
     }
 }
 
 #[async_trait]
 impl LlmProvider for MockLlm {
-    async fn chat(&self, _request: &ChatRequest) -> RamariaResult<String> {
-        Ok(self.reply.clone())
+    async fn chat(&self, _req: &ChatRequest) -> RamariaResult<String> {
+        Ok("mock reply".into())
     }
 
     async fn chat_stream(
         &self,
-        _request: &ChatRequest,
+        _req: &ChatRequest,
     ) -> RamariaResult<Pin<Box<dyn Stream<Item = RamariaResult<StreamDelta>> + Send>>> {
-        let reply = self.reply.clone();
-        let chars: Vec<char> = reply.chars().collect();
-
-        let stream = stream::iter(chars.into_iter().enumerate().map(move |(i, c)| {
-            Ok(StreamDelta {
-                content: c.to_string(),
-                done: i == reply.chars().count() - 1,
-                metadata: if i == reply.chars().count() - 1 {
-                    Some("stop".into())
-                } else {
-                    None
-                },
-            })
-        }));
-
-        Ok(Box::pin(stream))
+        Ok(Box::pin(stream::iter(vec![Ok(StreamDelta {
+            content: "mock".into(),
+            done: true,
+            metadata: Some("stop".into()),
+        })])))
     }
 
     fn capability(&self) -> &ModelCapability {
-        &self.model_capability
+        &self.config.capability
     }
 
     fn config(&self) -> &BackendConfig {
@@ -655,53 +540,10 @@ impl LlmProvider for MockLlm {
 }
 
 // =========================================================
-// MockFailingLlm — 始终返回错误的 Mock
+// MockEmbedding — 可用嵌入模型 Mock
 // =========================================================
 
-/// Mock LLM Provider，始终返回错误（用于测试错误处理路径）。
-#[allow(dead_code)]
-pub struct MockFailingLlm {
-    error_msg: String,
-    model_capability: ModelCapability,
-    config: BackendConfig,
-}
-
-#[async_trait]
-impl LlmProvider for MockFailingLlm {
-    async fn chat(&self, _request: &ChatRequest) -> RamariaResult<String> {
-        Err(RamariaError::llm(self.error_msg.clone()))
-    }
-
-    async fn chat_stream(
-        &self,
-        _request: &ChatRequest,
-    ) -> RamariaResult<Pin<Box<dyn Stream<Item = RamariaResult<StreamDelta>> + Send>>> {
-        Err(RamariaError::llm(self.error_msg.clone()))
-    }
-
-    fn capability(&self) -> &ModelCapability {
-        &self.model_capability
-    }
-
-    fn config(&self) -> &BackendConfig {
-        &self.config
-    }
-
-    async fn validate(&self) -> RamariaResult<()> {
-        Ok(())
-    }
-
-    fn name(&self) -> &'static str {
-        "MockFailingLlm"
-    }
-}
-
-// =========================================================
-// MockEmbedding — 占位 Embedding Provider
-// =========================================================
-
-/// Mock Embedding Provider（不上真实模型）。
-#[allow(dead_code)]
+/// Mock Embedding Provider，返回固定维度零向量。
 pub struct MockEmbedding {
     model_info: EmbeddingModelInfo,
 }
@@ -712,7 +554,6 @@ impl Default for MockEmbedding {
     }
 }
 
-#[allow(dead_code)]
 impl MockEmbedding {
     pub fn new() -> Self {
         Self {
@@ -753,4 +594,52 @@ impl EmbeddingProvider for MockEmbedding {
     fn is_available(&self) -> bool {
         true
     }
+}
+
+// =========================================================
+// test_context — 构建 PipelineContext
+// =========================================================
+
+/// 构建测试用 PipelineContext。
+///
+/// 参数:
+/// - `storage`: 自定义 MockStorage（可预填充数据）。
+/// - `llm`: 自定义 MockLlm（决定 provider 类型）。
+/// - `embedding`: 可选嵌入模型（None 表示未配置）。
+///
+/// 返回:
+/// - 可用于 Stage 测试的 PipelineContext。
+pub fn test_context(
+    storage: Arc<MockStorage>,
+    llm: Arc<MockLlm>,
+    embedding: Option<Arc<MockEmbedding>>,
+) -> PipelineContext {
+    let storage_dyn: Arc<dyn StorageBackend> = storage;
+    let llm_dyn: Arc<dyn LlmProvider> = llm;
+    let embedding_dyn: Option<Arc<dyn EmbeddingProvider>> =
+        embedding.map(|e| e as Arc<dyn EmbeddingProvider>);
+
+    let config = ramaria_core::config::RamariaConfig::default();
+    let retriever = Arc::new(StdMutex::new(Retriever::new()));
+    let keychain = Arc::new(ramaria_llm::keychain::Keychain::new());
+    let lifecycle = Arc::new(SessionLifecycle::new(config.clone()));
+
+    PipelineContext::new(
+        storage_dyn,
+        llm_dyn,
+        embedding_dyn,
+        config,
+        retriever,
+        keychain,
+        lifecycle,
+    )
+}
+
+/// 构建最简测试 PipelineContext（本地 LLM，无嵌入，空存储）。
+pub fn simple_context() -> PipelineContext {
+    test_context(
+        Arc::new(MockStorage::new()),
+        Arc::new(MockLlm::local()),
+        None,
+    )
 }

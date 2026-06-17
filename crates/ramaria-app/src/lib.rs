@@ -23,9 +23,11 @@ pub mod app_state;
 pub mod diagnostics;
 pub mod error_hint;
 pub mod model_manager;
+pub mod pipeline;
 pub mod privacy;
 pub mod session_lifecycle;
 pub mod setup;
+pub mod stages;
 pub mod stream_event;
 pub mod update;
 
@@ -36,8 +38,14 @@ pub use error_hint::{ErrorHint, error_detail, error_title, is_retryable};
 pub use model_manager::{
     DownloadProgress, MODEL_PRESETS, ModelManager, ModelPreset, default_models_root,
 };
+pub use pipeline::{
+    LlmRawStream, PipelineContext, PipelineData, PipelineError, PipelineStage, SendMessagePipeline,
+};
 pub use privacy::{PrivacyStatus, check_privacy, confirm_privacy, require_privacy};
 pub use session_lifecycle::SessionLifecycle;
 pub use setup::{SetupStatus, check_setup_status, determine_state, run_setup};
+pub use stages::{
+    StageCheckPrivacy, StageCheckState, StageLoadHistory, StageResolveSession, StageRetrieveMemory,
+};
 pub use stream_event::StreamEvent;
 pub use update::{UpdateStatus, check_update};

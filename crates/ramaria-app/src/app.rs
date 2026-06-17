@@ -64,8 +64,8 @@ pub struct App {
     pub(crate) llm: Mutex<Arc<dyn LlmProvider>>,
     /// 嵌入模型 provider（Mutex 包裹，None 表示未配置）
     pub(crate) embedding: Mutex<Option<Arc<dyn EmbeddingProvider>>>,
-    /// 内存检索器（BM25 + 向量 + 图谱）
-    pub(crate) retriever: Mutex<Retriever>,
+    /// 内存检索器（BM25 + 向量 + 图谱），Arc<Mutex<>> 支持与 PipelineContext 零拷贝共享
+    pub(crate) retriever: Arc<Mutex<Retriever>>,
     /// 应用配置
     pub(crate) config: ramaria_core::config::RamariaConfig,
     /// 当前应用状态
@@ -128,7 +128,7 @@ impl App {
             storage,
             llm: Mutex::new(llm),
             embedding: Mutex::new(embedding),
-            retriever: Mutex::new(retriever),
+            retriever: Arc::new(Mutex::new(retriever)),
             config,
             state: Mutex::new(AppState::NeedsSetup),
             keychain,
