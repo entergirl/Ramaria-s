@@ -137,6 +137,36 @@ pub async fn list_unabsorbed_events(
     Ok(rows.into_iter().map(|r| r.into_event()).collect())
 }
 
+/// 标记事件已被 L3 推断吸收。
+///
+/// 将 `absorbed` 设为 1，使这些事件不再出现在 `list_unabsorbed_events` 中。
+/// 使用批量 UPDATE 以支持大批量事件。
+pub async fn mark_absorbed(pool: &SqlitePool, event_ids: &[i64]) -> RamariaResult<()> {
+    if event_ids.is_empty() {
+        return Ok(());
+    }
+
+    // 分批处理，每批最多 100 个 ID，避免 SQL 过长
+    for chunk in event_ids.chunks(100) {
+        let placeholders: Vec<String> = chunk.iter().map(|_| "?".to_string()).collect();
+        let sql = format!(
+            "UPDATE memory_events SET absorbed = 1 WHERE id IN ({})",
+            placeholders.join(",")
+        );
+
+        let mut query = sqlx::query(&sql);
+        for id in chunk {
+            query = query.bind(*id);
+        }
+        query
+            .execute(pool)
+            .await
+            .storage_err("标记事件已吸收失败")?;
+    }
+
+    Ok(())
+}
+
 // =========================================================
 // 事件关系（from_id/to_id 均为 i64）
 // =========================================================

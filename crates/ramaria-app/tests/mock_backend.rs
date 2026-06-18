@@ -13,6 +13,7 @@
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use async_trait::async_trait;
 use futures::{Stream, stream};
@@ -48,6 +49,14 @@ pub struct MockStorage {
     backend_config: Mutex<Option<BackendConfig>>,
     index_version: Mutex<i32>,
     examples: Mutex<HashMap<String, Vec<PersonaExample>>>,
+    // v1.2 M3: 人格推断相关存储
+    traits: Mutex<HashMap<i64, PersonalityTrait>>,
+    traits_by_persona: Mutex<HashMap<String, Vec<i64>>>,
+    trait_seq: AtomicI64,
+    evidence: Mutex<HashMap<i64, Vec<TraitEvidence>>>,
+    evidence_seq: AtomicI64,
+    cluster_snapshots: Mutex<Vec<ClusterSnapshot>>,
+    snapshot_seq: AtomicI64,
 }
 
 impl Default for MockStorage {
@@ -69,6 +78,13 @@ impl MockStorage {
             backend_config: Mutex::new(None),
             index_version: Mutex::new(0),
             examples: Mutex::new(HashMap::new()),
+            traits: Mutex::new(HashMap::new()),
+            traits_by_persona: Mutex::new(HashMap::new()),
+            trait_seq: AtomicI64::new(1),
+            evidence: Mutex::new(HashMap::new()),
+            evidence_seq: AtomicI64::new(1),
+            cluster_snapshots: Mutex::new(Vec::new()),
+            snapshot_seq: AtomicI64::new(1),
         }
     }
 
@@ -126,6 +142,62 @@ impl MockStorage {
             .lock()
             .unwrap()
             .insert(persona_uid.to_string(), summaries);
+    }
+
+    /// 便捷方法：添加 PersonalityTrait 记录（自动分配 ID 并建立 persona 索引）。
+    #[allow(dead_code)]
+    pub fn add_trait(&self, mut t: PersonalityTrait) -> i64 {
+        let id = self.trait_seq.fetch_add(1, Ordering::SeqCst);
+        t.id = id;
+        let persona = t.persona_uid.clone();
+        self.traits.lock().unwrap().insert(id, t);
+        self.traits_by_persona
+            .lock()
+            .unwrap()
+            .entry(persona)
+            .or_default()
+            .push(id);
+        id
+    }
+
+    /// 便捷方法：添加 TraitEvidence 记录（自动分配 ID）。
+    #[allow(dead_code)]
+    pub fn add_evidence(&self, mut e: TraitEvidence) -> i64 {
+        let id = self.evidence_seq.fetch_add(1, Ordering::SeqCst);
+        e.id = id;
+        self.evidence
+            .lock()
+            .unwrap()
+            .entry(e.trait_id)
+            .or_default()
+            .push(e);
+        id
+    }
+
+    /// 便捷方法：添加 ClusterSnapshot 记录（自动分配 ID）。
+    #[allow(dead_code)]
+    pub fn add_cluster_snapshot(&self, mut s: ClusterSnapshot) -> i64 {
+        let id = self.snapshot_seq.fetch_add(1, Ordering::SeqCst);
+        s.id = id;
+        self.cluster_snapshots.lock().unwrap().push(s);
+        id
+    }
+
+    /// 便捷方法：获取已存储的 trait 数量（用于测试断言）。
+    #[allow(dead_code)]
+    pub fn trait_count(&self) -> usize {
+        self.traits.lock().unwrap().len()
+    }
+
+    /// 便捷方法：获取已存储的 evidence 数量（用于测试断言）。
+    #[allow(dead_code)]
+    pub fn evidence_count(&self) -> usize {
+        self.evidence
+            .lock()
+            .unwrap()
+            .values()
+            .map(|v| v.len())
+            .sum()
     }
 }
 
@@ -303,6 +375,10 @@ impl StorageBackend for MockStorage {
         Ok(Vec::new())
     }
 
+    async fn mark_events_absorbed(&self, _event_ids: &[i64]) -> RamariaResult<()> {
+        Ok(())
+    }
+
     async fn save_event_relation(&self, _rel: &EventRelation) -> RamariaResult<i64> {
         Ok(1)
     }
@@ -328,37 +404,94 @@ impl StorageBackend for MockStorage {
         Ok(Vec::new())
     }
 
-    async fn save_trait(&self, _t: &PersonalityTrait) -> RamariaResult<i64> {
-        Ok(1)
+    async fn save_trait(&self, t: &PersonalityTrait) -> RamariaResult<i64> {
+        let id = if t.id > 0 {
+            // 更新已有 trait（replace）
+            let mut traits = self.traits.lock().unwrap();
+            let persona = t.persona_uid.clone();
+            traits.insert(t.id, t.clone());
+            // 确保索引中存在
+            self.traits_by_persona
+                .lock()
+                .unwrap()
+                .entry(persona)
+                .or_default()
+                .push(t.id);
+            t.id
+        } else {
+            // 新增 trait
+            let id = self.trait_seq.fetch_add(1, Ordering::SeqCst);
+            let mut new_t = t.clone();
+            new_t.id = id;
+            let persona = new_t.persona_uid.clone();
+            self.traits.lock().unwrap().insert(id, new_t);
+            self.traits_by_persona
+                .lock()
+                .unwrap()
+                .entry(persona)
+                .or_default()
+                .push(id);
+            id
+        };
+        Ok(id)
     }
 
     async fn list_traits_by_persona(
         &self,
-        _persona_uid: &str,
+        persona_uid: &str,
     ) -> RamariaResult<Vec<PersonalityTrait>> {
-        Ok(Vec::new())
+        let by_persona = self.traits_by_persona.lock().unwrap();
+        let trait_ids = by_persona.get(persona_uid).cloned().unwrap_or_default();
+        let traits = self.traits.lock().unwrap();
+        Ok(trait_ids
+            .iter()
+            .filter_map(|id| traits.get(id).cloned())
+            .collect())
     }
 
     async fn update_trait_confidence(
         &self,
-        _id: i64,
-        _confidence: f64,
-        _evidence: f64,
-        _consistency: f64,
+        id: i64,
+        confidence: f64,
+        evidence: f64,
+        consistency: f64,
     ) -> RamariaResult<()> {
+        if let Some(t) = self.traits.lock().unwrap().get_mut(&id) {
+            t.confidence = confidence;
+            t.evidence = evidence;
+            t.consistency = consistency;
+        }
         Ok(())
     }
 
-    async fn update_trait_status(&self, _id: i64, _status: TraitStatus) -> RamariaResult<()> {
+    async fn update_trait_status(&self, id: i64, status: TraitStatus) -> RamariaResult<()> {
+        if let Some(t) = self.traits.lock().unwrap().get_mut(&id) {
+            t.status = status;
+        }
         Ok(())
     }
 
-    async fn save_evidence(&self, _e: &TraitEvidence) -> RamariaResult<i64> {
-        Ok(1)
+    async fn save_evidence(&self, e: &TraitEvidence) -> RamariaResult<i64> {
+        let id = self.evidence_seq.fetch_add(1, Ordering::SeqCst);
+        let mut new_e = e.clone();
+        new_e.id = id;
+        self.evidence
+            .lock()
+            .unwrap()
+            .entry(e.trait_id)
+            .or_default()
+            .push(new_e);
+        Ok(id)
     }
 
-    async fn list_evidence_by_trait(&self, _trait_id: i64) -> RamariaResult<Vec<TraitEvidence>> {
-        Ok(Vec::new())
+    async fn list_evidence_by_trait(&self, trait_id: i64) -> RamariaResult<Vec<TraitEvidence>> {
+        Ok(self
+            .evidence
+            .lock()
+            .unwrap()
+            .get(&trait_id)
+            .cloned()
+            .unwrap_or_default())
     }
 
     async fn save_example(&self, _e: &PersonaExample) -> RamariaResult<i64> {
@@ -378,16 +511,27 @@ impl StorageBackend for MockStorage {
             .unwrap_or_default())
     }
 
-    async fn save_cluster_snapshot(&self, _s: &ClusterSnapshot) -> RamariaResult<i64> {
-        Ok(1)
+    async fn save_cluster_snapshot(&self, s: &ClusterSnapshot) -> RamariaResult<i64> {
+        let id = self.snapshot_seq.fetch_add(1, Ordering::SeqCst);
+        let mut new_s = s.clone();
+        new_s.id = id;
+        self.cluster_snapshots.lock().unwrap().push(new_s);
+        Ok(id)
     }
 
     async fn get_current_snapshots(
         &self,
-        _persona_uid: &str,
-        _category: &str,
+        persona_uid: &str,
+        category: &str,
     ) -> RamariaResult<Vec<ClusterSnapshot>> {
-        Ok(Vec::new())
+        Ok(self
+            .cluster_snapshots
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|s| s.persona_uid == persona_uid && s.category == category && s.is_current)
+            .cloned()
+            .collect())
     }
 
     async fn upsert_keyword(&self, _keyword: &str) -> RamariaResult<()> {
@@ -566,6 +710,7 @@ pub struct MockLlm {
 
 impl MockLlm {
     /// 创建返回固定回复的 Mock LLM。
+    #[allow(dead_code)]
     pub fn new(reply: &str) -> Self {
         Self {
             reply: reply.to_string(),

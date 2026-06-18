@@ -232,6 +232,10 @@ impl StorageBackend for MockStorage {
         unimplemented!()
     }
 
+    async fn mark_events_absorbed(&self, _: &[i64]) -> RamariaResult<()> {
+        unimplemented!()
+    }
+
     // -- Event Relations --
     async fn save_event_relation(&self, _: &EventRelation) -> RamariaResult<i64> {
         unimplemented!()

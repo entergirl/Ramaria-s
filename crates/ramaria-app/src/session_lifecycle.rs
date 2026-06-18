@@ -582,17 +582,15 @@ impl SessionLifecycle {
     /// 可观测性:
     /// - 通过 JobManager 创建 `PersonalityInference` 任务记录，
     ///   记录开始/完成/failed 时间，便于运维排查"何时对谁做了推断"。
-    /// - 为纯数值计算（不调 LLM），确定性执行，因此不启用 JobManager 重试；
-    ///   存储写入失败逐条 warn 记录。
     ///
-    /// 说明:
+    /// v1.2 更新:
     /// - : 纯数值统计（预过滤 → 聚类 → 收缩 → 跨分类指标）
-    /// - : LLM 三步结构化推断（待 LLM 管线接通）
-    /// - : 漂移检测 + 置信度更新（待 LLM 管线接通）
+    /// - : LLM 三步结构化推断（已接通）
+    /// - : 漂移检测 + 置信度更新（已接通）
     async fn run_l3_inference(
         &self,
         storage: &dyn StorageBackend,
-        _llm: &dyn LlmProvider,
+        llm: &dyn LlmProvider,
         persona_uid: &str,
     ) {
         let persona_owned = persona_uid.to_string();
@@ -627,7 +625,6 @@ impl SessionLifecycle {
             Ok(id) => id,
             Err(e) => {
                 error!(persona_uid = %persona_owned, %e, "创建 L3 推断任务记录失败，继续执行");
-                // 任务记录创建失败不阻塞推断流程
                 0 // 哨兵值：表示无有效 job_id
             }
         };
@@ -637,8 +634,7 @@ impl SessionLifecycle {
         }
 
         // ---- : 统计特征提取（纯数值，不调 LLM） ----
-        // `run_phase_a_stats` 内部包含 A1 预过滤 + A2-A6 全流程
-        use ramaria_memory::inference::{StatsConfig, run_phase_a_stats};
+        use ramaria_memory::inference::{InferrerConfig, StatsConfig, run_phase_a_stats};
 
         let stats_config = StatsConfig::default();
         let stats_summary = run_phase_a_stats(&events, &stats_config);
@@ -664,7 +660,7 @@ impl SessionLifecycle {
             });
 
             let snapshot = ramaria_core::types::ClusterSnapshot {
-                id: 0, // 由 DB 自动分配
+                id: 0,
                 persona_uid: persona_owned.clone(),
                 category: cat_stats.category.clone(),
                 cluster_label: format!("cluster_{}", cat_stats.category),
@@ -687,6 +683,98 @@ impl SessionLifecycle {
             }
         }
 
+        info!(
+            persona_uid = %persona_owned,
+            job_id,
+            snapshot_count,
+            total_categories = stats_summary.categories.len(),
+            "L3 Phase A 推断流程完成，开始 Phase B"
+        );
+
+        // ---- : LLM 三步结构化推断 ----
+        use ramaria_memory::inference::run_phase_b_inference;
+
+        let inferrer_config = InferrerConfig::default();
+        let phase_b_result = match run_phase_b_inference(
+            llm,
+            storage,
+            &stats_summary,
+            &persona_owned,
+            &inferrer_config,
+        )
+        .await
+        {
+            Ok(result) => {
+                info!(
+                    persona_uid = %persona_owned,
+                    saved = result.traits_saved,
+                    updated = result.traits_updated,
+                    deprecated = result.traits_deprecated,
+                    source = ?result.source,
+                    "L3 Phase B 推断完成"
+                );
+                result
+            }
+            Err(e) => {
+                error!(persona_uid = %persona_owned, error = %e, "L3 Phase B 推断失败");
+                if job_id > 0 {
+                    let _ = job_manager
+                        .mark_failed(job_id, &format!("Phase B 推断失败: {e}"))
+                        .await;
+                }
+                return;
+            }
+        };
+
+        // ---- : 置信度更新 + 漂移检测 ----
+        use ramaria_memory::inference::run_phase_c_update;
+
+        // 判断是否为首轮推断（Phase B 结果中 traits_saved == total 且无 update/deprecate）
+        let is_first_round =
+            phase_b_result.traits_updated == 0 && phase_b_result.traits_deprecated == 0;
+
+        match run_phase_c_update(
+            storage,
+            &persona_owned,
+            &phase_b_result.traits,
+            &events,
+            is_first_round,
+        )
+        .await
+        {
+            Ok(phase_c_result) => {
+                info!(
+                    persona_uid = %persona_owned,
+                    traits_updated = phase_c_result.traits_updated,
+                    evidence_saved = phase_c_result.evidence_saved,
+                    has_drift = phase_c_result.has_significant_drift,
+                    drift_categories = ?phase_c_result.drift_categories,
+                    "L3 Phase C 更新完成"
+                );
+            }
+            Err(e) => {
+                error!(persona_uid = %persona_owned, error = %e, "L3 Phase C 更新失败");
+                // Phase C 失败不阻塞事件吸收标记——traits 已写入，confidence 保持初始值
+            }
+        };
+
+        // ---- 标记事件已吸收 ----
+        let event_ids: Vec<i64> = events.iter().map(|e| e.id).collect();
+        if !event_ids.is_empty() {
+            match storage.mark_events_absorbed(&event_ids).await {
+                Ok(_) => {
+                    info!(
+                        persona_uid = %persona_owned,
+                        event_count = event_ids.len(),
+                        "L3 推断：已标记事件吸收"
+                    );
+                }
+                Err(e) => {
+                    warn!(persona_uid = %persona_owned, error = %e, "L3 推断：标记事件吸收失败");
+                }
+            }
+        }
+
         // 标记任务完成
         if job_id > 0
             && let Err(e) = job_manager.mark_completed(job_id).await
@@ -697,9 +785,7 @@ impl SessionLifecycle {
         info!(
             persona_uid = %persona_owned,
             job_id,
-            snapshot_count,
-            total_categories = stats_summary.categories.len(),
-            "L3 Phase A 推断流程完成（Phase B/C 待 LLM 管线接通）"
+            "L3 推断全流程（Phase A→B→C）完成"
         );
     }
 

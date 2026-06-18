@@ -148,6 +148,10 @@ impl StorageBackend for SqliteStorage {
         repo::events::list_unabsorbed_events(&self.pool, persona_uid).await
     }
 
+    async fn mark_events_absorbed(&self, event_ids: &[i64]) -> RamariaResult<()> {
+        repo::events::mark_absorbed(&self.pool, event_ids).await
+    }
+
     // =========================================================
     // Event Relations（事件关系）+ Event Sources（事件溯源）
     // =========================================================

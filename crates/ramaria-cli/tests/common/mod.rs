@@ -341,6 +341,10 @@ impl StorageBackend for MockStorage {
         Ok(Vec::new())
     }
 
+    async fn mark_events_absorbed(&self, _event_ids: &[i64]) -> RamariaResult<()> {
+        Ok(())
+    }
+
     async fn save_event_relation(&self, _rel: &EventRelation) -> RamariaResult<i64> {
         Ok(1)
     }

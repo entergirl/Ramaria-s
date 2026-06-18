@@ -4,6 +4,7 @@
 //! - (纯数值): stats.rs 统计特征、clustering.rs 态度聚类、shrink.rs 贝叶斯收缩
 //! - (LLM 推断): inferrer.rs 三步结构化推断 + mock + 后处理
 //! - (增量更新): drift.rs Wasserstein 漂移检测、confidence.rs 证据累计置信度
+//! - 编排层: orchestrator.rs Phase B/C 异步编排 + 降级 + 持久化
 //! - 全量校准: calibration.rs 累积 10 轮触发 + 全量差异对比
 //! - 超参数锁定: HDBSCAN min_cluster_size=3, UMAP n_components=12, 置换检验 B=1000
 
@@ -12,6 +13,7 @@ pub mod clustering;
 pub mod confidence;
 pub mod drift;
 pub mod inferrer;
+pub mod orchestrator;
 pub mod shrink;
 pub mod stats;
 
@@ -40,6 +42,9 @@ pub use inferrer::{
     CategorySignal, ConsistencyAnalysis, DiffAction, InferenceResult, InferredTrait,
     InferrerConfig, PostProcessResult, TraitDiff, build_step1_prompt, build_step2_prompt,
     build_step3_prompt, compute_trait_diff, mock_infer, post_process_inference,
+};
+pub use orchestrator::{
+    PhaseBResult, PhaseBSource, PhaseCResult, run_phase_b_inference, run_phase_c_update,
 };
 pub use shrink::{
     ShrinkConfig, compute_dynamic_gamma, compute_global_stats, logit, run_shrinkage,

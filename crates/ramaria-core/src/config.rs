@@ -94,6 +94,10 @@ pub struct RamariaConfig {
     #[serde(default)]
     pub logging: LoggingConfig,
 
+    /// L3 性格推断配置（Phase B/C）
+    #[serde(default)]
+    pub inference: InferenceConfig,
+
     /// 杂项（预留扩展位，当前无字段）
     #[serde(default)]
     pub misc: MiscConfig,
@@ -133,6 +137,7 @@ impl Default for RamariaConfig {
             thresholds: ThresholdConfig::default(),
             index: IndexConfig::default(),
             logging: LoggingConfig::default(),
+            inference: InferenceConfig::default(),
             misc: MiscConfig::default(),
         }
     }
@@ -482,18 +487,166 @@ impl Default for LoggingConfig {
 }
 
 // =========================================================
-// 杂项配置（预留扩展位）
+// L3 推断配置
 // =========================================================
 
-/// 杂项配置。
+/// L3 性格推断配置（Phase B + Phase C）。
 ///
 /// 职责:
-/// - 放置尚未形成独立配置域的轻量选项。
-/// - 避免临时字段散落到多个不相关结构中。
+/// - 集中管理推断器、置信度更新、漂移检测和全量校准的参数。
+/// - 所有字段均含合理默认值，无需手动配置即可运行。
 ///
-/// 说明:
-/// - 中此结构当前无字段，作为序列化占位保留以确保配置文件向后兼容。
-/// - 线上隐私相关开关已归入 `BackendSelection` 和 `LoggingConfig`。
+/// 字段约定:
+/// - `inferrer`: Phase B LLM 三步推断参数。
+/// - `confidence`: Phase C 证据累积置信度参数。
+/// - `drift`: Phase C Wasserstein 漂移检测参数。
+/// - `calibration`: 定期全量校准触发参数。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct InferenceConfig {
+    /// Phase B 推断器配置
+    #[serde(default)]
+    pub inferrer: InferrerConf,
+    /// Phase C 置信度配置
+    #[serde(default)]
+    pub confidence: ConfidenceConf,
+    /// Phase C 漂移检测配置
+    #[serde(default)]
+    pub drift: DriftConf,
+    /// 全量校准配置
+    #[serde(default)]
+    pub calibration: CalibrationConf,
+}
+
+/// Phase B 推断器配置（可序列化版本）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InferrerConf {
+    /// LLM 生成温度（默认 0.3）
+    #[serde(default = "default_inferrer_temperature")]
+    pub temperature: f64,
+    /// LLM 最大输出 tokens（默认 2048）
+    #[serde(default = "default_inferrer_max_tokens")]
+    pub max_tokens: u32,
+    /// 小样本分类的证据阈值（默认 5.0）
+    #[serde(default = "default_inferrer_low_evidence")]
+    pub low_evidence_threshold: f64,
+    /// 每步最大 tokens（默认 2048）
+    #[serde(default = "default_inferrer_step_tokens")]
+    pub step_max_tokens: u32,
+}
+
+fn default_inferrer_temperature() -> f64 {
+    0.3
+}
+fn default_inferrer_max_tokens() -> u32 {
+    2048
+}
+fn default_inferrer_low_evidence() -> f64 {
+    5.0
+}
+fn default_inferrer_step_tokens() -> u32 {
+    2048
+}
+
+impl Default for InferrerConf {
+    fn default() -> Self {
+        Self {
+            temperature: 0.3,
+            max_tokens: 2048,
+            low_evidence_threshold: 5.0,
+            step_max_tokens: 2048,
+        }
+    }
+}
+
+/// Phase C 置信度更新配置（可序列化版本）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfidenceConf {
+    /// L2 层稳定性系数 S（默认 60，Ebbinghaus 遗忘曲线）
+    #[serde(default = "default_confidence_stability")]
+    pub stability_s: f64,
+    /// 时间衰减保底值（默认 0.01）
+    #[serde(default = "default_confidence_min_decay")]
+    pub min_decay: f64,
+}
+
+fn default_confidence_stability() -> f64 {
+    60.0
+}
+fn default_confidence_min_decay() -> f64 {
+    0.01
+}
+
+impl Default for ConfidenceConf {
+    fn default() -> Self {
+        Self {
+            stability_s: 60.0,
+            min_decay: 0.01,
+        }
+    }
+}
+
+/// Phase C 漂移检测配置（可序列化版本）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DriftConf {
+    /// 显著性水平（锁定 0.05）
+    #[serde(default = "default_drift_alpha")]
+    pub alpha: f64,
+    /// 置换检验次数（锁定 1000）
+    #[serde(default = "default_drift_n_permutations")]
+    pub n_permutations: usize,
+}
+
+fn default_drift_alpha() -> f64 {
+    0.05
+}
+fn default_drift_n_permutations() -> usize {
+    1000
+}
+
+impl Default for DriftConf {
+    fn default() -> Self {
+        Self {
+            alpha: 0.05,
+            n_permutations: 1000,
+        }
+    }
+}
+
+/// 全量校准配置（可序列化版本）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CalibrationConf {
+    /// 增量更新轮次阈值（默认 10）
+    #[serde(default = "default_calibration_round")]
+    pub round_threshold: u32,
+    /// 事件量翻倍比例阈值（默认 2.0）
+    #[serde(default = "default_calibration_doubling")]
+    pub event_doubling_ratio: f64,
+    /// 差异告警比例（默认 0.3）
+    #[serde(default = "default_calibration_diff_alert")]
+    pub diff_alert_ratio: f64,
+}
+
+fn default_calibration_round() -> u32 {
+    10
+}
+fn default_calibration_doubling() -> f64 {
+    2.0
+}
+fn default_calibration_diff_alert() -> f64 {
+    0.3
+}
+
+impl Default for CalibrationConf {
+    fn default() -> Self {
+        Self {
+            round_threshold: 10,
+            event_doubling_ratio: 2.0,
+            diff_alert_ratio: 0.3,
+        }
+    }
+}
+
+/// 杂项配置（预留扩展位）。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MiscConfig {
     // 预留：未来可扩展天气查询城市、通知偏好等轻量选项

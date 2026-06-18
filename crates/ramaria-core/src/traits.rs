@@ -363,6 +363,16 @@ pub trait StorageBackend: Send + Sync {
     ) -> RamariaResult<Vec<MemoryEvent>>;
     async fn list_unabsorbed_events(&self, persona_uid: &str) -> RamariaResult<Vec<MemoryEvent>>;
 
+    /// 标记事件已被 L3 推断吸收。
+    ///
+    /// 参数:
+    /// - `event_ids`: 要标记的事件 ID 列表。
+    ///
+    /// 说明:
+    /// - 将 `memory_events.absorbed` 设为 1，使这些事件不再出现在 `list_unabsorbed_events` 中。
+    /// - 幂等操作：已标记的事件重复调用无副作用。
+    async fn mark_events_absorbed(&self, event_ids: &[i64]) -> RamariaResult<()>;
+
     // -- Event Relations (from_id/to_id: i64) --
     async fn save_event_relation(&self, rel: &EventRelation) -> RamariaResult<i64>;
 
