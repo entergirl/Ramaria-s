@@ -37,8 +37,8 @@ impl StorageBackend for SqliteStorage {
     // =========================================================
     // Session 管理（会话生命周期）
     // =========================================================
-    async fn create_session(&self) -> RamariaResult<Session> {
-        repo::sessions::create(&self.pool).await
+    async fn create_session(&self, persona_uid: Option<&str>) -> RamariaResult<Session> {
+        repo::sessions::create(&self.pool, persona_uid).await
     }
     async fn close_session(&self, session_id: Uuid) -> RamariaResult<()> {
         repo::sessions::close(&self.pool, session_id).await
@@ -438,7 +438,7 @@ mod tests {
     #[tokio::test]
     async fn session_crud() {
         let storage = setup().await;
-        let session = storage.create_session().await.unwrap();
+        let session = storage.create_session(None).await.unwrap();
         assert!(session.ended_at.is_none());
 
         let got = storage.get_session(session.id).await.unwrap().unwrap();
@@ -449,10 +449,75 @@ mod tests {
         assert!(closed.ended_at.is_some());
     }
 
+    // =========================================================
+    // v1.2: Session-Persona 绑定测试
+    // =========================================================
+
+    /// 创建 session 时可传入 persona_uid，get 时正确返回。
+    #[tokio::test]
+    async fn session_with_persona_uid() {
+        let storage = setup().await;
+        let session = storage.create_session(Some("user-0001")).await.unwrap();
+
+        assert_eq!(session.persona_uid.as_deref(), Some("user-0001"));
+        assert!(session.ended_at.is_none());
+
+        // get 应返回相同 persona_uid
+        let got = storage.get_session(session.id).await.unwrap().unwrap();
+        assert_eq!(got.persona_uid.as_deref(), Some("user-0001"));
+    }
+
+    /// 存量兼容：不传 persona_uid 时，session.persona_uid 为 None。
+    #[tokio::test]
+    async fn session_without_persona_uid_compatible() {
+        let storage = setup().await;
+        let session = storage.create_session(None).await.unwrap();
+
+        assert!(session.persona_uid.is_none());
+        assert!(session.ended_at.is_none());
+
+        // get 应返回 None
+        let got = storage.get_session(session.id).await.unwrap().unwrap();
+        assert!(got.persona_uid.is_none());
+    }
+
+    /// 活跃 session 列表正确返回 persona_uid。
+    #[tokio::test]
+    async fn active_sessions_preserve_persona_uid() {
+        let storage = setup().await;
+
+        let s1 = storage.create_session(Some("char-0001")).await.unwrap();
+        let s2 = storage.create_session(Some("char-0002")).await.unwrap();
+        let _s3 = storage.create_session(None).await.unwrap();
+
+        let active = storage.list_active_sessions().await.unwrap();
+        // 所有 session 都是活跃的
+        assert!(active.len() >= 3);
+
+        let got1 = active.iter().find(|s| s.id == s1.id).unwrap();
+        assert_eq!(got1.persona_uid.as_deref(), Some("char-0001"));
+
+        let got2 = active.iter().find(|s| s.id == s2.id).unwrap();
+        assert_eq!(got2.persona_uid.as_deref(), Some("char-0002"));
+    }
+
+    /// 全部 session 列表正确返回 persona_uid。
+    #[tokio::test]
+    async fn all_sessions_preserve_persona_uid() {
+        let storage = setup().await;
+
+        let s = storage.create_session(Some("rama-0001")).await.unwrap();
+        storage.close_session(s.id).await.unwrap();
+
+        let all = storage.list_sessions().await.unwrap();
+        let got = all.iter().find(|x| x.id == s.id).unwrap();
+        assert_eq!(got.persona_uid.as_deref(), Some("rama-0001"));
+    }
+
     #[tokio::test]
     async fn message_crud() {
         let storage = setup().await;
-        let session = storage.create_session().await.unwrap();
+        let session = storage.create_session(None).await.unwrap();
         let msg = Message::new(
             session.id,
             MessageRole::User,
@@ -479,7 +544,7 @@ mod tests {
         );
         storage.create_persona(&p).await.unwrap();
 
-        let session = storage.create_session().await.unwrap();
+        let session = storage.create_session(None).await.unwrap();
         let mut msg = Message::new(
             session.id,
             MessageRole::User,
@@ -496,7 +561,7 @@ mod tests {
     #[tokio::test]
     async fn memory_l1_crud() {
         let storage = setup().await;
-        let session = storage.create_session().await.unwrap();
+        let session = storage.create_session(None).await.unwrap();
         let l1 = MemoryL1::new(session.id, "摘要".into(), Some("上午".into()));
         storage.save_memory_l1(&l1).await.unwrap();
 
@@ -586,7 +651,7 @@ mod tests {
     #[tokio::test]
     async fn event_source_crud() {
         let storage = setup().await;
-        let session = storage.create_session().await.unwrap();
+        let session = storage.create_session(None).await.unwrap();
         let l1 = MemoryL1::new(session.id, "摘要".into(), None);
         storage.save_memory_l1(&l1).await.unwrap();
         let p = Persona::new(
@@ -795,7 +860,7 @@ mod tests {
         );
         let persona_id = storage.create_persona(&p).await.unwrap();
 
-        let session = storage.create_session().await.unwrap();
+        let session = storage.create_session(None).await.unwrap();
         let l1 = MemoryL1::new(session.id, "测试摘要".into(), Some("上午".into()));
         storage.save_memory_l1(&l1).await.unwrap();
 
@@ -989,7 +1054,7 @@ mod tests {
             "local".into(),
         );
         storage.create_persona(&p).await.unwrap();
-        let session = storage.create_session().await.unwrap();
+        let session = storage.create_session(None).await.unwrap();
         (storage, persona_uid, session.id)
     }
 

@@ -262,7 +262,11 @@ pub trait EmbeddingProvider: Send + Sync {
 #[async_trait]
 pub trait StorageBackend: Send + Sync {
     // -- Session --
-    async fn create_session(&self) -> RamariaResult<Session>;
+    /// 创建新 session，可选的 persona_uid 用于 Session-Persona 绑定（v1.2）。
+    ///
+    /// 参数:
+    /// - `persona_uid`: 对话人格标识（None 兼容存量调用）。
+    async fn create_session(&self, persona_uid: Option<&str>) -> RamariaResult<Session>;
     async fn close_session(&self, session_id: Uuid) -> RamariaResult<()>;
     async fn get_session(&self, session_id: Uuid) -> RamariaResult<Option<Session>>;
     async fn list_active_sessions(&self) -> RamariaResult<Vec<Session>>;

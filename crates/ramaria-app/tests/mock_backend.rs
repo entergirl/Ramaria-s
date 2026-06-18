@@ -81,6 +81,7 @@ impl MockStorage {
                 id: session_id,
                 started_at: 1000,
                 ended_at: None,
+                persona_uid: None,
             },
         );
         self.messages.lock().unwrap().insert(session_id, messages);
@@ -107,6 +108,7 @@ impl MockStorage {
                 id: session_id,
                 started_at: 1000,
                 ended_at: None,
+                persona_uid: None,
             },
         );
     }
@@ -129,11 +131,12 @@ impl MockStorage {
 
 #[async_trait]
 impl StorageBackend for MockStorage {
-    async fn create_session(&self) -> RamariaResult<Session> {
+    async fn create_session(&self, persona_uid: Option<&str>) -> RamariaResult<Session> {
         let session = Session {
             id: Uuid::new_v4(),
             started_at: 1000,
             ended_at: None,
+            persona_uid: persona_uid.map(|s| s.to_string()),
         };
         self.sessions
             .lock()

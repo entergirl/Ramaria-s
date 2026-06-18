@@ -167,6 +167,8 @@ impl std::fmt::Display for MessageRole {
 /// 状态:
 /// - `ended_at = None`: 会话仍在进行中。
 /// - `ended_at = Some(...)`: 会话已关闭，可触发 L1 摘要。
+/// - `persona_uid = Some(...)`: 创建此 session 时使用的对话人格（v1.2 新增）。
+/// - `persona_uid = None`: 存量 session 或未指定人格。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: Uuid,
@@ -174,6 +176,8 @@ pub struct Session {
     pub started_at: i64,
     /// Session 结束时间，None 表示未关闭
     pub ended_at: Option<i64>,
+    /// 创建此 session 时绑定的对话人格 UID（v1.2 新增，可空兼容存量数据）
+    pub persona_uid: Option<String>,
 }
 
 impl Default for Session {
@@ -186,12 +190,29 @@ impl Session {
     /// 创建一个新的活跃 Session。
     ///
     /// 返回:
-    /// - 带新 UUID、当前开始时间、未关闭状态的 Session。
+    /// - 带新 UUID、当前开始时间、未关闭状态、无 persona_uid 的 Session。
     pub fn new() -> Self {
         Self {
             id: new_id(),
             started_at: now_ms(),
             ended_at: None,
+            persona_uid: None,
+        }
+    }
+
+    /// 创建一个绑定人格的活跃 Session（v1.2 新增）。
+    ///
+    /// 参数:
+    /// - `persona_uid`: 对话人格标识（None 表示 rama 自身）。
+    ///
+    /// 返回:
+    /// - 带新 UUID、当前开始时间、绑定 persona_uid 的 Session。
+    pub fn with_persona(persona_uid: Option<String>) -> Self {
+        Self {
+            id: new_id(),
+            started_at: now_ms(),
+            ended_at: None,
+            persona_uid,
         }
     }
 
@@ -871,6 +892,8 @@ pub struct MemoryEvent {
     pub absorbed: i64,
     /// 情境强度 1-5（从源 L1 传播），None 等效 3
     pub situation_strength: Option<i32>,
+    /// 底层动机标注（v1.2 Schema 预埋，v1.3 激活），None 表示未标注
+    pub motives: Option<String>,
     pub created_at: i64,
     pub last_accessed_at: Option<i64>,
     pub indexed_at: Option<i64>,
@@ -899,6 +922,7 @@ impl MemoryEvent {
             paraphrase: None,
             absorbed: 0,
             situation_strength: None,
+            motives: None,
             created_at: now,
             last_accessed_at: None,
             indexed_at: None,

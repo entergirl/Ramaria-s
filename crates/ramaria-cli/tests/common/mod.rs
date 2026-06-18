@@ -86,6 +86,7 @@ impl MockStorage {
                 id: session_id,
                 started_at: 1_717_977_600_000, // 2024-06-10T08:00:00 UTC
                 ended_at: None,
+                persona_uid: None,
             },
         );
         self.messages.lock().unwrap().insert(session_id, messages);
@@ -99,6 +100,7 @@ impl MockStorage {
                 id: session_id,
                 started_at: 1_717_977_600_000,
                 ended_at: Some(1_717_986_240_000), // 24h later
+                persona_uid: None,
             },
         );
     }
@@ -162,11 +164,12 @@ impl MockStorage {
 
 #[async_trait]
 impl StorageBackend for MockStorage {
-    async fn create_session(&self) -> RamariaResult<Session> {
+    async fn create_session(&self, persona_uid: Option<&str>) -> RamariaResult<Session> {
         let session = Session {
             id: Uuid::new_v4(),
             started_at: 1_717_977_600_000,
             ended_at: None,
+            persona_uid: persona_uid.map(|s| s.to_string()),
         };
         self.sessions
             .lock()
@@ -840,6 +843,7 @@ pub fn make_test_event(id: i64, title: &str) -> MemoryEvent {
         paraphrase: None,
         absorbed: 0,
         situation_strength: None,
+        motives: None,
         created_at: 1_717_977_600_000,
         last_accessed_at: None,
         indexed_at: None,

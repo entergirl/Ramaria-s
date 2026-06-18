@@ -187,7 +187,7 @@ pub async fn create_session(state: State<'_, DesktopState>) -> Result<SessionSum
     let session = state
         .app
         .storage()
-        .create_session()
+        .create_session(None)
         .await
         .map_err(|e| format!("创建会话失败: {}", e))?;
 

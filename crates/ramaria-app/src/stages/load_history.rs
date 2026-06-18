@@ -242,6 +242,7 @@ mod tests {
             id: session_id,
             started_at: 1000,
             ended_at: None,
+            persona_uid: None,
         }));
 
         let result = stage.execute(&ctx, data).await;
@@ -264,6 +265,7 @@ mod tests {
             id: session_id,
             started_at: 1000,
             ended_at: None,
+            persona_uid: None,
         }));
 
         let result = stage.execute(&ctx, data).await;
@@ -290,6 +292,7 @@ mod tests {
             id: session_id,
             started_at: 1000,
             ended_at: None,
+            persona_uid: None,
         }));
 
         let result = stage.execute(&ctx, data).await;
@@ -318,6 +321,7 @@ mod tests {
             id: session_id,
             started_at: 1000,
             ended_at: None,
+            persona_uid: None,
         }));
 
         let result = stage.execute(&ctx, data).await;
@@ -338,6 +342,7 @@ mod tests {
             id: session_id,
             started_at: 1000,
             ended_at: None,
+            persona_uid: None,
         }));
 
         let result = stage.execute(&ctx, data).await;

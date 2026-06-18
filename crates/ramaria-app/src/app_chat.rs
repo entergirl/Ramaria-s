@@ -459,14 +459,15 @@ async fn stream_forward_task(
     let mut has_error = false;
     let now = now_ms();
 
-    // 1. 保存用户消息（用户发言不关联 persona——发言人是用户自己）
+    // 1. 保存用户消息
+    //    v1.2: 用户消息现在也携带 persona_uid，表示"在此 persona 的对话上下文中"
     let user_msg = Message::new(
         session_id,
         MessageRole::User,
         user_message,
         MessageSource::Local,
-    );
-    // 用户消息不设 persona_uid（用户即自己），前端据此将气泡渲染在右侧
+    )
+    .with_persona_uid(persona_uid.clone());
     if let Err(e) = storage.save_message(&user_msg).await {
         tracing::error!(%e, "保存用户消息失败");
         let _ = tx.unbounded_send(Err(e));

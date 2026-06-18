@@ -135,7 +135,7 @@ impl MockStorage {
 #[async_trait]
 impl StorageBackend for MockStorage {
     // -- Session (unused by summarizer) --
-    async fn create_session(&self) -> RamariaResult<Session> {
+    async fn create_session(&self, _persona_uid: Option<&str>) -> RamariaResult<Session> {
         unimplemented!()
     }
     async fn close_session(&self, _: Uuid) -> RamariaResult<()> {

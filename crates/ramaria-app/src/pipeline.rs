@@ -535,7 +535,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl StorageBackend for TestStorage {
-        async fn create_session(&self) -> RamariaResult<Session> {
+        async fn create_session(&self, _persona_uid: Option<&str>) -> RamariaResult<Session> {
             Ok(Session::new())
         }
         async fn close_session(&self, _id: Uuid) -> RamariaResult<()> {

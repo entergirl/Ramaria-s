@@ -45,7 +45,9 @@ pub use privacy::{PrivacyStatus, check_privacy, confirm_privacy, require_privacy
 pub use session_lifecycle::SessionLifecycle;
 pub use setup::{SetupStatus, check_setup_status, determine_state, run_setup};
 pub use stages::{
-    StageCheckPrivacy, StageCheckState, StageLoadHistory, StageResolveSession, StageRetrieveMemory,
+    StageBuildPrompt, StageBuildRequest, StageCallLlm, StageCheckPrivacy, StageCheckState,
+    StageLoadHistory, StagePersistMessage, StageResolveSession, StageRetrieveMemory,
+    StageTokenBudget,
 };
 pub use stream_event::StreamEvent;
 pub use update::{UpdateStatus, check_update};

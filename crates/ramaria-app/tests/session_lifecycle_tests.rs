@@ -197,7 +197,7 @@ async fn mock_storage_save_rejects_closed_session() {
     // 验证 MockStorage 层面也拒绝了向已关闭 session 写入
     let storage = MockStorage::new();
 
-    let sid = storage.create_session().await.unwrap().id;
+    let sid = storage.create_session(None).await.unwrap().id;
 
     // 写入一条消息到活跃 session → 应成功
     let msg = ramaria_core::types::Message::new(
@@ -391,7 +391,7 @@ async fn send_message_with_explicit_session_id() {
     app.set_state(AppState::Ready);
 
     // 手动创建 session
-    let session = storage.create_session().await.unwrap();
+    let session = storage.create_session(None).await.unwrap();
     let sid = session.id;
 
     // 使用指定 session_id 发消息（需消费流以等待消息保存完成）

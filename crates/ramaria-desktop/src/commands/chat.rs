@@ -81,8 +81,8 @@ pub async fn send_message(
     if let Some(sid) = session_id_parsed {
         match app.storage().get_session(sid).await {
             Ok(Some(s)) if s.ended_at.is_some() => {
-                // Session 已关闭 → 自动创建新 session
-                match app.storage().create_session().await {
+                // Session 已关闭 → 自动创建新 session（v1.2: 绑定当前 persona_uid）
+                match app.storage().create_session(persona_uid.as_deref()).await {
                     Ok(new_s) => {
                         tracing::info!(
                             old_session_id = %sid,
@@ -101,8 +101,8 @@ pub async fn send_message(
                 // Session 仍活跃，正常使用
             }
             Ok(None) => {
-                // Session 不存在（可能被删除），也创建新 session
-                match app.storage().create_session().await {
+                // Session 不存在（可能被删除），也创建新 session（v1.2: 绑定当前 persona_uid）
+                match app.storage().create_session(persona_uid.as_deref()).await {
                     Ok(new_s) => {
                         tracing::info!(
                             old_session_id = %sid,

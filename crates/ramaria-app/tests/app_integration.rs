@@ -244,7 +244,7 @@ async fn send_message_preserves_session() {
     // Degraded 状态下 session 操作仍可用
 
     // 创建已知会话
-    let session = storage.create_session().await.unwrap();
+    let session = storage.create_session(None).await.unwrap();
     let session_id = session.id;
 
     // 发送消息（使用已有会话）

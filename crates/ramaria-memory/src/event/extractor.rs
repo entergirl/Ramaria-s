@@ -606,6 +606,7 @@ impl<'a> EventExtractor<'a> {
             paraphrase: None, // 后续异步生成
             absorbed: 0,
             situation_strength,
+            motives: None, // v1.2 Schema 预埋，v1.3 激活
             created_at: now,
             last_accessed_at: None,
             indexed_at: None,

@@ -72,6 +72,7 @@ impl MockStorage {
                 id: session_id,
                 started_at: 1000,
                 ended_at: None,
+                persona_uid: None,
             },
         );
     }
@@ -84,6 +85,7 @@ impl MockStorage {
                 id: session_id,
                 started_at: 1000,
                 ended_at: Some(2000),
+                persona_uid: None,
             },
         );
     }
@@ -109,8 +111,8 @@ impl MockStorage {
 
 #[async_trait]
 impl StorageBackend for MockStorage {
-    async fn create_session(&self) -> RamariaResult<Session> {
-        let session = Session::new();
+    async fn create_session(&self, persona_uid: Option<&str>) -> RamariaResult<Session> {
+        let session = Session::with_persona(persona_uid.map(|s| s.to_string()));
         self.sessions
             .lock()
             .unwrap()

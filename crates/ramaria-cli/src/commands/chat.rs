@@ -46,7 +46,7 @@ pub async fn run(app: &Arc<ramaria_app::App>, yes: bool) -> anyhow::Result<()> {
     // 创建新 session（mutable：空闲关闭后自动重建）
     let mut session = app
         .storage()
-        .create_session()
+        .create_session(None)
         .await
         .context("创建会话失败")?;
 
@@ -174,7 +174,7 @@ async fn try_send_or_recreate(
     }
 
     // 重建 session
-    let new_session = app.storage().create_session().await.map_err(|e| {
+    let new_session = app.storage().create_session(None).await.map_err(|e| {
         ramaria_core::error::RamariaError::storage(format!(
             "创建新会话失败（原 session {} 已关闭）: {e}",
             session.id
@@ -234,7 +234,7 @@ async fn handle_command(
                     println!("── 对话已保存 ──");
                     crate::ui::info("当前对话已保存，下次消息将自动开始新对话。");
                     // 尝试创建新 session 以便下次消息直接使用
-                    match app.storage().create_session().await {
+                    match app.storage().create_session(None).await {
                         Ok(new_s) => {
                             *session = new_s;
                             tracing::info!(
