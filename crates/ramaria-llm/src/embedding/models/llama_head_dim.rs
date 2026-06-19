@@ -284,6 +284,11 @@ impl LlamaHeadDimEncoder {
 
         // Step 3: Forward pass（Model::forward 需要 &mut self，seqlen_offset=0 表示首次推理）
         let mut model = self.model.lock().unwrap_or_else(|e| e.into_inner());
+        // ★ 关键修复：每次 forward 前清除 KV cache。
+        // candle qwen2 Model 的 forward() 会将 K/V 状态存入内部缓存（self.kv_cache），
+        // 下次调用时会 concatenate 新旧 K/V，导致 K_len > Q_len。
+        // 嵌入场景每次都是独立推理，不依赖上下文，必须清除。
+        model.clear_kv_cache();
         let hidden_states = model.forward(&input_ids, 0, None).map_err(|e| {
             ramaria_core::error::RamariaError::embedding(format!(
                 "前向推理失败: {}。文本: '{}...'",

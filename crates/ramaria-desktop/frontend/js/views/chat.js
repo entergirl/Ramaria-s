@@ -40,6 +40,16 @@ var RamariaChatView = (function () {
  // 内部状态
  // =========================================================
 
+ /**
+  * ★ v1.2 M4-A: 当前会话绑定的 persona_uid（真相源来自后端 session.persona_uid）。
+  * 与下拉框选择的 currentPersonaUid 区别：
+  * - currentPersonaUid: 用户通过 UI 选择的目标人格
+  * - sessionPersonaUid: 后端 DB session 表中实际记录的 persona_uid
+  * 正常情况下两者一致；不一致时以后端为准。
+  * 此变量用于 ChatView 内部快速访问，避免频繁调用 Store.get('sessionPersonaUid')。
+  */
+    var _sessionPersonaUid = null;
+
  /** 取消 Tauri 事件监听的函数列表 */
     var _unlistenFns = [];
  /** Router 钩子取消注册函数列表 */
@@ -368,50 +378,112 @@ var RamariaChatView = (function () {
     }
 
  /**
- * 切换到指定人格的会话。
+ * ★ v1.2 M4-A: 切换到指定人格的会话。
+ *
+ * 与 v1.1 的核心差异:
+ * - personaSessions 降级为性能缓存（不依赖其做归属判断）
+ * - 加载 session 后以 `session.persona_uid`（后端 DB 真相源）验证归属
+ * - 新增 `_sessionPersonaUid` 追踪，与 Store.sessionPersonaUid 同步
+ * - 缓存与真相源不一致时自动修正（过期缓存不阻塞正常流程）
  *
  * 参数:
  * - `personaUid`: 目标人格 UID。
  * - `silent`: 可选，true 时跳过 Toast 提示（初始加载用）。
  */
     async function _switchToPersona(personaUid, silent) {
- // 1. 更新 Store
+ // 1. 更新 Store 中的当前选中人格（前端视角）
         RamariaStore.set('currentPersonaUid', personaUid);
 
- // 2. 查找该人格的已有 session
-        var existingSessionId = RamariaStore.getPersonaSession(personaUid);
+ // 2. 从性能缓存查找该人格的已有 session（仅作 hint，不依赖做真相判断）
+        var cachedSessionId = RamariaStore.getPersonaSession(personaUid);
         var messagesLoaded = false;
 
-        if (existingSessionId) {
- // 尝试加载已有 session 的消息
+        if (cachedSessionId) {
             try {
-                var session = await RamariaApi.session.get(existingSessionId);
-                if (session && session.messages && session.messages.length > 0) {
-                    RamariaStore.set('activeSessionId', existingSessionId);
-                    RamariaStore.set('messages', session.messages);
-                    _renderAllMessages();
-                    messagesLoaded = true;
+                var session = await RamariaApi.session.get(cachedSessionId);
 
- // ★ 不启用只读模式：用户切换人格是为了继续聊，不是浏览历史。
- // 即使 session 已关闭，输入框保持可用——下次发送自动创建新 session。
-                    _setReadonlyMode(false);
+ // ★ v1.2: 验证后端真相源——session.persona_uid 是否与目标人格匹配
+                var dbPersonaUid = session ? (session.persona_uid || null) : null;
+
+                if (dbPersonaUid === personaUid) {
+ // 后端确认归属正确：session 确实属于该人格
+                    _sessionPersonaUid = personaUid;
+                    RamariaStore.set('sessionPersonaUid', personaUid);
+
+                    if (session.messages && session.messages.length > 0) {
+                        RamariaStore.set('activeSessionId', cachedSessionId);
+                        RamariaStore.set('messages', session.messages);
+                        _renderAllMessages();
+                        messagesLoaded = true;
+                        _setReadonlyMode(false);
+
+                        console.log('[ChatView] 切换人格 ' + personaUid
+                            + ' → session ' + cachedSessionId.substring(0, 8)
+                            + ' (persona_uid 已由后端确认, ' + session.messages.length + ' 条消息)');
+                    } else {
+ // session 归属正确但无消息，留空等待用户输入
+                        RamariaStore.set('activeSessionId', null);
+                        RamariaStore.set('messages', []);
+                        _clearMessages();
+                        console.log('[ChatView] 切换人格 ' + personaUid
+                            + ' → session ' + cachedSessionId.substring(0, 8)
+                            + ' 归属正确但无消息');
+                    }
+                } else if (dbPersonaUid === null) {
+ // ★ 存量兼容：session.persona_uid 为 NULL（v1.1 及以前创建的旧数据）
+ // 此类 session 尚未被后端 persona 绑定逻辑更新，暂时信任缓存
+                    _sessionPersonaUid = personaUid;
+                    RamariaStore.set('sessionPersonaUid', personaUid);
+
+                    if (session.messages && session.messages.length > 0) {
+                        RamariaStore.set('activeSessionId', cachedSessionId);
+                        RamariaStore.set('messages', session.messages);
+                        _renderAllMessages();
+                        messagesLoaded = true;
+                        _setReadonlyMode(false);
+
+                        console.log('[ChatView] 切换人格 ' + personaUid
+                            + ' → session ' + cachedSessionId.substring(0, 8)
+                            + ' (存量 session, persona_uid=NULL, '
+                            + session.messages.length + ' 条消息)');
+                    }
                 } else {
- // session 存在但无消息（可能被清空），移除映射
+ // persona_uid 不匹配：缓存已过期（后端可能已更新 session 归属）
+ // 清除过期缓存，显示空状态——下次发送消息时后端自动创建正确的新 session
+                    console.warn('[ChatView] 缓存过期: persona=' + personaUid
+                        + ', 缓存 session=' + cachedSessionId.substring(0, 8)
+                        + ', DB persona_uid=' + dbPersonaUid
+                        + '。清除过期缓存，显示空状态。');
+
                     RamariaStore.set('activeSessionId', null);
                     RamariaStore.set('messages', []);
+                    RamariaStore.set('sessionPersonaUid', null);
+                    _sessionPersonaUid = null;
                     _clearMessages();
+
+ // 从缓存中移除过期映射
+                    var ps = Object.assign({}, RamariaStore.get('personaSessions'));
+                    delete ps[personaUid];
+                    RamariaStore.set('personaSessions', ps, true);
                 }
             } catch (err) {
                 console.warn('[ChatView] 加载人格会话失败:', err);
- // 会话可能已被删除，清除映射
+ // 网络/后端异常：不清除缓存（可能是临时故障），但不阻塞 UI
                 RamariaStore.set('activeSessionId', null);
                 RamariaStore.set('messages', []);
+                RamariaStore.set('sessionPersonaUid', null);
+                _sessionPersonaUid = null;
                 _clearMessages();
             }
+        } else {
+ // 无缓存 hint：该人格尚无活跃 session
+            console.log('[ChatView] 切换人格 ' + personaUid + ' → 无缓存 session，显示空状态');
+            RamariaStore.set('sessionPersonaUid', null);
+            _sessionPersonaUid = null;
         }
 
         if (!messagesLoaded) {
- // 无已有会话，显示空状态
+ // 无已有会话或消息，显示空状态
             RamariaStore.set('activeSessionId', null);
             RamariaStore.set('messages', []);
             _clearMessages();
@@ -421,7 +493,7 @@ var RamariaChatView = (function () {
  // 3. 同步页眉（头像+名称）
         _updateHeaderPersona();
 
- // 4. 持久化映射（await 确保不被后续 navigate-away 中断）
+ // 4. 持久化缓存映射（非阻塞，失败仅 warn）
         await _persistPersonaSessions();
 
         if (!silent) {
@@ -442,29 +514,53 @@ var RamariaChatView = (function () {
  // =========================================================
 
  /**
- * 将 personaSessions 映射持久化到后端 settings。
+ * ★ v1.2: 将 personaSessions 缓存映射持久化到后端 settings。
  *
  * 说明:
- * - 每次 session 创建/切换时调用。
- * - 使用 RamariaApi.config.updateSetting 写入。
- * - 失败时仅打印 warn（非关键路径，下次正常写入即可覆盖）。
+ * - personaSessions 仅作为性能缓存（非真相源），真相源在后端 sessions.persona_uid。
+ * - 每次 session 创建/切换时调用，保存缓存以供冷启动恢复。
+ * - 失败时仅打印 warn（非关键路径，缓存可在下次正常运行时重建）。
  */
+ /**
+ * ★ v1.2 修复: 清除指定人格的会话缓存映射（仅内存，不持久化）。
+ *
+ * 场景: 保存对话后，_handleSaveSession 清除了 activeSessionId，
+ * 但 personaSessions 仍指向已关闭的 session。
+ * 若此时用户退出再进入（或应用重启），_loadInitialData 会将已关闭
+ * session 重新激活。清除映射确保不会再加载已关闭的 session。
+ *
+ * 不在此函数内持久化——防止与 _handleSend 的异步持久化产生竞态。
+ * 持久化由调用方负责（_handleSaveSession 在调用后 await _persistPersonaSessions）。
+ */
+    function _clearPersonaSessionCache(personaUid) {
+        if (!personaUid) return;
+        var map = Object.assign({}, RamariaStore.get('personaSessions') || {});
+        if (map[personaUid]) {
+            delete map[personaUid];
+            RamariaStore.set('personaSessions', map);
+            console.log('[ChatView] 已清除 persona=' + personaUid + ' 的会话缓存（内存）');
+        }
+    }
+
     async function _persistPersonaSessions() {
         try {
             var map = RamariaStore.get('personaSessions') || {};
             var json = JSON.stringify(map);
             await RamariaApi.config.updateSetting('persona_sessions', json);
+            console.log('[ChatView] persona_sessions 缓存已持久化（' + Object.keys(map).length + ' 条）');
         } catch (err) {
-            console.warn('[ChatView] 持久化 persona_sessions 失败:', err);
+            console.warn('[ChatView] 持久化 persona_sessions 缓存失败:', err);
         }
     }
 
  /**
- * 从后端 settings 恢复 personaSessions 映射。
+ * ★ v1.2: 从后端 settings 恢复 personaSessions 缓存映射。
  *
  * 说明:
- * - 在 _loadInitialData 中调用。
- * - 解析失败或不存在时回退到空映射。
+ * - 仅在 cold start（personaSessions 为空）时从后端恢复缓存。
+ * - 缓存非真相源——session 归属以 DB session.persona_uid 为准。
+ * - 若内存中已有映射（应用运行期间已建立），跳过后端恢复以避免覆盖。
+ * - 解析失败或不存在时回退到空缓存。
  */
     async function _restorePersonaSessions() {
  // ★ 修复: 仅在 cold start（personaSessions 为空）时从后端恢复。
@@ -540,9 +636,13 @@ var RamariaChatView = (function () {
  */
     async function _handleSaveSession() {
         try {
- // 获取当前选中的人格 UID
+ // ★ v1.2: 获取当前会话绑定的 persona UID——优先 sessionPersonaUid（后端真相源），
+ // 回退下拉框选择值（前端 UI 状态）
             var personaSelect = $('chat-persona-select');
-            var personaUid = personaSelect ? personaSelect.value : null;
+            var personaUid = _sessionPersonaUid || (personaSelect ? personaSelect.value : null);
+            if (!personaUid) {
+                console.warn('[ChatView] 保存对话时无法确定 persona_uid');
+            }
 
  // ★ 关键修复: 在 await 之前立即清除 activeSessionId + 禁用输入。
  // 否则 await RamariaApi.chat.save 期间 JavaScript 事件循环可被其他事件中断，
@@ -578,9 +678,17 @@ var RamariaChatView = (function () {
                 }
             }
 
- // 不清屏——保留当前消息。不删除 personaSessions 映射——已关闭的 session
- // 仍保留在映射中，确保用户退出重进后能通过 _loadInitialData 恢复并查看历史消息。
- // _handleSend 在下一次发送时会自动创建新 session 并覆盖映射。
+ // ★ v1.2: 不清屏——保留当前消息。
+ // ★ 修复: 清除 personaSessions 缓存映射。否则已关闭的 session 会被
+ // _loadInitialData 重新激活（尤其是在应用重启/热重载时，
+ // _restorePersonaSessions 从后端恢复旧映射导致加载已关闭 session）。
+ // 已保存消息仍在 DOM 中可见；下次发送消息时 _handleSend 自动创建新 session。
+ // _sessionPersonaUid 保留——用户仍在与同一 persona 对话。
+ _clearPersonaSessionCache(personaUid);
+ // 持久化清除后的映射到后端（非阻塞，失败仅 warn）
+ _persistPersonaSessions().catch(function(err) {
+     console.warn('[ChatView] 保存后持久化缓存失败:', err);
+ });
 
  // 根据 L1 生成结果给出不同提示
             if (parsed.l1_generated) {
@@ -663,9 +771,12 @@ var RamariaChatView = (function () {
     async function _handleNewSessionFromReadonly() {
         _setReadonlyMode(false);
 
- // 清除当前消息和活跃 session（不清除 personaSessions 映射）
+ // ★ v1.2: 清除当前消息、活跃 session 和会话 persona 绑定
+ // personaSessions 缓存保留（下次发送消息时后端自动创建新 session 并写入 persona_uid）
         RamariaStore.set('messages', []);
         RamariaStore.set('activeSessionId', null);
+        RamariaStore.set('sessionPersonaUid', null);
+        _sessionPersonaUid = null;
         _clearMessages();
         _showEmptyState(_msgListEl());
 
@@ -703,9 +814,15 @@ var RamariaChatView = (function () {
  // 禁用输入
         _setInputEnabled(false);
 
- // 当前人格
+ // ★ v1.2: 当前人格——优先从 session 真相源读取，回退前端下拉框
         var personaSelect = $('chat-persona-select');
         var personaUid = personaSelect ? personaSelect.value : 'rama-0001';
+
+ // 如果已有活跃 session 且其 persona_uid 已绑定，以 DB 为准
+        if (_sessionPersonaUid) {
+            personaUid = _sessionPersonaUid;
+            console.log('[ChatView] 当前会话已绑定 persona_uid=' + personaUid + '（后端真相源）');
+        }
 
  // 确保有活跃会话
         var sessionId = RamariaStore.get('activeSessionId');
@@ -714,16 +831,26 @@ var RamariaChatView = (function () {
                 var session = await RamariaApi.session.create();
                 sessionId = session.id;
                 RamariaStore.set('activeSessionId', sessionId);
- // 建立人格→会话映射并持久化
- // ★ 修复: await 确保映射在 send 之前已持久化到后端，
- // 避免"离开再返回时 person_sessions 过期"的问题。
+
+ // ★ v1.2: 建立人格→会话缓存映射并持久化（非真相源，仅供下次切换加速查找）
                 RamariaStore.setPersonaSession(personaUid, sessionId);
                 await _persistPersonaSessions();
+
+ // ★ v1.2: 新建 session 时同步 sessionPersonaUid（此时 session 刚创建，persona_uid 尚未写入 DB）
+ // 后端 send_message 的 resolve_session 阶段会完成绑定；前端假设绑定成功。
+                _sessionPersonaUid = personaUid;
+                RamariaStore.set('sessionPersonaUid', personaUid);
             } catch (err) {
                 console.error('[ChatView] 自动创建会话失败:', err);
                 RamariaToast.show('error', '创建会话失败', '无法自动创建会话');
                 _setInputEnabled(true);
                 return;
+            }
+        } else {
+ // session 已存在，确保 sessionPersonaUid 同步
+            if (!_sessionPersonaUid) {
+                _sessionPersonaUid = personaUid;
+                RamariaStore.set('sessionPersonaUid', personaUid);
             }
         }
 
@@ -1336,17 +1463,42 @@ var RamariaChatView = (function () {
             if (savedSessionId) {
                 try {
                     var session = await RamariaApi.session.get(savedSessionId);
-                    if (session && session.messages && session.messages.length > 0) {
+// ★ 防御: 跳过已关闭的 session（ended_at 非空）。
+// 已关闭 session 的 personaSessions 映射本应在 _handleSaveSession 中被
+// _clearPersonaSessionCache 清除，但若持久化失败或应用未正常退出，
+// 后端可能残留过期映射。此处作为最后一道防线确保不会恢复已关闭会话。
+                    if (session && session.ended_at != null && session.ended_at !== 0) {
+                        console.warn('[ChatView] 跳过已关闭 session: ' + savedSessionId
+                            + ' (ended_at=' + session.ended_at + '), 清除过期映射');
+                        _clearPersonaSessionCache(currentPersona);
+// 持久化清除后的映射，避免每次重启都重复"恢复→跳过→空状态"循环
+                        _persistPersonaSessions().catch(function(err) {
+                            console.warn('[ChatView] 清除过期映射持久化失败:', err);
+                        });
+                    } else if (session && session.messages && session.messages.length > 0) {
                         RamariaStore.set('activeSessionId', savedSessionId);
                         RamariaStore.set('messages', session.messages);
                         RamariaStore.set('currentPersonaUid', currentPersona);
                         _renderAllMessages();
                         loaded = true;
 
+ // ★ v1.2: 从后端 session.persona_uid 读取真相源并同步到 Store
+                        var dbPersona = session.persona_uid || null;
+                        if (dbPersona) {
+                            _sessionPersonaUid = dbPersona;
+                            RamariaStore.set('sessionPersonaUid', dbPersona);
+                            console.log('[ChatView] 恢复会话: ' + savedSessionId
+                                + ' (' + session.messages.length + ' 条消息, persona_uid=' + dbPersona + ')');
+                        } else {
+ // 存量兼容：session 无 persona_uid 时使用缓存 persona 作为默认值
+                            _sessionPersonaUid = currentPersona;
+                            RamariaStore.set('sessionPersonaUid', currentPersona);
+                            console.log('[ChatView] 恢复会话: ' + savedSessionId
+                                + ' (' + session.messages.length + ' 条消息, persona_uid=NULL, 回退=' + currentPersona + ')');
+                        }
+
  // ★ 不启用只读模式：用户回到对话页就是要继续聊的。
- // 即使 session 已关闭，输入框保持可用——下次发送自动创建新 session。
                         RamariaRouter.setSessionInfo('会话: ' + savedSessionId.substring(0, 8) + '...');
-                        console.log('[ChatView] 恢复会话: ' + savedSessionId + ' (' + session.messages.length + ' 条消息)');
                     }
                 } catch (err) {
                     console.warn('[ChatView] 恢复持久化会话失败:', err);
@@ -1358,6 +1510,8 @@ var RamariaChatView = (function () {
                 RamariaStore.set('activeSessionId', null);
                 RamariaStore.set('messages', []);
                 RamariaStore.set('currentPersonaUid', currentPersona);
+                RamariaStore.set('sessionPersonaUid', null);
+                _sessionPersonaUid = null;
                 _renderAllMessages();
                 _setReadonlyMode(false);
                 console.log('[ChatView] 无历史会话，显示空状态');

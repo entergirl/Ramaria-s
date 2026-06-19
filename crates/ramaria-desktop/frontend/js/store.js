@@ -66,11 +66,19 @@ var RamariaStore = (function () {
         viewingImportedSession: false,
  /// 导入消息的导出者 persona 名称（聊天页页眉展示用）
         viewingImportedName: '',
- /// 人格→会话映射 { persona_uid: session_id }
- /// 每个人格拥有独立对话栏，切换人格时自动切换对应会话。
+/// 人格→会话缓存 { persona_uid: session_id }
+/// ★ v1.2: 降级为性能缓存——真相源在后端 sessions.persona_uid 字段。
+/// 用于加速 persona 切换时的 session 查找，不依赖其作为归属判断依据。
+/// 缓存可能在 persona 切换后过期（session.persona_uid 已更新但缓存未刷新），
+/// 实际归属以 `sessionPersonaUid` 为准。
         personaSessions: {},
- /// 当前选中的人格 UID（用于消息归属和页眉显示）
+/// 当前选中的人格 UID（用于消息归属和页眉显示）
         currentPersonaUid: null,
+/// ★ v1.2: 当前活跃 session 绑定的 persona_uid（真相源来自后端 session.persona_uid）。
+/// 与 currentPersonaUid 的区别：前者来自前端下拉框选择，后者来自后端 DB 查询。
+/// 正常情况下两者一致；不一致时（如后端已更新但前端尚未感知），
+/// 以 sessionPersonaUid 为准做消息归属判断。
+        sessionPersonaUid: null,
     };
 
  // =========================================================
@@ -328,6 +336,10 @@ var RamariaStore = (function () {
             degradedReason: null,
             personaSessions: {},
             currentPersonaUid: null,
+            sessionPersonaUid: null,
+            preselectPersonaUid: null,
+            viewingImportedSession: false,
+            viewingImportedName: '',
         };
         _subscribers = {};
         console.log('[Store] 状态已重置');

@@ -11,13 +11,14 @@
 
 use ramaria_core::{
     RamariaError, RamariaResult,
-    traits::{LlmProvider, StorageBackend},
+    traits::{ChatRequest, LlmProvider, StorageBackend},
     types::{
         EvidenceDirection, MemoryEvent, PersonalityTrait, TraitEvidence, TraitLayer, TraitSource,
         TraitStatus, now_ms,
     },
 };
 use tracing::{debug, error, info, warn};
+use uuid::Uuid;
 
 use crate::inference::{
     confidence::{ConfidenceConfig, ConfidenceSummary, run_confidence_update},
@@ -353,9 +354,6 @@ async fn call_llm_and_get_text(
     config: &InferrerConfig,
     step_name: &str,
 ) -> RamariaResult<String> {
-    use ramaria_core::traits::ChatRequest;
-    use uuid::Uuid;
-
     let capability = llm.capability();
 
     let request = ChatRequest {
@@ -473,13 +471,9 @@ fn parse_category_signals(raw: &str) -> Option<Vec<CategorySignal>> {
         if let Ok(resp) = serde_json::from_value::<Step1Response>(value) {
             signals.push(CategorySignal {
                 category,
-                signal_label: resp
-                    .signal_label
-                    .unwrap_or_else(|| "insufficient_data".into()),
+                signal_label: resp.signal_label.unwrap_or("insufficient_data".into()),
                 evidence_citation: resp.evidence_citation.unwrap_or_default(),
-                stability_judgment: resp
-                    .stability_judgment
-                    .unwrap_or_else(|| "uncertain".into()),
+                stability_judgment: resp.stability_judgment.unwrap_or("uncertain".into()),
                 sufficient_evidence: resp.sufficient_evidence.unwrap_or(false),
             });
         } else {

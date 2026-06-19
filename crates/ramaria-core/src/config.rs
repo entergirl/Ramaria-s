@@ -27,7 +27,8 @@ use crate::types::LlmProvider;
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 
 /// 当前 Ramaria 应用版本号（与 workspace Cargo.toml 保持同步）。
-pub const CURRENT_APP_VERSION: &str = "1.1.0";
+/// v1.2.0 — Pipeline+Stage 重构 + Session-Persona 绑定 + L3 管线贯通
+pub const CURRENT_APP_VERSION: &str = "1.2.0";
 
 // =========================================================
 // 应用配置根结构
