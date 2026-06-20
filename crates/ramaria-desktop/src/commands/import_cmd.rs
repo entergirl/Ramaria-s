@@ -459,14 +459,18 @@ pub async fn import_qq_chat(
     tracing::info!(sessions_written, messages_written, "L0 写入完成");
 
     // Step 4.5: 为每个导入的 session 生成 L1 摘要
-    // (T-V11-5B-010): L1 摘要 persona_uid 存 NULL
-    // —— 导入的 session 来自两人对话，摘要不应被特定画像视图独占
+    // v1.2 修复: L1 摘要 persona_uid 设为导出者（self）人格 UID
+    // 原设计: persona_uid=NULL 以"避免记忆视图污染"（T-V11-5B-010）
+    // 问题: NULL 导致 list_unabsorbed_l1(uid) 永远查不到 → L2 永远无法触发
+    // 修复: 关联到导出者 persona，L2/L3 管线可正常级联；对方 persona 的
+    //       事件提取通过 chat_partners 分组独立进行，不交叉污染
     let app = state.app.clone();
     let sids = session_ids.clone();
     let is_deep = import_mode == ramaria_importer::ImportMode::Deep;
     let total_sids = sids.len();
+    let l1_persona_uid = self_persona_uid_resolved.clone();
     tokio::spawn(async move {
-        // ── 生成全部 L1 摘要（无级联，persona_uid=NULL）──
+        // ── 生成全部 L1 摘要（无级联，persona_uid=导出者）──
         app_handle
             .emit(
                 EVENT_IMPORT_PROGRESS,
@@ -477,7 +481,10 @@ pub async fn import_qq_chat(
         let mut l1_success = 0usize;
         let mut l1_failed = 0usize;
         for (i, sid) in sids.iter().enumerate() {
-            match app.regenerate_l1_no_cascade(*sid, None).await {
+            match app
+                .regenerate_l1_no_cascade(*sid, Some(&l1_persona_uid))
+                .await
+            {
                 Ok(Some(_)) => l1_success += 1,
                 Ok(None) => {
                     tracing::debug!(%sid, "session 无消息，跳过 L1");
@@ -504,7 +511,8 @@ pub async fn import_qq_chat(
             l1_success,
             l1_failed,
             total = total_sids,
-            "L1 摘要全部生成完成（persona_uid=NULL）"
+            persona_uid = %l1_persona_uid,
+            "L1 摘要全部生成完成"
         );
 
         // ── 深度模式: 级联 L2→L3 ──

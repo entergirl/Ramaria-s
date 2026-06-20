@@ -312,6 +312,11 @@ pub trait StorageBackend: Send + Sync {
     async fn list_memory_l1(&self, session_id: Uuid) -> RamariaResult<Vec<MemoryL1>>;
     async fn get_memory_l1(&self, id: Uuid) -> RamariaResult<Option<MemoryL1>>;
     async fn mark_l1_absorbed(&self, l1_ids: &[Uuid]) -> RamariaResult<()>;
+    /// v1.2: 删除指定 session 中 persona_uid 为 NULL 的 L1 摘要（仅清理导入残留）
+    async fn delete_memory_l1_by_session(&self, session_id: Uuid) -> RamariaResult<usize> {
+        let _ = session_id;
+        Ok(0) // 默认空实现：存量 mock 无需修改即可编译
+    }
     async fn list_unabsorbed_l1(&self, persona_uid: &str) -> RamariaResult<Vec<MemoryL1>>;
 
     /// 按创建时间降序获取指定 persona 的最近 N 条 L1 摘要。

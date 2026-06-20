@@ -1,0 +1,397 @@
+/* ═══════════════════════════════════════════════════════════
+   css/components/session-drawer.css — Ramaria SessionDrawer 样式
+   设计特点:
+   - 左侧滑出抽屉面板（320px 宽），position:absolute 覆盖在聊天内容上
+   - 滑入/滑出动画：transform translateX + opacity，180ms ease-out
+   - 会话项三种状态区分：活跃(绿色圆点) / 已关闭(灰色时间戳) / 导入(蓝色标签)
+   - 搜索栏置顶固定，列表区域滚动
+   - 响应式：窗口宽度 ≤640px 时全宽覆盖（width: 100%）
+   - 暗色主题适配（通过 CSS 变量自动继承）
+   - 骨架屏加载动画（shimmer）
+   - prefers-reduced-motion 尊重系统动效偏好
+   ═══════════════════════════════════════════════════════════ */
+
+/* =========================================================
+   1. 抽屉容器
+   ========================================================= */
+
+.session-drawer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: 320px;
+  max-width: 90vw;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-card);
+  border-right: 1px solid var(--border-default);
+  box-shadow: var(--shadow-lg);
+  transform: translateX(-100%);
+  opacity: 0;
+  transition: transform 180ms var(--ease-out),
+              opacity 180ms var(--ease-out);
+  /* 渲染隔离：抽屉内部 layout 变化不影响外部布局 */
+  contain: layout style;
+}
+
+/* 打开态 */
+.session-drawer--open {
+  transform: translateX(0);
+  opacity: 1;
+}
+
+/* =========================================================
+   2. 头部
+   ========================================================= */
+
+.session-drawer-header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border-light);
+  min-height: 44px;
+}
+
+.session-drawer-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-family: var(--font-display);
+  margin: 0;
+  user-select: none;
+}
+
+.session-drawer-close-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 16px;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out),
+              color var(--dur-fast) var(--ease-out);
+  flex-shrink: 0;
+}
+
+.session-drawer-close-btn:hover {
+  background: var(--bg-subtle);
+  color: var(--text-primary);
+}
+
+.session-drawer-close-btn:focus-visible {
+  box-shadow: 0 0 0 var(--focus-ring-width) var(--focus-ring-color);
+}
+
+/* =========================================================
+   3. 搜索栏
+   ========================================================= */
+
+.session-drawer-search {
+  flex-shrink: 0;
+  padding: var(--space-2) var(--space-4);
+}
+
+.session-drawer-search-input {
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-subtle);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: var(--font-body);
+  outline: none;
+  transition: border-color var(--dur-fast) var(--ease-out),
+              box-shadow var(--dur-fast) var(--ease-out);
+  box-sizing: border-box;
+}
+
+.session-drawer-search-input::placeholder {
+  color: var(--text-tertiary);
+}
+
+.session-drawer-search-input:focus {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 2px oklch(0.53 0.19 10 / 0.15);
+}
+
+/* =========================================================
+   4. 会话列表
+   ========================================================= */
+
+.session-drawer-list {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: var(--space-2) 0;
+}
+
+/* ── 分组标题 ── */
+.session-drawer-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-2) var(--space-4);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  user-select: none;
+}
+
+.session-drawer-group-count {
+  font-size: 10px;
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: var(--radius-full);
+  background: var(--bg-subtle);
+  color: var(--text-tertiary);
+}
+
+/* ── 会话项 ── */
+.session-drawer-item {
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out);
+  border-radius: var(--radius-sm);
+  margin: 1px var(--space-2);
+}
+
+.session-drawer-item:hover {
+  background: var(--bg-subtle);
+}
+
+.session-drawer-item:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--focus-ring-color);
+}
+
+.session-drawer-item-inner {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-2);
+}
+
+/* ── 状态列（左侧指示器）── */
+.session-drawer-item-status-col {
+  flex-shrink: 0;
+  display: flex;
+  align-items: flex-start;
+  min-width: 36px;
+  padding-top: 2px;
+}
+
+.session-drawer-item-status {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  user-select: none;
+}
+
+/* 活跃状态：绿色圆点 */
+.session-drawer-status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  background: #22c55e; /* 绿色（不使用 token 中无此色阶）*/
+  flex-shrink: 0;
+  box-shadow: 0 0 4px rgba(34, 197, 94, 0.4);
+}
+
+.session-drawer-item-status--active {
+  color: #22c55e;
+  font-weight: 500;
+}
+
+/* ── 信息列 ── */
+.session-drawer-item-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.session-drawer-item-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.session-drawer-item-time {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+/* 标签：活跃/导入 */
+.session-drawer-item-tag {
+  font-size: 10px;
+  padding: 0px 6px;
+  border-radius: var(--radius-full);
+  font-weight: 500;
+  white-space: nowrap;
+  line-height: 18px;
+}
+
+.session-drawer-item-tag--active {
+  background: oklch(0.87 0.22 145 / 0.15);
+  color: #16a34a;
+}
+
+.session-drawer-item-tag--import {
+  background: var(--blue-100);
+  color: var(--blue-600);
+}
+
+/* ── 元信息行 ── */
+.session-drawer-item-meta {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-drawer-item-persona {
+  color: var(--text-tertiary);
+}
+
+/* =========================================================
+   5. 空状态
+   ========================================================= */
+
+.session-drawer-empty {
+  text-align: center;
+  padding: var(--space-10) var(--space-6);
+  color: var(--text-tertiary);
+}
+
+.session-drawer-empty-icon {
+  font-size: 36px;
+  margin-bottom: var(--space-3);
+  opacity: 0.5;
+}
+
+.session-drawer-empty-text {
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.session-drawer-empty-text small {
+  display: block;
+  margin-top: var(--space-1);
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+/* =========================================================
+   6. 加载骨架屏
+   ========================================================= */
+
+.session-drawer-loading {
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.session-drawer-skeleton {
+  height: 36px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
+  /* shimmer 动画 */
+  background: linear-gradient(
+    90deg,
+    var(--bg-subtle) 25%,
+    var(--border-light) 50%,
+    var(--bg-subtle) 75%
+  );
+  background-size: 200% 100%;
+  animation: session-drawer-shimmer 1.5s infinite;
+}
+
+@keyframes session-drawer-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* =========================================================
+   7. 错误状态
+   ========================================================= */
+
+.session-drawer-error {
+  text-align: center;
+  padding: var(--space-8) var(--space-6);
+  color: var(--text-secondary);
+}
+
+.session-drawer-error-icon {
+  font-size: 28px;
+  margin-bottom: var(--space-2);
+}
+
+.session-drawer-error-text {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: var(--space-1);
+}
+
+.session-drawer-error-detail {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-bottom: var(--space-4);
+}
+
+/* =========================================================
+   8. 底部
+   ========================================================= */
+
+.session-drawer-footer {
+  flex-shrink: 0;
+  padding: var(--space-2) var(--space-4);
+  border-top: 1px solid var(--border-light);
+  display: flex;
+  justify-content: center;
+}
+
+.session-drawer-current-btn {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* =========================================================
+   9. 响应式：窄屏全宽
+   ========================================================= */
+
+@media (max-width: 640px) {
+  .session-drawer {
+    width: 100%;
+    max-width: 100%;
+    border-right: none;
+  }
+}
+
+/* =========================================================
+   10. 动效偏好
+   ========================================================= */
+
+@media (prefers-reduced-motion: reduce) {
+  .session-drawer {
+    transition: none;
+  }
+}

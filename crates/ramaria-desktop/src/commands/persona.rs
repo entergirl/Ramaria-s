@@ -283,7 +283,7 @@ pub async fn refresh_persona(
 /// 动机:
 /// - 导入时若 LLM 不可用，L1 摘要生成会失败（静默 WARN）。
 /// 用户连接 LLM 后，可通过记忆页面的"深度处理导入的消息"按钮调用本命令。
-/// - 与 `trigger_memory_pipeline` 的区别：本命令先重新生成 L1（persona_uid=NULL），
+/// - 与 `trigger_memory_pipeline` 的区别：本命令先重新生成 L1，
 /// 再触发 L2 检查，确保 LLM 失败场景下的 L0→L1→L2→L3 全管线可恢复。
 ///
 /// 参数:
@@ -294,7 +294,7 @@ pub async fn refresh_persona(
 ///
 /// 说明:
 /// - 幂等：已存在的 L1 摘要会被覆盖（regenerate_l1_no_cascade 内部删除旧 L1）。
-/// - 导入 session 的 L1 摘要 persona_uid 存 NULL（对话来自两人）。
+/// - v1.2: L1 摘要 persona_uid 关联到目标导入 persona（不再存 NULL，令 L2/L3 可触发）。
 /// - 此操作为异步后台任务：返回后 L1 已生成，L2/L3 后台继续执行。
 ///
 /// 日志:
@@ -354,7 +354,10 @@ pub async fn regenerate_import_pipeline(
         "找到关联的导入 session，开始重新生成 L1"
     );
 
-    // Step 2: 对每个 session 重新生成 L1 摘要（persona_uid=NULL，因为导入对话来自两人）
+    // Step 2: 对每个 session 重新生成 L1 摘要
+    // v1.2 修复: L1 摘要 persona_uid 关联到目标导入 persona（不再存 NULL）
+    // 原设计: persona_uid=NULL"因为导入对话来自两人"——但 NULL 导致 L2 永远无法触发
+    // 修复: 关联到目标 persona，对方 persona 的事件通过 chat_partners 分组独立提取
     //
     // 重试策略（对齐深度导入模式）:
     // - 单个 session 内部由 JobManager 负责 3 次重试（指数退避 1s/2s/4s）。
@@ -371,9 +374,13 @@ pub async fn regenerate_import_pipeline(
     let mut consecutive_failures: u32 = 0;
     let mut early_terminated = false;
     let mut remaining_skipped = 0usize;
+    let l1_persona_uid = persona_uid.clone();
 
     for (idx, sid) in session_ids.iter().enumerate() {
-        match app.regenerate_l1_no_cascade(*sid, None).await {
+        match app
+            .regenerate_l1_no_cascade(*sid, Some(&l1_persona_uid))
+            .await
+        {
             Ok(Some(_)) => {
                 l1_regenerated += 1;
                 consecutive_failures = 0; // 重置连续失败计数

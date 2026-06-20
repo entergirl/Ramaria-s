@@ -392,8 +392,60 @@
     color: var(--text-secondary);
 }
 
-.import-progress-bar {
+/* v1.2: 增强型进度条容器——包含进度条 + 信息行 */
+.import-progress-bar-enhanced {
     margin-top: var(--space-4);
+    text-align: left;
+}
+
+/* v1.2: 进度条轨道——最小高度 8px，适配大型导入场景的可见性 */
+.import-progress-track {
+    height: 10px;               /* ≥ 8px 要求 */
+    background: var(--gray-100);
+    border-radius: var(--radius-full);
+    overflow: hidden;
+    margin-bottom: var(--space-2);
+}
+
+/* v1.2: 进度信息行——百分比 + 会话计数器 + ETA 在同一行 */
+.import-progress-info {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: 12px;
+    color: var(--text-secondary);
+    flex-wrap: wrap;
+}
+
+.import-progress-pct {
+    font-family: var(--font-mono);
+    font-weight: 600;
+    color: var(--color-primary);
+    white-space: nowrap;
+}
+
+/* 分隔符· */
+.import-progress-sep {
+    color: var(--text-tertiary);
+    font-weight: 400;
+}
+
+/* 阶段指示器——"第 N/M 个会话" */
+.import-progress-session-counter {
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+.import-progress-session-counter strong {
+    color: var(--color-secondary);
+    font-weight: 600;
+}
+
+/* 预估剩余时间 */
+.import-progress-eta {
+    color: var(--text-tertiary);
+    font-style: italic;
+    white-space: nowrap;
 }
 
 /* ═════════════════════════════════════════════════
@@ -619,4 +671,17 @@
 
 [data-theme="dark"] .import-stat-number.degraded {
     color: oklch(0.75 0.14 85);
+}
+
+/* v1.2: 导入进度增强——暗色主题适配 */
+[data-theme="dark"] .import-progress-track {
+    background: var(--gray-700);
+}
+
+[data-theme="dark"] .import-progress-pct {
+    color: var(--pink-300);
+}
+
+[data-theme="dark"] .import-progress-session-counter strong {
+    color: var(--blue-300);
 }

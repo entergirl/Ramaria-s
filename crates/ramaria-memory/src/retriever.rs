@@ -13,6 +13,9 @@
 //! 4. RRF 融合: 三个通道结果通过 rrf_fuse 合并排序
 //! 5. 解析 doc_id → 加载实际文档 → 返回检索结果
 
+use ramaria_core::error::RamariaResult;
+use ramaria_core::types::MemoryL1;
+
 use crate::bm25::{Bm25Config, Bm25Index, DocId};
 use crate::graph_retriever::{GraphRetriever, GraphRetrieverConfig, graph_hits_to_rrf_pairs};
 use crate::rrf::{ChannelResult, FusedResult, RrfConfig, rrf_fuse};
@@ -275,6 +278,40 @@ impl Retriever {
 
         // LRU 驱逐: 总文档数超过上限时，从 BM25 和内存 HashMap 中同步清理最早文档
         self.evict_if_needed();
+    }
+
+    /// 将 `MemoryL1` 记录转换为 `L1DocView` 并增量添加到所有启用通道的索引中。
+    ///
+    /// 职责:
+    /// - 供 `SessionLifecycle` 在 L1 摘要生成成功后立即调用，
+    ///   确保新生成的 L1 文档无需等待全量 `rebuild_retriever` 即可被 Stage 5 RAG 检索命中。
+    /// - 将 `MemoryL1`（来自 `ramaria-core` 的业务类型）转为内部 `L1DocView` 后委托给 [`index_l1`]。
+    ///
+    /// 参数:
+    /// - `record`: 刚生成的 L1 摘要记录。
+    ///
+    /// 返回:
+    /// - `Ok(())`: 索引添加成功（即使 BM25 分词为空也是成功）。
+    ///
+    /// 说明:
+    /// - 本方法总是返回 `Ok(())`——转换和 BM25 索引添加均为纯内存操作，不可失败。
+    /// - 向量索引暂不更新（需 EmbeddingProvider 生成 query 向量，由后续 rebuild 路径处理）。
+    pub fn index_l1_record(&mut self, record: &MemoryL1) -> RamariaResult<()> {
+        let doc = L1DocView {
+            id: record.id,
+            summary: record.summary.clone(),
+            keywords: record.keywords.clone(),
+            persona_uid: record.persona_uid.clone(),
+            created_at: record.created_at,
+            salience: record.salience,
+        };
+        self.index_l1(&doc);
+        tracing::info!(
+            l1_id = %record.id,
+            persona_uid = ?record.persona_uid,
+            "L1 记录已增量加入 Retriever 索引"
+        );
+        Ok(())
     }
 
     /// 将 L2 事件添加到所有启用通道的索引中。
@@ -933,5 +970,145 @@ mod tests {
             assert!(sr.rrf_score > 0.0);
             assert!(sr.created_at > 0);
         }
+    }
+
+    // =========================================================
+    // index_l1_record 测试
+    // =========================================================
+
+    #[test]
+    fn index_l1_record_adds_to_bm25() {
+        let mut r = Retriever::new();
+        let l1 = MemoryL1 {
+            id: uuid::Uuid::new_v4(),
+            session_id: uuid::Uuid::new_v4(),
+            summary: "用户讨论Rust异步编程".to_string(),
+            keywords: Some("Rust,异步,编程".to_string()),
+            time_period: None,
+            atmosphere: None,
+            valence: 0.5,
+            salience: 0.8,
+            absorbed: false,
+            created_at: 1718000000000,
+            last_accessed_at: None,
+            persona_uid: Some("user-0001".to_string()),
+            context_json: None,
+            situation_strength: None,
+        };
+
+        let result = r.index_l1_record(&l1);
+        assert!(result.is_ok());
+        // 验证文档数增加了
+        assert_eq!(r.doc_count(), 1);
+    }
+
+    #[test]
+    fn index_l1_record_searchable_immediately() {
+        let mut r = Retriever::new();
+        let l1 = MemoryL1 {
+            id: uuid::Uuid::new_v4(),
+            session_id: uuid::Uuid::new_v4(),
+            summary: "用户今天学习了Rust编程语言的基础语法".to_string(),
+            keywords: Some("学习,Rust,编程".to_string()),
+            time_period: None,
+            atmosphere: None,
+            valence: 0.8,
+            salience: 0.9,
+            absorbed: false,
+            created_at: 1718000000000,
+            last_accessed_at: None,
+            persona_uid: Some("user-0001".to_string()),
+            context_json: None,
+            situation_strength: None,
+        };
+
+        r.index_l1_record(&l1).unwrap();
+
+        // 立即检索，应能命中
+        let req = SearchRequest {
+            query: "Rust".to_string(),
+            persona_uid: None,
+            top_k: 5,
+            filter_share: false,
+        };
+        let results = r.search(&req, None);
+        assert!(!results.is_empty());
+        assert!(results.iter().any(|sr| sr.doc_summary.contains("Rust")));
+    }
+
+    #[test]
+    fn index_l1_record_respects_persona_uid() {
+        let mut r = Retriever::new();
+        let l1_user_a = MemoryL1 {
+            id: uuid::Uuid::new_v4(),
+            session_id: uuid::Uuid::new_v4(),
+            summary: "用户A的私密对话".to_string(),
+            keywords: Some("私密".to_string()),
+            time_period: None,
+            atmosphere: None,
+            valence: 0.0,
+            salience: 0.5,
+            absorbed: false,
+            created_at: 1718000000000,
+            last_accessed_at: None,
+            persona_uid: Some("user-a".to_string()),
+            context_json: None,
+            situation_strength: None,
+        };
+
+        r.index_l1_record(&l1_user_a).unwrap();
+
+        // 以 user-b 检索，不应命中 user-a 的文档
+        let req = SearchRequest {
+            query: "私密".to_string(),
+            persona_uid: Some("user-b".to_string()),
+            top_k: 5,
+            filter_share: false,
+        };
+        let results = r.search(&req, None);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn index_l1_record_preserves_fields() {
+        let mut r = Retriever::new();
+        let id = uuid::Uuid::new_v4();
+        let sid = uuid::Uuid::new_v4();
+        let l1 = MemoryL1 {
+            id,
+            session_id: sid,
+            summary: "测试摘要".to_string(),
+            keywords: Some("测试,标签".to_string()),
+            time_period: Some("下午".to_string()),
+            atmosphere: Some("轻松".to_string()),
+            valence: 0.7,
+            salience: 0.9,
+            absorbed: false,
+            created_at: 1718000000000,
+            last_accessed_at: None,
+            persona_uid: Some("test-persona".to_string()),
+            context_json: None,
+            situation_strength: None,
+        };
+
+        r.index_l1_record(&l1).unwrap();
+
+        // 验证 L1 文档被正确存储
+        let req = SearchRequest {
+            query: "测试".to_string(),
+            persona_uid: None,
+            top_k: 5,
+            filter_share: false,
+        };
+        let results = r.search(&req, None);
+        assert!(!results.is_empty());
+
+        let found = results
+            .iter()
+            .find(|sr| matches!(&sr.doc_id, DocId::L1(uid) if *uid == id));
+        assert!(found.is_some(), "应能通过 ID 找到刚索引的文档");
+        let found = found.unwrap();
+        assert_eq!(found.persona_uid.as_deref(), Some("test-persona"));
+        assert_eq!(found.doc_summary, "测试摘要");
     }
 }

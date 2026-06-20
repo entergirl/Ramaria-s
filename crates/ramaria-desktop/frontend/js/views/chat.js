@@ -50,7 +50,14 @@ var RamariaChatView = (function () {
   */
     var _sessionPersonaUid = null;
 
- /** 取消 Tauri 事件监听的函数列表 */
+    /**
+     * ★ v1.2 M5-B: 标记是否通过 L1 卡片跳转加载了指定会话。
+     * 若为 true，_loadInitialData 将跳过自动 persona 匹配和消息加载，
+     * 避免覆盖已跳转加载的会话数据。
+     */
+    var _sessionJumped = false;
+
+/** 取消 Tauri 事件监听的函数列表 */
     var _unlistenFns = [];
  /** Router 钩子取消注册函数列表 */
     var _unregisterFns = [];
@@ -144,6 +151,9 @@ var RamariaChatView = (function () {
                 '</div>' +
             '</div>' +
             '<div class="chat-header-right">' +
+                '<button class="btn btn-ghost btn-sm" id="chat-history-btn" title="查看会话历史" aria-label="历史会话">' +
+                    '📋 历史' +
+                '</button>' +
                 '<button class="btn btn-ghost btn-sm" id="chat-save-btn" title="保存当前对话（关闭 session 并生成 L1 摘要）" aria-label="保存对话">' +
                     '💾 保存对话' +
                 '</button>' +
@@ -1280,9 +1290,18 @@ var RamariaChatView = (function () {
  // 人格选择器刷新
  // =========================================================
 
-    async function _refreshPersonaSelector() {
+    /**
+     * 刷新人格选择器下拉框。
+     *
+     * 参数:
+     * - `silent`: 可选，true 时仅填充选项但不改变选中值（用于跳转后保持已选 persona）。
+     */
+    async function _refreshPersonaSelector(silent) {
         var select = $('chat-persona-select');
         if (!select) return;
+
+        // ★ v1.2 M5-B: 保存当前选中值（silent 模式下保留）
+        var previousValue = silent ? select.value : null;
 
         try {
             var personas = await RamariaApi.memory.getPersonas();
@@ -1296,9 +1315,21 @@ var RamariaChatView = (function () {
                 select.appendChild(opt);
             }
 
- // 默认选中 rama-0001
-            var defaultOpt = select.querySelector('option[value="rama-0001"]');
-            if (defaultOpt) select.value = 'rama-0001';
+            if (silent && previousValue) {
+                // silent 模式：恢复之前的选中值（若该选项仍存在）
+                var prevOpt = select.querySelector('option[value="' + previousValue + '"]');
+                if (prevOpt) {
+                    select.value = previousValue;
+                } else {
+                    // 之前的 persona 不在列表中时回退默认
+                    var defaultOpt = select.querySelector('option[value="rama-0001"]');
+                    if (defaultOpt) select.value = 'rama-0001';
+                }
+            } else {
+                // 默认选中 rama-0001
+                var defaultOpt = select.querySelector('option[value="rama-0001"]');
+                if (defaultOpt) select.value = 'rama-0001';
+            }
         } catch (err) {
             console.error('[ChatView] 加载人格列表失败:', err);
         }
@@ -1311,8 +1342,11 @@ var RamariaChatView = (function () {
     function _registerHooks() {
         var unreg;
 
-        unreg = RamariaRouter.registerHook('chat', 'enter', function () {
-            console.log('[ChatView] 进入视图');
+        // ★ v1.2 M5-B: enter 钩子接收 Router options（第二个参数）
+        // options 可能包含 { sessionId, personaUid, fromView } 等跨视图传递参数
+        unreg = RamariaRouter.registerHook('chat', 'enter', function (_viewName, options) {
+            console.log('[ChatView] 进入视图' +
+                (options && options.fromView ? ' (来自: ' + options.fromView + ')' : ''));
 
  // 初始化非阻塞进度条（嵌入模型下载 / 索引重建）
             if (typeof RamariaProgressBar !== 'undefined') {
@@ -1327,8 +1361,19 @@ var RamariaChatView = (function () {
  // 首次渲染
             render();
 
- // 加载数据
-            _loadInitialData();
+ // ★ v1.2 M5-B: 若来自记忆页，显示面包屑导航
+            _handleBreadcrumb(options);
+
+ // ★ v1.2 M5-A: 初始化 SessionDrawer 组件
+            _initSessionDrawer();
+
+ // ★ v1.2 M5-B: 若有目标 sessionId（来自 L1 卡片跳转），加载该会话
+            // 注意：必须 await 完成后再执行 _loadInitialData，
+            // 否则 persona selector 的自动匹配可能覆盖跳转加载的会话。
+            _handleSessionJump(options).then(function () {
+                // 跳转加载完成后，再执行常规的初始数据加载
+                _loadInitialData();
+            });
 
  // 注册流式事件监听
             _listenStreamEvents();
@@ -1386,6 +1431,12 @@ var RamariaChatView = (function () {
                 }
             }
 
+ // ★ v1.2 M5-A: 销毁 SessionDrawer 组件
+            _destroySessionDrawer();
+
+ // ★ v1.2 M5-B: 移除面包屑（避免残留到其他视图）
+            _removeBreadcrumb();
+
  // 清理 Tauri 事件监听
             _unlistenAll();
 
@@ -1401,8 +1452,362 @@ var RamariaChatView = (function () {
         _unregisterFns.push(unreg);
     }
 
+ // =========================================================
+ // ★ v1.2 M5-A: SessionDrawer 集成
+ // =========================================================
+
+ /**
+ * 初始化 SessionDrawer 组件。
+ *
+ * 说明:
+ * - 在 ChatView enter 钩子中调用（每次进入对话视图时重新初始化）。
+ * - 注册会话选中回调：点击抽屉中的会话项 → 加载该会话的消息。
+ * - 绑定 Header "历史" 按钮 → toggle 抽屉。
+ * - 若 SessionDrawer 组件未加载（JS 缺失），静默跳过。
+ */
+    function _initSessionDrawer() {
+        if (typeof RamariaSessionDrawer === 'undefined') {
+            console.warn('[ChatView] RamariaSessionDrawer 未加载，跳过初始化');
+            return;
+        }
+
+        try {
+            RamariaSessionDrawer.init({
+                onSelect: function (sessionId, session) {
+                    _onSessionDrawerSelect(sessionId, session);
+                }
+            });
+
+            // 绑定 Header "历史" 按钮
+            setTimeout(function () {
+                var historyBtn = document.getElementById('chat-history-btn');
+                if (historyBtn) {
+                    historyBtn.addEventListener('click', function () {
+                        var personaUid = _sessionPersonaUid ||
+                            RamariaStore.get('currentPersonaUid') ||
+                            'rama-0001';
+                        RamariaSessionDrawer.toggle(personaUid);
+                    });
+                    console.log('[ChatView] SessionDrawer 历史按钮已绑定');
+                }
+            }, 200);
+
+            console.log('[ChatView] SessionDrawer 已初始化');
+        } catch (err) {
+            console.error('[ChatView] SessionDrawer 初始化失败:', err);
+        }
+    }
+
+ /**
+ * 销毁 SessionDrawer 组件。
+ * 在 ChatView leave 钩子中调用。
+ */
+    function _destroySessionDrawer() {
+        if (typeof RamariaSessionDrawer === 'undefined') return;
+        try {
+            RamariaSessionDrawer.destroy();
+            console.log('[ChatView] SessionDrawer 已销毁');
+        } catch (err) {
+            console.warn('[ChatView] SessionDrawer 销毁失败:', err);
+        }
+    }
+
+ // =========================================================
+ // ★ v1.2 M5-B: 面包屑导航 + 会话跳转
+ // =========================================================
+
+ /**
+ * 处理面包屑导航。
+ *
+ * 说明:
+ * - 当 ChatView 从记忆页跳转而来（options.fromView === 'memory'），
+ *   在聊天页眉上方渲染一条面包屑："← 返回记忆"。
+ * - 点击面包屑 → 导航回记忆页。
+ * - 面包屑在 leave 钩子中移除（通过 _removeBreadcrumb）。
+ *
+ * 参数:
+ * - `options`: Router 传入的导航 options。
+ */
+    function _handleBreadcrumb(options) {
+        if (!options || options.fromView !== 'memory') {
+            // 非记忆页跳转，移除可能残留的面包屑
+            _removeBreadcrumb();
+            return;
+        }
+
+        console.log('[ChatView] 来自记忆页，显示面包屑导航');
+
+        // 移除旧面包屑（防止重复）
+        _removeBreadcrumb();
+
+        // 创建面包屑
+        var container = document.getElementById('view-chat');
+        if (!container) return;
+
+        var breadcrumb = document.createElement('div');
+        breadcrumb.className = 'chat-breadcrumb';
+        breadcrumb.id = 'chat-breadcrumb';
+        breadcrumb.innerHTML =
+            '<button class="chat-breadcrumb-btn" id="chat-breadcrumb-back" ' +
+                'aria-label="返回记忆页" title="返回记忆页">' +
+                '← 返回记忆' +
+            '</button>';
+
+        // 插入到 chat-header 之前
+        var header = document.getElementById('chat-header');
+        if (header && header.parentNode === container) {
+            container.insertBefore(breadcrumb, header);
+        } else {
+            container.insertBefore(breadcrumb, container.firstChild);
+        }
+
+        // 绑定点击事件
+        var backBtn = document.getElementById('chat-breadcrumb-back');
+        if (backBtn) {
+            backBtn.addEventListener('click', function () {
+                console.log('[ChatView] 面包屑 → 返回记忆页');
+                RamariaRouter.showView('memory');
+            });
+        }
+    }
+
+ /**
+ * 移除面包屑 DOM 元素。
+ */
+    function _removeBreadcrumb() {
+        var el = document.getElementById('chat-breadcrumb');
+        if (el && el.parentNode) {
+            el.parentNode.removeChild(el);
+        }
+    }
+
+ /**
+ * 处理从 L1 记忆卡片跳转到指定会话。
+ *
+ * 说明:
+ * - 当 options.sessionId 存在时（来自记忆页 L1 卡片"查看对话"按钮），
+ *   加载该 session 的完整消息列表。
+ * - 此操作在 _loadInitialData 之前执行——若加载成功，
+ *   _loadInitialData 中与 persona 自动匹配的逻辑会被跳过（已有消息）。
+ * - 若 sessionId 对应的 session 已关闭，自动设置为只读模式。
+ *
+ * 参数:
+ * - `options`: Router 传入的导航 options。
+ */
+    async function _handleSessionJump(options) {
+        if (!options || !options.sessionId) {
+            _sessionJumped = false;
+            return; // 非跳转场景，正常加载
+        }
+
+        var sessionId = options.sessionId;
+        var personaUid = options.personaUid || null;
+
+        console.log('[ChatView] L1 记忆卡片跳转: session=' + sessionId.substring(0, 8) +
+            ', persona=' + personaUid);
+
+        try {
+            // 加载会话详情（含消息）
+            var detail = await RamariaApi.session.get(sessionId);
+
+            if (!detail) {
+                console.warn('[ChatView] 跳转目标会话不存在: ' + sessionId);
+                RamariaToast.show('warning', '会话不存在', '该会话可能已被删除，回到当前对话');
+                return;
+            }
+
+            var isClosed = !!detail.ended_at;
+            var messages = detail.messages || [];
+            var dbPersonaUid = detail.persona_uid || null;
+
+            console.log('[ChatView] 跳转加载完成: ' + messages.length + ' 条消息, 已关闭=' + isClosed);
+
+            // 清除空状态
+            _clearMessages();
+
+            // 设置消息
+            RamariaStore.set('messages', messages);
+            RamariaStore.set('activeSessionId', sessionId);
+
+            // 同步 persona_uid
+            if (dbPersonaUid) {
+                RamariaStore.set('sessionPersonaUid', dbPersonaUid);
+                _sessionPersonaUid = dbPersonaUid;
+
+                // 同步下拉框
+                var select = $('chat-persona-select');
+                if (select && select.value !== dbPersonaUid) {
+                    var optionExists = false;
+                    for (var i = 0; i < select.options.length; i++) {
+                        if (select.options[i].value === dbPersonaUid) {
+                            optionExists = true;
+                            break;
+                        }
+                    }
+                    if (optionExists) {
+                        select.value = dbPersonaUid;
+                        RamariaStore.set('currentPersonaUid', dbPersonaUid);
+                        _updateHeaderPersona();
+                    }
+                }
+            } else if (personaUid) {
+                // session 为存量 NULL 数据，使用前端传入的 personaUid
+                RamariaStore.set('sessionPersonaUid', null);
+                _sessionPersonaUid = null;
+            }
+
+            // 设置只读模式（已关闭 session）
+            _setReadonlyMode(isClosed);
+
+            // 更新 persona 会话缓存
+            var effectivePersona = dbPersonaUid || personaUid;
+            if (effectivePersona) {
+                RamariaStore.setPersonaSession(effectivePersona, sessionId);
+                _persistPersonaSessions().catch(function (err) {
+                    console.warn('[ChatView] 跳转后缓存持久化失败:', err);
+                });
+            }
+
+            // 全量渲染消息
+            _renderAllMessages();
+
+            // ★ 标记已通过跳转加载会话，防止 _loadInitialData 覆盖
+            _sessionJumped = true;
+
+            RamariaToast.show('info', '已加载历史对话',
+                messages.length + ' 条消息' + (isClosed ? '（只读）' : ''));
+
+        } catch (err) {
+            console.error('[ChatView] 跳转加载会话失败:', err);
+            _sessionJumped = false;
+            RamariaToast.show('error', '加载失败', err.message || '无法加载会话消息');
+        }
+    }
+
+ // =========================================================
+
+ /**
+ * ★ v1.2 M5-A: 当用户在 SessionDrawer 中点击某个会话项时调用。
+ *
+ * 流程:
+ * 1. 从后端加载该 session 的完整详情（含消息列表）。
+ * 2. 替换当前 ChatView 的消息列表为该 session 的消息。
+ * 3. 根据 session.ended_at 判断只读模式。
+ * 4. 同步 persona_uid 归属（前端 Store + 内部状态）。
+ * 5. 导入会话：不显示发送框（只读），显示来源标签。
+ *
+ * 参数:
+ * - `sessionId`: 会话 UUID。
+ * - `sessionSummary`: 会话摘要（来自 SessionDrawer 的列表项数据）。
+ *
+ * 容错:
+ * - session 不存在 → Toast 提示。
+ * - 加载失败 → Toast 提示，不改变当前界面。
+ * - 流式进行中 → 拒绝操作（Toast 提示）。
+ */
+    async function _onSessionDrawerSelect(sessionId, sessionSummary) {
+        if (!sessionId) return;
+
+        // 流式进行中时不可切换会话
+        if (RamariaStore.get('isStreaming')) {
+            RamariaToast.show('warning', '请等待当前回复完成后再切换会话');
+            return;
+        }
+
+        console.log('[ChatView] SessionDrawer 选中会话: ' + sessionId.substring(0, 8) +
+            ' (ended_at=' + (sessionSummary ? sessionSummary.ended_at : '?') + ')');
+
+        try {
+            // 加载会话详情（含消息）
+            var detail = await RamariaApi.session.get(sessionId);
+
+            if (!detail) {
+                RamariaToast.show('error', '会话不存在', '该会话可能已被删除');
+                return;
+            }
+
+            var isClosed = !!detail.ended_at;
+            var messages = detail.messages || [];
+            var dbPersonaUid = detail.persona_uid || null;
+
+            console.log('[ChatView] 加载会话 ' + sessionId.substring(0, 8) +
+                ': ' + messages.length + ' 条消息, 已关闭=' + isClosed +
+                ', persona_uid=' + (dbPersonaUid || '(null)'));
+
+            // 清除当前消息
+            _clearMessages();
+
+            // 设置消息到 Store
+            RamariaStore.set('messages', messages);
+            RamariaStore.set('activeSessionId', sessionId);
+
+            // 同步 persona_uid
+            if (dbPersonaUid) {
+                RamariaStore.set('sessionPersonaUid', dbPersonaUid);
+                _sessionPersonaUid = dbPersonaUid;
+
+                // 同步下拉框选择
+                var select = $('chat-persona-select');
+                if (select) {
+                    // 检查该 persona 是否在下拉框中
+                    var optionExists = false;
+                    for (var i = 0; i < select.options.length; i++) {
+                        if (select.options[i].value === dbPersonaUid) {
+                            optionExists = true;
+                            break;
+                        }
+                    }
+                    if (optionExists && select.value !== dbPersonaUid) {
+                        select.value = dbPersonaUid;
+                        RamariaStore.set('currentPersonaUid', dbPersonaUid);
+                        _updateHeaderPersona();
+                    }
+                }
+            } else {
+                // 存量 session: persona_uid 为 NULL
+                RamariaStore.set('sessionPersonaUid', null);
+                _sessionPersonaUid = null;
+                // 保留 currentPersonaUid（前端选择的人格）
+            }
+
+            // 设置只读模式
+            _setReadonlyMode(isClosed);
+
+            // 更新 persona 会话缓存
+            if (dbPersonaUid) {
+                RamariaStore.setPersonaSession(dbPersonaUid, sessionId);
+                _persistPersonaSessions().catch(function (err) {
+                    console.warn('[ChatView] 缓存持久化失败:', err);
+                });
+            }
+
+            // 全量渲染消息
+            _renderAllMessages();
+
+            RamariaToast.show('info', '已加载会话',
+                messages.length + ' 条消息' + (isClosed ? '（只读）' : ''));
+
+        } catch (err) {
+            console.error('[ChatView] SessionDrawer 加载会话失败:', err);
+            RamariaToast.show('error', '加载失败', err.message || '无法加载会话消息');
+        }
+    }
+
+ // =========================================================
+
     async function _loadInitialData() {
         try {
+ // ★ v1.2 M5-B: 若已通过 L1 卡片跳转加载了会话，跳过自动匹配和消息加载
+ // 仅刷新 persona 选择器（下拉框可能不含跳转 persona），保留已加载的会话数据。
+            if (_sessionJumped) {
+                console.log('[ChatView] 已通过跳转加载会话，跳过自动 persona 匹配');
+                // 刷新下拉框以包含跳转的 persona（但不改变选中值）
+                await _refreshPersonaSelector(true); // silent: 不触发自动切换
+                // 重置标记（仅对本次 enter 生效）
+                _sessionJumped = false;
+                return;
+            }
+
  // ── 先恢复人格会话映射（从后端 settings 读取）──
             await _restorePersonaSessions();
 

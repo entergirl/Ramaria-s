@@ -157,7 +157,7 @@
 }
 
 /* =========================================================
-   5. L1 摘要 — Bento Grid
+   5. L1 摘要 — Bento Grid（★ v1.2 M5-C 重新设计）
    ========================================================= */
 
 .memory-l1-grid {
@@ -168,6 +168,8 @@
 }
 
 .memory-l1-card {
+  /* position: relative 为 ::before 伪元素的 absolute 定位提供锚点 */
+  position: relative;
   background: linear-gradient(135deg,
     oklch(0.97 0.008 25) 0%,
     oklch(0.90 0.045 25 / 0.4) 100%);
@@ -183,6 +185,14 @@
 
   /* 渲染隔离：卡片之间互不影响 */
   contain: content;
+
+  /* 暗色主题适配 */
+  [data-theme="dark"] & {
+    background: linear-gradient(135deg,
+      oklch(0.18 0.01 25) 0%,
+      oklch(0.25 0.03 25 / 0.5) 100%);
+    border-color: oklch(0.35 0.04 20);
+  }
 }
 
 .memory-l1-card:hover {
@@ -190,6 +200,49 @@
   transform: translateY(-2px);
 }
 
+/* ═══════════════════════════════════════════════
+   ★ v1.2 M5-C: Valence 情感色条（::before 伪元素）
+   ═══════════════════════════════════════════════ */
+
+.memory-l1-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  /* 默认中性灰 */
+  background: var(--border-default);
+  transition: background var(--dur-fast) var(--ease-out);
+}
+
+/* valence > 0.3 → 粉色渐变（正面情绪） */
+.memory-l1-valence--positive::before {
+  background: linear-gradient(90deg,
+    var(--pink-300),
+    var(--pink-500),
+    var(--pink-300));
+}
+
+/* valence < -0.3 → 蓝色渐变（负面情绪） */
+.memory-l1-valence--negative::before {
+  background: linear-gradient(90deg,
+    var(--blue-300),
+    var(--blue-500),
+    var(--blue-300));
+}
+
+/* 中性 → 灰色（默认，无额外声明） */
+.memory-l1-valence--neutral::before {
+  background: var(--border-default);
+}
+
+/* ═══════════════════════════════════════════════
+   卡片内容区
+   ═══════════════════════════════════════════════ */
+
+/* ── 标题 ── */
 .memory-l1-card-header {
   display: flex;
   align-items: flex-start;
@@ -211,48 +264,85 @@
   -webkit-box-orient: vertical;
 }
 
-.memory-l1-card-badge {
-  flex-shrink: 0;
-  font-size: 10px;
-  padding: 1px 8px;
-  border-radius: var(--radius-full);
-  font-weight: 500;
-  background: var(--pink-200);
-  color: var(--pink-700);
-  white-space: nowrap;
-}
-
-.memory-l1-card-summary {
-  font-size: 12.5px;
-  color: var(--text-secondary);
-  line-height: 1.55;
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-}
-
-.memory-l1-card-footer {
+/* ── ★ v1.2 M5-C: 属性行（时段 | 氛围 | 参与人数）── */
+.memory-l1-card-attrs {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  margin-top: var(--space-3);
-  font-size: 11px;
-  color: var(--text-tertiary);
+  gap: var(--space-3);
+  margin-bottom: var(--space-2);
+  flex-wrap: wrap;
 }
 
-/* salience 强度条 */
+.memory-l1-attr {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* ── ★ v1.2 M5-C: 关键词 Chip 标签 ── */
+.memory-l1-card-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin-bottom: var(--space-2);
+}
+
+.memory-l1-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: var(--radius-full);
+  background: var(--pink-100);
+  color: var(--pink-600);
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: nowrap;
+  transition: background var(--dur-fast) var(--ease-out);
+
+  /* 暗色主题适配 */
+  [data-theme="dark"] & {
+    background: oklch(0.30 0.04 20);
+    color: oklch(0.80 0.06 20);
+  }
+}
+
+/* ── end chip ── */
+
+/* ═══════════════════════════════════════════════
+   ★ v1.2 M5-C: 底部操作栏（时间 | 强度条 | 查看对话）
+   ═══════════════════════════════════════════════ */
+
+.memory-l1-card-actions {
+  margin-top: auto;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border-pink);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.memory-l1-card-time {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* salience 强度条（在时间和按钮之间） */
 .memory-salience-bar {
   display: flex;
   align-items: center;
   gap: var(--space-1);
+  flex-shrink: 0;
 }
 
 .memory-salience-track {
-  width: 48px;
-  height: 4px;
+  width: 40px;
+  height: 3px;
   border-radius: 2px;
   background: var(--border-default);
   overflow: hidden;
@@ -265,12 +355,13 @@
   transition: width var(--dur-slow) var(--ease-out);
 }
 
-/* 强度标签 */
+/* 强度标签（精简） */
 .memory-salience-label {
-  font-size: 10px;
+  font-size: 9px;
+  color: var(--text-tertiary);
 }
 
-/* salience 百分比宽度（CSP-safe: 替代内联 style="width:X%"）*/
+/* salience 百分比宽度（CSP-safe） */
 .memory-salience-fill-w0   { width: 0%; }
 .memory-salience-fill-w10  { width: 10%; }
 .memory-salience-fill-w20  { width: 20%; }
@@ -282,6 +373,85 @@
 .memory-salience-fill-w80  { width: 80%; }
 .memory-salience-fill-w90  { width: 90%; }
 .memory-salience-fill-w100 { width: 100%; }
+
+/* ── 查看对话按钮 ── */
+.memory-l1-view-chat-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 3px var(--space-3);
+  border: 1.5px solid var(--color-secondary);
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--color-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  font-family: var(--font-body);
+  cursor: pointer;
+  transition: all var(--dur-fast) var(--ease-out);
+  white-space: nowrap;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.memory-l1-view-chat-btn:hover {
+  background: var(--color-secondary);
+  color: #fff;
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-blue);
+}
+
+.memory-l1-view-chat-btn:focus-visible {
+  box-shadow: 0 0 0 var(--focus-ring-width) var(--focus-ring-color);
+}
+
+/* 无 session_id 时的降级提示 */
+.memory-l1-no-session-hint {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  font-style: italic;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+/* ═══════════════════════════════════════════════
+   ★ v1.2 M5-C: 旧卡片兼容（保留旧类名但降级显示）
+   ═══════════════════════════════════════════════ */
+
+/* 旧卡片氛围 badge（v1.0/v1.1 使用）—— 保留兼容 */
+.memory-l1-card-badge {
+  flex-shrink: 0;
+  font-size: 10px;
+  padding: 1px 8px;
+  border-radius: var(--radius-full);
+  font-weight: 500;
+  background: var(--pink-200);
+  color: var(--pink-700);
+  white-space: nowrap;
+}
+
+/* 旧卡片 summary 区（v1.0/v1.1）—— 保留兼容，新卡片不使用 */
+.memory-l1-card-summary {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  line-height: 1.55;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+
+/* 旧卡片 footer（v1.0/v1.1）—— 保留兼容 */
+.memory-l1-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: var(--space-3);
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
 
 /* =========================================================
    6. L2 事件列表

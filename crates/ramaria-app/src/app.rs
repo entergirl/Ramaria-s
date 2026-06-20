@@ -104,8 +104,11 @@ impl App {
         config: ramaria_core::config::RamariaConfig,
         keychain: Arc<Keychain>,
     ) -> Self {
-        let retriever = Retriever::new();
+        let retriever = Arc::new(Mutex::new(Retriever::new()));
         let lifecycle = Arc::new(SessionLifecycle::new(config.clone()));
+
+        // v1.2: 注入 Retriever 到 SessionLifecycle，启用 L1 增量索引
+        lifecycle.set_retriever(Arc::clone(&retriever));
 
         let emb_info = embedding
             .as_ref()
@@ -128,7 +131,7 @@ impl App {
             storage,
             llm: Mutex::new(llm),
             embedding: Mutex::new(embedding),
-            retriever: Arc::new(Mutex::new(retriever)),
+            retriever,
             config,
             state: Mutex::new(AppState::NeedsSetup),
             keychain,

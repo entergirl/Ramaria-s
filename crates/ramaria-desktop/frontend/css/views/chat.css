@@ -85,6 +85,47 @@
 .chat-session-new-btn { display: none; }
 
 /* =========================================================
+   2b. ★ v1.2 M5-B: 面包屑导航（来自记忆页时显示）
+   ========================================================= */
+
+.chat-breadcrumb {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  padding: var(--space-1) var(--space-4);
+  background: var(--bg-subtle);
+  border-bottom: 1px solid var(--border-light);
+  min-height: 32px;
+}
+
+.chat-breadcrumb-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 2px var(--space-2);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  font-family: var(--font-body);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out),
+              color var(--dur-fast) var(--ease-out);
+  text-decoration: none;
+}
+
+.chat-breadcrumb-btn:hover {
+  background: var(--blue-50);
+  color: var(--color-secondary-hover);
+}
+
+.chat-breadcrumb-btn:focus-visible {
+  box-shadow: 0 0 0 var(--focus-ring-width) var(--focus-ring-color);
+}
+
+/* =========================================================
    3. 消息列表
    ========================================================= */
 

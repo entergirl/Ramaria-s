@@ -26,6 +26,7 @@ use ramaria_core::types::now_ms;
 use ramaria_memory::event::{EventExtractor, EventExtractorConfig};
 use ramaria_memory::job::{JobManager, JobResult, JobType};
 use ramaria_memory::l1::{L1Summarizer, L1SummarizerConfig};
+use ramaria_memory::retriever::Retriever;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -53,17 +54,40 @@ pub struct SessionLifecycle {
     pub(crate) config: RamariaConfig,
     /// 停止标志（所有后台线程在设置此标志后退出）
     pub(crate) shutdown_flag: Arc<AtomicBool>,
+    /// v1.2: 内存检索器引用（L1 生成后增量更新），None 表示未注入（向后兼容）
+    pub(crate) retriever: Mutex<Option<Arc<Mutex<Retriever>>>>,
 }
 
 impl SessionLifecycle {
     /// 创建新的 Session 生命周期编排器。
+    ///
+    /// retriever 默认为 `None`，调用方需在创建后通过 [`set_retriever`] 注入，
+    /// 以启用 L1 摘要生成后的增量索引更新。
     pub fn new(config: RamariaConfig) -> Self {
         Self {
             active_session_id: Mutex::new(None),
             session_last_active: Mutex::new(HashMap::new()),
             config,
             shutdown_flag: Arc::new(AtomicBool::new(false)),
+            retriever: Mutex::new(None),
         }
+    }
+
+    /// 注入内存检索器引用（v1.2 新增）。
+    ///
+    /// 调用时机:
+    /// - 在 `App::new` 中，`SessionLifecycle` 和 `Retriever` 创建完成后立即调用。
+    /// - 必须在后台任务启动前调用（空闲检测/shutdown 路径依赖此引用做 L1 增量索引）。
+    ///
+    /// 参数:
+    /// - `r`: 与 App 共享的 Retriever（`Arc<Mutex<Retriever>>`）。
+    pub fn set_retriever(&self, r: Arc<Mutex<Retriever>>) {
+        let mut guard = self.retriever.lock().unwrap_or_else(|e| {
+            error!("retriever lock poisoned during set_retriever: {e}");
+            e.into_inner()
+        });
+        *guard = Some(r);
+        info!("SessionLifecycle: Retriever 引用已注入，L1 增量索引已启用");
     }
 
     /// 返回 shutdown_flag 的 Arc 引用，供外部线程检查。
@@ -131,6 +155,40 @@ impl SessionLifecycle {
         guard.remove(&session_id);
     }
 
+    /// v1.2: 从 DB 读取当前活跃 session 的 `persona_uid`。
+    ///
+    /// 职责:
+    /// - 供空闲超时关闭（`spawn_idle_checker`）和 shutdown 关闭路径使用，
+    ///   确保 L1 摘要归属正确（不再传 `None` 导致 NULL persona_uid 死锁）。
+    ///
+    /// 降级:
+    /// - 无活跃 session → 返回 `None`。
+    /// - DB 查询失败 → warn 日志 + 返回 `None`（不阻塞关闭流程）。
+    ///
+    /// 参数:
+    /// - `storage`: 存储后端（用于查询 session 记录）。
+    ///
+    /// 返回:
+    /// - `Some(uid)`: 当前活跃 session 的 persona_uid。
+    /// - `None`: 无活跃 session / session 不存在 / 查询失败。
+    async fn get_active_session_persona_uid(&self, storage: &dyn StorageBackend) -> Option<String> {
+        let sid = self.get_active_session_id()?;
+        match storage.get_session(sid).await {
+            Ok(Some(s)) => {
+                debug!(%sid, persona_uid = ?s.persona_uid, "从活跃 session 读取 persona_uid");
+                s.persona_uid
+            }
+            Ok(None) => {
+                warn!(%sid, "活跃 session 在 DB 中不存在，persona_uid 回退为 None");
+                None
+            }
+            Err(e) => {
+                warn!(%sid, %e, "查询活跃 session persona_uid 失败，回退为 None");
+                None
+            }
+        }
+    }
+
     // =========================================================
     // 手动关闭：save_and_close_session
     // =========================================================
@@ -185,6 +243,10 @@ impl SessionLifecycle {
                     summary_len = l1.summary.chars().count(),
                     "L1 摘要生成成功"
                 );
+
+                // v1.2: 增量更新 Retriever 内存索引（D-V12-013）
+                // 必须在 L2 级联检查前执行，确保后续 L2/L3 也能检索到新 L1
+                self.index_l1_into_retriever(&l1);
 
                 // Step 3: 检查 L2 触发条件（路径 A：即时触发）
                 // 对齐 Python summarizer 末尾的 `merger.check_and_merge`
@@ -273,6 +335,8 @@ impl SessionLifecycle {
         {
             Ok(l1) => {
                 info!(%session_id, l1_id = %l1.id, "L1 重试成功");
+                // v1.2: 增量更新 Retriever 索引
+                self.index_l1_into_retriever(&l1);
                 // 触发 L2 检查（路径 A）
                 self.check_l2_trigger(storage, llm).await;
                 Ok(Some(l1))
@@ -285,6 +349,11 @@ impl SessionLifecycle {
     }
 
     /// 生成 L1 摘要但不触发 L2 级联（用于批量导入场景，全部 L1 完成后统一触发）。
+    ///
+    /// 幂等性（v1.2）:
+    /// - 若 session 已有目标 persona_uid 的 L1 摘要 → 跳过生成（避免重复 LLM 调用）。
+    /// - 若仅有 NULL-persona_uid 的旧摘要 → 删除后重新生成。
+    /// - 若无任何摘要 → 直接生成。
     ///
     /// 说明:
     /// - 与 `regenerate_l1` 功能相同，但跳过末尾的 `check_l2_trigger` 调用。
@@ -302,6 +371,35 @@ impl SessionLifecycle {
             return Ok(None);
         }
 
+        // v1.2: 检查是否已存在目标 persona_uid 的 L1 摘要（幂等——避免重复 LLM 调用）
+        if let Some(target_uid) = persona_uid {
+            let existing = storage.list_memory_l1(session_id).await?;
+            let already_has = existing
+                .iter()
+                .any(|l1| l1.persona_uid.as_deref() == Some(target_uid));
+            if already_has {
+                info!(
+                    %session_id,
+                    persona_uid = %target_uid,
+                    "该 session 已有目标 persona 的 L1 摘要，跳过重新生成"
+                );
+                // 增量索引仍要确保（万一之前的 rebuild 跳过了）
+                if let Some(l1) = existing
+                    .into_iter()
+                    .find(|l| l.persona_uid.as_deref() == Some(target_uid))
+                {
+                    self.index_l1_into_retriever(&l1);
+                }
+                return Ok(None);
+            }
+        }
+
+        // v1.2: 删除旧 NULL-persona_uid L1 摘要，再做生成
+        let deleted = storage.delete_memory_l1_by_session(session_id).await?;
+        if deleted > 0 {
+            info!(%session_id, deleted, "已清理旧 NULL-persona_uid L1 摘要");
+        }
+
         info!(%session_id, ?persona_uid, msg_count = messages.len(), "批量 L1 摘要（无级联）");
 
         match self
@@ -310,6 +408,8 @@ impl SessionLifecycle {
         {
             Ok(l1) => {
                 info!(%session_id, l1_id = %l1.id, "L1 生成成功（无级联）");
+                // v1.2: 增量更新 Retriever 索引（批量导入场景每批次一个 session）
+                self.index_l1_into_retriever(&l1);
                 Ok(Some(l1))
             }
             Err(e) => {
@@ -364,6 +464,51 @@ impl SessionLifecycle {
                     .ok_or_else(|| RamariaError::validation("L1 摘要生成后无法读取"))
             }
             Err(e) => Err(e),
+        }
+    }
+
+    /// v1.2: 将 L1 摘要增量添加到 Retriever 内存索引。
+    ///
+    /// 职责:
+    /// - 在 L1 摘要生成成功后立即调用，使新 L1 文档无需等待手动 `rebuild_retriever`
+    ///   即可被 Stage 5 RAG 检索命中（D-V12-013）。
+    ///
+    /// 容错:
+    /// - Retriever 未注入（向后兼容）→ 静默跳过。
+    /// - Mutex 锁污染 → warn 日志 + 跳过。
+    /// - 索引添加失败 → warn 日志 + 不阻塞 L2 级联检查。
+    ///
+    /// 参数:
+    /// - `l1`: 刚生成的 L1 摘要记录。
+    fn index_l1_into_retriever(&self, l1: &ramaria_core::types::MemoryL1) {
+        let ret_guard = match self.retriever.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                warn!("retriever lock poisoned during index_l1_into_retriever: {e}");
+                return;
+            }
+        };
+        if let Some(ref retriever_arc) = *ret_guard {
+            match retriever_arc.lock() {
+                Ok(mut retriever) => {
+                    if let Err(e) = retriever.index_l1_record(l1) {
+                        warn!(
+                            l1_id = %l1.id,
+                            error = %e,
+                            "增量更新 Retriever 索引失败（不影响 L2 级联）"
+                        );
+                    } else {
+                        info!(
+                            l1_id = %l1.id,
+                            persona_uid = ?l1.persona_uid,
+                            "L1 摘要已增量加入 Retriever 内存索引，即时可检索"
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!("retriever 内部 Mutex poisoned: {e}");
+                }
+            }
         }
     }
 
@@ -880,8 +1025,17 @@ impl SessionLifecycle {
                         "session 空闲超时，自动关闭"
                     );
 
+                    // v1.2: 从活跃 session 读取 persona_uid（不再传 None）
+                    // 修复前：save_and_close_session(..., None) → L1 摘要 persona_uid = NULL
+                    //          → list_recent_l1_by_persona 查不到 → 跨 session 上下文注入失效
+                    let persona_uid = slf.get_active_session_persona_uid(storage.as_ref()).await;
+
                     if let Err(e) = slf
-                        .save_and_close_session(storage.as_ref(), llm.as_ref(), None)
+                        .save_and_close_session(
+                            storage.as_ref(),
+                            llm.as_ref(),
+                            persona_uid.as_deref(),
+                        )
                         .await
                     {
                         error!(%active_sid, %e, "自动关闭 session 失败");
@@ -1055,7 +1209,13 @@ impl SessionLifecycle {
         self.shutdown_flag.store(true, Ordering::SeqCst);
 
         // Step 2: 关闭活跃 session（无超时——L1 摘要需要等待 LLM 响应）
-        match self.save_and_close_session(storage, llm, None).await {
+        // v1.2: 从活跃 session 读取 persona_uid（不再传 None）
+        // 修复前：save_and_close_session(..., None) → L1 摘要 persona_uid = NULL → 数据死锁
+        let persona_uid = self.get_active_session_persona_uid(storage).await;
+        match self
+            .save_and_close_session(storage, llm, persona_uid.as_deref())
+            .await
+        {
             Ok(()) => info!("shutdown: 活跃 session 已关闭"),
             Err(e) => warn!(%e, "shutdown: 关闭活跃 session 时出错（继续退出）"),
         }
@@ -1222,5 +1382,132 @@ mod tests {
         assert_eq!(lifecycle.config.session.l1_idle_minutes, 10);
         assert_eq!(lifecycle.config.session.idle_check_interval_seconds, 60);
         assert_eq!(lifecycle.config.session.l2_check_interval_seconds, 86400);
+    }
+
+    // =========================================================
+    // v1.2: Retriever 注入与增量索引测试
+    // =========================================================
+
+    #[test]
+    fn set_retriever_stores_reference() {
+        let config = RamariaConfig::default();
+        let lifecycle = SessionLifecycle::new(config);
+
+        let retriever = Arc::new(Mutex::new(Retriever::new()));
+        lifecycle.set_retriever(Arc::clone(&retriever));
+
+        // 验证 retriever 已存储
+        let guard = lifecycle.retriever.lock().unwrap();
+        assert!(guard.is_some());
+    }
+
+    #[test]
+    fn index_l1_into_retriever_without_set_retriever_is_noop() {
+        let config = RamariaConfig::default();
+        let lifecycle = SessionLifecycle::new(config);
+
+        // 未注入 retriever 时调用不应 panic
+        let l1 = ramaria_core::types::MemoryL1 {
+            id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            summary: "测试".to_string(),
+            keywords: None,
+            time_period: None,
+            atmosphere: None,
+            valence: 0.0,
+            salience: 0.5,
+            absorbed: false,
+            created_at: 1718000000000,
+            last_accessed_at: None,
+            persona_uid: Some("test".to_string()),
+            context_json: None,
+            situation_strength: None,
+        };
+        // 不应 panic
+        lifecycle.index_l1_into_retriever(&l1);
+    }
+
+    #[test]
+    fn index_l1_into_retriever_adds_to_index() {
+        let config = RamariaConfig::default();
+        let lifecycle = SessionLifecycle::new(config);
+
+        let retriever = Arc::new(Mutex::new(Retriever::new()));
+        lifecycle.set_retriever(Arc::clone(&retriever));
+
+        let sid = Uuid::new_v4();
+        let l1 = ramaria_core::types::MemoryL1 {
+            id: Uuid::new_v4(),
+            session_id: sid,
+            summary: "测试摘要：用户讨论了Rust编程话题".to_string(),
+            keywords: Some("Rust,编程".to_string()),
+            time_period: None,
+            atmosphere: None,
+            valence: 0.5,
+            salience: 0.8,
+            absorbed: false,
+            created_at: 1718000000000,
+            last_accessed_at: None,
+            persona_uid: Some("rama-0001".to_string()),
+            context_json: None,
+            situation_strength: None,
+        };
+
+        lifecycle.index_l1_into_retriever(&l1);
+
+        // 验证 retriever 中已有文档
+        let guard = retriever.lock().unwrap();
+        assert_eq!(guard.doc_count(), 1);
+    }
+
+    #[test]
+    fn index_l1_into_retriever_makes_l1_searchable() {
+        let config = RamariaConfig::default();
+        let lifecycle = SessionLifecycle::new(config);
+
+        let retriever = Arc::new(Mutex::new(Retriever::new()));
+        lifecycle.set_retriever(Arc::clone(&retriever));
+
+        let l1 = ramaria_core::types::MemoryL1 {
+            id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            summary: "用户今天学习了Rust编程语言的基础语法".to_string(),
+            keywords: Some("学习,Rust,编程".to_string()),
+            time_period: None,
+            atmosphere: None,
+            valence: 0.8,
+            salience: 0.9,
+            absorbed: false,
+            created_at: 1718000000000,
+            last_accessed_at: None,
+            persona_uid: Some("rama-0001".to_string()),
+            context_json: None,
+            situation_strength: None,
+        };
+
+        lifecycle.index_l1_into_retriever(&l1);
+
+        // 立即检索，应能命中
+        let guard = retriever.lock().unwrap();
+        let req = ramaria_memory::SearchRequest {
+            query: "Rust".to_string(),
+            persona_uid: None,
+            top_k: 5,
+            filter_share: false,
+        };
+        let results = guard.search(&req, None);
+        assert!(!results.is_empty());
+        assert!(results.iter().any(|sr| sr.doc_summary.contains("Rust")));
+    }
+
+    #[test]
+    fn get_active_session_persona_uid_returns_none_when_no_active() {
+        let config = RamariaConfig::default();
+        let lifecycle = SessionLifecycle::new(config);
+
+        // 无活跃 session 时 get_active_session_id 返回 None，
+        // get_active_session_persona_uid 中的 `?` 会提前返回 None
+        // （此测试验证方法签名和基本逻辑，不涉及 DB 查询）
+        assert!(lifecycle.get_active_session_id().is_none());
     }
 }

@@ -96,6 +96,9 @@ impl StorageBackend for SqliteStorage {
     async fn mark_l1_absorbed(&self, l1_ids: &[Uuid]) -> RamariaResult<()> {
         repo::memory_l1::mark_absorbed(&self.pool, l1_ids).await
     }
+    async fn delete_memory_l1_by_session(&self, session_id: Uuid) -> RamariaResult<usize> {
+        repo::memory_l1::delete_by_session(&self.pool, session_id).await
+    }
     async fn list_unabsorbed_l1(&self, persona_uid: &str) -> RamariaResult<Vec<MemoryL1>> {
         repo::memory_l1::list_unabsorbed(&self.pool, persona_uid).await
     }

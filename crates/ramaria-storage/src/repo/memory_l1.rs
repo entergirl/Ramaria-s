@@ -84,6 +84,24 @@ pub async fn save(pool: &SqlitePool, l1: &MemoryL1) -> RamariaResult<()> {
     Ok(())
 }
 
+/// v1.2: 删除指定 session 中 persona_uid 为 NULL 的 L1 摘要。
+///
+/// 用法:
+/// - `regenerate_l1_no_cascade` 在重新生成 L1 前调用，仅清理旧 NULL 记录。
+/// - 已有正确 persona_uid 的 L1 不会被删除（幂等安全——可重复调用）。
+pub async fn delete_by_session(pool: &SqlitePool, session_id: Uuid) -> RamariaResult<usize> {
+    let result = sqlx::query("DELETE FROM memory_l1 WHERE session_id = ? AND persona_uid IS NULL")
+        .bind(session_id.to_string())
+        .execute(pool)
+        .await
+        .storage_err("删除 session L1 摘要失败")?;
+    let count = result.rows_affected() as usize;
+    if count > 0 {
+        tracing::info!(%session_id, count, "已清理 session 的旧 NULL-persona_uid L1 摘要");
+    }
+    Ok(count)
+}
+
 pub async fn list_by_session(pool: &SqlitePool, session_id: Uuid) -> RamariaResult<Vec<MemoryL1>> {
     let rows = sqlx::query_as::<_, L1Row>(
         "SELECT id, session_id, summary, keywords, time_period, atmosphere, valence, salience,

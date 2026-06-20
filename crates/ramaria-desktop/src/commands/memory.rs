@@ -28,6 +28,10 @@ pub struct MemoryL1View {
     pub salience: f64,
     pub persona_uid: Option<String>,
     pub created_at: i64,
+    /// ★ v1.2 M5-C: 时间段（清晨/上午/下午/傍晚/夜间/深夜）
+    pub time_period: Option<String>,
+    /// ★ v1.2 M5-C: 分组上下文 JSON，含 chat_partners / message_count 等
+    pub context_json: Option<String>,
 }
 
 /// L2 事件视图。
@@ -163,6 +167,8 @@ pub async fn get_l1_memories(
                 summary: m.summary,
                 keywords: m.keywords.unwrap_or_default(),
                 atmosphere: m.atmosphere.unwrap_or_default(),
+                time_period: m.time_period,
+                context_json: m.context_json,
                 valence: m.valence,
                 salience: m.salience,
                 persona_uid: m.persona_uid,

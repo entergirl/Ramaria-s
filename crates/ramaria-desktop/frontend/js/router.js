@@ -81,10 +81,17 @@ var RamariaRouter = (function () {
  /** 当前显示的视图名称 */
     var _currentView = null;
 
- /** 上次在 Ready/Degraded 状态下用户选择的导航视图（用于状态恢复） */
+/** 上次在 Ready/Degraded 状态下用户选择的导航视图（用于状态恢复） */
     var _lastNavView = 'chat';
 
- /** 是否已初始化 */
+    /**
+     * ★ v1.2 M5-B: 最近一次 showView 调用时传入的 options。
+     * 视图模块（chat/memory 等）可通过 getLastOptions() 获取。
+     * 用于支持跨视图参数传递（如 sessionId、personaUid、fromView）。
+     */
+    var _lastOptions = {};
+
+    /** 是否已初始化 */
     var _initialized = false;
 
  /** 取消订阅 Store 的函数 */
@@ -150,6 +157,9 @@ var RamariaRouter = (function () {
         }
 
         options = options || {};
+
+ // ★ v1.2 M5-B: 保存 options 供视图 enter 钩子使用
+        _lastOptions = options;
 
  // 1. 旧视图 leave 钩子
         if (_currentView) {
@@ -288,9 +298,13 @@ var RamariaRouter = (function () {
         var hooks = _hooks[viewName] && _hooks[viewName][phase];
         if (!hooks || hooks.length === 0) return;
 
+        // ★ v1.2 M5-B: enter 钩子接收 _lastOptions 作为第二个参数
+        // leave 钩子不传 options（旧视图不应感知新视图的参数）
+        var hookOptions = (phase === 'enter') ? _lastOptions : undefined;
+
         for (var i = 0; i < hooks.length; i++) {
             try {
-                hooks[i](viewName);
+                hooks[i](viewName, hookOptions);
             } catch (err) {
                 console.error('[Router] 视图钩子异常 (' + viewName + '.' + phase + '):', err);
             }
@@ -569,19 +583,28 @@ var RamariaRouter = (function () {
  // =========================================================
 
     return {
- /** 初始化路由系统 */
+        /** 初始化路由系统 */
         init: init,
- /** 销毁路由系统 */
+        /** 销毁路由系统 */
         destroy: destroy,
 
- /** 切换到指定视图（外部调用，如 Toast 后导航） */
+        /** 切换到指定视图（外部调用，如 Toast 后导航） */
         showView: showView,
 
- /** 获取当前视图名称 */
+        /** 获取当前视图名称 */
         getCurrentView: function () { return _currentView; },
 
- /** 获取上次导航视图 */
+        /** 获取上次导航视图 */
         getLastNavView: function () { return _lastNavView; },
+
+        /**
+         * ★ v1.2 M5-B: 获取最近一次 showView 调用传入的 options。
+         * 视图模块用于读取跨视图传递的参数（如 sessionId、personaUid、fromView）。
+         *
+         * 返回:
+         * - 最近一次 showView 的 options 对象（可能为空 {}）
+         */
+        getLastOptions: function () { return _lastOptions; },
 
  /** 注册视图生命周期钩子 */
         registerHook: registerHook,

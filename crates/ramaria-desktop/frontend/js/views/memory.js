@@ -42,6 +42,20 @@ var RamariaMemoryView = (function () {
  /** 当前激活的 Tab: 'l1' | 'l2' | 'l3' */
     var _activeTab = 'l1';
 
+    /**
+     * ★ v1.2 M5-B: 标记是否从对话页返回（用于恢复状态）。
+     * 在 L1 卡片"查看对话"按钮点击时设为 true，
+     * 在 enter 钩子中检测并恢复之前的 persona 和 tab 选择。
+     */
+    var _returningFromChat = false;
+
+    /**
+     * ★ v1.2 M5-B: 离开记忆页时的状态快照，用于从对话页返回时恢复。
+     * 包含 { personaUid, activeTab }——不持久化到 Store，
+     * 仅存活于内存中（页面刷新后会丢失，用户需重新选择）。
+     */
+    var _savedState = null;
+
  // =========================================================
  // DOM 快捷查询
  // =========================================================
@@ -282,25 +296,96 @@ var RamariaMemoryView = (function () {
         for (var i = 0; i < items.length; i++) {
             var item = items[i];
 
+            // ★ v1.2 M5-C: 解析 context_json 获取扩展字段
+            var ctx = null;
+            var hasCtx = false;
+            try {
+                if (item.context_json) {
+                    ctx = typeof item.context_json === 'string'
+                        ? JSON.parse(item.context_json) : item.context_json;
+                    hasCtx = true;
+                }
+            } catch (_) { /* 解析失败，按无 context_json 降级 */ }
+
+            // ★ v1.2 M5-C: 从顶层字段 + context_json 提取扩展字段
+            // time_period 优先从 L1 顶层字段读取（v1.2 新增），回退 context_json
+            var timePeriod = item.time_period || (ctx && ctx.time_period) || '';
+            var chatPartners = (ctx && ctx.chat_partners && ctx.chat_partners.length > 0)
+                ? ctx.chat_partners : [];
+            var msgCount = (ctx && ctx.message_count) ? ctx.message_count : '';
+            // L1 顶层字段
+            var atmosphere = item.atmosphere || '';
+            var valence = (item.valence != null) ? item.valence : 0;
+            var keywords = item.keywords || '';
+            var hasSession = item.session_id && item.session_id.length > 0;
+
+            // ★ v1.2 M5-C: 确定 valence CSS class
+            var valenceClass;
+            if (valence > 0.3) {
+                valenceClass = 'memory-l1-valence--positive';
+            } else if (valence < -0.3) {
+                valenceClass = 'memory-l1-valence--negative';
+            } else {
+                valenceClass = 'memory-l1-valence--neutral';
+            }
+
             var card = document.createElement('div');
-            card.className = 'memory-l1-card';
+            card.className = 'memory-l1-card ' + valenceClass;
             card.setAttribute('data-l1-id', item.id || '');
 
-            var valenceEmoji = _valenceEmoji(item.valence);
-            var atmosphere = item.atmosphere || '';
+            // ★ v1.2 M5-C: 构建关键词 chip 标签
+            var chipsHtml = '';
+            if (keywords) {
+                var kwList = keywords.split(',');
+                for (var k = 0; k < kwList.length; k++) {
+                    var kw = kwList[k].trim();
+                    if (kw) {
+                        chipsHtml += '<span class="memory-l1-chip">' + _escapeHtml(kw) + '</span>';
+                    }
+                }
+            }
+
+            // ★ v1.2 M5-C: 构建属性行
+            var attrsHtml = '';
+            var attrParts = [];
+            if (timePeriod) {
+                attrParts.push('<span class="memory-l1-attr">🕐 ' + _escapeHtml(timePeriod) + '</span>');
+            }
+            if (atmosphere) {
+                var valenceEmoji = _valenceEmoji(valence);
+                attrParts.push('<span class="memory-l1-attr">' + valenceEmoji + ' ' + _escapeHtml(atmosphere) + '</span>');
+            }
+            // 旧卡片兼容：有 context_json 才显示参与人数；否则隐藏
+            if (hasCtx && chatPartners.length > 0) {
+                attrParts.push('<span class="memory-l1-attr">👥 ' + chatPartners.length + '人</span>');
+            }
+            if (attrParts.length > 0) {
+                attrsHtml = '<div class="memory-l1-card-attrs">' + attrParts.join('') + '</div>';
+            } else if (atmosphere) {
+                // 旧卡片降级：有氛围但无 context_json，仅显示氛围
+                var valenceEmojiOld = _valenceEmoji(valence);
+                attrsHtml = '<div class="memory-l1-card-attrs">' +
+                    '<span class="memory-l1-attr">' + valenceEmojiOld + ' ' + _escapeHtml(atmosphere) + '</span>' +
+                    '</div>';
+            }
+            // 若仍为空则不渲染属性行
 
             card.innerHTML =
+                // ── valence 色条（通过 ::before 伪元素渲染，此处仅占位标记）──
+                // ── 标题 ──
                 '<div class="memory-l1-card-header">' +
-                    '<div class="memory-l1-card-title">' + (item.summary || '(无摘要)') + '</div>' +
-                    (atmosphere
-                        ? '<span class="memory-l1-card-badge">' + valenceEmoji + ' ' + atmosphere + '</span>'
-                        : '') +
+                    '<div class="memory-l1-card-title">' + _escapeHtml(item.summary || '(无摘要)') + '</div>' +
                 '</div>' +
-                '<div class="memory-l1-card-summary">' +
-                    (item.keywords ? '🏷️ ' + item.keywords : '') +
-                '</div>' +
-                '<div class="memory-l1-card-footer">' +
-                    '<span>' + RamariaFormat.smartTime(item.created_at) + '</span>' +
+                // ── 属性行（时段 | 氛围 | 参与人数）──
+                attrsHtml +
+                // ── 关键词 chips ──
+                (chipsHtml ? '<div class="memory-l1-card-chips">' + chipsHtml + '</div>' : '') +
+                // ── 底部操作栏：时间 + 跳转按钮 ──
+                '<div class="memory-l1-card-actions">' +
+                    '<span class="memory-l1-card-time">' +
+                        RamariaFormat.smartTime(item.created_at) +
+                    '</span>' +
+                    // 强度条保留在中间
                     '<div class="memory-salience-bar">' +
                         '<span class="memory-salience-label">强度</span>' +
                         '<div class="memory-salience-track">' +
@@ -308,16 +393,29 @@ var RamariaMemoryView = (function () {
                                 (Math.round((item.salience || 0) * 10) * 10) + '"></div>' +
                         '</div>' +
                     '</div>' +
+                    (hasSession
+                        ? '<button class="memory-l1-view-chat-btn" data-session-id="' + item.session_id + '" ' +
+                            'data-persona-uid="' + (item.persona_uid || '') + '" ' +
+                            'title="跳转到该会话查看完整对话" aria-label="查看对话">' +
+                            '💬 查看对话' + (msgCount ? ' (' + msgCount + ' 条消息)' : '') +
+                            ' →</button>'
+                        : '<span class="memory-l1-no-session-hint">会话已过期</span>') +
                 '</div>';
 
-            card.addEventListener('click', function () {
+            // 卡片整体点击 → 展开详情 Modal（保留旧行为）
+            card.addEventListener('click', function (e) {
+                // 如果点击目标是"查看对话"按钮，不弹 Modal
+                if (e.target.closest && e.target.closest('.memory-l1-view-chat-btn')) {
+                    return;
+                }
+
                 var detail = (item.summary || '') + '\n\n' +
                     '氛围: ' + (item.atmosphere || '-') + '\n' +
                     '效价: ' + (item.valence != null ? item.valence.toFixed(2) : '-') + '\n' +
                     '显著性: ' + (item.salience != null ? (item.salience * 100).toFixed(0) + '%' : '-') + '\n' +
                     '关键词: ' + (item.keywords || '-') + '\n' +
                     '人格: ' + (item.persona_uid || '-') + '\n' +
-                    '会话: ' + (item.session_id ? item.session_id.substring(0, 8) + '...' : '-');
+                    '会话: ' + (hasSession ? item.session_id.substring(0, 8) + '...' : '-');
 
                 RamariaModal.show({
                     title: 'L1 摘要详情',
@@ -328,10 +426,51 @@ var RamariaMemoryView = (function () {
                 });
             });
 
+            // "查看对话"按钮独立事件（阻止冒泡）
+            var viewChatBtn = card.querySelector('.memory-l1-view-chat-btn');
+            if (viewChatBtn) {
+                viewChatBtn.addEventListener('click', function (e) {
+                    e.stopPropagation();
+
+                    var sessionId = this.getAttribute('data-session-id');
+                    var personaUid = this.getAttribute('data-persona-uid') || _currentPersonaUid;
+
+                    if (!sessionId) {
+                        RamariaToast.show('warning', '无法跳转', '该摘要未关联有效会话');
+                        return;
+                    }
+
+                    console.log('[MemoryView] L1 卡片跳转对话: session=' + sessionId.substring(0, 8) +
+                        ', persona=' + personaUid);
+
+                    _savedState = {
+                        personaUid: _currentPersonaUid,
+                        activeTab: _activeTab,
+                    };
+                    _returningFromChat = true;
+
+                    RamariaRouter.showView('chat', {
+                        sessionId: sessionId,
+                        personaUid: personaUid,
+                        fromView: 'memory',
+                    });
+                });
+            }
+
             grid.appendChild(card);
         }
 
         panel.appendChild(grid);
+    }
+
+    /**
+     * HTML 文本转义（防 XSS）。
+     */
+    function _escapeHtml(text) {
+        if (!text) return '';
+        var div = document.createElement('div');
+        div.appendChild(document.createTextNode(String(text)));
+        return div.innerHTML;
     }
 
     function _valenceEmoji(valence) {
@@ -713,10 +852,41 @@ var RamariaMemoryView = (function () {
     function _registerHooks() {
         var unreg;
 
-        unreg = RamariaRouter.registerHook('memory', 'enter', function () {
+        // ★ v1.2 M5-B: enter 钩子接收 Router options（第二个参数）
+        unreg = RamariaRouter.registerHook('memory', 'enter', function (_viewName, options) {
             console.log('[MemoryView] 进入视图');
+
+            // 检查是否从对话页返回（需要恢复状态）
+            var shouldRestore = _returningFromChat && _savedState;
+            if (shouldRestore) {
+                console.log('[MemoryView] 从对话页返回，恢复状态: persona=' +
+                    _savedState.personaUid + ', tab=' + _savedState.activeTab);
+            }
+
             render();
+
             _refreshPersonaSelector().then(function () {
+                // ★ v1.2 M5-B: 从对话页返回时恢复之前的 persona 和 tab
+                if (shouldRestore) {
+                    if (_savedState.personaUid) {
+                        var select = $('memory-persona-select');
+                        if (select) {
+                            var opt = select.querySelector('option[value="' + _savedState.personaUid + '"]');
+                            if (opt) {
+                                select.value = _savedState.personaUid;
+                                _currentPersonaUid = _savedState.personaUid;
+                            }
+                        }
+                    }
+                    if (_savedState.activeTab) {
+                        _activeTab = _savedState.activeTab;
+                        _switchTab(_savedState.activeTab);
+                    }
+                    // 清除标记
+                    _returningFromChat = false;
+                    _savedState = null;
+                }
+
                 _loadAllData();
                 _updatePipelineButton();
             });
@@ -725,6 +895,16 @@ var RamariaMemoryView = (function () {
 
         unreg = RamariaRouter.registerHook('memory', 'leave', function () {
             console.log('[MemoryView] 离开视图');
+
+            // ★ v1.2 M5-B: 离开时保存状态快照（仅在前往对话页时由 L1 卡片按钮设置 _returningFromChat）
+            // 若 _returningFromChat 为 true（即将跳转到对话页），保存当前状态
+            if (_returningFromChat) {
+                _savedState = {
+                    personaUid: _currentPersonaUid,
+                    activeTab: _activeTab,
+                };
+            }
+
             for (var i = 0; i < _unsubs.length; i++) {
                 try { _unsubs[i](); } catch (_) { /* ignore */ }
             }

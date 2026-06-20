@@ -75,6 +75,9 @@ var ImportView = (function () {
         l3Triggered: null,   // done 阶段：深度模式 L3 是否已触发
     };
 
+    /** v1.2: 导入开始时间（Unix 毫秒），用于预估剩余时间 */
+    var _importStartedAt = null;
+
  /** 导入完成后用于导航的 persona 信息 */
     var _importResultPersona = {
         selfUid: '',         // 导出者 persona UID
@@ -138,6 +141,7 @@ var ImportView = (function () {
         _isImporting = false;
         _importProgress = { phase: '', current: 0, total: 0, message: '', l1Success: null, l1Failed: null, l2Triggered: null, l3Triggered: null };
         _importResultPersona = { selfUid: '', selfName: '', otherUid: '', otherName: '' };
+        _importStartedAt = null;  // v1.2: 重置 ETA 计时
 
  // 设置标题
         RamariaRouter.setContentTitle('数据导入');
@@ -214,25 +218,92 @@ var ImportView = (function () {
     }
 
  /**
- * 更新导入进度条的宽度（通过 CSSOM，CSP-safe）。
+ * 更新导入进度条的宽度和 ETA（通过 CSSOM，CSP-safe）。
  *
  * 说明:
  * - CSP `style-src 'self'` 阻止 HTML 中的 `style="..."` 属性，
  * 但允许 JavaScript 通过 element.style 操作 CSSOM。
- * - 此函数在 `_render` 设置 innerHTML 后调用，更新进度条填充宽度。
+ * - 此函数在 `_render` 设置 innerHTML 后调用，更新进度条填充宽度、百分比、会话计数和 ETA。
+ * - v1.2 增强：进度条高度 ≥ 8px、显示"第 N/M 个会话"、预估剩余时间。
  */
     function _updateImportProgressBar() {
         var prog = _importProgress;
-        if (prog.total > 0 && prog.phase === 'l1') {
-            var bar = document.querySelector('.import-progress-bar .progress-fill');
+        if (prog.total > 0) {
+            var pct = Math.round((prog.current / prog.total) * 100);
+
+ // ── 进度条填充宽度 ──
+            var bar = document.getElementById('import-progress-fill-inline');
             if (bar) {
-                var pct = Math.round((prog.current / prog.total) * 100);
                 bar.style.width = pct + '%';  // CSSOM 操作，不触发 CSP
             }
-            var pctEl = document.querySelector('.import-progress-pct');
+
+ // ── 百分比文本 ──
+            var pctEl = document.getElementById('import-progress-pct-inline');
             if (pctEl) {
-                pctEl.textContent = prog.current + ' / ' + prog.total;
+                pctEl.textContent = pct + '% (' + prog.current + '/' + prog.total + ')';
             }
+
+ // ── 会话计数器更新 ──
+            var sessionCur = document.getElementById('import-session-current');
+            if (sessionCur) {
+                sessionCur.textContent = prog.current;
+            }
+
+ // ── 预估剩余时间 (ETA) ──
+            _updateEta(prog, pct);
+        }
+    }
+
+    /**
+     * v1.2: 计算并显示预估剩余时间。
+     *
+     * 算法:
+     * - elapsed = now - _importStartedAt（已用秒数）
+     * - if current > 0 && elapsed > 2: rate = elapsed / current（每会话秒数）
+     *   eta_seconds = rate * (total - current)
+     * - else: 显示"计算中..."
+     *
+     * 格式:
+     * - < 60秒: "约 N 秒"
+     * - < 3600秒: "约 N 分钟"
+     * - ≥ 3600秒: "约 N 小时 M 分钟"
+     */
+    function _updateEta(prog, pct) {
+        var etaEl = document.getElementById('import-progress-eta');
+        if (!etaEl) return;
+
+        if (!_importStartedAt || prog.current === 0 || pct >= 100) {
+            if (pct >= 100) {
+                etaEl.textContent = '即将完成';
+            } else {
+                etaEl.textContent = '计算中...';
+            }
+            return;
+        }
+
+        var now = Date.now();
+        var elapsedSec = (now - _importStartedAt) / 1000;
+
+ // 至少等待 2 秒再计算（避免初始波动导致荒谬的 ETA）
+        if (elapsedSec < 2) {
+            etaEl.textContent = '计算中...';
+            return;
+        }
+
+        var ratePerItem = elapsedSec / prog.current;          // 每会话秒数
+        var remaining = prog.total - prog.current;
+        var etaSec = Math.round(ratePerItem * remaining);
+
+ // 格式化为人类可读
+        if (etaSec < 60) {
+            etaEl.textContent = '约 ' + etaSec + ' 秒';
+        } else if (etaSec < 3600) {
+            var min = Math.round(etaSec / 60);
+            etaEl.textContent = '约 ' + min + ' 分钟';
+        } else {
+            var hr = Math.floor(etaSec / 3600);
+            var minRem = Math.round((etaSec % 3600) / 60);
+            etaEl.textContent = '约 ' + hr + ' 小时 ' + minRem + ' 分钟';
         }
     }
 
@@ -470,13 +541,30 @@ var ImportView = (function () {
         if (prog.message) descText = prog.message;
         html += '<div class="import-progress-desc">' + _escapeHtml(descText) + '</div>';
 
- // 进度条骨架（宽度由 _updateImportProgressBar 通过 CSSOM 设置，CSP-safe）
-        if (prog.total > 0 && prog.phase === 'l1') {
-            html += '<div class="import-progress-bar">';
-            html += '<div class="progress-track tall">';
-            html += '<div class="progress-fill progress-pink"></div>';
+ // v1.2: 进度条增强——放大高度 + 会话计数 + 预估剩余时间
+        if (prog.total > 0) {
+            html += '<div class="import-progress-bar-enhanced">';
+
+ // ── 进度条（高度 ≥ 8px）──
+            html += '<div class="progress-track import-progress-track">';
+            html += '<div class="progress-fill progress-pink" id="import-progress-fill-inline"></div>';
             html += '</div>';
-            html += '<div class="import-progress-pct"></div>';
+
+ // ── 进度信息行：百分比 + 会话计数 + ETA ──
+            html += '<div class="import-progress-info">';
+            html += '<span class="import-progress-pct" id="import-progress-pct-inline"></span>';
+
+ // 阶段指示器——显示"第 N/M 个会话"
+            if (prog.phase === 'l1') {
+                html += '<span class="import-progress-sep">·</span>';
+                html += '<span class="import-progress-session-counter">第 <strong id="import-session-current">' + prog.current + '</strong> / ' + prog.total + ' 个会话</span>';
+            }
+
+ // 预估剩余时间
+            html += '<span class="import-progress-sep">·</span>';
+            html += '<span class="import-progress-eta" id="import-progress-eta">计算中...</span>';
+            html += '</div>';
+
             html += '</div>';
         }
 
@@ -686,6 +774,7 @@ var ImportView = (function () {
                 _selectedFileSize = null;
                 _reportData = null;
                 _importProgress = { phase: '', current: 0, total: 0, message: '', l1Success: null, l1Failed: null, l2Triggered: null, l3Triggered: null };
+                _importStartedAt = null;  // v1.2: 重置 ETA 计时
                 _render();
             });
         }
@@ -880,6 +969,7 @@ var ImportView = (function () {
 
         _isImporting = true;
         _step = 'importing';
+        _importStartedAt = Date.now();  // v1.2: 记录开始时间用于 ETA 计算
         _render();
 
         console.log('[ImportView] 开始导入: file=' + _selectedFilePath + ', mode=' + _importMode + ', gap=' + _gapMinutes);
