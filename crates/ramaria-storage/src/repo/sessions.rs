@@ -100,20 +100,23 @@ pub async fn delete(pool: &SqlitePool, session_id: Uuid) -> RamariaResult<()> {
 /// 参数:
 /// - `started_at`: Session 开始时间（Unix 毫秒）。
 /// - `ended_at`: Session 结束时间（Unix 毫秒）。
+/// - `persona_uid`: ★ v1.2 修复——导入会话必须绑定人格，否则 SessionDrawer
+///   按 persona 筛选时 NULL 会话被错误归类到默认人格 rama-0001。
 ///
 /// 返回:
-/// - 带指定时间范围、已关闭的 Session（persona_uid 为 None）。
+/// - 带指定时间范围、已关闭的 Session。
 pub async fn create_historical(
     pool: &SqlitePool,
     started_at: i64,
     ended_at: i64,
+    persona_uid: &str,
 ) -> RamariaResult<Session> {
     let id = Uuid::new_v4();
     sqlx::query("INSERT INTO sessions (id, started_at, ended_at, persona_uid) VALUES (?, ?, ?, ?)")
         .bind(id.to_string())
         .bind(started_at)
         .bind(ended_at)
-        .bind(None::<&str>)
+        .bind(persona_uid)
         .execute(pool)
         .await
         .storage_err("创建历史 session 失败")?;
@@ -121,7 +124,7 @@ pub async fn create_historical(
         id,
         started_at,
         ended_at: Some(ended_at),
-        persona_uid: None,
+        persona_uid: Some(persona_uid.to_string()),
     })
 }
 

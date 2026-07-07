@@ -39,6 +39,9 @@ var RamariaSessionDrawer = (function () {
     /** 抽屉是否打开 */
     var _isOpen = false;
 
+    /** 是否正在异步加载会话列表（防并发 show() 调用） */
+    var _loading = false;
+
     /** 当前加载的会话列表 */
     var _sessions = [];
 
@@ -590,6 +593,12 @@ var RamariaSessionDrawer = (function () {
             return;
         }
 
+        // 防止并发 show() 调用（快速双击历史按钮等场景）
+        if (_loading) {
+            console.log('[SessionDrawer] 正在加载中，忽略重复 show()');
+            return;
+        }
+
         if (_isOpen) {
             // 已在打开状态：刷新列表
             console.log('[SessionDrawer] 已在打开状态，刷新列表');
@@ -601,32 +610,45 @@ var RamariaSessionDrawer = (function () {
         }
         _currentPersonaUid = personaUid;
 
+        // 标记加载中（防并发 show()）
+        _loading = true;
+
         // 显示加载中
         _showLoading();
 
-        // 打开面板（先显示空壳 + 加载动画）
+        // 打开面板视觉（CSS 动画立即播放，加载骨架屏可见）
         _dom.drawer.classList.add('session-drawer--open');
         _dom.drawer.setAttribute('aria-hidden', 'false');
-        _isOpen = true;
+        // ★ 修复: _isOpen 在异步加载完成后才设为 true，
+        // 避免同一次点击事件冒泡到 #view-chat 的 outside-click 处理器，
+        // 导致抽屉刚打开就被立即关闭的竞态条件。
 
-        // 加载会话
-        var ok = await _loadSessions();
-        if (ok) {
-            _renderSessionList();
-            // 重置搜索框
-            if (_dom.searchInput) {
-                _dom.searchInput.value = '';
+        try {
+            // 加载会话
+            var ok = await _loadSessions();
+
+            // 异步加载完成，标记逻辑状态为已打开
+            _isOpen = true;
+
+            if (ok) {
+                _renderSessionList();
+                // 重置搜索框
+                if (_dom.searchInput) {
+                    _dom.searchInput.value = '';
+                }
+                _filterText = '';
+            } else {
+                _showError('无法加载会话列表，请检查后端连接');
             }
-            _filterText = '';
-        } else {
-            _showError('无法加载会话列表，请检查后端连接');
-        }
 
-        // 搜索框聚焦
-        if (_dom.searchInput) {
-            setTimeout(function () {
-                try { _dom.searchInput.focus(); } catch (_) { /* ignore */ }
-            }, 200);
+            // 搜索框聚焦
+            if (_dom.searchInput) {
+                setTimeout(function () {
+                    try { _dom.searchInput.focus(); } catch (_) { /* ignore */ }
+                }, 200);
+            }
+        } finally {
+            _loading = false;
         }
     }
 
@@ -635,11 +657,12 @@ var RamariaSessionDrawer = (function () {
      */
     function hide() {
         if (!_initialized) return;
-        if (!_isOpen) return;
+        if (!_isOpen && !_loading) return;
 
         _dom.drawer.classList.remove('session-drawer--open');
         _dom.drawer.setAttribute('aria-hidden', 'true');
         _isOpen = false;
+        _loading = false;
 
         // 清空搜索
         _filterText = '';
@@ -677,6 +700,7 @@ var RamariaSessionDrawer = (function () {
         _currentPersonaUid = null;
         _filterText = '';
         _isOpen = false;
+        _loading = false;
         _onSelect = null;
         _initialized = false;
 
