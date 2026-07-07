@@ -458,7 +458,7 @@ mod tests {
 
         assert!(content.contains("os = windows"));
         assert!(content.contains("arch = x86_64"));
-        assert!(content.contains("app_version = 1.1.0"));
+        assert!(content.contains("app_version = 1.2.0"));
         assert!(content.contains("schema_version = 1"));
         assert!(content.contains("2026-06-15T12:00:00Z"));
     }
