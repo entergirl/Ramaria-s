@@ -1,4 +1,4 @@
-# 珊瑚菌 · Ramaria v1.1
+# 珊瑚菌 · Ramaria v1.2
 
 > 大模型懂一切，唯独不懂你。
 
@@ -47,8 +47,8 @@
 ```
 Tauri 桌面应用 / CLI
     ↓↑ Command / 函数调用
-ramaria-app  应用编排层（状态机: NeedsSetup → Indexing → Ready）
-    ├── ramaria-memory     记忆管线（L0→L3）+ 混合 RAG + 性格推断
+ramaria-app  应用编排层（Pipeline + Stage 对话管线，状态机）
+    ├── ramaria-memory     记忆管线（L0→L3）+ 混合 RAG + 性格推断（Phase A/B/C）
     ├── ramaria-llm        LLM Provider（LM Studio / DeepSeek / OpenAI）
     ├── ramaria-importer   聊天记录导入（QQ 解析 + 双模式导入）
     ├── ramaria-storage    SQLite（23 张表，Repository 模式）
@@ -64,7 +64,7 @@ ramaria-app  应用编排层（状态机: NeedsSetup → Indexing → Ready）
 | **ramaria-memory** | 自研管线 | 分层摘要→事件提取→性格推断、BM25/Qdrant 向量/图谱三通道 RAG、Ebbinghaus 衰减、RRF 融合、Token Budgeting |
 | **ramaria-llm** | reqwest + SSE | 3 后端适配器、SSE 流式传输、API Key 凭据管理器、指数退避重试、ONNX 嵌入模型 |
 | **ramaria-importer** | encoding_rs + sha2 | QQ 聊天记录解析（JSON + TXT）、快速/深度双模式、双画像自动创建 |
-| **ramaria-app** | async-trait | CLI/Desktop 共用编排层，状态机、隐私确认、流式事件模型、Session 生命周期管理、后台任务调度 |
+| **ramaria-app** | async-trait | CLI/Desktop 共用编排层，Pipeline+Stage 对话管线、状态机、隐私确认、流式事件模型、Session 生命周期管理、后台任务调度 |
 | **ramaria-cli** | clap derive | 11 个子命令、交互式 REPL、色彩输出 |
 | **ramaria-desktop** | Tauri 2 | 原生窗口、系统托盘、通知、CSP、Markdown 渲染、前端 JS（7 个视图） |
 
@@ -204,7 +204,8 @@ L0 原始消息（永久保留，不删除，不过滤，标记发言人）
 │   │   └── src/
 │   │       ├── l1/               # L0→L1 摘要生成（prompt + summarizer）
 │   │       ├── event/            # L1→L2 事件提取 + 降级策略
-│   │       ├── inference/        # 性格推断 Phase A/B/C（统计/聚类/校准/漂移）
+│   │       ├── inference/        # 性格推断 Phase A/B/C（统计/聚类/推断/置信度/漂移）
+│   │       │   └── orchestrator.rs # Phase B/C 编排函数（v1.2 新增）
 │   │       ├── prompt/           # System Prompt 5-Block 构建
 │   │       ├── bm25.rs           # BM25 全文索引
 │   │       ├── vector.rs         # 暴力搜索 / Qdrant 向量索引
@@ -232,7 +233,19 @@ L0 原始消息（永久保留，不删除，不过滤，标记发言人）
 │   ├── ramaria-app/              # 应用编排层（CLI/Desktop 共用）
 │   │   └── src/
 │   │       ├── app.rs            # App 状态机 + 核心编排
-│   │       ├── app_chat.rs       # 对话编排
+│   │       ├── pipeline.rs       # PipelineStage trait + PipelineContext + 编排器（v1.2 新增）
+│   │       ├── stages/           # 10 个 Pipeline Stage（v1.2 新增）
+│   │       │   ├── check_state.rs       # Stage 1: 状态检查
+│   │       │   ├── check_privacy.rs     # Stage 2: 隐私确认
+│   │       │   ├── resolve_session.rs   # Stage 3: 会话管理 + persona_uid 绑定
+│   │       │   ├── load_history.rs      # Stage 4: 历史消息 + L1 上下文
+│   │       │   ├── retrieve_memory.rs   # Stage 5: RAG 三通道检索
+│   │       │   ├── build_prompt.rs      # Stage 6: 5-Block System Prompt
+│   │       │   ├── token_budget.rs      # Stage 7: Token 预算
+│   │       │   ├── build_request.rs     # Stage 8: ChatRequest 构造
+│   │       │   ├── call_llm.rs          # Stage 9: LLM 流式调用
+│   │       │   └── persist_message.rs   # Stage 10: 消息保存 + 事件转发
+│   │       ├── app_chat.rs       # 对话编排（委托 Pipeline）
 │   │       ├── app_retriever.rs  # 检索编排
 │   │       ├── app_state.rs      # 状态管理
 │   │       ├── session_lifecycle.rs # Session 生命周期 + L0→L3 级联
@@ -275,7 +288,7 @@ L0 原始消息（永久保留，不删除，不过滤，标记发言人）
 └── Cargo.toml                    # Workspace 定义（resolver="3", edition="2024"）
 ```
 
-**规模统计**：8 个 crate、~140 个源文件、~30,000+ 行 Rust 代码、~530 个测试函数。
+**规模统计**：8 个 crate、~150 个源文件、~32,000+ 行 Rust 代码、~600 个测试函数。
 
 ---
 
@@ -294,7 +307,7 @@ L0 原始消息（永久保留，不删除，不过滤，标记发言人）
 
 | 表名 | 用途 |
 |------|------|
-| `sessions` | 对话 session 生命周期管理 |
+| `sessions` | 对话 session 生命周期管理（含 `persona_uid` 绑定，v1.2 新增） |
 | `messages` | 原始消息流（含 persona_uid 发言人标记、import_fingerprint 去重） |
 
 ### L1 层
@@ -307,7 +320,7 @@ L0 原始消息（永久保留，不删除，不过滤，标记发言人）
 
 | 表名 | 用途 |
 |------|------|
-| `memory_events` | 离散事件主表（含 8 个推断属性 + absorbed 标记） |
+| `memory_events` | 离散事件主表（含 8 个推断属性 + `motives` 预埋列（v1.3 激活）+ absorbed 标记） |
 | `event_relations` | 事件网状关系（6 种关系类型） |
 | `event_sources` | 事件溯源（关联事件→L1） |
 | `persona_facts` | 原子化事实库 |
@@ -353,7 +366,7 @@ L0 原始消息（永久保留，不删除，不过滤，标记发言人）
 
 ### 桌面应用安装
 
-1. 下载 `Ramaria_1.1.0_x64-setup.exe` 安装程序
+1. 下载 `Ramaria_1.2.0_x64-setup.exe` 安装程序
 2. 双击运行安装程序，按向导完成安装
 3. 桌面出现 Ramaria 快捷方式，双击启动
 4. 首次启动自动进入配置向导：
@@ -444,11 +457,11 @@ cargo tauri build
 | Crate | 职责 | 依赖 | 测试数 |
 |-------|------|------|--------|
 | `ramaria-core` | 核心类型 & Trait | 零 I/O 依赖 | ~59 |
-| `ramaria-storage` | SQLite 存储层 | core | ~32 |
-| `ramaria-memory` | 记忆管线 + RAG + 推断 | core + storage | ~410 |
+| `ramaria-storage` | SQLite 存储层 | core | ~36 |
+| `ramaria-memory` | 记忆管线 + RAG + 推断 | core + storage | ~440 |
 | `ramaria-llm` | LLM Provider + Embedding | core | ~43 |
 | `ramaria-importer` | QQ 聊天记录导入 | core + storage | ~17 |
-| `ramaria-app` | 应用编排 | core + storage + memory + llm | ~50 |
+| `ramaria-app` | 应用编排（含 Pipeline + Stage） | core + storage + memory + llm | ~140 |
 | `ramaria-cli` | 命令行入口 | app + core + storage + llm | ~40 |
 | `ramaria-desktop` | Tauri 桌面应用 | app + core + storage + llm | ~16 |
 
@@ -500,25 +513,26 @@ Ramaria 默认将所有对话数据与记忆存储在本地。详见 [`docs/priv
 
 ## 版本历史
 
-### v1.1.0（当前版本）
+### v1.2.0（当前版本）
 
-Rust v1.0 的首个增量版本。在 v1.0 核心闭环基础上，补齐了 Session 生命周期管理、嵌入模型、情境强度加权、Token Budgeting、QQ 导入器等关键功能。
+v1.2 是深度打磨版本，聚焦架构健康度和功能完整性。在 v1.1 基础上完成了对话系统 Pipeline + Stage 架构重构、L3 记忆管线 Phase B/C 贯通、前端记忆与对话联动、以及多项后端缺陷修复。
 
-**v1.1 新增**：
+**v1.2 新增**：
 
-- ✅ Session 生命周期管理（手动关闭 + 空闲自动关闭 + 只读约束 + L0→L3 全自动级联）
-- ✅ 嵌入模型集成（本地 ONNX + BM55 降级模式 + 下载进度条）
-- ✅ 情境强度加权（L1 摘要 situation_strength 字段 + Phase A 推断加权）
-- ✅ Token Budgeting（字符估算 + 句子边界截断 + 预算分配）
-- ✅ QQ 聊天记录导入（JSON + TXT 双格式，快速/深度双模式，双画像自动创建）
-- ✅ 多角色管理 GUI（人格列表/详情编辑/设为默认/重载）
-- ✅ 自动更新检查（手动触发，GitHub Release API 对比）
-- ✅ 诊断信息导出（日志 + 配置 + 系统信息 → .zip，API Key 脱敏）
-- ✅ 安全性修复（CSP 收紧、XSS 修复、路径穿越统一规范化、窗口关闭超时恢复）
-- ✅ 工程增强（CI llvm-cov/deny/audit、LRU 淘汰、批量写入事务、大文件拆分）
-- ✅ 新增 `ramaria-importer` crate，workspace 从 7 扩展为 8 个 crate
-- ✅ 新增 CLI `ramaria import` 和 `ramaria diagnostics` 子命令
-- ✅ 新建 `config/default.toml` 配置模板
+- ✅ Pipeline + Stage 架构重构：`send_message` 10 步管线拆解为独立可测试的 Stage（≥ 60 个新增测试）
+- ✅ Session-Persona 绑定：`sessions` 表新增 `persona_uid`；用户消息 persona 归属统一
+- ✅ L3 管线贯通：Phase B LLM 结构化推断 + Phase C 置信度更新全流程接通（≥ 37 个新增测试）
+- ✅ SessionDrawer 组件：对话页左侧会话历史抽屉，搜索过滤 + 状态区分 + 会话切换
+- ✅ L1 记忆卡片跳转：卡片"💬 查看对话"按钮 → 跳转对话 + 面包屑返回
+- ✅ L1 卡片 UI 重新设计：valence 情感色条 + chip 关键词 + 属性行 + 操作栏
+- ✅ 后端修复：空闲/shutdown 关闭时 `persona_uid` 正确传递；L1 生成后 Retriever 增量索引
+- ✅ 导入进度 UI 增强：进度条放大 + 会话计数 + 预估剩余时间
+- ✅ 测试总数 ≥ 600（v1.1: 546，新增 ≥ 50 个）
+- ✅ Schema 预埋：`memory_events.motives` 列（v1.3 激活）
+
+### v1.1.0 — 2026-06-16
+
+Rust v1.0 的首个增量版本。补齐了 Session 生命周期管理、嵌入模型、情境强度加权、Token Budgeting、QQ 导入器等关键功能。
 
 ### v1.0.1 — 2026-06-13
 
@@ -532,11 +546,11 @@ Rust 重写完成的首个正式发布版本。与 Python v0.7.x 相比，Rust v
 
 ### 与 Python 版（v0.7.x）的关系
 
-Python 版位于项目根目录，已进入**维护模式**，不再活跃开发。Rust v1.1 是正式替代版本。
+Python 版位于项目根目录，已进入**维护模式**，不再活跃开发。Rust v1.2 是正式替代版本。
 
 - 两个版本不共享数据库 schema，Python 旧数据不可自动迁移
 - Python 版将继续保留于仓库，接收关键安全修复，但不增加新功能
-- 新用户建议直接使用 Rust v1.1
+- 新用户建议直接使用 Rust v1.2
 
 > 📦 两个版本使用独立的 Git 仓库管理历史和远程地址。
 
@@ -544,7 +558,7 @@ Python 版位于项目根目录，已进入**维护模式**，不再活跃开发
 
 ## 路线图
 
-以下功能已在架构中预留接口，进入 **延后（deferred）** 队列，不在 v1.1 发布范围内：
+以下功能已在架构中预留接口，进入 **延后（deferred）** 队列，不在 v1.2 发布范围内：
 
 - Ollama / Anthropic Claude / 通义千问后端
 - 微信 / Telegram / Discord / Slack 导入器
@@ -557,6 +571,10 @@ Python 版位于项目根目录，已进入**维护模式**，不再活跃开发
 - D3.js 知识图谱可视化
 - LoRA 微调
 - macOS / Linux 安装包
+- 底层动机标注（schema 已在 v1.2 预埋 `memory_events.motives`，v1.3+ 激活）
+- 取消生成、编辑历史发言、重新生成、分支对话
+- tiktoken-rs 精确 token 化
+- Character Card JSON/PNG 导出
 
 > 如有需求，请在 [GitHub Issues](https://github.com/entergirl/Ramaria-s/issues) 提出。
 

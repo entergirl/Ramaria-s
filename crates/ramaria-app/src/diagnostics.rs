@@ -449,7 +449,7 @@ mod tests {
             os: "windows".into(),
             arch: "x86_64".into(),
             family: "windows".into(),
-            app_version: "1.1.0".into(),
+            app_version: "1.2.0".into(),
             schema_version: "1".into(),
             collected_at: "2026-06-15T12:00:00Z".into(),
         };

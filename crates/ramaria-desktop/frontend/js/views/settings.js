@@ -851,7 +851,7 @@ var RamariaSettingsView = (function () {
         about.innerHTML =
             '<div class="settings-about-logo" aria-hidden="true">🪸</div>' +
             '<div class="settings-about-name">Ramaria</div>' +
-            '<div class="settings-about-version" id="settings-about-version">v1.1.0</div>' +
+            '<div class="settings-about-version" id="settings-about-version">v1.2.0</div>' +
             '<div class="settings-about-desc">' +
                 '个人 AI 陪伴记忆系统<br>' +
                 'Rust + Tauri 2 重构版' +

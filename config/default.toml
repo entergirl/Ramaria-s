@@ -1,4 +1,4 @@
-# Ramaria v1.1 默认配置模板
+# Ramaria v1.2 默认配置模板
 #
 # 使用说明:
 # - 将此文件复制到 %APPDATA%\Ramaria\config.toml 后编辑
@@ -8,7 +8,7 @@
 # - 修改后重启 Ramaria 生效
 
 # 版本控制（请勿手动修改）
-version = "1.1.0"
+version = "1.2.0"
 schema_version = 1
 
 # =========================================================

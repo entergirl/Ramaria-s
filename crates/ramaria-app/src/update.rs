@@ -368,8 +368,8 @@ mod tests {
             release_notes: None,
             error: None,
         };
-        // 工作区版本为 1.1.0
-        assert_eq!(status.current_version, "1.1.0");
+        // 工作区版本为 1.2.0
+        assert_eq!(status.current_version, "1.2.0");
         assert!(!status.update_available);
     }
 }

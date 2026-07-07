@@ -7,6 +7,128 @@
 
 ---
 
+## [1.2.0] - 2026-07-07
+
+### 核心特性
+
+#### Pipeline + Stage 架构重构（🔴 P0）
+
+- 将 `send_message` 10 步单体方法重构为 Pipeline + Stage 模式
+- `PipelineStage` trait：统一接口，关联类型 `Input`/`Output`，`async execute()`
+- `PipelineContext`：全 `Arc` 引用共享上下文，零拷贝传递（storage/llm/embedding/config/retriever/keychain/lifecycle）
+- `PipelineData`：数据载体，承载 10 个 Stage 的中间结果
+- `PipelineError`：区分 `Retryable`/`Fatal`，编排器在第一处 Fatal 错误时中止
+- `SendMessagePipeline`：编排器，按顺序执行 Stage 序列
+- 10 个独立 Stage，各自可注入 mock 依赖编写确定性单元测试
+- 新增 ≥ 60 个单元测试 + 集成测试覆盖全流程正常路径和错误传播
+
+#### Session-Persona 绑定（🔴 P0）
+
+- `sessions` 表新增 `persona_uid TEXT` 列（增量 migration，`DEFAULT NULL` 兼容存量）
+- `create_session` 签名新增 `persona_uid` 参数，创建时写入当前对话人格
+- 用户消息 `persona_uid` 统一填入当前对话人格（不再为 NULL）
+- Persona 切换由后端主导：优先从 `session.persona_uid` 读取，NULL 时回退前端传参
+- 前端 `personaSessions` 降级为性能缓存
+- 导入历史会话绑定正确人格（`create_historical` 新增 `persona_uid` 参数）
+
+#### L3 管线贯通（🔴 P0）
+
+- 新建 `ramaria-memory/src/inference/orchestrator.rs`：`run_phase_b_inference` + `run_phase_c_update`
+- Phase B 三步 LLM 结构化推断完整接通（逐分类信号→跨分类一致性→合成三层画像）
+- JSON 三步解析 + 五档钳制降级策略；LLM 全失败时回退 `mock_infer` 产出 `TraitSource::Statistical`
+- Phase C 置信度更新 + Wasserstein 漂移检测 + 证据链记录
+- Phase B/C 写入 `personality_traits` + `trait_evidence`；完成后标记事件已吸收
+- `run_l3_inference` 全流程（Phase A→B→C）在 mock LLM 下跑通
+- 新增 `InferenceConfig` 配置项（含 4 个子配置，合理默认值）
+- 新增 ≥ 37 个测试（30 个纯函数 + 7 个端到端集成测试）
+
+#### 前端记忆与对话联动（🟡 P1）
+
+- **SessionDrawer 组件**：对话页左侧会话历史抽屉，点击 Header "📋 历史"按钮滑出
+  - 180ms slide 动画、搜索过滤、活跃/已关闭/导入标签区分
+  - 点击会话项加载消息，已关闭会话自动只读
+  - 加载骨架屏 + 错误重试 + ESC/外部点击关闭
+- **L1 记忆卡片跳转**：卡片底部"💬 查看对话 (N 条消息)"按钮
+  - `Router.showView` 扩展 `options`（`sessionId`/`personaUid`/`fromView`）
+  - ChatView 顶部"← 返回记忆"面包屑，记忆页恢复之前状态
+- **L1 卡片 UI 重新设计**：
+  - valence 情感色条（正面=粉渐变/负面=蓝渐变/中性=灰），顶部 3px
+  - 属性行并排展示（时段 + 氛围 + 参与人数）
+  - 关键词 chip 标签替代逗号分隔文本
+  - 底部操作栏（时间 + 强度条 + "💬 查看对话"按钮）
+  - 旧卡片降级兼容（无 `context_json` 隐藏参与人数，无 `session_id` 隐藏跳转按钮）
+- **导入进度 UI 增强**：进度条高度 ≥ 10px、阶段指示器"第 N/M 个会话"、预估剩余时间、暗色主题适配
+
+#### 后端记忆持久化修复（🔴 P0）
+
+- 空闲超时自动关闭和 shutdown 关闭路径的 `persona_uid` 不再丢失
+  - 修复前：硬编码 `None`，L1 摘要归属 NULL → `list_recent_l1_by_persona` 查询不到
+  - 修复后：从 active session 的 DB 记录读取 `persona_uid` 传入
+- L1 摘要生成后立即增量更新 Retriever 内存索引
+  - 新增 `Retriever::index_l1_record(&MemoryL1)` 公开方法
+  - L1 生成后立即可通过 Stage 5 RAG 检索命中，不需等待手动 rebuild
+  - BM25 通道可即时命中（向量通道需 rebuild 路径生成）
+- `App::new` 注入共享 `Arc<Mutex<Retriever>>` 到 `SessionLifecycle`
+- 新增 9 个单元测试覆盖空闲/shutdown 路径 + Retriever 增量索引
+
+### Schema 变更
+
+- `sessions` 表新增 `persona_uid TEXT`（增量 migration，DEFAULT NULL）
+- `memory_events` 表新增 `motives TEXT`（v1.3 激活，v1.2 仅预埋 schema，不修改业务逻辑）
+
+### 工程改善
+
+#### 测试
+
+- 全 workspace 测试总数 ≥ 600（v1.1: 546，新增 ≥ 50 个）
+- 新增 M1/M2/M3 集成测试文件（Mock 全依赖 Pipeline 流程 + L3 闭环验证）
+- 新模块行覆盖率 ≥ 80%（`pipeline.rs`、`stages/`、`orchestrator.rs`）
+
+#### 代码组织
+
+- 新建 `ramaria-app/src/pipeline.rs`（~1320 行）+ `stages/` 目录（10 个 Stage 文件）
+- 新建 `ramaria-memory/src/inference/orchestrator.rs`（~1400 行）
+- `app_chat.rs` 逻辑拆分至各 Stage（`search_and_assemble_context`、`build_system_prompt_with_context` 等）
+- `RunL3Inference` 中 `_llm` → `llm`，Phase B/C 调用链完整
+
+#### 文档（v1.2）
+
+- `chat-spec.md`：管线架构更新为 Pipeline + Stage 模式；Session-Persona 绑定；SessionDrawer；Retriever 增量索引
+- `memory-spec.md`：L3 闭环 Phase A→B→C 全流程；orchestrator；L1 卡片跳转
+- `arch-decisions-unified.md`：延后清单标注 L3 Phase B/C 在 v1.2 完成；`motives` 列已预埋
+- README：版本号 v1.1.0 → v1.2.0；测试数量 ~600+
+
+### Bug 修复
+
+- 修复空闲超时/shutdown 关闭 session 时 `persona_uid` 丢失（L1 摘要归属 NULL）
+- 修复 L1 生成后 Retriever 不更新的时序空隙（保存后立即检索命中）
+- 修复导入历史会话 `persona_uid` 为 NULL（SessionDrawer 按 persona 筛选失效）
+- 修复 SessionDrawer 竞态条件（`_isOpen` 过早设置导致 outside-click 处理器立即关闭抽屉）
+- 修复对话界面空白（`chat.js` 多余 `*/` 导致 JS 语法错误）
+- 修复 Embedding 查询失败（`llama_head_dim.rs` 未清除 KV cache）
+- 修复保存对话后重进只显示旧会话（`personaSessions` 缓存未清除）
+
+### 破坏性变更（开发者）
+
+面向终端用户无破坏性变更。以下为内部 API 变更，不影响功能：
+
+- `StorageBackend::create_session` 签名新增 `persona_uid: Option<&str>` 参数
+- `create_historical` 签名新增 `persona_uid: &str` 参数
+- `App.retriever` 类型从 `Mutex<Retriever>` 改为 `Arc<Mutex<Retriever>>`
+
+### 已知限制
+
+与 v1.1.0 相同的限制：
+- 仅支持 Windows 平台（桌面应用），Linux/macOS 可通过 CLI 使用
+- 应用图标为占位文件
+- 不支持 LLM 对话"重新生成"功能
+- ONNX 模型需用户手动下载或配置
+
+v1.2 新增：
+- 存量 session（v1.1 及以前）`persona_uid` 为 NULL，在 SessionDrawer 中按 persona 筛选时归入默认人格。不影响正常对话，下次关闭 session 时自动填充。
+
+---
+
 ## [1.1.0] - 2026-06-16
 
 ### 核心特性
@@ -270,6 +392,7 @@
 
 | 版本 | 日期 | 说明 |
 |------|------|------|
+| [v1.2.0](#120---2026-07-07) | 2026-07-07 | 深度打磨：Pipeline 架构重构 + L3 管线贯通 + 前端联动 + 后端修复 |
 | [v1.1.0](#110---2026-06-16) | 2026-06-16 | 首个增量版本：记忆管线接通 + 嵌入模型 + QQ 导入器 |
 | [v1.0.1](#101---2026-06-13) | 2026-06-13 | 紧急修复：全新安装无法启动 |
 | [v1.0.0](#100---2026-06-12) | 2026-06-12 | Rust 重写完成，首个正式发布版本 |
