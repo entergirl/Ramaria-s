@@ -248,10 +248,86 @@ impl StorageBackend for SqliteStorage {
     // Keyword Pool（关键词词典）
     // =========================================================
     async fn upsert_keyword(&self, keyword: &str) -> RamariaResult<()> {
-        repo::keyword::upsert(&self.pool, keyword).await
+        // 兼容旧接口：将 &str 转换为 KeywordToken 后委托 repo
+        if let Some(token) = ramaria_core::keyword::KeywordToken::new(keyword) {
+            repo::keyword::upsert(&self.pool, &token).await
+        } else {
+            tracing::warn!(keyword, "关键词无效，跳过 upsert");
+            Ok(())
+        }
     }
     async fn list_keywords(&self) -> RamariaResult<Vec<String>> {
-        repo::keyword::list_all(&self.pool).await
+        let tokens = repo::keyword::list_all(&self.pool).await?;
+        Ok(tokens.into_iter().map(|t| t.into_inner()).collect())
+    }
+    async fn list_keyword_counts(&self) -> RamariaResult<Vec<(String, u32)>> {
+        repo::keyword::list_all_with_counts(&self.pool).await
+    }
+
+    // =========================================================
+    // Keyword Refs（关键词倒排索引，v1.3 新增）
+    // =========================================================
+    async fn insert_keyword_ref(
+        &self,
+        keyword_id: &str,
+        doc_type: &str,
+        doc_id: &str,
+        persona_uid: &str,
+        weight: f64,
+    ) -> RamariaResult<()> {
+        repo::keyword::insert_ref(
+            &self.pool,
+            keyword_id,
+            doc_type,
+            doc_id,
+            persona_uid,
+            weight,
+        )
+        .await
+    }
+    async fn find_refs_by_keyword(
+        &self,
+        keyword_id: &str,
+    ) -> RamariaResult<Vec<(i64, String, String, String, String, f64, i64)>> {
+        let rows = repo::keyword::find_refs_by_keyword(&self.pool, keyword_id).await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                (
+                    r.id,
+                    r.keyword_id,
+                    r.doc_type,
+                    r.doc_id,
+                    r.persona_uid,
+                    r.weight,
+                    r.created_at,
+                )
+            })
+            .collect())
+    }
+    async fn find_refs_by_doc(
+        &self,
+        doc_type: &str,
+        doc_id: &str,
+    ) -> RamariaResult<Vec<(i64, String, String, String, String, f64, i64)>> {
+        let rows = repo::keyword::find_refs_by_doc(&self.pool, doc_type, doc_id).await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                (
+                    r.id,
+                    r.keyword_id,
+                    r.doc_type,
+                    r.doc_id,
+                    r.persona_uid,
+                    r.weight,
+                    r.created_at,
+                )
+            })
+            .collect())
+    }
+    async fn delete_refs_by_doc(&self, doc_type: &str, doc_id: &str) -> RamariaResult<u64> {
+        repo::keyword::delete_refs_by_doc(&self.pool, doc_type, doc_id).await
     }
 
     // =========================================================

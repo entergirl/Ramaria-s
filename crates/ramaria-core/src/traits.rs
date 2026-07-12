@@ -451,6 +451,38 @@ pub trait StorageBackend: Send + Sync {
     // -- Keyword Pool --
     async fn upsert_keyword(&self, keyword: &str) -> RamariaResult<()>;
     async fn list_keywords(&self) -> RamariaResult<Vec<String>>;
+    /// 按 use_count DESC 返回所有关键词及其使用量。（v1.3 新增）
+    async fn list_keyword_counts(&self) -> RamariaResult<Vec<(String, u32)>> {
+        let _ = self;
+        Ok(Vec::new()) // 默认空实现，保持向后兼容
+    }
+
+    // -- Keyword Refs (v1.3 新增) --
+    /// 插入一条关键词引用记录。
+    async fn insert_keyword_ref(
+        &self,
+        keyword_id: &str,
+        doc_type: &str,
+        doc_id: &str,
+        persona_uid: &str,
+        weight: f64,
+    ) -> RamariaResult<()>;
+    /// 根据关键词文本查询所有引用（倒排查）。
+    async fn find_refs_by_keyword(
+        &self,
+        keyword_id: &str,
+    ) -> RamariaResult<Vec<(i64, String, String, String, String, f64, i64)>>;
+    /// 根据文档查询所有引用（正排查）。
+    async fn find_refs_by_doc(
+        &self,
+        doc_type: &str,
+        doc_id: &str,
+    ) -> RamariaResult<Vec<(i64, String, String, String, String, f64, i64)>>;
+    /// 删除指定文档的所有关键词引用。
+    async fn delete_refs_by_doc(&self, _doc_type: &str, _doc_id: &str) -> RamariaResult<u64> {
+        let _ = self;
+        Ok(0)
+    }
 
     // -- Privacy Consent --
     async fn save_privacy_consent(&self, consent: &PrivacyConsent) -> RamariaResult<()>;
