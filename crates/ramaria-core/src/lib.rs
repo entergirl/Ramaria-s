@@ -9,8 +9,11 @@
 
 pub mod config;
 pub mod error;
+pub mod keyword;
 pub mod traits;
 pub mod types;
+
+pub use keyword::{KeywordRef, KeywordSet, KeywordStatus, KeywordToken};
 
 // 常用 re-export
 pub use config::RamariaConfig;
