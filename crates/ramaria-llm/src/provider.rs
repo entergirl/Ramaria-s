@@ -245,6 +245,46 @@ impl ProviderBase {
     // 验证
     // =========================================================
 
+    /// 轻量级健康检查——仅检查 base_url 是否可达。
+    ///
+    /// 与 `validate` 的区别:
+    /// - `health_check` 只发送简单 GET 请求到 base_url，超时 5 秒。
+    /// - 不检查模型列表、API key 有效性或流式能力。
+    ///
+    /// 说明:
+    /// - 用于 `run_setup` 末尾的启动探测。
+    /// - 线上 provider 应覆写此方法实现真正的 HTTP 探测。
+    pub async fn health_check(&self) -> RamariaResult<()> {
+        let check_url = self.transport.base_url().trim_end_matches('/').to_string();
+        let timeout = std::time::Duration::from_secs(5);
+
+        tokio::time::timeout(timeout, async {
+            self.transport.send_authenticated_get(&check_url).await
+        })
+        .await
+        .map_err(|_elapsed| {
+            tracing::warn!(
+                provider = self.provider_name(),
+                base_url = %check_url,
+                "健康检查超时（5s）— 后端可能未启动"
+            );
+            RamariaError::llm(format!(
+                "{} 健康检查超时（5s）：请确认服务已启动 ({})",
+                self.provider_name(),
+                check_url,
+            ))
+        })?
+        .map(|_response| {
+            tracing::info!(
+                provider = self.provider_name(),
+                base_url = %check_url,
+                "健康检查通过"
+            );
+        })?;
+
+        Ok(())
+    }
+
     /// 验证 provider 可用性。
     ///
     /// 检查内容:
@@ -451,6 +491,21 @@ macro_rules! impl_online_provider {
                     )));
                 }
                 self.base.validate().await
+            }
+
+            async fn health_check(&self) -> ramaria_core::error::RamariaResult<()> {
+                let api_key = self.resolve_api_key()?;
+                if api_key.is_none() {
+                    return Err(ramaria_core::error::RamariaError::privacy(format!(
+                        concat!(
+                            $display,
+                            " API key 未配置。请先在 keychain 中设置 ",
+                            $display,
+                            " API key。"
+                        )
+                    )));
+                }
+                self.base.health_check().await
             }
 
             fn name(&self) -> &'static str {

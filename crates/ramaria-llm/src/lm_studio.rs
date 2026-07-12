@@ -96,6 +96,11 @@ impl LlmProvider for LmStudioProvider {
         self.base.validate().await
     }
 
+    async fn health_check(&self) -> RamariaResult<()> {
+        // LM Studio 是本地服务，直接探测 base_url 可达性
+        self.base.health_check().await
+    }
+
     fn name(&self) -> &'static str {
         "LM Studio"
     }

@@ -61,7 +61,7 @@ ramaria-app  应用编排层（Pipeline + Stage 对话管线，状态机）
 |------|----------|------|
 | **ramaria-core** | 纯 Rust 类型系统 | 9 个枚举 + 9 个结构体 + StorageBackend trait（40+ 方法）+ LlmProvider trait |
 | **ramaria-storage** | SQLite（sqlx） | 23 张表 schema、19 个 Repository、手动行映射避免 derive 侵入 |
-| **ramaria-memory** | 自研管线 | 分层摘要→事件提取→性格推断、BM25/Qdrant 向量/图谱三通道 RAG、Ebbinghaus 衰减、RRF 融合、Token Budgeting |
+| **ramaria-memory** | 自研管线 | 分层摘要→事件提取→性格推断、BM25+向量+图谱三通道 RAG、Ebbinghaus 衰减、RRF 融合、Token Budgeting |
 | **ramaria-llm** | reqwest + SSE | 3 后端适配器、SSE 流式传输、API Key 凭据管理器、指数退避重试、ONNX 嵌入模型 |
 | **ramaria-importer** | encoding_rs + sha2 | QQ 聊天记录解析（JSON + TXT）、快速/深度双模式、双画像自动创建 |
 | **ramaria-app** | async-trait | CLI/Desktop 共用编排层，Pipeline+Stage 对话管线、状态机、隐私确认、流式事件模型、Session 生命周期管理、后台任务调度 |
@@ -142,7 +142,7 @@ L0 原始消息（永久保留，不删除，不过滤，标记发言人）
 用户消息 + persona_uid
   → Persona-Aware 过滤（按 share 分级过滤记忆）
   → 三通道并行检索：
-      1. 向量通道（Qdrant / 暴力搜索）— 语义相似度
+      1. 向量通道（暴力搜索 BruteForceIndex）— 语义相似度
       2. BM25 通道（自研全文索引）— 关键词精确匹配
       3. 图谱通道（BFS 遍历实体关系）— 关联记忆召回
   → Token Budgeting（超出上下文窗口时在句子边界截断）
@@ -208,7 +208,7 @@ L0 原始消息（永久保留，不删除，不过滤，标记发言人）
 │   │       │   └── orchestrator.rs # Phase B/C 编排函数（v1.2 新增）
 │   │       ├── prompt/           # System Prompt 5-Block 构建
 │   │       ├── bm25.rs           # BM25 全文索引
-│   │       ├── vector.rs         # 暴力搜索 / Qdrant 向量索引
+│   │       ├── vector.rs         # BruteForceIndex 暴力向量索引
 │   │       ├── graph_retriever.rs # 知识图谱 BFS 遍历检索
 │   │       ├── decay.rs          # Ebbinghaus 衰减函数
 │   │       ├── rrf.rs            # 倒数排名融合算法
@@ -477,7 +477,7 @@ cargo tauri build
 | 桌面 | Tauri 2 |
 | 日志 | tracing + tracing-subscriber |
 | 网络 | reqwest（JSON + SSE streaming） |
-| 向量检索 | 暴力搜索索引 + Qdrant（可选）+ ONNX（`ort`） |
+| 向量检索 | BruteForceIndex 暴力余弦 + 本地 ONNX 嵌入 |
 | 文本编码 | encoding_rs（GBK/UTF-16 兼容） |
 | 错误处理 | thiserror + anyhow |
 

@@ -7,7 +7,7 @@
 //! - 深度导入（deep）：创建历史 session → 写入 L0 → 关闭 session → 触发全管线
 //! - 双画像支持——分别为导出者和对方创建独立 persona
 //! - L1 摘要 persona_uid 存 NULL，不绑定特定画像
-//! - 路径安全校验：文件存在性检查 + 扩展名白名单
+//! - 路径安全校验：三层防御（canonicalize + 白名单 + 符号链接拒绝），复用 path_guard 模块
 //! - 所有 Tauri Command 只做参数转换 + 委托业务逻辑，不直接操作数据库
 
 use crate::DesktopState;
@@ -81,25 +81,16 @@ pub async fn analyze_qq_chat(
     file_path: String,
     gap_minutes: Option<u32>,
 ) -> Result<AnalysisReport, String> {
-    use std::path::Path;
-
     let gap = gap_minutes.unwrap_or(10);
-    let path = Path::new(&file_path);
 
-    if !path.exists() {
-        tracing::warn!(file = %file_path, "文件不存在");
-        return Err(format!("文件不存在: {}", file_path));
-    }
-    if !path.is_file() {
-        tracing::warn!(file = %file_path, "路径不是文件");
-        return Err(format!("路径不是文件: {}", file_path));
-    }
+    // 路径安全校验：三层防御（canonicalize + 白名单 + 符号链接拒绝）
+    let real_path = crate::path_guard::validate_import_file_path(&file_path)?;
 
-    tracing::info!(gap_minutes = gap, "开始解析 QQ 聊天记录文件");
+    tracing::info!(gap_minutes = gap, path = %real_path.display(), "开始解析 QQ 聊天记录文件");
 
     let importer = ramaria_importer::qq::QqImporter::new();
 
-    let is_qq = importer.detect_format(path).map_err(|e| {
+    let is_qq = importer.detect_format(&real_path).map_err(|e| {
         tracing::error!(error = %e, "格式检测失败");
         format!("格式检测失败: {}", e)
     })?;
@@ -109,7 +100,7 @@ pub async fn analyze_qq_chat(
         return Err(format!("文件 '{}' 不是 QQ 聊天记录格式", file_path));
     }
 
-    let (_sessions, report) = importer.parse(path, gap).map_err(|e| {
+    let (_sessions, report) = importer.parse(&real_path, gap).map_err(|e| {
         tracing::error!(error = %e, "文件解析失败");
         format!("文件解析失败: {}", e)
     })?;
@@ -216,20 +207,13 @@ pub async fn detect_qq_format(
     _state: State<'_, DesktopState>,
     file_path: String,
 ) -> Result<bool, String> {
-    let path = std::path::Path::new(&file_path);
-
-    // 安全检查：文件必须存在
-    if !path.exists() {
-        return Err(format!("文件不存在: {}", file_path));
-    }
-    if !path.is_file() {
-        return Err(format!("路径不是文件: {}", file_path));
-    }
+    // 路径安全校验：三层防御（canonicalize + 白名单 + 符号链接拒绝）
+    let real_path = crate::path_guard::validate_import_file_path(&file_path)?;
 
     // 委托 ramaria-importer 检测格式
     let importer = ramaria_importer::qq::QqImporter::new();
     importer
-        .detect_format(path)
+        .detect_format(&real_path)
         .map_err(|e| format!("格式检测失败: {}", e))
 }
 
@@ -266,8 +250,6 @@ pub async fn import_qq_chat(
     other_persona_uid: Option<String>,
     gap_minutes: Option<u32>,
 ) -> Result<ImportResult, String> {
-    use std::path::Path;
-
     use ramaria_importer::qq::build_persona_uid;
 
     let mode_str = mode.unwrap_or_else(|| "fast".to_string());
@@ -283,17 +265,11 @@ pub async fn import_qq_chat(
     };
     let gap = gap_minutes.unwrap_or(10);
 
-    // Step 1: 文件安全性校验
-    let path = Path::new(&file_path);
-    if !path.exists() {
-        return Err(format!("文件不存在: {}", file_path));
-    }
-    if !path.is_file() {
-        return Err(format!("路径不是文件: {}", file_path));
-    }
+    // Step 1: 路径安全校验（三层防御：canonicalize + 白名单 + 符号链接拒绝）
+    let real_path = crate::path_guard::validate_import_file_path(&file_path)?;
 
-    // 扩展名白名单
-    let ext = path
+    // 扩展名白名单（在 canonicalize 之后执行，使用真实路径的扩展名）
+    let ext = real_path
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
@@ -307,6 +283,7 @@ pub async fn import_qq_chat(
 
     tracing::info!(
         file = %file_path,
+        real = %real_path.display(),
         mode = %mode_str,
         gap_minutes = gap,
         "开始 QQ 聊天记录导入"
@@ -316,7 +293,7 @@ pub async fn import_qq_chat(
     let importer = ramaria_importer::qq::QqImporter::new();
 
     let is_qq = importer
-        .detect_format(path)
+        .detect_format(&real_path)
         .map_err(|e| format!("格式检测失败: {}", e))?;
 
     if !is_qq {
@@ -327,7 +304,7 @@ pub async fn import_qq_chat(
     }
 
     let (sessions, report) = importer
-        .parse(path, gap)
+        .parse(&real_path, gap)
         .map_err(|e| format!("文件解析失败: {}", e))?;
 
     if sessions.is_empty() {

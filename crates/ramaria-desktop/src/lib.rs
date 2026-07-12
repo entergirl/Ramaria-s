@@ -10,6 +10,7 @@
 mod commands;
 mod events;
 mod notification;
+mod path_guard;
 mod tray;
 
 use ramaria_core::StorageBackend;

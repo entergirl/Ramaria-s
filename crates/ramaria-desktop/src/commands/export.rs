@@ -5,11 +5,10 @@
 //! - 使用 Tauri dialog 选择保存路径（前端调用 open/save dialog 后传入路径）
 //! - JSON 格式：结构化 sessions → messages → L1 记忆
 //! - Markdown 格式：人类可读的对话记录
-//! - 导出路径由前端传入（前端通过 Tauri dialog 选择路径）
+//! - 导出路径安全校验：canonicalize + 白名单 + 符号链接拒绝，复用 path_guard 模块
 
 use crate::DesktopState;
 use serde::Serialize;
-use std::path::PathBuf;
 use tauri::State;
 
 // =========================================================
@@ -48,26 +47,15 @@ struct ExportMessage {
 ///
 /// 说明:
 /// - 导出结构：sessions[] 含 messages[]，每消息含 role/content/persona_uid/created_at
-/// - 路径安全检查：对父目录做 canonicalize（文件可能尚不存在，仅目录必须存在）
+/// - 路径安全检查：三层防御（canonicalize + 白名单 + 符号链接拒绝），复用 path_guard 模块
 #[tauri::command]
 #[tracing::instrument(skip(state))]
 pub async fn export_sessions_json(
     state: State<'_, DesktopState>,
     output_path: String,
 ) -> Result<String, String> {
-    let path = PathBuf::from(&output_path);
-
-    // 安全检查：规范化父目录（文件可能尚不存在，不能 canonicalize 文件路径本身）
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("无法解析导出路径: 路径 '{}' 无父目录", output_path))?;
-    let canonical_parent = parent
-        .canonicalize()
-        .map_err(|e| format!("导出目录不存在或无法访问 ({}): {}", parent.display(), e))?;
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| format!("无效的导出路径: 缺少文件名 ({})", output_path))?;
-    let canonical = canonical_parent.join(file_name);
+    // 路径安全校验（文件可能尚不存在，校验父目录）
+    let canonical = crate::path_guard::validate_export_path(&output_path)?;
 
     let sessions = state
         .app
@@ -129,25 +117,15 @@ pub async fn export_sessions_json(
 ///
 /// 说明:
 /// - 按会话分组，消息按角色标注（👤 用户 / 🤖 助手 / 🔧 系统）
-/// - 路径安全检查：对父目录做 canonicalize（文件可能尚不存在）
+/// - 路径安全检查：三层防御（canonicalize + 白名单 + 符号链接拒绝），复用 path_guard 模块
 #[tauri::command]
 #[tracing::instrument(skip(state))]
 pub async fn export_sessions_markdown(
     state: State<'_, DesktopState>,
     output_path: String,
 ) -> Result<String, String> {
-    let path = PathBuf::from(&output_path);
-    // 规范化父目录（文件可能尚不存在，仅目录必须存在）
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("无法解析导出路径: 路径 '{}' 无父目录", output_path))?;
-    let canonical_parent = parent
-        .canonicalize()
-        .map_err(|e| format!("导出目录不存在或无法访问 ({}): {}", parent.display(), e))?;
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| format!("无效的导出路径: 缺少文件名 ({})", output_path))?;
-    let canonical = canonical_parent.join(file_name);
+    // 路径安全校验（文件可能尚不存在，校验父目录）
+    let canonical = crate::path_guard::validate_export_path(&output_path)?;
 
     let sessions = state
         .app

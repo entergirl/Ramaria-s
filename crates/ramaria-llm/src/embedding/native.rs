@@ -5,7 +5,8 @@
 //! - 支持 BERT 架构（bge-small-zh-v1.5，mean pooling）和 LLaMA/Qwen3 架构（last token pooling）
 //! - 架构通过 config.json 自动检测，维度在构造时确定（不依赖模型加载）
 //! - 惰性加载：首次 `embed` 调用时才加载模型权重到内存
-//! - 线程安全：内部状态通过 `Mutex` 保护，满足 `EmbeddingProvider: Send + Sync`
+//! - 线程安全：编码器通过 `Arc<Encoder>` 在 `Mutex` 内保护，推理时克隆 Arc 后立即释放锁
+//! - P-1 修复：推理操作在锁外执行（先 clone Arc → 释放锁 → 推理），不阻塞其他请求
 //! - CPU 密集型推理使用 `tokio::task::block_in_place` 避免阻塞 async 运行时
 //! - 超时保护：单条 30s、批量 120s，防止模型加载/推理卡死
 //!
@@ -18,6 +19,7 @@
 //! - 区分错误类型: 文件缺失、格式无效、架构不支持、推理失败、超时
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
@@ -94,12 +96,12 @@ impl Encoder {
 /// 职责:
 /// - 实现 `EmbeddingProvider` trait
 /// - 惰性加载：构造时仅检测架构和维度（从 config.json），不加载权重
-/// - 线程安全：通过 `Mutex<Option<Encoder>>` 保护内部编码器状态
+/// - 线程安全：通过 `Mutex<Option<Arc<Encoder>>>` 保护内部编码器状态，推理时克隆 Arc 后释放锁
 ///
 /// 字段:
 /// - `model_dir`: 模型目录路径
 /// - `model_info`: 模型元信息（构造时从 config.json 确定，之后不可变）
-/// - `encoder`: 惰性加载的编码器（Mutex 保护，首次 embed 时初始化）
+/// - `encoder`: 惰性加载的编码器（Arc 包裹，推理时 clone Arc 后释放锁，不阻塞其他请求）
 /// - `progress`: 模型就绪进度（文件齐全时 = 1.0，否则 = 0.0）
 ///
 /// 用法:
@@ -113,8 +115,8 @@ pub struct NativeEmbeddingProvider {
     model_dir: PathBuf,
     /// 模型信息（构造时确定，之后只读）
     model_info: EmbeddingModelInfo,
-    /// 惰性加载的编码器
-    encoder: Mutex<Option<Encoder>>,
+    /// 惰性加载的编码器（Arc 包裹，推理时 clone Arc 后释放锁，不阻塞其他请求）
+    encoder: Mutex<Option<Arc<Encoder>>>,
     /// 模型就绪进度
     progress: Mutex<f64>,
 }
@@ -220,7 +222,7 @@ impl NativeEmbeddingProvider {
         // 更新进度
         *self.progress.lock().unwrap_or_else(|e| e.into_inner()) = 1.0;
 
-        *guard = Some(encoder);
+        *guard = Some(Arc::new(encoder));
 
         tracing::info!(
             architecture = arch_name,
@@ -326,19 +328,21 @@ impl EmbeddingProvider for NativeEmbeddingProvider {
 
         self.ensure_loaded()?;
 
-        // 编码器推理是 CPU 密集型操作（50ms-2s/条）。
-        // 策略: block_in_place（避免阻塞 tokio worker）+ timeout（防止卡死）。
-        // timeout 包裹 async { block_in_place(...) }：async 块使其成为 Future，
-        // block_in_place 在首次 poll 时同步执行，完成后 Future 立即就绪。
+        // P-1 修复：先克隆 Arc 再释放锁，推理在锁外执行。
+        // 编码器推理是 CPU 密集型操作（50ms-2s/条），持锁期间会串行化所有请求。
+        // 修复后：锁仅保护 Arc 的读取（<1μs），推理不持锁。
+        let encoder = {
+            let guard = self.encoder.lock().unwrap_or_else(|e| e.into_inner());
+            guard
+                .as_ref()
+                .ok_or_else(|| RamariaError::embedding("编码器未初始化 — 请先调用 ensure_loaded()"))
+                .cloned() // 轻量 Arc clone（仅增加引用计数）
+        }?;
+
+        // 推理在锁外执行，其他请求可同时读取模型
         let text = text.to_string();
         tokio::time::timeout(std::time::Duration::from_secs(EMBED_TIMEOUT_SECS), async {
-            tokio::task::block_in_place(|| {
-                let guard = self.encoder.lock().unwrap_or_else(|e| e.into_inner());
-                let encoder = guard.as_ref().ok_or_else(|| {
-                    RamariaError::embedding("编码器未初始化 — 请先调用 ensure_loaded()")
-                })?;
-                encoder.embed_text(&text)
-            })
+            tokio::task::block_in_place(|| encoder.embed_text(&text))
         })
         .await
         .map_err(|_elapsed| {
@@ -357,17 +361,23 @@ impl EmbeddingProvider for NativeEmbeddingProvider {
 
         self.ensure_loaded()?;
 
+        // P-1 修复：先克隆 Arc 再释放锁，推理在锁外执行
+        let encoder = {
+            let guard = self.encoder.lock().unwrap_or_else(|e| e.into_inner());
+            guard
+                .as_ref()
+                .ok_or_else(|| RamariaError::embedding("编码器未初始化"))
+                .cloned()
+        }?;
+
         let texts: Vec<String> = texts.iter().map(|t| t.to_string()).collect();
         let count = texts.len();
 
+        // 推理在锁外执行，大规模批次（最多 100 条，~50s）不阻塞其他请求
         tokio::time::timeout(
             std::time::Duration::from_secs(EMBED_BATCH_TIMEOUT_SECS),
             async {
                 tokio::task::block_in_place(|| {
-                    let guard = self.encoder.lock().unwrap_or_else(|e| e.into_inner());
-                    let encoder = guard
-                        .as_ref()
-                        .ok_or_else(|| RamariaError::embedding("编码器未初始化"))?;
                     let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
                     encoder.embed_batch_texts(&text_refs)
                 })
@@ -411,12 +421,16 @@ impl EmbeddingProvider for NativeEmbeddingProvider {
         // 加载模型并执行测试推理
         self.ensure_loaded()?;
 
-        let guard = self.encoder.lock().unwrap_or_else(|e| e.into_inner());
-        let encoder = guard
-            .as_ref()
-            .ok_or_else(|| RamariaError::embedding("编码器未初始化"))?;
+        // P-1 修复：先克隆 Arc 再释放锁，测试推理在锁外执行
+        let encoder = {
+            let guard = self.encoder.lock().unwrap_or_else(|e| e.into_inner());
+            guard
+                .as_ref()
+                .ok_or_else(|| RamariaError::embedding("编码器未初始化"))
+                .cloned()
+        }?;
 
-        // 用短测试文本验证完整管线
+        // 用短测试文本验证完整管线（不持锁）
         let test_vec = encoder.embed_text("测试")?;
         if test_vec.is_empty() {
             return Err(RamariaError::embedding("测试向量为空 — 模型可能未正确加载"));

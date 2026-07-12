@@ -141,6 +141,24 @@ pub trait LlmProvider: Send + Sync {
     /// - 必需的 streaming 能力是否可用。
     async fn validate(&self) -> RamariaResult<()>;
 
+    /// 快速健康检查（轻量级探测，用于启动时判断后端是否可达）。
+    ///
+    /// 与 `validate` 的区别:
+    /// - `health_check`: 仅检查 base_url 可达，不检查模型能力或 API key 有效性。
+    /// - `validate`: 完整检查（模型、流式能力、关键配置）。
+    ///
+    /// 默认实现: 直接返回 Ok(()), 适用于无需网络探测的场景。
+    /// 线上 provider 应覆写为真正的 HTTP 探测。
+    ///
+    /// 说明:
+    /// - 用于 `run_setup` 末尾的启动探测，不可用时置为 Degraded 状态。
+    /// - 超时 5 秒，避免启动阻塞过久。
+    async fn health_check(&self) -> RamariaResult<()> {
+        // 默认实现：不阻塞，适用于本地 provider 或无需网络探测的场景
+        tracing::debug!("health_check: 默认实现（无网络探测）");
+        Ok(())
+    }
+
     /// 返回 provider 名称。
     ///
     /// 返回:
