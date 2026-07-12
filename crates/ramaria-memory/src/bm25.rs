@@ -104,6 +104,56 @@ pub fn tokenize_with_freq(fields: &[&str]) -> HashMap<String, u32> {
 }
 
 // =========================================================
+// 词典增强分词（v1.3 新增）
+// =========================================================
+
+/// 使用 `BigramWithDictionaryNormalizer` 的复合词典增强分词。
+///
+/// 与 `tokenize` 的区别:
+/// - 词典中的复合关键词（如"职业倦怠"）被保留为整体 token
+/// - 非词典部分仍使用标准 bigram/英文分词
+/// - 词典为空时退化到标准 `tokenize` 行为
+///
+/// 用途:
+/// - BM25 索引构建时接入，提升专业术语的精确匹配率
+///
+/// 用法:
+/// ```rust
+/// use ramaria_memory::bm25::tokenize_with_dict;
+/// use ramaria_memory::keyword::BigramWithDictionaryNormalizer;
+/// let normalizer = BigramWithDictionaryNormalizer::new(
+///     vec!["职业倦怠".into(), "工作压力".into()]
+/// );
+/// let tokens = tokenize_with_dict("职业倦怠导致工作压力", &normalizer);
+/// assert!(tokens.contains(&"职业倦怠".to_string()));
+/// assert!(tokens.contains(&"工作压力".to_string()));
+/// ```
+pub fn tokenize_with_dict(
+    text: &str,
+    normalizer: &crate::keyword::BigramWithDictionaryNormalizer,
+) -> Vec<String> {
+    if text.is_empty() || normalizer.dictionary_size() == 0 {
+        return tokenize(text);
+    }
+
+    // 先用 normalizer 做最大正向匹配分词
+    let normalized = normalizer.normalize(text);
+    let mut result = Vec::with_capacity(normalized.len() * 2);
+
+    for token in normalized {
+        if normalizer.dictionary().contains(&token) {
+            // 词典匹配的复合关键词：保持整体
+            result.push(token);
+        } else {
+            // 单字符或非词典部分：用标准 bigram 分词
+            result.extend(tokenize(&token));
+        }
+    }
+
+    result
+}
+
+// =========================================================
 // BM25 索引
 // =========================================================
 

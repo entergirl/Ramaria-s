@@ -15,6 +15,7 @@ pub mod graph_retriever;
 pub mod inference;
 pub mod init;
 pub mod job;
+pub mod keyword;
 pub mod l1;
 pub mod rag;
 pub mod rebuild;
@@ -43,7 +44,8 @@ pub use rrf::{
 
 // BM25 全文检索
 pub use bm25::{
-    Bm25Config, Bm25Index, Bm25IndexBuilder, DocId, tokenize, tokenize_fields, tokenize_with_freq,
+    Bm25Config, Bm25Index, Bm25IndexBuilder, DocId, tokenize, tokenize_fields, tokenize_with_dict,
+    tokenize_with_freq,
 };
 
 // Vector 向量检索
@@ -165,6 +167,9 @@ pub use inference::{
     weighted_ratio,
     weighted_variance,
 };
+
+// Keyword 关键词处理（v1.3 新增）
+pub use keyword::{AliasManager, BigramWithDictionaryNormalizer};
 
 // Init 冷启动
 pub use init::{

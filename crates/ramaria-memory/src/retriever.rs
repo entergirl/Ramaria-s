@@ -627,6 +627,56 @@ impl Retriever {
         self.l1_docs.len() + self.l2_docs.len()
     }
 
+    // =========================================================
+    // 归一化关键词检索（v1.3 骨架方法，M3 中完整实现）
+    // =========================================================
+
+    /// 基于关键词倒排索引的精确匹配检索。
+    ///
+    /// 参数:
+    /// - `keywords`: 标准化后的关键词列表（KeywordToken）。
+    /// - `persona_uid`: 目标人格 UID。
+    /// - `top_k`: 最大返回结果数。
+    ///
+    /// 返回:
+    /// - 精确匹配的文档列表。
+    ///
+    /// 说明:
+    /// - v1.3 M3 中通过 `keyword_refs` 表实现完整逻辑。
+    /// - 当前返回空列表（骨架），编译通过即可。
+    pub fn search_exact(
+        &self,
+        _keywords: &[ramaria_core::keyword::KeywordToken],
+        _persona_uid: &str,
+        _top_k: usize,
+    ) -> Vec<SearchResult> {
+        // M3 中实现：通过 keyword_refs 倒排索引做精确匹配
+        Vec::new()
+    }
+
+    /// 基于 BM25 的子串匹配检索。
+    ///
+    /// 参数:
+    /// - `query`: 查询文本。
+    /// - `persona_uid`: 目标人格 UID。
+    /// - `top_k`: 最大返回结果数。
+    ///
+    /// 返回:
+    /// - 子串匹配的文档列表。
+    ///
+    /// 说明:
+    /// - v1.3 M3 中通过 BM25 内部实现子串匹配。
+    /// - 当前返回空列表（骨架），编译通过即可。
+    pub fn search_substring(
+        &self,
+        _query: &str,
+        _persona_uid: &str,
+        _top_k: usize,
+    ) -> Vec<SearchResult> {
+        // M3 中实现：基于 BM25 内部做子串匹配
+        Vec::new()
+    }
+
     /// 清空所有索引和文档。
     pub fn clear(&mut self) {
         self.bm25_index.clear();

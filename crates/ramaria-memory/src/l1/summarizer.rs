@@ -8,6 +8,7 @@
 //! - 关键词自动写回 keyword_pool，驱动词典累积
 //! - 所有可恢复错误转换为 RamariaError，保留上下文
 
+use ramaria_core::keyword::KeywordToken;
 use ramaria_core::traits::ChatRequest;
 use ramaria_core::types::MessageRole;
 use ramaria_core::{LlmProviderTrait, MemoryL1, RamariaError, RamariaResult, StorageBackend};
@@ -205,13 +206,25 @@ impl<'a> L1Summarizer<'a> {
             RamariaError::storage(format!("写入 session {session_id} L1 摘要失败: {e}"))
         })?;
 
-        // 9. 写回关键词词典
-        for kw in &keywords {
-            let kw = kw.trim();
-            if !kw.is_empty()
-                && let Err(e) = self.storage.upsert_keyword(kw).await
+        // 9. 写回关键词词典 + 倒排索引
+        for kw_token in &keywords {
+            // 写回 keyword_pool
+            if let Err(e) = self.storage.upsert_keyword(kw_token.as_str()).await {
+                warn!(%session_id, keyword=%kw_token, error=%e, "关键词写回失败（非致命）");
+            }
+            // 写入 keyword_refs 倒排索引（L1 文档引用，doc_id 使用 UUID 字符串）
+            if let Err(e) = self
+                .storage
+                .insert_keyword_ref(
+                    kw_token.as_str(),
+                    "l1",
+                    &l1.id.to_string(),
+                    l1.persona_uid.as_deref().unwrap_or(""),
+                    1.0,
+                )
+                .await
             {
-                warn!(%session_id, keyword=%kw, error=%e, "关键词写回失败（非致命）");
+                warn!(%session_id, keyword=%kw_token, error=%e, "关键词引用写入失败（非致命）");
             }
         }
 
@@ -331,8 +344,11 @@ impl<'a> L1Summarizer<'a> {
     /// - `salience`: 五档钳制到最近的合法值
     ///
     /// 返回:
-    /// - (MemoryL1, keywords列表)
-    fn validate_and_build(parsed: &L1SummaryResponse, session_id: Uuid) -> (MemoryL1, Vec<String>) {
+    /// - (MemoryL1, KeywordToken 列表)
+    fn validate_and_build(
+        parsed: &L1SummaryResponse,
+        session_id: Uuid,
+    ) -> (MemoryL1, Vec<KeywordToken>) {
         // summary: 必填降级
         let summary = parsed.summary.as_deref().unwrap_or("").trim().to_string();
         let summary = if summary.is_empty() {
@@ -419,19 +435,22 @@ impl<'a> L1Summarizer<'a> {
 // 纯函数辅助
 // =========================================================
 
-/// 解析关键词字符串为 `(存储用的逗号分隔字符串, 列表)`。
+/// 解析关键词字符串为 `(存储用的逗号分隔字符串, 标准化关键词列表)`。
 ///
 /// 如果输入为空或仅含空白字符，返回 `(None, vec![])`。
-fn parse_keywords(raw: Option<&str>) -> (Option<String>, Vec<String>) {
+/// v1.3: 返回 `Vec<KeywordToken>` 替代裸 `String`。
+fn parse_keywords(raw: Option<&str>) -> (Option<String>, Vec<KeywordToken>) {
     let cleaned = raw.map(|s| s.trim()).filter(|s| !s.is_empty());
     match cleaned {
         None => (None, vec![]),
         Some(s) => {
-            let list: Vec<String> = s
+            let list: Vec<KeywordToken> = s
                 .split(',')
-                .map(|k| k.trim().to_string())
+                .map(|k| k.trim())
                 .filter(|k| !k.is_empty())
+                .filter_map(KeywordToken::new)
                 .collect();
+            // 存储时仍用原始逗号分隔字符串（兼容旧 schema）
             (Some(s.to_string()), list)
         }
     }
