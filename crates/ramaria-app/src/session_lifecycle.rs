@@ -613,7 +613,8 @@ impl SessionLifecycle {
         let job_result = job_manager
             .execute_with_retry(JobType::EventExtract, Some(&payload), None, || {
                 // 每次尝试都新建 EventExtractor（提取器创建代价低，且避免重试时复用状态）
-                let extractor = EventExtractor::new(llm, storage, EventExtractorConfig::default());
+                let mut extractor =
+                    EventExtractor::new(llm, storage, EventExtractorConfig::default());
                 let uid = persona_owned.clone();
                 async move {
                     match extractor.extract_events(&uid).await {
@@ -1422,6 +1423,7 @@ mod tests {
             persona_uid: Some("test".to_string()),
             context_json: None,
             situation_strength: None,
+            evidence_notes: None,
         };
         // 不应 panic
         lifecycle.index_l1_into_retriever(&l1);
@@ -1451,6 +1453,7 @@ mod tests {
             persona_uid: Some("rama-0001".to_string()),
             context_json: None,
             situation_strength: None,
+            evidence_notes: None,
         };
 
         lifecycle.index_l1_into_retriever(&l1);
@@ -1483,6 +1486,7 @@ mod tests {
             persona_uid: Some("rama-0001".to_string()),
             context_json: None,
             situation_strength: None,
+            evidence_notes: None,
         };
 
         lifecycle.index_l1_into_retriever(&l1);

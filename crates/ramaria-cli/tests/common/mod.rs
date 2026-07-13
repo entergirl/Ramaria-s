@@ -609,6 +609,40 @@ impl StorageBackend for MockStorage {
     ) -> RamariaResult<Vec<(i64, i64, i64, String)>> {
         Ok(Vec::new())
     }
+
+    // =========================================================
+    // Keyword Refs (v1.3 新增——Mock 空实现)
+    // =========================================================
+
+    async fn insert_keyword_ref(
+        &self,
+        _keyword_id: &str,
+        _doc_type: &str,
+        _doc_id: &str,
+        _persona_uid: &str,
+        _weight: f64,
+    ) -> RamariaResult<()> {
+        Ok(())
+    }
+
+    async fn find_refs_by_keyword(
+        &self,
+        _keyword_id: &str,
+    ) -> RamariaResult<Vec<(i64, String, String, String, String, f64, i64)>> {
+        Ok(Vec::new())
+    }
+
+    async fn find_refs_by_doc(
+        &self,
+        _doc_type: &str,
+        _doc_id: &str,
+    ) -> RamariaResult<Vec<(i64, String, String, String, String, f64, i64)>> {
+        Ok(Vec::new())
+    }
+
+    async fn delete_refs_by_doc(&self, _doc_type: &str, _doc_id: &str) -> RamariaResult<u64> {
+        Ok(0)
+    }
 }
 
 // =========================================================
@@ -824,6 +858,7 @@ pub fn make_test_l1(session_id: Uuid, summary: &str) -> MemoryL1 {
         created_at: 1_717_977_600_000,
         last_accessed_at: None,
         situation_strength: None,
+        evidence_notes: None,
     }
 }
 

@@ -346,12 +346,26 @@ pub struct MemoryL1 {
     pub persona_uid: Option<String>,
     /// 分组上下文——JSON 格式 `{"chat_partners": ["user-0001", "char-0003"]}`
     pub context_json: Option<String>,
-    /// 情境强度 1-5（ 启用）：
+    /// 情境强度 1-5（v1.1.2 启用）：
     /// - 1-2: 弱情境（闲聊、日常寒暄）→ 加权 ×1.5
     /// - 3: 中性情境（默认值）→ 加权 ×1.0
     /// - 4-5: 强情境（冲突、关键决策）→ 加权 ×0.5
-    /// - None: 前的存量数据，等同于 3
+    /// - None: v1.1.2 前的存量数据，等同于 3
     pub situation_strength: Option<i32>,
+    /// 证据片段列表（v1.3 新增）。
+    ///
+    /// 存储支持摘要结论的具体事实引用，每条 evidence 记录
+    /// "谁在什么条件下表达了什么态度/经历了什么事件"。
+    ///
+    /// 格式:
+    /// - `Some(vec!["用户表示最近一个月每天加班到10点以后", ...])` — 正常产出
+    /// - `Some(vec![])` — LLM 未产出有效 evidence（降级路径，不阻塞 L1 生成）
+    /// - `None` — 存量数据或尚未生成
+    ///
+    /// 用途:
+    /// - L2 事件提取时作为证据互证判断的输入
+    /// - 前端 L3 性格画像的证据链溯源展示
+    pub evidence_notes: Option<Vec<String>>,
 }
 
 impl MemoryL1 {
@@ -380,6 +394,7 @@ impl MemoryL1 {
             persona_uid: None,
             context_json: None,
             situation_strength: None,
+            evidence_notes: None,
         }
     }
 
