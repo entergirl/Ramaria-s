@@ -241,6 +241,7 @@ mod tests {
             persona_uid: None,
             context_json: None,
             situation_strength: None,
+            evidence_notes: None,
         }
     }
 

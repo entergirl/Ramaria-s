@@ -1044,6 +1044,7 @@ mod tests {
             persona_uid: Some("user-0001".to_string()),
             context_json: None,
             situation_strength: None,
+            evidence_notes: None,
         };
 
         let result = r.index_l1_record(&l1);
@@ -1070,6 +1071,7 @@ mod tests {
             persona_uid: Some("user-0001".to_string()),
             context_json: None,
             situation_strength: None,
+            evidence_notes: None,
         };
 
         r.index_l1_record(&l1).unwrap();
@@ -1104,6 +1106,7 @@ mod tests {
             persona_uid: Some("user-a".to_string()),
             context_json: None,
             situation_strength: None,
+            evidence_notes: None,
         };
 
         r.index_l1_record(&l1_user_a).unwrap();
@@ -1139,6 +1142,7 @@ mod tests {
             persona_uid: Some("test-persona".to_string()),
             context_json: None,
             situation_strength: None,
+            evidence_notes: None,
         };
 
         r.index_l1_record(&l1).unwrap();

@@ -73,10 +73,10 @@ pub use rag::{
 // L1 Summarizer
 pub use l1::{L1Summarizer, L1SummarizerConfig};
 
-// Event Extractor
+// Event Extractor & TopicBatcher (v1.3)
 pub use event::{
-    DegradeConfig, EventExtractor, EventExtractorConfig, ParaphraseConfig, build_degraded_event,
-    generate_paraphrase,
+    DegradeConfig, EventExtractor, EventExtractorConfig, L1Item, ParaphraseConfig,
+    TopicBatcherConfig, TopicCluster, build_degraded_event, generate_paraphrase,
 };
 
 // Inference ( + + — 性格推断全管线)

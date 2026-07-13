@@ -35,7 +35,8 @@ pub const L1_SUMMARY_PROMPT_BASE: &str = r#"你是一个对话摘要助手。请
   "atmosphere": "四字以内描述对话整体氛围，例如：专注高效、轻松愉快、情绪低落",
   "valence": 0.0,
   "salience": 0.5,
-  "situation_strength": 3
+  "situation_strength": 3,
+  "evidence_notes": ["用户表示最近一个月每天加班到10点以后", "用户说'感觉身体被掏空了'"]
 }
 
 【valence 情绪效价说明】
@@ -61,6 +62,12 @@ pub const L1_SUMMARY_PROMPT_BASE: &str = r#"你是一个对话摘要助手。请
 3  中性情境（普通对话、一般交流）
 4  较强情境（重要对话、关键决策、正式场合）
 5  强情境（危机处理、重大人生事件、强烈冲突）
+
+【evidence_notes 证据片段说明】
+必须提取 1-3 条最能支撑 summary 结论的具体事实引用。
+每条 evidence 应记录"用户表达了什么观点/经历了什么事件"的原始描述，
+引用用户原话或转述具体事实，不少于 5 个中文字符。
+可以包含时间、地点、人物等具体信息。
 
 【其他字段说明】
 - summary：只记结论，不记过程；用"用户"指代用户；客观陈述，不加主观评价
@@ -95,7 +102,8 @@ pub const L1_SUMMARY_PROMPT_WITH_KEYWORDS: &str = r#"你是一个对话摘要助
   "atmosphere": "四字以内描述对话整体氛围，例如：专注高效、轻松愉快、情绪低落",
   "valence": 0.0,
   "salience": 0.5,
-  "situation_strength": 3
+  "situation_strength": 3,
+  "evidence_notes": ["用户表示最近一个月每天加班到10点以后", "用户说'感觉身体被掏空了'"]
 }
 
 【valence 情绪效价说明】
@@ -121,6 +129,12 @@ pub const L1_SUMMARY_PROMPT_WITH_KEYWORDS: &str = r#"你是一个对话摘要助
 3  中性情境（普通对话、一般交流）
 4  较强情境（重要对话、关键决策、正式场合）
 5  强情境（危机处理、重大人生事件、强烈冲突）
+
+【evidence_notes 证据片段说明】
+必须提取 1-3 条最能支撑 summary 结论的具体事实引用。
+每条 evidence 应记录"用户表达了什么观点/经历了什么事件"的原始描述，
+引用用户原话或转述具体事实，不少于 5 个中文字符。
+可以包含时间、地点、人物等具体信息。
 
 【其他字段说明】
 - summary：只记结论，不记过程；用"用户"指代用户；客观陈述，不加主观评价
@@ -230,6 +244,14 @@ mod tests {
             prompt.contains("situation_strength"),
             "prompt 应包含 situation_strength 字段"
         );
+        assert!(
+            prompt.contains("evidence_notes"),
+            "prompt 应包含 evidence_notes 字段"
+        );
+        assert!(
+            prompt.contains("用户表示最近一个月每天加班到10点以后"),
+            "prompt 应包含 evidence_notes 输出示例"
+        );
     }
 
     #[test]
@@ -249,12 +271,19 @@ mod tests {
     }
 
     #[test]
-    fn keyword_prompt_also_contains_situation_strength() {
+    fn keyword_prompt_also_contains_evidence_notes() {
         let prompt = build_l1_prompt("test", Some("天气, 心情"));
         assert!(
             prompt.contains("situation_strength"),
             "关键词注入版 prompt 也应包含 situation_strength"
         );
-        assert!(prompt.contains("关键词候选"));
+        assert!(
+            prompt.contains("evidence_notes"),
+            "关键词注入版 prompt 也应包含 evidence_notes"
+        );
+        assert!(
+            prompt.contains("关键词候选"),
+            "关键词注入版 prompt 应包含关键词候选段落"
+        );
     }
 }

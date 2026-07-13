@@ -408,6 +408,31 @@ impl StorageBackend for MockStorage {
     async fn list_graph_edges(&self, _: i64) -> RamariaResult<Vec<(i64, i64, i64, String)>> {
         unimplemented!()
     }
+
+    // -- Keyword Refs (v1.3 新增，mock 空实现) --
+    async fn insert_keyword_ref(
+        &self,
+        _keyword_id: &str,
+        _doc_type: &str,
+        _doc_id: &str,
+        _persona_uid: &str,
+        _weight: f64,
+    ) -> RamariaResult<()> {
+        Ok(())
+    }
+    async fn find_refs_by_keyword(
+        &self,
+        _keyword_id: &str,
+    ) -> RamariaResult<Vec<(i64, String, String, String, String, f64, i64)>> {
+        Ok(vec![])
+    }
+    async fn find_refs_by_doc(
+        &self,
+        _doc_type: &str,
+        _doc_id: &str,
+    ) -> RamariaResult<Vec<(i64, String, String, String, String, f64, i64)>> {
+        Ok(vec![])
+    }
 }
 
 // =========================================================
@@ -514,6 +539,7 @@ pub fn make_valid_l1(summary: &str) -> MemoryL1 {
         persona_uid: None,
         context_json: None,
         situation_strength: None,
+        evidence_notes: None,
     }
 }
 

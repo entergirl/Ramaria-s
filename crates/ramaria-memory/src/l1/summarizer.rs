@@ -28,8 +28,10 @@ use crate::utils;
 /// 字段:
 /// - 所有字段均为 `Option`，以容忍 LLM 输出缺失字段。
 /// - 校验阶段再填充默认值，避免解析阶段 panic。
-/// - `situation_strength` 为 新增字段，当前 LLM prompt 尚未包含此输出，
+/// - `situation_strength` 为 v1.1.2 新增字段，当前 LLM prompt 尚未包含此输出，
 ///   因此大部分情况下为 None（等效 3）。
+/// - `evidence_notes` 为 v1.3 新增字段，LLM 可能输出缺失或空数组，
+///   校验失败时降级为 `Some(vec![])` 但不阻塞 L1 生成。
 #[derive(Debug, Deserialize)]
 struct L1SummaryResponse {
     summary: Option<String>,
@@ -41,6 +43,9 @@ struct L1SummaryResponse {
     /// 情境强度 1-5，None 时按默认值 3 处理
     #[serde(default)]
     situation_strength: Option<i32>,
+    /// v1.3: 证据片段列表，缺失时降级为 Some(vec![])
+    #[serde(default)]
+    evidence_notes: Option<Vec<String>>,
 }
 
 // =========================================================
@@ -342,6 +347,8 @@ impl<'a> L1Summarizer<'a> {
     /// - `atmosphere`: 四字以内，超长截断
     /// - `valence`: 五档钳制到最近的合法值
     /// - `salience`: 五档钳制到最近的合法值
+    /// - `evidence_notes`: v1.3 新增，后处理校验（非空数组 + 每条 ≥ 5 字符），
+    ///   校验失败不阻塞 L1 生成，降级为空数组并记 warn 日志
     ///
     /// 返回:
     /// - (MemoryL1, KeywordToken 列表)
@@ -410,6 +417,11 @@ impl<'a> L1Summarizer<'a> {
             );
         }
 
+        // evidence_notes: v1.3 后处理校验
+        // 规则：非空数组 + 每条 trim 后 ≥ 5 字符
+        // 校验失败不阻塞 L1 生成，降级为空数组并记 warn 日志
+        let evidence_notes = validate_evidence_notes(parsed.evidence_notes.clone(), session_id);
+
         let l1 = MemoryL1 {
             id: ramaria_core::types::new_id(),
             session_id,
@@ -425,10 +437,53 @@ impl<'a> L1Summarizer<'a> {
             persona_uid: None,        // 由调用方在 construct 阶段通过 config 注入
             context_json: None,       // 由调用方在 construct 阶段通过 config 注入
             situation_strength: None, // 由 LLM 输出或 config 注入
+            evidence_notes: Some(evidence_notes), // 始终为 Some(vec![])，存储层存为 JSON 数组
         };
 
         (l1, keywords_list)
     }
+}
+
+// =========================================================
+// v1.3 evidence_notes 校验函数
+// =========================================================
+
+/// 校验 evidence_notes 字段。
+///
+/// 校验规则:
+/// 1. 输入为 None 或空数组 → 降级为空数组，记 warn
+/// 2. 每条 evidence trim 后 < 5 字符 → 丢弃该条，记 debug
+/// 3. 丢弃后数组为空 → 降级为空数组，记 warn
+///
+/// 返回:
+/// - `Vec<String>`：经过滤的有效 evidence 列表（可能为空）
+fn validate_evidence_notes(raw: Option<Vec<String>>, session_id: Uuid) -> Vec<String> {
+    let raw_list = match raw {
+        Some(list) if !list.is_empty() => list,
+        _ => {
+            warn!(%session_id, "LLM 未产出 evidence_notes 或为空数组，降级为空");
+            return vec![];
+        }
+    };
+
+    // 过滤过短条目
+    let valid: Vec<String> = raw_list
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| {
+            let ok = s.chars().count() >= 5;
+            if !ok {
+                debug!(%session_id, evidence=%s, "evidence 过短（<5 字符），丢弃");
+            }
+            ok
+        })
+        .collect();
+
+    if valid.is_empty() {
+        warn!(%session_id, "所有 evidence_notes 条目均不满足最小长度要求，降级为空");
+    }
+
+    valid
 }
 
 // =========================================================
@@ -570,6 +625,7 @@ mod tests {
             valence: Some(0.5),
             salience: Some(0.5),
             situation_strength: None,
+            evidence_notes: None,
         };
         let sid = ramaria_core::types::new_id();
         let (l1, _keywords) = L1Summarizer::validate_and_build(&parsed, sid);
@@ -586,6 +642,7 @@ mod tests {
             valence: Some(0.0),
             salience: Some(0.5),
             situation_strength: None,
+            evidence_notes: None,
         };
         let sid = ramaria_core::types::new_id();
         let (l1, _) = L1Summarizer::validate_and_build(&parsed, sid);
@@ -602,6 +659,7 @@ mod tests {
             valence: Some(0.5),
             salience: Some(0.5),
             situation_strength: None,
+            evidence_notes: None,
         };
         let sid = ramaria_core::types::new_id();
         let (l1, _) = L1Summarizer::validate_and_build(&parsed, sid);
@@ -619,13 +677,14 @@ mod tests {
             valence: Some(0.0),
             salience: Some(0.5),
             situation_strength: None,
+            evidence_notes: None,
         };
         let sid = ramaria_core::types::new_id();
         let (_l1, keywords) = L1Summarizer::validate_and_build(&parsed, sid);
         assert_eq!(keywords.len(), 3);
-        assert!(keywords.contains(&"工作".to_string()));
-        assert!(keywords.contains(&"学习".to_string()));
-        assert!(keywords.contains(&"编程".to_string()));
+        assert!(keywords.contains(&KeywordToken::new("工作").unwrap()));
+        assert!(keywords.contains(&KeywordToken::new("学习").unwrap()));
+        assert!(keywords.contains(&KeywordToken::new("编程").unwrap()));
     }
 
     // ---- parse_summary_json (via pure helpers) ----
@@ -685,6 +744,7 @@ mod tests {
             valence: Some(0.5),
             salience: Some(0.5),
             situation_strength: Some(5),
+            evidence_notes: None,
         };
         let sid = ramaria_core::types::new_id();
         let (l1, _) = L1Summarizer::validate_and_build(&parsed, sid);
@@ -703,6 +763,7 @@ mod tests {
             valence: Some(0.0),
             salience: Some(0.5),
             situation_strength: None,
+            evidence_notes: None,
         };
         let sid = ramaria_core::types::new_id();
         let (l1, _) = L1Summarizer::validate_and_build(&parsed, sid);
@@ -710,5 +771,123 @@ mod tests {
         // 实际赋值在 summarize_session 中（步骤 7）
         // validate_and_build 中设为 None，最终由调用方（步骤 7）注入
         assert_eq!(l1.situation_strength, None);
+    }
+
+    // =========================================================
+    // evidence_notes 校验测试（v1.3 新增）
+    // =========================================================
+
+    #[test]
+    fn evidence_notes_valid_list_is_preserved() {
+        // 正常产出证据片段 → 保留全部有效条目
+        let notes = vec![
+            "用户表示最近一个月每天加班到10点以后".to_string(),
+            "用户说'感觉身体被掏空了'".to_string(),
+            "用户提到'周末也经常被叫去开会'".to_string(),
+        ];
+        let result = validate_evidence_notes(Some(notes), Uuid::new_v4());
+        assert_eq!(result.len(), 3);
+        assert!(result[0].contains("加班"));
+    }
+
+    #[test]
+    fn evidence_notes_null_downgrades_to_empty() {
+        // LLM 未输出 evidence_notes → 降级为空数组
+        let result = validate_evidence_notes(None, Uuid::new_v4());
+        assert!(result.is_empty(), "evidence_notes 为 None 时应降级为空数组");
+    }
+
+    #[test]
+    fn evidence_notes_empty_array_downgrades_to_empty() {
+        // LLM 输出空数组 → 降级为空数组
+        let result = validate_evidence_notes(Some(vec![]), Uuid::new_v4());
+        assert!(result.is_empty(), "evidence_notes 为空数组时应降级为空数组");
+    }
+
+    #[test]
+    fn evidence_notes_short_items_are_filtered() {
+        // 过短条目（< 5 字符）应被丢弃
+        let notes = vec![
+            "太长的一条完整证据描述文本".to_string(),
+            "短".to_string(), // < 5 字符，应丢弃
+            "OK".to_string(), // < 5 字符，应丢弃
+            "足够长的证据描述文本内容".to_string(),
+        ];
+        let result = validate_evidence_notes(Some(notes), Uuid::new_v4());
+        assert_eq!(result.len(), 2);
+        assert!(result[0].contains("太长"));
+        assert!(result[1].contains("足够"));
+    }
+
+    #[test]
+    fn evidence_notes_all_short_downgrades_to_empty() {
+        // 全部条目过短 → 降级为空数组
+        let notes = vec!["短".to_string(), "A".to_string(), "B".to_string()];
+        let result = validate_evidence_notes(Some(notes), Uuid::new_v4());
+        assert!(result.is_empty(), "全部 evidence 过短时应降级为空数组");
+    }
+
+    #[test]
+    fn evidence_notes_parse_from_valid_json() {
+        // JSON 解析：包含 evidence_notes 数组
+        let raw = r#"{
+            "summary": "测试",
+            "valence": 0.0,
+            "salience": 0.5,
+            "evidence_notes": ["证据一：用户提到项目延期", "证据二：用户表示压力很大"]
+        }"#;
+        let parsed: L1SummaryResponse = serde_json::from_str(raw).unwrap();
+        let notes = parsed.evidence_notes.unwrap();
+        assert_eq!(notes.len(), 2);
+        assert!(notes[0].contains("项目延期"));
+    }
+
+    #[test]
+    fn evidence_notes_parse_missing_field_defaults_none() {
+        // JSON 缺失 evidence_notes 字段 → serde(default) 应返回 None
+        let raw = r#"{"summary": "测试", "valence": 0.0, "salience": 0.5}"#;
+        let parsed: L1SummaryResponse = serde_json::from_str(raw).unwrap();
+        assert!(parsed.evidence_notes.is_none());
+    }
+
+    #[test]
+    fn validate_and_build_evidence_notes_present() {
+        // validate_and_build 整合测试：正常 evidence_notes 应保留
+        let parsed = L1SummaryResponse {
+            summary: Some("测试摘要".into()),
+            keywords: None,
+            time_period: Some("上午".into()),
+            atmosphere: Some("专注".into()),
+            valence: Some(0.0),
+            salience: Some(0.5),
+            situation_strength: None,
+            evidence_notes: Some(vec!["用户提到项目截止日期临近".to_string()]),
+        };
+        let sid = ramaria_core::types::new_id();
+        let (l1, _) = L1Summarizer::validate_and_build(&parsed, sid);
+        let notes = l1.evidence_notes.expect("evidence_notes 不应为 None");
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("项目截止日期"));
+    }
+
+    #[test]
+    fn validate_and_build_evidence_notes_missing_downgrades() {
+        // validate_and_build 整合测试：缺失 evidence_notes 降级为空数组
+        let parsed = L1SummaryResponse {
+            summary: Some("测试摘要".into()),
+            keywords: None,
+            time_period: Some("上午".into()),
+            atmosphere: Some("轻松".into()),
+            valence: Some(0.5),
+            salience: Some(0.5),
+            situation_strength: None,
+            evidence_notes: None,
+        };
+        let sid = ramaria_core::types::new_id();
+        let (l1, _) = L1Summarizer::validate_and_build(&parsed, sid);
+        let notes = l1
+            .evidence_notes
+            .expect("evidence_notes 不应为 None，应为 Some(vec![])");
+        assert!(notes.is_empty(), "缺失 evidence_notes 时应降级为空数组");
     }
 }

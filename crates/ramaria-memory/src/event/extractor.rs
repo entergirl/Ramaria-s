@@ -2,9 +2,9 @@
 //!
 //! 设计特点:
 //! - 依赖注入: 通过 `&dyn LlmProvider` + `&dyn StorageBackend` 解耦具体实现
+//! - v1.3: 使用 `TopicBatcher` 语义聚类替代旧 `chat_partners + take(20)` 分批策略
 //! - 触发条件: 未吸收 L1 ≥ 5 条 或 最早未吸收 L1 ≥ 7 天
-//! - 按 persona_uid 分组取 L1，每次最多取 20 条
-//! - 调用 LLM 提取结构化事件（JSON 数组，每事件 11 个推断属性）
+//! - TopicBatcher 将未吸收 L1 聚类为 TopicCluster，每簇独立调用 LLM 提取事件
 //! - 降级兜底: JSON 解析失败 → 退化为 confidence=0.5 混合事件
 //! - 事件写入后自动生成 paraphrase（attitude 存在且非空时）
 //! - 成功后批量标记 L1 为 absorbed + 写入 event_sources
@@ -19,6 +19,7 @@ use serde::Deserialize;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use super::batcher::{L1Item, TopicBatcher, TopicBatcherConfig, TopicCluster};
 use super::degrade::{DegradeConfig, build_degraded_event};
 use super::paraphrase::{ParaphraseConfig, generate_paraphrase};
 use super::prompt::build_event_extraction_prompt;
@@ -124,19 +125,26 @@ pub struct EventExtractor<'a> {
     config: EventExtractorConfig,
     llm: &'a dyn LlmProviderTrait,
     storage: &'a dyn StorageBackend,
+    /// v1.3: 主题批量构建器，持有跨批次 Pending Buffer 状态
+    batcher: TopicBatcher,
 }
 
 impl<'a> EventExtractor<'a> {
     /// 创建新的事件提取器。
+    ///
+    /// v1.3: 自动创建 TopicBatcher，配置从 EventExtractorConfig 派生。
     pub fn new(
         llm: &'a dyn LlmProviderTrait,
         storage: &'a dyn StorageBackend,
         config: EventExtractorConfig,
     ) -> Self {
+        let batcher_config =
+            TopicBatcherConfig::new().with_max_cluster_size(config.max_l1_per_batch);
         Self {
             config,
             llm,
             storage,
+            batcher: TopicBatcher::new(batcher_config),
         }
     }
 
@@ -167,7 +175,7 @@ impl<'a> EventExtractor<'a> {
     /// 返回:
     /// - 成功时返回提取的事件列表（可能为空）。
     /// - LLM 调用失败时返回错误（上层应重试或降级）。
-    pub async fn extract_events(&self, persona_uid: &str) -> RamariaResult<Vec<MemoryEvent>> {
+    pub async fn extract_events(&mut self, persona_uid: &str) -> RamariaResult<Vec<MemoryEvent>> {
         // 1. 检查触发条件
         if !self.should_trigger(persona_uid).await? {
             debug!(%persona_uid, "未满足事件提取触发条件，跳过");
@@ -175,7 +183,6 @@ impl<'a> EventExtractor<'a> {
         }
 
         // 2. 读取未吸收 L1
-        // 按 context_json.chat_partners 分组，同一对话线的 L1 合并处理，避免交叉污染。
         let l1_list = self
             .storage
             .list_unabsorbed_l1(persona_uid)
@@ -190,169 +197,200 @@ impl<'a> EventExtractor<'a> {
             return Ok(vec![]);
         }
 
-        // 按 chat_partners 分组，同一对话线合并处理
-        let groups = group_l1_by_chat_partners(&l1_list);
-        info!(
-            %persona_uid,
-            total_l1 = l1_list.len(),
-            group_count = groups.len(),
-            "按 chat_partners 分组完成"
-        );
-
-        // 截断到批次上限
-        let batch: Vec<&MemoryL1> = l1_list.iter().take(self.config.max_l1_per_batch).collect();
-
-        info!(
-            %persona_uid,
-            total_l1 = l1_list.len(),
-            batch_size = batch.len(),
-            "开始事件提取"
-        );
-
-        // 3. 格式化 L1 摘要列表
-        let formatted = Self::format_l1_list(&batch);
-
-        // 4. 构建 prompt
-        let prompt = build_event_extraction_prompt(&formatted);
-
-        // 5. 调用 LLM
-        let request_id = Uuid::new_v4();
-        let llm_request = ChatRequest {
-            system_prompt: String::new(),
-            memory_context: None,
-            history: vec![],
-            user_message: prompt,
-            temperature: self.config.temperature,
-            max_tokens: self.config.max_tokens,
-            request_id,
-        };
-
-        let raw_response = match self.llm.chat(&llm_request).await {
-            Ok(text) => text,
-            Err(e) => {
-                warn!(%persona_uid, %request_id, error=%e, "事件提取 LLM 调用失败，触发降级");
-                return self.degrade_and_save(persona_uid, &batch).await;
-            }
-        };
-
-        debug!(%persona_uid, %request_id, "LLM 返回 {} 字符", raw_response.len());
-
-        // 6. 解析 JSON
-        let events = match Self::parse_event_response(&raw_response) {
-            Ok(events) if !events.is_empty() => events,
-            Ok(_) => {
-                // LLM 返回了合法但为空的事件数组
-                warn!(%persona_uid, "LLM 返回空事件数组，使用降级事件");
-                return self.degrade_and_save(persona_uid, &batch).await;
-            }
-            Err(_) => {
-                warn!(%persona_uid, "事件 JSON 解析失败，触发降级");
-                return self.degrade_and_save(persona_uid, &batch).await;
-            }
-        };
-
-        // 截断到 max_events
-        let events: Vec<ExtractedEventJson> =
-            events.into_iter().take(self.config.max_events).collect();
-
-        info!(
-            %persona_uid,
-            event_count = events.len(),
-            "LLM 提取 {} 条事件",
-            events.len()
-        );
-
-        // 7. 构建 MemoryEvent 并处理 paraphrase
+        // 3. v1.3: 转换为 L1Item 并通过 TopicBatcher 语义聚类
+        let l1_items: Vec<L1Item> = l1_list.iter().map(L1Item::from).collect();
         let now = now_ms();
-        let time_range = Self::compute_time_range(&batch);
-        let mut saved_events: Vec<MemoryEvent> = Vec::with_capacity(events.len());
+        let (clusters, _expired) = self.batcher.build_clusters(l1_items, now);
 
-        // 从源 L1 计算平均情境强度（None 等效 3）
-        let avg_situation: Option<i32> = {
-            let values: Vec<i32> = batch
+        if clusters.is_empty() {
+            debug!(%persona_uid, "TopicBatcher 未产出簇，跳过事件提取");
+            return Ok(vec![]);
+        }
+
+        info!(
+            %persona_uid,
+            total_l1 = l1_list.len(),
+            cluster_count = clusters.len(),
+            "TopicBatcher 聚类完成"
+        );
+
+        // 4. 对每个簇独立调用 LLM 提取事件
+        let mut all_events: Vec<MemoryEvent> = Vec::new();
+        let mut all_l1_ids: Vec<Uuid> = Vec::new();
+
+        for (ci, cluster) in clusters.iter().enumerate() {
+            let cluster_l1_ids: Vec<Uuid> = cluster.l1_items.iter().map(|i| i.id).collect();
+            let cluster_size = cluster.l1_items.len();
+
+            // 找到对应的原始 MemoryL1（用于降级和 event_sources）
+            let cluster_l1: Vec<&MemoryL1> = cluster_l1_ids
                 .iter()
-                .filter_map(|l1| l1.situation_strength)
+                .filter_map(|id| l1_list.iter().find(|l| l.id == *id))
                 .collect();
-            if values.is_empty() {
-                None
-            } else {
-                let sum: i32 = values.iter().sum();
-                Some(sum / values.len() as i32)
-            }
-        };
 
-        for (idx, ej) in events.into_iter().enumerate() {
-            let mut event = Self::build_event(
-                persona_uid,
-                ej,
-                time_range.0,
-                time_range.1,
-                now,
-                avg_situation,
+            // 格式化簇内 L1
+            let formatted = Self::format_l1_from_cluster(cluster);
+            let prompt = build_event_extraction_prompt(&formatted);
+
+            // 调用 LLM
+            let request_id = Uuid::new_v4();
+            let llm_request = ChatRequest {
+                system_prompt: String::new(),
+                memory_context: None,
+                history: vec![],
+                user_message: prompt,
+                temperature: self.config.temperature,
+                max_tokens: self.config.max_tokens,
+                request_id,
+            };
+
+            let raw_response = match self.llm.chat(&llm_request).await {
+                Ok(text) => text,
+                Err(e) => {
+                    warn!(%persona_uid, %request_id, cluster_idx = ci, error=%e,
+                        "簇 {} LLM 调用失败，触发降级", ci);
+                    let events = self.degrade_cluster(persona_uid, &cluster_l1).await?;
+                    all_events.extend(events);
+                    all_l1_ids.extend(cluster_l1_ids);
+                    continue;
+                }
+            };
+
+            debug!(%persona_uid, %request_id, cluster_idx = ci, "LLM 返回 {} 字符", raw_response.len());
+
+            // 解析 JSON
+            let extracted = match Self::parse_event_response(&raw_response) {
+                Ok(events) if !events.is_empty() => events,
+                Ok(_) | Err(_) => {
+                    warn!(%persona_uid, cluster_idx = ci, "簇 {} JSON 解析/空结果，触发降级", ci);
+                    let events = self.degrade_cluster(persona_uid, &cluster_l1).await?;
+                    all_events.extend(events);
+                    all_l1_ids.extend(cluster_l1_ids);
+                    continue;
+                }
+            };
+
+            // 截断到 max_events（每簇）
+            let extracted: Vec<ExtractedEventJson> =
+                extracted.into_iter().take(self.config.max_events).collect();
+
+            // 时间范围
+            let time_range = (
+                cluster
+                    .l1_items
+                    .first()
+                    .map(|i| i.created_at)
+                    .unwrap_or(now),
+                cluster.l1_items.last().map(|i| i.created_at).unwrap_or(now),
             );
 
-            // 如果有 attitude 且非空，生成 paraphrase
-            if let Some(ref attitude) = event.attitude
-                && !attitude.trim().is_empty()
-            {
-                let context = format!("{} {}", event.title, event.summary);
-                let paraphrase =
-                    generate_paraphrase(self.llm, attitude, &context, &self.config.paraphrase)
-                        .await;
-                // paraphrase 失败时保持 None（不阻断主流程）
-                event.paraphrase = paraphrase;
-            }
+            // 情境强度
+            let avg_situation: Option<i32> = {
+                let values: Vec<i32> = cluster_l1
+                    .iter()
+                    .filter_map(|l1| l1.situation_strength)
+                    .collect();
+                if values.is_empty() {
+                    None
+                } else {
+                    Some(values.iter().sum::<i32>() / values.len() as i32)
+                }
+            };
 
-            // 8. 写入事件
-            let event_id = self.storage.save_event(&event).await.map_err(|e| {
-                warn!(%persona_uid, error=%e, "写入 memory_event 失败");
-                RamariaError::storage(format!("写入事件失败: {e}"))
-            })?;
+            // 构建 MemoryEvent 并保存
+            for ej in extracted {
+                let mut event = Self::build_event(
+                    persona_uid,
+                    ej,
+                    time_range.0,
+                    time_range.1,
+                    now,
+                    avg_situation,
+                );
 
-            event.id = event_id;
-            saved_events.push(event.clone());
-
-            // 写入 event_sources（每条 L1 → 此事件）
-            for l1 in batch.iter() {
-                let weight = 1.0 / batch.len() as f64;
-                if let Err(e) = self
-                    .storage
-                    .save_event_source(event_id, l1.id, weight)
-                    .await
+                // paraphrase
+                if let Some(ref attitude) = event.attitude
+                    && !attitude.trim().is_empty()
                 {
-                    warn!(
-                        %event_id,
-                        l1_id = %l1.id,
-                        error=%e,
-                        "写入 event_source 失败（非致命）"
-                    );
+                    let context = format!("{} {}", event.title, event.summary);
+                    let paraphrase =
+                        generate_paraphrase(self.llm, attitude, &context, &self.config.paraphrase)
+                            .await;
+                    event.paraphrase = paraphrase;
+                }
+
+                let event_id = self.storage.save_event(&event).await.map_err(|e| {
+                    warn!(%persona_uid, error=%e, "写入 memory_event 失败");
+                    RamariaError::storage(format!("写入事件失败: {e}"))
+                })?;
+                event.id = event_id;
+                all_events.push(event.clone());
+
+                // event_sources
+                for l1 in &cluster_l1 {
+                    let weight = 1.0 / cluster_size as f64;
+                    if let Err(e) = self
+                        .storage
+                        .save_event_source(event_id, l1.id, weight)
+                        .await
+                    {
+                        warn!(%event_id, l1_id = %l1.id, error=%e,
+                            "写入 event_source 失败（非致命）");
+                    }
                 }
             }
 
-            debug!(
-                %persona_uid,
-                event_id,
-                title = %event.title,
-                idx,
-                "事件 {} 写入成功",
-                idx + 1
-            );
+            all_l1_ids.extend(cluster_l1_ids);
+            debug!(%persona_uid, cluster_idx = ci, cluster_size, "簇 {} 处理完成", ci);
         }
 
-        // 9. 标记 L1 为 absorbed
-        let l1_ids: Vec<Uuid> = batch.iter().map(|l| l.id).collect();
-        if let Err(e) = self.storage.mark_l1_absorbed(&l1_ids).await {
+        // 5. 批量标记 L1 为 absorbed
+        if !all_l1_ids.is_empty()
+            && let Err(e) = self.storage.mark_l1_absorbed(&all_l1_ids).await
+        {
             warn!(%persona_uid, error=%e, "标记 L1 absorbed 失败（非致命）");
         }
 
         info!(
             %persona_uid,
-            event_count = saved_events.len(),
-            absorbed_l1 = l1_ids.len(),
+            event_count = all_events.len(),
+            absorbed_l1 = all_l1_ids.len(),
             "事件提取完成"
         );
 
-        Ok(saved_events)
+        Ok(all_events)
+    }
+
+    /// 对单个簇执行降级处理。
+    async fn degrade_cluster(
+        &self,
+        persona_uid: &str,
+        l1_batch: &[&MemoryL1],
+    ) -> RamariaResult<Vec<MemoryEvent>> {
+        let l1_owned: Vec<MemoryL1> = l1_batch.iter().map(|l| (*l).clone()).collect();
+        let event = build_degraded_event(persona_uid, &l1_owned, &self.config.degrade);
+
+        let event_id = self
+            .storage
+            .save_event(&event)
+            .await
+            .map_err(|e| RamariaError::storage(format!("写入降级事件失败: {e}")))?;
+
+        let mut saved_event = event;
+        saved_event.id = event_id;
+
+        for l1 in l1_batch {
+            let weight = 1.0 / l1_batch.len() as f64;
+            if let Err(e) = self
+                .storage
+                .save_event_source(event_id, l1.id, weight)
+                .await
+            {
+                warn!(%event_id, l1_id = %l1.id, error=%e, "降级: event_source 写入失败（非致命）");
+            }
+        }
+
+        Ok(vec![saved_event])
     }
 
     // =========================================================
@@ -410,78 +448,23 @@ impl<'a> EventExtractor<'a> {
         Ok(false)
     }
 
-    /// 降级处理: 构建混合事件并写入存储。
-    async fn degrade_and_save(
-        &self,
-        persona_uid: &str,
-        l1_batch: &[&MemoryL1],
-    ) -> RamariaResult<Vec<MemoryEvent>> {
-        let l1_owned: Vec<MemoryL1> = l1_batch.iter().map(|l| (*l).clone()).collect();
-
-        let event = build_degraded_event(persona_uid, &l1_owned, &self.config.degrade);
-
-        info!(
-            %persona_uid,
-            "使用降级事件: {}",
-            event.title
-        );
-
-        let event_id = self
-            .storage
-            .save_event(&event)
-            .await
-            .map_err(|e| RamariaError::storage(format!("写入降级事件失败: {e}")))?;
-
-        let mut saved_event = event;
-        saved_event.id = event_id;
-
-        // 写入 event_sources
-        for l1 in l1_batch.iter() {
-            let weight = 1.0 / l1_batch.len() as f64;
-            if let Err(e) = self
-                .storage
-                .save_event_source(event_id, l1.id, weight)
-                .await
-            {
-                warn!(
-                    %persona_uid,
-                    event_id,
-                    l1_id = %l1.id,
-                    error = %e,
-                    "降级事件: 写入 event_source 失败（非致命）"
-                );
-            }
-        }
-
-        // 标记 L1 为 absorbed
-        let l1_ids: Vec<Uuid> = l1_batch.iter().map(|l| l.id).collect();
-        if let Err(e) = self.storage.mark_l1_absorbed(&l1_ids).await {
-            warn!(
-                %persona_uid,
-                error = %e,
-                l1_count = l1_ids.len(),
-                "降级事件: 标记 L1 absorbed 失败（非致命，下次仍会触发）"
-            );
-        }
-
-        Ok(vec![saved_event])
-    }
-
-    /// 格式化 L1 摘要列表为 LLM prompt 可读文本。
+    /// v1.3: 从 TopicCluster 格式化 L1 摘要列表。
     ///
     /// 格式:
     /// ```text
     /// [1] 2025-06-01 摘要文本 (keywords: kw1, kw2)
     /// ```
-    fn format_l1_list(l1_list: &[&MemoryL1]) -> String {
-        let mut lines = Vec::with_capacity(l1_list.len());
-        for (i, l1) in l1_list.iter().enumerate() {
-            let date = timestamp_to_date_str(l1.created_at);
-            let kw_str = match &l1.keywords {
-                Some(k) if !k.trim().is_empty() => format!(" (keywords: {k})"),
-                _ => String::new(),
+    fn format_l1_from_cluster(cluster: &TopicCluster) -> String {
+        let mut lines = Vec::with_capacity(cluster.l1_items.len());
+        for (i, item) in cluster.l1_items.iter().enumerate() {
+            let date = timestamp_to_date_str(item.created_at);
+            let kw_str = if item.keywords.is_empty() {
+                String::new()
+            } else {
+                let kw_list: Vec<&str> = item.keywords.iter().map(|k| k.as_str()).collect();
+                format!(" (keywords: {})", kw_list.join(", "))
             };
-            lines.push(format!("[{}] {} {}{}", i + 1, date, l1.summary, kw_str));
+            lines.push(format!("[{}] {} {}{}", i + 1, date, item.summary, kw_str));
         }
         lines.join("\n")
     }
@@ -613,28 +596,6 @@ impl<'a> EventExtractor<'a> {
             index_version: None,
         }
     }
-
-    /// 计算 L1 批次的时间范围（开始=最早，结束=最晚）。
-    ///
-    /// 单次遍历同时获取 min/max，避免两次 O(n) 遍历。
-    /// 空列表返回 (now, now)。
-    fn compute_time_range(l1_list: &[&MemoryL1]) -> (i64, i64) {
-        let now = now_ms();
-        if l1_list.is_empty() {
-            return (now, now);
-        }
-        let mut min_ts = l1_list[0].created_at;
-        let mut max_ts = l1_list[0].created_at;
-        for l1 in &l1_list[1..] {
-            if l1.created_at < min_ts {
-                min_ts = l1.created_at;
-            }
-            if l1.created_at > max_ts {
-                max_ts = l1.created_at;
-            }
-        }
-        (min_ts, max_ts)
-    }
 }
 
 // =========================================================
@@ -684,32 +645,6 @@ fn timestamp_to_date_str(ts_ms: i64) -> String {
     utils::timestamp_to_date_str(ts_ms)
 }
 
-/// 按 `context_json.chat_partners` 对 L1 分组。
-///
-/// 初衷: 同一对话线的 L1 合并处理，避免交叉污染。
-/// 如果某人同时与 A 和 B 对话，各自产生的 L1 应分别提取事件。
-///
-/// 分组键:
-/// - 如果 `context_json` 为 None 或为空，使用 `"_default"` 作为键。
-fn group_l1_by_chat_partners(
-    l1_list: &[MemoryL1],
-) -> std::collections::HashMap<String, Vec<&MemoryL1>> {
-    let mut groups: std::collections::HashMap<String, Vec<&MemoryL1>> =
-        std::collections::HashMap::new();
-
-    for l1 in l1_list {
-        let key = l1
-            .context_json
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or("_default")
-            .to_string();
-        groups.entry(key).or_default().push(l1);
-    }
-
-    groups
-}
-
 // =========================================================
 // 测试
 // =========================================================
@@ -717,80 +652,56 @@ fn group_l1_by_chat_partners(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ramaria_core::types::Presentation;
     use ramaria_core::types::now_ms;
-    use ramaria_core::types::{MemoryL1, Presentation};
     use uuid::Uuid;
 
-    // ---- format_l1_list ----
+    // ---- format_l1_from_cluster (v1.3) ----
 
     #[test]
-    fn format_single_l1() {
-        let l1 = MemoryL1 {
+    fn format_single_l1_from_cluster() {
+        let item = L1Item {
             id: Uuid::new_v4(),
-            session_id: Uuid::new_v4(),
             summary: "测试摘要".into(),
-            keywords: Some("测试, 摘要".into()),
-            time_period: None,
-            atmosphere: None,
-            valence: 0.0,
+            keywords: vec![
+                ramaria_core::keyword::KeywordToken::new("测试").unwrap(),
+                ramaria_core::keyword::KeywordToken::new("摘要").unwrap(),
+            ],
+            embedding: None,
             salience: 0.5,
-            absorbed: false,
-            created_at: 1_700_000_000_000, // 2023-11-14
-            last_accessed_at: None,
-            persona_uid: None,
-            context_json: None,
-            situation_strength: None,
+            created_at: 1_700_000_000_000,
         };
-        let formatted = EventExtractor::format_l1_list(&[&l1]);
+        let cluster = TopicCluster::new(vec![item]);
+        let formatted = EventExtractor::format_l1_from_cluster(&cluster);
         assert!(formatted.contains("[1]"));
         assert!(formatted.contains("测试摘要"));
         assert!(formatted.contains("keywords"));
     }
 
     #[test]
-    fn format_multiple_l1() {
-        let summary1 = "第一条摘要";
-        let summary2 = "第二条摘要";
-        let l1_list: Vec<MemoryL1> = vec![
-            MemoryL1 {
-                id: Uuid::new_v4(),
-                session_id: Uuid::new_v4(),
-                summary: summary1.into(),
-                keywords: None,
-                time_period: None,
-                atmosphere: None,
-                valence: 0.0,
-                salience: 0.5,
-                absorbed: false,
-                created_at: now_ms(),
-                last_accessed_at: None,
-                persona_uid: None,
-                context_json: None,
-                situation_strength: None,
-            },
-            MemoryL1 {
-                id: Uuid::new_v4(),
-                session_id: Uuid::new_v4(),
-                summary: summary2.into(),
-                keywords: Some("kw".into()),
-                time_period: None,
-                atmosphere: None,
-                valence: 0.0,
-                salience: 0.5,
-                absorbed: false,
-                created_at: now_ms(),
-                last_accessed_at: None,
-                persona_uid: None,
-                context_json: None,
-                situation_strength: None,
-            },
-        ];
-        let refs: Vec<&MemoryL1> = l1_list.iter().collect();
-        let formatted = EventExtractor::format_l1_list(&refs);
+    fn format_multiple_l1_from_cluster() {
+        let item1 = L1Item {
+            id: Uuid::new_v4(),
+            summary: "第一条摘要".into(),
+            keywords: vec![],
+            embedding: None,
+            salience: 0.5,
+            created_at: now_ms(),
+        };
+        let item2 = L1Item {
+            id: Uuid::new_v4(),
+            summary: "第二条摘要".into(),
+            keywords: vec![ramaria_core::keyword::KeywordToken::new("kw").unwrap()],
+            embedding: None,
+            salience: 0.5,
+            created_at: now_ms(),
+        };
+        let cluster = TopicCluster::new(vec![item1, item2]);
+        let formatted = EventExtractor::format_l1_from_cluster(&cluster);
         assert!(formatted.contains("[1]"));
         assert!(formatted.contains("[2]"));
-        assert!(formatted.contains(summary1));
-        assert!(formatted.contains(summary2));
+        assert!(formatted.contains("第一条摘要"));
+        assert!(formatted.contains("第二条摘要"));
     }
 
     // ---- parse_event_response ----
