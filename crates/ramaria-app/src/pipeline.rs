@@ -795,6 +795,29 @@ mod tests {
         async fn list_graph_edges(&self, _s: i64) -> RamariaResult<Vec<(i64, i64, i64, String)>> {
             Ok(Vec::new())
         }
+        async fn insert_keyword_ref(
+            &self,
+            _keyword_id: &str,
+            _doc_type: &str,
+            _doc_id: &str,
+            _persona_uid: &str,
+            _weight: f64,
+        ) -> RamariaResult<()> {
+            Ok(())
+        }
+        async fn find_refs_by_keyword(
+            &self,
+            _keyword_id: &str,
+        ) -> RamariaResult<Vec<(i64, String, String, String, String, f64, i64)>> {
+            Ok(vec![])
+        }
+        async fn find_refs_by_doc(
+            &self,
+            _doc_type: &str,
+            _doc_id: &str,
+        ) -> RamariaResult<Vec<(i64, String, String, String, String, f64, i64)>> {
+            Ok(vec![])
+        }
     }
 
     // =========================================================
