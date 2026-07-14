@@ -3,26 +3,32 @@
 //! 设计特点:
 //! - 依赖注入: 通过 `&dyn LlmProvider` + `&dyn StorageBackend` 解耦具体实现
 //! - v1.3: 使用 `TopicBatcher` 语义聚类替代旧 `chat_partners + take(20)` 分批策略
+//! - v1.3 M3-A: 通过可选的 `Retriever` 引用启用 CompositeIndex 补充上下文检索
+//! - v1.3 M3-B: Prompt 新增 motives（底层动机）+ relations（事件关系）输出
+//! - v1.3 M3-C: 激活 motives 字段写入 + event_relations 表写入
 //! - 触发条件: 未吸收 L1 ≥ 5 条 或 最早未吸收 L1 ≥ 7 天
 //! - TopicBatcher 将未吸收 L1 聚类为 TopicCluster，每簇独立调用 LLM 提取事件
 //! - 降级兜底: JSON 解析失败 → 退化为 confidence=0.5 混合事件
 //! - 事件写入后自动生成 paraphrase（attitude 存在且非空时）
-//! - 成功后批量标记 L1 为 absorbed + 写入 event_sources
+//! - 成功后批量标记 L1 为 absorbed + 写入 event_sources + event_relations
 //! - 所有可恢复错误转换为 RamariaError，保留上下文
 
 use ramaria_core::traits::ChatRequest;
-use ramaria_core::types::{Presentation, now_ms};
+use ramaria_core::types::{EventRelationKind, Presentation, now_ms};
 use ramaria_core::{
-    LlmProviderTrait, MemoryEvent, MemoryL1, RamariaError, RamariaResult, StorageBackend,
+    EventRelation, LlmProviderTrait, MemoryEvent, MemoryL1, RamariaError, RamariaResult,
+    StorageBackend,
 };
 use serde::Deserialize;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use super::batcher::{L1Item, TopicBatcher, TopicBatcherConfig, TopicCluster};
+use super::context_retriever::{ContextRetriever, ContextRetrieverConfig};
 use super::degrade::{DegradeConfig, build_degraded_event};
 use super::paraphrase::{ParaphraseConfig, generate_paraphrase};
-use super::prompt::build_event_extraction_prompt;
+use super::prompt::{build_event_extraction_prompt, build_event_extraction_prompt_with_context};
+use crate::retriever::Retriever;
 use crate::utils;
 
 /// 一天的毫秒数常量。
@@ -37,6 +43,7 @@ const MS_PER_DAY: f64 = utils::MS_PER_DAY;
 /// 说明:
 /// - 所有字段为 `Option`，容忍 LLM 输出缺失字段。
 /// - 校验阶段填充默认值。
+/// - v1.3: 新增 `motives` 字段（底层动机标签列表）。
 #[derive(Debug, Deserialize)]
 struct ExtractedEventJson {
     title: Option<String>,
@@ -49,20 +56,71 @@ struct ExtractedEventJson {
     presentation: Option<String>,
     share: Option<f64>,
     attitude: Option<String>,
+    /// v1.3 M3: 底层动机标签列表，如 ["地位维护", "自主性"]
+    #[serde(default)]
+    motives: Option<Vec<String>>,
 }
 
-/// LLM 返回的顶层结构：事件数组或单事件对象。
+/// v1.3 M3: LLM 返回的事件关系。
 ///
-/// 三步解析策略:
-/// 1. 尝试解析为 `Vec<ExtractedEventJson>` 数组
-/// 2. 尝试解析为单对象 `ExtractedEventJson`，包装为单元素数组
-/// 3. 失败 → 触发降级
+/// 字段约定:
+/// - `from_index` / `to_index`: 引用 events 数组中的事件索引（从 0 开始）。
+/// - `kind`: 六种关系类型之一。
+/// - `weight`: 关系确信度 0.0..1.0。
+#[derive(Debug, Deserialize)]
+struct EventRelationOutput {
+    from_index: usize,
+    to_index: usize,
+    kind: String,
+    #[serde(default = "default_relation_weight")]
+    weight: f64,
+    /// 关系逻辑的简要说明（由 LLM 输出，当前仅用于 Prompt 引导，未持久化存储）
+    #[serde(default)]
+    #[allow(dead_code)]
+    detail: Option<String>,
+}
+
+fn default_relation_weight() -> f64 {
+    0.5
+}
+
+/// v1.3 M3: LLM 返回的完整提取结果（events + relations）。
+///
+/// 字段约定:
+/// - `events` 为必填字段（无 `#[serde(default)]`），用于区分新格式与旧格式单事件对象。
+///   若 JSON 对象不含 `"events"` 键，serde 按缺少必填字段报错，降级到 `Array`/`Single` 变体。
+/// - `relations` 为可选字段（`#[serde(default)]`），缺失时等价于 `None`。
+#[derive(Debug, Deserialize)]
+struct EventExtractionResponse {
+    events: Vec<ExtractedEventJson>,
+    #[serde(default)]
+    relations: Option<Vec<EventRelationOutput>>,
+}
+
+/// LLM 返回的顶层结构：支持新旧两种格式。
+///
+/// 解析策略:
+/// 1. 尝试解析为 `EventExtractionResponse`（v1.3 新格式: {"events": [...], "relations": [...]}）
+/// 2. 尝试解析为 `Vec<ExtractedEventJson>` 数组（旧格式: [...]）
+/// 3. 尝试解析为单对象 `ExtractedEventJson`，包装为单元素数组
+/// 4. 失败 → 触发降级
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum EventResponse {
+    Object(EventExtractionResponse),
     Array(Vec<ExtractedEventJson>),
     // 兼容 LLM 偶尔返回单对象而非数组
     Single(serde_json::Value),
+}
+
+/// 解析后的完整结果：事件列表 + 可选的关系列表。
+///
+/// 职责:
+/// - 将 `EventResponse` 统一为此结构，供 `extract_events` 后续处理。
+#[derive(Debug)]
+struct ParsedExtractionResult {
+    events: Vec<ExtractedEventJson>,
+    relations: Option<Vec<EventRelationOutput>>,
 }
 
 // =========================================================
@@ -88,6 +146,8 @@ pub struct EventExtractorConfig {
     pub degrade: DegradeConfig,
     /// Paraphrase 配置
     pub paraphrase: ParaphraseConfig,
+    /// v1.3 M3: CompositeIndex 补充上下文检索配置
+    pub context_retriever: ContextRetrieverConfig,
 }
 
 impl Default for EventExtractorConfig {
@@ -101,6 +161,7 @@ impl Default for EventExtractorConfig {
             max_events: 5,
             degrade: DegradeConfig::default(),
             paraphrase: ParaphraseConfig::default(),
+            context_retriever: ContextRetrieverConfig::default(),
         }
     }
 }
@@ -116,9 +177,14 @@ impl Default for EventExtractorConfig {
 /// - 调用 LLM 提取结构化事件。
 /// - 处理降级、paraphrase 生成、写回存储。
 ///
+/// v1.3 M3:
+/// - 可选的 `Retriever` 引用启用 CompositeIndex 补充上下文检索。
+///   设置后，每个 TopicCluster 在 LLM 调用前自动检索历史相关 L1/L2。
+///
 /// 用法:
 /// ```ignore
-/// let extractor = EventExtractor::new(&llm, &storage, EventExtractorConfig::default);
+/// let mut extractor = EventExtractor::new(&llm, &storage, config);
+/// extractor.set_retriever(&retriever);  // v1.3 M3: 启用上下文检索
 /// let events = extractor.extract_events("user-0001").await?;
 /// ```
 pub struct EventExtractor<'a> {
@@ -127,6 +193,8 @@ pub struct EventExtractor<'a> {
     storage: &'a dyn StorageBackend,
     /// v1.3: 主题批量构建器，持有跨批次 Pending Buffer 状态
     batcher: TopicBatcher,
+    /// v1.3 M3: 可选的三通道检索器引用，用于 CompositeIndex 补充上下文
+    retriever: Option<&'a Retriever>,
 }
 
 impl<'a> EventExtractor<'a> {
@@ -145,7 +213,18 @@ impl<'a> EventExtractor<'a> {
             llm,
             storage,
             batcher: TopicBatcher::new(batcher_config),
+            retriever: None,
         }
+    }
+
+    /// v1.3 M3: 设置 Retriever 引用，启用 CompositeIndex 补充上下文检索。
+    ///
+    /// 说明:
+    /// - 不设置时（默认），事件提取无历史上下文注入，行为与 v1.2 一致。
+    /// - 设置后，每个 TopicCluster 在 LLM 调用前自动检索相关历史 L1/L2
+    ///   并注入 Prompt 的"补充背景"段落。
+    pub fn set_retriever(&mut self, retriever: &'a Retriever) {
+        self.retriever = Some(retriever);
     }
 
     // =========================================================
@@ -230,7 +309,28 @@ impl<'a> EventExtractor<'a> {
 
             // 格式化簇内 L1
             let formatted = Self::format_l1_from_cluster(cluster);
-            let prompt = build_event_extraction_prompt(&formatted);
+
+            // v1.3 M3: CompositeIndex 补充上下文检索
+            let context_docs = if let Some(retriever) = self.retriever {
+                let ctx_retriever =
+                    ContextRetriever::new(retriever, self.config.context_retriever.clone());
+                ctx_retriever.retrieve_context(cluster, persona_uid)
+            } else {
+                Vec::new()
+            };
+
+            // 构建 Prompt（带或不带补充上下文）
+            let prompt = if context_docs.is_empty() {
+                build_event_extraction_prompt(&formatted)
+            } else {
+                debug!(
+                    %persona_uid,
+                    cluster_idx = ci,
+                    context_doc_count = context_docs.len(),
+                    "注入 CompositeIndex 补充上下文"
+                );
+                build_event_extraction_prompt_with_context(&formatted, &context_docs)
+            };
 
             // 调用 LLM
             let request_id = Uuid::new_v4();
@@ -259,8 +359,8 @@ impl<'a> EventExtractor<'a> {
             debug!(%persona_uid, %request_id, cluster_idx = ci, "LLM 返回 {} 字符", raw_response.len());
 
             // 解析 JSON
-            let extracted = match Self::parse_event_response(&raw_response) {
-                Ok(events) if !events.is_empty() => events,
+            let parsed = match Self::parse_event_response(&raw_response) {
+                Ok(result) if !result.events.is_empty() => result,
                 Ok(_) | Err(_) => {
                     warn!(%persona_uid, cluster_idx = ci, "簇 {} JSON 解析/空结果，触发降级", ci);
                     let events = self.degrade_cluster(persona_uid, &cluster_l1).await?;
@@ -271,8 +371,12 @@ impl<'a> EventExtractor<'a> {
             };
 
             // 截断到 max_events（每簇）
-            let extracted: Vec<ExtractedEventJson> =
-                extracted.into_iter().take(self.config.max_events).collect();
+            let extracted: Vec<ExtractedEventJson> = parsed
+                .events
+                .into_iter()
+                .take(self.config.max_events)
+                .collect();
+            let relations = parsed.relations;
 
             // 时间范围
             let time_range = (
@@ -297,7 +401,8 @@ impl<'a> EventExtractor<'a> {
                 }
             };
 
-            // 构建 MemoryEvent 并保存
+            // 构建 MemoryEvent 并保存（记录 index→event_id 映射供 relations 使用）
+            let mut cluster_event_ids: Vec<i64> = Vec::with_capacity(extracted.len());
             for ej in extracted {
                 let mut event = Self::build_event(
                     persona_uid,
@@ -324,6 +429,7 @@ impl<'a> EventExtractor<'a> {
                     RamariaError::storage(format!("写入事件失败: {e}"))
                 })?;
                 event.id = event_id;
+                cluster_event_ids.push(event_id);
                 all_events.push(event.clone());
 
                 // event_sources
@@ -338,6 +444,22 @@ impl<'a> EventExtractor<'a> {
                             "写入 event_source 失败（非致命）");
                     }
                 }
+            }
+
+            // v1.3 M3-C: 写入事件关系（T-EVT-002 激活）
+            if let Some(ref rels) = relations
+                && !rels.is_empty()
+                && cluster_event_ids.len() >= 2
+            {
+                let saved_count = self
+                    .save_cluster_relations(rels, &cluster_event_ids, persona_uid, ci)
+                    .await;
+                debug!(
+                    %persona_uid,
+                    cluster_idx = ci,
+                    saved_relation_count = saved_count,
+                    "事件关系写入完成"
+                );
             }
 
             all_l1_ids.extend(cluster_l1_ids);
@@ -448,6 +570,85 @@ impl<'a> EventExtractor<'a> {
         Ok(false)
     }
 
+    /// v1.3 M3-C: 将 LLM 返回的事件关系写入 event_relations 表。
+    ///
+    /// 参数:
+    /// - `rels`: LLM 输出的关系列表（from_index/to_index 引用 events 数组索引）。
+    /// - `event_ids`: 本簇已保存事件的实际 DB ID 列表（与 events 数组顺序一致）。
+    /// - `persona_uid`: 人格标识（用于日志）。
+    /// - `cluster_idx`: 簇索引（用于日志）。
+    ///
+    /// 返回:
+    /// - 成功写入的关系数量。
+    async fn save_cluster_relations(
+        &self,
+        rels: &[EventRelationOutput],
+        event_ids: &[i64],
+        persona_uid: &str,
+        cluster_idx: usize,
+    ) -> usize {
+        let mut saved_count: usize = 0;
+        let now = now_ms();
+
+        for rel in rels {
+            // 索引边界校验
+            if rel.from_index >= event_ids.len() || rel.to_index >= event_ids.len() {
+                warn!(
+                    %persona_uid,
+                    cluster_idx,
+                    from_index = rel.from_index,
+                    to_index = rel.to_index,
+                    event_count = event_ids.len(),
+                    "事件关系索引越界，跳过"
+                );
+                continue;
+            }
+
+            // 不允许自引用
+            if rel.from_index == rel.to_index {
+                debug!(
+                    %persona_uid,
+                    cluster_idx,
+                    index = rel.from_index,
+                    "事件关系自引用，跳过"
+                );
+                continue;
+            }
+
+            let kind = parse_relation_kind(&rel.kind);
+            let from_id = event_ids[rel.from_index];
+            let to_id = event_ids[rel.to_index];
+
+            let event_rel = EventRelation {
+                id: 0,
+                from_id,
+                to_id,
+                kind,
+                weight: rel.weight.clamp(0.0, 1.0),
+                created_at: now,
+            };
+
+            match self.storage.save_event_relation(&event_rel).await {
+                Ok(_) => {
+                    saved_count += 1;
+                }
+                Err(e) => {
+                    warn!(
+                        %persona_uid,
+                        cluster_idx,
+                        from_id,
+                        to_id,
+                        kind = %event_rel.kind.as_str(),
+                        error = %e,
+                        "写入 event_relation 失败（非致命）"
+                    );
+                }
+            }
+        }
+
+        saved_count
+    }
+
     /// v1.3: 从 TopicCluster 格式化 L1 摘要列表。
     ///
     /// 格式:
@@ -469,16 +670,18 @@ impl<'a> EventExtractor<'a> {
         lines.join("\n")
     }
 
-    /// 解析 LLM 响应为事件列表。
+    /// 解析 LLM 响应为事件列表和关系列表。
     ///
     /// 三步递进策略（与 summarizer 一致）:
     /// 1. 直接 `serde_json::from_str`
     /// 2. 剥离 `<think>...</think>` 标签后重试
-    /// 3. 正则提取 JSON 数组 `[...]`
-    fn parse_event_response(raw: &str) -> RamariaResult<Vec<ExtractedEventJson>> {
+    /// 3. 正则提取 JSON 数组/对象
+    ///
+    /// v1.3: 返回 `ParsedExtractionResult`，包含 events 和可选的 relations。
+    fn parse_event_response(raw: &str) -> RamariaResult<ParsedExtractionResult> {
         // 步骤 1: 直接解析
         if let Ok(response) = serde_json::from_str::<EventResponse>(raw) {
-            return response.into_events();
+            return response.into_result();
         }
 
         // 步骤 2: 剥离 think 标签
@@ -486,14 +689,22 @@ impl<'a> EventExtractor<'a> {
         if stripped != raw
             && let Ok(response) = serde_json::from_str::<EventResponse>(&stripped)
         {
-            return response.into_events();
+            return response.into_result();
         }
 
         // 步骤 3: 正则提取
-        if let Some(array_str) = utils::extract_first_json_array(raw)
-            && let Ok(response) = serde_json::from_str::<EventResponse>(&array_str)
+        if let Some(extracted) = utils::extract_first_json_array(raw)
+            && let Ok(response) = serde_json::from_str::<EventResponse>(&extracted)
         {
-            return response.into_events();
+            return response.into_result();
+        }
+
+        // 步骤 3b: v1.3 M3 —— LLM 可能返回完整的 JSON 对象（含 events/relations），
+        // 而 extract_first_json_array 仅提取数组。尝试正则提取 JSON 对象 {...}。
+        if let Some(obj_str) = utils::extract_first_json_object(raw)
+            && let Ok(response) = serde_json::from_str::<EventResponse>(&obj_str)
+        {
+            return response.into_result();
         }
 
         Err(RamariaError::validation(format!(
@@ -503,6 +714,8 @@ impl<'a> EventExtractor<'a> {
     }
 
     /// 从 ExtractedEventJson 构建 MemoryEvent。
+    ///
+    /// v1.3 M3: motives 从 JSON 提取，过滤空字符串后以逗号分隔存储。
     ///
     /// 参数:
     /// - `situation_strength`: 从源 L1 传播的情境强度（1-5），
@@ -571,6 +784,20 @@ impl<'a> EventExtractor<'a> {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
 
+        // v1.3 M3: 提取 motives → 过滤空串 → 逗号分隔存储
+        let motives = json.motives.and_then(|m| {
+            let filtered: Vec<&str> = m
+                .iter()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if filtered.is_empty() {
+                None
+            } else {
+                Some(filtered.join(","))
+            }
+        });
+
         MemoryEvent {
             id: 0,
             persona_uid: persona_uid.to_string(),
@@ -589,7 +816,7 @@ impl<'a> EventExtractor<'a> {
             paraphrase: None, // 后续异步生成
             absorbed: 0,
             situation_strength,
-            motives: None, // v1.2 Schema 预埋，v1.3 激活
+            motives,
             created_at: now,
             last_accessed_at: None,
             indexed_at: None,
@@ -603,27 +830,40 @@ impl<'a> EventExtractor<'a> {
 // =========================================================
 
 impl EventResponse {
-    /// 将 `EventResponse` 转为事件列表。
+    /// 将 `EventResponse` 转为统一的 `ParsedExtractionResult`。
     ///
-    /// 处理三种 LLM 返回形式:
-    /// 1. 直接 JSON 数组 → `Array(events)`
-    /// 2. 单个 JSON 对象 → 包装为单元素 Vec
-    /// 3. 嵌套数组（罕见）→ 二次解包
-    fn into_events(self) -> RamariaResult<Vec<ExtractedEventJson>> {
+    /// 处理四种 LLM 返回形式:
+    /// 1. v1.3 新格式: `{"events": [...], "relations": [...]}` → Object
+    /// 2. 旧格式: JSON 数组 `[...]` → Array
+    /// 3. 单个对象 → 包装为单元素事件列表
+    /// 4. 嵌套数组（罕见）→ 二次解包
+    fn into_result(self) -> RamariaResult<ParsedExtractionResult> {
         match self {
-            EventResponse::Array(events) => Ok(events),
+            EventResponse::Object(resp) => Ok(ParsedExtractionResult {
+                events: resp.events,
+                relations: resp.relations,
+            }),
+            EventResponse::Array(events) => Ok(ParsedExtractionResult {
+                events,
+                relations: None,
+            }),
             EventResponse::Single(val) => {
-                // 尝试将单个对象包装为数组
+                // 尝试将单个对象包装为单元素事件列表
                 if val.is_object() {
                     if let Ok(event) = serde_json::from_value::<ExtractedEventJson>(val) {
-                        return Ok(vec![event]);
+                        return Ok(ParsedExtractionResult {
+                            events: vec![event],
+                            relations: None,
+                        });
                     }
-                    // val 已被 from_value 消费，此分支直接返回
                     return Err(RamariaError::validation("事件 JSON 对象反序列化失败"));
                 }
                 // 可能是嵌套数组（LLM 偶尔返回 [[...]] 形式）
                 if let Ok(events) = serde_json::from_value::<Vec<ExtractedEventJson>>(val) {
-                    return Ok(events);
+                    return Ok(ParsedExtractionResult {
+                        events,
+                        relations: None,
+                    });
                 }
                 Err(RamariaError::validation("事件响应格式无法识别"))
             }
@@ -637,6 +877,26 @@ fn parse_presentation(s: Option<&str>) -> Presentation {
         Some("subjective") => Presentation::Subjective,
         Some("mixed") => Presentation::Mixed,
         _ => Presentation::Mixed,
+    }
+}
+
+/// v1.3 M3: 将 LLM 输出的关系类型字符串解析为 `EventRelationKind`。
+///
+/// 说明:
+/// - 六种标准关系类型：CausedBy/PartOf/RelatedTo/ContinuedBy/Contradicts/Timeline
+/// - 不可识别时默认 `RelatedTo`，并记录 warn 日志。
+fn parse_relation_kind(s: &str) -> EventRelationKind {
+    match s {
+        "CausedBy" => EventRelationKind::CausedBy,
+        "PartOf" => EventRelationKind::PartOf,
+        "RelatedTo" => EventRelationKind::RelatedTo,
+        "ContinuedBy" => EventRelationKind::ContinuedBy,
+        "Contradicts" => EventRelationKind::Contradicts,
+        "Timeline" => EventRelationKind::Timeline,
+        other => {
+            tracing::warn!(kind = other, "未知事件关系类型，降级为 RelatedTo");
+            EventRelationKind::RelatedTo
+        }
     }
 }
 
@@ -711,44 +971,136 @@ mod tests {
         let raw = r#"[
             {"title": "跳槽", "summary": "用户换了新工作", "confidence": 0.9, "salience": 0.75}
         ]"#;
-        let events = EventExtractor::parse_event_response(raw).unwrap();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].title.as_deref(), Some("跳槽"));
+        let result = EventExtractor::parse_event_response(raw).unwrap();
+        assert_eq!(result.events.len(), 1);
+        assert_eq!(result.events[0].title.as_deref(), Some("跳槽"));
+        assert!(result.relations.is_none());
     }
 
     #[test]
     fn parse_empty_array() {
         let raw = "[]";
-        let events = EventExtractor::parse_event_response(raw).unwrap();
-        assert!(events.is_empty());
+        let result = EventExtractor::parse_event_response(raw).unwrap();
+        assert!(result.events.is_empty());
     }
 
     #[test]
     fn parse_single_object_wrapped() {
         // LLM 有时返回单对象而非数组
         let raw = r#"{"title": "事件", "summary": "描述", "confidence": 0.8, "salience": 0.5}"#;
-        let events = EventExtractor::parse_event_response(raw).unwrap();
-        assert_eq!(events.len(), 1);
+        let result = EventExtractor::parse_event_response(raw).unwrap();
+        assert_eq!(result.events.len(), 1);
     }
 
     #[test]
     fn parse_with_think_tags() {
         let raw = "<think>analyzing</think>\n[{\"title\": \"测试\", \"summary\": \"摘要\", \"confidence\": 0.7}]";
-        let events = EventExtractor::parse_event_response(raw).unwrap();
-        assert_eq!(events.len(), 1);
+        let result = EventExtractor::parse_event_response(raw).unwrap();
+        assert_eq!(result.events.len(), 1);
     }
 
     #[test]
     fn parse_with_prefix_text() {
         let raw = "以下是提取的事件：\n[{\"title\": \"事件\", \"summary\": \"描述\", \"confidence\": 0.8}]";
-        let events = EventExtractor::parse_event_response(raw).unwrap();
-        assert_eq!(events.len(), 1);
+        let result = EventExtractor::parse_event_response(raw).unwrap();
+        assert_eq!(result.events.len(), 1);
     }
 
     #[test]
     fn parse_invalid_json_returns_error() {
         let raw = "这不是JSON";
         assert!(EventExtractor::parse_event_response(raw).is_err());
+    }
+
+    // ---- v1.3 M3: 新格式解析 ----
+
+    #[test]
+    fn parse_v13_format_with_events_and_relations() {
+        let raw = r#"{
+            "events": [
+                {"title": "跳槽", "summary": "换工作", "confidence": 0.9, "motives": ["自主"]},
+                {"title": "失眠", "summary": "工作压力失眠", "confidence": 0.85}
+            ],
+            "relations": [
+                {"from_index": 0, "to_index": 1, "kind": "CausedBy", "weight": 0.8, "detail": "跳槽导致压力"}
+            ]
+        }"#;
+        let result = EventExtractor::parse_event_response(raw).unwrap();
+        assert_eq!(result.events.len(), 2);
+        assert_eq!(result.events[0].title.as_deref(), Some("跳槽"));
+        assert!(result.relations.is_some());
+        let rels = result.relations.unwrap();
+        assert_eq!(rels.len(), 1);
+        assert_eq!(rels[0].kind, "CausedBy");
+        assert_eq!(rels[0].from_index, 0);
+        assert_eq!(rels[0].to_index, 1);
+    }
+
+    #[test]
+    fn parse_v13_format_without_relations() {
+        let raw = r#"{
+            "events": [
+                {"title": "事件", "summary": "描述", "confidence": 0.7, "motives": ["归属"]}
+            ]
+        }"#;
+        let result = EventExtractor::parse_event_response(raw).unwrap();
+        assert_eq!(result.events.len(), 1);
+        // relations 字段缺失 → None
+        assert!(result.relations.is_none());
+    }
+
+    #[test]
+    fn parse_v13_format_empty_relations() {
+        let raw = r#"{
+            "events": [
+                {"title": "事件", "summary": "描述", "confidence": 0.7}
+            ],
+            "relations": []
+        }"#;
+        let result = EventExtractor::parse_event_response(raw).unwrap();
+        assert_eq!(result.events.len(), 1);
+        // 空 relations 数组 → Some([])
+        assert!(result.relations.is_some());
+        assert!(result.relations.unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_v13_format_with_prefix_text() {
+        // LLM 可能在 JSON 对象前加前缀文字
+        let raw = "以下是提取的结果：\n{\"events\": [{\"title\": \"事件\", \"summary\": \"描述\", \"confidence\": 0.8}]}";
+        let result = EventExtractor::parse_event_response(raw).unwrap();
+        assert_eq!(result.events.len(), 1);
+    }
+
+    // ---- parse_relation_kind ----
+
+    #[test]
+    fn parse_relation_kind_all_valid() {
+        use ramaria_core::types::EventRelationKind;
+        assert_eq!(parse_relation_kind("CausedBy"), EventRelationKind::CausedBy);
+        assert_eq!(parse_relation_kind("PartOf"), EventRelationKind::PartOf);
+        assert_eq!(
+            parse_relation_kind("RelatedTo"),
+            EventRelationKind::RelatedTo
+        );
+        assert_eq!(
+            parse_relation_kind("ContinuedBy"),
+            EventRelationKind::ContinuedBy
+        );
+        assert_eq!(
+            parse_relation_kind("Contradicts"),
+            EventRelationKind::Contradicts
+        );
+        assert_eq!(parse_relation_kind("Timeline"), EventRelationKind::Timeline);
+    }
+
+    #[test]
+    fn parse_relation_kind_unknown_defaults_to_related() {
+        use ramaria_core::types::EventRelationKind;
+        assert_eq!(
+            parse_relation_kind("UnknownType"),
+            EventRelationKind::RelatedTo
+        );
     }
 
     // ---- build_event ----
@@ -766,6 +1118,7 @@ mod tests {
             presentation: Some("subjective".into()),
             share: Some(0.3),
             attitude: Some("既兴奋又不安".into()),
+            motives: Some(vec!["自主".to_string(), "地位".to_string()]),
         };
         let now = now_ms();
         let event = EventExtractor::build_event("user-0001", json, now - 1000, now, now, None);
@@ -776,6 +1129,48 @@ mod tests {
         assert_eq!(event.presentation, Presentation::Subjective);
         assert!(event.situation_strength.is_none());
         assert!(event.attitude.is_some());
+        assert_eq!(event.motives.as_deref(), Some("自主,地位"));
+    }
+
+    #[test]
+    fn build_event_with_empty_motives() {
+        let json = ExtractedEventJson {
+            title: Some("事件".into()),
+            summary: Some("描述".into()),
+            keywords: None,
+            participants: None,
+            confidence: None,
+            salience: None,
+            valence: None,
+            presentation: None,
+            share: None,
+            attitude: None,
+            motives: Some(vec!["".to_string(), "  ".to_string()]),
+        };
+        let now = now_ms();
+        let event = EventExtractor::build_event("user-0001", json, now, now, now, None);
+        // 空字符串被过滤 → motives 为 None
+        assert!(event.motives.is_none());
+    }
+
+    #[test]
+    fn build_event_with_none_motives() {
+        let json = ExtractedEventJson {
+            title: Some("事件".into()),
+            summary: Some("描述".into()),
+            keywords: None,
+            participants: None,
+            confidence: None,
+            salience: None,
+            valence: None,
+            presentation: None,
+            share: None,
+            attitude: None,
+            motives: None,
+        };
+        let now = now_ms();
+        let event = EventExtractor::build_event("user-0001", json, now, now, now, None);
+        assert!(event.motives.is_none());
     }
 
     #[test]
@@ -791,6 +1186,7 @@ mod tests {
             presentation: None,
             share: None,
             attitude: None,
+            motives: None,
         };
         let now = now_ms();
         let event = EventExtractor::build_event("user-0001", json, now, now, now, None);
@@ -810,6 +1206,7 @@ mod tests {
             presentation: None,
             share: None,
             attitude: None,
+            motives: None,
         };
         let now = now_ms();
         let event = EventExtractor::build_event("user-0001", json, now, now, now, None);
@@ -869,10 +1266,10 @@ mod tests {
         assert!(crate::utils::extract_first_json_array("no array here").is_none());
     }
 
-    // ---- EventResponse::into_events ----
+    // ---- EventResponse::into_result ----
 
     #[test]
-    fn response_array_to_events() {
+    fn response_array_to_result() {
         let resp = EventResponse::Array(vec![ExtractedEventJson {
             title: Some("测试".into()),
             summary: Some("摘要".into()),
@@ -884,8 +1281,10 @@ mod tests {
             presentation: None,
             share: None,
             attitude: None,
+            motives: None,
         }]);
-        let events = resp.into_events().unwrap();
-        assert_eq!(events.len(), 1);
+        let result = resp.into_result().unwrap();
+        assert_eq!(result.events.len(), 1);
+        assert!(result.relations.is_none());
     }
 }

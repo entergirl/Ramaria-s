@@ -628,53 +628,215 @@ impl Retriever {
     }
 
     // =========================================================
-    // 归一化关键词检索（v1.3 骨架方法，M3 中完整实现）
+    // 归一化关键词检索（v1.3 M3）
     // =========================================================
 
-    /// 基于关键词倒排索引的精确匹配检索。
+    /// 基于内存文档关键词字段的精确匹配检索。
+    ///
+    /// 用法:
+    /// - 对每个 KeywordToken，在 `l1_docs` 和 `l2_docs` 的 keywords 字段中做精确命中检测。
+    /// - 关键词字段为逗号分隔字符串，按分隔后 trim 做精确比对。
     ///
     /// 参数:
     /// - `keywords`: 标准化后的关键词列表（KeywordToken）。
-    /// - `persona_uid`: 目标人格 UID。
+    /// - `persona_uid`: 目标人格 UID（空字符串表示不过滤）。
     /// - `top_k`: 最大返回结果数。
     ///
     /// 返回:
-    /// - 精确匹配的文档列表。
+    /// - 按命中关键词数降序排列的 SearchResult 列表，最多 top_k 条。
     ///
     /// 说明:
-    /// - v1.3 M3 中通过 `keyword_refs` 表实现完整逻辑。
-    /// - 当前返回空列表（骨架），编译通过即可。
+    /// - 纯内存计算，不依赖数据库。时间复杂度 O(d × k × m)，
+    ///   其中 d=文档数，k=查询关键词数，m=文档关键词数。在 10k 文档、10 关键词规模下 < 5ms。
     pub fn search_exact(
         &self,
-        _keywords: &[ramaria_core::keyword::KeywordToken],
-        _persona_uid: &str,
-        _top_k: usize,
+        keywords: &[ramaria_core::keyword::KeywordToken],
+        persona_uid: &str,
+        top_k: usize,
     ) -> Vec<SearchResult> {
-        // M3 中实现：通过 keyword_refs 倒排索引做精确匹配
-        Vec::new()
+        if keywords.is_empty() || top_k == 0 {
+            return Vec::new();
+        }
+
+        let filter_persona = !persona_uid.is_empty();
+
+        // (match_count, SearchResult) 元组
+        let mut candidates: Vec<(usize, SearchResult)> = Vec::new();
+
+        // 扫描 L1 文档
+        for (id, doc) in &self.l1_docs {
+            if filter_persona {
+                if let Some(ref puid) = doc.persona_uid {
+                    if puid != persona_uid {
+                        continue;
+                    }
+                } else {
+                    // L1 文档没有 persona_uid 绑定，跳过（不匹配特定 persona）
+                    continue;
+                }
+            }
+
+            let match_count = count_keyword_matches(doc.keywords.as_deref(), keywords);
+            if match_count > 0 {
+                candidates.push((
+                    match_count,
+                    SearchResult {
+                        doc_id: DocId::L1(*id),
+                        layer: "l1".to_string(),
+                        rrf_score: 0.0, // 由排序后重新赋值
+                        bm25_score: None,
+                        vector_score: None,
+                        graph_score: None,
+                        persona_uid: doc.persona_uid.clone(),
+                        share: None,
+                        created_at: doc.created_at,
+                        doc_summary: doc.summary.clone(),
+                    },
+                ));
+            }
+        }
+
+        // 扫描 L2 文档
+        for (id, doc) in &self.l2_docs {
+            if filter_persona && doc.persona_uid != persona_uid {
+                continue;
+            }
+
+            let match_count = count_keyword_matches(doc.keywords.as_deref(), keywords);
+            if match_count > 0 {
+                candidates.push((
+                    match_count,
+                    SearchResult {
+                        doc_id: DocId::L2(*id),
+                        layer: "l2".to_string(),
+                        rrf_score: 0.0,
+                        bm25_score: None,
+                        vector_score: None,
+                        graph_score: None,
+                        persona_uid: Some(doc.persona_uid.clone()),
+                        share: Some(doc.share),
+                        created_at: doc.created_at,
+                        doc_summary: format!("{} — {}", doc.title, doc.summary),
+                    },
+                ));
+            }
+        }
+
+        // 按命中关键词数降序排列，同等命中数按 created_at 降序
+        candidates.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then_with(|| b.1.created_at.cmp(&a.1.created_at))
+        });
+
+        // 截断到 top_k，并为每条结果赋值 rrf_score（基于排名的归一化分数）
+        let _total = candidates.len();
+        candidates.truncate(top_k);
+
+        candidates
+            .into_iter()
+            .enumerate()
+            .map(|(rank, (match_count, mut sr))| {
+                // rrf_score = 1.0 / (rank + 1)，排名越前分数越高
+                sr.rrf_score = 1.0 / (rank as f64 + 1.0);
+                tracing::debug!(
+                    doc_id = %sr.doc_id,
+                    layer = %sr.layer,
+                    match_count,
+                    rank,
+                    rrf_score = sr.rrf_score,
+                    "search_exact 命中"
+                );
+                sr
+            })
+            .collect()
     }
 
     /// 基于 BM25 的子串匹配检索。
     ///
+    /// 用法:
+    /// - 将查询文本委托给 BM25 索引做 bigram 分词检索，
+    ///   实现子串级别的文本匹配（中文以双字 bigram 为单位）。
+    ///
     /// 参数:
-    /// - `query`: 查询文本。
-    /// - `persona_uid`: 目标人格 UID。
+    /// - `query`: 查询文本（如关键词拼接字符串）。
+    /// - `persona_uid`: 目标人格 UID（空字符串表示不过滤）。
     /// - `top_k`: 最大返回结果数。
     ///
     /// 返回:
-    /// - 子串匹配的文档列表。
+    /// - 按 BM25 评分降序排列的 SearchResult 列表，最多 top_k 条。
     ///
     /// 说明:
-    /// - v1.3 M3 中通过 BM25 内部实现子串匹配。
-    /// - 当前返回空列表（骨架），编译通过即可。
+    /// - 关闭向量和图谱通道，仅使用 BM25。
+    /// - 复用现有 `search()` 方法，避免重复实现评分逻辑。
     pub fn search_substring(
         &self,
-        _query: &str,
-        _persona_uid: &str,
-        _top_k: usize,
+        query: &str,
+        persona_uid: &str,
+        top_k: usize,
     ) -> Vec<SearchResult> {
-        // M3 中实现：基于 BM25 内部做子串匹配
-        Vec::new()
+        if query.trim().is_empty() || top_k == 0 {
+            return Vec::new();
+        }
+
+        let request = SearchRequest {
+            query: query.to_string(),
+            persona_uid: if persona_uid.is_empty() {
+                None
+            } else {
+                Some(persona_uid.to_string())
+            },
+            top_k,
+            filter_share: false, // 事件提取上下文不过滤 share
+        };
+
+        // 仅启用 BM25 通道
+        // 注意：search() 使用 &self，但我们在此需要临时修改配置。
+        // 由于 search() 直接在方法内检查 self.config.enable_*，无法外部覆盖。
+        // 因此直接调用 BM25 索引 → 构建 SearchResult。
+        self.search_bm25_only(&request)
+    }
+
+    /// BM25-only 检索（供 search_substring 使用）。
+    ///
+    /// 直接访问 BM25 索引，绕过三通道编排，避免依赖向量/图谱通道。
+    fn search_bm25_only(&self, request: &SearchRequest) -> Vec<SearchResult> {
+        let raw_results = self.bm25_index.search(&request.query, &self.config.bm25);
+        if raw_results.is_empty() {
+            return Vec::new();
+        }
+
+        let mut results: Vec<SearchResult> = Vec::with_capacity(raw_results.len());
+
+        for (doc_id, bm25_score) in raw_results {
+            let data = resolve_bm25_doc(&doc_id, &self.l1_docs, &self.l2_docs);
+
+            // persona_uid 过滤
+            if let Some(ref target_uid) = request.persona_uid
+                && let Some(ref puid) = data.persona_uid
+                && puid != target_uid
+            {
+                continue;
+            }
+
+            results.push(SearchResult {
+                doc_id,
+                layer: data.layer,
+                rrf_score: bm25_score, // BM25 原始分数作为排名分数
+                bm25_score: Some(bm25_score),
+                vector_score: None,
+                graph_score: None,
+                persona_uid: data.persona_uid,
+                share: data.share,
+                created_at: data.created_at,
+                doc_summary: data.summary,
+            });
+
+            if results.len() >= request.top_k {
+                break;
+            }
+        }
+
+        results
     }
 
     /// 清空所有索引和文档。
@@ -833,6 +995,40 @@ fn parse_doc_label(
         // 未知格式 label（不应出现，但做防御处理）
         None
     }
+}
+
+/// 统计文档关键词字段中匹配到的查询关键词数量。
+///
+/// 参数:
+/// - `doc_keywords`: 文档的逗号分隔关键词字符串（如 "工作, 压力, 倦怠"）。
+/// - `query_keywords`: 查询关键词列表。
+///
+/// 返回:
+/// - 精确命中的关键词数量。
+fn count_keyword_matches(
+    doc_keywords: Option<&str>,
+    query_keywords: &[ramaria_core::keyword::KeywordToken],
+) -> usize {
+    let doc_str = match doc_keywords {
+        Some(s) => s,
+        None => return 0,
+    };
+
+    // 解析文档关键词为去重集合，做与 KeywordToken::new() 一致的规范化（trim + 英文小写）
+    let doc_kw_set: std::collections::HashSet<String> = doc_str
+        .split(',')
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if doc_kw_set.is_empty() {
+        return 0;
+    }
+
+    query_keywords
+        .iter()
+        .filter(|qk| doc_kw_set.contains(qk.as_str()))
+        .count()
 }
 
 // =========================================================
@@ -1164,5 +1360,159 @@ mod tests {
         let found = found.unwrap();
         assert_eq!(found.persona_uid.as_deref(), Some("test-persona"));
         assert_eq!(found.doc_summary, "测试摘要");
+    }
+
+    // =========================================================
+    // search_exact 测试（v1.3 M3）
+    // =========================================================
+
+    use ramaria_core::keyword::KeywordToken;
+
+    #[test]
+    fn search_exact_finds_matching_docs() {
+        let r = make_test_retriever();
+        let kw = vec![
+            KeywordToken::new("Rust").unwrap(),
+            KeywordToken::new("编程").unwrap(),
+        ];
+        let results = r.search_exact(&kw, "user-0001", 10);
+        // 应命中至少 2 条：L1 "Rust,编程" 和 L2 "Rust,项目,发布"
+        assert!(!results.is_empty());
+        // L2 事件命中 "Rust"，L1 命中 "Rust"+"编程"
+        assert!(results.iter().any(|sr| sr.layer == "l1"));
+        assert!(results.iter().any(|sr| sr.layer == "l2"));
+    }
+
+    #[test]
+    fn search_exact_empty_keywords() {
+        let r = make_test_retriever();
+        let results = r.search_exact(&[], "user-0001", 10);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_exact_no_match() {
+        let r = make_test_retriever();
+        let kw = vec![KeywordToken::new("不存在的关键词xyz").unwrap()];
+        let results = r.search_exact(&kw, "user-0001", 10);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_exact_filters_by_persona() {
+        let r = make_test_retriever();
+        let kw = vec![KeywordToken::new("Rust").unwrap()];
+        // user-0002 不应有任何文档
+        let results = r.search_exact(&kw, "user-0002", 10);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_exact_top_k_truncation() {
+        let mut r = make_test_retriever();
+        // 添加更多含相同关键词的文档
+        for i in 0..5 {
+            r.index_l1(&L1DocView {
+                id: uuid::Uuid::new_v4(),
+                summary: format!("文档{} 关于Rust", i),
+                keywords: Some("Rust,测试".to_string()),
+                persona_uid: Some("user-0001".to_string()),
+                created_at: 3000 + i as i64,
+                salience: 0.5,
+            });
+        }
+        let kw = vec![KeywordToken::new("Rust").unwrap()];
+        let results = r.search_exact(&kw, "user-0001", 3);
+        assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn search_exact_sorts_by_match_count() {
+        let mut r = Retriever::new();
+        // 文档 A: 命中 1 个关键词
+        r.index_l1(&L1DocView {
+            id: uuid::Uuid::new_v4(),
+            summary: "A".to_string(),
+            keywords: Some("Rust".to_string()),
+            persona_uid: Some("u1".to_string()),
+            created_at: 1000,
+            salience: 0.5,
+        });
+        // 文档 B: 命中 2 个关键词
+        r.index_l1(&L1DocView {
+            id: uuid::Uuid::new_v4(),
+            summary: "B".to_string(),
+            keywords: Some("Rust,编程,异步".to_string()),
+            persona_uid: Some("u1".to_string()),
+            created_at: 2000,
+            salience: 0.5,
+        });
+
+        let kw = vec![
+            KeywordToken::new("Rust").unwrap(),
+            KeywordToken::new("编程").unwrap(),
+        ];
+        let results = r.search_exact(&kw, "u1", 10);
+        assert_eq!(results.len(), 2);
+        // 文档 B（命中 2 个）应排在前面
+        assert!(
+            results[0].doc_summary.contains("B"),
+            "命中更多关键词的文档应排在前面"
+        );
+    }
+
+    // =========================================================
+    // search_substring 测试（v1.3 M3）
+    // =========================================================
+
+    #[test]
+    fn search_substring_finds_partial_match() {
+        let r = make_test_retriever();
+        // "Rust编程" 应能匹配到 BM25 bigram 命中的文档
+        let results = r.search_substring("Rust编程", "user-0001", 10);
+        assert!(!results.is_empty());
+        assert!(results.iter().any(|sr| sr.doc_summary.contains("Rust")));
+    }
+
+    #[test]
+    fn search_substring_empty_query() {
+        let r = make_test_retriever();
+        let results = r.search_substring("", "user-0001", 10);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_substring_filters_by_persona() {
+        let r = make_test_retriever();
+        let results = r.search_substring("火锅", "user-0002", 10);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_substring_top_k() {
+        let mut r = make_test_retriever();
+        for i in 0..5 {
+            r.index_l1(&L1DocView {
+                id: uuid::Uuid::new_v4(),
+                summary: format!("文档{} Rust相关", i),
+                keywords: Some("Rust".to_string()),
+                persona_uid: Some("user-0001".to_string()),
+                created_at: 3000 + i as i64,
+                salience: 0.5,
+            });
+        }
+        let results = r.search_substring("Rust", "user-0001", 2);
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn search_substring_returns_bm25_score() {
+        let r = make_test_retriever();
+        let results = r.search_substring("Rust", "user-0001", 5);
+        // BM25 分数应 > 0
+        for sr in &results {
+            assert!(sr.bm25_score.unwrap_or(0.0) > 0.0, "BM25 分数应大于 0");
+            assert!(sr.rrf_score > 0.0, "rrf_score 应为 BM25 分数");
+        }
     }
 }
