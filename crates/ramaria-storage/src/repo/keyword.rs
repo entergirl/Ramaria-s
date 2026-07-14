@@ -281,7 +281,7 @@ pub async fn find_refs_by_keyword(
         "SELECT id, keyword_id, doc_type, doc_id, persona_uid, weight, created_at
          FROM keyword_refs
          WHERE keyword_id = ?
-         ORDER BY created_at DESC",
+         ORDER BY created_at DESC, id DESC",
     )
     .bind(keyword_id)
     .fetch_all(pool)

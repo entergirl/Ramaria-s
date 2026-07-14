@@ -425,7 +425,7 @@ fn parse_json_message(
 
                 // 截断过长的引用内容（超过 30 字符加 "…"）
                 let quoted_display = if quoted_content.chars().count() > 30 {
-                    format!("{}…", &quoted_content.chars().take(30).collect::<String>())
+                    format!("{}…", quoted_content.chars().take(30).collect::<String>())
                 } else {
                     quoted_content.to_string()
                 };
