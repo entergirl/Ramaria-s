@@ -181,6 +181,67 @@ pub async fn save_relation(pool: &SqlitePool, rel: &EventRelation) -> RamariaRes
 }
 
 // =========================================================
+// 事件关系查询
+// =========================================================
+
+/// 事件关系查询行。
+#[derive(sqlx::FromRow)]
+struct RelationRow {
+    id: i64,
+    from_id: i64,
+    to_id: i64,
+    kind: String,
+    weight: f64,
+    created_at: i64,
+}
+
+impl RelationRow {
+    fn into_relation(self) -> EventRelation {
+        use ramaria_core::types::EventRelationKind;
+        let kind = match self.kind.as_str() {
+            "CausedBy" => EventRelationKind::CausedBy,
+            "PartOf" => EventRelationKind::PartOf,
+            "RelatedTo" => EventRelationKind::RelatedTo,
+            "ContinuedBy" => EventRelationKind::ContinuedBy,
+            "Contradicts" => EventRelationKind::Contradicts,
+            "Timeline" => EventRelationKind::Timeline,
+            _ => EventRelationKind::RelatedTo, // 未知关系类型降级
+        };
+        EventRelation {
+            id: self.id,
+            from_id: self.from_id,
+            to_id: self.to_id,
+            kind,
+            weight: self.weight,
+            created_at: self.created_at,
+        }
+    }
+}
+
+/// 按 persona_uid 查询该角色相关的所有事件关系。
+///
+/// 通过 JOIN memory_events 过滤：仅返回 from_id 对应事件属于目标 persona 的关系。
+/// 这样保证每条关系至少有一个端点属于该角色的事件。
+pub async fn list_relations_by_persona(
+    pool: &SqlitePool,
+    persona_uid: &str,
+) -> RamariaResult<Vec<EventRelation>> {
+    let rows = sqlx::query_as::<_, RelationRow>(
+        "SELECT er.id, er.from_id, er.to_id, er.kind, er.weight, er.created_at
+         FROM event_relations er
+         JOIN memory_events me ON er.from_id = me.id
+         WHERE me.persona_uid = ?
+         ORDER BY er.created_at ASC",
+    )
+    .bind(persona_uid)
+    .fetch_all(pool)
+    .await
+    .storage_err("查询事件关系列表失败")?;
+
+    Ok(rows.into_iter().map(|r| r.into_relation()).collect())
+}
+
+// =========================================================
 // 事件溯源（event_id 为 i64，l1_id 为 Uuid）
 // =========================================================
 

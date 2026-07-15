@@ -180,11 +180,28 @@ fn format_representative_events(events: &[RepresentativeEvent], max_display: usi
 }
 
 /// 构建 Step 1 prompt：逐分类个性模式提取。
-pub fn build_step1_prompt(stats: &StatsSummary, config: &InferrerConfig) -> String {
+///
+/// 参数:
+/// - `stats`: Phase A 统计摘要。
+/// - `config`: 推断器配置。
+/// - `causal_features_text`: 可选的因果链特征文本（由 A8 模块生成）。为 None 或空字符串时跳过。
+pub fn build_step1_prompt(
+    stats: &StatsSummary,
+    config: &InferrerConfig,
+    causal_features_text: Option<&str>,
+) -> String {
     let mut prompt = String::new();
     prompt.push_str(
         "你是一位性格心理分析师。基于以下统计数据和事件摘要，对用户在每个生活领域的性格表现进行分析。\n\n",
     );
+
+    // ---- 因果链特征（A8） ----
+    if let Some(causal_text) = causal_features_text
+        && !causal_text.is_empty()
+    {
+        prompt.push_str(causal_text);
+    }
+
     prompt.push_str("## 分类统计\n\n");
 
     for cat in &stats.categories {
@@ -673,6 +690,9 @@ mod tests {
         StatsSummary {
             total_events_in: 10,
             total_events_filtered: 8,
+            confirmed_count: 8,
+            tentative_count: 0,
+            discarded_count: 2,
             category_count: 2,
             categories: vec![
                 CategoryStats {
@@ -728,7 +748,7 @@ mod tests {
     fn build_step1_prompt_is_valid() {
         let stats = make_test_stats();
         let config = InferrerConfig::default();
-        let prompt = build_step1_prompt(&stats, &config);
+        let prompt = build_step1_prompt(&stats, &config, None);
         assert!(prompt.contains("工作"));
         assert!(prompt.contains("社交"));
         assert!(prompt.contains("n_eff"));
@@ -791,6 +811,9 @@ mod tests {
         let stats = StatsSummary {
             total_events_in: 0,
             total_events_filtered: 0,
+            confirmed_count: 0,
+            tentative_count: 0,
+            discarded_count: 0,
             category_count: 0,
             categories: vec![],
             cross_category: CrossCategoryMetrics {

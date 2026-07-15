@@ -162,6 +162,13 @@ impl StorageBackend for SqliteStorage {
         repo::events::save_relation(&self.pool, rel).await
     }
 
+    async fn list_event_relations_by_persona(
+        &self,
+        persona_uid: &str,
+    ) -> RamariaResult<Vec<EventRelation>> {
+        repo::events::list_relations_by_persona(&self.pool, persona_uid).await
+    }
+
     async fn save_event_source(
         &self,
         event_id: i64,

@@ -17,10 +17,12 @@ use ramaria_core::{
         TraitStatus, now_ms,
     },
 };
+use std::collections::HashMap;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::inference::{
+    causal::{extract_causal_features, format_causal_features_text},
     confidence::{ConfidenceConfig, ConfidenceSummary, run_confidence_update},
     drift::{CategoryEventData, DriftSummary, run_drift_detection},
     inferrer::{
@@ -28,6 +30,7 @@ use crate::inference::{
         PostProcessResult, build_step1_prompt, build_step2_prompt, build_step3_prompt, mock_infer,
         post_process_inference,
     },
+    shrink::{ShrinkConfig, run_shrinkage_layered},
     stats::StatsSummary,
 };
 use crate::utils::{extract_first_json_array, extract_first_json_object, strip_thinking};
@@ -139,8 +142,47 @@ pub async fn run_phase_b_inference(
         );
     }
 
+    // ---- 1.5. v1.3 因果链特征提取（A8） ----
+    let causal_text = match storage
+        .list_event_relations_by_persona(&persona_owned)
+        .await
+    {
+        Ok(relations) if !relations.is_empty() => {
+            // 查询该 persona 的所有事件用于类别映射
+            let events = storage
+                .list_events_by_persona(&persona_owned, 0, 10000)
+                .await
+                .unwrap_or_default();
+            let features = extract_causal_features(&events, &relations);
+            let text = format_causal_features_text(&features);
+            if !text.is_empty() {
+                debug!(
+                    persona_uid = %persona_owned,
+                    chain_length = features.chain_length,
+                    cycle_count = features.cyclic_patterns.len(),
+                    "Phase B: 因果链特征提取完成"
+                );
+            }
+            text
+        }
+        Ok(_) => {
+            debug!(persona_uid = %persona_owned, "Phase B: 无事件关系数据，跳过因果链分析");
+            String::new()
+        }
+        Err(e) => {
+            warn!(persona_uid = %persona_owned, error = %e, "Phase B: 查询事件关系失败，跳过因果链分析");
+            String::new()
+        }
+    };
+
     // ---- 2. 三步 LLM 推断（含降级） ----
-    let inference_result = run_three_step_inference(llm, stats, persona_uid, config).await;
+    let causal_text_ref: Option<&str> = if causal_text.is_empty() {
+        None
+    } else {
+        Some(&causal_text)
+    };
+    let inference_result =
+        run_three_step_inference(llm, stats, persona_uid, config, causal_text_ref).await;
 
     let (result, source) = match inference_result {
         Ok(r) => {
@@ -300,20 +342,171 @@ pub async fn run_phase_b_inference(
 }
 
 // =========================================================
+// v1.3 分层先验收缩集成
+// =========================================================
+
+/// 从已持久化的人格特质中构建分层先验提示映射。
+///
+/// 策略:
+/// - 仅读取 `Active` 状态的 trait，忽略 `Deprecated` / `Pending`。
+/// - 从每条 trait 的 `trait_label`（如"工作""社交"）映射到其 `layer`（Base/Primary/Accent）。
+/// - 同一 `trait_label` 出现多次时，按优先级 Base > Primary > Accent 保留最保守的层。
+///
+/// 说明:
+/// - `trait_label` 通常与 Phase A 的 `category` 名称一致，这是两者关联的桥梁。
+/// - 若 traits 列表为空（首轮推断），返回空 HashMap，`run_shrinkage_layered` 将退化为全局先验。
+///
+/// 参数:
+/// - `traits`: 从 DB 读取的已有 PersonalityTrait 列表。
+///
+/// 返回:
+/// - trait_label → TraitLayer 的映射。
+pub fn build_layer_hints_from_traits(traits: &[PersonalityTrait]) -> HashMap<String, TraitLayer> {
+    let mut hints: HashMap<String, TraitLayer> = HashMap::new();
+
+    for t in traits {
+        if t.status != TraitStatus::Active {
+            continue;
+        }
+        let label = t.trait_label.clone();
+        let layer = t.layer;
+        // 优先级: Base > Primary > Accent（数字越小越保守）
+        let priority = match layer {
+            TraitLayer::Base => 0u8,
+            TraitLayer::Primary => 1,
+            TraitLayer::Accent => 2,
+            _ => 3, // 未知 layer 最低优先级
+        };
+        hints
+            .entry(label)
+            .and_modify(|existing| {
+                let existing_priority = match *existing {
+                    TraitLayer::Base => 0,
+                    TraitLayer::Primary => 1,
+                    TraitLayer::Accent => 2,
+                    _ => 3,
+                };
+                if priority < existing_priority {
+                    *existing = layer;
+                }
+            })
+            .or_insert(layer);
+    }
+
+    hints
+}
+
+/// 对 Phase A 统计结果应用分层先验收缩。
+///
+/// 流程:
+/// 1. 从 DB 读取该 persona 的上一轮 Active traits。
+/// 2. 调用 `build_layer_hints_from_traits` 构建 layer 提示映射。
+/// 3. 若 hints 非空，调用 `run_shrinkage_layered` 使用分层先验收缩。
+/// 4. 若 hints 为空（首轮推断），调用 `run_shrinkage` 使用全局先验收缩。
+/// 5. 收缩结果直接写入 `stats_summary.categories`（in-place 修改）。
+///
+/// 说明:
+/// - 本函数应在 Phase A 统计完成后、Phase B 推断前调用。
+/// - DB 读取失败不阻塞管线：降级为全局先验收缩，仅记录 warn 日志。
+/// - 收缩后需重新计算 `StatsSummary.cross_category` 指标（如有必要，调用方负责）。
+///
+/// 参数:
+/// - `storage`: 存储后端，用于读取已有 traits。
+/// - `stats_summary`: Phase A 统计摘要（可变引用，categories 将被 in-place 收缩）。
+/// - `persona_uid`: 目标人格标识。
+/// - `shrink_config`: 收缩配置（γ 参数等）。
+///
+/// 返回:
+/// - 使用的 γ 值（供日志记录）。失败时返回 0.0。
+pub async fn apply_layered_shrinkage(
+    storage: &dyn StorageBackend,
+    stats_summary: &mut StatsSummary,
+    persona_uid: &str,
+    shrink_config: &ShrinkConfig,
+) -> f64 {
+    if stats_summary.categories.is_empty() {
+        debug!(
+            persona_uid = %persona_uid,
+            "Phase A shrinkage: categories 为空，跳过收缩"
+        );
+        return 0.0;
+    }
+
+    // 1. 读取上一轮的 traits
+    let old_traits = match storage.list_traits_by_persona(persona_uid).await {
+        Ok(traits) => traits,
+        Err(e) => {
+            warn!(
+                persona_uid = %persona_uid,
+                error = %e,
+                "Phase A shrinkage: 读取已有 traits 失败，降级为全局先验收缩"
+            );
+            // 降级: 全局先验收缩
+            return run_shrinkage_layered(
+                &mut stats_summary.categories,
+                shrink_config,
+                &HashMap::new(), // 空 hints → 所有分类使用全局先验
+            );
+        }
+    };
+
+    // 2. 构建 layer hints
+    let layer_hints = build_layer_hints_from_traits(&old_traits);
+
+    if layer_hints.is_empty() {
+        info!(
+            persona_uid = %persona_uid,
+            "Phase A shrinkage: 首轮推断，使用全局先验收缩"
+        );
+    } else {
+        let accent_count = layer_hints
+            .values()
+            .filter(|l| matches!(l, TraitLayer::Accent))
+            .count();
+        info!(
+            persona_uid = %persona_uid,
+            hint_count = layer_hints.len(),
+            accent_count,
+            "Phase A shrinkage: 加载上轮 layer 提示，执行分层收缩"
+        );
+    }
+
+    // 3. 执行分层收缩（空 hints 时退化为全局先验）
+    let gamma = run_shrinkage_layered(&mut stats_summary.categories, shrink_config, &layer_hints);
+
+    // 4. 收缩后更新叙事一致性（presentation 分布向先验收缩后一致性提高）
+    stats_summary.cross_category.narrative_consistency =
+        crate::inference::stats::compute_narrative_consistency(&stats_summary.categories);
+
+    debug!(
+        persona_uid = %persona_uid,
+        gamma,
+        narrative_consistency = stats_summary.cross_category.narrative_consistency,
+        "Phase A shrinkage: 分层收缩完成"
+    );
+
+    gamma
+}
+
+// =========================================================
 // Phase B 内部: 三步 LLM 推断
 // =========================================================
 
 /// 执行三步 LLM 推断（内部函数，不含降级逻辑）。
 ///
 /// 任一步骤失败返回错误，由调用方决定降级策略。
+///
+/// 参数:
+/// - `causal_features_text`: 可选的因果链特征文本（A8 模块产出），注入 Step 1 Prompt。
 async fn run_three_step_inference(
     llm: &dyn LlmProvider,
     stats: &StatsSummary,
     persona_uid: &str,
     config: &InferrerConfig,
+    causal_features_text: Option<&str>,
 ) -> RamariaResult<InferenceResult> {
     // Step 1: 逐分类个性模式提取
-    let step1_prompt = build_step1_prompt(stats, config);
+    let step1_prompt = build_step1_prompt(stats, config, causal_features_text);
     let step1_raw = call_llm_and_get_text(llm, &step1_prompt, config, "Step1").await?;
     let category_signals: Vec<CategorySignal> =
         parse_json_with_degrade(&step1_raw, "Step1", parse_category_signals)?;
@@ -1101,6 +1294,9 @@ mod tests {
         StatsSummary {
             total_events_in: 15,
             total_events_filtered: 12,
+            confirmed_count: 12,
+            tentative_count: 0,
+            discarded_count: 3,
             category_count: 2,
             categories: vec![
                 CategoryStats {
@@ -1409,7 +1605,7 @@ mod tests {
         let config = InferrerConfig::default();
         let result = mock_infer(&stats, "user-0001");
 
-        let p1 = build_step1_prompt(&stats, &config);
+        let p1 = build_step1_prompt(&stats, &config, None);
         assert!(!p1.is_empty());
         assert!(p1.contains("工作"));
         assert!(p1.contains("性格心理分析师"));
@@ -1427,5 +1623,116 @@ mod tests {
         assert!(!p3.is_empty());
         assert!(p3.contains("layer"));
         assert!(p3.contains("trait_label"));
+    }
+
+    // =========================================================
+    // v1.3 分层先验收缩集成
+    // =========================================================
+
+    /// 构造测试用 PersonalityTrait。
+    fn make_trait(
+        id: i64,
+        label: &str,
+        layer: TraitLayer,
+        confidence: f64,
+        status: TraitStatus,
+    ) -> PersonalityTrait {
+        let now = now_ms();
+        PersonalityTrait {
+            id,
+            persona_uid: "user-0001".into(),
+            trait_label: label.into(),
+            meaning: format!("{} 的描述", label),
+            layer,
+            confidence,
+            evidence: 1.0,
+            consistency: 0.5,
+            source: TraitSource::Inferred,
+            status,
+            not_meaning: None,
+            trigger: None,
+            suppress: None,
+            related: None,
+            seq: 1,
+            ref_event_id: None,
+            ref_l1_id: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn build_layer_hints_empty_traits() {
+        let hints = build_layer_hints_from_traits(&[]);
+        assert!(hints.is_empty());
+    }
+
+    #[test]
+    fn build_layer_hints_basic() {
+        let traits = vec![
+            make_trait(1, "工作", TraitLayer::Base, 0.7, TraitStatus::Active),
+            make_trait(2, "社交", TraitLayer::Accent, 0.5, TraitStatus::Active),
+        ];
+        let hints = build_layer_hints_from_traits(&traits);
+        assert_eq!(hints.len(), 2);
+        assert_eq!(hints.get("工作"), Some(&TraitLayer::Base));
+        assert_eq!(hints.get("社交"), Some(&TraitLayer::Accent));
+    }
+
+    #[test]
+    fn build_layer_hints_skips_deprecated() {
+        let traits = vec![
+            make_trait(1, "工作", TraitLayer::Base, 0.7, TraitStatus::Deprecated),
+            make_trait(2, "社交", TraitLayer::Accent, 0.5, TraitStatus::Active),
+        ];
+        let hints = build_layer_hints_from_traits(&traits);
+        assert_eq!(hints.len(), 1, "Deprecated trait 应被跳过");
+        assert_eq!(hints.get("社交"), Some(&TraitLayer::Accent));
+        assert!(!hints.contains_key("工作"));
+    }
+
+    #[test]
+    fn build_layer_hints_priority_base_over_accent() {
+        // 同一 label 出现两次: Base > Accent
+        let traits = vec![
+            make_trait(1, "工作", TraitLayer::Accent, 0.5, TraitStatus::Active),
+            make_trait(2, "工作", TraitLayer::Base, 0.7, TraitStatus::Active),
+        ];
+        let hints = build_layer_hints_from_traits(&traits);
+        assert_eq!(hints.len(), 1);
+        assert_eq!(
+            hints.get("工作"),
+            Some(&TraitLayer::Base),
+            "Base 优先级应高于 Accent"
+        );
+    }
+
+    #[test]
+    fn build_layer_hints_priority_primary_over_accent() {
+        let traits = vec![
+            make_trait(3, "社交", TraitLayer::Accent, 0.4, TraitStatus::Active),
+            make_trait(4, "社交", TraitLayer::Primary, 0.6, TraitStatus::Active),
+        ];
+        let hints = build_layer_hints_from_traits(&traits);
+        assert_eq!(hints.len(), 1);
+        assert_eq!(
+            hints.get("社交"),
+            Some(&TraitLayer::Primary),
+            "Primary 优先级应高于 Accent"
+        );
+    }
+
+    #[test]
+    fn build_layer_hints_mixed_status() {
+        let traits = vec![
+            make_trait(1, "工作", TraitLayer::Base, 0.7, TraitStatus::Active),
+            make_trait(2, "工作", TraitLayer::Accent, 0.5, TraitStatus::Deprecated),
+            make_trait(3, "社交", TraitLayer::Primary, 0.6, TraitStatus::Active),
+        ];
+        let hints = build_layer_hints_from_traits(&traits);
+        assert_eq!(hints.len(), 2);
+        // 工作: 只有 Active 的 Base，Deprecated Accent 被忽略
+        assert_eq!(hints.get("工作"), Some(&TraitLayer::Base));
+        assert_eq!(hints.get("社交"), Some(&TraitLayer::Primary));
     }
 }

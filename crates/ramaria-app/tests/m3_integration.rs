@@ -201,6 +201,9 @@ fn make_stats_summary() -> StatsSummary {
     StatsSummary {
         total_events_in: 15,
         total_events_filtered: 12,
+        confirmed_count: 12,
+        tentative_count: 0,
+        discarded_count: 3,
         category_count: 2,
         categories: vec![
             CategoryStats {

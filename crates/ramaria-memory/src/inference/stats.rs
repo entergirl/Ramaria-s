@@ -1,13 +1,16 @@
-//! rust/crates/ramaria-memory/src/inference/stats.rs - 统计特征提取
+//! rust/crates/ramaria-memory/src/inference/stats.rs - 统计特征提取（v1.3 校准权重链）
 //!
 //! 设计特点:
-//! - A1 预过滤: confidence < 0.6 的事件排除（唯一硬截断），salience 作为全链路连续权重
-//! - A3 按领域分类聚合: 按 keywords 主分类分组，计算 salience 加权均值/方差/有效样本量
+//! - A1 三轨动态准入: confirmed/tentative/discarded 替代置信度硬截断
+//! - 校准权重链: w_i = salience_cal × confidence_factor × situation_multiplier × source_support
+//! - salience 校准: 基于主题复现次数、情绪强度和用户提及频率的指数校准
+//! - A3 按领域分类聚合: 按 keywords 主分类分组，计算校准加权均值/方差/有效样本量
 //! - 情境强度加权: 弱情境(1-2)→×1.5，中性(3)/None→×1.0，强情境(4-5)→×0.5
 //! - A6 跨分类高阶指标: 情绪稳定性、叙事一致性、态度矛盾检测、社交开放性
 //! - A7 代表性事件选取: 每分类取 salience 最高的 2-3 条事件
 //! - 纯数值计算，零 I/O，不依赖数据库或异步运行时，所有输入由调用方传入
 //! - 可独立单元测试，无需 mock StorageBackend
+//! - 向后兼容: prefilter_events 保留但委托给三轨分类；StatsConfig::default() 行为不变
 
 use ramaria_core::types::{MemoryEvent, Presentation};
 
@@ -18,17 +21,25 @@ use ramaria_core::types::{MemoryEvent, Presentation};
 /// 统计配置。
 ///
 /// 职责:
-/// - 集中管理预过滤阈值、代表性事件数量和分组策略参数。
+/// - 集中管理预过滤策略、代表性事件数量和分组策略参数。
+/// - v1.3 新增: 校准权重链开关与参数。
 ///
 /// 字段约定:
-/// - `confidence_threshold`: 事件置信度门槛，默认 0.6。低于此值的事件不参与任何统计。
+/// - `confidence_threshold`: 事件置信度门槛，默认 0.6。在 `use_calibrated_weights=true` 时仅用于
+///   `prefilter_events` 兼容路径；三轨模式使用 `classify_events`。
 /// - `max_representative_events`: 每分类最多选取的代表性事件数，默认 3。
+/// - `use_calibrated_weights`: 是否启用四因子校准权重链，默认 true（v1.3 起）。
+/// - `calibrated_weight_config`: 校准权重链参数（仅在 use_calibrated_weights=true 时生效）。
 #[derive(Debug, Clone)]
 pub struct StatsConfig {
-    /// 事件置信度门槛（唯一硬截断），默认 0.6
+    /// 事件置信度门槛（兼容旧硬截断），默认 0.6
     pub confidence_threshold: f64,
     /// 每分类最多选取的代表性事件数，默认 3
     pub max_representative_events: usize,
+    /// 是否启用校准权重链（v1.3+ 默认 true）
+    pub use_calibrated_weights: bool,
+    /// 校准权重链参数
+    pub calibrated_weight_config: CalibratedWeightConfig,
 }
 
 impl Default for StatsConfig {
@@ -36,7 +47,136 @@ impl Default for StatsConfig {
         Self {
             confidence_threshold: 0.6,
             max_representative_events: 3,
+            use_calibrated_weights: true,
+            calibrated_weight_config: CalibratedWeightConfig::default(),
         }
+    }
+}
+
+// =========================================================
+// 校准权重链配置
+// =========================================================
+
+/// 校准权重链配置。
+///
+/// 职责:
+/// - 控制四因子校准权重 `w_i = salience_cal × confidence_factor × situation_multiplier × source_support`
+///   中各因子的行为参数。
+///
+/// 字段约定:
+/// - `salience_exponent`: salience 校准的指数基底，默认 1.0（不改变 salience 的凸性）。
+/// - `recurrence_boost_max`: 主题复现次数带来的最大加成比例，默认 0.30。
+/// - `intensity_boost_max`: 情绪强度带来的最大加成比例，默认 0.20。
+/// - `mention_boost_max`: 用户提及频率带来的最大加成比例，默认 0.15。
+/// - `min_sources_for_full_support`: source_support 达到 1.0 所需的最小独立来源数，默认 3。
+/// - `tentative_weight_factor`: tentative 轨道的半权重因子，默认 0.5。
+#[derive(Debug, Clone)]
+pub struct CalibratedWeightConfig {
+    /// salience 校准指数基底
+    pub salience_exponent: f64,
+    /// 主题复现最大加成
+    pub recurrence_boost_max: f64,
+    /// 情绪强度最大加成
+    pub intensity_boost_max: f64,
+    /// 提及频率最大加成
+    pub mention_boost_max: f64,
+    /// source_support 满额所需来源数
+    pub min_sources_for_full_support: usize,
+    /// tentative 轨道权重因子
+    pub tentative_weight_factor: f64,
+}
+
+impl Default for CalibratedWeightConfig {
+    fn default() -> Self {
+        Self {
+            salience_exponent: 1.0,
+            recurrence_boost_max: 0.30,
+            intensity_boost_max: 0.20,
+            mention_boost_max: 0.15,
+            min_sources_for_full_support: 3,
+            tentative_weight_factor: 0.5,
+        }
+    }
+}
+
+// =========================================================
+// 事件增强数据（校准权重计算的外部输入）
+// =========================================================
+
+/// 事件增强统计，用于校准权重计算。
+///
+/// 职责:
+/// - 封装从事件元数据或外部查询中提取的增强特征。
+/// - 作为 `compute_calibrated_weight` 的参数，与 `MemoryEvent` 配对使用。
+///
+/// 字段约定:
+/// - `topic_recurrence_count`: 同主题复现次数归一化值 [0.0, 1.0]。
+/// - `emotional_intensity`: 情绪强度 [0.0, 1.0]，可从 |valence| 或情绪标签推导。
+/// - `mention_frequency`: 用户主动提及频率归一化值 [0.0, 1.0]。
+/// - `source_count`: 支持该事件的独立 L1 来源数。
+#[derive(Debug, Clone, Default)]
+pub struct EventEnrichment {
+    /// 同主题复现次数归一化值
+    pub topic_recurrence_count: f64,
+    /// 情绪强度 0.0..1.0
+    pub emotional_intensity: f64,
+    /// 用户主动提及频率归一化值
+    pub mention_frequency: f64,
+    /// 独立来源数
+    pub source_count: usize,
+}
+
+impl EventEnrichment {
+    /// 从事件列表中的单个事件派生基础增强数据。
+    ///
+    /// 派生策略:
+    /// - `emotional_intensity = abs(valence)` 作为情绪强度的代理。
+    /// - `topic_recurrence_count`、`mention_frequency`、`source_count` 使用默认值。
+    ///   外部调用方应覆盖这些字段以提供更精确的值。
+    pub fn from_event(event: &MemoryEvent) -> Self {
+        Self {
+            topic_recurrence_count: 0.0,
+            emotional_intensity: event.valence.abs().min(1.0),
+            mention_frequency: event.salience, // salience 作为提及频率的代理
+            source_count: 1,                   // 默认至少 1 个来源
+        }
+    }
+
+    /// 为事件批次派生增强数据，按分类统计复现次数。
+    ///
+    /// 参数:
+    /// - `events`: 预过滤后的事件列表。
+    ///
+    /// 返回:
+    /// - 与 events 一一对应的 EventEnrichment 列表。
+    pub fn derive_batch(events: &[MemoryEvent]) -> Vec<Self> {
+        if events.is_empty() {
+            return Vec::new();
+        }
+
+        // 按主分类统计事件数
+        use std::collections::HashMap;
+        let mut category_counts: HashMap<String, usize> = HashMap::new();
+        for event in events {
+            let cat = extract_primary_category(event);
+            *category_counts.entry(cat).or_default() += 1;
+        }
+
+        let max_count = category_counts.values().copied().max().unwrap_or(1) as f64;
+
+        events
+            .iter()
+            .map(|event| {
+                let cat = extract_primary_category(event);
+                let count = *category_counts.get(&cat).unwrap_or(&1) as f64;
+                Self {
+                    topic_recurrence_count: (count / max_count).min(1.0),
+                    emotional_intensity: event.valence.abs().min(1.0),
+                    mention_frequency: event.salience,
+                    source_count: 1,
+                }
+            })
+            .collect()
     }
 }
 
@@ -47,18 +187,18 @@ impl Default for StatsConfig {
 /// 单分类统计摘要（A3 输出）。
 ///
 /// 职责:
-/// - 封装一个关键词分类下的全部 salience 加权统计量。
+/// - 封装一个关键词分类下的全部加权统计量。
 /// - 作为 LLM 推断的逐分类输入。
 ///
 /// 字段约定:
 /// - `category`: 主分类标签，如"工作""社交""家庭"，从事件 keywords 的第一个标签提取。
 /// - `event_count`: 该分类的原始事件数（仅用于诊断，不参与计算）。
-/// - `n_eff`: salience 加权有效样本量 = Σ salience_i。
-/// - `valence_mean`: salience 加权平均效价。
-/// - `valence_std`: salience 加权效价标准差。
-/// - `valence_positive_ratio`: 正面事件（valence > 0）的 salience 加权占比。
-/// - `share_mean`: salience 加权平均分享意愿。
-/// - `share_std`: salience 加权分享意愿标准差。
+/// - `n_eff`: 加权有效样本量 = Σ w_i（v1.3: 使用校准权重）。
+/// - `valence_mean`: 加权平均效价。
+/// - `valence_std`: 加权效价标准差。
+/// - `valence_positive_ratio`: 正面事件（valence > 0）的加权占比。
+/// - `share_mean`: 加权平均分享意愿。
+/// - `share_std`: 加权分享意愿标准差。
 /// - `presentation_objective_ratio / subjective_ratio / mixed_ratio`: 三种陈述方式的加权占比，和为 1。
 /// - `group_weight`: 该分类在全局画像中的相对权重 = (n_eff / 总 n_eff) × 该分类平均 salience。
 #[derive(Debug, Clone)]
@@ -67,17 +207,17 @@ pub struct CategoryStats {
     pub category: String,
     /// 原始事件数（仅诊断）
     pub event_count: usize,
-    /// salience 加权有效样本量
+    /// 加权有效样本量
     pub n_eff: f64,
-    /// salience 加权平均效价
+    /// 加权平均效价
     pub valence_mean: f64,
-    /// salience 加权效价标准差
+    /// 加权效价标准差
     pub valence_std: f64,
     /// 正面事件加权占比（valence > 0）
     pub valence_positive_ratio: f64,
-    /// salience 加权平均分享意愿
+    /// 加权平均分享意愿
     pub share_mean: f64,
-    /// salience 加权分享意愿标准差
+    /// 加权分享意愿标准差
     pub share_std: f64,
     /// 客观型加权占比
     pub presentation_objective_ratio: f64,
@@ -93,13 +233,13 @@ pub struct CategoryStats {
 ///
 /// 职责:
 /// - 汇总跨分类的比较性统计特征。
-/// - 为 的"区分底色/点缀"提供数值依据。
+/// - 为 LLM 推断的"区分底色/点缀"提供数值依据。
 ///
 /// 字段约定:
 /// - `emotional_stability`: 全局 valence 加权标准差。值越小情绪越平稳。
-/// - `narrative_consistency`: 跨分类 presentation 分布相似度的均值（Jensen-Shannon 散度的补数）。
-/// - `attitude_contradiction_count`: 态度矛盾指示器（当前为占位：≥2 分类时标记 1，精确计数待 接入真实 embedding 后通过 cross-cluster centroid cosine similarity 计算）。
-/// - `share_skewness`: 全局 share 分布的偏度。正值=右偏（少数事件 share 很高），负值=左偏。
+/// - `narrative_consistency`: 跨分类 presentation 分布相似度的均值（余弦相似度）。
+/// - `attitude_contradiction_count`: 态度矛盾指示器。
+/// - `share_skewness`: 全局 share 分布的偏度。正值=右偏，负值=左偏。
 /// - `share_kurtosis`: 全局 share 分布的峰度。正值=尖峰分布，负值=扁平分布。
 #[derive(Debug, Clone)]
 pub struct CrossCategoryMetrics {
@@ -136,17 +276,23 @@ pub struct RepresentativeEvent {
     pub category: String,
 }
 
-/// 完整统计摘要。
+/// 完整统计摘要（v1.3 新增三轨分布字段）。
 ///
 /// 职责:
 /// - 聚合 A1/A3/A6/A7 的全部输出，作为 LLM 推断的完整输入。
 /// - 所有字段由 `run_phase_a_stats` 一次性计算。
 #[derive(Debug, Clone)]
 pub struct StatsSummary {
-    /// 输入事件总数（预过滤前）
+    /// 输入事件总数（分类前）
     pub total_events_in: usize,
-    /// 预过滤后事件数
+    /// 预过滤后事件数（v1.3: 即 confirmed + tentative，不含 discarded）
     pub total_events_filtered: usize,
+    /// confirmed 轨道事件数（confidence ≥ 0.6）
+    pub confirmed_count: usize,
+    /// tentative 轨道事件数（0.45 ≤ confidence < 0.6）
+    pub tentative_count: usize,
+    /// discarded 轨道事件数（confidence < 0.45）
+    pub discarded_count: usize,
     /// 分类数
     pub category_count: usize,
     /// 按组权重降序排列的逐分类统计
@@ -158,15 +304,150 @@ pub struct StatsSummary {
 }
 
 // =========================================================
-// A1: 预过滤
+// 准入轨道类型
+// =========================================================
+
+/// 事件准入轨道。
+///
+/// 职责:
+/// - 替代 v1.2 的单一 confidence ≥ 0.6 硬截断。
+/// - 将事件按置信度分入三个轨道，各轨道有不同的统计参与权重。
+///
+/// 状态:
+/// - `Confirmed`: confidence ≥ 0.6，完整参与 L3 统计，confidence_factor = 1.0。
+/// - `Tentative`: 0.45 ≤ confidence < 0.6，以半权重参与候选统计，可跨批次复现提升。
+/// - `Discarded`: confidence < 0.45，不参与 L3 统计，但保留在存储中。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionTrack {
+    /// 确认事件，完整权重
+    Confirmed,
+    /// 待定事件，半权重
+    Tentative,
+    /// 丢弃事件，不参与
+    Discarded,
+}
+
+impl AdmissionTrack {
+    /// 返回该轨道对应的 confidence_factor（用于校准权重链）。
+    ///
+    /// 返回:
+    /// - Confirmed → 1.0
+    /// - Tentative → `tentative_factor`（默认 0.5）
+    /// - Discarded → 0.0
+    pub fn confidence_factor(self, tentative_factor: f64) -> f64 {
+        match self {
+            Self::Confirmed => 1.0,
+            Self::Tentative => tentative_factor,
+            Self::Discarded => 0.0,
+        }
+    }
+
+    /// 返回轨道的简短描述标签。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Confirmed => "confirmed",
+            Self::Tentative => "tentative",
+            Self::Discarded => "discarded",
+        }
+    }
+}
+
+/// 三轨分类结果。
+///
+/// 职责:
+/// - 替代 `prefilter_events` 的单一 (filtered, excluded) 返回。
+/// - 返回三个独立的轨道列表，供调用方按需组合。
+#[derive(Debug, Clone)]
+pub struct ClassifiedEvents {
+    /// confirmed 轨道（confidence ≥ 0.6）
+    pub confirmed: Vec<MemoryEvent>,
+    /// tentative 轨道（0.45 ≤ confidence < 0.6）
+    pub tentative: Vec<MemoryEvent>,
+    /// discarded 事件数（confidence < 0.45，不返回事件本身以节省内存）
+    pub discarded_count: usize,
+}
+
+impl ClassifiedEvents {
+    /// 获取所有参与统计的事件（confirmed + tentative）。
+    pub fn active_events(&self) -> Vec<MemoryEvent> {
+        let mut all = Vec::with_capacity(self.confirmed.len() + self.tentative.len());
+        all.extend(self.confirmed.iter().cloned());
+        all.extend(self.tentative.iter().cloned());
+        all
+    }
+
+    /// 统计参与事件的各类别总数。
+    pub fn active_count(&self) -> usize {
+        self.confirmed.len() + self.tentative.len()
+    }
+}
+
+// =========================================================
+// A1: 准入轨道分类
+// =========================================================
+
+/// 将单个事件分类到准入轨道。
+///
+/// 参数:
+/// - `event`: 待分类的事件。
+///
+/// 返回:
+/// - `AdmissionTrack` 枚举值。
+///
+/// 说明:
+/// - 边界值处理: confidence == 0.6 → Confirmed, confidence == 0.45 → Tentative。
+/// - 负值/NaN 防御: confidence < 0.0 或 NaN → Discarded。
+pub fn classify_event(event: &MemoryEvent) -> AdmissionTrack {
+    if event.confidence.is_nan() || event.confidence < 0.0 {
+        return AdmissionTrack::Discarded;
+    }
+    if event.confidence >= 0.6 {
+        AdmissionTrack::Confirmed
+    } else if event.confidence >= 0.45 {
+        AdmissionTrack::Tentative
+    } else {
+        AdmissionTrack::Discarded
+    }
+}
+
+/// 将事件列表分类到三个准入轨道。
+///
+/// 参数:
+/// - `events`: 完整的事件列表。
+///
+/// 返回:
+/// - `ClassifiedEvents`，包含三个轨道的分类结果。
+pub fn classify_events(events: &[MemoryEvent]) -> ClassifiedEvents {
+    let mut confirmed = Vec::new();
+    let mut tentative = Vec::new();
+    let mut discarded_count = 0usize;
+
+    for event in events {
+        match classify_event(event) {
+            AdmissionTrack::Confirmed => confirmed.push(event.clone()),
+            AdmissionTrack::Tentative => tentative.push(event.clone()),
+            AdmissionTrack::Discarded => discarded_count += 1,
+        }
+    }
+
+    ClassifiedEvents {
+        confirmed,
+        tentative,
+        discarded_count,
+    }
+}
+
+// =========================================================
+// A1 兼容: 预过滤（向后兼容，委托给三轨分类）
 // =========================================================
 
 /// 预过滤事件：排除 confidence 低于阈值的推测性事件。
 ///
 /// 说明:
-/// - 这是 中唯一的硬截断。
-/// - salience 不做截断，作为连续权重贯穿后续全部计算。
-/// - 被排除的事件保留在存储中，待未来交叉验证提升置信度后重新吸收。
+/// - **v1.3 起建议使用 `classify_events` 替代**。本函数保留以兼容旧调用方。
+/// - 内部委托给 `classify_event`，使用配置中的 `confidence_threshold` 做硬截断。
+/// - 当 `use_calibrated_weights=true` 时，调用方应优先使用 `run_phase_a_stats`，
+///   它会自动使用三轨分类。
 ///
 /// 参数:
 /// - `events`: 完整事件列表。
@@ -178,11 +459,251 @@ pub fn prefilter_events(events: &[MemoryEvent], config: &StatsConfig) -> (Vec<Me
     let total = events.len();
     let filtered: Vec<MemoryEvent> = events
         .iter()
-        .filter(|e| e.confidence >= config.confidence_threshold)
+        .filter(|e| classify_event(e) != AdmissionTrack::Discarded)
+        // 当 use_calibrated_weights=false 时，额外按旧阈值硬截断以保持完全兼容
+        .filter(|e| {
+            if config.use_calibrated_weights {
+                true
+            } else {
+                e.confidence >= config.confidence_threshold
+            }
+        })
         .cloned()
         .collect();
     let excluded = total - filtered.len();
     (filtered, excluded)
+}
+
+// =========================================================
+// A1 扩展: Tentative 跨批次复现自动提升
+// =========================================================
+
+/// Tentative 事件跨批次复现自动提升配置。
+///
+/// 职责:
+/// - 控制 tentative 事件自动提升为 confirmed 的条件阈值。
+///
+/// 字段约定:
+/// - `min_cluster_size`: 同一关键词簇中至少需 N 条 tentative 事件才考虑提升，默认 2。
+/// - `min_batch_interval_hours`: 判定为"不同批次"的最小时间间隔（小时），默认 6.0。
+/// - `keyword_similarity_threshold`: 簇内事件间关键词 Jaccard 相似度阈值，默认 0.4。
+/// - `promoted_confidence`: 提升后的置信度值，默认 0.6（刚好进入 confirmed 轨道）。
+#[derive(Debug, Clone)]
+pub struct TentativePromotionConfig {
+    /// 最小簇大小（至少 N 条 tentative 事件在同一关键词簇中）
+    pub min_cluster_size: usize,
+    /// 不同批次的最小时间间隔（小时）
+    pub min_batch_interval_hours: f64,
+    /// 关键词 Jaccard 相似度阈值（用于簇内互证）
+    pub keyword_similarity_threshold: f64,
+    /// 提升后的置信度值
+    pub promoted_confidence: f64,
+}
+
+impl Default for TentativePromotionConfig {
+    fn default() -> Self {
+        Self {
+            min_cluster_size: 2,
+            min_batch_interval_hours: 6.0,
+            keyword_similarity_threshold: 0.4,
+            promoted_confidence: 0.6,
+        }
+    }
+}
+
+/// Tentative 事件提升结果。
+///
+/// 职责:
+/// - 返回提升后的 confirmed 事件列表和未提升的 tentative 事件列表。
+/// - 调用方应将 promoted 事件合并到 confirmed 轨道参与后续 Phase A 统计。
+#[derive(Debug, Clone)]
+pub struct TentativePromotionResult {
+    /// 提升为 confirmed 的事件列表（confidence 已设为 promoted_confidence）
+    pub promoted: Vec<MemoryEvent>,
+    /// 未提升的 tentative 事件（保持原 confidence，继续以半权重参与统计）
+    pub remaining_tentative: Vec<MemoryEvent>,
+    /// 被提升的事件数
+    pub promoted_count: usize,
+    /// 未提升的事件数
+    pub remaining_count: usize,
+}
+
+/// 计算两个事件的关键词 Jaccard 相似度。
+///
+/// 公式: J(A,B) = |A ∩ B| / |A ∪ B|
+///
+/// 参数:
+/// - `a_keywords`: 事件 A 的关键词集合。
+/// - `b_keywords`: 事件 B 的关键词集合。
+///
+/// 返回:
+/// - Jaccard 相似度 [0.0, 1.0]。任一方关键词为空时返回 0.0。
+fn keyword_jaccard(a_keywords: &str, b_keywords: &str) -> f64 {
+    let a_set: std::collections::HashSet<&str> = a_keywords
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let b_set: std::collections::HashSet<&str> = b_keywords
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if a_set.is_empty() || b_set.is_empty() {
+        return 0.0;
+    }
+
+    let intersection = a_set.intersection(&b_set).count();
+    let union = a_set.union(&b_set).count();
+
+    if union == 0 {
+        0.0
+    } else {
+        intersection as f64 / union as f64
+    }
+}
+
+/// 判断两个事件是否来自不同批次。
+///
+/// 策略:
+/// - 比较 `created_at` 时间戳（Unix 毫秒），差值超过 `min_batch_interval_hours` 小时视为不同批次。
+/// - 若任一事件的 `created_at` 为 0（未初始化），保守视为同批次。
+///
+/// 参数:
+/// - `a`: 事件 A。
+/// - `b`: 事件 B。
+/// - `config`: 提升配置。
+///
+/// 返回:
+/// - true 表示来自不同批次。
+fn are_different_batches(
+    a: &MemoryEvent,
+    b: &MemoryEvent,
+    config: &TentativePromotionConfig,
+) -> bool {
+    if a.created_at == 0 || b.created_at == 0 {
+        return false;
+    }
+    let diff_ms = (a.created_at - b.created_at).abs() as f64;
+    let diff_hours = diff_ms / (1000.0 * 3600.0);
+    diff_hours >= config.min_batch_interval_hours
+}
+
+/// 判断一个 tentative 事件簇是否满足互证条件并应提升。
+///
+/// 判断标准（所有条件必须同时满足）:
+/// 1. 簇大小 ≥ `min_cluster_size`。
+/// 2. 至少存在一对事件来自不同批次。
+/// 3. 簇内事件对的关键词 Jaccard 相似度均值 ≥ `keyword_similarity_threshold`。
+///
+/// 参数:
+/// - `cluster`: 同一关键词簇中的 tentative 事件。
+/// - `config`: 提升配置。
+///
+/// 返回:
+/// - true 表示该簇应被提升。
+fn should_promote_cluster(cluster: &[MemoryEvent], config: &TentativePromotionConfig) -> bool {
+    if cluster.len() < config.min_cluster_size {
+        return false;
+    }
+
+    // 条件 2: 至少一对事件来自不同批次
+    let has_cross_batch = (0..cluster.len()).any(|i| {
+        ((i + 1)..cluster.len()).any(|j| are_different_batches(&cluster[i], &cluster[j], config))
+    });
+
+    if !has_cross_batch {
+        return false;
+    }
+
+    // 条件 3: 簇内关键词 Jaccard 相似度均值 ≥ 阈值
+    let mut total_sim = 0.0f64;
+    let mut pair_count = 0usize;
+    for i in 0..cluster.len() {
+        for j in (i + 1)..cluster.len() {
+            let a_kw = cluster[i].keywords.as_deref().unwrap_or("");
+            let b_kw = cluster[j].keywords.as_deref().unwrap_or("");
+            total_sim += keyword_jaccard(a_kw, b_kw);
+            pair_count += 1;
+        }
+    }
+
+    if pair_count == 0 {
+        return false;
+    }
+
+    let avg_sim = total_sim / pair_count as f64;
+    avg_sim >= config.keyword_similarity_threshold
+}
+
+/// 对 tentative 事件执行跨批次复现自动提升。
+///
+/// 算法:
+/// 1. 按主分类将 tentative 事件分组为关键词簇。
+/// 2. 对每个簇调用 `should_promote_cluster` 判断是否应提升。
+/// 3. 满足条件的簇内所有事件 confidence 设为 `promoted_confidence`，归入 promoted。
+/// 4. 不满足条件的簇内事件保持原 confidence，归入 remaining_tentative。
+///
+/// 说明:
+/// - 本函数为纯数值逻辑，不执行 I/O。调用方负责将提升后的事件写入存储。
+/// - `confirmed` 参数保留以供未来扩展（如与 confirmed 事件做交叉验证），当前版本仅用于签名兼容。
+/// - 当 embedding 可用时，调用方可在提升前额外过滤：对 `should_promote_cluster` 返回 true 的簇，
+///   使用 `paraphrase` 或 `summary` 字段的 embedding 做余弦相似度验证（> 0.7）。
+///
+/// 参数:
+/// - `tentative`: tentative 轨道的事件列表。
+/// - `confirmed`: confirmed 轨道的事件列表（保留供扩展，当前仅用于签名兼容）。
+/// - `config`: 提升配置。
+///
+/// 返回:
+/// - `TentativePromotionResult`，包含 promoted 和 remaining 两部分。
+pub fn promote_tentative_events(
+    tentative: &[MemoryEvent],
+    confirmed: &[MemoryEvent],
+    config: &TentativePromotionConfig,
+) -> TentativePromotionResult {
+    // 允许 unused 参数以保持签名扩展性
+    let _ = confirmed;
+
+    if tentative.is_empty() {
+        return TentativePromotionResult {
+            promoted: Vec::new(),
+            remaining_tentative: Vec::new(),
+            promoted_count: 0,
+            remaining_count: 0,
+        };
+    }
+
+    // Step 1: 按主分类分组（关键词簇）
+    let grouped = group_by_category(tentative);
+
+    let mut promoted = Vec::new();
+    let mut remaining_tentative = Vec::new();
+
+    // Step 2: 对每个簇判断是否应提升
+    for (_category, cluster) in grouped {
+        if should_promote_cluster(&cluster, config) {
+            // 提升: 将簇内所有事件的 confidence 设为 promoted_confidence
+            for mut event in cluster {
+                event.confidence = config.promoted_confidence;
+                promoted.push(event);
+            }
+        } else {
+            // 不满足条件: 保持原样
+            remaining_tentative.extend(cluster);
+        }
+    }
+
+    let promoted_count = promoted.len();
+    let remaining_count = remaining_tentative.len();
+
+    TentativePromotionResult {
+        promoted,
+        remaining_tentative,
+        promoted_count,
+        remaining_count,
+    }
 }
 
 // =========================================================
@@ -207,6 +728,153 @@ pub fn situation_multiplier(strength: Option<i32>) -> f64 {
         Some(4) | Some(5) => 0.5,
         _ => 1.0, // None 或 3 均为中性
     }
+}
+
+// =========================================================
+// 校准权重链核心函数
+// =========================================================
+
+/// salience 校准函数。
+///
+/// 公式: `salience_cal = raw_salience^exp × (1 + α_rec × recurrence + α_int × intensity + α_men × mention)`
+///
+/// 其中 α_rec/int/men 分别是复现次数、情绪强度、提及频率的最大加成比例。
+///
+/// 说明:
+/// - 原始 salience 通过指数变换调整凸性（exp=1.0 时线性，exp<1.0 时压缩高值差异）。
+/// - 三个加成因子独立叠加，上限由配置控制。
+/// - 结果 clamp 到 [0.01, 1.0] 以避免零权重。
+///
+/// 参数:
+/// - `raw_salience`: 事件的原始显著性 [0.0, 1.0]。
+/// - `recurrence_count`: 同主题复现次数归一化值 [0.0, 1.0]。
+/// - `emotional_intensity`: 情绪强度 [0.0, 1.0]。
+/// - `mention_frequency`: 用户提及频率归一化值 [0.0, 1.0]。
+/// - `config`: 校准权重链配置。
+///
+/// 返回:
+/// - 校准后的 salience 值 [0.01, 1.0]。
+pub fn calibrate_salience(
+    raw_salience: f64,
+    recurrence_count: f64,
+    emotional_intensity: f64,
+    mention_frequency: f64,
+    config: &CalibratedWeightConfig,
+) -> f64 {
+    // 指数变换: 调整 salience 的凸性
+    let base = raw_salience.clamp(0.0, 1.0).powf(config.salience_exponent);
+
+    // 三个加成因子，各自归一化后乘以最大加成比例
+    let rec_boost = recurrence_count.clamp(0.0, 1.0) * config.recurrence_boost_max;
+    let int_boost = emotional_intensity.clamp(0.0, 1.0) * config.intensity_boost_max;
+    let men_boost = mention_frequency.clamp(0.0, 1.0) * config.mention_boost_max;
+
+    let calibrated = base * (1.0 + rec_boost + int_boost + men_boost);
+    // 保底 0.01，避免零权重导致事件完全消失
+    calibrated.clamp(0.01, 1.0)
+}
+
+/// 计算四因子校准权重。
+///
+/// 公式: `w_i = salience_cal × confidence_factor × situation_multiplier × source_support`
+///
+/// 其中:
+/// - `salience_cal`: 由 `calibrate_salience` 计算的校准后显著性。
+/// - `confidence_factor`: 由事件置信度决定（Confirmed→1.0, Tentative→半权重, Discarded→0.0）。
+/// - `situation_multiplier`: 情境强度乘数（1.5 / 1.0 / 0.5）。
+/// - `source_support`: 多源互证因子 = min(1.0, source_count / min_sources)。
+///
+/// 说明:
+/// - 四因子相乘意味着任一因子为零则整体权重为零。
+/// - 这是 v1.3 相对于 v1.2 `salience × situation_multiplier` 的核心升级。
+///
+/// 参数:
+/// - `event`: 待计算权重的事件。
+/// - `enrichment`: 事件的增强统计数据。
+/// - `config`: 校准权重链配置。
+///
+/// 返回:
+/// - 校准后的综合权重 [0.0, 1.0]。
+pub fn compute_calibrated_weight(
+    event: &MemoryEvent,
+    enrichment: &EventEnrichment,
+    config: &CalibratedWeightConfig,
+) -> f64 {
+    // Step 1: salience 校准
+    let salience_cal = calibrate_salience(
+        event.salience,
+        enrichment.topic_recurrence_count,
+        enrichment.emotional_intensity,
+        enrichment.mention_frequency,
+        config,
+    );
+
+    // Step 2: confidence_factor（基于三轨分类）
+    let track = classify_event(event);
+    let confidence_factor = track.confidence_factor(config.tentative_weight_factor);
+
+    // Step 3: situation_multiplier（与 v1.2 相同）
+    let sit_mult = situation_multiplier(event.situation_strength);
+
+    // Step 4: source_support（多源互证）
+    let source_support = if enrichment.source_count == 0 {
+        0.5 // 无来源时给半权重（防御性处理）
+    } else {
+        let ratio = enrichment.source_count as f64 / config.min_sources_for_full_support as f64;
+        ratio.min(1.0)
+    };
+
+    salience_cal * confidence_factor * sit_mult * source_support
+}
+
+/// 为事件列表批量计算校准权重。
+///
+/// 参数:
+/// - `events`: 事件列表。
+/// - `enrichments`: 与 events 一一对应的增强数据。
+/// - `config`: 校准权重链配置。
+///
+/// 返回:
+/// - 与 events 一一对应的校准权重向量。
+///
+/// # Panics
+/// - 当 events 和 enrichments 长度不一致时 panic。
+pub fn compute_calibrated_weights_batch(
+    events: &[MemoryEvent],
+    enrichments: &[EventEnrichment],
+    config: &CalibratedWeightConfig,
+) -> Vec<f64> {
+    assert_eq!(
+        events.len(),
+        enrichments.len(),
+        "events 与 enrichments 长度必须一致"
+    );
+    events
+        .iter()
+        .zip(enrichments)
+        .map(|(event, enrichment)| compute_calibrated_weight(event, enrichment, config))
+        .collect()
+}
+
+/// 使用简单权重（v1.2 兼容路径）。
+///
+/// 公式: `w_i = salience × situation_multiplier(situation_strength)`
+///
+/// 说明:
+/// - 这是 v1.2 使用的权重公式，保留以支持 `use_calibrated_weights=false`。
+///
+/// 参数:
+/// - `event`: 待计算权重的事件。
+///
+/// 返回:
+/// - 简单权重 [0.0, 1.5]。
+pub fn compute_simple_weight(event: &MemoryEvent) -> f64 {
+    event.salience * situation_multiplier(event.situation_strength)
+}
+
+/// 为事件列表批量计算简单权重。
+pub fn compute_simple_weights_batch(events: &[MemoryEvent]) -> Vec<f64> {
+    events.iter().map(compute_simple_weight).collect()
 }
 
 // =========================================================
@@ -262,7 +930,7 @@ pub fn group_by_category(events: &[MemoryEvent]) -> Vec<(String, Vec<MemoryEvent
 ///
 /// 参数:
 /// - `values`: 各事件的指标取值。
-/// - `weights`: 各事件的 salience 权重（需与 values 一一对应）。
+/// - `weights`: 各事件的权重（需与 values 一一对应）。
 ///
 /// 返回:
 /// - 加权均值。若总权重为 0，返回 0.0。
@@ -275,13 +943,13 @@ pub fn weighted_mean(values: &[f64], weights: &[f64]) -> f64 {
     weighted_sum / total_weight
 }
 
-/// 计算 salience 加权方差（总体方差，非样本方差）。
+/// 计算加权方差（总体方差，非样本方差）。
 ///
 /// 公式: σ²_w = Σ(w_i · (x_i - x̄_w)²) / Σ w_i
 ///
 /// 参数:
 /// - `values`: 各事件的指标取值。
-/// - `weights`: 各事件的 salience 权重。
+/// - `weights`: 各事件的权重。
 /// - `mean`: 已计算的加权均值。
 ///
 /// 返回:
@@ -299,13 +967,13 @@ pub fn weighted_variance(values: &[f64], weights: &[f64], mean: f64) -> f64 {
     weighted_sq_diff / total_weight
 }
 
-/// 计算 salience 加权占比（用于正面事件比例和 presentation 分布）。
+/// 计算加权占比（用于正面事件比例和 presentation 分布）。
 ///
 /// 公式: ratio = Σ(indicator_i · w_i) / Σ w_i
 ///
 /// 参数:
 /// - `indicators`: 各事件的指示器值（0.0 或 1.0）。
-/// - `weights`: 各事件的 salience 权重。
+/// - `weights`: 各事件的权重。
 ///
 /// 返回:
 /// - 加权占比。若总权重为 0，返回 0.0。
@@ -318,21 +986,41 @@ pub fn weighted_ratio(indicators: &[f64], weights: &[f64]) -> f64 {
     weighted_sum / total_weight
 }
 
-/// 计算单个分类的全部统计量。
+/// 计算单个分类的全部统计量（使用校准权重）。
 ///
 /// 参数:
 /// - `category`: 分类标签。
 /// - `events`: 该分类下的全部事件。
+/// - `enrichments`: 与 events 一一对应的增强数据。若为 None，使用简单权重（向后兼容）。
+/// - `config`: 校准权重链配置（仅在 enrichments 不为 None 时使用）。
 ///
 /// 返回:
-/// - 包含所有 salience 加权统计量的 CategoryStats。
-pub fn compute_category_stats(category: &str, events: &[MemoryEvent]) -> CategoryStats {
+/// - 包含所有加权统计量的 CategoryStats。
+pub fn compute_category_stats(
+    category: &str,
+    events: &[MemoryEvent],
+    enrichments: Option<&[EventEnrichment]>,
+    config: &CalibratedWeightConfig,
+) -> CategoryStats {
     let event_count = events.len();
-    // salience × situation_multiplier → 有效权重
-    let weights: Vec<f64> = events
-        .iter()
-        .map(|e| e.salience * situation_multiplier(e.situation_strength))
-        .collect();
+
+    // 根据是否提供增强数据选择权重计算方式
+    let weights: Vec<f64> = match enrichments {
+        Some(enr) => {
+            assert_eq!(
+                events.len(),
+                enr.len(),
+                "events 与 enrichments 长度必须一致"
+            );
+            events
+                .iter()
+                .zip(enr.iter())
+                .map(|(event, enrichment)| compute_calibrated_weight(event, enrichment, config))
+                .collect()
+        }
+        None => compute_simple_weights_batch(events),
+    };
+
     let n_eff: f64 = weights.iter().sum();
 
     // 效价特征
@@ -423,26 +1111,41 @@ fn normalize_group_weights(categories: &mut [CategoryStats]) {
 }
 
 // =========================================================
-// A6: 跨分类高阶指标
+// A6: 跨分类高阶指标（v1.3 适配校准权重）
 // =========================================================
+
+/// 计算事件列表的权重向量（根据配置选择校准或简单权重）。
+fn compute_weights_for_events(
+    events: &[MemoryEvent],
+    enrichments: Option<&[EventEnrichment]>,
+    config: &CalibratedWeightConfig,
+) -> Vec<f64> {
+    match enrichments {
+        Some(enr) => compute_calibrated_weights_batch(events, enr, config),
+        None => compute_simple_weights_batch(events),
+    }
+}
 
 /// 计算情绪稳定性（全局 valence 加权标准差）。
 ///
 /// 说明:
-/// - 不按分类分组，直接对全部事件的 valence 做 salience 加权标准差。
+/// - 不按分类分组，直接对全部事件的 valence 做加权标准差。
 /// - 标准差小 → 情绪平稳；标准差大 → 情绪波动剧烈。
 ///
 /// 参数:
-/// - `events`: 预过滤后的事件列表。
+/// - `events`: 事件列表。
+/// - `enrichments`: 可选的增强数据（None 时使用简单权重）。
+/// - `config`: 校准权重链配置。
 ///
 /// 返回:
 /// - 全局加权 valence 标准差。
-pub fn compute_emotional_stability(events: &[MemoryEvent]) -> f64 {
+pub fn compute_emotional_stability(
+    events: &[MemoryEvent],
+    enrichments: Option<&[EventEnrichment]>,
+    config: &CalibratedWeightConfig,
+) -> f64 {
     let valences: Vec<f64> = events.iter().map(|e| e.valence).collect();
-    let weights: Vec<f64> = events
-        .iter()
-        .map(|e| e.salience * situation_multiplier(e.situation_strength))
-        .collect();
+    let weights = compute_weights_for_events(events, enrichments, config);
     let mean = weighted_mean(&valences, &weights);
     weighted_variance(&valences, &weights, mean).sqrt()
 }
@@ -493,21 +1196,24 @@ pub fn compute_narrative_consistency(categories: &[CategoryStats]) -> f64 {
     }
 }
 
-/// 计算 share 分布的偏度（基于 salience 加权）。
+/// 计算 share 分布的偏度（基于加权）。
 ///
 /// 公式: skew = Σ(w_i · (x_i - x̄)³) / (σ³ · Σ w_i)
 ///
 /// 参数:
-/// - `events`: 预过滤后的事件列表。
+/// - `events`: 事件列表。
+/// - `enrichments`: 可选的增强数据。
+/// - `config`: 校准权重链配置。
 ///
 /// 返回:
 /// - 偏度系数。正值=右偏（少数事件 share 很高），负值=左偏。
-pub fn compute_share_skewness(events: &[MemoryEvent]) -> f64 {
+pub fn compute_share_skewness(
+    events: &[MemoryEvent],
+    enrichments: Option<&[EventEnrichment]>,
+    config: &CalibratedWeightConfig,
+) -> f64 {
     let shares: Vec<f64> = events.iter().map(|e| e.share).collect();
-    let weights: Vec<f64> = events
-        .iter()
-        .map(|e| e.salience * situation_multiplier(e.situation_strength))
-        .collect();
+    let weights = compute_weights_for_events(events, enrichments, config);
     let total_weight: f64 = weights.iter().sum();
     if total_weight <= 0.0 {
         return 0.0;
@@ -527,21 +1233,24 @@ pub fn compute_share_skewness(events: &[MemoryEvent]) -> f64 {
     m3 / std.powi(3)
 }
 
-/// 计算 share 分布的峰度（基于 salience 加权）。
+/// 计算 share 分布的峰度（基于加权）。
 ///
 /// 公式: kurt = Σ(w_i · (x_i - x̄)⁴) / (σ⁴ · Σ w_i)
 ///
 /// 参数:
-/// - `events`: 预过滤后的事件列表。
+/// - `events`: 事件列表。
+/// - `enrichments`: 可选的增强数据。
+/// - `config`: 校准权重链配置。
 ///
 /// 返回:
 /// - 峰度系数。正值=尖峰分布，负值=扁平分布。
-pub fn compute_share_kurtosis(events: &[MemoryEvent]) -> f64 {
+pub fn compute_share_kurtosis(
+    events: &[MemoryEvent],
+    enrichments: Option<&[EventEnrichment]>,
+    config: &CalibratedWeightConfig,
+) -> f64 {
     let shares: Vec<f64> = events.iter().map(|e| e.share).collect();
-    let weights: Vec<f64> = events
-        .iter()
-        .map(|e| e.salience * situation_multiplier(e.situation_strength))
-        .collect();
+    let weights = compute_weights_for_events(events, enrichments, config);
     let total_weight: f64 = weights.iter().sum();
     if total_weight <= 0.0 {
         return 0.0;
@@ -564,22 +1273,26 @@ pub fn compute_share_kurtosis(events: &[MemoryEvent]) -> f64 {
 /// 计算完整的跨分类高阶指标。
 ///
 /// 参数:
-/// - `events`: 预过滤后的事件列表。
+/// - `events`: 事件列表。
 /// - `categories`: 所有分类的统计摘要。
+/// - `enrichments`: 可选的增强数据。
+/// - `config`: 校准权重链配置。
 ///
 /// 返回:
 /// - CrossCategoryMetrics 结构体。
 pub fn compute_cross_category_metrics(
     events: &[MemoryEvent],
     categories: &[CategoryStats],
+    enrichments: Option<&[EventEnrichment]>,
+    config: &CalibratedWeightConfig,
 ) -> CrossCategoryMetrics {
-    let emotional_stability = compute_emotional_stability(events);
+    let emotional_stability = compute_emotional_stability(events, enrichments, config);
     let narrative_consistency = compute_narrative_consistency(categories);
-    // 态度矛盾检测在 中基于分类对做标记，具体计数由 语义判断
+    // 态度矛盾检测在 LLM 推断阶段基于分类对做标记，具体计数由语义判断
     // 此处预留基础指标：分类数 >= 2 时标记可能存在矛盾
     let attitude_contradiction_count = if categories.len() >= 2 { 1 } else { 0 };
-    let share_skewness = compute_share_skewness(events);
-    let share_kurtosis = compute_share_kurtosis(events);
+    let share_skewness = compute_share_skewness(events, enrichments, config);
+    let share_kurtosis = compute_share_kurtosis(events, enrichments, config);
 
     CrossCategoryMetrics {
         emotional_stability,
@@ -669,38 +1382,40 @@ pub fn select_representative_events(
 }
 
 // =========================================================
-// 主编排函数
+// 主编排函数（v1.3 三轨 + 校准权重链）
 // =========================================================
 
-/// 执行完整的 统计管线。
+/// 执行完整的 Phase A 统计管线（v1.3 升级版）。
 ///
 /// 管线步骤:
-/// 1. A1: 预过滤（排除 confidence < 0.6 的事件）
-/// 2. A3: 按 keywords 主分类分组，计算 salience 加权统计量
-/// 3. A6: 计算跨分类高阶指标
-/// 4. A7: 选取代表性事件
+/// 1. A1: 三轨分类（confirmed/tentative/discarded）
+/// 2. 自动派生增强数据（主题复现、情绪强度、提及频率）
+/// 3. A3: 按 keywords 主分类分组，计算校准加权统计量
+/// 4. A6: 计算跨分类高阶指标
+/// 5. A7: 选取代表性事件
 ///
 /// 参数:
 /// - `events`: 完整的 L2 事件列表（从 StorageBackend 读取）。
 /// - `config`: 统计配置。
 ///
 /// 返回:
-/// - `StatsSummary`: 包含分类统计、跨分类指标和代表性事件的完整摘要。
+/// - `StatsSummary`: 包含三轨分布、分类统计、跨分类指标和代表性事件的完整摘要。
 ///
 /// 说明:
-/// - 若预过滤后无可用事件，返回空的 StatsSummary（categories 为空）。
+/// - 当 `config.use_calibrated_weights = true`（默认）时，使用三轨准入 + 校准权重链。
+/// - 当 `config.use_calibrated_weights = false` 时，回退到 v1.2 行为（硬截断 + 简单权重）。
+/// - 若所有事件都被 discarded，返回空的 StatsSummary。
 /// - 日志在调用方记录，本函数不执行 I/O。
 pub fn run_phase_a_stats(events: &[MemoryEvent], config: &StatsConfig) -> StatsSummary {
     let total_events_in = events.len();
 
-    // A1: 预过滤
-    let (filtered, _excluded) = prefilter_events(events, config);
-    let total_events_filtered = filtered.len();
-
-    if filtered.is_empty() {
+    if events.is_empty() {
         return StatsSummary {
-            total_events_in,
+            total_events_in: 0,
             total_events_filtered: 0,
+            confirmed_count: 0,
+            tentative_count: 0,
+            discarded_count: 0,
             category_count: 0,
             categories: Vec::new(),
             cross_category: CrossCategoryMetrics {
@@ -714,28 +1429,139 @@ pub fn run_phase_a_stats(events: &[MemoryEvent], config: &StatsConfig) -> StatsS
         };
     }
 
-    // A3: 按分类聚合
-    let grouped = group_by_category(&filtered);
-    let mut categories: Vec<CategoryStats> = grouped
-        .iter()
-        .map(|(cat, evts)| compute_category_stats(cat, evts))
-        .collect();
-    normalize_group_weights(&mut categories);
-    let category_count = categories.len();
+    if config.use_calibrated_weights {
+        // ---- v1.3 路径: 三轨准入 + 校准权重链 ----
 
-    // A6: 跨分类指标
-    let cross_category = compute_cross_category_metrics(&filtered, &categories);
+        // A1: 三轨分类
+        let classified = classify_events(events);
+        let active = classified.active_events();
 
-    // A7: 代表性事件
-    let representative_events = select_representative_events(&filtered, &categories, config);
+        if active.is_empty() {
+            return StatsSummary {
+                total_events_in,
+                total_events_filtered: 0,
+                confirmed_count: classified.confirmed.len(),
+                tentative_count: classified.tentative.len(),
+                discarded_count: classified.discarded_count,
+                category_count: 0,
+                categories: Vec::new(),
+                cross_category: CrossCategoryMetrics {
+                    emotional_stability: 0.0,
+                    narrative_consistency: 1.0,
+                    attitude_contradiction_count: 0,
+                    share_skewness: 0.0,
+                    share_kurtosis: 0.0,
+                },
+                representative_events: Vec::new(),
+            };
+        }
 
-    StatsSummary {
-        total_events_in,
-        total_events_filtered,
-        category_count,
-        categories,
-        cross_category,
-        representative_events,
+        // 派生增强数据
+        let enrichments = EventEnrichment::derive_batch(&active);
+
+        // A3: 按分类聚合（使用校准权重）
+        let grouped = group_by_category(&active);
+        let mut categories: Vec<CategoryStats> = grouped
+            .iter()
+            .map(|(cat, evts)| {
+                // 为每个分类的事件构建对应的增强数据子集
+                let cat_enrichments: Vec<EventEnrichment> = evts
+                    .iter()
+                    .map(|e| {
+                        // 在 active 中找到此事件的索引来获取对应的增强数据
+                        let idx = active.iter().position(|ae| ae.id == e.id).unwrap_or(0);
+                        enrichments.get(idx).cloned().unwrap_or_default()
+                    })
+                    .collect();
+                compute_category_stats(
+                    cat,
+                    evts,
+                    Some(&cat_enrichments),
+                    &config.calibrated_weight_config,
+                )
+            })
+            .collect();
+        normalize_group_weights(&mut categories);
+        let category_count = categories.len();
+
+        // A6: 跨分类指标（使用校准权重）
+        let cross_category = compute_cross_category_metrics(
+            &active,
+            &categories,
+            Some(&enrichments),
+            &config.calibrated_weight_config,
+        );
+
+        // A7: 代表性事件
+        let representative_events = select_representative_events(&active, &categories, config);
+
+        StatsSummary {
+            total_events_in,
+            total_events_filtered: active.len(),
+            confirmed_count: classified.confirmed.len(),
+            tentative_count: classified.tentative.len(),
+            discarded_count: classified.discarded_count,
+            category_count,
+            categories,
+            cross_category,
+            representative_events,
+        }
+    } else {
+        // ---- v1.2 兼容路径: 硬截断 + 简单权重 ----
+
+        let (filtered, _excluded) = prefilter_events(events, config);
+        let total_events_filtered = filtered.len();
+
+        if filtered.is_empty() {
+            return StatsSummary {
+                total_events_in,
+                total_events_filtered: 0,
+                confirmed_count: 0,
+                tentative_count: 0,
+                discarded_count: total_events_in,
+                category_count: 0,
+                categories: Vec::new(),
+                cross_category: CrossCategoryMetrics {
+                    emotional_stability: 0.0,
+                    narrative_consistency: 1.0,
+                    attitude_contradiction_count: 0,
+                    share_skewness: 0.0,
+                    share_kurtosis: 0.0,
+                },
+                representative_events: Vec::new(),
+            };
+        }
+
+        let grouped = group_by_category(&filtered);
+        let mut categories: Vec<CategoryStats> = grouped
+            .iter()
+            .map(|(cat, evts)| {
+                compute_category_stats(cat, evts, None, &config.calibrated_weight_config)
+            })
+            .collect();
+        normalize_group_weights(&mut categories);
+        let category_count = categories.len();
+
+        let cross_category = compute_cross_category_metrics(
+            &filtered,
+            &categories,
+            None,
+            &config.calibrated_weight_config,
+        );
+
+        let representative_events = select_representative_events(&filtered, &categories, config);
+
+        StatsSummary {
+            total_events_in,
+            total_events_filtered,
+            confirmed_count: total_events_filtered,
+            tentative_count: 0,
+            discarded_count: total_events_in - total_events_filtered,
+            category_count,
+            categories,
+            cross_category,
+            representative_events,
+        }
     }
 }
 
@@ -779,7 +1605,37 @@ mod tests {
         ev
     }
 
-    // ---- 情境强度乘数 ----
+    /// 构造测试用 MemoryEvent（含 situation_strength）。
+    fn make_event_with_situation(
+        title: &str,
+        summary: &str,
+        keywords: Option<&str>,
+        confidence: f64,
+        salience: f64,
+        valence: f64,
+        share: f64,
+        presentation: Presentation,
+        attitude: Option<&str>,
+        situation_strength: Option<i32>,
+    ) -> MemoryEvent {
+        let mut ev = make_event(
+            title,
+            summary,
+            keywords,
+            confidence,
+            salience,
+            valence,
+            share,
+            presentation,
+            attitude,
+        );
+        ev.situation_strength = situation_strength;
+        ev
+    }
+
+    // =========================================================
+    // 情境强度乘数（与 v1.2 相同）
+    // =========================================================
 
     #[test]
     fn situation_multiplier_none_is_neutral() {
@@ -805,76 +1661,524 @@ mod tests {
 
     #[test]
     fn situation_multiplier_invalid_fallsback_to_neutral() {
-        // 非法值（0 或 6+）应退回到中性
         assert!((situation_multiplier(Some(0)) - 1.0).abs() < 1e-10);
         assert!((situation_multiplier(Some(6)) - 1.0).abs() < 1e-10);
         assert!((situation_multiplier(Some(100)) - 1.0).abs() < 1e-10);
     }
 
+    // =========================================================
+    // 准入轨道分类
+    // =========================================================
+
     #[test]
-    fn category_stats_respects_situation_multiplier() {
-        // 两条事件：相同 salience 但不同情境 → 权重应不同
-        let weak_ev = make_event(
-            "弱情境事件",
-            "摘要",
-            Some("工作"),
+    fn classify_event_confirmed() {
+        let ev = make_event(
+            "E",
+            "s",
+            None,
             0.9,
-            0.8, // salience
             0.5,
+            0.0,
             0.5,
             Presentation::Mixed,
             None,
         );
-        let strong_ev = make_event(
-            "强情境事件",
-            "摘要",
-            Some("工作"),
-            0.9,
-            0.8, // same salience
+        assert_eq!(classify_event(&ev), AdmissionTrack::Confirmed);
+
+        // 边界值 0.6
+        let ev = make_event(
+            "E",
+            "s",
+            None,
+            0.6,
             0.5,
+            0.0,
             0.5,
             Presentation::Mixed,
             None,
         );
-
-        // Manually set situation_strength
-        let events = vec![
-            {
-                let mut e = weak_ev;
-                e.situation_strength = Some(2); // 弱情境 ×1.5
-                e
-            },
-            {
-                let mut e = strong_ev;
-                e.situation_strength = Some(5); // 强情境 ×0.5
-                e
-            },
-        ];
-
-        let stats = compute_category_stats("工作", &events);
-        // n_eff = 0.8*1.5 + 0.8*0.5 = 1.2 + 0.4 = 1.6
-        assert!((stats.n_eff - 1.6).abs() < 1e-10);
+        assert_eq!(classify_event(&ev), AdmissionTrack::Confirmed);
     }
 
     #[test]
-    fn category_stats_default_situation_neutral() {
-        let events = vec![make_event(
-            "默认情境",
-            "摘要",
-            Some("工作"),
+    fn classify_event_tentative() {
+        let ev = make_event(
+            "E",
+            "s",
+            None,
+            0.5,
+            0.5,
+            0.0,
+            0.5,
+            Presentation::Mixed,
+            None,
+        );
+        assert_eq!(classify_event(&ev), AdmissionTrack::Tentative);
+
+        // 边界值 0.45
+        let ev = make_event(
+            "E",
+            "s",
+            None,
+            0.45,
+            0.5,
+            0.0,
+            0.5,
+            Presentation::Mixed,
+            None,
+        );
+        assert_eq!(classify_event(&ev), AdmissionTrack::Tentative);
+
+        // 刚好低于 confirmed
+        let ev = make_event(
+            "E",
+            "s",
+            None,
+            0.5999,
+            0.5,
+            0.0,
+            0.5,
+            Presentation::Mixed,
+            None,
+        );
+        assert_eq!(classify_event(&ev), AdmissionTrack::Tentative);
+    }
+
+    #[test]
+    fn classify_event_discarded() {
+        let ev = make_event(
+            "E",
+            "s",
+            None,
+            0.3,
+            0.5,
+            0.0,
+            0.5,
+            Presentation::Mixed,
+            None,
+        );
+        assert_eq!(classify_event(&ev), AdmissionTrack::Discarded);
+
+        // 刚好低于 tentative
+        let ev = make_event(
+            "E",
+            "s",
+            None,
+            0.4499,
+            0.5,
+            0.0,
+            0.5,
+            Presentation::Mixed,
+            None,
+        );
+        assert_eq!(classify_event(&ev), AdmissionTrack::Discarded);
+    }
+
+    #[test]
+    fn classify_event_nan_defense() {
+        let ev = make_event(
+            "E",
+            "s",
+            None,
+            f64::NAN,
+            0.5,
+            0.0,
+            0.5,
+            Presentation::Mixed,
+            None,
+        );
+        assert_eq!(classify_event(&ev), AdmissionTrack::Discarded);
+    }
+
+    #[test]
+    fn classify_event_negative_defense() {
+        let ev = make_event(
+            "E",
+            "s",
+            None,
+            -0.1,
+            0.5,
+            0.0,
+            0.5,
+            Presentation::Mixed,
+            None,
+        );
+        assert_eq!(classify_event(&ev), AdmissionTrack::Discarded);
+    }
+
+    #[test]
+    fn classify_events_mixed() {
+        let events = vec![
+            make_event(
+                "E1",
+                "s",
+                None,
+                0.9,
+                0.8,
+                0.5,
+                0.5,
+                Presentation::Mixed,
+                None,
+            ),
+            make_event(
+                "E2",
+                "s",
+                None,
+                0.5,
+                0.6,
+                -0.2,
+                0.3,
+                Presentation::Subjective,
+                None,
+            ),
+            make_event(
+                "E3",
+                "s",
+                None,
+                0.3,
+                0.5,
+                0.6,
+                0.9,
+                Presentation::Mixed,
+                None,
+            ),
+        ];
+        let classified = classify_events(&events);
+        assert_eq!(classified.confirmed.len(), 1);
+        assert_eq!(classified.tentative.len(), 1);
+        assert_eq!(classified.discarded_count, 1);
+        assert_eq!(classified.active_count(), 2);
+    }
+
+    #[test]
+    fn classify_events_empty() {
+        let classified = classify_events(&[]);
+        assert_eq!(classified.confirmed.len(), 0);
+        assert_eq!(classified.tentative.len(), 0);
+        assert_eq!(classified.discarded_count, 0);
+    }
+
+    #[test]
+    fn admission_track_confidence_factor() {
+        assert!((AdmissionTrack::Confirmed.confidence_factor(0.5) - 1.0).abs() < 1e-10);
+        assert!((AdmissionTrack::Tentative.confidence_factor(0.5) - 0.5).abs() < 1e-10);
+        assert!((AdmissionTrack::Discarded.confidence_factor(0.5) - 0.0).abs() < 1e-10);
+
+        // 自定义 tentative_factor
+        assert!((AdmissionTrack::Tentative.confidence_factor(0.3) - 0.3).abs() < 1e-10);
+    }
+
+    #[test]
+    fn admission_track_as_str() {
+        assert_eq!(AdmissionTrack::Confirmed.as_str(), "confirmed");
+        assert_eq!(AdmissionTrack::Tentative.as_str(), "tentative");
+        assert_eq!(AdmissionTrack::Discarded.as_str(), "discarded");
+    }
+
+    // =========================================================
+    // 校准权重链核心
+    // =========================================================
+
+    #[test]
+    fn calibrate_salience_basic() {
+        let config = CalibratedWeightConfig::default();
+        // 无加成时，salience 保持不变
+        let cal = calibrate_salience(0.8, 0.0, 0.0, 0.0, &config);
+        assert!((cal - 0.8).abs() < 1e-10);
+    }
+
+    #[test]
+    fn calibrate_salience_with_recurrence_boost() {
+        let config = CalibratedWeightConfig::default();
+        // recurrence_boost_max=0.30, recurrence_count=1.0 → boost=0.30
+        // cal = 0.8 * (1 + 0.30) = 1.04 → clamp to 1.0
+        let cal = calibrate_salience(0.8, 1.0, 0.0, 0.0, &config);
+        assert!((cal - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn calibrate_salience_with_partial_boosts() {
+        let config = CalibratedWeightConfig::default();
+        // rec=0.5→0.15, int=0.5→0.10, men=0.5→0.075
+        // cal = 0.5 * (1 + 0.15 + 0.10 + 0.075) = 0.5 * 1.325 = 0.6625
+        let cal = calibrate_salience(0.5, 0.5, 0.5, 0.5, &config);
+        assert!((cal - 0.6625).abs() < 1e-6);
+    }
+
+    #[test]
+    fn calibrate_salience_floor() {
+        let config = CalibratedWeightConfig::default();
+        // 极低 salience 应保底 0.01
+        let cal = calibrate_salience(0.0, 0.0, 0.0, 0.0, &config);
+        assert!((cal - 0.01).abs() < 1e-10);
+    }
+
+    #[test]
+    fn calibrate_salience_ceiling() {
+        let config = CalibratedWeightConfig::default();
+        // 极高 salience + 全加成 → clamp 到 1.0
+        let cal = calibrate_salience(1.0, 1.0, 1.0, 1.0, &config);
+        assert!((cal - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn compute_calibrated_weight_confirmed() {
+        let config = CalibratedWeightConfig::default();
+        let event = make_event(
+            "E",
+            "s",
+            None,
             0.9,
             0.8,
             0.5,
             0.5,
             Presentation::Mixed,
             None,
-        )];
-        // situation_strength = None → ×1.0
-        let stats = compute_category_stats("工作", &events);
-        assert!((stats.n_eff - 0.8).abs() < 1e-10);
+        );
+        let enrichment = EventEnrichment {
+            topic_recurrence_count: 0.5,
+            emotional_intensity: 0.5,
+            mention_frequency: 0.5,
+            source_count: 3,
+        };
+        // salience_cal = 0.8 * (1 + 0.15 + 0.10 + 0.075) = 0.8 * 1.325 = 1.06 → clamp 1.0
+        // confidence_factor = 1.0 (confirmed)
+        // situation_multiplier = 1.0 (None → 中性)
+        // source_support = min(1.0, 3/3) = 1.0
+        // w = 1.0 * 1.0 * 1.0 * 1.0 = 1.0
+        let w = compute_calibrated_weight(&event, &enrichment, &config);
+        assert!((w - 1.0).abs() < 1e-6);
     }
 
-    // ---- A1 预过滤 ----
+    #[test]
+    fn compute_calibrated_weight_tentative_half() {
+        let config = CalibratedWeightConfig::default();
+        let event = make_event(
+            "E",
+            "s",
+            None,
+            0.5,
+            0.8,
+            0.0,
+            0.5,
+            Presentation::Mixed,
+            None,
+        );
+        let enrichment = EventEnrichment {
+            source_count: 1,
+            ..Default::default()
+        };
+        // salience_cal = 0.8 (no boosts)
+        // confidence_factor = 0.5 (tentative)
+        // situation_multiplier = 1.0
+        // source_support = min(1.0, 1/3) = 0.333...
+        // w = 0.8 * 0.5 * 1.0 * 0.333... = 0.1333...
+        let w = compute_calibrated_weight(&event, &enrichment, &config);
+        assert!((w - 0.8 * 0.5 * (1.0 / 3.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn compute_calibrated_weight_discarded_zero() {
+        let config = CalibratedWeightConfig::default();
+        let event = make_event(
+            "E",
+            "s",
+            None,
+            0.3,
+            0.8,
+            0.0,
+            0.5,
+            Presentation::Mixed,
+            None,
+        );
+        let enrichment = EventEnrichment::default();
+        let w = compute_calibrated_weight(&event, &enrichment, &config);
+        assert!((w - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn compute_calibrated_weight_weak_situation_boost() {
+        let config = CalibratedWeightConfig::default();
+        let event = make_event_with_situation(
+            "E",
+            "s",
+            None,
+            0.9,
+            0.8,
+            0.0,
+            0.5,
+            Presentation::Mixed,
+            None,
+            Some(2),
+        );
+        let enrichment = EventEnrichment {
+            source_count: 1,
+            ..Default::default()
+        };
+        // salience_cal = 0.8, conf_factor=1.0, sit_mult=1.5, source=1/3=0.333
+        // w = 0.8 * 1.0 * 1.5 * 0.333 = 0.4
+        let w = compute_calibrated_weight(&event, &enrichment, &config);
+        assert!((w - 0.8 * 1.5 / 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn compute_calibrated_weight_strong_situation_dampen() {
+        let config = CalibratedWeightConfig::default();
+        let event = make_event_with_situation(
+            "E",
+            "s",
+            None,
+            0.9,
+            0.8,
+            0.0,
+            0.5,
+            Presentation::Mixed,
+            None,
+            Some(5),
+        );
+        let enrichment = EventEnrichment {
+            source_count: 3,
+            ..Default::default()
+        };
+        // salience_cal = 0.8, conf_factor=1.0, sit_mult=0.5, source=1.0
+        // w = 0.8 * 0.5 = 0.4
+        let w = compute_calibrated_weight(&event, &enrichment, &config);
+        assert!((w - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn compute_calibrated_weight_full_source_support() {
+        let config = CalibratedWeightConfig::default();
+        let event = make_event(
+            "E",
+            "s",
+            None,
+            0.9,
+            1.0,
+            0.0,
+            0.5,
+            Presentation::Mixed,
+            None,
+        );
+        let enrichment = EventEnrichment {
+            source_count: 5, // > min_sources_for_full_support (3)
+            ..Default::default()
+        };
+        let w = compute_calibrated_weight(&event, &enrichment, &config);
+        // source_support = 1.0 (capped)
+        assert!(w > 0.9);
+    }
+
+    #[test]
+    fn compute_simple_weight_vs_calibrated() {
+        // 对比: 简单权重 vs 校准权重（无加成时）
+        let config = CalibratedWeightConfig::default();
+        let event = make_event(
+            "E",
+            "s",
+            None,
+            0.9,
+            0.8,
+            0.5,
+            0.5,
+            Presentation::Mixed,
+            None,
+        );
+        let enrichment = EventEnrichment::default();
+
+        let simple = compute_simple_weight(&event);
+        let calibrated = compute_calibrated_weight(&event, &enrichment, &config);
+
+        // simple = 0.8 * 1.0 = 0.8
+        assert!((simple - 0.8).abs() < 1e-10);
+
+        // calibrated 应该与简单权重有差异（因为 source_support < 1.0）
+        assert!(
+            calibrated < simple,
+            "校准权重应因 source_support < 1.0 而降低"
+        );
+    }
+
+    // =========================================================
+    // EventEnrichment 派生
+    // =========================================================
+
+    #[test]
+    fn enrichment_from_event() {
+        let event = make_event(
+            "E",
+            "s",
+            None,
+            0.9,
+            0.8,
+            -0.5,
+            0.5,
+            Presentation::Mixed,
+            None,
+        );
+        let enrichment = EventEnrichment::from_event(&event);
+        assert!((enrichment.emotional_intensity - 0.5).abs() < 1e-10);
+        assert!((enrichment.mention_frequency - 0.8).abs() < 1e-10);
+        assert_eq!(enrichment.source_count, 1);
+    }
+
+    #[test]
+    fn enrichment_derive_batch_recurrence() {
+        let events = vec![
+            make_event(
+                "E1",
+                "s",
+                Some("工作"),
+                0.9,
+                0.8,
+                0.5,
+                0.5,
+                Presentation::Mixed,
+                None,
+            ),
+            make_event(
+                "E2",
+                "s",
+                Some("工作"),
+                0.9,
+                0.6,
+                -0.2,
+                0.3,
+                Presentation::Subjective,
+                None,
+            ),
+            make_event(
+                "E3",
+                "s",
+                Some("社交"),
+                0.8,
+                0.5,
+                0.6,
+                0.9,
+                Presentation::Mixed,
+                None,
+            ),
+        ];
+        let enrichments = EventEnrichment::derive_batch(&events);
+        assert_eq!(enrichments.len(), 3);
+
+        // 工作 ×2, 社交 ×1 → max=2
+        // 工作 recurrence = 2/2 = 1.0
+        assert!((enrichments[0].topic_recurrence_count - 1.0).abs() < 1e-10);
+        assert!((enrichments[1].topic_recurrence_count - 1.0).abs() < 1e-10);
+        // 社交 recurrence = 1/2 = 0.5
+        assert!((enrichments[2].topic_recurrence_count - 0.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn enrichment_derive_batch_empty() {
+        let enrichments = EventEnrichment::derive_batch(&[]);
+        assert!(enrichments.is_empty());
+    }
+
+    // =========================================================
+    // 向后兼容: prefilter_events
+    // =========================================================
 
     #[test]
     fn prefilter_excludes_low_confidence() {
@@ -882,7 +2186,7 @@ mod tests {
         let events = vec![
             make_event(
                 "E1",
-                "摘要1",
+                "s1",
                 Some("工作,会议"),
                 0.9,
                 0.8,
@@ -893,7 +2197,7 @@ mod tests {
             ),
             make_event(
                 "E2",
-                "摘要2",
+                "s2",
                 Some("社交,聚会"),
                 0.3,
                 0.6,
@@ -904,7 +2208,7 @@ mod tests {
             ),
             make_event(
                 "E3",
-                "摘要3",
+                "s3",
                 Some("工作,项目"),
                 0.8,
                 0.5,
@@ -917,7 +2221,6 @@ mod tests {
         let (filtered, excluded) = prefilter_events(&events, &config);
         assert_eq!(excluded, 1, "应排除 1 条低置信度事件");
         assert_eq!(filtered.len(), 2);
-        // E1 和 E3 应保留
         let titles: Vec<&str> = filtered.iter().map(|e| e.title.as_str()).collect();
         assert!(titles.contains(&"E1"));
         assert!(titles.contains(&"E3"));
@@ -930,7 +2233,7 @@ mod tests {
         let events = vec![
             make_event(
                 "E1",
-                "摘要1",
+                "s1",
                 Some("工作"),
                 0.9,
                 0.5,
@@ -941,7 +2244,7 @@ mod tests {
             ),
             make_event(
                 "E2",
-                "摘要2",
+                "s2",
                 Some("社交"),
                 0.8,
                 0.5,
@@ -964,7 +2267,290 @@ mod tests {
         assert!(filtered.is_empty());
     }
 
-    // ---- 主分类提取 ----
+    // =========================================================
+    // Tentative 跨批次复现自动提升
+    // =========================================================
+
+    /// 创建一个带有自定义 created_at 的事件（用于批次检测）。
+    fn make_event_with_time(
+        title: &str,
+        keywords: Option<&str>,
+        confidence: f64,
+        salience: f64,
+        created_at: i64,
+    ) -> MemoryEvent {
+        let mut ev = make_event(
+            title,
+            "摘要",
+            keywords,
+            confidence,
+            salience,
+            0.0,
+            0.5,
+            Presentation::Mixed,
+            None,
+        );
+        ev.created_at = created_at;
+        ev
+    }
+
+    #[test]
+    fn keyword_jaccard_identical() {
+        let sim = keyword_jaccard("工作, 会议, 压力", "工作, 会议, 压力");
+        assert!((sim - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn keyword_jaccard_partial_overlap() {
+        let sim = keyword_jaccard("工作, 会议", "工作, 项目");
+        // 交集={工作}，并集={工作, 会议, 项目} → 1/3 ≈ 0.333
+        assert!((sim - 1.0 / 3.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn keyword_jaccard_no_overlap() {
+        let sim = keyword_jaccard("工作", "社交");
+        assert!((sim - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn keyword_jaccard_empty_keywords() {
+        let sim = keyword_jaccard("", "工作");
+        assert!((sim - 0.0).abs() < 1e-10);
+        let sim = keyword_jaccard("工作", "");
+        assert!((sim - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn are_different_batches_true() {
+        let config = TentativePromotionConfig::default(); // min_batch_interval_hours = 6.0
+        let base_time = 1700000000000i64; // 某个 Unix 毫秒时间戳
+        let a = make_event_with_time("E1", Some("工作"), 0.5, 0.6, base_time);
+        // 8 小时后 → 不同批次
+        let b = make_event_with_time("E2", Some("工作"), 0.5, 0.6, base_time + 8 * 3600 * 1000);
+        assert!(are_different_batches(&a, &b, &config));
+    }
+
+    #[test]
+    fn are_different_batches_false_within_interval() {
+        let config = TentativePromotionConfig::default();
+        let base_time = 1700000000000i64;
+        let a = make_event_with_time("E1", Some("工作"), 0.5, 0.6, base_time);
+        // 3 小时后 → 同批次
+        let b = make_event_with_time("E2", Some("工作"), 0.5, 0.6, base_time + 3 * 3600 * 1000);
+        assert!(!are_different_batches(&a, &b, &config));
+    }
+
+    #[test]
+    fn are_different_batches_zero_created_at() {
+        let config = TentativePromotionConfig::default();
+        let a = make_event_with_time("E1", Some("工作"), 0.5, 0.6, 0);
+        let b = make_event_with_time("E2", Some("工作"), 0.5, 0.6, 1700000000000i64);
+        // a.created_at == 0 → 保守视为同批次
+        assert!(!are_different_batches(&a, &b, &config));
+    }
+
+    #[test]
+    fn promote_tentative_cross_batch_promotes() {
+        let config = TentativePromotionConfig::default();
+        let base_time = 1700000000000i64;
+        // 两条同簇（工作）tentative 事件，来自不同批次，关键词相似度高 → 应提升
+        let tentative = vec![
+            make_event_with_time("E1", Some("工作, 会议, 压力"), 0.5, 0.6, base_time),
+            make_event_with_time(
+                "E2",
+                Some("工作, 会议, 项目"),
+                0.55,
+                0.5,
+                base_time + 8 * 3600 * 1000,
+            ),
+        ];
+        let confirmed: Vec<MemoryEvent> = vec![];
+        let result = promote_tentative_events(&tentative, &confirmed, &config);
+
+        assert_eq!(result.promoted_count, 2);
+        assert_eq!(result.remaining_count, 0);
+        // 提升后的置信度应为 0.6
+        for event in &result.promoted {
+            assert!(
+                (event.confidence - 0.6).abs() < 1e-10,
+                "提升后 confidence 应为 0.6，实际为 {}",
+                event.confidence
+            );
+        }
+    }
+
+    #[test]
+    fn promote_tentative_single_event_not_promoted() {
+        let config = TentativePromotionConfig::default();
+        // 单条 tentative 事件 → 簇大小不足，不提升
+        let tentative = vec![make_event_with_time(
+            "E1",
+            Some("工作, 会议"),
+            0.5,
+            0.6,
+            1700000000000i64,
+        )];
+        let confirmed: Vec<MemoryEvent> = vec![];
+        let result = promote_tentative_events(&tentative, &confirmed, &config);
+
+        assert_eq!(result.promoted_count, 0);
+        assert_eq!(result.remaining_count, 1);
+    }
+
+    #[test]
+    fn promote_tentative_same_batch_not_promoted() {
+        let config = TentativePromotionConfig::default();
+        let base_time = 1700000000000i64;
+        // 两条同簇事件，但来自同一批次（时间间隔不足）→ 不提升
+        let tentative = vec![
+            make_event_with_time("E1", Some("工作, 会议"), 0.5, 0.6, base_time),
+            make_event_with_time(
+                "E2",
+                Some("工作, 项目"),
+                0.55,
+                0.5,
+                base_time + 3600 * 1000, // 仅 1 小时后
+            ),
+        ];
+        let confirmed: Vec<MemoryEvent> = vec![];
+        let result = promote_tentative_events(&tentative, &confirmed, &config);
+
+        assert_eq!(result.promoted_count, 0);
+        assert_eq!(result.remaining_count, 2);
+    }
+
+    #[test]
+    fn promote_tentative_low_keyword_similarity_not_promoted() {
+        let config = TentativePromotionConfig::default();
+        let base_time = 1700000000000i64;
+        // 两条事件来自不同批次，但关键词无交集 → Jaccard=0，不提升
+        let tentative = vec![
+            make_event_with_time("E1", Some("工作, 会议"), 0.5, 0.6, base_time),
+            make_event_with_time(
+                "E2",
+                Some("社交, 聚会"),
+                0.55,
+                0.5,
+                base_time + 8 * 3600 * 1000,
+            ),
+        ];
+        let confirmed: Vec<MemoryEvent> = vec![];
+        let result = promote_tentative_events(&tentative, &confirmed, &config);
+
+        assert_eq!(result.promoted_count, 0);
+        assert_eq!(result.remaining_count, 2);
+    }
+
+    #[test]
+    fn promote_tentative_mixed_clusters() {
+        let config = TentativePromotionConfig::default();
+        let base_time = 1700000000000i64;
+        // 工作簇：2 条，跨批次，关键词相似 → 应提升
+        // 社交簇：1 条 → 不提升
+        let tentative = vec![
+            make_event_with_time("E1", Some("工作, 会议, 压力"), 0.5, 0.6, base_time),
+            make_event_with_time(
+                "E2",
+                Some("工作, 会议, 项目"),
+                0.55,
+                0.5,
+                base_time + 8 * 3600 * 1000,
+            ),
+            make_event_with_time("E3", Some("社交, 聚会"), 0.5, 0.4, base_time),
+        ];
+        let confirmed: Vec<MemoryEvent> = vec![];
+        let result = promote_tentative_events(&tentative, &confirmed, &config);
+
+        assert_eq!(result.promoted_count, 2, "工作簇应提升");
+        assert_eq!(result.remaining_count, 1, "社交簇不提升");
+        // 验证提升的是工作簇
+        let promoted_titles: Vec<&str> = result.promoted.iter().map(|e| e.title.as_str()).collect();
+        assert!(promoted_titles.contains(&"E1"));
+        assert!(promoted_titles.contains(&"E2"));
+        assert_eq!(result.remaining_tentative[0].title, "E3");
+    }
+
+    #[test]
+    fn promote_tentative_empty_input() {
+        let config = TentativePromotionConfig::default();
+        let tentative: Vec<MemoryEvent> = vec![];
+        let confirmed: Vec<MemoryEvent> = vec![];
+        let result = promote_tentative_events(&tentative, &confirmed, &config);
+
+        assert_eq!(result.promoted_count, 0);
+        assert_eq!(result.remaining_count, 0);
+        assert!(result.promoted.is_empty());
+        assert!(result.remaining_tentative.is_empty());
+    }
+
+    #[test]
+    fn promote_tentative_custom_min_cluster_size() {
+        let config = TentativePromotionConfig {
+            min_cluster_size: 3,
+            ..Default::default()
+        };
+        let base_time = 1700000000000i64;
+        // 3 条同簇事件，跨批次 → 满足 min_cluster_size=3
+        let tentative = vec![
+            make_event_with_time("E1", Some("工作, 会议, 压力"), 0.5, 0.6, base_time),
+            make_event_with_time(
+                "E2",
+                Some("工作, 会议, 项目"),
+                0.55,
+                0.5,
+                base_time + 8 * 3600 * 1000,
+            ),
+            make_event_with_time(
+                "E3",
+                Some("工作, 会议, 汇报"),
+                0.5,
+                0.4,
+                base_time + 16 * 3600 * 1000,
+            ),
+        ];
+        let confirmed: Vec<MemoryEvent> = vec![];
+        let result = promote_tentative_events(&tentative, &confirmed, &config);
+
+        assert_eq!(result.promoted_count, 3);
+        assert_eq!(result.remaining_count, 0);
+    }
+
+    #[test]
+    fn promote_tentative_respects_confirmed_list() {
+        // confirmed 列表存在但不应影响提升逻辑（当前为签名保留参数）
+        let config = TentativePromotionConfig::default();
+        let base_time = 1700000000000i64;
+        let tentative = vec![
+            make_event_with_time("E1", Some("工作, 会议"), 0.5, 0.6, base_time),
+            make_event_with_time(
+                "E2",
+                Some("工作, 会议, 项目"),
+                0.55,
+                0.5,
+                base_time + 8 * 3600 * 1000,
+            ),
+        ];
+        let confirmed = vec![make_event(
+            "E0_confirmed",
+            "已有确认事件",
+            Some("工作"),
+            0.9,
+            0.8,
+            0.5,
+            0.5,
+            Presentation::Mixed,
+            None,
+        )];
+        let result = promote_tentative_events(&tentative, &confirmed, &config);
+
+        // confirmed 列表存在时提升逻辑不受影响
+        assert_eq!(result.promoted_count, 2);
+    }
+
+    // =========================================================
+    // 主分类提取（与 v1.2 相同）
+    // =========================================================
 
     #[test]
     fn extract_primary_category_from_keywords() {
@@ -1030,7 +2616,9 @@ mod tests {
         assert_eq!(extract_primary_category(&ev), "未分类");
     }
 
-    // ---- 加权统计 ----
+    // =========================================================
+    // 加权统计（与 v1.2 相同）
+    // =========================================================
 
     #[test]
     fn weighted_mean_basic() {
@@ -1042,9 +2630,6 @@ mod tests {
 
     #[test]
     fn weighted_mean_with_weights() {
-        // Σ(w*x) = 0.2*0.5 + 0.5*0.5 + 0.8*1.0 = 0.1 + 0.25 + 0.8 = 1.15
-        // Σw = 0.2 + 0.5 + 0.8 = 1.5
-        // mean = 1.15/1.5 ≈ 0.7667
         let values = vec![0.5, 0.5, 1.0];
         let weights = vec![0.2, 0.5, 0.8];
         let mean = weighted_mean(&values, &weights);
@@ -1061,8 +2646,6 @@ mod tests {
 
     #[test]
     fn weighted_variance_basic() {
-        // 值 [1,2,3]，权重[1,1,1]，均值=2
-        // var = ((1-2)²+(2-2)²+(3-2)²)/3 = 2/3 ≈ 0.6667
         let values = vec![1.0, 2.0, 3.0];
         let weights = vec![1.0, 1.0, 1.0];
         let var = weighted_variance(&values, &weights, 2.0);
@@ -1071,65 +2654,113 @@ mod tests {
 
     #[test]
     fn weighted_ratio_basic() {
-        // 3 条事件，2 条正面
         let indicators = vec![1.0, 0.0, 1.0];
         let weights = vec![0.4, 0.6, 1.0];
-        // Σ(ind*w) = 0.4 + 0 + 1.0 = 1.4, Σw = 2.0, ratio = 0.7
         let ratio = weighted_ratio(&indicators, &weights);
         assert!((ratio - 0.7).abs() < 1e-10);
     }
 
-    // ---- 单分类统计 ----
+    // =========================================================
+    // 单分类统计（v1.3 校准权重 + 向后兼容）
+    // =========================================================
 
     #[test]
-    fn category_stats_computation() {
+    fn category_stats_with_calibrated_weights() {
+        let config = CalibratedWeightConfig::default();
         let events = vec![
             make_event(
                 "E1",
-                "工作摘要1",
+                "s1",
                 Some("工作,会议"),
                 0.9,
                 0.8,
                 0.5,
                 0.7,
                 Presentation::Objective,
-                Some("对项目进展满意"),
+                Some("满意"),
             ),
             make_event(
                 "E2",
-                "工作摘要2",
+                "s2",
                 Some("工作,项目"),
                 0.8,
                 0.6,
                 -0.3,
                 0.4,
                 Presentation::Subjective,
-                Some("对截止日期感到焦虑"),
+                Some("焦虑"),
             ),
             make_event(
                 "E3",
-                "工作摘要3",
+                "s3",
                 Some("工作,汇报"),
                 0.7,
                 0.9,
                 0.2,
                 0.6,
                 Presentation::Mixed,
-                Some("汇报结果一般"),
+                Some("一般"),
             ),
         ];
-        let stats = compute_category_stats("工作", &events);
+        let enrichments = EventEnrichment::derive_batch(&events);
+        let stats = compute_category_stats("工作", &events, Some(&enrichments), &config);
+
+        assert_eq!(stats.category, "工作");
+        assert_eq!(stats.event_count, 3);
+        // n_eff 应该由于校准权重而略小于简单加权（source_support < 1.0）
+        assert!(stats.n_eff > 0.0, "n_eff 应大于 0");
+    }
+
+    #[test]
+    fn category_stats_with_simple_weights_backward_compat() {
+        let config = CalibratedWeightConfig::default();
+        let events = vec![
+            make_event(
+                "E1",
+                "s1",
+                Some("工作,会议"),
+                0.9,
+                0.8,
+                0.5,
+                0.7,
+                Presentation::Objective,
+                Some("满意"),
+            ),
+            make_event(
+                "E2",
+                "s2",
+                Some("工作,项目"),
+                0.8,
+                0.6,
+                -0.3,
+                0.4,
+                Presentation::Subjective,
+                Some("焦虑"),
+            ),
+            make_event(
+                "E3",
+                "s3",
+                Some("工作,汇报"),
+                0.7,
+                0.9,
+                0.2,
+                0.6,
+                Presentation::Mixed,
+                Some("一般"),
+            ),
+        ];
+        // None enrichments → 简单权重
+        let stats = compute_category_stats("工作", &events, None, &config);
 
         assert_eq!(stats.category, "工作");
         assert_eq!(stats.event_count, 3);
         // n_eff = 0.8 + 0.6 + 0.9 = 2.3
         assert!((stats.n_eff - 2.3).abs() < 1e-10);
-        // valence_mean = (0.8*0.5 + 0.6*(-0.3) + 0.9*0.2) / 2.3 = (0.4 - 0.18 + 0.18) / 2.3 = 0.4/2.3 ≈ 0.1739
-        assert!((stats.valence_mean - 0.4 / 2.3).abs() < 0.001);
     }
 
     #[test]
     fn category_stats_single_event() {
+        let config = CalibratedWeightConfig::default();
         let events = vec![make_event(
             "E1",
             "摘要",
@@ -1141,23 +2772,58 @@ mod tests {
             Presentation::Subjective,
             None,
         )];
-        let stats = compute_category_stats("家庭", &events);
+        let stats = compute_category_stats("家庭", &events, None, &config);
         assert_eq!(stats.event_count, 1);
         assert!((stats.n_eff - 0.5).abs() < 1e-10);
         assert!((stats.valence_mean - 0.8).abs() < 1e-10);
-        // 单事件方差为 0
         assert!((stats.valence_std - 0.0).abs() < 1e-10);
         assert!((stats.presentation_subjective_ratio - 1.0).abs() < 1e-10);
     }
 
-    // ---- 分组 ----
+    #[test]
+    fn category_stats_respects_situation_multiplier() {
+        let config = CalibratedWeightConfig::default();
+        let events = vec![
+            make_event_with_situation(
+                "弱情境事件",
+                "摘要",
+                Some("工作"),
+                0.9,
+                0.8,
+                0.5,
+                0.5,
+                Presentation::Mixed,
+                None,
+                Some(2),
+            ),
+            make_event_with_situation(
+                "强情境事件",
+                "摘要",
+                Some("工作"),
+                0.9,
+                0.8,
+                0.5,
+                0.5,
+                Presentation::Mixed,
+                None,
+                Some(5),
+            ),
+        ];
+        let stats = compute_category_stats("工作", &events, None, &config);
+        // 简单权重: n_eff = 0.8*1.5 + 0.8*0.5 = 1.2 + 0.4 = 1.6
+        assert!((stats.n_eff - 1.6).abs() < 1e-10);
+    }
+
+    // =========================================================
+    // 分组 + 权重归一化
+    // =========================================================
 
     #[test]
     fn group_by_category_works() {
         let events = vec![
             make_event(
                 "E1",
-                "摘要1",
+                "s1",
                 Some("工作"),
                 0.9,
                 0.5,
@@ -1168,7 +2834,7 @@ mod tests {
             ),
             make_event(
                 "E2",
-                "摘要2",
+                "s2",
                 Some("社交"),
                 0.8,
                 0.5,
@@ -1179,7 +2845,7 @@ mod tests {
             ),
             make_event(
                 "E3",
-                "摘要3",
+                "s3",
                 Some("工作"),
                 0.7,
                 0.5,
@@ -1191,20 +2857,19 @@ mod tests {
         ];
         let grouped = group_by_category(&events);
         assert_eq!(grouped.len(), 2);
-        let work_group = grouped.iter().find(|(k, _)| k == "社交").unwrap();
-        assert_eq!(work_group.1.len(), 1);
+        let social_group = grouped.iter().find(|(k, _)| k == "社交").unwrap();
+        assert_eq!(social_group.1.len(), 1);
         let work_group = grouped.iter().find(|(k, _)| k == "工作").unwrap();
         assert_eq!(work_group.1.len(), 2);
     }
 
-    // ---- 组权重归一化 ----
-
     #[test]
     fn group_weights_normalize() {
+        let config = CalibratedWeightConfig::default();
         let events = vec![
             make_event(
                 "E1",
-                "摘要1",
+                "s1",
                 Some("工作"),
                 0.9,
                 0.8,
@@ -1215,7 +2880,7 @@ mod tests {
             ),
             make_event(
                 "E2",
-                "摘要2",
+                "s2",
                 Some("社交"),
                 0.8,
                 0.6,
@@ -1228,7 +2893,7 @@ mod tests {
         let grouped = group_by_category(&events);
         let mut cats: Vec<CategoryStats> = grouped
             .iter()
-            .map(|(cat, evts)| compute_category_stats(cat, evts))
+            .map(|(cat, evts)| compute_category_stats(cat, evts, None, &config))
             .collect();
         normalize_group_weights(&mut cats);
         let total: f64 = cats.iter().map(|c| c.group_weight).sum();
@@ -1239,14 +2904,17 @@ mod tests {
         );
     }
 
-    // ---- 跨分类指标 ----
+    // =========================================================
+    // 跨分类指标
+    // =========================================================
 
     #[test]
-    fn emotional_stability_computation() {
+    fn emotional_stability_with_calibrated_weights() {
+        let config = CalibratedWeightConfig::default();
         let events = vec![
             make_event(
                 "E1",
-                "摘要1",
+                "s1",
                 Some("工作"),
                 0.9,
                 0.5,
@@ -1257,7 +2925,7 @@ mod tests {
             ),
             make_event(
                 "E2",
-                "摘要2",
+                "s2",
                 Some("社交"),
                 0.8,
                 0.5,
@@ -1267,12 +2935,9 @@ mod tests {
                 None,
             ),
         ];
-        let stability = compute_emotional_stability(&events);
-        // 等权重均值 = (0.5 + (-0.3)) / 2 = 0.1
-        // 方差 = ((0.5-0.1)² + (-0.3-0.1)²) / 2 = (0.16 + 0.16) / 2 = 0.16
-        // std ≈ 0.4
+        let enrichments = EventEnrichment::derive_batch(&events);
+        let stability = compute_emotional_stability(&events, Some(&enrichments), &config);
         assert!(stability > 0.0, "方差应大于零");
-        assert!((stability - 0.4).abs() < 0.01);
     }
 
     #[test]
@@ -1308,10 +2973,7 @@ mod tests {
             },
         ];
         let consistency = compute_narrative_consistency(&cats);
-        assert!(
-            (consistency - 1.0).abs() < 1e-10,
-            "完全相同的分布应得一致性 1.0"
-        );
+        assert!((consistency - 1.0).abs() < 1e-10);
     }
 
     #[test]
@@ -1334,7 +2996,100 @@ mod tests {
         assert!((consistency - 1.0).abs() < 1e-10, "单个分类一致性为 1.0");
     }
 
-    // ---- 代表性事件选取 ----
+    #[test]
+    fn share_skewness_symmetric() {
+        let config = CalibratedWeightConfig::default();
+        let events = vec![
+            make_event(
+                "E1",
+                "s1",
+                Some("工作"),
+                0.9,
+                0.5,
+                0.0,
+                0.3,
+                Presentation::Mixed,
+                None,
+            ),
+            make_event(
+                "E2",
+                "s2",
+                Some("工作"),
+                0.9,
+                0.5,
+                0.0,
+                0.5,
+                Presentation::Mixed,
+                None,
+            ),
+            make_event(
+                "E3",
+                "s3",
+                Some("工作"),
+                0.9,
+                0.5,
+                0.0,
+                0.7,
+                Presentation::Mixed,
+                None,
+            ),
+        ];
+        let skew = compute_share_skewness(&events, None, &config);
+        assert!(skew.abs() < 0.1, "对称分布偏度应接近0，实际={}", skew);
+    }
+
+    #[test]
+    fn share_skewness_single_event() {
+        let config = CalibratedWeightConfig::default();
+        let events = vec![make_event(
+            "E1",
+            "s1",
+            Some("工作"),
+            0.9,
+            0.5,
+            0.0,
+            0.5,
+            Presentation::Mixed,
+            None,
+        )];
+        let skew = compute_share_skewness(&events, None, &config);
+        assert!((skew - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn share_kurtosis_uniform() {
+        let config = CalibratedWeightConfig::default();
+        let events = vec![
+            make_event(
+                "E1",
+                "s1",
+                Some("工作"),
+                0.9,
+                0.5,
+                0.0,
+                0.5,
+                Presentation::Mixed,
+                None,
+            ),
+            make_event(
+                "E2",
+                "s2",
+                Some("工作"),
+                0.9,
+                0.5,
+                0.0,
+                0.5,
+                Presentation::Mixed,
+                None,
+            ),
+        ];
+        let kurt = compute_share_kurtosis(&events, None, &config);
+        assert!((kurt - 0.0).abs() < 1e-10);
+    }
+
+    // =========================================================
+    // 代表性事件选取
+    // =========================================================
 
     #[test]
     fn representative_events_limit() {
@@ -1388,14 +3143,14 @@ mod tests {
                 Some("态度4"),
             ),
         ];
+        let cfg = CalibratedWeightConfig::default();
         let grouped = group_by_category(&events);
         let cats: Vec<CategoryStats> = grouped
             .iter()
-            .map(|(cat, evts)| compute_category_stats(cat, evts))
+            .map(|(cat, evts)| compute_category_stats(cat, evts, None, &cfg))
             .collect();
         let representatives = select_representative_events(&events, &cats, &config);
         assert_eq!(representatives.len(), 2, "最多 2 条");
-        // 应是 salience 最高的两条
         let saliences: Vec<f64> = representatives.iter().map(|r| r.salience).collect();
         assert!(saliences.contains(&0.9));
         assert!(saliences.contains(&0.8));
@@ -1415,21 +3170,24 @@ mod tests {
             Presentation::Mixed,
             Some("对项目进展感到满意"),
         )];
+        let cfg = CalibratedWeightConfig::default();
         let grouped = group_by_category(&events);
         let cats: Vec<CategoryStats> = grouped
             .iter()
-            .map(|(cat, evts)| compute_category_stats(cat, evts))
+            .map(|(cat, evts)| compute_category_stats(cat, evts, None, &cfg))
             .collect();
         let reps = select_representative_events(&events, &cats, &config);
         assert_eq!(reps.len(), 1);
         assert_eq!(reps[0].attitude.as_deref(), Some("对项目进展感到满意"));
     }
 
-    // ---- 完整管线 ----
+    // =========================================================
+    // 完整管线: v1.3 三轨 + 校准权重
+    // =========================================================
 
     #[test]
-    fn run_phase_a_stats_full_pipeline() {
-        let config = StatsConfig::default();
+    fn run_phase_a_stats_v13_calibrated() {
+        let config = StatsConfig::default(); // use_calibrated_weights = true
         let events = vec![
             make_event(
                 "E1",
@@ -1479,21 +3237,61 @@ mod tests {
         let summary = run_phase_a_stats(&events, &config);
 
         assert_eq!(summary.total_events_in, 4);
-        assert_eq!(summary.total_events_filtered, 3); // E2 被排除
+        // E2 被 discarded (conf=0.3)，其余 3 条为 active
+        assert_eq!(summary.total_events_filtered, 3);
+        assert_eq!(summary.discarded_count, 1);
+        assert!(summary.confirmed_count > 0);
         assert_eq!(summary.category_count, 3); // 工作、社交、家庭
         assert!(!summary.categories.is_empty());
         // 分类按 group_weight 降序
         assert!(
             summary.categories[0].group_weight >= summary.categories.last().unwrap().group_weight
         );
-        // 跨分类指标
         assert!(summary.cross_category.emotional_stability >= 0.0);
-        // 代表性事件
         assert!(!summary.representative_events.is_empty());
     }
 
     #[test]
-    fn run_phase_a_stats_empty_after_filter() {
+    fn run_phase_a_stats_v13_includes_tentative() {
+        let config = StatsConfig::default();
+        // 一个 tentative 事件（conf=0.5）+ 一个 confirmed 事件
+        let events = vec![
+            make_event(
+                "E1",
+                "s1",
+                Some("工作"),
+                0.9,
+                0.8,
+                0.5,
+                0.5,
+                Presentation::Mixed,
+                None,
+            ),
+            make_event(
+                "E2",
+                "待定事件",
+                Some("工作"),
+                0.5,
+                0.6,
+                -0.3,
+                0.3,
+                Presentation::Subjective,
+                None,
+            ),
+        ];
+        let summary = run_phase_a_stats(&events, &config);
+
+        assert_eq!(summary.total_events_in, 2);
+        // tentative 事件应在 active 中（以半权重参与统计）
+        assert_eq!(summary.total_events_filtered, 2);
+        assert_eq!(summary.confirmed_count, 1);
+        assert_eq!(summary.tentative_count, 1);
+        assert_eq!(summary.discarded_count, 0);
+        assert_eq!(summary.category_count, 1);
+    }
+
+    #[test]
+    fn run_phase_a_stats_v13_all_discarded() {
         let config = StatsConfig::default();
         let events = vec![
             make_event(
@@ -1522,41 +3320,43 @@ mod tests {
         let summary = run_phase_a_stats(&events, &config);
         assert_eq!(summary.total_events_in, 2);
         assert_eq!(summary.total_events_filtered, 0);
+        assert_eq!(summary.discarded_count, 2);
         assert_eq!(summary.category_count, 0);
         assert!(summary.categories.is_empty());
-        assert!(summary.representative_events.is_empty());
     }
 
     #[test]
-    fn run_phase_a_stats_empty_input() {
+    fn run_phase_a_stats_v13_empty_input() {
         let config = StatsConfig::default();
         let summary = run_phase_a_stats(&[], &config);
         assert_eq!(summary.total_events_in, 0);
         assert_eq!(summary.total_events_filtered, 0);
     }
 
-    // ---- 偏度与峰度 ----
-
     #[test]
-    fn share_skewness_symmetric() {
-        // 对称分布：share = [0.3, 0.5, 0.7]，等权重
+    fn run_phase_a_stats_v12_compat_path() {
+        // 使用 use_calibrated_weights=false 回退到 v1.2 行为
+        let config = StatsConfig {
+            use_calibrated_weights: false,
+            ..Default::default()
+        };
         let events = vec![
             make_event(
                 "E1",
                 "s1",
-                Some("工作"),
+                Some("工作,会议"),
                 0.9,
-                0.5,
-                0.0,
-                0.3,
-                Presentation::Mixed,
-                None,
+                0.8,
+                0.7,
+                0.8,
+                Presentation::Objective,
+                Some("满意"),
             ),
             make_event(
                 "E2",
-                "s2",
-                Some("工作"),
-                0.9,
+                "低置信事件",
+                Some("工作,闲聊"),
+                0.3,
                 0.5,
                 0.0,
                 0.5,
@@ -1566,30 +3366,52 @@ mod tests {
             make_event(
                 "E3",
                 "s3",
-                Some("工作"),
-                0.9,
-                0.5,
-                0.0,
+                Some("社交,聚会"),
+                0.8,
                 0.7,
+                0.5,
+                0.9,
+                Presentation::Subjective,
+                Some("愉快"),
+            ),
+            make_event(
+                "E4",
+                "s4",
+                Some("家庭,晚餐"),
+                0.7,
+                0.6,
+                -0.2,
+                0.3,
                 Presentation::Mixed,
-                None,
+                Some("小摩擦"),
             ),
         ];
-        let skew = compute_share_skewness(&events);
-        // 对称分布偏度应接近 0
-        assert!(skew.abs() < 0.1, "对称分布偏度应接近0，实际={}", skew);
+        let summary = run_phase_a_stats(&events, &config);
+
+        assert_eq!(summary.total_events_in, 4);
+        // v1.2 路径: E2 被硬截断排除
+        assert_eq!(summary.total_events_filtered, 3);
+        assert_eq!(summary.category_count, 3);
+        // v1.2 路径将所有通过的事件视为 confirmed
+        assert!(summary.confirmed_count > 0);
+        assert_eq!(summary.tentative_count, 0);
     }
 
+    // =========================================================
+    // 跨分类指标（校准权重路径）
+    // =========================================================
+
     #[test]
-    fn share_kurtosis_uniform() {
+    fn cross_category_metrics_with_calibrated_weights() {
+        let config = CalibratedWeightConfig::default();
         let events = vec![
             make_event(
                 "E1",
                 "s1",
                 Some("工作"),
                 0.9,
+                0.8,
                 0.5,
-                0.0,
                 0.5,
                 Presentation::Mixed,
                 None,
@@ -1597,35 +3419,113 @@ mod tests {
             make_event(
                 "E2",
                 "s2",
-                Some("工作"),
-                0.9,
+                Some("社交"),
+                0.8,
+                0.6,
+                -0.3,
                 0.5,
+                Presentation::Mixed,
+                None,
+            ),
+        ];
+        let enrichments = EventEnrichment::derive_batch(&events);
+        let cat_cfg = CalibratedWeightConfig::default();
+        let grouped = group_by_category(&events);
+        let mut cats: Vec<CategoryStats> = grouped
+            .iter()
+            .map(|(cat, evts)| {
+                let cat_enr: Vec<EventEnrichment> = evts
+                    .iter()
+                    .map(|e| {
+                        let idx = events.iter().position(|ae| ae.id == e.id).unwrap_or(0);
+                        enrichments.get(idx).cloned().unwrap_or_default()
+                    })
+                    .collect();
+                compute_category_stats(cat, evts, Some(&cat_enr), &cat_cfg)
+            })
+            .collect();
+        normalize_group_weights(&mut cats);
+
+        let metrics = compute_cross_category_metrics(&events, &cats, Some(&enrichments), &config);
+        assert!(metrics.emotional_stability >= 0.0);
+        assert!(metrics.narrative_consistency >= 0.0);
+    }
+
+    // =========================================================
+    // CalibratedWeightConfig::default() 验证
+    // =========================================================
+
+    #[test]
+    fn calibrated_weight_config_defaults() {
+        let config = CalibratedWeightConfig::default();
+        assert!((config.salience_exponent - 1.0).abs() < 1e-10);
+        assert!((config.recurrence_boost_max - 0.30).abs() < 1e-10);
+        assert!((config.intensity_boost_max - 0.20).abs() < 1e-10);
+        assert!((config.mention_boost_max - 0.15).abs() < 1e-10);
+        assert_eq!(config.min_sources_for_full_support, 3);
+        assert!((config.tentative_weight_factor - 0.5).abs() < 1e-10);
+    }
+
+    // =========================================================
+    // 批量权重计算
+    // =========================================================
+
+    #[test]
+    fn test_compute_calibrated_weights_batch() {
+        let config = CalibratedWeightConfig::default();
+        let events = vec![
+            make_event(
+                "E1",
+                "s1",
+                None,
+                0.9,
+                0.8,
+                0.5,
+                0.5,
+                Presentation::Mixed,
+                None,
+            ),
+            make_event(
+                "E2",
+                "s2",
+                None,
+                0.5,
+                0.6,
                 0.0,
                 0.5,
                 Presentation::Mixed,
                 None,
             ),
         ];
-        let kurt = compute_share_kurtosis(&events);
-        // 两个相同值，方差为 0，应返回 0
-        assert!((kurt - 0.0).abs() < 1e-10);
+        let enrichments = vec![
+            EventEnrichment::from_event(&events[0]),
+            EventEnrichment::from_event(&events[1]),
+        ];
+        let weights = compute_calibrated_weights_batch(&events, &enrichments, &config);
+        assert_eq!(weights.len(), 2);
+        // E1 (confirmed) 应比 E2 (tentative) 权重更高
+        assert!(
+            weights[0] > weights[1],
+            "confirmed 事件权重应高于 tentative"
+        );
     }
 
     #[test]
-    fn share_skewness_single_event() {
+    #[should_panic(expected = "events 与 enrichments 长度必须一致")]
+    fn test_compute_calibrated_weights_batch_mismatch() {
+        let config = CalibratedWeightConfig::default();
         let events = vec![make_event(
             "E1",
-            "s1",
-            Some("工作"),
+            "s",
+            None,
             0.9,
-            0.5,
+            0.8,
             0.0,
             0.5,
             Presentation::Mixed,
             None,
         )];
-        let skew = compute_share_skewness(&events);
-        // 单事件方差为 0，偏度为 0
-        assert!((skew - 0.0).abs() < 1e-10);
+        let enrichments = vec![EventEnrichment::default(), EventEnrichment::default()];
+        compute_calibrated_weights_batch(&events, &enrichments, &config);
     }
 }

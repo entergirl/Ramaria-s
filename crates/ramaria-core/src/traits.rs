@@ -399,6 +399,17 @@ pub trait StorageBackend: Send + Sync {
     // -- Event Relations (from_id/to_id: i64) --
     async fn save_event_relation(&self, rel: &EventRelation) -> RamariaResult<i64>;
 
+    /// 按 persona_uid 查询该角色相关的所有事件关系。
+    ///
+    /// 通过 JOIN memory_events 过滤，返回 from 事件属于该 persona 的关系。
+    /// 默认返回空列表——不会破坏已有 mock 实现。
+    async fn list_event_relations_by_persona(
+        &self,
+        _persona_uid: &str,
+    ) -> RamariaResult<Vec<EventRelation>> {
+        Ok(Vec::new())
+    }
+
     // -- Event Sources (event_id: i64, l1_id: Uuid) --
     async fn save_event_source(&self, event_id: i64, l1_id: Uuid, weight: f64)
     -> RamariaResult<()>;
