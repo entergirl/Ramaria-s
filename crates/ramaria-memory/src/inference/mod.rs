@@ -46,7 +46,8 @@ pub use drift::{
 pub use inferrer::{
     CategorySignal, ConsistencyAnalysis, DiffAction, InferenceResult, InferredTrait,
     InferrerConfig, PostProcessResult, TraitDiff, build_step1_prompt, build_step2_prompt,
-    build_step3_prompt, compute_trait_diff, mock_infer, post_process_inference,
+    build_step3_prompt, compute_trait_diff, format_motive_stats, mock_infer,
+    post_process_inference,
 };
 pub use orchestrator::{
     PhaseBResult, PhaseBSource, PhaseCResult, apply_layered_shrinkage,
@@ -59,12 +60,13 @@ pub use shrink::{
 };
 pub use stats::{
     AdmissionTrack, CalibratedWeightConfig, CategoryStats, ClassifiedEvents, CrossCategoryMetrics,
-    EventEnrichment, RepresentativeEvent, StatsConfig, StatsSummary, TentativePromotionConfig,
-    TentativePromotionResult, calibrate_salience, classify_event, classify_events,
-    compute_calibrated_weight, compute_calibrated_weights_batch, compute_category_stats,
-    compute_cross_category_metrics, compute_emotional_stability, compute_narrative_consistency,
-    compute_share_kurtosis, compute_share_skewness, compute_simple_weight,
-    compute_simple_weights_batch, extract_primary_category, group_by_category, prefilter_events,
-    promote_tentative_events, run_phase_a_stats, select_representative_events,
+    EventEnrichment, MotiveStats, RepresentativeEvent, StatsConfig, StatsSummary,
+    TentativePromotionConfig, TentativePromotionResult, calibrate_salience, classify_event,
+    classify_events, compute_calibrated_weight, compute_calibrated_weights_batch,
+    compute_category_stats, compute_cross_category_metrics, compute_emotional_stability,
+    compute_motive_stats, compute_narrative_consistency, compute_share_kurtosis,
+    compute_share_skewness, compute_simple_weight, compute_simple_weights_batch,
+    extract_motive_tags, extract_primary_category, group_by_category, group_by_motive,
+    prefilter_events, promote_tentative_events, run_phase_a_stats, select_representative_events,
     situation_multiplier, weighted_mean, weighted_ratio, weighted_variance,
 };

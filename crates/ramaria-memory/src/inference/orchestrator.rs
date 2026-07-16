@@ -27,8 +27,8 @@ use crate::inference::{
     drift::{CategoryEventData, DriftSummary, run_drift_detection},
     inferrer::{
         CategorySignal, ConsistencyAnalysis, InferenceResult, InferredTrait, InferrerConfig,
-        PostProcessResult, build_step1_prompt, build_step2_prompt, build_step3_prompt, mock_infer,
-        post_process_inference,
+        PostProcessResult, build_step1_prompt, build_step2_prompt, build_step3_prompt,
+        format_motive_stats, mock_infer, post_process_inference,
     },
     shrink::{ShrinkConfig, run_shrinkage_layered},
     stats::StatsSummary,
@@ -175,14 +175,42 @@ pub async fn run_phase_b_inference(
         }
     };
 
+    // ---- 1.6. v1.3 动机维度统计文本（E 模块） ----
+    let motive_stats_text = if !stats.motive_stats.is_empty() {
+        let text = format_motive_stats(&stats.motive_stats, 5);
+        if !text.is_empty() {
+            debug!(
+                persona_uid = %persona_owned,
+                motive_count = stats.motive_stats.len(),
+                "Phase B: 动机维度统计已格式化"
+            );
+        }
+        text
+    } else {
+        debug!(persona_uid = %persona_owned, "Phase B: 无动机数据，跳过动机维度统计");
+        String::new()
+    };
+
     // ---- 2. 三步 LLM 推断（含降级） ----
     let causal_text_ref: Option<&str> = if causal_text.is_empty() {
         None
     } else {
         Some(&causal_text)
     };
-    let inference_result =
-        run_three_step_inference(llm, stats, persona_uid, config, causal_text_ref).await;
+    let motive_stats_ref: Option<&str> = if motive_stats_text.is_empty() {
+        None
+    } else {
+        Some(&motive_stats_text)
+    };
+    let inference_result = run_three_step_inference(
+        llm,
+        stats,
+        persona_uid,
+        config,
+        causal_text_ref,
+        motive_stats_ref,
+    )
+    .await;
 
     let (result, source) = match inference_result {
         Ok(r) => {
@@ -498,15 +526,17 @@ pub async fn apply_layered_shrinkage(
 ///
 /// 参数:
 /// - `causal_features_text`: 可选的因果链特征文本（A8 模块产出），注入 Step 1 Prompt。
+/// - `motive_stats_text`: 可选的动机维度统计文本（E 模块产出），注入 Step 1 Prompt。
 async fn run_three_step_inference(
     llm: &dyn LlmProvider,
     stats: &StatsSummary,
     persona_uid: &str,
     config: &InferrerConfig,
     causal_features_text: Option<&str>,
+    motive_stats_text: Option<&str>,
 ) -> RamariaResult<InferenceResult> {
     // Step 1: 逐分类个性模式提取
-    let step1_prompt = build_step1_prompt(stats, config, causal_features_text);
+    let step1_prompt = build_step1_prompt(stats, config, causal_features_text, motive_stats_text);
     let step1_raw = call_llm_and_get_text(llm, &step1_prompt, config, "Step1").await?;
     let category_signals: Vec<CategorySignal> =
         parse_json_with_degrade(&step1_raw, "Step1", parse_category_signals)?;
@@ -1343,6 +1373,7 @@ mod tests {
                 salience: 0.9,
                 category: "工作".into(),
             }],
+            motive_stats: Vec::new(),
         }
     }
 
@@ -1605,7 +1636,7 @@ mod tests {
         let config = InferrerConfig::default();
         let result = mock_infer(&stats, "user-0001");
 
-        let p1 = build_step1_prompt(&stats, &config, None);
+        let p1 = build_step1_prompt(&stats, &config, None, None);
         assert!(!p1.is_empty());
         assert!(p1.contains("工作"));
         assert!(p1.contains("性格心理分析师"));

@@ -250,6 +250,7 @@ fn make_stats_summary() -> StatsSummary {
             salience: 0.9,
             category: "工作".into(),
         }],
+        motive_stats: Vec::new(),
     }
 }
 

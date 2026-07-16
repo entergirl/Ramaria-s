@@ -255,6 +255,51 @@ pub struct CrossCategoryMetrics {
     pub share_kurtosis: f64,
 }
 
+/// 单个动机标签的聚合统计（v1.3 新增：E 模块——动机维度统计）。
+///
+/// 职责:
+/// - 对同一动机标签下的事件进行加权聚合，产出与 CategoryStats 同构的统计指标。
+/// - 为 Phase B Prompt 提供动机维度的量化信息，辅助 LLM 推断动机驱动的性格模式。
+///
+/// 字段约定:
+/// - `motive`: 动机标签名（如 "地位维护"、"自主性"、"归属"）。
+/// - `event_count`: 该动机标签出现的原始事件总数。
+/// - `n_eff`: 加权有效样本量 = Σ w_i。
+/// - `valence_mean`: 加权平均效价。
+/// - `valence_std`: 加权效价标准差。
+/// - `valence_positive_ratio`: 正面事件（valence > 0）的加权占比。
+/// - `share_mean`: 加权平均分享意愿。
+/// - `share_std`: 加权分享意愿标准差。
+/// - `presentation_objective_ratio / subjective_ratio / mixed_ratio`: 三种陈述方式的加权占比。
+/// - `avg_salience`: 该动机标签下事件的平均显著性（算术均值，供排序使用）。
+#[derive(Debug, Clone)]
+pub struct MotiveStats {
+    /// 动机标签
+    pub motive: String,
+    /// 原始事件数
+    pub event_count: usize,
+    /// 加权有效样本量
+    pub n_eff: f64,
+    /// 加权平均效价
+    pub valence_mean: f64,
+    /// 加权效价标准差
+    pub valence_std: f64,
+    /// 正面事件加权占比
+    pub valence_positive_ratio: f64,
+    /// 加权平均分享意愿
+    pub share_mean: f64,
+    /// 加权分享意愿标准差
+    pub share_std: f64,
+    /// 客观型加权占比
+    pub presentation_objective_ratio: f64,
+    /// 主观型加权占比
+    pub presentation_subjective_ratio: f64,
+    /// 混合型加权占比
+    pub presentation_mixed_ratio: f64,
+    /// 算术平均显著性（供排序参考）
+    pub avg_salience: f64,
+}
+
 /// 代表性事件的精简视图（A7 输出）。
 ///
 /// 职责:
@@ -301,6 +346,9 @@ pub struct StatsSummary {
     pub cross_category: CrossCategoryMetrics,
     /// 每分类的代表性事件（按 salience 降序，最多 max_representative_events 条）
     pub representative_events: Vec<RepresentativeEvent>,
+    /// v1.3 新增：按动机标签的二次分组统计（主分类关键词分组之下的二级聚合）。
+    /// 若所有事件的 motives 均为 None 或为空，此字段为空。
+    pub motive_stats: Vec<MotiveStats>,
 }
 
 // =========================================================
@@ -924,7 +972,139 @@ pub fn group_by_category(events: &[MemoryEvent]) -> Vec<(String, Vec<MemoryEvent
     map.into_iter().collect()
 }
 
-/// 计算 salience 加权均值。
+// =========================================================
+// E: 动机维度二次分组统计（v1.3 新增）
+// =========================================================
+
+/// 从事件的 motives 字段中提取动机标签列表。
+///
+/// 策略:
+/// - motives 字段为逗号分隔的字符串（如 "地位维护,自主性"）。
+/// - 拆分后 trim 每个标签，过滤空白和空字符串。
+/// - 若 `motives` 为 None 或全部标签过滤后为空，返回空 Vec。
+///
+/// 参数:
+/// - `event`: 待提取动机标签的事件。
+///
+/// 返回:
+/// - 去空白后的动机标签列表。无动机时返回空 Vec。
+pub fn extract_motive_tags(event: &MemoryEvent) -> Vec<String> {
+    match &event.motives {
+        Some(s) => {
+            let tags: Vec<String> = s
+                .split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect();
+            tags
+        }
+        None => Vec::new(),
+    }
+}
+
+/// 按动机标签分组事件。
+///
+/// 说明:
+/// - 一个事件可能包含多个动机标签，会同时出现在多个分组中。
+/// - 这是"二次分组"——在主分类（keywords）之下，按动机标签做二级聚合。
+/// - 分组按动机标签字典序排列以保证确定性。
+///
+/// 参数:
+/// - `events`: 预过滤后的事件列表。
+///
+/// 返回:
+/// - 动机标签 → 事件列表的映射。仅包含至少 1 个事件的动机标签。
+pub fn group_by_motive(events: &[MemoryEvent]) -> Vec<(String, Vec<MemoryEvent>)> {
+    let mut map: std::collections::BTreeMap<String, Vec<MemoryEvent>> =
+        std::collections::BTreeMap::new();
+    for event in events {
+        let tags = extract_motive_tags(event);
+        for tag in tags {
+            map.entry(tag).or_default().push(event.clone());
+        }
+    }
+    map.into_iter().collect()
+}
+
+/// 计算全部动机标签的聚合统计。
+///
+/// 策略:
+/// - 对每个动机标签，调用 `compute_category_stats` 复用已有的加权统计算法。
+/// - 结果按 `n_eff` 降序排列（有效样本量大的动机优先展示）。
+/// - 仅对 confirmed + tentative 事件进行统计，discarded 已在上游排除。
+/// - 若所有事件均无 motives 数据，返回空 Vec。
+///
+/// 参数:
+/// - `events`: 活跃事件列表（confirmed + tentative，不含 discarded）。
+/// - `enrichments`: 与 events 一一对应的增强数据。
+/// - `config`: 校准权重链配置。
+///
+/// 返回:
+/// - 按 n_eff 降序排列的动机统计列表。无动机数据时为空。
+pub fn compute_motive_stats(
+    events: &[MemoryEvent],
+    enrichments: &[EventEnrichment],
+    config: &CalibratedWeightConfig,
+) -> Vec<MotiveStats> {
+    if events.is_empty() {
+        return Vec::new();
+    }
+
+    let grouped = group_by_motive(events);
+    if grouped.is_empty() {
+        return Vec::new();
+    }
+
+    // 按 n_eff 降序排列
+    let mut stats: Vec<MotiveStats> = grouped
+        .iter()
+        .map(|(motive, motive_events)| {
+            // 为每个动机分组构造对应的 enrichments 子集
+            let motive_enrichments: Vec<EventEnrichment> = motive_events
+                .iter()
+                .map(|e| {
+                    let idx = events.iter().position(|ae| ae.id == e.id).unwrap_or(0);
+                    enrichments.get(idx).cloned().unwrap_or_default()
+                })
+                .collect();
+
+            // 复用 compute_category_stats 计算加权统计量
+            let cat_stats =
+                compute_category_stats(motive, motive_events, Some(&motive_enrichments), config);
+
+            MotiveStats {
+                motive: motive.clone(),
+                event_count: cat_stats.event_count,
+                n_eff: cat_stats.n_eff,
+                valence_mean: cat_stats.valence_mean,
+                valence_std: cat_stats.valence_std,
+                valence_positive_ratio: cat_stats.valence_positive_ratio,
+                share_mean: cat_stats.share_mean,
+                share_std: cat_stats.share_std,
+                presentation_objective_ratio: cat_stats.presentation_objective_ratio,
+                presentation_subjective_ratio: cat_stats.presentation_subjective_ratio,
+                presentation_mixed_ratio: cat_stats.presentation_mixed_ratio,
+                avg_salience: if motive_events.is_empty() {
+                    0.0
+                } else {
+                    motive_events.iter().map(|e| e.salience).sum::<f64>()
+                        / motive_events.len() as f64
+                },
+            }
+        })
+        .collect();
+
+    // 按 n_eff 降序排列
+    stats.sort_by(|a, b| {
+        b.n_eff
+            .partial_cmp(&a.n_eff)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    stats
+}
+
+/// 计算加权均值。
 ///
 /// 公式: x̄_w = Σ(w_i · x_i) / Σ w_i
 ///
@@ -1426,6 +1606,7 @@ pub fn run_phase_a_stats(events: &[MemoryEvent], config: &StatsConfig) -> StatsS
                 share_kurtosis: 0.0,
             },
             representative_events: Vec::new(),
+            motive_stats: Vec::new(),
         };
     }
 
@@ -1453,6 +1634,7 @@ pub fn run_phase_a_stats(events: &[MemoryEvent], config: &StatsConfig) -> StatsS
                     share_kurtosis: 0.0,
                 },
                 representative_events: Vec::new(),
+                motive_stats: Vec::new(),
             };
         }
 
@@ -1495,6 +1677,10 @@ pub fn run_phase_a_stats(events: &[MemoryEvent], config: &StatsConfig) -> StatsS
         // A7: 代表性事件
         let representative_events = select_representative_events(&active, &categories, config);
 
+        // E: 动机维度二次分组统计（v1.3 新增）
+        let motive_stats =
+            compute_motive_stats(&active, &enrichments, &config.calibrated_weight_config);
+
         StatsSummary {
             total_events_in,
             total_events_filtered: active.len(),
@@ -1505,6 +1691,7 @@ pub fn run_phase_a_stats(events: &[MemoryEvent], config: &StatsConfig) -> StatsS
             categories,
             cross_category,
             representative_events,
+            motive_stats,
         }
     } else {
         // ---- v1.2 兼容路径: 硬截断 + 简单权重 ----
@@ -1529,6 +1716,7 @@ pub fn run_phase_a_stats(events: &[MemoryEvent], config: &StatsConfig) -> StatsS
                     share_kurtosis: 0.0,
                 },
                 representative_events: Vec::new(),
+                motive_stats: Vec::new(),
             };
         }
 
@@ -1561,6 +1749,7 @@ pub fn run_phase_a_stats(events: &[MemoryEvent], config: &StatsConfig) -> StatsS
             categories,
             cross_category,
             representative_events,
+            motive_stats: Vec::new(),
         }
     }
 }
@@ -3449,6 +3638,319 @@ mod tests {
         let metrics = compute_cross_category_metrics(&events, &cats, Some(&enrichments), &config);
         assert!(metrics.emotional_stability >= 0.0);
         assert!(metrics.narrative_consistency >= 0.0);
+    }
+
+    // =========================================================
+    // 动机维度统计（v1.3 新增：MotivesStats）
+    // =========================================================
+
+    /// 构造带 motives 字段的测试事件。
+    fn make_event_with_motives(
+        title: &str,
+        summary: &str,
+        keywords: Option<&str>,
+        confidence: f64,
+        salience: f64,
+        valence: f64,
+        share: f64,
+        presentation: Presentation,
+        attitude: Option<&str>,
+        motives: Option<&str>,
+    ) -> MemoryEvent {
+        let now = now_ms();
+        let mut ev = MemoryEvent::new(
+            "test-persona".into(),
+            title.into(),
+            summary.into(),
+            now - 1000,
+            now,
+        );
+        ev.keywords = keywords.map(|k| k.into());
+        ev.confidence = confidence;
+        ev.salience = salience;
+        ev.valence = valence;
+        ev.share = share;
+        ev.presentation = presentation;
+        ev.attitude = attitude.map(|a| a.into());
+        ev.motives = motives.map(|m| m.into());
+        ev.situation_strength = Some(3);
+        ev
+    }
+
+    #[test]
+    fn extract_motive_tags_parses_comma_separated() {
+        let event = make_event_with_motives(
+            "E1",
+            "s",
+            Some("工作"),
+            0.9,
+            0.8,
+            0.5,
+            0.5,
+            Presentation::Mixed,
+            None,
+            Some("地位维护,自主性,归属"),
+        );
+        let tags = extract_motive_tags(&event);
+        assert_eq!(tags.len(), 3);
+        assert_eq!(tags[0], "地位维护");
+        assert_eq!(tags[1], "自主性");
+        assert_eq!(tags[2], "归属");
+    }
+
+    #[test]
+    fn extract_motive_tags_empty_on_none() {
+        let event = make_event_with_motives(
+            "E2",
+            "s",
+            Some("社交"),
+            0.8,
+            0.6,
+            0.0,
+            0.5,
+            Presentation::Mixed,
+            None,
+            None,
+        );
+        let tags = extract_motive_tags(&event);
+        assert!(tags.is_empty());
+    }
+
+    #[test]
+    fn extract_motive_tags_empty_on_blank() {
+        let event = make_event_with_motives(
+            "E3",
+            "s",
+            Some("社交"),
+            0.8,
+            0.6,
+            0.0,
+            0.5,
+            Presentation::Mixed,
+            None,
+            Some("  ,  ,  "),
+        );
+        let tags = extract_motive_tags(&event);
+        assert!(tags.is_empty());
+    }
+
+    #[test]
+    fn extract_motive_tags_single_tag() {
+        let event = make_event_with_motives(
+            "E4",
+            "s",
+            Some("工作"),
+            0.9,
+            0.8,
+            0.5,
+            0.5,
+            Presentation::Mixed,
+            None,
+            Some("自主性"),
+        );
+        let tags = extract_motive_tags(&event);
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0], "自主性");
+    }
+
+    #[test]
+    fn extract_motive_tags_trim_whitespace() {
+        let event = make_event_with_motives(
+            "E5",
+            "s",
+            Some("工作"),
+            0.9,
+            0.8,
+            0.5,
+            0.5,
+            Presentation::Mixed,
+            None,
+            Some(" 地位维护 , 自主性 ,  归属 "),
+        );
+        let tags = extract_motive_tags(&event);
+        assert_eq!(tags.len(), 3);
+        assert_eq!(tags[0], "地位维护");
+        assert_eq!(tags[1], "自主性");
+        assert_eq!(tags[2], "归属");
+    }
+
+    #[test]
+    fn group_by_motive_handles_multi_tag_events() {
+        let e1 = make_event_with_motives(
+            "E1",
+            "s",
+            Some("工作"),
+            0.9,
+            0.8,
+            0.5,
+            0.5,
+            Presentation::Mixed,
+            None,
+            Some("地位维护,自主性"),
+        );
+        let e2 = make_event_with_motives(
+            "E2",
+            "s",
+            Some("社交"),
+            0.8,
+            0.6,
+            0.0,
+            0.5,
+            Presentation::Mixed,
+            None,
+            Some("归属"),
+        );
+        let e3 = make_event_with_motives(
+            "E3",
+            "s",
+            Some("工作"),
+            0.7,
+            0.7,
+            0.3,
+            0.5,
+            Presentation::Mixed,
+            None,
+            Some("地位维护"),
+        );
+        let events = vec![e1, e2, e3];
+        let grouped = group_by_motive(&events);
+
+        // 应该有 3 个动机标签: 地位维护, 自主性, 归属
+        assert_eq!(grouped.len(), 3);
+
+        // 地位维护应该有 2 个事件 (E1, E3)
+        let status_group: Vec<_> = grouped.iter().filter(|(k, _)| k == "地位维护").collect();
+        assert_eq!(status_group.len(), 1);
+        assert_eq!(status_group[0].1.len(), 2);
+
+        // 自主性应该有 1 个事件 (E1)
+        let autonomy_group: Vec<_> = grouped.iter().filter(|(k, _)| k == "自主性").collect();
+        assert_eq!(autonomy_group.len(), 1);
+        assert_eq!(autonomy_group[0].1.len(), 1);
+
+        // 归属应该有 1 个事件 (E2)
+        let belonging_group: Vec<_> = grouped.iter().filter(|(k, _)| k == "归属").collect();
+        assert_eq!(belonging_group.len(), 1);
+        assert_eq!(belonging_group[0].1.len(), 1);
+    }
+
+    #[test]
+    fn group_by_motive_empty_when_no_motives() {
+        let e1 = make_event_with_motives(
+            "E1",
+            "s",
+            Some("工作"),
+            0.9,
+            0.8,
+            0.5,
+            0.5,
+            Presentation::Mixed,
+            None,
+            None,
+        );
+        let e2 = make_event_with_motives(
+            "E2",
+            "s",
+            Some("社交"),
+            0.8,
+            0.6,
+            0.0,
+            0.5,
+            Presentation::Mixed,
+            None,
+            None,
+        );
+        let grouped = group_by_motive(&[e1, e2]);
+        assert!(grouped.is_empty());
+    }
+
+    #[test]
+    fn compute_motive_stats_basic() {
+        let events = vec![
+            make_event_with_motives(
+                "E1",
+                "s1",
+                Some("工作"),
+                0.9,
+                0.8,
+                0.6,
+                0.5,
+                Presentation::Mixed,
+                None,
+                Some("地位维护,自主性"),
+            ),
+            make_event_with_motives(
+                "E2",
+                "s2",
+                Some("社交"),
+                0.8,
+                0.6,
+                -0.3,
+                0.7,
+                Presentation::Subjective,
+                None,
+                Some("归属"),
+            ),
+            make_event_with_motives(
+                "E3",
+                "s3",
+                Some("工作"),
+                0.7,
+                0.7,
+                0.2,
+                0.4,
+                Presentation::Objective,
+                None,
+                Some("地位维护,公平"),
+            ),
+        ];
+
+        let enrichments = EventEnrichment::derive_batch(&events);
+        let config = CalibratedWeightConfig::default();
+        let stats = compute_motive_stats(&events, &enrichments, &config);
+
+        // 应该有 4 个动机标签: 地位维护, 自主性, 归属, 公平
+        assert_eq!(stats.len(), 4);
+
+        // 按 n_eff 降序排列，地位维护应该排第一（2个事件）
+        assert_eq!(stats[0].motive, "地位维护");
+        assert_eq!(stats[0].event_count, 2);
+        assert!(stats[0].n_eff > 0.0);
+        assert!(stats[0].valence_mean > 0.0); // 两个事件都正值
+
+        // 归属只有1个事件，负效价
+        let belonging = stats.iter().find(|s| s.motive == "归属").unwrap();
+        assert_eq!(belonging.event_count, 1);
+        assert!(belonging.valence_mean < 0.0);
+        assert!(belonging.valence_positive_ratio < 0.5);
+    }
+
+    #[test]
+    fn compute_motive_stats_empty() {
+        let events = vec![make_event_with_motives(
+            "E1",
+            "s",
+            Some("工作"),
+            0.9,
+            0.8,
+            0.5,
+            0.5,
+            Presentation::Mixed,
+            None,
+            None,
+        )];
+        let enrichments = EventEnrichment::derive_batch(&events);
+        let config = CalibratedWeightConfig::default();
+        let stats = compute_motive_stats(&events, &enrichments, &config);
+        assert!(stats.is_empty());
+    }
+
+    #[test]
+    fn compute_motive_stats_empty_events() {
+        let enrichments: Vec<EventEnrichment> = Vec::new();
+        let config = CalibratedWeightConfig::default();
+        let stats = compute_motive_stats(&[], &enrichments, &config);
+        assert!(stats.is_empty());
     }
 
     // =========================================================

@@ -12,7 +12,7 @@
 use ramaria_core::{PersonalityTrait, TraitLayer, TraitSource, TraitStatus};
 
 use crate::inference::stats::{
-    CategoryStats, CrossCategoryMetrics, RepresentativeEvent, StatsSummary,
+    CategoryStats, CrossCategoryMetrics, MotiveStats, RepresentativeEvent, StatsSummary,
 };
 
 // =========================================================
@@ -103,7 +103,12 @@ pub struct InferenceResult {
 // Prompt 构建
 // =========================================================
 
-/// 格式化分类统计为 LLM 可读文本。
+/// 格式化分类统计为 LLM 可读文本（v1.3 适配：说明校准权重来源）。
+///
+/// 说明:
+/// - n_eff 不再等于原始事件数，而是校准权重之和：w_i = salience_cal × confidence_factor × situation_multiplier × source_support。
+/// - tentative 事件（0.45 ≤ confidence < 0.6）以半权重参与统计。
+/// - 分类级统计已应用分层经验贝叶斯收缩（base/primary 使用全局先验，accent 使用领域先验）。
 fn format_category_stats(cat: &CategoryStats, low_threshold: f64) -> String {
     let warning = if cat.n_eff < low_threshold {
         format!(
@@ -117,8 +122,7 @@ fn format_category_stats(cat: &CategoryStats, low_threshold: f64) -> String {
     format!(
         "{}\
 分类: {}\n\
-  - 原始事件数: {}\n\
-  - 有效样本量 (n_eff): {:.1}\n\
+  - 原始事件数: {} | 有效样本量 n_eff (校准权重之和): {:.1}\n\
   - 加权效价均值: {:.2} | 标准差: {:.2} | 正面占比: {:.1}%\n\
   - 加权分享意愿均值: {:.2} | 标准差: {:.2}\n\
   - 陈述方式: 客观 {:.1}% | 主观 {:.1}% | 混合 {:.1}%\n\
@@ -179,27 +183,110 @@ fn format_representative_events(events: &[RepresentativeEvent], max_display: usi
     s
 }
 
+/// 格式化动机统计为 LLM 可读文本（v1.3 新增：动机维度）。
+///
+/// 策略:
+/// - 按 n_eff 降序展示动机标签及其统计指标。
+/// - 仅展示 n_eff ≥ 1.0 的动机（过滤噪声）。
+/// - 若结果为空或仅包含无效条目，返回空字符串。
+///
+/// 参数:
+/// - `motive_stats`: 动机统计列表。
+/// - `max_display`: 最多展示的动机标签数。
+///
+/// 返回:
+/// - 格式化的动机统计文本段落。无有效数据时为空字符串。
+pub fn format_motive_stats(motive_stats: &[MotiveStats], max_display: usize) -> String {
+    let valid: Vec<&MotiveStats> = motive_stats
+        .iter()
+        .filter(|m| m.n_eff >= 1.0 && m.event_count > 0)
+        .collect();
+
+    if valid.is_empty() {
+        return String::new();
+    }
+
+    let mut s = String::from("## 动机维度统计\n\n");
+    s.push_str(&format!(
+        "以下统计基于动机标签（Fundamental Motives Framework）对事件的二次分组聚合。\n\
+共有 {} 个动机标签（n_eff≥1.0）。各动机标签下的统计指标有助于评估用户行为的动机驱动力。\n\n",
+        valid.len()
+    ));
+
+    for m in valid.iter().take(max_display) {
+        s.push_str(&format!(
+            "动机「{}」:\n\
+  - 事件数: {} | 有效样本量 (n_eff): {:.1}\n\
+  - 加权效价均值: {:.2} | 标准差: {:.2} | 正面占比: {:.1}%\n\
+  - 加权分享意愿均值: {:.2} | 标准差: {:.2}\n\
+  - 陈述方式: 客观 {:.1}% | 主观 {:.1}% | 混合 {:.1}%\n\
+  - 平均显著性: {:.2}\n\n",
+            m.motive,
+            m.event_count,
+            m.n_eff,
+            m.valence_mean,
+            m.valence_std,
+            m.valence_positive_ratio * 100.0,
+            m.share_mean,
+            m.share_std,
+            m.presentation_objective_ratio * 100.0,
+            m.presentation_subjective_ratio * 100.0,
+            m.presentation_mixed_ratio * 100.0,
+            m.avg_salience,
+        ));
+    }
+
+    // 如有被截断的条目，备注说明
+    if valid.len() > max_display {
+        s.push_str(&format!(
+            "（仅展示前 {} 个动机标签，共 {} 个。剩余动机未在 Prompt 中展示但仍参与后台统计。）\n\n",
+            max_display,
+            valid.len()
+        ));
+    }
+
+    s
+}
+
 /// 构建 Step 1 prompt：逐分类个性模式提取。
 ///
 /// 参数:
 /// - `stats`: Phase A 统计摘要。
 /// - `config`: 推断器配置。
 /// - `causal_features_text`: 可选的因果链特征文本（由 A8 模块生成）。为 None 或空字符串时跳过。
+/// - `motive_stats_text`: 可选的动机维度统计文本（由 E 模块生成）。为 None 或空字符串时跳过。
 pub fn build_step1_prompt(
     stats: &StatsSummary,
     config: &InferrerConfig,
     causal_features_text: Option<&str>,
+    motive_stats_text: Option<&str>,
 ) -> String {
     let mut prompt = String::new();
+    prompt.push_str("你是一位性格心理分析师。基于以下统计数据和事件摘要，对用户在每个生活领域的性格表现进行分析。\n\n");
+
+    // ---- 统计方法说明 ----
+    prompt.push_str("## 统计方法说明\n\n");
+    prompt.push_str("本次统计使用 v1.3 校准权重链：w_i = salience_cal × confidence_factor × situation_multiplier × source_support。\n");
     prompt.push_str(
-        "你是一位性格心理分析师。基于以下统计数据和事件摘要，对用户在每个生活领域的性格表现进行分析。\n\n",
+        "- 有效样本量 n_eff 是校准权重之和（非原始事件数），高权重事件对统计结果贡献更大。\n",
     );
+    prompt.push_str(
+        "- tentative 事件（置信度 0.45-0.6）以半权重参与统计，discarded 事件（<0.45）已排除。\n",
+    );
+    prompt.push_str("- 分类级统计已应用分层经验贝叶斯收缩：base/primary 层使用全局先验，accent 层使用领域先验。\n\n");
 
     // ---- 因果链特征（A8） ----
     if let Some(causal_text) = causal_features_text
         && !causal_text.is_empty()
     {
         prompt.push_str(causal_text);
+    }
+
+    // ---- 动机维度统计（E 模块） ----
+    if let Some(motive_text) = motive_stats_text
+        && !motive_text.is_empty()
+    {
+        prompt.push_str(motive_text);
     }
 
     prompt.push_str("## 分类统计\n\n");
@@ -220,13 +307,14 @@ pub fn build_step1_prompt(
         "## 任务\n\
 对上述每个分类，提炼该分类下呈现的性格信号。输出 JSON 对象，键为分类名，值为对象包含:\n\
 - signal_label: 性格信号标签（2-4字中文词）\n\
-- evidence_citation: 引用统计指标作为证据\n\
+- evidence_citation: 引用统计指标作为证据（可引用动机维度统计作为补充线索）\n\
 - stability_judgment: \"stable\"/\"contextual\"/\"uncertain\"\n\
 - sufficient_evidence: true/false\n\n\
 只输出 JSON，不要任何其他文字。\n\n\
 约束:\n\
 - 只基于提供的数据推断，不引入对人类一般性的先验知识\n\
 - n_eff < {:.0} 的分类视为 uncertain\n\
+- tentative 标签表示置信度不足 0.6，不要贸然给出 strong stable 判定\n\
 - 如果数据不足以支持任何推断，signal_label 填 \"insufficient_data\"\n",
         config.low_evidence_threshold
     ));
@@ -425,6 +513,31 @@ pub fn mock_infer(stats: &StatsSummary, persona_uid: &str) -> InferenceResult {
             && !accent_candidates.contains(&sig.signal_label)
         {
             accent_candidates.push(sig.signal_label.clone());
+        }
+    }
+
+    // ---- v1.3 新增：动机维度的点缀特征 ----
+    // 从动机统计中提取显著的动机驱动模式作为点缀 trait
+    for motive_stat in stats.motive_stats.iter().take(3) {
+        // 仅对 n_eff >= 2.0 的动机生成信号
+        if motive_stat.n_eff < 2.0 {
+            continue;
+        }
+        // 根据动机的效价模式生成 signal label
+        let motive_signal = if motive_stat.valence_mean > 0.3 && motive_stat.valence_std < 0.5 {
+            format!("动机-{}-正向驱动", motive_stat.motive)
+        } else if motive_stat.valence_mean < -0.3 {
+            format!("动机-{}-负向驱动", motive_stat.motive)
+        } else if motive_stat.share_mean > 0.6 {
+            format!("动机-{}-高分享", motive_stat.motive)
+        } else if motive_stat.presentation_subjective_ratio > 0.6 {
+            format!("动机-{}-主观表达", motive_stat.motive)
+        } else {
+            format!("动机-{}-驱动", motive_stat.motive)
+        };
+        // 仅当动机信号不在已有候选里且不重复时才添加
+        if !accent_candidates.contains(&motive_signal) && accent_candidates.len() < 8 {
+            accent_candidates.push(motive_signal);
         }
     }
 
@@ -739,6 +852,7 @@ mod tests {
                 salience: 0.9,
                 category: "工作".into(),
             }],
+            motive_stats: Vec::new(),
         }
     }
 
@@ -748,7 +862,7 @@ mod tests {
     fn build_step1_prompt_is_valid() {
         let stats = make_test_stats();
         let config = InferrerConfig::default();
-        let prompt = build_step1_prompt(&stats, &config, None);
+        let prompt = build_step1_prompt(&stats, &config, None, None);
         assert!(prompt.contains("工作"));
         assert!(prompt.contains("社交"));
         assert!(prompt.contains("n_eff"));
@@ -824,10 +938,106 @@ mod tests {
                 share_kurtosis: 0.0,
             },
             representative_events: vec![],
+            motive_stats: Vec::new(),
         };
         let result = mock_infer(&stats, "user-0001");
         assert!(result.category_signals.is_empty());
         assert!(result.traits.is_empty());
+    }
+
+    // ---- v1.3 新增：动机维度 mock 推断 ----
+
+    #[test]
+    fn mock_infer_with_motive_stats_generates_motive_traits() {
+        use crate::inference::stats::MotiveStats;
+
+        let mut stats = make_test_stats();
+        // 添加两个动机统计条目
+        stats.motive_stats = vec![
+            MotiveStats {
+                motive: "地位维护".into(),
+                event_count: 3,
+                n_eff: 2.5,
+                valence_mean: 0.5,
+                valence_std: 0.2,
+                valence_positive_ratio: 0.8,
+                share_mean: 0.6,
+                share_std: 0.2,
+                presentation_objective_ratio: 0.3,
+                presentation_subjective_ratio: 0.5,
+                presentation_mixed_ratio: 0.2,
+                avg_salience: 0.7,
+            },
+            MotiveStats {
+                motive: "自主性".into(),
+                event_count: 2,
+                n_eff: 2.2,
+                valence_mean: -0.4,
+                valence_std: 0.3,
+                valence_positive_ratio: 0.2,
+                share_mean: 0.8,
+                share_std: 0.1,
+                presentation_objective_ratio: 0.1,
+                presentation_subjective_ratio: 0.7,
+                presentation_mixed_ratio: 0.2,
+                avg_salience: 0.6,
+            },
+        ];
+
+        let result = mock_infer(&stats, "user-0001");
+        // 应该包含动机驱动的 accent trait
+        let motive_traits: Vec<_> = result
+            .traits
+            .iter()
+            .filter(|t| t.trait_label.contains("动机-"))
+            .collect();
+        assert!(
+            !motive_traits.is_empty(),
+            "mock_infer 应在有动机数据时生成动机相关 trait，实际 traits: {:?}",
+            result
+                .traits
+                .iter()
+                .map(|t| &t.trait_label)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn build_step1_prompt_includes_calibration_preamble() {
+        let stats = make_test_stats();
+        let config = InferrerConfig::default();
+        let prompt = build_step1_prompt(&stats, &config, None, None);
+        assert!(prompt.contains("校准权重链"));
+        assert!(prompt.contains("confidence_factor"));
+        assert!(prompt.contains("tentative 事件"));
+        assert!(prompt.contains("分层经验贝叶斯收缩"));
+    }
+
+    #[test]
+    fn build_step1_prompt_with_motive_text() {
+        use crate::inference::stats::MotiveStats;
+
+        let mut stats = make_test_stats();
+        stats.motive_stats = vec![MotiveStats {
+            motive: "归属".into(),
+            event_count: 2,
+            n_eff: 1.8,
+            valence_mean: 0.3,
+            valence_std: 0.2,
+            valence_positive_ratio: 0.7,
+            share_mean: 0.5,
+            share_std: 0.15,
+            presentation_objective_ratio: 0.4,
+            presentation_subjective_ratio: 0.3,
+            presentation_mixed_ratio: 0.3,
+            avg_salience: 0.55,
+        }];
+
+        let motive_text = format_motive_stats(&stats.motive_stats, 5);
+        let prompt =
+            build_step1_prompt(&stats, &InferrerConfig::default(), None, Some(&motive_text));
+        assert!(prompt.contains("动机维度统计"));
+        assert!(prompt.contains("归属"));
     }
 
     // ---- 后处理（差异计算） ----
