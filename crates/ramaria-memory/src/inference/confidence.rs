@@ -106,6 +106,7 @@ pub fn time_decay_weight(created_at_ms: i64, now_ms: i64, config: &ConfidenceCon
 /// 从已有证据记录计算有效证据总量 E_total。
 ///
 /// 每条证据的贡献 = event_confidence × time_decay_weight(t)。
+/// 其中 event_confidence 为证据的 score 绝对值。
 ///
 /// 参数:
 /// - `evidence_records`: 该 trait 的所有历史证据记录。
@@ -116,7 +117,7 @@ pub fn time_decay_weight(created_at_ms: i64, now_ms: i64, config: &ConfidenceCon
 /// - E_total（有效证据量）。
 pub fn compute_e_total(
     evidence_records: &[TraitEvidence],
-    now_ms: i64,
+    now: i64,
     config: &ConfidenceConfig,
 ) -> f64 {
     evidence_records
@@ -125,8 +126,39 @@ pub fn compute_e_total(
             // 证据贡献 = |score| × decay_weight
             // score 的范围 -1.0..1.0，取绝对值为证据强度
             let strength = ev.score.abs();
-            let decay_w = time_decay_weight(ev.created_at, now_ms, config);
+            let decay_w = time_decay_weight(ev.created_at, now, config);
             strength * decay_w
+        })
+        .sum()
+}
+
+/// v1.3: 使用校准权重链计算 E_total。
+///
+/// 每条证据的贡献 = `calibrated_weight × |score| × decay_weight`。
+/// 与 `compute_e_total` 的区别：额外乘以校准权重 `calibrated_weight`，
+/// 反映事件本身的重要性（salience × confidence × situation × source）。
+///
+/// 参数:
+/// - `evidence_records`: 历史证据记录。
+/// - `calibrated_weights`: 每个证据对应的校准权重（需与 evidence_records 一一对应）。
+/// - `now`: 当前时间。
+/// - `config`: 置信度配置。
+///
+/// 返回:
+/// - 校准后的 E_total。
+pub fn compute_e_total_calibrated(
+    evidence_records: &[TraitEvidence],
+    calibrated_weights: &[f64],
+    now: i64,
+    config: &ConfidenceConfig,
+) -> f64 {
+    evidence_records
+        .iter()
+        .zip(calibrated_weights)
+        .map(|(ev, &cal_w)| {
+            let strength = ev.score.abs();
+            let decay_w = time_decay_weight(ev.created_at, now, config);
+            cal_w * strength * decay_w
         })
         .sum()
 }
@@ -168,7 +200,7 @@ pub fn compute_e_delta(new_evidence: &[(f64, i64)], now_ms: i64, config: &Confid
 /// - 一致度 C（0.0..1.0）。若无法计算返回 0.5（中性）。
 pub fn compute_consistency(
     evidence_records: &[TraitEvidence],
-    now_ms: i64,
+    now: i64,
     config: &ConfidenceConfig,
 ) -> f64 {
     if evidence_records.is_empty() {
@@ -179,7 +211,7 @@ pub fn compute_consistency(
     let mut total_weight = 0.0;
 
     for ev in evidence_records {
-        let decay_w = time_decay_weight(ev.created_at, now_ms, config);
+        let decay_w = time_decay_weight(ev.created_at, now, config);
         // score 本身已有方向，直接使用（不取绝对值）
         weighted_sum += ev.score * decay_w;
         total_weight += decay_w;
@@ -190,6 +222,47 @@ pub fn compute_consistency(
     }
 
     // 将 [-1, 1] 映射到 [0, 1]
+    let raw_consistency = weighted_sum / total_weight;
+    (raw_consistency + 1.0) / 2.0
+}
+
+/// v1.3: 使用校准权重链计算一致度 C。
+///
+/// 与 `compute_consistency` 的区别：一致性加权计算中每条证据的权重 = `calibrated_weight × decay_w`，
+/// 而非仅 `decay_w`。使得高重要性事件对一致性的影响与其证据量匹配。
+///
+/// 参数:
+/// - `evidence_records`: 历史证据记录。
+/// - `calibrated_weights`: 每个证据对应的校准权重（需与 evidence_records 一一对应）。
+/// - `now`: 当前时间。
+/// - `config`: 置信度配置。
+///
+/// 返回:
+/// - 校准后的一致度 C（0.0..1.0）。
+pub fn compute_consistency_calibrated(
+    evidence_records: &[TraitEvidence],
+    calibrated_weights: &[f64],
+    now: i64,
+    config: &ConfidenceConfig,
+) -> f64 {
+    if evidence_records.is_empty() {
+        return 0.5;
+    }
+
+    let mut weighted_sum = 0.0;
+    let mut total_weight = 0.0;
+
+    for (ev, &cal_w) in evidence_records.iter().zip(calibrated_weights) {
+        let decay_w = time_decay_weight(ev.created_at, now, config);
+        let combined_w = cal_w * decay_w;
+        weighted_sum += ev.score * combined_w;
+        total_weight += combined_w;
+    }
+
+    if total_weight < 1e-12 {
+        return 0.5;
+    }
+
     let raw_consistency = weighted_sum / total_weight;
     (raw_consistency + 1.0) / 2.0
 }
@@ -299,6 +372,91 @@ pub fn update_trait_confidence(
     TraitConfidenceUpdate {
         trait_id,
         conf_before,
+        conf_after,
+        e_total_before: e_old,
+        e_total_after: e_total_new,
+        consistency_before: c_old,
+        consistency_after: c_combined,
+        new_evidence_count: new_event_data.len(),
+    }
+}
+
+/// v1.3: 旧 trait 状态的输入包，用于校准权重链置信度更新。
+///
+/// 将旧证据和校准权重捆绑为单一参数，
+/// 避免 `update_trait_confidence_calibrated` 参数过多。
+#[derive(Debug, Clone)]
+pub struct OldTraitState {
+    /// trait ID
+    pub trait_id: i64,
+    /// 更新前的置信度
+    pub conf_before: f64,
+    /// 旧证据记录列表
+    pub old_evidence: Vec<TraitEvidence>,
+    /// 旧证据对应的校准权重（与 old_evidence 一一对应）
+    pub old_calibrated_weights: Vec<f64>,
+}
+
+/// v1.3: 使用校准权重链的单条 trait 置信度更新。
+///
+/// 与 `update_trait_confidence` 的区别：使用校准权重 `calibrated_weights`
+/// 替代原始证据 score 强度，使 E_total 和一致度 C 的计算反映事件实际重要性。
+///
+/// 参数:
+/// - `old_state`: 旧 trait 状态的输入包（含 trait_id、旧置信度、旧证据和校准权重）。
+/// - `new_event_data`: 新事件数据 (calibrated_weight, created_at_ms) 列表。
+/// - `new_event_scores`: 新事件对该 trait 的匹配度评分（-1..1）。
+/// - `now_ms`: 当前时间。
+/// - `config`: 置信度配置。
+///
+/// 返回:
+/// - TraitConfidenceUpdate。
+pub fn update_trait_confidence_calibrated(
+    old_state: &OldTraitState,
+    new_event_data: &[(f64, i64)],
+    new_event_scores: &[f64],
+    now_ms: i64,
+    config: &ConfidenceConfig,
+) -> TraitConfidenceUpdate {
+    // 旧证据量（校准权重链）
+    let e_old = compute_e_total_calibrated(
+        &old_state.old_evidence,
+        &old_state.old_calibrated_weights,
+        now_ms,
+        config,
+    );
+    let c_old = compute_consistency_calibrated(
+        &old_state.old_evidence,
+        &old_state.old_calibrated_weights,
+        now_ms,
+        config,
+    );
+
+    // 新证据贡献（使用 calibrated_weight 替代原始 event.confidence）
+    let e_new = new_event_data
+        .iter()
+        .map(|&(cal_w, created_at)| {
+            let decay_w = time_decay_weight(created_at, now_ms, config);
+            cal_w * decay_w
+        })
+        .sum();
+
+    // 新证据一致度
+    let c_new_batch = if new_event_scores.is_empty() {
+        0.5
+    } else {
+        let avg_score = new_event_scores.iter().sum::<f64>() / new_event_scores.len() as f64;
+        (avg_score + 1.0) / 2.0
+    };
+
+    // 融合
+    let e_total_new = e_old + e_new;
+    let c_combined = merge_consistency(c_old, e_old, c_new_batch, e_new);
+    let conf_after = compute_confidence(c_combined, e_total_new);
+
+    TraitConfidenceUpdate {
+        trait_id: old_state.trait_id,
+        conf_before: old_state.conf_before,
         conf_after,
         e_total_before: e_old,
         e_total_after: e_total_new,
@@ -619,5 +777,86 @@ mod tests {
         for u in &summary.updates {
             assert!(u.conf_after > 0.0);
         }
+    }
+
+    // ---- v1.3 M5-B: 校准权重链版本 ----
+
+    #[test]
+    fn compute_e_total_calibrated_basic() {
+        let config = ConfidenceConfig::default();
+        let now = now_ms();
+        let ev = make_evidence(1, 1, 0.8, 0.0, &config);
+        // 校准权重 = 2.0（高重要性事件）
+        let e = compute_e_total_calibrated(&[ev], &[2.0], now, &config);
+        // E ≈ 2.0 × 0.8 × 1.0 = 1.6
+        assert!((e - 1.6).abs() < 0.01, "E 应为 1.6，实际={}", e);
+    }
+
+    #[test]
+    fn compute_e_total_calibrated_vs_original() {
+        let config = ConfidenceConfig::default();
+        let now = now_ms();
+        let ev1 = make_evidence(1, 1, 0.8, 0.0, &config);
+        let ev2 = make_evidence(1, 2, -0.5, 0.0, &config);
+        let evidence = vec![ev1, ev2];
+
+        // 原版：E = |0.8| + |0.5| = 1.3
+        let e_orig = compute_e_total(&evidence, now, &config);
+        assert!((e_orig - 1.3).abs() < 0.01);
+
+        // 校准版：第一条权重 3.0，第二条权重 1.0
+        // E = 3.0×0.8 + 1.0×0.5 = 2.4 + 0.5 = 2.9
+        let e_cal = compute_e_total_calibrated(&evidence, &[3.0, 1.0], now, &config);
+        assert!((e_cal - 2.9).abs() < 0.01, "E_cal 应为 2.9，实际={}", e_cal);
+
+        // 高重要性事件对 E_total 的贡献显著增大
+        assert!(e_cal > e_orig, "校准后 E_total 应更大");
+    }
+
+    #[test]
+    fn compute_consistency_calibrated_high_weight_amplifies() {
+        let config = ConfidenceConfig::default();
+        let now = now_ms();
+        // 证据1: 高支持(score=0.9) + 高权重(3.0)
+        // 证据2: 中性(score=0.0) + 低权重(0.5)
+        let ev1 = make_evidence(1, 1, 0.9, 0.0, &config);
+        let ev2 = make_evidence(1, 2, 0.0, 0.0, &config);
+        let evidence = vec![ev1, ev2];
+
+        // 原版一致度：(0.9 + 0.0) / 2 → 原始均值 0.45，映射后 (0.45+1)/2 = 0.725
+        let c_orig = compute_consistency(&evidence, now, &config);
+        assert!((c_orig - 0.725).abs() < 0.01);
+
+        // 校准版：高权重放大高支持证据的影响
+        let c_cal = compute_consistency_calibrated(&evidence, &[3.0, 0.5], now, &config);
+        // C 应高于原版（高权重支持证据占主导），但不超过 0.95
+        assert!(
+            c_cal > c_orig,
+            "校准后一致度应更高，原={:.4}, 校准={:.4}",
+            c_orig,
+            c_cal
+        );
+        assert!(c_cal < 0.95, "不应过度放大");
+    }
+
+    #[test]
+    fn update_trait_confidence_calibrated_basic() {
+        let config = ConfidenceConfig::default();
+        let now = now_ms();
+        let old_evidence = vec![make_evidence(1, 1, 0.9, 0.0, &config)];
+        let old_weights = vec![1.5]; // 校准权重
+        let new_data = vec![(1.2, now)]; // (calibrated_weight=1.2, created_at)
+        let new_scores = vec![0.7];
+
+        let old_state = OldTraitState {
+            trait_id: 1,
+            conf_before: 0.6,
+            old_evidence,
+            old_calibrated_weights: old_weights,
+        };
+        let update =
+            update_trait_confidence_calibrated(&old_state, &new_data, &new_scores, now, &config);
+        assert!(update.conf_after > 0.0);
+        assert!(update.e_total_after > update.e_total_before);
     }
 }

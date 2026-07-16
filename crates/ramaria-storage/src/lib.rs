@@ -250,6 +250,12 @@ impl StorageBackend for SqliteStorage {
     ) -> RamariaResult<Vec<ClusterSnapshot>> {
         repo::cluster::get_current(&self.pool, persona_uid, category).await
     }
+    async fn get_all_snapshots_with_embeddings(
+        &self,
+        persona_uid: &str,
+    ) -> RamariaResult<Vec<ClusterSnapshot>> {
+        repo::cluster::get_all_with_embeddings(&self.pool, persona_uid).await
+    }
 
     // =========================================================
     // Keyword Pool（关键词词典）

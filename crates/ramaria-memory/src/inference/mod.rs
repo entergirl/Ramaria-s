@@ -31,12 +31,14 @@ pub use causal::{
 };
 pub use clustering::{
     AttitudeSample, ClusterAssignment, ClusterDescription, ClusteringConfig, ClusteringResult,
-    cosine_similarity, run_clustering, simple_density_cluster,
+    CrossVersionMatch, CrossVersionMatchResult, HistoricalSnapshot, cosine_similarity,
+    generate_semantic_label, match_clusters_cross_version, run_clustering, simple_density_cluster,
 };
 pub use confidence::{
-    ConfidenceConfig, ConfidenceSummary, TraitConfidenceUpdate, compute_confidence,
-    compute_consistency, compute_e_delta, compute_e_total, merge_consistency,
-    run_confidence_update, time_decay_weight, update_trait_confidence,
+    ConfidenceConfig, ConfidenceSummary, OldTraitState, TraitConfidenceUpdate, compute_confidence,
+    compute_consistency, compute_consistency_calibrated, compute_e_delta, compute_e_total,
+    compute_e_total_calibrated, merge_consistency, run_confidence_update, time_decay_weight,
+    update_trait_confidence, update_trait_confidence_calibrated,
 };
 pub use drift::{
     CategoryDriftResult, CategoryEventData, DimensionDriftResult, DriftConfig, DriftSummary,
@@ -51,7 +53,9 @@ pub use inferrer::{
 };
 pub use orchestrator::{
     PhaseBResult, PhaseBSource, PhaseCResult, apply_layered_shrinkage,
-    build_layer_hints_from_traits, run_phase_b_inference, run_phase_c_update,
+    build_layer_hints_from_traits, generate_semantic_labels_for_clusters,
+    persist_cluster_snapshots_with_semantic_labels, query_cross_version_matches,
+    run_phase_b_inference, run_phase_c_update,
 };
 pub use shrink::{
     ShrinkConfig, ShrinkPrior, compute_domain_prior, compute_dynamic_gamma, compute_global_stats,

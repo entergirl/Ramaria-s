@@ -1180,6 +1180,10 @@ impl PersonaExample {
 /// 职责:
 /// - 每次全量聚类后保存各分类下的簇结构和语义标签。
 /// - 跨版本匹配时比对语义标签的 embedding 相似度，而非簇编号。
+///
+/// v1.3 新增:
+/// - `semantic_label`: 从核心样本 paraphrase 中提取的语义标签文本。
+/// - `semantic_label_embedding`: 语义标签的 embedding 向量 BLOB（f32 小端序列化）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClusterSnapshot {
     /// 内部索引（INTEGER AUTOINCREMENT）
@@ -1187,7 +1191,7 @@ pub struct ClusterSnapshot {
     pub persona_uid: String,
     /// 事件分类标签（工作/社交/家庭）
     pub category: String,
-    /// 簇的语义标签
+    /// 簇的语义标签（旧字段，保留兼容）
     pub cluster_label: String,
     /// JSON 数组，核心样本的去情境化态度文本
     pub samples: Option<String>,
@@ -1196,6 +1200,10 @@ pub struct ClusterSnapshot {
     /// 1=最新快照，0=历史版本
     pub is_current: bool,
     pub created_at: i64,
+    /// v1.3: 从核心样本提取的语义标签文本
+    pub semantic_label: Option<String>,
+    /// v1.3: 语义标签的 embedding 向量（f32 小端 BLOB）
+    pub semantic_label_embedding: Option<Vec<u8>>,
 }
 
 impl ClusterSnapshot {
@@ -1210,7 +1218,41 @@ impl ClusterSnapshot {
             count: 0,
             is_current: true,
             created_at: now_ms(),
+            semantic_label: None,
+            semantic_label_embedding: None,
         }
+    }
+
+    /// 将 f32 向量序列化为 BLOB（小端字节序）。
+    ///
+    /// 格式: 每个 f32 占 4 字节，按小端排列。
+    /// 用于存储到 `semantic_label_embedding` BLOB 列。
+    pub fn serialize_embedding(vec: &[f32]) -> Vec<u8> {
+        let mut blob = Vec::with_capacity(vec.len() * 4);
+        for &val in vec {
+            blob.extend_from_slice(&val.to_le_bytes());
+        }
+        blob
+    }
+
+    /// 从 BLOB 反序列化为 f32 向量。
+    ///
+    /// 参数:
+    /// - `blob`: 小端字节序的 f32 BLOB 数据。
+    ///
+    /// 返回:
+    /// - `Some(Vec<f32>)` 如果 BLOB 长度是 4 的倍数；`None` 如果数据损坏或为空。
+    pub fn deserialize_embedding(blob: &[u8]) -> Option<Vec<f32>> {
+        if blob.is_empty() || !blob.len().is_multiple_of(4) {
+            return None;
+        }
+        let count = blob.len() / 4;
+        let mut vec = Vec::with_capacity(count);
+        for chunk in blob.chunks_exact(4) {
+            let arr: [u8; 4] = chunk.try_into().unwrap();
+            vec.push(f32::from_le_bytes(arr));
+        }
+        Some(vec)
     }
 }
 

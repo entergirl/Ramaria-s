@@ -72,6 +72,10 @@ pub struct DimensionDriftResult {
 /// 职责:
 /// - 封装一个事件分类的完整漂移检测输出。
 /// - 任一维度显著漂移时 `needs_review=true`。
+///
+/// v1.3 M5-B 新增:
+/// - salience_drift: salience 维度漂移检测结果。
+/// - confidence_drift: confidence 维度漂移检测结果。
 #[derive(Debug, Clone)]
 pub struct CategoryDriftResult {
     /// 分类标签
@@ -80,6 +84,10 @@ pub struct CategoryDriftResult {
     pub valence_drift: DimensionDriftResult,
     /// share 维度结果
     pub share_drift: DimensionDriftResult,
+    /// v1.3: salience 维度结果
+    pub salience_drift: DimensionDriftResult,
+    /// v1.3: confidence 维度结果
+    pub confidence_drift: DimensionDriftResult,
     /// 是否需要重审（任维度显著漂移）
     pub needs_review: bool,
 }
@@ -326,6 +334,9 @@ pub fn detect_dimension_drift(
 // =========================================================
 
 /// 单个分类的事件数据（用于漂移检测）。
+///
+/// v1.3 M5-B 新增:
+/// - old_confidences / new_confidences: confidence 维度漂移检测。
 #[derive(Debug, Clone)]
 pub struct CategoryEventData {
     /// 分类标签
@@ -336,15 +347,19 @@ pub struct CategoryEventData {
     pub old_shares: Vec<f64>,
     /// 旧事件 salience 值
     pub old_saliences: Vec<f64>,
+    /// v1.3: 旧事件 confidence 值
+    pub old_confidences: Vec<f64>,
     /// 新事件 valence 值
     pub new_valences: Vec<f64>,
     /// 新事件 share 值
     pub new_shares: Vec<f64>,
     /// 新事件 salience 值
     pub new_saliences: Vec<f64>,
+    /// v1.3: 新事件 confidence 值
+    pub new_confidences: Vec<f64>,
 }
 
-/// 对单个分类执行完整的漂移检测（valence + share 双维度）。
+/// 对单个分类执行完整的漂移检测（四维度：valence / share / salience / confidence）。
 ///
 /// 参数:
 /// - `data`: 分类的新旧事件数据。
@@ -372,13 +387,34 @@ pub fn detect_category_drift(
         &data.new_saliences,
         config,
     );
+    let salience_drift = detect_dimension_drift(
+        "salience",
+        &data.old_saliences,
+        &data.new_saliences,
+        &data.old_saliences,
+        &data.new_saliences,
+        config,
+    );
+    let confidence_drift = detect_dimension_drift(
+        "confidence",
+        &data.old_confidences,
+        &data.new_confidences,
+        &data.old_saliences,
+        &data.new_saliences,
+        config,
+    );
 
-    let needs_review = valence_drift.is_significant || share_drift.is_significant;
+    let needs_review = valence_drift.is_significant
+        || share_drift.is_significant
+        || salience_drift.is_significant
+        || confidence_drift.is_significant;
 
     CategoryDriftResult {
         category: data.category.clone(),
         valence_drift,
         share_drift,
+        salience_drift,
+        confidence_drift,
         needs_review,
     }
 }
@@ -555,9 +591,11 @@ mod tests {
             old_valences: vec![],
             old_shares: vec![],
             old_saliences: vec![],
+            old_confidences: vec![],
             new_valences: vec![],
             new_shares: vec![],
             new_saliences: vec![],
+            new_confidences: vec![],
         };
         let result = detect_category_drift(&data, &config);
         assert!(!result.needs_review, "空数据不应触发重审");
@@ -572,18 +610,22 @@ mod tests {
                 old_valences: vec![0.1, 0.2, 0.1, 0.2],
                 old_shares: vec![0.5, 0.6, 0.5, 0.6],
                 old_saliences: vec![0.5; 4],
+                old_confidences: vec![0.6; 4],
                 new_valences: vec![0.8, 0.9, 0.8, 0.9],
                 new_shares: vec![0.5, 0.6, 0.5, 0.6],
                 new_saliences: vec![0.5; 4],
+                new_confidences: vec![0.6; 4],
             },
             CategoryEventData {
                 category: "社交".into(),
                 old_valences: vec![0.3, 0.4, 0.3],
                 old_shares: vec![0.7, 0.8, 0.7],
                 old_saliences: vec![0.5; 3],
+                old_confidences: vec![0.6; 3],
                 new_valences: vec![0.3, 0.4, 0.3],
                 new_shares: vec![0.7, 0.8, 0.7],
                 new_saliences: vec![0.5; 3],
+                new_confidences: vec![0.6; 3],
             },
         ];
         let summary = run_drift_detection(&data, &config);
@@ -596,5 +638,71 @@ mod tests {
             .unwrap();
         assert!(work.needs_review, "工作分类应触发漂移");
         assert!(summary.any_drift);
+    }
+
+    // ---- v1.3 M5-B: 新增 drift 维度 ----
+
+    #[test]
+    fn category_drift_salience_dimension() {
+        let config = DriftConfig::default();
+        // salience 大幅变化（0.1→0.9），valence/share 不变
+        let data = CategoryEventData {
+            category: "工作".into(),
+            old_valences: vec![0.5; 5],
+            old_shares: vec![0.5; 5],
+            old_saliences: vec![0.1; 5],
+            old_confidences: vec![0.5; 5],
+            new_valences: vec![0.5; 5],
+            new_shares: vec![0.5; 5],
+            new_saliences: vec![0.9; 5],
+            new_confidences: vec![0.5; 5],
+        };
+        let result = detect_category_drift(&data, &config);
+        assert!(result.needs_review, "salience 大幅变化应触发漂移");
+        assert!(result.salience_drift.is_significant);
+    }
+
+    #[test]
+    fn category_drift_confidence_dimension() {
+        let config = DriftConfig::default();
+        // confidence 大幅变化（0.1→0.9），其他维度不变
+        let data = CategoryEventData {
+            category: "社交".into(),
+            old_valences: vec![0.5; 5],
+            old_shares: vec![0.5; 5],
+            old_saliences: vec![0.5; 5],
+            old_confidences: vec![0.1; 5],
+            new_valences: vec![0.5; 5],
+            new_shares: vec![0.5; 5],
+            new_saliences: vec![0.5; 5],
+            new_confidences: vec![0.9; 5],
+        };
+        let result = detect_category_drift(&data, &config);
+        assert!(result.needs_review, "confidence 大幅变化应触发漂移");
+        assert!(result.confidence_drift.is_significant);
+    }
+
+    #[test]
+    fn category_drift_result_includes_new_dimensions() {
+        let config = DriftConfig::default();
+        let data = CategoryEventData {
+            category: "工作".into(),
+            old_valences: vec![0.5; 4],
+            old_shares: vec![0.5; 4],
+            old_saliences: vec![0.5; 4],
+            old_confidences: vec![0.5; 4],
+            new_valences: vec![0.8; 4],
+            new_shares: vec![0.5; 4],
+            new_saliences: vec![0.5; 4],
+            new_confidences: vec![0.5; 4],
+        };
+        let result = detect_category_drift(&data, &config);
+        // 四个维度都存在
+        assert_eq!(result.valence_drift.dimension, "valence");
+        assert_eq!(result.share_drift.dimension, "share");
+        assert_eq!(result.salience_drift.dimension, "salience");
+        assert_eq!(result.confidence_drift.dimension, "confidence");
+        // valence 维度应漂移
+        assert!(result.valence_drift.is_significant);
     }
 }

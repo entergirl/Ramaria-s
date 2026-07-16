@@ -458,6 +458,15 @@ pub trait StorageBackend: Send + Sync {
         persona_uid: &str,
         category: &str,
     ) -> RamariaResult<Vec<ClusterSnapshot>>;
+    /// v1.3: 查询该 persona 的所有历史快照（含非 current），仅返回有 semantic_label_embedding 的条目。
+    /// 用于跨版本簇匹配。
+    async fn get_all_snapshots_with_embeddings(
+        &self,
+        persona_uid: &str,
+    ) -> RamariaResult<Vec<ClusterSnapshot>> {
+        let _ = persona_uid;
+        Ok(Vec::new()) // 默认空实现，保持向后兼容
+    }
 
     // -- Keyword Pool --
     async fn upsert_keyword(&self, keyword: &str) -> RamariaResult<()>;

@@ -352,6 +352,257 @@ pub fn run_clustering(samples: &[AttitudeSample], config: &ClusteringConfig) -> 
 }
 
 // =========================================================
+// v1.3: 语义标签生成与跨版本簇匹配
+// =========================================================
+
+/// 从簇的核心样本中提取语义标签。
+///
+/// 算法:
+/// 1. 对每条核心 paraphrase 按中文标点（，。！？、；：）和空格切分为短语片段。
+/// 2. 统计每个短语在所有核心 paraphrase 中出现的频次。
+/// 3. 筛选出现率 ≥ 50% 的短语，按频次降序排列。
+/// 4. 取前 3 个短语拼接为语义标签（用 "｜" 分隔）。
+/// 5. 若无满足阈值的短语，则取频次最高的前 2 个（最少取 1 个）。
+///
+/// 参数:
+/// - `cluster`: 聚类簇描述，使用其 `core_paraphrases` 作为分析源。
+///
+/// 返回:
+/// - 语义标签字符串。若核心样本为空则返回 `"未命名簇"`。
+pub fn generate_semantic_label(cluster: &ClusterDescription) -> String {
+    let phrases = &cluster.core_paraphrases;
+    if phrases.is_empty() {
+        return "未命名簇".to_string();
+    }
+
+    // Step 1: 对每条 paraphrase 切分为短语片段
+    let all_phrase_sets: Vec<Vec<String>> = phrases
+        .iter()
+        .map(|text| split_chinese_phrases(text))
+        .collect();
+
+    // Step 2: 统计每个短语在多少条 paraphrase 中出现
+    let total = phrases.len() as f64;
+    let mut phrase_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+
+    for phrase_set in &all_phrase_sets {
+        // 每条 paraphrase 内去重（同一短语在同一条中出现多次只计 1 次）
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for p in phrase_set {
+            if p.len() >= 2 && seen.insert(p) {
+                *phrase_counts.entry(p.clone()).or_default() += 1;
+            }
+        }
+    }
+
+    // Step 3: 筛选出现率 ≥ 50% 的短语，按频次降序
+    let threshold = (total * 0.5).ceil() as usize;
+    let mut candidates: Vec<(&String, &usize)> = phrase_counts
+        .iter()
+        .filter(|&(_, &count)| count >= threshold)
+        .collect();
+    candidates.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.len().cmp(&b.0.len())));
+
+    let top_phrases: Vec<String> = if candidates.len() >= 2 {
+        candidates
+            .iter()
+            .take(3)
+            .map(|(phrase, _)| (*phrase).clone())
+            .collect()
+    } else if !candidates.is_empty() {
+        // 只有 1 个满足阈值的短语，加上频次最高的其他短语补足
+        let mut result: Vec<String> = candidates
+            .iter()
+            .map(|(phrase, _)| (*phrase).clone())
+            .collect();
+        let mut remaining: Vec<(&String, &usize)> = phrase_counts
+            .iter()
+            .filter(|(p, _)| !result.contains(p))
+            .collect();
+        remaining.sort_by(|a, b| b.1.cmp(a.1));
+        for (phrase, _) in remaining.iter().take(2) {
+            result.push((*phrase).clone());
+        }
+        result
+    } else {
+        // 无短语达到 50% 阈值，取频次最高的 2 个
+        let mut sorted: Vec<(&String, &usize)> = phrase_counts.iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(a.1));
+        sorted
+            .iter()
+            .take(2) // 至少取 1 个，.take(2) 保证至少 1 个（空列表兜底在前）
+            .map(|(phrase, _)| (*phrase).clone())
+            .collect()
+    };
+
+    if top_phrases.is_empty() {
+        "未命名簇".to_string()
+    } else {
+        top_phrases.join(" ｜ ")
+    }
+}
+
+/// 按中文标点和空格切分文本为短语片段。
+///
+/// 保留长度 ≥ 2 字符的片段，过滤纯数字/标点片段。
+fn split_chinese_phrases(text: &str) -> Vec<String> {
+    let delimiters: &[char] = &[
+        '，', '。', '！', '？', '、', '；', '：', ' ', '\t', '\n', '\r',
+    ];
+    text.split(delimiters)
+        .map(|s| s.trim())
+        .filter(|s| s.len() >= 2 && s.chars().any(|c| c.is_alphabetic() || is_cjk(c)))
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// 判断字符是否为 CJK（中日韩）字符。
+fn is_cjk(c: char) -> bool {
+    matches!(
+        c,
+        '\u{4E00}'..='\u{9FFF}'   // CJK 统一表意文字
+        | '\u{3400}'..='\u{4DBF}'  // CJK 扩展 A
+        | '\u{F900}'..='\u{FAFF}'  // CJK 兼容表意文字
+        | '\u{3040}'..='\u{309F}'  // 平假名
+        | '\u{30A0}'..='\u{30FF}'  // 片假名
+        | '\u{AC00}'..='\u{D7AF}'  // 韩文音节
+    )
+}
+
+// =========================================================
+// v1.3: 跨版本簇匹配
+// =========================================================
+
+/// 跨版本簇匹配结果——单个历史快照的匹配信息。
+#[derive(Debug, Clone)]
+pub struct CrossVersionMatch {
+    /// 历史快照的 id
+    pub snapshot_id: i64,
+    /// 历史快照的语义标签文本
+    pub semantic_label: String,
+    /// 历史快照的分类
+    pub category: String,
+    /// 余弦相似度 (0..1)
+    pub similarity: f64,
+    /// 是否匹配（similarity ≥ match_threshold）
+    pub is_match: bool,
+    /// 历史快照的创建时间（Unix 毫秒）
+    pub snapshot_created_at: i64,
+}
+
+/// 跨版本簇匹配的聚合结果。
+#[derive(Debug, Clone, Default)]
+pub struct CrossVersionMatchResult {
+    /// 所有匹配项（相似度降序）
+    pub matches: Vec<CrossVersionMatch>,
+    /// 最佳匹配项（相似度最高者）
+    pub best_match: Option<CrossVersionMatch>,
+    /// 被查询的历史快照总数
+    pub total_historical: usize,
+    /// 匹配到的快照数
+    pub matched_count: usize,
+}
+
+/// 执行跨版本簇匹配。
+///
+/// 算法:
+/// 1. 对当前簇的语义标签 embedding 与每个历史快照的 embedding 计算余弦相似度。
+/// 2. 相似度 ≥ `match_threshold`（默认 0.75）视为匹配。
+/// 3. 返回按相似度降序排列的匹配列表。
+///
+/// 参数:
+/// - `current_embedding`: 当前簇语义标签的 embedding 向量。
+/// - `historical_snapshots`: 该 persona 的历史快照列表（需含 `semantic_label_embedding`）。
+/// - `match_threshold`: 匹配阈值，默认 0.75。
+///
+/// 返回:
+/// - CrossVersionMatchResult，含匹配列表和统计信息。
+pub fn match_clusters_cross_version(
+    current_embedding: &[f32],
+    historical_snapshots: &[HistoricalSnapshot],
+    match_threshold: f64,
+) -> CrossVersionMatchResult {
+    let total = historical_snapshots.len();
+    if current_embedding.is_empty() || total == 0 {
+        return CrossVersionMatchResult {
+            matches: Vec::new(),
+            best_match: None,
+            total_historical: total,
+            matched_count: 0,
+        };
+    }
+
+    let mut matches: Vec<CrossVersionMatch> = historical_snapshots
+        .iter()
+        .filter_map(|snap| {
+            let hist_emb = snap.semantic_label_embedding.as_ref()?;
+            let hist_vec = ramaria_core::types::ClusterSnapshot::deserialize_embedding(hist_emb)?;
+            if hist_vec.len() != current_embedding.len() {
+                return None; // 维度不匹配，跳过
+            }
+            let sim = cosine_similarity(current_embedding, &hist_vec);
+            Some(CrossVersionMatch {
+                snapshot_id: snap.id,
+                semantic_label: snap.semantic_label.clone().unwrap_or_default(),
+                category: snap.category.clone(),
+                similarity: sim,
+                is_match: sim >= match_threshold,
+                snapshot_created_at: snap.created_at,
+            })
+        })
+        .collect();
+
+    // 按相似度降序排列
+    matches.sort_by(|a, b| {
+        b.similarity
+            .partial_cmp(&a.similarity)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let matched_count = matches.iter().filter(|m| m.is_match).count();
+    let best_match = matches.first().cloned();
+
+    CrossVersionMatchResult {
+        matches,
+        best_match,
+        total_historical: total,
+        matched_count,
+    }
+}
+
+/// 历史快照的轻量表示（用于跨版本匹配输入）。
+///
+/// 职责:
+/// - 从 `ClusterSnapshot` 中提取跨版本匹配所需的最小字段集。
+/// - 避免在纯计算函数中依赖完整的 `ClusterSnapshot` 类型。
+#[derive(Debug, Clone)]
+pub struct HistoricalSnapshot {
+    /// 快照 id
+    pub id: i64,
+    /// 语义标签文本
+    pub semantic_label: Option<String>,
+    /// 语义标签 embedding BLOB
+    pub semantic_label_embedding: Option<Vec<u8>>,
+    /// 分类
+    pub category: String,
+    /// 创建时间
+    pub created_at: i64,
+}
+
+impl From<&ramaria_core::types::ClusterSnapshot> for HistoricalSnapshot {
+    fn from(s: &ramaria_core::types::ClusterSnapshot) -> Self {
+        Self {
+            id: s.id,
+            semantic_label: s.semantic_label.clone(),
+            semantic_label_embedding: s.semantic_label_embedding.clone(),
+            category: s.category.clone(),
+            created_at: s.created_at,
+        }
+    }
+}
+
+// =========================================================
 // 单元测试
 // =========================================================
 
@@ -556,5 +807,216 @@ mod tests {
         ];
         let result = run_clustering(&samples, &config);
         assert_eq!(result.cluster_count, 1);
+    }
+
+    // ---- v1.3: 语义标签生成 ----
+
+    #[test]
+    fn semantic_label_empty_phrases() {
+        let desc = ClusterDescription {
+            index: 0,
+            size: 0,
+            core_paraphrases: vec![],
+            edge_paraphrases: vec![],
+            centroid: vec![0.0; 4],
+        };
+        let label = generate_semantic_label(&desc);
+        assert_eq!(label, "未命名簇");
+    }
+
+    #[test]
+    fn semantic_label_common_phrase() {
+        let desc = ClusterDescription {
+            index: 0,
+            size: 3,
+            core_paraphrases: vec![
+                "对加班感到疲惫和无奈".to_string(),
+                "加班导致身心透支".to_string(),
+                "频繁加班影响了生活质量".to_string(),
+            ],
+            edge_paraphrases: vec![],
+            centroid: vec![1.0; 4],
+        };
+        let label = generate_semantic_label(&desc);
+        // "加班" 出现在所有 3 条中（100% ≥ 50%），应被提取
+        assert!(
+            label.contains("加班"),
+            "标签应包含'加班'，实际为: {}",
+            label
+        );
+    }
+
+    #[test]
+    fn semantic_label_no_high_freq_phrase() {
+        let desc = ClusterDescription {
+            index: 0,
+            size: 5,
+            core_paraphrases: vec![
+                "喜欢户外跑步".to_string(),
+                "对编程有热情".to_string(),
+                "周末喜欢看电影".to_string(),
+                "享受独自旅行".to_string(),
+                "热爱阅读历史书籍".to_string(),
+            ],
+            edge_paraphrases: vec![],
+            centroid: vec![1.0; 4],
+        };
+        let label = generate_semantic_label(&desc);
+        // 无短语达到 50%（3/5），应取频次最高的短语
+        assert!(!label.is_empty());
+        assert_ne!(label, "未命名簇");
+    }
+
+    #[test]
+    fn semantic_label_single_paraphrase() {
+        let desc = ClusterDescription {
+            index: 0,
+            size: 1,
+            core_paraphrases: vec![
+                "对于权威的否定感到强烈抵触，认为自己的专业判断被忽视".to_string(),
+            ],
+            edge_paraphrases: vec![],
+            centroid: vec![0.0; 4],
+        };
+        let label = generate_semantic_label(&desc);
+        // 单条核心样本：短语出现率 100%，应提取其关键短语
+        assert!(!label.is_empty());
+        assert_ne!(label, "未命名簇");
+    }
+
+    #[test]
+    fn semantic_label_deduplication_within_paraphrase() {
+        let desc = ClusterDescription {
+            index: 0,
+            size: 2,
+            core_paraphrases: vec![
+                "加班加班真的很累".to_string(),
+                "加班影响了我的生活".to_string(),
+            ],
+            edge_paraphrases: vec![],
+            centroid: vec![0.0; 4],
+        };
+        let label = generate_semantic_label(&desc);
+        // "加班" 在两条中各出现，但同一 paraphrase 内应去重计数
+        assert!(
+            label.contains("加班"),
+            "标签应包含'加班'，实际为: {}",
+            label
+        );
+    }
+
+    // ---- v1.3: 跨版本匹配 ----
+
+    fn make_hist_snapshot(
+        id: i64,
+        label: &str,
+        embedding: Vec<f32>,
+        category: &str,
+    ) -> HistoricalSnapshot {
+        HistoricalSnapshot {
+            id,
+            semantic_label: Some(label.to_string()),
+            semantic_label_embedding: Some(
+                ramaria_core::types::ClusterSnapshot::serialize_embedding(&embedding),
+            ),
+            category: category.to_string(),
+            created_at: 1000 * id,
+        }
+    }
+
+    #[test]
+    fn cross_version_match_exact() {
+        let current_emb = vec![1.0_f32, 0.0, 0.0, 0.0];
+        let historical = vec![make_hist_snapshot(
+            1,
+            "工作压力",
+            current_emb.clone(),
+            "工作",
+        )];
+        let result = match_clusters_cross_version(&current_emb, &historical, 0.75);
+        assert_eq!(result.total_historical, 1);
+        assert_eq!(result.matched_count, 1);
+        assert!(result.best_match.is_some());
+        let best = result.best_match.unwrap();
+        assert!(best.is_match);
+        assert!(
+            (best.similarity - 1.0).abs() < 1e-6,
+            "相同向量相似度应为1.0，实际={}",
+            best.similarity
+        );
+    }
+
+    #[test]
+    fn cross_version_match_no_match() {
+        let current_emb = vec![1.0_f32, 0.0, 0.0, 0.0];
+        let historical = vec![make_hist_snapshot(
+            1,
+            "社交活跃",
+            vec![0.0, 1.0, 0.0, 0.0],
+            "社交",
+        )];
+        let result = match_clusters_cross_version(&current_emb, &historical, 0.75);
+        assert_eq!(result.total_historical, 1);
+        assert_eq!(result.matched_count, 0);
+    }
+
+    #[test]
+    fn cross_version_match_empty_history() {
+        let current_emb = vec![1.0_f32, 0.0, 0.0];
+        let result = match_clusters_cross_version(&current_emb, &[], 0.75);
+        assert_eq!(result.total_historical, 0);
+        assert!(result.matches.is_empty());
+    }
+
+    #[test]
+    fn cross_version_match_empty_current_embedding() {
+        let historical = vec![make_hist_snapshot(1, "测试", vec![1.0, 0.0], "工作")];
+        let result = match_clusters_cross_version(&[], &historical, 0.75);
+        assert_eq!(result.total_historical, 1);
+        assert!(result.matches.is_empty());
+    }
+
+    #[test]
+    fn cross_version_match_dimension_mismatch() {
+        let current_emb = vec![1.0_f32, 0.0, 0.0]; // 3 维
+        let historical = vec![make_hist_snapshot(1, "测试", vec![1.0, 0.0], "工作")]; // 2 维
+        let result = match_clusters_cross_version(&current_emb, &historical, 0.75);
+        // 维度不匹配应被跳过
+        assert_eq!(result.matches.len(), 0);
+    }
+
+    #[test]
+    fn cross_version_match_multiple_historical() {
+        let current_emb = vec![1.0_f32, 0.0, 0.0, 0.0];
+        let historical = vec![
+            make_hist_snapshot(1, "不相关", vec![0.0, 1.0, 0.0, 0.0], "社交"),
+            make_hist_snapshot(2, "高度相似", vec![0.95, 0.05, 0.0, 0.0], "工作"),
+            make_hist_snapshot(3, "中度相似", vec![0.7, 0.3, 0.0, 0.0], "工作"),
+        ];
+        let result = match_clusters_cross_version(&current_emb, &historical, 0.75);
+        assert_eq!(result.total_historical, 3);
+        // 第二个快照相似度最高，应先出现
+        let best = result.best_match.unwrap();
+        assert_eq!(best.snapshot_id, 2);
+        assert!(best.similarity > 0.9);
+    }
+
+    #[test]
+    fn cross_version_match_with_null_embedding() {
+        let current_emb = vec![1.0_f32, 0.0];
+        let historical = vec![
+            HistoricalSnapshot {
+                id: 1,
+                semantic_label: Some("无embedding".into()),
+                semantic_label_embedding: None,
+                category: "工作".into(),
+                created_at: 1000,
+            },
+            make_hist_snapshot(2, "正常", vec![0.9, 0.1], "工作"),
+        ];
+        let result = match_clusters_cross_version(&current_emb, &historical, 0.75);
+        // 只有 id=2 的快照有效
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].snapshot_id, 2);
     }
 }

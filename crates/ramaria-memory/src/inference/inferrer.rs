@@ -346,12 +346,12 @@ pub fn build_step2_prompt(
     prompt.push_str(&format_cross_category(metrics));
     prompt.push('\n');
 
-    // 附加分类权重排名
-    prompt.push_str("## 分类权重排名\n");
+    // 附加分类权重排名（贝叶斯收缩后）
+    prompt.push_str("## 分类权重排名（贝叶斯收缩后）\n");
     for cat in categories.iter().take(5) {
         prompt.push_str(&format!(
-            "  {} - 权重 {:.1}% | n_eff={:.1}\n",
-            cat.category, cat.group_weight, cat.n_eff
+            "  {} - 权重 {:.1}% | n_eff={:.1} | 收缩后valence均值={:.3} | 收缩后share均值={:.3}\n",
+            cat.category, cat.group_weight, cat.n_eff, cat.valence_mean, cat.share_mean,
         ));
     }
     prompt.push('\n');
@@ -362,6 +362,8 @@ pub fn build_step2_prompt(
 - base (底色): 跨情境稳定的深层性格——需在≥2个分类中一致出现\n\
 - primary (主色调): 最高权重分类的最突出信号——日常最明显\n\
 - accent (点缀): 仅在特定分类或条件下出现的信号——包含矛盾检测来源\n\n\
+说明: 以下分类的均值和权重已经过贝叶斯收缩处理，低样本量分类的极端值已被向全局先验拉回，\n\
+缩小了抽样噪声带来的跨分类偏差，提高了跨分类可比性——跨分类一致性比较应基于这些收缩后指标。\n\n\
 输出 JSON:\n\
 {\n\
   \"base_candidates\": [\"标签1\", \"标签2\"],\n\
@@ -370,7 +372,7 @@ pub fn build_step2_prompt(
   \"notes\": \"简要分析说明\"\n\
 }\n\n\
 只输出 JSON。\n\
-注意: 底色基于叙事一致性指标和跨组一致性；主色调基于最高权重分类；点缀基于矛盾检测和条件性模式。\n",
+注意: 底色基于叙事一致性指标和跨组一致性；主色调基于最高权重分类；点缀基于矛盾检测和条件性模式。",
     );
 
     prompt

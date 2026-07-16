@@ -814,6 +814,8 @@ impl SessionLifecycle {
                 count: cat_stats.event_count as i32,
                 is_current: true,
                 created_at: now_ms(),
+                semantic_label: None,
+                semantic_label_embedding: None,
             };
 
             match storage.save_cluster_snapshot(&snapshot).await {
