@@ -380,6 +380,9 @@ pub fn run() {
             commands::memory::get_l2_events,
             commands::memory::get_l3_traits,
             commands::memory::trigger_memory_pipeline,
+            commands::memory::get_personality_profile,
+            commands::memory::get_trait_evidence,
+            commands::memory::get_profile_status,
             // ---- Config ----
             commands::config::get_backend_config,
             commands::config::update_backend_config,

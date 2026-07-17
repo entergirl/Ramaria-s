@@ -11,8 +11,8 @@
 use ramaria_core::error::RamariaResult;
 use ramaria_core::traits::StorageBackend;
 use ramaria_core::types::{
-    BackendConfig, ClusterSnapshot, EventRelation, MemoryEvent, MemoryL1, Message, Persona,
-    PersonaExample, PersonaFact, PersonalityTrait, PrivacyConsent, ProfileField, Session,
+    BackendConfig, ClusterSnapshot, EventRelation, EventSource, MemoryEvent, MemoryL1, Message,
+    Persona, PersonaExample, PersonaFact, PersonalityTrait, PrivacyConsent, ProfileField, Session,
     TraitEvidence, TraitStatus,
 };
 use sqlx::SqlitePool;
@@ -176,6 +176,10 @@ impl StorageBackend for SqliteStorage {
         weight: f64,
     ) -> RamariaResult<()> {
         repo::events::save_source(&self.pool, event_id, l1_id, weight).await
+    }
+
+    async fn list_event_sources_by_event(&self, event_id: i64) -> RamariaResult<Vec<EventSource>> {
+        repo::events::list_sources_by_event(&self.pool, event_id).await
     }
 
     // =========================================================

@@ -15,9 +15,9 @@ use uuid::Uuid;
 
 use crate::error::RamariaResult;
 use crate::types::{
-    BackendConfig, ClusterSnapshot, EventRelation, MemoryEvent, MemoryL1, Message, MessageRole,
-    ModelCapability, Persona, PersonaExample, PersonaFact, PersonalityTrait, PrivacyConsent,
-    ProfileField, Session, TraitEvidence, TraitStatus,
+    BackendConfig, ClusterSnapshot, EventRelation, EventSource, MemoryEvent, MemoryL1, Message,
+    MessageRole, ModelCapability, Persona, PersonaExample, PersonaFact, PersonalityTrait,
+    PrivacyConsent, ProfileField, Session, TraitEvidence, TraitStatus,
 };
 
 // =========================================================
@@ -413,6 +413,17 @@ pub trait StorageBackend: Send + Sync {
     // -- Event Sources (event_id: i64, l1_id: Uuid) --
     async fn save_event_source(&self, event_id: i64, l1_id: Uuid, weight: f64)
     -> RamariaResult<()>;
+
+    /// 查询指定事件的所有溯源 L1 记录。
+    ///
+    /// 职责:
+    /// - 用于前端性格画像证据链展开：事件 → L1 摘要 → evidence_notes。
+    /// - 返回该事件关联的全部 L1 source 记录（含 weight）。
+    ///
+    /// 默认实现返回空列表，子 crate 应覆写为 SQL 查询。
+    async fn list_event_sources_by_event(&self, _event_id: i64) -> RamariaResult<Vec<EventSource>> {
+        Ok(Vec::new())
+    }
 
     // -- Persona Facts (id: i64) --
     async fn save_fact(&self, fact: &PersonaFact) -> RamariaResult<i64>;

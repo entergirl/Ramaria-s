@@ -2,25 +2,30 @@
  * js/views/memory.js — Ramaria 记忆查看视图
  *
  * 职责:
- * - 三 Tab 记忆查看：L1 会话摘要（Bento Grid）/ L2 事件列表 / L3 性格标签云
+ * - 三 Tab 记忆查看：L1 会话摘要（Bento Grid）/ L2 事件列表 / L3 性格画像
  * - 按人格筛选记忆（PersonaSelector）
  * - 每层独立数据加载和缓存，切换 Tab 不重新请求
- * - 点击卡片/事件项展开详情
+ * - L3 v1.3 M5-D: 三层分层展示（base/primary/accent 卡片布局）
  *
  * 设计特点:
  * - 注册 Router enter/leave 钩子
- * - enter 时自动加载当前人格的 L1/L2/L3 数据
+ * - enter 时自动加载当前人格的 L1/L2/L3 + 画像状态数据
  * - 三面板通过 .active 类切换显示，DOM 始终保留（避免重复渲染）
- * - L1 Bento Grid：粉色渐变卡片，显示 salience 强度条
+ * - L1 Bento Grid：粉色渐变卡片，显示 salience 强度条 + valence 色条
  * - L2 事件列表：蓝色主题，点击展开详情（源/态度/置信度等）
- * - L3 标签云：base=粉色大字 / primary=蓝色中字 / accent=灰色小字，hover 放大
+ * - L3 性格画像（v1.3 重新设计）：
+ *   - 顶部状态指示器（数据不足/初步/可信 + n_total_eff 数值）
+ *   - 按 base/primary/accent 三层卡片布局（不同左边框色区分）
+ *   - 每条 trait 显示置信度色条（绿≥80%/黄60-80%/橙<60%）
+ *   - accent 层显示触发/抑制条件
+ *   - "展开证据"按钮 → RamariaTraitEvidence 组件加载完整证据链
  * - 空数据友好提示
  *
  * 依赖:
  * - RamariaApi / RamariaStore / RamariaRouter
  * - RamariaToast / RamariaSkeleton / RamariaFormat
- * - RamariaModal
- * - CSS: css/views/memory.css
+ * - RamariaTraitEvidence（v1.3 证据链组件）
+ * - CSS: css/views/memory.css + css/components/trait-evidence.css
  */
 
 var RamariaMemoryView = (function () {
@@ -190,22 +195,24 @@ var RamariaMemoryView = (function () {
  // =========================================================
 
     async function _loadAllData() {
- // 显示加载状态（直接在各面板内展示，不用骨架屏避免 innerHTML 覆盖问题）
+        // 显示加载状态（直接在各面板内展示，不用骨架屏避免 innerHTML 覆盖问题）
         _showPanelLoading();
 
         try {
- // 并行加载三层数据
+            // 并行加载 L1/L2/L3 + 画像状态
             var results = await Promise.allSettled([
                 RamariaApi.memory.getL1(_currentPersonaUid, 500),
                 RamariaApi.memory.getL2(_currentPersonaUid, 500),
                 RamariaApi.memory.getL3(_currentPersonaUid),
+                RamariaApi.memory.getProfileStatus(_currentPersonaUid),
             ]);
 
             var l1Data = results[0].status === 'fulfilled' ? results[0].value : [];
             var l2Data = results[1].status === 'fulfilled' ? results[1].value : [];
             var l3Data = results[2].status === 'fulfilled' ? results[2].value : [];
+            var profileStatus = results[3].status === 'fulfilled' ? results[3].value : null;
 
- // 若按 persona 过滤无结果，尝试不过滤再查一次
+            // 若按 persona 过滤无结果，尝试不过滤再查一次
             if (l1Data.length === 0 && _currentPersonaUid) {
                 try {
                     var l1Fallback = await RamariaApi.memory.getL1(null, 500);
@@ -216,26 +223,27 @@ var RamariaMemoryView = (function () {
                 } catch (_) { /* 降级查询失败，保持空结果 */ }
             }
 
- // 缓存
-            _cache[_currentPersonaUid] = { l1: l1Data, l2: l2Data, l3: l3Data };
+            // 缓存
+            _cache[_currentPersonaUid] = { l1: l1Data, l2: l2Data, l3: l3Data, profileStatus: profileStatus };
 
- // 渲染
+            // 渲染
             _renderL1(l1Data || []);
             _renderL2(l2Data || []);
-            _renderL3(l3Data || []);
+            _renderL3(l3Data || [], profileStatus);
 
- // 更新 badge 数量
+            // 更新 badge 数量
             _updateBadges(l1Data, l2Data, l3Data);
 
- // 错误日志
+            // 错误日志
             if (results[0].status === 'rejected') console.error('[MemoryView] L1 加载失败:', results[0].reason);
             if (results[1].status === 'rejected') console.error('[MemoryView] L2 加载失败:', results[1].reason);
             if (results[2].status === 'rejected') console.error('[MemoryView] L3 加载失败:', results[2].reason);
+            if (results[3].status === 'rejected') console.error('[MemoryView] 画像状态加载失败:', results[3].reason);
 
         } catch (err) {
             console.error('[MemoryView] 加载数据失败:', err);
             RamariaToast.show('error', '加载记忆失败', err.message || '未知错误');
- // 加载失败时在各面板显示错误提示
+            // 加载失败时在各面板显示错误提示
             _showPanelError(err.message || '未知错误');
         }
     }
@@ -555,25 +563,38 @@ var RamariaMemoryView = (function () {
         panel.appendChild(list);
     }
 
- // =========================================================
- // L3 渲染 — 性格标签云
- // =========================================================
+// =========================================================
+// L3 渲染 — 三层性格画像（v1.3 M5-D 重新设计）
+// =========================================================
 
-    function _renderL3(items) {
+/**
+ * 渲染 L3 性格画像面板。
+ *
+ * 参数:
+ * - `items`: L3 trait 数组（来自 getL3Traits API）。
+ * - `profileStatus`: 画像数据状态对象（来自 getProfileStatus API），
+ *    含 n_total_eff / active_trait_count / status / status_text。
+ */
+    function _renderL3(items, profileStatus) {
         var panel = $('memory-panel-l3');
         if (!panel) return;
         panel.innerHTML = '';
 
         if (!items || items.length === 0) {
-            panel.innerHTML =
-                '<div class="memory-empty">' +
-                    '<div class="memory-empty-icon">🏷️</div>' +
-                    '<div class="memory-empty-text">暂无 L3 性格标签<br>积累足够事件后自动推断</div>' +
-                '</div>';
+            _renderL3Empty(panel);
             return;
         }
 
- // 按 layer 分组
+        // 构建容器
+        var container = document.createElement('div');
+        container.className = 'memory-l3-profile';
+
+        // ── 状态指示器 ──
+        if (profileStatus) {
+            container.appendChild(_buildStatusBar(profileStatus));
+        }
+
+        // ── 按 layer 分组 ──
         var groups = { base: [], primary: [], accent: [] };
         for (var i = 0; i < items.length; i++) {
             var layer = items[i].layer || 'accent';
@@ -581,75 +602,211 @@ var RamariaMemoryView = (function () {
             groups[layer].push(items[i]);
         }
 
- // 排序：base → primary → accent
         var layerOrder = ['base', 'primary', 'accent'];
-        var layerNames = { base: '底色（Base）', primary: '基调（Primary）', accent: '点缀（Accent）' };
-
-        var cloud = document.createElement('div');
-        cloud.className = 'memory-l3-cloud';
+        var layerConfig = {
+            base:    { title: '底色层', subtitle: '跨情境稳定的深层性格基调', icon: '🏛️' },
+            primary: { title: '主色调层', subtitle: '日常最突出的性格特征', icon: '🎨' },
+            accent:  { title: '点缀层', subtitle: '特定条件下浮现的性格侧面', icon: '✨' },
+        };
 
         for (var l = 0; l < layerOrder.length; l++) {
             var layer = layerOrder[l];
             var traits = groups[layer] || [];
-            if (traits.length === 0) continue;
+            var cfg = layerConfig[layer];
 
             var section = document.createElement('div');
-            section.className = 'memory-l3-section';
-            section.innerHTML = '<div class="memory-l3-section-title">' + layerNames[layer] + '</div>';
+            section.className = 'memory-l3-section memory-l3-section--' + layer;
 
-            var tags = document.createElement('div');
-            tags.className = 'memory-l3-cloud';
+            // 层标题
+            section.innerHTML =
+                '<div class="memory-l3-section-header">' +
+                    '<span class="memory-l3-section-icon">' + cfg.icon + '</span>' +
+                    '<div class="memory-l3-section-text">' +
+                        '<div class="memory-l3-section-title">' + cfg.title + '</div>' +
+                        '<div class="memory-l3-section-subtitle">' + cfg.subtitle + '</div>' +
+                    '</div>' +
+                    '<span class="memory-l3-section-count">' + traits.length + '</span>' +
+                '</div>';
+
+            // trait 列表
+            var traitList = document.createElement('div');
+            traitList.className = 'memory-l3-traits';
+
+            // 层内按 seq 排序
+            traits.sort(function (a, b) { return (a.seq || 0) - (b.seq || 0); });
 
             for (var t = 0; t < traits.length; t++) {
- // ★ 使用 let 声明以创建块级作用域闭包
- // 修复：var trait（函数作用域→所有回调共享最后一个值）
- // let trait 确保每个 addEventListener 闭包捕获当次循环的值
-                var _trait = traits[t];
-                var _confidencePct = _trait.confidence != null ? Math.round(_trait.confidence * 100) : 0;
-
-                var tag = document.createElement('button');
-                tag.className = 'memory-l3-tag layer-' + layer;
-                tag.textContent = _trait.label || _trait.meaning || '?';
-                tag.title = (_trait.meaning || '') +
-                    '\nnot: ' + (_trait.not_meaning || '-') +
-                    '\n置信度: ' + _confidencePct + '%' +
-                    '\n证据量: ' + (_trait.evidence || 0) +
-                    '\n状态: ' + (_trait.status || 'active');
-
- // 通过 IIFE 绑定当前循环值，避免闭包引用循环变量
-                (function (trait, confidencePct) {
-                    tag.addEventListener('click', function () {
-                        var detail =
-                            '标签: ' + (trait.label || '-') + '\n' +
-                            '含义: ' + (trait.meaning || '-') + '\n' +
-                            '非含义: ' + (trait.not_meaning || '-') + '\n' +
-                            '层次: ' + (trait.layer || '-') + '\n' +
-                            '置信度: ' + confidencePct + '%\n' +
-                            '证据量: ' + (trait.evidence || 0) + '\n' +
-                            '一致性: ' + (trait.consistency != null ? (trait.consistency * 100).toFixed(0) + '%' : '-') + '\n' +
-                            '状态: ' + (trait.status || 'active') + '\n' +
-                            '触发: ' + (trait.trigger || '-') + '\n' +
-                            '抑制: ' + (trait.suppress || '-') + '\n' +
-                            '创建: ' + RamariaFormat.smartTime(trait.created_at);
-
-                        RamariaModal.show({
-                            title: '性格标签: ' + (trait.label || '?'),
-                            body: '<pre class="memory-modal-pre">' +
-                                  (RamariaMarkdown ? RamariaMarkdown.sanitize(detail) : detail) +
-                                  '</pre>',
-                            footer: '<button class="btn btn-secondary" data-action="close">关闭</button>',
-                        });
-                    });
-                })(_trait, _confidencePct);
-
-                tags.appendChild(tag);
+                traitList.appendChild(_buildTraitCard(traits[t], layer));
             }
 
-            section.appendChild(tags);
-            cloud.appendChild(section);
+            // 空层时显示提示
+            if (traits.length === 0) {
+                var emptyHint = document.createElement('div');
+                emptyHint.className = 'memory-l3-traits-empty';
+                emptyHint.textContent = '该层暂无性格标签';
+                traitList.appendChild(emptyHint);
+            }
+
+            section.appendChild(traitList);
+            container.appendChild(section);
         }
 
-        panel.appendChild(cloud);
+        panel.appendChild(container);
+    }
+
+// =========================================================
+// L3 空状态
+// =========================================================
+
+    function _renderL3Empty(panel) {
+        panel.innerHTML =
+            '<div class="memory-empty">' +
+                '<div class="memory-empty-icon">🏷️</div>' +
+                '<div class="memory-empty-text">暂无 L3 性格画像<br>积累足够事件后自动推断</div>' +
+            '</div>';
+    }
+
+// =========================================================
+// 状态指示器
+// =========================================================
+
+    function _buildStatusBar(status) {
+        var bar = document.createElement('div');
+        bar.className = 'memory-l3-status-bar';
+
+        var statusIcon = { insufficient: '🔴', preliminary: '🟡', trusted: '🟢' };
+        var icon = statusIcon[status.status] || '⚪';
+
+        bar.innerHTML =
+            '<span class="memory-l3-status-icon">' + icon + '</span>' +
+            '<span class="memory-l3-status-text">' + _escapeHtml(status.status_text || '') + '</span>';
+
+        return bar;
+    }
+
+// =========================================================
+// 单条 trait 卡片
+// =========================================================
+
+    function _buildTraitCard(trait, layer) {
+        var card = document.createElement('div');
+        card.className = 'memory-l3-trait-card';
+        card.setAttribute('data-trait-id', trait.id || '');
+
+        var confidencePct = trait.confidence != null ? Math.round(trait.confidence * 100) : 0;
+        var confClass = confidencePct >= 80 ? 'high' : (confidencePct >= 60 ? 'mid' : 'low');
+
+        // 头部: 标签名 + 置信度
+        var html = '';
+        html += '<div class="memory-l3-trait-header">';
+        html += '<span class="memory-l3-trait-label">' + _escapeHtml(trait.label || '?') + '</span>';
+        html += '<span class="memory-l3-trait-confidence ' + confClass + '">' + confidencePct + '% 置信</span>';
+        html += '</div>';
+
+        // 含义
+        html += '<div class="memory-l3-trait-meaning">' + _escapeHtml(trait.meaning || '') + '</div>';
+
+        // 置信度色条
+        html += '<div class="memory-l3-confidence-bar">';
+        html += '<div class="memory-l3-confidence-fill ' + confClass + '" style="width:' + Math.max(confidencePct, 2) + '%"></div>';
+        html += '</div>';
+
+        // 元信息行
+        html += '<div class="memory-l3-trait-meta">';
+        html += '<span>证据量: ' + (trait.evidence != null ? trait.evidence.toFixed(1) : '0') + '</span>';
+        html += '<span>一致性: ' + (trait.consistency != null ? Math.round(trait.consistency * 100) + '%' : '-') + '</span>';
+        html += '</div>';
+
+        // 否定界定（如有）
+        if (trait.not_meaning) {
+            html += '<div class="memory-l3-trait-not">≠ ' + _escapeHtml(trait.not_meaning) + '</div>';
+        }
+
+        // 触发/抑制条件（仅 accent 层）
+        if (layer === 'accent') {
+            if (trait.trigger) {
+                html += '<div class="memory-l3-trait-cond memory-l3-trait-cond--trigger">📌 触发: ' + _escapeHtml(trait.trigger) + '</div>';
+            }
+            if (trait.suppress) {
+                html += '<div class="memory-l3-trait-cond memory-l3-trait-cond--suppress">🔇 抑制: ' + _escapeHtml(trait.suppress) + '</div>';
+            }
+        }
+
+        // 关联性格（如有）
+        if (trait.related) {
+            html += '<div class="memory-l3-trait-related">🔗 ' + _escapeHtml(trait.related) + '</div>';
+        }
+
+        // 底部操作行
+        html += '<div class="memory-l3-trait-footer">';
+        html += '<span class="memory-l3-trait-time">' + RamariaFormat.smartTime(trait.created_at) + '</span>';
+        html += '<button class="btn btn-sm btn-outline memory-l3-evidence-btn" ' +
+                'data-trait-id="' + trait.id + '" ' +
+                'data-trait-label="' + _escapeHtml(trait.label || '') + '">' +
+                '📋 展开证据</button>';
+        html += '</div>';
+
+        // 证据链展开区（初始隐藏）
+        html += '<div class="memory-l3-evidence-panel" id="evidence-panel-' + trait.id + '" style="display:none"></div>';
+
+        card.innerHTML = html;
+
+        // 绑定"展开证据"按钮
+        _bindEvidenceButton(card, trait);
+
+        return card;
+    }
+
+// =========================================================
+// 证据链展开按钮
+// =========================================================
+
+    function _bindEvidenceButton(card, trait) {
+        var btn = card.querySelector('.memory-l3-evidence-btn');
+        if (!btn) return;
+
+        btn.addEventListener('click', function (e) {
+            e.stopPropagation();
+
+            var panel = document.getElementById('evidence-panel-' + trait.id);
+            if (!panel) return;
+
+            // 切换展开/折叠
+            if (panel.style.display !== 'none') {
+                panel.style.display = 'none';
+                panel.innerHTML = '';
+                btn.textContent = '📋 展开证据';
+                return;
+            }
+
+            panel.style.display = 'block';
+            btn.textContent = '📋 加载中...';
+
+            // 使用证据链组件加载数据
+            if (typeof RamariaTraitEvidence !== 'undefined') {
+                RamariaTraitEvidence.render(panel, _currentPersonaUid, trait.id, trait.label || '?');
+            } else {
+                panel.innerHTML =
+                    '<div class="tev-empty">' +
+                        '<div class="tev-empty-text">证据链组件未加载</div>' +
+                    '</div>';
+            }
+        });
+    }
+
+// =========================================================
+// 辅助函数
+// =========================================================
+
+    /** HTML 转义 */
+    function _escapeHtml(str) {
+        if (!str) return '';
+        return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
     }
 
  // =========================================================

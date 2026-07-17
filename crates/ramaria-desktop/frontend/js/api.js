@@ -265,6 +265,64 @@ var RamariaApi = (function () {
         return await _invoke('get_l3_traits', args, '查询 L3 性格标签');
     }
 
+// =========================================================
+// M5-C: L3 性格画像查询 (v1.3 新增)
+// =========================================================
+
+/**
+ * 查询指定人格的完整三层性格画像（base/primary/accent）。
+ *
+ * 参数:
+ * - `personaUid`: 目标人格 UID（如 "user-0001"）
+ *
+ * 返回:
+ * - { persona_uid, base: [...], primary: [...], accent: [...] }
+ * - 每层数组元素: { id, label, meaning, confidence, evidence, consistency,
+ *     layer, not_meaning, trigger, suppress, related, seq, source, status, created_at }
+ */
+    async function getPersonalityProfile(personaUid) {
+        _require(personaUid, 'personaUid');
+        return await _invoke('get_personality_profile', { personaUid: personaUid }, '查询 L3 性格画像');
+    }
+
+/**
+ * 查询指定性格标签的完整证据溯源链。
+ *
+ * 参数:
+ * - `personaUid`: 目标人格 UID。
+ * - `traitId`: 目标性格标签 ID。
+ *
+ * 返回:
+ * - [{ trait_id, trait_label, total_evidence, support_count, contradict_count, neutral_count,
+ *     evidence_events: [...] }]
+ * - evidence_events 每项: { event_id, title, summary, confidence, valence,
+ *     salience, attitude, paraphrase, motives, l1_sources: [...] }
+ * - l1_sources 每项: { l1_id, summary, evidence_notes: [...], atmosphere, valence, weight }
+ */
+    async function getTraitEvidence(personaUid, traitId) {
+        _require(personaUid, 'personaUid');
+        _require(traitId, 'traitId');
+        return await _invoke('get_trait_evidence', {
+            personaUid: personaUid,
+            traitId: traitId,
+        }, '查询 trait 证据链');
+    }
+
+/**
+ * 查询指定人格的数据画像状态。
+ *
+ * 参数:
+ * - `personaUid`: 目标人格 UID。
+ *
+ * 返回:
+ * - { persona_uid, n_total_eff, active_trait_count, status, status_text }
+ * - status: "insufficient" (n<5) / "preliminary" (5-20) / "trusted" (≥20)
+ */
+    async function getProfileStatus(personaUid) {
+        _require(personaUid, 'personaUid');
+        return await _invoke('get_profile_status', { personaUid: personaUid }, '查询画像数据状态');
+    }
+
  /**
  * 手动触发记忆管线（L2 事件提取 → L3 性格推断）。
  *
@@ -698,6 +756,9 @@ var RamariaApi = (function () {
             getL1: getL1Memories,
             getL2: getL2Events,
             getL3: getL3Traits,
+            getProfile: getPersonalityProfile,
+            getEvidence: getTraitEvidence,
+            getProfileStatus: getProfileStatus,
             triggerPipeline: triggerMemoryPipeline,
             regenerateImportPipeline: regenerateImportPipeline,
         },

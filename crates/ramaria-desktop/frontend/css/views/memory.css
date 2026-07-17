@@ -721,3 +721,304 @@
   border-color: oklch(0.38 0.004 25);
   color: oklch(0.72 0 0);
 }
+
+/* ═══════════════════════════════════════════════
+   11. L3 三层性格画像（v1.3 M5-D 重新设计）
+   ═══════════════════════════════════════════════ */
+
+/* 整体容器 */
+.memory-l3-profile {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+/* 状态指示器 */
+.memory-l3-status-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  background: var(--bg-subtle);
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.memory-l3-status-icon {
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
+.memory-l3-status-text {
+  flex: 1;
+  line-height: 1.5;
+}
+
+/* 层区块 */
+.memory-l3-section--base,
+.memory-l3-section--primary,
+.memory-l3-section--accent {
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.memory-l3-section--base {
+  border-left: 4px solid var(--pink-400);
+}
+
+.memory-l3-section--primary {
+  border-left: 4px solid var(--blue-400);
+}
+
+.memory-l3-section--accent {
+  border-left: 4px solid var(--text-tertiary);
+}
+
+/* 层标题 */
+.memory-l3-section-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--bg-subtle);
+  border-bottom: 1px solid var(--border-default);
+}
+
+.memory-l3-section-icon {
+  font-size: 22px;
+  flex-shrink: 0;
+}
+
+.memory-l3-section-text {
+  flex: 1;
+}
+
+.memory-l3-section-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.memory-l3-section-subtitle {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-top: 1px;
+}
+
+.memory-l3-section-count {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: var(--bg-surface);
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+}
+
+/* trait 列表 */
+.memory-l3-traits {
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.memory-l3-traits-empty {
+  text-align: center;
+  padding: var(--space-4);
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+/* 单条 trait 卡片 */
+.memory-l3-trait-card {
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+  background: var(--bg-surface);
+  transition: box-shadow var(--dur-fast) var(--ease-out);
+}
+
+.memory-l3-trait-card:hover {
+  box-shadow: var(--shadow-sm);
+}
+
+/* trait 头部：标签 + 置信度 */
+.memory-l3-trait-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.memory-l3-trait-label {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.memory-l3-trait-confidence {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+  flex-shrink: 0;
+}
+
+.memory-l3-trait-confidence.high {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.memory-l3-trait-confidence.mid {
+  background: #fef9c3;
+  color: #854d0e;
+}
+
+.memory-l3-trait-confidence.low {
+  background: #ffedd5;
+  color: #9a3412;
+}
+
+/* trait 含义 */
+.memory-l3-trait-meaning {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  margin-bottom: var(--space-2);
+}
+
+/* 置信度色条 */
+.memory-l3-confidence-bar {
+  height: 5px;
+  background: var(--bg-muted);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: var(--space-2);
+}
+
+.memory-l3-confidence-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.4s ease;
+}
+
+.memory-l3-confidence-fill.high { background: #16a34a; }
+.memory-l3-confidence-fill.mid  { background: #ca8a04; }
+.memory-l3-confidence-fill.low  { background: #ea580c; }
+
+/* trait 元信息行 */
+.memory-l3-trait-meta {
+  display: flex;
+  gap: var(--space-3);
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-bottom: var(--space-1);
+}
+
+/* 否定界定 */
+.memory-l3-trait-not {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  font-style: italic;
+  margin-bottom: var(--space-1);
+}
+
+/* 触发/抑制条件 */
+.memory-l3-trait-cond {
+  font-size: 11px;
+  padding: var(--space-1) var(--space-2);
+  border-radius: 4px;
+  margin-bottom: 2px;
+}
+
+.memory-l3-trait-cond--trigger {
+  background: var(--green-50, #f0fdf4);
+  color: #166534;
+}
+
+.memory-l3-trait-cond--suppress {
+  background: var(--bg-subtle);
+  color: var(--text-tertiary);
+}
+
+/* 关联性格 */
+.memory-l3-trait-related {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-bottom: var(--space-2);
+}
+
+/* trait 底部操作行 */
+.memory-l3-trait-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border-default);
+  margin-top: var(--space-1);
+}
+
+.memory-l3-trait-time {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.memory-l3-evidence-btn {
+  font-size: 11px;
+  padding: 3px 10px;
+}
+
+/* 证据链展开面板 */
+.memory-l3-evidence-panel {
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  background: var(--bg-subtle);
+  border-radius: var(--radius-sm);
+  border: 1px dashed var(--border-default);
+  max-height: 500px;
+  overflow-y: auto;
+}
+
+/* ═══════════════════════════════════════════════
+   12. 暗色模式 L3 Profile 覆盖
+   ═══════════════════════════════════════════════ */
+
+[data-theme="dark"] .memory-l3-trait-confidence.high {
+  background: #14532d;
+  color: #86efac;
+}
+
+[data-theme="dark"] .memory-l3-trait-confidence.mid {
+  background: #422006;
+  color: #fde047;
+}
+
+[data-theme="dark"] .memory-l3-trait-confidence.low {
+  background: #431407;
+  color: #fdba74;
+}
+
+[data-theme="dark"] .memory-l3-confidence-fill.high { background: #22c55e; }
+[data-theme="dark"] .memory-l3-confidence-fill.mid  { background: #eab308; }
+[data-theme="dark"] .memory-l3-confidence-fill.low  { background: #f97316; }
+
+[data-theme="dark"] .memory-l3-trait-cond--trigger {
+  background: rgba(22, 163, 74, 0.15);
+  color: #86efac;
+}
+
+[data-theme="dark"] .memory-l3-evidence-panel {
+  background: var(--bg-muted);
+}
+
+[data-theme="dark"] .memory-l3-section--base {
+  border-left-color: var(--pink-500);
+}
+
+[data-theme="dark"] .memory-l3-section--primary {
+  border-left-color: var(--blue-500);
+}

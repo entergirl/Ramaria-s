@@ -1,0 +1,364 @@
+/**
+ * css/components/trait-evidence.css — 性格标签证据链组件样式 (v1.3 M5-D)
+ *
+ * 层级缩进: trait → 事件 → L1 → evidence_notes
+ * 置信度色条: 绿 ≥ 0.8 / 黄 0.6-0.8 / 橙 < 0.6
+ */
+
+/* =========================================================
+   容器 & 加载状态
+   ========================================================= */
+
+.tev-loading,
+.tev-empty {
+    padding: var(--space-8);
+    text-align: center;
+    color: var(--text-secondary);
+    font-size: 13px;
+}
+
+.tev-empty-icon {
+    font-size: 28px;
+    margin-bottom: var(--space-2);
+}
+
+.tev-empty-text {
+    line-height: 1.6;
+}
+
+.tev-empty-text small {
+    color: var(--text-tertiary);
+}
+
+.tev-loading-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--pink-400);
+    animation: tev-bounce 1.4s infinite ease-in-out both;
+    margin: 0 2px;
+}
+
+.tev-loading-dot:nth-child(1) { animation-delay: -0.32s; }
+.tev-loading-dot:nth-child(2) { animation-delay: -0.16s; }
+
+@keyframes tev-bounce {
+    0%, 80%, 100% { transform: scale(0); opacity: 0.5; }
+    40% { transform: scale(1); opacity: 1; }
+}
+
+/* =========================================================
+   头部统计
+   ========================================================= */
+
+.tev-header {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    padding: var(--space-3) var(--space-4);
+    background: var(--bg-subtle);
+    border-radius: var(--radius-sm);
+    margin-bottom: var(--space-3);
+    font-size: 13px;
+}
+
+.tev-header-title {
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-right: var(--space-2);
+}
+
+.tev-header-stats {
+    display: flex;
+    gap: var(--space-3);
+    flex-wrap: wrap;
+}
+
+.tev-stat {
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.tev-stat--support { color: #16a34a; }
+.tev-stat--contradict { color: #dc2626; }
+.tev-stat--neutral { color: var(--text-tertiary); }
+
+/* =========================================================
+   事件列表
+   ========================================================= */
+
+.tev-events {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+}
+
+.tev-event {
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    transition: border-color var(--dur-fast) var(--ease-out);
+}
+
+.tev-event--expanded {
+    border-color: var(--pink-300);
+}
+
+.tev-event-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    cursor: pointer;
+    user-select: none;
+    background: var(--bg-surface);
+    transition: background var(--dur-fast) var(--ease-out);
+}
+
+.tev-event-header:hover {
+    background: var(--bg-subtle);
+}
+
+.tev-event-expand-icon {
+    font-size: 10px;
+    color: var(--text-tertiary);
+    width: 14px;
+    flex-shrink: 0;
+    transition: transform var(--dur-fast) var(--ease-out);
+}
+
+.tev-event-index {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    font-weight: 600;
+    min-width: 24px;
+}
+
+.tev-event-title {
+    flex: 1;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.tev-ev-badges {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
+}
+
+.tev-ev-badge {
+    font-size: 11px;
+    padding: 1px 6px;
+    border-radius: var(--radius-full);
+    font-weight: 600;
+}
+
+/* 置信度色条 */
+.tev-conf-badge {
+    color: #fff;
+}
+.tev-conf--high { background: #16a34a; }  /* ≥ 80% */
+.tev-conf--mid  { background: #ca8a04; }  /* 60-80% */
+.tev-conf--low  { background: #ea580c; }  /* < 60% */
+.tev-conf--none { background: var(--bg-muted); color: var(--text-tertiary); }
+
+.tev-att-badge {
+    background: var(--blue-100);
+    color: var(--blue-700);
+}
+
+.tev-event-summary {
+    padding: 0 var(--space-3) var(--space-2);
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+
+.tev-ev-motives {
+    display: block;
+    padding: 0 var(--space-3) var(--space-2);
+    font-size: 11px;
+    color: var(--pink-600);
+}
+
+/* =========================================================
+   事件详情（可展开）
+   ========================================================= */
+
+.tev-event-detail {
+    border-top: 1px solid var(--border-default);
+    background: var(--bg-subtle);
+}
+
+.tev-ev-signals {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1) var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    font-size: 11px;
+    color: var(--text-tertiary);
+}
+
+.tev-signal--wide {
+    flex-basis: 100%;
+}
+
+/* =========================================================
+   L1 溯源列表
+   ========================================================= */
+
+.tev-l1-list {
+    padding: var(--space-2) var(--space-3);
+    border-top: 1px dashed var(--border-default);
+}
+
+.tev-l1-list-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: var(--space-1);
+}
+
+.tev-l1-item {
+    border: 1px solid var(--border-default);
+    border-radius: 4px;
+    margin-bottom: 4px;
+    overflow: hidden;
+}
+
+.tev-l1-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: 4px var(--space-2);
+    cursor: pointer;
+    user-select: none;
+    font-size: 11px;
+    color: var(--text-secondary);
+    background: var(--bg-surface);
+    transition: background var(--dur-fast) var(--ease-out);
+}
+
+.tev-l1-header:hover {
+    background: var(--bg-subtle);
+}
+
+.tev-l1-expand-icon {
+    font-size: 8px;
+    color: var(--text-tertiary);
+    flex-shrink: 0;
+}
+
+.tev-l1-summary {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.tev-l1-meta {
+    font-size: 10px;
+    color: var(--text-tertiary);
+    flex-shrink: 0;
+}
+
+.tev-l1-detail {
+    padding: var(--space-2);
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+    background: var(--bg-surface);
+}
+
+.tev-l1-full-summary {
+    margin-bottom: var(--space-2);
+}
+
+.tev-l1-meta-row {
+    display: flex;
+    gap: var(--space-3);
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-top: var(--space-2);
+    padding-top: var(--space-2);
+    border-top: 1px solid var(--border-default);
+}
+
+/* =========================================================
+   证据片段
+   ========================================================= */
+
+.tev-evidence-notes {
+    margin-top: var(--space-2);
+    padding: var(--space-2);
+    background: var(--bg-subtle);
+    border-radius: 4px;
+    border-left: 3px solid var(--pink-400);
+}
+
+.tev-evidence-notes-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--pink-600);
+    margin-bottom: var(--space-1);
+}
+
+.tev-evidence-notes-list {
+    margin: 0;
+    padding-left: var(--space-4);
+    font-size: 11px;
+    color: var(--text-secondary);
+    line-height: 1.6;
+}
+
+.tev-evidence-notes-list li {
+    margin-bottom: 2px;
+}
+
+/* =========================================================
+   暗色模式
+   ========================================================= */
+
+[data-theme="dark"] .tev-header {
+    background: var(--bg-muted);
+}
+
+[data-theme="dark"] .tev-event-header {
+    background: var(--bg-muted);
+}
+
+[data-theme="dark"] .tev-event-header:hover {
+    background: var(--bg-subtle);
+}
+
+[data-theme="dark"] .tev-event-detail {
+    background: var(--bg-muted);
+}
+
+[data-theme="dark"] .tev-l1-header {
+    background: var(--bg-muted);
+}
+
+[data-theme="dark"] .tev-l1-detail {
+    background: var(--bg-muted);
+}
+
+[data-theme="dark"] .tev-evidence-notes {
+    background: var(--bg-muted);
+    border-left-color: var(--pink-500);
+}
+
+[data-theme="dark"] .tev-att-badge {
+    background: var(--blue-900);
+    color: var(--blue-300);
+}
+
+[data-theme="dark"] .tev-conf--high { background: #15803d; }
+[data-theme="dark"] .tev-conf--mid  { background: #a16207; }
+[data-theme="dark"] .tev-conf--low  { background: #c2410c; }

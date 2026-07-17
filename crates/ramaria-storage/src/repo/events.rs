@@ -9,7 +9,7 @@
 use crate::parse_enum_fallback;
 use crate::repo::StorageResultExt;
 use ramaria_core::error::RamariaResult;
-use ramaria_core::types::{EventRelation, MemoryEvent, Presentation};
+use ramaria_core::types::{EventRelation, EventSource, MemoryEvent, Presentation};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
@@ -262,4 +262,51 @@ pub async fn save_source(
     .await
     .storage_err("保存事件溯源失败")?;
     Ok(())
+}
+
+/// 事件溯源行映射（用于 sqlx::FromRow 自动反序列化）。
+#[derive(sqlx::FromRow)]
+struct SourceRow {
+    id: i64,
+    event_id: i64,
+    l1_id: String,
+    weight: f64,
+}
+
+impl SourceRow {
+    fn into_source(self) -> RamariaResult<EventSource> {
+        let l1_id = Uuid::parse_str(&self.l1_id).map_err(|e| {
+            ramaria_core::RamariaError::storage(format!(
+                "event_sources 中 l1_id 不是有效 UUID: {e}"
+            ))
+        })?;
+        Ok(EventSource {
+            id: self.id,
+            event_id: self.event_id,
+            l1_id,
+            weight: self.weight,
+        })
+    }
+}
+
+/// 查询指定事件的所有溯源 L1 记录。
+///
+/// 用于前端性格画像证据链展开：事件 → L1 摘要 → evidence_notes。
+pub async fn list_sources_by_event(
+    pool: &SqlitePool,
+    event_id: i64,
+) -> RamariaResult<Vec<EventSource>> {
+    let rows = sqlx::query_as::<_, SourceRow>(
+        "SELECT id, event_id, l1_id, weight FROM event_sources WHERE event_id = ? ORDER BY weight DESC",
+    )
+    .bind(event_id)
+    .fetch_all(pool)
+    .await
+    .storage_err("查询事件溯源列表失败")?;
+
+    let mut sources = Vec::with_capacity(rows.len());
+    for row in rows {
+        sources.push(row.into_source()?);
+    }
+    Ok(sources)
 }
