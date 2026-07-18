@@ -86,3 +86,57 @@ pub async fn list_by_persona(
         .map(|r| r.into_fact())
         .collect::<RamariaResult<Vec<_>>>()
 }
+
+/// 按 persona_uid 一次性统计所有 ProfileField 的 fact 数量。
+///
+/// 使用单条 GROUP BY 查询替代 N+1 循环（v1.3 P-4 修复）。
+///
+/// 返回:
+/// - `Vec<(ProfileField, usize)>`：每个字段的 fact 数量和。
+/// - 某个字段无记录时返回 `(field, 0)`。
+pub async fn count_by_persona_grouped(
+    pool: &SqlitePool,
+    persona_uid: &str,
+) -> RamariaResult<Vec<(ProfileField, usize)>> {
+    use crate::repo::StorageResultExt;
+
+    #[derive(sqlx::FromRow)]
+    struct FieldCount {
+        field: String,
+        cnt: i64,
+    }
+
+    let rows = sqlx::query_as::<_, FieldCount>(
+        "SELECT field, COUNT(*) AS cnt FROM persona_facts
+         WHERE persona_uid = ?
+         GROUP BY field",
+    )
+    .bind(persona_uid)
+    .fetch_all(pool)
+    .await
+    .storage_err("统计事实数量失败")?;
+
+    // 构建所有字段的计数映射
+    let count_map: std::collections::HashMap<String, usize> = rows
+        .into_iter()
+        .map(|r| (r.field, r.cnt as usize))
+        .collect();
+
+    // 返回全部 7 个 ProfileField 的结果（缺失字段为 0）
+    let fields = [
+        ("basic_info", ProfileField::BasicInfo),
+        ("personal_status", ProfileField::PersonalStatus),
+        ("interests", ProfileField::Interests),
+        ("social", ProfileField::Social),
+        ("history", ProfileField::History),
+        ("recent_context", ProfileField::RecentContext),
+        ("speaking_style", ProfileField::SpeakingStyle),
+    ];
+
+    let result = fields
+        .iter()
+        .map(|(key, field)| (*field, count_map.get(*key).copied().unwrap_or(0)))
+        .collect();
+
+    Ok(result)
+}

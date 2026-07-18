@@ -468,6 +468,36 @@ pub trait StorageBackend: Send + Sync {
         persona_uid: &str,
         field: ProfileField,
     ) -> RamariaResult<Vec<PersonaFact>>;
+    /// 按 persona_uid 一次性统计所有字段的 fact 数量（GROUP BY）。
+    ///
+    /// 返回:
+    /// - `Vec<(ProfileField, usize)>`：每个字段及其对应的 fact 数量。
+    /// - 某字段无记录时结果为 0。
+    ///
+    /// 性能:
+    /// - 单次 SQL GROUP BY 查询，替代 v1.2 的 N+1 循环查询。
+    /// - 用于冷启动已有画像的 fact 计数。
+    async fn count_all_facts_for_persona(
+        &self,
+        persona_uid: &str,
+    ) -> RamariaResult<Vec<(ProfileField, usize)>> {
+        // 默认实现：委托 list_facts_by_persona 逐字段查询（兼容非 SQL 后端）
+        let fields = [
+            ProfileField::BasicInfo,
+            ProfileField::PersonalStatus,
+            ProfileField::Interests,
+            ProfileField::Social,
+            ProfileField::History,
+            ProfileField::RecentContext,
+            ProfileField::SpeakingStyle,
+        ];
+        let mut result = Vec::with_capacity(fields.len());
+        for &field in &fields {
+            let count = self.list_facts_by_persona(persona_uid, field).await?.len();
+            result.push((field, count));
+        }
+        Ok(result)
+    }
 
     // -- Personality Traits (L3 性格层, id: i64) --
     async fn save_trait(&self, t: &PersonalityTrait) -> RamariaResult<i64>;

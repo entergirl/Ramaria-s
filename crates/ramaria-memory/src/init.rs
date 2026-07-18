@@ -568,31 +568,18 @@ fn parse_trait_layer(layer: &str) -> TraitLayer {
     }
 }
 
-/// 统计某个 persona 的 facts 数量。
+/// 统计某个 persona 的 facts 总数量。
 ///
-/// TODO(P3): 当前对 7 个 ProfileField 各发一次 DB 查询（N+1），
-/// 应在 StorageBackend 中添加 `count_all_facts_for_persona` 方法，
-/// 改为一条 `GROUP BY field` SQL 完成统计。
+/// v1.3 P-4 修复:
+/// - 使用 `StorageBackend::count_all_facts_for_persona` 的 GROUP BY 查询。
+/// - 替代 v1.2 的 N+1 循环（每个 ProfileField 各发一次 DB 查询）。
+/// - 对不支持 GROUP BY 的非 SQL 后端，trait 默认实现自动降级为逐字段查询。
 async fn count_facts_for_persona(
     storage: &dyn StorageBackend,
     persona_uid: &str,
 ) -> RamariaResult<usize> {
-    // 遍历所有 ProfileField 变体，累加 count
-    let fields = [
-        ProfileField::BasicInfo,
-        ProfileField::PersonalStatus,
-        ProfileField::Interests,
-        ProfileField::Social,
-        ProfileField::History,
-        ProfileField::RecentContext,
-        ProfileField::SpeakingStyle,
-    ];
-
-    let mut total = 0usize;
-    for field in &fields {
-        let facts = storage.list_facts_by_persona(persona_uid, *field).await?;
-        total += facts.len();
-    }
+    let counts = storage.count_all_facts_for_persona(persona_uid).await?;
+    let total: usize = counts.iter().map(|(_, cnt)| cnt).sum();
     Ok(total)
 }
 

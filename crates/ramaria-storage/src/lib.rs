@@ -204,6 +204,13 @@ impl StorageBackend for SqliteStorage {
     ) -> RamariaResult<Vec<PersonaFact>> {
         repo::facts::list_by_persona(&self.pool, persona_uid, field).await
     }
+    /// v1.3 P-4 修复: 使用 GROUP BY 单查询替代 N+1 循环。
+    async fn count_all_facts_for_persona(
+        &self,
+        persona_uid: &str,
+    ) -> RamariaResult<Vec<(ProfileField, usize)>> {
+        repo::facts::count_by_persona_grouped(&self.pool, persona_uid).await
+    }
 
     // =========================================================
     // Personality Traits（L3 性格层）+ Trait Evidence（证据链）
@@ -805,6 +812,99 @@ mod tests {
             .unwrap();
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].id, fact_id);
+    }
+
+    /// v1.3 P-4 修复: 验证 GROUP BY 查询正确统计各字段数量。
+    #[tokio::test]
+    async fn count_all_facts_for_persona_grouped() {
+        let storage = setup().await;
+        let p = Persona::new(
+            "user-0001".into(),
+            "用户".into(),
+            PersonaKind::User,
+            1,
+            "local".into(),
+        );
+        storage.create_persona(&p).await.unwrap();
+
+        // 写入 3 条不同字段的 fact
+        let f1 = PersonaFact::new(
+            "user-0001".into(),
+            ramaria_core::types::ProfileField::BasicInfo,
+            "姓名：小明".into(),
+            FactSource::L1,
+        );
+        let f2 = PersonaFact::new(
+            "user-0001".into(),
+            ramaria_core::types::ProfileField::Interests,
+            "喜欢编程".into(),
+            FactSource::Manual,
+        );
+        let f3 = PersonaFact::new(
+            "user-0001".into(),
+            ramaria_core::types::ProfileField::Interests,
+            "喜欢阅读".into(),
+            FactSource::Manual,
+        );
+        storage.save_fact(&f1).await.unwrap();
+        storage.save_fact(&f2).await.unwrap();
+        storage.save_fact(&f3).await.unwrap();
+
+        let counts = storage
+            .count_all_facts_for_persona("user-0001")
+            .await
+            .unwrap();
+        assert_eq!(counts.len(), 7, "应返回全部 7 个 ProfileField");
+
+        // BasicInfo: 1 条
+        let basic_count = counts
+            .iter()
+            .find(|(f, _)| *f == ramaria_core::types::ProfileField::BasicInfo)
+            .map(|(_, c)| *c)
+            .unwrap_or(0);
+        assert_eq!(basic_count, 1);
+
+        // Interests: 2 条
+        let interests_count = counts
+            .iter()
+            .find(|(f, _)| *f == ramaria_core::types::ProfileField::Interests)
+            .map(|(_, c)| *c)
+            .unwrap_or(0);
+        assert_eq!(interests_count, 2);
+
+        // PersonalStatus: 0 条（未写入）
+        let ps_count = counts
+            .iter()
+            .find(|(f, _)| *f == ramaria_core::types::ProfileField::PersonalStatus)
+            .map(|(_, c)| *c)
+            .unwrap_or(0);
+        assert_eq!(ps_count, 0, "未写入的字段应返回 0");
+
+        // 总计数应为 3
+        let total: usize = counts.iter().map(|(_, c)| c).sum();
+        assert_eq!(total, 3);
+    }
+
+    /// v1.3 P-4 修复: 验证无记录 persona 返回全 0。
+    #[tokio::test]
+    async fn count_all_facts_for_persona_empty() {
+        let storage = setup().await;
+        let p = Persona::new(
+            "user-empty".into(),
+            "用户".into(),
+            PersonaKind::User,
+            1,
+            "local".into(),
+        );
+        storage.create_persona(&p).await.unwrap();
+
+        let counts = storage
+            .count_all_facts_for_persona("user-empty")
+            .await
+            .unwrap();
+        assert_eq!(counts.len(), 7);
+        let total: usize = counts.iter().map(|(_, c)| c).sum();
+        assert_eq!(total, 0, "无 fact 时总计应为 0");
     }
 
     #[tokio::test]
