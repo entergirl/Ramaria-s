@@ -554,8 +554,44 @@ pub fn mock_infer(stats: &StatsSummary, persona_uid: &str) -> InferenceResult {
     let mut traits = Vec::new();
     let now = ramaria_core::types::now_ms();
 
+    // v1.3 修复：根据分类统计指标动态计算 evidence 和 consistency，
+    // 避免所有 trait 使用相同的硬编码初始值（导致统一 47% 置信度）
+    let compute_mock_evidence = |n_eff: f64| n_eff.clamp(0.0, 100.0);
+    let compute_mock_consistency = |valence_std: f64, share_std: f64| {
+        let avg_std = (valence_std + share_std) / 2.0;
+        (1.0 - avg_std).clamp(0.1, 0.95)
+    };
+    let compute_mock_confidence = |evidence: f64, consistency: f64| {
+        if evidence <= 0.0 {
+            0.0
+        } else {
+            consistency * (1.0 - 1.0 / (1.0 + evidence))
+        }
+    };
+
+    // 从信号标签中匹配对应分类的统计指标。
+    // 信号标签格式为 "{category}-{signal}"（如"工作-积极稳定"），
+    // 通过遍历所有 category 检查标签前缀来匹配。
+    let find_stats_for_signal =
+        |signal_label: &str| -> Option<(&CategoryStats, f64, f64)> {
+            stats
+                .categories
+                .iter()
+                .find(|c| signal_label.starts_with(&c.category))
+                .map(|cs| {
+                    let ev = compute_mock_evidence(cs.n_eff);
+                    let con = compute_mock_consistency(cs.valence_std, cs.share_std);
+                    (cs, ev, con)
+                })
+        };
+
     // 底色
     for (i, label) in consistency.base_candidates.iter().enumerate().take(3) {
+        let (evidence, consistency) = find_stats_for_signal(label)
+            .map(|(_cs, ev, con)| (ev, con))
+            .unwrap_or((1.0, 0.5));
+        let confidence = compute_mock_confidence(evidence, consistency);
+
         traits.push(PersonalityTrait {
             id: 0,
             persona_uid: persona_uid.to_string(),
@@ -570,9 +606,9 @@ pub fn mock_infer(stats: &StatsSummary, persona_uid: &str) -> InferenceResult {
             source: TraitSource::Inferred,
             ref_event_id: None,
             ref_l1_id: None,
-            confidence: 0.5,
-            evidence: 1.0,
-            consistency: 0.5,
+            confidence,
+            evidence,
+            consistency,
             status: TraitStatus::Active,
             created_at: now,
             updated_at: now,
@@ -582,6 +618,11 @@ pub fn mock_infer(stats: &StatsSummary, persona_uid: &str) -> InferenceResult {
 
     // 主色调
     for (i, label) in consistency.primary_candidates.iter().enumerate().take(2) {
+        let (evidence, consistency) = find_stats_for_signal(label)
+            .map(|(_cs, ev, con)| (ev, con))
+            .unwrap_or((1.0, 0.5));
+        let confidence = compute_mock_confidence(evidence, consistency);
+
         traits.push(PersonalityTrait {
             id: 0,
             persona_uid: persona_uid.to_string(),
@@ -596,9 +637,9 @@ pub fn mock_infer(stats: &StatsSummary, persona_uid: &str) -> InferenceResult {
             source: TraitSource::Inferred,
             ref_event_id: None,
             ref_l1_id: None,
-            confidence: 0.5,
-            evidence: 1.0,
-            consistency: 0.5,
+            confidence,
+            evidence,
+            consistency,
             status: TraitStatus::Active,
             created_at: now,
             updated_at: now,
@@ -608,6 +649,18 @@ pub fn mock_infer(stats: &StatsSummary, persona_uid: &str) -> InferenceResult {
 
     // 点缀
     for (i, label) in consistency.accent_candidates.iter().enumerate().take(4) {
+        let (evidence, consistency) = find_stats_for_signal(label)
+            .map(|(_cs, ev, con)| (ev * 0.5, con * 0.7))
+            // 点缀层证据量较低，总体折扣
+            .unwrap_or((0.5, 0.3));
+        // 动机维度标签（"动机-xxx-驱动"）或"内在矛盾型"取默认值
+        let (evidence, consistency) = if label.starts_with("动机-") || label.starts_with("内在矛盾") {
+            (0.5, 0.3)
+        } else {
+            (evidence, consistency)
+        };
+        let confidence = compute_mock_confidence(evidence, consistency);
+
         traits.push(PersonalityTrait {
             id: 0,
             persona_uid: persona_uid.to_string(),
@@ -622,9 +675,9 @@ pub fn mock_infer(stats: &StatsSummary, persona_uid: &str) -> InferenceResult {
             source: TraitSource::Inferred,
             ref_event_id: None,
             ref_l1_id: None,
-            confidence: 0.3, // 点缀初始置信度较低
-            evidence: 0.5,
-            consistency: 0.3,
+            confidence,
+            evidence,
+            consistency,
             status: TraitStatus::Active,
             created_at: now,
             updated_at: now,

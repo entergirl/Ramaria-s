@@ -226,7 +226,7 @@ pub async fn run(
     let mut l1_skip = 0u32;
     let mut l1_err = 0u32;
     for sid in &session_ids {
-        match app.regenerate_l1(*sid, None).await {
+        match app.regenerate_l1(*sid, None, None, None).await {
             Ok(Some(_)) => l1_ok += 1,
             Ok(None) => l1_skip += 1,
             Err(e) => {

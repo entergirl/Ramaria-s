@@ -56,7 +56,7 @@ pub const EVENT_EXTRACTION_PROMPT: &str = r#"你是一个事件提取助手。�
 【字段说明】
 - title: ≤20字，用中文概括事件的核心内容
 - summary: 2-3句话，从当前分析的人物的视角描述事件；用"用户"指代此人
-- keywords: 5-8个名词标签，用英文逗号分隔；优先使用能描述事件分类和地点的标签
+- keywords: 5-8个中文名词标签，用英文逗号分隔；优先使用能描述事件分类和地点的标签；禁止英文关键词，仅限中文
 - participants: JSON 字符串数组；列出事件中除"用户"以外的其他参与者角色或名称
 - confidence: 事实确凿度，0.0..1.0。确凿=1.0（如"用户明确说了..."），推测=0.5（如"可能发生了..."），<0.6不参与性格推断
 
@@ -84,9 +84,12 @@ pub const EVENT_EXTRACTION_PROMPT: &str = r#"你是一个事件提取助手。�
   0.3 = 可分享给亲密的人
   0.7 = 可一般分享
   1.0 = 完全公开无妨
+  鼓励使用连续值（如 0.45, 0.55, 0.85），避免仅使用 0.3 和 0.7 两个锚点
 
-- attitude: 该人物对此事件的态度（自然语言一句话），例如"感到骄傲""有些遗憾""很平静地接受"
-  如果无法判断或事件为纯事实描述，填空字符串 ""
+- attitude: 该人物对此事件的态度（自然语言一句话）。
+  即使是碎片化闲聊，也请从语气、措辞中推断基本态度倾向，
+  例如"平和陈述""略带抱怨""热情分享""敷衍回应""认真探讨""轻松调侃"等。
+  如确无任何态度线索，填写"中性交流"而非空字符串
 
 - motives: 字符串数组，该事件背后反映的底层动机。从以下七类中选择最相关的 1-3 个：
   自我保护 - 事件与人身安全、健康、规避威胁相关
@@ -189,6 +192,29 @@ pub fn build_event_extraction_prompt(l1_formatted: &str) -> String {
     EVENT_EXTRACTION_PROMPT.replace("{l1_summaries}", l1_formatted)
 }
 
+/// v1.3 D9 修复：构建事件提取 Prompt，将"用户"替换为 persona 显示名称。
+///
+/// 用法:
+/// - 导入场景中，L2 事件提取 Prompt 的"用'用户'指代"应替换为实际 persona 名称。
+/// - 正常对话场景仍可用 `build_event_extraction_prompt`（保持"用户"）。
+///
+/// 参数:
+/// - `l1_formatted`: 同 `build_event_extraction_prompt`。
+/// - `persona_name`: persona 显示名称，用于替换 Prompt 中的"用户"。
+///
+/// 返回:
+/// - 完整 prompt 字符串，所有"用户"已替换为 `persona_name`。
+pub fn build_event_extraction_prompt_for_persona(
+    l1_formatted: &str,
+    persona_name: &str,
+) -> String {
+    // 先构建基础 prompt (含 L1 文本)，再替换"用户"→实际 persona 名称。
+    // 注意：L1 摘要文本（来自导入场景，content 已有 [sender_name] 前缀 + 空前缀格式化）
+    // 不应再包含"用户"字样，因此全量替换是安全的。
+    let prompt = build_event_extraction_prompt(l1_formatted);
+    prompt.replace("用户", persona_name)
+}
+
 /// 构建带补充上下文的事件提取 Prompt。
 ///
 /// 用法:
@@ -225,6 +251,24 @@ pub fn build_event_extraction_prompt_with_context(
     }
 
     prompt
+}
+
+/// v1.3 D9 修复：构建带补充上下文的事件提取 Prompt，
+/// 将"用户"替换为 persona 显示名称。
+///
+/// 参数:
+/// - 同 `build_event_extraction_prompt_with_context`。
+/// - `persona_name`: persona 显示名称。
+///
+/// 返回:
+/// - 完整 prompt 字符串，所有"用户"已替换为 `persona_name`。
+pub fn build_event_extraction_prompt_with_context_for_persona(
+    l1_formatted: &str,
+    context_docs: &[crate::event::context_retriever::ContextDocument],
+    persona_name: &str,
+) -> String {
+    let prompt = build_event_extraction_prompt_with_context(l1_formatted, context_docs);
+    prompt.replace("用户", persona_name)
 }
 
 /// 构建 paraphrase Prompt。

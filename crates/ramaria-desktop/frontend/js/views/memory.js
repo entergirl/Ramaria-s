@@ -199,17 +199,19 @@ var RamariaMemoryView = (function () {
         _showPanelLoading();
 
         try {
-            // 并行加载 L1/L2/L3 + 画像状态
+            // 并行加载 L1/L2/L3 画像 + 画像状态
+            // v1.3 修复：L3 改用 get_personality_profile（含完整 TraitDetailView 字段），
+            // 而非 get_l3_traits（不含 trigger/suppress/not_meaning/related/seq）
             var results = await Promise.allSettled([
                 RamariaApi.memory.getL1(_currentPersonaUid, 500),
                 RamariaApi.memory.getL2(_currentPersonaUid, 500),
-                RamariaApi.memory.getL3(_currentPersonaUid),
+                RamariaApi.memory.getProfile(_currentPersonaUid),
                 RamariaApi.memory.getProfileStatus(_currentPersonaUid),
             ]);
 
             var l1Data = results[0].status === 'fulfilled' ? results[0].value : [];
             var l2Data = results[1].status === 'fulfilled' ? results[1].value : [];
-            var l3Data = results[2].status === 'fulfilled' ? results[2].value : [];
+            var profile = results[2].status === 'fulfilled' ? results[2].value : null;
             var profileStatus = results[3].status === 'fulfilled' ? results[3].value : null;
 
             // 若按 persona 过滤无结果，尝试不过滤再查一次
@@ -221,6 +223,14 @@ var RamariaMemoryView = (function () {
                         l1Data = l1Fallback;
                     }
                 } catch (_) { /* 降级查询失败，保持空结果 */ }
+            }
+
+            // v1.3 修复：将 get_personality_profile 的三层结构展平为带 layer 标记的数组
+            var l3Data = [];
+            if (profile) {
+                (profile.base || []).forEach(function(t) { t.layer = 'base'; l3Data.push(t); });
+                (profile.primary || []).forEach(function(t) { t.layer = 'primary'; l3Data.push(t); });
+                (profile.accent || []).forEach(function(t) { t.layer = 'accent'; l3Data.push(t); });
             }
 
             // 缓存
@@ -237,7 +247,7 @@ var RamariaMemoryView = (function () {
             // 错误日志
             if (results[0].status === 'rejected') console.error('[MemoryView] L1 加载失败:', results[0].reason);
             if (results[1].status === 'rejected') console.error('[MemoryView] L2 加载失败:', results[1].reason);
-            if (results[2].status === 'rejected') console.error('[MemoryView] L3 加载失败:', results[2].reason);
+            if (results[2].status === 'rejected') console.error('[MemoryView] L3 画像加载失败:', results[2].reason);
             if (results[3].status === 'rejected') console.error('[MemoryView] 画像状态加载失败:', results[3].reason);
 
         } catch (err) {
@@ -302,7 +312,7 @@ var RamariaMemoryView = (function () {
         grid.className = 'memory-l1-grid';
 
         for (var i = 0; i < items.length; i++) {
-            var item = items[i];
+            let item = items[i];
 
             // ★ v1.2 M5-C: 解析 context_json 获取扩展字段
             var ctx = null;
@@ -325,7 +335,7 @@ var RamariaMemoryView = (function () {
             var atmosphere = item.atmosphere || '';
             var valence = (item.valence != null) ? item.valence : 0;
             var keywords = item.keywords || '';
-            var hasSession = item.session_id && item.session_id.length > 0;
+            let hasSession = item.session_id && item.session_id.length > 0;
 
             // ★ v1.2 M5-C: 确定 valence CSS class
             var valenceClass;
@@ -784,12 +794,25 @@ var RamariaMemoryView = (function () {
 
             // 使用证据链组件加载数据
             if (typeof RamariaTraitEvidence !== 'undefined') {
-                RamariaTraitEvidence.render(panel, _currentPersonaUid, trait.id, trait.label || '?');
+                // v1.3 修复：await render（异步）完成后恢复按钮文字
+                RamariaTraitEvidence.render(panel, _currentPersonaUid, trait.id, trait.label || '?')
+                    .then(function () {
+                        btn.textContent = '📋 收起证据';
+                    })
+                    .catch(function (err) {
+                        console.error('[MemoryView] 证据链加载失败:', err);
+                        btn.textContent = '📋 展开证据';
+                        panel.innerHTML =
+                            '<div class="tev-empty">' +
+                                '<div class="tev-empty-text">证据链加载失败</div>' +
+                            '</div>';
+                    });
             } else {
                 panel.innerHTML =
                     '<div class="tev-empty">' +
                         '<div class="tev-empty-text">证据链组件未加载</div>' +
                     '</div>';
+                btn.textContent = '📋 展开证据';
             }
         });
     }

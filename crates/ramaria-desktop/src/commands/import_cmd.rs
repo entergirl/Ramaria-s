@@ -436,18 +436,21 @@ pub async fn import_qq_chat(
     tracing::info!(sessions_written, messages_written, "L0 写入完成");
 
     // Step 4.5: 为每个导入的 session 生成 L1 摘要
-    // v1.2 修复: L1 摘要 persona_uid 设为导出者（self）人格 UID
-    // 原设计: persona_uid=NULL 以"避免记忆视图污染"（T-V11-5B-010）
-    // 问题: NULL 导致 list_unabsorbed_l1(uid) 永远查不到 → L2 永远无法触发
-    // 修复: 关联到导出者 persona，L2/L3 管线可正常级联；对方 persona 的
-    //       事件提取通过 chat_partners 分组独立进行，不交叉污染
+    // v1.3 修复: L1 摘要 persona_uid 设为对话方（other）人格 UID
+    // 原因: 导入场景中导出者通常是用户自身（不需要分析自己的性格），
+    //       对话方才是分析目标。L1 归属到对话方后，L2/L3 管线可为其正常级联。
+    //       导出者的 L1 摘要可由前端按 chat_partners 跨 persona 查看。
     let app = state.app.clone();
     let sids = session_ids.clone();
     let is_deep = import_mode == ramaria_importer::ImportMode::Deep;
     let total_sids = sids.len();
-    let l1_persona_uid = self_persona_uid_resolved.clone();
+    let l1_persona_uid = other_persona_uid_resolved.clone();
     tokio::spawn(async move {
-        // ── 生成全部 L1 摘要（无级联，persona_uid=导出者）──
+        // ── 生成全部 L1 摘要（无级联，persona_uid=对话方）──
+        // v1.3 D9 修复：导入的消息 content 中已含 "[sender_name]" 前缀
+        // （由 QQ parser 的 make_role_content 嵌入），故传空前缀避免"用户：""助手："双重前缀。
+        // 空前缀 → 对话格式为 "[张三] 消息内容" 而非 "用户：[张三] 消息内容"，
+        // LLM 在 summary/evidence_notes 中自然使用实际名称。
         app_handle
             .emit(
                 EVENT_IMPORT_PROGRESS,
@@ -459,7 +462,7 @@ pub async fn import_qq_chat(
         let mut l1_failed = 0usize;
         for (i, sid) in sids.iter().enumerate() {
             match app
-                .regenerate_l1_no_cascade(*sid, Some(&l1_persona_uid))
+                .regenerate_l1_no_cascade(*sid, Some(&l1_persona_uid), Some(""), Some(""))
                 .await
             {
                 Ok(Some(_)) => l1_success += 1,
@@ -489,10 +492,11 @@ pub async fn import_qq_chat(
             l1_failed,
             total = total_sids,
             persona_uid = %l1_persona_uid,
-            "L1 摘要全部生成完成"
+            "L1 摘要全部生成完成（归属到对话方 persona）"
         );
 
-        // ── 深度模式: 级联 L2→L3 ──
+        // ── 深度模式: 级联 L2→L3（trigger_l2_check 遍历所有 persona，
+        //     由于 L1 归属到对话方，仅对话方有未吸收 L1，L2/L3 仅为其生成）──
         let mut l2_triggered = false;
         let mut l3_triggered = false;
         if is_deep && l1_success > 0 {

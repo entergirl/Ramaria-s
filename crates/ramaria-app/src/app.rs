@@ -246,6 +246,8 @@ impl App {
     /// 参数:
     /// - `session_id`: 目标 session（通常是已关闭但缺少 L1 的 session）。
     /// - `persona_uid`: 人格标识，用于 L1 归属。
+    /// - `user_prefix`: 覆盖默认"用户："前缀。`None` 使用默认。
+    /// - `assistant_prefix`: 覆盖默认"助手："前缀。`None` 使用默认。
     ///
     /// 返回:
     /// - `Ok(Some(l1))`: L1 生成成功。
@@ -255,22 +257,29 @@ impl App {
         &self,
         session_id: Uuid,
         persona_uid: Option<&str>,
+        user_prefix: Option<&str>,
+        assistant_prefix: Option<&str>,
     ) -> RamariaResult<Option<ramaria_core::types::MemoryL1>> {
         let llm = self.llm.lock().unwrap_or_else(|e| e.into_inner()).clone();
         self.lifecycle
-            .regenerate_l1(self.storage.as_ref(), llm.as_ref(), session_id, persona_uid)
+            .regenerate_l1(self.storage.as_ref(), llm.as_ref(), session_id, persona_uid, user_prefix, assistant_prefix)
             .await
     }
 
     /// 生成 L1 摘要但跳过 L2 级联（批量导入用）。
+    ///
+    /// v1.3 D9: 支持 `user_prefix` / `assistant_prefix` 覆盖，
+    /// 导入场景传 `Some("")` 避免前缀与 content 中的 `[sender_name]` 重复。
     pub async fn regenerate_l1_no_cascade(
         &self,
         session_id: Uuid,
         persona_uid: Option<&str>,
+        user_prefix: Option<&str>,
+        assistant_prefix: Option<&str>,
     ) -> RamariaResult<Option<ramaria_core::types::MemoryL1>> {
         let llm = self.llm.lock().unwrap_or_else(|e| e.into_inner()).clone();
         self.lifecycle
-            .regenerate_l1_no_cascade(self.storage.as_ref(), llm.as_ref(), session_id, persona_uid)
+            .regenerate_l1_no_cascade(self.storage.as_ref(), llm.as_ref(), session_id, persona_uid, user_prefix, assistant_prefix)
             .await
     }
 

@@ -419,7 +419,7 @@ pub async fn generate_l1(
 
     let result = state
         .app
-        .regenerate_l1(sid, persona_uid.as_deref())
+        .regenerate_l1(sid, persona_uid.as_deref(), None, None)
         .await
         .map_err(|e| format!("L1 生成失败: {e}"))?;
 

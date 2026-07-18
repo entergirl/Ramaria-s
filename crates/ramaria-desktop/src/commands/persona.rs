@@ -378,7 +378,7 @@ pub async fn regenerate_import_pipeline(
 
     for (idx, sid) in session_ids.iter().enumerate() {
         match app
-            .regenerate_l1_no_cascade(*sid, Some(&l1_persona_uid))
+            .regenerate_l1_no_cascade(*sid, Some(&l1_persona_uid), None, None)
             .await
         {
             Ok(Some(_)) => {

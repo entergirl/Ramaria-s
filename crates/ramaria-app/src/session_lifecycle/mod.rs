@@ -235,8 +235,9 @@ impl SessionLifecycle {
 
         // Step 2: 生成 L1 摘要（传入当前对话人格）
         // 对齐 Python `summarizer.summarize_session(session_id)`
+        // v1.3 D9: 正常对话流程使用默认前缀（"用户：""助手："）
         match self
-            .generate_l1_summary(storage, llm, active_sid, persona_uid)
+            .generate_l1_summary(storage, llm, active_sid, persona_uid, None, None)
             .await
         {
             Ok(l1) => {

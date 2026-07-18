@@ -190,7 +190,7 @@ async fn summarize_session(
         messages.len()
     ));
 
-    match app.regenerate_l1(sid, persona_uid).await {
+    match app.regenerate_l1(sid, persona_uid, None, None).await {
         Ok(Some(l1)) => {
             crate::ui::success("L1 摘要生成成功");
             println!();

@@ -31,6 +31,8 @@ impl SessionLifecycle {
     /// 参数:
     /// - `session_id`: 目标 session。
     /// - `persona_uid`: 人格标识。
+    /// - `user_prefix`: 覆盖默认"用户："前缀。`None` 使用默认。
+    /// - `assistant_prefix`: 覆盖默认"助手："前缀。`None` 使用默认。
     ///
     /// 返回:
     /// - `Ok(Some(l1))`: 生成成功。
@@ -41,6 +43,8 @@ impl SessionLifecycle {
         llm: &dyn LlmProvider,
         session_id: Uuid,
         persona_uid: Option<&str>,
+        user_prefix: Option<&str>,
+        assistant_prefix: Option<&str>,
     ) -> RamariaResult<Option<ramaria_core::types::MemoryL1>> {
         // 检查是否有消息可摘要
         let messages = storage.list_messages(session_id).await?;
@@ -52,7 +56,7 @@ impl SessionLifecycle {
         info!(%session_id, ?persona_uid, msg_count = messages.len(), "手动重试 L1 摘要");
 
         match self
-            .generate_l1_summary(storage, llm, session_id, persona_uid)
+            .generate_l1_summary(storage, llm, session_id, persona_uid, user_prefix, assistant_prefix)
             .await
         {
             Ok(l1) => {
@@ -86,6 +90,8 @@ impl SessionLifecycle {
         llm: &dyn LlmProvider,
         session_id: Uuid,
         persona_uid: Option<&str>,
+        user_prefix: Option<&str>,
+        assistant_prefix: Option<&str>,
     ) -> RamariaResult<Option<ramaria_core::types::MemoryL1>> {
         let messages = storage.list_messages(session_id).await?;
         if messages.is_empty() {
@@ -125,7 +131,7 @@ impl SessionLifecycle {
         info!(%session_id, ?persona_uid, msg_count = messages.len(), "批量 L1 摘要（无级联）");
 
         match self
-            .generate_l1_summary(storage, llm, session_id, persona_uid)
+            .generate_l1_summary(storage, llm, session_id, persona_uid, user_prefix, assistant_prefix)
             .await
         {
             Ok(l1) => {
@@ -151,6 +157,9 @@ impl SessionLifecycle {
     ///
     /// 参数:
     /// - `persona_uid`: 当前对话人格的 UID，用于 L1 归属。
+    /// - `user_prefix`: 覆盖默认"用户："前缀。`None` 使用默认，
+    ///   `Some("")` 表示不添加前缀（消息内容已含发送者名称）。
+    /// - `assistant_prefix`: 覆盖默认"助手："前缀。同上。
     ///
     /// 对齐 Python `summarizer.summarize_session(session_id)`。
     pub(super) async fn generate_l1_summary(
@@ -159,11 +168,20 @@ impl SessionLifecycle {
         llm: &dyn LlmProvider,
         session_id: Uuid,
         persona_uid: Option<&str>,
+        user_prefix: Option<&str>,
+        assistant_prefix: Option<&str>,
     ) -> RamariaResult<ramaria_core::types::MemoryL1> {
         let mut summarizer_config = L1SummarizerConfig::default();
         // 设置 persona_uid，确保 L1 摘要可被记忆页面按人格过滤查询到
         if let Some(uid) = persona_uid {
             summarizer_config.persona_uid = Some(uid.to_string());
+        }
+        // v1.3 D9 修复：导入场景覆盖对话前缀，避免"用户/助手"称呼污染摘要
+        if let Some(prefix) = user_prefix {
+            summarizer_config.user_prefix = prefix.to_string();
+        }
+        if let Some(prefix) = assistant_prefix {
+            summarizer_config.assistant_prefix = prefix.to_string();
         }
         let summarizer = L1Summarizer::new(llm, storage, summarizer_config);
 

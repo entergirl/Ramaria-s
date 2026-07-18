@@ -27,7 +27,10 @@ use super::batcher::{L1Item, TopicBatcher, TopicBatcherConfig, TopicCluster};
 use super::context_retriever::{ContextRetriever, ContextRetrieverConfig};
 use super::degrade::{DegradeConfig, build_degraded_event};
 use super::paraphrase::{ParaphraseConfig, generate_paraphrase};
-use super::prompt::{build_event_extraction_prompt, build_event_extraction_prompt_with_context};
+use super::prompt::{
+    build_event_extraction_prompt_for_persona,
+    build_event_extraction_prompt_with_context_for_persona,
+};
 use crate::retriever::Retriever;
 use crate::utils;
 
@@ -286,6 +289,17 @@ impl<'a> EventExtractor<'a> {
             return Ok(vec![]);
         }
 
+        // v1.3 D9: 查询 persona 显示名称，用于 Prompt 中替换"用户"
+        let persona_name = self
+            .storage
+            .get_persona_by_uid(persona_uid)
+            .await
+            .map(|p| p.map(|p| p.name).unwrap_or_else(|| persona_uid.to_string()))
+            .unwrap_or_else(|e| {
+                warn!(%persona_uid, error = %e, "查询 persona 名称失败，回退到 uid");
+                persona_uid.to_string()
+            });
+
         info!(
             %persona_uid,
             total_l1 = l1_list.len(),
@@ -320,8 +334,9 @@ impl<'a> EventExtractor<'a> {
             };
 
             // 构建 Prompt（带或不带补充上下文）
+            // v1.3 D9: 使用 persona 实际名称替代"用户"
             let prompt = if context_docs.is_empty() {
-                build_event_extraction_prompt(&formatted)
+                build_event_extraction_prompt_for_persona(&formatted, &persona_name)
             } else {
                 debug!(
                     %persona_uid,
@@ -329,7 +344,11 @@ impl<'a> EventExtractor<'a> {
                     context_doc_count = context_docs.len(),
                     "注入 CompositeIndex 补充上下文"
                 );
-                build_event_extraction_prompt_with_context(&formatted, &context_docs)
+                build_event_extraction_prompt_with_context_for_persona(
+                    &formatted,
+                    &context_docs,
+                    &persona_name,
+                )
             };
 
             // 调用 LLM
