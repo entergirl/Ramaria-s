@@ -18,7 +18,9 @@
 
 pub mod app;
 pub mod app_chat;
+pub mod app_privacy;
 pub mod app_retriever;
+pub mod app_setup;
 pub mod app_state;
 pub mod diagnostics;
 pub mod error_hint;
