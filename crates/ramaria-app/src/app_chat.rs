@@ -200,7 +200,7 @@ impl App {
     /// 注意:
     /// - 所有字段通过 Arc 克隆共享，零所有权拷贝
     /// - LLM 和 Embedding 从 Mutex 中 clone Arc 出锁后传入
-    /// - Retriever 通过 Arc 引用共享（v1.2 已将 App.retriever 类型改为 Arc<Mutex<Retriever>>）
+    /// - Retriever 通过 Arc 引用共享（v1.3 P-3 已改为 Arc<RwLock<Retriever>>）
     fn build_pipeline_context(&self) -> crate::pipeline::PipelineContext {
         let llm = self.llm_clone();
         let embedding = self.embedding_provider();

@@ -65,6 +65,15 @@ impl StorageBackend for SqliteStorage {
     async fn list_messages(&self, session_id: Uuid) -> RamariaResult<Vec<Message>> {
         repo::messages::list_by_session(&self.pool, session_id).await
     }
+    /// v1.3 (P-6): 覆写为高效 SQL 分页（`ORDER BY created_at DESC LIMIT ? OFFSET ?`）。
+    async fn list_messages_paginated(
+        &self,
+        session_id: Uuid,
+        limit: i64,
+        offset: i64,
+    ) -> RamariaResult<Vec<Message>> {
+        repo::messages::list_by_session_paginated(&self.pool, session_id, limit, offset).await
+    }
     async fn list_messages_by_persona(&self, persona_uid: &str) -> RamariaResult<Vec<Message>> {
         repo::messages::list_by_persona(&self.pool, persona_uid).await
     }

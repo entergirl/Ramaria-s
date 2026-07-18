@@ -9,6 +9,7 @@
 //! - 非流式请求（`stream: false`）直接解析完整 JSON 响应
 //! - 所有 HTTP 错误保留 status code 和响应体前 500 字符，便于诊断
 //! - 不记录 API key 或完整消息内容
+//! - v1.3: SSE 单行 > 10KB 截断并 warn；流式整体 120s 超时保护
 
 use bytes::BytesMut;
 use futures::Stream;
@@ -212,9 +213,10 @@ impl OpenAiTransport {
     /// - 流中解析错误 → 流内的 `RamariaResult::Err`（不中断流）。
     ///
     /// 实现:
-    /// - 使用 `futures::channel::mpsc::unbounded` 桥接 tokio 后台任务与返回流。
+    /// - v1.3 (P-5): 使用 `mpsc::channel(64)` 有界通道替代 unbounded，背压保护。
+    /// - v1.3 (P-8): `sse_read_loop` 内含 120s 整体超时保护。
     /// - 后台任务逐块从 `bytes_stream` 读取、拼接不完整行、逐行解析 SSE。
-    /// - 当接收端丢弃 stream 时，后台任务自动退出（`tx.unbounded_send` 返回错误）。
+    /// - 当接收端丢弃 stream 时，后台任务自动退出（`tx.send` 返回错误）。
     pub async fn chat_stream(
         &self,
         messages: &[serde_json::Value],
@@ -241,7 +243,8 @@ impl OpenAiTransport {
 
         // 真正流式：使用 bytes_stream 逐块读取
         let byte_stream = response.bytes_stream();
-        let (tx, rx) = mpsc::unbounded::<RamariaResult<StreamDelta>>();
+        // v1.3 (P-5): 有界 channel，容量 64，满时 send 返回错误自然降级
+        let (tx, rx) = mpsc::channel::<RamariaResult<StreamDelta>>(64);
 
         tokio::spawn(async move {
             sse_read_loop(byte_stream, tx).await;
@@ -286,21 +289,125 @@ impl OpenAiTransport {
 }
 
 // =========================================================
+// SSE 保护常量
+// =========================================================
+
+/// SSE 单行最大字节数（10KB）。
+///
+/// 说明:
+/// - 正常 SSE `data:` 行通常 < 1KB
+/// - 超过此限制的行将被截断，记录 warn 日志
+/// - 防止异常服务器返回无换行的超大 chunk 导致 `BytesMut` 无限增长
+const SSE_MAX_LINE_BYTES: usize = 10 * 1024;
+
+/// 流式读取整体超时秒数（120s）。
+///
+/// 说明:
+/// - 从首次接收到 HTTP 响应到流结束的总时间上限
+/// - 超时后发送错误事件并退出，防止服务端挂起导致资源泄漏
+const SSE_STREAM_TIMEOUT_SECS: u64 = 120;
+
+// =========================================================
 // SSE 读取循环（后台 tokio 任务）
 // =========================================================
 
-/// 在后台 tokio 任务中逐块读取 HTTP 响应、逐行解析 SSE、通过 channel 发送。
+/// v1.3 (P-5): 使用 `mpsc::Sender`（有界 channel）替代 `UnboundedSender`。
+/// 使用 `try_send` 非阻塞发送，满时丢弃并记 warn（避免阻塞 SSE 读取线程）。
 ///
 /// 设计:
 /// - 使用 `BytesMut` 缓冲区拼接跨 chunk 的不完整行。
 /// - 遇到 `\n` 时切割一行，调用 `parse_sse_line` 解析。
 /// - `data: [DONE]` 时发送 `done=true` 的 Delta 后退出。
-/// - 接收端 drop stream 时 `tx.unbounded_send` 返回错误，此时静默退出。
+/// - 接收端 drop stream 时 `tx.try_send` 返回 Disconnected 错误，此时静默退出。
+/// - v1.3 (P-7): 单行 > `SSE_MAX_LINE_BYTES` 时截断并记 warn。
+/// - v1.3 (P-8): 整体 120s 超时保护，超时发送错误事件。
+///
+/// 参数:
+/// - `byte_stream`: HTTP 响应体字节流。
+/// - `tx`: 有界事件发送通道（容量 64）。
 async fn sse_read_loop(
     byte_stream: impl Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
-    tx: mpsc::UnboundedSender<RamariaResult<StreamDelta>>,
+    tx: mpsc::Sender<RamariaResult<StreamDelta>>,
+) {
+    sse_read_loop_inner(byte_stream, tx, None).await;
+}
+
+/// SSE 读取循环内部实现——支持可选的 request_id 用于超时日志。
+async fn sse_read_loop_inner(
+    byte_stream: impl Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
+    mut tx: mpsc::Sender<RamariaResult<StreamDelta>>,
+    request_id: Option<String>,
+) {
+    // P-8: 流式整体 120s 超时保护
+    let timeout_result = tokio::time::timeout(
+        std::time::Duration::from_secs(SSE_STREAM_TIMEOUT_SECS),
+        sse_read_core(byte_stream, &mut tx, request_id.as_deref()),
+    )
+    .await;
+
+    match timeout_result {
+        Ok(_) => {
+            // 正常完成
+        }
+        Err(_elapsed) => {
+            // 超时：发送错误事件后退出
+            let rid = request_id.as_deref().unwrap_or("unknown");
+            tracing::warn!(
+                request_id = %rid,
+                timeout_secs = SSE_STREAM_TIMEOUT_SECS,
+                "SSE 流式读取整体超时"
+            );
+            let _ = tx.try_send(Err(RamariaError::llm(format!(
+                "SSE 流式读取超时（{SSE_STREAM_TIMEOUT_SECS}s），服务端可能已挂起"
+            ))));
+        }
+    }
+}
+
+/// SSE 核心读取逻辑——逐 chunk 读取、逐行解析、通过 channel 发送。
+///
+/// 职责:
+/// - 从 `byte_stream` 逐块读取 HTTP 响应体。
+/// - 使用 `BytesMut` 缓冲区拼接跨 chunk 的不完整行。
+/// - 逐行调用 `parse_sse_line` 解析 SSE 格式。
+/// - P-7: 单行 > `SSE_MAX_LINE_BYTES` 时截断并 warn。
+/// - v1.3 (P-5): 使用 `try_send` 非阻塞发送，满时丢弃 delta 并记 warn。
+///
+/// v1.3 (P-5): `try_send` 需要 `&mut self`，因此 `tx` 声明为 `&mut mpsc::Sender`。
+async fn sse_read_core(
+    byte_stream: impl Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
+    tx: &mut mpsc::Sender<RamariaResult<StreamDelta>>,
+    request_id: Option<&str>,
 ) {
     use futures::StreamExt;
+
+    // 辅助闭包：尝试发送事件到有界 channel
+    // - 成功 → 返回 false（继续读取）
+    // - Full (is_disconnected=false) → 记 warn + 返回 false
+    // - Disconnected → 返回 true（停止读取）
+    let try_send = |tx: &mut mpsc::Sender<_>, item: RamariaResult<StreamDelta>| -> bool {
+        match tx.try_send(item) {
+            Ok(()) => false,
+            Err(e) if e.is_disconnected() => {
+                tracing::debug!("SSE 接收端已断开，停止读取");
+                true
+            }
+            Err(e) => {
+                // Full: 有界 channel 容量满，丢弃事件不阻塞
+                let item = e.into_inner();
+                if let Ok(ref delta) = item
+                    && !delta.content.is_empty()
+                {
+                    let rid = request_id.unwrap_or("unknown");
+                    tracing::warn!(
+                        request_id = %rid,
+                        "SSE 有界 channel 已满（容量 64），丢弃 delta 事件（前端消费慢或卡顿）"
+                    );
+                }
+                false
+            }
+        }
+    };
 
     futures::pin_mut!(byte_stream);
     let mut buffer = BytesMut::new();
@@ -309,6 +416,22 @@ async fn sse_read_loop(
         match chunk_result {
             Ok(chunk) => {
                 buffer.extend_from_slice(&chunk);
+
+                // P-7: 检查缓冲区是否超过 SSE_MAX_LINE_BYTES 且无换行符
+                // 异常服务器可能持续发送无换行的超大单行数据
+                if buffer.len() > SSE_MAX_LINE_BYTES && !buffer.contains(&b'\n') {
+                    let rid = request_id.unwrap_or("unknown");
+                    tracing::warn!(
+                        request_id = %rid,
+                        buffer_len = buffer.len(),
+                        max_line_bytes = SSE_MAX_LINE_BYTES,
+                        "SSE 缓冲区超过行长度上限且无换行符，截断缓冲区以防止内存无限增长"
+                    );
+                    // 截断缓冲区到安全大小，丢弃溢出数据
+                    buffer.truncate(SSE_MAX_LINE_BYTES);
+                    // 在截断处插入换行符，强制触发行解析
+                    buffer.extend_from_slice(b"\n");
+                }
 
                 // 逐行解析
                 while let Some(pos) = buffer.iter().position(|&b| b == b'\n') {
@@ -320,14 +443,35 @@ async fn sse_read_loop(
                     } else {
                         &line_bytes[..len - 1]
                     };
+
+                    // P-7: 单行长度保护——正常 SSE data 行 < 1KB，超大行视为异常
+                    if content.len() > SSE_MAX_LINE_BYTES {
+                        let rid = request_id.unwrap_or("unknown");
+                        tracing::warn!(
+                            request_id = %rid,
+                            line_len = content.len(),
+                            max_line_bytes = SSE_MAX_LINE_BYTES,
+                            "SSE 单行超过长度上限，截断处理"
+                        );
+                        // 截取前 SSE_MAX_LINE_BYTES 字节尝试解析
+                        let truncated = &content[..SSE_MAX_LINE_BYTES];
+                        let line = String::from_utf8_lossy(truncated);
+                        if let Some(delta_result) = parse_sse_line(&line)
+                            && try_send(tx, delta_result)
+                        {
+                            return;
+                        }
+                        continue;
+                    }
+
                     let line = String::from_utf8_lossy(content);
 
                     if let Some(delta_result) = parse_sse_line(&line) {
                         match delta_result {
                             Ok(delta) => {
                                 let is_done = delta.done;
-                                if tx.unbounded_send(Ok(delta)).is_err() {
-                                    return; // 接收端已丢弃
+                                if try_send(tx, Ok(delta)) {
+                                    return;
                                 }
                                 if is_done {
                                     // [DONE] 已发送，正常退出
@@ -335,7 +479,7 @@ async fn sse_read_loop(
                                 }
                             }
                             Err(e) => {
-                                if tx.unbounded_send(Err(e)).is_err() {
+                                if try_send(tx, Err(e)) {
                                     return;
                                 }
                             }
@@ -345,7 +489,7 @@ async fn sse_read_loop(
                 }
             }
             Err(e) => {
-                let _ = tx.unbounded_send(Err(RamariaError::llm_with_source("HTTP 流读取失败", e)));
+                let _ = try_send(tx, Err(RamariaError::llm_with_source("HTTP 流读取失败", e)));
                 return;
             }
         }
@@ -361,16 +505,19 @@ async fn sse_read_loop(
             if let Ok(ref delta) = delta_result {
                 done_already_sent = delta.done;
             }
-            let _ = tx.unbounded_send(delta_result);
+            let _ = try_send(tx, delta_result);
         }
     }
     // 仅当流中未发送 done 时才发送合成 done 信号，避免双重 Done
     if !done_already_sent {
-        let _ = tx.unbounded_send(Ok(StreamDelta {
-            content: String::new(),
-            done: true,
-            metadata: Some("stream_ended_without_done".to_string()),
-        }));
+        let _ = try_send(
+            tx,
+            Ok(StreamDelta {
+                content: String::new(),
+                done: true,
+                metadata: Some("stream_ended_without_done".to_string()),
+            }),
+        );
     }
 }
 

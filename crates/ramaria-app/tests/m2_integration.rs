@@ -44,7 +44,7 @@ fn make_ctx(
     embedding: Option<Arc<MockEmbedding>>,
 ) -> PipelineContext {
     let config = RamariaConfig::default();
-    let retriever = Arc::new(std::sync::Mutex::new(Retriever::new()));
+    let retriever = Arc::new(std::sync::RwLock::new(Retriever::new()));
     let keychain = Arc::new(Keychain::new());
     let lifecycle = Arc::new(SessionLifecycle::new(config.clone()));
 
@@ -364,7 +364,7 @@ async fn llm_failure_produces_error_stream() {
     let failing_llm: Arc<dyn LlmProvider> =
         Arc::new(mock_backend::MockLlm::failing("mock connection refused"));
     let config = RamariaConfig::default();
-    let retriever = Arc::new(std::sync::Mutex::new(Retriever::new()));
+    let retriever = Arc::new(std::sync::RwLock::new(Retriever::new()));
     let keychain = Arc::new(Keychain::new());
     let lifecycle = Arc::new(SessionLifecycle::new(config.clone()));
     let ctx = PipelineContext::new(

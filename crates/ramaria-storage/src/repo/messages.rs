@@ -172,6 +172,39 @@ pub async fn list_by_session(pool: &SqlitePool, session_id: Uuid) -> RamariaResu
         .collect::<RamariaResult<Vec<_>>>()
 }
 
+/// v1.3 (P-6): 按创建时间降序分页加载消息。
+///
+/// 返回按 `created_at DESC` 排序（最新在前），便于调用方从最新消息开始按 token 预算加载。
+///
+/// 参数:
+/// - `pool`: 数据库连接池。
+/// - `session_id`: 会话 ID。
+/// - `limit`: 每页最大条数。
+/// - `offset`: 分页偏移量（第一页为 0）。
+///
+/// 返回:
+/// - 按 `created_at DESC` 排序的消息列表。
+pub async fn list_by_session_paginated(
+    pool: &SqlitePool,
+    session_id: Uuid,
+    limit: i64,
+    offset: i64,
+) -> RamariaResult<Vec<Message>> {
+    let rows = sqlx::query_as::<_, MessageRow>(
+        "SELECT id, session_id, role, content, created_at, source, import_fingerprint, persona_uid
+         FROM messages WHERE session_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+    )
+    .bind(session_id.to_string())
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await
+    .storage_err("分页查询消息列表失败")?;
+    rows.into_iter()
+        .map(|r| r.into_message())
+        .collect::<RamariaResult<Vec<_>>>()
+}
+
 pub async fn find_by_fingerprint(
     pool: &SqlitePool,
     fingerprint: &str,

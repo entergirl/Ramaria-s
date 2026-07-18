@@ -8,7 +8,7 @@
 //! - SendMessagePipeline 编排器按顺序执行 Stage 序列，任一失败即中止
 //! - 向后兼容：App::send_message 对外接口不变，内部委托 SendMessagePipeline::execute
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use ramaria_core::config::RamariaConfig;
@@ -227,8 +227,8 @@ pub struct PipelineContext {
     pub embedding: Option<Arc<dyn EmbeddingProvider>>,
     /// 应用配置
     pub config: RamariaConfig,
-    /// 内存检索器（Mutex 保护内部三通道索引的读写并发）
-    pub retriever: Arc<Mutex<Retriever>>,
+    /// 内存检索器（v1.3 P-3: RwLock 替代 Mutex，允许多读并发）
+    pub retriever: Arc<RwLock<Retriever>>,
     /// OS keychain
     pub keychain: Arc<Keychain>,
     /// Session 生命周期编排器
@@ -254,7 +254,7 @@ impl PipelineContext {
         llm: Arc<dyn LlmProvider>,
         embedding: Option<Arc<dyn EmbeddingProvider>>,
         config: RamariaConfig,
-        retriever: Arc<Mutex<Retriever>>,
+        retriever: Arc<RwLock<Retriever>>,
         keychain: Arc<Keychain>,
         lifecycle: Arc<SessionLifecycle>,
     ) -> Self {
@@ -888,7 +888,7 @@ mod tests {
         let storage: Arc<dyn StorageBackend> = Arc::new(TestStorage);
         let llm: Arc<dyn LlmProvider> = Arc::new(TestLlm::new());
         let config = RamariaConfig::default();
-        let retriever = Arc::new(Mutex::new(Retriever::new()));
+        let retriever = Arc::new(RwLock::new(Retriever::new()));
         let keychain = Arc::new(Keychain::new());
         let lifecycle = Arc::new(SessionLifecycle::new(config.clone()));
 

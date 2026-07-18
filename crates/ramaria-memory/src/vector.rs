@@ -13,6 +13,7 @@
 //! - 预留 `VectorIndexError` 错误枚举供扩展
 
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 // =========================================================
 // 核心类型
@@ -310,6 +311,230 @@ impl VectorIndex for BruteForceIndex {
 
     fn labels(&self) -> Vec<String> {
         self.entries.keys().cloned().collect()
+    }
+}
+
+// =========================================================
+// CachedVectorIndex — 查询结果缓存装饰器
+// =========================================================
+
+/// 向量索引查询缓存配置。
+///
+/// v1.3 (P-2): 对 BruteForceIndex 添加 LRU-style 查询结果缓存。
+/// 相同或高度相似的查询向量可直接返回缓存结果，避免 O(N·D) 全量扫描。
+///
+/// 缓存策略:
+/// - 对查询向量做量化哈希（float → u8 → u64），容忍微小浮点差异
+/// - 缓存未命中 → 执行底层检索后存入缓存（使用 RefCell 实现 search(&self) 内部可变）
+/// - 索引变更（add/remove/clear）时清空全部缓存
+#[derive(Debug, Clone)]
+pub struct VectorCacheConfig {
+    /// 最大缓存条目数（默认 128）
+    pub max_entries: usize,
+    /// 是否启用缓存
+    pub enabled: bool,
+}
+
+impl Default for VectorCacheConfig {
+    fn default() -> Self {
+        Self {
+            max_entries: 128,
+            enabled: true,
+        }
+    }
+}
+
+/// 缓存条目类型：(查询哈希, top_k, min_similarity量化, 结果列表)
+type CacheEntries = Vec<(u64, usize, u64, Vec<VectorHit>)>;
+
+/// 带查询缓存的向量索引装饰器。
+///
+/// 职责:
+/// - 包装任意 `VectorIndex` 实现，透明添加查询缓存
+/// - 对查询向量做量化哈希以减少缓存 key 的浮点敏感性
+/// - 索引变更时自动清空缓存
+/// - 使用 `Mutex` 实现搜索时的缓存读写（search 为 &self，缓存为内部可变）
+///
+/// 适用场景:
+/// - 同一 session 内多次相似查询（例如流式对话中的反复 RAG 检索）
+/// - 前端轮询记忆卡片时的重复查询
+///
+/// 注意事项:
+/// - 缓存基于查询向量 + config 的复合 key，config 变更视为不同查询
+/// - `top_k` 和 `min_similarity` 是 key 的一部分——不同参数不会误命中
+/// - 使用 `std::sync::Mutex` 替代 RefCell 以满足 `VectorIndex: Send + Sync` 约束
+/// - MutexGuard 仅在同线程内短期持有，不跨 .await，不会死锁
+#[derive(Debug)]
+pub struct CachedVectorIndex<I: VectorIndex> {
+    /// 底层索引实现
+    inner: I,
+    /// 缓存配置
+    cache_config: VectorCacheConfig,
+    /// 缓存条目: (量化哈希, top_k, min_similarity) → Vec<VectorHit>
+    /// Mutex 实现内部可变性，满足 VectorIndex: Send + Sync 约束
+    #[allow(clippy::type_complexity)]
+    cache: Mutex<CacheEntries>,
+}
+
+impl<I: VectorIndex> CachedVectorIndex<I> {
+    /// 创建带缓存的向量索引包装。
+    ///
+    /// 参数:
+    /// - `inner`: 底层索引实现（如 `BruteForceIndex`）。
+    /// - `cache_config`: 缓存配置（None 使用默认值）。
+    pub fn new(inner: I, cache_config: Option<VectorCacheConfig>) -> Self {
+        Self {
+            inner,
+            cache_config: cache_config.unwrap_or_default(),
+            cache: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// 获取底层索引的不可变引用。
+    pub fn inner(&self) -> &I {
+        &self.inner
+    }
+
+    /// 获取底层索引的可变引用（会清空缓存）。
+    pub fn inner_mut(&mut self) -> &mut I {
+        self.cache.lock().unwrap().clear();
+        &mut self.inner
+    }
+
+    /// 手动清空查询缓存。
+    pub fn invalidate_cache(&self) {
+        self.cache.lock().unwrap().clear();
+    }
+
+    /// 返回当前缓存条目数。
+    pub fn cache_len(&self) -> usize {
+        self.cache.lock().unwrap().len()
+    }
+
+    /// 对查询向量做量化哈希。
+    ///
+    /// 将每个 f32 量化为 u8（0-255），然后折叠为 u64。
+    /// 对微小浮点差异不敏感（例如 0.123456 vs 0.123457 → 相同 u8）。
+    ///
+    /// 参数:
+    /// - `query`: 查询向量。
+    ///
+    /// 返回:
+    /// - 量化后的 64 位哈希值。
+    fn quantize_query(query: &[f32]) -> u64 {
+        let mut hash: u64 = 0;
+        for (i, &val) in query.iter().enumerate() {
+            // 将 f32 线性映射到 u8（0.0→0, 1.0→255, clamp 到 [0,1]）
+            let clamped = val.clamp(0.0_f32, 1.0_f32);
+            let quantized = (clamped * 255.0_f32) as u8;
+            // 旋转哈希，每个量化值影响不同位
+            hash = hash.wrapping_mul(31).wrapping_add(quantized as u64);
+            // 混合位置信息
+            hash ^= (i as u64).wrapping_mul(0x9E3779B97F4A7C15);
+        }
+        hash
+    }
+
+    /// 将 `min_similarity` 量化为 u64。
+    ///
+    /// 将 f64 相似度阈值转换为可哈希的整数表示。
+    fn quantize_min_sim(min_sim: f64) -> u64 {
+        // 保留 4 位小数精度：0.1234 → 1234
+        (min_sim * 10000.0_f64).clamp(0.0, 10000.0) as u64
+    }
+}
+
+impl<I: VectorIndex + std::fmt::Display> std::fmt::Display for CachedVectorIndex<I> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let cache = self.cache.lock().unwrap();
+        write!(
+            f,
+            "CachedVectorIndex(cache={}/{}, inner={})",
+            cache.len(),
+            self.cache_config.max_entries,
+            self.inner
+        )
+    }
+}
+
+impl<I: VectorIndex> VectorIndex for CachedVectorIndex<I> {
+    fn add(&mut self, label: &str, vector: Vec<f32>, created_at: i64) {
+        self.invalidate_cache();
+        self.inner.add(label, vector, created_at);
+    }
+
+    fn add_batch(&mut self, entries: Vec<(String, Vec<f32>, i64)>) {
+        self.invalidate_cache();
+        for (label, vec, ts) in entries {
+            self.inner.add(&label, vec, ts);
+        }
+    }
+
+    fn search(
+        &self,
+        query: &[f32],
+        config: &VectorIndexConfig,
+    ) -> Result<Vec<VectorHit>, VectorIndexError> {
+        if !self.cache_config.enabled {
+            return self.inner.search(query, config);
+        }
+
+        // 构建缓存 key
+        let qhash = Self::quantize_query(query);
+        let sim_key = Self::quantize_min_sim(config.min_similarity);
+
+        // 查找缓存
+        {
+            let cache = self.cache.lock().unwrap();
+            for (c_qhash, c_topk, c_sim, hits) in cache.iter() {
+                if *c_qhash == qhash && *c_topk == config.top_k && *c_sim == sim_key {
+                    tracing::trace!(
+                        cache_hit = true,
+                        qhash,
+                        top_k = config.top_k,
+                        "向量查询缓存命中"
+                    );
+                    return Ok(hits.clone());
+                }
+            }
+        }
+
+        // 缓存未命中：执行实际检索
+        tracing::trace!(
+            cache_hit = false,
+            qhash,
+            top_k = config.top_k,
+            "向量查询缓存未命中，执行实际检索并回填缓存"
+        );
+        let results = self.inner.search(query, config)?;
+
+        // 回填缓存
+        let mut cache = self.cache.lock().unwrap();
+        // LRU 驱逐：超过最大条目时删除最旧的（第一个）
+        if cache.len() >= self.cache_config.max_entries {
+            cache.remove(0);
+        }
+        cache.push((qhash, config.top_k, sim_key, results.clone()));
+
+        Ok(results)
+    }
+
+    fn remove(&mut self, label: &str) {
+        self.invalidate_cache();
+        self.inner.remove(label);
+    }
+
+    fn clear(&mut self) {
+        self.invalidate_cache();
+        self.inner.clear();
+    }
+
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn labels(&self) -> Vec<String> {
+        self.inner.labels()
     }
 }
 

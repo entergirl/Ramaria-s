@@ -16,7 +16,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use ramaria_core::config::RamariaConfig;
@@ -55,7 +55,7 @@ pub struct SessionLifecycle {
     /// 停止标志（所有后台线程在设置此标志后退出）
     pub(crate) shutdown_flag: Arc<AtomicBool>,
     /// v1.2: 内存检索器引用（L1 生成后增量更新），None 表示未注入（向后兼容）
-    pub(crate) retriever: Mutex<Option<Arc<Mutex<Retriever>>>>,
+    pub(crate) retriever: Mutex<Option<Arc<RwLock<Retriever>>>>,
 }
 
 impl SessionLifecycle {
@@ -80,8 +80,8 @@ impl SessionLifecycle {
     /// - 必须在后台任务启动前调用（空闲检测/shutdown 路径依赖此引用做 L1 增量索引）。
     ///
     /// 参数:
-    /// - `r`: 与 App 共享的 Retriever（`Arc<Mutex<Retriever>>`）。
-    pub fn set_retriever(&self, r: Arc<Mutex<Retriever>>) {
+    /// - `r`: 与 App 共享的 Retriever（v1.3 P-3: `Arc<RwLock<Retriever>>`）。
+    pub fn set_retriever(&self, r: Arc<RwLock<Retriever>>) {
         let mut guard = self.retriever.lock().unwrap_or_else(|e| {
             error!("retriever lock poisoned during set_retriever: {e}");
             e.into_inner()
@@ -489,7 +489,8 @@ impl SessionLifecycle {
             }
         };
         if let Some(ref retriever_arc) = *ret_guard {
-            match retriever_arc.lock() {
+            // v1.3 P-3: RwLock write() 用于索引写入（index_l1_record 需要 &mut self）
+            match retriever_arc.write() {
                 Ok(mut retriever) => {
                     if let Err(e) = retriever.index_l1_record(l1) {
                         warn!(
@@ -1396,7 +1397,7 @@ mod tests {
         let config = RamariaConfig::default();
         let lifecycle = SessionLifecycle::new(config);
 
-        let retriever = Arc::new(Mutex::new(Retriever::new()));
+        let retriever = Arc::new(RwLock::new(Retriever::new()));
         lifecycle.set_retriever(Arc::clone(&retriever));
 
         // 验证 retriever 已存储
@@ -1436,7 +1437,7 @@ mod tests {
         let config = RamariaConfig::default();
         let lifecycle = SessionLifecycle::new(config);
 
-        let retriever = Arc::new(Mutex::new(Retriever::new()));
+        let retriever = Arc::new(RwLock::new(Retriever::new()));
         lifecycle.set_retriever(Arc::clone(&retriever));
 
         let sid = Uuid::new_v4();
@@ -1460,8 +1461,8 @@ mod tests {
 
         lifecycle.index_l1_into_retriever(&l1);
 
-        // 验证 retriever 中已有文档
-        let guard = retriever.lock().unwrap();
+        // 验证 retriever 中已有文档（v1.3 P-3: read() 即可，doc_count 为只读）
+        let guard = retriever.read().unwrap();
         assert_eq!(guard.doc_count(), 1);
     }
 
@@ -1470,7 +1471,7 @@ mod tests {
         let config = RamariaConfig::default();
         let lifecycle = SessionLifecycle::new(config);
 
-        let retriever = Arc::new(Mutex::new(Retriever::new()));
+        let retriever = Arc::new(RwLock::new(Retriever::new()));
         lifecycle.set_retriever(Arc::clone(&retriever));
 
         let l1 = ramaria_core::types::MemoryL1 {
@@ -1493,8 +1494,8 @@ mod tests {
 
         lifecycle.index_l1_into_retriever(&l1);
 
-        // 立即检索，应能命中
-        let guard = retriever.lock().unwrap();
+        // 立即检索，应能命中（v1.3 P-3: read() 即可，search 为 &self）
+        let guard = retriever.read().unwrap();
         let req = ramaria_memory::SearchRequest {
             query: "Rust".to_string(),
             persona_uid: None,

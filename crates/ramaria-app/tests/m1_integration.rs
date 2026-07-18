@@ -40,7 +40,7 @@ fn make_pipeline_context(
     embedding: Option<Arc<MockEmbedding>>,
 ) -> PipelineContext {
     let config = RamariaConfig::default();
-    let retriever = Arc::new(std::sync::Mutex::new(Retriever::new()));
+    let retriever = Arc::new(std::sync::RwLock::new(Retriever::new()));
     let keychain = Arc::new(Keychain::new());
     let lifecycle = Arc::new(SessionLifecycle::new(config.clone()));
 

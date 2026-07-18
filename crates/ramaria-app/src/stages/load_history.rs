@@ -2,7 +2,8 @@
 //!
 //! 设计特点:
 //! - 对应 send_message 管线 Step 4 + Step 4.5
-//! - 加载当前 session 的全部消息，转换为 ChatMessage 格式
+//! - v1.3 (P-6): 按 token 预算倒序分页加载消息（每页 20 条），避免长会话全量内存加载
+//! - 将 Message 转换为 ChatMessage 格式供后续 TokenBudget / BuildRequest 使用
 //! - 预加载近期 L1 摘要（跨 session 上下文注入），无条件注入 Block C1
 //! - 格式化 L1 摘要为可读文本行
 //! - 提取最后活跃时间字符串
@@ -17,20 +18,37 @@ use crate::pipeline::{PipelineContext, PipelineData, PipelineError, PipelineStag
 /// Stage 4: 加载历史消息 + 近期 L1 摘要。
 ///
 /// 职责:
-/// - 读取 PipelineData.session（由 Stage 3 设置），加载该 session 全部消息
+/// - 读取 PipelineData.session（由 Stage 3 设置），按 token 预算倒序分页加载消息
+/// - 每页 20 条，从最新消息倒序加载，直到达到消息上限或 token 预算（粗糙字符估算）
 /// - 将 Message 转换为 ChatMessage 格式供后续 TokenBudget / BuildRequest 使用
 /// - 按 persona_uid 预加载近期 3 条 L1 摘要（跨 session 上下文）
 /// - 将 L1 摘要格式化为上下文文本行
 /// - 从最近 L1 提取最后活跃时间字符串
 ///
+/// v1.3 (P-6): 分页加载替代全量加载。
+/// - 每页 20 条，从最新消息倒序加载
+/// - 达到消息数量上限（200 条）或粗略字符预算时停止
+/// - 加载完成后反转为时间正序供后续 Stage 使用
+///
 /// 降级策略:
 /// - L1 加载失败 → warn 日志 + 空列表（不阻塞对话）
 /// - 空 session（无消息）→ 空历史列表，正常继续
+/// - list_messages_paginated 不可用 → 回退到 list_messages（通过 trait 默认实现）
 ///
 /// 安全约束:
 /// - 消息原文只在内存中，不记日志
 /// - L1 摘要最多截断前 120 字符到 DEBUG 日志
 pub struct StageLoadHistory;
+
+/// 每页加载的消息数。
+const HISTORY_PAGE_SIZE: i64 = 20;
+
+/// 最大加载消息数量（安全上限，防止内存无限增长）。
+const HISTORY_MAX_MESSAGES: i64 = 200;
+
+/// 粗略字符预算上限（消息内容 + role 标记的总字符数）。
+/// 约对应 4K token 上下文（中文 ~1.5 chars/token）。
+const HISTORY_CHAR_BUDGET: usize = 6000;
 
 impl StageLoadHistory {
     /// 创建 StageLoadHistory 实例。
@@ -81,18 +99,72 @@ impl PipelineStage for StageLoadHistory {
             })?
             .id;
 
-        // ---- Step 4: 加载当前 session 历史消息 ----
-        let messages = ctx.storage.list_messages(session_id).await.map_err(|e| {
-            PipelineError::fatal(
-                "LoadHistory",
-                ramaria_core::error::RamariaError::storage_with_source(
-                    format!("加载 session {session_id} 的消息失败"),
-                    e,
-                ),
-            )
-        })?;
+        // ---- Step 4: v1.3 (P-6) 按 token 预算倒序分页加载历史消息 ----
+        // 从最新消息倒序加载，每页 20 条，直到达到安全上限或粗略字符预算
+        let mut all_messages_reversed: Vec<ramaria_core::types::Message> = Vec::new();
+        let mut total_chars: usize = 0;
+        let mut offset: i64 = 0;
 
-        let history_messages: Vec<ChatMessage> = messages
+        loop {
+            // 检查是否已超过上限
+            if all_messages_reversed.len() as i64 >= HISTORY_MAX_MESSAGES {
+                tracing::debug!(
+                    session_id = %session_id,
+                    loaded = all_messages_reversed.len(),
+                    max = HISTORY_MAX_MESSAGES,
+                    "历史消息已达到加载上限"
+                );
+                break;
+            }
+            if total_chars >= HISTORY_CHAR_BUDGET {
+                tracing::debug!(
+                    session_id = %session_id,
+                    total_chars,
+                    budget = HISTORY_CHAR_BUDGET,
+                    "历史消息已达到字符预算"
+                );
+                break;
+            }
+
+            let page = ctx
+                .storage
+                .list_messages_paginated(session_id, HISTORY_PAGE_SIZE, offset)
+                .await
+                .map_err(|e| {
+                    PipelineError::fatal(
+                        "LoadHistory",
+                        ramaria_core::error::RamariaError::storage_with_source(
+                            format!("分页加载 session {session_id} 的消息失败"),
+                            e,
+                        ),
+                    )
+                })?;
+
+            if page.is_empty() {
+                break; // 没有更多消息
+            }
+
+            let page_len = page.len() as i64;
+
+            // 累计字符数（粗略估算：role 名称 + content）
+            for msg in &page {
+                total_chars += msg.content.chars().count() + 16; // 16 ≈ role 标记开销
+            }
+
+            all_messages_reversed.extend(page);
+            offset += HISTORY_PAGE_SIZE;
+
+            // 如果返回的页不满，说明已是最后一批
+            if page_len < HISTORY_PAGE_SIZE {
+                break;
+            }
+        }
+
+        // 按 created_at 升序排列（时间正序），替代简单 reverse()
+        // 原因: list_messages_paginated 返回 DESC，reverse() 在相同时间戳时可能错误翻转
+        all_messages_reversed.sort_by_key(|m| m.created_at);
+
+        let history_messages: Vec<ChatMessage> = all_messages_reversed
             .iter()
             .map(|m| ChatMessage {
                 role: m.role,
@@ -103,7 +175,8 @@ impl PipelineStage for StageLoadHistory {
         tracing::debug!(
             session_id = %session_id,
             message_count = history_messages.len(),
-            "历史消息已加载"
+            total_chars,
+            "历史消息已加载（v1.3 分页模式）"
         );
 
         input.history_messages = history_messages;

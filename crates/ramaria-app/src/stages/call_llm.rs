@@ -238,7 +238,7 @@ mod tests {
         let storage: Arc<dyn ramaria_core::traits::StorageBackend> = Arc::new(MockStorage::new());
         let llm: Arc<dyn LlmProvider> = Arc::new(FailingLlm);
         let config = ramaria_core::config::RamariaConfig::default();
-        let retriever = Arc::new(std::sync::Mutex::new(
+        let retriever = Arc::new(std::sync::RwLock::new(
             ramaria_memory::retriever::Retriever::new(),
         ));
         let keychain = Arc::new(ramaria_llm::keychain::Keychain::new());

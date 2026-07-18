@@ -300,6 +300,40 @@ pub trait StorageBackend: Send + Sync {
         &self,
         fingerprint: &str,
     ) -> RamariaResult<Option<Message>>;
+
+    /// v1.3 (P-6): 按创建时间降序分页加载最近消息。
+    ///
+    /// 职责:
+    /// - 替代 `list_messages` 全量加载，支持按 limit/offset 分页
+    /// - 返回的消息按 `created_at DESC` 排序（最新在前），调用方按需反转
+    ///
+    /// 参数:
+    /// - `session_id`: 会话 ID。
+    /// - `limit`: 每页最大条数。
+    /// - `offset`: 分页偏移量（第一页为 0）。
+    ///
+    /// 返回:
+    /// - 按 `created_at DESC` 排序的消息列表。
+    ///
+    /// 默认实现:
+    /// - 委托 `list_messages` 全量加载后手动排序截断（兼容存量实现）。
+    /// - 子 crate（ramaria-storage）应覆写为高效 SQL（`ORDER BY created_at DESC LIMIT ? OFFSET ?`）。
+    async fn list_messages_paginated(
+        &self,
+        session_id: Uuid,
+        limit: i64,
+        offset: i64,
+    ) -> RamariaResult<Vec<Message>> {
+        let mut all = self.list_messages(session_id).await?;
+        all.sort_by_key(|m| std::cmp::Reverse(m.created_at));
+        let start = offset as usize;
+        let end = (offset + limit).min(all.len() as i64) as usize;
+        Ok(all
+            .into_iter()
+            .skip(start)
+            .take(end.saturating_sub(start))
+            .collect())
+    }
     /// 获取指定 session 最后一条消息的时间（Unix 毫秒）。
     ///
     /// 职责:

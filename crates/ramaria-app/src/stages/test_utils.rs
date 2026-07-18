@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
 use futures::{Stream, stream};
@@ -650,7 +650,7 @@ pub fn test_context(
         embedding.map(|e| e as Arc<dyn EmbeddingProvider>);
 
     let config = ramaria_core::config::RamariaConfig::default();
-    let retriever = Arc::new(Mutex::new(Retriever::new()));
+    let retriever = Arc::new(RwLock::new(Retriever::new()));
     let keychain = Arc::new(ramaria_llm::keychain::Keychain::new());
     let lifecycle = Arc::new(SessionLifecycle::new(config.clone()));
 

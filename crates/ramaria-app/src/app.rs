@@ -15,7 +15,7 @@
 
 use std::pin::Pin;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use futures::Stream;
 use ramaria_core::error::RamariaResult;
@@ -64,8 +64,8 @@ pub struct App {
     pub(crate) llm: Mutex<Arc<dyn LlmProvider>>,
     /// 嵌入模型 provider（Mutex 包裹，None 表示未配置）
     pub(crate) embedding: Mutex<Option<Arc<dyn EmbeddingProvider>>>,
-    /// 内存检索器（BM25 + 向量 + 图谱），Arc<Mutex<>> 支持与 PipelineContext 零拷贝共享
-    pub(crate) retriever: Arc<Mutex<Retriever>>,
+    /// 内存检索器（v1.3 P-3: RwLock 替代 Mutex，允许多读并发）
+    pub(crate) retriever: Arc<RwLock<Retriever>>,
     /// 应用配置
     pub(crate) config: ramaria_core::config::RamariaConfig,
     /// 当前应用状态
@@ -104,7 +104,7 @@ impl App {
         config: ramaria_core::config::RamariaConfig,
         keychain: Arc<Keychain>,
     ) -> Self {
-        let retriever = Arc::new(Mutex::new(Retriever::new()));
+        let retriever = Arc::new(RwLock::new(Retriever::new()));
         let lifecycle = Arc::new(SessionLifecycle::new(config.clone()));
 
         // v1.2: 注入 Retriever 到 SessionLifecycle，启用 L1 增量索引

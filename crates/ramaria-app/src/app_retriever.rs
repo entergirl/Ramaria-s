@@ -109,9 +109,9 @@ impl App {
             }
         }
 
-        // 4. 锁定检索器并批量索引（纯同步操作，不跨越 .await）
+        // 4. 锁定检索器并批量索引（v1.3 P-3: RwLock::write() 用于索引写入）
         {
-            let mut retriever = self.retriever.lock().unwrap_or_else(|e| {
+            let mut retriever = self.retriever.write().unwrap_or_else(|e| {
                 tracing::error!("Retriever lock poisoned during rebuild: {e}");
                 e.into_inner()
             });

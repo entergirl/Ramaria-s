@@ -8,6 +8,7 @@
 //! - 流中错误转发为 StreamEvent::Error，收集完整回复后发送 StreamEvent::Done
 //! - 日志记录 request_id、session_id、reply_chars、duration_ms，便于性能监控
 //! - 不持有跨 .await 的 MutexGuard（所有 I/O 通过 ctx.storage）
+//! - v1.3 (P-5): 使用 `mpsc::channel(64)` 有界通道替代 unbounded，背压保护
 
 use std::sync::Arc;
 
@@ -102,8 +103,8 @@ impl PipelineStage for StagePersistMessage {
         let request_id = input.request_id;
         let persona_uid = input.persona_uid.clone();
 
-        // 创建 mpcs 通道，后台任务通过 tx 发送 StreamEvent
-        let (tx, rx) = mpsc::unbounded::<RamariaResult<StreamEvent>>();
+        // v1.3 (P-5): 有界 channel，容量 64，满时 send 返回错误自然降级
+        let (tx, rx) = mpsc::channel::<RamariaResult<StreamEvent>>(64);
 
         tracing::info!(
             request_id = %request_id,
@@ -145,10 +146,13 @@ impl PipelineStage for StagePersistMessage {
 /// - 收集完整 assistant 回复文本
 /// - 保存 user message + assistant message 到 storage
 ///
+/// v1.3 (P-5): 使用 `mpsc::Sender`（有界 channel 容量 64），`try_send` 防止背压阻塞。
+/// 满时丢弃 delta 事件并记 warn（前端消费慢或卡顿时的降级策略）。
+///
 /// 参数:
 /// - `storage`: 存储后端（Arc 克隆传入，独立于调用者生命周期）
 /// - `raw_stream`: LLM provider 返回的原始 delta 流
-/// - `tx`: 事件发送通道（UnboundedSender，接收端为 send_message 的返回流）
+/// - `tx`: 有界事件发送通道（容量 64）
 /// - `session_id`: 消息所属 session
 /// - `user_message`: 用户原始输入
 /// - `request_id`: 本次请求唯一标识
@@ -156,7 +160,7 @@ impl PipelineStage for StagePersistMessage {
 async fn stream_forward_task(
     storage: Arc<dyn StorageBackend>,
     raw_stream: LlmRawStream,
-    tx: mpsc::UnboundedSender<RamariaResult<StreamEvent>>,
+    mut tx: mpsc::Sender<RamariaResult<StreamEvent>>,
     session_id: Uuid,
     user_message: String,
     request_id: Uuid,
@@ -171,6 +175,29 @@ async fn stream_forward_task(
     let mut has_error = false;
     let start_ms = now_ms();
 
+    // 辅助闭包：尝试发送 StreamEvent 到有界 channel
+    // v1.3 (P-5): 满时丢弃并记 warn，断开时返回 true 表示应当退出
+    // `mpsc::Sender::try_send` 需要 `&mut self`，因此闭包签名使用 `&mut Sender`
+    let try_send = |tx: &mut mpsc::Sender<_>, item: RamariaResult<StreamEvent>| -> bool {
+        match tx.try_send(item) {
+            Ok(()) => false,
+            Err(e) if e.is_disconnected() => {
+                tracing::debug!(
+                    request_id = %request_id,
+                    "接收端已断开，停止流式转发"
+                );
+                true
+            }
+            Err(_) => {
+                tracing::warn!(
+                    request_id = %request_id,
+                    "有界 channel 已满（容量 64），丢弃 StreamEvent（前端消费慢或卡顿）"
+                );
+                false
+            }
+        }
+    };
+
     // 1. 保存用户消息
     //    v1.2: 用户消息现在也携带 persona_uid，表示"在此 persona 的对话上下文中"
     //    前端据此可按 persona 过滤消息（多角色场景下区分"在对谁说话"）
@@ -183,7 +210,7 @@ async fn stream_forward_task(
     .with_persona_uid(persona_uid.clone());
     if let Err(e) = storage.save_message(&user_msg).await {
         tracing::error!(%e, request_id = %request_id, "保存用户消息失败");
-        let _ = tx.unbounded_send(Err(e));
+        let _ = try_send(&mut tx, Err(e));
         return;
     }
 
@@ -195,13 +222,8 @@ async fn stream_forward_task(
 
                 // 转发 Delta 事件给前端
                 let event = StreamEvent::delta(request_id, delta.content);
-                if tx.unbounded_send(Ok(event)).is_err() {
-                    // 接收端已断开（例如用户关闭了对话框），停止转发
-                    tracing::debug!(
-                        request_id = %request_id,
-                        "接收端已断开，停止流式转发"
-                    );
-                    return;
+                if try_send(&mut tx, Ok(event)) {
+                    return; // 接收端已断开
                 }
 
                 if delta.done {
@@ -213,7 +235,7 @@ async fn stream_forward_task(
                 has_error = true;
                 tracing::error!(%e, request_id = %request_id, "LLM 流错误");
                 let event = StreamEvent::error(request_id, e.to_string());
-                let _ = tx.unbounded_send(Ok(event));
+                let _ = try_send(&mut tx, Ok(event));
                 break;
             }
         }
@@ -237,7 +259,7 @@ async fn stream_forward_task(
     // 4. 发送 Done 事件（仅在无错误时——错误已通过 Error 事件发送）
     if !has_error {
         let done_event = StreamEvent::done(request_id, backend_id, full_reply.chars().count());
-        let _ = tx.unbounded_send(Ok(done_event));
+        let _ = try_send(&mut tx, Ok(done_event));
     }
 
     let elapsed_ms = now_ms() - start_ms;
@@ -326,9 +348,9 @@ mod tests {
         let mut data = full_data();
         // 模拟 Stage 9 失败后预填充的 Error 流
         let request_id = data.request_id;
-        let (tx, rx) = mpsc::unbounded::<RamariaResult<StreamEvent>>();
+        let (mut tx, rx) = mpsc::channel::<RamariaResult<StreamEvent>>(8);
         let error_event = StreamEvent::error(request_id, "mock LLM failure".into());
-        let _ = tx.unbounded_send(Ok(error_event));
+        let _ = tx.try_send(Ok(error_event));
         data.output_stream = Some(Box::pin(rx));
         // llm_stream 在 Stage 9 错误路径中为 None
         data.llm_stream = None;
@@ -449,7 +471,7 @@ mod tests {
             metadata: Some("stop".into()),
         })]));
 
-        let (tx, mut rx) = mpsc::unbounded::<RamariaResult<StreamEvent>>();
+        let (tx, mut rx) = mpsc::channel::<RamariaResult<StreamEvent>>(64);
 
         // 在 spawn 中运行
         let storage_clone = Arc::clone(&storage) as Arc<dyn StorageBackend>;
@@ -524,7 +546,7 @@ mod tests {
             Err(RamariaError::llm("mid-stream failure")),
         ]));
 
-        let (tx, mut rx) = mpsc::unbounded::<RamariaResult<StreamEvent>>();
+        let (tx, mut rx) = mpsc::channel::<RamariaResult<StreamEvent>>(64);
 
         let storage_clone = Arc::clone(&storage) as Arc<dyn StorageBackend>;
         tokio::spawn(async move {
