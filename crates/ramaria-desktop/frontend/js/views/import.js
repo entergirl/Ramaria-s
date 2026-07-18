@@ -3,7 +3,7 @@
  *
  * 职责:
  * - 三步向导：选择文件 → 预览报告 → 确认导入
- * - 支持 qq-chat-exporter v5.x JSON 格式的 QQ 聊天记录导入
+ * - 支持 qq-chat-exporter v6.x JSON 格式的 QQ 聊天记录导入
  * - 快速导入（仅 L0）和深度导入（L0 + 后台管线）两种模式
  * - 文件选择通过 Tauri dialog 打开系统文件选择器
  * - : 双画像支持——分别为导出者和对方创建独立 persona
@@ -381,7 +381,7 @@ var ImportView = (function () {
             html += '<div class="import-file-zone" id="import-file-zone">';
             html += '<div class="import-file-zone-icon">📂</div>';
             html += '<div class="import-file-zone-title">选择 QQ 聊天记录文件</div>';
-            html += '<div class="import-file-zone-desc">支持 shuakami/qq-chat-exporter v5.x 导出的 JSON 文件</div>';
+            html += '<div class="import-file-zone-desc">支持 shuakami/qq-chat-exporter v6.x 导出的 JSON 文件</div>';
             html += '<button class="btn btn-primary" id="btn-select-file">浏览文件</button>';
             html += '</div>';
         }

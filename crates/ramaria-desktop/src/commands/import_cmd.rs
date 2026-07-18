@@ -2,7 +2,7 @@
 //!
 //! 设计特点:
 //! - `import_qq_chat`: 接收文件路径、导入模式和双画像参数，委托 ramaria-importer 执行解析与写入
-//! - `detect_qq_format`: 检测文件是否为 qq-chat-exporter v5.x JSON 格式
+//! - `detect_qq_format`: 检测文件是否为 qq-chat-exporter v6.x JSON 格式
 //! - 快速导入（fast）：仅写入 messages 表（L0），按发送者分配 persona_uid
 //! - 深度导入（deep）：创建历史 session → 写入 L0 → 关闭 session → 触发全管线
 //! - 双画像支持——分别为导出者和对方创建独立 persona
@@ -195,7 +195,7 @@ pub struct AnalysisReport {
 /// - `file_path`: 待检测的文件绝对路径。
 ///
 /// 返回:
-/// - `true`: 文件格式匹配 qq-chat-exporter v5.x JSON
+/// - `true`: 文件格式匹配 qq-chat-exporter v6.x JSON
 /// - `false`: 格式不匹配，应提示用户选择正确的文件
 ///
 /// 说明:
@@ -226,7 +226,7 @@ pub async fn detect_qq_format(
 /// Tauri Command 参数由前端逐个传递，参数数膨胀是合理的架构取舍。
 ///
 /// 参数:
-/// - `file_path`: 聊天记录文件的绝对路径（qq-chat-exporter v5.x JSON）。
+/// - `file_path`: 聊天记录文件的绝对路径（qq-chat-exporter v6.x JSON）。
 /// - `mode`: 导入模式，"fast"（仅 L0）或 "deep"（全管线）。
 /// - `persona_name`: 可选，导出者 persona 显示名称。如果不提供，使用导出者名称。
 /// - `self_persona_uid`: 可选，导出者 persona UID（留空按优先级自动生成）。
@@ -276,7 +276,7 @@ pub async fn import_qq_chat(
         .to_lowercase();
     if ext != "json" {
         return Err(format!(
-            "不支持的文件类型: .{}（仅支持 qq-chat-exporter v5.x 导出的 .json）",
+            "不支持的文件类型: .{}（仅支持 qq-chat-exporter v6.x 导出的 .json）",
             ext
         ));
     }
@@ -298,7 +298,7 @@ pub async fn import_qq_chat(
 
     if !is_qq {
         return Err(format!(
-            "文件 '{}' 不是 QQ 聊天记录格式。请确认文件来自 qq-chat-exporter v5.x 导出的 JSON。",
+            "文件 '{}' 不是 QQ 聊天记录格式。请确认文件来自 qq-chat-exporter v6.x 导出的 JSON。",
             file_path
         ));
     }

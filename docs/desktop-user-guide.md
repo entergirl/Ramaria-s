@@ -185,7 +185,7 @@ Ramaria 桌面应用是一个本地运行的个人 AI 陪伴记忆系统。具�
 ### QQ 聊天记录导入
 
 支持两种格式：
-- **JSON 格式**：qq-chat-exporter v5.x 导出的 JSON 文件
+- **JSON 格式**：qq-chat-exporter v6.x 导出的 JSON 文件
 - **TXT 格式**：经典 PCQQ 导出的 `.txt` 聊天记录文件
 
 ### 三步导入向导

@@ -267,7 +267,7 @@ ramaria import qq --file chat.txt --yes
 4. 导入完成后显示统计报告
 
 **支持的格式**：
-- **JSON**：qq-chat-exporter v5.x 导出格式
+- **JSON**：qq-chat-exporter v6.x 导出格式
 - **TXT**：经典 PCQQ 导出 `.txt` 格式（GBK/UTF-8/UTF-16 多编码兼容）
 
 ---

@@ -96,7 +96,7 @@ pub struct ImportedSession {
 /// 职责:
 /// - 提供完整的文件解析结果概览，供 CLI 和前端展示。
 /// - 记录文件信息（含双画像标识）、时间跨度和 session 切割结果。
-/// - 覆盖 qce v5.x 全部 11 种消息类型（见 qq-chat-exporter-json-schema.md §8）。
+/// - 覆盖 qce v6.x 全部 10 种消息类型（见 import-qq-schema.md §8）。
 /// - : 新增导出者 QQ 号和对方标识，支持双画像导入。
 #[derive(Debug, Clone)]
 pub struct ImportReport {
@@ -113,11 +113,11 @@ pub struct ImportReport {
     pub chat_name: String,
     /// 对话类型（private / group）
     pub chat_type: String,
-    /// 对话对方 QQ UID（从第一条非 self 消息的 sender.uid 提取）
+    /// 对话对方 QQ UID（从 chatInfo.peerUid 直接提取）
     pub other_uid: String,
-    /// 对话对方 QQ 号（从第一条非 self 消息的 sender.uin 提取），不存在时为 None
+    /// 对话对方 QQ 号（从 chatInfo.peerUin 直接提取），不存在时为 None
     pub other_uin: Option<String>,
-    /// 对话对方名称（从第一条非 self 消息的 sender.name 提取）
+    /// 对话对方名称（chatInfo.name）
     pub other_name: String,
 
     // -- 时间范围 --
@@ -139,7 +139,7 @@ pub struct ImportReport {
     pub success_image: usize,
     /// 回复消息数
     pub success_reply: usize,
-    /// 对方发言消息数（仅 type_1 和 type_3）
+    /// 对方发言消息数（仅 text 和 reply 类型）
     pub success_other_sender: usize,
 
     // -- 降级处理（非文本消息→文本占位符） --

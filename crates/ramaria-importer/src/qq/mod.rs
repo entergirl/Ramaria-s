@@ -1,14 +1,14 @@
 //! rust/crates/ramaria-importer/src/qq/mod.rs - QQ 聊天记录导入模块
 //!
 //! 设计特点:
-//! - 仅支持 shuakami/qq-chat-exporter v5.x JSON 格式（TXT 已从 移除）
+//! - 仅支持 shuakami/qq-chat-exporter v6.x JSON 格式（语义化 type 名称）
 //! - `QqImporter` 实现 `ImportSource` trait，通过 `detect_format` 检测 JSON 格式
 //! - 快速导入：仅写 messages 表，标记 fingerprint 去重
 //! - 深度导入：创建 session → 写入 L0 → 关闭 session → 触发全管线
 //! - 双画像支持——按发送者分别关联 persona（self_persona_uid vs other_persona_uid）
 //! - `build_persona_uid` 提供 4 级优先级的 UID 生成策略
 //! - `ensure_qq_persona` 复用原有逻辑，每次调用创建/查找单个 persona
-//! - 完整覆盖 qce v5.x 全部 11 种消息类型（含 type_8/10/19 和 system 过滤）
+//! - 完整覆盖 qce v6.x 全部 10 种语义化消息类型（text/reply/audio/json/file/video/forward/type_10/type_19/system）
 
 pub mod parser;
 
@@ -28,7 +28,7 @@ use crate::traits::{ImportReport, ImportSource, ImportedSession};
 ///
 /// 职责:
 /// - 实现 `ImportSource` trait，提供 QQ 聊天记录的格式检测和解析能力。
-/// - 仅支持 qq-chat-exporter v5.x JSON 格式。
+/// - 仅支持 qq-chat-exporter v6.x JSON 格式（语义化 type 名称）。
 /// - 提供 `execute_fast_import` 方法，执行完整的 L0 导入流程。
 pub struct QqImporter;
 

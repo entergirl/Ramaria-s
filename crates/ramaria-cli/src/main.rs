@@ -138,7 +138,7 @@ enum Commands {
 enum ImportCmd {
     /// 导入 QQ 聊天记录
     Qq {
-        /// 聊天记录文件路径（QQ Chat Exporter v5.x JSON 格式）
+        /// 聊天记录文件路径（QQ Chat Exporter v6.x JSON 格式）
         #[arg(short, long)]
         file: String,
 

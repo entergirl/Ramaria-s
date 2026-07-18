@@ -1,4 +1,5 @@
 //! rust/crates/ramaria-cli/src/commands/import_cmd.rs - 数据导入命令
+//!
 //! 设计特点:
 //! - `ramaria import qq --file <PATH> [--deep] [--persona-self-name <NAME>] [--persona-other-name <NAME>] [--gap <MINUTES>]`
 //! - 快速导入（默认）：仅写入 messages 表（L0），适合快速预览历史对话
@@ -10,7 +11,7 @@
 //! - 解析报告输出到 stdout，含成功/降级/跳过统计
 //! - 支持 `--yes` 全局参数跳过确认提示
 //! - 使用 ramaria-importer crate 做格式检测、解析和写入
-//! - 仅支持 qq-chat-exporter v5.x JSON 格式
+//! - 仅支持 qq-chat-exporter v6.x JSON 格式（语义化 type 名称）
 
 use anyhow::Context;
 use ramaria_importer::ImportSource;
@@ -25,7 +26,7 @@ use std::sync::Arc;
 /// CLI 导入命令的参数。
 /// 新增双画像参数（self/other 两方独立命名和 UID 指定）。
 pub struct ImportArgs {
-    /// QQ 聊天记录文件路径（qq-chat-exporter v5.x JSON 格式）
+    /// QQ 聊天记录文件路径（qq-chat-exporter v6.x JSON 格式）
     pub file: String,
     /// 导入模式：fast（默认，仅 L0）或 deep（全管线）
     pub deep: bool,
@@ -83,7 +84,7 @@ pub async fn run(
         .to_lowercase();
     if ext != "json" {
         anyhow::bail!(
-            "不支持的文件类型: .{}（仅支持 qq-chat-exporter v5.x 导出的 .json 格式）",
+            "不支持的文件类型: .{}（仅支持 qq-chat-exporter v6.x 导出的 .json 格式）",
             ext
         );
     }
@@ -102,7 +103,7 @@ pub async fn run(
     if !is_qq {
         anyhow::bail!(
             "文件 '{}' 不是 QQ 聊天记录格式。\n\
-             请确认文件来自 shuakami/qq-chat-exporter v5.x 导出的 JSON 文件。",
+             请确认文件来自 shuakami/qq-chat-exporter v6.x 导出的 JSON 文件。",
             args.file
         );
     }
