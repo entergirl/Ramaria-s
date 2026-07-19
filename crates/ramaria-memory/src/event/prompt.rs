@@ -204,10 +204,7 @@ pub fn build_event_extraction_prompt(l1_formatted: &str) -> String {
 ///
 /// 返回:
 /// - 完整 prompt 字符串，所有"用户"已替换为 `persona_name`。
-pub fn build_event_extraction_prompt_for_persona(
-    l1_formatted: &str,
-    persona_name: &str,
-) -> String {
+pub fn build_event_extraction_prompt_for_persona(l1_formatted: &str, persona_name: &str) -> String {
     // 先构建基础 prompt (含 L1 文本)，再替换"用户"→实际 persona 名称。
     // 注意：L1 摘要文本（来自导入场景，content 已有 [sender_name] 前缀 + 空前缀格式化）
     // 不应再包含"用户"字样，因此全量替换是安全的。

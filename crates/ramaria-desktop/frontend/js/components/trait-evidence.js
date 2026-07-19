@@ -40,6 +40,21 @@ var RamariaTraitEvidence = (function () {
             return;
         }
 
+        // v1.3 N5 修复：traitId 参数校验。
+        // 当 trait.id=0（新推断 trait 尚未持久化获取自增 ID）或为 null/undefined 时，
+        // 后端 getEvidence(traitId=0) 查询不到任何记录 → 返回空数组。
+        // 需提前拦截无效参数，避免前端展示空白面板。
+        if (!traitId || traitId === 0 || traitId === '0') {
+            console.warn('[TraitEvidence] traitId 无效 (' + traitId + ')，该 trait 可能尚未持久化或为 mock 推断产物');
+            container.innerHTML =
+                '<div class="tev-empty">' +
+                    '<div class="tev-empty-icon">🔄</div>' +
+                    '<div class="tev-empty-text">证据数据暂未就绪</div>' +
+                    '<div class="tev-empty-hint">该性格标签的证据记录尚未生成，请等待后台管线完成或重新导入数据。</div>' +
+                '</div>';
+            return;
+        }
+
         // 显示加载中
         container.innerHTML =
             '<div class="tev-loading">' +

@@ -214,16 +214,10 @@ var RamariaMemoryView = (function () {
             var profile = results[2].status === 'fulfilled' ? results[2].value : null;
             var profileStatus = results[3].status === 'fulfilled' ? results[3].value : null;
 
-            // 若按 persona 过滤无结果，尝试不过滤再查一次
-            if (l1Data.length === 0 && _currentPersonaUid) {
-                try {
-                    var l1Fallback = await RamariaApi.memory.getL1(null, 500);
-                    if (l1Fallback && l1Fallback.length > 0) {
-                        console.warn('[MemoryView] L1 按 persona=' + _currentPersonaUid + ' 查询为空，降级为全量查询，找到 ' + l1Fallback.length + ' 条');
-                        l1Data = l1Fallback;
-                    }
-                } catch (_) { /* 降级查询失败，保持空结果 */ }
-            }
+            // v1.3 N1 修复：移除 L1 降级全量查询。
+            // 原 fallback（getL1(null)）导致系统人格（rama-0001/user-0001）
+            // 和按 persona 过滤无结果的 persona 错误显示全量导入 L1 数据。
+            // 若某 persona 的 L1 为空，显示"暂无 L1 摘要"是正确行为。
 
             // v1.3 修复：将 get_personality_profile 的三层结构展平为带 layer 标记的数组
             var l3Data = [];
@@ -794,17 +788,24 @@ var RamariaMemoryView = (function () {
 
             // 使用证据链组件加载数据
             if (typeof RamariaTraitEvidence !== 'undefined') {
+                // v1.3 N5 修复：增加调试日志，便于诊断首次展开空白问题。
+                // trait.id=0 时 trait-evidence.js 内部会拦截并显示"暂未就绪"。
+                console.debug('[MemoryView] 请求证据链: persona=' + _currentPersonaUid +
+                    ', traitId=' + trait.id + ', label=' + (trait.label || '?'));
+
                 // v1.3 修复：await render（异步）完成后恢复按钮文字
                 RamariaTraitEvidence.render(panel, _currentPersonaUid, trait.id, trait.label || '?')
                     .then(function () {
+                        console.debug('[MemoryView] 证据链渲染完成, traitId=' + trait.id);
                         btn.textContent = '📋 收起证据';
                     })
                     .catch(function (err) {
-                        console.error('[MemoryView] 证据链加载失败:', err);
+                        console.error('[MemoryView] 证据链加载失败, traitId=' + trait.id +
+                            ', label=' + trait.label + ', err=', err);
                         btn.textContent = '📋 展开证据';
                         panel.innerHTML =
                             '<div class="tev-empty">' +
-                                '<div class="tev-empty-text">证据链加载失败</div>' +
+                                '<div class="tev-empty-text">证据链加载失败: ' + (err.message || '未知错误') + '</div>' +
                             '</div>';
                     });
             } else {

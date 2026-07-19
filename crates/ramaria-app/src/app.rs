@@ -262,7 +262,14 @@ impl App {
     ) -> RamariaResult<Option<ramaria_core::types::MemoryL1>> {
         let llm = self.llm.lock().unwrap_or_else(|e| e.into_inner()).clone();
         self.lifecycle
-            .regenerate_l1(self.storage.as_ref(), llm.as_ref(), session_id, persona_uid, user_prefix, assistant_prefix)
+            .regenerate_l1(
+                self.storage.as_ref(),
+                llm.as_ref(),
+                session_id,
+                persona_uid,
+                user_prefix,
+                assistant_prefix,
+            )
             .await
     }
 
@@ -279,7 +286,14 @@ impl App {
     ) -> RamariaResult<Option<ramaria_core::types::MemoryL1>> {
         let llm = self.llm.lock().unwrap_or_else(|e| e.into_inner()).clone();
         self.lifecycle
-            .regenerate_l1_no_cascade(self.storage.as_ref(), llm.as_ref(), session_id, persona_uid, user_prefix, assistant_prefix)
+            .regenerate_l1_no_cascade(
+                self.storage.as_ref(),
+                llm.as_ref(),
+                session_id,
+                persona_uid,
+                user_prefix,
+                assistant_prefix,
+            )
             .await
     }
 

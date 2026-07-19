@@ -35,7 +35,7 @@ use crate::inference::{
         format_motive_stats, mock_infer, post_process_inference,
     },
     shrink::{ShrinkConfig, run_shrinkage_layered},
-    stats::StatsSummary,
+    stats::{CategoryStats, StatsSummary},
 };
 use crate::utils::{extract_first_json_array, extract_first_json_object, strip_thinking};
 
@@ -559,7 +559,8 @@ async fn run_three_step_inference(
         parse_json_with_degrade(&step3_raw, "Step3", parse_inferred_traits)?;
 
     // 将 InferredTrait 转换为 PersonalityTrait
-    let traits = convert_to_personality_traits(&inferred_traits, persona_uid);
+    // v1.3 N3: 传入 stats 用于 LLM 未提供 confidence 时的动态校准
+    let traits = convert_to_personality_traits(&inferred_traits, persona_uid, stats);
 
     Ok(InferenceResult {
         category_signals,
@@ -765,6 +766,9 @@ fn parse_inferred_traits(raw: &str) -> Option<Vec<InferredTrait>> {
         related: Option<String>,
         #[serde(default)]
         seq: i32,
+        // v1.3 N3: LLM 推断置信度（0.0..1.0），None 表示 LLM 未提供
+        #[serde(default)]
+        confidence: Option<f64>,
     }
 
     let items: Vec<Step3Item> = serde_json::from_str(raw).ok()?;
@@ -784,6 +788,7 @@ fn parse_inferred_traits(raw: &str) -> Option<Vec<InferredTrait>> {
                 suppress: item.suppress,
                 related: item.related,
                 seq: item.seq,
+                confidence: item.confidence,
             })
             .collect(),
     )
@@ -799,11 +804,44 @@ fn parse_inferred_traits(raw: &str) -> Option<Vec<InferredTrait>> {
 /// - `layer` 字符串映射到 `TraitLayer` 枚举。
 /// - 无法识别的 layer 默认归入 Accent。
 /// - id=0 表示由 DB 自动分配。
+///
+/// v1.3 N3 修复：置信度/证据量/一致性不再硬编码 0.5/1.0/0.5。
+/// - 优先使用 LLM 推断的 confidence 值。
+/// - 若 LLM 未提供 confidence，根据 trait_label 前缀匹配 stats 中
+///   对应分类的 n_eff/valence_std/share_std 动态计算。
 fn convert_to_personality_traits(
     inferred: &[InferredTrait],
     persona_uid: &str,
+    stats: &StatsSummary,
 ) -> Vec<PersonalityTrait> {
     let now = now_ms();
+
+    // v1.3 N3: 根据 n_eff 等统计指标动态计算 evidence/consistency/confidence
+    let compute_evidence = |n_eff: f64| n_eff.clamp(0.0, 100.0);
+    let compute_consistency = |valence_std: f64, share_std: f64| {
+        let avg_std = (valence_std + share_std) / 2.0;
+        (1.0 - avg_std).clamp(0.1, 0.95)
+    };
+    let compute_confidence = |evidence: f64, consistency: f64| {
+        if evidence <= 0.0 {
+            0.0
+        } else {
+            consistency * (1.0 - 1.0 / (1.0 + evidence))
+        }
+    };
+
+    // 按 trait_label 前缀匹配 stats 中对应分类的统计指标
+    let find_stats_for_label = |label: &str| -> Option<(&CategoryStats, f64, f64)> {
+        stats
+            .categories
+            .iter()
+            .find(|c| label.starts_with(&c.category))
+            .map(|cs| {
+                let ev = compute_evidence(cs.n_eff);
+                let con = compute_consistency(cs.valence_std, cs.share_std);
+                (cs, ev, con)
+            })
+    };
 
     inferred
         .iter()
@@ -812,6 +850,36 @@ fn convert_to_personality_traits(
                 "base" => TraitLayer::Base,
                 "primary" => TraitLayer::Primary,
                 _ => TraitLayer::Accent,
+            };
+
+            // v1.3 N3: 置信度优先取 LLM 的推断值，无则用统计指标计算
+            let (confidence, evidence, consistency) = if let Some(llm_conf) = t.confidence {
+                // LLM 提供了置信度，用它；evidence/consistency 从 stats 匹配
+                let (ev, con) = find_stats_for_label(&t.trait_label)
+                    .map(|(_, ev, con)| (ev, con))
+                    .unwrap_or((1.0, 0.5));
+                tracing::debug!(
+                    trait_label = %t.trait_label,
+                    llm_conf,
+                    computed_conf = ?compute_confidence(ev, con),
+                    ev,
+                    con,
+                    "LLM 推断置信度已解析，evidence/consistency 由统计指标补全"
+                );
+                (llm_conf, ev, con)
+            } else {
+                // LLM 未提供置信度，全部由统计指标计算
+                let (ev, con, conf) = find_stats_for_label(&t.trait_label)
+                    .map(|(_, ev, con)| (ev, con, compute_confidence(ev, con)))
+                    .unwrap_or((1.0, 0.5, 0.5));
+                tracing::debug!(
+                    trait_label = %t.trait_label,
+                    ev,
+                    con,
+                    conf,
+                    "LLM 未提供置信度，由统计指标动态计算"
+                );
+                (conf, ev, con)
             };
 
             PersonalityTrait {
@@ -828,9 +896,9 @@ fn convert_to_personality_traits(
                 source: TraitSource::Inferred,
                 ref_event_id: None,
                 ref_l1_id: None,
-                confidence: 0.5,
-                evidence: 1.0,
-                consistency: 0.5,
+                confidence,
+                evidence,
+                consistency,
                 status: TraitStatus::Active,
                 created_at: now,
                 updated_at: now,
@@ -1519,6 +1587,7 @@ mod tests {
 
     #[test]
     fn convert_inferred_to_personality_traits() {
+        let stats = make_test_stats();
         let inferred = vec![
             InferredTrait {
                 layer: "base".into(),
@@ -1529,6 +1598,7 @@ mod tests {
                 suppress: None,
                 related: None,
                 seq: 0,
+                confidence: None,
             },
             InferredTrait {
                 layer: "primary".into(),
@@ -1539,16 +1609,18 @@ mod tests {
                 suppress: None,
                 related: None,
                 seq: 0,
+                confidence: None,
             },
         ];
 
-        let traits = convert_to_personality_traits(&inferred, "user-0001");
+        let traits = convert_to_personality_traits(&inferred, "user-0001", &stats);
 
         assert_eq!(traits.len(), 2);
         assert_eq!(traits[0].layer, TraitLayer::Base);
         assert_eq!(traits[0].persona_uid, "user-0001");
         assert_eq!(traits[0].source, TraitSource::Inferred);
         assert_eq!(traits[0].status, TraitStatus::Active);
+        // v1.3 N3: 无匹配分类时回退到默认值 0.5
         assert_eq!(traits[0].confidence, 0.5);
 
         assert_eq!(traits[1].layer, TraitLayer::Primary);
@@ -1557,6 +1629,7 @@ mod tests {
 
     #[test]
     fn convert_unknown_layer_defaults_to_accent() {
+        let stats = make_test_stats();
         let inferred = vec![InferredTrait {
             layer: "unknown_layer".into(),
             trait_label: "测试".into(),
@@ -1566,9 +1639,10 @@ mod tests {
             suppress: None,
             related: None,
             seq: 0,
+            confidence: None,
         }];
 
-        let traits = convert_to_personality_traits(&inferred, "user-0001");
+        let traits = convert_to_personality_traits(&inferred, "user-0001", &stats);
         assert_eq!(traits[0].layer, TraitLayer::Accent);
     }
 
@@ -1744,12 +1818,14 @@ mod tests {
 
     #[test]
     fn convert_empty_inferred_list() {
-        let traits = convert_to_personality_traits(&[], "user-0001");
+        let stats = make_test_stats();
+        let traits = convert_to_personality_traits(&[], "user-0001", &stats);
         assert!(traits.is_empty());
     }
 
     #[test]
     fn convert_multiple_layers_preserves_order() {
+        let stats = make_test_stats();
         let inferred = vec![
             InferredTrait {
                 layer: "base".into(),
@@ -1760,6 +1836,7 @@ mod tests {
                 suppress: None,
                 related: None,
                 seq: 0,
+                confidence: None,
             },
             InferredTrait {
                 layer: "primary".into(),
@@ -1770,6 +1847,7 @@ mod tests {
                 suppress: None,
                 related: None,
                 seq: 0,
+                confidence: None,
             },
             InferredTrait {
                 layer: "accent".into(),
@@ -1780,9 +1858,10 @@ mod tests {
                 suppress: None,
                 related: None,
                 seq: 0,
+                confidence: None,
             },
         ];
-        let traits = convert_to_personality_traits(&inferred, "user-0001");
+        let traits = convert_to_personality_traits(&inferred, "user-0001", &stats);
         assert_eq!(traits.len(), 3);
         assert_eq!(traits[0].layer, TraitLayer::Base);
         assert_eq!(traits[1].layer, TraitLayer::Primary);
@@ -1791,6 +1870,7 @@ mod tests {
 
     #[test]
     fn convert_preserves_all_fields() {
+        let stats = make_test_stats();
         let inferred = vec![InferredTrait {
             layer: "accent".into(),
             trait_label: "幽默".into(),
@@ -1800,8 +1880,9 @@ mod tests {
             suppress: Some("正式场合".into()),
             related: Some("与温和互补".into()),
             seq: 3,
+            confidence: None,
         }];
-        let traits = convert_to_personality_traits(&inferred, "user-0001");
+        let traits = convert_to_personality_traits(&inferred, "user-0001", &stats);
         let t = &traits[0];
         assert_eq!(t.trait_label, "幽默");
         assert_eq!(t.meaning, "用自嘲化解尴尬");

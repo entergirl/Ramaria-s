@@ -56,7 +56,14 @@ impl SessionLifecycle {
         info!(%session_id, ?persona_uid, msg_count = messages.len(), "手动重试 L1 摘要");
 
         match self
-            .generate_l1_summary(storage, llm, session_id, persona_uid, user_prefix, assistant_prefix)
+            .generate_l1_summary(
+                storage,
+                llm,
+                session_id,
+                persona_uid,
+                user_prefix,
+                assistant_prefix,
+            )
             .await
         {
             Ok(l1) => {
@@ -131,7 +138,14 @@ impl SessionLifecycle {
         info!(%session_id, ?persona_uid, msg_count = messages.len(), "批量 L1 摘要（无级联）");
 
         match self
-            .generate_l1_summary(storage, llm, session_id, persona_uid, user_prefix, assistant_prefix)
+            .generate_l1_summary(
+                storage,
+                llm,
+                session_id,
+                persona_uid,
+                user_prefix,
+                assistant_prefix,
+            )
             .await
         {
             Ok(l1) => {

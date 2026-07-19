@@ -435,18 +435,27 @@ pub async fn import_qq_chat(
 
     tracing::info!(sessions_written, messages_written, "L0 写入完成");
 
-    // Step 4.5: 为每个导入的 session 生成 L1 摘要
-    // v1.3 修复: L1 摘要 persona_uid 设为对话方（other）人格 UID
-    // 原因: 导入场景中导出者通常是用户自身（不需要分析自己的性格），
-    //       对话方才是分析目标。L1 归属到对话方后，L2/L3 管线可为其正常级联。
-    //       导出者的 L1 摘要可由前端按 chat_partners 跨 persona 查看。
+    // Step 4.5: 为每个导入的 session 生成 L1 摘要（双方 persona 各一份）
+    //
+    // v1.3 N2 修复（替代 D1 过度校正）：
+    // 导入对话是双人对话（self↔other），L1 摘要应同时归属两人。
+    // D1 将 persona_uid 从 self→other 后，other 获得了 L1→L2→L3 全管线，
+    // 但 self 的 L1 来源完全断裂，无法触发 L2/L3。
+    //
+    // 修复方案：对每个 session，分别以 self 和 other 的 persona_uid
+    // 各调用一次 regenerate_l1_no_cascade。LLM 会根据对话内容为双方
+    // 各生成语义上适当的摘要（因为 persona_uid 不同，存储为不同行）。
+    //
+    // 影响：LLM 调用量翻倍（N session × 2），但这是正确语义的必要代价。
     let app = state.app.clone();
     let sids = session_ids.clone();
     let is_deep = import_mode == ramaria_importer::ImportMode::Deep;
     let total_sids = sids.len();
-    let l1_persona_uid = other_persona_uid_resolved.clone();
+    // v1.3 N2: 为双方 persona 各存储一份 L1
+    let self_uid = self_persona_uid_resolved.clone();
+    let other_uid = other_persona_uid_resolved.clone();
     tokio::spawn(async move {
-        // ── 生成全部 L1 摘要（无级联，persona_uid=对话方）──
+        // ── 生成全部 L1 摘要（无级联）──
         // v1.3 D9 修复：导入的消息 content 中已含 "[sender_name]" 前缀
         // （由 QQ parser 的 make_role_content 嵌入），故传空前缀避免"用户：""助手："双重前缀。
         // 空前缀 → 对话格式为 "[张三] 消息内容" 而非 "用户：[张三] 消息内容"，
@@ -454,27 +463,52 @@ pub async fn import_qq_chat(
         app_handle
             .emit(
                 EVENT_IMPORT_PROGRESS,
-                ImportProgressPayload::new("l1", 0, total_sids, "正在生成 L1 会话摘要..."),
+                ImportProgressPayload::new(
+                    "l1",
+                    0,
+                    total_sids * 2,
+                    "正在生成 L1 会话摘要（双方 persona）...",
+                ),
             )
             .ok();
 
         let mut l1_success = 0usize;
         let mut l1_failed = 0usize;
+        let mut l1_processed = 0usize; // 已处理次数（每个 session 2 次）
         for (i, sid) in sids.iter().enumerate() {
+            // ── 为导出方（self）生成 L1 ──
             match app
-                .regenerate_l1_no_cascade(*sid, Some(&l1_persona_uid), Some(""), Some(""))
+                .regenerate_l1_no_cascade(*sid, Some(&self_uid), Some(""), Some(""))
                 .await
             {
                 Ok(Some(_)) => l1_success += 1,
                 Ok(None) => {
-                    tracing::debug!(%sid, "session 无消息，跳过 L1");
+                    tracing::debug!(%sid, self_uid = %self_uid, "self: session 无消息，跳过 L1");
                 }
                 Err(e) => {
                     l1_failed += 1;
-                    tracing::warn!(%sid, error = %e, "L1 摘要生成失败（非致命）");
+                    tracing::warn!(%sid, self_uid = %self_uid, error = %e, "L1 摘要生成失败 (self, 非致命)");
                 }
             }
-            // 每处理一个 session 就推送进度
+            l1_processed += 1;
+
+            // ── 为对话方（other）生成 L1 ──
+            match app
+                .regenerate_l1_no_cascade(*sid, Some(&other_uid), Some(""), Some(""))
+                .await
+            {
+                Ok(Some(_)) => l1_success += 1,
+                Ok(None) => {
+                    tracing::debug!(%sid, other_uid = %other_uid, "other: session 无消息，跳过 L1");
+                }
+                Err(e) => {
+                    l1_failed += 1;
+                    tracing::warn!(%sid, other_uid = %other_uid, error = %e, "L1 摘要生成失败 (other, 非致命)");
+                }
+            }
+            l1_processed += 1;
+
+            // 每处理一个 session（2 个 persona）就推送进度
             app_handle
                 .emit(
                     EVENT_IMPORT_PROGRESS,
@@ -482,7 +516,7 @@ pub async fn import_qq_chat(
                         "l1",
                         i + 1,
                         total_sids,
-                        &format!("L1 摘要 {}/{}", i + 1, total_sids),
+                        &format!("L1 摘要 {}/{}（双方 persona）", i + 1, total_sids),
                     ),
                 )
                 .ok();
@@ -490,20 +524,23 @@ pub async fn import_qq_chat(
         tracing::info!(
             l1_success,
             l1_failed,
-            total = total_sids,
-            persona_uid = %l1_persona_uid,
-            "L1 摘要全部生成完成（归属到对话方 persona）"
+            l1_processed,
+            total_sessions = total_sids,
+            self_uid = %self_uid,
+            other_uid = %other_uid,
+            "L1 摘要全部生成完成（双方 persona 各有独立副本）"
         );
 
-        // ── 深度模式: 级联 L2→L3（trigger_l2_check 遍历所有 persona，
-        //     由于 L1 归属到对话方，仅对话方有未吸收 L1，L2/L3 仅为其生成）──
+        // ── 深度模式: 级联 L2→L3 ──
+        // v1.3 N2 修复：双方 persona 都有 L1 后，trigger_l2_check 遍历所有 persona，
+        // 双方均可在满足未吸收 L1 ≥ 5 条条件后各自触发 L2→L3 级联。
         let mut l2_triggered = false;
         let mut l3_triggered = false;
         if is_deep && l1_success > 0 {
             app_handle
                 .emit(
                     EVENT_IMPORT_PROGRESS,
-                    ImportProgressPayload::new("l2", 0, 0, "正在提取 L2 事件..."),
+                    ImportProgressPayload::new("l2", 0, 0, "正在提取 L2 事件（双方 persona）..."),
                 )
                 .ok();
 
@@ -513,7 +550,12 @@ pub async fn import_qq_chat(
             app_handle
                 .emit(
                     EVENT_IMPORT_PROGRESS,
-                    ImportProgressPayload::new("l3", 0, 0, "正在推断 L3 性格画像..."),
+                    ImportProgressPayload::new(
+                        "l3",
+                        0,
+                        0,
+                        "正在推断 L3 性格画像（双方 persona）...",
+                    ),
                 )
                 .ok();
             l3_triggered = true;
@@ -523,10 +565,13 @@ pub async fn import_qq_chat(
         let done_msg = if l1_failed > 0 {
             format!(
                 "深度处理完成: L1 成功 {}/{}, 失败 {}。请确认 LLM 已连接后重试。",
-                l1_success, total_sids, l1_failed
+                l1_success, l1_processed, l1_failed
             )
         } else {
-            format!("深度处理完成: L1 全部成功 ({}/{})", l1_success, total_sids)
+            format!(
+                "深度处理完成: L1 全部成功 ({}/{})",
+                l1_success, l1_processed
+            )
         };
         app_handle
             .emit(

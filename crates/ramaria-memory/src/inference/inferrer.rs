@@ -86,6 +86,10 @@ pub struct InferredTrait {
     pub suppress: Option<String>,
     pub related: Option<String>,
     pub seq: i32,
+    /// LLM 推断的置信度（0.0..1.0）。
+    /// v1.3 N3: 从 LLM JSON 输出中解析，不再统一硬编码 0.5。
+    /// 若 LLM 未提供此字段，默认回退为 None（由后处理校准）。
+    pub confidence: Option<f64>,
 }
 
 /// 完整推断结果。
@@ -305,8 +309,15 @@ pub fn build_step1_prompt(
 
     prompt.push_str(&format!(
         "## 任务\n\
-对上述每个分类，提炼该分类下呈现的性格信号。输出 JSON 对象，键为分类名，值为对象包含:\n\
-- signal_label: 性格信号标签（2-4字中文词）\n\
+对上述每个分类，提炼该分类下呈现的性格信号。\n\
+\n\
+重要区分: 以下统计指标中的\"分类\"是对话涉及的话题领域（如工作、家庭、游戏等），\n\
+不是性格标签。请从这些话题领域的统计模式中提炼出**跨领域的性格特征**。\n\
+性格信号标签应描述人的稳定行为倾向（如\"尽责\"\"外向\"\"情绪稳定\"），\n\
+而非话题名称（如\"沉浸体验\"\"系统逻辑\"\"AI模拟\"）。\n\
+\n\
+输出 JSON 对象，键为分类名，值为对象包含:\n\
+- signal_label: 性格信号标签（2-4字中文词，必须是性格特征词）\n\
 - evidence_citation: 引用统计指标作为证据（可引用动机维度统计作为补充线索）\n\
 - stability_judgment: \"stable\"/\"contextual\"/\"uncertain\"\n\
 - sufficient_evidence: true/false\n\n\
@@ -379,6 +390,11 @@ pub fn build_step2_prompt(
 }
 
 /// 构建 Step 3 prompt：合成结构化性格画像。
+///
+/// v1.3 N4 修复：增加"话题 vs 性格"语义区分指令，防止 LLM 将
+/// 对话话题名称（如"沉浸体验""系统逻辑"）当作性格标签输出。
+/// v1.3 N3 修复：增加 confidence 差异化指导，要求 LLM 根据证据量
+/// 给出不同的置信度，避免所有 trait 置信度统一。
 pub fn build_step3_prompt(
     analysis: &ConsistencyAnalysis,
     _category_signals: &[CategorySignal],
@@ -402,23 +418,35 @@ pub fn build_step3_prompt(
     prompt.push('\n');
 
     prompt.push_str(
-        "## 任务\n\
+        "## 重要区分：话题 vs 性格\n\
+以下候选标签来自对用户在不同生活话题领域的行为统计。\n\
+话题名称（如\"沉浸体验\"\"系统逻辑\"\"游戏\"\"技术开发\"等）描述的是对话涉及的主题领域，\n\
+不是性格特征。你的任务是**从这些话题领域的行为模式中提炼出跨领域的性格特征**。\n\
+\n\
+性格标签应描述人的稳定行为倾向，正确示例: \"尽责\"\"温和\"\"好奇\"\"坚韧\"\"外向\"\"谨慎\"\n\
+错误示例（这些是话题名，不是性格标签）: \"沉浸体验\"\"系统逻辑\"\"叙事驱动\"\"AI模拟\"\"规则构建\"\n\
+\n\
+## 任务\n\
 为每层的每个标签生成完整的 trait 记录。输出 JSON 数组，每元素包含:\n\
 - layer: \"base\" / \"primary\" / \"accent\"\n\
-- trait_label: 标签词（2-4字中文）\n\
+- trait_label: 标签词（2-4字中文，必须是性格特征词，不是话题名称）\n\
 - meaning: 在此人身上的具体含义（1-2句话，具体描述而非泛泛而谈）\n\
 - not_meaning: 反向界定——它不是什么（如果有的话，null 表示无）\n\
 - trigger: 浮现条件（accent 必填，其他可选，null 表示不特定）\n\
 - suppress: 抑制条件\n\
 - related: 与其他性格标签的关系\n\
-- seq: 层内排序（0-based）\n\n\
+- seq: 层内排序（0-based）\n\
+- confidence: 对该推断的置信度 0.0..1.0（必须差异化，不要所有 trait 使用相同值）\n\
+  - 有充足统计证据（n_eff ≥ 10.0）→ 0.7-0.9\n\
+  - 中等证据（5.0-10.0）→ 0.4-0.7\n\
+  - 低证据（< 5.0）→ 0.2-0.4\n\n\
 约束:\n\
 - 每条 trait 引用至少一个统计指标作为 evidence_citation\n\
 - not_meaning 用于防止误解（如\"幽默\"的 not_meaning 可以是\"并非轻浮\"）\n\
 - 底色最多3条，主色调最多2条，点缀最多4条\n\
 - 只输出 JSON 数组，不要任何其他文字\n\n\
 格式示例:\n\
-[\n  {{\"layer\":\"primary\",\"trait_label\":\"温和\",\"meaning\":\"xxx\",\"not_meaning\":null,\"trigger\":null,\"suppress\":null,\"related\":null,\"seq\":0}},\n  ...\n]\n"
+[\n  {{\"layer\":\"primary\",\"trait_label\":\"温和\",\"meaning\":\"xxx\",\"not_meaning\":null,\"trigger\":null,\"suppress\":null,\"related\":null,\"seq\":0,\"confidence\":0.75}},\n  ...\n]\n"
     );
 
     prompt
@@ -449,8 +477,34 @@ pub fn mock_infer(stats: &StatsSummary, persona_uid: &str) -> InferenceResult {
     for cat in &stats.categories {
         let sufficient = cat.n_eff >= 5.0;
 
+        // v1.3 N4 修复：话题特征词黑名单。
+        // L2 事件提取产出的 category 是话题聚类结果（如"沉浸体验""系统逻辑"），
+        // 而非性格维度。若统计指标不足以提炼出性格信号，标记为"insufficient_data"
+        // 而非直接用话题名生成伪性格标签。
+        const TOPIC_BLACKLIST: &[&str] = &[
+            "沉浸体验",
+            "系统逻辑",
+            "叙事驱动",
+            "规则构建",
+            "角色带入",
+            "AI模拟",
+            "卡面模拟",
+            "游戏",
+            "技术",
+            "编程",
+            "开发",
+            "界面设计",
+            "数值系统",
+            "世界观设定",
+        ];
+
+        let is_topic_category = TOPIC_BLACKLIST.iter().any(|kw| cat.category.contains(kw));
+
         // 优先使用最显著的信号维度
-        let (signal_label, stability) = if cat.valence_mean > 0.4 && cat.valence_std < 0.4 {
+        let (signal_label, stability) = if is_topic_category && !sufficient {
+            // 话题类分类 + 低证据量 → 不足以推断性格信号
+            (format!("{}-数据不足", cat.category), "uncertain")
+        } else if cat.valence_mean > 0.4 && cat.valence_std < 0.4 {
             (format!("{}-积极稳定", cat.category), "stable")
         } else if cat.valence_mean < -0.3 {
             (format!("{}-消极回避", cat.category), "contextual")
@@ -572,18 +626,17 @@ pub fn mock_infer(stats: &StatsSummary, persona_uid: &str) -> InferenceResult {
     // 从信号标签中匹配对应分类的统计指标。
     // 信号标签格式为 "{category}-{signal}"（如"工作-积极稳定"），
     // 通过遍历所有 category 检查标签前缀来匹配。
-    let find_stats_for_signal =
-        |signal_label: &str| -> Option<(&CategoryStats, f64, f64)> {
-            stats
-                .categories
-                .iter()
-                .find(|c| signal_label.starts_with(&c.category))
-                .map(|cs| {
-                    let ev = compute_mock_evidence(cs.n_eff);
-                    let con = compute_mock_consistency(cs.valence_std, cs.share_std);
-                    (cs, ev, con)
-                })
-        };
+    let find_stats_for_signal = |signal_label: &str| -> Option<(&CategoryStats, f64, f64)> {
+        stats
+            .categories
+            .iter()
+            .find(|c| signal_label.starts_with(&c.category))
+            .map(|cs| {
+                let ev = compute_mock_evidence(cs.n_eff);
+                let con = compute_mock_consistency(cs.valence_std, cs.share_std);
+                (cs, ev, con)
+            })
+    };
 
     // 底色
     for (i, label) in consistency.base_candidates.iter().enumerate().take(3) {
@@ -654,7 +707,8 @@ pub fn mock_infer(stats: &StatsSummary, persona_uid: &str) -> InferenceResult {
             // 点缀层证据量较低，总体折扣
             .unwrap_or((0.5, 0.3));
         // 动机维度标签（"动机-xxx-驱动"）或"内在矛盾型"取默认值
-        let (evidence, consistency) = if label.starts_with("动机-") || label.starts_with("内在矛盾") {
+        let (evidence, consistency) = if label.starts_with("动机-") || label.starts_with("内在矛盾")
+        {
             (0.5, 0.3)
         } else {
             (evidence, consistency)
