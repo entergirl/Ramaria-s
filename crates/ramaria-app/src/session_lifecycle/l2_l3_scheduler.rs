@@ -72,7 +72,17 @@ impl SessionLifecycle {
                     trigger_count,
                     "L2 触发条件满足，启动事件提取"
                 );
-                self.run_l2_extraction(storage, llm, &persona.uid).await;
+                // v1.3 T2: 确定对话另一方名称（仅当 personas 恰好 2 个时可靠）
+                let other_name = if personas.len() == 2 {
+                    personas
+                        .iter()
+                        .find(|p| p.uid != persona.uid)
+                        .map(|p| p.name.clone())
+                } else {
+                    None
+                };
+                self.run_l2_extraction(storage, llm, &persona.uid, other_name)
+                    .await;
             } else {
                 skipped += 1;
                 info!(
@@ -103,6 +113,10 @@ impl SessionLifecycle {
     ///
     /// 对齐 Python `merger.check_and_merge` 的 LLM 提取逻辑。
     ///
+    /// v1.3 T2: 新增 `other_persona_name` 参数，用于双向对话场景的角色区分。
+    /// 当已知对话另一方时，EventExtractor 会在 Prompt 中注入角色提示，
+    /// 帮助 LLM 正确区分"用户"与"另一方"的行为归属。
+    ///
     /// 重试策略:
     /// - LLM 调用失败 → 可重试（JobResult::Retryable），最多 3 次，指数退避。
     /// - 存储写入失败 → 同上可重试。
@@ -112,6 +126,7 @@ impl SessionLifecycle {
         storage: &dyn StorageBackend,
         llm: &dyn LlmProvider,
         persona_uid: &str,
+        other_persona_name: Option<String>,
     ) {
         let persona_owned = persona_uid.to_string();
         let job_manager = JobManager::with_defaults(storage);
@@ -119,11 +134,15 @@ impl SessionLifecycle {
 
         // 通过 JobManager 包裹执行：create → running → execute → completed/failed
         // 重试由 JobManager 内部处理（指数退避，最大 3 次）
+        let other_name = other_persona_name.clone();
         let job_result = job_manager
             .execute_with_retry(JobType::EventExtract, Some(&payload), None, || {
                 // 每次尝试都新建 EventExtractor（提取器创建代价低，且避免重试时复用状态）
+                let mut config = EventExtractorConfig::default();
+                // v1.3 T2: 设置对话另一方名称
+                config.other_persona_name = other_name.clone();
                 let mut extractor =
-                    EventExtractor::new(llm, storage, EventExtractorConfig::default());
+                    EventExtractor::new(llm, storage, config);
                 let uid = persona_owned.clone();
                 async move {
                     match extractor.extract_events(&uid).await {
@@ -538,7 +557,16 @@ impl SessionLifecycle {
                                 l1_count = l1_list.len(),
                                 "L2 定时触发（路径 B：最早未吸收 L1 > 7 天）"
                             );
-                            self.run_l2_extraction(storage, llm, &persona.uid).await;
+                            // v1.3 T2: 定时路径也确定对话另一方
+                            let other_name = if personas.len() == 2 {
+                                personas
+                                    .iter()
+                                    .find(|p| p.uid != persona.uid)
+                                    .map(|p| p.name.clone())
+                            } else {
+                                None
+                            };
+                            self.run_l2_extraction(storage, llm, &persona.uid, other_name).await;
                         }
                     }
                 }

@@ -207,7 +207,8 @@ pub use keyword::{AliasManager, BigramWithDictionaryNormalizer};
 
 // Init 冷启动
 pub use init::{
-    ColdStartConfig, ColdStartResult, PersonaToml, initialize_rama_persona, parse_persona_toml,
+    ColdStartConfig, ColdStartResult, PersonaToml, SHARED_CHAT_STYLE_RULES,
+    initialize_rama_persona, parse_persona_toml,
 };
 
 // Job 后台任务管理

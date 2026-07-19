@@ -114,6 +114,16 @@ pub const EVENT_EXTRACTION_PROMPT: &str = r#"你是一个事件提取助手。�
 - detail: 1句话简述关系逻辑
 - 如果事件间无明显关系可提取，返回空数组 []
 
+【角色区分规则——极其重要】
+- 对话中可能存在两方：一方是当前分析对象（在摘要中用"用户"指代），另一方是对话对象。
+- L1 摘要中嵌入的对话内容如果包含发送者标识（如"[昵称] 消息内容"），请注意区分谁是"用户"、谁是对话的另一方。
+- 当事件涉及双方互动时，summary 中必须明确：
+  - 如果"用户"是互动发起方 → 使用"用户主动..."的表述
+  - 如果另一方是发起方 → 使用"对方...，用户回应..."的表述
+  - 如果对话另一方也在 L1 摘要中出现，参与者列表中应包含对方
+- 严禁出现"用户向用户发送了..."或"用户向自己..."等逻辑错误。
+- 请仔细核对每条事件中"用户"的行为是否确实来自 L1 摘要中标记为该人物的内容。
+
 【提取规则】
 1. 每条事件必须基于下方 L1 摘要中的具体内容，不可凭空编造
 2. 同一主题可能分散在多条 L1 中，应合并为一个事件（同时提高 confidence）
@@ -198,18 +208,39 @@ pub fn build_event_extraction_prompt(l1_formatted: &str) -> String {
 /// - 导入场景中，L2 事件提取 Prompt 的"用'用户'指代"应替换为实际 persona 名称。
 /// - 正常对话场景仍可用 `build_event_extraction_prompt`（保持"用户"）。
 ///
+/// v1.3 T2 修复：新增 `other_persona_name` 参数，当已知对话另一方时注入角色提示，
+/// 帮助 LLM 正确区分"用户"与"对话另一方"的行为归属。
+///
 /// 参数:
 /// - `l1_formatted`: 同 `build_event_extraction_prompt`。
 /// - `persona_name`: persona 显示名称，用于替换 Prompt 中的"用户"。
+/// - `other_persona_name`: 对话另一方的名称。`None` 表示未知（单方对话或不确定）。
 ///
 /// 返回:
 /// - 完整 prompt 字符串，所有"用户"已替换为 `persona_name`。
-pub fn build_event_extraction_prompt_for_persona(l1_formatted: &str, persona_name: &str) -> String {
+pub fn build_event_extraction_prompt_for_persona(
+    l1_formatted: &str,
+    persona_name: &str,
+    other_persona_name: Option<&str>,
+) -> String {
     // 先构建基础 prompt (含 L1 文本)，再替换"用户"→实际 persona 名称。
     // 注意：L1 摘要文本（来自导入场景，content 已有 [sender_name] 前缀 + 空前缀格式化）
     // 不应再包含"用户"字样，因此全量替换是安全的。
-    let prompt = build_event_extraction_prompt(l1_formatted);
-    prompt.replace("用户", persona_name)
+    let mut prompt = build_event_extraction_prompt(l1_formatted);
+    prompt = prompt.replace("用户", persona_name);
+
+    // v1.3 T2: 注入对话另一方角色提示，帮助 LLM 区分行为归属
+    if let Some(other) = other_persona_name {
+        let role_hint = format!(
+            "\n\n【当前分析对象的对话方：{other}】\
+             \n以上 L1 摘要中嵌入的对话内容包含两方：{persona_name}（分析对象）和 {other}（对话另一方）。\
+             \n提取事件时，请仔细区分每句话的发送者，确保事件的行为归属正确。\
+             \n例如：\"{persona_name} 的消息\"应归属于分析对象，\"{other} 的消息\"应归属于对方。"
+        );
+        prompt.push_str(&role_hint);
+    }
+
+    prompt
 }
 
 /// 构建带补充上下文的事件提取 Prompt。
@@ -253,9 +284,12 @@ pub fn build_event_extraction_prompt_with_context(
 /// v1.3 D9 修复：构建带补充上下文的事件提取 Prompt，
 /// 将"用户"替换为 persona 显示名称。
 ///
+/// v1.3 T2 修复：新增 `other_persona_name` 参数，注入角色提示。
+///
 /// 参数:
 /// - 同 `build_event_extraction_prompt_with_context`。
 /// - `persona_name`: persona 显示名称。
+/// - `other_persona_name`: 对话另一方的名称。
 ///
 /// 返回:
 /// - 完整 prompt 字符串，所有"用户"已替换为 `persona_name`。
@@ -263,9 +297,22 @@ pub fn build_event_extraction_prompt_with_context_for_persona(
     l1_formatted: &str,
     context_docs: &[crate::event::context_retriever::ContextDocument],
     persona_name: &str,
+    other_persona_name: Option<&str>,
 ) -> String {
-    let prompt = build_event_extraction_prompt_with_context(l1_formatted, context_docs);
-    prompt.replace("用户", persona_name)
+    let mut prompt = build_event_extraction_prompt_with_context(l1_formatted, context_docs);
+    prompt = prompt.replace("用户", persona_name);
+
+    // v1.3 T2: 注入对话另一方角色提示
+    if let Some(other) = other_persona_name {
+        let role_hint = format!(
+            "\n\n【当前分析对象的对话方：{other}】\
+             \n以上 L1 摘要中嵌入的对话内容包含两方：{persona_name}（分析对象）和 {other}（对话另一方）。\
+             \n提取事件时，请仔细区分每句话的发送者，确保事件的行为归属正确。"
+        );
+        prompt.push_str(&role_hint);
+    }
+
+    prompt
 }
 
 /// 构建 paraphrase Prompt。
@@ -332,6 +379,41 @@ mod tests {
         assert!(prompt.contains("ContinuedBy"));
         assert!(prompt.contains("Contradicts"));
         assert!(prompt.contains("Timeline"));
+    }
+
+    #[test]
+    fn event_prompt_contains_role_distinction_rules() {
+        let prompt = build_event_extraction_prompt("[1] 2025-01-01 测试摘要");
+        assert!(
+            prompt.contains("角色区分规则"),
+            "v1.3 T2: prompt 应包含角色区分规则段落"
+        );
+        assert!(prompt.contains("对话另一方"));
+        assert!(prompt.contains("用户主动"));
+        assert!(prompt.contains("逻辑错误"));
+    }
+
+    #[test]
+    fn persona_prompt_injects_other_party_hint() {
+        let prompt = build_event_extraction_prompt_for_persona(
+            "[1] 2025-01-01 测试",
+            "张三",
+            Some("李四"),
+        );
+        assert!(prompt.contains("张三"), "应包含 persona 名称");
+        assert!(prompt.contains("李四"), "应包含对话另一方名称");
+        assert!(prompt.contains("对话方：李四"));
+    }
+
+    #[test]
+    fn persona_prompt_no_other_party_no_hint() {
+        let prompt = build_event_extraction_prompt_for_persona(
+            "[1] 2025-01-01 测试",
+            "张三",
+            None,
+        );
+        assert!(prompt.contains("张三"));
+        assert!(!prompt.contains("对话方"), "无另一方时不应注入角色提示");
     }
 
     #[test]

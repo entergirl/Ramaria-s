@@ -17,6 +17,7 @@ use ramaria_core::error::RamariaResult;
 use ramaria_core::traits::{ChatRequest, StorageBackend};
 use ramaria_core::types::{Message, MessageRole, MessageSource, ProfileField, new_id, now_ms};
 use ramaria_memory::parse_persona_toml;
+use ramaria_memory::SHARED_CHAT_STYLE_RULES;
 use ramaria_memory::prompt::builder::{PromptConfig, PromptContext, assemble_prompt};
 use ramaria_memory::token_budget::{self, TokenBudgetConfig};
 use uuid::Uuid;
@@ -386,7 +387,9 @@ fn load_persona_toml_prompt(db_config: Option<&str>) -> Option<String> {
         .iter()
         .find(|(k, _)| k == "E_rules")
         .map(|(_, v)| v.as_str())
-        .unwrap_or("");
+        .filter(|s| !s.trim().is_empty())
+        // v1.3 T4: 无自定义 E_rules 时使用共享社交平台口吻
+        .unwrap_or(SHARED_CHAT_STYLE_RULES);
 
     let name = &parsed.assistant_name;
     let time_str = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();

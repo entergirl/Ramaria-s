@@ -455,9 +455,14 @@ var RamariaMemoryView = (function () {
                     console.log('[MemoryView] L1 卡片跳转对话: session=' + sessionId.substring(0, 8) +
                         ', persona=' + personaUid);
 
+                    // v1.3 T1: 在离开前保存 L1 面板滚动位置
+                    var l1Panel = document.getElementById('memory-panel-l1');
+                    var scrollTop = l1Panel ? l1Panel.scrollTop : 0;
+
                     _savedState = {
                         personaUid: _currentPersonaUid,
                         activeTab: _activeTab,
+                        l1ScrollTop: scrollTop, // v1.3 T1: 保存滚动位置
                     };
                     _returningFromChat = true;
 
@@ -1039,9 +1044,13 @@ var RamariaMemoryView = (function () {
 
             // 检查是否从对话页返回（需要恢复状态）
             var shouldRestore = _returningFromChat && _savedState;
+            // v1.3 T1: 在清除 _savedState 前提取滚动位置
+            var savedScrollTop = 0;
             if (shouldRestore) {
+                savedScrollTop = _savedState.l1ScrollTop || 0;
                 console.log('[MemoryView] 从对话页返回，恢复状态: persona=' +
-                    _savedState.personaUid + ', tab=' + _savedState.activeTab);
+                    _savedState.personaUid + ', tab=' + _savedState.activeTab +
+                    ', scrollTop=' + savedScrollTop);
             }
 
             render();
@@ -1068,7 +1077,20 @@ var RamariaMemoryView = (function () {
                     _savedState = null;
                 }
 
-                _loadAllData();
+                _loadAllData().then(function () {
+                    // v1.3 T1: 从对话页返回时恢复 L1 滚动位置
+                    if (shouldRestore && savedScrollTop > 0) {
+                        // 使用 requestAnimationFrame 确保 DOM 已布局完成
+                        requestAnimationFrame(function () {
+                            var l1Panel = document.getElementById('memory-panel-l1');
+                            if (l1Panel) {
+                                l1Panel.scrollTop = savedScrollTop;
+                                console.log('[MemoryView] 恢复 L1 滚动位置: ' + savedScrollTop);
+                            }
+                        });
+                    }
+                });
+
                 _updatePipelineButton();
             });
         });

@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use ramaria_core::traits::StorageBackend;
 use ramaria_core::types::{Persona, ProfileField};
 use ramaria_memory::parse_persona_toml;
+use ramaria_memory::SHARED_CHAT_STYLE_RULES;
 use ramaria_memory::prompt::builder::{PromptConfig, PromptContext, assemble_prompt};
 
 use crate::pipeline::{PipelineContext, PipelineData, PipelineError, PipelineStage};
@@ -200,7 +201,51 @@ async fn build_structured_prompt(
         "5-Block System Prompt 已装配"
     );
 
-    assemble_prompt(&ctx, &config)
+    let mut prompt = assemble_prompt(&ctx, &config);
+
+    // v1.3 T4: 注入共享社交平台聊天口吻（所有 persona 默认使用）
+    // rama-0001 的 persona.toml 中已有 E_rules，但导入创建的 persona 缺少此配置。
+    // 此处为所有通过 5-Block 路径装配的 persona 注入默认回复规则，
+    // 确保所有应用内人格使用统一的社交平台聊天口吻。
+    let rules = resolve_chat_style_rules(persona);
+    prompt.push_str("\n\n回复规则:\n");
+    prompt.push_str(rules);
+
+    prompt
+}
+
+/// v1.3 T4: 解析当前 persona 的聊天回复风格规则。
+///
+/// 优先级:
+/// 1. 若 persona.config 中包含 `E_rules` 块 → 使用自定义规则。
+/// 2. 否则 → 使用共享社交平台口吻模板 `SHARED_CHAT_STYLE_RULES`。
+fn resolve_chat_style_rules(persona: &Persona) -> String {
+    // 尝试从 persona.config 中提取自定义 E_rules
+    if let Some(ref cfg) = persona.config {
+        if let Ok(parsed) = ramaria_memory::parse_persona_toml(cfg) {
+            if let Some(rules) = parsed
+                .blocks
+                .iter()
+                .find(|(k, _)| k == "E_rules")
+                .map(|(_, v)| v.clone())
+            {
+                if !rules.trim().is_empty() {
+                    tracing::debug!(
+                        persona_uid = %persona.uid,
+                        "使用 persona.config 中的自定义 E_rules"
+                    );
+                    return rules;
+                }
+            }
+        }
+    }
+
+    // 默认使用共享社交平台口吻
+    tracing::debug!(
+        persona_uid = %persona.uid,
+        "使用共享社交平台聊天口吻（无自定义 E_rules）"
+    );
+    SHARED_CHAT_STYLE_RULES.to_string()
 }
 
 // =========================================================
@@ -249,7 +294,9 @@ fn load_persona_toml_fallback(db_config: Option<&str>) -> Option<String> {
         .iter()
         .find(|(k, _)| k == "E_rules")
         .map(|(_, v)| v.as_str())
-        .unwrap_or("");
+        .filter(|s| !s.trim().is_empty())
+        // v1.3 T4: 无自定义 E_rules 时使用共享社交平台口吻
+        .unwrap_or(SHARED_CHAT_STYLE_RULES);
 
     let name = &parsed.assistant_name;
     let time_str = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();

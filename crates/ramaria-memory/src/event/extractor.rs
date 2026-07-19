@@ -151,6 +151,9 @@ pub struct EventExtractorConfig {
     pub paraphrase: ParaphraseConfig,
     /// v1.3 M3: CompositeIndex 补充上下文检索配置
     pub context_retriever: ContextRetrieverConfig,
+    /// v1.3 T2: 对话另一方的名称（用于双向对话场景的角色区分）。
+    /// `None` 表示未知或单方对话场景。
+    pub other_persona_name: Option<String>,
 }
 
 impl Default for EventExtractorConfig {
@@ -165,6 +168,7 @@ impl Default for EventExtractorConfig {
             degrade: DegradeConfig::default(),
             paraphrase: ParaphraseConfig::default(),
             context_retriever: ContextRetrieverConfig::default(),
+            other_persona_name: None,
         }
     }
 }
@@ -335,8 +339,10 @@ impl<'a> EventExtractor<'a> {
 
             // 构建 Prompt（带或不带补充上下文）
             // v1.3 D9: 使用 persona 实际名称替代"用户"
+            // v1.3 T2: 注入对话另一方角色提示
+            let other_name = self.config.other_persona_name.as_deref();
             let prompt = if context_docs.is_empty() {
-                build_event_extraction_prompt_for_persona(&formatted, &persona_name)
+                build_event_extraction_prompt_for_persona(&formatted, &persona_name, other_name)
             } else {
                 debug!(
                     %persona_uid,
@@ -348,6 +354,7 @@ impl<'a> EventExtractor<'a> {
                     &formatted,
                     &context_docs,
                     &persona_name,
+                    other_name,
                 )
             };
 

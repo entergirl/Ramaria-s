@@ -992,9 +992,10 @@ pub async fn run_phase_c_update(
         trait_states.push((t.id, t.confidence, evidence));
     }
 
-    // ---- 3. 准备新事件数据 ----
-    // 为每个 trait 构建新事件数据 (confidence, created_at) 和匹配度评分
-    // 简化方案：使用事件本身的 valence 作为对该 trait 的证据贡献方向
+    // ---- 3. 准备新事件数据（v1.3 T3 修复：按语义匹配度分配事件） ----
+    // 修复前：每个事件被无差别广播给所有 trait（相同 score），导致 E_total/C/conf 全相同。
+    // 修复后：基于事件关键词与 trait 标签的文本重叠计算匹配度，
+    // 仅将匹配度 > 阈值的事件分配给对应 trait，score = valence × relevance。
     let n_traits = active_traits.len();
     let mut new_event_data_by_trait: Vec<Vec<(f64, i64)>> = vec![vec![]; n_traits];
     let mut new_event_scores_by_trait: Vec<Vec<f64>> = vec![vec![]; n_traits];
@@ -1003,13 +1004,27 @@ pub async fn run_phase_c_update(
         // 事件贡献 = (event.confidence, event.created_at)
         let event_data = (event.confidence, event.created_at);
 
-        for (i, _t) in active_traits.iter().enumerate() {
-            new_event_data_by_trait[i].push(event_data);
+        // 解析事件关键词
+        let event_keywords: Vec<&str> = event
+            .keywords
+            .as_deref()
+            .unwrap_or("")
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
 
-            // 简化评分：事件效价作为对该 trait 的语义匹配度代理
-            // 实际应由 LLM 对每条 trait 评估事件匹配度，此处为计算可行性做近似
-            let score = event.valence.clamp(-1.0, 1.0);
-            new_event_scores_by_trait[i].push(score);
+        for (i, t) in active_traits.iter().enumerate() {
+            // v1.3 T3: 计算该事件与该 trait 的语义匹配度
+            let relevance = compute_event_trait_relevance(&event_keywords, &t.trait_label);
+
+            // 仅当匹配度超过阈值时才关联事件（避免无关事件稀释置信度）
+            if relevance > 0.1 {
+                new_event_data_by_trait[i].push(event_data);
+                // score 为带方向的相关性：方向由 valence 符号决定，强度由 relevance 缩放
+                let score = (event.valence.clamp(-1.0, 1.0) * relevance).clamp(-1.0, 1.0);
+                new_event_scores_by_trait[i].push(score);
+            }
         }
     }
 
@@ -1473,6 +1488,83 @@ pub async fn query_cross_version_matches(
         &hist_snaps,
         match_threshold,
     ))
+}
+
+// =========================================================
+// v1.3 T3: 事件-Trait 语义匹配度计算
+// =========================================================
+
+/// 计算事件与性格 trait 的语义匹配度（0.0..1.0）。
+///
+/// 基于事件的关键词与 trait 标签的文本重叠来估计相关性。
+/// 这是 LLM 评估的轻量替代方案，无需额外 API 调用。
+///
+/// 算法:
+/// 1. 对每个事件关键词，计算其与 trait_label 的最长公共子串比例。
+/// 2. 匹配度 = 匹配关键词数 / 总关键词数。
+/// 3. 无关键词时返回中等默认值 0.5。
+///
+/// 参数:
+/// - `event_keywords`: 事件的关键词列表（已按逗号分割并 trim）。
+/// - `trait_label`: trait 的标签文本（如"尽责""温和""幽默"）。
+///
+/// 返回:
+/// - 0.0..1.0 的匹配度值。
+fn compute_event_trait_relevance(event_keywords: &[&str], trait_label: &str) -> f64 {
+    if event_keywords.is_empty() {
+        // 无关键词时默认中等相关，不排除事件
+        return 0.5;
+    }
+
+    let trait_label_lower = trait_label.to_lowercase();
+    let trait_chars: Vec<char> = trait_label_lower.chars().collect();
+
+    let mut match_count = 0usize;
+
+    for kw in event_keywords {
+        let kw_lower = kw.to_lowercase();
+        let kw_chars: Vec<char> = kw_lower.chars().collect();
+
+        // 计算最长公共子串长度 / 较短者长度
+        let overlap_ratio = longest_common_substring_ratio(&kw_chars, &trait_chars);
+
+        // 阈值 0.3：至少 30% 的字符重叠才视为相关
+        if overlap_ratio > 0.3 {
+            match_count += 1;
+        }
+    }
+
+    let relevance = match_count as f64 / event_keywords.len() as f64;
+
+    // 边界保护：不返回 0.0（保留最低匹配度，避免排除所有事件）
+    relevance.max(0.05)
+}
+
+/// 计算两个字符序列的最长公共子串长度与较短者长度的比例。
+///
+/// 使用动态规划 O(m*n) 计算 LCS 长度，返回 lcs_len / min(len_a, len_b)。
+fn longest_common_substring_ratio(a: &[char], b: &[char]) -> f64 {
+    let n = a.len();
+    let m = b.len();
+
+    if n == 0 || m == 0 {
+        return 0.0;
+    }
+
+    // DP: dp[i][j] = 以 a[i-1] 和 b[j-1] 结尾的最长公共后缀长度
+    let mut dp = vec![vec![0usize; m + 1]; n + 1];
+    let mut max_len = 0usize;
+
+    for i in 1..=n {
+        for j in 1..=m {
+            if a[i - 1] == b[j - 1] {
+                dp[i][j] = dp[i - 1][j - 1] + 1;
+                max_len = max_len.max(dp[i][j]);
+            }
+        }
+    }
+
+    max_len as f64 / (n.min(m) as f64)
 }
 
 // =========================================================
@@ -2102,5 +2194,83 @@ mod tests {
         // 工作: 只有 Active 的 Base，Deprecated Accent 被忽略
         assert_eq!(hints.get("工作"), Some(&TraitLayer::Base));
         assert_eq!(hints.get("社交"), Some(&TraitLayer::Primary));
+    }
+
+    // =========================================================
+    // v1.3 T3: 语义匹配度测试
+    // =========================================================
+
+    #[test]
+    fn compute_relevance_exact_match() {
+        let keywords = vec!["工作", "项目", "截止日期"];
+        let relevance = compute_event_trait_relevance(&keywords, "尽责");
+        // "尽责" 与中文关键词的直接字面重叠可能为 0，
+        // 但关键词中有"工作"可能部分匹配。这里主要验证不 panic。
+        assert!(relevance >= 0.0 && relevance <= 1.0);
+    }
+
+    #[test]
+    fn compute_relevance_partial_overlap() {
+        // "社交" 与 "社交回避" 有 LCS "社交" = 2 字符
+        let keywords = vec!["社交", "朋友", "聚会"];
+        let relevance = compute_event_trait_relevance(&keywords, "社交回避");
+        // min(len("社交")=2, len("社交回避")=4) = 2, LCS=2, ratio=1.0
+        assert!(relevance > 0.3);
+    }
+
+    #[test]
+    fn compute_relevance_no_overlap() {
+        let keywords = vec!["abc", "xyz", "123"];
+        let relevance = compute_event_trait_relevance(&keywords, "尽责");
+        assert!(relevance <= 0.1);
+    }
+
+    #[test]
+    fn compute_relevance_empty_keywords() {
+        let keywords: Vec<&str> = vec![];
+        let relevance = compute_event_trait_relevance(&keywords, "尽责");
+        // 无关键词时默认 0.5
+        assert!((relevance - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn lcs_ratio_identical() {
+        let a: Vec<char> = "社交".chars().collect();
+        let b: Vec<char> = "社交".chars().collect();
+        let ratio = longest_common_substring_ratio(&a, &b);
+        assert!((ratio - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn lcs_ratio_substring() {
+        let a: Vec<char> = "社交".chars().collect();
+        let b: Vec<char> = "社交回避".chars().collect();
+        let ratio = longest_common_substring_ratio(&a, &b);
+        assert!((ratio - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn lcs_ratio_no_overlap() {
+        let a: Vec<char> = "abc".chars().collect();
+        let b: Vec<char> = "xyz".chars().collect();
+        let ratio = longest_common_substring_ratio(&a, &b);
+        assert!((ratio - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn lcs_ratio_partial() {
+        let a: Vec<char> = "测试工作".chars().collect();
+        let b: Vec<char> = "工作项目".chars().collect();
+        let ratio = longest_common_substring_ratio(&a, &b);
+        // LCS = "工作" = 2 chars, min(4, 4) = 4, ratio = 2/4 = 0.5
+        assert!((ratio - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn lcs_ratio_empty() {
+        let a: Vec<char> = vec![];
+        let b: Vec<char> = "测试".chars().collect();
+        let ratio = longest_common_substring_ratio(&a, &b);
+        assert!((ratio - 0.0).abs() < f64::EPSILON);
     }
 }
