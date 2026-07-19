@@ -11,8 +11,8 @@
 use async_trait::async_trait;
 use ramaria_core::traits::StorageBackend;
 use ramaria_core::types::{Persona, ProfileField};
-use ramaria_memory::parse_persona_toml;
 use ramaria_memory::SHARED_CHAT_STYLE_RULES;
+use ramaria_memory::parse_persona_toml;
 use ramaria_memory::prompt::builder::{PromptConfig, PromptContext, assemble_prompt};
 
 use crate::pipeline::{PipelineContext, PipelineData, PipelineError, PipelineStage};
@@ -209,7 +209,7 @@ async fn build_structured_prompt(
     // 确保所有应用内人格使用统一的社交平台聊天口吻。
     let rules = resolve_chat_style_rules(persona);
     prompt.push_str("\n\n回复规则:\n");
-    prompt.push_str(rules);
+    prompt.push_str(&rules);
 
     prompt
 }
@@ -221,23 +221,20 @@ async fn build_structured_prompt(
 /// 2. 否则 → 使用共享社交平台口吻模板 `SHARED_CHAT_STYLE_RULES`。
 fn resolve_chat_style_rules(persona: &Persona) -> String {
     // 尝试从 persona.config 中提取自定义 E_rules
-    if let Some(ref cfg) = persona.config {
-        if let Ok(parsed) = ramaria_memory::parse_persona_toml(cfg) {
-            if let Some(rules) = parsed
-                .blocks
-                .iter()
-                .find(|(k, _)| k == "E_rules")
-                .map(|(_, v)| v.clone())
-            {
-                if !rules.trim().is_empty() {
-                    tracing::debug!(
-                        persona_uid = %persona.uid,
-                        "使用 persona.config 中的自定义 E_rules"
-                    );
-                    return rules;
-                }
-            }
-        }
+    if let Some(ref cfg) = persona.config
+        && let Ok(parsed) = ramaria_memory::parse_persona_toml(cfg)
+        && let Some(rules) = parsed
+            .blocks
+            .iter()
+            .find(|(k, _)| k == "E_rules")
+            .map(|(_, v)| v.clone())
+        && !rules.trim().is_empty()
+    {
+        tracing::debug!(
+            persona_uid = %persona.uid,
+            "使用 persona.config 中的自定义 E_rules"
+        );
+        return rules;
     }
 
     // 默认使用共享社交平台口吻

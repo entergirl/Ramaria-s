@@ -395,11 +395,8 @@ mod tests {
 
     #[test]
     fn persona_prompt_injects_other_party_hint() {
-        let prompt = build_event_extraction_prompt_for_persona(
-            "[1] 2025-01-01 测试",
-            "张三",
-            Some("李四"),
-        );
+        let prompt =
+            build_event_extraction_prompt_for_persona("[1] 2025-01-01 测试", "张三", Some("李四"));
         assert!(prompt.contains("张三"), "应包含 persona 名称");
         assert!(prompt.contains("李四"), "应包含对话另一方名称");
         assert!(prompt.contains("对话方：李四"));
@@ -407,11 +404,7 @@ mod tests {
 
     #[test]
     fn persona_prompt_no_other_party_no_hint() {
-        let prompt = build_event_extraction_prompt_for_persona(
-            "[1] 2025-01-01 测试",
-            "张三",
-            None,
-        );
+        let prompt = build_event_extraction_prompt_for_persona("[1] 2025-01-01 测试", "张三", None);
         assert!(prompt.contains("张三"));
         assert!(!prompt.contains("对话方"), "无另一方时不应注入角色提示");
     }

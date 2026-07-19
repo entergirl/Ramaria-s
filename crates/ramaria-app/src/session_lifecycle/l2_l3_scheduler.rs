@@ -138,11 +138,11 @@ impl SessionLifecycle {
         let job_result = job_manager
             .execute_with_retry(JobType::EventExtract, Some(&payload), None, || {
                 // 每次尝试都新建 EventExtractor（提取器创建代价低，且避免重试时复用状态）
-                let mut config = EventExtractorConfig::default();
-                // v1.3 T2: 设置对话另一方名称
-                config.other_persona_name = other_name.clone();
-                let mut extractor =
-                    EventExtractor::new(llm, storage, config);
+                let config = EventExtractorConfig {
+                    other_persona_name: other_name.clone(),
+                    ..Default::default()
+                };
+                let mut extractor = EventExtractor::new(llm, storage, config);
                 let uid = persona_owned.clone();
                 async move {
                     match extractor.extract_events(&uid).await {
@@ -566,7 +566,8 @@ impl SessionLifecycle {
                             } else {
                                 None
                             };
-                            self.run_l2_extraction(storage, llm, &persona.uid, other_name).await;
+                            self.run_l2_extraction(storage, llm, &persona.uid, other_name)
+                                .await;
                         }
                     }
                 }
