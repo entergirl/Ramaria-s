@@ -154,13 +154,16 @@ pub struct EventExtractorConfig {
     /// v1.3 T2: 对话另一方的名称（用于双向对话场景的角色区分）。
     /// `None` 表示未知或单方对话场景。
     pub other_persona_name: Option<String>,
+    /// 簇间 LLM 请求间隔（毫秒），用于避免触发远程 API 速率限制。
+    /// 默认 0（不等待），建议对 DeepSeek 等有速率限制的 API 设为 500~1000。
+    pub cluster_delay_ms: u64,
 }
 
 impl Default for EventExtractorConfig {
     fn default() -> Self {
         Self {
             temperature: 0.3,
-            max_tokens: 2048,
+            max_tokens: 8192,
             trigger_count: 5,
             trigger_days: 7,
             max_l1_per_batch: 20,
@@ -169,6 +172,7 @@ impl Default for EventExtractorConfig {
             paraphrase: ParaphraseConfig::default(),
             context_retriever: ContextRetrieverConfig::default(),
             other_persona_name: None,
+            cluster_delay_ms: 0,
         }
     }
 }
@@ -382,7 +386,21 @@ impl<'a> EventExtractor<'a> {
                 }
             };
 
-            debug!(%persona_uid, %request_id, cluster_idx = ci, "LLM 返回 {} 字符", raw_response.len());
+            // 记录原始响应用于诊断（截断到 ~2000 字节，避免日志膨胀）。
+            // 必须停在 UTF-8 字符边界上，否则直接切片会 panic。
+            let preview = if raw_response.len() > 2000 {
+                let mut end = 2000;
+                while !raw_response.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}...<truncated>", &raw_response[..end])
+            } else {
+                raw_response.clone()
+            };
+            debug!(%persona_uid, %request_id, cluster_idx = ci,
+                len = raw_response.len(),
+                raw = %preview,
+                "LLM 返回 {} 字符", raw_response.len());
 
             // 解析 JSON
             let parsed = match Self::parse_event_response(&raw_response) {
@@ -490,6 +508,16 @@ impl<'a> EventExtractor<'a> {
 
             all_l1_ids.extend(cluster_l1_ids);
             debug!(%persona_uid, cluster_idx = ci, cluster_size, "簇 {} 处理完成", ci);
+
+            // 簇间延迟：避免触发远程 API 速率限制
+            if self.config.cluster_delay_ms > 0 {
+                debug!(%persona_uid, cluster_idx = ci, delay_ms = self.config.cluster_delay_ms,
+                    "簇间等待 {}ms", self.config.cluster_delay_ms);
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    self.config.cluster_delay_ms,
+                ))
+                .await;
+            }
         }
 
         // 5. 批量标记 L1 为 absorbed

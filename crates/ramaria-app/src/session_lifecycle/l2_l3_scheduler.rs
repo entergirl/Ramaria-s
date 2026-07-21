@@ -140,6 +140,10 @@ impl SessionLifecycle {
                 // 每次尝试都新建 EventExtractor（提取器创建代价低，且避免重试时复用状态）
                 let config = EventExtractorConfig {
                     other_persona_name: other_name.clone(),
+                    cluster_delay_ms: self.config.thresholds.cluster_delay_ms,
+                    temperature: self.config.event_extraction.temperature,
+                    max_tokens: self.config.event_extraction.max_tokens,
+                    max_events: self.config.event_extraction.max_events,
                     ..Default::default()
                 };
                 let mut extractor = EventExtractor::new(llm, storage, config);

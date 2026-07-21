@@ -138,6 +138,8 @@ l2_trigger_days = 7
 l3_trigger_count = 10
 # 最早未吸收事件触发 L3 推断的天数阈值（路径 B）
 l3_trigger_days = 30
+# L2 簇间 LLM 请求间隔（毫秒），0=不等待；对 DeepSeek 等有速率限制的 API 建议设为 500~1000
+cluster_delay_ms = 800
 
 # =========================================================
 # 索引管理
@@ -148,6 +150,36 @@ l3_trigger_days = 30
 bm25_incremental_threshold = 10
 # BM25 定时重建检查间隔（秒）
 bm25_rebuild_interval = 300
+
+# =========================================================
+# L3 性格推断 LLM 参数（Phase B/C）
+# =========================================================
+# 控制 L3 三步推断（Few-shot 基线 → 事件驱动更新 → 置信度校准）的 LLM 行为。
+
+[inference.inferrer]
+# LLM 生成温度
+temperature = 0.3
+# Phase B 推断最大输出 token
+max_tokens = 2048
+# 小样本分类的证据阈值
+low_evidence_threshold = 5.0
+# 每步最大 tokens
+step_max_tokens = 2048
+
+# =========================================================
+# L2 事件提取 LLM 参数
+# =========================================================
+# 事件提取的输出是长 JSON（含多个事件的 title/summary/keywords/motives 等），
+# 需要比对话大得多的 token 预算。截断将导致 JSON 不完整 → 降级。
+# DeepSeek 建议 4096-8192，本地模型按实际能力调整。
+
+[event_extraction]
+# LLM 生成温度
+temperature = 0.3
+# 最大输出 token（事件 JSON 较长，默认 4096。截断会导致降级）
+max_tokens = 8192
+# 单簇最多提取的事件数
+max_events = 5
 
 # =========================================================
 # 日志

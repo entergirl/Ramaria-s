@@ -99,6 +99,10 @@ pub struct RamariaConfig {
     #[serde(default)]
     pub inference: InferenceConfig,
 
+    /// L2 事件提取 LLM 参数
+    #[serde(default)]
+    pub event_extraction: EventExtractionConfig,
+
     /// 杂项（预留扩展位，当前无字段）
     #[serde(default)]
     pub misc: MiscConfig,
@@ -139,6 +143,7 @@ impl Default for RamariaConfig {
             index: IndexConfig::default(),
             logging: LoggingConfig::default(),
             inference: InferenceConfig::default(),
+            event_extraction: EventExtractionConfig::default(),
             misc: MiscConfig::default(),
         }
     }
@@ -408,6 +413,10 @@ pub struct ThresholdConfig {
     pub l3_trigger_count: u32,
     /// 最早未吸收事件触发 L3 推断的天数阈值（路径 B）
     pub l3_trigger_days: u32,
+    /// L2 事件提取时簇间 LLM 请求间隔（毫秒），用于避免触发远程 API 速率限制。
+    /// 默认 0（不等待），建议对 DeepSeek 等有速率限制的 API 设为 500~1000。
+    #[serde(default)]
+    pub cluster_delay_ms: u64,
 }
 
 impl Default for ThresholdConfig {
@@ -422,6 +431,49 @@ impl Default for ThresholdConfig {
             l2_trigger_days: 7,
             l3_trigger_count: 10,
             l3_trigger_days: 30,
+            cluster_delay_ms: 800,
+        }
+    }
+}
+
+// =========================================================
+// 事件提取配置（L1→L2）
+// =========================================================
+
+/// 事件提取器 LLM 参数。
+///
+/// 职责:
+/// - 控制 EventExtractor 调用 LLM 时的 `max_tokens`、`temperature` 和单簇最大事件数。
+/// - 独立于全局 `[backend]` 配置，因为事件提取的 JSON 输出需要比对话大得多的 token 预算。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventExtractionConfig {
+    /// LLM 生成温度（0.0-2.0）
+    #[serde(default = "default_event_extraction_temperature")]
+    pub temperature: f64,
+    /// 最大输出 token 数（事件 JSON 较长，需比对话大）
+    #[serde(default = "default_event_extraction_max_tokens")]
+    pub max_tokens: u32,
+    /// 单簇最多提取的事件数
+    #[serde(default = "default_event_extraction_max_events")]
+    pub max_events: usize,
+}
+
+fn default_event_extraction_temperature() -> f64 {
+    0.3
+}
+fn default_event_extraction_max_tokens() -> u32 {
+    8192
+}
+fn default_event_extraction_max_events() -> usize {
+    5
+}
+
+impl Default for EventExtractionConfig {
+    fn default() -> Self {
+        Self {
+            temperature: 0.3,
+            max_tokens: 8192,
+            max_events: 5,
         }
     }
 }

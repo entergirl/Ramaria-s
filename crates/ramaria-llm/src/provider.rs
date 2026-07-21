@@ -204,8 +204,10 @@ impl ProviderBase {
     pub async fn chat(&self, request: &ChatRequest) -> RamariaResult<String> {
         let messages = build_messages(request);
         let model = &self.config.capability.model_id;
-        let temperature = self.config.temperature;
-        let max_tokens = self.config.max_tokens;
+        // 优先使用 ChatRequest 显式参数（允许不同调用路径使用不同的
+        // temperature/max_tokens），而非统一使用 BackendConfig 的默认值。
+        let temperature = request.temperature;
+        let max_tokens = request.max_tokens;
 
         self.with_retry(|| async {
             self.transport
@@ -236,8 +238,8 @@ impl ProviderBase {
     ) -> RamariaResult<Pin<Box<dyn Stream<Item = RamariaResult<StreamDelta>> + Send>>> {
         let messages = build_messages(request);
         let model = &self.config.capability.model_id;
-        let temperature = self.config.temperature;
-        let max_tokens = self.config.max_tokens;
+        let temperature = request.temperature;
+        let max_tokens = request.max_tokens;
 
         self.with_retry(|| async {
             self.transport
