@@ -28,7 +28,7 @@ use crate::inference::{
         match_clusters_cross_version,
     },
     confidence::{ConfidenceConfig, ConfidenceSummary, run_confidence_update},
-    drift::{CategoryEventData, DriftSummary, run_drift_detection},
+    drift::{CategoryEventData, DriftConfig, DriftSummary, run_drift_detection},
     inferrer::{
         CategorySignal, ConsistencyAnalysis, InferenceResult, InferredTrait, InferrerConfig,
         PostProcessResult, build_step1_prompt, build_step2_prompt, build_step3_prompt,
@@ -930,6 +930,8 @@ fn convert_to_personality_traits(
 /// 返回:
 /// - PhaseCResult：包含更新数量、证据数量、漂移检测结果。
 pub async fn run_phase_c_update(
+    confidence_config: &ConfidenceConfig,
+    drift_config: &DriftConfig,
     storage: &dyn StorageBackend,
     persona_uid: &str,
     new_traits: &[PersonalityTrait],
@@ -938,7 +940,6 @@ pub async fn run_phase_c_update(
 ) -> RamariaResult<PhaseCResult> {
     let persona_owned = persona_uid.to_string();
     let now = now_ms();
-    let confidence_config = ConfidenceConfig::default();
 
     if new_traits.is_empty() {
         info!(persona_uid = %persona_owned, "Phase C: 无 trait 需要更新置信度");
@@ -1037,7 +1038,7 @@ pub async fn run_phase_c_update(
         &new_event_data_by_trait,
         &new_event_scores_by_trait,
         now,
-        &confidence_config,
+        confidence_config,
     );
 
     // ---- 5. 持久化置信度更新 ----
@@ -1116,7 +1117,7 @@ pub async fn run_phase_c_update(
         info!(persona_uid = %persona_owned, "Phase C: 首轮推断，跳过漂移检测");
         (false, vec![], None)
     } else {
-        match detect_and_summarize_drift(storage, &persona_owned, events).await {
+        match detect_and_summarize_drift(storage, &persona_owned, events, drift_config).await {
             Ok(summary) => {
                 let categories: Vec<String> = summary
                     .categories
@@ -1170,8 +1171,8 @@ async fn detect_and_summarize_drift(
     storage: &dyn StorageBackend,
     persona_uid: &str,
     events: &[MemoryEvent],
+    drift_config: &DriftConfig,
 ) -> RamariaResult<DriftSummary> {
-    use crate::inference::drift::DriftConfig;
     use crate::inference::stats::extract_primary_category;
 
     // 按 category 对事件分组
@@ -1241,8 +1242,7 @@ async fn detect_and_summarize_drift(
         });
     }
 
-    let drift_config = DriftConfig::default();
-    Ok(run_drift_detection(&category_data, &drift_config))
+    Ok(run_drift_detection(&category_data, drift_config))
 }
 
 // =========================================================

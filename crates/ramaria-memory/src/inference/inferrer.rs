@@ -43,6 +43,19 @@ impl Default for InferrerConfig {
     }
 }
 
+// ---- v1.3 配置传播修复：从 ramaria-core 的可序列化配置创建 ----
+
+impl From<ramaria_core::config::InferrerConf> for InferrerConfig {
+    fn from(conf: ramaria_core::config::InferrerConf) -> Self {
+        Self {
+            temperature: conf.temperature,
+            max_tokens: conf.max_tokens,
+            low_evidence_threshold: conf.low_evidence_threshold,
+            step_max_tokens: conf.step_max_tokens,
+        }
+    }
+}
+
 // =========================================================
 // 结构化中间输出类型
 // =========================================================

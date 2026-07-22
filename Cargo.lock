@@ -4033,7 +4033,6 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 name = "ramaria-app"
 version = "1.2.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "chrono",
  "futures",
@@ -4140,7 +4139,6 @@ dependencies = [
 name = "ramaria-llm"
 version = "1.2.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "bytes",
  "candle-core",
@@ -4165,7 +4163,6 @@ dependencies = [
 name = "ramaria-memory"
 version = "1.2.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "chrono",
  "futures",

@@ -70,6 +70,29 @@ impl DecayConfig {
             ..Default::default()
         }
     }
+
+    // ---- v1.3 配置传播修复：从 ramaria-core 的可序列化配置创建 ----
+
+    /// 从 core 可序列化配置按层级创建。
+    ///
+    /// 参数:
+    /// - `core`: ramaria-core 中的 DecayConfig（来自 config.toml）。
+    /// - `layer`: "l0" / "l1" / "l2"，决定使用哪个稳定性系数。
+    pub fn from_core(core: &ramaria_core::config::DecayConfig, layer: &str) -> Self {
+        let stability_s = match layer {
+            "l0" => core.s_l0 as f64,
+            "l1" => core.s_l1 as f64,
+            "l2" => core.s_l2 as f64,
+            _ => core.s_l1 as f64,
+        };
+        Self {
+            stability_s,
+            salience_multiplier: core.salience_multiplier,
+            access_boost_enabled: core.enable_access_boost,
+            access_boost_days: core.recent_boost_days,
+            access_boost_floor: core.recent_boost_floor,
+        }
+    }
 }
 
 // =========================================================

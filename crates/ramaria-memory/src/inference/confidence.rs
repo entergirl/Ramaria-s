@@ -41,6 +41,17 @@ impl Default for ConfidenceConfig {
     }
 }
 
+// ---- v1.3 配置传播修复：从 ramaria-core 的可序列化配置创建 ----
+
+impl From<ramaria_core::config::ConfidenceConf> for ConfidenceConfig {
+    fn from(conf: ramaria_core::config::ConfidenceConf) -> Self {
+        Self {
+            stability_s: conf.stability_s,
+            min_decay: conf.min_decay,
+        }
+    }
+}
+
 // =========================================================
 // 输出类型
 // =========================================================

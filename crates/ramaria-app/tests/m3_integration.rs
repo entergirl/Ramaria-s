@@ -441,7 +441,11 @@ async fn phase_c_confidence_and_evidence() {
     let events = make_test_events(persona_uid);
 
     // 运行置信度更新
+    let confidence_config = ramaria_memory::inference::confidence::ConfidenceConfig::default();
+    let drift_config = ramaria_memory::inference::drift::DriftConfig::default();
     let phase_c = run_phase_c_update(
+        &confidence_config,
+        &drift_config,
         &*storage,
         persona_uid,
         &phase_b.traits,

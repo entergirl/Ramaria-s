@@ -263,7 +263,6 @@ impl SessionLifecycle {
     /// - 通过 JobManager 创建 `PersonalityInference` 任务记录，
     ///   记录开始/完成/failed 时间，便于运维排查"何时对谁做了推断"。
     ///
-
     /// - Phase A: 校准权重链 + 三轨准入 + 分层收缩 + 动机统计
     /// - Phase B: LLM 三步结构化推断（注入因果链特征 + 动机维度）
     /// - Phase C: 校准化置信度更新 + 四维度漂移检测
@@ -314,7 +313,7 @@ impl SessionLifecycle {
         }
 
         // ---- 统计特征提取（纯数值，不调 LLM） ----
-        use ramaria_memory::inference::{InferrerConfig, StatsConfig, run_phase_a_stats};
+        use ramaria_memory::inference::{StatsConfig, run_phase_a_stats};
 
         let stats_config = StatsConfig::default();
         let stats_summary = run_phase_a_stats(&events, &stats_config);
@@ -374,9 +373,13 @@ impl SessionLifecycle {
         );
 
         // ---- LLM 三步结构化推断 ----
+        use ramaria_memory::inference::confidence::ConfidenceConfig;
+        use ramaria_memory::inference::drift::DriftConfig;
+        use ramaria_memory::inference::inferrer::InferrerConfig;
         use ramaria_memory::inference::run_phase_b_inference;
 
-        let inferrer_config = InferrerConfig::default();
+        // v1.3 配置传播修复：从 RamariaConfig 读取而非硬编码默认值
+        let inferrer_config = InferrerConfig::from(self.config.inference.inferrer.clone());
         let phase_b_result = match run_phase_b_inference(
             llm,
             storage,
@@ -415,7 +418,12 @@ impl SessionLifecycle {
         let is_first_round =
             phase_b_result.traits_updated == 0 && phase_b_result.traits_deprecated == 0;
 
+        // v1.3 配置传播修复：从 RamariaConfig 读取而非硬编码默认值
+        let confidence_config = ConfidenceConfig::from(self.config.inference.confidence.clone());
+        let drift_config = DriftConfig::from(self.config.inference.drift.clone());
         match run_phase_c_update(
+            &confidence_config,
+            &drift_config,
             storage,
             &persona_owned,
             &phase_b_result.traits,

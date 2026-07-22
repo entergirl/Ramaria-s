@@ -34,6 +34,18 @@ impl Default for CalibrationConfig {
     }
 }
 
+// ---- v1.3 配置传播修复：从 ramaria-core 的可序列化配置创建 ----
+
+impl From<ramaria_core::config::CalibrationConf> for CalibrationConfig {
+    fn from(conf: ramaria_core::config::CalibrationConf) -> Self {
+        Self {
+            round_threshold: conf.round_threshold,
+            event_doubling_ratio: conf.event_doubling_ratio,
+            diff_alert_ratio: conf.diff_alert_ratio,
+        }
+    }
+}
+
 // =========================================================
 // 校准状态
 // =========================================================

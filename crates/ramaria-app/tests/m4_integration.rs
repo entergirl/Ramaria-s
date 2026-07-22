@@ -771,7 +771,18 @@ async fn full_pipeline_respects_calibrated_weights_in_output() {
     );
 
     // 执行 Phase C
-    let _pc = run_phase_c_update(&storage, "persona-m4-cw", &pb.traits, &[], true).await;
+    let conf_cfg = ramaria_memory::inference::confidence::ConfidenceConfig::default();
+    let drift_cfg = ramaria_memory::inference::drift::DriftConfig::default();
+    let _pc = run_phase_c_update(
+        &conf_cfg,
+        &drift_cfg,
+        &storage,
+        "persona-m4-cw",
+        &pb.traits,
+        &[],
+        true,
+    )
+    .await;
     assert!(_pc.is_ok());
 }
 

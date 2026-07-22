@@ -132,8 +132,9 @@ impl PipelineStage for StageRetrieveMemory {
 
         // ---- 5.3 时间衰减：rrf_score × Ebbinghaus decay ----
         let now = now_ms();
-        let decay_config_l1 = DecayConfig::l1();
-        let decay_config_l2 = DecayConfig::l2();
+        // v1.3 配置传播修复：从 RamariaConfig 读取衰减参数
+        let decay_config_l1 = DecayConfig::from_core(&ctx.config.decay, "l1");
+        let decay_config_l2 = DecayConfig::from_core(&ctx.config.decay, "l2");
 
         for r in &mut results {
             let decay_config = if r.layer == "l2" {

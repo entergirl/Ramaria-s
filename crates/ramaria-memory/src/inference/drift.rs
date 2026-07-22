@@ -37,6 +37,17 @@ impl Default for DriftConfig {
     }
 }
 
+// ---- v1.3 配置传播修复：从 ramaria-core 的可序列化配置创建 ----
+
+impl From<ramaria_core::config::DriftConf> for DriftConfig {
+    fn from(conf: ramaria_core::config::DriftConf) -> Self {
+        Self {
+            alpha: conf.alpha,
+            n_permutations: conf.n_permutations,
+        }
+    }
+}
+
 // =========================================================
 // 输出类型
 // =========================================================

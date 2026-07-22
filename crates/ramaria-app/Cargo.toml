@@ -12,7 +12,6 @@ ramaria-llm = { path = "../ramaria-llm" }
 ramaria-importer = { path = "../ramaria-importer", optional = true }
 tokio.workspace = true
 tracing.workspace = true
-anyhow.workspace = true
 futures.workspace = true
 uuid.workspace = true
 serde = { workspace = true }
