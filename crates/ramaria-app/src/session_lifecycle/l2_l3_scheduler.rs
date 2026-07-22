@@ -72,7 +72,7 @@ impl SessionLifecycle {
                     trigger_count,
                     "L2 触发条件满足，启动事件提取"
                 );
-                // v1.3 T2: 确定对话另一方名称（仅当 personas 恰好 2 个时可靠）
+                // 确定对话另一方名称（仅当 personas 恰好 2 个时可靠）
                 let other_name = if personas.len() == 2 {
                     personas
                         .iter()
@@ -113,7 +113,7 @@ impl SessionLifecycle {
     ///
     /// 对齐 Python `merger.check_and_merge` 的 LLM 提取逻辑。
     ///
-    /// v1.3 T2: 新增 `other_persona_name` 参数，用于双向对话场景的角色区分。
+    /// 新增 `other_persona_name` 参数，用于双向对话场景的角色区分。
     /// 当已知对话另一方时，EventExtractor 会在 Prompt 中注入角色提示，
     /// 帮助 LLM 正确区分"用户"与"另一方"的行为归属。
     ///
@@ -263,7 +263,7 @@ impl SessionLifecycle {
     /// - 通过 JobManager 创建 `PersonalityInference` 任务记录，
     ///   记录开始/完成/failed 时间，便于运维排查"何时对谁做了推断"。
     ///
-    /// v1.3 更新:
+
     /// - Phase A: 校准权重链 + 三轨准入 + 分层收缩 + 动机统计
     /// - Phase B: LLM 三步结构化推断（注入因果链特征 + 动机维度）
     /// - Phase C: 校准化置信度更新 + 四维度漂移检测
@@ -313,7 +313,7 @@ impl SessionLifecycle {
             let _ = job_manager.mark_running(job_id).await;
         }
 
-        // ---- Phase A: 统计特征提取（纯数值，不调 LLM） ----
+        // ---- 统计特征提取（纯数值，不调 LLM） ----
         use ramaria_memory::inference::{InferrerConfig, StatsConfig, run_phase_a_stats};
 
         let stats_config = StatsConfig::default();
@@ -373,7 +373,7 @@ impl SessionLifecycle {
             "L3 Phase A 推断流程完成，开始 Phase B"
         );
 
-        // ---- Phase B: LLM 三步结构化推断 ----
+        // ---- LLM 三步结构化推断 ----
         use ramaria_memory::inference::run_phase_b_inference;
 
         let inferrer_config = InferrerConfig::default();
@@ -408,10 +408,10 @@ impl SessionLifecycle {
             }
         };
 
-        // ---- Phase C: 置信度更新 + 漂移检测 ----
+        // ---- 置信度更新 + 漂移检测 ----
         use ramaria_memory::inference::run_phase_c_update;
 
-        // 判断是否为首轮推断（Phase B 结果中 traits_saved == total 且无 update/deprecate）
+        // 判断是否为首轮推断
         let is_first_round =
             phase_b_result.traits_updated == 0 && phase_b_result.traits_deprecated == 0;
 
@@ -436,7 +436,7 @@ impl SessionLifecycle {
             }
             Err(e) => {
                 error!(persona_uid = %persona_owned, error = %e, "L3 Phase C 更新失败");
-                // Phase C 失败不阻塞事件吸收标记——traits 已写入，confidence 保持初始值
+                // 失败不阻塞事件吸收标记——traits 已写入，confidence 保持初始值
             }
         };
 
@@ -561,7 +561,7 @@ impl SessionLifecycle {
                                 l1_count = l1_list.len(),
                                 "L2 定时触发（路径 B：最早未吸收 L1 > 7 天）"
                             );
-                            // v1.3 T2: 定时路径也确定对话另一方
+                            // 定时路径也确定对话另一方
                             let other_name = if personas.len() == 2 {
                                 personas
                                     .iter()

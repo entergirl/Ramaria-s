@@ -1,14 +1,14 @@
-//! rust/crates/ramaria-memory/src/inference/shrink.rs - 经验贝叶斯小样本收缩（v1.3 分层先验）
+//! rust/crates/ramaria-memory/src/inference/shrink.rs - 经验贝叶斯小样本收缩
 //!
 //! 设计特点:
 //! - A5 小样本收缩估计: 当分类有效样本量 n_eff 过小时，将极端估计值向全局均值收缩
-//! - v1.3 分层先验: Base/Primary 使用跨领域全局先验，Accent 使用领域/主题簇先验
+//! - 分层先验: Base/Primary 使用跨领域全局先验，Accent 使用领域/主题簇先验
 //! - Valence: 标准经验贝叶斯收缩（无界连续量，对称分布）
 //! - Share: logit 变换 → 收缩 → sigmoid（有界 [0,1]）
 //! - Presentation: Dirichlet-Multinomial 共轭（三比例和为 1 的组合数据）
 //! - γ 动态公式: γ = 3 + 30 / max(n_total_eff, 30)，随总样本量自适应调整
 //! - 纯数值计算，零 I/O，不依赖数据库或异步运行时
-//! - 向后兼容: `run_shrinkage()` 保留，`run_shrinkage_layered()` 为 v1.3 新增
+//! - 向后兼容: `run_shrinkage()` 保留，`run_shrinkage_layered()` 新增
 
 use std::collections::HashMap;
 
@@ -352,7 +352,7 @@ pub fn run_shrinkage(categories: &mut [CategoryStats], shrink_config: &ShrinkCon
 }
 
 // =========================================================
-// v1.3 分层先验收缩
+// 分层先验收缩
 // =========================================================
 
 /// 收缩先验值包（五个先验指标聚合）。
@@ -481,7 +481,7 @@ pub fn compute_domain_prior(
     Some(prior)
 }
 
-/// 执行分层经验贝叶斯收缩管线（v1.3 新增）。
+/// 执行分层经验贝叶斯收缩管线。
 ///
 /// 流程:
 /// 1. 计算全局先验（来自所有分类）。
@@ -855,7 +855,7 @@ mod tests {
     }
 
     // =========================================================
-    // v1.3 分层先验收缩
+    // 分层先验收缩
     // =========================================================
 
     /// 构造测试用 CategoryStats。

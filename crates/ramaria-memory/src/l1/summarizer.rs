@@ -28,9 +28,9 @@ use crate::utils;
 /// 字段:
 /// - 所有字段均为 `Option`，以容忍 LLM 输出缺失字段。
 /// - 校验阶段再填充默认值，避免解析阶段 panic。
-/// - `situation_strength` 为 v1.1.2 新增字段，当前 LLM prompt 尚未包含此输出，
+/// - `situation_strength` 为新增字段，当前 LLM prompt 尚未包含此输出，
 ///   因此大部分情况下为 None（等效 3）。
-/// - `evidence_notes` 为 v1.3 新增字段，LLM 可能输出缺失或空数组，
+/// - `evidence_notes` 为新增字段，LLM 可能输出缺失或空数组，
 ///   校验失败时降级为 `Some(vec![])` 但不阻塞 L1 生成。
 #[derive(Debug, Deserialize)]
 struct L1SummaryResponse {
@@ -43,7 +43,7 @@ struct L1SummaryResponse {
     /// 情境强度 1-5，None 时按默认值 3 处理
     #[serde(default)]
     situation_strength: Option<i32>,
-    /// v1.3: 证据片段列表，缺失时降级为 Some(vec![])
+    /// 证据片段列表，缺失时降级为 Some(vec![])
     #[serde(default)]
     evidence_notes: Option<Vec<String>>,
 }
@@ -347,7 +347,7 @@ impl<'a> L1Summarizer<'a> {
     /// - `atmosphere`: 四字以内，超长截断
     /// - `valence`: 五档钳制到最近的合法值
     /// - `salience`: 五档钳制到最近的合法值
-    /// - `evidence_notes`: v1.3 新增，后处理校验（非空数组 + 每条 ≥ 5 字符），
+    /// - `evidence_notes`: 新增，后处理校验（非空数组 + 每条 ≥ 5 字符），
     ///   校验失败不阻塞 L1 生成，降级为空数组并记 warn 日志
     ///
     /// 返回:
@@ -417,7 +417,7 @@ impl<'a> L1Summarizer<'a> {
             );
         }
 
-        // evidence_notes: v1.3 后处理校验
+        // evidence_notes: 后处理校验
         // 规则：非空数组 + 每条 trim 后 ≥ 5 字符
         // 校验失败不阻塞 L1 生成，降级为空数组并记 warn 日志
         let evidence_notes = validate_evidence_notes(parsed.evidence_notes.clone(), session_id);
@@ -445,7 +445,7 @@ impl<'a> L1Summarizer<'a> {
 }
 
 // =========================================================
-// v1.3 evidence_notes 校验函数
+// evidence_notes 校验函数
 // =========================================================
 
 /// 校验 evidence_notes 字段。
@@ -493,7 +493,7 @@ fn validate_evidence_notes(raw: Option<Vec<String>>, session_id: Uuid) -> Vec<St
 /// 解析关键词字符串为 `(存储用的逗号分隔字符串, 标准化关键词列表)`。
 ///
 /// 如果输入为空或仅含空白字符，返回 `(None, vec![])`。
-/// v1.3: 返回 `Vec<KeywordToken>` 替代裸 `String`。
+/// 返回 `Vec<KeywordToken>` 替代裸 `String`。
 fn parse_keywords(raw: Option<&str>) -> (Option<String>, Vec<KeywordToken>) {
     let cleaned = raw.map(|s| s.trim()).filter(|s| !s.is_empty());
     match cleaned {
@@ -774,7 +774,7 @@ mod tests {
     }
 
     // =========================================================
-    // evidence_notes 校验测试（v1.3 新增）
+    // evidence_notes 校验测试
     // =========================================================
 
     #[test]

@@ -146,7 +146,7 @@ pub async fn run_phase_b_inference(
         );
     }
 
-    // ---- 1.5. v1.3 因果链特征提取（A8） ----
+    // ---- 1.5. 因果链特征提取（A8） ----
     let causal_text = match storage
         .list_event_relations_by_persona(&persona_owned)
         .await
@@ -179,7 +179,7 @@ pub async fn run_phase_b_inference(
         }
     };
 
-    // ---- 1.6. v1.3 动机维度统计文本（E 模块） ----
+    // ---- 1.6. 动机维度统计文本（E 模块） ----
     let motive_stats_text = if !stats.motive_stats.is_empty() {
         let text = format_motive_stats(&stats.motive_stats, 5);
         if !text.is_empty() {
@@ -374,7 +374,7 @@ pub async fn run_phase_b_inference(
 }
 
 // =========================================================
-// v1.3 分层先验收缩集成
+// 分层先验收缩集成
 // =========================================================
 
 /// 从已持久化的人格特质中构建分层先验提示映射。
@@ -559,7 +559,7 @@ async fn run_three_step_inference(
         parse_json_with_degrade(&step3_raw, "Step3", parse_inferred_traits)?;
 
     // 将 InferredTrait 转换为 PersonalityTrait
-    // v1.3 N3: 传入 stats 用于 LLM 未提供 confidence 时的动态校准
+    // 传入 stats 用于 LLM 未提供 confidence 时的动态校准
     let traits = convert_to_personality_traits(&inferred_traits, persona_uid, stats);
 
     Ok(InferenceResult {
@@ -766,7 +766,7 @@ fn parse_inferred_traits(raw: &str) -> Option<Vec<InferredTrait>> {
         related: Option<String>,
         #[serde(default)]
         seq: i32,
-        // v1.3 N3: LLM 推断置信度（0.0..1.0），None 表示 LLM 未提供
+        // LLM 推断置信度（0.0..1.0），None 表示 LLM 未提供
         #[serde(default)]
         confidence: Option<f64>,
     }
@@ -805,7 +805,7 @@ fn parse_inferred_traits(raw: &str) -> Option<Vec<InferredTrait>> {
 /// - 无法识别的 layer 默认归入 Accent。
 /// - id=0 表示由 DB 自动分配。
 ///
-/// v1.3 N3 修复：置信度/证据量/一致性不再硬编码 0.5/1.0/0.5。
+/// 置信度/证据量/一致性不再硬编码 0.5/1.0/0.5。
 /// - 优先使用 LLM 推断的 confidence 值。
 /// - 若 LLM 未提供 confidence，根据 trait_label 前缀匹配 stats 中
 ///   对应分类的 n_eff/valence_std/share_std 动态计算。
@@ -816,7 +816,7 @@ fn convert_to_personality_traits(
 ) -> Vec<PersonalityTrait> {
     let now = now_ms();
 
-    // v1.3 N3: 根据 n_eff 等统计指标动态计算 evidence/consistency/confidence
+    // 根据 n_eff 等统计指标动态计算 evidence/consistency/confidence
     let compute_evidence = |n_eff: f64| n_eff.clamp(0.0, 100.0);
     let compute_consistency = |valence_std: f64, share_std: f64| {
         let avg_std = (valence_std + share_std) / 2.0;
@@ -852,7 +852,7 @@ fn convert_to_personality_traits(
                 _ => TraitLayer::Accent,
             };
 
-            // v1.3 N3: 置信度优先取 LLM 的推断值，无则用统计指标计算
+            // 置信度优先取 LLM 的推断值，无则用统计指标计算
             let (confidence, evidence, consistency) = if let Some(llm_conf) = t.confidence {
                 // LLM 提供了置信度，用它；evidence/consistency 从 stats 匹配
                 let (ev, con) = find_stats_for_label(&t.trait_label)
@@ -992,7 +992,7 @@ pub async fn run_phase_c_update(
         trait_states.push((t.id, t.confidence, evidence));
     }
 
-    // ---- 3. 准备新事件数据（v1.3 T3 修复：按语义匹配度分配事件） ----
+    // ---- 3. 准备新事件数据（按语义匹配度分配事件） ----
     // 修复前：每个事件被无差别广播给所有 trait（相同 score），导致 E_total/C/conf 全相同。
     // 修复后：基于事件关键词与 trait 标签的文本重叠计算匹配度，
     // 仅将匹配度 > 阈值的事件分配给对应 trait，score = valence × relevance。
@@ -1015,12 +1015,12 @@ pub async fn run_phase_c_update(
             .collect();
 
         for (i, t) in active_traits.iter().enumerate() {
-            // v1.3 T3: 计算该事件与该 trait 的语义匹配度
+            // 计算该事件与该 trait 的语义匹配度
             // 同时匹配 trait_label（如"尽责"）和 meaning（如"对任务有强烈的完成意愿"）
             let relevance =
                 compute_event_trait_relevance(&event_keywords, &t.trait_label, &t.meaning);
 
-            // v1.3 T3: 所有事件均分配到所有 trait（floor 保证 relevance ≥ 0.3），
+            // 所有事件均分配到所有 trait（floor 保证 relevance ≥ 0.3），
             // 但 score = valence × relevance 使高匹配度的 trait 获得更强的证据权重。
             if relevance > 0.0 {
                 new_event_data_by_trait[i].push(event_data);
@@ -1246,7 +1246,7 @@ async fn detect_and_summarize_drift(
 }
 
 // =========================================================
-// v1.3 M5-A: 语义标签持久化与跨版本簇匹配
+// 语义标签持久化与跨版本簇匹配
 // =========================================================
 
 /// 从聚类结果中为每个簇生成语义标签。
@@ -1494,7 +1494,7 @@ pub async fn query_cross_version_matches(
 }
 
 // =========================================================
-// v1.3 T3: 事件-Trait 语义匹配度计算
+// 事件-Trait 语义匹配度计算
 // =========================================================
 
 /// 计算事件与性格 trait 的语义匹配度（0.0..1.0）。
@@ -1730,7 +1730,7 @@ mod tests {
         assert_eq!(traits[0].persona_uid, "user-0001");
         assert_eq!(traits[0].source, TraitSource::Inferred);
         assert_eq!(traits[0].status, TraitStatus::Active);
-        // v1.3 N3: 无匹配分类时回退到默认值 0.5
+        // 无匹配分类时回退到默认值 0.5
         assert_eq!(traits[0].confidence, 0.5);
 
         assert_eq!(traits[1].layer, TraitLayer::Primary);
@@ -2104,7 +2104,7 @@ mod tests {
     }
 
     // =========================================================
-    // v1.3 分层先验收缩集成
+    // 分层先验收缩集成
     // =========================================================
 
     /// 构造测试用 PersonalityTrait。
@@ -2215,7 +2215,7 @@ mod tests {
     }
 
     // =========================================================
-    // v1.3 T3: 语义匹配度测试
+    // 语义匹配度测试
     // =========================================================
 
     #[test]

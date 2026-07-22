@@ -611,7 +611,7 @@ impl StorageBackend for MockStorage {
     }
 
     // =========================================================
-    // Keyword Refs (v1.3 新增——Mock 空实现)
+    // Keyword Refs (Mock 空实现)
     // =========================================================
 
     async fn insert_keyword_ref(

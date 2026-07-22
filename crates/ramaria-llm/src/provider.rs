@@ -6,7 +6,7 @@
 //! - `build_messages`: 将 `ChatRequest` 组装为 OpenAI 兼容消息数组，含 Prompt Injection 防护
 //! - 三个 provider 通过组合 `ProviderBase` + keychain 实现 `LlmProvider` trait
 //!
-//! Prompt Injection 防护 (v1.3 S-3):
+//! Prompt Injection 防护：
 //! - memory_context 以 `<memory_context>` XML 标签包裹，与系统指令明确分隔
 //! - 用户消息含已知注入模式时追加防御性前缀，提示 LLM 区分系统指令与用户输入
 //! - 注入模式检测保守：仅匹配 10 种英文常见指令覆盖模式，不干扰正常对话
@@ -564,7 +564,7 @@ const INJECTION_PATTERNS: &[&str] = &[
 /// 2. `history` 中的消息按序映射 role
 /// 3. `user` 消息 = 经过注入检测的 `user_message`
 ///
-/// Prompt Injection 防护 (v1.3 S-3):
+/// Prompt Injection 防护：
 /// - `memory_context` 以 `<memory_context>` XML 标签包裹，与系统核心指令明确分隔。
 /// - 用户消息含已知注入模式时追加防御性前缀，提示 LLM 保持角色边界。
 ///
@@ -754,7 +754,7 @@ mod tests {
         let messages = build_messages(&request);
         let system_content = messages[0]["content"].as_str().unwrap();
         assert!(system_content.contains("你是一个助手"));
-        // v1.3 S-3: memory_context 以 XML 标签包裹
+        // memory_context 以 XML 标签包裹
         assert!(system_content.contains("<memory_context>"));
         assert!(system_content.contains("</memory_context>"));
         assert!(system_content.contains("用户喜欢猫"));
@@ -807,7 +807,7 @@ mod tests {
         assert_eq!(messages[3]["content"], "谢谢");
     }
 
-    // ---- Prompt Injection 防护测试 (v1.3 S-3) ----
+    // ---- Prompt Injection 防护测试 ----
 
     #[test]
     fn sanitize_normal_message_passes_through() {

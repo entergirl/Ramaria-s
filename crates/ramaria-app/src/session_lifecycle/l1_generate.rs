@@ -3,7 +3,7 @@
 //! 设计特点:
 //! - 实现 `SessionLifecycle` 的 L1 摘要生成、手动重试、批量无级联生成
 //! - `generate_l1_summary` 通过 JobManager 包裹执行，含指数退避重试
-//! - `index_l1_into_retriever` 在 L1 生成后增量更新内存检索索引（v1.2 新增）
+//! - `index_l1_into_retriever` 在 L1 生成后增量更新内存检索索引
 //! - `regenerate_l1_no_cascade` 支持幂等性检查：已有目标 persona_uid 的 L1 则跳过
 //! - `close_session_safe` 安全关闭 session（防已关闭重复操作）
 //! - `summarize_with_summarizer` 作为 JobManager 闭包的适配器
@@ -68,7 +68,7 @@ impl SessionLifecycle {
         {
             Ok(l1) => {
                 info!(%session_id, l1_id = %l1.id, "L1 重试成功");
-                // v1.2: 增量更新 Retriever 索引
+                // 增量更新 Retriever 索引
                 self.index_l1_into_retriever(&l1);
                 // 触发 L2 检查（路径 A）
                 self.check_l2_trigger(storage, llm).await;
@@ -83,7 +83,7 @@ impl SessionLifecycle {
 
     /// 生成 L1 摘要但不触发 L2 级联（用于批量导入场景，全部 L1 完成后统一触发）。
     ///
-    /// 幂等性（v1.2）:
+    /// 幂等性：
     /// - 若 session 已有目标 persona_uid 的 L1 摘要 → 跳过生成（避免重复 LLM 调用）。
     /// - 若仅有 NULL-persona_uid 的旧摘要 → 删除后重新生成。
     /// - 若无任何摘要 → 直接生成。
@@ -106,7 +106,7 @@ impl SessionLifecycle {
             return Ok(None);
         }
 
-        // v1.2: 检查是否已存在目标 persona_uid 的 L1 摘要（幂等——避免重复 LLM 调用）
+        // 检查是否已存在目标 persona_uid 的 L1 摘要（幂等——避免重复 LLM 调用）
         if let Some(target_uid) = persona_uid {
             let existing = storage.list_memory_l1(session_id).await?;
             let already_has = existing
@@ -129,7 +129,7 @@ impl SessionLifecycle {
             }
         }
 
-        // v1.2: 删除旧 NULL-persona_uid L1 摘要，再做生成
+        // 删除旧 NULL-persona_uid L1 摘要，再做生成
         let deleted = storage.delete_memory_l1_by_session(session_id).await?;
         if deleted > 0 {
             info!(%session_id, deleted, "已清理旧 NULL-persona_uid L1 摘要");
@@ -150,7 +150,7 @@ impl SessionLifecycle {
         {
             Ok(l1) => {
                 info!(%session_id, l1_id = %l1.id, "L1 生成成功（无级联）");
-                // v1.2: 增量更新 Retriever 索引（批量导入场景每批次一个 session）
+                // 增量更新 Retriever 索引（批量导入场景每批次一个 session）
                 self.index_l1_into_retriever(&l1);
                 Ok(Some(l1))
             }
@@ -190,7 +190,7 @@ impl SessionLifecycle {
         if let Some(uid) = persona_uid {
             summarizer_config.persona_uid = Some(uid.to_string());
         }
-        // v1.3 D9 修复：导入场景覆盖对话前缀，避免"用户/助手"称呼污染摘要
+        // 导入场景覆盖对话前缀，避免"用户/助手"称呼污染摘要
         if let Some(prefix) = user_prefix {
             summarizer_config.user_prefix = prefix.to_string();
         }
@@ -223,7 +223,7 @@ impl SessionLifecycle {
         }
     }
 
-    /// v1.2: 将 L1 摘要增量添加到 Retriever 内存索引。
+    /// 将 L1 摘要增量添加到 Retriever 内存索引。
     ///
     /// 职责:
     /// - 在 L1 摘要生成成功后立即调用，使新 L1 文档无需等待手动 `rebuild_retriever`
@@ -245,7 +245,7 @@ impl SessionLifecycle {
             }
         };
         if let Some(ref retriever_arc) = *ret_guard {
-            // v1.3 P-3: RwLock write() 用于索引写入（index_l1_record 需要 &mut self）
+            // RwLock write() 用于索引写入（index_l1_record 需要 &mut self）
             match retriever_arc.write() {
                 Ok(mut retriever) => {
                     if let Err(e) = retriever.index_l1_record(l1) {
@@ -385,7 +385,7 @@ mod tests {
 
         lifecycle.index_l1_into_retriever(&l1);
 
-        // 验证 retriever 中已有文档（v1.3 P-3: read() 即可，doc_count 为只读）
+        // 验证 retriever 中已有文档（read() 即可，doc_count 为只读）
         let guard = retriever.read().unwrap();
         assert_eq!(guard.doc_count(), 1);
     }
@@ -418,7 +418,7 @@ mod tests {
 
         lifecycle.index_l1_into_retriever(&l1);
 
-        // 立即检索，应能命中（v1.3 P-3: read() 即可，search 为 &self）
+        // 立即检索，应能命中（read() 即可，search 为 &self）
         let guard = retriever.read().unwrap();
         let req = ramaria_memory::SearchRequest {
             query: "Rust".to_string(),

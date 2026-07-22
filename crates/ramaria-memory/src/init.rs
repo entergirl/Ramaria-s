@@ -24,7 +24,7 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 // =========================================================
-// v1.3 T4: 共享社交平台聊天口吻模板
+// 共享社交平台聊天口吻模板
 // =========================================================
 
 /// 共享的社交平台聊天口吻（所有 persona 的默认回复规则）。
@@ -594,9 +594,7 @@ fn parse_trait_layer(layer: &str) -> TraitLayer {
 
 /// 统计某个 persona 的 facts 总数量。
 ///
-/// v1.3 P-4 修复:
 /// - 使用 `StorageBackend::count_all_facts_for_persona` 的 GROUP BY 查询。
-/// - 替代 v1.2 的 N+1 循环（每个 ProfileField 各发一次 DB 查询）。
 /// - 对不支持 GROUP BY 的非 SQL 后端，trait 默认实现自动降级为逐字段查询。
 async fn count_facts_for_persona(
     storage: &dyn StorageBackend,

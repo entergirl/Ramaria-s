@@ -6,7 +6,6 @@
 //! - 纯函数设计：不依赖 DB 或 LLM，输入 MemoryEvent + EventRelation 即可运算
 //! - 因果链特征以结构化文本注入 Phase B Step 1 Prompt
 //! - 无 CausedBy 关系时返回空特征，不阻塞管线
-//! - v1.3 范围：仅链长度 + 循环模式（时延和情绪走势延后 v1.4）
 
 use ramaria_core::types::{EventRelation, EventRelationKind, MemoryEvent};
 use std::collections::{HashMap, HashSet};

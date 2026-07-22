@@ -85,7 +85,7 @@ var RamariaRouter = (function () {
     var _lastNavView = 'chat';
 
     /**
-     * ★ v1.2 M5-B: 最近一次 showView 调用时传入的 options。
+     * 最近一次 showView 调用时传入的 options。
      * 视图模块（chat/memory 等）可通过 getLastOptions() 获取。
      * 用于支持跨视图参数传递（如 sessionId、personaUid、fromView）。
      */
@@ -158,7 +158,7 @@ var RamariaRouter = (function () {
 
         options = options || {};
 
- // ★ v1.2 M5-B: 保存 options 供视图 enter 钩子使用
+ // 保存 options 供视图 enter 钩子使用
         _lastOptions = options;
 
  // 1. 旧视图 leave 钩子
@@ -298,7 +298,7 @@ var RamariaRouter = (function () {
         var hooks = _hooks[viewName] && _hooks[viewName][phase];
         if (!hooks || hooks.length === 0) return;
 
-        // ★ v1.2 M5-B: enter 钩子接收 _lastOptions 作为第二个参数
+        // enter 钩子接收 _lastOptions 作为第二个参数
         // leave 钩子不传 options（旧视图不应感知新视图的参数）
         var hookOptions = (phase === 'enter') ? _lastOptions : undefined;
 
@@ -598,7 +598,7 @@ var RamariaRouter = (function () {
         getLastNavView: function () { return _lastNavView; },
 
         /**
-         * ★ v1.2 M5-B: 获取最近一次 showView 调用传入的 options。
+         * 获取最近一次 showView 调用传入的 options。
          * 视图模块用于读取跨视图传递的参数（如 sessionId、personaUid、fromView）。
          *
          * 返回:

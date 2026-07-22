@@ -73,7 +73,6 @@ pub struct DimensionDriftResult {
 /// - 封装一个事件分类的完整漂移检测输出。
 /// - 任一维度显著漂移时 `needs_review=true`。
 ///
-/// v1.3 M5-B 新增:
 /// - salience_drift: salience 维度漂移检测结果。
 /// - confidence_drift: confidence 维度漂移检测结果。
 #[derive(Debug, Clone)]
@@ -84,9 +83,9 @@ pub struct CategoryDriftResult {
     pub valence_drift: DimensionDriftResult,
     /// share 维度结果
     pub share_drift: DimensionDriftResult,
-    /// v1.3: salience 维度结果
+    /// salience 维度结果
     pub salience_drift: DimensionDriftResult,
-    /// v1.3: confidence 维度结果
+    /// confidence 维度结果
     pub confidence_drift: DimensionDriftResult,
     /// 是否需要重审（任维度显著漂移）
     pub needs_review: bool,
@@ -335,7 +334,6 @@ pub fn detect_dimension_drift(
 
 /// 单个分类的事件数据（用于漂移检测）。
 ///
-/// v1.3 M5-B 新增:
 /// - old_confidences / new_confidences: confidence 维度漂移检测。
 #[derive(Debug, Clone)]
 pub struct CategoryEventData {
@@ -347,7 +345,7 @@ pub struct CategoryEventData {
     pub old_shares: Vec<f64>,
     /// 旧事件 salience 值
     pub old_saliences: Vec<f64>,
-    /// v1.3: 旧事件 confidence 值
+    /// 旧事件 confidence 值
     pub old_confidences: Vec<f64>,
     /// 新事件 valence 值
     pub new_valences: Vec<f64>,
@@ -355,7 +353,7 @@ pub struct CategoryEventData {
     pub new_shares: Vec<f64>,
     /// 新事件 salience 值
     pub new_saliences: Vec<f64>,
-    /// v1.3: 新事件 confidence 值
+    /// 新事件 confidence 值
     pub new_confidences: Vec<f64>,
 }
 
@@ -640,7 +638,7 @@ mod tests {
         assert!(summary.any_drift);
     }
 
-    // ---- v1.3 M5-B: 新增 drift 维度 ----
+    // ---- 新增 drift 维度 ----
 
     #[test]
     fn category_drift_salience_dimension() {

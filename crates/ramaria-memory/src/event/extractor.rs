@@ -2,10 +2,10 @@
 //!
 //! 设计特点:
 //! - 依赖注入: 通过 `&dyn LlmProvider` + `&dyn StorageBackend` 解耦具体实现
-//! - v1.3: 使用 `TopicBatcher` 语义聚类替代旧 `chat_partners + take(20)` 分批策略
-//! - v1.3 M3-A: 通过可选的 `Retriever` 引用启用 CompositeIndex 补充上下文检索
-//! - v1.3 M3-B: Prompt 新增 motives（底层动机）+ relations（事件关系）输出
-//! - v1.3 M3-C: 激活 motives 字段写入 + event_relations 表写入
+//! - 使用 `TopicBatcher` 语义聚类替代旧 `chat_partners + take(20)` 分批策略
+//! - 通过可选的 `Retriever` 引用启用 CompositeIndex 补充上下文检索
+//! - Prompt 新增 motives（底层动机）+ relations（事件关系）输出
+//! - 激活 motives 字段写入 + event_relations 表写入
 //! - 触发条件: 未吸收 L1 ≥ 5 条 或 最早未吸收 L1 ≥ 7 天
 //! - TopicBatcher 将未吸收 L1 聚类为 TopicCluster，每簇独立调用 LLM 提取事件
 //! - 降级兜底: JSON 解析失败 → 退化为 confidence=0.5 混合事件
@@ -46,7 +46,7 @@ const MS_PER_DAY: f64 = utils::MS_PER_DAY;
 /// 说明:
 /// - 所有字段为 `Option`，容忍 LLM 输出缺失字段。
 /// - 校验阶段填充默认值。
-/// - v1.3: 新增 `motives` 字段（底层动机标签列表）。
+/// - 新增 `motives` 字段（底层动机标签列表）。
 #[derive(Debug, Deserialize)]
 struct ExtractedEventJson {
     title: Option<String>,
@@ -59,12 +59,12 @@ struct ExtractedEventJson {
     presentation: Option<String>,
     share: Option<f64>,
     attitude: Option<String>,
-    /// v1.3 M3: 底层动机标签列表，如 ["地位维护", "自主性"]
+    /// 底层动机标签列表，如 ["地位维护", "自主性"]
     #[serde(default)]
     motives: Option<Vec<String>>,
 }
 
-/// v1.3 M3: LLM 返回的事件关系。
+/// LLM 返回的事件关系。
 ///
 /// 字段约定:
 /// - `from_index` / `to_index`: 引用 events 数组中的事件索引（从 0 开始）。
@@ -87,7 +87,7 @@ fn default_relation_weight() -> f64 {
     0.5
 }
 
-/// v1.3 M3: LLM 返回的完整提取结果（events + relations）。
+/// LLM 返回的完整提取结果（events + relations）。
 ///
 /// 字段约定:
 /// - `events` 为必填字段（无 `#[serde(default)]`），用于区分新格式与旧格式单事件对象。
@@ -103,7 +103,7 @@ struct EventExtractionResponse {
 /// LLM 返回的顶层结构：支持新旧两种格式。
 ///
 /// 解析策略:
-/// 1. 尝试解析为 `EventExtractionResponse`（v1.3 新格式: {"events": [...], "relations": [...]}）
+/// 1. 尝试解析为 `EventExtractionResponse`（新格式: {"events": [...], "relations": [...]}）
 /// 2. 尝试解析为 `Vec<ExtractedEventJson>` 数组（旧格式: [...]）
 /// 3. 尝试解析为单对象 `ExtractedEventJson`，包装为单元素数组
 /// 4. 失败 → 触发降级
@@ -149,9 +149,9 @@ pub struct EventExtractorConfig {
     pub degrade: DegradeConfig,
     /// Paraphrase 配置
     pub paraphrase: ParaphraseConfig,
-    /// v1.3 M3: CompositeIndex 补充上下文检索配置
+    /// CompositeIndex 补充上下文检索配置
     pub context_retriever: ContextRetrieverConfig,
-    /// v1.3 T2: 对话另一方的名称（用于双向对话场景的角色区分）。
+    /// 对话另一方的名称（用于双向对话场景的角色区分）。
     /// `None` 表示未知或单方对话场景。
     pub other_persona_name: Option<String>,
     /// 簇间 LLM 请求间隔（毫秒），用于避免触发远程 API 速率限制。
@@ -188,30 +188,30 @@ impl Default for EventExtractorConfig {
 /// - 调用 LLM 提取结构化事件。
 /// - 处理降级、paraphrase 生成、写回存储。
 ///
-/// v1.3 M3:
+///
 /// - 可选的 `Retriever` 引用启用 CompositeIndex 补充上下文检索。
 ///   设置后，每个 TopicCluster 在 LLM 调用前自动检索历史相关 L1/L2。
 ///
 /// 用法:
 /// ```ignore
 /// let mut extractor = EventExtractor::new(&llm, &storage, config);
-/// extractor.set_retriever(&retriever);  // v1.3 M3: 启用上下文检索
+/// extractor.set_retriever(&retriever);  // 启用上下文检索
 /// let events = extractor.extract_events("user-0001").await?;
 /// ```
 pub struct EventExtractor<'a> {
     config: EventExtractorConfig,
     llm: &'a dyn LlmProviderTrait,
     storage: &'a dyn StorageBackend,
-    /// v1.3: 主题批量构建器，持有跨批次 Pending Buffer 状态
+    /// 主题批量构建器，持有跨批次 Pending Buffer 状态
     batcher: TopicBatcher,
-    /// v1.3 M3: 可选的三通道检索器引用，用于 CompositeIndex 补充上下文
+    /// 可选的三通道检索器引用，用于 CompositeIndex 补充上下文
     retriever: Option<&'a Retriever>,
 }
 
 impl<'a> EventExtractor<'a> {
     /// 创建新的事件提取器。
     ///
-    /// v1.3: 自动创建 TopicBatcher，配置从 EventExtractorConfig 派生。
+    /// 自动创建 TopicBatcher，配置从 EventExtractorConfig 派生。
     pub fn new(
         llm: &'a dyn LlmProviderTrait,
         storage: &'a dyn StorageBackend,
@@ -228,10 +228,10 @@ impl<'a> EventExtractor<'a> {
         }
     }
 
-    /// v1.3 M3: 设置 Retriever 引用，启用 CompositeIndex 补充上下文检索。
+    /// 设置 Retriever 引用，启用 CompositeIndex 补充上下文检索。
     ///
     /// 说明:
-    /// - 不设置时（默认），事件提取无历史上下文注入，行为与 v1.2 一致。
+    /// - 不设置时（默认），事件提取无历史上下文注入。
     /// - 设置后，每个 TopicCluster 在 LLM 调用前自动检索相关历史 L1/L2
     ///   并注入 Prompt 的"补充背景"段落。
     pub fn set_retriever(&mut self, retriever: &'a Retriever) {
@@ -287,7 +287,7 @@ impl<'a> EventExtractor<'a> {
             return Ok(vec![]);
         }
 
-        // 3. v1.3: 转换为 L1Item 并通过 TopicBatcher 语义聚类
+        // 3. 转换为 L1Item 并通过 TopicBatcher 语义聚类
         let l1_items: Vec<L1Item> = l1_list.iter().map(L1Item::from).collect();
         let now = now_ms();
         let (clusters, _expired) = self.batcher.build_clusters(l1_items, now);
@@ -297,7 +297,7 @@ impl<'a> EventExtractor<'a> {
             return Ok(vec![]);
         }
 
-        // v1.3 D9: 查询 persona 显示名称，用于 Prompt 中替换"用户"
+        // 查询 persona 显示名称，用于 Prompt 中替换"用户"
         let persona_name = self
             .storage
             .get_persona_by_uid(persona_uid)
@@ -332,7 +332,7 @@ impl<'a> EventExtractor<'a> {
             // 格式化簇内 L1
             let formatted = Self::format_l1_from_cluster(cluster);
 
-            // v1.3 M3: CompositeIndex 补充上下文检索
+            // CompositeIndex 补充上下文检索
             let context_docs = if let Some(retriever) = self.retriever {
                 let ctx_retriever =
                     ContextRetriever::new(retriever, self.config.context_retriever.clone());
@@ -342,8 +342,8 @@ impl<'a> EventExtractor<'a> {
             };
 
             // 构建 Prompt（带或不带补充上下文）
-            // v1.3 D9: 使用 persona 实际名称替代"用户"
-            // v1.3 T2: 注入对话另一方角色提示
+            // 使用 persona 实际名称替代"用户"
+            // 注入对话另一方角色提示
             let other_name = self.config.other_persona_name.as_deref();
             let prompt = if context_docs.is_empty() {
                 build_event_extraction_prompt_for_persona(&formatted, &persona_name, other_name)
@@ -490,7 +490,7 @@ impl<'a> EventExtractor<'a> {
                 }
             }
 
-            // v1.3 M3-C: 写入事件关系（T-EVT-002 激活）
+            // 写入事件关系
             if let Some(ref rels) = relations
                 && !rels.is_empty()
                 && cluster_event_ids.len() >= 2
@@ -624,7 +624,7 @@ impl<'a> EventExtractor<'a> {
         Ok(false)
     }
 
-    /// v1.3 M3-C: 将 LLM 返回的事件关系写入 event_relations 表。
+    /// 将 LLM 返回的事件关系写入 event_relations 表。
     ///
     /// 参数:
     /// - `rels`: LLM 输出的关系列表（from_index/to_index 引用 events 数组索引）。
@@ -703,7 +703,7 @@ impl<'a> EventExtractor<'a> {
         saved_count
     }
 
-    /// v1.3: 从 TopicCluster 格式化 L1 摘要列表。
+    /// 从 TopicCluster 格式化 L1 摘要列表。
     ///
     /// 格式:
     /// ```text
@@ -731,7 +731,7 @@ impl<'a> EventExtractor<'a> {
     /// 2. 剥离 `<think>...</think>` 标签后重试
     /// 3. 正则提取 JSON 数组/对象
     ///
-    /// v1.3: 返回 `ParsedExtractionResult`，包含 events 和可选的 relations。
+    /// 返回 `ParsedExtractionResult`，包含 events 和可选的 relations。
     fn parse_event_response(raw: &str) -> RamariaResult<ParsedExtractionResult> {
         // 步骤 1: 直接解析
         if let Ok(response) = serde_json::from_str::<EventResponse>(raw) {
@@ -753,7 +753,7 @@ impl<'a> EventExtractor<'a> {
             return response.into_result();
         }
 
-        // 步骤 3b: v1.3 M3 —— LLM 可能返回完整的 JSON 对象（含 events/relations），
+        // 步骤 3b: LLM 可能返回完整的 JSON 对象（含 events/relations），
         // 而 extract_first_json_array 仅提取数组。尝试正则提取 JSON 对象 {...}。
         if let Some(obj_str) = utils::extract_first_json_object(raw)
             && let Ok(response) = serde_json::from_str::<EventResponse>(&obj_str)
@@ -769,7 +769,7 @@ impl<'a> EventExtractor<'a> {
 
     /// 从 ExtractedEventJson 构建 MemoryEvent。
     ///
-    /// v1.3 M3: motives 从 JSON 提取，过滤空字符串后以逗号分隔存储。
+    /// motives 从 JSON 提取，过滤空字符串后以逗号分隔存储。
     ///
     /// 参数:
     /// - `situation_strength`: 从源 L1 传播的情境强度（1-5），
@@ -838,7 +838,7 @@ impl<'a> EventExtractor<'a> {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
 
-        // v1.3 M3: 提取 motives → 过滤空串 → 逗号分隔存储
+        // 提取 motives → 过滤空串 → 逗号分隔存储
         let motives = json.motives.and_then(|m| {
             let filtered: Vec<&str> = m
                 .iter()
@@ -887,7 +887,7 @@ impl EventResponse {
     /// 将 `EventResponse` 转为统一的 `ParsedExtractionResult`。
     ///
     /// 处理四种 LLM 返回形式:
-    /// 1. v1.3 新格式: `{"events": [...], "relations": [...]}` → Object
+    /// 1. 新格式: `{"events": [...], "relations": [...]}` → Object
     /// 2. 旧格式: JSON 数组 `[...]` → Array
     /// 3. 单个对象 → 包装为单元素事件列表
     /// 4. 嵌套数组（罕见）→ 二次解包
@@ -934,7 +934,7 @@ fn parse_presentation(s: Option<&str>) -> Presentation {
     }
 }
 
-/// v1.3 M3: 将 LLM 输出的关系类型字符串解析为 `EventRelationKind`。
+/// 将 LLM 输出的关系类型字符串解析为 `EventRelationKind`。
 ///
 /// 说明:
 /// - 六种标准关系类型：CausedBy/PartOf/RelatedTo/ContinuedBy/Contradicts/Timeline
@@ -970,7 +970,7 @@ mod tests {
     use ramaria_core::types::now_ms;
     use uuid::Uuid;
 
-    // ---- format_l1_from_cluster (v1.3) ----
+    // ---- format_l1_from_cluster ----
 
     #[test]
     fn format_single_l1_from_cluster() {
@@ -1066,7 +1066,7 @@ mod tests {
         assert!(EventExtractor::parse_event_response(raw).is_err());
     }
 
-    // ---- v1.3 M3: 新格式解析 ----
+    // ---- 新格式解析 ----
 
     #[test]
     fn parse_v13_format_with_events_and_relations() {

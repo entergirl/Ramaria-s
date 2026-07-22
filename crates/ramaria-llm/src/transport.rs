@@ -9,7 +9,7 @@
 //! - 非流式请求（`stream: false`）直接解析完整 JSON 响应
 //! - 所有 HTTP 错误保留 status code 和响应体前 500 字符，便于诊断
 //! - 不记录 API key 或完整消息内容
-//! - v1.3: SSE 单行 > 10KB 截断并 warn；流式整体 120s 超时保护
+//! - SSE 单行 > 10KB 截断并 warn；流式整体 120s 超时保护
 
 use bytes::BytesMut;
 use futures::Stream;
@@ -213,8 +213,8 @@ impl OpenAiTransport {
     /// - 流中解析错误 → 流内的 `RamariaResult::Err`（不中断流）。
     ///
     /// 实现:
-    /// - v1.3 (P-5): 使用 `mpsc::channel(64)` 有界通道替代 unbounded，背压保护。
-    /// - v1.3 (P-8): `sse_read_loop` 内含 120s 整体超时保护。
+    /// - 使用 `mpsc::channel(64)` 有界通道替代 unbounded，背压保护。
+    /// - `sse_read_loop` 内含 120s 整体超时保护。
     /// - 后台任务逐块从 `bytes_stream` 读取、拼接不完整行、逐行解析 SSE。
     /// - 当接收端丢弃 stream 时，后台任务自动退出（`tx.send` 返回错误）。
     pub async fn chat_stream(
@@ -243,7 +243,7 @@ impl OpenAiTransport {
 
         // 真正流式：使用 bytes_stream 逐块读取
         let byte_stream = response.bytes_stream();
-        // v1.3 (P-5): 有界 channel，容量 64，满时 send 返回错误自然降级
+        // 有界 channel，容量 64，满时 send 返回错误自然降级
         let (tx, rx) = mpsc::channel::<RamariaResult<StreamDelta>>(64);
 
         tokio::spawn(async move {
@@ -311,7 +311,7 @@ const SSE_STREAM_TIMEOUT_SECS: u64 = 120;
 // SSE 读取循环（后台 tokio 任务）
 // =========================================================
 
-/// v1.3 (P-5): 使用 `mpsc::Sender`（有界 channel）替代 `UnboundedSender`。
+/// 使用 `mpsc::Sender`（有界 channel）替代 `UnboundedSender`。
 /// 使用 `try_send` 非阻塞发送，满时丢弃并记 warn（避免阻塞 SSE 读取线程）。
 ///
 /// 设计:
@@ -319,8 +319,8 @@ const SSE_STREAM_TIMEOUT_SECS: u64 = 120;
 /// - 遇到 `\n` 时切割一行，调用 `parse_sse_line` 解析。
 /// - `data: [DONE]` 时发送 `done=true` 的 Delta 后退出。
 /// - 接收端 drop stream 时 `tx.try_send` 返回 Disconnected 错误，此时静默退出。
-/// - v1.3 (P-7): 单行 > `SSE_MAX_LINE_BYTES` 时截断并记 warn。
-/// - v1.3 (P-8): 整体 120s 超时保护，超时发送错误事件。
+/// - 单行 > `SSE_MAX_LINE_BYTES` 时截断并记 warn。
+/// - 整体 120s 超时保护，超时发送错误事件。
 ///
 /// 参数:
 /// - `byte_stream`: HTTP 响应体字节流。
@@ -371,9 +371,9 @@ async fn sse_read_loop_inner(
 /// - 使用 `BytesMut` 缓冲区拼接跨 chunk 的不完整行。
 /// - 逐行调用 `parse_sse_line` 解析 SSE 格式。
 /// - P-7: 单行 > `SSE_MAX_LINE_BYTES` 时截断并 warn。
-/// - v1.3 (P-5): 使用 `try_send` 非阻塞发送，满时丢弃 delta 并记 warn。
+/// - 使用 `try_send` 非阻塞发送，满时丢弃 delta 并记 warn。
 ///
-/// v1.3 (P-5): `try_send` 需要 `&mut self`，因此 `tx` 声明为 `&mut mpsc::Sender`。
+/// `try_send` 需要 `&mut self`，因此 `tx` 声明为 `&mut mpsc::Sender`。
 async fn sse_read_core(
     byte_stream: impl Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
     tx: &mut mpsc::Sender<RamariaResult<StreamDelta>>,

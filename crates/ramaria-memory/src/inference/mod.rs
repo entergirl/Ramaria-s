@@ -1,13 +1,13 @@
 //! rust/crates/ramaria-memory/src/inference/mod.rs - L2→L3 性格推断管线模块
 //!
 //! 设计特点:
-//! - (纯数值): stats.rs 统计特征（v1.3 校准权重链）、clustering.rs 态度聚类、shrink.rs 贝叶斯收缩
+//! - (纯数值): stats.rs 统计特征（校准权重链）、clustering.rs 态度聚类、shrink.rs 贝叶斯收缩
 //! - (LLM 推断): inferrer.rs 三步结构化推断 + mock + 后处理
 //! - (增量更新): drift.rs Wasserstein 漂移检测、confidence.rs 证据累计置信度
 //! - 编排层: orchestrator.rs Phase B/C 异步编排 + 降级 + 持久化
 //! - 全量校准: calibration.rs 累积 10 轮触发 + 全量差异对比
 //! - 超参数锁定: HDBSCAN min_cluster_size=3, UMAP n_components=12, 置换检验 B=1000
-//! - v1.3 新增: AdmissionTrack 三轨准入、CalibratedWeightConfig 校准权重链、EventEnrichment 增强数据
+//! - AdmissionTrack 三轨准入、CalibratedWeightConfig 校准权重链、EventEnrichment 增强数据
 
 pub mod calibration;
 pub mod causal;

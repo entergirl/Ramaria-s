@@ -203,7 +203,7 @@ async fn build_structured_prompt(
 
     let mut prompt = assemble_prompt(&ctx, &config);
 
-    // v1.3 T4: 注入共享社交平台聊天口吻（所有 persona 默认使用）
+    // 注入共享社交平台聊天口吻（所有 persona 默认使用）
     // rama-0001 的 persona.toml 中已有 E_rules，但导入创建的 persona 缺少此配置。
     // 此处为所有通过 5-Block 路径装配的 persona 注入默认回复规则，
     // 确保所有应用内人格使用统一的社交平台聊天口吻。
@@ -214,7 +214,7 @@ async fn build_structured_prompt(
     prompt
 }
 
-/// v1.3 T4: 解析当前 persona 的聊天回复风格规则。
+/// 解析当前 persona 的聊天回复风格规则。
 ///
 /// 优先级:
 /// 1. 若 persona.config 中包含 `E_rules` 块 → 使用自定义规则。
@@ -292,7 +292,7 @@ fn load_persona_toml_fallback(db_config: Option<&str>) -> Option<String> {
         .find(|(k, _)| k == "E_rules")
         .map(|(_, v)| v.as_str())
         .filter(|s| !s.trim().is_empty())
-        // v1.3 T4: 无自定义 E_rules 时使用共享社交平台口吻
+        // 无自定义 E_rules 时使用共享社交平台口吻
         .unwrap_or(SHARED_CHAT_STYLE_RULES);
 
     let name = &parsed.assistant_name;

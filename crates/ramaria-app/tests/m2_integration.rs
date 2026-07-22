@@ -124,7 +124,7 @@ async fn full_10_stage_pipeline_succeeds() {
     // Stage 3: session 已创建
     let session = output.session.as_ref().expect("session should be set");
     assert!(session.ended_at.is_none());
-    // v1.2: session 应绑定 persona_uid
+    // session 应绑定 persona_uid
     assert_eq!(session.persona_uid.as_deref(), Some("rama-0001"));
 
     // Stage 6: system_prompt 已装配
@@ -200,7 +200,7 @@ async fn pipeline_forwards_llm_stream_correctly() {
     assert_eq!(delta_count, 5);
 }
 
-/// 验证用户消息携带 persona_uid（v1.2 Session-Persona 绑定）。
+/// 验证用户消息携带 persona_uid。
 #[tokio::test]
 async fn user_message_has_persona_uid() {
     let storage = Arc::new(MockStorage::new());
@@ -229,7 +229,7 @@ async fn user_message_has_persona_uid() {
         .find(|m| m.role == MessageRole::User)
         .expect("user message should exist");
 
-    // v1.2: 用户消息应携带 persona_uid
+    // 用户消息应携带 persona_uid
     assert_eq!(
         user_msg.persona_uid.as_deref(),
         Some("char-0001"),

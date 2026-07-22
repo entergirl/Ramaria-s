@@ -132,7 +132,7 @@ pub fn compute_e_total(
         .sum()
 }
 
-/// v1.3: 使用校准权重链计算 E_total。
+/// 使用校准权重链计算 E_total。
 ///
 /// 每条证据的贡献 = `calibrated_weight × |score| × decay_weight`。
 /// 与 `compute_e_total` 的区别：额外乘以校准权重 `calibrated_weight`，
@@ -226,7 +226,7 @@ pub fn compute_consistency(
     (raw_consistency + 1.0) / 2.0
 }
 
-/// v1.3: 使用校准权重链计算一致度 C。
+/// 使用校准权重链计算一致度 C。
 ///
 /// 与 `compute_consistency` 的区别：一致性加权计算中每条证据的权重 = `calibrated_weight × decay_w`，
 /// 而非仅 `decay_w`。使得高重要性事件对一致性的影响与其证据量匹配。
@@ -381,7 +381,7 @@ pub fn update_trait_confidence(
     }
 }
 
-/// v1.3: 旧 trait 状态的输入包，用于校准权重链置信度更新。
+/// 旧 trait 状态的输入包，用于校准权重链置信度更新。
 ///
 /// 将旧证据和校准权重捆绑为单一参数，
 /// 避免 `update_trait_confidence_calibrated` 参数过多。
@@ -397,7 +397,7 @@ pub struct OldTraitState {
     pub old_calibrated_weights: Vec<f64>,
 }
 
-/// v1.3: 使用校准权重链的单条 trait 置信度更新。
+/// 使用校准权重链的单条 trait 置信度更新。
 ///
 /// 与 `update_trait_confidence` 的区别：使用校准权重 `calibrated_weights`
 /// 替代原始证据 score 强度，使 E_total 和一致度 C 的计算反映事件实际重要性。
@@ -779,7 +779,7 @@ mod tests {
         }
     }
 
-    // ---- v1.3 M5-B: 校准权重链版本 ----
+    // ---- 校准权重链版本 ----
 
     #[test]
     fn compute_e_total_calibrated_basic() {

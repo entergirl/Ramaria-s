@@ -3,7 +3,7 @@
 //! 设计特点:
 //! - 管理对话会话生命周期：创建、关闭、查询、删除
 //! - id 使用 UUID v4（TEXT 主键），时间字段为 Unix 毫秒
-//! - v1.2: 新增 persona_uid 字段，支持 Session-Persona 绑定
+//! - 新增 persona_uid 字段，支持 Session-Persona 绑定
 //! - UUID 解析失败时记录 WARNING 日志
 
 use crate::repo::StorageResultExt;
@@ -100,7 +100,7 @@ pub async fn delete(pool: &SqlitePool, session_id: Uuid) -> RamariaResult<()> {
 /// 参数:
 /// - `started_at`: Session 开始时间（Unix 毫秒）。
 /// - `ended_at`: Session 结束时间（Unix 毫秒）。
-/// - `persona_uid`: ★ v1.2 修复——导入会话必须绑定人格，否则 SessionDrawer
+/// - `persona_uid`: 导入会话必须绑定人格，否则 SessionDrawer
 ///   按 persona 筛选时 NULL 会话被错误归类到默认人格 rama-0001。
 ///
 /// 返回:

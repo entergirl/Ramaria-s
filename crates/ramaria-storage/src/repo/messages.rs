@@ -172,7 +172,7 @@ pub async fn list_by_session(pool: &SqlitePool, session_id: Uuid) -> RamariaResu
         .collect::<RamariaResult<Vec<_>>>()
 }
 
-/// v1.3 (P-6): 按创建时间降序分页加载消息。
+/// 按创建时间降序分页加载消息。
 ///
 /// 返回按 `created_at DESC` 排序（最新在前），便于调用方从最新消息开始按 token 预算加载。
 ///

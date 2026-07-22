@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/inference/stats.rs - 统计特征提取（v1.3 校准权重链）
+//! rust/crates/ramaria-memory/src/inference/stats.rs - 统计特征提取
 //!
 //! 设计特点:
 //! - A1 三轨动态准入: confirmed/tentative/discarded 替代置信度硬截断
@@ -22,13 +22,13 @@ use ramaria_core::types::{MemoryEvent, Presentation};
 ///
 /// 职责:
 /// - 集中管理预过滤策略、代表性事件数量和分组策略参数。
-/// - v1.3 新增: 校准权重链开关与参数。
+/// - 新增: 校准权重链开关与参数。
 ///
 /// 字段约定:
 /// - `confidence_threshold`: 事件置信度门槛，默认 0.6。在 `use_calibrated_weights=true` 时仅用于
 ///   `prefilter_events` 兼容路径；三轨模式使用 `classify_events`。
 /// - `max_representative_events`: 每分类最多选取的代表性事件数，默认 3。
-/// - `use_calibrated_weights`: 是否启用四因子校准权重链，默认 true（v1.3 起）。
+/// - `use_calibrated_weights`: 是否启用四因子校准权重链，默认 true。
 /// - `calibrated_weight_config`: 校准权重链参数（仅在 use_calibrated_weights=true 时生效）。
 #[derive(Debug, Clone)]
 pub struct StatsConfig {
@@ -36,7 +36,7 @@ pub struct StatsConfig {
     pub confidence_threshold: f64,
     /// 每分类最多选取的代表性事件数，默认 3
     pub max_representative_events: usize,
-    /// 是否启用校准权重链（v1.3+ 默认 true）
+    /// 是否启用校准权重链（默认 true）
     pub use_calibrated_weights: bool,
     /// 校准权重链参数
     pub calibrated_weight_config: CalibratedWeightConfig,
@@ -193,7 +193,7 @@ impl EventEnrichment {
 /// 字段约定:
 /// - `category`: 主分类标签，如"工作""社交""家庭"，从事件 keywords 的第一个标签提取。
 /// - `event_count`: 该分类的原始事件数（仅用于诊断，不参与计算）。
-/// - `n_eff`: 加权有效样本量 = Σ w_i（v1.3: 使用校准权重）。
+/// - `n_eff`: 加权有效样本量 = Σ w_i（使用校准权重）。
 /// - `valence_mean`: 加权平均效价。
 /// - `valence_std`: 加权效价标准差。
 /// - `valence_positive_ratio`: 正面事件（valence > 0）的加权占比。
@@ -255,7 +255,7 @@ pub struct CrossCategoryMetrics {
     pub share_kurtosis: f64,
 }
 
-/// 单个动机标签的聚合统计（v1.3 新增：E 模块——动机维度统计）。
+/// 单个动机标签的聚合统计（E 模块——动机维度统计）。
 ///
 /// 职责:
 /// - 对同一动机标签下的事件进行加权聚合，产出与 CategoryStats 同构的统计指标。
@@ -321,7 +321,7 @@ pub struct RepresentativeEvent {
     pub category: String,
 }
 
-/// 完整统计摘要（v1.3 新增三轨分布字段）。
+/// 完整统计摘要（新增三轨分布字段）。
 ///
 /// 职责:
 /// - 聚合 A1/A3/A6/A7 的全部输出，作为 LLM 推断的完整输入。
@@ -330,7 +330,7 @@ pub struct RepresentativeEvent {
 pub struct StatsSummary {
     /// 输入事件总数（分类前）
     pub total_events_in: usize,
-    /// 预过滤后事件数（v1.3: 即 confirmed + tentative，不含 discarded）
+    /// 预过滤后事件数（即 confirmed + tentative，不含 discarded）
     pub total_events_filtered: usize,
     /// confirmed 轨道事件数（confidence ≥ 0.6）
     pub confirmed_count: usize,
@@ -346,7 +346,7 @@ pub struct StatsSummary {
     pub cross_category: CrossCategoryMetrics,
     /// 每分类的代表性事件（按 salience 降序，最多 max_representative_events 条）
     pub representative_events: Vec<RepresentativeEvent>,
-    /// v1.3 新增：按动机标签的二次分组统计（主分类关键词分组之下的二级聚合）。
+    /// 按动机标签的二次分组统计（主分类关键词分组之下的二级聚合）。
     /// 若所有事件的 motives 均为 None 或为空，此字段为空。
     pub motive_stats: Vec<MotiveStats>,
 }
@@ -358,7 +358,7 @@ pub struct StatsSummary {
 /// 事件准入轨道。
 ///
 /// 职责:
-/// - 替代 v1.2 的单一 confidence ≥ 0.6 硬截断。
+/// - 替代单一的 confidence ≥ 0.6 硬截断。
 /// - 将事件按置信度分入三个轨道，各轨道有不同的统计参与权重。
 ///
 /// 状态:
@@ -492,7 +492,7 @@ pub fn classify_events(events: &[MemoryEvent]) -> ClassifiedEvents {
 /// 预过滤事件：排除 confidence 低于阈值的推测性事件。
 ///
 /// 说明:
-/// - **v1.3 起建议使用 `classify_events` 替代**。本函数保留以兼容旧调用方。
+/// - **建议使用 `classify_events` 替代**。本函数保留以兼容旧调用方。
 /// - 内部委托给 `classify_event`，使用配置中的 `confidence_threshold` 做硬截断。
 /// - 当 `use_calibrated_weights=true` 时，调用方应优先使用 `run_phase_a_stats`，
 ///   它会自动使用三轨分类。
@@ -834,7 +834,7 @@ pub fn calibrate_salience(
 ///
 /// 说明:
 /// - 四因子相乘意味着任一因子为零则整体权重为零。
-/// - 这是 v1.3 相对于 v1.2 `salience × situation_multiplier` 的核心升级。
+/// - 这是相对于 `salience × situation_multiplier` 的核心升级。
 ///
 /// 参数:
 /// - `event`: 待计算权重的事件。
@@ -861,7 +861,7 @@ pub fn compute_calibrated_weight(
     let track = classify_event(event);
     let confidence_factor = track.confidence_factor(config.tentative_weight_factor);
 
-    // Step 3: situation_multiplier（与 v1.2 相同）
+    // Step 3: situation_multiplier
     let sit_mult = situation_multiplier(event.situation_strength);
 
     // Step 4: source_support（多源互证）
@@ -904,12 +904,12 @@ pub fn compute_calibrated_weights_batch(
         .collect()
 }
 
-/// 使用简单权重（v1.2 兼容路径）。
+/// 使用简单权重（兼容路径）。
 ///
 /// 公式: `w_i = salience × situation_multiplier(situation_strength)`
 ///
 /// 说明:
-/// - 这是 v1.2 使用的权重公式，保留以支持 `use_calibrated_weights=false`。
+/// - 这是旧权重公式，保留以支持 `use_calibrated_weights=false`。
 ///
 /// 参数:
 /// - `event`: 待计算权重的事件。
@@ -973,7 +973,7 @@ pub fn group_by_category(events: &[MemoryEvent]) -> Vec<(String, Vec<MemoryEvent
 }
 
 // =========================================================
-// E: 动机维度二次分组统计（v1.3 新增）
+// E: 动机维度二次分组统计
 // =========================================================
 
 /// 从事件的 motives 字段中提取动机标签列表。
@@ -1291,7 +1291,7 @@ fn normalize_group_weights(categories: &mut [CategoryStats]) {
 }
 
 // =========================================================
-// A6: 跨分类高阶指标（v1.3 适配校准权重）
+// A6: 跨分类高阶指标
 // =========================================================
 
 /// 计算事件列表的权重向量（根据配置选择校准或简单权重）。
@@ -1562,10 +1562,10 @@ pub fn select_representative_events(
 }
 
 // =========================================================
-// 主编排函数（v1.3 三轨 + 校准权重链）
+// 主编排函数
 // =========================================================
 
-/// 执行完整的 Phase A 统计管线（v1.3 升级版）。
+/// 执行完整的 Phase A 统计管线。
 ///
 /// 管线步骤:
 /// 1. A1: 三轨分类（confirmed/tentative/discarded）
@@ -1583,7 +1583,7 @@ pub fn select_representative_events(
 ///
 /// 说明:
 /// - 当 `config.use_calibrated_weights = true`（默认）时，使用三轨准入 + 校准权重链。
-/// - 当 `config.use_calibrated_weights = false` 时，回退到 v1.2 行为（硬截断 + 简单权重）。
+/// - 当 `config.use_calibrated_weights = false` 时，回退到旧行为（硬截断 + 简单权重）。
 /// - 若所有事件都被 discarded，返回空的 StatsSummary。
 /// - 日志在调用方记录，本函数不执行 I/O。
 pub fn run_phase_a_stats(events: &[MemoryEvent], config: &StatsConfig) -> StatsSummary {
@@ -1611,7 +1611,7 @@ pub fn run_phase_a_stats(events: &[MemoryEvent], config: &StatsConfig) -> StatsS
     }
 
     if config.use_calibrated_weights {
-        // ---- v1.3 路径: 三轨准入 + 校准权重链 ----
+        // ---- 三轨准入 + 校准权重链 ----
 
         // A1: 三轨分类
         let classified = classify_events(events);
@@ -1677,7 +1677,7 @@ pub fn run_phase_a_stats(events: &[MemoryEvent], config: &StatsConfig) -> StatsS
         // A7: 代表性事件
         let representative_events = select_representative_events(&active, &categories, config);
 
-        // E: 动机维度二次分组统计（v1.3 新增）
+        // E: 动机维度二次分组统计
         let motive_stats =
             compute_motive_stats(&active, &enrichments, &config.calibrated_weight_config);
 
@@ -1694,7 +1694,7 @@ pub fn run_phase_a_stats(events: &[MemoryEvent], config: &StatsConfig) -> StatsS
             motive_stats,
         }
     } else {
-        // ---- v1.2 兼容路径: 硬截断 + 简单权重 ----
+        // ---- 兼容路径: 硬截断 + 简单权重 ----
 
         let (filtered, _excluded) = prefilter_events(events, config);
         let total_events_filtered = filtered.len();
@@ -1823,7 +1823,7 @@ mod tests {
     }
 
     // =========================================================
-    // 情境强度乘数（与 v1.2 相同）
+    // 情境强度乘数
     // =========================================================
 
     #[test]
@@ -2738,7 +2738,7 @@ mod tests {
     }
 
     // =========================================================
-    // 主分类提取（与 v1.2 相同）
+    // 主分类提取
     // =========================================================
 
     #[test]
@@ -2806,7 +2806,7 @@ mod tests {
     }
 
     // =========================================================
-    // 加权统计（与 v1.2 相同）
+    // 加权统计
     // =========================================================
 
     #[test]
@@ -2850,7 +2850,7 @@ mod tests {
     }
 
     // =========================================================
-    // 单分类统计（v1.3 校准权重 + 向后兼容）
+    // 单分类统计（校准权重 + 向后兼容）
     // =========================================================
 
     #[test]
@@ -3371,7 +3371,7 @@ mod tests {
     }
 
     // =========================================================
-    // 完整管线: v1.3 三轨 + 校准权重
+    // 完整管线: 三轨 + 校准权重
     // =========================================================
 
     #[test]
@@ -3524,7 +3524,7 @@ mod tests {
 
     #[test]
     fn run_phase_a_stats_v12_compat_path() {
-        // 使用 use_calibrated_weights=false 回退到 v1.2 行为
+        // 使用 use_calibrated_weights=false 回退到旧行为
         let config = StatsConfig {
             use_calibrated_weights: false,
             ..Default::default()
@@ -3578,10 +3578,10 @@ mod tests {
         let summary = run_phase_a_stats(&events, &config);
 
         assert_eq!(summary.total_events_in, 4);
-        // v1.2 路径: E2 被硬截断排除
+        // 旧路径: E2 被硬截断排除
         assert_eq!(summary.total_events_filtered, 3);
         assert_eq!(summary.category_count, 3);
-        // v1.2 路径将所有通过的事件视为 confirmed
+        // 旧路径将所有通过的事件视为 confirmed
         assert!(summary.confirmed_count > 0);
         assert_eq!(summary.tentative_count, 0);
     }
@@ -3641,7 +3641,7 @@ mod tests {
     }
 
     // =========================================================
-    // 动机维度统计（v1.3 新增：MotivesStats）
+    // 动机维度统计（MotivesStats）
     // =========================================================
 
     /// 构造带 motives 字段的测试事件。

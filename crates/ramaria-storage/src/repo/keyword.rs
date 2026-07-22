@@ -6,8 +6,7 @@
 //! - `keyword_refs` 倒排索引：关键词→L1/L2 文档的引用管理
 //! - 所有 SQL 使用 `?` 参数绑定，杜绝注入风险
 //!
-//! v1.3 变更:
-//! - 激活 keyword_pool 的 canonical_id/alias_status 列（v1.2 预埋）
+//! - 激活 keyword_pool 的 canonical_id/alias_status 列（预埋）
 //! - 新增 keyword_refs 表 CRUD 支持精确匹配检索
 
 use ramaria_core::error::RamariaResult;

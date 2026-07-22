@@ -227,7 +227,7 @@ pub struct PipelineContext {
     pub embedding: Option<Arc<dyn EmbeddingProvider>>,
     /// 应用配置
     pub config: RamariaConfig,
-    /// 内存检索器（v1.3 P-3: RwLock 替代 Mutex，允许多读并发）
+    /// 内存检索器（RwLock 替代 Mutex，允许多读并发）
     pub retriever: Arc<RwLock<Retriever>>,
     /// OS keychain
     pub keychain: Arc<Keychain>,

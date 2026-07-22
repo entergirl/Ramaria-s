@@ -8,7 +8,7 @@
 //! - 流中错误转发为 StreamEvent::Error，收集完整回复后发送 StreamEvent::Done
 //! - 日志记录 request_id、session_id、reply_chars、duration_ms，便于性能监控
 //! - 不持有跨 .await 的 MutexGuard（所有 I/O 通过 ctx.storage）
-//! - v1.3 (P-5): 使用 `mpsc::channel(64)` 有界通道替代 unbounded，背压保护
+//! - 使用 `mpsc::channel(64)` 有界通道替代 unbounded，背压保护
 
 use std::sync::Arc;
 
@@ -103,7 +103,7 @@ impl PipelineStage for StagePersistMessage {
         let request_id = input.request_id;
         let persona_uid = input.persona_uid.clone();
 
-        // v1.3 (P-5): 有界 channel，容量 64，满时 send 返回错误自然降级
+        // 有界 channel，容量 64，满时 send 返回错误自然降级
         let (tx, rx) = mpsc::channel::<RamariaResult<StreamEvent>>(64);
 
         tracing::info!(
@@ -146,7 +146,7 @@ impl PipelineStage for StagePersistMessage {
 /// - 收集完整 assistant 回复文本
 /// - 保存 user message + assistant message 到 storage
 ///
-/// v1.3 (P-5): 使用 `mpsc::Sender`（有界 channel 容量 64），`try_send` 防止背压阻塞。
+/// 使用 `mpsc::Sender`（有界 channel 容量 64），`try_send` 防止背压阻塞。
 /// 满时丢弃 delta 事件并记 warn（前端消费慢或卡顿时的降级策略）。
 ///
 /// 参数:
@@ -176,7 +176,7 @@ async fn stream_forward_task(
     let start_ms = now_ms();
 
     // 辅助闭包：尝试发送 StreamEvent 到有界 channel
-    // v1.3 (P-5): 满时丢弃并记 warn，断开时返回 true 表示应当退出
+    // 满时丢弃并记 warn，断开时返回 true 表示应当退出
     // `mpsc::Sender::try_send` 需要 `&mut self`，因此闭包签名使用 `&mut Sender`
     let try_send = |tx: &mut mpsc::Sender<_>, item: RamariaResult<StreamEvent>| -> bool {
         match tx.try_send(item) {
@@ -199,7 +199,7 @@ async fn stream_forward_task(
     };
 
     // 1. 保存用户消息
-    //    v1.2: 用户消息现在也携带 persona_uid，表示"在此 persona 的对话上下文中"
+    //    用户消息现在也携带 persona_uid，表示"在此 persona 的对话上下文中"
     //    前端据此可按 persona 过滤消息（多角色场景下区分"在对谁说话"）
     let user_msg = Message::new(
         session_id,

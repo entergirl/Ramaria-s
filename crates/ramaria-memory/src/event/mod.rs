@@ -1,8 +1,8 @@
 //! rust/crates/ramaria-memory/src/event/mod.rs - L1→L2 事件提取模块
 //!
 //! 设计特点:
-//! - batcher: v1.3 TopicBatcher 主题批量构建（关键词 Jaccard 图 + BFS 连通分量 + 语义融合）
-//! - context_retriever: v1.3 M3 CompositeIndex 三级编排补充上下文检索
+//! - batcher: TopicBatcher 主题批量构建（关键词 Jaccard 图 + BFS 连通分量 + 语义融合）
+//! - context_retriever: CompositeIndex 三级编排补充上下文检索
 //! - 按 persona_uid 分组取待吸收 L1
 //! - 调用 LLM 提取结构化 JSON 事件（11 个推断属性）
 //! - attitude → paraphrase 去情境化重述（LLM 轻量调用，结果缓存）

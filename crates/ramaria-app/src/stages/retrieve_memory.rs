@@ -33,7 +33,7 @@ use crate::pipeline::{PipelineContext, PipelineData, PipelineError, PipelineStag
 /// - 检索结果为空 → memory_context = None
 ///
 /// 安全约束:
-/// - v1.3 P-3: 检索器使用 RwLock::read()（search 为 &self），允许多读并发
+/// - 检索器使用 RwLock::read()（search 为 &self），允许多读并发
 /// - 检索器操作为纯同步，不持有锁跨 .await
 /// - 查询文本不记日志（仅记录维度和结果数量）
 pub struct StageRetrieveMemory;
@@ -100,7 +100,7 @@ impl PipelineStage for StageRetrieveMemory {
             }
         };
 
-        // ---- 5.2 执行三通道检索（v1.3 P-3: RwLock::read() 允许多读并发） ----
+        // ---- 5.2 执行三通道检索（RwLock::read() 允许多读并发） ----
         let mut results = {
             let retriever = match ctx.retriever.read() {
                 Ok(guard) => guard,

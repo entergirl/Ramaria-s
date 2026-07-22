@@ -54,7 +54,7 @@ pub struct SessionLifecycle {
     pub(crate) config: RamariaConfig,
     /// 停止标志（所有后台线程在设置此标志后退出）
     pub(crate) shutdown_flag: Arc<AtomicBool>,
-    /// v1.2: 内存检索器引用（L1 生成后增量更新），None 表示未注入（向后兼容）
+    /// 内存检索器引用（L1 生成后增量更新），None 表示未注入（向后兼容）
     pub(crate) retriever: Mutex<Option<Arc<RwLock<Retriever>>>>,
 }
 
@@ -73,14 +73,14 @@ impl SessionLifecycle {
         }
     }
 
-    /// 注入内存检索器引用（v1.2 新增）。
+    /// 注入内存检索器引用。
     ///
     /// 调用时机:
     /// - 在 `App::new` 中，`SessionLifecycle` 和 `Retriever` 创建完成后立即调用。
     /// - 必须在后台任务启动前调用（空闲检测/shutdown 路径依赖此引用做 L1 增量索引）。
     ///
     /// 参数:
-    /// - `r`: 与 App 共享的 Retriever（v1.3 P-3: `Arc<RwLock<Retriever>>`）。
+    /// - `r`: 与 App 共享的 Retriever（`Arc<RwLock<Retriever>>`）。
     pub fn set_retriever(&self, r: Arc<RwLock<Retriever>>) {
         let mut guard = self.retriever.lock().unwrap_or_else(|e| {
             error!("retriever lock poisoned during set_retriever: {e}");
@@ -155,7 +155,7 @@ impl SessionLifecycle {
         guard.remove(&session_id);
     }
 
-    /// v1.2: 从 DB 读取当前活跃 session 的 `persona_uid`。
+    /// 从 DB 读取当前活跃 session 的 `persona_uid`。
     ///
     /// 职责:
     /// - 供空闲超时关闭（`spawn_idle_checker`）和 shutdown 关闭路径使用，
@@ -235,7 +235,7 @@ impl SessionLifecycle {
 
         // Step 2: 生成 L1 摘要（传入当前对话人格）
         // 对齐 Python `summarizer.summarize_session(session_id)`
-        // v1.3 D9: 正常对话流程使用默认前缀（"用户：""助手："）
+        // 正常对话流程使用默认前缀（"用户：""助手："）
         match self
             .generate_l1_summary(storage, llm, active_sid, persona_uid, None, None)
             .await
@@ -248,7 +248,7 @@ impl SessionLifecycle {
                     "L1 摘要生成成功"
                 );
 
-                // v1.2: 增量更新 Retriever 内存索引（D-V12-013）
+                // 增量更新 Retriever 内存索引
                 // 必须在 L2 级联检查前执行，确保后续 L2/L3 也能检索到新 L1
                 self.index_l1_into_retriever(&l1);
 
@@ -335,7 +335,7 @@ impl SessionLifecycle {
         self.shutdown_flag.store(true, Ordering::SeqCst);
 
         // Step 2: 关闭活跃 session（无超时——L1 摘要需要等待 LLM 响应）
-        // v1.2: 从活跃 session 读取 persona_uid（不再传 None）
+        // 从活跃 session 读取 persona_uid（不再传 None）
         let persona_uid = self.get_active_session_persona_uid(storage).await;
         match self
             .save_and_close_session(storage, llm, persona_uid.as_deref())

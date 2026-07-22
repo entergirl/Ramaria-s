@@ -30,13 +30,13 @@ use crate::stages::{
 use crate::stream_event::StreamEvent;
 
 // =========================================================
-// send_message: 核心对话管线（v1.2 Pipeline 重构版）
+// send_message: 核心对话管线（Pipeline 重构版）
 // =========================================================
 
 impl App {
     /// 发送消息并获取流式回复。
     ///
-    /// 完整管线（v1.2 Pipeline + Stage 模式）:
+    /// 完整管线（Pipeline + Stage 模式）:
     /// Steps 1-5 → `SendMessagePipeline` 编排 5 个独立 Stage
     /// Steps 6-10 → 本方法继续执行（M2 将拆分为 Stage 6-10）
     ///
@@ -201,7 +201,7 @@ impl App {
     /// 注意:
     /// - 所有字段通过 Arc 克隆共享，零所有权拷贝
     /// - LLM 和 Embedding 从 Mutex 中 clone Arc 出锁后传入
-    /// - Retriever 通过 Arc 引用共享（v1.3 P-3 已改为 Arc<RwLock<Retriever>>）
+    /// - Retriever 通过 Arc 引用共享（已改为 Arc<RwLock<Retriever>>）
     fn build_pipeline_context(&self) -> crate::pipeline::PipelineContext {
         let llm = self.llm_clone();
         let embedding = self.embedding_provider();
@@ -388,7 +388,7 @@ fn load_persona_toml_prompt(db_config: Option<&str>) -> Option<String> {
         .find(|(k, _)| k == "E_rules")
         .map(|(_, v)| v.as_str())
         .filter(|s| !s.trim().is_empty())
-        // v1.3 T4: 无自定义 E_rules 时使用共享社交平台口吻
+        // 无自定义 E_rules 时使用共享社交平台口吻
         .unwrap_or(SHARED_CHAT_STYLE_RULES);
 
     let name = &parsed.assistant_name;
@@ -463,7 +463,7 @@ async fn stream_forward_task(
     let now = now_ms();
 
     // 1. 保存用户消息
-    //    v1.2: 用户消息现在也携带 persona_uid，表示"在此 persona 的对话上下文中"
+    //    用户消息现在也携带 persona_uid，表示"在此 persona 的对话上下文中"
     let user_msg = Message::new(
         session_id,
         MessageRole::User,

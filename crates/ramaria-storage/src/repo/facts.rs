@@ -89,7 +89,7 @@ pub async fn list_by_persona(
 
 /// 按 persona_uid 一次性统计所有 ProfileField 的 fact 数量。
 ///
-/// 使用单条 GROUP BY 查询替代 N+1 循环（v1.3 P-4 修复）。
+/// 使用单条 GROUP BY 查询替代 N+1 循环。
 ///
 /// 返回:
 /// - `Vec<(ProfileField, usize)>`：每个字段的 fact 数量和。

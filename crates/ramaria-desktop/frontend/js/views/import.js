@@ -75,7 +75,7 @@ var ImportView = (function () {
         l3Triggered: null,   // done 阶段：深度模式 L3 是否已触发
     };
 
-    /** v1.2: 导入开始时间（Unix 毫秒），用于预估剩余时间 */
+    /** 导入开始时间（Unix 毫秒），用于预估剩余时间 */
     var _importStartedAt = null;
 
  /** 导入完成后用于导航的 persona 信息 */
@@ -141,7 +141,7 @@ var ImportView = (function () {
         _isImporting = false;
         _importProgress = { phase: '', current: 0, total: 0, message: '', l1Success: null, l1Failed: null, l2Triggered: null, l3Triggered: null };
         _importResultPersona = { selfUid: '', selfName: '', otherUid: '', otherName: '' };
-        _importStartedAt = null;  // v1.2: 重置 ETA 计时
+        _importStartedAt = null;  // 重置 ETA 计时
 
  // 设置标题
         RamariaRouter.setContentTitle('数据导入');
@@ -224,7 +224,7 @@ var ImportView = (function () {
  * - CSP `style-src 'self'` 阻止 HTML 中的 `style="..."` 属性，
  * 但允许 JavaScript 通过 element.style 操作 CSSOM。
  * - 此函数在 `_render` 设置 innerHTML 后调用，更新进度条填充宽度、百分比、会话计数和 ETA。
- * - v1.2 增强：进度条高度 ≥ 8px、显示"第 N/M 个会话"、预估剩余时间。
+ * - 进度条高度 ≥ 8px、显示"第 N/M 个会话"、预估剩余时间。
  */
     function _updateImportProgressBar() {
         var prog = _importProgress;
@@ -255,7 +255,7 @@ var ImportView = (function () {
     }
 
     /**
-     * v1.2: 计算并显示预估剩余时间。
+     * 计算并显示预估剩余时间。
      *
      * 算法:
      * - elapsed = now - _importStartedAt（已用秒数）
@@ -541,7 +541,7 @@ var ImportView = (function () {
         if (prog.message) descText = prog.message;
         html += '<div class="import-progress-desc">' + _escapeHtml(descText) + '</div>';
 
- // v1.2: 进度条增强——放大高度 + 会话计数 + 预估剩余时间
+ // 进度条增强——放大高度 + 会话计数 + 预估剩余时间
         if (prog.total > 0) {
             html += '<div class="import-progress-bar-enhanced">';
 
@@ -774,7 +774,7 @@ var ImportView = (function () {
                 _selectedFileSize = null;
                 _reportData = null;
                 _importProgress = { phase: '', current: 0, total: 0, message: '', l1Success: null, l1Failed: null, l2Triggered: null, l3Triggered: null };
-                _importStartedAt = null;  // v1.2: 重置 ETA 计时
+                _importStartedAt = null;  // 重置 ETA 计时
                 _render();
             });
         }
@@ -969,7 +969,7 @@ var ImportView = (function () {
 
         _isImporting = true;
         _step = 'importing';
-        _importStartedAt = Date.now();  // v1.2: 记录开始时间用于 ETA 计算
+        _importStartedAt = Date.now();  // 记录开始时间用于 ETA 计算
         _render();
 
         console.log('[ImportView] 开始导入: file=' + _selectedFilePath + ', mode=' + _importMode + ', gap=' + _gapMinutes);

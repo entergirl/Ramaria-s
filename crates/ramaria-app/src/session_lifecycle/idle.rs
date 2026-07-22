@@ -111,7 +111,7 @@ impl SessionLifecycle {
                         "session 空闲超时，自动关闭"
                     );
 
-                    // v1.2: 从活跃 session 读取 persona_uid（不再传 None）
+                    // 从活跃 session 读取 persona_uid（不再传 None）
                     let persona_uid = slf.get_active_session_persona_uid(storage.as_ref()).await;
 
                     if let Err(e) = slf

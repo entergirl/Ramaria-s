@@ -63,8 +63,8 @@ pub(crate) fn l2_normalize(vector: &Tensor, device: &Device) -> RamariaResult<Te
 /// 从 safetensors 文件读取 JSON header 的原始字节（兼容新旧格式）。
 ///
 /// safetensors 有两种文件格式:
-/// - **新格式** (v0.3+, HuggingFace 默认): [tensor data] + [JSON header] + [header_size: u64 LE]
-/// - **旧格式** (v0.1-0.2): [header_size: u64 LE] + [JSON header] + [tensor data]
+/// - **新格式** (HuggingFace 默认): [tensor data] + [JSON header] + [header_size: u64 LE]
+/// - **旧格式**: [header_size: u64 LE] + [JSON header] + [tensor data]
 ///
 /// 检测策略: 先尝试新格式（末尾 8 字节），若 header_size 超出合理范围则尝试旧格式（开头 8 字节）。
 /// candle 的 `safetensors` crate 透明支持两种格式，此处手动实现以保持一致。

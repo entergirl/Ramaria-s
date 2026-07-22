@@ -49,7 +49,7 @@ pub struct MockStorage {
     backend_config: Mutex<Option<BackendConfig>>,
     index_version: Mutex<i32>,
     examples: Mutex<HashMap<String, Vec<PersonaExample>>>,
-    // v1.2 M3: 人格推断相关存储
+    // 人格推断相关存储
     traits: Mutex<HashMap<i64, PersonalityTrait>>,
     traits_by_persona: Mutex<HashMap<String, Vec<i64>>>,
     trait_seq: AtomicI64,

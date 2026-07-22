@@ -23,7 +23,7 @@ pub struct SessionSummary {
     pub ended_at: Option<i64>,
     /// 消息数量（通过 `SELECT COUNT(*)` 实时查询）
     pub message_count: u32,
-    /// ★ v1.2 M5-A: 会话绑定的人格 UID（NULL 表示存量旧数据）。
+    /// 会话绑定的人格 UID（NULL 表示存量旧数据）。
     /// 前端 SessionDrawer 据此按 persona 筛选会话列表。
     pub persona_uid: Option<String>,
 }
@@ -34,7 +34,7 @@ pub struct SessionDetail {
     pub id: String,
     pub started_at: i64,
     pub ended_at: Option<i64>,
-    /// ★ v1.2 M5-A: 会话绑定的人格 UID。
+    /// 会话绑定的人格 UID。
     pub persona_uid: Option<String>,
     pub messages: Vec<MessageView>,
 }

@@ -320,7 +320,7 @@ impl VectorIndex for BruteForceIndex {
 
 /// 向量索引查询缓存配置。
 ///
-/// v1.3 (P-2): 对 BruteForceIndex 添加 LRU-style 查询结果缓存。
+/// 对 BruteForceIndex 添加 LRU-style 查询结果缓存。
 /// 相同或高度相似的查询向量可直接返回缓存结果，避免 O(N·D) 全量扫描。
 ///
 /// 缓存策略:

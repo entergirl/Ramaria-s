@@ -280,7 +280,7 @@ pub trait EmbeddingProvider: Send + Sync {
 #[async_trait]
 pub trait StorageBackend: Send + Sync {
     // -- Session --
-    /// 创建新 session，可选的 persona_uid 用于 Session-Persona 绑定（v1.2）。
+    /// 创建新 session，可选的 persona_uid 用于 Session-Persona 绑定。
     ///
     /// 参数:
     /// - `persona_uid`: 对话人格标识（None 兼容存量调用）。
@@ -301,7 +301,7 @@ pub trait StorageBackend: Send + Sync {
         fingerprint: &str,
     ) -> RamariaResult<Option<Message>>;
 
-    /// v1.3 (P-6): 按创建时间降序分页加载最近消息。
+    /// 按创建时间降序分页加载最近消息。
     ///
     /// 职责:
     /// - 替代 `list_messages` 全量加载，支持按 limit/offset 分页
@@ -364,7 +364,7 @@ pub trait StorageBackend: Send + Sync {
     async fn list_memory_l1(&self, session_id: Uuid) -> RamariaResult<Vec<MemoryL1>>;
     async fn get_memory_l1(&self, id: Uuid) -> RamariaResult<Option<MemoryL1>>;
     async fn mark_l1_absorbed(&self, l1_ids: &[Uuid]) -> RamariaResult<()>;
-    /// v1.2: 删除指定 session 中 persona_uid 为 NULL 的 L1 摘要（仅清理导入残留）
+    /// 删除指定 session 中 persona_uid 为 NULL 的 L1 摘要（仅清理导入残留）
     async fn delete_memory_l1_by_session(&self, session_id: Uuid) -> RamariaResult<usize> {
         let _ = session_id;
         Ok(0) // 默认空实现：存量 mock 无需修改即可编译
@@ -475,7 +475,7 @@ pub trait StorageBackend: Send + Sync {
     /// - 某字段无记录时结果为 0。
     ///
     /// 性能:
-    /// - 单次 SQL GROUP BY 查询，替代 v1.2 的 N+1 循环查询。
+    /// - 单次 SQL GROUP BY 查询，替代原来的 N+1 循环查询。
     /// - 用于冷启动已有画像的 fact 计数。
     async fn count_all_facts_for_persona(
         &self,
@@ -533,7 +533,7 @@ pub trait StorageBackend: Send + Sync {
         persona_uid: &str,
         category: &str,
     ) -> RamariaResult<Vec<ClusterSnapshot>>;
-    /// v1.3: 查询该 persona 的所有历史快照（含非 current），仅返回有 semantic_label_embedding 的条目。
+    /// 查询该 persona 的所有历史快照（含非 current），仅返回有 semantic_label_embedding 的条目。
     /// 用于跨版本簇匹配。
     async fn get_all_snapshots_with_embeddings(
         &self,
@@ -546,13 +546,13 @@ pub trait StorageBackend: Send + Sync {
     // -- Keyword Pool --
     async fn upsert_keyword(&self, keyword: &str) -> RamariaResult<()>;
     async fn list_keywords(&self) -> RamariaResult<Vec<String>>;
-    /// 按 use_count DESC 返回所有关键词及其使用量。（v1.3 新增）
+    /// 按 use_count DESC 返回所有关键词及其使用量。
     async fn list_keyword_counts(&self) -> RamariaResult<Vec<(String, u32)>> {
         let _ = self;
         Ok(Vec::new()) // 默认空实现，保持向后兼容
     }
 
-    // -- Keyword Refs (v1.3 新增) --
+    // -- Keyword Refs --
     /// 插入一条关键词引用记录。
     async fn insert_keyword_ref(
         &self,

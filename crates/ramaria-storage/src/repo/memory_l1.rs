@@ -32,7 +32,7 @@ struct L1Row {
     persona_uid: Option<String>,
     context_json: Option<String>,
     situation_strength: Option<i64>,
-    /// v1.3: 证据片段（JSON 数组字符串），存量数据为 NULL
+    /// 证据片段（JSON 数组字符串），存量数据为 NULL
     evidence_notes: Option<String>,
 }
 
@@ -113,7 +113,7 @@ pub async fn save(pool: &SqlitePool, l1: &MemoryL1) -> RamariaResult<()> {
     Ok(())
 }
 
-/// v1.2: 删除指定 session 中 persona_uid 为 NULL 的 L1 摘要。
+/// 删除指定 session 中 persona_uid 为 NULL 的 L1 摘要。
 ///
 /// 用法:
 /// - `regenerate_l1_no_cascade` 在重新生成 L1 前调用，仅清理旧 NULL 记录。

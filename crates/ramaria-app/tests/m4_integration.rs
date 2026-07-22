@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/tests/m4_integration.rs - M4 Phase A 统计深化集成测试
+//! rust/crates/ramaria-app/tests/m4_integration.rs - M4 统计深化集成测试
 //!
 //! 设计特点:
 //! - 验证 M4 全部新特性: 校准权重链、三轨准入、分层收缩、因果链、动机维度统计
@@ -377,7 +377,7 @@ fn make_m4_stats_summary() -> StatsSummary {
 }
 
 // =========================================================
-// M4-A: 校准权重链测试
+// 校准权重链测试
 // =========================================================
 
 #[test]
@@ -418,14 +418,13 @@ fn phase_a_v12_compat_path_disables_calibrated_weights() {
     };
     let summary = run_phase_a_stats(&events, &config);
 
-    // v1.2 路径: 硬截断 confidence < 0.6
     assert_eq!(summary.total_events_in, 8);
     let total_n_eff: f64 = summary.categories.iter().map(|c| c.n_eff).sum();
     assert!(total_n_eff > 0.0, "v1.2 路径应有有效 n_eff");
 }
 
 // =========================================================
-// M4-B: 三轨动态准入测试
+// 三轨动态准入测试
 // =========================================================
 
 #[test]
@@ -494,7 +493,7 @@ fn tentative_promotion_across_batches() {
 }
 
 // =========================================================
-// M4-E: 动机维度统计测试
+// 动机维度统计测试
 // =========================================================
 
 #[test]
@@ -594,7 +593,7 @@ fn motive_stats_only_from_active_events() {
 }
 
 // =========================================================
-// M4-F: 全链路 Phase A→B→C 集成测试
+// 全链路 Phase A→B→C 集成测试
 // =========================================================
 
 #[tokio::test]

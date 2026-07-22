@@ -3,7 +3,7 @@
 //! 设计特点:
 //! - 管理态度聚类快照，支撑跨版本簇匹配（语义标签→embedding 相似度）
 //! - get_current 按 (persona_uid, category) 查询最新版本快照
-//! - v1.3 新增 semantic_label / semantic_label_embedding 读写
+//! - 新增 semantic_label / semantic_label_embedding 读写
 //! - 使用 sqlx::query_as 自动映射 ClusterRow → ClusterSnapshot
 
 use crate::repo::StorageResultExt;
@@ -25,9 +25,9 @@ struct ClusterRow {
     count: i64,
     is_current: i64,
     created_at: i64,
-    /// v1.3: 语义标签文本（可为 NULL，兼容旧记录）
+    /// 语义标签文本（可为 NULL，兼容旧记录）
     semantic_label: Option<String>,
-    /// v1.3: 语义标签 embedding BLOB（可为 NULL）
+    /// 语义标签 embedding BLOB（可为 NULL）
     semantic_label_embedding: Option<Vec<u8>>,
 }
 
@@ -48,7 +48,7 @@ impl ClusterRow {
     }
 }
 
-/// 保存聚类快照（含 v1.3 语义标签和 embedding）。
+/// 保存聚类快照（含语义标签和 embedding）。
 ///
 /// 参数:
 /// - `s`: 快照数据。`semantic_label` 和 `semantic_label_embedding` 为 `None` 时写入 NULL。

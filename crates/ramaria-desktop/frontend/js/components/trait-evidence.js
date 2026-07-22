@@ -1,5 +1,5 @@
 /**
- * js/components/trait-evidence.js — 性格标签证据链可展开组件 (v1.3 M5-D)
+ * js/components/trait-evidence.js — 性格标签证据链可展开组件
  *
  * 职责:
  * - 为单条性格标签加载并渲染完整证据溯源链。
@@ -40,7 +40,7 @@ var RamariaTraitEvidence = (function () {
             return;
         }
 
-        // v1.3 N5 修复：traitId 参数校验。
+        // traitId 参数校验。
         // 当 trait.id=0（新推断 trait 尚未持久化获取自增 ID）或为 null/undefined 时，
         // 后端 getEvidence(traitId=0) 查询不到任何记录 → 返回空数组。
         // 需提前拦截无效参数，避免前端展示空白面板。

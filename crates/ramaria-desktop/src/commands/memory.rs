@@ -32,9 +32,9 @@ pub struct MemoryL1View {
     pub salience: f64,
     pub persona_uid: Option<String>,
     pub created_at: i64,
-    /// ★ v1.2 M5-C: 时间段（清晨/上午/下午/傍晚/夜间/深夜）
+    /// 时间段（清晨/上午/下午/傍晚/夜间/深夜）
     pub time_period: Option<String>,
-    /// ★ v1.2 M5-C: 分组上下文 JSON，含 chat_partners / message_count 等
+    /// 分组上下文 JSON，含 chat_partners / message_count 等
     pub context_json: Option<String>,
 }
 
@@ -551,14 +551,14 @@ pub async fn get_personality_profile(
 ///
 /// 职责:
 /// - 承载事件溯源链中的 L1 层证据片段。
-/// - 包含 evidence_notes（v1.3 双层摘要中的证据片段层），供前端"展开证据"渲染。
+/// - 包含 evidence_notes（双层摘要中的证据片段层），供前端"展开证据"渲染。
 #[derive(Debug, Clone, Serialize)]
 pub struct L1SourceView {
     /// L1 摘要 ID（UUID）
     pub l1_id: String,
     /// L1 摘要文本
     pub summary: String,
-    /// L1 证据片段（v1.3 evidence_notes），可能为空数组
+    /// L1 证据片段（evidence_notes），可能为空数组
     pub evidence_notes: Vec<String>,
     /// L1 会话氛围
     pub atmosphere: Option<String>,

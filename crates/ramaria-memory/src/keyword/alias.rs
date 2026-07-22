@@ -256,7 +256,7 @@ impl AliasManager {
     ///
     /// 说明:
     /// - 当前为简化实现：仅通过文本相似性（编辑距离 < 3 或共享前缀）找出可能的同义词。
-    /// - v1.3 未来可接入 embedding 语义相似度提升匹配精度。
+    /// - 未来可接入 embedding 语义相似度提升匹配精度。
     pub fn suggest_merges(&self, min_use_for_suggestion: u32) -> Vec<MergeSuggestion> {
         if self.use_counts.is_empty() {
             return Vec::new();
@@ -368,7 +368,7 @@ impl Default for AliasManager {
 ///
 /// 说明:
 /// - 仅用于合并建议的初步筛选，不涉及 DB 写入。
-/// - v1.3 可升级为 embedding cosine similarity。
+/// - 可升级为 embedding cosine similarity。
 fn is_similar_keyword(a: &str, b: &str) -> bool {
     if a == b {
         return false; // 完全相同不视为"相似"

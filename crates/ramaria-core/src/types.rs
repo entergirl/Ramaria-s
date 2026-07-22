@@ -167,7 +167,7 @@ impl std::fmt::Display for MessageRole {
 /// 状态:
 /// - `ended_at = None`: 会话仍在进行中。
 /// - `ended_at = Some(...)`: 会话已关闭，可触发 L1 摘要。
-/// - `persona_uid = Some(...)`: 创建此 session 时使用的对话人格（v1.2 新增）。
+/// - `persona_uid = Some(...)`: 创建此 session 时使用的对话人格。
 /// - `persona_uid = None`: 存量 session 或未指定人格。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -176,7 +176,7 @@ pub struct Session {
     pub started_at: i64,
     /// Session 结束时间，None 表示未关闭
     pub ended_at: Option<i64>,
-    /// 创建此 session 时绑定的对话人格 UID（v1.2 新增，可空兼容存量数据）
+    /// 创建此 session 时绑定的对话人格 UID（可空兼容存量数据）
     pub persona_uid: Option<String>,
 }
 
@@ -200,7 +200,7 @@ impl Session {
         }
     }
 
-    /// 创建一个绑定人格的活跃 Session（v1.2 新增）。
+    /// 创建一个绑定人格的活跃 Session。
     ///
     /// 参数:
     /// - `persona_uid`: 对话人格标识（None 表示 rama 自身）。
@@ -346,13 +346,13 @@ pub struct MemoryL1 {
     pub persona_uid: Option<String>,
     /// 分组上下文——JSON 格式 `{"chat_partners": ["user-0001", "char-0003"]}`
     pub context_json: Option<String>,
-    /// 情境强度 1-5（v1.1.2 启用）：
+    /// 情境强度 1-5：
     /// - 1-2: 弱情境（闲聊、日常寒暄）→ 加权 ×1.5
     /// - 3: 中性情境（默认值）→ 加权 ×1.0
     /// - 4-5: 强情境（冲突、关键决策）→ 加权 ×0.5
-    /// - None: v1.1.2 前的存量数据，等同于 3
+    /// - None: 存量数据，等同于 3
     pub situation_strength: Option<i32>,
-    /// 证据片段列表（v1.3 新增）。
+    /// 证据片段列表。
     ///
     /// 存储支持摘要结论的具体事实引用，每条 evidence 记录
     /// "谁在什么条件下表达了什么态度/经历了什么事件"。
@@ -907,7 +907,7 @@ pub struct MemoryEvent {
     pub absorbed: i64,
     /// 情境强度 1-5（从源 L1 传播），None 等效 3
     pub situation_strength: Option<i32>,
-    /// 底层动机标注（v1.2 Schema 预埋，v1.3 激活），None 表示未标注
+    /// 底层动机标注（Schema 预埋），None 表示未标注
     pub motives: Option<String>,
     pub created_at: i64,
     pub last_accessed_at: Option<i64>,
@@ -1181,7 +1181,6 @@ impl PersonaExample {
 /// - 每次全量聚类后保存各分类下的簇结构和语义标签。
 /// - 跨版本匹配时比对语义标签的 embedding 相似度，而非簇编号。
 ///
-/// v1.3 新增:
 /// - `semantic_label`: 从核心样本 paraphrase 中提取的语义标签文本。
 /// - `semantic_label_embedding`: 语义标签的 embedding 向量 BLOB（f32 小端序列化）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1200,9 +1199,9 @@ pub struct ClusterSnapshot {
     /// 1=最新快照，0=历史版本
     pub is_current: bool,
     pub created_at: i64,
-    /// v1.3: 从核心样本提取的语义标签文本
+    /// 从核心样本提取的语义标签文本
     pub semantic_label: Option<String>,
-    /// v1.3: 语义标签的 embedding 向量（f32 小端 BLOB）
+    /// 语义标签的 embedding 向量（f32 小端 BLOB）
     pub semantic_label_embedding: Option<Vec<u8>>,
 }
 

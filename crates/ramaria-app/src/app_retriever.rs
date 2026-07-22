@@ -109,7 +109,7 @@ impl App {
             }
         }
 
-        // 4. 锁定检索器并批量索引（v1.3 P-3: RwLock::write() 用于索引写入）
+        // 4. 锁定检索器并批量索引（RwLock::write() 用于索引写入）
         {
             let mut retriever = self.retriever.write().unwrap_or_else(|e| {
                 tracing::error!("Retriever lock poisoned during rebuild: {e}");

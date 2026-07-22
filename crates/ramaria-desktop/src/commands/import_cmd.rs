@@ -437,7 +437,6 @@ pub async fn import_qq_chat(
 
     // Step 4.5: 为每个导入的 session 生成 L1 摘要（双方 persona 各一份）
     //
-    // v1.3 N2 修复（替代 D1 过度校正）：
     // 导入对话是双人对话（self↔other），L1 摘要应同时归属两人。
     // D1 将 persona_uid 从 self→other 后，other 获得了 L1→L2→L3 全管线，
     // 但 self 的 L1 来源完全断裂，无法触发 L2/L3。
@@ -451,12 +450,10 @@ pub async fn import_qq_chat(
     let sids = session_ids.clone();
     let is_deep = import_mode == ramaria_importer::ImportMode::Deep;
     let total_sids = sids.len();
-    // v1.3 N2: 为双方 persona 各存储一份 L1
     let self_uid = self_persona_uid_resolved.clone();
     let other_uid = other_persona_uid_resolved.clone();
     tokio::spawn(async move {
         // ── 生成全部 L1 摘要（无级联）──
-        // v1.3 D9 修复：导入的消息 content 中已含 "[sender_name]" 前缀
         // （由 QQ parser 的 make_role_content 嵌入），故传空前缀避免"用户：""助手："双重前缀。
         // 空前缀 → 对话格式为 "[张三] 消息内容" 而非 "用户：[张三] 消息内容"，
         // LLM 在 summary/evidence_notes 中自然使用实际名称。
@@ -532,7 +529,6 @@ pub async fn import_qq_chat(
         );
 
         // ── 深度模式: 级联 L2→L3 ──
-        // v1.3 N2 修复：双方 persona 都有 L1 后，trigger_l2_check 遍历所有 persona，
         // 双方均可在满足未吸收 L1 ≥ 5 条条件后各自触发 L2→L3 级联。
         let mut l2_triggered = false;
         let mut l3_triggered = false;

@@ -2,7 +2,7 @@
 //!
 //! 设计特点:
 //! - 对应 send_message 管线 Step 4 + Step 4.5
-//! - v1.3 (P-6): 按 token 预算倒序分页加载消息（每页 20 条），避免长会话全量内存加载
+//! - 按 token 预算倒序分页加载消息（每页 20 条），避免长会话全量内存加载
 //! - 将 Message 转换为 ChatMessage 格式供后续 TokenBudget / BuildRequest 使用
 //! - 预加载近期 L1 摘要（跨 session 上下文注入），无条件注入 Block C1
 //! - 格式化 L1 摘要为可读文本行
@@ -25,7 +25,7 @@ use crate::pipeline::{PipelineContext, PipelineData, PipelineError, PipelineStag
 /// - 将 L1 摘要格式化为上下文文本行
 /// - 从最近 L1 提取最后活跃时间字符串
 ///
-/// v1.3 (P-6): 分页加载替代全量加载。
+/// 分页加载替代全量加载。
 /// - 每页 20 条，从最新消息倒序加载
 /// - 达到消息数量上限（200 条）或粗略字符预算时停止
 /// - 加载完成后反转为时间正序供后续 Stage 使用
@@ -99,7 +99,7 @@ impl PipelineStage for StageLoadHistory {
             })?
             .id;
 
-        // ---- Step 4: v1.3 (P-6) 按 token 预算倒序分页加载历史消息 ----
+        // ---- Step 4: 按 token 预算倒序分页加载历史消息 ----
         // 从最新消息倒序加载，每页 20 条，直到达到安全上限或粗略字符预算
         let mut all_messages_reversed: Vec<ramaria_core::types::Message> = Vec::new();
         let mut total_chars: usize = 0;

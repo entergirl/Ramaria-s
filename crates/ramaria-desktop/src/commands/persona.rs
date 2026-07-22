@@ -294,7 +294,7 @@ pub async fn refresh_persona(
 ///
 /// 说明:
 /// - 幂等：已存在的 L1 摘要会被覆盖（regenerate_l1_no_cascade 内部删除旧 L1）。
-/// - v1.2: L1 摘要 persona_uid 关联到目标导入 persona（不再存 NULL，令 L2/L3 可触发）。
+/// - L1 摘要 persona_uid 关联到目标导入 persona（不再存 NULL，令 L2/L3 可触发）。
 /// - 此操作为异步后台任务：返回后 L1 已生成，L2/L3 后台继续执行。
 ///
 /// 日志:
@@ -355,7 +355,7 @@ pub async fn regenerate_import_pipeline(
     );
 
     // Step 2: 对每个 session 重新生成 L1 摘要
-    // v1.2 修复: L1 摘要 persona_uid 关联到目标导入 persona（不再存 NULL）
+    // L1 摘要 persona_uid 关联到目标导入 persona（不再存 NULL）
     // 原设计: persona_uid=NULL"因为导入对话来自两人"——但 NULL 导致 L2 永远无法触发
     // 修复: 关联到目标 persona，对方 persona 的事件通过 chat_partners 分组独立提取
     //

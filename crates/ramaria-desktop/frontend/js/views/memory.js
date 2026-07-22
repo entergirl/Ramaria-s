@@ -5,7 +5,7 @@
  * - 三 Tab 记忆查看：L1 会话摘要（Bento Grid）/ L2 事件列表 / L3 性格画像
  * - 按人格筛选记忆（PersonaSelector）
  * - 每层独立数据加载和缓存，切换 Tab 不重新请求
- * - L3 v1.3 M5-D: 三层分层展示（base/primary/accent 卡片布局）
+ * - L3: 三层分层展示（base/primary/accent 卡片布局）
  *
  * 设计特点:
  * - 注册 Router enter/leave 钩子
@@ -13,7 +13,7 @@
  * - 三面板通过 .active 类切换显示，DOM 始终保留（避免重复渲染）
  * - L1 Bento Grid：粉色渐变卡片，显示 salience 强度条 + valence 色条
  * - L2 事件列表：蓝色主题，点击展开详情（源/态度/置信度等）
- * - L3 性格画像（v1.3 重新设计）：
+ * - L3 性格画像：
  *   - 顶部状态指示器（数据不足/初步/可信 + n_total_eff 数值）
  *   - 按 base/primary/accent 三层卡片布局（不同左边框色区分）
  *   - 每条 trait 显示置信度色条（绿≥80%/黄60-80%/橙<60%）
@@ -24,7 +24,7 @@
  * 依赖:
  * - RamariaApi / RamariaStore / RamariaRouter
  * - RamariaToast / RamariaSkeleton / RamariaFormat
- * - RamariaTraitEvidence（v1.3 证据链组件）
+ * - RamariaTraitEvidence（证据链组件）
  * - CSS: css/views/memory.css + css/components/trait-evidence.css
  */
 
@@ -48,14 +48,14 @@ var RamariaMemoryView = (function () {
     var _activeTab = 'l1';
 
     /**
-     * ★ v1.2 M5-B: 标记是否从对话页返回（用于恢复状态）。
+     * 标记是否从对话页返回（用于恢复状态）。
      * 在 L1 卡片"查看对话"按钮点击时设为 true，
      * 在 enter 钩子中检测并恢复之前的 persona 和 tab 选择。
      */
     var _returningFromChat = false;
 
     /**
-     * ★ v1.2 M5-B: 离开记忆页时的状态快照，用于从对话页返回时恢复。
+     * 离开记忆页时的状态快照，用于从对话页返回时恢复。
      * 包含 { personaUid, activeTab }——不持久化到 Store，
      * 仅存活于内存中（页面刷新后会丢失，用户需重新选择）。
      */
@@ -200,7 +200,7 @@ var RamariaMemoryView = (function () {
 
         try {
             // 并行加载 L1/L2/L3 画像 + 画像状态
-            // v1.3 修复：L3 改用 get_personality_profile（含完整 TraitDetailView 字段），
+            // L3 改用 get_personality_profile（含完整 TraitDetailView 字段），
             // 而非 get_l3_traits（不含 trigger/suppress/not_meaning/related/seq）
             var results = await Promise.allSettled([
                 RamariaApi.memory.getL1(_currentPersonaUid, 500),
@@ -214,12 +214,12 @@ var RamariaMemoryView = (function () {
             var profile = results[2].status === 'fulfilled' ? results[2].value : null;
             var profileStatus = results[3].status === 'fulfilled' ? results[3].value : null;
 
-            // v1.3 N1 修复：移除 L1 降级全量查询。
+            // 移除 L1 降级全量查询。
             // 原 fallback（getL1(null)）导致系统人格（rama-0001/user-0001）
             // 和按 persona 过滤无结果的 persona 错误显示全量导入 L1 数据。
             // 若某 persona 的 L1 为空，显示"暂无 L1 摘要"是正确行为。
 
-            // v1.3 修复：将 get_personality_profile 的三层结构展平为带 layer 标记的数组
+            // 将 get_personality_profile 的三层结构展平为带 layer 标记的数组
             var l3Data = [];
             if (profile) {
                 (profile.base || []).forEach(function(t) { t.layer = 'base'; l3Data.push(t); });
@@ -308,7 +308,7 @@ var RamariaMemoryView = (function () {
         for (var i = 0; i < items.length; i++) {
             let item = items[i];
 
-            // ★ v1.2 M5-C: 解析 context_json 获取扩展字段
+            // 解析 context_json 获取扩展字段
             var ctx = null;
             var hasCtx = false;
             try {
@@ -319,8 +319,8 @@ var RamariaMemoryView = (function () {
                 }
             } catch (_) { /* 解析失败，按无 context_json 降级 */ }
 
-            // ★ v1.2 M5-C: 从顶层字段 + context_json 提取扩展字段
-            // time_period 优先从 L1 顶层字段读取（v1.2 新增），回退 context_json
+            // 从顶层字段 + context_json 提取扩展字段
+            // time_period 优先从 L1 顶层字段读取，回退 context_json
             var timePeriod = item.time_period || (ctx && ctx.time_period) || '';
             var chatPartners = (ctx && ctx.chat_partners && ctx.chat_partners.length > 0)
                 ? ctx.chat_partners : [];
@@ -331,7 +331,7 @@ var RamariaMemoryView = (function () {
             var keywords = item.keywords || '';
             let hasSession = item.session_id && item.session_id.length > 0;
 
-            // ★ v1.2 M5-C: 确定 valence CSS class
+            // 确定 valence CSS class
             var valenceClass;
             if (valence > 0.3) {
                 valenceClass = 'memory-l1-valence--positive';
@@ -345,7 +345,7 @@ var RamariaMemoryView = (function () {
             card.className = 'memory-l1-card ' + valenceClass;
             card.setAttribute('data-l1-id', item.id || '');
 
-            // ★ v1.2 M5-C: 构建关键词 chip 标签
+            // 构建关键词 chip 标签
             var chipsHtml = '';
             if (keywords) {
                 var kwList = keywords.split(',');
@@ -357,7 +357,7 @@ var RamariaMemoryView = (function () {
                 }
             }
 
-            // ★ v1.2 M5-C: 构建属性行
+            // 构建属性行
             var attrsHtml = '';
             var attrParts = [];
             if (timePeriod) {
@@ -455,14 +455,14 @@ var RamariaMemoryView = (function () {
                     console.log('[MemoryView] L1 卡片跳转对话: session=' + sessionId.substring(0, 8) +
                         ', persona=' + personaUid);
 
-                    // v1.3 T1: 在离开前保存 L1 面板滚动位置
+                    // 在离开前保存 L1 面板滚动位置
                     var l1Panel = document.getElementById('memory-panel-l1');
                     var scrollTop = l1Panel ? l1Panel.scrollTop : 0;
 
                     _savedState = {
                         personaUid: _currentPersonaUid,
                         activeTab: _activeTab,
-                        l1ScrollTop: scrollTop, // v1.3 T1: 保存滚动位置
+                        l1ScrollTop: scrollTop, // 保存滚动位置
                     };
                     _returningFromChat = true;
 
@@ -573,7 +573,7 @@ var RamariaMemoryView = (function () {
     }
 
 // =========================================================
-// L3 渲染 — 三层性格画像（v1.3 M5-D 重新设计）
+// L3 渲染 — 三层性格画像
 // =========================================================
 
 /**
@@ -793,12 +793,12 @@ var RamariaMemoryView = (function () {
 
             // 使用证据链组件加载数据
             if (typeof RamariaTraitEvidence !== 'undefined') {
-                // v1.3 N5 修复：增加调试日志，便于诊断首次展开空白问题。
+                // 增加调试日志，便于诊断首次展开空白问题。
                 // trait.id=0 时 trait-evidence.js 内部会拦截并显示"暂未就绪"。
                 console.debug('[MemoryView] 请求证据链: persona=' + _currentPersonaUid +
                     ', traitId=' + trait.id + ', label=' + (trait.label || '?'));
 
-                // v1.3 修复：await render（异步）完成后恢复按钮文字
+                // await render（异步）完成后恢复按钮文字
                 RamariaTraitEvidence.render(panel, _currentPersonaUid, trait.id, trait.label || '?')
                     .then(function () {
                         console.debug('[MemoryView] 证据链渲染完成, traitId=' + trait.id);
@@ -1038,13 +1038,13 @@ var RamariaMemoryView = (function () {
     function _registerHooks() {
         var unreg;
 
-        // ★ v1.2 M5-B: enter 钩子接收 Router options（第二个参数）
+        // enter 钩子接收 Router options（第二个参数）
         unreg = RamariaRouter.registerHook('memory', 'enter', function (_viewName, options) {
             console.log('[MemoryView] 进入视图');
 
             // 检查是否从对话页返回（需要恢复状态）
             var shouldRestore = _returningFromChat && _savedState;
-            // v1.3 T1: 在清除 _savedState 前提取滚动位置
+            // 在清除 _savedState 前提取滚动位置
             var savedScrollTop = 0;
             if (shouldRestore) {
                 savedScrollTop = _savedState.l1ScrollTop || 0;
@@ -1056,7 +1056,7 @@ var RamariaMemoryView = (function () {
             render();
 
             _refreshPersonaSelector().then(function () {
-                // ★ v1.2 M5-B: 从对话页返回时恢复之前的 persona 和 tab
+                // 从对话页返回时恢复之前的 persona 和 tab
                 if (shouldRestore) {
                     if (_savedState.personaUid) {
                         var select = $('memory-persona-select');
@@ -1078,7 +1078,7 @@ var RamariaMemoryView = (function () {
                 }
 
                 _loadAllData().then(function () {
-                    // v1.3 T1: 从对话页返回时恢复 L1 滚动位置
+                    // 从对话页返回时恢复 L1 滚动位置
                     if (shouldRestore && savedScrollTop > 0) {
                         // 使用 requestAnimationFrame 确保 DOM 已布局完成
                         requestAnimationFrame(function () {
@@ -1099,7 +1099,7 @@ var RamariaMemoryView = (function () {
         unreg = RamariaRouter.registerHook('memory', 'leave', function () {
             console.log('[MemoryView] 离开视图');
 
-            // ★ v1.2 M5-B: 离开时保存状态快照（仅在前往对话页时由 L1 卡片按钮设置 _returningFromChat）
+            // 离开时保存状态快照（仅在前往对话页时由 L1 卡片按钮设置 _returningFromChat）
             // 若 _returningFromChat 为 true（即将跳转到对话页），保存当前状态
             if (_returningFromChat) {
                 _savedState = {

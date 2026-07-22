@@ -41,7 +41,7 @@ var RamariaChatView = (function () {
  // =========================================================
 
  /**
-  * ★ v1.2 M4-A: 当前会话绑定的 persona_uid（真相源来自后端 session.persona_uid）。
+  * 当前会话绑定的 persona_uid（真相源来自后端 session.persona_uid）。
   * 与下拉框选择的 currentPersonaUid 区别：
   * - currentPersonaUid: 用户通过 UI 选择的目标人格
   * - sessionPersonaUid: 后端 DB session 表中实际记录的 persona_uid
@@ -51,7 +51,7 @@ var RamariaChatView = (function () {
     var _sessionPersonaUid = null;
 
     /**
-     * ★ v1.2 M5-B: 标记是否通过 L1 卡片跳转加载了指定会话。
+     * 标记是否通过 L1 卡片跳转加载了指定会话。
      * 若为 true，_loadInitialData 将跳过自动 persona 匹配和消息加载，
      * 避免覆盖已跳转加载的会话数据。
      */
@@ -388,9 +388,9 @@ var RamariaChatView = (function () {
     }
 
  /**
- * ★ v1.2 M4-A: 切换到指定人格的会话。
+ * 切换到指定人格的会话。
  *
- * 与 v1.1 的核心差异:
+ * 更新：
  * - personaSessions 降级为性能缓存（不依赖其做归属判断）
  * - 加载 session 后以 `session.persona_uid`（后端 DB 真相源）验证归属
  * - 新增 `_sessionPersonaUid` 追踪，与 Store.sessionPersonaUid 同步
@@ -412,7 +412,7 @@ var RamariaChatView = (function () {
             try {
                 var session = await RamariaApi.session.get(cachedSessionId);
 
- // ★ v1.2: 验证后端真相源——session.persona_uid 是否与目标人格匹配
+ // 验证后端真相源——session.persona_uid 是否与目标人格匹配
                 var dbPersonaUid = session ? (session.persona_uid || null) : null;
 
                 if (dbPersonaUid === personaUid) {
@@ -440,7 +440,7 @@ var RamariaChatView = (function () {
                             + ' 归属正确但无消息');
                     }
                 } else if (dbPersonaUid === null) {
- // ★ 存量兼容：session.persona_uid 为 NULL（v1.1 及以前创建的旧数据）
+ // 存量兼容：session.persona_uid 为 NULL
  // 此类 session 尚未被后端 persona 绑定逻辑更新，暂时信任缓存
                     _sessionPersonaUid = personaUid;
                     RamariaStore.set('sessionPersonaUid', personaUid);
@@ -524,7 +524,7 @@ var RamariaChatView = (function () {
  // =========================================================
 
  /**
- * ★ v1.2: 将 personaSessions 缓存映射持久化到后端 settings。
+ * 将 personaSessions 缓存映射持久化到后端 settings。
  *
  * 说明:
  * - personaSessions 仅作为性能缓存（非真相源），真相源在后端 sessions.persona_uid。
@@ -532,7 +532,7 @@ var RamariaChatView = (function () {
  * - 失败时仅打印 warn（非关键路径，缓存可在下次正常运行时重建）。
  */
  /**
- * ★ v1.2 修复: 清除指定人格的会话缓存映射（仅内存，不持久化）。
+ * 清除指定人格的会话缓存映射（仅内存，不持久化）。
  *
  * 场景: 保存对话后，_handleSaveSession 清除了 activeSessionId，
  * 但 personaSessions 仍指向已关闭的 session。
@@ -564,7 +564,7 @@ var RamariaChatView = (function () {
     }
 
  /**
- * ★ v1.2: 从后端 settings 恢复 personaSessions 缓存映射。
+ * 从后端 settings 恢复 personaSessions 缓存映射。
  *
  * 说明:
  * - 仅在 cold start（personaSessions 为空）时从后端恢复缓存。
@@ -646,7 +646,7 @@ var RamariaChatView = (function () {
  */
     async function _handleSaveSession() {
         try {
- // ★ v1.2: 获取当前会话绑定的 persona UID——优先 sessionPersonaUid（后端真相源），
+ // 获取当前会话绑定的 persona UID——优先 sessionPersonaUid（后端真相源），
  // 回退下拉框选择值（前端 UI 状态）
             var personaSelect = $('chat-persona-select');
             var personaUid = _sessionPersonaUid || (personaSelect ? personaSelect.value : null);
@@ -688,8 +688,8 @@ var RamariaChatView = (function () {
                 }
             }
 
- // ★ v1.2: 不清屏——保留当前消息。
- // ★ 修复: 清除 personaSessions 缓存映射。否则已关闭的 session 会被
+ // 不清屏——保留当前消息。
+ // 修复: 清除 personaSessions 缓存映射。否则已关闭的 session 会被
  // _loadInitialData 重新激活（尤其是在应用重启/热重载时，
  // _restorePersonaSessions 从后端恢复旧映射导致加载已关闭 session）。
  // 已保存消息仍在 DOM 中可见；下次发送消息时 _handleSend 自动创建新 session。
@@ -781,7 +781,7 @@ var RamariaChatView = (function () {
     async function _handleNewSessionFromReadonly() {
         _setReadonlyMode(false);
 
- // ★ v1.2: 清除当前消息、活跃 session 和会话 persona 绑定
+ // 清除当前消息、活跃 session 和会话 persona 绑定
  // personaSessions 缓存保留（下次发送消息时后端自动创建新 session 并写入 persona_uid）
         RamariaStore.set('messages', []);
         RamariaStore.set('activeSessionId', null);
@@ -824,7 +824,7 @@ var RamariaChatView = (function () {
  // 禁用输入
         _setInputEnabled(false);
 
- // ★ v1.2: 当前人格——优先从 session 真相源读取，回退前端下拉框
+ // 当前人格——优先从 session 真相源读取，回退前端下拉框
         var personaSelect = $('chat-persona-select');
         var personaUid = personaSelect ? personaSelect.value : 'rama-0001';
 
@@ -842,11 +842,11 @@ var RamariaChatView = (function () {
                 sessionId = session.id;
                 RamariaStore.set('activeSessionId', sessionId);
 
- // ★ v1.2: 建立人格→会话缓存映射并持久化（非真相源，仅供下次切换加速查找）
+ // 建立人格→会话缓存映射并持久化（非真相源，仅供下次切换加速查找）
                 RamariaStore.setPersonaSession(personaUid, sessionId);
                 await _persistPersonaSessions();
 
- // ★ v1.2: 新建 session 时同步 sessionPersonaUid（此时 session 刚创建，persona_uid 尚未写入 DB）
+ // 新建 session 时同步 sessionPersonaUid（此时 session 刚创建，persona_uid 尚未写入 DB）
  // 后端 send_message 的 resolve_session 阶段会完成绑定；前端假设绑定成功。
                 _sessionPersonaUid = personaUid;
                 RamariaStore.set('sessionPersonaUid', personaUid);
@@ -1300,7 +1300,7 @@ var RamariaChatView = (function () {
         var select = $('chat-persona-select');
         if (!select) return;
 
-        // ★ v1.2 M5-B: 保存当前选中值（silent 模式下保留）
+        // 保存当前选中值（silent 模式下保留）
         var previousValue = silent ? select.value : null;
 
         try {
@@ -1342,7 +1342,7 @@ var RamariaChatView = (function () {
     function _registerHooks() {
         var unreg;
 
-        // ★ v1.2 M5-B: enter 钩子接收 Router options（第二个参数）
+        // enter 钩子接收 Router options（第二个参数）
         // options 可能包含 { sessionId, personaUid, fromView } 等跨视图传递参数
         unreg = RamariaRouter.registerHook('chat', 'enter', function (_viewName, options) {
             console.log('[ChatView] 进入视图' +
@@ -1361,13 +1361,13 @@ var RamariaChatView = (function () {
  // 首次渲染
             render();
 
- // ★ v1.2 M5-B: 若来自记忆页，显示面包屑导航
+ // 若来自记忆页，显示面包屑导航
             _handleBreadcrumb(options);
 
- // ★ v1.2 M5-A: 初始化 SessionDrawer 组件
+ // 初始化 SessionDrawer 组件
             _initSessionDrawer();
 
- // ★ v1.2 M5-B: 若有目标 sessionId（来自 L1 卡片跳转），加载该会话
+ // 若有目标 sessionId（来自 L1 卡片跳转），加载该会话
             // 注意：必须 await 完成后再执行 _loadInitialData，
             // 否则 persona selector 的自动匹配可能覆盖跳转加载的会话。
             _handleSessionJump(options).then(function () {
@@ -1431,10 +1431,10 @@ var RamariaChatView = (function () {
                 }
             }
 
- // ★ v1.2 M5-A: 销毁 SessionDrawer 组件
+ // 销毁 SessionDrawer 组件
             _destroySessionDrawer();
 
- // ★ v1.2 M5-B: 移除面包屑（避免残留到其他视图）
+ // 移除面包屑（避免残留到其他视图）
             _removeBreadcrumb();
 
  // 清理 Tauri 事件监听
@@ -1453,7 +1453,7 @@ var RamariaChatView = (function () {
     }
 
  // =========================================================
- // ★ v1.2 M5-A: SessionDrawer 集成
+ // SessionDrawer 集成
  // =========================================================
 
  /**
@@ -1513,7 +1513,7 @@ var RamariaChatView = (function () {
     }
 
  // =========================================================
- // ★ v1.2 M5-B: 面包屑导航 + 会话跳转
+ // 面包屑导航 + 会话跳转
  // =========================================================
 
  /**
@@ -1687,7 +1687,7 @@ var RamariaChatView = (function () {
  // =========================================================
 
  /**
- * ★ v1.2 M5-A: 当用户在 SessionDrawer 中点击某个会话项时调用。
+ * 当用户在 SessionDrawer 中点击某个会话项时调用。
  *
  * 流程:
  * 1. 从后端加载该 session 的完整详情（含消息列表）。
@@ -1797,7 +1797,7 @@ var RamariaChatView = (function () {
 
     async function _loadInitialData() {
         try {
- // ★ v1.2 M5-B: 若已通过 L1 卡片跳转加载了会话，跳过自动匹配和消息加载
+ // 若已通过 L1 卡片跳转加载了会话，跳过自动匹配和消息加载
  // 仅刷新 persona 选择器（下拉框可能不含跳转 persona），保留已加载的会话数据。
             if (_sessionJumped) {
                 console.log('[ChatView] 已通过跳转加载会话，跳过自动 persona 匹配');
@@ -1887,7 +1887,7 @@ var RamariaChatView = (function () {
                         _renderAllMessages();
                         loaded = true;
 
- // ★ v1.2: 从后端 session.persona_uid 读取真相源并同步到 Store
+ // 从后端 session.persona_uid 读取真相源并同步到 Store
                         var dbPersona = session.persona_uid || null;
                         if (dbPersona) {
                             _sessionPersonaUid = dbPersona;

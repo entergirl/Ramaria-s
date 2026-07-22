@@ -2,7 +2,7 @@
 //!
 //! 设计特点:
 //! - 事件提取 Prompt: 从多条 L1 摘要中提取结构化事件（11 个推断属性）
-//! - v1.3 M3: 支持注入补充上下文段落（CompositeIndex 检索结果），标注防编造约束
+//! - 支持注入补充上下文段落（CompositeIndex 检索结果），标注防编造约束
 //! - Paraphrase Prompt: 将态度的自然语言去情境化重述
 //! - 严格 JSON 数组输出格式约束，引导 LLM 生成合规事件
 //! - 字段约束（五档 confidence/salience/valence/share，三选一 presentation）嵌入 Prompt
@@ -137,7 +137,7 @@ pub const EVENT_EXTRACTION_PROMPT: &str = r#"你是一个事件提取助手。�
 请输出上述 JSON 格式（含 events 和 relations）："""#;
 
 // =========================================================
-// 补充上下文段落模板（v1.3 M3）
+// 补充上下文段落模板
 // =========================================================
 
 /// 补充上下文段落的标题/说明。
@@ -202,14 +202,11 @@ pub fn build_event_extraction_prompt(l1_formatted: &str) -> String {
     EVENT_EXTRACTION_PROMPT.replace("{l1_summaries}", l1_formatted)
 }
 
-/// v1.3 D9 修复：构建事件提取 Prompt，将"用户"替换为 persona 显示名称。
+/// 构建事件提取 Prompt，将"用户"替换为 persona 显示名称。
 ///
 /// 用法:
 /// - 导入场景中，L2 事件提取 Prompt 的"用'用户'指代"应替换为实际 persona 名称。
 /// - 正常对话场景仍可用 `build_event_extraction_prompt`（保持"用户"）。
-///
-/// v1.3 T2 修复：新增 `other_persona_name` 参数，当已知对话另一方时注入角色提示，
-/// 帮助 LLM 正确区分"用户"与"对话另一方"的行为归属。
 ///
 /// 参数:
 /// - `l1_formatted`: 同 `build_event_extraction_prompt`。
@@ -229,7 +226,7 @@ pub fn build_event_extraction_prompt_for_persona(
     let mut prompt = build_event_extraction_prompt(l1_formatted);
     prompt = prompt.replace("用户", persona_name);
 
-    // v1.3 T2: 注入对话另一方角色提示，帮助 LLM 区分行为归属
+    // 注入对话另一方角色提示，帮助 LLM 区分行为归属
     if let Some(other) = other_persona_name {
         let role_hint = format!(
             "\n\n【当前分析对象的对话方：{other}】\
@@ -281,10 +278,8 @@ pub fn build_event_extraction_prompt_with_context(
     prompt
 }
 
-/// v1.3 D9 修复：构建带补充上下文的事件提取 Prompt，
+/// 构建带补充上下文的事件提取 Prompt，
 /// 将"用户"替换为 persona 显示名称。
-///
-/// v1.3 T2 修复：新增 `other_persona_name` 参数，注入角色提示。
 ///
 /// 参数:
 /// - 同 `build_event_extraction_prompt_with_context`。
@@ -302,7 +297,6 @@ pub fn build_event_extraction_prompt_with_context_for_persona(
     let mut prompt = build_event_extraction_prompt_with_context(l1_formatted, context_docs);
     prompt = prompt.replace("用户", persona_name);
 
-    // v1.3 T2: 注入对话另一方角色提示
     if let Some(other) = other_persona_name {
         let role_hint = format!(
             "\n\n【当前分析对象的对话方：{other}】\
@@ -450,7 +444,7 @@ mod tests {
     }
 
     // =========================================================
-    // build_event_extraction_prompt_with_context 测试（v1.3 M3）
+    // build_event_extraction_prompt_with_context 测试
     // =========================================================
 
     use crate::event::context_retriever::ContextDocument;

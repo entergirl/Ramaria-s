@@ -4,7 +4,7 @@
 //! - `KeywordGraph`: 基于邻接表的无向加权图，节点为 L1Item 精简视图，边为 Jaccard 相似度
 //! - `build_jaccard_graph()`: 对 L1 对计算关键词 Jaccard 相似度，仅保留 ≥ θ_sim 的边
 //! - `find_connected_components()`: BFS 求所有连通分量，返回节点索引的向量列表
-//! - `try_bisect_component()`: v1.3 模块度 Q 贪心二分，用于拆分过大连通分量
+//! - `try_bisect_component()`: 模块度 Q 贪心二分，用于拆分过大连通分量
 //! - `split_large_components()`: 递归应用二分直到所有分量 ≤ max_cluster_size
 //! - 时间复杂度: 建图 O(n²·k)，BFS O(n + m)，二分 O(n²·m) per component
 //! - 纯计算模块，零 I/O，零 async，可独立单元测试
@@ -209,7 +209,7 @@ impl Default for KeywordGraph {
 }
 
 // =========================================================
-// 模块度 Q 贪心二分拆分（v1.3 M2-C）
+// 模块度 Q 贪心二分拆分
 // =========================================================
 
 /// 对超过 `max_cluster_size` 的连通分量递归执行模块度 Q 二分拆分。

@@ -78,10 +78,7 @@ impl QqImporter {
             }
 
             // 创建历史 session（已关闭）
-            // ★ v1.2 修复: session.persona_uid = 导入的目标人格（other_persona_uid）
-            // 理由: 会话代表"与导入角色之间的对话"，应归属到导入人格而非默认人格。
-            // 消息级别的 persona_uid 仍按发送者分别分配（self/other），
-            // 但 session 级别统一归属到导入人格，使 SessionDrawer 和记忆管线正确筛选。
+
             let db_session = ramaria_storage::repo::sessions::create_historical(
                 pool,
                 session.started_at,

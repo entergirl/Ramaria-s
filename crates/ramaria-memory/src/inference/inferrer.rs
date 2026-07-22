@@ -87,7 +87,7 @@ pub struct InferredTrait {
     pub related: Option<String>,
     pub seq: i32,
     /// LLM 推断的置信度（0.0..1.0）。
-    /// v1.3 N3: 从 LLM JSON 输出中解析，不再统一硬编码 0.5。
+    /// 从 LLM JSON 输出中解析，不再统一硬编码 0.5。
     /// 若 LLM 未提供此字段，默认回退为 None（由后处理校准）。
     pub confidence: Option<f64>,
 }
@@ -107,7 +107,7 @@ pub struct InferenceResult {
 // Prompt 构建
 // =========================================================
 
-/// 格式化分类统计为 LLM 可读文本（v1.3 适配：说明校准权重来源）。
+/// 格式化分类统计为 LLM 可读文本。
 ///
 /// 说明:
 /// - n_eff 不再等于原始事件数，而是校准权重之和：w_i = salience_cal × confidence_factor × situation_multiplier × source_support。
@@ -187,7 +187,7 @@ fn format_representative_events(events: &[RepresentativeEvent], max_display: usi
     s
 }
 
-/// 格式化动机统计为 LLM 可读文本（v1.3 新增：动机维度）。
+/// 格式化动机统计为 LLM 可读文本。
 ///
 /// 策略:
 /// - 按 n_eff 降序展示动机标签及其统计指标。
@@ -391,9 +391,9 @@ pub fn build_step2_prompt(
 
 /// 构建 Step 3 prompt：合成结构化性格画像。
 ///
-/// v1.3 N4 修复：增加"话题 vs 性格"语义区分指令，防止 LLM 将
+/// 增加"话题 vs 性格"语义区分指令，防止 LLM 将
 /// 对话话题名称（如"沉浸体验""系统逻辑"）当作性格标签输出。
-/// v1.3 N3 修复：增加 confidence 差异化指导，要求 LLM 根据证据量
+/// 增加 confidence 差异化指导，要求 LLM 根据证据量
 /// 给出不同的置信度，避免所有 trait 置信度统一。
 pub fn build_step3_prompt(
     analysis: &ConsistencyAnalysis,
@@ -477,7 +477,7 @@ pub fn mock_infer(stats: &StatsSummary, persona_uid: &str) -> InferenceResult {
     for cat in &stats.categories {
         let sufficient = cat.n_eff >= 5.0;
 
-        // v1.3 N4 修复：话题特征词黑名单。
+        // 话题特征词黑名单。
         // L2 事件提取产出的 category 是话题聚类结果（如"沉浸体验""系统逻辑"），
         // 而非性格维度。若统计指标不足以提炼出性格信号，标记为"insufficient_data"
         // 而非直接用话题名生成伪性格标签。
@@ -572,7 +572,7 @@ pub fn mock_infer(stats: &StatsSummary, persona_uid: &str) -> InferenceResult {
         }
     }
 
-    // ---- v1.3 新增：动机维度的点缀特征 ----
+    // ---- 动机维度的点缀特征 ----
     // 从动机统计中提取显著的动机驱动模式作为点缀 trait
     for motive_stat in stats.motive_stats.iter().take(3) {
         // 仅对 n_eff >= 2.0 的动机生成信号
@@ -608,7 +608,7 @@ pub fn mock_infer(stats: &StatsSummary, persona_uid: &str) -> InferenceResult {
     let mut traits = Vec::new();
     let now = ramaria_core::types::now_ms();
 
-    // v1.3 修复：根据分类统计指标动态计算 evidence 和 consistency，
+    // 根据分类统计指标动态计算 evidence 和 consistency，
     // 避免所有 trait 使用相同的硬编码初始值（导致统一 47% 置信度）
     let compute_mock_evidence = |n_eff: f64| n_eff.clamp(0.0, 100.0);
     let compute_mock_consistency = |valence_std: f64, share_std: f64| {
@@ -1054,7 +1054,7 @@ mod tests {
         assert!(result.traits.is_empty());
     }
 
-    // ---- v1.3 新增：动机维度 mock 推断 ----
+    // ---- 动机维度 mock 推断 ----
 
     #[test]
     fn mock_infer_with_motive_stats_generates_motive_traits() {

@@ -2,8 +2,8 @@
 //!
 //! 设计特点:
 //! - 使用 MockStorage + Mock LLM 验证 L3 Phase B/C 全链路
-//! - Phase B: mock LLM 返回 JSON 格式的三步推断结果
-//! - Phase C: 验证置信度更新 + 证据链记录
+//! - mock LLM 返回 JSON 格式的三步推断结果
+//! - 验证置信度更新 + 证据链记录
 //! - 覆盖正常路径、降级路径、首轮推断路径
 //! - 验证 System Prompt Block A 在 L3 推断后包含结构化性格标签
 
@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// 多步 Mock LLM：按顺序返回预设回复列表，每次调用 consume 一项。
 ///
-/// 用于模拟 Phase B 三步推断中 LLM 按 Step 1→2→3 返回不同 JSON。
+/// 用于模拟三步推断中 LLM 按 Step 1→2→3 返回不同 JSON。
 struct MultiStepLlm {
     replies: Vec<String>,
     call_count: AtomicUsize,
@@ -113,7 +113,7 @@ impl LlmProvider for MultiStepLlm {
 }
 
 // =========================================================
-// Phase B 三步推断的测试用 JSON 回复
+// 三步推断的测试用 JSON 回复
 // =========================================================
 
 /// Step 1 回复：逐分类性格信号。
@@ -313,7 +313,7 @@ fn make_test_events(persona_uid: &str) -> Vec<MemoryEvent> {
 // T-V12-3-008: L3 全管线端到端测试
 // =========================================================
 
-/// 测试 Phase B 使用 mock LLM 产出 PersonalityTrait 记录并写入 DB。
+/// 测试使用 mock LLM 产出 PersonalityTrait 记录并写入 DB。
 #[tokio::test]
 async fn phase_b_produces_traits_with_mock_llm() {
     let storage = Arc::new(MockStorage::new());
@@ -355,7 +355,7 @@ async fn phase_b_produces_traits_with_mock_llm() {
     }
 }
 
-/// 测试 Phase B 在 LLM 失败时降级至 mock_infer。
+/// 测试在 LLM 失败时降级至 mock_infer。
 #[tokio::test]
 async fn phase_b_falls_back_to_mock_infer_on_llm_error() {
     let storage = Arc::new(MockStorage::new());
@@ -381,7 +381,7 @@ async fn phase_b_falls_back_to_mock_infer_on_llm_error() {
     assert!(!saved_traits.is_empty());
 }
 
-/// 测试 Phase B 增量推断（有旧 traits 时的 diff 更新）。
+/// 测试增量推断（有旧 traits 时的 diff 更新）。
 #[tokio::test]
 async fn phase_b_incremental_update_with_existing_traits() {
     let storage = Arc::new(MockStorage::new());
@@ -423,13 +423,13 @@ async fn phase_b_incremental_update_with_existing_traits() {
     assert!(result.traits_saved > 0, "应有新增 trait");
 }
 
-/// 测试 Phase C 置信度更新 + 证据链记录。
+/// 测试置信度更新 + 证据链记录。
 #[tokio::test]
 async fn phase_c_confidence_and_evidence() {
     let storage = Arc::new(MockStorage::new());
     let persona_uid = "rama-0001";
 
-    // 先运行 Phase B 创建 traits
+    // 先运行创建 traits
     let multi_llm = MultiStepLlm::new(vec![step1_reply(), step2_reply(), step3_reply()]);
     let stats = make_stats_summary();
     let config = InferrerConfig::default();
@@ -440,7 +440,7 @@ async fn phase_c_confidence_and_evidence() {
     // 准备测试事件
     let events = make_test_events(persona_uid);
 
-    // 运行 Phase C
+    // 运行置信度更新
     let phase_c = run_phase_c_update(
         &*storage,
         persona_uid,
@@ -491,7 +491,7 @@ async fn list_traits_by_persona_returns_traits_after_l3() {
     let before = storage.list_traits_by_persona(persona_uid).await.unwrap();
     assert!(before.is_empty(), "推断前应无 trait");
 
-    // 运行 Phase B
+    // 运行推断
     let multi_llm = MultiStepLlm::new(vec![step1_reply(), step2_reply(), step3_reply()]);
     let stats = make_stats_summary();
     let config = InferrerConfig::default();

@@ -63,7 +63,7 @@ pub struct App {
     pub(crate) llm: Mutex<Arc<dyn LlmProvider>>,
     /// 嵌入模型 provider（Mutex 包裹，None 表示未配置）
     pub(crate) embedding: Mutex<Option<Arc<dyn EmbeddingProvider>>>,
-    /// 内存检索器（v1.3 P-3: RwLock 替代 Mutex，允许多读并发）
+    /// 内存检索器（RwLock 替代 Mutex，允许多读并发）
     pub(crate) retriever: Arc<RwLock<Retriever>>,
     /// 应用配置
     pub(crate) config: ramaria_core::config::RamariaConfig,
@@ -106,7 +106,7 @@ impl App {
         let retriever = Arc::new(RwLock::new(Retriever::new()));
         let lifecycle = Arc::new(SessionLifecycle::new(config.clone()));
 
-        // v1.2: 注入 Retriever 到 SessionLifecycle，启用 L1 增量索引
+        // 注入 Retriever 到 SessionLifecycle，启用 L1 增量索引
         lifecycle.set_retriever(Arc::clone(&retriever));
 
         let emb_info = embedding
@@ -275,7 +275,7 @@ impl App {
 
     /// 生成 L1 摘要但跳过 L2 级联（批量导入用）。
     ///
-    /// v1.3 D9: 支持 `user_prefix` / `assistant_prefix` 覆盖，
+    /// 支持 `user_prefix` / `assistant_prefix` 覆盖，
     /// 导入场景传 `Some("")` 避免前缀与 content 中的 `[sender_name]` 重复。
     pub async fn regenerate_l1_no_cascade(
         &self,

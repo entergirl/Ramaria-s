@@ -73,7 +73,7 @@ pub use rag::{
 // L1 Summarizer
 pub use l1::{L1Summarizer, L1SummarizerConfig};
 
-// Event Extractor & TopicBatcher (v1.3)
+// Event Extractor & TopicBatcher
 pub use event::{
     DegradeConfig, EventExtractor, EventExtractorConfig, L1Item, ParaphraseConfig,
     TopicBatcherConfig, TopicCluster, build_degraded_event, generate_paraphrase,
@@ -94,7 +94,7 @@ pub use inference::{
     // LLM 推断 + 后处理
     CategorySignal,
     CategoryStats,
-    // 因果链特征（v1.3 A8）
+    // 因果链特征（A8）
     CausalChainFeatures,
     ClassifiedEvents,
     ClusterAssignment,
@@ -105,7 +105,7 @@ pub use inference::{
     ConfidenceSummary,
     ConsistencyAnalysis,
     CrossCategoryMetrics,
-    // v1.3 M5-A: 跨版本簇匹配
+    // 跨版本簇匹配
     CrossVersionMatch,
     CrossVersionMatchResult,
     CyclePattern,
@@ -202,7 +202,7 @@ pub use inference::{
     weighted_variance,
 };
 
-// Keyword 关键词处理（v1.3 新增）
+// Keyword 关键词处理
 pub use keyword::{AliasManager, BigramWithDictionaryNormalizer};
 
 // Init 冷启动

@@ -65,7 +65,7 @@ impl StorageBackend for SqliteStorage {
     async fn list_messages(&self, session_id: Uuid) -> RamariaResult<Vec<Message>> {
         repo::messages::list_by_session(&self.pool, session_id).await
     }
-    /// v1.3 (P-6): 覆写为高效 SQL 分页（`ORDER BY created_at DESC LIMIT ? OFFSET ?`）。
+    /// 覆写为高效 SQL 分页（`ORDER BY created_at DESC LIMIT ? OFFSET ?`）。
     async fn list_messages_paginated(
         &self,
         session_id: Uuid,
@@ -204,7 +204,7 @@ impl StorageBackend for SqliteStorage {
     ) -> RamariaResult<Vec<PersonaFact>> {
         repo::facts::list_by_persona(&self.pool, persona_uid, field).await
     }
-    /// v1.3 P-4 修复: 使用 GROUP BY 单查询替代 N+1 循环。
+    /// 使用 GROUP BY 单查询替代 N+1 循环。
     async fn count_all_facts_for_persona(
         &self,
         persona_uid: &str,
@@ -298,7 +298,7 @@ impl StorageBackend for SqliteStorage {
     }
 
     // =========================================================
-    // Keyword Refs（关键词倒排索引，v1.3 新增）
+    // Keyword Refs（关键词倒排索引）
     // =========================================================
     async fn insert_keyword_ref(
         &self,
@@ -566,7 +566,7 @@ mod tests {
     }
 
     // =========================================================
-    // v1.2: Session-Persona 绑定测试
+    // Session-Persona 绑定测试
     // =========================================================
 
     /// 创建 session 时可传入 persona_uid，get 时正确返回。
@@ -814,7 +814,7 @@ mod tests {
         assert_eq!(facts[0].id, fact_id);
     }
 
-    /// v1.3 P-4 修复: 验证 GROUP BY 查询正确统计各字段数量。
+    /// 验证 GROUP BY 查询正确统计各字段数量。
     #[tokio::test]
     async fn count_all_facts_for_persona_grouped() {
         let storage = setup().await;
@@ -885,7 +885,7 @@ mod tests {
         assert_eq!(total, 3);
     }
 
-    /// v1.3 P-4 修复: 验证无记录 persona 返回全 0。
+    /// 验证无记录 persona 返回全 0。
     #[tokio::test]
     async fn count_all_facts_for_persona_empty() {
         let storage = setup().await;

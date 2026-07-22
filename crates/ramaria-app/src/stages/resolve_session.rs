@@ -114,7 +114,7 @@ impl PipelineStage for StageResolveSession {
                     "无 session_id，创建新 session"
                 );
 
-                // v1.2: 创建 session 时绑定当前 persona_uid
+                // 创建 session 时绑定当前 persona_uid
                 let s = ctx
                     .storage
                     .create_session(input.persona_uid.as_deref())
@@ -132,7 +132,7 @@ impl PipelineStage for StageResolveSession {
             }
         };
 
-        // v1.2: Session-Persona 绑定——优先使用 session 中的 persona_uid
+        // Session-Persona 绑定——优先使用 session 中的 persona_uid
         // 若 session 有 persona_uid（DB 中已绑定），覆盖前端传参
         // 若 session 无 persona_uid（存量数据），保持前端传参不变
         if session.persona_uid.is_some() {

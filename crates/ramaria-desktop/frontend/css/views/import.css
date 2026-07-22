@@ -392,13 +392,13 @@
     color: var(--text-secondary);
 }
 
-/* v1.2: 增强型进度条容器——包含进度条 + 信息行 */
+/* 增强型进度条容器——包含进度条 + 信息行 */
 .import-progress-bar-enhanced {
     margin-top: var(--space-4);
     text-align: left;
 }
 
-/* v1.2: 进度条轨道——最小高度 8px，适配大型导入场景的可见性 */
+/* 进度条轨道——最小高度 8px，适配大型导入场景的可见性 */
 .import-progress-track {
     height: 10px;               /* ≥ 8px 要求 */
     background: var(--gray-100);
@@ -407,7 +407,7 @@
     margin-bottom: var(--space-2);
 }
 
-/* v1.2: 进度信息行——百分比 + 会话计数器 + ETA 在同一行 */
+/* 进度信息行——百分比 + 会话计数器 + ETA 在同一行 */
 .import-progress-info {
     display: flex;
     align-items: center;
@@ -545,13 +545,13 @@
     margin-top: var(--space-4);
 }
 
-/* v1.1 修复: 完成页导航按钮 —— 主操作靠右，辅助操作靠左 */
+/* 完成页导航按钮 —— 主操作靠右，辅助操作靠左 */
 .import-actions #btn-new-import {
     margin-right: auto; /* 将"导入另一个文件"推到最左侧 */
 }
 
 /* ═════════════════════════════════════════════════
-   v1.1 修复: 完成页警告条 / 信息条
+   完成页警告条 / 信息条
    ═════════════════════════════════════════════════ */
 .import-warning-banner {
     display: flex;
@@ -616,7 +616,7 @@
     line-height: 1.6;
 }
 
-/* v1.1 修复: 导入进度百分比 */
+/* 导入进度百分比 */
 .import-progress-pct {
     text-align: center;
     font-size: 12px;
@@ -673,7 +673,7 @@
     color: oklch(0.75 0.14 85);
 }
 
-/* v1.2: 导入进度增强——暗色主题适配 */
+/* 导入进度增强——暗色主题适配 */
 [data-theme="dark"] .import-progress-track {
     background: var(--gray-700);
 }
