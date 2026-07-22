@@ -7,6 +7,98 @@
 
 ---
 
+## [1.3.0] - 2026-07-22
+
+### 核心特性
+
+#### TopicBatcher 主题聚类分批
+
+替代了之前"按时间截取 N 条"的 L1→L2 事件提取批次组织方式。新的 TopicBatcher 通过关键词 Jaccard 图（α=0.5 与 L1 embedding 语义融合，无 embedding 时自动 α=1.0 降级）构建簇关系，经连通分量 BFS 后再以模块度 Q 二分递归拆分超大分量（> 25 条时 Q < 0.3 停止）。小于 3 条的碎片簇进入 Pending Buffer，同类积累到阈值后自动提升为正式簇，30 天未归并则降级合并；孤立节点做语义吸附归入最近簇。最终各簇按平均 salience 降序排列。相关代码位于 `ramaria-memory/src/event/batcher/`（mod.rs ~1100 行、graph.rs ~600 行、buffer.rs ~500 行），新增约 78 个单元测试覆盖图构建、模块度拆分、缓冲区管理、语义融合和端到端编排。
+
+#### 关键词体系 Newtype 升级
+
+在 `ramaria-core` 中新增 `KeywordToken` Newtype（自动 trim + 英文小写 + 非空校验 + 256 字符上限），配套 `KeywordSet` 去重有序集合、`KeywordStatus` 三态枚举（Canonical / Alias / Pending）和 `KeywordRef` 倒排引用枚举。归一化方面，`ramaria-memory` 新增 `BigramWithDictionaryNormalizer`（最大正向匹配，词典按长度降序 + 别名解析）和 `AliasManager`（正向/反向双缓存，文本相似度 + 高使用量别名反转）。Schema 层面新建 `keyword_refs` 倒排索引表，同时激活了 v1.2 预埋的 `keyword_pool.canonical_id` 和 `alias_status` 列。L1 Summarizer 的关键词输出和 BM25 分词器均已接入新体系。新增约 95 个单元测试。
+
+#### L1 evidence_notes 双层摘要
+
+`memory_l1` 表新增 `evidence_notes TEXT` 列，L1 Summarizer Prompt 同步增加对应的字符串数组输出字段，`L1SummaryResponse` 以 `Option<Vec<String>>` 接收并兼容缺失字段。后处理对 None、空数组、全短条目（< 5 字符）三种情况做降级处理，仅记 warn 日志，不阻塞 L1 生成。
+
+#### CompositeIndex 三级上下文检索
+
+新增 `ContextRetriever`，在事件提取前为每个 TopicCluster 检索历史上下文，按精确匹配 → 子串匹配 → 语义模糊三级递进编排（嵌入模型不可用时自动跳过语义层）。检索到的历史上下文以独立段落注入提取 Prompt，附"仅供背景参考，不得据此编造新事件"的约束和去重指令。为支撑这一功能，Retriever 新增了 `search_exact()`（内存 HashMap 精确命中）和 `search_substring()`（BM25 bigram 子串匹配）两个公开方法。
+
+#### 事件提取 Prompt 改版：motives 激活与事件关系
+
+L2 EventExtractor Prompt 输出格式从纯数组升级为 `{"events": [...], "relations": [...]}` 结构体。每事件新增 `motives` 字段（Fundamental Motives Framework 七类动机候选池），`memory_events.motives` 列从硬编码 None 改为 LLM 输出写入。事件关系 6 种类型（CausedBy / PartOf / RelatedTo / ContinuedBy / Contradicts / Timeline）正式激活写入，含索引边界校验、自引用过滤和非致命错误降级。解析层新增 `EventRelationOutput` / `EventExtractionResponse` / `ParsedExtractionResult` 三个类型，采用四步 JSON 解析确保鲁棒性。
+
+#### Phase A 统计方法深化
+
+校准权重链从简单 `salience × situation_multiplier` 升级为四因子乘积 `salience^cal × confidence_factor × situation_multiplier × source_support`。准入机制从单一的 confidence ≥ 0.6 硬截断改为 confirmed / tentative / discarded 三轨动态准入，tentative 事件跨批次复现时自动提升至 confirmed。收缩估计从单一全局先验升级为分层选择：Base/Primary 层使用跨领域全局先验，Accent 层使用领域/主题簇先验，Phase B 的 layer 标注反哺 Phase A 选择。新增 motives 维度统计（`MotiveStats` + `group_by_motive()`），统计文本注入 Phase B Prompt。旧版兼容路径通过 `use_calibrated_weights = false` 保留。相关代码主要位于 `ramaria-memory/src/inference/stats.rs`、`shrink.rs` 和 `orchestrator.rs`，新增约 78 个单元测试。
+
+#### A8 因果链分析
+
+新增 `ramaria-memory/src/inference/causal.rs`，实现了因果链特征提取流程：基于 CausedBy 关系构建有向图，从入度为 0 的源节点 DFS 寻最长因果路径，对事件类别序列分组检测循环模式（≥ 2 次出现），去重后保留前 5 个模式。特征文本通过 `format_causal_features_text()` 注入 Phase B Step 1 Prompt。`StorageBackend` 新增 `list_event_relations_by_persona` 方法支撑数据查询。新增约 19 个单元测试。
+
+#### 跨版本簇匹配
+
+Phase A 聚类后为每个簇生成语义标签（从核心样本 paraphrase 按中文标点切分短语 → 频次统计 → 前 3 个高频短语拼接），经 embedding 向量化后持久化到 `persona_cluster_snapshots`（新增 `semantic_label` + `semantic_label_embedding` 列）。跨版本匹配以 cosine similarity 比较新旧标签。新增约 12 个单元测试。
+
+#### Phase B/C 适配新统计指标
+
+Phase B Step 2 Prompt 增加了"贝叶斯收缩后"的标注说明，增强不同分类间统计值的可比性。Step 1 新增"话题 vs 性格"语义区分指令。Step 3 新增置信度差异化指导（n_eff ≥ 10 → 0.7-0.9，5-10 → 0.4-0.7，< 5 → 0.2-0.4）。Phase C 的漂移检测从三维度扩展为四维度（新增 `salience_drift` + `confidence_drift`），置信度更新适配了新校准权重链（每条证据贡献 = `calibrated_weight × |score| × decay`），事件到 trait 的分配改为按最长公共子串比例匹配而非全量广播。
+
+#### 前端 L3 三层性格展示
+
+新增 `trait-evidence.js`（~290 行）和 `trait-evidence.css`（~290 行），实现可展开的证据链组件。L3 Tab 按 base/primary/accent 三层分区渲染，卡片布局配合不同左边框色区分层级，顶部设数据状态指示器（可信/初步/数据不足 + n_total_eff）。后端新增 `get_personality_profile()`、`get_trait_evidence()` 和 `get_profile_status()` 三个 Tauri 命令，配套 6 个 View 结构体支撑 trait → event → L1 → evidence_notes 完整溯源链的传输。CSS 约 240 行新样式，含置信度色条（绿 ≥ 0.8 / 黄 0.6-0.8 / 橙 < 0.6）和暗色模式适配。
+
+### 审查修复
+
+#### 安全
+
+导入路径增加了 `canonicalize` 解析和符号链接跨越白名单目录的拒绝校验，覆盖 `analyze_qq_chat`、`detect_qq_format`、`import_qq_chat` 三个入口。导出路径限制在用户文档目录（Documents / Downloads / Desktop）内。Prompt injection 防御方面，memory_context 以 `<memory_context>` XML 标签包裹，`sanitize_user_message()` 检测 10 种注入模式并追加防御性前缀。
+
+#### 可用性
+
+新增 LLM health_check 启动探测（轻量 GET，5s 超时，3 次重试间隔 2s），失败时非阻塞地置为 Degraded 状态。将嵌入推理从持锁执行改为 clone Arc 后锁外执行（< 1μs 持锁时间）。清理了 README 和 CHANGELOG 中残留的 Qdrant 引用，全部替换为 BruteForceIndex，并删除了 `qdrant_poc.rs`。`facts` 统计从多次循环查询改为单条 GROUP BY SQL。SSE 增加了单行 10KB 截断、无换行缓冲区插入和 120s 整体超时三个限制。
+
+#### 性能
+
+向量索引增加了基于查询向量量化哈希的 128 条目 LRU 缓存，索引变更时自动清空。检索器从 `Mutex` 改为 `RwLock`，允许多读并发。内部事件 channel 从无界改为有界（容量 64），`try_send` 满时丢弃并记 warn。消息加载改为分页，每页 20 条，200 条上限，6000 字符预算。
+
+#### 代码拆分
+
+`session_lifecycle.rs`（~940 行）拆分为 `session_lifecycle/` 目录 4 文件：`mod.rs`（编排入口 ~320 行）、`idle.rs`（~155 行）、`l1_generate.rs`（~320 行）、`l2_l3_scheduler.rs`（~380 行）。`app.rs` 提取出 `app_setup.rs`（run_setup / probe_health_with_retry / refresh_setup_state）和 `app_privacy.rs`（check_privacy / confirm_privacy），主文件降至 ~441 行。
+
+### 测试修复
+
+经过三轮集中的端到端测试与回归修复（覆盖 QQ 7083 条消息的导入全流程），共修复 20 项缺陷，主要集中在以下几个模块：
+
+**L1 摘要生成**：系统人格不再显示全部导入 LLM 的 L1 记录；导入时为对话双方各生成一份独立的 L1 摘要；L1 空前缀和 persona 名称替换问题跨 6 个文件修复。
+
+**L2 事件提取**：事件关键词限制为中文；态度推断在闲聊场景中也能正常触发；移除了 L1 降级查询 fallback 导致的噪声；事件角色关系通过 Prompt 增加角色区分规则和 `other_persona_name` 参数来解决交叉污染。
+
+**L3 性格推断**：置信度从统一 50% 改为基于 n_eff 区间的差异化指导；trait 标签从话题名改为真正的性格描述（Prompt 增加语义区分指令 + mock_infer 话题词黑名单）；置信度完全相同的问题通过 Phase C 改用 `compute_event_trait_relevance`（最长公共子串比例）匹配事件到 trait 来解决。
+
+**前端交互**：L1 滚动位置通过 `_savedState.l1ScrollTop` + `requestAnimationFrame` 恢复；证据面板首次展开空白的问题经两轮修复（增加 traitId 参数校验 + async 恢复按钮）解决；应用内人格的聊天口吻通过新增 `SHARED_CHAT_STYLE_RULES` 常量和 `load_persona_toml_fallback` 注入来适配社交平台的表达习惯。
+
+### Schema 变更
+
+新建 `keyword_refs` 倒排索引表（keyword_id FK→keyword_pool，doc_type，doc_id，persona_uid，weight），含双索引。`memory_l1` 新增 `evidence_notes TEXT` 列。`persona_cluster_snapshots` 新增 `semantic_label TEXT` 和 `semantic_label_embedding BLOB` 列。`keyword_pool.canonical_id` 和 `alias_status` 列从 v1.2 预埋状态正式激活 CRUD。
+
+### 工程改善
+
+全 workspace 测试总数达到 700+（v1.2 基线约 600），新增约 100 个测试，覆盖 M4 全链路集成、关键词倒排索引、TopicBatcher 端到端和 L2→L3 全流程。真实 LLM Smoke Test 在 LM Studio / DeepSeek / OpenAI 三后端各通过一次。新增 `ramaria-core/src/keyword.rs`（~650 行）、`ramaria-memory/src/keyword/` 目录（~1000 行）、`ramaria-memory/src/event/batcher/` 目录（~2200 行）、`ramaria-memory/src/event/context_retriever.rs`（~450 行）、`ramaria-memory/src/inference/causal.rs`（~650 行）。同步更新了 5 份开发文档和 README，将决策 SSOT 升级至 v8.0。
+
+### 破坏性变更
+
+关键词从裸 `String` 升级为 `KeywordToken` newtype，影响所有涉及关键词的公共接口，保留 `From<String>` / `Into<String>` 向后兼容转换。L1→L2 事件提取的批次组织从"按时间截取 N 条"完全重写为 TopicBatcher 语义聚类分批。Phase A 统计权重从简单 `salience × situation_multiplier` 改为四因子校准权重链 + 三轨准入，L3 推断的输入权重和准入门槛均有变化。`StorageBackend` trait 新增了 `list_event_relations_by_persona`、关键词倒排 CRUD、`list_messages_paginated`、`get_all_snapshots_with_embeddings`、`count_all_facts_for_persona`、`list_event_sources_by_event` 等多个方法。
+
+### 已知限制
+
+与 v1.2.0 相同：仅支持 Windows 平台（桌面应用），Linux/macOS 可通过 CLI 使用；应用图标为占位文件；不支持 LLM 对话"重新生成"功能；ONNX 模型需用户手动下载或配置。
+
+---
+
 ## [1.2.0] - 2026-07-07
 
 ### 核心特性
@@ -392,6 +484,7 @@ v1.2 新增：
 
 | 版本 | 日期 | 说明 |
 |------|------|------|
+| [v1.3.0](#130---2026-07-22) | 2026-07-22 | 算法深化：TopicBatcher + 关键词体系 + 校准权重链 + 三轨准入 + 分层收缩 + A8 + motives + L3 展示 + 审查修复 |
 | [v1.2.0](#120---2026-07-07) | 2026-07-07 | 深度打磨：Pipeline 架构重构 + L3 管线贯通 + 前端联动 + 后端修复 |
 | [v1.1.0](#110---2026-06-16) | 2026-06-16 | 首个增量版本：记忆管线接通 + 嵌入模型 + QQ 导入器 |
 | [v1.0.1](#101---2026-06-13) | 2026-06-13 | 紧急修复：全新安装无法启动 |
