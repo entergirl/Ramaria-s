@@ -2095,7 +2095,7 @@ mod tests {
         );
         assert!(!p2.is_empty());
         assert!(p2.contains("base_candidates"));
-        assert!(p2.contains("跨领域一致性"));
+        assert!(p2.contains("跨领域的一致性模式"));
 
         let p3 = build_step3_prompt(&result.consistency, &result.category_signals, &stats);
         assert!(!p3.is_empty());

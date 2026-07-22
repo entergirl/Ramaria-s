@@ -177,7 +177,8 @@ async fn build_structured_prompt(
         return prompt;
     }
 
-    // 正常路径：5-Block 装配
+    // 正常路径：CRISPE 装配
+    let rules = resolve_chat_style_rules(persona);
     let ctx = PromptContext {
         persona: Some(persona.clone()),
         facts,
@@ -189,6 +190,7 @@ async fn build_structured_prompt(
         knowledge_boundary: None,
         current_time_str: Some(chrono::Local::now().format("%Y-%m-%d %H:%M").to_string()),
         weather: None,
+        chat_style_rules: Some(rules), // v2.0: 回复规则作为 Experiment 块注入
     };
 
     let config = PromptConfig::default();
@@ -198,20 +200,10 @@ async fn build_structured_prompt(
         traits = ctx.traits.len(),
         examples = ctx.examples.len(),
         summaries = ctx.recent_session_summaries.len(),
-        "5-Block System Prompt 已装配"
+        "CRISPE System Prompt 已装配"
     );
 
-    let mut prompt = assemble_prompt(&ctx, &config);
-
-    // 注入共享社交平台聊天口吻（所有 persona 默认使用）
-    // rama-0001 的 persona.toml 中已有 E_rules，但导入创建的 persona 缺少此配置。
-    // 此处为所有通过 5-Block 路径装配的 persona 注入默认回复规则，
-    // 确保所有应用内人格使用统一的社交平台聊天口吻。
-    let rules = resolve_chat_style_rules(persona);
-    prompt.push_str("\n\n回复规则:\n");
-    prompt.push_str(&rules);
-
-    prompt
+    assemble_prompt(&ctx, &config)
 }
 
 /// 解析当前 persona 的聊天回复风格规则。

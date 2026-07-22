@@ -315,6 +315,7 @@ impl App {
                 knowledge_boundary: None,
                 current_time_str: Some(chrono::Local::now().format("%Y-%m-%d %H:%M").to_string()),
                 weather: None,
+                chat_style_rules: None, // v2.0: 无自定义规则时使用最小化默认规则
             };
 
             let config = PromptConfig::default();
@@ -323,7 +324,7 @@ impl App {
                 facts = ctx.facts.len(),
                 traits = ctx.traits.len(),
                 examples = ctx.examples.len(),
-                "5-Block System Prompt 已装配"
+                "CRISPE System Prompt 已装配"
             );
             return assemble_prompt(&ctx, &config);
         }
