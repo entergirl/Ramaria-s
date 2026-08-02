@@ -203,43 +203,28 @@ mod tests {
     }
 
     // =========================================================
-    // 测试: budgeted_system_prompt 未设置 → Fatal 错误
+    // 测试: 关键字段未设置 → Fatal 错误
     // =========================================================
 
     #[tokio::test]
-    async fn missing_system_prompt_returns_fatal() {
-        let ctx = simple_context();
-        let stage = StageBuildRequest::new();
-        let mut data = full_data();
-        data.budgeted_system_prompt = None;
+    async fn missing_field_returns_fatal() {
+        let cases: Vec<(&str, fn(&mut PipelineData))> = vec![
+            ("system_prompt", |d| d.budgeted_system_prompt = None),
+            ("backend_config", |d| d.backend_config = None),
+        ];
+        for (label, mutate) in cases {
+            let ctx = simple_context();
+            let stage = StageBuildRequest::new();
+            let mut data = full_data();
+            mutate(&mut data);
 
-        let result = stage.execute(&ctx, data).await;
-        match result {
-            Ok(_) => panic!("should fail with missing system_prompt"),
-            Err(err) => {
-                assert!(!err.is_retryable(), "missing system_prompt should be Fatal");
-                assert_eq!(err.stage(), "BuildRequest");
-            }
-        }
-    }
-
-    // =========================================================
-    // 测试: backend_config 未设置 → Fatal 错误
-    // =========================================================
-
-    #[tokio::test]
-    async fn missing_backend_config_returns_fatal() {
-        let ctx = simple_context();
-        let stage = StageBuildRequest::new();
-        let mut data = full_data();
-        data.backend_config = None;
-
-        let result = stage.execute(&ctx, data).await;
-        match result {
-            Ok(_) => panic!("should fail with missing backend_config"),
-            Err(err) => {
-                assert!(!err.is_retryable());
-                assert_eq!(err.stage(), "BuildRequest");
+            let result = stage.execute(&ctx, data).await;
+            match result {
+                Ok(_) => panic!("should fail with missing {label}"),
+                Err(err) => {
+                    assert!(!err.is_retryable(), "missing {label} should be Fatal");
+                    assert_eq!(err.stage(), "BuildRequest");
+                }
             }
         }
     }

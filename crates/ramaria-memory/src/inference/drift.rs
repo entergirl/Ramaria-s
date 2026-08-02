@@ -37,8 +37,6 @@ impl Default for DriftConfig {
     }
 }
 
-// ---- v1.3 配置传播修复：从 ramaria-core 的可序列化配置创建 ----
-
 impl From<ramaria_core::config::DriftConf> for DriftConfig {
     fn from(conf: ramaria_core::config::DriftConf) -> Self {
         Self {
@@ -135,10 +133,10 @@ pub fn wasserstein_1d(a: &[f64], b: &[f64]) -> f64 {
         return 0.0;
     }
 
-    let mut a_sorted = a.to_vec();
-    let mut b_sorted = b.to_vec();
-    a_sorted.sort_unstable_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
-    b_sorted.sort_unstable_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+    let mut old_sorted = a.to_vec();
+    let mut new_sorted = b.to_vec();
+    old_sorted.sort_unstable_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+    new_sorted.sort_unstable_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
 
     // 使用线性插值在统一网格上计算距离
     // 取两组中较大者作为网格大小
@@ -148,9 +146,9 @@ pub fn wasserstein_1d(a: &[f64], b: &[f64]) -> f64 {
     for i in 0..n {
         // 分位数位置 (i / n)
         let q = i as f64 / n as f64;
-        let a_val = quantile(&a_sorted, q);
-        let b_val = quantile(&b_sorted, q);
-        total += (a_val - b_val).abs();
+        let old_val = quantile(&old_sorted, q);
+        let new_val = quantile(&new_sorted, q);
+        total += (old_val - new_val).abs();
     }
 
     total / n as f64
@@ -465,45 +463,26 @@ mod tests {
 
     // ---- Wasserstein 1D ----
 
+    /// wasserstein_1d 各输入参数化验证（None 表示仅断言范围 [0,1]）。
     #[test]
-    fn wasserstein_identical_distributions() {
-        let a = vec![0.5, 0.5, 0.5];
-        let b = vec![0.5, 0.5, 0.5];
-        let w = wasserstein_1d(&a, &b);
-        assert!(w.abs() < 1e-10, "相同分布 Wasserstein 距离应为 0");
-    }
-
-    #[test]
-    fn wasserstein_different_distributions() {
-        let a = vec![0.0, 0.0, 0.0];
-        let b = vec![1.0, 1.0, 1.0];
-        let w = wasserstein_1d(&a, &b);
-        assert!((w - 1.0).abs() < 1e-10, "完全分离分布距离应为 1.0");
-    }
-
-    #[test]
-    fn wasserstein_empty_input() {
-        assert_eq!(wasserstein_1d(&[], &[1.0, 2.0]), 0.0);
-        assert_eq!(wasserstein_1d(&[1.0, 2.0], &[]), 0.0);
-    }
-
-    #[test]
-    fn wasserstein_single_element() {
-        let a = vec![0.0];
-        let b = vec![1.0];
-        let w = wasserstein_1d(&a, &b);
-        assert!((w - 1.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn wasserstein_different_sizes() {
-        // 两组大小不同的分布
-        let a = vec![0.0, 0.5, 1.0];
-        let b = vec![0.3, 0.7];
-        let w = wasserstein_1d(&a, &b);
-        // 距离应在合理范围内
-        assert!(w >= 0.0);
-        assert!(w <= 1.0);
+    fn wasserstein_1d_cases() {
+        let cases: Vec<(Vec<f64>, Vec<f64>, Option<f64>)> = vec![
+            (vec![0.5, 0.5, 0.5], vec![0.5, 0.5, 0.5], Some(0.0)), // 相同分布 → 0
+            (vec![0.0, 0.0, 0.0], vec![1.0, 1.0, 1.0], Some(1.0)), // 完全分离 → 1.0
+            (vec![], vec![1.0, 2.0], Some(0.0)),                   // 空输入 → 0.0
+            (vec![1.0, 2.0], vec![], Some(0.0)),                   // 空输入 → 0.0
+            (vec![0.0], vec![1.0], Some(1.0)),                     // 单元素
+            (vec![0.0, 0.5, 1.0], vec![0.3, 0.7], None),           // 不同大小 → 合理范围
+        ];
+        for (a, b, expected) in cases {
+            let w = wasserstein_1d(&a, &b);
+            match expected {
+                Some(exp) => assert!((w - exp).abs() < 1e-10, "a={a:?} b={b:?} 期望 {exp}"),
+                None => {
+                    assert!(w >= 0.0 && w <= 1.0, "a={a:?} b={b:?} 应在 [0,1]");
+                }
+            }
+        }
     }
 
     // ---- 置换检验 ----

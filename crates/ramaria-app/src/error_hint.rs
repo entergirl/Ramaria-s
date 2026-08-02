@@ -185,67 +185,50 @@ pub fn is_retryable(err: &RamariaError) -> bool {
 mod tests {
     use super::*;
 
+    /// ErrorHint::from_error 各错误类型变体参数化验证。
     #[test]
-    fn config_error_not_retryable() {
-        let err = RamariaError::config("配置缺失");
-        let hint = ErrorHint::from_error(&err);
-        assert_eq!(hint.title, "配置错误");
-        assert!(!hint.retryable);
-        assert!(hint.detail.contains("设置向导"));
-    }
-
-    #[test]
-    fn llm_error_retryable() {
-        let err = RamariaError::llm("连接超时");
-        let hint = ErrorHint::from_error(&err);
-        assert_eq!(hint.title, "LLM 服务错误");
-        assert!(hint.retryable);
-    }
-
-    #[test]
-    fn storage_error_not_retryable() {
-        let err = RamariaError::storage("数据库损坏");
-        let hint = ErrorHint::from_error(&err);
-        assert!(!hint.retryable);
-        assert!(hint.detail.contains("磁盘空间"));
-    }
-
-    #[test]
-    fn privacy_error_not_retryable() {
-        let err = RamariaError::privacy("API key 缺失");
-        let hint = ErrorHint::from_error(&err);
-        assert!(!hint.retryable);
-        assert!(hint.detail.contains("隐私确认"));
-    }
-
-    #[test]
-    fn index_error_not_retryable() {
-        let err = RamariaError::index("索引损坏");
-        let hint = ErrorHint::from_error(&err);
-        assert!(!hint.retryable);
-        assert!(hint.detail.contains("重建索引"));
-    }
-
-    #[test]
-    fn validation_error_not_retryable() {
-        let err = RamariaError::validation("内容为空");
-        let hint = ErrorHint::from_error(&err);
-        assert!(!hint.retryable);
-    }
-
-    #[test]
-    fn io_error_not_retryable() {
-        let err = RamariaError::io("读取失败", None);
-        let hint = ErrorHint::from_error(&err);
-        assert!(!hint.retryable);
-    }
-
-    #[test]
-    fn unsupported_error_not_retryable() {
-        let err = RamariaError::unsupported("功能未实现");
-        let hint = ErrorHint::from_error(&err);
-        assert!(!hint.retryable);
-        assert!(hint.detail.contains("升级"));
+    fn error_hint_variants() {
+        // (err, 期望 title（空=不断言）, 期望 retryable, 期望 detail 子串（None=不断言）)
+        let cases: Vec<(RamariaError, &str, bool, Option<&str>)> = vec![
+            (
+                RamariaError::config("配置缺失"),
+                "配置错误",
+                false,
+                Some("设置向导"),
+            ),
+            (RamariaError::llm("连接超时"), "LLM 服务错误", true, None),
+            (
+                RamariaError::storage("数据库损坏"),
+                "",
+                false,
+                Some("磁盘空间"),
+            ),
+            (
+                RamariaError::privacy("API key 缺失"),
+                "",
+                false,
+                Some("隐私确认"),
+            ),
+            (RamariaError::index("索引损坏"), "", false, Some("重建索引")),
+            (RamariaError::validation("内容为空"), "", false, None),
+            (RamariaError::io("读取失败", None), "", false, None),
+            (
+                RamariaError::unsupported("功能未实现"),
+                "",
+                false,
+                Some("升级"),
+            ),
+        ];
+        for (err, title, retryable, detail_substr) in cases {
+            let hint = ErrorHint::from_error(&err);
+            if !title.is_empty() {
+                assert_eq!(hint.title, title, "{err:?}");
+            }
+            assert_eq!(hint.retryable, retryable, "{err:?}");
+            if let Some(substr) = detail_substr {
+                assert!(hint.detail.contains(substr), "{err:?}");
+            }
+        }
     }
 
     #[test]

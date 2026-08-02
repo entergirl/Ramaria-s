@@ -5,29 +5,6 @@
 //! - 提供共享辅助宏和工具函数，减少各模块的重复代码
 //! - 所有数据库错误统一转换为 RamariaError::Storage
 
-pub mod backend_config;
-pub mod background_jobs;
-pub mod bm25_index;
-pub mod cluster;
-pub mod conflict_queue;
-pub mod events;
-pub mod examples;
-pub mod facts;
-pub mod graph;
-pub mod keyword;
-pub mod memory_l1;
-pub mod messages;
-pub mod pending_push;
-pub mod personas;
-pub mod privacy_consent;
-pub mod schema_meta;
-pub mod sessions;
-pub mod settings;
-pub mod traits;
-
-use ramaria_core::error::RamariaError;
-use ramaria_core::error::RamariaResult;
-
 // =========================================================
 // 共享宏: 枚举解析（DB TEXT → 枚举 + 非法值回退）
 // =========================================================
@@ -54,7 +31,6 @@ use ramaria_core::error::RamariaResult;
 /// 5. 列名（仅用于日志）
 ///
 /// 6.. 映射: "db_value" => EnumVariant
-#[macro_export]
 macro_rules! parse_enum_fallback {
     ($fn_name:ident, $enum_ty:ty, $default:expr, $table:expr, $column:expr,
      $($str:expr => $variant:ident),+ $(,)?) => {
@@ -69,6 +45,29 @@ macro_rules! parse_enum_fallback {
         }
     };
 }
+
+pub mod backend_config;
+pub mod background_jobs;
+pub mod bm25_index;
+pub mod cluster;
+pub mod conflict_queue;
+pub mod events;
+pub mod examples;
+pub mod facts;
+pub mod graph;
+pub mod keyword;
+pub mod memory_l1;
+pub mod messages;
+pub mod pending_push;
+pub mod personas;
+pub mod privacy_consent;
+pub mod schema_meta;
+pub mod sessions;
+pub mod settings;
+pub mod traits;
+
+use ramaria_core::error::RamariaError;
+use ramaria_core::error::RamariaResult;
 
 // =========================================================
 // 共享 trait: 为 sqlx::Result 提供统一错误映射
@@ -106,7 +105,11 @@ impl<T> StorageResultExt<T> for Result<T, sqlx::Error> {
 /// - 成功时返回解析后的 Uuid。
 /// - 失败时返回 `RamariaError::Validation`，携带原始值和上下文。
 #[inline]
-pub fn parse_uuid_required(raw: &str, table: &str, column: &str) -> RamariaResult<uuid::Uuid> {
+pub(crate) fn parse_uuid_required(
+    raw: &str,
+    table: &str,
+    column: &str,
+) -> RamariaResult<uuid::Uuid> {
     ramaria_core::types::uuid_from_db(raw).inspect_err(
         |_| tracing::warn!(raw_id = %raw, "{table}.{column} UUID 解析失败，数据可能已损坏"),
     )
@@ -121,7 +124,7 @@ pub fn parse_uuid_required(raw: &str, table: &str, column: &str) -> RamariaResul
 /// - `Ok(Some(uuid))`: 解析成功。
 /// - `Err`: 解析失败。
 #[inline]
-pub fn parse_uuid_optional(
+pub(crate) fn parse_uuid_optional(
     raw: &Option<String>,
     table: &str,
     column: &str,

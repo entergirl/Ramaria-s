@@ -336,17 +336,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn menu_id_constants_are_unique() {
+    fn menu_id_constants_sane() {
+        // 菜单 ID 常量应互异且非空
         assert_ne!(MENU_ID_SHOW, MENU_ID_QUIT);
-    }
-
-    #[test]
-    fn menu_id_show_is_non_empty() {
         assert!(!MENU_ID_SHOW.is_empty());
-    }
-
-    #[test]
-    fn menu_id_quit_is_non_empty() {
         assert!(!MENU_ID_QUIT.is_empty());
     }
 }

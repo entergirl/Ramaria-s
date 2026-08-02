@@ -396,35 +396,25 @@ mod tests {
     // ── API key 脱敏 ──
 
     #[test]
-    fn test_redact_api_key_basic() {
-        let input = "api_key = \"sk-abc123def456\"";
-        let result = redact_api_keys(input);
-        assert_eq!(result, "api_key = \"[REDACTED]\"");
-    }
-
-    #[test]
-    fn test_redact_case_insensitive() {
-        let input = "API_KEY = \"secret\"";
-        let result = redact_api_keys(input);
-        assert_eq!(result, "API_KEY = \"[REDACTED]\"");
-    }
-
-    #[test]
-    fn test_redact_does_not_touch_comment() {
-        let input = "# api_key = \"this is a comment\"";
-        let result = redact_api_keys(input);
-        assert_eq!(result, input);
-    }
-
-    #[test]
-    fn test_redact_does_not_touch_non_key() {
-        let input = "base_url = \"https://api.example.com\"";
-        let result = redact_api_keys(input);
-        assert_eq!(result, input);
-    }
-
-    #[test]
-    fn test_redact_multiple_lines() {
+    fn test_redact_api_key_cases() {
+        // 单行脱敏、大小写不敏感、注释与无关键保持原样
+        let cases = [
+            ("api_key = \"sk-abc123def456\"", "api_key = \"[REDACTED]\""),
+            ("API_KEY = \"secret\"", "API_KEY = \"[REDACTED]\""),
+            (
+                "# api_key = \"this is a comment\"",
+                "# api_key = \"this is a comment\"",
+            ),
+            (
+                "base_url = \"https://api.example.com\"",
+                "base_url = \"https://api.example.com\"",
+            ),
+            ("// api_key = \"value\"", "// api_key = \"value\""),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(redact_api_keys(input), expected, "input={input:?}");
+        }
+        // 多行: 保留 base_url/model_id、api_key 脱敏、不含原密文
         let input =
             "base_url = \"https://api.example.com\"\napi_key = \"my-secret\"\nmodel_id = \"gpt-4\"";
         let result = redact_api_keys(input);
@@ -432,13 +422,6 @@ mod tests {
         assert!(result.contains("[REDACTED]"));
         assert!(result.contains("model_id"));
         assert!(!result.contains("my-secret"));
-    }
-
-    #[test]
-    fn test_redact_line_comment_with_slash() {
-        let input = "// api_key = \"value\"";
-        let result = redact_api_keys(input);
-        assert_eq!(result, input);
     }
 
     // ── system.txt 构建 ──

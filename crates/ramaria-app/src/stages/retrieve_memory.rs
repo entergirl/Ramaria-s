@@ -132,7 +132,6 @@ impl PipelineStage for StageRetrieveMemory {
 
         // ---- 5.3 时间衰减：rrf_score × Ebbinghaus decay ----
         let now = now_ms();
-        // v1.3 配置传播修复：从 RamariaConfig 读取衰减参数
         let decay_config_l1 = DecayConfig::from_core(&ctx.config.decay, "l1");
         let decay_config_l2 = DecayConfig::from_core(&ctx.config.decay, "l2");
 
@@ -228,24 +227,6 @@ mod tests {
         let result = stage.execute(&ctx, data).await;
 
         assert!(result.is_ok());
-        let output = result.expect("should succeed");
-        assert!(output.memory_context.is_none());
-    }
-
-    #[tokio::test]
-    async fn no_embedding_still_succeeds() {
-        let ctx = test_context(
-            Arc::new(MockStorage::new()),
-            Arc::new(MockLlm::local()),
-            None,
-        );
-        let stage = StageRetrieveMemory::new();
-        let data = make_data("测试查询", Some("rama-0001"));
-
-        let result = stage.execute(&ctx, data).await;
-
-        assert!(result.is_ok());
-        // 空检索器 → memory_context = None
         let output = result.expect("should succeed");
         assert!(output.memory_context.is_none());
     }

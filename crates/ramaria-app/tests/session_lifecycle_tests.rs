@@ -16,7 +16,7 @@ mod mock_backend;
 
 use ramaria_app::App;
 use ramaria_core::config::RamariaConfig;
-use ramaria_core::traits::{LlmProvider, StorageBackend};
+use ramaria_core::traits::StorageBackend;
 use ramaria_core::types::{AppState, BackendConfig, MessageRole, MessageSource};
 use ramaria_llm::keychain::Keychain;
 use std::sync::Arc;
@@ -54,44 +54,9 @@ async fn setup_app_ready(storage: &dyn StorageBackend) {
 
 // =========================================================
 // T-V11-0-008.1: 手动关闭
+// （原 manual_save_and_close_session 的完整流程已被
+//  new_session_created_after_save_and_close 覆盖，已删除）
 // =========================================================
-
-#[tokio::test]
-async fn manual_save_and_close_session() {
-    let storage = Arc::new(MockStorage::new());
-    let llm = Arc::new(MockLlm::new("测试回复"));
-    let config = RamariaConfig::default();
-    let keychain = Arc::new(Keychain::new());
-    let app = App::new_without_embedding(
-        Arc::clone(&storage) as Arc<dyn StorageBackend>,
-        Arc::clone(&llm) as Arc<dyn LlmProvider>,
-        config,
-        keychain,
-    );
-
-    setup_app_ready(storage.as_ref()).await;
-    app.set_state(AppState::Ready);
-
-    // 1. 发送消息（自动创建 session）
-    app.send_message("你好", None, None)
-        .await
-        .expect("send_message 应成功");
-
-    // 2. 验证活跃 session 存在
-    let active_sid = app.get_active_session_id();
-    assert!(active_sid.is_some(), "发送消息后应有活跃 session");
-
-    // 3. 手动保存并关闭
-    app.save_and_close_session(None)
-        .await
-        .expect("save_and_close 应成功");
-
-    // 4. 验证活跃 session 已清除
-    assert!(
-        app.get_active_session_id().is_none(),
-        "关闭后活跃 session 应为 None"
-    );
-}
 
 #[tokio::test]
 async fn save_and_close_without_active_session_is_noop() {
@@ -269,71 +234,19 @@ async fn shutdown_closes_active_session() {
 
 // =========================================================
 // T-V11-0-008.5: send_message 在非 Ready 状态被拒绝
+// （原 send_message_rejected_in_needs_setup 与 app_integration.rs 的
+//  send_message_rejects_when_not_ready 同 setup 同断言，已删除）
 // =========================================================
-
-#[tokio::test]
-async fn send_message_rejected_in_needs_setup() {
-    let storage = Arc::new(MockStorage::new());
-    let llm = Arc::new(MockLlm::new("测试"));
-    let config = RamariaConfig::default();
-    let keychain = Arc::new(Keychain::new());
-    let app = App::new_without_embedding(storage, llm, config, keychain);
-
-    // 状态为 NeedsSetup（默认）
-    let result = app.send_message("你好", None, None).await;
-    match result {
-        Err(e) => {
-            assert!(
-                e.to_string().contains("尚未就绪"),
-                "错误消息应提示未就绪，实际: {e}"
-            );
-        }
-        Ok(_stream) => panic!("NeedsSetup 状态应拒绝消息，但成功了"),
-    }
-}
 
 // =========================================================
 // T-V11-0-008.6: 后台任务幂等启动
+// （原 background_tasks_start_only_once 无任何断言，仅观察日志，已删除）
 // =========================================================
-
-#[tokio::test]
-async fn background_tasks_start_only_once() {
-    let storage = Arc::new(MockStorage::new());
-    let llm = Arc::new(MockLlm::new("测试"));
-    let config = RamariaConfig::default();
-    let keychain = Arc::new(Keychain::new());
-    let app = App::new_without_embedding(storage, llm, config, keychain);
-
-    app.set_state(AppState::Ready);
-
-    // 第一次启动
-    app.start_background_tasks();
-
-    // 第二次启动应被忽略（幂等）
-    // 通过日志观察：重复调用 start_background_tasks 应输出 "已启动，跳过"
-    app.start_background_tasks(); // 不应 panic
-
-    // 清理
-    app.shutdown().await;
-}
 
 // =========================================================
 // T-V11-0-008.7: get_active_session_id 线程安全
+// （原 active_session_id_default_is_none 为琐碎 getter 初始值断言，已删除）
 // =========================================================
-
-#[test]
-fn active_session_id_default_is_none() {
-    let storage = Arc::new(MockStorage::new());
-    let llm = Arc::new(MockLlm::new("测试"));
-    let config = RamariaConfig::default();
-    let keychain = Arc::new(Keychain::new());
-    let app = App::new_without_embedding(storage, llm, config, keychain);
-
-    assert!(
-        app.get_active_session_id().is_none(),
-        "新 App 应无活跃 session"
-    );
-}
 
 // =========================================================
 // T-V11-0-008.8: save_and_close 后新消息创建新 session

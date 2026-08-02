@@ -543,12 +543,12 @@ fn parse_sse_line(line: &str) -> Option<RamariaResult<StreamDelta>> {
     }
 
     // 提取 "data:" 或 "data: " 前缀后的内容（兼容 W3C SSE 规范）
-    let data = line
+    let payload = line
         .strip_prefix("data: ")
         .or_else(|| line.strip_prefix("data:"))?;
 
     // [DONE] 标记
-    if data == "[DONE]" {
+    if payload == "[DONE]" {
         return Some(Ok(StreamDelta {
             content: String::new(),
             done: true,
@@ -557,7 +557,7 @@ fn parse_sse_line(line: &str) -> Option<RamariaResult<StreamDelta>> {
     }
 
     // 解析 JSON chunk
-    match serde_json::from_str::<serde_json::Value>(data) {
+    match serde_json::from_str::<serde_json::Value>(payload) {
         Ok(chunk) => {
             // 提取 delta.content
             let content = chunk["choices"][0]["delta"]["content"]
@@ -579,7 +579,7 @@ fn parse_sse_line(line: &str) -> Option<RamariaResult<StreamDelta>> {
             }))
         }
         Err(e) => Some(Err(RamariaError::llm_with_source(
-            format!("SSE data 解析失败: {}", &data[..data.len().min(200)]),
+            format!("SSE data 解析失败: {}", &payload[..payload.len().min(200)]),
             e,
         ))),
     }
@@ -620,126 +620,92 @@ mod tests {
 
     // ---- parse_sse_line ----
 
+    /// parse_sse_line 各分支参数化验证：空行/注释/事件行 → None；
+    /// [DONE]/内容增量/finish_reason → Some(Ok(delta))；非法 JSON → Some(Err)。
     #[test]
-    fn parse_empty_line_returns_none() {
-        assert!(parse_sse_line("").is_none());
-        assert!(parse_sse_line("   ").is_none());
-    }
-
-    #[test]
-    fn parse_comment_line_returns_none() {
-        assert!(parse_sse_line(": heartbeat").is_none());
-        assert!(parse_sse_line(":ok").is_none());
-    }
-
-    #[test]
-    fn parse_done_marker() {
-        let result = parse_sse_line("data: [DONE]").expect("应解析 [DONE]");
-        let delta = result.expect("应为 Ok");
-        assert!(delta.done);
-        assert_eq!(delta.metadata.as_deref(), Some("[DONE]"));
-        assert!(delta.content.is_empty());
-    }
-
-    #[test]
-    fn parse_content_delta() {
-        let line = r#"data: {"choices":[{"delta":{"content":"你好"},"finish_reason":null}]}"#;
-        let result = parse_sse_line(line).expect("应解析内容增量");
-        let delta = result.expect("应为 Ok");
-        assert_eq!(delta.content, "你好");
-        assert!(!delta.done);
-        assert!(delta.metadata.is_none());
-    }
-
-    #[test]
-    fn parse_finish_reason() {
-        let line = r#"data: {"choices":[{"delta":{"content":""},"finish_reason":"stop"}]}"#;
-        let result = parse_sse_line(line).expect("应解析结束标记");
-        let delta = result.expect("应为 Ok");
-        assert!(delta.done);
-        assert_eq!(delta.metadata.as_deref(), Some("stop"));
-        assert!(delta.content.is_empty());
-    }
-
-    #[test]
-    fn parse_malformed_json_returns_err() {
-        let line = "data: {not valid json}";
-        let result = parse_sse_line(line).expect("应尝试解析");
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert_eq!(err.category(), "llm");
-        assert!(err.context().contains("SSE data 解析失败"));
-    }
-
-    #[test]
-    fn parse_no_data_prefix_returns_none() {
-        assert!(parse_sse_line("event: ping").is_none());
-    }
-
-    #[test]
-    fn parse_data_with_leading_whitespace() {
-        let line = "  data: [DONE]  ";
-        let result = parse_sse_line(line).expect("应解析");
-        let delta = result.expect("应为 Ok");
-        assert!(delta.done);
-    }
-
-    #[test]
-    fn parse_data_prefix_without_space() {
-        // W3C SSE 规范允许 "data:" 无空格
-        let line = "data:[DONE]";
-        let result = parse_sse_line(line).expect("应解析");
-        let delta = result.expect("应为 Ok");
-        assert!(delta.done);
-        assert_eq!(delta.metadata.as_deref(), Some("[DONE]"));
-    }
-
-    #[test]
-    fn parse_content_delta_without_space_after_data() {
-        // 某些 server 发送 "data:" 不带空格
-        let line = r#"data:{"choices":[{"delta":{"content":"测试"},"finish_reason":null}]}"#;
-        let result = parse_sse_line(line).expect("应解析");
-        let delta = result.expect("应为 Ok");
-        assert_eq!(delta.content, "测试");
-        assert!(!delta.done);
+    fn parse_sse_line_cases() {
+        enum Expect {
+            None,                  // None
+            Done(&'static str),    // Some(Ok(done=true, metadata=Some(x)))
+            Content(&'static str), // Some(Ok(content=x, done=false))
+            Err,                   // Some(Err)
+        }
+        let cases = [
+            ("", Expect::None),
+            ("   ", Expect::None),
+            (": heartbeat", Expect::None),
+            (":ok", Expect::None),
+            ("event: ping", Expect::None),
+            ("data: [DONE]", Expect::Done("[DONE]")),
+            (
+                r#"data: {"choices":[{"delta":{"content":"你好"},"finish_reason":null}]}"#,
+                Expect::Content("你好"),
+            ),
+            (
+                r#"data: {"choices":[{"delta":{"content":""},"finish_reason":"stop"}]}"#,
+                Expect::Done("stop"),
+            ),
+            ("data: {not valid json}", Expect::Err),
+            ("  data: [DONE]  ", Expect::Done("[DONE]")),
+            ("data:[DONE]", Expect::Done("[DONE]")),
+            (
+                r#"data:{"choices":[{"delta":{"content":"测试"},"finish_reason":null}]}"#,
+                Expect::Content("测试"),
+            ),
+        ];
+        for (line, expect) in cases {
+            let parsed = parse_sse_line(line);
+            match (parsed, expect) {
+                (None, Expect::None) => {}
+                (None, _) => panic!("line={line:?} 应返回 Some"),
+                (Some(_), Expect::None) => panic!("line={line:?} 应返回 None"),
+                (Some(result), Expect::Err) => {
+                    let err = result.unwrap_err();
+                    assert_eq!(err.category(), "llm", "line={line:?}");
+                    assert!(err.context().contains("SSE data 解析失败"), "line={line:?}");
+                }
+                (Some(result), Expect::Done(meta)) => {
+                    let d = result.expect("应为 Ok");
+                    assert!(d.done, "line={line:?} 应 done");
+                    assert_eq!(d.metadata.as_deref(), Some(meta), "line={line:?}");
+                    assert!(d.content.is_empty(), "line={line:?}");
+                }
+                (Some(result), Expect::Content(c)) => {
+                    let d = result.expect("应为 Ok");
+                    assert_eq!(d.content, c, "line={line:?}");
+                    assert!(!d.done, "line={line:?}");
+                    assert!(d.metadata.is_none(), "line={line:?}");
+                }
+            }
+        }
     }
 
     // ---- http_error ----
 
+    /// http_error 各状态码分支参数化验证。
     #[test]
-    fn http_401_is_auth_error() {
-        let err = http_error(401, r#"{"error":"Invalid API key"}"#);
-        assert_eq!(err.category(), "llm");
-        assert!(err.context().contains("鉴权失败"));
-        assert!(err.context().contains("401"));
-    }
-
-    #[test]
-    fn http_429_is_rate_limit() {
-        let err = http_error(429, "Too many requests");
-        assert!(err.context().contains("频率超限"));
-        assert!(err.context().contains("429"));
-    }
-
-    #[test]
-    fn http_500_is_server_error() {
-        let err = http_error(500, "Internal error");
-        assert!(err.context().contains("服务端错误"));
-        assert!(err.context().contains("500"));
-    }
-
-    #[test]
-    fn http_400_is_request_error() {
-        let err = http_error(400, r#"{"error":"model not found"}"#);
-        assert!(err.context().contains("请求错误"));
-        assert!(err.context().contains("400"));
-    }
-
-    #[test]
-    fn http_error_body_truncated() {
+    fn http_error_cases() {
+        let cases = [
+            (401, r#"{"error":"Invalid API key"}"#, "鉴权失败"),
+            (429, "Too many requests", "频率超限"),
+            (500, "Internal error", "服务端错误"),
+            (400, r#"{"error":"model not found"}"#, "请求错误"),
+        ];
+        for (status, body, keyword) in cases {
+            let err = http_error(status, body);
+            assert_eq!(err.category(), "llm");
+            assert!(
+                err.context().contains(keyword),
+                "status={status} 应包含 {keyword}"
+            );
+            assert!(
+                err.context().contains(&status.to_string()),
+                "status={status}"
+            );
+        }
+        // 长 body 应截断
         let long_body = "x".repeat(1000);
         let err = http_error(422, &long_body);
-        // 上下文应截断到 500 字符
         assert!(err.context().len() < 700); // 500 + 前缀长度
     }
 }

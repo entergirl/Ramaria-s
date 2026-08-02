@@ -521,32 +521,25 @@ mod tests {
         assert!((pairs[0].1 - 0.9).abs() < 0.01);
     }
 
+    /// contains_subsequence 各输入参数化验证。
     #[test]
-    fn contains_subsequence_basic() {
-        let haystack: Vec<char> = "机器学习项目".chars().collect();
-        let needle: Vec<char> = "学习".chars().collect();
-        assert!(contains_subsequence(&haystack, &needle));
-    }
-
-    #[test]
-    fn contains_subsequence_not_found() {
-        let haystack: Vec<char> = "机器学习".chars().collect();
-        let needle: Vec<char> = "深度".chars().collect();
-        assert!(!contains_subsequence(&haystack, &needle));
-    }
-
-    #[test]
-    fn contains_subsequence_empty_needle() {
-        let haystack: Vec<char> = "测试".chars().collect();
-        let needle: Vec<char> = vec![];
-        assert!(contains_subsequence(&haystack, &needle));
-    }
-
-    #[test]
-    fn contains_subsequence_too_long() {
-        let haystack: Vec<char> = "短".chars().collect();
-        let needle: Vec<char> = "太长了".chars().collect();
-        assert!(!contains_subsequence(&haystack, &needle));
+    fn contains_subsequence_cases() {
+        fn chars(s: &str) -> Vec<char> {
+            s.chars().collect()
+        }
+        let cases = [
+            (chars("机器学习项目"), chars("学习"), true),
+            (chars("机器学习"), chars("深度"), false),
+            (chars("测试"), Vec::new(), true),     // 空 needle
+            (chars("短"), chars("太长了"), false), // needle 更长
+        ];
+        for (haystack, needle, expected) in cases {
+            assert_eq!(
+                contains_subsequence(&haystack, &needle),
+                expected,
+                "haystack={haystack:?} needle={needle:?}"
+            );
+        }
     }
 
     #[test]

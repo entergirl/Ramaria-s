@@ -243,7 +243,7 @@ impl PipelineContext {
     /// - `llm`: LLM provider。
     /// - `embedding`: 可选嵌入模型（None 表示未配置）。
     /// - `config`: 应用配置。
-    /// - `retriever`: 检索器（Arc<Mutex> 包裹，支持并发读写）。
+    /// - `retriever`: 检索器（Arc<RwLock> 包裹，支持并发读写）。
     /// - `keychain`: OS keychain。
     /// - `lifecycle`: Session 生命周期编排器。
     ///
@@ -978,16 +978,15 @@ mod tests {
     // T-V12-1-004: PipelineError 测试
     // =========================================================
 
+    /// PipelineError 构造与 stage/source 访问验证。
     #[test]
-    fn pipeline_error_retryable_construction() {
+    fn pipeline_error_construction_cases() {
+        // retryable 构造
         let err = PipelineError::retryable("CallLlm", RamariaError::llm("connection timeout"));
         assert!(err.is_retryable());
         assert_eq!(err.stage(), "CallLlm");
         assert_eq!(err.source_error().category(), "llm");
-    }
-
-    #[test]
-    fn pipeline_error_fatal_construction() {
+        // fatal 构造
         let err = PipelineError::fatal(
             "CheckState",
             RamariaError::validation("app in fatal error state"),
@@ -995,19 +994,21 @@ mod tests {
         assert!(!err.is_retryable());
         assert_eq!(err.stage(), "CheckState");
         assert_eq!(err.source_error().category(), "validation");
+        // stage 名在不同变体间独立
+        let retryable = PipelineError::retryable("A", RamariaError::llm("x"));
+        let fatal = PipelineError::fatal("B", RamariaError::storage("y"));
+        assert_eq!(retryable.stage(), "A");
+        assert_eq!(fatal.stage(), "B");
     }
 
+    /// PipelineError Display 输出验证。
     #[test]
-    fn pipeline_error_display_retryable() {
+    fn pipeline_error_display_cases() {
         let err = PipelineError::retryable("RetrieveMemory", RamariaError::storage("index locked"));
         let msg = err.to_string();
         assert!(msg.contains("RetrieveMemory"));
         assert!(msg.contains("retryable"));
         assert!(msg.contains("index locked"));
-    }
-
-    #[test]
-    fn pipeline_error_display_fatal() {
         let err =
             PipelineError::fatal("ResolveSession", RamariaError::validation("session closed"));
         let msg = err.to_string();
@@ -1017,31 +1018,20 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_error_stage_name_both_variants() {
-        let retryable = PipelineError::retryable("A", RamariaError::llm("x"));
-        let fatal = PipelineError::fatal("B", RamariaError::storage("y"));
-        assert_eq!(retryable.stage(), "A");
-        assert_eq!(fatal.stage(), "B");
-    }
-
-    #[test]
     fn pipeline_error_source_error_preserves_category() {
         let err = PipelineError::retryable("CallLlm", RamariaError::privacy("not confirmed"));
         assert_eq!(err.source_error().category(), "privacy");
         assert_eq!(err.source_error().context(), "not confirmed");
     }
 
+    /// PipelineError → RamariaError 转换验证。
     #[test]
-    fn pipeline_error_to_ramaria_error() {
+    fn pipeline_error_to_ramaria_error_cases() {
         let original = RamariaError::llm("timeout");
         let pipeline_err = PipelineError::retryable("CallLlm", original);
         let ramaria_err: RamariaError = pipeline_err.into();
         assert_eq!(ramaria_err.category(), "llm");
         assert!(ramaria_err.context().contains("timeout"));
-    }
-
-    #[test]
-    fn pipeline_error_fatal_to_ramaria_error() {
         let original = RamariaError::validation("bad state");
         let pipeline_err = PipelineError::fatal("CheckState", original);
         let ramaria_err: RamariaError = pipeline_err.into();

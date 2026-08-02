@@ -11,12 +11,13 @@ use ramaria_core::error::RamariaResult;
 use sqlx::SqlitePool;
 
 pub async fn get(pool: &SqlitePool, key: &str) -> RamariaResult<Option<String>> {
-    let val: Option<String> = sqlx::query_scalar("SELECT value FROM settings WHERE key = ?")
-        .bind(key)
-        .fetch_optional(pool)
-        .await
-        .storage_err("查询设置失败")?;
-    Ok(val)
+    let setting_value: Option<String> =
+        sqlx::query_scalar("SELECT value FROM settings WHERE key = ?")
+            .bind(key)
+            .fetch_optional(pool)
+            .await
+            .storage_err("查询设置失败")?;
+    Ok(setting_value)
 }
 
 pub async fn set(pool: &SqlitePool, key: &str, value: &str) -> RamariaResult<()> {

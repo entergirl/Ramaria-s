@@ -955,8 +955,50 @@ fn parse_relation_kind(s: &str) -> EventRelationKind {
 }
 
 /// 将 Unix 毫秒时间戳转为 `YYYY-MM-DD` 字符串。
+///
+/// 用途: L1 摘要列表格式化，供 LLM 理解事件时间顺序。
+///
+/// 说明: 使用简化的儒略日算法，仅用于显示，不追求高精度到秒。
 fn timestamp_to_date_str(ts_ms: i64) -> String {
-    utils::timestamp_to_date_str(ts_ms)
+    let total_secs = ts_ms / 1000;
+    let days_since_epoch = total_secs / 86400;
+    let (y, m, d) = days_to_ymd(days_since_epoch);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+fn days_to_ymd(total_days: i64) -> (i64, u32, u32) {
+    let mut days = total_days;
+    let mut year = 1970i64;
+
+    loop {
+        let days_in_year = if is_leap(year) { 366 } else { 365 };
+        if days < days_in_year {
+            break;
+        }
+        days -= days_in_year;
+        year += 1;
+    }
+
+    let month_days: [i64; 12] = if is_leap(year) {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+
+    let mut month = 1u32;
+    for &md in month_days.iter() {
+        if days < md {
+            break;
+        }
+        days -= md;
+        month += 1;
+    }
+
+    (year, month, (days + 1) as u32)
+}
+
+fn is_leap(y: i64) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
 }
 
 // =========================================================
@@ -1128,33 +1170,22 @@ mod tests {
 
     // ---- parse_relation_kind ----
 
+    /// parse_relation_kind 各类型参数化验证（未知类型回退 RelatedTo）。
     #[test]
-    fn parse_relation_kind_all_valid() {
+    fn parse_relation_kind_cases() {
         use ramaria_core::types::EventRelationKind;
-        assert_eq!(parse_relation_kind("CausedBy"), EventRelationKind::CausedBy);
-        assert_eq!(parse_relation_kind("PartOf"), EventRelationKind::PartOf);
-        assert_eq!(
-            parse_relation_kind("RelatedTo"),
-            EventRelationKind::RelatedTo
-        );
-        assert_eq!(
-            parse_relation_kind("ContinuedBy"),
-            EventRelationKind::ContinuedBy
-        );
-        assert_eq!(
-            parse_relation_kind("Contradicts"),
-            EventRelationKind::Contradicts
-        );
-        assert_eq!(parse_relation_kind("Timeline"), EventRelationKind::Timeline);
-    }
-
-    #[test]
-    fn parse_relation_kind_unknown_defaults_to_related() {
-        use ramaria_core::types::EventRelationKind;
-        assert_eq!(
-            parse_relation_kind("UnknownType"),
-            EventRelationKind::RelatedTo
-        );
+        let cases = [
+            ("CausedBy", EventRelationKind::CausedBy),
+            ("PartOf", EventRelationKind::PartOf),
+            ("RelatedTo", EventRelationKind::RelatedTo),
+            ("ContinuedBy", EventRelationKind::ContinuedBy),
+            ("Contradicts", EventRelationKind::Contradicts),
+            ("Timeline", EventRelationKind::Timeline),
+            ("UnknownType", EventRelationKind::RelatedTo), // 未知 → 默认 RelatedTo
+        ];
+        for (input, expected) in cases {
+            assert_eq!(parse_relation_kind(input), expected, "input={input:?}");
+        }
     }
 
     // ---- build_event ----
@@ -1273,36 +1304,17 @@ mod tests {
         assert_eq!(event.share, 0.5);
     }
 
-    // ---- 钳制函数 ----
-
-    #[test]
-    fn clamp_salience_grid() {
-        assert!((crate::utils::clamp_salience(0.3) - 0.25).abs() < f64::EPSILON);
-        assert!((crate::utils::clamp_salience(0.4) - 0.5).abs() < f64::EPSILON);
-        assert!((crate::utils::clamp_salience(0.9) - 1.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn clamp_valence_grid() {
-        assert!((crate::utils::clamp_valence(-0.7) - (-0.5)).abs() < f64::EPSILON);
-        assert!((crate::utils::clamp_valence(0.3) - 0.5).abs() < f64::EPSILON);
-        assert!((crate::utils::clamp_valence(0.24) - 0.0).abs() < f64::EPSILON);
-    }
+    // ---- 钳制函数（与 utils.rs 自身测试重复，已删除） ----
 
     // ---- timestamp_to_date_str ----
 
+    /// timestamp_to_date_str 各时间戳参数化验证。
     #[test]
-    fn timestamp_to_date_epoch() {
-        let ts = 0;
-        let date = crate::utils::timestamp_to_date_str(ts);
-        assert_eq!(date, "1970-01-01");
-    }
-
-    #[test]
-    fn timestamp_to_date_2025() {
-        let ts = 1_748_736_000_000i64;
-        let date = crate::utils::timestamp_to_date_str(ts);
-        assert_eq!(date, "2025-06-01");
+    fn timestamp_to_date_cases() {
+        let cases = [(0i64, "1970-01-01"), (1_748_736_000_000i64, "2025-06-01")];
+        for (ts, expected) in cases {
+            assert_eq!(timestamp_to_date_str(ts), expected, "ts={ts}");
+        }
     }
 
     // ---- extract_first_json_array ----

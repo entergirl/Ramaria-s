@@ -673,13 +673,7 @@ mod tests {
     use super::*;
 
     /// 验证 trait 可通过 trait object 引用，便于后续 mock 或依赖注入。
-    #[test]
-    fn trait_definitions_exist() {
-        // 编译期验证：trait 已定义且可被引用
-        fn _check_llm(_p: &dyn LlmProvider) {}
-        fn _check_embedding(_p: &dyn EmbeddingProvider) {}
-        fn _check_storage(_p: &dyn StorageBackend) {}
-    }
+    /// （原 trait_definitions_exist 为空验证，编译期已保证，已删除）
 
     #[test]
     fn chat_request_construction() {

@@ -34,8 +34,6 @@ impl Default for CalibrationConfig {
     }
 }
 
-// ---- v1.3 配置传播修复：从 ramaria-core 的可序列化配置创建 ----
-
 impl From<ramaria_core::config::CalibrationConf> for CalibrationConfig {
     fn from(conf: ramaria_core::config::CalibrationConf) -> Self {
         Self {
@@ -286,9 +284,11 @@ mod tests {
 
     // ---- CalibrationDiff ----
 
+    /// compute_calibration_diff 各场景参数化验证：无变化/全部新增/需复核/部分变化。
     #[test]
-    fn calibration_diff_no_change() {
+    fn calibration_diff_cases() {
         let config = CalibrationConfig::default();
+        // 无变化
         let old = vec!["温和".to_string(), "幽默".to_string()];
         let new = vec!["温和".to_string(), "幽默".to_string()];
         let diff = compute_calibration_diff(&old, &new, &config);
@@ -297,33 +297,20 @@ mod tests {
         assert_eq!(diff.kept_count, 2);
         assert!((diff.diff_ratio - 0.0).abs() < 1e-10);
         assert!(!diff.needs_manual_review);
-    }
-
-    #[test]
-    fn calibration_diff_all_new() {
-        let config = CalibrationConfig::default();
+        // 全部新增（旧列表为空）
         let old: Vec<String> = vec![];
         let new = vec!["温和".to_string(), "幽默".to_string()];
         let diff = compute_calibration_diff(&old, &new, &config);
         assert_eq!(diff.added_count, 2);
         assert_eq!(diff.old_trait_count, 0);
         assert!((diff.diff_ratio - 0.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn calibration_diff_needs_review() {
-        let config = CalibrationConfig::default();
+        // 需人工复核（diff_ratio > 0.3）
         let old = vec!["温和".to_string(), "幽默".to_string(), "尽责".to_string()];
         let new = vec!["激进".to_string(), "开放".to_string()];
         let diff = compute_calibration_diff(&old, &new, &config);
-        // added=2, deprecated=3, diff_ratio=5/3≈1.67 > 0.3
         assert!(diff.needs_manual_review);
         assert!(diff.diff_ratio > 0.3);
-    }
-
-    #[test]
-    fn calibration_diff_partial_change() {
-        let config = CalibrationConfig::default();
+        // 部分变化: kept=2 (温和, 幽默), added=1 (冲动), deprecated=3 (尽责, 社交, 理性)
         let old = vec![
             "温和".to_string(),
             "幽默".to_string(),
@@ -333,11 +320,9 @@ mod tests {
         ];
         let new = vec!["温和".to_string(), "幽默".to_string(), "冲动".to_string()];
         let diff = compute_calibration_diff(&old, &new, &config);
-        // kept=2 (温和, 幽默), added=1 (冲动), deprecated=3 (尽责, 社交, 理性)
         assert_eq!(diff.kept_count, 2);
         assert_eq!(diff.added_count, 1);
         assert_eq!(diff.deprecated_count, 3);
-        // diff_ratio = 4/5 = 0.8 > 0.3
         assert!(diff.needs_manual_review);
     }
 }

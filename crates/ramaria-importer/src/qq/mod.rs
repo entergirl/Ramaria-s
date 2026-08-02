@@ -345,73 +345,47 @@ mod tests {
 
     // ── build_persona_uid 4 级优先级测试 ──
 
+    /// build_persona_uid 全分支参数化验证：
+    /// 级别 1 用户显式指定优先；级别 2 QQ 号 uin；级别 3 QQ UID；级别 4 自动序号。
     #[test]
-    fn build_persona_uid_level_1_user_provided() {
-        // 级别 1: 用户显式指定优先
-        let uid = build_persona_uid(Some("char-my-custom"), Some("12345"), "u_abc", 7);
-        assert_eq!(uid, "char-my-custom");
-    }
-
-    #[test]
-    fn build_persona_uid_level_1_without_prefix_auto_adds_char() {
-        // 用户提供不含 "char-" 前缀的值 → 自动补全
-        let uid = build_persona_uid(Some("my-custom"), None, "", 7);
-        assert_eq!(uid, "char-my-custom");
-    }
-
-    #[test]
-    fn build_persona_uid_level_1_empty_is_ignored() {
-        // 用户提供空字符串 → 降级到下一级
-        let uid = build_persona_uid(Some(""), Some("123456789"), "u_abc", 7);
-        assert_eq!(uid, "char-123456789");
-    }
-
-    #[test]
-    fn build_persona_uid_level_2_qq_number() {
-        // 级别 2: QQ 号 uin
-        let uid = build_persona_uid(None, Some("123456789"), "u_example_uid", 7);
-        assert_eq!(uid, "char-123456789");
-    }
-
-    #[test]
-    fn build_persona_uid_level_2_uin_empty_falls_to_uid() {
-        // uin 为空 → 降级到 UID
-        let uid = build_persona_uid(None, Some(""), "u_example_uid", 7);
-        assert_eq!(uid, "char-u_example_uid");
-    }
-
-    #[test]
-    fn build_persona_uid_level_3_qq_uid() {
-        // 级别 3: QQ UID（无 uin）
-        let uid = build_persona_uid(None, None, "u_example_uid", 7);
-        assert_eq!(uid, "char-u_example_uid");
-    }
-
-    #[test]
-    fn build_persona_uid_level_3_empty_uid_falls_to_seq() {
-        // uid 也为空 → 降级到 seq
-        let uid = build_persona_uid(None, None, "", 3);
-        assert_eq!(uid, "char-0003");
-    }
-
-    #[test]
-    fn build_persona_uid_level_4_sequential() {
-        // 级别 4: 自动递增序号
-        let uid = build_persona_uid(None, None, "", 42);
-        assert_eq!(uid, "char-0042");
-    }
-
-    #[test]
-    fn build_persona_uid_all_none() {
-        // 极端：所有字段为 None/空
-        let uid = build_persona_uid(None, None, "", 1);
-        assert_eq!(uid, "char-0001");
-    }
-
-    #[test]
-    fn build_persona_uid_user_provided_overrides_all() {
-        // 用户显式指定时，即使 uin/uid 都有值也使用用户指定的
-        let uid = build_persona_uid(Some("char-explicit"), Some("99999"), "u_something", 10);
-        assert_eq!(uid, "char-explicit");
+    fn build_persona_uid_cases() {
+        let cases = [
+            // (provided, uin, uid, seq, expected)
+            (
+                Some("char-my-custom"),
+                Some("12345"),
+                "u_abc",
+                7,
+                "char-my-custom",
+            ), // L1 显式指定
+            (Some("my-custom"), None, "", 7, "char-my-custom"), // L1 自动补前缀
+            (Some(""), Some("123456789"), "u_abc", 7, "char-123456789"), // L1 空 → L2
+            (
+                None,
+                Some("123456789"),
+                "u_example_uid",
+                7,
+                "char-123456789",
+            ), // L2 QQ 号
+            (None, Some(""), "u_example_uid", 7, "char-u_example_uid"), // L2 空 → L3
+            (None, None, "u_example_uid", 7, "char-u_example_uid"), // L3 QQ UID
+            (None, None, "", 3, "char-0003"),                   // L3 空 → L4
+            (None, None, "", 42, "char-0042"),                  // L4 序号
+            (None, None, "", 1, "char-0001"),                   // 全部为空
+            (
+                Some("char-explicit"),
+                Some("99999"),
+                "u_something",
+                10,
+                "char-explicit",
+            ), // 用户指定覆盖一切
+        ];
+        for (provided, uin, uid, seq, expected) in cases {
+            assert_eq!(
+                build_persona_uid(provided, uin, uid, seq),
+                expected,
+                "provided={provided:?} uin={uin:?} uid={uid:?} seq={seq}"
+            );
+        }
     }
 }

@@ -505,7 +505,7 @@ fn parse_keywords(raw: Option<&str>) -> (Option<String>, Vec<KeywordToken>) {
                 .filter(|k| !k.is_empty())
                 .filter_map(KeywordToken::new)
                 .collect();
-            // 存储时仍用原始逗号分隔字符串（兼容旧 schema）
+            // 存储时使用逗号分隔字符串
             (Some(s.to_string()), list)
         }
     }
@@ -519,55 +519,9 @@ fn parse_keywords(raw: Option<&str>) -> (Option<String>, Vec<KeywordToken>) {
 mod tests {
     use super::*;
 
-    // ---- strip_thinking ----
-
-    #[test]
-    fn strip_thinking_simple() {
-        let input = "<think>Let me think...</think>\n{\"summary\": \"hello\"}";
-        let result = crate::utils::strip_thinking(input);
-        assert!(!result.contains("<think>"));
-        assert!(result.contains("{\"summary\""));
-    }
-
-    #[test]
-    fn strip_thinking_no_tags() {
-        let input = "{\"summary\": \"hello\"}";
-        let result = crate::utils::strip_thinking(input);
-        assert_eq!(result, input);
-    }
-
-    #[test]
-    fn strip_thinking_multiline() {
-        let input = "Some text\n<think>\nreasoning here\n</think>\n{\"summary\": \"test\"}";
-        let result = crate::utils::strip_thinking(input);
-        assert!(result.contains("Some text"));
-        assert!(result.contains("{\"summary\": \"test\"}"));
-        assert!(!result.contains("reasoning"));
-    }
+    // ---- strip_thinking（与 utils.rs 同名测试完全重复，已删除） ----
 
     // ---- extract_first_json_object ----
-
-    #[test]
-    fn extract_simple_json() {
-        let input = "前缀文本 {\"summary\": \"测试\", \"valence\": 0.5} 后缀文本";
-        let result = crate::utils::extract_first_json_object(input).unwrap();
-        assert!(result.starts_with('{'));
-        assert!(result.ends_with('}'));
-        assert!(result.contains("\"summary\""));
-    }
-
-    #[test]
-    fn extract_nested_json() {
-        let input = r#"{"a": {"b": [1,2,3]}, "c": "d"}"#;
-        let result = crate::utils::extract_first_json_object(input).unwrap();
-        assert_eq!(result, input);
-    }
-
-    #[test]
-    fn extract_no_json() {
-        let input = "纯文本无JSON";
-        assert!(crate::utils::extract_first_json_object(input).is_none());
-    }
 
     #[test]
     fn extract_with_markdown_block() {
@@ -576,21 +530,7 @@ mod tests {
         assert!(result.contains("\"summary\""));
     }
 
-    // ---- clamp_valence ----
-
-    #[test]
-    fn clamp_valence_exact_match() {
-        assert!((crate::utils::clamp_valence(0.0) - 0.0).abs() < f64::EPSILON);
-        assert!((crate::utils::clamp_valence(1.0) - 1.0).abs() < f64::EPSILON);
-        assert!((crate::utils::clamp_valence(-1.0) - (-1.0)).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn clamp_valence_to_nearest() {
-        assert!((crate::utils::clamp_valence(0.3) - 0.5).abs() < f64::EPSILON);
-        assert!((crate::utils::clamp_valence(-0.7) - (-0.5)).abs() < f64::EPSILON);
-        assert!((crate::utils::clamp_valence(0.9) - 1.0).abs() < f64::EPSILON);
-    }
+    // ---- clamp_valence（与 utils.rs 同名测试完全重复，已删除） ----
 
     #[test]
     fn clamp_valence_boundary() {
@@ -598,20 +538,7 @@ mod tests {
         assert!(result == 0.0 || result == 0.5);
     }
 
-    // ---- clamp_salience ----
-
-    #[test]
-    fn clamp_salience_exact_match() {
-        assert!((crate::utils::clamp_salience(0.5) - 0.5).abs() < f64::EPSILON);
-        assert!((crate::utils::clamp_salience(0.0) - 0.0).abs() < f64::EPSILON);
-        assert!((crate::utils::clamp_salience(0.75) - 0.75).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn clamp_salience_to_nearest() {
-        assert!((crate::utils::clamp_salience(0.3) - 0.25).abs() < f64::EPSILON);
-        assert!((crate::utils::clamp_salience(0.9) - 1.0).abs() < f64::EPSILON);
-    }
+    // ---- clamp_salience（与 utils.rs 同名测试完全重复，已删除） ----
 
     // ---- validate_and_build (free function) ----
 
@@ -892,7 +819,7 @@ mod tests {
     }
 
     // =========================================================
-    // summarize_session 集成测试（v1.3 管线覆盖修复）
+    // summarize_session 集成测试
     // =========================================================
 
     /// 测试 summarize_session 完整流程：消息→格式化→mock LLM→解析→校验→存储。

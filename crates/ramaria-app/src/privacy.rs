@@ -185,24 +185,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn privacy_status_not_needed() {
+    fn privacy_status_variants() {
+        // NotNeeded: 无需用户操作、已确认
         let status = PrivacyStatus::NotNeeded;
         assert!(!status.needs_user_action());
         assert!(status.is_confirmed());
-    }
-
-    #[test]
-    fn privacy_status_confirmed() {
+        // Confirmed: 无需用户操作、已确认
         let status = PrivacyStatus::Confirmed {
             persistent: true,
             confirmed_at: 1000,
         };
         assert!(!status.needs_user_action());
         assert!(status.is_confirmed());
-    }
-
-    #[test]
-    fn privacy_status_needs_confirmation() {
+        // NeedsConfirmation: 需要用户操作、未确认
         let status = PrivacyStatus::NeedsConfirmation {
             provider_name: "DeepSeek".into(),
             base_url: "https://api.deepseek.com/v1".into(),
@@ -212,18 +207,14 @@ mod tests {
     }
 
     #[test]
-    fn lm_studio_is_not_online() {
-        let provider = LlmProvider::LmStudio;
-        assert!(!provider.is_online());
-    }
-
-    #[test]
-    fn deepseek_is_online() {
-        assert!(LlmProvider::DeepSeek.is_online());
-    }
-
-    #[test]
-    fn openai_is_online() {
-        assert!(LlmProvider::OpenAI.is_online());
+    fn provider_online_status() {
+        let cases = [
+            (LlmProvider::LmStudio, false),
+            (LlmProvider::DeepSeek, true),
+            (LlmProvider::OpenAI, true),
+        ];
+        for (provider, expected) in cases {
+            assert_eq!(provider.is_online(), expected, "{provider:?}");
+        }
     }
 }

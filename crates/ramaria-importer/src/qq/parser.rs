@@ -159,7 +159,7 @@ fn has_image_element(elements: &[serde_json::Value]) -> bool {
 }
 
 /// 从 elements 列表中提取 type=reply 的元素数据。
-fn get_reply_element(elements: &[serde_json::Value]) -> Option<serde_json::Value> {
+fn reply_element(elements: &[serde_json::Value]) -> Option<serde_json::Value> {
     elements
         .iter()
         .find(|e| e.get("type").and_then(|t| t.as_str()) == Some(ELEM_REPLY))
@@ -175,7 +175,7 @@ fn get_reply_element(elements: &[serde_json::Value]) -> Option<serde_json::Value
 /// 返回:
 /// - `Some(description)` — 提取到的描述文本
 /// - `None` — elements 中无 json 元素或 data 中无 description/title
-fn get_json_element_description(elements: &[serde_json::Value]) -> Option<String> {
+fn json_element_description(elements: &[serde_json::Value]) -> Option<String> {
     elements
         .iter()
         .find(|e| e.get("type").and_then(|t| t.as_str()) == Some(ELEM_JSON))
@@ -436,7 +436,7 @@ fn parse_json_message(
 
         // "reply": 回复/引用消息
         TYPE_REPLY => {
-            if let Some(reply_elem) = get_reply_element(&elements) {
+            if let Some(reply_elem) = reply_element(&elements) {
                 // 有 reply 元素：格式化「回复 sender: content」引用头部
                 let quoted_sender = reply_elem
                     .get("senderName")
@@ -478,7 +478,7 @@ fn parse_json_message(
         // 优先提取 data.description 或 data.title 以保留语义信息
         TYPE_JSON => {
             report.degraded_card += 1;
-            if let Some(desc) = get_json_element_description(&elements) {
+            if let Some(desc) = json_element_description(&elements) {
                 // 截断过长的描述（保留前 40 字符）
                 let truncated = if desc.chars().count() > 40 {
                     format!("{}…", desc.chars().take(40).collect::<String>())
@@ -604,7 +604,7 @@ fn make_role_content(
         };
         // 统计对方发言（仅 text 纯文本和 reply 成功回复）
         if matches!(msg_type, TYPE_TEXT | TYPE_REPLY)
-            && (msg_type != TYPE_REPLY || get_reply_element(elements).is_some())
+            && (msg_type != TYPE_REPLY || reply_element(elements).is_some())
         {
             report.success_other_sender += 1;
         }
@@ -912,51 +912,43 @@ mod tests {
 
     // -- 回复正文提取 --
 
+    /// extract_reply_body 各输入参数化验证。
     #[test]
-    fn extract_reply_body_with_newline() {
-        let input = "回复的头部信息\n这是真正的回复正文";
-        assert_eq!(extract_reply_body(input), "这是真正的回复正文");
-    }
-
-    #[test]
-    fn extract_reply_body_no_newline() {
-        let input = "[回复某人] 这是正文";
-        assert_eq!(extract_reply_body(input), "这是正文");
-    }
-
-    #[test]
-    fn extract_reply_body_empty() {
-        assert_eq!(extract_reply_body(""), "");
+    fn extract_reply_body_cases() {
+        let cases = [
+            ("回复的头部信息\n这是真正的回复正文", "这是真正的回复正文"),
+            ("[回复某人] 这是正文", "这是正文"),
+            ("", ""),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(extract_reply_body(input), expected, "input={input:?}");
+        }
     }
 
     // -- 指纹计算 --
 
+    /// make_fingerprint 确定性与区分度验证。
     #[test]
-    fn fingerprint_deterministic() {
+    fn fingerprint_properties() {
+        // 同输入 → 同指纹，长度 16
         let fp1 = make_fingerprint(1700000000000, "user", "你好");
         let fp2 = make_fingerprint(1700000000000, "user", "你好");
         assert_eq!(fp1, fp2);
         assert_eq!(fp1.len(), 16);
-    }
-
-    #[test]
-    fn fingerprint_different_content() {
-        let fp1 = make_fingerprint(1700000000000, "user", "你好");
-        let fp2 = make_fingerprint(1700000000000, "user", "再见");
-        assert_ne!(fp1, fp2);
-    }
-
-    #[test]
-    fn fingerprint_different_role() {
-        let fp1 = make_fingerprint(1700000000000, "user", "你好");
-        let fp2 = make_fingerprint(1700000000000, "assistant", "你好");
-        assert_ne!(fp1, fp2);
+        // content 不同 → 指纹不同
+        let fp3 = make_fingerprint(1700000000000, "user", "再见");
+        assert_ne!(fp1, fp3);
+        // role 不同 → 指纹不同
+        let fp4 = make_fingerprint(1700000000000, "assistant", "你好");
+        assert_ne!(fp1, fp4);
     }
 
     // -- Session 切割 --
 
+    /// split_into_sessions 各消息序列参数化验证。
     #[test]
-    fn split_sessions_single() {
+    fn split_sessions_cases() {
+        // 单会话（间隔 < 60s）
         let msgs = vec![
             make_test_msg("user", "消息1", 1000),
             make_test_msg("assistant", "消息2", 2000),
@@ -964,10 +956,7 @@ mod tests {
         let sessions = split_into_sessions(&msgs, 60000);
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].messages.len(), 2);
-    }
-
-    #[test]
-    fn split_sessions_multi() {
+        // 多会话（间隔 > 60s → 拆为 2 组）
         let msgs = vec![
             make_test_msg("user", "消息1", 1000),
             make_test_msg("assistant", "消息2", 2000),
@@ -978,63 +967,44 @@ mod tests {
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].messages.len(), 2);
         assert_eq!(sessions[1].messages.len(), 2);
-    }
-
-    #[test]
-    fn split_sessions_empty() {
-        let sessions = split_into_sessions(&[], 60000);
-        assert!(sessions.is_empty());
+        // 空输入
+        assert!(split_into_sessions(&[], 60000).is_empty());
     }
 
     // -- 日期转换 --
 
+    /// ts_ms_to_date 各时间戳参数化验证。
     #[test]
-    fn ts_ms_to_date_known() {
-        let date = ts_ms_to_date(1704067200000);
-        assert_eq!(date, "2024-01-01");
-    }
-
-    #[test]
-    fn ts_ms_to_date_epoch() {
-        let date = ts_ms_to_date(0);
-        assert_eq!(date, "1970-01-01");
+    fn ts_ms_to_date_cases() {
+        let cases = [(1704067200000i64, "2024-01-01"), (0i64, "1970-01-01")];
+        for (ts, expected) in cases {
+            assert_eq!(ts_ms_to_date(ts), expected, "ts={ts}");
+        }
     }
 
     // -- JSON 元素描述提取 --
 
+    /// json_element_description 各元素参数化验证（description > title > None）。
     #[test]
-    fn get_json_element_description_from_description() {
-        let elements: Vec<serde_json::Value> = vec![serde_json::json!({
-            "type": "json",
-            "data": {
-                "title": "[QQ小程序]牛脑发力！",
-                "description": "牛脑发力！动画区玩谁是卧底..."
-            }
-        })];
-        let desc = get_json_element_description(&elements);
-        assert_eq!(desc.as_deref(), Some("牛脑发力！动画区玩谁是卧底..."));
-    }
-
-    #[test]
-    fn get_json_element_description_fallback_to_title() {
-        let elements: Vec<serde_json::Value> = vec![serde_json::json!({
-            "type": "json",
-            "data": {
-                "title": "[QQ小程序]标题文本"
-            }
-        })];
-        let desc = get_json_element_description(&elements);
-        assert_eq!(desc.as_deref(), Some("[QQ小程序]标题文本"));
-    }
-
-    #[test]
-    fn get_json_element_description_none_when_no_json_element() {
-        let elements: Vec<serde_json::Value> = vec![serde_json::json!({
-            "type": "text",
-            "data": {"text": "你好"}
-        })];
-        let desc = get_json_element_description(&elements);
-        assert!(desc.is_none());
+    fn json_element_description_cases() {
+        let cases = [
+            (
+                serde_json::json!({"type": "json", "data": {"title": "[QQ小程序]牛脑发力！", "description": "牛脑发力！动画区玩谁是卧底..."}}),
+                Some("牛脑发力！动画区玩谁是卧底..."),
+            ),
+            (
+                serde_json::json!({"type": "json", "data": {"title": "[QQ小程序]标题文本"}}),
+                Some("[QQ小程序]标题文本"),
+            ),
+            (
+                serde_json::json!({"type": "text", "data": {"text": "你好"}}),
+                None,
+            ),
+        ];
+        for (element, expected) in cases {
+            let desc = json_element_description(&[element]);
+            assert_eq!(desc.as_deref(), expected);
+        }
     }
 
     // -- 辅助函数 --

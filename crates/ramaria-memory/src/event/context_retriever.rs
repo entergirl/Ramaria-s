@@ -382,65 +382,13 @@ mod tests {
         assert!(docs.len() <= 1, "结果数不应超过 top_k=1");
     }
 
-    #[test]
-    fn retrieve_context_substring_fallback() {
-        let r = make_test_retriever();
-        let cr = ContextRetriever::new(&r, ContextRetrieverConfig::default());
-
-        // 使用不存在于任何文档 keywords 中但存在于 summary 中的词
-        let cluster = TopicCluster::new(vec![super::super::batcher::L1Item {
-            id: uuid::Uuid::new_v4(),
-            summary: "失眠".into(),
-            keywords: vec![KeywordToken::new("失眠").unwrap()],
-            embedding: None,
-            salience: 0.5,
-            created_at: 1000,
-        }]);
-
-        let docs = cr.retrieve_context(&cluster, "user-0001");
-        // "失眠" 在 L2 "工作压力导致失眠" 的 keywords 中存在
-        // Level 1 应命中
-        assert!(
-            docs.iter().any(|d| d.source_channel == "exact"),
-            "应在精确匹配中找到'失眠'关键词"
-        );
-    }
+    // （原 retrieve_context_substring_fallback 输入"失眠"实际存在于 L2 文档 keywords，
+    //  exact 路径必命中，substring 降级不可达，测试名不副实，已删除）
 
     // ---- 降级路径 ----
 
-    #[test]
-    fn retrieve_context_level2_triggers_when_level1_insufficient() {
-        let r = make_test_retriever();
-        // top_k=10 但 exact_limit=1 → Level 1 只返回 1 条，Level 2 补充
-        let config = ContextRetrieverConfig {
-            top_k: 5,
-            exact_limit: 1,
-            substring_supplement: 10,
-        };
-        let cr = ContextRetriever::new(&r, config);
-
-        let cluster = TopicCluster::new(vec![super::super::batcher::L1Item {
-            id: uuid::Uuid::new_v4(),
-            summary: "Rust".into(),
-            keywords: vec![KeywordToken::new("Rust").unwrap()],
-            embedding: None,
-            salience: 0.5,
-            created_at: 1000,
-        }]);
-
-        let docs = cr.retrieve_context(&cluster, "user-0001");
-        // Level 1 精确匹配返回 1 条（受 exact_limit=1 限制）
-        // Level 2 子串匹配补充剩余
-        let exact_count = docs.iter().filter(|d| d.source_channel == "exact").count();
-        let substring_count = docs
-            .iter()
-            .filter(|d| d.source_channel == "substring")
-            .count();
-        assert!(exact_count <= 1, "Level 1 最多 1 条（受 exact_limit 限制）");
-        // Level 2 可能补充也可能不补充（取决于 BM25 结果），不需要断言 substring_count > 0
-        // 只需验证没有报错即可
-        let _ = substring_count;
-    }
+    // （原 retrieve_context_level2_triggers_when_level1_insufficient 的
+    //  Level 2 补充行为无任何断言，仅验证不报错，已删除）
 
     #[test]
     fn retrieve_context_level3_skipped_without_embedding() {
@@ -472,8 +420,10 @@ mod tests {
 
     // ---- build_query_from_keywords ----
 
+    /// build_query_from_keywords 各关键词输入参数化验证。
     #[test]
-    fn build_query_joins_keywords() {
+    fn build_query_cases() {
+        // 非空关键词 → 拼接查询
         let kw = vec![
             KeywordToken::new("Rust").unwrap(),
             KeywordToken::new("编程").unwrap(),
@@ -484,11 +434,7 @@ mod tests {
         assert!(query.contains("rust"));
         assert!(query.contains("编程"));
         assert!(query.contains("异步"));
-    }
-
-    #[test]
-    fn build_query_empty() {
-        let query = build_query_from_keywords(&[]);
-        assert!(query.is_empty());
+        // 空关键词 → 空查询
+        assert!(build_query_from_keywords(&[]).is_empty());
     }
 }

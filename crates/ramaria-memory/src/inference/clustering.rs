@@ -625,35 +625,19 @@ mod tests {
 
     // ---- 余弦相似度 ----
 
+    /// cosine_similarity 各输入参数化验证。
     #[test]
-    fn cosine_similarity_identical() {
-        let a = vec![1.0, 0.0, 0.0];
-        let sim = cosine_similarity(&a, &a);
-        assert!((sim - 1.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn cosine_similarity_orthogonal() {
-        let a = vec![1.0, 0.0];
-        let b = vec![0.0, 1.0];
-        let sim = cosine_similarity(&a, &b);
-        assert!(sim.abs() < 1e-10);
-    }
-
-    #[test]
-    fn cosine_similarity_opposite() {
-        let a = vec![1.0, 0.0];
-        let b = vec![-1.0, 0.0];
-        let sim = cosine_similarity(&a, &b);
-        assert!((sim + 1.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn cosine_similarity_zero_vector() {
-        let a = vec![0.0, 0.0];
-        let b = vec![1.0, 1.0];
-        let sim = cosine_similarity(&a, &b);
-        assert!((sim - 0.0).abs() < 1e-10);
+    fn cosine_similarity_cases() {
+        let cases: Vec<(Vec<f32>, Vec<f32>, f64)> = vec![
+            (vec![1.0, 0.0, 0.0], vec![1.0, 0.0, 0.0], 1.0), // 相同
+            (vec![1.0, 0.0], vec![0.0, 1.0], 0.0),           // 正交
+            (vec![1.0, 0.0], vec![-1.0, 0.0], -1.0),         // 反向
+            (vec![0.0, 0.0], vec![1.0, 1.0], 0.0),           // 零向量
+        ];
+        for (a, b, expected) in cases {
+            let sim = cosine_similarity(&a, &b);
+            assert!((sim - expected).abs() < 1e-10, "期望 {expected}");
+        }
     }
 
     // ---- 相似度矩阵 ----

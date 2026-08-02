@@ -409,12 +409,8 @@ mod persona_formatter_tests {
         assert_eq!(fmt.flush(), Some("|".to_string()));
     }
 
-    #[test]
-    fn isolated_pipe_at_end_no_more_chunks() {
-        let mut fmt = PersonaFormatter::new();
-        assert_eq!(fmt.feed("末尾有|"), "末尾有");
-        assert_eq!(fmt.flush(), Some("|".to_string()));
-    }
+    // （原 isolated_pipe_at_end_no_more_chunks 与 isolated_pipe_at_end_flushed
+    //  行为完全重复，仅文本不同，已删除）
 
     #[test]
     fn double_pipe_at_chunk_boundary_with_trailing_text() {
@@ -470,11 +466,6 @@ mod persona_formatter_tests {
 
     // ---- 兼容现有 API ----
 
-    #[test]
-    fn write_persona_delta_integration() {
-        let mut fmt = PersonaFormatter::new();
-        let text = fmt.feed("测试||文本");
-        assert!(!text.is_empty());
-        assert_eq!(fmt.flush(), None);
-    }
+    // （原 write_persona_delta_integration 与 basic_double_pipe_replacement
+    //  同模式且断言更弱，已删除）
 }

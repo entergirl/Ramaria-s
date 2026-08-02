@@ -188,39 +188,29 @@ pub fn build_l1_prompt(conversation_text: &str, keyword_candidates: Option<&str>
 mod tests {
     use super::*;
 
+    /// build_l1_prompt 各关键词输入参数化验证（None/有值/空串/纯空白）。
     #[test]
-    fn build_prompt_without_keywords() {
+    fn build_prompt_keywords_cases() {
+        // 无关键词 → 不含"关键词候选"
         let conv = "用户：你好\n助手：你好，有什么可以帮你的？";
         let prompt = build_l1_prompt(conv, None);
         assert!(prompt.contains(conv));
         assert!(!prompt.contains("关键词候选"));
         assert!(prompt.contains("清晨"));
         assert!(prompt.contains("Context"));
-    }
-
-    #[test]
-    fn build_prompt_with_keywords() {
+        // 有关键词 → 注入候选
         let conv = "用户：今天天气真不错";
-        let keywords = "天气, 心情, 户外";
-        let prompt = build_l1_prompt(conv, Some(keywords));
+        let prompt = build_l1_prompt(conv, Some("天气, 心情, 户外"));
         assert!(prompt.contains(conv));
         assert!(prompt.contains("天气"));
         assert!(prompt.contains("心情"));
         assert!(prompt.contains("关键词候选"));
-    }
-
-    #[test]
-    fn build_prompt_with_empty_keywords_falls_back() {
-        let conv = "用户：测试";
-        let prompt = build_l1_prompt(conv, Some(""));
+        // 空串 → 回退（不含候选）
+        let prompt = build_l1_prompt("用户：测试", Some(""));
         assert!(!prompt.contains("关键词候选"));
         assert!(prompt.contains("测试"));
-    }
-
-    #[test]
-    fn build_prompt_with_whitespace_keywords_falls_back() {
-        let conv = "用户：测试";
-        let prompt = build_l1_prompt(conv, Some("   "));
+        // 纯空白 → 回退（不含候选）
+        let prompt = build_l1_prompt("用户：测试", Some("   "));
         assert!(!prompt.contains("关键词候选"));
     }
 

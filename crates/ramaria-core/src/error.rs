@@ -147,22 +147,6 @@ impl RamariaError {
         }
     }
 
-    /// 创建带 source 的配置错误。
-    ///
-    /// 参数:
-    /// - `context`: 当前层对错误的解释。
-    /// - `source`: 底层错误，用于保留错误链。
-    pub fn config_with_source(
-        context: impl Into<String>,
-        source: impl Into<Box<dyn std::error::Error + Send + Sync>>,
-    ) -> Self {
-        Self::Config {
-            context: context.into(),
-            source: Some(source.into()),
-            trace_id: None,
-        }
-    }
-
     // -- Storage --
 
     /// 创建存储错误。
@@ -237,22 +221,6 @@ impl RamariaError {
         }
     }
 
-    /// 创建带 source 的序列化错误。
-    ///
-    /// 参数:
-    /// - `context`: 当前序列化操作的错误描述。
-    /// - `source`: serde_json、serde 或其他格式库的底层错误。
-    pub fn serialization_with_source(
-        context: impl Into<String>,
-        source: impl Into<Box<dyn std::error::Error + Send + Sync>>,
-    ) -> Self {
-        Self::Serialization {
-            context: context.into(),
-            source: Some(source.into()),
-            trace_id: None,
-        }
-    }
-
     // -- Privacy --
 
     /// 创建隐私错误。
@@ -263,22 +231,6 @@ impl RamariaError {
         Self::Privacy {
             context: context.into(),
             source: None,
-            trace_id: None,
-        }
-    }
-
-    /// 创建带 source 的隐私错误。
-    ///
-    /// 参数:
-    /// - `context`: 当前隐私或密钥操作的错误描述。
-    /// - `source`: keychain、系统 API 或底层存储错误。
-    pub fn privacy_with_source(
-        context: impl Into<String>,
-        source: impl Into<Box<dyn std::error::Error + Send + Sync>>,
-    ) -> Self {
-        Self::Privacy {
-            context: context.into(),
-            source: Some(source.into()),
             trace_id: None,
         }
     }
@@ -351,22 +303,6 @@ impl RamariaError {
         Self::Embedding {
             context: context.into(),
             source: None,
-            trace_id: None,
-        }
-    }
-
-    /// 创建带 source 的嵌入模型错误。
-    ///
-    /// 参数:
-    /// - `context`: 当前嵌入操作的错误描述。
-    /// - `source`: candle、safetensors、tokenizers 等底层错误。
-    pub fn embedding_with_source(
-        context: impl Into<String>,
-        source: impl Into<Box<dyn std::error::Error + Send + Sync>>,
-    ) -> Self {
-        Self::Embedding {
-            context: context.into(),
-            source: Some(source.into()),
             trace_id: None,
         }
     }
@@ -573,11 +509,5 @@ mod tests {
         assert!(err.to_string().contains("serialization error"));
         assert!(err.to_string().contains("反序列化 MessageFormat 失败"));
         assert_eq!(err.category(), "serialization");
-    }
-
-    #[test]
-    fn error_is_send_sync() {
-        fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<RamariaError>();
     }
 }

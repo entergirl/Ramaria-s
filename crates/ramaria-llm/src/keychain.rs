@@ -237,18 +237,6 @@ use platform::*;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn keychain_new_creates_instance() {
-        let kc = Keychain::new();
-        // 仅验证构造成功
-        let _ = kc;
-    }
-
-    #[test]
-    fn keychain_default_creates_instance() {
-        let kc = Keychain;
-        let _ = kc;
-    }
+    // （原 keychain_new_creates_instance / keychain_default_creates_instance
+    //  无任何断言，Keychain 构造恒成功，已删除）
 }

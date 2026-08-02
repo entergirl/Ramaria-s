@@ -317,20 +317,6 @@ mod tests {
     }
 
     #[test]
-    fn clamp_salience_values() {
-        assert!((crate::utils::clamp_salience(0.3) - 0.25).abs() < f64::EPSILON);
-        assert!((crate::utils::clamp_salience(0.9) - 1.0).abs() < f64::EPSILON);
-        assert!((crate::utils::clamp_salience(0.0) - 0.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn clamp_valence_values() {
-        assert!((crate::utils::clamp_valence(-0.7) - (-0.5)).abs() < f64::EPSILON);
-        assert!((crate::utils::clamp_valence(0.3) - 0.5).abs() < f64::EPSILON);
-        assert!((crate::utils::clamp_valence(-1.0) - (-1.0)).abs() < f64::EPSILON);
-    }
-
-    #[test]
     fn degraded_event_no_keywords() {
         let sid = Uuid::new_v4();
         let l1_list = vec![make_l1(sid, "无关键词摘要", None, 0.0, 0.5)];

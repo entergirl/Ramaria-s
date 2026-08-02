@@ -281,7 +281,7 @@ impl StorageBackend for SqliteStorage {
     // Keyword Pool（关键词词典）
     // =========================================================
     async fn upsert_keyword(&self, keyword: &str) -> RamariaResult<()> {
-        // 兼容旧接口：将 &str 转换为 KeywordToken 后委托 repo
+        // 将 &str 转换为 KeywordToken 后委托 repo
         if let Some(token) = ramaria_core::keyword::KeywordToken::new(keyword) {
             repo::keyword::upsert(&self.pool, &token).await
         } else {

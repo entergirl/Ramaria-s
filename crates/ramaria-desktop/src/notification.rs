@@ -177,46 +177,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn truncate_short_string_unchanged() {
-        assert_eq!(truncate_str("hello", 10), "hello");
-    }
-
-    #[test]
-    fn truncate_ascii() {
-        assert_eq!(truncate_str("hello world", 5), "hello");
-    }
-
-    #[test]
-    fn truncate_chinese() {
-        // "你好世界" = 4 个汉字
-        assert_eq!(truncate_str("你好世界", 2), "你好");
-    }
-
-    #[test]
-    fn truncate_mixed() {
-        // "Hi你好" = 2 英文 + 2 中文 = 4 字符
-        assert_eq!(truncate_str("Hi你好world", 5), "Hi你好w");
-    }
-
-    #[test]
-    fn truncate_empty() {
-        assert_eq!(truncate_str("", 5), "");
-    }
-
-    #[test]
-    fn truncate_exact_boundary() {
-        assert_eq!(truncate_str("abc", 3), "abc");
-    }
-
-    #[test]
-    fn truncate_zero_len() {
-        assert_eq!(truncate_str("hello", 0), "");
-    }
-
-    #[test]
-    fn truncate_japanese() {
-        // ひらがな = 4 个假名
-        assert_eq!(truncate_str("ひらがな", 2), "ひら");
+    fn truncate_str_cases() {
+        let cases = [
+            ("hello", 10, "hello"),        // 未超长原样
+            ("hello world", 5, "hello"),   // ASCII 截断
+            ("你好世界", 2, "你好"),       // 中文按字符截断
+            ("Hi你好world", 5, "Hi你好w"), // 中英混合
+            ("", 5, ""),                   // 空串
+            ("abc", 3, "abc"),             // 恰好边界
+            ("hello", 0, ""),              // max=0
+            ("ひらがな", 2, "ひら"),       // 日文假名
+        ];
+        for (input, max, expected) in cases {
+            assert_eq!(
+                truncate_str(input, max),
+                expected,
+                "input={input:?} max={max}"
+            );
+        }
     }
 
     #[test]

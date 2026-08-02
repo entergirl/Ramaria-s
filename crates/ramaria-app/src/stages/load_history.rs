@@ -176,7 +176,7 @@ impl PipelineStage for StageLoadHistory {
             session_id = %session_id,
             message_count = history_messages.len(),
             total_chars,
-            "历史消息已加载（v1.3 分页模式）"
+            "历史消息已加载"
         );
 
         input.history_messages = history_messages;

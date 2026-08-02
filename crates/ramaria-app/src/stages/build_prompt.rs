@@ -188,7 +188,7 @@ async fn build_structured_prompt(
         recent_session_summaries: recent_summaries.to_vec(),
         last_active_at: last_active_at.map(|s| s.to_string()),
         knowledge_boundary: None,
-        current_time_str: Some(chrono::Local::now().format("%Y-%m-%d %H:%M").to_string()),
+        current_time_str: Some(crate::now_timestamp_str()),
         weather: None,
         chat_style_rules: Some(rules), // v2.0: 回复规则作为 Experiment 块注入
     };
@@ -288,7 +288,7 @@ fn load_persona_toml_fallback(db_config: Option<&str>) -> Option<String> {
         .unwrap_or(SHARED_CHAT_STYLE_RULES);
 
     let name = &parsed.assistant_name;
-    let time_str = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
+    let time_str = crate::now_timestamp_str();
 
     Some(format!(
         "你的名字是{name}。\n\n{persona_block}\n\n回复规则:\n{rules_block}\n\n\
@@ -307,7 +307,7 @@ fn fallback_read_persona_toml() -> Option<String> {
         return Some(c);
     }
 
-    // 回退到旧路径（兼容旧版安装）
+    // 回退到旧路径
     let old_path = "../config/persona.toml";
     match std::fs::read_to_string(old_path) {
         Ok(c) => {
@@ -339,7 +339,7 @@ fn default_ramaria_prompt() -> String {
          请用自然、友好的语气回复用户。如果用户提到之前聊过的内容，\
          请结合记忆上下文给出更有针对性的回复。\n\
          当前时间：{}",
-        chrono::Local::now().format("%Y-%m-%d %H:%M")
+        crate::now_timestamp_str()
     )
 }
 
@@ -399,40 +399,9 @@ mod tests {
     }
 
     // =========================================================
-    // 测试: persona 存在但 traits 为空 → 回退 persona.toml
-    // =========================================================
-
-    #[tokio::test]
-    async fn person_exists_no_traits_fallback() {
-        // MockStorage 的 get_persona_by_uid 默认返回 None
-        // 所以会走默认 prompt 降级路径
-        let ctx = simple_context();
-        let stage = StageBuildPrompt::new();
-        let data = base_data(Some("test-0001"));
-
-        let result = stage.execute(&ctx, data).await;
-        assert!(result.is_ok());
-        let output = result.expect("should succeed");
-        assert!(output.system_prompt.is_some());
-    }
-
-    // =========================================================
     // 测试: persona_uid 缺失时使用 "rama-0001" 兜底
+    // （与 no_persona_uses_default_prompt 场景重复，已覆盖）
     // =========================================================
-
-    #[tokio::test]
-    async fn missing_persona_uid_defaults_to_rama() {
-        let ctx = simple_context();
-        let stage = StageBuildPrompt::new();
-        let mut data = base_data(None);
-        data.persona_uid = None; // 显式 None
-
-        let result = stage.execute(&ctx, data).await;
-        assert!(result.is_ok());
-        let output = result.expect("should succeed");
-        let prompt = output.system_prompt.expect("system_prompt should be set");
-        assert!(prompt.contains("Ramaria"));
-    }
 
     // =========================================================
     // 测试: system_prompt 字段在 Stage 后确实被设置
@@ -493,28 +462,6 @@ mod tests {
 
     // =========================================================
     // 测试: load_persona_toml_fallback 失败返回 None
+    // （原 no_db_no_file / invalid_content 无断言冒烟测试已删除）
     // =========================================================
-
-    #[test]
-    fn load_toml_fallback_no_db_no_file() {
-        // 不提供 db_config，文件系统也不存在 → 应返回 None
-        let result = load_persona_toml_fallback(None);
-        // 测试环境可能没有 persona.toml 文件，期望 None
-        // 如果恰好有文件，也接受 Some
-        // 但重点是函数不 panic
-        let _ = result;
-    }
-
-    // =========================================================
-    // 测试: load_toml_fallback 对无效内容的处理
-    // =========================================================
-
-    #[test]
-    fn load_toml_fallback_invalid_content() {
-        // 提供看起来像 TOML 但不是有效 persona 的内容
-        let result = load_persona_toml_fallback(Some("[identity]\nname = \"test\""));
-        // 无效 TOML（缺少 [blocks] 或 blocks 格式不对）→ 会尝试解析并失败或成功
-        // 至少不 panic
-        let _ = result;
-    }
 }

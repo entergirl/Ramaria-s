@@ -24,11 +24,10 @@ use crate::types::LlmProvider;
 ///
 /// 版本历史:
 /// - 1: 初始 schema
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+const CURRENT_SCHEMA_VERSION: u32 = 1;
 
 /// 当前 Ramaria 应用版本号（与 workspace Cargo.toml 保持同步）。
-/// v1.3.0 — 算法深化：TopicBatcher + 关键词体系 + 校准权重链 + 三轨准入 + 分层收缩 + A8 因果链 + motives 激活
-pub const CURRENT_APP_VERSION: &str = "1.3.0";
+const CURRENT_APP_VERSION: &str = "1.3.0";
 
 // =========================================================
 // 应用配置根结构
@@ -414,7 +413,7 @@ pub struct ThresholdConfig {
     /// 最早未吸收事件触发 L3 推断的天数阈值（路径 B）
     pub l3_trigger_days: u32,
     /// L2 事件提取时簇间 LLM 请求间隔（毫秒），用于避免触发远程 API 速率限制。
-    /// 默认 0（不等待），建议对 DeepSeek 等有速率限制的 API 设为 500~1000。
+    /// `Default` 实现为 800（等待 800ms）；建议对 DeepSeek 等有速率限制的 API 调大。
     #[serde(default)]
     pub cluster_delay_ms: u64,
 }

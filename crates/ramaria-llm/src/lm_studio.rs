@@ -134,11 +134,4 @@ mod tests {
         assert!(!cap.supports_json_mode);
         assert!(cap.context_window > 0);
     }
-
-    #[test]
-    fn lm_studio_no_api_key_required() {
-        let config = BackendConfig::lm_studio_default();
-        let provider = LmStudioProvider::new(config).expect("构造应成功");
-        let _ = provider;
-    }
 }

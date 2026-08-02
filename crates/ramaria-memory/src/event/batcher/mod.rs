@@ -687,17 +687,16 @@ mod tests {
 
     // ---- L1Item::from ----
 
-    #[test]
-    fn l1_item_from_memory_l1_with_keywords() {
-        let l1 = MemoryL1 {
+    fn make_memory_l1(summary: &str, keywords: Option<&str>, salience: f64) -> MemoryL1 {
+        MemoryL1 {
             id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
-            summary: "测试摘要".into(),
-            keywords: Some("工作, 压力, 倦怠".into()),
+            summary: summary.into(),
+            keywords: keywords.map(|s| s.into()),
             time_period: None,
             atmosphere: None,
             valence: 0.0,
-            salience: 0.75,
+            salience,
             absorbed: false,
             created_at: 1_700_000_000_000,
             last_accessed_at: None,
@@ -705,56 +704,22 @@ mod tests {
             context_json: None,
             situation_strength: None,
             evidence_notes: None,
-        };
-        let item = L1Item::from(&l1);
+        }
+    }
+
+    /// L1Item::from 各关键词输入参数化验证。
+    #[test]
+    fn l1_item_from_memory_l1_cases() {
+        // 有关键词 → 解析为 3 个 token，保留 salience
+        let item = L1Item::from(&make_memory_l1("测试摘要", Some("工作, 压力, 倦怠"), 0.75));
         assert_eq!(item.keywords.len(), 3);
         assert!((item.salience - 0.75).abs() < f64::EPSILON);
         assert!(item.embedding.is_none());
-    }
-
-    #[test]
-    fn l1_item_from_memory_l1_no_keywords() {
-        let l1 = MemoryL1 {
-            id: Uuid::new_v4(),
-            session_id: Uuid::new_v4(),
-            summary: "无关键词摘要".into(),
-            keywords: None,
-            time_period: None,
-            atmosphere: None,
-            valence: 0.0,
-            salience: 0.5,
-            absorbed: false,
-            created_at: 1_700_000_000_000,
-            last_accessed_at: None,
-            persona_uid: None,
-            context_json: None,
-            situation_strength: None,
-            evidence_notes: None,
-        };
-        let item = L1Item::from(&l1);
+        // 无关键词 → 空
+        let item = L1Item::from(&make_memory_l1("无关键词摘要", None, 0.5));
         assert!(item.keywords.is_empty());
-    }
-
-    #[test]
-    fn l1_item_from_memory_l1_empty_keywords() {
-        let l1 = MemoryL1 {
-            id: Uuid::new_v4(),
-            session_id: Uuid::new_v4(),
-            summary: "空关键词".into(),
-            keywords: Some("".into()),
-            time_period: None,
-            atmosphere: None,
-            valence: 0.0,
-            salience: 0.5,
-            absorbed: false,
-            created_at: 1_700_000_000_000,
-            last_accessed_at: None,
-            persona_uid: None,
-            context_json: None,
-            situation_strength: None,
-            evidence_notes: None,
-        };
-        let item = L1Item::from(&l1);
+        // 空关键词字符串 → 空
+        let item = L1Item::from(&make_memory_l1("空关键词", Some(""), 0.5));
         assert!(item.keywords.is_empty());
     }
 
@@ -822,18 +787,17 @@ mod tests {
 
     // ---- TopicBatcherConfig ----
 
+    /// TopicBatcherConfig 默认值 / builder / 边界钳制验证。
     #[test]
-    fn config_defaults() {
+    fn config_cases() {
+        // 默认值
         let c = TopicBatcherConfig::default();
         assert_eq!(c.min_cluster_size, 3);
         assert_eq!(c.max_cluster_size, 25);
         assert!((c.similarity_threshold - 0.2).abs() < f64::EPSILON);
         assert!((c.alpha - 0.5).abs() < f64::EPSILON);
         assert!((c.modularity_min - 0.3).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn config_builder() {
+        // builder 链
         let c = TopicBatcherConfig::new()
             .with_min_cluster_size(5)
             .with_max_cluster_size(30)
@@ -845,10 +809,7 @@ mod tests {
         assert!((c.similarity_threshold - 0.3).abs() < f64::EPSILON);
         assert!((c.alpha - 0.7).abs() < f64::EPSILON);
         assert!((c.modularity_min - 0.25).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn config_clamp_values() {
+        // 超界输入被钳制
         let c = TopicBatcherConfig::new()
             .with_similarity_threshold(1.5) // 超上限
             .with_alpha(-0.5) // 超下限
@@ -860,121 +821,73 @@ mod tests {
 
     // ---- jaccard_similarity ----
 
+    /// jaccard_similarity 各输入参数化验证。
     #[test]
-    fn jaccard_identical() {
-        let a = vec![
-            KeywordToken::new("工作").unwrap(),
-            KeywordToken::new("压力").unwrap(),
+    fn jaccard_similarity_cases() {
+        fn kw(s: &str) -> KeywordToken {
+            KeywordToken::new(s).unwrap()
+        }
+        let cases: Vec<(Vec<KeywordToken>, Vec<KeywordToken>, f64)> = vec![
+            (
+                vec![kw("工作"), kw("压力")],
+                vec![kw("工作"), kw("压力")],
+                1.0,
+            ),
+            (vec![kw("工作")], vec![kw("休闲")], 0.0),
+            // 交集=1（工作），并集=3（工作、压力、倦怠）→ 1/3 ≈ 0.333
+            (
+                vec![kw("工作"), kw("压力")],
+                vec![kw("工作"), kw("倦怠")],
+                1.0 / 3.0,
+            ),
+            (vec![], vec![], 0.0),
+            (vec![kw("工作")], vec![], 0.0),
         ];
-        let b = vec![
-            KeywordToken::new("工作").unwrap(),
-            KeywordToken::new("压力").unwrap(),
-        ];
-        assert!((jaccard_similarity(&a, &b) - 1.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn jaccard_disjoint() {
-        let a = vec![KeywordToken::new("工作").unwrap()];
-        let b = vec![KeywordToken::new("休闲").unwrap()];
-        assert!((jaccard_similarity(&a, &b) - 0.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn jaccard_partial_overlap() {
-        let a = vec![
-            KeywordToken::new("工作").unwrap(),
-            KeywordToken::new("压力").unwrap(),
-        ];
-        let b = vec![
-            KeywordToken::new("工作").unwrap(),
-            KeywordToken::new("倦怠").unwrap(),
-        ];
-        // 交集=1（工作），并集=3（工作、压力、倦怠）→ 1/3 ≈ 0.333
-        let sim = jaccard_similarity(&a, &b);
-        assert!((sim - 1.0 / 3.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn jaccard_both_empty() {
-        let a: Vec<KeywordToken> = vec![];
-        let b: Vec<KeywordToken> = vec![];
-        assert!((jaccard_similarity(&a, &b) - 0.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn jaccard_one_empty() {
-        let a = vec![KeywordToken::new("工作").unwrap()];
-        let b: Vec<KeywordToken> = vec![];
-        assert!((jaccard_similarity(&a, &b) - 0.0).abs() < f64::EPSILON);
+        for (a, b, expected) in cases {
+            assert!(
+                (jaccard_similarity(&a, &b) - expected).abs() < 0.001,
+                "期望 {expected}"
+            );
+        }
     }
 
     // ---- cosine_similarity ----
 
+    /// cosine_similarity 各输入参数化验证（含零向量与长度不一致）。
     #[test]
-    fn cosine_identical_vectors() {
-        let a = vec![1.0f32, 0.0, 0.0];
-        let b = vec![1.0f32, 0.0, 0.0];
-        assert!((cosine_similarity(&a, &b) - 1.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn cosine_orthogonal_vectors() {
-        let a = vec![1.0f32, 0.0];
-        let b = vec![0.0f32, 1.0];
-        assert!((cosine_similarity(&a, &b) - 0.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn cosine_opposite_vectors() {
-        let a = vec![1.0f32, 0.0];
-        let b = vec![-1.0f32, 0.0];
-        assert!((cosine_similarity(&a, &b) - (-1.0)).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn cosine_zero_vector() {
-        let a = vec![0.0f32, 0.0];
-        let b = vec![1.0f32, 0.0];
-        assert!((cosine_similarity(&a, &b) - 0.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn cosine_mismatched_lengths() {
-        let a = vec![1.0f32, 0.0];
-        let b = vec![1.0f32, 0.0, 0.0]; // 长度不一致
-        assert!((cosine_similarity(&a, &b) - 0.0).abs() < f64::EPSILON);
+    fn cosine_similarity_cases() {
+        let cases: Vec<(Vec<f32>, Vec<f32>, f64)> = vec![
+            (vec![1.0, 0.0, 0.0], vec![1.0, 0.0, 0.0], 1.0),
+            (vec![1.0, 0.0], vec![0.0, 1.0], 0.0),
+            (vec![1.0, 0.0], vec![-1.0, 0.0], -1.0),
+            (vec![0.0, 0.0], vec![1.0, 0.0], 0.0),
+            (vec![1.0, 0.0], vec![1.0, 0.0, 0.0], 0.0), // 长度不一致
+        ];
+        for (a, b, expected) in cases {
+            assert!(
+                (cosine_similarity(&a, &b) - expected).abs() < f64::EPSILON,
+                "期望 {expected}"
+            );
+        }
     }
 
     // ---- compute_semantic_score ----
 
+    /// compute_semantic_score 各 alpha/embedding 组合参数化验证。
     #[test]
-    fn semantic_score_with_embedding_alpha_05() {
+    fn semantic_score_cases() {
         let emb_a = vec![1.0f32, 0.0];
         let emb_b = vec![1.0f32, 0.0]; // cos=1.0
-        let sim_kw = 0.4;
         // score = 0.5 * 0.4 + 0.5 * 1.0 = 0.7
-        let score = compute_semantic_score(Some(&emb_a), Some(&emb_b), sim_kw, 0.5).unwrap();
+        let score = compute_semantic_score(Some(&emb_a), Some(&emb_b), 0.4, 0.5).unwrap();
         assert!((score - 0.7).abs() < 0.001);
-    }
-
-    #[test]
-    fn semantic_score_with_embedding_alpha_10() {
-        let emb_a = vec![1.0f32, 0.0];
         let emb_b = vec![0.0f32, 1.0]; // cos=0.0
-        let sim_kw = 0.4;
         // score = 1.0 * 0.4 + 0.0 * 0.0 = 0.4
-        let score = compute_semantic_score(Some(&emb_a), Some(&emb_b), sim_kw, 1.0).unwrap();
+        let score = compute_semantic_score(Some(&emb_a), Some(&emb_b), 0.4, 1.0).unwrap();
         assert!((score - 0.4).abs() < 0.001);
-    }
-
-    #[test]
-    fn semantic_score_missing_embedding_returns_none() {
-        let emb = vec![1.0f32, 0.0];
-        let sim_kw = 0.4;
-        // 一边缺少 embedding
-        assert!(compute_semantic_score(None, Some(&emb), sim_kw, 0.5).is_none());
-        assert!(compute_semantic_score(Some(&emb), None, sim_kw, 0.5).is_none());
+        // 一边缺少 embedding → None
+        assert!(compute_semantic_score(None, Some(&emb_a), 0.4, 0.5).is_none());
+        assert!(compute_semantic_score(Some(&emb_a), None, 0.4, 0.5).is_none());
     }
 
     // =========================================================

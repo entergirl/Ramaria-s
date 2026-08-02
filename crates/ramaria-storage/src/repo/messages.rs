@@ -7,7 +7,6 @@
 //! - role/source 解析失败时记录 WARNING 日志并回退到安全默认值
 //! - UUID 解析异常时记录 WARNING，不静默吞错
 
-use crate::parse_enum_fallback;
 use crate::repo::StorageResultExt;
 use crate::repo::parse_uuid_required;
 use ramaria_core::error::{RamariaError, RamariaResult};
@@ -95,7 +94,7 @@ pub async fn save(pool: &SqlitePool, msg: &Message) -> RamariaResult<()> {
 /// 返回:
 /// - `Ok(true)`: session 存在且未关闭。
 /// - `Ok(false)`: session 不存在或已关闭。
-pub async fn is_session_active(pool: &SqlitePool, session_id: Uuid) -> RamariaResult<bool> {
+async fn is_session_active(pool: &SqlitePool, session_id: Uuid) -> RamariaResult<bool> {
     let row: Option<(i64,)> =
         sqlx::query_as("SELECT 1 FROM sessions WHERE id = ? AND ended_at IS NULL")
             .bind(session_id.to_string())

@@ -67,13 +67,8 @@ async fn noop_different_dimensions() {
     assert_eq!(p2.model_info().dimension, 1024);
 }
 
-#[tokio::test]
-async fn noop_empty_text_batch() {
-    let p = NoopEmbeddingProvider::new(384);
-    // 即使不可用，空文本列表也应返回错误
-    let result = p.embed_batch(&[]).await;
-    assert!(result.is_err() || result.unwrap().is_empty());
-}
+// （原 noop_empty_text_batch 断言 `is_err() || unwrap().is_empty()` 恒真，
+//  embed_batch 无条件返回 Err，与 noop_embed_batch_returns_unsupported 同路径，已删除）
 
 // =========================================================
 // EmbeddingProvider trait object 测试

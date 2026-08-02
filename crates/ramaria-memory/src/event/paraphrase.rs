@@ -139,8 +139,10 @@ fn clean_paraphrase(raw: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
 
+    /// clean_paraphrase 各输入参数化验证：去引号 / 截断 / 空输入 / 保真 / 中文弯引号。
     #[test]
-    fn clean_removes_quotes() {
+    fn clean_paraphrase_cases() {
+        // 去英文引号（双引号/单引号）
         assert_eq!(
             clean_paraphrase(r#""面对批评时容易沮丧""#, 30),
             "面对批评时容易沮丧"
@@ -149,28 +151,22 @@ mod tests {
             clean_paraphrase("'面对权威时倾向于退缩'", 30),
             "面对权威时倾向于退缩"
         );
-    }
-
-    #[test]
-    fn clean_truncates() {
+        // 去中文弯引号
+        assert_eq!(
+            clean_paraphrase("\u{201c}面对批评容易沮丧\u{201d}", 30),
+            "面对批评容易沮丧"
+        );
+        // 超长截断
         let long = "这是一个非常长的去情境化描述文本超过了三十个字的限制需要截断处理";
         let result = clean_paraphrase(long, 30);
         assert!(result.chars().count() <= 30);
-    }
-
-    #[test]
-    fn clean_handles_empty() {
+        // 空输入
         assert_eq!(clean_paraphrase("", 30), "");
         assert_eq!(clean_paraphrase("   ", 30), "");
-    }
-
-    #[test]
-    fn clean_preserves_content() {
+        // 30 字以内保留全文
         let input = "面对亲密关系中的不安全感时倾向于过度担忧";
-        let result = clean_paraphrase(input, 30);
-        // 30字以内应保留全文
         assert!(input.chars().count() <= 30);
-        assert_eq!(result, input);
+        assert_eq!(clean_paraphrase(input, 30), input);
     }
 
     #[test]
@@ -179,13 +175,5 @@ mod tests {
         assert_eq!(config.temperature, 0.2);
         assert_eq!(config.max_tokens, 128);
         assert_eq!(config.max_chars, 30);
-    }
-
-    #[test]
-    fn clean_chinese_quotes() {
-        assert_eq!(
-            clean_paraphrase("\u{201c}面对批评容易沮丧\u{201d}", 30),
-            "面对批评容易沮丧"
-        );
     }
 }

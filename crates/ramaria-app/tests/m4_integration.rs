@@ -394,6 +394,12 @@ fn phase_a_calibrated_weights_reduces_tentative_weight() {
     // tentative 事件以半权重参与
     assert_eq!(summary.confirmed_count, 5);
     assert_eq!(summary.tentative_count, 2);
+    // 三轨一致性: active events = confirmed + tentative
+    assert_eq!(
+        summary.confirmed_count + summary.tentative_count,
+        summary.total_events_filtered,
+        "active events = confirmed + tentative"
+    );
 
     // 校准权重下 n_eff 应小于原始事件数（tentative 半权重 + situation_strength 影响）
     let total_n_eff: f64 = summary.categories.iter().map(|c| c.n_eff).sum();
@@ -420,29 +426,14 @@ fn phase_a_v12_compat_path_disables_calibrated_weights() {
 
     assert_eq!(summary.total_events_in, 8);
     let total_n_eff: f64 = summary.categories.iter().map(|c| c.n_eff).sum();
-    assert!(total_n_eff > 0.0, "v1.2 路径应有有效 n_eff");
+    assert!(total_n_eff > 0.0, "路径应有有效 n_eff");
 }
 
 // =========================================================
 // 三轨动态准入测试
+// （原 three_track_classification 的三轨计数断言已并入
+//  phase_a_calibrated_weights_reduces_tentative_weight，已删除）
 // =========================================================
-
-#[test]
-fn three_track_classification() {
-    let events = make_diverse_events();
-    let config = StatsConfig::default();
-    let summary = run_phase_a_stats(&events, &config);
-
-    // 三轨分类应正确反映在 StatsSummary 中
-    assert_eq!(summary.confirmed_count, 5);
-    assert_eq!(summary.tentative_count, 2);
-    assert_eq!(summary.discarded_count, 1);
-    assert_eq!(
-        summary.confirmed_count + summary.tentative_count,
-        summary.total_events_filtered,
-        "active events = confirmed + tentative"
-    );
-}
 
 #[test]
 fn tentative_promotion_across_batches() {

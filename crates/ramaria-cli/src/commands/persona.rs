@@ -396,54 +396,66 @@ mod tests {
     // 注: extract_toml_value 的单元测试已移至 crate::util 模块，
     // 此处仅保留 extract_toml_block / summarize_block / PersonaKind::from_uid 的测试。
 
+    /// extract_toml_block 各输入参数化验证。
     #[test]
-    fn extract_toml_block_basic() {
-        let toml = "[blocks]\nA_persona = \"\"\"\n我是测试人格。\n性格：温和。\n\"\"\"\nE_rules = \"\"\"\n规则内容\n\"\"\"";
-        let result = extract_toml_block(toml, "A_persona");
-        assert!(result.is_some());
-        let content = result.unwrap();
-        assert!(content.contains("我是测试人格"));
-        assert!(content.contains("性格：温和"));
-        assert!(!content.contains("\"\"\""));
+    fn extract_toml_block_cases() {
+        // (toml, key, 期望内容（None=不存在）, 是否要求精确相等)
+        let cases = [
+            (
+                "[blocks]\nA_persona = \"\"\"\n我是测试人格。\n性格：温和。\n\"\"\"\nE_rules = \"\"\"\n规则内容\n\"\"\"",
+                "A_persona",
+                Some("我是测试人格。\n性格：温和。"),
+                false,
+            ),
+            (
+                "[blocks]\nA_persona = \"\"\"\n内容\n\"\"\"",
+                "E_rules",
+                None,
+                false,
+            ), // key 不存在
+            (
+                "[blocks]\nA_persona = \"\"\"\"\"\"",
+                "A_persona",
+                None,
+                false,
+            ), // 空块
+            (
+                "[blocks]\nA_persona = \"\"\"\n\n\n核心内容\n\n\n\"\"\"",
+                "A_persona",
+                Some("核心内容"),
+                true, // 空行清理后精确匹配
+            ),
+        ];
+        for (toml, key, expected, exact) in cases {
+            let result = extract_toml_block(toml, key);
+            match (result, expected) {
+                (Some(content), Some(exp)) => {
+                    if exact {
+                        assert_eq!(content, exp, "key={key}");
+                    } else {
+                        assert!(content.contains(exp), "key={key}");
+                    }
+                    assert!(!content.contains("\"\"\""), "key={key}");
+                }
+                (None, None) => {}
+                (r, e) => panic!("key={key}: 期望 {e:?}，实际 {r:?}"),
+            }
+        }
     }
 
+    /// summarize_block 各输入参数化验证。
     #[test]
-    fn extract_toml_block_not_found() {
-        let toml = "[blocks]\nA_persona = \"\"\"\n内容\n\"\"\"";
-        assert_eq!(extract_toml_block(toml, "E_rules"), None);
-    }
-
-    #[test]
-    fn extract_toml_block_empty_block() {
-        let toml = "[blocks]\nA_persona = \"\"\"\"\"\"";
-        assert_eq!(extract_toml_block(toml, "A_persona"), None);
-    }
-
-    #[test]
-    fn extract_toml_block_with_empty_lines() {
-        let toml = "[blocks]\nA_persona = \"\"\"\n\n\n核心内容\n\n\n\"\"\"";
-        let result = extract_toml_block(toml, "A_persona");
-        assert_eq!(result, Some("核心内容".to_string()));
-    }
-
-    #[test]
-    fn summarize_block_short() {
+    fn summarize_block_cases() {
+        // 短文本原样
         assert_eq!(summarize_block("短文本", 100), "短文本");
-    }
-
-    #[test]
-    fn summarize_block_truncated() {
+        // 超长截断：50 chars + "..."
         let long = "a".repeat(200);
         let result = summarize_block(&long, 50);
         assert!(result.ends_with("..."));
-        assert_eq!(result.chars().count(), 53); // 50 chars + "..."
-    }
-
-    #[test]
-    fn summarize_block_multiline() {
+        assert_eq!(result.chars().count(), 53);
+        // 多行合并为单行
         let text = "第一行\n第二行\n  第三行有空格  ";
         let result = summarize_block(text, 100);
-        // 多行合并为单行，以空格分隔
         assert!(result.contains("第一行"));
         assert!(result.contains("第二行"));
         assert!(result.contains("第三行有空格"));

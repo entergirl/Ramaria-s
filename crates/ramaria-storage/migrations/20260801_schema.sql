@@ -1,7 +1,11 @@
--- Ramaria v1.0 完整 Schema Migration（23 张表）
--- 一次性建齐全部表，不兼容旧 Python schema
--- 时间字段统一 INTEGER（Unix 毫秒）
--- DDL 按依赖顺序排列，避免前向引用
+-- =========================================================
+-- Ramaria 数据库完整 Schema（合并基线）
+--
+-- 说明:
+-- - 由历史增量迁移合并而成，作为单一基线迁移文件。
+-- - 时间字段统一 INTEGER（Unix 毫秒）。
+-- - DDL 按依赖顺序排列：先建全部表，再执行列级增量变更。
+-- =========================================================
 
 -- =========================================================
 -- 公共层（无外键依赖）
@@ -161,7 +165,6 @@ CREATE INDEX idx_personality_traits_uid_status ON personality_traits(persona_uid
 
 -- =========================================================
 -- L2/L3 层 — 证据链 / 聚类快照 / Few-shot
---   证据链 FK→personality_traits + memory_events（两者已建完）
 -- =========================================================
 
 CREATE TABLE trait_evidence (
@@ -204,7 +207,7 @@ CREATE TABLE persona_examples (
 CREATE INDEX idx_persona_examples_uid_sel ON persona_examples(persona_uid, selected);
 
 -- =========================================================
--- L0 层 — messages（FK→sessions, personas，两者已建完）
+-- L0 层 — messages（FK→sessions, personas）
 -- =========================================================
 
 CREATE TABLE messages (
@@ -327,3 +330,44 @@ CREATE TABLE settings (
     value      TEXT NOT NULL,
     updated_at INTEGER NOT NULL
 );
+
+-- =========================================================
+-- 列级增量（历史迁移合并）
+-- =========================================================
+
+-- 情境强度加权（memory_events / memory_l1，1-5 级，NULL 等效 3 中性）
+ALTER TABLE memory_events ADD COLUMN situation_strength INTEGER;
+ALTER TABLE memory_l1 ADD COLUMN situation_strength INTEGER;
+
+-- 人格简介（personas，面向用户的多角色管理描述）
+ALTER TABLE personas ADD COLUMN description TEXT;
+
+-- Session 绑定当前对话人格（persona_uid）
+ALTER TABLE sessions ADD COLUMN persona_uid TEXT;
+
+-- 底层动机标注（memory_events，JSON 数组字符串）
+ALTER TABLE memory_events ADD COLUMN motives TEXT;
+
+-- 关键词倒排索引表（关键词 → 业务文档引用）
+CREATE TABLE IF NOT EXISTS keyword_refs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    keyword_id  TEXT    NOT NULL REFERENCES keyword_pool(keyword) ON DELETE CASCADE,
+    doc_type    TEXT    NOT NULL,   -- 'l1' / 'l2'
+    doc_id      TEXT    NOT NULL,   -- L1: UUID字符串, L2: i64字符串
+    persona_uid TEXT    NOT NULL,
+    weight      REAL    NOT NULL DEFAULT 1.0,
+    created_at  INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_keyword_refs_keyword
+    ON keyword_refs(keyword_id);
+
+CREATE INDEX IF NOT EXISTS idx_keyword_refs_doc
+    ON keyword_refs(doc_type, doc_id);
+
+-- 聚类快照跨版本语义标签
+ALTER TABLE persona_cluster_snapshots ADD COLUMN semantic_label TEXT;
+ALTER TABLE persona_cluster_snapshots ADD COLUMN semantic_label_embedding BLOB;
+
+-- L1 证据片段（JSON 数组字符串）
+ALTER TABLE memory_l1 ADD COLUMN evidence_notes TEXT;

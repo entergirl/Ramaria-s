@@ -402,57 +402,27 @@ mod tests {
 
     // ── KeywordToken 测试 ──
 
-    /// 正常中文关键词
+    /// KeywordToken::new 规范化：中文保留 / 英文小写 / trim 空白
     #[test]
-    fn keyword_token_normal_chinese() {
-        let token = KeywordToken::new("工作压力").expect("中文关键词应能构造");
-        assert_eq!(token.as_str(), "工作压力");
+    fn keyword_token_normalization_cases() {
+        let cases = [
+            ("工作压力", "工作压力"),
+            ("Work Stress", "work stress"),
+            ("DeepSeek-API", "deepseek-api"),
+            ("  职业倦怠  ", "职业倦怠"),
+        ];
+        for (input, expected) in cases {
+            let token = KeywordToken::new(input).expect("关键词应能构造");
+            assert_eq!(token.as_str(), expected, "input={input:?}");
+        }
     }
 
-    /// 英文自动小写
+    /// KeywordToken::new 无效输入：空/纯空白/超长 → None；边界长度 → Some
     #[test]
-    fn keyword_token_english_lowercase() {
-        let token = KeywordToken::new("Work Stress").expect("英文关键词应能构造");
-        assert_eq!(token.as_str(), "work stress");
-    }
-
-    /// 混合大小写英文
-    #[test]
-    fn keyword_token_mixed_case() {
-        let token = KeywordToken::new("DeepSeek-API").expect("混合大小写应能构造");
-        assert_eq!(token.as_str(), "deepseek-api");
-    }
-
-    /// 前后空白被 trim
-    #[test]
-    fn keyword_token_trim_whitespace() {
-        let token = KeywordToken::new("  职业倦怠  ").expect("含空白关键词应能构造");
-        assert_eq!(token.as_str(), "职业倦怠");
-    }
-
-    /// 空字符串返回 None
-    #[test]
-    fn keyword_token_empty_returns_none() {
-        assert!(KeywordToken::new("").is_none());
-    }
-
-    /// 纯空白返回 None
-    #[test]
-    fn keyword_token_whitespace_only_returns_none() {
-        assert!(KeywordToken::new("   ").is_none());
-        assert!(KeywordToken::new("\t\n").is_none());
-    }
-
-    /// 超长字符串返回 None
-    #[test]
-    fn keyword_token_too_long_returns_none() {
-        let long_str = "x".repeat(257);
-        assert!(KeywordToken::new(&long_str).is_none());
-    }
-
-    /// 边界长度（256 字符）应能构造
-    #[test]
-    fn keyword_token_boundary_length() {
+    fn keyword_token_invalid_inputs() {
+        for bad in ["", "   ", "\t\n", &"x".repeat(257)] {
+            assert!(KeywordToken::new(bad).is_none(), "input 应被拒绝");
+        }
         let boundary = "x".repeat(256);
         let token = KeywordToken::new(&boundary);
         assert!(token.is_some());
@@ -493,19 +463,11 @@ mod tests {
         assert_eq!(token, deserialized);
     }
 
-    /// into_inner 消费 self
+    /// into_inner 消费 self（From<KeywordToken> for String 委托同一实现）
     #[test]
     fn keyword_token_into_inner() {
         let token = KeywordToken::new("测试").unwrap();
         let s: String = token.into_inner();
-        assert_eq!(s, "测试");
-    }
-
-    /// From<KeywordToken> for String
-    #[test]
-    fn keyword_token_into_string() {
-        let token = KeywordToken::new("测试").unwrap();
-        let s: String = token.into();
         assert_eq!(s, "测试");
     }
 
@@ -680,39 +642,42 @@ mod tests {
 
     // ── KeywordRef 测试 ──
 
-    /// L1 引用构造和查询
+    /// KeywordRef 各变体的 doc_type/doc_id/persona_uid 查询
     #[test]
-    fn keyword_ref_l1() {
-        let r = KeywordRef::L1 {
-            id: 123,
-            persona_uid: "p1".to_string(),
-        };
-        assert_eq!(r.doc_type(), "l1");
-        assert_eq!(r.doc_id(), Some(123));
-        assert_eq!(r.persona_uid(), Some("p1"));
-    }
-
-    /// L2 引用构造和查询
-    #[test]
-    fn keyword_ref_l2() {
-        let r = KeywordRef::L2 {
-            id: 456,
-            persona_uid: "p2".to_string(),
-        };
-        assert_eq!(r.doc_type(), "l2");
-        assert_eq!(r.doc_id(), Some(456));
-        assert_eq!(r.persona_uid(), Some("p2"));
-    }
-
-    /// Pool 引用构造和查询
-    #[test]
-    fn keyword_ref_pool() {
-        let r = KeywordRef::Pool {
-            keyword: "测试词".to_string(),
-        };
-        assert_eq!(r.doc_type(), "pool");
-        assert_eq!(r.doc_id(), None);
-        assert_eq!(r.persona_uid(), None);
+    fn keyword_ref_variants() {
+        let cases = vec![
+            (
+                KeywordRef::L1 {
+                    id: 123,
+                    persona_uid: "p1".to_string(),
+                },
+                "l1",
+                Some(123),
+                Some("p1"),
+            ),
+            (
+                KeywordRef::L2 {
+                    id: 456,
+                    persona_uid: "p2".to_string(),
+                },
+                "l2",
+                Some(456),
+                Some("p2"),
+            ),
+            (
+                KeywordRef::Pool {
+                    keyword: "测试词".to_string(),
+                },
+                "pool",
+                None,
+                None,
+            ),
+        ];
+        for (r, dt, did, pu) in cases {
+            assert_eq!(r.doc_type(), dt);
+            assert_eq!(r.doc_id(), did);
+            assert_eq!(r.persona_uid(), pu);
+        }
     }
 
     /// Serialize + Deserialize 往返

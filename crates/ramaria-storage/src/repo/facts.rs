@@ -5,7 +5,6 @@
 //! - field 和 source 解析失败时回退到合理默认值并记录 WARNING
 //! - ref_event_id 和 ref_l1_id 为独立可空列，避免一列指两张表
 
-use crate::parse_enum_fallback;
 use crate::repo::StorageResultExt;
 use crate::repo::parse_uuid_optional;
 use ramaria_core::error::RamariaResult;

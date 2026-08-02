@@ -280,14 +280,14 @@ fn is_newer_version(latest: &str, current: &str) -> bool {
             .collect()
     };
 
-    let a_segs = parse_segments(latest);
-    let b_segs = parse_segments(current);
+    let latest_segments = parse_segments(latest);
+    let current_segments = parse_segments(current);
 
-    let max_len = a_segs.len().max(b_segs.len());
+    let max_len = latest_segments.len().max(current_segments.len());
 
     for i in 0..max_len {
-        let a = a_segs.get(i).copied().unwrap_or(0);
-        let b = b_segs.get(i).copied().unwrap_or(0);
+        let a = latest_segments.get(i).copied().unwrap_or(0);
+        let b = current_segments.get(i).copied().unwrap_or(0);
 
         match a.cmp(&b) {
             std::cmp::Ordering::Greater => return true,
@@ -311,47 +311,25 @@ mod tests {
     // ── 版本比较 ──
 
     #[test]
-    fn test_version_newer_major() {
-        assert!(is_newer_version("2.0.0", "1.9.9"));
-    }
-
-    #[test]
-    fn test_version_newer_minor() {
-        assert!(is_newer_version("1.1.0", "1.0.9"));
-    }
-
-    #[test]
-    fn test_version_newer_patch() {
-        assert!(is_newer_version("1.0.1", "1.0.0"));
-    }
-
-    #[test]
-    fn test_version_equal() {
-        assert!(!is_newer_version("1.0.0", "1.0.0"));
-    }
-
-    #[test]
-    fn test_version_older() {
-        assert!(!is_newer_version("0.9.0", "1.0.0"));
-    }
-
-    #[test]
-    fn test_version_shorter_is_treated_as_zero() {
-        // "1.1" 应视为 "1.1.0"，比 "1.0.0" 新
-        assert!(is_newer_version("1.1", "1.0.0"));
-    }
-
-    #[test]
-    fn test_version_different_length() {
-        // "2.0" 比 "1.9.9" 新
-        assert!(is_newer_version("2.0", "1.9.9"));
-    }
-
-    #[test]
-    fn test_version_with_non_numeric_fallback() {
-        // pre-release 标签中的非数字段视为 0
-        // "1.1.0-alpha" 在数字比较上与 "1.1.0" 相同
-        assert!(!is_newer_version("1.1.0-alpha", "1.1.0"));
+    fn test_version_compare_cases() {
+        // (latest, current, 是否更新的期望)
+        let cases = [
+            ("2.0.0", "1.9.9", true),        // major 更新
+            ("1.1.0", "1.0.9", true),        // minor 更新
+            ("1.0.1", "1.0.0", true),        // patch 更新
+            ("1.0.0", "1.0.0", false),       // 相等
+            ("0.9.0", "1.0.0", false),       // 更旧
+            ("1.1", "1.0.0", true),          // "1.1" 视为 "1.1.0"
+            ("2.0", "1.9.9", true),          // 不同长度
+            ("1.1.0-alpha", "1.1.0", false), // 非数字段视为 0
+        ];
+        for (latest, current, expected) in cases {
+            assert_eq!(
+                is_newer_version(latest, current),
+                expected,
+                "is_newer_version({latest}, {current})"
+            );
+        }
     }
 
     // ── UpdateStatus 结构完整性 ──

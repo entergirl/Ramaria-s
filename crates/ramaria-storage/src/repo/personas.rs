@@ -5,7 +5,6 @@
 //! - uid 为全局业务标识（user-0001/rama-0001 等），id 为 AUTOINCREMENT 内部索引
 //! - kind 解析失败时回退到 Hist 并记录 WARNING 日志
 
-use crate::parse_enum_fallback;
 use crate::repo::StorageResultExt;
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::types::{Persona, PersonaKind};

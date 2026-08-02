@@ -41,8 +41,6 @@ impl Default for ConfidenceConfig {
     }
 }
 
-// ---- v1.3 配置传播修复：从 ramaria-core 的可序列化配置创建 ----
-
 impl From<ramaria_core::config::ConfidenceConf> for ConfidenceConfig {
     fn from(conf: ramaria_core::config::ConfidenceConf) -> Self {
         Self {
@@ -567,32 +565,20 @@ mod tests {
 
     // ---- 时间衰减 ----
 
+    /// time_decay_weight 各时间参数化验证（近期/长期/保底）。
     #[test]
-    fn time_decay_recent() {
+    fn time_decay_cases() {
         let config = ConfidenceConfig::default();
         let now = now_ms();
-        // 刚创建的事件
+        // 刚创建 → 权重接近 1.0
         let w = time_decay_weight(now, now, &config);
         assert!((w - 1.0).abs() < 0.01, "刚创建的事件权重应接近 1.0");
-    }
-
-    #[test]
-    fn time_decay_old() {
-        let config = ConfidenceConfig::default();
-        let now = now_ms();
-        // 180 天前
+        // 180 天前 → w ≈ e^(-180/60) ≈ 0.05，不低于保底
         let created_at = now - (180.0 * MS_PER_DAY * 1000.0) as i64;
         let w = time_decay_weight(created_at, now, &config);
-        // w ≈ e^(-180/60) = e^(-3) ≈ 0.05
         assert!(w < 0.1, "180天前权重应 < 0.1，实际={}", w);
         assert!(w >= config.min_decay, "不应低于保底值");
-    }
-
-    #[test]
-    fn time_decay_minimum() {
-        let config = ConfidenceConfig::default();
-        let now = now_ms();
-        // 1000 天前
+        // 1000 天前 → 被保底值钳制
         let created_at = now - (1000.0 * MS_PER_DAY * 1000.0) as i64;
         let w = time_decay_weight(created_at, now, &config);
         assert!((w - config.min_decay).abs() < 1e-10, "应被保底值钳制");
@@ -633,36 +619,27 @@ mod tests {
 
     // ---- 一致度 C ----
 
+    /// compute_consistency 各证据组合参数化验证。
     #[test]
-    fn consistency_all_support() {
+    fn consistency_cases() {
         let config = ConfidenceConfig::default();
         let now = now_ms();
+        // 全支持 → 一致度 > 0.9
         let evidence = vec![
             make_evidence(1, 1, 0.9, 0.0, &config),
             make_evidence(1, 2, 0.8, 0.0, &config),
         ];
         let c = compute_consistency(&evidence, now, &config);
-        // avg_score = 0.85, C = (0.85+1)/2 = 0.925
         assert!(c > 0.9, "全支持证据一致度应 > 0.9，实际={}", c);
-    }
-
-    #[test]
-    fn consistency_mixed() {
-        let config = ConfidenceConfig::default();
-        let now = now_ms();
+        // 正负混合 → 一致度偏低（C=(0.3+1)/2=0.65）
         let evidence = vec![
             make_evidence(1, 1, 0.9, 0.0, &config),
             make_evidence(1, 2, -0.3, 0.0, &config),
         ];
         let c = compute_consistency(&evidence, now, &config);
-        // avg_score = 0.3, C = (0.3+1)/2 = 0.65
         assert!((c - 0.65).abs() < 0.01);
         assert!(c < 0.9, "混合证据一致度应偏低");
-    }
-
-    #[test]
-    fn consistency_empty() {
-        let config = ConfidenceConfig::default();
+        // 无证据 → 0.5 中性
         let c = compute_consistency(&[], now_ms(), &config);
         assert!((c - 0.5).abs() < 1e-10, "无证据时一致度应为 0.5 中性");
     }

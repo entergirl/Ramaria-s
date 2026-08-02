@@ -43,8 +43,6 @@ impl Default for InferrerConfig {
     }
 }
 
-// ---- v1.3 配置传播修复：从 ramaria-core 的可序列化配置创建 ----
-
 impl From<ramaria_core::config::InferrerConf> for InferrerConfig {
     fn from(conf: ramaria_core::config::InferrerConf) -> Self {
         Self {

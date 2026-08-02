@@ -308,31 +308,9 @@ async fn error_title_works() {
 // 配置流程
 // =========================================================
 
-#[tokio::test]
-async fn set_state_transitions_traceable() {
-    let (_, _, app) = make_app();
-
-    app.set_state(AppState::Indexing);
-    assert_eq!(app.current_state(), AppState::Indexing);
-
-    app.set_state(AppState::Ready);
-    assert_eq!(app.current_state(), AppState::Ready);
-}
-
-#[tokio::test]
-async fn check_privacy_integration() {
-    let (_storage, _, app) = make_app();
-    // app 使用 LM Studio（本地），隐私应自动通过
-    let status = app.check_privacy().await.unwrap();
-    assert!(status.is_confirmed());
-}
-
-#[tokio::test]
-async fn backend_config_accessible() {
-    let (_, _, app) = make_app();
-    let cfg = app.backend_config();
-    assert_eq!(cfg.provider, LlmProviderKind::LmStudio);
-}
+// （原 set_state_transitions_traceable 为琐碎 setter/getter 往返测试、
+//  backend_config_accessible 仅断言默认配置常量，
+//  check_privacy_integration 与 privacy_local_provider_auto_approved 重复，均已删除）
 
 // =========================================================
 // T-FIX-015: MockFailingLlm 错误路径集成测试
@@ -343,85 +321,49 @@ async fn backend_config_accessible() {
 // 3. 错误事件内容与 MockFailingLlm 的错误消息一致
 
 #[tokio::test]
-async fn send_message_failing_llm_produces_error_no_done() {
-    let (storage, _, app) = make_failing_app("LLM 服务返回 500 内部错误");
+async fn send_message_failing_llm_cases() {
+    // 两个失败场景：HTTP 500 内部错误 / 连接被拒绝
+    for error_msg in [
+        "LLM 服务返回 500 内部错误",
+        "无法连接到 LLM 服务: 连接被拒绝",
+    ] {
+        let (storage, _, app) = make_failing_app(error_msg);
 
-    // 准备: 设置 → Ready
-    storage
-        .save_backend_config(&BackendConfig::lm_studio_default())
-        .await
-        .unwrap();
-    storage.set_index_version(1).await.unwrap();
-    app.refresh_setup_state().await.unwrap();
-    assert_eq!(app.current_state(), AppState::Degraded);
+        // 准备: 设置 → Ready
+        storage
+            .save_backend_config(&BackendConfig::lm_studio_default())
+            .await
+            .unwrap();
+        storage.set_index_version(1).await.unwrap();
+        app.refresh_setup_state().await.unwrap();
+        assert_eq!(app.current_state(), AppState::Degraded);
 
-    // 发送消息（LLM 将失败）
-    let mut stream = app.send_message("测试消息", None, None).await.unwrap();
+        // 发送消息（LLM 将失败）
+        let mut stream = app.send_message("测试消息", None, None).await.unwrap();
 
-    let mut error_seen = false;
-    let mut done_seen = false;
-    let mut delta_count = 0usize;
+        let mut error_seen = false;
+        let mut done_seen = false;
+        let mut delta_count = 0usize;
 
-    while let Some(event_result) = stream.next().await {
-        match event_result {
-            Ok(StreamEvent::Delta { .. }) => delta_count += 1,
-            Ok(StreamEvent::Done { .. }) => done_seen = true,
-            Ok(StreamEvent::Error { error, .. }) => {
-                error_seen = true;
-                assert!(
-                    error.contains("500"),
-                    "错误事件应包含原始错误信息，实际: {error}"
-                );
+        while let Some(event_result) = stream.next().await {
+            match event_result {
+                Ok(StreamEvent::Delta { .. }) => delta_count += 1,
+                Ok(StreamEvent::Done { .. }) => done_seen = true,
+                Ok(StreamEvent::Error { error, .. }) => {
+                    error_seen = true;
+                    assert!(
+                        error.contains("500") || error.contains("连接被拒绝"),
+                        "错误事件应包含原始错误信息，实际: {error}"
+                    );
+                }
+                // StreamEvent 为 #[non_exhaustive]，处理未来新增事件类型
+                Ok(_) => {}
+                Err(_) => {}
             }
-            // StreamEvent 为 #[non_exhaustive]，处理未来新增事件类型
-            Ok(_) => {}
-            Err(_) => {}
         }
+
+        assert!(error_seen, "LLM 失败时应产生 Error 事件");
+        assert!(!done_seen, "LLM 失败时不应产生 Done 事件（T-FIX-013）");
+        assert_eq!(delta_count, 0, "LLM 失败时不应有 Delta 事件");
     }
-
-    assert!(error_seen, "LLM 失败时应产生 Error 事件");
-    assert!(!done_seen, "LLM 失败时不应产生 Done 事件（T-FIX-013）");
-    assert_eq!(delta_count, 0, "LLM 失败时不应有 Delta 事件");
-}
-
-#[tokio::test]
-async fn send_message_failing_llm_connection_error() {
-    // 测试连接超时场景
-    let (storage, _, app) = make_failing_app("无法连接到 LLM 服务: 连接被拒绝");
-
-    // 准备: 设置 → Ready
-    storage
-        .save_backend_config(&BackendConfig::lm_studio_default())
-        .await
-        .unwrap();
-    storage.set_index_version(1).await.unwrap();
-    app.refresh_setup_state().await.unwrap();
-
-    let mut stream = app.send_message("ping", None, None).await.unwrap();
-
-    let mut events: Vec<String> = Vec::new();
-    while let Some(event_result) = stream.next().await {
-        match event_result {
-            Ok(StreamEvent::Delta { content, .. }) => events.push(format!("delta:{}", content)),
-            Ok(StreamEvent::Done { .. }) => events.push("done".into()),
-            Ok(StreamEvent::Error { error, .. }) => events.push(format!("error:{}", error)),
-            // StreamEvent 为 #[non_exhaustive]，处理未来新增事件类型
-            Ok(other) => events.push(format!("unknown:{:?}", other)),
-            Err(e) => events.push(format!("stream_err:{}", e)),
-        }
-    }
-
-    // 应有一个 Error 事件，无 Done
-    assert!(
-        events.iter().any(|e| e.starts_with("error:")),
-        "应包含 Error 事件，实际事件: {events:?}"
-    );
-    assert!(
-        !events.iter().any(|e| e == "done"),
-        "不应包含 Done 事件，实际事件: {events:?}"
-    );
-    assert!(
-        !events.iter().any(|e| e.starts_with("delta:")),
-        "不应包含 Delta 事件，实际事件: {events:?}"
-    );
 }

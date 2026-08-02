@@ -231,98 +231,110 @@ pub async fn run_setup(
 mod tests {
     use super::*;
 
+    /// SetupStatus::is_complete / missing_items 各字段组合参数化验证。
     #[test]
-    fn setup_status_complete() {
-        let status = SetupStatus {
-            backend_configured: true,
-            model_selected: true,
-            needs_indexing: false,
-            embedding_available: true,
-        };
-        assert!(status.is_complete());
-        assert!(status.missing_items().is_empty());
+    fn setup_status_cases() {
+        let cases = [
+            // (status, is_complete, missing_len, 首项必含子串)
+            (
+                SetupStatus {
+                    backend_configured: true,
+                    model_selected: true,
+                    needs_indexing: false,
+                    embedding_available: true,
+                },
+                true,
+                0,
+                None,
+            ),
+            (
+                SetupStatus {
+                    backend_configured: false,
+                    model_selected: false,
+                    needs_indexing: false,
+                    embedding_available: false,
+                },
+                false,
+                3, // backend + model + embedding
+                None,
+            ),
+            (
+                SetupStatus {
+                    backend_configured: true,
+                    model_selected: true,
+                    needs_indexing: true,
+                    embedding_available: true,
+                },
+                false,
+                1,
+                Some("索引"),
+            ),
+            (
+                SetupStatus {
+                    backend_configured: true,
+                    model_selected: true,
+                    needs_indexing: false,
+                    embedding_available: false,
+                },
+                true, // 核心功能就绪
+                1,
+                Some("嵌入"),
+            ),
+        ];
+        for (status, exp_complete, exp_missing_len, exp_substr) in cases {
+            assert_eq!(status.is_complete(), exp_complete);
+            let missing = status.missing_items();
+            assert_eq!(missing.len(), exp_missing_len);
+            if let Some(substr) = exp_substr {
+                assert!(missing[0].contains(substr));
+            }
+        }
     }
 
+    /// determine_state 各 SetupStatus 组合参数化验证。
     #[test]
-    fn setup_status_missing_backend() {
-        let status = SetupStatus {
-            backend_configured: false,
-            model_selected: false,
-            needs_indexing: false,
-            embedding_available: false,
-        };
-        assert!(!status.is_complete());
-        assert_eq!(status.missing_items().len(), 3); // backend + model + embedding
-    }
-
-    #[test]
-    fn setup_status_needs_indexing() {
-        let status = SetupStatus {
-            backend_configured: true,
-            model_selected: true,
-            needs_indexing: true,
-            embedding_available: true,
-        };
-        assert!(!status.is_complete());
-        assert_eq!(status.missing_items().len(), 1);
-        assert!(status.missing_items()[0].contains("索引"));
-    }
-
-    #[test]
-    fn setup_status_missing_embedding() {
-        let status = SetupStatus {
-            backend_configured: true,
-            model_selected: true,
-            needs_indexing: false,
-            embedding_available: false,
-        };
-        assert!(status.is_complete()); // 核心功能就绪
-        assert_eq!(status.missing_items().len(), 1);
-        assert!(status.missing_items()[0].contains("嵌入"));
-    }
-
-    #[test]
-    fn determine_state_needs_setup() {
-        let status = SetupStatus {
-            backend_configured: false,
-            model_selected: false,
-            needs_indexing: false,
-            embedding_available: false,
-        };
-        assert_eq!(determine_state(&status), AppState::NeedsSetup);
-    }
-
-    #[test]
-    fn determine_state_indexing() {
-        let status = SetupStatus {
-            backend_configured: true,
-            model_selected: true,
-            needs_indexing: true,
-            embedding_available: true,
-        };
-        assert_eq!(determine_state(&status), AppState::Indexing);
-    }
-
-    #[test]
-    fn determine_state_ready() {
-        let status = SetupStatus {
-            backend_configured: true,
-            model_selected: true,
-            needs_indexing: false,
-            embedding_available: true,
-        };
-        assert_eq!(determine_state(&status), AppState::Ready);
-    }
-
-    #[test]
-    fn determine_state_degraded_missing_embedding() {
-        let status = SetupStatus {
-            backend_configured: true,
-            model_selected: true,
-            needs_indexing: false,
-            embedding_available: false,
-        };
-        // 嵌入模型缺失 → Degraded（非阻塞）
-        assert_eq!(determine_state(&status), AppState::Degraded);
+    fn determine_state_cases() {
+        let cases = [
+            (
+                SetupStatus {
+                    backend_configured: false,
+                    model_selected: false,
+                    needs_indexing: false,
+                    embedding_available: false,
+                },
+                AppState::NeedsSetup,
+            ),
+            (
+                SetupStatus {
+                    backend_configured: true,
+                    model_selected: true,
+                    needs_indexing: true,
+                    embedding_available: true,
+                },
+                AppState::Indexing,
+            ),
+            (
+                SetupStatus {
+                    backend_configured: true,
+                    model_selected: true,
+                    needs_indexing: false,
+                    embedding_available: true,
+                },
+                AppState::Ready,
+            ),
+            (
+                SetupStatus {
+                    backend_configured: true,
+                    model_selected: true,
+                    needs_indexing: false,
+                    embedding_available: false,
+                },
+                // 嵌入模型缺失 → Degraded（非阻塞）
+                AppState::Degraded,
+            ),
+        ];
+        for (status, expected) in cases {
+            assert_eq!(determine_state(&status), expected);
+        }
     }
 }

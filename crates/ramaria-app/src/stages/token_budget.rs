@@ -214,43 +214,28 @@ mod tests {
     }
 
     // =========================================================
-    // 测试: system_prompt 未设置 → Fatal 错误
+    // 测试: 关键字段未设置 → Fatal 错误
     // =========================================================
 
     #[tokio::test]
-    async fn missing_system_prompt_returns_fatal() {
-        let ctx = simple_context();
-        let stage = StageTokenBudget::new();
-        let mut data = full_data();
-        data.system_prompt = None; // 未设置 Stage 6 产出
+    async fn missing_field_returns_fatal() {
+        let cases: Vec<(&str, fn(&mut PipelineData))> = vec![
+            ("system_prompt", |d| d.system_prompt = None), // 未设置 Stage 6 产出
+            ("backend_config", |d| d.backend_config = None), // 未设置 Stage 2 产出
+        ];
+        for (label, mutate) in cases {
+            let ctx = simple_context();
+            let stage = StageTokenBudget::new();
+            let mut data = full_data();
+            mutate(&mut data);
 
-        let result = stage.execute(&ctx, data).await;
-        match result {
-            Ok(_) => panic!("should fail with missing system_prompt"),
-            Err(err) => {
-                assert!(!err.is_retryable(), "missing system_prompt should be Fatal");
-                assert_eq!(err.stage(), "TokenBudget");
-            }
-        }
-    }
-
-    // =========================================================
-    // 测试: backend_config 未设置 → Fatal 错误
-    // =========================================================
-
-    #[tokio::test]
-    async fn missing_backend_config_returns_fatal() {
-        let ctx = simple_context();
-        let stage = StageTokenBudget::new();
-        let mut data = full_data();
-        data.backend_config = None; // 未设置 Stage 2 产出
-
-        let result = stage.execute(&ctx, data).await;
-        match result {
-            Ok(_) => panic!("should fail with missing backend_config"),
-            Err(err) => {
-                assert!(!err.is_retryable());
-                assert_eq!(err.stage(), "TokenBudget");
+            let result = stage.execute(&ctx, data).await;
+            match result {
+                Ok(_) => panic!("should fail with missing {label}"),
+                Err(err) => {
+                    assert!(!err.is_retryable(), "missing {label} should be Fatal");
+                    assert_eq!(err.stage(), "TokenBudget");
+                }
             }
         }
     }
@@ -332,22 +317,6 @@ mod tests {
 
     // =========================================================
     // 测试: estimated_tokens 字段被正确设置
+    // （已在 small_conversation_within_window 中断言 estimated_tokens > 0）
     // =========================================================
-
-    #[tokio::test]
-    async fn estimated_tokens_set() {
-        let ctx = simple_context();
-        let stage = StageTokenBudget::new();
-        let data = full_data();
-
-        let result = stage.execute(&ctx, data).await;
-        assert!(result.is_ok());
-
-        let output = result.expect("should succeed");
-        assert!(
-            output.estimated_tokens > 0,
-            "estimated_tokens 应为正数: {}",
-            output.estimated_tokens
-        );
-    }
 }

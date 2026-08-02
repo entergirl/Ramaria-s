@@ -698,43 +698,31 @@ mod tests {
         assert!(hits.iter().all(|h| h.doc_label == "a"));
     }
 
+    /// BruteForceIndex::cosine_similarity 各输入参数化验证。
     #[test]
-    fn cosine_similarity_identical() {
-        let v = vec![1.0, 2.0, 3.0];
-        let sim = BruteForceIndex::cosine_similarity(&v, &v);
-        assert!((sim - 1.0).abs() < 0.0001);
-    }
-
-    #[test]
-    fn cosine_similarity_orthogonal() {
-        let a = vec![1.0, 0.0];
-        let b = vec![0.0, 1.0];
-        let sim = BruteForceIndex::cosine_similarity(&a, &b);
-        assert!((sim - 0.0).abs() < 0.0001);
-    }
-
-    #[test]
-    fn cosine_similarity_zero_vector() {
-        let a = vec![0.0, 0.0];
-        let b = vec![1.0, 0.0];
-        let sim = BruteForceIndex::cosine_similarity(&a, &b);
-        assert!((sim - 0.0).abs() < 0.0001);
+    fn cosine_similarity_cases() {
+        let cases: Vec<(Vec<f32>, Vec<f32>, f64)> = vec![
+            (vec![1.0, 2.0, 3.0], vec![1.0, 2.0, 3.0], 1.0), // 相同向量
+            (vec![1.0, 0.0], vec![0.0, 1.0], 0.0),           // 正交
+            (vec![0.0, 0.0], vec![1.0, 0.0], 0.0),           // 零向量
+        ];
+        for (a, b, expected) in cases {
+            let sim = BruteForceIndex::cosine_similarity(&a, &b);
+            assert!((sim - expected).abs() < 0.0001, "期望 {expected}");
+        }
     }
 
     // ---- label utilities ----
 
+    /// make_vector_label / parse_vector_label 往返与非法输入验证。
     #[test]
-    fn vector_label_roundtrip() {
+    fn vector_label_cases() {
         let label = make_vector_label("l1", "550e8400-e29b-41d4-a716-446655440000");
         assert_eq!(label, "L1:550e8400-e29b-41d4-a716-446655440000");
-
         let parsed = parse_vector_label(&label).unwrap();
         assert_eq!(parsed.0, "L1");
         assert_eq!(parsed.1, "550e8400-e29b-41d4-a716-446655440000");
-    }
-
-    #[test]
-    fn vector_label_parse_invalid() {
+        // 非法格式 → None
         assert!(parse_vector_label("invalid").is_none());
     }
 

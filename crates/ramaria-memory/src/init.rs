@@ -777,64 +777,49 @@ A_persona = '你是黎杋枫。被问及"是否是AI"时温柔回避。'
     // 辅助函数测试
     // =========================================================
 
+    /// parse_profile_field 中英文与未知字段参数化验证。
     #[test]
-    fn test_parse_profile_field_english() {
-        assert_eq!(parse_profile_field("BasicInfo"), ProfileField::BasicInfo);
-        assert_eq!(
-            parse_profile_field("PersonalStatus"),
-            ProfileField::PersonalStatus
-        );
-        assert_eq!(parse_profile_field("Interests"), ProfileField::Interests);
-        assert_eq!(parse_profile_field("Social"), ProfileField::Social);
-        assert_eq!(parse_profile_field("History"), ProfileField::History);
-        assert_eq!(
-            parse_profile_field("RecentContext"),
-            ProfileField::RecentContext
-        );
-        assert_eq!(
-            parse_profile_field("SpeakingStyle"),
-            ProfileField::SpeakingStyle
-        );
+    fn test_parse_profile_field_cases() {
+        let cases = [
+            ("BasicInfo", ProfileField::BasicInfo),
+            ("PersonalStatus", ProfileField::PersonalStatus),
+            ("Interests", ProfileField::Interests),
+            ("Social", ProfileField::Social),
+            ("History", ProfileField::History),
+            ("RecentContext", ProfileField::RecentContext),
+            ("SpeakingStyle", ProfileField::SpeakingStyle),
+            // 中文映射
+            ("身份信息", ProfileField::BasicInfo),
+            ("性格描述", ProfileField::PersonalStatus),
+            ("兴趣爱好", ProfileField::Interests),
+            ("社交关系", ProfileField::Social),
+            ("背景", ProfileField::History),
+            ("近期背景", ProfileField::RecentContext),
+            ("说话风格", ProfileField::SpeakingStyle),
+            // 未知字段回退为 BasicInfo
+            ("UnknownField", ProfileField::BasicInfo),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(parse_profile_field(input), expected, "input={input:?}");
+        }
     }
 
+    /// parse_trait_layer 中英文与未知字段参数化验证。
     #[test]
-    fn test_parse_profile_field_chinese() {
-        assert_eq!(parse_profile_field("身份信息"), ProfileField::BasicInfo);
-        assert_eq!(
-            parse_profile_field("性格描述"),
-            ProfileField::PersonalStatus
-        );
-        assert_eq!(parse_profile_field("兴趣爱好"), ProfileField::Interests);
-        assert_eq!(parse_profile_field("社交关系"), ProfileField::Social);
-        assert_eq!(parse_profile_field("背景"), ProfileField::History);
-        assert_eq!(parse_profile_field("近期背景"), ProfileField::RecentContext);
-        assert_eq!(parse_profile_field("说话风格"), ProfileField::SpeakingStyle);
-    }
-
-    #[test]
-    fn test_parse_profile_field_unknown() {
-        // 未知字段回退为 BasicInfo
-        assert_eq!(parse_profile_field("UnknownField"), ProfileField::BasicInfo);
-    }
-
-    #[test]
-    fn test_parse_trait_layer_english() {
-        assert_eq!(parse_trait_layer("Base"), TraitLayer::Base);
-        assert_eq!(parse_trait_layer("Primary"), TraitLayer::Primary);
-        assert_eq!(parse_trait_layer("Accent"), TraitLayer::Accent);
-    }
-
-    #[test]
-    fn test_parse_trait_layer_chinese() {
-        assert_eq!(parse_trait_layer("底色"), TraitLayer::Base);
-        assert_eq!(parse_trait_layer("主色调"), TraitLayer::Primary);
-        assert_eq!(parse_trait_layer("点缀"), TraitLayer::Accent);
-    }
-
-    #[test]
-    fn test_parse_trait_layer_unknown() {
-        // 未知回退为 Accent
-        assert_eq!(parse_trait_layer("Unknown"), TraitLayer::Accent);
+    fn test_parse_trait_layer_cases() {
+        let cases = [
+            ("Base", TraitLayer::Base),
+            ("Primary", TraitLayer::Primary),
+            ("Accent", TraitLayer::Accent),
+            ("底色", TraitLayer::Base),
+            ("主色调", TraitLayer::Primary),
+            ("点缀", TraitLayer::Accent),
+            // 未知字段回退为 Accent
+            ("UnknownLayer", TraitLayer::Accent),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(parse_trait_layer(input), expected, "input={input:?}");
+        }
     }
 
     #[test]

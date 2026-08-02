@@ -98,7 +98,7 @@ pub struct SearchRequest {
     pub persona_uid: Option<String>,
     /// 最大返回结果数
     pub top_k: usize,
-    /// 是否过滤低 share 事件（rama 类型不适用）
+    /// 供下游 `rag.rs` 过滤低 share 事件使用（本结构体的检索方法不读取该字段）
     pub filter_share: bool,
 }
 
@@ -474,8 +474,8 @@ impl Retriever {
                     .map(|(doc_id, score)| {
                         let label = doc_id.to_string();
                         // 预解析文档数据，避免后续 parse_doc_label 中的 UUID 解析开销
-                        let data = resolve_bm25_doc(&doc_id, &self.l1_docs, &self.l2_docs);
-                        bm25_data.insert(label.clone(), data);
+                        let doc_data = resolve_bm25_doc(&doc_id, &self.l1_docs, &self.l2_docs);
+                        bm25_data.insert(label.clone(), doc_data);
                         (label, score)
                     })
                     .collect();
@@ -767,7 +767,7 @@ impl Retriever {
     ///
     /// 说明:
     /// - 关闭向量和图谱通道，仅使用 BM25。
-    /// - 复用现有 `search()` 方法，避免重复实现评分逻辑。
+    /// - 复用 `search_bm25_only()`（`search()` 无法外部覆盖 enable_* 开关）。
     pub fn search_substring(
         &self,
         query: &str,
@@ -808,11 +808,11 @@ impl Retriever {
         let mut results: Vec<SearchResult> = Vec::with_capacity(raw_results.len());
 
         for (doc_id, bm25_score) in raw_results {
-            let data = resolve_bm25_doc(&doc_id, &self.l1_docs, &self.l2_docs);
+            let doc_data = resolve_bm25_doc(&doc_id, &self.l1_docs, &self.l2_docs);
 
             // persona_uid 过滤
             if let Some(ref target_uid) = request.persona_uid
-                && let Some(ref puid) = data.persona_uid
+                && let Some(ref puid) = doc_data.persona_uid
                 && puid != target_uid
             {
                 continue;
@@ -820,15 +820,15 @@ impl Retriever {
 
             results.push(SearchResult {
                 doc_id,
-                layer: data.layer,
+                layer: doc_data.layer,
                 rrf_score: bm25_score, // BM25 原始分数作为排名分数
                 bm25_score: Some(bm25_score),
                 vector_score: None,
                 graph_score: None,
-                persona_uid: data.persona_uid,
-                share: data.share,
-                created_at: data.created_at,
-                doc_summary: data.summary,
+                persona_uid: doc_data.persona_uid,
+                share: doc_data.share,
+                created_at: doc_data.created_at,
+                doc_summary: doc_data.summary,
             });
 
             if results.len() >= request.top_k {

@@ -606,46 +606,31 @@ mod tests {
 
     // ── 辅助函数测试 ──
 
+    /// levenshtein_distance 各输入参数化验证。
     #[test]
-    fn test_levenshtein_identical() {
-        assert_eq!(levenshtein_distance("abc", "abc"), 0);
+    fn test_levenshtein_cases() {
+        let cases = [
+            ("abc", "abc", 0),  // 相同
+            ("abc", "abcd", 1), // 插入
+            ("abcd", "abc", 1), // 删除
+            ("abc", "abd", 1),  // 替换
+        ];
+        for (a, b, expected) in cases {
+            assert_eq!(levenshtein_distance(a, b), expected, "{a} vs {b}");
+        }
     }
 
+    /// is_similar_keyword 各输入参数化验证。
     #[test]
-    fn test_levenshtein_insertion() {
-        assert_eq!(levenshtein_distance("abc", "abcd"), 1);
-    }
-
-    #[test]
-    fn test_levenshtein_deletion() {
-        assert_eq!(levenshtein_distance("abcd", "abc"), 1);
-    }
-
-    #[test]
-    fn test_levenshtein_substitution() {
-        assert_eq!(levenshtein_distance("abc", "abd"), 1);
-    }
-
-    #[test]
-    fn test_is_similar_identical_returns_false() {
-        assert!(!is_similar_keyword("same", "same"));
-    }
-
-    #[test]
-    fn test_is_similar_common_chars() {
-        // "工作压力"和"工作焦虑"共享"工"+"作"两个字
-        assert!(is_similar_keyword("工作压力", "工作焦虑"));
-    }
-
-    #[test]
-    fn test_is_similar_contains() {
-        // "职场工作压力" 包含 "工作压力"
-        assert!(is_similar_keyword("职场工作压力", "工作压力"));
-    }
-
-    #[test]
-    fn test_is_similar_not_similar() {
-        // "abc" 和 "xyz" 没有共同字
-        assert!(!is_similar_keyword("abc", "xyz"));
+    fn test_is_similar_cases() {
+        let cases = [
+            ("same", "same", false),            // 相同词不算相似
+            ("工作压力", "工作焦虑", true),     // 共享"工""作"
+            ("职场工作压力", "工作压力", true), // 包含关系
+            ("abc", "xyz", false),              // 无共同字
+        ];
+        for (a, b, expected) in cases {
+            assert_eq!(is_similar_keyword(a, b), expected, "{a} vs {b}");
+        }
     }
 }

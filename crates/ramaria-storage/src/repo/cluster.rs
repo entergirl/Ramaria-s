@@ -146,14 +146,12 @@ mod tests {
         }
     }
 
+    /// deserialize_embedding 无效 blob 参数化验证。
     #[test]
-    fn snapshot_deserialize_empty_blob() {
+    fn snapshot_deserialize_invalid_blobs() {
+        // 空 blob → None
         assert!(ClusterSnapshot::deserialize_embedding(&[]).is_none());
-    }
-
-    #[test]
-    fn snapshot_deserialize_malformed_blob() {
-        // 3 字节不能被 4 整除
+        // 3 字节不能被 4 整除 → None
         assert!(ClusterSnapshot::deserialize_embedding(&[0, 1, 2]).is_none());
     }
 

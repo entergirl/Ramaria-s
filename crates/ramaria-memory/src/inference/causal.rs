@@ -463,18 +463,17 @@ mod tests {
     // extract_causal_features 测试
     // =========================================================
 
+    /// extract_causal_features 无 CausedBy 关系时的默认结果验证。
     #[test]
-    fn empty_relations_returns_default() {
+    fn no_causal_relations_returns_default() {
+        // 空关系列表
         let events = vec![make_event(1, "工作")];
         let relations: Vec<EventRelation> = vec![];
         let features = extract_causal_features(&events, &relations);
         assert_eq!(features.chain_length, 0);
         assert!(features.cyclic_patterns.is_empty());
         assert_eq!(features.total_causal_events, 0);
-    }
-
-    #[test]
-    fn no_causedby_relations_returns_default() {
+        // 仅 RelatedTo 关系（非因果）
         let events = vec![make_event(1, "工作"), make_event(2, "生活")];
         let relations = vec![make_related(1, 2)];
         let features = extract_causal_features(&events, &relations);

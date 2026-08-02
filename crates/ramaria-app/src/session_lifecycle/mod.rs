@@ -138,7 +138,7 @@ impl SessionLifecycle {
     }
 
     /// 获取 session 最后活跃时间（从内存缓存）。
-    pub(super) fn get_last_active(&self, session_id: Uuid) -> Option<i64> {
+    pub(super) fn last_active(&self, session_id: Uuid) -> Option<i64> {
         let guard = self.session_last_active.lock().unwrap_or_else(|e| {
             error!("session_last_active lock poisoned: {e}");
             e.into_inner()
@@ -402,7 +402,7 @@ mod tests {
 
         let sid = Uuid::new_v4();
         lifecycle.touch_session(sid);
-        let last = lifecycle.get_last_active(sid);
+        let last = lifecycle.last_active(sid);
         assert!(last.is_some());
         assert!(last.unwrap() > 0);
     }
@@ -414,10 +414,10 @@ mod tests {
 
         let sid = Uuid::new_v4();
         lifecycle.touch_session(sid);
-        assert!(lifecycle.get_last_active(sid).is_some());
+        assert!(lifecycle.last_active(sid).is_some());
 
         lifecycle.forget_session(sid);
-        assert!(lifecycle.get_last_active(sid).is_none());
+        assert!(lifecycle.last_active(sid).is_none());
     }
 
     #[test]
@@ -454,15 +454,5 @@ mod tests {
         // 验证 retriever 已存储
         let guard = lifecycle.retriever.lock().unwrap();
         assert!(guard.is_some());
-    }
-
-    #[test]
-    fn get_active_session_persona_uid_returns_none_when_no_active() {
-        let config = RamariaConfig::default();
-        let lifecycle = SessionLifecycle::new(config);
-
-        // 无活跃 session 时 get_active_session_id 返回 None，
-        // get_active_session_persona_uid 中的 `?` 会提前返回 None
-        assert!(lifecycle.get_active_session_id().is_none());
     }
 }

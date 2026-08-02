@@ -110,6 +110,7 @@ mod tests {
 
     use ramaria_core::types::AppState;
 
+    /// 本地 provider 跳过隐私检查，且 backend_config 字段被正确填充。
     #[tokio::test]
     async fn local_provider_skips_privacy() {
         let ctx = test_context(
@@ -129,68 +130,44 @@ mod tests {
             output.backend_config.as_ref().unwrap().provider,
             LlmProvider::LmStudio
         );
-    }
-
-    #[tokio::test]
-    async fn online_provider_without_consent_returns_retryable() {
-        let ctx = test_context(
-            Arc::new(MockStorage::new()),
-            Arc::new(MockLlm::online_deepseek()),
-            None,
-        );
-        let stage = StageCheckPrivacy::new();
-        let data = make_data();
-
-        let result = stage.execute(&ctx, data).await;
-
-        let err = match result {
-            Ok(_) => panic!("online provider without consent should fail"),
-            Err(e) => e,
-        };
-        assert!(err.is_retryable());
-        assert_eq!(err.stage(), "CheckPrivacy");
-    }
-
-    #[tokio::test]
-    async fn online_provider_with_consent_passes() {
-        let storage = Arc::new(MockStorage::new());
-        // 预填充隐私确认
-        storage.add_privacy_consent(PrivacyConsent::new(
-            LlmProvider::DeepSeek,
-            "https://api.deepseek.com/v1".to_string(),
-            true,
-        ));
-
-        let ctx = test_context(storage, Arc::new(MockLlm::online_deepseek()), None);
-        let stage = StageCheckPrivacy::new();
-        let data = make_data();
-
-        let result = stage.execute(&ctx, data).await;
-
-        assert!(result.is_ok());
-        let output = result.expect("online provider with consent should pass");
-        assert_eq!(
-            output.backend_config.as_ref().unwrap().provider,
-            LlmProvider::DeepSeek
-        );
-    }
-
-    #[tokio::test]
-    async fn backend_config_is_populated() {
-        let ctx = test_context(
-            Arc::new(MockStorage::new()),
-            Arc::new(MockLlm::local()),
-            None,
-        );
-        let stage = StageCheckPrivacy::new();
-        let data = make_data();
-
-        let result = stage.execute(&ctx, data).await;
-
-        let output = result.expect("should pass");
         let cfg = output.backend_config.expect("backend_config should be set");
         assert_eq!(cfg.temperature, 0.3);
         assert_eq!(cfg.max_tokens, 1024);
+    }
+
+    /// 线上 provider：无 consent → Retryable；有 consent → 通过。
+    #[tokio::test]
+    async fn online_provider_consent_cases() {
+        for has_consent in [false, true] {
+            let storage = Arc::new(MockStorage::new());
+            if has_consent {
+                storage.add_privacy_consent(PrivacyConsent::new(
+                    LlmProvider::DeepSeek,
+                    "https://api.deepseek.com/v1".to_string(),
+                    true,
+                ));
+            }
+
+            let ctx = test_context(storage, Arc::new(MockLlm::online_deepseek()), None);
+            let stage = StageCheckPrivacy::new();
+            let data = make_data();
+
+            let result = stage.execute(&ctx, data).await;
+            if has_consent {
+                let output = result.expect("online provider with consent should pass");
+                assert_eq!(
+                    output.backend_config.as_ref().unwrap().provider,
+                    LlmProvider::DeepSeek
+                );
+            } else {
+                let err = match result {
+                    Ok(_) => panic!("online provider without consent should fail"),
+                    Err(e) => e,
+                };
+                assert!(err.is_retryable());
+                assert_eq!(err.stage(), "CheckPrivacy");
+            }
+        }
     }
 
     #[tokio::test]

@@ -378,7 +378,6 @@ impl SessionLifecycle {
         use ramaria_memory::inference::inferrer::InferrerConfig;
         use ramaria_memory::inference::run_phase_b_inference;
 
-        // v1.3 配置传播修复：从 RamariaConfig 读取而非硬编码默认值
         let inferrer_config = InferrerConfig::from(self.config.inference.inferrer.clone());
         let phase_b_result = match run_phase_b_inference(
             llm,
@@ -418,7 +417,6 @@ impl SessionLifecycle {
         let is_first_round =
             phase_b_result.traits_updated == 0 && phase_b_result.traits_deprecated == 0;
 
-        // v1.3 配置传播修复：从 RamariaConfig 读取而非硬编码默认值
         let confidence_config = ConfidenceConfig::from(self.config.inference.confidence.clone());
         let drift_config = DriftConfig::from(self.config.inference.drift.clone());
         match run_phase_c_update(

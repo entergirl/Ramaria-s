@@ -567,52 +567,35 @@ mod tests {
 
     // ---- γ 动态计算 ----
 
+    /// compute_dynamic_gamma 各样本量参数化验证。
     #[test]
-    fn gamma_small_sample() {
+    fn gamma_cases() {
         let config = ShrinkConfig::default();
-        let gamma = compute_dynamic_gamma(10.0, &config);
-        // γ = 3 + 30/30 = 4.0（因为 max(10,30)=30）
-        assert!((gamma - 4.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn gamma_large_sample() {
-        let config = ShrinkConfig::default();
-        let gamma = compute_dynamic_gamma(300.0, &config);
-        // γ = 3 + 30/300 = 3.1
-        assert!((gamma - 3.1).abs() < 1e-10);
-    }
-
-    #[test]
-    fn gamma_very_large_sample() {
-        let config = ShrinkConfig::default();
-        let gamma = compute_dynamic_gamma(10_000.0, &config);
-        // γ = 3 + 30/10000 = 3.003
-        assert!((gamma - 3.003).abs() < 0.001);
+        let cases = [
+            (10.0, 4.0),       // γ = 3 + 30/30（max(10,30)=30）
+            (300.0, 3.1),      // γ = 3 + 30/300
+            (10_000.0, 3.003), // γ = 3 + 30/10000
+        ];
+        for (n, expected) in cases {
+            let gamma = compute_dynamic_gamma(n, &config);
+            assert!((gamma - expected).abs() < 0.001, "n={n}");
+        }
     }
 
     // ---- Valence 收缩 ----
 
+    /// shrink_valence 各 n_eff 参数化验证。
     #[test]
-    fn shrink_valence_large_n_eff() {
-        // n_eff 很大时收缩接近原始值
-        let result = shrink_valence(0.8, 100.0, 0.2, 4.0);
-        // μ = (100/104)*0.8 + (4/104)*0.2 ≈ 0.769 + 0.008 ≈ 0.777
-        assert!((result - 0.777).abs() < 0.01);
-    }
-
-    #[test]
-    fn shrink_valence_small_n_eff() {
-        // n_eff 很小时收缩接近全局均值
-        let result = shrink_valence(0.8, 1.0, 0.2, 4.0);
-        // μ = (1/5)*0.8 + (4/5)*0.2 = 0.16 + 0.16 = 0.32
-        assert!((result - 0.32).abs() < 1e-10);
-    }
-
-    #[test]
-    fn shrink_valence_zero_n_eff() {
-        let result = shrink_valence(0.8, 0.0, 0.2, 4.0);
-        assert!((result - 0.2).abs() < 1e-10); // 完全依赖先验
+    fn shrink_valence_cases() {
+        let cases = [
+            (100.0, 0.777), // n_eff 很大 → 接近原始值
+            (1.0, 0.32),    // n_eff 很小 → 接近全局均值
+            (0.0, 0.2),     // 完全依赖先验
+        ];
+        for (n_eff, expected) in cases {
+            let result = shrink_valence(0.8, n_eff, 0.2, 4.0);
+            assert!((result - expected).abs() < 0.01, "n_eff={n_eff}");
+        }
     }
 
     // ---- Logit / Sigmoid ----
@@ -884,58 +867,45 @@ mod tests {
         }
     }
 
+    /// select_prior 各 (layer, global, domain) 参数化验证。
     #[test]
-    fn select_prior_base_uses_global() {
-        let result = select_prior(&TraitLayer::Base, 0.5, Some(0.8));
-        assert!((result - 0.5).abs() < 1e-10, "Base 应使用全局先验");
+    fn select_prior_cases() {
+        let cases = [
+            (TraitLayer::Base, 0.5, Some(0.8), 0.5),    // Base 用全局
+            (TraitLayer::Primary, 0.5, Some(0.8), 0.5), // Primary 用全局
+            (TraitLayer::Accent, 0.5, Some(0.8), 0.8),  // Accent 用领域
+            (TraitLayer::Accent, 0.5, None, 0.5),       // Accent 无领域 → fallback 全局
+        ];
+        for (layer, global, domain, expected) in cases {
+            let result = select_prior(&layer, global, domain);
+            assert!(
+                (result - expected).abs() < 1e-10,
+                "{layer:?} 期望 {expected}"
+            );
+        }
     }
 
+    /// compute_domain_prior 各索引/n_eff 参数化验证。
     #[test]
-    fn select_prior_primary_uses_global() {
-        let result = select_prior(&TraitLayer::Primary, 0.5, Some(0.8));
-        assert!((result - 0.5).abs() < 1e-10, "Primary 应使用全局先验");
-    }
-
-    #[test]
-    fn select_prior_accent_uses_domain() {
-        let result = select_prior(&TraitLayer::Accent, 0.5, Some(0.8));
-        assert!((result - 0.8).abs() < 1e-10, "Accent 应使用领域先验");
-    }
-
-    #[test]
-    fn select_prior_accent_fallback_to_global() {
-        let result = select_prior(&TraitLayer::Accent, 0.5, None);
-        assert!(
-            (result - 0.5).abs() < 1e-10,
-            "Accent 无领域先验时应 fallback 全局"
-        );
-    }
-
-    #[test]
-    fn compute_domain_prior_empty_indices() {
+    fn compute_domain_prior_cases() {
+        // 空索引 → None
         let cats = vec![make_cat("工作", 10.0, 0.5, 0.6, 0.4, 0.3, 0.3)];
-        let result = compute_domain_prior(&cats, &[]);
-        assert!(result.is_none(), "空索引应返回 None");
-    }
-
-    #[test]
-    fn compute_domain_prior_low_n_eff() {
+        assert!(
+            compute_domain_prior(&cats, &[]).is_none(),
+            "空索引应返回 None"
+        );
+        // n_eff < 1.0 → None
         let cats = vec![make_cat("社交", 0.5, 0.8, 0.9, 0.2, 0.5, 0.3)];
-        let result = compute_domain_prior(&cats, &[0]);
-        assert!(result.is_none(), "n_eff < 1.0 应返回 None");
-    }
-
-    #[test]
-    fn compute_domain_prior_valid() {
+        assert!(
+            compute_domain_prior(&cats, &[0]).is_none(),
+            "n_eff < 1.0 应返回 None"
+        );
+        // 有效领域 → Some，prior 接近原始值
         let cats = vec![
             make_cat("工作", 8.0, 0.6, 0.7, 0.5, 0.3, 0.2),
             make_cat("社交", 5.0, 0.1, 0.8, 0.2, 0.5, 0.3),
         ];
-        // 仅使用索引 [1]（社交）
-        let result = compute_domain_prior(&cats, &[1]);
-        assert!(result.is_some(), "有效领域应返回 Some");
-        let prior = result.unwrap();
-        // 社交的 prior 应接近原始值
+        let prior = compute_domain_prior(&cats, &[1]).expect("有效领域应返回 Some");
         assert!((prior.valence_mean - 0.1).abs() < 0.01);
         assert!((prior.share_mean - 0.8).abs() < 0.01);
     }

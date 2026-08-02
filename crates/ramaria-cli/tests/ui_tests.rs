@@ -23,10 +23,7 @@ fn mask_key_short_4_chars() {
     assert_eq!(ramaria_cli::ui::mask_key("abcd"), "****");
 }
 
-#[test]
-fn mask_key_short_3_chars() {
-    assert_eq!(ramaria_cli::ui::mask_key("abc"), "****");
-}
+// （原 mask_key_short_3_chars 与 mask_key_short_4_chars 首行断言完全重复，已删除）
 
 #[test]
 fn mask_key_empty() {
@@ -44,41 +41,12 @@ fn mask_key_very_long() {
 
 // =========================================================
 // labeled 输出测试
+// （原 labeled_formats_correctly 为空占位测试，无任何断言，已删除）
 // =========================================================
-
-#[test]
-fn labeled_formats_correctly() {
-    // labeled 函数直接输出到 stdout，无法在测试中捕获
-    // 只验证函数存在且可调用（编译期保证）
-    // 此处为占位测试，标记 labeled 为已验证签名
-}
 
 // =========================================================
 // truncate / format_timestamp 测试
 // 注: 这两个函数已提取至 ramaria_cli::util 模块（pub），
 // 其完整单元测试在 util.rs 的 #[cfg(test)] 块中。
-// 此处仅做集成层面的快速冒烟验证。
+// 此处原有的集成冒烟测试与 util.rs 单元测试完全重复，已删除。
 // =========================================================
-
-#[test]
-fn util_truncate_short_string() {
-    let result = ramaria_cli::util::truncate("Hello World", 50);
-    assert_eq!(result, "Hello World");
-}
-
-#[test]
-fn util_format_timestamp_valid() {
-    // 2024-06-10T08:00:00 UTC = 1718006400000 ms
-    let result = ramaria_cli::util::format_timestamp(1_718_006_400_000);
-    assert_eq!(result, Some("2024-06-10 08:00".to_string()));
-}
-
-#[test]
-fn util_format_timestamp_zero_is_none() {
-    assert_eq!(ramaria_cli::util::format_timestamp(0), None);
-}
-
-#[test]
-fn util_format_timestamp_negative_is_none() {
-    assert_eq!(ramaria_cli::util::format_timestamp(-1), None);
-}

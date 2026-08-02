@@ -71,8 +71,6 @@ impl DecayConfig {
         }
     }
 
-    // ---- v1.3 配置传播修复：从 ramaria-core 的可序列化配置创建 ----
-
     /// 从 core 可序列化配置按层级创建。
     ///
     /// 参数:
@@ -99,9 +97,6 @@ impl DecayConfig {
 // 公共函数
 // =========================================================
 
-/// 一天的毫秒数。
-const MS_PER_DAY: f64 = 86_400_000.0;
-
 /// 计算距今的天数差。
 ///
 /// 参数:
@@ -118,7 +113,7 @@ fn days_since(created_at_ms: i64, now_ms: i64) -> f64 {
     if delta_ms <= 0 {
         return 0.0;
     }
-    (delta_ms as f64) / MS_PER_DAY
+    (delta_ms as f64) / crate::utils::MS_PER_DAY
 }
 
 /// 按给定稳定性 S 计算纯时间衰减权重 (不含 salience 和访问加成)。
@@ -269,24 +264,16 @@ mod tests {
 
     // --- days_since ---
 
+    /// days_since 各时间参数化验证。
     #[test]
-    fn days_since_exactly_one_day() {
+    fn days_since_cases() {
         let now = 1_000_000_000_000;
-        let created = now - 86_400_000; // 恰好 1 天前
-        let days = days_since(created, now);
+        // 恰好 1 天前
+        let days = days_since(now - 86_400_000, now);
         assert!((days - 1.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn days_since_future_returns_zero() {
-        let now = 1_000_000_000_000;
-        let created = now + 86_400_000; // 未来
-        assert_eq!(days_since(created, now), 0.0);
-    }
-
-    #[test]
-    fn days_since_same_time_returns_zero() {
-        let now = 1_000_000_000_000;
+        // 未来时间 → 0
+        assert_eq!(days_since(now + 86_400_000, now), 0.0);
+        // 同时刻 → 0
         assert_eq!(days_since(now, now), 0.0);
     }
 
@@ -476,51 +463,34 @@ mod tests {
 
     // --- adjust_distance ---
 
+    /// adjust_distance 各 R 值参数化验证。
     #[test]
-    fn adjust_distance_increases_when_r_small() {
-        let dist = 0.3;
-        // R=0.5 → adjusted = 0.3/0.5 = 0.6
-        let adj = adjust_distance(dist, 0.5);
-        assert!((adj - 0.6).abs() < 0.001);
-    }
-
-    #[test]
-    fn adjust_distance_with_very_small_r() {
-        let dist = 0.3;
-        // R=0.01 → max(0.01, 0.1)=0.1 → adjusted = 0.3/0.1 = 3.0
-        let adj = adjust_distance(dist, 0.01);
-        assert!((adj - 3.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn adjust_distance_r_is_one_unchanged() {
-        let dist = 0.3;
-        let adj = adjust_distance(dist, 1.0);
-        assert!((adj - 0.3).abs() < 0.001);
+    fn adjust_distance_cases() {
+        let cases = [
+            (0.5, 0.6),  // R=0.5 → 0.3/0.5 = 0.6
+            (0.01, 3.0), // R=0.01 → max(0.01,0.1)=0.1 → 0.3/0.1 = 3.0
+            (1.0, 0.3),  // R=1.0 → 不变
+        ];
+        for (r, expected) in cases {
+            let adj = adjust_distance(0.3, r);
+            assert!((adj - expected).abs() < 0.001, "R={r}");
+        }
     }
 
     // --- 配置创建器 ---
 
+    /// DecayConfig 各层级 stability 参数化验证。
     #[test]
-    fn config_l0_has_stability_10() {
-        let cfg = DecayConfig::l0();
-        assert_eq!(cfg.stability_s, 10.0);
-    }
-
-    #[test]
-    fn config_l1_has_stability_30() {
-        let cfg = DecayConfig::l1();
-        assert_eq!(cfg.stability_s, 30.0);
-    }
-
-    #[test]
-    fn config_l2_has_stability_60() {
-        let cfg = DecayConfig::l2();
-        assert_eq!(cfg.stability_s, 60.0);
-    }
-
-    #[test]
-    fn config_default_has_sensible_values() {
+    fn config_layer_stability() {
+        let cases = [
+            (DecayConfig::l0(), 10.0),
+            (DecayConfig::l1(), 30.0),
+            (DecayConfig::l2(), 60.0),
+        ];
+        for (cfg, expected) in cases {
+            assert_eq!(cfg.stability_s, expected);
+        }
+        // default 值合理
         let cfg = DecayConfig::default();
         assert!(cfg.stability_s > 0.0);
         assert!(cfg.salience_multiplier > 0.0);

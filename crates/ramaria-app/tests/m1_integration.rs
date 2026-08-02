@@ -256,20 +256,8 @@ async fn pipeline_stops_on_needs_setup_state() {
     assert_eq!(err.stage(), "CheckState");
 }
 
-#[tokio::test]
-async fn pipeline_local_provider_skips_privacy() {
-    // 本地 provider（LM Studio）跳过隐私确认
-    let ctx = make_pipeline_context(
-        Arc::new(MockStorage::new()),
-        Arc::new(MockLlm::new("test reply")),
-        None,
-    );
-    let pipeline = make_pipeline();
-    let data = ready_data("test");
-
-    let result = pipeline.execute(&ctx, data).await;
-    assert!(result.is_ok());
-}
+// （原 pipeline_local_provider_skips_privacy 与 pipeline_all_5_stages_succeed
+//  setup 相同，仅断言 is_ok() 为后者断言集子集，已删除）
 
 #[tokio::test]
 async fn pipeline_online_provider_without_consent_returns_retryable() {

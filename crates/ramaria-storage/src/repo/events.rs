@@ -6,7 +6,6 @@
 //! - presentation 解析失败时回退为 Mixed 并记录 WARNING
 //! - event_sources 使用 ON CONFLICT 幂等写入（同一 (event_id, l1_id) 不重复）
 
-use crate::parse_enum_fallback;
 use crate::repo::StorageResultExt;
 use ramaria_core::error::RamariaResult;
 use ramaria_core::types::{EventRelation, EventSource, MemoryEvent, Presentation};

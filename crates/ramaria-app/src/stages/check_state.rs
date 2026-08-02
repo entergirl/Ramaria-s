@@ -119,92 +119,40 @@ mod tests {
         PipelineData::new("test".into(), None, None, uuid::Uuid::new_v4()).with_app_state(state)
     }
 
+    /// Ready / Degraded 状态应通过检查。
     #[tokio::test]
-    async fn ready_state_passes() {
-        let ctx = simple_context();
-        let stage = StageCheckState::new();
-        let data = make_data(AppState::Ready);
-
-        let result = stage.execute(&ctx, data).await;
-
-        assert!(result.is_ok());
+    async fn ready_like_states_pass() {
+        for state in [AppState::Ready, AppState::Degraded] {
+            let ctx = simple_context();
+            let stage = StageCheckState::new();
+            let data = make_data(state);
+            let result = stage.execute(&ctx, data).await;
+            assert!(result.is_ok(), "{state:?} 应通过");
+        }
     }
 
+    /// 非 Ready 状态（FatalError / NeedsSetup / DownloadingModel / Indexing）应被拒绝。
     #[tokio::test]
-    async fn degraded_state_passes() {
-        let ctx = simple_context();
-        let stage = StageCheckState::new();
-        let data = make_data(AppState::Degraded);
-
-        let result = stage.execute(&ctx, data).await;
-
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn fatal_error_state_rejected() {
-        let ctx = simple_context();
-        let stage = StageCheckState::new();
-        let data = make_data(AppState::FatalError);
-
-        let result = stage.execute(&ctx, data).await;
-
-        let err = match result {
-            Ok(_) => panic!("FatalError should be rejected"),
-            Err(e) => e,
-        };
-        assert!(!err.is_retryable());
-        assert_eq!(err.stage(), "CheckState");
-        assert!(err.source_error().context().contains("严重错误"));
-    }
-
-    #[tokio::test]
-    async fn needs_setup_state_rejected() {
-        let ctx = simple_context();
-        let stage = StageCheckState::new();
-        let data = make_data(AppState::NeedsSetup);
-
-        let result = stage.execute(&ctx, data).await;
-
-        let err = match result {
-            Ok(_) => panic!("NeedsSetup should be rejected"),
-            Err(e) => e,
-        };
-        assert!(!err.is_retryable());
-        assert_eq!(err.stage(), "CheckState");
-        assert!(err.source_error().context().contains("尚未就绪"));
-    }
-
-    #[tokio::test]
-    async fn downloading_model_state_rejected() {
-        let ctx = simple_context();
-        let stage = StageCheckState::new();
-        let data = make_data(AppState::DownloadingModel);
-
-        let result = stage.execute(&ctx, data).await;
-
-        let err = match result {
-            Ok(_) => panic!("DownloadingModel should be rejected"),
-            Err(e) => e,
-        };
-        assert!(!err.is_retryable());
-        assert!(err.source_error().context().contains("尚未就绪"));
-    }
-
-    #[tokio::test]
-    async fn indexing_state_rejected() {
-        let ctx = simple_context();
-        let stage = StageCheckState::new();
-        let data = make_data(AppState::Indexing);
-
-        let result = stage.execute(&ctx, data).await;
-
-        let err = match result {
-            Ok(_) => panic!("Indexing should be rejected"),
-            Err(e) => e,
-        };
-        assert!(!err.is_retryable());
-        assert!(err.source_error().context().contains("尚未就绪"));
+    async fn non_ready_states_rejected() {
+        let cases = [
+            (AppState::FatalError, "严重错误"),
+            (AppState::NeedsSetup, "尚未就绪"),
+            (AppState::DownloadingModel, "尚未就绪"),
+            (AppState::Indexing, "尚未就绪"),
+        ];
+        for (state, substr) in cases {
+            let ctx = simple_context();
+            let stage = StageCheckState::new();
+            let data = make_data(state);
+            let result = stage.execute(&ctx, data).await;
+            let err = match result {
+                Ok(_) => panic!("{state:?} should be rejected"),
+                Err(e) => e,
+            };
+            assert!(!err.is_retryable(), "{state:?}");
+            assert_eq!(err.stage(), "CheckState", "{state:?}");
+            assert!(err.source_error().context().contains(substr), "{state:?}");
+        }
     }
 
     #[tokio::test]

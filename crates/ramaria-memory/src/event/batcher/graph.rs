@@ -643,67 +643,34 @@ mod tests {
     // 模块度 Q 二分拆分测试
     // =========================================================
 
-    /// 分量大小 ≤ max_cluster_size 时保持不变
+    /// 分量大小 ≤ max_cluster_size（含恰好相等）时保持不变。
     #[test]
-    fn split_small_component_unchanged() {
+    fn split_small_or_exact_component_unchanged() {
+        // 2 节点，max=25 → 不拆分
         let items = vec![
             make_l1(vec!["工作", "压力"], 0.5),
             make_l1(vec!["工作", "倦怠"], 0.5),
         ];
         let g = KeywordGraph::build_jaccard_graph(&items, 0.2);
         let comps = g.find_connected_components();
-        // max=25，2 远小于上限，不应拆分
         let result = split_large_components(&g, comps, 25, 0.3);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].len(), 2);
-    }
-
-    /// 分量恰好等于 max_cluster_size 时保持不变
-    #[test]
-    fn split_exact_max_size_unchanged() {
+        // 5 节点恰好等于 max=5 → 不拆分
         let items: Vec<L1Item> = (0..5)
             .map(|i| make_l1(vec!["工作", "压力"], 0.5 + i as f64 * 0.1))
             .collect();
         let g = KeywordGraph::build_jaccard_graph(&items, 0.2);
         let comps = g.find_connected_components();
         assert_eq!(comps.len(), 1);
-        // max=5，恰好等于上限，不应拆分
         let result = split_large_components(&g, comps, 5, 0.3);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].len(), 5);
     }
 
     /// 设置很小的 max_cluster_size 强制大分量被拆分
-    #[test]
-    fn split_large_component_with_small_max() {
-        // 4 条有边 L1 — 两两强联系，但整体连通
-        let items = vec![
-            make_l1(vec!["工作", "加班", "会议"], 0.5),
-            make_l1(vec!["工作", "加班", "报告"], 0.5),
-            make_l1(vec!["休闲", "旅游", "摄影"], 0.5),
-            make_l1(vec!["休闲", "旅游", "美食"], 0.5),
-        ];
-        let g = KeywordGraph::build_jaccard_graph(&items, 0.2);
-        let comps = g.find_connected_components();
-        // 四个节点应通过部分共享关键词连通为一个分量
-        // 验证连通性
-        if comps.len() == 1 && comps[0].len() == 4 {
-            // 设 max=2，应触发拆分
-            let result = split_large_components(&g, comps, 2, 0.0); // Q_min=0 确保接受任何拆分
-            assert!(
-                result.len() >= 2,
-                "大分量应被拆分为至少 2 个子组，实际: {}",
-                result.len()
-            );
-            // 各子组大小应 ≤ 2（或无法继续拆分）
-            for comp in &result {
-                assert!(comp.len() <= 2, "子组大小应 ≤ max=2，实际: {}", comp.len());
-            }
-            // 所有节点应被覆盖
-            let total: usize = result.iter().map(|c| c.len()).sum();
-            assert_eq!(total, 4, "拆分后节点总数应不变");
-        }
-    }
+    /// （原 split_large_component_with_small_max 的守卫条件恒为假：
+    ///  两组关键词 Jaccard=0 实际构成 2 个独立连通分量，断言永不执行，已删除）
 
     /// 无边的连通分量（孤立节点组）不可拆分
     #[test]

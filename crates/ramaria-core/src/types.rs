@@ -52,14 +52,6 @@ pub fn uuid_from_db(s: &str) -> crate::error::RamariaResult<Uuid> {
 
 /// 检查 UUID 是否为 nil（表示解析失败或未初始化）。
 ///
-/// 注意:
-/// - 自 .0 起，`uuid_from_db` 已返回 `Result`，nil UUID 不应再出现。
-/// - 此函数保留用于向后兼容和防御性检查。
-#[inline]
-pub fn is_nil_uuid(u: &Uuid) -> bool {
-    u.is_nil()
-}
-
 /// 返回当前 Unix 毫秒时间戳。
 ///
 /// 用法:
@@ -1580,38 +1572,21 @@ mod tests {
 
     // ---- MessageRole ----
 
+    /// MessageRole serde 序列化（小写字符串）与往返验证。
     #[test]
-    fn message_role_serde_roundtrip() {
-        for role in [
-            MessageRole::User,
-            MessageRole::Assistant,
-            MessageRole::System,
-            MessageRole::Tool,
-        ] {
+    fn message_role_serde_cases() {
+        let cases = [
+            (MessageRole::User, r#""user""#),
+            (MessageRole::Assistant, r#""assistant""#),
+            (MessageRole::System, r#""system""#),
+            (MessageRole::Tool, r#""tool""#),
+        ];
+        for (role, expected) in cases {
             let json = serde_json::to_string(&role).unwrap();
+            assert_eq!(json, expected, "{role:?} 应序列化为小写");
             let back: MessageRole = serde_json::from_str(&json).unwrap();
             assert_eq!(role, back);
         }
-    }
-
-    #[test]
-    fn message_role_lowercase() {
-        assert_eq!(
-            serde_json::to_string(&MessageRole::User).unwrap(),
-            r#""user""#
-        );
-        assert_eq!(
-            serde_json::to_string(&MessageRole::Assistant).unwrap(),
-            r#""assistant""#
-        );
-        assert_eq!(
-            serde_json::to_string(&MessageRole::System).unwrap(),
-            r#""system""#
-        );
-        assert_eq!(
-            serde_json::to_string(&MessageRole::Tool).unwrap(),
-            r#""tool""#
-        );
     }
 
     // ---- Session / Message ----

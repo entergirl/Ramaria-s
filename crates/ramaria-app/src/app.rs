@@ -428,14 +428,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn app_state_default_is_needs_setup() {
-        // 编译期验证：App 的默认构造不会 panic
-        // 实际 App 需要 trait objects，此处仅测试辅助逻辑
-        let state = AppState::NeedsSetup;
-        assert_eq!(state.as_str(), "needs_setup");
-    }
-
-    #[test]
     fn app_state_values() {
         assert_eq!(AppState::NeedsSetup.as_str(), "needs_setup");
         assert_eq!(AppState::DownloadingModel.as_str(), "downloading_model");
@@ -454,7 +446,7 @@ mod tests {
              请用自然、友好的语气回复用户。如果用户提到之前聊过的内容，\
              请结合记忆上下文给出更有针对性的回复。\n\
              当前时间：{}",
-            chrono::Local::now().format("%Y-%m-%d %H:%M")
+            crate::now_timestamp_str()
         );
         assert!(prompt.contains("Ramaria"));
         assert!(prompt.contains("记忆"));

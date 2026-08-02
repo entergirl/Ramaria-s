@@ -512,9 +512,6 @@ impl LlamaEncoder {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn empty_text_error() {
-        let err = ramaria_core::error::RamariaError::embedding("嵌入文本不能为空");
-        assert_eq!(err.category(), "embedding");
-    }
+    // （原 empty_text_error 与 bert.rs:574 / llama_head_dim.rs 同名测试完全重复，
+    //  仅验证 ramaria-core 的 error 构造，与 LlamaEncoder 逻辑无关，已删除）
 }

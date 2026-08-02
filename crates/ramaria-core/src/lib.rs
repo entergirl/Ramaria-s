@@ -13,7 +13,7 @@ pub mod keyword;
 pub mod traits;
 pub mod types;
 
-pub use keyword::{KeywordRef, KeywordSet, KeywordStatus, KeywordToken};
+pub use keyword::KeywordToken;
 
 // 常用 re-export
 pub use config::RamariaConfig;
@@ -26,7 +26,6 @@ pub use types::{
     AppState, BackendConfig, ClusterSnapshot, EventRelation, EventRelationKind, EventSource,
     EvidenceDirection, FactSource, LlmProvider, MemoryEvent, MemoryL1, Message, MessageRole,
     MessageSource, ModelCapability, Persona, PersonaExample, PersonaFact, PersonaKind,
-    PersonalityTrait, Presentation, PrivacyConsent, ProfileField, Session, TIME_PERIOD_OPTIONS,
-    TraitEvidence, TraitLayer, TraitSource, TraitStatus, is_nil_uuid, new_id, now_ms, uuid_from_db,
-    uuid_to_db,
+    PersonalityTrait, Presentation, PrivacyConsent, ProfileField, Session, TraitEvidence,
+    TraitLayer, TraitSource, TraitStatus, new_id, now_ms, uuid_from_db, uuid_to_db,
 };

@@ -492,59 +492,35 @@ mod tests {
 
     // ---- tokenize ----
 
+    /// tokenize 各输入参数化验证：中文 bigram / 英文小写 / 混合 / 空 / 标点 / 单字符过滤。
     #[test]
-    fn tokenize_chinese_bigram() {
+    fn tokenize_cases() {
+        // 中文 bigram
         let tokens = tokenize("机器学习");
         assert!(tokens.contains(&"机器".to_string()));
         assert!(tokens.contains(&"器学".to_string()));
         assert!(tokens.contains(&"学习".to_string()));
-    }
-
-    #[test]
-    fn tokenize_english_lowercase() {
+        // 英文小写，过滤单字母
         let tokens = tokenize("Machine Learning");
         assert!(tokens.contains(&"machine".to_string()));
         assert!(tokens.contains(&"learning".to_string()));
-        // 不应包含单字母的 "M" 或 "L"
         assert!(!tokens.iter().any(|t| t.len() < 2));
-    }
-
-    #[test]
-    fn tokenize_mixed_cn_en() {
+        // 中英混合
         let tokens = tokenize("我在学Rust和Python");
-        // 应包含中文 bigram
         assert!(tokens.contains(&"我在".to_string()) || tokens.contains(&"在学".to_string()));
-        // 应包含英文 token
         assert!(tokens.contains(&"rust".to_string()));
         assert!(tokens.contains(&"python".to_string()));
-    }
-
-    #[test]
-    fn tokenize_empty() {
+        // 空输入
         assert!(tokenize("").is_empty());
-    }
-
-    #[test]
-    fn tokenize_single_chinese_char() {
-        // 单个中文字符不构成 bigram，应返回空
-        let tokens = tokenize("我");
-        assert!(tokens.is_empty());
-    }
-
-    #[test]
-    fn tokenize_punctuation_removed() {
+        // 单中文字符不构成 bigram
+        assert!(tokenize("我").is_empty());
+        // 标点被移除
         let tokens = tokenize("你好！世界？");
-        // 不应包含标点
         assert!(!tokens.contains(&"！世".to_string()));
-        // 但应有中文 bigram
         assert!(tokens.contains(&"你好".to_string()));
         assert!(tokens.contains(&"世界".to_string()));
-    }
-
-    #[test]
-    fn tokenize_single_english_letter_ignored() {
-        let tokens = tokenize("a b c");
-        assert!(tokens.is_empty(), "单字母 token 应被过滤");
+        // 单字母英文被过滤
+        assert!(tokenize("a b c").is_empty(), "单字母 token 应被过滤");
     }
 
     // ---- Bm25Index ----

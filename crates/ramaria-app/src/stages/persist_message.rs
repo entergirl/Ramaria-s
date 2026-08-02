@@ -512,7 +512,7 @@ mod tests {
         assert_eq!(
             user_msgs[0].persona_uid.as_deref(),
             Some("rama-0001"),
-            "v1.2: user message should carry session persona_uid"
+            "user message should carry session persona_uid"
         );
 
         // 验证助手消息已保存（含 persona_uid）

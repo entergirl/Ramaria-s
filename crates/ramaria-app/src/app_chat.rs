@@ -58,7 +58,7 @@ impl App {
 
         // ---- 构建 PipelineContext + PipelineData ----
         let ctx = self.build_pipeline_context();
-        let data = PipelineData::new(
+        let pipeline_data = PipelineData::new(
             user_input.to_string(),
             persona_uid.map(|s| s.to_string()),
             session_id,
@@ -76,7 +76,7 @@ impl App {
         ]);
 
         let result = pipeline
-            .execute(&ctx, data)
+            .execute(&ctx, pipeline_data)
             .await
             .map_err(ramaria_core::error::RamariaError::from)?;
 
@@ -313,7 +313,7 @@ impl App {
                 recent_session_summaries: recent_summaries.to_vec(),
                 last_active_at: last_active_at.map(|s| s.to_string()),
                 knowledge_boundary: None,
-                current_time_str: Some(chrono::Local::now().format("%Y-%m-%d %H:%M").to_string()),
+                current_time_str: Some(crate::now_timestamp_str()),
                 weather: None,
                 chat_style_rules: None, // v2.0: 无自定义规则时使用最小化默认规则
             };
@@ -337,7 +337,7 @@ impl App {
              请用自然、友好的语气回复用户。如果用户提到之前聊过的内容，\
              请结合记忆上下文给出更有针对性的回复。\n\
              当前时间：{}",
-            chrono::Local::now().format("%Y-%m-%d %H:%M")
+            crate::now_timestamp_str()
         )
     }
 }
@@ -393,7 +393,7 @@ fn load_persona_toml_prompt(db_config: Option<&str>) -> Option<String> {
         .unwrap_or(SHARED_CHAT_STYLE_RULES);
 
     let name = &parsed.assistant_name;
-    let time_str = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
+    let time_str = crate::now_timestamp_str();
 
     Some(format!(
         "你的名字是{name}。\n\n{persona_block}\n\n回复规则:\n{rules_block}\n\n\
@@ -416,7 +416,7 @@ fn fallback_read_persona_toml() -> Option<String> {
         return Some(c);
     }
 
-    // 回退到旧路径（兼容旧版安装）
+    // 回退到旧路径
     let old_path = "../config/persona.toml";
     match std::fs::read_to_string(old_path) {
         Ok(c) => {

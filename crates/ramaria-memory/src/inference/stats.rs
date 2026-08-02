@@ -32,7 +32,7 @@ use ramaria_core::types::{MemoryEvent, Presentation};
 /// - `calibrated_weight_config`: 校准权重链参数（仅在 use_calibrated_weights=true 时生效）。
 #[derive(Debug, Clone)]
 pub struct StatsConfig {
-    /// 事件置信度门槛（兼容旧硬截断），默认 0.6
+    /// 事件置信度门槛（硬截断），默认 0.6
     pub confidence_threshold: f64,
     /// 每分类最多选取的代表性事件数，默认 3
     pub max_representative_events: usize,
@@ -492,7 +492,6 @@ pub fn classify_events(events: &[MemoryEvent]) -> ClassifiedEvents {
 /// 预过滤事件：排除 confidence 低于阈值的推测性事件。
 ///
 /// 说明:
-/// - **建议使用 `classify_events` 替代**。本函数保留以兼容旧调用方。
 /// - 内部委托给 `classify_event`，使用配置中的 `confidence_threshold` 做硬截断。
 /// - 当 `use_calibrated_weights=true` 时，调用方应优先使用 `run_phase_a_stats`，
 ///   它会自动使用三轨分类。
@@ -814,10 +813,10 @@ pub fn calibrate_salience(
 
     // 三个加成因子，各自归一化后乘以最大加成比例
     let rec_boost = recurrence_count.clamp(0.0, 1.0) * config.recurrence_boost_max;
-    let int_boost = emotional_intensity.clamp(0.0, 1.0) * config.intensity_boost_max;
+    let intensity_boost = emotional_intensity.clamp(0.0, 1.0) * config.intensity_boost_max;
     let men_boost = mention_frequency.clamp(0.0, 1.0) * config.mention_boost_max;
 
-    let calibrated = base * (1.0 + rec_boost + int_boost + men_boost);
+    let calibrated = base * (1.0 + rec_boost + intensity_boost + men_boost);
     // 保底 0.01，避免零权重导致事件完全消失
     calibrated.clamp(0.01, 1.0)
 }
@@ -1826,173 +1825,63 @@ mod tests {
     // 情境强度乘数
     // =========================================================
 
+    /// situation_multiplier 全分支参数化验证：
+    /// - None / 3 / 非法值(0,6,100) → 中性 1.0
+    /// - 弱情境 (1,2) → 放大 1.5
+    /// - 强情境 (4,5) → 抑制 0.5
     #[test]
-    fn situation_multiplier_none_is_neutral() {
-        assert!((situation_multiplier(None) - 1.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn situation_multiplier_3_is_neutral() {
-        assert!((situation_multiplier(Some(3)) - 1.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn situation_multiplier_weak_amplifies() {
-        assert!((situation_multiplier(Some(1)) - 1.5).abs() < 1e-10);
-        assert!((situation_multiplier(Some(2)) - 1.5).abs() < 1e-10);
-    }
-
-    #[test]
-    fn situation_multiplier_strong_dampens() {
-        assert!((situation_multiplier(Some(4)) - 0.5).abs() < 1e-10);
-        assert!((situation_multiplier(Some(5)) - 0.5).abs() < 1e-10);
-    }
-
-    #[test]
-    fn situation_multiplier_invalid_fallsback_to_neutral() {
-        assert!((situation_multiplier(Some(0)) - 1.0).abs() < 1e-10);
-        assert!((situation_multiplier(Some(6)) - 1.0).abs() < 1e-10);
-        assert!((situation_multiplier(Some(100)) - 1.0).abs() < 1e-10);
+    fn situation_multiplier_cases() {
+        let cases = [
+            (None, 1.0),
+            (Some(3), 1.0),
+            (Some(1), 1.5),
+            (Some(2), 1.5),
+            (Some(4), 0.5),
+            (Some(5), 0.5),
+            (Some(0), 1.0),
+            (Some(6), 1.0),
+            (Some(100), 1.0),
+        ];
+        for (strength, expected) in cases {
+            assert!(
+                (situation_multiplier(strength) - expected).abs() < 1e-10,
+                "strength={strength:?} 期望 {expected}",
+            );
+        }
     }
 
     // =========================================================
     // 准入轨道分类
     // =========================================================
 
+    /// classify_event 各置信度分支参数化验证（含边界值与 NaN/负值防御）。
     #[test]
-    fn classify_event_confirmed() {
-        let ev = make_event(
-            "E",
-            "s",
-            None,
-            0.9,
-            0.5,
-            0.0,
-            0.5,
-            Presentation::Mixed,
-            None,
-        );
-        assert_eq!(classify_event(&ev), AdmissionTrack::Confirmed);
-
-        // 边界值 0.6
-        let ev = make_event(
-            "E",
-            "s",
-            None,
-            0.6,
-            0.5,
-            0.0,
-            0.5,
-            Presentation::Mixed,
-            None,
-        );
-        assert_eq!(classify_event(&ev), AdmissionTrack::Confirmed);
-    }
-
-    #[test]
-    fn classify_event_tentative() {
-        let ev = make_event(
-            "E",
-            "s",
-            None,
-            0.5,
-            0.5,
-            0.0,
-            0.5,
-            Presentation::Mixed,
-            None,
-        );
-        assert_eq!(classify_event(&ev), AdmissionTrack::Tentative);
-
-        // 边界值 0.45
-        let ev = make_event(
-            "E",
-            "s",
-            None,
-            0.45,
-            0.5,
-            0.0,
-            0.5,
-            Presentation::Mixed,
-            None,
-        );
-        assert_eq!(classify_event(&ev), AdmissionTrack::Tentative);
-
-        // 刚好低于 confirmed
-        let ev = make_event(
-            "E",
-            "s",
-            None,
-            0.5999,
-            0.5,
-            0.0,
-            0.5,
-            Presentation::Mixed,
-            None,
-        );
-        assert_eq!(classify_event(&ev), AdmissionTrack::Tentative);
-    }
-
-    #[test]
-    fn classify_event_discarded() {
-        let ev = make_event(
-            "E",
-            "s",
-            None,
-            0.3,
-            0.5,
-            0.0,
-            0.5,
-            Presentation::Mixed,
-            None,
-        );
-        assert_eq!(classify_event(&ev), AdmissionTrack::Discarded);
-
-        // 刚好低于 tentative
-        let ev = make_event(
-            "E",
-            "s",
-            None,
-            0.4499,
-            0.5,
-            0.0,
-            0.5,
-            Presentation::Mixed,
-            None,
-        );
-        assert_eq!(classify_event(&ev), AdmissionTrack::Discarded);
-    }
-
-    #[test]
-    fn classify_event_nan_defense() {
-        let ev = make_event(
-            "E",
-            "s",
-            None,
-            f64::NAN,
-            0.5,
-            0.0,
-            0.5,
-            Presentation::Mixed,
-            None,
-        );
-        assert_eq!(classify_event(&ev), AdmissionTrack::Discarded);
-    }
-
-    #[test]
-    fn classify_event_negative_defense() {
-        let ev = make_event(
-            "E",
-            "s",
-            None,
-            -0.1,
-            0.5,
-            0.0,
-            0.5,
-            Presentation::Mixed,
-            None,
-        );
-        assert_eq!(classify_event(&ev), AdmissionTrack::Discarded);
+    fn classify_event_cases() {
+        let cases = [
+            (0.9, AdmissionTrack::Confirmed),
+            (0.6, AdmissionTrack::Confirmed), // 边界值
+            (0.5, AdmissionTrack::Tentative),
+            (0.45, AdmissionTrack::Tentative),   // 边界值
+            (0.5999, AdmissionTrack::Tentative), // 刚好低于 confirmed
+            (0.3, AdmissionTrack::Discarded),
+            (0.4499, AdmissionTrack::Discarded), // 刚好低于 tentative
+            (f64::NAN, AdmissionTrack::Discarded), // NaN 防御
+            (-0.1, AdmissionTrack::Discarded),   // 负值防御
+        ];
+        for (confidence, expected) in cases {
+            let ev = make_event(
+                "E",
+                "s",
+                None,
+                confidence,
+                0.5,
+                0.0,
+                0.5,
+                Presentation::Mixed,
+                None,
+            );
+            assert_eq!(classify_event(&ev), expected, "confidence={confidence}");
+        }
     }
 
     #[test]
@@ -2068,46 +1957,22 @@ mod tests {
     // 校准权重链核心
     // =========================================================
 
+    /// calibrate_salience 各 (raw, rec, int, men) 组合参数化验证（含 floor/ceiling）。
     #[test]
-    fn calibrate_salience_basic() {
+    fn calibrate_salience_cases() {
         let config = CalibratedWeightConfig::default();
-        // 无加成时，salience 保持不变
-        let cal = calibrate_salience(0.8, 0.0, 0.0, 0.0, &config);
-        assert!((cal - 0.8).abs() < 1e-10);
-    }
-
-    #[test]
-    fn calibrate_salience_with_recurrence_boost() {
-        let config = CalibratedWeightConfig::default();
-        // recurrence_boost_max=0.30, recurrence_count=1.0 → boost=0.30
-        // cal = 0.8 * (1 + 0.30) = 1.04 → clamp to 1.0
-        let cal = calibrate_salience(0.8, 1.0, 0.0, 0.0, &config);
-        assert!((cal - 1.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn calibrate_salience_with_partial_boosts() {
-        let config = CalibratedWeightConfig::default();
-        // rec=0.5→0.15, int=0.5→0.10, men=0.5→0.075
-        // cal = 0.5 * (1 + 0.15 + 0.10 + 0.075) = 0.5 * 1.325 = 0.6625
-        let cal = calibrate_salience(0.5, 0.5, 0.5, 0.5, &config);
-        assert!((cal - 0.6625).abs() < 1e-6);
-    }
-
-    #[test]
-    fn calibrate_salience_floor() {
-        let config = CalibratedWeightConfig::default();
-        // 极低 salience 应保底 0.01
-        let cal = calibrate_salience(0.0, 0.0, 0.0, 0.0, &config);
-        assert!((cal - 0.01).abs() < 1e-10);
-    }
-
-    #[test]
-    fn calibrate_salience_ceiling() {
-        let config = CalibratedWeightConfig::default();
-        // 极高 salience + 全加成 → clamp 到 1.0
-        let cal = calibrate_salience(1.0, 1.0, 1.0, 1.0, &config);
-        assert!((cal - 1.0).abs() < 1e-10);
+        let cases = [
+            // (raw, recurrence, intensity, mention, expected)
+            (0.8, 0.0, 0.0, 0.0, 0.8),    // 无加成 → 保持不变
+            (0.8, 1.0, 0.0, 0.0, 1.0),    // rec=1.0 → boost 0.30 → clamp 1.0
+            (0.5, 0.5, 0.5, 0.5, 0.6625), // rec=0.15 + int=0.10 + men=0.075
+            (0.0, 0.0, 0.0, 0.0, 0.01),   // 极低 → 保底 0.01
+            (1.0, 1.0, 1.0, 1.0, 1.0),    // 全加成 → clamp 1.0
+        ];
+        for (raw, rec, int, men, expected) in cases {
+            let cal = calibrate_salience(raw, rec, int, men, &config);
+            assert!((cal - expected).abs() < 1e-6, "raw={raw} 期望 {expected}");
+        }
     }
 
     #[test]
@@ -2483,60 +2348,41 @@ mod tests {
         ev
     }
 
+    /// keyword_jaccard 各分支参数化验证：完全一致 / 部分重叠 / 无重叠 / 空关键词。
     #[test]
-    fn keyword_jaccard_identical() {
+    fn keyword_jaccard_cases() {
+        // 完全相同 → 1.0
         let sim = keyword_jaccard("工作, 会议, 压力", "工作, 会议, 压力");
         assert!((sim - 1.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn keyword_jaccard_partial_overlap() {
+        // 部分重叠: 交集={工作}，并集={工作, 会议, 项目} → 1/3 ≈ 0.333
         let sim = keyword_jaccard("工作, 会议", "工作, 项目");
-        // 交集={工作}，并集={工作, 会议, 项目} → 1/3 ≈ 0.333
         assert!((sim - 1.0 / 3.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn keyword_jaccard_no_overlap() {
+        // 无重叠 → 0.0
         let sim = keyword_jaccard("工作", "社交");
         assert!((sim - 0.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn keyword_jaccard_empty_keywords() {
+        // 任一方为空 → 0.0
         let sim = keyword_jaccard("", "工作");
         assert!((sim - 0.0).abs() < 1e-10);
         let sim = keyword_jaccard("工作", "");
         assert!((sim - 0.0).abs() < 1e-10);
     }
 
+    /// are_different_batches 各分支参数化验证：跨批次 / 间隔内 / created_at 为 0 保守同批次。
     #[test]
-    fn are_different_batches_true() {
+    fn are_different_batches_cases() {
         let config = TentativePromotionConfig::default(); // min_batch_interval_hours = 6.0
         let base_time = 1700000000000i64; // 某个 Unix 毫秒时间戳
         let a = make_event_with_time("E1", Some("工作"), 0.5, 0.6, base_time);
         // 8 小时后 → 不同批次
         let b = make_event_with_time("E2", Some("工作"), 0.5, 0.6, base_time + 8 * 3600 * 1000);
         assert!(are_different_batches(&a, &b, &config));
-    }
-
-    #[test]
-    fn are_different_batches_false_within_interval() {
-        let config = TentativePromotionConfig::default();
-        let base_time = 1700000000000i64;
-        let a = make_event_with_time("E1", Some("工作"), 0.5, 0.6, base_time);
         // 3 小时后 → 同批次
         let b = make_event_with_time("E2", Some("工作"), 0.5, 0.6, base_time + 3 * 3600 * 1000);
         assert!(!are_different_batches(&a, &b, &config));
-    }
-
-    #[test]
-    fn are_different_batches_zero_created_at() {
-        let config = TentativePromotionConfig::default();
-        let a = make_event_with_time("E1", Some("工作"), 0.5, 0.6, 0);
-        let b = make_event_with_time("E2", Some("工作"), 0.5, 0.6, 1700000000000i64);
-        // a.created_at == 0 → 保守视为同批次
-        assert!(!are_different_batches(&a, &b, &config));
+        // created_at == 0 → 保守视为同批次
+        let c = make_event_with_time("E3", Some("工作"), 0.5, 0.6, 0);
+        let d = make_event_with_time("E4", Some("工作"), 0.5, 0.6, base_time);
+        assert!(!are_different_batches(&c, &d, &config));
     }
 
     #[test]
@@ -2741,92 +2587,49 @@ mod tests {
     // 主分类提取
     // =========================================================
 
+    /// extract_primary_category 各分支参数化验证：多关键词取首个 / 单关键词 / None / 空串。
     #[test]
-    fn extract_primary_category_from_keywords() {
-        let ev = make_event(
-            "E1",
-            "摘要",
-            Some("工作, 会议, 紧张"),
-            0.8,
-            0.5,
-            0.0,
-            0.5,
-            Presentation::Mixed,
-            None,
-        );
-        assert_eq!(extract_primary_category(&ev), "工作");
-    }
-
-    #[test]
-    fn extract_primary_category_single_keyword() {
-        let ev = make_event(
-            "E1",
-            "摘要",
-            Some("家庭"),
-            0.8,
-            0.5,
-            0.0,
-            0.5,
-            Presentation::Mixed,
-            None,
-        );
-        assert_eq!(extract_primary_category(&ev), "家庭");
-    }
-
-    #[test]
-    fn extract_primary_category_none_keywords() {
-        let ev = make_event(
-            "E1",
-            "摘要",
-            None,
-            0.8,
-            0.5,
-            0.0,
-            0.5,
-            Presentation::Mixed,
-            None,
-        );
-        assert_eq!(extract_primary_category(&ev), "未分类");
-    }
-
-    #[test]
-    fn extract_primary_category_empty_keywords() {
-        let ev = make_event(
-            "E1",
-            "摘要",
-            Some(""),
-            0.8,
-            0.5,
-            0.0,
-            0.5,
-            Presentation::Mixed,
-            None,
-        );
-        assert_eq!(extract_primary_category(&ev), "未分类");
+    fn extract_primary_category_cases() {
+        let cases = [
+            (Some("工作, 会议, 紧张"), "工作"),
+            (Some("家庭"), "家庭"),
+            (None, "未分类"),
+            (Some(""), "未分类"),
+        ];
+        for (keywords, expected) in cases {
+            let ev = make_event(
+                "E1",
+                "摘要",
+                keywords,
+                0.8,
+                0.5,
+                0.0,
+                0.5,
+                Presentation::Mixed,
+                None,
+            );
+            assert_eq!(extract_primary_category(&ev), expected);
+        }
     }
 
     // =========================================================
     // 加权统计
     // =========================================================
 
+    /// weighted_mean 各分支参数化验证：等权重 / 非等权重 / 全零权重。
     #[test]
-    fn weighted_mean_basic() {
+    fn weighted_mean_cases() {
+        // 等权重 → 算术平均
         let values = vec![1.0, 2.0, 3.0];
         let weights = vec![1.0, 1.0, 1.0];
         let mean = weighted_mean(&values, &weights);
         assert!((mean - 2.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn weighted_mean_with_weights() {
+        // 非等权重 → 加权平均
         let values = vec![0.5, 0.5, 1.0];
         let weights = vec![0.2, 0.5, 0.8];
         let mean = weighted_mean(&values, &weights);
         assert!((mean - 0.7666).abs() < 0.001);
-    }
-
-    #[test]
-    fn weighted_mean_zero_weights() {
+        // 全零权重 → 0.0
         let values = vec![1.0, 2.0];
         let weights = vec![0.0, 0.0];
         let mean = weighted_mean(&values, &weights);
@@ -3185,9 +2988,11 @@ mod tests {
         assert!((consistency - 1.0).abs() < 1e-10, "单个分类一致性为 1.0");
     }
 
+    /// compute_share_skewness 各事件分布参数化验证。
     #[test]
-    fn share_skewness_symmetric() {
+    fn share_skewness_cases() {
         let config = CalibratedWeightConfig::default();
+        // 对称分布（share 0.3/0.5/0.7）→ 偏度接近 0
         let events = vec![
             make_event(
                 "E1",
@@ -3224,12 +3029,8 @@ mod tests {
             ),
         ];
         let skew = compute_share_skewness(&events, None, &config);
-        assert!(skew.abs() < 0.1, "对称分布偏度应接近0，实际={}", skew);
-    }
-
-    #[test]
-    fn share_skewness_single_event() {
-        let config = CalibratedWeightConfig::default();
+        assert!(skew.abs() < 0.1, "对称分布偏度应接近0，实际={skew}");
+        // 单事件 → 偏度 0
         let events = vec![make_event(
             "E1",
             "s1",
@@ -3677,8 +3478,10 @@ mod tests {
         ev
     }
 
+    /// extract_motive_tags 各分支参数化验证：多标签 / None / 纯空白 / 单标签 / 去除空白。
     #[test]
-    fn extract_motive_tags_parses_comma_separated() {
+    fn extract_motive_tags_cases() {
+        // 逗号分隔多标签
         let event = make_event_with_motives(
             "E1",
             "s",
@@ -3696,10 +3499,7 @@ mod tests {
         assert_eq!(tags[0], "地位维护");
         assert_eq!(tags[1], "自主性");
         assert_eq!(tags[2], "归属");
-    }
-
-    #[test]
-    fn extract_motive_tags_empty_on_none() {
+        // None → 空
         let event = make_event_with_motives(
             "E2",
             "s",
@@ -3712,12 +3512,8 @@ mod tests {
             None,
             None,
         );
-        let tags = extract_motive_tags(&event);
-        assert!(tags.is_empty());
-    }
-
-    #[test]
-    fn extract_motive_tags_empty_on_blank() {
+        assert!(extract_motive_tags(&event).is_empty());
+        // 纯空白 → 空
         let event = make_event_with_motives(
             "E3",
             "s",
@@ -3730,12 +3526,8 @@ mod tests {
             None,
             Some("  ,  ,  "),
         );
-        let tags = extract_motive_tags(&event);
-        assert!(tags.is_empty());
-    }
-
-    #[test]
-    fn extract_motive_tags_single_tag() {
+        assert!(extract_motive_tags(&event).is_empty());
+        // 单标签
         let event = make_event_with_motives(
             "E4",
             "s",
@@ -3751,10 +3543,7 @@ mod tests {
         let tags = extract_motive_tags(&event);
         assert_eq!(tags.len(), 1);
         assert_eq!(tags[0], "自主性");
-    }
-
-    #[test]
-    fn extract_motive_tags_trim_whitespace() {
+        // 去除首尾空白
         let event = make_event_with_motives(
             "E5",
             "s",
@@ -3925,8 +3714,10 @@ mod tests {
         assert!(belonging.valence_positive_ratio < 0.5);
     }
 
+    /// compute_motive_stats 空结果各分支参数化验证：事件无 motives / 空事件列表。
     #[test]
-    fn compute_motive_stats_empty() {
+    fn compute_motive_stats_empty_cases() {
+        // 事件存在但无 motives → 空
         let events = vec![make_event_with_motives(
             "E1",
             "s",
@@ -3943,12 +3734,8 @@ mod tests {
         let config = CalibratedWeightConfig::default();
         let stats = compute_motive_stats(&events, &enrichments, &config);
         assert!(stats.is_empty());
-    }
-
-    #[test]
-    fn compute_motive_stats_empty_events() {
+        // 空事件列表 → 空
         let enrichments: Vec<EventEnrichment> = Vec::new();
-        let config = CalibratedWeightConfig::default();
         let stats = compute_motive_stats(&[], &enrichments, &config);
         assert!(stats.is_empty());
     }

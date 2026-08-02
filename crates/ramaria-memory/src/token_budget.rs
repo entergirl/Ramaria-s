@@ -333,43 +333,24 @@ mod tests {
 
     // ---- estimate_tokens ----
 
+    /// estimate_tokens 各输入参数化验证。
     #[test]
-    fn estimate_tokens_empty() {
-        assert_eq!(estimate_tokens(""), 0);
-    }
-
-    #[test]
-    fn estimate_tokens_chinese() {
-        // "你好世界" = 4 CJK chars → 4/2 = 2 tokens
-        let tokens = estimate_tokens("你好世界");
-        assert_eq!(tokens, 2);
-    }
-
-    #[test]
-    fn estimate_tokens_english() {
-        // "Hello World" = 10 letters + 1 space = 11 latin → 11/4 = 3 tokens
-        let tokens = estimate_tokens("Hello World");
-        assert_eq!(tokens, 3);
-    }
-
-    #[test]
-    fn estimate_tokens_mixed() {
-        // "你好 World" = 2 CJK + 1 space + 5 latin = 2/2 + 6/4 = 1 + 2 = 3
-        let tokens = estimate_tokens("你好 World");
-        assert_eq!(tokens, 3);
-    }
-
-    #[test]
-    fn estimate_tokens_single_char() {
-        assert_eq!(estimate_tokens("a"), 1);
-        assert_eq!(estimate_tokens("中"), 1);
-    }
-
-    #[test]
-    fn estimate_tokens_long_text() {
+    fn estimate_tokens_cases() {
+        // (input, expected)：CJK 按 2 字符/token，拉丁按 4 字符/token，向上取整
+        let cases = [
+            ("", 0),
+            ("你好世界", 2),    // 4 CJK → 2
+            ("Hello World", 3), // 11 latin → 3
+            ("你好 World", 3),  // 2/2 + 6/4 = 1 + 2
+            ("a", 1),
+            ("中", 1),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(estimate_tokens(input), expected, "input={input:?}");
+        }
+        // 长文本应有合理的 token 数
         let text = "这是一段较长的中文文本用于测试token估算的准确性。".repeat(10);
-        let tokens = estimate_tokens(&text);
-        assert!(tokens > 50, "长文本应有合理的 token 数");
+        assert!(estimate_tokens(&text) > 50, "长文本应有合理的 token 数");
     }
 
     // ---- truncate_at_boundary ----

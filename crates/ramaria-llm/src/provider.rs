@@ -9,7 +9,7 @@
 //! Prompt Injection 防护：
 //! - memory_context 以 `<memory_context>` XML 标签包裹，与系统指令明确分隔
 //! - 用户消息含已知注入模式时追加防御性前缀，提示 LLM 区分系统指令与用户输入
-//! - 注入模式检测保守：仅匹配 10 种英文常见指令覆盖模式，不干扰正常对话
+//! - 注入模式检测保守：仅匹配 11 种英文 + 4 种中文指令模式，不干扰正常对话
 //!
 //! 重试策略:
 //! - 最大 3 次重试
@@ -118,7 +118,7 @@ impl RetryConfig {
 /// 安全约束:
 /// - 不持有 API key（由 keychain 在调用时实时获取）
 #[derive(Debug, Clone)]
-pub struct ProviderBase {
+pub(crate) struct ProviderBase {
     /// 非敏感后端配置
     pub config: BackendConfig,
     /// HTTP 传输层
@@ -133,7 +133,8 @@ impl ProviderBase {
     /// 参数:
     /// - `config`: 后端配置（含 capability）。
     /// - `api_key`: 可选 API key（LM Studio 为 None）。
-    /// - `timeout_secs`: HTTP 超时秒数（默认 120）。
+    ///
+    /// 超时在函数体内固定为 120 秒（见 `OpenAiTransport::new`）。
     ///
     /// 返回:
     /// - 成功时返回 ProviderBase 实例。
@@ -573,7 +574,7 @@ const INJECTION_PATTERNS: &[&str] = &[
 ///
 /// 返回:
 /// - `Vec<serde_json::Value>`，可直接序列化到 OpenAI API 的 `messages` 字段。
-pub fn build_messages(request: &ChatRequest) -> Vec<serde_json::Value> {
+fn build_messages(request: &ChatRequest) -> Vec<serde_json::Value> {
     let mut messages: Vec<serde_json::Value> = Vec::new();
 
     // Block A: System Prompt（含记忆上下文，用 XML 标签分隔）
@@ -739,26 +740,9 @@ mod tests {
         assert_eq!(messages[1]["content"], "你好");
     }
 
-    #[test]
-    fn build_messages_with_memory_context() {
-        let request = ChatRequest {
-            system_prompt: "你是一个助手".into(),
-            memory_context: Some("用户喜欢猫，讨厌狗。".into()),
-            history: vec![],
-            user_message: "推荐宠物".into(),
-            temperature: 0.3,
-            max_tokens: 1024,
-            request_id: Uuid::new_v4(),
-        };
-
-        let messages = build_messages(&request);
-        let system_content = messages[0]["content"].as_str().unwrap();
-        assert!(system_content.contains("你是一个助手"));
-        // memory_context 以 XML 标签包裹
-        assert!(system_content.contains("<memory_context>"));
-        assert!(system_content.contains("</memory_context>"));
-        assert!(system_content.contains("用户喜欢猫"));
-    }
+    // （原 build_messages_with_memory_context 与 sanitize_memory_context_uses_xml_delimiters
+    //  场景一致，XML 标签断言已被后者覆盖；system prompt 包含断言已被
+    //  build_messages_basic 覆盖，已删除）
 
     #[test]
     fn build_messages_with_empty_memory_context() {
@@ -959,12 +943,6 @@ mod tests {
     // ---- RetryConfig error discrimination ----
 
     #[test]
-    fn retry_does_not_retry_validation_errors() {
-        let cfg = RetryConfig::default();
-        assert!(!cfg.should_retry_error(&RamariaError::validation("test")));
-    }
-
-    #[test]
     fn retry_does_retry_llm_errors() {
         let cfg = RetryConfig::default();
         assert!(cfg.should_retry_error(&RamariaError::llm("connection reset")));
@@ -991,10 +969,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn retry_does_not_retry_config_privacy_errors() {
-        let cfg = RetryConfig::default();
-        assert!(!cfg.should_retry_error(&RamariaError::config("缺少模型 ID")));
-        assert!(!cfg.should_retry_error(&RamariaError::privacy("API key 缺失")));
-    }
+    // （原 retry_does_not_retry_config_privacy_errors 与 should_retry_error_type 中
+    //  config/privacy 断言逐字重复，已删除）
 }

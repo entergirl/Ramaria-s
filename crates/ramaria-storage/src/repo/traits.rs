@@ -5,7 +5,6 @@
 //! - 所有枚举解析失败时回退到合理默认值并记录 WARNING
 //! - list_traits_by_persona 仅返回 active 状态的标签（System Prompt 构建用）
 
-use crate::parse_enum_fallback;
 use crate::repo::StorageResultExt;
 use crate::repo::parse_uuid_optional;
 use ramaria_core::error::RamariaResult;

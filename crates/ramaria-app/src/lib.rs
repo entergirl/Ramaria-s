@@ -53,3 +53,10 @@ pub use stages::{
 };
 pub use stream_event::StreamEvent;
 pub use update::{UpdateStatus, check_update};
+
+/// 返回当前时间的 `YYYY-MM-DD HH:MM` 字符串（本地时区）。
+///
+/// 用途: 消息时间戳、System Prompt 当前时间等共享格式化。
+pub(crate) fn now_timestamp_str() -> String {
+    chrono::Local::now().format("%Y-%m-%d %H:%M").to_string()
+}

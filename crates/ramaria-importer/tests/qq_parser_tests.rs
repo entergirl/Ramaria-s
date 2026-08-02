@@ -253,6 +253,8 @@ fn parse_json_type_10_red_envelope() {
     assert_eq!(report.degraded_red_envelope, 1);
     assert_eq!(report.total_degraded(), 1);
     assert!(sessions[0].messages[0].content.contains("[红包/转账]"));
+    // type_10 有非空 text，不计入 skipped_empty
+    assert_eq!(report.skipped_empty, 0);
 }
 
 #[test]
@@ -564,32 +566,9 @@ fn parse_json_file_not_found() {
 
 // =========================================================
 // 指纹确定性测试
+// （原 fingerprints_are_deterministic_across_parses 验证同一性质，
+//  已被 parse_json_fingerprint_consistent_with_dual_prefix 严格覆盖，已删除）
 // =========================================================
-
-/// 通过完整 JSON 解析验证指纹一致性。
-#[test]
-fn fingerprints_are_deterministic_across_parses() {
-    let content = r#"{
-        "chatInfo": {"selfUid":"u","selfName":"n","name":"c","type":"private","peerUid":"u_p"},
-        "messages": [
-            {"id":"1","timestamp":1704067200000,"type":"text","recalled":false,"system":false,"content":{"text":"测试","elements":[]},"sender":{"uid":"u","name":"n"}}
-        ]
-    }"#;
-
-    let path1 = create_temp_json("fp_test_1", content);
-    let path2 = create_temp_json("fp_test_2", content);
-
-    let result1 = parser::parse_qq_export(Path::new(&path1), 10).unwrap();
-    let result2 = parser::parse_qq_export(Path::new(&path2), 10).unwrap();
-
-    cleanup(&path1);
-    cleanup(&path2);
-
-    assert_eq!(
-        result1.0[0].messages[0].fingerprint,
-        result2.0[0].messages[0].fingerprint
-    );
-}
 
 // =========================================================
 // 导入报告测试
@@ -845,49 +824,6 @@ fn parse_json_fingerprint_consistent_with_dual_prefix() {
 
 // =========================================================
 // v6.x 特有：type_10/type_19 非空 text 正常解析
+// （原 parse_json_type_10_has_readable_text / parse_json_type_19_has_readable_text
+//  与 parse_json_type_10_red_envelope / parse_json_type_19_call 重复，已删除）
 // =========================================================
-
-#[test]
-fn parse_json_type_10_has_readable_text() {
-    // v6.x: type_10 的 content.text 为 "红包/钱包消息"（非空）
-    let content = r#"{
-        "chatInfo": {"selfUid": "u_self", "selfName": "我", "name": "好友", "type": "private", "peerUid": "u_friend"},
-        "messages": [
-            {"id":"1","timestamp":1704067200000,"type":"type_10","recalled":false,"system":false,"content":{"text":"红包/钱包消息","elements":[{"type":"wallet","data":{"summary":"红包/钱包消息"}}]},"sender":{"uid":"u_other","name":"好友"}}
-        ]
-    }"#;
-    let path = create_temp_json("parse_type10_text", content);
-
-    let result = parser::parse_qq_export(Path::new(&path), 10);
-    cleanup(&path);
-
-    assert!(result.is_ok());
-    let (sessions, report) = result.unwrap();
-
-    assert_eq!(report.degraded_red_envelope, 1);
-    // 降级为 [红包/转账]，非原始 text
-    assert!(sessions[0].messages[0].content.contains("[红包/转账]"));
-    // 不应计入 skipped_empty
-    assert_eq!(report.skipped_empty, 0);
-}
-
-#[test]
-fn parse_json_type_19_has_readable_text() {
-    // v6.x: type_19 的 content.text 为 "通话 - 已在其他设备处理"（非空）
-    let content = r#"{
-        "chatInfo": {"selfUid": "u_self", "selfName": "我", "name": "好友", "type": "private", "peerUid": "u_friend"},
-        "messages": [
-            {"id":"1","timestamp":1704067200000,"type":"type_19","recalled":false,"system":false,"content":{"text":"通话 - 已在其他设备处理","elements":[{"type":"av_record","data":{"summary":"通话 - 已在其他设备处理"}}]},"sender":{"uid":"u_other","name":"好友"}}
-        ]
-    }"#;
-    let path = create_temp_json("parse_type19_text", content);
-
-    let result = parser::parse_qq_export(Path::new(&path), 10);
-    cleanup(&path);
-
-    assert!(result.is_ok());
-    let (_sessions, report) = result.unwrap();
-
-    assert_eq!(report.degraded_qce_unsupported, 1);
-    assert_eq!(report.skipped_empty, 0);
-}

@@ -76,7 +76,7 @@ impl SessionLifecycle {
                 };
 
                 // 从内存缓存获取最后活跃时间（Python 从 DB 查）
-                let last_active = match slf.get_last_active(active_sid) {
+                let last_active = match slf.last_active(active_sid) {
                     Some(t) => t,
                     None => {
                         // 内存缓存中没有，尝试从 DB 恢复

@@ -321,6 +321,10 @@ async fn phase_b_produces_traits_with_mock_llm() {
     let stats = make_stats_summary();
     let config = InferrerConfig::default();
 
+    // 推断前 storage 中无 trait
+    let before = storage.list_traits_by_persona("rama-0001").await.unwrap();
+    assert!(before.is_empty(), "推断前应无 trait");
+
     let result = run_phase_b_inference(&multi_llm, &*storage, &stats, "rama-0001", &config)
         .await
         .expect("Phase B 应成功完成");
@@ -485,29 +489,8 @@ async fn phase_c_confidence_and_evidence() {
     }
 }
 
-/// 测试 L3 推断后 list_traits_by_persona 返回非空结果。
-#[tokio::test]
-async fn list_traits_by_persona_returns_traits_after_l3() {
-    let storage = Arc::new(MockStorage::new());
-    let persona_uid = "rama-0001";
-
-    // 推断前应为空
-    let before = storage.list_traits_by_persona(persona_uid).await.unwrap();
-    assert!(before.is_empty(), "推断前应无 trait");
-
-    // 运行推断
-    let multi_llm = MultiStepLlm::new(vec![step1_reply(), step2_reply(), step3_reply()]);
-    let stats = make_stats_summary();
-    let config = InferrerConfig::default();
-    run_phase_b_inference(&multi_llm, &*storage, &stats, persona_uid, &config)
-        .await
-        .expect("Phase B 应成功");
-
-    // 推断后应非空
-    let after = storage.list_traits_by_persona(persona_uid).await.unwrap();
-    assert!(!after.is_empty(), "推断后应有 trait");
-    assert!(after.len() >= 4, "应至少有 4 个 trait");
-}
+// （原 list_traits_by_persona_returns_traits_after_l3 与 phase_b_produces_traits_with_mock_llm
+//  setup 相同，其"推断前为空"断言已并入 phase_b_produces_traits_with_mock_llm，已删除）
 
 // =========================================================
 // T-V12-3-009: System Prompt Block A 验证

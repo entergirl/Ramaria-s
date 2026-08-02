@@ -425,22 +425,21 @@ impl<'a> JobManager<'a> {
 mod tests {
     use super::*;
 
+    /// JobType::as_str 与 Display（Display 委托 as_str）。
     #[test]
-    fn test_job_type_as_str() {
-        assert_eq!(JobType::L1Summary.as_str(), "l1_summary");
-        assert_eq!(JobType::EventExtract.as_str(), "event_extract");
-        assert_eq!(
-            JobType::PersonalityInference.as_str(),
-            "personality_inference"
-        );
-        assert_eq!(JobType::Calibration.as_str(), "calibration");
-        assert_eq!(JobType::IndexRebuild.as_str(), "index_rebuild");
-        assert_eq!(JobType::Custom("custom_task").as_str(), "custom_task");
-    }
-
-    #[test]
-    fn test_job_type_display() {
-        assert_eq!(format!("{}", JobType::L1Summary), "l1_summary");
+    fn test_job_type_str_and_display() {
+        let cases = [
+            (JobType::L1Summary, "l1_summary"),
+            (JobType::EventExtract, "event_extract"),
+            (JobType::PersonalityInference, "personality_inference"),
+            (JobType::Calibration, "calibration"),
+            (JobType::IndexRebuild, "index_rebuild"),
+            (JobType::Custom("custom_task"), "custom_task"),
+        ];
+        for (job, expected) in cases {
+            assert_eq!(job.as_str(), expected);
+            assert_eq!(format!("{job}"), expected);
+        }
         assert_eq!(format!("{}", JobType::Custom("adhoc")), "adhoc");
     }
 
@@ -454,46 +453,28 @@ mod tests {
         assert_eq!(status::FATAL, "fatal");
     }
 
+    /// JobManagerConfig 默认值与自定义构造验证。
     #[test]
-    fn test_job_manager_config_default() {
-        let cfg = JobManagerConfig::default();
-        assert_eq!(cfg.max_retries, 3);
-        assert_eq!(cfg.retry_base_delay_ms, 1000);
-    }
-
-    #[test]
-    fn test_job_manager_config_custom() {
-        let cfg = JobManagerConfig {
+    fn test_job_manager_config_cases() {
+        let default = JobManagerConfig::default();
+        assert_eq!(default.max_retries, 3);
+        assert_eq!(default.retry_base_delay_ms, 1000);
+        let custom = JobManagerConfig {
             max_retries: 5,
             retry_base_delay_ms: 2000,
         };
-        assert_eq!(cfg.max_retries, 5);
-        assert_eq!(cfg.retry_base_delay_ms, 2000);
+        assert_eq!(custom.max_retries, 5);
+        assert_eq!(custom.retry_base_delay_ms, 2000);
     }
 
+    /// CancellationToken 取消状态与 clone 共享状态验证。
     #[test]
-    fn test_job_result_variants() {
-        // 验证枚举变体可构造
-        let _ = JobResult::Success;
-        let _ = JobResult::Retryable("network timeout".into());
-        let _ = JobResult::Fatal("disk full".into());
-    }
-
-    /// 验证 CancellationToken::cancel 后 is_cancelled 返回 true。
-    #[test]
-    fn test_cancellation_token_basic() {
+    fn test_cancellation_token_cases() {
         let token = CancellationToken::new();
         assert!(!token.is_cancelled());
-        token.cancel();
-        assert!(token.is_cancelled());
-    }
-
-    /// 验证 CancellationToken clone 共享同一取消状态。
-    #[test]
-    fn test_cancellation_token_clone_shares_state() {
-        let token = CancellationToken::new();
         let clone = token.clone();
         token.cancel();
-        assert!(clone.is_cancelled());
+        assert!(token.is_cancelled());
+        assert!(clone.is_cancelled(), "clone 应共享同一取消状态");
     }
 }

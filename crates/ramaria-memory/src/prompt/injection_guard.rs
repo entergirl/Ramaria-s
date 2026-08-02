@@ -125,45 +125,52 @@ pub fn apply_injection_guard(
 mod tests {
     use super::*;
 
+    /// check_injection 各 (provider, online, has_memory) 参数化验证。
     #[test]
-    fn local_provider_always_allowed() {
-        let status = check_injection(LlmProvider::LmStudio, false, true);
-        assert_eq!(status, MemoryInjectionStatus::Allowed);
+    fn check_injection_cases() {
+        let cases = [
+            (
+                LlmProvider::LmStudio,
+                false,
+                true,
+                MemoryInjectionStatus::Allowed,
+            ),
+            (
+                LlmProvider::DeepSeek,
+                true,
+                true,
+                MemoryInjectionStatus::Allowed,
+            ),
+            (
+                LlmProvider::DeepSeek,
+                false,
+                true,
+                MemoryInjectionStatus::Disabled,
+            ),
+            (
+                LlmProvider::OpenAI,
+                true,
+                false,
+                MemoryInjectionStatus::NotApplicable,
+            ),
+        ];
+        for (provider, online, has_memory, expected) in cases {
+            let status = check_injection(provider, online, has_memory);
+            assert_eq!(status, expected, "{provider:?} online={online}");
+        }
     }
 
+    /// apply_injection_guard 各 (provider, online, ctx) 参数化验证。
     #[test]
-    fn online_provider_with_injection_on() {
-        let status = check_injection(LlmProvider::DeepSeek, true, true);
-        assert_eq!(status, MemoryInjectionStatus::Allowed);
-    }
-
-    #[test]
-    fn online_provider_with_injection_off() {
-        let status = check_injection(LlmProvider::DeepSeek, false, true);
-        assert_eq!(status, MemoryInjectionStatus::Disabled);
-    }
-
-    #[test]
-    fn no_memory_not_applicable() {
-        let status = check_injection(LlmProvider::OpenAI, true, false);
-        assert_eq!(status, MemoryInjectionStatus::NotApplicable);
-    }
-
-    #[test]
-    fn apply_guard_online_disabled() {
-        let result = apply_injection_guard(LlmProvider::DeepSeek, false, Some("敏感记忆".into()));
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn apply_guard_local_preserves() {
-        let result = apply_injection_guard(LlmProvider::LmStudio, false, Some("记忆".into()));
-        assert_eq!(result.as_deref(), Some("记忆"));
-    }
-
-    #[test]
-    fn apply_guard_empty_string_treated_as_none() {
-        let result = apply_injection_guard(LlmProvider::LmStudio, true, Some("   ".into()));
-        assert!(result.is_none());
+    fn apply_guard_cases() {
+        let cases = [
+            (LlmProvider::DeepSeek, false, Some("敏感记忆"), None),
+            (LlmProvider::LmStudio, false, Some("记忆"), Some("记忆")),
+            (LlmProvider::LmStudio, true, Some("   "), None),
+        ];
+        for (provider, online, ctx, expected) in cases {
+            let result = apply_injection_guard(provider, online, ctx.map(String::from));
+            assert_eq!(result.as_deref(), expected, "{provider:?} online={online}");
+        }
     }
 }

@@ -337,10 +337,7 @@ mod tests {
     #[test]
     fn event_prompt_contains_motives_field() {
         let prompt = build_event_extraction_prompt("[1] 2025-01-01 测试摘要");
-        assert!(
-            prompt.contains("motives"),
-            "v1.3: prompt 应包含 motives 字段"
-        );
+        assert!(prompt.contains("motives"), "prompt 应包含 motives 字段");
         assert!(prompt.contains("自我保护"));
         assert!(prompt.contains("归属"));
         assert!(prompt.contains("求知"));
@@ -349,10 +346,7 @@ mod tests {
     #[test]
     fn event_prompt_contains_relations_format() {
         let prompt = build_event_extraction_prompt("[1] 2025-01-01 测试摘要");
-        assert!(
-            prompt.contains("relations"),
-            "v1.3: prompt 应包含 relations 数组"
-        );
+        assert!(prompt.contains("relations"), "prompt 应包含 relations 数组");
         assert!(prompt.contains("from_index"));
         assert!(prompt.contains("to_index"));
         assert!(prompt.contains("CausedBy"));

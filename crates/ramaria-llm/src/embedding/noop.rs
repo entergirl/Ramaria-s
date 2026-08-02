@@ -28,7 +28,7 @@ use ramaria_core::traits::{EmbeddingModelInfo, EmbeddingProvider};
 /// ```
 pub struct NoopEmbeddingProvider {
     /// 模型信息（dimension 可配置）
-    info: EmbeddingModelInfo,
+    model_info: EmbeddingModelInfo,
 }
 
 impl NoopEmbeddingProvider {
@@ -38,7 +38,7 @@ impl NoopEmbeddingProvider {
     /// - `dimension`: 宣称的向量维度（实际不工作）。
     pub fn new(dimension: usize) -> Self {
         Self {
-            info: EmbeddingModelInfo {
+            model_info: EmbeddingModelInfo {
                 model_id: "noop".to_string(),
                 dimension,
             },
@@ -61,7 +61,7 @@ impl EmbeddingProvider for NoopEmbeddingProvider {
     }
 
     fn model_info(&self) -> &EmbeddingModelInfo {
-        &self.info
+        &self.model_info
     }
 
     async fn validate(&self) -> RamariaResult<()> {
@@ -91,32 +91,6 @@ impl EmbeddingProvider for NoopEmbeddingProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn noop_is_never_available() {
-        let p = NoopEmbeddingProvider::new(384);
-        assert!(!p.is_available());
-        assert_eq!(p.download_progress(), 0.0);
-    }
-
-    #[tokio::test]
-    async fn noop_embed_returns_unsupported() {
-        let p = NoopEmbeddingProvider::new(384);
-        let result = p.embed("测试文本").await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn noop_validate_returns_unsupported() {
-        let p = NoopEmbeddingProvider::new(384);
-        assert!(p.validate().await.is_err());
-    }
-
-    #[tokio::test]
-    async fn noop_model_info_is_consistent() {
-        let p = NoopEmbeddingProvider::new(768);
-        assert_eq!(p.model_info().dimension, 768);
-        assert_eq!(p.model_info().model_id, "noop");
-    }
+    // （原 4 条 noop_* 测试与 tests/embedding_tests.rs 同名测试完全重复，
+    //  已由集成测试完整覆盖，已删除）
 }

@@ -571,13 +571,6 @@ mod tests {
         assert_eq!(provider.model_info().dimension, 384);
     }
 
-    /// 测试进度初始值
-    #[test]
-    fn progress_starts_at_zero_for_missing_model() {
-        let provider = NativeEmbeddingProvider::new("/nonexistent/path").unwrap();
-        assert_eq!(provider.download_progress(), 0.0);
-    }
-
     /// 测试 model_info 模型 ID 格式
     #[test]
     fn model_info_id_format() {

@@ -3,7 +3,7 @@
 //! 设计特点:
 //! - 消除跨命令模块的代码重复（format_timestamp / truncate / extract_toml_value）
 //! - 所有函数为纯函数，零 I/O、零状态
-//! - 供 commands/ 下各模块和 ui.rs 调用
+//! - 供 commands/ 下各命令模块调用
 //! - 按字符边界操作，正确处理 UTF-8 与 CJK
 
 use chrono::TimeZone;
@@ -64,7 +64,7 @@ pub fn truncate(s: &str, max_chars: usize) -> String {
 // TOML 简单解析
 // =========================================================
 
-/// 从 TOML 文本中提取 `[identity]` 节下的简单键值。
+/// 从 TOML 文本中提取形如 `key = value` 的简单键值（不做节检查）。
 ///
 /// 参数:
 /// - `content`: 完整 TOML 文本。
@@ -109,59 +109,37 @@ mod tests {
 
     // ---- format_timestamp ----
 
+    /// format_timestamp 各输入参数化验证。
     #[test]
-    fn format_ts_zero_returns_none() {
-        assert_eq!(format_timestamp(0), None);
-    }
-
-    #[test]
-    fn format_ts_negative_returns_none() {
-        assert_eq!(format_timestamp(-1), None);
-    }
-
-    #[test]
-    fn format_ts_valid() {
-        // 2024-06-10T08:00:00 UTC = 1718006400000 ms
-        let result = format_timestamp(1_718_006_400_000);
-        assert_eq!(result, Some("2024-06-10 08:00".to_string()));
+    fn format_ts_cases() {
+        let cases = [
+            (0i64, None),                                              // 0 → None
+            (-1, None),                                                // 负数 → None
+            (1_718_006_400_000, Some("2024-06-10 08:00".to_string())), // 有效时间
+        ];
+        for (ts, expected) in cases {
+            assert_eq!(format_timestamp(ts), expected, "ts={ts}");
+        }
     }
 
     // ---- truncate ----
 
+    /// truncate 各 (input, max) 参数化验证。
     #[test]
-    fn truncate_short() {
-        assert_eq!(truncate("hello", 10), "hello");
-    }
-
-    #[test]
-    fn truncate_exact_length() {
-        assert_eq!(truncate("hello", 5), "hello");
-    }
-
-    #[test]
-    fn truncate_long() {
-        assert_eq!(truncate("hello world", 8), "hello...");
-    }
-
-    #[test]
-    fn truncate_very_short_max() {
-        // max_chars = 3 → 0 chars + "..."
-        assert_eq!(truncate("hello", 3), "...");
-    }
-
-    #[test]
-    fn truncate_cjk() {
-        // 中文字符也是 1 char
-        // "你好世界" = 4 chars，不超过 max 时原样返回
-        assert_eq!(truncate("你好世界", 4), "你好世界");
-        assert_eq!(truncate("你好世界", 3), "..."); // 3-3=0 chars + "..."
-        // 用更长的 CJK 字符串验证截断
-        assert_eq!(truncate("你好世界啊", 4), "你..."); // "你好世界啊"=5 chars > 4, 取1字+"..."
-    }
-
-    #[test]
-    fn truncate_empty() {
-        assert_eq!(truncate("", 10), "");
+    fn truncate_cases() {
+        let cases = [
+            ("hello", 10, "hello"), // 未超长原样
+            ("hello", 5, "hello"),  // 恰好边界
+            ("hello world", 8, "hello..."),
+            ("hello", 3, "..."),         // max=3 → 0 chars + "..."
+            ("你好世界", 4, "你好世界"), // CJK 1 char/字
+            ("你好世界", 3, "..."),
+            ("你好世界啊", 4, "你..."), // 5 chars > 4, 取 1 字 + "..."
+            ("", 10, ""),               // 空串
+        ];
+        for (input, max, expected) in cases {
+            assert_eq!(truncate(input, max), expected, "input={input:?} max={max}");
+        }
     }
 
     // ---- extract_toml_value ----

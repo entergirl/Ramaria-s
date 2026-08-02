@@ -151,15 +151,8 @@ fn verify_checksum_matches() {
     cleanup(&root);
 }
 
-#[test]
-fn model_dir_consistent_path() {
-    let root = temp_models_root();
-    let mgr = ModelManager::new(&root).unwrap();
-
-    let dir = mgr.model_dir("my-model");
-    assert!(dir.ends_with("my-model"));
-    cleanup(&root);
-}
+// （原 model_dir_consistent_path 仅断言 model_dir(name) 以 name 结尾，
+//  为 getter 复述实现，已删除）
 
 #[test]
 fn repeated_creation_is_idempotent() {

@@ -23,10 +23,7 @@ use ramaria_app::stages::{
 use ramaria_app::stream_event::StreamEvent;
 use ramaria_core::config::RamariaConfig;
 use ramaria_core::traits::{EmbeddingProvider, LlmProvider, StorageBackend};
-use ramaria_core::types::{
-    AppState, BackendConfig, LlmProvider as LlmProviderKind, MessageRole, Persona, PersonaKind,
-    PrivacyConsent,
-};
+use ramaria_core::types::{AppState, MessageRole, Persona, PersonaKind};
 use ramaria_llm::keychain::Keychain;
 use ramaria_memory::retriever::Retriever;
 use uuid::Uuid;
@@ -442,66 +439,15 @@ async fn stage_8_missing_budgeted_prompt_returns_fatal() {
     assert_eq!(err.stage(), "TokenBudget");
 }
 
-/// FatalError 状态 → Stage 1 即中止。
-#[tokio::test]
-async fn fatal_error_state_stops_pipeline_immediately() {
-    let ctx = make_ctx(
-        Arc::new(MockStorage::new()),
-        Arc::new(MockLlm::new("test")),
-        None,
-    );
-    let pipeline = full_pipeline();
-    let data = PipelineData::new("test".into(), None, None, Uuid::new_v4())
-        .with_app_state(AppState::FatalError);
-
-    let result = pipeline.execute(&ctx, data).await;
-    let err = match result {
-        Ok(_) => panic!("should fail at CheckState"),
-        Err(e) => e,
-    };
-    assert!(!err.is_retryable());
-    assert_eq!(err.stage(), "CheckState");
-}
+// （原 fatal_error_state_stops_pipeline_immediately 与 m1_integration.rs 的
+//  pipeline_stops_on_fatal_error_state 同断言同逻辑（FatalError 在 Stage1 CheckState
+//  被拒，与管线长度无关），已删除）
 
 // =========================================================
 // 线上 provider 隐私确认测试
 // =========================================================
 
-/// 线上 provider + 已确认 → 全流程通过。
-#[tokio::test]
-async fn online_provider_with_consent_full_pipeline() {
-    let storage = Arc::new(MockStorage::new());
-    storage.add_privacy_consent(PrivacyConsent::new(
-        LlmProviderKind::DeepSeek,
-        "https://api.deepseek.com/v1".to_string(),
-        true,
-    ));
-
-    let deepseek_config = BackendConfig::deepseek_default();
-    let llm = Arc::new(MockLlm::with_config("deepseek reply", deepseek_config));
-    let ctx = make_ctx(Arc::clone(&storage) as Arc<MockStorage>, llm, None);
-    let pipeline = full_pipeline();
-    let data = ready_data("测试", Some("rama-0001"));
-
-    let result = pipeline.execute(&ctx, data).await;
-    assert!(result.is_ok());
-}
-
-/// 线上 provider + 未确认 → Stage 2 返回 Retryable。
-#[tokio::test]
-async fn online_provider_without_consent_stops_at_privacy() {
-    let storage = Arc::new(MockStorage::new());
-    let deepseek_config = BackendConfig::deepseek_default();
-    let llm = Arc::new(MockLlm::with_config("deepseek reply", deepseek_config));
-    let ctx = make_ctx(Arc::clone(&storage) as Arc<MockStorage>, llm, None);
-    let pipeline = full_pipeline();
-    let data = ready_data("测试", Some("rama-0001"));
-
-    let result = pipeline.execute(&ctx, data).await;
-    let err = match result {
-        Ok(_) => panic!("online provider without consent should fail"),
-        Err(e) => e,
-    };
-    assert!(err.is_retryable());
-    assert_eq!(err.stage(), "CheckPrivacy");
-}
+// （原 online_provider_with_consent_full_pipeline /
+//  online_provider_without_consent_stops_at_privacy 与 m1_integration.rs 的
+//  pipeline_online_provider_with_consent_succeeds /
+//  pipeline_online_provider_without_consent_returns_retryable 同 setup 同断言，已删除）

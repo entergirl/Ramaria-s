@@ -2262,64 +2262,24 @@ mod tests {
         assert!((relevance - 0.5).abs() < f64::EPSILON);
     }
 
-    #[test]
-    fn compute_relevance_work_tasks_match_duty() {
-        // 模拟真实场景："工作,项目" 匹配 "尽责"（含义：对任务有强烈的完成意愿）
-        let keywords = vec!["工作", "项目"];
-        let relevance = compute_event_trait_relevance(
-            &keywords,
-            "尽责",
-            "对交给自己的任务有强烈的完成意愿，重视承诺",
-        );
-        // "工作" chars: 工,作; "项目" chars: 项,目
-        // meaning chars: 对,交,给,自,己,的,任,务,...
-        // "工作" 中的 "作" may appear in "任务" → but "任务" is one word
-        // character 任 ≠ 作, but "任" appears in "任务"
-        // Actually this is char-by-char matching. Let me check:
-        // "工" "作" vs meaning chars - no direct match for "工" or "作"
-        // So this test would fail with char-level LCS.
-        // Let me change this test to just verify the function works.
-        assert!(relevance >= 0.0 && relevance <= 1.0);
-    }
+    // （原 compute_relevance_work_tasks_match_duty 与 compute_relevance_meaning_match
+    //  同输入同断言完全重复，且注释自认废弃试验，已删除）
 
+    /// longest_common_substring_ratio 各输入参数化验证。
     #[test]
-    fn lcs_ratio_identical() {
-        let a: Vec<char> = "社交".chars().collect();
-        let b: Vec<char> = "社交".chars().collect();
-        let ratio = longest_common_substring_ratio(&a, &b);
-        assert!((ratio - 1.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn lcs_ratio_substring() {
-        let a: Vec<char> = "社交".chars().collect();
-        let b: Vec<char> = "社交回避".chars().collect();
-        let ratio = longest_common_substring_ratio(&a, &b);
-        assert!((ratio - 1.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn lcs_ratio_no_overlap() {
-        let a: Vec<char> = "abc".chars().collect();
-        let b: Vec<char> = "xyz".chars().collect();
-        let ratio = longest_common_substring_ratio(&a, &b);
-        assert!((ratio - 0.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn lcs_ratio_partial() {
-        let a: Vec<char> = "测试工作".chars().collect();
-        let b: Vec<char> = "工作项目".chars().collect();
-        let ratio = longest_common_substring_ratio(&a, &b);
-        // LCS = "工作" = 2 chars, min(4, 4) = 4, ratio = 2/4 = 0.5
-        assert!((ratio - 0.5).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn lcs_ratio_empty() {
-        let a: Vec<char> = vec![];
-        let b: Vec<char> = "测试".chars().collect();
-        let ratio = longest_common_substring_ratio(&a, &b);
-        assert!((ratio - 0.0).abs() < f64::EPSILON);
+    fn lcs_ratio_cases() {
+        let cases = [
+            ("社交", "社交", 1.0),         // 完全相同
+            ("社交", "社交回避", 1.0),     // 子串
+            ("abc", "xyz", 0.0),           // 无重叠
+            ("测试工作", "工作项目", 0.5), // LCS="工作" 2/4
+            ("", "测试", 0.0),             // 空输入
+        ];
+        for (a, b, expected) in cases {
+            let a: Vec<char> = a.chars().collect();
+            let b: Vec<char> = b.chars().collect();
+            let ratio = longest_common_substring_ratio(&a, &b);
+            assert!((ratio - expected).abs() < f64::EPSILON, "{a:?} vs {b:?}");
+        }
     }
 }
