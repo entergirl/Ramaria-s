@@ -40,6 +40,8 @@ pub struct DesktopState {
     pub pool: SqlitePool,
     /// 数据库文件路径（诊断用）
     pub db_path: PathBuf,
+    /// config.toml 路径（配置双写同步服务用，v1.4）
+    pub config_path: PathBuf,
 }
 
 // =========================================================
@@ -154,16 +156,18 @@ fn ensure_data_dir(path: &PathBuf) -> std::io::Result<()> {
 /// 3. 创建 Keychain
 /// 4. 根据配置创建 LLM Provider
 /// 5. 尝试恢复已保存的嵌入模型（如有）
-/// 6. 构造 App 实例
-/// 7. 刷新应用状态
+/// 6. 配置双写同步：加载 config.toml + DB 两侧并做一致性校验（v1.4 D-V14-006）
+/// 7. 构造 App 实例
+/// 8. 刷新应用状态
 ///
 /// 返回:
 /// - `Ok(App)` 初始化成功
 /// - `Err(String)` 初始化失败（含用户友好的错误描述）
 async fn init_app(
     data_dir: &PathBuf,
-) -> Result<(Arc<ramaria_app::App>, SqlitePool, PathBuf), String> {
+) -> Result<(Arc<ramaria_app::App>, SqlitePool, PathBuf, PathBuf), String> {
     let db_path = data_dir.join("assistant.db");
+    let config_path = data_dir.join("config.toml");
 
     // 确保数据目录存在
     ensure_data_dir(data_dir).map_err(|e| format!("创建数据目录失败: {}", e))?;
@@ -259,20 +263,52 @@ async fn init_app(
         }
     };
 
-    // Step 6: 构造 App（填充实际路径到配置中，供诊断导出等模块使用）
-    let mut config = ramaria_core::config::RamariaConfig::default();
+    // Step 6: 配置双写同步（v1.4）：加载 config.toml + DB 两侧，一致性校验以文件为准
+    let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
+    let config_sync = ramaria_app::ConfigSyncService::new(storage_dyn, config_path.clone());
+    let sync_outcome = config_sync
+        .load()
+        .await
+        .map_err(|e| format!("配置同步加载失败: {}", e))?;
+    if !sync_outcome.file_existed {
+        tracing::info!(
+            path = %config_path.display(),
+            "config.toml 不存在，已生成含全部默认值的模板"
+        );
+    }
+    for err in &sync_outcome.file_parse_errors {
+        tracing::warn!(error = %err, "config.toml 解析问题，已回退默认配置");
+    }
+    if sync_outcome.mismatches.is_empty() {
+        tracing::info!("配置双写一致性校验通过（文件与 DB 一致）");
+    } else {
+        tracing::warn!(
+            count = sync_outcome.mismatches.len(),
+            "配置双写一致性校验发现不一致项，已按 config.toml 为准回写 DB"
+        );
+        for m in &sync_outcome.mismatches {
+            // 仅记录键名，不打印配置值（避免泄露 base_url 等敏感细节）
+            tracing::warn!(key = %m.key, "配置不一致（以文件为准，已回写 DB）");
+        }
+    }
+    for err in &sync_outcome.db_write_failures {
+        tracing::warn!(error = %err, "DB 侧配置回写失败（降级不阻塞）");
+    }
+
+    // Step 7: 构造 App（基于同步后的配置，填充实际路径）
+    let mut config = sync_outcome.config;
     config.paths.data_dir = data_dir.to_string_lossy().to_string();
     config.paths.log_dir = data_dir.join("logs").to_string_lossy().to_string();
     config.paths.config_dir = data_dir.to_string_lossy().to_string();
     config.paths.vector_index_dir = data_dir.join("vectors").to_string_lossy().to_string();
     let app = ramaria_app::App::new(storage, llm, embedding, config, keychain);
 
-    // Step 7: 刷新状态
+    // Step 8: 刷新状态
     app.refresh_setup_state()
         .await
         .map_err(|e| format!("刷新应用状态失败: {}", e))?;
 
-    // Step 8: 如果状态为 Ready，启动后台任务（空闲检测 + L2/L3 定时检查）
+    // Step 9: 如果状态为 Ready，启动后台任务（空闲检测 + L2/L3 定时检查）
     if app.current_state() == ramaria_core::AppState::Ready {
         app.start_background_tasks();
         tracing::info!("后台任务已启动");
@@ -284,7 +320,7 @@ async fn init_app(
         "App 初始化完成"
     );
 
-    Ok((Arc::new(app), pool, db_path))
+    Ok((Arc::new(app), pool, db_path, config_path))
 }
 
 // =========================================================
@@ -327,7 +363,7 @@ pub fn run() {
         .expect("创建 tokio 运行时失败");
 
     // 执行应用初始化
-    let (app, pool, db_path) = match rt.block_on(init_app(&data_dir)) {
+    let (app, pool, db_path, config_path) = match rt.block_on(init_app(&data_dir)) {
         Ok(result) => result,
         Err(e) => {
             tracing::error!(error = %e, "应用初始化失败");
@@ -344,6 +380,7 @@ pub fn run() {
         app,
         pool,
         db_path: db_path.clone(),
+        config_path,
     };
 
     // 构建 Tauri 应用
@@ -388,6 +425,8 @@ pub fn run() {
             commands::config::update_backend_config,
             commands::config::get_settings,
             commands::config::update_setting,
+            commands::config::get_full_config,
+            commands::config::update_full_config,
             // ---- Export ----
             commands::export::export_sessions_json,
             commands::export::export_sessions_markdown,

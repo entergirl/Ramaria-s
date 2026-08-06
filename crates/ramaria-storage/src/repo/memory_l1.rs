@@ -12,7 +12,7 @@
 use crate::repo::StorageResultExt;
 use crate::repo::parse_uuid_required;
 use ramaria_core::error::RamariaResult;
-use ramaria_core::types::MemoryL1;
+use ramaria_core::types::{EvidenceNote, MemoryL1};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
@@ -32,7 +32,7 @@ struct L1Row {
     persona_uid: Option<String>,
     context_json: Option<String>,
     situation_strength: Option<i64>,
-    /// 证据片段（JSON 数组字符串），存量数据为 NULL
+    /// 证据线索（JSON 对象数组字符串），存量数据为 NULL
     evidence_notes: Option<String>,
 }
 
@@ -41,10 +41,11 @@ impl L1Row {
         let id = parse_uuid_required(&self.id, "memory_l1", "id")?;
         let session_id = parse_uuid_required(&self.session_id, "memory_l1", "session_id")?;
 
-        // evidence_notes: TEXT 存储 JSON 数组，反序列化为 Vec<String>
+        // evidence_notes: TEXT 存储 JSON 对象数组，反序列化为 Vec<EvidenceNote>
+        // （v1.4 结构化格式：{text, time?, who?, cause?}，由 migration 一次性迁移）
         let evidence_notes = self
             .evidence_notes
-            .map(|s| serde_json::from_str::<Vec<String>>(&s))
+            .map(|s| serde_json::from_str::<Vec<EvidenceNote>>(&s))
             .transpose()
             .map_err(|e| {
                 ramaria_core::error::RamariaError::validation(format!(
@@ -74,7 +75,7 @@ impl L1Row {
 }
 
 pub async fn save(pool: &SqlitePool, l1: &MemoryL1) -> RamariaResult<()> {
-    // evidence_notes: Vec<String> → JSON 数组字符串存储
+    // evidence_notes: Vec<EvidenceNote> → JSON 对象数组字符串存储
     let evidence_notes_json = l1
         .evidence_notes
         .as_ref()

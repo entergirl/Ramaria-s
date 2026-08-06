@@ -22,6 +22,7 @@ pub mod app_privacy;
 pub mod app_retriever;
 pub mod app_setup;
 pub mod app_state;
+pub mod config_sync;
 pub mod diagnostics;
 pub mod error_hint;
 pub mod model_manager;
@@ -35,6 +36,7 @@ pub mod update;
 
 // 重新导出核心类型
 pub use app::{App, SendMessageStream};
+pub use config_sync::{ConfigSyncService, MismatchEntry, SyncOutcome, SyncWriteResult};
 pub use diagnostics::{DiagnosticsReport, export_diagnostics};
 pub use error_hint::{ErrorHint, error_detail, error_title, is_retryable};
 pub use model_manager::{

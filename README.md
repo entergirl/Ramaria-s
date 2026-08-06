@@ -51,7 +51,7 @@ ramaria-app  应用编排层（Pipeline + Stage 对话管线，状态机）
     ├── ramaria-memory     记忆管线（L0→L3）+ 混合 RAG + 性格推断（Phase A/B/C）
     ├── ramaria-llm        LLM Provider（LM Studio / DeepSeek / OpenAI）
     ├── ramaria-importer   聊天记录导入（QQ 解析 + 双模式导入）
-    ├── ramaria-storage    SQLite（23 张表，Repository 模式）
+    ├── ramaria-storage    SQLite（24 张表，Repository 模式）
     └── ramaria-core       核心类型 & Trait（零 I/O）
 ```
 
@@ -60,7 +60,7 @@ ramaria-app  应用编排层（Pipeline + Stage 对话管线，状态机）
 | 模块 | 技术选型 | 职责 |
 |------|----------|------|
 | **ramaria-core** | 纯 Rust 类型系统 | 9 个枚举 + 9 个结构体 + StorageBackend trait（40+ 方法）+ LlmProvider trait |
-| **ramaria-storage** | SQLite（sqlx） | 23 张表 schema、19 个 Repository、手动行映射避免 derive 侵入 |
+| **ramaria-storage** | SQLite（sqlx） | 24 张表 schema、19 个 Repository、手动行映射避免 derive 侵入 |
 | **ramaria-memory** | 自研管线 | 分层摘要→事件提取→性格推断、BM25+向量+图谱三通道 RAG、Ebbinghaus 衰减、RRF 融合、Token Budgeting |
 | **ramaria-llm** | reqwest + SSE | 3 后端适配器、SSE 流式传输、API Key 凭据管理器、指数退避重试、ONNX 嵌入模型 |
 | **ramaria-importer** | encoding_rs + sha2 | QQ 聊天记录解析（JSON + TXT）、快速/深度双模式、双画像自动创建 |
@@ -191,7 +191,7 @@ L0 原始消息（永久保留，不删除，不过滤，标记发言人）
 ```
 crates/
 ├── ramaria-core/          # 核心类型 & Trait（零 I/O）
-├── ramaria-storage/       # SQLite 存储层（23 张表，19 个 Repository）
+├── ramaria-storage/       # SQLite 存储层（24 张表，19 个 Repository）
 ├── ramaria-memory/        # 记忆管线 + RAG + 性格推断
 ├── ramaria-llm/           # LLM Provider（LM Studio / DeepSeek / OpenAI）
 ├── ramaria-importer/      # QQ 聊天记录导入
@@ -209,7 +209,7 @@ tests/                     # 集成测试
 <summary>展开查看各 crate 内部目录</summary>
 
 **ramaria-core/src/**
-- `config.rs` — RamariaConfig 统一配置（10 个配置域）
+- `config.rs` — RamariaConfig 统一配置（11 个配置域）
 - `error.rs` — 错误类型体系（8 种错误变体）
 - `traits.rs` — StorageBackend（40+ 方法）、LlmProvider、EmbeddingProvider
 - `types.rs` — 9 枚举 + 9 结构体（MemoryEvent, Persona, Session...）

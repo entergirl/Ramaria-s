@@ -10,7 +10,7 @@
 
 use ramaria_core::keyword::KeywordToken;
 use ramaria_core::traits::ChatRequest;
-use ramaria_core::types::MessageRole;
+use ramaria_core::types::{EvidenceNote, MessageRole};
 use ramaria_core::{LlmProviderTrait, MemoryL1, RamariaError, RamariaResult, StorageBackend};
 use serde::Deserialize;
 use tracing::{debug, info, warn};
@@ -30,8 +30,10 @@ use crate::utils;
 /// - 校验阶段再填充默认值，避免解析阶段 panic。
 /// - `situation_strength` 为新增字段，当前 LLM prompt 尚未包含此输出，
 ///   因此大部分情况下为 None（等效 3）。
-/// - `evidence_notes` 为新增字段，LLM 可能输出缺失或空数组，
+/// - `evidence_notes` 为结构化证据线索（v1.4），LLM 可能输出缺失或空数组，
 ///   校验失败时降级为 `Some(vec![])` 但不阻塞 L1 生成。
+///   M1~M3 过渡期 LLM 仍可能输出旧字符串数组，由自定义反序列化器统一转换为
+///   对象数组（字符串落 `text` 槽位）；M4 起 prompt 升级为对象数组。
 #[derive(Debug, Deserialize)]
 struct L1SummaryResponse {
     summary: Option<String>,
@@ -43,9 +45,9 @@ struct L1SummaryResponse {
     /// 情境强度 1-5，None 时按默认值 3 处理
     #[serde(default)]
     situation_strength: Option<i32>,
-    /// 证据片段列表，缺失时降级为 Some(vec![])
-    #[serde(default)]
-    evidence_notes: Option<Vec<String>>,
+    /// 证据线索列表（宽容解析：对象数组 / 旧字符串数组 / 缺失）
+    #[serde(default, deserialize_with = "deserialize_evidence_notes")]
+    evidence_notes: Option<Vec<EvidenceNote>>,
 }
 
 // =========================================================
@@ -445,19 +447,64 @@ impl<'a> L1Summarizer<'a> {
 }
 
 // =========================================================
-// evidence_notes 校验函数
+// evidence_notes 宽容反序列化 + 校验
 // =========================================================
 
-/// 校验 evidence_notes 字段。
+/// 宽容反序列化 evidence_notes（v1.4 结构化升级的过渡兼容）。
+///
+/// 兼容三种输入:
+/// 1. 对象数组 `[{"text": "...", "time": ..., "who": ..., "cause": ...}]` — 直接解析
+/// 2. 旧字符串数组 `["...", "..."]` — 字符串落 `text` 槽位，其余置空
+/// 3. 缺失 / null / 非数组 — 返回 None
+///
+/// 说明:
+/// - 存储层（memory_l1 表）自 M1 起只读写新格式，无旧格式解析分支（D-V14-003）；
+///   此处的宽容解析仅针对 LLM 输出（M4 之前 prompt 仍为旧格式）。
+fn deserialize_evidence_notes<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Vec<EvidenceNote>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let items = match value {
+        serde_json::Value::Array(items) => items,
+        _ => return Ok(None),
+    };
+
+    let mut notes = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
+            // 旧格式：字符串 → text 槽位
+            serde_json::Value::String(s) => notes.push(EvidenceNote::new(s)),
+            // 新格式：对象 → 结构化解析（缺失字段回退 None）
+            serde_json::Value::Object(_) => match serde_json::from_value::<EvidenceNote>(item) {
+                Ok(note) => notes.push(note),
+                Err(e) => {
+                    tracing::warn!(error = %e, "evidence_notes 条目解析失败，跳过该条");
+                }
+            },
+            other => {
+                tracing::warn!(
+                    kind = %other,
+                    "evidence_notes 条目类型非法（应为字符串或对象），跳过该条"
+                );
+            }
+        }
+    }
+    Ok(Some(notes))
+}
+
+/// 校验 evidence_notes 字段（v1.4 结构化格式）。
 ///
 /// 校验规则:
 /// 1. 输入为 None 或空数组 → 降级为空数组，记 warn
-/// 2. 每条 evidence trim 后 < 5 字符 → 丢弃该条，记 debug
+/// 2. 每条 evidence 的 `text` trim 后 < 5 字符 → 丢弃该条，记 debug
 /// 3. 丢弃后数组为空 → 降级为空数组，记 warn
 ///
 /// 返回:
-/// - `Vec<String>`：经过滤的有效 evidence 列表（可能为空）
-fn validate_evidence_notes(raw: Option<Vec<String>>, session_id: Uuid) -> Vec<String> {
+/// - `Vec<EvidenceNote>`：经过滤的有效 evidence 列表（可能为空）
+fn validate_evidence_notes(raw: Option<Vec<EvidenceNote>>, session_id: Uuid) -> Vec<EvidenceNote> {
     let raw_list = match raw {
         Some(list) if !list.is_empty() => list,
         _ => {
@@ -466,14 +513,17 @@ fn validate_evidence_notes(raw: Option<Vec<String>>, session_id: Uuid) -> Vec<St
         }
     };
 
-    // 过滤过短条目
-    let valid: Vec<String> = raw_list
+    // 过滤过短条目（校验 text 槽位）
+    let valid: Vec<EvidenceNote> = raw_list
         .into_iter()
-        .map(|s| s.trim().to_string())
-        .filter(|s| {
-            let ok = s.chars().count() >= 5;
+        .map(|mut note| {
+            note.text = note.text.trim().to_string();
+            note
+        })
+        .filter(|note| {
+            let ok = note.text.chars().count() >= 5;
             if !ok {
-                debug!(%session_id, evidence=%s, "evidence 过短（<5 字符），丢弃");
+                debug!(%session_id, evidence=%note.text, "evidence 过短（<5 字符），丢弃");
             }
             ok
         })
@@ -708,13 +758,13 @@ mod tests {
     fn evidence_notes_valid_list_is_preserved() {
         // 正常产出证据片段 → 保留全部有效条目
         let notes = vec![
-            "用户表示最近一个月每天加班到10点以后".to_string(),
-            "用户说'感觉身体被掏空了'".to_string(),
-            "用户提到'周末也经常被叫去开会'".to_string(),
+            EvidenceNote::new("用户表示最近一个月每天加班到10点以后"),
+            EvidenceNote::new("用户说'感觉身体被掏空了'"),
+            EvidenceNote::new("用户提到'周末也经常被叫去开会'"),
         ];
         let result = validate_evidence_notes(Some(notes), Uuid::new_v4());
         assert_eq!(result.len(), 3);
-        assert!(result[0].contains("加班"));
+        assert!(result[0].text.contains("加班"));
     }
 
     #[test]
@@ -735,28 +785,32 @@ mod tests {
     fn evidence_notes_short_items_are_filtered() {
         // 过短条目（< 5 字符）应被丢弃
         let notes = vec![
-            "太长的一条完整证据描述文本".to_string(),
-            "短".to_string(), // < 5 字符，应丢弃
-            "OK".to_string(), // < 5 字符，应丢弃
-            "足够长的证据描述文本内容".to_string(),
+            EvidenceNote::new("太长的一条完整证据描述文本"),
+            EvidenceNote::new("短"), // < 5 字符，应丢弃
+            EvidenceNote::new("OK"), // < 5 字符，应丢弃
+            EvidenceNote::new("足够长的证据描述文本内容"),
         ];
         let result = validate_evidence_notes(Some(notes), Uuid::new_v4());
         assert_eq!(result.len(), 2);
-        assert!(result[0].contains("太长"));
-        assert!(result[1].contains("足够"));
+        assert!(result[0].text.contains("太长"));
+        assert!(result[1].text.contains("足够"));
     }
 
     #[test]
     fn evidence_notes_all_short_downgrades_to_empty() {
         // 全部条目过短 → 降级为空数组
-        let notes = vec!["短".to_string(), "A".to_string(), "B".to_string()];
+        let notes = vec![
+            EvidenceNote::new("短"),
+            EvidenceNote::new("A"),
+            EvidenceNote::new("B"),
+        ];
         let result = validate_evidence_notes(Some(notes), Uuid::new_v4());
         assert!(result.is_empty(), "全部 evidence 过短时应降级为空数组");
     }
 
     #[test]
     fn evidence_notes_parse_from_valid_json() {
-        // JSON 解析：包含 evidence_notes 数组
+        // JSON 解析：包含 evidence_notes 数组（旧字符串数组 → 宽容转换为对象）
         let raw = r#"{
             "summary": "测试",
             "valence": 0.0,
@@ -766,7 +820,50 @@ mod tests {
         let parsed: L1SummaryResponse = serde_json::from_str(raw).unwrap();
         let notes = parsed.evidence_notes.unwrap();
         assert_eq!(notes.len(), 2);
-        assert!(notes[0].contains("项目延期"));
+        assert!(notes[0].text.contains("项目延期"));
+    }
+
+    #[test]
+    fn evidence_notes_parse_structured_object_array() {
+        // JSON 解析：对象数组（v1.4 新格式）直接解析为结构化 EvidenceNote
+        let raw = r#"{
+            "summary": "测试",
+            "valence": 0.0,
+            "salience": 0.5,
+            "evidence_notes": [
+                {"text": "用户提到项目延期", "time": "上周三", "who": "用户", "cause": "需求变更"}
+            ]
+        }"#;
+        let parsed: L1SummaryResponse = serde_json::from_str(raw).unwrap();
+        let notes = parsed.evidence_notes.unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].text, "用户提到项目延期");
+        assert_eq!(notes[0].time.as_deref(), Some("上周三"));
+        assert_eq!(notes[0].who.as_deref(), Some("用户"));
+        assert_eq!(notes[0].cause.as_deref(), Some("需求变更"));
+    }
+
+    #[test]
+    fn evidence_notes_parse_mixed_items() {
+        // JSON 解析：混合旧字符串与对象条目 → 全部转换为 EvidenceNote
+        let raw = r#"{
+            "summary": "测试",
+            "evidence_notes": ["旧格式字符串", {"text": "新格式对象"}]
+        }"#;
+        let parsed: L1SummaryResponse = serde_json::from_str(raw).unwrap();
+        let notes = parsed.evidence_notes.unwrap();
+        assert_eq!(notes.len(), 2);
+        assert_eq!(notes[0].text, "旧格式字符串");
+        assert!(notes[0].time.is_none());
+        assert_eq!(notes[1].text, "新格式对象");
+    }
+
+    #[test]
+    fn evidence_notes_parse_null_array_defaults_none() {
+        // JSON 中 evidence_notes 为 null → 返回 None（降级路径）
+        let raw = r#"{"summary": "测试", "evidence_notes": null}"#;
+        let parsed: L1SummaryResponse = serde_json::from_str(raw).unwrap();
+        assert!(parsed.evidence_notes.is_none());
     }
 
     #[test]
@@ -788,13 +885,13 @@ mod tests {
             valence: Some(0.0),
             salience: Some(0.5),
             situation_strength: None,
-            evidence_notes: Some(vec!["用户提到项目截止日期临近".to_string()]),
+            evidence_notes: Some(vec![EvidenceNote::new("用户提到项目截止日期临近")]),
         };
         let sid = ramaria_core::types::new_id();
         let (l1, _) = L1Summarizer::validate_and_build(&parsed, sid);
         let notes = l1.evidence_notes.expect("evidence_notes 不应为 None");
         assert_eq!(notes.len(), 1);
-        assert!(notes[0].contains("项目截止日期"));
+        assert!(notes[0].text.contains("项目截止日期"));
     }
 
     #[test]

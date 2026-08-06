@@ -4048,6 +4048,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tokio",
+ "toml 0.8.2",
  "tracing",
  "uuid",
  "zip 2.4.2",
@@ -4088,6 +4089,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "toml 0.8.2",
  "tracing",
  "uuid",
 ]

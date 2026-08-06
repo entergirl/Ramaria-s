@@ -172,6 +172,18 @@ pub async fn update_backend_config(
         .await
         .map_err(|e| format!("保存后端配置失败: {}", e))?;
 
+    // ★ 配置双写同步（v1.4 D-V14-006）：同步 [backend] 组到 config.toml，
+    //   保持文件与 backend_config 表一致（单侧失败降级不阻塞）
+    let config_sync =
+        ramaria_app::ConfigSyncService::new(state.app.storage().clone(), state.config_path.clone());
+    let sync_result = config_sync.sync_backend_config(&new_config).await;
+    if !sync_result.file_ok {
+        tracing::warn!(
+            failures = ?sync_result.failures,
+            "后端配置已写入 DB，但 config.toml 同步失败（下次启动校验时提示）"
+        );
+    }
+
     // 如果有 API key，写入 keychain
     if let Some(key) = api_key {
         if !key.trim().is_empty() {
@@ -279,4 +291,81 @@ pub async fn update_setting(
 
     tracing::info!(key = %key, "设置已更新");
     Ok("updated".to_string())
+}
+
+// =========================================================
+// get_full_config — 获取完整配置（v1.4 配置双写通道）
+// =========================================================
+
+/// 获取完整非敏感配置（config.toml 与 DB 合并后的生效配置）。
+///
+/// 返回:
+/// - 完整 `RamariaConfig` 的 JSON 文本（不含 API key——配置结构本身不含密钥）。
+///
+/// 说明:
+/// - 供设置页基础/高级两级表单回显（M6 前端接线）。
+/// - 只读加载（`load_config_only`），无写副作用，反映运行时实际生效值。
+#[tauri::command]
+#[tracing::instrument(skip(state))]
+pub async fn get_full_config(state: State<'_, DesktopState>) -> Result<String, String> {
+    let config_sync =
+        ramaria_app::ConfigSyncService::new(state.app.storage().clone(), state.config_path.clone());
+    let config = config_sync
+        .load_config_only()
+        .await
+        .map_err(|e| format!("读取配置失败: {}", e))?;
+    let json = serde_json::to_string(&config).map_err(|e| format!("序列化配置失败: {}", e))?;
+    tracing::debug!("get_full_config 完成");
+    Ok(json)
+}
+
+// =========================================================
+// update_full_config — 统一写入口（v1.4 配置双写通道）
+// =========================================================
+
+/// 全量配置更新结果视图。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateConfigResultView {
+    /// 文件侧（config.toml）是否写入成功
+    pub file_ok: bool,
+    /// DB 侧（backend_config + settings）是否全部写入成功
+    pub db_ok: bool,
+    /// 失败明细（为空表示全部成功）
+    pub failures: Vec<String>,
+}
+
+/// 通过统一写入口保存完整配置（同时落 config.toml 与 DB 两侧）。
+///
+/// 参数:
+/// - `config_json`: 完整 `RamariaConfig` 的 JSON 文本。
+///
+/// 返回:
+/// - `UpdateConfigResultView`：双侧写入结果（单侧失败降级不阻塞，UI 据此提示）。
+///
+/// 安全约束:
+/// - 配置结构不含 API key；keychain 通道不受此命令影响。
+#[tauri::command]
+#[tracing::instrument(skip(state))]
+pub async fn update_full_config(
+    state: State<'_, DesktopState>,
+    config_json: String,
+) -> Result<UpdateConfigResultView, String> {
+    let cfg: ramaria_core::config::RamariaConfig =
+        serde_json::from_str(&config_json).map_err(|e| format!("配置 JSON 解析失败: {}", e))?;
+
+    let config_sync =
+        ramaria_app::ConfigSyncService::new(state.app.storage().clone(), state.config_path.clone());
+    let result = config_sync.save_config(&cfg).await;
+
+    tracing::info!(
+        file_ok = result.file_ok,
+        db_ok = result.db_ok,
+        "update_full_config 完成"
+    );
+    Ok(UpdateConfigResultView {
+        file_ok: result.file_ok,
+        db_ok: result.db_ok,
+        failures: result.failures,
+    })
 }

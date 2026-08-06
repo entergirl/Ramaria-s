@@ -359,10 +359,9 @@ mod tests {
 
     /// 创建测试数据库连接池（内存 SQLite，自动运行 migration）
     async fn setup() -> SqlitePool {
-        let pool = database::init_test_pool()
+        database::init_test_pool()
             .await
-            .expect("创建测试数据库失败");
-        pool
+            .expect("创建测试数据库失败")
     }
 
     // ── keyword_pool CRUD ──

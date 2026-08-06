@@ -301,6 +301,73 @@ impl Message {
 // 分层记忆类型（TEXT 主键 — 使用 UUID）
 // =========================================================
 
+/// L1 摘要的结构化证据线索（v1.4 起替代旧字符串数组）。
+///
+/// 职责:
+/// - 记录支撑 summary 结论的具体事实引用，供 L2 事件提取与前端证据链展示。
+/// - `time` / `who` / `cause` 为可选槽位，为 L2 事件提取提供因果线索（v1.4 B1）。
+///
+/// 格式:
+/// - `text`: 必填，证据文本（校验要求 ≥ 5 字符）。
+/// - `time`: 可选，事件发生的时间描述（如"上周三晚上"）。
+/// - `who`: 可选，涉及的人物/角色。
+/// - `cause`: 可选，可辨时的因果线索（缺失留空，供背景参考）。
+///
+/// 迁移约定（D-V14-003）:
+/// - 存量旧格式（字符串数组）由 migration 一次性迁移，字符串落 `text` 槽位、其余置空。
+/// - 运行时不做兼容解析，读写均为新格式。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvidenceNote {
+    /// 证据文本（必填，≥ 5 字符）
+    pub text: String,
+    /// 事件发生的时间描述（可选）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time: Option<String>,
+    /// 涉及的人物/角色（可选）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub who: Option<String>,
+    /// 因果线索（可选，仅供背景参考，不视为事实断言）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<String>,
+}
+
+impl EvidenceNote {
+    /// 创建仅含文本的证据线索（其余槽位置空）。
+    ///
+    /// 参数:
+    /// - `text`: 证据文本。
+    ///
+    /// 返回:
+    /// - `time`/`who`/`cause` 均为 None 的 EvidenceNote。
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            time: None,
+            who: None,
+            cause: None,
+        }
+    }
+
+    /// 创建带完整槽位的证据线索。
+    ///
+    /// 参数:
+    /// - `text`: 证据文本（必填）。
+    /// - `time`/`who`/`cause`: 可选槽位，None 表示未填写。
+    pub fn with_slots(
+        text: impl Into<String>,
+        time: Option<String>,
+        who: Option<String>,
+        cause: Option<String>,
+    ) -> Self {
+        Self {
+            text: text.into(),
+            time,
+            who,
+            cause,
+        }
+    }
+}
+
 /// L1 单次会话摘要。
 ///
 /// 职责:
@@ -344,20 +411,20 @@ pub struct MemoryL1 {
     /// - 4-5: 强情境（冲突、关键决策）→ 加权 ×0.5
     /// - None: 存量数据，等同于 3
     pub situation_strength: Option<i32>,
-    /// 证据片段列表。
+    /// 证据线索列表（结构化对象，v1.4 起替代旧字符串数组）。
     ///
     /// 存储支持摘要结论的具体事实引用，每条 evidence 记录
     /// "谁在什么条件下表达了什么态度/经历了什么事件"。
     ///
     /// 格式:
-    /// - `Some(vec!["用户表示最近一个月每天加班到10点以后", ...])` — 正常产出
+    /// - `Some(vec![EvidenceNote { text, time?, who?, cause? }, ...])` — 正常产出
     /// - `Some(vec![])` — LLM 未产出有效 evidence（降级路径，不阻塞 L1 生成）
     /// - `None` — 存量数据或尚未生成
     ///
     /// 用途:
     /// - L2 事件提取时作为证据互证判断的输入
     /// - 前端 L3 性格画像的证据链溯源展示
-    pub evidence_notes: Option<Vec<String>>,
+    pub evidence_notes: Option<Vec<EvidenceNote>>,
 }
 
 impl MemoryL1 {
@@ -409,6 +476,84 @@ impl MemoryL1 {
 
 /// 时间段的合法值集合。
 pub const TIME_PERIOD_OPTIONS: &[&str] = &["清晨", "上午", "下午", "傍晚", "夜间", "深夜"];
+
+// =========================================================
+// utt 话语块（v1.4 新增 — 原文注入通道的最小单元）
+// =========================================================
+
+/// utt 话语块——原文按连续性切分的最小注入单元（v1.4 A1）。
+///
+/// 职责:
+/// - 承载一次会话中按时间间隙/条数上限切分出的连续原文片段。
+/// - 作为对话时【原文片段】注入、跨会话桥接与未来风格统计的原料底座。
+///
+/// 字段约定:
+/// - `persona_uid`: 块归属人格，原文按 persona 严格隔离（隐私约束）。
+/// - `block_text`: 块内原文全文，按原文格式拼接（含发言人标记），不写日志。
+/// - `embedding`: 块文本向量（f32 小端 BLOB），`None` 表示未生成或 embedding 不可用。
+///
+/// 安全约束:
+/// - 原文是最高敏感层：注入受 `persona_kind_whitelist` 约束，内容不记录日志。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UttBlock {
+    /// 内部索引（INTEGER AUTOINCREMENT，0 表示尚未入库）
+    pub id: i64,
+    /// 块归属人格 UID
+    pub persona_uid: String,
+    /// 来源会话 ID
+    pub session_id: Uuid,
+    /// 块内首条消息 ID
+    pub start_msg_id: Uuid,
+    /// 块内末条消息 ID
+    pub end_msg_id: Uuid,
+    /// 块内原文全文
+    pub block_text: String,
+    /// 块内消息条数
+    pub msg_count: u32,
+    /// 首末消息时间跨度（毫秒）
+    pub time_span_ms: i64,
+    /// 块文本向量（f32 小端 BLOB），None 表示未生成
+    pub embedding: Option<Vec<u8>>,
+    /// 创建时间（Unix 毫秒）
+    pub created_at: i64,
+}
+
+impl UttBlock {
+    /// 创建新话语块（id=0，由存储层回填）。
+    ///
+    /// 参数:
+    /// - `persona_uid`: 块归属人格。
+    /// - `session_id`: 来源会话。
+    /// - `start_msg_id` / `end_msg_id`: 消息区间。
+    /// - `block_text`: 原文全文。
+    /// - `msg_count`: 消息条数。
+    /// - `time_span_ms`: 时间跨度。
+    ///
+    /// 返回:
+    /// - `embedding=None`、`created_at=当前时间` 的 UttBlock。
+    pub fn new(
+        persona_uid: String,
+        session_id: Uuid,
+        start_msg_id: Uuid,
+        end_msg_id: Uuid,
+        block_text: String,
+        msg_count: u32,
+        time_span_ms: i64,
+    ) -> Self {
+        Self {
+            id: 0,
+            persona_uid,
+            session_id,
+            start_msg_id,
+            end_msg_id,
+            block_text,
+            msg_count,
+            time_span_ms,
+            embedding: None,
+            created_at: now_ms(),
+        }
+    }
+}
 
 // =========================================================
 // Persona 枚举体系（9 个枚举）
@@ -1260,7 +1405,10 @@ impl ClusterSnapshot {
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum LlmProvider {
-    #[serde(rename = "lm_studio")]
+    // 序列化统一为 `lm_studio`（snake_case，与 CLI/前端/DB 一致）；
+    // 反序列化同时接受历史写法 `lm-studio`（v1.2/v1.3 模板与文档使用连字符，
+    // 真实用户 config.toml 中可能仍是该写法，必须兼容以免升级后配置被当损坏）。
+    #[serde(rename = "lm_studio", alias = "lm-studio")]
     LmStudio,
     DeepSeek,
     OpenAI,
@@ -1275,10 +1423,17 @@ impl LlmProvider {
             Self::OpenAI => "openai",
         }
     }
-
     /// 是否为线上 provider（需要隐私确认）。
     pub fn is_online(&self) -> bool {
         matches!(self, Self::DeepSeek | Self::OpenAI)
+    }
+}
+
+impl Default for LlmProvider {
+    /// 默认 provider 为本地 LM Studio（与 `BackendSelection::default()` 一致，
+    /// 供 serde `#[serde(default)]` 在字段缺失时回退）。
+    fn default() -> Self {
+        Self::LmStudio
     }
 }
 
@@ -1530,6 +1685,97 @@ impl std::fmt::Display for AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- EvidenceNote（v1.4 结构化证据线索）----
+
+    #[test]
+    fn evidence_note_new_creates_text_only() {
+        let note = EvidenceNote::new("用户表示最近一个月每天加班到10点以后");
+        assert_eq!(note.text, "用户表示最近一个月每天加班到10点以后");
+        assert!(note.time.is_none());
+        assert!(note.who.is_none());
+        assert!(note.cause.is_none());
+    }
+
+    #[test]
+    fn evidence_note_with_slots() {
+        let note = EvidenceNote::with_slots(
+            "用户提到项目延期",
+            Some("上周三晚上".to_string()),
+            Some("用户".to_string()),
+            Some("因为需求变更".to_string()),
+        );
+        assert_eq!(note.time.as_deref(), Some("上周三晚上"));
+        assert_eq!(note.who.as_deref(), Some("用户"));
+        assert_eq!(note.cause.as_deref(), Some("因为需求变更"));
+    }
+
+    #[test]
+    fn evidence_note_serde_roundtrip_full() {
+        let note = EvidenceNote::with_slots(
+            "用户表示压力很大",
+            Some("最近".to_string()),
+            Some("用户".to_string()),
+            Some("工作量大".to_string()),
+        );
+        let json = serde_json::to_string(&note).unwrap();
+        let back: EvidenceNote = serde_json::from_str(&json).unwrap();
+        assert_eq!(note, back);
+    }
+
+    #[test]
+    fn evidence_note_serde_roundtrip_text_only() {
+        let note = EvidenceNote::new("仅文本证据");
+        let json = serde_json::to_string(&note).unwrap();
+        let back: EvidenceNote = serde_json::from_str(&json).unwrap();
+        assert_eq!(note, back);
+        // 文本-only 序列化应包含 text 键且无多余槽位
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["text"], "仅文本证据");
+        assert!(value.get("time").is_none(), "None 槽位不应序列化");
+    }
+
+    #[test]
+    fn evidence_note_parses_missing_slots() {
+        // 兼容：缺失槽位的 JSON 反序列化为 None（而非报错）
+        let json = r#"{"text": "只有文本的证据"}"#;
+        let note: EvidenceNote = serde_json::from_str(json).unwrap();
+        assert_eq!(note.text, "只有文本的证据");
+        assert!(note.time.is_none());
+        assert!(note.who.is_none());
+        assert!(note.cause.is_none());
+    }
+
+    #[test]
+    fn evidence_note_parses_null_slots() {
+        // LLM 可能输出 "time": null，应解析为 None
+        let json = r#"{"text": "证据", "time": null, "who": null, "cause": null}"#;
+        let note: EvidenceNote = serde_json::from_str(json).unwrap();
+        assert_eq!(note.text, "证据");
+        assert!(note.time.is_none());
+    }
+
+    #[test]
+    fn memory_l1_evidence_notes_upgraded_to_structured() {
+        // MemoryL1.evidence_notes 已是 Vec<EvidenceNote>（结构化新格式）
+        let mut l1 = MemoryL1::new(Uuid::new_v4(), "摘要".to_string(), None);
+        l1.evidence_notes = Some(vec![
+            EvidenceNote::with_slots(
+                "用户提到项目延期",
+                Some("上周".to_string()),
+                Some("用户".to_string()),
+                Some("需求变更".to_string()),
+            ),
+            EvidenceNote::new("用户表示压力很大"),
+        ]);
+        let json = serde_json::to_string(&l1).unwrap();
+        let back: MemoryL1 = serde_json::from_str(&json).unwrap();
+        let notes = back.evidence_notes.expect("evidence_notes 不应为 None");
+        assert_eq!(notes.len(), 2);
+        assert_eq!(notes[0].who.as_deref(), Some("用户"));
+        assert_eq!(notes[1].text, "用户表示压力很大");
+        assert!(notes[1].cause.is_none());
+    }
 
     // ---- ID 与时间约定 ----
 
@@ -1960,6 +2206,16 @@ mod tests {
             let back: LlmProvider = serde_json::from_str(expected).unwrap();
             assert_eq!(back, provider);
         }
+    }
+
+    #[test]
+    fn llm_provider_accepts_legacy_kebab_form() {
+        // 回归红线：v1.2/v1.3 config.toml 模板使用连字符写法 `lm-studio`，
+        // 反序列化必须兼容（否则真实用户配置文件会被误判为损坏而回退默认值）。
+        // TOML 通道的完整场景（[backend] 表内 provider = "lm-studio"）由
+        // config.rs::v14_config_groups_missing_fields_fallback_to_defaults 覆盖。
+        let back: LlmProvider = serde_json::from_str(r#""lm-studio""#).unwrap();
+        assert_eq!(back, LlmProvider::LmStudio);
     }
 
     #[test]

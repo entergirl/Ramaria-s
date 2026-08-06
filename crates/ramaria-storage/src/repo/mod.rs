@@ -65,6 +65,7 @@ pub mod schema_meta;
 pub mod sessions;
 pub mod settings;
 pub mod traits;
+pub mod utt_blocks;
 
 use ramaria_core::error::RamariaError;
 use ramaria_core::error::RamariaResult;

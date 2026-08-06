@@ -17,7 +17,7 @@ use crate::error::RamariaResult;
 use crate::types::{
     BackendConfig, ClusterSnapshot, EventRelation, EventSource, MemoryEvent, MemoryL1, Message,
     MessageRole, ModelCapability, Persona, PersonaExample, PersonaFact, PersonalityTrait,
-    PrivacyConsent, ProfileField, Session, TraitEvidence, TraitStatus,
+    PrivacyConsent, ProfileField, Session, TraitEvidence, TraitStatus, UttBlock,
 };
 
 // =========================================================
@@ -525,6 +525,31 @@ pub trait StorageBackend: Send + Sync {
     async fn save_example(&self, e: &PersonaExample) -> RamariaResult<i64>;
     async fn list_selected_examples(&self, persona_uid: &str)
     -> RamariaResult<Vec<PersonaExample>>;
+
+    // -- Utt Blocks (原文话语块, v1.4) --
+    /// 插入一条 utt 话语块，返回自增 id。
+    ///
+    /// 默认实现返回 `Unsupported` 错误（存量 mock 无需实现即可编译）。
+    async fn insert_utt_block(&self, _block: &UttBlock) -> RamariaResult<i64> {
+        Err(crate::error::RamariaError::unsupported(
+            "StorageBackend 未实现 utt_blocks 写入",
+        ))
+    }
+    /// 按 persona 查询全部话语块（原文按 persona 严格隔离）。
+    async fn list_utt_blocks_by_persona(&self, _persona_uid: &str) -> RamariaResult<Vec<UttBlock>> {
+        Ok(Vec::new())
+    }
+    /// 获取指定会话的最新话语块（桥接取上一会话尾部原文）。
+    async fn get_latest_utt_block_by_session(
+        &self,
+        _session_id: Uuid,
+    ) -> RamariaResult<Option<UttBlock>> {
+        Ok(None)
+    }
+    /// 删除指定会话的全部话语块，返回删除行数。
+    async fn delete_utt_blocks_by_session(&self, _session_id: Uuid) -> RamariaResult<usize> {
+        Ok(0)
+    }
 
     // -- Persona Cluster Snapshots (id: i64) --
     async fn save_cluster_snapshot(&self, s: &ClusterSnapshot) -> RamariaResult<i64>;

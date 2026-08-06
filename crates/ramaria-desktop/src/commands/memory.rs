@@ -755,7 +755,14 @@ pub async fn get_trait_evidence(
                     l1_source_views.push(L1SourceView {
                         l1_id: l1.id.to_string(),
                         summary: l1.summary,
-                        evidence_notes: l1.evidence_notes.unwrap_or_default(),
+                        // v1.4 起 evidence_notes 为结构化对象，前端仍按字符串数组渲染，
+                        // 此处取 text 槽位保持语义等价（M4 再升级前端结构化展示）
+                        evidence_notes: l1
+                            .evidence_notes
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|note| note.text)
+                            .collect(),
                         atmosphere: l1.atmosphere,
                         valence: l1.valence,
                         weight: src.weight,

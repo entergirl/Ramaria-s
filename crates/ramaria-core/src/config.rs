@@ -10,7 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::LlmProvider;
+use crate::types::{LlmProvider, PersonaKind};
 
 // =========================================================
 // 版本控制常量
@@ -102,6 +102,18 @@ pub struct RamariaConfig {
     #[serde(default)]
     pub event_extraction: EventExtractionConfig,
 
+    /// utt 话语块（原文注入通道，v1.4 新增）
+    #[serde(default)]
+    pub utt: UttConfig,
+
+    /// examples（Few-shot 示例激活，v1.4 新增）
+    #[serde(default)]
+    pub examples: ExamplesConfig,
+
+    /// 跨会话桥接（v1.4 新增）
+    #[serde(default)]
+    pub bridge: BridgeConfig,
+
     /// 杂项（预留扩展位，当前无字段）
     #[serde(default)]
     pub misc: MiscConfig,
@@ -143,6 +155,9 @@ impl Default for RamariaConfig {
             logging: LoggingConfig::default(),
             inference: InferenceConfig::default(),
             event_extraction: EventExtractionConfig::default(),
+            utt: UttConfig::default(),
+            examples: ExamplesConfig::default(),
+            bridge: BridgeConfig::default(),
             misc: MiscConfig::default(),
         }
     }
@@ -202,7 +217,13 @@ impl Default for PathConfig {
 /// 安全约束:
 /// - API key 不属于此结构，必须通过 OS keychain 读取。
 /// - `base_url` 变化会影响隐私确认粒度，上层应重新确认。
+///
+/// 兼容性说明:
+/// - struct 级 `#[serde(default)]`：`[backend]` 表只写部分键（v1.2/v1.3 模板
+///   即注释掉 `embedding_model_id`）时，缺失字段回退各自默认值，
+///   保证旧配置文件可解析、不丢失其余键。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct BackendSelection {
     /// 当前 provider。
     pub provider: LlmProvider,
@@ -705,6 +726,143 @@ pub struct MiscConfig {
 }
 
 // =========================================================
+// utt 话语块配置（v1.4 新增）
+// =========================================================
+
+/// utt 话语块（原文注入通道）配置。
+///
+/// 职责:
+/// - 控制原文切分、检索与注入的开关和参数。
+/// - 控制原文注入的 persona 类型白名单（隐私最小暴露）。
+///
+/// 安全约束:
+/// - `persona_kind_whitelist` 默认仅角色类 persona（char/anim/oc/hist），
+///   助手/系统类 persona 不注入原文，行为与 v1.3 完全一致。
+/// - 原文是最高敏感层，关闭开关后注入行为整体回退 v1.3。
+///
+/// 兼容性说明:
+/// - struct 级 `#[serde(default)]`：config.toml 中 `[utt]` 表只写部分键时
+///   （部分覆盖场景），缺失字段回退 `Default` 实现，避免解析失败。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UttConfig {
+    /// 是否启用 utt 话语块全链路（切分/构建/检索/注入）。
+    /// `false` 时行为回退 v1.3（不注入原文片段）。
+    pub enabled: bool,
+    /// 时间间隙阈值（分钟）：相邻消息间隔超过此值切分为新块。
+    pub theta_gap_minutes: u32,
+    /// 单块最大消息条数：超过此条数强制切分。
+    pub max_msgs_per_block: u32,
+    /// 对话时检索返回的 utt 块数量（top_k）。
+    pub retrieve_top_k: u32,
+    /// 原文片段注入的字符预算上限（所有块合计）。
+    /// 超预算时按相似度从低到高丢弃整块，不做块内截断。
+    pub max_block_chars: u32,
+    /// 原文注入的 persona 类型白名单。
+    /// 白名单外的 persona（助手/系统类）不注入原文。
+    pub persona_kind_whitelist: Vec<PersonaKind>,
+}
+
+impl Default for UttConfig {
+    /// 创建默认 utt 配置。
+    ///
+    /// 返回:
+    /// - 启用全链路，30 分钟间隙 / 40 条上限切分。
+    /// - 检索 top_k=3，注入预算 1500 字符。
+    /// - 白名单 = 角色类 persona（char/anim/oc/hist）。
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            theta_gap_minutes: 30,
+            max_msgs_per_block: 40,
+            retrieve_top_k: 3,
+            max_block_chars: 1500,
+            persona_kind_whitelist: vec![
+                PersonaKind::Char,
+                PersonaKind::Anim,
+                PersonaKind::Oc,
+                PersonaKind::Hist,
+            ],
+        }
+    }
+}
+
+// =========================================================
+// examples 配置（v1.4 新增）
+// =========================================================
+
+/// examples（Few-shot 示例激活）配置。
+///
+/// 职责:
+/// - 控制会话关闭时的回复对抽取、评分轮换与兜底注入。
+/// - `max_examples` 与既有 `list_selected` 的 LIMIT 保持一致。
+///
+/// 说明:
+/// - `enabled=false` 时行为回退 v1.3（读侧通道保留，写侧不激活）。
+///
+/// 兼容性说明:
+/// - struct 级 `#[serde(default)]`：`[examples]` 表只写部分键时回退默认值。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExamplesConfig {
+    /// 是否启用 examples 写侧激活（抽取/入库/轮换/兜底注入）。
+    pub enabled: bool,
+    /// 注入时的最大示例条数。
+    pub max_examples: u32,
+}
+
+impl Default for ExamplesConfig {
+    /// 创建默认 examples 配置。
+    ///
+    /// 返回:
+    /// - 启用，最多注入 5 条示例（与既有查询 LIMIT 一致）。
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_examples: 5,
+        }
+    }
+}
+
+// =========================================================
+// 桥接配置（v1.4 新增）
+// =========================================================
+
+/// 跨会话桥接配置。
+///
+/// 职责:
+/// - 控制新会话创建时是否加载最近一个已关闭会话的尾部原文。
+/// - 桥接内容受原文白名单约束，不写日志。
+///
+/// 说明:
+/// - `enabled=false` 时不加载桥接，行为等同 v1.3。
+///
+/// 兼容性说明:
+/// - struct 级 `#[serde(default)]`：`[bridge]` 表只写部分键时回退默认值。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BridgeConfig {
+    /// 是否启用桥接（新会话加载上一会话尾部原文）。
+    pub enabled: bool,
+    /// 桥接内容字符预算上限。
+    /// 超限时从头部截断、保最近内容。
+    pub max_chars: u32,
+}
+
+impl Default for BridgeConfig {
+    /// 创建默认桥接配置。
+    ///
+    /// 返回:
+    /// - 启用，预算 800 字符。
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_chars: 800,
+        }
+    }
+}
+
+// =========================================================
 // 单元测试
 // =========================================================
 
@@ -789,5 +947,145 @@ mod tests {
         assert!(json.contains("l2_trigger_count"));
         assert!(json.contains("bm25_incremental_threshold"));
         assert!(json.contains("log_full_prompt"));
+        // v1.4 新增配置组
+        assert!(json.contains("theta_gap_minutes"));
+        assert!(json.contains("max_msgs_per_block"));
+        assert!(json.contains("retrieve_top_k"));
+        assert!(json.contains("max_block_chars"));
+        assert!(json.contains("persona_kind_whitelist"));
+        assert!(json.contains("max_examples"));
+        assert!(json.contains("bridge"));
+    }
+
+    // =========================================================
+    // v1.4 新增配置组测试（[utt] / [examples] / [bridge]）
+    // =========================================================
+
+    #[test]
+    fn utt_config_defaults() {
+        let cfg = RamariaConfig::default();
+
+        // 开关默认开启
+        assert!(cfg.utt.enabled);
+        // 切分参数
+        assert_eq!(cfg.utt.theta_gap_minutes, 30);
+        assert_eq!(cfg.utt.max_msgs_per_block, 40);
+        // 检索与预算
+        assert_eq!(cfg.utt.retrieve_top_k, 3);
+        assert_eq!(cfg.utt.max_block_chars, 1500);
+        // 默认白名单 = 角色类 persona（char/anim/oc/hist）
+        let expected = [
+            PersonaKind::Char,
+            PersonaKind::Anim,
+            PersonaKind::Oc,
+            PersonaKind::Hist,
+        ];
+        assert_eq!(cfg.utt.persona_kind_whitelist, expected);
+        // 助手/系统类不在默认白名单中（回归红线：助手类不注入原文）
+        assert!(!cfg.utt.persona_kind_whitelist.contains(&PersonaKind::Rama));
+        assert!(!cfg.utt.persona_kind_whitelist.contains(&PersonaKind::User));
+    }
+
+    #[test]
+    fn examples_config_defaults() {
+        let cfg = RamariaConfig::default();
+        assert!(cfg.examples.enabled);
+        assert_eq!(cfg.examples.max_examples, 5);
+    }
+
+    #[test]
+    fn bridge_config_defaults() {
+        let cfg = RamariaConfig::default();
+        assert!(cfg.bridge.enabled);
+        assert_eq!(cfg.bridge.max_chars, 800);
+    }
+
+    #[test]
+    fn v14_config_groups_serde_roundtrip() {
+        // JSON 往返：新配置组序列化/反序列化保持一致
+        let cfg = RamariaConfig::default();
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: RamariaConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(back.utt.theta_gap_minutes, cfg.utt.theta_gap_minutes);
+        assert_eq!(
+            back.utt.persona_kind_whitelist,
+            cfg.utt.persona_kind_whitelist
+        );
+        assert_eq!(back.examples.max_examples, cfg.examples.max_examples);
+        assert_eq!(back.bridge.max_chars, cfg.bridge.max_chars);
+        assert_eq!(back.bridge.enabled, cfg.bridge.enabled);
+    }
+
+    #[test]
+    fn v14_config_groups_toml_roundtrip() {
+        // TOML 往返（config.toml 通道）：新配置组可经 toml 文本无损恢复
+        let cfg = RamariaConfig::default();
+        let toml_text = toml::to_string(&cfg).expect("默认配置应可序列化为 TOML");
+        let back: RamariaConfig = toml::from_str(&toml_text).expect("默认 TOML 应可反序列化");
+
+        assert_eq!(back.utt.enabled, cfg.utt.enabled);
+        assert_eq!(back.utt.theta_gap_minutes, cfg.utt.theta_gap_minutes);
+        assert_eq!(back.utt.max_msgs_per_block, cfg.utt.max_msgs_per_block);
+        assert_eq!(back.utt.retrieve_top_k, cfg.utt.retrieve_top_k);
+        assert_eq!(back.utt.max_block_chars, cfg.utt.max_block_chars);
+        assert_eq!(
+            back.utt.persona_kind_whitelist,
+            cfg.utt.persona_kind_whitelist
+        );
+        assert_eq!(back.examples.enabled, cfg.examples.enabled);
+        assert_eq!(back.examples.max_examples, cfg.examples.max_examples);
+        assert_eq!(back.bridge.enabled, cfg.bridge.enabled);
+        assert_eq!(back.bridge.max_chars, cfg.bridge.max_chars);
+    }
+
+    #[test]
+    fn v14_config_groups_missing_fields_fallback_to_defaults() {
+        // 兼容性：旧配置文件（无 [utt]/[examples]/[bridge]）解析后回退默认值
+        let legacy_toml = r#"
+version = "1.3.0"
+schema_version = 1
+[backend]
+provider = "lm-studio"
+"#;
+        let cfg: RamariaConfig = toml::from_str(legacy_toml).expect("旧配置应可解析");
+        assert!(cfg.utt.enabled, "缺失 [utt] 组应回退默认值");
+        assert_eq!(cfg.utt.theta_gap_minutes, 30);
+        assert_eq!(cfg.examples.max_examples, 5);
+        assert!(cfg.bridge.enabled);
+    }
+
+    #[test]
+    fn v14_config_groups_partial_override() {
+        // 部分覆盖：只配置 [utt] 的 enabled=false，其余字段回退默认
+        let partial_toml = r#"
+[utt]
+enabled = false
+"#;
+        let cfg: RamariaConfig = toml::from_str(partial_toml).expect("部分配置应可解析");
+        assert!(!cfg.utt.enabled);
+        // 未配置字段使用默认值
+        assert_eq!(cfg.utt.theta_gap_minutes, 30);
+        assert_eq!(cfg.utt.persona_kind_whitelist.len(), 4);
+        assert_eq!(cfg.examples.max_examples, 5);
+    }
+
+    #[test]
+    fn v14_whitelist_serde_string_form() {
+        // config.toml 中以字符串数组书写白名单（PersonaKind lowercase 序列化）
+        let toml_text = r#"
+[utt]
+persona_kind_whitelist = ["char", "anim", "oc", "hist"]
+"#;
+        let cfg: RamariaConfig = toml::from_str(toml_text).expect("白名单应可解析");
+        assert_eq!(
+            cfg.utt.persona_kind_whitelist,
+            vec![
+                PersonaKind::Char,
+                PersonaKind::Anim,
+                PersonaKind::Oc,
+                PersonaKind::Hist
+            ]
+        );
     }
 }

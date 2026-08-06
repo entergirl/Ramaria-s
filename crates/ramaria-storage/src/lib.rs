@@ -1,7 +1,7 @@
 //! rust/crates/ramaria-storage/src/lib.rs - Ramaria SQLite 存储层
 //!
 //! 设计特点:
-//! - 封装 SqlitePool，实现 `StorageBackend` trait 的全部方法（覆盖 23 张表）
+//! - 封装 SqlitePool，实现 `StorageBackend` trait 的全部方法（覆盖 24 张表）
 //! - Repository 模式：每个子模块负责一类实体的 SQL 操作与行映射
 //! - 所有可恢复错误统一转换为 RamariaError::Storage
 //! - 手动行映射避免 sqlx derive 侵入 core 层，保持零 I/O 约束
@@ -13,7 +13,7 @@ use ramaria_core::traits::StorageBackend;
 use ramaria_core::types::{
     BackendConfig, ClusterSnapshot, EventRelation, EventSource, MemoryEvent, MemoryL1, Message,
     Persona, PersonaExample, PersonaFact, PersonalityTrait, PrivacyConsent, ProfileField, Session,
-    TraitEvidence, TraitStatus,
+    TraitEvidence, TraitStatus, UttBlock,
 };
 use sqlx::SqlitePool;
 use uuid::Uuid;
@@ -255,6 +255,25 @@ impl StorageBackend for SqliteStorage {
         persona_uid: &str,
     ) -> RamariaResult<Vec<PersonaExample>> {
         repo::examples::list_selected(&self.pool, persona_uid).await
+    }
+
+    // =========================================================
+    // Utt Blocks（原文话语块，v1.4）
+    // =========================================================
+    async fn insert_utt_block(&self, block: &UttBlock) -> RamariaResult<i64> {
+        repo::utt_blocks::insert(&self.pool, block).await
+    }
+    async fn list_utt_blocks_by_persona(&self, persona_uid: &str) -> RamariaResult<Vec<UttBlock>> {
+        repo::utt_blocks::list_by_persona(&self.pool, persona_uid).await
+    }
+    async fn get_latest_utt_block_by_session(
+        &self,
+        session_id: Uuid,
+    ) -> RamariaResult<Option<UttBlock>> {
+        repo::utt_blocks::get_latest_block_by_session(&self.pool, session_id).await
+    }
+    async fn delete_utt_blocks_by_session(&self, session_id: Uuid) -> RamariaResult<usize> {
+        repo::utt_blocks::delete_by_session(&self.pool, session_id).await
     }
 
     // =========================================================
@@ -1451,5 +1470,478 @@ mod tests {
         let job = pending.iter().find(|(jid, _, _)| *jid == id).unwrap();
         assert_eq!(job.1, "health_check");
         assert!(job.2.is_none(), "无 payload 时应为 None");
+    }
+
+    // =========================================================
+    // Utt Blocks（原文话语块，v1.4 M1-005）
+    // =========================================================
+
+    /// 辅助：创建 persona + session + 若干消息，返回 (storage, persona_uid, session_id)。
+    async fn setup_utt_context() -> (SqliteStorage, String, Uuid) {
+        let storage = setup().await;
+        let p = Persona::new(
+            "char-0001".into(),
+            "测试角色".into(),
+            PersonaKind::Char,
+            1,
+            "local".into(),
+        );
+        storage.create_persona(&p).await.unwrap();
+        let session = storage.create_session(Some("char-0001")).await.unwrap();
+
+        // 插入 3 条消息作为块内原文（utt_blocks FK→messages）
+        for (i, text) in ["你好呀", "最近怎么样", "挺好的"].iter().enumerate() {
+            let msg = Message::new(
+                session.id,
+                MessageRole::User,
+                text.to_string(),
+                MessageSource::Local,
+            )
+            .with_persona_uid(Some("char-0001".to_string()));
+            // 时间递增，保证 created_at 有序
+            let mut m = msg;
+            m.created_at = 1_700_000_000_000 + i as i64 * 60_000;
+            storage.save_message(&m).await.unwrap();
+        }
+        (storage, "char-0001".to_string(), session.id)
+    }
+
+    #[tokio::test]
+    async fn utt_block_insert_and_get_latest() {
+        let (storage, persona_uid, session_id) = setup_utt_context().await;
+        let messages = storage.list_messages(session_id).await.unwrap();
+
+        let block = UttBlock::new(
+            persona_uid.clone(),
+            session_id,
+            messages[0].id,
+            messages[2].id,
+            "你好呀\n最近怎么样\n挺好的".to_string(),
+            3,
+            120_000,
+        );
+        let id = storage.insert_utt_block(&block).await.unwrap();
+        assert!(id > 0, "插入应返回自增 id");
+
+        let latest = storage
+            .get_latest_utt_block_by_session(session_id)
+            .await
+            .unwrap()
+            .expect("会话应有最新话语块");
+        assert_eq!(latest.id, id);
+        assert_eq!(latest.persona_uid, persona_uid);
+        assert_eq!(latest.msg_count, 3);
+        assert_eq!(latest.time_span_ms, 120_000);
+        assert_eq!(latest.block_text, "你好呀\n最近怎么样\n挺好的");
+        assert!(latest.embedding.is_none(), "未设置 embedding 时应为 None");
+    }
+
+    #[tokio::test]
+    async fn utt_block_list_by_persona_isolation() {
+        let (storage, persona_uid, session_id) = setup_utt_context().await;
+        let messages = storage.list_messages(session_id).await.unwrap();
+
+        // persona A 插入 2 个块
+        for n in 0..2 {
+            let block = UttBlock::new(
+                persona_uid.clone(),
+                session_id,
+                messages[0].id,
+                messages[2].id,
+                format!("块{n}"),
+                1,
+                0,
+            );
+            storage.insert_utt_block(&block).await.unwrap();
+        }
+
+        // persona B（不同 uid）查询 → 严格隔离，看不到 persona A 的块
+        let other = storage
+            .list_utt_blocks_by_persona("char-9999")
+            .await
+            .unwrap();
+        assert!(other.is_empty(), "跨 persona 不应看到原文块");
+
+        let mine = storage
+            .list_utt_blocks_by_persona(&persona_uid)
+            .await
+            .unwrap();
+        assert_eq!(mine.len(), 2, "应返回本人 persona 的全部块");
+        assert_eq!(mine[0].block_text, "块0");
+        assert_eq!(mine[1].block_text, "块1");
+    }
+
+    #[tokio::test]
+    async fn utt_block_latest_returns_newest() {
+        let (storage, persona_uid, session_id) = setup_utt_context().await;
+        let messages = storage.list_messages(session_id).await.unwrap();
+
+        // 按时间顺序插入 3 个块
+        let mut last_id = 0;
+        for n in 0..3 {
+            let block = UttBlock::new(
+                persona_uid.clone(),
+                session_id,
+                messages[0].id,
+                messages[2].id,
+                format!("块{n}"),
+                1,
+                0,
+            );
+            last_id = storage.insert_utt_block(&block).await.unwrap();
+        }
+
+        let latest = storage
+            .get_latest_utt_block_by_session(session_id)
+            .await
+            .unwrap()
+            .expect("应有最新块");
+        assert_eq!(latest.id, last_id, "应返回最后插入的块");
+        assert_eq!(latest.block_text, "块2");
+    }
+
+    #[tokio::test]
+    async fn utt_block_delete_by_session() {
+        let (storage, persona_uid, session_id) = setup_utt_context().await;
+        let messages = storage.list_messages(session_id).await.unwrap();
+
+        for n in 0..3 {
+            let block = UttBlock::new(
+                persona_uid.clone(),
+                session_id,
+                messages[0].id,
+                messages[2].id,
+                format!("块{n}"),
+                1,
+                0,
+            );
+            storage.insert_utt_block(&block).await.unwrap();
+        }
+
+        let deleted = storage
+            .delete_utt_blocks_by_session(session_id)
+            .await
+            .unwrap();
+        assert_eq!(deleted, 3, "应删除 3 个块");
+
+        let remaining = storage
+            .list_utt_blocks_by_persona(&persona_uid)
+            .await
+            .unwrap();
+        assert!(remaining.is_empty(), "删除后不应残留块");
+
+        // 幂等：再次删除返回 0
+        let again = storage
+            .delete_utt_blocks_by_session(session_id)
+            .await
+            .unwrap();
+        assert_eq!(again, 0);
+    }
+
+    #[tokio::test]
+    async fn utt_block_empty_session_returns_none() {
+        let (storage, _, session_id) = setup_utt_context().await;
+        let latest = storage
+            .get_latest_utt_block_by_session(session_id)
+            .await
+            .unwrap();
+        assert!(latest.is_none(), "无块会话应返回 None");
+    }
+
+    #[tokio::test]
+    async fn utt_block_embedding_roundtrip() {
+        let (storage, persona_uid, session_id) = setup_utt_context().await;
+        let messages = storage.list_messages(session_id).await.unwrap();
+
+        // 构造 4 维 f32 向量的小端 BLOB
+        let vector = vec![0.1f32, 0.2, 0.3, 0.4];
+        let blob: Vec<u8> = vector.iter().flat_map(|v| v.to_le_bytes()).collect();
+
+        let mut block = UttBlock::new(
+            persona_uid,
+            session_id,
+            messages[0].id,
+            messages[2].id,
+            "带向量的块".to_string(),
+            3,
+            60_000,
+        );
+        block.embedding = Some(blob);
+        storage.insert_utt_block(&block).await.unwrap();
+
+        let latest = storage
+            .get_latest_utt_block_by_session(session_id)
+            .await
+            .unwrap()
+            .expect("应有块");
+        let stored = latest.embedding.expect("embedding 应往返保留");
+        assert_eq!(stored.len(), 16, "4 × f32 = 16 字节");
+        let back: Vec<f32> = stored
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(back, vector);
+    }
+
+    // =========================================================
+    // evidence_notes 存量迁移（v1.4 M1-004，D-V14-003）
+    // =========================================================
+
+    /// 模拟旧库（仅执行基线 schema）并插入指定 evidence_notes 的 L1 行。
+    ///
+    /// 返回:
+    /// - `(pool, l1_ids)`：旧库连接池与插入的 L1 id 列表（按插入顺序）。
+    async fn setup_legacy_db(notes_rows: &[(Uuid, Option<&str>)]) -> (sqlx::SqlitePool, Vec<Uuid>) {
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+        let options = SqliteConnectOptions::new()
+            .filename(":memory:")
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+
+        // 基线 schema（20260801，含 evidence_notes 列）
+        sqlx::raw_sql(include_str!("../migrations/20260801_schema.sql"))
+            .execute(&pool)
+            .await
+            .expect("基线 schema 应可执行");
+
+        // 引用数据：persona + session（memory_l1 的外键依赖）
+        let persona_uid = "char-0001";
+        sqlx::query(
+            "INSERT INTO personas (uid, name, kind, seq, source, created_at, updated_at) \
+             VALUES (?, '测试', 'char', 1, 'local', 0, 0)",
+        )
+        .bind(persona_uid)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let session_id = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO sessions (id, started_at) VALUES (?, 0)")
+            .bind(&session_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let mut l1_ids = Vec::with_capacity(notes_rows.len());
+        for (id, notes) in notes_rows {
+            sqlx::query(
+                "INSERT INTO memory_l1 (id, session_id, summary, valence, salience, absorbed, \
+                 created_at, persona_uid, evidence_notes) \
+                 VALUES (?, ?, '摘要', 0.0, 0.5, 0, 0, ?, ?)",
+            )
+            .bind(id.to_string())
+            .bind(&session_id)
+            .bind(persona_uid)
+            .bind(notes)
+            .execute(&pool)
+            .await
+            .unwrap();
+            l1_ids.push(*id);
+        }
+        (pool, l1_ids)
+    }
+
+    /// 执行 v1.4 migration（20260806）并返回迁移后的 evidence_notes 值。
+    async fn apply_v14_migration(pool: &sqlx::SqlitePool, l1_id: Uuid) -> Option<String> {
+        sqlx::raw_sql(include_str!("../migrations/20260806_v1.4_utt.sql"))
+            .execute(pool)
+            .await
+            .expect("v1.4 migration 应可执行");
+
+        sqlx::query_scalar("SELECT evidence_notes FROM memory_l1 WHERE id = ?")
+            .bind(l1_id.to_string())
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn evidence_notes_migration_converts_legacy_strings() {
+        // 旧格式字符串数组 → 新格式对象数组（字符串落 text 槽位，其余置空）
+        let id = Uuid::new_v4();
+        let (pool, _) =
+            setup_legacy_db(&[(id, Some(r#"["用户提到项目延期", "用户表示压力很大"]"#))]).await;
+
+        let migrated = apply_v14_migration(&pool, id)
+            .await
+            .expect("应迁移出非空值");
+        let notes: Vec<ramaria_core::types::EvidenceNote> =
+            serde_json::from_str(&migrated).expect("迁移结果应为合法 JSON");
+        assert_eq!(notes.len(), 2, "两条旧字符串应转为两个对象");
+        assert_eq!(notes[0].text, "用户提到项目延期");
+        assert_eq!(notes[1].text, "用户表示压力很大");
+        assert!(notes[0].time.is_none());
+        assert!(notes[0].who.is_none());
+        assert!(notes[0].cause.is_none());
+    }
+
+    #[tokio::test]
+    async fn evidence_notes_migration_keeps_null_untouched() {
+        // NULL 行不参与迁移，保持 NULL（无运行时兼容分支，读取端按新格式处理空值）
+        let id = Uuid::new_v4();
+        let (pool, _) = setup_legacy_db(&[(id, None)]).await;
+
+        let migrated = apply_v14_migration(&pool, id).await;
+        assert!(migrated.is_none(), "NULL 行应保持 NULL");
+    }
+
+    #[tokio::test]
+    async fn evidence_notes_migration_keeps_empty_array() {
+        // 空数组 `[]` 保持原样（json_type('$[0]') 无元素 → 不命中 UPDATE）
+        let id = Uuid::new_v4();
+        let (pool, _) = setup_legacy_db(&[(id, Some("[]"))]).await;
+
+        let migrated = apply_v14_migration(&pool, id).await.expect("应保留空数组");
+        let notes: Vec<ramaria_core::types::EvidenceNote> =
+            serde_json::from_str(&migrated).unwrap();
+        assert!(notes.is_empty(), "空数组应保持空数组");
+    }
+
+    #[tokio::test]
+    async fn evidence_notes_migration_mixed_rows() {
+        // 混合场景：旧格式 + NULL + 空数组 三行共存，各自正确迁移
+        let id_old = Uuid::new_v4();
+        let id_null = Uuid::new_v4();
+        let id_empty = Uuid::new_v4();
+        let (pool, _) = setup_legacy_db(&[
+            (id_old, Some(r#"["仅一条旧证据"]"#)),
+            (id_null, None),
+            (id_empty, Some("[]")),
+        ])
+        .await;
+
+        sqlx::raw_sql(include_str!("../migrations/20260806_v1.4_utt.sql"))
+            .execute(&pool)
+            .await
+            .expect("v1.4 migration 应可执行");
+
+        // 旧格式行 → 对象数组
+        let old_val: Option<String> =
+            sqlx::query_scalar("SELECT evidence_notes FROM memory_l1 WHERE id = ?")
+                .bind(id_old.to_string())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let notes: Vec<ramaria_core::types::EvidenceNote> =
+            serde_json::from_str(&old_val.unwrap()).unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].text, "仅一条旧证据");
+
+        // NULL / 空数组行保持原样
+        let null_val: Option<String> =
+            sqlx::query_scalar("SELECT evidence_notes FROM memory_l1 WHERE id = ?")
+                .bind(id_null.to_string())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(null_val.is_none());
+
+        let empty_val: Option<String> =
+            sqlx::query_scalar("SELECT evidence_notes FROM memory_l1 WHERE id = ?")
+                .bind(id_empty.to_string())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(empty_val.as_deref(), Some("[]"));
+    }
+
+    #[tokio::test]
+    async fn evidence_notes_migration_backs_up_original_values() {
+        // 迁移前备份：备份表应包含原始字符串数组（含引号原样）
+        let id = Uuid::new_v4();
+        let (pool, _) = setup_legacy_db(&[(id, Some(r#"["备份我", "原样保留"]"#))]).await;
+
+        sqlx::raw_sql(include_str!("../migrations/20260806_v1.4_utt.sql"))
+            .execute(&pool)
+            .await
+            .expect("v1.4 migration 应可执行");
+
+        let backed_up: String = sqlx::query_scalar(
+            "SELECT evidence_notes FROM memory_l1_evidence_notes_backup WHERE id = ?",
+        )
+        .bind(id.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("备份表应包含原值");
+        assert_eq!(backed_up, r#"["备份我", "原样保留"]"#);
+    }
+
+    #[tokio::test]
+    async fn evidence_notes_migration_is_idempotent_on_new_format() {
+        // 幂等：已迁移（对象数组）的行再次执行迁移不改变内容
+        let id = Uuid::new_v4();
+        let (pool, _) = setup_legacy_db(&[(id, Some(r#"["旧格式"]"#))]).await;
+
+        sqlx::raw_sql(include_str!("../migrations/20260806_v1.4_utt.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let first: String = sqlx::query_scalar("SELECT evidence_notes FROM memory_l1 WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        // 再次执行同一 migration（模拟迁移重跑）
+        sqlx::raw_sql(include_str!("../migrations/20260806_v1.4_utt.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let second: String =
+            sqlx::query_scalar("SELECT evidence_notes FROM memory_l1 WHERE id = ?")
+                .bind(id.to_string())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        assert_eq!(first, second, "已迁移行重复执行不应变化");
+        let notes: Vec<ramaria_core::types::EvidenceNote> = serde_json::from_str(&second).unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].text, "旧格式");
+    }
+
+    #[tokio::test]
+    async fn v14_migration_creates_utt_blocks_table() {
+        // 新库迁移：utt_blocks 表存在且可插入（含索引）
+        let (pool, _) = setup_legacy_db(&[]).await;
+        sqlx::raw_sql(include_str!("../migrations/20260806_v1.4_utt.sql"))
+            .execute(&pool)
+            .await
+            .expect("v1.4 migration 应可执行");
+
+        // 表存在性探测：插入一条块
+        let persona_uid = "char-0001";
+        let session_id = Uuid::new_v4().to_string();
+        let msg_id = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO sessions (id, started_at) VALUES (?, 0)")
+            .bind(&session_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO messages (id, session_id, role, content, created_at, source) \
+             VALUES (?, ?, 'user', '你好', 0, 'local')",
+        )
+        .bind(&msg_id)
+        .bind(&session_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO utt_blocks (persona_uid, session_id, start_msg_id, end_msg_id, \
+             block_text, msg_count, time_span_ms, created_at) \
+             VALUES (?, ?, ?, ?, '原文', 1, 0, 0)",
+        )
+        .bind(persona_uid)
+        .bind(&session_id)
+        .bind(&msg_id)
+        .bind(&msg_id)
+        .execute(&pool)
+        .await
+        .expect("utt_blocks 表应可写入");
     }
 }
