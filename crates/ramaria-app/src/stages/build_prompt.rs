@@ -93,6 +93,8 @@ impl PipelineStage for StageBuildPrompt {
                 p,
                 &input.recent_summaries,
                 input.last_active_at.as_deref(),
+                // v1.4 M6（T-V14-6-004）：examples.max_examples 经 RamariaConfig 传播
+                ctx.config.examples.max_examples as usize,
             )
             .await;
 
@@ -133,11 +135,13 @@ impl PipelineStage for StageBuildPrompt {
 /// - `persona`: 当前 persona 记录。
 /// - `recent_summaries`: 近期 L1 摘要列表（跨 session 上下文）。
 /// - `last_active_at`: 最后活跃时间（YYYY-MM-DD HH:MM 格式）。
+/// - `max_examples`: `[examples].max_examples` 配置（v1.4 M6 配置传播）。
 async fn build_structured_prompt(
     storage: &dyn StorageBackend,
     persona: &Persona,
     recent_summaries: &[String],
     last_active_at: Option<&str>,
+    max_examples: usize,
 ) -> String {
     // 并行加载关联数据（各独立调用，失败单独降级）
     let facts = storage
@@ -195,7 +199,11 @@ async fn build_structured_prompt(
         bridge_context: None, // v1.4 M5: 桥接内容由活跃路径（app_chat）注入，本 Stage 未接线
     };
 
-    let config = PromptConfig::default();
+    let config = PromptConfig {
+        // v1.4 M6（T-V14-6-004）：[examples].max_examples 经 RamariaConfig 传播
+        max_examples,
+        ..Default::default()
+    };
     tracing::debug!(
         persona_uid = %persona.uid,
         facts = ctx.facts.len(),

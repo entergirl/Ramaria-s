@@ -337,13 +337,18 @@ impl App {
                 bridge_context: bridge_context.map(|s| s.to_string()),
             };
 
-            let config = PromptConfig::default();
+            // v1.4 M6（T-V14-6-004）：[examples].max_examples 经 RamariaConfig 传播，
+            // 与 `load_examples_for_input` 的预选上限保持一致（双闸门）。
+            let config = PromptConfig {
+                max_examples: self.config.examples.max_examples as usize,
+                ..Default::default()
+            };
             tracing::debug!(
                 persona_uid = %p.uid,
                 facts = ctx.facts.len(),
                 traits = ctx.traits.len(),
                 examples = ctx.examples.len(),
-                "CRISPE System Prompt 已装配"
+                "四层 System Prompt 已装配"
             );
             return assemble_prompt(&ctx, &config);
         }

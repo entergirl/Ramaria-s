@@ -155,6 +155,20 @@ impl MockStorage {
             .insert(persona.uid.clone(), persona);
     }
 
+    /// 便捷方法：注入一条 Few-shot 示例（selected 可控）。
+    ///
+    /// v1.4 M6（T-V14-6-004）: 配置传播测试使用——`examples.enabled=false`
+    /// 回退静态 selected 查询，`enabled=true` 时从候选池评分轮换。
+    #[allow(dead_code)]
+    pub fn add_example(&self, persona_uid: &str, example: PersonaExample) {
+        self.examples
+            .lock()
+            .unwrap()
+            .entry(persona_uid.to_string())
+            .or_default()
+            .push(example);
+    }
+
     /// 便捷方法：为指定会话添加一条 utt 话语块（追加到该会话块列表尾部）。
     ///
     /// 说明:
@@ -602,14 +616,41 @@ impl StorageBackend for MockStorage {
             .unwrap_or_default())
     }
 
-    async fn save_example(&self, _e: &PersonaExample) -> RamariaResult<i64> {
-        Ok(1)
+    async fn save_example(&self, e: &PersonaExample) -> RamariaResult<i64> {
+        // v1.4 M6（T-V14-6-004）：实际存储（与 test_utils 对齐），
+        // 使 examples 配置传播测试可端到端断言注入行为。
+        let mut id = e.id;
+        if id <= 0 {
+            id = self.examples.lock().unwrap().len() as i64 + 1;
+        }
+        let mut ex = e.clone();
+        ex.id = id;
+        self.examples
+            .lock()
+            .unwrap()
+            .entry(ex.persona_uid.clone())
+            .or_default()
+            .push(ex);
+        Ok(id)
     }
 
     async fn list_selected_examples(
         &self,
         persona_uid: &str,
     ) -> RamariaResult<Vec<PersonaExample>> {
+        Ok(self
+            .examples
+            .lock()
+            .unwrap()
+            .get(persona_uid)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| e.selected)
+            .collect())
+    }
+
+    async fn list_all_examples(&self, persona_uid: &str) -> RamariaResult<Vec<PersonaExample>> {
         Ok(self
             .examples
             .lock()
