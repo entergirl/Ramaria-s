@@ -312,3 +312,80 @@
     width: 100%;
   }
 }
+
+/* =========================================================
+   9. 基础/高级两级 Tab（v1.4 M6 T-V14-6-005）
+   ========================================================= */
+
+.settings-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: var(--space-6);
+  border-bottom: 1px solid var(--border-color, #e2e8f0);
+  padding-bottom: 10px;
+}
+
+.settings-tab-btn {
+  padding: 8px 18px;
+  border: 1px solid var(--border-color, #e2e8f0);
+  border-radius: 8px;
+  background: var(--surface-color, #ffffff);
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--text-secondary, #64748b);
+  transition: all 0.15s ease;
+}
+
+.settings-tab-btn:hover {
+  border-color: var(--primary-color, #6366f1);
+  color: var(--primary-color, #6366f1);
+}
+
+.settings-tab-btn.active {
+  background: var(--primary-color, #6366f1);
+  color: #ffffff;
+  border-color: var(--primary-color, #6366f1);
+}
+
+.settings-tab-pane {
+  display: block;
+}
+
+.settings-tab-pane.hidden {
+  display: none;
+}
+
+/* =========================================================
+   10. 高级设置（v1.4 M6 T-V14-6-006）
+   ========================================================= */
+
+.settings-risk-banner {
+  background: #fef3c7;
+  border: 1px solid #f59e0b;
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 13px;
+  color: #92400e;
+  margin-bottom: var(--space-6);
+  line-height: 1.6;
+}
+
+.settings-form-whitelist {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin: 6px 0 2px;
+}
+
+.settings-form-inline-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.settings-form-inline-label input[type="checkbox"] {
+  accent-color: var(--primary-color, #6366f1);
+}

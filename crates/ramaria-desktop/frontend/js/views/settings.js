@@ -61,26 +61,58 @@ var RamariaSettingsView = (function () {
         scroll.className = 'settings-scroll';
         viewEl.appendChild(scroll);
 
- // ── 后端配置 ──
-        _renderBackendSection(scroll);
+ // ── v1.4 M6（T-V14-6-005）：基础/高级两级 Tab 框架 ──
+        var tabs = document.createElement('div');
+        tabs.className = 'settings-tabs';
+        tabs.innerHTML =
+            '<button class="settings-tab-btn active" data-tab="basic">基础设置</button>' +
+            '<button class="settings-tab-btn" data-tab="advanced">高级设置</button>';
+        scroll.appendChild(tabs);
 
- // ── 嵌入模型配置──
-        _renderEmbeddingSection(scroll);
+        var basicPane = document.createElement('div');
+        basicPane.className = 'settings-tab-pane';
+        basicPane.id = 'settings-pane-basic';
+        scroll.appendChild(basicPane);
 
- // ── 会话设置（v1.4 M5）──
-        _renderSessionSection(scroll);
+        var advancedPane = document.createElement('div');
+        advancedPane.className = 'settings-tab-pane hidden';
+        advancedPane.id = 'settings-pane-advanced';
+        scroll.appendChild(advancedPane);
 
- // ── 隐私设置 ──
-        _renderPrivacySection(scroll);
+ // ── 基础设置（面向日常用户，T-V14-6-005）──
+        _renderBackendSection(basicPane);
+        _renderEmbeddingSection(basicPane);
+        _renderMemoryInjectionSection(basicPane);
+        _renderSessionSection(basicPane);
+        _renderPrivacySection(basicPane);
+        _renderDataDirSection(basicPane);
+        _renderDataSection(basicPane);
+        _renderDiagnosticsSection(basicPane);
+        _renderAboutSection(basicPane);
 
- // ── 数据管理 ──
-        _renderDataSection(scroll);
+ // ── 高级设置（面向进阶用户与排障，T-V14-6-006）──
+        _renderAdvancedSection(advancedPane);
 
- // ── 诊断与更新──
-        _renderDiagnosticsSection(scroll);
+ // ── Tab 切换绑定 ──
+        var tabBtns = tabs.querySelectorAll('.settings-tab-btn');
+        for (var i = 0; i < tabBtns.length; i++) {
+            tabBtns[i].addEventListener('click', (function (btn) {
+                return function () { _switchTab(btn.dataset.tab, tabBtns); };
+            })(tabBtns[i]));
+        }
+    }
 
- // ── 关于 ──
-        _renderAboutSection(scroll);
+    /**
+     * 切换基础/高级 Tab（v1.4 M6）。
+     */
+    function _switchTab(tab, btns) {
+        for (var i = 0; i < btns.length; i++) {
+            btns[i].classList.toggle('active', btns[i].dataset.tab === tab);
+        }
+        var basic = $('settings-pane-basic');
+        var advanced = $('settings-pane-advanced');
+        if (basic) basic.classList.toggle('hidden', tab !== 'basic');
+        if (advanced) advanced.classList.toggle('hidden', tab !== 'advanced');
     }
 
  // =========================================================
@@ -285,11 +317,145 @@ var RamariaSettingsView = (function () {
     }
 
  // =========================================================
+ // 记忆注入开关区块（v1.4 M6，T-V14-6-005 基础设置）
+ // =========================================================
+
+    function _renderMemoryInjectionSection(parent) {
+        var section = document.createElement('div');
+        section.className = 'settings-section';
+        section.innerHTML =
+            '<div class="settings-section-title">🧠 记忆注入</div>' +
+            '<div class="settings-section-desc">控制线上 LLM 后端是否接收记忆上下文（L1/L2/L3 摘要与检索结果）。</div>';
+
+        var card = document.createElement('div');
+        card.className = 'settings-card';
+        card.innerHTML =
+            '<div class="settings-form-group">' +
+                '<label class="settings-form-label">' +
+                    '<input type="checkbox" id="settings-memory-injection" /> 允许线上后端注入记忆上下文' +
+                '</label>' +
+                '<div class="settings-form-hint">' +
+                    '关闭后线上 provider 的请求不携带记忆上下文（本地 LM Studio 不受影响）。' +
+                    '默认开启；开启线上注入前需完成隐私确认。' +
+                '</div>' +
+            '</div>' +
+            '<div class="settings-save-hint">' +
+                '<button class="btn btn-primary btn-sm" id="settings-save-memory-injection">保存记忆注入设置</button>' +
+            '</div>';
+
+        section.appendChild(card);
+        parent.appendChild(section);
+
+        var btn = $('settings-save-memory-injection');
+        if (btn) btn.addEventListener('click', _handleSaveMemoryInjection);
+    }
+
+    /**
+     * 回显记忆注入开关（online_memory_injection）。
+     */
+    function _fillMemoryInjectionForm(config) {
+        if (!config || !config.backend) return;
+        var box = $('settings-memory-injection');
+        if (box) box.checked = !!config.backend.online_memory_injection;
+    }
+
+    /**
+     * 保存记忆注入开关：完整配置更新（统一写入口双写）。
+     */
+    async function _handleSaveMemoryInjection() {
+        try {
+            if (!_fullConfig) {
+                throw new Error('配置未加载，请刷新设置页后重试');
+            }
+            var box = $('settings-memory-injection');
+            if (!box) return;
+
+            var cfg = JSON.parse(JSON.stringify(_fullConfig));
+            cfg.backend.online_memory_injection = box.checked;
+
+            var result = await RamariaApi.config.updateFull(cfg);
+            if (result && result.fileOk === false && result.dbOk === false) {
+                throw new Error('配置双写均失败');
+            }
+            _fullConfig = cfg;
+            RamariaToast.show('success', '记忆注入设置已保存');
+        } catch (err) {
+            RamariaToast.show('error', '保存失败', err.message || '未知错误');
+        }
+    }
+
+ // =========================================================
+ // 数据目录区块（v1.4 M6，T-V14-6-005 基础设置）
+ // =========================================================
+
+    function _renderDataDirSection(parent) {
+        var section = document.createElement('div');
+        section.className = 'settings-section';
+        section.innerHTML =
+            '<div class="settings-section-title">📂 数据目录</div>' +
+            '<div class="settings-section-desc">查看与修改 Ramaria 数据目录（数据库/索引/日志存储位置）。</div>';
+
+        var card = document.createElement('div');
+        card.className = 'settings-card';
+        card.innerHTML =
+            '<div class="settings-form-group">' +
+                '<label class="settings-form-label">数据目录</label>' +
+                '<input class="settings-form-input" id="settings-data-dir" type="text" placeholder="%APPDATA%\\Ramaria\\data" />' +
+                '<div class="settings-form-hint">修改后需重启应用生效。留空使用系统默认位置。</div>' +
+            '</div>' +
+            '<div class="settings-save-hint">' +
+                '<button class="btn btn-primary btn-sm" id="settings-save-data-dir">保存数据目录</button>' +
+            '</div>';
+
+        section.appendChild(card);
+        parent.appendChild(section);
+
+        var btn = $('settings-save-data-dir');
+        if (btn) btn.addEventListener('click', _handleSaveDataDir);
+    }
+
+    /**
+     * 回显数据目录（paths.data_dir）。
+     */
+    function _fillDataDirForm(config) {
+        if (!config || !config.paths) return;
+        var input = $('settings-data-dir');
+        if (input && typeof config.paths.data_dir === 'string') {
+            input.value = config.paths.data_dir;
+        }
+    }
+
+    /**
+     * 保存数据目录：完整配置更新（统一写入口双写）。
+     */
+    async function _handleSaveDataDir() {
+        try {
+            if (!_fullConfig) {
+                throw new Error('配置未加载，请刷新设置页后重试');
+            }
+            var input = $('settings-data-dir');
+            if (!input) return;
+
+            var cfg = JSON.parse(JSON.stringify(_fullConfig));
+            cfg.paths.data_dir = input.value.trim();
+
+            var result = await RamariaApi.config.updateFull(cfg);
+            if (result && result.fileOk === false && result.dbOk === false) {
+                throw new Error('配置双写均失败');
+            }
+            _fullConfig = cfg;
+            RamariaToast.show('success', '数据目录已保存（重启后生效）');
+        } catch (err) {
+            RamariaToast.show('error', '保存失败', err.message || '未知错误');
+        }
+    }
+
+ // =========================================================
  // 会话区块（v1.4 M5：空闲自动保存时长滑动块）
  // =========================================================
 
     // 完整生效配置缓存（getFullConfig 回显 + 保存时回写）
-    var _sessionFullConfig = null;
+    var _fullConfig = null;
 
     function _renderSessionSection(parent) {
         var section = document.createElement('div');
@@ -382,14 +548,14 @@ var RamariaSettingsView = (function () {
      */
     async function _handleSaveSession() {
         try {
-            if (!_sessionFullConfig) {
+            if (!_fullConfig) {
                 throw new Error('配置未加载，请刷新设置页后重试');
             }
             var minutes = _readIdleMinutes();
             if (minutes === null) return;
 
             // 深拷贝后仅改 session.l1_idle_minutes，其余字段原样回写
-            var cfg = JSON.parse(JSON.stringify(_sessionFullConfig));
+            var cfg = JSON.parse(JSON.stringify(_fullConfig));
             cfg.session.l1_idle_minutes = minutes;
 
             var result = await RamariaApi.config.updateFull(cfg);
@@ -397,7 +563,7 @@ var RamariaSettingsView = (function () {
                 throw new Error('配置双写均失败');
             }
             // 后端保存成功后已热更新运行时阈值（与空闲检测线程联动，无需重启）
-            _sessionFullConfig.session.l1_idle_minutes = minutes;
+            _fullConfig.session.l1_idle_minutes = minutes;
             RamariaToast.show('success', '会话设置已保存（立即生效）');
         } catch (err) {
             RamariaToast.show('error', '保存会话设置失败', err.message || '未知错误');
@@ -1009,6 +1175,414 @@ var RamariaSettingsView = (function () {
     }
 
  // =========================================================
+ // 高级设置（v1.4 M6，T-V14-6-006）
+ // =========================================================
+
+    /**
+     * 高级配置组元数据（字段默认值与 ramaria-core/src/config.rs 的 Default 实现对齐）。
+     *
+     * 字段约定:
+     * - `path`: 配置 JSON 中的字段路径（数组，支持嵌套）。
+     * - `type`: `number` | `bool` | `whitelist`。
+     * - `def`: 默认值（恢复默认与默认值标注用；`whitelist` 为数组）。
+     * - `options`: 仅 `whitelist` 使用（可选值列表 {value, label}）。
+     */
+    var _ADVANCED_GROUPS = [
+        {
+            key: 'retrieval',
+            title: '🔍 检索参数',
+            desc: '控制 L0/L1/L2 检索数量、相似度阈值与多通道融合权重，影响记忆召回质量。',
+            fields: [
+                { path: ['l0_window_size'], label: 'L0 滑动窗口', type: 'number', min: 1, def: 3, hint: 'L0 滑动窗口大小' },
+                { path: ['l0_retrieve_top_k'], label: 'L0 检索条数', type: 'number', min: 0, def: 3, hint: 'L0 检索返回条数' },
+                { path: ['l1_retrieve_top_k'], label: 'L1 检索条数', type: 'number', min: 0, def: 4, hint: 'L1 检索返回条数' },
+                { path: ['l2_retrieve_top_k'], label: 'L2 检索条数', type: 'number', min: 0, def: 2, hint: 'L2 检索返回条数' },
+                { path: ['similarity_threshold'], label: '相似度阈值', type: 'number', step: 0.05, min: 0, max: 1, def: 0.6, hint: '余弦距离超过此值视为不相关' },
+                { path: ['rrf_k'], label: 'RRF 平滑系数', type: 'number', min: 1, def: 60, hint: 'RRF 融合平滑系数 k' },
+                { path: ['bm25_weight'], label: 'BM25 通道权重', type: 'number', step: 0.1, min: 0, def: 1.0, hint: 'BM25 通道权重' },
+                { path: ['graph_weight'], label: '图谱通道权重', type: 'number', step: 0.1, min: 0, def: 0.8, hint: '图谱通道权重' },
+                { path: ['retrieval_weight_l2'], label: 'L2 排序权重', type: 'number', step: 0.1, min: 0, def: 0.8, hint: '<1.0 表示 L2 优先展示' },
+                { path: ['retrieval_weight_l1'], label: 'L1 排序权重', type: 'number', step: 0.1, min: 0, def: 1.0, hint: 'L1 结果排序权重' },
+            ],
+        },
+        {
+            key: 'decay',
+            title: '⏳ 记忆衰减',
+            desc: 'Ebbinghaus 遗忘曲线参数，控制记忆随时间衰减的速度。',
+            fields: [
+                { path: ['s_l0'], label: 'L0 稳定性系数', type: 'number', min: 1, def: 10, hint: '细节信息衰减最快' },
+                { path: ['s_l1'], label: 'L1 稳定性系数', type: 'number', min: 1, def: 30, hint: 'L1 稳定性' },
+                { path: ['s_l2'], label: 'L2 稳定性系数', type: 'number', min: 1, def: 60, hint: '聚合摘要衰减最慢' },
+                { path: ['enable_access_boost'], label: '访问加成', type: 'bool', def: true, hint: '近期访问过的记忆保留率加成' },
+                { path: ['recent_boost_days'], label: '近期访问加成天数', type: 'number', min: 0, def: 7, hint: '近期访问加成窗口' },
+                { path: ['recent_boost_floor'], label: '近期保留率下限', type: 'number', step: 0.05, min: 0, max: 1, def: 0.5, hint: '近期访问保留率下限' },
+                { path: ['salience_multiplier'], label: 'Salience 加成系数', type: 'number', step: 0.1, min: 0, def: 0.5, hint: 'S_adjusted = S × (1 + salience × multiplier)' },
+            ],
+        },
+        {
+            key: 'thresholds',
+            title: '🎚️ 记忆层触发阈值',
+            desc: '控制 L2 合并与 L3 推断的触发条件（计数 + 时间双路径）。',
+            fields: [
+                { path: ['l2_trigger_count'], label: 'L2 触发条数', type: 'number', min: 1, def: 5, hint: '未吸收 L1 达到此条数触发 L2 合并' },
+                { path: ['l2_trigger_days'], label: 'L2 触发天数', type: 'number', min: 1, def: 7, hint: '最早未吸收 L1 超过此天数触发 L2' },
+                { path: ['l3_trigger_count'], label: 'L3 触发条数', type: 'number', min: 1, def: 10, hint: '未吸收事件达到此条数触发 L3 推断' },
+                { path: ['l3_trigger_days'], label: 'L3 触发天数', type: 'number', min: 1, def: 30, hint: '最早未吸收事件超过此天数触发 L3' },
+                { path: ['cluster_delay_ms'], label: '簇间延迟（毫秒）', type: 'number', min: 0, def: 800, hint: 'L2 事件提取簇间请求间隔，避免速率限制（DeepSeek 建议调大）' },
+            ],
+        },
+        {
+            key: 'index',
+            title: '🗂️ 索引与 BM25',
+            desc: 'BM25 增量合并与周期性重建节奏。',
+            fields: [
+                { path: ['bm25_incremental_threshold'], label: '增量合并阈值', type: 'number', min: 1, def: 10, hint: '缓冲区积累超过此条数触发合并' },
+                { path: ['bm25_rebuild_interval'], label: '重建间隔（秒）', type: 'number', min: 10, def: 300, hint: 'BM25 定时重建检查间隔' },
+            ],
+        },
+        {
+            key: 'logging',
+            title: '📜 日志',
+            desc: '日志记录级别控制。',
+            fields: [
+                { path: ['log_full_prompt'], label: '记录完整 Prompt', type: 'bool', def: false, hint: '记录完整 prompt 含记忆上下文与原文片段（隐私敏感，开启需弹窗确认）' },
+            ],
+        },
+        {
+            key: 'inference',
+            title: '🔮 L3 推断',
+            desc: 'Phase B/C 推断参数（温度、证据阈值、置信度、漂移检测、全量校准）。',
+            fields: [
+                { path: ['inferrer', 'temperature'], label: '推断温度', type: 'number', step: 0.1, min: 0, max: 2, def: 0.3, hint: 'Phase B LLM 生成温度' },
+                { path: ['inferrer', 'max_tokens'], label: '最大输出 tokens', type: 'number', min: 128, def: 2048, hint: 'Phase B LLM 最大输出' },
+                { path: ['inferrer', 'low_evidence_threshold'], label: '低证据阈值', type: 'number', step: 0.5, min: 0, def: 5.0, hint: '小样本分类证据阈值' },
+                { path: ['inferrer', 'step_max_tokens'], label: '每步最大 tokens', type: 'number', min: 128, def: 2048, hint: 'Phase B 每步最大输出' },
+                { path: ['confidence', 'stability_s'], label: '置信度稳定性 S', type: 'number', step: 1, min: 1, def: 60, hint: 'L2 层稳定性系数（Ebbinghaus）' },
+                { path: ['confidence', 'min_decay'], label: '时间衰减保底', type: 'number', step: 0.01, min: 0, max: 1, def: 0.01, hint: '置信度时间衰减保底值' },
+                { path: ['drift', 'alpha'], label: '漂移显著性水平', type: 'number', step: 0.01, min: 0.001, max: 1, def: 0.05, hint: 'Wasserstein 漂移检测显著性（锁定值）' },
+                { path: ['drift', 'n_permutations'], label: '置换检验次数', type: 'number', min: 100, def: 1000, hint: '置换检验次数（锁定值）' },
+                { path: ['calibration', 'round_threshold'], label: '校准轮次阈值', type: 'number', min: 1, def: 10, hint: '增量更新轮次阈值' },
+                { path: ['calibration', 'event_doubling_ratio'], label: '事件翻倍比例', type: 'number', step: 0.1, min: 1, def: 2.0, hint: '事件量翻倍比例阈值' },
+                { path: ['calibration', 'diff_alert_ratio'], label: '差异告警比例', type: 'number', step: 0.05, min: 0, max: 1, def: 0.3, hint: '差异告警比例' },
+            ],
+        },
+        {
+            key: 'event_extraction',
+            title: '📇 事件提取',
+            desc: 'L1→L2 事件提取器的 LLM 参数（独立于对话参数，JSON 输出需更大 token 预算）。',
+            fields: [
+                { path: ['temperature'], label: '提取温度', type: 'number', step: 0.1, min: 0, max: 2, def: 0.3, hint: '事件提取 LLM 温度' },
+                { path: ['max_tokens'], label: '最大输出 tokens', type: 'number', min: 256, def: 8192, hint: '事件 JSON 输出预算' },
+                { path: ['max_events'], label: '单簇最大事件数', type: 'number', min: 1, def: 5, hint: '单簇最多提取的事件数' },
+            ],
+        },
+        {
+            key: 'utt',
+            title: '💬 utt 原文通道',
+            desc: '原文话语块切分、检索与注入参数。原文是最高敏感层，白名单外 persona 不注入。',
+            fields: [
+                { path: ['enabled'], label: '启用原文通道', type: 'bool', def: true, hint: '关闭后行为回退 v1.3（不注入原文片段）' },
+                { path: ['theta_gap_minutes'], label: '切分时间间隙（分钟）', type: 'number', min: 1, def: 30, hint: '相邻消息间隔超过此值切分为新块' },
+                { path: ['max_msgs_per_block'], label: '单块最大消息数', type: 'number', min: 1, def: 40, hint: '超过此条数强制切分' },
+                { path: ['retrieve_top_k'], label: '检索块数 top_k', type: 'number', min: 0, def: 3, hint: '对话时检索返回的 utt 块数量' },
+                { path: ['max_block_chars'], label: '注入字符预算', type: 'number', min: 50, def: 1500, hint: '原文片段注入预算（超限按相似度丢整块）' },
+                {
+                    path: ['persona_kind_whitelist'],
+                    label: '原文白名单（persona 类型）',
+                    type: 'whitelist',
+                    def: ['char', 'anim', 'oc', 'hist'],
+                    options: [
+                        { value: 'char', label: '角色' },
+                        { value: 'anim', label: '动画' },
+                        { value: 'oc', label: '原创 OC' },
+                        { value: 'hist', label: '历史人物' },
+                    ],
+                    hint: '白名单外的 persona（助手/系统类）不注入原文',
+                },
+            ],
+        },
+        {
+            key: 'examples',
+            title: '🎭 示例注入',
+            desc: 'Few-shot 示例的自学习抽取、评分轮换与兜底注入参数。',
+            fields: [
+                { path: ['enabled'], label: '启用示例注入', type: 'bool', def: true, hint: '关闭后回退 v1.3 静态 selected 查询' },
+                { path: ['max_examples'], label: '最大示例条数', type: 'number', min: 1, def: 5, hint: '注入时的最大示例条数' },
+            ],
+        },
+        {
+            key: 'bridge',
+            title: '🌉 会话桥接',
+            desc: '新会话加载上一会话尾部原文，保持对话连贯性。',
+            fields: [
+                { path: ['enabled'], label: '启用桥接', type: 'bool', def: true, hint: '关闭后新会话不加载桥接（等同 v1.3）' },
+                { path: ['max_chars'], label: '桥接字符预算', type: 'number', min: 50, def: 800, hint: '超限从头部截断、保最近' },
+            ],
+        },
+    ];
+
+    /**
+     * 渲染高级设置区块：风险提示条 + 全部配置组表单。
+     */
+    function _renderAdvancedSection(parent) {
+        var risk = document.createElement('div');
+        risk.className = 'settings-risk-banner';
+        risk.textContent =
+            '⚠️ 高级设置面向进阶用户与排障场景。修改以下参数可能影响检索与推断质量，' +
+            '非排障场景请保持默认值；每项均可通过「恢复默认」还原。';
+        parent.appendChild(risk);
+
+        for (var i = 0; i < _ADVANCED_GROUPS.length; i++) {
+            _renderAdvancedGroup(parent, _ADVANCED_GROUPS[i]);
+        }
+    }
+
+    /**
+     * 按元数据渲染一个高级配置组。
+     */
+    function _renderAdvancedGroup(parent, group) {
+        var section = document.createElement('div');
+        section.className = 'settings-section';
+        section.innerHTML =
+            '<div class="settings-section-title">' + group.title + '</div>' +
+            '<div class="settings-section-desc">' + group.desc + '</div>';
+
+        var card = document.createElement('div');
+        card.className = 'settings-card';
+        var html = '';
+        for (var i = 0; i < group.fields.length; i++) {
+            var f = group.fields[i];
+            var fid = _advFieldId(group, f);
+            if (f.type === 'bool') {
+                html += '<div class="settings-form-group">' +
+                    '<label class="settings-form-label">' +
+                        '<input type="checkbox" id="' + fid + '" /> ' + f.label +
+                    '</label>' +
+                    '<div class="settings-form-hint">' + f.hint + '（默认：' + (f.def ? '开' : '关') + '）</div>' +
+                '</div>';
+            } else if (f.type === 'whitelist') {
+                html += '<div class="settings-form-group">' +
+                    '<label class="settings-form-label">' + f.label + '</label>' +
+                    '<div class="settings-form-whitelist">';
+                for (var w = 0; w < f.options.length; w++) {
+                    var opt = f.options[w];
+                    html += '<label class="settings-form-inline-label">' +
+                        '<input type="checkbox" id="' + fid + '-' + opt.value + '" data-value="' + opt.value + '" /> ' +
+                        opt.label +
+                    '</label>';
+                }
+                html += '</div>' +
+                    '<div class="settings-form-hint">' + f.hint + '（默认：' + f.def.join(', ') + '）</div>' +
+                '</div>';
+            } else {
+                html += '<div class="settings-form-group">' +
+                    '<label class="settings-form-label">' + f.label + '</label>' +
+                    '<input class="settings-form-input" id="' + fid + '" type="number"' +
+                        (f.step ? ' step="' + f.step + '"' : '') +
+                        (f.min !== undefined ? ' min="' + f.min + '"' : '') +
+                        (f.max !== undefined ? ' max="' + f.max + '"' : '') +
+                    ' />' +
+                    '<div class="settings-form-hint">' + f.hint + '（默认：' + f.def + '）</div>' +
+                '</div>';
+            }
+        }
+        html += '<div class="settings-save-hint">' +
+            '<button class="btn btn-primary btn-sm" id="settings-adv-save-' + group.key + '">保存</button> ' +
+            '<button class="btn btn-secondary btn-sm" id="settings-adv-reset-' + group.key + '">恢复默认</button>' +
+        '</div>';
+        card.innerHTML = html;
+        section.appendChild(card);
+        parent.appendChild(section);
+
+        var saveBtn = $('settings-adv-save-' + group.key);
+        if (saveBtn) {
+            saveBtn.addEventListener('click', function () { _handleAdvancedSave(group); });
+        }
+        var resetBtn = $('settings-adv-reset-' + group.key);
+        if (resetBtn) {
+            resetBtn.addEventListener('click', function () { _handleAdvancedReset(group); });
+        }
+
+        // log_full_prompt 开启需显式隐私确认（T-V14-6-006）
+        var logBox = $('settings-adv-logging-log_full_prompt');
+        if (logBox) {
+            logBox.addEventListener('change', function () {
+                if (!logBox.checked) return;
+                RamariaModal.show({
+                    title: '⚠️ 隐私确认',
+                    body: '开启后将把完整 prompt（含记忆上下文与原文片段）写入日志，' +
+                        '可能包含敏感信息。仅在排障时短期开启，用后请立即关闭。',
+                    actions: [
+                        { label: '取消', action: 'cancel', className: 'btn btn-secondary' },
+                        { label: '确认开启', action: 'confirm', className: 'btn btn-danger' },
+                    ],
+                    onAction: function (action) {
+                        if (action !== 'confirm') {
+                            logBox.checked = false;
+                        }
+                    },
+                });
+            });
+        }
+    }
+
+    /**
+     * 高级字段的 DOM id。
+     */
+    function _advFieldId(group, f) {
+        return 'settings-adv-' + group.key + '-' + f.path.join('-');
+    }
+
+    /**
+     * 从配置对象读取嵌套路径值。
+     */
+    function _advGetValue(cfg, path) {
+        var v = cfg;
+        for (var i = 0; i < path.length; i++) {
+            v = v[path[i]];
+            if (v === undefined) return undefined;
+        }
+        return v;
+    }
+
+    /**
+     * 向配置对象写入嵌套路径值。
+     */
+    function _advSetValue(cfg, path, value) {
+        var v = cfg;
+        for (var i = 0; i < path.length - 1; i++) {
+            v = v[path[i]];
+        }
+        v[path[path.length - 1]] = value;
+    }
+
+    /**
+     * 回显一个高级配置组（进入设置页时调用）。
+     */
+    function _fillAdvancedForm(group, cfg) {
+        for (var i = 0; i < group.fields.length; i++) {
+            var f = group.fields[i];
+            var fid = _advFieldId(group, f);
+            var value = _advGetValue(cfg, f.path);
+            if (f.type === 'bool') {
+                var box = $(fid);
+                if (box) box.checked = !!value;
+            } else if (f.type === 'whitelist') {
+                var list = Array.isArray(value) ? value : [];
+                for (var w = 0; w < f.options.length; w++) {
+                    var cb = $(fid + '-' + f.options[w].value);
+                    if (cb) cb.checked = list.indexOf(f.options[w].value) !== -1;
+                }
+            } else {
+                var input = $(fid);
+                if (input && value !== undefined) input.value = value;
+            }
+        }
+    }
+
+    /**
+     * 回显全部高级配置组。
+     */
+    function _fillAdvancedForms(cfg) {
+        for (var i = 0; i < _ADVANCED_GROUPS.length; i++) {
+            _fillAdvancedForm(_ADVANCED_GROUPS[i], cfg);
+        }
+    }
+
+    /**
+     * 收集一个高级配置组的当前表单值（校验后返回 {path, value} 列表；
+     * 校验失败返回 null 并 toast 提示）。
+     */
+    function _collectAdvancedGroup(group) {
+        var entries = [];
+        for (var i = 0; i < group.fields.length; i++) {
+            var f = group.fields[i];
+            var fid = _advFieldId(group, f);
+            var value;
+            if (f.type === 'bool') {
+                var box = $(fid);
+                if (!box) continue;
+                value = box.checked;
+            } else if (f.type === 'whitelist') {
+                var list = [];
+                for (var w = 0; w < f.options.length; w++) {
+                    var cb = $(fid + '-' + f.options[w].value);
+                    if (cb && cb.checked) list.push(f.options[w].value);
+                }
+                value = list;
+            } else {
+                var input = $(fid);
+                if (!input) continue;
+                var raw = input.value;
+                if (raw === '') {
+                    RamariaToast.show('warning', f.label + ' 不能为空');
+                    return null;
+                }
+                value = (f.step && f.step < 1) ? parseFloat(raw) : parseInt(raw, 10);
+                if (isNaN(value)) {
+                    RamariaToast.show('warning', f.label + ' 不是有效数字');
+                    return null;
+                }
+            }
+            entries.push({ path: f.path, value: value });
+        }
+        return entries;
+    }
+
+    /**
+     * 保存一个高级配置组（统一写入口双写）。
+     */
+    async function _handleAdvancedSave(group) {
+        try {
+            if (!_fullConfig) {
+                throw new Error('配置未加载，请刷新设置页后重试');
+            }
+            var entries = _collectAdvancedGroup(group);
+            if (!entries) return;
+
+            var cfg = JSON.parse(JSON.stringify(_fullConfig));
+            for (var i = 0; i < entries.length; i++) {
+                _advSetValue(cfg, entries[i].path, entries[i].value);
+            }
+
+            var result = await RamariaApi.config.updateFull(cfg);
+            if (result && result.fileOk === false && result.dbOk === false) {
+                throw new Error('配置双写均失败');
+            }
+            _fullConfig = cfg;
+            RamariaToast.show('success', group.title + ' 已保存');
+        } catch (err) {
+            RamariaToast.show('error', '保存失败', err.message || '未知错误');
+        }
+    }
+
+    /**
+     * 恢复一个高级配置组的默认值（立即保存，统一写入口双写）。
+     */
+    async function _handleAdvancedReset(group) {
+        try {
+            if (!_fullConfig) {
+                throw new Error('配置未加载，请刷新设置页后重试');
+            }
+            var cfg = JSON.parse(JSON.stringify(_fullConfig));
+            for (var i = 0; i < group.fields.length; i++) {
+                var f = group.fields[i];
+                _advSetValue(cfg, f.path, JSON.parse(JSON.stringify(f.def)));
+            }
+
+            var result = await RamariaApi.config.updateFull(cfg);
+            if (result && result.fileOk === false && result.dbOk === false) {
+                throw new Error('配置双写均失败');
+            }
+            _fullConfig = cfg;
+            _fillAdvancedForm(group, cfg);
+            RamariaToast.show('success', group.title + ' 已恢复默认并保存');
+        } catch (err) {
+            RamariaToast.show('error', '恢复默认失败', err.message || '未知错误');
+        }
+    }
+
+ // =========================================================
  // 生命周期
  // =========================================================
 
@@ -1039,10 +1613,13 @@ var RamariaSettingsView = (function () {
                 console.error('[SettingsView] 加载嵌入模型配置失败:', err);
             }
 
- // 加载完整配置并回显会话区块（v1.4 M5）
+ // 加载完整配置并回显（v1.4 M5 会话区块 + M6 基础/高级表单）
             try {
-                _sessionFullConfig = await RamariaApi.config.getFull();
-                _fillSessionForm(_sessionFullConfig);
+                _fullConfig = await RamariaApi.config.getFull();
+                _fillSessionForm(_fullConfig);
+                _fillMemoryInjectionForm(_fullConfig);
+                _fillDataDirForm(_fullConfig);
+                _fillAdvancedForms(_fullConfig);
             } catch (err) {
                 console.error('[SettingsView] 加载完整配置失败:', err);
             }
