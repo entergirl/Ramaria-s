@@ -80,6 +80,11 @@ pub const EVENT_EXTRACTION_PROMPT: &str = r#"# Context（背景）
 - 不要将无关 L1 强行合并为"杂项"事件
 - 如果当前 L1 与补充背景中的历史事件高度重合（相同人物、相同主题、相近时间）→ 合并并提高 confidence，而非新建事件
 
+### 因果线索（evidence_notes，仅供背景参考）
+- 每条 L1 摘要可能附带 `[线索]` 行，含可选槽位：`time`（时间点）、`who`（人物）、`cause`（原因/触发条件）
+- `cause` 槽位是摘要阶段记录的短句因果线索，仅用于帮助判断关系提取中 `CausedBy` 的方向与置信度，**不视为独立事实断言**
+- 线索内容如未在 L1 摘要正文中出现，**不得**据此编造新事件；事件本身必须基于摘要正文
+
 ### 数量控制
 - 最多提取 5 条事件
 - L1 过于琐碎无法提炼事件 → 返回 `{"events":[],"relations":[]}`
@@ -369,6 +374,33 @@ mod tests {
         assert!(prompt.contains("逻辑错误"));
     }
 
+    /// v1.4 M4（T-V14-4-004）：提取 Prompt 含因果线索段落——
+    /// cause 槽位说明、仅供背景参考标注、防编造约束。
+    #[test]
+    fn event_prompt_contains_evidence_clue_section() {
+        let prompt = build_event_extraction_prompt("[1] 2025-01-01 测试摘要");
+        assert!(prompt.contains("因果线索"), "应包含因果线索规则段落");
+        assert!(prompt.contains("[线索]"), "应说明 [线索] 行格式");
+        assert!(prompt.contains("cause"), "应说明 cause 槽位");
+        assert!(prompt.contains("仅供背景参考"), "应标注仅供背景参考");
+        assert!(
+            prompt.contains("CausedBy"),
+            "cause 应与 CausedBy 关系提取关联"
+        );
+        assert!(prompt.contains("不得"), "应禁止依据线索编造新事件");
+    }
+
+    /// v1.4 M4：因果线索段落同时存在于 persona 替换版本（导入场景）。
+    #[test]
+    fn persona_prompt_keeps_evidence_clue_section() {
+        let prompt = build_event_extraction_prompt_for_persona("[1] 2025-01-01 测试", "张三", None);
+        assert!(
+            prompt.contains("因果线索"),
+            "persona 版 prompt 也应含因果线索段落"
+        );
+        assert!(prompt.contains("cause"));
+    }
+
     #[test]
     fn persona_prompt_injects_other_party_hint() {
         let prompt =
@@ -449,8 +481,16 @@ mod tests {
     #[test]
     fn prompt_with_context_empty_docs_no_injection() {
         let prompt = build_event_extraction_prompt_with_context("[1] 2025-01-01 测试摘要", &[]);
-        // 空上下文 → 不注入补充段落
-        assert!(!prompt.contains("仅供背景参考"));
+        // 空上下文 → 不注入补充背景段落（v1.4 M4 起基础模板自带
+        // "因果线索（仅供背景参考）"段落，因此断言补充背景专属标题）
+        assert!(
+            !prompt.contains("### 补充背景"),
+            "空上下文不应注入补充背景段落"
+        );
+        assert!(
+            !prompt.contains("[L1]") && !prompt.contains("[L2]"),
+            "不应有上下文条目"
+        );
         assert!(prompt.contains("测试摘要"));
     }
 

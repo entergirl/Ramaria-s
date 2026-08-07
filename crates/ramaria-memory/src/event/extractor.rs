@@ -705,10 +705,16 @@ impl<'a> EventExtractor<'a> {
 
     /// 从 TopicCluster 格式化 L1 摘要列表。
     ///
-    /// 格式:
+    /// 格式（v1.4 M4：每条 L1 可附带结构化证据线索行）:
     /// ```text
     /// [1] 2025-06-01 摘要文本 (keywords: kw1, kw2)
+    /// [线索] 证据文本（time: 上周三；who: 用户；cause: 需求变更频繁）
     /// ```
+    ///
+    /// 说明:
+    /// - evidence_notes 非空时，在摘要行下方输出 `[线索]` 行，
+    ///   槽位仅展示非空项（缺失槽位省略，避免空占位干扰 LLM）。
+    /// - cause 槽位承载因果线索，供 L2 事件提取作为背景参考（不视为事实断言）。
     fn format_l1_from_cluster(cluster: &TopicCluster) -> String {
         let mut lines = Vec::with_capacity(cluster.l1_items.len());
         for (i, item) in cluster.l1_items.iter().enumerate() {
@@ -720,6 +726,28 @@ impl<'a> EventExtractor<'a> {
                 format!(" (keywords: {})", kw_list.join(", "))
             };
             lines.push(format!("[{}] {} {}{}", i + 1, date, item.summary, kw_str));
+
+            // 结构化证据线索行（v1.4 M4）：非空时输出，槽位仅列非空项
+            if !item.evidence_notes.is_empty() {
+                for note in &item.evidence_notes {
+                    let mut slots: Vec<String> = Vec::with_capacity(3);
+                    if let Some(time) = note.time.as_deref() {
+                        slots.push(format!("time: {time}"));
+                    }
+                    if let Some(who) = note.who.as_deref() {
+                        slots.push(format!("who: {who}"));
+                    }
+                    if let Some(cause) = note.cause.as_deref() {
+                        slots.push(format!("cause: {cause}"));
+                    }
+                    let slot_str = if slots.is_empty() {
+                        String::new()
+                    } else {
+                        format!("（{}）", slots.join("；"))
+                    };
+                    lines.push(format!("[线索] {}{}", note.text, slot_str));
+                }
+            }
         }
         lines.join("\n")
     }
@@ -1024,6 +1052,7 @@ mod tests {
                 ramaria_core::keyword::KeywordToken::new("摘要").unwrap(),
             ],
             embedding: None,
+            evidence_notes: vec![],
             salience: 0.5,
             created_at: 1_700_000_000_000,
         };
@@ -1041,6 +1070,7 @@ mod tests {
             summary: "第一条摘要".into(),
             keywords: vec![],
             embedding: None,
+            evidence_notes: vec![],
             salience: 0.5,
             created_at: now_ms(),
         };
@@ -1049,6 +1079,7 @@ mod tests {
             summary: "第二条摘要".into(),
             keywords: vec![ramaria_core::keyword::KeywordToken::new("kw").unwrap()],
             embedding: None,
+            evidence_notes: vec![],
             salience: 0.5,
             created_at: now_ms(),
         };
@@ -1058,6 +1089,77 @@ mod tests {
         assert!(formatted.contains("[2]"));
         assert!(formatted.contains("第一条摘要"));
         assert!(formatted.contains("第二条摘要"));
+    }
+    /// v1.4 M4（T-V14-4-004）：evidence_notes 非空时格式化输出 `[线索]` 行，
+    /// cause 因果线索槽位随行注入（仅供 L2 背景参考）。
+    #[test]
+    fn format_l1_with_evidence_notes_injects_clue_lines() {
+        use ramaria_core::types::EvidenceNote;
+        let item = L1Item {
+            id: Uuid::new_v4(),
+            summary: "用户讨论项目延期安排".into(),
+            keywords: vec![],
+            embedding: None,
+            evidence_notes: vec![EvidenceNote {
+                text: "用户提到项目延期到月底".into(),
+                time: Some("上周三".into()),
+                who: Some("用户".into()),
+                cause: Some("需求变更频繁".into()),
+            }],
+            salience: 0.5,
+            created_at: now_ms(),
+        };
+        let cluster = TopicCluster::new(vec![item]);
+        let formatted = EventExtractor::format_l1_from_cluster(&cluster);
+        assert!(formatted.contains("[线索]"), "应输出线索行标记");
+        assert!(formatted.contains("用户提到项目延期到月底"), "应含证据文本");
+        assert!(
+            formatted.contains("cause: 需求变更频繁"),
+            "应注入 cause 槽位"
+        );
+        assert!(formatted.contains("time: 上周三"), "应注入 time 槽位");
+        assert!(formatted.contains("who: 用户"), "应注入 who 槽位");
+    }
+
+    /// v1.4 M4：线索的缺失槽位不输出占位（仅 text 的线索只输出文本本身）。
+    #[test]
+    fn format_l1_evidence_notes_omits_missing_slots() {
+        use ramaria_core::types::EvidenceNote;
+        let item = L1Item {
+            id: Uuid::new_v4(),
+            summary: "仅文本线索摘要".into(),
+            keywords: vec![],
+            embedding: None,
+            evidence_notes: vec![EvidenceNote::new("用户提到通勤时间变长")],
+            salience: 0.5,
+            created_at: now_ms(),
+        };
+        let cluster = TopicCluster::new(vec![item]);
+        let formatted = EventExtractor::format_l1_from_cluster(&cluster);
+        assert!(formatted.contains("[线索] 用户提到通勤时间变长"));
+        assert!(!formatted.contains("time:"), "缺失槽位不应输出占位");
+        assert!(!formatted.contains("who:"));
+        assert!(!formatted.contains("cause:"));
+    }
+
+    /// v1.4 M4：无证据线索时输出与 v1.3 完全一致（不产生空线索行，回归保护）。
+    #[test]
+    fn format_l1_without_evidence_notes_unchanged() {
+        let item = L1Item {
+            id: Uuid::new_v4(),
+            summary: "无证据摘要".into(),
+            keywords: vec![ramaria_core::keyword::KeywordToken::new("kw").unwrap()],
+            embedding: None,
+            evidence_notes: vec![],
+            salience: 0.5,
+            created_at: now_ms(),
+        };
+        let cluster = TopicCluster::new(vec![item]);
+        let formatted = EventExtractor::format_l1_from_cluster(&cluster);
+        assert!(formatted.contains("[1]"));
+        assert!(formatted.contains("无证据摘要"));
+        assert!(formatted.contains("(keywords: kw)"));
+        assert!(!formatted.contains("[线索]"), "无线索时不应出现线索行");
     }
 
     // ---- parse_event_response ----

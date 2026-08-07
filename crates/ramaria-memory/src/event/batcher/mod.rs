@@ -12,7 +12,7 @@ pub mod buffer;
 pub mod graph;
 
 use ramaria_core::keyword::KeywordToken;
-use ramaria_core::types::MemoryL1;
+use ramaria_core::types::{EvidenceNote, MemoryL1};
 use uuid::Uuid;
 
 // =========================================================
@@ -28,12 +28,15 @@ use uuid::Uuid;
 ///
 /// 字段约定:
 /// - `keywords`: 标准化后的关键词列表（已通过 `KeywordToken::new()` 过滤）。
+/// - `evidence_notes`: 结构化证据线索（v1.4，供 S2 语义增强输入组装）。
 /// - `embedding`: L1 摘要文本的向量表示（384 维），None 表示未配置嵌入模型。
 #[derive(Debug, Clone)]
 pub struct L1Item {
     pub id: Uuid,
     pub summary: String,
     pub keywords: Vec<KeywordToken>,
+    /// 结构化证据线索（v1.4 M4 起参与语义增强输入组装）
+    pub evidence_notes: Vec<EvidenceNote>,
     pub embedding: Option<Vec<f32>>,
     pub salience: f64,
     pub created_at: i64,
@@ -44,6 +47,7 @@ impl From<&MemoryL1> for L1Item {
     ///
     /// 说明:
     /// - 关键词从 `keywords` 字段解析，通过 `KeywordToken::new()` 标准化。
+    /// - evidence_notes 直接复制结构化线索（缺失/为空 → 空 Vec）。
     /// - embedding 初始化为 None，由上层在构建图之前注入。
     fn from(l1: &MemoryL1) -> Self {
         let keywords = l1
@@ -63,10 +67,57 @@ impl From<&MemoryL1> for L1Item {
             id: l1.id,
             summary: l1.summary.clone(),
             keywords,
+            evidence_notes: l1.evidence_notes.clone().unwrap_or_default(),
             embedding: None,
             salience: l1.salience,
             created_at: l1.created_at,
         }
+    }
+}
+
+impl L1Item {
+    /// 组装 S2 语义增强的 embedding 输入文本（v3.1 §5：summary + evidence_notes + keywords）。
+    ///
+    /// 设计:
+    /// - 上层用此文本调用 embedding provider 生成向量后挂载到 `embedding` 字段。
+    /// - evidence_notes 为空时自动退化为 `summary + keywords`，保证无线索时输入形态稳定。
+    /// - 结构化槽位（time/who/cause）按"槽位名: 值"拼接，供模型感知因果线索语义。
+    ///
+    /// 返回:
+    /// - 拼接后的语义文本（单行，各段以空格分隔）。
+    pub fn semantic_text(&self) -> String {
+        let mut parts: Vec<String> = Vec::with_capacity(3);
+        parts.push(self.summary.trim().to_string());
+
+        // 证据线索段：仅取 text 槽位与可选槽位（time/who/cause），逐条拼接
+        let evidence_part: Vec<String> = self
+            .evidence_notes
+            .iter()
+            .map(|note| {
+                let mut seg = note.text.trim().to_string();
+                if let Some(time) = note.time.as_deref() {
+                    seg.push_str(&format!(" time: {time}"));
+                }
+                if let Some(who) = note.who.as_deref() {
+                    seg.push_str(&format!(" who: {who}"));
+                }
+                if let Some(cause) = note.cause.as_deref() {
+                    seg.push_str(&format!(" cause: {cause}"));
+                }
+                seg
+            })
+            .collect();
+        if !evidence_part.is_empty() {
+            parts.push(evidence_part.join(" ; "));
+        }
+
+        // 关键词段
+        if !self.keywords.is_empty() {
+            let kw_joined: Vec<&str> = self.keywords.iter().map(|k| k.as_str()).collect();
+            parts.push(kw_joined.join(" "));
+        }
+
+        parts.join(" ")
     }
 }
 
@@ -723,6 +774,126 @@ mod tests {
         assert!(item.keywords.is_empty());
     }
 
+    /// v1.4 M4（T-V14-4-004）：L1Item::from 携带结构化 evidence_notes；
+    /// 缺失时为默认空 Vec（不产生 None 分支，下游消费形态稳定）。
+    #[test]
+    fn l1_item_from_memory_l1_carries_evidence_notes() {
+        // MemoryL1 带结构化线索 → L1Item 完整复制
+        let mut l1 = make_memory_l1("用户讨论项目延期", Some("项目,延期"), 0.5);
+        l1.evidence_notes = Some(vec![EvidenceNote {
+            text: "用户提到项目延期到月底".into(),
+            time: Some("上周三".into()),
+            who: Some("用户".into()),
+            cause: Some("需求变更频繁".into()),
+        }]);
+        let item = L1Item::from(&l1);
+        assert_eq!(item.evidence_notes.len(), 1);
+        assert_eq!(item.evidence_notes[0].text, "用户提到项目延期到月底");
+        assert_eq!(
+            item.evidence_notes[0].cause.as_deref(),
+            Some("需求变更频繁")
+        );
+
+        // MemoryL1 缺失 → 空 Vec
+        let l1 = make_memory_l1("无线索摘要", None, 0.5);
+        let item = L1Item::from(&l1);
+        assert!(
+            item.evidence_notes.is_empty(),
+            "缺失 evidence_notes 时应为默认空 Vec"
+        );
+    }
+
+    // ---- semantic_text（S2 语义增强输入组装，v3.1 §5）----
+
+    /// semantic_text 完整输入：summary + evidence_notes（含槽位）+ keywords 三段齐全。
+    #[test]
+    fn semantic_text_includes_summary_evidence_and_keywords() {
+        let item = L1Item {
+            id: Uuid::new_v4(),
+            summary: "用户讨论项目延期安排".into(),
+            keywords: vec![
+                KeywordToken::new("项目").unwrap(),
+                KeywordToken::new("延期").unwrap(),
+            ],
+            evidence_notes: vec![EvidenceNote {
+                text: "用户提到项目延期到月底".into(),
+                time: Some("上周三".into()),
+                who: Some("用户".into()),
+                cause: Some("需求变更频繁".into()),
+            }],
+            embedding: None,
+            salience: 0.5,
+            created_at: 1000,
+        };
+        let text = item.semantic_text();
+        assert!(text.contains("用户讨论项目延期安排"), "应含 summary");
+        assert!(text.contains("用户提到项目延期到月底"), "应含证据文本");
+        assert!(text.contains("time: 上周三"), "应含 time 槽位");
+        assert!(text.contains("who: 用户"), "应含 who 槽位");
+        assert!(text.contains("cause: 需求变更频繁"), "应含 cause 槽位");
+        assert!(text.contains("项目 延期"), "应含关键词段");
+    }
+
+    /// semantic_text 退化路径：无 evidence_notes / 无 keywords 时各段自动省略，
+    /// 保持"summary + 可用段"的稳定形态（embedding 输入不因缺数据而失真）。
+    #[test]
+    fn semantic_text_degrades_gracefully() {
+        // 无线索 + 无关键词 → 仅 summary
+        let item = L1Item {
+            id: Uuid::new_v4(),
+            summary: "仅摘要文本".into(),
+            keywords: vec![],
+            evidence_notes: vec![],
+            embedding: None,
+            salience: 0.5,
+            created_at: 1000,
+        };
+        let text = item.semantic_text();
+        assert_eq!(text, "仅摘要文本");
+
+        // 无线索 + 有关键词 → summary + keywords
+        let item = L1Item {
+            id: Uuid::new_v4(),
+            summary: "摘要".into(),
+            keywords: vec![KeywordToken::new("工作").unwrap()],
+            evidence_notes: vec![],
+            embedding: None,
+            salience: 0.5,
+            created_at: 1000,
+        };
+        let text = item.semantic_text();
+        assert!(text.contains("摘要"));
+        assert!(text.contains("工作"));
+        assert!(!text.contains("cause:"), "无线索时不应出现槽位标记");
+    }
+
+    /// semantic_text 多条线索以分隔符拼接（供 embedding 感知跨线索语义）。
+    #[test]
+    fn semantic_text_joins_multiple_evidence_notes() {
+        let item = L1Item {
+            id: Uuid::new_v4(),
+            summary: "摘要".into(),
+            keywords: vec![],
+            evidence_notes: vec![
+                EvidenceNote::new("用户提到项目延期到月底"),
+                EvidenceNote {
+                    text: "用户表示压力很大".into(),
+                    cause: Some("工作量增加".into()),
+                    time: None,
+                    who: None,
+                },
+            ],
+            embedding: None,
+            salience: 0.5,
+            created_at: 1000,
+        };
+        let text = item.semantic_text();
+        assert!(text.contains(" ; "), "多条线索应以分隔符拼接");
+        assert!(text.contains("用户提到项目延期到月底"));
+        assert!(text.contains("用户表示压力很大"));
+        assert!(text.contains("cause: 工作量增加"));
+    }
+
     // ---- TopicCluster ----
 
     #[test]
@@ -733,6 +904,7 @@ mod tests {
                 summary: "s1".into(),
                 keywords: vec![KeywordToken::new("工作").unwrap()],
                 embedding: None,
+                evidence_notes: vec![],
                 salience: 0.5,
                 created_at: 2000,
             },
@@ -741,6 +913,7 @@ mod tests {
                 summary: "s2".into(),
                 keywords: vec![KeywordToken::new("压力").unwrap()],
                 embedding: None,
+                evidence_notes: vec![],
                 salience: 0.8,
                 created_at: 1000,
             },
@@ -765,6 +938,7 @@ mod tests {
                     KeywordToken::new("压力").unwrap(),
                 ],
                 embedding: None,
+                evidence_notes: vec![],
                 salience: 0.5,
                 created_at: 1000,
             },
@@ -776,6 +950,7 @@ mod tests {
                     KeywordToken::new("倦怠").unwrap(),
                 ],
                 embedding: None,
+                evidence_notes: vec![],
                 salience: 0.5,
                 created_at: 2000,
             },
@@ -900,6 +1075,7 @@ mod tests {
             id: Uuid::new_v4(),
             summary: format!("s_{}", keywords.join("_")),
             keywords: keywords.into_iter().filter_map(KeywordToken::new).collect(),
+            evidence_notes: vec![],
             embedding,
             salience,
             created_at: 1_000_000,

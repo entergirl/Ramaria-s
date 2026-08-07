@@ -313,6 +313,7 @@ mod tests {
                 KeywordToken::new("编程").unwrap(),
             ],
             embedding: None,
+            evidence_notes: vec![],
             salience: 0.5,
             created_at: 1000,
         }]);
@@ -347,6 +348,7 @@ mod tests {
             summary: "Rust".into(),
             keywords: vec![KeywordToken::new("Rust").unwrap()],
             embedding: None,
+            evidence_notes: vec![],
             salience: 0.5,
             created_at: 1000,
         }]);
@@ -374,6 +376,7 @@ mod tests {
                 KeywordToken::new("编程").unwrap(),
             ],
             embedding: None,
+            evidence_notes: vec![],
             salience: 0.5,
             created_at: 1000,
         }]);
@@ -406,6 +409,7 @@ mod tests {
             summary: "xyznotfound".into(),
             keywords: vec![KeywordToken::new("xyznotfound").unwrap()],
             embedding: None,
+            evidence_notes: vec![],
             salience: 0.5,
             created_at: 1000,
         }]);

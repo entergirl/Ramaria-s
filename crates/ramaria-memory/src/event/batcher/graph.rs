@@ -468,6 +468,7 @@ mod tests {
             id: Uuid::new_v4(),
             summary: format!("summary_{}", keywords.join("_")),
             keywords: keywords.into_iter().filter_map(KeywordToken::new).collect(),
+            evidence_notes: vec![],
             embedding: None,
             salience,
             created_at: 1_000_000,
