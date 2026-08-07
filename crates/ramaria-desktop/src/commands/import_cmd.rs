@@ -452,6 +452,17 @@ pub async fn import_qq_chat(
     let total_sids = sids.len();
     let self_uid = self_persona_uid_resolved.clone();
     let other_uid = other_persona_uid_resolved.clone();
+    // 批量 LLM 请求间最小间隔（毫秒）：读 `[thresholds].cluster_delay_ms`，
+    // L1/L2 共用（`ramaria_memory::llm_gate::inter_llm_delay`）。
+    // 导入会连续 N×2 次调用 LLM，无节流时易触发远程 API 速率限制
+    // （2026-08-08 诊断：HTTP 200 + 空内容 → L1 摘要失败重试）。
+    // 读取失败时降级为 0（不阻塞导入，等同旧行为）。
+    let llm_delay_ms =
+        ramaria_app::ConfigSyncService::new(state.app.storage().clone(), state.config_path.clone())
+            .load_config_only()
+            .await
+            .map(|cfg| cfg.thresholds.cluster_delay_ms)
+            .unwrap_or(0);
     tokio::spawn(async move {
         // ── 生成全部 L1 摘要（无级联）──
         // （由 QQ parser 的 make_role_content 嵌入），故传空前缀避免"用户：""助手："双重前缀。
@@ -489,6 +500,10 @@ pub async fn import_qq_chat(
             }
             l1_processed += 1;
 
+            // 请求间节流（L1/L2 共用，`[thresholds].cluster_delay_ms`）：
+            // 连续 LLM 调用间保持最小间隔，避免触发远程 API 速率限制。
+            ramaria_memory::llm_gate::inter_llm_delay(llm_delay_ms, "L1 导入批量摘要 (self)").await;
+
             // ── 为对话方（other）生成 L1 ──
             match app
                 .regenerate_l1_no_cascade(*sid, Some(&other_uid), Some(""), Some(""))
@@ -504,6 +519,10 @@ pub async fn import_qq_chat(
                 }
             }
             l1_processed += 1;
+
+            // 请求间节流（同上）：self 与 other 各一次 LLM 调用，间隔保持 ≥ delay_ms。
+            ramaria_memory::llm_gate::inter_llm_delay(llm_delay_ms, "L1 导入批量摘要 (other)")
+                .await;
 
             // 每处理一个 session（2 个 persona）就推送进度
             app_handle

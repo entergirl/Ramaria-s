@@ -129,6 +129,15 @@ impl SessionLifecycle {
                     {
                         error!(%active_sid, %e, "自动关闭 session 失败");
                     }
+
+                    // 请求间节流（L1/L2 共用，`[thresholds].cluster_delay_ms`）：
+                    // 多个 session 同时超时会被连续封存（连续触发 L1 摘要 LLM 调用），
+                    // 保持最小间隔避免触发远程 API 速率限制。
+                    ramaria_memory::llm_gate::inter_llm_delay(
+                        slf.config.thresholds.cluster_delay_ms,
+                        "L1 空闲批量封存",
+                    )
+                    .await;
                 } else {
                     debug!(
                         %active_sid,

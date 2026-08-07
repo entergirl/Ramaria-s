@@ -4104,6 +4104,7 @@ dependencies = [
  "ramaria-core",
  "ramaria-importer",
  "ramaria-llm",
+ "ramaria-memory",
  "ramaria-storage",
  "serde",
  "serde_json",

@@ -19,6 +19,7 @@ ramaria-core = { path = "../ramaria-core" }
 ramaria-storage = { path = "../ramaria-storage" }
 ramaria-llm = { path = "../ramaria-llm", features = ["embedding-native"] }
 ramaria-importer = { path = "../ramaria-importer" }
+ramaria-memory = { path = "../ramaria-memory" }
 
 # ---------- Tauri 2 ----------
 tauri = { version = "2", features = ["tray-icon"] }

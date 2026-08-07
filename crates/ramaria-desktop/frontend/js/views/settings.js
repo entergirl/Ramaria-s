@@ -1226,7 +1226,7 @@ var RamariaSettingsView = (function () {
                 { path: ['l2_trigger_days'], label: 'L2 触发天数', type: 'number', min: 1, def: 7, hint: '最早未吸收 L1 超过此天数触发 L2' },
                 { path: ['l3_trigger_count'], label: 'L3 触发条数', type: 'number', min: 1, def: 10, hint: '未吸收事件达到此条数触发 L3 推断' },
                 { path: ['l3_trigger_days'], label: 'L3 触发天数', type: 'number', min: 1, def: 30, hint: '最早未吸收事件超过此天数触发 L3' },
-                { path: ['cluster_delay_ms'], label: '簇间延迟（毫秒）', type: 'number', min: 0, def: 800, hint: 'L2 事件提取簇间请求间隔，避免速率限制（DeepSeek 建议调大）' },
+                { path: ['cluster_delay_ms'], label: 'LLM 请求间隔（毫秒）', type: 'number', min: 0, def: 800, hint: '批量 LLM 请求间最小间隔（L1 导入/空闲封存摘要与 L2 事件提取共用），避免触发远程 API 速率限制（DeepSeek 建议调大）' },
             ],
         },
         {

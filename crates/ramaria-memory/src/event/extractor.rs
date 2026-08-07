@@ -509,15 +509,13 @@ impl<'a> EventExtractor<'a> {
             all_l1_ids.extend(cluster_l1_ids);
             debug!(%persona_uid, cluster_idx = ci, cluster_size, "簇 {} 处理完成", ci);
 
-            // 簇间延迟：避免触发远程 API 速率限制
-            if self.config.cluster_delay_ms > 0 {
-                debug!(%persona_uid, cluster_idx = ci, delay_ms = self.config.cluster_delay_ms,
-                    "簇间等待 {}ms", self.config.cluster_delay_ms);
-                tokio::time::sleep(std::time::Duration::from_millis(
-                    self.config.cluster_delay_ms,
-                ))
-                .await;
-            }
+            // 请求间节流（v1.4 抽象，L1/L2 共用）：避免触发远程 API 速率限制。
+            // 实现见 `crate::llm_gate::inter_llm_delay`（delay=0 时跳过）。
+            crate::llm_gate::inter_llm_delay(
+                self.config.cluster_delay_ms,
+                &format!("L2 簇间 cluster={ci}"),
+            )
+            .await;
         }
 
         // 5. 批量标记 L1 为 absorbed

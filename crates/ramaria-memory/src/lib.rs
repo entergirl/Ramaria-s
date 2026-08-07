@@ -17,6 +17,7 @@ pub mod init;
 pub mod job;
 pub mod keyword;
 pub mod l1;
+pub mod llm_gate;
 pub mod prompt;
 pub mod rag;
 pub mod rebuild;
