@@ -124,69 +124,68 @@ impl PipelineStage for StageRetrieveMemory {
             }
         };
 
-        if results.is_empty() {
-            tracing::debug!("无记忆上下文");
-            input.memory_context = None;
-            return Ok(input);
-        }
+        // 注：RAG 未命中不提前返回——utt 原文通道（5.5）独立于 RAG，仍需执行
+        if !results.is_empty() {
+            // ---- 5.3 时间衰减：rrf_score × Ebbinghaus decay ----
+            let now = now_ms();
+            let decay_config_l1 = DecayConfig::from_core(&ctx.config.decay, "l1");
+            let decay_config_l2 = DecayConfig::from_core(&ctx.config.decay, "l2");
 
-        // ---- 5.3 时间衰减：rrf_score × Ebbinghaus decay ----
-        let now = now_ms();
-        let decay_config_l1 = DecayConfig::from_core(&ctx.config.decay, "l1");
-        let decay_config_l2 = DecayConfig::from_core(&ctx.config.decay, "l2");
+            for r in &mut results {
+                let decay_config = if r.layer == "l2" {
+                    &decay_config_l2
+                } else {
+                    &decay_config_l1
+                };
 
-        for r in &mut results {
-            let decay_config = if r.layer == "l2" {
-                &decay_config_l2
+                // salience: SearchResult 不携带此字段，使用中性值 0.5
+                let salience = 0.5;
+                let decay_factor = calc_decay_r(r.created_at, now, salience, decay_config);
+                r.rrf_score *= decay_factor;
+
+                tracing::trace!(
+                    doc_id = %r.doc_id,
+                    layer = %r.layer,
+                    decay_factor = format!("{:.4}", decay_factor),
+                    rrf_adjusted = format!("{:.4}", r.rrf_score),
+                    "时间衰减已应用"
+                );
+            }
+
+            // 重新按衰减后 rrf_score 降序排序
+            results.sort_by(|a, b| {
+                b.rrf_score
+                    .partial_cmp(&a.rrf_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            // ---- 5.4 Persona-Aware 过滤 + 格式化 ----
+            let persona_kind = persona_uid
+                .map(PersonaKind::from_uid)
+                .unwrap_or(PersonaKind::Rama);
+
+            let rag_config = RagConfig::default();
+            let filtered = filter_by_persona(&results, persona_kind, &rag_config);
+
+            if filtered.is_empty() {
+                tracing::debug!("Persona-Aware 过滤后无结果");
+                input.memory_context = None;
             } else {
-                &decay_config_l1
-            };
+                let context = format_context_text(&filtered, &rag_config);
 
-            // salience: SearchResult 不携带此字段，使用中性值 0.5
-            let salience = 0.5;
-            let decay_factor = calc_decay_r(r.created_at, now, salience, decay_config);
-            r.rrf_score *= decay_factor;
+                tracing::debug!(
+                    total_results = results.len(),
+                    filtered = filtered.len(),
+                    context_chars = context.chars().count(),
+                    "记忆上下文已组装（含时间衰减）"
+                );
 
-            tracing::trace!(
-                doc_id = %r.doc_id,
-                layer = %r.layer,
-                decay_factor = format!("{:.4}", decay_factor),
-                rrf_adjusted = format!("{:.4}", r.rrf_score),
-                "时间衰减已应用"
-            );
-        }
-
-        // 重新按衰减后 rrf_score 降序排序
-        results.sort_by(|a, b| {
-            b.rrf_score
-                .partial_cmp(&a.rrf_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        // ---- 5.4 Persona-Aware 过滤 + 格式化 ----
-        let persona_kind = persona_uid
-            .map(PersonaKind::from_uid)
-            .unwrap_or(PersonaKind::Rama);
-
-        let rag_config = RagConfig::default();
-        let filtered = filter_by_persona(&results, persona_kind, &rag_config);
-
-        if filtered.is_empty() {
-            tracing::debug!("Persona-Aware 过滤后无结果");
+                input.memory_context = Some(context);
+            }
+        } else {
+            tracing::debug!("无记忆上下文（utt 通道继续）");
             input.memory_context = None;
-            return Ok(input);
         }
-
-        let context = format_context_text(&filtered, &rag_config);
-
-        tracing::debug!(
-            total_results = results.len(),
-            filtered = filtered.len(),
-            context_chars = context.chars().count(),
-            "记忆上下文已组装（含时间衰减）"
-        );
-
-        input.memory_context = Some(context);
 
         // ---- 5.5 utt 原文块检索（v1.4，原文通道） ----
         // 开关与白名单双闸门：关闭 / persona 类型不在白名单 → 不检索（行为回退 v1.3）。
@@ -450,22 +449,23 @@ mod tests {
     #[tokio::test]
     async fn utt_budget_trims_low_score_blocks() {
         // 预算裁剪：高相似度块保留，低分块整块丢弃
+        // 得分构造：query="命中话题散步"（3 tokens）；块1 命中 2 个、块2 命中 3 个 → 块2 确定排前
         let ctx = test_context(
             Arc::new(MockStorage::new()),
             Arc::new(MockLlm::local()),
             None,
         );
         seed_utt(&ctx, 1, "char-0001", "命中话题的第一块内容", None);
-        seed_utt(&ctx, 2, "char-0001", "命中话题的第二块内容", None);
+        seed_utt(&ctx, 2, "char-0001", "命中话题散步的第二块内容", None);
         let mut ctx = ctx;
-        ctx.config.utt.max_block_chars = 8; // 只够第一块
+        ctx.config.utt.max_block_chars = 12; // 只够最高分的一块（12 字符）
         let stage = StageRetrieveMemory::new();
-        let data = make_data("命中话题", Some("char-0001"));
+        let data = make_data("命中话题散步", Some("char-0001"));
 
         let output = stage.execute(&ctx, data).await.expect("should succeed");
         let text = output.utt_context.expect("有命中应注入");
-        assert!(text.contains("第一块"), "高分块保留");
-        assert!(!text.contains("第二块"), "超预算整块丢弃");
+        assert!(text.contains("第二块"), "高分块保留");
+        assert!(!text.contains("第一块"), "超预算整块丢弃");
     }
 
     #[tokio::test]

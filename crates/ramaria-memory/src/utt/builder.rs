@@ -640,7 +640,8 @@ mod tests {
             .await
             .unwrap();
 
-        // 新增消息与前一条间隔 2 小时（> θ_gap）→ 形成新块
+        // 新增消息与前一条间隔 2 小时（> θ_gap）→ 形成新块；
+        // 新块需含双方发言（单条 target 会因单边合并并入旧尾块）
         let last_time = storage
             .list_messages(session.id)
             .await
@@ -648,24 +649,36 @@ mod tests {
             .last()
             .unwrap()
             .created_at;
-        let msg = Message::new(
+        let gap_start = last_time + 2 * 3600 * 1000;
+        let user_msg = Message::new(
+            session.id,
+            MessageRole::User,
+            "隔天的新问题".to_string(),
+            MessageSource::Local,
+        );
+        let mut user_msg = user_msg;
+        user_msg.created_at = gap_start;
+        storage.save_message(&user_msg).await.unwrap();
+
+        let reply_msg = Message::new(
             session.id,
             MessageRole::Assistant,
-            "隔天新消息".to_string(),
+            "隔天的新回答内容".to_string(),
             MessageSource::Local,
         )
         .with_persona_uid(Some("char-0001".to_string()));
-        // 直接改时间戳模拟间隙（save_message 用 now_ms，此处手动构造后写库）
-        let mut m = msg;
-        m.created_at = last_time + 2 * 3600 * 1000;
-        storage.save_message(&m).await.unwrap();
+        let mut reply_msg = reply_msg;
+        reply_msg.created_at = gap_start + 60_000;
+        storage.save_message(&reply_msg).await.unwrap();
 
         let stats = builder
             .build_session(&storage, &session, None)
             .await
             .unwrap();
-        assert_eq!(stats.chunks_removed, 1);
-        assert_eq!(stats.chunks_created, 2, "旧尾块重切 + 新间隙块");
+        // 重切首块与库中最后一块一致（旧块无变化）→ 幂等跳过；间隙后的新块单独插入
+        assert_eq!(stats.chunks_skipped, 1, "旧尾块重切结果一致 → 跳过");
+        assert_eq!(stats.chunks_removed, 0);
+        assert_eq!(stats.chunks_created, 1, "间隙新块插入");
 
         let blocks = storage
             .list_utt_blocks_by_persona("char-0001")

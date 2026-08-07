@@ -525,6 +525,23 @@ pub trait StorageBackend: Send + Sync {
     async fn save_example(&self, e: &PersonaExample) -> RamariaResult<i64>;
     async fn list_selected_examples(&self, persona_uid: &str)
     -> RamariaResult<Vec<PersonaExample>>;
+    /// 查询 persona 的全部示例候选（不区分 selected，供评分轮换注入）。
+    ///
+    /// v1.4 新增默认实现：存量 mock 无需改动即可编译。
+    async fn list_all_examples(&self, _persona_uid: &str) -> RamariaResult<Vec<PersonaExample>> {
+        Ok(Vec::new())
+    }
+    /// 按 (partner, reply) 精确查重（examples 写侧幂等判定）。
+    ///
+    /// v1.4 新增默认实现：存量 mock 无需改动即可编译。
+    async fn find_example_by_pair(
+        &self,
+        _persona_uid: &str,
+        _partner: &str,
+        _reply: &str,
+    ) -> RamariaResult<Option<PersonaExample>> {
+        Ok(None)
+    }
 
     // -- Utt Blocks (原文话语块, v1.4) --
     /// 插入一条 utt 话语块，返回自增 id。

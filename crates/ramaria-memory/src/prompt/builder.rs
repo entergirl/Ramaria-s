@@ -1200,11 +1200,12 @@ mod tests {
     #[test]
     fn render_utt_context_trims_by_budget_keeping_high_score() {
         // 预算只够一块：高分的保留，低分的整块丢弃
+        // 块1 9 字符 ≤ 预算 10；块1+块2 = 9+5+2(空行) > 10 → 块2 被丢
         let hits = vec![
-            utt_hit(1, "char-0001", "第一块原文内容很长很长很长很长很长", 0.9),
-            utt_hit(2, "char-0001", "第二块", 0.8),
+            utt_hit(1, "char-0001", "第一块内容很长很长", 0.9),
+            utt_hit(2, "char-0001", "第二块内容", 0.8),
         ];
-        let out = render_utt_context(&hits, 15);
+        let out = render_utt_context(&hits, 10);
         assert!(out.contains("第一块"), "高分块保留");
         assert!(!out.contains("第二块"), "超预算整块丢弃");
     }

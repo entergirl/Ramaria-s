@@ -69,3 +69,49 @@ pub async fn list_selected(
         .map(|r| r.into_example())
         .collect::<RamariaResult<Vec<_>>>()
 }
+
+/// 候选池上限：防止长期使用后评分轮换退化（注入只取前 N 条，全量无意义）。
+const LIST_ALL_LIMIT: u32 = 500;
+
+/// 查询 persona 的全部示例候选（不区分 selected，供评分轮换）。
+///
+/// 说明:
+/// - 按创建时间降序，最多 [`LIST_ALL_LIMIT`] 条（候选池防御上限）。
+/// - `list_selected` 保留不动（v1.3 兼容路径，`examples.enabled=false` 时使用）。
+pub async fn list_all(pool: &SqlitePool, persona_uid: &str) -> RamariaResult<Vec<PersonaExample>> {
+    let rows = sqlx::query_as::<_, ExampleRow>(
+        "SELECT id, persona_uid, partner, reply, session_id, context, valence, tags, selected, length, created_at
+         FROM persona_examples WHERE persona_uid = ? ORDER BY created_at DESC LIMIT ?"
+    ).bind(persona_uid).bind(LIST_ALL_LIMIT).fetch_all(pool).await
+        .storage_err("查询示例候选池失败")?;
+    rows.into_iter()
+        .map(|r| r.into_example())
+        .collect::<RamariaResult<Vec<_>>>()
+}
+
+/// 按 (partner, reply) 精确查重：抽取入库前判定是否已存在。
+///
+/// 用途:
+/// - examples 写侧激活（v1.4）：重复回复对不重复入库（幂等）。
+///
+/// 返回:
+/// - `Ok(Some(ex))`: 已存在同对示例。
+/// - `Ok(None)`: 不存在（可入库）。
+pub async fn find_by_pair(
+    pool: &SqlitePool,
+    persona_uid: &str,
+    partner: &str,
+    reply: &str,
+) -> RamariaResult<Option<PersonaExample>> {
+    let row = sqlx::query_as::<_, ExampleRow>(
+        "SELECT id, persona_uid, partner, reply, session_id, context, valence, tags, selected, length, created_at
+         FROM persona_examples WHERE persona_uid = ? AND partner = ? AND reply = ? LIMIT 1"
+    )
+    .bind(persona_uid)
+    .bind(partner)
+    .bind(reply)
+    .fetch_optional(pool)
+    .await
+    .storage_err("查询示例查重失败")?;
+    row.map(|r| r.into_example()).transpose()
+}

@@ -13,6 +13,7 @@
 //! - Thread B → `l2_l3_scheduler::spawn_l2_l3_scheduler`
 //! - `force_close_current_session` → `save_and_close_session`
 
+pub mod example_extract;
 pub mod idle;
 pub mod l1_generate;
 pub mod l2_l3_scheduler;
@@ -274,6 +275,10 @@ impl SessionLifecycle {
                 // 失败降级记 warn 不阻塞封存（下次封存自动补齐）
                 self.build_utt_for_session(storage, active_sid).await;
 
+                // Step 2.6: examples 回复对抽取入库（v1.4，与 L1 同钩子）
+                // 失败降级记 warn 不阻塞封存（下次封存自动补齐）
+                self.extract_examples_for_session(storage, active_sid).await;
+
                 // Step 3: 检查 L2 触发条件（路径 A：即时触发）
                 // 对齐 Python summarizer 末尾的 `merger.check_and_merge`
                 self.check_l2_trigger(storage, llm).await;
@@ -391,6 +396,113 @@ impl SessionLifecycle {
                 );
             }
         }
+    }
+
+    /// examples 回复对抽取入库（封存钩子，v1.4）。
+    ///
+    /// 职责:
+    /// - 会话封存后抽取"对方消息 → persona 回复"相邻对（D-V14-004）入库为候选池。
+    /// - 入库前按 (partner, reply) 查重：重复回复对不重复入库（幂等）。
+    ///
+    /// 降级（不阻塞封存）:
+    /// - `examples.enabled=false` → 跳过（行为回退 v1.3）。
+    /// - 会话读取/抽取/入库失败 → warn 日志，下次封存自动补齐。
+    /// - 抽取结果为空（无有效回复对）→ 正常返回，记 debug。
+    ///
+    /// 安全约束:
+    /// - 日志只记录计数，不记录对话内容。
+    pub(super) async fn extract_examples_for_session(
+        &self,
+        storage: &dyn StorageBackend,
+        session_id: Uuid,
+    ) {
+        if !self.config.examples.enabled {
+            debug!(%session_id, "examples 配置关闭，跳过回复对抽取（等同 v1.3）");
+            return;
+        }
+
+        let session = match storage.get_session(session_id).await {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                warn!(%session_id, "封存会话不存在，跳过 examples 抽取");
+                return;
+            }
+            Err(e) => {
+                warn!(%session_id, %e, "读取会话失败，跳过 examples 抽取");
+                return;
+            }
+        };
+        let Some(persona_uid) = session.persona_uid.as_deref() else {
+            debug!(%session_id, "会话无绑定 persona，跳过 examples 抽取");
+            return;
+        };
+
+        let messages = match storage.list_messages(session_id).await {
+            Ok(m) => m,
+            Err(e) => {
+                warn!(%session_id, %e, "读取会话消息失败，跳过 examples 抽取");
+                return;
+            }
+        };
+
+        let pairs = example_extract::extract_pairs(&messages, persona_uid);
+        if pairs.is_empty() {
+            debug!(%session_id, "本会话无有效回复对，跳过入库");
+            return;
+        }
+
+        let mut saved = 0usize;
+        let mut skipped = 0usize;
+        for pair in pairs {
+            // 幂等查重：已存在相同回复对 → 跳过
+            match storage
+                .find_example_by_pair(persona_uid, &pair.partner, &pair.reply)
+                .await
+            {
+                Ok(Some(_)) => {
+                    skipped += 1;
+                    continue;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    warn!(%session_id, %e, "examples 查重失败，跳过该回复对");
+                    continue;
+                }
+            }
+
+            let mut example = ramaria_core::types::PersonaExample::new(
+                persona_uid.to_string(),
+                pair.partner,
+                pair.reply,
+            );
+            example.session_id = Some(session_id);
+            example.context = pair.context;
+            example.tags = if pair.tags.is_empty() {
+                None
+            } else {
+                Some(pair.tags)
+            };
+            // 新入库示例进入候选池（selected=false），
+            // 注入侧按评分轮换选择（T-V14-3-003），不再依赖静态 selected 标记。
+
+            match storage.save_example(&example).await {
+                Ok(id) => {
+                    saved += 1;
+                    info!(example_id = id, %session_id, persona_uid, "example 已入库");
+                }
+                Err(e) => {
+                    warn!(%session_id, %e, "example 入库失败（不阻塞封存）");
+                }
+            }
+        }
+
+        info!(
+            %session_id,
+            persona_uid,
+            saved,
+            skipped,
+            "examples 回复对抽取入库完成"
+        );
     }
 
     // =========================================================
@@ -547,5 +659,116 @@ mod tests {
         // 验证 retriever 已存储
         let guard = lifecycle.retriever.lock().unwrap();
         assert!(guard.is_some());
+    }
+
+    // =========================================================
+    // examples 回复对抽取入库（v1.4，T-V14-3-002）
+    // =========================================================
+
+    fn make_pair_messages(session_id: Uuid, target: &str) -> Vec<ramaria_core::types::Message> {
+        use ramaria_core::types::{Message, MessageRole, MessageSource};
+        let mut msgs = Vec::new();
+        for i in 0..2 {
+            msgs.push(Message::new(
+                session_id,
+                MessageRole::User,
+                format!("用户问题第{i}条内容"),
+                MessageSource::Local,
+            ));
+            msgs.push(
+                Message::new(
+                    session_id,
+                    MessageRole::Assistant,
+                    format!("角色回复第{i}条内容"),
+                    MessageSource::Local,
+                )
+                .with_persona_uid(Some(target.to_string())),
+            );
+        }
+        msgs
+    }
+
+    #[tokio::test]
+    async fn extract_examples_populates_pool() {
+        // 封存后：候选池增长（抽取 2 对入库）
+        let storage = Arc::new(crate::stages::test_utils::MockStorage::new());
+        let session = storage.create_session(Some("char-0001")).await.unwrap();
+        storage.add_messages(session.id, make_pair_messages(session.id, "char-0001"));
+        let lifecycle = SessionLifecycle::new(RamariaConfig::default());
+
+        lifecycle
+            .extract_examples_for_session(storage.as_ref(), session.id)
+            .await;
+
+        let pool = storage.list_all_examples("char-0001").await.unwrap();
+        assert_eq!(pool.len(), 2, "两对回复全部入库");
+        assert!(
+            pool.iter()
+                .all(|e| e.persona_uid == "char-0001" && e.session_id == Some(session.id)),
+            "归属与来源正确"
+        );
+    }
+
+    #[tokio::test]
+    async fn extract_examples_idempotent() {
+        // 重复执行：相同回复对不重复入库（幂等）
+        let storage = Arc::new(crate::stages::test_utils::MockStorage::new());
+        let session = storage.create_session(Some("char-0001")).await.unwrap();
+        storage.add_messages(session.id, make_pair_messages(session.id, "char-0001"));
+        let lifecycle = SessionLifecycle::new(RamariaConfig::default());
+
+        lifecycle
+            .extract_examples_for_session(storage.as_ref(), session.id)
+            .await;
+        lifecycle
+            .extract_examples_for_session(storage.as_ref(), session.id)
+            .await;
+
+        let pool = storage.list_all_examples("char-0001").await.unwrap();
+        assert_eq!(pool.len(), 2, "重复执行不产生重复入库");
+    }
+
+    #[tokio::test]
+    async fn extract_examples_disabled_skips() {
+        // 开关关闭 → 行为回退 v1.3（不抽取）
+        let storage = Arc::new(crate::stages::test_utils::MockStorage::new());
+        let session = storage.create_session(Some("char-0001")).await.unwrap();
+        storage.add_messages(session.id, make_pair_messages(session.id, "char-0001"));
+        let mut config = RamariaConfig::default();
+        config.examples.enabled = false;
+        let lifecycle = SessionLifecycle::new(config);
+
+        lifecycle
+            .extract_examples_for_session(storage.as_ref(), session.id)
+            .await;
+
+        assert!(
+            storage
+                .list_all_examples("char-0001")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn extract_examples_no_persona_skips() {
+        // 会话未绑定 persona（rama 自身）→ 不抽取（无目标回复对）
+        let storage = Arc::new(crate::stages::test_utils::MockStorage::new());
+        let session = storage.create_session(None).await.unwrap();
+        storage.add_messages(session.id, make_pair_messages(session.id, "char-0001"));
+        let lifecycle = SessionLifecycle::new(RamariaConfig::default());
+
+        lifecycle
+            .extract_examples_for_session(storage.as_ref(), session.id)
+            .await;
+
+        assert!(
+            storage
+                .list_all_examples("char-0001")
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

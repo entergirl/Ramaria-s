@@ -1753,6 +1753,8 @@ mod tests {
     #[test]
     fn index_utt_and_search_vector() {
         let mut r = Retriever::new();
+        // 过滤零相似度命中（相似度恰为 0 的块不应作为结果返回）
+        r.config_mut().vector.min_similarity = 0.01;
         r.index_utt(
             &make_utt_doc(1, "char-0001", "今天天气很好我们去公园吧", 1000),
             Some(vec![1.0, 0.0]),

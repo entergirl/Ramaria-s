@@ -43,6 +43,8 @@ pub struct MockStorage {
     l1_by_persona: Mutex<HashMap<String, Vec<MemoryL1>>>,
     privacy_consents: Mutex<Vec<PrivacyConsent>>,
     backend_config: Mutex<Option<BackendConfig>>,
+    examples: Mutex<Vec<PersonaExample>>,
+    next_example_id: Mutex<i64>,
 }
 
 impl Default for MockStorage {
@@ -59,6 +61,8 @@ impl MockStorage {
             l1_by_persona: Mutex::new(HashMap::new()),
             privacy_consents: Mutex::new(Vec::new()),
             backend_config: Mutex::new(None),
+            examples: Mutex::new(Vec::new()),
+            next_example_id: Mutex::new(1),
         }
     }
 
@@ -320,12 +324,57 @@ impl StorageBackend for MockStorage {
         Ok(Vec::new())
     }
 
-    async fn save_example(&self, _e: &PersonaExample) -> RamariaResult<i64> {
-        Ok(1)
+    async fn save_example(&self, e: &PersonaExample) -> RamariaResult<i64> {
+        let mut id_guard = self
+            .next_example_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let id = *id_guard;
+        *id_guard += 1;
+        let mut ex = e.clone();
+        ex.id = id;
+        self.examples
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(ex);
+        Ok(id)
     }
 
-    async fn list_selected_examples(&self, _uid: &str) -> RamariaResult<Vec<PersonaExample>> {
-        Ok(Vec::new())
+    async fn list_selected_examples(&self, uid: &str) -> RamariaResult<Vec<PersonaExample>> {
+        Ok(self
+            .examples
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|e| e.persona_uid == uid && e.selected)
+            .cloned()
+            .collect())
+    }
+
+    async fn list_all_examples(&self, uid: &str) -> RamariaResult<Vec<PersonaExample>> {
+        Ok(self
+            .examples
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|e| e.persona_uid == uid)
+            .cloned()
+            .collect())
+    }
+
+    async fn find_example_by_pair(
+        &self,
+        uid: &str,
+        partner: &str,
+        reply: &str,
+    ) -> RamariaResult<Option<PersonaExample>> {
+        Ok(self
+            .examples
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|e| e.persona_uid == uid && e.partner == partner && e.reply == reply)
+            .cloned())
     }
 
     async fn save_cluster_snapshot(&self, _s: &ClusterSnapshot) -> RamariaResult<i64> {

@@ -94,12 +94,22 @@ impl App {
             .expect("Stage 2 (CheckPrivacy) must set backend_config");
 
         // ---- Step 6: 构建 System Prompt（5-Block 装配器） ----
+        // examples 预选（v1.4）：评分轮换 + 记忆未命中兜底；enabled=false 回退 v1.3 静态注入
+        let examples = load_examples_for_input(
+            self.storage.as_ref(),
+            &self.config.examples,
+            persona_uid,
+            user_input,
+            memory_context.is_some(),
+        )
+        .await;
         let system_prompt = self
             .build_system_prompt_with_context(
                 persona_uid,
                 &recent_summaries,
                 last_active_at.as_deref(),
                 utt_context.as_deref(),
+                examples,
             )
             .await;
 
@@ -235,6 +245,7 @@ impl App {
     /// - `recent_summaries`: 近期 L1 摘要列表（预格式化文本）。
     /// - `last_active_at`: 最后活跃时间字符串（YYYY-MM-DD HH:MM 格式）。
     /// - `utt_context`: utt 原文片段（已按预算裁剪渲染；None 表示不注入，等同 v1.3）。
+    /// - `examples`: 已选好的 Few-shot 示例（由 `load_examples_for_input` 评分轮换/兜底后传入）。
     ///
     /// 降级策略:
     /// - storage 读取失败 → 记录 warn 日志，使用空数据继续。
@@ -250,6 +261,7 @@ impl App {
         recent_summaries: &[String],
         last_active_at: Option<&str>,
         utt_context: Option<&str>,
+        examples: Vec<ramaria_core::types::PersonaExample>,
     ) -> String {
         let actual_uid = persona_uid.unwrap_or("rama-0001");
 
@@ -287,14 +299,9 @@ impl App {
                     Vec::new()
                 });
 
-            let examples = self
-                .storage
-                .list_selected_examples(&p.uid)
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::warn!(persona_uid = %p.uid, %e, "加载 examples 失败，跳过");
-                    Vec::new()
-                });
+            // examples 由调用方（send_message）预选后传入：
+            // v1.4 起注入侧按话题/情绪/长度评分轮换（T-V14-3-003），
+            // 并在记忆检索未命中时作风格兜底（T-V14-3-004）。
 
             // 冷启动兜底：facts/traits 均为空时，尝试加载 persona.toml
             // 优先从 DB persona.config 读取，其次回退到文件系统
@@ -407,6 +414,84 @@ fn load_persona_toml_prompt(db_config: Option<&str>) -> Option<String> {
          你可以记住与用户的对话历史。如果用户提到之前聊过的内容，\
          请结合记忆上下文给出更有针对性的回复。"
     ))
+}
+
+/// 预选 Few-shot 示例（v1.4 examples 激活）。
+///
+/// 选择策略:
+/// - `examples.enabled=false` → 回退 v1.3：静态 `selected=1` 查询（`list_selected_examples`）。
+/// - `examples.enabled=true`：
+///   - 记忆检索命中（`memory_hit=true`）→ 不注入（避免与记忆内容重复，T-V14-3-004）；
+///   - 记忆未命中 → 从候选池按话题/情绪/长度评分轮换选择（T-V14-3-003），风格兜底。
+///
+/// 降级:
+/// - 候选池为空 / 存储失败 → 空列表（不注入，等同 v1.3）。
+/// - 评分选择不满足最低条数 → 空列表（example_selector 语义，不强制凑数）。
+///
+/// 安全约束:
+/// - 日志只记录数量，不记录示例内容。
+///
+/// 参数:
+/// - `persona_uid`: 人格 UID（None 表示 rama 自身，回退 "rama-0001"）。
+/// - `user_input`: 用户当前输入（话题匹配关键词来源）。
+/// - `memory_hit`: 记忆检索是否命中（RAG 上下文非空）。
+///
+/// 返回:
+/// - 注入用示例列表（最多 `[examples].max_examples` 条）。
+async fn load_examples_for_input(
+    storage: &dyn ramaria_core::traits::StorageBackend,
+    examples_cfg: &ramaria_core::config::ExamplesConfig,
+    persona_uid: Option<&str>,
+    user_input: &str,
+    memory_hit: bool,
+) -> Vec<ramaria_core::types::PersonaExample> {
+    use ramaria_memory::prompt::example_selector::{ExampleSelector, ExampleSelectorConfig};
+
+    let uid = persona_uid.unwrap_or("rama-0001");
+
+    // v1.3 兼容路径：静态 selected 注入（无条件）
+    if !examples_cfg.enabled {
+        return storage
+            .list_selected_examples(uid)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(persona_uid = %uid, %e, "加载 selected examples 失败，跳过");
+                Vec::new()
+            });
+    }
+
+    // v1.4 路径：记忆命中不重复注入（兜底语义）
+    if memory_hit {
+        tracing::debug!(persona_uid = %uid, "记忆检索命中，跳过 examples 兜底注入");
+        return Vec::new();
+    }
+
+    // 记忆未命中 → 候选池评分轮换（风格兜底）
+    let candidates = storage.list_all_examples(uid).await.unwrap_or_else(|e| {
+        tracing::warn!(persona_uid = %uid, %e, "加载 examples 候选池失败，跳过");
+        Vec::new()
+    });
+    if candidates.is_empty() {
+        tracing::debug!(persona_uid = %uid, "examples 候选池为空，跳过注入");
+        return Vec::new();
+    }
+
+    let keywords = ramaria_memory::prompt::example_selector::extract_keywords(user_input);
+    let keyword_refs: Vec<&str> = keywords.iter().map(|s| s.as_str()).collect();
+    let selector_config = ExampleSelectorConfig {
+        max_examples: examples_cfg.max_examples as usize,
+        ..ExampleSelectorConfig::default()
+    };
+
+    let selected = ExampleSelector::select(&candidates, &keyword_refs, 0.0, &selector_config);
+
+    tracing::debug!(
+        persona_uid = %uid,
+        candidates = candidates.len(),
+        selected = selected.len(),
+        "examples 评分轮换完成（记忆未命中兜底注入）"
+    );
+    selected
 }
 
 /// 文件系统回退: 优先尝试新路径 `../config/personas/rama-0001.toml`，其次旧路径 `../config/persona.toml`。
@@ -540,4 +625,260 @@ async fn stream_forward_task(
         duration_ms = now_ms() - now,
         "send_message 完成"
     );
+}
+
+// =========================================================
+// examples 预选测试（v1.4，T-V14-3-003/004）
+// =========================================================
+
+#[cfg(test)]
+mod examples_tests {
+    use super::load_examples_for_input;
+    use crate::stages::test_utils::MockStorage;
+    use ramaria_core::config::ExamplesConfig;
+    use ramaria_core::traits::StorageBackend;
+    use ramaria_core::types::PersonaExample;
+    use std::sync::Arc;
+
+    /// 构造候选示例（tags 逗号分隔）。
+    fn example(uid: &str, partner: &str, reply: &str, tags: Option<&str>) -> PersonaExample {
+        let mut e = PersonaExample::new(uid.to_string(), partner.to_string(), reply.to_string());
+        e.tags = tags.map(|s| s.to_string());
+        e
+    }
+
+    fn enabled_cfg(max_examples: u32) -> ExamplesConfig {
+        ExamplesConfig {
+            enabled: true,
+            max_examples,
+        }
+    }
+
+    #[tokio::test]
+    async fn miss_injects_scored_examples() {
+        // 记忆未命中 → 候选池评分轮换注入（风格兜底）
+        let storage = Arc::new(MockStorage::new());
+        storage
+            .save_example(&example(
+                "char-0001",
+                "今天天气好吗",
+                "很好呀我们出去玩吧",
+                Some("天气,公园"),
+            ))
+            .await
+            .unwrap();
+        storage
+            .save_example(&example(
+                "char-0001",
+                "晚上吃什么",
+                "火锅怎么样",
+                Some("晚餐,火锅"),
+            ))
+            .await
+            .unwrap();
+
+        let selected = load_examples_for_input(
+            storage.as_ref(),
+            &enabled_cfg(5),
+            Some("char-0001"),
+            "今天天气怎么样",
+            false,
+        )
+        .await;
+
+        assert!(!selected.is_empty(), "未命中应注入");
+        assert!(
+            selected.iter().any(|e| e.reply.contains("很好呀")),
+            "话题相关示例应入选"
+        );
+    }
+
+    #[tokio::test]
+    async fn hit_skips_injection() {
+        // 记忆检索命中 → 不重复注入
+        let storage = Arc::new(MockStorage::new());
+        storage
+            .save_example(&example("char-0001", "你好", "你好呀朋友", Some("问候")))
+            .await
+            .unwrap();
+
+        let selected = load_examples_for_input(
+            storage.as_ref(),
+            &enabled_cfg(5),
+            Some("char-0001"),
+            "你好",
+            true,
+        )
+        .await;
+        assert!(selected.is_empty(), "命中记忆时不重复注入");
+    }
+
+    #[tokio::test]
+    async fn empty_pool_skips_injection() {
+        let storage = Arc::new(MockStorage::new());
+        let selected = load_examples_for_input(
+            storage.as_ref(),
+            &enabled_cfg(5),
+            Some("char-0001"),
+            "任何话题",
+            false,
+        )
+        .await;
+        assert!(selected.is_empty(), "候选池为空不注入");
+    }
+
+    #[tokio::test]
+    async fn disabled_falls_back_to_selected() {
+        // v1.3 兼容：enabled=false → 静态 selected=1 无条件注入
+        let storage = Arc::new(MockStorage::new());
+        let mut sel = example("char-0001", "你好", "你好呀朋友", Some("问候"));
+        sel.selected = true;
+        storage.save_example(&sel).await.unwrap();
+        storage
+            .save_example(&example("char-0001", "未选中", "未选中的回复内容", None))
+            .await
+            .unwrap();
+
+        let selected = load_examples_for_input(
+            storage.as_ref(),
+            &ExamplesConfig {
+                enabled: false,
+                max_examples: 5,
+            },
+            Some("char-0001"),
+            "任意输入",
+            true, // 命中记忆也注入（v1.3 无条件语义）
+        )
+        .await;
+        assert_eq!(selected.len(), 1, "仅 selected=1 的示例注入");
+        assert_eq!(selected[0].partner, "你好");
+    }
+
+    #[tokio::test]
+    async fn disabled_no_selected_returns_empty() {
+        let storage = Arc::new(MockStorage::new());
+        storage
+            .save_example(&example("char-0001", "你好", "你好呀朋友", None))
+            .await
+            .unwrap();
+        let selected = load_examples_for_input(
+            storage.as_ref(),
+            &ExamplesConfig {
+                enabled: false,
+                max_examples: 5,
+            },
+            Some("char-0001"),
+            "你好",
+            false,
+        )
+        .await;
+        assert!(selected.is_empty(), "无 selected 示例 → 空");
+    }
+
+    #[tokio::test]
+    async fn topic_match_ranks_first() {
+        // 话题相关（tags 含查询关键词）的示例应排在无关示例之前
+        let storage = Arc::new(MockStorage::new());
+        storage
+            .save_example(&example(
+                "char-0001",
+                "无关话题",
+                "这是完全无关的回复内容",
+                Some("旅行"),
+            ))
+            .await
+            .unwrap();
+        storage
+            .save_example(&example(
+                "char-0001",
+                "编程问题",
+                "这个 bug 我帮你看看代码",
+                Some("编程,代码"),
+            ))
+            .await
+            .unwrap();
+
+        let selected = load_examples_for_input(
+            storage.as_ref(),
+            &enabled_cfg(5),
+            Some("char-0001"),
+            "帮我看看这段代码",
+            false,
+        )
+        .await;
+        assert!(!selected.is_empty());
+        assert_eq!(
+            selected[0].tags.as_deref().unwrap(),
+            "编程,代码",
+            "话题相关排前"
+        );
+    }
+
+    #[tokio::test]
+    async fn max_examples_respected() {
+        let storage = Arc::new(MockStorage::new());
+        for i in 0..4 {
+            storage
+                .save_example(&example(
+                    "char-0001",
+                    &format!("问题{i}"),
+                    &format!("这是第{i}条回复内容"),
+                    None,
+                ))
+                .await
+                .unwrap();
+        }
+        let selected = load_examples_for_input(
+            storage.as_ref(),
+            &enabled_cfg(2),
+            Some("char-0001"),
+            "随便聊聊",
+            false,
+        )
+        .await;
+        assert_eq!(selected.len(), 2, "max_examples=2 生效");
+    }
+
+    #[tokio::test]
+    async fn no_persona_falls_back_to_rama() {
+        // persona_uid=None（rama 自身会话）→ 查 rama-0001 候选池
+        let storage = Arc::new(MockStorage::new());
+        storage
+            .save_example(&example("rama-0001", "你好", "你好呀我是助手", None))
+            .await
+            .unwrap();
+        let selected =
+            load_examples_for_input(storage.as_ref(), &enabled_cfg(5), None, "你好", false).await;
+        assert!(!selected.is_empty(), "rama 自身也参与兜底");
+    }
+
+    #[tokio::test]
+    async fn scoring_uses_tags_without_llm() {
+        // 评分纯规则（无 LLM）：相同话题多候选时按 tag 命中数排序
+        let storage = Arc::new(MockStorage::new());
+        storage
+            .save_example(&example("char-0001", "A", "回复内容甲", Some("天气")))
+            .await
+            .unwrap();
+        storage
+            .save_example(&example(
+                "char-0001",
+                "B",
+                "回复内容乙",
+                Some("天气,公园,散步"),
+            ))
+            .await
+            .unwrap();
+
+        let selected = load_examples_for_input(
+            storage.as_ref(),
+            &enabled_cfg(5),
+            Some("char-0001"),
+            "今天天气好去公园散步",
+            false,
+        )
+        .await;
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].partner, "B", "tags 命中更多的示例排前");
+    }
 }

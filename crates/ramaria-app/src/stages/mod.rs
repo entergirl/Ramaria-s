@@ -17,7 +17,8 @@ pub mod retrieve_memory;
 pub mod token_budget;
 
 #[cfg(test)]
-mod test_utils;
+#[cfg(test)]
+pub(crate) mod test_utils;
 
 // re-export 全部 Stage 供外部使用
 pub use build_prompt::StageBuildPrompt;

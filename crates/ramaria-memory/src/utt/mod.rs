@@ -61,10 +61,11 @@ pub struct UttChunk {
 /// 判断消息是否为"目标 persona 发言"。
 ///
 /// 规则:
-/// - 系统/工具消息不是对话发言，恒为 false（切分前已被过滤，此处防御）。
+/// - 仅 Assistant 角色的消息可能成为目标发言（User/System/Tool 恒非目标，
+///   即使携带目标 persona_uid——导入数据可能给用户消息带 uid，但发言权属于角色）。
 /// - `target` 为 Some(uid) 时：`msg.persona_uid == Some(uid)` 才算目标发言
 ///   （其他 assistant 消息视为对方侧，避免跨 persona 混淆）。
-/// - `target` 为 None（rama 自身会话）时：无 persona_uid 的消息视为目标发言。
+/// - `target` 为 None（rama 自身会话）时：无 persona_uid 的 assistant 消息视为目标发言。
 ///
 /// 参数:
 /// - `msg`: 消息。
@@ -73,12 +74,12 @@ pub struct UttChunk {
 /// 返回:
 /// - 是否为目标 persona 的发言。
 pub fn is_target_speech(msg: &Message, target: Option<&str>) -> bool {
-    match msg.role {
-        MessageRole::System | MessageRole::Tool => false,
-        _ => match target {
-            Some(uid) => msg.persona_uid.as_deref() == Some(uid),
-            None => msg.persona_uid.is_none(),
-        },
+    if msg.role != MessageRole::Assistant {
+        return false;
+    }
+    match target {
+        Some(uid) => msg.persona_uid.as_deref() == Some(uid),
+        None => msg.persona_uid.is_none(),
     }
 }
 

@@ -165,7 +165,7 @@ mod tests {
 
     /// 构造测试消息：persona_uid 为 Some(uid) 表示 target 发言，None 表示用户。
     fn msg(created_at: i64, persona_uid: Option<&str>) -> Message {
-        Message::new(
+        let mut m = Message::new(
             uuid::Uuid::new_v4(),
             if persona_uid.is_some() {
                 MessageRole::Assistant
@@ -175,7 +175,10 @@ mod tests {
             format!("msg@{}", created_at),
             MessageSource::Local,
         )
-        .with_persona_uid(persona_uid.map(|s| s.to_string()))
+        .with_persona_uid(persona_uid.map(|s| s.to_string()));
+        // Message::new 使用 now_ms()，测试需显式覆盖以模拟时间间隙/乱序场景
+        m.created_at = created_at;
+        m
     }
 
     /// 连续消息序列（间隔 1 分钟），target 发言穿插。
@@ -250,11 +253,10 @@ mod tests {
     fn max_count_splits() {
         let msgs = continuous(TARGET, 9);
         let chunks = split_messages(&msgs, Some(TARGET), &cfg(30, 4));
-        // 9 条 / 每块 4 条 → 4+4+1 三块（单边交替，合并后每块均含双方 → 不合并）
-        assert_eq!(chunks.len(), 3);
+        // 9 条 / 每块 4 条 → 候选 4+4+1；末块单条 target 单边 → 并入第二块 → 2 块
+        assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].msg_count, 4);
-        assert_eq!(chunks[1].msg_count, 4);
-        assert_eq!(chunks[2].msg_count, 1);
+        assert_eq!(chunks[1].msg_count, 5, "单边末块并入相邻块");
     }
 
     #[test]
@@ -310,17 +312,18 @@ mod tests {
 
     #[test]
     fn single_side_block_merges_into_previous() {
-        // 块结构：[双方 3 条] [纯 target 2 条] [双方 2 条]，上限 3 → 第二块单边
+        // 块结构：[双方 3 条] [纯 target 2 条]（2 小时间隙分隔）[双方 2 条]
+        // 中间块（纯 target）单边 → 并入前一块
         let mut msgs = continuous(TARGET, 3);
         let t = msgs.last().unwrap().created_at + 60_000;
         msgs.push(msg(t, Some(TARGET)));
         msgs.push(msg(t + 60_000, Some(TARGET)));
-        let t2 = msgs.last().unwrap().created_at + 60_000;
-        msgs.push(msg(t2, None));
-        msgs.push(msg(t2 + 60_000, Some(TARGET)));
+        // 2 小时间隙（> θ_gap）→ 后续消息开新块，块2 保持纯 target
+        let t5 = msgs.last().unwrap().created_at + 2 * 3600 * 1000;
+        msgs.push(msg(t5, None));
+        msgs.push(msg(t5 + 60_000, Some(TARGET)));
 
         let chunks = split_messages(&msgs, Some(TARGET), &cfg(30, 3));
-        // 第二块（纯 target）并入第一块 → 两块
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].msg_count, 5, "单边块并入前一块");
         assert_eq!(chunks[1].msg_count, 2);
@@ -356,7 +359,9 @@ mod tests {
     #[test]
     fn all_target_speech_keeps_single_block() {
         // 全会话只有 target 发言：合并后仍单边，保留单块
-        let msgs = continuous(TARGET, 6);
+        let msgs: Vec<Message> = (0..6)
+            .map(|i| msg(1_000_000 + i as i64 * 60_000, Some(TARGET)))
+            .collect();
         let chunks = split_messages(&msgs, Some(TARGET), &cfg(30, 2));
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].msg_count, 6);
@@ -373,14 +378,11 @@ mod tests {
     #[test]
     fn merge_can_exceed_max_count() {
         // 单边合并优先于条数上限：合并后块可超过 max_msgs_per_block
-        let mut msgs = vec![msg(1000, Some(TARGET)), msg(60_000, Some(TARGET))];
-        for i in 2..8 {
-            msgs.push(msg(
-                i as i64 * 60_000,
-                if i % 2 == 0 { Some(TARGET) } else { None },
-            ));
-        }
+        let msgs: Vec<Message> = (0..8)
+            .map(|i| msg(1000 + i as i64 * 60_000, Some(TARGET)))
+            .collect();
         let chunks = split_messages(&msgs, Some(TARGET), &cfg(30, 3));
+        // 8 条全 target → 候选 3+3+2 全单边 → 合并收敛为一块（8 > 上限 3）
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].msg_count, 8, "合并突破上限但保留完整消息");
     }
@@ -404,10 +406,22 @@ mod tests {
     #[test]
     fn none_target_session_uses_no_persona_uid() {
         // rama 自身会话（target=None）：无 persona_uid 的 assistant 消息算目标发言
+        // 注意：splitter 测试的 msg helper 将 None → User 角色；
+        // 这里显式构造 Assistant + 无 uid（rama 自身发言的表示）
+        fn asst_no_uid(t: i64) -> Message {
+            let mut m = Message::new(
+                uuid::Uuid::new_v4(),
+                MessageRole::Assistant,
+                format!("rama@{t}"),
+                MessageSource::Local,
+            );
+            m.created_at = t;
+            m
+        }
         let msgs = vec![
-            msg(1000, None),
+            asst_no_uid(1000),
             msg(60_000, Some("char-0001")), // 其他 persona：非目标
-            msg(120_000, None),
+            asst_no_uid(120_000),
         ];
         let chunks = split_messages(&msgs, None, &cfg(30, 40));
         assert_eq!(chunks.len(), 1, "含无 uid 发言 → 保留");
@@ -428,10 +442,9 @@ mod tests {
         msgs.push(msg(msgs.last().unwrap().created_at + 60_000, None));
         msgs.push(msg(msgs.last().unwrap().created_at + 60_000, None));
         let chunks = split_messages(&msgs, Some(TARGET), &cfg(30, 3));
-        assert_eq!(chunks.len(), 2, "前 3 条一块，后 2 条纯用户并入相邻");
-        // 末块纯用户 → 并入前块 → 一块
+        // 末块（纯用户）单边 → 并入前块 → 一块 5 条
+        assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].msg_count, 5);
-        assert_eq!(chunks.len(), 1, "验证合并");
     }
 
     #[test]
