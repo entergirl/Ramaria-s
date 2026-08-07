@@ -127,14 +127,19 @@ pub fn truncate_at_boundary(text: &str, max_chars: usize) -> String {
     }
 }
 
-/// 在字符串中查找最后一个句子终止符的位置。
+/// 在字符串中查找最后一个句子终止符的位置（返回**字符**索引）。
 ///
 /// 句子终止符: `。` `！` `？` `\n`
+///
+/// 说明:
+/// - `char_indices` 返回的是字节偏移，此处换算为字符索引，
+///   供调用方 `truncate_at_boundary` 按 `chars().take(end)` 使用，
+///   避免多字节（中文）场景下截断长度超预算。
 fn find_last_sentence_boundary(text: &str) -> Option<usize> {
     text.char_indices()
         .rev()
         .find(|(_, ch)| matches!(ch, '。' | '！' | '？' | '\n'))
-        .map(|(idx, _)| idx)
+        .map(|(idx, _)| text[..idx].chars().count())
 }
 
 // =========================================================

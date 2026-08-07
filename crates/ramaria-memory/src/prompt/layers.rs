@@ -211,7 +211,10 @@ pub fn allocate_memory_layer_budget(
             used += chars;
         } else if used < budget_chars {
             let remaining = budget_chars - used;
-            out.rag = Some(truncate_at_boundary(rag_text, remaining));
+            // `truncate_at_boundary` 在句子边界恰在窗口末尾时可能返回 max+1 字符
+            // （含省略号），此处 clamp 保证预算不超支（防御）。
+            let trimmed = truncate_at_boundary(rag_text, remaining);
+            out.rag = Some(fit_chars(trimmed, remaining));
             used += out.rag.as_ref().map_or(0, |s| s.chars().count());
         }
     }
@@ -248,6 +251,7 @@ pub fn allocate_memory_layer_budget(
 /// 规则（与 `builder::render_utt_context` 一致）:
 /// - 以空行（`\n\n`）切块，从头部（高分）整块累加。
 /// - 首个超预算的块及其后全部丢弃（不做块内截断）。
+/// - 块间分隔符（`\n\n`）计入预算，保证输出总长 ≤ `max_chars`。
 ///
 /// 参数:
 /// - `text`: 已渲染的原文片段（块间以空行分隔，降序）。
@@ -265,14 +269,29 @@ fn keep_high_score_blocks(text: &str, max_chars: usize) -> String {
             continue;
         }
         let chars = b.chars().count();
-        if used + chars > max_chars {
+        // 分隔符计费：非首块需额外 2 字符（`\n\n`），保证输出总长 ≤ 预算
+        let sep_cost = if kept.is_empty() { 0 } else { 2 };
+        if used + sep_cost + chars > max_chars {
             break;
         }
+        used += sep_cost + chars;
         kept.push(b);
-        used += chars;
     }
 
     kept.join(BLOCK_SEPARATOR)
+}
+
+/// 将文本裁剪到不超过 `max_chars` 字符（超出时取前部，防御性 clamp）。
+///
+/// 用途: 上游截断函数（如 `truncate_at_boundary`）在边界条件下可能返回
+/// `max + 1` 字符，预算分配器统一在此收紧，保证脉络层总长 ≤ 预算。
+fn fit_chars(text: String, max_chars: usize) -> String {
+    let count = text.chars().count();
+    if count <= max_chars {
+        text
+    } else {
+        text.chars().take(max_chars).collect()
+    }
 }
 
 /// 从文本尾部（最近内容）截取最多 `max_chars` 字符。
@@ -290,6 +309,10 @@ fn keep_high_score_blocks(text: &str, max_chars: usize) -> String {
 /// 返回:
 /// - 尾部截取文本（带 `…` 前缀）。
 fn take_tail(text: &str, max_chars: usize) -> String {
+    // 防御：预算为 0 时直接返回空（不产生 `…` 占位）
+    if max_chars == 0 {
+        return String::new();
+    }
     let total = text.chars().count();
     if total <= max_chars {
         return text.to_string();
@@ -542,6 +565,17 @@ mod tests {
     }
 
     #[test]
+    fn keep_blocks_charges_separator_to_budget() {
+        // 分隔符计费：块各 3 字符，max=7 时块1(3)+分隔(2)+块2(3)=8 > 7 → 只保留块1
+        let kept = keep_high_score_blocks("AAA\n\nBBB", 7);
+        assert_eq!(kept, "AAA", "分隔符计入预算");
+        assert!(kept.chars().count() <= 7, "输出总长 ≤ 预算");
+        // max=8 时可容纳两块
+        let kept2 = keep_high_score_blocks("AAA\n\nBBB", 8);
+        assert_eq!(kept2, "AAA\n\nBBB");
+    }
+
+    #[test]
     fn keep_blocks_skips_blank_segments() {
         let text = "块一\n\n\n\n块二";
         let kept = keep_high_score_blocks(text, 100);
@@ -569,6 +603,35 @@ mod tests {
         let tail = take_tail("没有换行的长文本内容", 5);
         assert!(tail.starts_with('…'));
         assert_eq!(tail.chars().count(), 5, "结果总长 ≤ 预算（含省略号）");
+    }
+
+    #[test]
+    fn take_tail_zero_budget_returns_empty() {
+        assert_eq!(take_tail("任何内容", 0), "", "预算 0 不产生省略号占位");
+    }
+
+    #[test]
+    fn fit_chars_clamps_over_budget() {
+        assert_eq!(fit_chars("短文本".to_string(), 100), "短文本");
+        let clamped = fit_chars("超预算文本内容".to_string(), 4);
+        assert_eq!(clamped.chars().count(), 4);
+        assert_eq!(fit_chars(String::new(), 0), "");
+    }
+
+    #[test]
+    fn rag_truncation_never_exceeds_budget() {
+        // 句子边界恰在窗口末尾：truncate_at_boundary 可能返回 max+1，clamp 后不超支
+        let out = allocate_memory_layer_budget(
+            Some("原文内容"),
+            Some("桥接内容"),
+            &["摘要".to_string()],
+            Some("第一句。第二句。第三句。"),
+            8,
+        );
+        let rag = out.rag.expect("RAG 应保留");
+        assert!(rag.chars().count() <= 5, "RAG 截断不超预算: {rag}");
+        // 摘要(2) + RAG(≤5) ≤ 8；桥接/原文因预算耗尽不注入
+        assert_eq!(out.summaries, vec!["摘要"]);
     }
 
     // ---- 槽位预留（T-V14-6-003） ----

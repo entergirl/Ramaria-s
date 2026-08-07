@@ -374,11 +374,10 @@ var RamariaSettingsView = (function () {
             cfg.backend.online_memory_injection = box.checked;
 
             var result = await RamariaApi.config.updateFull(cfg);
-            if (result && result.fileOk === false && result.dbOk === false) {
+            if (!_handleUpdateFullResult(result, '记忆注入设置已保存')) {
                 throw new Error('配置双写均失败');
             }
             _fullConfig = cfg;
-            RamariaToast.show('success', '记忆注入设置已保存');
         } catch (err) {
             RamariaToast.show('error', '保存失败', err.message || '未知错误');
         }
@@ -440,11 +439,10 @@ var RamariaSettingsView = (function () {
             cfg.paths.data_dir = input.value.trim();
 
             var result = await RamariaApi.config.updateFull(cfg);
-            if (result && result.fileOk === false && result.dbOk === false) {
+            if (!_handleUpdateFullResult(result, '数据目录已保存（重启后生效）')) {
                 throw new Error('配置双写均失败');
             }
             _fullConfig = cfg;
-            RamariaToast.show('success', '数据目录已保存（重启后生效）');
         } catch (err) {
             RamariaToast.show('error', '保存失败', err.message || '未知错误');
         }
@@ -1523,10 +1521,45 @@ var RamariaSettingsView = (function () {
                     RamariaToast.show('warning', f.label + ' 不是有效数字');
                     return null;
                 }
+                // 范围校验（HTML min/max 在无 form 提交时不生效，需显式检查）
+                if (f.min !== undefined && value < f.min) {
+                    RamariaToast.show('warning', f.label + ' 不能小于 ' + f.min);
+                    return null;
+                }
+                if (f.max !== undefined && value > f.max) {
+                    RamariaToast.show('warning', f.label + ' 不能大于 ' + f.max);
+                    return null;
+                }
             }
             entries.push({ path: f.path, value: value });
         }
         return entries;
+    }
+
+    /**
+     * 统一处理 updateFull 双写结果（决策 D-V14-006：单侧写失败降级不阻塞，但需明确提示）。
+     *
+     * 返回:
+     * - `true`: 至少一侧生效（含单侧失败降级提示）。
+     * - `false`: 双写均失败（致命，调用方应报错）。
+     */
+    function _handleUpdateFullResult(result, okMsg) {
+        if (!result) return true;
+        if (result.fileOk === false && result.dbOk === false) return false;
+        if (result.fileOk === false) {
+            RamariaToast.show('warning', okMsg + '（config.toml 同步失败，数据库侧已生效；下次启动校验会提示不一致）');
+            return true;
+        }
+        if (result.dbOk === false) {
+            RamariaToast.show('warning', okMsg + '（数据库侧同步失败，config.toml 已生效）');
+            return true;
+        }
+        if (result.failures && result.failures.length > 0) {
+            RamariaToast.show('warning', okMsg + '（部分同步项失败：' + result.failures.join('；') + '）');
+            return true;
+        }
+        RamariaToast.show('success', okMsg);
+        return true;
     }
 
     /**
@@ -1546,11 +1579,10 @@ var RamariaSettingsView = (function () {
             }
 
             var result = await RamariaApi.config.updateFull(cfg);
-            if (result && result.fileOk === false && result.dbOk === false) {
+            if (!_handleUpdateFullResult(result, group.title + ' 已保存')) {
                 throw new Error('配置双写均失败');
             }
             _fullConfig = cfg;
-            RamariaToast.show('success', group.title + ' 已保存');
         } catch (err) {
             RamariaToast.show('error', '保存失败', err.message || '未知错误');
         }
@@ -1571,12 +1603,11 @@ var RamariaSettingsView = (function () {
             }
 
             var result = await RamariaApi.config.updateFull(cfg);
-            if (result && result.fileOk === false && result.dbOk === false) {
+            if (!_handleUpdateFullResult(result, group.title + ' 已恢复默认并保存')) {
                 throw new Error('配置双写均失败');
             }
             _fullConfig = cfg;
             _fillAdvancedForm(group, cfg);
-            RamariaToast.show('success', group.title + ' 已恢复默认并保存');
         } catch (err) {
             RamariaToast.show('error', '恢复默认失败', err.message || '未知错误');
         }
