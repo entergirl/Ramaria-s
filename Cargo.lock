@@ -4067,6 +4067,7 @@ dependencies = [
  "ramaria-core",
  "ramaria-importer",
  "ramaria-llm",
+ "ramaria-memory",
  "ramaria-storage",
  "reqwest 0.12.28",
  "serde",

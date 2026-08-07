@@ -106,6 +106,10 @@ enum Commands {
     #[command(subcommand)]
     Index(IndexCmd),
 
+    /// utt 话语块管理（探针切分参数定稿后重建）
+    #[command(subcommand)]
+    Utt(UttCmd),
+
     /// 数据导出
     Export {
         /// 导出格式: json / markdown
@@ -230,6 +234,18 @@ enum PersonaCmd {
 enum IndexCmd {
     /// 重建检索索引
     Rebuild,
+}
+
+/// utt 话语块管理子命令。
+#[derive(Subcommand)]
+enum UttCmd {
+    /// 重建全部会话的 utt 话语块
+    Rebuild {
+        /// 强制模式：先清空全部旧块再全量重切
+        /// （切分参数 θ_gap / 条数上限变更后必须使用）
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 // =========================================================
@@ -421,6 +437,11 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
         Commands::Index(sub) => match sub {
             IndexCmd::Rebuild => {
                 commands::index_cmd::run(app).await?;
+            }
+        },
+        Commands::Utt(sub) => match sub {
+            UttCmd::Rebuild { force } => {
+                commands::utt::run(app, commands::utt::UttCmd::Rebuild { force }).await?;
             }
         },
         Commands::Persona(sub) => {

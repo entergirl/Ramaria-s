@@ -330,3 +330,110 @@ async fn send_message_with_explicit_session_id() {
     let msgs = storage.list_messages(sid).await.unwrap();
     assert!(!msgs.is_empty(), "消息应已写入指定 session");
 }
+
+// =========================================================
+// v1.4 截断修复：L1 摘要 max_tokens 从 backend_config 传播
+// =========================================================
+
+/// backend_config.max_tokens ≥ L1 默认值时，L1 摘要请求使用 backend 值
+/// （默认 512 对 evidence_notes 结构化 JSON 输出过紧，易被截断）。
+#[tokio::test]
+async fn l1_summary_uses_backend_config_max_tokens() {
+    use ramaria_memory::l1::L1SummarizerConfig;
+
+    // MockLlm 需返回合法 L1 JSON，确保 save_and_close 走完整成功路径
+    const L1_JSON: &str = r#"{"summary":"用户讨论了项目安排","keywords":"项目,排期","time_period":"下午","atmosphere":"紧张","valence":0.0,"salience":0.5}"#;
+    let storage = Arc::new(MockStorage::new());
+    let llm = Arc::new(MockLlm::new(L1_JSON));
+    let config = RamariaConfig::default();
+    let keychain = Arc::new(Keychain::new());
+    let app = App::new_without_embedding(
+        Arc::clone(&storage) as Arc<dyn StorageBackend>,
+        Arc::clone(&llm) as Arc<dyn ramaria_core::traits::LlmProvider>,
+        config,
+        keychain,
+    );
+    app.set_state(AppState::Ready);
+
+    // 自定义 backend_config：max_tokens = 2048（高于 L1 默认值）
+    let mut bc = BackendConfig::lm_studio_default();
+    bc.max_tokens = 2048;
+    storage.save_backend_config(&bc).await.unwrap();
+
+    // 发送消息创建活跃 session（drain 流等待消息保存完成）
+    use futures::StreamExt;
+    let mut stream = app.send_message("你好", None, None).await.unwrap();
+    while let Some(event_result) = stream.next().await {
+        if matches!(event_result, Ok(ramaria_app::StreamEvent::Done { .. })) {
+            break;
+        }
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        app.get_active_session_id().is_some(),
+        "send_message 后应有活跃 session"
+    );
+
+    app.save_and_close_session(None).await.unwrap();
+
+    let last = llm
+        .last_request()
+        .expect("save_and_close 应触发 L1 摘要请求");
+    assert_eq!(
+        last.max_tokens,
+        2048,
+        "L1 摘要应使用 backend_config.max_tokens（2048），而非 L1 默认 {}",
+        L1SummarizerConfig::default().max_tokens
+    );
+}
+
+/// backend_config.max_tokens 低于 L1 默认值时，钳制到 L1 默认值，
+/// 防止用户将 chat max_tokens 配得过小时破坏 L1 完整 JSON 输出。
+#[tokio::test]
+async fn l1_summary_max_tokens_has_floor() {
+    use ramaria_memory::l1::L1SummarizerConfig;
+
+    const L1_JSON: &str = r#"{"summary":"用户讨论了项目安排","keywords":"项目,排期","time_period":"下午","atmosphere":"紧张","valence":0.0,"salience":0.5}"#;
+    let storage = Arc::new(MockStorage::new());
+    let llm = Arc::new(MockLlm::new(L1_JSON));
+    let config = RamariaConfig::default();
+    let keychain = Arc::new(Keychain::new());
+    let app = App::new_without_embedding(
+        Arc::clone(&storage) as Arc<dyn StorageBackend>,
+        Arc::clone(&llm) as Arc<dyn ramaria_core::traits::LlmProvider>,
+        config,
+        keychain,
+    );
+    app.set_state(AppState::Ready);
+
+    // 自定义 backend_config：max_tokens = 128（低于 L1 默认值 1024）
+    let mut bc = BackendConfig::lm_studio_default();
+    bc.max_tokens = 128;
+    storage.save_backend_config(&bc).await.unwrap();
+
+    // 发送消息创建活跃 session（drain 流等待消息保存完成）
+    use futures::StreamExt;
+    let mut stream = app.send_message("你好", None, None).await.unwrap();
+    while let Some(event_result) = stream.next().await {
+        if matches!(event_result, Ok(ramaria_app::StreamEvent::Done { .. })) {
+            break;
+        }
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        app.get_active_session_id().is_some(),
+        "send_message 后应有活跃 session"
+    );
+
+    app.save_and_close_session(None).await.unwrap();
+
+    let floor = L1SummarizerConfig::default().max_tokens;
+    let last = llm
+        .last_request()
+        .expect("save_and_close 应触发 L1 摘要请求");
+    assert_eq!(
+        last.max_tokens, floor,
+        "L1 摘要 max_tokens 不应低于 L1 默认值（{floor}），实际 {}",
+        last.max_tokens
+    );
+}

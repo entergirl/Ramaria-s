@@ -3,7 +3,11 @@
 /target-*/
 
 # 本地数据库文件
-/.ramaria-dev/
+# 注意: 不用前导斜杠——运行时数据目录可能出现在任意 crate 下
+# （如 crates/ramaria-desktop/.ramaria-dev/，tauri dev 运行时创建），
+# 前导 / 会把模式锚定在仓库根目录导致子目录不被忽略。
+# 目录名以点开头（.ramaria-dev），模式必须包含该点。
+.ramaria-dev/
 /data/
 *.db
 *.sqlite

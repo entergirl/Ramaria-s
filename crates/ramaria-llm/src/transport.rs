@@ -152,12 +152,22 @@ impl OpenAiTransport {
         max_tokens: u32,
     ) -> RamariaResult<String> {
         let url = format!("{}/chat/completions", self.base_url);
+        // 关闭思考模式（thinking disabled）：
+        // - deepseek-v4-flash 默认开启思考（官方文档 thinking_mode：默认 enabled，
+        //   effort=high），思考内容（reasoning_content）消耗输出预算；
+        //   在 max_tokens 较小（如 L1 摘要 512）时思考即可耗尽预算，
+        //   导致 content 为空或截断（2026-08-08 实测 reasoning_len=30556 后 content 空）。
+        // - 本函数服务全部结构化提取任务（L1 摘要/L2 事件提取/L3 推断/冷启动），
+        //   不需要链式思考；关闭后 temperature 参数也恢复生效（思考模式下
+        //   temperature/top_p 等参数无效，官方文档 Input and Output Parameters）。
+        // - 对话路径（chat_stream）保持默认思考模式不受影响。
         let body = serde_json::json!({
             "model": model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
             "stream": false,
+            "thinking": {"type": "disabled"},
         });
 
         let response = self.send_request(&url, &body).await?;
@@ -189,7 +199,21 @@ impl OpenAiTransport {
             .to_string();
 
         if content.is_empty() {
-            tracing::warn!(model, "LLM 返回空内容，可能模型不可用或请求被拒绝");
+            // 推理模型（如 DeepSeek Reasoner）可能将输出全部消耗在思考过程，
+            // 导致 content 为空——此时继续以空串解析 JSON 只会得到误导性的
+            // "JSON 解析失败"；改为明确错误，供上层重试与诊断。
+            let reasoning_len = parsed["choices"][0]["message"]["reasoning_content"]
+                .as_str()
+                .map(|s| s.len())
+                .unwrap_or(0);
+            tracing::warn!(
+                model,
+                reasoning_len,
+                "LLM 返回空内容（HTTP 200），可能模型不可用、请求被拒绝或 max_tokens 被思考过程耗尽"
+            );
+            return Err(RamariaError::llm(format!(
+                "LLM 返回空内容（HTTP 200），可能模型不可用或请求被拒绝: {model}"
+            )));
         }
 
         Ok(content)

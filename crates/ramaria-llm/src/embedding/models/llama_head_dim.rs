@@ -8,7 +8,7 @@
 //! - 使用 candle 的 `qwen3::Config`（Deserialize）：原生支持 `head_dim: usize`
 //!   与 `sliding_window: Option<usize>`——Qwen3 config.json 中 `"sliding_window": null`
 //!   可正确解析（candle 的 qwen2::Config 将 sliding_window 声明为 usize，遇到 null
-//!   会报 "invalid type: null, expected usize"，见 2026-08-08 修复）
+//!   会报 "invalid type: null, expected usize"）
 //! - 内嵌无状态 Qwen3 前向（参考 candle-transformers qwen3 模块，去除 KV cache 与
 //!   sliding window 分支）：embedding 场景每次推理独立，无需跨调用上下文，
 //!   天然无状态，也不依赖 candle 内部私有 `clear_kv_cache` API
@@ -57,7 +57,7 @@ const TOKENIZER_FILE: &str = "tokenizer.json";
 const CONFIG_FILE: &str = "config.json";
 
 // =========================================================
-// 内嵌无状态 Qwen3 前向（2026-08-08 修复）
+// 内嵌无状态 Qwen3 前向
 // =========================================================
 //
 // 说明:
@@ -704,7 +704,7 @@ mod tests {
     // - 编码器需要真实模型文件（config.json + safetensors + tokenizer.json），
     //   无法在 CI 构造，端到端验证由 `validate_embedding_model` 命令在真实
     //   模型目录上执行（见 ramaria-desktop commands/setup.rs）。
-    // - 2026-08-08 修复回归：Qwen3-Embedding config.json 的 `"sliding_window": null`
+    // - Qwen3-Embedding config.json 的 `"sliding_window": null`
     //   解析由 candle `qwen3::Config` 的 `Option<usize>` 字段天然兼容，
     //   反序列化行为由 candle 单测覆盖；此处保留空模块占位。
 

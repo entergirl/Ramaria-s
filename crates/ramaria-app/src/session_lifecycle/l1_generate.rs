@@ -175,6 +175,12 @@ impl SessionLifecycle {
     ///   `Some("")` 表示不添加前缀（消息内容已含发送者名称）。
     /// - `assistant_prefix`: 覆盖默认"助手："前缀。同上。
     ///
+    /// max_tokens 策略（v1.4 截断修复）:
+    /// - 优先从 `backend_config` 传播 `max_tokens`（与 chat 管线输出预算一致），
+    ///   下限钳制到 `L1SummarizerConfig` 默认值（1024），防止用户将 chat
+    ///   `max_tokens` 配得过小时破坏 L1 完整 JSON 输出（含 evidence_notes）。
+    /// - backend_config 缺失/读取失败 → 使用 L1 默认值 1024。
+    ///
     /// 对齐 Python `summarizer.summarize_session(session_id)`。
     pub(super) async fn generate_l1_summary(
         &self,
@@ -196,6 +202,18 @@ impl SessionLifecycle {
         }
         if let Some(prefix) = assistant_prefix {
             summarizer_config.assistant_prefix = prefix.to_string();
+        }
+        // L1 输出预算从 backend_config 传播（v1.4 截断修复）：
+        // evidence_notes 结构化 JSON 输出需要更大预算，默认 512 易被截断；
+        // 下限钳制到 L1 默认值，避免 chat max_tokens 小配置破坏 L1 完整性。
+        if let Ok(Some(backend)) = storage.get_backend_config().await {
+            let floor = summarizer_config.max_tokens;
+            summarizer_config.max_tokens = backend.max_tokens.max(floor);
+            debug!(
+                max_tokens = summarizer_config.max_tokens,
+                backend_max_tokens = backend.max_tokens,
+                "L1 摘要 max_tokens 已从 backend_config 传播"
+            );
         }
         let summarizer = L1Summarizer::new(llm, storage, summarizer_config);
 

@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 ramaria-app = { path = "../ramaria-app" }
 ramaria-core = { path = "../ramaria-core" }
+ramaria-memory = { path = "../ramaria-memory" }
 ramaria-storage = { path = "../ramaria-storage" }
 ramaria-llm = { path = "../ramaria-llm", features = ["embedding-native"] }
 ramaria-importer = { path = "../ramaria-importer" }

@@ -455,7 +455,7 @@ pub async fn import_qq_chat(
     // 批量 LLM 请求间最小间隔（毫秒）：读 `[thresholds].cluster_delay_ms`，
     // L1/L2 共用（`ramaria_memory::llm_gate::inter_llm_delay`）。
     // 导入会连续 N×2 次调用 LLM，无节流时易触发远程 API 速率限制
-    // （2026-08-08 诊断：HTTP 200 + 空内容 → L1 摘要失败重试）。
+    // （典型表现：HTTP 200 + 空内容 → L1 摘要失败重试）。
     // 读取失败时降级为 0（不阻塞导入，等同旧行为）。
     let llm_delay_ms =
         ramaria_app::ConfigSyncService::new(state.app.storage().clone(), state.config_path.clone())

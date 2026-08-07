@@ -57,7 +57,9 @@ pub struct UttBuildStats {
 ///
 /// 使用:
 /// - 封存钩子：`build_session`（只处理本会话尾部）。
-/// - 启动/索引重建：`rebuild_all`（遍历全部会话，内部逐会话走增量语义）。
+/// - 全量重建：`rebuild_all`（遍历全部会话，内部逐会话走增量语义；
+///   幂等，已一致的块跳过）。CLI 入口：`ramaria utt rebuild`；
+///   切分参数变更后需 `--force`（先清空旧块再全量重切）。
 pub struct UttBuilder {
     /// 构建配置
     config: UttBuildConfig,

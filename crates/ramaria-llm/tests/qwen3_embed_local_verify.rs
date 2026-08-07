@@ -1,6 +1,6 @@
 //! rust/crates/ramaria-llm/tests/qwen3_embed_local_verify.rs - Qwen3-Embedding 本地回归验证
 //!
-//! 2026-08-08 修复回归：Qwen3-Embedding-0.6B 导入校验失败
+//! 修复回归：Qwen3-Embedding-0.6B 导入校验失败
 //! （config.json `"sliding_window": null` 无法被 candle qwen2::Config 解析 +
 //!   head_dim=128 与 qwen2 隐式 head_dim 不匹配）。
 //! 修复后 `validate()` 与 `embed()` 均应通过。
@@ -8,6 +8,7 @@
 //! 运行方式（需要本机模型，默认路径 F:/9700/model/Qwen3-Embedding-0.6B）:
 //!   QWEN3_EMBED_DIR=<模型目录> cargo test -p ramaria-llm \
 //!     --features embedding-native --test qwen3_embed_local_verify -- --ignored
+#![cfg(feature = "embedding-native")]
 
 use ramaria_core::traits::EmbeddingProvider;
 use ramaria_llm::embedding::native::NativeEmbeddingProvider;

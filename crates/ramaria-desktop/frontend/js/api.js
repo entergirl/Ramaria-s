@@ -423,7 +423,20 @@ var RamariaApi = (function () {
  *   （不含 API key——配置结构本身不存密钥）。
  */
     async function getFullConfig() {
-        return await _invoke('get_full_config', {}, '查询完整配置');
+        var raw = await _invoke('get_full_config', {}, '查询完整配置');
+        // tauri 命令返回 `Result<String, String>`（JSON 文本），此处解析为对象，
+        // 调用方（设置页会话/高级表单回显与保存）直接使用配置对象。
+        // 2026-08-08 修复：此前原样返回字符串，导致 M6 高级表单保存时
+        // `_advSetValue` 在字符串上设置属性报错
+        // "Cannot create property 'temperature' on string"。
+        if (typeof raw === 'string') {
+            try {
+                return JSON.parse(raw);
+            } catch (err) {
+                throw new Error('配置 JSON 解析失败: ' + err.message);
+            }
+        }
+        return raw;
     }
 
  /**

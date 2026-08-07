@@ -56,7 +56,10 @@ struct L1SummaryResponse {
 /// L1 Summarizer 配置。
 ///
 /// 字段约定:
-/// - `max_tokens`: LLM 最大输出 token 数，默认 512（与 Python 一致）。
+/// - `max_tokens`: LLM 最大输出 token 数，默认 1024。v1.4 起 L1 输出包含
+///   `evidence_notes` 结构化对象数组（1-3 条 × text/time/who/cause 槽位），
+///   完整 JSON 明显长于旧版字符串数组输出；512（Python 旧值）过紧会导致
+///   LLM 输出被截断、JSON 解析失败，故默认提升至 1024。
 /// - `temperature`: LLM 生成温度，默认 0.3。
 /// - `conversation_format_user`: 用户消息格式化前缀。
 /// - `conversation_format_assistant`: 助手消息格式化前缀。
@@ -85,7 +88,7 @@ impl Default for L1SummarizerConfig {
     fn default() -> Self {
         Self {
             temperature: 0.3,
-            max_tokens: 512,
+            max_tokens: 1024,
             user_prefix: "用户：".to_string(),
             assistant_prefix: "助手：".to_string(),
             persona_uid: None,
@@ -334,9 +337,13 @@ impl<'a> L1Summarizer<'a> {
 
         // 全部失败
         let preview: String = raw.chars().take(100).collect();
-        warn!(response_preview=%preview, "L1 摘要 JSON 解析全部失败");
+        warn!(
+            response_preview = %preview,
+            "L1 摘要 JSON 解析全部失败（可能因 max_tokens 输出预算不足被截断）"
+        );
         Err(RamariaError::validation(format!(
-            "L1 摘要 JSON 解析失败，原始响应前 100 字符: {preview}"
+            "L1 摘要 JSON 解析失败，原始响应前 100 字符: {preview} \
+             （若响应不完整，可能是 max_tokens 输出预算不足导致截断）"
         )))
     }
 
@@ -590,6 +597,21 @@ mod tests {
     use super::*;
 
     // ---- strip_thinking（与 utils.rs 同名测试完全重复，已删除） ----
+
+    /// v1.4 截断修复：默认 max_tokens 应足以容纳含 evidence_notes 的完整 JSON。
+    ///
+    /// 说明:
+    /// - 512（Python 旧值）对 v1.4 结构化对象数组输出过紧，LLM 输出易被截断
+    ///   导致 JSON 解析失败；默认值提升至 1024 作为所有未显式传值路径的兜底。
+    #[test]
+    fn default_config_max_tokens_sufficient() {
+        let cfg = L1SummarizerConfig::default();
+        assert_eq!(cfg.max_tokens, 1024, "L1 默认 max_tokens 应为 1024");
+        assert!(
+            (cfg.temperature - 0.3).abs() < f64::EPSILON,
+            "temperature 默认 0.3"
+        );
+    }
 
     // ---- extract_first_json_object ----
 
