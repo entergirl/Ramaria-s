@@ -28,8 +28,7 @@ use crate::utils;
 /// 字段:
 /// - 所有字段均为 `Option`，以容忍 LLM 输出缺失字段。
 /// - 校验阶段再填充默认值，避免解析阶段 panic。
-/// - `situation_strength` 为新增字段，当前 LLM prompt 尚未包含此输出，
-///   因此大部分情况下为 None（等效 3）。
+/// - `situation_strength` 为新增字段，prompt 已包含此输出，缺失时由 config 注入或默认 3。
 /// - `evidence_notes` 为结构化证据线索（v1.4），LLM 可能输出缺失或空数组，
 ///   校验失败时降级为 `Some(vec![])` 但不阻塞 L1 生成。
 ///   M1~M3 过渡期 LLM 仍可能输出旧字符串数组，由自定义反序列化器统一转换为
@@ -500,7 +499,9 @@ where
 /// 校验规则:
 /// 1. 输入为 None 或空数组 → 降级为空数组，记 warn
 /// 2. 每条 evidence 的 `text` trim 后 < 5 字符 → 丢弃该条，记 debug
-/// 3. 丢弃后数组为空 → 降级为空数组，记 warn
+/// 3. 可选槽位 `time`/`who`/`cause` 规范化：trim 后为空字符串视为缺失 → 置 None
+///    （v3.1 §6.3：cause 缺失时槽位置空，不阻塞生成）
+/// 4. 丢弃后数组为空 → 降级为空数组，记 warn
 ///
 /// 返回:
 /// - `Vec<EvidenceNote>`：经过滤的有效 evidence 列表（可能为空）
@@ -513,17 +514,24 @@ fn validate_evidence_notes(raw: Option<Vec<EvidenceNote>>, session_id: Uuid) -> 
         }
     };
 
-    // 过滤过短条目（校验 text 槽位）
+    // 过滤过短条目（校验 text 槽位）+ 规范化可选槽位（空白视为缺失）
     let valid: Vec<EvidenceNote> = raw_list
         .into_iter()
         .map(|mut note| {
+            // text 必填槽位：trim 后参与长度校验
             note.text = note.text.trim().to_string();
+            // 可选槽位：trim 后为空字符串 → 置 None（保持"缺省即无"的语义，
+            // 避免下游把空字符串误当作有效槽位值）
+            note.time = normalize_optional_slot(note.time);
+            note.who = normalize_optional_slot(note.who);
+            note.cause = normalize_optional_slot(note.cause);
             note
         })
         .filter(|note| {
             let ok = note.text.chars().count() >= 5;
             if !ok {
-                debug!(%session_id, evidence=%note.text, "evidence 过短（<5 字符），丢弃");
+                // 隐私红线：evidence_notes 承载原文级信息，日志只记长度不记内容
+                debug!(%session_id, len = note.text.chars().count(), "evidence 过短（<5 字符），丢弃");
             }
             ok
         })
@@ -534,6 +542,18 @@ fn validate_evidence_notes(raw: Option<Vec<EvidenceNote>>, session_id: Uuid) -> 
     }
 
     valid
+}
+
+/// 规范化可选槽位值：trim 后为空字符串（或仅空白）视为缺失 → None。
+///
+/// 说明:
+/// - LLM 可能输出 `"time": ""` 或 `"cause": "  "` 这类空值，
+///   与缺失槽位（JSON 省略该键）语义等价，统一归一为 None。
+/// - 非空值保留 trim 后的内容，避免首尾空白污染下游消费。
+fn normalize_optional_slot(value: Option<String>) -> Option<String> {
+    value
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 // =========================================================
@@ -913,6 +933,86 @@ mod tests {
             .evidence_notes
             .expect("evidence_notes 不应为 None，应为 Some(vec![])");
         assert!(notes.is_empty(), "缺失 evidence_notes 时应降级为空数组");
+    }
+
+    // ---- v1.4 M4（T-V14-4-002）结构化槽位校验测试 ----
+
+    /// 完整对象（text + time/who/cause 全部槽位）经校验后槽位完整保留。
+    #[test]
+    fn evidence_notes_full_object_slots_preserved() {
+        let notes = vec![EvidenceNote {
+            text: "用户提到项目延期到月底".into(),
+            time: Some("上周三".into()),
+            who: Some("用户".into()),
+            cause: Some("需求变更频繁".into()),
+        }];
+        let result = validate_evidence_notes(Some(notes), Uuid::new_v4());
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].text, "用户提到项目延期到月底");
+        assert_eq!(result[0].time.as_deref(), Some("上周三"));
+        assert_eq!(result[0].who.as_deref(), Some("用户"));
+        assert_eq!(result[0].cause.as_deref(), Some("需求变更频繁"));
+    }
+
+    /// 可选槽位为空字符串或纯空白 → 归一为 None（缺省即无，不阻塞生成）。
+    #[test]
+    fn evidence_notes_blank_optional_slots_normalized_to_none() {
+        let notes = vec![EvidenceNote {
+            text: "用户表示最近压力很大".into(),
+            time: Some("".into()),   // 空字符串
+            who: Some("   ".into()), // 纯空白
+            cause: Some("".into()),  // 空字符串
+        }];
+        let result = validate_evidence_notes(Some(notes), Uuid::new_v4());
+        assert_eq!(result.len(), 1, "text 有效时条目应保留");
+        assert!(result[0].time.is_none(), "空 time 应归一为 None");
+        assert!(result[0].who.is_none(), "空白 who 应归一为 None");
+        assert!(result[0].cause.is_none(), "空 cause 应归一为 None");
+    }
+
+    /// 可选槽位带首尾空白 → trim 后保留有效内容。
+    #[test]
+    fn evidence_notes_optional_slots_are_trimmed() {
+        let notes = vec![EvidenceNote {
+            text: "用户提到通勤时间变长".into(),
+            time: Some(" 上周五 ".into()),
+            who: Some(" 同事 ".into()),
+            cause: Some(" 搬家 ".into()),
+        }];
+        let result = validate_evidence_notes(Some(notes), Uuid::new_v4());
+        assert_eq!(result[0].time.as_deref(), Some("上周五"));
+        assert_eq!(result[0].who.as_deref(), Some("同事"));
+        assert_eq!(result[0].cause.as_deref(), Some("搬家"));
+    }
+
+    /// 反序列化：对象条目缺少 text（如 text 为数字等非法类型）→ 跳过该条并记 warn，
+    /// 其余合法条目保留（解析失败不阻塞整体）。
+    #[test]
+    fn evidence_notes_parse_invalid_object_item_skipped() {
+        let raw = r#"{
+            "summary": "测试",
+            "evidence_notes": [
+                {"text": 123, "cause": "非法类型"},
+                {"text": "用户提到项目顺利上线"}
+            ]
+        }"#;
+        let parsed: L1SummaryResponse = serde_json::from_str(raw).unwrap();
+        let notes = parsed.evidence_notes.expect("应产出部分有效条目");
+        assert_eq!(notes.len(), 1, "非法条目应被跳过，合法条目保留");
+        assert_eq!(notes[0].text, "用户提到项目顺利上线");
+    }
+
+    /// 反序列化：非字符串非对象的非法条目（数字/布尔）→ 跳过该条。
+    #[test]
+    fn evidence_notes_parse_non_object_items_skipped() {
+        let raw = r#"{
+            "summary": "测试",
+            "evidence_notes": [42, true, "用户提到天气转凉"]
+        }"#;
+        let parsed: L1SummaryResponse = serde_json::from_str(raw).unwrap();
+        let notes = parsed.evidence_notes.expect("应产出部分有效条目");
+        assert_eq!(notes.len(), 1, "数字/布尔条目应被跳过");
+        assert_eq!(notes[0].text, "用户提到天气转凉");
     }
 
     // =========================================================
