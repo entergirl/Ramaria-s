@@ -333,6 +333,10 @@ pub struct PipelineData {
     /// RAG 检索结果格式化文本（None 表示无相关记忆）
     pub memory_context: Option<String>,
 
+    // === Stage 5.5: utt 原文块检索（v1.4） ===
+    /// utt 原文片段（已按预算裁剪渲染；白名单外/未命中为 None，等同 v1.3）
+    pub utt_context: Option<String>,
+
     // === Stage 6: BuildPrompt ===
     /// 5-Block System Prompt
     pub system_prompt: Option<String>,
@@ -389,6 +393,7 @@ impl PipelineData {
             recent_summaries: Vec::new(),
             last_active_at: None,
             memory_context: None,
+            utt_context: None,
             system_prompt: None,
             budgeted_system_prompt: None,
             budgeted_memory_context: None,

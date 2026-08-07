@@ -272,6 +272,9 @@ impl StorageBackend for SqliteStorage {
     ) -> RamariaResult<Option<UttBlock>> {
         repo::utt_blocks::get_latest_block_by_session(&self.pool, session_id).await
     }
+    async fn delete_utt_block(&self, id: i64) -> RamariaResult<()> {
+        repo::utt_blocks::delete_by_id(&self.pool, id).await
+    }
     async fn delete_utt_blocks_by_session(&self, session_id: Uuid) -> RamariaResult<usize> {
         repo::utt_blocks::delete_by_session(&self.pool, session_id).await
     }

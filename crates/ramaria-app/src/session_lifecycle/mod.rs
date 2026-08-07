@@ -24,9 +24,10 @@ use std::time::Duration;
 
 use ramaria_core::config::RamariaConfig;
 use ramaria_core::error::RamariaResult;
-use ramaria_core::traits::{LlmProvider, StorageBackend};
+use ramaria_core::traits::{EmbeddingProvider, LlmProvider, StorageBackend};
 use ramaria_core::types::now_ms;
 use ramaria_memory::retriever::Retriever;
+use ramaria_memory::utt::builder::UttBuilder;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -56,6 +57,8 @@ pub struct SessionLifecycle {
     pub(crate) shutdown_flag: Arc<AtomicBool>,
     /// 内存检索器引用（L1 生成后增量更新），None 表示未注入（向后兼容）
     pub(crate) retriever: Mutex<Option<Arc<RwLock<Retriever>>>>,
+    /// embedding provider 引用（utt 块向量生成），None 表示未配置（块无向量）
+    pub(crate) embedding: Mutex<Option<Arc<dyn EmbeddingProvider>>>,
 }
 
 impl SessionLifecycle {
@@ -70,6 +73,7 @@ impl SessionLifecycle {
             config,
             shutdown_flag: Arc::new(AtomicBool::new(false)),
             retriever: Mutex::new(None),
+            embedding: Mutex::new(None),
         }
     }
 
@@ -88,6 +92,20 @@ impl SessionLifecycle {
         });
         *guard = Some(r);
         info!("SessionLifecycle: Retriever 引用已注入，L1 增量索引已启用");
+    }
+
+    /// 注入 embedding provider 引用（utt 块向量生成）。
+    ///
+    /// 调用时机:
+    /// - 在 `App::new` 中与 [`set_retriever`] 同时调用。
+    /// - 未注入时 utt 块照常构建，仅无向量（检索走子串降级）。
+    pub fn set_embedding(&self, embedding: Option<Arc<dyn EmbeddingProvider>>) {
+        let mut guard = self.embedding.lock().unwrap_or_else(|e| {
+            error!("embedding lock poisoned during set_embedding: {e}");
+            e.into_inner()
+        });
+        *guard = embedding;
+        info!("SessionLifecycle: embedding 引用已注入，utt 块向量生成已启用");
     }
 
     /// 返回 shutdown_flag 的 Arc 引用，供外部线程检查。
@@ -252,6 +270,10 @@ impl SessionLifecycle {
                 // 必须在 L2 级联检查前执行，确保后续 L2/L3 也能检索到新 L1
                 self.index_l1_into_retriever(&l1);
 
+                // Step 2.5: utt 话语块增量构建（v1.4，与 L1 同钩子）
+                // 失败降级记 warn 不阻塞封存（下次封存自动补齐）
+                self.build_utt_for_session(storage, active_sid).await;
+
                 // Step 3: 检查 L2 触发条件（路径 A：即时触发）
                 // 对齐 Python summarizer 末尾的 `merger.check_and_merge`
                 self.check_l2_trigger(storage, llm).await;
@@ -298,6 +320,77 @@ impl SessionLifecycle {
 
         info!(%active_sid, "session 已关闭");
         Ok(())
+    }
+
+    /// utt 话语块增量构建（封存钩子，v1.4）。
+    ///
+    /// 职责:
+    /// - 会话封存后立即把本会话消息切分为话语块并入库（含向量生成）。
+    /// - 幂等：重复执行只重切最后一个已入库块及其后的新增消息。
+    ///
+    /// 降级（不阻塞封存）:
+    /// - `utt.enabled=false` → 跳过（行为回退 v1.3）。
+    /// - 会话读取/构建失败 → warn 日志，下次封存自动补齐。
+    /// - embedding 不可用/失败 → 块照常入库（无向量，检索走子串降级）。
+    ///
+    /// 安全约束:
+    /// - 日志只记录计数与 ID，不记录原文内容（原文是最高敏感层）。
+    pub(super) async fn build_utt_for_session(
+        &self,
+        storage: &dyn StorageBackend,
+        session_id: Uuid,
+    ) {
+        if !self.config.utt.enabled {
+            debug!(%session_id, "utt 配置关闭，跳过话语块构建（等同 v1.3）");
+            return;
+        }
+
+        let session = match storage.get_session(session_id).await {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                warn!(%session_id, "封存会话不存在，跳过 utt 构建");
+                return;
+            }
+            Err(e) => {
+                warn!(%session_id, %e, "读取会话失败，跳过 utt 构建");
+                return;
+            }
+        };
+
+        // 先 clone Arc 出锁再 await，避免 MutexGuard 跨 .await
+        let embedder = self
+            .embedding
+            .lock()
+            .unwrap_or_else(|e| {
+                warn!("embedding lock poisoned during utt build: {e}");
+                e.into_inner()
+            })
+            .clone();
+
+        let builder = UttBuilder::from_config(&self.config.utt);
+        match builder
+            .build_session(storage, &session, embedder.as_deref())
+            .await
+        {
+            Ok(stats) => {
+                info!(
+                    %session_id,
+                    created = stats.chunks_created,
+                    skipped = stats.chunks_skipped,
+                    removed = stats.chunks_removed,
+                    embedding_ok = stats.embedding_ok,
+                    embedding_failed = stats.embedding_failed,
+                    "utt 话语块增量构建完成"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    %session_id,
+                    %e,
+                    "utt 话语块构建失败（不阻塞封存，下次封存自动补齐）"
+                );
+            }
+        }
     }
 
     // =========================================================

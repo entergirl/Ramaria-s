@@ -119,6 +119,22 @@ pub async fn get_latest_block_by_session(
     row.map(|r| r.into_block()).transpose()
 }
 
+/// 删除单个话语块（按主键）。
+///
+/// 用途:
+/// - utt 增量构建：重切后删除过期尾块（仅最后一块会被删除，更早的块原样保留）。
+///
+/// 返回:
+/// - `Ok(())`: 删除成功（块不存在时视为成功，幂等）。
+pub async fn delete_by_id(pool: &SqlitePool, id: i64) -> RamariaResult<()> {
+    sqlx::query("DELETE FROM utt_blocks WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await
+        .storage_err("删除 utt 话语块失败")?;
+    Ok(())
+}
+
 /// 删除指定会话的全部话语块。
 ///
 /// 用途:

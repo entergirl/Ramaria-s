@@ -20,6 +20,7 @@
 //! - `ramaria_core::types`: Persona, PersonaFact, PersonalityTrait, PersonaExample
 //! - `ramaria_memory::rag`: RAG 上下文格式化（由上层传入）
 
+use crate::retriever::UttHit;
 use chrono::Local;
 use ramaria_core::types::{
     Persona, PersonaExample, PersonaFact, PersonalityTrait, ProfileField, TraitStatus,
@@ -131,6 +132,13 @@ pub struct PromptContext {
     /// 由 Stage 6 的 `resolve_chat_style_rules` 提供。
     /// 若为空则使用最小化默认规则。
     pub chat_style_rules: Option<String>,
+
+    /// v1.4 新增: utt 原文片段（Memory 块 [原文片段] 小节，已按预算裁剪渲染）
+    ///
+    /// 安全约束:
+    /// - 仅角色类 persona（白名单内）由检索层填充；白名单外为 None（行为等同 v1.3）。
+    /// - 原文内容不写日志。
+    pub utt_context: Option<String>,
 }
 
 // =========================================================
@@ -339,7 +347,56 @@ fn build_memory(context: &PromptContext) -> String {
         }
     }
 
+    // 原文片段（v1.4 utt 话语块；白名单外为 None → 不产生段落，等同 v1.3）
+    if let Some(utt) = &context.utt_context
+        && !utt.trim().is_empty()
+    {
+        parts.push(format!(
+            "\n\n## 原文片段\n\
+             以下是目标角色说过的原话（完整引用，不要逐字抄袭，仅学习其语气、用词与口癖）：\n\
+             {utt}"
+        ));
+    }
+
     parts.join("")
+}
+
+// =========================================================
+// utt 原文片段渲染与预算裁剪（v1.4）
+// =========================================================
+
+/// 按预算渲染【原文片段】段落内容（整块保留/丢弃，超预算按相似度从低到高丢整块）。
+///
+/// 规则（v3.1 §8.3）:
+/// - `hits` 必须按得分降序传入（检索侧保证）。
+/// - 从高分到低分整块累加：未超预算的块全部保留，首个超预算的块及其后全部丢弃
+///   （不做块内截断——原文是整体引用的，截断会破坏语义）。
+///
+/// 参数:
+/// - `hits`: 检索命中（按得分降序）。
+/// - `max_block_chars`: 全部块合计的字符预算上限（`[utt].max_block_chars`）。
+///
+/// 返回:
+/// - 块文本序列（块间空行分隔）；`hits` 为空或首块即超预算时返回空字符串。
+pub fn render_utt_context(hits: &[UttHit], max_block_chars: usize) -> String {
+    let mut kept: Vec<String> = Vec::new();
+    let mut used = 0usize;
+
+    for hit in hits {
+        let text = hit.doc.block_text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let chars = text.chars().count();
+        if used + chars > max_block_chars {
+            // 超预算：丢整块（含其后所有块——已按相似度降序，剩余相似度更低）
+            break;
+        }
+        kept.push(text.to_string());
+        used += chars;
+    }
+
+    kept.join("\n\n")
 }
 
 /// 从近期 L1 摘要构建跨 session 叙事引导句。
@@ -1073,6 +1130,7 @@ mod tests {
             last_active_at: Some("2026-06-08".into()),
             weather: Some("晴".into()),
             chat_style_rules: Some("测试回复规则".into()),
+            utt_context: None, // 默认无原文片段（v1.4）
         };
         let config = PromptConfig::default();
         let result = assemble_prompt(&ctx, &config);
@@ -1099,5 +1157,102 @@ mod tests {
         assert!(!result.is_empty());
         assert!(result.contains("Ramaria"));
         assert!(result.contains("首次对话"));
+    }
+
+    // =========================================================
+    // utt 原文片段（v1.4）
+    // =========================================================
+
+    fn utt_hit(id: i64, persona: &str, text: &str, score: f64) -> crate::retriever::UttHit {
+        crate::retriever::UttHit {
+            doc: crate::retriever::UttDocView {
+                id,
+                persona_uid: persona.to_string(),
+                session_id: uuid::Uuid::new_v4(),
+                block_text: text.to_string(),
+                msg_count: 2,
+                created_at: 1000,
+            },
+            score,
+            channel: "vector",
+        }
+    }
+
+    #[test]
+    fn render_utt_context_keeps_all_within_budget() {
+        let hits = vec![
+            utt_hit(1, "char-0001", "今天天气真好", 0.9),
+            utt_hit(2, "char-0001", "晚上吃火锅", 0.8),
+        ];
+        let out = render_utt_context(&hits, 500);
+        assert!(out.contains("今天天气真好"));
+        assert!(out.contains("晚上吃火锅"));
+        assert!(
+            out.contains(
+                "
+
+"
+            ),
+            "块间空行分隔"
+        );
+    }
+
+    #[test]
+    fn render_utt_context_trims_by_budget_keeping_high_score() {
+        // 预算只够一块：高分的保留，低分的整块丢弃
+        let hits = vec![
+            utt_hit(1, "char-0001", "第一块原文内容很长很长很长很长很长", 0.9),
+            utt_hit(2, "char-0001", "第二块", 0.8),
+        ];
+        let out = render_utt_context(&hits, 15);
+        assert!(out.contains("第一块"), "高分块保留");
+        assert!(!out.contains("第二块"), "超预算整块丢弃");
+    }
+
+    #[test]
+    fn render_utt_context_first_block_over_budget_yields_empty() {
+        let hits = vec![utt_hit(1, "char-0001", "超长块内容", 0.9)];
+        let out = render_utt_context(&hits, 2);
+        assert!(out.is_empty(), "首块即超预算 → 不注入");
+    }
+
+    #[test]
+    fn render_utt_context_empty_hits_yields_empty() {
+        assert!(render_utt_context(&[], 100).is_empty());
+    }
+
+    #[test]
+    fn render_utt_context_skips_blank_blocks() {
+        let hits = vec![
+            utt_hit(1, "char-0001", "   ", 0.9),
+            utt_hit(2, "char-0001", "有效内容", 0.8),
+        ];
+        let out = render_utt_context(&hits, 100);
+        assert!(out.contains("有效内容"));
+        assert!(
+            !out.contains(
+                "
+
+"
+            ),
+            "空白块被跳过不产生空段"
+        );
+    }
+
+    #[test]
+    fn assemble_prompt_includes_utt_section_only_when_present() {
+        // 回归红线：无原文片段 → prompt 不含【原文片段】段落（白名单外/未命中 = v1.3）
+        let ctx = PromptContext::default();
+        let result = assemble_prompt(&ctx, &PromptConfig::default());
+        assert!(!result.contains("原文片段"), "无原文时不产生段落");
+
+        // 有原文片段 → 段落出现
+        let ctx2 = PromptContext {
+            utt_context: Some("这是角色原话内容".to_string()),
+            ..Default::default()
+        };
+        let result2 = assemble_prompt(&ctx2, &PromptConfig::default());
+        assert!(result2.contains("## 原文片段"), "原文片段段落应出现");
+        assert!(result2.contains("这是角色原话内容"));
     }
 }

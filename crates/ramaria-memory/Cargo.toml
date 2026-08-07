@@ -16,3 +16,6 @@ uuid.workspace = true
 futures.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
+
+[dev-dependencies]
+sqlx.workspace = true

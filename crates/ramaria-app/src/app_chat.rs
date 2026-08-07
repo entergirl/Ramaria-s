@@ -88,6 +88,7 @@ impl App {
         let recent_summaries = result.recent_summaries;
         let last_active_at = result.last_active_at;
         let memory_context = result.memory_context;
+        let utt_context = result.utt_context;
         let cfg = result
             .backend_config
             .expect("Stage 2 (CheckPrivacy) must set backend_config");
@@ -98,6 +99,7 @@ impl App {
                 persona_uid,
                 &recent_summaries,
                 last_active_at.as_deref(),
+                utt_context.as_deref(),
             )
             .await;
 
@@ -232,6 +234,7 @@ impl App {
     /// - `persona_uid`: 人格标识。
     /// - `recent_summaries`: 近期 L1 摘要列表（预格式化文本）。
     /// - `last_active_at`: 最后活跃时间字符串（YYYY-MM-DD HH:MM 格式）。
+    /// - `utt_context`: utt 原文片段（已按预算裁剪渲染；None 表示不注入，等同 v1.3）。
     ///
     /// 降级策略:
     /// - storage 读取失败 → 记录 warn 日志，使用空数据继续。
@@ -246,6 +249,7 @@ impl App {
         persona_uid: Option<&str>,
         recent_summaries: &[String],
         last_active_at: Option<&str>,
+        utt_context: Option<&str>,
     ) -> String {
         let actual_uid = persona_uid.unwrap_or("rama-0001");
 
@@ -316,6 +320,8 @@ impl App {
                 current_time_str: Some(crate::now_timestamp_str()),
                 weather: None,
                 chat_style_rules: None, // v2.0: 无自定义规则时使用最小化默认规则
+                // v1.4: utt 原文片段（检索层已按白名单与预算过滤，None 等同 v1.3）
+                utt_context: utt_context.map(|s| s.to_string()),
             };
 
             let config = PromptConfig::default();

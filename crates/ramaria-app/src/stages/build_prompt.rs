@@ -191,6 +191,7 @@ async fn build_structured_prompt(
         current_time_str: Some(crate::now_timestamp_str()),
         weather: None,
         chat_style_rules: Some(rules), // v2.0: 回复规则作为 Experiment 块注入
+        utt_context: None,             // v1.4: 原文片段由活跃路径（app_chat）注入，本 Stage 未接线
     };
 
     let config = PromptConfig::default();

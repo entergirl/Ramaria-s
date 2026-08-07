@@ -27,6 +27,7 @@ impl App {
         // 2. 从存储层收集所有 L1 数据（在锁外执行 I/O）
         let mut all_l1: Vec<L1DocView> = Vec::new();
         let mut all_l2: Vec<L2DocView> = Vec::new();
+        let mut all_utt: Vec<ramaria_core::types::UttBlock> = Vec::new();
 
         for persona in &personas {
             // L1
@@ -63,9 +64,18 @@ impl App {
                     salience: ev.salience,
                 });
             }
+
+            // utt 话语块（v1.4 原文通道；失败降级记 warn，不阻塞重建）
+            match self.storage.list_utt_blocks_by_persona(&persona.uid).await {
+                Ok(blocks) => all_utt.extend(blocks),
+                Err(e) => {
+                    tracing::warn!(persona_uid = %persona.uid, %e, "读取 utt 块失败，跳过该 persona");
+                }
+            }
         }
 
         let total = all_l1.len() + all_l2.len();
+        let utt_count = all_utt.len();
 
         // 3. 生成向量（如果嵌入模型可用）
         let embeddings_available = self.is_embedding_available();
@@ -125,6 +135,12 @@ impl App {
                 retriever.index_l2(doc);
             }
 
+            // utt 原文通道（v1.4）：块向量在构建时已生成并存 BLOB，此处直接复用
+            // （无向量的块仍入内存文档，检索走子串降级）
+            for block in &all_utt {
+                retriever.index_utt_block(block);
+            }
+
             // 向量索引
             if embeddings_available {
                 for (id, vec, created_at) in &l1_vectors {
@@ -147,6 +163,7 @@ impl App {
 
         tracing::info!(
             total,
+            utt = utt_count,
             personas = personas.len(),
             embeddings_available,
             "检索器索引重建完成"

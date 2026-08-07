@@ -144,6 +144,38 @@ pub struct L2DocView {
     pub salience: f64,
 }
 
+/// utt 话语块的检索视图（v1.4 原文通道）。
+///
+/// 安全约束:
+/// - 原文是最高敏感层：检索严格按 `persona_uid` 精确隔离，不做跨 persona 共享。
+/// - `block_text` 不写日志。
+#[derive(Debug, Clone)]
+pub struct UttDocView {
+    /// utt_blocks 表主键
+    pub id: i64,
+    /// 块归属人格（检索隔离键）
+    pub persona_uid: String,
+    /// 来源会话
+    pub session_id: uuid::Uuid,
+    /// 块内原文全文（含发言人标记）
+    pub block_text: String,
+    /// 块内消息条数
+    pub msg_count: u32,
+    /// 块创建时间（Unix 毫秒）
+    pub created_at: i64,
+}
+
+/// utt 原文块检索命中。
+#[derive(Debug, Clone)]
+pub struct UttHit {
+    /// 命中的块视图
+    pub doc: UttDocView,
+    /// 相似度得分：向量通道为调整后相似度，子串降级为命中 token 数
+    pub score: f64,
+    /// 命中通道: `"vector"`（向量）或 `"substring"`（BM25 子串降级）
+    pub channel: &'static str,
+}
+
 // =========================================================
 // 三通道检索器
 // =========================================================
@@ -181,6 +213,8 @@ pub struct Retriever {
     l1_docs: std::collections::HashMap<uuid::Uuid, L1DocView>,
     /// doc_id → L2 视图（BM25 结果解析用）
     l2_docs: std::collections::HashMap<i64, L2DocView>,
+    /// utt 块 ID → 块视图（原文通道；不参与 LRU 驱逐，块数量级远小于 L1/L2）
+    utt_docs: std::collections::HashMap<i64, UttDocView>,
 }
 
 /// 默认 LRU 容量上限：50,000 条文档。
@@ -200,6 +234,7 @@ impl Retriever {
             lru_max_entries: DEFAULT_LRU_MAX_ENTRIES,
             l1_docs: std::collections::HashMap::new(),
             l2_docs: std::collections::HashMap::new(),
+            utt_docs: std::collections::HashMap::new(),
         }
     }
 
@@ -213,6 +248,7 @@ impl Retriever {
             lru_max_entries: DEFAULT_LRU_MAX_ENTRIES,
             l1_docs: std::collections::HashMap::new(),
             l2_docs: std::collections::HashMap::new(),
+            utt_docs: std::collections::HashMap::new(),
         }
     }
 
@@ -846,6 +882,189 @@ impl Retriever {
         self.graph_retriever.clear();
         self.l1_docs.clear();
         self.l2_docs.clear();
+        self.utt_docs.clear();
+    }
+
+    // =========================================================
+    // utt 原文通道（v1.4）
+    // =========================================================
+
+    /// 将 utt 块视图加入索引（内存文档 + 可选向量）。
+    ///
+    /// 向量 label 格式: `L0:{utt_block_id}`（与 L1:/L2: 前缀共存于 BruteForceIndex）。
+    /// 现有三通道检索解析不到 `L0:` 前缀时自然跳过，互不干扰。
+    ///
+    /// 参数:
+    /// - `doc`: 块视图。
+    /// - `vector`: 可选的块向量（None 表示无 embedding，检索走子串降级）。
+    pub fn index_utt(&mut self, doc: &UttDocView, vector: Option<Vec<f32>>) {
+        self.utt_docs.insert(doc.id, doc.clone());
+        if let Some(v) = vector {
+            self.vector_index
+                .add(&format!("L0:{}", doc.id), v, doc.created_at);
+        }
+    }
+
+    /// 从存储层 `UttBlock` 直接索引（解码 f32 BLOB 向量）。
+    ///
+    /// 说明:
+    /// - embedding BLOB 解码失败（数据损坏）→ 记 warn，仅入内存文档（子串降级可用）。
+    pub fn index_utt_block(&mut self, block: &ramaria_core::types::UttBlock) {
+        let doc = UttDocView {
+            id: block.id,
+            persona_uid: block.persona_uid.clone(),
+            session_id: block.session_id,
+            block_text: block.block_text.clone(),
+            msg_count: block.msg_count,
+            created_at: block.created_at,
+        };
+        let vector = match block.embedding.as_deref() {
+            Some(blob) => match crate::utt::decode_embedding(blob) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    tracing::warn!(block_id = block.id, %e, "utt 块 embedding 解码失败，仅入内存文档");
+                    None
+                }
+            },
+            None => None,
+        };
+        self.index_utt(&doc, vector);
+    }
+
+    /// 从索引移除一个 utt 块（内存文档 + 向量）。
+    pub fn remove_utt(&mut self, id: i64) {
+        self.utt_docs.remove(&id);
+        self.vector_index.remove(&format!("L0:{id}"));
+    }
+
+    /// 当前内存中的 utt 块数量。
+    pub fn utt_doc_count(&self) -> usize {
+        self.utt_docs.len()
+    }
+
+    /// 检索 utt 原文块（v1.4 原文通道）。
+    ///
+    /// 通道与降级:
+    /// - 向量优先：`query_vec` 可用时在 BruteForceIndex 的 `L0:` label 上检索。
+    /// - 子串降级：无向量 / 向量索引空 / 维度不符时，按 query 分词 token
+    ///   在块文本中的出现次数打分（BM25 子串匹配）。
+    /// - 两通道均无命中 → 空列表（等同 v1.3，不注入原文）。
+    ///
+    /// 安全约束:
+    /// - `persona_uid` 为 None（未指定目标）→ 恒返回空（原文严格按 persona 隔离）。
+    /// - 仅返回 `persona_uid` 精确匹配的块，不做跨 persona 共享。
+    ///
+    /// 参数:
+    /// - `query`: 查询文本（子串降级用）。
+    /// - `query_vec`: 查询向量（None 时跳过向量通道）。
+    /// - `top_k`: 最大返回块数。
+    /// - `persona_uid`: 目标 persona（原文隔离键）。
+    ///
+    /// 返回:
+    /// - 按得分降序的命中列表（最多 top_k 条）。
+    pub fn search_utt(
+        &self,
+        query: &str,
+        query_vec: Option<&[f32]>,
+        top_k: usize,
+        persona_uid: Option<&str>,
+    ) -> Vec<UttHit> {
+        let Some(target) = persona_uid else {
+            return Vec::new();
+        };
+
+        // 严格隔离：只取目标 persona 的块
+        let candidates: Vec<&UttDocView> = self
+            .utt_docs
+            .values()
+            .filter(|d| d.persona_uid == target)
+            .collect();
+        if candidates.is_empty() {
+            return Vec::new();
+        }
+
+        // ---- 向量通道 ----
+        if let Some(qv) = query_vec {
+            match self.vector_index.search(qv, &self.config.vector) {
+                Ok(hits) => {
+                    let mut out: Vec<UttHit> = hits
+                        .into_iter()
+                        .filter_map(|h: crate::vector::VectorHit| {
+                            let id = h.doc_label.strip_prefix("L0:")?.parse::<i64>().ok()?;
+                            let doc = self.utt_docs.get(&id)?;
+                            if doc.persona_uid != target {
+                                return None; // 跨 persona 命中丢弃
+                            }
+                            Some(UttHit {
+                                doc: doc.clone(),
+                                score: h.adjusted_similarity,
+                                channel: "vector",
+                            })
+                        })
+                        .collect();
+                    out.sort_by(|a, b| {
+                        b.score
+                            .partial_cmp(&a.score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    out.truncate(top_k);
+                    if !out.is_empty() {
+                        return out;
+                    }
+                    // 向量命中但均被隔离过滤（防御）→ 落入子串降级
+                }
+                Err(_) => {
+                    // 空索引 / 维度不符 → 子串降级
+                }
+            }
+        }
+
+        // ---- 子串降级（BM25 分词 token 命中计数） ----
+        self.search_utt_substring(query, &candidates, top_k)
+    }
+
+    /// 子串降级检索：query 分词 token 在块文本中的命中计数打分。
+    fn search_utt_substring(
+        &self,
+        query: &str,
+        candidates: &[&UttDocView],
+        top_k: usize,
+    ) -> Vec<UttHit> {
+        let tokens = crate::bm25::tokenize(query);
+        let mut scored: Vec<UttHit> = Vec::new();
+
+        for doc in candidates {
+            let lower_text = doc.block_text.to_lowercase();
+            let score: usize = if tokens.is_empty() {
+                // 分词为空（如纯符号查询）→ 原始子串包含判定
+                let q = query.trim().to_lowercase();
+                if !q.is_empty() && lower_text.contains(&q) {
+                    1
+                } else {
+                    0
+                }
+            } else {
+                tokens
+                    .iter()
+                    .filter(|t| lower_text.contains(t.as_str()))
+                    .count()
+            };
+            if score > 0 {
+                scored.push(UttHit {
+                    doc: (*doc).clone(),
+                    score: score as f64,
+                    channel: "substring",
+                });
+            }
+        }
+
+        scored.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        scored.truncate(top_k);
+        scored
     }
 }
 
@@ -1513,6 +1732,203 @@ mod tests {
         for sr in &results {
             assert!(sr.bm25_score.unwrap_or(0.0) > 0.0, "BM25 分数应大于 0");
             assert!(sr.rrf_score > 0.0, "rrf_score 应为 BM25 分数");
+        }
+    }
+
+    // =========================================================
+    // utt 原文通道测试（v1.4）
+    // =========================================================
+
+    fn make_utt_doc(id: i64, persona_uid: &str, text: &str, created_at: i64) -> UttDocView {
+        UttDocView {
+            id,
+            persona_uid: persona_uid.to_string(),
+            session_id: uuid::Uuid::new_v4(),
+            block_text: text.to_string(),
+            msg_count: 2,
+            created_at,
+        }
+    }
+
+    #[test]
+    fn index_utt_and_search_vector() {
+        let mut r = Retriever::new();
+        r.index_utt(
+            &make_utt_doc(1, "char-0001", "今天天气很好我们去公园吧", 1000),
+            Some(vec![1.0, 0.0]),
+        );
+        r.index_utt(
+            &make_utt_doc(2, "char-0001", "晚饭想吃火锅", 2000),
+            Some(vec![0.0, 1.0]),
+        );
+
+        let hits = r.search_utt("天气", Some(&[1.0, 0.0]), 5, Some("char-0001"));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].doc.id, 1);
+        assert_eq!(hits[0].channel, "vector");
+        assert!(hits[0].score > 0.0);
+    }
+
+    #[test]
+    fn search_utt_persona_isolation() {
+        // 跨 persona 严格隔离：char-0002 检索不到 char-0001 的块
+        let mut r = Retriever::new();
+        r.index_utt(
+            &make_utt_doc(1, "char-0001", "这是我的秘密原文内容", 1000),
+            Some(vec![1.0, 0.0]),
+        );
+
+        let hits = r.search_utt("秘密", Some(&[1.0, 0.0]), 5, Some("char-0002"));
+        assert!(hits.is_empty(), "跨 persona 不可见");
+        assert_eq!(r.utt_doc_count(), 1);
+    }
+
+    #[test]
+    fn search_utt_without_persona_returns_empty() {
+        // 未指定目标 persona → 不检索原文（隔离红线）
+        let mut r = Retriever::new();
+        r.index_utt(&make_utt_doc(1, "char-0001", "原文", 1000), Some(vec![1.0]));
+        assert!(r.search_utt("原文", Some(&[1.0]), 5, None).is_empty());
+    }
+
+    #[test]
+    fn search_utt_vector_empty_index_falls_back_to_substring() {
+        // 向量索引为空（块无 embedding）→ 子串降级
+        let mut r = Retriever::new();
+        r.index_utt(
+            &make_utt_doc(1, "char-0001", "今天天气很好我们去公园吧", 1000),
+            None,
+        );
+        r.index_utt(&make_utt_doc(2, "char-0001", "晚饭想吃火锅", 2000), None);
+
+        let hits = r.search_utt("火锅", Some(&[1.0, 0.0]), 5, Some("char-0001"));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].doc.id, 2);
+        assert_eq!(hits[0].channel, "substring");
+    }
+
+    #[test]
+    fn search_utt_substring_scores_by_token_hits() {
+        let mut r = Retriever::new();
+        // 块1 命中 1 个 token（"天气"），块2 命中 2 个 token（"天气""公园"）
+        r.index_utt(&make_utt_doc(1, "char-0001", "天气不错", 1000), None);
+        r.index_utt(
+            &make_utt_doc(2, "char-0001", "天气好去公园散步", 2000),
+            None,
+        );
+
+        let hits = r.search_utt("天气 公园", None, 5, Some("char-0001"));
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].doc.id, 2, "命中更多 token 的块排前");
+        assert!(hits[0].score > hits[1].score);
+    }
+
+    #[test]
+    fn search_utt_substring_no_match_returns_empty() {
+        let mut r = Retriever::new();
+        r.index_utt(&make_utt_doc(1, "char-0001", "今天天气很好", 1000), None);
+        let hits = r.search_utt("完全无关的话题词汇", None, 5, Some("char-0001"));
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn search_utt_top_k_limits_results() {
+        let mut r = Retriever::new();
+        for i in 0..5 {
+            r.index_utt(
+                &make_utt_doc(i, "char-0001", &format!("天气讨论第{i}轮内容"), i * 1000),
+                None,
+            );
+        }
+        let hits = r.search_utt("天气", None, 2, Some("char-0001"));
+        assert_eq!(hits.len(), 2);
+    }
+
+    #[test]
+    fn remove_utt_removes_doc_and_vector() {
+        let mut r = Retriever::new();
+        r.index_utt(
+            &make_utt_doc(1, "char-0001", "原文内容", 1000),
+            Some(vec![1.0, 0.0]),
+        );
+        r.remove_utt(1);
+        assert_eq!(r.utt_doc_count(), 0);
+        assert!(
+            r.search_utt("原文", Some(&[1.0, 0.0]), 5, Some("char-0001"))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn clear_removes_utt_docs() {
+        let mut r = Retriever::new();
+        r.index_utt(&make_utt_doc(1, "char-0001", "原文", 1000), Some(vec![1.0]));
+        r.clear();
+        assert_eq!(r.utt_doc_count(), 0);
+    }
+
+    #[test]
+    fn index_utt_block_decodes_embedding_blob() {
+        use ramaria_core::types::UttBlock;
+        let mut r = Retriever::new();
+        let mut block = UttBlock::new(
+            "char-0001".to_string(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            "块原文文本".to_string(),
+            3,
+            1000,
+        );
+        block.embedding = Some(crate::utt::encode_embedding(&[0.5, -0.25]));
+        r.index_utt_block(&block);
+
+        let hits = r.search_utt("块原文", Some(&[0.5, -0.25]), 5, Some("char-0001"));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].channel, "vector");
+    }
+
+    #[test]
+    fn index_utt_block_corrupted_blob_degrades_to_substring() {
+        use ramaria_core::types::UttBlock;
+        let mut r = Retriever::new();
+        let mut block = UttBlock::new(
+            "char-0001".to_string(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            "损坏向量但文本可检索".to_string(),
+            3,
+            1000,
+        );
+        block.embedding = Some(vec![1, 2, 3]); // 长度非 4 倍数 → 解码失败
+        r.index_utt_block(&block);
+
+        let hits = r.search_utt("文本可检索", Some(&[1.0, 2.0, 3.0]), 5, Some("char-0001"));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].channel, "substring", "损坏 BLOB 降级子串");
+    }
+
+    #[test]
+    fn l0_labels_do_not_leak_into_regular_search() {
+        // 回归红线：utt 块（L0: label）不得混入三通道 RAG 检索结果
+        let mut r = make_test_retriever();
+        r.index_utt(
+            &make_utt_doc(99, "user-0001", "用户原文内容", 5000),
+            Some(vec![1.0, 0.0]),
+        );
+        let results = r.search(
+            &SearchRequest {
+                query: "用户原文内容".to_string(),
+                persona_uid: Some("user-0001".to_string()),
+                top_k: 5,
+                filter_share: true,
+            },
+            Some(&[1.0, 0.0]),
+        );
+        // 既有 L1 文档（user-0001）可命中，但 L0: 块不会作为结果出现
+        for sr in &results {
+            assert_ne!(sr.layer, "l0", "L0 块不应混入常规 RAG 结果");
         }
     }
 }

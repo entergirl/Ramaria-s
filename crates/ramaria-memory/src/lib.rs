@@ -17,15 +17,15 @@ pub mod init;
 pub mod job;
 pub mod keyword;
 pub mod l1;
+pub mod prompt;
 pub mod rag;
 pub mod rebuild;
 pub mod retriever;
 pub mod rrf;
 pub mod token_budget;
 mod utils;
+pub mod utt;
 pub mod vector; // 内部共享工具（不暴露到公共 API）
-
-pub mod prompt;
 
 // =========================================================
 // 公共 re-export

@@ -546,6 +546,14 @@ pub trait StorageBackend: Send + Sync {
     ) -> RamariaResult<Option<UttBlock>> {
         Ok(None)
     }
+    /// 删除单个 utt 话语块（增量构建重切时移除过期尾块）。
+    ///
+    /// 默认实现返回 `Unsupported` 错误（存量 mock 无需实现即可编译）。
+    async fn delete_utt_block(&self, _id: i64) -> RamariaResult<()> {
+        Err(crate::error::RamariaError::unsupported(
+            "StorageBackend 未实现单块 utt_blocks 删除",
+        ))
+    }
     /// 删除指定会话的全部话语块，返回删除行数。
     async fn delete_utt_blocks_by_session(&self, _session_id: Uuid) -> RamariaResult<usize> {
         Ok(0)

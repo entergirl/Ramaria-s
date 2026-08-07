@@ -187,6 +187,60 @@ impl PipelineStage for StageRetrieveMemory {
         );
 
         input.memory_context = Some(context);
+
+        // ---- 5.5 utt 原文块检索（v1.4，原文通道） ----
+        // 开关与白名单双闸门：关闭 / persona 类型不在白名单 → 不检索（行为回退 v1.3）。
+        // 原文是最高敏感层：仅按 persona_uid 精确隔离检索，不跨 persona 共享。
+        let utt_cfg = &ctx.config.utt;
+        if utt_cfg.enabled {
+            if let Some(puid) = persona_uid {
+                let kind = PersonaKind::from_uid(puid);
+                if utt_cfg.persona_kind_whitelist.contains(&kind) {
+                    let hits = {
+                        let retriever = match ctx.retriever.read() {
+                            Ok(guard) => guard,
+                            Err(e) => {
+                                tracing::error!(error = %e, "Retriever lock poisoned during utt search");
+                                input.utt_context = None;
+                                return Ok(input);
+                            }
+                        };
+                        retriever.search_utt(
+                            query,
+                            query_vec.as_deref(),
+                            utt_cfg.retrieve_top_k as usize,
+                            Some(puid),
+                        )
+                    };
+                    if !hits.is_empty() {
+                        let rendered = ramaria_memory::prompt::builder::render_utt_context(
+                            &hits,
+                            utt_cfg.max_block_chars as usize,
+                        );
+                        if !rendered.is_empty() {
+                            tracing::debug!(
+                                persona_uid = %puid,
+                                hits = hits.len(),
+                                budget_chars = utt_cfg.max_block_chars,
+                                "utt 原文片段已渲染（不记录内容）"
+                            );
+                            input.utt_context = Some(rendered);
+                        }
+                    } else {
+                        tracing::debug!(persona_uid = %puid, "utt 原文块无命中，跳过注入");
+                    }
+                } else {
+                    tracing::debug!(
+                        persona_uid = %puid,
+                        kind = %kind.as_str(),
+                        "persona 类型不在原文白名单，跳过原文注入（等同 v1.3）"
+                    );
+                }
+            }
+        } else {
+            tracing::debug!("utt 配置关闭，跳过原文检索（等同 v1.3）");
+        }
+
         Ok(input)
     }
 }
@@ -283,5 +337,151 @@ mod tests {
     async fn stage_name_is_correct() {
         let stage = StageRetrieveMemory::new();
         assert_eq!(stage.name(), "RetrieveMemory");
+    }
+
+    // =========================================================
+    // utt 原文通道测试（v1.4）
+    // =========================================================
+
+    /// 向测试检索器注入一个 utt 块。
+    fn seed_utt(
+        ctx: &PipelineContext,
+        id: i64,
+        persona_uid: &str,
+        text: &str,
+        vector: Option<Vec<f32>>,
+    ) {
+        use ramaria_memory::retriever::UttDocView;
+        let mut retriever = ctx.retriever.write().expect("retriever 锁可用");
+        retriever.index_utt(
+            &UttDocView {
+                id,
+                persona_uid: persona_uid.to_string(),
+                session_id: uuid::Uuid::new_v4(),
+                block_text: text.to_string(),
+                msg_count: 2,
+                created_at: 1000,
+            },
+            vector,
+        );
+    }
+
+    #[tokio::test]
+    async fn utt_injected_for_whitelisted_persona() {
+        // 角色类 persona（白名单内）且有命中 → 注入原文片段
+        let ctx = test_context(
+            Arc::new(MockStorage::new()),
+            Arc::new(MockLlm::local()),
+            Some(Arc::new(MockEmbedding::new())),
+        );
+        seed_utt(&ctx, 1, "char-0001", "今天天气真好我们一起去公园", None);
+        let stage = StageRetrieveMemory::new();
+        let data = make_data("公园", Some("char-0001"));
+
+        let output = stage.execute(&ctx, data).await.expect("should succeed");
+        assert!(output.utt_context.is_some(), "白名单内应注入原文");
+        let text = output.utt_context.unwrap();
+        assert!(text.contains("公园"), "原文内容保留");
+    }
+
+    #[tokio::test]
+    async fn utt_not_injected_for_rama_persona() {
+        // 回归红线：助手类 persona（白名单外）不注入原文，prompt 与 v1.3 等价
+        let ctx = test_context(
+            Arc::new(MockStorage::new()),
+            Arc::new(MockLlm::local()),
+            Some(Arc::new(MockEmbedding::new())),
+        );
+        seed_utt(&ctx, 1, "rama-0001", "rama 的原文", None);
+        let stage = StageRetrieveMemory::new();
+        let data = make_data("原文", Some("rama-0001"));
+
+        let output = stage.execute(&ctx, data).await.expect("should succeed");
+        assert!(output.utt_context.is_none(), "白名单外不注入原文");
+    }
+
+    #[tokio::test]
+    async fn utt_disabled_skips_retrieval() {
+        let ctx = test_context(
+            Arc::new(MockStorage::new()),
+            Arc::new(MockLlm::local()),
+            Some(Arc::new(MockEmbedding::new())),
+        );
+        seed_utt(&ctx, 1, "char-0001", "今天天气真好", None);
+        let mut ctx = ctx;
+        ctx.config.utt.enabled = false; // 开关关闭 → 行为回退 v1.3
+        let stage = StageRetrieveMemory::new();
+        let data = make_data("天气", Some("char-0001"));
+
+        let output = stage.execute(&ctx, data).await.expect("should succeed");
+        assert!(output.utt_context.is_none(), "开关关闭不注入");
+    }
+
+    #[tokio::test]
+    async fn utt_no_hit_returns_none() {
+        let ctx = test_context(
+            Arc::new(MockStorage::new()),
+            Arc::new(MockLlm::local()),
+            None,
+        );
+        let stage = StageRetrieveMemory::new();
+        let data = make_data("完全不相关的内容", Some("char-0001"));
+
+        let output = stage.execute(&ctx, data).await.expect("should succeed");
+        assert!(output.utt_context.is_none(), "无命中不注入");
+    }
+
+    #[tokio::test]
+    async fn utt_other_persona_invisible() {
+        // 原文严格按 persona_uid 隔离：char-0001 检索不到 char-0002 的块
+        let ctx = test_context(
+            Arc::new(MockStorage::new()),
+            Arc::new(MockLlm::local()),
+            None,
+        );
+        seed_utt(&ctx, 1, "char-0002", "别人的秘密原文", None);
+        let stage = StageRetrieveMemory::new();
+        let data = make_data("秘密原文", Some("char-0001"));
+
+        let output = stage.execute(&ctx, data).await.expect("should succeed");
+        assert!(output.utt_context.is_none(), "跨 persona 不可见");
+    }
+
+    #[tokio::test]
+    async fn utt_budget_trims_low_score_blocks() {
+        // 预算裁剪：高相似度块保留，低分块整块丢弃
+        let ctx = test_context(
+            Arc::new(MockStorage::new()),
+            Arc::new(MockLlm::local()),
+            None,
+        );
+        seed_utt(&ctx, 1, "char-0001", "命中话题的第一块内容", None);
+        seed_utt(&ctx, 2, "char-0001", "命中话题的第二块内容", None);
+        let mut ctx = ctx;
+        ctx.config.utt.max_block_chars = 8; // 只够第一块
+        let stage = StageRetrieveMemory::new();
+        let data = make_data("命中话题", Some("char-0001"));
+
+        let output = stage.execute(&ctx, data).await.expect("should succeed");
+        let text = output.utt_context.expect("有命中应注入");
+        assert!(text.contains("第一块"), "高分块保留");
+        assert!(!text.contains("第二块"), "超预算整块丢弃");
+    }
+
+    #[tokio::test]
+    async fn utt_vector_channel_used_when_embedding_available() {
+        // 块有向量 + query 向量可用 → 向量通道命中
+        let ctx = test_context(
+            Arc::new(MockStorage::new()),
+            Arc::new(MockLlm::local()),
+            Some(Arc::new(MockEmbedding::new())),
+        );
+        // 非零块向量（MockEmbedding 返回零向量 query；余弦为 0 但命中成立）
+        seed_utt(&ctx, 1, "char-0001", "向量检索目标块", Some(vec![1.0; 128]));
+        let stage = StageRetrieveMemory::new();
+        let data = make_data("任意查询", Some("char-0001"));
+
+        let output = stage.execute(&ctx, data).await.expect("should succeed");
+        assert!(output.utt_context.is_some(), "向量通道应命中");
     }
 }

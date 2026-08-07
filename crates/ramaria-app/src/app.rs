@@ -108,6 +108,8 @@ impl App {
 
         // 注入 Retriever 到 SessionLifecycle，启用 L1 增量索引
         lifecycle.set_retriever(Arc::clone(&retriever));
+        // 注入 embedding 到 SessionLifecycle，启用 utt 块向量生成（v1.4）
+        lifecycle.set_embedding(embedding.clone());
 
         let emb_info = embedding
             .as_ref()
