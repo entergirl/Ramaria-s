@@ -514,11 +514,206 @@ mod tests {
         assert!(blocks[0].embedding.is_none(), "无 embedder → 无向量");
     }
 
+    /// 端到端验收（T-V14-5-005）：真实消息序列上验证单边合并——
+    /// 中间出现"只有一方发言"的块时正确并入相邻块（优先并入前块）。
+    ///
+    /// 消息序列: 双边块(0-3) → 1h 间隙 → 单边 User 块(4-5) → 1h 间隙 → 双边块(6-9)
+    /// 期望: 单边块并入前块 → 2 块（0-5 / 6-9），块 1 含单边消息原文。
+    #[tokio::test]
+    async fn end_to_end_single_side_block_merges_into_previous() {
+        let storage = mem_storage().await;
+        let persona_uid = "char-0001";
+        let persona = Persona::new(
+            persona_uid.to_string(),
+            "角色A".to_string(),
+            PersonaKind::Char,
+            1,
+            "local".to_string(),
+        );
+        storage.create_persona(&persona).await.unwrap();
+        let session = storage.create_session(Some(persona_uid)).await.unwrap();
+
+        // 显式构造带时间间隙的消息序列（间隙 1h > θ_gap 30min）
+        let base = 1_700_000_000_000i64;
+        let gap_ms = 60 * 60 * 1000; // 1 小时
+        let mut msgs: Vec<Message> = Vec::new();
+        let mut t = base;
+        // 块 1：双边交替（目标发言 + 用户发言）
+        for i in 0..4 {
+            let role = if i % 2 == 0 {
+                MessageRole::Assistant
+            } else {
+                MessageRole::User
+            };
+            let uid = if i % 2 == 0 {
+                Some(persona_uid.to_string())
+            } else {
+                None
+            };
+            let mut m = Message::new(
+                session.id,
+                role,
+                format!("双边块1内容{i}"),
+                MessageSource::Local,
+            )
+            .with_persona_uid(uid);
+            m.created_at = t;
+            t += 60_000;
+            msgs.push(m);
+        }
+        // 块 2：纯用户发言（单边，无目标发言）
+        t += gap_ms;
+        for i in 4..6 {
+            let mut m = Message::new(
+                session.id,
+                MessageRole::User,
+                format!("单边块内容{i}"),
+                MessageSource::Local,
+            );
+            m.created_at = t;
+            t += 60_000;
+            msgs.push(m);
+        }
+        // 块 3：双边交替
+        t += gap_ms;
+        for i in 6..10 {
+            let role = if i % 2 == 0 {
+                MessageRole::Assistant
+            } else {
+                MessageRole::User
+            };
+            let uid = if i % 2 == 0 {
+                Some(persona_uid.to_string())
+            } else {
+                None
+            };
+            let mut m = Message::new(
+                session.id,
+                role,
+                format!("双边块2内容{i}"),
+                MessageSource::Local,
+            )
+            .with_persona_uid(uid);
+            m.created_at = t;
+            t += 60_000;
+            msgs.push(m);
+        }
+        for m in &msgs {
+            storage.save_message(m).await.unwrap();
+        }
+
+        let stats = test_builder()
+            .build_session(&storage, &session, None)
+            .await
+            .unwrap();
+        assert_eq!(stats.chunks_created, 2, "单边块应并入相邻块 → 2 块");
+
+        let blocks = storage
+            .list_utt_blocks_by_persona(persona_uid)
+            .await
+            .unwrap();
+        assert_eq!(blocks.len(), 2, "端到端应产出 2 块");
+        // 块 1 = 双边块1 + 单边块（并入前块）
+        assert_eq!(blocks[0].msg_count, 6, "块1 应包含单边块消息（0-5）");
+        assert!(
+            blocks[0].block_text.contains("单边块内容4")
+                && blocks[0].block_text.contains("单边块内容5"),
+            "单边块原文应并入块1: {}",
+            blocks[0].block_text
+        );
+        // 块 2 = 双边块2
+        assert_eq!(blocks[1].msg_count, 4, "块2 应保持 4 条（6-9）");
+        assert!(
+            !blocks[1].block_text.contains("单边块内容"),
+            "块2 不应含单边块消息"
+        );
+    }
+
+    /// 端到端验收（T-V14-5-005）：首块单边（只有一方发言）时并入后一块。
+    ///
+    /// 消息序列: 单边 User 块(0-1) → 1h 间隙 → 双边块(2-5)
+    /// 期望: 首块并入后块 → 1 块（0-5），块含全部消息。
+    #[tokio::test]
+    async fn end_to_end_single_side_first_block_merges_into_next() {
+        let storage = mem_storage().await;
+        let persona_uid = "char-0001";
+        let persona = Persona::new(
+            persona_uid.to_string(),
+            "角色A".to_string(),
+            PersonaKind::Char,
+            1,
+            "local".to_string(),
+        );
+        storage.create_persona(&persona).await.unwrap();
+        let session = storage.create_session(Some(persona_uid)).await.unwrap();
+
+        let base = 1_700_000_000_000i64;
+        let gap_ms = 60 * 60 * 1000;
+        let mut msgs: Vec<Message> = Vec::new();
+        let mut t = base;
+        // 首块：纯用户发言（单边）
+        for i in 0..2 {
+            let mut m = Message::new(
+                session.id,
+                MessageRole::User,
+                format!("首单边内容{i}"),
+                MessageSource::Local,
+            );
+            m.created_at = t;
+            t += 60_000;
+            msgs.push(m);
+        }
+        // 次块：双边交替
+        t += gap_ms;
+        for i in 2..6 {
+            let role = if i % 2 == 0 {
+                MessageRole::Assistant
+            } else {
+                MessageRole::User
+            };
+            let uid = if i % 2 == 0 {
+                Some(persona_uid.to_string())
+            } else {
+                None
+            };
+            let mut m = Message::new(
+                session.id,
+                role,
+                format!("双边内容{i}"),
+                MessageSource::Local,
+            )
+            .with_persona_uid(uid);
+            m.created_at = t;
+            t += 60_000;
+            msgs.push(m);
+        }
+        for m in &msgs {
+            storage.save_message(m).await.unwrap();
+        }
+
+        let stats = test_builder()
+            .build_session(&storage, &session, None)
+            .await
+            .unwrap();
+        assert_eq!(stats.chunks_created, 1, "首单边块应并入后块 → 1 块");
+
+        let blocks = storage
+            .list_utt_blocks_by_persona(persona_uid)
+            .await
+            .unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].msg_count, 6, "合并后应含全部 6 条消息");
+        assert!(
+            blocks[0].block_text.contains("首单边内容0")
+                && blocks[0].block_text.contains("双边内容5"),
+            "块应含首单边与双边全部消息"
+        );
+    }
+
     #[tokio::test]
     async fn build_session_generates_embedding() {
         let storage = mem_storage().await;
         let session = setup_session(&storage, "char-0001", 4, 1).await;
-
         let stats = test_builder()
             .build_session(&storage, &session, Some(&FixedEmbedding))
             .await
