@@ -24,7 +24,7 @@ use ramaria_core::traits::{
 use ramaria_core::types::{
     BackendConfig, ClusterSnapshot, EventRelation, LlmProvider as LlmProviderKind, MemoryEvent,
     MemoryL1, Message, ModelCapability, Persona, PersonaExample, PersonaFact, PersonalityTrait,
-    PrivacyConsent, ProfileField, Session, TraitEvidence, TraitStatus,
+    PrivacyConsent, ProfileField, Session, TraitEvidence, TraitStatus, UttBlock,
 };
 use uuid::Uuid;
 
@@ -57,6 +57,8 @@ pub struct MockStorage {
     evidence_seq: AtomicI64,
     cluster_snapshots: Mutex<Vec<ClusterSnapshot>>,
     snapshot_seq: AtomicI64,
+    /// utt 话语块（按 session_id 索引，v1.4 M5：桥接/封存链路测试）
+    utt_blocks: Mutex<HashMap<Uuid, Vec<UttBlock>>>,
 }
 
 impl Default for MockStorage {
@@ -85,6 +87,7 @@ impl MockStorage {
             evidence_seq: AtomicI64::new(1),
             cluster_snapshots: Mutex::new(Vec::new()),
             snapshot_seq: AtomicI64::new(1),
+            utt_blocks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -127,6 +130,42 @@ impl MockStorage {
                 persona_uid: None,
             },
         );
+    }
+
+    /// 便捷方法：添加已关闭会话（ended_at 固定为 2000，供桥接等场景）。
+    #[allow(dead_code)]
+    pub fn add_closed_session(&self, session_id: Uuid) {
+        self.sessions.lock().unwrap().insert(
+            session_id,
+            Session {
+                id: session_id,
+                started_at: 1000,
+                ended_at: Some(2000),
+                persona_uid: None,
+            },
+        );
+    }
+
+    /// 便捷方法：添加 persona（供白名单/桥接/推断测试）。
+    #[allow(dead_code)]
+    pub fn add_persona(&self, persona: Persona) {
+        self.personas
+            .lock()
+            .unwrap()
+            .insert(persona.uid.clone(), persona);
+    }
+
+    /// 便捷方法：为指定会话添加一条 utt 话语块（追加到该会话块列表尾部）。
+    ///
+    /// 说明:
+    /// - id 自动分配（当前块数 + 1），模拟存储层自增。
+    /// - 覆盖 `get_latest_utt_block_by_session`（取列表尾部）。
+    #[allow(dead_code)]
+    pub fn add_utt_block(&self, mut block: UttBlock) {
+        let mut map = self.utt_blocks.lock().unwrap();
+        let list = map.entry(block.session_id).or_default();
+        block.id = list.len() as i64 + 1;
+        list.push(block);
     }
 
     /// 便捷方法：添加消息。
@@ -246,7 +285,55 @@ impl StorageBackend for MockStorage {
     async fn delete_session(&self, session_id: Uuid) -> RamariaResult<()> {
         self.sessions.lock().unwrap().remove(&session_id);
         self.messages.lock().unwrap().remove(&session_id);
+        self.utt_blocks.lock().unwrap().remove(&session_id);
         Ok(())
+    }
+
+    // -- Utt Blocks（v1.4 M5：桥接/封存链路测试支持） --
+
+    async fn insert_utt_block(&self, block: &UttBlock) -> RamariaResult<i64> {
+        let mut map = self.utt_blocks.lock().unwrap();
+        let list = map.entry(block.session_id).or_default();
+        let id = list.len() as i64 + 1;
+        let mut b = block.clone();
+        b.id = id;
+        list.push(b);
+        Ok(id)
+    }
+
+    async fn list_utt_blocks_by_persona(&self, persona_uid: &str) -> RamariaResult<Vec<UttBlock>> {
+        Ok(self
+            .utt_blocks
+            .lock()
+            .unwrap()
+            .values()
+            .flatten()
+            .filter(|b| b.persona_uid == persona_uid)
+            .cloned()
+            .collect())
+    }
+
+    async fn get_latest_utt_block_by_session(
+        &self,
+        session_id: Uuid,
+    ) -> RamariaResult<Option<UttBlock>> {
+        Ok(self
+            .utt_blocks
+            .lock()
+            .unwrap()
+            .get(&session_id)
+            .and_then(|list| list.last())
+            .cloned())
+    }
+
+    async fn delete_utt_blocks_by_session(&self, session_id: Uuid) -> RamariaResult<usize> {
+        Ok(self
+            .utt_blocks
+            .lock()
+            .unwrap()
+            .remove(&session_id)
+            .map(|l| l.len())
+            .unwrap_or(0))
     }
 
     async fn save_message(&self, message: &Message) -> RamariaResult<()> {
@@ -292,12 +379,33 @@ impl StorageBackend for MockStorage {
         Ok(None)
     }
 
-    async fn save_memory_l1(&self, _memory: &MemoryL1) -> RamariaResult<()> {
+    async fn save_memory_l1(&self, memory: &MemoryL1) -> RamariaResult<()> {
+        self.l1_list
+            .lock()
+            .unwrap()
+            .entry(memory.session_id)
+            .or_default()
+            .push(memory.clone());
+        // 同步维护 persona 维度索引（list_unabsorbed_l1 等查询依赖）
+        if let Some(uid) = memory.persona_uid.clone() {
+            self.l1_by_persona
+                .lock()
+                .unwrap()
+                .entry(uid)
+                .or_default()
+                .push(memory.clone());
+        }
         Ok(())
     }
 
-    async fn list_memory_l1(&self, _session_id: Uuid) -> RamariaResult<Vec<MemoryL1>> {
-        Ok(Vec::new())
+    async fn list_memory_l1(&self, session_id: Uuid) -> RamariaResult<Vec<MemoryL1>> {
+        Ok(self
+            .l1_list
+            .lock()
+            .unwrap()
+            .get(&session_id)
+            .cloned()
+            .unwrap_or_default())
     }
 
     async fn get_memory_l1(&self, _id: Uuid) -> RamariaResult<Option<MemoryL1>> {
@@ -732,6 +840,8 @@ pub struct MockLlm {
     reply: String,
     model_capability: ModelCapability,
     config: BackendConfig,
+    /// 最近一次 chat/chat_stream 请求（v1.4 M5：桥接注入等 prompt 断言用）
+    last_request: Mutex<Option<ChatRequest>>,
 }
 
 impl MockLlm {
@@ -750,6 +860,7 @@ impl MockLlm {
                 max_output_tokens: 4096,
             },
             config: BackendConfig::lm_studio_default(),
+            last_request: Mutex::new(None),
         }
     }
 
@@ -761,6 +872,7 @@ impl MockLlm {
             reply: reply.to_string(),
             model_capability: capability,
             config,
+            last_request: Mutex::new(None),
         }
     }
 
@@ -783,16 +895,26 @@ impl MockLlm {
     }
 }
 
+impl MockLlm {
+    /// 最近一次 chat 请求（供 prompt 内容断言）。
+    #[allow(dead_code)]
+    pub fn last_request(&self) -> Option<ChatRequest> {
+        self.last_request.lock().unwrap().clone()
+    }
+}
+
 #[async_trait]
 impl LlmProvider for MockLlm {
-    async fn chat(&self, _request: &ChatRequest) -> RamariaResult<String> {
+    async fn chat(&self, request: &ChatRequest) -> RamariaResult<String> {
+        *self.last_request.lock().unwrap() = Some(request.clone());
         Ok(self.reply.clone())
     }
 
     async fn chat_stream(
         &self,
-        _request: &ChatRequest,
+        request: &ChatRequest,
     ) -> RamariaResult<Pin<Box<dyn Stream<Item = RamariaResult<StreamDelta>> + Send>>> {
+        *self.last_request.lock().unwrap() = Some(request.clone());
         let reply = self.reply.clone();
         let chars: Vec<char> = reply.chars().collect();
 

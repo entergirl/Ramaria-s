@@ -337,6 +337,9 @@ pub struct PipelineData {
     /// utt 原文片段（已按预算裁剪渲染；白名单外/未命中为 None，等同 v1.3）
     pub utt_context: Option<String>,
 
+    /// 桥接内容（上一会话尾部原文，已按预算渲染；None 表示不注入，等同 v1.3）
+    pub bridge_context: Option<String>,
+
     // === Stage 6: BuildPrompt ===
     /// 5-Block System Prompt
     pub system_prompt: Option<String>,
@@ -394,6 +397,7 @@ impl PipelineData {
             last_active_at: None,
             memory_context: None,
             utt_context: None,
+            bridge_context: None,
             system_prompt: None,
             budgeted_system_prompt: None,
             budgeted_memory_context: None,

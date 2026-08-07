@@ -22,6 +22,7 @@ pub mod app_privacy;
 pub mod app_retriever;
 pub mod app_setup;
 pub mod app_state;
+pub mod bridge;
 pub mod config_sync;
 pub mod diagnostics;
 pub mod error_hint;

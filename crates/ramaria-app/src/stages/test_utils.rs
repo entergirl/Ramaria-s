@@ -19,7 +19,7 @@ use ramaria_core::traits::{
 use ramaria_core::types::{
     BackendConfig, ClusterSnapshot, EventRelation, MemoryEvent, MemoryL1, Message, ModelCapability,
     Persona, PersonaExample, PersonaFact, PersonalityTrait, PrivacyConsent, ProfileField, Session,
-    TraitEvidence, TraitStatus,
+    TraitEvidence, TraitStatus, UttBlock,
 };
 use ramaria_memory::retriever::Retriever;
 use uuid::Uuid;
@@ -45,6 +45,9 @@ pub struct MockStorage {
     backend_config: Mutex<Option<BackendConfig>>,
     examples: Mutex<Vec<PersonaExample>>,
     next_example_id: Mutex<i64>,
+    personas: Mutex<HashMap<String, Persona>>,
+    /// utt 话语块（按 session 索引，v1.4 M5：桥接测试支持）
+    utt_blocks: Mutex<HashMap<Uuid, Vec<UttBlock>>>,
 }
 
 impl Default for MockStorage {
@@ -63,6 +66,8 @@ impl MockStorage {
             backend_config: Mutex::new(None),
             examples: Mutex::new(Vec::new()),
             next_example_id: Mutex::new(1),
+            personas: Mutex::new(HashMap::new()),
+            utt_blocks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -81,12 +86,17 @@ impl MockStorage {
 
     /// 预填充一个已关闭 session 并返回其 ID。
     pub fn add_closed_session(&self, session_id: Uuid) {
+        self.add_closed_session_at(session_id, 2000);
+    }
+
+    /// 预填充一个已关闭 session（ended_at 可控，供"取最近已关闭会话"类测试）。
+    pub fn add_closed_session_at(&self, session_id: Uuid, ended_at: i64) {
         self.sessions.lock().unwrap().insert(
             session_id,
             Session {
                 id: session_id,
                 started_at: 1000,
-                ended_at: Some(2000),
+                ended_at: Some(ended_at),
                 persona_uid: None,
             },
         );
@@ -108,6 +118,22 @@ impl MockStorage {
     /// 预填充隐私确认记录。
     pub fn add_privacy_consent(&self, consent: PrivacyConsent) {
         self.privacy_consents.lock().unwrap().push(consent);
+    }
+
+    /// 预填充 persona（v1.4 M5：桥接白名单/名称解析测试）。
+    pub fn add_persona(&self, persona: Persona) {
+        self.personas
+            .lock()
+            .unwrap()
+            .insert(persona.uid.clone(), persona);
+    }
+
+    /// 为指定会话添加一条 utt 话语块（追加到该会话列表尾部，id 自动分配）。
+    pub fn add_utt_block(&self, mut block: UttBlock) {
+        let mut map = self.utt_blocks.lock().unwrap();
+        let list = map.entry(block.session_id).or_default();
+        block.id = list.len() as i64 + 1;
+        list.push(block);
     }
 }
 
@@ -151,7 +177,55 @@ impl StorageBackend for MockStorage {
     async fn delete_session(&self, session_id: Uuid) -> RamariaResult<()> {
         self.sessions.lock().unwrap().remove(&session_id);
         self.messages.lock().unwrap().remove(&session_id);
+        self.utt_blocks.lock().unwrap().remove(&session_id);
         Ok(())
+    }
+
+    // -- Utt Blocks（v1.4 M5：桥接测试支持） --
+
+    async fn insert_utt_block(&self, block: &UttBlock) -> RamariaResult<i64> {
+        let mut map = self.utt_blocks.lock().unwrap();
+        let list = map.entry(block.session_id).or_default();
+        let id = list.len() as i64 + 1;
+        let mut b = block.clone();
+        b.id = id;
+        list.push(b);
+        Ok(id)
+    }
+
+    async fn list_utt_blocks_by_persona(&self, persona_uid: &str) -> RamariaResult<Vec<UttBlock>> {
+        Ok(self
+            .utt_blocks
+            .lock()
+            .unwrap()
+            .values()
+            .flatten()
+            .filter(|b| b.persona_uid == persona_uid)
+            .cloned()
+            .collect())
+    }
+
+    async fn get_latest_utt_block_by_session(
+        &self,
+        session_id: Uuid,
+    ) -> RamariaResult<Option<UttBlock>> {
+        Ok(self
+            .utt_blocks
+            .lock()
+            .unwrap()
+            .get(&session_id)
+            .and_then(|list| list.last())
+            .cloned())
+    }
+
+    async fn delete_utt_blocks_by_session(&self, session_id: Uuid) -> RamariaResult<usize> {
+        Ok(self
+            .utt_blocks
+            .lock()
+            .unwrap()
+            .remove(&session_id)
+            .map(|l| l.len())
+            .unwrap_or(0))
     }
 
     async fn save_message(&self, message: &Message) -> RamariaResult<()> {
@@ -230,16 +304,20 @@ impl StorageBackend for MockStorage {
             .collect())
     }
 
-    async fn create_persona(&self, _p: &Persona) -> RamariaResult<i64> {
+    async fn create_persona(&self, p: &Persona) -> RamariaResult<i64> {
+        self.personas
+            .lock()
+            .unwrap()
+            .insert(p.uid.clone(), p.clone());
         Ok(1)
     }
 
-    async fn get_persona_by_uid(&self, _uid: &str) -> RamariaResult<Option<Persona>> {
-        Ok(None)
+    async fn get_persona_by_uid(&self, uid: &str) -> RamariaResult<Option<Persona>> {
+        Ok(self.personas.lock().unwrap().get(uid).cloned())
     }
 
     async fn list_personas(&self) -> RamariaResult<Vec<Persona>> {
-        Ok(Vec::new())
+        Ok(self.personas.lock().unwrap().values().cloned().collect())
     }
 
     async fn update_persona(
