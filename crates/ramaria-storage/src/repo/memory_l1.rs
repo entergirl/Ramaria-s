@@ -250,3 +250,227 @@ pub async fn list_recent_by_persona(
         .map(|r| r.into_l1())
         .collect::<RamariaResult<Vec<_>>>()
 }
+
+// =========================================================
+// 测试（v1.4 M4 T-V14-4-003：evidence_notes 结构化读写集成测试）
+// =========================================================
+//
+// 说明:
+// - 使用内存 SQLite 真库（database::init_test_pool 自动应用全部 migration）。
+// - 迁移后读取测试手动构造"旧库（基线 schema + 旧格式数据）"再应用 v1.4 迁移，
+//   验证 D-V14-003 一次性迁移的产物可被 repo 结构化读取。
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database;
+
+    /// 构造一条带完整槽位的 MemoryL1（text/time/who/cause 全填）。
+    fn make_l1_with_slots(session_id: Uuid) -> MemoryL1 {
+        MemoryL1 {
+            id: Uuid::new_v4(),
+            session_id,
+            summary: "用户讨论项目延期安排".into(),
+            keywords: Some("项目,延期,排期".into()),
+            time_period: Some("下午".into()),
+            atmosphere: Some("紧张".into()),
+            valence: 0.0,
+            salience: 0.5,
+            absorbed: false,
+            created_at: 1_700_000_000_000,
+            last_accessed_at: None,
+            persona_uid: Some("char-0001".into()),
+            context_json: None,
+            situation_strength: Some(4),
+            evidence_notes: Some(vec![EvidenceNote {
+                text: "用户提到项目延期到月底".into(),
+                time: Some("上周三".into()),
+                who: Some("用户".into()),
+                cause: Some("需求变更频繁".into()),
+            }]),
+        }
+    }
+
+    /// 创建测试 fixture：persona + session（满足 memory_l1 的外键约束）。
+    ///
+    /// 说明: init_test_pool 每次创建全新内存库，必须显式插入引用数据，
+    /// 否则 save 触发 FOREIGN KEY constraint failed。
+    async fn setup_fixture(pool: &SqlitePool) -> Uuid {
+        sqlx::query(
+            "INSERT INTO personas (uid, name, kind, seq, source, created_at, updated_at) \
+             VALUES ('char-0001', '测试', 'char', 1, 'local', 0, 0)",
+        )
+        .execute(pool)
+        .await
+        .expect("插入 persona fixture 应成功");
+        let session_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO sessions (id, started_at) VALUES (?, 0)")
+            .bind(session_id.to_string())
+            .execute(pool)
+            .await
+            .expect("插入 session fixture 应成功");
+        session_id
+    }
+
+    /// 新格式往返：save → get，结构化槽位完整保留（T-V14-4-003 验收 1）。
+    #[tokio::test]
+    async fn evidence_notes_structured_roundtrip_via_get() {
+        let pool = database::init_test_pool().await.unwrap();
+        let session_id = setup_fixture(&pool).await;
+        let l1 = make_l1_with_slots(session_id);
+
+        save(&pool, &l1).await.expect("save 应成功");
+
+        let got = get(&pool, l1.id)
+            .await
+            .expect("get 应成功")
+            .expect("应存在");
+        assert_eq!(got.summary, l1.summary);
+        let notes = got.evidence_notes.expect("evidence_notes 不应为 None");
+        assert_eq!(notes.len(), 1, "1 条结构化线索应往返保留");
+        assert_eq!(notes[0].text, "用户提到项目延期到月底");
+        assert_eq!(notes[0].time.as_deref(), Some("上周三"));
+        assert_eq!(notes[0].who.as_deref(), Some("用户"));
+        assert_eq!(notes[0].cause.as_deref(), Some("需求变更频繁"));
+    }
+
+    /// 新格式往返：save → list_by_session，多条含/不含槽位的线索均完整（T-V14-4-003 验收 1）。
+    #[tokio::test]
+    async fn evidence_notes_structured_roundtrip_via_list_by_session() {
+        let pool = database::init_test_pool().await.unwrap();
+        let session_id = setup_fixture(&pool).await;
+        let mut l1 = make_l1_with_slots(session_id);
+        // 追加一条仅 text 的线索（可选槽位缺省）
+        l1.evidence_notes
+            .as_mut()
+            .unwrap()
+            .push(EvidenceNote::new("用户表示新方案还在评估中"));
+
+        save(&pool, &l1).await.expect("save 应成功");
+
+        let list = list_by_session(&pool, session_id)
+            .await
+            .expect("list_by_session 应成功");
+        assert_eq!(list.len(), 1);
+        let notes = list[0].evidence_notes.as_ref().unwrap();
+        assert_eq!(notes.len(), 2);
+        // 第一条：完整槽位
+        assert_eq!(notes[0].cause.as_deref(), Some("需求变更频繁"));
+        // 第二条：仅 text，可选槽位为 None
+        assert_eq!(notes[1].text, "用户表示新方案还在评估中");
+        assert!(notes[1].time.is_none());
+        assert!(notes[1].who.is_none());
+        assert!(notes[1].cause.is_none());
+    }
+
+    /// 迁移后读取：旧格式字符串数组经 v1.4 迁移后，repo 按新格式读回结构化线索
+    /// （字符串落 text 槽位，其余置空；T-V14-4-003 验收 2，D-V14-003）。
+    #[tokio::test]
+    async fn evidence_notes_migrated_legacy_rows_readable() {
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+        // 1. 旧库：仅基线 schema（20260801，含 evidence_notes 列，无 v1.4 迁移）
+        let options = SqliteConnectOptions::new()
+            .filename(":memory:")
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!("../../migrations/20260801_schema.sql"))
+            .execute(&pool)
+            .await
+            .expect("基线 schema 应可执行");
+
+        // 2. 引用数据（memory_l1 的外键依赖）+ 旧格式 L1 行
+        let persona_uid = "char-0001";
+        sqlx::query(
+            "INSERT INTO personas (uid, name, kind, seq, source, created_at, updated_at) \
+             VALUES (?, '测试', 'char', 1, 'local', 0, 0)",
+        )
+        .bind(persona_uid)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let session_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO sessions (id, started_at) VALUES (?, 0)")
+            .bind(session_id.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let l1_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO memory_l1 (id, session_id, summary, valence, salience, absorbed, \
+             created_at, persona_uid, evidence_notes) \
+             VALUES (?, ?, '摘要', 0.0, 0.5, 0, 0, ?, ?)",
+        )
+        .bind(l1_id.to_string())
+        .bind(session_id.to_string())
+        .bind(persona_uid)
+        .bind(r#"["用户提到项目延期", "用户表示压力很大"]"#)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // 3. 应用 v1.4 迁移（一次性：旧字符串数组 → 对象数组）
+        sqlx::raw_sql(include_str!("../../migrations/20260806_v1.4_utt.sql"))
+            .execute(&pool)
+            .await
+            .expect("v1.4 migration 应可执行");
+
+        // 4. repo 按新格式读取：2 条线索，text 槽位承载旧字符串，其余槽位为空
+        let got = get(&pool, l1_id)
+            .await
+            .expect("get 应成功")
+            .expect("应存在");
+        let notes = got.evidence_notes.expect("迁移后应有 evidence_notes");
+        assert_eq!(notes.len(), 2, "两条旧字符串应转为两个结构化对象");
+        assert_eq!(notes[0].text, "用户提到项目延期");
+        assert_eq!(notes[1].text, "用户表示压力很大");
+        assert!(notes[0].time.is_none() && notes[0].who.is_none() && notes[0].cause.is_none());
+        assert!(notes[1].time.is_none() && notes[1].who.is_none() && notes[1].cause.is_none());
+    }
+
+    /// 空值往返：evidence_notes 为 None → save → get 仍为 None（T-V14-4-003 验收 3）。
+    #[tokio::test]
+    async fn evidence_notes_none_roundtrip() {
+        let pool = database::init_test_pool().await.unwrap();
+        let session_id = setup_fixture(&pool).await;
+        let mut l1 = make_l1_with_slots(session_id);
+        l1.evidence_notes = None;
+
+        save(&pool, &l1).await.expect("save 应成功");
+
+        let got = get(&pool, l1.id).await.unwrap().unwrap();
+        assert!(got.evidence_notes.is_none(), "None 应保持 None（DB NULL）");
+    }
+
+    /// 空数组往返：evidence_notes 为 Some(vec![]) → save → get 读回空数组
+    /// （存储为 `[]` 而非 NULL，与 None 语义区分；T-V14-4-003 验收 3）。
+    #[tokio::test]
+    async fn evidence_notes_empty_array_roundtrip() {
+        let pool = database::init_test_pool().await.unwrap();
+        let session_id = setup_fixture(&pool).await;
+        let mut l1 = make_l1_with_slots(session_id);
+        l1.evidence_notes = Some(vec![]);
+
+        save(&pool, &l1).await.expect("save 应成功");
+
+        let got = get(&pool, l1.id).await.unwrap().unwrap();
+        let notes = got.evidence_notes.expect("空数组应读回 Some(vec![])");
+        assert!(notes.is_empty(), "空数组应往返为空数组");
+    }
+
+    /// 多槽位 JSON 序列化不含空槽位（skip_serializing_if）：存储紧凑且迁移幂等友好。
+    #[tokio::test]
+    async fn evidence_notes_serialized_json_omits_empty_slots() {
+        let note = EvidenceNote::new("用户提到周末加班");
+        let json = serde_json::to_string(&vec![note]).unwrap();
+        assert!(
+            !json.contains("time") && !json.contains("who") && !json.contains("cause"),
+            "空槽位不应出现在存储 JSON 中: {json}"
+        );
+        assert!(json.contains("用户提到周末加班"));
+    }
+}

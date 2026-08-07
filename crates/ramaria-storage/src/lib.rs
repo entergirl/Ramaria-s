@@ -1816,6 +1816,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn evidence_notes_migration_mixed_array_converts_per_element() {
+        // 边缘情况（v1.4 M4 增强）：混合数组 = 旧字符串 + 新对象，
+        // 按元素类型逐项转换——字符串落 text 槽位、对象原样保留，
+        // 避免对象被错误嵌套进 text 字段导致读取失败。
+        let id = Uuid::new_v4();
+        let (pool, _) = setup_legacy_db(&[(
+            id,
+            Some(r#"["旧格式字符串", {"text": "新格式对象", "cause": "触发原因"}]"#),
+        )])
+        .await;
+
+        let migrated = apply_v14_migration(&pool, id)
+            .await
+            .expect("应迁移出非空值");
+        let notes: Vec<ramaria_core::types::EvidenceNote> =
+            serde_json::from_str(&migrated).expect("迁移结果应为合法 JSON");
+        assert_eq!(notes.len(), 2, "两条混合元素都应保留");
+        // 旧字符串 → text 槽位，其余置空
+        assert_eq!(notes[0].text, "旧格式字符串");
+        assert!(notes[0].time.is_none() && notes[0].who.is_none() && notes[0].cause.is_none());
+        // 新对象 → 原样保留（槽位不被破坏）
+        assert_eq!(notes[1].text, "新格式对象");
+        assert_eq!(notes[1].cause.as_deref(), Some("触发原因"));
+
+        // 幂等：已迁移对象数组再次执行不改变内容
+        sqlx::raw_sql(include_str!("../migrations/20260806_v1.4_utt.sql"))
+            .execute(&pool)
+            .await
+            .expect("重复执行应成功");
+        let again: String = sqlx::query_scalar("SELECT evidence_notes FROM memory_l1 WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(again, migrated, "混合数组迁移后应幂等");
+    }
+
+    #[tokio::test]
     async fn evidence_notes_migration_mixed_rows() {
         // 混合场景：旧格式 + NULL + 空数组 三行共存，各自正确迁移
         let id_old = Uuid::new_v4();

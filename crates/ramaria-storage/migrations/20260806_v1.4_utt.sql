@@ -29,10 +29,20 @@ WHERE evidence_notes IS NOT NULL AND evidence_notes <> '';
 --     新格式对象数组（首元素 'object'）与空数组（无首元素）保持不变。
 --     json_object 负责字符串转义；空数组不会被此 UPDATE 命中（保持原样）。
 --     内层子查询按数组索引（key 列，字符串索引）排序，保证 group_concat 顺序稳定。
+--     边缘情况（v1.4 M4 增强）：混合数组（如 ["旧字符串", {"text":"新对象"}]）
+--     按元素类型逐项转换——字符串落 text 槽位、已是对象的元素原样保留，
+--     数字/布尔/null 元素丢弃（group_concat 跳过 NULL），
+--     避免旧数据中对象元素被错误嵌套进 text 字段导致读取失败。
+--     注意：json_type(value) 对非 JSON 字符串直接报 malformed JSON 而非返回 NULL，
+--     因此必须先以 json_valid(value) 短路守卫（AND 短路保证 json_type 不被误调）。
 UPDATE memory_l1
 SET evidence_notes = (
     SELECT '[' || group_concat(
-        json_object('text', value, 'time', NULL, 'who', NULL, 'cause', NULL), ','
+        CASE
+            WHEN json_valid(value) AND json_type(value) = 'object' THEN json(value)
+            WHEN typeof(value) = 'text' THEN
+                json_object('text', value, 'time', NULL, 'who', NULL, 'cause', NULL)
+        END, ','
     ) || ']'
     FROM (
         SELECT value, key
