@@ -61,17 +61,21 @@ pub const L1_SUMMARY_PROMPT_BASE: &str = r#"# Context（背景）
    - `3` 中性情境（普通对话、一般交流）
    - `4` 较强情境（重要对话、关键决策、正式场合）
    - `5` 强情境（危机处理、重大人生事件、强烈冲突）
-8. **evidence_notes** — 1–3 条支撑 summary 结论的具体事实引用，每条不少于 5 个中文字符。记录"表达了什么观点/经历了什么事件"，引用原话或转述具体事实。
+8. **evidence_notes** — 1–3 条支撑 summary 结论的结构化证据线索（对象数组），记录"谁在什么条件下表达了什么/经历了什么"，引用原话或转述具体事实。每条对象含 4 个槽位：
+   - `text`（必填）— 证据文本，不少于 5 个中文字符
+   - `time`（可选）— 时间点描述，如"上周三晚上"，无法判断时省略
+   - `who`（可选）— 涉及的人物/角色，无法判断时省略
+   - `cause`（可选）— 原因/触发条件，仅当对话中可辨时填写一句短句原因；无法辨明时省略该槽位，不要编造
 
 # Format（输出格式）
 你的整个回复必须是一个裸 JSON 对象，以 { 开头、以 } 结尾，不要添加任何其他内容：
 
-{"summary":"...","keywords":"...","time_period":"...","atmosphere":"...","valence":0.0,"salience":0.5,"situation_strength":3,"evidence_notes":["...","..."]}
+{"summary":"...","keywords":"...","time_period":"...","atmosphere":"...","valence":0.0,"salience":0.5,"situation_strength":3,"evidence_notes":[{"text":"...","time":"...","who":"...","cause":"..."}]}
 
 # Target（质量目标）
 - summary 客观、精炼、可独立理解（脱离对话原文仍有信息量）
 - valence/salience 严格使用五档离散值，不做微调（如 0.3、0.7 等无效值）
-- evidence_notes 从对话中提取，不编造
+- evidence_notes 从对话中提取，不编造；cause 槽位仅在对话中可辨时填写，宁缺毋滥
 
 ---
 
@@ -125,18 +129,22 @@ pub const L1_SUMMARY_PROMPT_WITH_KEYWORDS: &str = r#"# Context（背景）
    - `3` 中性情境（普通对话、一般交流）
    - `4` 较强情境（重要对话、关键决策、正式场合）
    - `5` 强情境（危机处理、重大人生事件、强烈冲突）
-8. **evidence_notes** — 1–3 条支撑 summary 结论的具体事实引用，每条不少于 5 个中文字符。记录"表达了什么观点/经历了什么事件"，引用原话或转述具体事实。
+8. **evidence_notes** — 1–3 条支撑 summary 结论的结构化证据线索（对象数组），记录"谁在什么条件下表达了什么/经历了什么"，引用原话或转述具体事实。每条对象含 4 个槽位：
+   - `text`（必填）— 证据文本，不少于 5 个中文字符
+   - `time`（可选）— 时间点描述，如"上周三晚上"，无法判断时省略
+   - `who`（可选）— 涉及的人物/角色，无法判断时省略
+   - `cause`（可选）— 原因/触发条件，仅当对话中可辨时填写一句短句原因；无法辨明时省略该槽位，不要编造
 
 # Format（输出格式）
 你的整个回复必须是一个裸 JSON 对象，以 { 开头、以 } 结尾，不要添加任何其他内容：
 
-{"summary":"...","keywords":"...","time_period":"...","atmosphere":"...","valence":0.0,"salience":0.5,"situation_strength":3,"evidence_notes":["...","..."]}
+{"summary":"...","keywords":"...","time_period":"...","atmosphere":"...","valence":0.0,"salience":0.5,"situation_strength":3,"evidence_notes":[{"text":"...","time":"...","who":"...","cause":"..."}]}
 
 # Target（质量目标）
 - summary 客观、精炼、可独立理解（脱离对话原文仍有信息量）
 - keywords 优先使用候选列表中的词，便于跨会话聚合
 - valence/salience 严格使用五档离散值，不做微调（如 0.3、0.7 等无效值）
-- evidence_notes 从对话中提取，不编造
+- evidence_notes 从对话中提取，不编造；cause 槽位仅在对话中可辨时填写，宁缺毋滥
 
 ---
 
@@ -270,5 +278,49 @@ mod tests {
             prompt.contains("关键词候选"),
             "关键词注入版 prompt 应包含关键词候选段落"
         );
+    }
+
+    /// v1.4 M4（T-V14-4-001）：两条模板均须输出结构化对象数组
+    /// `[{text, time?, who?, cause?}]`，含槽位说明与 JSON 示例。
+    #[test]
+    fn both_templates_use_structured_object_array() {
+        for prompt in [
+            build_l1_prompt("test", None),
+            build_l1_prompt("test", Some("天气, 心情")),
+        ] {
+            // 槽位说明齐全
+            assert!(
+                prompt.contains("`text`（必填）"),
+                "应说明 text 必填: {prompt}"
+            );
+            assert!(prompt.contains("`time`（可选）"), "应说明 time 可选槽位");
+            assert!(prompt.contains("`who`（可选）"), "应说明 who 可选槽位");
+            assert!(prompt.contains("`cause`（可选）"), "应说明 cause 可选槽位");
+            // JSON 示例为对象数组（含 { 起始的 text 槽位），不再是字符串数组
+            assert!(
+                prompt.contains(r#""evidence_notes":[{"text""#),
+                "示例应为对象数组: {prompt}"
+            );
+            // 旧字符串数组示例必须移除，避免误导 LLM 输出旧格式
+            assert!(
+                !prompt.contains(r#""evidence_notes":["..."]"#),
+                "不应残留旧字符串数组示例"
+            );
+            // 可选槽位缺失时的降级语义说明
+            assert!(prompt.contains("无法判断时省略"), "应说明槽位可省略");
+            assert!(prompt.contains("宁缺毋滥"), "应包含 cause 宁缺毋滥约束");
+        }
+    }
+
+    /// v1.4 M4：两条模板均明确 cause 槽位仅记短句原因、不编造。
+    #[test]
+    fn both_templates_mention_cause_guidance() {
+        for prompt in [
+            build_l1_prompt("test", None),
+            build_l1_prompt("test", Some("天气, 心情")),
+        ] {
+            assert!(prompt.contains("原因/触发条件"), "应说明 cause 语义");
+            assert!(prompt.contains("不要编造"), "应禁止编造 cause");
+        }
     }
 }
