@@ -1,25 +1,32 @@
-//! rust/crates/ramaria-memory/src/prompt/builder.rs - CRISPE System Prompt 装配器
+//! rust/crates/ramaria-memory/src/prompt/builder.rs - 四层 System Prompt 装配器
 //!
-//! v2.0 重构 (CRISPE 框架):
-//! - Capacity: 能力边界（AI 助手核心能力 + 安全边界）
-//! - Role: 角色身份（persona 名称/类型/背景）
-//! - Memory: 记忆上下文——最高优先级（近期对话脉络 + RAG 相关记忆）
-//! - Insight: 行为洞察（性格标签 + 已知事实）
-//! - Statement: 声明示例（Few-shot 对话示例）
-//! - Personality: 性格约束（说话风格）
-//! - Experiment: 回复规范（chat style rules + 记忆引用规则）
-//! - 当前语境: 时间/天气/上次活跃
+//! v1.4 M6（T-V14-6-001）模板精简：由 v2.0 的 CRISPE 七段式对齐算法说明书
+//! v3.1 §8.2 的四层注入结构。段落命名与结构映射表（`TEMPLATE_LAYER_MAP`）：
+//!
+//! | v1.4 M6 段落（v3.1 §8.2） | 内容来源 | v1.3 CRISPE 对应块 |
+//! |--------------------------|----------|--------------------|
+//! | `# 能力边界` | 安全边界（保留，非四层） | Capacity |
+//! | `# 角色（行为层）` | 角色身份 + 性格特征 + 已知事实 + 回复规范 | Role + Insight + Experiment |
+//! | （行为层槽位，v1.5） | 情境-反应规则（`render_behavior_block`） | 新增预留 |
+//! | `# 说话风格（表达层）` | 说话风格 + 对话示例 | Personality + Statement |
+//! | `# 知识（知识层，按需）` | 事实卡片（`render_knowledge_block`，v1.6） | 新增预留 |
+//! | `# 记忆（脉络层）` | 近期对话脉络 + 相关记忆 + 原文片段 + 桥接 | Memory + utt/桥接（v1.4） |
+//! | `# 当前时间` | 时间/天气/上次活跃 | 当前语境 |
 //!
 //! 设计特点:
-//! - Memory 块从 Block C 的从属位置提升至 Role 之后，明确"最高优先级"
-//! - 支持线上记忆注入开关：若关闭且 provider 为线上，Memory 块仅显示近期摘要
-//! - 所有块均支持缺省降级（如无 traits 则省略 Insight 中的性格段）
-//! - 记忆引用规则精确定义"主动回溯 vs 被动响应"的边界
+//! - 空块自动跳过：行为/知识槽位当前为空实现（T-V14-6-003），不产生空段落。
+//! - 脉络层独立预算（v3.1 §8.3，≤ 30%），超限裁剪顺序：原文块 → 桥接头部
+//!   → 相关记忆 → 脉络保最近（预算分配器见 `layers.rs`）。
+//! - 回归红线：助手类 persona（原文白名单外）不注入原文/桥接，输出与 v1.3 语义等价。
 //!
 //! 依赖:
 //! - `ramaria_core::types`: Persona, PersonaFact, PersonalityTrait, PersonaExample
 //! - `ramaria_memory::rag`: RAG 上下文格式化（由上层传入）
+//! - `prompt::layers`: 四层注入结构与预算分配器（T-V14-6-002）
 
+use crate::prompt::layers::{
+    LayerBudgetConfig, allocate_memory_layer_budget, render_behavior_block, render_knowledge_block,
+};
 use crate::retriever::UttHit;
 use chrono::Local;
 use ramaria_core::types::{
@@ -38,13 +45,15 @@ use ramaria_core::types::{
 /// - `include_traits`: 是否包含性格标签（Insight 块）。默认 true。
 /// - `include_facts`: 是否包含事实信息（Insight 块）。默认 true。
 /// - `include_examples`: 是否包含 Few-shot 示例（Statement 块）。默认 true。
-/// - `include_knowledge_boundary`: 是否包含知识边界（Capacity 块末尾）。默认 true。
+/// - `include_knowledge_boundary`: 是否包含知识边界（能力边界块末尾）。默认 true。
 /// - `current_time_str`: 当前时间的格式化字符串。空则自动使用 chrono::Local::now()。
+/// - `memory_layer_budget_chars`: 脉络层字符预算上限（v1.4 M6）。
+///   `None` 时使用默认预算：`LayerBudgetConfig`（1000 tokens × 30% × 2 = 600 字符）。
 #[derive(Debug, Clone)]
 pub struct PromptConfig {
-    /// Statement 块最大示例对数
+    /// 对话示例最大条数
     pub max_examples: usize,
-    /// Insight 块每层最多展示的性格标签数
+    /// 性格标签每层最多展示数
     pub max_traits_per_layer: usize,
     /// 是否包含性格标签
     pub include_traits: bool,
@@ -56,6 +65,8 @@ pub struct PromptConfig {
     pub include_knowledge_boundary: bool,
     /// 当前时间字符串（空则使用 chrono::Local::now()）
     pub current_time_str: String,
+    /// 脉络层字符预算上限（v1.4 M6；None = 默认 600 字符）
+    pub memory_layer_budget_chars: Option<usize>,
 }
 
 impl Default for PromptConfig {
@@ -68,6 +79,7 @@ impl Default for PromptConfig {
             include_examples: true,
             include_knowledge_boundary: true,
             current_time_str: String::new(),
+            memory_layer_budget_chars: None,
         }
     }
 }
@@ -150,45 +162,78 @@ pub struct PromptContext {
 }
 
 // =========================================================
-// CRISPE System Prompt 模板
+// 四层 System Prompt 模板（v1.4 M6，对齐 v3.1 §8.2）
 // =========================================================
 
-/// CRISPE 框架 System Prompt 模板。
+/// 四层模板结构（v3.1 §8.2）。
 ///
 /// 占位符说明:
-/// - `{capacity}` → Capacity 块（能力边界 + 知识边界）
-/// - `{role}` → Role 块（角色身份/类型/背景）
-/// - `{memory}` → Memory 块（近期对话脉络 + 相关历史记忆）
-/// - `{insight}` → Insight 块（性格标签 + 已知事实）
-/// - `{statement}` → Statement 块（Few-shot 示例）
-/// - `{personality}` → Personality 块（说话风格）
-/// - `{experiment}` → Experiment 块（回复规则 + 记忆引用规则）
-/// - `{context_block}` → 当前语境块（时间/天气/上次活跃）
-const CRISPE_TEMPLATE: &str = "\
+/// - `{capacity}` → `# 能力边界`（安全边界，非四层，前置保留）
+/// - `{role_layer}` → `# 角色（行为层）`（角色身份/性格特征/已知事实/回复规范）
+/// - `{behavior}` → 行为层槽位（v1.5 情境-反应规则；当前为空实现）
+/// - `{style_layer}` → `# 说话风格（表达层）`（说话风格 + 对话示例）
+/// - `{knowledge}` → `# 知识（知识层，按需）`（v1.6 事实卡片；当前为空实现）
+/// - `{memory}` → `# 记忆（脉络层）`（近期脉络/相关记忆/原文片段/桥接）
+/// - `{context_block}` → `# 当前时间`（时间/天气/上次活跃）
+///
+/// 装配语义: 空块自动跳过（不产生空段落），由 `assemble_prompt` 按序拼接。
+pub const LAYER_TEMPLATE: &str = "\
 {capacity}
 
-{role}
+{role_layer}
+
+{behavior}
+
+{style_layer}
+
+{knowledge}
 
 {memory}
 
-{insight}
-
-{statement}
-
-{personality}
-
-{experiment}
-
 {context_block}";
+
+/// 段落结构映射表（v1.4 M6 文档化产物，T-V14-6-001）。
+///
+/// 每项 `(段落标题, 内容来源, v1.3 CRISPE 对应块)`：
+/// 记录四层模板与 v1.3 七段式的对应关系，供回归核对与后续版本参考。
+pub const TEMPLATE_LAYER_MAP: &[(&str, &str, &str)] = &[
+    (
+        "# 能力边界",
+        "安全边界（AI 助手核心能力 + 知识边界）",
+        "Capacity（v1.3 保留）",
+    ),
+    (
+        "# 角色（行为层）",
+        "角色身份 + 性格特征 + 已知事实 + 回复规范",
+        "Role + Insight + Experiment",
+    ),
+    (
+        "# 说话风格（表达层）",
+        "说话风格（speaking_style）+ 对话示例（Few-shot）",
+        "Personality + Statement",
+    ),
+    (
+        "# 知识（知识层，按需）",
+        "事实卡片（v1.6 填充，当前槽位为空）",
+        "新增预留（T-V14-6-003）",
+    ),
+    (
+        "# 记忆（脉络层）",
+        "近期对话脉络 + 相关历史记忆 + 原文片段 + 桥接",
+        "Memory（v1.3）+ utt/桥接（v1.4）",
+    ),
+    ("# 当前时间", "时间 / 天气 / 上次活跃", "当前语境（v1.3）"),
+];
 
 // =========================================================
 // 装配函数
 // =========================================================
 
-/// 装配完整的 CRISPE System Prompt。
+/// 装配完整的四层 System Prompt。
 ///
 /// v2.0: 从 5-Block 格式重构为 CRISPE 七段式。
-/// Memory 块前移至 Role 之后，标注"最高优先级"。
+/// v1.4 M6: 对齐 v3.1 §8.2 精简为四层结构（段落映射见 `TEMPLATE_LAYER_MAP`），
+/// 空块自动跳过（行为/知识槽位当前为空，不产生空段落）。
 ///
 /// 参数:
 /// - `context`: 装配上下文（persona/facts/traits/examples 等）。
@@ -199,39 +244,39 @@ const CRISPE_TEMPLATE: &str = "\
 ///
 /// 降级策略:
 /// - 无 persona 时使用默认 Ramaria 身份描述。
-/// - 无 traits 时省略 Insight 中的性格段。
-/// - 无 facts 时省略 Insight 中的事实段。
-/// - 无 examples 时省略 Statement 块。
+/// - 无 traits 时省略角色层中的性格特征段。
+/// - 无 facts 时省略角色层中的已知事实段。
+/// - 无 examples 时省略表达层中的对话示例段。
 /// - 无 chat_style_rules 时使用最小化默认规则。
+/// - 行为/知识层槽位为空 → 不产生段落（v1.5/v1.6 填充后自动生效）。
 pub fn assemble_prompt(context: &PromptContext, config: &PromptConfig) -> String {
-    let capacity = build_capacity(config, context);
-    let role = build_role(context);
-    let memory = build_memory(context);
-    let insight = build_insight(context, config);
-    let statement = build_statement(context, config);
-    let personality = build_personality(context);
-    let experiment = build_experiment(context, config);
-    let context_block = build_context_block(context);
-
-    CRISPE_TEMPLATE
-        .replace("{capacity}", &capacity)
-        .replace("{role}", &role)
-        .replace("{memory}", &memory)
-        .replace("{insight}", &insight)
-        .replace("{statement}", &statement)
-        .replace("{personality}", &personality)
-        .replace("{experiment}", &experiment)
-        .replace("{context_block}", &context_block)
+    let mut blocks: Vec<String> = Vec::with_capacity(7);
+    for block in [
+        build_capacity(config, context),
+        build_role_layer(context, config),
+        // 行为层槽位（v1.5 填充；当前 None → 不产生段落）
+        render_behavior_block(context).map_or(String::new(), |b| b.content),
+        build_style_layer(context, config),
+        // 知识层槽位（v1.6 填充；当前 None → 不产生段落）
+        render_knowledge_block(context).map_or(String::new(), |b| b.content),
+        build_memory(context, config),
+        build_context_block(context),
+    ] {
+        if !block.trim().is_empty() {
+            blocks.push(block);
+        }
+    }
+    blocks.join("\n\n")
 }
 
 // =========================================================
 // Capacity 块: 能力边界
 // =========================================================
 
-/// 组装 Capacity 块：能力边界 + 知识边界。
+/// 组装能力边界块：AI 助手核心能力 + 知识边界（安全红线，非四层，前置保留）。
 fn build_capacity(config: &PromptConfig, context: &PromptContext) -> String {
     let mut parts = vec![
-        "# Capacity（能力边界）\n\
+        "# 能力边界\n\
          你是 Ramaria 记忆系统驱动的 AI 助手。你的核心能力是**记住与用户的对话历史，并在合适的时机自然引用**。\
          你的知识截止于训练数据，不知道的事情不编造，不确定的信息会说明。\
          你不提供医疗/法律/金融建议，不生成有害内容。"
@@ -262,11 +307,11 @@ fn build_capacity(config: &PromptConfig, context: &PromptContext) -> String {
 // Role 块: 角色身份
 // =========================================================
 
-/// 组装 Role 块：角色身份 + persona 类型 + 背景描述 + 说话风格。
+/// 组装角色身份段：角色身份 + persona 类型 + 背景描述（`# 角色（行为层）` 的头部）。
 fn build_role(context: &PromptContext) -> String {
     if let Some(ref persona) = context.persona {
         let mut parts = vec![format!(
-            "# Role（角色身份）\n你是「{}」，一位 AI 助手。",
+            "# 角色（行为层）\n你是「{}」，一位 AI 助手。",
             persona.name
         )];
 
@@ -292,7 +337,7 @@ fn build_role(context: &PromptContext) -> String {
 
         parts.join("\n")
     } else {
-        "# Role（角色身份）\n\
+        "# 角色（行为层）\n\
          你是 Ramaria，一个具有记忆能力、善解人意的 AI 助手。\n\
          你可以记住与用户的对话历史，并在后续对话中引用这些记忆。"
             .to_string()
@@ -303,33 +348,49 @@ fn build_role(context: &PromptContext) -> String {
 // Memory 块: 记忆上下文（最高优先级）
 // =========================================================
 
-/// 组装 Memory 块：近期对话脉络 + 相关历史记忆。
+/// 组装记忆层块：近期对话脉络 + 相关历史记忆 + 原文片段 + 桥接（`# 记忆（脉络层）`）。
 ///
-/// v2.0: 从 Block C 从属位置提升为独立 # Memory 块，标注"最高优先级"。
+/// v2.0: 从 Block C 从属位置提升为独立 Memory 块。
+/// v1.4 M6（T-V14-6-002）: 接入脉络层预算分配器（v3.1 §8.3）——
+/// 独立预算 ≤ 30%，超限裁剪顺序：原文块 → 桥接头部 → 相关记忆 → 脉络保最近。
 ///
-/// 两层结构:
-/// 1. [近期对话脉络] — 无条件注入最近 1-3 条 L1 摘要的叙事引导句
-/// 2. [相关历史记忆] — RAG 检索结果（条件注入，由 injection_guard 控制）
-fn build_memory(context: &PromptContext) -> String {
+/// 子段落结构（v3.1 §8.2）:
+/// 1. `## 近期对话脉络` — 最近 1-3 条 L1 摘要的叙事引导句（预算内保最近）
+/// 2. `## 相关历史记忆` — RAG 检索结果（条件注入）
+/// 3. `## 原文片段` — utt 话语块（v1.4，白名单外为 None 不产生段落）
+/// 4. `## 桥接（上一会话尾部）` — 上一会话尾部原文（v1.4 M5）
+fn build_memory(context: &PromptContext, config: &PromptConfig) -> String {
     let mut parts: Vec<String> = Vec::with_capacity(2);
 
     parts.push(
-        "# Memory（记忆上下文——最高优先级）\n\
+        "# 记忆（脉络层）\n\
                以下是你的记忆系统检索到的相关信息。你对用户的了解完全来源于此。\
                请仔细阅读，在对话中自然地运用这些信息——但只在话题相关或用户主动提及时引用，\
                不强行插入无关记忆。"
             .to_string(),
     );
 
-    // 近期对话脉络
-    if context.recent_session_summaries.is_empty() {
+    // 脉络层预算分配（v3.1 §8.3：独立预算，默认 1000 tokens × 30% × 2 = 600 字符）
+    let budget = config
+        .memory_layer_budget_chars
+        .unwrap_or_else(|| LayerBudgetConfig::default().budget_chars());
+    let alloc = allocate_memory_layer_budget(
+        context.utt_context.as_deref(),
+        context.bridge_context.as_deref(),
+        &context.recent_session_summaries,
+        context.memory_context.as_deref(),
+        budget,
+    );
+
+    // 近期对话脉络（预算内保最近；预算不足时显示"首次对话"）
+    if alloc.summaries.is_empty() {
         parts.push("\n\n## 近期对话脉络\n（这是你与用户的首次对话）".to_string());
     } else {
-        let narrative = build_cross_session_narrative(&context.recent_session_summaries);
+        let narrative = build_cross_session_narrative(&alloc.summaries);
         let mut lines = vec!["\n\n## 近期对话脉络".to_string(), narrative];
 
         // 逐条列出近期摘要（截断到 120 字符）
-        for (i, summary) in context.recent_session_summaries.iter().enumerate() {
+        for (i, summary) in alloc.summaries.iter().enumerate() {
             let display: String = if summary.chars().count() > 120 {
                 summary.chars().take(120).collect::<String>() + "…"
             } else {
@@ -341,13 +402,13 @@ fn build_memory(context: &PromptContext) -> String {
         parts.push(lines.join("\n"));
     }
 
-    // 相关历史记忆（RAG 结果）
-    match &context.memory_context {
-        Some(ctx) if !ctx.trim().is_empty() => {
+    // 相关历史记忆（RAG 结果；预算内句子边界截断）
+    match &alloc.rag {
+        Some(rag) if !rag.trim().is_empty() => {
             parts.push(format!(
                 "\n\n## 相关历史记忆\n\
                  以下是与当前话题相关的历史记忆，请结合这些信息回复：\n\
-                 {ctx}"
+                 {rag}"
             ));
         }
         _ => {
@@ -355,8 +416,8 @@ fn build_memory(context: &PromptContext) -> String {
         }
     }
 
-    // 原文片段（v1.4 utt 话语块；白名单外为 None → 不产生段落，等同 v1.3）
-    if let Some(utt) = &context.utt_context
+    // 原文片段（v1.4 utt 话语块；预算不足/白名单外为 None → 不产生段落，等同 v1.3）
+    if let Some(utt) = &alloc.utt
         && !utt.trim().is_empty()
     {
         parts.push(format!(
@@ -366,8 +427,8 @@ fn build_memory(context: &PromptContext) -> String {
         ));
     }
 
-    // 桥接（v1.4 M5 上一会话尾部；开关关闭/白名单外/无上一会话为 None → 不产生段落）
-    if let Some(bridge) = &context.bridge_context
+    // 桥接（v1.4 M5 上一会话尾部；预算不足/开关关闭/白名单外为 None → 不产生段落）
+    if let Some(bridge) = &alloc.bridge
         && !bridge.trim().is_empty()
     {
         parts.push(format!(
@@ -477,19 +538,17 @@ pub fn build_cross_session_narrative(summaries: &[String]) -> String {
 }
 
 // =========================================================
-// Insight 块: 行为洞察
+// 角色层（行为层）: 角色身份 + 性格特征 + 已知事实 + 回复规范
 // =========================================================
 
-/// 组装 Insight 块：性格标签 + 已知事实。
-fn build_insight(context: &PromptContext, config: &PromptConfig) -> String {
-    let mut parts = vec![
-        "# Insight（行为洞察）\n\
-         以下是从历史对话中推断出的用户性格特征。记忆上下文提供了「用户做了什么」，\
-         而这里提供了「用户是什么样的人」。请结合两者来调整回复的深度和角度："
-            .to_string(),
-    ];
+/// 组装角色层块（`# 角色（行为层）`）：角色身份 + 性格特征 + 已知事实 + 回复规范。
+///
+/// 对应 v1.3 的 Role + Insight + Experiment 三块（映射见 `TEMPLATE_LAYER_MAP`）；
+/// 行为规则槽位（v1.5 情境-反应规则）由 `render_behavior_block` 在装配时挂载。
+fn build_role_layer(context: &PromptContext, config: &PromptConfig) -> String {
+    let mut parts: Vec<String> = vec![build_role(context)];
 
-    // 性格标签（按 layer 分组）
+    // 性格标签（按 layer 分组；无 traits 时省略，v1.3 降级语义）
     if config.include_traits && !context.traits.is_empty() {
         let trait_text = format_traits_for_prompt(&context.traits, config.max_traits_per_layer);
         if !trait_text.is_empty() {
@@ -497,13 +556,16 @@ fn build_insight(context: &PromptContext, config: &PromptConfig) -> String {
         }
     }
 
-    // 事实信息
+    // 已知事实（无 facts 时省略）
     if config.include_facts && !context.facts.is_empty() {
         let fact_text = format_facts_for_prompt(&context.facts);
         if !fact_text.is_empty() {
             parts.push(format!("\n\n## 已知事实\n{fact_text}"));
         }
     }
+
+    // 回复规范（核心规则 + 记忆引用规则；无自定义规则时使用最小化默认）
+    parts.push(build_experiment_section(context, config));
 
     parts.join("")
 }
@@ -572,10 +634,55 @@ fn format_facts_for_prompt(facts: &[PersonaFact]) -> String {
 }
 
 // =========================================================
-// Statement 块: Few-shot 示例
+// 表达层（说话风格）: 说话风格 + 对话示例
 // =========================================================
 
-/// 组装 Statement 块：Few-shot 对话示例。
+/// 组装表达层块（`# 说话风格（表达层）`）：说话风格 + 对话示例。
+///
+/// 对应 v1.3 的 Personality + Statement 两块（映射见 `TEMPLATE_LAYER_MAP`）；
+/// 两子段皆缺省时整体不产生段落（v1.3 降级语义）。
+fn build_style_layer(context: &PromptContext, config: &PromptConfig) -> String {
+    let mut sub: Vec<String> = Vec::with_capacity(2);
+
+    // 说话风格（persona.config 的 speaking_style）
+    let style = build_personality(context);
+    if !style.is_empty() {
+        sub.push(style);
+    }
+
+    // 对话示例（Few-shot）
+    let statement = build_statement(context, config);
+    if !statement.is_empty() {
+        sub.push(statement);
+    }
+
+    if sub.is_empty() {
+        return String::new();
+    }
+    format!("# 说话风格（表达层）\n{}", sub.join("\n\n"))
+}
+
+/// 组装说话风格子段（`## 说话风格`）。
+///
+/// v2.0: 从 Block A 中独立出来，作为独立段。
+/// v1.4 M6: 并入表达层作为子段；无 speaking_style 时返回空（不产生段落）。
+/// 从 persona.config JSON 的 `speaking_style` 字段提取。
+fn build_personality(context: &PromptContext) -> String {
+    if let Some(ref persona) = context.persona
+        && let Some(ref cfg_json) = persona.config
+        && let Ok(obj) = serde_json::from_str::<serde_json::Value>(cfg_json)
+        && let Some(style) = obj.get("speaking_style").and_then(|v| v.as_str())
+        && !style.trim().is_empty()
+    {
+        format!("## 说话风格\n{style}")
+    } else {
+        String::new()
+    }
+}
+
+/// 组装对话示例子段（`## 对话示例`）：Few-shot 对话示例。
+///
+/// v1.4 M6: 从独立 Statement 块并入表达层；无示例时返回空（不产生段落）。
 fn build_statement(context: &PromptContext, config: &PromptConfig) -> String {
     if !config.include_examples || context.examples.is_empty() {
         return String::new();
@@ -583,7 +690,7 @@ fn build_statement(context: &PromptContext, config: &PromptConfig) -> String {
 
     let mut lines: Vec<String> = Vec::new();
     lines.push(
-        "# Statement（声明示例）\n\
+        "## 对话示例\n\
          以下是你在此人格下的对话示例，请参考其风格和节奏："
             .to_string(),
     );
@@ -614,48 +721,26 @@ fn build_statement(context: &PromptContext, config: &PromptConfig) -> String {
 }
 
 // =========================================================
-// Personality 块: 性格约束
+// 回复规范子段（角色层内）
 // =========================================================
 
-/// 组装 Personality 块：说话风格。
-///
-/// v2.0: 从 Block A 中独立出来，作为 CRISPE 框架的独立段。
-/// 从 persona.config JSON 的 `speaking_style` 字段提取。
-fn build_personality(context: &PromptContext) -> String {
-    if let Some(ref persona) = context.persona
-        && let Some(ref cfg_json) = persona.config
-        && let Ok(obj) = serde_json::from_str::<serde_json::Value>(cfg_json)
-        && let Some(style) = obj.get("speaking_style").and_then(|v| v.as_str())
-        && !style.trim().is_empty()
-    {
-        format!("# Personality（性格约束）\n{style}")
-    } else {
-        String::new()
-    }
-}
-
-// =========================================================
-// Experiment 块: 回复规范
-// =========================================================
-
-/// 组装 Experiment 块：回复规则 + 记忆引用规则。
+/// 组装回复规范子段（`## 回复规范`）：回复规则 + 记忆引用规则。
 ///
 /// v2.0: 合并原 SHARED_CHAT_STYLE_RULES（回复规则）和新增的记忆引用规则。
+/// v1.4 M6: 从独立 Experiment 块并入角色层；
 /// 记忆引用规则精确定义"主动回溯 vs 被动响应"的边界。
-fn build_experiment(context: &PromptContext, config: &PromptConfig) -> String {
-    let mut parts: Vec<String> = Vec::new();
+fn build_experiment_section(context: &PromptContext, config: &PromptConfig) -> String {
+    let mut parts: Vec<String> = vec!["## 回复规范".to_string()];
 
-    parts.push("# Experiment（回复规范）".to_string());
-
-    // 回复规则
+    // 核心回复规则
     if let Some(ref rules) = context.chat_style_rules
         && !rules.trim().is_empty()
     {
-        parts.push(format!("\n## 核心规则\n{rules}"));
+        parts.push(format!("\n### 核心规则\n{rules}"));
     } else {
         // 最小化默认规则
         parts.push(
-            "\n## 核心规则\n\
+            "\n### 核心规则\n\
              - 用自然、友好的语气回复。\n\
              - 回复简洁明了，不冗长。\n\
              - 不确定的事情请诚实说明。"
@@ -666,7 +751,7 @@ fn build_experiment(context: &PromptContext, config: &PromptConfig) -> String {
     // 记忆引用规则（v2.0 新增）
     if config.include_knowledge_boundary {
         parts.push(
-            "\n## 记忆引用规则（极其重要）\n\
+            "\n### 记忆引用规则（极其重要）\n\
              1. **时机判断**：仅当用户当前消息与记忆上下文明确相关时，才引用历史记忆。\
              如果用户只是打招呼或开启全新话题，不要强行插入「上次我们聊到……」.\n\
              2. **自然衔接**：引用记忆时用「记得你之前……」或类似自然表达，\
@@ -688,7 +773,7 @@ fn build_experiment(context: &PromptContext, config: &PromptConfig) -> String {
 // 当前语境块
 // =========================================================
 
-/// 组装当前语境块：时间 + 可选天气 + 可选上次活跃时间。
+/// 组装当前时间块（`# 当前时间`）：时间 + 可选天气 + 可选上次活跃时间。
 ///
 /// 时间格式：
 /// - 若 `context.current_time_str` 有值，直接使用。
@@ -700,7 +785,7 @@ fn build_context_block(context: &PromptContext) -> String {
         .unwrap_or_else(|| Local::now().format("%Y-%m-%d %H:%M").to_string());
 
     let mut lines = vec![format!(
-        "# 当前语境\n\
+        "# 当前时间\n\
          当前时间：{time_str}"
     )];
 
@@ -806,11 +891,11 @@ mod tests {
         assert!(result.contains("虚构角色"));
         assert!(result.contains("编程"));
         assert!(result.contains("emoji"));
-        // CRISPE 框架 markers
-        assert!(result.contains("# Role"));
-        assert!(result.contains("# Memory"));
-        assert!(result.contains("# Insight"));
-        assert!(result.contains("# 当前语境"));
+        // 四层模板 markers（v1.4 M6，对齐 v3.1 §8.2）
+        assert!(result.contains("# 角色（行为层）"));
+        assert!(result.contains("# 记忆（脉络层）"));
+        assert!(result.contains("## 说话风格"));
+        assert!(result.contains("# 当前时间"));
     }
 
     #[test]
@@ -896,7 +981,7 @@ mod tests {
         let config = PromptConfig::default();
         let result = assemble_prompt(&ctx, &config);
 
-        assert!(result.contains("# Statement"));
+        assert!(result.contains("## 对话示例"));
         assert!(result.contains("你好呀"));
         assert!(result.contains("😊"));
         assert!(result.contains("Rust"));
@@ -914,7 +999,7 @@ mod tests {
             ..Default::default()
         };
         let result = assemble_prompt(&ctx, &config);
-        assert!(!result.contains("# Statement"));
+        assert!(!result.contains("## 对话示例"));
     }
 
     #[test]
@@ -955,7 +1040,7 @@ mod tests {
         assert!(result.contains("首次对话"));
         // RAG 结果
         assert!(result.contains("喜欢猫"));
-        assert!(result.contains("Memory（记忆上下文"));
+        assert!(result.contains("记忆（脉络层）"));
     }
 
     #[test]
@@ -1158,7 +1243,7 @@ mod tests {
 
         // CRISPE 框架所有块
         assert!(result.contains("小明"), "Role 块缺失");
-        assert!(result.contains("# Statement"), "Statement 块缺失");
+        assert!(result.contains("## 对话示例"), "对话示例子段缺失");
         assert!(result.contains("近期对话脉络"), "Memory 近期对话脉络缺失");
         assert!(result.contains("相关历史记忆"), "Memory 相关历史记忆缺失");
         assert!(result.contains("知识边界"), "Capacity 知识边界缺失");
@@ -1327,5 +1412,175 @@ mod tests {
         assert!(result.contains("## 原文片段"), "原文片段段落应保留");
         assert!(result.contains("## 桥接（上一会话尾部）"), "桥接段落应出现");
         assert!(result.contains("原文片段内容") && result.contains("桥接内容"));
+    }
+
+    // =========================================================
+    // v1.4 M6（T-V14-6-001）：模板精简与语义等价回归
+    // =========================================================
+
+    /// 模板结构映射表（`TEMPLATE_LAYER_MAP`）与四层模板常量一致（文档化核对）。
+    #[test]
+    fn template_layer_map_matches_rendered_paragraphs() {
+        // 映射表覆盖 v3.1 §8.2 的四层 + 能力边界 + 当前时间
+        let titles: Vec<&str> = TEMPLATE_LAYER_MAP.iter().map(|(t, _, _)| *t).collect();
+        assert!(titles.contains(&"# 能力边界"));
+        assert!(titles.contains(&"# 角色（行为层）"));
+        assert!(titles.contains(&"# 说话风格（表达层）"));
+        assert!(titles.contains(&"# 知识（知识层，按需）"));
+        assert!(titles.contains(&"# 记忆（脉络层）"));
+        assert!(titles.contains(&"# 当前时间"));
+
+        // 模板常量包含全部占位符（结构可机械核对）
+        for (i, placeholder) in [
+            "capacity",
+            "role_layer",
+            "behavior",
+            "style_layer",
+            "knowledge",
+            "memory",
+            "context_block",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let _ = i;
+            assert!(
+                LAYER_TEMPLATE.contains(&format!("{{{placeholder}}}")),
+                "模板缺少占位符 {{{placeholder}}}"
+            );
+        }
+    }
+
+    /// 回归红线：助手类 persona（原文白名单外）的输出与 v1.3 语义等价——
+    /// 全部关键语义元素（能力边界/角色身份/性格/事实/示例/回复规则/记忆引用规则/
+    /// 近期脉络/相关记忆/当前时间）保留，且不产生原文/桥接段落。
+    ///
+    /// 说明: 白名单闸门在检索/桥接加载层（`retrieve_memory.rs` / `bridge.rs`，
+    /// 已分别有断言测试），本测试验证装配层对 `None` 注入源不产生段落。
+    #[test]
+    fn rama_persona_prompt_semantically_equivalent_to_v13() {
+        let ctx = PromptContext {
+            persona: Some(Persona {
+                id: 1,
+                uid: "rama-0001".into(),
+                name: "Ramaria".into(),
+                kind: PersonaKind::Rama, // 助手类：原文白名单外
+                seq: 1,
+                source: "system".into(),
+                ref_id: None,
+                avatar: None,
+                active: true,
+                config: Some(r#"{"description":"系统助手"}"#.into()),
+                description: None,
+                created_at: 1000,
+                updated_at: 1000,
+            }),
+            facts: vec![PersonaFact {
+                id: 1,
+                persona_uid: "rama-0001".into(),
+                field: ProfileField::Interests,
+                content: "用户喜欢编程".into(),
+                source: ramaria_core::types::FactSource::Manual,
+                ref_event_id: None,
+                ref_l1_id: None,
+                created_at: 1000,
+                updated_at: 1000,
+            }],
+            traits: vec![make_test_trait("严谨", TraitLayer::Base, "做事认真")],
+            examples: vec![make_test_example("你好", "你好呀")],
+            recent_session_summaries: vec!["昨天讨论了项目排期".to_string()],
+            memory_context: Some("用户：最近在学 Rust".into()),
+            chat_style_rules: Some("回复简洁，用口语化表达".into()),
+            current_time_str: Some("2026-08-08 10:00".into()),
+            // 白名单外：注入源为 None（检索/桥接层闸门保证），不产生段落
+            utt_context: None,
+            bridge_context: None,
+            ..Default::default()
+        };
+        let result = assemble_prompt(&ctx, &PromptConfig::default());
+
+        // ---- 语义元素齐全（与 v1.3 语义等价） ----
+        let semantic_elements = [
+            "# 能力边界",           // Capacity 安全边界
+            "记住与用户的对话历史", // 核心能力
+            "# 角色（行为层）",     // 角色身份
+            "Ramaria",
+            "## 性格特征", // Insight traits
+            "严谨",
+            "## 已知事实", // Insight facts
+            "用户喜欢编程",
+            "## 回复规范", // Experiment 回复规则
+            "回复简洁，用口语化表达",
+            "记忆引用规则", // 记忆引用规则保留
+            "## 对话示例",  // Statement Few-shot
+            "你好呀",
+            "## 近期对话脉络", // Memory 脉络
+            "项目排期",
+            "## 相关历史记忆", // RAG
+            "Rust",
+            "# 当前时间", // 语境
+            "2026-08-08",
+        ];
+        for elem in semantic_elements {
+            assert!(result.contains(elem), "助手类 prompt 缺少语义元素: {elem}");
+        }
+
+        // ---- 原文/桥接不注入（隐私红线，装配层对 None 源不产生段落） ----
+        assert!(
+            !result.contains("## 原文片段"),
+            "白名单外不得产生原文片段段落"
+        );
+        assert!(
+            !result.contains("## 桥接（上一会话尾部）"),
+            "白名单外不得产生桥接段落"
+        );
+    }
+
+    /// v1.4 M6：行为/知识槽位为空时不产生空段落（T-V14-6-003 验收点）。
+    #[test]
+    fn empty_slots_do_not_produce_blank_paragraphs() {
+        let ctx = PromptContext {
+            persona: Some(make_test_persona()),
+            ..Default::default()
+        };
+        let result = assemble_prompt(&ctx, &PromptConfig::default());
+
+        // 槽位标题不出现（空实现）
+        assert!(
+            !result.contains("# 知识（知识层，按需）"),
+            "知识槽位为空不产生段落"
+        );
+        // 无三连空行（join 拼接，空块已跳过）
+        assert!(!result.contains("\n\n\n\n"), "不应出现多空行");
+        // 段落顺序：能力边界在最前，当前时间在最后
+        let capacity_pos = result.find("# 能力边界").expect("能力边界应存在");
+        let time_pos = result.rfind("# 当前时间").expect("当前时间应存在");
+        assert!(capacity_pos < time_pos, "能力边界应前置，当前时间应置尾");
+    }
+
+    /// v1.4 M6（T-V14-6-002）：脉络层预算——超限时原文/桥接被裁剪，
+    /// 脉络摘要保最近（装配层集成验证，分配器单测在 layers.rs）。
+    #[test]
+    fn memory_layer_budget_applied_in_assemble() {
+        let ctx = PromptContext {
+            persona: Some(make_test_persona()),
+            recent_session_summaries: vec![
+                "最近的摘要内容".to_string(),
+                "较旧的摘要内容".to_string(),
+            ],
+            utt_context: Some("第一块原文内容\n\n第二块原文内容".to_string()),
+            bridge_context: Some("第一行桥接内容\n第二行桥接内容".to_string()),
+            ..Default::default()
+        };
+        // 极紧预算：只够脉络摘要
+        let config = PromptConfig {
+            memory_layer_budget_chars: Some(8),
+            ..Default::default()
+        };
+        let result = assemble_prompt(&ctx, &config);
+        assert!(result.contains("最近的摘要内容"), "脉络摘要保最近");
+        assert!(!result.contains("较旧的摘要内容"), "最旧摘要被裁");
+        assert!(!result.contains("原文内容"), "原文块被裁");
+        assert!(!result.contains("桥接内容"), "桥接被裁");
     }
 }
