@@ -219,6 +219,15 @@ impl App {
         self.lifecycle.get_active_session_id()
     }
 
+    /// 热更新空闲自动保存阈值（分钟）（T-V14-5-001）。
+    ///
+    /// 说明:
+    /// - 由桌面端 `update_full_config` 命令在保存成功后调用，
+    ///   与空闲检测线程联动（无需重启）。
+    pub fn set_idle_minutes(&self, minutes: u32) {
+        self.lifecycle.set_idle_minutes(minutes);
+    }
+
     /// 手动保存并关闭当前活跃 session。
     ///
     /// 流程（对齐 Python `force_close_current_session`）:

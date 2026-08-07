@@ -415,6 +415,36 @@ var RamariaApi = (function () {
         return await _invoke('update_setting', { key: key, value: value || '' }, '更新设置');
     }
 
+ /**
+ * 获取完整生效配置（v1.4 M5：设置页全量回显）。
+ *
+ * 说明:
+ * - 返回 config.toml 与 DB 合并后的完整 `RamariaConfig` JSON
+ *   （不含 API key——配置结构本身不存密钥）。
+ */
+    async function getFullConfig() {
+        return await _invoke('get_full_config', {}, '查询完整配置');
+    }
+
+ /**
+ * 全量更新配置（v1.4 M5：会话区块滑动块保存入口）。
+ *
+ * 说明:
+ * - 传完整 `RamariaConfig` JSON；后端走统一写入口（config.toml + DB 双写），
+ *   保存成功后热更新运行时配置（如空闲阈值即时生效，无需重启）。
+ *
+ * 参数:
+ * - `configJson`: 完整配置 JSON 字符串（或对象，自动序列化）。
+ *
+ * 返回:
+ * - { fileOk, dbOk, failures }
+ */
+    async function updateFullConfig(configJson) {
+        _require(configJson, '配置内容');
+        var json = typeof configJson === 'string' ? configJson : JSON.stringify(configJson);
+        return await _invoke('update_full_config', { configJson: json }, '保存完整配置');
+    }
+
  // =========================================================
  // 5. 首次配置 (setup)
  // =========================================================
@@ -767,6 +797,8 @@ var RamariaApi = (function () {
             updateBackend: updateBackendConfig,
             getSettings: getSettings,
             updateSetting: updateSetting,
+            getFull: getFullConfig,
+            updateFull: updateFullConfig,
         },
         setup: {
             run: runSetup,

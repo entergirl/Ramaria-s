@@ -46,12 +46,13 @@ impl SessionLifecycle {
     ) -> tokio::task::JoinHandle<()> {
         let slf = Arc::clone(self);
         let interval_secs = self.config.session.idle_check_interval_seconds;
-        let idle_minutes = self.config.session.l1_idle_minutes;
         let shutdown_flag = Arc::clone(&self.shutdown_flag);
+        let idle_minutes_arc = Arc::clone(&self.idle_minutes);
 
         info!(
             interval_secs,
-            idle_minutes, "后台空闲检测线程启动（Thread A）"
+            idle_minutes = idle_minutes_arc.load(Ordering::Relaxed),
+            "后台空闲检测线程启动（Thread A）"
         );
 
         tokio::spawn(async move {
@@ -66,6 +67,10 @@ impl SessionLifecycle {
                     info!("空闲检测线程收到停止信号，退出");
                     return;
                 }
+
+                // 每轮 tick 读取最新阈值（T-V14-5-001 热更新：
+                // 设置页保存后 set_idle_minutes 即时生效，无需重启）
+                let idle_minutes = idle_minutes_arc.load(Ordering::Relaxed);
 
                 let active_sid = match slf.get_active_session_id() {
                     Some(sid) => sid,

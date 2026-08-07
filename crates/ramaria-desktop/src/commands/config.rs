@@ -358,9 +358,15 @@ pub async fn update_full_config(
         ramaria_app::ConfigSyncService::new(state.app.storage().clone(), state.config_path.clone());
     let result = config_sync.save_config(&cfg).await;
 
+    // v1.4 M5（T-V14-5-001）：保存成功后热更新空闲阈值，与空闲检测线程联动
+    //（无需重启）。即使单侧写失败也尝试联动——运行中阈值优先于落盘结果，
+    // 下次启动以文件/DB 为准。
+    state.app.set_idle_minutes(cfg.session.l1_idle_minutes);
+
     tracing::info!(
         file_ok = result.file_ok,
         db_ok = result.db_ok,
+        idle_minutes = cfg.session.l1_idle_minutes,
         "update_full_config 完成"
     );
     Ok(UpdateConfigResultView {

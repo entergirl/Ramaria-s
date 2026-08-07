@@ -19,7 +19,7 @@ pub mod l1_generate;
 pub mod l2_l3_scheduler;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -56,6 +56,14 @@ pub struct SessionLifecycle {
     pub(crate) config: RamariaConfig,
     /// 停止标志（所有后台线程在设置此标志后退出）
     pub(crate) shutdown_flag: Arc<AtomicBool>,
+    /// 空闲自动保存阈值（分钟）——热更新（T-V14-5-001）
+    ///
+    /// 说明:
+    /// - 独立于 `config.session.l1_idle_minutes` 的可变副本：设置页修改配置后
+    ///   通过 `set_idle_minutes` 即时生效，空闲检测线程每轮 tick 读取最新值，
+    ///   无需重启（与既有空闲检测线程联动）。
+    /// - 初始值来自 `config.session.l1_idle_minutes`（`new` 时快照）。
+    pub(crate) idle_minutes: Arc<AtomicU32>,
     /// 内存检索器引用（L1 生成后增量更新），None 表示未注入（向后兼容）
     pub(crate) retriever: Mutex<Option<Arc<RwLock<Retriever>>>>,
     /// embedding provider 引用（utt 块向量生成），None 表示未配置（块无向量）
@@ -68,11 +76,13 @@ impl SessionLifecycle {
     /// retriever 默认为 `None`，调用方需在创建后通过 [`set_retriever`] 注入，
     /// 以启用 L1 摘要生成后的增量索引更新。
     pub fn new(config: RamariaConfig) -> Self {
+        let idle_minutes = config.session.l1_idle_minutes;
         Self {
             active_session_id: Mutex::new(None),
             session_last_active: Mutex::new(HashMap::new()),
             config,
             shutdown_flag: Arc::new(AtomicBool::new(false)),
+            idle_minutes: Arc::new(AtomicU32::new(idle_minutes)),
             retriever: Mutex::new(None),
             embedding: Mutex::new(None),
         }
@@ -112,6 +122,24 @@ impl SessionLifecycle {
     /// 返回 shutdown_flag 的 Arc 引用，供外部线程检查。
     pub fn shutdown_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.shutdown_flag)
+    }
+
+    /// 热更新空闲自动保存阈值（分钟）（T-V14-5-001）。
+    ///
+    /// 说明:
+    /// - 设置页保存 `session.l1_idle_minutes` 后由配置命令调用，
+    ///   空闲检测线程下一轮 tick 即使用新阈值（无需重启）。
+    /// - 调用方负责已落盘（config 双写）；本方法只做运行时联动。
+    ///
+    /// 参数:
+    /// - `minutes`: 新阈值（分钟）。任意 u32 均接受（配置层已做范围校验）。
+    pub fn set_idle_minutes(&self, minutes: u32) {
+        let old = self.idle_minutes.swap(minutes, Ordering::Relaxed);
+        info!(
+            old_minutes = old,
+            new_minutes = minutes,
+            "空闲自动保存阈值已热更新"
+        );
     }
 
     // =========================================================
@@ -629,12 +657,54 @@ mod tests {
     fn shutdown_flag_signals_correctly() {
         let config = RamariaConfig::default();
         let lifecycle = SessionLifecycle::new(config);
-
         let flag = lifecycle.shutdown_flag();
         assert!(!flag.load(Ordering::Relaxed));
 
         lifecycle.shutdown_flag.store(true, Ordering::SeqCst);
         assert!(flag.load(Ordering::Relaxed));
+    }
+
+    /// v1.4 M5（T-V14-5-001）：set_idle_minutes 热更新——初始值来自 config，
+    /// 热更新后新值即时生效（空闲检测线程每轮 tick 读取最新值，无需重启）。
+    #[test]
+    fn set_idle_minutes_hot_updates_threshold() {
+        // 默认配置阈值 10 分钟
+        let config = RamariaConfig::default();
+        assert_eq!(config.session.l1_idle_minutes, 10);
+        let lifecycle = SessionLifecycle::new(config);
+        assert_eq!(lifecycle.idle_minutes.load(Ordering::Relaxed), 10);
+
+        // 热更新到 25 分钟 → 下一轮 tick 使用新阈值
+        lifecycle.set_idle_minutes(25);
+        assert_eq!(lifecycle.idle_minutes.load(Ordering::Relaxed), 25);
+
+        // 再次热更新（滑动块/自定义输入连续保存）
+        lifecycle.set_idle_minutes(5);
+        assert_eq!(lifecycle.idle_minutes.load(Ordering::Relaxed), 5);
+    }
+
+    /// v1.4 M5（T-V14-5-001）：App::set_idle_minutes 转发到 lifecycle（桌面端命令入口）。
+    #[tokio::test]
+    async fn app_set_idle_minutes_forwards_to_lifecycle() {
+        use ramaria_core::traits::StorageBackend;
+        use ramaria_core::types::AppState;
+        use ramaria_llm::keychain::Keychain;
+        use std::sync::Arc;
+
+        let storage = Arc::new(crate::stages::test_utils::MockStorage::new());
+        let llm = Arc::new(crate::stages::test_utils::MockLlm::local());
+        let config = RamariaConfig::default();
+        let keychain = Arc::new(Keychain::new());
+        let app = crate::App::new_without_embedding(
+            storage.clone() as Arc<dyn StorageBackend>,
+            llm.clone() as Arc<dyn ramaria_core::traits::LlmProvider>,
+            config,
+            keychain,
+        );
+        app.set_state(AppState::Ready);
+
+        app.set_idle_minutes(30);
+        assert_eq!(app.lifecycle.idle_minutes.load(Ordering::Relaxed), 30);
     }
 
     #[test]
