@@ -139,6 +139,14 @@ pub struct PromptContext {
     /// - 仅角色类 persona（白名单内）由检索层填充；白名单外为 None（行为等同 v1.3）。
     /// - 原文内容不写日志。
     pub utt_context: Option<String>,
+
+    /// v1.4 M5 新增: 桥接内容（Memory 块 [桥接（上一会话尾部）] 小节，
+    /// 已按预算从头部截断、保最近；None 表示不注入，等同 v1.3）
+    ///
+    /// 安全约束（与 utt_context 一致）:
+    /// - 承载原文级信息，仅白名单内 persona 由桥接层填充。
+    /// - 内容不写日志。
+    pub bridge_context: Option<String>,
 }
 
 // =========================================================
@@ -355,6 +363,18 @@ fn build_memory(context: &PromptContext) -> String {
             "\n\n## 原文片段\n\
              以下是目标角色说过的原话（完整引用，不要逐字抄袭，仅学习其语气、用词与口癖）：\n\
              {utt}"
+        ));
+    }
+
+    // 桥接（v1.4 M5 上一会话尾部；开关关闭/白名单外/无上一会话为 None → 不产生段落）
+    if let Some(bridge) = &context.bridge_context
+        && !bridge.trim().is_empty()
+    {
+        parts.push(format!(
+            "\n\n## 桥接（上一会话尾部）\n\
+             以下是你上一段对话结尾的原文，用于保持对话连贯性（仅供衔接参考，\
+             不要逐字引用，也不要编造其中未提及的内容）：\n\
+             {bridge}"
         ));
     }
 
@@ -1130,7 +1150,8 @@ mod tests {
             last_active_at: Some("2026-06-08".into()),
             weather: Some("晴".into()),
             chat_style_rules: Some("测试回复规则".into()),
-            utt_context: None, // 默认无原文片段（v1.4）
+            utt_context: None,    // 默认无原文片段（v1.4）
+            bridge_context: None, // 默认无桥接内容（v1.4 M5）
         };
         let config = PromptConfig::default();
         let result = assemble_prompt(&ctx, &config);
@@ -1255,5 +1276,56 @@ mod tests {
         let result2 = assemble_prompt(&ctx2, &PromptConfig::default());
         assert!(result2.contains("## 原文片段"), "原文片段段落应出现");
         assert!(result2.contains("这是角色原话内容"));
+    }
+
+    /// v1.4 M5（T-V14-5-003）：桥接内容存在时产生【桥接（上一会话尾部）】段落；
+    /// 缺失/空白时不产生段落（回归红线：白名单外 = 与 v1.3 语义等价）。
+    #[test]
+    fn assemble_prompt_includes_bridge_section_only_when_present() {
+        // 无桥接内容 → 不产生段落
+        let ctx = PromptContext::default();
+        let result = assemble_prompt(&ctx, &PromptConfig::default());
+        assert!(
+            !result.contains("桥接（上一会话尾部）"),
+            "无桥接时不产生段落"
+        );
+
+        // 空白内容 → 不产生段落（防御）
+        let ctx_blank = PromptContext {
+            bridge_context: Some("   ".to_string()),
+            ..Default::default()
+        };
+        let result_blank = assemble_prompt(&ctx_blank, &PromptConfig::default());
+        assert!(
+            !result_blank.contains("## 桥接"),
+            "空白桥接内容不应产生段落"
+        );
+
+        // 有桥接内容 → 段落出现，含衔接说明与原文
+        let ctx2 = PromptContext {
+            bridge_context: Some("[2026-08-01 20:00] 角色: 上次聊到这里".to_string()),
+            ..Default::default()
+        };
+        let result2 = assemble_prompt(&ctx2, &PromptConfig::default());
+        assert!(
+            result2.contains("## 桥接（上一会话尾部）"),
+            "桥接段落应出现"
+        );
+        assert!(result2.contains("保持对话连贯性"), "应含衔接用途说明");
+        assert!(result2.contains("上次聊到这里"), "应含桥接原文内容");
+    }
+
+    /// v1.4 M5（T-V14-5-003）：桥接与原文片段并存时两个段落都渲染（互不覆盖）。
+    #[test]
+    fn assemble_prompt_bridge_and_utt_coexist() {
+        let ctx = PromptContext {
+            utt_context: Some("原文片段内容".to_string()),
+            bridge_context: Some("桥接内容".to_string()),
+            ..Default::default()
+        };
+        let result = assemble_prompt(&ctx, &PromptConfig::default());
+        assert!(result.contains("## 原文片段"), "原文片段段落应保留");
+        assert!(result.contains("## 桥接（上一会话尾部）"), "桥接段落应出现");
+        assert!(result.contains("原文片段内容") && result.contains("桥接内容"));
     }
 }

@@ -89,6 +89,7 @@ impl App {
         let last_active_at = result.last_active_at;
         let memory_context = result.memory_context;
         let utt_context = result.utt_context;
+        let bridge_context = result.bridge_context;
         let cfg = result
             .backend_config
             .expect("Stage 2 (CheckPrivacy) must set backend_config");
@@ -109,6 +110,7 @@ impl App {
                 &recent_summaries,
                 last_active_at.as_deref(),
                 utt_context.as_deref(),
+                bridge_context.as_deref(),
                 examples,
             )
             .await;
@@ -245,6 +247,7 @@ impl App {
     /// - `recent_summaries`: 近期 L1 摘要列表（预格式化文本）。
     /// - `last_active_at`: 最后活跃时间字符串（YYYY-MM-DD HH:MM 格式）。
     /// - `utt_context`: utt 原文片段（已按预算裁剪渲染；None 表示不注入，等同 v1.3）。
+    /// - `bridge_context`: 桥接内容（上一会话尾部原文，已按预算截断；None 表示不注入）。
     /// - `examples`: 已选好的 Few-shot 示例（由 `load_examples_for_input` 评分轮换/兜底后传入）。
     ///
     /// 降级策略:
@@ -261,6 +264,7 @@ impl App {
         recent_summaries: &[String],
         last_active_at: Option<&str>,
         utt_context: Option<&str>,
+        bridge_context: Option<&str>,
         examples: Vec<ramaria_core::types::PersonaExample>,
     ) -> String {
         let actual_uid = persona_uid.unwrap_or("rama-0001");
@@ -329,6 +333,8 @@ impl App {
                 chat_style_rules: None, // v2.0: 无自定义规则时使用最小化默认规则
                 // v1.4: utt 原文片段（检索层已按白名单与预算过滤，None 等同 v1.3）
                 utt_context: utt_context.map(|s| s.to_string()),
+                // v1.4 M5: 桥接内容（桥接层已按白名单与预算过滤，None 等同 v1.3）
+                bridge_context: bridge_context.map(|s| s.to_string()),
             };
 
             let config = PromptConfig::default();
