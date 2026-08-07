@@ -40,9 +40,9 @@ pub enum ModelArchitecture {
     /// - 池化：Last token pooling + L2 normalize
     Llama,
     /// LLaMA head_dim 变体（config.json 显式指定 head_dim ≠ hidden_size/num_heads）
-    /// - 编码器：`llama_head_dim.rs`（基于 candle qwen2 模块 + head_dim patch）
+    /// - 编码器：`llama_head_dim.rs`（基于 candle qwen3 模块 + 内嵌无状态前向）
     /// - 池化：Last token pooling + L2 normalize
-    /// - 适用: Qwen3-Embedding 系列及其他显式 head_dim 的 LLaMA 变体
+    /// - 适用: Qwen3-Embedding 系列及其他显式 head_dim 的 Qwen3 变体
     LlamaHeadDim,
 }
 
