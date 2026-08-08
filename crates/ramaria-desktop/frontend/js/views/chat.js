@@ -838,7 +838,9 @@ var RamariaChatView = (function () {
         var sessionId = RamariaStore.get('activeSessionId');
         if (!sessionId) {
             try {
-                var session = await RamariaApi.session.create();
+ // P0-1 修复：创建会话时绑定当前人格，避免 sessions.persona_uid=NULL
+ // 导致保存的会话错归默认人格历史、utt/examples 无法生效
+                var session = await RamariaApi.session.create(personaUid);
                 sessionId = session.id;
                 RamariaStore.set('activeSessionId', sessionId);
 
@@ -846,8 +848,8 @@ var RamariaChatView = (function () {
                 RamariaStore.setPersonaSession(personaUid, sessionId);
                 await _persistPersonaSessions();
 
- // 新建 session 时同步 sessionPersonaUid（此时 session 刚创建，persona_uid 尚未写入 DB）
- // 后端 send_message 的 resolve_session 阶段会完成绑定；前端假设绑定成功。
+ // 新建 session 时同步 sessionPersonaUid（后端 create_session 已写入 DB，
+ // resolve_session 亦会回写兜底，此处仅为前端内存同步）
                 _sessionPersonaUid = personaUid;
                 RamariaStore.set('sessionPersonaUid', personaUid);
             } catch (err) {

@@ -20,7 +20,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use super::splitter::split_messages;
-use super::{UttChunk, UttSplitterConfig, encode_embedding};
+use super::{UttChunk, UttSplitterConfig, encode_embedding, infer_target_persona_from_messages};
 
 /// rama 自身会话（Session.persona_uid 为 None）使用的块归属 UID。
 const RAMA_FALLBACK_UID: &str = "rama-0001";
@@ -122,18 +122,30 @@ impl UttBuilder {
             ..Default::default()
         };
 
-        let target = session
-            .persona_uid
-            .clone()
-            .unwrap_or_else(|| RAMA_FALLBACK_UID.to_string());
+        // P0-2 修复：目标 persona 优先取 session.persona_uid；
+        // 存量 NULL 会话（历史缺陷）防御性从消息首条 assistant 发言推断，
+        // 两者都缺失才回退 rama-0001（rama 自身会话）。
         let messages = storage.list_messages(session.id).await?;
         if messages.is_empty() {
             return Ok(stats);
         }
 
+        let target = session
+            .persona_uid
+            .clone()
+            .or_else(|| infer_target_persona_from_messages(&messages))
+            .unwrap_or_else(|| RAMA_FALLBACK_UID.to_string());
+        if session.persona_uid.is_none() && target != RAMA_FALLBACK_UID {
+            warn!(
+                %session.id,
+                persona_uid = %target,
+                "会话 persona_uid 为 NULL，已从消息推断目标 persona（存量兼容）"
+            );
+        }
+
         // 定位增量重切起点：库中最后一块的 start_msg_id
         let last = storage.get_latest_utt_block_by_session(session.id).await?;
-        let (start_idx, messages_ref) = match &last {
+        let (_, messages_ref) = match &last {
             Some(block) => match messages.iter().position(|m| m.id == block.start_msg_id) {
                 Some(i) => (i, &messages[i..]),
                 None => {
@@ -149,7 +161,6 @@ impl UttBuilder {
             },
             None => (0, &messages[..]),
         };
-        let _ = start_idx;
 
         let chunks = split_messages(messages_ref, Some(&target), &self.config.splitter);
         if chunks.is_empty() {
@@ -977,14 +988,81 @@ mod tests {
             ended_at: None,
             persona_uid: None,
         };
-        // persona_uid=None → target=rama-0001；原块归属 char-0001 → 起点消息仍存在
+        // P0-2 修复后：persona_uid=None 从消息首条 assistant 发言推断
+        // 目标 = char-0001（与原归属一致）→ 幂等跳过，不产生新块
         let stats = builder
             .build_session(&storage, &missing_session, None)
             .await
             .unwrap();
-        // target 变化 → 重切结果不含旧目标发言 → 无块可建；旧 char-0001 块不受影响
-        assert_eq!(stats.chunks_created, 0);
+        assert_eq!(stats.chunks_created, 0, "NULL 会话经推断后幂等跳过");
+        assert_eq!(stats.chunks_skipped, 1, "推断归属与库中块一致 → 跳过");
         let _ = blocks;
+    }
+
+    // P0-2 修复：NULL 会话（存量缺陷）从消息推断目标 persona 后正常建块
+    #[tokio::test]
+    async fn build_session_null_persona_infers_target_from_messages() {
+        let storage = mem_storage().await;
+        let persona = Persona::new(
+            "char-0001".to_string(),
+            "角色char-0001".to_string(),
+            PersonaKind::Char,
+            1,
+            "local".to_string(),
+        );
+        storage.create_persona(&persona).await.unwrap();
+        let session = storage.create_session(None).await.unwrap(); // NULL 会话
+
+        for i in 0..4 {
+            let uid = if i % 2 == 0 { Some("char-0001") } else { None };
+            let role = if i % 2 == 0 {
+                MessageRole::Assistant
+            } else {
+                MessageRole::User
+            };
+            let msg = Message::new(session.id, role, format!("内容{i}"), MessageSource::Local)
+                .with_persona_uid(uid.map(|s| s.to_string()));
+            storage.save_message(&msg).await.unwrap();
+        }
+
+        let stats = test_builder()
+            .build_session(&storage, &session, None)
+            .await
+            .unwrap();
+        assert_eq!(stats.chunks_created, 1, "NULL 会话经消息推断后应建块");
+
+        let blocks = storage
+            .list_utt_blocks_by_persona("char-0001")
+            .await
+            .unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].persona_uid, "char-0001", "块归属推断出的 persona");
+        assert!(
+            blocks[0].block_text.contains("角色char-0001"),
+            "发言人标记应解析 persona 名"
+        );
+    }
+
+    // P0-2 修复：NULL 会话且无 assistant 发言（纯用户）→ 无法推断
+    // → 回退 rama-0001 作目标；无目标发言 → 不建块安全跳过（不产生错误归属块）
+    #[tokio::test]
+    async fn build_session_null_persona_no_assistant_skips_safely() {
+        let storage = mem_storage().await;
+        let session = storage.create_session(None).await.unwrap();
+        let msg = Message::new(
+            session.id,
+            MessageRole::User,
+            "只有用户发言".to_string(),
+            MessageSource::Local,
+        );
+        storage.save_message(&msg).await.unwrap();
+
+        let stats = test_builder()
+            .build_session(&storage, &session, None)
+            .await
+            .expect("无目标发言应安全返回而非报错");
+        assert_eq!(stats.chunks_created, 0, "无法推断目标时不应建块");
+        assert_eq!(stats.chunks_skipped, 0);
     }
 
     #[tokio::test]

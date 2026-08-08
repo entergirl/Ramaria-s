@@ -55,6 +55,13 @@ impl StorageBackend for SqliteStorage {
     async fn delete_session(&self, session_id: Uuid) -> RamariaResult<()> {
         repo::sessions::delete(&self.pool, session_id).await
     }
+    async fn bind_session_persona_uid(
+        &self,
+        session_id: Uuid,
+        persona_uid: &str,
+    ) -> RamariaResult<()> {
+        repo::sessions::bind_persona_uid(&self.pool, session_id, persona_uid).await
+    }
 
     // =========================================================
     // Message（L0 原始消息）
@@ -1612,6 +1619,44 @@ mod tests {
             .expect("应有最新块");
         assert_eq!(latest.id, last_id, "应返回最后插入的块");
         assert_eq!(latest.block_text, "块2");
+    }
+
+    // P2-2 修复：list_messages_by_persona 不再截断（原 LIMIT 200），
+    // 导入管线重建能枚举该 persona 的全部消息与 session
+    #[tokio::test]
+    async fn message_list_by_persona_returns_all_over_200() {
+        let storage = setup().await;
+        let p = Persona::new(
+            "char-p22".into(),
+            "P2-2 角色".into(),
+            PersonaKind::Char,
+            1,
+            "local".into(),
+        );
+        storage.create_persona(&p).await.unwrap();
+        let session = storage.create_session(Some("char-p22")).await.unwrap();
+
+        // 写入 250 条消息（> 原 LIMIT 200），横跨 3 个 session 更贴近导入场景
+        let total = 250usize;
+        for i in 0..total {
+            let msg = Message::new(
+                session.id,
+                MessageRole::User,
+                format!("消息{i}"),
+                MessageSource::Local,
+            )
+            .with_persona_uid(Some("char-p22".to_string()));
+            let mut m = msg;
+            m.created_at = 1_700_000_000_000 + i as i64 * 1000;
+            storage.save_message(&m).await.unwrap();
+        }
+
+        let all = storage.list_messages_by_persona("char-p22").await.unwrap();
+        assert_eq!(all.len(), total, "应返回全部 {} 条消息而非截断", total);
+
+        // 枚举出的 session 集合覆盖该 persona 全部会话
+        let sessions: std::collections::HashSet<_> = all.iter().map(|m| m.session_id).collect();
+        assert!(sessions.contains(&session.id));
     }
 
     #[tokio::test]

@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
@@ -48,6 +49,8 @@ pub struct MockStorage {
     personas: Mutex<HashMap<String, Persona>>,
     /// utt 话语块（按 session 索引，v1.4 M5：桥接测试支持）
     utt_blocks: Mutex<HashMap<Uuid, Vec<UttBlock>>>,
+    /// 测试注入：bind_session_persona_uid 是否强制失败（P0-1 降级路径测试）
+    fail_bind: AtomicBool,
 }
 
 impl Default for MockStorage {
@@ -68,7 +71,13 @@ impl MockStorage {
             next_example_id: Mutex::new(1),
             personas: Mutex::new(HashMap::new()),
             utt_blocks: Mutex::new(HashMap::new()),
+            fail_bind: AtomicBool::new(false),
         }
+    }
+
+    /// 测试注入：让 bind_session_persona_uid 返回错误（验证降级不阻塞发送）。
+    pub fn set_bind_fails(&self, fail: bool) {
+        self.fail_bind.store(fail, Ordering::Relaxed);
     }
 
     /// 预填充一个活跃 session 并返回其 ID。
@@ -178,6 +187,22 @@ impl StorageBackend for MockStorage {
         self.sessions.lock().unwrap().remove(&session_id);
         self.messages.lock().unwrap().remove(&session_id);
         self.utt_blocks.lock().unwrap().remove(&session_id);
+        Ok(())
+    }
+
+    async fn bind_session_persona_uid(
+        &self,
+        session_id: Uuid,
+        persona_uid: &str,
+    ) -> RamariaResult<()> {
+        if self.fail_bind.load(Ordering::Relaxed) {
+            return Err(RamariaError::unsupported(
+                "测试注入：bind_session_persona_uid 强制失败",
+            ));
+        }
+        if let Some(session) = self.sessions.lock().unwrap().get_mut(&session_id) {
+            session.persona_uid = Some(persona_uid.to_string());
+        }
         Ok(())
     }
 
@@ -642,22 +667,37 @@ impl StorageBackend for MockStorage {
 /// 设计:
 /// - `config` 字段决定 provider 类型（LM Studio / DeepSeek / OpenAI）
 /// - 用于 Stage 2 隐私检查测试：线上 provider 触发隐私确认
+/// - `chat_reply` 字段控制非流式 `chat()` 的返回文本：默认 "mock reply"
+///   （既有测试依赖该值），结构化输出测试可用 [`Self::with_reply`] 注入
+///   L1 JSON 等可解析文本
 pub struct MockLlm {
     config: BackendConfig,
+    chat_reply: String,
 }
 
 impl MockLlm {
     /// 创建 LM Studio 本地 provider 的 Mock。
     pub fn local() -> Self {
-        Self {
-            config: BackendConfig::lm_studio_default(),
-        }
+        Self::with_reply("mock reply")
     }
 
     /// 创建 DeepSeek 线上 provider 的 Mock。
     pub fn online_deepseek() -> Self {
         Self {
             config: BackendConfig::deepseek_default(),
+            chat_reply: "mock reply".to_string(),
+        }
+    }
+
+    /// 创建指定非流式回复的 Mock（用于注入结构化输出，如 L1 JSON）。
+    ///
+    /// 说明:
+    /// - 仅影响 `chat()`（summarizer/事件提取等使用非流式调用）；
+    /// - `chat_stream()` 保持固定 "mock" 文本（既有流式断言依赖）。
+    pub fn with_reply(reply: &str) -> Self {
+        Self {
+            config: BackendConfig::lm_studio_default(),
+            chat_reply: reply.to_string(),
         }
     }
 }
@@ -665,7 +705,7 @@ impl MockLlm {
 #[async_trait]
 impl LlmProvider for MockLlm {
     async fn chat(&self, _req: &ChatRequest) -> RamariaResult<String> {
-        Ok("mock reply".into())
+        Ok(self.chat_reply.clone())
     }
 
     async fn chat_stream(

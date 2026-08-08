@@ -747,6 +747,10 @@ fn parse_consistency_analysis(raw: &str) -> Option<ConsistencyAnalysis> {
 }
 
 /// 解析 Step 3 响应：`[{ "layer": "base", "trait_label": "...", "meaning": "...", ... }, ...]`。
+///
+/// P1-2 修复：空数组 `[]` 是 LLM 的合法响应（数据不足时明确表示
+/// "无可推断 traits"），应返回 `Some(vec![])` 而非解析失败——否则会
+/// 误触发 MockFallback 降级，用 mock 数据污染真实画像。
 fn parse_inferred_traits(raw: &str) -> Option<Vec<InferredTrait>> {
     #[derive(serde::Deserialize)]
     struct Step3Item {
@@ -772,10 +776,7 @@ fn parse_inferred_traits(raw: &str) -> Option<Vec<InferredTrait>> {
     }
 
     let items: Vec<Step3Item> = serde_json::from_str(raw).ok()?;
-    if items.is_empty() {
-        return None;
-    }
-
+    // 空数组是合法响应（LLM 明确表示无足够证据），不再视为解析失败
     Some(
         items
             .into_iter()
@@ -1651,9 +1652,12 @@ mod tests {
 
     #[test]
     fn parse_inferred_traits_empty_array() {
+        // P1-2 修复：空数组是 LLM 的合法响应（无足够证据），
+        // 应解析成功并返回空 traits，而非触发 MockFallback 降级。
         let raw = "[]";
         let result = parse_inferred_traits(raw);
-        assert!(result.is_none(), "空数组应返回 None");
+        assert!(result.is_some(), "空数组应解析成功");
+        assert_eq!(result.unwrap().len(), 0, "空数组应返回空 traits");
     }
 
     // =========================================================
@@ -1689,6 +1693,15 @@ mod tests {
         let raw = "完全没有 JSON 的文本";
         let result = parse_json_with_degrade(raw, "test", parse_consistency_analysis);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_json_empty_array_is_success() {
+        // P1-2 修复：LLM 返回空数组是合法响应（无足够证据），
+        // 应解析成功（空 traits），而不是触发 MockFallback 降级。
+        let result = parse_json_with_degrade("[]", "Step3", parse_inferred_traits);
+        assert!(result.is_ok(), "空数组应解析成功");
+        assert!(result.unwrap().is_empty(), "空数组应产生空 traits");
     }
 
     // =========================================================

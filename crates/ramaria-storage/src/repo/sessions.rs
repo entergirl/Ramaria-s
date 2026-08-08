@@ -46,6 +46,31 @@ pub async fn close(pool: &SqlitePool, session_id: Uuid) -> RamariaResult<()> {
     Ok(())
 }
 
+/// 回写绑定会话的 persona_uid（存量 NULL 会话归属修复，P0-1）。
+///
+/// 职责:
+/// - 会话创建时未绑定（`persona_uid=NULL`）时，由 resolve_session
+///   在发送消息阶段用前端传入的 persona_uid 补绑。
+/// - 幂等：已绑定同 uid 时 UPDATE 无副作用；会话不存在时静默成功
+///   （调用方不依赖返回行数，防御优先）。
+///
+/// 参数:
+/// - `session_id`: 目标会话 UUID。
+/// - `persona_uid`: 要绑定的对话人格 UID。
+pub async fn bind_persona_uid(
+    pool: &SqlitePool,
+    session_id: Uuid,
+    persona_uid: &str,
+) -> RamariaResult<()> {
+    sqlx::query("UPDATE sessions SET persona_uid = ? WHERE id = ?")
+        .bind(persona_uid)
+        .bind(session_id.to_string())
+        .execute(pool)
+        .await
+        .storage_err("回写 session persona_uid 失败")?;
+    Ok(())
+}
+
 pub async fn get(pool: &SqlitePool, session_id: Uuid) -> RamariaResult<Option<Session>> {
     let row = sqlx::query_as::<_, SessionRow>(
         "SELECT id, started_at, ended_at, persona_uid FROM sessions WHERE id = ?",

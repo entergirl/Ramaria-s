@@ -186,19 +186,26 @@ pub async fn delete_session(
 
 /// 创建一个新的空白会话。
 ///
+/// 参数:
+/// - `persona_uid`: 绑定的人格 UID（None 表示暂不绑定，发送消息时由
+///   resolve_session 回写绑定）。
+///
 /// 返回:
 /// - SessionSummary（新会话的摘要信息）
 #[tauri::command]
 #[tracing::instrument(skip(state))]
-pub async fn create_session(state: State<'_, DesktopState>) -> Result<SessionSummary, String> {
+pub async fn create_session(
+    state: State<'_, DesktopState>,
+    persona_uid: Option<String>,
+) -> Result<SessionSummary, String> {
     let session = state
         .app
         .storage()
-        .create_session(None)
+        .create_session(persona_uid.as_deref())
         .await
         .map_err(|e| format!("创建会话失败: {}", e))?;
 
-    tracing::info!(session_id = %session.id, "新会话已创建");
+    tracing::info!(session_id = %session.id, persona_uid = ?session.persona_uid, "新会话已创建");
 
     Ok(SessionSummary {
         id: session.id.to_string(),

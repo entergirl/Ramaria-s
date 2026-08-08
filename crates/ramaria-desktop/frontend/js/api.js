@@ -184,11 +184,20 @@ var RamariaApi = (function () {
  /**
  * 创建新会话。
  *
+ * 参数:
+ * - `personaUid`: 可选，创建时绑定的人格 UID。
+ *   P0-1 修复：前端创建会话即传 persona_uid，避免 sessions.persona_uid=NULL
+ *   导致保存的会话错归默认人格、utt/examples 无法生效。
+ *
  * 返回:
- * - { id, started_at, ended_at, message_count }
+ * - { id, started_at, ended_at, message_count, persona_uid }
  */
-    async function createSession() {
-        return await _invoke('create_session', {}, '创建会话');
+    async function createSession(personaUid) {
+        var args = {};
+        if (personaUid) {
+            args.personaUid = personaUid;
+        }
+        return await _invoke('create_session', args, '创建会话');
     }
 
  /**

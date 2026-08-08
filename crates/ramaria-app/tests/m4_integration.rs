@@ -813,6 +813,40 @@ async fn mock_infer_fallback_with_m4_stats() {
     );
 }
 
+// P1-2 修复：LLM Step3 返回空数组 `[]`（无足够证据）是合法响应，
+// 应走 LlmInference（saved=0），而不是误触发 MockFallback 用 mock 数据污染画像
+#[tokio::test]
+async fn llm_empty_traits_uses_llm_source_not_mock() {
+    let stats = make_m4_stats_summary();
+    let storage = MockStorage::new();
+
+    let step1 = r#"{"工作":{"signal_label":"尽责","evidence_citation":"n_eff=4.2","stability_judgment":"stable","sufficient_evidence":true},"社交":{"signal_label":"亲和","evidence_citation":"n_eff=1.8","stability_judgment":"contextual","sufficient_evidence":false}}"#;
+    let step2 = r#"{"base_candidates":[],"primary_candidates":[],"accent_candidates":[],"notes":"数据不足"}"#;
+    let step3 = "[]"; // LLM 明确表示无可推断 traits（P1-2 复现输入）
+    let llm = MultiStepLlm::new(vec![step1.into(), step2.into(), step3.into()]);
+    let config = InferrerConfig::default();
+
+    let result = run_phase_b_inference(&llm, &storage, &stats, "persona-m4-empty", &config).await;
+    assert!(result.is_ok(), "空数组响应不应触发降级 panic");
+    let pb = result.unwrap();
+
+    assert_eq!(
+        pb.source,
+        PhaseBSource::LlmInference,
+        "空数组是 LLM 合法响应，不应降级 MockFallback"
+    );
+    assert_eq!(pb.traits_saved, 0, "LLM 确认无 traits，不伪造 mock 数据");
+    assert_eq!(
+        storage
+            .list_traits_by_persona("persona-m4-empty")
+            .await
+            .unwrap()
+            .len(),
+        0,
+        "库中不应出现 mock traits"
+    );
+}
+
 // =========================================================
 // 边界情况测试
 // =========================================================

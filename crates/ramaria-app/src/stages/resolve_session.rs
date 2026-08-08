@@ -103,6 +103,35 @@ impl PipelineStage for StageResolveSession {
                     ));
                 }
 
+                // P0-1 修复：存量 NULL 会话归属回写。
+                // 会话创建时未绑定（persona_uid=NULL）且前端传入 uid 时，
+                // 回写 DB 绑定，保证保存/封存时 L1、utt、examples 归属正确。
+                // 回写失败仅 warn 不阻塞发送（绑定是增强，非消息发送前置条件）。
+                // 注意：多客户端并发下为"最后写者胜"语义——单用户桌面场景
+                // 窗口极小，可接受；如未来支持多端并发可在此加乐观锁。
+                let mut s = s;
+                if s.persona_uid.is_none()
+                    && let Some(uid) = input.persona_uid.clone()
+                {
+                    match ctx.storage.bind_session_persona_uid(s.id, &uid).await {
+                        Ok(()) => {
+                            s.persona_uid = Some(uid.clone());
+                            tracing::info!(
+                                session_id = %s.id,
+                                persona_uid = %uid,
+                                "会话 NULL 归属已回写绑定"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                session_id = %s.id,
+                                %e,
+                                "会话 NULL 归属回写失败（不阻塞消息发送）"
+                            );
+                        }
+                    }
+                }
+
                 // 同步追踪活跃 session（否则 save_and_close_session 找不到）
                 ctx.lifecycle.set_active_session_id_public(Some(s.id));
 
@@ -180,6 +209,7 @@ impl PipelineStage for StageResolveSession {
 mod tests {
     use super::*;
     use crate::stages::test_utils::{MockLlm, MockStorage, test_context};
+    use ramaria_core::traits::StorageBackend;
     use ramaria_core::types::AppState;
     use std::sync::Arc;
     use uuid::Uuid;
@@ -287,5 +317,96 @@ mod tests {
     async fn stage_name_is_correct() {
         let stage = StageResolveSession::new();
         assert_eq!(stage.name(), "ResolveSession");
+    }
+
+    // P0-1 修复：存量 NULL 会话在发送消息时回写绑定 persona_uid
+    #[tokio::test]
+    async fn null_persona_session_bound_from_input() {
+        let storage = Arc::new(MockStorage::new());
+        let session_id = Uuid::new_v4();
+        storage.add_active_session(session_id);
+
+        let ctx = test_context(storage.clone(), Arc::new(MockLlm::local()), None);
+        let stage = StageResolveSession::new();
+        // 前端传入 persona_uid，session 本身为 NULL（存量缺陷场景）
+        let data = PipelineData::new(
+            "hi".into(),
+            Some("char-0001".into()),
+            Some(session_id),
+            Uuid::new_v4(),
+        )
+        .with_app_state(AppState::Ready);
+
+        let output = stage.execute(&ctx, data).await.expect("should succeed");
+
+        // 内存中 session 已绑定
+        assert_eq!(
+            output.session.as_ref().unwrap().persona_uid.as_deref(),
+            Some("char-0001")
+        );
+        // DB 已回写持久化
+        let stored = storage.get_session(session_id).await.unwrap().unwrap();
+        assert_eq!(stored.persona_uid.as_deref(), Some("char-0001"));
+    }
+
+    // P0-1 修复：session 已绑定 persona_uid（DB 真相源）时不被前端覆盖，
+    // 也不触发回写（幂等绑定）
+    #[tokio::test]
+    async fn bound_persona_session_keeps_db_truth() {
+        let storage = Arc::new(MockStorage::new());
+        let session = storage.create_session(Some("char-0002")).await.unwrap();
+        let session_id = session.id;
+
+        let ctx = test_context(storage.clone(), Arc::new(MockLlm::local()), None);
+        let stage = StageResolveSession::new();
+        let data = PipelineData::new(
+            "hi".into(),
+            Some("char-0001".into()),
+            Some(session_id),
+            Uuid::new_v4(),
+        )
+        .with_app_state(AppState::Ready);
+
+        let output = stage.execute(&ctx, data).await.expect("should succeed");
+        assert_eq!(
+            output.session.as_ref().unwrap().persona_uid.as_deref(),
+            Some("char-0002"),
+            "DB 已绑定 persona 优先，前端传参不覆盖"
+        );
+    }
+
+    // P0-1 修复：回写失败（存储不支持）时降级 warn，不阻塞消息发送，
+    // 前端传入 uid 保留用于消息级归属
+    #[tokio::test]
+    async fn null_persona_bind_failure_does_not_block_send() {
+        let storage = Arc::new(MockStorage::new());
+        let session_id = Uuid::new_v4();
+        storage.add_active_session(session_id);
+        storage.set_bind_fails(true);
+
+        let ctx = test_context(storage.clone(), Arc::new(MockLlm::local()), None);
+        let stage = StageResolveSession::new();
+        let data = PipelineData::new(
+            "hi".into(),
+            Some("char-0001".into()),
+            Some(session_id),
+            Uuid::new_v4(),
+        )
+        .with_app_state(AppState::Ready);
+
+        let output = stage
+            .execute(&ctx, data)
+            .await
+            .expect("回写失败不应阻塞消息发送");
+
+        // 内存态保持 NULL（回写失败），前端 uid 保留在 input 供消息归属
+        assert_eq!(output.session.as_ref().unwrap().persona_uid, None);
+        assert_eq!(
+            output.persona_uid.as_deref(),
+            Some("char-0001"),
+            "前端传入 uid 保留"
+        );
+        let stored = storage.get_session(session_id).await.unwrap().unwrap();
+        assert_eq!(stored.persona_uid, None, "DB 未绑定");
     }
 }

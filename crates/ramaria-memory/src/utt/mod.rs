@@ -83,6 +83,26 @@ pub fn is_target_speech(msg: &Message, target: Option<&str>) -> bool {
     }
 }
 
+/// 从会话消息推断目标 persona UID（防御 `session.persona_uid=NULL` 存量场景，P0-2）。
+///
+/// 规则:
+/// - 取第一条（时间升序）Assistant 角色且带 persona_uid 的消息的 uid；
+///   对话中 persona 的回复必然以 assistant 角色落库，故首条 assistant 发言
+///   即该会话绑定的对话人格。
+/// - 无任何 assistant 发言（纯用户会话/空会话）→ None，由调用方回退默认值。
+///
+/// 参数:
+/// - `messages`: 会话消息（时间升序；调用方负责排序）。
+///
+/// 返回:
+/// - 推断出的 persona UID。
+pub fn infer_target_persona_from_messages(messages: &[Message]) -> Option<String> {
+    messages
+        .iter()
+        .find(|m| m.role == MessageRole::Assistant && m.persona_uid.is_some())
+        .and_then(|m| m.persona_uid.clone())
+}
+
 /// 消息是否为可切分的对话消息（系统/工具消息不进入原文块）。
 pub fn is_chat_message(msg: &Message) -> bool {
     !matches!(msg.role, MessageRole::System | MessageRole::Tool)
@@ -197,5 +217,32 @@ mod tests {
         let c = UttSplitterConfig::default();
         assert_eq!(c.theta_gap_minutes, 30);
         assert_eq!(c.max_msgs_per_block, 40);
+    }
+
+    // ---- P0-2：NULL 会话目标 persona 推断 ----
+
+    #[test]
+    fn infer_target_persona_finds_first_assistant() {
+        let user = msg(MessageRole::User, None, 1000);
+        let assistant = msg(MessageRole::Assistant, Some("char-0001"), 2000);
+        let assistant2 = msg(MessageRole::Assistant, Some("char-0002"), 3000);
+        let inferred = infer_target_persona_from_messages(&[user, assistant, assistant2]);
+        assert_eq!(inferred.as_deref(), Some("char-0001"));
+    }
+
+    #[test]
+    fn infer_target_persona_none_without_assistant() {
+        let user = msg(MessageRole::User, None, 1000);
+        let sys = msg(MessageRole::System, None, 2000);
+        assert_eq!(infer_target_persona_from_messages(&[user, sys]), None);
+    }
+
+    #[test]
+    fn infer_target_persona_skips_null_assistant() {
+        // assistant 无 persona_uid（rama 自身会话）不参与推断
+        let assistant_null = msg(MessageRole::Assistant, None, 1000);
+        let assistant_uid = msg(MessageRole::Assistant, Some("char-0009"), 2000);
+        let inferred = infer_target_persona_from_messages(&[assistant_null, assistant_uid]);
+        assert_eq!(inferred.as_deref(), Some("char-0009"));
     }
 }

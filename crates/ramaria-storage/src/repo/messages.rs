@@ -219,10 +219,16 @@ pub async fn find_by_fingerprint(
     row.map(|r| r.into_message()).transpose()
 }
 
+/// 按发言人查询全部消息（Persona-Aware RAG / 导入管线重建用）。
+///
+/// P2-2 修复：去掉 `LIMIT 200`。调用方 `regenerate_import_pipeline`
+/// 依赖"某 persona 的全部消息"来枚举其所属 session 并重建 L1；
+/// 截断导致 129 个导入 session 中只有最近 4 个被覆盖（按钮名不副实）。
+/// 消息量级（万级）下全量加载可控；如未来需分页再引入显式 limit 参数。
 pub async fn list_by_persona(pool: &SqlitePool, persona_uid: &str) -> RamariaResult<Vec<Message>> {
     let rows = sqlx::query_as::<_, MessageRow>(
         "SELECT id, session_id, role, content, created_at, source, import_fingerprint, persona_uid
-         FROM messages WHERE persona_uid = ? ORDER BY created_at DESC LIMIT 200",
+         FROM messages WHERE persona_uid = ? ORDER BY created_at DESC",
     )
     .bind(persona_uid)
     .fetch_all(pool)

@@ -303,6 +303,17 @@ impl StorageBackend for MockStorage {
         Ok(())
     }
 
+    async fn bind_session_persona_uid(
+        &self,
+        session_id: Uuid,
+        persona_uid: &str,
+    ) -> RamariaResult<()> {
+        if let Some(session) = self.sessions.lock().unwrap().get_mut(&session_id) {
+            session.persona_uid = Some(persona_uid.to_string());
+        }
+        Ok(())
+    }
+
     // -- Utt Blocks（v1.4 M5：桥接/封存链路测试支持） --
 
     async fn insert_utt_block(&self, block: &UttBlock) -> RamariaResult<i64> {

@@ -437,3 +437,93 @@ async fn l1_summary_max_tokens_has_floor() {
         last.max_tokens
     );
 }
+
+// =========================================================
+// P0-3 修复：save_and_close_session 归属统一以 DB sessions.persona_uid 为真相源
+// =========================================================
+
+/// 手动保存时前端传入 None（或旧内存值），但 DB 中 session 已绑定 persona →
+/// L1 归属应取 DB 值，不依赖前端内存态。
+#[tokio::test]
+async fn save_and_close_l1_uses_db_session_persona() {
+    const L1_JSON: &str = r#"{"summary":"用户讨论了项目安排","keywords":"项目,排期","time_period":"下午","atmosphere":"紧张","valence":0.0,"salience":0.5}"#;
+    let storage = Arc::new(MockStorage::new());
+    let llm = Arc::new(MockLlm::new(L1_JSON));
+    let config = RamariaConfig::default();
+    let keychain = Arc::new(Keychain::new());
+    let app = App::new_without_embedding(
+        Arc::clone(&storage) as Arc<dyn StorageBackend>,
+        Arc::clone(&llm) as Arc<dyn ramaria_core::traits::LlmProvider>,
+        config,
+        keychain,
+    );
+    app.set_state(AppState::Ready);
+
+    // 发送消息：resolve_session 创建并绑定 char-0001 的活跃 session
+    use futures::StreamExt;
+    let mut stream = app
+        .send_message("你好", Some("char-0001"), None)
+        .await
+        .unwrap();
+    while let Some(event_result) = stream.next().await {
+        if matches!(event_result, Ok(ramaria_app::StreamEvent::Done { .. })) {
+            break;
+        }
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let sid = app.get_active_session_id().expect("应有活跃 session");
+
+    // 保存时前端传 None（P0-3：空闲保存/旧前端可能传 None 或过期内存值）
+    app.save_and_close_session(None).await.unwrap();
+
+    // L1 归属应为 DB 会话绑定的 char-0001，而非 NULL
+    let l1s = storage.list_memory_l1(sid).await.unwrap();
+    assert!(!l1s.is_empty(), "L1 应已生成");
+    assert_eq!(
+        l1s[0].persona_uid.as_deref(),
+        Some("char-0001"),
+        "L1 归属应取 DB sessions.persona_uid"
+    );
+}
+
+/// 空闲自动保存路径（idle.rs 从 DB 读 persona_uid）与手动保存路径
+/// 使用同一真相源：DB 已绑定时无论调用方传什么，都以 DB 为准。
+#[tokio::test]
+async fn save_and_close_ignores_stale_input_persona() {
+    const L1_JSON: &str = r#"{"summary":"用户讨论了项目安排","keywords":"项目,排期","time_period":"下午","atmosphere":"紧张","valence":0.0,"salience":0.5}"#;
+    let storage = Arc::new(MockStorage::new());
+    let llm = Arc::new(MockLlm::new(L1_JSON));
+    let config = RamariaConfig::default();
+    let keychain = Arc::new(Keychain::new());
+    let app = App::new_without_embedding(
+        Arc::clone(&storage) as Arc<dyn StorageBackend>,
+        Arc::clone(&llm) as Arc<dyn ramaria_core::traits::LlmProvider>,
+        config,
+        keychain,
+    );
+    app.set_state(AppState::Ready);
+
+    use futures::StreamExt;
+    let mut stream = app
+        .send_message("你好", Some("char-0001"), None)
+        .await
+        .unwrap();
+    while let Some(event_result) = stream.next().await {
+        if matches!(event_result, Ok(ramaria_app::StreamEvent::Done { .. })) {
+            break;
+        }
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let sid = app.get_active_session_id().expect("应有活跃 session");
+
+    // 前端内存态过期（错误地传了 char-9999）→ 不应覆盖 DB 真相源
+    app.save_and_close_session(Some("char-9999")).await.unwrap();
+
+    let l1s = storage.list_memory_l1(sid).await.unwrap();
+    assert!(!l1s.is_empty(), "L1 应已生成");
+    assert_eq!(
+        l1s[0].persona_uid.as_deref(),
+        Some("char-0001"),
+        "过期前端内存值不应覆盖 DB 会话归属"
+    );
+}

@@ -255,7 +255,7 @@ impl SessionLifecycle {
     /// 参数:
     /// - `storage`: 存储后端。
     /// - `llm`: LLM provider（供 L1 summarizer 使用）。
-    /// - `persona_uid`: 当前对话人格的 UID（用于 L1 摘要归属）。
+    /// - `persona_uid`: 当前对话人格的 UID（仅兜底，真相源为 DB session）。
     ///
     /// 返回:
     /// - `Ok()`: 关闭成功（即使无活跃 session 也视为成功）。
@@ -276,20 +276,71 @@ impl SessionLifecycle {
 
         info!(%active_sid, "手动保存并关闭 session");
 
+        // 核心流程（关闭 + L1 + utt + examples + L2 检查）
+        self.close_session_pipeline(storage, llm, active_sid, persona_uid)
+            .await?;
+
+        // Step 4: 清除活跃 session
+        self.set_active_session_id(None);
+        self.forget_session(active_sid);
+
+        info!(%active_sid, "session 已关闭");
+        Ok(())
+    }
+
+    /// 关闭指定 session 的完整管线（P1-3 修复：供空闲检测复用）。
+    ///
+    /// 与 [`save_and_close_session`] 的区别：本函数**不操作 active 指针**，
+    /// 只对传入的 session_id 执行关闭 + L1 + utt + examples + L2 检查。
+    /// 这样空闲检测线程可遍历关闭**所有**活跃会话（含切换人格后遗留的
+    /// 孤儿会话），而不仅限于 active 指针指向的当前会话。
+    ///
+    /// 调用方职责:
+    /// - 若关闭的 session 恰好是 active 指针指向的会话，调用方需自行
+    ///   清理指针（`set_active_session_id(None)` + `forget_session`）。
+    ///
+    /// 参数:
+    /// - `storage`: 存储后端。
+    /// - `llm`: LLM provider（供 L1 summarizer 使用）。
+    /// - `session_id`: 目标 session（必须未关闭，否则 close_session_safe 幂等跳过）。
+    /// - `persona_uid`: 归属兜底参数（真相源为 DB `sessions.persona_uid`）。
+    pub(super) async fn close_session_pipeline(
+        &self,
+        storage: &dyn StorageBackend,
+        llm: &dyn LlmProvider,
+        session_id: Uuid,
+        persona_uid: Option<&str>,
+    ) -> RamariaResult<()> {
+        // P0-3 修复：归属统一以 DB `sessions.persona_uid` 为真相源。
+        // 手动保存（前端传内存态）与空闲保存（DB 读）来源不一致导致
+        // L1/utt/examples 归属不稳定；此处统一从 session 读取，
+        // 调用方传入的 persona_uid 仅作兜底（session 查询失败时使用）。
+        let persona_uid: Option<String> = match storage.get_session(session_id).await {
+            Ok(Some(s)) => s.persona_uid.or_else(|| persona_uid.map(|p| p.to_string())),
+            Ok(None) => {
+                warn!(%session_id, "保存时 session 不存在，persona_uid 回退调用方参数");
+                persona_uid.map(|p| p.to_string())
+            }
+            Err(e) => {
+                warn!(%session_id, %e, "保存时读取 session 失败，persona_uid 回退调用方参数");
+                persona_uid.map(|p| p.to_string())
+            }
+        };
+
         // Step 1: 关闭 session（设置 ended_at）
         // 对齐 Python `close_session(sid)`
-        l1_generate::close_session_safe(storage, active_sid).await?;
+        l1_generate::close_session_safe(storage, session_id).await?;
 
         // Step 2: 生成 L1 摘要（传入当前对话人格）
         // 对齐 Python `summarizer.summarize_session(session_id)`
         // 正常对话流程使用默认前缀（"用户：""助手："）
         match self
-            .generate_l1_summary(storage, llm, active_sid, persona_uid, None, None)
+            .generate_l1_summary(storage, llm, session_id, persona_uid.as_deref(), None, None)
             .await
         {
             Ok(l1) => {
                 info!(
-                    %active_sid,
+                    %session_id,
                     l1_id = %l1.id,
                     summary_len = l1.summary.chars().count(),
                     "L1 摘要生成成功"
@@ -301,11 +352,11 @@ impl SessionLifecycle {
 
                 // Step 2.5: utt 话语块增量构建（v1.4，与 L1 同钩子）
                 // 失败降级记 warn 不阻塞封存（下次封存自动补齐）
-                self.build_utt_for_session(storage, active_sid).await;
+                self.build_utt_for_session(storage, session_id).await;
 
                 // Step 2.6: examples 回复对抽取入库（v1.4，与 L1 同钩子）
                 // 失败降级记 warn 不阻塞封存（下次封存自动补齐）
-                self.extract_examples_for_session(storage, active_sid).await;
+                self.extract_examples_for_session(storage, session_id).await;
 
                 // Step 3: 检查 L2 触发条件（路径 A：即时触发）
                 // 对齐 Python summarizer 末尾的 `merger.check_and_merge`
@@ -313,14 +364,14 @@ impl SessionLifecycle {
             }
             Err(e) => {
                 tracing::error!(
-                    %active_sid,
+                    %session_id,
                     error = %e,
                     "❌ L1 摘要生成失败！session 已关闭但未生成摘要。LLM 服务可能不可用。"
                 );
                 // 创建 pending BackgroundJob，供后续 regenerate_l1 重试
                 // 对齐决策：L1 失败不阻塞 session 关闭，但需记录可重试任务
                 let payload = serde_json::json!({
-                    "session_id": active_sid.to_string(),
+                    "session_id": session_id.to_string(),
                     "persona_uid": persona_uid,
                     "reason": "auto_retry_on_close"
                 })
@@ -331,14 +382,14 @@ impl SessionLifecycle {
                 {
                     Ok(job_id) => {
                         tracing::info!(
-                            %active_sid,
+                            %session_id,
                             job_id,
                             "已创建 pending L1 重试任务，稍后可调用 regenerate_l1 或后台自动重试"
                         );
                     }
                     Err(job_err) => {
                         tracing::error!(
-                            %active_sid,
+                            %session_id,
                             %job_err,
                             "❌ 创建 L1 重试任务也失败了！需手动使用 generate_l1 命令重试。"
                         );
@@ -347,11 +398,7 @@ impl SessionLifecycle {
             }
         }
 
-        // Step 4: 清除活跃 session
-        self.set_active_session_id(None);
-        self.forget_session(active_sid);
-
-        info!(%active_sid, "session 已关闭");
+        info!(%session_id, "session 已关闭（管线完成）");
         Ok(())
     }
 
@@ -461,7 +508,32 @@ impl SessionLifecycle {
             }
         };
         let Some(persona_uid) = session.persona_uid.as_deref() else {
-            debug!(%session_id, "会话无绑定 persona，跳过 examples 抽取");
+            // P0-2 修复：存量 NULL 会话防御——从消息首条 assistant 发言推断
+            // 目标 persona；仍无法推断（纯用户会话）才跳过。
+            let messages = match storage.list_messages(session_id).await {
+                Ok(m) => m,
+                Err(e) => {
+                    warn!(%session_id, %e, "读取会话消息失败，跳过 examples 抽取");
+                    return;
+                }
+            };
+            let Some(inferred) = ramaria_memory::utt::infer_target_persona_from_messages(&messages)
+            else {
+                debug!(%session_id, "会话无绑定 persona 且无法从消息推断，跳过 examples 抽取");
+                return;
+            };
+            warn!(
+                %session_id,
+                persona_uid = %inferred,
+                "会话 persona_uid 为 NULL，已从消息推断目标 persona（存量兼容）"
+            );
+
+            let pairs = example_extract::extract_pairs(&messages, &inferred);
+            if pairs.is_empty() {
+                debug!(%session_id, "本会话无有效回复对，跳过入库");
+                return;
+            }
+            save_example_pairs(storage, session_id, &inferred, pairs).await;
             return;
         };
 
@@ -478,59 +550,7 @@ impl SessionLifecycle {
             debug!(%session_id, "本会话无有效回复对，跳过入库");
             return;
         }
-
-        let mut saved = 0usize;
-        let mut skipped = 0usize;
-        for pair in pairs {
-            // 幂等查重：已存在相同回复对 → 跳过
-            match storage
-                .find_example_by_pair(persona_uid, &pair.partner, &pair.reply)
-                .await
-            {
-                Ok(Some(_)) => {
-                    skipped += 1;
-                    continue;
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    warn!(%session_id, %e, "examples 查重失败，跳过该回复对");
-                    continue;
-                }
-            }
-
-            let mut example = ramaria_core::types::PersonaExample::new(
-                persona_uid.to_string(),
-                pair.partner,
-                pair.reply,
-            );
-            example.session_id = Some(session_id);
-            example.context = pair.context;
-            example.tags = if pair.tags.is_empty() {
-                None
-            } else {
-                Some(pair.tags)
-            };
-            // 新入库示例进入候选池（selected=false），
-            // 注入侧按评分轮换选择（T-V14-3-003），不再依赖静态 selected 标记。
-
-            match storage.save_example(&example).await {
-                Ok(id) => {
-                    saved += 1;
-                    info!(example_id = id, %session_id, persona_uid, "example 已入库");
-                }
-                Err(e) => {
-                    warn!(%session_id, %e, "example 入库失败（不阻塞封存）");
-                }
-            }
-        }
-
-        info!(
-            %session_id,
-            persona_uid,
-            saved,
-            skipped,
-            "examples 回复对抽取入库完成"
-        );
+        save_example_pairs(storage, session_id, persona_uid, pairs).await;
     }
 
     // =========================================================
@@ -597,6 +617,80 @@ impl SessionLifecycle {
 
         info!("SessionLifecycle shutdown 完成");
     }
+}
+
+// =========================================================
+// examples 回复对入库（extract_examples_for_session 共用）
+// =========================================================
+
+/// 把抽取的回复对查重后入库（幂等），并记录统计日志。
+///
+/// 职责:
+/// - 按 (persona_uid, partner, reply) 查重，重复回复对不重复入库。
+/// - 新入库示例进入候选池（selected=false），注入侧按评分轮换选择。
+/// - 单条失败仅 warn 不中断其余入库（不阻塞封存）。
+///
+/// 参数:
+/// - `storage`: 存储后端。
+/// - `session_id`: 来源会话。
+/// - `persona_uid`: 归属人格（已解析，可能来自消息推断）。
+/// - `pairs`: 抽取的回复对（非空，由调用方保证）。
+async fn save_example_pairs(
+    storage: &dyn StorageBackend,
+    session_id: Uuid,
+    persona_uid: &str,
+    pairs: Vec<example_extract::ExtractedPair>,
+) {
+    let mut saved = 0usize;
+    let mut skipped = 0usize;
+    for pair in pairs {
+        // 幂等查重：已存在相同回复对 → 跳过
+        match storage
+            .find_example_by_pair(persona_uid, &pair.partner, &pair.reply)
+            .await
+        {
+            Ok(Some(_)) => {
+                skipped += 1;
+                continue;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                warn!(%session_id, %e, "examples 查重失败，跳过该回复对");
+                continue;
+            }
+        }
+
+        let mut example = ramaria_core::types::PersonaExample::new(
+            persona_uid.to_string(),
+            pair.partner,
+            pair.reply,
+        );
+        example.session_id = Some(session_id);
+        example.context = pair.context;
+        example.tags = if pair.tags.is_empty() {
+            None
+        } else {
+            Some(pair.tags)
+        };
+
+        match storage.save_example(&example).await {
+            Ok(id) => {
+                saved += 1;
+                info!(example_id = id, %session_id, persona_uid, "example 已入库");
+            }
+            Err(e) => {
+                warn!(%session_id, %e, "example 入库失败（不阻塞封存）");
+            }
+        }
+    }
+
+    info!(
+        %session_id,
+        persona_uid,
+        saved,
+        skipped,
+        "examples 回复对抽取入库完成"
+    );
 }
 
 // =========================================================
@@ -823,10 +917,16 @@ mod tests {
 
     #[tokio::test]
     async fn extract_examples_no_persona_skips() {
-        // 会话未绑定 persona（rama 自身）→ 不抽取（无目标回复对）
+        // 会话未绑定 persona 且无法从消息推断（纯用户会话）→ 不抽取
         let storage = Arc::new(crate::stages::test_utils::MockStorage::new());
         let session = storage.create_session(None).await.unwrap();
-        storage.add_messages(session.id, make_pair_messages(session.id, "char-0001"));
+        let user_only = vec![ramaria_core::types::Message::new(
+            session.id,
+            ramaria_core::types::MessageRole::User,
+            "只有用户发言，没有 persona 回复".to_string(),
+            ramaria_core::types::MessageSource::Local,
+        )];
+        storage.add_messages(session.id, user_only);
         let lifecycle = SessionLifecycle::new(RamariaConfig::default());
 
         lifecycle
@@ -840,5 +940,89 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    // P0-2 修复：NULL 会话（存量缺陷）从消息首条 assistant 发言推断
+    // 目标 persona 后正常抽取入库，不再整会话跳过
+    #[tokio::test]
+    async fn extract_examples_null_persona_infers_target() {
+        let storage = Arc::new(crate::stages::test_utils::MockStorage::new());
+        let session = storage.create_session(None).await.unwrap();
+        storage.add_messages(session.id, make_pair_messages(session.id, "char-0001"));
+        let lifecycle = SessionLifecycle::new(RamariaConfig::default());
+
+        lifecycle
+            .extract_examples_for_session(storage.as_ref(), session.id)
+            .await;
+
+        let pool = storage.list_all_examples("char-0001").await.unwrap();
+        assert_eq!(pool.len(), 2, "NULL 会话经推断后应抽取两对回复");
+        assert!(
+            pool.iter().all(|e| e.persona_uid == "char-0001"),
+            "推断归属 char-0001"
+        );
+    }
+
+    // =========================================================
+    // P1-3 修复：close_session_pipeline 可关闭非 active 的孤儿会话
+    // =========================================================
+
+    /// 空闲检测遍历**全部**活跃会话（含切换人格遗留的孤儿会话）时，
+    /// 复用 `close_session_pipeline` 关闭指定会话：
+    /// - 孤儿会话正确关闭（ended_at 已置）；
+    /// - active 指针指向的会话不受影响（指针与 ended_at 均不变）。
+    ///
+    /// 注：L1 归属（DB 真相源）已由 tests/session_lifecycle_tests.rs
+    /// 的 P0-3 集成测试覆盖（test_utils 的 MockStorage 不落 L1）。
+    #[tokio::test]
+    async fn close_pipeline_closes_orphan_without_touching_active() {
+        use ramaria_core::types::{Message, MessageRole, MessageSource};
+
+        let storage = Arc::new(crate::stages::test_utils::MockStorage::new());
+        let llm = Arc::new(crate::stages::test_utils::MockLlm::local());
+        let lifecycle = SessionLifecycle::new(RamariaConfig::default());
+
+        // 两个活跃会话：active（当前对话指针）+ orphan（切换人格后遗留）
+        let active = storage.create_session(Some("char-0001")).await.unwrap();
+        let orphan = storage.create_session(Some("char-0002")).await.unwrap();
+        lifecycle.set_active_session_id(Some(active.id));
+
+        // 孤儿会话注入消息（L1 摘要需要输入）
+        storage.add_messages(
+            orphan.id,
+            vec![Message::new(
+                orphan.id,
+                MessageRole::User,
+                "你好".to_string(),
+                MessageSource::Local,
+            )],
+        );
+
+        // 核心：直接关闭孤儿会话（不经 active 指针）
+        lifecycle
+            .close_session_pipeline(storage.as_ref(), llm.as_ref(), orphan.id, None)
+            .await
+            .expect("关闭孤儿会话不应失败");
+
+        // 孤儿会话已关闭（ended_at 已置）
+        let closed = storage
+            .get_session(orphan.id)
+            .await
+            .unwrap()
+            .expect("孤儿会话应存在");
+        assert!(closed.ended_at.is_some(), "孤儿会话应被关闭");
+
+        // active 指针不受影响；active 会话保持活跃
+        assert_eq!(
+            lifecycle.get_active_session_id(),
+            Some(active.id),
+            "active 指针不应被孤儿会话关闭影响"
+        );
+        let active_now = storage
+            .get_session(active.id)
+            .await
+            .unwrap()
+            .expect("active 会话应存在");
+        assert!(active_now.ended_at.is_none(), "active 会话应保持活跃");
     }
 }

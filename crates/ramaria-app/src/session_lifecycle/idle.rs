@@ -72,62 +72,92 @@ impl SessionLifecycle {
                 // 设置页保存后 set_idle_minutes 即时生效，无需重启）
                 let idle_minutes = idle_minutes_arc.load(Ordering::Relaxed);
 
-                let active_sid = match slf.get_active_session_id() {
-                    Some(sid) => sid,
-                    None => {
-                        // 无活跃 session，无需检测
+                // P1-3 修复：遍历 DB 中**全部**活跃会话（含切换人格后
+                // 遗留的孤儿会话），而非仅 active 指针指向的当前会话。
+                // 旧实现只检查 active 指针 → 切换人格后旧会话永远不被
+                // 空闲检测关闭，成为长期滞留的孤儿活跃会话。
+                let active_sessions = match storage.list_active_sessions().await {
+                    Ok(list) => list,
+                    Err(e) => {
+                        warn!(%e, "查询活跃会话列表失败，本轮跳过");
                         continue;
                     }
                 };
+                if active_sessions.is_empty() {
+                    continue;
+                }
+                // 当前 active 指针（用于关闭后清理）
+                let current_active = slf.get_active_session_id();
 
-                // 从内存缓存获取最后活跃时间（Python 从 DB 查）
-                let last_active = match slf.last_active(active_sid) {
-                    Some(t) => t,
-                    None => {
-                        // 内存缓存中没有，尝试从 DB 恢复
-                        // 对齐 Python `database.get_last_message_time(session_id)`
-                        match get_last_msg_time_from_db(storage.as_ref(), active_sid).await {
-                            Ok(Some(t)) => {
-                                slf.touch_session(active_sid);
-                                t
-                            }
-                            Ok(None) => {
-                                // 无消息的空 session，使用创建时间
-                                debug!(%active_sid, "session 无消息，跳过空闲检测");
-                                continue;
-                            }
-                            Err(e) => {
-                                warn!(%active_sid, %e, "查询最后消息时间失败");
-                                continue;
+                for session in &active_sessions {
+                    let sid = session.id;
+
+                    // 从内存缓存获取最后活跃时间（Python 从 DB 查）
+                    let last_active = match slf.last_active(sid) {
+                        Some(t) => t,
+                        None => {
+                            // 内存缓存中没有，尝试从 DB 恢复
+                            // 对齐 Python `database.get_last_message_time(session_id)`
+                            match get_last_msg_time_from_db(storage.as_ref(), sid).await {
+                                Ok(Some(t)) => {
+                                    slf.touch_session(sid);
+                                    t
+                                }
+                                Ok(None) => {
+                                    // 无消息的空 session，使用创建时间
+                                    debug!(%sid, "session 无消息，跳过空闲检测");
+                                    continue;
+                                }
+                                Err(e) => {
+                                    warn!(%sid, %e, "查询最后消息时间失败");
+                                    continue;
+                                }
                             }
                         }
+                    };
+
+                    let now = now_ms();
+                    let idle_ms = now.saturating_sub(last_active);
+                    let idle_min = idle_ms as f64 / 60_000.0;
+
+                    if idle_min < idle_minutes as f64 {
+                        debug!(
+                            %sid,
+                            idle_min = %format!("{:.1}", idle_min),
+                            "session 仍在活跃，未触发空闲关闭"
+                        );
+                        continue;
                     }
-                };
 
-                let now = now_ms();
-                let idle_ms = now.saturating_sub(last_active);
-                let idle_min = idle_ms as f64 / 60_000.0;
-
-                if idle_min >= idle_minutes as f64 {
                     info!(
-                        %active_sid,
+                        %sid,
                         idle_min = %format!("{:.1}", idle_min),
                         threshold_min = idle_minutes,
                         "session 空闲超时，自动关闭"
                     );
 
-                    // 从活跃 session 读取 persona_uid（不再传 None）
-                    let persona_uid = slf.get_active_session_persona_uid(storage.as_ref()).await;
+                    // 归属以 DB session.persona_uid 为准（P0-3；兜底 None
+                    // 时由 close_session_pipeline 内部再读 DB 真相源）
+                    let persona_uid = session.persona_uid.clone();
 
                     if let Err(e) = slf
-                        .save_and_close_session(
+                        .close_session_pipeline(
                             storage.as_ref(),
                             llm.as_ref(),
+                            sid,
                             persona_uid.as_deref(),
                         )
                         .await
                     {
-                        error!(%active_sid, %e, "自动关闭 session 失败");
+                        error!(%sid, %e, "自动关闭 session 失败");
+                    }
+
+                    // 若关闭的正是 active 指针指向的会话 → 清理指针，
+                    // 否则保持 active 指针不变（孤儿会话关闭不影响当前对话）
+                    if current_active == Some(sid) {
+                        slf.set_active_session_id(None);
+                        slf.forget_session(sid);
+                        info!(%sid, "active 指针已清理（空闲关闭）");
                     }
 
                     // 请求间节流（L1/L2 共用，`[thresholds].cluster_delay_ms`）：
@@ -138,12 +168,6 @@ impl SessionLifecycle {
                         "L1 空闲批量封存",
                     )
                     .await;
-                } else {
-                    debug!(
-                        %active_sid,
-                        idle_min = %format!("{:.1}", idle_min),
-                        "session 仍在活跃，未触发空闲关闭"
-                    );
                 }
             }
         })

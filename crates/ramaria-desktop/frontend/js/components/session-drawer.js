@@ -213,8 +213,17 @@ var RamariaSessionDrawer = (function () {
                 _sessions = allSessions.filter(function (s) {
                     // 匹配 persona_uid（NULL 的存量 session 归入默认人格）
                     if (!s.persona_uid) {
-                        // 存量 NULL session：若当前人格是默认人格(rama-0001)，则显示
-                        return _currentPersonaUid === 'rama-0001';
+                        // 存量 NULL session：仅当当前人格是默认人格(rama-0001)时显示。
+                        // P0-1 修复后新建会话都会绑定 persona_uid，此处仅为
+                        // 旧数据兼容；命中时告警便于发现归属缺失的存量会话。
+                        if (_currentPersonaUid === 'rama-0001') {
+                            console.warn(
+                                '[SessionDrawer] 会话归属缺失（persona_uid=NULL）：' +
+                                (s.id || '') + '，按存量兼容归入默认人格 rama-0001'
+                            );
+                            return true;
+                        }
+                        return false;
                     }
                     return s.persona_uid === _currentPersonaUid;
                 });

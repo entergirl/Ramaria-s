@@ -291,6 +291,25 @@ pub trait StorageBackend: Send + Sync {
     async fn list_sessions(&self) -> RamariaResult<Vec<Session>>;
     async fn delete_session(&self, session_id: Uuid) -> RamariaResult<()>;
 
+    /// 回写绑定会话的 persona_uid（存量 NULL 会话归属修复，P0-1）。
+    ///
+    /// 职责:
+    /// - 会话创建时未绑定（`persona_uid=NULL`）的场景，在发送消息时
+    ///   由 `resolve_session` 用前端传入的 persona_uid 回写 DB。
+    /// - 幂等：重复绑定同一 uid 不产生副作用。
+    ///
+    /// 默认实现返回 `Unsupported` 错误（存量 mock 无需实现即可编译；
+    /// 回写失败在调用方降级为 warn，不阻塞消息发送）。
+    async fn bind_session_persona_uid(
+        &self,
+        _session_id: Uuid,
+        _persona_uid: &str,
+    ) -> RamariaResult<()> {
+        Err(crate::error::RamariaError::unsupported(
+            "StorageBackend 未实现 session persona_uid 回写绑定",
+        ))
+    }
+
     // -- Message (L0) --
     async fn save_message(&self, message: &Message) -> RamariaResult<()>;
     async fn list_messages(&self, session_id: Uuid) -> RamariaResult<Vec<Message>>;
