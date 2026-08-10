@@ -256,8 +256,8 @@ impl<'a> EventExtractor<'a> {
     /// 9. 标记 L1 为 absorbed
     ///
     /// 注意:
-    /// - `event_relations` 写入尚待实现（T-EVT-002: 6 种关系类型提取）。
-    ///   当前仅实现了 chat_partners 分组和 event_sources 记录。
+    /// - `event_relations` 写入已实现（v1.3，6 种关系类型提取，见 `save_cluster_relations`）。
+    ///   写入条件：LLM 返回 relations 且本簇事件数 ≥ 2；索引越界/自引用/写失败均降级 warn 不阻塞。
     ///
     /// 参数:
     /// - `persona_uid`: 分析对象的人格标识。传空字符串表示分析默认用户。

@@ -67,7 +67,10 @@ impl LlmProviderTrait for MockLlm {
         &self,
         _request: &ChatRequest,
     ) -> RamariaResult<Pin<Box<dyn Stream<Item = RamariaResult<StreamDelta>> + Send>>> {
-        unimplemented!("MockLlm 不支持流式（事件提取使用非流式 chat）")
+        // 事件提取链路仅使用非流式 chat；返回空流而非 unimplemented，
+        // 防止未来链路切换流式后测试以 panic 形式爆炸。
+        let empty: Vec<RamariaResult<StreamDelta>> = Vec::new();
+        Ok(Box::pin(futures::stream::iter(empty)))
     }
 
     fn capability(&self) -> &ModelCapability {

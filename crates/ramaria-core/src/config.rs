@@ -27,7 +27,7 @@ use crate::types::{LlmProvider, PersonaKind};
 const CURRENT_SCHEMA_VERSION: u32 = 1;
 
 /// 当前 Ramaria 应用版本号（与 workspace Cargo.toml 保持同步）。
-const CURRENT_APP_VERSION: &str = "1.3.0";
+const CURRENT_APP_VERSION: &str = "1.4.0";
 
 // =========================================================
 // 应用配置根结构
@@ -1043,7 +1043,7 @@ mod tests {
     fn v14_config_groups_missing_fields_fallback_to_defaults() {
         // 兼容性：旧配置文件（无 [utt]/[examples]/[bridge]）解析后回退默认值
         let legacy_toml = r#"
-version = "1.3.0"
+version = "1.4.0"
 schema_version = 1
 [backend]
 provider = "lm-studio"

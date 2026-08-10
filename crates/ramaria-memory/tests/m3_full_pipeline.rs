@@ -205,6 +205,8 @@ async fn full_pipeline_extracts_events_with_motives_and_relations() {
     );
 
     // 4) ContextRetriever 参与：LLM 最近请求 prompt 含补充上下文段落
+    // 注：当前 ContextRetriever 无"排除当前簇"逻辑，簇内 L1 自身也会被召回；
+    //     若未来增加簇排除优化，此断言需同步调整（依赖该耦合）。
     let last = llm.last_request().expect("应至少有一次 LLM 调用");
     assert!(
         last.user_message.contains("补充背景") || last.user_message.contains("仅供背景参考"),

@@ -35,8 +35,15 @@
  // 常量
  // =========================================================
 
- /** 版本号（与 Cargo.toml 保持同步） */
-    var APP_VERSION = '1.2.0';
+ /**
+  * 应用版本号。
+  *
+  * 初始为占位（''），启动时经 `get_version` 后端命令（编译期
+  * `env!("CARGO_PKG_VERSION")`）获取真实版本并写入全局变量
+  * `window.RamariaApp.version`；浏览器预览模式（Tauri IPC 不可用）
+  * 时保持占位，不阻塞启动。
+  */
+    var APP_VERSION = '';
 
  /** 开发模式标志（通过 URL 参数 ?dev 启用） */
     var IS_DEV = (function () {
@@ -178,9 +185,42 @@
  // =========================================================
 
  /**
+ * 从后端获取真实版本号并路由到全局变量与 DOM。
+ *
+ * 行为:
+ * - 调用 RamariaApi.diagnostics.getVersion()（后端 `get_version` →
+ *   编译期 `env!("CARGO_PKG_VERSION")`，与 Cargo.toml 单一来源同步）。
+ * - 写入全局变量 `window.RamariaApp.version`（延迟到 RamariaApp 定义后
+ *   由 `Object.defineProperty` 保护——此处通过对象属性赋值更新）。
+ * - 更新主页面左上角品牌区 `#sidebar-brand-version`。
+ * - 失败静默降级：保持占位，不阻塞启动（浏览器预览模式同理）。
+ */
+    async function loadAppVersion() {
+        try {
+            var version = await RamariaApi.diagnostics.getVersion();
+            if (!version) return;
+            APP_VERSION = version;
+
+ // 更新全局变量（RamariaApp 对象属性可写，仅对象引用被 defineProperty 冻结）
+            if (window.RamariaApp) {
+                window.RamariaApp.version = version;
+            }
+
+ // 更新左上角品牌区版本号
+            var brandVersionEl = $('sidebar-brand-version');
+            if (brandVersionEl) {
+                brandVersionEl.textContent = 'v' + version;
+            }
+        } catch (_) {
+ // 静默忽略加载失败（预览模式 / IPC 异常）
+        }
+    }
+
+ /**
  * 主初始化流程。
  *
  * 执行顺序:
+ * 0. 加载真实版本号（get_version → 全局变量 → 左上角品牌区）
  * 1. 恢复主题偏好
  * 2. 绑定主题切换按钮
  * 3. 初始化 Router（注册 Store 订阅 + Tauri 事件）
@@ -188,7 +228,12 @@
  * 5. 非 Tauri 环境：降级展示
  */
     async function init() {
-        console.log('[App] Ramaria v' + APP_VERSION + ' 桌面应用启动中...');
+ // 0. 加载真实版本号（Tauri 环境）；浏览器预览模式静默跳过
+        if (isTauri) {
+            await loadAppVersion();
+        }
+
+        console.log('[App] Ramaria v' + (APP_VERSION || '?') + ' 桌面应用启动中...');
         console.log('[App] 环境: ' + (isTauri ? 'Tauri WebView' : '浏览器预览'));
 
  // 1. 恢复主题
