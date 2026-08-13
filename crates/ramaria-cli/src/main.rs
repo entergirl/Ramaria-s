@@ -1,21 +1,22 @@
-//! rust/crates/ramaria-cli/src/main.rs - Ramaria CLI 入口
+//! crates/ramaria-cli/src/main.rs - Ramaria CLI 入口
 //!
 //! 设计特点:
-//! - clap derive 模式定义命令结构（T-CLI-001）
-//! - tracing-subscriber 初始化（RUST_LOG 控制日志级别）
+//! - clap derive 模式定义命令结构，全局 --json / --yes / --quiet / --db 对所有命令可用
+//! - 全局 --json：统一信封 `{"ok":true,"data":…}` / `{"ok":false,"error":{"code":…,"message":"…"}}`（D-V15-011）
+//! - stdout 只输出数据；状态/提示/警告走 stderr（ui::info/success/warn 已改 eprintln）
+//! - exit code 约定：0 成功 / 2 参数错(clap) / 3 LLM 或后端不可用 / 4 业务校验失败
+//! - `ramaria help` 按 对话/记忆/数据/管理/高级 分组（subcommand_help_heading）
+//! - blocks 为 canonical 命令名，utt 保留为 alias（D-V15-007）
 //! - App 统一初始化（DB → storage → LLM → App）
-//! - 所有命令委托给 commands/ 模块
-//! - 错误统一通过 ui::fatal 输出
-//! - --db 指定数据库路径
-//! - --yes 在线隐私自动确认（T-CLI-010 规则：需显式指定 provider）
 
 // 命令模块通过 lib.rs 暴露（pub mod），以供集成测试使用
 use ramaria_cli::commands;
 use ramaria_cli::ui;
 
 use anyhow::Context;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use ramaria_core::StorageBackend;
+use ramaria_core::error::RamariaError;
 use sqlx::SqlitePool;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -36,21 +37,27 @@ struct Cli {
     #[arg(long, global = true, default_value = "data/ramaria_assistant.db")]
     db: PathBuf,
 
-    /// 跳过隐私确认（仅线上 provider 生效，需显式配置 provider）
+    /// 自动确认所有确认点（隐私/删除/导入等）；非 TTY 且无 --yes 时不挂起、直接失败并提示（M1 B 项）
     #[arg(long, global = true)]
     yes: bool,
 
     /// 跳过 LLM 连接验证（仅 setup 命令）
     #[arg(long, global = true)]
     skip_validate: bool,
+
+    /// 以 JSON 信封输出结果（stdout 仅含 JSON；错误 code 复用 exit code 约定）
+    #[arg(long, global = true)]
+    json: bool,
+
+    /// 抑制 stderr 提示（info/success/warn），仅保留错误输出
+    #[arg(long, global = true)]
+    quiet: bool,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// 运行首次配置向导
-    Setup,
-
-    /// 发送单条消息并获取回复（默认流式输出）
+    /// 发送单条消息并获取回复（默认流式输出）[对话]
+    #[command(display_order = 10)]
     Ask {
         /// 用户消息
         message: Vec<String>,
@@ -67,17 +74,23 @@ enum Commands {
         #[arg(long)]
         no_stream: bool,
 
-        /// JSON 事件流输出（每行一个 StreamEvent JSON）
+        /// JSON 事件流输出（每行一个 StreamEvent JSON；与全局 --json 等价）
         #[arg(long)]
         json: bool,
     },
 
-    /// 启动交互式对话 REPL
+    /// 启动交互式对话 REPL [对话]
+    #[command(display_order = 11)]
     Chat,
 
-    /// 查看记忆（L1 摘要 / L2 事件 / L3 性格）
+    /// 运行首次配置向导 [对话]
+    #[command(display_order = 12)]
+    Setup,
+
+    /// 查看记忆（L1 摘要 / L2 事件 / L3 性格）[记忆]
+    #[command(display_order = 20)]
     Memory {
-        /// 记忆层级: l1 / l2 / l3
+        /// 记忆层级: l1|summary / l2|events / l3|profile
         #[arg(default_value = "l1")]
         layer: String,
 
@@ -88,29 +101,26 @@ enum Commands {
         /// 输出条数上限（1-500）
         #[arg(long, default_value = "20", value_parser = parse_limit)]
         limit: usize,
+
+        /// 跳过前 N 条（与 --limit 组合分页）
+        #[arg(long, default_value = "0")]
+        offset: usize,
     },
 
-    /// 会话管理
-    #[command(subcommand)]
-    Session(SessionCmd),
+    /// 话语块管理（utt 的 canonical 名称；切分参数定稿后重建）[记忆]
+    #[command(display_order = 21, visible_alias = "utt", subcommand)]
+    Blocks(BlocksCmd),
 
-    /// 配置管理
-    #[command(subcommand)]
-    Config(ConfigCmd),
-
-    /// 人格文件管理（查看/重新加载）
-    #[command(subcommand)]
-    Persona(PersonaCmd),
-
-    /// 索引管理
-    #[command(subcommand)]
+    /// 索引管理 [记忆]
+    #[command(display_order = 22, subcommand)]
     Index(IndexCmd),
 
-    /// utt 话语块管理（探针切分参数定稿后重建）
-    #[command(subcommand)]
-    Utt(UttCmd),
+    /// 导入外部聊天记录（QQ）[数据]
+    #[command(display_order = 30, subcommand)]
+    Import(ImportCmd),
 
-    /// 数据导出
+    /// 数据导出 [数据]
+    #[command(display_order = 31)]
     Export {
         /// 导出格式: json / markdown
         #[arg(default_value = "json")]
@@ -120,20 +130,45 @@ enum Commands {
         #[arg(long)]
         persona: Option<String>,
 
-        /// 输出文件路径（默认 stdout）
+        /// 输出文件路径（默认 stdout，`-` 表示 stdout）
         #[arg(short, long)]
         output: Option<String>,
     },
 
-    /// 导入外部聊天记录（QQ）
-    #[command(subcommand)]
-    Import(ImportCmd),
+    /// 会话管理 [管理]
+    #[command(display_order = 40, subcommand)]
+    Session(SessionCmd),
 
-    /// 导出诊断信息（打包日志、配置、系统信息为 .zip）
+    /// 配置管理 [管理]
+    #[command(display_order = 41, subcommand)]
+    Config(ConfigCmd),
+
+    /// 人格管理（list / show / reload）[管理]
+    #[command(display_order = 42, subcommand)]
+    Persona(PersonaCmd),
+
+    /// 导出诊断信息（打包日志、配置、系统信息为 .zip）[管理]
+    #[command(display_order = 43)]
     Diagnostics {
         /// 输出文件路径（默认: ramaria-diagnostics-{timestamp}.zip）
         #[arg(short, long)]
         output: Option<String>,
+    },
+
+    /// 应用状态探活（agent 使用：状态/配置摘要/DB 路径）[高级]
+    #[command(display_order = 50)]
+    Status,
+}
+
+/// 话语块管理子命令（canonical 名称 blocks，别名 utt）。
+#[derive(Subcommand)]
+enum BlocksCmd {
+    /// 重建全部会话的话语块
+    Rebuild {
+        /// 强制模式：先清空全部旧块再全量重切
+        /// （切分参数 θ_gap / 条数上限变更后必须使用）
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -149,6 +184,14 @@ enum ImportCmd {
         /// 深度导入模式（触发完整 L0→L1→L2→L3 记忆管线）
         #[arg(long)]
         deep: bool,
+
+        /// 强制导入（跳过确认，等同 --yes 双保险）
+        #[arg(long)]
+        force: bool,
+
+        /// 仅解析预览（输出结构化 JSON 摘要，不写入数据库）
+        #[arg(long)]
+        dry_run: bool,
 
         /// 导出者 persona 名称（向后兼容，默认使用文件中解析的导出者名称）
         #[arg(long)]
@@ -179,18 +222,32 @@ enum ImportCmd {
 #[derive(Subcommand)]
 enum SessionCmd {
     /// 列出所有会话
-    List,
+    #[command(display_order = 10)]
+    List {
+        /// 输出条数上限（默认全部）
+        #[arg(long)]
+        limit: Option<usize>,
+        /// 跳过前 N 条
+        #[arg(long, default_value = "0")]
+        offset: usize,
+    },
     /// 查看指定会话的消息历史
+    #[command(display_order = 20)]
     Show {
         /// 会话 UUID
         session_id: String,
     },
-    /// 删除指定会话
+    /// 删除指定会话（需确认；非 TTY 需 --yes，--force 双保险）
+    #[command(display_order = 30)]
     Delete {
         /// 会话 UUID
         session_id: String,
+        /// 强制删除（跳过确认，等同 --yes 双保险）
+        #[arg(long)]
+        force: bool,
     },
     /// 为指定会话重新生成 L1 摘要（手动重试）
+    #[command(display_order = 40)]
     Summarize {
         /// 会话 UUID
         session_id: String,
@@ -206,7 +263,7 @@ enum ConfigCmd {
     List,
     /// 获取单个配置项
     Get {
-        /// 配置项名称（provider / base_url / temperature / max_tokens / api_key / state）
+        /// 配置项名称（provider / base_url / temperature / max_tokens / api_key / state / utt.* / bridge.*）
         key: String,
     },
     /// 设置配置项
@@ -220,6 +277,15 @@ enum ConfigCmd {
 
 #[derive(Subcommand)]
 enum PersonaCmd {
+    /// 列出所有人格（uid / 名称 / kind 结构化）
+    List {
+        /// 输出条数上限（默认全部）
+        #[arg(long)]
+        limit: Option<usize>,
+        /// 跳过前 N 条
+        #[arg(long, default_value = "0")]
+        offset: usize,
+    },
     /// 显示所有人格摘要
     Show,
     /// 从 personas/ 目录重新加载人格文件到 DB
@@ -236,18 +302,6 @@ enum IndexCmd {
     Rebuild,
 }
 
-/// utt 话语块管理子命令。
-#[derive(Subcommand)]
-enum UttCmd {
-    /// 重建全部会话的 utt 话语块
-    Rebuild {
-        /// 强制模式：先清空全部旧块再全量重切
-        /// （切分参数 θ_gap / 条数上限变更后必须使用）
-        #[arg(long)]
-        force: bool,
-    },
-}
-
 // =========================================================
 // 主入口
 // =========================================================
@@ -257,26 +311,92 @@ async fn main() {
     // 初始化日志系统
     init_tracing();
 
-    let cli = Cli::parse();
+    // 使用分组帮助的 Command 解析（--help 按 对话/记忆/数据/管理/高级 分组）
+    let cli = Cli::from_arg_matches(&grouped_command().get_matches()).unwrap_or_else(|e| e.exit());
 
-    // 初始化 App
+    // 设置 --quiet（抑制 stderr 提示，仅错误）
+    ui::set_quiet(cli.quiet);
+
+    let json_mode = cli.json;
+
+    // 初始化 App（后端不可用视为 exit code 3）
     let (app, pool) = match init_app(cli.db.clone()).await {
         Ok((a, p)) => (a, p),
-        Err(e) => {
-            ui::fatal_anyhow(&e, 1);
-        }
+        Err(e) => exit_with_error(&e, json_mode),
     };
 
     // 调度命令
     let result = dispatch(&app, &pool, cli).await;
 
     if let Err(e) = result {
-        // 检查是否有 RamariaError source
-        if let Some(ramaria_err) = e.downcast_ref::<ramaria_core::error::RamariaError>() {
-            ui::fatal(ramaria_err, 1);
-        }
-        ui::fatal_anyhow(&e, 1);
+        exit_with_error(&e, json_mode);
     }
+}
+
+/// 带分组的 clap Command（`ramaria help` 按 对话/记忆/数据/管理/高级 分组显示子命令）。
+fn grouped_command() -> clap::Command {
+    let mut cmd = Cli::command();
+    for (name, heading) in [
+        ("ask", "对话"),
+        ("chat", "对话"),
+        ("setup", "对话"),
+        ("memory", "记忆"),
+        ("blocks", "记忆"),
+        ("index", "记忆"),
+        ("import", "数据"),
+        ("export", "数据"),
+        ("session", "管理"),
+        ("config", "管理"),
+        ("persona", "管理"),
+        ("diagnostics", "管理"),
+        ("status", "高级"),
+    ] {
+        cmd = cmd.mut_subcommand(name, |c| c.subcommand_help_heading(heading));
+    }
+    cmd
+}
+
+// =========================================================
+// 错误处理与 exit code 约定（D-V15-011）
+// =========================================================
+
+/// 将错误映射为 exit code（0 成功 / 2 参数错(clap) / 3 LLM 或后端不可用 / 4 业务校验失败）。
+fn exit_code_for_error(err: &anyhow::Error) -> i32 {
+    // 直接类型匹配 + source 链遍历（anyhow context 包裹后仍能识别 RamariaError）
+    let mut current: Option<&dyn std::error::Error> = Some(err.as_ref());
+    while let Some(e) = current {
+        if let Some(re) = e.downcast_ref::<RamariaError>() {
+            return match re {
+                // 3: LLM 或后端不可用（可重试类）
+                RamariaError::Llm { .. }
+                | RamariaError::Embedding { .. }
+                | RamariaError::Storage { .. } => 3,
+                // 4: 业务校验失败（修正后可重试；隐私拒绝属业务侧决策）
+                RamariaError::Validation { .. } | RamariaError::Privacy { .. } => 4,
+                // 其余分类（Config/Serialization/Index/Io/Unsupported）归为通用失败
+                _ => 1,
+            };
+        }
+        current = e.source();
+    }
+    1
+}
+
+/// 按 exit code 约定输出错误并退出进程。
+///
+/// json 模式下先向 stdout 输出错误信封（`{"ok":false,"error":{...}}`），
+/// 文本错误始终走 stderr，随后以约定 exit code 退出。
+fn exit_with_error(err: &anyhow::Error, json_mode: bool) -> ! {
+    let code = exit_code_for_error(err);
+    if json_mode {
+        // 错误信封走 stdout（agent 直接取 stdout 即纯数据，含错误）
+        ramaria_cli::json::emit_err(code, &format!("{err:#}"));
+    }
+    // 检查是否有 RamariaError source
+    if let Some(ramaria_err) = err.downcast_ref::<RamariaError>() {
+        ui::fatal(ramaria_err, code);
+    }
+    ui::fatal_anyhow(err, code);
 }
 
 // =========================================================
@@ -379,7 +499,10 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
         } => {
             let msg = message.join(" ");
             if msg.trim().is_empty() {
-                anyhow::bail!("消息不能为空。用法: ramaria ask <消息>");
+                // 业务校验失败（D-V15-011: exit code 4）
+                return Err(anyhow::anyhow!(RamariaError::validation(
+                    "消息不能为空。用法: ramaria ask <消息>"
+                )));
             }
 
             let args = commands::ask::AskArgs {
@@ -387,7 +510,8 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
                 persona,
                 session,
                 no_stream,
-                json,
+                // 子命令 --json 与全局 --json 等价（任一开启即事件流输出）
+                json: cli.json || json,
                 yes: cli.yes,
             };
             commands::ask::run(app, args).await?;
@@ -399,22 +523,37 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
             layer,
             persona,
             limit,
+            offset,
         } => {
             let args = commands::memory::MemoryArgs {
                 layer,
                 persona,
                 limit,
+                offset,
+                json: cli.json,
             };
             commands::memory::run(app, args).await?;
         }
+        Commands::Blocks(sub) => match sub {
+            BlocksCmd::Rebuild { force } => {
+                commands::utt::run(app, commands::utt::UttCmd::Rebuild { force }).await?;
+            }
+        },
+        Commands::Index(sub) => match sub {
+            IndexCmd::Rebuild => {
+                commands::index_cmd::run(app).await?;
+            }
+        },
         Commands::Session(sub) => {
             let cmd = match sub {
-                SessionCmd::List => commands::session::SessionCmd::List,
+                SessionCmd::List { limit, offset } => {
+                    commands::session::SessionCmd::List { limit, offset }
+                }
                 SessionCmd::Show { session_id } => {
                     commands::session::SessionCmd::Show { session_id }
                 }
-                SessionCmd::Delete { session_id } => {
-                    commands::session::SessionCmd::Delete { session_id }
+                SessionCmd::Delete { session_id, force } => {
+                    commands::session::SessionCmd::Delete { session_id, force }
                 }
                 SessionCmd::Summarize {
                     session_id,
@@ -424,7 +563,7 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
                     persona_uid: persona,
                 },
             };
-            commands::session::run(app, cmd).await?;
+            commands::session::run(app, cmd, cli.json, cli.yes).await?;
         }
         Commands::Config(sub) => {
             let cmd = match sub {
@@ -432,24 +571,17 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
                 ConfigCmd::Get { key } => commands::config::ConfigCmd::Get { key },
                 ConfigCmd::Set { key, value } => commands::config::ConfigCmd::Set { key, value },
             };
-            commands::config::run(app, cmd).await?;
+            commands::config::run(app, cmd, cli.json).await?;
         }
-        Commands::Index(sub) => match sub {
-            IndexCmd::Rebuild => {
-                commands::index_cmd::run(app).await?;
-            }
-        },
-        Commands::Utt(sub) => match sub {
-            UttCmd::Rebuild { force } => {
-                commands::utt::run(app, commands::utt::UttCmd::Rebuild { force }).await?;
-            }
-        },
         Commands::Persona(sub) => {
             let cmd = match sub {
+                PersonaCmd::List { limit, offset } => {
+                    commands::persona::PersonaCmd::List { limit, offset }
+                }
                 PersonaCmd::Show => commands::persona::PersonaCmd::Show,
                 PersonaCmd::Reload { uid } => commands::persona::PersonaCmd::Reload { uid },
             };
-            commands::persona::run(app, cmd).await?;
+            commands::persona::run(app, cmd, cli.json).await?;
         }
         Commands::Export {
             format,
@@ -467,6 +599,8 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
             ImportCmd::Qq {
                 file,
                 deep,
+                force,
+                dry_run,
                 persona,
                 persona_self_name,
                 persona_self_uid,
@@ -479,12 +613,15 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
                 let args = commands::import_cmd::ImportArgs {
                     file,
                     deep,
+                    dry_run,
                     persona_self_name: effective_self_name,
                     persona_self_uid,
                     persona_other_name,
                     persona_other_uid,
                     gap,
-                    yes: cli.yes,
+                    // --force 与 --yes 双保险
+                    yes: cli.yes || force,
+                    json: cli.json,
                 };
                 // 导入命令需要 App（触发 L1 摘要）和数据库连接池
                 commands::import_cmd::run(app, pool, args).await?;
@@ -493,6 +630,13 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
         Commands::Diagnostics { output } => {
             let args = commands::diagnostics::DiagnosticsArgs { output };
             commands::diagnostics::run(app, pool, args).await?;
+        }
+        Commands::Status => {
+            let args = commands::status::StatusArgs {
+                db_path: cli.db,
+                json: cli.json,
+            };
+            commands::status::run(app, args).await?;
         }
     }
 
@@ -530,12 +674,14 @@ fn init_tracing() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
+    // 日志必须走 stderr（M1 A 项：stdout 只输出数据，保证管道/agent 取 stdout 即纯数据）
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_span_events(FmtSpan::CLOSE)
         .with_target(false)
         .with_file(true)
         .with_line_number(true)
+        .with_writer(std::io::stderr)
         .try_init()
         .ok(); // 忽略重复初始化错误（测试等场景）
 }

@@ -68,7 +68,10 @@ pub async fn ensure_privacy(app: &ramaria_app::App, auto_yes: bool) -> RamariaRe
             eprintln!("  请确认你已阅读并同意该服务商的隐私政策。");
             eprintln!();
 
-            let confirmed = crate::ui::confirm("是否同意将数据发送至线上服务？")?;
+            let confirmed = crate::ui::confirm("是否同意将数据发送至线上服务？", auto_yes)
+                .map_err(|e| {
+                    ramaria_core::error::RamariaError::validation(format!("隐私确认失败: {e}"))
+                })?;
 
             if !confirmed {
                 tracing::warn!(provider = %provider_name, "用户拒绝隐私确认");
@@ -78,7 +81,10 @@ pub async fn ensure_privacy(app: &ramaria_app::App, auto_yes: bool) -> RamariaRe
             }
 
             // 确认是否持久化（下次不再询问）
-            let persistent = crate::ui::confirm("是否记住此选择（下次不再询问）？")?;
+            let persistent = crate::ui::confirm("是否记住此选择（下次不再询问）？", auto_yes)
+                .map_err(|e| {
+                    ramaria_core::error::RamariaError::validation(format!("隐私确认失败: {e}"))
+                })?;
             app.confirm_privacy(persistent).await?;
 
             crate::ui::success("隐私确认完成");

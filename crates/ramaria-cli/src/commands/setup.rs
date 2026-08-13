@@ -180,7 +180,8 @@ fn configure_api_key(
             "检测到已有 {service} API key: {}",
             crate::ui::mask_key(&existing)
         ));
-        let reuse = crate::ui::confirm("是否使用已有 key？")?;
+        // setup 是交互式向导，确认始终走 TTY（false = 不自动确认）
+        let reuse = crate::ui::confirm("是否使用已有 key？", false)?;
         if reuse {
             return Ok(existing);
         }

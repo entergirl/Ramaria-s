@@ -1,16 +1,35 @@
-//! rust/crates/ramaria-cli/src/ui.rs - 终端输出与格式化工具
+//! crates/ramaria-cli/src/ui.rs - 终端输出与格式化工具
 //!
 //! 设计特点:
-//! - 统一错误输出格式（红色 "✗" 前缀 + 错误链）
-//! - 成功消息（绿色 "✓" 前缀）
+//! - stdout 只输出数据（--json 信封或文本数据）；状态/提示/警告走 stderr（M1 A 项）
+//! - 统一错误输出格式（红色 "✗" 前缀 + 错误链），错误始终输出（不受 --quiet 抑制）
+//! - --quiet 抑制 info/success/warn 等提示类输出（仅保留错误）
+//! - confirm 支持 --yes 自动确认；非 TTY 且无 --yes 时不挂起、直接失败提示（M1 B 项）
 //! - 流式文本增量输出（不换行追加）
-//! - 表格对齐工具（session/memory 列表）
 //! - 敏感信息遮蔽（API key 显示为 "***"）
 //! - read_secret 通过 Windows Console API 隐藏回显（非明文暴露）
 //! - 无额外外部依赖，仅使用标准库 + tracing + windows crate（已存在于依赖树）
 
 use std::error::Error;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+// =========================================================
+// --quiet 全局开关（进程级，由 main 在解析参数后设置）
+// =========================================================
+
+/// 进程级 quiet 标志：抑制 info/success/warn 提示，仅保留错误输出。
+static QUIET: AtomicBool = AtomicBool::new(false);
+
+/// 设置/清除 quiet 模式（--quiet 全局选项）。
+pub fn set_quiet(quiet: bool) {
+    QUIET.store(quiet, Ordering::Relaxed);
+}
+
+/// 当前是否处于 quiet 模式。
+pub fn is_quiet() -> bool {
+    QUIET.load(Ordering::Relaxed)
+}
 
 // =========================================================
 // 错误输出
@@ -50,18 +69,33 @@ pub fn fatal_anyhow(err: &anyhow::Error, exit_code: i32) -> ! {
 // 成功/信息输出
 // =========================================================
 
-/// 输出成功消息（绿色 ✓）。
+/// 输出成功消息（绿色 ✓，走 stderr，不污染 stdout 数据流）。
+///
+/// quiet 模式下抑制（--quiet 仅保留错误输出）。
 pub fn success(msg: &str) {
-    println!("\x1b[32m✓\x1b[0m {msg}");
+    if is_quiet() {
+        return;
+    }
+    eprintln!("\x1b[32m✓\x1b[0m {msg}");
 }
 
-/// 输出信息消息（蓝色 ℹ）。
+/// 输出信息消息（蓝色 ℹ，走 stderr，不污染 stdout 数据流）。
+///
+/// quiet 模式下抑制（--quiet 仅保留错误输出）。
 pub fn info(msg: &str) {
-    println!("\x1b[34mℹ\x1b[0m  {msg}");
+    if is_quiet() {
+        return;
+    }
+    eprintln!("\x1b[34mℹ\x1b[0m  {msg}");
 }
 
-/// 输出警告消息（黄色 ⚠）。
+/// 输出警告消息（黄色 ⚠，走 stderr）。
+///
+/// quiet 模式下抑制（--quiet 仅保留错误输出）。
 pub fn warn(msg: &str) {
+    if is_quiet() {
+        return;
+    }
     eprintln!("\x1b[33m⚠ 警告:\x1b[0m {msg}");
 }
 
@@ -319,9 +353,30 @@ pub fn read_secret(prompt: &str) -> io::Result<String> {
 // 用户确认
 // =========================================================
 
-/// 询问用户确认（y/N）。
-/// 返回 true 表示用户输入了 'y' 或 'Y'。
-pub fn confirm(prompt: &str) -> io::Result<bool> {
+/// 询问用户确认（y/N），支持 `--yes` 自动确认与非 TTY 直接失败。
+///
+/// 参数:
+/// - `prompt`: 确认提示文本（不含 [y/N] 后缀）。
+/// - `auto_yes`: `--yes` 全局选项；为 true 时直接返回 true（跳过交互）。
+///
+/// 返回:
+/// - `Ok(true)`: 已确认（交互输入 y/yes，或 auto_yes）。
+/// - `Ok(false)`: 用户取消。
+/// - `Err`: 非 TTY 环境且未传 auto_yes（不挂起，直接失败提示需要 --yes/--force），
+///   或标准输入读取失败。
+///
+/// 说明:
+/// - 非 TTY（管道/脚本/agent 调用）且无 `--yes` 时不挂起等待输入，
+///   直接返回错误并提示使用 `--yes` 或 `--force`（M1 B 项）。
+pub fn confirm(prompt: &str, auto_yes: bool) -> io::Result<bool> {
+    if auto_yes {
+        return Ok(true);
+    }
+    if !io::stdin().is_terminal() {
+        return Err(io::Error::other(format!(
+            "{prompt}——当前环境非交互式终端（stdin 非 TTY），无法等待确认；请使用 --yes 或 --force 自动确认"
+        )));
+    }
     let input = read_line(&format!("{prompt} [y/N]:"))?;
     Ok(input.eq_ignore_ascii_case("y") || input.eq_ignore_ascii_case("yes"))
 }

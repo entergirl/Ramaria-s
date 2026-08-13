@@ -6,6 +6,7 @@
 //! - main.rs 通过 `use ramaria_cli::...` 引用，而非私有 mod。
 
 pub mod commands;
+pub mod json;
 pub mod privacy;
 pub mod ui;
 pub mod util;

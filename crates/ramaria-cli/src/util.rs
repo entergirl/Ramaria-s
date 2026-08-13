@@ -35,6 +35,29 @@ pub fn format_timestamp(ms: i64) -> Option<String> {
         .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
 }
 
+/// 将 Unix 毫秒时间戳格式化为 ISO-8601 UTC 字符串（`--json` 模式统一格式，D-V15-011）。
+///
+/// 参数:
+/// - `ms`: Unix 毫秒时间戳。
+///
+/// 返回:
+/// - `Some("2024-06-10T08:00:00Z")`: 有效时间戳。
+/// - `None`: ms ≤ 0（无效时间戳）。
+///
+/// 说明:
+/// - 输出格式 `%Y-%m-%dT%H:%M:%SZ`（UTC，秒级精度，无时区歧义）。
+/// - 仅用于 JSON 输出；文本模式保持 `format_timestamp` 的紧凑格式。
+pub fn format_timestamp_iso(ms: i64) -> Option<String> {
+    if ms <= 0 {
+        return None;
+    }
+    let secs = ms / 1000;
+    chrono::Utc
+        .timestamp_opt(secs, ((ms % 1000) * 1_000_000) as u32)
+        .single()
+        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+}
+
 // =========================================================
 // 字符串截断
 // =========================================================

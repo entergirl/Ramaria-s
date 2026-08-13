@@ -1,6 +1,6 @@
 # Ramaria CLI 使用指南
 
-> 版本：v1.1  
+> 版本：v1.2（v1.1 + M1 CLI 自动化友好改造与命名规范化：--json/--yes/--quiet、exit code 约定、blocks/utt、memory 层级别名、status、import --dry-run）
 > 适用平台：Windows / macOS / Linux
 
 ## 概述
@@ -34,7 +34,9 @@ cargo build --release -p ramaria-cli
 | 选项 | 说明 |
 |------|------|
 | `--db <PATH>` | 数据库文件路径。默认 `data/ramaria_assistant.db`，可通过 `RAMARIA_DB_PATH` 环境变量覆盖 |
-| `--yes` | 跳过隐私确认对话框（仅线上 provider 生效） |
+| `--json` | 全局 JSON 信封输出：stdout 仅输出 `{"ok":true,"data":…}` / `{"ok":false,"error":{...}}`，供脚本/agent 解析（D-V15-011） |
+| `--yes` | 自动确认所有确认点（隐私/删除/导入等）。非 TTY 且无 `--yes` 时不挂起、直接失败并提示 |
+| `--quiet` | 抑制 stderr 提示（info/success/warn），仅保留错误输出 |
 | `--skip-validate` | 跳过 LLM 后端连接验证（仅 `setup` 命令生效） |
 
 ---
@@ -370,6 +372,26 @@ ramaria diagnostics --output diag.zip
 # 7. 导出数据
 ramaria export --format markdown --output memories.md
 ```
+
+---
+
+## 命令变更
+
+本版本（v1.5 M1）的 CLI 命名与输出约定变更，均保留旧命令兼容（clap alias），旧脚本不受影响：
+
+| 变更 | 说明 |
+|------|------|
+| `utt` → `blocks` | 话语块命令 canonical 名称改为 `blocks`（如 `ramaria blocks rebuild`），`utt` 保留为 alias |
+| `memory <层>` 层级别名 | 层级参数双支持：`l1`↔`summary`、`l2`↔`events`、`l3`↔`profile`；帮助与纠错提示同时列出 |
+| 全局 `--json` | 所有命令支持信封输出；`ask --json` 修复为合法 JSON 事件流（`{"type":"delta|done|error",…}`），`--no-stream` 聚合为单个 `done` 事件。注意：事件流中输出 `error` 事件时进程仍以 exit 0 退出（错误已内嵌于流），需消费端检查事件类型，勿仅依赖 exit code |
+| stdout/stderr 分离 | stdout 只输出数据；状态/提示/警告走 stderr（脚本依赖「stdout 混杂状态行」的需要调整） |
+| exit code 约定 | `0` 成功 / `2` 参数错（clap）/ `3` LLM 或后端不可用 / `4` 业务校验失败；`--json` 模式错误信封的 `error.code` 复用该约定 |
+| 时间戳约定 | `--json` 模式时间戳统一 ISO-8601 UTC（如 `2026-08-10T08:00:00Z`） |
+| `persona list` | 新增：结构化列出人格（uid/名称/kind/来源/状态），支持 `--limit/--offset` 分页 |
+| `status` | 新增：应用状态/配置摘要/DB 路径探活（agent 使用，非 TTY 可执行） |
+| `import qq --dry-run` | 新增：仅解析预览输出结构化 JSON 摘要，不写入数据库（agent 先验证数据源）。预览 JSON 含双方 QQ uin/uid 标识字段（数据源验证用途），注意其隐私属性 |
+| `session delete --force` | 新增：跳过确认（等同 `--yes` 双保险） |
+| `memory` 默认 persona | 修正：`user-0001` 硬编码 → `rama-0001`（缺陷修复，查询默认对象变化） |
 
 ---
 

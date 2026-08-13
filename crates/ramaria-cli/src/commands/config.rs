@@ -8,6 +8,7 @@
 //! - 敏感信息（API key）只通过 keychain 操作，config 命令不直接读写
 
 use anyhow::Context;
+use ramaria_core::error::RamariaError;
 use std::sync::Arc;
 
 /// config 命令的子命令。
@@ -87,27 +88,29 @@ fn set_sectioned(
 fn parse_bool(key: &str, value: &str) -> anyhow::Result<bool> {
     match value {
         "true" | "false" => Ok(value == "true"),
-        _ => anyhow::bail!("{key} 必须是布尔值（true / false）"),
+        _ => Err(anyhow::anyhow!(RamariaError::validation(format!(
+            "{key} 必须是布尔值（true / false）"
+        )))),
     }
 }
 
 fn parse_u32(key: &str, value: &str) -> anyhow::Result<u32> {
     value
         .parse::<u32>()
-        .with_context(|| format!("{key} 必须是正整数"))
+        .map_err(|_| anyhow::anyhow!(RamariaError::validation(format!("{key} 必须是正整数"))))
 }
 
 /// 执行 config 命令。
-pub async fn run(app: &Arc<ramaria_app::App>, cmd: ConfigCmd) -> anyhow::Result<()> {
+pub async fn run(app: &Arc<ramaria_app::App>, cmd: ConfigCmd, json: bool) -> anyhow::Result<()> {
     match cmd {
-        ConfigCmd::List => list_config(app).await,
-        ConfigCmd::Get { key } => get_config(app, &key).await,
-        ConfigCmd::Set { key, value } => set_config(app, &key, &value).await,
+        ConfigCmd::List => list_config(app, json).await,
+        ConfigCmd::Get { key } => get_config(app, &key, json).await,
+        ConfigCmd::Set { key, value } => set_config(app, &key, &value, json).await,
     }
 }
 
 /// 列出所有配置。
-async fn list_config(app: &Arc<ramaria_app::App>) -> anyhow::Result<()> {
+async fn list_config(app: &Arc<ramaria_app::App>, json: bool) -> anyhow::Result<()> {
     let cfg = app.backend_config();
 
     // 读取 API key（遮蔽）
@@ -116,6 +119,32 @@ async fn list_config(app: &Arc<ramaria_app::App>) -> anyhow::Result<()> {
         Ok(None) => "(未设置)".to_string(),
         Err(_) => "(读取失败)".to_string(),
     };
+
+    if json {
+        let settings = app
+            .storage()
+            .list_settings()
+            .await
+            .context("读取设置失败")?;
+        let settings_map: serde_json::Map<String, serde_json::Value> = settings
+            .into_iter()
+            .map(|(k, v)| (k, serde_json::Value::String(v)))
+            .collect();
+        let data = serde_json::json!({
+            "provider": cfg.provider.as_str(),
+            "base_url": cfg.base_url,
+            "api_key": api_key_status,
+            "model_id": cfg.capability.model_id,
+            "temperature": cfg.temperature,
+            "max_tokens": cfg.max_tokens,
+            "streaming": cfg.capability.supports_streaming,
+            "json_mode": cfg.capability.supports_json_mode,
+            "context_window": cfg.capability.context_window,
+            "state": app.current_state().as_str(),
+            "settings": settings_map,
+        });
+        return crate::json::emit_ok(&data);
+    }
 
     println!();
     crate::ui::separator();
@@ -164,24 +193,25 @@ async fn list_config(app: &Arc<ramaria_app::App>) -> anyhow::Result<()> {
 }
 
 /// 获取单个配置项。
-async fn get_config(app: &Arc<ramaria_app::App>, key: &str) -> anyhow::Result<()> {
+async fn get_config(app: &Arc<ramaria_app::App>, key: &str, json: bool) -> anyhow::Result<()> {
     let cfg = app.backend_config();
 
-    match key {
-        "provider" => println!("{}", cfg.provider.as_str()),
-        "base_url" => println!("{}", cfg.base_url),
-        "model_id" => println!("{}", cfg.capability.model_id),
-        "temperature" => println!("{:.2}", cfg.temperature),
-        "max_tokens" => println!("{}", cfg.max_tokens),
+    // 统一取值函数：返回 String，未知 key 时由调用方决定错误信息。
+    let value: Result<String, anyhow::Error> = match key {
+        "provider" => Ok(cfg.provider.as_str().to_string()),
+        "base_url" => Ok(cfg.base_url.clone()),
+        "model_id" => Ok(cfg.capability.model_id.clone()),
+        "temperature" => Ok(format!("{:.2}", cfg.temperature)),
+        "max_tokens" => Ok(cfg.max_tokens.to_string()),
         "api_key" => {
             // API key 从 keychain 读取
             match app.keychain().get_api_key(cfg.provider.as_str()) {
-                Ok(Some(key)) => println!("{}", crate::ui::mask_key(&key)),
-                Ok(None) => println!("(未设置)"),
+                Ok(Some(key)) => Ok(crate::ui::mask_key(&key)),
+                Ok(None) => Ok("(未设置)".to_string()),
                 Err(e) => anyhow::bail!("读取 API key 失败: {e}"),
             }
         }
-        "state" => println!("{}", app.current_state().as_str()),
+        "state" => Ok(app.current_state().as_str().to_string()),
         _ => {
             // 点分路径配置组（utt.* / bridge.*）：读生效配置（文件 + DB 合并）
             if SECTIONED_KEYS.contains(&key) {
@@ -190,26 +220,39 @@ async fn get_config(app: &Arc<ramaria_app::App>, key: &str) -> anyhow::Result<()
                     .await
                     .context("读取配置失败")?;
                 match get_sectioned(&full, key) {
-                    Some(value) => println!("{value}"),
-                    None => anyhow::bail!("未知配置项: '{key}'"),
+                    Some(value) => Ok(value),
+                    None => Err(anyhow::anyhow!(RamariaError::validation(format!(
+                        "未知配置项: '{key}'"
+                    )))),
                 }
-                return Ok(());
-            }
-            // 尝试从 settings 表读取自定义设置
-            match app.storage().get_setting(key).await? {
-                Some(value) => println!("{value}"),
-                None => anyhow::bail!(
-                    "未知配置项: '{key}'。支持: provider / base_url / model_id / temperature / max_tokens / api_key / state / utt.* / bridge.*"
-                ),
+            } else {
+                // 尝试从 settings 表读取自定义设置
+                match app.storage().get_setting(key).await? {
+                    Some(value) => Ok(value),
+                    None => Err(anyhow::anyhow!(RamariaError::validation(format!(
+                        "未知配置项: '{key}'。支持: provider / base_url / model_id / temperature / max_tokens / api_key / state / utt.* / bridge.*"
+                    )))),
+                }
             }
         }
-    }
+    };
+    let value = value?;
 
+    if json {
+        let data = serde_json::json!({"key": key, "value": value});
+        return crate::json::emit_ok(&data);
+    }
+    println!("{value}");
     Ok(())
 }
 
 /// 设置配置项。
-async fn set_config(app: &Arc<ramaria_app::App>, key: &str, value: &str) -> anyhow::Result<()> {
+async fn set_config(
+    app: &Arc<ramaria_app::App>,
+    key: &str,
+    value: &str,
+    json: bool,
+) -> anyhow::Result<()> {
     let mut cfg = app.backend_config().clone();
 
     match key {
@@ -218,9 +261,11 @@ async fn set_config(app: &Arc<ramaria_app::App>, key: &str, value: &str) -> anyh
                 "lm_studio" | "lmstudio" => ramaria_core::types::LlmProvider::LmStudio,
                 "deepseek" => ramaria_core::types::LlmProvider::DeepSeek,
                 "openai" => ramaria_core::types::LlmProvider::OpenAI,
-                _ => anyhow::bail!(
-                    "不支持的 provider: '{value}'。支持: lm_studio / deepseek / openai"
-                ),
+                _ => {
+                    return Err(anyhow::anyhow!(RamariaError::validation(format!(
+                        "不支持的 provider: '{value}'。支持: lm_studio / deepseek / openai"
+                    ))));
+                }
             };
             cfg.provider = provider;
         }
@@ -248,6 +293,9 @@ async fn set_config(app: &Arc<ramaria_app::App>, key: &str, value: &str) -> anyh
                 .set_api_key(provider.as_str(), value)
                 .context("保存 API key 失败")?;
             crate::ui::success(&format!("{} API key 已更新", provider.as_str()));
+            if json {
+                crate::json::emit_ok(&serde_json::json!({"key": key, "value": "已更新"}))?;
+            }
             return Ok(());
         }
         _ => {
@@ -267,6 +315,9 @@ async fn set_config(app: &Arc<ramaria_app::App>, key: &str, value: &str) -> anyh
                 if result.file_ok || result.db_ok {
                     crate::ui::success(&format!("{key} 已更新为 {value}"));
                     crate::ui::info("utt/bridge 参数在会话封存/桥接时生效；桌面端需重启应用");
+                    if json {
+                        crate::json::emit_ok(&serde_json::json!({"key": key, "value": value}))?;
+                    }
                 } else {
                     anyhow::bail!("{key} 更新失败：文件与 DB 两侧均写入失败");
                 }
@@ -278,6 +329,9 @@ async fn set_config(app: &Arc<ramaria_app::App>, key: &str, value: &str) -> anyh
                 .await
                 .context("保存设置失败")?;
             crate::ui::success(&format!("设置 {key} 已更新"));
+            if json {
+                crate::json::emit_ok(&serde_json::json!({"key": key, "value": value}))?;
+            }
             return Ok(());
         }
     }
@@ -293,6 +347,10 @@ async fn set_config(app: &Arc<ramaria_app::App>, key: &str, value: &str) -> anyh
 
     crate::ui::success(&format!("{key} 已更新为 {value}"));
     crate::ui::info(&format!("当前状态: {}", app.current_state().as_str()));
+
+    if json {
+        crate::json::emit_ok(&serde_json::json!({"key": key, "value": value}))?;
+    }
 
     Ok(())
 }

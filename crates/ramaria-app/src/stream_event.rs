@@ -1,15 +1,19 @@
-//! rust/crates/ramaria-app/src/stream_event.rs - 流式事件领域模型
+//! crates/ramaria-app/src/stream_event.rs - 流式事件领域模型
 //!
 //! 设计特点:
 //! - 封装 LLM 流式响应的领域事件，统一 CLI 和 Desktop 消费
 //! - 三种事件: Delta（增量文本）、Done（流结束）、Error（流中错误）
 //! - 每个事件携带 request_id 和 created_at，便于前端串联和日志追踪
+//! - 实现 Serialize（v1.5 M1）：internally tagged `type` 字段（delta/done/error），
+//!   `ask --json` 事件流可直接 serde_json 序列化（修复 Debug 格式非合法 JSON 问题）
+//! - Done 事件携带 session_id（ask --json 聚合输出需要）
 //! - backend_id 记录 provider 返回的 finish_reason 或 error 类型
 //! - 与 `ramaria_core::traits::StreamDelta` 互补：StreamDelta 是 provider 层协议，
 //!
 //! StreamEvent 是 app 层领域事件（增加 request_id/created_at/语义化错误）
 
 use ramaria_core::types::now_ms;
+use serde::Serialize;
 use uuid::Uuid;
 
 // =========================================================
@@ -22,12 +26,14 @@ use uuid::Uuid;
 /// - 将 LLM provider 的原始 `StreamDelta` 转换为 UI 友好的事件
 /// - 统一流式增量、完成通知和错误三种场景
 /// - 每个事件独立携带时间戳，支持前端按序渲染
+/// - `--json` 序列化为 `{"type":"delta|done|error",...}` 事件流（D-V15-011）
 ///
 /// 变体:
 /// - `Delta`: LLM 输出的增量文本片段
-/// - `Done`: 流式输出完成信号（含总字符数和 provider 元数据）
+/// - `Done`: 流式输出完成信号（含总字符数、session_id 和 provider 元数据）
 /// - `Error`: 流式输出中的可恢复错误（上层可选择重试或显示）
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum StreamEvent {
     /// LLM 增量文本输出。
@@ -44,6 +50,8 @@ pub enum StreamEvent {
     Done {
         /// 当前请求唯一标识
         request_id: Uuid,
+        /// 本次回复所属会话 ID（None 表示不可用/未创建）
+        session_id: Option<Uuid>,
         /// provider 返回的后端标识（如 finish_reason: "stop"）
         backend_id: Option<String>,
         /// 本次回复总字符数
@@ -81,11 +89,18 @@ impl StreamEvent {
     ///
     /// 参数:
     /// - `request_id`: 当前请求 ID。
+    /// - `session_id`: 本次回复所属会话 ID（供 `ask --json` 聚合输出）。
     /// - `backend_id`: provider 返回的 finish_reason 或后端标识。
     /// - `total_chars`: 累计输出字符数。
-    pub fn done(request_id: Uuid, backend_id: Option<String>, total_chars: usize) -> Self {
+    pub fn done(
+        request_id: Uuid,
+        session_id: Option<Uuid>,
+        backend_id: Option<String>,
+        total_chars: usize,
+    ) -> Self {
         Self::Done {
             request_id,
+            session_id,
             backend_id,
             total_chars,
             created_at: now_ms(),
@@ -147,14 +162,17 @@ mod tests {
     #[test]
     fn done_event() {
         let id = Uuid::new_v4();
-        let event = StreamEvent::done(id, Some("stop".into()), 42);
+        let sid = Uuid::new_v4();
+        let event = StreamEvent::done(id, Some(sid), Some("stop".into()), 42);
         assert_eq!(event.kind(), "done");
         match event {
             StreamEvent::Done {
+                session_id,
                 backend_id,
                 total_chars,
                 ..
             } => {
+                assert_eq!(session_id, Some(sid));
                 assert_eq!(backend_id.as_deref(), Some("stop"));
                 assert_eq!(total_chars, 42);
             }
@@ -180,5 +198,40 @@ mod tests {
             StreamEvent::Delta { created_at, .. } => assert!(created_at > 0),
             _ => panic!("应为 Delta"),
         }
+    }
+
+    #[test]
+    fn serialize_delta_event() {
+        let id = Uuid::new_v4();
+        let event = StreamEvent::delta(id, "你好".into());
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["type"], "delta");
+        assert_eq!(parsed["request_id"], id.to_string());
+        assert_eq!(parsed["content"], "你好");
+        assert!(parsed["created_at"].is_number());
+    }
+
+    #[test]
+    fn serialize_done_event_includes_session_id() {
+        let id = Uuid::new_v4();
+        let sid = Uuid::new_v4();
+        let event = StreamEvent::done(id, Some(sid), Some("stop".into()), 42);
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["type"], "done");
+        assert_eq!(parsed["session_id"], sid.to_string());
+        assert_eq!(parsed["backend_id"], "stop");
+        assert_eq!(parsed["total_chars"], 42);
+    }
+
+    #[test]
+    fn serialize_error_event() {
+        let id = Uuid::new_v4();
+        let event = StreamEvent::error(id, "连接超时".into());
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["type"], "error");
+        assert_eq!(parsed["error"], "连接超时");
     }
 }

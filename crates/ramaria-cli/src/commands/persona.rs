@@ -28,10 +28,18 @@ const PERSONAS_DIR: &str = "../config/personas";
 /// Persona 子命令。
 ///
 /// 职责:
+/// - List: 结构化列出所有人格（uid / 名称 / kind），供 agent 脚本消费。
 /// - Show: 展示当前所有已注册人格的摘要信息。
 /// - Reload: 重新扫描文件系统，同步到 DB（支持全量或按 UID 指定）。
 #[derive(Debug, Clone)]
 pub enum PersonaCmd {
+    /// 结构化列出所有人格（uid / 名称 / kind）
+    List {
+        /// 输出条数上限（None = 全部）
+        limit: Option<usize>,
+        /// 跳过前 N 条（分页）
+        offset: usize,
+    },
     /// 显示所有人格摘要（uid / name / kind / config 预览）
     Show,
     /// 从 personas/ 目录重新加载人格文件到 DB
@@ -46,11 +54,82 @@ pub enum PersonaCmd {
 /// 参数:
 /// - `app`: App 实例引用。
 /// - `cmd`: Persona 子命令。
-pub async fn run(app: &Arc<ramaria_app::App>, cmd: PersonaCmd) -> anyhow::Result<()> {
+/// - `json`: JSON 信封输出。
+pub async fn run(app: &Arc<ramaria_app::App>, cmd: PersonaCmd, json: bool) -> anyhow::Result<()> {
     match cmd {
-        PersonaCmd::Show => run_show(app).await,
+        PersonaCmd::List { limit, offset } => run_list(app, json, limit, offset).await,
+        PersonaCmd::Show => run_show(app, json).await,
         PersonaCmd::Reload { uid } => run_reload(app, uid).await,
     }
+}
+
+// =========================================================
+// list 命令
+// =========================================================
+
+/// 结构化列出所有人格（uid / 名称 / kind / source / active）。
+///
+/// - `--json`: 输出 `{"personas":[{uid,name,kind,source,active}...]}` 信封。
+/// - 文本模式：紧凑表格（uid / 名称 / kind / 来源 / 状态）。
+/// - 支持 --limit/--offset 分页（T-V15-1-006 列表命令统一约定）。
+async fn run_list(
+    app: &Arc<ramaria_app::App>,
+    json: bool,
+    limit: Option<usize>,
+    offset: usize,
+) -> anyhow::Result<()> {
+    let personas = app
+        .storage()
+        .list_personas()
+        .await
+        .context("查询 persona 列表失败")?;
+
+    // 分页：先跳过 offset 条，再取 limit 条（limit=None 表示全部）
+    let page_limit = limit.unwrap_or(usize::MAX);
+    let paged: Vec<_> = personas.iter().skip(offset).take(page_limit).collect();
+
+    if json {
+        let items: Vec<serde_json::Value> = paged
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "uid": p.uid,
+                    "name": p.name,
+                    "kind": p.kind.as_str(),
+                    "source": p.source,
+                    "active": p.active,
+                })
+            })
+            .collect();
+        let data = serde_json::json!({ "personas": items });
+        return crate::json::emit_ok(&data);
+    }
+
+    if paged.is_empty() {
+        crate::ui::info("暂无已注册的人格");
+        return Ok(());
+    }
+
+    println!();
+    println!(
+        "  {:<16}  {:<20}  {:<6}  {:<10}  状态",
+        "UID", "名称", "Kind", "来源"
+    );
+    println!(
+        "  {:-<16}  {:-<20}  {:-<6}  {:-<10}  {:-<6}",
+        "", "", "", "", ""
+    );
+    for p in &paged {
+        println!(
+            "  {:<16}  {:<20}  {:<6}  {:<10}  {}",
+            p.uid,
+            p.name,
+            p.kind.as_str(),
+            p.source,
+            if p.active { "活跃" } else { "停用" }
+        );
+    }
+    Ok(())
 }
 
 // =========================================================
@@ -63,12 +142,31 @@ pub async fn run(app: &Arc<ramaria_app::App>, cmd: PersonaCmd) -> anyhow::Result
 /// - 从 storage.list_personas 读取全部活跃 persona。
 /// - 解析 config 字段中的 TOML 内容，提取 assistant_name 和人设/规则摘要。
 /// - 无 persona 时输出引导提示。
-async fn run_show(app: &Arc<ramaria_app::App>) -> anyhow::Result<()> {
+async fn run_show(app: &Arc<ramaria_app::App>, json: bool) -> anyhow::Result<()> {
     let personas = app
         .storage()
         .list_personas()
         .await
         .context("查询 persona 列表失败")?;
+
+    if json {
+        // show 的 JSON 形态与 list 一致（均为 persona 集合），供脚本统一消费
+        let items: Vec<serde_json::Value> = personas
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "uid": p.uid,
+                    "name": p.name,
+                    "kind": p.kind.as_str(),
+                    "source": p.source,
+                    "active": p.active,
+                    "config": p.config,
+                })
+            })
+            .collect();
+        let data = serde_json::json!({ "personas": items });
+        return crate::json::emit_ok(&data);
+    }
 
     if personas.is_empty() {
         crate::ui::info("暂无已注册的人格");

@@ -258,7 +258,12 @@ async fn stream_forward_task(
 
     // 4. 发送 Done 事件（仅在无错误时——错误已通过 Error 事件发送）
     if !has_error {
-        let done_event = StreamEvent::done(request_id, backend_id, full_reply.chars().count());
+        let done_event = StreamEvent::done(
+            request_id,
+            Some(session_id),
+            backend_id,
+            full_reply.chars().count(),
+        );
         let _ = try_send(&mut tx, Ok(done_event));
     }
 
