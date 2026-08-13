@@ -1,17 +1,19 @@
 # Ramaria CLI 使用指南
 
-> 版本：v1.2（v1.1 + M1 CLI 自动化友好改造与命名规范化：--json/--yes/--quiet、exit code 约定、blocks/utt、memory 层级别名、status、import --dry-run）
-> 适用平台：Windows / macOS / Linux
+> 版本：v1.3（v1.2 + M2 探针命令 `probe build`/`probe run`、运行方式与数据目录说明更新）
+> 适用平台：Windows / macOS / Linux（Windows 首发）
 
 ## 概述
 
-`ramaria` 是 Ramaria 的命令行入口，支持对话、记忆查询、会话管理、配置修改、人格管理、数据导入、诊断导出和数据导出。
+`ramaria` 是 Ramaria 的命令行入口，支持对话、记忆查询、会话管理、配置修改、人格管理、数据导入、诊断导出、数据导出与探针实验（probe）。
 
-首次使用前需运行首次配置向导，CLI 与桌面应用共享同一数据目录（`%APPDATA%\Ramaria\`）。
+首次使用前需运行首次配置向导（`ramaria setup`）。**CLI 与桌面应用的数据目录相互独立**：CLI 的数据库由 `--db` 指定（默认 `data/ramaria_assistant.db`，`RAMARIA_DB_PATH` 覆盖）；桌面应用开发模式（`cargo tauri dev`）使用 `crates/ramaria-desktop/.ramaria-dev/`、生产模式使用 `%APPDATA%\Ramaria\data\`；API key 均保存在 Windows Credential Manager（不落盘）。
 
 ---
 
-## 安装
+## 安装与运行
+
+**无需安装**：仓库已构建的调试二进制位于 `f:\Ramaria-s\main\target\debug\ramaria.exe`，包含全部命令（含 probe），直接执行即可。建议先 `cd f:\Ramaria-s\main` 再运行，避免相对路径（默认数据库 `data/ramaria_assistant.db`）跑偏；也可创建 `ramaria.cmd` 快捷入口（内容：`@echo off` + `"%~dp0target\debug\ramaria.exe" %*`），之后在 `f:\Ramaria-s\main` 下直接敲 `ramaria`。
 
 ### 从安装包
 
@@ -20,9 +22,9 @@ Windows 安装包将 `ramaria.exe` 安装到系统 PATH。
 ### 从源码编译
 
 ```bash
-cd rust
-cargo build --release -p ramaria-cli
-# 二进制位于 target/release/ramaria.exe
+cd f:\Ramaria-s\main
+cargo build -p ramaria-cli
+# 调试二进制位于 target/debug/ramaria.exe
 ```
 
 ---
@@ -125,17 +127,20 @@ ramaria chat
 
 ```
 ramaria memory                    # 查看 L1 摘要（默认）
-ramaria memory --layer l2         # 查看 L2 事件
-ramaria memory --layer l3         # 查看 L3 性格画像
+ramaria memory l2                 # 查看 L2 事件
+ramaria memory events             # 层级别名：l2 ↔ events
+ramaria memory l3                 # 查看 L3 性格画像
+ramaria memory profile            # 层级别名：l3 ↔ profile
 ramaria memory --persona rama-0001  # 筛选特定人格
 ramaria memory --limit 20         # 限制返回条数
 ```
 
 | 参数 | 说明 |
 |------|------|
-| `--layer <l1/l2/l3>` | 记忆层级（默认 `l1`） |
+| `<LAYER>` | 记忆层级位置参数：`l1`/`summary`（摘要，默认）、`l2`/`events`（事件）、`l3`/`profile`（性格画像），双支持（D-V15-007），未知层级有纠错提示 |
 | `--persona <UID>` | 按人格筛选 |
 | `--limit <N>` | 返回条数限制 |
+| `--offset <N>` | 跳过前 N 条（分页） |
 
 **输出格式**：
 - **L1**：摘要卡片，含 `summary` / `atmosphere` / `valence` / `salience` / `situation_strength`
@@ -238,9 +243,9 @@ ramaria import qq --file chat.txt --deep
 
 # 为导入的双方指定画像名称和 UID
 ramaria import qq --file chat.txt \
-  --persona-self-name "烧酒" \
-  --persona-other-name "omkidaso" \
-  --persona-other-uid "char-342215559"
+  --persona-self-name "我的昵称" \
+  --persona-other-name "对方昵称" \
+  --persona-other-uid "char-123456789"
 
 # 跳过确认直接导入
 ramaria import qq --file chat.txt --yes
@@ -321,8 +326,71 @@ ramaria export --output ./my-memories.json  # 指定输出文件
 
 ---
 
-## 环境变量
+### `ramaria probe` — 探针实验（v1.5 M2 新增）
 
+自动化工具链：构建测试集 + 按参数档位批量跑对话管线，用于 utt 参数定稿（θ_gap / 条数上限 / top_k，T-V15-2-003）与聚类参数摸底（D-P，M5 复用）。建立于 M1 `--json` 信封约定之上；实验设计与定稿结论见 `f:\Ramaria-s\docs\dev-1.5\v1.5-probe-report.md`。
+
+#### `ramaria probe build` — 构建测试集（旧名 `probe dataset`，保留 alias）
+
+从导入数据自动构建测试集（2 维「语气模仿 tone / 事实记忆 fact」× 每维 10 题），输出结构化 JSON 数据集。
+
+```
+ramaria probe build --output probe-dataset.json
+ramaria probe build --persona char-0001 --questions-per-dim 15 --seed 42 --json
+ramaria probe build --source custom-source.json --output ds.json
+ramaria probe dataset --output ds.json        # 旧名 alias，等价
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--persona <UID>` | 目标 persona（默认自动选白名单内角色类 persona，兜底 `char-0001`） |
+| `--questions-per-dim <N>` | 每维题数（默认 10，共 20 题；v1.7 正式评估 ≥30 题时调大） |
+| `--seed <N>` | 抽样 seed（默认 `20260810`，固定可复跑：同 seed 输出相同测试集） |
+| `--source <FILE>` | 显式数据源文件（JSON：`{persona_uid, messages:[{question,reply,source_ref}], events:[{title,summary}]}`）；不指定则从数据库构建 |
+| `--output <FILE>` | 数据集输出文件（`-` = stdout）；不指定时 `--json` 输出完整数据集到 stdout |
+
+**降级**：数据库无真实数据 / 数据源文件处理失败时，自动以内置测试夹具数据兜底（记 warn，不报错），保证测试集恒有 `2 × 每维题数` 道题（真实数据在前，夹具补齐在后，每题 `source` 字段标注 `db`/`file`/`fixture`）。
+
+**档位组合**（代表配对，写进数据集供 run 使用）：
+
+| 档位 id | θ_gap（分钟） | 条数上限 | top_k | 说明 |
+|---------|:---:|:---:|:---:|------|
+| baseline | 30 | 40 | 3 | v3.1 初值（对照基准） |
+| theta_gap_60 | 60 | 40 | 3 | θ_gap 上调（块更长） |
+| max_msgs_80 | 30 | 80 | 3 | 条数上限上调（块更长） |
+| top_k_1 | 30 | 40 | 1 | top_k 下调（更保守的原文注入） |
+
+#### `ramaria probe run` — 档位批量实验
+
+按档位批量跑对话管线，结构化输出（档位 → 输出 → 指标），供 v1.6 T2 自动评分与 v1.7 T3 正式评估复用。
+
+```
+ramaria probe run --dataset probe-dataset.json --output probe-results.json --json
+ramaria probe run --dataset ds.json --variants baseline,top_k_1 --limit 10 --json
+ramaria probe run --dataset ds.json --no-rebuild-utt --json
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--dataset <FILE>` | 数据集文件（`probe build` 产物），必选 |
+| `--variants <ids>` | 只跑指定档位（逗号分隔 id，默认全部；无效 id 忽略） |
+| `--limit <N>` | 每档位最多跑题数（默认全部） |
+| `--rebuild-utt` / `--no-rebuild-utt` | 是否按档位参数重建 utt 块（默认开启；θ_gap/条数档位必须重建才生效。注意：开启会**清空并按新参数重建数据库中的 utt 块**） |
+| `--output <FILE>` | 结果输出文件（`-` = stdout 输出原始结果 JSON） |
+| `--json` | M1 信封输出（`{"ok":true,"data":{…}}`） |
+
+**输出结构**（信封 `data`）：
+- `variants[]`：每档位 `variant_id` / `params`（三参数）/ `runs[]`（每题 `item_id` / `dimension` / `question` / `reply` / `metrics{reply_chars,elapsed_ms}` / `error`）/ `failed_count`
+- 单题失败不中断批量：失败题 `error` 记录原因，其余题与档位继续执行
+
+**注意**：
+- 线上 provider（DeepSeek/OpenAI）需要隐私确认，脚本场景加 `--yes`
+- 每次对话会新建会话并写库（探针实验数据）；建议对副本数据库执行
+- 隐私红线：日志不记录完整问题与回复；数据集含参考文本（persona 原回复/事件摘要），注意保管
+
+---
+
+## 环境变量
 | 变量 | 说明 |
 |------|------|
 | `RAMARIA_DATA_DIR` | 数据目录（覆盖默认 `%APPDATA%\Ramaria\`） |
@@ -361,7 +429,7 @@ ramaria ask "用一句话介绍自己"
 ramaria chat
 
 # 4. 查看记忆
-ramaria memory --layer l1
+ramaria memory l1
 
 # 5. 导入 QQ 聊天记录
 ramaria import qq --file chat.json --deep
@@ -371,13 +439,19 @@ ramaria diagnostics --output diag.zip
 
 # 7. 导出数据
 ramaria export --format markdown --output memories.md
+
+# 8. 构建探针测试集（2 维 × 10 题，seed 固定可复跑）
+ramaria probe build --output probe-dataset.json
+
+# 9. 跑档位实验（默认 4 档位；--rebuild-utt 会按档位参数重建 utt 块）
+ramaria probe run --dataset probe-dataset.json --output probe-results.json --json
 ```
 
 ---
 
 ## 命令变更
 
-本版本（v1.5 M1）的 CLI 命名与输出约定变更，均保留旧命令兼容（clap alias），旧脚本不受影响：
+本版本（v1.5）的 CLI 命名与输出约定变更，均保留旧命令兼容（clap alias），旧脚本不受影响（M1 自动化友好改造 + M2 探针命令）：
 
 | 变更 | 说明 |
 |------|------|
@@ -392,12 +466,13 @@ ramaria export --format markdown --output memories.md
 | `import qq --dry-run` | 新增：仅解析预览输出结构化 JSON 摘要，不写入数据库（agent 先验证数据源）。预览 JSON 含双方 QQ uin/uid 标识字段（数据源验证用途），注意其隐私属性 |
 | `session delete --force` | 新增：跳过确认（等同 `--yes` 双保险） |
 | `memory` 默认 persona | 修正：`user-0001` 硬编码 → `rama-0001`（缺陷修复，查询默认对象变化） |
+| `probe dataset` → `probe build` | **M2 新增探针命令**：`probe build`（构建测试集）/ `probe run`（档位批量实验），`dataset` 保留为 alias（D-V15-007）；详见上文 `probe` 章节 |
 
 ---
 
 ## 参考
 
-- 桌面使用指南：`rust/docs/desktop-user-guide.md`
-- 隐私说明：`rust/docs/privacy-notice.md`
-- 完整架构说明：`rust/docs/dev/rust-rewrite-analysis.md`
-- 默认配置模板：`rust/config/default.toml`
+- 桌面使用指南：`docs/desktop-user-guide.md`
+- 隐私说明：`docs/privacy-notice.md`
+- 探针实验设计与定稿：`f:\Ramaria-s\docs\dev-1.5\v1.5-probe-report.md`（v1.5 计划/决策/任务清单同目录）
+- 默认配置模板：`config/default.toml`

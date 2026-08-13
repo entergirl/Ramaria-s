@@ -26,7 +26,6 @@ use ramaria_core::error::RamariaError;
 use ramaria_core::types::{MessageRole, PersonaKind, now_ms};
 use ramaria_memory::utt::builder::UttBuilder;
 
-
 // =========================================================
 // 常量与档位定义
 // =========================================================
@@ -201,7 +200,19 @@ pub async fn run(app: &Arc<ramaria_app::App>, cmd: ProbeCmd, yes: bool) -> anyho
             rebuild_utt,
             output,
             json,
-        } => run_experiment(app, dataset, variants, limit, rebuild_utt, output, json, yes).await,
+        } => {
+            run_experiment(
+                app,
+                dataset,
+                variants,
+                limit,
+                rebuild_utt,
+                output,
+                json,
+                yes,
+            )
+            .await
+        }
     }
 }
 
@@ -252,13 +263,12 @@ fn default_variants() -> Vec<ProbeVariant> {
 // probe build：构建测试集
 // =========================================================
 
-/// 执行 `probe build`。
+/// 构建测试集（供命令与脚本复用；含 fixture 兜底降级）。
 ///
 /// 数据来源优先级:
 /// 1. `--source <file>`: 显式指定的数据源文件（JSON，含 messages/events）。
 /// 2. 数据库: 从导入数据构建（tone 用 persona 发言配对、fact 用 L2 事件）。
 /// 3. 内置夹具: 上述路径无真实数据或构建失败时兜底（静默降级 + warn）。
-/// 构建测试集（供命令与脚本复用；含 fixture 兜底降级）。
 ///
 /// 参数:
 /// - `source`: 显式数据源文件（None = 从数据库构建）。
@@ -443,7 +453,13 @@ async fn build_from_file(
         .events
         .iter()
         .filter(|e| !e.title.trim().is_empty())
-        .map(|e| (format!("还记得「{}」这件事吗？", e.title), e.summary.clone(), e.title.clone()))
+        .map(|e| {
+            (
+                format!("还记得「{}」这件事吗？", e.title),
+                e.summary.clone(),
+                e.title.clone(),
+            )
+        })
         .collect();
 
     let (tone_items, tone_real) = sample_with_fallback(
@@ -455,7 +471,8 @@ async fn build_from_file(
         qpd,
         seed,
     );
-    let (fact_cands, fact_real) = sample_with_fallback(&fact_cands, &fixture_fact_events(), qpd, seed);
+    let (fact_cands, fact_real) =
+        sample_with_fallback(&fact_cands, &fixture_fact_events(), qpd, seed);
 
     let mut items = Vec::with_capacity(qpd * 2);
     for (idx, (question, reference, src_ref)) in tone_items.into_iter().enumerate() {
@@ -559,7 +576,10 @@ async fn resolve_target_persona(app: &Arc<ramaria_app::App>, explicit: Option<&s
             tracing::warn!(%e, "读取 persona 列表失败，使用默认 persona");
         }
     }
-    tracing::info!(persona_uid = DEFAULT_PERSONA, "probe build 使用默认 persona");
+    tracing::info!(
+        persona_uid = DEFAULT_PERSONA,
+        "probe build 使用默认 persona"
+    );
     DEFAULT_PERSONA.to_string()
 }
 
@@ -616,7 +636,11 @@ async fn collect_fact_events(
     app: &Arc<ramaria_app::App>,
     persona_uid: &str,
 ) -> Vec<(String, String, String)> {
-    let events = match app.storage().list_events_by_persona(persona_uid, 0, 10_000).await {
+    let events = match app
+        .storage()
+        .list_events_by_persona(persona_uid, 0, 10_000)
+        .await
+    {
         Ok(e) => e,
         Err(e) => {
             tracing::warn!(%persona_uid, %e, "probe build 读取事件失败，事实记忆维度无候选");
@@ -675,6 +699,9 @@ fn sample_with_fallback<T: Clone>(
 /// 2. 加载生效配置（config.toml + DB 双写合并）作为档位基准。
 /// 3. 逐档位：覆盖 utt 三参数 →（可选）按档位参数重建 utt 块 → 逐题跑对话管线。
 /// 4. 单题/单档位失败均不中断其余（记 warn + 记录失败原因）。
+// 参数为命令入口的完整输入集合（含输出模式与隐私透传），合并会降低可读性；
+// 与 app_chat.rs 的 `build_system_prompt_with_context` 采用同一 allow 约定。
+#[allow(clippy::too_many_arguments)]
 async fn run_experiment(
     app: &Arc<ramaria_app::App>,
     dataset_path: PathBuf,
@@ -687,12 +714,17 @@ async fn run_experiment(
 ) -> anyhow::Result<()> {
     // Step 1: 读取并校验数据集（文件缺失/解析失败 → 业务校验失败，exit code 4）
     let text = std::fs::read_to_string(&dataset_path).with_context(|| {
-        format!("读取数据集失败: {}（请先运行 `ramaria probe build` 生成）", dataset_path.display())
+        format!(
+            "读取数据集失败: {}（请先运行 `ramaria probe build` 生成）",
+            dataset_path.display()
+        )
     })?;
     let dataset: ProbeDataset = serde_json::from_str(&text)
         .map_err(|e| RamariaError::validation(format!("数据集解析失败: {e}")))?;
     if dataset.items.is_empty() {
-        return Err(anyhow::anyhow!(RamariaError::validation("数据集不含任何测试问题")));
+        return Err(anyhow::anyhow!(RamariaError::validation(
+            "数据集不含任何测试问题"
+        )));
     }
 
     // Step 2-5: 构建档位实验结果（隐私确认/配置基准/逐档位批量；单题失败不中断）
@@ -800,21 +832,22 @@ pub async fn build_experiment(
         );
 
         // 按档位参数重建 utt 块（θ_gap/条数档位必须重建才生效；失败记 warn 继续）
-        if rebuild_utt {
-            if let Err(e) = rebuild_utt_for_config(app, &variant_config).await {
-                tracing::warn!(
-                    variant_id = %variant.id,
-                    %e,
-                    "档位 utt 块重建失败，本次档位可能未按目标参数生效"
-                );
-            }
+        if rebuild_utt && let Err(e) = rebuild_utt_for_config(app, &variant_config).await {
+            tracing::warn!(
+                variant_id = %variant.id,
+                %e,
+                "档位 utt 块重建失败，本次档位可能未按目标参数生效"
+            );
         }
 
         let mut runs = Vec::new();
         let mut failed = 0usize;
-        let max_runs = limit.unwrap_or(dataset.items.len()).min(dataset.items.len());
+        let max_runs = limit
+            .unwrap_or(dataset.items.len())
+            .min(dataset.items.len());
         for item in dataset.items.iter().take(max_runs) {
-            let result = run_single_question(app, &variant_config, &dataset.persona_uid, item).await;
+            let result =
+                run_single_question(app, &variant_config, &dataset.persona_uid, item).await;
             if result.error.is_some() {
                 failed += 1;
                 tracing::warn!(
@@ -883,13 +916,17 @@ async fn rebuild_utt_for_config(
 ) -> anyhow::Result<()> {
     let sessions = app.storage().list_sessions().await?;
     for session in &sessions {
-        app.storage().delete_utt_blocks_by_session(session.id).await?;
+        app.storage()
+            .delete_utt_blocks_by_session(session.id)
+            .await?;
     }
     let builder = UttBuilder::from_config(&config.utt);
     let embedding = app.embedding_provider();
     let embedder: Option<&dyn ramaria_core::EmbeddingProvider> =
         embedding.as_ref().map(|arc| arc.as_ref());
-    builder.rebuild_all(app.storage().as_ref(), embedder).await?;
+    builder
+        .rebuild_all(app.storage().as_ref(), embedder)
+        .await?;
     app.rebuild_retriever().await?;
     Ok(())
 }
@@ -942,10 +979,10 @@ async fn run_single_question(
                 } => {
                     total_chars = tc;
                 }
-                ramaria_app::stream_event::StreamEvent::Error { error: e, .. } => {
-                    if error.is_none() {
-                        error = Some(e);
-                    }
+                ramaria_app::stream_event::StreamEvent::Error { error: e, .. }
+                    if error.is_none() =>
+                {
+                    error = Some(e);
                 }
                 _ => {
                     // StreamEvent 为 #[non_exhaustive]，忽略未知事件类型
@@ -993,7 +1030,11 @@ fn filter_variants(variants: &[ProbeVariant], filter: Option<&str>) -> Vec<Probe
     let Some(filter) = filter else {
         return variants.to_vec();
     };
-    let ids: Vec<&str> = filter.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    let ids: Vec<&str> = filter
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
     let mut out = Vec::new();
     for id in ids {
         match variants.iter().find(|v| v.id == id) {
@@ -1021,7 +1062,8 @@ fn write_dataset_file(out: &str, dataset: &ProbeDataset) -> anyhow::Result<()> {
     if out == "-" {
         println!("{json}");
     } else {
-        std::fs::write(out, format!("{json}\n")).with_context(|| format!("写入数据集失败: {out}"))?;
+        std::fs::write(out, format!("{json}\n"))
+            .with_context(|| format!("写入数据集失败: {out}"))?;
     }
     Ok(())
 }
@@ -1040,9 +1082,21 @@ fn write_experiment_file(out: &str, experiment: &ProbeExperiment) -> anyhow::Res
 
 /// 文本模式打印数据集摘要（stdout 仅输出数据，提示走 stderr）。
 fn print_dataset_summary(dataset: &ProbeDataset) {
-    let tone = dataset.items.iter().filter(|i| i.dimension == "tone").count();
-    let fact = dataset.items.iter().filter(|i| i.dimension == "fact").count();
-    let real = dataset.items.iter().filter(|i| i.source != "fixture").count();
+    let tone = dataset
+        .items
+        .iter()
+        .filter(|i| i.dimension == "tone")
+        .count();
+    let fact = dataset
+        .items
+        .iter()
+        .filter(|i| i.dimension == "fact")
+        .count();
+    let real = dataset
+        .items
+        .iter()
+        .filter(|i| i.source != "fixture")
+        .count();
     println!(
         "probe 测试集: persona={} | 维度=tone({})/fact({}) | 档位={} | 真实数据 {} 题 / 夹具 {} 题 | source={}",
         dataset.persona_uid,
@@ -1098,7 +1152,8 @@ fn print_experiment_summary(experiment: &ProbeExperiment) {
 
 /// 当前时间（ISO-8601 UTC，M1 约定）。
 fn now_iso8601() -> String {
-    crate::util::format_timestamp_iso(now_ms()).unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string())
+    crate::util::format_timestamp_iso(now_ms())
+        .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string())
 }
 
 // =========================================================
@@ -1118,7 +1173,11 @@ impl DeterministicRng {
     /// 创建生成器（seed=0 时使用固定非零种子，避免全零状态退化）。
     fn new(seed: u64) -> Self {
         Self {
-            state: if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed },
+            state: if seed == 0 {
+                0x9E37_79B9_7F4A_7C15
+            } else {
+                seed
+            },
         }
     }
 
@@ -1187,7 +1246,8 @@ fn fixture_tone_pairs() -> Vec<(String, String)> {
     vec![
         (
             "今天上班被领导批评了，说我方案写得不行".to_string(),
-            "别太往心里去，领导批评方案不代表否定你这个人。把意见一条条记下来，改完这版肯定能行。".to_string(),
+            "别太往心里去，领导批评方案不代表否定你这个人。把意见一条条记下来，改完这版肯定能行。"
+                .to_string(),
         ),
         (
             "周末想约你出来玩，你有空吗".to_string(),
@@ -1195,11 +1255,13 @@ fn fixture_tone_pairs() -> Vec<(String, String)> {
         ),
         (
             "我养的猫今天吐了，好担心".to_string(),
-            "先观察一下是不是吃太快或者毛球。如果持续吐或者精神不好，尽快带去看医生比较稳妥。".to_string(),
+            "先观察一下是不是吃太快或者毛球。如果持续吐或者精神不好，尽快带去看医生比较稳妥。"
+                .to_string(),
         ),
         (
             "项目又要延期了，客户催得紧".to_string(),
-            "延期不全是坏事，说明需求一直在变。跟客户沟通好新的时间点，把预期管理做到位更重要。".to_string(),
+            "延期不全是坏事，说明需求一直在变。跟客户沟通好新的时间点，把预期管理做到位更重要。"
+                .to_string(),
         ),
         (
             "晚上总是失眠，脑子里全是工作的事".to_string(),
@@ -1207,11 +1269,13 @@ fn fixture_tone_pairs() -> Vec<(String, String)> {
         ),
         (
             "今天终于把健身卡办了，坚持了一个月".to_string(),
-            "坚持一个月已经很厉害了，最难的起步阶段你已经过了。接下来保持节奏就行，别贪快。".to_string(),
+            "坚持一个月已经很厉害了，最难的起步阶段你已经过了。接下来保持节奏就行，别贪快。"
+                .to_string(),
         ),
         (
             "想换个工作，又怕不稳定".to_string(),
-            "有换工作的念头说明你在成长。先想清楚你最在意什么——工资、发展还是氛围，排个序再决定。".to_string(),
+            "有换工作的念头说明你在成长。先想清楚你最在意什么——工资、发展还是氛围，排个序再决定。"
+                .to_string(),
         ),
         (
             "手机丢了，里面有很多照片".to_string(),
@@ -1231,7 +1295,8 @@ fn fixture_tone_pairs() -> Vec<(String, String)> {
         ),
         (
             "准备考研，但一直静不下心".to_string(),
-            "学习最难的是开始那半小时。先把手机放远，定个 25 分钟的小目标，进入状态就好了。".to_string(),
+            "学习最难的是开始那半小时。先把手机放远，定个 25 分钟的小目标，进入状态就好了。"
+                .to_string(),
         ),
     ]
 }
@@ -1239,17 +1304,50 @@ fn fixture_tone_pairs() -> Vec<(String, String)> {
 /// 内置事实记忆夹具（(问题, 事件摘要, 事件标题)）。
 fn fixture_fact_events() -> Vec<(String, String, String)> {
     let raw = [
-        ("东京旅行", "2024 年 3 月和朋友去了东京，看了樱花，去了浅草寺和秋叶原，非常开心。"),
-        ("养猫", "去年收养了一只三花猫，取名「团子」，现在一岁半，性格粘人。"),
-        ("跳槽到新公司", "2025 年初从上一家公司跳槽，现在做后端开发，团队氛围不错。"),
-        ("跑步习惯", "从今年春天开始每周跑三次五公里，配速从 8 分提高到 6 分半。"),
-        ("学吉他", "去年开始学吉他，已经会弹三首完整的曲子，最喜欢《晴天》。"),
-        ("搬家", "去年秋天搬到了离公司更近的小区，通勤时间从一小时缩短到二十分钟。"),
-        ("第一次马拉松", "上个月完成了人生第一个半程马拉松，用时 2 小时 15 分。"),
-        ("考驾照", "今年六月拿到了驾照，科目二补考了一次，科目三一次过。"),
-        ("近视手术", "前年做了近视手术，现在视力恢复到 1.0，彻底告别眼镜。"),
-        ("养多肉", "办公桌上养了一排多肉，最喜欢那棵熊童子，已经养了两年。"),
-        ("换手机", "今年换了新手机，主要是为了拍照，拍风景和猫都很满意。"),
+        (
+            "东京旅行",
+            "2024 年 3 月和朋友去了东京，看了樱花，去了浅草寺和秋叶原，非常开心。",
+        ),
+        (
+            "养猫",
+            "去年收养了一只三花猫，取名「团子」，现在一岁半，性格粘人。",
+        ),
+        (
+            "跳槽到新公司",
+            "2025 年初从上一家公司跳槽，现在做后端开发，团队氛围不错。",
+        ),
+        (
+            "跑步习惯",
+            "从今年春天开始每周跑三次五公里，配速从 8 分提高到 6 分半。",
+        ),
+        (
+            "学吉他",
+            "去年开始学吉他，已经会弹三首完整的曲子，最喜欢《晴天》。",
+        ),
+        (
+            "搬家",
+            "去年秋天搬到了离公司更近的小区，通勤时间从一小时缩短到二十分钟。",
+        ),
+        (
+            "第一次马拉松",
+            "上个月完成了人生第一个半程马拉松，用时 2 小时 15 分。",
+        ),
+        (
+            "考驾照",
+            "今年六月拿到了驾照，科目二补考了一次，科目三一次过。",
+        ),
+        (
+            "近视手术",
+            "前年做了近视手术，现在视力恢复到 1.0，彻底告别眼镜。",
+        ),
+        (
+            "养多肉",
+            "办公桌上养了一排多肉，最喜欢那棵熊童子，已经养了两年。",
+        ),
+        (
+            "换手机",
+            "今年换了新手机，主要是为了拍照，拍风景和猫都很满意。",
+        ),
         ("学游泳", "去年夏天学会了蛙泳，现在每周去一次游泳馆。"),
     ];
     raw.iter()
@@ -1385,8 +1483,14 @@ mod tests {
         // 全部来自夹具
         assert!(ds.items.iter().all(|i| i.source == "fixture"));
         // 每维恰好 qpd 题
-        assert_eq!(ds.items.iter().filter(|i| i.dimension == "tone").count(), DEFAULT_QUESTIONS_PER_DIM);
-        assert_eq!(ds.items.iter().filter(|i| i.dimension == "fact").count(), DEFAULT_QUESTIONS_PER_DIM);
+        assert_eq!(
+            ds.items.iter().filter(|i| i.dimension == "tone").count(),
+            DEFAULT_QUESTIONS_PER_DIM
+        );
+        assert_eq!(
+            ds.items.iter().filter(|i| i.dimension == "fact").count(),
+            DEFAULT_QUESTIONS_PER_DIM
+        );
         // 每题都有 reference 与 id
         for item in &ds.items {
             assert!(item.reference.is_some(), "{} 应有参考回答", item.id);

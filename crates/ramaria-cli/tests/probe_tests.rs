@@ -19,10 +19,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::Stream;
+use ramaria_cli::commands::probe::{ProbeCmd, build_dataset, build_experiment};
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::traits::{ChatRequest, LlmProvider, StorageBackend, StreamDelta};
 use ramaria_core::types::{BackendConfig, LlmProvider as LlmProviderKind, ModelCapability};
-use ramaria_cli::commands::probe::{ProbeCmd, build_dataset, build_experiment};
 use uuid::Uuid;
 
 use common::{
@@ -141,7 +141,10 @@ async fn probe_build_empty_db_falls_back_to_fixture() {
     let ds = build_dataset(&app, None, 10, 2026_0810, None).await;
 
     assert_eq!(ds.source, "fixture", "空库应降级为夹具数据");
-    assert_eq!(ds.persona_uid, "char-0001", "无白名单 persona 时默认 char-0001");
+    assert_eq!(
+        ds.persona_uid, "char-0001",
+        "无白名单 persona 时默认 char-0001"
+    );
     assert_eq!(ds.items.len(), 20, "2 维 × 每维 10 题");
     assert_eq!(ds.dimensions, vec!["tone", "fact"]);
     assert_eq!(ds.variants.len(), 4, "代表配对 4 档位");
@@ -208,7 +211,10 @@ async fn probe_build_dataset_serializes_to_valid_json() {
     assert_eq!(json["items"].as_array().unwrap().len(), 6);
     assert!(json["variants"][0]["id"].is_string());
     assert!(json["items"][0]["question"].is_string());
-    assert!(json["items"][0]["reference"].is_string(), "每题应带参考回答");
+    assert!(
+        json["items"][0]["reference"].is_string(),
+        "每题应带参考回答"
+    );
 }
 
 /// 命令级入口：`probe build` 返回 Ok（输出路径由进程级测试覆盖）。
@@ -228,7 +234,10 @@ async fn probe_build_command_runs_ok() {
         false,
     )
     .await;
-    assert!(result.is_ok(), "probe build 命令应成功（空库 fixture 兜底）");
+    assert!(
+        result.is_ok(),
+        "probe build 命令应成功（空库 fixture 兜底）"
+    );
 }
 
 // =========================================================
@@ -240,9 +249,17 @@ async fn probe_build_command_runs_ok() {
 async fn probe_run_batch_structure_with_mock_llm() {
     let (app, _storage) = build_test_app();
     let ds = build_dataset(&app, None, 2, 7, None).await; // 2 维 × 2 题 = 4 题
-    let experiment = build_experiment(&app, &ds, &PathBuf::from("dataset.json"), None, None, false, false)
-        .await
-        .expect("档位实验应成功");
+    let experiment = build_experiment(
+        &app,
+        &ds,
+        &PathBuf::from("dataset.json"),
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("档位实验应成功");
 
     assert_eq!(experiment.persona_uid, ds.persona_uid);
     assert_eq!(experiment.variants.len(), 4, "默认全部 4 档位");
@@ -266,13 +283,25 @@ async fn probe_run_batch_structure_with_mock_llm() {
 async fn probe_run_single_failure_does_not_abort_batch() {
     let (app, _storage) = build_app_with_llm(Arc::new(FailingLlm::new()));
     let ds = build_dataset(&app, None, 2, 7, None).await;
-    let experiment = build_experiment(&app, &ds, &PathBuf::from("dataset.json"), None, None, false, false)
-        .await
-        .expect("单题失败不应中断批量（返回 Ok）");
+    let experiment = build_experiment(
+        &app,
+        &ds,
+        &PathBuf::from("dataset.json"),
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("单题失败不应中断批量（返回 Ok）");
 
     assert_eq!(experiment.variants.len(), 4, "全部档位仍执行");
     for variant in &experiment.variants {
-        assert_eq!(variant.failed_count, variant.runs.len(), "所有题都应记录失败");
+        assert_eq!(
+            variant.failed_count,
+            variant.runs.len(),
+            "所有题都应记录失败"
+        );
         for run in &variant.runs {
             assert!(run.error.is_some(), "{} 应记录失败原因", run.item_id);
             assert!(run.error.as_deref().unwrap().contains("LLM 恒失败"));
@@ -286,11 +315,23 @@ async fn probe_run_single_failure_does_not_abort_batch() {
 async fn probe_run_variants_filter() {
     let (app, _storage) = build_test_app();
     let ds = build_dataset(&app, None, 1, 7, None).await;
-    let experiment = build_experiment(&app, &ds, &PathBuf::from("dataset.json"), Some("baseline,top_k_1,nonexistent"), None, false, false)
-        .await
-        .expect("档位过滤实验应成功");
+    let experiment = build_experiment(
+        &app,
+        &ds,
+        &PathBuf::from("dataset.json"),
+        Some("baseline,top_k_1,nonexistent"),
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("档位过滤实验应成功");
 
-    let ids: Vec<&str> = experiment.variants.iter().map(|v| v.variant_id.as_str()).collect();
+    let ids: Vec<&str> = experiment
+        .variants
+        .iter()
+        .map(|v| v.variant_id.as_str())
+        .collect();
     assert_eq!(ids, vec!["baseline", "top_k_1"], "只应包含有效档位");
 }
 
@@ -299,9 +340,17 @@ async fn probe_run_variants_filter() {
 async fn probe_run_limit_truncates_items() {
     let (app, _storage) = build_test_app();
     let ds = build_dataset(&app, None, 10, 7, None).await; // 20 题
-    let experiment = build_experiment(&app, &ds, &PathBuf::from("dataset.json"), None, Some(3), false, false)
-        .await
-        .expect("limit 实验应成功");
+    let experiment = build_experiment(
+        &app,
+        &ds,
+        &PathBuf::from("dataset.json"),
+        None,
+        Some(3),
+        false,
+        false,
+    )
+    .await
+    .expect("limit 实验应成功");
 
     for variant in &experiment.variants {
         assert_eq!(variant.runs.len(), 3, "每档位只跑 limit=3 题");
@@ -313,9 +362,17 @@ async fn probe_run_limit_truncates_items() {
 async fn probe_run_result_serializes_to_valid_json() {
     let (app, _storage) = build_test_app();
     let ds = build_dataset(&app, None, 1, 7, None).await;
-    let experiment = build_experiment(&app, &ds, &PathBuf::from("dataset.json"), None, None, false, false)
-        .await
-        .expect("实验应成功");
+    let experiment = build_experiment(
+        &app,
+        &ds,
+        &PathBuf::from("dataset.json"),
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("实验应成功");
     let json = serde_json::to_value(&experiment).expect("实验结果必须可序列化");
     assert!(json["variants"].is_array());
     let first = &json["variants"][0];
@@ -344,11 +401,20 @@ fn probe_dataset_alias_and_json_envelope() {
     assert_eq!(parsed["ok"], true, "信封 ok 应为 true");
     assert_eq!(parsed["data"]["source"], "fixture", "空库构建应降级夹具");
     assert_eq!(
-        parsed["data"]["items"].as_array().map(|a| a.len()).unwrap_or(0),
+        parsed["data"]["items"]
+            .as_array()
+            .map(|a| a.len())
+            .unwrap_or(0),
         20,
         "默认 2 维 × 10 题"
     );
-    assert_eq!(parsed["data"]["variants"].as_array().map(|a| a.len()).unwrap_or(0), 4);
+    assert_eq!(
+        parsed["data"]["variants"]
+            .as_array()
+            .map(|a| a.len())
+            .unwrap_or(0),
+        4
+    );
 }
 
 /// 运行真实 ramaria 二进制（临时空 DB），返回进程输出。
@@ -356,11 +422,8 @@ fn run_cli(args: &[&str]) -> std::process::Output {
     use std::sync::atomic::{AtomicI64, Ordering};
     static DB_SEQ: AtomicI64 = AtomicI64::new(0);
     let seq = DB_SEQ.fetch_add(1, Ordering::Relaxed);
-    let db_dir = std::env::temp_dir().join(format!(
-        "ramaria_cli_probe_{}_{}",
-        std::process::id(),
-        seq
-    ));
+    let db_dir =
+        std::env::temp_dir().join(format!("ramaria_cli_probe_{}_{}", std::process::id(), seq));
     let _ = std::fs::create_dir_all(&db_dir);
     let db = db_dir.join("probe.db");
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_ramaria"))
