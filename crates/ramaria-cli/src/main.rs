@@ -158,6 +158,10 @@ enum Commands {
     /// 应用状态探活（agent 使用：状态/配置摘要/DB 路径）[高级]
     #[command(display_order = 50)]
     Status,
+
+    /// 探针实验（build: 构建测试集 / run: 档位批量实验）[高级]
+    #[command(display_order = 51, subcommand)]
+    Probe(ProbeArgs),
 }
 
 /// 话语块管理子命令（canonical 名称 blocks，别名 utt）。
@@ -169,6 +173,58 @@ enum BlocksCmd {
         /// （切分参数 θ_gap / 条数上限变更后必须使用）
         #[arg(long)]
         force: bool,
+    },
+}
+
+/// 探针子命令（build 的旧名 `dataset` 保留为 alias，D-V15-007 动词化决策）。
+#[derive(Subcommand)]
+enum ProbeArgs {
+    /// 构建测试集（原 `probe dataset`，动词化后保留 alias）
+    #[command(visible_alias = "dataset")]
+    Build {
+        /// 目标 persona_uid（默认自动选择白名单内角色类 persona，兜底 char-0001）
+        #[arg(long)]
+        persona: Option<String>,
+
+        /// 每维题数（默认 10，2 维共 20 题；v1.7 正式评估可扩大至 ≥30 题）
+        #[arg(long, default_value_t = ramaria_cli::commands::probe::DEFAULT_QUESTIONS_PER_DIM)]
+        questions_per_dim: usize,
+
+        /// 抽样 seed（固定可复跑；同 seed 输出相同测试集）
+        #[arg(long, default_value_t = ramaria_cli::commands::probe::DEFAULT_SEED)]
+        seed: u64,
+
+        /// 显式数据源文件（JSON；不指定则从数据库构建，无真实数据时夹具兜底）
+        #[arg(long)]
+        source: Option<PathBuf>,
+
+        /// 数据集输出文件（`-` = stdout；不指定时 --json 输出完整数据集）
+        #[arg(long)]
+        output: Option<String>,
+    },
+
+    /// 按参数档位批量跑对话管线，结构化输出（档位 → 输出 → 指标）
+    Run {
+        /// 数据集文件（`ramaria probe build` 的产物）
+        #[arg(long)]
+        dataset: PathBuf,
+
+        /// 只跑指定档位（逗号分隔 id，默认全部；无效 id 跳过）
+        #[arg(long)]
+        variants: Option<String>,
+
+        /// 每档位最多跑题数（默认全部）
+        #[arg(long)]
+        limit: Option<usize>,
+
+        /// 按档位参数重建 utt 块（默认开启；θ_gap/条数档位必须重建才生效，
+        /// 用 --no-rebuild-utt 关闭）
+        #[arg(long, default_value_t = true)]
+        rebuild_utt: bool,
+
+        /// 结果输出文件（`-` = stdout 输出原始结果 JSON）
+        #[arg(long)]
+        output: Option<String>,
     },
 }
 
@@ -350,6 +406,7 @@ fn grouped_command() -> clap::Command {
         ("persona", "管理"),
         ("diagnostics", "管理"),
         ("status", "高级"),
+        ("probe", "高级"),
     ] {
         cmd = cmd.mut_subcommand(name, |c| c.subcommand_help_heading(heading));
     }
@@ -637,6 +694,39 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
                 json: cli.json,
             };
             commands::status::run(app, args).await?;
+        }
+        Commands::Probe(sub) => {
+            let cmd = match sub {
+                ProbeArgs::Build {
+                    persona,
+                    questions_per_dim,
+                    seed,
+                    source,
+                    output,
+                } => commands::probe::ProbeCmd::Build {
+                    persona,
+                    questions_per_dim,
+                    seed,
+                    source,
+                    output,
+                    json: cli.json,
+                },
+                ProbeArgs::Run {
+                    dataset,
+                    variants,
+                    limit,
+                    rebuild_utt,
+                    output,
+                } => commands::probe::ProbeCmd::Run {
+                    dataset,
+                    variants,
+                    limit,
+                    rebuild_utt,
+                    output,
+                    json: cli.json,
+                },
+            };
+            commands::probe::run(app, cmd, cli.yes).await?;
         }
     }
 

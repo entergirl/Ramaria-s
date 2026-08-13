@@ -54,10 +54,35 @@ impl App {
         persona_uid: Option<&str>,
         session_id: Option<Uuid>,
     ) -> RamariaResult<crate::app::SendMessageStream> {
+        // 默认按 App 当前配置执行（对外接口与 v1.4 完全一致，向后兼容）
+        self.send_message_with_config(user_input, persona_uid, session_id, &self.config)
+            .await
+    }
+
+    /// 以指定配置发送消息（探针档位实验等需要覆盖运行时配置的场景）。
+    ///
+    /// 与 `send_message` 的唯一区别：本方法允许调用方提供完整的 `RamariaConfig`，
+    /// 对话管线（检索、examples 预选、prompt 装配、token 预算）全部按该配置执行；
+    /// 探针档位对比（θ_gap / 条数上限 / top_k）通过覆盖 `config.utt` 生效。
+    ///
+    /// 用法:
+    /// - 普通调用: 传 `&self.config`（效果与 `send_message` 完全一致）。
+    /// - 档位实验: 克隆当前配置后修改目标字段再传入（`probe run` 场景）。
+    ///
+    /// 说明:
+    /// - 不修改 App 内部状态：仅本次调用按传入配置执行，进程内其他调用不受影响。
+    /// - 状态检查 / 隐私确认 / 会话解析等 Stage 行为与 `send_message` 一致。
+    pub async fn send_message_with_config(
+        &self,
+        user_input: &str,
+        persona_uid: Option<&str>,
+        session_id: Option<Uuid>,
+        config: &ramaria_core::config::RamariaConfig,
+    ) -> RamariaResult<crate::app::SendMessageStream> {
         let request_id = new_id();
 
-        // ---- 构建 PipelineContext + PipelineData ----
-        let ctx = self.build_pipeline_context();
+        // ---- 构建 PipelineContext + PipelineData（按传入配置执行） ----
+        let ctx = self.build_pipeline_context(config);
         let pipeline_data = PipelineData::new(
             user_input.to_string(),
             persona_uid.map(|s| s.to_string()),
@@ -98,7 +123,7 @@ impl App {
         // examples 预选（v1.4）：评分轮换 + 记忆未命中兜底；enabled=false 回退 v1.3 静态注入
         let examples = load_examples_for_input(
             self.storage.as_ref(),
-            &self.config.examples,
+            &config.examples,
             persona_uid,
             user_input,
             memory_context.is_some(),
@@ -112,6 +137,7 @@ impl App {
                 utt_context.as_deref(),
                 bridge_context.as_deref(),
                 examples,
+                config.examples.max_examples as usize,
             )
             .await;
 
@@ -216,11 +242,14 @@ impl App {
     /// - 所有字段通过 Arc 克隆共享，零所有权拷贝
     /// - LLM 和 Embedding 从 Mutex 中 clone Arc 出锁后传入
     /// - Retriever 通过 Arc 引用共享（已改为 Arc<RwLock<Retriever>>）
-    fn build_pipeline_context(&self) -> crate::pipeline::PipelineContext {
+    fn build_pipeline_context(
+        &self,
+        config: &ramaria_core::config::RamariaConfig,
+    ) -> crate::pipeline::PipelineContext {
         let llm = self.llm_clone();
         let embedding = self.embedding_provider();
         let storage = Arc::clone(&self.storage);
-        let config = self.config.clone();
+        let config = config.clone();
         let retriever = Arc::clone(&self.retriever);
         let keychain = Arc::clone(&self.keychain);
         let lifecycle = Arc::clone(&self.lifecycle);
@@ -249,6 +278,8 @@ impl App {
     /// - `utt_context`: utt 原文片段（已按预算裁剪渲染；None 表示不注入，等同 v1.3）。
     /// - `bridge_context`: 桥接内容（上一会话尾部原文，已按预算截断；None 表示不注入）。
     /// - `examples`: 已选好的 Few-shot 示例（由 `load_examples_for_input` 评分轮换/兜底后传入）。
+    /// - `max_examples`: examples 注入上限（来自生效配置 `examples.max_examples`，
+    ///   v1.5 起由调用方传入以支持配置覆盖的探针场景）。
     ///
     /// 降级策略:
     /// - storage 读取失败 → 记录 warn 日志，使用空数据继续。
@@ -258,6 +289,9 @@ impl App {
     ///
     /// 安全约束:
     /// - 不在此处写入 system prompt 到日志（完整 prompt 仅发送到 LLM）。
+    // 参数均为装配 5-Block prompt 所需的独立输入，打包成结构体反而降低可读性；
+    // 由 `send_message_with_config` 统一传入（v1.5 探针配置覆盖场景）。
+    #[allow(clippy::too_many_arguments)]
     async fn build_system_prompt_with_context(
         &self,
         persona_uid: Option<&str>,
@@ -266,6 +300,7 @@ impl App {
         utt_context: Option<&str>,
         bridge_context: Option<&str>,
         examples: Vec<ramaria_core::types::PersonaExample>,
+        max_examples: usize,
     ) -> String {
         let actual_uid = persona_uid.unwrap_or("rama-0001");
 
@@ -340,7 +375,7 @@ impl App {
             // v1.4 M6（T-V14-6-004）：[examples].max_examples 经 RamariaConfig 传播，
             // 与 `load_examples_for_input` 的预选上限保持一致（双闸门）。
             let config = PromptConfig {
-                max_examples: self.config.examples.max_examples as usize,
+                max_examples,
                 ..Default::default()
             };
             tracing::debug!(

@@ -14,6 +14,7 @@ pub mod import_cmd;
 pub mod index_cmd;
 pub mod memory;
 pub mod persona;
+pub mod probe;
 pub mod session;
 pub mod setup;
 pub mod status;
