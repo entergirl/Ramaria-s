@@ -859,6 +859,7 @@ pub fn make_test_l1(session_id: Uuid, summary: &str) -> MemoryL1 {
         last_accessed_at: None,
         situation_strength: None,
         evidence_notes: None,
+        continuation: None,
     }
 }
 

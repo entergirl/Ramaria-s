@@ -1460,6 +1460,7 @@ mod tests {
             context_json: None,
             situation_strength: None,
             evidence_notes: None,
+            continuation: None,
         };
 
         let result = r.index_l1_record(&l1);
@@ -1487,6 +1488,7 @@ mod tests {
             context_json: None,
             situation_strength: None,
             evidence_notes: None,
+            continuation: None,
         };
 
         r.index_l1_record(&l1).unwrap();
@@ -1522,6 +1524,7 @@ mod tests {
             context_json: None,
             situation_strength: None,
             evidence_notes: None,
+            continuation: None,
         };
 
         r.index_l1_record(&l1_user_a).unwrap();
@@ -1558,6 +1561,7 @@ mod tests {
             context_json: None,
             situation_strength: None,
             evidence_notes: None,
+            continuation: None,
         };
 
         r.index_l1_record(&l1).unwrap();

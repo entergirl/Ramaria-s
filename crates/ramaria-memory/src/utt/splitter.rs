@@ -11,9 +11,13 @@
 //!
 //! 合并规则说明:
 //! - "单边"指块内消息全部来自同一发言侧（全为目标发言或全非目标发言）。
-//! - 单边块优先并入前一块（保持时间顺序）；首块则并入后一块。
+//! - 单边块不独立存在，按**时间间隔更短的一侧**并入相邻块（v1.5 D-V15-014）：
+//!   比较单边块首条与前块末条的间隔、后块首条与单边块末条的间隔，取短侧；
+//!   首块仅后侧、末块仅前侧；等距时并入前块（保持时间顺序，兼容旧行为）。
+//!   目的：提问型独白近回复侧 → 并入后块（问答配对同块）；收尾型独白
+//!   （如"晚安"）近旧话题侧 → 并入前块末尾（意义连贯），无需语义判断。
 //! - 合并循环收敛：每次合并减少一块，最多 n-1 次；单边块并入后若仍单边继续合并。
-//! - 合并可突破条数上限（合并优先于上限，注释约定）。
+//! - 合并可突破 θ_gap 与条数上限（合并优先于上限，注释约定）。
 //! - 最终仍不含目标 persona 发言的块丢弃（纯用户消息无注入价值）。
 
 use ramaria_core::types::Message;
@@ -74,27 +78,55 @@ pub fn split_messages(
         candidates.push(build_chunk(current));
     }
 
-    // ---- 单边合并（收敛循环） ----
+    // ---- 单边合并（收敛循环，v1.5 D-V15-014：按时间间隔更短的一侧并入） ----
     let mut chunks = candidates;
     let mut i = 0;
     while i < chunks.len() {
-        if is_single_side(&chunks[i], target_persona_uid) {
-            if i > 0 {
-                // 优先并入前一块（保持时间顺序）
-                let cur = chunks.remove(i);
-                chunks[i - 1] = merge_back(chunks[i - 1].clone(), cur);
-                i -= 1; // 回退：合并后的前块可能仍单边，继续检查
-            } else if chunks.len() > 1 {
-                // 首块：并入后一块
-                let first = chunks.remove(0);
-                chunks[0] = merge_front(chunks[0].clone(), first);
-                // i 保持 0，继续检查新首块
-            } else {
-                // 只剩一块且单边：无法合并，保留
-                break;
-            }
-        } else {
+        if !is_single_side(&chunks[i], target_persona_uid) {
             i += 1;
+            continue;
+        }
+
+        // 单边块：两侧间隔比较，取短侧并入（无需语义判断）
+        let has_prev = i > 0;
+        let has_next = i + 1 < chunks.len();
+        if !has_prev && !has_next {
+            // 仅剩一块且仍单边：无法合并，保留
+            break;
+        }
+
+        // 间隔计算（毫秒）：
+        // - 前侧间隔 = 单边块首条与前块末条的时间差
+        // - 后侧间隔 = 后块首条与单边块末条的时间差
+        let gap_prev = has_prev.then(|| {
+            chunks[i].messages.first().expect("块非空").created_at
+                - chunks[i - 1].messages.last().expect("块非空").created_at
+        });
+        let gap_next = has_next.then(|| {
+            chunks[i + 1].messages.first().expect("块非空").created_at
+                - chunks[i].messages.last().expect("块非空").created_at
+        });
+
+        // 方向判定：
+        // - 两侧都有 → 取短侧（<= 表示等距时并入前块，保持时间顺序）
+        // - 末块（仅前侧）→ 并入前块；首块（仅后侧）→ 并入后块
+        let merge_into_prev = match (gap_prev, gap_next) {
+            (Some(gp), Some(gn)) => gp <= gn,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => unreachable!("has_prev || has_next 已保证至少一侧"),
+        };
+
+        if merge_into_prev {
+            // 并入前块末尾（收尾型独白：保持意义连贯）
+            let cur = chunks.remove(i);
+            chunks[i - 1] = merge_back(chunks[i - 1].clone(), cur);
+            i -= 1; // 回退：合并后的前块可能仍单边，继续向前检查
+        } else {
+            // 并入后块开头（提问型独白：问答配对同块）
+            let cur = chunks.remove(i);
+            chunks[i] = merge_front(chunks[i].clone(), cur);
+            // i 保持不变：新合并块可能仍单边，继续按短侧原则检查
         }
     }
 
@@ -313,7 +345,7 @@ mod tests {
     #[test]
     fn single_side_block_merges_into_previous() {
         // 块结构：[双方 3 条] [纯 target 2 条]（2 小时间隙分隔）[双方 2 条]
-        // 中间块（纯 target）单边 → 并入前一块
+        // 中间块（纯 target）单边 → 前侧间隔 1 分钟 < 后侧间隔 2 小时 → 并入前一块
         let mut msgs = continuous(TARGET, 3);
         let t = msgs.last().unwrap().created_at + 60_000;
         msgs.push(msg(t, Some(TARGET)));
@@ -325,7 +357,7 @@ mod tests {
 
         let chunks = split_messages(&msgs, Some(TARGET), &cfg(30, 3));
         assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].msg_count, 5, "单边块并入前一块");
+        assert_eq!(chunks[0].msg_count, 5, "单边块并入前一块（时间短侧）");
         assert_eq!(chunks[1].msg_count, 2);
     }
 
@@ -445,6 +477,104 @@ mod tests {
         // 末块（纯用户）单边 → 并入前块 → 一块 5 条
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].msg_count, 5);
+    }
+
+    // ---- v1.5 D-V15-014：单边合并方向 = 时间间隔更短的一侧 ----
+
+    /// 隔夜提问独白并入回复侧（后块）：
+    /// 用户深夜提问（纯用户块）与次日回复间隔近、与旧话题块间隔远 → 并入回复块。
+    #[test]
+    fn overnight_question_merges_into_reply_side() {
+        // 块1：白天双方对话（3 条，间隔 1 分钟）
+        let mut msgs = continuous(TARGET, 3);
+        // 深夜：用户独白"在吗？"（纯用户块），与块1 末条间隔 8 小时
+        let night = msgs.last().unwrap().created_at + 8 * 3600 * 1000;
+        msgs.push(msg(night, None));
+        // 次日清晨：回复（双方块），与提问间隔仅 10 分钟
+        let morning = night + 10 * 60_000;
+        msgs.push(msg(morning, None));
+        msgs.push(msg(morning + 60_000, Some(TARGET)));
+
+        let chunks = split_messages(&msgs, Some(TARGET), &cfg(30, 40));
+        // 候选：[双方块] [纯用户提问] [双方回复]；提问块近回复侧 → 并入后块
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].msg_count, 3, "旧话题块独立保留");
+        assert_eq!(chunks[1].msg_count, 3, "提问并入回复块（问答同块）");
+        assert_eq!(
+            chunks[1].messages[0].created_at, night,
+            "提问消息应位于回复块开头"
+        );
+    }
+
+    /// 收尾型独白并入旧话题侧（前块）：
+    /// "晚安"独白紧邻旧话题块、远离下次对话 → 并入前块末尾（意义连贯）。
+    #[test]
+    fn closing_monologue_merges_into_old_topic_side() {
+        // 块1：双方对话（3 条）
+        let mut msgs = continuous(TARGET, 3);
+        // target 收尾独白："晚安"（纯 target），紧接块1 末条
+        let close = msgs.last().unwrap().created_at + 60_000;
+        msgs.push(msg(close, Some(TARGET)));
+        // 下次对话（双方），与收尾独白间隔 10 小时
+        let next = close + 10 * 3600 * 1000;
+        msgs.push(msg(next, None));
+        msgs.push(msg(next + 60_000, Some(TARGET)));
+
+        let chunks = split_messages(&msgs, Some(TARGET), &cfg(30, 40));
+        // 候选：[双方块] [纯 target 收尾] [下次对话]；收尾近旧话题侧 → 并入前块
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].msg_count, 4, "收尾独白并入前块末尾");
+        assert_eq!(chunks[1].msg_count, 2, "下次对话独立成块");
+        assert_eq!(
+            chunks[0].messages.last().unwrap().created_at,
+            close,
+            "收尾消息应位于前块末尾"
+        );
+    }
+
+    /// 条数上限切出的单边块按时间短侧回切相邻块：
+    /// 上限切分使纯 target 块独立，其与相邻块的间隔决定回切方向。
+    #[test]
+    fn single_side_split_by_count_merges_to_short_side() {
+        // 连续 6 条交替消息（上限 2）：候选 [t,u] [t,u] [t,u] 均双方 → 无单边
+        // 构造：4 条 target 连续（上限 2 切出两块纯 target），随后紧跟双方块
+        let base = 1_000_000i64;
+        let mut msgs: Vec<Message> = (0..4)
+            .map(|i| msg(base + i as i64 * 60_000, Some(TARGET)))
+            .collect();
+        // 双方块：紧接纯 target 块（间隔 1 分钟）
+        msgs.push(msg(base + 4 * 60_000, None));
+        msgs.push(msg(base + 5 * 60_000, Some(TARGET)));
+
+        let chunks = split_messages(&msgs, Some(TARGET), &cfg(30, 2));
+        // 候选：[t,t] [t,t] [u,t]；块1 首块并入后块 → [t,t,t,t] [u,t]
+        // 合并块仍纯 target 单边 → 唯一相邻侧为后块 → 并入 → 一块 6 条
+        assert_eq!(chunks.len(), 1, "连续单边块收敛为一块");
+        assert_eq!(chunks[0].msg_count, 6);
+    }
+
+    /// 等距时并入前块（保持时间顺序，兼容旧行为）。
+    ///
+    /// 构造：三块之间间隙相同（均 > θ_gap），中间为纯 target 单边块，
+    /// 前侧间隔 == 后侧间隔 → 按 `<=` 判定并入前块。
+    #[test]
+    fn equal_gap_merges_into_previous() {
+        let gap = 600_001i64; // θ_gap=10 分钟（600_000ms），严格大于才切
+        // 块1：双方对话
+        let mut msgs = vec![msg(1_000, None), msg(2_000, Some(TARGET))];
+        // 块2：纯 target 单边块（与块1 末条间隔 = gap）
+        msgs.push(msg(2_000 + gap, Some(TARGET)));
+        msgs.push(msg(2_000 + gap + 60_000, Some(TARGET)));
+        // 块3：双方块（与块2 末条间隔 = gap，等距）
+        msgs.push(msg(2_000 + gap + 60_000 + gap, None));
+        msgs.push(msg(2_000 + gap + 60_000 + gap + 60_000, Some(TARGET)));
+
+        let chunks = split_messages(&msgs, Some(TARGET), &cfg(10, 40));
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].msg_count, 4, "等距时并入前块");
+        assert_eq!(chunks[1].msg_count, 2);
+        // 单边块消息位于合并后的前块末尾
+        assert_eq!(chunks[0].messages[3].created_at, 2_000 + gap + 60_000);
     }
 
     #[test]

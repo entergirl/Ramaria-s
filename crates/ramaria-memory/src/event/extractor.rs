@@ -1730,6 +1730,7 @@ mod tests {
             context_json: None,
             situation_strength: None,
             evidence_notes: None,
+            continuation: None,
         }
     }
 

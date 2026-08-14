@@ -468,22 +468,34 @@ pub async fn import_qq_chat(
         // （由 QQ parser 的 make_role_content 嵌入），故传空前缀避免"用户：""助手："双重前缀。
         // 空前缀 → 对话格式为 "[张三] 消息内容" 而非 "用户：[张三] 消息内容"，
         // LLM 在 summary/evidence_notes 中自然使用实际名称。
+        //
+        // v1.5 I 项（T-V15-4-003/004）阶段统计与 EMA：
+        // - L1 预计总量可预知 = session × persona（self + other 各一条 L1）。
+        // - L2/L3 预计总量在线估算：深度模式下以触发 persona 数为工作量单位
+        //   （事件提取/性格推断均按 persona 批处理，导入双人场景上界为 2）。
+        // - EtaEstimator 分层维护 EMA 单次耗时，剩余秒数随事件下发；
+        //   首次无样本时 remaining_seconds() = None，前端回退线性估算（降级）。
+        let started_at = std::time::Instant::now();
+        let mut eta_est = ramaria_app::eta::EtaEstimator::new();
+        let l1_total = total_sids * 2; // L1 调用数 = session × persona
+
         app_handle
             .emit(
                 EVENT_IMPORT_PROGRESS,
                 ImportProgressPayload::new(
                     "l1",
                     0,
-                    total_sids * 2,
+                    l1_total,
                     "正在生成 L1 会话摘要（双方 persona）...",
-                ),
+                )
+                .with_estimates(Some(l1_total), None, None, None),
             )
             .ok();
 
         let mut l1_success = 0usize;
         let mut l1_failed = 0usize;
         let mut l1_processed = 0usize; // 已处理次数（每个 session 2 次）
-        for (i, sid) in sids.iter().enumerate() {
+        for sid in &sids {
             // ── 为导出方（self）生成 L1 ──
             match app
                 .regenerate_l1_no_cascade(*sid, Some(&self_uid), Some(""), Some(""))
@@ -525,15 +537,25 @@ pub async fn import_qq_chat(
                 .await;
 
             // 每处理一个 session（2 个 persona）就推送进度
+            // 修复 v1.4 的 total 不一致：统一以 LLM 调用次数（l1_total）为分母，
+            // current = 已处理调用次数（l1_processed）。
+            eta_est.update(
+                ramaria_app::eta::PhaseKind::L1,
+                l1_processed,
+                l1_total,
+                started_at.elapsed().as_secs_f64(),
+            );
+            let eta_secs = eta_est.remaining_seconds().map(|s| s.round() as u64);
             app_handle
                 .emit(
                     EVENT_IMPORT_PROGRESS,
                     ImportProgressPayload::new(
                         "l1",
-                        i + 1,
-                        total_sids,
-                        &format!("L1 摘要 {}/{}（双方 persona）", i + 1, total_sids),
-                    ),
+                        l1_processed,
+                        l1_total,
+                        &format!("L1 摘要 {}/{}（双方 persona）", l1_processed, l1_total),
+                    )
+                    .with_estimates(Some(l1_total), None, None, eta_secs),
                 )
                 .ok();
         }
@@ -552,24 +574,67 @@ pub async fn import_qq_chat(
         let mut l2_triggered = false;
         let mut l3_triggered = false;
         if is_deep && l1_success > 0 {
+            // L2/L3 预计总量在线估算：以触发处理的 persona 数为工作量单位
+            // （事件提取/性格推断均按 persona 批处理，导入双人场景上界为 2）。
+            let l2_expected = 2;
+            let l3_expected = 2;
+            // L2 阶段开始：总量 = 触发事件提取的 persona 数（在线估算）
+            eta_est.update(
+                ramaria_app::eta::PhaseKind::L2,
+                0,
+                l2_expected,
+                started_at.elapsed().as_secs_f64(),
+            );
+            let eta_secs = eta_est.remaining_seconds().map(|s| s.round() as u64);
             app_handle
                 .emit(
                     EVENT_IMPORT_PROGRESS,
-                    ImportProgressPayload::new("l2", 0, 0, "正在提取 L2 事件（双方 persona）..."),
+                    ImportProgressPayload::new(
+                        "l2",
+                        0,
+                        l2_expected,
+                        "正在提取 L2 事件（双方 persona）...",
+                    )
+                    .with_estimates(
+                        Some(l1_total),
+                        Some(l2_expected),
+                        None,
+                        eta_secs,
+                    ),
                 )
                 .ok();
 
             app.trigger_l2_check().await;
             l2_triggered = true;
 
+            // L3 阶段开始：L2 已完成（回填 L2 样本），总量 = 触发推断的 persona 数
+            eta_est.update(
+                ramaria_app::eta::PhaseKind::L2,
+                l2_expected,
+                l2_expected,
+                started_at.elapsed().as_secs_f64(),
+            );
+            eta_est.update(
+                ramaria_app::eta::PhaseKind::L3,
+                0,
+                l3_expected,
+                started_at.elapsed().as_secs_f64(),
+            );
+            let eta_secs = eta_est.remaining_seconds().map(|s| s.round() as u64);
             app_handle
                 .emit(
                     EVENT_IMPORT_PROGRESS,
                     ImportProgressPayload::new(
                         "l3",
                         0,
-                        0,
+                        l3_expected,
                         "正在推断 L3 性格画像（双方 persona）...",
+                    )
+                    .with_estimates(
+                        Some(l1_total),
+                        Some(l2_expected),
+                        Some(l3_expected),
+                        eta_secs,
                     ),
                 )
                 .ok();

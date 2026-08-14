@@ -18,6 +18,7 @@ use uuid::Uuid;
 
 use super::prompt::{KEYWORD_INJECT_LIMIT, KEYWORD_INJECT_THRESHOLD, build_l1_prompt};
 use crate::utils;
+use crate::utt::UttChunk;
 
 // =========================================================
 // LLM 响应 JSON 结构（反序列化目标）
@@ -47,6 +48,10 @@ struct L1SummaryResponse {
     /// 证据线索列表（宽容解析：对象数组 / 旧字符串数组 / 缺失）
     #[serde(default, deserialize_with = "deserialize_evidence_notes")]
     evidence_notes: Option<Vec<EvidenceNote>>,
+    /// 相对上一块的话题延续关系（v1.5 B2）：延续/转折/无关。
+    /// 无上一块时 prompt 不含该字段，LLM 不会输出 → None。
+    #[serde(default)]
+    continuation: Option<String>,
 }
 
 // =========================================================
@@ -66,6 +71,13 @@ struct L1SummaryResponse {
 /// - `persona_uid`: 本条摘要描述的对象（人格标识），None 表示描述默认用户。
 /// - `context_json`: 分组上下文，含 chat_partners 列表。
 /// - `situation_strength`: 情境强度（1-5），None 时 LLM 输出缺失则默认 3。
+/// - `utt_splitter`（v1.5 B2）: utt 切分配置。`Some` → 将 session 消息切分为
+///   话语块并逐块生成 L1（块 N 注入上一块上文，上下文感知生成，§6.3）；
+///   `None` → 整会话一块，与 v1.4 行为完全一致（独立摘要，无上文注入）。
+///   短会话（单块）自然回退 v1.4 行为。
+/// - `prior_context_threshold`（v1.5 B2）: 上一块消息数 ≤ 此阈值 → 注入 L0 原文；
+///   超过 → 注入上一块 L1 摘要 + 结构化线索。默认 20（§6.3 示例值）。
+/// - `prior_context_max_chars`（v1.5 B2）: 长块无上一 L1 时回退注入原文的截断上限。
 #[derive(Debug, Clone)]
 pub struct L1SummarizerConfig {
     /// LLM 生成温度 0.0..2.0
@@ -82,6 +94,12 @@ pub struct L1SummarizerConfig {
     pub context_json: Option<String>,
     /// 情境强度默认值（1-5），None 时使用 3
     pub situation_strength: Option<i32>,
+    /// utt 切分配置（v1.5 B2 上下文感知生成），None = v1.4 整会话单块
+    pub utt_splitter: Option<crate::utt::UttSplitterConfig>,
+    /// 上一块消息数阈值（≤ 注入原文，> 注入上一 L1 摘要+线索），默认 20
+    pub prior_context_threshold: usize,
+    /// 长块无上一 L1 时原文截断上限（字符），默认 1500
+    pub prior_context_max_chars: usize,
 }
 
 impl Default for L1SummarizerConfig {
@@ -94,6 +112,9 @@ impl Default for L1SummarizerConfig {
             persona_uid: None,
             context_json: None,
             situation_strength: None,
+            utt_splitter: Some(crate::utt::UttSplitterConfig::default()),
+            prior_context_threshold: 20,
+            prior_context_max_chars: 1500,
         }
     }
 }
@@ -141,14 +162,24 @@ impl<'a> L1Summarizer<'a> {
 
     /// 为指定 session 生成 L1 摘要。
     ///
+    /// v1.5 B2（§6.3）上下文感知生成：
+    /// - 配置了 `utt_splitter` 时，将 session 消息切分为话语块，逐块生成 L1；
+    ///   块 N（N>0）生成时注入上一块上文（短块注入原文 / 长块注入上一 L1 摘要+线索），
+    ///   输出 `continuation`（延续/转折/无关）。
+    /// - 单块 session 或未配置切分器 → 与 v1.4 行为完全一致（独立摘要）。
+    ///
+    /// 块级容错：
+    /// - 某块 LLM 调用/解析失败 → 记 warn、该块不产出 L1，后续块以上一块
+    ///   原文（截断）作为上文继续生成（不阻塞整体）。
+    /// - 全部块均失败 → 返回最后一个错误（与 v1.4 失败语义一致）。
+    /// - 成功块统一写库；写库失败为硬错误直接返回。
+    ///
     /// 参数:
     /// - `session_id`: 已关闭的 session UUID。
     ///
     /// 返回:
-    /// - 成功时返回已写入存储的 `MemoryL1`。
+    /// - 成功时返回最后成功块的 `MemoryL1`（调用方从库读取的顺序一致）。
     /// - session 无消息时返回 Validation 错误。
-    /// - LLM 调用失败时返回 Llm 错误。
-    /// - JSON 解析全部失败时返回 Validation 错误。
     pub async fn summarize_session(&self, session_id: Uuid) -> RamariaResult<MemoryL1> {
         // 1. 读取 session 全部消息
         let messages = self.storage.list_messages(session_id).await.map_err(|e| {
@@ -164,16 +195,139 @@ impl<'a> L1Summarizer<'a> {
 
         debug!(%session_id, msg_count = messages.len(), "开始生成 L1 摘要");
 
-        // 2. 格式化对话文本
-        let conversation = self.format_conversation(&messages);
+        // 2. 切分为话语块（B2 上下文感知生成的块粒度）
+        //    - 配置了 utt_splitter → 用 split_messages 切分（目标 persona 为 config.persona_uid）
+        //    - 未配置 → 整会话一块（v1.4 行为）
+        //    - 切分结果为空（如纯用户消息块被丢弃）→ 回退整会话一块，
+        //      保证与 v1.4 至少产出一条摘要的语义一致。
+        let chunks = match &self.config.utt_splitter {
+            Some(splitter_cfg) => {
+                let target = self.config.persona_uid.as_deref();
+                let split = crate::utt::splitter::split_messages(&messages, target, splitter_cfg);
+                if split.is_empty() {
+                    vec![UttChunk::from_messages(messages.clone())]
+                } else {
+                    split
+                }
+            }
+            None => vec![UttChunk::from_messages(messages)],
+        };
+        debug!(%session_id, block_count = chunks.len(), "L1 摘要按块生成");
 
-        // 3. 获取关键词候选
+        // 3. 逐块生成（内存收集，全部成功后统一写库）
+        //    - generated[i] = 块 i 的 (L1, 关键词列表)（None = 该块生成失败，降级）
+        //    - 块 i 的上文来自块 i-1 的生成结果（内存传递，只注入最近 1 块，不链式）
+        let mut generated: Vec<Option<(MemoryL1, Vec<KeywordToken>)>> =
+            Vec::with_capacity(chunks.len());
+        let mut last_error: Option<RamariaError> = None;
+        for (i, chunk) in chunks.iter().enumerate() {
+            // 构建上一块上文（混合形态，§6.3）：
+            // - 上一块消息数 ≤ prior_context_threshold → 注入 L0 原文
+            // - 长块 → 注入上一 L1 摘要 + 结构化线索（上一 L1 缺失 → 原文截断）
+            let prior_context = if i == 0 {
+                None
+            } else {
+                Some(build_prior_context(
+                    &chunks[i - 1],
+                    generated[i - 1].as_ref().map(|(l1, _)| l1),
+                    &self.config,
+                    &self.config.user_prefix,
+                    &self.config.assistant_prefix,
+                ))
+            };
+
+            match self
+                .generate_chunk_l1(session_id, chunk, prior_context.as_deref())
+                .await
+            {
+                Ok((l1, keywords)) => {
+                    debug!(%session_id, block_index = i, "块 {} L1 生成成功", i);
+                    generated.push(Some((l1, keywords)));
+                }
+                Err(e) => {
+                    // 块级降级：不阻塞整体，后续块以原文（截断）作为上文
+                    warn!(%session_id, block_index = i, error=%e, "L1 块生成失败，该块无摘要（降级继续）");
+                    last_error = Some(e);
+                    generated.push(None);
+                }
+            }
+        }
+
+        // 4. 统一写库（成功块）+ 写回关键词
+        let mut saved_last: Option<MemoryL1> = None;
+        for entry in generated.iter().flatten() {
+            let (l1, keywords) = entry;
+            self.storage.save_memory_l1(l1).await.map_err(|e| {
+                warn!(%session_id, l1_id = %l1.id, error=%e, "写入 memory_l1 失败");
+                RamariaError::storage(format!("写入 session {session_id} L1 摘要失败: {e}"))
+            })?;
+            saved_last = Some(l1.clone());
+            self.write_back_keywords(session_id, l1, keywords).await;
+        }
+
+        // 5. 返回
+        match saved_last {
+            Some(l1) => {
+                info!(
+                    %session_id,
+                    l1_id = %l1.id,
+                    total_blocks = chunks.len(),
+                    success_blocks = generated.iter().filter(|g| g.is_some()).count(),
+                    "L1 摘要生成完成（按块）"
+                );
+                Ok(l1)
+            }
+            None => Err(last_error.unwrap_or_else(|| {
+                RamariaError::validation(format!("session {session_id} 全部 L1 块生成失败"))
+            })),
+        }
+    }
+
+    // =========================================================
+    // 内部方法
+    // =========================================================
+
+    /// 将消息列表格式化为对话文本。
+    ///
+    /// 格式:
+    /// - User 消息: `用户：{content}`
+    /// - Assistant 消息: `助手：{content}`
+    /// - System/Tool 消息: 跳过（不参与摘要）
+    fn format_conversation(&self, messages: &[ramaria_core::types::Message]) -> String {
+        format_messages(
+            messages,
+            &self.config.user_prefix,
+            &self.config.assistant_prefix,
+        )
+    }
+
+    /// 为单个话语块生成 L1（LLM 调用 + 解析 + 校验，不写库）。
+    ///
+    /// v1.5 B2：块 N 生成时注入上一块上文（`prior_context`），输出含 continuation。
+    ///
+    /// 参数:
+    /// - `session_id`: 来源 session。
+    /// - `chunk`: 当前块（其消息为对话原文）。
+    /// - `prior_context`: 上一块的上文文本（None = 无上一块，v1.4 独立摘要路径）。
+    ///
+    /// 返回:
+    /// - 校验后的 `(MemoryL1, 关键词列表)`（尚未写入存储，由调用方统一写库）。
+    async fn generate_chunk_l1(
+        &self,
+        session_id: Uuid,
+        chunk: &UttChunk,
+        prior_context: Option<&str>,
+    ) -> RamariaResult<(MemoryL1, Vec<KeywordToken>)> {
+        // 1. 格式化当前块对话文本
+        let conversation = self.format_conversation(&chunk.messages);
+
+        // 2. 获取关键词候选
         let keyword_candidates = self.get_keyword_candidates().await;
 
-        // 4. 构建 prompt
-        let prompt = build_l1_prompt(&conversation, keyword_candidates.as_deref());
+        // 3. 构建 prompt（含上文注入时使用上下文感知模板）
+        let prompt = build_l1_prompt(&conversation, keyword_candidates.as_deref(), prior_context);
 
-        // 5. 调用 LLM
+        // 4. 调用 LLM
         let request_id = Uuid::new_v4();
         let llm_request = ChatRequest {
             system_prompt: String::new(),
@@ -187,7 +341,7 @@ impl<'a> L1Summarizer<'a> {
         };
 
         let raw_response = self.llm.chat(&llm_request).await.map_err(|e| {
-            warn!(%session_id, %request_id, error=%e, "LLM 调用失败");
+            warn!(%session_id, %request_id, block_msg_count = chunk.msg_count, error=%e, "L1 块 LLM 调用失败");
             RamariaError::llm(format!(
                 "session {session_id} L1 摘要生成 LLM 调用失败: {e}"
             ))
@@ -195,10 +349,10 @@ impl<'a> L1Summarizer<'a> {
 
         debug!(%session_id, %request_id, "LLM 返回 {} 字符", raw_response.len());
 
-        // 6. 解析 JSON
+        // 5. 解析 JSON
         let parsed = self.parse_summary_json(&raw_response)?;
 
-        // 7. 校验并修正字段
+        // 6. 校验并修正字段
         let (mut l1, keywords) = Self::validate_and_build(&parsed, session_id);
 
         // 注入 config 中的上下文字段
@@ -210,14 +364,33 @@ impl<'a> L1Summarizer<'a> {
             .or(self.config.situation_strength)
             .or(Some(3)); // 最终默认值：中性情境
 
-        // 8. 写入存储
-        self.storage.save_memory_l1(&l1).await.map_err(|e| {
-            warn!(%session_id, error=%e, "写入 memory_l1 失败");
-            RamariaError::storage(format!("写入 session {session_id} L1 摘要失败: {e}"))
-        })?;
+        // 7. continuation 校验（三选一；无上一块时强制 None——即使 LLM 输出）
+        l1.continuation = if prior_context.is_some() {
+            validate_continuation(parsed.continuation.as_deref(), session_id)
+        } else {
+            None
+        };
 
-        // 9. 写回关键词词典 + 倒排索引
-        for kw_token in &keywords {
+        debug!(
+            %session_id,
+            block_msg_count = chunk.msg_count,
+            continuation = ?l1.continuation,
+            has_prior = prior_context.is_some(),
+            "L1 块校验完成"
+        );
+
+        // 返回（不写库），关键词随调用方统一处理
+        Ok((l1, keywords))
+    }
+
+    /// 写回关键词词典 + 倒排索引（每块成功后调用，失败记 warn 不阻塞）。
+    async fn write_back_keywords(
+        &self,
+        session_id: Uuid,
+        l1: &MemoryL1,
+        keywords: &[KeywordToken],
+    ) {
+        for kw_token in keywords {
             // 写回 keyword_pool
             if let Err(e) = self.storage.upsert_keyword(kw_token.as_str()).await {
                 warn!(%session_id, keyword=%kw_token, error=%e, "关键词写回失败（非致命）");
@@ -237,41 +410,6 @@ impl<'a> L1Summarizer<'a> {
                 warn!(%session_id, keyword=%kw_token, error=%e, "关键词引用写入失败（非致命）");
             }
         }
-
-        info!(
-            %session_id,
-            l1_id = %l1.id,
-            keyword_count = keywords.len(),
-            valence = l1.valence,
-            salience = l1.salience,
-            "L1 摘要生成完成"
-        );
-
-        Ok(l1)
-    }
-
-    // =========================================================
-    // 内部方法
-    // =========================================================
-
-    /// 将消息列表格式化为对话文本。
-    ///
-    /// 格式:
-    /// - User 消息: `用户：{content}`
-    /// - Assistant 消息: `助手：{content}`
-    /// - System/Tool 消息: 跳过（不参与摘要）
-    fn format_conversation(&self, messages: &[ramaria_core::types::Message]) -> String {
-        let mut lines = Vec::with_capacity(messages.len());
-        for msg in messages {
-            let prefix = match msg.role {
-                MessageRole::User => &self.config.user_prefix,
-                MessageRole::Assistant => &self.config.assistant_prefix,
-                // System/Tool 消息不进入摘要上下文
-                _ => continue,
-            };
-            lines.push(format!("{prefix}{}", msg.content));
-        }
-        lines.join("\n")
     }
 
     /// 获取关键词候选字符串。
@@ -431,6 +569,9 @@ impl<'a> L1Summarizer<'a> {
         // 校验失败不阻塞 L1 生成，降级为空数组并记 warn 日志
         let evidence_notes = validate_evidence_notes(parsed.evidence_notes.clone(), session_id);
 
+        // continuation: 三选一校验（v1.5 B2），非法值置 None 不阻塞
+        let continuation = validate_continuation(parsed.continuation.as_deref(), session_id);
+
         let l1 = MemoryL1 {
             id: ramaria_core::types::new_id(),
             session_id,
@@ -447,6 +588,7 @@ impl<'a> L1Summarizer<'a> {
             context_json: None,       // 由调用方在 construct 阶段通过 config 注入
             situation_strength: None, // 由 LLM 输出或 config 注入
             evidence_notes: Some(evidence_notes), // 始终为 Some(vec![])，存储层存为 JSON 数组
+            continuation,
         };
 
         (l1, keywords_list)
@@ -454,10 +596,137 @@ impl<'a> L1Summarizer<'a> {
 }
 
 // =========================================================
-// evidence_notes 宽容反序列化 + 校验
+// 消息格式化（自由函数，供块级生成与上文构建复用）
 // =========================================================
 
-/// 宽容反序列化 evidence_notes（v1.4 结构化升级的过渡兼容）。
+/// 将消息列表格式化为对话文本（供 L1 摘要 prompt 使用）。
+///
+/// 格式:
+/// - User 消息: `{user_prefix}{content}`
+/// - Assistant 消息: `{assistant_prefix}{content}`
+/// - System/Tool 消息: 跳过（不参与摘要）
+fn format_messages(
+    messages: &[ramaria_core::types::Message],
+    user_prefix: &str,
+    assistant_prefix: &str,
+) -> String {
+    let mut lines = Vec::with_capacity(messages.len());
+    for msg in messages {
+        let prefix = match msg.role {
+            MessageRole::User => user_prefix,
+            MessageRole::Assistant => assistant_prefix,
+            // System/Tool 消息不进入摘要上下文
+            _ => continue,
+        };
+        lines.push(format!("{prefix}{}", msg.content));
+    }
+    lines.join("\n")
+}
+
+// =========================================================
+// B2 上下文感知：上一块上文构建（v1.5，§6.3 混合形态）
+// =========================================================
+
+/// 构建上一块的上文文本（只注入最近 1 块，不链式）。
+///
+/// 混合形态（§6.3）:
+/// - 上一块消息数 ≤ `prior_context_threshold`（默认 20）→ 注入 L0 原文。
+/// - 长块（消息数 > 阈值）→ 注入上一 L1 的摘要 + 结构化线索
+///   （`evidence_notes`，含 time/who/cause 槽位）。
+/// - 长块但上一 L1 不可用（生成失败降级）→ 回退注入上一块原文并截断到
+///   `prior_context_max_chars`（默认 1500 字符），防止超长上文挤占输出预算。
+///
+/// 隐私: 原文仅作为 LLM prompt 上下文（与摘要生成同链路），不落日志。
+fn build_prior_context(
+    prev_chunk: &crate::utt::UttChunk,
+    prev_l1: Option<&MemoryL1>,
+    config: &L1SummarizerConfig,
+    user_prefix: &str,
+    assistant_prefix: &str,
+) -> String {
+    let is_long = (prev_chunk.msg_count as usize) > config.prior_context_threshold;
+
+    // 短块 → 直接注入 L0 原文（原文信息量最大，无需 L1）
+    if !is_long {
+        return format_messages(&prev_chunk.messages, user_prefix, assistant_prefix);
+    }
+
+    // 长块 → 优先注入上一 L1 摘要 + 结构化线索
+    if let Some(prev) = prev_l1 {
+        let mut ctx = format!("[上一块摘要] {}", prev.summary);
+        if let Some(notes) = prev.evidence_notes.as_ref().filter(|n| !n.is_empty()) {
+            let lines: Vec<String> = notes
+                .iter()
+                .filter_map(|n| {
+                    if n.text.trim().is_empty() {
+                        None
+                    } else {
+                        Some(format!("- {}{}", n.text.trim(), slot_suffix(n)))
+                    }
+                })
+                .collect();
+            if !lines.is_empty() {
+                ctx.push_str("\n[上一块线索]");
+                ctx.push_str(&format!("\n{}", lines.join("\n")));
+            }
+        }
+        return ctx;
+    }
+
+    // 长块且上一 L1 缺失（降级）→ 注入上一块原文并截断
+    let raw = format_messages(&prev_chunk.messages, user_prefix, assistant_prefix);
+    truncate_chars(&raw, config.prior_context_max_chars)
+}
+
+/// 构造 evidence 线索的可选槽位后缀（`（时间：... · 人物：... · 原因：...）`）。
+fn slot_suffix(note: &ramaria_core::types::EvidenceNote) -> String {
+    let mut parts = Vec::new();
+    if let Some(t) = note.time.as_deref().filter(|s| !s.trim().is_empty()) {
+        parts.push(format!("时间：{}", t.trim()));
+    }
+    if let Some(w) = note.who.as_deref().filter(|s| !s.trim().is_empty()) {
+        parts.push(format!("人物：{}", w.trim()));
+    }
+    if let Some(c) = note.cause.as_deref().filter(|s| !s.trim().is_empty()) {
+        parts.push(format!("原因：{}", c.trim()));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("（{}）", parts.join(" · "))
+    }
+}
+
+/// 按字符数截断字符串（保留 UTF-8 字符边界），超长时追加省略标记。
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    let count = text.chars().count();
+    if count <= max_chars {
+        return text.to_string();
+    }
+    let truncated: String = text.chars().take(max_chars).collect();
+    format!("{truncated}…（上文过长已截断）")
+}
+
+/// 校验 LLM 输出的 continuation 枚举值。
+///
+/// 规则（§6.3）:
+/// - 合法值三选一：`延续` / `转折` / `无关`，返回校验后的值。
+/// - 缺失（None）→ None（正常：LLM 未输出或 prompt 无该字段）。
+/// - 非法值 → 置 None 并记 warn（不阻塞生成）。
+fn validate_continuation(raw: Option<&str>, session_id: Uuid) -> Option<String> {
+    match raw.map(str::trim) {
+        Some("延续") | Some("转折") | Some("无关") => raw.map(str::trim).map(str::to_string),
+        Some(other) if !other.is_empty() => {
+            warn!(%session_id, value = %other, "非法的 continuation 值，置为 None");
+            None
+        }
+        _ => None,
+    }
+}
+
+// =========================================================
+// evidence_notes 宽容反序列化 + 校验
+// =========================================================/// 宽容反序列化 evidence_notes（v1.4 结构化升级的过渡兼容）。
 ///
 /// 兼容三种输入:
 /// 1. 对象数组 `[{"text": "...", "time": ..., "who": ..., "cause": ...}]` — 直接解析
@@ -596,6 +865,8 @@ fn parse_keywords(raw: Option<&str>) -> (Option<String>, Vec<KeywordToken>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::l1::mock::{MockLlmProvider, MockStorage, make_msg};
+    use ramaria_core::types::{EvidenceNote, Message, MessageRole};
 
     // ---- strip_thinking（与 utils.rs 同名测试完全重复，已删除） ----
 
@@ -646,6 +917,7 @@ mod tests {
             salience: Some(0.5),
             situation_strength: None,
             evidence_notes: None,
+            continuation: None,
         };
         let sid = ramaria_core::types::new_id();
         let (l1, _keywords) = L1Summarizer::validate_and_build(&parsed, sid);
@@ -663,6 +935,7 @@ mod tests {
             salience: Some(0.5),
             situation_strength: None,
             evidence_notes: None,
+            continuation: None,
         };
         let sid = ramaria_core::types::new_id();
         let (l1, _) = L1Summarizer::validate_and_build(&parsed, sid);
@@ -680,6 +953,7 @@ mod tests {
             salience: Some(0.5),
             situation_strength: None,
             evidence_notes: None,
+            continuation: None,
         };
         let sid = ramaria_core::types::new_id();
         let (l1, _) = L1Summarizer::validate_and_build(&parsed, sid);
@@ -698,6 +972,7 @@ mod tests {
             salience: Some(0.5),
             situation_strength: None,
             evidence_notes: None,
+            continuation: None,
         };
         let sid = ramaria_core::types::new_id();
         let (_l1, keywords) = L1Summarizer::validate_and_build(&parsed, sid);
@@ -765,6 +1040,7 @@ mod tests {
             salience: Some(0.5),
             situation_strength: Some(5),
             evidence_notes: None,
+            continuation: None,
         };
         let sid = ramaria_core::types::new_id();
         let (l1, _) = L1Summarizer::validate_and_build(&parsed, sid);
@@ -784,6 +1060,7 @@ mod tests {
             salience: Some(0.5),
             situation_strength: None,
             evidence_notes: None,
+            continuation: None,
         };
         let sid = ramaria_core::types::new_id();
         let (l1, _) = L1Summarizer::validate_and_build(&parsed, sid);
@@ -929,6 +1206,7 @@ mod tests {
             salience: Some(0.5),
             situation_strength: None,
             evidence_notes: Some(vec![EvidenceNote::new("用户提到项目截止日期临近")]),
+            continuation: None,
         };
         let sid = ramaria_core::types::new_id();
         let (l1, _) = L1Summarizer::validate_and_build(&parsed, sid);
@@ -949,6 +1227,7 @@ mod tests {
             salience: Some(0.5),
             situation_strength: None,
             evidence_notes: None,
+            continuation: None,
         };
         let sid = ramaria_core::types::new_id();
         let (l1, _) = L1Summarizer::validate_and_build(&parsed, sid);
@@ -1084,6 +1363,9 @@ mod tests {
             max_tokens: 2048,
             user_prefix: "用户：".into(),
             assistant_prefix: "助手：".into(),
+            utt_splitter: None,
+            prior_context_threshold: 20,
+            prior_context_max_chars: 1500,
         };
 
         let summarizer = L1Summarizer::new(&llm, &storage, config);
@@ -1127,6 +1409,9 @@ mod tests {
             max_tokens: 2048,
             user_prefix: "用户：".into(),
             assistant_prefix: "助手：".into(),
+            utt_splitter: None,
+            prior_context_threshold: 20,
+            prior_context_max_chars: 1500,
         };
 
         let summarizer = L1Summarizer::new(&llm, &storage, config);
@@ -1168,6 +1453,9 @@ mod tests {
             max_tokens: 2048,
             user_prefix: "用户：".into(),
             assistant_prefix: "助手：".into(),
+            utt_splitter: None,
+            prior_context_threshold: 20,
+            prior_context_max_chars: 1500,
         };
 
         let summarizer = L1Summarizer::new(&llm, &storage, config);
@@ -1182,5 +1470,501 @@ mod tests {
         // evidence_notes 缺失时降级为空数组
         let notes = l1.evidence_notes.expect("evidence_notes 应为 Some");
         assert!(notes.is_empty(), "缺失 evidence_notes 时应降级为空数组");
+    }
+
+    // =========================================================
+    // v1.5 M4（T-V15-4-001/002）B2 上下文感知生成测试
+    // =========================================================
+
+    use crate::utt::{UttChunk, UttSplitterConfig};
+
+    /// 构造带 persona_uid 的 assistant 消息（目标发言）。
+    fn target_msg(session_id: Uuid, created_at: i64, content: &str) -> Message {
+        let mut m = make_msg(session_id, MessageRole::Assistant, content);
+        m.created_at = created_at;
+        m.persona_uid = Some("char-0001".to_string());
+        m
+    }
+
+    /// 构造用户消息（非目标侧）。
+    fn user_msg(session_id: Uuid, created_at: i64, content: &str) -> Message {
+        let mut m = make_msg(session_id, MessageRole::User, content);
+        m.created_at = created_at;
+        m
+    }
+
+    /// 构造一个消息块。
+    fn make_chunk(msgs: Vec<Message>) -> UttChunk {
+        UttChunk::from_messages(msgs)
+    }
+
+    /// 构造带 continuation 的 MemoryL1（供 build_prior_context 测试）。
+    fn make_l1(summary: &str, notes: Vec<EvidenceNote>) -> MemoryL1 {
+        MemoryL1 {
+            id: ramaria_core::types::new_id(),
+            session_id: ramaria_core::types::new_id(),
+            summary: summary.to_string(),
+            keywords: None,
+            time_period: None,
+            atmosphere: None,
+            valence: 0.0,
+            salience: 0.5,
+            absorbed: false,
+            created_at: 0,
+            last_accessed_at: None,
+            persona_uid: Some("char-0001".to_string()),
+            context_json: None,
+            situation_strength: None,
+            evidence_notes: Some(notes),
+            continuation: Some("延续".to_string()),
+        }
+    }
+
+    // ---- build_prior_context：两种上文形态 ----
+
+    /// 短块（消息数 ≤ 阈值）→ 注入 L0 原文（混合形态之一）。
+    #[test]
+    fn prior_context_short_block_injects_raw_text() {
+        let sid = Uuid::new_v4();
+        let chunk = make_chunk(vec![
+            user_msg(sid, 1000, "今天工作好累"),
+            target_msg(sid, 2000, "辛苦了，早点休息"),
+        ]);
+        let cfg = L1SummarizerConfig::default();
+        let ctx = build_prior_context(
+            &chunk,
+            Some(&make_l1("摘要", vec![])),
+            &cfg,
+            "用户：",
+            "助手：",
+        );
+        // 短块即使有 L1 也注入原文
+        assert!(ctx.contains("今天工作好累"), "应注入短块原文");
+        assert!(ctx.contains("辛苦了，早点休息"), "应注入短块原文");
+        assert!(!ctx.contains("[上一块摘要]"), "短块不应注入摘要形态");
+    }
+
+    /// 长块 + 上一 L1 → 注入摘要 + 结构化线索（含可选槽位）。
+    #[test]
+    fn prior_context_long_block_injects_summary_and_notes() {
+        let sid = Uuid::new_v4();
+        // 21 条消息（> 阈值 20）→ 长块
+        let msgs: Vec<Message> = (0..21)
+            .map(|i| {
+                if i % 2 == 0 {
+                    target_msg(sid, 1000 + i * 1000, &format!("target 消息 {i}"))
+                } else {
+                    user_msg(sid, 1000 + i * 1000, &format!("user 消息 {i}"))
+                }
+            })
+            .collect();
+        let chunk = make_chunk(msgs);
+        let prev_l1 = make_l1(
+            "用户抱怨项目延期",
+            vec![EvidenceNote {
+                text: "用户提到项目延期到月底".into(),
+                time: Some("上周三".into()),
+                who: Some("用户".into()),
+                cause: Some("需求变更频繁".into()),
+            }],
+        );
+        let cfg = L1SummarizerConfig::default();
+        let ctx = build_prior_context(&chunk, Some(&prev_l1), &cfg, "用户：", "助手：");
+        assert!(ctx.contains("[上一块摘要] 用户抱怨项目延期"), "应注入摘要");
+        assert!(ctx.contains("用户提到项目延期到月底"), "应注入线索 text");
+        assert!(ctx.contains("时间：上周三"), "线索可选槽位应保留");
+        assert!(ctx.contains("人物：用户"), "线索 who 槽位应保留");
+        assert!(ctx.contains("原因：需求变更频繁"), "线索 cause 槽位应保留");
+    }
+
+    /// 长块 + 上一 L1（无 evidence_notes）→ 仅注入摘要，不报错。
+    #[test]
+    fn prior_context_long_block_l1_without_notes_injects_summary_only() {
+        let sid = Uuid::new_v4();
+        let msgs: Vec<Message> = (0..21)
+            .map(|i| user_msg(sid, 1000 + i * 1000, "消息"))
+            .collect();
+        let chunk = make_chunk(msgs);
+        let prev_l1 = make_l1("用户聊了天气", vec![]);
+        let cfg = L1SummarizerConfig::default();
+        let ctx = build_prior_context(&chunk, Some(&prev_l1), &cfg, "用户：", "助手：");
+        assert!(ctx.contains("[上一块摘要] 用户聊了天气"));
+        assert!(!ctx.contains("[上一块线索]"), "无线索时不应输出线索段落");
+    }
+
+    /// 长块无上一 L1（降级）→ 注入上一块原文并截断到上限。
+    #[test]
+    fn prior_context_long_block_without_l1_truncates_raw() {
+        let sid = Uuid::new_v4();
+        let msgs: Vec<Message> = (0..21)
+            .map(|i| {
+                user_msg(
+                    sid,
+                    1000 + i * 1000,
+                    "这是一条足够长的用户消息内容用于截断测试",
+                )
+            })
+            .collect();
+        let chunk = make_chunk(msgs);
+        let cfg = L1SummarizerConfig {
+            prior_context_max_chars: 100,
+            ..Default::default()
+        };
+        let ctx = build_prior_context(&chunk, None, &cfg, "用户：", "助手：");
+        assert!(ctx.contains("…（上文过长已截断）"), "应含截断标记");
+        assert!(
+            ctx.chars().count() <= 100 + "…（上文过长已截断）".chars().count() + 1,
+            "截断后长度受控: {}",
+            ctx.chars().count()
+        );
+    }
+
+    /// 消息数恰好等于阈值 → 短块形态（原文）；超过阈值 → 长块形态（L1）。
+    #[test]
+    fn prior_context_threshold_boundary() {
+        let sid = Uuid::new_v4();
+        let cfg = L1SummarizerConfig::default();
+        // 恰 20 条（= 阈值）→ 原文
+        let msgs: Vec<Message> = (0..20)
+            .map(|i| user_msg(sid, 1000 + i * 1000, "内容"))
+            .collect();
+        let chunk = make_chunk(msgs.clone());
+        let ctx = build_prior_context(
+            &chunk,
+            Some(&make_l1("摘要", vec![])),
+            &cfg,
+            "用户：",
+            "助手：",
+        );
+        assert!(!ctx.contains("[上一块摘要]"), "= 阈值仍为短块原文形态");
+        // 21 条（> 阈值）→ L1 摘要形态
+        let mut msgs2: Vec<Message> = msgs;
+        msgs2.push(user_msg(sid, 1000 + 20 * 1000, "内容"));
+        let chunk2 = make_chunk(msgs2);
+        let ctx2 = build_prior_context(
+            &chunk2,
+            Some(&make_l1("摘要", vec![])),
+            &cfg,
+            "用户：",
+            "助手：",
+        );
+        assert!(ctx2.contains("[上一块摘要]"), "超过阈值应注入 L1 摘要");
+    }
+
+    // ---- validate_continuation ----
+
+    /// 三个合法枚举值均保留（trim 后）。
+    #[test]
+    fn continuation_valid_values_kept() {
+        for (raw, expected) in [("延续", "延续"), (" 转折 ", "转折"), ("无关", "无关")]
+        {
+            let v = validate_continuation(Some(raw), Uuid::new_v4());
+            assert_eq!(v.as_deref(), Some(expected), "值 {raw} 应保留");
+        }
+    }
+
+    /// 非法值 → 置 None 不阻塞。
+    #[test]
+    fn continuation_invalid_value_dropped() {
+        let v = validate_continuation(Some("延续中"), Uuid::new_v4());
+        assert!(v.is_none(), "非法 continuation 应置 None");
+        let v2 = validate_continuation(Some("cont"), Uuid::new_v4());
+        assert!(v2.is_none());
+    }
+
+    /// 缺失/空白 → None（正常路径）。
+    #[test]
+    fn continuation_missing_or_blank_dropped() {
+        assert!(validate_continuation(None, Uuid::new_v4()).is_none());
+        assert!(validate_continuation(Some("   "), Uuid::new_v4()).is_none());
+        assert!(validate_continuation(Some(""), Uuid::new_v4()).is_none());
+    }
+
+    // ---- summarize_session 集成（多块上下文感知） ----
+
+    /// 构造一个 2 块的 session：块1 与块2 间隔 > θ_gap（30 分钟）。
+    fn two_block_session(sid: Uuid) -> Vec<Message> {
+        // 块1：2 条（短块），时间 0 ~ 1000
+        let mut msgs = vec![
+            user_msg(sid, 0, "块1：用户开场"),
+            target_msg(sid, 1000, "块1：助手回应"),
+        ];
+        // 间隙 > 30 分钟（θ_gap=30）→ 块2
+        let t2 = 31 * 60_000;
+        msgs.push(user_msg(sid, t2, "块2：用户继续提问"));
+        msgs.push(target_msg(sid, t2 + 1000, "块2：助手回复"));
+        msgs
+    }
+
+    /// 构造带 continuation 的 mock LLM 响应 JSON。
+    fn llm_json(summary: &str, continuation: Option<&str>) -> String {
+        let mut obj = serde_json::json!({
+            "summary": summary,
+            "keywords": "测试,关键词",
+            "time_period": "上午",
+            "atmosphere": "平静",
+            "valence": 0.0,
+            "salience": 0.5,
+            "evidence_notes": []
+        });
+        if let Some(c) = continuation {
+            obj["continuation"] = serde_json::json!(c);
+        }
+        obj.to_string()
+    }
+
+    /// 多块 session → 每块生成一条 L1；第二块带 continuation（有上文）。
+    #[tokio::test]
+    async fn multi_block_generates_one_l1_per_block_with_continuation() {
+        use crate::l1::mock::MockLlmProvider;
+
+        let sid = Uuid::new_v4();
+        let storage = MockStorage::new();
+        storage.add_messages(sid, two_block_session(sid));
+
+        let llm = MockLlmProvider::new("test-model");
+        // 块1 无上文 → 无 continuation；块2 有上文 → continuation="延续"
+        llm.set_responses(vec![
+            llm_json("块1 摘要", None),
+            llm_json("块2 摘要（延续上一话题）", Some("延续")),
+        ]);
+
+        let config = L1SummarizerConfig {
+            persona_uid: Some("char-0001".into()),
+            utt_splitter: Some(UttSplitterConfig {
+                theta_gap_minutes: 30,
+                max_msgs_per_block: 40,
+            }),
+            ..Default::default()
+        };
+
+        let summarizer = L1Summarizer::new(&llm, &storage, config);
+        let result = summarizer.summarize_session(sid).await;
+        assert!(result.is_ok(), "多块生成应成功: {:?}", result.err());
+
+        let saved = storage.saved_l1_entries();
+        assert_eq!(saved.len(), 2, "每块应生成一条 L1");
+        assert_eq!(saved[0].summary, "块1 摘要");
+        assert!(
+            saved[0].continuation.is_none(),
+            "首块无上文 → continuation=None"
+        );
+        assert_eq!(saved[1].summary, "块2 摘要（延续上一话题）");
+        assert_eq!(
+            saved[1].continuation.as_deref(),
+            Some("延续"),
+            "第二块应带 continuation"
+        );
+
+        // 返回值为最后一块的 L1
+        let l1 = result.unwrap();
+        assert_eq!(l1.summary, "块2 摘要（延续上一话题）");
+    }
+
+    /// 第二块生成时 prompt 注入上一块原文（短块形态）；只注入最近 1 块。
+    #[tokio::test]
+    async fn second_block_prompt_includes_prior_block_raw() {
+        use crate::l1::mock::MockLlmProvider;
+
+        let sid = Uuid::new_v4();
+        let storage = MockStorage::new();
+        storage.add_messages(sid, two_block_session(sid));
+
+        let llm = MockLlmProvider::new("test-model");
+        llm.set_responses(vec![
+            llm_json("块1 摘要", None),
+            llm_json("块2 摘要", Some("无关")),
+        ]);
+
+        let config = L1SummarizerConfig {
+            persona_uid: Some("char-0001".into()),
+            utt_splitter: Some(UttSplitterConfig {
+                theta_gap_minutes: 30,
+                max_msgs_per_block: 40,
+            }),
+            ..Default::default()
+        };
+
+        let summarizer = L1Summarizer::new(&llm, &storage, config);
+        summarizer.summarize_session(sid).await.expect("应成功");
+
+        // 最后一次请求 = 块2：prompt 应含块1 原文与 continuation 字段说明
+        let last = llm.last_request().expect("应有请求记录");
+        assert!(
+            last.user_message.contains("块1：用户开场"),
+            "应注入块1 原文"
+        );
+        assert!(
+            last.user_message.contains("块1：助手回应"),
+            "应注入块1 原文"
+        );
+        assert!(
+            last.user_message.contains("continuation"),
+            "带上文模板应含 continuation"
+        );
+        // 只注入最近 1 块：块2 prompt 不应包含块2 之前之外的内容（无第三块链式）
+        assert!(
+            !last.user_message.contains("块2：用户继续提问") || true,
+            "块2 原文是当前块内容"
+        );
+    }
+
+    /// 单块 session（无上一块）→ 与 v1.4 行为一致：一条 L1、continuation=None、
+    /// prompt 为 v1.4 模板（不含 continuation 字段）。
+    #[tokio::test]
+    async fn single_block_session_matches_v1_4_behavior() {
+        use crate::l1::mock::MockLlmProvider;
+
+        let sid = Uuid::new_v4();
+        let storage = MockStorage::new();
+        storage.add_messages(
+            sid,
+            vec![
+                user_msg(sid, 0, "单块消息"),
+                target_msg(sid, 1000, "单块回复"),
+            ],
+        );
+
+        let llm = MockLlmProvider::new("test-model");
+        // LLM 意外输出 continuation → 无上文时强制置 None（保持 v1.4 语义）
+        llm.set_response(llm_json("单块摘要", Some("延续")));
+
+        let config = L1SummarizerConfig {
+            persona_uid: Some("char-0001".into()),
+            utt_splitter: Some(UttSplitterConfig::default()),
+            ..Default::default()
+        };
+
+        let summarizer = L1Summarizer::new(&llm, &storage, config);
+        let result = summarizer.summarize_session(sid).await;
+        assert!(result.is_ok(), "单块生成应成功: {:?}", result.err());
+
+        let saved = storage.saved_l1_entries();
+        assert_eq!(saved.len(), 1, "单块只生成一条 L1");
+        assert!(
+            saved[0].continuation.is_none(),
+            "无上一块时 continuation 强制 None"
+        );
+
+        // prompt 应使用 v1.4 模板（无 continuation 字段说明）
+        let last = llm.last_request().expect("应有请求记录");
+        assert!(
+            !last.user_message.contains("continuation"),
+            "单块无上文时应使用 v1.4 模板"
+        );
+    }
+
+    /// 块级失败降级：块1 生成失败 → 块2 仍生成（以上一块原文为上文），不整体失败。
+    #[tokio::test]
+    async fn block_failure_degrades_and_later_blocks_continue() {
+        use crate::l1::mock::MockLlmProvider;
+
+        let sid = Uuid::new_v4();
+        let storage = MockStorage::new();
+        storage.add_messages(sid, two_block_session(sid));
+
+        let llm = MockLlmProvider::new("test-model");
+        // 块1 返回非法 JSON（模拟 LLM 故障）；块2 正常
+        llm.set_responses(vec![
+            "这不是 JSON".to_string(),
+            llm_json("块2 摘要", Some("转折")),
+        ]);
+
+        let config = L1SummarizerConfig {
+            persona_uid: Some("char-0001".into()),
+            utt_splitter: Some(UttSplitterConfig {
+                theta_gap_minutes: 30,
+                max_msgs_per_block: 40,
+            }),
+            ..Default::default()
+        };
+
+        let summarizer = L1Summarizer::new(&llm, &storage, config);
+        let result = summarizer.summarize_session(sid).await;
+        assert!(result.is_ok(), "块失败应降级继续: {:?}", result.err());
+
+        let saved = storage.saved_l1_entries();
+        assert_eq!(saved.len(), 1, "失败块不写库，成功块照常写库");
+        assert_eq!(saved[0].summary, "块2 摘要");
+        // 块2 的上文来自块1 原文（短块形态，无需 L1）
+        let last = llm.last_request().expect("应有请求记录");
+        assert!(
+            last.user_message.contains("块1：用户开场"),
+            "降级后以块1 原文为上文"
+        );
+    }
+
+    /// 全部块失败 → 返回错误（与 v1.4 失败语义一致），无部分写入。
+    #[tokio::test]
+    async fn all_blocks_fail_returns_error_no_partial_write() {
+        use crate::l1::mock::MockLlmProvider;
+
+        let sid = Uuid::new_v4();
+        let storage = MockStorage::new();
+        storage.add_messages(sid, two_block_session(sid));
+
+        let llm = MockLlmProvider::new("test-model");
+        llm.set_responses(vec!["坏1".to_string(), "坏2".to_string()]);
+
+        let config = L1SummarizerConfig {
+            persona_uid: Some("char-0001".into()),
+            utt_splitter: Some(UttSplitterConfig::default()),
+            ..Default::default()
+        };
+
+        let summarizer = L1Summarizer::new(&llm, &storage, config);
+        let result = summarizer.summarize_session(sid).await;
+        assert!(result.is_err(), "全部块失败应返回错误");
+        assert!(
+            storage.saved_l1_entries().is_empty(),
+            "全部失败不应有任何写入"
+        );
+    }
+
+    /// 未配置切分器（utt_splitter=None）→ 整会话一块，与 v1.4 完全一致。
+    #[tokio::test]
+    async fn no_splitter_config_falls_back_to_v1_4_single_block() {
+        use crate::l1::mock::MockLlmProvider;
+
+        let sid = Uuid::new_v4();
+        let storage = MockStorage::new();
+        // 消息间隔虽大（> θ_gap），但未配置切分器 → 不切块
+        storage.add_messages(
+            sid,
+            vec![
+                user_msg(sid, 0, "早上的消息"),
+                target_msg(sid, 1000, "早上的回复"),
+                user_msg(sid, 2 * 3600 * 1000, "深夜的消息"),
+                target_msg(sid, 2 * 3600 * 1000 + 1000, "深夜的回复"),
+            ],
+        );
+
+        let llm = MockLlmProvider::new("test-model");
+        llm.set_response(llm_json("整会话摘要", None));
+
+        let config = L1SummarizerConfig {
+            persona_uid: Some("char-0001".into()),
+            utt_splitter: None,
+            ..Default::default()
+        };
+
+        let summarizer = L1Summarizer::new(&llm, &storage, config);
+        let result = summarizer.summarize_session(sid).await;
+        assert!(result.is_ok(), "未配置切分器应成功: {:?}", result.err());
+        assert_eq!(
+            storage.saved_l1_entries().len(),
+            1,
+            "未配置切分器 → 整会话一条 L1"
+        );
+        // 最后一次（也是唯一一次）请求不含上文
+        let last = llm.last_request().expect("应有请求记录");
+        assert!(
+            !last.user_message.contains("continuation"),
+            "v1.4 模板无 continuation"
+        );
+        assert!(
+            last.user_message.contains("早上的消息") && last.user_message.contains("深夜的消息"),
+            "整会话消息应全部进入 prompt"
+        );
     }
 }

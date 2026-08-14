@@ -369,6 +369,7 @@ mod tests {
             context_json: None,
             situation_strength: None,
             evidence_notes: None,
+            continuation: None,
         };
         // 不应 panic
         lifecycle.index_l1_into_retriever(&l1);
@@ -399,6 +400,7 @@ mod tests {
             context_json: None,
             situation_strength: None,
             evidence_notes: None,
+            continuation: None,
         };
 
         lifecycle.index_l1_into_retriever(&l1);
@@ -432,6 +434,7 @@ mod tests {
             context_json: None,
             situation_strength: None,
             evidence_notes: None,
+            continuation: None,
         };
 
         lifecycle.index_l1_into_retriever(&l1);

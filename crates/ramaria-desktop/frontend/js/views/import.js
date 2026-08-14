@@ -73,6 +73,11 @@ var ImportView = (function () {
         l1Failed: null,      // done 阶段：L1 失败数
         l2Triggered: null,   // done 阶段：深度模式 L2 是否已触发
         l3Triggered: null,   // done 阶段：深度模式 L3 是否已触发
+        // v1.5 I：后端阶段预计总量与 EMA 剩余秒数（None/undefined = 未知，前端线性兜底）
+        l1Expected: null,
+        l2Expected: null,
+        l3Expected: null,
+        etaSeconds: null,
     };
 
     /** 导入开始时间（Unix 毫秒），用于预估剩余时间 */
@@ -139,7 +144,7 @@ var ImportView = (function () {
         _importMode = 'fast';
         _reportData = null;
         _isImporting = false;
-        _importProgress = { phase: '', current: 0, total: 0, message: '', l1Success: null, l1Failed: null, l2Triggered: null, l3Triggered: null };
+        _importProgress = { phase: '', current: 0, total: 0, message: '', l1Success: null, l1Failed: null, l2Triggered: null, l3Triggered: null, l1Expected: null, l2Expected: null, l3Expected: null, etaSeconds: null };
         _importResultPersona = { selfUid: '', selfName: '', otherUid: '', otherName: '' };
         _importStartedAt = null;  // 重置 ETA 计时
 
@@ -257,11 +262,12 @@ var ImportView = (function () {
     /**
      * 计算并显示预估剩余时间。
      *
-     * 算法:
-     * - elapsed = now - _importStartedAt（已用秒数）
-     * - if current > 0 && elapsed > 2: rate = elapsed / current（每会话秒数）
-     *   eta_seconds = rate * (total - current)
-     * - else: 显示"计算中..."
+     * v1.5 I（T-V15-4-004）:
+     * - 优先使用后端分层 EMA 估算结果（payload.eta_seconds，已含各阶段
+     *   L1/L2/L3 剩余量 × EMA 单次耗时求和）。
+     * - 后端不可得（无样本/首次运行/旧后端）→ 回退既有线性 rate 估算：
+     *   elapsed = now - _importStartedAt; rate = elapsed / current;
+     *   eta_seconds = rate × (total - current)。
      *
      * 格式:
      * - < 60秒: "约 N 秒"
@@ -281,18 +287,26 @@ var ImportView = (function () {
             return;
         }
 
-        var now = Date.now();
-        var elapsedSec = (now - _importStartedAt) / 1000;
+        var etaSec = null;
+
+ // ── 后端 EMA 优先（v1.5 I）──
+        if (typeof prog.etaSeconds === 'number' && prog.etaSeconds >= 0) {
+            etaSec = Math.round(prog.etaSeconds);
+        } else {
+ // ── 线性 rate 估算兜底（后端统计不可得时）──
+            var now = Date.now();
+            var elapsedSec = (now - _importStartedAt) / 1000;
 
  // 至少等待 2 秒再计算（避免初始波动导致荒谬的 ETA）
-        if (elapsedSec < 2) {
-            etaEl.textContent = '计算中...';
-            return;
-        }
+            if (elapsedSec < 2) {
+                etaEl.textContent = '计算中...';
+                return;
+            }
 
-        var ratePerItem = elapsedSec / prog.current;          // 每会话秒数
-        var remaining = prog.total - prog.current;
-        var etaSec = Math.round(ratePerItem * remaining);
+            var ratePerItem = elapsedSec / prog.current;          // 每会话秒数
+            var remaining = prog.total - prog.current;
+            etaSec = Math.round(ratePerItem * remaining);
+        }
 
  // 格式化为人类可读
         if (etaSec < 60) {
@@ -554,10 +568,10 @@ var ImportView = (function () {
             html += '<div class="import-progress-info">';
             html += '<span class="import-progress-pct" id="import-progress-pct-inline"></span>';
 
- // 阶段指示器——显示"第 N/M 个会话"
+ // 阶段指示器——显示"已完成 x/y 项"（v1.5 I：L1 总量 = session × persona，以 LLM 调用项计）
             if (prog.phase === 'l1') {
                 html += '<span class="import-progress-sep">·</span>';
-                html += '<span class="import-progress-session-counter">第 <strong id="import-session-current">' + prog.current + '</strong> / ' + prog.total + ' 个会话</span>';
+                html += '<span class="import-progress-session-counter">已完成 <strong id="import-session-current">' + prog.current + '</strong> / ' + prog.total + ' 项</span>';
             }
 
  // 预估剩余时间
@@ -773,7 +787,7 @@ var ImportView = (function () {
                 _selectedFileName = null;
                 _selectedFileSize = null;
                 _reportData = null;
-                _importProgress = { phase: '', current: 0, total: 0, message: '', l1Success: null, l1Failed: null, l2Triggered: null, l3Triggered: null };
+                _importProgress = { phase: '', current: 0, total: 0, message: '', l1Success: null, l1Failed: null, l2Triggered: null, l3Triggered: null, l1Expected: null, l2Expected: null, l3Expected: null, etaSeconds: null };
                 _importStartedAt = null;  // 重置 ETA 计时
                 _render();
             });
@@ -1044,6 +1058,8 @@ var ImportView = (function () {
  * - `message`: 阶段描述
  * - `l1_success` / `l1_failed`: done 阶段统计（可选）
  * - `l2_triggered` / `l3_triggered`: done 阶段标记（可选）
+ * - `l1_expected` / `l2_expected` / `l3_expected`: 各阶段预计总量（v1.5 I，可选）
+ * - `eta_seconds`: 后端 EMA 估算剩余秒数（v1.5 I，可选；缺失时前端线性兜底）
  */
     function _setupImportProgressListener() {
  // 先清理旧监听器
@@ -1058,6 +1074,12 @@ var ImportView = (function () {
                 _importProgress.current = payload.current || 0;
                 _importProgress.total = payload.total || 0;
                 _importProgress.message = payload.message || '';
+
+ // v1.5 I：阶段预计总量与后端 EMA 剩余秒数（缺失时前端线性兜底）
+                if (payload.l1_expected !== undefined) _importProgress.l1Expected = payload.l1_expected;
+                if (payload.l2_expected !== undefined) _importProgress.l2Expected = payload.l2_expected;
+                if (payload.l3_expected !== undefined) _importProgress.l3Expected = payload.l3_expected;
+                if (payload.eta_seconds !== undefined) _importProgress.etaSeconds = payload.eta_seconds;
 
  // done 阶段携带最终统计
                 if (payload.phase === 'done') {

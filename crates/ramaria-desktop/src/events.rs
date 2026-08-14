@@ -130,6 +130,10 @@ impl ChatErrorPayload {
 /// - `current` / `total`: 进度计数；done 阶段为最终统计
 /// - `l1_success` / `l1_failed`: 仅 done 阶段有意义，其余阶段为 None
 /// - `l2_triggered` / `l3_triggered`: 仅 done 阶段有意义，标记深度模式级联是否已触发
+/// - `l1_expected` / `l2_expected` / `l3_expected`（v1.5 I）: 各阶段预计总量，
+///   前端据此 + EMA 计算剩余时间；None = 该阶段总量未知（尚未开始/不可预知）
+/// - `eta_seconds`（v1.5 I）: 后端分层 EMA 估算的剩余秒数；None = 无法估算
+///   （无样本/首次运行），前端回退线性估算
 #[derive(Debug, Clone, Serialize)]
 pub struct ImportProgressPayload {
     /// 阶段: "l1" | "l2" | "l3" | "done"
@@ -152,6 +156,18 @@ pub struct ImportProgressPayload {
     /// 深度模式：L3 是否已触发（仅 done 阶段有意义）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub l3_triggered: Option<bool>,
+    /// L1 阶段预计总量（= session × persona；v1.5 I 项）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub l1_expected: Option<usize>,
+    /// L2 阶段预计总量（在线估算：满足触发条件的 persona 数；v1.5 I 项）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub l2_expected: Option<usize>,
+    /// L3 阶段预计总量（固定阶段数 = 触发推断的 persona 数；v1.5 I 项）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub l3_expected: Option<usize>,
+    /// 后端 EMA 估算的剩余秒数（None = 无样本，前端线性兜底；v1.5 I 项）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eta_seconds: Option<u64>,
 }
 
 impl ImportProgressPayload {
@@ -166,7 +182,30 @@ impl ImportProgressPayload {
             l1_failed: None,
             l2_triggered: None,
             l3_triggered: None,
+            l1_expected: None,
+            l2_expected: None,
+            l3_expected: None,
+            eta_seconds: None,
         }
+    }
+
+    /// 附加阶段预计总量与 EMA 剩余秒数（v1.5 I 项）。
+    ///
+    /// 参数:
+    /// - `l1_expected` / `l2_expected` / `l3_expected`: 各阶段预计总量（None = 未知）。
+    /// - `eta_seconds`: 后端 EMA 估算剩余秒数（None = 前端线性兜底）。
+    pub fn with_estimates(
+        mut self,
+        l1_expected: Option<usize>,
+        l2_expected: Option<usize>,
+        l3_expected: Option<usize>,
+        eta_seconds: Option<u64>,
+    ) -> Self {
+        self.l1_expected = l1_expected;
+        self.l2_expected = l2_expected;
+        self.l3_expected = l3_expected;
+        self.eta_seconds = eta_seconds;
+        self
     }
 
     /// 创建带完整统计的 done 阶段事件负载。
@@ -195,6 +234,10 @@ impl ImportProgressPayload {
             l1_failed: Some(l1_failed),
             l2_triggered: Some(l2_triggered),
             l3_triggered: Some(l3_triggered),
+            l1_expected: None,
+            l2_expected: None,
+            l3_expected: None,
+            eta_seconds: None,
         }
     }
 }
@@ -235,5 +278,67 @@ mod tests {
         assert!(json.contains("连接失败"));
         assert!(json.contains("请检查网络"));
         assert!(json.contains("true"));
+    }
+
+    // ---- v1.5 M4（T-V15-4-003）阶段预计总量与 ETA 字段 ----
+
+    /// 基础 payload（无估算字段）→ 序列化不含 l1_expected/l2_expected/l3_expected/eta_seconds
+    /// （向后兼容：旧前端忽略未知字段；旧后端事件不含新字段）。
+    #[test]
+    fn basic_payload_omits_estimate_fields() {
+        let payload = ImportProgressPayload::new("l1", 1, 10, "进度");
+        let json = serde_json::to_string(&payload).expect("序列化失败");
+        assert!(
+            !json.contains("l1_expected"),
+            "未附加估算时不应输出字段: {json}"
+        );
+        assert!(
+            !json.contains("eta_seconds"),
+            "未附加估算时不应输出字段: {json}"
+        );
+    }
+
+    /// 附加估算字段 → 序列化包含各阶段预计总量与 eta_seconds。
+    #[test]
+    fn payload_with_estimates_serializes_fields() {
+        let payload = ImportProgressPayload::new("l1", 5, 20, "进度").with_estimates(
+            Some(20),
+            Some(2),
+            Some(2),
+            Some(120),
+        );
+        let json = serde_json::to_string(&payload).expect("序列化失败");
+        assert!(
+            json.contains(r#""l1_expected":20"#),
+            "应含 l1_expected: {json}"
+        );
+        assert!(
+            json.contains(r#""l2_expected":2"#),
+            "应含 l2_expected: {json}"
+        );
+        assert!(
+            json.contains(r#""l3_expected":2"#),
+            "应含 l3_expected: {json}"
+        );
+        assert!(
+            json.contains(r#""eta_seconds":120"#),
+            "应含 eta_seconds: {json}"
+        );
+    }
+
+    /// 部分估算字段为 None → 仅序列化非 None 字段。
+    #[test]
+    fn payload_with_partial_estimates_serializes_only_some() {
+        // L1 阶段：仅 l1_expected 已知，L2/L3 未知
+        let payload = ImportProgressPayload::new("l1", 0, 20, "进度").with_estimates(
+            Some(20),
+            None,
+            None,
+            None,
+        );
+        let json = serde_json::to_string(&payload).expect("序列化失败");
+        assert!(json.contains(r#""l1_expected":20"#));
+        assert!(!json.contains("l2_expected"), "未知阶段不应输出: {json}");
+        assert!(!json.contains("eta_seconds"), "无 ETA 不应输出: {json}");
     }
 }

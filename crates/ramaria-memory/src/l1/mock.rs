@@ -31,10 +31,15 @@ use uuid::Uuid;
 ///
 /// 用法:
 /// - 通过 `set_response` 预设下次 `chat` 返回的文本。
+/// - 通过 `set_responses` 预设队列（依次消费；队列耗尽后回退单响应）。
 /// - `chat_stream` 返回 unimplemented（摘要管线不使用流式）。
 pub struct MockLlmProvider {
     name: &'static str,
     response: Mutex<Option<String>>,
+    /// 响应队列（v1.5 B2 多块生成：每块一次 chat 调用，依次消费）
+    responses: Mutex<std::collections::VecDeque<String>>,
+    /// 最后一次 chat 请求（供断言 prompt 内容，如上文注入）
+    last_request: Mutex<Option<ChatRequest>>,
 }
 
 impl MockLlmProvider {
@@ -42,6 +47,8 @@ impl MockLlmProvider {
         Self {
             name,
             response: Mutex::new(None),
+            responses: Mutex::new(std::collections::VecDeque::new()),
+            last_request: Mutex::new(None),
         }
     }
 
@@ -49,11 +56,29 @@ impl MockLlmProvider {
     pub fn set_response(&self, text: impl Into<String>) {
         *self.response.lock().unwrap() = Some(text.into());
     }
+
+    /// 预设响应队列（v1.5 B2：逐块调用依次消费）。
+    pub fn set_responses(&self, texts: Vec<String>) {
+        let mut q = self.responses.lock().unwrap();
+        for t in texts {
+            q.push_back(t);
+        }
+    }
+
+    /// 返回最后一次 chat 请求（供断言注入内容）。
+    pub fn last_request(&self) -> Option<ChatRequest> {
+        self.last_request.lock().unwrap().clone()
+    }
 }
 
 #[async_trait]
 impl LlmProviderTrait for MockLlmProvider {
-    async fn chat(&self, _request: &ChatRequest) -> RamariaResult<String> {
+    async fn chat(&self, request: &ChatRequest) -> RamariaResult<String> {
+        *self.last_request.lock().unwrap() = Some(request.clone());
+        // 优先消费队列（多块场景）；队列空时回退单响应
+        if let Some(text) = self.responses.lock().unwrap().pop_front() {
+            return Ok(text);
+        }
         self.response
             .lock()
             .unwrap()
@@ -540,6 +565,7 @@ pub fn make_valid_l1(summary: &str) -> MemoryL1 {
         context_json: None,
         situation_strength: None,
         evidence_notes: None,
+        continuation: None,
     }
 }
 

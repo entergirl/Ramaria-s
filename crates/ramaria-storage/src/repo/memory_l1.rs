@@ -34,6 +34,8 @@ struct L1Row {
     situation_strength: Option<i64>,
     /// 证据线索（JSON 对象数组字符串），存量数据为 NULL
     evidence_notes: Option<String>,
+    /// 与上一块的话题延续关系（v1.5 B2）："延续" | "转折" | "无关"，NULL=无上一块
+    continuation: Option<String>,
 }
 
 impl L1Row {
@@ -70,6 +72,7 @@ impl L1Row {
             context_json: self.context_json,
             situation_strength: self.situation_strength.map(|v| v as i32),
             evidence_notes,
+            continuation: self.continuation,
         })
     }
 }
@@ -90,8 +93,8 @@ pub async fn save(pool: &SqlitePool, l1: &MemoryL1) -> RamariaResult<()> {
     sqlx::query(
         "INSERT INTO memory_l1 (id, session_id, summary, keywords, time_period, atmosphere,
          valence, salience, absorbed, created_at, last_accessed_at, persona_uid, context_json,
-         situation_strength, evidence_notes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         situation_strength, evidence_notes, continuation)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(l1.id.to_string())
     .bind(l1.session_id.to_string())
@@ -108,6 +111,7 @@ pub async fn save(pool: &SqlitePool, l1: &MemoryL1) -> RamariaResult<()> {
     .bind(&l1.context_json)
     .bind(l1.situation_strength.map(|v| v as i64))
     .bind(evidence_notes_json)
+    .bind(&l1.continuation)
     .execute(pool)
     .await
     .storage_err("保存 L1 记忆失败")?;
@@ -136,7 +140,7 @@ pub async fn list_by_session(pool: &SqlitePool, session_id: Uuid) -> RamariaResu
     let rows = sqlx::query_as::<_, L1Row>(
         "SELECT id, session_id, summary, keywords, time_period, atmosphere, valence, salience,
          absorbed, created_at, last_accessed_at, persona_uid, context_json, situation_strength,
-         evidence_notes
+         evidence_notes, continuation
          FROM memory_l1 WHERE session_id = ? ORDER BY created_at ASC",
     )
     .bind(session_id.to_string())
@@ -152,7 +156,7 @@ pub async fn get(pool: &SqlitePool, id: Uuid) -> RamariaResult<Option<MemoryL1>>
     let row = sqlx::query_as::<_, L1Row>(
         "SELECT id, session_id, summary, keywords, time_period, atmosphere, valence, salience,
          absorbed, created_at, last_accessed_at, persona_uid, context_json, situation_strength,
-         evidence_notes
+         evidence_notes, continuation
          FROM memory_l1 WHERE id = ?",
     )
     .bind(id.to_string())
@@ -206,7 +210,7 @@ pub async fn list_unabsorbed(pool: &SqlitePool, persona_uid: &str) -> RamariaRes
     let rows = sqlx::query_as::<_, L1Row>(
         "SELECT id, session_id, summary, keywords, time_period, atmosphere, valence, salience,
          absorbed, created_at, last_accessed_at, persona_uid, context_json, situation_strength,
-         evidence_notes
+         evidence_notes, continuation
          FROM memory_l1 WHERE absorbed = 0 AND persona_uid = ? ORDER BY created_at ASC",
     )
     .bind(persona_uid)
@@ -238,7 +242,7 @@ pub async fn list_recent_by_persona(
     let rows = sqlx::query_as::<_, L1Row>(
         "SELECT id, session_id, summary, keywords, time_period, atmosphere, valence, salience,
          absorbed, created_at, last_accessed_at, persona_uid, context_json, situation_strength,
-         evidence_notes
+         evidence_notes, continuation
          FROM memory_l1 WHERE persona_uid = ? ORDER BY created_at DESC LIMIT ?",
     )
     .bind(persona_uid)
@@ -288,6 +292,7 @@ mod tests {
                 who: Some("用户".into()),
                 cause: Some("需求变更频繁".into()),
             }]),
+            continuation: None,
         }
     }
 
@@ -419,6 +424,12 @@ mod tests {
             .await
             .expect("v1.4 migration 应可执行");
 
+        // 3.5 应用 v1.5 M4 迁移（新增 continuation 列；repo 查询依赖该列）
+        sqlx::raw_sql(include_str!("../../migrations/20260813_v1.5_m4.sql"))
+            .execute(&pool)
+            .await
+            .expect("v1.5 M4 migration 应可执行");
+
         // 4. repo 按新格式读取：2 条线索，text 槽位承载旧字符串，其余槽位为空
         let got = get(&pool, l1_id)
             .await
@@ -460,6 +471,37 @@ mod tests {
         let got = get(&pool, l1.id).await.unwrap().unwrap();
         let notes = got.evidence_notes.expect("空数组应读回 Some(vec![])");
         assert!(notes.is_empty(), "空数组应往返为空数组");
+    }
+
+    /// continuation 往返：Some("延续") → save → get 读回；None → 读回 None
+    /// （v1.5 B2 T-V15-4-001 存储层验收）。
+    #[tokio::test]
+    async fn continuation_roundtrip() {
+        let pool = database::init_test_pool().await.unwrap();
+        let session_id = setup_fixture(&pool).await;
+
+        // Some("延续") 往返
+        let mut l1 = make_l1_with_slots(session_id);
+        l1.continuation = Some("延续".to_string());
+        save(&pool, &l1).await.expect("save 应成功");
+        let got = get(&pool, l1.id).await.unwrap().unwrap();
+        assert_eq!(got.continuation.as_deref(), Some("延续"));
+
+        // 非法枚举值（防御：若上游未校验，存储层原样保存）——仅验证读写一致性
+        let mut l1b = make_l1_with_slots(session_id);
+        l1b.id = Uuid::new_v4();
+        l1b.continuation = Some("无关".to_string());
+        save(&pool, &l1b).await.expect("save 应成功");
+        let got_b = get(&pool, l1b.id).await.unwrap().unwrap();
+        assert_eq!(got_b.continuation.as_deref(), Some("无关"));
+
+        // None（首块/独立摘要路径）往返
+        let mut l1c = make_l1_with_slots(session_id);
+        l1c.id = Uuid::new_v4();
+        l1c.continuation = None;
+        save(&pool, &l1c).await.expect("save 应成功");
+        let got_c = get(&pool, l1c.id).await.unwrap().unwrap();
+        assert!(got_c.continuation.is_none(), "None 应往返为 None");
     }
 
     /// 多槽位 JSON 序列化不含空槽位（skip_serializing_if）：存储紧凑且迁移幂等友好。

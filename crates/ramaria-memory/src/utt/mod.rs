@@ -58,6 +58,27 @@ pub struct UttChunk {
     pub time_span_ms: i64,
 }
 
+impl UttChunk {
+    /// 由消息序列直接构造单块（不切分，v1.4 整会话路径）。
+    ///
+    /// 参数:
+    /// - `messages`: 已按时间升序的消息（调用方负责排序/过滤）。
+    ///
+    /// 返回:
+    /// - 单个话语块（消息首末区间元数据自动计算）。
+    pub fn from_messages(messages: Vec<Message>) -> Self {
+        let first = messages.first().expect("块非空");
+        let last = messages.last().expect("块非空");
+        Self {
+            start_msg_id: first.id,
+            end_msg_id: last.id,
+            msg_count: messages.len() as u32,
+            time_span_ms: last.created_at - first.created_at,
+            messages,
+        }
+    }
+}
+
 /// 判断消息是否为"目标 persona 发言"。
 ///
 /// 规则:

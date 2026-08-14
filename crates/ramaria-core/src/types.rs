@@ -425,6 +425,18 @@ pub struct MemoryL1 {
     /// - L2 事件提取时作为证据互证判断的输入
     /// - 前端 L3 性格画像的证据链溯源展示
     pub evidence_notes: Option<Vec<EvidenceNote>>,
+    /// 与上一对话块的话题延续关系（v1.5 B2 上下文感知生成，§6.3）。
+    ///
+    /// 枚举（相对上一块）:
+    /// - `"延续"` — 当前对话承接上一块话题继续讨论
+    /// - `"转折"` — 话题发生转换或明显偏移
+    /// - `"无关"` — 与上一块完全无关（独立话题，生成时忽略上文）
+    ///
+    /// 语义:
+    /// - `None` — 无上一块（首块/独立摘要路径，等同 v1.4 行为），
+    ///   或 LLM 输出非法值被校验丢弃。
+    /// - 供 L2 因果与脉络注入使用，不参与摘要文本本身。
+    pub continuation: Option<String>,
 }
 
 impl MemoryL1 {
@@ -454,6 +466,7 @@ impl MemoryL1 {
             context_json: None,
             situation_strength: None,
             evidence_notes: None,
+            continuation: None,
         }
     }
 
