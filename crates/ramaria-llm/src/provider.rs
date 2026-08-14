@@ -19,8 +19,9 @@
 
 use futures::Stream;
 use ramaria_core::error::{RamariaError, RamariaResult};
-use ramaria_core::traits::{ChatRequest, StreamDelta};
+use ramaria_core::traits::{ChatRequest, LlmResponseCache, StreamDelta};
 use ramaria_core::types::{BackendConfig, MessageRole, ModelCapability};
+use sha2::{Digest, Sha256};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -114,10 +115,14 @@ impl RetryConfig {
 /// - 通过 `OpenAiTransport` 发送 HTTP 请求
 /// - 实现重试逻辑（`with_retry`）
 /// - 将 `ChatRequest`（trait 格式）组装为 OpenAI 消息数组
+/// - 可选接入 LLM 响应精确缓存（v1.5 C 三层生成缓存）：
+///   `chat()` 先按 `sha256(model_id + template_version + prompt)` 查缓存，
+///   命中直接复用（不重复花费 API 账单）；查询/写入失败静默降级走 LLM。
 ///
 /// 安全约束:
 /// - 不持有 API key（由 keychain 在调用时实时获取）
-#[derive(Debug, Clone)]
+/// - 缓存只存响应不存原文输入（key 为哈希，见 `cache_key`）
+#[derive(Clone)]
 pub(crate) struct ProviderBase {
     /// 非敏感后端配置
     pub config: BackendConfig,
@@ -125,6 +130,19 @@ pub(crate) struct ProviderBase {
     transport: Arc<OpenAiTransport>,
     /// 重试配置
     retry_config: RetryConfig,
+    /// LLM 响应精确缓存（v1.5 新增；None = 未启用缓存，行为同 v1.4）
+    cache: Option<Arc<dyn LlmResponseCache>>,
+}
+
+impl std::fmt::Debug for ProviderBase {
+    /// 手动 Debug：缓存为 trait object 不实现 Debug，仅输出是否启用。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderBase")
+            .field("config", &self.config)
+            .field("retry_config", &self.retry_config)
+            .field("cache_enabled", &self.cache.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl ProviderBase {
@@ -144,6 +162,7 @@ impl ProviderBase {
             config,
             transport,
             retry_config: RetryConfig::default(),
+            cache: None,
         })
     }
 
@@ -163,7 +182,21 @@ impl ProviderBase {
             config,
             transport,
             retry_config,
+            cache: None,
         })
+    }
+
+    /// 接入 LLM 响应精确缓存（v1.5 C 三层生成缓存）。
+    ///
+    /// 参数:
+    /// - `cache`: 缓存实现（通常为 `ramaria_storage::SqliteLlmCache`）。
+    ///
+    /// 说明:
+    /// - 幂等：重复调用以最后一次为准。
+    /// - 缓存查询/写入失败均不影响主流程（ProviderBase 内部降级）。
+    pub fn with_cache(mut self, cache: Arc<dyn LlmResponseCache>) -> Self {
+        self.cache = Some(cache);
+        self
     }
 
     /// 返回 ModelCapability 引用（供 `LlmProvider::capability` 使用）。
@@ -195,13 +228,24 @@ impl ProviderBase {
     // 非流式聊天
     // =========================================================
 
-    /// 执行非流式聊天（带重试）。
+    /// 执行非流式聊天（带重试 + 可选精确缓存）。
     ///
     /// 参数:
     /// - `request`: 组装好的聊天请求。
     ///
     /// 返回:
     /// - 完整 assistant 回复文本。
+    ///
+    /// 缓存行为（v1.5 C 三层生成缓存）:
+    /// - 已注入缓存（`with_cache`）且 `request.template_version` 非空时：
+    ///   1. 构造 key = sha256(model_id + template_version + messages JSON)；
+    ///   2. 查询缓存：命中 → 记 `cache_hit=true` 日志并直接返回（不发 HTTP）；
+    ///   3. 未命中 → 正常调 LLM，成功后写入缓存（写失败记 warn 继续）；
+    ///   4. 查询失败 → 记 warn 后直接走 LLM（降级不阻塞）。
+    /// - 未注入缓存或 template_version 为空：行为与 v1.4 完全一致。
+    ///
+    /// 说明:
+    /// - 流式 `chat_stream` 不缓存（交互式场景无重跑语义）。
     pub async fn chat(&self, request: &ChatRequest) -> RamariaResult<String> {
         let messages = build_messages(request);
         let model = &self.config.capability.model_id;
@@ -210,6 +254,76 @@ impl ProviderBase {
         let temperature = request.temperature;
         let max_tokens = request.max_tokens;
 
+        // ---- 精确缓存查询（v1.5）----
+        if let Some(cache) = &self.cache
+            && !request.template_version.trim().is_empty()
+        {
+            let key = cache_key(model, &request.template_version, &messages);
+            match cache.get(&key).await {
+                Ok(Some(cached)) => {
+                    tracing::info!(
+                        provider = self.provider_name(),
+                        model = %model,
+                        template_version = %request.template_version,
+                        cache_key = %key,
+                        cache_hit = true,
+                        "LLM 精确缓存命中，直接复用响应"
+                    );
+                    return Ok(cached);
+                }
+                Ok(None) => {
+                    tracing::debug!(
+                        provider = self.provider_name(),
+                        cache_key = %key,
+                        cache_hit = false,
+                        "LLM 精确缓存未命中，走真实 LLM 调用"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        provider = self.provider_name(),
+                        cache_key = %key,
+                        error = %e,
+                        "LLM 精确缓存查询失败，降级直接走 LLM"
+                    );
+                }
+            }
+
+            let response = self
+                .with_retry(|| async {
+                    self.transport
+                        .chat(&messages, model, temperature, max_tokens)
+                        .await
+                })
+                .await;
+
+            // ---- 成功后写入缓存（写失败不阻断，记 warn 继续）----
+            match &response {
+                Ok(text) => {
+                    if let Err(e) = cache
+                        .put(&key, text, model, &request.template_version)
+                        .await
+                    {
+                        tracing::warn!(
+                            provider = self.provider_name(),
+                            cache_key = %key,
+                            error = %e,
+                            "LLM 精确缓存写入失败（非致命，继续返回响应）"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        provider = self.provider_name(),
+                        error = %e,
+                        "LLM 调用失败，不写入缓存"
+                    );
+                }
+            }
+            return response;
+        }
+
+        // ---- 未启用缓存路径（与 v1.4 行为一致）----
         self.with_retry(|| async {
             self.transport
                 .chat(&messages, model, temperature, max_tokens)
@@ -555,6 +669,40 @@ const INJECTION_PATTERNS: &[&str] = &[
 ];
 
 // =========================================================
+// 精确缓存 key 构造（v1.5 C 三层生成缓存）
+// =========================================================
+
+/// 构造 LLM 精确缓存 key。
+///
+/// 公式（D-V15-008/010）:
+/// `key = sha256_hex(model_id + template_version + canonical_messages_json)`
+///
+/// 参数:
+/// - `model_id`: `BackendConfig.capability.model_id`。
+/// - `template_version`: `ChatRequest.template_version`（prompt 模板版本常量）。
+/// - `messages`: `build_messages` 组装后的 OpenAI 兼容消息数组。
+///
+/// 说明:
+/// - prompt 部分使用消息数组的 canonical JSON（`serde_json::to_string`），
+///   同一请求内容在重跑/重试时序列化结果稳定，保证同 key 同输出。
+/// - 模板版本变更 → key 变化 → 旧缓存不误命中（跨版本隔离）。
+/// - 只输出哈希 hex，不包含任何原文（隐私红线：缓存表只存响应）。
+fn cache_key(model_id: &str, template_version: &str, messages: &[serde_json::Value]) -> String {
+    let prompt_json = serde_json::to_string(messages).unwrap_or_default();
+    let mut hasher = Sha256::new();
+    hasher.update(model_id.as_bytes());
+    hasher.update(template_version.as_bytes());
+    hasher.update(prompt_json.as_bytes());
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
+// =========================================================
 // 消息组装
 // =========================================================
 
@@ -660,6 +808,7 @@ mod tests {
     use super::*;
     use ramaria_core::traits::ChatMessage;
     use ramaria_core::types::LlmProvider;
+    use std::collections::HashMap;
     use uuid::Uuid;
 
     // ---- RetryConfig ----
@@ -730,6 +879,7 @@ mod tests {
             temperature: 0.3,
             max_tokens: 1024,
             request_id: Uuid::new_v4(),
+            template_version: "test".into(),
         };
 
         let messages = build_messages(&request);
@@ -754,6 +904,7 @@ mod tests {
             temperature: 0.3,
             max_tokens: 1024,
             request_id: Uuid::new_v4(),
+            template_version: "test".into(),
         };
 
         let messages = build_messages(&request);
@@ -779,6 +930,7 @@ mod tests {
             temperature: 0.3,
             max_tokens: 1024,
             request_id: Uuid::new_v4(),
+            template_version: "test".into(),
         };
 
         let messages = build_messages(&request);
@@ -852,6 +1004,7 @@ mod tests {
             temperature: 0.3,
             max_tokens: 1024,
             request_id: Uuid::new_v4(),
+            template_version: "test".into(),
         };
 
         let messages = build_messages(&request);
@@ -873,6 +1026,7 @@ mod tests {
             temperature: 0.3,
             max_tokens: 1024,
             request_id: Uuid::new_v4(),
+            template_version: "test".into(),
         };
 
         let messages = build_messages(&request);
@@ -971,4 +1125,169 @@ mod tests {
 
     // （原 retry_does_not_retry_config_privacy_errors 与 should_retry_error_type 中
     //  config/privacy 断言逐字重复，已删除）
+
+    // =========================================================
+    // 精确缓存（v1.5 C 三层生成缓存，T-V15-3-002）
+    // =========================================================
+
+    /// 内存 mock 缓存：记录调用次数，支持注入查询失败。
+    #[derive(Clone)]
+    struct MockCache {
+        store: Arc<std::sync::Mutex<HashMap<String, String>>>,
+        fail_get: bool,
+        get_calls: Arc<std::sync::atomic::AtomicU32>,
+        put_calls: Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    impl MockCache {
+        fn new() -> Self {
+            Self {
+                store: Arc::new(std::sync::Mutex::new(HashMap::new())),
+                fail_get: false,
+                get_calls: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                put_calls: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            }
+        }
+        fn get_count(&self) -> u32 {
+            self.get_calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn put_count(&self) -> u32 {
+            self.put_calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmResponseCache for MockCache {
+        async fn get(&self, key: &str) -> RamariaResult<Option<String>> {
+            self.get_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fail_get {
+                return Err(RamariaError::storage("mock 缓存查询失败（模拟降级）"));
+            }
+            Ok(self.store.lock().unwrap().get(key).cloned())
+        }
+        async fn put(
+            &self,
+            key: &str,
+            response: &str,
+            _model_id: &str,
+            _template_version: &str,
+        ) -> RamariaResult<()> {
+            self.put_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.store
+                .lock()
+                .unwrap()
+                .insert(key.to_string(), response.to_string());
+            Ok(())
+        }
+        async fn count(&self) -> RamariaResult<u64> {
+            Ok(self.store.lock().unwrap().len() as u64)
+        }
+        async fn evict_oldest(&self, _keep: u64) -> RamariaResult<u64> {
+            Ok(0)
+        }
+    }
+
+    /// 构造指向不可达端口的 ProviderBase（端口 9 = discard，几乎必然连接被拒），
+    /// 避免单测意外命中本地真实 LLM 服务。
+    fn base_with_no_llm() -> ProviderBase {
+        let mut config = BackendConfig::lm_studio_default();
+        config.base_url = "http://127.0.0.1:9/v1".to_string();
+        config.capability.model_id = "test-model".to_string();
+        ProviderBase::with_retry_config(
+            config,
+            None,
+            5,
+            RetryConfig {
+                max_retries: 0, // 关闭重试，保证单测快速失败
+                ..Default::default()
+            },
+        )
+        .expect("构造应成功")
+    }
+
+    fn chat_request(template_version: &str) -> ChatRequest {
+        ChatRequest {
+            system_prompt: "你是一个助手".into(),
+            memory_context: None,
+            history: vec![],
+            user_message: "你好".into(),
+            temperature: 0.3,
+            max_tokens: 1024,
+            request_id: Uuid::new_v4(),
+            template_version: template_version.into(),
+        }
+    }
+
+    #[test]
+    fn cache_key_changes_with_template_version() {
+        let messages = serde_json::json!([{"role": "system", "content": "你好"}]);
+        let messages: Vec<serde_json::Value> = vec![messages];
+        let k1 = cache_key("model-a", "v1", &messages);
+        let k1_again = cache_key("model-a", "v1", &messages);
+        let k2 = cache_key("model-a", "v2", &messages);
+        let k3 = cache_key("model-b", "v1", &messages);
+
+        assert_eq!(k1, k1_again, "同输入应产生同 key（重跑稳定）");
+        assert_eq!(k1.len(), 64, "SHA-256 hex 应为 64 字符");
+        assert_ne!(k1, k2, "模板版本变更 → key 变化，跨版本不误命中");
+        assert_ne!(k1, k3, "模型变更 → key 变化");
+    }
+
+    #[tokio::test]
+    async fn cache_hit_reuses_response_without_calling_llm() {
+        let cache = MockCache::new();
+        // 预置命中：key 需与 chat() 内部构造一致——先跑一次未命中路径不可行
+        // （会发 HTTP），因此直接通过 chat 第一次调用写入（LLM 失败不写）。
+        // 这里改为：手动预置 store 为空 + 直接验证"查询被调用且未命中时走 LLM"。
+        // 命中路径通过预置 store 模拟：
+        let request = chat_request("test");
+        let messages = build_messages(&request);
+        let key = cache_key("test-model", "test", &messages);
+        cache
+            .store
+            .lock()
+            .unwrap()
+            .insert(key.clone(), "cached-reply".to_string());
+
+        let base = base_with_no_llm().with_cache(Arc::new(cache.clone()));
+        let reply = base.chat(&request).await.expect("命中缓存应直接返回");
+        assert_eq!(reply, "cached-reply");
+        assert_eq!(cache.get_count(), 1, "应查询缓存一次");
+        assert_eq!(cache.put_count(), 0, "命中时不写入缓存");
+    }
+
+    #[tokio::test]
+    async fn cache_miss_falls_through_to_llm_and_does_not_write_on_failure() {
+        let cache = MockCache::new();
+        let base = base_with_no_llm().with_cache(Arc::new(cache.clone()));
+        let result = base.chat(&chat_request("test")).await;
+        assert!(result.is_err(), "未命中且 LLM 不可达时应返回错误");
+        assert_eq!(cache.get_count(), 1, "应查询缓存一次");
+        assert_eq!(cache.put_count(), 0, "LLM 失败时不写入缓存");
+    }
+
+    #[tokio::test]
+    async fn cache_query_failure_degrades_to_llm() {
+        let mut cache = MockCache::new();
+        cache.fail_get = true;
+        let base = base_with_no_llm().with_cache(Arc::new(cache.clone()));
+        let result = base.chat(&chat_request("test")).await;
+        assert!(
+            result.is_err(),
+            "查询失败降级走 LLM；LLM 不可达时返回错误而非缓存错误"
+        );
+        assert_eq!(cache.put_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn empty_template_version_skips_cache() {
+        let cache = MockCache::new();
+        let base = base_with_no_llm().with_cache(Arc::new(cache.clone()));
+        let result = base.chat(&chat_request("")).await;
+        assert!(result.is_err(), "模板版本为空时跳过缓存直接走 LLM");
+        assert_eq!(cache.get_count(), 0, "不应查询缓存");
+        assert_eq!(cache.put_count(), 0);
+    }
 }

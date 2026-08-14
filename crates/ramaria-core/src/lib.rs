@@ -20,7 +20,7 @@ pub use config::RamariaConfig;
 pub use error::{RamariaError, RamariaResult};
 pub use traits::{
     ChatMessage, ChatRequest, Embedding, EmbeddingModelInfo, EmbeddingProvider,
-    LlmProvider as LlmProviderTrait, StorageBackend, StreamDelta,
+    LlmProvider as LlmProviderTrait, LlmResponseCache, StorageBackend, StreamDelta,
 };
 pub use types::{
     AppState, BackendConfig, ClusterSnapshot, EventRelation, EventRelationKind, EventSource,

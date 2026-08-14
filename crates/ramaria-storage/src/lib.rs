@@ -8,12 +8,13 @@
 //! - 公共 API 与 `StorageBackend` trait 一致，供 app/memory 层依赖注入使用
 //! - ID 类型对齐: TEXT 主键表用 Uuid，INTEGER AUTOINCREMENT 表用 i64
 
+use ramaria_core::config::CacheEviction;
 use ramaria_core::error::RamariaResult;
 use ramaria_core::traits::StorageBackend;
 use ramaria_core::types::{
     BackendConfig, ClusterSnapshot, EventRelation, EventSource, MemoryEvent, MemoryL1, Message,
     Persona, PersonaExample, PersonaFact, PersonalityTrait, PrivacyConsent, ProfileField, Session,
-    TraitEvidence, TraitStatus, UttBlock,
+    TraitEvidence, TraitStatus, UttBlock, now_ms,
 };
 use sqlx::SqlitePool;
 use uuid::Uuid;
@@ -570,6 +571,119 @@ impl StorageBackend for SqliteStorage {
     ) -> RamariaResult<Vec<(i64, i64, i64, String)>> {
         repo::graph::list_edges(&self.pool, source_id).await
     }
+
+    // =========================================================
+    // L2 聚类去重指纹（v1.5 三层生成缓存 C，T-V15-3-003）
+    // =========================================================
+
+    async fn l2_fingerprint_exists(
+        &self,
+        persona_uid: &str,
+        fingerprint: &str,
+    ) -> RamariaResult<bool> {
+        repo::l2_fingerprint::exists(&self.pool, persona_uid, fingerprint).await
+    }
+
+    async fn save_l2_fingerprint(&self, persona_uid: &str, fingerprint: &str) -> RamariaResult<()> {
+        repo::l2_fingerprint::insert(&self.pool, persona_uid, fingerprint, now_ms()).await
+    }
+
+    /// 查询 persona 最近事件（按 created_at 倒序，供相似度去重比对）。
+    async fn list_recent_events(
+        &self,
+        persona_uid: &str,
+        limit: u32,
+    ) -> RamariaResult<Vec<MemoryEvent>> {
+        repo::events::list_recent_by_persona(&self.pool, persona_uid, limit).await
+    }
+}
+
+// =========================================================
+// SqliteLlmCache —— LlmResponseCache trait 实现
+// =========================================================
+
+/// SQLite 实现的 LLM 响应精确缓存。
+///
+/// 职责:
+/// - 实现 `ramaria_core::traits::LlmResponseCache`，供 `ramaria-llm` 的
+///   `ProviderBase` 注入使用（`llm_response_cache` 表）。
+/// - 写入后按 `[cache].max_entries` 容量上限自动淘汰（LRU/FIFO），
+///   防止表无限增长；淘汰失败仅记 warn（不阻塞主流程）。
+///
+/// 安全约束:
+/// - 只存响应，不存原文输入（key 为哈希，见 migration 注释）。
+pub struct SqliteLlmCache {
+    pool: SqlitePool,
+    /// 容量上限（条目数）；0 表示不限制（仅测试/特殊场景）。
+    max_entries: u64,
+    /// 淘汰策略：true = FIFO（按 created_at），false = LRU（按 last_accessed_at）。
+    fifo: bool,
+}
+
+impl SqliteLlmCache {
+    /// 创建缓存实例。
+    ///
+    /// 参数:
+    /// - `pool`: 数据库连接池（与主存储共用，保证同库事务一致）。
+    /// - `max_entries`: 容量上限（`[cache].max_entries`）。
+    /// - `eviction`: 淘汰策略（`[cache].eviction`，lru | fifo）。
+    pub fn new(pool: SqlitePool, max_entries: u64, eviction: CacheEviction) -> Self {
+        Self {
+            pool,
+            max_entries,
+            fifo: eviction == CacheEviction::Fifo,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ramaria_core::traits::LlmResponseCache for SqliteLlmCache {
+    async fn get(&self, key: &str) -> RamariaResult<Option<String>> {
+        let now = now_ms();
+        match repo::llm_response_cache::get(&self.pool, key, now).await? {
+            Some(entry) => Ok(Some(entry.response)),
+            None => Ok(None),
+        }
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        response: &str,
+        model_id: &str,
+        template_version: &str,
+    ) -> RamariaResult<()> {
+        let entry = repo::llm_response_cache::LlmCacheEntry {
+            key: key.to_string(),
+            response: response.to_string(),
+            model_id: model_id.to_string(),
+            template_version: template_version.to_string(),
+            created_at: 0,
+            last_accessed_at: 0,
+            hit_count: 0,
+        };
+        repo::llm_response_cache::put(&self.pool, &entry, now_ms()).await?;
+
+        // 容量自淘汰（v1.5 T-V15-3-004）：写入后若超出上限，按配置策略淘汰最旧条目。
+        // 淘汰失败仅记 warn——缓存淘汰是优化而非正确性约束，不阻塞响应返回。
+        if self.max_entries > 0
+            && let Err(e) =
+                repo::llm_response_cache::evict_oldest(&self.pool, self.max_entries, self.fifo)
+                    .await
+        {
+            tracing::warn!(error = %e, max_entries = self.max_entries, "LLM 响应缓存容量淘汰失败（非致命）");
+        }
+        Ok(())
+    }
+
+    async fn count(&self) -> RamariaResult<u64> {
+        repo::llm_response_cache::count(&self.pool).await
+    }
+
+    async fn evict_oldest(&self, keep: u64) -> RamariaResult<u64> {
+        // 使用实例配置的淘汰策略（来自 [cache].eviction）。
+        repo::llm_response_cache::evict_oldest(&self.pool, keep, self.fifo).await
+    }
 }
 
 // =========================================================
@@ -579,6 +693,7 @@ impl StorageBackend for SqliteStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ramaria_core::traits::LlmResponseCache;
     use ramaria_core::types::{
         EventRelationKind, EvidenceDirection, FactSource, MessageRole, MessageSource, PersonaKind,
         TraitLayer, TraitSource, TraitStatus, now_ms,
@@ -2168,5 +2283,83 @@ mod tests {
         assert_eq!(got.context.as_deref(), Some("前文"));
         assert_eq!(got.length, 5, "length = reply 字符数");
         assert!(!got.selected);
+    }
+
+    // =========================================================
+    // SqliteLlmCache 容量自淘汰（v1.5 C，T-V15-3-004）
+    // =========================================================
+
+    /// 写入三条记录（间隔 2ms 保证时间戳可区分顺序），
+    /// 返回各 key 供断言。
+    async fn fill_cache(cache: &SqliteLlmCache) {
+        for (key, resp) in [("k1", "r1"), ("k2", "r2"), ("k3", "r3")] {
+            cache
+                .put(key, resp, "test-model", "test-version")
+                .await
+                .unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn llm_cache_evicts_lru_beyond_capacity() {
+        let pool = database::init_test_pool().await.expect("测试库初始化失败");
+        let cache = SqliteLlmCache::new(pool, 2, CacheEviction::Lru);
+        fill_cache(&cache).await;
+
+        // 容量 2，写入 3 条 → 自动淘汰最旧 1 条
+        assert_eq!(cache.count().await.unwrap(), 2);
+        assert!(
+            cache.get("k1").await.unwrap().is_none(),
+            "LRU 应淘汰最早写入的 k1"
+        );
+        assert_eq!(cache.get("k3").await.unwrap().as_deref(), Some("r3"));
+    }
+
+    #[tokio::test]
+    async fn llm_cache_evicts_fifo_beyond_capacity() {
+        let pool = database::init_test_pool().await.expect("测试库初始化失败");
+        let cache = SqliteLlmCache::new(pool, 2, CacheEviction::Fifo);
+        fill_cache(&cache).await;
+
+        // FIFO 按写入顺序淘汰：即便 k3 先被访问，淘汰的仍是 early 写入的 k1
+        assert_eq!(cache.count().await.unwrap(), 2);
+        assert!(
+            cache.get("k1").await.unwrap().is_none(),
+            "FIFO 应按写入时间淘汰最早的 k1"
+        );
+        assert_eq!(cache.get("k3").await.unwrap().as_deref(), Some("r3"));
+    }
+
+    #[tokio::test]
+    async fn llm_cache_unlimited_capacity_keeps_all() {
+        let pool = database::init_test_pool().await.expect("测试库初始化失败");
+        // max_entries=0 表示不限制容量
+        let cache = SqliteLlmCache::new(pool, 0, CacheEviction::Lru);
+        fill_cache(&cache).await;
+        assert_eq!(cache.count().await.unwrap(), 3, "不限制容量时不应淘汰");
+    }
+
+    #[tokio::test]
+    async fn llm_cache_hit_refreshes_lru_order() {
+        let pool = database::init_test_pool().await.expect("测试库初始化失败");
+        let cache = SqliteLlmCache::new(pool, 2, CacheEviction::Lru);
+        for (key, resp) in [("k1", "r1"), ("k2", "r2")] {
+            cache.put(key, resp, "m", "v").await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        // 命中 k1 刷新其访问时间 → 之后写入 k3 时应淘汰 k2（而非 k1）
+        assert_eq!(cache.get("k1").await.unwrap().as_deref(), Some("r1"));
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        cache.put("k3", "r3", "m", "v").await.unwrap();
+        assert_eq!(cache.count().await.unwrap(), 2);
+        assert!(
+            cache.get("k1").await.unwrap().is_some(),
+            "被命中的 k1 应保留"
+        );
+        assert!(
+            cache.get("k2").await.unwrap().is_none(),
+            "LRU 应淘汰未命中的 k2"
+        );
     }
 }

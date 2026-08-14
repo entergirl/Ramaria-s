@@ -128,19 +128,40 @@ pub async fn run_setup(
         .map_err(|e| format!("设置流程失败: {}", e))?;
 
     // ---- ★ 热更新 LLM provider，确保后续对话使用新配置 ----
+    // 复用 App 持有的精确缓存实例（v1.5 C）：切换后端后缓存不失效
+    let llm_cache = state.app.llm_cache();
     let new_llm: Arc<dyn ramaria_core::traits::LlmProvider> = match llm_provider {
-        ramaria_core::types::LlmProvider::LmStudio => Arc::new(
-            ramaria_llm::lm_studio::LmStudioProvider::new(config.clone())
-                .map_err(|e| format!("创建 LM Studio provider 失败: {}", e))?,
-        ),
-        ramaria_core::types::LlmProvider::DeepSeek => Arc::new(
-            ramaria_llm::deepseek::DeepSeekProvider::new(config.clone(), state.app.keychain_arc())
-                .map_err(|e| format!("创建 DeepSeek provider 失败: {}", e))?,
-        ),
-        ramaria_core::types::LlmProvider::OpenAI => Arc::new(
-            ramaria_llm::openai::OpenAIProvider::new(config.clone(), state.app.keychain_arc())
-                .map_err(|e| format!("创建 OpenAI provider 失败: {}", e))?,
-        ),
+        ramaria_core::types::LlmProvider::LmStudio => {
+            let provider = ramaria_llm::lm_studio::LmStudioProvider::new(config.clone())
+                .map_err(|e| format!("创建 LM Studio provider 失败: {}", e))?;
+            let provider = match &llm_cache {
+                Some(cache) => provider.with_cache(Arc::clone(cache)),
+                None => provider,
+            };
+            Arc::new(provider)
+        }
+        ramaria_core::types::LlmProvider::DeepSeek => {
+            let provider = ramaria_llm::deepseek::DeepSeekProvider::new(
+                config.clone(),
+                state.app.keychain_arc(),
+            )
+            .map_err(|e| format!("创建 DeepSeek provider 失败: {}", e))?;
+            let provider = match &llm_cache {
+                Some(cache) => provider.with_cache(Arc::clone(cache)),
+                None => provider,
+            };
+            Arc::new(provider)
+        }
+        ramaria_core::types::LlmProvider::OpenAI => {
+            let provider =
+                ramaria_llm::openai::OpenAIProvider::new(config.clone(), state.app.keychain_arc())
+                    .map_err(|e| format!("创建 OpenAI provider 失败: {}", e))?;
+            let provider = match &llm_cache {
+                Some(cache) => provider.with_cache(Arc::clone(cache)),
+                None => provider,
+            };
+            Arc::new(provider)
+        }
         _ => return Err(format!("不支持的 provider: {}", provider)),
     };
     state.app.update_llm(new_llm);

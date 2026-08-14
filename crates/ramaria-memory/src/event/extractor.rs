@@ -20,6 +20,8 @@ use ramaria_core::{
     StorageBackend,
 };
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -157,6 +159,22 @@ pub struct EventExtractorConfig {
     /// 簇间 LLM 请求间隔（毫秒），用于避免触发远程 API 速率限制。
     /// 默认 0（不等待），建议对 DeepSeek 等有速率限制的 API 设为 500~1000。
     pub cluster_delay_ms: u64,
+    /// L2 聚类去重指纹开关（v1.5 三层生成缓存 C，T-V15-3-003）。
+    ///
+    /// `true` 时:
+    /// - 同一 L1 集合（已聚类且无产出）通过指纹直接跳过，不重复聚类；
+    /// - 新提取事件与 persona 最近已有事件做相似度去重（近似重复不保存）。
+    ///
+    /// `false` 时: 事件提取行为回退 v1.4（不做集合跳过/相似度去重）。
+    ///
+    /// 来源: `[cache].l2_fingerprint_enabled`（默认开启）。
+    pub l2_fingerprint_enabled: bool,
+    /// 新提取事件与已有事件的相似度去重判定阈值（0.0..=1.0）。
+    /// 相似度 ≥ 此值时判为近似重复、跳过保存。来源: `[cache].l2_similarity_threshold`。
+    pub l2_similarity_threshold: f64,
+    /// 相似度去重比对的最远事件条数（取 persona 最近 N 条，按时间倒序）。
+    /// 来源: `[cache].l2_recent_events_limit`。
+    pub l2_recent_events_limit: u32,
 }
 
 impl Default for EventExtractorConfig {
@@ -173,6 +191,9 @@ impl Default for EventExtractorConfig {
             context_retriever: ContextRetrieverConfig::default(),
             other_persona_name: None,
             cluster_delay_ms: 0,
+            l2_fingerprint_enabled: true,
+            l2_similarity_threshold: 0.95,
+            l2_recent_events_limit: 200,
         }
     }
 }
@@ -287,6 +308,49 @@ impl<'a> EventExtractor<'a> {
             return Ok(vec![]);
         }
 
+        // 2.5 L2 聚类去重指纹检查（v1.5 三层生成缓存 C，T-V15-3-003）
+        //
+        // 语义: 若同一 L1 集合此前已被聚类且无任何事件产出（已登记指纹），
+        // 则本次直接跳过——重跑/重试/失败恢复场景不重复聚类、不重复花费 API 账单。
+        // 集合一旦变化（新增/移除 L1），指纹必然变化，自动触发重新聚类。
+        //
+        // 降级: 指纹查询失败仅记 warn 并继续正常聚类（不阻塞主流程）。
+        let fingerprint = compute_l1_set_fingerprint(&l1_list);
+        let fingerprint_enabled = self.config.l2_fingerprint_enabled;
+        if fingerprint_enabled {
+            match self
+                .storage
+                .l2_fingerprint_exists(persona_uid, &fingerprint)
+                .await
+            {
+                Ok(true) => {
+                    info!(
+                        %persona_uid,
+                        fingerprint = %fingerprint,
+                        l1_count = l1_list.len(),
+                        "L2 集合指纹命中：同集合已聚类且无产出，跳过本次事件提取（不重复聚类）"
+                    );
+                    return Ok(vec![]);
+                }
+                Ok(false) => {
+                    debug!(
+                        %persona_uid,
+                        fingerprint = %fingerprint,
+                        l1_count = l1_list.len(),
+                        "L2 集合指纹未命中，正常聚类"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        %persona_uid,
+                        fingerprint = %fingerprint,
+                        error = %e,
+                        "L2 集合指纹查询失败，降级正常聚类（不阻塞）"
+                    );
+                }
+            }
+        }
+
         // 3. 转换为 L1Item 并通过 TopicBatcher 语义聚类
         let l1_items: Vec<L1Item> = l1_list.iter().map(L1Item::from).collect();
         let now = now_ms();
@@ -294,6 +358,9 @@ impl<'a> EventExtractor<'a> {
 
         if clusters.is_empty() {
             debug!(%persona_uid, "TopicBatcher 未产出簇，跳过事件提取");
+            // 无产出也登记指纹：下次同集合直接跳过（不重复聚类）
+            self.record_fingerprint_if_no_output(persona_uid, &fingerprint, 0)
+                .await;
             return Ok(vec![]);
         }
 
@@ -318,6 +385,30 @@ impl<'a> EventExtractor<'a> {
         // 4. 对每个簇独立调用 LLM 提取事件
         let mut all_events: Vec<MemoryEvent> = Vec::new();
         let mut all_l1_ids: Vec<Uuid> = Vec::new();
+
+        // 4.0 相似度去重事件池（v1.5）：取 persona 最近 N 条已有事件，
+        // 供新提取事件做近似重复比对（重跑场景不产生重复事件）。
+        // 降级: 查询失败记 warn 后置空池（跳过相似度去重，不阻塞提取）。
+        let dedup_pool = if fingerprint_enabled {
+            match self
+                .storage
+                .list_recent_events(persona_uid, self.config.l2_recent_events_limit)
+                .await
+            {
+                Ok(pool) => pool,
+                Err(e) => {
+                    warn!(
+                        %persona_uid,
+                        error = %e,
+                        "相似度去重：查询最近事件失败，本次跳过相似度去重（不阻塞）"
+                    );
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        let mut dedup_skipped = 0usize;
 
         for (ci, cluster) in clusters.iter().enumerate() {
             let cluster_l1_ids: Vec<Uuid> = cluster.l1_items.iter().map(|i| i.id).collect();
@@ -372,6 +463,7 @@ impl<'a> EventExtractor<'a> {
                 temperature: self.config.temperature,
                 max_tokens: self.config.max_tokens,
                 request_id,
+                template_version: crate::prompt::PROMPT_TEMPLATE_VERSION.to_string(),
             };
 
             let raw_response = match self.llm.chat(&llm_request).await {
@@ -457,6 +549,24 @@ impl<'a> EventExtractor<'a> {
                     avg_situation,
                 );
 
+                // v1.5 相似度去重：与 persona 最近已有事件比对，
+                // 近似重复（相似度 ≥ 阈值）的事件不保存（不重复入库）。
+                if !dedup_pool.is_empty()
+                    && dedup_pool.iter().any(|existing| {
+                        event_text_similarity(&event, existing)
+                            >= self.config.l2_similarity_threshold
+                    })
+                {
+                    dedup_skipped += 1;
+                    debug!(
+                        %persona_uid,
+                        title = %event.title,
+                        threshold = self.config.l2_similarity_threshold,
+                        "L2 相似度去重：与已有事件近似重复，跳过保存"
+                    );
+                    continue;
+                }
+
                 // paraphrase
                 if let Some(ref attitude) = event.attitude
                     && !attitude.trim().is_empty()
@@ -525,14 +635,58 @@ impl<'a> EventExtractor<'a> {
             warn!(%persona_uid, error=%e, "标记 L1 absorbed 失败（非致命）");
         }
 
+        // 5.5 无产出登记指纹（v1.5）：
+        // 全部簇均未产出事件时登记 L1 集合指纹，下次同集合直接跳过。
+        self.record_fingerprint_if_no_output(persona_uid, &fingerprint, all_events.len())
+            .await;
+
         info!(
             %persona_uid,
             event_count = all_events.len(),
             absorbed_l1 = all_l1_ids.len(),
+            dedup_skipped,
             "事件提取完成"
         );
 
         Ok(all_events)
+    }
+
+    /// 记录"已聚类且无产出"的 L1 集合指纹（v1.5 L2 聚类去重指纹）。
+    ///
+    /// 语义:
+    /// - 仅当指纹开关开启且 `event_count == 0`（无事件产出）时登记；
+    ///   有产出时 L1 会被标记 absorbed，下次集合变化指纹自然失效，无需登记。
+    /// - 登记失败仅记 warn（降级：下次会重复聚类，不阻塞主流程）。
+    async fn record_fingerprint_if_no_output(
+        &self,
+        persona_uid: &str,
+        fingerprint: &str,
+        event_count: usize,
+    ) {
+        if !self.config.l2_fingerprint_enabled || event_count > 0 {
+            return;
+        }
+        match self
+            .storage
+            .save_l2_fingerprint(persona_uid, fingerprint)
+            .await
+        {
+            Ok(_) => {
+                info!(
+                    %persona_uid,
+                    fingerprint = %fingerprint,
+                    "L2 无产出：已登记 L1 集合指纹（同集合下次直接跳过）"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    %persona_uid,
+                    fingerprint = %fingerprint,
+                    error = %e,
+                    "L2 指纹登记失败（下次将重复聚类，不阻塞）"
+                );
+            }
+        }
     }
 
     /// 对单个簇执行降级处理。
@@ -903,6 +1057,108 @@ impl<'a> EventExtractor<'a> {
             index_version: None,
         }
     }
+}
+
+// =========================================================
+// L2 聚类去重指纹辅助函数（v1.5 三层生成缓存 C，T-V15-3-003）
+// =========================================================
+
+/// 计算 L1 集合指纹：`sha256(按 L1 id 升序拼接的 id 列表)` 的 hex 摘要。
+///
+/// 性质:
+/// - **顺序无关**：先排序再拼接，同一集合无论 L1 读取顺序如何均得同指纹。
+/// - **集合敏感性**：新增/移除任一 L1 → 指纹必然变化 → 自动触发重新聚类
+///   （同集合跳过、集合变更重聚类的核心）。
+/// - **不落原文**：仅由 L1 id（UUID）推导，不含对话原文（隐私红线）。
+pub(crate) fn compute_l1_set_fingerprint(l1_list: &[MemoryL1]) -> String {
+    let mut ids: Vec<String> = l1_list.iter().map(|l| l.id.to_string()).collect();
+    ids.sort();
+    let joined = ids.join("|");
+    let mut hasher = Sha256::new();
+    hasher.update(joined.as_bytes());
+    hex_digest(&hasher.finalize())
+}
+
+/// 将 SHA-256 摘要编码为 64 字符小写 hex。
+fn hex_digest(digest: &[u8]) -> String {
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
+/// 计算两个事件的去重相似度（0.0..=1.0）。
+///
+/// 取「标题+摘要字符 bigram Jaccard」与「关键词集合 Jaccard」的**较大值**:
+/// - 重跑/失败恢复场景: LLM 重新生成的标题/摘要措辞可能略有差异，
+///   但关键词提取通常一致 → 关键词通道命中（高相似 → 判重）；
+/// - 关键词缺失或两侧关键词不同的边缘场景 → 文本 bigram 通道兜底。
+pub(crate) fn event_text_similarity(a: &MemoryEvent, b: &MemoryEvent) -> f64 {
+    let bigram = char_bigram_jaccard(
+        &format!("{} {}", a.title, a.summary),
+        &format!("{} {}", b.title, b.summary),
+    );
+    let kw = keyword_jaccard(a.keywords.as_deref(), b.keywords.as_deref());
+    bigram.max(kw)
+}
+
+/// 字符 bigram Jaccard 相似度。
+///
+/// 归一化（小写 + 仅保留字母数字/空白）后按 Unicode 字符取相邻二元组，
+/// 对中英文混合文本均有效；两文本均无 bigram 时返回 0.0（不误判为相似）。
+fn char_bigram_jaccard(text_a: &str, text_b: &str) -> f64 {
+    let set_a = char_bigrams(&normalize_for_dedup(text_a));
+    let set_b = char_bigrams(&normalize_for_dedup(text_b));
+    if set_a.is_empty() || set_b.is_empty() {
+        return 0.0;
+    }
+    let inter = set_a.intersection(&set_b).count();
+    let union = set_a.union(&set_b).count();
+    inter as f64 / union as f64
+}
+
+/// 归一化去重文本：小写化并仅保留字母数字与空白（去除标点干扰）。
+fn normalize_for_dedup(text: &str) -> String {
+    text.chars()
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+/// 取文本的 Unicode 字符二元组集合（相邻两字符为一组）。
+fn char_bigrams(normalized: &str) -> HashSet<String> {
+    let chars: Vec<char> = normalized.chars().collect();
+    chars
+        .windows(2)
+        .map(|w| w.iter().collect::<String>())
+        .collect()
+}
+
+/// 关键词集合 Jaccard 相似度（关键词为逗号分隔字符串）。
+///
+/// 任一侧关键词缺失/为空时返回 0.0（信息不足不判重）。
+fn keyword_jaccard(kw_a: Option<&str>, kw_b: Option<&str>) -> f64 {
+    let set_a = split_keywords(kw_a);
+    let set_b = split_keywords(kw_b);
+    if set_a.is_empty() || set_b.is_empty() {
+        return 0.0;
+    }
+    let inter = set_a.intersection(&set_b).count();
+    let union = set_a.union(&set_b).count();
+    inter as f64 / union as f64
+}
+
+/// 将逗号分隔的关键词字符串解析为去空集合。
+fn split_keywords(kw: Option<&str>) -> HashSet<String> {
+    kw.map(|s| {
+        s.split(',')
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty())
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 // =========================================================
@@ -1452,5 +1708,145 @@ mod tests {
         let result = resp.into_result().unwrap();
         assert_eq!(result.events.len(), 1);
         assert!(result.relations.is_none());
+    }
+
+    // ---- L2 聚类去重指纹（v1.5 T-V15-3-003）----
+
+    /// 构造测试用 L1（仅指纹/相似度计算需要的字段有值）。
+    fn l1_for_fp(id: &str, summary: &str) -> MemoryL1 {
+        MemoryL1 {
+            id: Uuid::parse_str(id).expect("合法 UUID"),
+            session_id: Uuid::new_v4(),
+            summary: summary.to_string(),
+            keywords: None,
+            time_period: None,
+            atmosphere: None,
+            valence: 0.0,
+            salience: 0.5,
+            absorbed: false,
+            created_at: now_ms(),
+            last_accessed_at: None,
+            persona_uid: None,
+            context_json: None,
+            situation_strength: None,
+            evidence_notes: None,
+        }
+    }
+
+    #[test]
+    fn fingerprint_is_deterministic_and_order_independent() {
+        let a = l1_for_fp("00000000-0000-0000-0000-000000000001", "摘要 A");
+        let b = l1_for_fp("00000000-0000-0000-0000-000000000002", "摘要 B");
+        let c = l1_for_fp("00000000-0000-0000-0000-000000000003", "摘要 C");
+
+        // 同集合（不同读取顺序）→ 同指纹
+        let fp_abc = compute_l1_set_fingerprint(&[a.clone(), b.clone(), c.clone()]);
+        let fp_cba = compute_l1_set_fingerprint(&[c.clone(), b.clone(), a.clone()]);
+        assert_eq!(fp_abc, fp_cba, "集合指纹应与读取顺序无关");
+        assert_eq!(fp_abc.len(), 64, "SHA-256 hex 应为 64 字符");
+
+        // 集合变化（移除/新增 L1）→ 指纹变化（自动触发重聚类）
+        let fp_ab = compute_l1_set_fingerprint(&[a, b]);
+        assert_ne!(fp_abc, fp_ab, "移除 L1 后指纹应变化");
+    }
+
+    #[test]
+    fn fingerprint_ignores_l1_content_but_is_stable_across_calls() {
+        // 指纹仅由 L1 id 决定（隐私：不含摘要原文）；
+        // 同一 id 集合即使摘要文本变化，指纹也稳定（保证重跑同集合稳定跳过）。
+        let id = "00000000-0000-0000-0000-00000000000a";
+        let fp1 = compute_l1_set_fingerprint(&[l1_for_fp(id, "第一次摘要")]);
+        let fp2 = compute_l1_set_fingerprint(&[l1_for_fp(id, "重新生成的摘要")]);
+        assert_eq!(fp1, fp2);
+    }
+
+    /// 构造测试用事件（title/summary/keywords 为相似度输入）。
+    fn event_for_sim(title: &str, summary: &str, keywords: Option<&str>) -> MemoryEvent {
+        MemoryEvent {
+            id: 0,
+            persona_uid: "p1".into(),
+            title: title.into(),
+            summary: summary.into(),
+            keywords: keywords.map(|s| s.to_string()),
+            participants: None,
+            start: 0,
+            end: 0,
+            confidence: 0.5,
+            salience: 0.5,
+            valence: 0.0,
+            presentation: Presentation::Mixed,
+            share: 0.5,
+            attitude: None,
+            paraphrase: None,
+            absorbed: 0,
+            situation_strength: None,
+            motives: None,
+            created_at: 0,
+            last_accessed_at: None,
+            indexed_at: None,
+            index_version: None,
+        }
+    }
+
+    #[test]
+    fn event_similarity_identical_text_is_high() {
+        let a = event_for_sim(
+            "项目延期",
+            "用户表示项目延期到月底，原因是需求频繁变更",
+            Some("项目,延期,需求"),
+        );
+        let b = event_for_sim(
+            "项目延期",
+            "用户表示项目延期到月底，原因是需求频繁变更",
+            Some("项目,延期,需求"),
+        );
+        let sim = event_text_similarity(&a, &b);
+        assert!(sim >= 0.99, "完全相同事件相似度应接近 1.0，实际 {sim}");
+    }
+
+    #[test]
+    fn event_similarity_rerun_slight_wording_diff_hits_keyword_channel() {
+        // 重跑场景：标题/摘要措辞有差异，但关键词一致 → 关键词通道保证判重
+        let a = event_for_sim(
+            "项目延期",
+            "用户说项目要延期到月底，因为需求总在变",
+            Some("项目,延期,需求"),
+        );
+        let b = event_for_sim(
+            "项目延期",
+            "用户表示项目延期至月底，由于需求频繁变更",
+            Some("项目,延期,需求"),
+        );
+        let sim = event_text_similarity(&a, &b);
+        assert!(sim >= 0.95, "关键词一致应判重，实际 {sim}");
+    }
+
+    #[test]
+    fn event_similarity_unrelated_events_are_low() {
+        let a = event_for_sim(
+            "周末爬山",
+            "用户周末和朋友去爬山，天气很好",
+            Some("爬山,周末,天气"),
+        );
+        let b = event_for_sim("项目延期", "用户表示项目延期到月底", Some("项目,延期,需求"));
+        let sim = event_text_similarity(&a, &b);
+        assert!(sim < 0.95, "无关事件相似度应低于阈值，实际 {sim}");
+    }
+
+    #[test]
+    fn event_similarity_missing_keywords_falls_back_to_text() {
+        // 关键词缺失 → 纯文本 bigram 通道兜底
+        let a = event_for_sim("加班到深夜", "用户连续加班到深夜，身体疲惫", None);
+        let b = event_for_sim("加班到深夜", "用户连续加班到深夜，身体非常疲惫", None);
+        let sim = event_text_similarity(&a, &b);
+        assert!(sim > 0.7, "文本高度相似应通过 bigram 通道判高，实际 {sim}");
+        assert!(sim < 1.0, "存在措辞差异，不应完全相等");
+    }
+
+    #[test]
+    fn event_similarity_empty_text_is_zero() {
+        let a = event_for_sim("", "", None);
+        let b = event_for_sim("", "", None);
+        assert_eq!(event_text_similarity(&a, &b), 0.0, "空文本不应误判为相似");
     }
 }

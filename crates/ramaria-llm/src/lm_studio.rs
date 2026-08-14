@@ -17,6 +17,7 @@ use ramaria_core::error::RamariaResult;
 use ramaria_core::traits::{ChatRequest, LlmProvider, StreamDelta};
 use ramaria_core::types::{BackendConfig, ModelCapability};
 use std::pin::Pin;
+use std::sync::Arc;
 
 use crate::provider::{ProviderBase, RetryConfig};
 
@@ -68,6 +69,19 @@ impl LmStudioProvider {
     ) -> RamariaResult<Self> {
         let base = ProviderBase::with_retry_config(config, None, timeout_secs, retry_config)?;
         Ok(Self { base })
+    }
+
+    /// 接入 LLM 响应精确缓存（v1.5 C 三层生成缓存）。
+    ///
+    /// 参数:
+    /// - `cache`: 缓存实现（通常为 `ramaria_storage::SqliteLlmCache`）。
+    ///
+    /// 说明:
+    /// - 缓存查询/写入失败均静默降级走真实 LLM，不阻塞主流程。
+    pub fn with_cache(self, cache: Arc<dyn ramaria_core::traits::LlmResponseCache>) -> Self {
+        Self {
+            base: self.base.with_cache(cache),
+        }
     }
 }
 

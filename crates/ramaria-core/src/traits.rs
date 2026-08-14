@@ -72,6 +72,14 @@ pub struct ChatRequest {
     pub max_tokens: u32,
     /// 请求标识，用于流式事件串联
     pub request_id: Uuid,
+    /// Prompt 模板版本（D-V15-010）。
+    ///
+    /// 来源: `ramaria_memory::prompt::PROMPT_TEMPLATE_VERSION` 常量，
+    /// 随 `prompt/builder.rs`/`layers.rs` 变更递增。
+    ///
+    /// 用途: 参与精确缓存 key 构造（`sha256(model_id + template_version + prompt)`），
+    /// 防止模板变更后跨版本误命中旧缓存。
+    pub template_version: String,
 }
 
 /// 对话消息（简化为 trait 所需格式）。
@@ -250,6 +258,69 @@ pub trait EmbeddingProvider: Send + Sync {
 
     /// 模型是否已下载且可用。
     fn is_available(&self) -> bool;
+}
+
+// =========================================================
+// LLM 响应缓存抽象层（v1.5 三层生成缓存 C）
+// =========================================================
+
+/// LLM 响应精确缓存接口。
+///
+/// 职责:
+/// - 供 `ramaria-llm` 的 `ProviderBase` 在调用 LLM 前查询、成功后写入缓存，
+///   覆盖重跑/重试/失败恢复导入与生成管线场景（不重复花费 API 账单）。
+/// - 由 `ramaria-storage` 的 `SqliteLlmCache` 实现（`llm_response_cache` 表）。
+///
+/// 安全约束（隐私红线）:
+/// - **只存响应，不存原文输入**：`key` 为 `sha256(model_id + template_version + prompt)`
+///   哈希，`put` 只接收响应文本与元数据，不接收 prompt 原文。
+/// - 命中缓存不改变输出语义（同 key 同输出）。
+///
+/// 降级约定:
+/// - 查询失败由调用方（ProviderBase）记 warn 后直接走 LLM，不阻塞主流程。
+/// - 写入失败由调用方记 warn 后继续。
+#[async_trait]
+pub trait LlmResponseCache: Send + Sync {
+    /// 按 key 查询缓存响应，并更新访问时间与命中计数。
+    ///
+    /// 参数:
+    /// - `key`: 缓存键（SHA-256 hex）。
+    ///
+    /// 返回:
+    /// - `Ok(Some(response))`: 命中。
+    /// - `Ok(None)`: 未命中。
+    /// - `Err`: 查询失败（调用方应降级直接走 LLM）。
+    async fn get(&self, key: &str) -> RamariaResult<Option<String>>;
+
+    /// 写入一条缓存响应。
+    ///
+    /// 参数:
+    /// - `key`: 缓存键（SHA-256 hex）。
+    /// - `response`: LLM 响应文本（唯一存储的内容）。
+    /// - `model_id`: 后端模型标识（`BackendConfig.capability.model_id`）。
+    /// - `template_version`: Prompt 模板版本（`ChatRequest.template_version`）。
+    ///
+    /// 说明:
+    /// - 同 key 已存在时覆盖（INSERT OR REPLACE）。
+    async fn put(
+        &self,
+        key: &str,
+        response: &str,
+        model_id: &str,
+        template_version: &str,
+    ) -> RamariaResult<()>;
+
+    /// 返回当前缓存条目数。
+    async fn count(&self) -> RamariaResult<u64>;
+
+    /// 按淘汰策略删除最旧条目，使剩余条目数不超过 `keep`。
+    ///
+    /// 参数:
+    /// - `keep`: 保留上限（`[cache].max_entries`）。
+    ///
+    /// 返回:
+    /// - 实际删除的条目数。
+    async fn evict_oldest(&self, keep: u64) -> RamariaResult<u64>;
 }
 
 // =========================================================
@@ -731,6 +802,51 @@ pub trait StorageBackend: Send + Sync {
     ) -> RamariaResult<i64>;
     async fn list_graph_edges(&self, source_id: i64)
     -> RamariaResult<Vec<(i64, i64, i64, String)>>;
+
+    // =========================================================
+    // L2 聚类去重指纹（v1.5 三层生成缓存 C，T-V15-3-003）
+    // =========================================================
+    //
+    // 记录"已聚类且无产出"的 L1 集合指纹（SHA-256 集合指纹），
+    // 同集合未吸收 L1 不重复聚类；集合变更（新 L1 加入）后指纹变化自动重聚类。
+    // 默认实现返回"不存在/不记录"，存量 mock 无需改动即可编译。
+
+    /// 判断指定 persona 是否已记录过该 L1 集合指纹。
+    ///
+    /// 默认实现返回 `Ok(false)`（未记录，正常聚类）。
+    async fn l2_fingerprint_exists(
+        &self,
+        _persona_uid: &str,
+        _fingerprint: &str,
+    ) -> RamariaResult<bool> {
+        Ok(false)
+    }
+
+    /// 记录一次"已聚类且无产出"的 L1 集合指纹。
+    ///
+    /// 默认实现返回 `Ok(())`（不持久化，仅保证可编译）。
+    async fn save_l2_fingerprint(
+        &self,
+        _persona_uid: &str,
+        _fingerprint: &str,
+    ) -> RamariaResult<()> {
+        Ok(())
+    }
+
+    /// 查询 persona 最近的事件（供新事件相似度去重比对）。
+    ///
+    /// 参数:
+    /// - `persona_uid`: 目标人格。
+    /// - `limit`: 最多返回条数（默认实现忽略）。
+    ///
+    /// 默认实现返回空列表（不做相似度去重，保证可编译）。
+    async fn list_recent_events(
+        &self,
+        _persona_uid: &str,
+        _limit: u32,
+    ) -> RamariaResult<Vec<MemoryEvent>> {
+        Ok(Vec::new())
+    }
 }
 
 // =========================================================
@@ -757,10 +873,12 @@ mod tests {
             temperature: 0.3,
             max_tokens: 1024,
             request_id: Uuid::new_v4(),
+            template_version: "test".into(),
         };
         assert_eq!(req.temperature, 0.3);
         assert!(req.memory_context.is_some());
         assert!(!req.history.is_empty());
+        assert!(!req.template_version.is_empty());
     }
 
     #[test]

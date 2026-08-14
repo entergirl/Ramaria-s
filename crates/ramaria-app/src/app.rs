@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use futures::Stream;
 use ramaria_core::error::RamariaResult;
-use ramaria_core::traits::{EmbeddingProvider, LlmProvider, StorageBackend};
+use ramaria_core::traits::{EmbeddingProvider, LlmProvider, LlmResponseCache, StorageBackend};
 use ramaria_core::types::AppState;
 use ramaria_llm::keychain::Keychain;
 use ramaria_memory::retriever::Retriever;
@@ -73,6 +73,11 @@ pub struct App {
     pub(crate) keychain: Arc<Keychain>,
     /// Session 生命周期编排器（活跃 session 追踪、空闲检测、管线触发）
     pub(crate) lifecycle: Arc<SessionLifecycle>,
+    /// LLM 响应精确缓存（v1.5 三层生成缓存 C）。
+    ///
+    /// 由调用方（desktop/cli）在初始化时注入；热更新 provider 时
+    /// 通过 `llm_cache()` 复用同一缓存实例，保证后端切换后缓存不失效。
+    pub(crate) llm_cache: Mutex<Option<Arc<dyn LlmResponseCache>>>,
     /// 后台空闲检测线程句柄
     pub(crate) idle_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// 后台 L2/L3 定时检查线程句柄
@@ -137,6 +142,7 @@ impl App {
             state: Mutex::new(AppState::NeedsSetup),
             keychain,
             lifecycle,
+            llm_cache: Mutex::new(None),
             idle_handle: Mutex::new(None),
             scheduler_handle: Mutex::new(None),
         }
@@ -153,6 +159,37 @@ impl App {
         keychain: Arc<Keychain>,
     ) -> Self {
         Self::new(storage, llm, None, config, keychain)
+    }
+
+    // =========================================================
+    // LLM 响应精确缓存（v1.5 三层生成缓存 C，D-V15-008）
+    // =========================================================
+
+    /// 注入 LLM 响应精确缓存实例。
+    ///
+    /// 调用时机:
+    /// - 初始化时由调用方（desktop/cli）在创建 provider 后立即调用；
+    /// - 缓存实例与 provider 内注入的是同一 `Arc`，供热更新路径复用
+    ///   （见 `llm_cache()`）。
+    ///
+    /// 说明:
+    /// - `None` 表示缓存未启用（`[cache].enabled=false`），行为回退 v1.4。
+    pub fn set_llm_cache(&self, cache: Option<Arc<dyn LlmResponseCache>>) {
+        let mut guard = self.llm_cache.lock().unwrap_or_else(|e| e.into_inner());
+        tracing::info!(cache_enabled = cache.is_some(), "LLM 响应精确缓存注入");
+        *guard = cache;
+    }
+
+    /// 获取当前 LLM 响应精确缓存（克隆 Arc，供锁外调用）。
+    ///
+    /// 用途:
+    /// - 后端配置热更新（`update_llm`）时复用同一缓存实例，
+    ///   保证切换 provider 后缓存不失效（重跑导入仍命中）。
+    pub fn llm_cache(&self) -> Option<Arc<dyn LlmResponseCache>> {
+        self.llm_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// 启动后台任务（空闲检测 + L2/L3 定时检查）。

@@ -594,6 +594,7 @@ async fn call_llm_and_get_text(
             .step_max_tokens
             .min(capability.context_window.saturating_sub(2048)),
         request_id: Uuid::new_v4(),
+        template_version: crate::prompt::PROMPT_TEMPLATE_VERSION.to_string(),
     };
 
     debug!(

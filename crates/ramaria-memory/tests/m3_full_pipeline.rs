@@ -275,3 +275,199 @@ async fn llm_failure_degrades_to_builtin_event() {
         .expect("降级路径不应失败");
     assert!(!events.is_empty(), "降级应产出内置事件");
 }
+
+// =========================================================
+// v1.5 L2 聚类去重指纹（T-V15-3-003/004，三层生成缓存 C）
+// =========================================================
+
+/// 同集合跳过：L1 集合已聚类且无产出（无簇）→ 登记指纹 →
+/// 再次提取同集合直接跳过（不重复聚类、不调用 LLM）。
+#[tokio::test]
+async fn l2_fingerprint_same_set_no_cluster_skips_second_extraction() {
+    let storage = mem_storage().await;
+    let persona_uid = create_persona(&storage, "char-fp", "指纹角色").await;
+    let session = create_session(&storage, Some(&persona_uid)).await;
+
+    // 5 条关键词完全不同的未吸收 L1：满足触发阈值（≥5）但无法聚类成簇
+    // （min_cluster_size=3，孤立点入 Pending Buffer 不成簇）→ "已聚类且无产出"。
+    let topics = ["量子物理", "美食探店", "健身计划", "电影观感", "宠物养护"];
+    for (i, topic) in topics.iter().enumerate() {
+        storage
+            .save_memory_l1(&make_l1(
+                session.id,
+                &format!("{topic}摘要{i}"),
+                topic,
+                &persona_uid,
+                0.5,
+                now_ms() - 60_000 + i as i64 * 1000,
+            ))
+            .await
+            .unwrap();
+    }
+
+    let llm = MockLlm::new("{\"events\": []}");
+    let mut extractor = EventExtractor::new(&llm, &storage, EventExtractorConfig::default());
+
+    // 第一次：聚类无簇产出 → 登记指纹，不应有任何 LLM 调用
+    let events = extractor
+        .extract_events(&persona_uid)
+        .await
+        .expect("首次提取成功");
+    assert!(events.is_empty());
+    assert_eq!(llm.call_count(), 0, "无簇产出时不应调用 LLM");
+
+    // 第二次：同集合 → 指纹命中 → 直接跳过（不重复聚类、不调 LLM）
+    let calls_before = llm.call_count();
+    let events2 = extractor
+        .extract_events(&persona_uid)
+        .await
+        .expect("二次提取成功");
+    assert!(events2.is_empty());
+    assert_eq!(
+        llm.call_count(),
+        calls_before,
+        "同集合应跳过：不重复聚类、不调用 LLM"
+    );
+}
+
+/// 集合变更重聚类：同集合跳过之后新增 L1 → 集合指纹变化 →
+/// 自动重新聚类（LLM 调用恢复，不被旧指纹误拦）。
+#[tokio::test]
+async fn l2_fingerprint_set_change_reclusters() {
+    let storage = mem_storage().await;
+    let persona_uid = create_persona(&storage, "char-fp2", "指纹角色二").await;
+    let session = create_session(&storage, Some(&persona_uid)).await;
+
+    let topics = ["量子物理", "美食探店", "健身计划", "电影观感", "宠物养护"];
+    for (i, topic) in topics.iter().enumerate() {
+        storage
+            .save_memory_l1(&make_l1(
+                session.id,
+                &format!("{topic}摘要{i}"),
+                topic,
+                &persona_uid,
+                0.5,
+                now_ms() - 60_000 + i as i64 * 1000,
+            ))
+            .await
+            .unwrap();
+    }
+
+    let llm = MockLlm::new("{\"events\": []}");
+    let mut extractor = EventExtractor::new(&llm, &storage, EventExtractorConfig::default());
+
+    // 第一次：无簇 → 登记指纹
+    assert!(
+        extractor
+            .extract_events(&persona_uid)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // 第二次：同集合 → 跳过
+    assert!(
+        extractor
+            .extract_events(&persona_uid)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let calls_after_skip = llm.call_count();
+    assert_eq!(calls_after_skip, 0, "同集合跳过不应调用 LLM");
+
+    // 集合变化：新增 1 条同主题 L1（可与前 5 条之一聚簇）→ 指纹变化 → 重新聚类
+    storage
+        .save_memory_l1(&make_l1(
+            session.id,
+            "量子物理摘要-新增",
+            "量子物理",
+            &persona_uid,
+            0.5,
+            now_ms(),
+        ))
+        .await
+        .unwrap();
+
+    let events = extractor
+        .extract_events(&persona_uid)
+        .await
+        .expect("集合变更后提取成功");
+    // 新集合中"量子物理"关键词有 2 条（< min_cluster_size=3），仍可能无簇；
+    // 关键断言是 LLM 被重新调用（指纹失效），而非事件产出。
+    let _ = events;
+    assert!(
+        llm.call_count() > calls_after_skip,
+        "集合变更应触发重新聚类（旧指纹不应误拦）"
+    );
+}
+
+/// 相似度去重：新提取事件与 persona 最近已有事件近似重复（≥ 阈值）→
+/// 跳过保存（不重复入库），且全部去重后登记指纹。
+#[tokio::test]
+async fn l2_fingerprint_similar_event_deduped() {
+    use ramaria_core::types::MemoryEvent;
+
+    let storage = mem_storage().await;
+    let persona_uid = create_persona(&storage, "char-dedup", "去重角色").await;
+    let session = create_session(&storage, Some(&persona_uid)).await;
+
+    // 预置 1 条已有事件（模拟此前已入库的同内容事件）
+    let mut existing = MemoryEvent::new(
+        persona_uid.clone(),
+        "项目延期".into(),
+        "用户讨论项目延期安排，需求变更频繁。".into(),
+        now_ms() - 1000,
+        now_ms(),
+    );
+    existing.keywords = Some("工作,项目,延期".into());
+    storage.save_event(&existing).await.unwrap();
+
+    // 5 条同主题 L1 → 1 个簇 → LLM 返回与已有事件完全相同内容的事件
+    for i in 0..5 {
+        storage
+            .save_memory_l1(&make_l1(
+                session.id,
+                &format!("项目延期摘要{i}"),
+                "工作,项目,延期",
+                &persona_uid,
+                0.5,
+                now_ms() - 60_000 + i as i64 * 1000,
+            ))
+            .await
+            .unwrap();
+    }
+
+    // 与预置事件 title/summary/keywords 完全一致 → 相似度 ≈ 1.0 → 判重
+    const DUP_LLM_RESPONSE: &str = r#"{
+      "events": [
+        {
+          "title": "项目延期",
+          "summary": "用户讨论项目延期安排，需求变更频繁。",
+          "keywords": "工作,项目,延期",
+          "confidence": 0.8,
+          "salience": 0.7,
+          "valence": -0.2,
+          "presentation": "subjective",
+          "share": 0.6,
+          "attitude": null
+        }
+      ]
+    }"#;
+    let llm = MockLlm::new(DUP_LLM_RESPONSE);
+    let mut extractor = EventExtractor::new(&llm, &storage, EventExtractorConfig::default());
+
+    let events = extractor
+        .extract_events(&persona_uid)
+        .await
+        .expect("提取成功");
+    assert!(events.is_empty(), "近似重复事件应全部被去重跳过");
+    assert_eq!(llm.call_count(), 1, "应恰好聚类 1 簇并调用 1 次 LLM");
+
+    // 库中事件数不变（仍只有预置的 1 条），未产生重复入库
+    let recent = storage
+        .list_recent_events(&persona_uid, 10)
+        .await
+        .expect("查询最近事件成功");
+    assert_eq!(recent.len(), 1, "相似事件不应重复入库");
+    assert_eq!(recent[0].title, "项目延期");
+}

@@ -446,6 +446,7 @@ pub async fn initialize_rama_persona(
         temperature: config.temperature,
         max_tokens: config.max_tokens,
         request_id: Uuid::new_v4(),
+        template_version: crate::prompt::PROMPT_TEMPLATE_VERSION.to_string(),
     };
 
     let raw_response = match llm.chat(&request).await {

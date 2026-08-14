@@ -183,6 +183,7 @@ impl<'a> L1Summarizer<'a> {
             temperature: self.config.temperature,
             max_tokens: self.config.max_tokens,
             request_id,
+            template_version: crate::prompt::PROMPT_TEMPLATE_VERSION.to_string(),
         };
 
         let raw_response = self.llm.chat(&llm_request).await.map_err(|e| {

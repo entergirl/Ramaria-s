@@ -161,6 +161,7 @@ mod tests {
             temperature: 0.7,
             max_tokens: 4096,
             request_id,
+            template_version: ramaria_memory::prompt::PROMPT_TEMPLATE_VERSION.to_string(),
         });
         data
     }

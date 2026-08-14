@@ -29,6 +29,7 @@ futures.workspace = true
 async-trait.workspace = true
 uuid.workspace = true
 bytes = "1"
+sha2.workspace = true
 
 # Embedding 支持（可选 feature — 推荐使用 embedding-native）
 candle-core = { workspace = true, optional = true }

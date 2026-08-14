@@ -483,35 +483,8 @@ async fn init_app(db_path: PathBuf) -> anyhow::Result<(Arc<ramaria_app::App>, sq
     // Step 3: 创建 Keychain
     let keychain = Arc::new(ramaria_llm::keychain::Keychain::new());
 
-    // Step 4: 创建 LLM Provider
-    let llm: Arc<dyn ramaria_core::LlmProviderTrait> = match backend_config.provider {
-        ramaria_core::types::LlmProvider::LmStudio => {
-            let provider = ramaria_llm::lm_studio::LmStudioProvider::new(backend_config.clone())
-                .context("创建 LM Studio provider 失败")?;
-            Arc::new(provider)
-        }
-        ramaria_core::types::LlmProvider::DeepSeek => {
-            let provider = ramaria_llm::deepseek::DeepSeekProvider::new(
-                backend_config.clone(),
-                Arc::clone(&keychain),
-            )
-            .context("创建 DeepSeek provider 失败")?;
-            Arc::new(provider)
-        }
-        ramaria_core::types::LlmProvider::OpenAI => {
-            let provider = ramaria_llm::openai::OpenAIProvider::new(
-                backend_config.clone(),
-                Arc::clone(&keychain),
-            )
-            .context("创建 OpenAI provider 失败")?;
-            Arc::new(provider)
-        }
-        _ => {
-            anyhow::bail!("不支持的 LLM provider");
-        }
-    };
-
-    // Step 5: 构造 App（填充实际路径到配置中，供诊断导出等模块使用）
+    // Step 4: 构造 App 配置（填充实际路径；缓存策略取默认 [cache] 配置组，
+    // CLI 以默认值运行：精确缓存默认开启，详见 config/default.toml）
     let data_dir = db_path
         .parent()
         .map(|p| p.to_path_buf())
@@ -521,10 +494,68 @@ async fn init_app(db_path: PathBuf) -> anyhow::Result<(Arc<ramaria_app::App>, sq
     config.paths.log_dir = data_dir.join("logs").to_string_lossy().to_string();
     config.paths.config_dir = data_dir.to_string_lossy().to_string();
     config.paths.vector_index_dir = data_dir.join("vectors").to_string_lossy().to_string();
+
+    // Step 5: 创建 LLM Provider（按 [cache] 配置注入精确缓存，v1.5 C，D-V15-008）
+    //
+    // - `config.cache.enabled`（默认 true）：创建 SqliteLlmCache 并注入 provider，
+    //   重跑导入/重试/失败恢复场景命中缓存不重复花费 API 账单；
+    // - 缓存实例同时保存到 App（set_llm_cache），供热更新路径复用。
+    let llm_cache: Option<Arc<dyn ramaria_core::traits::LlmResponseCache>> = if config.cache.enabled
+    {
+        Some(Arc::new(ramaria_storage::SqliteLlmCache::new(
+            pool.clone(),
+            config.cache.max_entries,
+            config.cache.eviction,
+        )))
+    } else {
+        None
+    };
+    let llm: Arc<dyn ramaria_core::LlmProviderTrait> = match backend_config.provider {
+        ramaria_core::types::LlmProvider::LmStudio => {
+            let provider = ramaria_llm::lm_studio::LmStudioProvider::new(backend_config.clone())
+                .context("创建 LM Studio provider 失败")?;
+            let provider = match &llm_cache {
+                Some(cache) => provider.with_cache(Arc::clone(cache)),
+                None => provider,
+            };
+            Arc::new(provider)
+        }
+        ramaria_core::types::LlmProvider::DeepSeek => {
+            let provider = ramaria_llm::deepseek::DeepSeekProvider::new(
+                backend_config.clone(),
+                Arc::clone(&keychain),
+            )
+            .context("创建 DeepSeek provider 失败")?;
+            let provider = match &llm_cache {
+                Some(cache) => provider.with_cache(Arc::clone(cache)),
+                None => provider,
+            };
+            Arc::new(provider)
+        }
+        ramaria_core::types::LlmProvider::OpenAI => {
+            let provider = ramaria_llm::openai::OpenAIProvider::new(
+                backend_config.clone(),
+                Arc::clone(&keychain),
+            )
+            .context("创建 OpenAI provider 失败")?;
+            let provider = match &llm_cache {
+                Some(cache) => provider.with_cache(Arc::clone(cache)),
+                None => provider,
+            };
+            Arc::new(provider)
+        }
+        _ => {
+            anyhow::bail!("不支持的 LLM provider");
+        }
+    };
+
+    // Step 6: 构造 App
     let app = ramaria_app::App::new(storage, llm, None, config, keychain);
+    // 保存缓存实例引用：后端热更新（update_llm）时复用同一缓存
+    app.set_llm_cache(llm_cache);
     let app = Arc::new(app);
 
-    // Step 6: 刷新状态
+    // Step 7: 刷新状态
     app.refresh_setup_state()
         .await
         .context("刷新应用状态失败")?;

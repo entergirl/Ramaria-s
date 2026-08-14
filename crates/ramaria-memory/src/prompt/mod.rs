@@ -11,3 +11,16 @@ pub mod builder;
 pub mod example_selector;
 pub mod injection_guard;
 pub mod layers;
+
+/// Prompt 模板版本常量（D-V15-010）。
+///
+/// 约定:
+/// - 随 `prompt/builder.rs` / `prompt/layers.rs` 的模板结构或语义变更时递增，
+///   格式 `YYYYMMDD-vX.Y.Z`（日期 + 语义版本）。
+/// - 参与 LLM 精确缓存 key 构造（`sha256(model_id + template_version + prompt)`），
+///   模板变更后旧缓存自动失效，防止跨版本误命中（回归红线：缓存命中不改变输出语义）。
+///
+/// 修改提醒:
+/// - 修改本常量时同步检查 `ramaria-app` / `ramaria-memory` 各 ChatRequest 构造点
+///   是否统一引用本常量（不应散落字面量）。
+pub const PROMPT_TEMPLATE_VERSION: &str = "20260810-v1.5.0";

@@ -114,6 +114,10 @@ pub struct RamariaConfig {
     #[serde(default)]
     pub bridge: BridgeConfig,
 
+    /// 三层生成缓存（v1.5 新增，D-V15-008）
+    #[serde(default)]
+    pub cache: CacheConfig,
+
     /// 杂项（预留扩展位，当前无字段）
     #[serde(default)]
     pub misc: MiscConfig,
@@ -158,6 +162,7 @@ impl Default for RamariaConfig {
             utt: UttConfig::default(),
             examples: ExamplesConfig::default(),
             bridge: BridgeConfig::default(),
+            cache: CacheConfig::default(),
             misc: MiscConfig::default(),
         }
     }
@@ -867,6 +872,83 @@ impl Default for BridgeConfig {
 }
 
 // =========================================================
+// 缓存配置（v1.5 新增，三层生成缓存 C，D-V15-008/010）
+// =========================================================
+
+/// 缓存淘汰策略。
+///
+/// 说明:
+/// - `Lru`: 最近最少使用（按 `last_accessed_at` 淘汰，命中会刷新访问时间）。
+/// - `Fifo`: 先入先出（按 `created_at` 淘汰，与命中无关）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheEviction {
+    /// 最近最少使用（默认）
+    #[default]
+    Lru,
+    /// 先入先出
+    Fifo,
+}
+
+impl CacheEviction {
+    /// 返回策略的 snake_case 名称（供日志与展示）。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Lru => "lru",
+            Self::Fifo => "fifo",
+        }
+    }
+}
+
+/// 三层生成缓存配置（v1.5 新增）。
+///
+/// 职责:
+/// - 控制 LLM 响应精确缓存（`llm_response_cache` 表）与 L2 聚类去重指纹。
+/// - `enabled=false` 时精确缓存关闭，LLM 调用行为回退 v1.4（回归红线）。
+/// - L2 指纹可独立开关；关闭后事件提取回退 v1.4（不做集合跳过/相似度去重）。
+///
+/// 兼容性说明:
+/// - struct 级 `#[serde(default)]`：`[cache]` 表只写部分键时回退默认值。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CacheConfig {
+    /// 精确缓存总开关。
+    /// `false` 时 LLM 调用不查询/不写入缓存（行为同 v1.4）。
+    pub enabled: bool,
+    /// `llm_response_cache` 表容量上限（条目数）。
+    /// 写入后超出上限按 `eviction` 策略淘汰最旧条目。
+    pub max_entries: u64,
+    /// 淘汰策略（lru | fifo）。
+    pub eviction: CacheEviction,
+    /// L2 聚类去重指纹开关。
+    /// `false` 时不做「同集合跳过」与「新事件相似度去重」（行为回退 v1.4）。
+    pub l2_fingerprint_enabled: bool,
+    /// 新提取事件与已有事件相似度去重的判定阈值（0.0..=1.0）。
+    /// 相似度 ≥ 此值时判为重复、跳过保存。
+    pub l2_similarity_threshold: f64,
+    /// 相似度去重比对的最远事件条数（取 persona 最近 N 条）。
+    pub l2_recent_events_limit: u32,
+}
+
+impl Default for CacheConfig {
+    /// 创建默认缓存配置。
+    ///
+    /// 返回:
+    /// - 精确缓存默认开启（D-V15-008：默认开启），容量 10000 条，LRU 淘汰。
+    /// - L2 指纹默认开启，相似度阈值 0.95，比对最近 200 条事件。
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_entries: 10_000,
+            eviction: CacheEviction::Lru,
+            l2_fingerprint_enabled: true,
+            l2_similarity_threshold: 0.95,
+            l2_recent_events_limit: 200,
+        }
+    }
+}
+
+// =========================================================
 // 单元测试
 // =========================================================
 
@@ -905,6 +987,14 @@ mod tests {
 
         // 日志默认
         assert!(!cfg.logging.log_full_prompt);
+
+        // 缓存默认（v1.5）：精确缓存与 L2 指纹默认开启
+        assert!(cfg.cache.enabled);
+        assert_eq!(cfg.cache.max_entries, 10_000);
+        assert_eq!(cfg.cache.eviction, CacheEviction::Lru);
+        assert!(cfg.cache.l2_fingerprint_enabled);
+        assert!((cfg.cache.l2_similarity_threshold - 0.95).abs() < f64::EPSILON);
+        assert_eq!(cfg.cache.l2_recent_events_limit, 200);
     }
 
     #[test]
@@ -920,6 +1010,14 @@ mod tests {
         assert_eq!(cfg.backend.provider, back.backend.provider);
         assert!(
             (cfg.decay.salience_multiplier - back.decay.salience_multiplier).abs() < f64::EPSILON
+        );
+        // 缓存组 roundtrip（v1.5）
+        assert_eq!(cfg.cache.enabled, back.cache.enabled);
+        assert_eq!(cfg.cache.max_entries, back.cache.max_entries);
+        assert_eq!(cfg.cache.eviction, back.cache.eviction);
+        assert_eq!(
+            cfg.cache.l2_fingerprint_enabled,
+            back.cache.l2_fingerprint_enabled
         );
     }
 

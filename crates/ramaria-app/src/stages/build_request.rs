@@ -84,6 +84,7 @@ impl PipelineStage for StageBuildRequest {
             temperature: backend_config.temperature,
             max_tokens: backend_config.max_tokens,
             request_id: input.request_id,
+            template_version: ramaria_memory::prompt::PROMPT_TEMPLATE_VERSION.to_string(),
         };
 
         tracing::debug!(

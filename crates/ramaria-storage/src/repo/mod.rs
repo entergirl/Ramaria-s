@@ -56,6 +56,8 @@ pub mod examples;
 pub mod facts;
 pub mod graph;
 pub mod keyword;
+pub mod l2_fingerprint;
+pub mod llm_response_cache;
 pub mod memory_l1;
 pub mod messages;
 pub mod pending_push;

@@ -178,6 +178,7 @@ impl App {
             temperature: cfg.temperature,
             max_tokens: cfg.max_tokens,
             request_id,
+            template_version: ramaria_memory::prompt::PROMPT_TEMPLATE_VERSION.to_string(),
         };
 
         tracing::info!(

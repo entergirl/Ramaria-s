@@ -84,6 +84,20 @@ impl DeepSeekProvider {
         Ok(Self { base, keychain })
     }
 
+    /// 接入 LLM 响应精确缓存（v1.5 C 三层生成缓存）。
+    ///
+    /// 参数:
+    /// - `cache`: 缓存实现（通常为 `ramaria_storage::SqliteLlmCache`）。
+    ///
+    /// 说明:
+    /// - 缓存查询/写入失败均静默降级走真实 LLM，不阻塞主流程。
+    pub fn with_cache(self, cache: Arc<dyn ramaria_core::traits::LlmResponseCache>) -> Self {
+        Self {
+            base: self.base.with_cache(cache),
+            keychain: self.keychain,
+        }
+    }
+
     /// 从 keychain 获取 API key。
     fn resolve_api_key(&self) -> RamariaResult<Option<String>> {
         self.keychain.get_api_key("deepseek")

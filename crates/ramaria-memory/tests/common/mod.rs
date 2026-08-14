@@ -32,6 +32,8 @@ pub struct MockLlm {
     config: BackendConfig,
     /// 最近一次 chat 请求（prompt 断言用）
     last_request: Mutex<Option<ChatRequest>>,
+    /// 累计 chat 调用次数（v1.5 L2 指纹测试断言"不重复调用 LLM"用）
+    calls: std::sync::atomic::AtomicU32,
 }
 
 impl MockLlm {
@@ -42,12 +44,18 @@ impl MockLlm {
             capability: config.capability.clone(),
             config,
             last_request: Mutex::new(None),
+            calls: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
     /// 最近一次 chat 请求内容。
     pub fn last_request(&self) -> Option<ChatRequest> {
         self.last_request.lock().unwrap().clone()
+    }
+
+    /// 累计 chat 调用次数（供"同集合跳过时不重复调用 LLM"断言）。
+    pub fn call_count(&self) -> u32 {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// 预设/更新 chat 回复。
@@ -59,6 +67,7 @@ impl MockLlm {
 #[async_trait]
 impl LlmProviderTrait for MockLlm {
     async fn chat(&self, request: &ChatRequest) -> RamariaResult<String> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         *self.last_request.lock().unwrap() = Some(request.clone());
         Ok(self.reply.lock().unwrap().clone())
     }

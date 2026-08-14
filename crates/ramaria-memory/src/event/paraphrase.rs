@@ -77,6 +77,7 @@ pub async fn generate_paraphrase(
         temperature: config.temperature,
         max_tokens: config.max_tokens,
         request_id,
+        template_version: crate::prompt::PROMPT_TEMPLATE_VERSION.to_string(),
     };
 
     // 调用 LLM

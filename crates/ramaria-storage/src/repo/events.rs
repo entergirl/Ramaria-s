@@ -136,6 +136,29 @@ pub async fn list_unabsorbed_events(
     Ok(rows.into_iter().map(|r| r.into_event()).collect())
 }
 
+/// 查询 persona 最近事件（按 created_at 倒序），供新事件相似度去重比对。
+///
+/// 参数:
+/// - `limit`: 最多返回条数。
+pub async fn list_recent_by_persona(
+    pool: &SqlitePool,
+    persona_uid: &str,
+    limit: u32,
+) -> RamariaResult<Vec<MemoryEvent>> {
+    let rows = sqlx::query_as::<_, EventRow>(
+        "SELECT id, persona_uid, title, summary, keywords, participants, start, \"end\",
+         confidence, salience, valence, presentation, share, attitude, paraphrase,
+         absorbed, situation_strength, motives, created_at, last_accessed_at, indexed_at, index_version
+         FROM memory_events WHERE persona_uid = ? ORDER BY created_at DESC LIMIT ?",
+    )
+    .bind(persona_uid)
+    .bind(limit as i64)
+    .fetch_all(pool)
+    .await
+    .storage_err("查询最近事件失败")?;
+    Ok(rows.into_iter().map(|r| r.into_event()).collect())
+}
+
 /// 标记事件已被 L3 推断吸收。
 ///
 /// 将 `absorbed` 设为 1，使这些事件不再出现在 `list_unabsorbed_events` 中。

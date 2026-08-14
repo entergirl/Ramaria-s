@@ -144,6 +144,10 @@ impl SessionLifecycle {
                     temperature: self.config.event_extraction.temperature,
                     max_tokens: self.config.event_extraction.max_tokens,
                     max_events: self.config.event_extraction.max_events,
+                    // v1.5 L2 聚类去重指纹（T-V15-3-003/004）：从 [cache] 配置组传播
+                    l2_fingerprint_enabled: self.config.cache.l2_fingerprint_enabled,
+                    l2_similarity_threshold: self.config.cache.l2_similarity_threshold,
+                    l2_recent_events_limit: self.config.cache.l2_recent_events_limit,
                     ..Default::default()
                 };
                 let mut extractor = EventExtractor::new(llm, storage, config);
