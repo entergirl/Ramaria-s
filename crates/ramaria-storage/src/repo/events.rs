@@ -119,6 +119,25 @@ pub async fn list_events_by_persona(
     Ok(rows.into_iter().map(|r| r.into_event()).collect())
 }
 
+/// 按 id 查询单条事件（证据链溯源用）。
+///
+/// 返回:
+/// - `Ok(Some(event))`: 命中。
+/// - `Ok(None)`: 未命中（不视为错误）。
+pub async fn get(pool: &SqlitePool, id: i64) -> RamariaResult<Option<MemoryEvent>> {
+    let row = sqlx::query_as::<_, EventRow>(
+        "SELECT id, persona_uid, title, summary, keywords, participants, start, \"end\",
+         confidence, salience, valence, presentation, share, attitude, paraphrase,
+         absorbed, situation_strength, motives, created_at, last_accessed_at, indexed_at, index_version
+         FROM memory_events WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .storage_err("查询事件失败")?;
+    Ok(row.map(|r| r.into_event()))
+}
+
 pub async fn list_unabsorbed_events(
     pool: &SqlitePool,
     persona_uid: &str,

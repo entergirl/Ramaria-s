@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 use async_trait::async_trait;
 use futures::{Stream, stream};
+use ramaria_core::behavior::{BehaviorRule, FeedbackLog};
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::traits::{
     ChatRequest, EmbeddingModelInfo, EmbeddingProvider, LlmProvider, StorageBackend, StreamDelta,
@@ -59,6 +60,17 @@ pub struct MockStorage {
     snapshot_seq: AtomicI64,
     /// utt 话语块（按 session_id 索引，v1.4 M5：桥接/封存链路测试）
     utt_blocks: Mutex<HashMap<Uuid, Vec<UttBlock>>>,
+    /// 事件（v1.5 M5：行为学习/增量更新测试）
+    events: Mutex<HashMap<i64, MemoryEvent>>,
+    events_by_persona: Mutex<HashMap<String, Vec<i64>>>,
+    event_seq: AtomicI64,
+    /// 行为规则（v1.5 M5 D7）
+    behavior_rules: Mutex<HashMap<i64, BehaviorRule>>,
+    rules_by_persona: Mutex<HashMap<String, Vec<i64>>>,
+    rule_seq: AtomicI64,
+    /// 反馈日志（v1.5 M5 H1）
+    feedback_logs: Mutex<Vec<FeedbackLog>>,
+    feedback_seq: AtomicI64,
 }
 
 impl Default for MockStorage {
@@ -88,6 +100,14 @@ impl MockStorage {
             cluster_snapshots: Mutex::new(Vec::new()),
             snapshot_seq: AtomicI64::new(1),
             utt_blocks: Mutex::new(HashMap::new()),
+            events: Mutex::new(HashMap::new()),
+            events_by_persona: Mutex::new(HashMap::new()),
+            event_seq: AtomicI64::new(1),
+            behavior_rules: Mutex::new(HashMap::new()),
+            rules_by_persona: Mutex::new(HashMap::new()),
+            rule_seq: AtomicI64::new(1),
+            feedback_logs: Mutex::new(Vec::new()),
+            feedback_seq: AtomicI64::new(1),
         }
     }
 
@@ -491,24 +511,58 @@ impl StorageBackend for MockStorage {
         Ok(())
     }
 
-    async fn save_event(&self, _event: &MemoryEvent) -> RamariaResult<i64> {
-        Ok(1)
+    async fn save_event(&self, event: &MemoryEvent) -> RamariaResult<i64> {
+        let id = self
+            .event_seq
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut ev = event.clone();
+        ev.id = id;
+        self.events.lock().unwrap().insert(id, ev.clone());
+        self.events_by_persona
+            .lock()
+            .unwrap()
+            .entry(ev.persona_uid.clone())
+            .or_default()
+            .push(id);
+        Ok(id)
+    }
+
+    async fn get_event(&self, id: i64) -> RamariaResult<Option<MemoryEvent>> {
+        Ok(self.events.lock().unwrap().get(&id).cloned())
     }
 
     async fn list_events_by_persona(
         &self,
-        _persona_uid: &str,
+        persona_uid: &str,
         _offset: i64,
         _limit: i64,
     ) -> RamariaResult<Vec<MemoryEvent>> {
-        Ok(Vec::new())
+        let ids = self
+            .events_by_persona
+            .lock()
+            .unwrap()
+            .get(persona_uid)
+            .cloned()
+            .unwrap_or_default();
+        let events = self.events.lock().unwrap();
+        Ok(ids
+            .iter()
+            .filter_map(|id| events.get(id).cloned())
+            .collect())
     }
 
-    async fn list_unabsorbed_events(&self, _persona_uid: &str) -> RamariaResult<Vec<MemoryEvent>> {
-        Ok(Vec::new())
+    async fn list_unabsorbed_events(&self, persona_uid: &str) -> RamariaResult<Vec<MemoryEvent>> {
+        self.list_events_by_persona(persona_uid, 0, i64::MAX).await
     }
 
-    async fn mark_events_absorbed(&self, _event_ids: &[i64]) -> RamariaResult<()> {
+    async fn mark_events_absorbed(&self, event_ids: &[i64]) -> RamariaResult<()> {
+        // mock 语义：吸收 = 从列表移除（与真实实现"标记 absorbed"等效）
+        let events = self.events.lock().unwrap();
+        let mut by_persona = self.events_by_persona.lock().unwrap();
+        for (_, ids) in by_persona.iter_mut() {
+            ids.retain(|id| !event_ids.contains(id));
+        }
+        drop(events);
         Ok(())
     }
 
@@ -880,6 +934,96 @@ impl StorageBackend for MockStorage {
         _doc_id: &str,
     ) -> RamariaResult<Vec<(i64, String, String, String, String, f64, i64)>> {
         Ok(vec![])
+    }
+
+    // -- 行为规则（v1.5 M5 D） --
+
+    async fn save_behavior_rule(&self, rule: &BehaviorRule) -> RamariaResult<i64> {
+        let id = self
+            .rule_seq
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut r = rule.clone();
+        r.id = id;
+        self.behavior_rules.lock().unwrap().insert(id, r.clone());
+        self.rules_by_persona
+            .lock()
+            .unwrap()
+            .entry(r.persona_uid.clone())
+            .or_default()
+            .push(id);
+        Ok(id)
+    }
+
+    async fn get_behavior_rule(&self, id: i64) -> RamariaResult<Option<BehaviorRule>> {
+        Ok(self.behavior_rules.lock().unwrap().get(&id).cloned())
+    }
+
+    async fn list_behavior_rules_by_persona(
+        &self,
+        persona_uid: &str,
+    ) -> RamariaResult<Vec<BehaviorRule>> {
+        let ids = self
+            .rules_by_persona
+            .lock()
+            .unwrap()
+            .get(persona_uid)
+            .cloned()
+            .unwrap_or_default();
+        let rules = self.behavior_rules.lock().unwrap();
+        Ok(ids.iter().filter_map(|id| rules.get(id).cloned()).collect())
+    }
+
+    async fn update_behavior_rule(&self, rule: &BehaviorRule) -> RamariaResult<()> {
+        self.behavior_rules
+            .lock()
+            .unwrap()
+            .insert(rule.id, rule.clone());
+        Ok(())
+    }
+
+    async fn delete_behavior_rule(&self, id: i64) -> RamariaResult<()> {
+        let removed = self.behavior_rules.lock().unwrap().remove(&id);
+        if let Some(rule) = removed {
+            let mut by_persona = self.rules_by_persona.lock().unwrap();
+            if let Some(ids) = by_persona.get_mut(&rule.persona_uid) {
+                ids.retain(|&x| x != id);
+            }
+        }
+        Ok(())
+    }
+
+    async fn set_rule_enabled(&self, id: i64, enabled: bool) -> RamariaResult<()> {
+        let mut rules = self.behavior_rules.lock().unwrap();
+        if let Some(rule) = rules.get_mut(&id) {
+            rule.enabled = enabled;
+        }
+        Ok(())
+    }
+
+    // -- 反馈日志（v1.5 M5 H1） --
+
+    async fn save_feedback_log(&self, log: &FeedbackLog) -> RamariaResult<i64> {
+        let id = self
+            .feedback_seq
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut l = log.clone();
+        l.id = id;
+        self.feedback_logs.lock().unwrap().push(l);
+        Ok(id)
+    }
+
+    async fn list_feedback_logs_by_persona(
+        &self,
+        persona_uid: &str,
+    ) -> RamariaResult<Vec<FeedbackLog>> {
+        Ok(self
+            .feedback_logs
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.persona_uid == persona_uid)
+            .cloned()
+            .collect())
     }
 }
 

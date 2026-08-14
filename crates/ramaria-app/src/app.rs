@@ -78,6 +78,13 @@ pub struct App {
     /// 由调用方（desktop/cli）在初始化时注入；热更新 provider 时
     /// 通过 `llm_cache()` 复用同一缓存实例，保证后端切换后缓存不失效。
     pub(crate) llm_cache: Mutex<Option<Arc<dyn LlmResponseCache>>>,
+    /// 行为待定池（v1.5 M5 D6 增量更新，跨会话内存态）。
+    ///
+    /// 职责:
+    /// - 未归入现有规则簇的新事件积累区；每次封存时推进（成簇/低置信）。
+    /// - 内存态简化：重启后重建为空（未归入事件仍在事件表，全量重学可重新聚类）。
+    /// - Arc 共享给 SessionLifecycle 封存钩子（手动/空闲两条封存路径同一池）。
+    pub(crate) behavior_pending: Arc<Mutex<ramaria_memory::behavior::PendingPool>>,
     /// 后台空闲检测线程句柄
     pub(crate) idle_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// 后台 L2/L3 定时检查线程句柄
@@ -116,6 +123,47 @@ impl App {
         // 注入 embedding 到 SessionLifecycle，启用 utt 块向量生成（v1.4）
         lifecycle.set_embedding(embedding.clone());
 
+        // 行为待定池（D6 增量更新）：App 与 SessionLifecycle 封存钩子共享
+        let behavior_pending = Arc::new(Mutex::new(ramaria_memory::behavior::PendingPool::new(
+            &config.behavior,
+        )));
+
+        // 注册行为层封存钩子（D6）：封存时增量更新，失败记 warn 不阻塞封存
+        let hook_storage = Arc::clone(&storage);
+        let hook_llm = Arc::clone(&llm);
+        let hook_embedding = embedding.clone();
+        let hook_config = config.behavior.clone();
+        let hook_pending = Arc::clone(&behavior_pending);
+        let hook: crate::session_lifecycle::BehaviorCloseHook =
+            Arc::new(move |persona_uid: &str| {
+                let storage = Arc::clone(&hook_storage);
+                let llm = Arc::clone(&hook_llm);
+                let embedding = hook_embedding.clone();
+                let config = hook_config.clone();
+                let pending = Arc::clone(&hook_pending);
+                let persona_uid = persona_uid.to_string();
+                Box::pin(async move {
+                    if let Err(e) = crate::commands::behavior::behavior_incremental_update_core(
+                        storage.as_ref(),
+                        llm.as_ref(),
+                        embedding.as_deref(),
+                        &config,
+                        &pending,
+                        &persona_uid,
+                    )
+                    .await
+                    {
+                        // 增量更新失败不阻塞封存主流程（注册式接入，静默降级链）
+                        tracing::warn!(
+                            persona_uid,
+                            error = %e,
+                            "行为规则增量更新失败（封存已正常完成，下次封存自动重试）"
+                        );
+                    }
+                })
+            });
+        lifecycle.set_behavior_hook(hook);
+
         let emb_info = embedding
             .as_ref()
             .map(|e| {
@@ -143,6 +191,7 @@ impl App {
             keychain,
             lifecycle,
             llm_cache: Mutex::new(None),
+            behavior_pending,
             idle_handle: Mutex::new(None),
             scheduler_handle: Mutex::new(None),
         }

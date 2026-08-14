@@ -118,6 +118,10 @@ pub struct RamariaConfig {
     #[serde(default)]
     pub cache: CacheConfig,
 
+    /// 行为模型学习与驱动（v1.5 M5 新增，算法说明书 v3.1 §4）
+    #[serde(default)]
+    pub behavior: BehaviorConfig,
+
     /// 杂项（预留扩展位，当前无字段）
     #[serde(default)]
     pub misc: MiscConfig,
@@ -163,6 +167,7 @@ impl Default for RamariaConfig {
             examples: ExamplesConfig::default(),
             bridge: BridgeConfig::default(),
             cache: CacheConfig::default(),
+            behavior: BehaviorConfig::default(),
             misc: MiscConfig::default(),
         }
     }
@@ -949,6 +954,90 @@ impl Default for CacheConfig {
 }
 
 // =========================================================
+// 行为层配置（v1.5 M5，算法说明书 v3.1 §4）
+// =========================================================
+
+/// 行为模型学习与驱动配置（`[behavior]` 配置组，v1.5 M5 新增）。
+///
+/// 职责:
+/// - 集中管理行为层全链路参数：聚类（D2）、规则生成（D4）、情境路由（D5）、增量更新（D6）。
+/// - `enabled=false` 时行为层全链路关闭（不学习/不路由），行为回退 v1.4。
+///
+/// 降级链（D-V15-013，D-P 摸底延后至 v1.6）:
+/// - 聚类参数（θ_nb / min_cluster_size / θ_join / β1 / β2）按 v3.1 初值推进，
+///   全部标注「待实证」——v1.6 探针工具链定稿后回填，参数不可用时回退本默认值。
+/// - embedding 不可用 → 双通道向量通道关闭，退化为纯关键词 Jaccard 通道（β=0）。
+///
+/// 字段约定:
+/// - `theta_nb`: 密度聚类邻域相似度阈值（待实证：初值 0.5，v3.1 建议真实数据 P50~P75）。
+/// - `beta1` + `beta2`: 双通道融合权重，约束 β1 + β2 ≤ 1（关键词通道 = 1 − β1 − β2）。
+/// - `theta_route`: 路由阈值，全部候选低于此值 → 不注入（静默降级）。
+/// - `top_n`: 路由 Top-N 合并上限（主规则完整注入 + 次规则仅合并 avoid/params）。
+/// - `min_evidence`: 证据量门槛，簇内有效样本量 < 此值 → 不生成规则文本（仅参数）。
+/// - `min_n_eff`: 有效样本量门槛（salience 加权），< 此值 → 降级候选规则。
+/// - `valence_std_limit`: 簇内 valence 标准差上限，超限视为反应倾向不一致 → 降级候选。
+/// - `max_outlier_ratio`: 孤立点比例上限，聚类超过此比例触发失败模式检查（下调 θ_nb）。
+/// - `pending_expire_days`: 待定池样本超过此天数未成簇 → 低置信标记（不参与规则生成）。
+/// - `evidence_decay_threshold`: 规则证据衰减后的保留率下限，低于此值 → 规则降级/失效。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BehaviorConfig {
+    /// 行为层总开关（false = 不学习/不路由，行为回退 v1.4）
+    pub enabled: bool,
+    /// 密度聚类邻域相似度阈值 θ_nb（待实证：v3.1 初值 0.5，v1.6 探针定稿）
+    pub theta_nb: f64,
+    /// 核心样本最小邻居数 min_cluster_size（v3.1 默认 3，探针备选 2）
+    pub min_cluster_size: usize,
+    /// 增量归簇阈值 θ_join（v3.1 默认 0.7）
+    pub theta_join: f64,
+    /// 反应通道权重 β1（待实证，v3.1 初值 0.4）
+    pub beta1: f64,
+    /// 情境通道权重 β2（待实证，v3.1 初值 0.3）
+    pub beta2: f64,
+    /// 情境路由阈值 θ_route（默认 0.6，全部低于 → 不注入）
+    pub theta_route: f64,
+    /// 路由评分 cos 项权重 γ（默认 0.7）
+    pub gamma: f64,
+    /// 路由 Top-N 合并上限（默认 3）
+    pub top_n: usize,
+    /// 规则文本生成的证据量门槛（默认 5）
+    pub min_evidence: usize,
+    /// 有效样本量门槛 n_eff（默认 5）
+    pub min_n_eff: usize,
+    /// 簇内 valence 标准差上限（默认 0.5，超限降级候选规则）
+    pub valence_std_limit: f64,
+    /// 聚类孤立点比例上限（默认 0.6，超限触发失败模式检查）
+    pub max_outlier_ratio: f64,
+    /// 待定池样本过期天数（默认 30，超期未成簇 → 低置信标记）
+    pub pending_expire_days: u32,
+    /// 规则证据衰减保留率下限（默认 0.3，低于 → 降级/失效）
+    pub evidence_decay_threshold: f64,
+}
+
+impl Default for BehaviorConfig {
+    /// 创建默认行为层配置（v3.1 初值 + 待实证标注）。
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            theta_nb: 0.5,
+            min_cluster_size: 3,
+            theta_join: 0.7,
+            beta1: 0.4,
+            beta2: 0.3,
+            theta_route: 0.6,
+            gamma: 0.7,
+            top_n: 3,
+            min_evidence: 5,
+            min_n_eff: 5,
+            valence_std_limit: 0.5,
+            max_outlier_ratio: 0.6,
+            pending_expire_days: 30,
+            evidence_decay_threshold: 0.3,
+        }
+    }
+}
+
+// =========================================================
 // 单元测试
 // =========================================================
 
@@ -995,6 +1084,25 @@ mod tests {
         assert!(cfg.cache.l2_fingerprint_enabled);
         assert!((cfg.cache.l2_similarity_threshold - 0.95).abs() < f64::EPSILON);
         assert_eq!(cfg.cache.l2_recent_events_limit, 200);
+
+        // 行为层默认（v1.5 M5）：v3.1 初值 + 待实证标注
+        assert!(cfg.behavior.enabled);
+        assert!((cfg.behavior.theta_nb - 0.5).abs() < f64::EPSILON);
+        assert_eq!(cfg.behavior.min_cluster_size, 3);
+        assert!((cfg.behavior.theta_join - 0.7).abs() < f64::EPSILON);
+        assert!((cfg.behavior.beta1 - 0.4).abs() < f64::EPSILON);
+        assert!((cfg.behavior.beta2 - 0.3).abs() < f64::EPSILON);
+        assert!((cfg.behavior.theta_route - 0.6).abs() < f64::EPSILON);
+        assert!((cfg.behavior.gamma - 0.7).abs() < f64::EPSILON);
+        assert_eq!(cfg.behavior.top_n, 3);
+        assert_eq!(cfg.behavior.min_evidence, 5);
+        assert_eq!(cfg.behavior.min_n_eff, 5);
+        assert!((cfg.behavior.valence_std_limit - 0.5).abs() < f64::EPSILON);
+        assert!((cfg.behavior.max_outlier_ratio - 0.6).abs() < f64::EPSILON);
+        assert_eq!(cfg.behavior.pending_expire_days, 30);
+        assert!((cfg.behavior.evidence_decay_threshold - 0.3).abs() < f64::EPSILON);
+        // 权重约束：β1 + β2 ≤ 1（关键词通道 = 1 − β1 − β2 非负）
+        assert!(cfg.behavior.beta1 + cfg.behavior.beta2 <= 1.0);
     }
 
     #[test]
@@ -1019,6 +1127,15 @@ mod tests {
             cfg.cache.l2_fingerprint_enabled,
             back.cache.l2_fingerprint_enabled
         );
+        // 行为层 roundtrip（v1.5 M5）
+        assert_eq!(cfg.behavior.enabled, back.behavior.enabled);
+        assert!((cfg.behavior.theta_nb - back.behavior.theta_nb).abs() < f64::EPSILON);
+        assert_eq!(
+            cfg.behavior.min_cluster_size,
+            back.behavior.min_cluster_size
+        );
+        assert!((cfg.behavior.theta_route - back.behavior.theta_route).abs() < f64::EPSILON);
+        assert!((cfg.behavior.gamma - back.behavior.gamma).abs() < f64::EPSILON);
     }
 
     #[test]

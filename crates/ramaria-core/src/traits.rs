@@ -13,6 +13,7 @@ use async_trait::async_trait;
 use futures::Stream;
 use uuid::Uuid;
 
+use crate::behavior::{BehaviorRule, FeedbackLog};
 use crate::error::RamariaResult;
 use crate::types::{
     BackendConfig, ClusterSnapshot, EventRelation, EventSource, MemoryEvent, MemoryL1, Message,
@@ -502,6 +503,12 @@ pub trait StorageBackend: Send + Sync {
 
     // -- Memory Events (L2 事件层, id: i64) --
     async fn save_event(&self, event: &MemoryEvent) -> RamariaResult<i64>;
+    /// 按 id 查询单条事件（证据链溯源用，v1.5 M5 D7）。
+    ///
+    /// 默认实现返回 `Ok(None)`（存量 mock 无需实现即可编译）。
+    async fn get_event(&self, _id: i64) -> RamariaResult<Option<MemoryEvent>> {
+        Ok(None)
+    }
     async fn list_events_by_persona(
         &self,
         persona_uid: &str,
@@ -845,6 +852,89 @@ pub trait StorageBackend: Send + Sync {
         _persona_uid: &str,
         _limit: u32,
     ) -> RamariaResult<Vec<MemoryEvent>> {
+        Ok(Vec::new())
+    }
+
+    // =========================================================
+    // 行为规则（v1.5 M5 D，算法说明书 v3.1 §4）
+    // =========================================================
+    //
+    // behavior_rules 表 CRUD 与 enabled 过滤。默认实现返回 Unsupported / 空，
+    // 存量 mock 无需改动即可编译；SqliteStorage 覆写为真实实现。
+
+    /// 插入一条行为规则，返回自增 id。
+    ///
+    /// 默认实现返回 `Unsupported` 错误（存量 mock 无需实现即可编译）。
+    async fn save_behavior_rule(&self, _rule: &BehaviorRule) -> RamariaResult<i64> {
+        Err(crate::error::RamariaError::unsupported(
+            "StorageBackend 未实现 behavior_rules 写入",
+        ))
+    }
+
+    /// 按 id 查询行为规则。
+    ///
+    /// 默认实现返回 `Ok(None)`。
+    async fn get_behavior_rule(&self, _id: i64) -> RamariaResult<Option<BehaviorRule>> {
+        Ok(None)
+    }
+
+    /// 按 persona 查询全部行为规则（含 enabled=false，管理端需要看到禁用项）。
+    ///
+    /// 默认实现返回空列表。
+    async fn list_behavior_rules_by_persona(
+        &self,
+        _persona_uid: &str,
+    ) -> RamariaResult<Vec<BehaviorRule>> {
+        Ok(Vec::new())
+    }
+
+    /// 整体更新一条行为规则（edit 命令；reaction/params/avoid/situation 全部覆盖）。
+    ///
+    /// 默认实现返回 `Unsupported` 错误。
+    async fn update_behavior_rule(&self, _rule: &BehaviorRule) -> RamariaResult<()> {
+        Err(crate::error::RamariaError::unsupported(
+            "StorageBackend 未实现 behavior_rules 更新",
+        ))
+    }
+
+    /// 删除一条行为规则（delete 命令，需确认）。
+    ///
+    /// 默认实现返回 `Unsupported` 错误。
+    async fn delete_behavior_rule(&self, _id: i64) -> RamariaResult<()> {
+        Err(crate::error::RamariaError::unsupported(
+            "StorageBackend 未实现 behavior_rules 删除",
+        ))
+    }
+
+    /// 启用/禁用一条行为规则（disable/enable 命令）。
+    ///
+    /// 默认实现返回 `Unsupported` 错误。
+    async fn set_rule_enabled(&self, _id: i64, _enabled: bool) -> RamariaResult<()> {
+        Err(crate::error::RamariaError::unsupported(
+            "StorageBackend 未实现 behavior_rules enabled 切换",
+        ))
+    }
+
+    // =========================================================
+    // 反馈日志（v1.5 M5 H1，v3.1 §9.4；S2/S3 v1.7 复用同表）
+    // =========================================================
+
+    /// 写入一条反馈日志，返回自增 id。
+    ///
+    /// 默认实现返回 `Unsupported` 错误。
+    async fn save_feedback_log(&self, _log: &FeedbackLog) -> RamariaResult<i64> {
+        Err(crate::error::RamariaError::unsupported(
+            "StorageBackend 未实现 feedback_log 写入",
+        ))
+    }
+
+    /// 按 persona 查询反馈日志（审计/证据链展示）。
+    ///
+    /// 默认实现返回空列表。
+    async fn list_feedback_logs_by_persona(
+        &self,
+        _persona_uid: &str,
+    ) -> RamariaResult<Vec<FeedbackLog>> {
         Ok(Vec::new())
     }
 }

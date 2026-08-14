@@ -68,7 +68,19 @@ pub struct SessionLifecycle {
     pub(crate) retriever: Mutex<Option<Arc<RwLock<Retriever>>>>,
     /// embedding provider 引用（utt 块向量生成），None 表示未配置（块无向量）
     pub(crate) embedding: Mutex<Option<Arc<dyn EmbeddingProvider>>>,
+    /// 行为层封存钩子（v1.5 M5 D6）：会话封存时触发行为规则增量更新。
+    ///
+    /// 职责:
+    /// - 与 L1 生成同钩子（Step 2.7），手动/空闲两条封存路径均覆盖。
+    /// - 钩子内部自行处理失败（记 warn 不阻塞封存主流程，注册式接入）。
+    /// - None = 未注册（行为层关闭或旧构造路径），封存不触发增量更新（等同 v1.4）。
+    pub(crate) behavior_hook: Mutex<Option<BehaviorCloseHook>>,
 }
+
+/// 行为层封存钩子类型：接收 persona_uid 的异步闭包（内部自行处理失败）。
+pub(crate) type BehaviorCloseHook = Arc<
+    dyn Fn(&str) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync,
+>;
 
 impl SessionLifecycle {
     /// 创建新的 Session 生命周期编排器。
@@ -85,7 +97,23 @@ impl SessionLifecycle {
             idle_minutes: Arc::new(AtomicU32::new(idle_minutes)),
             retriever: Mutex::new(None),
             embedding: Mutex::new(None),
+            behavior_hook: Mutex::new(None),
         }
+    }
+
+    /// 注册行为层封存钩子（v1.5 M5 D6）。
+    ///
+    /// 调用时机:
+    /// - 在 `App::new` 中完成 App 依赖组装后立即调用。
+    /// - 钩子接收 persona_uid，内部执行行为规则增量更新；
+    ///   任何失败由钩子自行记 warn（不阻塞封存主流程）。
+    pub fn set_behavior_hook(&self, hook: BehaviorCloseHook) {
+        let mut guard = self.behavior_hook.lock().unwrap_or_else(|e| {
+            error!("behavior_hook lock poisoned during set_behavior_hook: {e}");
+            e.into_inner()
+        });
+        *guard = Some(hook);
+        info!("SessionLifecycle: 行为层封存钩子已注册，封存时触发增量更新");
     }
 
     /// 注入内存检索器引用。
@@ -357,6 +385,21 @@ impl SessionLifecycle {
                 // Step 2.6: examples 回复对抽取入库（v1.4，与 L1 同钩子）
                 // 失败降级记 warn 不阻塞封存（下次封存自动补齐）
                 self.extract_examples_for_session(storage, session_id).await;
+
+                // Step 2.7: 行为规则增量更新（v1.5 M5 D6，与 L1 同钩子）
+                // 注册式接入：钩子内部失败记 warn 不阻塞封存（等同 v1.4 行为）
+                // 仅在 L1 生成成功路径触发（有真实对话内容才值得更新行为模型）
+                // 注意：hook guard 须在 await 前释放（避免 std MutexGuard 跨 await）
+                let hook = self
+                    .behavior_hook
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                if let Some(persona) = persona_uid.as_deref()
+                    && let Some(hook) = hook
+                {
+                    hook(persona).await;
+                }
 
                 // Step 3: 检查 L2 触发条件（路径 A：即时触发）
                 // 对齐 Python summarizer 末尾的 `merger.check_and_merge`

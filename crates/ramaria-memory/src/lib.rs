@@ -8,6 +8,7 @@
 //! - 所有 LLM 依赖通过 `LlmProvider` trait 注入，便于 mock 测试
 //! - 纯数学模块（decay/rrf）零 I/O，不依赖数据库或异步运行时
 
+pub mod behavior;
 pub mod bm25;
 pub mod decay;
 pub mod event;

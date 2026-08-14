@@ -48,12 +48,14 @@ macro_rules! parse_enum_fallback {
 
 pub mod backend_config;
 pub mod background_jobs;
+pub mod behavior_rules;
 pub mod bm25_index;
 pub mod cluster;
 pub mod conflict_queue;
 pub mod events;
 pub mod examples;
 pub mod facts;
+pub mod feedback_log;
 pub mod graph;
 pub mod keyword;
 pub mod l2_fingerprint;

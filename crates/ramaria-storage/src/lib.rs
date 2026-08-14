@@ -8,6 +8,7 @@
 //! - 公共 API 与 `StorageBackend` trait 一致，供 app/memory 层依赖注入使用
 //! - ID 类型对齐: TEXT 主键表用 Uuid，INTEGER AUTOINCREMENT 表用 i64
 
+use ramaria_core::behavior::{BehaviorRule, FeedbackLog};
 use ramaria_core::config::CacheEviction;
 use ramaria_core::error::RamariaResult;
 use ramaria_core::traits::StorageBackend;
@@ -155,6 +156,9 @@ impl StorageBackend for SqliteStorage {
     // =========================================================
     async fn save_event(&self, event: &MemoryEvent) -> RamariaResult<i64> {
         repo::events::save_event(&self.pool, event).await
+    }
+    async fn get_event(&self, id: i64) -> RamariaResult<Option<MemoryEvent>> {
+        repo::events::get(&self.pool, id).await
     }
     async fn list_events_by_persona(
         &self,
@@ -595,6 +599,52 @@ impl StorageBackend for SqliteStorage {
         limit: u32,
     ) -> RamariaResult<Vec<MemoryEvent>> {
         repo::events::list_recent_by_persona(&self.pool, persona_uid, limit).await
+    }
+
+    // =========================================================
+    // 行为规则（v1.5 M5 D，算法说明书 v3.1 §4）
+    // =========================================================
+
+    async fn save_behavior_rule(&self, rule: &BehaviorRule) -> RamariaResult<i64> {
+        repo::behavior_rules::save(&self.pool, rule).await
+    }
+
+    async fn get_behavior_rule(&self, id: i64) -> RamariaResult<Option<BehaviorRule>> {
+        repo::behavior_rules::get(&self.pool, id).await
+    }
+
+    async fn list_behavior_rules_by_persona(
+        &self,
+        persona_uid: &str,
+    ) -> RamariaResult<Vec<BehaviorRule>> {
+        repo::behavior_rules::list_by_persona(&self.pool, persona_uid).await
+    }
+
+    async fn update_behavior_rule(&self, rule: &BehaviorRule) -> RamariaResult<()> {
+        repo::behavior_rules::update(&self.pool, rule).await
+    }
+
+    async fn delete_behavior_rule(&self, id: i64) -> RamariaResult<()> {
+        repo::behavior_rules::delete(&self.pool, id).await
+    }
+
+    async fn set_rule_enabled(&self, id: i64, enabled: bool) -> RamariaResult<()> {
+        repo::behavior_rules::set_enabled(&self.pool, id, enabled).await
+    }
+
+    // =========================================================
+    // 反馈日志（v1.5 M5 H1，v3.1 §9.4）
+    // =========================================================
+
+    async fn save_feedback_log(&self, log: &FeedbackLog) -> RamariaResult<i64> {
+        repo::feedback_log::save(&self.pool, log).await
+    }
+
+    async fn list_feedback_logs_by_persona(
+        &self,
+        persona_uid: &str,
+    ) -> RamariaResult<Vec<FeedbackLog>> {
+        repo::feedback_log::list_by_persona(&self.pool, persona_uid).await
     }
 }
 

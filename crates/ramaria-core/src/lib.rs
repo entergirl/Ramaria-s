@@ -7,6 +7,7 @@
 //! - 作为 workspace 的类型边界，避免 CLI/Desktop 直接耦合底层实现
 //! - 所有公共类型面向跨 crate 共享和长期演进设计
 
+pub mod behavior;
 pub mod config;
 pub mod error;
 pub mod keyword;
@@ -14,6 +15,11 @@ pub mod traits;
 pub mod types;
 
 pub use keyword::KeywordToken;
+
+pub use behavior::{
+    BehaviorEvidence, BehaviorParams, BehaviorRule, BehaviorSituation, FeedbackLog, RuleSource,
+    SignalType, TargetType,
+};
 
 // 常用 re-export
 pub use config::RamariaConfig;

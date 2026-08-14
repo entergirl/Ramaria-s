@@ -147,6 +147,10 @@ enum Commands {
     #[command(display_order = 42, subcommand)]
     Persona(PersonaCmd),
 
+    /// 行为规则管理（list / show / import / edit / enable / disable / delete / evidence）[管理]
+    #[command(display_order = 44, subcommand)]
+    Rule(RuleCmd),
+
     /// 导出诊断信息（打包日志、配置、系统信息为 .zip）[管理]
     #[command(display_order = 43)]
     Diagnostics {
@@ -162,6 +166,70 @@ enum Commands {
     /// 探针实验（build: 构建测试集 / run: 档位批量实验）[高级]
     #[command(display_order = 51, subcommand)]
     Probe(ProbeArgs),
+}
+
+/// 行为规则管理子命令（§2.9 词表：list/show/import/edit/enable/disable/delete/evidence）。
+#[derive(Subcommand)]
+enum RuleCmd {
+    /// 列出行为规则（按 persona 筛选）
+    List {
+        /// 按 persona_uid 筛选（默认 rama-0001）
+        #[arg(long)]
+        persona: Option<String>,
+        /// 输出条数上限（1-500）
+        #[arg(long, default_value = "100", value_parser = parse_limit)]
+        limit: usize,
+        /// 跳过前 N 条（与 --limit 组合分页）
+        #[arg(long, default_value = "0")]
+        offset: usize,
+    },
+    /// 查看单条规则详情
+    Show {
+        /// 规则 id
+        id: i64,
+    },
+    /// 手工导入规则（JSON 文件，`-` = stdin）
+    Import {
+        /// 导入源文件路径（`-` = stdin）
+        file: String,
+        /// 规则所属 persona（默认 rama-0001）
+        #[arg(long)]
+        persona: Option<String>,
+    },
+    /// 编辑规则（reaction / avoid；编辑后转为 Manual 并写 S1 反馈）
+    Edit {
+        /// 规则 id
+        id: i64,
+        /// 新的规则文本（缺省保留原值）
+        #[arg(long)]
+        reaction: Option<String>,
+        /// 新的禁忌列表（逗号分隔，缺省保留原值）
+        #[arg(long)]
+        avoid: Option<String>,
+    },
+    /// 启用规则
+    Enable {
+        /// 规则 id
+        id: i64,
+    },
+    /// 禁用规则（写 S1 反馈日志）
+    Disable {
+        /// 规则 id
+        id: i64,
+    },
+    /// 删除规则（需确认；--yes/--force 自动通过）
+    Delete {
+        /// 规则 id
+        id: i64,
+        /// 跳过交互确认（双保险）
+        #[arg(long)]
+        force: bool,
+    },
+    /// 展示规则证据链（规则 → 事件 → 原文摘要）
+    Evidence {
+        /// 规则 id
+        id: i64,
+    },
 }
 
 /// 话语块管理子命令（canonical 名称 blocks，别名 utt）。
@@ -670,6 +738,37 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
                 PersonaCmd::Reload { uid } => commands::persona::PersonaCmd::Reload { uid },
             };
             commands::persona::run(app, cmd, cli.json).await?;
+        }
+        Commands::Rule(sub) => {
+            let cmd = match sub {
+                RuleCmd::List {
+                    persona,
+                    limit,
+                    offset,
+                } => commands::rule::RuleCmd::List {
+                    persona,
+                    limit: Some(limit),
+                    offset,
+                },
+                RuleCmd::Show { id } => commands::rule::RuleCmd::Show { id },
+                RuleCmd::Import { file, persona } => {
+                    commands::rule::RuleCmd::Import { file, persona }
+                }
+                RuleCmd::Edit {
+                    id,
+                    reaction,
+                    avoid,
+                } => commands::rule::RuleCmd::Edit {
+                    id,
+                    reaction,
+                    avoid,
+                },
+                RuleCmd::Enable { id } => commands::rule::RuleCmd::Enable { id },
+                RuleCmd::Disable { id } => commands::rule::RuleCmd::Disable { id },
+                RuleCmd::Delete { id, force } => commands::rule::RuleCmd::Delete { id, force },
+                RuleCmd::Evidence { id } => commands::rule::RuleCmd::Evidence { id },
+            };
+            commands::rule::run(app, cmd, cli.json, cli.yes).await?;
         }
         Commands::Export {
             format,
