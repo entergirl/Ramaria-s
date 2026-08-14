@@ -44,6 +44,24 @@ var RamariaSettingsView = (function () {
 
     function $(id) { return document.getElementById(id); }
 
+    /**
+     * HTML 转义（v1.5 M6 安全修复）。
+     *
+     * 用于"检查更新"等渲染远程/外部数据的场景：先转义再拼 innerHTML，
+     * 防止 GitHub release 等外部内容注入 HTML（CSP 严格模式可阻断脚本执行，
+     * 但注入的标签/样式仍会造成页面破坏，转义为根本修复）。
+     * 属性值转义 `"`（href 等）与 `'`，文本转义 `<`/`>`/`&`。
+     */
+    function _escapeHtml(str) {
+        if (str == null) return '';
+        return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
  // =========================================================
  // 渲染
  // =========================================================
@@ -985,10 +1003,10 @@ var RamariaSettingsView = (function () {
                 '</div>' +
                 '<span class="settings-row-value" id="settings-update-badge">-</span>' +
             '</div>' +
-            '<div id="settings-update-detail" class="hidden" style="margin-top:8px;">' +
+            '<div id="settings-update-detail" class="hidden settings-update-detail">' +
                 '<div class="settings-row-meta" id="settings-update-message"></div>' +
             '</div>' +
-            '<div class="settings-actions" style="margin-top:12px;">' +
+            '<div class="settings-actions settings-actions-tight">' +
                 '<button class="btn btn-secondary btn-sm" id="settings-check-update">检查更新</button>' +
                 '<button class="btn btn-secondary btn-sm" id="settings-export-diagnostics">导出诊断信息</button>' +
             '</div>';
@@ -1038,33 +1056,36 @@ var RamariaSettingsView = (function () {
                 }
                 if (detailEl) detailEl.classList.remove('hidden');
                 if (msgEl) {
- // 多行错误消息转为带换行的 HTML（安全：后端错误消息不含用户输入）
-                    msgEl.innerHTML = result.error.replace(/\n/g, '<br>');
+                    // 多行错误消息转为带换行的 HTML（v1.5 M6：先转义再拼接，防注入）
+                    msgEl.innerHTML = _escapeHtml(result.error).replace(/\n/g, '<br>');
                 }
- // Toast 只显示首行摘要
+                // Toast 只显示首行摘要
                 var firstLine = result.error.split('\n')[0];
                 RamariaToast.show('warning', '检查更新失败', firstLine);
             } else if (result.updateAvailable) {
- // 新版本可用
+                // 新版本可用
                 if (badgeEl) {
                     badgeEl.textContent = '↑ 可更新';
                     badgeEl.className = 'settings-row-value text-green';
                 }
                 if (detailEl) detailEl.classList.remove('hidden');
                 if (msgEl) {
-                    var releaseHtml = '发现新版本: <strong>' + (result.latestVersion || '?') + '</strong>';
+                    // v1.5 M6 安全修复：latestVersion/releaseUrl/releaseNotesPreview
+                    // 均来自 GitHub API（远程内容），先转义再拼 HTML（href 属性同样转义）
+                    var releaseHtml = '发现新版本: <strong>' + _escapeHtml(result.latestVersion || '?') + '</strong>';
                     if (result.releaseUrl) {
-                        releaseHtml += ' — <a href="' + result.releaseUrl + '" target="_blank" rel="noopener" class="settings-about-link">前往下载</a>';
+                        releaseHtml += ' — <a href="' + _escapeHtml(result.releaseUrl) +
+                            '" target="_blank" rel="noopener" class="settings-about-link">前往下载</a>';
                     }
                     if (result.releaseNotesPreview) {
                         releaseHtml += '<br><small class="text-tertiary">' +
-                            result.releaseNotesPreview.replace(/\n/g, '<br>') + '</small>';
+                            _escapeHtml(result.releaseNotesPreview).replace(/\n/g, '<br>') + '</small>';
                     }
                     msgEl.innerHTML = releaseHtml;
                 }
                 RamariaToast.show('info', '发现新版本 ' + (result.latestVersion || ''));
             } else {
- // 已是最新
+                // 已是最新
                 if (badgeEl) {
                     badgeEl.textContent = '✓ 已是最新';
                     badgeEl.className = 'settings-row-value text-green';
@@ -1081,7 +1102,7 @@ var RamariaSettingsView = (function () {
             if (detailEl) detailEl.classList.remove('hidden');
             if (msgEl) {
                 var errText = err.message || '未知错误';
-                msgEl.innerHTML = errText.replace(/\n/g, '<br>');
+                msgEl.innerHTML = _escapeHtml(errText).replace(/\n/g, '<br>');
             }
             RamariaToast.show('error', '检查更新失败', (err.message || '未知错误').split('\n')[0]);
         } finally {
@@ -1327,11 +1348,30 @@ var RamariaSettingsView = (function () {
         risk.className = 'settings-risk-banner';
         risk.textContent =
             '⚠️ 高级设置面向进阶用户与排障场景。修改以下参数可能影响检索与推断质量，' +
-            '非排障场景请保持默认值；每项均可通过「恢复默认」还原。';
+            '非排障场景请保持默认值；可单项或一键全部恢复默认。';
         parent.appendChild(risk);
 
         for (var i = 0; i < _ADVANCED_GROUPS.length; i++) {
             _renderAdvancedGroup(parent, _ADVANCED_GROUPS[i]);
+        }
+
+        // ── 全局恢复默认栏（v1.5 M6 U 项功能增强）：单开一栏，点击直接执行（无弹窗）──
+        var resetSection = document.createElement('div');
+        resetSection.className = 'settings-section';
+        resetSection.innerHTML =
+            '<div class="settings-section-title">⚙️ 恢复默认</div>' +
+            '<div class="settings-section-desc">将下方全部高级参数恢复为出厂默认值并立即保存（仅影响高级设置页参数，基础设置与后端连接配置不受影响）。</div>' +
+            '<div class="settings-card">' +
+                '<div class="settings-adv-reset-row">' +
+                    '<span class="settings-adv-reset-desc">确认后立即生效，无需逐项操作。</span>' +
+                    '<button class="btn btn-secondary btn-sm" id="settings-adv-reset-all">全部恢复默认</button>' +
+                '</div>' +
+            '</div>';
+        parent.appendChild(resetSection);
+
+        var resetAllBtn = $('settings-adv-reset-all');
+        if (resetAllBtn) {
+            resetAllBtn.addEventListener('click', _handleAdvancedResetAll);
         }
     }
 
@@ -1352,9 +1392,11 @@ var RamariaSettingsView = (function () {
             var f = group.fields[i];
             var fid = _advFieldId(group, f);
             if (f.type === 'bool') {
+                // 默认开的选项默认选中（v1.5 M6 U 项增强）：渲染时按 def 预置 checked，
+                // 配置回显（_fillAdvancedForm）再覆盖为实际值，避免加载前/失败时状态与默认不符
                 html += '<div class="settings-form-group">' +
                     '<label class="settings-form-label">' +
-                        '<input type="checkbox" id="' + fid + '" /> ' + f.label +
+                        '<input type="checkbox" id="' + fid + '"' + (f.def ? ' checked' : '') + ' /> ' + f.label +
                     '</label>' +
                     '<div class="settings-form-hint">' + f.hint + '（默认：' + (f.def ? '开' : '关') + '）</div>' +
                 '</div>';
@@ -1364,8 +1406,10 @@ var RamariaSettingsView = (function () {
                     '<div class="settings-form-whitelist">';
                 for (var w = 0; w < f.options.length; w++) {
                     var opt = f.options[w];
+                    var defOn = f.def.indexOf(opt.value) !== -1;
                     html += '<label class="settings-form-inline-label">' +
-                        '<input type="checkbox" id="' + fid + '-' + opt.value + '" data-value="' + opt.value + '" /> ' +
+                        '<input type="checkbox" id="' + fid + '-' + opt.value + '" data-value="' + opt.value + '"' +
+                            (defOn ? ' checked' : '') + ' /> ' +
                         opt.label +
                     '</label>';
                 }
@@ -1373,9 +1417,11 @@ var RamariaSettingsView = (function () {
                     '<div class="settings-form-hint">' + f.hint + '（默认：' + f.def.join(', ') + '）</div>' +
                 '</div>';
             } else {
+                // 数值输入框：初始 value 预置默认值并以浅色字符显示（is-default），
+                // 提示"当前为默认值"；用户输入不同值后自动转深色（见 input 事件同步）
                 html += '<div class="settings-form-group">' +
                     '<label class="settings-form-label">' + f.label + '</label>' +
-                    '<input class="settings-form-input" id="' + fid + '" type="number"' +
+                    '<input class="settings-form-input is-default" id="' + fid + '" type="number" value="' + f.def + '"' +
                         (f.step ? ' step="' + f.step + '"' : '') +
                         (f.min !== undefined ? ' min="' + f.min + '"' : '') +
                         (f.max !== undefined ? ' max="' + f.max + '"' : '') +
@@ -1399,6 +1445,19 @@ var RamariaSettingsView = (function () {
         var resetBtn = $('settings-adv-reset-' + group.key);
         if (resetBtn) {
             resetBtn.addEventListener('click', function () { _handleAdvancedReset(group); });
+        }
+
+        // 数值输入框：输入时同步"默认值浅色字符"状态（值=默认 → 浅色，否则深色）
+        for (var j = 0; j < group.fields.length; j++) {
+            var field = group.fields[j];
+            if (field.type === 'number') {
+                var numInput = $(_advFieldId(group, field));
+                if (numInput) {
+                    numInput.addEventListener('input', (function (input, fld) {
+                        return function () { _syncAdvancedInputDefault(input, fld); };
+                    })(numInput, field));
+                }
+            }
         }
 
         // log_full_prompt 开启需显式隐私确认（T-V14-6-006）
@@ -1445,10 +1504,16 @@ var RamariaSettingsView = (function () {
 
     /**
      * 向配置对象写入嵌套路径值。
+     *
+     * v1.5 M6 增强：路径中间对象缺失时自动补建（防御——配置快照可能不含
+     * 某些嵌套分组，直接写入会抛 TypeError 中断「恢复全部默认」流程）。
      */
     function _advSetValue(cfg, path, value) {
         var v = cfg;
         for (var i = 0; i < path.length - 1; i++) {
+            if (v[path[i]] == null || typeof v[path[i]] !== 'object') {
+                v[path[i]] = {};
+            }
             v = v[path[i]];
         }
         v[path[path.length - 1]] = value;
@@ -1456,6 +1521,11 @@ var RamariaSettingsView = (function () {
 
     /**
      * 回显一个高级配置组（进入设置页时调用）。
+     *
+     * 说明（v1.5 M6 U 项增强）:
+     * - 渲染时已按默认值预置控件状态；此处仅在实际配置存在对应字段时覆盖，
+     *   配置缺失（undefined）时保留默认态（checkbox 保持默认选中、输入框保持默认值）。
+     * - 数值输入框回显后同步"默认值浅色字符"状态。
      */
     function _fillAdvancedForm(group, cfg) {
         for (var i = 0; i < group.fields.length; i++) {
@@ -1463,19 +1533,38 @@ var RamariaSettingsView = (function () {
             var fid = _advFieldId(group, f);
             var value = _advGetValue(cfg, f.path);
             if (f.type === 'bool') {
-                var box = $(fid);
-                if (box) box.checked = !!value;
+                if (value !== undefined) {
+                    var box = $(fid);
+                    if (box) box.checked = !!value;
+                }
             } else if (f.type === 'whitelist') {
-                var list = Array.isArray(value) ? value : [];
-                for (var w = 0; w < f.options.length; w++) {
-                    var cb = $(fid + '-' + f.options[w].value);
-                    if (cb) cb.checked = list.indexOf(f.options[w].value) !== -1;
+                if (value !== undefined) {
+                    var list = Array.isArray(value) ? value : [];
+                    for (var w = 0; w < f.options.length; w++) {
+                        var cb = $(fid + '-' + f.options[w].value);
+                        if (cb) cb.checked = list.indexOf(f.options[w].value) !== -1;
+                    }
                 }
             } else {
                 var input = $(fid);
-                if (input && value !== undefined) input.value = value;
+                if (!input) continue;
+                if (value !== undefined) input.value = value;
+                _syncAdvancedInputDefault(input, f);
             }
         }
+    }
+
+    /**
+     * 同步数值输入框的"默认值浅色字符"状态（v1.5 M6 U 项增强）。
+     *
+     * 规则: 输入框当前值 === 字段默认值 → 添加 `is-default`（浅色字符，
+     * 提示"当前为默认值"）；否则移除（深色主文字，表示已自定义）。
+     * 数值统一按字符串比较（HTML input.value 恒为字符串，避免 1 与 1.0 误判差异）。
+     */
+    function _syncAdvancedInputDefault(input, f) {
+        if (!input) return;
+        var isDefault = String(input.value) === String(f.def);
+        input.classList.toggle('is-default', isDefault);
     }
 
     /**
@@ -1608,6 +1697,38 @@ var RamariaSettingsView = (function () {
             }
             _fullConfig = cfg;
             _fillAdvancedForm(group, cfg);
+        } catch (err) {
+            RamariaToast.show('error', '恢复默认失败', err.message || '未知错误');
+        }
+    }
+
+    /**
+     * 一键恢复全部高级设置参数为默认值（v1.5 M6 U 项功能增强）。
+     *
+     * 交互（2026-08-14 负责人调整：单开一栏、无确认弹窗）:
+     * - 独立栏内直接点击执行（栏内已带说明文字，无需再弹窗确认）；
+     * - 遍历 `_ADVANCED_GROUPS` 全部字段写回默认值并立即保存（统一写入口双写）；
+     * - 保存成功后重新回显全部高级表单（触发"默认值浅色字符"状态同步）。
+     */
+    async function _handleAdvancedResetAll() {
+        try {
+            if (!_fullConfig) {
+                throw new Error('配置未加载，请刷新设置页后重试');
+            }
+            var cfg = JSON.parse(JSON.stringify(_fullConfig));
+            for (var i = 0; i < _ADVANCED_GROUPS.length; i++) {
+                var group = _ADVANCED_GROUPS[i];
+                for (var j = 0; j < group.fields.length; j++) {
+                    var f = group.fields[j];
+                    _advSetValue(cfg, f.path, JSON.parse(JSON.stringify(f.def)));
+                }
+            }
+            var result = await RamariaApi.config.updateFull(cfg);
+            if (!_handleUpdateFullResult(result, '高级设置已全部恢复默认并保存')) {
+                throw new Error('配置双写均失败');
+            }
+            _fullConfig = cfg;
+            _fillAdvancedForms(cfg);
         } catch (err) {
             RamariaToast.show('error', '恢复默认失败', err.message || '未知错误');
         }

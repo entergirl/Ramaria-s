@@ -146,6 +146,13 @@ var RamariaTraitEvidence = (function () {
 
         container.innerHTML = html;
 
+        // CSP 严格模式（style-src 'self'）：HTML 内嵌 style 属性会被阻止，
+        // 事件/L1 详情节初始隐藏改为渲染后 CSSOM 统一设置（不受 style-src 限制）
+        var collapsed = container.querySelectorAll('.tev-event-detail, .tev-l1-detail');
+        for (var c = 0; c < collapsed.length; c++) {
+            collapsed[c].style.display = 'none';
+        }
+
         // 绑定展开/折叠事件
         _bindExpandEvents(container);
     }
@@ -183,8 +190,8 @@ var RamariaTraitEvidence = (function () {
             html += motivesHtml;
         }
 
-        // 可展开详情节
-        html += '<div class="tev-event-detail" id="tev-detail-' + index + '" style="display:none">';
+        // 可展开详情节（初始隐藏由 CSSOM 统一设置，见 container.innerHTML 之后）
+        html += '<div class="tev-event-detail" id="tev-detail-' + index + '">';
 
         // 事件推断信号
         html += '<div class="tev-ev-signals">';
@@ -230,8 +237,8 @@ var RamariaTraitEvidence = (function () {
         html += '<span class="tev-l1-meta">权重: ' + (src.weight != null ? src.weight.toFixed(2) : '-') + '</span>';
         html += '</div>';
 
-        // 可展开详情节: 完整摘要 + evidence_notes
-        html += '<div class="tev-l1-detail" id="' + detailId + '" style="display:none">';
+        // 可展开详情节: 完整摘要 + evidence_notes（初始隐藏由 CSSOM 统一设置）
+        html += '<div class="tev-l1-detail" id="' + detailId + '">';
         html += '<div class="tev-l1-full-summary">' + _escapeHtml(src.summary) + '</div>';
 
         if (src.evidence_notes && src.evidence_notes.length > 0) {

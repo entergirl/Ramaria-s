@@ -23,4 +23,6 @@ pub mod layers;
 /// 修改提醒:
 /// - 修改本常量时同步检查 `ramaria-app` / `ramaria-memory` 各 ChatRequest 构造点
 ///   是否统一引用本常量（不应散落字面量）。
-pub const PROMPT_TEMPLATE_VERSION: &str = "20260810-v1.5.0";
+/// - v1.5 M6 递增记录：行为层槽位填充（`render_behavior_block` 渲染 `## 行为规则`
+///   小节，模板结构变更）→ 旧缓存自动失效，防跨版本误命中。
+pub const PROMPT_TEMPLATE_VERSION: &str = "20260814-v1.5.1";

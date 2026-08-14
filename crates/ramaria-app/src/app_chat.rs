@@ -119,6 +119,43 @@ impl App {
             .backend_config
             .expect("Stage 2 (CheckPrivacy) must set backend_config");
 
+        // ---- Step 5.5: 行为层情境路由（v1.5 M6，F 任务接线）----
+        // [behavior].enabled=false / 未命中 / 路由失败 → None（静默降级，
+        // prompt 与 v1.4 语义等价——回归红线）；命中 → 合并主/次规则注入行为块。
+        let behavior_decision = if config.behavior.enabled {
+            // history_messages 为 ChatMessage（role+content），行为路由仅消费
+            // role/content（查询构造），转换为轻量 Message 列表
+            let route_messages: Vec<Message> = history_messages
+                .iter()
+                .map(|m| Message::new(session.id, m.role, m.content.clone(), MessageSource::Local))
+                .collect();
+            match crate::commands::behavior::behavior_route(
+                self,
+                persona_uid.unwrap_or("rama-0001"),
+                &route_messages,
+            )
+            .await
+            {
+                Ok(r) if r.matched => r
+                    .primary
+                    .as_ref()
+                    .map(|p| ramaria_memory::behavior::merge_route_targets(p, &r.secondary)),
+                // 未命中 → 静默降级（等同 v1.4）
+                Ok(_) => None,
+                // 路由失败（存储/查询异常）→ 记 warn 降级，不阻塞主流程
+                Err(e) => {
+                    tracing::warn!(
+                        %e,
+                        request_id = %request_id,
+                        "行为情境路由失败，静默降级不注入行为块"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // ---- Step 6: 构建 System Prompt（5-Block 装配器） ----
         // examples 预选（v1.4）：评分轮换 + 记忆未命中兜底；enabled=false 回退 v1.3 静态注入
         let examples = load_examples_for_input(
@@ -136,6 +173,7 @@ impl App {
                 last_active_at.as_deref(),
                 utt_context.as_deref(),
                 bridge_context.as_deref(),
+                behavior_decision,
                 examples,
                 config.examples.max_examples as usize,
             )
@@ -278,6 +316,8 @@ impl App {
     /// - `last_active_at`: 最后活跃时间字符串（YYYY-MM-DD HH:MM 格式）。
     /// - `utt_context`: utt 原文片段（已按预算裁剪渲染；None 表示不注入，等同 v1.3）。
     /// - `bridge_context`: 桥接内容（上一会话尾部原文，已按预算截断；None 表示不注入）。
+    /// - `behavior_decision`: 行为层路由合并决策（v1.5 M6；None = 未命中/关闭，
+    ///   不注入行为块，prompt 与 v1.4 语义等价——回归红线）。
     /// - `examples`: 已选好的 Few-shot 示例（由 `load_examples_for_input` 评分轮换/兜底后传入）。
     /// - `max_examples`: examples 注入上限（来自生效配置 `examples.max_examples`，
     ///   v1.5 起由调用方传入以支持配置覆盖的探针场景）。
@@ -287,6 +327,7 @@ impl App {
     /// - persona 不存在 → 使用默认 Ramaria 身份 prompt。
     /// - facts/traits/examples 为空 → 对应 Block 自动省略（由 builder 处理）。
     /// - recent_summaries 为空 → Block C1 显示"首次对话"提示。
+    /// - behavior_decision=None → 行为块不注入（静默降级，等同 v1.4）。
     ///
     /// 安全约束:
     /// - 不在此处写入 system prompt 到日志（完整 prompt 仅发送到 LLM）。
@@ -300,6 +341,7 @@ impl App {
         last_active_at: Option<&str>,
         utt_context: Option<&str>,
         bridge_context: Option<&str>,
+        behavior_decision: Option<ramaria_memory::behavior::MergedDecision>,
         examples: Vec<ramaria_core::types::PersonaExample>,
         max_examples: usize,
     ) -> String {
@@ -371,6 +413,8 @@ impl App {
                 utt_context: utt_context.map(|s| s.to_string()),
                 // v1.4 M5: 桥接内容（桥接层已按白名单与预算过滤，None 等同 v1.3）
                 bridge_context: bridge_context.map(|s| s.to_string()),
+                // v1.5 M6: 行为层路由决策（None = 未命中/关闭，等同 v1.4）
+                behavior_decision,
             };
 
             // v1.4 M6（T-V14-6-004）：[examples].max_examples 经 RamariaConfig 传播，

@@ -715,9 +715,10 @@ var RamariaMemoryView = (function () {
         // 含义
         html += '<div class="memory-l3-trait-meaning">' + _escapeHtml(trait.meaning || '') + '</div>';
 
-        // 置信度色条
+        // 置信度色条（宽度由 CSSOM 设置，见 card.innerHTML 之后——
+        // CSP 严格模式 style-src 'self' 禁止 HTML 内嵌 inline style）
         html += '<div class="memory-l3-confidence-bar">';
-        html += '<div class="memory-l3-confidence-fill ' + confClass + '" style="width:' + Math.max(confidencePct, 2) + '%"></div>';
+        html += '<div class="memory-l3-confidence-fill ' + confClass + '"></div>';
         html += '</div>';
 
         // 元信息行
@@ -755,10 +756,21 @@ var RamariaMemoryView = (function () {
                 '📋 展开证据</button>';
         html += '</div>';
 
-        // 证据链展开区（初始隐藏）
-        html += '<div class="memory-l3-evidence-panel" id="evidence-panel-' + trait.id + '" style="display:none"></div>';
+        // 证据链展开区（初始隐藏由 CSSOM 设置，见 card.innerHTML 之后）
+        html += '<div class="memory-l3-evidence-panel" id="evidence-panel-' + trait.id + '"></div>';
 
         card.innerHTML = html;
+
+        // CSP 严格模式（style-src 'self'）：HTML 内嵌 style 属性会被阻止，
+        // 置信度色条宽度与证据面板初始隐藏改为渲染后 CSSOM 设置（不受 style-src 限制）
+        var confFill = card.querySelector('.memory-l3-confidence-fill');
+        if (confFill) {
+            confFill.style.width = Math.max(confidencePct, 2) + '%';
+        }
+        var evidencePanel = card.querySelector('.memory-l3-evidence-panel');
+        if (evidencePanel) {
+            evidencePanel.style.display = 'none';
+        }
 
         // 绑定"展开证据"按钮
         _bindEvidenceButton(card, trait);
@@ -810,7 +822,8 @@ var RamariaMemoryView = (function () {
                         btn.textContent = '📋 展开证据';
                         panel.innerHTML =
                             '<div class="tev-empty">' +
-                                '<div class="tev-empty-text">证据链加载失败: ' + (err.message || '未知错误') + '</div>' +
+                                '<div class="tev-empty-text">证据链加载失败: ' +
+                                    _escapeHtml(err.message || '未知错误') + '</div>' +
                             '</div>';
                     });
             } else {

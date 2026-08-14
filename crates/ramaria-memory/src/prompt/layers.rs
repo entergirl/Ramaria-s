@@ -1,10 +1,10 @@
-//! rust/crates/ramaria-memory/src/prompt/layers.rs - 四层注入结构与预算分配器（v1.4 M6）
+//! rust/crates/ramaria-memory/src/prompt/layers.rs - 四层注入结构与预算分配器（v1.4 M6 / v1.5 M6）
 //!
 //! 对齐算法说明书 v3.1 §8（驱动环装配：四层融合为一次生成）：
 //!
 //! | 层 | 内容 | 状态 |
 //! |----|------|------|
-//! | 行为层（Behavior） | 情境-反应规则（v3.1 §4） | v1.5 填充，当前为空实现（槽位预留） |
+//! | 行为层（Behavior） | 情境-反应规则（v3.1 §4） | v1.5 已填充（情境路由命中注入） |
 //! | 知识层（Knowledge） | 事实卡片（v3.1 §5） | v1.6 填充，当前为空实现（槽位预留） |
 //! | 表达层（Style） | utt 原文块 + 风格特征规则 | v1.4 已注入（原文片段/示例/说话风格） |
 //! | 脉络层（Memory） | L1 近期脉络 + 相关历史记忆 + 原文片段 + 桥接 | v1.4 已注入 |
@@ -12,6 +12,7 @@
 //! 优先级（v3.1 §8.1）：行为 > 知识 > 表达 > 脉络。
 //!
 //! 预算规则（v3.1 §8.3 / 计划书 §2.5）：
+//! - 行为控制块固定小比例、始终保底（默认 400 字符，`PromptConfig.behavior_block_max_chars` 可调）。
 //! - 脉络独立预算（约 30% 上限，相对 system prompt 预留 token）。
 //! - 超限裁剪顺序：原文块（按相似度从低到高丢整块）→ 桥接（从头部截断、保最近）
 //!   → 相关历史记忆（句子边界截断）→ 脉络摘要（保最近，丢最旧）。
@@ -20,8 +21,10 @@
 //! - 原文级内容（utt/桥接）在此模块仅做预算裁剪，不做内容改写；
 //!   白名单过滤在检索/加载层完成（`ramaria-app`），本模块不感知 persona 类型。
 //! - 本模块为纯函数，零 I/O，不写日志（原文内容不落日志的红线由上层保证）。
+//! - 行为块只消费路由决策（规则文本/参数/avoid），不接触事件原文与对话原文。
 
-use crate::prompt::builder::PromptContext;
+use crate::behavior::MergedDecision;
+use crate::prompt::builder::{PromptConfig, PromptContext};
 use crate::token_budget::truncate_at_boundary;
 
 // =========================================================
@@ -349,16 +352,118 @@ fn take_tail(text: &str, max_chars: usize) -> String {
 }
 
 // =========================================================
-// 行为/知识层槽位（v1.5 / v1.6 预留，T-V14-6-003）
+// 行为层槽位（v1.5 M6 已填充：情境-反应规则注入）
 // =========================================================
 
-/// 行为层注入块渲染（槽位预留，v1.5 填充：情境-反应规则）。
+/// 行为控制块默认字符预算（v3.1 §8.3：行为控制块固定小比例、始终保底）。
+const BEHAVIOR_BLOCK_DEFAULT_MAX_CHARS: usize = 400;
+/// 行为块最小字符预算（低于标题+引导行长度时渲染残缺段落，防御性返回 None）。
+const BEHAVIOR_BLOCK_MIN_CHARS: usize = 24;
+
+/// 行为层注入块渲染（v1.5 M6 填充，v3.1 §4.3 / §8.2）。
 ///
-/// 当前为空实现：恒返回 `None`，装配器跳过该块（不产生空段落）。
-/// v1.5 实现行为层时在此处返回 `Some(InjectionBlock)`，
-/// 渲染 `# 角色（行为层）` 下的行为规则子段。
-pub fn render_behavior_block(_context: &PromptContext) -> Option<InjectionBlock> {
-    None
+/// 消费 `PromptContext.behavior_decision`（情境路由合并结果，由 `ramaria-app`
+/// 在对话管线中注入）：
+/// - `None`（未命中 / 行为关闭 / 路由失败降级）→ 返回 `None`，不产生段落，
+///   行为层未命中时 prompt 与 v1.4 语义等价（回归红线）。
+/// - `Some(decision)` → 渲染 `## 行为规则` 小节（reaction + params + avoid），
+///   段落置于 `# 角色（行为层）` 之后，语义上归属角色段（v3.1 §8.2）。
+///
+/// 预算:
+/// - 行为控制块固定小比例（默认 400 字符，`PromptConfig.behavior_block_max_chars`
+///   可调），超限从头部截断保规则文本并加 `…`（规则文本为主、参数为辅）。
+///
+/// 参数:
+/// - `context`: 装配上下文（含行为路由决策）。
+/// - `config`: 装配配置（行为块预算）。
+///
+/// 返回:
+/// - 命中时返回行为层注入块；未命中/决策为空时返回 `None`。
+pub fn render_behavior_block(
+    context: &PromptContext,
+    config: &PromptConfig,
+) -> Option<InjectionBlock> {
+    let decision = context.behavior_decision.as_ref()?;
+    let max_chars = config
+        .behavior_block_max_chars
+        .unwrap_or(BEHAVIOR_BLOCK_DEFAULT_MAX_CHARS);
+
+    let content = render_behavior_decision(decision, max_chars)?;
+    Some(InjectionBlock::new(
+        LayerKind::Behavior,
+        "## 行为规则",
+        content,
+    ))
+}
+
+/// 将合并后的路由决策渲染为行为规则小节文本。
+///
+/// 输出格式（v3.1 §8.2「规则文本为主、结构化参数为辅」）:
+/// ```text
+/// ## 行为规则
+/// 当聊到「加班」「累」等话题时：{reaction}
+/// - 表达倾向：情感强度-0.42 · 主动程度0.82 · 详细度0.65 · 正式度0.58
+/// - 避免：深夜打扰、说教
+/// ```
+///
+/// 降级:
+/// - 候选规则（reaction 为空）→ 以"按表达倾向调整回应"占位（仅参数注入）。
+/// - avoid 为空 → 不输出避免行。
+/// - 超预算 → 从头部截断保规则文本（reaction 优先），追加 `…`，总长 ≤ `max_chars`。
+///
+/// 参数:
+/// - `decision`: 路由合并决策（主规则 + 合并 avoid/params）。
+/// - `max_chars`: 行为块字符预算。
+///
+/// 返回:
+/// - 渲染文本；截断后为空时返回 `None`（不产生空段落）。
+fn render_behavior_decision(decision: &MergedDecision, max_chars: usize) -> Option<String> {
+    // 预算不足最小可读长度（标题+引导行）：不渲染残缺段落（防御，与预算 0 一致）
+    if max_chars < BEHAVIOR_BLOCK_MIN_CHARS {
+        return None;
+    }
+    let keywords = &decision.primary_rule.situation.keywords;
+    let kw_text = if keywords.is_empty() {
+        "相关话题".to_string()
+    } else {
+        let quoted: Vec<String> = keywords.iter().map(|k| format!("「{k}」")).collect();
+        quoted.join("、")
+    };
+
+    let reaction_line = match decision.primary_rule.reaction.as_deref() {
+        Some(reaction) if !reaction.trim().is_empty() => reaction.trim().to_string(),
+        _ => "（候选规则，无规则文本，按表达倾向调整回应）".to_string(),
+    };
+
+    let mut lines = vec![
+        "## 行为规则".to_string(),
+        format!("当聊到{kw_text}等话题时：{reaction_line}"),
+        format!(
+            "- 表达倾向：情感强度{:.2} · 主动程度{:.2} · 详细度{:.2} · 正式度{:.2}",
+            decision.merged_params.emotional_intensity,
+            decision.merged_params.proactiveness,
+            decision.merged_params.detail_level,
+            decision.merged_params.formality
+        ),
+    ];
+    if !decision.merged_avoid.is_empty() {
+        lines.push(format!("- 避免：{}", decision.merged_avoid.join("、")));
+    }
+
+    let mut content = lines.join("\n");
+    let total = content.chars().count();
+    if total > max_chars {
+        // 行为控制块固定小比例：超限保前部（规则文本优先），截断提示 `…`
+        content = content
+            .chars()
+            .take(max_chars.saturating_sub(1))
+            .collect::<String>()
+            + "…";
+    }
+    if content.trim().is_empty() {
+        return None;
+    }
+    Some(content)
 }
 
 /// 知识层注入块渲染（槽位预留，v1.6 填充：事实卡片）。
@@ -634,15 +739,191 @@ mod tests {
         assert_eq!(out.summaries, vec!["摘要"]);
     }
 
-    // ---- 槽位预留（T-V14-6-003） ----
+    // ---- 槽位预留（T-V14-6-003）/ 行为层渲染（v1.5 M6） ----
 
     #[test]
     fn behavior_and_knowledge_slots_are_empty_for_now() {
+        // v1.5 M6：行为槽位已填充——无路由决策（未命中/关闭）时仍返回 None
         let ctx = PromptContext::default();
-        assert!(render_behavior_block(&ctx).is_none(), "v1.5 前行为槽位为空");
+        let config = PromptConfig::default();
+        assert!(
+            render_behavior_block(&ctx, &config).is_none(),
+            "行为层未命中/关闭 → 不产生段落（等同 v1.4）"
+        );
         assert!(
             render_knowledge_block(&ctx).is_none(),
             "v1.6 前知识槽位为空"
         );
+    }
+
+    // ---- 行为层渲染辅助 ----
+
+    /// 构造带 reaction/params/avoid 的合并决策（与 routing.rs 测试同构）。
+    fn make_decision(reaction: Option<&str>, avoid: &[&str]) -> MergedDecision {
+        use ramaria_core::behavior::{BehaviorParams, BehaviorRule, BehaviorSituation, RuleSource};
+        let mut rule = BehaviorRule::new(
+            "char-0001",
+            BehaviorSituation {
+                keywords: vec!["加班".to_string(), "累".to_string()],
+                centroid: None,
+                response_centroid: None,
+                valence_mean: -0.5,
+                valence_std: 0.2,
+                sample_count: 6,
+                presentation_dist: Vec::new(),
+                situation_strength_mean: 3.0,
+                time_span_days: 10.0,
+                trait_refs: Vec::new(),
+            },
+            reaction.map(|s| s.to_string()),
+            BehaviorParams {
+                emotional_intensity: -0.42,
+                proactiveness: 0.82,
+                detail_level: 0.65,
+                formality: 0.58,
+            },
+            RuleSource::Auto,
+        );
+        rule.id = 1;
+        MergedDecision {
+            primary_rule: rule,
+            merged_avoid: avoid.iter().map(|s| s.to_string()).collect(),
+            merged_params: BehaviorParams {
+                emotional_intensity: -0.42,
+                proactiveness: 0.82,
+                detail_level: 0.65,
+                formality: 0.58,
+            },
+        }
+    }
+
+    #[test]
+    fn render_behavior_block_hit_renders_rule_section() {
+        let decision = make_decision(
+            Some("用疲惫但温和的语气回应，先共情再给建议"),
+            &["深夜打扰"],
+        );
+        let ctx = PromptContext {
+            behavior_decision: Some(decision),
+            ..Default::default()
+        };
+        let block =
+            render_behavior_block(&ctx, &PromptConfig::default()).expect("命中时应渲染行为块");
+        assert_eq!(block.layer, LayerKind::Behavior);
+        let content = &block.content;
+        assert!(content.contains("## 行为规则"), "小节标题: {content}");
+        assert!(content.contains("「加班」、「累」"), "关键词: {content}");
+        assert!(
+            content.contains("用疲惫但温和的语气回应"),
+            "reaction 注入: {content}"
+        );
+        assert!(
+            content.contains("情感强度-0.42") && content.contains("主动程度0.82"),
+            "params 注入: {content}"
+        );
+        assert!(content.contains("深夜打扰"), "avoid 注入: {content}");
+    }
+
+    #[test]
+    fn render_behavior_block_candidate_rule_without_reaction() {
+        // 候选规则（reaction=None）命中 → 仅参数注入，不产生空规则行
+        let decision = make_decision(None, &[]);
+        let ctx = PromptContext {
+            behavior_decision: Some(decision),
+            ..Default::default()
+        };
+        let block = render_behavior_block(&ctx, &PromptConfig::default())
+            .expect("候选规则命中时仍渲染（仅参数）");
+        let content = &block.content;
+        assert!(
+            content.contains("按表达倾向调整回应"),
+            "候选规则占位: {content}"
+        );
+        assert!(content.contains("情感强度-0.42"), "参数注入: {content}");
+        assert!(
+            !content.contains("- 避免"),
+            "空 avoid 不输出避免行: {content}"
+        );
+    }
+
+    #[test]
+    fn render_behavior_block_budget_truncates_head_first() {
+        // 极紧预算：输出总长 ≤ 预算，截断保前部（规则文本优先）并带 `…`
+        let decision = make_decision(Some("这是一段很长的规则文本内容，用于验证预算裁剪"), &["a"]);
+        let ctx = PromptContext {
+            behavior_decision: Some(decision),
+            ..Default::default()
+        };
+        let config = PromptConfig {
+            behavior_block_max_chars: Some(24),
+            ..Default::default()
+        };
+        let block = render_behavior_block(&ctx, &config).expect("命中时渲染");
+        assert!(block.content.chars().count() <= 24, "总长 ≤ 预算");
+        assert!(block.content.ends_with('…'), "截断提示: {}", block.content);
+        assert!(
+            block.content.starts_with("## 行为规则"),
+            "保前部: {}",
+            block.content
+        );
+    }
+
+    #[test]
+    fn render_behavior_block_zero_budget_returns_none() {
+        let decision = make_decision(Some("规则文本"), &[]);
+        let ctx = PromptContext {
+            behavior_decision: Some(decision),
+            ..Default::default()
+        };
+        let config = PromptConfig {
+            behavior_block_max_chars: Some(0),
+            ..Default::default()
+        };
+        assert!(
+            render_behavior_block(&ctx, &config).is_none(),
+            "预算 0 → 不产生空段落"
+        );
+    }
+
+    #[test]
+    fn render_behavior_block_no_decision_is_none() {
+        let ctx = PromptContext {
+            behavior_decision: None,
+            ..Default::default()
+        };
+        assert!(
+            render_behavior_block(&ctx, &PromptConfig::default()).is_none(),
+            "未命中/关闭 → None（v1.4 语义等价）"
+        );
+    }
+
+    #[test]
+    fn render_behavior_decision_no_keywords_fallback() {
+        use ramaria_core::behavior::{BehaviorParams, BehaviorRule, BehaviorSituation, RuleSource};
+        let rule = BehaviorRule::new(
+            "char-0001",
+            BehaviorSituation {
+                keywords: vec![],
+                centroid: None,
+                response_centroid: None,
+                valence_mean: 0.0,
+                valence_std: 0.1,
+                sample_count: 5,
+                presentation_dist: Vec::new(),
+                situation_strength_mean: 2.0,
+                time_span_days: 5.0,
+                trait_refs: Vec::new(),
+            },
+            Some("规则文本".to_string()),
+            BehaviorParams::default(),
+            RuleSource::Auto,
+        );
+        let decision = MergedDecision {
+            primary_rule: rule,
+            merged_avoid: Vec::new(),
+            merged_params: BehaviorParams::default(),
+        };
+        let text = render_behavior_decision(&decision, 400).expect("渲染成功");
+        assert!(text.contains("相关话题"), "无关键词回退: {text}");
     }
 }

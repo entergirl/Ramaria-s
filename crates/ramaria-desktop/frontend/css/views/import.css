@@ -26,6 +26,7 @@
    ═════════════════════════════════════════════════ */
 .import-steps {
     display: flex;
+    flex-wrap: wrap;              /* v1.5 M6 U 项：空间不足时换行而非竖排，保持横排优先 */
     justify-content: center;
     gap: var(--space-2);
     margin-bottom: var(--space-6);    /* 与下方内容拉开，区隔页眉区域 */
@@ -633,10 +634,7 @@
         padding: var(--space-3);
     }
 
-    .import-steps {
-        flex-direction: column;
-        align-items: center;
-    }
+    /* v1.5 M6 U 项：顶部三个步骤窗口不再竖排（保持横排，窄时由 flex-wrap 换行） */
 
     .import-mode-selector {
         flex-direction: column;

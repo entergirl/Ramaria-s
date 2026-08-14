@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/tests/m6_integration.rs - v1.4 M6 集成测试
+//! rust/crates/ramaria-app/tests/m6_integration.rs - v1.4/v1.5 M6 集成测试
 //!
 //! 覆盖:
 //! - T-V14-6-001/002/003：四层模板（活跃路径端到端）
@@ -11,6 +11,10 @@
 //!   - examples.enabled=false → 回退静态 selected 查询（v1.3 行为）
 //!   - examples.max_examples 传播（注入条数上限生效）
 //!   - 三开关全关 → prompt 无任何 v1.4 新增段落（语义等价 v1.3）
+//! - T-V15-6-001/002：驱动环接线（v1.5 M6，F 任务）
+//!   - 情境路由命中 → `## 行为规则` 行为块注入 prompt（reaction + params + avoid）
+//!   - [behavior].enabled=false → 无行为块（prompt 与 v1.4 语义等价——回归红线）
+//!   - 无规则（助手 persona）→ 无行为块（无回归）
 //!
 //! 安全约束:
 //! - 全部使用 mock（MockStorage + MockLlm），不触碰真实数据库/LLM。
@@ -22,6 +26,7 @@ mod mock_backend;
 
 use futures::StreamExt;
 use ramaria_app::App;
+use ramaria_app::stream_event::StreamEvent;
 use ramaria_core::config::RamariaConfig;
 use ramaria_core::traits::StorageBackend;
 use ramaria_core::types::{
@@ -338,4 +343,151 @@ async fn all_v14_features_disabled_returns_v13_semantics() {
         prompt.contains("静态示例回复"),
         "examples 关闭回退静态 selected"
     );
+}
+
+// =========================================================
+// T-V15-6-001/002：驱动环接线——行为控制块注入（v1.5 M6）
+// =========================================================
+
+/// 发送消息并返回 Done 事件的 session_id（供后续轮次复用会话）。
+async fn send_and_get_session(
+    app: &App,
+    text: &str,
+    persona: Option<&str>,
+    session: Option<Uuid>,
+) -> Option<Uuid> {
+    let mut stream = app
+        .send_message(text, persona, session)
+        .await
+        .expect("发送成功");
+    let mut sid = None;
+    while let Some(ev) = stream.next().await {
+        if let Ok(StreamEvent::Done { session_id, .. }) = ev {
+            sid = session_id;
+        }
+    }
+    sid
+}
+
+/// 注册角色类 persona（行为规则学习/路由目标）。
+async fn setup_behavior_persona(storage: &MockStorage) {
+    storage
+        .create_persona(&Persona::new(
+            "char-0001".to_string(),
+            "小夏".to_string(),
+            PersonaKind::Char,
+            0,
+            "local".into(),
+        ))
+        .await
+        .expect("persona 创建成功");
+}
+
+/// 行为命中：情境路由命中 → `## 行为规则` 块注入 prompt（reaction + params + avoid）。
+///
+/// 说明:
+/// - 手工导入 Manual 规则（M5 D7）而非 learn：避免 mock LLM 翻译响应污染
+///   对话历史（assistant 消息会进入路由查询窗口）；MockLlm 空回复 →
+///   assistant 消息不落库，历史仅含用户消息，查询侧 Jaccard 纯净命中。
+#[tokio::test]
+async fn behavior_rule_injected_when_route_hits() {
+    let storage = Arc::new(MockStorage::new());
+    let llm = Arc::new(MockLlm::new("")); // 空回复：assistant 消息不入历史
+    let app = make_app(
+        Arc::clone(&storage),
+        Arc::clone(&llm),
+        RamariaConfig::default(),
+    );
+    setup_ready(&app, storage.as_ref()).await;
+
+    setup_behavior_persona(&storage).await;
+    // 手工导入规则：关键词 [加班]，reaction + avoid（enabled 默认 true）
+    ramaria_app::commands::behavior::behavior_import_rule(
+        &app,
+        "char-0001",
+        r#"{
+            "situation": {"keywords": ["加班"], "valence_mean": -0.5, "valence_std": 0.1, "sample_count": 6},
+            "reaction": "先共情再给建议，语气疲惫但温和。",
+            "params": {"emotional_intensity": -0.4, "proactiveness": 0.7, "detail_level": 0.6, "formality": 0.3},
+            "avoid": ["深夜"]
+        }"#,
+    )
+    .await
+    .expect("导入成功");
+
+    // 第一轮建立会话（history 为空 → 行为路由不命中）
+    let sid = send_and_get_session(&app, "加班", Some("char-0001"), None)
+        .await
+        .expect("首轮应返回 session_id");
+    // 第二轮：历史含"加班" → 查询侧 Jaccard=1.0 ≥ θ_route → 行为块注入
+    send_and_get_session(&app, "继续聊聊", Some("char-0001"), Some(sid)).await;
+
+    let request = llm.last_request().expect("应记录最后一次请求");
+    let prompt = &request.system_prompt;
+    assert!(prompt.contains("## 行为规则"), "行为块缺失: {prompt}");
+    assert!(
+        prompt.contains("先共情再给建议"),
+        "reaction 未注入: {prompt}"
+    );
+    assert!(prompt.contains("深夜"), "avoid 未注入: {prompt}");
+    assert!(prompt.contains("表达倾向"), "params 未注入: {prompt}");
+}
+
+/// [behavior].enabled=false → 不路由不注入，prompt 与 v1.4 语义等价（回归红线）。
+#[tokio::test]
+async fn behavior_disabled_no_behavior_block() {
+    let mut cfg = RamariaConfig::default();
+    cfg.behavior.enabled = false;
+
+    let storage = Arc::new(MockStorage::new());
+    let llm = Arc::new(MockLlm::new(""));
+    let app = make_app(Arc::clone(&storage), Arc::clone(&llm), cfg);
+    setup_ready(&app, storage.as_ref()).await;
+
+    setup_behavior_persona(&storage).await;
+    // 存在可命中的规则（但行为关闭 → 不路由）
+    ramaria_app::commands::behavior::behavior_import_rule(
+        &app,
+        "char-0001",
+        r#"{
+            "situation": {"keywords": ["加班"], "valence_mean": -0.5, "valence_std": 0.1, "sample_count": 6},
+            "reaction": "先共情再给建议。",
+            "avoid": ["深夜"]
+        }"#,
+    )
+    .await
+    .expect("导入成功");
+
+    let sid = send_and_get_session(&app, "加班", Some("char-0001"), None)
+        .await
+        .expect("首轮 session_id");
+    send_and_get_session(&app, "继续聊聊", Some("char-0001"), Some(sid)).await;
+
+    let request = llm.last_request().expect("应记录最后一次请求");
+    let prompt = &request.system_prompt;
+    assert!(!prompt.contains("## 行为规则"), "行为关闭不注入行为块");
+    assert!(!prompt.contains("先共情再给建议"), "规则文本不泄漏");
+}
+
+/// 无规则（助手 persona 未学习）→ 无行为块（回归红线：助手类 persona 无回归）。
+#[tokio::test]
+async fn behavior_no_rule_no_block_for_assistant() {
+    let storage = Arc::new(MockStorage::new());
+    let llm = Arc::new(MockLlm::new("好的。"));
+    let app = make_app(
+        Arc::clone(&storage),
+        Arc::clone(&llm),
+        RamariaConfig::default(),
+    );
+    setup_ready(&app, storage.as_ref()).await;
+
+    // 未注册规则：直接对话（不学习）
+    let sid = send_and_get_session(&app, "你好", Some("rama-0001"), None)
+        .await
+        .expect("首轮 session_id");
+    send_and_get_session(&app, "今天天气不错", Some("rama-0001"), Some(sid)).await;
+
+    let request = llm.last_request().expect("应记录最后一次请求");
+    let prompt = &request.system_prompt;
+    assert!(!prompt.contains("## 行为规则"), "无规则不产生行为块");
 }

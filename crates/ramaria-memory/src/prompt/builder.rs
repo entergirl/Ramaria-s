@@ -7,14 +7,15 @@
 //! |--------------------------|----------|--------------------|
 //! | `# 能力边界` | 安全边界（保留，非四层） | Capacity |
 //! | `# 角色（行为层）` | 角色身份 + 性格特征 + 已知事实 + 回复规范 | Role + Insight + Experiment |
-//! | （行为层槽位，v1.5） | 情境-反应规则（`render_behavior_block`） | 新增预留 |
+//! | `## 行为规则`（行为层，v1.5） | 情境-反应规则（`render_behavior_block`，命中注入） | v1.4 空槽位已填充 |
 //! | `# 说话风格（表达层）` | 说话风格 + 对话示例 | Personality + Statement |
 //! | `# 知识（知识层，按需）` | 事实卡片（`render_knowledge_block`，v1.6） | 新增预留 |
 //! | `# 记忆（脉络层）` | 近期对话脉络 + 相关记忆 + 原文片段 + 桥接 | Memory + utt/桥接（v1.4） |
 //! | `# 当前时间` | 时间/天气/上次活跃 | 当前语境 |
 //!
 //! 设计特点:
-//! - 空块自动跳过：行为/知识槽位当前为空实现（T-V14-6-003），不产生空段落。
+//! - 空块自动跳过：行为槽位 v1.5 已填充（未命中/关闭不产生段落），知识槽位仍为空实现
+//!   （T-V14-6-003），不产生空段落。
 //! - 脉络层独立预算（v3.1 §8.3，≤ 30%），超限裁剪顺序：原文块 → 桥接头部
 //!   → 相关记忆 → 脉络保最近（预算分配器见 `layers.rs`）。
 //! - 回归红线：助手类 persona（原文白名单外）不注入原文/桥接，输出与 v1.3 语义等价。
@@ -67,6 +68,8 @@ pub struct PromptConfig {
     pub current_time_str: String,
     /// 脉络层字符预算上限（v1.4 M6；None = 默认 600 字符）
     pub memory_layer_budget_chars: Option<usize>,
+    /// 行为控制块字符预算上限（v1.5 M6；None = 默认 400 字符，§8.3 固定小比例）
+    pub behavior_block_max_chars: Option<usize>,
 }
 
 impl Default for PromptConfig {
@@ -80,6 +83,7 @@ impl Default for PromptConfig {
             include_knowledge_boundary: true,
             current_time_str: String::new(),
             memory_layer_budget_chars: None,
+            behavior_block_max_chars: None,
         }
     }
 }
@@ -159,6 +163,15 @@ pub struct PromptContext {
     /// - 承载原文级信息，仅白名单内 persona 由桥接层填充。
     /// - 内容不写日志。
     pub bridge_context: Option<String>,
+
+    /// v1.5 M6 新增: 行为层路由决策（情境路由命中合并结果，`behavior/routing.rs`）。
+    ///
+    /// 字段约定:
+    /// - `None` = 行为关闭 / 未命中 / 路由失败降级 → 不注入行为块，
+    ///   prompt 与 v1.4 语义等价（回归红线，由 `ramaria-app` 保证）。
+    /// - `Some(decision)` = 主规则 + 合并 avoid/params，由
+    ///   `render_behavior_block` 渲染 `## 行为规则` 小节。
+    pub behavior_decision: Option<crate::behavior::MergedDecision>,
 }
 
 // =========================================================
@@ -248,14 +261,15 @@ pub const TEMPLATE_LAYER_MAP: &[(&str, &str, &str)] = &[
 /// - 无 facts 时省略角色层中的已知事实段。
 /// - 无 examples 时省略表达层中的对话示例段。
 /// - 无 chat_style_rules 时使用最小化默认规则。
-/// - 行为/知识层槽位为空 → 不产生段落（v1.5/v1.6 填充后自动生效）。
+/// - 行为层未命中/关闭（`behavior_decision=None`）→ 不产生段落（等同 v1.4）；
+///   知识层槽位为空 → 不产生段落（v1.6 填充后自动生效）。
 pub fn assemble_prompt(context: &PromptContext, config: &PromptConfig) -> String {
     let mut blocks: Vec<String> = Vec::with_capacity(7);
     for block in [
         build_capacity(config, context),
         build_role_layer(context, config),
-        // 行为层槽位（v1.5 填充；当前 None → 不产生段落）
-        render_behavior_block(context).map_or(String::new(), |b| b.content),
+        // 行为层（v1.5 M6 已填充；None → 不产生段落，等同 v1.4）
+        render_behavior_block(context, config).map_or(String::new(), |b| b.content),
         build_style_layer(context, config),
         // 知识层槽位（v1.6 填充；当前 None → 不产生段落）
         render_knowledge_block(context).map_or(String::new(), |b| b.content),
@@ -1235,8 +1249,9 @@ mod tests {
             last_active_at: Some("2026-06-08".into()),
             weather: Some("晴".into()),
             chat_style_rules: Some("测试回复规则".into()),
-            utt_context: None,    // 默认无原文片段（v1.4）
-            bridge_context: None, // 默认无桥接内容（v1.4 M5）
+            utt_context: None,       // 默认无原文片段（v1.4）
+            bridge_context: None,    // 默认无桥接内容（v1.4 M5）
+            behavior_decision: None, // v1.5 M6：默认无行为路由决策
         };
         let config = PromptConfig::default();
         let result = assemble_prompt(&ctx, &config);
@@ -1252,6 +1267,100 @@ mod tests {
         // 跨 session 上下文
         assert!(result.contains("Rust编程"), "近期摘要未注入");
         assert!(result.contains("上次对话时间"), "最后活跃时间未注入");
+    }
+
+    // =========================================================
+    // 行为层装配（v1.5 M6）
+    // =========================================================
+
+    /// 构造行为路由合并决策（与 layers.rs 测试同构）。
+    fn make_behavior_decision() -> crate::behavior::MergedDecision {
+        use ramaria_core::behavior::{BehaviorParams, BehaviorRule, BehaviorSituation, RuleSource};
+        let mut rule = BehaviorRule::new(
+            "char-0001",
+            BehaviorSituation {
+                keywords: vec!["加班".to_string()],
+                centroid: None,
+                response_centroid: None,
+                valence_mean: -0.5,
+                valence_std: 0.2,
+                sample_count: 6,
+                presentation_dist: Vec::new(),
+                situation_strength_mean: 3.0,
+                time_span_days: 10.0,
+                trait_refs: Vec::new(),
+            },
+            Some("先共情再给建议，语气疲惫但温和".to_string()),
+            BehaviorParams::default(),
+            RuleSource::Auto,
+        );
+        rule.id = 1;
+        crate::behavior::MergedDecision {
+            primary_rule: rule,
+            merged_avoid: vec!["深夜打扰".to_string()],
+            merged_params: BehaviorParams {
+                emotional_intensity: -0.4,
+                proactiveness: 0.7,
+                detail_level: 0.6,
+                formality: 0.3,
+            },
+        }
+    }
+
+    #[test]
+    fn behavior_block_injected_between_role_and_style() {
+        // 命中：行为块注入，位置在角色段与说话风格段之间（注入优先级 行为 > 表达）
+        let ctx = PromptContext {
+            persona: Some(make_test_persona()),
+            behavior_decision: Some(make_behavior_decision()),
+            ..Default::default()
+        };
+        let result = assemble_prompt(&ctx, &PromptConfig::default());
+        assert!(result.contains("## 行为规则"), "行为块缺失: {result}");
+        assert!(result.contains("先共情再给建议"), "reaction 缺失");
+        assert!(result.contains("深夜打扰"), "avoid 缺失");
+        let role_pos = result.find("# 角色（行为层）").expect("角色段存在");
+        let behavior_pos = result.find("## 行为规则").expect("行为块存在");
+        let style_pos = result.find("# 说话风格（表达层）").expect("表达段存在");
+        assert!(
+            role_pos < behavior_pos && behavior_pos < style_pos,
+            "行为块应位于角色段之后、表达段之前（行为 > 表达）"
+        );
+    }
+
+    #[test]
+    fn behavior_block_absent_without_decision_equals_v1_4() {
+        // 未命中/关闭（decision=None）→ 无行为块，输出与 v1.4 语义等价
+        let ctx = PromptContext {
+            persona: Some(make_test_persona()),
+            behavior_decision: None,
+            ..Default::default()
+        };
+        let result = assemble_prompt(&ctx, &PromptConfig::default());
+        assert!(!result.contains("## 行为规则"), "未命中不产生行为块");
+        assert!(!result.contains("先共情再给建议"), "规则文本不泄漏");
+    }
+
+    #[test]
+    fn behavior_block_budget_applied_in_assemble() {
+        // 极紧预算：行为块被截断到预算内（§8.3 固定小比例）
+        let ctx = PromptContext {
+            persona: Some(make_test_persona()),
+            behavior_decision: Some(make_behavior_decision()),
+            ..Default::default()
+        };
+        let config = PromptConfig {
+            behavior_block_max_chars: Some(24),
+            ..Default::default()
+        };
+        let result = assemble_prompt(&ctx, &config);
+        let behavior_pos = result.find("## 行为规则").expect("行为块存在");
+        // 截取行为块文本（到下一个段落标题或结尾）
+        let tail = &result[behavior_pos..];
+        let block_len = tail.find("\n\n# ").map(|p| p).unwrap_or(tail.len());
+        let block = &tail[..block_len];
+        assert!(block.chars().count() <= 24, "行为块 ≤ 预算: {block}");
+        assert!(block.ends_with('…'), "截断提示: {block}");
     }
 
     #[test]

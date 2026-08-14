@@ -865,7 +865,7 @@ fn parse_keywords(raw: Option<&str>) -> (Option<String>, Vec<KeywordToken>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::l1::mock::{MockLlmProvider, MockStorage, make_msg};
+    use crate::l1::mock::{MockStorage, make_msg};
     use ramaria_core::types::{EvidenceNote, Message, MessageRole};
 
     // ---- strip_thinking（与 utils.rs 同名测试完全重复，已删除） ----

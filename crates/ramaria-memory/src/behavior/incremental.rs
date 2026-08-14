@@ -444,7 +444,7 @@ mod tests {
         let mut manual = rule(2, &["加班"], Some(vec![1.0, 0.0]));
         manual.source = RuleSource::Manual;
         let rules = vec![auto, manual];
-        let mut ev = event(10, "加班", -0.5);
+        let ev = event(10, "加班", -0.5);
         let mut s = sample_from(&ev);
         s.situation_vector = Some(vec![1.0, 0.0]);
         // 禁用与手工规则都不吸收 → None（进待定池）

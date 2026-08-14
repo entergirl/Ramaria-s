@@ -18,12 +18,11 @@ mod mock_backend;
 use ramaria_app::App;
 use ramaria_app::commands::behavior::{
     behavior_delete_rule, behavior_edit_rule, behavior_get_rule, behavior_import_rule,
-    behavior_incremental_update, behavior_incremental_update_core, behavior_learn,
-    behavior_list_rules, behavior_route, behavior_rule_evidence, behavior_set_rule_enabled,
+    behavior_incremental_update, behavior_learn, behavior_list_rules, behavior_route,
+    behavior_rule_evidence, behavior_set_rule_enabled,
 };
 use ramaria_core::behavior::{
-    BehaviorParams, BehaviorRule, BehaviorSituation, FeedbackLog, RuleSource, SignalType,
-    TargetType,
+    BehaviorParams, BehaviorRule, BehaviorSituation, RuleSource, SignalType, TargetType,
 };
 use ramaria_core::config::RamariaConfig;
 use ramaria_core::error::RamariaError;
@@ -456,7 +455,7 @@ async fn rule_evidence_traces_to_events() {
     assert!(items.iter().all(|i| i.event_id > 0), "证据指向真实事件");
     assert!(items.iter().all(|i| i.title == "加班事件"));
     // 权重降序
-    let mut weights: Vec<f64> = items.iter().map(|i| i.weight).collect();
+    let weights: Vec<f64> = items.iter().map(|i| i.weight).collect();
     let mut sorted = weights.clone();
     sorted.sort_by(|a, b| b.partial_cmp(a).unwrap());
     assert_eq!(weights, sorted, "按权重降序");
