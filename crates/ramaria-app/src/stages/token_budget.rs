@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/src/stages/token_budget.rs - Stage 7: Token 预算管理
+//! crates/ramaria-app/src/stages/token_budget.rs - Stage 7: Token 预算管理
 //!
 //! 设计特点:
 //! - 调用 `token_budget::apply_token_budget` 进行字符级 token 估算与截断

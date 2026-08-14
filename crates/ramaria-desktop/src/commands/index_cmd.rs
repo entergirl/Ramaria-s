@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-desktop/src/commands/index_cmd.rs - 索引管理 Tauri Commands
+//! crates/ramaria-desktop/src/commands/index_cmd.rs - 索引管理 Tauri Commands
 //!
 //! 设计特点:
 //! - rebuild_index: 触发检索索引全量重建

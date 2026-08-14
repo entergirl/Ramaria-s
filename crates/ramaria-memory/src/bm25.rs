@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/bm25.rs — BM25 全文检索引擎
+//! crates/ramaria-memory/src/bm25.rs — BM25 全文检索引擎
 //!
 //! 设计特点:
 //! - 中文字符二元组（bigram）分词 + 英文按空白/标点切分，零外部依赖
@@ -26,6 +26,15 @@ use std::collections::HashMap;
 ///   生成相邻字符二元组（bigram），如 "机器学习" → ["机器", "器学", "学习"]
 /// - 英文/数字：按 Unicode 字母/数字边界切分，小写化，过滤长度 < 2 的 token
 /// - 标点/空白：丢弃
+///
+/// 与 `prompt::example_selector::extract_keywords` 的关系（v1.5 审查批 2）:
+/// - 两者主体逻辑（CJK bigram + 英文小写切分）几乎逐行相同，但**保留两处不合并**:
+///   1. 长度过滤阈值不同：本函数按 UTF-8 **字节数**（`buf.len() >= 2`）过滤，
+///      `extract_keywords` 按 **字符数**（`chars().count() >= 2`，小写化后）过滤——
+///      对独立多字节非 CJK 字母（如 "é"）二者输出集不同（本函数输出，example_selector 丢弃）。
+///   2. 输出形式不同：本函数保持原始顺序且**不去重**（供 BM25 tf 统计）；
+///      `extract_keywords` 排序并去重（供示例筛选关键词集合）。
+/// - 如需统一，需先对齐长度过滤阈值与去重语义（会改变本函数分词结果集）。
 ///
 /// 示例:
 /// ```rust
@@ -90,67 +99,6 @@ pub fn tokenize_fields(fields: &[&str]) -> Vec<String> {
         all.extend(tokenize(field));
     }
     all
-}
-
-/// 对文本字段分词，统计词频。
-///
-/// 返回: (token, term_frequency_in_this_doc) 的映射。
-pub fn tokenize_with_freq(fields: &[&str]) -> HashMap<String, u32> {
-    let mut freq: HashMap<String, u32> = HashMap::new();
-    for token in tokenize_fields(fields) {
-        *freq.entry(token).or_insert(0) += 1;
-    }
-    freq
-}
-
-// =========================================================
-// 词典增强分词
-// =========================================================
-
-/// 使用 `BigramWithDictionaryNormalizer` 的复合词典增强分词。
-///
-/// 与 `tokenize` 的区别:
-/// - 词典中的复合关键词（如"职业倦怠"）被保留为整体 token
-/// - 非词典部分仍使用标准 bigram/英文分词
-/// - 词典为空时退化到标准 `tokenize` 行为
-///
-/// 用途:
-/// - BM25 索引构建时接入，提升专业术语的精确匹配率
-///
-/// 用法:
-/// ```rust
-/// use ramaria_memory::bm25::tokenize_with_dict;
-/// use ramaria_memory::keyword::BigramWithDictionaryNormalizer;
-/// let normalizer = BigramWithDictionaryNormalizer::new(
-///     vec!["职业倦怠".into(), "工作压力".into()]
-/// );
-/// let tokens = tokenize_with_dict("职业倦怠导致工作压力", &normalizer);
-/// assert!(tokens.contains(&"职业倦怠".to_string()));
-/// assert!(tokens.contains(&"工作压力".to_string()));
-/// ```
-pub fn tokenize_with_dict(
-    text: &str,
-    normalizer: &crate::keyword::BigramWithDictionaryNormalizer,
-) -> Vec<String> {
-    if text.is_empty() || normalizer.dictionary_size() == 0 {
-        return tokenize(text);
-    }
-
-    // 先用 normalizer 做最大正向匹配分词
-    let normalized = normalizer.normalize(text);
-    let mut result = Vec::with_capacity(normalized.len() * 2);
-
-    for token in normalized {
-        if normalizer.dictionary().contains(&token) {
-            // 词典匹配的复合关键词：保持整体
-            result.push(token);
-        } else {
-            // 单字符或非词典部分：用标准 bigram 分词
-            result.extend(tokenize(&token));
-        }
-    }
-
-    result
 }
 
 // =========================================================
@@ -368,118 +316,6 @@ impl Bm25Index {
         // 截取 top-k（默认返回全部有分的文档，上层通过 RRF 控制数量）
         scores
     }
-
-    /// 获取文档中所有 token 的列表（用于持久化到 bm25_index 表）。
-    pub fn get_doc_tokens(&self, doc_id: &DocId) -> Option<Vec<String>> {
-        self.docs.get(doc_id).map(|doc| {
-            let mut tokens = Vec::with_capacity(doc.term_freq.len());
-            for (token, &freq) in &doc.term_freq {
-                for _ in 0..freq {
-                    tokens.push(token.clone());
-                }
-            }
-            tokens
-        })
-    }
-
-    /// 返回索引中所有文档的 (doc_id, layer_str, tokens_json) 三元组。
-    ///
-    /// 用于批量持久化到 bm25_index 表。
-    /// 图谱实体（`DocId::Graph`）不参与 BM25 索引，因此不会被导出。
-    pub fn export_all(&self) -> Vec<(DocId, String, String)> {
-        self.docs
-            .keys()
-            .filter_map(|doc_id| {
-                let layer = match doc_id {
-                    DocId::L1(_) => "l1".to_string(),
-                    DocId::L2(_) => "l2".to_string(),
-                    DocId::Graph(_) => return None, // 图谱实体不参与 BM25 持久化
-                };
-                let tokens = self.get_doc_tokens(doc_id)?;
-                let json = serde_json::to_string(&tokens).ok()?;
-                Some((doc_id.clone(), layer, json))
-            })
-            .collect()
-    }
-}
-
-// =========================================================
-// 索引构建辅助
-// =========================================================
-
-/// 从 L1 和 L2 文档构建 BM25 索引。
-///
-/// L1 索引字段: summary, keywords
-/// L2 索引字段: title, summary, keywords, attitude, paraphrase
-pub struct Bm25IndexBuilder {
-    config: Bm25Config,
-    index: Bm25Index,
-}
-
-impl Bm25IndexBuilder {
-    /// 使用默认配置创建构建器。
-    pub fn new() -> Self {
-        Self {
-            config: Bm25Config::default(),
-            index: Bm25Index::new(),
-        }
-    }
-
-    /// 使用自定义 BM25 配置创建构建器。
-    pub fn with_config(config: Bm25Config) -> Self {
-        Self {
-            config,
-            index: Bm25Index::new(),
-        }
-    }
-
-    /// 添加一条 L1 记忆到索引。
-    pub fn add_l1(&mut self, id: uuid::Uuid, summary: &str, keywords: Option<&str>) {
-        let mut fields: Vec<&str> = vec![summary];
-        if let Some(kw) = keywords {
-            fields.push(kw);
-        }
-        self.index.add_tokenized(DocId::L1(id), &fields);
-    }
-
-    /// 添加一条 L2 事件到索引。
-    pub fn add_l2(
-        &mut self,
-        id: i64,
-        title: &str,
-        summary: &str,
-        keywords: Option<&str>,
-        attitude: Option<&str>,
-        paraphrase: Option<&str>,
-    ) {
-        let mut fields: Vec<&str> = vec![title, summary];
-        if let Some(kw) = keywords {
-            fields.push(kw);
-        }
-        if let Some(att) = attitude {
-            fields.push(att);
-        }
-        if let Some(par) = paraphrase {
-            fields.push(par);
-        }
-        self.index.add_tokenized(DocId::L2(id), &fields);
-    }
-
-    /// 消耗构建器，返回索引和配置。
-    pub fn build(self) -> (Bm25Index, Bm25Config) {
-        (self.index, self.config)
-    }
-
-    /// 获取内部索引的可变引用（用于增量更新）。
-    pub fn index_mut(&mut self) -> &mut Bm25Index {
-        &mut self.index
-    }
-}
-
-impl Default for Bm25IndexBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 // =========================================================
@@ -634,78 +470,6 @@ mod tests {
 
         let results_eat = index.search("吃饭", &config);
         assert!(!results_eat.is_empty());
-    }
-
-    // ---- Bm25IndexBuilder ----
-
-    #[test]
-    fn builder_add_l1() {
-        let mut builder = Bm25IndexBuilder::new();
-        let id = uuid::Uuid::new_v4();
-        builder.add_l1(id, "今天天气很好适合出门", Some("天气,出门"));
-        let (index, _) = builder.build();
-
-        assert_eq!(index.doc_count(), 1);
-    }
-
-    #[test]
-    fn builder_add_l2() {
-        let mut builder = Bm25IndexBuilder::new();
-        builder.add_l2(
-            1,
-            "项目上线",
-            "团队完成了主要模块的开发和测试",
-            Some("工作,项目"),
-            Some("感到很有成就感"),
-            Some("对完成重要工作感到满意"),
-        );
-        let (index, _) = builder.build();
-
-        let config = Bm25Config::default();
-        let results = index.search("成就感", &config);
-        assert!(!results.is_empty());
-    }
-
-    #[test]
-    fn builder_add_l2_without_optional_fields() {
-        let mut builder = Bm25IndexBuilder::new();
-        builder.add_l2(1, "简单事件", "只是一个测试", None, None, None);
-        let (index, _) = builder.build();
-        assert_eq!(index.doc_count(), 1);
-    }
-
-    // ---- export_all ----
-
-    #[test]
-    fn export_all_roundtrip() {
-        let mut index = Bm25Index::new();
-        let l1_id = uuid::Uuid::new_v4();
-        let l2_id = 42_i64;
-
-        index.add_tokenized(DocId::L1(l1_id), &["测试文档"]);
-        index.add_tokenized(DocId::L2(l2_id), &["事件内容"]);
-
-        let exports = index.export_all();
-        assert_eq!(exports.len(), 2);
-
-        // 验证 layer 标记正确
-        let l1_export = exports
-            .iter()
-            .find(|(id, _, _)| matches!(id, DocId::L1(_)))
-            .unwrap();
-        assert_eq!(l1_export.1, "l1");
-
-        let l2_export = exports
-            .iter()
-            .find(|(id, _, _)| matches!(id, DocId::L2(_)))
-            .unwrap();
-        assert_eq!(l2_export.1, "l2");
-
-        // 验证 tokens_json 可解析
-        for (_, _, json_str) in &exports {
-            let tokens: Vec<String> = serde_json::from_str(json_str).unwrap();
-            assert!(!tokens.is_empty());
-        }
     }
 
     // ---- DocId Display ----

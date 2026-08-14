@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-storage/src/repo/utt_blocks.rs - utt 话语块存取模块
+//! crates/ramaria-storage/src/repo/utt_blocks.rs - utt 话语块存取模块
 //!
 //! 设计特点:
 //! - 管理 `utt_blocks` 表（v1.4 新增），原文话语块的持久化读写

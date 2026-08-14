@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/inference/inferrer.rs - 三步 LLM 结构化性格推断
+//! crates/ramaria-memory/src/inference/inferrer.rs - 三步 LLM 结构化性格推断
 //!
 //! 设计特点:
 //! - Step 1: 逐分类个性模式提取 — 统计指标 + 态度聚类结果 → 分类级性格信号
@@ -265,7 +265,7 @@ pub fn format_motive_stats(motive_stats: &[MotiveStats], max_display: usize) -> 
 
 /// 构建 Step 1 prompt：逐分类个性模式提取。
 ///
-/// v2.0 重构 (CRAFT 框架):
+/// CRAFT 框架:
 /// - Context: 统计方法说明 + 因果链特征 + 动机维度统计。
 /// - Role: 田野心理学家视角，严格区分"话题领域"和"性格特征"。
 /// - Action: 逐分类提炼性格信号。
@@ -384,7 +384,7 @@ pub fn build_step1_prompt(
 
 /// 构建 Step 2 prompt：跨分类一致性比较。
 ///
-/// v2.0 重构 (CRAFT 框架):
+/// CRAFT 框架:
 /// - Context: 跨分类高阶指标含义说明。
 /// - Role: 整合者视角，从分散信号识别底色/主色调/点缀。
 /// - Action + Format: JSON 输出 base/primary/accent/excluded_categories/notes。
@@ -494,7 +494,7 @@ pub fn build_step2_prompt(
 
 /// 构建 Step 3 prompt：合成结构化性格画像。
 ///
-/// v2.0 重构 (CRAFT 框架):
+/// CRAFT 框架:
 /// - Context: 基于 Step 2 候选 + Step 1 信号合成最终画像。
 /// - Role: 人格心理学家精确性——不只是"是什么"，更重要的是"不是什么"。
 /// - Action: 为每个候选标签生成完整 trait 记录。
@@ -901,7 +901,7 @@ pub fn mock_infer(stats: &StatsSummary, persona_uid: &str) -> InferenceResult {
 }
 
 // =========================================================
-// 输出后处理（T-INF-011）
+// 输出后处理
 // =========================================================
 
 /// 推断后处理的差异类型。

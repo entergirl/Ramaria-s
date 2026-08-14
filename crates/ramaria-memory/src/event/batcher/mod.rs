@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/event/batcher/mod.rs - TopicBatcher 主题批量构建器
+//! crates/ramaria-memory/src/event/batcher/mod.rs - TopicBatcher 主题批量构建器
 //!
 //! 设计特点:
 //! - 从未吸收 L1 摘要构建关键词 Jaccard 图，通过连通分量实现语义聚类
@@ -302,12 +302,30 @@ impl TopicBatcherConfig {
 /// 5. 簇排序: 簇内按时间正序，簇间按 avg_salience 降序
 ///
 /// 使用示例:
-/// ```ignore
+/// ```
+/// use ramaria_memory::event::batcher::{L1Item, TopicBatcher};
+/// use ramaria_memory::TopicBatcherConfig;
+/// use ramaria_core::keyword::KeywordToken;
+/// use uuid::Uuid;
+///
+/// let item = L1Item {
+///     id: Uuid::new_v4(),
+///     summary: "用户提到工作压力".into(),
+///     keywords: vec![
+///         KeywordToken::new("工作").unwrap(),
+///         KeywordToken::new("压力").unwrap(),
+///     ],
+///     evidence_notes: vec![],
+///     embedding: None,
+///     salience: 0.6,
+///     created_at: 1_000,
+/// };
 /// let mut batcher = TopicBatcher::new(TopicBatcherConfig::default());
-/// let (clusters, expired) = batcher.build_clusters(l1_items, now_ms);
-/// for cluster in &clusters {
-///     // 每个 cluster 送入 LLM 做事件提取
-/// }
+/// // 单条 L1 不足 min_cluster_size(3) → 进入 Pending Buffer，不产出正式簇
+/// let (clusters, expired) = batcher.build_clusters(vec![item], 2_000);
+/// assert!(clusters.is_empty());
+/// assert!(expired.is_empty());
+/// assert_eq!(batcher.pending_buffer.fragment_count(), 1);
 /// ```
 #[derive(Debug, Clone)]
 pub struct TopicBatcher {
@@ -496,49 +514,13 @@ pub fn compute_semantic_score(
 ///
 /// 公式: `cos(θ) = (A·B) / (||A|| × ||B||)`
 ///
-/// 说明:
-/// - 若任一向量范数为零，返回 0.0（零向量无方向，相似度最低）。
-/// - 结果钳制到 [-1.0, 1.0]（防御浮点误差）。
-/// - 两个向量的长度必须相等，否则返回 0.0 并记录 warn 日志。
-///
-/// 参数:
-/// - `a`: 第一个向量。
-/// - `b`: 第二个向量（必须与 a 等长）。
+/// 说明（v1.5 收敛）:
+/// - 实现统一收敛到 `crate::similarity::cosine_similarity`，本函数为薄包装。
 ///
 /// 返回:
 /// - 余弦相似度值，范围 [-1.0, 1.0]。
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
-    if a.len() != b.len() {
-        tracing::warn!(
-            a_len = a.len(),
-            b_len = b.len(),
-            "余弦相似度: 向量长度不一致，返回 0.0"
-        );
-        return 0.0;
-    }
-
-    if a.is_empty() {
-        return 0.0;
-    }
-
-    let mut dot = 0.0f64;
-    let mut norm_a = 0.0f64;
-    let mut norm_b = 0.0f64;
-
-    for i in 0..a.len() {
-        let ai = a[i] as f64;
-        let bi = b[i] as f64;
-        dot += ai * bi;
-        norm_a += ai * ai;
-        norm_b += bi * bi;
-    }
-
-    if norm_a == 0.0 || norm_b == 0.0 {
-        return 0.0;
-    }
-
-    let cos = dot / (norm_a.sqrt() * norm_b.sqrt());
-    cos.clamp(-1.0, 1.0)
+    crate::similarity::cosine_similarity(a, b)
 }
 
 // =========================================================
@@ -549,10 +531,9 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
 ///
 /// 公式: `J(A, B) = |A ∩ B| / |A ∪ B|`
 ///
-/// 说明:
-/// - 使用 `KeywordToken` 的 `PartialEq` 进行比较（已标准化）。
-/// - 若并集为空（两组关键词均为空），返回 0.0。
-/// - 时间复杂度 O(n²)，n 通常 < 20，可接受。
+/// 说明（v1.5 收敛）:
+/// - 实现统一收敛到 `crate::similarity::jaccard_similarity`，本函数为薄包装。
+/// - 统一语义: 基于集合去重（重复关键词不影响结果）；任一侧为空（含两侧皆空）→ 0.0。
 ///
 /// 参数:
 /// - `kw_a`: 第一个关键词列表。
@@ -561,29 +542,7 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
 /// 返回:
 /// - Jaccard 相似度，范围 [0.0, 1.0]。
 pub fn jaccard_similarity(kw_a: &[KeywordToken], kw_b: &[KeywordToken]) -> f64 {
-    if kw_a.is_empty() && kw_b.is_empty() {
-        return 0.0;
-    }
-
-    // 计算交集大小
-    let intersection = kw_a.iter().filter(|k| kw_b.contains(k)).count();
-
-    // 计算并集大小
-    // 使用去重后的关键词数量
-    let mut union_set: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
-    for k in kw_a {
-        union_set.insert(k.as_str());
-    }
-    for k in kw_b {
-        union_set.insert(k.as_str());
-    }
-    let union_size = union_set.len();
-
-    if union_size == 0 {
-        return 0.0;
-    }
-
-    intersection as f64 / union_size as f64
+    crate::similarity::jaccard_similarity(kw_a.iter(), kw_b.iter())
 }
 
 // =========================================================
@@ -775,7 +734,7 @@ mod tests {
         assert!(item.keywords.is_empty());
     }
 
-    /// v1.4 M4（T-V14-4-004）：L1Item::from 携带结构化 evidence_notes；
+    /// v1.4 M4：L1Item::from 携带结构化 evidence_notes；
     /// 缺失时为默认空 Vec（不产生 None 分支，下游消费形态稳定）。
     #[test]
     fn l1_item_from_memory_l1_carries_evidence_notes() {
@@ -993,58 +952,6 @@ mod tests {
         assert!((c.similarity_threshold - 1.0).abs() < f64::EPSILON);
         assert!((c.alpha - 0.0).abs() < f64::EPSILON);
         assert!((c.modularity_min - 1.0).abs() < f64::EPSILON);
-    }
-
-    // ---- jaccard_similarity ----
-
-    /// jaccard_similarity 各输入参数化验证。
-    #[test]
-    fn jaccard_similarity_cases() {
-        fn kw(s: &str) -> KeywordToken {
-            KeywordToken::new(s).unwrap()
-        }
-        let cases: Vec<(Vec<KeywordToken>, Vec<KeywordToken>, f64)> = vec![
-            (
-                vec![kw("工作"), kw("压力")],
-                vec![kw("工作"), kw("压力")],
-                1.0,
-            ),
-            (vec![kw("工作")], vec![kw("休闲")], 0.0),
-            // 交集=1（工作），并集=3（工作、压力、倦怠）→ 1/3 ≈ 0.333
-            (
-                vec![kw("工作"), kw("压力")],
-                vec![kw("工作"), kw("倦怠")],
-                1.0 / 3.0,
-            ),
-            (vec![], vec![], 0.0),
-            (vec![kw("工作")], vec![], 0.0),
-        ];
-        for (a, b, expected) in cases {
-            assert!(
-                (jaccard_similarity(&a, &b) - expected).abs() < 0.001,
-                "期望 {expected}"
-            );
-        }
-    }
-
-    // ---- cosine_similarity ----
-
-    /// cosine_similarity 各输入参数化验证（含零向量与长度不一致）。
-    #[test]
-    fn cosine_similarity_cases() {
-        let cases: Vec<(Vec<f32>, Vec<f32>, f64)> = vec![
-            (vec![1.0, 0.0, 0.0], vec![1.0, 0.0, 0.0], 1.0),
-            (vec![1.0, 0.0], vec![0.0, 1.0], 0.0),
-            (vec![1.0, 0.0], vec![-1.0, 0.0], -1.0),
-            (vec![0.0, 0.0], vec![1.0, 0.0], 0.0),
-            (vec![1.0, 0.0], vec![1.0, 0.0, 0.0], 0.0), // 长度不一致
-        ];
-        for (a, b, expected) in cases {
-            assert!(
-                (cosine_similarity(&a, &b) - expected).abs() < f64::EPSILON,
-                "期望 {expected}"
-            );
-        }
     }
 
     // ---- compute_semantic_score ----

@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/l1/mod.rs - L0→L1 摘要管线模块
+//! crates/ramaria-memory/src/l1/mod.rs - L0→L1 摘要管线模块
 //!
 //! 设计特点:
 //! - 负责 session 结束后的 L1 摘要生成

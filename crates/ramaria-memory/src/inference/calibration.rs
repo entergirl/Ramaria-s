@@ -1,7 +1,7 @@
-//! rust/crates/ramaria-memory/src/inference/calibration.rs - 定期全量校准触发逻辑
+//! crates/ramaria-memory/src/inference/calibration.rs - 定期全量校准触发逻辑
 //!
 //! 设计特点:
-//! - T-INF-014: 增量更新累积 10 轮后（或事件量翻倍）触发全量冷启动推断
+//! - 增量更新累积 10 轮后（或事件量翻倍）触发全量冷启动推断
 //! - 校准触发后重置计数器，重新跑 +
 //! - 与旧画像做全量差异对比，差异超过阈值时提示人工确认
 //! - 纯逻辑，零 I/O，仅维护计数器状态

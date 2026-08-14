@@ -47,7 +47,7 @@ pub async fn run(
         SessionCmd::List { limit, offset } => list_sessions(app, json, limit, offset).await,
         SessionCmd::Show { session_id } => show_session(app, &session_id, json).await,
         SessionCmd::Delete { session_id, force } => {
-            delete_session(app, &session_id, auto_yes || force).await
+            delete_session(app, &session_id, auto_yes || force, json).await
         }
         SessionCmd::Summarize {
             session_id,
@@ -229,6 +229,7 @@ async fn delete_session(
     app: &Arc<ramaria_app::App>,
     session_id: &str,
     auto_yes: bool,
+    json: bool,
 ) -> anyhow::Result<()> {
     let sid = parse_session_uuid(session_id)?;
 
@@ -236,6 +237,11 @@ async fn delete_session(
     let confirmed = crate::ui::confirm(&format!("确认删除会话 {sid}？此操作不可撤销"), auto_yes)
         .map_err(|e| RamariaError::validation(e.to_string()))?;
     if !confirmed {
+        if json {
+            // 用户主动取消：非错误（ok:true + cancelled 标志，exit 0）
+            let data = serde_json::json!({ "session_id": sid.to_string(), "cancelled": true });
+            return crate::json::emit_ok(&data);
+        }
         crate::ui::info("已取消");
         return Ok(());
     }
@@ -245,6 +251,10 @@ async fn delete_session(
         .await
         .context("删除会话失败")?;
 
+    if json {
+        let data = serde_json::json!({ "session_id": sid.to_string(), "deleted": true });
+        return crate::json::emit_ok(&data);
+    }
     crate::ui::success(&format!("会话 {sid} 已删除"));
     Ok(())
 }

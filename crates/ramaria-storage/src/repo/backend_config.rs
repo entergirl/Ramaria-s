@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-storage/src/repo/backend_config.rs - 后端配置存取模块
+//! crates/ramaria-storage/src/repo/backend_config.rs - 后端配置存取模块
 //!
 //! 设计特点:
 //! - 单行存储（id=1），将整个 BackendConfig 序列化为 JSON 存入 data 列

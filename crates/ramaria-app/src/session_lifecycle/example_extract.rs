@@ -1,8 +1,8 @@
-//! rust/crates/ramaria-app/src/session_lifecycle/example_extract.rs - 回复对抽取（examples 写侧）
+//! crates/ramaria-app/src/session_lifecycle/example_extract.rs - 回复对抽取（examples 写侧）
 //!
 //! 设计特点:
 //! - 纯函数模块：消息序列 → 回复对列表，无 IO、无状态、不调用 LLM
-//! - 抽取范围（D-V14-004）: 仅"对方消息 → persona 回复"相邻对
+//! - 抽取范围（决策见 docs/dev-1.4/v1.4-decisions.md）: 仅"对方消息 → persona 回复"相邻对
 //! - 过滤规则: 图片消息 / 回复过短（< 5 字符）/ 系统消息 / 批内重复对
 //! - 每条回复对附带前文 context（最多 3 条）与话题 tags（CJK bigram 关键词），
 //!   供注入时的话题匹配评分（example_selector）使用

@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/src/session_lifecycle/mod.rs - Session 生命周期与记忆管线触发
+//! crates/ramaria-app/src/session_lifecycle/mod.rs - Session 生命周期与记忆管线触发
 //!
 //! 设计特点:
 //! - 对齐 Python `SessionManager` 的完整行为：手动关闭、空闲自动关闭、只读约束
@@ -56,7 +56,7 @@ pub struct SessionLifecycle {
     pub(crate) config: RamariaConfig,
     /// 停止标志（所有后台线程在设置此标志后退出）
     pub(crate) shutdown_flag: Arc<AtomicBool>,
-    /// 空闲自动保存阈值（分钟）——热更新（T-V14-5-001）
+    /// 空闲自动保存阈值（分钟）——热更新
     ///
     /// 说明:
     /// - 独立于 `config.session.l1_idle_minutes` 的可变副本：设置页修改配置后
@@ -152,7 +152,7 @@ impl SessionLifecycle {
         Arc::clone(&self.shutdown_flag)
     }
 
-    /// 热更新空闲自动保存阈值（分钟）（T-V14-5-001）。
+    /// 热更新空闲自动保存阈值（分钟）。
     ///
     /// 说明:
     /// - 设置页保存 `session.l1_idle_minutes` 后由配置命令调用，
@@ -316,7 +316,7 @@ impl SessionLifecycle {
         Ok(())
     }
 
-    /// 关闭指定 session 的完整管线（P1-3 修复：供空闲检测复用）。
+    /// 关闭指定 session 的完整管线（供空闲检测复用）。
     ///
     /// 与 [`save_and_close_session`] 的区别：本函数**不操作 active 指针**，
     /// 只对传入的 session_id 执行关闭 + L1 + utt + examples + L2 检查。
@@ -339,7 +339,7 @@ impl SessionLifecycle {
         session_id: Uuid,
         persona_uid: Option<&str>,
     ) -> RamariaResult<()> {
-        // P0-3 修复：归属统一以 DB `sessions.persona_uid` 为真相源。
+        // 归属统一以 DB `sessions.persona_uid` 为真相源。
         // 手动保存（前端传内存态）与空闲保存（DB 读）来源不一致导致
         // L1/utt/examples 归属不稳定；此处统一从 session 读取，
         // 调用方传入的 persona_uid 仅作兜底（session 查询失败时使用）。
@@ -519,7 +519,7 @@ impl SessionLifecycle {
     /// examples 回复对抽取入库（封存钩子，v1.4）。
     ///
     /// 职责:
-    /// - 会话封存后抽取"对方消息 → persona 回复"相邻对（D-V14-004）入库为候选池。
+    /// - 会话封存后抽取"对方消息 → persona 回复"相邻对（决策见 docs/dev-1.4/v1.4-decisions.md）入库为候选池。
     /// - 入库前按 (partner, reply) 查重：重复回复对不重复入库（幂等）。
     ///
     /// 降级（不阻塞封存）:
@@ -551,7 +551,7 @@ impl SessionLifecycle {
             }
         };
         let Some(persona_uid) = session.persona_uid.as_deref() else {
-            // P0-2 修复：存量 NULL 会话防御——从消息首条 assistant 发言推断
+            // 存量 NULL 会话防御——从消息首条 assistant 发言推断
             // 目标 persona；仍无法推断（纯用户会话）才跳过。
             let messages = match storage.list_messages(session_id).await {
                 Ok(m) => m,
@@ -801,7 +801,7 @@ mod tests {
         assert!(flag.load(Ordering::Relaxed));
     }
 
-    /// v1.4 M5（T-V14-5-001）：set_idle_minutes 热更新——初始值来自 config，
+    /// v1.4 M5：set_idle_minutes 热更新——初始值来自 config，
     /// 热更新后新值即时生效（空闲检测线程每轮 tick 读取最新值，无需重启）。
     #[test]
     fn set_idle_minutes_hot_updates_threshold() {
@@ -820,7 +820,7 @@ mod tests {
         assert_eq!(lifecycle.idle_minutes.load(Ordering::Relaxed), 5);
     }
 
-    /// v1.4 M5（T-V14-5-001）：App::set_idle_minutes 转发到 lifecycle（桌面端命令入口）。
+    /// v1.4 M5：App::set_idle_minutes 转发到 lifecycle（桌面端命令入口）。
     #[tokio::test]
     async fn app_set_idle_minutes_forwards_to_lifecycle() {
         use ramaria_core::traits::StorageBackend;
@@ -869,7 +869,7 @@ mod tests {
     }
 
     // =========================================================
-    // examples 回复对抽取入库（v1.4，T-V14-3-002）
+    // examples 回复对抽取入库（v1.4）
     // =========================================================
 
     fn make_pair_messages(session_id: Uuid, target: &str) -> Vec<ramaria_core::types::Message> {
@@ -985,7 +985,7 @@ mod tests {
         );
     }
 
-    // P0-2 修复：NULL 会话（存量缺陷）从消息首条 assistant 发言推断
+    // NULL 会话（存量缺陷）从消息首条 assistant 发言推断
     // 目标 persona 后正常抽取入库，不再整会话跳过
     #[tokio::test]
     async fn extract_examples_null_persona_infers_target() {
@@ -1007,7 +1007,7 @@ mod tests {
     }
 
     // =========================================================
-    // P1-3 修复：close_session_pipeline 可关闭非 active 的孤儿会话
+    // close_session_pipeline 可关闭非 active 的孤儿会话
     // =========================================================
 
     /// 空闲检测遍历**全部**活跃会话（含切换人格遗留的孤儿会话）时，
@@ -1016,7 +1016,7 @@ mod tests {
     /// - active 指针指向的会话不受影响（指针与 ended_at 均不变）。
     ///
     /// 注：L1 归属（DB 真相源）已由 tests/session_lifecycle_tests.rs
-    /// 的 P0-3 集成测试覆盖（test_utils 的 MockStorage 不落 L1）。
+    /// 的集成测试覆盖（test_utils 的 MockStorage 不落 L1）。
     #[tokio::test]
     async fn close_pipeline_closes_orphan_without_touching_active() {
         use ramaria_core::types::{Message, MessageRole, MessageSource};

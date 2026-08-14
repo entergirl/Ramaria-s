@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-desktop/src/commands/session.rs - 会话管理 Tauri Commands
+//! crates/ramaria-desktop/src/commands/session.rs - 会话管理 Tauri Commands
 //!
 //! 设计特点:
 //! - list_sessions / get_session / delete_session / create_session: 委托 StorageBackend

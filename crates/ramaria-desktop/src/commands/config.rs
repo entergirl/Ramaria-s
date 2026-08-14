@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-desktop/src/commands/config.rs - 配置管理 Tauri Commands
+//! crates/ramaria-desktop/src/commands/config.rs - 配置管理 Tauri Commands
 //!
 //! 设计特点:
 //! - get_backend_config / update_backend_config: 读写当前 LLM 后端配置
@@ -172,7 +172,7 @@ pub async fn update_backend_config(
         .await
         .map_err(|e| format!("保存后端配置失败: {}", e))?;
 
-    // ★ 配置双写同步（v1.4 D-V14-006）：同步 [backend] 组到 config.toml，
+    // ★ 配置双写同步（见 docs/dev-1.5/v1.5-decisions.md 决策记录）：同步 [backend] 组到 config.toml，
     //   保持文件与 backend_config 表一致（单侧失败降级不阻塞）
     let config_sync =
         ramaria_app::ConfigSyncService::new(state.app.storage().clone(), state.config_path.clone());
@@ -208,43 +208,12 @@ pub async fn update_backend_config(
 
     // ★ 热更新内存中的 LLM provider，确保后续对话使用新配置
     // 复用 App 持有的精确缓存实例（v1.5 C）：切换后端后缓存不失效
-    let llm_cache = state.app.llm_cache();
-    let new_llm: Arc<dyn ramaria_core::traits::LlmProvider> = match llm_provider {
-        ramaria_core::types::LlmProvider::LmStudio => {
-            let provider = ramaria_llm::lm_studio::LmStudioProvider::new(new_config.clone())
-                .map_err(|e| format!("创建 LM Studio provider 失败: {}", e))?;
-            let provider = match &llm_cache {
-                Some(cache) => provider.with_cache(Arc::clone(cache)),
-                None => provider,
-            };
-            Arc::new(provider)
-        }
-        ramaria_core::types::LlmProvider::DeepSeek => {
-            let provider = ramaria_llm::deepseek::DeepSeekProvider::new(
-                new_config.clone(),
-                state.app.keychain_arc(),
-            )
-            .map_err(|e| format!("创建 DeepSeek provider 失败: {}", e))?;
-            let provider = match &llm_cache {
-                Some(cache) => provider.with_cache(Arc::clone(cache)),
-                None => provider,
-            };
-            Arc::new(provider)
-        }
-        ramaria_core::types::LlmProvider::OpenAI => {
-            let provider = ramaria_llm::openai::OpenAIProvider::new(
-                new_config.clone(),
-                state.app.keychain_arc(),
-            )
-            .map_err(|e| format!("创建 OpenAI provider 失败: {}", e))?;
-            let provider = match &llm_cache {
-                Some(cache) => provider.with_cache(Arc::clone(cache)),
-                None => provider,
-            };
-            Arc::new(provider)
-        }
-        _ => return Err(format!("不支持的 provider: {}", provider)),
-    };
+    let new_llm: Arc<dyn ramaria_core::traits::LlmProvider> = crate::build_llm_provider(
+        llm_provider,
+        &new_config,
+        state.app.keychain_arc(),
+        state.app.llm_cache(),
+    )?;
     state.app.update_llm(new_llm);
 
     tracing::info!(provider = %provider, model_id = %model_id, "后端配置已更新并热加载");
@@ -378,7 +347,7 @@ pub async fn update_full_config(
         ramaria_app::ConfigSyncService::new(state.app.storage().clone(), state.config_path.clone());
     let result = config_sync.save_config(&cfg).await;
 
-    // v1.4 M5（T-V14-5-001）：保存成功后热更新空闲阈值，与空闲检测线程联动
+    // 保存成功后热更新空闲阈值，与空闲检测线程联动
     //（无需重启）。即使单侧写失败也尝试联动——运行中阈值优先于落盘结果，
     // 下次启动以文件/DB 为准。
     state.app.set_idle_minutes(cfg.session.l1_idle_minutes);

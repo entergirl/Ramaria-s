@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/src/config_sync.rs - 配置双写同步服务（v1.4 D-V14-006）
+//! crates/ramaria-app/src/config_sync.rs - 配置双写同步服务（v1.4，决策见 docs/dev-1.4/v1.4-decisions.md）
 //!
 //! 设计特点:
 //! - 统一配置服务：config.toml（canonical）↔ `backend_config` 表 / `settings` 表 双写同步
@@ -823,12 +823,6 @@ mod tests {
         ) -> RamariaResult<Vec<ramaria_core::types::Message>> {
             Ok(vec![])
         }
-        async fn find_message_by_fingerprint(
-            &self,
-            _f: &str,
-        ) -> RamariaResult<Option<ramaria_core::types::Message>> {
-            Ok(None)
-        }
         async fn save_memory_l1(&self, _m: &ramaria_core::types::MemoryL1) -> RamariaResult<()> {
             Ok(())
         }
@@ -1069,15 +1063,6 @@ mod tests {
         async fn resolve_conflict(&self, _i: i64) -> RamariaResult<()> {
             Ok(())
         }
-        async fn create_push(&self, _c: &str) -> RamariaResult<i64> {
-            Ok(1)
-        }
-        async fn list_pending_pushes(&self) -> RamariaResult<Vec<(i64, String)>> {
-            Ok(vec![])
-        }
-        async fn mark_push_sent(&self, _i: i64) -> RamariaResult<()> {
-            Ok(())
-        }
         async fn get_setting(&self, key: &str) -> RamariaResult<Option<String>> {
             Ok(self.settings.lock().unwrap().get(key).cloned())
         }
@@ -1096,15 +1081,6 @@ mod tests {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect())
-        }
-        async fn save_bm25(&self, _d: i64, _l: &str, _t: &str) -> RamariaResult<()> {
-            Ok(())
-        }
-        async fn list_bm25_by_doc(&self, _d: i64) -> RamariaResult<Vec<(String, String)>> {
-            Ok(vec![])
-        }
-        async fn delete_bm25_by_doc(&self, _d: i64) -> RamariaResult<()> {
-            Ok(())
         }
         async fn insert_graph_node(
             &self,

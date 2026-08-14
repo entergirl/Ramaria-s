@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/l1/mock.rs - 测试用 mock LlmProvider + StorageBackend
+//! crates/ramaria-memory/src/l1/mock.rs - 测试用 mock LlmProvider + StorageBackend
 //!
 //! 设计特点:
 //! - 仅 #[cfg(test)] 编译，零运行时开销
@@ -197,9 +197,6 @@ impl StorageBackend for MockStorage {
     async fn list_messages_by_persona(&self, _: &str) -> RamariaResult<Vec<Message>> {
         unimplemented!()
     }
-    async fn find_message_by_fingerprint(&self, _: &str) -> RamariaResult<Option<Message>> {
-        unimplemented!()
-    }
 
     // -- Memory L1 (used by summarizer) --
     async fn save_memory_l1(&self, memory: &MemoryL1) -> RamariaResult<()> {
@@ -387,15 +384,6 @@ impl StorageBackend for MockStorage {
     async fn resolve_conflict(&self, _: i64) -> RamariaResult<()> {
         unimplemented!()
     }
-    async fn create_push(&self, _: &str) -> RamariaResult<i64> {
-        unimplemented!()
-    }
-    async fn list_pending_pushes(&self) -> RamariaResult<Vec<(i64, String)>> {
-        unimplemented!()
-    }
-    async fn mark_push_sent(&self, _: i64) -> RamariaResult<()> {
-        unimplemented!()
-    }
     async fn get_setting(&self, _: &str) -> RamariaResult<Option<String>> {
         unimplemented!()
     }
@@ -403,15 +391,6 @@ impl StorageBackend for MockStorage {
         unimplemented!()
     }
     async fn list_settings(&self) -> RamariaResult<Vec<(String, String)>> {
-        unimplemented!()
-    }
-    async fn save_bm25(&self, _: i64, _: &str, _: &str) -> RamariaResult<()> {
-        unimplemented!()
-    }
-    async fn list_bm25_by_doc(&self, _: i64) -> RamariaResult<Vec<(String, String)>> {
-        unimplemented!()
-    }
-    async fn delete_bm25_by_doc(&self, _: i64) -> RamariaResult<()> {
         unimplemented!()
     }
     async fn insert_graph_node(&self, _: &str, _: &str, _: Option<Uuid>) -> RamariaResult<i64> {

@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-cli/src/commands/utt.rs - utt 话语块管理命令
+//! crates/ramaria-cli/src/commands/utt.rs - utt 话语块管理命令
 //!
 //! 设计特点:
 //! - rebuild: 重建全部会话的 utt 话语块（供探针切分参数定稿后重切）

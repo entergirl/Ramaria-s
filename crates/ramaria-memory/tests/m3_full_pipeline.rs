@@ -1,4 +1,4 @@
-//! T-V13-3-010：M3 全链路集成测试（v1.3 遗留收尾补齐，T-V14-8-001）
+//! M3 全链路集成测试：mock LLM + fixture L1 → 事件提取 → motives/关系记录
 //!
 //! 验收要求：mock LLM + mock embedding + fixture L1 clusters → TopicBatcher →
 //! ContextRetriever → 事件提取 → 验证：events 含 motives + event_relations 有记录
@@ -192,8 +192,24 @@ async fn full_pipeline_extracts_events_with_motives_and_relations() {
     }
 
     // 3) 事件溯源写入（event_sources）与 L1 absorbed 标记
-    let sources_ok = relations.iter().all(|r| r.from_id > 0 && r.to_id > 0);
-    assert!(sources_ok, "关系应引用真实事件 ID");
+    // 关系两端都应引用真实提取的事件 ID（FK→memory_events.id），而非 0/占位值
+    let event_ids: std::collections::HashSet<i64> = events.iter().map(|e| e.id).collect();
+    assert!(
+        event_ids.len() == events.len() && !event_ids.contains(&0),
+        "提取事件应携带非 0 的真实存储 ID"
+    );
+    for rel in &relations {
+        assert!(
+            event_ids.contains(&rel.from_id),
+            "关系 from_id={} 应引用真实提取事件 ID",
+            rel.from_id
+        );
+        assert!(
+            event_ids.contains(&rel.to_id),
+            "关系 to_id={} 应引用真实提取事件 ID",
+            rel.to_id
+        );
+    }
     let remaining = storage
         .list_unabsorbed_l1(&persona_uid)
         .await
@@ -277,7 +293,7 @@ async fn llm_failure_degrades_to_builtin_event() {
 }
 
 // =========================================================
-// v1.5 L2 聚类去重指纹（T-V15-3-003/004，三层生成缓存 C）
+// v1.5 L2 聚类去重指纹（三层生成缓存 C）
 // =========================================================
 
 /// 同集合跳过：L1 集合已聚类且无产出（无簇）→ 登记指纹 →

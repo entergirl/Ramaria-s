@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/src/lib.rs - Ramaria 应用编排层入口
+//! crates/ramaria-app/src/lib.rs - Ramaria 应用编排层入口
 //!
 //! 设计特点:
 //! - CLI 和 Desktop 共用的应用编排层，不直接处理 UI 展示

@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-llm/src/embedding/mod.rs - Embedding Provider 模块入口
+//! crates/ramaria-llm/src/embedding/mod.rs - Embedding Provider 模块入口
 //!
 //! 设计特点:
 //! - 通过 feature `embedding-native` 条件编译原生 safetensors 实现（推荐）

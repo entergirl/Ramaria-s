@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/event/context_retriever.rs - CompositeIndex 补充上下文检索器
+//! crates/ramaria-memory/src/event/context_retriever.rs - CompositeIndex 补充上下文检索器
 //!
 //! 设计特点:
 //! - 三级降级编排: 精确匹配 → 子串匹配 → (语义模糊匹配，需 embedding 可用时)
@@ -86,8 +86,14 @@ impl Default for ContextRetrieverConfig {
 /// 3. **语义模糊** (暂跳过): embedding 不可用时跳过。由上层在 embedding 可用时通过 `search_semantic` 补充。
 ///
 /// 用法:
-/// ```ignore
-/// let ctx_retriever = ContextRetriever::new(retriever, config);
+/// ```no_run
+/// # use ramaria_memory::retriever::Retriever;
+/// # use ramaria_memory::event::context_retriever::{ContextRetriever, ContextRetrieverConfig};
+/// # use ramaria_memory::event::batcher::TopicCluster;
+/// # let retriever = Retriever::new();
+/// # let config = ContextRetrieverConfig::default();
+/// # let cluster = TopicCluster::new(Vec::new());
+/// let ctx_retriever = ContextRetriever::new(&retriever, config);
 /// let docs = ctx_retriever.retrieve_context(&cluster, "user-0001");
 /// // 将 docs 格式化为 Prompt 中的补充背景段落
 /// ```
@@ -394,7 +400,7 @@ mod tests {
     //  Level 2 补充行为无任何断言，仅验证不报错，已删除）
 
     #[test]
-    fn retrieve_context_level3_skipped_without_embedding() {
+    fn retrieve_context_skips_semantic_channel_without_embedding() {
         let r = make_test_retriever();
         // 全部文档的 keywords 均不含 "xyznotfound"
         let config = ContextRetrieverConfig {
@@ -415,11 +421,14 @@ mod tests {
         }]);
 
         let docs = cr.retrieve_context(&cluster, "user-0001");
-        // 无法命中任何文档 → 返回空，但不应 panic
+        // 真实验证：embedding 不可用 → Level 3（semantic 通道）被跳过，
+        // 任何结果都不应来自 semantic 通道
         assert!(
-            docs.is_empty() || docs.len() <= 3,
-            "无匹配时返回空或不超过 top_k"
+            docs.iter().all(|d| d.source_channel != "semantic"),
+            "embedding 不可用时不应产出语义通道结果"
         );
+        // 无精确/子串命中 → 返回空（检索路径不 panic）
+        assert!(docs.is_empty(), "无任何匹配时应返回空");
     }
 
     // ---- build_query_from_keywords ----

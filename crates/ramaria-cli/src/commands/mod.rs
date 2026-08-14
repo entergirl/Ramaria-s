@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-cli/src/commands/mod.rs - CLI 命令模块入口
+//! crates/ramaria-cli/src/commands/mod.rs - CLI 命令模块入口
 //!
 //! 设计特点:
 //! - 每个命令一个子模块，职责单一

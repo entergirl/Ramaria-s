@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/src/stages/retrieve_memory.rs - Stage 5: 记忆检索 + RAG
+//! crates/ramaria-app/src/stages/retrieve_memory.rs - Stage 5: 记忆检索 + RAG
 //!
 //! 设计特点:
 //! - 对应 send_message 管线 Step 5: 记忆检索 + Persona-Aware RAG

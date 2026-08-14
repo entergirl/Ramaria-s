@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/src/pipeline.rs - Pipeline + Stage 核心基础设施
+//! crates/ramaria-app/src/pipeline.rs - Pipeline + Stage 核心基础设施
 //!
 //! 设计特点:
 //! - PipelineStage trait 定义统一 Stage 接口，每个 Stage 独立可测试
@@ -577,12 +577,6 @@ mod tests {
         ) -> RamariaResult<Vec<ramaria_core::types::Message>> {
             Ok(Vec::new())
         }
-        async fn find_message_by_fingerprint(
-            &self,
-            _fp: &str,
-        ) -> RamariaResult<Option<ramaria_core::types::Message>> {
-            Ok(None)
-        }
         async fn save_memory_l1(&self, _m: &MemoryL1) -> RamariaResult<()> {
             Ok(())
         }
@@ -753,15 +747,6 @@ mod tests {
         async fn resolve_conflict(&self, _id: i64) -> RamariaResult<()> {
             Ok(())
         }
-        async fn create_push(&self, _c: &str) -> RamariaResult<i64> {
-            Ok(1)
-        }
-        async fn list_pending_pushes(&self) -> RamariaResult<Vec<(i64, String)>> {
-            Ok(Vec::new())
-        }
-        async fn mark_push_sent(&self, _id: i64) -> RamariaResult<()> {
-            Ok(())
-        }
         async fn get_setting(&self, _k: &str) -> RamariaResult<Option<String>> {
             Ok(None)
         }
@@ -770,15 +755,6 @@ mod tests {
         }
         async fn list_settings(&self) -> RamariaResult<Vec<(String, String)>> {
             Ok(Vec::new())
-        }
-        async fn save_bm25(&self, _d: i64, _l: &str, _t: &str) -> RamariaResult<()> {
-            Ok(())
-        }
-        async fn list_bm25_by_doc(&self, _d: i64) -> RamariaResult<Vec<(String, String)>> {
-            Ok(Vec::new())
-        }
-        async fn delete_bm25_by_doc(&self, _d: i64) -> RamariaResult<()> {
-            Ok(())
         }
         async fn insert_graph_node(
             &self,
@@ -984,7 +960,7 @@ mod tests {
     }
 
     // =========================================================
-    // T-V12-1-004: PipelineError 测试
+    // PipelineError 测试
     // =========================================================
 
     /// PipelineError 构造与 stage/source 访问验证。
@@ -1048,7 +1024,7 @@ mod tests {
     }
 
     // =========================================================
-    // T-V12-1-004: PipelineData 测试
+    // PipelineData 测试
     // =========================================================
 
     #[test]
@@ -1121,7 +1097,7 @@ mod tests {
     }
 
     // =========================================================
-    // T-V12-1-004: SendMessagePipeline 编排器测试
+    // SendMessagePipeline 编排器测试
     // =========================================================
 
     #[tokio::test]

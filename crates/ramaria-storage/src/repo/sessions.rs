@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-storage/src/repo/sessions.rs - Session CRUD
+//! crates/ramaria-storage/src/repo/sessions.rs - Session CRUD
 //!
 //! 设计特点:
 //! - 管理对话会话生命周期：创建、关闭、查询、删除
@@ -46,7 +46,7 @@ pub async fn close(pool: &SqlitePool, session_id: Uuid) -> RamariaResult<()> {
     Ok(())
 }
 
-/// 回写绑定会话的 persona_uid（存量 NULL 会话归属修复，P0-1）。
+/// 回写绑定会话的 persona_uid（存量 NULL 会话归属修复）。
 ///
 /// 职责:
 /// - 会话创建时未绑定（`persona_uid=NULL`）时，由 resolve_session

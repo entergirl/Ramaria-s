@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-desktop/src/commands/diagnostics.rs - 诊断与更新 Tauri Commands
+//! crates/ramaria-desktop/src/commands/diagnostics.rs - 诊断与更新 Tauri Commands
 //!
 //! 设计特点:
 //! - `check_update`: 调用 ramaria_app::check_update，返回版本比较结果。

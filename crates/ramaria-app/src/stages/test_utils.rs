@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/src/stages/test_utils.rs - Stage 单元测试共享 Mock 工具
+//! crates/ramaria-app/src/stages/test_utils.rs - Stage 单元测试共享 Mock 工具
 //!
 //! 设计特点:
 //! - 提供功能完整的 MockStorage（HashMap 实现，支持 session/message/L1 增删查改）
@@ -49,7 +49,7 @@ pub struct MockStorage {
     personas: Mutex<HashMap<String, Persona>>,
     /// utt 话语块（按 session 索引，v1.4 M5：桥接测试支持）
     utt_blocks: Mutex<HashMap<Uuid, Vec<UttBlock>>>,
-    /// 测试注入：bind_session_persona_uid 是否强制失败（P0-1 降级路径测试）
+    /// 测试注入：bind_session_persona_uid 是否强制失败（降级路径测试）
     fail_bind: AtomicBool,
 }
 
@@ -286,10 +286,6 @@ impl StorageBackend for MockStorage {
 
     async fn list_messages_by_persona(&self, _uid: &str) -> RamariaResult<Vec<Message>> {
         Ok(Vec::new())
-    }
-
-    async fn find_message_by_fingerprint(&self, _fp: &str) -> RamariaResult<Option<Message>> {
-        Ok(None)
     }
 
     async fn save_memory_l1(&self, _m: &MemoryL1) -> RamariaResult<()> {
@@ -572,18 +568,6 @@ impl StorageBackend for MockStorage {
         Ok(())
     }
 
-    async fn create_push(&self, _c: &str) -> RamariaResult<i64> {
-        Ok(1)
-    }
-
-    async fn list_pending_pushes(&self) -> RamariaResult<Vec<(i64, String)>> {
-        Ok(Vec::new())
-    }
-
-    async fn mark_push_sent(&self, _id: i64) -> RamariaResult<()> {
-        Ok(())
-    }
-
     async fn get_setting(&self, _k: &str) -> RamariaResult<Option<String>> {
         Ok(None)
     }
@@ -594,18 +578,6 @@ impl StorageBackend for MockStorage {
 
     async fn list_settings(&self) -> RamariaResult<Vec<(String, String)>> {
         Ok(Vec::new())
-    }
-
-    async fn save_bm25(&self, _d: i64, _l: &str, _t: &str) -> RamariaResult<()> {
-        Ok(())
-    }
-
-    async fn list_bm25_by_doc(&self, _d: i64) -> RamariaResult<Vec<(String, String)>> {
-        Ok(Vec::new())
-    }
-
-    async fn delete_bm25_by_doc(&self, _d: i64) -> RamariaResult<()> {
-        Ok(())
     }
 
     async fn insert_graph_node(&self, _n: &str, _t: &str, _l: Option<Uuid>) -> RamariaResult<i64> {

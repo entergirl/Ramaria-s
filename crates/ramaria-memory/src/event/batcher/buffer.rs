@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/event/batcher/buffer.rs - 碎片簇缓冲区（Pending Buffer）
+//! crates/ramaria-memory/src/event/batcher/buffer.rs - 碎片簇缓冲区（Pending Buffer）
 //!
 //! 设计特点:
 //! - `PendingFragment`: 暂存不足 min_cluster_size 的孤立 L1 条目
@@ -111,11 +111,26 @@ impl PendingFragment {
 /// - `max_age_days`: 碎片的最大存活天数，超时降级合并，默认 30。
 ///
 /// 使用示例:
-/// ```ignore
+/// ```
+/// use ramaria_memory::event::batcher::buffer::PendingBuffer;
+/// use ramaria_memory::event::batcher::L1Item;
+/// use ramaria_core::keyword::KeywordToken;
+/// use uuid::Uuid;
+///
 /// let mut buf = PendingBuffer::default();
-/// buf.add_fragment(orphan_l1, now_ms);
-/// let promoted = buf.drain_promoted(); // 达到 3 条的碎片
-/// let expired = buf.collect_expired(now_ms); // 超过 30 天的碎片
+/// let orphan = L1Item {
+///     id: Uuid::new_v4(),
+///     summary: "孤立 L1 摘要".into(),
+///     keywords: vec![KeywordToken::new("工作").unwrap()],
+///     evidence_notes: vec![],
+///     embedding: None,
+///     salience: 0.5,
+///     created_at: 1_000,
+/// };
+/// buf.add_fragment(orphan, 1_000_000);
+/// let promoted = buf.drain_promoted(); // 未达 3 条，不会提升
+/// let expired = buf.collect_expired(1_000_000); // 未超时，无过期
+/// assert!(promoted.is_empty() && expired.is_empty());
 /// ```
 #[derive(Debug, Clone)]
 pub struct PendingBuffer {
@@ -304,37 +319,19 @@ impl Default for PendingBuffer {
 }
 
 // =========================================================
-// 关键词 Jaccard 相似度（buffer 专用，与 mod.rs 中的逻辑一致）
+// 关键词 Jaccard 相似度（buffer 专用薄包装，收敛到 similarity 模块）
 // =========================================================
 
 /// 计算两组 KeywordToken 的 Jaccard 相似度。
 ///
 /// 公式: `J(A, B) = |A ∩ B| / |A ∪ B|`
 ///
-/// 与 `mod.rs::jaccard_similarity` 逻辑相同，在此重复以避免跨模块循环依赖。
+/// 说明（v1.5 收敛）:
+/// - 实现统一收敛到 `crate::similarity::jaccard_similarity`，本函数为薄包装，
+///   与 `mod.rs::jaccard_similarity` 共用同一实现（原"为避免跨模块循环依赖"
+///   而逐行重复的实现体已消除）。
 fn jaccard_keyword_sets(kw_a: &[KeywordToken], kw_b: &[KeywordToken]) -> f64 {
-    if kw_a.is_empty() && kw_b.is_empty() {
-        return 0.0;
-    }
-
-    // 计算交集
-    let intersection = kw_a.iter().filter(|k| kw_b.contains(k)).count();
-
-    // 计算并集（去重）
-    let mut union_set: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
-    for k in kw_a {
-        union_set.insert(k.as_str());
-    }
-    for k in kw_b {
-        union_set.insert(k.as_str());
-    }
-    let union_size = union_set.len();
-
-    if union_size == 0 {
-        return 0.0;
-    }
-
-    intersection as f64 / union_size as f64
+    crate::similarity::jaccard_similarity(kw_a.iter(), kw_b.iter())
 }
 
 // =========================================================
@@ -479,7 +476,7 @@ mod tests {
     }
 
     #[test]
-    fn add_fragment_merges_to_best_match() {
+    fn add_fragment_below_merge_threshold_creates_new() {
         let mut buf = PendingBuffer::new(3, 30);
 
         // 碎片 A: 工作相关
@@ -634,34 +631,5 @@ mod tests {
         assert_eq!(promoted2.len(), 1, "跨批次积累后应提升");
         assert_eq!(promoted2[0].len(), 3);
         assert!(buf.is_empty());
-    }
-
-    // ---- jaccard_keyword_sets ----
-
-    #[test]
-    fn jaccard_identical() {
-        let a: Vec<KeywordToken> = vec![
-            KeywordToken::new("工作").unwrap(),
-            KeywordToken::new("压力").unwrap(),
-        ];
-        let b: Vec<KeywordToken> = vec![
-            KeywordToken::new("工作").unwrap(),
-            KeywordToken::new("压力").unwrap(),
-        ];
-        assert!((jaccard_keyword_sets(&a, &b) - 1.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn jaccard_disjoint() {
-        let a = vec![KeywordToken::new("工作").unwrap()];
-        let b = vec![KeywordToken::new("休闲").unwrap()];
-        assert!((jaccard_keyword_sets(&a, &b) - 0.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn jaccard_empty() {
-        let a: Vec<KeywordToken> = vec![];
-        let b: Vec<KeywordToken> = vec![];
-        assert!((jaccard_keyword_sets(&a, &b) - 0.0).abs() < f64::EPSILON);
     }
 }

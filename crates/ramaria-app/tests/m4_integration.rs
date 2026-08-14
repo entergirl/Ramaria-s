@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/tests/m4_integration.rs - M4 统计深化集成测试
+//! crates/ramaria-app/tests/m4_integration.rs - M4 统计深化集成测试
 //!
 //! 设计特点:
 //! - 验证 M4 全部新特性: 校准权重链、三轨准入、分层收缩、因果链、动机维度统计
@@ -813,7 +813,7 @@ async fn mock_infer_fallback_with_m4_stats() {
     );
 }
 
-// P1-2 修复：LLM Step3 返回空数组 `[]`（无足够证据）是合法响应，
+// LLM Step3 返回空数组 `[]`（无足够证据）是合法响应，
 // 应走 LlmInference（saved=0），而不是误触发 MockFallback 用 mock 数据污染画像
 #[tokio::test]
 async fn llm_empty_traits_uses_llm_source_not_mock() {
@@ -822,7 +822,7 @@ async fn llm_empty_traits_uses_llm_source_not_mock() {
 
     let step1 = r#"{"工作":{"signal_label":"尽责","evidence_citation":"n_eff=4.2","stability_judgment":"stable","sufficient_evidence":true},"社交":{"signal_label":"亲和","evidence_citation":"n_eff=1.8","stability_judgment":"contextual","sufficient_evidence":false}}"#;
     let step2 = r#"{"base_candidates":[],"primary_candidates":[],"accent_candidates":[],"notes":"数据不足"}"#;
-    let step3 = "[]"; // LLM 明确表示无可推断 traits（P1-2 复现输入）
+    let step3 = "[]"; // LLM 明确表示无可推断 traits（复现输入）
     let llm = MultiStepLlm::new(vec![step1.into(), step2.into(), step3.into()]);
     let config = InferrerConfig::default();
 

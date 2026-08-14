@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/token_budget.rs - Token 预算管理模块
+//! crates/ramaria-memory/src/token_budget.rs - Token 预算管理模块
 //!
 //! 设计特点:
 //! - 字符数估算 token 数: 中文 ≈ len/2，英文 ≈ len/4

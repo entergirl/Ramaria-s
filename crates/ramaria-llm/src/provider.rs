@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-llm/src/provider.rs - Provider 共享基础设施
+//! crates/ramaria-llm/src/provider.rs - Provider 共享基础设施
 //!
 //! 设计特点:
 //! - `ProviderBase`: 封装 HTTP 传输、消息组装、重试/超时策略
@@ -75,18 +75,19 @@ impl RetryConfig {
     /// 判断 `RamariaError` 是否应重试。
     ///
     /// 可重试: Llm 错误中的网络/服务端/限流问题（5xx、429、连接超时等）
-    /// 不重试: Config / Validation / Privacy 错误 + Llm 中的鉴权错误 (401/403)
+    /// 不重试: Config / Validation / Privacy 错误 + Llm 中的客户端错误（4xx，除 429）
     ///
-    /// 鉴权错误通过 context 文本中的 "HTTP 401" 或 "HTTP 403" 识别。
-    /// 当 API key 无效或过期时，重试无意义且浪费配额。
+    /// 客户端错误（400/401/403/404 等）通过 context 文本中的 "HTTP <状态码>" 识别——
+    /// 请求无效或鉴权失败时重试无意义且浪费配额；429（速率限制）与 5xx 可重试。
     pub fn should_retry_error(&self, err: &RamariaError) -> bool {
         let _ = self; // 保持方法签名一致性，供 RetryConfig 实例调用
         match err {
             RamariaError::Llm { context, .. } => {
-                // 鉴权错误 (401/403) 不应重试——无效的 API key 重试多少次也不会变
-                if context.contains("HTTP 401") || context.contains("HTTP 403") {
-                    return false;
+                // 能提取到 HTTP 状态码时按状态码判定（4xx 除 429 不重试）
+                if let Some(status) = extract_http_status(context) {
+                    return Self::should_retry_http(status);
                 }
+                // 无状态码的网络/服务端错误（连接失败、超时等）视为可重试
                 true
             }
             // 非 Llm 错误（Config / Validation / Privacy 等）一律不重试
@@ -102,6 +103,21 @@ impl RetryConfig {
             (self.initial_backoff_ms as f64 * self.backoff_multiplier.powi(attempt as i32)) as u64;
         ms.min(self.max_backoff_ms)
     }
+}
+
+/// 从错误上下文中提取 "HTTP <状态码>" 形式的 HTTP 状态码。
+///
+/// 说明:
+/// - 传输层错误文案统一为 `...(HTTP {status}): ...` 格式（见 transport.rs）。
+/// - 提取失败（无状态码的网络错误等）返回 None，由调用方按可重试处理。
+fn extract_http_status(context: &str) -> Option<u16> {
+    context
+        .split("HTTP ")
+        .nth(1)?
+        .split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse::<u16>()
+        .ok()
 }
 
 // =========================================================
@@ -222,6 +238,15 @@ impl ProviderBase {
     /// 返回 HTTP 传输引用（供 validate 使用）。
     pub fn transport(&self) -> &OpenAiTransport {
         &self.transport
+    }
+
+    /// 更新传输层 API key（运行时热更新）。
+    ///
+    /// 说明:
+    /// - 线上 provider 每次请求前从 keychain 重新读取并同步到此，
+    ///   用户修改 keychain 后无需重建 provider 即生效。
+    pub fn set_api_key(&self, api_key: Option<String>) {
+        self.transport.set_api_key(api_key);
     }
 
     // =========================================================
@@ -527,12 +552,99 @@ impl ProviderBase {
 // 在线 Provider 实现宏（消除 DeepSeek/OpenAI 间的 ~97% 重复）
 // =========================================================
 
+/// 为在线 LLM provider 生成构造器（new / with_retry_config / with_cache / resolve_api_key）。
+///
+/// 与 `impl_online_provider!` 配套：该宏生成 trait 实现，本宏生成固有构造方法，
+/// 消除 DeepSeek/OpenAI 构造逻辑的重复（约 60 行）。
+///
+/// 参数:
+/// - `$struct_name`: provider 结构体名
+/// - `$service`: keychain service name（如 `"deepseek"`）
+/// - `$display`: 人类可读名称（如 `"DeepSeek"`）
+#[macro_export]
+macro_rules! impl_online_provider_constructors {
+    ($struct_name:ident, $service:literal, $display:literal) => {
+        impl $struct_name {
+            /// 创建 $display Provider。
+            ///
+            /// 参数:
+            /// - `config`: 后端配置（含默认 capability）。
+            /// - `keychain`: OS keychain 实例，用于读取 API key。
+            ///
+            /// 返回:
+            /// - 成功时返回 provider 实例。
+            /// - API key 不存在不在此处报错（延迟到 `chat`/`validate` 时检查）。
+            pub fn new(
+                config: ramaria_core::types::BackendConfig,
+                keychain: std::sync::Arc<$crate::keychain::Keychain>,
+            ) -> ramaria_core::error::RamariaResult<Self> {
+                let result = keychain.get_api_key($service);
+                let api_key = result.unwrap_or(None);
+                let key_status = match &api_key {
+                    Some(_) => "已配置",
+                    None => "未配置",
+                };
+
+                let base = $crate::provider::ProviderBase::new(config, api_key)?;
+
+                tracing::info!(
+                    key_status,
+                    base_url = %base.transport().base_url(),
+                    concat!($display, "Provider 已创建")
+                );
+
+                Ok(Self { base, keychain })
+            }
+
+            /// 创建带自定义重试配置的 $display Provider。
+            pub fn with_retry_config(
+                config: ramaria_core::types::BackendConfig,
+                keychain: std::sync::Arc<$crate::keychain::Keychain>,
+                timeout_secs: u64,
+                retry_config: $crate::provider::RetryConfig,
+            ) -> ramaria_core::error::RamariaResult<Self> {
+                let api_key = keychain.get_api_key($service).unwrap_or(None);
+                let base = $crate::provider::ProviderBase::with_retry_config(
+                    config,
+                    api_key,
+                    timeout_secs,
+                    retry_config,
+                )?;
+                Ok(Self { base, keychain })
+            }
+
+            /// 接入 LLM 响应精确缓存（v1.5 C 三层生成缓存）。
+            ///
+            /// 参数:
+            /// - `cache`: 缓存实现（通常为 `ramaria_storage::SqliteLlmCache`）。
+            ///
+            /// 说明:
+            /// - 缓存查询/写入失败均静默降级走真实 LLM，不阻塞主流程。
+            pub fn with_cache(
+                self,
+                cache: std::sync::Arc<dyn ramaria_core::traits::LlmResponseCache>,
+            ) -> Self {
+                Self {
+                    base: self.base.with_cache(cache),
+                    keychain: self.keychain,
+                }
+            }
+
+            /// 从 keychain 获取 API key。
+            fn resolve_api_key(&self) -> ramaria_core::error::RamariaResult<Option<String>> {
+                self.keychain.get_api_key($service)
+            }
+        }
+    };
+}
+
 /// 为在线 LLM provider 生成完整的 `LlmProvider` trait 实现。
 ///
 /// DeepSeek 和 OpenAI 的实现逻辑完全相同，差异仅在于字符串常量。
 /// 此宏消除 ~150 行重复代码。
 ///
 /// 用法:
+/// 宏调用需 provider 类型已定义并实现所需字段，示例仅示意，不参与编译。
 /// ```ignore
 /// impl_online_provider!(DeepSeekProvider, "deepseek", "DeepSeek");
 /// impl_online_provider!(OpenAIProvider, "openai", "OpenAI");
@@ -562,6 +674,7 @@ macro_rules! impl_online_provider {
                         )
                     )));
                 }
+                self.base.set_api_key(api_key);
                 self.base.chat(request).await
             }
 
@@ -590,6 +703,7 @@ macro_rules! impl_online_provider {
                         )
                     )));
                 }
+                self.base.set_api_key(api_key);
                 self.base.chat_stream(request).await
             }
 
@@ -613,6 +727,7 @@ macro_rules! impl_online_provider {
                         )
                     )));
                 }
+                self.base.set_api_key(api_key);
                 self.base.validate().await
             }
 
@@ -628,6 +743,7 @@ macro_rules! impl_online_provider {
                         )
                     )));
                 }
+                self.base.set_api_key(api_key);
                 self.base.health_check().await
             }
 
@@ -674,7 +790,7 @@ const INJECTION_PATTERNS: &[&str] = &[
 
 /// 构造 LLM 精确缓存 key。
 ///
-/// 公式（D-V15-008/010）:
+/// 缓存 key 公式（三层生成缓存精确缓存 + template_version 来源决策，见 docs/dev-1.5/v1.5-decisions.md）:
 /// `key = sha256_hex(model_id + template_version + canonical_messages_json)`
 ///
 /// 参数:
@@ -1127,7 +1243,7 @@ mod tests {
     //  config/privacy 断言逐字重复，已删除）
 
     // =========================================================
-    // 精确缓存（v1.5 C 三层生成缓存，T-V15-3-002）
+    // 精确缓存（v1.5 三层生成缓存 C 决策，详见 docs/dev-1.5/v1.5-decisions.md）
     // =========================================================
 
     /// 内存 mock 缓存：记录调用次数，支持注入查询失败。

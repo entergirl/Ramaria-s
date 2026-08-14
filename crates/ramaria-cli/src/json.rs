@@ -1,7 +1,7 @@
 //! crates/ramaria-cli/src/json.rs - CLI 全局 --json 信封输出模块
 //!
 //! 设计特点:
-//! - 统一信封 schema（D-V15-011）: `{"ok":true,"data":…}` / `{"ok":false,"error":{"code":…,"message":"…"}}`
+//! - 统一信封 schema（见 docs/dev-1.5/v1.5-decisions.md §D-V15-011）: `{"ok":true,"data":…}` / `{"ok":false,"error":{"code":…,"message":"…"}}`
 //! - stdout 只输出数据（信封 JSON），状态/提示/警告走 stderr（ui 模块）
 //! - `error.code` 复用 exit code 约定（0 成功 / 2 参数错 / 3 LLM 或后端不可用 / 4 业务校验失败）
 //! - 序列化失败回退文本输出并记 warn（静默降级约定，不阻塞主流程）
@@ -25,7 +25,7 @@ use serde::Serialize;
 /// 说明:
 /// - 输出格式为单行 JSON：`{"ok":true,"data":<data>}`。
 /// - 序列化失败属于异常路径（负载通常为简单结构），按降级约定
-///   （T-V15-1-001 验收：`--json` 输出失败回退文本并记 warn）以 Debug 形态
+///   （`--json` 输出失败回退文本并记 warn）以 Debug 形态
 ///   输出负载到 stdout（仍只输出数据，不输出状态），保证 agent 侧 stdout 非空。
 pub fn emit_ok<T: Serialize + std::fmt::Debug>(data: &T) -> anyhow::Result<()> {
     let envelope = serde_json::json!({
@@ -109,7 +109,7 @@ mod tests {
         assert_eq!(parsed["error"]["message"], "LLM 不可用");
     }
 
-    /// 错误信封字段命名必须为 snake_case（D-V15-011）。
+    /// 错误信封字段命名必须为 snake_case（统一信封 schema，见 docs/dev-1.5/v1.5-decisions.md §D-V15-011）。
     #[test]
     fn envelope_field_names_are_snake_case() {
         let ok = serde_json::json!({"ok": true, "data": null});

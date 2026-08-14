@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/event/paraphrase.rs - Attitude → Paraphrase 去情境化重述
+//! crates/ramaria-memory/src/event/paraphrase.rs - Attitude → Paraphrase 去情境化重述
 //!
 //! 设计特点:
 //! - 轻量 LLM 调用: 仅当事件有 attitude 且 paraphrase 为空时才触发
@@ -47,6 +47,7 @@ impl Default for ParaphraseConfig {
 ///
 /// 用法:
 /// ```ignore
+/// // async + 需要 &dyn LlmProviderTrait（真实 LLM 或 mock），示例仅示意调用形态。
 /// let paraphrase = generate_paraphrase(llm, "被批评后很沮丧", "工作汇报后被领导批评", &config).await;
 /// ```
 ///

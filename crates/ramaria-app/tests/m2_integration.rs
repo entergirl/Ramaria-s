@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/tests/m2_integration.rs - M2 Pipeline 全流程集成测试
+//! crates/ramaria-app/tests/m2_integration.rs - M2 Pipeline 全流程集成测试
 //!
 //! 测试覆盖:
 //! - 全 10 个 Stage Pipeline 正常路径（Mock 全部依赖）

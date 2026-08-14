@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/src/app.rs - 应用编排核心
+//! crates/ramaria-app/src/app.rs - 应用编排核心
 //!
 //! 设计特点:
 //! - `App` 结构体持有所有运行时依赖：storage、llm provider、retriever、config、keychain
@@ -211,7 +211,7 @@ impl App {
     }
 
     // =========================================================
-    // LLM 响应精确缓存（v1.5 三层生成缓存 C，D-V15-008）
+    // LLM 响应精确缓存（v1.5 三层生成缓存 C，决策见 docs/dev-1.5/v1.5-decisions.md）
     // =========================================================
 
     /// 注入 LLM 响应精确缓存实例。
@@ -305,7 +305,7 @@ impl App {
         self.lifecycle.get_active_session_id()
     }
 
-    /// 热更新空闲自动保存阈值（分钟）（T-V14-5-001）。
+    /// 热更新空闲自动保存阈值（分钟）。
     ///
     /// 说明:
     /// - 由桌面端 `update_full_config` 命令在保存成功后调用，

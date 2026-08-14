@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-importer/src/error.rs - 导入器专用错误类型
+//! crates/ramaria-importer/src/error.rs - 导入器专用错误类型
 //!
 //! 设计特点:
 //! - 所有导入相关错误统一转换为 `RamariaError`，保持与 core 层一致

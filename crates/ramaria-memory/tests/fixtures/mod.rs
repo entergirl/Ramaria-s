@@ -1,9 +1,19 @@
-//! rust/tests/fixtures/mod.rs - 测试 fixture 加载器
+//! ramaria-memory 测试 fixture 加载器
+//!
+//! 迁移自仓库根 `tests/fixtures.rs`（决策 4.B：死测试复活）。
+//! 原文件在仓库根 virtual workspace 下 cargo 永不编译，迁移后由
+//! `ramaria-memory` crate 的集成测试编译执行。
 //!
 //! 设计特点:
 //! - 提供类型安全的 fixture 加载函数
 //! - 包含预期值的结构体定义
 //! - 纯数据模块，零 I/O 依赖
+//!
+//! 数据文件与本模块同目录（conversations.json / memory_events.json），
+//! `include_str!` 相对当前文件解析，路径自动成立。
+
+// 各测试二进制独立编译本模块，各目标使用子集不同 → 允许未使用项
+#![allow(dead_code)]
 
 use serde::Deserialize;
 
@@ -86,7 +96,7 @@ pub struct MemoryEventFixtures {
 /// 返回:
 /// - 解析后的 ConversationFixtures。
 pub fn load_conversation_fixtures() -> ConversationFixtures {
-    let json_str = include_str!("fixtures/conversations.json");
+    let json_str = include_str!("conversations.json");
     serde_json::from_str(json_str).expect("对话 fixtures JSON 解析失败")
 }
 
@@ -95,7 +105,7 @@ pub fn load_conversation_fixtures() -> ConversationFixtures {
 /// 返回:
 /// - 解析后的 MemoryEventFixtures。
 pub fn load_memory_event_fixtures() -> MemoryEventFixtures {
-    let json_str = include_str!("fixtures/memory_events.json");
+    let json_str = include_str!("memory_events.json");
     serde_json::from_str(json_str).expect("记忆事件 fixtures JSON 解析失败")
 }
 
@@ -113,7 +123,7 @@ mod tests {
         assert!(!fixtures.fixtures.is_empty(), "对话 fixtures 不应为空");
         assert_eq!(fixtures.fixtures.len(), 7);
 
- // 验证第一条 fixture
+        // 验证第一条 fixture
         let f = &fixtures.fixtures[0];
         assert_eq!(f.id, "conv-001");
         assert!(f.messages.len() >= 6);
@@ -126,7 +136,7 @@ mod tests {
         assert!(!fixtures.events.is_empty(), "记忆事件 fixtures 不应为空");
         assert_eq!(fixtures.events.len(), 10);
 
- // 验证第一条事件
+        // 验证第一条事件
         let ev = &fixtures.events[0];
         assert_eq!(ev.id, 1);
         assert_eq!(ev.persona_uid, "user-0001");

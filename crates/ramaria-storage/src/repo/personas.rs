@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-storage/src/repo/personas.rs - Persona CRUD
+//! crates/ramaria-storage/src/repo/personas.rs - Persona CRUD
 //!
 //! 设计特点:
 //! - 管理 personas 表的创建、查询、更新和软删除

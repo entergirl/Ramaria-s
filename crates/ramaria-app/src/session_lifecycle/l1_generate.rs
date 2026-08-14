@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/src/session_lifecycle/l1_generate.rs - L1 摘要生成与重试
+//! crates/ramaria-app/src/session_lifecycle/l1_generate.rs - L1 摘要生成与重试
 //!
 //! 设计特点:
 //! - 实现 `SessionLifecycle` 的 L1 摘要生成、手动重试、批量无级联生成
@@ -245,7 +245,7 @@ impl SessionLifecycle {
     ///
     /// 职责:
     /// - 在 L1 摘要生成成功后立即调用，使新 L1 文档无需等待手动 `rebuild_retriever`
-    ///   即可被 Stage 5 RAG 检索命中（D-V12-013）。
+    ///   即可被 Stage 5 RAG 检索命中（决策见 docs/dev-1.2/v1.2-decisions.md）。
     ///
     /// 容错:
     /// - Retriever 未注入（向后兼容）→ 静默跳过。

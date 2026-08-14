@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/src/stages/build_prompt.rs - Stage 6: 5-Block System Prompt 装配
+//! crates/ramaria-app/src/stages/build_prompt.rs - Stage 6: 5-Block System Prompt 装配
 //!
 //! 设计特点:
 //! - 从 DB 加载 persona/facts/traits/examples，调用 `assemble_prompt` 组装 5-Block Prompt
@@ -93,7 +93,7 @@ impl PipelineStage for StageBuildPrompt {
                 p,
                 &input.recent_summaries,
                 input.last_active_at.as_deref(),
-                // v1.4 M6（T-V14-6-004）：examples.max_examples 经 RamariaConfig 传播
+                // v1.4 M6：examples.max_examples 经 RamariaConfig 传播
                 ctx.config.examples.max_examples as usize,
             )
             .await;
@@ -201,7 +201,7 @@ async fn build_structured_prompt(
     };
 
     let config = PromptConfig {
-        // v1.4 M6（T-V14-6-004）：[examples].max_examples 经 RamariaConfig 传播
+        // v1.4 M6：[examples].max_examples 经 RamariaConfig 传播
         max_examples,
         ..Default::default()
     };

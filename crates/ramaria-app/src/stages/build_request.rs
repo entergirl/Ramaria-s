@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/src/stages/build_request.rs - Stage 8: ChatRequest 构造
+//! crates/ramaria-app/src/stages/build_request.rs - Stage 8: ChatRequest 构造
 //!
 //! 设计特点:
 //! - 从 PipelineData 的 budgeted_* 字段构造 ChatRequest

@@ -2,10 +2,10 @@
 -- Ramaria v1.4 Migration —— utt_blocks 表 + evidence_notes 结构化
 --
 -- 内容:
--- 1. evidence_notes 存量迁移（D-V14-003，一次性破坏性变更）
+-- 1. evidence_notes 存量迁移（一次性破坏性变更，见 docs/dev-1.4/v1.4-decisions.md）
 --    旧格式 JSON 字符串数组 → 新格式对象数组 [{text, time?, who?, cause?}]
 --    字符串落 text 槽位，time/who/cause 置空；迁移前备份原值。
--- 2. utt_blocks 表（D-V14-001）：原文话语块存储，供检索/桥接/风格统计复用。
+-- 2. utt_blocks 表（v1.4 新增，见 docs/dev-1.4/v1.4-decisions.md）：原文话语块存储，供检索/桥接/风格统计复用。
 --
 -- 幂等性说明:
 -- - evidence_notes 迁移仅处理"首元素为字符串"的旧格式行；

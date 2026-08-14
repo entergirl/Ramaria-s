@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-desktop/src/commands/import_cmd.rs - QQ 聊天记录导入 Tauri Command
+//! crates/ramaria-desktop/src/commands/import_cmd.rs - QQ 聊天记录导入 Tauri Command
 //!
 //! 设计特点:
 //! - `import_qq_chat`: 接收文件路径、导入模式和双画像参数，委托 ramaria-importer 执行解析与写入
@@ -469,7 +469,7 @@ pub async fn import_qq_chat(
         // 空前缀 → 对话格式为 "[张三] 消息内容" 而非 "用户：[张三] 消息内容"，
         // LLM 在 summary/evidence_notes 中自然使用实际名称。
         //
-        // v1.5 I 项（T-V15-4-003/004）阶段统计与 EMA：
+        // 阶段统计与 EMA：
         // - L1 预计总量可预知 = session × persona（self + other 各一条 L1）。
         // - L2/L3 预计总量在线估算：深度模式下以触发 persona 数为工作量单位
         //   （事件提取/性格推断均按 persona 批处理，导入双人场景上界为 2）。

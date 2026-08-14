@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/tests/session_lifecycle_tests.rs - Session 生命周期集成测试
+//! crates/ramaria-app/tests/session_lifecycle_tests.rs - Session 生命周期集成测试
 //!
 //! 设计特点:
 //! - 使用 MockStorage + MockLlm 验证 session 生命周期的完整行为
@@ -53,7 +53,7 @@ async fn setup_app_ready(storage: &dyn StorageBackend) {
 }
 
 // =========================================================
-// T-V11-0-008.1: 手动关闭
+// 手动关闭
 // （原 manual_save_and_close_session 的完整流程已被
 //  new_session_created_after_save_and_close 覆盖，已删除）
 // =========================================================
@@ -74,7 +74,7 @@ async fn save_and_close_without_active_session_is_noop() {
 }
 
 // =========================================================
-// T-V11-0-008.2: 新消息自动创建 session
+// 新消息自动创建 session
 // =========================================================
 
 #[tokio::test]
@@ -115,7 +115,7 @@ async fn new_message_auto_creates_session() {
 }
 
 // =========================================================
-// T-V11-0-008.3: 已关闭 session 只读约束
+// 已关闭 session 只读约束
 // =========================================================
 
 #[tokio::test]
@@ -191,7 +191,7 @@ async fn mock_storage_save_rejects_closed_session() {
 }
 
 // =========================================================
-// T-V11-0-008.4: shutdown 自动关闭活跃 session
+// shutdown 自动关闭活跃 session
 // =========================================================
 
 #[tokio::test]
@@ -233,23 +233,7 @@ async fn shutdown_closes_active_session() {
 }
 
 // =========================================================
-// T-V11-0-008.5: send_message 在非 Ready 状态被拒绝
-// （原 send_message_rejected_in_needs_setup 与 app_integration.rs 的
-//  send_message_rejects_when_not_ready 同 setup 同断言，已删除）
-// =========================================================
-
-// =========================================================
-// T-V11-0-008.6: 后台任务幂等启动
-// （原 background_tasks_start_only_once 无任何断言，仅观察日志，已删除）
-// =========================================================
-
-// =========================================================
-// T-V11-0-008.7: get_active_session_id 线程安全
-// （原 active_session_id_default_is_none 为琐碎 getter 初始值断言，已删除）
-// =========================================================
-
-// =========================================================
-// T-V11-0-008.8: save_and_close 后新消息创建新 session
+// save_and_close 后新消息创建新 session
 // =========================================================
 
 #[tokio::test]
@@ -284,7 +268,7 @@ async fn new_session_created_after_save_and_close() {
 }
 
 // =========================================================
-// T-V11-0-008.9: 指定 session_id 发消息到活跃 session
+// 指定 session_id 发消息到活跃 session
 // =========================================================
 
 #[tokio::test]
@@ -439,7 +423,7 @@ async fn l1_summary_max_tokens_has_floor() {
 }
 
 // =========================================================
-// P0-3 修复：save_and_close_session 归属统一以 DB sessions.persona_uid 为真相源
+// save_and_close_session 归属统一以 DB sessions.persona_uid 为真相源
 // =========================================================
 
 /// 手动保存时前端传入 None（或旧内存值），但 DB 中 session 已绑定 persona →
@@ -473,7 +457,7 @@ async fn save_and_close_l1_uses_db_session_persona() {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     let sid = app.get_active_session_id().expect("应有活跃 session");
 
-    // 保存时前端传 None（P0-3：空闲保存/旧前端可能传 None 或过期内存值）
+    // 保存时前端传 None（空闲保存/旧前端可能传 None 或过期内存值）
     app.save_and_close_session(None).await.unwrap();
 
     // L1 归属应为 DB 会话绑定的 char-0001，而非 NULL

@@ -379,7 +379,7 @@ var RamariaSessionDrawer = (function () {
         } else {
             // 已关闭：显示简短时间
             var closedTime = RamariaFormat ? RamariaFormat.smartTime(session.ended_at || session.started_at) : '';
-            statusHtml = '<span class="' + statusClass + '">' + _escapeHtml(closedTime) + '</span>';
+            statusHtml = '<span class="' + statusClass + '">' + RamariaEscape.escapeHtml(closedTime) + '</span>';
         }
 
         // 标题行：时间 + 状态标签
@@ -393,7 +393,7 @@ var RamariaSessionDrawer = (function () {
             if (_isImportedSession(session)) {
                 var personaName = _getPersonaName(session.persona_uid);
                 tagHtml = '<span class="session-drawer-item-tag session-drawer-item-tag--import">导入: ' +
-                    _escapeHtml(personaName) + '</span>';
+                    RamariaEscape.escapeHtml(personaName) + '</span>';
             }
         }
 
@@ -409,13 +409,13 @@ var RamariaSessionDrawer = (function () {
                 '<div class="session-drawer-item-status-col">' + statusHtml + '</div>' +
                 '<div class="session-drawer-item-info">' +
                     '<div class="session-drawer-item-title">' +
-                        '<span class="session-drawer-item-time">' + _escapeHtml(timeLabel) + '</span>' +
+                        '<span class="session-drawer-item-time">' + RamariaEscape.escapeHtml(timeLabel) + '</span>' +
                         tagHtml +
                     '</div>' +
                     '<div class="session-drawer-item-meta">' +
                         '<span>' + msgLabel + '</span>' +
                         (personaLabel ? '<span class="session-drawer-item-persona"> — ' +
-                            _escapeHtml(personaLabel) + '</span>' : '') +
+                            RamariaEscape.escapeHtml(personaLabel) + '</span>' : '') +
                     '</div>' +
                 '</div>' +
             '</div>';
@@ -489,16 +489,6 @@ var RamariaSessionDrawer = (function () {
         hide();
     }
 
-    /**
-     * HTML 转义（防 XSS）。
-     */
-    function _escapeHtml(text) {
-        if (!text) return '';
-        var div = document.createElement('div');
-        div.appendChild(document.createTextNode(text));
-        return div.innerHTML;
-    }
-
     // =========================================================
     // 加载/错误状态渲染
     // =========================================================
@@ -525,7 +515,7 @@ var RamariaSessionDrawer = (function () {
             '<div class="session-drawer-error">' +
                 '<div class="session-drawer-error-icon">⚠️</div>' +
                 '<div class="session-drawer-error-text">加载失败</div>' +
-                '<div class="session-drawer-error-detail">' + _escapeHtml(errMsg || '未知错误') + '</div>' +
+                '<div class="session-drawer-error-detail">' + RamariaEscape.escapeHtml(errMsg || '未知错误') + '</div>' +
                 '<button class="btn btn-secondary btn-sm" id="session-drawer-retry-btn">🔄 重试</button>' +
             '</div>';
 

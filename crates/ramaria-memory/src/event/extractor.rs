@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/event/extractor.rs - L1→L2 事件提取管线
+//! crates/ramaria-memory/src/event/extractor.rs - L1→L2 事件提取管线
 //!
 //! 设计特点:
 //! - 依赖注入: 通过 `&dyn LlmProvider` + `&dyn StorageBackend` 解耦具体实现
@@ -159,7 +159,7 @@ pub struct EventExtractorConfig {
     /// 簇间 LLM 请求间隔（毫秒），用于避免触发远程 API 速率限制。
     /// 默认 0（不等待），建议对 DeepSeek 等有速率限制的 API 设为 500~1000。
     pub cluster_delay_ms: u64,
-    /// L2 聚类去重指纹开关（v1.5 三层生成缓存 C，T-V15-3-003）。
+    /// L2 聚类去重指纹开关（v1.5 三层生成缓存 C）。
     ///
     /// `true` 时:
     /// - 同一 L1 集合（已聚类且无产出）通过指纹直接跳过，不重复聚类；
@@ -215,6 +215,8 @@ impl Default for EventExtractorConfig {
 ///
 /// 用法:
 /// ```ignore
+/// // 依赖 &dyn LlmProviderTrait 与 &dyn StorageBackend（及可选 &Retriever），
+/// // 需完整 mock 才能运行，示例仅示意调用形态。
 /// let mut extractor = EventExtractor::new(&llm, &storage, config);
 /// extractor.set_retriever(&retriever);  // 启用上下文检索
 /// let events = extractor.extract_events("user-0001").await?;
@@ -308,7 +310,7 @@ impl<'a> EventExtractor<'a> {
             return Ok(vec![]);
         }
 
-        // 2.5 L2 聚类去重指纹检查（v1.5 三层生成缓存 C，T-V15-3-003）
+        // 2.5 L2 聚类去重指纹检查（v1.5 三层生成缓存 C）
         //
         // 语义: 若同一 L1 集合此前已被聚类且无任何事件产出（已登记指纹），
         // 则本次直接跳过——重跑/重试/失败恢复场景不重复聚类、不重复花费 API 账单。
@@ -1060,7 +1062,7 @@ impl<'a> EventExtractor<'a> {
 }
 
 // =========================================================
-// L2 聚类去重指纹辅助函数（v1.5 三层生成缓存 C，T-V15-3-003）
+// L2 聚类去重指纹辅助函数（v1.5 三层生成缓存 C）
 // =========================================================
 
 /// 计算 L1 集合指纹：`sha256(按 L1 id 升序拼接的 id 列表)` 的 hex 摘要。
@@ -1139,15 +1141,11 @@ fn char_bigrams(normalized: &str) -> HashSet<String> {
 /// 关键词集合 Jaccard 相似度（关键词为逗号分隔字符串）。
 ///
 /// 任一侧关键词缺失/为空时返回 0.0（信息不足不判重）。
+///
+/// 说明（v1.5 收敛）:
+/// - 实现统一收敛到 `crate::similarity::jaccard_similarity`。
 fn keyword_jaccard(kw_a: Option<&str>, kw_b: Option<&str>) -> f64 {
-    let set_a = split_keywords(kw_a);
-    let set_b = split_keywords(kw_b);
-    if set_a.is_empty() || set_b.is_empty() {
-        return 0.0;
-    }
-    let inter = set_a.intersection(&set_b).count();
-    let union = set_a.union(&set_b).count();
-    inter as f64 / union as f64
+    crate::similarity::jaccard_similarity(split_keywords(kw_a), split_keywords(kw_b))
 }
 
 /// 将逗号分隔的关键词字符串解析为去空集合。
@@ -1344,7 +1342,7 @@ mod tests {
         assert!(formatted.contains("第一条摘要"));
         assert!(formatted.contains("第二条摘要"));
     }
-    /// v1.4 M4（T-V14-4-004）：evidence_notes 非空时格式化输出 `[线索]` 行，
+    /// v1.4 M4：evidence_notes 非空时格式化输出 `[线索]` 行，
     /// cause 因果线索槽位随行注入（仅供 L2 背景参考）。
     #[test]
     fn format_l1_with_evidence_notes_injects_clue_lines() {
@@ -1710,7 +1708,7 @@ mod tests {
         assert!(result.relations.is_none());
     }
 
-    // ---- L2 聚类去重指纹（v1.5 T-V15-3-003）----
+    // ---- L2 聚类去重指纹（v1.5 三层生成缓存 C）----
 
     /// 构造测试用 L1（仅指纹/相似度计算需要的字段有值）。
     fn l1_for_fp(id: &str, summary: &str) -> MemoryL1 {

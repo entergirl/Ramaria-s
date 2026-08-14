@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/tests/app_integration.rs - App 编排集成测试
+//! crates/ramaria-app/tests/app_integration.rs - App 编排集成测试
 //!
 //! 测试覆盖:
 //! - App 构造与初始状态
@@ -313,11 +313,11 @@ async fn error_title_works() {
 //  check_privacy_integration 与 privacy_local_provider_auto_approved 重复，均已删除）
 
 // =========================================================
-// T-FIX-015: MockFailingLlm 错误路径集成测试
+// MockFailingLlm 错误路径集成测试（LLM 失败仅发 Error 不发 Done）
 // =========================================================
 // 验证 LLM 失败时:
 // 1. 流中包含 Error 事件（用户可感知错误）
-// 2. 流中不包含 Done 事件（修复 T-FIX-013: Error 后不发 Done）
+// 2. 流中不包含 Done 事件（LLM 失败仅发 Error 不发 Done）
 // 3. 错误事件内容与 MockFailingLlm 的错误消息一致
 
 #[tokio::test]
@@ -363,7 +363,7 @@ async fn send_message_failing_llm_cases() {
         }
 
         assert!(error_seen, "LLM 失败时应产生 Error 事件");
-        assert!(!done_seen, "LLM 失败时不应产生 Done 事件（T-FIX-013）");
+        assert!(!done_seen, "LLM 失败时不应产生 Done 事件");
         assert_eq!(delta_count, 0, "LLM 失败时不应有 Delta 事件");
     }
 }

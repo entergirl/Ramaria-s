@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-llm/src/embedding/native.rs - 原生 safetensors 嵌入 Provider
+//! crates/ramaria-llm/src/embedding/native.rs - 原生 safetensors 嵌入 Provider
 //!
 //! 设计特点:
 //! - 取代旧的 ONNX 方案，直接从 HuggingFace safetensors 格式加载嵌入模型
@@ -105,6 +105,7 @@ impl Encoder {
 /// - `progress`: 模型就绪进度（文件齐全时 = 1.0，否则 = 0.0）
 ///
 /// 用法:
+/// 需本机 safetensors 模型目录（`/path/to/model` 为占位路径），示例仅示意，不参与编译。
 /// ```ignore
 /// let provider = NativeEmbeddingProvider::new("/path/to/model")?;
 /// // model_info 此时已可用（维度从 config.json 读取）

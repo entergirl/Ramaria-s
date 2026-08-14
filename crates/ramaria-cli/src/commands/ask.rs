@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-cli/src/commands/ask.rs - 单次问答命令
+//! crates/ramaria-cli/src/commands/ask.rs - 单次问答命令
 //!
 //! 设计特点:
 //! - 默认流式输出（逐字打印），--no-stream 切换为完整回复
@@ -159,7 +159,7 @@ async fn consume_full(mut stream: SendMessageStream) -> anyhow::Result<()> {
 
 /// JSON 事件流输出：每行一个 JSON 对象（`{"type":"delta|done|error",...}`）。
 ///
-/// StreamEvent 已实现 Serialize（D-V15-011 信封的流式形态），
+/// StreamEvent 已实现 Serialize（统一信封 schema 的流式形态，见 docs/dev-1.5/v1.5-decisions.md §D-V15-011），
 /// 输出为合法 JSON（修复 v1.4 用 Debug 格式输出非合法 JSON 的问题）。
 async fn consume_json(mut stream: SendMessageStream) -> anyhow::Result<()> {
     while let Some(event_result) = stream.next().await {
@@ -270,7 +270,7 @@ mod tests {
     use ramaria_app::stream_event::StreamEvent;
     use uuid::Uuid;
 
-    /// `ask --json` 事件流每行必须是合法 JSON 且带 type 标签（T-V15-1-002）。
+    /// `ask --json` 事件流每行必须是合法 JSON 且带 type 标签。
     #[test]
     fn serialize_event_line_is_valid_json() {
         let id = Uuid::new_v4();

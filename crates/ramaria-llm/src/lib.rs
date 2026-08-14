@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-llm/src/lib.rs - Ramaria LLM Provider 层入口
+//! crates/ramaria-llm/src/lib.rs - Ramaria LLM Provider 层入口
 //!
 //! 设计特点:
 //! - 实现 `ramaria_core::traits::LlmProvider` trait，支持 LM Studio / DeepSeek / OpenAI

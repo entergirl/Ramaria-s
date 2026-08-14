@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-llm/src/lm_studio.rs - LM Studio Provider 实现
+//! crates/ramaria-llm/src/lm_studio.rs - LM Studio Provider 实现
 //!
 //! 设计特点:
 //! - 本地 LLM 后端，不需要 API key 认证
@@ -33,6 +33,7 @@ use crate::provider::{ProviderBase, RetryConfig};
 /// - 无需 API key，HTTP 请求不发送 Authorization header。
 ///
 /// 用法:
+/// 需本机 LM Studio 服务运行（默认 `http://localhost:1234/v1`），示例仅示意，不参与编译。
 /// ```ignore
 /// let config = BackendConfig::lm_studio_default();
 /// let provider = LmStudioProvider::new(config)?;

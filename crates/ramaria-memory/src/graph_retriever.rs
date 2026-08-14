@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/graph_retriever.rs — 知识图谱检索通道
+//! crates/ramaria-memory/src/graph_retriever.rs — 知识图谱检索通道
 //!
 //! 设计特点:
 //! - 从查询中提取潜在实体名 → 匹配 graph_nodes → 遍历 1-hop 边 → 评分

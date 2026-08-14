@@ -1,4 +1,4 @@
-//! crates/ramaria-storage/src/repo/behavior_rules.rs - 行为规则 CRUD（v1.5 M5 D1）
+//! crates/ramaria-storage/src/repo/behavior_rules.rs - 行为规则 CRUD（v1.5 M5，算法说明书 v3.1 §4.1）
 //!
 //! 设计特点:
 //! - 管理 `behavior_rules` 表（算法说明书 v3.1 §4.1）

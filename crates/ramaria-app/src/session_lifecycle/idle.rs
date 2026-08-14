@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/src/session_lifecycle/idle.rs - 后台空闲检测线程（Thread A）
+//! crates/ramaria-app/src/session_lifecycle/idle.rs - 后台空闲检测线程（Thread A）
 //!
 //! 设计特点:
 //! - 实现 `SessionLifecycle::spawn_idle_checker`，对齐 Python `SessionManager._idle_checker_loop`
@@ -68,11 +68,11 @@ impl SessionLifecycle {
                     return;
                 }
 
-                // 每轮 tick 读取最新阈值（T-V14-5-001 热更新：
+                // 每轮 tick 读取最新阈值（热更新：
                 // 设置页保存后 set_idle_minutes 即时生效，无需重启）
                 let idle_minutes = idle_minutes_arc.load(Ordering::Relaxed);
 
-                // P1-3 修复：遍历 DB 中**全部**活跃会话（含切换人格后
+                // 遍历 DB 中**全部**活跃会话（含切换人格后
                 // 遗留的孤儿会话），而非仅 active 指针指向的当前会话。
                 // 旧实现只检查 active 指针 → 切换人格后旧会话永远不被
                 // 空闲检测关闭，成为长期滞留的孤儿活跃会话。
@@ -136,7 +136,7 @@ impl SessionLifecycle {
                         "session 空闲超时，自动关闭"
                     );
 
-                    // 归属以 DB session.persona_uid 为准（P0-3；兜底 None
+                    // 归属以 DB session.persona_uid 为准（兜底 None
                     // 时由 close_session_pipeline 内部再读 DB 真相源）
                     let persona_uid = session.persona_uid.clone();
 

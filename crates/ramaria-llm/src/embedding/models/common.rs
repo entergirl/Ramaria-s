@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-llm/src/embedding/models/common.rs - 嵌入模型共享工具
+//! crates/ramaria-llm/src/embedding/models/common.rs - 嵌入模型共享工具
 //!
 //! 设计特点:
 //! - 提供 BERT 和 LLaMA/Qwen 编码器共用的纯函数工具

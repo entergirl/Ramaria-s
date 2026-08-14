@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-core/src/types.rs - Ramaria 核心业务数据类型模块
+//! crates/ramaria-core/src/types.rs - Ramaria 核心业务数据类型模块
 //!
 //! 设计特点:
 //! - 覆盖核心领域对象: Session、Message、MemoryL1、MemoryEvent、Persona、PersonalityTrait 等
@@ -313,7 +313,7 @@ impl Message {
 /// - `who`: 可选，涉及的人物/角色。
 /// - `cause`: 可选，可辨时的因果线索（缺失留空，供背景参考）。
 ///
-/// 迁移约定（D-V14-003）:
+/// 迁移约定（v1.4 一次性迁移，见 docs/dev-1.4/v1.4-decisions.md）:
 /// - 存量旧格式（字符串数组）由 migration 一次性迁移，字符串落 `text` 槽位、其余置空。
 /// - 运行时不做兼容解析，读写均为新格式。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

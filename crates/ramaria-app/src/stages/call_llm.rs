@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/src/stages/call_llm.rs - Stage 9: LLM 流式调用
+//! crates/ramaria-app/src/stages/call_llm.rs - Stage 9: LLM 流式调用
 //!
 //! 设计特点:
 //! - 调用 `ctx.llm.chat_stream(&chat_request)` 获取原始 `LlmRawStream`
@@ -101,7 +101,7 @@ impl PipelineStage for StageCallLlm {
                 Ok(input)
             }
             Err(e) => {
-                // ★ 决策 D-V12-002：LLM 调用失败时不返回 PipelineError
+                // ★ 决策（见 docs/dev-1.2/v1.2-decisions.md）：LLM 调用失败时不返回 PipelineError
                 // 而是构造 Error 事件流（mpsc 单事件），通过 data.output_stream 透传
                 // 上层接收到的是正常的 SendMessageStream，只是第一个（也是唯一一个）事件是 Error
                 tracing::error!(

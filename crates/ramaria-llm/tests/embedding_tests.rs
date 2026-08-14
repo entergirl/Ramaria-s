@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-llm/tests/embedding_tests.rs — 嵌入模型集成测试
+//! crates/ramaria-llm/tests/embedding_tests.rs — 嵌入模型集成测试
 //!
 //! 设计特点:
 //! - 使用 `NoopEmbeddingProvider` 进行无需真实模型的单元测试

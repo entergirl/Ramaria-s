@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-importer/src/qq/mod.rs - QQ 聊天记录导入模块
+//! crates/ramaria-importer/src/qq/mod.rs - QQ 聊天记录导入模块
 //!
 //! 设计特点:
 //! - 仅支持 shuakami/qq-chat-exporter v6.x JSON 格式（语义化 type 名称）
@@ -91,8 +91,9 @@ impl QqImporter {
                 e
             })?;
 
-            // 逐条写入消息，按发送者分配 persona_uid
+            // 收集本 session 消息（按发送者分配 persona_uid），随后批量事务写入
             let mut msg_count = 0usize;
+            let mut batch = Vec::with_capacity(session.messages.len());
             for parsed in &session.messages {
                 // 按发送者决定使用哪个 persona_uid
                 let persona_for_msg = if parsed.sender_uid == self_uid {
@@ -103,7 +104,7 @@ impl QqImporter {
                     other_persona_uid
                 };
 
-                let msg = ramaria_core::types::Message {
+                batch.push(ramaria_core::types::Message {
                     id: ramaria_core::types::new_id(),
                     session_id: db_session.id,
                     role: if parsed.role == "user" {
@@ -116,17 +117,17 @@ impl QqImporter {
                     source: ramaria_core::types::MessageSource::Local,
                     fingerprint: Some(parsed.fingerprint.clone()),
                     persona_uid: Some(persona_for_msg.to_string()),
-                };
-
-                ramaria_storage::repo::messages::save_import(pool, &msg)
-                    .await
-                    .map_err(|e| {
-                        tracing::error!(msg_id = %msg.id, error = %e, "写入导入消息失败");
-                        e
-                    })?;
-
-                msg_count += 1;
+                });
             }
+
+            // 单事务批量写入（替代逐条 INSERT，显著降低大文件导入的 fsync 开销）
+            let written = ramaria_storage::repo::messages::save_import_batch(pool, &batch)
+                .await
+                .map_err(|e| {
+                    tracing::error!(session_id = %db_session.id, error = %e, "批量写入导入消息失败");
+                    e
+                })?;
+            msg_count += written;
 
             session_ids.push(db_session.id);
             sessions_written += 1;
@@ -186,7 +187,7 @@ impl ImportSource for QqImporter {
 ///
 /// 职责:
 /// - 为 QQ 导入的双方画像生成简洁、可辨识的 UID。
-/// - 避免使用过于冗长的 QQ 内部 UID（如 `char-u_RSOI7gG2LaRiP64W8ayLDA`）。
+/// - 避免使用过于冗长的 QQ 内部 UID（如 `char-u_example_uid`）。
 ///
 /// 4 级优先级（从高到低）:
 /// 1. **用户显式指定** — `user_provided_uid` 非空时使用；若不以 `char-` 开头则自动补全。
@@ -233,7 +234,7 @@ pub fn build_persona_uid(
         return uid_str;
     }
 
-    // 级别 3: QQ 内部 UID（如 `char-u_RSOI7gG2LaRiP64W8ayLDA`）
+    // 级别 3: QQ 内部 UID（如 `char-u_example_uid`）
     if !uid.is_empty() {
         let uid_str = format!("char-{uid}");
         tracing::debug!(uid = %uid_str, "使用 QQ UID 生成 persona UID");

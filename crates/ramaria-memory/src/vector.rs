@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/vector.rs — 向量检索引擎封装
+//! crates/ramaria-memory/src/vector.rs — 向量检索引擎封装
 //!
 //! 设计特点:
 //! - 定义 `VectorIndex` trait：统一的向量存储与检索接口
@@ -28,6 +28,7 @@ pub struct VectorEntry {
     pub doc_label: String,
     /// 时间衰减因子 R（0.0..1.0），用于调整检索距离
     /// distance_adjusted = cosine_distance / max(R, 0.1)
+    /// v1.6 向量通道决策联动（D-26-01）定夺
     pub retention: f64,
     /// 创建/更新时间（Unix 毫秒），用于时间衰减计算
     pub created_at: i64,
@@ -184,28 +185,12 @@ impl BruteForceIndex {
     ///
     /// 公式: cos(a,b) = (a·b) / (||a||·||b||)
     ///
-    /// 返回 0.0..1.0 之间的值。
+    /// 说明（v1.5 收敛）:
+    /// - 实现统一收敛到 `crate::similarity::cosine_similarity`，本函数为薄包装。
+    /// - 统一实现返回 [-1.0, 1.0]；本模块在 `search()` 调用处以 `.max(0.0)`
+    ///   保持原 [0.0, 1.0] 语义（负相关视为 0，不惩罚）。
     fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
-        debug_assert_eq!(a.len(), b.len(), "向量维度必须一致");
-
-        let mut dot = 0.0_f64;
-        let mut norm_a = 0.0_f64;
-        let mut norm_b = 0.0_f64;
-
-        for i in 0..a.len() {
-            let ai = a[i] as f64;
-            let bi = b[i] as f64;
-            dot += ai * bi;
-            norm_a += ai * ai;
-            norm_b += bi * bi;
-        }
-
-        let denom = (norm_a * norm_b).sqrt();
-        if denom < 1e-12 {
-            0.0 // 零向量
-        } else {
-            (dot / denom).clamp(0.0, 1.0)
-        }
+        crate::similarity::cosine_similarity(a, b)
     }
 }
 
@@ -268,7 +253,8 @@ impl VectorIndex for BruteForceIndex {
             .entries
             .values()
             .map(|entry| {
-                let similarity = Self::cosine_similarity(query, &entry.vector);
+                // 统一实现返回 [-1,1]，此处保持原 [0,1] 语义（负相关视为 0，不惩罚）
+                let similarity = Self::cosine_similarity(query, &entry.vector).max(0.0);
                 let adjusted = similarity * entry.retention;
                 VectorHit {
                     doc_label: entry.doc_label.clone(),
@@ -327,6 +313,8 @@ impl VectorIndex for BruteForceIndex {
 /// - 对查询向量做量化哈希（float → u8 → u64），容忍微小浮点差异
 /// - 缓存未命中 → 执行底层检索后存入缓存（使用 RefCell 实现 search(&self) 内部可变）
 /// - 索引变更（add/remove/clear）时清空全部缓存
+///
+/// 预留给 v1.6 向量通道（见 docs/dev-1.6/备忘.md D-26-01）；当前实现为 FIFO 非 LRU，接线前需修正
 #[derive(Debug, Clone)]
 pub struct VectorCacheConfig {
     /// 最大缓存条目数（默认 128）
@@ -364,6 +352,8 @@ type CacheEntries = Vec<(u64, usize, u64, Vec<VectorHit>)>;
 /// - `top_k` 和 `min_similarity` 是 key 的一部分——不同参数不会误命中
 /// - 使用 `std::sync::Mutex` 替代 RefCell 以满足 `VectorIndex: Send + Sync` 约束
 /// - MutexGuard 仅在同线程内短期持有，不跨 .await，不会死锁
+///
+/// 预留给 v1.6 向量通道（见 docs/dev-1.6/备忘.md D-26-01）；当前实现为 FIFO 非 LRU，接线前需修正
 #[derive(Debug)]
 pub struct CachedVectorIndex<I: VectorIndex> {
     /// 底层索引实现
@@ -696,20 +686,6 @@ mod tests {
         assert!(hits.iter().any(|h| h.doc_label == "a"));
         // "b" 相似度低，应被过滤
         assert!(hits.iter().all(|h| h.doc_label == "a"));
-    }
-
-    /// BruteForceIndex::cosine_similarity 各输入参数化验证。
-    #[test]
-    fn cosine_similarity_cases() {
-        let cases: Vec<(Vec<f32>, Vec<f32>, f64)> = vec![
-            (vec![1.0, 2.0, 3.0], vec![1.0, 2.0, 3.0], 1.0), // 相同向量
-            (vec![1.0, 0.0], vec![0.0, 1.0], 0.0),           // 正交
-            (vec![0.0, 0.0], vec![1.0, 0.0], 0.0),           // 零向量
-        ];
-        for (a, b, expected) in cases {
-            let sim = BruteForceIndex::cosine_similarity(&a, &b);
-            assert!((sim - expected).abs() < 0.0001, "期望 {expected}");
-        }
     }
 
     // ---- label utilities ----

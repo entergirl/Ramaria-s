@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-desktop/src/commands/mod.rs - Tauri Commands 模块入口
+//! crates/ramaria-desktop/src/commands/mod.rs - Tauri Commands 模块入口
 //!
 //! 设计特点:
 //! - 聚合所有 Tauri Command 子模块

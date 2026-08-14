@@ -245,12 +245,12 @@ var RamariaPersonaView = (function () {
                 '<div class="persona-card-icon" aria-hidden="true">' + _personaIcon(p.kind) + '</div>' +
                 '<div class="persona-card-meta">' +
                     '<div class="persona-card-name">' +
-                        _escapeHtml(p.name) +
+                        RamariaEscape.escapeHtml(p.name) +
                         (isDefault ? ' <span class="persona-card-badge-default" title="默认对话人格">⭐</span>' : '') +
                     '</div>' +
                     '<div class="persona-card-kind">' +
                         '<span class="persona-tag persona-tag--' + p.kind + '">' + kindLabel + '</span>' +
-                        '<span class="persona-card-source">' + _escapeHtml(p.source) + '</span>' +
+                        '<span class="persona-card-source">' + RamariaEscape.escapeHtml(p.source) + '</span>' +
                     '</div>' +
                 '</div>' +
             '</div>' +
@@ -415,10 +415,10 @@ var RamariaPersonaView = (function () {
         meta.className = 'persona-detail-meta';
         meta.innerHTML =
             '<div class="persona-meta-grid">' +
-                '<div class="persona-meta-item"><span class="persona-meta-label">UID</span><span class="persona-meta-value">' + _escapeHtml(p.uid) + '</span></div>' +
+                '<div class="persona-meta-item"><span class="persona-meta-label">UID</span><span class="persona-meta-value">' + RamariaEscape.escapeHtml(p.uid) + '</span></div>' +
                 '<div class="persona-meta-item"><span class="persona-meta-label">类型</span><span class="persona-meta-value">' + _kindLabel(p.kind) + '</span></div>' +
-                '<div class="persona-meta-item"><span class="persona-meta-label">来源</span><span class="persona-meta-value">' + _escapeHtml(p.source) + '</span></div>' +
-                '<div class="persona-meta-item"><span class="persona-meta-label">来源ID</span><span class="persona-meta-value">' + (p.ref_id ? _escapeHtml(p.ref_id) : '—') + '</span></div>' +
+                '<div class="persona-meta-item"><span class="persona-meta-label">来源</span><span class="persona-meta-value">' + RamariaEscape.escapeHtml(p.source) + '</span></div>' +
+                '<div class="persona-meta-item"><span class="persona-meta-label">来源ID</span><span class="persona-meta-value">' + (p.ref_id ? RamariaEscape.escapeHtml(p.ref_id) : '—') + '</span></div>' +
                 '<div class="persona-meta-item"><span class="persona-meta-label">创建时间</span><span class="persona-meta-value">' + _formatTime(p.created_at) + '</span></div>' +
                 '<div class="persona-meta-item"><span class="persona-meta-label">更新时间</span><span class="persona-meta-value">' + _formatTime(p.updated_at) + '</span></div>' +
             '</div>';
@@ -720,7 +720,7 @@ var RamariaPersonaView = (function () {
         div.innerHTML =
             '<div class="persona-error-icon" aria-hidden="true">⚠️</div>' +
             '<h3 class="persona-error-title">加载失败</h3>' +
-            '<p class="persona-error-desc">' + _escapeHtml(message) + '</p>' +
+            '<p class="persona-error-desc">' + RamariaEscape.escapeHtml(message) + '</p>' +
             '<button class="btn btn-primary btn-sm persona-error-retry">重试</button>';
         div.querySelector('.persona-error-retry').addEventListener('click', function () {
             _loadAndRender();
@@ -774,19 +774,6 @@ var RamariaPersonaView = (function () {
             'hist': '📜',
         };
         return map[kind] || '👤';
-    }
-
- /**
- * 简单 HTML 转义（防 XSS）。
- */
-    function _escapeHtml(str) {
-        if (!str) return '';
-        return str
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;')
-            .replace(/'/g, '&#39;');
     }
 
  // =========================================================

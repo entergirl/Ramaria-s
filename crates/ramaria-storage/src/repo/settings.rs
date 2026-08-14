@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-storage/src/repo/settings.rs - 全局运行配置存取模块
+//! crates/ramaria-storage/src/repo/settings.rs - 全局运行配置存取模块
 //!
 //! 设计特点:
 //! - key-value 结构，value 统一存储为 TEXT

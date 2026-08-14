@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-core/src/config.rs - Ramaria 应用配置类型模块
+//! crates/ramaria-core/src/config.rs - Ramaria 应用配置类型模块
 //!
 //! 设计特点:
 //! - 按职责拆分配置域: 路径、后端、检索、衰减、Session、索引、日志、隐私
@@ -114,7 +114,7 @@ pub struct RamariaConfig {
     #[serde(default)]
     pub bridge: BridgeConfig,
 
-    /// 三层生成缓存（v1.5 新增，D-V15-008）
+    /// 三层生成缓存（v1.5 新增，默认开启，见 docs/dev-1.5/v1.5-decisions.md）
     #[serde(default)]
     pub cache: CacheConfig,
 
@@ -760,14 +760,13 @@ pub struct UttConfig {
     /// `false` 时行为回退 v1.3（不注入原文片段）。
     pub enabled: bool,
     /// 时间间隙阈值（分钟）：相邻消息间隔超过此值切分为新块。
-    /// v1.5 探针定稿（T-V15-2-003）：档位对比后写入定稿值并标注依据，
-    /// 见 `docs/dev-1.5/v1.5-probe-report.md`。
+    /// 档位经 v1.5 探针对比定稿，依据 `docs/dev-1.5/v1.5-probe-report.md`。
     pub theta_gap_minutes: u32,
     /// 单块最大消息条数：超过此条数强制切分。
-    /// v1.5 探针定稿（T-V15-2-003）：档位对比后写入定稿值并标注依据。
+    /// 档位经 v1.5 探针对比定稿，依据 `docs/dev-1.5/v1.5-probe-report.md`。
     pub max_msgs_per_block: u32,
     /// 对话时检索返回的 utt 块数量（top_k）。
-    /// v1.5 探针定稿（T-V15-2-003）：档位对比后写入定稿值并标注依据。
+    /// 档位经 v1.5 探针对比定稿，依据 `docs/dev-1.5/v1.5-probe-report.md`。
     pub retrieve_top_k: u32,
     /// 原文片段注入的字符预算上限（所有块合计）。
     /// 超预算时按相似度从低到高丢弃整块，不做块内截断。
@@ -877,7 +876,7 @@ impl Default for BridgeConfig {
 }
 
 // =========================================================
-// 缓存配置（v1.5 新增，三层生成缓存 C，D-V15-008/010）
+// 缓存配置（v1.5 新增，三层生成缓存 C，见 docs/dev-1.5/v1.5-decisions.md）
 // =========================================================
 
 /// 缓存淘汰策略。
@@ -939,7 +938,7 @@ impl Default for CacheConfig {
     /// 创建默认缓存配置。
     ///
     /// 返回:
-    /// - 精确缓存默认开启（D-V15-008：默认开启），容量 10000 条，LRU 淘汰。
+    /// - 精确缓存默认开启（见 docs/dev-1.5/v1.5-decisions.md），容量 10000 条，LRU 淘汰。
     /// - L2 指纹默认开启，相似度阈值 0.95，比对最近 200 条事件。
     fn default() -> Self {
         Self {
@@ -960,10 +959,10 @@ impl Default for CacheConfig {
 /// 行为模型学习与驱动配置（`[behavior]` 配置组，v1.5 M5 新增）。
 ///
 /// 职责:
-/// - 集中管理行为层全链路参数：聚类（D2）、规则生成（D4）、情境路由（D5）、增量更新（D6）。
+/// - 集中管理行为层全链路参数：聚类与规则生成（算法说明书 v3.1 §4.2）、情境路由（§4.3）、增量更新（§4.4）。
 /// - `enabled=false` 时行为层全链路关闭（不学习/不路由），行为回退 v1.4。
 ///
-/// 降级链（D-V15-013，D-P 摸底延后至 v1.6）:
+/// 降级链（参数摸底延后至 v1.6，决策见 docs/dev-1.5/v1.5-decisions.md）:
 /// - 聚类参数（θ_nb / min_cluster_size / θ_join / β1 / β2）按 v3.1 初值推进，
 ///   全部标注「待实证」——v1.6 探针工具链定稿后回填，参数不可用时回退本默认值。
 /// - embedding 不可用 → 双通道向量通道关闭，退化为纯关键词 Jaccard 通道（β=0）。

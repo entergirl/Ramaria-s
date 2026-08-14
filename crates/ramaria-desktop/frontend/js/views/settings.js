@@ -44,24 +44,6 @@ var RamariaSettingsView = (function () {
 
     function $(id) { return document.getElementById(id); }
 
-    /**
-     * HTML 转义（v1.5 M6 安全修复）。
-     *
-     * 用于"检查更新"等渲染远程/外部数据的场景：先转义再拼 innerHTML，
-     * 防止 GitHub release 等外部内容注入 HTML（CSP 严格模式可阻断脚本执行，
-     * 但注入的标签/样式仍会造成页面破坏，转义为根本修复）。
-     * 属性值转义 `"`（href 等）与 `'`，文本转义 `<`/`>`/`&`。
-     */
-    function _escapeHtml(str) {
-        if (str == null) return '';
-        return String(str)
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;')
-            .replace(/'/g, '&#39;');
-    }
-
  // =========================================================
  // 渲染
  // =========================================================
@@ -79,7 +61,7 @@ var RamariaSettingsView = (function () {
         scroll.className = 'settings-scroll';
         viewEl.appendChild(scroll);
 
- // ── v1.4 M6（T-V14-6-005）：基础/高级两级 Tab 框架 ──
+ // ── v1.4 M6：基础/高级两级 Tab 框架 ──
         var tabs = document.createElement('div');
         tabs.className = 'settings-tabs';
         tabs.innerHTML =
@@ -97,7 +79,7 @@ var RamariaSettingsView = (function () {
         advancedPane.id = 'settings-pane-advanced';
         scroll.appendChild(advancedPane);
 
- // ── 基础设置（面向日常用户，T-V14-6-005）──
+ // ── 基础设置（面向日常用户）──
         _renderBackendSection(basicPane);
         _renderEmbeddingSection(basicPane);
         _renderMemoryInjectionSection(basicPane);
@@ -108,7 +90,7 @@ var RamariaSettingsView = (function () {
         _renderDiagnosticsSection(basicPane);
         _renderAboutSection(basicPane);
 
- // ── 高级设置（面向进阶用户与排障，T-V14-6-006）──
+ // ── 高级设置（面向进阶用户与排障）──
         _renderAdvancedSection(advancedPane);
 
  // ── Tab 切换绑定 ──
@@ -335,7 +317,7 @@ var RamariaSettingsView = (function () {
     }
 
  // =========================================================
- // 记忆注入开关区块（v1.4 M6，T-V14-6-005 基础设置）
+ // 记忆注入开关区块（v1.4 M6 基础设置）
  // =========================================================
 
     function _renderMemoryInjectionSection(parent) {
@@ -402,7 +384,7 @@ var RamariaSettingsView = (function () {
     }
 
  // =========================================================
- // 数据目录区块（v1.4 M6，T-V14-6-005 基础设置）
+ // 数据目录区块（v1.4 M6 基础设置）
  // =========================================================
 
     function _renderDataDirSection(parent) {
@@ -1057,7 +1039,7 @@ var RamariaSettingsView = (function () {
                 if (detailEl) detailEl.classList.remove('hidden');
                 if (msgEl) {
                     // 多行错误消息转为带换行的 HTML（v1.5 M6：先转义再拼接，防注入）
-                    msgEl.innerHTML = _escapeHtml(result.error).replace(/\n/g, '<br>');
+                    msgEl.innerHTML = RamariaEscape.escapeHtml(result.error).replace(/\n/g, '<br>');
                 }
                 // Toast 只显示首行摘要
                 var firstLine = result.error.split('\n')[0];
@@ -1072,14 +1054,14 @@ var RamariaSettingsView = (function () {
                 if (msgEl) {
                     // v1.5 M6 安全修复：latestVersion/releaseUrl/releaseNotesPreview
                     // 均来自 GitHub API（远程内容），先转义再拼 HTML（href 属性同样转义）
-                    var releaseHtml = '发现新版本: <strong>' + _escapeHtml(result.latestVersion || '?') + '</strong>';
+                    var releaseHtml = '发现新版本: <strong>' + RamariaEscape.escapeHtml(result.latestVersion || '?') + '</strong>';
                     if (result.releaseUrl) {
-                        releaseHtml += ' — <a href="' + _escapeHtml(result.releaseUrl) +
+                        releaseHtml += ' — <a href="' + RamariaEscape.escapeHtml(result.releaseUrl) +
                             '" target="_blank" rel="noopener" class="settings-about-link">前往下载</a>';
                     }
                     if (result.releaseNotesPreview) {
                         releaseHtml += '<br><small class="text-tertiary">' +
-                            _escapeHtml(result.releaseNotesPreview).replace(/\n/g, '<br>') + '</small>';
+                            RamariaEscape.escapeHtml(result.releaseNotesPreview).replace(/\n/g, '<br>') + '</small>';
                     }
                     msgEl.innerHTML = releaseHtml;
                 }
@@ -1102,7 +1084,7 @@ var RamariaSettingsView = (function () {
             if (detailEl) detailEl.classList.remove('hidden');
             if (msgEl) {
                 var errText = err.message || '未知错误';
-                msgEl.innerHTML = _escapeHtml(errText).replace(/\n/g, '<br>');
+                msgEl.innerHTML = RamariaEscape.escapeHtml(errText).replace(/\n/g, '<br>');
             }
             RamariaToast.show('error', '检查更新失败', (err.message || '未知错误').split('\n')[0]);
         } finally {
@@ -1194,7 +1176,7 @@ var RamariaSettingsView = (function () {
     }
 
  // =========================================================
- // 高级设置（v1.4 M6，T-V14-6-006）
+ // 高级设置（v1.4 M6）
  // =========================================================
 
     /**
@@ -1460,7 +1442,7 @@ var RamariaSettingsView = (function () {
             }
         }
 
-        // log_full_prompt 开启需显式隐私确认（T-V14-6-006）
+        // log_full_prompt 开启需显式隐私确认
         var logBox = $('settings-adv-logging-log_full_prompt');
         if (logBox) {
             logBox.addEventListener('change', function () {
@@ -1626,7 +1608,8 @@ var RamariaSettingsView = (function () {
     }
 
     /**
-     * 统一处理 updateFull 双写结果（决策 D-V14-006：单侧写失败降级不阻塞，但需明确提示）。
+     * 统一处理 updateFull 双写结果（单侧写失败降级不阻塞，但需明确提示；
+     * 决策记录见 docs/dev-1.5/v1.5-decisions.md）。
      *
      * 返回:
      * - `true`: 至少一侧生效（含单侧失败降级提示）。

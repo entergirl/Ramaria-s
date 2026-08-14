@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-llm/src/embedding/models/mod.rs - 嵌入模型架构检测与路由
+//! crates/ramaria-llm/src/embedding/models/mod.rs - 嵌入模型架构检测与路由
 //!
 //! 设计特点:
 //! - 从 HuggingFace `config.json` 自动检测模型架构（BERT / LLaMA / Qwen2）

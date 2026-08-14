@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/l1/prompt.rs - L1 摘要 Prompt 模板管理
+//! crates/ramaria-memory/src/l1/prompt.rs - L1 摘要 Prompt 模板管理
 //!
 //! 设计特点:
 //! - 基础模板 + 关键词候选注入两个变体
@@ -13,7 +13,7 @@
 
 /// L1 摘要基础 Prompt —— emotion-only 版本。
 ///
-/// v2.0 重构 (CRAFT 框架):
+/// CRAFT 框架:
 /// - Context: 明确任务背景（对话摘要供记忆系统检索聚合）。
 /// - Role: 客观第三方视角，离散值约束。
 /// - Action: 8 字段任务描述。
@@ -231,7 +231,7 @@ pub const L1_SUMMARY_PROMPT_WITH_KEYWORDS_AND_PRIOR: &str = r#"# Context（背�
 // L1 摘要 Prompt（含关键词候选注入）
 // =========================================================/// L1 摘要 Prompt —— emotion + keyword injection 版本。
 ///
-/// v2.0 重构 (CRAFT 框架): 与基础版共享相同的 CRAFT 结构，
+/// CRAFT 框架: 与基础版共享相同的 CRAFT 结构，
 /// 仅在 Action > keywords 字段末尾注入关键词候选列表，
 /// 并在 Target 中增加"优先使用候选列表中的词"的引导。
 ///
@@ -440,7 +440,7 @@ mod tests {
         );
     }
 
-    /// v1.4 M4（T-V14-4-001）：两条模板均须输出结构化对象数组
+    /// 两条模板均须输出结构化对象数组
     /// `[{text, time?, who?, cause?}]`，含槽位说明与 JSON 示例。
     #[test]
     fn both_templates_use_structured_object_array() {
@@ -485,7 +485,7 @@ mod tests {
     }
 
     // =========================================================
-    // v1.5 M4（T-V15-4-001）上下文感知模板测试
+    // 上下文感知模板测试
     // =========================================================
 
     /// 注入上文 → 使用上下文感知模板（含 prior_context 段落与 continuation 字段）。

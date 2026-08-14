@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/rrf.rs - Ramaria RRF 多通道融合模块
+//! crates/ramaria-memory/src/rrf.rs - Ramaria RRF 多通道融合模块
 //!
 //! 设计特点:
 //! - 实现标准 Reciprocal Rank Fusion (RRF) 融合算法

@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/inference/mod.rs - L2→L3 性格推断管线模块
+//! crates/ramaria-memory/src/inference/mod.rs - L2→L3 性格推断管线模块
 //!
 //! 设计特点:
 //! - (纯数值): stats.rs 统计特征（校准权重链）、clustering.rs 态度聚类、shrink.rs 贝叶斯收缩
@@ -59,8 +59,8 @@ pub use orchestrator::{
 };
 pub use shrink::{
     ShrinkConfig, ShrinkPrior, compute_domain_prior, compute_dynamic_gamma, compute_global_stats,
-    logit, run_shrinkage, run_shrinkage_layered, select_prior, shrink_category,
-    shrink_presentation, shrink_share, shrink_valence, sigmoid,
+    logit, run_shrinkage_layered, shrink_category, shrink_presentation, shrink_share,
+    shrink_valence, sigmoid,
 };
 pub use stats::{
     AdmissionTrack, CalibratedWeightConfig, CategoryStats, ClassifiedEvents, CrossCategoryMetrics,

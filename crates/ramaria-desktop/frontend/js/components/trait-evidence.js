@@ -94,7 +94,7 @@ var RamariaTraitEvidence = (function () {
             '<div class="tev-empty">' +
                 '<div class="tev-empty-icon">📋</div>' +
                 '<div class="tev-empty-text">' +
-                    '「' + _escapeHtml(traitLabel) + '」暂无证据记录<br>' +
+                    '「' + RamariaEscape.escapeHtml(traitLabel) + '」暂无证据记录<br>' +
                     '<small>积累更多对话后，事件提取将自动关联证据</small>' +
                 '</div>' +
             '</div>';
@@ -108,7 +108,7 @@ var RamariaTraitEvidence = (function () {
         container.innerHTML =
             '<div class="tev-empty">' +
                 '<div class="tev-empty-icon">⚠</div>' +
-                '<div class="tev-empty-text">证据链加载失败<br><small>' + _escapeHtml(msg) + '</small></div>' +
+                '<div class="tev-empty-text">证据链加载失败<br><small>' + RamariaEscape.escapeHtml(msg) + '</small></div>' +
             '</div>';
     }
 
@@ -122,7 +122,7 @@ var RamariaTraitEvidence = (function () {
 
         // 头部统计
         html += '<div class="tev-header">';
-        html += '<span class="tev-header-title">证据链: 「' + _escapeHtml(traitLabel) + '」</span>';
+        html += '<span class="tev-header-title">证据链: 「' + RamariaEscape.escapeHtml(traitLabel) + '」</span>';
         html += '<span class="tev-header-stats">';
         if (chain.support_count > 0) {
             html += '<span class="tev-stat tev-stat--support">✓ ' + chain.support_count + ' 支持</span>';
@@ -165,7 +165,7 @@ var RamariaTraitEvidence = (function () {
         var confClass = _confidenceClass(ev.confidence);
         var confPct = ev.confidence != null ? Math.round(ev.confidence * 100) : 0;
         var motivesHtml = ev.motives
-            ? '<span class="tev-ev-motives">🎯 ' + _escapeHtml(ev.motives) + '</span>'
+            ? '<span class="tev-ev-motives">🎯 ' + RamariaEscape.escapeHtml(ev.motives) + '</span>'
             : '';
 
         var html = '';
@@ -175,16 +175,16 @@ var RamariaTraitEvidence = (function () {
         html += '<div class="tev-event-header">';
         html += '<span class="tev-event-expand-icon" id="tev-expand-icon-' + index + '">▶</span>';
         html += '<span class="tev-event-index">#' + (index + 1) + '</span>';
-        html += '<span class="tev-event-title">' + _escapeHtml(ev.title || '(无标题)') + '</span>';
+        html += '<span class="tev-event-title">' + RamariaEscape.escapeHtml(ev.title || '(无标题)') + '</span>';
         html += '<span class="tev-ev-badges">';
         html += '<span class="tev-ev-badge tev-conf-badge ' + confClass + '">' + confPct + '%</span>';
         if (ev.attitude) {
-            html += '<span class="tev-ev-badge tev-att-badge">' + _escapeHtml(ev.attitude) + '</span>';
+            html += '<span class="tev-ev-badge tev-att-badge">' + RamariaEscape.escapeHtml(ev.attitude) + '</span>';
         }
         html += '</span></div>';
 
         // 事件摘要
-        html += '<div class="tev-event-summary">' + _escapeHtml(ev.summary || '') + '</div>';
+        html += '<div class="tev-event-summary">' + RamariaEscape.escapeHtml(ev.summary || '') + '</div>';
 
         if (motivesHtml) {
             html += motivesHtml;
@@ -198,7 +198,7 @@ var RamariaTraitEvidence = (function () {
         html += '<span class="tev-signal">效价: ' + (ev.valence != null ? ev.valence.toFixed(2) : '-') + '</span>';
         html += '<span class="tev-signal">显著性: ' + (ev.salience != null ? ev.salience.toFixed(2) : '-') + '</span>';
         if (ev.paraphrase) {
-            html += '<span class="tev-signal tev-signal--wide">重述: ' + _escapeHtml(ev.paraphrase) + '</span>';
+            html += '<span class="tev-signal tev-signal--wide">重述: ' + RamariaEscape.escapeHtml(ev.paraphrase) + '</span>';
         }
         html += '</div>';
 
@@ -233,13 +233,13 @@ var RamariaTraitEvidence = (function () {
         html += '<div class="tev-l1-item">';
         html += '<div class="tev-l1-header" data-expand="' + detailId + '">';
         html += '<span class="tev-l1-expand-icon" id="' + iconId + '">▶</span>';
-        html += '<span class="tev-l1-summary">' + _escapeHtml(_truncate(src.summary, 80)) + '</span>';
+        html += '<span class="tev-l1-summary">' + RamariaEscape.escapeHtml(_truncate(src.summary, 80)) + '</span>';
         html += '<span class="tev-l1-meta">权重: ' + (src.weight != null ? src.weight.toFixed(2) : '-') + '</span>';
         html += '</div>';
 
         // 可展开详情节: 完整摘要 + evidence_notes（初始隐藏由 CSSOM 统一设置）
         html += '<div class="tev-l1-detail" id="' + detailId + '">';
-        html += '<div class="tev-l1-full-summary">' + _escapeHtml(src.summary) + '</div>';
+        html += '<div class="tev-l1-full-summary">' + RamariaEscape.escapeHtml(src.summary) + '</div>';
 
         if (src.evidence_notes && src.evidence_notes.length > 0) {
             html += '<div class="tev-evidence-notes">';
@@ -248,7 +248,7 @@ var RamariaTraitEvidence = (function () {
             for (var k = 0; k < src.evidence_notes.length; k++) {
                 var note = src.evidence_notes[k];
                 if (note && note.trim().length > 0) {
-                    html += '<li>' + _escapeHtml(note) + '</li>';
+                    html += '<li>' + RamariaEscape.escapeHtml(note) + '</li>';
                 }
             }
             html += '</ul></div>';
@@ -316,17 +316,6 @@ var RamariaTraitEvidence = (function () {
 // =========================================================
 // 辅助函数
 // =========================================================
-
-    /** HTML 转义 */
-    function _escapeHtml(str) {
-        if (!str) return '';
-        return String(str)
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;')
-            .replace(/'/g, '&#39;');
-    }
 
     /** 截断文本 */
     function _truncate(str, maxLen) {

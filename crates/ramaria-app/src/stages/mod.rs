@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/src/stages/mod.rs - Stage 模块入口
+//! crates/ramaria-app/src/stages/mod.rs - Stage 模块入口
 //!
 //! 设计特点:
 //! - 管理全部 10 个 Pipeline Stage 的模块声明与 re-export

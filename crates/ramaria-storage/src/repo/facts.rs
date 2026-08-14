@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-storage/src/repo/facts.rs - PersonaFact CRUD
+//! crates/ramaria-storage/src/repo/facts.rs - PersonaFact CRUD
 //!
 //! 设计特点:
 //! - 管理原子化人物事实（替代旧 user_profile 表）

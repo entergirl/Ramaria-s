@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/inference/causal.rs - A8 因果链特征提取
+//! crates/ramaria-memory/src/inference/causal.rs - A8 因果链特征提取
 //!
 //! 设计特点:
 //! - 从 event_relations 表（CausedBy 关系）构建有向图，DFS 计算最长因果路径

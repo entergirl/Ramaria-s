@@ -2,11 +2,11 @@
 //!
 //! 设计特点:
 //! - clap derive 模式定义命令结构，全局 --json / --yes / --quiet / --db 对所有命令可用
-//! - 全局 --json：统一信封 `{"ok":true,"data":…}` / `{"ok":false,"error":{"code":…,"message":"…"}}`（D-V15-011）
+//! - 全局 --json：统一信封 `{"ok":true,"data":…}` / `{"ok":false,"error":{"code":…,"message":"…"}}`（统一信封 schema，见 docs/dev-1.5/v1.5-decisions.md §D-V15-011）
 //! - stdout 只输出数据；状态/提示/警告走 stderr（ui::info/success/warn 已改 eprintln）
 //! - exit code 约定：0 成功 / 2 参数错(clap) / 3 LLM 或后端不可用 / 4 业务校验失败
 //! - `ramaria help` 按 对话/记忆/数据/管理/高级 分组（subcommand_help_heading）
-//! - blocks 为 canonical 命令名，utt 保留为 alias（D-V15-007）
+//! - blocks 为 canonical 命令名，utt 保留为 alias（人性化别名决策，见 docs/dev-1.5/v1.5-decisions.md §D-V15-007）
 //! - App 统一初始化（DB → storage → LLM → App）
 
 // 命令模块通过 lib.rs 暴露（pub mod），以供集成测试使用
@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 // =========================================================
-// CLI 参数定义 (T-CLI-001)
+// CLI 参数定义
 // =========================================================
 
 /// Ramaria — 带记忆能力的 AI 助手 CLI
@@ -244,7 +244,7 @@ enum BlocksCmd {
     },
 }
 
-/// 探针子命令（build 的旧名 `dataset` 保留为 alias，D-V15-007 动词化决策）。
+/// 探针子命令（build 的旧名 `dataset` 保留为 alias，人性化别名决策，见 docs/dev-1.5/v1.5-decisions.md §D-V15-007）。
 #[derive(Subcommand)]
 enum ProbeArgs {
     /// 构建测试集（原 `probe dataset`，动词化后保留 alias）
@@ -482,7 +482,7 @@ fn grouped_command() -> clap::Command {
 }
 
 // =========================================================
-// 错误处理与 exit code 约定（D-V15-011）
+// 错误处理与 exit code 约定（见 docs/dev-1.5/v1.5-decisions.md §D-V15-011）
 // =========================================================
 
 /// 将错误映射为 exit code（0 成功 / 2 参数错(clap) / 3 LLM 或后端不可用 / 4 业务校验失败）。
@@ -563,7 +563,7 @@ async fn init_app(db_path: PathBuf) -> anyhow::Result<(Arc<ramaria_app::App>, sq
     config.paths.config_dir = data_dir.to_string_lossy().to_string();
     config.paths.vector_index_dir = data_dir.join("vectors").to_string_lossy().to_string();
 
-    // Step 5: 创建 LLM Provider（按 [cache] 配置注入精确缓存，v1.5 C，D-V15-008）
+    // Step 5: 创建 LLM Provider（按 [cache] 配置注入精确缓存，见 docs/dev-1.5/v1.5-decisions.md §D-V15-008）
     //
     // - `config.cache.enabled`（默认 true）：创建 SqliteLlmCache 并注入 provider，
     //   重跑导入/重试/失败恢复场景命中缓存不重复花费 API 账单；
@@ -655,7 +655,7 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
         } => {
             let msg = message.join(" ");
             if msg.trim().is_empty() {
-                // 业务校验失败（D-V15-011: exit code 4）
+                // 业务校验失败（exit code 4，见 docs/dev-1.5/v1.5-decisions.md §D-V15-011）
                 return Err(anyhow::anyhow!(RamariaError::validation(
                     "消息不能为空。用法: ramaria ask <消息>"
                 )));
@@ -779,6 +779,7 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
                 format,
                 persona,
                 output,
+                json: cli.json,
             };
             commands::export::run(app, args).await?;
         }

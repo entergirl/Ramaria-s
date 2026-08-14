@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-llm/src/embedding/onnx.rs - ONNX 嵌入模型 Provider
+//! crates/ramaria-llm/src/embedding/onnx.rs - ONNX 嵌入模型 Provider
 //!
 //! 设计特点:
 //! - 基于 `ort` (ONNX Runtime v2) 实现高效推理，支持 BGE/BERT 等嵌入模型
@@ -438,9 +438,10 @@ impl OnnxSession {
 /// - 线程安全：内部状态通过 `Mutex` 保护；`model_info` 构造时确定后不可变
 ///
 /// 用法:
+/// 需本机 ONNX 模型目录（`/path/to/bge-model` 为占位路径），示例仅示意，不参与编译。
 /// ```ignore
 /// let provider = OnnxEmbeddingProvider::new("/path/to/bge-model")?;
-/// if provider.is_available {
+/// if provider.is_available() {
 /// let vec = provider.embed("你好世界").await?;
 /// }
 /// ```

@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-core/src/traits.rs - Ramaria 核心能力抽象模块
+//! crates/ramaria-core/src/traits.rs - Ramaria 核心能力抽象模块
 //!
 //! 设计特点:
 //! - 定义三类核心边界: LLM Provider、Embedding Provider、Storage Backend
@@ -73,7 +73,7 @@ pub struct ChatRequest {
     pub max_tokens: u32,
     /// 请求标识，用于流式事件串联
     pub request_id: Uuid,
-    /// Prompt 模板版本（D-V15-010）。
+    /// Prompt 模板版本（参与精确缓存 key，变更需递增；决策见 docs/dev-1.5/v1.5-decisions.md）。
     ///
     /// 来源: `ramaria_memory::prompt::PROMPT_TEMPLATE_VERSION` 常量，
     /// 随 `prompt/builder.rs`/`layers.rs` 变更递增。
@@ -363,7 +363,7 @@ pub trait StorageBackend: Send + Sync {
     async fn list_sessions(&self) -> RamariaResult<Vec<Session>>;
     async fn delete_session(&self, session_id: Uuid) -> RamariaResult<()>;
 
-    /// 回写绑定会话的 persona_uid（存量 NULL 会话归属修复，P0-1）。
+    /// 回写绑定会话的 persona_uid（存量 NULL 会话归属修复）。
     ///
     /// 职责:
     /// - 会话创建时未绑定（`persona_uid=NULL`）的场景，在发送消息时
@@ -387,10 +387,6 @@ pub trait StorageBackend: Send + Sync {
     async fn list_messages(&self, session_id: Uuid) -> RamariaResult<Vec<Message>>;
     /// 按发言人查询消息（Persona-Aware RAG 的原话过滤）。
     async fn list_messages_by_persona(&self, persona_uid: &str) -> RamariaResult<Vec<Message>>;
-    async fn find_message_by_fingerprint(
-        &self,
-        fingerprint: &str,
-    ) -> RamariaResult<Option<Message>>;
 
     /// 按创建时间降序分页加载最近消息。
     ///
@@ -503,7 +499,7 @@ pub trait StorageBackend: Send + Sync {
 
     // -- Memory Events (L2 事件层, id: i64) --
     async fn save_event(&self, event: &MemoryEvent) -> RamariaResult<i64>;
-    /// 按 id 查询单条事件（证据链溯源用，v1.5 M5 D7）。
+    /// 按 id 查询单条事件（证据链溯源用，v1.5 M5，算法说明书 v3.1 §4.5）。
     ///
     /// 默认实现返回 `Ok(None)`（存量 mock 无需实现即可编译）。
     async fn get_event(&self, _id: i64) -> RamariaResult<Option<MemoryEvent>> {
@@ -693,11 +689,6 @@ pub trait StorageBackend: Send + Sync {
     // -- Keyword Pool --
     async fn upsert_keyword(&self, keyword: &str) -> RamariaResult<()>;
     async fn list_keywords(&self) -> RamariaResult<Vec<String>>;
-    /// 按 use_count DESC 返回所有关键词及其使用量。
-    async fn list_keyword_counts(&self) -> RamariaResult<Vec<(String, u32)>> {
-        let _ = self;
-        Ok(Vec::new()) // 默认空实现，保持向后兼容
-    }
 
     // -- Keyword Refs --
     /// 插入一条关键词引用记录。
@@ -762,6 +753,7 @@ pub trait StorageBackend: Send + Sync {
     async fn list_pending_jobs(&self) -> RamariaResult<Vec<(i64, String, Option<String>)>>;
 
     // -- Conflict Queue --
+    // 预留给 v1.6 知识层冲突仲裁（算法说明书 v3.1 §5.4）
     async fn create_conflict(
         &self,
         field: &str,
@@ -773,20 +765,10 @@ pub trait StorageBackend: Send + Sync {
     async fn list_pending_conflicts(&self) -> RamariaResult<Vec<(i64, String, String, String)>>;
     async fn resolve_conflict(&self, id: i64) -> RamariaResult<()>;
 
-    // -- Pending Push --
-    async fn create_push(&self, content: &str) -> RamariaResult<i64>;
-    async fn list_pending_pushes(&self) -> RamariaResult<Vec<(i64, String)>>;
-    async fn mark_push_sent(&self, id: i64) -> RamariaResult<()>;
-
     // -- Settings --
     async fn get_setting(&self, key: &str) -> RamariaResult<Option<String>>;
     async fn set_setting(&self, key: &str, value: &str) -> RamariaResult<()>;
     async fn list_settings(&self) -> RamariaResult<Vec<(String, String)>>;
-
-    // -- BM25 Index --
-    async fn save_bm25(&self, doc_id: i64, layer: &str, tokens_json: &str) -> RamariaResult<()>;
-    async fn list_bm25_by_doc(&self, doc_id: i64) -> RamariaResult<Vec<(String, String)>>;
-    async fn delete_bm25_by_doc(&self, doc_id: i64) -> RamariaResult<()>;
 
     // -- Graph --
     async fn insert_graph_node(
@@ -811,7 +793,7 @@ pub trait StorageBackend: Send + Sync {
     -> RamariaResult<Vec<(i64, i64, i64, String)>>;
 
     // =========================================================
-    // L2 聚类去重指纹（v1.5 三层生成缓存 C，T-V15-3-003）
+    // L2 聚类去重指纹（v1.5 三层生成缓存 C）
     // =========================================================
     //
     // 记录"已聚类且无产出"的 L1 集合指纹（SHA-256 集合指纹），
@@ -856,7 +838,7 @@ pub trait StorageBackend: Send + Sync {
     }
 
     // =========================================================
-    // 行为规则（v1.5 M5 D，算法说明书 v3.1 §4）
+    // 行为规则（v1.5 M5，算法说明书 v3.1 §4）
     // =========================================================
     //
     // behavior_rules 表 CRUD 与 enabled 过滤。默认实现返回 Unsupported / 空，
@@ -916,7 +898,7 @@ pub trait StorageBackend: Send + Sync {
     }
 
     // =========================================================
-    // 反馈日志（v1.5 M5 H1，v3.1 §9.4；S2/S3 v1.7 复用同表）
+    // 反馈日志（v1.5 M5，v3.1 §9.4；S2/S3 v1.7 复用同表）
     // =========================================================
 
     /// 写入一条反馈日志，返回自增 id。

@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/src/stages/persist_message.rs - Stage 10: 消息保存 + 流事件转发
+//! crates/ramaria-app/src/stages/persist_message.rs - Stage 10: 消息保存 + 流事件转发
 //!
 //! 设计特点:
 //! - `tokio::spawn` 后台任务转发 LLM 流事件 → `SendMessageStream`

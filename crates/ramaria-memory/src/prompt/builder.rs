@@ -1,6 +1,6 @@
-//! rust/crates/ramaria-memory/src/prompt/builder.rs - 四层 System Prompt 装配器
+//! crates/ramaria-memory/src/prompt/builder.rs - 四层 System Prompt 装配器
 //!
-//! v1.4 M6（T-V14-6-001）模板精简：由 v2.0 的 CRISPE 七段式对齐算法说明书
+//! 模板精简：由 v2.0 的 CRISPE 七段式对齐算法说明书
 //! v3.1 §8.2 的四层注入结构。段落命名与结构映射表（`TEMPLATE_LAYER_MAP`）：
 //!
 //! | v1.4 M6 段落（v3.1 §8.2） | 内容来源 | v1.3 CRISPE 对应块 |
@@ -14,8 +14,8 @@
 //! | `# 当前时间` | 时间/天气/上次活跃 | 当前语境 |
 //!
 //! 设计特点:
-//! - 空块自动跳过：行为槽位 v1.5 已填充（未命中/关闭不产生段落），知识槽位仍为空实现
-//!   （T-V14-6-003），不产生空段落。
+//! - 空块自动跳过：行为槽位 v1.5 已填充（未命中/关闭不产生段落），知识槽位仍为空实现，
+//!   不产生空段落。
 //! - 脉络层独立预算（v3.1 §8.3，≤ 30%），超限裁剪顺序：原文块 → 桥接头部
 //!   → 相关记忆 → 脉络保最近（预算分配器见 `layers.rs`）。
 //! - 回归红线：助手类 persona（原文白名单外）不注入原文/桥接，输出与 v1.3 语义等价。
@@ -23,7 +23,7 @@
 //! 依赖:
 //! - `ramaria_core::types`: Persona, PersonaFact, PersonalityTrait, PersonaExample
 //! - `ramaria_memory::rag`: RAG 上下文格式化（由上层传入）
-//! - `prompt::layers`: 四层注入结构与预算分配器（T-V14-6-002）
+//! - `prompt::layers`: 四层注入结构与预算分配器
 
 use crate::prompt::layers::{
     LayerBudgetConfig, allocate_memory_layer_budget, render_behavior_block, render_knowledge_block,
@@ -205,7 +205,7 @@ pub const LAYER_TEMPLATE: &str = "\
 
 {context_block}";
 
-/// 段落结构映射表（v1.4 M6 文档化产物，T-V14-6-001）。
+/// 段落结构映射表（v1.4 M6 文档化产物）。
 ///
 /// 每项 `(段落标题, 内容来源, v1.3 CRISPE 对应块)`：
 /// 记录四层模板与 v1.3 七段式的对应关系，供回归核对与后续版本参考。
@@ -228,7 +228,7 @@ pub const TEMPLATE_LAYER_MAP: &[(&str, &str, &str)] = &[
     (
         "# 知识（知识层，按需）",
         "事实卡片（v1.6 填充，当前槽位为空）",
-        "新增预留（T-V14-6-003）",
+        "知识层槽位（v1.6 填充）",
     ),
     (
         "# 记忆（脉络层）",
@@ -365,7 +365,7 @@ fn build_role(context: &PromptContext) -> String {
 /// 组装记忆层块：近期对话脉络 + 相关历史记忆 + 原文片段 + 桥接（`# 记忆（脉络层）`）。
 ///
 /// v2.0: 从 Block C 从属位置提升为独立 Memory 块。
-/// v1.4 M6（T-V14-6-002）: 接入脉络层预算分配器（v3.1 §8.3）——
+/// v1.4 M6: 接入脉络层预算分配器（v3.1 §8.3）——
 /// 独立预算 ≤ 30%，超限裁剪顺序：原文块 → 桥接头部 → 相关记忆 → 脉络保最近。
 ///
 /// 子段落结构（v3.1 §8.2）:
@@ -1472,7 +1472,7 @@ mod tests {
         assert!(result2.contains("这是角色原话内容"));
     }
 
-    /// v1.4 M5（T-V14-5-003）：桥接内容存在时产生【桥接（上一会话尾部）】段落；
+    /// v1.4 M5：桥接内容存在时产生【桥接（上一会话尾部）】段落；
     /// 缺失/空白时不产生段落（回归红线：白名单外 = 与 v1.3 语义等价）。
     #[test]
     fn assemble_prompt_includes_bridge_section_only_when_present() {
@@ -1509,7 +1509,7 @@ mod tests {
         assert!(result2.contains("上次聊到这里"), "应含桥接原文内容");
     }
 
-    /// v1.4 M5（T-V14-5-003）：桥接与原文片段并存时两个段落都渲染（互不覆盖）。
+    /// v1.4 M5：桥接与原文片段并存时两个段落都渲染（互不覆盖）。
     #[test]
     fn assemble_prompt_bridge_and_utt_coexist() {
         let ctx = PromptContext {
@@ -1524,7 +1524,7 @@ mod tests {
     }
 
     // =========================================================
-    // v1.4 M6（T-V14-6-001）：模板精简与语义等价回归
+    // 模板精简与语义等价回归
     // =========================================================
 
     /// 模板结构映射表（`TEMPLATE_LAYER_MAP`）与四层模板常量一致（文档化核对）。
@@ -1645,7 +1645,7 @@ mod tests {
         );
     }
 
-    /// v1.4 M6：行为/知识槽位为空时不产生空段落（T-V14-6-003 验收点）。
+    /// v1.4 M6：行为/知识槽位为空时不产生空段落。
     #[test]
     fn empty_slots_do_not_produce_blank_paragraphs() {
         let ctx = PromptContext {
@@ -1667,7 +1667,7 @@ mod tests {
         assert!(capacity_pos < time_pos, "能力边界应前置，当前时间应置尾");
     }
 
-    /// v1.4 M6（T-V14-6-002）：脉络层预算——超限时原文/桥接被裁剪，
+    /// v1.4 M6：脉络层预算——超限时原文/桥接被裁剪，
     /// 脉络摘要保最近（装配层集成验证，分配器单测在 layers.rs）。
     #[test]
     fn memory_layer_budget_applied_in_assemble() {

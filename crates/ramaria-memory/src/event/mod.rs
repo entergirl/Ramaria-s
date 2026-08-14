@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/event/mod.rs - L1→L2 事件提取模块
+//! crates/ramaria-memory/src/event/mod.rs - L1→L2 事件提取模块
 //!
 //! 设计特点:
 //! - batcher: TopicBatcher 主题批量构建（关键词 Jaccard 图 + BFS 连通分量 + 语义融合）

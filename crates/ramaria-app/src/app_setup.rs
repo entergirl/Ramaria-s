@@ -1,7 +1,7 @@
-//! rust/crates/ramaria-app/src/app_setup.rs - 设置流程代理方法
+//! crates/ramaria-app/src/app_setup.rs - 设置流程代理方法
 //!
 //! 设计特点:
-//! - 从 `app.rs` 拆分，减少 App 本体的行数（M-5 修复）
+//! - 从 `app.rs` 拆分，减少 App 本体的行数
 //! - `run_setup`: 保存后端配置 → 健康探测 → 更新状态
 //! - `probe_health_with_retry`: LLM 后端健康检查（最多 3 次重试，间隔 2s）
 //! - `refresh_setup_state`: 检查嵌入模型状态并刷新应用状态

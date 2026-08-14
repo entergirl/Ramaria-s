@@ -3,7 +3,7 @@
 //! 设计特点:
 //! - 定义行为规则 BehaviorRule 及其情境/反应/参数/证据结构，对齐算法说明书 v3.1 §4
 //! - 规则 = 情境侧（situation）+ 行为侧（reaction/params/avoid）+ 元数据（evidence/confidence/stability/source/enabled）
-//! - reaction 为 `Option<String>`：`Some` = 完整规则文本；`None` = 候选规则（仅参数注入，D4 质控降级轨道）
+//! - reaction 为 `Option<String>`：`Some` = 完整规则文本；`None` = 候选规则（仅参数注入，算法说明书 v3.1 §4.2 质控降级轨道）
 //! - situation/params/avoid/evidence 均以 JSON 形态持久化（DB 单列），serde 全量序列化/反序列化
 //! - 反馈日志 FeedbackLog 对齐 v3.1 §9.4（S1 强信号 edit/disable 写入；S2/S3 弱信号 v1.7 复用同表只增不删）
 //! - 纯类型定义，零 I/O，不依赖数据库或异步运行时
@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 /// 行为规则的来源。
 ///
 /// 字段约定:
-/// - `Auto`: 由学习管线自动生成（D2→D4），自动生效（无人工参与）。
+/// - `Auto`: 由学习管线自动生成（算法说明书 v3.1 §4.2 聚类→规则生成），自动生效（无人工参与）。
 /// - `Manual`: 用户手工导入或编辑产生，优先级高于 Auto（v3.1 §4.5 / §9.3 强锚点）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -46,12 +46,12 @@ impl RuleSource {
 /// 反馈日志的标的类型（v3.1 §9.4）。
 ///
 /// 字段约定:
-/// - 本版本（v1.5 H1）只写 `BehaviorRule`；`PersonaFact` / `PersonalityTrait`
-///   为 v1.7 H2 预留（表结构已建好，只增不删）。
+/// - 本版本（v1.5）只写 `BehaviorRule`；`PersonaFact` / `PersonalityTrait`
+///   为 v1.7 预留（表结构已建好，只增不删）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TargetType {
-    /// 行为规则（v1.5 H1 S1 写入对象）
+    /// 行为规则（v1.5 反馈环 S1 写入对象）
     BehaviorRule,
     /// 知识事实（预留）
     PersonaFact,
@@ -143,7 +143,7 @@ pub struct PresentationFreq {
 ///
 /// 职责:
 /// - 描述规则适用的"情境"：关键词集 + 簇中心向量 + valence 分布 + presentation 分布等。
-/// - 供 D5 情境路由做候选评分（cos(q, 簇中心) + 查询侧 Jaccard）。
+/// - 供情境路由做候选评分（算法说明书 v3.1 §4.3：cos(q, 簇中心) + 查询侧 Jaccard）。
 ///
 /// 字段约定:
 /// - `keywords`: 簇关键词并集（频次 Top-N）。
@@ -203,7 +203,7 @@ impl BehaviorSituation {
 /// 规则的结构化参数（v3.1 §4.1 params，供生成器微调）。
 ///
 /// 字段约定:
-/// - `emotional_intensity`: 情感强度 -1.0..1.0（= 簇内加权 valence，D4 Step 5）。
+/// - `emotional_intensity`: 情感强度 -1.0..1.0（= 簇内加权 valence，算法说明书 v3.1 §4.2 参数化）。
 /// - `proactiveness`: 主动程度 0.0..1.0（倾向主动引导还是被动回应）。
 /// - `detail_level`: 详细度 0.0..1.0（倾向简短还是展开说明）。
 /// - `formality`: 正式度 0.0..1.0（倾向正式还是随意）。
@@ -250,12 +250,12 @@ pub struct BehaviorEvidence {
 /// 行为规则（v3.1 §4.1 BehaviorRule）。
 ///
 /// 职责:
-/// - 表示一条"情境 → 反应"规则，供 D5 情境路由与 prompt 行为块注入使用。
+/// - 表示一条"情境 → 反应"规则，供情境路由（算法说明书 v3.1 §4.3）与 prompt 行为块注入使用。
 /// - 规则文本为主（可解释、可编辑、注入 prompt 由 LLM 执行），结构化参数为辅。
 ///
 /// 状态:
 /// - `reaction = Some(..)`: 完整规则（含规则文本），可注入。
-/// - `reaction = None`: 候选规则（仅参数注入，D4 质控降级轨道），路由时只合并 params。
+/// - `reaction = None`: 候选规则（仅参数注入，算法说明书 v3.1 §4.2 质控降级轨道），路由时只合并 params。
 /// - `enabled = false`: 规则被禁用（用户禁用后不参与路由，可再启用）。
 ///
 /// 字段约定:
@@ -341,14 +341,14 @@ impl BehaviorRule {
 }
 
 // =========================================================
-// 反馈日志（v3.1 §9.4，H1 S1 写入）
+// 反馈日志（v3.1 §9.4，S1 强信号写入）
 // =========================================================
 
 /// 反馈日志条目。
 ///
 /// 职责:
 /// - 记录用户对规则/事实/trait 的显式干预（S1 强信号），供校准与审计。
-/// - v1.5 H1 只写入 edit/disable（weight=1.0）；S2/S3 弱信号 v1.7 复用同表。
+/// - v1.5 反馈环 S1 只写入 edit/disable（weight=1.0）；S2/S3 弱信号 v1.7 复用同表。
 ///
 /// 安全约束:
 /// - `detail` 只存"编辑前后快照"（规则字段 JSON），不存完整对话原文。

@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-llm/src/keychain.rs - OS Keychain 密钥管理封装
+//! crates/ramaria-llm/src/keychain.rs - OS Keychain 密钥管理封装
 //!
 //! 设计特点:
 //! - 封装 Windows Credential Manager API，提供安全的 API key 存取

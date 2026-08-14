@@ -1,5 +1,5 @@
 -- =========================================================
--- Ramaria v1.5 Migration —— 三层生成缓存（C，D-V15-008）
+-- Ramaria v1.5 Migration —— 三层生成缓存（C，见 docs/dev-1.5/v1.5-decisions.md）
 --
 -- 内容:
 -- 1. llm_response_cache 表：LLM 响应精确缓存。

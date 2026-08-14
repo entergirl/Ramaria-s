@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-storage/src/repo/conflict_queue.rs - 冲突检测队列
+//! crates/ramaria-storage/src/repo/conflict_queue.rs - 冲突检测队列
 //!
 //! 设计特点:
 //! - 管理画像矛盾与实体别名冲突的待确认队列

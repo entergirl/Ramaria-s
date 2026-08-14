@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-cli/src/commands/config.rs - 配置管理命令
+//! crates/ramaria-cli/src/commands/config.rs - 配置管理命令
 //!
 //! 设计特点:
 //! - list: 显示当前完整配置（API key 遮蔽为 "***"）
@@ -300,7 +300,7 @@ async fn set_config(
         }
         _ => {
             // 点分路径配置组（utt.* / bridge.*）：读生效配置 → 修改 → 双写
-            // （config.toml + DB settings，与桌面设置页同一通道，D-V14-006）。
+            // （config.toml + DB settings，与桌面设置页同一双写通道）。
             if SECTIONED_KEYS.contains(&key) {
                 let sync = config_sync(app);
                 let mut full = sync.load_config_only().await.context("读取配置失败")?;

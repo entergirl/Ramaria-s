@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-desktop/src/commands/setup.rs - 首次配置 Tauri Commands
+//! crates/ramaria-desktop/src/commands/setup.rs - 首次配置 Tauri Commands
 //!
 //! 设计特点:
 //! - run_setup: 执行完整的首次配置流程（保存配置 → 验证连接 → 初始化人格）
@@ -129,41 +129,12 @@ pub async fn run_setup(
 
     // ---- ★ 热更新 LLM provider，确保后续对话使用新配置 ----
     // 复用 App 持有的精确缓存实例（v1.5 C）：切换后端后缓存不失效
-    let llm_cache = state.app.llm_cache();
-    let new_llm: Arc<dyn ramaria_core::traits::LlmProvider> = match llm_provider {
-        ramaria_core::types::LlmProvider::LmStudio => {
-            let provider = ramaria_llm::lm_studio::LmStudioProvider::new(config.clone())
-                .map_err(|e| format!("创建 LM Studio provider 失败: {}", e))?;
-            let provider = match &llm_cache {
-                Some(cache) => provider.with_cache(Arc::clone(cache)),
-                None => provider,
-            };
-            Arc::new(provider)
-        }
-        ramaria_core::types::LlmProvider::DeepSeek => {
-            let provider = ramaria_llm::deepseek::DeepSeekProvider::new(
-                config.clone(),
-                state.app.keychain_arc(),
-            )
-            .map_err(|e| format!("创建 DeepSeek provider 失败: {}", e))?;
-            let provider = match &llm_cache {
-                Some(cache) => provider.with_cache(Arc::clone(cache)),
-                None => provider,
-            };
-            Arc::new(provider)
-        }
-        ramaria_core::types::LlmProvider::OpenAI => {
-            let provider =
-                ramaria_llm::openai::OpenAIProvider::new(config.clone(), state.app.keychain_arc())
-                    .map_err(|e| format!("创建 OpenAI provider 失败: {}", e))?;
-            let provider = match &llm_cache {
-                Some(cache) => provider.with_cache(Arc::clone(cache)),
-                None => provider,
-            };
-            Arc::new(provider)
-        }
-        _ => return Err(format!("不支持的 provider: {}", provider)),
-    };
+    let new_llm: Arc<dyn ramaria_core::traits::LlmProvider> = crate::build_llm_provider(
+        llm_provider,
+        &config,
+        state.app.keychain_arc(),
+        state.app.llm_cache(),
+    )?;
     state.app.update_llm(new_llm);
 
     tracing::info!(

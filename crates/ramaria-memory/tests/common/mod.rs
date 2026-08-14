@@ -1,4 +1,4 @@
-//! ramaria-memory 集成测试共享基础设施（T-V13-2-016 / T-V13-3-010 收尾补齐）
+//! ramaria-memory 集成测试共享基础设施
 //!
 //! 提供:
 //! - `MockLlm`: 实现 `LlmProviderTrait` 的 mock LLM（预设 JSON 回复 + 最近请求记录）
@@ -163,20 +163,6 @@ pub fn make_l1(
     l1.salience = salience;
     l1.created_at = created_at;
     l1
-}
-
-/// 分组关键词构造辅助：把一组 L1 摘要配给一个主题。
-///
-/// 返回 (summary, keywords) 列表，keywords 为逗号分隔的主题词。
-pub fn topic_fixture(
-    topic_words: &[&str],
-    count: usize,
-    summary_prefix: &str,
-) -> Vec<(String, String)> {
-    let kw = topic_words.join(",");
-    (0..count)
-        .map(|i| (format!("{summary_prefix} 第{i}条"), kw.clone()))
-        .collect()
 }
 
 /// 当前时间（Unix 毫秒）。

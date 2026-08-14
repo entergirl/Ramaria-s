@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-storage/src/repo/llm_response_cache.rs - LLM 响应精确缓存存取模块
+//! crates/ramaria-storage/src/repo/llm_response_cache.rs - LLM 响应精确缓存存取模块
 //!
 //! 设计特点:
 //! - 管理 `llm_response_cache` 表（v1.5 新增），LLM 响应精确缓存的持久化读写
@@ -156,15 +156,6 @@ pub async fn evict_oldest(pool: &SqlitePool, keep: u64, fifo: bool) -> RamariaRe
     Ok(result.rows_affected())
 }
 
-/// 清空缓存表。
-pub async fn clear(pool: &SqlitePool) -> RamariaResult<u64> {
-    let result = sqlx::query("DELETE FROM llm_response_cache")
-        .execute(pool)
-        .await
-        .storage_err("清空 LLM 响应缓存失败")?;
-    Ok(result.rows_affected())
-}
-
 // =========================================================
 // 单元测试（内存库）
 // =========================================================
@@ -295,19 +286,5 @@ mod tests {
         let removed = evict_oldest(&pool, 10, false).await.expect("淘汰成功");
         assert_eq!(removed, 0);
         assert_eq!(count(&pool).await.expect("计数成功"), 2);
-    }
-
-    #[tokio::test]
-    async fn clear_removes_all() {
-        let pool = init_test_pool().await.expect("测试库初始化成功");
-        put(&pool, &entry("k1", "m1", "v1"), 1_000)
-            .await
-            .expect("写入成功");
-        put(&pool, &entry("k2", "m1", "v1"), 1_000)
-            .await
-            .expect("写入成功");
-        let removed = clear(&pool).await.expect("清空成功");
-        assert_eq!(removed, 2);
-        assert_eq!(count(&pool).await.expect("计数成功"), 0);
     }
 }

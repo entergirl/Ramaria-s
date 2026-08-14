@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/inference/stats.rs - 统计特征提取
+//! crates/ramaria-memory/src/inference/stats.rs - 统计特征提取
 //!
 //! 设计特点:
 //! - A1 三轨动态准入: confirmed/tentative/discarded 替代置信度硬截断
@@ -585,6 +585,9 @@ pub struct TentativePromotionResult {
 ///
 /// 返回:
 /// - Jaccard 相似度 [0.0, 1.0]。任一方关键词为空时返回 0.0。
+///
+/// 说明（v1.5 收敛）:
+/// - 实现统一收敛到 `crate::similarity::jaccard_similarity`。
 fn keyword_jaccard(a_keywords: &str, b_keywords: &str) -> f64 {
     let a_set: std::collections::HashSet<&str> = a_keywords
         .split(',')
@@ -597,18 +600,7 @@ fn keyword_jaccard(a_keywords: &str, b_keywords: &str) -> f64 {
         .filter(|s| !s.is_empty())
         .collect();
 
-    if a_set.is_empty() || b_set.is_empty() {
-        return 0.0;
-    }
-
-    let intersection = a_set.intersection(&b_set).count();
-    let union = a_set.union(&b_set).count();
-
-    if union == 0 {
-        0.0
-    } else {
-        intersection as f64 / union as f64
-    }
+    crate::similarity::jaccard_similarity(a_set, b_set)
 }
 
 /// 判断两个事件是否来自不同批次。
@@ -2348,25 +2340,6 @@ mod tests {
         ev
     }
 
-    /// keyword_jaccard 各分支参数化验证：完全一致 / 部分重叠 / 无重叠 / 空关键词。
-    #[test]
-    fn keyword_jaccard_cases() {
-        // 完全相同 → 1.0
-        let sim = keyword_jaccard("工作, 会议, 压力", "工作, 会议, 压力");
-        assert!((sim - 1.0).abs() < 1e-10);
-        // 部分重叠: 交集={工作}，并集={工作, 会议, 项目} → 1/3 ≈ 0.333
-        let sim = keyword_jaccard("工作, 会议", "工作, 项目");
-        assert!((sim - 1.0 / 3.0).abs() < 0.01);
-        // 无重叠 → 0.0
-        let sim = keyword_jaccard("工作", "社交");
-        assert!((sim - 0.0).abs() < 1e-10);
-        // 任一方为空 → 0.0
-        let sim = keyword_jaccard("", "工作");
-        assert!((sim - 0.0).abs() < 1e-10);
-        let sim = keyword_jaccard("工作", "");
-        assert!((sim - 0.0).abs() < 1e-10);
-    }
-
     /// are_different_batches 各分支参数化验证：跨批次 / 间隔内 / created_at 为 0 保守同批次。
     #[test]
     fn are_different_batches_cases() {
@@ -2700,6 +2673,13 @@ mod tests {
         assert_eq!(stats.category, "工作");
         assert_eq!(stats.event_count, 3);
         // n_eff 应该由于校准权重而略小于简单加权（source_support < 1.0）
+        let simple_stats = compute_category_stats("工作", &events, None, &config);
+        assert!(
+            stats.n_eff < simple_stats.n_eff,
+            "校准 n_eff({}) 应小于简单加权 n_eff({})",
+            stats.n_eff,
+            simple_stats.n_eff
+        );
         assert!(stats.n_eff > 0.0, "n_eff 应大于 0");
     }
 

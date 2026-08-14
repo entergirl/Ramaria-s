@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-llm/src/embedding/models/llama.rs - LLaMA/Qwen3 编码器
+//! crates/ramaria-llm/src/embedding/models/llama.rs - LLaMA/Qwen3 编码器
 //!
 //! 设计特点:
 //! - 基于 `candle-transformers` 的 `Llama` 模型，兼容 Qwen2/Qwen3 架构（RMSNorm、RoPE、GQA、SwiGLU）

@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/inference/confidence.rs - 证据累积式置信度更新
+//! crates/ramaria-memory/src/inference/confidence.rs - 证据累积式置信度更新
 //!
 //! 设计特点:
 //! - C2: 有效证据量 E_total + 一致度 C → conf = C × (1 - 1/(1 + E_total))
@@ -7,6 +7,12 @@
 //! - 增量权重随总证据量增长自然衰减（近因事件不会异常放大）
 //! - 新旧 C 的融合使用 n_eff 加权平滑
 //! - 纯数值计算，零 I/O，不依赖数据库
+//!
+//! 决策 2 标注（保留+标注）:
+//! - calibrated 族（`compute_e_total_calibrated` / `compute_consistency_calibrated` /
+//!   `update_trait_confidence_calibrated` + `OldTraitState`）当前零生产调用：
+//!   Phase C 现用路径走未校准版（`run_confidence_update` → `update_trait_confidence`）。
+//! - 按决策 2 保留并标注，预留给校准权重链路径；v1.6 接线时核查是否并入现用管线。
 
 use ramaria_core::types::TraitEvidence;
 
@@ -546,7 +552,7 @@ mod tests {
         config: &ConfidenceConfig,
     ) -> TraitEvidence {
         let now = now_ms();
-        let created_at = now - (days_ago * MS_PER_DAY * 1000.0) as i64;
+        let created_at = now - (days_ago * MS_PER_DAY) as i64;
         let decay = time_decay_weight(created_at, now, config);
         TraitEvidence {
             id: 0,
@@ -574,12 +580,12 @@ mod tests {
         let w = time_decay_weight(now, now, &config);
         assert!((w - 1.0).abs() < 0.01, "刚创建的事件权重应接近 1.0");
         // 180 天前 → w ≈ e^(-180/60) ≈ 0.05，不低于保底
-        let created_at = now - (180.0 * MS_PER_DAY * 1000.0) as i64;
+        let created_at = now - (180.0 * MS_PER_DAY) as i64;
         let w = time_decay_weight(created_at, now, &config);
         assert!(w < 0.1, "180天前权重应 < 0.1，实际={}", w);
         assert!(w >= config.min_decay, "不应低于保底值");
         // 1000 天前 → 被保底值钳制
-        let created_at = now - (1000.0 * MS_PER_DAY * 1000.0) as i64;
+        let created_at = now - (1000.0 * MS_PER_DAY) as i64;
         let w = time_decay_weight(created_at, now, &config);
         assert!((w - config.min_decay).abs() < 1e-10, "应被保底值钳制");
     }

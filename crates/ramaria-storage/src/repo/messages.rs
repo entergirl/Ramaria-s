@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-storage/src/repo/messages.rs - L0 原始消息存取模块
+//! crates/ramaria-storage/src/repo/messages.rs - L0 原始消息存取模块
 //!
 //! 设计特点:
 //! - id 使用 UUID v4（TEXT 主键），与 sessions 保持 ID 类型一致
@@ -57,16 +57,16 @@ impl MessageRow {
     }
 }
 
-pub async fn save(pool: &SqlitePool, msg: &Message) -> RamariaResult<()> {
-    // 写入前检查 session 是否已关闭（只读约束）
-    // 对齐 Python：已关闭 session 不可再编辑
-    if !is_session_active(pool, msg.session_id).await? {
-        return Err(RamariaError::validation(format!(
-            "session {} 已关闭，不可写入新消息",
-            msg.session_id
-        )));
-    }
-
+/// 执行 messages INSERT（save / save_import / save_import_batch 共用）。
+///
+/// 参数:
+/// - `executor`: sqlx 执行器（连接池引用或事务内连接）。
+/// - `msg`: 待写入消息。
+/// - `err_ctx`: 失败时的错误上下文文案。
+async fn insert_message<'e, E>(executor: E, msg: &Message, err_ctx: &str) -> RamariaResult<()>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     sqlx::query(
         "INSERT INTO messages (id, session_id, role, content, created_at, source, import_fingerprint, persona_uid)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
@@ -79,10 +79,23 @@ pub async fn save(pool: &SqlitePool, msg: &Message) -> RamariaResult<()> {
         .bind(msg.source.to_string())
         .bind(&msg.fingerprint)
         .bind(&msg.persona_uid)
-        .execute(pool)
+        .execute(executor)
         .await
-        .storage_err("保存消息失败")?;
+        .storage_err(err_ctx)?;
     Ok(())
+}
+
+pub async fn save(pool: &SqlitePool, msg: &Message) -> RamariaResult<()> {
+    // 写入前检查 session 是否已关闭（只读约束）
+    // 对齐 Python：已关闭 session 不可再编辑
+    if !is_session_active(pool, msg.session_id).await? {
+        return Err(RamariaError::validation(format!(
+            "session {} 已关闭，不可写入新消息",
+            msg.session_id
+        )));
+    }
+
+    insert_message(pool, msg, "保存消息失败").await
 }
 
 /// 检查 session 是否处于活跃状态（ended_at IS NULL）。
@@ -204,6 +217,7 @@ pub async fn list_by_session_paginated(
         .collect::<RamariaResult<Vec<_>>>()
 }
 
+// 预留给 v1.6 跨文件导入去重（可选立项，见 docs/dev-1.6/备忘.md D-26-21）
 pub async fn find_by_fingerprint(
     pool: &SqlitePool,
     fingerprint: &str,
@@ -221,7 +235,7 @@ pub async fn find_by_fingerprint(
 
 /// 按发言人查询全部消息（Persona-Aware RAG / 导入管线重建用）。
 ///
-/// P2-2 修复：去掉 `LIMIT 200`。调用方 `regenerate_import_pipeline`
+/// 去掉 `LIMIT 200`。调用方 `regenerate_import_pipeline`
 /// 依赖"某 persona 的全部消息"来枚举其所属 session 并重建 L1；
 /// 截断导致 129 个导入 session 中只有最近 4 个被覆盖（按钮名不副实）。
 /// 消息量级（万级）下全量加载可控；如未来需分页再引入显式 limit 参数。
@@ -250,46 +264,7 @@ pub async fn list_by_persona(pool: &SqlitePool, persona_uid: &str) -> RamariaRes
 /// 参数:
 /// - `msg`: 待写入的消息，含 fingerprint 和 persona_uid。
 pub async fn save_import(pool: &SqlitePool, msg: &Message) -> RamariaResult<()> {
-    sqlx::query(
-        "INSERT INTO messages (id, session_id, role, content, created_at, source, import_fingerprint, persona_uid)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-    )
-        .bind(msg.id.to_string())
-        .bind(msg.session_id.to_string())
-        .bind(msg.role.as_str())
-        .bind(&msg.content)
-        .bind(msg.created_at)
-        .bind(msg.source.to_string())
-        .bind(&msg.fingerprint)
-        .bind(&msg.persona_uid)
-        .execute(pool)
-        .await
-        .storage_err("导入消息写入失败")?;
-    Ok(())
-}
-
-/// 获取所有已导入消息的指纹集合（去重预检专用）。
-///
-/// 职责:
-/// - 供导入器在写入前批量比对，避免重复导入。
-/// - 仅查询 `import_fingerprint IS NOT NULL` 的消息（正常对话消息不含指纹）。
-///
-/// 返回:
-/// - 所有已导入 fingerprint 的集合。
-pub async fn list_all_fingerprints(pool: &SqlitePool) -> RamariaResult<Vec<String>> {
-    #[derive(sqlx::FromRow)]
-    struct FpRow {
-        import_fingerprint: String,
-    }
-
-    let rows = sqlx::query_as::<_, FpRow>(
-        "SELECT import_fingerprint FROM messages WHERE import_fingerprint IS NOT NULL",
-    )
-    .fetch_all(pool)
-    .await
-    .storage_err("查询指纹列表失败")?;
-
-    Ok(rows.into_iter().map(|r| r.import_fingerprint).collect())
+    insert_message(pool, msg, "导入消息写入失败").await
 }
 
 /// 批量保存导入消息，包裹在显式 SQLite 事务中。
@@ -323,21 +298,12 @@ pub async fn save_import_batch(pool: &SqlitePool, msgs: &[Message]) -> RamariaRe
     let mut written = 0usize;
 
     for msg in msgs {
-        sqlx::query(
-            "INSERT INTO messages (id, session_id, role, content, created_at, source, import_fingerprint, persona_uid)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        insert_message(
+            &mut *txn,
+            msg,
+            &format!("批量导入消息写入失败 (第 {} 条)", written + 1),
         )
-            .bind(msg.id.to_string())
-            .bind(msg.session_id.to_string())
-            .bind(msg.role.as_str())
-            .bind(&msg.content)
-            .bind(msg.created_at)
-            .bind(msg.source.to_string())
-            .bind(&msg.fingerprint)
-            .bind(&msg.persona_uid)
-            .execute(&mut *txn)
-            .await
-            .storage_err(format!("批量导入消息写入失败 (第 {} 条)", written + 1))?;
+        .await?;
         written += 1;
     }
 

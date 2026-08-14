@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/tests/model_manager_tests.rs — 模型管理器集成测试
+//! crates/ramaria-app/tests/model_manager_tests.rs — 模型管理器集成测试
 //!
 //! 设计特点:
 //! - 使用临时目录进行所有测试，测试后自动清理

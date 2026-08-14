@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/src/app_state.rs - 应用状态管理
+//! crates/ramaria-app/src/app_state.rs - 应用状态管理
 //!
 //! 设计特点:
 //! - 从 `app.rs` 提取的状态管理方法

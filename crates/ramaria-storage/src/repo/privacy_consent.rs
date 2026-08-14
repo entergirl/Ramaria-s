@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-storage/src/repo/privacy_consent.rs - 隐私确认存取模块
+//! crates/ramaria-storage/src/repo/privacy_consent.rs - 隐私确认存取模块
 //!
 //! 设计特点:
 //! - 按 provider + base_url 粒度记录用户的线上调用隐私确认

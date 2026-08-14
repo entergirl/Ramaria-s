@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-core/src/lib.rs - Ramaria 核心 crate 入口模块
+//! crates/ramaria-core/src/lib.rs - Ramaria 核心 crate 入口模块
 //!
 //! 设计特点:
 //! - 统一暴露核心能力: 配置、错误、trait、业务数据类型

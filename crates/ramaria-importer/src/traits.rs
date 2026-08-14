@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-importer/src/traits.rs - 导入器抽象层
+//! crates/ramaria-importer/src/traits.rs - 导入器抽象层
 //!
 //! 设计特点:
 //! - `ImportSource` trait 定义导入源的统一接口，便于扩展 QQ/微信/Telegram 等格式
@@ -52,7 +52,7 @@ impl std::fmt::Display for ImportMode {
 /// 字段约定:
 /// - `role`: "user" 表示导出者本人，"assistant" 表示对方。
 /// - `content`: 已经过占位符替换和前缀处理的最终文本。
-/// - `sender_uid`: QQ 内部用户标识（如 `u_RSOI7gG2LaRiP64W8ayLDA`）。
+/// - `sender_uid`: QQ 内部用户标识（如 `u_example_uid`）。
 /// - `sender_uin`: QQ 号（如 `123456789`），不存在时为 None。
 /// - `sender_name`: 发送者显示昵称/群名片。
 #[derive(Debug, Clone)]

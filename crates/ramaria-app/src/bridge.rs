@@ -1,7 +1,7 @@
-//! rust/crates/ramaria-app/src/bridge.rs - 会话桥接（v1.4 M5，T-V14-5-002/003）
+//! crates/ramaria-app/src/bridge.rs - 会话桥接（v1.4 M5）
 //!
 //! 设计特点:
-//! - 新会话创建时加载"上一会话尾部"原文，帮助 LLM 保持对话连贯性（D-V14-005）。
+//! - 新会话创建时加载"上一会话尾部"原文，帮助 LLM 保持对话连贯性（决策见 docs/dev-1.4/v1.4-decisions.md）。
 //! - 两级降级：优先取最近一个已关闭会话的最后一个 utt 块；
 //!   无 utt 块时降级取该会话末 N 条原文消息；仍无则跳过（不注入，等同 v1.3）。
 //! - 只取最近一个已关闭会话（不链式回溯，防止级联错误传播）。
@@ -20,7 +20,7 @@ use tracing::{debug, info, warn};
 /// 降级路径取末 N 条原文消息（无 utt 块时）。
 ///
 /// 说明:
-/// - 固定常量而非配置项（D-V14-005 未定义该参数；最小改动原则）。
+/// - 固定常量而非配置项（决策见 docs/dev-1.4/v1.4-decisions.md，未定义该参数；最小改动原则）。
 /// - 取值 5：足够传递上一会话尾部语境，又避免长会话原文过载。
 pub const BRIDGE_FALLBACK_MESSAGE_COUNT: usize = 5;
 
@@ -186,7 +186,7 @@ pub async fn load_bridge_context(
 
 /// 按预算从头部截断、保最近内容。
 ///
-/// 规则（D-V14-005：预算从头部截断保最近）:
+/// 规则（决策见 docs/dev-1.4/v1.4-decisions.md：预算从头部截断保最近）:
 /// - 文本字符数 ≤ 预算 → 原样返回。
 /// - 超预算 → 保留末尾 `max_chars` 个字符，前缀省略标记行
 ///   （标记行不计入预算，确保省略语义清晰）。
@@ -297,7 +297,7 @@ mod tests {
         }
     }
 
-    /// 桥接开关关闭 → 不加载（T-V14-5-002 验收：开关）。
+    /// 桥接开关关闭 → 不加载（验收：开关）。
     #[tokio::test]
     async fn bridge_disabled_returns_none() {
         let storage = Arc::new(MockStorage::new());
@@ -321,7 +321,7 @@ mod tests {
         assert!(ctx.is_empty(), "助手类 persona 不应加载桥接原文");
     }
 
-    /// 无已关闭会话 → 跳过（T-V14-5-002 验收：无会话跳过）。
+    /// 无已关闭会话 → 跳过（验收：无会话跳过）。
     #[tokio::test]
     async fn bridge_no_closed_session_skips() {
         let storage = Arc::new(MockStorage::new());
@@ -336,7 +336,7 @@ mod tests {
         assert!(ctx.is_empty(), "无已关闭会话不应加载桥接");
     }
 
-    /// 一级来源：ut 块（T-V14-5-002 验收：最近会话 + utt 块优先）。
+    /// 一级来源：ut 块（验收：最近会话 + utt 块优先）。
     #[tokio::test]
     async fn bridge_loads_latest_utt_block_of_recent_closed_session() {
         let storage = Arc::new(MockStorage::new());
@@ -368,7 +368,7 @@ mod tests {
         );
     }
 
-    /// 二级降级：无 utt 块 → 取末 N 条原文（T-V14-5-002 验收：两级降级）。
+    /// 二级降级：无 utt 块 → 取末 N 条原文（验收：两级降级）。
     #[tokio::test]
     async fn bridge_falls_back_to_recent_messages() {
         let storage = Arc::new(MockStorage::new());
@@ -411,7 +411,7 @@ mod tests {
         assert!(content.contains("用户"), "应含用户角色标签");
     }
 
-    /// 降级路径但会话无消息 → 跳过（T-V14-5-002 验收：两级降级尽头）。
+    /// 降级路径但会话无消息 → 跳过（验收：两级降级尽头）。
     #[tokio::test]
     async fn bridge_fallback_no_messages_skips() {
         let storage = Arc::new(MockStorage::new());
@@ -428,7 +428,7 @@ mod tests {
         assert!(ctx.is_empty(), "无块无消息应跳过桥接");
     }
 
-    /// 预算截断：超预算从头部截断、保最近（T-V14-5-003 验收：预算截断）。
+    /// 预算截断：超预算从头部截断、保最近（验收：预算截断）。
     #[test]
     fn truncate_from_head_keeps_recent_content() {
         let text = "第一行内容\n第二行内容\n第三行内容";

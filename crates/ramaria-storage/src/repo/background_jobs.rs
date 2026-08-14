@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-storage/src/repo/background_jobs.rs - 后台任务管理
+//! crates/ramaria-storage/src/repo/background_jobs.rs - 后台任务管理
 //!
 //! 设计特点:
 //! - 管理 L1→L2 事件提取、索引重建等后台异步任务的状态

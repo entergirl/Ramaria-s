@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-storage/src/repo/cluster.rs - ClusterSnapshot CRUD
+//! crates/ramaria-storage/src/repo/cluster.rs - ClusterSnapshot CRUD
 //!
 //! 设计特点:
 //! - 管理态度聚类快照，支撑跨版本簇匹配（语义标签→embedding 相似度）

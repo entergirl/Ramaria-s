@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-storage/src/repo/keyword.rs - KeywordPool + keyword_refs CRUD
+//! crates/ramaria-storage/src/repo/keyword.rs - KeywordPool + keyword_refs CRUD
 //!
 //! 设计特点:
 //! - 关键词池（keyword_pool）读写接口从裸 `String` 升级为 `KeywordToken` Newtype
@@ -69,6 +69,7 @@ pub async fn upsert(pool: &SqlitePool, keyword: &KeywordToken) -> RamariaResult<
     Ok(())
 }
 
+// 预留给 keyword_refs 消费路径（v1.6 精确匹配检索）
 /// 插入或更新关键词，并写入别名状态。
 ///
 /// 参数:
@@ -134,6 +135,7 @@ pub async fn list_all(pool: &SqlitePool) -> RamariaResult<Vec<KeywordToken>> {
     Ok(tokens)
 }
 
+// 预留给 keyword_refs 消费路径（v1.6 精确匹配检索）
 /// 根据规范词 ID 查找所有别名。
 ///
 /// 参数:
@@ -157,6 +159,7 @@ pub async fn list_aliases(pool: &SqlitePool, canonical_id: i64) -> RamariaResult
     Ok(rows)
 }
 
+// 预留给 keyword_refs 消费路径（v1.6 精确匹配检索）
 /// 根据关键词文本查询其 canonical_id。
 ///
 /// 返回:
@@ -180,6 +183,7 @@ pub async fn find_canonical_id(
     Ok(row.and_then(|r| r.0))
 }
 
+// 预留给 keyword_refs 消费路径（v1.6 精确匹配检索）
 /// 更新关键词的别名状态。
 ///
 /// 参数:
@@ -214,6 +218,7 @@ pub async fn update_alias_status(
 ///
 /// 说明:
 /// - 供 AliasManager::load_use_counts() 批量加载使用。
+/// - 预留给 keyword_refs 消费路径（v1.6 精确匹配检索）。
 pub async fn list_all_with_counts(pool: &SqlitePool) -> RamariaResult<Vec<(String, u32)>> {
     let rows = sqlx::query_as::<_, (String, u32)>(
         "SELECT keyword, use_count FROM keyword_pool ORDER BY use_count DESC",
@@ -338,6 +343,7 @@ pub async fn delete_refs_by_doc(
     Ok(result.rows_affected())
 }
 
+// 预留给 keyword_refs 消费路径（v1.6 精确匹配检索）
 /// 统计关键词引用总数（用于调试和监控）。
 pub async fn count_all(pool: &SqlitePool) -> RamariaResult<i64> {
     let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM keyword_refs")

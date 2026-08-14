@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/tests/mock_backend.rs - Mock StorageBackend + Mock LlmProvider
+//! crates/ramaria-app/tests/mock_backend.rs - Mock StorageBackend + Mock LlmProvider
 //!
 //! 设计特点:
 //! - `MockStorage`: 内存 HashMap 实现的 StorageBackend，用于 app 集成测试
@@ -177,7 +177,7 @@ impl MockStorage {
 
     /// 便捷方法：注入一条 Few-shot 示例（selected 可控）。
     ///
-    /// v1.4 M6（T-V14-6-004）: 配置传播测试使用——`examples.enabled=false`
+    /// v1.4 M6: 配置传播测试使用——`examples.enabled=false`
     /// 回退静态 selected 查询，`enabled=true` 时从候选池评分轮换。
     #[allow(dead_code)]
     pub fn add_example(&self, persona_uid: &str, example: PersonaExample) {
@@ -415,13 +415,6 @@ impl StorageBackend for MockStorage {
 
     async fn list_messages_by_persona(&self, _persona_uid: &str) -> RamariaResult<Vec<Message>> {
         Ok(Vec::new())
-    }
-
-    async fn find_message_by_fingerprint(
-        &self,
-        _fingerprint: &str,
-    ) -> RamariaResult<Option<Message>> {
-        Ok(None)
     }
 
     async fn save_memory_l1(&self, memory: &MemoryL1) -> RamariaResult<()> {
@@ -682,7 +675,7 @@ impl StorageBackend for MockStorage {
     }
 
     async fn save_example(&self, e: &PersonaExample) -> RamariaResult<i64> {
-        // v1.4 M6（T-V14-6-004）：实际存储（与 test_utils 对齐），
+        // v1.4 M6：实际存储（与 test_utils 对齐），
         // 使 examples 配置传播测试可端到端断言注入行为。
         let mut id = e.id;
         if id <= 0 {
@@ -840,18 +833,6 @@ impl StorageBackend for MockStorage {
         Ok(())
     }
 
-    async fn create_push(&self, _content: &str) -> RamariaResult<i64> {
-        Ok(1)
-    }
-
-    async fn list_pending_pushes(&self) -> RamariaResult<Vec<(i64, String)>> {
-        Ok(Vec::new())
-    }
-
-    async fn mark_push_sent(&self, _id: i64) -> RamariaResult<()> {
-        Ok(())
-    }
-
     async fn get_setting(&self, _key: &str) -> RamariaResult<Option<String>> {
         Ok(None)
     }
@@ -862,18 +843,6 @@ impl StorageBackend for MockStorage {
 
     async fn list_settings(&self) -> RamariaResult<Vec<(String, String)>> {
         Ok(Vec::new())
-    }
-
-    async fn save_bm25(&self, _doc_id: i64, _layer: &str, _tokens_json: &str) -> RamariaResult<()> {
-        Ok(())
-    }
-
-    async fn list_bm25_by_doc(&self, _doc_id: i64) -> RamariaResult<Vec<(String, String)>> {
-        Ok(Vec::new())
-    }
-
-    async fn delete_bm25_by_doc(&self, _doc_id: i64) -> RamariaResult<()> {
-        Ok(())
     }
 
     async fn insert_graph_node(

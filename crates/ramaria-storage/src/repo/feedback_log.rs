@@ -1,4 +1,4 @@
-//! crates/ramaria-storage/src/repo/feedback_log.rs - 反馈日志存取（v1.5 M5 H1）
+//! crates/ramaria-storage/src/repo/feedback_log.rs - 反馈日志存取（v1.5 M5，算法说明书 v3.1 §9.4）
 //!
 //! 设计特点:
 //! - 管理 `feedback_log` 表（v3.1 §9.4），S1 强信号（edit/disable，weight=1.0）写入
@@ -111,32 +111,6 @@ pub async fn list_by_persona(
     Ok(rows.into_iter().map(LogRow::into_log).collect())
 }
 
-/// 按标的（target_type + target_id）查询反馈日志（单条规则的干预历史）。
-pub async fn list_by_target(
-    pool: &SqlitePool,
-    target_type: TargetType,
-    target_id: &str,
-) -> RamariaResult<Vec<FeedbackLog>> {
-    let type_str = match target_type {
-        TargetType::BehaviorRule => "behavior_rule",
-        TargetType::PersonaFact => "persona_fact",
-        TargetType::PersonalityTrait => "personality_trait",
-    };
-    let rows = sqlx::query_as::<_, LogRow>(
-        "SELECT id, persona_uid, target_type, target_id, signal_type, weight,
-                session_id, detail, created_at
-         FROM feedback_log WHERE target_type = ? AND target_id = ?
-         ORDER BY created_at DESC, id DESC",
-    )
-    .bind(type_str)
-    .bind(target_id)
-    .fetch_all(pool)
-    .await
-    .storage_err("查询标的反馈日志失败")?;
-
-    Ok(rows.into_iter().map(LogRow::into_log).collect())
-}
-
 // =========================================================
 // 单元测试（内存数据库，migration 自动应用）
 // =========================================================
@@ -211,47 +185,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_by_target_returns_rule_history() {
-        let pool = init_test_pool().await.expect("测试库初始化成功");
-        for signal in [SignalType::Edit, SignalType::Disable, SignalType::Edit] {
-            save(
-                &pool,
-                &FeedbackLog::new(
-                    "char-0001",
-                    TargetType::BehaviorRule,
-                    "7",
-                    signal,
-                    None,
-                    None,
-                ),
-            )
-            .await
-            .expect("写入成功");
-        }
-        // 另一条规则不应混入
-        save(
-            &pool,
-            &FeedbackLog::new(
-                "char-0001",
-                TargetType::BehaviorRule,
-                "8",
-                SignalType::Edit,
-                None,
-                None,
-            ),
-        )
-        .await
-        .expect("写入成功");
-
-        let history = list_by_target(&pool, TargetType::BehaviorRule, "7")
-            .await
-            .expect("查询成功");
-        assert_eq!(history.len(), 3, "按标的过滤");
-        // 创建时间相同（同毫秒），按 id 降序
-        assert!(history[0].id > history[2].id);
-    }
-
-    #[tokio::test]
     async fn reserved_target_types_roundtrip() {
         let pool = init_test_pool().await.expect("测试库初始化成功");
         for (ty, id) in [
@@ -268,7 +201,7 @@ mod tests {
         }
         let list = list_by_persona(&pool, "char-0001").await.expect("查询成功");
         assert_eq!(list.len(), 3);
-        // 枚举 roundtrip（v1.7 H2 预留类型不丢精度）
+        // 枚举 roundtrip（v1.7 预留类型不丢精度）
         let types: Vec<TargetType> = list.iter().map(|l| l.target_type).collect();
         assert!(types.contains(&TargetType::PersonaFact));
         assert!(types.contains(&TargetType::PersonalityTrait));

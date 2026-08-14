@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-desktop/src/commands/chat.rs - 聊天与对话 Tauri Commands
+//! crates/ramaria-desktop/src/commands/chat.rs - 聊天与对话 Tauri Commands
 //!
 //! 设计特点:
 //! - `send_message`: 异步启动 LLM 流式对话，立即返回 request_id，通过 Tauri Event 推送增量内容

@@ -60,11 +60,11 @@ pub struct MockStorage {
     index_version: Mutex<i32>,
     examples: Mutex<HashMap<String, Vec<PersonaExample>>>,
     event_seq: AtomicI64,
-    /// 行为规则（v1.5 M5 D7 CLI 测试）
+    /// 行为规则（CLI 测试）
     behavior_rules: Mutex<HashMap<i64, BehaviorRule>>,
     rules_by_persona: Mutex<HashMap<String, Vec<i64>>>,
     rule_seq: AtomicI64,
-    /// 反馈日志（v1.5 M5 H1 CLI 测试）
+    /// 反馈日志（CLI 测试）
     feedback_logs: Mutex<Vec<FeedbackLog>>,
     feedback_seq: AtomicI64,
 }
@@ -248,13 +248,6 @@ impl StorageBackend for MockStorage {
 
     async fn list_messages_by_persona(&self, _persona_uid: &str) -> RamariaResult<Vec<Message>> {
         Ok(Vec::new())
-    }
-
-    async fn find_message_by_fingerprint(
-        &self,
-        _fingerprint: &str,
-    ) -> RamariaResult<Option<Message>> {
-        Ok(None)
     }
 
     async fn save_memory_l1(&self, _memory: &MemoryL1) -> RamariaResult<()> {
@@ -562,18 +555,6 @@ impl StorageBackend for MockStorage {
         Ok(())
     }
 
-    async fn create_push(&self, _content: &str) -> RamariaResult<i64> {
-        Ok(1)
-    }
-
-    async fn list_pending_pushes(&self) -> RamariaResult<Vec<(i64, String)>> {
-        Ok(Vec::new())
-    }
-
-    async fn mark_push_sent(&self, _id: i64) -> RamariaResult<()> {
-        Ok(())
-    }
-
     async fn get_setting(&self, key: &str) -> RamariaResult<Option<String>> {
         Ok(self.settings.lock().unwrap().get(key).cloned())
     }
@@ -594,18 +575,6 @@ impl StorageBackend for MockStorage {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect())
-    }
-
-    async fn save_bm25(&self, _doc_id: i64, _layer: &str, _tokens_json: &str) -> RamariaResult<()> {
-        Ok(())
-    }
-
-    async fn list_bm25_by_doc(&self, _doc_id: i64) -> RamariaResult<Vec<(String, String)>> {
-        Ok(Vec::new())
-    }
-
-    async fn delete_bm25_by_doc(&self, _doc_id: i64) -> RamariaResult<()> {
-        Ok(())
     }
 
     async fn insert_graph_node(
@@ -676,7 +645,7 @@ impl StorageBackend for MockStorage {
         Ok(0)
     }
 
-    // -- 行为规则（v1.5 M5 D7 CLI 测试） --
+    // -- 行为规则（CLI 测试） --
 
     async fn save_behavior_rule(&self, rule: &BehaviorRule) -> RamariaResult<i64> {
         let id = self

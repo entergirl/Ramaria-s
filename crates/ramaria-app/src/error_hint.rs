@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/src/error_hint.rs - 错误到 UI/CLI 提示映射
+//! crates/ramaria-app/src/error_hint.rs - 错误到 UI/CLI 提示映射
 //!
 //! 设计特点:
 //! - 将 `RamariaError::category` 映射为面向最终用户的友好提示

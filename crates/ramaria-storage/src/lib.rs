@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-storage/src/lib.rs - Ramaria SQLite 存储层
+//! crates/ramaria-storage/src/lib.rs - Ramaria SQLite 存储层
 //!
 //! 设计特点:
 //! - 封装 SqlitePool，实现 `StorageBackend` trait 的全部方法（覆盖 24 张表）
@@ -85,12 +85,6 @@ impl StorageBackend for SqliteStorage {
     }
     async fn list_messages_by_persona(&self, persona_uid: &str) -> RamariaResult<Vec<Message>> {
         repo::messages::list_by_persona(&self.pool, persona_uid).await
-    }
-    async fn find_message_by_fingerprint(
-        &self,
-        fingerprint: &str,
-    ) -> RamariaResult<Option<Message>> {
-        repo::messages::find_by_fingerprint(&self.pool, fingerprint).await
     }
     async fn get_last_message_time(&self, session_id: Uuid) -> RamariaResult<Option<i64>> {
         repo::messages::get_last_message_time(&self.pool, session_id).await
@@ -338,9 +332,6 @@ impl StorageBackend for SqliteStorage {
         let tokens = repo::keyword::list_all(&self.pool).await?;
         Ok(tokens.into_iter().map(|t| t.into_inner()).collect())
     }
-    async fn list_keyword_counts(&self) -> RamariaResult<Vec<(String, u32)>> {
-        repo::keyword::list_all_with_counts(&self.pool).await
-    }
 
     // =========================================================
     // Keyword Refs（关键词倒排索引）
@@ -496,19 +487,6 @@ impl StorageBackend for SqliteStorage {
     }
 
     // =========================================================
-    // Pending Push（待推送消息）
-    // =========================================================
-    async fn create_push(&self, content: &str) -> RamariaResult<i64> {
-        repo::pending_push::create(&self.pool, content).await
-    }
-    async fn list_pending_pushes(&self) -> RamariaResult<Vec<(i64, String)>> {
-        repo::pending_push::list_pending(&self.pool).await
-    }
-    async fn mark_push_sent(&self, id: i64) -> RamariaResult<()> {
-        repo::pending_push::mark_sent(&self.pool, id).await
-    }
-
-    // =========================================================
     // Settings（全局运行配置）
     // =========================================================
     async fn get_setting(&self, key: &str) -> RamariaResult<Option<String>> {
@@ -519,19 +497,6 @@ impl StorageBackend for SqliteStorage {
     }
     async fn list_settings(&self) -> RamariaResult<Vec<(String, String)>> {
         repo::settings::list_all(&self.pool).await
-    }
-
-    // =========================================================
-    // BM25 Index（全文索引）
-    // =========================================================
-    async fn save_bm25(&self, doc_id: i64, layer: &str, tokens_json: &str) -> RamariaResult<()> {
-        repo::bm25_index::save(&self.pool, doc_id, layer, tokens_json).await
-    }
-    async fn list_bm25_by_doc(&self, doc_id: i64) -> RamariaResult<Vec<(String, String)>> {
-        repo::bm25_index::list_by_doc(&self.pool, doc_id).await
-    }
-    async fn delete_bm25_by_doc(&self, doc_id: i64) -> RamariaResult<()> {
-        repo::bm25_index::delete_by_doc(&self.pool, doc_id).await
     }
 
     // =========================================================
@@ -577,7 +542,7 @@ impl StorageBackend for SqliteStorage {
     }
 
     // =========================================================
-    // L2 聚类去重指纹（v1.5 三层生成缓存 C，T-V15-3-003）
+    // L2 聚类去重指纹（v1.5 三层生成缓存 C）
     // =========================================================
 
     async fn l2_fingerprint_exists(
@@ -602,7 +567,7 @@ impl StorageBackend for SqliteStorage {
     }
 
     // =========================================================
-    // 行为规则（v1.5 M5 D，算法说明书 v3.1 §4）
+    // 行为规则（v1.5 M5，算法说明书 v3.1 §4）
     // =========================================================
 
     async fn save_behavior_rule(&self, rule: &BehaviorRule) -> RamariaResult<i64> {
@@ -633,7 +598,7 @@ impl StorageBackend for SqliteStorage {
     }
 
     // =========================================================
-    // 反馈日志（v1.5 M5 H1，v3.1 §9.4）
+    // 反馈日志（v1.5 M5，v3.1 §9.4）
     // =========================================================
 
     async fn save_feedback_log(&self, log: &FeedbackLog) -> RamariaResult<i64> {
@@ -714,7 +679,7 @@ impl ramaria_core::traits::LlmResponseCache for SqliteLlmCache {
         };
         repo::llm_response_cache::put(&self.pool, &entry, now_ms()).await?;
 
-        // 容量自淘汰（v1.5 T-V15-3-004）：写入后若超出上限，按配置策略淘汰最旧条目。
+        // 容量自淘汰（v1.5）：写入后若超出上限，按配置策略淘汰最旧条目。
         // 淘汰失败仅记 warn——缓存淘汰是优化而非正确性约束，不阻塞响应返回。
         if self.max_entries > 0
             && let Err(e) =
@@ -1259,7 +1224,7 @@ mod tests {
     }
 
     // =========================================================
-    // T-FIX-006: list_unabsorbed_events & update_persona 补充测试
+    // list_unabsorbed_events & update_persona 补充测试
     // =========================================================
 
     /// 辅助：创建含 persona 和 L1 的完整测试上下文。
@@ -1423,7 +1388,7 @@ mod tests {
     }
 
     // =========================================================
-    // T-FIX-014: mark_absorbed 批次边界测试
+    // mark_absorbed 批次边界测试
     // =========================================================
     // 验证 BATCH_SIZE=100 的分批逻辑在所有边界条件下正确工作。
     // 由于 mark_absorbed 内部以 100 条为单位分批，需要确保:
@@ -1564,7 +1529,7 @@ mod tests {
     }
 
     // =========================================================
-    // T-FIX-014: background_jobs CRUD 集成测试
+    // background_jobs CRUD 集成测试
     // =========================================================
 
     #[tokio::test]
@@ -1659,7 +1624,7 @@ mod tests {
     }
 
     // =========================================================
-    // Utt Blocks（原文话语块，v1.4 M1-005）
+    // Utt Blocks（原文话语块）
     // =========================================================
 
     /// 辅助：创建 persona + session + 若干消息，返回 (storage, persona_uid, session_id)。
@@ -1786,7 +1751,7 @@ mod tests {
         assert_eq!(latest.block_text, "块2");
     }
 
-    // P2-2 修复：list_messages_by_persona 不再截断（原 LIMIT 200），
+    // list_messages_by_persona 不再截断（原 LIMIT 200），
     // 导入管线重建能枚举该 persona 的全部消息与 session
     #[tokio::test]
     async fn message_list_by_persona_returns_all_over_200() {
@@ -1908,7 +1873,7 @@ mod tests {
     }
 
     // =========================================================
-    // evidence_notes 存量迁移（v1.4 M1-004，D-V14-003）
+    // evidence_notes 存量迁移（v1.4，见 docs/dev-1.4/v1.4-decisions.md）
     // =========================================================
 
     /// 模拟旧库（仅执行基线 schema）并插入指定 evidence_notes 的 L1 行。
@@ -2208,7 +2173,7 @@ mod tests {
     }
 
     // =========================================================
-    // examples repo（v1.4，T-V14-3-002）
+    // examples repo（v1.4）
     // =========================================================
 
     async fn setup_example_persona(storage: &SqliteStorage) -> String {
@@ -2336,7 +2301,7 @@ mod tests {
     }
 
     // =========================================================
-    // SqliteLlmCache 容量自淘汰（v1.5 C，T-V15-3-004）
+    // SqliteLlmCache 容量自淘汰（v1.5 C）
     // =========================================================
 
     /// 写入三条记录（间隔 2ms 保证时间戳可区分顺序），

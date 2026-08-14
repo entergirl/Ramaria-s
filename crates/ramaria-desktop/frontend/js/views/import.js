@@ -262,7 +262,6 @@ var ImportView = (function () {
     /**
      * 计算并显示预估剩余时间。
      *
-     * v1.5 I（T-V15-4-004）:
      * - 优先使用后端分层 EMA 估算结果（payload.eta_seconds，已含各阶段
      *   L1/L2/L3 剩余量 × EMA 单次耗时求和）。
      * - 后端不可得（无样本/首次运行/旧后端）→ 回退既有线性 rate 估算：
@@ -383,7 +382,7 @@ var ImportView = (function () {
             html += '<div class="import-file-info">';
             html += '<div class="import-file-info-icon">📁</div>';
             html += '<div class="import-file-info-details">';
-            html += '<div class="import-file-info-name">' + _escapeHtml(_selectedFileName) + '</div>';
+            html += '<div class="import-file-info-name">' + RamariaEscape.escapeHtml(_selectedFileName) + '</div>';
             html += '<div class="import-file-info-size">' + (_selectedFileSize || '未知大小') + '</div>';
             html += '</div>';
             html += '</div>';
@@ -424,28 +423,28 @@ var ImportView = (function () {
         html += '<div class="import-option-group">';
         html += '<div class="import-option-label">我的 Persona 名称（可选）</div>';
         html += '<div class="import-option-desc">导出的消息中，你自己的发言将关联到此 Persona。留空则使用文件中解析的导出者名称。</div>';
-        html += '<input type="text" class="input" id="input-persona-name" placeholder="例如: 小王" value="' + _escapeHtml(_personaName) + '" />';
+        html += '<input type="text" class="input" id="input-persona-name" placeholder="例如: 小王" value="' + RamariaEscape.escapeHtml(_personaName) + '" />';
         html += '</div>';
 
  // 导出者 Persona UID
         html += '<div class="import-option-group">';
         html += '<div class="import-option-label">我的 Persona UID（可选）</div>';
         html += '<div class="import-option-desc">指定 UID（如 char-123456789）。留空则根据 QQ 号自动生成。</div>';
-        html += '<input type="text" class="input" id="input-self-persona-uid" placeholder="char-123456789" value="' + _escapeHtml(_selfPersonaUid) + '" />';
+        html += '<input type="text" class="input" id="input-self-persona-uid" placeholder="char-123456789" value="' + RamariaEscape.escapeHtml(_selfPersonaUid) + '" />';
         html += '</div>';
 
  // 对方 Persona 名称
         html += '<div class="import-option-group">';
         html += '<div class="import-option-label">对方 Persona 名称（可选）</div>';
         html += '<div class="import-option-desc">对话中对方的发言将关联到此 Persona。留空则使用文件中解析的对方名称。</div>';
-        html += '<input type="text" class="input" id="input-other-persona-name" placeholder="例如: 好友小李" value="' + _escapeHtml(_otherPersonaName) + '" />';
+        html += '<input type="text" class="input" id="input-other-persona-name" placeholder="例如: 好友小李" value="' + RamariaEscape.escapeHtml(_otherPersonaName) + '" />';
         html += '</div>';
 
  // 对方 Persona UID
         html += '<div class="import-option-group">';
         html += '<div class="import-option-label">对方 Persona UID（可选）</div>';
         html += '<div class="import-option-desc">指定 UID。留空则根据 QQ 号自动生成。</div>';
-        html += '<input type="text" class="input" id="input-other-persona-uid" placeholder="char-123456789" value="' + _escapeHtml(_otherPersonaUid) + '" />';
+        html += '<input type="text" class="input" id="input-other-persona-uid" placeholder="char-123456789" value="' + RamariaEscape.escapeHtml(_otherPersonaUid) + '" />';
         html += '</div>';
 
  // 切割间隔
@@ -481,7 +480,7 @@ var ImportView = (function () {
         html += '<div class="import-report">';
         html += '<div class="import-report-header">';
         html += '<div class="import-report-title">📊 文件解析报告</div>';
-        html += '<div class="import-report-subtitle">' + _escapeHtml(_selectedFileName) + '</div>';
+        html += '<div class="import-report-subtitle">' + RamariaEscape.escapeHtml(_selectedFileName) + '</div>';
         html += '</div>';
         html += '<div class="import-report-body">';
 
@@ -508,13 +507,13 @@ var ImportView = (function () {
  // 详细信息（深色昵称 @浅色ID 格式，QQ 号也浅色）
         html += '<div class="import-report-details">';
         html += '<div class="import-report-section">';
-        html += '<strong>导出者:</strong> ' + _escapeHtml(report.selfName || '未知') + ' <span class="text-tertiary">@' + _escapeHtml(report.selfId || '') + '</span>' + (report.selfUin ? ' <span class="text-tertiary">[QQ:' + _escapeHtml(report.selfUin) + ']</span>' : '') + '<br />';
+        html += '<strong>导出者:</strong> ' + RamariaEscape.escapeHtml(report.selfName || '未知') + ' <span class="text-tertiary">@' + RamariaEscape.escapeHtml(report.selfId || '') + '</span>' + (report.selfUin ? ' <span class="text-tertiary">[QQ:' + RamariaEscape.escapeHtml(report.selfUin) + ']</span>' : '') + '<br />';
         if (report.otherName) {
-            html += '<strong>对方:</strong> ' + _escapeHtml(report.otherName) + ' <span class="text-tertiary">@' + _escapeHtml(report.otherUid || '') + '</span>' + (report.otherUin ? ' <span class="text-tertiary">[QQ:' + _escapeHtml(report.otherUin) + ']</span>' : '') + '<br />';
+            html += '<strong>对方:</strong> ' + RamariaEscape.escapeHtml(report.otherName) + ' <span class="text-tertiary">@' + RamariaEscape.escapeHtml(report.otherUid || '') + '</span>' + (report.otherUin ? ' <span class="text-tertiary">[QQ:' + RamariaEscape.escapeHtml(report.otherUin) + ']</span>' : '') + '<br />';
         } else {
-            html += '<strong>对话对象:</strong> ' + _escapeHtml(report.chatName || '未知') + '<br />';
+            html += '<strong>对话对象:</strong> ' + RamariaEscape.escapeHtml(report.chatName || '未知') + '<br />';
         }
-        html += '<strong>时间范围:</strong> ' + _escapeHtml(report.timeRange || '未知') + '<br />';
+        html += '<strong>时间范围:</strong> ' + RamariaEscape.escapeHtml(report.timeRange || '未知') + '<br />';
         html += '<strong>Session 切割:</strong> ' + report.sessionCount + ' 个会话（间隔 ' + _gapMinutes + ' 分钟）';
         html += '</div>';
         html += '</div>';
@@ -548,12 +547,12 @@ var ImportView = (function () {
         if (prog.phase === 'l1') titleText = '正在生成 L1 会话摘要...';
         else if (prog.phase === 'l2') titleText = '正在提取 L2 事件...';
         else if (prog.phase === 'l3') titleText = '正在推断 L3 性格画像...';
-        html += '<div class="import-progress-title">' + _escapeHtml(titleText) + '</div>';
+        html += '<div class="import-progress-title">' + RamariaEscape.escapeHtml(titleText) + '</div>';
 
  // 进度描述
         var descText = '请耐心等待，处理大文件可能需要一些时间';
         if (prog.message) descText = prog.message;
-        html += '<div class="import-progress-desc">' + _escapeHtml(descText) + '</div>';
+        html += '<div class="import-progress-desc">' + RamariaEscape.escapeHtml(descText) + '</div>';
 
  // 进度条增强——放大高度 + 会话计数 + 预估剩余时间
         if (prog.total > 0) {
@@ -640,7 +639,7 @@ var ImportView = (function () {
         html += '<div class="import-result-stat-label">写入消息</div>';
         html += '</div>';
         html += '<div class="import-result-stat">';
-        html += '<div class="import-result-stat-value">' + _escapeHtml(result.mode || '') + '</div>';
+        html += '<div class="import-result-stat-value">' + RamariaEscape.escapeHtml(result.mode || '') + '</div>';
         html += '<div class="import-result-stat-label">导入模式</div>';
         html += '</div>';
  // 展示 L1 处理状态（如果 deep 模式或已有统计）
@@ -653,7 +652,7 @@ var ImportView = (function () {
         html += '</div>';
 
         if (result.reportSummary) {
-            html += '<div class="import-result-summary">' + _escapeHtml(result.reportSummary) + '</div>';
+            html += '<div class="import-result-summary">' + RamariaEscape.escapeHtml(result.reportSummary) + '</div>';
         }
 
         html += '</div></div>';
@@ -1202,23 +1201,6 @@ var ImportView = (function () {
         if (RamariaRouter) {
             RamariaRouter.showView('chat', { forceReenter: true });
         }
-    }
-
- // =========================================================
- // 辅助函数
- // =========================================================
-
- /**
- * HTML 实体转义，防止 XSS。
- */
-    function _escapeHtml(text) {
-        if (!text) return '';
-        return String(text)
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;')
-            .replace(/'/g, '&#039;');
     }
 
  // =========================================================

@@ -26,7 +26,7 @@ use uuid::Uuid;
 /// - 将 LLM provider 的原始 `StreamDelta` 转换为 UI 友好的事件
 /// - 统一流式增量、完成通知和错误三种场景
 /// - 每个事件独立携带时间戳，支持前端按序渲染
-/// - `--json` 序列化为 `{"type":"delta|done|error",...}` 事件流（D-V15-011）
+/// - `--json` 序列化为 `{"type":"delta|done|error",...}` 事件流（决策见 docs/dev-1.5/v1.5-decisions.md）
 ///
 /// 变体:
 /// - `Delta`: LLM 输出的增量文本片段

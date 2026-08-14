@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-desktop/src/commands/persona.rs - 人格管理 Tauri Commands
+//! crates/ramaria-desktop/src/commands/persona.rs - 人格管理 Tauri Commands
 //!
 //! 设计特点:
 //! - 提供完整的 Persona CRUD 前端接口：列表（全字段）、编辑、刷新
@@ -63,7 +63,7 @@ pub struct PersonaUpdateRequest {
 }
 
 // =========================================================
-// list_personas_full — 列出所有人格（全字段）(T-V11-6-003)
+// list_personas_full — 列出所有人格（全字段）
 // =========================================================
 
 /// 列出所有已注册人格的完整信息。
@@ -113,7 +113,7 @@ pub async fn list_personas_full(
 }
 
 // =========================================================
-// update_persona_info — 更新人格基本信息 (T-V11-6-004)
+// update_persona_info — 更新人格基本信息
 // =========================================================
 
 /// 更新指定人格的基本信息（名称、头像、描述）。
@@ -208,7 +208,7 @@ pub async fn update_persona_info(
 }
 
 // =========================================================
-// refresh_persona — 刷新指定人格的记忆管线 (T-V11-6-005)
+// refresh_persona — 刷新指定人格的记忆管线
 // =========================================================
 
 /// 触发指定 persona 的 L2→L3 记忆管线。

@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/event/prompt.rs - 事件提取 Prompt 模板
+//! crates/ramaria-memory/src/event/prompt.rs - 事件提取 Prompt 模板
 //!
 //! 设计特点:
 //! - 事件提取 Prompt: 从多条 L1 摘要中提取结构化事件（11 个推断属性）
@@ -13,7 +13,7 @@
 
 /// 事件提取 Prompt 模板。
 ///
-/// v2.0 重构 (CRAFT 框架):
+/// CRAFT 框架:
 /// - Context: 明确任务背景——从 L1 摘要提取结构化事件。
 /// - Role: 历史学家视角（证据驱动）+ 心理学视角（动机推断）。
 /// - Action: 两个子任务——事件提取（11 字段）+ 关系提取（6 种类型）。
@@ -111,7 +111,6 @@ pub const EVENT_EXTRACTION_PROMPT: &str = r#"# Context（背景）
 
 /// 补充上下文段落的标题/说明。
 ///
-/// v2.0 重构:
 /// - 从中文自然语言改为与 CRAFT 框架一致的 Markdown 标题格式。
 /// - 强化三个约束指令的措辞（"仅供背景参考"→明确标注为补充信息，
 ///   "不得据此编造"→更直接的口吻，"优先合并"→具体操作约束）。
@@ -139,7 +138,7 @@ pub const CONTEXT_ITEM_TEMPLATE: &str = "- [{layer}] {summary}";
 
 /// 态度去情境化重述 Prompt。
 ///
-/// v2.0 重构 (CRAFT 框架):
+/// CRAFT 框架:
 /// - Context: 明确任务背景——态度→通用行为模式。
 /// - Role: 个案抽象为模式的心理学研究者视角。
 /// - Action: 去情境化重述（剥离实体、保留情感核心）。
@@ -374,7 +373,7 @@ mod tests {
         assert!(prompt.contains("逻辑错误"));
     }
 
-    /// v1.4 M4（T-V14-4-004）：提取 Prompt 含因果线索段落——
+    /// v1.4 M4：提取 Prompt 含因果线索段落——
     /// cause 槽位说明、仅供背景参考标注、防编造约束。
     #[test]
     fn event_prompt_contains_evidence_clue_section() {

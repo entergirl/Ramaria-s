@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/inference/clustering.rs - 态度语义聚类
+//! crates/ramaria-memory/src/inference/clustering.rs - 态度语义聚类
 //!
 //! 设计特点:
 //! - 对去情境化后的 attitude（paraphrase）embedding 进行密度聚类
@@ -109,27 +109,14 @@ pub struct ClusteringResult {
 ///
 /// 公式: cos(θ) = (a·b) / (||a|| · ||b||)
 ///
-/// 参数:
-/// - `a`, `b`: 两个等长向量。
+/// 说明（v1.5 收敛）:
+/// - 实现统一收敛到 `crate::similarity::cosine_similarity`，本函数为薄包装，
+///   保持公开 API（`ramaria_memory::cosine_similarity`）签名不变。
 ///
 /// 返回:
 /// - 余弦相似度 -1.0..1.0。若任一向量为零向量则返回 0.0。
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
-    debug_assert_eq!(a.len(), b.len(), "向量长度必须相等");
-    let mut dot = 0.0f64;
-    let mut norm_a = 0.0f64;
-    let mut norm_b = 0.0f64;
-    for i in 0..a.len() {
-        let ai = a[i] as f64;
-        let bi = b[i] as f64;
-        dot += ai * bi;
-        norm_a += ai * ai;
-        norm_b += bi * bi;
-    }
-    if norm_a < 1e-12 || norm_b < 1e-12 {
-        return 0.0;
-    }
-    (dot / (norm_a.sqrt() * norm_b.sqrt())).clamp(-1.0, 1.0)
+    crate::similarity::cosine_similarity(a, b)
 }
 
 /// 计算所有样本间的余弦相似度矩阵。
@@ -620,23 +607,6 @@ mod tests {
             paraphrase: paraphrase.to_string(),
             embedding,
             source_index: index,
-        }
-    }
-
-    // ---- 余弦相似度 ----
-
-    /// cosine_similarity 各输入参数化验证。
-    #[test]
-    fn cosine_similarity_cases() {
-        let cases: Vec<(Vec<f32>, Vec<f32>, f64)> = vec![
-            (vec![1.0, 0.0, 0.0], vec![1.0, 0.0, 0.0], 1.0), // 相同
-            (vec![1.0, 0.0], vec![0.0, 1.0], 0.0),           // 正交
-            (vec![1.0, 0.0], vec![-1.0, 0.0], -1.0),         // 反向
-            (vec![0.0, 0.0], vec![1.0, 1.0], 0.0),           // 零向量
-        ];
-        for (a, b, expected) in cases {
-            let sim = cosine_similarity(&a, &b);
-            assert!((sim - expected).abs() < 1e-10, "期望 {expected}");
         }
     }
 

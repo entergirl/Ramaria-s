@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/tests/m3_integration.rs - M3 L3 管线闭环集成测试
+//! crates/ramaria-app/tests/m3_integration.rs - M3 L3 管线闭环集成测试
 //!
 //! 设计特点:
 //! - 使用 MockStorage + Mock LLM 验证 L3 Phase B/C 全链路
@@ -310,7 +310,7 @@ fn make_test_events(persona_uid: &str) -> Vec<MemoryEvent> {
 }
 
 // =========================================================
-// T-V12-3-008: L3 全管线端到端测试
+// L3 全管线端到端测试
 // =========================================================
 
 /// 测试使用 mock LLM 产出 PersonalityTrait 记录并写入 DB。
@@ -493,7 +493,7 @@ async fn phase_c_confidence_and_evidence() {
 //  setup 相同，其"推断前为空"断言已并入 phase_b_produces_traits_with_mock_llm，已删除）
 
 // =========================================================
-// T-V12-3-009: System Prompt Block A 验证
+// System Prompt Block A 验证
 // =========================================================
 
 /// 验证 L3 推断后的 trait 包含结构化性格标签，可用于 System Prompt Block A。

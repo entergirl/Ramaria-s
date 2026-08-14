@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/utt/mod.rs - utt 话语块模块（v1.4 表达层）
+//! crates/ramaria-memory/src/utt/mod.rs - utt 话语块模块（v1.4 表达层）
 //!
 //! 设计特点:
 //! - 原文切分（splitter）+ 全量/增量构建（builder）两个子模块

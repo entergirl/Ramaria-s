@@ -281,7 +281,7 @@ pub async fn run(
         .context("导入写入失败")?;
 
     // Step 6.5: 为每个导入的 session 触发 L1 摘要生成
-    // (T-V11-5B-010): L1 摘要 persona_uid 存 NULL
+    // L1 摘要 persona_uid 存 NULL
     // —— 导入的 session 来自多人对话，摘要不应被特定画像视图独占
     let mut l1_ok = 0u32;
     let mut l1_skip = 0u32;

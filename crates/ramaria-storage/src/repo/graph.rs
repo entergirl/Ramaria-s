@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-storage/src/repo/graph.rs - GraphNodes / GraphEdges CRUD
+//! crates/ramaria-storage/src/repo/graph.rs - GraphNodes / GraphEdges CRUD
 //!
 //! 设计特点:
 //! - 管理知识图谱实体节点和关系边

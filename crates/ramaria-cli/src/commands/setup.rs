@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-cli/src/commands/setup.rs - 首次配置向导
+//! crates/ramaria-cli/src/commands/setup.rs - 首次配置向导
 //!
 //! 设计特点:
 //! - 交互式三步: 选 provider → 配地址 → 输 API key（线上）
@@ -299,11 +299,11 @@ async fn create_initial_personas(app: &Arc<ramaria_app::App>) -> anyhow::Result<
 /// - 单文件读取失败 → 跳过该文件，继续处理其他文件。
 /// - 所有文件为空 → 尝试旧路径 `../config/persona.toml` 作为兼容回退。
 fn scan_personas_directory() -> Vec<(String, String, String)> {
-    let dir = Path::new("../config/personas");
+    let dir = crate::commands::persona::personas_dir();
     let mut results: Vec<(String, String, String)> = Vec::new();
 
     if dir.exists() && dir.is_dir() {
-        match std::fs::read_dir(dir) {
+        match std::fs::read_dir(&dir) {
             Ok(entries) => {
                 for entry in entries.flatten() {
                     let path = entry.path();

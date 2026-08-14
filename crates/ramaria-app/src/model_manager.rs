@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/src/model_manager.rs - 嵌入模型下载与校验管理
+//! crates/ramaria-app/src/model_manager.rs - 嵌入模型下载与校验管理
 //!
 //! 设计特点:
 //! - 管理嵌入模型的下载、SHA-256 校验、断点续传和目录管理

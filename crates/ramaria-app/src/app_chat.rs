@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/src/app_chat.rs - 核心对话管线
+//! crates/ramaria-app/src/app_chat.rs - 核心对话管线
 //!
 //! 设计特点:
 //! - `send_message` Steps 1-5 委托 `SendMessagePipeline` + 5 个独立 Stage 执行
@@ -382,8 +382,8 @@ impl App {
                 });
 
             // examples 由调用方（send_message）预选后传入：
-            // v1.4 起注入侧按话题/情绪/长度评分轮换（T-V14-3-003），
-            // 并在记忆检索未命中时作风格兜底（T-V14-3-004）。
+            // v1.4 起注入侧按话题/情绪/长度评分轮换，
+            // 并在记忆检索未命中时作风格兜底。
 
             // 冷启动兜底：facts/traits 均为空时，尝试加载 persona.toml
             // 优先从 DB persona.config 读取，其次回退到文件系统
@@ -417,7 +417,7 @@ impl App {
                 behavior_decision,
             };
 
-            // v1.4 M6（T-V14-6-004）：[examples].max_examples 经 RamariaConfig 传播，
+            // v1.4 M6：[examples].max_examples 经 RamariaConfig 传播，
             // 与 `load_examples_for_input` 的预选上限保持一致（双闸门）。
             let config = PromptConfig {
                 max_examples,
@@ -512,8 +512,8 @@ fn load_persona_toml_prompt(db_config: Option<&str>) -> Option<String> {
 /// 选择策略:
 /// - `examples.enabled=false` → 回退 v1.3：静态 `selected=1` 查询（`list_selected_examples`）。
 /// - `examples.enabled=true`：
-///   - 记忆检索命中（`memory_hit=true`）→ 不注入（避免与记忆内容重复，T-V14-3-004）；
-///   - 记忆未命中 → 从候选池按话题/情绪/长度评分轮换选择（T-V14-3-003），风格兜底。
+///   - 记忆检索命中（`memory_hit=true`）→ 不注入（避免与记忆内容重复）；
+///   - 记忆未命中 → 从候选池按话题/情绪/长度评分轮换选择，风格兜底。
 ///
 /// 降级:
 /// - 候选池为空 / 存储失败 → 空列表（不注入，等同 v1.3）。
@@ -724,7 +724,7 @@ async fn stream_forward_task(
 }
 
 // =========================================================
-// examples 预选测试（v1.4，T-V14-3-003/004）
+// examples 预选测试（v1.4）
 // =========================================================
 
 #[cfg(test)]

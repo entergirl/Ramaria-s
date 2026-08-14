@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-llm/tests/qwen3_embed_local_verify.rs - Qwen3-Embedding 本地回归验证
+//! crates/ramaria-llm/tests/qwen3_embed_local_verify.rs - Qwen3-Embedding 本地回归验证
 //!
 //! 修复回归：Qwen3-Embedding-0.6B 导入校验失败
 //! （config.json `"sliding_window": null` 无法被 candle qwen2::Config 解析 +

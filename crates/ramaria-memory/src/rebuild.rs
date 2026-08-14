@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/rebuild.rs - Ramaria 索引重建编排器
+//! crates/ramaria-memory/src/rebuild.rs - Ramaria 索引重建编排器
 //!
 //! 设计特点:
 //! - 编排 BM25 + 向量 + 图谱三通道索引的全量重建
@@ -6,6 +6,8 @@
 //! - 支持增量重建（仅重建指定通道）和全量重建
 //! - 不直接访问数据库——所有数据由调用方通过参数注入
 //! - 记录文档数量、耗时等观测指标
+//!
+//! 全量重建管线（README 核心特性）；v1.6 核查 desktop index 命令接线
 //!
 //! 重建流程:
 //! 1. 清空 Retriever 全部索引（clear）
@@ -87,15 +89,12 @@ impl std::fmt::Display for RebuildStats {
 /// - 支持仅重建指定通道（BM25 / 图谱）
 ///
 /// 用法:
-/// ```ignore
-/// let mut rebuilder = IndexRebuilder::new(RebuildConfig::default);
-/// let stats = rebuilder.rebuild_all(
-/// &mut retriever,
-/// &l1_docs,
-/// &l2_docs,
-/// &graph_nodes,
-/// &graph_edges,
-/// );
+/// ```
+/// use ramaria_memory::{IndexRebuilder, RebuildConfig, Retriever};
+/// let mut rebuilder = IndexRebuilder::new(RebuildConfig::default());
+/// let mut retriever = Retriever::new();
+/// let stats = rebuilder.rebuild_all(&mut retriever, &[], &[], &[], &[]);
+/// assert_eq!(stats.l1_count, 0);
 /// ```
 pub struct IndexRebuilder {
     config: RebuildConfig,

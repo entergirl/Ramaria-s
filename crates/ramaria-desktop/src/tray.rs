@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-desktop/src/tray.rs - 系统托盘模块
+//! crates/ramaria-desktop/src/tray.rs - 系统托盘模块
 //!
 //! 设计特点:
 //! - 基于 Tauri 2 tray-icon feature，注册系统托盘图标和右键菜单

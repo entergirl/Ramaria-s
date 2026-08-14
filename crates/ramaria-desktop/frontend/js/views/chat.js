@@ -607,7 +607,7 @@ var RamariaChatView = (function () {
  /**
  * 设置对话视图的只读模式。
  *
- * 对齐 T-V11-0-011: 已关闭 session 时隐藏输入框，
+ * 已关闭 session 时隐藏输入框，
  * 显示"此对话已关闭"提示和"开始新对话"按钮。
  */
     function _setReadonlyMode(isReadonly) {
@@ -638,7 +638,7 @@ var RamariaChatView = (function () {
  /**
  * 处理"保存对话"按钮点击。
  *
- * 对齐 T-V11-0-012 + Python `force_close_current_session`:
+ * 对齐保存会话行为（不清屏）:
  * - 调用 save_current_session Tauri Command
  * - 不清屏（保留当前消息）
  * - 插入系统分隔线"── 对话已保存 ──"

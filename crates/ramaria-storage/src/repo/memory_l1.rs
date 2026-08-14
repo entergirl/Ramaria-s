@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-storage/src/repo/memory_l1.rs - L1 单次会话摘要存取模块
+//! crates/ramaria-storage/src/repo/memory_l1.rs - L1 单次会话摘要存取模块
 //!
 //! 设计特点:
 //! - id 使用 UUID v4（TEXT 主键），与 sessions/messages 保持 ID 类型一致
@@ -256,13 +256,13 @@ pub async fn list_recent_by_persona(
 }
 
 // =========================================================
-// 测试（v1.4 M4 T-V14-4-003：evidence_notes 结构化读写集成测试）
+// 测试（evidence_notes 结构化读写集成测试）
 // =========================================================
 //
 // 说明:
 // - 使用内存 SQLite 真库（database::init_test_pool 自动应用全部 migration）。
 // - 迁移后读取测试手动构造"旧库（基线 schema + 旧格式数据）"再应用 v1.4 迁移，
-//   验证 D-V14-003 一次性迁移的产物可被 repo 结构化读取。
+//   验证 v1.4 一次性迁移的产物可被 repo 结构化读取（见 docs/dev-1.4/v1.4-decisions.md）。
 
 #[cfg(test)]
 mod tests {
@@ -317,7 +317,7 @@ mod tests {
         session_id
     }
 
-    /// 新格式往返：save → get，结构化槽位完整保留（T-V14-4-003 验收 1）。
+    /// 新格式往返：save → get，结构化槽位完整保留（验收 1）。
     #[tokio::test]
     async fn evidence_notes_structured_roundtrip_via_get() {
         let pool = database::init_test_pool().await.unwrap();
@@ -339,7 +339,7 @@ mod tests {
         assert_eq!(notes[0].cause.as_deref(), Some("需求变更频繁"));
     }
 
-    /// 新格式往返：save → list_by_session，多条含/不含槽位的线索均完整（T-V14-4-003 验收 1）。
+    /// 新格式往返：save → list_by_session，多条含/不含槽位的线索均完整（验收 1）。
     #[tokio::test]
     async fn evidence_notes_structured_roundtrip_via_list_by_session() {
         let pool = database::init_test_pool().await.unwrap();
@@ -369,7 +369,7 @@ mod tests {
     }
 
     /// 迁移后读取：旧格式字符串数组经 v1.4 迁移后，repo 按新格式读回结构化线索
-    /// （字符串落 text 槽位，其余置空；T-V14-4-003 验收 2，D-V14-003）。
+    /// （字符串落 text 槽位，其余置空；验收 2，v1.4 一次性迁移）。
     #[tokio::test]
     async fn evidence_notes_migrated_legacy_rows_readable() {
         use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -443,7 +443,7 @@ mod tests {
         assert!(notes[1].time.is_none() && notes[1].who.is_none() && notes[1].cause.is_none());
     }
 
-    /// 空值往返：evidence_notes 为 None → save → get 仍为 None（T-V14-4-003 验收 3）。
+    /// 空值往返：evidence_notes 为 None → save → get 仍为 None（验收 3）。
     #[tokio::test]
     async fn evidence_notes_none_roundtrip() {
         let pool = database::init_test_pool().await.unwrap();
@@ -458,7 +458,7 @@ mod tests {
     }
 
     /// 空数组往返：evidence_notes 为 Some(vec![]) → save → get 读回空数组
-    /// （存储为 `[]` 而非 NULL，与 None 语义区分；T-V14-4-003 验收 3）。
+    /// （存储为 `[]` 而非 NULL，与 None 语义区分；验收 3）。
     #[tokio::test]
     async fn evidence_notes_empty_array_roundtrip() {
         let pool = database::init_test_pool().await.unwrap();
@@ -474,7 +474,7 @@ mod tests {
     }
 
     /// continuation 往返：Some("延续") → save → get 读回；None → 读回 None
-    /// （v1.5 B2 T-V15-4-001 存储层验收）。
+    /// （v1.5 B2 存储层验收）。
     #[tokio::test]
     async fn continuation_roundtrip() {
         let pool = database::init_test_pool().await.unwrap();

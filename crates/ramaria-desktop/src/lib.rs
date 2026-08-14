@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-desktop/src/lib.rs - Ramaria Tauri 桌面应用入口
+//! crates/ramaria-desktop/src/lib.rs - Ramaria Tauri 桌面应用入口
 //!
 //! 设计特点:
 //! - 管理应用初始化全流程：数据库 → 配置 → LLM Provider → Embedding 恢复 → App 构造
@@ -145,6 +145,68 @@ fn ensure_data_dir(path: &PathBuf) -> std::io::Result<()> {
 }
 
 // =========================================================
+// LLM Provider 构造
+// =========================================================
+
+/// 按 provider 类型构造 LLM Provider（三处调用收敛为单点实现）。
+///
+/// 参数:
+/// - `provider`: LLM 后端类型（LmStudio / DeepSeek / OpenAI）
+/// - `config`: 后端配置（含 base_url / model_id / capability）
+/// - `keychain`: OS keychain 实例（线上 provider 构造时读取 API key）
+/// - `cache`: LLM 响应精确缓存（v1.5 C；None = 不注入，行为回退 v1.4）
+///
+/// 返回:
+/// - `Ok(Arc<dyn LlmProvider>)` 构造成功
+/// - `Err(String)` 构造失败（用户友好的中文错误描述）
+///
+/// 说明:
+/// - 供 `init_app` / `update_backend_config` / `run_setup` 共用，
+///   保证三处 cache 注入条件与错误文案一致。
+pub(crate) fn build_llm_provider(
+    provider: ramaria_core::types::LlmProvider,
+    config: &ramaria_core::types::BackendConfig,
+    keychain: Arc<ramaria_llm::keychain::Keychain>,
+    cache: Option<Arc<dyn ramaria_core::traits::LlmResponseCache>>,
+) -> Result<Arc<dyn ramaria_core::traits::LlmProvider>, String> {
+    let provider_arc: Arc<dyn ramaria_core::traits::LlmProvider> = match provider {
+        ramaria_core::types::LlmProvider::LmStudio => {
+            let instance = ramaria_llm::lm_studio::LmStudioProvider::new(config.clone())
+                .map_err(|e| format!("创建 LM Studio provider 失败: {}", e))?;
+            let instance = match &cache {
+                Some(cache) => instance.with_cache(Arc::clone(cache)),
+                None => instance,
+            };
+            Arc::new(instance)
+        }
+        ramaria_core::types::LlmProvider::DeepSeek => {
+            let instance =
+                ramaria_llm::deepseek::DeepSeekProvider::new(config.clone(), Arc::clone(&keychain))
+                    .map_err(|e| format!("创建 DeepSeek provider 失败: {}", e))?;
+            let instance = match &cache {
+                Some(cache) => instance.with_cache(Arc::clone(cache)),
+                None => instance,
+            };
+            Arc::new(instance)
+        }
+        ramaria_core::types::LlmProvider::OpenAI => {
+            let instance =
+                ramaria_llm::openai::OpenAIProvider::new(config.clone(), Arc::clone(&keychain))
+                    .map_err(|e| format!("创建 OpenAI provider 失败: {}", e))?;
+            let instance = match &cache {
+                Some(cache) => instance.with_cache(Arc::clone(cache)),
+                None => instance,
+            };
+            Arc::new(instance)
+        }
+        _ => {
+            return Err(format!("不支持的 LLM provider: {}", provider.as_str()));
+        }
+    };
+    Ok(provider_arc)
+}
+
+// =========================================================
 // 应用初始化
 // =========================================================
 
@@ -156,7 +218,7 @@ fn ensure_data_dir(path: &PathBuf) -> std::io::Result<()> {
 /// 3. 创建 Keychain
 /// 4. 根据配置创建 LLM Provider
 /// 5. 尝试恢复已保存的嵌入模型（如有）
-/// 6. 配置双写同步：加载 config.toml + DB 两侧并做一致性校验（v1.4 D-V14-006）
+/// 6. 配置双写同步：加载 config.toml + DB 两侧并做一致性校验（见 docs/dev-1.5/v1.5-decisions.md 决策记录）
 /// 7. 构造 App 实例
 /// 8. 刷新应用状态
 ///
@@ -273,7 +335,7 @@ async fn init_app(
 
     // Step 7.5: 创建 LLM Provider（基于同步后的配置注入精确缓存，v1.5 C）
     //
-    // 缓存策略（[cache] 配置组，D-V15-008）：
+    // 缓存策略（[cache] 配置组，见 docs/dev-1.5/v1.5-decisions.md 决策记录）：
     // - `enabled=true`（默认）：创建 SqliteLlmCache 并注入 provider，
     //   重跑/重试/失败恢复场景命中缓存不重复花费 API 账单；
     // - `enabled=false`：不注入缓存，LLM 调用行为回退 v1.4。
@@ -288,47 +350,12 @@ async fn init_app(
     } else {
         None
     };
-    let llm: Arc<dyn ramaria_core::LlmProviderTrait> = match backend_config.provider {
-        ramaria_core::types::LlmProvider::LmStudio => {
-            let provider = ramaria_llm::lm_studio::LmStudioProvider::new(backend_config.clone())
-                .map_err(|e| format!("创建 LM Studio provider 失败: {}", e))?;
-            let provider = match &llm_cache {
-                Some(cache) => provider.with_cache(Arc::clone(cache)),
-                None => provider,
-            };
-            Arc::new(provider)
-        }
-        ramaria_core::types::LlmProvider::DeepSeek => {
-            let provider = ramaria_llm::deepseek::DeepSeekProvider::new(
-                backend_config.clone(),
-                Arc::clone(&keychain),
-            )
-            .map_err(|e| format!("创建 DeepSeek provider 失败: {}", e))?;
-            let provider = match &llm_cache {
-                Some(cache) => provider.with_cache(Arc::clone(cache)),
-                None => provider,
-            };
-            Arc::new(provider)
-        }
-        ramaria_core::types::LlmProvider::OpenAI => {
-            let provider = ramaria_llm::openai::OpenAIProvider::new(
-                backend_config.clone(),
-                Arc::clone(&keychain),
-            )
-            .map_err(|e| format!("创建 OpenAI provider 失败: {}", e))?;
-            let provider = match &llm_cache {
-                Some(cache) => provider.with_cache(Arc::clone(cache)),
-                None => provider,
-            };
-            Arc::new(provider)
-        }
-        _ => {
-            return Err(format!(
-                "不支持的 LLM provider: {}",
-                backend_config.provider.as_str()
-            ));
-        }
-    };
+    let llm: Arc<dyn ramaria_core::LlmProviderTrait> = build_llm_provider(
+        backend_config.provider,
+        &backend_config,
+        Arc::clone(&keychain),
+        llm_cache.clone(),
+    )?;
     let app = ramaria_app::App::new(storage, llm, embedding, config, keychain);
     // 保存缓存实例引用：后端热更新（update_llm）时复用同一缓存
     app.set_llm_cache(llm_cache);

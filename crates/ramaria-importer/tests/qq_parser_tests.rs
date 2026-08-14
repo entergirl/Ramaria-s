@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-importer/tests/qq_parser_tests.rs - QQ JSON 解析器集成测试
+//! crates/ramaria-importer/tests/qq_parser_tests.rs - QQ JSON 解析器集成测试
 //!
 //! 设计特点:
 //! - 测试 qq-chat-exporter v6.x JSON 格式（语义化 type 名称）
@@ -160,7 +160,7 @@ fn parse_json_system_messages_skipped() {
         "chatInfo": {"selfUid": "u_self", "selfName": "我", "name": "好友", "type": "private", "peerUid": "u_friend"},
         "messages": [
             {"id":"1","timestamp":1704067200000,"type":"text","recalled":false,"system":false,"content":{"text":"正常消息","elements":[]},"sender":{"uid":"u_self","name":"我"}},
-            {"id":"2","timestamp":1704067260000,"type":"system","recalled":false,"system":true,"content":{"text":"烧酒领取了茄子的红包","elements":[{"type":"system","data":{"subType":17}}]},"sender":{"uid":"未知","name":"系统消息"}},
+            {"id":"2","timestamp":1704067260000,"type":"system","recalled":false,"system":true,"content":{"text":"小明领取了小红发的红包","elements":[{"type":"system","data":{"subType":17}}]},"sender":{"uid":"未知","name":"系统消息"}},
             {"id":"3","timestamp":1704067320000,"type":"text","recalled":false,"system":false,"content":{"text":"又一条正常","elements":[]},"sender":{"uid":"u_self","name":"我"}}
         ]
     }"#;
@@ -666,15 +666,15 @@ fn parse_json_peer_uid_directly_from_chat_info() {
         "chatInfo": {
             "selfUid": "u_self",
             "selfUin": "10001",
-            "selfName": "烧酒",
-            "name": "omkidaso",
+            "selfName": "小明",
+            "name": "小红",
             "type": "private",
-            "peerUid": "u_I5Q7jwgQApoZIy8cBGOopA",
-            "peerUin": "2232537224"
+            "peerUid": "u_peer_example",
+            "peerUin": "9876543210"
         },
         "messages": [
-            {"id":"1","timestamp":1704067200001,"type":"text","recalled":false,"system":false,"content":{"text":"你好","elements":[]},"sender":{"uid":"u_self","name":"烧酒","uin":"10001"}},
-            {"id":"2","timestamp":1704067200002,"type":"text","recalled":false,"system":false,"content":{"text":"你好呀","elements":[]},"sender":{"uid":"u_I5Q7jwgQApoZIy8cBGOopA","name":"omkidaso","uin":"2232537224"}}
+            {"id":"1","timestamp":1704067200001,"type":"text","recalled":false,"system":false,"content":{"text":"你好","elements":[]},"sender":{"uid":"u_self","name":"小明","uin":"10001"}},
+            {"id":"2","timestamp":1704067200002,"type":"text","recalled":false,"system":false,"content":{"text":"你好呀","elements":[]},"sender":{"uid":"u_peer_example","name":"小红","uin":"9876543210"}}
         ]
     }"#;
     let path = create_temp_json("parse_peer_uid", content);
@@ -686,15 +686,15 @@ fn parse_json_peer_uid_directly_from_chat_info() {
     let (_sessions, report) = result.unwrap();
 
     // 对方标识应直接从 chatInfo 提取
-    assert_eq!(report.other_uid, "u_I5Q7jwgQApoZIy8cBGOopA");
-    assert_eq!(report.other_uin.as_deref(), Some("2232537224"));
-    assert_eq!(report.other_name, "omkidaso");
+    assert_eq!(report.other_uid, "u_peer_example");
+    assert_eq!(report.other_uin.as_deref(), Some("9876543210"));
+    assert_eq!(report.other_name, "小红");
 
     // summary 应包含双方标识信息
     let summary = report.summary();
     assert!(summary.contains("QQ号=10001"));
-    assert!(summary.contains("omkidaso"));
-    assert!(summary.contains("QQ号=2232537224"));
+    assert!(summary.contains("小红"));
+    assert!(summary.contains("QQ号=9876543210"));
 }
 
 #[test]
@@ -731,14 +731,14 @@ fn parse_json_dual_prefix_both_parties_have_name_prefix() {
     let content = r#"{
         "chatInfo": {
             "selfUid": "u_self",
-            "selfName": "烧酒",
-            "name": "omkidaso",
+            "selfName": "小明",
+            "name": "小红",
             "type": "private",
             "peerUid": "u_other"
         },
         "messages": [
-            {"id":"1","timestamp":1704067200001,"type":"text","recalled":false,"system":false,"content":{"text":"你好","elements":[]},"sender":{"uid":"u_self","name":"烧酒","uin":"10001"}},
-            {"id":"2","timestamp":1704067200002,"type":"text","recalled":false,"system":false,"content":{"text":"你好呀","elements":[]},"sender":{"uid":"u_other","name":"omkidaso","uin":"123456789"}}
+            {"id":"1","timestamp":1704067200001,"type":"text","recalled":false,"system":false,"content":{"text":"你好","elements":[]},"sender":{"uid":"u_self","name":"小明","uin":"10001"}},
+            {"id":"2","timestamp":1704067200002,"type":"text","recalled":false,"system":false,"content":{"text":"你好呀","elements":[]},"sender":{"uid":"u_other","name":"小红","uin":"123456789"}}
         ]
     }"#;
     let path = create_temp_json("parse_dual_prefix", content);
@@ -749,12 +749,12 @@ fn parse_json_dual_prefix_both_parties_have_name_prefix() {
     assert!(result.is_ok());
     let (sessions, _report) = result.unwrap();
     assert_eq!(sessions.len(), 1);
-    // 导出者消息应有 [烧酒] 前缀
+    // 导出者消息应有 [小明] 前缀
     assert_eq!(sessions[0].messages[0].role, "user");
-    assert_eq!(sessions[0].messages[0].content, "[烧酒] 你好");
-    // 对方消息也有 [omkidaso] 前缀
+    assert_eq!(sessions[0].messages[0].content, "[小明] 你好");
+    // 对方消息也有 [小红] 前缀
     assert_eq!(sessions[0].messages[1].role, "assistant");
-    assert_eq!(sessions[0].messages[1].content, "[omkidaso] 你好呀");
+    assert_eq!(sessions[0].messages[1].content, "[小红] 你好呀");
 }
 
 #[test]
@@ -791,13 +791,13 @@ fn parse_json_fingerprint_consistent_with_dual_prefix() {
     let content = r#"{
         "chatInfo": {
             "selfUid": "u_self",
-            "selfName": "烧酒",
+            "selfName": "小明",
             "name": "好友",
             "type": "private",
             "peerUid": "u_friend"
         },
         "messages": [
-            {"id":"1","timestamp":1704067200001,"type":"text","recalled":false,"system":false,"content":{"text":"你好","elements":[]},"sender":{"uid":"u_self","name":"烧酒"}},
+            {"id":"1","timestamp":1704067200001,"type":"text","recalled":false,"system":false,"content":{"text":"你好","elements":[]},"sender":{"uid":"u_self","name":"小明"}},
             {"id":"2","timestamp":1704067200002,"type":"text","recalled":false,"system":false,"content":{"text":"你好呀","elements":[]},"sender":{"uid":"u_friend","name":"好友"}}
         ]
     }"#;

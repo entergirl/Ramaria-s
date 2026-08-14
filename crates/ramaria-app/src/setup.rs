@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/src/setup.rs - 首次配置流程
+//! crates/ramaria-app/src/setup.rs - 首次配置流程
 //!
 //! 设计特点:
 //! - `check_setup_status`: 诊断当前配置状态，返回缺失项列表

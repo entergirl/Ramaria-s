@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-cli/src/commands/persona.rs - 人格文件管理命令
+//! crates/ramaria-cli/src/commands/persona.rs - 人格文件管理命令
 //!
 //! 设计特点:
 //! - show: 从 DB 读取所有 persona，展示 uid/name/kind/config 摘要
@@ -17,9 +17,31 @@ use std::sync::Arc;
 // 常量
 // =========================================================
 
-/// 人格文件目录（相对于 rust/ 工作目录，即 ../config/personas/）。
-/// 运行期路径设计为 `%APPDATA%\Ramaria\personas\`，安装版首次释放到此目录。
-const PERSONAS_DIR: &str = "../config/personas";
+/// 人格文件目录（候选路径按优先级探测，取第一个存在的目录）。
+///
+/// 候选顺序:
+/// 1. `RAMARIA_DATA_DIR` 环境变量指向的数据根下的 `personas/`（运行期安装布局）；
+/// 2. 当前工作目录下的 `config/personas`（仓库根运行时）；
+/// 3. 上级目录的 `config/personas`（旧 `rust/` 布局兼容）。
+///
+/// 全部不存在时回退 `config/personas`（相对 CWD）。
+pub(crate) fn personas_dir() -> std::path::PathBuf {
+    let candidates: Vec<std::path::PathBuf> = std::env::var("RAMARIA_DATA_DIR")
+        .ok()
+        .map(|d| std::path::PathBuf::from(d).join("personas"))
+        .into_iter()
+        .chain([
+            std::path::PathBuf::from("config/personas"),
+            std::path::PathBuf::from("../config/personas"),
+        ])
+        .collect();
+
+    candidates
+        .iter()
+        .find(|c| c.is_dir())
+        .cloned()
+        .unwrap_or_else(|| std::path::PathBuf::from("config/personas"))
+}
 
 // =========================================================
 // 公共枚举与入口
@@ -71,7 +93,7 @@ pub async fn run(app: &Arc<ramaria_app::App>, cmd: PersonaCmd, json: bool) -> an
 ///
 /// - `--json`: 输出 `{"personas":[{uid,name,kind,source,active}...]}` 信封。
 /// - 文本模式：紧凑表格（uid / 名称 / kind / 来源 / 状态）。
-/// - 支持 --limit/--offset 分页（T-V15-1-006 列表命令统一约定）。
+/// - 支持 --limit/--offset 分页（列表命令统一约定）。
 async fn run_list(
     app: &Arc<ramaria_app::App>,
     json: bool,
@@ -170,10 +192,7 @@ async fn run_show(app: &Arc<ramaria_app::App>, json: bool) -> anyhow::Result<()>
 
     if personas.is_empty() {
         crate::ui::info("暂无已注册的人格");
-        crate::ui::info(&format!(
-            "人格文件目录: {}",
-            Path::new(PERSONAS_DIR).display()
-        ));
+        crate::ui::info(&format!("人格文件目录: {}", personas_dir().display()));
         crate::ui::info("将 .toml 文件放入该目录后运行 `ramaria persona reload` 加载");
         return Ok(());
     }
@@ -191,7 +210,7 @@ async fn run_show(app: &Arc<ramaria_app::App>, json: bool) -> anyhow::Result<()>
     // 提示文件路径
     crate::ui::info(&format!(
         "提示: 编辑 `{}` 下的 .toml 文件后运行 `ramaria persona reload` 同步",
-        PERSONAS_DIR
+        personas_dir().display()
     ));
     Ok(())
 }
@@ -239,12 +258,12 @@ fn display_persona(p: &Persona) {
 /// 3. 逐个文件读取 → 解析 assistant_name → 创建或更新 DB 记录。
 /// 4. 输出加载结果摘要。
 async fn run_reload(app: &Arc<ramaria_app::App>, uid: Option<String>) -> anyhow::Result<()> {
-    let dir = Path::new(PERSONAS_DIR);
+    let dir = personas_dir();
 
     if !dir.exists() {
         return Err(anyhow::anyhow!(
             "人格文件目录不存在: {}\n\
-             请确认工作目录在 rust/ 下，或创建 ../config/personas/ 目录并放入 .toml 文件。",
+             请确认工作目录在仓库根下，或将 .toml 文件放入 config/personas/ 目录。",
             dir.display()
         ));
     }
@@ -253,7 +272,7 @@ async fn run_reload(app: &Arc<ramaria_app::App>, uid: Option<String>) -> anyhow:
     }
 
     // 收集要处理的文件
-    let files = collect_toml_files(dir, uid.as_deref())?;
+    let files = collect_toml_files(&dir, uid.as_deref())?;
 
     if files.is_empty() {
         if let Some(ref target_uid) = uid {

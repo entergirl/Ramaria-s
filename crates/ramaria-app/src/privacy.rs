@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/src/privacy.rs - 隐私确认流程
+//! crates/ramaria-app/src/privacy.rs - 隐私确认流程
 //!
 //! 设计特点:
 //! - 按 provider + base_url 粒度检查隐私确认状态

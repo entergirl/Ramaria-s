@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/rag.rs — Persona-Aware RAG（检索增强生成）
+//! crates/ramaria-memory/src/rag.rs — Persona-Aware RAG（检索增强生成）
 //!
 //! 设计特点:
 //! - 在 retriever 的结果上叠加 Persona-Aware 过滤逻辑
@@ -14,7 +14,6 @@
 //!
 //! 上下文格式化（对接 5-Block System Prompt）:
 //! - Block C (记忆上下文): 2-3 段 L1+L2 格式化文字
-//! - Block E (参考信息): 图谱实体关系描述
 
 use crate::retriever::SearchResult;
 use ramaria_core::types::PersonaKind;
@@ -137,68 +136,6 @@ pub fn format_context_text(results: &[&SearchResult], config: &RagConfig) -> Str
     }
 
     lines.join("\n")
-}
-
-/// 从检索结果中提取图谱实体列表（供 System Prompt Block E 使用）。
-///
-/// 格式:
-/// ```text
-/// [知识图谱]
-/// - Python (模块): 用于机器学习的数据分析
-/// - 机器学习 (项目): 关联 Python, 数据清洗
-/// ```
-pub fn format_graph_context(results: &[&SearchResult], config: &RagConfig) -> Option<String> {
-    if !config.include_graph_entities {
-        return None;
-    }
-
-    let entities: Vec<&str> = results
-        .iter()
-        .filter(|r| r.doc_summary.starts_with("[图谱实体]"))
-        .map(|r| r.doc_summary.as_str())
-        .collect();
-
-    if entities.is_empty() {
-        return None;
-    }
-
-    let mut lines = Vec::with_capacity(entities.len() + 2);
-    lines.push("[知识图谱]".to_string());
-
-    for (i, entity) in entities.iter().enumerate() {
-        // 去掉 "[图谱实体] " 前缀
-        let clean = entity.strip_prefix("[图谱实体] ").unwrap_or(entity);
-        lines.push(format!("{}. {}", i + 1, clean));
-    }
-
-    Some(lines.join("\n"))
-}
-
-/// 一站式 RAG 上下文组装。
-///
-/// 流程:
-/// 1. 按 persona_kind 过滤结果
-/// 2. 格式化为上下文文本
-/// 3. 可选地附加图谱实体
-///
-/// 返回完整上下文字符串，可直接注入 System Prompt。
-pub fn assemble_rag_context(
-    results: &[SearchResult],
-    persona_uid: &str,
-    config: &RagConfig,
-) -> String {
-    let kind = PersonaKind::from_uid(persona_uid);
-    let filtered = filter_by_persona(results, kind, config);
-
-    let mut context = format_context_text(&filtered, config);
-
-    if let Some(graph) = format_graph_context(&filtered, config) {
-        context.push('\n');
-        context.push('\n');
-        context.push_str(&graph);
-    }
-
-    context
 }
 
 // =========================================================
@@ -405,117 +342,5 @@ mod tests {
 
         // 截断后后应有省略号
         assert!(text.contains('…'));
-    }
-
-    // ---- format_graph_context ----
-
-    #[test]
-    fn format_graph_context_with_entities() {
-        let config = RagConfig::default();
-        let r1 = make_test_result("正常记忆", "l1", None, 0.9);
-        let r2 = SearchResult {
-            doc_id: DocId::Graph("Python".to_string()),
-            layer: "graph".to_string(),
-            rrf_score: 0.5,
-            bm25_score: None,
-            vector_score: None,
-            graph_score: Some(0.5),
-            persona_uid: None,
-            share: None,
-            created_at: 0,
-            doc_summary: "[图谱实体] Python".to_string(),
-        };
-        let results = vec![&r1, &r2];
-        let graph = format_graph_context(&results, &config);
-        assert!(graph.is_some());
-        let text = graph.unwrap();
-        assert!(text.contains("[知识图谱]"));
-        assert!(text.contains("Python"));
-    }
-
-    #[test]
-    fn format_graph_context_no_entities() {
-        let config = RagConfig::default();
-        let r = make_test_result("正常记忆", "l1", None, 0.9);
-        let results = vec![&r];
-        let graph = format_graph_context(&results, &config);
-        assert!(graph.is_none());
-    }
-
-    #[test]
-    fn format_graph_context_disabled() {
-        let config = RagConfig {
-            include_graph_entities: false,
-            ..Default::default()
-        };
-
-        let r = SearchResult {
-            doc_id: DocId::Graph("Python".to_string()),
-            layer: "graph".to_string(),
-            rrf_score: 0.5,
-            bm25_score: None,
-            vector_score: None,
-            graph_score: Some(0.5),
-            persona_uid: None,
-            share: None,
-            created_at: 0,
-            doc_summary: "[图谱实体] Python".to_string(),
-        };
-        let results = vec![&r];
-        assert!(format_graph_context(&results, &config).is_none());
-    }
-
-    // ---- assemble_rag_context ----
-
-    #[test]
-    fn assemble_rag_context_rama_sees_all() {
-        let config = RagConfig::default();
-        let results = vec![
-            make_test_result("私密内容", "l2", Some(0.1), 0.9),
-            make_test_result("公开内容", "l2", Some(0.9), 0.8),
-        ];
-        let context = assemble_rag_context(&results, "rama-0001", &config);
-        assert!(context.contains("私密内容"));
-        assert!(context.contains("公开内容"));
-    }
-
-    #[test]
-    fn assemble_rag_context_user_filtered() {
-        let config = RagConfig::default();
-        let results = vec![
-            make_test_result("私密内容", "l2", Some(0.1), 0.9),
-            make_test_result("公开内容", "l2", Some(0.9), 0.8),
-        ];
-        let context = assemble_rag_context(&results, "user-0001", &config);
-        assert!(!context.contains("私密内容"));
-        assert!(context.contains("公开内容"));
-    }
-
-    #[test]
-    fn assemble_rag_context_includes_graph() {
-        let config = RagConfig {
-            max_memories: 5,
-            ..Default::default()
-        };
-
-        let mut results: Vec<SearchResult> = (0..3)
-            .map(|i| make_test_result(&format!("文档{}", i), "l1", None, 0.9))
-            .collect();
-        results.push(SearchResult {
-            doc_id: DocId::Graph("Python".to_string()),
-            layer: "graph".to_string(),
-            rrf_score: 0.5,
-            bm25_score: None,
-            vector_score: None,
-            graph_score: Some(0.5),
-            persona_uid: None,
-            share: None,
-            created_at: 0,
-            doc_summary: "[图谱实体] Python".to_string(),
-        });
-
-        let context = assemble_rag_context(&results, "rama-0001", &config);
-        assert!(context.contains("[相关记忆]"));
-        assert!(context.contains("[知识图谱]"));
     }
 }

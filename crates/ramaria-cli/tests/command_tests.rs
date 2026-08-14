@@ -522,6 +522,7 @@ async fn export_json_empty() {
             format: "json".to_string(),
             persona: None,
             output: Some("-".to_string()),
+            json: false,
         },
     )
     .await;
@@ -538,6 +539,7 @@ async fn export_json_with_data() {
             format: "json".to_string(),
             persona: None,
             output: Some("-".to_string()),
+            json: false,
         },
     )
     .await;
@@ -554,6 +556,7 @@ async fn export_json_with_persona() {
             format: "json".to_string(),
             persona: Some("user-0001".to_string()),
             output: Some("-".to_string()),
+            json: false,
         },
     )
     .await;
@@ -570,6 +573,7 @@ async fn export_markdown_empty() {
             format: "markdown".to_string(),
             persona: None,
             output: Some("-".to_string()),
+            json: false,
         },
     )
     .await;
@@ -586,6 +590,7 @@ async fn export_markdown_with_data() {
             format: "markdown".to_string(),
             persona: None,
             output: Some("-".to_string()),
+            json: false,
         },
     )
     .await;
@@ -602,6 +607,7 @@ async fn export_invalid_format() {
             format: "xml".to_string(),
             persona: None,
             output: None,
+            json: false,
         },
     )
     .await;
@@ -619,6 +625,7 @@ async fn export_json_to_file() {
             format: "json".to_string(),
             persona: None,
             output: Some(tmp_file.to_string_lossy().to_string()),
+            json: false,
         },
     )
     .await;
@@ -644,6 +651,7 @@ async fn export_markdown_to_file() {
             format: "markdown".to_string(),
             persona: None,
             output: Some(tmp_file.to_string_lossy().to_string()),
+            json: false,
         },
     )
     .await;
@@ -871,7 +879,7 @@ async fn session_delete_via_storage() {
 }
 
 // =========================================================
-// M1 CLI 契约测试（T-V15-1-008）
+// M1 CLI 契约测试（进程级 CLI 契约）
 // =========================================================
 // 说明:
 // - 进程级测试运行真实二进制（CARGO_BIN_EXE_ramaria）+ 临时 DB，验证
@@ -918,7 +926,7 @@ fn json_envelope_stdout_purity() {
     assert!(!out.stderr.is_empty(), "stderr 应含日志/提示");
 }
 
-/// `--json` 错误信封：业务校验失败 → ok=false + error.code=4（D-V15-011）。
+/// `--json` 错误信封：业务校验失败 → ok=false + error.code=4（统一信封 schema，见 docs/dev-1.5/v1.5-decisions.md §D-V15-011）。
 #[test]
 fn json_error_envelope_validation_code() {
     let out = run_cli(&["memory", "l4", "--json"]);
@@ -969,7 +977,7 @@ fn help_grouped_sections() {
     }
 }
 
-/// blocks canonical + utt alias 双支持（D-V15-007）。
+/// blocks canonical + utt alias 双支持（人性化别名决策，见 docs/dev-1.5/v1.5-decisions.md §D-V15-007）。
 #[test]
 fn blocks_and_utt_alias() {
     let out_blocks = run_cli(&["blocks", "rebuild", "--help"]);
@@ -982,7 +990,7 @@ fn blocks_and_utt_alias() {
 // M1 命令级契约测试
 // =========================================================
 
-/// memory 层级别名双支持：summary/events/profile 与 l1/l2/l3 等价（D-V15-007）。
+/// memory 层级别名双支持：summary/events/profile 与 l1/l2/l3 等价（人性化别名决策，见 docs/dev-1.5/v1.5-decisions.md §D-V15-007）。
 #[tokio::test]
 async fn memory_layer_aliases_ok() {
     let (app, _storage) = build_test_app();

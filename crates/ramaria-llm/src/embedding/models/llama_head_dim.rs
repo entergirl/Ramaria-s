@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-llm/src/embedding/models/llama_head_dim.rs - LLaMA head_dim 变体嵌入编码器
+//! crates/ramaria-llm/src/embedding/models/llama_head_dim.rs - LLaMA head_dim 变体嵌入编码器
 //!
 //! 设计特点:
 //! - 基于 candle 0.10 的 `qwen3` 模块语义，适配显式指定 head_dim 的 LLaMA 变体

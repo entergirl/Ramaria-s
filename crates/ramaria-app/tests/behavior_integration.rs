@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/tests/behavior_integration.rs - v1.5 M5 行为层集成测试（D7+H1）
+//! crates/ramaria-app/tests/behavior_integration.rs - v1.5 M5 行为层集成测试（D7+H1）
 //!
 //! 覆盖:
 //! - 学习管线：事件 → 聚类 → 规则生成 → 替换旧 Auto 规则落库

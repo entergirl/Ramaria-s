@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-cli/src/commands/index_cmd.rs - 索引管理命令
+//! crates/ramaria-cli/src/commands/index_cmd.rs - 索引管理命令
 //!
 //! 设计特点:
 //! - rebuild: 从存储层重建内存检索器索引（BM25 + 向量 + 图谱）

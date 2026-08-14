@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/lib.rs - Ramaria 记忆系统核心模块
+//! crates/ramaria-memory/src/lib.rs - Ramaria 记忆系统核心模块
 //!
 //! 设计特点:
 //! - 实现完整的分层记忆管线: L0→L1 摘要、L1→L2 事件提取、L2→L3 性格推断
@@ -24,6 +24,7 @@ pub mod rag;
 pub mod rebuild;
 pub mod retriever;
 pub mod rrf;
+mod similarity; // 内部共享工具（相似度统一实现，不暴露到公共 API）
 pub mod token_budget;
 mod utils;
 pub mod utt;
@@ -45,10 +46,7 @@ pub use rrf::{
 };
 
 // BM25 全文检索
-pub use bm25::{
-    Bm25Config, Bm25Index, Bm25IndexBuilder, DocId, tokenize, tokenize_fields, tokenize_with_dict,
-    tokenize_with_freq,
-};
+pub use bm25::{Bm25Config, Bm25Index, DocId, tokenize, tokenize_fields};
 
 // Vector 向量检索
 pub use vector::{
@@ -68,9 +66,7 @@ pub use retriever::{
 
 // RAG Persona-Aware 检索增强生成
 // 注：PersonaKind 已统一到 ramaria_core::types，不再从此模块 re-export
-pub use rag::{
-    RagConfig, assemble_rag_context, filter_by_persona, format_context_text, format_graph_context,
-};
+pub use rag::{RagConfig, filter_by_persona, format_context_text};
 
 // L1 Summarizer
 pub use l1::{L1Summarizer, L1SummarizerConfig};
@@ -185,9 +181,7 @@ pub use inference::{
     run_phase_a_stats,
     run_phase_b_inference,
     run_phase_c_update,
-    run_shrinkage,
     run_shrinkage_layered,
-    select_prior,
     select_representative_events,
     shrink_category,
     shrink_presentation,
@@ -205,7 +199,7 @@ pub use inference::{
 };
 
 // Keyword 关键词处理
-pub use keyword::{AliasManager, BigramWithDictionaryNormalizer};
+pub use keyword::AliasManager;
 
 // Init 冷启动
 pub use init::{

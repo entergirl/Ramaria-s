@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/event/batcher/graph.rs - TopicBatcher 关键词图
+//! crates/ramaria-memory/src/event/batcher/graph.rs - TopicBatcher 关键词图
 //!
 //! 设计特点:
 //! - `KeywordGraph`: 基于邻接表的无向加权图，节点为 L1Item 精简视图，边为 Jaccard 相似度
@@ -561,7 +561,6 @@ mod tests {
         // 每个分量应有 2 个节点
         let sizes: Vec<usize> = comps.iter().map(|c| c.len()).collect();
         assert!(sizes.contains(&2));
-        assert!(sizes.contains(&2));
     }
 
     #[test]
@@ -688,21 +687,27 @@ mod tests {
     /// 高 Q_min 阻止拆分
     #[test]
     fn high_q_min_prevents_split() {
-        // 构建一个全连通的小图
+        // 双社区结构：组内 Jaccard≈0.67，组间经 b1/b2 桥接（Jaccard=0.25）。
+        // 该结构在 q_min=0.0 下必然可拆分（模块度 Q≈0.14 ≥ 0.0），
+        // 但 Q 达不到 q_min=0.99 → 拆分被阻止。
         let items = vec![
-            make_l1(vec!["工作", "压力", "加班"], 0.5),
-            make_l1(vec!["工作", "压力", "倦怠"], 0.6),
-            make_l1(vec!["工作", "加班", "倦怠"], 0.7),
+            // Group A: work-related + 2 bridge keywords
+            make_l1(vec!["工作", "加班", "会议", "b1", "b2"], 0.5),
+            make_l1(vec!["工作", "加班", "报告", "b1", "b2"], 0.5),
+            make_l1(vec!["工作", "会议", "报告", "b1", "b2"], 0.5),
+            // Group B: leisure-related + 2 bridge keywords
+            make_l1(vec!["休闲", "旅游", "摄影", "b1", "b2"], 0.5),
+            make_l1(vec!["休闲", "旅游", "美食", "b1", "b2"], 0.5),
+            make_l1(vec!["休闲", "摄影", "美食", "b1", "b2"], 0.5),
         ];
         let g = KeywordGraph::build_jaccard_graph(&items, 0.2);
         let comps = g.find_connected_components();
-        assert_eq!(comps.len(), 1);
+        assert_eq!(comps.len(), 1, "bridge 关键词应连接两组为一个分量");
 
-        // Q_min=0.0 应接受拆分
-        let _result_low = try_bisect_component(&g, &comps[0], 0.0);
-        // 紧密连接的图拆分 Q 通常较小，但 Q_min=0 一定接受
-        // 注意：如果贪心所有节点都留在 A（无移动能增加 ΔQ），则无法拆分
-        // 这种情况下 result_low 也会是 None
+        // Q_min=0.0 应接受拆分，且两组均非空
+        let result_low = try_bisect_component(&g, &comps[0], 0.0);
+        let (a, b) = result_low.expect("双社区结构在 q_min=0.0 时应成功拆分");
+        assert!(!a.is_empty() && !b.is_empty(), "拆分两组均不应为空");
 
         // Q_min=0.99 应拒绝拆分（真实图的 Q 几乎不可能达到 0.99）
         let result_high = try_bisect_component(&g, &comps[0], 0.99);
@@ -716,25 +721,28 @@ mod tests {
     /// 二分结果两组均非空
     #[test]
     fn bisect_produces_two_nonempty_groups() {
-        // 构建一个半连通图：A-B-C-D，其中 A-B-C 紧密，D 仅在边缘
+        // 双社区结构（组内 Jaccard≈0.67，组间 0.25）：6 节点单连通分量，
+        // 贪心二分在 q_min=0.0 下必然成功，且两组均非空。
         let items = vec![
-            make_l1(vec!["工作", "压力", "加班", "会议"], 0.5),
-            make_l1(vec!["工作", "压力", "加班", "报告"], 0.5),
-            make_l1(vec!["工作", "压力", "倦怠"], 0.5),
-            make_l1(vec!["工作", "休闲"], 0.5), // 松连接
+            // Group A: work-related + 2 bridge keywords
+            make_l1(vec!["工作", "加班", "会议", "b1", "b2"], 0.5),
+            make_l1(vec!["工作", "加班", "报告", "b1", "b2"], 0.5),
+            make_l1(vec!["工作", "会议", "报告", "b1", "b2"], 0.5),
+            // Group B: leisure-related + 2 bridge keywords
+            make_l1(vec!["休闲", "旅游", "摄影", "b1", "b2"], 0.5),
+            make_l1(vec!["休闲", "旅游", "美食", "b1", "b2"], 0.5),
+            make_l1(vec!["休闲", "摄影", "美食", "b1", "b2"], 0.5),
         ];
-        let g = KeywordGraph::build_jaccard_graph(&items, 0.15); // 低阈值确保连通
+        let g = KeywordGraph::build_jaccard_graph(&items, 0.2);
         let comps = g.find_connected_components();
+        assert_eq!(comps.len(), 1, "bridge 关键词应连接两组为一个分量");
+        assert_eq!(comps[0].len(), 6);
 
-        if comps.len() == 1 && comps[0].len() >= 3 {
-            let result = try_bisect_component(&g, &comps[0], 0.0);
-            if let Some((a, b)) = result {
-                assert!(!a.is_empty(), "组 A 不应为空");
-                assert!(!b.is_empty(), "组 B 不应为空");
-                assert_eq!(a.len() + b.len(), comps[0].len(), "节点总数应不变");
-            }
-            // 注意：贪心算法可能因没有正向 ΔQ 而无法拆分，此时 result=None
-        }
+        let result = try_bisect_component(&g, &comps[0], 0.0);
+        let (a, b) = result.expect("双社区结构应可二分");
+        assert!(!a.is_empty(), "组 A 不应为空");
+        assert!(!b.is_empty(), "组 B 不应为空");
+        assert_eq!(a.len() + b.len(), comps[0].len(), "节点总数应不变");
     }
 
     /// 递归拆分：有社区结构的图应被拆分

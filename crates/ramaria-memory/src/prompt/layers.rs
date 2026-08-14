@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/prompt/layers.rs - 四层注入结构与预算分配器（v1.4 M6 / v1.5 M6）
+//! crates/ramaria-memory/src/prompt/layers.rs - 四层注入结构与预算分配器（v1.4 M6 / v1.5 M6）
 //!
 //! 对齐算法说明书 v3.1 §8（驱动环装配：四层融合为一次生成）：
 //!
@@ -739,7 +739,7 @@ mod tests {
         assert_eq!(out.summaries, vec!["摘要"]);
     }
 
-    // ---- 槽位预留（T-V14-6-003）/ 行为层渲染（v1.5 M6） ----
+    // ---- 行为层渲染（v1.5 M6） ----
 
     #[test]
     fn behavior_and_knowledge_slots_are_empty_for_now() {

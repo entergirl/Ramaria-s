@@ -1,5 +1,5 @@
 -- =========================================================
--- Ramaria v1.5 Migration —— 行为模型学习与驱动（M5，D + H1）
+-- Ramaria v1.5 Migration —— 行为模型学习与驱动（算法说明书 v3.1 §4 行为层 + §9 反馈环）
 --
 -- 内容:
 -- 1. behavior_rules 表：行为规则（算法说明书 v3.1 §4.1）。
@@ -7,8 +7,8 @@
 --    reaction（规则文本）/ params（JSON 参数）/ avoid（JSON）均以 JSON 列存储；
 --    evidence 只存 事件 id + 权重（原文经 memory_events 二次查询，原文不落此表）。
 --    source = auto | manual（Manual 优先级高于 Auto）；enabled 控制是否参与路由。
---    reaction 可为 NULL = 候选规则（仅参数注入，D4 质控降级轨道）。
--- 2. feedback_log 表：反馈日志（v3.1 §9.4，H1 S1 写入；S2/S3 v1.7 复用同表只增不删）。
+--    reaction 可为 NULL = 候选规则（仅参数注入，质控降级轨道，算法说明书 v3.1 §4.2）。
+-- 2. feedback_log 表：反馈日志（v3.1 §9.4，S1 强信号写入；S2/S3 v1.7 复用同表只增不删）。
 --    signal_type = edit | disable（S1 强信号，weight=1.0）；detail 存编辑前后快照 JSON。
 --
 -- 幂等性说明:
@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS behavior_rules (
     persona_uid TEXT NOT NULL,
     -- 情境侧特征 JSON（BehaviorSituation：关键词集/簇中心向量/valence 分布/presentation 分布）
     situation TEXT NOT NULL,
-    -- 规则文本（NULL = 候选规则，仅参数注入，D4 质控降级轨道）
+    -- 规则文本（NULL = 候选规则，仅参数注入，质控降级轨道，算法说明书 v3.1 §4.2）
     reaction TEXT,
     -- 结构化参数 JSON（BehaviorParams：情感强度/主动程度/详细度/正式度）
     params TEXT NOT NULL,
@@ -59,7 +59,7 @@ CREATE INDEX IF NOT EXISTS idx_behavior_rules_persona
     ON behavior_rules(persona_uid);
 
 -- ---------------------------------------------------------
--- 2. feedback_log 表（v3.1 §9.4，H1 S1；S2/S3 v1.7 复用）
+-- 2. feedback_log 表（v3.1 §9.4，S1 强信号；S2/S3 v1.7 复用）
 -- ---------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS feedback_log (

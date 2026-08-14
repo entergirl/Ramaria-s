@@ -1,4 +1,4 @@
-//! tests/rule_tests.rs - 行为规则管理命令测试（D7，v1.5 M5）
+//! tests/rule_tests.rs - 行为规则管理命令测试（v1.5 规则管理）
 //!
 //! 覆盖:
 //! - list: 空数据（JSON 信封）

@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/inference/shrink.rs - 经验贝叶斯小样本收缩
+//! crates/ramaria-memory/src/inference/shrink.rs - 经验贝叶斯小样本收缩
 //!
 //! 设计特点:
 //! - A5 小样本收缩估计: 当分类有效样本量 n_eff 过小时，将极端估计值向全局均值收缩
@@ -8,7 +8,7 @@
 //! - Presentation: Dirichlet-Multinomial 共轭（三比例和为 1 的组合数据）
 //! - γ 动态公式: γ = 3 + 30 / max(n_total_eff, 30)，随总样本量自适应调整
 //! - 纯数值计算，零 I/O，不依赖数据库或异步运行时
-//! - 向后兼容: `run_shrinkage()` 保留，`run_shrinkage_layered()` 新增
+//! - 现役版本为分层先验 `run_shrinkage_layered()`（旧 `run_shrinkage()` 已删除）
 
 use std::collections::HashMap;
 
@@ -325,32 +325,6 @@ pub fn compute_global_stats(categories: &[CategoryStats]) -> (f64, f64, f64, f64
     )
 }
 
-/// 执行完整的经验贝叶斯收缩管线。
-///
-/// 流程:
-/// 1. 计算全局加权统计量。
-/// 2. 基于 n_total_eff 动态计算 γ。
-/// 3. 逐分类执行收缩（valence/logit-share/Dirichlet-presentation）。
-///
-/// 参数:
-/// - `categories`: 所有分类统计（可变引用，in-place 更新）。
-/// - `shrink_config`: 收缩配置。
-///
-/// 返回:
-/// - 使用的 γ 值（供日志记录）。
-pub fn run_shrinkage(categories: &mut [CategoryStats], shrink_config: &ShrinkConfig) -> f64 {
-    let (g_val_mean, g_share_mean, g_obj, g_sub, g_mix, n_total_eff) =
-        compute_global_stats(categories);
-
-    let gamma = compute_dynamic_gamma(n_total_eff, shrink_config);
-
-    for cat in categories.iter_mut() {
-        shrink_category(cat, g_val_mean, g_share_mean, g_obj, g_sub, g_mix, gamma);
-    }
-
-    gamma
-}
-
 // =========================================================
 // 分层先验收缩
 // =========================================================
@@ -394,30 +368,6 @@ impl ShrinkPrior {
             mix_ratio: gm,
             n_total_eff: n_total,
         }
-    }
-}
-
-/// 根据 trait_layer 选择应使用的先验值。
-///
-/// 规则:
-/// - `Base` / `Primary`: 始终使用全局先验（跨领域稳定的人格特质）。
-/// - `Accent`: 使用领域先验。若领域先验不可用（如首次推断、领域样本不足），则 fallback 到全局先验。
-///
-/// 说明:
-/// - 本函数仅选择单个指标的先验值。完整先验包选择由 `select_shrink_prior` 完成。
-///
-/// 参数:
-/// - `trait_layer`: 人格特质层级。
-/// - `global_prior`: 跨领域全局先验值。
-/// - `domain_prior`: 领域内先验值（可选，Accent 时使用）。
-///
-/// 返回:
-/// - 选定的先验值。
-pub fn select_prior(trait_layer: &TraitLayer, global_prior: f64, domain_prior: Option<f64>) -> f64 {
-    match trait_layer {
-        TraitLayer::Base | TraitLayer::Primary => global_prior,
-        TraitLayer::Accent => domain_prior.unwrap_or(global_prior),
-        _ => global_prior, // 未知 layer 保守使用全局先验
     }
 }
 
@@ -504,7 +454,7 @@ pub fn compute_domain_prior(
 ///
 /// 说明:
 /// - 当至少 2 个分类标记为 Accent 时才计算领域先验；单个 Accent 分类 fallback 全局先验。
-/// - 与 `run_shrinkage()` 的差异仅在于先验来源，收缩公式完全一致。
+/// - 与全局先验收缩（已删除的 `run_shrinkage`）的差异仅在于先验来源，收缩公式完全一致。
 pub fn run_shrinkage_layered(
     categories: &mut [CategoryStats],
     shrink_config: &ShrinkConfig,
@@ -771,72 +721,6 @@ mod tests {
         assert!((sum - 1.0).abs() < 1e-10, "presentation 和应为1");
     }
 
-    #[test]
-    fn run_shrinkage_full_pipeline() {
-        use crate::inference::stats::{CalibratedWeightConfig, compute_category_stats};
-        use ramaria_core::types::{MemoryEvent, Presentation, now_ms};
-
-        let config = ShrinkConfig::default();
-
-        fn mk(
-            title: &str,
-            kw: &str,
-            salience: f64,
-            valence: f64,
-            share: f64,
-            pres: Presentation,
-        ) -> MemoryEvent {
-            let now = now_ms();
-            let mut ev = MemoryEvent::new(
-                "user-0001".into(),
-                title.into(),
-                "摘要".into(),
-                now - 1000,
-                now,
-            );
-            ev.keywords = Some(kw.into());
-            ev.confidence = 0.9;
-            ev.salience = salience;
-            ev.valence = valence;
-            ev.share = share;
-            ev.presentation = pres;
-            ev
-        }
-
-        let events_work = vec![mk("E1", "工作", 0.8, 0.9, 0.8, Presentation::Objective)];
-        let events_social = vec![
-            mk("E2", "社交", 0.7, 0.5, 0.9, Presentation::Subjective),
-            mk("E3", "社交", 0.6, 0.3, 0.7, Presentation::Mixed),
-            mk("E4", "社交", 0.8, 0.6, 0.8, Presentation::Subjective),
-        ];
-
-        let wcfg = CalibratedWeightConfig::default();
-        let cat1 = compute_category_stats("工作", &events_work, None, &wcfg);
-        let cat2 = compute_category_stats("社交", &events_social, None, &wcfg);
-        let mut cats = vec![cat1, cat2];
-
-        let gamma = run_shrinkage(&mut cats, &config);
-        assert!(gamma > 0.0, "γ 应为正数");
-
-        // 工作（n_eff=0.8）应被明显收缩
-        let work = &cats[0];
-        // 社交（n_eff=2.1）收缩程度较小
-        let social = cats.iter().find(|c| c.category == "社交").unwrap();
-
-        // 两者都应仍在合理范围
-        assert!(work.valence_mean >= -1.0 && work.valence_mean <= 1.0);
-        assert!(social.valence_mean >= -1.0 && social.valence_mean <= 1.0);
-        assert!(work.share_mean >= 0.0 && work.share_mean <= 1.0);
-    }
-
-    #[test]
-    fn run_shrinkage_empty_categories() {
-        let config = ShrinkConfig::default();
-        let mut cats: Vec<CategoryStats> = Vec::new();
-        let gamma = run_shrinkage(&mut cats, &config);
-        assert!((gamma - 4.0).abs() < 1e-10); // n_total_eff=0 → max(0,30)=30 → γ=4
-    }
-
     // =========================================================
     // 分层先验收缩
     // =========================================================
@@ -864,24 +748,6 @@ mod tests {
             presentation_subjective_ratio: sub,
             presentation_mixed_ratio: mix,
             group_weight: 1.0,
-        }
-    }
-
-    /// select_prior 各 (layer, global, domain) 参数化验证。
-    #[test]
-    fn select_prior_cases() {
-        let cases = [
-            (TraitLayer::Base, 0.5, Some(0.8), 0.5),    // Base 用全局
-            (TraitLayer::Primary, 0.5, Some(0.8), 0.5), // Primary 用全局
-            (TraitLayer::Accent, 0.5, Some(0.8), 0.8),  // Accent 用领域
-            (TraitLayer::Accent, 0.5, None, 0.5),       // Accent 无领域 → fallback 全局
-        ];
-        for (layer, global, domain, expected) in cases {
-            let result = select_prior(&layer, global, domain);
-            assert!(
-                (result - expected).abs() < 1e-10,
-                "{layer:?} 期望 {expected}"
-            );
         }
     }
 
@@ -941,9 +807,15 @@ mod tests {
         // 记录原始值
         let social_original_valence = cats[1].valence_mean;
 
-        // 先用全局先验收缩一次
+        // 先用全局先验收缩一次（等价于已删除的 run_shrinkage：全局统计 → γ → 逐分类收缩）
         let mut cats_global = cats.clone();
-        run_shrinkage(&mut cats_global, &config);
+        {
+            let (gv, gs, go, gsub, gmix, n_total) = compute_global_stats(&cats_global);
+            let gamma_g = compute_dynamic_gamma(n_total, &config);
+            for cat in cats_global.iter_mut() {
+                shrink_category(cat, gv, gs, go, gsub, gmix, gamma_g);
+            }
+        }
         let social_global_shrunk = cats_global[1].valence_mean;
 
         // 再用分层先验收缩
@@ -1010,16 +882,23 @@ mod tests {
         let mut cats = vec![make_cat("工作", 10.0, 0.8, 0.7, 0.5, 0.3, 0.2)];
 
         let mut cats_expected = cats.clone();
-        run_shrinkage(&mut cats_expected, &config);
+        // 全局先验收缩基线（等价于已删除的 run_shrinkage）
+        {
+            let (gv, gs, go, gsub, gmix, n_total) = compute_global_stats(&cats_expected);
+            let gamma_g = compute_dynamic_gamma(n_total, &config);
+            for cat in cats_expected.iter_mut() {
+                shrink_category(cat, gv, gs, go, gsub, gmix, gamma_g);
+            }
+        }
 
         let hints = HashMap::new(); // 空 hints
         let gamma = run_shrinkage_layered(&mut cats, &config, &hints);
         assert!(gamma > 0.0);
 
-        // 空 hints 应退化为全局先验=run_shrinkage
+        // 空 hints 应退化为全局先验（与全局先验收缩结果一致）
         assert!(
             (cats[0].valence_mean - cats_expected[0].valence_mean).abs() < 0.01,
-            "空 hints 应与 run_shrinkage 结果一致"
+            "空 hints 应与全局先验收缩结果一致"
         );
     }
 

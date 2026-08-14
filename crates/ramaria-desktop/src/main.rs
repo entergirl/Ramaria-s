@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-desktop/src/main.rs - Windows 桌面应用入口点
+//! crates/ramaria-desktop/src/main.rs - Windows 桌面应用入口点
 //!
 //! 设计特点:
 //! - 在 release 模式下隐藏控制台窗口（windows_subsystem = "windows"）

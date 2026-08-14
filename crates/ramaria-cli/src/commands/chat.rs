@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-cli/src/commands/chat.rs - 交互式对话 REPL
+//! crates/ramaria-cli/src/commands/chat.rs - 交互式对话 REPL
 //!
 //! 设计特点:
 //! - 简单 REPL 循环（不做 ratatui）

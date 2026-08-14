@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-desktop/src/events.rs - Tauri 事件负载类型定义
+//! crates/ramaria-desktop/src/events.rs - Tauri 事件负载类型定义
 //!
 //! 设计特点:
 //! - 定义前端通过 Tauri Event 接收的所有事件负载结构
@@ -280,7 +280,7 @@ mod tests {
         assert!(json.contains("true"));
     }
 
-    // ---- v1.5 M4（T-V15-4-003）阶段预计总量与 ETA 字段 ----
+    // ---- 阶段预计总量与 ETA 字段 ----
 
     /// 基础 payload（无估算字段）→ 序列化不含 l1_expected/l2_expected/l3_expected/eta_seconds
     /// （向后兼容：旧前端忽略未知字段；旧后端事件不含新字段）。

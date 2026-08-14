@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-cli/src/commands/export.rs - 数据导出命令
+//! crates/ramaria-cli/src/commands/export.rs - 数据导出命令
 //!
 //! 设计特点:
 //! - 支持 JSON 和 Markdown 两种导出格式
@@ -20,8 +20,10 @@ pub struct ExportArgs {
     pub format: String,
     /// 按 persona_uid 筛选
     pub persona: Option<String>,
-    /// 输出文件路径（默认 stdout）
+    /// 输出文件路径（默认 exports/ 目录；`-` 表示 stdout）
     pub output: Option<String>,
+    /// 全局 --json 信封模式：stdout 输出 `{"ok":true,"data":{...}}` 信封
+    pub json: bool,
 }
 
 /// 执行 export 命令。
@@ -120,6 +122,21 @@ async fn export_json(app: &Arc<ramaria_app::App>, args: &ExportArgs) -> anyhow::
         }
     }))?;
 
+    // --json 信封模式：stdout 只输出信封（数据在 data.content 或 written_to 指向的文件）
+    if args.json {
+        if args.output.as_deref() == Some("-") {
+            let data = serde_json::json!({ "format": "json", "content": json_output });
+            return crate::json::emit_ok(&data);
+        }
+        let written_to = write_output(&json_output, args.output.as_deref(), "json")?;
+        let data = serde_json::json!({
+            "format": "json",
+            "written_to": written_to,
+            "sessions": sessions.len(),
+        });
+        return crate::json::emit_ok(&data);
+    }
+
     write_output(&json_output, args.output.as_deref(), "json")?;
 
     crate::ui::success(&format!("已导出 {} 个会话", sessions.len()));
@@ -192,6 +209,21 @@ async fn export_markdown(app: &Arc<ramaria_app::App>, args: &ExportArgs) -> anyh
         return Ok(());
     }
 
+    // --json 信封模式：stdout 只输出信封（数据在 data.content 或 written_to 指向的文件）
+    if args.json {
+        if args.output.as_deref() == Some("-") {
+            let data = serde_json::json!({ "format": "markdown", "content": md });
+            return crate::json::emit_ok(&data);
+        }
+        let written_to = write_output(&md, args.output.as_deref(), "md")?;
+        let data = serde_json::json!({
+            "format": "markdown",
+            "written_to": written_to,
+            "sessions": exported_count,
+        });
+        return crate::json::emit_ok(&data);
+    }
+
     write_output(&md, args.output.as_deref(), "md")?;
 
     crate::ui::success(&format!("已导出 {} 个会话为 Markdown 格式", exported_count));
@@ -211,13 +243,21 @@ async fn export_markdown(app: &Arc<ramaria_app::App>, args: &ExportArgs) -> anyh
 /// 安全约束:
 /// - 使用 canonicalize 规范化父目录，防止路径穿越攻击（符号链接、`..`、`RootDir`/`Prefix` 组件）。
 /// - 自动创建父目录。
-fn write_output(content: &str, output: Option<&str>, format: &str) -> anyhow::Result<()> {
+///
+/// 返回:
+/// - `Ok(Some(path))`: 实际写入的文件路径。
+/// - `Ok(None)`: 内容已输出到 stdout。
+fn write_output(
+    content: &str,
+    output: Option<&str>,
+    format: &str,
+) -> anyhow::Result<Option<String>> {
     // → 在 canonicalize 前先确保父目录存在，避免导出目录尚不存在时 canonicalize 报错。
     let path = match output {
         Some("-") => {
             println!("{content}");
             crate::ui::info("已输出到 stdout");
-            return Ok(());
+            return Ok(None);
         }
         Some(p) => PathBuf::from(p),
         None => PathBuf::from(default_export_path(format)),
@@ -240,7 +280,7 @@ fn write_output(content: &str, output: Option<&str>, format: &str) -> anyhow::Re
         .with_context(|| format!("写入文件失败: {display_path}"))?;
     crate::ui::info(&format!("已写入: {display_path}"));
 
-    Ok(())
+    Ok(Some(display_path))
 }
 
 /// 规范化导出路径：通过 canonicalize 父目录防御路径穿越。

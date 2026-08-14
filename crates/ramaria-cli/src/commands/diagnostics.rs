@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-cli/src/commands/diagnostics.rs - CLI 诊断导出命令
+//! crates/ramaria-cli/src/commands/diagnostics.rs - CLI 诊断导出命令
 //!
 //! 设计特点:
 //! - `ramaria diagnostics --output <PATH>`: 收集诊断信息并打包为 .zip。

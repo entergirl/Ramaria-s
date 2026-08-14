@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/prompt/injection_guard.rs - 线上记忆注入开关
+//! crates/ramaria-memory/src/prompt/injection_guard.rs - 线上记忆注入开关
 //!
 //! 设计特点:
 //! - 根据 `BackendSelection.online_memory_injection` 控制是否向线上 LLM 注入记忆上下文

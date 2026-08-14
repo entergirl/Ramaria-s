@@ -1,17 +1,17 @@
-//! rust/crates/ramaria-app/tests/m6_integration.rs - v1.4/v1.5 M6 集成测试
+//! crates/ramaria-app/tests/m6_integration.rs - v1.4/v1.5 M6 集成测试
 //!
 //! 覆盖:
-//! - T-V14-6-001/002/003：四层模板（活跃路径端到端）
+//! - 四层模板（活跃路径端到端）
 //!   - 段落标题对齐 v3.1 §8.2（# 角色（行为层）/ # 说话风格（表达层）/
 //!     # 记忆（脉络层）/ # 当前时间；# 知识（知识层，按需）槽位为空不产生段落）
 //!   - 原文片段与桥接并存（utt 检索 + 桥接加载双通道）
-//! - T-V14-6-004：配置传播（[utt]/[examples]/[bridge] 开关逐一断言 + 关闭回退 v1.3）
+//! - 配置传播（[utt]/[examples]/[bridge] 开关逐一断言 + 关闭回退 v1.3）
 //!   - utt.enabled=false → 无原文片段（行为回退 v1.3）
 //!   - bridge.enabled=false → 无桥接段落
 //!   - examples.enabled=false → 回退静态 selected 查询（v1.3 行为）
 //!   - examples.max_examples 传播（注入条数上限生效）
 //!   - 三开关全关 → prompt 无任何 v1.4 新增段落（语义等价 v1.3）
-//! - T-V15-6-001/002：驱动环接线（v1.5 M6，F 任务）
+//! - 驱动环接线（v1.5 M6，F 任务）
 //!   - 情境路由命中 → `## 行为规则` 行为块注入 prompt（reaction + params + avoid）
 //!   - [behavior].enabled=false → 无行为块（prompt 与 v1.4 语义等价——回归红线）
 //!   - 无规则（助手 persona）→ 无行为块（无回归）
@@ -115,7 +115,7 @@ fn make_example(partner: &str, reply: &str, tags: Option<&str>, selected: bool) 
 }
 
 // =========================================================
-// T-V14-6-001/002/003：四层模板端到端
+// 四层模板端到端
 // =========================================================
 
 /// 角色类 persona 全链路（utt 块 + 桥接 + 表达层）：四层段落齐全，
@@ -148,7 +148,7 @@ async fn four_layer_template_rendered_in_active_path() {
     assert!(prompt.contains("# 记忆（脉络层）"), "脉络层缺失");
     assert!(prompt.contains("# 当前时间"), "当前时间段缺失");
 
-    // ---- 知识槽位为空 → 不产生段落（T-V14-6-003） ----
+    // ---- 知识槽位为空 → 不产生段落 ----
     assert!(
         !prompt.contains("# 知识（知识层，按需）"),
         "知识槽位为空不应产生段落"
@@ -164,7 +164,7 @@ async fn four_layer_template_rendered_in_active_path() {
 }
 
 // =========================================================
-// T-V14-6-004：配置传播
+// 配置传播
 // =========================================================
 
 /// [utt].enabled=false → 不检索不注入原文片段（行为回退 v1.3）。
@@ -346,7 +346,7 @@ async fn all_v14_features_disabled_returns_v13_semantics() {
 }
 
 // =========================================================
-// T-V15-6-001/002：驱动环接线——行为控制块注入（v1.5 M6）
+// 驱动环接线——行为控制块注入（v1.5 M6）
 // =========================================================
 
 /// 发送消息并返回 Done 事件的 session_id（供后续轮次复用会话）。

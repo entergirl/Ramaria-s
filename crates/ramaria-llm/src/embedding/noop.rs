@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-llm/src/embedding/noop.rs - 空占位 Embedding Provider
+//! crates/ramaria-llm/src/embedding/noop.rs - 空占位 Embedding Provider
 //!
 //! 设计特点:
 //! - 当 `embedding-onnx` feature 未启用时编译，避免上层条件编译散落

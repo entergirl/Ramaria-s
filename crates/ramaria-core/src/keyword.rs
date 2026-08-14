@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-core/src/keyword.rs - Ramaria 关键词类型系统
+//! crates/ramaria-core/src/keyword.rs - Ramaria 关键词类型系统
 //!
 //! 设计特点:
 //! - `KeywordToken`: 标准化关键词 Newtype，自动 trim + 小写 + 非空校验
@@ -6,6 +6,7 @@
 //! - `KeywordStatus`: 三态枚举（Canonical / Alias / Pending），支撑别名归一化管线
 //! - `KeywordRef`: 倒排索引引用枚举（L1/L2/Pool），关联关键词与业务文档
 //! - 纯类型层，零 I/O，零外部依赖（仅 serde），完全符合 ramaria-core 零 I/O 约束
+//! - KeywordSet/KeywordStatus/KeywordRef 三个类型：预留给 keyword_refs 消费路径（v1.6）
 
 use serde::{Deserialize, Serialize};
 use std::fmt;

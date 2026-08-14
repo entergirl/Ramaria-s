@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/retriever.rs — 三通道组合检索编排器
+//! crates/ramaria-memory/src/retriever.rs — 三通道组合检索编排器
 //!
 //! 设计特点:
 //! - 编排 BM25 + 向量 + 图谱三个独立通道，结果通过 RRF 融合
@@ -19,7 +19,10 @@ use ramaria_core::types::MemoryL1;
 use crate::bm25::{Bm25Config, Bm25Index, DocId};
 use crate::graph_retriever::{GraphRetriever, GraphRetrieverConfig, graph_hits_to_rrf_pairs};
 use crate::rrf::{ChannelResult, FusedResult, RrfConfig, rrf_fuse};
-use crate::vector::{BruteForceIndex, VectorHit, VectorIndex, VectorIndexConfig};
+use crate::vector::{
+    BruteForceIndex, VectorHit, VectorIndex, VectorIndexConfig, make_vector_label,
+    parse_vector_label,
+};
 
 // =========================================================
 // 检索配置
@@ -466,6 +469,8 @@ impl Retriever {
     /// 重建 BM25 索引。
     ///
     /// 清空现有索引，从 l1_docs 和 l2_docs 重新构建。
+    ///
+    /// 接线候选：desktop index rebuild 命令（v1.6 核查）
     pub fn rebuild_bm25(&mut self) {
         self.bm25_index.clear();
         let l1_snapshot: Vec<L1DocView> = self.l1_docs.values().cloned().collect();
@@ -900,8 +905,11 @@ impl Retriever {
     pub fn index_utt(&mut self, doc: &UttDocView, vector: Option<Vec<f32>>) {
         self.utt_docs.insert(doc.id, doc.clone());
         if let Some(v) = vector {
-            self.vector_index
-                .add(&format!("L0:{}", doc.id), v, doc.created_at);
+            self.vector_index.add(
+                &make_vector_label("l0", &doc.id.to_string()),
+                v,
+                doc.created_at,
+            );
         }
     }
 
@@ -934,7 +942,8 @@ impl Retriever {
     /// 从索引移除一个 utt 块（内存文档 + 向量）。
     pub fn remove_utt(&mut self, id: i64) {
         self.utt_docs.remove(&id);
-        self.vector_index.remove(&format!("L0:{id}"));
+        self.vector_index
+            .remove(&make_vector_label("l0", &id.to_string()));
     }
 
     /// 当前内存中的 utt 块数量。
@@ -990,7 +999,11 @@ impl Retriever {
                     let mut out: Vec<UttHit> = hits
                         .into_iter()
                         .filter_map(|h: crate::vector::VectorHit| {
-                            let id = h.doc_label.strip_prefix("L0:")?.parse::<i64>().ok()?;
+                            let (layer, id_str) = parse_vector_label(&h.doc_label)?;
+                            if layer != "L0" {
+                                return None;
+                            }
+                            let id = id_str.parse::<i64>().ok()?;
                             let doc = self.utt_docs.get(&id)?;
                             if doc.persona_uid != target {
                                 return None; // 跨 persona 命中丢弃
@@ -1386,7 +1399,7 @@ mod tests {
 
     #[test]
     fn rebuild_bm25_preserves_data() {
-        let r = make_test_retriever();
+        let mut r = make_test_retriever();
         // 先搜索确认有结果
         let req = SearchRequest {
             query: "火锅".to_string(),
@@ -1397,9 +1410,16 @@ mod tests {
         let before = r.search(&req, None);
         assert!(!before.is_empty());
 
-        // 不 mutable 的可重建测试
-        // rebuild_bm25 需要 &mut self，这里仅验证 rebuild 后逻辑不会 panic
-        // 实际 rebuild 测试在集成测试中做
+        // 重建 BM25 索引（清空后从 l1_docs/l2_docs 重新构建）→ 检索结果应保持不变
+        r.rebuild_bm25();
+        let after = r.search(&req, None);
+        assert!(!after.is_empty(), "重建后仍应能检索到火锅文档");
+        assert!(
+            after.iter().any(|sr| sr.doc_summary.contains("火锅")),
+            "重建后结果应仍包含火锅文档"
+        );
+        // 文档总数不变（重建只重建索引，不丢失文档）
+        assert_eq!(r.doc_count(), 3);
     }
 
     #[test]

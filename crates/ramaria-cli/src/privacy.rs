@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-cli/src/privacy.rs - 线上隐私确认流程
+//! crates/ramaria-cli/src/privacy.rs - 线上隐私确认流程
 //!
 //! 设计特点:
 //! - 调用 ramaria-app 的隐私检查 API（复用隐私确认逻辑）
@@ -22,7 +22,7 @@ use ramaria_core::error::RamariaResult;
 /// 说明:
 /// - 本地 LM Studio 直接通过（不触发确认流程）。
 /// - 线上 provider（DeepSeek/OpenAI）需要用户交互确认。
-/// - `--yes` 只在显式指定了线上 provider 时生效（T-CLI-010 规则）。
+/// - `--yes` 只在显式指定了线上 provider 时生效。
 pub async fn ensure_privacy(app: &ramaria_app::App, auto_yes: bool) -> RamariaResult<()> {
     // 委托给 ramaria-app 的隐私检查
     let status = app.check_privacy().await?;
@@ -42,7 +42,7 @@ pub async fn ensure_privacy(app: &ramaria_app::App, auto_yes: bool) -> RamariaRe
             base_url,
         } => {
             if auto_yes {
-                // --yes 模式：自动持久确认（T-CLI-010 规则）
+                // --yes 模式：自动持久确认
                 tracing::warn!(
                     provider = %provider_name,
                     base_url = %base_url,

@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-desktop/src/path_guard.rs - Ramaria 路径安全校验模块
+//! crates/ramaria-desktop/src/path_guard.rs - Ramaria 路径安全校验模块
 //!
 //! 设计特点:
 //! - 统一导入/导出路径的安全校验入口，两个函数覆盖所有文件操作场景

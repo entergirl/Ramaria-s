@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-storage/src/repo/examples.rs - PersonaExample CRUD
+//! crates/ramaria-storage/src/repo/examples.rs - PersonaExample CRUD
 //!
 //! 设计特点:
 //! - 管理对话 Few-shot 示例（partner→reply），用于 System Prompt 注入

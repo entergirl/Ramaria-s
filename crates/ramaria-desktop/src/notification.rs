@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-desktop/src/notification.rs - 桌面通知模块
+//! crates/ramaria-desktop/src/notification.rs - 桌面通知模块
 //!
 //! 设计特点:
 //! - 封装 tauri-plugin-notification，提供简洁的通知发送接口

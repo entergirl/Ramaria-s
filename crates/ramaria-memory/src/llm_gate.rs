@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/llm_gate.rs - LLM 批量请求节流（L1/L2 共用）
+//! crates/ramaria-memory/src/llm_gate.rs - LLM 批量请求节流（L1/L2 共用）
 //!
 //! 背景:
 //! - 导入/空闲批量封存/事件提取会**连续**发起多个 LLM 请求：

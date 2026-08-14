@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/init.rs - Ramaria 助手冷启动模块
+//! crates/ramaria-memory/src/init.rs - Ramaria 助手冷启动模块
 //!
 //! 设计特点:
 //! - 首次启动检测: 查询 personas 表无 kind='rama' 记录时触发
@@ -37,7 +37,6 @@ use uuid::Uuid;
 /// 确保所有应用内人格使用统一的社交平台聊天口吻。
 /// 共享的社交平台聊天口吻（所有 persona 的默认回复规则）。
 ///
-/// v2.0 重构:
 /// - 从平铺自然语言重构为分类层次化规则（格式规则 / 风格规则 / 节奏规则）。
 /// - 每条规则编号，便于 LLM 逐条执行和后续调试定位。
 /// - 增加正确示例段落，帮助 LLM 建立直觉。
@@ -246,7 +245,7 @@ pub struct ColdStartResult {
 
 /// 冷启动 Prompt：将 persona.toml 配置拆解为结构化画像。
 ///
-/// v2.0 重构 (CRISPE 框架):
+/// CRISPE 框架:
 /// - Capacity: 明确 LLM 的角色画像分析能力边界。
 /// - Role: 以心理学和人格理论视角分析，同时挖掘显性陈述和隐含信息。
 /// - Insight: 5 个分析维度引导 LLM 全面覆盖。
@@ -377,6 +376,8 @@ const RAMA_SOURCE: &str = "manual";
 ///
 /// 返回:
 /// - `ColdStartResult`: 冷启动结果，包含 persona_uid、是否新建、facts 和 traits 数量。
+///
+/// 冷启动入口（README 核心特性）；v1.6 确认接线路径
 pub async fn initialize_rama_persona(
     storage: &dyn StorageBackend,
     llm: &dyn LlmProviderTrait,

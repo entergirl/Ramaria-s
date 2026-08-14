@@ -256,44 +256,24 @@ pub fn fused_similarity(a: &BehaviorSample, b: &BehaviorSample, beta1: f64, beta
 }
 
 /// 两集合的 Jaccard 相似度（空集 → 0.0）。
+///
+/// 说明（v1.5 收敛）:
+/// - 实现统一收敛到 `crate::similarity::jaccard_similarity`，本函数为薄包装。
 pub fn jaccard(a: &[String], b: &[String]) -> f64 {
-    if a.is_empty() && b.is_empty() {
-        return 0.0;
-    }
-    let set_b: std::collections::HashSet<&str> = b.iter().map(String::as_str).collect();
-    let mut inter = 0usize;
-    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    for k in a {
-        if set_b.contains(k.as_str()) && seen.insert(k.as_str()) {
-            inter += 1;
-        }
-    }
-    let union = a.len() + b.len() - inter;
-    if union == 0 {
-        return 0.0;
-    }
-    inter as f64 / union as f64
+    crate::similarity::jaccard_similarity(
+        a.iter().map(String::as_str),
+        b.iter().map(String::as_str),
+    )
 }
 
 /// 余弦相似度（零向量 → 0.0；结果 clip 到 [-1,1] 防御浮点误差）。
+///
+/// 说明（v1.5 收敛）:
+/// - 实现统一收敛到 `crate::similarity::cosine_similarity`，本函数为薄包装。
+/// - 统一实现同样 clamp 到 [-1,1]；调用点如需 [0,1] 语义请自行 `.max(0.0)`
+///   （`routing::score_rule` 与 `incremental` 模块已如此处理）。
 pub fn cosine_clipped(a: &[f32], b: &[f32]) -> f64 {
-    if a.len() != b.len() || a.is_empty() {
-        return 0.0;
-    }
-    let mut dot = 0.0f64;
-    let mut norm_a = 0.0f64;
-    let mut norm_b = 0.0f64;
-    for i in 0..a.len() {
-        let ai = a[i] as f64;
-        let bi = b[i] as f64;
-        dot += ai * bi;
-        norm_a += ai * ai;
-        norm_b += bi * bi;
-    }
-    if norm_a < 1e-12 || norm_b < 1e-12 {
-        return 0.0;
-    }
-    (dot / (norm_a.sqrt() * norm_b.sqrt())).clamp(-1.0, 1.0)
+    crate::similarity::cosine_similarity(a, b)
 }
 
 // =========================================================
@@ -860,6 +840,7 @@ mod tests {
 
     #[test]
     fn jaccard_basic() {
+        // 用例已随实现迁移至 similarity.rs 表驱动测试；此处保留行为级冒烟断言
         let a = vec!["a".to_string(), "b".to_string()];
         let b = vec!["b".to_string(), "c".to_string()];
         assert!((jaccard(&a, &b) - 1.0 / 3.0).abs() < 1e-9);
@@ -873,6 +854,8 @@ mod tests {
         assert_eq!(jaccard(&a, &[]), 0.0);
     }
 
+    /// 行为级 clamp 语义验证（经薄包装调用统一实现 `similarity::cosine_similarity`）:
+    /// 结果保留负值到 [-1,1]（不在此处 clip 为 0），零向量/维度不一致 → 0.0。
     #[test]
     fn cosine_clipped_handles_zero_and_mismatch() {
         assert_eq!(cosine_clipped(&[], &[]), 0.0);
@@ -1059,7 +1042,7 @@ mod tests {
     }
 
     #[test]
-    fn outlier_ratio_above_threshold_triggers_retry() {
+    fn density_cluster_reports_high_outlier_ratio() {
         // 8 个核心（两簇 4+4，min_cluster_size=3 时成簇）+ 15 个互异孤立样本
         // → 孤立比例 = 15/23 ≈ 0.65 > 0.6（失败模式检查触发阈值）
         let mut samples = clusterable_samples();

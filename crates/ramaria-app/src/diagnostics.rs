@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/src/diagnostics.rs - 诊断信息导出
+//! crates/ramaria-app/src/diagnostics.rs - 诊断信息导出
 //!
 //! 设计特点:
 //! - 收集：日志(最近1000行)、配置(API key 脱敏)、数据库 schema 版本、系统信息。

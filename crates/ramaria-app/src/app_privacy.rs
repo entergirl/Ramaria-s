@@ -1,7 +1,7 @@
-//! rust/crates/ramaria-app/src/app_privacy.rs - 隐私确认代理方法
+//! crates/ramaria-app/src/app_privacy.rs - 隐私确认代理方法
 //!
 //! 设计特点:
-//! - 从 `app.rs` 拆分，减少 App 本体的行数（M-5 修复）
+//! - 从 `app.rs` 拆分，减少 App 本体的行数
 //! - `check_privacy`: 查询当前 provider 的隐私确认状态
 //! - `confirm_privacy`: 记录隐私确认（支持跨重启持久化）
 //! - 委托 `crate::privacy` 模块执行具体逻辑

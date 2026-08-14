@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/l1/summarizer.rs - L0→L1 摘要生成管线
+//! crates/ramaria-memory/src/l1/summarizer.rs - L0→L1 摘要生成管线
 //!
 //! 设计特点:
 //! - 依赖注入: 通过 `&dyn LlmProvider` + `&dyn StorageBackend` 解耦具体实现
@@ -132,9 +132,12 @@ impl Default for L1SummarizerConfig {
 /// - 将关键词写回 `keyword_pool`。
 ///
 /// 用法:
-/// ```ignore
-/// let summarizer = L1Summarizer::new(&llm, &storage, L1SummarizerConfig::default);
-/// let l1 = summarizer.summarize_session(session_id).await?;
+/// ```no_run
+/// # use ramaria_memory::{L1Summarizer, L1SummarizerConfig};
+/// // llm / storage 由上层注入（&dyn LlmProviderTrait / &dyn StorageBackend）；
+/// // 需完整 mock 才能运行，故示例仅示意构造（no_run）。
+/// let summarizer = L1Summarizer::new(todo!(), todo!(), L1SummarizerConfig::default());
+/// # let _ = &summarizer;
 /// ```
 pub struct L1Summarizer<'a> {
     config: L1SummarizerConfig,
@@ -734,7 +737,7 @@ fn validate_continuation(raw: Option<&str>, session_id: Uuid) -> Option<String> 
 /// 3. 缺失 / null / 非数组 — 返回 None
 ///
 /// 说明:
-/// - 存储层（memory_l1 表）自 M1 起只读写新格式，无旧格式解析分支（D-V14-003）；
+/// - 存储层（memory_l1 表）格式约定：只读写新格式，无旧格式解析分支（见 docs/dev-1.5/v1.5-decisions.md）；
 ///   此处的宽容解析仅针对 LLM 输出（M4 之前 prompt 仍为旧格式）。
 fn deserialize_evidence_notes<'de, D>(
     deserializer: D,
@@ -1028,46 +1031,140 @@ mod tests {
     }
 
     #[test]
-    fn validate_situation_strength_injected_from_llm() {
-        // validate_and_build 始终设置 situation_strength = None，
-        // 实际注入在 summarize_session 中完成（LLM 输出 > config > 默认 3）
-        let parsed = L1SummaryResponse {
-            summary: Some("测试摘要".into()),
-            keywords: None,
-            time_period: Some("上午".into()),
-            atmosphere: Some("轻松".into()),
-            valence: Some(0.5),
-            salience: Some(0.5),
-            situation_strength: Some(5),
-            evidence_notes: None,
-            continuation: None,
-        };
-        let sid = ramaria_core::types::new_id();
-        let (l1, _) = L1Summarizer::validate_and_build(&parsed, sid);
-        // validate_and_build 不负责注入 — 注入由 summarize_session 步骤 7 完成
-        assert_eq!(l1.situation_strength, None);
+    fn validate_and_build_does_not_inject_situation_strength() {
+        // validate_and_build 只负责字段校验，situation_strength 的注入
+        // 由调用方 generate_chunk_l1 完成（LLM 输出 > config > 默认 3）。
+        // 此处验证注入不在此层发生：无论 LLM 是否输出该字段，
+        // validate_and_build 产出的 L1 均为 None。
+        for llm_value in [Some(5), None] {
+            let parsed = L1SummaryResponse {
+                summary: Some("测试摘要".into()),
+                keywords: None,
+                time_period: Some("上午".into()),
+                atmosphere: Some("轻松".into()),
+                valence: Some(0.5),
+                salience: Some(0.5),
+                situation_strength: llm_value,
+                evidence_notes: None,
+                continuation: None,
+            };
+            let sid = ramaria_core::types::new_id();
+            let (l1, _) = L1Summarizer::validate_and_build(&parsed, sid);
+            assert_eq!(
+                l1.situation_strength, None,
+                "validate_and_build 不应注入 situation_strength（LLM 输入 {llm_value:?}）"
+            );
+        }
     }
 
-    #[test]
-    fn validate_situation_strength_defaults_to_3() {
-        // LLM 未输出 situation_strength → config 也未设置 → 应回退到 Some(3)
-        let parsed = L1SummaryResponse {
-            summary: Some("测试摘要".into()),
-            keywords: None,
-            time_period: Some("下午".into()),
-            atmosphere: Some("专注".into()),
-            valence: Some(0.0),
-            salience: Some(0.5),
-            situation_strength: None,
-            evidence_notes: None,
-            continuation: None,
-        };
-        let sid = ramaria_core::types::new_id();
-        let (l1, _) = L1Summarizer::validate_and_build(&parsed, sid);
-        // validate_and_build 设置 situation_strength 为 None，
-        // 实际赋值在 summarize_session 中（步骤 7）
-        // validate_and_build 中设为 None，最终由调用方（步骤 7）注入
-        assert_eq!(l1.situation_strength, None);
+    /// 真实注入路径（generate_chunk_l1 步骤 7）：
+    /// LLM 输出 > config 回退 > 默认 3。
+    #[tokio::test]
+    async fn summarize_session_injects_situation_strength_priority() {
+        use crate::l1::mock::MockLlmProvider;
+
+        // 场景 A：LLM 输出 situation_strength=5 → 优先采用
+        let sid_a = Uuid::new_v4();
+        let storage_a = MockStorage::new();
+        storage_a.add_messages(
+            sid_a,
+            vec![
+                make_msg(sid_a, MessageRole::User, "最近压力好大"),
+                make_msg(sid_a, MessageRole::Assistant, "辛苦了，早点休息"),
+            ],
+        );
+        let llm_a = MockLlmProvider::new("test-model");
+        llm_a.set_response(
+            serde_json::json!({
+                "summary": "测试摘要",
+                "keywords": "压力",
+                "time_period": "上午",
+                "atmosphere": "平静",
+                "valence": -0.4,
+                "salience": 0.5,
+                "situation_strength": 5,
+                "evidence_notes": []
+            })
+            .to_string(),
+        );
+        let summarizer_a = L1Summarizer::new(
+            &llm_a,
+            &storage_a,
+            L1SummarizerConfig {
+                utt_splitter: None,
+                ..Default::default()
+            },
+        );
+        summarizer_a
+            .summarize_session(sid_a)
+            .await
+            .expect("场景 A 应成功");
+        assert_eq!(
+            storage_a.saved_l1_entries()[0].situation_strength,
+            Some(5),
+            "LLM 输出优先于 config 与默认值"
+        );
+
+        // 场景 B：LLM 缺失 + config=Some(2) → 回退 config
+        let sid_b = Uuid::new_v4();
+        let storage_b = MockStorage::new();
+        storage_b.add_messages(
+            sid_b,
+            vec![
+                make_msg(sid_b, MessageRole::User, "最近压力好大"),
+                make_msg(sid_b, MessageRole::Assistant, "辛苦了，早点休息"),
+            ],
+        );
+        let llm_b = MockLlmProvider::new("test-model");
+        llm_b.set_response(llm_json("测试摘要", None)); // 无 situation_strength
+        let summarizer_b = L1Summarizer::new(
+            &llm_b,
+            &storage_b,
+            L1SummarizerConfig {
+                situation_strength: Some(2),
+                utt_splitter: None,
+                ..Default::default()
+            },
+        );
+        summarizer_b
+            .summarize_session(sid_b)
+            .await
+            .expect("场景 B 应成功");
+        assert_eq!(
+            storage_b.saved_l1_entries()[0].situation_strength,
+            Some(2),
+            "LLM 缺失时应回退 config 值"
+        );
+
+        // 场景 C：LLM 缺失 + config=None → 默认 3
+        let sid_c = Uuid::new_v4();
+        let storage_c = MockStorage::new();
+        storage_c.add_messages(
+            sid_c,
+            vec![
+                make_msg(sid_c, MessageRole::User, "最近压力好大"),
+                make_msg(sid_c, MessageRole::Assistant, "辛苦了，早点休息"),
+            ],
+        );
+        let llm_c = MockLlmProvider::new("test-model");
+        llm_c.set_response(llm_json("测试摘要", None));
+        let summarizer_c = L1Summarizer::new(
+            &llm_c,
+            &storage_c,
+            L1SummarizerConfig {
+                utt_splitter: None,
+                ..Default::default()
+            },
+        );
+        summarizer_c
+            .summarize_session(sid_c)
+            .await
+            .expect("场景 C 应成功");
+        assert_eq!(
+            storage_c.saved_l1_entries()[0].situation_strength,
+            Some(3),
+            "LLM 与 config 均缺失时回退默认 3"
+        );
     }
 
     // =========================================================
@@ -1237,7 +1334,7 @@ mod tests {
         assert!(notes.is_empty(), "缺失 evidence_notes 时应降级为空数组");
     }
 
-    // ---- v1.4 M4（T-V14-4-002）结构化槽位校验测试 ----
+    // ---- 结构化槽位校验测试 ----
 
     /// 完整对象（text + time/who/cause 全部槽位）经校验后槽位完整保留。
     #[test]
@@ -1473,7 +1570,7 @@ mod tests {
     }
 
     // =========================================================
-    // v1.5 M4（T-V15-4-001/002）B2 上下文感知生成测试
+    // B2 上下文感知生成测试
     // =========================================================
 
     use crate::utt::{UttChunk, UttSplitterConfig};
@@ -1802,10 +1899,11 @@ mod tests {
             last.user_message.contains("continuation"),
             "带上文模板应含 continuation"
         );
-        // 只注入最近 1 块：块2 prompt 不应包含块2 之前之外的内容（无第三块链式）
+        // 只注入最近 1 块：块2 原文是当前块内容，应出现在块2 的 prompt 对话部分
+        //（上文注入的是块1，不含第三块链式内容）
         assert!(
-            !last.user_message.contains("块2：用户继续提问") || true,
-            "块2 原文是当前块内容"
+            last.user_message.contains("块2：用户继续提问"),
+            "块2 原文是当前块内容，应出现在块2 prompt 中"
         );
     }
 

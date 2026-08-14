@@ -13,7 +13,7 @@
 
 ## 安装与运行
 
-**无需安装**：仓库已构建的调试二进制位于 `f:\Ramaria-s\main\target\debug\ramaria.exe`，包含全部命令（含 probe），直接执行即可。建议先 `cd f:\Ramaria-s\main` 再运行，避免相对路径（默认数据库 `data/ramaria_assistant.db`）跑偏；也可创建 `ramaria.cmd` 快捷入口（内容：`@echo off` + `"%~dp0target\debug\ramaria.exe" %*`），之后在 `f:\Ramaria-s\main` 下直接敲 `ramaria`。
+**无需安装**：仓库已构建的调试二进制位于 `target\debug\ramaria.exe`（仓库根下），包含全部命令（含 probe），直接执行即可。建议先 `cd` 到仓库根目录再运行，避免相对路径（默认数据库 `data/ramaria_assistant.db`）跑偏；也可创建 `ramaria.cmd` 快捷入口（内容：`@echo off` + `"%~dp0target\debug\ramaria.exe" %*`），之后在仓库根目录下直接敲 `ramaria`。
 
 ### 从安装包
 
@@ -22,7 +22,7 @@ Windows 安装包将 `ramaria.exe` 安装到系统 PATH。
 ### 从源码编译
 
 ```bash
-cd f:\Ramaria-s\main
+cd <仓库根目录>
 cargo build -p ramaria-cli
 # 调试二进制位于 target/debug/ramaria.exe
 ```
@@ -36,7 +36,7 @@ cargo build -p ramaria-cli
 | 选项 | 说明 |
 |------|------|
 | `--db <PATH>` | 数据库文件路径。默认 `data/ramaria_assistant.db`，可通过 `RAMARIA_DB_PATH` 环境变量覆盖 |
-| `--json` | 全局 JSON 信封输出：stdout 仅输出 `{"ok":true,"data":…}` / `{"ok":false,"error":{...}}`，供脚本/agent 解析（D-V15-011） |
+| `--json` | 全局 JSON 信封输出：stdout 仅输出 `{"ok":true,"data":…}` / `{"ok":false,"error":{...}}`，供脚本/agent 解析（遵循全局 JSON 信封约定） |
 | `--yes` | 自动确认所有确认点（隐私/删除/导入等）。非 TTY 且无 `--yes` 时不挂起、直接失败并提示 |
 | `--quiet` | 抑制 stderr 提示（info/success/warn），仅保留错误输出 |
 | `--skip-validate` | 跳过 LLM 后端连接验证（仅 `setup` 命令生效） |
@@ -137,7 +137,7 @@ ramaria memory --limit 20         # 限制返回条数
 
 | 参数 | 说明 |
 |------|------|
-| `<LAYER>` | 记忆层级位置参数：`l1`/`summary`（摘要，默认）、`l2`/`events`（事件）、`l3`/`profile`（性格画像），双支持（D-V15-007），未知层级有纠错提示 |
+| `<LAYER>` | 记忆层级位置参数：`l1`/`summary`（摘要，默认）、`l2`/`events`（事件）、`l3`/`profile`（性格画像），层级别名双支持，未知层级有纠错提示 |
 | `--persona <UID>` | 按人格筛选 |
 | `--limit <N>` | 返回条数限制 |
 | `--offset <N>` | 跳过前 N 条（分页） |
@@ -248,23 +248,23 @@ ramaria import qq --file chat.txt \
   --persona-other-uid "char-123456789"
 
 # 跳过确认直接导入
-ramaria import qq --file chat.txt --yes
+ramaria import qq --file chat.json --yes
 ```
 
 | 参数 | 说明 |
 |------|------|
-| `--file <PATH>` | QQ 聊天记录文件路径（`.txt` 或 `.json`） |
+| `--file <PATH>` | QQ 聊天记录文件路径（`.json`；TXT 格式支持规划中） |
 | `--deep` | 深度导入模式：L0→L1→L2→L3 全管线 |
 | `--persona <NAME>` | 导出者画像名称（向后兼容，等同于 `--persona-self-name`） |
 | `--persona-self-name <NAME>` | 导出者画像名称 |
 | `--persona-self-uid <UID>` | 导出者画像 UID（默认自动生成如 `char-{QQ号}`） |
 | `--persona-other-name <NAME>` | 对方画像名称 |
 | `--persona-other-uid <UID>` | 对方画像 UID |
-| `--gap <MINUTES>` | 会话切割间隔（分钟），默认 1440（1 天） |
+| `--gap <MINUTES>` | 会话切割间隔（分钟），默认 10 |
 | `--yes` | 跳过诊断报告确认直接执行导入 |
 
 **导入流程**：
-1. 解析聊天记录文件（JSON 或 TXT 格式）
+1. 解析聊天记录文件（JSON 格式；TXT 格式支持规划中）
 2. 显示诊断报告：消息数量、时间范围、参与者信息
 3. 用户确认后执行导入：
    - 为双方自动创建 persona（source=`qq`）
@@ -274,8 +274,7 @@ ramaria import qq --file chat.txt --yes
 4. 导入完成后显示统计报告
 
 **支持的格式**：
-- **JSON**：qq-chat-exporter v6.x 导出格式
-- **TXT**：经典 PCQQ 导出 `.txt` 格式（GBK/UTF-8/UTF-16 多编码兼容）
+- **JSON**：qq-chat-exporter v6.x 导出格式（TXT / PCQQ 格式支持规划中）
 
 ---
 
@@ -328,7 +327,7 @@ ramaria export --output ./my-memories.json  # 指定输出文件
 
 ### `ramaria probe` — 探针实验（v1.5 M2 新增）
 
-自动化工具链：构建测试集 + 按参数档位批量跑对话管线，用于 utt 参数定稿（θ_gap / 条数上限 / top_k，T-V15-2-003）与聚类参数摸底（D-P，M5 复用）。建立于 M1 `--json` 信封约定之上；实验设计与定稿结论见 `f:\Ramaria-s\docs\dev-1.5\v1.5-probe-report.md`。
+自动化工具链：构建测试集 + 按参数档位批量跑对话管线，用于 utt 参数定稿（θ_gap / 条数上限 / top_k）与聚类参数摸底（见 docs/dev-1.5/v1.5-plan.md）。建立于 M1 `--json` 信封约定之上；实验设计与定稿结论见 `docs/dev-1.5/v1.5-probe-report.md`。
 
 #### `ramaria probe build` — 构建测试集（旧名 `probe dataset`，保留 alias）
 
@@ -466,7 +465,7 @@ ramaria probe run --dataset probe-dataset.json --output probe-results.json --jso
 | `import qq --dry-run` | 新增：仅解析预览输出结构化 JSON 摘要，不写入数据库（agent 先验证数据源）。预览 JSON 含双方 QQ uin/uid 标识字段（数据源验证用途），注意其隐私属性 |
 | `session delete --force` | 新增：跳过确认（等同 `--yes` 双保险） |
 | `memory` 默认 persona | 修正：`user-0001` 硬编码 → `rama-0001`（缺陷修复，查询默认对象变化） |
-| `probe dataset` → `probe build` | **M2 新增探针命令**：`probe build`（构建测试集）/ `probe run`（档位批量实验），`dataset` 保留为 alias（D-V15-007）；详见上文 `probe` 章节 |
+| `probe dataset` → `probe build` | **M2 新增探针命令**：`probe build`（构建测试集）/ `probe run`（档位批量实验），`dataset` 保留为 alias；详见上文 `probe` 章节 |
 
 ---
 
@@ -474,5 +473,5 @@ ramaria probe run --dataset probe-dataset.json --output probe-results.json --jso
 
 - 桌面使用指南：`docs/desktop-user-guide.md`
 - 隐私说明：`docs/privacy-notice.md`
-- 探针实验设计与定稿：`f:\Ramaria-s\docs\dev-1.5\v1.5-probe-report.md`（v1.5 计划/决策/任务清单同目录）
+- 探针实验设计与定稿：`docs/dev-1.5/v1.5-probe-report.md`（v1.5 计划/决策/任务清单同目录）
 - 默认配置模板：`config/default.toml`

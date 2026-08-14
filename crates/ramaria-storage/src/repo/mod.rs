@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-storage/src/repo/mod.rs - Repository 模块入口
+//! crates/ramaria-storage/src/repo/mod.rs - Repository 模块入口
 //!
 //! 设计特点:
 //! - 每个子模块负责一类实体的 SQL 操作和行映射
@@ -49,7 +49,6 @@ macro_rules! parse_enum_fallback {
 pub mod backend_config;
 pub mod background_jobs;
 pub mod behavior_rules;
-pub mod bm25_index;
 pub mod cluster;
 pub mod conflict_queue;
 pub mod events;
@@ -62,7 +61,6 @@ pub mod l2_fingerprint;
 pub mod llm_response_cache;
 pub mod memory_l1;
 pub mod messages;
-pub mod pending_push;
 pub mod personas;
 pub mod privacy_consent;
 pub mod schema_meta;

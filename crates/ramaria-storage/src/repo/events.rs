@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-storage/src/repo/events.rs - MemoryEvent / EventRelation / EventSource CRUD
+//! crates/ramaria-storage/src/repo/events.rs - MemoryEvent / EventRelation / EventSource CRUD
 //!
 //! 设计特点:
 //! - 管理 L2 事件主表及其关系和溯源

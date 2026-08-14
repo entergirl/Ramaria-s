@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/event/degrade.rs - 事件提取降级策略
+//! crates/ramaria-memory/src/event/degrade.rs - 事件提取降级策略
 //!
 //! 设计特点:
 //! - 降级触发条件: LLM 返回的 JSON 无法解析为合法事件数组

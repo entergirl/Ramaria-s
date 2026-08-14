@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/prompt/example_selector.rs - Few-shot 示例筛选器
+//! crates/ramaria-memory/src/prompt/example_selector.rs - Few-shot 示例筛选器
 //!
 //! 设计特点:
 //! - 从 persona_examples 候选库中按多维度评分选取最优 3-5 对
@@ -68,8 +68,11 @@ impl Default for ExampleSelectorConfig {
 /// - 返回评分最高的前 N 条。
 ///
 /// 用法:
-/// ```ignore
-/// let selected = ExampleSelector::select(&examples, &query_keywords, query_valence, &config);
+/// ```
+/// use ramaria_memory::prompt::example_selector::{ExampleSelector, ExampleSelectorConfig};
+/// // 空候选 → 返回空列表（示例仅示意调用形态，完整示例数据见库内测试）
+/// let selected = ExampleSelector::select(&[], &["工作"], 0.0, &ExampleSelectorConfig::default());
+/// assert!(selected.is_empty());
 /// ```
 pub struct ExampleSelector;
 
@@ -236,6 +239,15 @@ impl ExampleSelector {
 ///
 /// 返回:
 /// - 去重后的小写关键词列表，按字典序排列。
+///
+/// 与 `bm25::tokenize` 的关系（v1.5 审查批 2）:
+/// - 两者主体逻辑（CJK bigram + 英文小写切分）几乎逐行相同，但**保留两处不合并**:
+///   1. 长度过滤阈值不同：本函数按 **字符数**（`chars().count() >= 2`，小写化后）过滤，
+///      `bm25::tokenize` 按 UTF-8 **字节数**（`buf.len() >= 2`）过滤——
+///      对独立多字节非 CJK 字母（如 "é"）二者输出集不同（本函数丢弃，bm25 输出）。
+///   2. 输出形式不同：本函数排序并去重（供示例筛选关键词集合）；
+///      `bm25::tokenize` 保持原始顺序且不去重（供 BM25 tf 统计）。
+/// - 如需统一，需先对齐长度过滤阈值与去重语义（会改变本函数分词结果集）。
 ///
 /// 说明:
 /// - 接入真实分词器后可替换为 jieba-rs 等实现。

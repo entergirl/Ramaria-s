@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/src/app_retriever.rs - 检索器重建模块
+//! crates/ramaria-app/src/app_retriever.rs - 检索器重建模块
 //!
 //! 从 `app.rs` 提取。
 //! 职责: 从存储层加载 L1/L2 数据，构建内存检索索引（BM25 + 向量 + 图谱）。

@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-storage/src/repo/traits.rs - PersonalityTrait / TraitEvidence CRUD
+//! crates/ramaria-storage/src/repo/traits.rs - PersonalityTrait / TraitEvidence CRUD
 //!
 //! 设计特点:
 //! - 管理 L3 性格标签（三层模型：base/primary/accent）及其证据链

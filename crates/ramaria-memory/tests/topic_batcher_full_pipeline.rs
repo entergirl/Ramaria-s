@@ -1,4 +1,4 @@
-//! T-V13-2-016：TopicBatcher 全链路集成测试（v1.3 遗留收尾补齐，T-V14-8-001）
+//! TopicBatcher 全链路集成测试：50 条 L1 → 簇数量/内聚性/缓冲区
 //!
 //! 验收要求：mock LLM + mock embedding + 50 条 fixture L1 → 验证簇数量/内聚性/缓冲区行为。
 //!

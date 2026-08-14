@@ -587,9 +587,8 @@ fn cluster_situation(cluster: &RefinedCluster) -> BehaviorSituation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ramaria_core::behavior::{BehaviorEvidence, BehaviorSituation};
+    use ramaria_core::behavior::BehaviorSituation;
     use ramaria_core::types::Presentation;
-    use std::sync::Arc;
 
     // ---- mock LLM ----
 
@@ -698,72 +697,77 @@ mod tests {
         }
     }
 
-    // ---- 极性一致性校验 ----
+    // ---- 极性一致性校验（表驱动） ----
 
     #[test]
-    fn polarity_consistent_same_sign() {
-        // 簇 valence 为负，文本含消极词 → 一致
+    fn polarity_consistency_cases() {
+        // 输入-期望表：(文本, 簇 valence, 期望一致)
+        let cases: [(&str, f64, bool); 4] = [
+            ("我也很难过，压力好大", -0.4, true), // 文本消极 + 簇消极 → 一致
+            ("太好了真开心", -0.4, false),        // 文本积极 + 簇消极 → 不一致（降级候选）
+            ("别担心，会好的，我支持你", 0.5, true), // 文本积极 + 簇积极 → 一致
+            ("", -0.4, true),                     // 中性文本（无词典词）→ 无信息不误判
+        ];
+        for (text, cluster_valence, expected) in cases {
+            let v = check_polarity(polarity_of_text(text), cluster_valence);
+            assert_eq!(
+                v.consistent, expected,
+                "文本 {text:?} 对簇 valence {cluster_valence} 的极性一致结果应为 {expected}"
+            );
+        }
+        // 附加：消极文本极性为负；无词典词文本极性≈0
         let v = check_polarity(polarity_of_text("我也很难过，压力好大"), -0.4);
-        assert!(v.consistent);
-        assert!(v.text_polarity < 0.0);
-    }
-
-    #[test]
-    fn polarity_inconsistent_opposite_sign() {
-        // 簇 valence 为负，文本却积极 → 不一致（降级候选）
-        let v = check_polarity(polarity_of_text("太好了真开心"), -0.4);
-        assert!(!v.consistent);
-    }
-
-    #[test]
-    fn polarity_neutral_text_considered_consistent() {
-        // 文本中性（无词典词）→ 视为一致（无信息不误判）
-        let v = check_polarity(0.0, -0.4);
-        assert!(v.consistent);
-    }
-
-    #[test]
-    fn polarity_positive_cluster_positive_text() {
-        let v = check_polarity(polarity_of_text("别担心，会好的，我支持你"), 0.5);
-        assert!(v.consistent);
-    }
-
-    // ---- 质控门槛 ----
-
-    #[test]
-    fn quality_gate_passes_healthy_cluster() {
-        let cluster = make_cluster(-0.4, 0.2, 6, 6.0);
-        assert_eq!(
-            quality_gate(&cluster, &RuleGenConfig::default()),
-            QualityVerdict::Pass
+        assert!(
+            v.text_polarity < 0.0,
+            "消极文本极性应为负，实际 {}",
+            v.text_polarity
+        );
+        let neutral = check_polarity(polarity_of_text(""), -0.4);
+        assert!(
+            neutral.text_polarity.abs() < 0.1,
+            "无词典词文本极性应≈0，实际 {}",
+            neutral.text_polarity
         );
     }
 
-    #[test]
-    fn quality_gate_low_evidence_degrades() {
-        let cluster = make_cluster(-0.4, 0.2, 3, 3.0);
-        assert_eq!(
-            quality_gate(&cluster, &RuleGenConfig::default()),
-            QualityVerdict::Degrade(RuleDegradeReason::LowEvidence)
-        );
-    }
+    // ---- 质控门槛（表驱动） ----
 
     #[test]
-    fn quality_gate_low_neff_degrades() {
-        let cluster = make_cluster(-0.4, 0.2, 8, 2.0);
-        assert_eq!(
-            quality_gate(&cluster, &RuleGenConfig::default()),
-            QualityVerdict::Degrade(RuleDegradeReason::LowNeff)
-        );
-    }
-
-    #[test]
-    fn quality_gate_high_valence_variance_degrades() {
-        let cluster = make_cluster(-0.2, 0.8, 8, 8.0);
-        assert_eq!(
-            quality_gate(&cluster, &RuleGenConfig::default()),
-            QualityVerdict::Degrade(RuleDegradeReason::HighValenceVariance)
-        );
+    fn quality_gate_cases() {
+        // 输入-期望表：(valence_mean, valence_std, sample_count, n_eff, 期望结论)
+        let config = RuleGenConfig::default();
+        let cases: [(f64, f64, usize, f64, QualityVerdict); 4] = [
+            (-0.4, 0.2, 6, 6.0, QualityVerdict::Pass),
+            (
+                -0.4,
+                0.2,
+                3,
+                3.0,
+                QualityVerdict::Degrade(RuleDegradeReason::LowEvidence),
+            ),
+            (
+                -0.4,
+                0.2,
+                8,
+                2.0,
+                QualityVerdict::Degrade(RuleDegradeReason::LowNeff),
+            ),
+            (
+                -0.2,
+                0.8,
+                8,
+                8.0,
+                QualityVerdict::Degrade(RuleDegradeReason::HighValenceVariance),
+            ),
+        ];
+        for (valence_mean, valence_std, sample_count, n_eff, expected) in cases {
+            let cluster = make_cluster(valence_mean, valence_std, sample_count, n_eff);
+            assert_eq!(
+                quality_gate(&cluster, &config),
+                expected,
+                "簇(vm={valence_mean}, vs={valence_std}, n={sample_count}, n_eff={n_eff}) 结论应为 {expected:?}"
+            );
+        }
     }
 
     // ---- avoid 校验 ----
@@ -1025,20 +1029,30 @@ mod tests {
         assert!(out[1].rule.has_reaction(), "簇 2 完整规则");
     }
 
-    #[test]
-    fn generated_rule_evidence_uses_ids() {
-        // 证据链只含事件 id + 权重（隐私红线断言）
+    /// 隐私红线：真实生成路径下，规则证据链只含簇内事件 id + 权重，不携带原文文本。
+    #[tokio::test]
+    async fn generated_rule_evidence_uses_ids() {
+        let llm = MockRuleLlm::new(vec![
+            r#"{"reaction": "辛苦了，别太累，我陪着你。", "avoid": []}"#,
+        ]);
         let cluster = make_cluster(-0.4, 0.2, 6, 6.0);
-        let ev: Vec<BehaviorEvidence> = cluster
-            .member_event_ids
-            .iter()
-            .map(|&event_id| BehaviorEvidence {
-                event_id,
-                weight: 0.5,
-            })
-            .collect();
-        let json = serde_json::to_string(&ev).unwrap();
+        let generator = BehaviorRuleGenerator::new(RuleGenConfig::default(), &llm);
+        let out = generator.generate_rule(&cluster).await;
+        assert_eq!(out.degrade, RuleDegradeReason::None, "健康簇应生成完整规则");
+
+        // 证据只引用簇内成员事件 id（非 0/占位）
+        let evidence = out.rule.evidence;
+        assert!(!evidence.is_empty(), "完整规则应带证据链");
+        for ev in &evidence {
+            assert!(
+                cluster.member_event_ids.contains(&ev.event_id),
+                "证据 event_id={} 应来自簇内成员事件",
+                ev.event_id
+            );
+        }
+
+        // 证据 JSON 只含 event_id/weight 字段（序列化不携带任何原文文本）
+        let json = serde_json::to_string(&evidence).unwrap();
         assert!(!json.contains("原文"), "证据 JSON 不含原文");
-        let _ = Arc::new(());
     }
 }

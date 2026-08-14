@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/inference/orchestrator.rs - Phase B/C 编排层
+//! crates/ramaria-memory/src/inference/orchestrator.rs - Phase B/C 编排层
 //!
 //! 设计特点:
 //! - Phase B: 三步 prompt 构建 → LLM 调用 → JSON 解析 → post_process → 写入 DB
@@ -433,8 +433,8 @@ pub fn build_layer_hints_from_traits(traits: &[PersonalityTrait]) -> HashMap<Str
 /// 流程:
 /// 1. 从 DB 读取该 persona 的上一轮 Active traits。
 /// 2. 调用 `build_layer_hints_from_traits` 构建 layer 提示映射。
-/// 3. 若 hints 非空，调用 `run_shrinkage_layered` 使用分层先验收缩。
-/// 4. 若 hints 为空（首轮推断），调用 `run_shrinkage` 使用全局先验收缩。
+/// 3. 调用 `run_shrinkage_layered`：hints 非空时使用分层先验收缩。
+/// 4. hints 为空（首轮推断）时退化为全局先验收缩（旧 `run_shrinkage` 已删除）。
 /// 5. 收缩结果直接写入 `stats_summary.categories`（in-place 修改）。
 ///
 /// 说明:
@@ -749,7 +749,7 @@ fn parse_consistency_analysis(raw: &str) -> Option<ConsistencyAnalysis> {
 
 /// 解析 Step 3 响应：`[{ "layer": "base", "trait_label": "...", "meaning": "...", ... }, ...]`。
 ///
-/// P1-2 修复：空数组 `[]` 是 LLM 的合法响应（数据不足时明确表示
+/// 空数组 `[]` 是 LLM 的合法响应（数据不足时明确表示
 /// "无可推断 traits"），应返回 `Some(vec![])` 而非解析失败——否则会
 /// 误触发 MockFallback 降级，用 mock 数据污染真实画像。
 fn parse_inferred_traits(raw: &str) -> Option<Vec<InferredTrait>> {
@@ -996,8 +996,7 @@ pub async fn run_phase_c_update(
     }
 
     // ---- 3. 准备新事件数据（按语义匹配度分配事件） ----
-    // 修复前：每个事件被无差别广播给所有 trait（相同 score），导致 E_total/C/conf 全相同。
-    // 修复后：基于事件关键词与 trait 标签的文本重叠计算匹配度，
+    // 基于事件关键词与 trait 标签的文本重叠计算匹配度，
     // 仅将匹配度 > 阈值的事件分配给对应 trait，score = valence × relevance。
     let n_traits = active_traits.len();
     let mut new_event_data_by_trait: Vec<Vec<(f64, i64)>> = vec![vec![]; n_traits];
@@ -1653,7 +1652,7 @@ mod tests {
 
     #[test]
     fn parse_inferred_traits_empty_array() {
-        // P1-2 修复：空数组是 LLM 的合法响应（无足够证据），
+        // 空数组是 LLM 的合法响应（无足够证据），
         // 应解析成功并返回空 traits，而非触发 MockFallback 降级。
         let raw = "[]";
         let result = parse_inferred_traits(raw);
@@ -1698,7 +1697,7 @@ mod tests {
 
     #[test]
     fn parse_json_empty_array_is_success() {
-        // P1-2 修复：LLM 返回空数组是合法响应（无足够证据），
+        // LLM 返回空数组是合法响应（无足够证据），
         // 应解析成功（空 traits），而不是触发 MockFallback 降级。
         let result = parse_json_with_degrade("[]", "Step3", parse_inferred_traits);
         assert!(result.is_ok(), "空数组应解析成功");
@@ -1832,23 +1831,7 @@ mod tests {
     }
 
     // =========================================================
-    // StatsSummary 构建测试
-    // =========================================================
-
-    #[test]
-    fn test_stats_summary_structure() {
-        let stats = make_test_stats();
-        assert_eq!(stats.total_events_in, 15);
-        assert_eq!(stats.category_count, 2);
-        assert_eq!(stats.categories.len(), 2);
-        assert_eq!(stats.categories[0].category, "工作");
-        assert_eq!(stats.categories[1].category, "社交");
-        assert!(!stats.representative_events.is_empty());
-        assert_eq!(stats.representative_events[0].title, "项目验收");
-    }
-
-    // =========================================================
-    // T-V12-3-010: 纯函数边界测试（无需 StorageBackend/LlmProvider mock）
+    // 纯函数边界测试（无需 StorageBackend/LlmProvider mock）
     // 说明: 异步集成测试（Phase B/C 全链路 + mock LLM）在
     //       `crates/ramaria-app/tests/m3_integration.rs` 中。
     // =========================================================
@@ -1912,30 +1895,6 @@ mod tests {
         assert!(result.has_significant_drift);
         assert_eq!(result.drift_categories.len(), 2);
         assert!(result.drift_categories.contains(&"工作".to_string()));
-    }
-
-    // ---- PhaseBSource enum ----
-
-    #[test]
-    fn phase_b_source_equality() {
-        assert_eq!(PhaseBSource::LlmInference, PhaseBSource::LlmInference);
-        assert_ne!(PhaseBSource::LlmInference, PhaseBSource::MockFallback);
-    }
-
-    #[test]
-    fn phase_b_source_debug() {
-        // 验证 Debug 实现可正常工作
-        let s = format!("{:?}", PhaseBSource::LlmInference);
-        assert!(s.contains("LlmInference"));
-        let s = format!("{:?}", PhaseBSource::MockFallback);
-        assert!(s.contains("MockFallback"));
-    }
-
-    #[test]
-    fn phase_b_source_clone() {
-        let s1 = PhaseBSource::MockFallback;
-        let s2 = s1.clone();
-        assert_eq!(s1, s2);
     }
 
     // ---- convert_to_personality_traits 边界情况 ----

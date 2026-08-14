@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/src/stages/check_state.rs - Stage 1: 应用状态检查
+//! crates/ramaria-app/src/stages/check_state.rs - Stage 1: 应用状态检查
 //!
 //! 设计特点:
 //! - 对应 send_message 管线 Step 1: 状态检查

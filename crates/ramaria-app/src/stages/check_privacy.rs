@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/src/stages/check_privacy.rs - Stage 2: 隐私确认检查
+//! crates/ramaria-app/src/stages/check_privacy.rs - Stage 2: 隐私确认检查
 //!
 //! 设计特点:
 //! - 对应 send_message 管线 Step 2: 隐私确认

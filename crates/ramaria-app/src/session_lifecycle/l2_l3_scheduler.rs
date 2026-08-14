@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/src/session_lifecycle/l2_l3_scheduler.rs - L2 事件提取 & L3 性格推断调度
+//! crates/ramaria-app/src/session_lifecycle/l2_l3_scheduler.rs - L2 事件提取 & L3 性格推断调度
 //!
 //! 设计特点:
 //! - 实现 `SessionLifecycle` 的 L2 触发检查（路径 A 即时 + 路径 B 定时）与 L3 级联触发
@@ -144,7 +144,7 @@ impl SessionLifecycle {
                     temperature: self.config.event_extraction.temperature,
                     max_tokens: self.config.event_extraction.max_tokens,
                     max_events: self.config.event_extraction.max_events,
-                    // v1.5 L2 聚类去重指纹（T-V15-3-003/004）：从 [cache] 配置组传播
+                    // v1.5 L2 聚类去重指纹：从 [cache] 配置组传播
                     l2_fingerprint_enabled: self.config.cache.l2_fingerprint_enabled,
                     l2_similarity_threshold: self.config.cache.l2_similarity_threshold,
                     l2_recent_events_limit: self.config.cache.l2_recent_events_limit,

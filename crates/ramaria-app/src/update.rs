@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/src/update.rs - 版本检查与自动更新检测
+//! crates/ramaria-app/src/update.rs - 版本检查与自动更新检测
 //!
 //! 设计特点:
 //! - 通过 GitHub Release API 检查最新版本
@@ -346,8 +346,8 @@ mod tests {
             release_notes: None,
             error: None,
         };
-        // 工作区版本为 1.4.0
-        assert_eq!(status.current_version, "1.4.0");
+        // 当前版本必须与 cargo 包版本一致（发版 bump 时无需改动此测试）
+        assert_eq!(status.current_version, env!("CARGO_PKG_VERSION"));
         assert!(!status.update_available);
     }
 }

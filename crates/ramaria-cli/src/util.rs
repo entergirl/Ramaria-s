@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-cli/src/util.rs - CLI 共享工具函数
+//! crates/ramaria-cli/src/util.rs - CLI 共享工具函数
 //!
 //! 设计特点:
 //! - 消除跨命令模块的代码重复（format_timestamp / truncate / extract_toml_value）
@@ -35,7 +35,7 @@ pub fn format_timestamp(ms: i64) -> Option<String> {
         .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
 }
 
-/// 将 Unix 毫秒时间戳格式化为 ISO-8601 UTC 字符串（`--json` 模式统一格式，D-V15-011）。
+/// 将 Unix 毫秒时间戳格式化为 ISO-8601 UTC 字符串（`--json` 模式统一格式，见 docs/dev-1.5/v1.5-decisions.md §D-V15-011）。
 ///
 /// 参数:
 /// - `ms`: Unix 毫秒时间戳。

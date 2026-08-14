@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-importer/src/lib.rs - Ramaria 聊天记录导入器
+//! crates/ramaria-importer/src/lib.rs - Ramaria 聊天记录导入器
 //!
 //! 设计特点:
 //! - 通过 `ImportSource` trait 抽象导入源，支持 QQ/微信/Telegram 等格式扩展

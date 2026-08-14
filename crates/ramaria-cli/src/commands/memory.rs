@@ -2,8 +2,8 @@
 //!
 //! 设计特点:
 //! - 支持 L1（摘要）/ L2（事件）/ L3（性格）三层记忆查看
-//! - 层级别名双支持（D-V15-007）: l1↔summary / l2↔events / l3↔profile，纠错提示同时列出
-//! - 默认显示 L1，默认 persona 为 rama-0001（修复 user-0001 硬编码缺陷，D-V15-007）
+//! - 层级别名双支持（人性化别名决策，见 docs/dev-1.5/v1.5-decisions.md §D-V15-007）: l1↔summary / l2↔events / l3↔profile，纠错提示同时列出
+//! - 默认显示 L1，默认 persona 为 rama-0001（修复 user-0001 硬编码缺陷，见 docs/dev-1.5/v1.5-decisions.md §D-V15-007）
 //! - --persona 筛选特定 persona 的记忆
 //! - --limit/--offset 控制分页
 //! - --json 输出信封（时间戳 ISO-8601 UTC），文本模式表格化展示
@@ -45,7 +45,7 @@ pub async fn run(app: &Arc<ramaria_app::App>, args: MemoryArgs) -> anyhow::Resul
     let canonical = match resolve_layer(&args.layer) {
         Some(l) => l,
         None => {
-            // 业务校验失败（D-V15-011: exit code 4）
+            // 业务校验失败（exit code 4，见 docs/dev-1.5/v1.5-decisions.md §D-V15-011）
             return Err(anyhow::anyhow!(RamariaError::validation(format!(
                 "未知记忆层级: '{}'。可用: summary / events / profile（或 l1 / l2 / l3）",
                 args.layer
@@ -335,7 +335,7 @@ fn print_trait_group(label: &str, traits: &[&ramaria_core::types::PersonalityTra
 mod tests {
     use super::*;
 
-    /// 层级别名双支持：l1↔summary / l2↔events / l3↔profile（D-V15-007）。
+    /// 层级别名双支持：l1↔summary / l2↔events / l3↔profile（人性化别名决策，见 docs/dev-1.5/v1.5-decisions.md §D-V15-007）。
     #[test]
     fn layer_aliases_resolve() {
         assert_eq!(resolve_layer("l1"), Some("l1"));

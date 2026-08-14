@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-storage/src/repo/schema_meta.rs - Schema 与索引版本管理模块
+//! crates/ramaria-storage/src/repo/schema_meta.rs - Schema 与索引版本管理模块
 //!
 //! 设计特点:
 //! - 通过 key-value 表管理 schema_version 和 index_version

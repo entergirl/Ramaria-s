@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-memory/src/utils.rs - 记忆模块通用工具函数
+//! crates/ramaria-memory/src/utils.rs - 记忆模块通用工具函数
 //!
 //! 设计特点:
 //! - 集中管理 L1 摘要和事件提取共用的纯函数

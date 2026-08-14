@@ -1,10 +1,12 @@
-//! rust/crates/ramaria-memory/src/keyword/alias.rs - 关键词别名管理模块
+//! crates/ramaria-memory/src/keyword/alias.rs - 关键词别名管理模块
 //!
 //! 设计特点:
 //! - `AliasManager`: 内存级别名管理器，注册/查询/建议合并一站式
 //! - 双缓存设计：`alias_to_canonical` 别名→规范词正向查询 + `canonical_id_by_text` 文本→ID 反向查询
 //! - 合并建议引擎：按 `use_count` 分析同类关键词，输出"高使用量同义词应合并"的建议
 //! - 纯逻辑层，不直接操作数据库（存储操作通过回调/注入实现）
+//!
+//! 预留给 keyword_refs 消费路径（v1.6 精确匹配检索）
 //!
 //! 用法:
 //! ```

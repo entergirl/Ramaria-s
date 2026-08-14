@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/src/stages/load_history.rs - Stage 4: 加载历史消息 + L1 上下文
+//! crates/ramaria-app/src/stages/load_history.rs - Stage 4: 加载历史消息 + L1 上下文
 //!
 //! 设计特点:
 //! - 对应 send_message 管线 Step 4 + Step 4.5

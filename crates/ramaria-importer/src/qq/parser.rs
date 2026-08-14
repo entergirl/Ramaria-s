@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-importer/src/qq/parser.rs - QQ 聊天记录解析核心
+//! crates/ramaria-importer/src/qq/parser.rs - QQ 聊天记录解析核心
 //!
 //! 设计特点:
 //! - 仅支持 shuakami/qq-chat-exporter v6.x JSON 格式（语义化 type 名称）
@@ -169,8 +169,8 @@ fn reply_element(elements: &[serde_json::Value]) -> Option<serde_json::Value> {
 /// 从 elements 列表中提取 JSON 卡片元素的描述文本。
 ///
 /// 优先级:
-/// 1. `data.description` — 卡片的描述摘要（如"牛脑发力！动画区玩谁是卧底..."）
-/// 2. `data.title` — 卡片标题（如"[QQ小程序]牛脑发力！动画区玩..."）
+/// 1. `data.description` — 卡片的描述摘要（如"示例活动：动画区答题互动..."）
+/// 2. `data.title` — 卡片标题（如"[QQ小程序]示例活动：动画答题..."）
 ///
 /// 返回:
 /// - `Some(description)` — 提取到的描述文本
@@ -989,8 +989,8 @@ mod tests {
     fn json_element_description_cases() {
         let cases = [
             (
-                serde_json::json!({"type": "json", "data": {"title": "[QQ小程序]牛脑发力！", "description": "牛脑发力！动画区玩谁是卧底..."}}),
-                Some("牛脑发力！动画区玩谁是卧底..."),
+                serde_json::json!({"type": "json", "data": {"title": "[QQ小程序]示例活动", "description": "示例活动：动画区答题互动..."}}),
+                Some("示例活动：动画区答题互动..."),
             ),
             (
                 serde_json::json!({"type": "json", "data": {"title": "[QQ小程序]标题文本"}}),

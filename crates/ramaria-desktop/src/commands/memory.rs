@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-desktop/src/commands/memory.rs - 记忆查看 Tauri Commands
+//! crates/ramaria-desktop/src/commands/memory.rs - 记忆查看 Tauri Commands
 //!
 //! 设计特点:
 //! - 提供 L1/L2/L3 三层记忆查询接口，按 persona_uid 可选过滤

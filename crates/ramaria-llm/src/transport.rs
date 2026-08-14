@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-llm/src/transport.rs - OpenAI-compatible HTTP 传输层
+//! crates/ramaria-llm/src/transport.rs - OpenAI-compatible HTTP 传输层
 //!
 //! 设计特点:
 //! - 真正的 SSE 流式处理：使用 `reqwest::Response::bytes_stream` + `futures::channel::mpsc`
@@ -32,14 +32,28 @@ use std::pin::Pin;
 /// 安全约束:
 /// - `api_key` 仅在 `Authorization: Bearer` header 中使用，不进入日志
 /// - 请求体和响应体不自动记录（由上层决定是否记录 prompt）
-#[derive(Clone)]
 pub struct OpenAiTransport {
     /// 不含尾随 `/` 的 base URL，例如 `https://api.deepseek.com/v1`
     base_url: String,
-    /// 可选 API key（LM Studio 不需要）
-    api_key: Option<String>,
+    /// 可选 API key（LM Studio 不需要；运行时可通过 `set_api_key` 热更新）
+    api_key: std::sync::RwLock<Option<String>>,
     /// HTTP 客户端
     http: reqwest::Client,
+}
+
+impl Clone for OpenAiTransport {
+    fn clone(&self) -> Self {
+        Self {
+            base_url: self.base_url.clone(),
+            api_key: std::sync::RwLock::new(
+                self.api_key
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone(),
+            ),
+            http: self.http.clone(),
+        }
+    }
 }
 
 // 手动实现 Debug：遮蔽 API key，仅显示 base_url 和 key 是否存在
@@ -49,11 +63,11 @@ impl std::fmt::Debug for OpenAiTransport {
             .field("base_url", &self.base_url)
             .field(
                 "api_key",
-                &if self.api_key.is_some() {
-                    "***"
-                } else {
-                    "None"
-                },
+                &self
+                    .api_key
+                    .read()
+                    .map(|g| if g.is_some() { "***" } else { "None" })
+                    .unwrap_or("poisoned"),
             )
             .field("http", &self.http)
             .finish()
@@ -82,19 +96,22 @@ impl OpenAiTransport {
 
         Ok(Self {
             base_url,
-            api_key,
+            api_key: std::sync::RwLock::new(api_key),
             http,
         })
+    }
+
+    /// 更新 API key（运行时热更新；LM Studio 场景传 None 清除）。
+    ///
+    /// 说明:
+    /// - 用户修改 keychain 后，下一次请求即使用新 key，无需重建 provider。
+    pub fn set_api_key(&self, api_key: Option<String>) {
+        *self.api_key.write().unwrap_or_else(|e| e.into_inner()) = api_key;
     }
 
     /// 返回 base_url 引用（供 validate 使用）。
     pub fn base_url(&self) -> &str {
         &self.base_url
-    }
-
-    /// 返回 HTTP 客户端引用（供 validate 发送测试请求）。
-    pub fn http_client(&self) -> &reqwest::Client {
-        &self.http
     }
 
     /// 发送带认证的 GET 请求。
@@ -111,7 +128,12 @@ impl OpenAiTransport {
     pub async fn send_authenticated_get(&self, url: &str) -> RamariaResult<reqwest::Response> {
         let mut req = self.http.get(url);
 
-        if let Some(ref key) = self.api_key {
+        let api_key = self
+            .api_key
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(key) = api_key.as_ref() {
             req = req.header("Authorization", format!("Bearer {}", key));
         }
 
@@ -293,7 +315,12 @@ impl OpenAiTransport {
             .json(body)
             .header("Content-Type", "application/json");
 
-        if let Some(ref key) = self.api_key {
+        let api_key = self
+            .api_key
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(key) = api_key.as_ref() {
             req = req.header("Authorization", format!("Bearer {}", key));
         }
 

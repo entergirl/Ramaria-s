@@ -1,9 +1,9 @@
-//! rust/crates/ramaria-cli/src/commands/rule.rs - 行为规则管理命令（D7，v1.5 M5）
+//! crates/ramaria-cli/src/commands/rule.rs - 行为规则管理命令（v1.5 规则管理决策，见 docs/dev-1.5/v1.5-plan.md §2.5 D7）
 //!
 //! 设计特点:
 //! - 子命令遵循 §2.9 动词词表：list/show/import/edit/enable/disable/delete/evidence
 //!   （`get` 仅 config 专用，规则详情用 `show`）
-//! - 全部支持全局 `--json` 信封（D-V15-011）；stdout 只输出数据
+//! - 全部支持全局 `--json` 信封（统一信封 schema，见 docs/dev-1.5/v1.5-decisions.md §D-V15-011）；stdout 只输出数据
 //! - delete 为破坏性操作：交互确认 / 非 TTY 或 `--yes` 自动通过（M1 B 项）
 //! - evidence 展示规则 → 事件 → 原文溯源链（只含结构化字段，原文不落日志）
 //! - edit/disable 触发 H1 S1 反馈写入（行为层内部处理）
@@ -109,7 +109,7 @@ async fn run_list(
         .await
         .context("查询行为规则失败")?;
 
-    // 分页（列表命令统一 --limit/--offset 约定，T-V15-1-006）
+    // 分页（列表命令统一 --limit/--offset 约定）
     let total = rules.len();
     if let Some(limit) = limit {
         rules = rules.into_iter().skip(offset).take(limit).collect();
@@ -347,9 +347,9 @@ async fn run_delete(
             .map_err(|e| anyhow::anyhow!(e))?;
     if !confirmed {
         if json {
-            // 用户取消：业务校验失败（exit code 4），消息走 stderr
-            json::emit_err(4, &format!("删除规则 #{id} 已取消"));
-            return Ok(());
+            // 用户主动取消：非错误（ok:true + cancelled 标志，exit 0）
+            let data = serde_json::json!({ "id": id, "cancelled": true });
+            return json::emit_ok(&data);
         }
         crate::ui::info(&format!("删除规则 #{id} 已取消"));
         return Ok(());

@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-desktop/src/commands/export.rs - 数据导出 Tauri Commands
+//! crates/ramaria-desktop/src/commands/export.rs - 数据导出 Tauri Commands
 //!
 //! 设计特点:
 //! - export_sessions_json / export_sessions_markdown: 导出对话数据为文件

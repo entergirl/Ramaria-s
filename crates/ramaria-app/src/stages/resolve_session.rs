@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/src/stages/resolve_session.rs - Stage 3: 会话管理
+//! crates/ramaria-app/src/stages/resolve_session.rs - Stage 3: 会话管理
 //!
 //! 设计特点:
 //! - 对应 send_message 管线 Step 3: 会话管理
@@ -103,7 +103,7 @@ impl PipelineStage for StageResolveSession {
                     ));
                 }
 
-                // P0-1 修复：存量 NULL 会话归属回写。
+                // 存量 NULL 会话归属回写。
                 // 会话创建时未绑定（persona_uid=NULL）且前端传入 uid 时，
                 // 回写 DB 绑定，保证保存/封存时 L1、utt、examples 归属正确。
                 // 回写失败仅 warn 不阻塞发送（绑定是增强，非消息发送前置条件）。
@@ -158,7 +158,7 @@ impl PipelineStage for StageResolveSession {
                 ctx.lifecycle.set_active_session_id_public(Some(s.id));
                 tracing::info!(session_id = %s.id, "自动创建新 session");
 
-                // v1.4 M5（T-V14-5-002）：桥接加载——新会话创建时取
+                // v1.4 M5：桥接加载——新会话创建时取
                 // 最近一个已关闭会话的尾部原文（utt 块优先，降级末 N 条原文）。
                 // 开关关闭 / 白名单外 / 无上一会话 → 不注入（等同 v1.3），不阻塞。
                 let bridge = crate::bridge::load_bridge_context(
@@ -319,7 +319,7 @@ mod tests {
         assert_eq!(stage.name(), "ResolveSession");
     }
 
-    // P0-1 修复：存量 NULL 会话在发送消息时回写绑定 persona_uid
+    // 存量 NULL 会话在发送消息时回写绑定 persona_uid
     #[tokio::test]
     async fn null_persona_session_bound_from_input() {
         let storage = Arc::new(MockStorage::new());
@@ -349,7 +349,7 @@ mod tests {
         assert_eq!(stored.persona_uid.as_deref(), Some("char-0001"));
     }
 
-    // P0-1 修复：session 已绑定 persona_uid（DB 真相源）时不被前端覆盖，
+    // session 已绑定 persona_uid（DB 真相源）时不被前端覆盖，
     // 也不触发回写（幂等绑定）
     #[tokio::test]
     async fn bound_persona_session_keeps_db_truth() {
@@ -375,7 +375,7 @@ mod tests {
         );
     }
 
-    // P0-1 修复：回写失败（存储不支持）时降级 warn，不阻塞消息发送，
+    // 回写失败（存储不支持）时降级 warn，不阻塞消息发送，
     // 前端传入 uid 保留用于消息级归属
     #[tokio::test]
     async fn null_persona_bind_failure_does_not_block_send() {

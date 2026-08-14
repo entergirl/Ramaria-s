@@ -352,7 +352,7 @@ var RamariaMemoryView = (function () {
                 for (var k = 0; k < kwList.length; k++) {
                     var kw = kwList[k].trim();
                     if (kw) {
-                        chipsHtml += '<span class="memory-l1-chip">' + _escapeHtml(kw) + '</span>';
+                        chipsHtml += '<span class="memory-l1-chip">' + RamariaEscape.escapeHtml(kw) + '</span>';
                     }
                 }
             }
@@ -361,11 +361,11 @@ var RamariaMemoryView = (function () {
             var attrsHtml = '';
             var attrParts = [];
             if (timePeriod) {
-                attrParts.push('<span class="memory-l1-attr">🕐 ' + _escapeHtml(timePeriod) + '</span>');
+                attrParts.push('<span class="memory-l1-attr">🕐 ' + RamariaEscape.escapeHtml(timePeriod) + '</span>');
             }
             if (atmosphere) {
                 var valenceEmoji = _valenceEmoji(valence);
-                attrParts.push('<span class="memory-l1-attr">' + valenceEmoji + ' ' + _escapeHtml(atmosphere) + '</span>');
+                attrParts.push('<span class="memory-l1-attr">' + valenceEmoji + ' ' + RamariaEscape.escapeHtml(atmosphere) + '</span>');
             }
             // 旧卡片兼容：有 context_json 才显示参与人数；否则隐藏
             if (hasCtx && chatPartners.length > 0) {
@@ -377,7 +377,7 @@ var RamariaMemoryView = (function () {
                 // 旧卡片降级：有氛围但无 context_json，仅显示氛围
                 var valenceEmojiOld = _valenceEmoji(valence);
                 attrsHtml = '<div class="memory-l1-card-attrs">' +
-                    '<span class="memory-l1-attr">' + valenceEmojiOld + ' ' + _escapeHtml(atmosphere) + '</span>' +
+                    '<span class="memory-l1-attr">' + valenceEmojiOld + ' ' + RamariaEscape.escapeHtml(atmosphere) + '</span>' +
                     '</div>';
             }
             // 若仍为空则不渲染属性行
@@ -386,7 +386,7 @@ var RamariaMemoryView = (function () {
                 // ── valence 色条（通过 ::before 伪元素渲染，此处仅占位标记）──
                 // ── 标题 ──
                 '<div class="memory-l1-card-header">' +
-                    '<div class="memory-l1-card-title">' + _escapeHtml(item.summary || '(无摘要)') + '</div>' +
+                    '<div class="memory-l1-card-title">' + RamariaEscape.escapeHtml(item.summary || '(无摘要)') + '</div>' +
                 '</div>' +
                 // ── 属性行（时段 | 氛围 | 参与人数）──
                 attrsHtml +
@@ -478,16 +478,6 @@ var RamariaMemoryView = (function () {
         }
 
         panel.appendChild(grid);
-    }
-
-    /**
-     * HTML 文本转义（防 XSS）。
-     */
-    function _escapeHtml(text) {
-        if (!text) return '';
-        var div = document.createElement('div');
-        div.appendChild(document.createTextNode(String(text)));
-        return div.innerHTML;
     }
 
     function _valenceEmoji(valence) {
@@ -688,7 +678,7 @@ var RamariaMemoryView = (function () {
 
         bar.innerHTML =
             '<span class="memory-l3-status-icon">' + icon + '</span>' +
-            '<span class="memory-l3-status-text">' + _escapeHtml(status.status_text || '') + '</span>';
+            '<span class="memory-l3-status-text">' + RamariaEscape.escapeHtml(status.status_text || '') + '</span>';
 
         return bar;
     }
@@ -708,12 +698,12 @@ var RamariaMemoryView = (function () {
         // 头部: 标签名 + 置信度
         var html = '';
         html += '<div class="memory-l3-trait-header">';
-        html += '<span class="memory-l3-trait-label">' + _escapeHtml(trait.label || '?') + '</span>';
+        html += '<span class="memory-l3-trait-label">' + RamariaEscape.escapeHtml(trait.label || '?') + '</span>';
         html += '<span class="memory-l3-trait-confidence ' + confClass + '">' + confidencePct + '% 置信</span>';
         html += '</div>';
 
         // 含义
-        html += '<div class="memory-l3-trait-meaning">' + _escapeHtml(trait.meaning || '') + '</div>';
+        html += '<div class="memory-l3-trait-meaning">' + RamariaEscape.escapeHtml(trait.meaning || '') + '</div>';
 
         // 置信度色条（宽度由 CSSOM 设置，见 card.innerHTML 之后——
         // CSP 严格模式 style-src 'self' 禁止 HTML 内嵌 inline style）
@@ -729,22 +719,22 @@ var RamariaMemoryView = (function () {
 
         // 否定界定（如有）
         if (trait.not_meaning) {
-            html += '<div class="memory-l3-trait-not">≠ ' + _escapeHtml(trait.not_meaning) + '</div>';
+            html += '<div class="memory-l3-trait-not">≠ ' + RamariaEscape.escapeHtml(trait.not_meaning) + '</div>';
         }
 
         // 触发/抑制条件（仅 accent 层）
         if (layer === 'accent') {
             if (trait.trigger) {
-                html += '<div class="memory-l3-trait-cond memory-l3-trait-cond--trigger">📌 触发: ' + _escapeHtml(trait.trigger) + '</div>';
+                html += '<div class="memory-l3-trait-cond memory-l3-trait-cond--trigger">📌 触发: ' + RamariaEscape.escapeHtml(trait.trigger) + '</div>';
             }
             if (trait.suppress) {
-                html += '<div class="memory-l3-trait-cond memory-l3-trait-cond--suppress">🔇 抑制: ' + _escapeHtml(trait.suppress) + '</div>';
+                html += '<div class="memory-l3-trait-cond memory-l3-trait-cond--suppress">🔇 抑制: ' + RamariaEscape.escapeHtml(trait.suppress) + '</div>';
             }
         }
 
         // 关联性格（如有）
         if (trait.related) {
-            html += '<div class="memory-l3-trait-related">🔗 ' + _escapeHtml(trait.related) + '</div>';
+            html += '<div class="memory-l3-trait-related">🔗 ' + RamariaEscape.escapeHtml(trait.related) + '</div>';
         }
 
         // 底部操作行
@@ -752,7 +742,7 @@ var RamariaMemoryView = (function () {
         html += '<span class="memory-l3-trait-time">' + RamariaFormat.smartTime(trait.created_at) + '</span>';
         html += '<button class="btn btn-sm btn-outline memory-l3-evidence-btn" ' +
                 'data-trait-id="' + trait.id + '" ' +
-                'data-trait-label="' + _escapeHtml(trait.label || '') + '">' +
+                'data-trait-label="' + RamariaEscape.escapeHtml(trait.label || '') + '">' +
                 '📋 展开证据</button>';
         html += '</div>';
 
@@ -823,7 +813,7 @@ var RamariaMemoryView = (function () {
                         panel.innerHTML =
                             '<div class="tev-empty">' +
                                 '<div class="tev-empty-text">证据链加载失败: ' +
-                                    _escapeHtml(err.message || '未知错误') + '</div>' +
+                                    RamariaEscape.escapeHtml(err.message || '未知错误') + '</div>' +
                             '</div>';
                     });
             } else {
@@ -834,21 +824,6 @@ var RamariaMemoryView = (function () {
                 btn.textContent = '📋 展开证据';
             }
         });
-    }
-
-// =========================================================
-// 辅助函数
-// =========================================================
-
-    /** HTML 转义 */
-    function _escapeHtml(str) {
-        if (!str) return '';
-        return String(str)
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;')
-            .replace(/'/g, '&#39;');
     }
 
  // =========================================================

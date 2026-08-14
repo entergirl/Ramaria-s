@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-llm/src/embedding/models/bert.rs - BERT 编码器（bge-small-zh-v1.5）
+//! crates/ramaria-llm/src/embedding/models/bert.rs - BERT 编码器（bge-small-zh-v1.5）
 //!
 //! 设计特点:
 //! - 基于 `candle-transformers` 的 `BertModel`，支持从 safetensors 直接加载权重

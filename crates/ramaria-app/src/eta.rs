@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-app/src/eta.rs - 导入进度分层 EMA 预估模块（v1.5 I 项）
+//! crates/ramaria-app/src/eta.rs - 导入进度分层 EMA 预估模块（v1.5 I 项）
 //!
 //! 设计特点:
 //! - 纯计算模块（无 I/O、无异步），便于单元测试与在导入后台任务中复用。

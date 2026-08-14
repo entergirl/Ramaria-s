@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-core/src/error.rs - Ramaria 统一错误管理模块
+//! crates/ramaria-core/src/error.rs - Ramaria 统一错误管理模块
 //!
 //! 设计特点:
 //! - 标准化错误分类: Config / Storage / Llm / Privacy / Index / Validation / Io / Unsupported

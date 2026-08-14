@@ -1,4 +1,4 @@
-//! rust/crates/ramaria-storage/src/database.rs - 数据库连接池与 migration 管理
+//! crates/ramaria-storage/src/database.rs - 数据库连接池与 migration 管理
 //!
 //! 设计特点:
 //! - 封装 SqlitePool 初始化，支持默认路径、开发路径、环境变量覆盖
