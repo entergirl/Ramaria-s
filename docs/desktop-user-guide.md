@@ -30,7 +30,7 @@ Ramaria 桌面应用是一个本地运行的个人 AI 陪伴记忆系统。具�
 
 ### 安装步骤
 
-1. 下载 `Ramaria_1.4.0_x64-setup.exe` 安装程序
+1. 下载 `Ramaria_1.5.0_x64-setup.exe` 安装程序
 2. 双击运行安装程序（中文引导）
 3. 选择安装路径（默认 `%LOCALAPPDATA%\Ramaria\`）
 4. 完成安装，桌面出现快捷方式

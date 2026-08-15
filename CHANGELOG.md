@@ -7,6 +7,132 @@
 
 ---
 
+## [1.5.0] - 2026-08-15
+
+### 核心特性
+
+#### 行为层（L3 行为模型，v3.1 §4）——情境-反应规则全链路
+
+persona 的反应模式自动复现：从记忆事件中学习"在什么情境下 ta 会怎么反应"，生成行为规则并在对话中自动命中注入。新增 `ramaria-memory/src/behavior/` 模块（clustering / sentiment / rule_gen / routing / incremental）与 `behavior_rules`/`feedback_log` 表：
+
+- **情境-反应聚类（D2）**：事件 → 情境-反应对样本，双通道向量化（反应通道 `embedding(paraphrase⊕attitude)`、情境通道 `embedding(关键词拼接)`），三路融合相似度 `sim = β1·cos(反应) + β2·cos(情境) + (1−β1−β2)·Jaccard(关键词)`（β1=0.4/β2=0.3/关键词 0.3，缺通道权重归一化）；密度聚类（邻域 θ_nb=0.5、核心样本邻居 ≥ min_cluster_size=3、密度可达链式传播、边界软分配、孤立点不入簇）；失败模式检查（孤立点比例 > 60% 下调 θ_nb 重试）；簇提炼（关键词 Top-N / 簇中心 / valence 加权均值与标准差 / presentation 分布 / situation_strength / 时间跨度 / 簇质量）。
+- **规则生成（D4）**：每簇 → LLM 翻译规则文本（JSON `{reaction, avoid}`，引用簇内代表事件 attitude 作示例）；翻译后**极性一致性校验**（内置中文情感词典提取规则文本极性，与簇内加权 valence 符号比对，不一致重试 1 次仍不一致 → 降级候选规则仅参数注入）；avoid 列表与低 valence 事件相关性校验；质控双门槛（证据量 ≥ 5 / n_eff ≥ 5 / valence 方差 ≤ 0.5）；参数化（情感强度 = 加权 valence、表达倾向 = presentation 分布）；近期事件加权；Auto 规则自动生效（无人工参与）。
+- **情境路由（D5）**：查询构造（最近 5 条消息 → 查询向量 q + 话题词 Top-10）；候选评分 `score = γ·max(0, cos(q, 簇中心)) + (1−γ)·Jaccard(查询侧)`（γ=0.7，cos clip [0,1]，**查询侧** Jaccard 避免偏袒窄规则）；阈值 θ_route=0.6 全低于 → 不注入（静默降级，等同 v1.4）；Top 1~3 排序合并（主规则完整注入、次规则仅合并 avoid 与互补 params、valence 方向矛盾丢弃次规则）。
+- **增量更新（D6）**：会话封存时新事件归入最近簇（≥ θ_join=0.7，滚动更新簇统计与规则参数微调）；未归入 → 待定池（内聚成簇 / 30 天未成簇低置信标记）；旧规则证据按 Ebbinghaus 衰减、低于阈值降级/失效；系统性变化复用漂移检测（Wasserstein + 置换检验）触发规则重构。
+- **规则管理后端 + CLI（D7）**：`ramaria rule list/show/import/edit/enable/disable/delete/evidence` 8 动词子命令（遵循 §2.9 词表与 M1 `--json`/`--yes` 约定）；手工导入 JSON（宽松 situation 解析、空情境/空规则拒绝）；`evidence` 展示规则 → 事件 → 原文摘要溯源链（只含结构化字段，原文不落日志）。规则管理前端 UI 延后（D-V15-004 决策）。
+- **反馈环 S1（H1，并入 D7）**：`feedback_log` 表（S1=edit/disable weight=1.0，detail 编辑前后快照；S2/S3 类型预置，v1.7 复用只增不删）；edit/disable 写 S1 强信号；edit 后规则转 Manual；**Manual 强锚点**（learn 时 Manual 规则以 salience=1.0 锚点样本注入聚类偏移簇中心）。
+
+#### 驱动环接线（F，v3.1 §8）——行为控制块注入
+
+填充 v1.4 预留的 `render_behavior_block` 空槽位：路由命中时渲染【角色（行为层）】段落（`## 行为规则` 小节：关键词 + reaction + params 数值行 + avoid 行，规则文本为主参数为辅）；注入优先级行为 > 知识 > 表达 > 脉络（§8.1）；行为块预算受 §8.3 约束（`behavior_block_max_chars` 默认 400，超限保前部截断 + 最小预算 24 防御残缺段落）。新增 `[behavior]` 配置组（enabled / θ_route / γ / top_n / 聚类与质控参数）全链路传播；**行为层关闭或未命中时 prompt 与 v1.4 语义等价**（回归断言锁定，`PROMPT_TEMPLATE_VERSION` 递增至 `20260814-v1.5.1` 使旧缓存失效）。
+
+#### 三层生成缓存（C，不含语义缓存）
+
+重跑/重试/失败恢复导入与生成管线时不重复花费 API 账单，L2 不做无意义重复聚类：
+
+- **LLM 响应精确缓存**：`llm_response_cache` 表（key 主键 = sha256(model_id + template_version + prompt)，只存响应不存原文输入）；`ChatRequest` 新增 `template_version` 字段（prompt 模板版本常量）；`ProviderBase` 全链路查询-写入（命中记 `cache_hit=true` 直接复用、未命中走 LLM 成功后写入、查询/写入失败记 warn 降级、template_version 为空跳过）；表容量自淘汰（LRU/FIFO 策略）。
+- **L2 聚类去重指纹**：`l2_cluster_fingerprints` 表记录"已聚类且无产出"的 L1 集合指纹（SHA-256 集合指纹，顺序无关）；同集合跳过不重复聚类；新事件与已有事件相似度去重（字符 bigram / 关键词 Jaccard 取大，阈值 0.95，最近 200 条比对）。
+- 新增 `[cache]` 配置组（enabled 默认开启 / max_entries=10000 / eviction / l2_fingerprint_enabled / 相似度阈值），关闭后行为回退 v1.4（回归断言锁定）。
+
+#### 上下文感知生成（B2，v3.1 §6.3）
+
+L1 摘要生成质量提升：生成块 N 时注入上一块上文——上一块消息数 ≤ 阈值（默认 20）→ 注入 L0 原文；长块 → 注入上一 L1 摘要 + 结构化线索（evidence_notes）；**只注入最近 1 块（不链式）**。Prompt 增强"判断当前对话是否延续上一话题；延续则在摘要与线索中体现延续性，无关则独立摘要"；输出含 `continuation`（延续/转折/无关）。缺失槽位降级：cause 缺失置空不阻塞、结构化线索缺失降级空数组记 warn、无上一块/无 utt 块 → 与 v1.4 行为一致（独立摘要断言锁定）。
+
+#### utt 切分单边合并方向变更（D-V15-014）
+
+单边块（块内消息全部来自同一发言侧）并入方向由「并入前块优先」改为「按时间间隔更短的一侧」——比较单边块首条与前块末条间隔、后块首条与单边块末条间隔，取短侧（首块仅后侧、末块仅前侧）；合并可突破 θ_gap 与条数上限，收敛循环，仅剩一块保留。修复异步对话（跨夜回复）中提问型独白与回复的问答配对断裂。仅作用于导入/重建路径的离线切分，实时对话不经过切分；utt 块为派生数据，`blocks rebuild` 重建幂等（非破坏）。
+
+#### 导入进度 ETA（I）
+
+导入后台任务期间前台显示「已完成 x/y · 预计剩余 N 分钟」：后端按阶段（L1/L2/L3）分别统计——L1 调用数可预知（= session × persona）、L2 聚类簇在线估算（已聚簇数/预计簇数）、L3 固定阶段数；`import-progress` 事件 payload 增加各阶段预计总量字段；EMA 平滑分层单次耗时，剩余时间 = Σ(各阶段剩余量 × EMA 单次耗时)；后端统计不可得时前端回退线性估算（降级路径）。
+
+#### CLI 自动化友好改造与命名规范化（M1，D-V15-005/006/007/011）
+
+- **全局 `--json`**：统一信封 `{"ok":true,"data":…}` / `{"ok":false,"error":{"code":…,"message":"…"}}`（D-V15-011），stdout 只输出数据、状态/提示/警告走 stderr，新增 `--quiet`（抑制 stderr 提示）。
+- **`ask --json` 修复**：`StreamEvent` 实现 `Serialize`，事件流 `{"type":"delta|done|error",…}`；`--no-stream` 聚合为单个 `done`（reply/session_id/total_chars）。
+- **`--yes` 全覆盖 + 非 TTY 不挂起**：所有确认点（session delete / import / rule delete 等）支持自动确认；非 TTY 且无 `--yes` 直接失败并提示；破坏性操作统一 `--force` 双保险。
+- **exit code 约定**：0 成功 / 2 参数错（clap）/ 3 LLM 或后端不可用 / 4 业务校验失败；`--json` 模式时间戳统一 ISO-8601 UTC。
+- **增量命令**：`persona list`（uid/名称/kind/来源/状态，分页）、`status`（应用状态/配置摘要/DB 路径，agent 探活）、`import qq --dry-run`（解析预览不写库）；memory/session/config 查询类全部补 `--json`；`memory` 默认 persona 修正（`user-0001` → `rama-0001`，缺陷修复）；`--output` 统一支持 `-` = stdout。
+- **命名与语法规范**：命令结构 `ramaria <对象> <动作> [位置参数] [选项]`；`memory <层>` 层级别名 `l1↔summary`/`l2↔events`/`l3↔profile`（双支持 + 纠错提示）；`utt` → `blocks`（保留 alias）；`probe dataset` → `probe build`（保留 alias）；`ramaria help` 分组（对话/记忆/数据/管理/高级）带示例；错误提示带纠错。
+
+#### 探针 CLI 骨架（M2 T1）
+
+`ramaria probe build/run`：从导入数据自动构建测试集（2 维「语气模仿/事实记忆」× 10 题，seed 固定可复跑，无真实数据时 fixture 兜底）+ 按参数档位批量跑对话管线（结构化输出 档位 → 输出 → 指标）。工具链代码完成；**档位实验（utt 参数定稿 + D-P 聚类参数摸底）延后至 v1.6**（D-V15-013：CLI 未接入 embedding provider + probe persona 选择缺陷，见 `docs/dev-1.6/备忘.md`），utt 参数维持 v3.1 初值（θ_gap=30 / 条数上限 40 / top_k=3）带"待实证"标注。
+
+#### 设置页视觉整改（U）与前端加固
+
+- 对照 `frontend/css/tokens.css` 粉蓝双色设计系统与 `desktop-design.html` 整改基础/高级两级设置页（视觉差异清单见 `docs/dev-1.5/v1.5-m6-settings-visual-checklist.md`）：Tab 由边框式按钮改为分段控件（gray-100 底 + 无边框 + 激活白底 shadow-sm）、`.settings-risk-banner` 改品牌粉语义色、checkbox accent-color 改 `--color-primary`、全部硬编码色值清除；设置项分组与配置链路零改动（功能回归红线）。
+- 交互增强（负责人追加）：数值输入框默认值浅色显示（非默认值自动转深色）；默认开的选项预置 `checked`；高级设置页底部新增「⚙️ 恢复默认」独立栏（点击直接执行，无弹窗）；导入页顶部三步骤窗口删除 640px 断点竖排规则、改常驻 `flex-wrap: wrap`（缩窄保持横排）。
+
+### 修复
+
+- **CSP 违规（负责人反馈）**：`frontend/index.html` meta CSP 严格模式（`style-src 'self'`）阻止 6 处 HTML 字符串内嵌 `style="..."` 属性——静态样式改类（`.settings-update-detail`/`.settings-actions-tight`），动态宽度/显隐改渲染后 CSSOM 设置（不受 style-src 限制）；CSSOM 类操作不受 CSP 限制保留不动。
+- **安全审查 4 项**（security-review）：① HIGH 检查更新结果（GitHub API 远程内容）未转义拼 innerHTML → 模块级 `_escapeHtml`（含属性值转义）先行转义再渲染；② MEDIUM `tauri.conf.json` CSP 含 `'unsafe-inline'` 与 meta 严格策略不一致 → 收敛为与 `index.html` meta 完全一致（connect-src 补 `http://ipc.localhost https://ipc.localhost`）；③ LOW `_advSetValue` 缺失中间路径对象抛 TypeError → 写前自动补建；④ LOW `memory.js` 证据链加载失败分支 `err.message` 未转义 → `_escapeHtml` 转义。
+- 既有缺陷：`memory` 默认 persona `user-0001` → `rama-0001`（查询默认对象指向错误对象的缺陷修复）。
+
+### 破坏性变更
+
+- **CLI 命名（非破坏，alias 兼容）**：`utt` → `blocks`、`probe dataset` → `probe build`，旧命令名继续可用。
+- **stdout/stderr 分离（脚本注意）**：状态/提示/警告消息改走 stderr，stdout 仅保留数据——既有文本输出的数据部分不变，仅提示位置变化；依赖"stdout 混杂状态行"的脚本需调整。
+- **`ask --json` 输出格式修复**：由 Rust Debug 格式（非合法 JSON）修复为真 JSON 事件流——旧格式本不可解析，按修复处理。
+- **`memory` 默认 persona 修正**：`user-0001` 硬编码改为 `rama-0001`——查询默认对象变化，属缺陷修复。
+- **utt 切分单边合并方向（数据重建注意，非破坏）**：单边块并入方向由「前块优先」改为「时间短侧」——既有 utt 块边界随之变化，需 `blocks rebuild` 生效，对应 L1 摘要重新生成（LLM 成本）；utt 块为派生数据，重建幂等（按 start_msg_id 去重）。
+- **无数据库破坏性变更**：`behavior_rules`/`feedback_log`/`llm_response_cache`/`l2_cluster_fingerprints` 均为新增表（增量 migration），既有表结构不变。
+
+### 说明
+
+- 探针档位实验（utt 参数定稿 T-V15-2-003 + D-P 聚类参数摸底 T-V15-5-003）延后至 v1.6（D-V15-013）：CLI 未接入 embedding provider（检索退化 BM25）+ `probe build` 自动 persona 选择未考虑 role 分布；阻塞项修复见 `docs/dev-1.6/备忘.md`；`v1.5-probe-report.md` 保持草稿。
+- 规则管理前端 UI 延后（D-V15-004）：v1.5 提供后端 API + CLI 管理（`ramaria rule`）。
+- 生成缓存不含语义缓存（用户决策 2026-08-08，D-V15-008）。
+- 反馈环 S2/S3 弱反馈检测与风格特征统计延后至 v1.7（H2）；知识层延后至 v1.6。
+- 待项目负责人验收：全量 `cargo test --workspace`；真实 LLM Smoke Test（行为规则自动生成并生效、精确缓存命中 + API 账单对比、导入 ETA 一致性、B2 延续/转折体感）；设置页手动视觉验收；CSP 修复验证（进入设置页控制台无 `style-src` 违规报错）。
+
+---
+
+## [1.4.0] - 2026-08-08
+
+### 核心特性
+
+#### utt 话语块（L0 原文表达层）
+
+新增 `utt_blocks` 表与 `ramaria-memory/src/utt/` 模块，实现原文话语块全链路：切分器按时间间隙（θ_gap=30 分钟）与条数上限（40 条）切分会话消息，块内必须含目标 persona 发言，单边对话块自动与相邻块合并、无发言块丢弃；构建器支持全量重建（按 start_msg_id 幂等去重）与增量构建（会话封存钩子，只处理未切分消息）；块 embedding 写入 BruteForceIndex 的 layer='l0' 新通道，检索向量优先、embedding 不可用时降级 BM25 子串匹配，persona_uid 严格隔离。对话时经【原文片段】段落整块注入（超预算按相似度从低到高丢整块）。原文通道受 `persona_kind_whitelist` 白名单约束（默认仅角色类 persona 开启），助手/系统类不注入、行为与 v1.3 完全一致，原文内容不写日志。相关测试约 80 个。
+
+#### examples 自学习激活（Few-shot 风格兜底）
+
+`persona_examples` 写侧激活：会话封存时纯规则抽取"对方 → 你"回复对（过滤图片/过短/系统消息/重复），经 `save_example` 入库候选池（查重幂等）。注入侧激活 `example_selector.rs` 多维评分（话题相关/情绪/长度）轮换选择，替代 v1.3 静态 `selected=1` 查询；记忆检索未命中（`memory_context=None`）时注入 examples 作风格兜底，命中时不重复注入。相关测试约 45 个。
+
+#### evidence_notes 结构化线索
+
+`memory_l1.evidence_notes` 从字符串数组升级为结构化对象数组 `[{text, time?, who?, cause?}]`（text 必填 ≥ 5 字符，time/who/cause 可选，1~3 条）。L1 Summarizer Prompt 升级输出对象数组并附槽位说明；后处理校验可选槽位 trim + 空白归一为 None，过短条目不记原文日志（隐私红线）。存量数据一次性迁移（旧字符串数组落 `text` 槽位，迁移前备份原值，无运行时兼容解析）。L2 事件提取注入 cause 槽位因果线索段落（仅供背景参考）；TopicBatcher 语义增强输入适配新结构（summary + evidence_notes + keywords）。相关测试约 30 个。
+
+#### 会话桥接与生命周期
+
+新会话创建时取最近一个已关闭会话的最后一个 utt 块（无块降级取末 5 条原文，仍无跳过），以 `[时间] 角色: 内容…` 格式注入【桥接（上一会话尾部）】段落（只取最近一个不链式，`bridge_enabled` 开关默认开启，预算从头部截断保最近，内容受原文白名单约束）。空闲自动保存时长可配置：设置页【会话】区块滑动块 5~60 分钟（滑到尽头切换自定义输入），保存后热更新空闲检测线程（`Arc<AtomicU32>`，无需重启）。空闲检测遍历 DB 全部活跃会话，孤儿会话不再遗留。相关测试约 25 个。
+
+#### 驱动环骨架与四层注入
+
+CRISPE 模板精简对齐 v3.1 §8.2 四层结构（角色行为层/说话风格表达层/知识层/记忆脉络层），段落映射表文档化。新增 `prompt/layers.rs` 统一注入块（`LayerKind`/`InjectionBlock`）与预算分配器（脉络独立预算 ≤ 30%，默认 600 字符；裁剪顺序：原文块按相似度 → 桥接截头部 → 相关记忆句子边界 → 脉络保最近）；行为/知识注入块空实现预留（v1.5/v1.6 填充）。`[utt]/[examples]/[bridge]` 配置组经 `RamariaConfig` 全链路传播，开关关闭后行为回退 v1.3（回归断言锁定）。相关测试约 35 个。
+
+#### 设置功能完善
+
+打通 config.toml 与 DB 双写同步链路（`ramaria-app/src/config_sync.rs`）：启动读取两处并做一致性校验（不一致以文件为准并告警），config.toml 缺失时生成含全部默认值的模板，设置页修改经统一写入口同时落文件与表，API key 仍走 keychain 不入文件，单侧写失败降级不阻塞。设置页重构为基础/高级两级 Tab：基础（LLM 后端/嵌入模型/记忆注入开关/会话/隐私/数据目录），高级（检索/衰减/阈值/索引/日志/推断/事件提取/utt/examples/bridge 参数组，元数据驱动表单引擎 10 组 56 字段）；每字段默认值标注 + 恢复默认，`log_full_prompt` 开启弹窗隐私确认。
+
+### 修复
+
+- P0（真实消息导入测试，`docs/dev-1.4/测试报告.md`）：前端创建会话 `persona_uid` 恒为 NULL 导致保存会话错归默认人格（`create_session` 增加 persona_uid 参数 + `resolve_session` 回写绑定 + 抽屉告警）；utt/examples 在对话路径未生效（目标 persona 三层推断兜底）；保存时 L1 归属来源不统一（以 DB `sessions.persona_uid` 为真相源）；L3 空数组响应被误判解析失败 → 降级 mock 污染画像（空数组视为合法响应）；孤儿活跃会话遗留（空闲检测遍历全部活跃会话）；「深度处理导入的消息」LIMIT 200 只覆盖 4 个 session（移除限制）。
+- 既有缺陷：`token_budget.rs` 多字节截断超预算（`find_last_sentence_boundary` 字节索引 → 字符索引）；RAG 截断 `fit_chars` clamp；预算分配块间分隔符计入。
+- Qwen3-Embedding 0.6B 导入校验失败（`sliding_window: null` + `head_dim`）——改用 candle `qwen3::Config` + 内嵌无状态 Qwen3 前向。
+
+### 破坏性变更
+
+- `memory_l1.evidence_notes` 格式升级为结构化对象数组 `[{text, time?, who?, cause?}]`，存量行一次性迁移（无运行时兼容解析，迁移前备份原值）。其余变更均为增量（新增 `utt_blocks` 表、新增配置组）。
+
+### 说明
+
+- M7 探针实验不在 v1.4 执行（决策 D-V14-010）：探针改造为 CLI 自动化工具链（T1→v1.5、T2→v1.6、T3→v1.7），utt 切分/召回/说话人标注参数维持 v3.1 初值（待实证）。
+
+---
+
 ## [1.3.0] - 2026-07-22
 
 ### 核心特性

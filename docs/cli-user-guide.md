@@ -1,11 +1,11 @@
 # Ramaria CLI 使用指南
 
-> 版本：v1.3（v1.2 + M2 探针命令 `probe build`/`probe run`、运行方式与数据目录说明更新）
+> 版本：v1.4（v1.3 + M5 规则管理命令 `rule`、行为层说明更新）
 > 适用平台：Windows / macOS / Linux（Windows 首发）
 
 ## 概述
 
-`ramaria` 是 Ramaria 的命令行入口，支持对话、记忆查询、会话管理、配置修改、人格管理、数据导入、诊断导出、数据导出与探针实验（probe）。
+`ramaria` 是 Ramaria 的命令行入口，支持对话、记忆查询、会话管理、配置修改、人格管理、行为规则管理（rule）、数据导入、诊断导出、数据导出与探针实验（probe）。
 
 首次使用前需运行首次配置向导（`ramaria setup`）。**CLI 与桌面应用的数据目录相互独立**：CLI 的数据库由 `--db` 指定（默认 `data/ramaria_assistant.db`，`RAMARIA_DB_PATH` 覆盖）；桌面应用开发模式（`cargo tauri dev`）使用 `crates/ramaria-desktop/.ramaria-dev/`、生产模式使用 `%APPDATA%\Ramaria\data\`；API key 均保存在 Windows Credential Manager（不落盘）。
 
@@ -389,6 +389,49 @@ ramaria probe run --dataset ds.json --no-rebuild-utt --json
 
 ---
 
+### `ramaria rule` — 行为规则管理（v1.5 M5 新增）
+
+行为层（情境-反应规则）的管理命令：查看 persona 自动学习到的行为规则、手工导入、编辑/启用/禁用/删除，以及查看规则证据链（规则 → 事件 → 原文摘要溯源）。建立于 M1 `--json` 信封约定与 §2.9 动词词表之上；行为层设计见算法说明书 v3.1 §4 与 `docs/dev-1.5/v1.5-plan.md` §2.5。
+
+```
+ramaria rule list                              # 列出默认 persona（rama-0001）的规则
+ramaria rule list --persona char-0001 --json   # 指定 persona + JSON 信封
+ramaria rule show 3                            # 查看规则 #3 详情
+ramaria rule import rules.json                 # 手工导入规则（JSON 文件，- = stdin）
+ramaria rule edit 3 --reaction "..." --avoid "a,b"
+ramaria rule enable 3 / ramaria rule disable 3
+ramaria rule delete 3                          # 破坏性操作：交互确认 / --yes 自动通过
+ramaria rule evidence 3                        # 规则 → 事件 → 原文摘要溯源链
+```
+
+| 子命令 | 说明 |
+|--------|------|
+| `list` | 列出 persona 的行为规则（默认 `rama-0001`；`--persona` 筛选、`--limit/--offset` 分页，`--json` 输出含分页前 `total`） |
+| `show <ID>` | 查看单条规则详情（来源 Manual/Auto、状态、规则文本、情境关键词、情感强度/主动程度/详细度/正式度、禁忌列表、置信度/稳定性/证据数） |
+| `import <FILE>` | 手工导入规则 JSON（`-` = stdin），导入后 `source=Manual` 自动生效；宽松 situation 解析、空情境/空规则拒绝 |
+| `edit <ID>` | 编辑规则（`--reaction` / `--avoid`，至少一个；编辑后规则转为 Manual 并写 S1 反馈日志） |
+| `enable <ID>` / `disable <ID>` | 启用 / 禁用规则（disable 写 S1 反馈日志） |
+| `delete <ID>` | 删除规则（破坏性操作：交互确认，非 TTY 或 `--yes/--force` 自动通过） |
+| `evidence <ID>` | 展示规则证据链：规则 → 事件（title/摘要/paraphrase，脱敏字段，原文不落日志） |
+
+**手工导入 JSON 格式**（宽松解析，字段缺失取默认值）：
+
+```json
+{
+  "situation": {"keywords": ["工作", "加班", "吐槽"]},
+  "reaction": "遇到工作吐槽时，先共情再给实用建议",
+  "params": {"emotional_intensity": 0.6, "proactiveness": 0.5, "detail_level": 0.5, "formality": 0.3},
+  "avoid": ["敷衍安慰", "讲大道理"]
+}
+```
+
+**注意**：
+- 规则文本与 evidence 均为脱敏内容（paraphrase/摘要），原始对话不落日志（隐私红线）
+- 删除为破坏性操作，脚本场景加 `--yes` 或 `--force`
+- 编辑/禁用会写入 `feedback_log`（S1 强信号，weight=1.0），用于 v1.7 反馈环（H2）校准
+
+---
+
 ## 环境变量
 | 变量 | 说明 |
 |------|------|
@@ -466,6 +509,7 @@ ramaria probe run --dataset probe-dataset.json --output probe-results.json --jso
 | `session delete --force` | 新增：跳过确认（等同 `--yes` 双保险） |
 | `memory` 默认 persona | 修正：`user-0001` 硬编码 → `rama-0001`（缺陷修复，查询默认对象变化） |
 | `probe dataset` → `probe build` | **M2 新增探针命令**：`probe build`（构建测试集）/ `probe run`（档位批量实验），`dataset` 保留为 alias；详见上文 `probe` 章节 |
+| `rule list/show/import/edit/enable/disable/delete/evidence` | **M5 新增行为规则管理命令**（v1.5 规则管理决策：UI 延后，仅后端 + CLI）；详见上文 `rule` 章节 |
 
 ---
 

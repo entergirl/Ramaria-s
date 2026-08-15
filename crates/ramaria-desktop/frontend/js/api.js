@@ -763,7 +763,7 @@ var RamariaApi = (function () {
  * - 不消耗 GitHub API 配额。
  *
  * 返回:
- * - 版本号字符串，如 "1.4.0"（编译期 env!("CARGO_PKG_VERSION") 嵌入）
+ * - 版本号字符串，如 "1.5.0"（编译期 env!("CARGO_PKG_VERSION") 嵌入）
  */
     async function getVersion() {
         return await _invoke('get_version', {}, '获取版本号');
