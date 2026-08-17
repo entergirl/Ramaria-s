@@ -222,6 +222,26 @@ pub async fn list_unabsorbed(pool: &SqlitePool, persona_uid: &str) -> RamariaRes
         .collect::<RamariaResult<Vec<_>>>()
 }
 
+/// 查询未吸收的"无主"L1（`persona_uid IS NULL`，导入产生的 L1 属此类）。
+///
+/// 用途:
+/// - 重建检索索引时加载无主 L1（按 persona 查询查不到 NULL 记录，
+///   但检索侧对 NULL persona 文档不做过滤，任何画像可命中）。
+pub async fn list_unabsorbed_unbound(pool: &SqlitePool) -> RamariaResult<Vec<MemoryL1>> {
+    let rows = sqlx::query_as::<_, L1Row>(
+        "SELECT id, session_id, summary, keywords, time_period, atmosphere, valence, salience,
+         absorbed, created_at, last_accessed_at, persona_uid, context_json, situation_strength,
+         evidence_notes, continuation
+         FROM memory_l1 WHERE absorbed = 0 AND persona_uid IS NULL ORDER BY created_at ASC",
+    )
+    .fetch_all(pool)
+    .await
+    .storage_err("查询未吸收的无主 L1 失败")?;
+    rows.into_iter()
+        .map(|r| r.into_l1())
+        .collect::<RamariaResult<Vec<_>>>()
+}
+
 /// 按创建时间降序获取指定 persona 的最近 N 条 L1 摘要。
 ///
 /// 用法:

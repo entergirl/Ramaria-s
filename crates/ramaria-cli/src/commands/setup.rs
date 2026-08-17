@@ -1,7 +1,7 @@
 //! crates/ramaria-cli/src/commands/setup.rs - 首次配置向导
 //!
 //! 设计特点:
-//! - 交互式三步: 选 provider → 配地址 → 输 API key（线上）
+//! - 交互式步骤: 选 provider → 配地址 → 配嵌入模型路径（可选）→ 输 API key（线上）
 //! - 委托 ramaria-app 进行设置保存和状态刷新
 //! - 验证 provider 连接可用性（可选）
 //! - 本地 LM Studio 跳过 API key 步骤
@@ -30,19 +30,25 @@ pub async fn run(app: &Arc<ramaria_app::App>, skip_validate: bool) -> anyhow::Re
     // ---- Step 2: 配置 base_url ----
     let base_url = configure_base_url(provider)?;
 
-    // ---- Step 3: 配置 API key（仅线上 provider）----
+    // ---- Step 3: 配置 embedding 模型路径（可选，回车跳过）----
+    let embedding_model_path = configure_embedding_model_path()?;
+
+    // ---- Step 4: 配置 API key（仅线上 provider）----
     let api_key = if provider.is_online() {
         Some(configure_api_key(app, provider)?)
     } else {
         None
     };
 
-    // ---- Step 4: 构建 BackendConfig 并保存 ----
+    // ---- Step 5: 构建 BackendConfig 并保存 ----
+    // 继承已有配置中的 embedding 模型设置（重跑向导时不丢配置），
+    // 向导新输入的路径优先。
+    let existing = app.backend_config();
     let config = BackendConfig {
         provider,
         base_url: base_url.clone(),
-        embedding_model_id: None,
-        embedding_model_path: None,
+        embedding_model_id: existing.embedding_model_id,
+        embedding_model_path: embedding_model_path.or(existing.embedding_model_path),
         temperature: 0.3,
         max_tokens: 1024,
         capability: ramaria_core::types::ModelCapability {
@@ -73,10 +79,10 @@ pub async fn run(app: &Arc<ramaria_app::App>, skip_validate: bool) -> anyhow::Re
 
     crate::ui::success("后端配置已保存");
 
-    // ---- Step 5: 创建初始 persona（扫描 personas/ 目录批量初始化）----
+    // ---- Step 6: 创建初始 persona（扫描 personas/ 目录批量初始化）----
     create_initial_personas(app).await?;
 
-    // ---- Step 6: 刷新应用状态 ----
+    // ---- Step 7: 刷新应用状态 ----
     let new_state = app
         .refresh_setup_state()
         .await
@@ -87,7 +93,7 @@ pub async fn run(app: &Arc<ramaria_app::App>, skip_validate: bool) -> anyhow::Re
         crate::ui::warn("应用仍需要进一步配置（如 embedding 模型下载）");
     }
 
-    // ---- Step 7: 可选验证 LLM 连接 ----
+    // ---- Step 8: 可选验证 LLM 连接 ----
     if !skip_validate {
         println!();
         crate::ui::info("正在验证 LLM 连接...");
@@ -165,6 +171,26 @@ fn configure_base_url(provider: ramaria_core::types::LlmProvider) -> anyhow::Res
 
     crate::ui::info(&format!("API 地址: {url}"));
     Ok(url)
+}
+
+/// 配置 embedding 模型路径（可选）。
+///
+/// 说明:
+/// - 直接回车跳过（保留已有配置或保持未设置）。
+/// - 本地嵌入模型文件路径用于离线语义检索，与远程 embedding_model_id 二选一。
+fn configure_embedding_model_path() -> anyhow::Result<Option<String>> {
+    println!();
+    println!("嵌入模型路径（可选，直接回车跳过）：");
+    println!("  本地嵌入模型文件路径（如 GGUF），用于离线语义检索");
+    let input = crate::ui::read_line("  [回车跳过]:")?;
+
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        Ok(None)
+    } else {
+        crate::ui::info(&format!("嵌入模型路径: {trimmed}"));
+        Ok(Some(trimmed.to_string()))
+    }
 }
 
 /// 配置 API key（仅线上 provider）。

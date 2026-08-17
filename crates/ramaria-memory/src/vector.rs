@@ -311,10 +311,9 @@ impl VectorIndex for BruteForceIndex {
 ///
 /// 缓存策略:
 /// - 对查询向量做量化哈希（float → u8 → u64），容忍微小浮点差异
-/// - 缓存未命中 → 执行底层检索后存入缓存（使用 RefCell 实现 search(&self) 内部可变）
+/// - 缓存未命中 → 执行底层检索后存入缓存（使用 Mutex 实现 search(&self) 内部可变）
+/// - 命中 → LRU 提升（条目移到末尾，最近使用优先保留）；容量满时淘汰队头最久未使用
 /// - 索引变更（add/remove/clear）时清空全部缓存
-///
-/// 预留给 v1.6 向量通道（见 docs/dev-1.6/备忘.md D-26-01）；当前实现为 FIFO 非 LRU，接线前需修正
 #[derive(Debug, Clone)]
 pub struct VectorCacheConfig {
     /// 最大缓存条目数（默认 128）
@@ -353,7 +352,10 @@ type CacheEntries = Vec<(u64, usize, u64, Vec<VectorHit>)>;
 /// - 使用 `std::sync::Mutex` 替代 RefCell 以满足 `VectorIndex: Send + Sync` 约束
 /// - MutexGuard 仅在同线程内短期持有，不跨 .await，不会死锁
 ///
-/// 预留给 v1.6 向量通道（见 docs/dev-1.6/备忘.md D-26-01）；当前实现为 FIFO 非 LRU，接线前需修正
+/// 容量策略（LRU 修正）:
+/// - 原实现为 FIFO 驱逐（队头即最旧插入），已修正为 LRU：
+///   查询命中时条目移到队尾（最近使用），容量满时淘汰队头（最久未使用）。
+/// - 已接线进 `Retriever`（`vector_index: CachedVectorIndex<BruteForceIndex>`）。
 #[derive(Debug)]
 pub struct CachedVectorIndex<I: VectorIndex> {
     /// 底层索引实现
@@ -473,19 +475,23 @@ impl<I: VectorIndex> VectorIndex for CachedVectorIndex<I> {
         let qhash = Self::quantize_query(query);
         let sim_key = Self::quantize_min_sim(config.min_similarity);
 
-        // 查找缓存
+        // 查找缓存（LRU：命中条目移到末尾，最近使用优先保留）
         {
-            let cache = self.cache.lock().unwrap();
-            for (c_qhash, c_topk, c_sim, hits) in cache.iter() {
-                if *c_qhash == qhash && *c_topk == config.top_k && *c_sim == sim_key {
-                    tracing::trace!(
-                        cache_hit = true,
-                        qhash,
-                        top_k = config.top_k,
-                        "向量查询缓存命中"
-                    );
-                    return Ok(hits.clone());
-                }
+            let mut cache = self.cache.lock().unwrap();
+            let hit_index = cache.iter().position(|(c_qhash, c_topk, c_sim, _)| {
+                *c_qhash == qhash && *c_topk == config.top_k && *c_sim == sim_key
+            });
+            if let Some(idx) = hit_index {
+                tracing::trace!(
+                    cache_hit = true,
+                    qhash,
+                    top_k = config.top_k,
+                    "向量查询缓存命中（LRU 提升）"
+                );
+                let entry = cache.remove(idx);
+                let hits = entry.3.clone();
+                cache.push(entry);
+                return Ok(hits);
             }
         }
 
@@ -498,9 +504,8 @@ impl<I: VectorIndex> VectorIndex for CachedVectorIndex<I> {
         );
         let results = self.inner.search(query, config)?;
 
-        // 回填缓存
+        // 回填缓存（LRU 驱逐：超过最大条目时淘汰最久未使用——队列头部）
         let mut cache = self.cache.lock().unwrap();
-        // LRU 驱逐：超过最大条目时删除最旧的（第一个）
         if cache.len() >= self.cache_config.max_entries {
             cache.remove(0);
         }
@@ -712,5 +717,69 @@ mod tests {
 
         let idx = BruteForceIndex::new();
         _accept(&idx);
+    }
+
+    // ---- CachedVectorIndex（LRU 容量策略）----
+
+    /// 缓存容量满时淘汰"最久未使用"（LRU），而非最早插入（FIFO）。
+    ///
+    /// 场景: max_entries=2，依次查询 A/B/A/C：
+    /// - A、B 入缓存 [A, B]；再查 A → LRU 提升 [B, A]；
+    /// - 查 C（未命中）→ 容量满 → 淘汰队头 B（最久未使用）→ 缓存 [A, C]；
+    /// - 若为 FIFO 则淘汰 A，B 仍在——本断言锁定 LRU 语义。
+    #[test]
+    fn cached_index_evicts_least_recently_used() {
+        let mut inner = BruteForceIndex::new();
+        inner.add("a", vec![1.0, 0.0, 0.0], 1);
+        inner.add("b", vec![0.0, 1.0, 0.0], 2);
+        inner.add("c", vec![0.0, 0.0, 1.0], 3);
+        let cfg = VectorCacheConfig {
+            max_entries: 2,
+            enabled: true,
+        };
+        let idx = CachedVectorIndex::new(inner, Some(cfg));
+        let conf = VectorIndexConfig::default();
+
+        let qa = [1.0, 0.0, 0.0];
+        let qb = [0.0, 1.0, 0.0];
+        let qc = [0.0, 0.0, 1.0];
+
+        idx.search(&qa, &conf).unwrap(); // 缓存 [A]
+        idx.search(&qb, &conf).unwrap(); // 缓存 [A, B]
+        assert_eq!(idx.cache_len(), 2);
+        idx.search(&qa, &conf).unwrap(); // 命中 A → LRU 提升 [B, A]
+        idx.search(&qc, &conf).unwrap(); // C 未命中 → 驱逐队头 B → [A, C]
+
+        assert_eq!(idx.cache_len(), 2);
+        let cache = idx.cache.lock().unwrap();
+        let labels: Vec<&str> = cache
+            .iter()
+            .map(|(_, _, _, hits)| hits[0].doc_label.as_str())
+            .collect();
+        assert_eq!(
+            labels,
+            vec!["a", "c"],
+            "应淘汰最久未使用的 B（LRU 而非 FIFO）"
+        );
+    }
+
+    /// 缓存命中提升：重复查询同一向量走缓存，不重复全量扫描（cache_len 不增长）。
+    #[test]
+    fn cached_index_hit_does_not_grow_cache() {
+        let mut inner = BruteForceIndex::new();
+        inner.add("a", vec![1.0, 0.0], 1);
+        let cfg = VectorCacheConfig {
+            max_entries: 8,
+            enabled: true,
+        };
+        let idx = CachedVectorIndex::new(inner, Some(cfg));
+        let conf = VectorIndexConfig::default();
+
+        let q = [1.0, 0.0];
+        for _ in 0..5 {
+            let hits = idx.search(&q, &conf).unwrap();
+            assert_eq!(hits[0].doc_label, "a");
+        }
+        assert_eq!(idx.cache_len(), 1, "同查询命中缓存，不新增条目");
     }
 }

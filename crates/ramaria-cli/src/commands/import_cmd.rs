@@ -25,7 +25,7 @@ use std::sync::Arc;
 // =========================================================
 
 /// CLI 导入命令的参数。
-/// 新增双画像参数（self/other 两方独立命名和 UID 指定）。
+/// 新增双画像参数（self/other 两方独立命名和 UID 指定）+ 导入侧过滤（--side）。
 pub struct ImportArgs {
     /// QQ 聊天记录文件路径（qq-chat-exporter v6.x JSON 格式）
     pub file: String,
@@ -43,6 +43,8 @@ pub struct ImportArgs {
     pub persona_other_uid: Option<String>,
     /// session 切割时间间隔（分钟），默认 10
     pub gap: u32,
+    /// 导入侧过滤：self|other|both，默认 both
+    pub side: ramaria_importer::qq::ImportSide,
     /// 跳过确认提示
     pub yes: bool,
     /// JSON 信封输出
@@ -150,6 +152,11 @@ pub async fn run(
             "file": args.file,
             "mode": if args.deep { "deep" } else { "fast" },
             "gap_minutes": args.gap,
+            "side": match args.side {
+                ramaria_importer::qq::ImportSide::Me => "self",
+                ramaria_importer::qq::ImportSide::Other => "other",
+                ramaria_importer::qq::ImportSide::Both => "both",
+            },
             "sessions": sessions.len(),
             "messages": report.total_success() + report.total_degraded(),
             "self": {
@@ -195,8 +202,8 @@ pub async fn run(
         }
     }
 
-    // Step 5: 双画像 Persona 准备
-    use ramaria_importer::qq::build_persona_uid;
+    // Step 5: 双画像 Persona 准备（按 --side 只创建处理侧 persona）
+    use ramaria_importer::qq::{PersonaSide, build_persona_uid};
 
     // 5a. 查询 QQ persona 当前最大 seq（用于 fallback 级别 4）
     let all_personas = ramaria_storage::repo::personas::list_all(pool)
@@ -209,25 +216,39 @@ pub async fn run(
         .max()
         .unwrap_or(0);
 
-    // 5b. 导出者（self）persona
+    // 5b. 导出者（self）persona —— 我方，UID 前缀 user-（kind=user）；
+    //     side=other 时该侧 persona 不创建（消息也不会入库）
     let self_name = args
         .persona_self_name
         .clone()
         .unwrap_or_else(|| report.self_name.clone());
     let self_uid = build_persona_uid(
+        PersonaSide::Me,
         args.persona_self_uid.as_deref(),
         report.self_uin.as_deref(),
         &report.self_id,
         max_qq_seq + 1,
     );
-    let self_persona_uid =
-        ramaria_importer::qq::ensure_qq_persona(pool, &self_uid, &self_name, Some(&report.self_id))
-            .await
-            .context("创建/查找导出者 persona 失败")?;
+    let self_persona_uid: Option<String> = if args.side.needs_persona(PersonaSide::Me) {
+        let resolved = ramaria_importer::qq::ensure_qq_persona(
+            pool,
+            &self_uid,
+            &self_name,
+            Some(&report.self_id),
+        )
+        .await
+        .context("创建/查找导出者 persona 失败")?;
+        crate::ui::info(&format!("👤 导出者: {} ({})", self_name, resolved));
+        Some(resolved)
+    } else {
+        crate::ui::info(&format!(
+            "⏭️  跳过导出者 persona（--side {} 不处理我方）",
+            "other"
+        ));
+        None
+    };
 
-    crate::ui::info(&format!("👤 导出者: {} ({})", self_name, self_persona_uid));
-
-    // 5c. 对方（other）persona
+    // 5c. 对方（other）persona；side=self 时该侧 persona 不创建
     let other_name = args.persona_other_name.clone().unwrap_or_else(|| {
         if report.other_name.is_empty() {
             report.chat_name.clone()
@@ -243,26 +264,32 @@ pub async fn run(
     // 对方 seq 在 self 之后递增
     let next_seq = max_qq_seq + 2;
     let other_default_uid = build_persona_uid(
+        PersonaSide::Other,
         args.persona_other_uid.as_deref(),
         report.other_uin.as_deref(),
         &report.other_uid,
         next_seq,
     );
-    let other_persona_uid = ramaria_importer::qq::ensure_qq_persona(
-        pool,
-        &other_default_uid,
-        &other_name,
-        other_ref_id,
-    )
-    .await
-    .context("创建/查找对方 persona 失败")?;
+    let other_persona_uid: Option<String> = if args.side.needs_persona(PersonaSide::Other) {
+        let resolved = ramaria_importer::qq::ensure_qq_persona(
+            pool,
+            &other_default_uid,
+            &other_name,
+            other_ref_id,
+        )
+        .await
+        .context("创建/查找对方 persona 失败")?;
+        crate::ui::info(&format!("👤 对话对方: {} ({})", other_name, resolved));
+        Some(resolved)
+    } else {
+        crate::ui::info(&format!(
+            "⏭️  跳过对方 persona（--side {} 不处理对方）",
+            "self"
+        ));
+        None
+    };
 
-    crate::ui::info(&format!(
-        "👤 对话对方: {} ({})",
-        other_name, other_persona_uid
-    ));
-
-    // Step 6: 执行导入
+    // Step 6: 执行导入（按 side 过滤消息；单侧模式下跳过侧 persona 为 None）
     if args.deep {
         crate::ui::info("🔄 执行深度导入（L0 → 触发 L1 摘要生成）...");
     } else {
@@ -273,9 +300,10 @@ pub async fn run(
         ramaria_importer::qq::QqImporter::execute_fast_import(
             pool,
             &sessions,
-            &self_persona_uid,
-            &other_persona_uid,
+            self_persona_uid.as_deref(),
+            other_persona_uid.as_deref(),
             &report.self_id,
+            args.side,
         )
         .await
         .context("导入写入失败")?;

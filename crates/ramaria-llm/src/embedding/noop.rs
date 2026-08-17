@@ -60,8 +60,8 @@ impl EmbeddingProvider for NoopEmbeddingProvider {
         ))
     }
 
-    fn model_info(&self) -> &EmbeddingModelInfo {
-        &self.model_info
+    fn model_info(&self) -> EmbeddingModelInfo {
+        self.model_info.clone()
     }
 
     async fn validate(&self) -> RamariaResult<()> {

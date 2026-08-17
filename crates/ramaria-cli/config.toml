@@ -1,0 +1,129 @@
+version = "1.5.0"
+schema_version = 1
+
+[paths]
+data_dir = ""
+config_dir = ""
+log_dir = ""
+vector_index_dir = ""
+
+[backend]
+provider = "lm_studio"
+model_id = ""
+base_url = "http://localhost:1234/v1"
+temperature = 0.8
+max_tokens = 1024
+online_memory_injection = true
+
+[retrieval]
+l0_window_size = 3
+l0_retrieve_top_k = 3
+l1_retrieve_top_k = 4
+l2_retrieve_top_k = 2
+similarity_threshold = 0.6
+rrf_k = 60
+bm25_weight = 1.0
+graph_weight = 0.8
+retrieval_weight_l2 = 0.8
+retrieval_weight_l1 = 1.0
+
+[decay]
+s_l0 = 10
+s_l1 = 30
+s_l2 = 60
+enable_access_boost = true
+recent_boost_days = 7
+recent_boost_floor = 0.5
+salience_multiplier = 0.5
+
+[session]
+l1_idle_minutes = 10
+idle_check_interval_seconds = 60
+l2_check_interval_seconds = 86400
+max_history_messages = 40
+
+[thresholds]
+l2_trigger_count = 5
+l2_trigger_days = 7
+l3_trigger_count = 10
+l3_trigger_days = 30
+cluster_delay_ms = 800
+
+[index]
+bm25_incremental_threshold = 10
+bm25_rebuild_interval = 300
+
+[logging]
+log_full_prompt = false
+
+[inference.inferrer]
+temperature = 0.3
+max_tokens = 2048
+low_evidence_threshold = 5.0
+step_max_tokens = 2048
+
+[inference.confidence]
+stability_s = 60.0
+min_decay = 0.01
+
+[inference.drift]
+alpha = 0.05
+n_permutations = 1000
+
+[inference.calibration]
+round_threshold = 10
+event_doubling_ratio = 2.0
+diff_alert_ratio = 0.3
+
+[event_extraction]
+temperature = 0.3
+max_tokens = 8192
+max_events = 5
+
+[utt]
+enabled = true
+theta_gap_minutes = 30
+max_msgs_per_block = 40
+retrieve_top_k = 3
+max_block_chars = 1500
+persona_kind_whitelist = [
+    "char",
+    "anim",
+    "oc",
+    "hist",
+]
+
+[examples]
+enabled = true
+max_examples = 5
+
+[bridge]
+enabled = true
+max_chars = 800
+
+[cache]
+enabled = true
+max_entries = 10000
+eviction = "lru"
+l2_fingerprint_enabled = true
+l2_similarity_threshold = 0.95
+l2_recent_events_limit = 200
+
+[behavior]
+enabled = true
+theta_nb = 0.5
+min_cluster_size = 3
+theta_join = 0.7
+beta1 = 0.4
+beta2 = 0.3
+theta_route = 0.6
+gamma = 0.7
+top_n = 3
+min_evidence = 5
+min_n_eff = 5
+valence_std_limit = 0.5
+max_outlier_ratio = 0.6
+pending_expire_days = 30
+evidence_decay_threshold = 0.3
+
+[misc]

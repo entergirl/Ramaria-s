@@ -1248,8 +1248,8 @@ mod tests {
             }
             Ok(out)
         }
-        fn model_info(&self) -> &ramaria_core::traits::EmbeddingModelInfo {
-            &self.model_info
+        fn model_info(&self) -> ramaria_core::traits::EmbeddingModelInfo {
+            self.model_info.clone()
         }
         async fn validate(&self) -> RamariaResult<()> {
             Ok(())

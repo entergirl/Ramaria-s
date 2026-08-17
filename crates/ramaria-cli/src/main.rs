@@ -17,6 +17,7 @@ use anyhow::Context;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use ramaria_core::StorageBackend;
 use ramaria_core::error::RamariaError;
+use ramaria_core::traits::EmbeddingProvider;
 use sqlx::SqlitePool;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -34,7 +35,15 @@ struct Cli {
     command: Commands,
 
     /// 数据库文件路径（默认: ./data/ramaria_assistant.db，可通过 RAMARIA_DB_PATH 环境变量覆盖）
-    #[arg(long, global = true, default_value = "data/ramaria_assistant.db")]
+    ///
+    /// 优先级: `--db` 命令行参数 > `RAMARIA_DB_PATH` 环境变量 > 默认路径
+    /// （clap 原生保证：显式参数 > env > default_value）。
+    #[arg(
+        long,
+        global = true,
+        env = "RAMARIA_DB_PATH",
+        default_value = "data/ramaria_assistant.db"
+    )]
     db: PathBuf,
 
     /// 自动确认所有确认点（隐私/删除/导入等）；非 TTY 且无 --yes 时不挂起、直接失败并提示（M1 B 项）
@@ -337,6 +346,10 @@ enum ImportCmd {
         #[arg(long)]
         persona_other_uid: Option<String>,
 
+        /// 导入侧过滤: self（仅我方）| other（仅对方）| both（默认）
+        #[arg(long, default_value = "both", value_parser = parse_import_side)]
+        side: ramaria_importer::qq::ImportSide,
+
         /// session 切割时间间隔（分钟），默认 10
         #[arg(long, default_value = "10")]
         gap: u32,
@@ -528,9 +541,15 @@ fn exit_with_error(err: &anyhow::Error, json_mode: bool) -> ! {
 // App 初始化
 // =========================================================
 
-/// 初始化 App：连接数据库 → 迁移 → 创建 LLM → 构造 App。
+/// 初始化 App：连接数据库 → 迁移 → 配置双写同步 → 恢复 embedding → 创建 LLM → 构造 App。
 ///
 /// 返回 (App实例, 数据库连接池)。连接池供导入器等需要直接访问 SQLite 的命令使用。
+///
+/// v1.6 CLI 一致性修复（启动前置）:
+/// - config.toml 经 `ConfigSyncService` 加载（对齐桌面端 lib.rs:297-327），
+///   `[utt]` 等配置组对 CLI 对话链路生效；缺失生成模板、损坏回退默认记 warn。
+/// - 恢复已保存的 embedding provider（`backend_config.embedding_model_path`），
+///   目录存在时创建 native provider；缺失/失败 → `None`（BM25 降级记 warn，不阻塞）。
 async fn init_app(db_path: PathBuf) -> anyhow::Result<(Arc<ramaria_app::App>, sqlx::SqlitePool)> {
     tracing::info!(db = %db_path.display(), "初始化 App");
 
@@ -551,19 +570,92 @@ async fn init_app(db_path: PathBuf) -> anyhow::Result<(Arc<ramaria_app::App>, sq
     // Step 3: 创建 Keychain
     let keychain = Arc::new(ramaria_llm::keychain::Keychain::new());
 
-    // Step 4: 构造 App 配置（填充实际路径；缓存策略取默认 [cache] 配置组，
-    // CLI 以默认值运行：精确缓存默认开启，详见 config/default.toml）
+    // Step 4: 配置双写同步（v1.4+）：加载 config.toml + DB 两侧，
+    // 一致性校验以文件为准（config.toml 与数据库同级目录，约定同桌面端）。
     let data_dir = db_path
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
-    let mut config = ramaria_core::config::RamariaConfig::default();
+    let config_path = data_dir.join("config.toml");
+    let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
+    let config_sync = ramaria_app::ConfigSyncService::new(storage_dyn, config_path.clone());
+    let sync_outcome = config_sync.load().await.context("配置同步加载失败")?;
+    if !sync_outcome.file_existed {
+        tracing::info!(
+            path = %config_path.display(),
+            "config.toml 不存在，已生成含全部默认值的模板"
+        );
+    }
+    for err in &sync_outcome.file_parse_errors {
+        tracing::warn!(error = %err, "config.toml 解析问题，已回退默认配置");
+    }
+    if sync_outcome.mismatches.is_empty() {
+        tracing::info!("配置双写一致性校验通过（文件与 DB 一致）");
+    } else {
+        tracing::warn!(
+            count = sync_outcome.mismatches.len(),
+            "配置双写一致性校验发现不一致项，已按 config.toml 为准回写 DB"
+        );
+        for m in &sync_outcome.mismatches {
+            // 仅记录键名，不打印配置值（避免泄露 base_url 等敏感细节）
+            tracing::warn!(key = %m.key, "配置不一致（以文件为准，已回写 DB）");
+        }
+    }
+    for err in &sync_outcome.db_write_failures {
+        tracing::warn!(error = %err, "DB 侧配置回写失败（降级不阻塞）");
+    }
+
+    // Step 5: 构造 App 配置（基于同步后的配置，填充实际路径；缓存策略取 [cache] 配置组）
+    let mut config = sync_outcome.config;
     config.paths.data_dir = data_dir.to_string_lossy().to_string();
     config.paths.log_dir = data_dir.join("logs").to_string_lossy().to_string();
     config.paths.config_dir = data_dir.to_string_lossy().to_string();
     config.paths.vector_index_dir = data_dir.join("vectors").to_string_lossy().to_string();
 
-    // Step 5: 创建 LLM Provider（按 [cache] 配置注入精确缓存，见 docs/dev-1.5/v1.5-decisions.md §D-V15-008）
+    // Step 6: 尝试恢复已保存的嵌入模型（对齐桌面端加载逻辑）。
+    // 目录存在 → 创建 native provider（向量通道真实可用）；
+    // 目录缺失 / 创建失败 → None（BM25 降级，记 warn 不阻塞启动）。
+    let embedding: Option<Arc<dyn EmbeddingProvider>> = {
+        match &backend_config.embedding_model_path {
+            Some(saved_path) if !saved_path.is_empty() => {
+                let model_dir = std::path::Path::new(saved_path);
+                if !model_dir.exists() {
+                    tracing::warn!(
+                        path = %saved_path,
+                        "已保存的嵌入模型目录不存在，CLI 将以 BM25 降级模式运行"
+                    );
+                    None
+                } else {
+                    match ramaria_llm::embedding::native::create_native_provider(model_dir) {
+                        Ok(provider) => {
+                            let info = provider.model_info();
+                            tracing::info!(
+                                path = %saved_path,
+                                model_id = %info.model_id,
+                                dim = info.dimension,
+                                "已恢复嵌入模型（向量通道可用）"
+                            );
+                            Some(Arc::new(provider) as Arc<dyn EmbeddingProvider>)
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                path = %saved_path,
+                                error = %e,
+                                "加载已保存的嵌入模型失败，CLI 将以 BM25 降级模式运行"
+                            );
+                            None
+                        }
+                    }
+                }
+            }
+            _ => {
+                tracing::debug!("无已保存的嵌入模型，跳过恢复");
+                None
+            }
+        }
+    };
+
+    // Step 7: 创建 LLM Provider（按 [cache] 配置注入精确缓存）
     //
     // - `config.cache.enabled`（默认 true）：创建 SqliteLlmCache 并注入 provider，
     //   重跑导入/重试/失败恢复场景命中缓存不重复花费 API 账单；
@@ -617,13 +709,13 @@ async fn init_app(db_path: PathBuf) -> anyhow::Result<(Arc<ramaria_app::App>, sq
         }
     };
 
-    // Step 6: 构造 App
-    let app = ramaria_app::App::new(storage, llm, None, config, keychain);
+    // Step 8: 构造 App（注入 embedding；None = 向量通道降级）
+    let app = ramaria_app::App::new(storage, llm, embedding, config, keychain);
     // 保存缓存实例引用：后端热更新（update_llm）时复用同一缓存
     app.set_llm_cache(llm_cache);
     let app = Arc::new(app);
 
-    // Step 7: 刷新状态
+    // Step 9: 刷新状态
     app.refresh_setup_state()
         .await
         .context("刷新应用状态失败")?;
@@ -794,6 +886,7 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
                 persona_self_uid,
                 persona_other_name,
                 persona_other_uid,
+                side,
                 gap,
             } => {
                 // --persona 向后兼容（映射为 self_name）
@@ -807,6 +900,7 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
                     persona_other_name,
                     persona_other_uid,
                     gap,
+                    side,
                     // --force 与 --yes 双保险
                     yes: cli.yes || force,
                     json: cli.json,
@@ -884,6 +978,11 @@ fn parse_limit(s: &str) -> Result<usize, String> {
     Ok(n)
 }
 
+/// 校验 `--side` 参数: self | other | both。
+fn parse_import_side(s: &str) -> Result<ramaria_importer::qq::ImportSide, String> {
+    ramaria_importer::qq::ImportSide::parse_cli(Some(s))
+}
+
 // =========================================================
 // 日志初始化
 // =========================================================
@@ -905,4 +1004,142 @@ fn init_tracing() {
         .with_writer(std::io::stderr)
         .try_init()
         .ok(); // 忽略重复初始化错误（测试等场景）
+}
+
+// =========================================================
+// 单元测试（cli 参数解析，不启动 App）
+// =========================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 串行化 env 变量测试（多个 #[test] 并行时会互相干扰环境变量）。
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 解析 `ramaria <args>` 并返回 db 路径（仅解析，不执行命令）。
+    fn parse_db(args: &[&str]) -> PathBuf {
+        Cli::try_parse_from(args).unwrap().db
+    }
+
+    /// RAMARIA_DB_PATH 生效：无 `--db` 时使用环境变量。
+    #[test]
+    fn db_path_uses_env_when_no_flag() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // safety: edition 2024 下 set_var 为 unsafe；测试内串行使用，无并发读
+        unsafe { std::env::set_var("RAMARIA_DB_PATH", "env-data/assistant.db") };
+        let db = parse_db(&["ramaria", "status"]);
+        unsafe { std::env::remove_var("RAMARIA_DB_PATH") };
+        assert_eq!(db, PathBuf::from("env-data/assistant.db"));
+    }
+
+    /// `--db` 优先于环境变量（优先级：--db > env > 默认）。
+    #[test]
+    fn db_path_flag_overrides_env() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // safety: 同 db_path_uses_env_when_no_flag
+        unsafe { std::env::set_var("RAMARIA_DB_PATH", "env-data/assistant.db") };
+        let db = parse_db(&["ramaria", "--db", "flag-data/custom.db", "status"]);
+        unsafe { std::env::remove_var("RAMARIA_DB_PATH") };
+        assert_eq!(db, PathBuf::from("flag-data/custom.db"));
+    }
+
+    /// 无 env 且无 `--db` 时使用默认路径。
+    #[test]
+    fn db_path_defaults_when_nothing_set() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::remove_var("RAMARIA_DB_PATH") };
+        let db = parse_db(&["ramaria", "status"]);
+        assert_eq!(db, PathBuf::from("data/ramaria_assistant.db"));
+    }
+
+    // =========================================================
+    // init_app 集成测试（真实 SQLite 临时库，不连网）
+    // =========================================================
+
+    /// 创建唯一临时测试目录（自动清理）。
+    fn temp_test_dir(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos();
+        let dir = std::env::temp_dir().join(format!("ramaria-cli-init-{tag}-{nanos}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn cleanup_temp_dir(dir: &PathBuf) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 断言 config.toml 参数被 CLI 链路读取。
+    #[tokio::test]
+    async fn init_app_loads_config_toml() {
+        let dir = temp_test_dir("toml");
+        let db_path = dir.join("assistant.db");
+        // 预写 config.toml：`[utt] theta_gap_minutes = 45`（与默认 30 不同，用于断言读取生效）
+        std::fs::write(dir.join("config.toml"), "[utt]\ntheta_gap_minutes = 45\n").unwrap();
+
+        let (app, pool) = init_app(db_path).await.expect("init_app 应成功");
+        assert_eq!(
+            app.config().utt.theta_gap_minutes,
+            45,
+            "config.toml 的 [utt] 参数必须被 CLI 链路读取"
+        );
+        pool.close().await;
+        cleanup_temp_dir(&dir);
+    }
+
+    /// config.toml 缺失 → 生成含默认值的模板，CLI 以默认配置启动。
+    #[tokio::test]
+    async fn init_app_generates_template_when_missing() {
+        let dir = temp_test_dir("missing");
+        let db_path = dir.join("assistant.db");
+
+        let (app, pool) = init_app(db_path).await.expect("init_app 应成功");
+        assert_eq!(app.config().utt.theta_gap_minutes, 30, "缺失时用默认值");
+        assert!(
+            dir.join("config.toml").exists(),
+            "config.toml 缺失时应生成模板"
+        );
+        pool.close().await;
+        cleanup_temp_dir(&dir);
+    }
+
+    /// config.toml 损坏 → 回退默认值记 warn，启动不失败。
+    #[tokio::test]
+    async fn init_app_falls_back_on_corrupt_config() {
+        let dir = temp_test_dir("corrupt");
+        let db_path = dir.join("assistant.db");
+        std::fs::write(dir.join("config.toml"), "这不是合法的 TOML [[[").unwrap();
+
+        let (app, pool) = init_app(db_path).await.expect("损坏 config 不应阻塞启动");
+        assert_eq!(app.config().utt.theta_gap_minutes, 30, "损坏时回退默认值");
+        pool.close().await;
+        cleanup_temp_dir(&dir);
+    }
+
+    /// embedding_model_path 指向不存在目录 → 降级为 None 不阻塞。
+    #[tokio::test]
+    async fn init_app_degrades_when_embedding_missing() {
+        let dir = temp_test_dir("embed");
+        let db_path = dir.join("assistant.db");
+        let pool = ramaria_storage::database::init_pool(Some(db_path.clone()))
+            .await
+            .unwrap();
+        let storage = ramaria_storage::SqliteStorage::new(pool.clone());
+        let mut backend = ramaria_core::types::BackendConfig::lm_studio_default();
+        backend.embedding_model_path =
+            Some(dir.join("no-such-model").to_string_lossy().to_string());
+        storage.save_backend_config(&backend).await.unwrap();
+        pool.close().await;
+
+        let (app, pool) = init_app(db_path).await.expect("embedding 缺失不应阻塞启动");
+        assert!(
+            !app.is_embedding_available(),
+            "模型目录不存在时 embedding 不可用（BM25 降级）"
+        );
+        pool.close().await;
+        cleanup_temp_dir(&dir);
+    }
 }

@@ -308,6 +308,17 @@ impl StorageBackend for MockStorage {
         Ok(Vec::new())
     }
 
+    async fn list_unabsorbed_l1_unbound(&self) -> RamariaResult<Vec<MemoryL1>> {
+        // 无主 L1（persona_uid IS NULL）：测试中用空字符串键（""）预填充
+        Ok(self
+            .l1_by_persona
+            .lock()
+            .unwrap()
+            .get("")
+            .cloned()
+            .unwrap_or_default())
+    }
+
     async fn list_recent_l1_by_persona(
         &self,
         persona_uid: &str,
@@ -744,8 +755,8 @@ impl EmbeddingProvider for MockEmbedding {
         Ok(texts.iter().map(|_| vec![0.0; 128]).collect())
     }
 
-    fn model_info(&self) -> &EmbeddingModelInfo {
-        &self.model_info
+    fn model_info(&self) -> EmbeddingModelInfo {
+        self.model_info.clone()
     }
 
     async fn validate(&self) -> RamariaResult<()> {

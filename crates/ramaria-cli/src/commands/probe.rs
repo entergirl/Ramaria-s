@@ -553,27 +553,45 @@ fn build_from_fixture(persona_uid: &str, qpd: usize, seed: u64) -> ProbeDataset 
 /// 1. 显式指定 → 用之；
 /// 2. 未指定 → 数据库第一个白名单内角色类 persona（char/anim/oc/hist）；
 /// 3. 无匹配 → 默认 char-0001（夹具数据以此编写）。
+///
+/// 语义（不按发言量选择）:
+/// - 白名单 kind 过滤（Char/Anim/Oc/Hist）天然排除"我方"（kind=user），
+///   探针目标始终为"对方" persona；
+/// - 多个对方 persona 时取列表第一个（稳定可复跑），不引入发言量排序。
 async fn resolve_target_persona(app: &Arc<ramaria_app::App>, explicit: Option<&str>) -> String {
+    match app.storage().list_personas().await {
+        Ok(personas) => select_target_persona(&personas, explicit),
+        Err(e) => {
+            tracing::warn!(%e, "读取 persona 列表失败，使用默认 persona");
+            DEFAULT_PERSONA.to_string()
+        }
+    }
+}
+
+/// 从 persona 列表中选择探针目标（纯函数，便于确定性测试）。
+///
+/// 优先级:
+/// 1. 显式 `explicit` → 直接使用（不校验 kind，尊重用户指定）。
+/// 2. 白名单 kind（Char/Anim/Oc/Hist）内第一个 persona —— 对方语义；
+///    我方（kind=User）与助手（kind=Rama）不入选。
+/// 3. 无匹配 → `DEFAULT_PERSONA`（char-0001，夹具数据以此编写）。
+fn select_target_persona(
+    personas: &[ramaria_core::types::Persona],
+    explicit: Option<&str>,
+) -> String {
     if let Some(uid) = explicit {
         return uid.to_string();
     }
-    match app.storage().list_personas().await {
-        Ok(personas) => {
-            let whitelisted = [
-                PersonaKind::Char,
-                PersonaKind::Anim,
-                PersonaKind::Oc,
-                PersonaKind::Hist,
-            ];
-            for p in &personas {
-                if whitelisted.contains(&p.kind) {
-                    tracing::info!(persona_uid = %p.uid, "probe build 自动选择白名单 persona");
-                    return p.uid.clone();
-                }
-            }
-        }
-        Err(e) => {
-            tracing::warn!(%e, "读取 persona 列表失败，使用默认 persona");
+    let whitelisted = [
+        PersonaKind::Char,
+        PersonaKind::Anim,
+        PersonaKind::Oc,
+        PersonaKind::Hist,
+    ];
+    for p in personas {
+        if whitelisted.contains(&p.kind) {
+            tracing::info!(persona_uid = %p.uid, "probe build 自动选择白名单 persona");
+            return p.uid.clone();
         }
     }
     tracing::info!(
@@ -1467,6 +1485,69 @@ mod tests {
     fn fixture_data_covers_default_scale() {
         assert!(fixture_tone_pairs().len() >= DEFAULT_QUESTIONS_PER_DIM);
         assert!(fixture_fact_events().len() >= DEFAULT_QUESTIONS_PER_DIM);
+    }
+
+    // ---- select_target_persona（不按发言量，白名单过滤对方）----
+
+    /// 构造测试 persona。
+    fn test_persona(uid: &str, kind: PersonaKind) -> ramaria_core::types::Persona {
+        ramaria_core::types::Persona::new(
+            uid.to_string(),
+            uid.to_string(),
+            kind,
+            1,
+            "test".to_string(),
+        )
+    }
+
+    #[test]
+    fn select_persona_excludes_user_kind() {
+        // 我方（kind=user）不得入选探针目标
+        let personas = vec![
+            test_persona("user-0001", PersonaKind::User),
+            test_persona("char-0001", PersonaKind::Char),
+        ];
+        assert_eq!(select_target_persona(&personas, None), "char-0001");
+    }
+
+    #[test]
+    fn select_persona_first_whitelisted() {
+        // 多个对方 persona：取第一个白名单，不引入发言量排序
+        let personas = vec![
+            test_persona("user-0001", PersonaKind::User),
+            test_persona("anim-0001", PersonaKind::Anim),
+            test_persona("char-0001", PersonaKind::Char),
+            test_persona("hist-0001", PersonaKind::Hist),
+        ];
+        assert_eq!(select_target_persona(&personas, None), "anim-0001");
+    }
+
+    #[test]
+    fn select_persona_explicit_wins() {
+        // 显式 --persona 优先（不校验 kind，尊重用户指定）
+        let personas = vec![
+            test_persona("user-0001", PersonaKind::User),
+            test_persona("char-0001", PersonaKind::Char),
+        ];
+        assert_eq!(
+            select_target_persona(&personas, Some("rama-0001")),
+            "rama-0001"
+        );
+    }
+
+    #[test]
+    fn select_persona_all_user_role_falls_back() {
+        // 全 user-role 退化场景：无白名单 persona → 默认 char-0001（夹具兜底）
+        let personas = vec![
+            test_persona("user-0001", PersonaKind::User),
+            test_persona("user-0002", PersonaKind::User),
+        ];
+        assert_eq!(select_target_persona(&personas, None), DEFAULT_PERSONA);
+    }
+
+    #[test]
+    fn select_persona_empty_falls_back() {
+        assert_eq!(select_target_persona(&[], None), DEFAULT_PERSONA);
     }
 
     // ---- build_from_fixture ----

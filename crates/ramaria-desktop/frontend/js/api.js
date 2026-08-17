@@ -718,7 +718,7 @@ var RamariaApi = (function () {
  * - ImportResult: { success, mode, report_summary, sessions_written, messages_written,
  * persona_uid, persona_name, other_persona_uid, other_persona_name, ... }
  */
-    async function importQQChat(filePath, mode, personaName, selfPersonaUid, otherPersonaName, otherPersonaUid, gapMinutes) {
+    async function importQQChat(filePath, mode, personaName, selfPersonaUid, otherPersonaName, otherPersonaUid, gapMinutes, side) {
         _require(filePath, '文件路径');
         var args = {
             filePath: filePath,
@@ -731,6 +731,8 @@ var RamariaApi = (function () {
         if (gapMinutes !== undefined && gapMinutes !== null) {
             args.gapMinutes = gapMinutes;
         }
+        // 导入侧过滤：self | other | both；不传默认 both
+        if (side) args.side = side;
         console.log('[Api] 调用 importQQChat，参数:', JSON.stringify(args, null, 2));
         return await _invoke('import_qq_chat', args, '导入 QQ 聊天记录');
     }

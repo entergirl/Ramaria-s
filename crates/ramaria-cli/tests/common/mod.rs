@@ -285,6 +285,11 @@ impl StorageBackend for MockStorage {
         Ok(all)
     }
 
+    async fn list_unabsorbed_l1_unbound(&self) -> RamariaResult<Vec<MemoryL1>> {
+        // MockStorage 不做 absorb/persona 区分：返回全部 L1（与 list_unabsorbed_l1 一致）
+        self.list_unabsorbed_l1("").await
+    }
+
     async fn create_persona(&self, persona: &Persona) -> RamariaResult<i64> {
         let mut seq = self.persona_seq.lock().unwrap();
         *seq += 1;
@@ -851,8 +856,8 @@ impl EmbeddingProvider for MockEmbedding {
         Ok(texts.iter().map(|_| vec![0.0; 128]).collect())
     }
 
-    fn model_info(&self) -> &EmbeddingModelInfo {
-        &self.model_info
+    fn model_info(&self) -> EmbeddingModelInfo {
+        self.model_info.clone()
     }
 
     async fn validate(&self) -> RamariaResult<()> {

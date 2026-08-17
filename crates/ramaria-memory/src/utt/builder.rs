@@ -402,13 +402,11 @@ mod tests {
         async fn embed_batch(&self, texts: &[&str]) -> RamariaResult<Vec<Vec<f32>>> {
             Ok(texts.iter().map(|_| vec![0.1, 0.2, 0.3]).collect())
         }
-        fn model_info(&self) -> &ramaria_core::traits::EmbeddingModelInfo {
-            static INFO: std::sync::OnceLock<ramaria_core::traits::EmbeddingModelInfo> =
-                std::sync::OnceLock::new();
-            INFO.get_or_init(|| ramaria_core::traits::EmbeddingModelInfo {
+        fn model_info(&self) -> ramaria_core::traits::EmbeddingModelInfo {
+            ramaria_core::traits::EmbeddingModelInfo {
                 model_id: "fixed".to_string(),
                 dimension: 3,
-            })
+            }
         }
         async fn validate(&self) -> RamariaResult<()> {
             Ok(())
@@ -435,13 +433,11 @@ mod tests {
         async fn embed_batch(&self, _texts: &[&str]) -> RamariaResult<Vec<Vec<f32>>> {
             Err(RamariaError::embedding("mock embedding 不可用"))
         }
-        fn model_info(&self) -> &ramaria_core::traits::EmbeddingModelInfo {
-            static INFO: std::sync::OnceLock<ramaria_core::traits::EmbeddingModelInfo> =
-                std::sync::OnceLock::new();
-            INFO.get_or_init(|| ramaria_core::traits::EmbeddingModelInfo {
+        fn model_info(&self) -> ramaria_core::traits::EmbeddingModelInfo {
+            ramaria_core::traits::EmbeddingModelInfo {
                 model_id: "failing".to_string(),
                 dimension: 3,
-            })
+            }
         }
         async fn validate(&self) -> RamariaResult<()> {
             Err(RamariaError::embedding("不可用"))

@@ -32,6 +32,9 @@ const SECTIONED_KEYS: &[&str] = &[
     "bridge.max_chars",
 ];
 
+/// get/set 遇到未知 key 时提示的支持项列表（与 get_config / set_config 共用）。
+const SUPPORTED_KEY_HINT: &str = "provider / base_url / model_id / temperature / max_tokens / api_key / state / embedding_model_path / utt.* / bridge.*";
+
 /// 构造 ConfigSyncService（config.toml 位于 config_dir 下）。
 fn config_sync(app: &Arc<ramaria_app::App>) -> ramaria_app::ConfigSyncService {
     let config_path = std::path::PathBuf::from(&app.config().paths.config_dir).join("config.toml");
@@ -137,6 +140,7 @@ async fn list_config(app: &Arc<ramaria_app::App>, json: bool) -> anyhow::Result<
             "model_id": cfg.capability.model_id,
             "temperature": cfg.temperature,
             "max_tokens": cfg.max_tokens,
+            "embedding_model_path": cfg.embedding_model_path,
             "streaming": cfg.capability.supports_streaming,
             "json_mode": cfg.capability.supports_json_mode,
             "context_window": cfg.capability.context_window,
@@ -155,6 +159,10 @@ async fn list_config(app: &Arc<ramaria_app::App>, json: bool) -> anyhow::Result<
     crate::ui::labeled("Base URL", &cfg.base_url);
     crate::ui::labeled("API Key", &api_key_status);
     crate::ui::labeled("Model ID", &cfg.capability.model_id);
+    crate::ui::labeled(
+        "Embedding Model Path",
+        cfg.embedding_model_path.as_deref().unwrap_or("(未设置)"),
+    );
     crate::ui::labeled("Temperature", &format!("{:.2}", cfg.temperature));
     crate::ui::labeled("Max Tokens", &cfg.max_tokens.to_string());
     crate::ui::labeled(
@@ -212,6 +220,10 @@ async fn get_config(app: &Arc<ramaria_app::App>, key: &str, json: bool) -> anyho
             }
         }
         "state" => Ok(app.current_state().as_str().to_string()),
+        "embedding_model_path" => Ok(cfg
+            .embedding_model_path
+            .clone()
+            .unwrap_or_else(|| "(未设置)".to_string())),
         _ => {
             // 点分路径配置组（utt.* / bridge.*）：读生效配置（文件 + DB 合并）
             if SECTIONED_KEYS.contains(&key) {
@@ -230,7 +242,7 @@ async fn get_config(app: &Arc<ramaria_app::App>, key: &str, json: bool) -> anyho
                 match app.storage().get_setting(key).await? {
                     Some(value) => Ok(value),
                     None => Err(anyhow::anyhow!(RamariaError::validation(format!(
-                        "未知配置项: '{key}'。支持: provider / base_url / model_id / temperature / max_tokens / api_key / state / utt.* / bridge.*"
+                        "未知配置项: '{key}'。支持: {SUPPORTED_KEY_HINT}"
                     )))),
                 }
             }
@@ -282,6 +294,17 @@ async fn set_config(
                 .parse::<u32>()
                 .context("max_tokens 必须是正整数（如 1024）")?;
         }
+        "model_id" => {
+            // 与 get_config 的 "model_id"（capability.model_id）对称；
+            // 空值拒绝，避免清空后模型不可用。
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Err(anyhow::anyhow!(RamariaError::validation(
+                    "model_id 不能为空"
+                )));
+            }
+            cfg.capability.model_id = trimmed.to_string();
+        }
         "api_key" => {
             // API key 写入 keychain，不写入 config
             let provider = cfg.provider;
@@ -297,6 +320,16 @@ async fn set_config(
                 crate::json::emit_ok(&serde_json::json!({"key": key, "value": "已更新"}))?;
             }
             return Ok(());
+        }
+        "embedding_model_path" => {
+            // 空字符串或 none 视为清除，否则保存路径
+            let trimmed = value.trim();
+            cfg.embedding_model_path = if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none")
+            {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
         }
         _ => {
             // 点分路径配置组（utt.* / bridge.*）：读生效配置 → 修改 → 双写
@@ -323,7 +356,13 @@ async fn set_config(
                 }
                 return Ok(());
             }
-            // 自定义设置项写入 settings 表
+            // 自定义设置项：仅当 key 已存在于 settings 表时允许更新（与 get_config 对称）。
+            // 未知 key 直接报错，避免静默假成功。
+            if app.storage().get_setting(key).await?.is_none() {
+                return Err(anyhow::anyhow!(RamariaError::validation(format!(
+                    "未知配置项: '{key}'。支持: {SUPPORTED_KEY_HINT}"
+                ))));
+            }
             app.storage()
                 .set_setting(key, value)
                 .await
@@ -341,6 +380,13 @@ async fn set_config(
         .save_backend_config(&cfg)
         .await
         .context("保存配置失败")?;
+
+    // 同步 [backend] 组到 config.toml（与桌面端 update_backend_config 同通道）。
+    // 否则下次启动 ConfigSyncService 以文件为准回写 DB，会把本次设置覆盖回旧值。
+    let sync_result = config_sync(app).sync_backend_config(&cfg).await;
+    if !sync_result.file_ok {
+        crate::ui::warn("config.toml 写入失败（DB 侧仍生效，但下次启动可能以文件为准覆盖）");
+    }
 
     // 刷新状态
     app.refresh_setup_state().await?;

@@ -237,8 +237,13 @@ pub trait EmbeddingProvider: Send + Sync {
     /// - 与输入顺序一致的向量列表。
     async fn embed_batch(&self, texts: &[&str]) -> RamariaResult<Vec<Vec<f32>>>;
 
-    /// 获取模型信息。
-    fn model_info(&self) -> &EmbeddingModelInfo;
+    /// 获取模型信息（按值返回，线程安全）。
+    ///
+    /// 说明:
+    /// - 按值返回而非引用：实现内部可能用锁保护可变维度（如 native provider
+    ///   在模型加载后同步实际维度），调用方可安全地在并发场景读取。
+    /// - 结构为 `Clone`，每次调用复制 model_id 字符串（短字符串，开销可忽略）。
+    fn model_info(&self) -> EmbeddingModelInfo;
 
     /// 验证模型可用。
     ///
@@ -457,6 +462,20 @@ pub trait StorageBackend: Send + Sync {
         Ok(0) // 默认空实现：存量 mock 无需修改即可编译
     }
     async fn list_unabsorbed_l1(&self, persona_uid: &str) -> RamariaResult<Vec<MemoryL1>>;
+
+    /// 查询未吸收的"无主"L1 摘要（`persona_uid IS NULL`）。
+    ///
+    /// 用途:
+    /// - 导入产生的 L1 不绑定特定画像（避免记忆视图污染），
+    ///   但重建检索索引时仍需加载，否则导入数据在对话中永不可检索。
+    /// - 检索侧对 NULL persona 文档不做 persona 过滤（任何画像可命中），
+    ///   因此加载无主 L1 与"按画像隔离"不冲突。
+    ///
+    /// 默认实现:
+    /// - 返回空 Vec（存量 mock 无需修改即可编译）。
+    async fn list_unabsorbed_l1_unbound(&self) -> RamariaResult<Vec<MemoryL1>> {
+        Ok(Vec::new())
+    }
 
     /// 按创建时间降序获取指定 persona 的最近 N 条 L1 摘要。
     ///

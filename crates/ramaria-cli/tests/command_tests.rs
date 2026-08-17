@@ -292,18 +292,181 @@ async fn config_set_invalid_temperature() {
 
 #[tokio::test]
 async fn config_set_custom_setting() {
-    let (app, _storage) = build_test_app();
+    let (app, storage) = build_test_app();
+    storage.add_setting("theme", "dark");
 
     let result = ramaria_cli::commands::config::run(
         &app,
         ramaria_cli::commands::config::ConfigCmd::Set {
             key: "theme".to_string(),
-            value: "dark".to_string(),
+            value: "light".to_string(),
         },
         false,
     )
     .await;
-    assert!(result.is_ok()); // 自定义设置写入 settings 表
+    assert!(result.is_ok()); // 自定义设置项已存在时仍可更新（回归既有能力）
+    let value = storage.get_setting("theme").await.unwrap();
+    assert_eq!(value.as_deref(), Some("light"));
+}
+
+#[tokio::test]
+async fn config_set_unknown_key_rejected() {
+    let (app, storage) = build_test_app();
+
+    // 未知 key（如 backend.provider）必须报错，且不得写入 settings 表（避免静默假成功）
+    let result = ramaria_cli::commands::config::run(
+        &app,
+        ramaria_cli::commands::config::ConfigCmd::Set {
+            key: "backend.provider".to_string(),
+            value: "deepseek".to_string(),
+        },
+        false,
+    )
+    .await;
+    assert!(result.is_err());
+    let setting = storage.get_setting("backend.provider").await.unwrap();
+    assert!(setting.is_none());
+}
+
+/// 构造带指定 config_dir 的测试 App（config.toml 双写测试需要真实文件目录，
+/// 默认空 config_dir 会把文件写到测试工作区，污染仓库）。
+fn build_test_app_with_config_dir(
+    dir: &std::path::Path,
+) -> (Arc<ramaria_app::App>, Arc<MockStorage>) {
+    use ramaria_app::App;
+    use ramaria_core::config::RamariaConfig;
+
+    let storage = Arc::new(MockStorage::new());
+    let llm = Arc::new(common::MockLlm::new("Hello, World!"));
+    let keychain = Arc::new(ramaria_llm::keychain::Keychain::new());
+    let mut config = RamariaConfig::default();
+    config.paths.config_dir = dir.to_string_lossy().to_string();
+    let app = App::new_without_embedding(
+        Arc::clone(&storage) as Arc<dyn ramaria_core::StorageBackend>,
+        llm,
+        config,
+        keychain,
+    );
+    app.set_state(ramaria_core::types::AppState::Ready);
+    (Arc::new(app), storage)
+}
+
+/// 创建唯一临时测试目录（自动清理）。
+fn temp_config_dir(tag: &str) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
+    let dir = std::env::temp_dir().join(format!("ramaria-cli-config-{tag}-{nanos}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[tokio::test]
+async fn config_set_provider_persists_to_config_toml() {
+    let dir = temp_config_dir("provider");
+    let (app, storage) = build_test_app_with_config_dir(&dir);
+
+    // 设置 provider
+    let result = ramaria_cli::commands::config::run(
+        &app,
+        ramaria_cli::commands::config::ConfigCmd::Set {
+            key: "provider".to_string(),
+            value: "deepseek".to_string(),
+        },
+        false,
+    )
+    .await;
+    assert!(result.is_ok());
+
+    // 1) DB 侧已更新
+    let saved = storage.get_backend_config().await.unwrap().unwrap();
+    assert_eq!(saved.provider, ramaria_core::types::LlmProvider::DeepSeek);
+
+    // 2) config.toml 文件侧已同步（[backend] 组）
+    let config_path = dir.join("config.toml");
+    let content = std::fs::read_to_string(&config_path).unwrap();
+    assert!(
+        content.contains("provider = \"deepseek\""),
+        "config.toml 应包含 deepseek: {content}"
+    );
+
+    // 3) 模拟重启：ConfigSyncService::load() 以文件为准回写 →
+    //    文件与 DB 一致 → 无 mismatch → DB 不被覆盖回默认值
+    let sync = ramaria_app::ConfigSyncService::new(storage.clone(), config_path.clone());
+    let outcome = sync.load().await.unwrap();
+    assert!(
+        outcome.mismatches.is_empty(),
+        "重启后文件与 DB 应一致: {:?}",
+        outcome.mismatches
+    );
+    let saved = storage.get_backend_config().await.unwrap().unwrap();
+    assert_eq!(
+        saved.provider,
+        ramaria_core::types::LlmProvider::DeepSeek,
+        "重启后 provider 不得被覆盖回默认值"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn config_embedding_model_path_roundtrip() {
+    let dir = temp_config_dir("embed");
+    let (app, storage) = build_test_app_with_config_dir(&dir);
+
+    // 设置
+    let result = ramaria_cli::commands::config::run(
+        &app,
+        ramaria_cli::commands::config::ConfigCmd::Set {
+            key: "embedding_model_path".to_string(),
+            value: "/models/bge-m3.gguf".to_string(),
+        },
+        false,
+    )
+    .await;
+    assert!(result.is_ok());
+    let saved = storage.get_backend_config().await.unwrap().unwrap();
+    assert_eq!(
+        saved.embedding_model_path.as_deref(),
+        Some("/models/bge-m3.gguf")
+    );
+
+    // 读取（未配置时应输出 (未设置)，设置后正常返回）
+    let result = ramaria_cli::commands::config::run(
+        &app,
+        ramaria_cli::commands::config::ConfigCmd::Get {
+            key: "embedding_model_path".to_string(),
+        },
+        false,
+    )
+    .await;
+    assert!(result.is_ok());
+
+    // 清空（空字符串视为清除）
+    let result = ramaria_cli::commands::config::run(
+        &app,
+        ramaria_cli::commands::config::ConfigCmd::Set {
+            key: "embedding_model_path".to_string(),
+            value: "".to_string(),
+        },
+        false,
+    )
+    .await;
+    assert!(result.is_ok());
+    let saved = storage.get_backend_config().await.unwrap().unwrap();
+    assert!(saved.embedding_model_path.is_none());
+
+    // 清空后读取仍成功
+    let result = ramaria_cli::commands::config::run(
+        &app,
+        ramaria_cli::commands::config::ConfigCmd::Get {
+            key: "embedding_model_path".to_string(),
+        },
+        false,
+    )
+    .await;
+    assert!(result.is_ok());
 }
 
 #[tokio::test]
@@ -1095,6 +1258,40 @@ async fn status_command_ok() {
 /// 注：真实 dry-run 路径依赖 qq-chat-exporter 文件，进程级验证由 M1 手动验收覆盖；
 /// 此处验证 dry_run 参数不影响现有命令行为（文件缺失仍为业务校验错误）。
 #[tokio::test]
+async fn config_set_model_id_roundtrip() {
+    let dir = temp_config_dir("model");
+    let (app, storage) = build_test_app_with_config_dir(&dir);
+
+    // 设置 model_id（写入 capability.model_id，与 get_config 对称）
+    let result = ramaria_cli::commands::config::run(
+        &app,
+        ramaria_cli::commands::config::ConfigCmd::Set {
+            key: "model_id".to_string(),
+            value: "qwen3-8b".to_string(),
+        },
+        false,
+    )
+    .await;
+    assert!(result.is_ok());
+    let saved = storage.get_backend_config().await.unwrap().unwrap();
+    assert_eq!(saved.capability.model_id, "qwen3-8b");
+
+    // 空值拒绝
+    let result = ramaria_cli::commands::config::run(
+        &app,
+        ramaria_cli::commands::config::ConfigCmd::Set {
+            key: "model_id".to_string(),
+            value: "".to_string(),
+        },
+        false,
+    )
+    .await;
+    assert!(result.is_err());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn import_dry_run_missing_file_is_validation_error() {
     let (app, _storage) = build_test_app();
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
@@ -1110,6 +1307,7 @@ async fn import_dry_run_missing_file_is_validation_error() {
             persona_other_name: None,
             persona_other_uid: None,
             gap: 10,
+            side: ramaria_importer::qq::ImportSide::Both,
             yes: false,
             json: false,
         },

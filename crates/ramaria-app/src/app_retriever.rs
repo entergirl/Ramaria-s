@@ -74,8 +74,25 @@ impl App {
             }
         }
 
-        let total = all_l1.len() + all_l2.len();
         let utt_count = all_utt.len();
+
+        // 2.5 无主 L1（persona_uid IS NULL）：导入产生的 L1 不绑定画像，
+        //     但检索侧对 NULL persona 文档不做过滤，任何画像可命中，必须一并加载。
+        //     否则导入数据在对话链路中永不可检索。
+        match self.storage.list_unabsorbed_l1_unbound().await {
+            Ok(unbound) => all_l1.extend(unbound.into_iter().map(|l1| L1DocView {
+                id: l1.id,
+                summary: l1.summary.clone(),
+                keywords: l1.keywords.clone(),
+                salience: l1.salience,
+                created_at: l1.created_at,
+                persona_uid: l1.persona_uid.clone(),
+            })),
+            Err(e) => {
+                tracing::warn!(%e, "读取无主 L1 失败，跳过（导入摘要可能不可检索）");
+            }
+        }
+        let total = all_l1.len() + all_l2.len();
 
         // 3. 生成向量（如果嵌入模型可用）
         let embeddings_available = self.is_embedding_available();
@@ -141,14 +158,15 @@ impl App {
                 retriever.index_utt_block(block);
             }
 
-            // 向量索引
+            // 向量索引（label 统一 make_vector_label，与增量路径一致；
+            // parse_doc_label 按 "L1:"/"L2:" 前缀解析，大小写均已兼容）
             if embeddings_available {
                 for (id, vec, created_at) in &l1_vectors {
-                    let label = format!("L1:{}", id);
+                    let label = ramaria_memory::vector::make_vector_label("l1", &id.to_string());
                     retriever.vector_mut().add(&label, vec.clone(), *created_at);
                 }
                 for (id, vec, created_at) in &l2_vectors {
-                    let label = format!("L2:{}", id);
+                    let label = ramaria_memory::vector::make_vector_label("l2", &id.to_string());
                     retriever.vector_mut().add(&label, vec.clone(), *created_at);
                 }
                 tracing::info!(
@@ -169,5 +187,65 @@ impl App {
             "检索器索引重建完成"
         );
         Ok(total)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ramaria_core::types::MemoryL1;
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    /// 构造一个 L1 记录（persona_uid 可变）。
+    fn make_l1(persona_uid: Option<String>, summary: &str) -> MemoryL1 {
+        MemoryL1 {
+            id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            summary: summary.to_string(),
+            keywords: Some(summary.split_whitespace().map(|s| s.to_string()).collect()),
+            time_period: None,
+            atmosphere: None,
+            valence: 0.0,
+            salience: 1.0,
+            absorbed: false,
+            created_at: 1_700_000_000_000,
+            last_accessed_at: None,
+            persona_uid,
+            context_json: None,
+            situation_strength: None,
+            evidence_notes: None,
+            continuation: None,
+        }
+    }
+
+    /// 无主 L1（persona_uid IS NULL）必须被 rebuild_retriever 加载并可检索。
+    ///
+    /// 验证: 导入产生的 L1 不绑定画像（0/None），但 rebuild 后仍进入检索索引
+    /// （否则导入数据在对话链路中永不可检索）。
+    #[tokio::test]
+    async fn rebuild_loads_unbound_l1() {
+        let storage = Arc::new(crate::stages::test_utils::MockStorage::new());
+        // 无主 L1：用空字符串键预填充（mock 的 unbound 查询读取该键）
+        storage.add_l1_summaries(
+            "",
+            vec![make_l1(None, "用户喜欢喝咖啡，每天上午必点一杯拿铁")],
+        );
+
+        let llm = crate::stages::test_utils::MockLlm::local();
+        let keychain = Arc::new(ramaria_llm::keychain::Keychain::new());
+        let config = ramaria_core::config::RamariaConfig::default();
+        let app = App::new_without_embedding(
+            storage as Arc<dyn ramaria_core::traits::StorageBackend>,
+            Arc::new(llm),
+            config,
+            keychain,
+        );
+
+        let total = app.rebuild_retriever().await.unwrap();
+        assert!(total >= 1, "无主 L1 必须被加载进索引，实际 total={total}");
+        // 检索器中的文档数应 ≥1（无主 L1 已入索引）
+        let guard = app.retriever.read().unwrap_or_else(|e| e.into_inner());
+        assert!(guard.doc_count() >= 1, "检索器 doc_count 应为 ≥1");
     }
 }

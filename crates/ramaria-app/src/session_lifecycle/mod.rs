@@ -376,7 +376,7 @@ impl SessionLifecycle {
 
                 // 增量更新 Retriever 内存索引
                 // 必须在 L2 级联检查前执行，确保后续 L2/L3 也能检索到新 L1
-                self.index_l1_into_retriever(&l1);
+                self.index_l1_into_retriever(&l1).await;
 
                 // Step 2.5: utt 话语块增量构建（v1.4，与 L1 同钩子）
                 // 失败降级记 warn 不阻塞封存（下次封存自动补齐）

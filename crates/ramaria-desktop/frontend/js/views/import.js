@@ -41,6 +41,8 @@ var ImportView = (function () {
 
  /** 导入模式: 'fast' | 'deep' */
     var _importMode = 'fast';
+    /** 导入侧过滤：self | other | both */
+    var _importSide = 'both';
 
  /** Persona 名称（导出者，: 保留向后兼容） */
     var _personaName = '';
@@ -447,6 +449,17 @@ var ImportView = (function () {
         html += '<input type="text" class="input" id="input-other-persona-uid" placeholder="char-123456789" value="' + RamariaEscape.escapeHtml(_otherPersonaUid) + '" />';
         html += '</div>';
 
+ // 导入侧过滤（self/other/both）
+        html += '<div class="import-option-group">';
+        html += '<div class="import-option-label">导入侧（可选）</div>';
+        html += '<div class="import-option-desc">只导入某一侧的消息：self=仅我的发言，other=仅对方发言，both=双方（默认）。跳过侧消息不入库、不创建对应 Persona。</div>';
+        html += '<select class="input" id="input-import-side">';
+        html += '<option value="both"' + (_importSide === 'both' ? ' selected' : '') + '>双方（默认）</option>';
+        html += '<option value="self"' + (_importSide === 'self' ? ' selected' : '') + '>仅我方（self）</option>';
+        html += '<option value="other"' + (_importSide === 'other' ? ' selected' : '') + '>仅对方（other）</option>';
+        html += '</select>';
+        html += '</div>';
+
  // 切割间隔
         html += '<div class="import-option-group">';
         html += '<div class="import-option-label">Session 切割间隔（分钟）</div>';
@@ -744,6 +757,14 @@ var ImportView = (function () {
             });
         }
 
+ // 导入侧下拉（self/other/both）
+        var inputSide = $('input-import-side');
+        if (inputSide) {
+            inputSide.addEventListener('change', function () {
+                _importSide = inputSide.value;
+            });
+        }
+
  // Gap 输入
         var inputGap = $('input-gap-minutes');
         if (inputGap) {
@@ -999,7 +1020,8 @@ var ImportView = (function () {
                 _selfPersonaUid || undefined,
                 _otherPersonaName || undefined,
                 _otherPersonaUid || undefined,
-                _gapMinutes
+                _gapMinutes,
+                _importSide
             );
 
             console.log('[ImportView] 导入返回结果:', result);

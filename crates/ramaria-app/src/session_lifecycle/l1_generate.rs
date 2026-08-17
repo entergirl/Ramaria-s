@@ -69,7 +69,7 @@ impl SessionLifecycle {
             Ok(l1) => {
                 info!(%session_id, l1_id = %l1.id, "L1 重试成功");
                 // 增量更新 Retriever 索引
-                self.index_l1_into_retriever(&l1);
+                self.index_l1_into_retriever(&l1).await;
                 // 触发 L2 检查（路径 A）
                 self.check_l2_trigger(storage, llm).await;
                 Ok(Some(l1))
@@ -123,7 +123,7 @@ impl SessionLifecycle {
                     .into_iter()
                     .find(|l| l.persona_uid.as_deref() == Some(target_uid))
                 {
-                    self.index_l1_into_retriever(&l1);
+                    self.index_l1_into_retriever(&l1).await;
                 }
                 return Ok(None);
             }
@@ -151,7 +151,7 @@ impl SessionLifecycle {
             Ok(l1) => {
                 info!(%session_id, l1_id = %l1.id, "L1 生成成功（无级联）");
                 // 增量更新 Retriever 索引（批量导入场景每批次一个 session）
-                self.index_l1_into_retriever(&l1);
+                self.index_l1_into_retriever(&l1).await;
                 Ok(Some(l1))
             }
             Err(e) => {
@@ -241,20 +241,25 @@ impl SessionLifecycle {
         }
     }
 
-    /// 将 L1 摘要增量添加到 Retriever 内存索引。
+    /// 将 L1 摘要增量添加到 Retriever 内存索引（含向量通道接线）。
     ///
     /// 职责:
     /// - 在 L1 摘要生成成功后立即调用，使新 L1 文档无需等待手动 `rebuild_retriever`
     ///   即可被 Stage 5 RAG 检索命中（决策见 docs/dev-1.2/v1.2-decisions.md）。
+    /// - embedding 可用时为摘要生成向量并写入向量索引（此前增量路径不写向量，
+    ///   导致新 L1 仅 BM25 可检索；全量 rebuild 才入向量索引）。
     ///
-    /// 容错:
+    /// 容错（静默降级）:
     /// - Retriever 未注入（向后兼容）→ 静默跳过。
     /// - Mutex 锁污染 → warn 日志 + 跳过。
-    /// - 索引添加失败 → warn 日志 + 不阻塞 L2 级联检查。
+    /// - embedding 不可用 / 向量生成失败 → 仅 BM25 索引（记 debug，不阻塞）。
     ///
     /// 参数:
     /// - `l1`: 刚生成的 L1 摘要记录。
-    pub(super) fn index_l1_into_retriever(&self, l1: &ramaria_core::types::MemoryL1) {
+    pub(super) async fn index_l1_into_retriever(&self, l1: &ramaria_core::types::MemoryL1) {
+        // 生成向量（embedding 可用时；失败/不可用 → None，BM25 检索不阻塞）
+        let vector = self.embed_summary_vector(&l1.summary).await;
+
         let ret_guard = match self.retriever.lock() {
             Ok(g) => g,
             Err(e) => {
@@ -263,27 +268,51 @@ impl SessionLifecycle {
             }
         };
         if let Some(ref retriever_arc) = *ret_guard {
-            // RwLock write() 用于索引写入（index_l1_record 需要 &mut self）
+            // RwLock write() 用于索引写入（index_l1_with_vector 需要 &mut self）
             match retriever_arc.write() {
                 Ok(mut retriever) => {
-                    if let Err(e) = retriever.index_l1_record(l1) {
-                        warn!(
-                            l1_id = %l1.id,
-                            error = %e,
-                            "增量更新 Retriever 索引失败（不影响 L2 级联）"
-                        );
-                    } else {
-                        info!(
-                            l1_id = %l1.id,
-                            persona_uid = ?l1.persona_uid,
-                            "L1 摘要已增量加入 Retriever 内存索引，即时可检索"
-                        );
-                    }
+                    let doc = ramaria_memory::retriever::L1DocView {
+                        id: l1.id,
+                        summary: l1.summary.clone(),
+                        keywords: l1.keywords.clone(),
+                        persona_uid: l1.persona_uid.clone(),
+                        created_at: l1.created_at,
+                        salience: l1.salience,
+                    };
+                    retriever.index_l1_with_vector(&doc, vector);
+                    info!(
+                        l1_id = %l1.id,
+                        persona_uid = ?l1.persona_uid,
+                        "L1 摘要已增量加入 Retriever 索引（BM25 + 向量），即时可检索"
+                    );
                 }
                 Err(e) => {
                     warn!("retriever 内部 Mutex poisoned: {e}");
                 }
             }
+        }
+    }
+
+    /// 为 L1 摘要文本生成向量（embedding 可用时）。
+    ///
+    /// 返回:
+    /// - `Some(vec)`: 向量生成成功。
+    /// - `None`: embedding 未配置 / 生成失败（BM25 降级，不阻塞）。
+    async fn embed_summary_vector(&self, summary: &str) -> Option<Vec<f32>> {
+        let embedding = self
+            .embedding
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        match embedding {
+            Some(provider) => match provider.embed(summary).await {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    tracing::debug!(%e, "L1 增量向量生成失败，仅入 BM25 索引（降级）");
+                    None
+                }
+            },
+            None => None,
         }
     }
 }
@@ -347,8 +376,8 @@ mod tests {
     use ramaria_memory::retriever::Retriever;
     use std::sync::{Arc, RwLock};
 
-    #[test]
-    fn index_l1_into_retriever_without_set_retriever_is_noop() {
+    #[tokio::test]
+    async fn index_l1_into_retriever_without_set_retriever_is_noop() {
         let config = RamariaConfig::default();
         let lifecycle = SessionLifecycle::new(config);
 
@@ -372,11 +401,11 @@ mod tests {
             continuation: None,
         };
         // 不应 panic
-        lifecycle.index_l1_into_retriever(&l1);
+        lifecycle.index_l1_into_retriever(&l1).await;
     }
 
-    #[test]
-    fn index_l1_into_retriever_adds_to_index() {
+    #[tokio::test]
+    async fn index_l1_into_retriever_adds_to_index() {
         let config = RamariaConfig::default();
         let lifecycle = SessionLifecycle::new(config);
 
@@ -403,15 +432,15 @@ mod tests {
             continuation: None,
         };
 
-        lifecycle.index_l1_into_retriever(&l1);
+        lifecycle.index_l1_into_retriever(&l1).await;
 
         // 验证 retriever 中已有文档（read() 即可，doc_count 为只读）
         let guard = retriever.read().unwrap();
         assert_eq!(guard.doc_count(), 1);
     }
 
-    #[test]
-    fn index_l1_into_retriever_makes_l1_searchable() {
+    #[tokio::test]
+    async fn index_l1_into_retriever_makes_l1_searchable() {
         let config = RamariaConfig::default();
         let lifecycle = SessionLifecycle::new(config);
 
@@ -437,7 +466,7 @@ mod tests {
             continuation: None,
         };
 
-        lifecycle.index_l1_into_retriever(&l1);
+        lifecycle.index_l1_into_retriever(&l1).await;
 
         // 立即检索，应能命中（read() 即可，search 为 &self）
         let guard = retriever.read().unwrap();

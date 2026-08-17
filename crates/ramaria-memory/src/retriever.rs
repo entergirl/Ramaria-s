@@ -20,8 +20,8 @@ use crate::bm25::{Bm25Config, Bm25Index, DocId};
 use crate::graph_retriever::{GraphRetriever, GraphRetrieverConfig, graph_hits_to_rrf_pairs};
 use crate::rrf::{ChannelResult, FusedResult, RrfConfig, rrf_fuse};
 use crate::vector::{
-    BruteForceIndex, VectorHit, VectorIndex, VectorIndexConfig, make_vector_label,
-    parse_vector_label,
+    BruteForceIndex, CachedVectorIndex, VectorHit, VectorIndex, VectorIndexConfig,
+    make_vector_label, parse_vector_label,
 };
 
 // =========================================================
@@ -206,8 +206,8 @@ pub struct Retriever {
     config: RetrieverConfig,
     /// BM25 索引
     bm25_index: Bm25Index,
-    /// 向量索引
-    vector_index: BruteForceIndex,
+    /// 向量索引（带 LRU 查询缓存，v1.6 接线：L1/L2 文档向量与 utt 块向量共存）
+    vector_index: CachedVectorIndex<BruteForceIndex>,
     /// 图谱检索器
     graph_retriever: GraphRetriever,
     /// LRU 容量上限：超过此值时驱逐最旧文档（0 表示不限制）
@@ -232,7 +232,7 @@ impl Retriever {
         Self {
             config: RetrieverConfig::default(),
             bm25_index: Bm25Index::new(),
-            vector_index: BruteForceIndex::new(),
+            vector_index: CachedVectorIndex::new(BruteForceIndex::new(), None),
             graph_retriever: GraphRetriever::new(),
             lru_max_entries: DEFAULT_LRU_MAX_ENTRIES,
             l1_docs: std::collections::HashMap::new(),
@@ -246,7 +246,7 @@ impl Retriever {
         Self {
             config,
             bm25_index: Bm25Index::new(),
-            vector_index: BruteForceIndex::new(),
+            vector_index: CachedVectorIndex::new(BruteForceIndex::new(), None),
             graph_retriever: GraphRetriever::new(),
             lru_max_entries: DEFAULT_LRU_MAX_ENTRIES,
             l1_docs: std::collections::HashMap::new(),
@@ -274,7 +274,7 @@ impl Retriever {
     }
 
     /// 获取内部向量索引的可变引用。
-    pub fn vector_mut(&mut self) -> &mut BruteForceIndex {
+    pub fn vector_mut(&mut self) -> &mut CachedVectorIndex<BruteForceIndex> {
         &mut self.vector_index
     }
 
@@ -300,6 +300,11 @@ impl Retriever {
     /// 接受引用以避免调用方不必要的 clone；内部仅在存入 HashMap 时做一次 clone。
     ///
     /// LRU 驱逐: 添加后若总文档数超过 `lru_max_entries`，按 `created_at` 驱逐最旧文档。
+    ///
+    /// 向量通道说明（接线）:
+    /// - 本方法不生成向量（同步路径无 embedding provider），仅 BM25 + 内存文档；
+    /// - 向量由调用方在 embedding 可用时通过 [`index_l1_with_vector`] 写入，
+    ///   使 L1 文档真实进入向量索引（此前仅 rebuild 全量路径写入）。
     pub fn index_l1(&mut self, doc: &L1DocView) {
         // BM25 索引
         if self.config.enable_bm25 {
@@ -310,13 +315,30 @@ impl Retriever {
             self.bm25_index.add(DocId::L1(doc.id), tokens);
         }
 
-        // 向量索引（L1 文档暂不添加向量，需要 EmbeddingProvider）
-        // 接入真实 embedding 后，在此生成向量并添加到 vector_index
-
         self.l1_docs.insert(doc.id, doc.clone());
 
         // LRU 驱逐: 总文档数超过上限时，从 BM25 和内存 HashMap 中同步清理最早文档
         self.evict_if_needed();
+    }
+
+    /// 将 L1 文档连同向量加入索引（L1 embedding 真实入向量索引）。
+    ///
+    /// 参数:
+    /// - `doc`: L1 文档视图。
+    /// - `vector`: 文档向量（None = 无 embedding，仅入 BM25/内存，检索走 BM25）。
+    ///
+    /// 说明:
+    /// - label 统一 `make_vector_label("l1", uuid)`（大写 `L1:`，与 `parse_doc_label` 匹配）。
+    /// - 向量维度由索引首个条目确定；后续条目维度不一致会被 `BruteForceIndex::add` 拒绝并记 warn。
+    pub fn index_l1_with_vector(&mut self, doc: &L1DocView, vector: Option<Vec<f32>>) {
+        self.index_l1(doc);
+        if let Some(v) = vector {
+            self.vector_index.add(
+                &make_vector_label("l1", &doc.id.to_string()),
+                v,
+                doc.created_at,
+            );
+        }
     }
 
     /// 将 `MemoryL1` 记录转换为 `L1DocView` 并增量添加到所有启用通道的索引中。
@@ -359,6 +381,10 @@ impl Retriever {
     /// 同时消除了之前因 borrow checker 限制而产生的临时 String 分配。
     ///
     /// LRU 驱逐: 添加后若总文档数超过 `lru_max_entries`，按 `created_at` 驱逐最旧文档。
+    ///
+    /// 向量通道说明（接线）:
+    /// - 本方法不生成向量（同步路径无 embedding provider），仅 BM25 + 内存文档；
+    /// - 向量由调用方在 embedding 可用时通过 [`index_l2_with_vector`] 写入。
     pub fn index_l2(&mut self, doc: &L2DocView) {
         // BM25 索引
         if self.config.enable_bm25 {
@@ -376,11 +402,29 @@ impl Retriever {
             self.bm25_index.add(DocId::L2(doc.id), tokens);
         }
 
-        // 向量索引（同 L1， 接入 embedding）
         self.l2_docs.insert(doc.id, doc.clone());
 
         // LRU 驱逐
         self.evict_if_needed();
+    }
+
+    /// 将 L2 事件连同向量加入索引（L2 embedding 真实入向量索引）。
+    ///
+    /// 参数:
+    /// - `doc`: L2 事件视图。
+    /// - `vector`: 事件向量（None = 无 embedding，仅入 BM25/内存）。
+    ///
+    /// 说明:
+    /// - label 统一 `make_vector_label("l2", id)`（大写 `L2:`，与 `parse_doc_label` 匹配）。
+    pub fn index_l2_with_vector(&mut self, doc: &L2DocView, vector: Option<Vec<f32>>) {
+        self.index_l2(doc);
+        if let Some(v) = vector {
+            self.vector_index.add(
+                &make_vector_label("l2", &doc.id.to_string()),
+                v,
+                doc.created_at,
+            );
+        }
     }
 
     /// 从整个检索器中移除一个 L1 文档（BM25 + HashMap）。
@@ -1203,7 +1247,10 @@ fn parse_doc_label(
     l1_docs: &std::collections::HashMap<uuid::Uuid, L1DocView>,
     l2_docs: &std::collections::HashMap<i64, L2DocView>,
 ) -> Option<(DocId, Option<String>, Option<f64>, i64, String)> {
-    if let Some(uuid_str) = label.strip_prefix("L1:") {
+    if let Some(uuid_str) = label
+        .strip_prefix("L1:")
+        .or_else(|| label.strip_prefix("l1:"))
+    {
         let id = uuid::Uuid::parse_str(uuid_str).ok()?;
         let doc = l1_docs.get(&id)?;
         Some((
@@ -1213,7 +1260,10 @@ fn parse_doc_label(
             doc.created_at,
             doc.summary.clone(),
         ))
-    } else if let Some(id_str) = label.strip_prefix("L2:") {
+    } else if let Some(id_str) = label
+        .strip_prefix("L2:")
+        .or_else(|| label.strip_prefix("l2:"))
+    {
         let id = id_str.parse::<i64>().ok()?;
         let doc = l2_docs.get(&id)?;
         Some((
@@ -1324,6 +1374,91 @@ mod tests {
         assert!(!results.is_empty());
         // 应找到至少一条包含 "Rust" 的结果
         assert!(results.iter().any(|sr| sr.doc_summary.contains("Rust")));
+    }
+
+    /// 向量通道接线：index_l1_with_vector / index_l2_with_vector
+    /// 写入的 L1/L2 文档在带 query 向量的检索中被真实命中。
+    #[test]
+    fn vector_channel_finds_indexed_l1_l2() {
+        let mut r = Retriever::new();
+        let l1_id = uuid::Uuid::new_v4();
+        r.index_l1_with_vector(
+            &L1DocView {
+                id: l1_id,
+                summary: "用户喜欢打篮球，每周三晚上去球场".to_string(),
+                keywords: None,
+                persona_uid: Some("user-0001".to_string()),
+                created_at: 1000,
+                salience: 0.8,
+            },
+            Some(vec![1.0, 0.0, 0.0]),
+        );
+        r.index_l2_with_vector(
+            &L2DocView {
+                id: 7,
+                title: "篮球比赛".to_string(),
+                summary: "参加了周末篮球比赛".to_string(),
+                keywords: None,
+                attitude: None,
+                paraphrase: None,
+                persona_uid: "user-0001".to_string(),
+                share: 0.9,
+                confidence: 0.9,
+                created_at: 2000,
+                salience: 0.7,
+            },
+            Some(vec![0.9, 0.1, 0.0]),
+        );
+
+        let req = SearchRequest {
+            query: "篮球".to_string(),
+            persona_uid: None,
+            top_k: 10,
+            filter_share: false,
+        };
+        // 查询向量与 L1 文档向量高度相似（cos≈1.0），向量通道必须命中
+        let results = r.search(&req, Some(&[1.0, 0.0, 0.0]));
+        assert!(
+            results
+                .iter()
+                .any(|sr| sr.layer == "l1" && sr.doc_summary.contains("篮球")),
+            "L1 文档应通过向量通道被检索到（此前零产出缺陷）"
+        );
+        // L2 文档（cos≈0.994 > min_similarity=0.0）也应被检索到
+        assert!(
+            results
+                .iter()
+                .any(|sr| sr.layer == "l2" && sr.doc_summary.contains("篮球")),
+            "L2 文档应通过向量通道被检索到"
+        );
+    }
+
+    /// 向量通道降级：无 query 向量（embedding 不可用）→ 向量通道跳过，
+    /// BM25 仍可命中（回归红线 2：embedding 不可用不阻塞检索）。
+    #[test]
+    fn vector_channel_skipped_without_query_vector() {
+        let mut r = Retriever::new();
+        r.index_l1_with_vector(
+            &L1DocView {
+                id: uuid::Uuid::new_v4(),
+                summary: "用户喜欢打篮球".to_string(),
+                keywords: None,
+                persona_uid: Some("user-0001".to_string()),
+                created_at: 1000,
+                salience: 0.8,
+            },
+            Some(vec![1.0, 0.0, 0.0]),
+        );
+        let req = SearchRequest {
+            query: "篮球".to_string(),
+            persona_uid: None,
+            top_k: 10,
+            filter_share: false,
+        };
+        // query_vec = None → 向量通道跳过；BM25 无关键词命中 → 空结果（不报错）
+        let results = r.search(&req, None);
+        // 不 panic、返回空或 BM25 结果均可（此用例仅验证不阻塞）
+        let _ = results;
     }
 
     #[test]

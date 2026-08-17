@@ -26,6 +26,9 @@ pub async fn run(app: &Arc<ramaria_app::App>, yes: bool) -> anyhow::Result<()> {
     // 隐私确认
     crate::privacy::ensure_privacy(app, yes).await?;
 
+    // 加载检索索引（CLI 单命令进程，启动时检索器为空；失败降级不阻塞）
+    crate::commands::ask::ensure_retriever_loaded(app).await;
+
     // 启动后台任务（空闲检测 + L2/L3 定时检查）
     // 对齐 Python `SessionManager.start` 启动 Thread A + Thread B
     app.start_background_tasks();

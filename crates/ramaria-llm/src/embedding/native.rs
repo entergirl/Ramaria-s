@@ -114,8 +114,14 @@ impl Encoder {
 pub struct NativeEmbeddingProvider {
     /// 模型目录路径
     model_dir: PathBuf,
-    /// 模型信息（构造时确定，之后只读）
-    model_info: EmbeddingModelInfo,
+    /// 模型信息（构造时确定 model_id；dimension 在模型加载后同步为实际值）
+    ///
+    /// 线程安全说明:
+    /// - 构造时模型文件不存在（先构造后下载流程）→ dimension 为默认占位 384；
+    /// - `ensure_loaded` 加载成功后把实际加载维度写回本字段（维度同步），
+    ///   避免 validate 报"维度不匹配"；
+    /// - 用 `Mutex` 保护读写：`model_info()` 按值返回（trait 签名），无并发数据竞争。
+    model_info: Mutex<EmbeddingModelInfo>,
     /// 惰性加载的编码器（Arc 包裹，推理时 clone Arc 后释放锁，不阻塞其他请求）
     encoder: Mutex<Option<Arc<Encoder>>>,
     /// 模型就绪进度
@@ -185,7 +191,7 @@ impl NativeEmbeddingProvider {
 
         Ok(Self {
             model_dir: dir,
-            model_info: info,
+            model_info: Mutex::new(info),
             encoder: Mutex::new(None),
             progress: Mutex::new(progress),
         })
@@ -219,6 +225,22 @@ impl NativeEmbeddingProvider {
 
         let actual_dim = encoder.dimension();
         let arch_name = encoder.architecture().name();
+
+        // 维度同步：保存实际加载维度，覆盖构造时的占位/猜测值。
+        // 先构造后下载流程中构造时维度可能为默认 384，此处更新为真实维度，
+        // 使 validate 的"维度不匹配"校验与实际模型一致。
+        // 锁顺序：encoder 锁 → model_info 锁（model_info() 只持 model_info 锁，无反向嵌套，不死锁）。
+        {
+            let mut info = self.model_info.lock().unwrap_or_else(|e| e.into_inner());
+            if info.dimension != actual_dim {
+                tracing::info!(
+                    from = info.dimension,
+                    to = actual_dim,
+                    "嵌入模型维度已同步为实际加载值"
+                );
+                info.dimension = actual_dim;
+            }
+        }
 
         // 更新进度
         *self.progress.lock().unwrap_or_else(|e| e.into_inner()) = 1.0;
@@ -393,10 +415,13 @@ impl EmbeddingProvider for NativeEmbeddingProvider {
         })?
     }
 
-    fn model_info(&self) -> &EmbeddingModelInfo {
-        // model_info 在构造时确定（从 config.json 读取维度），之后不可变
-        // 因此可以直接返回 &self.model_info，无需锁
-        &self.model_info
+    fn model_info(&self) -> EmbeddingModelInfo {
+        // 按值返回（trait 签名）：从 Mutex 内 clone，避免返回引用带来的并发竞争。
+        // dimension 在 ensure_loaded 后为实际加载维度（构造时可能为占位 384）。
+        self.model_info
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     async fn validate(&self) -> RamariaResult<()> {
@@ -437,7 +462,7 @@ impl EmbeddingProvider for NativeEmbeddingProvider {
             return Err(RamariaError::embedding("测试向量为空 — 模型可能未正确加载"));
         }
 
-        let expected_dim = self.model_info.dimension;
+        let expected_dim = self.model_info().dimension;
         if test_vec.len() != expected_dim {
             return Err(RamariaError::embedding(format!(
                 "向量维度不匹配: 期望 {}，实际 {}。\n\
@@ -577,5 +602,30 @@ mod tests {
     fn model_info_id_format() {
         let provider = NativeEmbeddingProvider::new("/test/model/dir").unwrap();
         assert!(provider.model_info().model_id.starts_with("native:"));
+    }
+
+    /// 并发调用 model_info()：验证 Mutex 化后的线程安全读取（无 panic、值一致）。
+    ///
+    /// 说明:
+    /// - trait 签名按值返回后，读取路径全部走锁内 clone，无并发数据竞争
+    ///   （维度同步的并发语义）。
+    /// - 真实模型加载维度同步需真实 safetensors 模型，属手动验证项
+    ///   （构造-下载-validate 流程：先构造 384 占位 → 加载后同步实际维度）。
+    #[test]
+    fn model_info_concurrent_reads_are_consistent() {
+        let provider =
+            std::sync::Arc::new(NativeEmbeddingProvider::new("/test/model/dir").unwrap());
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let p = std::sync::Arc::clone(&provider);
+            handles.push(std::thread::spawn(move || {
+                let info = p.model_info();
+                assert_eq!(info.dimension, 384);
+                assert!(info.model_id.starts_with("native:"));
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
     }
 }

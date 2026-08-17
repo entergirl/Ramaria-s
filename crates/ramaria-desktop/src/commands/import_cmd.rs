@@ -36,12 +36,12 @@ pub struct ImportResult {
     pub sessions_written: usize,
     /// 写入的消息总数
     pub messages_written: usize,
-    /// 使用的 persona_uid（导出者）
-    pub persona_uid: String,
+    /// 使用的 persona_uid（导出者；side=other 导入侧过滤时为 null）
+    pub persona_uid: Option<String>,
     /// persona 名称（导出者）
     pub persona_name: String,
-    /// 对方 persona UID
-    pub other_persona_uid: String,
+    /// 对方 persona UID（side=self 导入侧过滤时为 null）
+    pub other_persona_uid: Option<String>,
     /// 对方 persona 名称
     pub other_persona_name: String,
     /// 导出者名称（从文件中解析）
@@ -249,8 +249,9 @@ pub async fn import_qq_chat(
     other_persona_name: Option<String>,
     other_persona_uid: Option<String>,
     gap_minutes: Option<u32>,
+    side: Option<String>,
 ) -> Result<ImportResult, String> {
-    use ramaria_importer::qq::build_persona_uid;
+    use ramaria_importer::qq::{PersonaSide, build_persona_uid};
 
     let mode_str = mode.unwrap_or_else(|| "fast".to_string());
     let import_mode = match mode_str.as_str() {
@@ -264,6 +265,9 @@ pub async fn import_qq_chat(
         }
     };
     let gap = gap_minutes.unwrap_or(10);
+    // 导入侧过滤：前端面板传入 "self"/"other"/"both"；缺失/非法回退 both
+    let import_side = ramaria_importer::qq::ImportSide::parse_cli(side.as_deref())
+        .unwrap_or(ramaria_importer::qq::ImportSide::Both);
 
     // Step 1: 路径安全校验（三层防御：canonicalize + 白名单 + 符号链接拒绝）
     let real_path = crate::path_guard::validate_import_file_path(&file_path)?;
@@ -338,33 +342,40 @@ pub async fn import_qq_chat(
         .max()
         .unwrap_or(0);
 
-    // 3a. 导出者（self）persona
+    // 3a. 导出者（self）persona —— 我方，UID 前缀 user-（kind=user）；
+    //     side=other 时该侧 persona 不创建（消息也不会入库）
     let self_name = persona_name.unwrap_or_else(|| report.self_name.clone());
     let self_uid = build_persona_uid(
+        PersonaSide::Me,
         self_persona_uid.as_deref(),
         report.self_uin.as_deref(),
         &report.self_id,
         max_qq_seq + 1,
     );
-    let self_persona_uid_resolved = ramaria_importer::qq::ensure_qq_persona(
-        &state.pool,
-        &self_uid,
-        &self_name,
-        Some(&report.self_id),
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, self_uid = %self_uid, self_name = %self_name, "创建/查找导出者 persona 失败");
-        format!("创建/查找导出者 persona 失败: {}", e)
-    })?;
+    let self_persona_uid_resolved: Option<String> = if import_side.needs_persona(PersonaSide::Me) {
+        let resolved = ramaria_importer::qq::ensure_qq_persona(
+                &state.pool,
+                &self_uid,
+                &self_name,
+                Some(&report.self_id),
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, self_uid = %self_uid, self_name = %self_name, "创建/查找导出者 persona 失败");
+                format!("创建/查找导出者 persona 失败: {}", e)
+            })?;
+        tracing::info!(
+            persona_uid = %resolved,
+            persona_name = %self_name,
+            "导出者 Persona 已准备"
+        );
+        Some(resolved)
+    } else {
+        tracing::info!("导入侧过滤：跳过导出者 persona（side=other）");
+        None
+    };
 
-    tracing::info!(
-        persona_uid = %self_persona_uid_resolved,
-        persona_name = %self_name,
-        "导出者 Persona 已准备"
-    );
-
-    // 3b. 对方（other）persona
+    // 3b. 对方（other）persona；side=self 时该侧 persona 不创建
     let other_name = other_persona_name.unwrap_or_else(|| {
         if report.other_name.is_empty() {
             report.chat_name.clone()
@@ -378,6 +389,7 @@ pub async fn import_qq_chat(
         Some(report.other_uid.as_str())
     };
     let other_default_uid = build_persona_uid(
+        PersonaSide::Other,
         other_persona_uid.as_deref(),
         report.other_uin.as_deref(),
         &report.other_uid,
@@ -392,30 +404,38 @@ pub async fn import_qq_chat(
         "准备创建对方 persona"
     );
 
-    let other_persona_uid_resolved = ramaria_importer::qq::ensure_qq_persona(
-        &state.pool,
-        &other_default_uid,
-        &other_name,
-        other_ref_id,
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, other_uid = %other_default_uid, other_name = %other_name, "创建/查找对方 persona 失败");
-        format!("创建/查找对方 persona 失败: {}", e)
-    })?;
+    let other_persona_uid_resolved: Option<String> = if import_side
+        .needs_persona(PersonaSide::Other)
+    {
+        let resolved = ramaria_importer::qq::ensure_qq_persona(
+                &state.pool,
+                &other_default_uid,
+                &other_name,
+                other_ref_id,
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, other_uid = %other_default_uid, other_name = %other_name, "创建/查找对方 persona 失败");
+                format!("创建/查找对方 persona 失败: {}", e)
+            })?;
+        tracing::info!(
+            persona_uid = %resolved,
+            persona_name = %other_name,
+            "对方 Persona 已准备"
+        );
+        Some(resolved)
+    } else {
+        tracing::info!("导入侧过滤：跳过对方 persona（side=self）");
+        None
+    };
 
-    tracing::info!(
-        persona_uid = %other_persona_uid_resolved,
-        persona_name = %other_name,
-        "对方 Persona 已准备"
-    );
-
-    // Step 4: 执行导入
+    // Step 4: 执行导入（按 side 过滤消息；单侧模式下跳过侧 persona 为 None）
     tracing::debug!(
         sessions_count = sessions.len(),
-        self_persona = %self_persona_uid_resolved,
-        other_persona = %other_persona_uid_resolved,
+        self_persona = ?self_persona_uid_resolved,
+        other_persona = ?other_persona_uid_resolved,
         self_id = %report.self_id,
+        side = ?import_side,
         "准备执行快速导入"
     );
 
@@ -423,9 +443,10 @@ pub async fn import_qq_chat(
         ramaria_importer::qq::QqImporter::execute_fast_import(
             &state.pool,
             &sessions,
-            &self_persona_uid_resolved,
-            &other_persona_uid_resolved,
+            self_persona_uid_resolved.as_deref(),
+            other_persona_uid_resolved.as_deref(),
             &report.self_id,
+            import_side,
         )
         .await
         .map_err(|e| {
@@ -450,8 +471,10 @@ pub async fn import_qq_chat(
     let sids = session_ids.clone();
     let is_deep = import_mode == ramaria_importer::ImportMode::Deep;
     let total_sids = sids.len();
+    // 单侧模式（side=self/other）下，跳过侧 persona 为 None → 该侧 L1 摘要不生成
     let self_uid = self_persona_uid_resolved.clone();
     let other_uid = other_persona_uid_resolved.clone();
+    let persona_count = usize::from(self_uid.is_some()) + usize::from(other_uid.is_some());
     // 批量 LLM 请求间最小间隔（毫秒）：读 `[thresholds].cluster_delay_ms`，
     // L1/L2 共用（`ramaria_memory::llm_gate::inter_llm_delay`）。
     // 导入会连续 N×2 次调用 LLM，无节流时易触发远程 API 速率限制
@@ -477,7 +500,8 @@ pub async fn import_qq_chat(
         //   首次无样本时 remaining_seconds() = None，前端回退线性估算（降级）。
         let started_at = std::time::Instant::now();
         let mut eta_est = ramaria_app::eta::EtaEstimator::new();
-        let l1_total = total_sids * 2; // L1 调用数 = session × persona
+        // L1 调用数 = session × 实际处理 persona 数（单侧模式为 1）
+        let l1_total = total_sids * persona_count;
 
         app_handle
             .emit(
@@ -496,45 +520,50 @@ pub async fn import_qq_chat(
         let mut l1_failed = 0usize;
         let mut l1_processed = 0usize; // 已处理次数（每个 session 2 次）
         for sid in &sids {
-            // ── 为导出方（self）生成 L1 ──
-            match app
-                .regenerate_l1_no_cascade(*sid, Some(&self_uid), Some(""), Some(""))
-                .await
-            {
-                Ok(Some(_)) => l1_success += 1,
-                Ok(None) => {
-                    tracing::debug!(%sid, self_uid = %self_uid, "self: session 无消息，跳过 L1");
+            // ── 为导出方（self）生成 L1（side=other 时跳过侧不生成）──
+            if let Some(uid) = &self_uid {
+                match app
+                    .regenerate_l1_no_cascade(*sid, Some(uid), Some(""), Some(""))
+                    .await
+                {
+                    Ok(Some(_)) => l1_success += 1,
+                    Ok(None) => {
+                        tracing::debug!(%sid, self_uid = %uid, "self: session 无消息，跳过 L1");
+                    }
+                    Err(e) => {
+                        l1_failed += 1;
+                        tracing::warn!(%sid, self_uid = %uid, error = %e, "L1 摘要生成失败 (self, 非致命)");
+                    }
                 }
-                Err(e) => {
-                    l1_failed += 1;
-                    tracing::warn!(%sid, self_uid = %self_uid, error = %e, "L1 摘要生成失败 (self, 非致命)");
-                }
+                l1_processed += 1;
+
+                // 请求间节流（L1/L2 共用，`[thresholds].cluster_delay_ms`）：
+                // 连续 LLM 调用间保持最小间隔，避免触发远程 API 速率限制。
+                ramaria_memory::llm_gate::inter_llm_delay(llm_delay_ms, "L1 导入批量摘要 (self)")
+                    .await;
             }
-            l1_processed += 1;
 
-            // 请求间节流（L1/L2 共用，`[thresholds].cluster_delay_ms`）：
-            // 连续 LLM 调用间保持最小间隔，避免触发远程 API 速率限制。
-            ramaria_memory::llm_gate::inter_llm_delay(llm_delay_ms, "L1 导入批量摘要 (self)").await;
+            // ── 为对话方（other）生成 L1（side=self 时跳过侧不生成）──
+            if let Some(uid) = &other_uid {
+                match app
+                    .regenerate_l1_no_cascade(*sid, Some(uid), Some(""), Some(""))
+                    .await
+                {
+                    Ok(Some(_)) => l1_success += 1,
+                    Ok(None) => {
+                        tracing::debug!(%sid, other_uid = %uid, "other: session 无消息，跳过 L1");
+                    }
+                    Err(e) => {
+                        l1_failed += 1;
+                        tracing::warn!(%sid, other_uid = %uid, error = %e, "L1 摘要生成失败 (other, 非致命)");
+                    }
+                }
+                l1_processed += 1;
 
-            // ── 为对话方（other）生成 L1 ──
-            match app
-                .regenerate_l1_no_cascade(*sid, Some(&other_uid), Some(""), Some(""))
-                .await
-            {
-                Ok(Some(_)) => l1_success += 1,
-                Ok(None) => {
-                    tracing::debug!(%sid, other_uid = %other_uid, "other: session 无消息，跳过 L1");
-                }
-                Err(e) => {
-                    l1_failed += 1;
-                    tracing::warn!(%sid, other_uid = %other_uid, error = %e, "L1 摘要生成失败 (other, 非致命)");
-                }
+                // 请求间节流（同上）：self 与 other 各一次 LLM 调用，间隔保持 ≥ delay_ms。
+                ramaria_memory::llm_gate::inter_llm_delay(llm_delay_ms, "L1 导入批量摘要 (other)")
+                    .await;
             }
-            l1_processed += 1;
-
-            // 请求间节流（同上）：self 与 other 各一次 LLM 调用，间隔保持 ≥ delay_ms。
-            ramaria_memory::llm_gate::inter_llm_delay(llm_delay_ms, "L1 导入批量摘要 (other)")
-                .await;
 
             // 每处理一个 session（2 个 persona）就推送进度
             // 修复 v1.4 的 total 不一致：统一以 LLM 调用次数（l1_total）为分母，
@@ -564,8 +593,8 @@ pub async fn import_qq_chat(
             l1_failed,
             l1_processed,
             total_sessions = total_sids,
-            self_uid = %self_uid,
-            other_uid = %other_uid,
+            self_uid = ?self_uid,
+            other_uid = ?other_uid,
             "L1 摘要全部生成完成（双方 persona 各有独立副本）"
         );
 
@@ -705,8 +734,8 @@ pub async fn import_qq_chat(
         sessions = sessions_written,
         messages = messages_written,
         mode = %result.mode,
-        self_persona = %result.persona_uid,
-        other_persona = %result.other_persona_uid,
+        self_persona = ?result.persona_uid,
+        other_persona = ?result.other_persona_uid,
         "QQ 聊天记录导入完成"
     );
 

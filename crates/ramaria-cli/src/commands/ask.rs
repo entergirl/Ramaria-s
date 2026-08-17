@@ -29,8 +29,31 @@ pub struct AskArgs {
     pub yes: bool,
 }
 
+/// 确保检索索引已加载（ask/chat 共用，幂等）。
+///
+/// CLI 为"单命令进程"：每次启动检索器为空，必须先调用 `rebuild_retriever`
+/// 从存储层构建内存索引，否则 L1/L2/utt 记忆检索恒为空。
+///
+/// 降级策略:
+/// - 重建成功但日志提示文档数即可；失败记 warn，不阻塞对话（对话仍有桥接 + LLM）。
+pub async fn ensure_retriever_loaded(app: &Arc<ramaria_app::App>) {
+    match app.rebuild_retriever().await {
+        Ok(count) => {
+            tracing::info!(docs = count, "对话前检索索引已加载");
+        }
+        Err(e) => {
+            tracing::warn!(%e, "加载检索索引失败，本次对话记忆检索不可用（降级不阻塞）");
+        }
+    }
+}
+
 /// 执行 ask 命令。
 pub async fn run(app: &Arc<ramaria_app::App>, args: AskArgs) -> anyhow::Result<()> {
+    // Step 0: 加载检索索引（CLI 为单命令进程，启动时检索器为空；
+    //        必须先 rebuild 才能命中 L1/L2/utt 记忆检索）。
+    //        失败降级记 warn，不阻塞对话。
+    ensure_retriever_loaded(app).await;
+
     // Step 1: 隐私确认
     crate::privacy::ensure_privacy(app, args.yes).await?;
 
