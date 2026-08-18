@@ -491,17 +491,23 @@ pub struct CrossVersionMatchResult {
     pub matched_count: usize,
 }
 
+/// 跨版本簇匹配的语义余弦相似度阈值（统一 0.85）。
+///
+/// 语义标签 embedding 与历史快照的余弦相似度 ≥ 该值才判定为同一性格倾向的延续，
+/// 低于 0.85 视为不同倾向，避免将语义相近但不同的簇误判为跨版本延续。
+pub const CROSS_VERSION_MATCH_THRESHOLD: f64 = 0.85;
+
 /// 执行跨版本簇匹配。
 ///
 /// 算法:
 /// 1. 对当前簇的语义标签 embedding 与每个历史快照的 embedding 计算余弦相似度。
-/// 2. 相似度 ≥ `match_threshold`（默认 0.75）视为匹配。
+/// 2. 相似度 ≥ `match_threshold`（默认 0.85）视为匹配。
 /// 3. 返回按相似度降序排列的匹配列表。
 ///
 /// 参数:
 /// - `current_embedding`: 当前簇语义标签的 embedding 向量。
 /// - `historical_snapshots`: 该 persona 的历史快照列表（需含 `semantic_label_embedding`）。
-/// - `match_threshold`: 匹配阈值，默认 0.75。
+/// - `match_threshold`: 匹配阈值，默认 0.85。
 ///
 /// 返回:
 /// - CrossVersionMatchResult，含匹配列表和统计信息。
@@ -887,7 +893,7 @@ mod tests {
             current_emb.clone(),
             "工作",
         )];
-        let result = match_clusters_cross_version(&current_emb, &historical, 0.75);
+        let result = match_clusters_cross_version(&current_emb, &historical, 0.85);
         assert_eq!(result.total_historical, 1);
         assert_eq!(result.matched_count, 1);
         assert!(result.best_match.is_some());
@@ -909,7 +915,7 @@ mod tests {
             vec![0.0, 1.0, 0.0, 0.0],
             "社交",
         )];
-        let result = match_clusters_cross_version(&current_emb, &historical, 0.75);
+        let result = match_clusters_cross_version(&current_emb, &historical, 0.85);
         assert_eq!(result.total_historical, 1);
         assert_eq!(result.matched_count, 0);
     }
@@ -917,7 +923,7 @@ mod tests {
     #[test]
     fn cross_version_match_empty_history() {
         let current_emb = vec![1.0_f32, 0.0, 0.0];
-        let result = match_clusters_cross_version(&current_emb, &[], 0.75);
+        let result = match_clusters_cross_version(&current_emb, &[], 0.85);
         assert_eq!(result.total_historical, 0);
         assert!(result.matches.is_empty());
     }
@@ -925,7 +931,7 @@ mod tests {
     #[test]
     fn cross_version_match_empty_current_embedding() {
         let historical = vec![make_hist_snapshot(1, "测试", vec![1.0, 0.0], "工作")];
-        let result = match_clusters_cross_version(&[], &historical, 0.75);
+        let result = match_clusters_cross_version(&[], &historical, 0.85);
         assert_eq!(result.total_historical, 1);
         assert!(result.matches.is_empty());
     }
@@ -934,7 +940,7 @@ mod tests {
     fn cross_version_match_dimension_mismatch() {
         let current_emb = vec![1.0_f32, 0.0, 0.0]; // 3 维
         let historical = vec![make_hist_snapshot(1, "测试", vec![1.0, 0.0], "工作")]; // 2 维
-        let result = match_clusters_cross_version(&current_emb, &historical, 0.75);
+        let result = match_clusters_cross_version(&current_emb, &historical, 0.85);
         // 维度不匹配应被跳过
         assert_eq!(result.matches.len(), 0);
     }
@@ -947,7 +953,7 @@ mod tests {
             make_hist_snapshot(2, "高度相似", vec![0.95, 0.05, 0.0, 0.0], "工作"),
             make_hist_snapshot(3, "中度相似", vec![0.7, 0.3, 0.0, 0.0], "工作"),
         ];
-        let result = match_clusters_cross_version(&current_emb, &historical, 0.75);
+        let result = match_clusters_cross_version(&current_emb, &historical, 0.85);
         assert_eq!(result.total_historical, 3);
         // 第二个快照相似度最高，应先出现
         let best = result.best_match.unwrap();
@@ -968,9 +974,71 @@ mod tests {
             },
             make_hist_snapshot(2, "正常", vec![0.9, 0.1], "工作"),
         ];
-        let result = match_clusters_cross_version(&current_emb, &historical, 0.75);
+        let result = match_clusters_cross_version(&current_emb, &historical, 0.85);
         // 只有 id=2 的快照有效
         assert_eq!(result.matches.len(), 1);
         assert_eq!(result.matches[0].snapshot_id, 2);
+    }
+
+    /// 0.85 边界断言：0.85 匹配、0.84 不匹配。
+    ///
+    /// 用单位向量构造精确余弦相似度：对目标余弦 `c`，向量 `[c, sqrt(1-c²)]` 是单位向量，
+    /// 与 `[1, 0]` 的余弦 = `c`。`sqrt` 在 f64 下计算，避免手写近似值精度不足。
+    /// 为避免 f32 舍入导致余弦恰好落在阈值两侧的脆弱断言，匹配侧取 0.8501（稳 ≥ 0.85）、
+    /// 不匹配侧取 0.8499（稳 < 0.85），验证阈值 0.85 的硬边界语义。
+    #[test]
+    fn cross_version_match_threshold_boundary_085() {
+        let query = vec![1.0_f32, 0.0];
+        let mk = |c: f64| vec![c as f32, (1.0 - c * c).sqrt() as f32];
+
+        // 余弦 ≈ 0.8501（稳 ≥ 0.85）→ 判定匹配
+        let match_emb = mk(0.8501);
+        let match_result = match_clusters_cross_version(
+            &query,
+            &[make_hist_snapshot(1, "t", match_emb, "c")],
+            0.85,
+        );
+        assert_eq!(match_result.matched_count, 1, "≥0.85 应判定为匹配");
+        let m = match_result.best_match.unwrap();
+        assert!(m.is_match);
+        assert!(m.similarity >= 0.85, "sim={:.4}", m.similarity);
+
+        // 余弦 ≈ 0.8499（稳 < 0.85）→ 判定不匹配
+        let no_match_emb = mk(0.8499);
+        let no_result = match_clusters_cross_version(
+            &query,
+            &[make_hist_snapshot(2, "t2", no_match_emb, "c")],
+            0.85,
+        );
+        assert_eq!(no_result.matched_count, 0, "<0.85 不应判定为匹配");
+        let nm = no_result.best_match.unwrap();
+        assert!(!nm.is_match);
+        assert!(nm.similarity < 0.85, "sim={:.4}", nm.similarity);
+    }
+
+    /// 阈值常量锁定 0.85。
+    #[test]
+    fn cross_version_threshold_constant_is_085() {
+        assert!((CROSS_VERSION_MATCH_THRESHOLD - 0.85).abs() < f64::EPSILON);
+    }
+
+    /// 配置开关回退：关闭升级（threshold=0.75）时，相似度 0.80 的簇被判定为匹配；
+    /// 开启 0.85 后同一簇不匹配。
+    ///
+    /// 断言阈值收紧带来的行为差异，供回归对照。
+    #[test]
+    fn cross_version_threshold_loose_fallback_behavior() {
+        // 与 [1,0] 余弦相似度 = 0.80 的向量
+        let emb = vec![0.80_f32, 0.6_f32];
+        let snap = make_hist_snapshot(1, "t", emb, "c");
+
+        // 宽松阈值 0.75：0.80 ≥ 0.75 → 匹配
+        let loose = match_clusters_cross_version(&[1.0_f32, 0.0], &[snap.clone()], 0.75);
+        assert_eq!(loose.matched_count, 1, "阈值 0.75 时 0.80 应匹配");
+
+        // 收紧阈值 0.85：0.80 < 0.85 → 不匹配
+        let tight =
+            match_clusters_cross_version(&[1.0_f32, 0.0], &[snap], CROSS_VERSION_MATCH_THRESHOLD);
+        assert_eq!(tight.matched_count, 0, "阈值 0.85 时 0.80 不应匹配");
     }
 }

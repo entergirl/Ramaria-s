@@ -434,11 +434,12 @@ pub fn compute_domain_prior(
 /// 执行分层经验贝叶斯收缩管线。
 ///
 /// 流程:
-/// 1. 计算全局先验（来自所有分类）。
+/// 1. 确定全局先验：优先使用 `cross_user_prior`（系统内已有人格画像的跨用户经验分布，
+///    冷启动校准）；未提供时回退当前 persona 全部分类先验。
 /// 2. 根据 layer_hints 识别 Accent 分类，计算领域先验（来自 Accent 分类子集）。
 /// 3. 对每个分类：
 ///    - 查 layer_hints 获取该分类的预期 TraitLayer。
-///    - Base/Primary → 使用全局先验。
+///    - Base/Primary → 使用全局先验（跨用户或当前 persona）。
 ///    - Accent → 使用领域先验（不可用时 fallback 全局先验）。
 ///    - 未在 hints 中的分类 → 使用全局先验（保守策略）。
 /// 4. 执行标准收缩公式。
@@ -448,6 +449,8 @@ pub fn compute_domain_prior(
 /// - `shrink_config`: 收缩配置（γ 参数）。
 /// - `layer_hints`: 分类名 → TraitLayer 的映射（来自上一轮 Phase B 的持久化结果）。
 ///   首次推断时传入空 HashMap，此时所有分类使用全局先验。
+/// - `cross_user_prior`: 可选的跨用户经验先验（冷启动校准）。
+///   `Some` → 作为 base/primary 的全局先验来源；`None` → 回退当前 persona 内先验。
 ///
 /// 返回:
 /// - 使用的 γ 值（供日志记录）。
@@ -459,9 +462,13 @@ pub fn run_shrinkage_layered(
     categories: &mut [CategoryStats],
     shrink_config: &ShrinkConfig,
     layer_hints: &HashMap<String, TraitLayer>,
+    cross_user_prior: Option<&ShrinkPrior>,
 ) -> f64 {
-    // Step 1: 计算全局先验（来自所有分类）
-    let global_prior = ShrinkPrior::from_categories(categories);
+    // Step 1: 确定全局先验。
+    // 跨用户经验先验优先（冷启动校准）；
+    // 未提供时回退当前 persona 全部分类先验。
+    let own_prior = ShrinkPrior::from_categories(categories);
+    let global_prior = cross_user_prior.unwrap_or(&own_prior);
 
     // Step 2: 识别 Accent 分类索引并计算领域先验
     let accent_indices: Vec<usize> = categories
@@ -489,8 +496,8 @@ pub fn run_shrinkage_layered(
     for cat in categories.iter_mut() {
         let layer = layer_hints.get(&cat.category);
         let prior = match layer {
-            Some(l) => select_shrink_prior(l, &global_prior, &domain_prior),
-            None => &global_prior, // 无 hint 时保守使用全局先验
+            Some(l) => select_shrink_prior(l, global_prior, &domain_prior),
+            None => global_prior, // 无 hint 时保守使用全局先验
         };
 
         shrink_category(
@@ -505,6 +512,67 @@ pub fn run_shrinkage_layered(
     }
 
     gamma
+}
+
+// =========================================================
+// 跨用户经验先验（冷启动校准）
+// =========================================================
+
+/// 统一的冷启动默认先验（首个 persona、系统内无已有人格画像时回退）。
+///
+/// 语义（中性先验）:
+/// - `valence_mean = 0.0`：情感方向无偏（社会赞许偏倚的对抗基线）。
+/// - `share_mean = 0.5`：分享意愿中性。
+/// - `presentation` 三态均分（objective/subjective/mixed = 1/3）。
+///
+/// 返回:
+/// - 中性先验包。
+pub fn unified_default_prior() -> ShrinkPrior {
+    ShrinkPrior {
+        valence_mean: 0.0,
+        share_mean: 0.5,
+        obj_ratio: 1.0 / 3.0,
+        sub_ratio: 1.0 / 3.0,
+        mix_ratio: 1.0 / 3.0,
+        n_total_eff: 0.0,
+    }
+}
+
+/// 合并多个 persona 的经验先验为跨用户先验。
+///
+/// 算法:
+/// - 对每个 persona 的 `ShrinkPrior` 按 `n_total_eff` 加权平均各指标，
+///   得到"系统内已有人格画像的跨用户经验分布"。
+/// - 输入为空（系统内尚无已有人格画像）时回退统一默认先验 `unified_default_prior()`。
+///
+/// 参数:
+/// - `persona_priors`: 各已有人格画像的收缩先验观察。
+///
+/// 返回:
+/// - 跨用户经验先验包（空输入时回退统一默认）。
+pub fn merge_cross_user_prior(persona_priors: &[ShrinkPrior]) -> ShrinkPrior {
+    let total_eff: f64 = persona_priors.iter().map(|p| p.n_total_eff).sum();
+
+    if total_eff < 1e-12 {
+        return unified_default_prior();
+    }
+
+    let weighted = |f: &dyn Fn(&ShrinkPrior) -> f64| -> f64 {
+        persona_priors
+            .iter()
+            .map(|p| p.n_total_eff * f(p))
+            .sum::<f64>()
+            / total_eff
+    };
+
+    ShrinkPrior {
+        valence_mean: weighted(&|p| p.valence_mean),
+        share_mean: weighted(&|p| p.share_mean),
+        obj_ratio: weighted(&|p| p.obj_ratio),
+        sub_ratio: weighted(&|p| p.sub_ratio),
+        mix_ratio: weighted(&|p| p.mix_ratio),
+        n_total_eff: total_eff,
+    }
 }
 
 // =========================================================
@@ -785,7 +853,7 @@ mod tests {
         let mut hints = HashMap::new();
         hints.insert("工作".to_string(), TraitLayer::Base);
 
-        let gamma = run_shrinkage_layered(&mut cats, &config, &hints);
+        let gamma = run_shrinkage_layered(&mut cats, &config, &hints, None);
         assert!(gamma > 0.0);
 
         // Base 使用全局先验，n_eff=10 较大，收缩幅度小
@@ -823,7 +891,7 @@ mod tests {
         hints.insert("工作".to_string(), TraitLayer::Base);
         hints.insert("社交".to_string(), TraitLayer::Accent);
         // 只有 1 个 Accent → 领域先验不可用 → fallback 全局，结果应与 run_shrinkage 一致
-        let gamma = run_shrinkage_layered(&mut cats, &config, &hints);
+        let gamma = run_shrinkage_layered(&mut cats, &config, &hints, None);
         assert!(gamma > 0.0);
 
         // 单 Accent 时 fallback 全局，结果应接近全局收缩
@@ -857,7 +925,7 @@ mod tests {
         hints.insert("社交".to_string(), TraitLayer::Accent);
         hints.insert("家庭".to_string(), TraitLayer::Accent);
 
-        let gamma = run_shrinkage_layered(&mut cats, &config, &hints);
+        let gamma = run_shrinkage_layered(&mut cats, &config, &hints, None);
         assert!(gamma > 0.0);
 
         // 工作（Base, n_eff=20）几乎不变
@@ -892,7 +960,7 @@ mod tests {
         }
 
         let hints = HashMap::new(); // 空 hints
-        let gamma = run_shrinkage_layered(&mut cats, &config, &hints);
+        let gamma = run_shrinkage_layered(&mut cats, &config, &hints, None);
         assert!(gamma > 0.0);
 
         // 空 hints 应退化为全局先验（与全局先验收缩结果一致）
@@ -907,7 +975,7 @@ mod tests {
         let config = ShrinkConfig::default();
         let mut cats: Vec<CategoryStats> = Vec::new();
         let hints = HashMap::new();
-        let gamma = run_shrinkage_layered(&mut cats, &config, &hints);
+        let gamma = run_shrinkage_layered(&mut cats, &config, &hints, None);
         assert!((gamma - 4.0).abs() < 1e-10);
     }
 
@@ -927,5 +995,101 @@ mod tests {
         assert!((prior.valence_mean - 0.6).abs() < 0.01);
         assert!((prior.share_mean - 0.7).abs() < 0.01);
         assert!((prior.n_total_eff - 10.0).abs() < 0.01);
+    }
+
+    // =========================================================
+    // 跨用户经验先验
+    // =========================================================
+
+    fn make_prior(valence: f64, share: f64, n_eff: f64) -> ShrinkPrior {
+        ShrinkPrior {
+            valence_mean: valence,
+            share_mean: share,
+            obj_ratio: 0.4,
+            sub_ratio: 0.3,
+            mix_ratio: 0.3,
+            n_total_eff: n_eff,
+        }
+    }
+
+    /// 空输入（系统内无已有人格画像）→ 回退统一默认先验（首个 persona）。
+    #[test]
+    fn merge_cross_user_prior_empty_returns_default() {
+        let prior = merge_cross_user_prior(&[]);
+        assert!((prior.valence_mean - 0.0).abs() < 1e-10);
+        assert!((prior.share_mean - 0.5).abs() < 1e-10);
+        assert!((prior.obj_ratio - 1.0 / 3.0).abs() < 1e-10);
+        assert!((prior.n_total_eff - 0.0).abs() < 1e-10);
+    }
+
+    /// 多 persona 按 n_eff 加权平均。
+    #[test]
+    fn merge_cross_user_prior_weighted_average() {
+        // persona A: valence=0.6, n=10；persona B: valence=-0.2, n=30
+        // 加权 valence = (0.6*10 + (-0.2)*30)/40 = (6 - 6)/40 = 0.0
+        let priors = vec![make_prior(0.6, 0.7, 10.0), make_prior(-0.2, 0.3, 30.0)];
+        let merged = merge_cross_user_prior(&priors);
+        assert!(
+            (merged.valence_mean - 0.0).abs() < 1e-9,
+            "v={}",
+            merged.valence_mean
+        );
+        // share = (0.7*10 + 0.3*30)/40 = (7+9)/40 = 0.4
+        assert!(
+            (merged.share_mean - 0.4).abs() < 1e-9,
+            "s={}",
+            merged.share_mean
+        );
+        assert!((merged.n_total_eff - 40.0).abs() < 1e-9);
+    }
+
+    /// 单 persona 的跨用户先验 = 该 persona 自身先验。
+    #[test]
+    fn merge_cross_user_prior_single() {
+        let prior = make_prior(0.5, 0.6, 12.0);
+        let merged = merge_cross_user_prior(&[prior.clone()]);
+        assert!((merged.valence_mean - 0.5).abs() < 1e-9);
+        assert!((merged.share_mean - 0.6).abs() < 1e-9);
+        assert!((merged.n_total_eff - 12.0).abs() < 1e-9);
+    }
+
+    /// `run_shrinkage_layered` 传入跨用户先验时，小样本分类向跨用户先验收缩。
+    #[test]
+    fn run_shrinkage_layered_uses_cross_user_prior() {
+        let config = ShrinkConfig::default();
+        // 当前 persona 分类 valence=0.8（极端、小样本），n_eff=1
+        let mut cats = vec![make_cat("工作", 1.0, 0.8, 0.7, 0.5, 0.3, 0.2)];
+        let cross_user = make_prior(0.0, 0.5, 100.0); // 跨用户经验先验（中性）
+
+        let mut hints = HashMap::new();
+        hints.insert("工作".to_string(), TraitLayer::Base);
+
+        let gamma = run_shrinkage_layered(&mut cats, &config, &hints, Some(&cross_user));
+        assert!(gamma > 0.0);
+
+        // n_eff=1 极小时，收缩应显著向跨用户先验 0.0 靠近（远低于原 0.8）
+        assert!(
+            cats[0].valence_mean < 0.6,
+            "小样本应显著向跨用户先验收缩，实际={}",
+            cats[0].valence_mean
+        );
+    }
+
+    /// 关闭冷启动跨用户先验（传入 None）→ 回退当前 persona 内先验。
+    #[test]
+    fn run_shrinkage_layered_fallback_own_prior() {
+        let config = ShrinkConfig::default();
+        let mut cats = vec![make_cat("工作", 1.0, 0.8, 0.7, 0.5, 0.3, 0.2)];
+        let mut hints = HashMap::new();
+        hints.insert("工作".to_string(), TraitLayer::Base);
+
+        let gamma = run_shrinkage_layered(&mut cats, &config, &hints, None);
+        assert!(gamma > 0.0);
+        // 当前 persona 内全局先验 = 0.8（唯一分类），n_eff 再小也向自身 0.8 收缩，基本不变
+        assert!(
+            (cats[0].valence_mean - 0.8).abs() < 0.2,
+            "无跨用户先验时应向自身先验收缩，实际={}",
+            cats[0].valence_mean
+        );
     }
 }

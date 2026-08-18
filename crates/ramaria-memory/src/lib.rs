@@ -75,7 +75,8 @@ pub use l1::{L1Summarizer, L1SummarizerConfig};
 // Event Extractor & TopicBatcher
 pub use event::{
     DegradeConfig, EventExtractor, EventExtractorConfig, L1Item, ParaphraseConfig,
-    TopicBatcherConfig, TopicCluster, build_degraded_event, generate_paraphrase,
+    TopicBatcherConfig, TopicCluster, build_degraded_event, degraded_confidence,
+    generate_paraphrase,
 };
 
 // Inference ( + + — 性格推断全管线)
@@ -83,6 +84,7 @@ pub use inference::{
     AdmissionTrack,
     // 统计 + 聚类 + 收缩
     AttitudeSample,
+    CROSS_VERSION_MATCH_THRESHOLD,
     CalibratedWeightConfig,
     // 漂移检测 + 置信度更新
     CalibrationConfig,
@@ -169,6 +171,7 @@ pub use inference::{
     logit,
     match_clusters_cross_version,
     merge_consistency,
+    merge_cross_user_prior,
     mock_infer,
     permutation_test,
     persist_cluster_snapshots_with_semantic_labels,
@@ -192,6 +195,7 @@ pub use inference::{
     simple_density_cluster,
     situation_multiplier,
     time_decay_weight,
+    unified_default_prior,
     update_trait_confidence,
     wasserstein_1d,
     weighted_mean,

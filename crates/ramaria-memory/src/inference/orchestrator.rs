@@ -473,11 +473,12 @@ pub async fn apply_layered_shrinkage(
                 error = %e,
                 "Phase A shrinkage: 读取已有 traits 失败，降级为全局先验收缩"
             );
-            // 降级: 全局先验收缩
+            // 降级: 全局先验收缩（无跨用户先验，回退当前 persona 内先验）
             return run_shrinkage_layered(
                 &mut stats_summary.categories,
                 shrink_config,
                 &HashMap::new(), // 空 hints → 所有分类使用全局先验
+                None,
             );
         }
     };
@@ -503,8 +504,15 @@ pub async fn apply_layered_shrinkage(
         );
     }
 
-    // 3. 执行分层收缩（空 hints 时退化为全局先验）
-    let gamma = run_shrinkage_layered(&mut stats_summary.categories, shrink_config, &layer_hints);
+    // 3. 执行分层收缩（空 hints 时退化为全局先验）。
+    // 跨用户经验先验需从系统内已有人格画像聚合，当前收缩路径尚未接入存储聚合，
+    // 传入 None 回退当前 persona 内先验（跨用户先验接入属后续增强）。
+    let gamma = run_shrinkage_layered(
+        &mut stats_summary.categories,
+        shrink_config,
+        &layer_hints,
+        None,
+    );
 
     // 4. 收缩后更新叙事一致性（presentation 分布向先验收缩后一致性提高）
     stats_summary.cross_category.narrative_consistency =
@@ -1202,10 +1210,19 @@ async fn detect_and_summarize_drift(
                 vec![]
             });
 
-        // 从快照提取旧分布（简化为使用均值作为单点分布）
-        let old_valences: Vec<f64> = snapshots.iter().map(|_s| 0.0).collect(); // 实际应从快照的 samples JSON 中恢复
-        let old_shares: Vec<f64> = snapshots.iter().map(|_s| 0.5).collect();
-        let old_saliences: Vec<f64> = vec![];
+        // 从快照提取旧分布。
+        // 开启开关时从 `persona_cluster_snapshots.samples` JSON 恢复真实旧分布；
+        // 关闭开关（`restore_real_distribution=false`）时回退硬编码占位（全 0 / 0.5）。
+        let (old_valences, old_shares, old_saliences) = if drift_config.restore_real_distribution {
+            restore_old_distribution(&snapshots)
+        } else {
+            // 旧版占位：快照数条 0.0 valence / 0.5 share，漂移检测实际不触发（all-zeros 守卫）。
+            (
+                snapshots.iter().map(|_s| 0.0).collect(),
+                snapshots.iter().map(|_s| 0.5).collect(),
+                Vec::<f64>::new(),
+            )
+        };
 
         // 从当前事件提取新分布
         let new_valences: Vec<f64> = cat_events.iter().map(|e| e.valence).collect();
@@ -1213,12 +1230,20 @@ async fn detect_and_summarize_drift(
         let new_saliences: Vec<f64> = cat_events.iter().map(|e| e.salience).collect();
         let new_confidences: Vec<f64> = cat_events.iter().map(|e| e.confidence).collect();
 
-        // 如果旧分布为空（新分类），跳过漂移检测
+        // 如果旧分布为空（新分类），跳过漂移检测。
+        // 快照缺失时记 warn 并跳过（静默降级，不阻塞主流程）。
         if old_valences.is_empty() || old_valences.iter().all(|&v| v == 0.0) {
-            debug!(
-                persona_uid,
-                category, "Phase C: 新分类无旧分布，跳过漂移检测"
-            );
+            if old_valences.is_empty() {
+                warn!(
+                    persona_uid,
+                    category, "Phase C: 快照旧分布为空（samples 缺失或解析失败），跳过漂移检测"
+                );
+            } else {
+                debug!(
+                    persona_uid,
+                    category, "Phase C: 新分类无旧分布，跳过漂移检测"
+                );
+            }
             continue;
         }
 
@@ -1244,6 +1269,79 @@ async fn detect_and_summarize_drift(
     }
 
     Ok(run_drift_detection(&category_data, drift_config))
+}
+
+/// 从 `persona_cluster_snapshots` 的 `samples` JSON 恢复真实旧分布。
+///
+/// 快照 `samples` 为分类级聚合 JSON（由 L3 Phase A 持久化时写入），结构形如：
+/// `{"category": "...", "event_count": N, "n_effective": n, "valence_mean": x,
+///   "valence_std": s, "share_mean": y}`。
+///
+/// 漂移检测需要新旧两组样本向量进行 Wasserstein + 置换检验，因此将 `valence_mean`
+/// 与 `share_mean` 按 `n_effective`（向下取整）重复展开，作为旧分布的近似样本点。
+///
+/// 参数:
+/// - `snapshots`: 该 persona + 分类的当前快照列表。
+///
+/// 返回:
+/// - (old_valences, old_shares, old_saliences)。samples 缺失或解析失败时返回空向量
+///   （调用方据此跳过该分类漂移检测并记 warn）。
+fn restore_old_distribution(
+    snapshots: &[ramaria_core::types::ClusterSnapshot],
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    let mut valences: Vec<f64> = Vec::new();
+    let mut shares: Vec<f64> = Vec::new();
+
+    for snap in snapshots {
+        let Some(samples_json) = snap.samples.as_deref() else {
+            continue;
+        };
+        // 解析快照聚合 JSON；解析失败记 debug 并跳过该快照（静默降级）。
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(samples_json) else {
+            debug!(
+                persona_uid = %snap.persona_uid,
+                category = %snap.category,
+                "Phase C: 快照 samples JSON 解析失败，跳过该快照旧分布恢复"
+            );
+            continue;
+        };
+
+        let valence_mean = v.get("valence_mean").and_then(|x| x.as_f64());
+        let share_mean = v.get("share_mean").and_then(|x| x.as_f64());
+        // 样本量取 n_effective（向下取整），缺失时回退 event_count。
+        // 两者都缺失时 n_eff=0，无法可靠重建旧分布权重，跳过该快照（保守，不臆造样本）。
+        let n_eff = v
+            .get("n_effective")
+            .and_then(|x| x.as_f64())
+            .map(|n| n.floor() as usize)
+            .or_else(|| {
+                v.get("event_count")
+                    .and_then(|c| c.as_u64())
+                    .map(|c| c as usize)
+            })
+            .unwrap_or(0);
+
+        if n_eff == 0 {
+            debug!(
+                persona_uid = %snap.persona_uid,
+                category = %snap.category,
+                "Phase C: 快照 samples 无样本量字段，跳过该快照旧分布恢复"
+            );
+            continue;
+        }
+
+        // 样本量上限防御（防极端大值拖慢置换检验）
+        let n = n_eff.clamp(1, 10_000);
+        if let Some(vm) = valence_mean {
+            valences.extend(std::iter::repeat_n(vm.clamp(-1.0, 1.0), n));
+        }
+        if let Some(sm) = share_mean {
+            shares.extend(std::iter::repeat_n(sm.clamp(0.0, 1.0), n));
+        }
+    }
+
+    // salience 快照未持久化，返回空（salience 维度漂移在新旧都无样本时自动不显著）。
+    (valences, shares, Vec::<f64>::new())
 }
 
 // =========================================================
@@ -1283,7 +1381,7 @@ pub fn generate_semantic_labels_for_clusters(result: &ClusteringResult) -> Vec<S
 /// - `result`: 聚类结果。
 /// - `persona_uid`: 当前人格标识。
 /// - `category`: 事件分类标签（工作/社交/家庭等）。
-/// - `match_threshold`: 跨版本余弦相似度匹配阈值（默认 0.75）。
+/// - `match_threshold`: 跨版本余弦相似度匹配阈值（默认 0.85）。
 ///
 /// 返回:
 /// - 保存的快照数量 + 跨版本匹配结果。
@@ -1468,7 +1566,7 @@ pub async fn persist_cluster_snapshots_with_semantic_labels(
 /// - `storage`: 存储后端。
 /// - `persona_uid`: 人格标识。
 /// - `current_embedding`: 当前簇的语义标签 embedding。
-/// - `match_threshold`: 匹配阈值（默认 0.75）。
+/// - `match_threshold`: 匹配阈值（默认 0.85）。
 ///
 /// 返回:
 /// - CrossVersionMatchResult，含历史匹配列表。
@@ -2254,5 +2352,97 @@ mod tests {
             let ratio = longest_common_substring_ratio(&a, &b);
             assert!((ratio - expected).abs() < f64::EPSILON, "{a:?} vs {b:?}");
         }
+    }
+
+    // =========================================================
+    // 漂移检测旧分布恢复
+    // =========================================================
+
+    fn make_cluster_snapshot(
+        persona_uid: &str,
+        category: &str,
+        samples: Option<String>,
+    ) -> ramaria_core::types::ClusterSnapshot {
+        ramaria_core::types::ClusterSnapshot {
+            id: 0,
+            persona_uid: persona_uid.to_string(),
+            category: category.to_string(),
+            cluster_label: format!("cluster_{category}"),
+            samples,
+            count: 0,
+            is_current: true,
+            created_at: 0,
+            semantic_label: None,
+            semantic_label_embedding: None,
+        }
+    }
+
+    /// 从快照 samples JSON 恢复真实旧分布：valence_mean/share_mean 按 n_effective 展开。
+    #[test]
+    fn restore_old_distribution_valid_snapshot() {
+        let snap = make_cluster_snapshot(
+            "char-1",
+            "工作",
+            Some(
+                r#"{"category":"工作","event_count":10,"n_effective":5,
+                   "valence_mean":0.6,"valence_std":0.2,"share_mean":0.7}"#
+                    .to_string(),
+            ),
+        );
+        let (valences, shares, saliences) = restore_old_distribution(&[snap]);
+
+        // n_effective=5 → valence 重复 5 次 0.6，share 重复 5 次 0.7
+        assert_eq!(valences.len(), 5);
+        assert_eq!(shares.len(), 5);
+        assert!(valences.iter().all(|&v| (v - 0.6).abs() < 1e-9));
+        assert!(shares.iter().all(|&s| (s - 0.7).abs() < 1e-9));
+        assert!(saliences.is_empty());
+    }
+
+    /// 快照 samples 缺失 → 返回空向量（调用方跳过并记 warn，不阻塞）。
+    #[test]
+    fn restore_old_distribution_missing_samples() {
+        let snap = make_cluster_snapshot("char-1", "工作", None);
+        let (valences, shares, _) = restore_old_distribution(&[snap]);
+        assert!(valences.is_empty());
+        assert!(shares.is_empty());
+    }
+
+    /// 快照 samples 为非法 JSON → 静默跳过该快照（不 panic），其余快照正常恢复。
+    #[test]
+    fn restore_old_distribution_bad_json_skipped() {
+        let good = make_cluster_snapshot(
+            "char-1",
+            "社交",
+            Some(r#"{"n_effective":2,"valence_mean":0.5,"share_mean":0.4}"#.to_string()),
+        );
+        let bad = make_cluster_snapshot("char-1", "社交", Some("不是JSON".to_string()));
+        let (valences, shares, _) = restore_old_distribution(&[bad, good]);
+
+        assert_eq!(valences.len(), 2);
+        assert_eq!(shares.len(), 2);
+    }
+
+    /// n_effective 缺失时回退 event_count，仍缺失时回退 0（空分布）。
+    #[test]
+    fn restore_old_distribution_fallback_sample_size() {
+        // 仅 event_count，无 n_effective → 用 event_count=3
+        let snap_event_count = make_cluster_snapshot(
+            "char-1",
+            "家庭",
+            Some(r#"{"event_count":3,"valence_mean":0.4,"share_mean":0.3}"#.to_string()),
+        );
+        let (v1, s1, _) = restore_old_distribution(&[snap_event_count]);
+        assert_eq!(v1.len(), 3);
+        assert_eq!(s1.len(), 3);
+
+        // 无样本量字段 → 空分布
+        let snap_no_size = make_cluster_snapshot(
+            "char-1",
+            "家庭",
+            Some(r#"{"valence_mean":0.4}"#.to_string()),
+        );
+        let (v2, _, _) = restore_old_distribution(&[snap_no_size]);
+        assert!(v2.is_empty());
     }
 }

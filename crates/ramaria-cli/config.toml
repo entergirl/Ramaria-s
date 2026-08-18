@@ -75,10 +75,16 @@ round_threshold = 10
 event_doubling_ratio = 2.0
 diff_alert_ratio = 0.3
 
+[inference.upgrade]
+cross_version_threshold_085 = true
+cold_start_cross_user_prior = true
+drift_restore_real_distribution = true
+
 [event_extraction]
 temperature = 0.3
 max_tokens = 8192
 max_events = 5
+degraded_confidence_enabled = true
 
 [utt]
 enabled = true

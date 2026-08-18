@@ -18,6 +18,6 @@ pub mod prompt;
 
 pub use batcher::{L1Item, TopicBatcherConfig, TopicCluster};
 pub use context_retriever::{ContextDocument, ContextRetriever, ContextRetrieverConfig};
-pub use degrade::{DegradeConfig, build_degraded_event};
+pub use degrade::{DegradeConfig, build_degraded_event, degraded_confidence};
 pub use extractor::{EventExtractor, EventExtractorConfig};
 pub use paraphrase::{ParaphraseConfig, generate_paraphrase};

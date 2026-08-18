@@ -355,6 +355,7 @@ pub async fn compute_incremental_update(
             let drift_cfg = DriftConfig {
                 alpha: 0.05,
                 n_permutations: 50, // 轻量置换（真实场景可加大）
+                restore_real_distribution: true,
             };
             outcome.drift_triggered = detect_reaction_drift(&historical, &recent, &drift_cfg);
         }
@@ -551,6 +552,7 @@ mod tests {
         let config = DriftConfig {
             alpha: 0.05,
             n_permutations: 200,
+            ..Default::default()
         };
         assert!(detect_reaction_drift(&historical, &recent, &config));
     }
@@ -562,6 +564,7 @@ mod tests {
         let config = DriftConfig {
             alpha: 0.05,
             n_permutations: 200,
+            ..Default::default()
         };
         assert!(!detect_reaction_drift(&historical, &recent, &config));
     }

@@ -30,9 +30,10 @@ pub use causal::{
     CausalChainFeatures, CyclePattern, extract_causal_features, format_causal_features_text,
 };
 pub use clustering::{
-    AttitudeSample, ClusterAssignment, ClusterDescription, ClusteringConfig, ClusteringResult,
-    CrossVersionMatch, CrossVersionMatchResult, HistoricalSnapshot, cosine_similarity,
-    generate_semantic_label, match_clusters_cross_version, run_clustering, simple_density_cluster,
+    AttitudeSample, CROSS_VERSION_MATCH_THRESHOLD, ClusterAssignment, ClusterDescription,
+    ClusteringConfig, ClusteringResult, CrossVersionMatch, CrossVersionMatchResult,
+    HistoricalSnapshot, cosine_similarity, generate_semantic_label, match_clusters_cross_version,
+    run_clustering, simple_density_cluster,
 };
 pub use confidence::{
     ConfidenceConfig, ConfidenceSummary, OldTraitState, TraitConfidenceUpdate, compute_confidence,
@@ -59,8 +60,8 @@ pub use orchestrator::{
 };
 pub use shrink::{
     ShrinkConfig, ShrinkPrior, compute_domain_prior, compute_dynamic_gamma, compute_global_stats,
-    logit, run_shrinkage_layered, shrink_category, shrink_presentation, shrink_share,
-    shrink_valence, sigmoid,
+    logit, merge_cross_user_prior, run_shrinkage_layered, shrink_category, shrink_presentation,
+    shrink_share, shrink_valence, sigmoid, unified_default_prior,
 };
 pub use stats::{
     AdmissionTrack, CalibratedWeightConfig, CategoryStats, ClassifiedEvents, CrossCategoryMetrics,

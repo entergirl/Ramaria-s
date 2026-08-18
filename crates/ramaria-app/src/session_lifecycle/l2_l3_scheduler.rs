@@ -148,6 +148,14 @@ impl SessionLifecycle {
                     l2_fingerprint_enabled: self.config.cache.l2_fingerprint_enabled,
                     l2_similarity_threshold: self.config.cache.l2_similarity_threshold,
                     l2_recent_events_limit: self.config.cache.l2_recent_events_limit,
+                    // 降级事件动态置信度开关：从 [event_extraction] 配置组传播
+                    degrade: ramaria_memory::event::DegradeConfig {
+                        dynamic_confidence_enabled: self
+                            .config
+                            .event_extraction
+                            .degraded_confidence_enabled,
+                        ..Default::default()
+                    },
                     ..Default::default()
                 };
                 let mut extractor = EventExtractor::new(llm, storage, config);
@@ -422,7 +430,13 @@ impl SessionLifecycle {
             phase_b_result.traits_updated == 0 && phase_b_result.traits_deprecated == 0;
 
         let confidence_config = ConfidenceConfig::from(self.config.inference.confidence.clone());
-        let drift_config = DriftConfig::from(self.config.inference.drift.clone());
+        let mut drift_config = DriftConfig::from(self.config.inference.drift.clone());
+        // 漂移检测是否从快照恢复真实旧分布（配置开关）
+        drift_config.restore_real_distribution = self
+            .config
+            .inference
+            .upgrade
+            .drift_restore_real_distribution;
         match run_phase_c_update(
             &confidence_config,
             &drift_config,

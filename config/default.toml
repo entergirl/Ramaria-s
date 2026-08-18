@@ -167,6 +167,19 @@ low_evidence_threshold = 5.0
 step_max_tokens = 2048
 
 # =========================================================
+# 画像升级
+# =========================================================
+# 画像升级四个增量的独立开关；全部关闭时画像输出回退旧版行为。
+
+[inference.upgrade]
+# 跨版本簇匹配阈值使用 0.85；false = 回退旧值 0.75
+cross_version_threshold_085 = true
+# 冷启动先验使用跨用户经验分布；false = 回退当前 persona 内先验
+cold_start_cross_user_prior = true
+# 漂移检测从 persona_cluster_snapshots 恢复真实旧分布；false = 回退硬编码占位
+drift_restore_real_distribution = true
+
+# =========================================================
 # L2 事件提取 LLM 参数
 # =========================================================
 # 事件提取的输出是长 JSON（含多个事件的 title/summary/keywords/motives 等），
@@ -180,6 +193,9 @@ temperature = 0.3
 max_tokens = 8192
 # 单簇最多提取的事件数
 max_events = 5
+# 降级事件动态置信度公式：min(0.59, 0.35 + 0.02 × n_l1)
+# 封顶 0.59 恒处 tentative；false = 回退固定 0.5
+degraded_confidence_enabled = true
 
 # =========================================================
 # 日志

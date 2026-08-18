@@ -490,6 +490,11 @@ pub struct EventExtractionConfig {
     /// 单簇最多提取的事件数
     #[serde(default = "default_event_extraction_max_events")]
     pub max_events: usize,
+    /// 降级事件动态置信度公式开关。
+    /// `true` → `min(0.59, 0.35 + 0.02 × n_l1)` 封顶 0.59 恒 tentative；
+    /// `false` → 回退固定 `default_confidence`（0.5）。
+    #[serde(default = "default_degraded_confidence_enabled")]
+    pub degraded_confidence_enabled: bool,
 }
 
 fn default_event_extraction_temperature() -> f64 {
@@ -501,6 +506,9 @@ fn default_event_extraction_max_tokens() -> u32 {
 fn default_event_extraction_max_events() -> usize {
     5
 }
+fn default_degraded_confidence_enabled() -> bool {
+    true
+}
 
 impl Default for EventExtractionConfig {
     fn default() -> Self {
@@ -508,6 +516,7 @@ impl Default for EventExtractionConfig {
             temperature: 0.3,
             max_tokens: 8192,
             max_events: 5,
+            degraded_confidence_enabled: true,
         }
     }
 }
@@ -602,6 +611,10 @@ pub struct InferenceConfig {
     /// 全量校准配置
     #[serde(default)]
     pub calibration: CalibrationConf,
+    /// 画像升级开关。
+    /// 独立配置开关：全部关闭时输出回退旧版行为。
+    #[serde(default)]
+    pub upgrade: InferenceUpgradeConfig,
 }
 
 /// Phase B 推断器配置（可序列化版本）。
@@ -729,6 +742,47 @@ impl Default for CalibrationConf {
             round_threshold: 10,
             event_doubling_ratio: 2.0,
             diff_alert_ratio: 0.3,
+        }
+    }
+}
+
+// =========================================================
+// 画像升级配置
+// =========================================================
+
+/// 画像升级开关。
+///
+/// 职责:
+/// - 独立控制画像升级的四个增量（阈值 0.85 / 冷启动先验 / 降级置信度 / 漂移检测真实实现）。
+/// - 全部关闭时画像输出回退旧版行为。
+///
+/// 兼容性说明:
+/// - 每个开关默认开启。
+/// - struct 级 `#[serde(default)]`：`[inference.upgrade]` 表只写部分键时回退默认值。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InferenceUpgradeConfig {
+    /// 跨版本簇匹配阈值是否使用 0.85。
+    /// `false` → 回退旧值 0.75。
+    pub cross_version_threshold_085: bool,
+    /// 冷启动先验是否使用跨用户经验分布。
+    /// `false` → 回退当前 persona 内先验。
+    pub cold_start_cross_user_prior: bool,
+    /// 漂移检测是否从 `persona_cluster_snapshots` 恢复真实旧分布。
+    /// `false` → 回退硬编码占位（全 0 / 0.5，all-zeros 守卫下不触发）。
+    pub drift_restore_real_distribution: bool,
+}
+
+impl Default for InferenceUpgradeConfig {
+    /// 创建默认画像升级配置。
+    ///
+    /// 返回:
+    /// - 三个增量开关默认开启。
+    fn default() -> Self {
+        Self {
+            cross_version_threshold_085: true,
+            cold_start_cross_user_prior: true,
+            drift_restore_real_distribution: true,
         }
     }
 }
@@ -1165,6 +1219,14 @@ mod tests {
         assert!((cfg.knowledge.corroboration_cosine_threshold - 0.7).abs() < f64::EPSILON);
         assert_eq!(cfg.knowledge.injection_budget_chars, 800);
         assert_eq!(cfg.knowledge.volatile_halflife_days, 30);
+
+        // 画像升级：三开关默认开启
+        assert!(cfg.inference.upgrade.cross_version_threshold_085);
+        assert!(cfg.inference.upgrade.cold_start_cross_user_prior);
+        assert!(cfg.inference.upgrade.drift_restore_real_distribution);
+
+        // 事件提取降级动态置信度默认开启
+        assert!(cfg.event_extraction.degraded_confidence_enabled);
     }
 
     #[test]

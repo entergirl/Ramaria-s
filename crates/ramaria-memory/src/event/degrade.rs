@@ -2,9 +2,12 @@
 //!
 //! 设计特点:
 //! - 降级触发条件: LLM 返回的 JSON 无法解析为合法事件数组
-//! - 降级策略: 将多条未吸收 L1 糅合成一条 confidence=0.5 的混合事件
+//! - 降级策略: 将多条未吸收 L1 糅合成一条混合事件
+//! - 降级置信度: `min(0.59, 0.35 + 0.02 × n_l1)`，封顶 0.59 恒处 tentative
+//! - 合并的 L1 越多越说明"这是一段有内容的对话"，置信度越高；n_l1=12 达上界 0.59
 //! - 降级事件保留所有 L1 的摘要和关键词，不丢失信息
 //! - 降级事件标记 presentation=Mixed, salience=avg(L1_salience)
+//! - `dynamic_confidence_enabled=false` 时回退固定 `default_confidence`（0.5）
 //! - 纯函数，不依赖 LLM 或存储
 
 use ramaria_core::types::{MemoryEvent, MemoryL1, Presentation, now_ms};
@@ -16,12 +19,21 @@ use ramaria_core::types::{MemoryEvent, MemoryL1, Presentation, now_ms};
 /// 降级事件配置。
 #[derive(Debug, Clone)]
 pub struct DegradeConfig {
-    /// 降级事件的默认事实确凿度
+    /// 降级事件的默认事实确凿度（`dynamic_confidence_enabled=false` 时使用）
     pub default_confidence: f64,
     /// 降级事件的默认分享意愿
     pub default_share: f64,
     /// 摘要最大拼接字符数
     pub max_summary_chars: usize,
+    /// 是否启用动态置信度公式。
+    /// `true` → `min(0.59, 0.35 + 0.02 × n_l1)`；`false` → 固定 `default_confidence`。
+    pub dynamic_confidence_enabled: bool,
+    /// 动态置信度公式封顶值（默认 0.59，恒处 tentative 区间 < 0.6）。
+    pub dynamic_confidence_cap: f64,
+    /// 动态置信度公式基础偏移量（默认 0.35）。
+    pub dynamic_confidence_base: f64,
+    /// 动态置信度公式每 L1 增量系数（默认 0.02）。
+    pub dynamic_confidence_per_l1: f64,
 }
 
 impl Default for DegradeConfig {
@@ -30,8 +42,33 @@ impl Default for DegradeConfig {
             default_confidence: 0.5,
             default_share: 0.5,
             max_summary_chars: 500,
+            dynamic_confidence_enabled: true,
+            dynamic_confidence_cap: 0.59,
+            dynamic_confidence_base: 0.35,
+            dynamic_confidence_per_l1: 0.02,
         }
     }
+}
+
+/// 计算降级事件动态置信度。
+///
+/// 公式:
+/// `conf = min(cap, base + per_l1 × n_l1)`，取值区间 [0.0, cap]。
+///
+/// 语义:
+/// - 合并了越多 L1 的降级事件越说明"这是一段有内容的对话"，置信度越高；
+/// - 封顶 `cap`（默认 0.59）确保其恒处于 tentative 区间（始终低于 confirmed 门槛 0.6）；
+/// - `n_l1=12` 时 `conf=0.59`（tentative 上界）；`n_l1=2` 时 `conf=0.39` 合理排除。
+///
+/// 参数:
+/// - `n_l1`: 糅合进降级事件的未吸收 L1 数量。
+/// - `config`: 降级配置（含 cap/base/per_l1）。
+///
+/// 返回:
+/// - 动态置信度，钳制在 [0.0, cap]。
+pub fn degraded_confidence(n_l1: usize, config: &DegradeConfig) -> f64 {
+    let raw = config.dynamic_confidence_base + config.dynamic_confidence_per_l1 * n_l1 as f64;
+    raw.clamp(0.0, config.dynamic_confidence_cap)
 }
 
 // =========================================================
@@ -47,7 +84,8 @@ impl Default for DegradeConfig {
 /// 降级事件属性:
 /// - title: "时间段混合事件"
 /// - summary: 拼接所有 L1 摘要（截断到 max_summary_chars）
-/// - confidence: 0.5（默认）
+/// - confidence: 动态公式 `min(0.59, 0.35 + 0.02 × n_l1)`（封顶 0.59 恒 tentative），
+///   关闭动态公式时回退固定 `default_confidence`（0.5）
 /// - salience: L1 salience 平均值
 /// - valence: L1 valence 平均值
 /// - presentation: Mixed
@@ -65,6 +103,14 @@ pub fn build_degraded_event(
     config: &DegradeConfig,
 ) -> MemoryEvent {
     let now = now_ms();
+
+    // 动态置信度：合并 L1 越多越有内容，封顶 0.59 恒处 tentative。
+    // 关闭动态公式时回退固定 default_confidence。
+    let confidence = if config.dynamic_confidence_enabled {
+        degraded_confidence(l1_list.len(), config)
+    } else {
+        config.default_confidence
+    };
 
     // 计算事件时间范围（单次遍历）
     let (start, end) = if l1_list.is_empty() {
@@ -129,11 +175,11 @@ pub fn build_degraded_event(
         participants: None,
         start,
         end,
-        confidence: config.default_confidence,
         salience,
         valence,
         presentation: Presentation::Mixed,
         share: config.default_share,
+        confidence,
         attitude: None,
         paraphrase: None,
         absorbed,
@@ -250,11 +296,96 @@ mod tests {
     fn degraded_event_empty_l1_list() {
         let event = build_degraded_event("user-0001", &[], &DegradeConfig::default());
         assert_eq!(event.persona_uid, "user-0001");
-        assert_eq!(event.confidence, 0.5);
+        // 动态公式: 空列表 → min(0.59, 0.35 + 0.02×0) = 0.35
+        assert!((event.confidence - 0.35).abs() < 1e-9);
         assert_eq!(event.salience, 0.5);
         assert_eq!(event.valence, 0.0);
         assert_eq!(event.presentation, Presentation::Mixed);
         assert!(event.title.contains("降级"));
+    }
+
+    /// 动态置信度公式边界。
+    ///
+    /// - n_l1 小（2）→ 0.39（合理排除）；
+    /// - n_l1 达到封顶（12）→ 0.59（tentative 上界）；
+    /// - n_l1 超大 → 仍封顶 0.59（不越过 confirmed 门槛 0.6）。
+    #[test]
+    fn degraded_confidence_formula_boundaries() {
+        let cfg = DegradeConfig::default();
+
+        // n_l1 = 0 → 0.35
+        assert!((degraded_confidence(0, &cfg) - 0.35).abs() < 1e-9);
+        // n_l1 = 2 → 0.39
+        assert!((degraded_confidence(2, &cfg) - 0.39).abs() < 1e-9);
+        // n_l1 = 12 → 0.59（封顶）
+        assert!((degraded_confidence(12, &cfg) - 0.59).abs() < 1e-9);
+        // n_l1 = 100 → 仍封顶 0.59
+        assert!((degraded_confidence(100, &cfg) - 0.59).abs() < 1e-9);
+        // 恒处 tentative（< 0.6）
+        for n in 0..100 {
+            assert!(degraded_confidence(n, &cfg) < 0.6, "n={n} 应恒 < 0.6");
+        }
+    }
+
+    /// 关闭动态公式时回退固定 0.5。
+    ///
+    /// 说明: `degraded_confidence` 是纯公式函数（始终计算动态公式），
+    /// 配置开关 `dynamic_confidence_enabled=false` 由 `build_degraded_event` 层裁决——
+    /// 关闭时回退固定 `default_confidence`（0.5）。
+    #[test]
+    fn degraded_confidence_fallback() {
+        let cfg = DegradeConfig {
+            dynamic_confidence_enabled: false,
+            ..Default::default()
+        };
+        // 无论 n_l1 多少，关闭动态公式 → build_degraded_event 固定 default_confidence = 0.5
+        let e_empty = build_degraded_event("user-0001", &[], &cfg);
+        assert!(
+            (e_empty.confidence - 0.5).abs() < 1e-9,
+            "conf={}",
+            e_empty.confidence
+        );
+
+        let sid = Uuid::new_v4();
+        let twelve: Vec<MemoryL1> = (0..12)
+            .map(|i| make_l1(sid, &format!("L{i}"), None, 0.0, 0.5))
+            .collect();
+        let e12 = build_degraded_event("user-0001", &twelve, &cfg);
+        assert!(
+            (e12.confidence - 0.5).abs() < 1e-9,
+            "conf={}",
+            e12.confidence
+        );
+    }
+
+    /// 动态公式在 build_degraded_event 中生效（按 L1 数量变化）。
+    #[test]
+    fn degraded_confidence_applied_in_event() {
+        let cfg = DegradeConfig::default();
+        let sid = Uuid::new_v4();
+
+        // 2 条 L1 → 0.39
+        let two = vec![
+            make_l1(sid, "A", None, 0.0, 0.5),
+            make_l1(sid, "B", None, 0.0, 0.5),
+        ];
+        let e2 = build_degraded_event("user-0001", &two, &cfg);
+        assert!(
+            (e2.confidence - 0.39).abs() < 1e-9,
+            "conf={}",
+            e2.confidence
+        );
+
+        // 12 条 L1 → 0.59（封顶）
+        let twelve: Vec<MemoryL1> = (0..12)
+            .map(|i| make_l1(sid, &format!("L{i}"), None, 0.0, 0.5))
+            .collect();
+        let e12 = build_degraded_event("user-0001", &twelve, &cfg);
+        assert!(
+            (e12.confidence - 0.59).abs() < 1e-9,
+            "conf={}",
+            e12.confidence
+        );
     }
 
     #[test]

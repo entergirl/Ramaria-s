@@ -16,16 +16,21 @@
 ///
 /// 职责:
 /// - 管理置换检验参数和显著性水平。
+/// - 控制是否从 `persona_cluster_snapshots` 恢复真实旧分布。
 ///
 /// 字段约定:
 /// - `alpha`: 显著性水平，锁定 0.05。
 /// - `n_permutations`: 置换次数，锁定 1000。
+/// - `restore_real_distribution`: 是否恢复真实旧分布；`false` 回退硬编码占位。
 #[derive(Debug, Clone)]
 pub struct DriftConfig {
     /// 显著性水平（锁定 0.05）
     pub alpha: f64,
     /// 置换检验次数（锁定 1000）
     pub n_permutations: usize,
+    /// 是否从 `persona_cluster_snapshots` samples JSON 恢复真实旧分布。
+    /// `false` → 回退硬编码占位（全 0 / 0.5，all-zeros 守卫下漂移不触发）。
+    pub restore_real_distribution: bool,
 }
 
 impl Default for DriftConfig {
@@ -33,6 +38,7 @@ impl Default for DriftConfig {
         Self {
             alpha: 0.05,
             n_permutations: 1000,
+            restore_real_distribution: true,
         }
     }
 }
@@ -42,6 +48,7 @@ impl From<ramaria_core::config::DriftConf> for DriftConfig {
         Self {
             alpha: conf.alpha,
             n_permutations: conf.n_permutations,
+            restore_real_distribution: true,
         }
     }
 }
