@@ -2,7 +2,7 @@
 //!
 //! 设计特点:
 //! - `probe build`：从导入数据自动构建测试集（问题 × 参数档位组合，seed 固定可复跑），
-//!   输出结构化 JSON 数据集；`dataset` 保留为 alias（人性化别名决策，见 docs/dev-1.5/v1.5-decisions.md §D-V15-007）。
+//!   输出结构化 JSON 数据集；`dataset` 保留为 alias。
 //! - `probe run`：按档位批量跑对话管线，结构化输出（档位 → 输出 → 指标），
 //!   供 v1.6 T2 自动评分（evaluate/report）与 v1.7 T3 正式评估复用同一工具链。
 //! - 探针规模：2 维（语气模仿 tone / 事实记忆 fact）× 每维 10 题，

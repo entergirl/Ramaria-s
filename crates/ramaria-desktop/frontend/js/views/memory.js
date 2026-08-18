@@ -121,6 +121,11 @@ var RamariaMemoryView = (function () {
             '<button class="memory-tab" data-tab="l3" role="tab" aria-selected="false" aria-controls="memory-panel-l3">' +
                 '🏷️ L3 性格' +
                 '<span class="memory-tab-badge" id="memory-badge-l3">-</span>' +
+            '</button>' +
+            // 知识卡片只读视图
+            '<button class="memory-tab" data-tab="knowledge" role="tab" aria-selected="false" aria-controls="memory-panel-knowledge">' +
+                '🧠 知识' +
+                '<span class="memory-tab-badge" id="memory-badge-knowledge">-</span>' +
             '</button>';
         inner.appendChild(tabs);
 
@@ -148,6 +153,15 @@ var RamariaMemoryView = (function () {
         panelL3.setAttribute('aria-labelledby', '');
         panelL3.setAttribute('data-panel', 'l3');
         inner.appendChild(panelL3);
+
+ // ── 知识卡片面板（只读视图）──
+        var panelKnowledge = document.createElement('div');
+        panelKnowledge.className = 'memory-panel';
+        panelKnowledge.id = 'memory-panel-knowledge';
+        panelKnowledge.setAttribute('role', 'tabpanel');
+        panelKnowledge.setAttribute('aria-labelledby', '');
+        panelKnowledge.setAttribute('data-panel', 'knowledge');
+        inner.appendChild(panelKnowledge);
 
  // ── 事件绑定 ──
         _bindEvents();
@@ -199,7 +213,7 @@ var RamariaMemoryView = (function () {
         _showPanelLoading();
 
         try {
-            // 并行加载 L1/L2/L3 画像 + 画像状态
+            // 并行加载 L1/L2/L3 画像 + 画像状态 + 知识事实
             // L3 改用 get_personality_profile（含完整 TraitDetailView 字段），
             // 而非 get_l3_traits（不含 trigger/suppress/not_meaning/related/seq）
             var results = await Promise.allSettled([
@@ -207,12 +221,15 @@ var RamariaMemoryView = (function () {
                 RamariaApi.memory.getL2(_currentPersonaUid, 500),
                 RamariaApi.memory.getProfile(_currentPersonaUid),
                 RamariaApi.memory.getProfileStatus(_currentPersonaUid),
+                RamariaApi.memory.getFacts(_currentPersonaUid),
             ]);
 
             var l1Data = results[0].status === 'fulfilled' ? results[0].value : [];
             var l2Data = results[1].status === 'fulfilled' ? results[1].value : [];
             var profile = results[2].status === 'fulfilled' ? results[2].value : null;
             var profileStatus = results[3].status === 'fulfilled' ? results[3].value : null;
+            // 知识事实 { grouped, versions }；失败 → 空对象（静默降级）
+            var facts = results[4].status === 'fulfilled' ? results[4].value : { grouped: {}, versions: {} };
 
             // 移除 L1 降级全量查询。
             // 原 fallback（getL1(null)）导致系统人格（rama-0001/user-0001）
@@ -228,21 +245,23 @@ var RamariaMemoryView = (function () {
             }
 
             // 缓存
-            _cache[_currentPersonaUid] = { l1: l1Data, l2: l2Data, l3: l3Data, profileStatus: profileStatus };
+            _cache[_currentPersonaUid] = { l1: l1Data, l2: l2Data, l3: l3Data, profileStatus: profileStatus, facts: facts };
 
             // 渲染
             _renderL1(l1Data || []);
             _renderL2(l2Data || []);
             _renderL3(l3Data || [], profileStatus);
+            _renderKnowledge(facts || { grouped: {}, versions: {} });
 
             // 更新 badge 数量
-            _updateBadges(l1Data, l2Data, l3Data);
+            _updateBadges(l1Data, l2Data, l3Data, facts);
 
             // 错误日志
             if (results[0].status === 'rejected') console.error('[MemoryView] L1 加载失败:', results[0].reason);
             if (results[1].status === 'rejected') console.error('[MemoryView] L2 加载失败:', results[1].reason);
             if (results[2].status === 'rejected') console.error('[MemoryView] L3 画像加载失败:', results[2].reason);
             if (results[3].status === 'rejected') console.error('[MemoryView] 画像状态加载失败:', results[3].reason);
+            if (results[4].status === 'rejected') console.error('[MemoryView] 知识事实加载失败:', results[4].reason);
 
         } catch (err) {
             console.error('[MemoryView] 加载数据失败:', err);
@@ -254,7 +273,7 @@ var RamariaMemoryView = (function () {
 
  /** 在各面板显示加载中状态 */
     function _showPanelLoading() {
-        var panels = ['memory-panel-l1', 'memory-panel-l2', 'memory-panel-l3'];
+        var panels = ['memory-panel-l1', 'memory-panel-l2', 'memory-panel-l3', 'memory-panel-knowledge'];
         for (var i = 0; i < panels.length; i++) {
             var panel = document.getElementById(panels[i]);
             if (panel) {
@@ -271,7 +290,7 @@ var RamariaMemoryView = (function () {
 
  /** 在各面板显示错误提示 */
     function _showPanelError(msg) {
-        var panels = ['memory-panel-l1', 'memory-panel-l2', 'memory-panel-l3'];
+        var panels = ['memory-panel-l1', 'memory-panel-l2', 'memory-panel-l3', 'memory-panel-knowledge'];
         for (var i = 0; i < panels.length; i++) {
             var panel = document.getElementById(panels[i]);
             if (panel) {
@@ -666,6 +685,139 @@ var RamariaMemoryView = (function () {
     }
 
 // =========================================================
+// 知识卡片渲染（只读视图）
+// =========================================================
+
+    /**
+     * 渲染知识卡片面板（# 知识，只读）。
+     *
+     * 数据形态（来自 get_facts）:
+     * - grouped: { field_label: [fact] }——active 事实按 ProfileField 分组。
+     * - versions: { fact_id: [历史版本链] }——折叠展示历史版本。
+     *
+     * 只读约定:
+     * - 无编辑/删除入口（只读）。
+     * - 内容为事实陈述（非原文），仅展示 active（superseded 版本仅版本链内可见）。
+     * - 空数据友好提示。
+     */
+    function _renderKnowledge(data) {
+        var panel = $('memory-panel-knowledge');
+        if (!panel) return;
+        panel.innerHTML = '';
+
+        var grouped = (data && data.grouped) || {};
+        var versions = (data && data.versions) || {};
+        var fields = Object.keys(grouped);
+
+        if (fields.length === 0) {
+            panel.innerHTML =
+                '<div class="memory-empty">' +
+                    '<div class="memory-empty-icon">🧠</div>' +
+                    '<div class="memory-empty-text">暂无知识事实<br>开启 [knowledge] 自动抽取后生成</div>' +
+                '</div>';
+            return;
+        }
+
+        var container = document.createElement('div');
+        container.className = 'memory-knowledge-group';
+
+        // 按 field 分组渲染卡片（preserve 插入顺序）
+        for (var i = 0; i < fields.length; i++) {
+            var fieldLabel = fields[i];
+            var facts = grouped[fieldLabel] || [];
+
+            var group = document.createElement('div');
+            group.className = 'memory-knowledge-field-group';
+
+            var head = document.createElement('div');
+            head.className = 'memory-knowledge-field-head';
+            head.innerHTML =
+                '<span class="memory-knowledge-field-label">' + RamariaEscape.escapeHtml(fieldLabel) + '</span>' +
+                '<span class="memory-knowledge-field-count">' + facts.length + ' 条</span>';
+            group.appendChild(head);
+
+            for (var j = 0; j < facts.length; j++) {
+                var f = facts[j];
+                var card = document.createElement('div');
+                card.className = 'memory-knowledge-card';
+                card.setAttribute('data-fact-id', f.id);
+
+                // 徽标：来源 + 分层 + 置信度
+                var badgesHtml =
+                    '<span class="memory-knowledge-badge memory-knowledge-badge--source">' +
+                        RamariaEscape.escapeHtml(_factSourceLabel(f.source)) + '</span>' +
+                    '<span class="memory-knowledge-badge memory-knowledge-badge--tier">' +
+                        RamariaEscape.escapeHtml(_factTierLabel(f.tier)) + '</span>' +
+                    '<span class="memory-knowledge-badge memory-knowledge-badge--conf">' +
+                        '置信度 ' + Math.round((f.confidence || 0) * 100) + '%' + '</span>';
+
+                // 关键词 chips
+                var chipsHtml = '';
+                if (f.keyword_hint) {
+                    var kws = String(f.keyword_hint).split(/[,，、]/);
+                    for (var k = 0; k < kws.length; k++) {
+                        var kw = kws[k].trim();
+                        if (kw) {
+                            chipsHtml += '<span class="memory-knowledge-chip">' +
+                                RamariaEscape.escapeHtml(kw) + '</span>';
+                        }
+                    }
+                }
+
+                // 历史版本折叠（versions[fact_id] 链长 > 1 才展示）
+                var versionHtml = '';
+                var chain = versions[f.id];
+                if (chain && chain.length > 1) {
+                    var chainHtml = '';
+                    for (var v = 0; v < chain.length; v++) {
+                        var ver = chain[v];
+                        var marker = ver.id === f.id ? '（当前）' : '';
+                        chainHtml +=
+                            '<div class="memory-knowledge-version">' +
+                                '<span class="memory-knowledge-version-badge">v' + (v + 1) + marker + '</span>' +
+                                '<span class="memory-knowledge-version-content">' +
+                                    RamariaEscape.escapeHtml(ver.content) + '</span>' +
+                            '</div>';
+                    }
+                    versionHtml =
+                        '<details class="memory-knowledge-versions">' +
+                            '<summary>历史版本（' + chain.length + '）</summary>' +
+                            '<div class="memory-knowledge-versions-list">' + chainHtml + '</div>' +
+                        '</details>';
+                }
+
+                card.innerHTML =
+                    '<div class="memory-knowledge-card-head">' +
+                        '<div class="memory-knowledge-card-content">' +
+                            RamariaEscape.escapeHtml(f.content) +
+                        '</div>' +
+                        '<div class="memory-knowledge-card-badges">' + badgesHtml + '</div>' +
+                    '</div>' +
+                    (chipsHtml ? '<div class="memory-knowledge-card-chips">' + chipsHtml + '</div>' : '') +
+                    versionHtml;
+
+                group.appendChild(card);
+            }
+
+            container.appendChild(group);
+        }
+
+        panel.appendChild(container);
+    }
+
+    /** 事实来源徽标文案（隐私：仅类别，不含原文）。 */
+    function _factSourceLabel(source) {
+        var map = { event: '事件', manual: '人工', l1: '会话' };
+        return map[source] || source || '未知';
+    }
+
+    /** 事实分层徽标文案。 */
+    function _factTierLabel(tier) {
+        var map = { stable: '稳定', volatile: '动态', historical: '历史' };
+        return map[tier] || tier || '稳定';
+    }
+
+// =========================================================
 // 状态指示器
 // =========================================================
 
@@ -830,14 +982,25 @@ var RamariaMemoryView = (function () {
  // 辅助
  // =========================================================
 
-    function _updateBadges(l1, l2, l3) {
+    function _updateBadges(l1, l2, l3, facts) {
         var badgeL1 = $('memory-badge-l1');
         var badgeL2 = $('memory-badge-l2');
         var badgeL3 = $('memory-badge-l3');
+        var badgeKnowledge = $('memory-badge-knowledge');
 
         if (badgeL1) badgeL1.textContent = l1 ? l1.length : '0';
         if (badgeL2) badgeL2.textContent = l2 ? l2.length : '0';
         if (badgeL3) badgeL3.textContent = l3 ? l3.length : '0';
+        // knowledge badge = active 事实总数（跨 field 求和）
+        if (badgeKnowledge) {
+            var total = 0;
+            if (facts && facts.grouped) {
+                Object.keys(facts.grouped).forEach(function (k) {
+                    total += (facts.grouped[k] || []).length;
+                });
+            }
+            badgeKnowledge.textContent = String(total);
+        }
     }
 
  // =========================================================

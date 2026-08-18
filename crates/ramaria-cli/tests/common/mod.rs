@@ -67,6 +67,9 @@ pub struct MockStorage {
     /// 反馈日志（CLI 测试）
     feedback_logs: Mutex<Vec<FeedbackLog>>,
     feedback_seq: AtomicI64,
+    /// 知识事实（内存版版本链，CLI fact 契约测试）
+    facts: Mutex<Vec<PersonaFact>>,
+    fact_seq: AtomicI64,
 }
 
 impl MockStorage {
@@ -91,6 +94,8 @@ impl MockStorage {
             rule_seq: AtomicI64::new(1),
             feedback_logs: Mutex::new(Vec::new()),
             feedback_seq: AtomicI64::new(1),
+            facts: Mutex::new(Vec::new()),
+            fact_seq: AtomicI64::new(1),
         }
     }
 
@@ -175,6 +180,40 @@ impl MockStorage {
             .lock()
             .unwrap()
             .insert(persona.uid.clone(), persona);
+    }
+
+    /// 添加一条知识事实（CLI fact 契约测试用）。
+    ///
+    /// 说明:
+    /// - 自动分配 id（内存自增），与真实库一致。
+    /// - 默认 status=active；调用方可通过 `fact.status` 覆写以构造 superseded/candidate。
+    pub fn add_fact(&self, mut fact: PersonaFact) -> i64 {
+        let id = self
+            .fact_seq
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        fact.id = id;
+        self.facts.lock().unwrap().push(fact);
+        id
+    }
+
+    /// 构造一条版本链覆盖：旧事实置 superseded + 新事实写入（version_of 指向旧 id）。
+    ///
+    /// 说明:
+    /// - 模拟真实 `save_fact_with_version` 的原子语义（旧置 superseded + 新 insert + 链指针）。
+    /// - 返回新事实 id。
+    pub fn add_fact_with_version(&self, old: &PersonaFact, mut fresh: PersonaFact) -> i64 {
+        let mut facts = self.facts.lock().unwrap();
+        if let Some(o) = facts.iter_mut().find(|f| f.id == old.id) {
+            o.status = ramaria_core::types::FactStatus::Superseded;
+        }
+        let new_id = self
+            .fact_seq
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        fresh.id = new_id;
+        fresh.status = ramaria_core::types::FactStatus::Active;
+        fresh.version_of = Some(old.id);
+        facts.push(fresh);
+        new_id
     }
 }
 
@@ -388,16 +427,140 @@ impl StorageBackend for MockStorage {
         Ok(())
     }
 
-    async fn save_fact(&self, _fact: &PersonaFact) -> RamariaResult<i64> {
-        Ok(1)
+    async fn save_fact(&self, fact: &PersonaFact) -> RamariaResult<i64> {
+        let id = self
+            .fact_seq
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut f = fact.clone();
+        f.id = id;
+        self.facts.lock().unwrap().push(f);
+        Ok(id)
     }
 
     async fn list_facts_by_persona(
         &self,
-        _persona_uid: &str,
-        _field: ProfileField,
+        persona_uid: &str,
+        field: ProfileField,
     ) -> RamariaResult<Vec<PersonaFact>> {
-        Ok(Vec::new())
+        // 语义: 返回该字段的**全部**版本（含 superseded/candidate），供版本链展示。
+        Ok(self
+            .facts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|f| f.persona_uid == persona_uid && f.field == field)
+            .cloned()
+            .collect())
+    }
+
+    async fn list_active_facts_by_persona(
+        &self,
+        persona_uid: &str,
+    ) -> RamariaResult<Vec<PersonaFact>> {
+        Ok(self
+            .facts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|f| {
+                f.persona_uid == persona_uid && f.status == ramaria_core::types::FactStatus::Active
+            })
+            .cloned()
+            .collect())
+    }
+
+    async fn list_active_facts_by_field(
+        &self,
+        persona_uid: &str,
+        field: ProfileField,
+    ) -> RamariaResult<Vec<PersonaFact>> {
+        Ok(self
+            .facts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|f| {
+                f.persona_uid == persona_uid
+                    && f.field == field
+                    && f.status == ramaria_core::types::FactStatus::Active
+            })
+            .cloned()
+            .collect())
+    }
+
+    async fn list_all_facts_by_persona(
+        &self,
+        persona_uid: &str,
+    ) -> RamariaResult<Vec<PersonaFact>> {
+        Ok(self
+            .facts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|f| f.persona_uid == persona_uid)
+            .cloned()
+            .collect())
+    }
+
+    async fn get_fact_by_id(&self, id: i64) -> RamariaResult<Option<PersonaFact>> {
+        Ok(self
+            .facts
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|f| f.id == id)
+            .cloned())
+    }
+
+    async fn save_fact_with_version(
+        &self,
+        old: &PersonaFact,
+        f: &PersonaFact,
+    ) -> RamariaResult<i64> {
+        Ok(self.add_fact_with_version(old, f.clone()))
+    }
+
+    async fn promote_fact_to_active(&self, id: i64) -> RamariaResult<()> {
+        let mut facts = self.facts.lock().unwrap();
+        if let Some(f) = facts.iter_mut().find(|f| f.id == id) {
+            f.status = ramaria_core::types::FactStatus::Active;
+        }
+        Ok(())
+    }
+
+    async fn list_fact_versions(&self, seed_id: i64) -> RamariaResult<Vec<PersonaFact>> {
+        let facts = self.facts.lock().unwrap();
+        let seed = match facts.iter().find(|f| f.id == seed_id) {
+            Some(s) => s.clone(),
+            None => return Ok(Vec::new()),
+        };
+        // 沿 version_of 链回溯（与真实 repo 一致：链头最早在前，需 reverse）
+        let mut chain = vec![seed];
+        let mut current = chain[0].version_of;
+        let mut guard = 0u32;
+        while let Some(pid) = current {
+            if guard >= 64 {
+                break;
+            }
+            guard += 1;
+            match facts.iter().find(|f| f.id == pid) {
+                Some(f) => {
+                    current = f.version_of;
+                    chain.push(f.clone());
+                }
+                None => break,
+            }
+        }
+        chain.reverse();
+        Ok(chain)
+    }
+
+    async fn supersede_fact(&self, id: i64, _at: i64) -> RamariaResult<()> {
+        let mut facts = self.facts.lock().unwrap();
+        if let Some(f) = facts.iter_mut().find(|f| f.id == id) {
+            f.status = ramaria_core::types::FactStatus::Superseded;
+        }
+        Ok(())
     }
 
     async fn save_trait(&self, _t: &PersonalityTrait) -> RamariaResult<i64> {

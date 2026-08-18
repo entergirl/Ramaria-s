@@ -126,4 +126,13 @@ max_outlier_ratio = 0.6
 pending_expire_days = 30
 evidence_decay_threshold = 0.3
 
+[knowledge]
+auto_fact_detect = false
+detector_enabled = true
+dedup_cosine_threshold = 0.85
+dedup_keyword_min = 1
+corroboration_cosine_threshold = 0.7
+injection_budget_chars = 800
+volatile_halflife_days = 30
+
 [misc]

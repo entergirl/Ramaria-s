@@ -119,9 +119,9 @@ impl App {
             .backend_config
             .expect("Stage 2 (CheckPrivacy) must set backend_config");
 
-        // ---- Step 5.5: 行为层情境路由（v1.5 M6，F 任务接线）----
+        // ---- Step 5.5: 行为层情境路由 ----
         // [behavior].enabled=false / 未命中 / 路由失败 → None（静默降级，
-        // prompt 与 v1.4 语义等价——回归红线）；命中 → 合并主/次规则注入行为块。
+        // prompt 不含行为块）；命中 → 合并主/次规则注入行为块。
         let behavior_decision = if config.behavior.enabled {
             // history_messages 为 ChatMessage（role+content），行为路由仅消费
             // role/content（查询构造），转换为轻量 Message 列表
@@ -156,6 +156,21 @@ impl App {
             None
         };
 
+        // ---- Step 5.6: 知识层判定器检索 ----
+        // [knowledge].auto_fact_detect=false / 判定器未命中 / 检索失败 → 空 facts，
+        // prompt 不含知识块（静默降级）。
+        let knowledge_facts = if config.knowledge.auto_fact_detect {
+            crate::app_knowledge::load_knowledge_facts(
+                self.storage.as_ref(),
+                self.config.knowledge.clone(),
+                persona_uid.unwrap_or("rama-0001"),
+                user_input,
+            )
+            .await
+        } else {
+            Vec::new()
+        };
+
         // ---- Step 6: 构建 System Prompt（5-Block 装配器） ----
         // examples 预选（v1.4）：评分轮换 + 记忆未命中兜底；enabled=false 回退 v1.3 静态注入
         let examples = load_examples_for_input(
@@ -176,6 +191,7 @@ impl App {
                 behavior_decision,
                 examples,
                 config.examples.max_examples as usize,
+                knowledge_facts,
             )
             .await;
 
@@ -316,8 +332,8 @@ impl App {
     /// - `last_active_at`: 最后活跃时间字符串（YYYY-MM-DD HH:MM 格式）。
     /// - `utt_context`: utt 原文片段（已按预算裁剪渲染；None 表示不注入，等同 v1.3）。
     /// - `bridge_context`: 桥接内容（上一会话尾部原文，已按预算截断；None 表示不注入）。
-    /// - `behavior_decision`: 行为层路由合并决策（v1.5 M6；None = 未命中/关闭，
-    ///   不注入行为块，prompt 与 v1.4 语义等价——回归红线）。
+    /// - `behavior_decision`: 行为层路由合并决策（None = 未命中/关闭，
+    ///   不注入行为块，prompt 不含行为层段落）。
     /// - `examples`: 已选好的 Few-shot 示例（由 `load_examples_for_input` 评分轮换/兜底后传入）。
     /// - `max_examples`: examples 注入上限（来自生效配置 `examples.max_examples`，
     ///   v1.5 起由调用方传入以支持配置覆盖的探针场景）。
@@ -344,6 +360,7 @@ impl App {
         behavior_decision: Option<ramaria_memory::behavior::MergedDecision>,
         examples: Vec<ramaria_core::types::PersonaExample>,
         max_examples: usize,
+        knowledge_facts: Vec<ramaria_core::types::PersonaFact>,
     ) -> String {
         let actual_uid = persona_uid.unwrap_or("rama-0001");
 
@@ -411,13 +428,16 @@ impl App {
                 chat_style_rules: None, // v2.0: 无自定义规则时使用最小化默认规则
                 // v1.4: utt 原文片段（检索层已按白名单与预算过滤，None 等同 v1.3）
                 utt_context: utt_context.map(|s| s.to_string()),
-                // v1.4 M5: 桥接内容（桥接层已按白名单与预算过滤，None 等同 v1.3）
+                // 桥接内容（桥接层已按白名单与预算过滤，None 表示未启用）
                 bridge_context: bridge_context.map(|s| s.to_string()),
-                // v1.5 M6: 行为层路由决策（None = 未命中/关闭，等同 v1.4）
+                // 行为层路由决策（None = 未命中/关闭）
                 behavior_decision,
+                // 知识层 active 事实（判定器命中后由 send_message 检索传入；
+                // 空 = 关闭/未命中 → prompt 不含知识块）
+                knowledge_facts,
             };
 
-            // v1.4 M6：[examples].max_examples 经 RamariaConfig 传播，
+            // examples.max_examples 经 RamariaConfig 传播，
             // 与 `load_examples_for_input` 的预选上限保持一致（双闸门）。
             let config = PromptConfig {
                 max_examples,

@@ -12,6 +12,7 @@ pub mod behavior;
 pub mod bm25;
 pub mod decay;
 pub mod event;
+pub mod fact;
 pub mod graph_retriever;
 pub mod inference;
 pub mod init;

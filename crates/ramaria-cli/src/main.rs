@@ -2,11 +2,11 @@
 //!
 //! 设计特点:
 //! - clap derive 模式定义命令结构，全局 --json / --yes / --quiet / --db 对所有命令可用
-//! - 全局 --json：统一信封 `{"ok":true,"data":…}` / `{"ok":false,"error":{"code":…,"message":"…"}}`（统一信封 schema，见 docs/dev-1.5/v1.5-decisions.md §D-V15-011）
+//! - 全局 --json：统一信封 `{"ok":true,"data":…}` / `{"ok":false,"error":{"code":…,"message":"…"}}`
 //! - stdout 只输出数据；状态/提示/警告走 stderr（ui::info/success/warn 已改 eprintln）
 //! - exit code 约定：0 成功 / 2 参数错(clap) / 3 LLM 或后端不可用 / 4 业务校验失败
 //! - `ramaria help` 按 对话/记忆/数据/管理/高级 分组（subcommand_help_heading）
-//! - blocks 为 canonical 命令名，utt 保留为 alias（人性化别名决策，见 docs/dev-1.5/v1.5-decisions.md §D-V15-007）
+//! - blocks 为 canonical 命令名，utt 保留为 alias
 //! - App 统一初始化（DB → storage → LLM → App）
 
 // 命令模块通过 lib.rs 暴露（pub mod），以供集成测试使用
@@ -46,7 +46,7 @@ struct Cli {
     )]
     db: PathBuf,
 
-    /// 自动确认所有确认点（隐私/删除/导入等）；非 TTY 且无 --yes 时不挂起、直接失败并提示（M1 B 项）
+    /// 自动确认所有确认点（隐私/删除/导入等）；非 TTY 且无 --yes 时不挂起、直接失败并提示
     #[arg(long, global = true)]
     yes: bool,
 
@@ -160,6 +160,10 @@ enum Commands {
     #[command(display_order = 44, subcommand)]
     Rule(RuleCmd),
 
+    /// 知识事实查询（list / show，只读）[管理]
+    #[command(display_order = 45, subcommand)]
+    Fact(FactCmd),
+
     /// 导出诊断信息（打包日志、配置、系统信息为 .zip）[管理]
     #[command(display_order = 43)]
     Diagnostics {
@@ -241,6 +245,31 @@ enum RuleCmd {
     },
 }
 
+/// 知识事实查询子命令（**无 delete**，双端不做事实删除）。
+#[derive(Subcommand)]
+enum FactCmd {
+    /// 列出 persona 的 active 知识事实（按 field 分组）
+    List {
+        /// 按 persona_uid 过滤（默认 rama-0001）
+        #[arg(long)]
+        persona: Option<String>,
+        /// 按 field 过滤（basic_info/personal_status/interests/social/history/recent_context/speaking_style）
+        #[arg(long)]
+        field: Option<String>,
+        /// 输出条数上限（1-500）
+        #[arg(long, default_value = "100", value_parser = parse_limit)]
+        limit: usize,
+        /// 跳过前 N 条
+        #[arg(long, default_value = "0")]
+        offset: usize,
+    },
+    /// 查看单条知识事实详情（含完整版本链）
+    Show {
+        /// 事实 id
+        id: i64,
+    },
+}
+
 /// 话语块管理子命令（canonical 名称 blocks，别名 utt）。
 #[derive(Subcommand)]
 enum BlocksCmd {
@@ -253,7 +282,7 @@ enum BlocksCmd {
     },
 }
 
-/// 探针子命令（build 的旧名 `dataset` 保留为 alias，人性化别名决策，见 docs/dev-1.5/v1.5-decisions.md §D-V15-007）。
+/// 探针子命令。
 #[derive(Subcommand)]
 enum ProbeArgs {
     /// 构建测试集（原 `probe dataset`，动词化后保留 alias）
@@ -495,7 +524,7 @@ fn grouped_command() -> clap::Command {
 }
 
 // =========================================================
-// 错误处理与 exit code 约定（见 docs/dev-1.5/v1.5-decisions.md §D-V15-011）
+// 错误处理与 exit code 约定
 // =========================================================
 
 /// 将错误映射为 exit code（0 成功 / 2 参数错(clap) / 3 LLM 或后端不可用 / 4 业务校验失败）。
@@ -545,7 +574,7 @@ fn exit_with_error(err: &anyhow::Error, json_mode: bool) -> ! {
 ///
 /// 返回 (App实例, 数据库连接池)。连接池供导入器等需要直接访问 SQLite 的命令使用。
 ///
-/// v1.6 CLI 一致性修复（启动前置）:
+/// CLI 初始化（启动前置）:
 /// - config.toml 经 `ConfigSyncService` 加载（对齐桌面端 lib.rs:297-327），
 ///   `[utt]` 等配置组对 CLI 对话链路生效；缺失生成模板、损坏回退默认记 warn。
 /// - 恢复已保存的 embedding provider（`backend_config.embedding_model_path`），
@@ -747,7 +776,7 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
         } => {
             let msg = message.join(" ");
             if msg.trim().is_empty() {
-                // 业务校验失败（exit code 4，见 docs/dev-1.5/v1.5-decisions.md §D-V15-011）
+                // 业务校验失败
                 return Err(anyhow::anyhow!(RamariaError::validation(
                     "消息不能为空。用法: ramaria ask <消息>"
                 )));
@@ -861,6 +890,23 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
                 RuleCmd::Evidence { id } => commands::rule::RuleCmd::Evidence { id },
             };
             commands::rule::run(app, cmd, cli.json, cli.yes).await?;
+        }
+        Commands::Fact(sub) => {
+            let cmd = match sub {
+                FactCmd::List {
+                    persona,
+                    field,
+                    limit,
+                    offset,
+                } => commands::fact::FactCmd::List {
+                    persona,
+                    field,
+                    limit: Some(limit),
+                    offset,
+                },
+                FactCmd::Show { id } => commands::fact::FactCmd::Show { id },
+            };
+            commands::fact::run(app, cmd, cli.json).await?;
         }
         Commands::Export {
             format,
@@ -994,7 +1040,7 @@ fn init_tracing() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
-    // 日志必须走 stderr（M1 A 项：stdout 只输出数据，保证管道/agent 取 stdout 即纯数据）
+    // 日志必须走 stderr（stdout 只输出数据，保证管道/agent 取 stdout 即纯数据）
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_span_events(FmtSpan::CLOSE)

@@ -1022,3 +1022,155 @@
 [data-theme="dark"] .memory-l3-section--primary {
   border-left-color: var(--blue-500);
 }
+
+/* ═══════════════════════════════════════════════
+   13. 知识卡片视图（只读）
+   ═══════════════════════════════════════════════ */
+
+.memory-knowledge-group {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.memory-knowledge-field-group {
+  background: var(--bg-card, #fff);
+  border: 1px solid var(--border-color, #eee);
+  border-left: 3px solid var(--blue-300, #54a8e0);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+
+.memory-knowledge-field-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.memory-knowledge-field-label {
+  font-weight: 600;
+  color: var(--text-strong, #333);
+}
+
+.memory-knowledge-field-count {
+  font-size: 12px;
+  color: var(--text-muted, #888);
+}
+
+.memory-knowledge-card {
+  border-top: 1px dashed var(--border-color, #eee);
+  padding: 10px 0 4px;
+}
+
+.memory-knowledge-card:first-child {
+  border-top: none;
+  padding-top: 2px;
+}
+
+.memory-knowledge-card-content {
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text-strong, #333);
+  word-break: break-word;
+}
+
+.memory-knowledge-card-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.memory-knowledge-badge {
+  display: inline-block;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 8px;
+  border-radius: 999px;
+}
+
+.memory-knowledge-badge--source { background: var(--pink-100, #ffd1cc); color: var(--pink-600, #9a3442); }
+.memory-knowledge-badge--tier   { background: var(--blue-50, #f0f7fd);  color: var(--blue-600, #0e4f8a); }
+.memory-knowledge-badge--conf   { background: var(--gray-100, #f3f4f6); color: var(--text-muted, #888); }
+
+.memory-knowledge-card-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.memory-knowledge-chip {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--gray-100, #f3f4f6);
+  color: var(--text-muted, #888);
+}
+
+.memory-knowledge-versions {
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+.memory-knowledge-versions summary {
+  cursor: pointer;
+  color: var(--blue-500, #1a6fb5);
+  user-select: none;
+}
+
+.memory-knowledge-versions-list {
+  margin-top: 6px;
+  padding: 8px 10px;
+  background: var(--bg-subtle, #fafafa);
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.memory-knowledge-version {
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted, #888);
+}
+
+.memory-knowledge-version-badge {
+  flex-shrink: 0;
+  font-weight: 600;
+  color: var(--gray-500, #6b7280);
+}
+
+/* 暗色模式 */
+[data-theme="dark"] .memory-knowledge-field-group {
+  background: var(--bg-card, #1f2937);
+  border-color: var(--border-color, #374151);
+}
+
+[data-theme="dark"] .memory-knowledge-field-label {
+  color: var(--text-strong, #f9fafb);
+}
+
+[data-theme="dark"] .memory-knowledge-card-content {
+  color: var(--text-strong, #f9fafb);
+}
+
+[data-theme="dark"] .memory-knowledge-badge--source { background: rgba(220, 115, 120, 0.18); color: #fda4af; }
+[data-theme="dark"] .memory-knowledge-badge--tier   { background: rgba(46, 136, 204, 0.18);  color: #93c5fd; }
+[data-theme="dark"] .memory-knowledge-badge--conf   { background: rgba(107, 114, 128, 0.25); color: #d1d5db; }
+
+[data-theme="dark"] .memory-knowledge-chip {
+  background: rgba(107, 114, 128, 0.25);
+  color: #d1d5db;
+}
+
+[data-theme="dark"] .memory-knowledge-versions-list {
+  background: var(--bg-muted, #111827);
+}
+
+[data-theme="dark"] .memory-knowledge-version {
+  color: #9ca3af;
+}

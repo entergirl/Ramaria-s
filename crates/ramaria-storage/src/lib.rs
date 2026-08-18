@@ -221,6 +221,44 @@ impl StorageBackend for SqliteStorage {
     ) -> RamariaResult<Vec<(ProfileField, usize)>> {
         repo::facts::count_by_persona_grouped(&self.pool, persona_uid).await
     }
+    async fn list_active_facts_by_persona(
+        &self,
+        persona_uid: &str,
+    ) -> RamariaResult<Vec<PersonaFact>> {
+        repo::facts::list_active_by_persona(&self.pool, persona_uid).await
+    }
+    async fn list_active_facts_by_field(
+        &self,
+        persona_uid: &str,
+        field: ProfileField,
+    ) -> RamariaResult<Vec<PersonaFact>> {
+        repo::facts::list_active_by_field(&self.pool, persona_uid, field).await
+    }
+    async fn list_all_facts_by_persona(
+        &self,
+        persona_uid: &str,
+    ) -> RamariaResult<Vec<PersonaFact>> {
+        repo::facts::list_all_by_persona(&self.pool, persona_uid).await
+    }
+    async fn get_fact_by_id(&self, id: i64) -> RamariaResult<Option<PersonaFact>> {
+        repo::facts::get_by_id(&self.pool, id).await
+    }
+    async fn save_fact_with_version(
+        &self,
+        old: &PersonaFact,
+        f: &PersonaFact,
+    ) -> RamariaResult<i64> {
+        repo::facts::save_with_version(&self.pool, old, f).await
+    }
+    async fn promote_fact_to_active(&self, id: i64) -> RamariaResult<()> {
+        repo::facts::promote_to_active(&self.pool, id).await
+    }
+    async fn list_fact_versions(&self, seed_id: i64) -> RamariaResult<Vec<PersonaFact>> {
+        repo::facts::list_versions(&self.pool, seed_id).await
+    }
+    async fn supersede_fact(&self, id: i64, at: i64) -> RamariaResult<()> {
+        repo::facts::supersede(&self.pool, id, at).await
+    }
 
     // =========================================================
     // Personality Traits（L3 性格层）+ Trait Evidence（证据链）
@@ -571,7 +609,7 @@ impl StorageBackend for SqliteStorage {
     }
 
     // =========================================================
-    // 行为规则（v1.5 M5，算法说明书 v3.1 §4）
+    // 行为规则
     // =========================================================
 
     async fn save_behavior_rule(&self, rule: &BehaviorRule) -> RamariaResult<i64> {
@@ -602,7 +640,7 @@ impl StorageBackend for SqliteStorage {
     }
 
     // =========================================================
-    // 反馈日志（v1.5 M5，v3.1 §9.4）
+    // 反馈日志
     // =========================================================
 
     async fn save_feedback_log(&self, log: &FeedbackLog) -> RamariaResult<i64> {
@@ -986,6 +1024,165 @@ mod tests {
             .unwrap();
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].id, fact_id);
+    }
+
+    // =========================================================
+    // persona_facts 版本化 repo 测试
+    // =========================================================
+
+    /// 事务化版本链覆盖写：旧事实置 superseded + 新事实写入（version_of 指向旧 id）。
+    #[tokio::test]
+    async fn fact_version_chain_overwrite_atomic() {
+        use ramaria_core::types::FactStatus;
+        let storage = setup().await;
+        let p = Persona::new(
+            "user-0002".into(),
+            "用户二".into(),
+            PersonaKind::User,
+            1,
+            "local".into(),
+        );
+        storage.create_persona(&p).await.unwrap();
+
+        let mut old = PersonaFact::new(
+            "user-0002".into(),
+            ramaria_core::types::ProfileField::PersonalStatus,
+            "当前情绪：平静".into(),
+            FactSource::Event,
+        );
+        let old_id = storage.save_fact(&old).await.unwrap();
+        old.id = old_id;
+
+        // 新事实覆盖旧事实：旧置 superseded、新写入且 version_of 指向旧
+        let fresh = PersonaFact::new(
+            "user-0002".into(),
+            ramaria_core::types::ProfileField::PersonalStatus,
+            "当前情绪：焦虑".into(),
+            FactSource::Event,
+        );
+        let fresh_id = storage.save_fact_with_version(&old, &fresh).await.unwrap();
+        assert!(fresh_id > old_id);
+
+        // 旧事实已 superseded
+        let old_now = storage.get_fact_by_id(old_id).await.unwrap().unwrap();
+        assert_eq!(old_now.status, FactStatus::Superseded);
+
+        // 新事实 active 且 version_of 指向旧 id
+        let fresh_now = storage.get_fact_by_id(fresh_id).await.unwrap().unwrap();
+        assert_eq!(fresh_now.status, FactStatus::Active);
+        assert_eq!(fresh_now.version_of, Some(old_id));
+
+        // 版本链：从新事实回溯到旧事实（链头最早在前）
+        let chain = storage.list_fact_versions(fresh_id).await.unwrap();
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[0].id, old_id);
+        assert_eq!(chain[1].id, fresh_id);
+
+        // active 查询只返回新事实（不含 superseded 旧事实）
+        let active = storage
+            .list_active_facts_by_field(
+                "user-0002",
+                ramaria_core::types::ProfileField::PersonalStatus,
+            )
+            .await
+            .unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].id, fresh_id);
+    }
+
+    /// list_active_facts_by_persona：跨字段仅返回 active 事实。
+    #[tokio::test]
+    async fn fact_list_active_by_persona_excludes_superseded() {
+        use ramaria_core::types::FactStatus;
+        let storage = setup().await;
+        let p = Persona::new(
+            "user-0003".into(),
+            "用户三".into(),
+            PersonaKind::User,
+            1,
+            "local".into(),
+        );
+        storage.create_persona(&p).await.unwrap();
+
+        let f = PersonaFact::new(
+            "user-0003".into(),
+            ramaria_core::types::ProfileField::Interests,
+            "喜欢摄影".into(),
+            FactSource::Manual,
+        );
+        let id = storage.save_fact(&f).await.unwrap();
+
+        // 置为 superseded
+        storage
+            .supersede_fact(id, ramaria_core::types::now_ms())
+            .await
+            .unwrap();
+
+        let active = storage
+            .list_active_facts_by_persona("user-0003")
+            .await
+            .unwrap();
+        assert!(active.is_empty(), "superseded 事实不应出现在 active 查询中");
+
+        // 全部查询（CLI/版本链统计）仍包含 superseded
+        let all = storage
+            .list_all_facts_by_persona("user-0003")
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].status, FactStatus::Superseded);
+    }
+
+    /// candidate → active 提升（互证通过后）。
+    #[tokio::test]
+    async fn fact_promote_candidate_to_active() {
+        use ramaria_core::types::FactStatus;
+        let storage = setup().await;
+        let p = Persona::new(
+            "user-0004".into(),
+            "用户四".into(),
+            PersonaKind::User,
+            1,
+            "local".into(),
+        );
+        storage.create_persona(&p).await.unwrap();
+
+        // 主观隐含事实：status=candidate, tier=stable, confidence=0.5
+        let mut f = PersonaFact::new(
+            "user-0004".into(),
+            ramaria_core::types::ProfileField::Interests,
+            "偏好事实：不喜欢加班".into(),
+            FactSource::Event,
+        );
+        f.status = FactStatus::Candidate;
+        f.confidence = 0.5;
+        let id = storage.save_fact(&f).await.unwrap();
+
+        // 未提升前 active 查询不含 candidate
+        let active = storage
+            .list_active_facts_by_persona("user-0004")
+            .await
+            .unwrap();
+        assert!(active.is_empty());
+
+        // 互证通过 → 提升 active
+        storage.promote_fact_to_active(id).await.unwrap();
+        let got = storage.get_fact_by_id(id).await.unwrap().unwrap();
+        assert_eq!(got.status, FactStatus::Active);
+
+        let active = storage
+            .list_active_facts_by_persona("user-0004")
+            .await
+            .unwrap();
+        assert_eq!(active.len(), 1);
+    }
+
+    /// get_fact_by_id 对不存在 id 返回 None（CLI show 缺省兜底）。
+    #[tokio::test]
+    async fn fact_get_by_id_missing_returns_none() {
+        let storage = setup().await;
+        let got = storage.get_fact_by_id(99999).await.unwrap();
+        assert!(got.is_none());
     }
 
     /// 验证 GROUP BY 查询正确统计各字段数量。
@@ -1874,306 +2071,6 @@ mod tests {
             .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
             .collect();
         assert_eq!(back, vector);
-    }
-
-    // =========================================================
-    // evidence_notes 存量迁移（v1.4，见 docs/dev-1.4/v1.4-decisions.md）
-    // =========================================================
-
-    /// 模拟旧库（仅执行基线 schema）并插入指定 evidence_notes 的 L1 行。
-    ///
-    /// 返回:
-    /// - `(pool, l1_ids)`：旧库连接池与插入的 L1 id 列表（按插入顺序）。
-    async fn setup_legacy_db(notes_rows: &[(Uuid, Option<&str>)]) -> (sqlx::SqlitePool, Vec<Uuid>) {
-        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-
-        let options = SqliteConnectOptions::new()
-            .filename(":memory:")
-            .foreign_keys(true);
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await
-            .unwrap();
-
-        // 基线 schema（20260801，含 evidence_notes 列）
-        sqlx::raw_sql(include_str!("../migrations/20260801_schema.sql"))
-            .execute(&pool)
-            .await
-            .expect("基线 schema 应可执行");
-
-        // 引用数据：persona + session（memory_l1 的外键依赖）
-        let persona_uid = "char-0001";
-        sqlx::query(
-            "INSERT INTO personas (uid, name, kind, seq, source, created_at, updated_at) \
-             VALUES (?, '测试', 'char', 1, 'local', 0, 0)",
-        )
-        .bind(persona_uid)
-        .execute(&pool)
-        .await
-        .unwrap();
-        let session_id = Uuid::new_v4().to_string();
-        sqlx::query("INSERT INTO sessions (id, started_at) VALUES (?, 0)")
-            .bind(&session_id)
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        let mut l1_ids = Vec::with_capacity(notes_rows.len());
-        for (id, notes) in notes_rows {
-            sqlx::query(
-                "INSERT INTO memory_l1 (id, session_id, summary, valence, salience, absorbed, \
-                 created_at, persona_uid, evidence_notes) \
-                 VALUES (?, ?, '摘要', 0.0, 0.5, 0, 0, ?, ?)",
-            )
-            .bind(id.to_string())
-            .bind(&session_id)
-            .bind(persona_uid)
-            .bind(notes)
-            .execute(&pool)
-            .await
-            .unwrap();
-            l1_ids.push(*id);
-        }
-        (pool, l1_ids)
-    }
-
-    /// 执行 v1.4 migration（20260806）并返回迁移后的 evidence_notes 值。
-    async fn apply_v14_migration(pool: &sqlx::SqlitePool, l1_id: Uuid) -> Option<String> {
-        sqlx::raw_sql(include_str!("../migrations/20260806_v1.4_utt.sql"))
-            .execute(pool)
-            .await
-            .expect("v1.4 migration 应可执行");
-
-        sqlx::query_scalar("SELECT evidence_notes FROM memory_l1 WHERE id = ?")
-            .bind(l1_id.to_string())
-            .fetch_one(pool)
-            .await
-            .unwrap()
-    }
-
-    #[tokio::test]
-    async fn evidence_notes_migration_converts_legacy_strings() {
-        // 旧格式字符串数组 → 新格式对象数组（字符串落 text 槽位，其余置空）
-        let id = Uuid::new_v4();
-        let (pool, _) =
-            setup_legacy_db(&[(id, Some(r#"["用户提到项目延期", "用户表示压力很大"]"#))]).await;
-
-        let migrated = apply_v14_migration(&pool, id)
-            .await
-            .expect("应迁移出非空值");
-        let notes: Vec<ramaria_core::types::EvidenceNote> =
-            serde_json::from_str(&migrated).expect("迁移结果应为合法 JSON");
-        assert_eq!(notes.len(), 2, "两条旧字符串应转为两个对象");
-        assert_eq!(notes[0].text, "用户提到项目延期");
-        assert_eq!(notes[1].text, "用户表示压力很大");
-        assert!(notes[0].time.is_none());
-        assert!(notes[0].who.is_none());
-        assert!(notes[0].cause.is_none());
-    }
-
-    #[tokio::test]
-    async fn evidence_notes_migration_keeps_null_untouched() {
-        // NULL 行不参与迁移，保持 NULL（无运行时兼容分支，读取端按新格式处理空值）
-        let id = Uuid::new_v4();
-        let (pool, _) = setup_legacy_db(&[(id, None)]).await;
-
-        let migrated = apply_v14_migration(&pool, id).await;
-        assert!(migrated.is_none(), "NULL 行应保持 NULL");
-    }
-
-    #[tokio::test]
-    async fn evidence_notes_migration_keeps_empty_array() {
-        // 空数组 `[]` 保持原样（json_type('$[0]') 无元素 → 不命中 UPDATE）
-        let id = Uuid::new_v4();
-        let (pool, _) = setup_legacy_db(&[(id, Some("[]"))]).await;
-
-        let migrated = apply_v14_migration(&pool, id).await.expect("应保留空数组");
-        let notes: Vec<ramaria_core::types::EvidenceNote> =
-            serde_json::from_str(&migrated).unwrap();
-        assert!(notes.is_empty(), "空数组应保持空数组");
-    }
-
-    #[tokio::test]
-    async fn evidence_notes_migration_mixed_array_converts_per_element() {
-        // 边缘情况（v1.4 M4 增强）：混合数组 = 旧字符串 + 新对象，
-        // 按元素类型逐项转换——字符串落 text 槽位、对象原样保留，
-        // 避免对象被错误嵌套进 text 字段导致读取失败。
-        let id = Uuid::new_v4();
-        let (pool, _) = setup_legacy_db(&[(
-            id,
-            Some(r#"["旧格式字符串", {"text": "新格式对象", "cause": "触发原因"}]"#),
-        )])
-        .await;
-
-        let migrated = apply_v14_migration(&pool, id)
-            .await
-            .expect("应迁移出非空值");
-        let notes: Vec<ramaria_core::types::EvidenceNote> =
-            serde_json::from_str(&migrated).expect("迁移结果应为合法 JSON");
-        assert_eq!(notes.len(), 2, "两条混合元素都应保留");
-        // 旧字符串 → text 槽位，其余置空
-        assert_eq!(notes[0].text, "旧格式字符串");
-        assert!(notes[0].time.is_none() && notes[0].who.is_none() && notes[0].cause.is_none());
-        // 新对象 → 原样保留（槽位不被破坏）
-        assert_eq!(notes[1].text, "新格式对象");
-        assert_eq!(notes[1].cause.as_deref(), Some("触发原因"));
-
-        // 幂等：已迁移对象数组再次执行不改变内容
-        sqlx::raw_sql(include_str!("../migrations/20260806_v1.4_utt.sql"))
-            .execute(&pool)
-            .await
-            .expect("重复执行应成功");
-        let again: String = sqlx::query_scalar("SELECT evidence_notes FROM memory_l1 WHERE id = ?")
-            .bind(id.to_string())
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(again, migrated, "混合数组迁移后应幂等");
-    }
-
-    #[tokio::test]
-    async fn evidence_notes_migration_mixed_rows() {
-        // 混合场景：旧格式 + NULL + 空数组 三行共存，各自正确迁移
-        let id_old = Uuid::new_v4();
-        let id_null = Uuid::new_v4();
-        let id_empty = Uuid::new_v4();
-        let (pool, _) = setup_legacy_db(&[
-            (id_old, Some(r#"["仅一条旧证据"]"#)),
-            (id_null, None),
-            (id_empty, Some("[]")),
-        ])
-        .await;
-
-        sqlx::raw_sql(include_str!("../migrations/20260806_v1.4_utt.sql"))
-            .execute(&pool)
-            .await
-            .expect("v1.4 migration 应可执行");
-
-        // 旧格式行 → 对象数组
-        let old_val: Option<String> =
-            sqlx::query_scalar("SELECT evidence_notes FROM memory_l1 WHERE id = ?")
-                .bind(id_old.to_string())
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        let notes: Vec<ramaria_core::types::EvidenceNote> =
-            serde_json::from_str(&old_val.unwrap()).unwrap();
-        assert_eq!(notes.len(), 1);
-        assert_eq!(notes[0].text, "仅一条旧证据");
-
-        // NULL / 空数组行保持原样
-        let null_val: Option<String> =
-            sqlx::query_scalar("SELECT evidence_notes FROM memory_l1 WHERE id = ?")
-                .bind(id_null.to_string())
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert!(null_val.is_none());
-
-        let empty_val: Option<String> =
-            sqlx::query_scalar("SELECT evidence_notes FROM memory_l1 WHERE id = ?")
-                .bind(id_empty.to_string())
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(empty_val.as_deref(), Some("[]"));
-    }
-
-    #[tokio::test]
-    async fn evidence_notes_migration_backs_up_original_values() {
-        // 迁移前备份：备份表应包含原始字符串数组（含引号原样）
-        let id = Uuid::new_v4();
-        let (pool, _) = setup_legacy_db(&[(id, Some(r#"["备份我", "原样保留"]"#))]).await;
-
-        sqlx::raw_sql(include_str!("../migrations/20260806_v1.4_utt.sql"))
-            .execute(&pool)
-            .await
-            .expect("v1.4 migration 应可执行");
-
-        let backed_up: String = sqlx::query_scalar(
-            "SELECT evidence_notes FROM memory_l1_evidence_notes_backup WHERE id = ?",
-        )
-        .bind(id.to_string())
-        .fetch_one(&pool)
-        .await
-        .expect("备份表应包含原值");
-        assert_eq!(backed_up, r#"["备份我", "原样保留"]"#);
-    }
-
-    #[tokio::test]
-    async fn evidence_notes_migration_is_idempotent_on_new_format() {
-        // 幂等：已迁移（对象数组）的行再次执行迁移不改变内容
-        let id = Uuid::new_v4();
-        let (pool, _) = setup_legacy_db(&[(id, Some(r#"["旧格式"]"#))]).await;
-
-        sqlx::raw_sql(include_str!("../migrations/20260806_v1.4_utt.sql"))
-            .execute(&pool)
-            .await
-            .unwrap();
-        let first: String = sqlx::query_scalar("SELECT evidence_notes FROM memory_l1 WHERE id = ?")
-            .bind(id.to_string())
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-
-        // 再次执行同一 migration（模拟迁移重跑）
-        sqlx::raw_sql(include_str!("../migrations/20260806_v1.4_utt.sql"))
-            .execute(&pool)
-            .await
-            .unwrap();
-        let second: String =
-            sqlx::query_scalar("SELECT evidence_notes FROM memory_l1 WHERE id = ?")
-                .bind(id.to_string())
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-
-        assert_eq!(first, second, "已迁移行重复执行不应变化");
-        let notes: Vec<ramaria_core::types::EvidenceNote> = serde_json::from_str(&second).unwrap();
-        assert_eq!(notes.len(), 1);
-        assert_eq!(notes[0].text, "旧格式");
-    }
-
-    #[tokio::test]
-    async fn v14_migration_creates_utt_blocks_table() {
-        // 新库迁移：utt_blocks 表存在且可插入（含索引）
-        let (pool, _) = setup_legacy_db(&[]).await;
-        sqlx::raw_sql(include_str!("../migrations/20260806_v1.4_utt.sql"))
-            .execute(&pool)
-            .await
-            .expect("v1.4 migration 应可执行");
-
-        // 表存在性探测：插入一条块
-        let persona_uid = "char-0001";
-        let session_id = Uuid::new_v4().to_string();
-        let msg_id = Uuid::new_v4().to_string();
-        sqlx::query("INSERT INTO sessions (id, started_at) VALUES (?, 0)")
-            .bind(&session_id)
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query(
-            "INSERT INTO messages (id, session_id, role, content, created_at, source) \
-             VALUES (?, ?, 'user', '你好', 0, 'local')",
-        )
-        .bind(&msg_id)
-        .bind(&session_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO utt_blocks (persona_uid, session_id, start_msg_id, end_msg_id, \
-             block_text, msg_count, time_span_ms, created_at) \
-             VALUES (?, ?, ?, ?, '原文', 1, 0, 0)",
-        )
-        .bind(persona_uid)
-        .bind(&session_id)
-        .bind(&msg_id)
-        .bind(&msg_id)
-        .execute(&pool)
-        .await
-        .expect("utt_blocks 表应可写入");
     }
 
     // =========================================================

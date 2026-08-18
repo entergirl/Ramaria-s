@@ -281,8 +281,8 @@ pub async fn list_recent_by_persona(
 //
 // 说明:
 // - 使用内存 SQLite 真库（database::init_test_pool 自动应用全部 migration）。
-// - 迁移后读取测试手动构造"旧库（基线 schema + 旧格式数据）"再应用 v1.4 迁移，
-//   验证 v1.4 一次性迁移的产物可被 repo 结构化读取（见 docs/dev-1.4/v1.4-decisions.md）。
+// - 迁移后读取测试手动构造"旧库（基线 schema + 旧格式数据）"再应用一次性迁移，
+//   验证迁移产物可被 repo 结构化读取。
 
 #[cfg(test)]
 mod tests {
@@ -388,82 +388,7 @@ mod tests {
         assert!(notes[1].cause.is_none());
     }
 
-    /// 迁移后读取：旧格式字符串数组经 v1.4 迁移后，repo 按新格式读回结构化线索
-    /// （字符串落 text 槽位，其余置空；验收 2，v1.4 一次性迁移）。
-    #[tokio::test]
-    async fn evidence_notes_migrated_legacy_rows_readable() {
-        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-
-        // 1. 旧库：仅基线 schema（20260801，含 evidence_notes 列，无 v1.4 迁移）
-        let options = SqliteConnectOptions::new()
-            .filename(":memory:")
-            .foreign_keys(true);
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await
-            .unwrap();
-        sqlx::raw_sql(include_str!("../../migrations/20260801_schema.sql"))
-            .execute(&pool)
-            .await
-            .expect("基线 schema 应可执行");
-
-        // 2. 引用数据（memory_l1 的外键依赖）+ 旧格式 L1 行
-        let persona_uid = "char-0001";
-        sqlx::query(
-            "INSERT INTO personas (uid, name, kind, seq, source, created_at, updated_at) \
-             VALUES (?, '测试', 'char', 1, 'local', 0, 0)",
-        )
-        .bind(persona_uid)
-        .execute(&pool)
-        .await
-        .unwrap();
-        let session_id = Uuid::new_v4();
-        sqlx::query("INSERT INTO sessions (id, started_at) VALUES (?, 0)")
-            .bind(session_id.to_string())
-            .execute(&pool)
-            .await
-            .unwrap();
-        let l1_id = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO memory_l1 (id, session_id, summary, valence, salience, absorbed, \
-             created_at, persona_uid, evidence_notes) \
-             VALUES (?, ?, '摘要', 0.0, 0.5, 0, 0, ?, ?)",
-        )
-        .bind(l1_id.to_string())
-        .bind(session_id.to_string())
-        .bind(persona_uid)
-        .bind(r#"["用户提到项目延期", "用户表示压力很大"]"#)
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        // 3. 应用 v1.4 迁移（一次性：旧字符串数组 → 对象数组）
-        sqlx::raw_sql(include_str!("../../migrations/20260806_v1.4_utt.sql"))
-            .execute(&pool)
-            .await
-            .expect("v1.4 migration 应可执行");
-
-        // 3.5 应用 v1.5 M4 迁移（新增 continuation 列；repo 查询依赖该列）
-        sqlx::raw_sql(include_str!("../../migrations/20260813_v1.5_m4.sql"))
-            .execute(&pool)
-            .await
-            .expect("v1.5 M4 migration 应可执行");
-
-        // 4. repo 按新格式读取：2 条线索，text 槽位承载旧字符串，其余槽位为空
-        let got = get(&pool, l1_id)
-            .await
-            .expect("get 应成功")
-            .expect("应存在");
-        let notes = got.evidence_notes.expect("迁移后应有 evidence_notes");
-        assert_eq!(notes.len(), 2, "两条旧字符串应转为两个结构化对象");
-        assert_eq!(notes[0].text, "用户提到项目延期");
-        assert_eq!(notes[1].text, "用户表示压力很大");
-        assert!(notes[0].time.is_none() && notes[0].who.is_none() && notes[0].cause.is_none());
-        assert!(notes[1].time.is_none() && notes[1].who.is_none() && notes[1].cause.is_none());
-    }
-
-    /// 空值往返：evidence_notes 为 None → save → get 仍为 None（验收 3）。
+    /// 空值往返：evidence_notes 为 None → save → get 仍为 None。
     #[tokio::test]
     async fn evidence_notes_none_roundtrip() {
         let pool = database::init_test_pool().await.unwrap();

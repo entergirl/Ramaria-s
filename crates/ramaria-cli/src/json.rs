@@ -1,7 +1,7 @@
 //! crates/ramaria-cli/src/json.rs - CLI 全局 --json 信封输出模块
 //!
 //! 设计特点:
-//! - 统一信封 schema（见 docs/dev-1.5/v1.5-decisions.md §D-V15-011）: `{"ok":true,"data":…}` / `{"ok":false,"error":{"code":…,"message":"…"}}`
+//! - 统一信封 schema: `{"ok":true,"data":…}` / `{"ok":false,"error":{"code":…,"message":"…"}}`
 //! - stdout 只输出数据（信封 JSON），状态/提示/警告走 stderr（ui 模块）
 //! - `error.code` 复用 exit code 约定（0 成功 / 2 参数错 / 3 LLM 或后端不可用 / 4 业务校验失败）
 //! - 序列化失败回退文本输出并记 warn（静默降级约定，不阻塞主流程）
@@ -109,7 +109,7 @@ mod tests {
         assert_eq!(parsed["error"]["message"], "LLM 不可用");
     }
 
-    /// 错误信封字段命名必须为 snake_case（统一信封 schema，见 docs/dev-1.5/v1.5-decisions.md §D-V15-011）。
+    /// 错误信封字段命名必须为 snake_case。
     #[test]
     fn envelope_field_names_are_snake_case() {
         let ok = serde_json::json!({"ok": true, "data": null});

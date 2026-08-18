@@ -218,7 +218,7 @@ pub(crate) fn build_llm_provider(
 /// 3. 创建 Keychain
 /// 4. 根据配置创建 LLM Provider
 /// 5. 尝试恢复已保存的嵌入模型（如有）
-/// 6. 配置双写同步：加载 config.toml + DB 两侧并做一致性校验（见 docs/dev-1.5/v1.5-decisions.md 决策记录）
+/// 6. 配置双写同步：加载 config.toml + DB 两侧并做一致性校验
 /// 7. 构造 App 实例
 /// 8. 刷新应用状态
 ///
@@ -335,7 +335,7 @@ async fn init_app(
 
     // Step 7.5: 创建 LLM Provider（基于同步后的配置注入精确缓存，v1.5 C）
     //
-    // 缓存策略（[cache] 配置组，见 docs/dev-1.5/v1.5-decisions.md 决策记录）：
+    // 缓存策略（[cache] 配置组）：
     // - `enabled=true`（默认）：创建 SqliteLlmCache 并注入 provider，
     //   重跑/重试/失败恢复场景命中缓存不重复花费 API 账单；
     // - `enabled=false`：不注入缓存，LLM 调用行为回退 v1.4。
@@ -477,6 +477,7 @@ pub fn run() {
             commands::memory::get_personality_profile,
             commands::memory::get_trait_evidence,
             commands::memory::get_profile_status,
+            commands::memory::get_facts,
             // ---- Config ----
             commands::config::get_backend_config,
             commands::config::update_backend_config,

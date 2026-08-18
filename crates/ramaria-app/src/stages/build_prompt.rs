@@ -93,7 +93,7 @@ impl PipelineStage for StageBuildPrompt {
                 p,
                 &input.recent_summaries,
                 input.last_active_at.as_deref(),
-                // v1.4 M6：examples.max_examples 经 RamariaConfig 传播
+                // examples.max_examples 经 RamariaConfig 传播
                 ctx.config.examples.max_examples as usize,
             )
             .await;
@@ -135,7 +135,7 @@ impl PipelineStage for StageBuildPrompt {
 /// - `persona`: 当前 persona 记录。
 /// - `recent_summaries`: 近期 L1 摘要列表（跨 session 上下文）。
 /// - `last_active_at`: 最后活跃时间（YYYY-MM-DD HH:MM 格式）。
-/// - `max_examples`: `[examples].max_examples` 配置（v1.4 M6 配置传播）。
+/// - `max_examples`: `[examples].max_examples` 配置（配置传播）。
 async fn build_structured_prompt(
     storage: &dyn StorageBackend,
     persona: &Persona,
@@ -195,13 +195,14 @@ async fn build_structured_prompt(
         current_time_str: Some(crate::now_timestamp_str()),
         weather: None,
         chat_style_rules: Some(rules), // v2.0: 回复规则作为 Experiment 块注入
-        utt_context: None,             // v1.4: 原文片段由活跃路径（app_chat）注入，本 Stage 未接线
-        bridge_context: None, // v1.4 M5: 桥接内容由活跃路径（app_chat）注入，本 Stage 未接线
-        behavior_decision: None, // v1.5 M6: 行为路由由活跃路径（app_chat）注入，本 Stage 未接线
+        utt_context: None,             // 原文片段由活跃路径（app_chat）注入，本 Stage 未接线
+        bridge_context: None,          // 桥接内容由活跃路径（app_chat）注入，本 Stage 未接线
+        behavior_decision: None,       // 行为路由由活跃路径（app_chat）注入，本 Stage 未接线
+        knowledge_facts: Vec::new(),   // 知识层由活跃路径注入，本 Stage 未接线
     };
 
     let config = PromptConfig {
-        // v1.4 M6：[examples].max_examples 经 RamariaConfig 传播
+        // examples.max_examples 经 RamariaConfig 传播
         max_examples,
         ..Default::default()
     };

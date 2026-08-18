@@ -114,13 +114,16 @@ pub struct RamariaConfig {
     #[serde(default)]
     pub bridge: BridgeConfig,
 
-    /// 三层生成缓存（v1.5 新增，默认开启，见 docs/dev-1.5/v1.5-decisions.md）
+    /// 三层生成缓存
     #[serde(default)]
     pub cache: CacheConfig,
 
-    /// 行为模型学习与驱动（v1.5 M5 新增，算法说明书 v3.1 §4）
+    /// 行为模型学习与驱动配置
     #[serde(default)]
     pub behavior: BehaviorConfig,
+    /// 知识层配置（persona_facts 生命周期与事实卡片注入）。
+    #[serde(default)]
+    pub knowledge: KnowledgeConfig,
 
     /// 杂项（预留扩展位，当前无字段）
     #[serde(default)]
@@ -168,6 +171,7 @@ impl Default for RamariaConfig {
             bridge: BridgeConfig::default(),
             cache: CacheConfig::default(),
             behavior: BehaviorConfig::default(),
+            knowledge: KnowledgeConfig::default(),
             misc: MiscConfig::default(),
         }
     }
@@ -760,13 +764,13 @@ pub struct UttConfig {
     /// `false` 时行为回退 v1.3（不注入原文片段）。
     pub enabled: bool,
     /// 时间间隙阈值（分钟）：相邻消息间隔超过此值切分为新块。
-    /// 档位经 v1.5 探针对比定稿，依据 `docs/dev-1.5/v1.5-probe-report.md`。
+    /// 档位经 v1.5 探针对比定稿。
     pub theta_gap_minutes: u32,
     /// 单块最大消息条数：超过此条数强制切分。
-    /// 档位经 v1.5 探针对比定稿，依据 `docs/dev-1.5/v1.5-probe-report.md`。
+    /// 档位经 v1.5 探针对比定稿。
     pub max_msgs_per_block: u32,
     /// 对话时检索返回的 utt 块数量（top_k）。
-    /// 档位经 v1.5 探针对比定稿，依据 `docs/dev-1.5/v1.5-probe-report.md`。
+    /// 档位经 v1.5 探针对比定稿。
     pub retrieve_top_k: u32,
     /// 原文片段注入的字符预算上限（所有块合计）。
     /// 超预算时按相似度从低到高丢弃整块，不做块内截断。
@@ -876,7 +880,7 @@ impl Default for BridgeConfig {
 }
 
 // =========================================================
-// 缓存配置（v1.5 新增，三层生成缓存 C，见 docs/dev-1.5/v1.5-decisions.md）
+// 缓存配置
 // =========================================================
 
 /// 缓存淘汰策略。
@@ -904,12 +908,12 @@ impl CacheEviction {
     }
 }
 
-/// 三层生成缓存配置（v1.5 新增）。
+/// 三层生成缓存配置。
 ///
 /// 职责:
 /// - 控制 LLM 响应精确缓存（`llm_response_cache` 表）与 L2 聚类去重指纹。
-/// - `enabled=false` 时精确缓存关闭，LLM 调用行为回退 v1.4（回归红线）。
-/// - L2 指纹可独立开关；关闭后事件提取回退 v1.4（不做集合跳过/相似度去重）。
+/// - `enabled=false` 时精确缓存关闭，每次生成直接调用 LLM。
+/// - L2 指纹可独立开关；关闭后事件提取不做集合跳过/相似度去重。
 ///
 /// 兼容性说明:
 /// - struct 级 `#[serde(default)]`：`[cache]` 表只写部分键时回退默认值。
@@ -938,7 +942,7 @@ impl Default for CacheConfig {
     /// 创建默认缓存配置。
     ///
     /// 返回:
-    /// - 精确缓存默认开启（见 docs/dev-1.5/v1.5-decisions.md），容量 10000 条，LRU 淘汰。
+    /// - 精确缓存默认开启，容量 10000 条，LRU 淘汰。
     /// - L2 指纹默认开启，相似度阈值 0.95，比对最近 200 条事件。
     fn default() -> Self {
         Self {
@@ -953,18 +957,18 @@ impl Default for CacheConfig {
 }
 
 // =========================================================
-// 行为层配置（v1.5 M5，算法说明书 v3.1 §4）
+// 行为层配置
 // =========================================================
 
-/// 行为模型学习与驱动配置（`[behavior]` 配置组，v1.5 M5 新增）。
+/// 行为模型学习与驱动配置（`[behavior]` 配置组）。
 ///
 /// 职责:
-/// - 集中管理行为层全链路参数：聚类与规则生成（算法说明书 v3.1 §4.2）、情境路由（§4.3）、增量更新（§4.4）。
-/// - `enabled=false` 时行为层全链路关闭（不学习/不路由），行为回退 v1.4。
+/// - 集中管理行为层全链路参数：聚类与规则生成、情境路由、增量更新。
+/// - `enabled=false` 时行为层全链路关闭（不学习/不路由）。
 ///
-/// 降级链（参数摸底延后至 v1.6，决策见 docs/dev-1.5/v1.5-decisions.md）:
-/// - 聚类参数（θ_nb / min_cluster_size / θ_join / β1 / β2）按 v3.1 初值推进，
-///   全部标注「待实证」——v1.6 探针工具链定稿后回填，参数不可用时回退本默认值。
+/// 降级链:
+/// - 聚类参数（θ_nb / min_cluster_size / θ_join / β1 / β2）按初值推进，
+///   全部标注「待实证」——探针工具链定稿后回填，参数不可用时回退本默认值。
 /// - embedding 不可用 → 双通道向量通道关闭，退化为纯关键词 Jaccard 通道（β=0）。
 ///
 /// 字段约定:
@@ -1037,6 +1041,56 @@ impl Default for BehaviorConfig {
 }
 
 // =========================================================
+// 知识层配置
+// =========================================================
+
+/// 知识层配置组（`[knowledge]`）。
+///
+/// 职责:
+/// - 控制知识层（persona_facts 生命周期 + 事实卡片注入）的开关与阈值。
+/// - 总开关关闭时知识层全链路禁用，prompt 不含知识块。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KnowledgeConfig {
+    /// 知识层总开关（默认 false —— 自动抽取默认关闭，需用户显式开启）。
+    ///
+    /// `false` → 不抽取、不检索注入，prompt 不含知识块。
+    pub auto_fact_detect: bool,
+    /// 规则判定器开关（零新增 LLM 调用；false = 不检索注入，仅保留知识库写入能力）。
+    pub detector_enabled: bool,
+    /// 判重语义余弦阈值（默认 0.85）。
+    pub dedup_cosine_threshold: f64,
+    /// 判重关键词交集阈值（≥1 个共同词判重复）。
+    pub dedup_keyword_min: u32,
+    /// 多事件互证语义余弦阈值（默认 0.7）。
+    pub corroboration_cosine_threshold: f64,
+    /// 事实卡片注入预算（字符上限；默认 800）。
+    pub injection_budget_chars: usize,
+    /// volatile 事实时效半衰期（天）。
+    pub volatile_halflife_days: u32,
+}
+
+impl Default for KnowledgeConfig {
+    /// 创建默认知识层配置。
+    ///
+    /// 返回:
+    /// - 自动抽取默认关闭（`auto_fact_detect=false`，需用户显式开启）。
+    /// - 判重 0.85 / 互证 0.7。
+    /// - 注入预算 800 字符；volatile 半衰期 30 天。
+    fn default() -> Self {
+        Self {
+            auto_fact_detect: false,
+            detector_enabled: true,
+            dedup_cosine_threshold: 0.85,
+            dedup_keyword_min: 1,
+            corroboration_cosine_threshold: 0.7,
+            injection_budget_chars: 800,
+            volatile_halflife_days: 30,
+        }
+    }
+}
+
+// =========================================================
 // 单元测试
 // =========================================================
 
@@ -1084,7 +1138,7 @@ mod tests {
         assert!((cfg.cache.l2_similarity_threshold - 0.95).abs() < f64::EPSILON);
         assert_eq!(cfg.cache.l2_recent_events_limit, 200);
 
-        // 行为层默认（v1.5 M5）：v3.1 初值 + 待实证标注
+        // 行为层默认：初值 + 待实证标注
         assert!(cfg.behavior.enabled);
         assert!((cfg.behavior.theta_nb - 0.5).abs() < f64::EPSILON);
         assert_eq!(cfg.behavior.min_cluster_size, 3);
@@ -1102,6 +1156,15 @@ mod tests {
         assert!((cfg.behavior.evidence_decay_threshold - 0.3).abs() < f64::EPSILON);
         // 权重约束：β1 + β2 ≤ 1（关键词通道 = 1 − β1 − β2 非负）
         assert!(cfg.behavior.beta1 + cfg.behavior.beta2 <= 1.0);
+
+        // 知识层默认：自动抽取默认关闭
+        assert!(!cfg.knowledge.auto_fact_detect, "auto_fact_detect 默认关闭");
+        assert!(cfg.knowledge.detector_enabled);
+        assert!((cfg.knowledge.dedup_cosine_threshold - 0.85).abs() < f64::EPSILON);
+        assert_eq!(cfg.knowledge.dedup_keyword_min, 1);
+        assert!((cfg.knowledge.corroboration_cosine_threshold - 0.7).abs() < f64::EPSILON);
+        assert_eq!(cfg.knowledge.injection_budget_chars, 800);
+        assert_eq!(cfg.knowledge.volatile_halflife_days, 30);
     }
 
     #[test]
@@ -1118,7 +1181,7 @@ mod tests {
         assert!(
             (cfg.decay.salience_multiplier - back.decay.salience_multiplier).abs() < f64::EPSILON
         );
-        // 缓存组 roundtrip（v1.5）
+        // 缓存组 roundtrip
         assert_eq!(cfg.cache.enabled, back.cache.enabled);
         assert_eq!(cfg.cache.max_entries, back.cache.max_entries);
         assert_eq!(cfg.cache.eviction, back.cache.eviction);
@@ -1126,7 +1189,7 @@ mod tests {
             cfg.cache.l2_fingerprint_enabled,
             back.cache.l2_fingerprint_enabled
         );
-        // 行为层 roundtrip（v1.5 M5）
+        // 行为层 roundtrip
         assert_eq!(cfg.behavior.enabled, back.behavior.enabled);
         assert!((cfg.behavior.theta_nb - back.behavior.theta_nb).abs() < f64::EPSILON);
         assert_eq!(
@@ -1199,7 +1262,7 @@ mod tests {
             PersonaKind::Hist,
         ];
         assert_eq!(cfg.utt.persona_kind_whitelist, expected);
-        // 助手/系统类不在默认白名单中（回归红线：助手类不注入原文）
+        // 助手/系统类不在默认白名单中（助手类不注入原文）
         assert!(!cfg.utt.persona_kind_whitelist.contains(&PersonaKind::Rama));
         assert!(!cfg.utt.persona_kind_whitelist.contains(&PersonaKind::User));
     }

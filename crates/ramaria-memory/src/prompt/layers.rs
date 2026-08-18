@@ -1,17 +1,17 @@
-//! crates/ramaria-memory/src/prompt/layers.rs - 四层注入结构与预算分配器（v1.4 M6 / v1.5 M6）
+//! crates/ramaria-memory/src/prompt/layers.rs - 四层注入结构与预算分配器
 //!
-//! 对齐算法说明书 v3.1 §8（驱动环装配：四层融合为一次生成）：
+//! 驱动环装配：四层融合为一次生成：
 //!
 //! | 层 | 内容 | 状态 |
 //! |----|------|------|
-//! | 行为层（Behavior） | 情境-反应规则（v3.1 §4） | v1.5 已填充（情境路由命中注入） |
-//! | 知识层（Knowledge） | 事实卡片（v3.1 §5） | v1.6 填充，当前为空实现（槽位预留） |
-//! | 表达层（Style） | utt 原文块 + 风格特征规则 | v1.4 已注入（原文片段/示例/说话风格） |
-//! | 脉络层（Memory） | L1 近期脉络 + 相关历史记忆 + 原文片段 + 桥接 | v1.4 已注入 |
+//! | 行为层（Behavior） | 情境-反应规则 | 已填充（情境路由命中注入） |
+//! | 知识层（Knowledge） | 事实卡片 | 已填充（判定器命中注入 active 事实） |
+//! | 表达层（Style） | utt 原文块 + 风格特征规则 | 已注入（原文片段/示例/说话风格） |
+//! | 脉络层（Memory） | L1 近期脉络 + 相关历史记忆 + 原文片段 + 桥接 | 已注入 |
 //!
-//! 优先级（v3.1 §8.1）：行为 > 知识 > 表达 > 脉络。
+//! 优先级：行为 > 知识 > 表达 > 脉络。
 //!
-//! 预算规则（v3.1 §8.3 / 计划书 §2.5）：
+//! 预算规则:
 //! - 行为控制块固定小比例、始终保底（默认 400 字符，`PromptConfig.behavior_block_max_chars` 可调）。
 //! - 脉络独立预算（约 30% 上限，相对 system prompt 预留 token）。
 //! - 超限裁剪顺序：原文块（按相似度从低到高丢整块）→ 桥接（从头部截断、保最近）
@@ -20,7 +20,7 @@
 //! 安全约束：
 //! - 原文级内容（utt/桥接）在此模块仅做预算裁剪，不做内容改写；
 //!   白名单过滤在检索/加载层完成（`ramaria-app`），本模块不感知 persona 类型。
-//! - 本模块为纯函数，零 I/O，不写日志（原文内容不落日志的红线由上层保证）。
+//! - 本模块为纯函数，零 I/O，不写日志（原文内容不落日志由上层保证）。
 //! - 行为块只消费路由决策（规则文本/参数/avoid），不接触事件原文与对话原文。
 
 use crate::behavior::MergedDecision;
@@ -31,12 +31,12 @@ use crate::token_budget::truncate_at_boundary;
 // 四层注入结构
 // =========================================================
 
-/// 四层注入的层类型（v3.1 §8.1 流程顺序）。
+/// 四层注入的层类型（按注入流程顺序）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayerKind {
-    /// 行为层：情境-反应规则（v1.5 填充，当前槽位为空）
+    /// 行为层：情境-反应规则
     Behavior,
-    /// 知识层：事实卡片（v1.6 填充，当前槽位为空）
+    /// 知识层：事实卡片
     Knowledge,
     /// 表达层：说话风格 + 对话示例 + 原文片段
     Style,
@@ -55,7 +55,7 @@ impl LayerKind {
         }
     }
 
-    /// 注入优先级（数值越小越优先保留，v3.1 §8.1：行为 > 知识 > 表达 > 脉络）。
+    /// 注入优先级（数值越小越优先保留：行为 > 知识 > 表达 > 脉络）。
     pub fn priority(self) -> u8 {
         match self {
             LayerKind::Behavior => 1,
@@ -66,12 +66,11 @@ impl LayerKind {
     }
 }
 
-/// 统一注入块：一次生成中的所有注入内容单元（v1.4 M6 四层注入结构）。
+/// 统一注入块：一次生成中的所有注入内容单元。
 ///
 /// 职责:
 /// - 将各层注入内容统一为一个可枚举、可排序、可裁剪的单元。
-/// - 为 v1.5（行为规则）、v1.6（知识卡片）提供统一的挂载点，
-///   避免后续版本重构 prompt 装配器。
+/// - 为行为规则、知识卡片等提供统一的挂载点，避免重构 prompt 装配器。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InjectionBlock {
     /// 所属层
@@ -102,7 +101,7 @@ impl InjectionBlock {
 // 脉络层预算配置
 // =========================================================
 
-/// 脉络层预算配置（v3.1 §8.3：独立预算约 30% 上限）。
+/// 脉络层预算配置（独立预算约 30% 上限）。
 ///
 /// 与 `token_budget::TokenBudgetConfig` 的关系：
 /// - `system_prompt_reserve_tokens` 对齐该结构的同名默认值（1000）。
@@ -112,7 +111,7 @@ impl InjectionBlock {
 pub struct LayerBudgetConfig {
     /// System Prompt 预留 token 数（默认 1000，对齐 token_budget）
     pub system_prompt_reserve_tokens: usize,
-    /// 脉络层预算占比上限（默认 0.30，v3.1 §8.3「约 30% 上限」）
+    /// 脉络层预算占比上限（默认 0.30）
     pub memory_layer_ratio: f64,
 }
 
@@ -161,7 +160,7 @@ pub struct MemoryLayerBudget {
 /// 块间分隔符（与 `builder::render_utt_context` 的输出约定一致）。
 const BLOCK_SEPARATOR: &str = "\n\n";
 
-/// 脉络层预算分配器（v3.1 §8.3 / 计划书 §2.5）。
+/// 脉络层预算分配器。
 ///
 /// 保留优先级（从高到低）：
 /// 1. 脉络摘要（保最近）
@@ -352,22 +351,21 @@ fn take_tail(text: &str, max_chars: usize) -> String {
 }
 
 // =========================================================
-// 行为层槽位（v1.5 M6 已填充：情境-反应规则注入）
+// 行为层槽位（情境-反应规则注入）
 // =========================================================
 
-/// 行为控制块默认字符预算（v3.1 §8.3：行为控制块固定小比例、始终保底）。
+/// 行为控制块默认字符预算（固定小比例、始终保底）。
 const BEHAVIOR_BLOCK_DEFAULT_MAX_CHARS: usize = 400;
 /// 行为块最小字符预算（低于标题+引导行长度时渲染残缺段落，防御性返回 None）。
 const BEHAVIOR_BLOCK_MIN_CHARS: usize = 24;
 
-/// 行为层注入块渲染（v1.5 M6 填充，v3.1 §4.3 / §8.2）。
+/// 行为层注入块渲染。
 ///
 /// 消费 `PromptContext.behavior_decision`（情境路由合并结果，由 `ramaria-app`
 /// 在对话管线中注入）：
-/// - `None`（未命中 / 行为关闭 / 路由失败降级）→ 返回 `None`，不产生段落，
-///   行为层未命中时 prompt 与 v1.4 语义等价（回归红线）。
+/// - `None`（未命中 / 行为关闭 / 路由失败降级）→ 返回 `None`，不产生段落。
 /// - `Some(decision)` → 渲染 `## 行为规则` 小节（reaction + params + avoid），
-///   段落置于 `# 角色（行为层）` 之后，语义上归属角色段（v3.1 §8.2）。
+///   段落置于 `# 角色（行为层）` 之后，语义上归属角色段。
 ///
 /// 预算:
 /// - 行为控制块固定小比例（默认 400 字符，`PromptConfig.behavior_block_max_chars`
@@ -398,7 +396,7 @@ pub fn render_behavior_block(
 
 /// 将合并后的路由决策渲染为行为规则小节文本。
 ///
-/// 输出格式（v3.1 §8.2「规则文本为主、结构化参数为辅」）:
+/// 输出格式（规则文本为主、结构化参数为辅）:
 /// ```text
 /// ## 行为规则
 /// 当聊到「加班」「累」等话题时：{reaction}
@@ -466,14 +464,19 @@ fn render_behavior_decision(decision: &MergedDecision, max_chars: usize) -> Opti
     Some(content)
 }
 
-/// 知识层注入块渲染（槽位预留，v1.6 填充：事实卡片）。
+/// 知识层注入块渲染（事实卡片）。
 ///
-/// 当前为空实现：恒返回 `None`，装配器跳过该块（不产生空段落）。
-/// v1.6 实现知识层时在此处返回 `Some(InjectionBlock)`，
-/// 渲染 `# 知识（知识层，按需）` 段落。
-pub fn render_knowledge_block(_context: &PromptContext) -> Option<InjectionBlock> {
-    None
+/// 消费 `PromptContext.knowledge_facts`（active 事实，由 `ramaria-app` 检索/判定后装配）。
+/// 渲染 `# 知识（知识层，按需）` 段落；空集 → `None`（不产生空段落）。
+pub fn render_knowledge_block(context: &PromptContext) -> Option<InjectionBlock> {
+    if context.knowledge_facts.is_empty() {
+        return None;
+    }
+    crate::fact::retriever::build_knowledge_injection(&context.knowledge_facts, MAX_KNOWLEDGE_CHARS)
 }
+
+/// 知识层注入预算（字符上限；对齐脉络层预算思路，固定小占比）。
+const MAX_KNOWLEDGE_CHARS: usize = 800;
 
 // =========================================================
 // 单元测试
@@ -486,8 +489,8 @@ mod tests {
     // ---- LayerKind / InjectionBlock ----
 
     #[test]
-    fn layer_priority_follows_v31_section_81() {
-        // v3.1 §8.1：行为 > 知识 > 表达 > 脉络
+    fn layer_priority_follows_order() {
+        // 行为 > 知识 > 表达 > 脉络
         assert!(LayerKind::Behavior.priority() < LayerKind::Knowledge.priority());
         assert!(LayerKind::Knowledge.priority() < LayerKind::Style.priority());
         assert!(LayerKind::Style.priority() < LayerKind::Memory.priority());
@@ -739,20 +742,20 @@ mod tests {
         assert_eq!(out.summaries, vec!["摘要"]);
     }
 
-    // ---- 行为层渲染（v1.5 M6） ----
+    // ---- 行为层渲染 ----
 
     #[test]
     fn behavior_and_knowledge_slots_are_empty_for_now() {
-        // v1.5 M6：行为槽位已填充——无路由决策（未命中/关闭）时仍返回 None
+        // 行为槽位：无路由决策（未命中/关闭）时返回 None
         let ctx = PromptContext::default();
         let config = PromptConfig::default();
         assert!(
             render_behavior_block(&ctx, &config).is_none(),
-            "行为层未命中/关闭 → 不产生段落（等同 v1.4）"
+            "行为层未命中/关闭 → 不产生段落"
         );
         assert!(
             render_knowledge_block(&ctx).is_none(),
-            "v1.6 前知识槽位为空"
+            "无知识事实 → 不产生知识段落"
         );
     }
 

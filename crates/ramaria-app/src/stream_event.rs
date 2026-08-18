@@ -4,7 +4,7 @@
 //! - 封装 LLM 流式响应的领域事件，统一 CLI 和 Desktop 消费
 //! - 三种事件: Delta（增量文本）、Done（流结束）、Error（流中错误）
 //! - 每个事件携带 request_id 和 created_at，便于前端串联和日志追踪
-//! - 实现 Serialize（v1.5 M1）：internally tagged `type` 字段（delta/done/error），
+//! - 实现 Serialize：internally tagged `type` 字段（delta/done/error），
 //!   `ask --json` 事件流可直接 serde_json 序列化（修复 Debug 格式非合法 JSON 问题）
 //! - Done 事件携带 session_id（ask --json 聚合输出需要）
 //! - backend_id 记录 provider 返回的 finish_reason 或 error 类型
@@ -26,7 +26,7 @@ use uuid::Uuid;
 /// - 将 LLM provider 的原始 `StreamDelta` 转换为 UI 友好的事件
 /// - 统一流式增量、完成通知和错误三种场景
 /// - 每个事件独立携带时间戳，支持前端按序渲染
-/// - `--json` 序列化为 `{"type":"delta|done|error",...}` 事件流（决策见 docs/dev-1.5/v1.5-decisions.md）
+/// - `--json` 序列化为 `{"type":"delta|done|error",...}` 事件流
 ///
 /// 变体:
 /// - `Delta`: LLM 输出的增量文本片段

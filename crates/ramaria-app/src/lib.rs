@@ -18,6 +18,7 @@
 
 pub mod app;
 pub mod app_chat;
+pub mod app_knowledge;
 pub mod app_privacy;
 pub mod app_retriever;
 pub mod app_setup;

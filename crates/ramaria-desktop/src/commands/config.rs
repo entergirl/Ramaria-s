@@ -172,7 +172,7 @@ pub async fn update_backend_config(
         .await
         .map_err(|e| format!("保存后端配置失败: {}", e))?;
 
-    // ★ 配置双写同步（见 docs/dev-1.5/v1.5-decisions.md 决策记录）：同步 [backend] 组到 config.toml，
+    // ★ 配置双写同步：同步 [backend] 组到 config.toml，
     //   保持文件与 backend_config 表一致（单侧失败降级不阻塞）
     let config_sync =
         ramaria_app::ConfigSyncService::new(state.app.storage().clone(), state.config_path.clone());

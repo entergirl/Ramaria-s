@@ -313,7 +313,7 @@ impl Message {
 /// - `who`: 可选，涉及的人物/角色。
 /// - `cause`: 可选，可辨时的因果线索（缺失留空，供背景参考）。
 ///
-/// 迁移约定（v1.4 一次性迁移，见 docs/dev-1.4/v1.4-decisions.md）:
+/// 迁移约定（一次性迁移）:
 /// - 存量旧格式（字符串数组）由 migration 一次性迁移，字符串落 `text` 槽位、其余置空。
 /// - 运行时不做兼容解析，读写均为新格式。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -425,7 +425,7 @@ pub struct MemoryL1 {
     /// - L2 事件提取时作为证据互证判断的输入
     /// - 前端 L3 性格画像的证据链溯源展示
     pub evidence_notes: Option<Vec<EvidenceNote>>,
-    /// 与上一对话块的话题延续关系（v1.5 B2 上下文感知生成，§6.3）。
+    /// 与上一对话块的话题延续关系。
     ///
     /// 枚举（相对上一块）:
     /// - `"延续"` — 当前对话承接上一块话题继续讨论
@@ -792,6 +792,73 @@ impl FactSource {
     }
 }
 
+/// 事实生命周期状态（persona_facts.status 版本链）。
+///
+/// 职责:
+/// - 约束 `persona_facts.status` 可写入的状态集合。
+/// - 检索与注入只取 `Active`；`Superseded` 沿 `version_of` 链可追溯；`Candidate` 待互证提升。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum FactStatus {
+    /// 当前生效，参与检索与注入
+    Active,
+    /// 已被覆盖（沿 version_of 链指向被替换事实）
+    Superseded,
+    /// 待互证提升（主观隐含事实初始落于此轨道）
+    Candidate,
+}
+
+impl FactStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Superseded => "superseded",
+            Self::Candidate => "candidate",
+        }
+    }
+}
+
+impl std::fmt::Display for FactStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// 事实分层策略（persona_facts.tier）。
+///
+/// 职责:
+/// - 约束 `persona_facts.tier` 可写入的分层，决定更新与衰减策略。
+///
+/// 策略约定:
+/// - `Stable`: 基础信息/兴趣爱好/社交长期——不轻易覆盖（需互证或 manual），不衰减。
+/// - `Volatile`: 近期状态/近期背景——新覆盖旧，保留版本链，随事件时间衰减。
+/// - `Historical`: 历史事件——只追加不覆盖。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum FactTier {
+    Stable,
+    Volatile,
+    Historical,
+}
+
+impl FactTier {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+            Self::Volatile => "volatile",
+            Self::Historical => "historical",
+        }
+    }
+}
+
+impl std::fmt::Display for FactTier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// 事件关系类型——事件间 6 种语义关联。
 ///
 /// 职责:
@@ -973,6 +1040,13 @@ impl Persona {
 /// - `ref_event_id` 为 i64 (FK→memory_events.id)。
 /// - `ref_l1_id` 为 UUID (FK→memory_l1.id，TEXT 表)。
 /// - 拆为两个独立可空列，避免一列指两张表的关系模型二义性。
+///
+/// 版本化字段:
+/// - `status` = active / superseded / candidate（检索只取 active）。
+/// - `tier` = stable / volatile / historical（分层更新与衰减策略）。
+/// - `version_of` = 覆盖时新事实指向被替换事实 id；旧事实置 superseded。
+/// - `confidence` = 0.0..1.0；主观隐含事实初始 0.5 入 candidate 轨道。
+/// - `keyword_hint` = 事实关键词（判重交集 & 判定器话题检索使用）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersonaFact {
     /// 内部索引（INTEGER AUTOINCREMENT）
@@ -981,6 +1055,16 @@ pub struct PersonaFact {
     pub field: ProfileField,
     pub content: String,
     pub source: FactSource,
+    /// 生命周期状态
+    pub status: FactStatus,
+    /// 分层策略
+    pub tier: FactTier,
+    /// 覆盖链——指向被替换事实 id
+    pub version_of: Option<i64>,
+    /// 置信度 0.0..1.0
+    pub confidence: f64,
+    /// 事实关键词（逗号分隔）
+    pub keyword_hint: Option<String>,
     /// FK→memory_events.id (INTEGER)
     pub ref_event_id: Option<i64>,
     /// FK→memory_l1.id (TEXT/UUID)
@@ -1004,6 +1088,11 @@ impl PersonaFact {
             field,
             content,
             source,
+            status: FactStatus::Active,
+            tier: FactTier::Stable,
+            version_of: None,
+            confidence: 1.0,
+            keyword_hint: None,
             ref_event_id: None,
             ref_l1_id: None,
             created_at: now,
@@ -2223,7 +2312,7 @@ mod tests {
 
     #[test]
     fn llm_provider_accepts_legacy_kebab_form() {
-        // 回归红线：v1.2/v1.3 config.toml 模板使用连字符写法 `lm-studio`，
+        // 兼容旧 config.toml 模板的连字符写法 `lm-studio`：
         // 反序列化必须兼容（否则真实用户配置文件会被误判为损坏而回退默认值）。
         // TOML 通道的完整场景（[backend] 表内 provider = "lm-studio"）由
         // config.rs::v14_config_groups_missing_fields_fallback_to_defaults 覆盖。

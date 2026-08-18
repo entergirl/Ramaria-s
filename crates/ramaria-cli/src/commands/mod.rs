@@ -10,6 +10,7 @@ pub mod chat;
 pub mod config;
 pub mod diagnostics;
 pub mod export;
+pub mod fact;
 pub mod import_cmd;
 pub mod index_cmd;
 pub mod memory;

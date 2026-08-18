@@ -81,6 +81,41 @@ pub struct PersonaView {
     pub created_at: i64,
 }
 
+/// 知识事实视图（只读展示）。
+#[derive(Debug, Clone, Serialize)]
+pub struct PersonaFactView {
+    /// 事实 id
+    pub id: i64,
+    /// 字段归属
+    pub field: String,
+    /// 事实内容（陈述句，非原文）
+    pub content: String,
+    /// 生命周期状态（active/superseded/candidate）
+    pub status: String,
+    /// 分层（stable/volatile/historical）
+    pub tier: String,
+    /// 置信度 0.0..1.0
+    pub confidence: f64,
+    /// 来源（event/manual/l1）
+    pub source: String,
+    /// 关键词（判重/检索提示）
+    pub keyword_hint: Option<String>,
+    /// 覆盖链：被替换事实 id（沿此可展开历史版本）
+    pub version_of: Option<i64>,
+    /// 创建时间（Unix 毫秒）
+    pub created_at: i64,
+}
+
+/// 知识事实查询响应（按 ProfileField 分组的 active 事实 + 版本链）。
+#[derive(Debug, Clone, Serialize)]
+pub struct FactListView {
+    pub persona_uid: String,
+    /// 按 field 分组：{ field_label: [PersonaFactView] }
+    pub grouped: HashMap<String, Vec<PersonaFactView>>,
+    /// 版本链查找：{ fact_id: [旧→新版本链] }（供历史版本折叠展示）
+    pub versions: HashMap<i64, Vec<PersonaFactView>>,
+}
+
 // =========================================================
 // get_personas — 列出所有 Persona
 // =========================================================
@@ -947,4 +982,87 @@ pub async fn get_profile_status(
         status: status.to_string(),
         status_text,
     })
+}
+
+// =========================================================
+// get_facts — 知识事实只读查询
+// =========================================================
+
+/// 查询指定人格的 active 知识事实，按 ProfileField 分组。
+///
+/// 返回:
+/// - `grouped`: { field_label: [PersonaFactView] }——每组含该 field 的全部 active 事实。
+/// - `versions`: { fact_id: [版本链] }——覆盖链历史版本折叠展示用（链头最早在前）。
+///
+/// 只读视图约定:
+/// - 无删除/编辑入口，仅展示。
+/// - 严格按 persona_uid 隔离。
+/// - 事实内容为陈述句（非原文）。
+#[tauri::command]
+#[tracing::instrument(skip(state))]
+pub async fn get_facts(
+    state: State<'_, DesktopState>,
+    persona_uid: String,
+) -> Result<FactListView, String> {
+    if persona_uid.trim().is_empty() {
+        return Err("人格 UID 不能为空".to_string());
+    }
+
+    let storage = state.app.storage();
+    let active = storage
+        .list_active_facts_by_persona(&persona_uid)
+        .await
+        .map_err(|e| format!("查询知识事实失败: {e}"))?;
+
+    // 按 field 分组（label 便于前端展示）
+    let mut grouped: HashMap<String, Vec<PersonaFactView>> = HashMap::new();
+    for f in &active {
+        let view = fact_to_view(f);
+        grouped
+            .entry(f.field.label().to_string())
+            .or_default()
+            .push(view);
+    }
+
+    // 版本链：为每个 active 事实回溯历史版本（供折叠查看）
+    let mut versions: HashMap<i64, Vec<PersonaFactView>> = HashMap::new();
+    for f in &active {
+        match storage.list_fact_versions(f.id).await {
+            Ok(chain) if chain.len() > 1 => {
+                versions.insert(f.id, chain.iter().map(fact_to_view).collect());
+            }
+            _ => {
+                // 单版本或查询失败：无版本链（折叠区不展示）
+            }
+        }
+    }
+
+    tracing::info!(
+        %persona_uid,
+        active_count = active.len(),
+        version_chains = versions.len(),
+        "get_facts 完成（知识卡片只读查询）"
+    );
+
+    Ok(FactListView {
+        persona_uid,
+        grouped,
+        versions,
+    })
+}
+
+/// 将 PersonaFact 转换为前端视图（不含内部字段）。
+fn fact_to_view(f: &ramaria_core::types::PersonaFact) -> PersonaFactView {
+    PersonaFactView {
+        id: f.id,
+        field: f.field.as_str().to_string(),
+        content: f.content.clone(),
+        status: f.status.as_str().to_string(),
+        tier: f.tier.as_str().to_string(),
+        confidence: f.confidence,
+        source: f.source.as_str().to_string(),
+        keyword_hint: f.keyword_hint.clone(),
+        version_of: f.version_of,
+        created_at: f.created_at,
+    }
 }

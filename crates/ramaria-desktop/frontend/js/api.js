@@ -333,6 +333,25 @@ var RamariaApi = (function () {
     }
 
  /**
+ * 查询指定人格的 active 知识事实（知识卡片，只读）。
+ *
+ * 参数:
+ * - `personaUid`: 目标人格 UID。
+ *
+ * 返回:
+ * - { persona_uid, grouped, versions }
+ * - grouped: { field_label: [{ id, field, content, status, tier, confidence,
+ *     source, keyword_hint, version_of, created_at }] }——按 ProfileField 分组。
+ * - versions: { fact_id: [版本链] }——历史版本折叠展示（链头最早在前）。
+ *
+ * 只读约定: 无删除/编辑入口，内容为事实陈述（非原文）。
+ */
+    async function getFacts(personaUid) {
+        _require(personaUid, 'personaUid');
+        return await _invoke('get_facts', { personaUid: personaUid }, '查询知识事实');
+    }
+
+ /**
  * 手动触发记忆管线（L2 事件提取 → L3 性格推断）。
  *
  * 说明:
@@ -425,7 +444,7 @@ var RamariaApi = (function () {
     }
 
  /**
- * 获取完整生效配置（v1.4 M5：设置页全量回显）。
+ * 获取完整生效配置（设置页全量回显）。
  *
  * 说明:
  * - 返回 config.toml 与 DB 合并后的完整 `RamariaConfig` JSON
@@ -449,7 +468,7 @@ var RamariaApi = (function () {
     }
 
  /**
- * 全量更新配置（v1.4 M5：会话区块滑动块保存入口）。
+ * 全量更新配置（会话区块滑动块保存入口）。
  *
  * 说明:
  * - 传完整 `RamariaConfig` JSON；后端走统一写入口（config.toml + DB 双写），
@@ -813,6 +832,7 @@ var RamariaApi = (function () {
             getProfile: getPersonalityProfile,
             getEvidence: getTraitEvidence,
             getProfileStatus: getProfileStatus,
+            getFacts: getFacts,
             triggerPipeline: triggerMemoryPipeline,
             regenerateImportPipeline: regenerateImportPipeline,
         },

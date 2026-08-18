@@ -73,7 +73,7 @@ pub struct ChatRequest {
     pub max_tokens: u32,
     /// 请求标识，用于流式事件串联
     pub request_id: Uuid,
-    /// Prompt 模板版本（参与精确缓存 key，变更需递增；决策见 docs/dev-1.5/v1.5-decisions.md）。
+    /// Prompt 模板版本（参与精确缓存 key，变更需递增）。
     ///
     /// 来源: `ramaria_memory::prompt::PROMPT_TEMPLATE_VERSION` 常量，
     /// 随 `prompt/builder.rs`/`layers.rs` 变更递增。
@@ -267,7 +267,7 @@ pub trait EmbeddingProvider: Send + Sync {
 }
 
 // =========================================================
-// LLM 响应缓存抽象层（v1.5 三层生成缓存 C）
+// LLM 响应缓存抽象层
 // =========================================================
 
 /// LLM 响应精确缓存接口。
@@ -518,7 +518,7 @@ pub trait StorageBackend: Send + Sync {
 
     // -- Memory Events (L2 事件层, id: i64) --
     async fn save_event(&self, event: &MemoryEvent) -> RamariaResult<i64>;
-    /// 按 id 查询单条事件（证据链溯源用，v1.5 M5，算法说明书 v3.1 §4.5）。
+    /// 按 id 查询单条事件（证据链溯源用）。
     ///
     /// 默认实现返回 `Ok(None)`（存量 mock 无需实现即可编译）。
     async fn get_event(&self, _id: i64) -> RamariaResult<Option<MemoryEvent>> {
@@ -575,11 +575,67 @@ pub trait StorageBackend: Send + Sync {
     async fn save_fact(&self, fact: &PersonaFact) -> RamariaResult<i64>;
     /// 按 persona_uid 和字段分类查询事实。
     /// `field` 使用 `ProfileField` 枚举以确保类型安全，避免传入非法字段名。
+    ///
+    /// 语义: 返回该字段的**全部**版本（含 superseded/candidate），供版本链展示。
     async fn list_facts_by_persona(
         &self,
         persona_uid: &str,
         field: ProfileField,
     ) -> RamariaResult<Vec<PersonaFact>>;
+    /// 按 persona 查询**全部字段**的 **active** 事实
+    /// （版本链中仅当前生效参与检索与注入；知识卡片分组/判定器检索使用）。
+    async fn list_active_facts_by_persona(
+        &self,
+        _persona_uid: &str,
+    ) -> RamariaResult<Vec<PersonaFact>> {
+        Ok(Vec::new())
+    }
+    /// 按 persona + field 查询 **active** 事实（同 field 召回/判重候选读取）。
+    async fn list_active_facts_by_field(
+        &self,
+        _persona_uid: &str,
+        _field: ProfileField,
+    ) -> RamariaResult<Vec<PersonaFact>> {
+        Ok(Vec::new())
+    }
+    /// 按 persona 查询**全部**事实（含 superseded/candidate，CLI list 用）。
+    async fn list_all_facts_by_persona(
+        &self,
+        _persona_uid: &str,
+    ) -> RamariaResult<Vec<PersonaFact>> {
+        Ok(Vec::new())
+    }
+    /// 按 id 查询单条事实（CLI show / 版本链跳转）。
+    async fn get_fact_by_id(&self, _id: i64) -> RamariaResult<Option<PersonaFact>> {
+        Ok(None)
+    }
+    /// 事务化版本链覆盖写入——旧事实置 superseded + 新事实写入（version_of 指向旧 id）。
+    ///
+    /// 说明:
+    /// - 同一事务内完成"旧 superseded + 新 insert"，避免中间态（覆盖写原子化）。
+    /// - `old` 为被覆盖事实，`f` 为新事实（id 应为 0，由存储层回填）。
+    /// - 返回新事实 id。
+    async fn save_fact_with_version(
+        &self,
+        _old: &PersonaFact,
+        _f: &PersonaFact,
+    ) -> RamariaResult<i64> {
+        Err(crate::error::RamariaError::unsupported(
+            "StorageBackend 未实现事实版本链覆盖写",
+        ))
+    }
+    /// 升级 candidate → active（互证通过后提升）。
+    async fn promote_fact_to_active(&self, _id: i64) -> RamariaResult<()> {
+        Ok(())
+    }
+    /// 查询某事实的完整版本链（含自身，按 created_at 升序；链头最早在前）。
+    async fn list_fact_versions(&self, _seed_id: i64) -> RamariaResult<Vec<PersonaFact>> {
+        Ok(Vec::new())
+    }
+    /// 将单条事实置 superseded（独立覆盖写，供上层仲裁原子化）。
+    async fn supersede_fact(&self, _id: i64, _at: i64) -> RamariaResult<()> {
+        Ok(())
+    }
     /// 按 persona_uid 一次性统计所有字段的 fact 数量（GROUP BY）。
     ///
     /// 返回:
@@ -639,13 +695,13 @@ pub trait StorageBackend: Send + Sync {
     -> RamariaResult<Vec<PersonaExample>>;
     /// 查询 persona 的全部示例候选（不区分 selected，供评分轮换注入）。
     ///
-    /// v1.4 新增默认实现：存量 mock 无需改动即可编译。
+    /// 默认实现：存量 mock 无需改动即可编译。
     async fn list_all_examples(&self, _persona_uid: &str) -> RamariaResult<Vec<PersonaExample>> {
         Ok(Vec::new())
     }
     /// 按 (partner, reply) 精确查重（examples 写侧幂等判定）。
     ///
-    /// v1.4 新增默认实现：存量 mock 无需改动即可编译。
+    /// 默认实现：存量 mock 无需改动即可编译。
     async fn find_example_by_pair(
         &self,
         _persona_uid: &str,
@@ -655,7 +711,7 @@ pub trait StorageBackend: Send + Sync {
         Ok(None)
     }
 
-    // -- Utt Blocks (原文话语块, v1.4) --
+    // -- Utt Blocks (原文话语块) --
     /// 插入一条 utt 话语块，返回自增 id。
     ///
     /// 默认实现返回 `Unsupported` 错误（存量 mock 无需实现即可编译）。
@@ -772,7 +828,7 @@ pub trait StorageBackend: Send + Sync {
     async fn list_pending_jobs(&self) -> RamariaResult<Vec<(i64, String, Option<String>)>>;
 
     // -- Conflict Queue --
-    // 预留给 v1.6 知识层冲突仲裁（算法说明书 v3.1 §5.4）
+    // 知识层冲突仲裁（事实覆盖写前的一致性检查）
     async fn create_conflict(
         &self,
         field: &str,
@@ -812,7 +868,7 @@ pub trait StorageBackend: Send + Sync {
     -> RamariaResult<Vec<(i64, i64, i64, String)>>;
 
     // =========================================================
-    // L2 聚类去重指纹（v1.5 三层生成缓存 C）
+    // L2 聚类去重指纹
     // =========================================================
     //
     // 记录"已聚类且无产出"的 L1 集合指纹（SHA-256 集合指纹），
@@ -857,7 +913,7 @@ pub trait StorageBackend: Send + Sync {
     }
 
     // =========================================================
-    // 行为规则（v1.5 M5，算法说明书 v3.1 §4）
+    // 行为规则
     // =========================================================
     //
     // behavior_rules 表 CRUD 与 enabled 过滤。默认实现返回 Unsupported / 空，
@@ -917,7 +973,7 @@ pub trait StorageBackend: Send + Sync {
     }
 
     // =========================================================
-    // 反馈日志（v1.5 M5，v3.1 §9.4；S2/S3 v1.7 复用同表）
+    // 反馈日志（S2/S3 复用同表）
     // =========================================================
 
     /// 写入一条反馈日志，返回自增 id。

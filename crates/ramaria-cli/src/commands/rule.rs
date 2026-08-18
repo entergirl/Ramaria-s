@@ -1,9 +1,9 @@
-//! crates/ramaria-cli/src/commands/rule.rs - 行为规则管理命令（v1.5 规则管理决策，见 docs/dev-1.5/v1.5-plan.md §2.5 D7）
+//! crates/ramaria-cli/src/commands/rule.rs - 行为规则管理命令
 //!
 //! 设计特点:
 //! - 子命令遵循 §2.9 动词词表：list/show/import/edit/enable/disable/delete/evidence
 //!   （`get` 仅 config 专用，规则详情用 `show`）
-//! - 全部支持全局 `--json` 信封（统一信封 schema，见 docs/dev-1.5/v1.5-decisions.md §D-V15-011）；stdout 只输出数据
+//! - 全部支持全局 `--json` 信封；stdout 只输出数据
 //! - delete 为破坏性操作：交互确认 / 非 TTY 或 `--yes` 自动通过（M1 B 项）
 //! - evidence 展示规则 → 事件 → 原文溯源链（只含结构化字段，原文不落日志）
 //! - edit/disable 触发 H1 S1 反馈写入（行为层内部处理）
