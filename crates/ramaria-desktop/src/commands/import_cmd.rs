@@ -105,14 +105,13 @@ pub async fn analyze_qq_chat(
         format!("文件解析失败: {}", e)
     })?;
 
+    // 隐私红线：QQ 号/UID 属个人标识，info 级日志不记录（仅记录量与统计信息）
     tracing::info!(
         total_raw = report.total_raw,
         success = report.total_success(),
         degraded = report.total_degraded(),
         skipped = report.total_skipped(),
         sessions = report.session_count,
-        self_uin = ?report.self_uin,
-        other_uid = %report.other_uid,
         "QQ 文件解析完成"
     );
 
@@ -400,7 +399,6 @@ pub async fn import_qq_chat(
         other_uid = %other_default_uid,
         other_name = %other_name,
         other_ref_id = ?other_ref_id,
-        other_uin = ?report.other_uin,
         "准备创建对方 persona"
     );
 

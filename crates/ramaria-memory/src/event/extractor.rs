@@ -480,21 +480,10 @@ impl<'a> EventExtractor<'a> {
                 }
             };
 
-            // 记录原始响应用于诊断（截断到 ~2000 字节，避免日志膨胀）。
-            // 必须停在 UTF-8 字符边界上，否则直接切片会 panic。
-            let preview = if raw_response.len() > 2000 {
-                let mut end = 2000;
-                while !raw_response.is_char_boundary(end) {
-                    end -= 1;
-                }
-                format!("{}...<truncated>", &raw_response[..end])
-            } else {
-                raw_response.clone()
-            };
+            // 隐私红线：LLM 原始响应不落日志，仅记录字符长度供诊断
             debug!(%persona_uid, %request_id, cluster_idx = ci,
-                len = raw_response.len(),
-                raw = %preview,
-                "LLM 返回 {} 字符", raw_response.len());
+                len = raw_response.chars().count(),
+                "LLM 返回 {} 字符（原始响应不记录）", raw_response.chars().count());
 
             // 解析 JSON
             let parsed = match Self::parse_event_response(&raw_response) {
@@ -944,8 +933,8 @@ impl<'a> EventExtractor<'a> {
         }
 
         Err(RamariaError::validation(format!(
-            "事件 JSON 解析失败，原始响应前 200 字符: {}",
-            raw.chars().take(200).collect::<String>()
+            "事件 JSON 解析失败，原始响应 {} 字符（不记录原文，防隐私泄漏）",
+            raw.chars().count()
         )))
     }
 

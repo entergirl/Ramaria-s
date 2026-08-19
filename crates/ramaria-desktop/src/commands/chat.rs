@@ -366,10 +366,11 @@ pub async fn save_current_session(
 
     if l1_generated {
         let l1 = &l1_entries[0];
+        // 隐私红线：不记 L1 摘要全文，仅记 id 与字符长度供诊断
         tracing::info!(
             %sid,
             l1_id = %l1.id,
-            summary = %l1.summary,
+            summary_len = l1.summary.chars().count(),
             persona_uid = ?l1.persona_uid,
             l1_count = l1_entries.len(),
             "L1 摘要已确认存在"

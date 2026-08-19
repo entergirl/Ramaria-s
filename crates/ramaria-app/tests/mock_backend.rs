@@ -23,9 +23,9 @@ use ramaria_core::traits::{
     ChatRequest, EmbeddingModelInfo, EmbeddingProvider, LlmProvider, StorageBackend, StreamDelta,
 };
 use ramaria_core::types::{
-    BackendConfig, ClusterSnapshot, EventRelation, LlmProvider as LlmProviderKind, MemoryEvent,
-    MemoryL1, Message, ModelCapability, Persona, PersonaExample, PersonaFact, PersonalityTrait,
-    PrivacyConsent, ProfileField, Session, TraitEvidence, TraitStatus, UttBlock,
+    BackendConfig, ClusterSnapshot, EventRelation, FactStatus, LlmProvider as LlmProviderKind,
+    MemoryEvent, MemoryL1, Message, ModelCapability, Persona, PersonaExample, PersonaFact,
+    PersonalityTrait, PrivacyConsent, ProfileField, Session, TraitEvidence, TraitStatus, UttBlock,
 };
 use uuid::Uuid;
 
@@ -60,17 +60,21 @@ pub struct MockStorage {
     snapshot_seq: AtomicI64,
     /// utt 话语块（按 session_id 索引，v1.4 M5：桥接/封存链路测试）
     utt_blocks: Mutex<HashMap<Uuid, Vec<UttBlock>>>,
-    /// 事件（v1.5 M5：行为学习/增量更新测试）
+    /// 事件
     events: Mutex<HashMap<i64, MemoryEvent>>,
     events_by_persona: Mutex<HashMap<String, Vec<i64>>>,
     event_seq: AtomicI64,
-    /// 行为规则（v1.5 M5 D7）
+    /// 行为规则
     behavior_rules: Mutex<HashMap<i64, BehaviorRule>>,
     rules_by_persona: Mutex<HashMap<String, Vec<i64>>>,
     rule_seq: AtomicI64,
-    /// 反馈日志（v1.5 M5 H1）
+    /// 反馈日志
     feedback_logs: Mutex<Vec<FeedbackLog>>,
     feedback_seq: AtomicI64,
+    /// 人物事实
+    facts: Mutex<HashMap<i64, PersonaFact>>,
+    facts_by_persona: Mutex<HashMap<String, Vec<i64>>>,
+    fact_seq: AtomicI64,
 }
 
 impl Default for MockStorage {
@@ -108,6 +112,9 @@ impl MockStorage {
             rule_seq: AtomicI64::new(1),
             feedback_logs: Mutex::new(Vec::new()),
             feedback_seq: AtomicI64::new(1),
+            facts: Mutex::new(HashMap::new()),
+            facts_by_persona: Mutex::new(HashMap::new()),
+            fact_seq: AtomicI64::new(1),
         }
     }
 
@@ -215,6 +222,24 @@ impl MockStorage {
             .lock()
             .unwrap()
             .insert(persona_uid.to_string(), summaries);
+    }
+
+    /// 便捷方法：注入一条 PersonaFact（自动分配 ID 并建立 persona 索引）。
+    ///
+    /// 用于知识层降级/隔离测试。状态默认为调用方给定，供 active/candidate/superseded 场景。
+    #[allow(dead_code)]
+    pub fn add_fact(&self, mut f: PersonaFact) -> i64 {
+        let id = self.fact_seq.fetch_add(1, Ordering::SeqCst);
+        f.id = id;
+        let persona = f.persona_uid.clone();
+        self.facts.lock().unwrap().insert(id, f);
+        self.facts_by_persona
+            .lock()
+            .unwrap()
+            .entry(persona)
+            .or_default()
+            .push(id);
+        id
     }
 
     /// 便捷方法：添加 PersonalityTrait 记录（自动分配 ID 并建立 persona 索引）。
@@ -585,16 +610,71 @@ impl StorageBackend for MockStorage {
         Ok(())
     }
 
-    async fn save_fact(&self, _fact: &PersonaFact) -> RamariaResult<i64> {
-        Ok(1)
+    async fn save_fact(&self, fact: &PersonaFact) -> RamariaResult<i64> {
+        let id = self.fact_seq.fetch_add(1, Ordering::SeqCst);
+        let mut f = fact.clone();
+        f.id = id;
+        let persona = f.persona_uid.clone();
+        self.facts.lock().unwrap().insert(id, f);
+        self.facts_by_persona
+            .lock()
+            .unwrap()
+            .entry(persona)
+            .or_default()
+            .push(id);
+        Ok(id)
     }
 
     async fn list_facts_by_persona(
         &self,
-        _persona_uid: &str,
-        _field: ProfileField,
+        persona_uid: &str,
+        field: ProfileField,
     ) -> RamariaResult<Vec<PersonaFact>> {
-        Ok(Vec::new())
+        let ids = self
+            .facts_by_persona
+            .lock()
+            .unwrap()
+            .get(persona_uid)
+            .cloned()
+            .unwrap_or_default();
+        let facts = self.facts.lock().unwrap();
+        Ok(ids
+            .iter()
+            .filter_map(|id| facts.get(id).cloned())
+            .filter(|f| f.field == field)
+            .collect())
+    }
+
+    async fn list_active_facts_by_persona(
+        &self,
+        persona_uid: &str,
+    ) -> RamariaResult<Vec<PersonaFact>> {
+        let ids = self
+            .facts_by_persona
+            .lock()
+            .unwrap()
+            .get(persona_uid)
+            .cloned()
+            .unwrap_or_default();
+        let facts = self.facts.lock().unwrap();
+        Ok(ids
+            .iter()
+            .filter_map(|id| facts.get(id).cloned())
+            .filter(|f| matches!(f.status, FactStatus::Active))
+            .collect())
+    }
+
+    async fn list_active_facts_by_field(
+        &self,
+        persona_uid: &str,
+        field: ProfileField,
+    ) -> RamariaResult<Vec<PersonaFact>> {
+        Ok(self
+            .list_active_facts_by_persona(persona_uid)
+            .await?
+            .into_iter()
+            .filter(|f| f.field == field)
+            .collect())
     }
 
     async fn save_trait(&self, t: &PersonalityTrait) -> RamariaResult<i64> {

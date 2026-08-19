@@ -453,7 +453,7 @@ impl<'a> L1Summarizer<'a> {
     /// 2. 剥离 `<think>...</think>` 标签后重试
     /// 3. 正则提取首对 `{...}` 后解析
     ///
-    /// 全部失败返回 Validation 错误，包含原始响应前 100 字符供诊断。
+    /// 全部失败返回 Validation 错误（隐私红线：不包含原始响应内容，仅记长度供诊断）。
     fn parse_summary_json(&self, raw: &str) -> RamariaResult<L1SummaryResponse> {
         // 步骤 1: 直接解析
         if let Ok(parsed) = serde_json::from_str::<L1SummaryResponse>(raw) {
@@ -478,14 +478,15 @@ impl<'a> L1Summarizer<'a> {
         }
 
         // 全部失败
-        let preview: String = raw.chars().take(100).collect();
+        // 隐私红线：LLM 原始响应不落日志，仅记录长度供诊断
         warn!(
-            response_preview = %preview,
+            response_len = raw.chars().count(),
             "L1 摘要 JSON 解析全部失败（可能因 max_tokens 输出预算不足被截断）"
         );
         Err(RamariaError::validation(format!(
-            "L1 摘要 JSON 解析失败，原始响应前 100 字符: {preview} \
-             （若响应不完整，可能是 max_tokens 输出预算不足导致截断）"
+            "L1 摘要 JSON 解析失败，原始响应 {} 字符（不记录原文，防隐私泄漏）\
+             （若响应不完整，可能是 max_tokens 输出预算不足导致截断）",
+            raw.chars().count()
         )))
     }
 

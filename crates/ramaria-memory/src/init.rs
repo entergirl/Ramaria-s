@@ -471,7 +471,8 @@ pub async fn initialize_rama_persona(
         Some(j) => match serde_json::from_str::<ColdStartResponse>(&j) {
             Ok(r) => r,
             Err(e) => {
-                warn!(error = %e, json = %j, "LLM 返回的 JSON 解析失败，创建基础 persona");
+                // 隐私红线：LLM 原始响应不落日志，仅记录长度供诊断
+                warn!(error = %e, json_len = j.chars().count(), "LLM 返回的 JSON 解析失败，创建基础 persona");
                 return Ok(ColdStartResult {
                     persona_uid: "rama-0001".to_string(),
                     is_new: true,

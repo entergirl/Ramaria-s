@@ -669,14 +669,15 @@ fn parse_json_with_degrade<T>(
     }
 
     // 全部失败
-    let preview: String = raw.chars().take(200).collect();
+    // 隐私红线：LLM 原始响应不落日志，仅记录长度供诊断
     warn!(
         step = step_name,
-        response_preview = %preview,
-        "Phase B: JSON 解析全部失败"
+        response_len = raw.chars().count(),
+        "Phase B: JSON 解析全部失败（原始响应不记录）"
     );
     Err(RamariaError::validation(format!(
-        "Phase B {step_name} JSON 解析失败，原始响应前 200 字符: {preview}"
+        "Phase B {step_name} JSON 解析失败，原始响应 {} 字符（不记录原文，防隐私泄漏）",
+        raw.chars().count()
     )))
 }
 
