@@ -41,6 +41,17 @@ desktop.ini
 *.db-wal
 *.db-shm
 
+# 探针实验产物（probe build/run/evaluate/report 测试数据；含对话回复与评分，不上传）
+/probe-*.json
+/run-*.json
+/eval-*.json
+/report-*.json
+/report-*.md
+/calib-*.json
+/probe-*.log
+/run-*.log
+/eval-*.log
+
 # 项目私有文档（开发、设计、决策）
 /docs/dev/
 /docs/dev-1.0/

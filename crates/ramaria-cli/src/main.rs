@@ -332,6 +332,48 @@ enum ProbeArgs {
         #[arg(long)]
         output: Option<String>,
     },
+
+    /// 对 `probe run` 实验结果自动评分（事实维 golden + 语气维 LLM-as-judge）
+    Evaluate {
+        /// 实验结果文件（`ramaria probe run --output` 的产物）
+        #[arg(long)]
+        results: PathBuf,
+
+        /// 数据集文件（`ramaria probe build --output` 的产物；提供时按 golden reference 精确评分）
+        #[arg(long)]
+        dataset: Option<PathBuf>,
+
+        /// 只评指定档位（逗号分隔 id，默认全部）
+        #[arg(long)]
+        variants: Option<String>,
+
+        /// 评分数值输出文件（`-` = stdout 输出评分 JSON）
+        #[arg(long)]
+        output: Option<String>,
+
+        /// 跳过语气维 LLM-as-judge（仅评事实维，节省 LLM 调用）
+        #[arg(long)]
+        no_tone_judge: bool,
+    },
+
+    /// 生成档位对比报告与定稿建议（markdown/JSON 双形态；支持人工抽检校准）
+    Report {
+        /// 实验结果文件（`ramaria probe run --output` 的产物）
+        #[arg(long)]
+        results: PathBuf,
+
+        /// 评分数值文件（`ramaria probe evaluate --output` 的产物）
+        #[arg(long)]
+        evaluation: Option<PathBuf>,
+
+        /// 人工抽检校准文件（JSON: 数组 of {item_id, score}）
+        #[arg(long)]
+        calibration: Option<PathBuf>,
+
+        /// 报告输出文件（`-` = stdout；.md 为 markdown、.json 为 JSON）
+        #[arg(long)]
+        output: Option<String>,
+    },
 }
 
 /// 导入子命令。
@@ -993,6 +1035,32 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
                     variants,
                     limit,
                     rebuild_utt,
+                    output,
+                    json: cli.json,
+                },
+                ProbeArgs::Evaluate {
+                    results,
+                    dataset,
+                    variants,
+                    output,
+                    no_tone_judge,
+                } => commands::probe::ProbeCmd::Evaluate {
+                    results,
+                    dataset,
+                    variants,
+                    output,
+                    no_tone_judge,
+                    json: cli.json,
+                },
+                ProbeArgs::Report {
+                    results,
+                    evaluation,
+                    calibration,
+                    output,
+                } => commands::probe::ProbeCmd::Report {
+                    results,
+                    evaluation,
+                    calibration,
                     output,
                     json: cli.json,
                 },

@@ -23,8 +23,10 @@ use anyhow::Context;
 use futures::StreamExt;
 use ramaria_core::config::RamariaConfig;
 use ramaria_core::error::RamariaError;
+use ramaria_core::traits::{ChatRequest, EmbeddingProvider, LlmProvider};
 use ramaria_core::types::{MessageRole, PersonaKind, now_ms};
 use ramaria_memory::utt::builder::UttBuilder;
+use uuid::Uuid;
 
 // =========================================================
 // 常量与档位定义
@@ -98,8 +100,8 @@ pub struct ProbeVariant {
     pub retrieve_top_k: u32,
 }
 
-/// 探针实验结果（`probe run` 的输出）。
-#[derive(Debug, Clone, serde::Serialize)]
+/// 探针实验结果（`probe run` 的输出；evaluate/report 读取用）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProbeExperiment {
     pub dataset_file: String,
     pub dataset_seed: u64,
@@ -110,7 +112,7 @@ pub struct ProbeExperiment {
 }
 
 /// 单档位实验结果。
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProbeVariantResult {
     pub variant_id: String,
     pub description: String,
@@ -121,7 +123,7 @@ pub struct ProbeVariantResult {
 }
 
 /// 档位参数（结果中的可读形态，与 ProbeVariant 字段一致）。
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct VariantParams {
     pub theta_gap_minutes: u32,
     pub max_msgs_per_block: u32,
@@ -129,7 +131,7 @@ pub struct VariantParams {
 }
 
 /// 单题运行结果。
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProbeRunItem {
     pub item_id: String,
     pub dimension: String,
@@ -141,7 +143,7 @@ pub struct ProbeRunItem {
 }
 
 /// 单题可测指标（探针阶段：长度与耗时；语义质量由 v1.6 T2 自动评分）。
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProbeMetrics {
     /// 回复字符数
     pub reply_chars: usize,
@@ -180,6 +182,32 @@ pub enum ProbeCmd {
         output: Option<String>,
         json: bool,
     },
+    /// 对 probe run 实验结果自动评分（事实维 golden + 语气维 LLM-as-judge）
+    Evaluate {
+        /// 实验结果文件（probe run 产物）
+        results: PathBuf,
+        /// 数据集文件（probe build 产物；提供时按 golden reference 精确评分）
+        dataset: Option<PathBuf>,
+        /// 只评指定档位（逗号分隔 id，默认全部）
+        variants: Option<String>,
+        /// 评分数值输出文件（`-` = stdout 输出评分 JSON）
+        output: Option<String>,
+        /// 跳过语气维 LLM-as-judge
+        no_tone_judge: bool,
+        json: bool,
+    },
+    /// 生成档位对比报告与定稿建议（markdown/JSON 双形态）
+    Report {
+        /// 实验结果文件（probe run 产物）
+        results: PathBuf,
+        /// 评分数值文件（probe evaluate 产物）
+        evaluation: Option<PathBuf>,
+        /// 人工抽检校准文件（JSON 数组 {item_id, score}）
+        calibration: Option<PathBuf>,
+        /// 报告输出文件（`-` = stdout；.md 为 markdown、.json 为 JSON）
+        output: Option<String>,
+        json: bool,
+    },
 }
 
 /// probe 命令入口（probe 不需要交互确认，yes 参数供线上 provider 隐私确认透传）。
@@ -210,6 +238,42 @@ pub async fn run(app: &Arc<ramaria_app::App>, cmd: ProbeCmd, yes: bool) -> anyho
                 output,
                 json,
                 yes,
+            )
+            .await
+        }
+        ProbeCmd::Evaluate {
+            results,
+            dataset,
+            variants,
+            output,
+            no_tone_judge,
+            json,
+        } => {
+            run_evaluate(
+                app,
+                &results,
+                dataset.as_deref(),
+                variants.as_deref(),
+                output.as_deref(),
+                no_tone_judge,
+                json,
+            )
+            .await
+        }
+        ProbeCmd::Report {
+            results,
+            evaluation,
+            calibration,
+            output,
+            json,
+        } => {
+            run_report(
+                app,
+                &results,
+                evaluation.as_deref(),
+                calibration.as_deref(),
+                output.as_deref(),
+                json,
             )
             .await
         }
@@ -436,10 +500,18 @@ async fn build_from_file(
     qpd: usize,
     seed: u64,
 ) -> anyhow::Result<ProbeDataset> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("读取数据源文件失败: {}", path.display()))?;
-    let raw: ProbeSourceFile = serde_json::from_str(&text)
-        .with_context(|| format!("解析数据源文件失败: {}", path.display()))?;
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        anyhow::anyhow!(RamariaError::validation(format!(
+            "读取数据源文件失败: {}: {e}",
+            path.display()
+        )))
+    })?;
+    let raw: ProbeSourceFile = serde_json::from_str(&text).map_err(|e| {
+        anyhow::anyhow!(RamariaError::validation(format!(
+            "解析数据源文件失败: {}: {e}",
+            path.display()
+        )))
+    })?;
 
     let persona = raw.persona_uid.unwrap_or_else(|| persona_uid.to_string());
 
@@ -731,11 +803,11 @@ async fn run_experiment(
     yes: bool,
 ) -> anyhow::Result<()> {
     // Step 1: 读取并校验数据集（文件缺失/解析失败 → 业务校验失败，exit code 4）
-    let text = std::fs::read_to_string(&dataset_path).with_context(|| {
-        format!(
-            "读取数据集失败: {}（请先运行 `ramaria probe build` 生成）",
+    let text = std::fs::read_to_string(&dataset_path).map_err(|e| {
+        anyhow::anyhow!(RamariaError::validation(format!(
+            "读取数据集失败: {}（请先运行 `ramaria probe build` 生成）: {e}",
             dataset_path.display()
-        )
+        )))
     })?;
     let dataset: ProbeDataset = serde_json::from_str(&text)
         .map_err(|e| RamariaError::validation(format!("数据集解析失败: {e}")))?;
@@ -1068,6 +1140,1423 @@ fn filter_variants(variants: &[ProbeVariant], filter: Option<&str>) -> Vec<Probe
     } else {
         out
     }
+}
+
+// =========================================================
+// probe evaluate：自动评分（事实维 golden + 语气维 LLM-as-judge）
+// =========================================================
+
+/// 探针评分结果（`probe evaluate` 的输出）。
+///
+/// 格式:
+/// - `variants`: 各档位的评分汇总（事实维 / 语气维均分 + 逐题明细）。
+/// - `judge_used`: 语气维 LLM-as-judge 是否可用（不可用则 tone 分缺失并标注）。
+/// - `embedding_used`: 事实维是否使用了 embedding 余弦（不可用则退化为关键词）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ProbeEvaluation {
+    pub results_file: String,
+    pub persona_uid: String,
+    pub dataset_seed: u64,
+    pub judge_used: bool,
+    pub embedding_used: bool,
+    pub generated_at: String,
+    pub variants: Vec<VariantEvaluation>,
+}
+
+/// 单档位评分汇总。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct VariantEvaluation {
+    pub variant_id: String,
+    pub description: String,
+    pub params: VariantParams,
+    /// 事实维均分（0.0~1.0；无 fact 题或全失败为 None）
+    pub fact_score: Option<f64>,
+    /// 语气维均分（1.0~5.0；judge 不可用或全失败为 None）
+    pub tone_score: Option<f64>,
+    pub failed_count: usize,
+    pub items: Vec<ItemEvaluation>,
+}
+
+/// 单题评分明细。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ItemEvaluation {
+    pub item_id: String,
+    pub dimension: String,
+    pub question: String,
+    /// 参考回答（golden 摘要 / persona 原回复）
+    pub reference: Option<String>,
+    /// 模型回复（长文本截断为摘要，避免评分文件过大）
+    pub reply_preview: String,
+    /// 事实维子评分（仅 fact 维度有值）
+    pub fact: Option<FactItemScore>,
+    /// 语气维子评分（仅 tone 维度且 judge 可用时有值）
+    pub tone: Option<ToneItemScore>,
+    /// 单题失败原因（成功为 None）
+    pub error: Option<String>,
+}
+
+/// 事实维单题评分（embedding 余弦 + 关键词命中加权）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FactItemScore {
+    /// 余弦相似度（-1.0~1.0；embedding 不可用为 None）
+    pub cosine: Option<f64>,
+    /// 关键词命中率（0.0~1.0，参考文本 token 在回复中出现的比例）
+    pub keyword_hit: f64,
+    /// 综合分（0.0~1.0）
+    pub score: f64,
+}
+
+/// 语气维单题评分（LLM-as-judge）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ToneItemScore {
+    /// judge 评分（1~5 整数）
+    pub score: u32,
+    /// judge 简短理由（脱敏，不含原文）
+    pub reason: Option<String>,
+}
+
+/// 语气维 judge 的 rubric 常量（1~5 档语义锚定）。
+const TONE_RUBRIC: &str = "\
+请按 1~5 分评估「候选回复」在语气、风格上与「参考回复」的相似程度：
+1 分：语气/风格完全不像参考（生硬、机器人腔、明显偏离角色）；
+2 分：略有相似但有明显偏差；
+3 分：基本相似，偶有偏差；
+4 分：语气/风格较贴近参考，偏差少；
+5 分：语气/风格高度贴近参考，几乎难辨。
+只输出一个整数分数（1~5），不要输出任何其他文字。";
+
+/// 语气维 judge 的示例锚定（few-shot，帮助 judge 稳定判分）。
+const TONE_ANCHOR_EXAMPLES: &str = "\
+【示例 1】
+参考回复：别太往心里去，领导批评方案不代表否定你这个人。把意见一条条记下来，改完这版肯定能行。
+候选回复：不要太难过，领导不是否定你。把建议记录下来，改好就行。
+分数：4
+【示例 2】
+参考回复：周末我一般不安排太满。你想去哪里？公园散步或者找家安静的咖啡馆都行。
+候选回复：周末有空，你说去哪。
+分数：2
+【示例 3】
+参考回复：先观察一下是不是吃太快或者毛球。如果持续吐或者精神不好，尽快带去看医生比较稳妥。
+候选回复：赶紧去医院，别等了。
+分数：1";
+
+/// 事实维综合分权重（cosine 0.6 / keyword 0.4）。
+const FACT_COSINE_WEIGHT: f64 = 0.6;
+const FACT_KEYWORD_WEIGHT: f64 = 0.4;
+
+/// 事实维 cosine 未用时的纯关键词权重（embedding 不可用降级）。
+const FACT_KEYWORD_ONLY_WEIGHT: f64 = 1.0;
+
+// =========================================================
+// 执行 `probe evaluate`
+// =========================================================
+
+/// 执行 `probe evaluate`。
+///
+/// 流程:
+/// 1. 读取并校验实验结果文件（probe run 产物；缺失/解析失败 → exit code 4）。
+/// 2. 可选读取数据集文件（probe build 产物）：提供时按 golden reference 精确评分（事实维）。
+/// 3. 过滤档位（--variants）。
+/// 4. 逐档位逐题评分：
+///    - 事实维: golden 评分（embedding 余弦 + 关键词命中加权；embedding 不可用退化为纯关键词）。
+///    - 语气维: LLM-as-judge（rubric 1~5、温度 0、示例锚定）；LLM 不可用 → 跳过并标注。
+/// 5. 单题失败不中断批量（记 warn + error 字段）。
+async fn run_evaluate(
+    app: &Arc<ramaria_app::App>,
+    results_path: &Path,
+    dataset_path: Option<&Path>,
+    variants_filter: Option<&str>,
+    output: Option<&str>,
+    no_tone_judge: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    // Step 1: 读取实验结果
+    let experiment = read_experiment(results_path)?;
+    if experiment.variants.is_empty() {
+        return Err(anyhow::anyhow!(RamariaError::validation(
+            "实验结果不含任何档位数据"
+        )));
+    }
+
+    // Step 2: 可选读取数据集（golden reference 索引：item_id → reference）
+    let golden = match dataset_path {
+        Some(p) => match load_golden_references(p) {
+            Ok(g) => {
+                tracing::info!(
+                    references = g.len(),
+                    "已加载 golden reference（事实维精确评分）"
+                );
+                Some(g)
+            }
+            Err(e) => {
+                tracing::warn!(%e, "golden reference 加载失败，事实维退化为回复启发式评分");
+                None
+            }
+        },
+        None => None,
+    };
+
+    // Step 3: 过滤档位（复用 filter_variants 的语义：无效 id 记 warn 跳过）
+    let selected: Vec<ProbeVariantResult> = filter_variant_results(&experiment, variants_filter);
+
+    // Step 4: 初始化评分器（embedding / judge）
+    let embedder = app.embedding_provider();
+    let embedding_used = embedder.as_ref().map(|e| e.is_available()).unwrap_or(false);
+    if !embedding_used {
+        tracing::warn!("embedding 不可用，事实维退化为纯关键词评分");
+    }
+
+    let judge: Option<Arc<dyn LlmProvider>> = if no_tone_judge {
+        tracing::info!("--no-tone-judge：跳过语气维 LLM-as-judge");
+        None
+    } else {
+        let llm = app.llm_clone();
+        // LM Studio 本地后端可直接用作 judge；线上后端（DeepSeek/OpenAI）为隐私考虑不自动判分
+        let provider_name = llm.config().provider.as_str();
+        if provider_name == "lm-studio" {
+            Some(llm)
+        } else {
+            tracing::warn!(
+                provider = %provider_name,
+                "语气维 judge 仅支持本地 LM Studio（线上后端自动跳过并标注）"
+            );
+            None
+        }
+    };
+    let judge_used = judge.is_some();
+
+    tracing::info!(
+        results = %results_path.display(),
+        embedding_used,
+        judge_used,
+        variants = selected.len(),
+        "probe evaluate 开始"
+    );
+
+    // Step 4: 逐档位评分
+    let mut eval_variants = Vec::with_capacity(selected.len());
+    for vr in &selected {
+        let mut items = Vec::with_capacity(vr.runs.len());
+        let mut fact_scores: Vec<f64> = Vec::new();
+        let mut tone_scores: Vec<u32> = Vec::new();
+        let mut failed = 0usize;
+
+        for run in &vr.runs {
+            let item_eval = evaluate_item(run, &embedder, judge.as_deref(), golden.as_ref()).await;
+            if item_eval.error.is_some() {
+                failed += 1;
+            }
+            // 汇总维度均分（仅成功题计入）
+            match &item_eval.fact {
+                Some(f) if item_eval.error.is_none() => fact_scores.push(f.score),
+                _ => {}
+            }
+            match &item_eval.tone {
+                Some(t) if item_eval.error.is_none() => tone_scores.push(t.score),
+                _ => {}
+            }
+            items.push(item_eval);
+        }
+
+        let fact_score = if fact_scores.is_empty() {
+            None
+        } else {
+            Some(fact_scores.iter().sum::<f64>() / fact_scores.len() as f64)
+        };
+        let tone_score = if tone_scores.is_empty() {
+            None
+        } else {
+            Some(tone_scores.iter().sum::<u32>() as f64 / tone_scores.len() as f64)
+        };
+
+        tracing::info!(
+            variant_id = %vr.variant_id,
+            fact_score,
+            tone_score,
+            failed,
+            items = items.len(),
+            "probe evaluate 档位完成"
+        );
+
+        eval_variants.push(VariantEvaluation {
+            variant_id: vr.variant_id.clone(),
+            description: vr.description.clone(),
+            params: vr.params.clone(),
+            fact_score,
+            tone_score,
+            failed_count: failed,
+            items,
+        });
+    }
+
+    let evaluation = ProbeEvaluation {
+        results_file: results_path.display().to_string(),
+        persona_uid: experiment.persona_uid.clone(),
+        dataset_seed: experiment.dataset_seed,
+        judge_used,
+        embedding_used,
+        generated_at: now_iso8601(),
+        variants: eval_variants,
+    };
+
+    // Step 5: 输出
+    if let Some(out) = output {
+        write_evaluation_file(out, &evaluation)?;
+        if json {
+            let data = serde_json::json!({
+                "file": out,
+                "persona_uid": evaluation.persona_uid,
+                "variants": evaluation.variants.len(),
+                "judge_used": evaluation.judge_used,
+                "embedding_used": evaluation.embedding_used,
+            });
+            return crate::json::emit_ok(&data);
+        }
+        crate::ui::success(&format!(
+            "评分数值已写入 {}（{} 档位，judge={}，embedding={}）",
+            out,
+            evaluation.variants.len(),
+            evaluation.judge_used,
+            evaluation.embedding_used
+        ));
+        return Ok(());
+    }
+
+    if json {
+        return crate::json::emit_ok(&evaluation);
+    }
+
+    print_evaluation_summary(&evaluation);
+    Ok(())
+}
+
+/// 读取实验结果文件（probe run 产物），缺失/解析失败 → 业务校验失败。
+fn read_experiment(path: &Path) -> anyhow::Result<ProbeExperiment> {
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        anyhow::anyhow!(RamariaError::validation(format!(
+            "读取实验结果失败: {}（请先运行 `ramaria probe run` 生成）: {e}",
+            path.display()
+        )))
+    })?;
+    serde_json::from_str(&text)
+        .map_err(|e| anyhow::anyhow!(RamariaError::validation(format!("实验结果解析失败: {e}"))))
+}
+
+/// 按 --variants 过滤实验结果档位（无效 id 记 warn 跳过；空回退全部）。
+fn filter_variant_results(
+    experiment: &ProbeExperiment,
+    filter: Option<&str>,
+) -> Vec<ProbeVariantResult> {
+    let Some(filter) = filter else {
+        return experiment.variants.clone();
+    };
+    let ids: Vec<&str> = filter
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let mut out = Vec::new();
+    for id in ids {
+        match experiment.variants.iter().find(|v| v.variant_id == id) {
+            Some(v) => out.push(v.clone()),
+            None => {
+                tracing::warn!(variant_id = id, "probe evaluate 忽略未知档位 id");
+            }
+        }
+    }
+    if out.is_empty() {
+        tracing::warn!("probe evaluate 档位过滤结果为空，回退为全部档位");
+        experiment.variants.clone()
+    } else {
+        out
+    }
+}
+
+/// 从数据集文件加载 golden reference 索引（item_id → reference）。
+///
+/// 说明:
+/// - 仅收集 fact 维度的 reference（事件摘要），作为事实维精确评分的 golden 参照。
+/// - reference 缺失的条目忽略（后续退化为问题文本近似）。
+fn load_golden_references(
+    dataset_path: &Path,
+) -> anyhow::Result<std::collections::HashMap<String, String>> {
+    let text = std::fs::read_to_string(dataset_path).map_err(|e| {
+        anyhow::anyhow!(RamariaError::validation(format!(
+            "读取数据集失败: {}: {e}",
+            dataset_path.display()
+        )))
+    })?;
+    let dataset: ProbeDataset = serde_json::from_str(&text)
+        .map_err(|e| RamariaError::validation(format!("数据集解析失败: {e}")))?;
+
+    let mut map = std::collections::HashMap::new();
+    for item in &dataset.items {
+        if item.dimension == "fact"
+            && let Some(rev) = item.reference.clone().filter(|r| !r.trim().is_empty())
+        {
+            map.insert(item.id.clone(), rev);
+        }
+    }
+    Ok(map)
+}
+
+/// 对单题运行结果评分。
+///
+/// 维度分派:
+/// - `fact` 题 → 事实维 golden 评分（cosine + keyword 加权）。
+/// - `tone` 题 → 语气维 LLM-as-judge（judge 不可用则 tone=None，不报错）。
+async fn evaluate_item(
+    run: &ProbeRunItem,
+    embedder: &Option<Arc<dyn EmbeddingProvider>>,
+    judge: Option<&dyn LlmProvider>,
+    golden: Option<&std::collections::HashMap<String, String>>,
+) -> ItemEvaluation {
+    // 单题运行失败 → 不评分（error 透传）
+    if let Some(e) = &run.error {
+        return ItemEvaluation {
+            item_id: run.item_id.clone(),
+            dimension: run.dimension.clone(),
+            question: run.question.clone(),
+            reference: None,
+            reply_preview: crate::util::truncate(&run.reply, 200),
+            fact: None,
+            tone: None,
+            error: Some(e.clone()),
+        };
+    }
+
+    let reply_preview = crate::util::truncate(&run.reply, 200);
+
+    // 按维度评分
+    match run.dimension.as_str() {
+        "fact" => {
+            // golden reference：优先用数据集 reference（精确）；缺失时用问题文本（近似）
+            let reference = golden
+                .and_then(|g| g.get(&run.item_id).cloned())
+                .unwrap_or_else(|| run.question.clone());
+            let fact = score_fact_item(&run.reply, &reference, embedder.as_deref()).await;
+            ItemEvaluation {
+                item_id: run.item_id.clone(),
+                dimension: run.dimension.clone(),
+                question: run.question.clone(),
+                reference: Some(reference),
+                reply_preview,
+                fact: Some(fact),
+                tone: None,
+                error: None,
+            }
+        }
+        "tone" => {
+            let tone = match judge {
+                Some(j) => match score_tone_item(j, run).await {
+                    Ok(t) => Some(t),
+                    Err(e) => {
+                        // judge 单题失败不阻塞批量（记 warn，tone=None）
+                        tracing::warn!(
+                            item_id = %run.item_id,
+                            error = %e,
+                            "probe evaluate 语气维 judge 单题失败（tone 分缺失）"
+                        );
+                        None
+                    }
+                },
+                None => None,
+            };
+            ItemEvaluation {
+                item_id: run.item_id.clone(),
+                dimension: run.dimension.clone(),
+                question: run.question.clone(),
+                reference: None,
+                reply_preview,
+                fact: None,
+                tone,
+                error: None,
+            }
+        }
+        other => {
+            // 未知维度：不评分，记录 error（不中断批量）
+            ItemEvaluation {
+                item_id: run.item_id.clone(),
+                dimension: other.to_string(),
+                question: run.question.clone(),
+                reference: None,
+                reply_preview,
+                fact: None,
+                tone: None,
+                error: Some(format!("未知维度 {other}，未评分")),
+            }
+        }
+    }
+}
+
+// =========================================================
+// 事实维评分（golden：embedding 余弦 + 关键词命中）
+// =========================================================
+
+/// 事实维单题评分。
+///
+/// 评分公式:
+/// - embedding 可用: `综合分 = 0.6 × cosine(reply, reference) + 0.4 × 关键词命中率`。
+/// - embedding 不可用: `综合分 = 关键词命中率`（纯关键词降级，标注 embedding 未用）。
+///
+/// 说明:
+/// - `reference` 为事实维 golden 参考（事件摘要）；`reply` 为模型对探针问题的回复。
+/// - 关键词命中率衡量 reply 是否涵盖 reference 中的关键信息（按 2-gram 字面重叠）。
+/// - cosine 为 reply 与 reference 的语义相似度（embedding 向量余弦）。
+async fn score_fact_item(
+    reply: &str,
+    reference: &str,
+    embedder: Option<&dyn EmbeddingProvider>,
+) -> FactItemScore {
+    // 关键词命中率：reference 的关键 2-gram 在 reply 中的覆盖比例
+    let keyword_hit = keyword_hit_score(reply, reference);
+
+    // embedding 余弦：reply vs reference
+    let cosine = match embedder {
+        Some(e) => match embed_pair(e, reply, reference).await {
+            Some(c) => Some(c),
+            None => {
+                tracing::warn!("embedding 余弦计算失败，该题 cosine 缺失");
+                None
+            }
+        },
+        None => None,
+    };
+
+    // 综合分：cosine 不可用时纯关键词
+    let score = match cosine {
+        Some(c) => FACT_COSINE_WEIGHT * c.max(0.0) + FACT_KEYWORD_WEIGHT * keyword_hit,
+        None => FACT_KEYWORD_ONLY_WEIGHT * keyword_hit,
+    }
+    .clamp(0.0, 1.0);
+
+    FactItemScore {
+        cosine,
+        keyword_hit,
+        score,
+    }
+}
+
+/// 计算回复对参考文本的关键词命中率（0.0~1.0）。
+///
+/// 算法:
+/// - 对 `reference` 提取中文 2-gram（bigram）集合，统计其中出现在 `reply` 中的比例。
+/// - 2-gram 字面重叠在中文短文本上能稳定反映"回复是否覆盖参考关键信息"。
+/// - `reference` 过短（<2 字）时退化为按 reply 信息密度打分。
+fn keyword_hit_score(reply: &str, reference: &str) -> f64 {
+    let reply = reply.trim();
+    if reply.is_empty() {
+        return 0.0;
+    }
+    let ref_chars: Vec<char> = reference.trim().chars().collect();
+    if ref_chars.len() < 2 {
+        // reference 过短，退化为 reply 信息密度
+        return density_score(reply);
+    }
+
+    // reference 的 2-gram 集合
+    let mut ref_bigrams: std::collections::HashSet<(char, char)> = std::collections::HashSet::new();
+    for w in ref_chars.windows(2) {
+        ref_bigrams.insert((w[0], w[1]));
+    }
+    if ref_bigrams.is_empty() {
+        return 0.0;
+    }
+
+    // 统计出现在 reply 中的 reference bigram
+    let reply_chars: Vec<char> = reply.chars().collect();
+    let mut hit = 0usize;
+    for w in reply_chars.windows(2) {
+        if ref_bigrams.contains(&(w[0], w[1])) {
+            hit += 1;
+        }
+    }
+
+    // 命中率 = 命中 bigram 数 / reference bigram 总数（上限 1.0）
+    (hit as f64 / ref_bigrams.len() as f64).clamp(0.0, 1.0)
+}
+
+/// 回复信息密度打分（无参考可用时的近似，0.0~1.0）。
+///
+/// 说明: 回复越长、信息越充分，密度分越高；空/过短回复得分低。
+fn density_score(reply: &str) -> f64 {
+    let chars = reply.chars().count();
+    if chars < 8 {
+        return 0.2;
+    }
+    if chars >= 40 {
+        1.0
+    } else {
+        0.5 + 0.5 * (chars as f64 - 8.0) / 32.0
+    }
+}
+
+/// 计算两段文本的 embedding 余弦相似度（失败返回 None，不阻塞）。
+///
+/// 说明: 任一文本向量化失败或向量为空 → None（调用方处理缺失）。
+async fn embed_pair(embedder: &dyn EmbeddingProvider, a: &str, b: &str) -> Option<f64> {
+    let va = match embedder.embed(a).await {
+        Ok(v) if !v.is_empty() => v,
+        Ok(_) => return None,
+        Err(e) => {
+            tracing::warn!(error = %e, "embedding 向量化失败（文本 A）");
+            return None;
+        }
+    };
+    let vb = match embedder.embed(b).await {
+        Ok(v) if !v.is_empty() => v,
+        Ok(_) => return None,
+        Err(e) => {
+            tracing::warn!(error = %e, "embedding 向量化失败（文本 B）");
+            return None;
+        }
+    };
+    Some(cosine_f32(&va, &vb))
+}
+
+/// 两个 f32 向量的余弦相似度（归一化内积）。
+///
+/// 说明: 任一向量的 L2 范数为 0（空/零向量）→ 返回 0.0（无语义可比）。
+fn cosine_f32(a: &[f32], b: &[f32]) -> f64 {
+    if a.len() != b.len() {
+        return 0.0;
+    }
+    let mut dot = 0.0f64;
+    let mut na = 0.0f64;
+    let mut nb = 0.0f64;
+    for i in 0..a.len() {
+        dot += a[i] as f64 * b[i] as f64;
+        na += (a[i] as f64) * (a[i] as f64);
+        nb += (b[i] as f64) * (b[i] as f64);
+    }
+    if na == 0.0 || nb == 0.0 {
+        return 0.0;
+    }
+    (dot / (na.sqrt() * nb.sqrt())).clamp(-1.0, 1.0)
+}
+
+// =========================================================
+// 语气维评分（LLM-as-judge）
+// =========================================================
+
+/// 语气维 LLM-as-judge 单题评分（返回 judge 分 + 理由）。
+///
+/// 说明:
+/// - 构造 judge prompt：rubric + 示例锚定 + 参考回复 + 候选回复。
+/// - 温度 0（确定性评分）、max_tokens 小（只需整数）。
+/// - 解析 LLM 输出的整数分数（1~5）；解析失败 → 报错（调用方记 warn）。
+async fn score_tone_item(
+    judge: &dyn LlmProvider,
+    run: &ProbeRunItem,
+) -> anyhow::Result<ToneItemScore> {
+    let request = ChatRequest {
+        system_prompt: format!("{TONE_RUBRIC}\n\n{TONE_ANCHOR_EXAMPLES}"),
+        memory_context: None,
+        history: vec![],
+        user_message: format!(
+            "参考回复：{}\n候选回复：{}",
+            run.question, // question 为 tone 题的用户输入；reference 为 persona 原回复未随结果携带
+            run.reply
+        ),
+        temperature: 0.0,
+        max_tokens: 16,
+        request_id: Uuid::new_v4(),
+        template_version: "probe-judge-v1".to_string(),
+    };
+
+    let raw = judge.chat(&request).await.map_err(|e| {
+        tracing::warn!(item_id = %run.item_id, error = %e, "语气维 judge LLM 调用失败");
+        anyhow::anyhow!(e)
+    })?;
+
+    // 解析整数分数（从输出中提取 1~5 的数字）
+    let score = parse_judge_score(&raw).ok_or_else(|| {
+        anyhow::anyhow!(
+            "judge 输出无法解析为 1~5 整数: {}",
+            crate::util::truncate(&raw, 40)
+        )
+    })?;
+
+    tracing::debug!(item_id = %run.item_id, score, "probe evaluate 语气维 judge 完成");
+    Ok(ToneItemScore {
+        score,
+        reason: None, // 隐私约定：不记录 judge 理由原文
+    })
+}
+
+/// 从 judge 输出解析 1~5 整数分（首个 1~5 数字；忽略其余文本）。
+fn parse_judge_score(raw: &str) -> Option<u32> {
+    let digits: String = raw.chars().filter(|c| c.is_ascii_digit()).collect();
+    for ch in digits.chars() {
+        let n = ch.to_digit(10)?;
+        if (1..=5).contains(&n) {
+            return Some(n);
+        }
+    }
+    // 中文数字兜底（一~五）
+    match raw.trim() {
+        "一" => Some(1),
+        "二" | "两" => Some(2),
+        "三" => Some(3),
+        "四" => Some(4),
+        "五" => Some(5),
+        _ => None,
+    }
+}
+
+// =========================================================
+// 输出辅助（evaluate）
+// =========================================================
+
+/// 写评分数值到文件（`-` 表示 stdout）。
+fn write_evaluation_file(out: &str, evaluation: &ProbeEvaluation) -> anyhow::Result<()> {
+    let json = serde_json::to_string_pretty(evaluation).context("评分数值序列化失败")?;
+    if out == "-" {
+        println!("{json}");
+    } else {
+        std::fs::write(out, format!("{json}\n"))
+            .with_context(|| format!("写入评分数值失败: {out}"))?;
+    }
+    Ok(())
+}
+
+/// 文本模式打印评分摘要。
+fn print_evaluation_summary(evaluation: &ProbeEvaluation) {
+    println!(
+        "probe 评分: persona={} | {} 档位 | judge={} | embedding={} | 数据集 seed={}",
+        evaluation.persona_uid,
+        evaluation.variants.len(),
+        evaluation.judge_used,
+        evaluation.embedding_used,
+        evaluation.dataset_seed
+    );
+    for v in &evaluation.variants {
+        let fact = v
+            .fact_score
+            .map(|s| format!("{:.2}", s))
+            .unwrap_or_else(|| "-".to_string());
+        let tone = v
+            .tone_score
+            .map(|s| format!("{:.2}", s))
+            .unwrap_or_else(|| "-".to_string());
+        println!(
+            "  档位 {:<14} 事实维={:<6} 语气维={:<6} 失败={} — {}",
+            v.variant_id, fact, tone, v.failed_count, v.description
+        );
+    }
+    if !evaluation.judge_used {
+        crate::ui::info("语气维 judge 不可用或已跳过（tone 分为空），可运行 --json 查看标注");
+    }
+    crate::ui::info(
+        "运行 `ramaria probe report --results <文件> --evaluation <评分文件>` 生成报告",
+    );
+}
+
+// =========================================================
+// probe report：档位对比报告 + 定稿建议 + 校准 + 知识层质量评估
+// =========================================================
+
+/// 档位对比报告（`probe report` 的输出，markdown/JSON 双形态）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProbeReport {
+    pub results_file: String,
+    pub evaluation_file: Option<String>,
+    pub persona_uid: String,
+    pub dataset_seed: u64,
+    pub judge_used: bool,
+    pub embedding_used: bool,
+    pub generated_at: String,
+    /// 各档位评分汇总表
+    pub variants: Vec<VariantReportRow>,
+    /// 定稿建议（每维度的推荐档位 + 理由）
+    pub recommendation: Recommendation,
+    /// 人工抽检校准结果（未提供校准文件时为 None）
+    pub calibration: Option<CalibrationResult>,
+    /// 知识层抽取质量评估（基于 fact 题误报/漏报；可选）
+    pub knowledge_quality: Option<KnowledgeQualityReport>,
+}
+
+/// 档位报告行（评分对比表）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct VariantReportRow {
+    pub variant_id: String,
+    pub description: String,
+    pub params: VariantParams,
+    pub fact_score: Option<f64>,
+    pub tone_score: Option<f64>,
+    pub success_count: usize,
+    pub total_count: usize,
+    pub failed_count: usize,
+}
+
+/// 定稿建议。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Recommendation {
+    /// 每维度的最佳档位 id 与理由
+    pub per_dimension: Vec<DimensionRecommendation>,
+    /// 综合建议（兼顾两维的平衡档位）
+    pub overall: String,
+}
+
+/// 单维度定稿建议。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DimensionRecommendation {
+    pub dimension: String,
+    pub best_variant: Option<String>,
+    pub best_score: Option<f64>,
+    pub reason: String,
+}
+
+/// 人工抽检校准结果。
+///
+/// 说明:
+/// - `consistency`: judge 与人工分数的一致性（同分占比 / 平均绝对差）。
+/// - `bias`: judge 相对人工的系统性偏差（judge 均分 − 人工均分；>0 偏高、<0 偏低）。
+/// - `calibrated_coefficient`: 校准系数（人工均分 / judge 均分，用于把 judge 分缩放到人工尺度）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CalibrationResult {
+    pub sample_count: usize,
+    pub total_count: usize,
+    pub sample_rate: f64,
+    pub consistency_exact: f64,
+    pub mean_abs_diff: f64,
+    pub bias: f64,
+    pub calibrated_coefficient: Option<f64>,
+    /// 是否不一致（一致性低或偏差大，报告标注）
+    pub inconsistent: bool,
+    /// 标注说明
+    pub annotation: String,
+}
+
+/// 知识层抽取质量评估报告。
+///
+/// 说明:
+/// - 基于事实维探针题评估知识层抽取质量：以「回复是否包含事件事实」判定命中/漏报。
+/// - `false_positive_rate`（误报）：判定器注入但回复未涵盖事实（答非所问）。
+/// - `false_negative_rate`（漏报）：回复未包含应有的事实信息（目标 <10%）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct KnowledgeQualityReport {
+    pub sample_count: usize,
+    pub fact_hit_count: usize,
+    pub false_positive_rate: f64,
+    pub false_negative_rate: f64,
+    /// 是否达到漏报 <10% 目标
+    pub miss_target_met: bool,
+    pub annotation: String,
+}
+
+// =========================================================
+// 执行 `probe report`
+// =========================================================
+
+/// 执行 `probe report`。
+///
+/// 流程:
+/// 1. 读取实验结果（probe run 产物）。
+/// 2. 读取评分数值（probe evaluate 产物；缺失则仅汇总 run 指标）。
+/// 3. 生成档位对比表 + 定稿建议（每维最佳档位）。
+/// 4. 若提供校准文件 → 计算 judge/人工一致性、偏差、校准系数。
+/// 5. 若提供评分数值 → 基于 fact 题评估知识层误报/漏报。
+/// 6. 输出 markdown / JSON 双形态。
+async fn run_report(
+    _app: &Arc<ramaria_app::App>,
+    results_path: &Path,
+    evaluation_path: Option<&Path>,
+    calibration_path: Option<&Path>,
+    output: Option<&str>,
+    json: bool,
+) -> anyhow::Result<()> {
+    // Step 1: 读取实验结果
+    let experiment = read_experiment(results_path)?;
+
+    // Step 2: 读取评分数值（可选）
+    let evaluation: Option<ProbeEvaluation> = match evaluation_path {
+        Some(p) => {
+            let text = std::fs::read_to_string(p).map_err(|e| {
+                anyhow::anyhow!(RamariaError::validation(format!(
+                    "读取评分数值失败: {}（请先运行 `ramaria probe evaluate` 生成）: {e}",
+                    p.display()
+                )))
+            })?;
+            match serde_json::from_str(&text) {
+                Ok(e) => Some(e),
+                Err(e) => {
+                    tracing::warn!(error = %e, "评分数值解析失败，报告仅含运行指标");
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+
+    // Step 3: 档位对比表
+    let mut rows = Vec::with_capacity(experiment.variants.len());
+    for vr in &experiment.variants {
+        let ev = evaluation
+            .as_ref()
+            .and_then(|e| e.variants.iter().find(|v| v.variant_id == vr.variant_id));
+        let success = vr.runs.len().saturating_sub(vr.failed_count);
+        rows.push(VariantReportRow {
+            variant_id: vr.variant_id.clone(),
+            description: vr.description.clone(),
+            params: vr.params.clone(),
+            fact_score: ev.and_then(|v| v.fact_score),
+            tone_score: ev.and_then(|v| v.tone_score),
+            success_count: success,
+            total_count: vr.runs.len(),
+            failed_count: vr.failed_count,
+        });
+    }
+
+    // Step 4: 定稿建议（基于评分，无评分时基于运行指标）
+    let recommendation = build_recommendation(&rows);
+
+    // Step 5: 人工抽检校准（可选）
+    let calibration = match calibration_path {
+        Some(p) => {
+            let manual = read_manual_scores(p)?;
+            Some(compute_calibration(&manual, evaluation.as_ref()))
+        }
+        None => None,
+    };
+
+    // Step 6: 知识层质量评估（基于评分数值 fact 题）
+    let knowledge_quality = evaluation.as_ref().map(assess_knowledge_quality);
+
+    let report = ProbeReport {
+        results_file: results_path.display().to_string(),
+        evaluation_file: evaluation_path.map(|p| p.display().to_string()),
+        persona_uid: experiment.persona_uid.clone(),
+        dataset_seed: experiment.dataset_seed,
+        judge_used: evaluation.as_ref().map(|e| e.judge_used).unwrap_or(false),
+        embedding_used: evaluation
+            .as_ref()
+            .map(|e| e.embedding_used)
+            .unwrap_or(false),
+        generated_at: now_iso8601(),
+        variants: rows,
+        recommendation,
+        calibration,
+        knowledge_quality,
+    };
+
+    // Step 7: 输出
+    if let Some(out) = output {
+        // 按扩展名判断输出形态：.json → JSON；.md → markdown；其他按 --json 决定
+        let is_json_file = out.ends_with(".json");
+        if is_json_file || (json && !out.ends_with(".md")) {
+            write_report_json(out, &report)?;
+        } else {
+            write_report_markdown(out, &report)?;
+        }
+        if json {
+            let data = serde_json::json!({
+                "file": out,
+                "persona_uid": report.persona_uid,
+                "variants": report.variants.len(),
+                "calibration": report.calibration.is_some(),
+                "knowledge_quality": report.knowledge_quality.is_some(),
+            });
+            return crate::json::emit_ok(&data);
+        }
+        crate::ui::success(&format!(
+            "探针报告已写入 {}（{} 档位对比，{}）",
+            out,
+            report.variants.len(),
+            if report.calibration.is_some() {
+                "含人工抽检校准"
+            } else {
+                "未校准"
+            }
+        ));
+        return Ok(());
+    }
+
+    if json {
+        return crate::json::emit_ok(&report);
+    }
+
+    print_report_summary(&report);
+    Ok(())
+}
+
+/// 构建定稿建议（每维最佳档位 + 综合建议）。
+fn build_recommendation(rows: &[VariantReportRow]) -> Recommendation {
+    let mut per_dimension = Vec::new();
+
+    // 事实维：取 fact_score 最高档位
+    let fact_best = rows
+        .iter()
+        .filter(|r| r.fact_score.is_some())
+        .max_by(|a, b| {
+            a.fact_score
+                .partial_cmp(&b.fact_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+    per_dimension.push(DimensionRecommendation {
+        dimension: "fact".to_string(),
+        best_variant: fact_best.map(|r| r.variant_id.clone()),
+        best_score: fact_best.and_then(|r| r.fact_score),
+        reason: match fact_best {
+            Some(r) => format!(
+                "事实维最高分 {:.2}（档位 {}）；综合 embedding 余弦与关键词命中",
+                r.fact_score.unwrap_or(0.0),
+                r.variant_id
+            ),
+            None => {
+                "无有效事实维评分（embedding 不可用或全部失败），无法给出事实维建议".to_string()
+            }
+        },
+    });
+
+    // 语气维：取 tone_score 最高档位
+    let tone_best = rows
+        .iter()
+        .filter(|r| r.tone_score.is_some())
+        .max_by(|a, b| {
+            a.tone_score
+                .partial_cmp(&b.tone_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+    per_dimension.push(DimensionRecommendation {
+        dimension: "tone".to_string(),
+        best_variant: tone_best.map(|r| r.variant_id.clone()),
+        best_score: tone_best.and_then(|r| r.tone_score),
+        reason: match tone_best {
+            Some(r) => format!(
+                "语气维最高分 {:.2}（档位 {}）；judge rubric 1~5 评分",
+                r.tone_score.unwrap_or(0.0),
+                r.variant_id
+            ),
+            None => "语气维 judge 不可用或已跳过，无法给出语气维建议".to_string(),
+        },
+    });
+
+    // 综合建议：若事实/语气最佳档位一致 → 取该档位；否则提示需人工权衡
+    let overall = match (fact_best, tone_best) {
+        (Some(f), Some(t)) if f.variant_id == t.variant_id => {
+            format!(
+                "综合建议档位 {}（事实与语气均最优）；需人工抽检校准后定稿",
+                f.variant_id
+            )
+        }
+        _ => "事实与语气最佳档位不一致，需结合人工抽检与定稿实验（M5）权衡取舍".to_string(),
+    };
+
+    Recommendation {
+        per_dimension,
+        overall,
+    }
+}
+
+// =========================================================
+// 人工抽检校准（T-V16-4-004）
+// =========================================================
+
+/// 读取人工抽检校准文件。
+///
+/// 格式（JSON）:
+/// ```json
+/// { "scores": [ {"item_id": "tone-0001", "score": 4}, ... ] }
+/// ```
+/// 或简单数组 `[{"item_id": "...", "score": 4}]`。
+fn read_manual_scores(path: &Path) -> anyhow::Result<Vec<ManualScore>> {
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        anyhow::anyhow!(RamariaError::validation(format!(
+            "读取校准文件失败: {}: {e}",
+            path.display()
+        )))
+    })?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| RamariaError::validation(format!("校准文件解析失败: {e}")))?;
+
+    let scores = if let Some(arr) = value.as_array() {
+        arr.clone()
+    } else if let Some(obj) = value.get("scores").and_then(|s| s.as_array()) {
+        obj.clone()
+    } else {
+        return Err(anyhow::anyhow!(RamariaError::validation(
+            "校准文件格式无效（应为 JSON 数组或 {scores:[...]}）"
+        )));
+    };
+
+    let mut out = Vec::with_capacity(scores.len());
+    for s in scores {
+        let item_id = s
+            .get("item_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!(RamariaError::validation("校准条目缺少 item_id 字段")))?
+            .to_string();
+        let score = s
+            .get("score")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| anyhow::anyhow!(RamariaError::validation("校准条目缺少 score 字段")))?;
+        out.push(ManualScore { item_id, score });
+    }
+    Ok(out)
+}
+
+/// 人工抽检单条分数。
+#[derive(Debug, Clone)]
+pub struct ManualScore {
+    pub item_id: String,
+    pub score: u64,
+}
+
+/// 计算人工抽检校准结果（一致性 / 偏差 / 校准系数）。
+///
+/// 说明:
+/// - 只统计 judge 有分的条目（tone 题 judge 分）。
+/// - `consistency_exact`: judge 与人工同分占比。
+/// - `mean_abs_diff`: 平均绝对差。
+/// - `bias`: judge 均分 − 人工均分。
+/// - `calibrated_coefficient`: 人工均分 / judge 均分（judge 均分为 0 时为 None）。
+/// - `inconsistent`: 同分占比 < 0.5 或 |bias| > 1.0（判定校准不一致）。
+fn compute_calibration(
+    manual: &[ManualScore],
+    evaluation: Option<&ProbeEvaluation>,
+) -> CalibrationResult {
+    // 收集 judge 分（从 evaluation 的 tone 题逐题明细）
+    let mut judge_by_item: std::collections::HashMap<String, u32> =
+        std::collections::HashMap::new();
+    if let Some(eval) = evaluation {
+        for v in &eval.variants {
+            for item in &v.items {
+                if let Some(tone) = &item.tone {
+                    judge_by_item.insert(item.item_id.clone(), tone.score);
+                }
+            }
+        }
+    }
+
+    // 配对：manual 中能在 judge 中找到分且维度匹配 tone 的条目
+    let mut pairs: Vec<(u32, u64)> = Vec::new();
+    for m in manual {
+        if let Some(j) = judge_by_item.get(&m.item_id) {
+            pairs.push((*j, m.score));
+        }
+    }
+
+    let sample_count = pairs.len();
+    if sample_count == 0 {
+        return CalibrationResult {
+            sample_count: 0,
+            total_count: manual.len(),
+            sample_rate: 0.0,
+            consistency_exact: 0.0,
+            mean_abs_diff: 0.0,
+            bias: 0.0,
+            calibrated_coefficient: None,
+            inconsistent: true,
+            annotation: "未找到任何与 judge 分匹配的人工抽检条目，无法校准".to_string(),
+        };
+    }
+
+    let total_count = manual.len();
+    let sample_rate = sample_count as f64 / total_count.max(1) as f64;
+
+    let exact = pairs.iter().filter(|(j, m)| *j as u64 == *m).count();
+    let consistency_exact = exact as f64 / sample_count as f64;
+
+    let mean_abs_diff = pairs
+        .iter()
+        .map(|(j, m)| (*j as f64 - *m as f64).abs())
+        .sum::<f64>()
+        / sample_count as f64;
+
+    let judge_mean = pairs.iter().map(|(j, _)| *j as f64).sum::<f64>() / sample_count as f64;
+    let manual_mean = pairs.iter().map(|(_, m)| *m as f64).sum::<f64>() / sample_count as f64;
+    let bias = judge_mean - manual_mean;
+
+    let calibrated_coefficient = if judge_mean.abs() < 1e-9 {
+        None
+    } else {
+        Some(manual_mean / judge_mean)
+    };
+
+    let inconsistent = consistency_exact < 0.5 || bias.abs() > 1.0;
+    let annotation = if inconsistent {
+        format!(
+            "一致性偏低（同分 {:.0}% / 均差 {:.2} / 偏差 {:.2}），judge 需人工复核或调参",
+            consistency_exact * 100.0,
+            mean_abs_diff,
+            bias
+        )
+    } else {
+        format!(
+            "一致性可接受（同分 {:.0}% / 均差 {:.2} / 偏差 {:.2}）",
+            consistency_exact * 100.0,
+            mean_abs_diff,
+            bias
+        )
+    };
+
+    CalibrationResult {
+        sample_count,
+        total_count,
+        sample_rate,
+        consistency_exact,
+        mean_abs_diff,
+        bias,
+        calibrated_coefficient,
+        inconsistent,
+        annotation,
+    }
+}
+
+// =========================================================
+// 知识层抽取质量评估（T-V16-4-005）
+// =========================================================
+
+/// 评估知识层抽取质量（误报 / 漏报率）。
+///
+/// 说明:
+/// - 基于评分数值中的 fact 题：以「回复是否充分回应事实性问题」判定命中。
+/// - 判定规则（无 reference 时的近似）:
+///   - `fact_hit`: 事实维 score ≥ 0.5（回复具体、信息充分）。
+///   - `false_positive`（误报）: score 低但判定器/知识注入本应提供事实（此处以 score < 0.3 计）。
+///   - `false_negative`（漏报）: score 居中但信息不足（score < 0.4 视为未充分回答事实）。
+/// - 漏报率目标 < 10%（D-V16-004）。
+fn assess_knowledge_quality(evaluation: &ProbeEvaluation) -> KnowledgeQualityReport {
+    let mut fact_items: Vec<&ItemEvaluation> = Vec::new();
+    for v in &evaluation.variants {
+        for item in &v.items {
+            if item.dimension == "fact" && item.fact.is_some() {
+                fact_items.push(item);
+            }
+        }
+    }
+
+    let sample_count = fact_items.len();
+    if sample_count == 0 {
+        return KnowledgeQualityReport {
+            sample_count: 0,
+            fact_hit_count: 0,
+            false_positive_rate: 0.0,
+            false_negative_rate: 0.0,
+            miss_target_met: false,
+            annotation: "无事实维样本，无法评估知识层质量".to_string(),
+        };
+    }
+
+    let fact_hit_count = fact_items
+        .iter()
+        .filter(|i| i.fact.as_ref().map(|f| f.score >= 0.5).unwrap_or(false))
+        .count();
+
+    // 误报：判定注入但回复未覆盖事实（score 低）——近似为 score < 0.3
+    let false_positive = fact_items
+        .iter()
+        .filter(|i| i.fact.as_ref().map(|f| f.score < 0.3).unwrap_or(false))
+        .count();
+
+    // 漏报：回复未充分回答事实问题（score < 0.4 视为信息不足）
+    let false_negative = fact_items
+        .iter()
+        .filter(|i| i.fact.as_ref().map(|f| f.score < 0.4).unwrap_or(false))
+        .count();
+
+    let false_positive_rate = false_positive as f64 / sample_count as f64;
+    let false_negative_rate = false_negative as f64 / sample_count as f64;
+    let miss_target_met = false_negative_rate < 0.10;
+
+    let annotation = if miss_target_met {
+        format!(
+            "漏报率 {:.1}% 达标（<10%）；误报率 {:.1}%",
+            false_negative_rate * 100.0,
+            false_positive_rate * 100.0
+        )
+    } else {
+        format!(
+            "漏报率 {:.1}% 未达标（目标 <10%）；误报率 {:.1}%；需优化知识抽取或检索召回",
+            false_negative_rate * 100.0,
+            false_positive_rate * 100.0
+        )
+    };
+
+    KnowledgeQualityReport {
+        sample_count,
+        fact_hit_count,
+        false_positive_rate,
+        false_negative_rate,
+        miss_target_met,
+        annotation,
+    }
+}
+
+// =========================================================
+// 报告输出辅助
+// =========================================================
+
+/// 写 JSON 报告到文件。
+fn write_report_json(out: &str, report: &ProbeReport) -> anyhow::Result<()> {
+    let json = serde_json::to_string_pretty(report).context("报告 JSON 序列化失败")?;
+    if out == "-" {
+        println!("{json}");
+    } else {
+        std::fs::write(out, format!("{json}\n")).with_context(|| format!("写入报告失败: {out}"))?;
+    }
+    Ok(())
+}
+
+/// 写 markdown 报告到文件。
+fn write_report_markdown(out: &str, report: &ProbeReport) -> anyhow::Result<()> {
+    let md = render_report_markdown(report);
+    if out == "-" {
+        print!("{md}");
+    } else {
+        std::fs::write(out, md).with_context(|| format!("写入报告失败: {out}"))?;
+    }
+    Ok(())
+}
+
+/// 渲染 markdown 报告（档位对比表 + 定稿建议 + 校准 + 知识层质量）。
+fn render_report_markdown(report: &ProbeReport) -> String {
+    let mut md = String::new();
+    md.push_str("# Ramaria 探针档位对比报告\n\n");
+    md.push_str(&format!("- persona: `{}`\n", report.persona_uid));
+    md.push_str(&format!("- 数据集 seed: {}\n", report.dataset_seed));
+    md.push_str(&format!(
+        "- 语气 judge: {} / 事实 embedding: {}\n",
+        report.judge_used, report.embedding_used
+    ));
+    md.push_str(&format!("- 生成时间: {}\n\n", report.generated_at));
+
+    // 档位对比表
+    md.push_str("## 档位评分对比\n\n");
+    md.push_str("| 档位 | 事实维 | 语气维 | 成功/总 | 失败 | 说明 |\n");
+    md.push_str("|------|:---:|:---:|:---:|:---:|------|\n");
+    for r in &report.variants {
+        let fact = r
+            .fact_score
+            .map(|s| format!("{:.2}", s))
+            .unwrap_or_else(|| "-".to_string());
+        let tone = r
+            .tone_score
+            .map(|s| format!("{:.2}", s))
+            .unwrap_or_else(|| "-".to_string());
+        md.push_str(&format!(
+            "| {} | {} | {} | {}/{} | {} | {} |\n",
+            r.variant_id,
+            fact,
+            tone,
+            r.success_count,
+            r.total_count,
+            r.failed_count,
+            r.description.replace('|', "\\|")
+        ));
+    }
+    md.push('\n');
+
+    // 定稿建议
+    md.push_str("## 定稿建议\n\n");
+    for d in &report.recommendation.per_dimension {
+        md.push_str(&format!(
+            "**{}**：{}（最佳档位 {}）\n\n",
+            d.dimension,
+            d.reason,
+            d.best_variant.as_deref().unwrap_or("—")
+        ));
+    }
+    md.push_str(&format!("**综合**：{}\n\n", report.recommendation.overall));
+
+    // 人工抽检校准
+    if let Some(c) = &report.calibration {
+        md.push_str("## 人工抽检校准\n\n");
+        md.push_str(&format!(
+            "- 抽检样本：{}/{}（{:.0}%）\n",
+            c.sample_count,
+            c.total_count,
+            c.sample_rate * 100.0
+        ));
+        md.push_str(&format!(
+            "- 同分一致性：{:.0}%\n",
+            c.consistency_exact * 100.0
+        ));
+        md.push_str(&format!("- 平均绝对差：{:.2}\n", c.mean_abs_diff));
+        md.push_str(&format!("- 偏差（judge−人工）：{:.2}\n", c.bias));
+        if let Some(coef) = c.calibrated_coefficient {
+            md.push_str(&format!("- 校准系数：{:.3}\n", coef));
+        }
+        md.push_str(&format!("- 标注：{}\n\n", c.annotation));
+    }
+
+    // 知识层质量
+    if let Some(kq) = &report.knowledge_quality {
+        md.push_str("## 知识层抽取质量评估\n\n");
+        md.push_str(&format!("- 样本数：{}（事实维）\n", kq.sample_count));
+        md.push_str(&format!("- 事实命中：{}\n", kq.fact_hit_count));
+        md.push_str(&format!(
+            "- 误报率：{:.1}%\n",
+            kq.false_positive_rate * 100.0
+        ));
+        md.push_str(&format!(
+            "- 漏报率：{:.1}%（目标 <10% → {})\n",
+            kq.false_negative_rate * 100.0,
+            if kq.miss_target_met {
+                "达标"
+            } else {
+                "未达标"
+            }
+        ));
+        md.push_str(&format!("- 结论：{}\n\n", kq.annotation));
+    }
+
+    md.push_str("---\n*由 `ramaria probe report` 自动生成，供 M5 定稿实验参考。*\n");
+    md
+}
+
+/// 文本模式打印报告摘要（stdout 只输出数据）。
+fn print_report_summary(report: &ProbeReport) {
+    println!(
+        "探针报告: persona={} | {} 档位对比 | judge={} | embedding={}",
+        report.persona_uid,
+        report.variants.len(),
+        report.judge_used,
+        report.embedding_used
+    );
+    for r in &report.variants {
+        let fact = r
+            .fact_score
+            .map(|s| format!("{:.2}", s))
+            .unwrap_or_else(|| "-".to_string());
+        let tone = r
+            .tone_score
+            .map(|s| format!("{:.2}", s))
+            .unwrap_or_else(|| "-".to_string());
+        println!(
+            "  档位 {:<14} 事实={:<6} 语气={:<6} 成功={}/{} — {}",
+            r.variant_id, fact, tone, r.success_count, r.total_count, r.description
+        );
+    }
+    println!("定稿建议: {}", report.recommendation.overall);
+    if let Some(c) = &report.calibration {
+        println!(
+            "校准: 样本 {}/{} 同分 {:.0}% 偏差 {:.2} {}",
+            c.sample_count,
+            c.total_count,
+            c.consistency_exact * 100.0,
+            c.bias,
+            if c.inconsistent {
+                "⚠ 不一致"
+            } else {
+                "✓ 一致"
+            }
+        );
+    }
+    if let Some(kq) = &report.knowledge_quality {
+        println!(
+            "知识层: 误报 {:.1}% 漏报 {:.1}% {}",
+            kq.false_positive_rate * 100.0,
+            kq.false_negative_rate * 100.0,
+            if kq.miss_target_met {
+                "（达标）"
+            } else {
+                "（未达标）"
+            }
+        );
+    }
+    crate::ui::info("用 --output 生成 markdown/JSON 报告文件");
 }
 
 // =========================================================
@@ -1477,6 +2966,50 @@ mod tests {
             .count();
             assert_eq!(changed, 1, "档位 {} 应只变化一个参数", v.id);
         }
+    }
+
+    // ---- read_experiment（实验结果文件缺失/非法 → 业务校验失败）----
+
+    #[test]
+    fn read_experiment_missing_file_is_validation_error() {
+        let err =
+            read_experiment(Path::new("/nonexistent/run.json")).expect_err("文件缺失必须报错");
+        let ramaria_err = err.downcast_ref::<RamariaError>();
+        assert!(
+            matches!(ramaria_err, Some(RamariaError::Validation { .. })),
+            "文件缺失应归类为业务校验失败（exit 4），实际: {ramaria_err:?}"
+        );
+    }
+
+    #[test]
+    fn read_experiment_malformed_json_is_validation_error() {
+        let path = std::env::temp_dir().join("ramaria_probe_bad_experiment.json");
+        std::fs::write(&path, "{ not json").expect("写入临时文件失败");
+        let err = read_experiment(&path).expect_err("非法 JSON 必须报错");
+        let ramaria_err = err.downcast_ref::<RamariaError>();
+        assert!(matches!(ramaria_err, Some(RamariaError::Validation { .. })));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ---- 输入文件缺失统一归业务校验失败（--results / --evaluation / --calibration / --dataset / --source）----
+
+    #[test]
+    fn read_manual_scores_missing_file_is_validation_error() {
+        let err = read_manual_scores(Path::new("/nonexistent/calib.json"))
+            .expect_err("校准文件缺失必须报错");
+        let ramaria_err = err.downcast_ref::<RamariaError>();
+        assert!(
+            matches!(ramaria_err, Some(RamariaError::Validation { .. })),
+            "校准文件缺失应归类为业务校验失败（exit 4），实际: {ramaria_err:?}"
+        );
+    }
+
+    #[test]
+    fn load_golden_references_missing_file_is_validation_error() {
+        let err = load_golden_references(Path::new("/nonexistent/dataset.json"))
+            .expect_err("数据集缺失必须报错");
+        let ramaria_err = err.downcast_ref::<RamariaError>();
+        assert!(matches!(ramaria_err, Some(RamariaError::Validation { .. })));
     }
 
     // ---- fixture ----

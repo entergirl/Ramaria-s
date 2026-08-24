@@ -417,6 +417,130 @@ fn probe_dataset_alias_and_json_envelope() {
     );
 }
 
+/// `--results` 文件缺失 → 业务校验失败 exit code=4（非通用失败 1），
+/// 且错误信封携带 error.code=4（与结构非法 JSON 的 exit 4 一致）。
+#[test]
+fn probe_evaluate_missing_results_uses_validation_exit_code() {
+    let out = run_cli(&[
+        "probe",
+        "evaluate",
+        "--results",
+        "/nonexistent/run.json",
+        "--json",
+    ]);
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "实验结果文件缺失应归业务校验失败 exit 4"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("错误信封应为合法 JSON");
+    assert_eq!(parsed["ok"], false);
+    assert_eq!(parsed["error"]["code"], 4, "错误信封应携带 exit code 4");
+}
+
+/// `probe report --results` 文件缺失 → 同样 exit code=4。
+#[test]
+fn probe_report_missing_results_uses_validation_exit_code() {
+    let out = run_cli(&[
+        "probe",
+        "report",
+        "--results",
+        "/nonexistent/run.json",
+        "--json",
+    ]);
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "报告读取实验结果失败也应归业务校验失败 exit 4"
+    );
+}
+
+/// `probe run --dataset` 文件缺失 → exit code=4（与注释声明的契约一致）。
+#[test]
+fn probe_run_missing_dataset_uses_validation_exit_code() {
+    let out = run_cli(&[
+        "probe",
+        "run",
+        "--dataset",
+        "/nonexistent/probe.json",
+        "--json",
+    ]);
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "数据集文件缺失应归业务校验失败 exit 4"
+    );
+}
+
+/// `probe report --evaluation` 文件缺失 → exit code=4（需先提供有效 results）。
+#[test]
+fn probe_report_missing_evaluation_uses_validation_exit_code() {
+    let dir = std::env::temp_dir().join(format!(
+        "ramaria_probe_report_eval_missing_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::create_dir_all(&dir);
+    let results = dir.join("results.json");
+    std::fs::write(&results, minimal_experiment_json()).expect("写入结果文件失败");
+    let out = run_cli(&[
+        "probe",
+        "report",
+        "--results",
+        results.to_str().unwrap(),
+        "--evaluation",
+        "/nonexistent/eval.json",
+        "--json",
+    ]);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "评分数值文件缺失应归业务校验失败 exit 4"
+    );
+}
+
+/// `probe report --calibration` 文件缺失 → exit code=4（需先提供有效 results）。
+#[test]
+fn probe_report_missing_calibration_uses_validation_exit_code() {
+    let dir = std::env::temp_dir().join(format!(
+        "ramaria_probe_report_calib_missing_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::create_dir_all(&dir);
+    let results = dir.join("results.json");
+    std::fs::write(&results, minimal_experiment_json()).expect("写入结果文件失败");
+    let out = run_cli(&[
+        "probe",
+        "report",
+        "--results",
+        results.to_str().unwrap(),
+        "--calibration",
+        "/nonexistent/calib.json",
+        "--json",
+    ]);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "校准文件缺失应归业务校验失败 exit 4"
+    );
+}
+
+/// 最小可解析的 ProbeExperiment JSON（空档位，供 report 走到 evaluation/calibration 读取步骤）。
+fn minimal_experiment_json() -> String {
+    serde_json::json!({
+        "dataset_file": "probe.json",
+        "dataset_seed": 1,
+        "persona_uid": "char-0001",
+        "rebuild_utt": false,
+        "variants": [],
+        "generated_at": "2026-08-24T00:00:00Z"
+    })
+    .to_string()
+}
+
 /// 运行真实 ramaria 二进制（临时空 DB），返回进程输出。
 fn run_cli(args: &[&str]) -> std::process::Output {
     use std::sync::atomic::{AtomicI64, Ordering};
