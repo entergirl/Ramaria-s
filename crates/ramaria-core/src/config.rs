@@ -125,6 +125,10 @@ pub struct RamariaConfig {
     #[serde(default)]
     pub knowledge: KnowledgeConfig,
 
+    /// 嵌入模型运行时配置（`[embedding]`，设备选择）。
+    #[serde(default)]
+    pub embedding: EmbeddingConfig,
+
     /// 杂项（预留扩展位，当前无字段）
     #[serde(default)]
     pub misc: MiscConfig,
@@ -172,6 +176,7 @@ impl Default for RamariaConfig {
             cache: CacheConfig::default(),
             behavior: BehaviorConfig::default(),
             knowledge: KnowledgeConfig::default(),
+            embedding: EmbeddingConfig::default(),
             misc: MiscConfig::default(),
         }
     }
@@ -1069,6 +1074,9 @@ pub struct BehaviorConfig {
     pub pending_expire_days: u32,
     /// 规则证据衰减保留率下限（默认 0.3，低于 → 降级/失效）
     pub evidence_decay_threshold: f64,
+    /// 行为层近期事件加权窗口（天）：窗口内事件 recency_factor=1.0，
+    /// 之后指数衰减（半衰期 = 窗口）。
+    pub recent_days: i64,
 }
 
 impl Default for BehaviorConfig {
@@ -1090,6 +1098,7 @@ impl Default for BehaviorConfig {
             max_outlier_ratio: 0.6,
             pending_expire_days: 30,
             evidence_decay_threshold: 0.3,
+            recent_days: 30,
         }
     }
 }
@@ -1140,6 +1149,83 @@ impl Default for KnowledgeConfig {
             corroboration_cosine_threshold: 0.7,
             injection_budget_chars: 800,
             volatile_halflife_days: 30,
+        }
+    }
+}
+
+// =========================================================
+// 嵌入模型运行时配置
+// =========================================================
+
+/// 嵌入模型计算设备选择。
+///
+/// 职责:
+/// - 控制 candle 编码器运行在哪个设备上（CPU / CUDA GPU / 自动探测）。
+/// - 序列化到 `[embedding] device` 配置项。
+///
+/// 降级约束:
+/// - `cuda` / `auto` 在 CUDA 不可用（未编译 feature 或环境无 GPU）时
+///   静默回退 CPU，不阻塞模型加载（回归红线：静默降级）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EmbeddingDevice {
+    /// 强制使用 CPU 推理（最保守，默认）。
+    Cpu,
+    /// 强制使用 CUDA GPU；不可用时回退 CPU。
+    Cuda,
+    /// 自动探测：CUDA 可用则用 GPU，否则 CPU。
+    Auto,
+}
+
+impl Default for EmbeddingDevice {
+    /// 默认使用自动探测设备。
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+impl EmbeddingDevice {
+    /// 返回人类可读的设备名（用于日志与诊断）。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            Self::Cuda => "cuda",
+            Self::Auto => "auto",
+        }
+    }
+
+    /// 从 config.toml 内容解析嵌入设备配置。
+    ///
+    /// 参数:
+    /// - `toml_text`: 配置文件全文。
+    ///
+    /// 返回:
+    /// - 解析成功返回 `[embedding].device`；文件缺失 / 解析失败 / 字段缺失
+    ///   均回退默认 `Auto`（静默降级，不阻塞启动）。
+    pub fn from_toml_str(toml_text: &str) -> Self {
+        toml::from_str::<RamariaConfig>(toml_text)
+            .map(|cfg| cfg.embedding.device)
+            .unwrap_or_default()
+    }
+}
+
+/// 嵌入模型运行时配置组（`[embedding]`）。
+///
+/// 职责:
+/// - 控制原生 safetensors 嵌入编码器的计算设备（CPU / CUDA / 自动）。
+/// - 设备选择不改变向量语义，仅影响推理性能。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EmbeddingConfig {
+    /// 编码器计算设备（cpu / cuda / auto）。
+    pub device: EmbeddingDevice,
+}
+
+impl Default for EmbeddingConfig {
+    /// 创建默认嵌入配置（自动探测设备）。
+    fn default() -> Self {
+        Self {
+            device: EmbeddingDevice::Auto,
         }
     }
 }

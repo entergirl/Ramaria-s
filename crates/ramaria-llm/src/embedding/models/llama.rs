@@ -4,7 +4,7 @@
 //! - 基于 `candle-transformers` 的 `Llama` 模型，兼容 Qwen2/Qwen3 架构（RMSNorm、RoPE、GQA、SwiGLU）
 //! - 仅用于嵌入提取（非生成），不维护 KV cache
 //! - 池化策略: Last token pooling（取最后一个有效 token 的 hidden state）+ L2 归一化
-//! - 所有计算在 CPU 上执行，保证 Send + Sync
+//! - 计算设备由调用方传入（CPU 或 CUDA GPU），权重经 `VarBuilder` 直接加载到目标设备
 //! - Qwen3 config.json 使用 `hidden_size` 字段（与 BERT 一致），非 LLaMA 的 `dim`
 //!
 //! 架构差异说明:
@@ -50,7 +50,7 @@ const CONFIG_FILE: &str = "config.json";
 /// - `tokenizer`: HuggingFace tokenizer（BPE 类型）
 /// - `dimension`: 向量维度（与 hidden_size 一致）
 /// - `config`: 模型配置（用于创建 Cache）
-/// - `device`: 计算设备（固定为 CPU）
+/// - `device`: 计算设备（CPU 或 CUDA GPU，由调用方传入）
 pub struct LlamaEncoder {
     model: Llama,
     tokenizer: Tokenizer,
@@ -77,9 +77,7 @@ impl LlamaEncoder {
     /// - config.json 与 safetensors 权重不匹配。
     /// - 分词器缺失或格式无效。
     /// - 模型过大导致 OOM（CPU 内存不足）。
-    pub fn load(model_dir: &Path) -> RamariaResult<Self> {
-        let device = Device::Cpu;
-
+    pub fn load(model_dir: &Path, device: &Device) -> RamariaResult<Self> {
         // ---- 加载 config.json ----
         // 注意: candle 0.8 的 LlamaConfig 未实现 Deserialize，需手动解析 JSON
         let config_path = model_dir.join(CONFIG_FILE);
@@ -133,7 +131,7 @@ impl LlamaEncoder {
         // (4) 文件大小可能很大（Qwen3-Embedding-0.6B ≈ 1.2GB），需确保系统内存充足。
         // 若文件被外部截断或修改，mmap 会触发 SIGBUS。此风险由用户承担。
         let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&[model_path.as_path()], DType::F32, &device)
+            VarBuilder::from_mmaped_safetensors(&[model_path.as_path()], DType::F32, device)
         }
         .map_err(|e| {
             ramaria_core::error::RamariaError::embedding(format!(
@@ -190,7 +188,7 @@ impl LlamaEncoder {
             tokenizer,
             dimension,
             config,
-            device,
+            device: device.clone(),
         })
     }
 

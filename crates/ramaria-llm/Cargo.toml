@@ -15,6 +15,15 @@ embedding-native = [
     "dep:safetensors",
     "dep:tokenizers",
 ]
+# 启用 candle CUDA 后端（GPU 向量推理，RTX 4060 等）。
+# 依赖系统安装 CUDA toolkit 与 nvcc；未启用时 device=cuda/auto 自动回退 CPU。
+# 需与 embedding-native 一起启用。
+cuda = [
+    "embedding-native",
+    "candle-core/cuda",
+    "candle-nn/cuda",
+    "candle-transformers/cuda",
+]
 # 旧 ONNX 路径（保留兼容，Phase 2 后移除）
 embedding-onnx = ["dep:ort", "dep:tokenizers", "dep:ndarray"]
 

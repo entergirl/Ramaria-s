@@ -265,13 +265,21 @@ async fn init_app(
                     );
                     None
                 } else {
-                    match ramaria_llm::embedding::native::create_native_provider(model_dir) {
+                    // 计算设备按 `[embedding]` 配置（cpu/cuda/auto；CUDA 不可用回退 CPU）。
+                    // config.toml 完整加载在 Step 6/7，此处仅读取设备配置。
+                    let device = std::fs::read_to_string(&config_path)
+                        .map(|text| ramaria_core::config::EmbeddingDevice::from_toml_str(&text))
+                        .unwrap_or_default();
+                    match ramaria_llm::embedding::native::create_native_provider_with_device(
+                        model_dir, device,
+                    ) {
                         Ok(provider) => {
                             let info = provider.model_info();
                             tracing::info!(
                                 path = %saved_path,
                                 model_id = %info.model_id,
                                 dim = info.dimension,
+                                device = device.as_str(),
                                 "已恢复嵌入模型"
                             );
                             Some(Arc::new(provider) as Arc<dyn EmbeddingProvider>)

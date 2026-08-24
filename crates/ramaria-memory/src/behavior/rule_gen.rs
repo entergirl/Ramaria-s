@@ -51,7 +51,8 @@ impl From<&BehaviorConfig> for RuleGenConfig {
             min_evidence: cfg.min_evidence,
             min_n_eff: cfg.min_n_eff,
             valence_std_limit: cfg.valence_std_limit,
-            recent_days: 30,
+            // 近期事件加权窗口从 `[behavior].recent_days` 配置读取
+            recent_days: cfg.recent_days,
             max_retries: 1,
             temperature: 0.3,
             max_tokens: 1024,
@@ -281,23 +282,42 @@ pub fn recency_factor(event_start_ms: i64, now_ms: i64, recent_days: i64) -> f64
 /// 构建证据列表（簇内事件 → 事件 id + 加权权重）。
 ///
 /// 说明:
-/// - 权重 = salience × 近期因子，保证新近事件对规则影响更大（近期事件加权）。
-/// - 排序按 start 时间升序（证据链展示稳定）。
+/// - 权重 = salience × 近期因子（`evidence_weight`），保证新近事件对规则影响更大
+///   （近期事件加权，v3.1 §4.2 Step 4）。
+/// - 使用簇成员的真实 `start_ms` / `salience`（D-V16-007，修复原"恒 1.0"缺陷）。
+/// - 排序按事件 id 升序（证据链展示稳定）。
+///
+/// 回退:
+/// - 若 `member_events` 为空（未保留逐事件信息），回退为按 n_eff 均匀分摊 +
+///   保守默认 salience=0.5 + 近期时间，保证总和 ≈ n_eff（存量兼容）。
 pub fn build_evidence(cluster: &RefinedCluster, now_ms: i64, recent_days: i64) -> Vec<(i64, f64)> {
-    // 簇提炼未保留逐事件 salience/start，这里按事件 id 顺序均匀引用；
-    // 权重取 n_eff 分摊 × 近期因子（保守默认 salience=0.5，保证总和 ≈ n_eff）。
-    let n = cluster.member_event_ids.len().max(1) as f64;
-    let base = cluster.n_eff / n;
-    let mut ev: Vec<(i64, f64)> = cluster
-        .member_event_ids
-        .iter()
-        .map(|&id| {
-            (
-                id,
-                (base * recency_factor(now_ms - 1_000, now_ms, recent_days)).clamp(0.0, 1.0),
-            )
-        })
-        .collect();
+    let mut ev: Vec<(i64, f64)> = if !cluster.member_events.is_empty() {
+        // 主路径：真实逐事件 start/salience 计算近期加权权重。
+        cluster
+            .member_events
+            .iter()
+            .map(|m| {
+                (
+                    m.event_id,
+                    evidence_weight(m.salience, m.start_ms, now_ms, recent_days),
+                )
+            })
+            .collect()
+    } else {
+        // 回退：无逐事件信息时按 n_eff 分摊 × 近期因子（保守默认 salience=0.5）。
+        let n = cluster.member_event_ids.len().max(1) as f64;
+        let base = cluster.n_eff / n;
+        cluster
+            .member_event_ids
+            .iter()
+            .map(|&id| {
+                (
+                    id,
+                    base * recency_factor(now_ms - 1_000, now_ms, recent_days),
+                )
+            })
+            .collect()
+    };
     ev.sort_by_key(|(id, _)| *id);
     ev
 }
@@ -694,6 +714,14 @@ mod tests {
             cohesion: 0.8,
             quality: 0.6,
             member_event_ids: (1..=sample_count as i64).collect(),
+            member_events: (1..=sample_count as i64)
+                .map(|id| crate::behavior::clustering::ClusterMember {
+                    event_id: id,
+                    // 默认近 5 天内的近期事件（recency_factor ≈ 1.0）
+                    start_ms: ramaria_core::types::now_ms() - 5 * 86_400_000,
+                    salience: 0.5,
+                })
+                .collect(),
         }
     }
 

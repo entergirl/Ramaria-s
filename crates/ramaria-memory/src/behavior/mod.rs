@@ -18,9 +18,9 @@ pub mod rule_gen;
 pub mod sentiment;
 
 pub use clustering::{
-    BehaviorClusterer, BehaviorSample, DensityClusterResult, RefinedCluster, cosine_clipped,
-    dedup_keywords, density_cluster, fused_similarity, jaccard, refine_cluster, sample_from_event,
-    vectorize,
+    BehaviorClusterer, BehaviorSample, ClusterMember, DensityClusterResult, RefinedCluster,
+    cosine_clipped, dedup_keywords, density_cluster, fused_similarity, jaccard, refine_cluster,
+    sample_from_event, vectorize,
 };
 pub use incremental::{
     IncrementalUpdateOutcome, PendingEvent, PendingPool, assign_event_to_cluster,

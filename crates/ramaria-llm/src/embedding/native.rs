@@ -9,6 +9,7 @@
 //! - P-1 修复：推理操作在锁外执行（先 clone Arc → 释放锁 → 推理），不阻塞其他请求
 //! - CPU 密集型推理使用 `tokio::task::block_in_place` 避免阻塞 async 运行时
 //! - 超时保护：单条 30s、批量 120s，防止模型加载/推理卡死
+//! - 设备选择：由调用方传入 `EmbeddingDevice`（cpu/cuda/auto），CUDA 不可用时静默回退 CPU
 //!
 //! 模型目录约定:
 //! - 需包含: config.json, model.safetensors, tokenizer.json
@@ -23,6 +24,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+use candle_core::Device;
+use ramaria_core::config::EmbeddingDevice;
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::traits::{EmbeddingModelInfo, EmbeddingProvider};
 
@@ -37,6 +40,57 @@ const EMBED_TIMEOUT_SECS: u64 = 30;
 
 /// 批量嵌入超时（秒）。最多 100 条，每条 500ms → 50s，120s 留有充足余量。
 const EMBED_BATCH_TIMEOUT_SECS: u64 = 120;
+
+// =========================================================
+// 设备解析
+// =========================================================
+
+/// 将 `EmbeddingDevice` 配置解析为具体的 candle 计算设备。
+///
+/// 规则:
+/// - `cpu` → `Device::Cpu`。
+/// - `cuda` → 尝试 CUDA；不可用（未编译 feature / 无 GPU）回退 CPU 并记 warn。
+/// - `auto` → 自动探测：CUDA 可用则用 GPU，否则 CPU。
+///
+/// 说明:
+/// - CUDA 功能需在编译时启用 `cuda` feature（`candle-core/cuda`）；
+///   未启用时 `Device::Cuda` 变体不可用，恒回退 CPU。
+/// - 设备选择不改变向量语义，仅影响推理性能。
+fn resolve_device(device: EmbeddingDevice) -> Device {
+    match device {
+        EmbeddingDevice::Cpu => Device::Cpu,
+        EmbeddingDevice::Cuda | EmbeddingDevice::Auto => {
+            #[cfg(feature = "cuda")]
+            {
+                match Device::cuda_if_available(0) {
+                    Ok(d) => {
+                        tracing::info!(
+                            device = %device.as_str(),
+                            "嵌入模型使用 CUDA GPU 推理"
+                        );
+                        d
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            requested = %device.as_str(),
+                            error = %e,
+                            "CUDA 设备不可用，嵌入模型回退 CPU 推理"
+                        );
+                        Device::Cpu
+                    }
+                }
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                tracing::warn!(
+                    requested = %device.as_str(),
+                    "未编译 CUDA 支持（缺少 cuda feature），嵌入模型使用 CPU 推理"
+                );
+                Device::Cpu
+            }
+        }
+    }
+}
 
 // =========================================================
 // 内部编码器枚举
@@ -103,6 +157,7 @@ impl Encoder {
 /// - `model_info`: 模型元信息（构造时从 config.json 确定，之后不可变）
 /// - `encoder`: 惰性加载的编码器（Arc 包裹，推理时 clone Arc 后释放锁，不阻塞其他请求）
 /// - `progress`: 模型就绪进度（文件齐全时 = 1.0，否则 = 0.0）
+/// - `device`: 计算设备选择（cpu/cuda/auto；cuda 不可用时回退 cpu）
 ///
 /// 用法:
 /// 需本机 safetensors 模型目录（`/path/to/model` 为占位路径），示例仅示意，不参与编译。
@@ -126,6 +181,8 @@ pub struct NativeEmbeddingProvider {
     encoder: Mutex<Option<Arc<Encoder>>>,
     /// 模型就绪进度
     progress: Mutex<f64>,
+    /// 计算设备选择（cpu/cuda/auto）；CUDA 不可用时静默回退 CPU。
+    device: EmbeddingDevice,
 }
 
 impl NativeEmbeddingProvider {
@@ -141,7 +198,24 @@ impl NativeEmbeddingProvider {
     /// - 构造时读取 config.json 检测架构和维度。
     /// - 如果 config.json 不可用（模型未下载），使用默认维度 384。
     /// - 模型权重的实际加载延迟到首次 `embed` 调用。
+    /// - 计算设备默认使用自动探测（`EmbeddingDevice::Auto`）。
     pub fn new(model_dir: impl Into<PathBuf>) -> RamariaResult<Self> {
+        Self::with_device(model_dir, EmbeddingDevice::Auto)
+    }
+
+    /// 创建 provider 并指定计算设备。
+    ///
+    /// 参数:
+    /// - `model_dir`: 模型目录路径。
+    /// - `device`: 计算设备选择（cpu/cuda/auto）。
+    ///
+    /// 说明:
+    /// - 设备选择在首次加载权重时解析为具体 `candle Device`；
+    ///   CUDA 不可用时静默回退 CPU（回归红线：静默降级）。
+    pub fn with_device(
+        model_dir: impl Into<PathBuf>,
+        device: EmbeddingDevice,
+    ) -> RamariaResult<Self> {
         let dir: PathBuf = model_dir.into();
         let model_exists = Self::check_files_exist(&dir);
 
@@ -186,6 +260,7 @@ impl NativeEmbeddingProvider {
             model_exists,
             dimension,
             progress,
+            device = device.as_str(),
             "NativeEmbeddingProvider 已创建"
         );
 
@@ -194,6 +269,7 @@ impl NativeEmbeddingProvider {
             model_info: Mutex::new(info),
             encoder: Mutex::new(None),
             progress: Mutex::new(progress),
+            device,
         })
     }
 
@@ -220,8 +296,11 @@ impl NativeEmbeddingProvider {
         // 检测架构
         let (architecture, _dimension) = models::detect_architecture(&self.model_dir)?;
 
+        // 解析计算设备（cuda/auto 在 CUDA 不可用时回退 CPU，静默降级）
+        let device = resolve_device(self.device);
+
         // 根据架构加载编码器 — 带容错回退
-        let encoder = Self::load_encoder(architecture, &self.model_dir)?;
+        let encoder = Self::load_encoder(architecture, &self.model_dir, &device)?;
 
         let actual_dim = encoder.dimension();
         let arch_name = encoder.architecture().name();
@@ -262,9 +341,14 @@ impl NativeEmbeddingProvider {
     /// - BGE 等模型的 config.json 有时使用非标准 architecture 名，
     ///   导致检测为 LLaMA 但 safetensors 实际是 BERT 格式。
     /// - 此容错机制可处理这类边缘情况。
-    fn load_encoder(detected: ModelArchitecture, model_dir: &Path) -> RamariaResult<Encoder> {
+    /// - `device` 已由调用方解析为具体 candle 设备（CPU 或 CUDA）。
+    fn load_encoder(
+        detected: ModelArchitecture,
+        model_dir: &Path,
+        device: &Device,
+    ) -> RamariaResult<Encoder> {
         // 先尝试检测到的架构
-        let primary_result = Self::try_load(detected, model_dir);
+        let primary_result = Self::try_load(detected, model_dir, device);
         match primary_result {
             Ok(encoder) => Ok(encoder),
             Err(primary_err) => {
@@ -281,7 +365,7 @@ impl NativeEmbeddingProvider {
                     "主架构加载失败，尝试回退架构"
                 );
 
-                match Self::try_load(fallback, model_dir) {
+                match Self::try_load(fallback, model_dir, device) {
                     Ok(encoder) => {
                         tracing::info!(
                             from = %detected.name(),
@@ -311,18 +395,23 @@ impl NativeEmbeddingProvider {
     }
 
     /// 尝试加载指定架构的编码器。
-    fn try_load(arch: ModelArchitecture, model_dir: &Path) -> RamariaResult<Encoder> {
+    fn try_load(
+        arch: ModelArchitecture,
+        model_dir: &Path,
+        device: &Device,
+    ) -> RamariaResult<Encoder> {
         match arch {
             ModelArchitecture::Bert => {
-                let bert = super::models::bert::BertEncoder::load(model_dir)?;
+                let bert = super::models::bert::BertEncoder::load(model_dir, device)?;
                 Ok(Encoder::Bert(bert))
             }
             ModelArchitecture::Llama => {
-                let llama = super::models::llama::LlamaEncoder::load(model_dir)?;
+                let llama = super::models::llama::LlamaEncoder::load(model_dir, device)?;
                 Ok(Encoder::Llama(llama))
             }
             ModelArchitecture::LlamaHeadDim => {
-                let encoder = super::models::llama_head_dim::LlamaHeadDimEncoder::load(model_dir)?;
+                let encoder =
+                    super::models::llama_head_dim::LlamaHeadDimEncoder::load(model_dir, device)?;
                 Ok(Encoder::LlamaHeadDim(encoder))
             }
         }
@@ -535,11 +624,26 @@ impl EmbeddingProvider for NativeEmbeddingProvider {
 /// - `model_dir`: 模型目录路径。
 ///
 /// 返回:
-/// - `NativeEmbeddingProvider` 实例。
+/// - `NativeEmbeddingProvider` 实例（计算设备默认自动探测）。
 pub fn create_native_provider(
     model_dir: impl Into<PathBuf>,
 ) -> RamariaResult<NativeEmbeddingProvider> {
     NativeEmbeddingProvider::new(model_dir)
+}
+
+/// 创建原生 safetensors 嵌入 provider 并指定计算设备。
+///
+/// 参数:
+/// - `model_dir`: 模型目录路径。
+/// - `device`: 计算设备选择（cpu/cuda/auto）。
+///
+/// 返回:
+/// - `NativeEmbeddingProvider` 实例。
+pub fn create_native_provider_with_device(
+    model_dir: impl Into<PathBuf>,
+    device: EmbeddingDevice,
+) -> RamariaResult<NativeEmbeddingProvider> {
+    NativeEmbeddingProvider::with_device(model_dir, device)
 }
 
 // =========================================================

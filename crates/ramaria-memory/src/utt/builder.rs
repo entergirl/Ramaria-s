@@ -11,6 +11,9 @@
 //! - 每行 `[YYYY-MM-DD HH:MM] 角色: 内容`，块内消息按时间升序
 //! - 角色名：目标 persona 用其注册名（查询失败回退 uid），用户消息显示"用户"
 
+use std::collections::HashMap;
+use std::sync::Mutex;
+
 use chrono::{Local, TimeZone};
 use ramaria_core::config::UttConfig;
 use ramaria_core::error::RamariaResult;
@@ -25,11 +28,17 @@ use super::{UttChunk, UttSplitterConfig, encode_embedding, infer_target_persona_
 /// rama 自身会话（Session.persona_uid 为 None）使用的块归属 UID。
 const RAMA_FALLBACK_UID: &str = "rama-0001";
 
-/// utt 构建配置（切分参数）。
+/// utt 构建配置（切分参数 + 内容级去重开关）。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct UttBuildConfig {
     /// 切分参数
     pub splitter: UttSplitterConfig,
+    /// 内容级去重开关（生产路径经 `from_config` 默认开启）。
+    ///
+    /// `true` → 同一构建周期内内容未变的块复用已生成的 embedding，
+    /// 避免重复会话/未变块全量重算（全量重建退化为增量 O(变动块)）。
+    /// `false` → 逐块重算 embedding（性能兜底可关闭）。
+    pub content_dedup: bool,
 }
 
 /// 一次构建的统计结果（供日志与测试断言）。
@@ -45,6 +54,8 @@ pub struct UttBuildStats {
     pub chunks_removed: usize,
     /// 成功生成 embedding 的块数
     pub embedding_ok: usize,
+    /// 内容级去重复用的 embedding 块数（未重算）
+    pub embedding_reused: usize,
     /// embedding 生成失败的块数（降级为无向量）
     pub embedding_failed: usize,
 }
@@ -63,6 +74,14 @@ pub struct UttBuildStats {
 pub struct UttBuilder {
     /// 构建配置
     config: UttBuildConfig,
+    /// 内容级去重缓存：块文本内容 hash → embedding 向量。
+    ///
+    /// 说明:
+    /// - 在同一构建器生命周期内跨会话复用（`rebuild_all` 遍历全部会话）。
+    /// - 内容未变的块复用缓存向量，避免重复重算 embedding。
+    /// - 用 `Mutex` 保护：`write_chunk` 在 async 中持锁时间极短（hash 查找/插入），
+    ///   不跨 `.await` 持锁（embedding 计算在锁外）。
+    embedding_cache: Mutex<HashMap<u64, Vec<f32>>>,
 }
 
 impl UttBuilder {
@@ -71,7 +90,10 @@ impl UttBuilder {
     /// 参数:
     /// - `config`: 切分配置。
     pub fn new(config: UttBuildConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            embedding_cache: Mutex::new(HashMap::new()),
+        }
     }
 
     /// 从应用配置创建构建器（`[utt]` 组）。
@@ -84,6 +106,7 @@ impl UttBuilder {
                 theta_gap_minutes: cfg.theta_gap_minutes,
                 max_msgs_per_block: cfg.max_msgs_per_block,
             },
+            content_dedup: true,
         })
     }
 
@@ -227,6 +250,7 @@ impl UttBuilder {
                     total.chunks_skipped += stats.chunks_skipped;
                     total.chunks_removed += stats.chunks_removed;
                     total.embedding_ok += stats.embedding_ok;
+                    total.embedding_reused += stats.embedding_reused;
                     total.embedding_failed += stats.embedding_failed;
                 }
                 Err(e) => {
@@ -249,7 +273,12 @@ impl UttBuilder {
     // 内部：写入单个块
     // =========================================================
 
-    /// 渲染块文本 → 生成 embedding → 入库。
+    /// 渲染块文本 → 生成 embedding（含内容级去重）→ 入库。
+    ///
+    /// 内容级去重（T-V16-5-002）:
+    /// - 同一构建周期内，内容未变的块（`block_text` 哈希一致）复用缓存向量，
+    ///   避免重复会话/未变块全量重算 embedding。
+    /// - 去重关闭、hash 缺失、embedding 不可用时回退逐块重算。
     async fn write_chunk(
         &self,
         storage: &dyn StorageBackend,
@@ -273,19 +302,49 @@ impl UttBuilder {
 
         // embedding 生成（失败降级：块照常入库，仅无向量）
         if let Some(provider) = embedder {
-            match provider.embed(&block.block_text).await {
-                Ok(vec) => {
-                    block.embedding = Some(encode_embedding(&vec));
-                    stats.embedding_ok += 1;
+            let content_hash = content_hash(&block.block_text);
+            // 内容级去重：命中缓存 → 复用向量，不触发新的 embedding 推理。
+            let reused = if self.config.content_dedup {
+                let cached = self
+                    .embedding_cache
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&content_hash)
+                    .cloned();
+                match cached {
+                    Some(vec) => {
+                        block.embedding = Some(encode_embedding(&vec));
+                        stats.embedding_reused += 1;
+                        true
+                    }
+                    None => false,
                 }
-                Err(e) => {
-                    stats.embedding_failed += 1;
-                    warn!(
-                        session_id = %block.session_id,
-                        start_msg_id = %block.start_msg_id,
-                        %e,
-                        "utt 块 embedding 生成失败，降级为无向量（不影响入库）"
-                    );
+            } else {
+                false
+            };
+
+            if !reused {
+                match provider.embed(&block.block_text).await {
+                    Ok(vec) => {
+                        // 去重开启时写入缓存，供后续同内容块复用（锁内短操作，不跨 await）。
+                        if self.config.content_dedup {
+                            self.embedding_cache
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .insert(content_hash, vec.clone());
+                        }
+                        block.embedding = Some(encode_embedding(&vec));
+                        stats.embedding_ok += 1;
+                    }
+                    Err(e) => {
+                        stats.embedding_failed += 1;
+                        warn!(
+                            session_id = %block.session_id,
+                            start_msg_id = %block.start_msg_id,
+                            %e,
+                            "utt 块 embedding 生成失败，降级为无向量（不影响入库）"
+                        );
+                    }
                 }
             }
         }
@@ -313,6 +372,21 @@ async fn resolve_persona_name(storage: &dyn StorageBackend, uid: &str) -> String
         Ok(Some(p)) if !p.name.is_empty() => p.name,
         _ => uid.to_string(),
     }
+}
+
+/// 计算块文本的内容哈希（用于内容级去重）。
+///
+/// 说明:
+/// - 用 64 位 FNV-1a 哈希（碰撞概率在去重场景可接受；即使碰撞也只是多算一次 embedding，
+///   不影响正确性——向量仍来自同内容文本）。
+/// - 不记录原文，仅作为去重键，符合原文隐私约束。
+fn content_hash(text: &str) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in text.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 /// 渲染消息的发言人标记。
@@ -495,6 +569,7 @@ mod tests {
                 theta_gap_minutes: 30,
                 max_msgs_per_block: 40,
             },
+            content_dedup: true,
         })
     }
 

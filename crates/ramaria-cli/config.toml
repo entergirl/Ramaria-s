@@ -131,6 +131,7 @@ valence_std_limit = 0.5
 max_outlier_ratio = 0.6
 pending_expire_days = 30
 evidence_decay_threshold = 0.3
+recent_days = 30
 
 [knowledge]
 auto_fact_detect = false
@@ -140,5 +141,8 @@ dedup_keyword_min = 1
 corroboration_cosine_threshold = 0.7
 injection_budget_chars = 800
 volatile_halflife_days = 30
+
+[embedding]
+device = "auto"
 
 [misc]

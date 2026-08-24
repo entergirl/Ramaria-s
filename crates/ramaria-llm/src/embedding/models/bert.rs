@@ -5,7 +5,7 @@
 //! - 仅使用 encoder（BERT 无 decoder），适用于嵌入提取场景
 //! - 池化策略: Mean pooling（attention_mask 加权平均）+ L2 归一化
 //! - 最大序列长度: 512 tokens（bge-small-zh-v1.5 标准）
-//! - 所有 candle 张量操作在 CPU 上执行（Device::Cpu），保证 Send + Sync
+//! - 计算设备由调用方传入（CPU 或 CUDA GPU），权重经 `VarBuilder` 直接加载到目标设备
 //! - 输入使用 i64 token IDs（与 HuggingFace tokenizers 输出对齐）
 
 use candle_core::{DType, Device, IndexOp, Tensor};
@@ -45,7 +45,7 @@ const CONFIG_FILE: &str = "config.json";
 /// - `model`: candle BertModel 实例
 /// - `tokenizer`: HuggingFace tokenizer
 /// - `dimension`: 向量维度（与 BERT hidden_size 一致）
-/// - `device`: 计算设备（固定为 CPU）
+/// - `device`: 计算设备（CPU 或 CUDA GPU，由调用方传入）
 pub struct BertEncoder {
     model: BertModel,
     tokenizer: Tokenizer,
@@ -58,6 +58,7 @@ impl BertEncoder {
     ///
     /// 参数:
     /// - `model_dir`: 包含 config.json、model.safetensors、tokenizer.json 的目录。
+    /// - `device`: 计算设备（CPU 或 CUDA GPU），权重将加载到该设备。
     ///
     /// 返回:
     /// - 已加载并可用于推理的 BertEncoder。
@@ -67,9 +68,7 @@ impl BertEncoder {
     /// - config.json 解析失败。
     /// - safetensors 权重加载失败（文件损坏、键名不匹配）。
     /// - 分词器加载失败。
-    pub fn load(model_dir: &Path) -> RamariaResult<Self> {
-        let device = Device::Cpu;
-
+    pub fn load(model_dir: &Path, device: &Device) -> RamariaResult<Self> {
         // ---- 加载 config.json ----
         let config_path = model_dir.join(CONFIG_FILE);
         let config = Self::parse_config(&config_path)?;
@@ -99,7 +98,7 @@ impl BertEncoder {
         // 若文件被外部截断或修改，mmap 会触发 SIGBUS。此风险由用户操作模型文件的行为承担，
         // 属于本地部署场景的可接受边界。
         let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&[model_path.as_path()], DType::F32, &device)
+            VarBuilder::from_mmaped_safetensors(&[model_path.as_path()], DType::F32, device)
         }
         .map_err(|e| {
             ramaria_core::error::RamariaError::embedding(format!(
@@ -145,7 +144,7 @@ impl BertEncoder {
             model,
             tokenizer,
             dimension,
-            device,
+            device: device.clone(),
         })
     }
 

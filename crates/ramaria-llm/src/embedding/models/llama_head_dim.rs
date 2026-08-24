@@ -14,7 +14,7 @@
 //!   天然无状态，也不依赖 candle 内部私有 `clear_kv_cache` API
 //! - 仅用于嵌入提取（非生成）
 //! - 池化策略: Last token pooling（取最后一个有效 token 的 hidden state）+ L2 归一化
-//! - 所有计算在 CPU 上执行，保证 Send + Sync
+//! - 计算设备由调用方传入（CPU 或 CUDA GPU），权重经 `VarBuilder` 直接加载到目标设备
 //! - 最大序列长度: 2048 tokens
 //!
 //! 依赖前提:
@@ -389,6 +389,7 @@ impl LlamaHeadDimEncoder {
     ///
     /// 参数:
     /// - `model_dir`: 包含 config.json、model.safetensors、tokenizer.json 的目录。
+    /// - `device`: 计算设备（CPU 或 CUDA GPU），权重将加载到该设备。
     ///
     /// 返回:
     /// - 已加载并可用于推理的 LlamaHeadDimEncoder。
@@ -403,9 +404,7 @@ impl LlamaHeadDimEncoder {
     /// - config.json 与 safetensors 权重不匹配。
     /// - 分词器缺失或格式无效。
     /// - 模型过大导致 OOM。
-    pub fn load(model_dir: &Path) -> RamariaResult<Self> {
-        let device = Device::Cpu;
-
+    pub fn load(model_dir: &Path, device: &Device) -> RamariaResult<Self> {
         // ---- 加载 config.json（qwen3::Config 支持 Deserialize：
         //      head_dim: usize + sliding_window: Option<usize>，null 天然兼容）----
         let config_path = model_dir.join(CONFIG_FILE);
@@ -480,7 +479,7 @@ impl LlamaHeadDimEncoder {
         // (3) tensor 数据类型为 F32（DType::F32），与 candle 期望一致。
         // 若文件被外部截断或修改，mmap 会触发 SIGBUS。
         let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&[model_path.as_path()], DType::F32, &device)
+            VarBuilder::from_mmaped_safetensors(&[model_path.as_path()], DType::F32, device)
         }
         .map_err(|e| {
             ramaria_core::error::RamariaError::embedding(format!(
@@ -544,7 +543,7 @@ impl LlamaHeadDimEncoder {
             model: Mutex::new(model),
             tokenizer,
             dimension,
-            device,
+            device: device.clone(),
         })
     }
 

@@ -452,6 +452,21 @@ pub fn density_cluster(
 // 簇提炼
 // =========================================================
 
+/// 簇成员逐事件信息（供近期事件加权证据链）。
+///
+/// 职责:
+/// - 保留每个成员的 `start_ms` 与 `salience`，使 `build_evidence` 能用真实
+///   事件时间计算 recency_factor（修复"恒 1.0"缺陷，D-V16-007）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClusterMember {
+    /// 事件 id（锚点可能为负，调用方过滤后写入证据链）
+    pub event_id: i64,
+    /// 事件开始时间（Unix 毫秒）
+    pub start_ms: i64,
+    /// 显著性权重（salience 加权）
+    pub salience: f64,
+}
+
 /// 提炼后的簇（可直接构造 `BehaviorSituation` 持久化）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct RefinedCluster {
@@ -465,6 +480,10 @@ pub struct RefinedCluster {
     pub quality: f64,
     /// 簇内事件 id（证据链引用）
     pub member_event_ids: Vec<i64>,
+    /// 簇成员逐事件信息（保留 start/salience，供近期事件加权）。
+    ///
+    /// 与 `member_event_ids` 一一对应（同索引），顺序一致。
+    pub member_events: Vec<ClusterMember>,
 }
 
 /// 关键词并集保留的 Top-N 条数。
@@ -615,6 +634,14 @@ pub fn refine_cluster(
         cohesion,
         quality,
         member_event_ids: member_samples.iter().map(|s| s.event_id).collect(),
+        member_events: member_samples
+            .iter()
+            .map(|s| ClusterMember {
+                event_id: s.event_id,
+                start_ms: s.start_ms,
+                salience: s.salience,
+            })
+            .collect(),
     }
 }
 

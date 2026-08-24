@@ -697,13 +697,18 @@ async fn init_app(db_path: PathBuf) -> anyhow::Result<(Arc<ramaria_app::App>, sq
                     );
                     None
                 } else {
-                    match ramaria_llm::embedding::native::create_native_provider(model_dir) {
+                    // 按 `[embedding]` 配置选择计算设备（cpu/cuda/auto；CUDA 不可用回退 CPU）。
+                    let device = config.embedding.device;
+                    match ramaria_llm::embedding::native::create_native_provider_with_device(
+                        model_dir, device,
+                    ) {
                         Ok(provider) => {
                             let info = provider.model_info();
                             tracing::info!(
                                 path = %saved_path,
                                 model_id = %info.model_id,
                                 dim = info.dimension,
+                                device = device.as_str(),
                                 "已恢复嵌入模型（向量通道可用）"
                             );
                             Some(Arc::new(provider) as Arc<dyn EmbeddingProvider>)
