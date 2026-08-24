@@ -1,6 +1,8 @@
 ﻿# Cargo缓存
 /target/
 /target-*/
+# CUDA 验证临时目录
+.cargo-tmp-cuda/
 
 # 本地数据库文件
 # 注意: 不用前导斜杠——运行时数据目录可能出现在任意 crate 下

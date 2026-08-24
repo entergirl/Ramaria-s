@@ -80,3 +80,12 @@ sha2 = "0.10"
 # ---------- Desktop ----------
 tauri = "2"
 tauri-build = "2"
+
+# ---------- 第三方补丁 ----------
+# candle-kernels 0.10.2 在 Windows + CUDA 13.x 下编译 quantized.cu 因 CCCL 要求
+# 标准符合预处理器（/Zc:preprocessor）失败（huggingface/candle#3686，上游未修复）。
+# 本地打补丁：build.rs 对 MSVC 目标显式传入 -Xcompiler=/Zc:preprocessor。
+# 变更点见 vendor/candle-kernels/build.rs；仅 Windows CUDA 构建受影响，
+# 非 CUDA（默认）构建不引入任何行为差异。
+[patch.crates-io]
+candle-kernels = { path = "vendor/candle-kernels" }
