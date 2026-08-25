@@ -477,6 +477,32 @@ pub trait StorageBackend: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// 批量把"无主"L1（`persona_uid IS NULL` 且未吸收）归属到指定 persona。
+    ///
+    /// 背景:
+    /// - 导入产生的 L1 固定 `persona_uid=NULL`（摘要不应被特定画像独占），
+    ///   导致按 persona 的 L2 触发查询永远查不到这些 L1 → L2 事件恒为 0。
+    /// - 本方法在 L2 触发时把候选无主 L1 归属到来源 session 的 persona，
+    ///   打通 L1→L2→行为事件链路。
+    ///
+    /// 幂等:
+    /// - 仅更新 `persona_uid IS NULL AND absorbed = 0` 的记录：
+    ///   不覆盖既有归属，不触碰已吸收数据。
+    /// - 重复调用对已归属记录无副作用（实际更新数为 0）。
+    ///
+    /// 返回:
+    /// - 实际更新的条数（可能小于 `l1_ids.len()`：部分已归属/已吸收时）。
+    ///
+    /// 默认实现:
+    /// - 返回 `Ok(0)`（存量 mock 无需修改即可编译）。
+    async fn assign_l1_persona_uid(
+        &self,
+        _l1_ids: &[Uuid],
+        _persona_uid: &str,
+    ) -> RamariaResult<usize> {
+        Ok(0)
+    }
+
     /// 按创建时间降序获取指定 persona 的最近 N 条 L1 摘要。
     ///
     /// 职责:

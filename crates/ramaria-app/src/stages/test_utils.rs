@@ -319,6 +319,31 @@ impl StorageBackend for MockStorage {
             .unwrap_or_default())
     }
 
+    async fn assign_l1_persona_uid(
+        &self,
+        l1_ids: &[Uuid],
+        persona_uid: &str,
+    ) -> RamariaResult<usize> {
+        // 模拟真实归属语义（与 SQL 实现一致）：
+        // 把无主（"" 键）L1 按 id 移动到目标 persona 键，并回填 persona_uid；
+        // 仅移动仍为 NULL 且未吸收的记录——已归属/已吸收的不动（幂等）。
+        let mut map = self.l1_by_persona.lock().unwrap();
+        let unbound = map.get("").cloned().unwrap_or_default();
+        let (kept, to_move): (Vec<MemoryL1>, Vec<MemoryL1>) = unbound
+            .into_iter()
+            .partition(|l| !l1_ids.contains(&l.id) || l.persona_uid.is_some() || l.absorbed);
+        map.insert("".to_string(), kept);
+
+        let target = map.entry(persona_uid.to_string()).or_default();
+        let mut assigned = 0usize;
+        for mut l in to_move {
+            l.persona_uid = Some(persona_uid.to_string());
+            target.push(l);
+            assigned += 1;
+        }
+        Ok(assigned)
+    }
+
     async fn list_recent_l1_by_persona(
         &self,
         persona_uid: &str,

@@ -341,6 +341,20 @@ async fn init_app(
     config.paths.config_dir = data_dir.to_string_lossy().to_string();
     config.paths.vector_index_dir = data_dir.join("vectors").to_string_lossy().to_string();
 
+    // Step 7.4: 重新读取后端配置（BUG-M5b-01 修复）。
+    //
+    // Step 2 在 ConfigSyncService 同步之前读取 backend_config：
+    // 新库（backend_config 表无记录）回退 lm_studio_default()，
+    // 导致 LLM 指向 localhost:1234、忽略 config.toml 的 [backend]。
+    // Step 6 已把文件侧后端配置写回 DB（新库补齐记录），此处以同步后
+    // 的 DB 记录为 LLM provider 的真相源；极端情况仍为空（同步写回降级
+    // 失败）则保留旧值，避免无配置构建。
+    let backend_config = storage
+        .get_backend_config()
+        .await
+        .map_err(|e| format!("重新读取后端配置失败: {}", e))?
+        .unwrap_or(backend_config);
+
     // Step 7.5: 创建 LLM Provider（基于同步后的配置注入精确缓存，v1.5 C）
     //
     // 缓存策略（[cache] 配置组）：

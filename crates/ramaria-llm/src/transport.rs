@@ -182,7 +182,8 @@ impl OpenAiTransport {
         // - 本函数服务全部结构化提取任务（L1 摘要/L2 事件提取/L3 推断/冷启动），
         //   不需要链式思考；关闭后 temperature 参数也恢复生效（思考模式下
         //   temperature/top_p 等参数无效，官方文档 Input and Output Parameters）。
-        // - 对话路径（chat_stream）保持默认思考模式不受影响。
+        // - 对话路径（chat_stream）已同步关闭思考（2026-08-25），
+        //   保证 temperature 在对话链路同样生效、输出可复现。
         let body = serde_json::json!({
             "model": model,
             "messages": messages,
@@ -271,12 +272,20 @@ impl OpenAiTransport {
         max_tokens: u32,
     ) -> RamariaResult<Pin<Box<dyn Stream<Item = RamariaResult<StreamDelta>> + Send>>> {
         let url = format!("{}/chat/completions", self.base_url);
+        // 关闭思考模式（thinking disabled），与 chat 非流式方法（已修复）保持一致：
+        // - deepseek-v4-flash 默认开启思考（官方文档 thinking_mode：默认 enabled，
+        //   effort=high）；思考模式下 temperature/top_p 等采样参数不生效
+        //   （官方文档 Input and Output Parameters："设置不报错但不生效"），
+        //   输出由思考主导、同参数不可复现（2026-08-25 探针复跑一致性验证失败：
+        //   同 seed 同命令两次运行，全部回复不同）。
+        // - 本函数服务对话路径；关闭后 temperature 恢复生效、输出显著更确定。
         let body = serde_json::json!({
             "model": model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
             "stream": true,
+            "thinking": {"type": "disabled"},
         });
 
         let response = self.send_request(&url, &body).await?;
@@ -758,5 +767,129 @@ mod tests {
         let long_body = "x".repeat(1000);
         let err = http_error(422, &long_body);
         assert!(err.context().len() < 700); // 500 + 前缀长度
+    }
+
+    // ---- chat_stream 请求 body 构造（思考模式禁用）----
+
+    /// 启动本地 mock SSE server：捕获 POST `/chat/completions` 的请求 body，
+    /// 返回一段固定 SSE 流。返回 `(base_url, 捕获的请求 body)`。
+    async fn spawn_mock_sse_server() -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<Option<serde_json::Value>>>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("绑定 mock 端口应成功");
+        let addr = listener.local_addr().expect("获取 mock 地址应成功");
+        let captured: std::sync::Arc<std::sync::Mutex<Option<serde_json::Value>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+        let captured_clone = std::sync::Arc::clone(&captured);
+
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+            let (mut socket, _) = listener.accept().await.expect("mock 应收到连接");
+
+            // 读取完整请求：先读到头部结束（\r\n\r\n），再按 Content-Length 补齐 body
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 2048];
+            let header_end = loop {
+                let n = socket.read(&mut tmp).await.expect("mock 读请求头应成功");
+                if n == 0 {
+                    break None;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+                if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break Some(pos + 4);
+                }
+            };
+            let header_end = header_end.expect("mock 应收到请求头");
+            let head = String::from_utf8_lossy(&buf[..header_end]);
+            let content_len: usize = head
+                .lines()
+                .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+                .and_then(|l| l.split_once(':').map(|(_, v)| v.trim().parse().ok()))
+                .flatten()
+                .unwrap_or(0);
+            while buf.len() < header_end + content_len {
+                let n = socket.read(&mut tmp).await.expect("mock 读 body 应成功");
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+            }
+
+            let body_str = String::from_utf8_lossy(&buf[header_end..header_end + content_len]);
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body_str) {
+                *captured_clone.lock().expect("mock 捕获锁应可用") = Some(v);
+            }
+
+            // 返回固定 SSE 流（一个内容增量 + [DONE]）
+            let sse = concat!(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"你好\"},\"finish_reason\":null}]}\n\n",
+                "data: [DONE]\n\n"
+            );
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                sse.len(),
+                sse
+            );
+            socket
+                .write_all(resp.as_bytes())
+                .await
+                .expect("mock 写响应应成功");
+            let _ = socket.shutdown().await;
+        });
+
+        (format!("http://{}", addr), captured)
+    }
+
+    /// chat_stream 请求 body 必须含 `thinking.type == "disabled"`。
+    ///
+    /// 背景:
+    /// - 思考模式下 temperature/top_p 等采样参数不生效（官方文档 Input and
+    ///   Output Parameters："设置不报错但不生效"），输出由思考主导、不可复现；
+    ///   chat 非流式已修复，chat_stream 未同步导致对话链路同参数不可复现。
+    /// - 通过 mock server 捕获真实发送的请求 body，断言字段存在且取值正确。
+    #[tokio::test]
+    async fn chat_stream_body_disables_thinking() {
+        use futures::StreamExt;
+
+        let (base_url, captured) = spawn_mock_sse_server().await;
+        let transport = OpenAiTransport::new(base_url, Some("test-key".into()), 5)
+            .expect("构造 transport 应成功");
+
+        let messages = vec![serde_json::json!({"role": "user", "content": "你好"})];
+        let mut stream = transport
+            .chat_stream(&messages, "deepseek-chat", 0.0, 512)
+            .await
+            .expect("chat_stream 应成功");
+
+        // 消费流直到 [DONE]，验证链路完整可用
+        let mut received = String::new();
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(d) if d.done => break,
+                Ok(d) => received.push_str(&d.content),
+                Err(e) => panic!("流内错误: {e}"),
+            }
+        }
+        assert_eq!(received, "你好", "应收到 mock 返回的流内容");
+
+        // 断言请求 body：思考模式必须禁用，其余字段正确透传
+        let body = captured
+            .lock()
+            .expect("捕获锁应可用")
+            .clone()
+            .expect("应捕获到请求 body");
+        assert_eq!(
+            body["thinking"]["type"], "disabled",
+            "流式请求必须禁用思考模式（temperature 才能生效）"
+        );
+        assert_eq!(body["stream"], true, "stream 应为 true");
+        assert_eq!(body["model"], "deepseek-chat", "model 应正确");
+        assert_eq!(body["temperature"], 0.0, "temperature 应透传");
+        assert_eq!(body["max_tokens"], 512, "max_tokens 应透传");
+        assert_eq!(body["messages"][0]["role"], "user", "messages 应透传");
     }
 }

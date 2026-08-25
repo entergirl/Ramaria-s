@@ -118,6 +118,14 @@ impl StorageBackend for SqliteStorage {
     async fn list_unabsorbed_l1_unbound(&self) -> RamariaResult<Vec<MemoryL1>> {
         repo::memory_l1::list_unabsorbed_unbound(&self.pool).await
     }
+
+    async fn assign_l1_persona_uid(
+        &self,
+        l1_ids: &[Uuid],
+        persona_uid: &str,
+    ) -> RamariaResult<usize> {
+        repo::memory_l1::assign_persona_uid(&self.pool, l1_ids, persona_uid).await
+    }
     async fn list_recent_l1_by_persona(
         &self,
         persona_uid: &str,

@@ -731,6 +731,20 @@ async fn init_app(db_path: PathBuf) -> anyhow::Result<(Arc<ramaria_app::App>, sq
         }
     };
 
+    // Step 6.5: 重新读取后端配置（BUG-M5b-01 修复）。
+    //
+    // Step 2 在 ConfigSyncService 同步之前读取 backend_config：
+    // 新库（backend_config 表无记录）回退 lm_studio_default()，
+    // 导致 LLM 指向 localhost:1234、忽略 config.toml 的 [backend]。
+    // Step 4 已把文件侧后端配置写回 DB（新库补齐记录），此处以同步后
+    // 的 DB 记录为 LLM provider 的真相源；极端情况仍为空（同步写回降级
+    // 失败）则保留旧值，避免无配置构建。
+    let backend_config = storage
+        .get_backend_config()
+        .await
+        .context("重新读取后端配置失败")?
+        .unwrap_or(backend_config);
+
     // Step 7: 创建 LLM Provider（按 [cache] 配置注入精确缓存）
     //
     // - `config.cache.enabled`（默认 true）：创建 SqliteLlmCache 并注入 provider，
@@ -1258,6 +1272,86 @@ mod tests {
             !app.is_embedding_available(),
             "模型目录不存在时 embedding 不可用（BM25 降级）"
         );
+        pool.close().await;
+        cleanup_temp_dir(&dir);
+    }
+
+    /// BUG-M5b-01 回归：新库（backend_config 表无记录）首次启动，
+    /// config.toml 的 `[backend]`（deepseek）必须在 ConfigSyncService 同步后
+    /// 生效，而不是回退 lm_studio_default() 指向 localhost:1234。
+    ///
+    /// 复现路径：init_app 在同步前读取 backend_config → 空库回退 LM Studio →
+    /// L1/L2 全失败（首次导入因此失败）。
+    #[tokio::test]
+    async fn init_app_uses_config_toml_backend_on_fresh_db() {
+        let dir = temp_test_dir("backend");
+        let db_path = dir.join("assistant.db");
+        // 预写 config.toml：deepseek 后端（新库 backend_config 表无任何记录）
+        std::fs::write(
+            dir.join("config.toml"),
+            "[backend]\nprovider = \"deepseek\"\nbase_url = \"https://api.deepseek.com\"\nmodel_id = \"deepseek-chat\"\napi_key = \"test-only-key\"\n",
+        )
+        .unwrap();
+
+        let (app, pool) = init_app(db_path).await.expect("init_app 应成功");
+        assert_eq!(
+            app.llm_provider_name(),
+            "DeepSeek",
+            "新库首次启动必须采用 config.toml 的 [backend]（BUG-M5b-01）"
+        );
+
+        // 同步后 DB backend_config 也应记录 deepseek（文件为准回写）
+        let storage = ramaria_storage::SqliteStorage::new(pool.clone());
+        let bc = storage
+            .get_backend_config()
+            .await
+            .expect("读取 backend_config 应成功")
+            .expect("新库同步后 backend_config 应有记录");
+        assert_eq!(
+            bc.provider.as_str(),
+            "deepseek",
+            "DB backend_config 应为 deepseek"
+        );
+        assert_eq!(
+            bc.base_url, "https://api.deepseek.com",
+            "base_url 应以文件为准"
+        );
+
+        pool.close().await;
+        cleanup_temp_dir(&dir);
+    }
+
+    /// BUG-M5b-01 对照：DB 已保存 LM Studio 但 config.toml 指定 deepseek → 以文件为准。
+    ///
+    /// 覆盖"文件与 DB 不一致"场景：同步写回 DB 后，LLM 应使用文件侧的 deepseek。
+    #[tokio::test]
+    async fn init_app_prefers_config_toml_over_stale_db_backend() {
+        let dir = temp_test_dir("backend-stale");
+        let db_path = dir.join("assistant.db");
+        // 预写 config.toml：deepseek
+        std::fs::write(
+            dir.join("config.toml"),
+            "[backend]\nprovider = \"deepseek\"\nbase_url = \"https://api.deepseek.com\"\nmodel_id = \"deepseek-chat\"\napi_key = \"test-only-key\"\n",
+        )
+        .unwrap();
+        // 预写 DB：LM Studio（旧状态，模拟升级前的遗留配置）
+        let pool = ramaria_storage::database::init_pool(Some(db_path.clone()))
+            .await
+            .unwrap();
+        let storage = ramaria_storage::SqliteStorage::new(pool.clone());
+        storage
+            .save_backend_config(&ramaria_core::types::BackendConfig::lm_studio_default())
+            .await
+            .unwrap();
+        pool.close().await;
+
+        let (app, pool) = init_app(db_path).await.expect("init_app 应成功");
+        assert_eq!(
+            app.llm_provider_name(),
+            "DeepSeek",
+            "文件与 DB 不一致时应以 config.toml 为准"
+        );
+
         pool.close().await;
         cleanup_temp_dir(&dir);
     }

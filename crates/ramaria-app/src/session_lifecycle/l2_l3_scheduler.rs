@@ -9,15 +9,17 @@
 //! - `spawn_l2_l3_scheduler` 后台线程（Thread B）每 24h 定时检查，首次延迟 5min
 //! - 所有 LLM 调用失败均不阻塞级联，仅记录 warn/error 日志
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use ramaria_core::traits::{LlmProvider, StorageBackend};
-use ramaria_core::types::now_ms;
+use ramaria_core::types::{MemoryL1, now_ms};
 use ramaria_memory::event::{EventExtractor, EventExtractorConfig};
 use ramaria_memory::job::{JobManager, JobResult, JobType};
 use tracing::{debug, error, info, warn};
+use uuid::Uuid;
 
 use super::SessionLifecycle;
 
@@ -107,6 +109,28 @@ impl SessionLifecycle {
             triggered,
             skipped
         );
+
+        // ---- 无主 L1 处理（数据断层修复）----
+        // 导入产生的 L1 固定 persona_uid=NULL，persona 循环查不到它们，
+        // L2 触发条件永不满足 → 事件恒为 0。此处单独把无主 L1 按来源
+        // session 的归属 persona 归并，满足计数阈值即触发 L2 提取。
+        let unbound_stats = self
+            .process_unbound_l1_for_l2(
+                storage,
+                llm,
+                self.config.thresholds.l2_trigger_count as usize,
+                0.0,
+            )
+            .await;
+
+        info!(
+            ?unbound_stats,
+            "L2 触发检查：无主 L1 处理完成（归属 {} / 无法归属 {} / 触发组 {} / 待下次组 {}）",
+            unbound_stats.attributed,
+            unbound_stats.unattributable,
+            unbound_stats.triggered_personas,
+            unbound_stats.pending_groups
+        );
     }
 
     /// 执行 L2 事件提取（通过 JobManager 包裹，带重试和可观测性）。
@@ -144,6 +168,10 @@ impl SessionLifecycle {
                     temperature: self.config.event_extraction.temperature,
                     max_tokens: self.config.event_extraction.max_tokens,
                     max_events: self.config.event_extraction.max_events,
+                    // 触发阈值与调度器保持一致：调度器按计数/时间触发后，
+                    // 提取器内部 should_trigger 用同一阈值二次确认，避免自定义阈值下静默跳过。
+                    trigger_count: self.config.thresholds.l2_trigger_count as i64,
+                    trigger_days: self.config.thresholds.l2_trigger_days as i64,
                     // v1.5 L2 聚类去重指纹：从 [cache] 配置组传播
                     l2_fingerprint_enabled: self.config.cache.l2_fingerprint_enabled,
                     l2_similarity_threshold: self.config.cache.l2_similarity_threshold,
@@ -202,6 +230,214 @@ impl SessionLifecycle {
                 );
             }
         }
+    }
+}
+
+// =========================================================
+// 无主 L1 处理（数据断层修复）：L2 触发链路补全
+// =========================================================
+
+/// 无主 L1 处理统计（供日志聚合与可观测性）。
+#[derive(Debug, Default, Clone)]
+struct UnboundL1ProcessStats {
+    /// 无主未吸收 L1 总数
+    total: usize,
+    /// 已归属到 persona 的条数（可触发候选）
+    attributed: usize,
+    /// 无法归属的条数（来源 session 缺失或 session.persona_uid 为 NULL）
+    unattributable: usize,
+    /// 达到触发条件并启动 L2 提取的 persona 组数
+    triggered_personas: usize,
+    /// 未达触发条件、保持无主状态待下次检查的 persona 组数
+    pending_groups: usize,
+}
+
+impl SessionLifecycle {
+    /// 处理"无主"L1（`persona_uid IS NULL`，导入产生的 L1 属此类）。
+    ///
+    /// 背景（数据断层修复）:
+    /// - 导入的 L1 摘要固定 NULL 归属（摘要不应被特定画像独占），
+    ///   但 L2 事件提取严格按 persona 遍历 `list_unabsorbed_l1(persona_uid)`，
+    ///   NULL 归属的 L1 对任何 persona 都查不到 → L2 永不触发 → 事件恒为 0。
+    /// - 本函数打通该链路：把无主 L1 按来源 session 的归属 persona 归并，
+    ///   满足触发条件（计数/时间二选一）时回填 persona_uid 后走标准 L2 提取。
+    ///
+    /// 归属规则:
+    /// - 每条无主 L1 的 `session_id` → `sessions.persona_uid` 即其归属 persona
+    ///   （导入场景下 session 归属为处理侧 persona，即"对方"画像）。
+    /// - session 不存在 / session.persona_uid 为 NULL / 查询失败 → 无法归属，
+    ///   保持无主状态（记 warn + 统计），不阻塞其他组的处理。
+    ///
+    /// 触发语义:
+    /// - `trigger_count > 0`：启用计数触发（路径 A），未吸收 L1 ≥ 该值即触发。
+    /// - `trigger_days > 0.0`：启用时间触发（路径 B），最早无主 L1 年龄 ≥ 该值即触发。
+    /// - 两者均 > 0 时满足任一即触发；均为 0 时不触发（安全默认）。
+    ///
+    /// 幂等与降级:
+    /// - 归属仅更新仍为 NULL 且未吸收的 L1（`assign_l1_persona_uid` 幂等），
+    ///   重复调用不会覆盖既有归属。
+    /// - 归属失败仅跳过该组（记 error），不阻塞其他组的 L2 提取。
+    /// - 提取成功时 L1 被标记 absorbed，后续检查自然跳过；
+    ///   提取失败（LLM 不可用）时 L1 已归属到 persona，由标准 persona 循环负责重试。
+    async fn process_unbound_l1_for_l2(
+        &self,
+        storage: &dyn StorageBackend,
+        llm: &dyn LlmProvider,
+        trigger_count: usize,
+        trigger_days: f64,
+    ) -> UnboundL1ProcessStats {
+        let mut stats = UnboundL1ProcessStats::default();
+
+        // 1. 读取无主未吸收 L1（storage 既有通道，此前仅检索索引使用）
+        let unbound = match storage.list_unabsorbed_l1_unbound().await {
+            Ok(list) => list,
+            Err(e) => {
+                error!(error = %e, "L2 无主 L1 处理：查询无主未吸收 L1 失败");
+                return stats;
+            }
+        };
+        stats.total = unbound.len();
+        if unbound.is_empty() {
+            return stats;
+        }
+        info!(
+            total = unbound.len(),
+            "L2 触发检查：发现无主 L1，开始归属处理（数据断层修复链路）"
+        );
+
+        // 2. 按来源 session 分组（同一 session 的 L1 归属相同，去重查询）
+        let mut by_session: HashMap<Uuid, Vec<&MemoryL1>> = HashMap::new();
+        for l1 in &unbound {
+            by_session.entry(l1.session_id).or_default().push(l1);
+        }
+
+        // 3. 解析每个 session 的归属 persona_uid（逐 session 查询，失败记 warn 不中断）
+        let mut session_owner: HashMap<Uuid, Option<String>> =
+            HashMap::with_capacity(by_session.len());
+        for sid in by_session.keys() {
+            let owner = match storage.get_session(*sid).await {
+                Ok(Some(s)) => s.persona_uid,
+                Ok(None) => {
+                    warn!(session_id = %sid, "L2 无主 L1 处理：来源 session 不存在，无法归属");
+                    None
+                }
+                Err(e) => {
+                    warn!(session_id = %sid, error = %e, "L2 无主 L1 处理：查询来源 session 失败，无法归属");
+                    None
+                }
+            };
+            session_owner.insert(*sid, owner);
+        }
+
+        // 4. 按归属 persona 聚合（无法归属的计入统计，保持无主状态）
+        let mut by_persona: HashMap<String, Vec<&MemoryL1>> = HashMap::new();
+        for (sid, l1s) in &by_session {
+            match session_owner.get(sid).and_then(|o| o.as_ref()) {
+                Some(owner) => {
+                    let entry = by_persona.entry(owner.clone()).or_default();
+                    entry.extend(l1s.iter().copied());
+                    stats.attributed += l1s.len();
+                }
+                None => {
+                    stats.unattributable += l1s.len();
+                }
+            }
+        }
+
+        if by_persona.is_empty() {
+            debug!(
+                unattributable = stats.unattributable,
+                "L2 无主 L1 处理：无任何可归属候选，结束"
+            );
+            return stats;
+        }
+
+        // 5. 懒加载 persona 列表（确定对话另一方名称，仅当存在归属候选时查询）
+        let personas = match storage.list_personas().await {
+            Ok(list) => list,
+            Err(e) => {
+                warn!(error = %e, "L2 无主 L1 处理：查询 persona 列表失败，另一方名称为空");
+                Vec::new()
+            }
+        };
+
+        let now = now_ms();
+        let ms_per_day: i64 = 86_400_000;
+
+        // 6. 逐 persona 检查触发条件并执行 L2 提取
+        for (owner, l1s) in &by_persona {
+            if self.shutdown_flag.load(Ordering::Relaxed) {
+                warn!("L2 无主 L1 处理：收到停止信号，中断后续处理");
+                break;
+            }
+
+            // 计数触发（路径 A）与时间触发（路径 B）独立判定
+            let count_ok = trigger_count > 0 && l1s.len() >= trigger_count;
+            let oldest_age_days = l1s
+                .iter()
+                .map(|l| l.created_at)
+                .min()
+                .map(|min| (now.saturating_sub(min)) as f64 / ms_per_day as f64)
+                .unwrap_or(0.0);
+            let age_ok = trigger_days > 0.0 && oldest_age_days >= trigger_days;
+
+            if !(count_ok || age_ok) {
+                stats.pending_groups += 1;
+                info!(
+                    persona_uid = %owner,
+                    l1_count = l1s.len(),
+                    oldest_days = %format!("{oldest_age_days:.1}"),
+                    trigger_count,
+                    trigger_days,
+                    "L2 无主 L1 处理：触发条件未满足，保持无主状态待下次检查"
+                );
+                continue;
+            }
+
+            // 回填 persona_uid（幂等：仅更新仍为 NULL 且未吸收的记录）
+            let ids: Vec<Uuid> = l1s.iter().map(|l| l.id).collect();
+            match storage.assign_l1_persona_uid(&ids, owner).await {
+                Ok(assigned) => {
+                    info!(
+                        persona_uid = %owner,
+                        assigned,
+                        total = ids.len(),
+                        "L2 无主 L1 处理：已归属 {} 条无主 L1 到 persona（{} 条跳过，可能已归属/已吸收）",
+                        assigned,
+                        ids.len().saturating_sub(assigned)
+                    );
+                }
+                Err(e) => {
+                    error!(
+                        persona_uid = %owner,
+                        error = %e,
+                        "L2 无主 L1 处理：归属失败，跳过该组（不阻塞其他组）"
+                    );
+                    continue;
+                }
+            }
+
+            // 确定对话另一方名称（仅当 personas 恰好 2 个时可靠）
+            let other_name = if personas.len() == 2 {
+                personas
+                    .iter()
+                    .find(|p| p.uid.as_str() != owner.as_str())
+                    .map(|p| p.name.clone())
+            } else {
+                None
+            };
+
+            stats.triggered_personas += 1;
+            info!(
+                persona_uid = %owner,
+                l1_count = l1s.len(),
+                "L2 无主 L1 处理：触发条件满足，启动事件提取（数据断层修复）"
+            );
+            self.run_l2_extraction(storage, llm, owner, other_name)
+                .await;
+        }
+
+        stats
     }
 }
 
@@ -627,6 +863,223 @@ impl SessionLifecycle {
             }
         }
 
+        // ---- 无主 L1 时间触发（数据断层修复）----
+        // 定时路径：最早无主 L1 年龄 ≥ 阈值时触发 L2 提取（导入数据同样适用），
+        // 与 persona 循环的时间触发（路径 B）语义一致。
+        let unbound_stats = self
+            .process_unbound_l1_for_l2(
+                storage,
+                llm,
+                0,
+                self.config.thresholds.l2_trigger_days as f64,
+            )
+            .await;
+        info!(
+            ?unbound_stats,
+            "L2/L3 定时检查：无主 L1 处理完成（归属 {} / 无法归属 {} / 触发组 {} / 待下次组 {}）",
+            unbound_stats.attributed,
+            unbound_stats.unattributable,
+            unbound_stats.triggered_personas,
+            unbound_stats.pending_groups
+        );
+
         debug!("L2/L3 定时检查完成");
+    }
+}
+
+// =========================================================
+// 单元测试：无主 L1 归属处理（数据断层修复链路）
+// =========================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stages::test_utils::{MockLlm, MockStorage};
+    use ramaria_core::config::RamariaConfig;
+    use ramaria_core::types::{Persona, PersonaKind};
+    use std::sync::Arc;
+
+    /// 构造一条无主 L1（persona_uid=None、未吸收），归属于给定 session。
+    fn make_unbound_l1(session_id: Uuid) -> MemoryL1 {
+        MemoryL1::new(session_id, "导入会话摘要内容".into(), None)
+    }
+
+    /// 预置双 persona（char + user），用于 other_name 分支与归属解析。
+    fn setup_personas(storage: &MockStorage) {
+        storage.add_persona(Persona::new(
+            "char-0001".into(),
+            "角色".into(),
+            PersonaKind::Char,
+            1,
+            "local".into(),
+        ));
+        storage.add_persona(Persona::new(
+            "user-0001".into(),
+            "用户".into(),
+            PersonaKind::User,
+            2,
+            "local".into(),
+        ));
+    }
+
+    /// 核心修复路径：无主 L1 ≥ 计数阈值 → 归属到来源 session 的 persona 并触发 L2。
+    #[tokio::test]
+    async fn unbound_l1_attributes_and_triggers_on_count() {
+        let storage = Arc::new(MockStorage::new());
+        setup_personas(&storage);
+
+        // 归属 persona = char-0001 的 session
+        let session = storage.create_session(Some("char-0001")).await.unwrap();
+
+        // 5 条无主 L1（等于默认触发阈值 5）
+        let l1s: Vec<MemoryL1> = (0..5)
+            .map(|i| {
+                let mut l1 = make_unbound_l1(session.id);
+                l1.summary = format!("摘要 {i}");
+                l1
+            })
+            .collect();
+        storage.add_l1_summaries("", l1s);
+
+        let lifecycle = SessionLifecycle::new(RamariaConfig::default());
+        let llm = Arc::new(MockLlm::local());
+        let stats = lifecycle
+            .process_unbound_l1_for_l2(storage.as_ref(), llm.as_ref(), 5, 0.0)
+            .await;
+
+        // 触发判定
+        assert_eq!(stats.total, 5, "应发现 5 条无主 L1");
+        assert_eq!(stats.attributed, 5, "5 条全部可归属");
+        assert_eq!(stats.unattributable, 0, "无无法归属项");
+        assert_eq!(stats.triggered_personas, 1, "应触发 1 个 persona 的 L2");
+        assert_eq!(stats.pending_groups, 0, "无待下次组");
+
+        // 归属结果：无主通道清空，目标 persona 通道获得 5 条
+        let unbound_left = storage.list_recent_l1_by_persona("", 100).await.unwrap();
+        assert!(unbound_left.is_empty(), "无主 L1 应全部被归属");
+        let bound = storage
+            .list_recent_l1_by_persona("char-0001", 100)
+            .await
+            .unwrap();
+        assert_eq!(bound.len(), 5, "char-0001 应获得 5 条 L1");
+        assert!(
+            bound
+                .iter()
+                .all(|l| l.persona_uid.as_deref() == Some("char-0001")),
+            "归属后 persona_uid 应回填"
+        );
+    }
+
+    /// 计数未达阈值：保持无主状态，不触发提取。
+    #[tokio::test]
+    async fn unbound_l1_pending_below_threshold() {
+        let storage = Arc::new(MockStorage::new());
+        setup_personas(&storage);
+
+        let session = storage.create_session(Some("char-0001")).await.unwrap();
+        let l1s: Vec<MemoryL1> = (0..3).map(|_| make_unbound_l1(session.id)).collect();
+        storage.add_l1_summaries("", l1s);
+
+        let lifecycle = SessionLifecycle::new(RamariaConfig::default());
+        let llm = Arc::new(MockLlm::local());
+        let stats = lifecycle
+            .process_unbound_l1_for_l2(storage.as_ref(), llm.as_ref(), 5, 0.0)
+            .await;
+
+        assert_eq!(stats.total, 3);
+        assert_eq!(stats.attributed, 3, "归属判定仍成立（可归属）");
+        assert_eq!(stats.pending_groups, 1, "未达阈值 → 待下次检查");
+        assert_eq!(stats.triggered_personas, 0, "不触发提取");
+
+        // 无主通道仍保有全部 3 条（未被归属）
+        let unbound_left = storage.list_recent_l1_by_persona("", 100).await.unwrap();
+        assert_eq!(unbound_left.len(), 3, "低于阈值不应归属，保持无主");
+        let bound = storage
+            .list_recent_l1_by_persona("char-0001", 100)
+            .await
+            .unwrap();
+        assert!(bound.is_empty(), "不应有归属");
+    }
+
+    /// 无法归属（来源 session 不存在）：计入统计、保持无主、不中断处理。
+    #[tokio::test]
+    async fn unbound_l1_unattributable_keeps_unbound() {
+        let storage = Arc::new(MockStorage::new());
+        setup_personas(&storage);
+
+        // 不创建对应 session —— L1 来源 session 不存在
+        let ghost_session = Uuid::new_v4();
+        let l1s: Vec<MemoryL1> = (0..6).map(|_| make_unbound_l1(ghost_session)).collect();
+        storage.add_l1_summaries("", l1s);
+
+        let lifecycle = SessionLifecycle::new(RamariaConfig::default());
+        let llm = Arc::new(MockLlm::local());
+        let stats = lifecycle
+            .process_unbound_l1_for_l2(storage.as_ref(), llm.as_ref(), 5, 0.0)
+            .await;
+
+        assert_eq!(stats.total, 6);
+        assert_eq!(stats.attributed, 0, "无法归属");
+        assert_eq!(stats.unattributable, 6, "全部计入无法归属");
+        assert_eq!(stats.triggered_personas, 0, "无候选不触发");
+
+        let unbound_left = storage.list_recent_l1_by_persona("", 100).await.unwrap();
+        assert_eq!(
+            unbound_left.len(),
+            6,
+            "无法归属的 L1 保持无主，等待后续处理"
+        );
+    }
+
+    /// 时间触发（路径 B）：最早无主 L1 年龄 ≥ 阈值时触发，即使计数不足。
+    #[tokio::test]
+    async fn unbound_l1_age_trigger() {
+        let storage = Arc::new(MockStorage::new());
+        setup_personas(&storage);
+
+        let session = storage.create_session(Some("char-0001")).await.unwrap();
+        let now = now_ms();
+        // 1 条 10 天前的无主 L1（时间触发阈值 7 天，计数阈值不启用）
+        let mut l1 = make_unbound_l1(session.id);
+        l1.created_at = now - 10 * 86_400_000;
+        storage.add_l1_summaries("", vec![l1]);
+
+        let lifecycle = SessionLifecycle::new(RamariaConfig::default());
+        let llm = Arc::new(MockLlm::local());
+        let stats = lifecycle
+            .process_unbound_l1_for_l2(storage.as_ref(), llm.as_ref(), 0, 7.0)
+            .await;
+
+        assert_eq!(stats.total, 1);
+        assert_eq!(stats.triggered_personas, 1, "年龄 ≥ 7 天应触发 L2");
+        assert_eq!(stats.pending_groups, 0);
+
+        let bound = storage
+            .list_recent_l1_by_persona("char-0001", 100)
+            .await
+            .unwrap();
+        assert_eq!(bound.len(), 1, "时间触发同样应归属 L1");
+    }
+
+    /// 安全默认：trigger_count 与 trigger_days 均为 0 → 不触发、不归属。
+    #[tokio::test]
+    async fn unbound_l1_no_trigger_with_zero_thresholds() {
+        let storage = Arc::new(MockStorage::new());
+        setup_personas(&storage);
+
+        let session = storage.create_session(Some("char-0001")).await.unwrap();
+        let l1s: Vec<MemoryL1> = (0..10).map(|_| make_unbound_l1(session.id)).collect();
+        storage.add_l1_summaries("", l1s);
+
+        let lifecycle = SessionLifecycle::new(RamariaConfig::default());
+        let llm = Arc::new(MockLlm::local());
+        let stats = lifecycle
+            .process_unbound_l1_for_l2(storage.as_ref(), llm.as_ref(), 0, 0.0)
+            .await;
+
+        assert_eq!(stats.triggered_personas, 0, "双零阈值不应触发");
+        assert_eq!(stats.pending_groups, 1, "应计入待下次组");
+        let unbound_left = storage.list_recent_l1_by_persona("", 100).await.unwrap();
+        assert_eq!(unbound_left.len(), 10, "不应发生任何归属");
     }
 }

@@ -229,6 +229,15 @@ impl App {
         *guard = cache;
     }
 
+    /// 返回当前 LLM provider 的静态名称（诊断/测试用途）。
+    ///
+    /// 说明:
+    /// - 直接取 provider 的 `name()`，不触发网络调用、不构造新对象。
+    /// - 配置热更新（`update_llm`）后反映最新 provider。
+    pub fn llm_provider_name(&self) -> &'static str {
+        self.llm.lock().unwrap_or_else(|e| e.into_inner()).name()
+    }
+
     /// 获取当前 LLM 响应精确缓存（克隆 Arc，供锁外调用）。
     ///
     /// 用途:

@@ -242,6 +242,59 @@ pub async fn list_unabsorbed_unbound(pool: &SqlitePool) -> RamariaResult<Vec<Mem
         .collect::<RamariaResult<Vec<_>>>()
 }
 
+/// 批量把"无主"L1（`persona_uid IS NULL` 且未吸收）归属到指定 persona。
+///
+/// 语义:
+/// - 导入产生的 L1 固定 NULL 归属，导致 L2 按 persona 的触发查询无法命中；
+///   本方法在 L2 触发时把候选组归属到来源 session 的 persona，打通 L1→L2 链路。
+/// - 幂等：仅更新 `persona_uid IS NULL AND absorbed = 0` 的记录，
+///   重复归属不会覆盖既有归属，也不触碰已吸收数据。
+///
+/// 返回:
+/// - 实际更新的条数（可能小于 `l1_ids.len()`：部分已归属/已吸收时）。
+pub async fn assign_persona_uid(
+    pool: &SqlitePool,
+    l1_ids: &[Uuid],
+    persona_uid: &str,
+) -> RamariaResult<usize> {
+    if l1_ids.is_empty() {
+        return Ok(0);
+    }
+
+    // 分批处理：每批最多 100 条，避免 SQL 语句过长（SQLite 默认参数限制 999 个）。
+    // 与 mark_absorbed 保持一致的分批策略。
+    const BATCH_SIZE: usize = 100;
+    let mut assigned = 0usize;
+
+    for chunk in l1_ids.chunks(BATCH_SIZE) {
+        let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
+        let sql = format!(
+            "UPDATE memory_l1 SET persona_uid = ? \
+             WHERE persona_uid IS NULL AND absorbed = 0 AND id IN ({})",
+            placeholders.join(", ")
+        );
+
+        // 参数顺序：第 1 个是 persona_uid，其余是 L1 id（与 SQL 占位符一一对应）
+        let mut q = sqlx::query(&sql).bind(persona_uid);
+        for id in chunk {
+            q = q.bind(id.to_string());
+        }
+        let res = q
+            .execute(pool)
+            .await
+            .storage_err("批量归属无主 L1 到 persona 失败")?;
+        assigned += res.rows_affected() as usize;
+    }
+
+    tracing::info!(
+        total = l1_ids.len(),
+        assigned,
+        persona_uid,
+        "无主 L1 批量归属到 persona 完成"
+    );
+    Ok(assigned)
+}
+
 /// 按创建时间降序获取指定 persona 的最近 N 条 L1 摘要。
 ///
 /// 用法:
@@ -459,5 +512,118 @@ mod tests {
             "空槽位不应出现在存储 JSON 中: {json}"
         );
         assert!(json.contains("用户提到周末加班"));
+    }
+
+    // =========================================================
+    // assign_persona_uid：无主 L1 归属（数据断层修复链路）
+    // =========================================================
+
+    /// 构造一条无主 L1（persona_uid = None），复用 make_l1_with_slots 的槽位。
+    fn make_unbound_l1(session_id: Uuid) -> MemoryL1 {
+        let mut l1 = make_l1_with_slots(session_id);
+        l1.persona_uid = None;
+        l1
+    }
+
+    /// 基本归属：无主未吸收 L1 被归属到目标 persona，重复归属幂等。
+    #[tokio::test]
+    async fn assign_persona_uid_attributes_unbound() {
+        let pool = database::init_test_pool().await.unwrap();
+        let session_id = setup_fixture(&pool).await;
+
+        // 3 条无主 L1（persona_uid=NULL）
+        let l1a = make_unbound_l1(session_id);
+        let l1b = make_unbound_l1(session_id);
+        let l1c = make_unbound_l1(session_id);
+        for l1 in [&l1a, &l1b, &l1c] {
+            save(&pool, l1).await.expect("save 应成功");
+        }
+
+        // 归属其中 2 条到 char-0001
+        let assigned = assign_persona_uid(&pool, &[l1a.id, l1b.id], "char-0001")
+            .await
+            .expect("归属应成功");
+        assert_eq!(assigned, 2, "应归属 2 条无主 L1");
+
+        // 校验：目标 persona 读回 2 条；无主通道读回 1 条
+        let bound = list_unabsorbed(&pool, "char-0001")
+            .await
+            .expect("查询应成功");
+        assert_eq!(bound.len(), 2, "char-0001 应读到 2 条");
+        assert!(
+            bound
+                .iter()
+                .all(|l| l.persona_uid.as_deref() == Some("char-0001"))
+        );
+
+        let unbound = list_unabsorbed_unbound(&pool).await.expect("查询应成功");
+        assert_eq!(unbound.len(), 1, "无主通道应剩 1 条");
+        assert_eq!(unbound[0].id, l1c.id, "剩余应为未归属的 l1c");
+
+        // 幂等：重复归属同一批 → 不再更新（已归属）
+        let assigned2 = assign_persona_uid(&pool, &[l1a.id, l1b.id], "char-0001")
+            .await
+            .expect("重复归属应成功");
+        assert_eq!(assigned2, 0, "重复归属应为 0（幂等）");
+    }
+
+    /// 边界：不覆盖既有归属；不触碰已吸收记录；空 id 列表返回 0。
+    #[tokio::test]
+    async fn assign_persona_uid_respects_boundaries() {
+        let pool = database::init_test_pool().await.unwrap();
+        let session_id = setup_fixture(&pool).await;
+
+        // 1) 已有归属的 L1：尝试重新归属到其他 persona → 不被覆盖
+        let l1_bound = make_l1_with_slots(session_id); // persona_uid=char-0001
+        save(&pool, &l1_bound).await.expect("save 应成功");
+        let assigned = assign_persona_uid(&pool, &[l1_bound.id], "char-9999")
+            .await
+            .expect("归属应成功");
+        assert_eq!(assigned, 0, "既有归属不应被覆盖");
+        let got = get(&pool, l1_bound.id).await.unwrap().unwrap();
+        assert_eq!(got.persona_uid.as_deref(), Some("char-0001"), "原归属保持");
+
+        // 2) 已吸收的无主 L1：不触碰（absorbed=1）
+        let mut l1_absorbed = make_unbound_l1(session_id);
+        l1_absorbed.id = Uuid::new_v4();
+        l1_absorbed.absorbed = true;
+        save(&pool, &l1_absorbed).await.expect("save 应成功");
+        let assigned2 = assign_persona_uid(&pool, &[l1_absorbed.id], "char-0001")
+            .await
+            .expect("归属应成功");
+        assert_eq!(assigned2, 0, "已吸收记录不应被触碰");
+        let got2 = get(&pool, l1_absorbed.id).await.unwrap().unwrap();
+        assert!(got2.persona_uid.is_none(), "已吸收记录保持无主");
+
+        // 3) 空 id 列表 → 返回 0
+        let assigned3 = assign_persona_uid(&pool, &[], "char-0001")
+            .await
+            .expect("空列表应成功");
+        assert_eq!(assigned3, 0, "空列表应返回 0");
+    }
+
+    /// 大批量归属分批（>100 条）：全部归属成功（SQLite 参数上限保护）。
+    #[tokio::test]
+    async fn assign_persona_uid_batch_chunking() {
+        let pool = database::init_test_pool().await.unwrap();
+        let session_id = setup_fixture(&pool).await;
+
+        // 250 条无主 L1（跨 3 批：100+100+50）
+        let mut ids = Vec::with_capacity(250);
+        for _ in 0..250 {
+            let l1 = make_unbound_l1(session_id);
+            ids.push(l1.id);
+            save(&pool, &l1).await.expect("save 应成功");
+        }
+
+        let assigned = assign_persona_uid(&pool, &ids, "char-0001")
+            .await
+            .expect("分批归属应成功");
+        assert_eq!(assigned, 250, "全部 250 条应归属成功");
+
+        let bound = list_unabsorbed(&pool, "char-0001")
+            .await
+            .expect("查询应成功");
+        assert_eq!(bound.len(), 250, "归属后目标 persona 应有 250 条");
     }
 }
