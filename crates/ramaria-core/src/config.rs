@@ -27,7 +27,7 @@ use crate::types::{LlmProvider, PersonaKind};
 const CURRENT_SCHEMA_VERSION: u32 = 1;
 
 /// 当前 Ramaria 应用版本号（与 workspace Cargo.toml 保持同步）。
-const CURRENT_APP_VERSION: &str = "1.5.0";
+const CURRENT_APP_VERSION: &str = "1.6.0";
 
 // =========================================================
 // 应用配置根结构

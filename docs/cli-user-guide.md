@@ -249,6 +249,9 @@ ramaria import qq --file chat.txt \
 
 # 跳过确认直接导入
 ramaria import qq --file chat.json --yes
+
+# 只处理对方消息（跳过"我方"侧，my persona 不创建）
+ramaria import qq --file chat.json --side other
 ```
 
 | 参数 | 说明 |
@@ -257,9 +260,10 @@ ramaria import qq --file chat.json --yes
 | `--deep` | 深度导入模式：L0→L1→L2→L3 全管线 |
 | `--persona <NAME>` | 导出者画像名称（向后兼容，等同于 `--persona-self-name`） |
 | `--persona-self-name <NAME>` | 导出者画像名称 |
-| `--persona-self-uid <UID>` | 导出者画像 UID（默认自动生成如 `char-{QQ号}`） |
+| `--persona-self-uid <UID>` | 导出者画像 UID（默认自动生成，**我方 `user-` 前缀 / kind=user**，如 `user-123456789`） |
 | `--persona-other-name <NAME>` | 对方画像名称 |
-| `--persona-other-uid <UID>` | 对方画像 UID |
+| `--persona-other-uid <UID>` | 对方画像 UID（默认 `char-` 前缀 / kind=char，如 `char-123456789`） |
+| `--side <self\|other\|both>` | 导入侧过滤，默认 `both`：`self` 只处理"我方"（导出者，kind=user）、`other` 只处理对方（kind=char）、`both` 全部处理；`*-uid` 前补 `user-`/`char-` 前缀也按侧归一 |
 | `--gap <MINUTES>` | 会话切割间隔（分钟），默认 10 |
 | `--yes` | 跳过诊断报告确认直接执行导入 |
 
@@ -387,6 +391,65 @@ ramaria probe run --dataset ds.json --no-rebuild-utt --json
 - 每次对话会新建会话并写库（探针实验数据）；建议对副本数据库执行
 - 隐私红线：日志不记录完整问题与回复；数据集含参考文本（persona 原回复/事件摘要），注意保管
 
+#### `ramaria probe evaluate` — 对档位实验自动评分（v1.6新增）
+
+对 `probe run` 结果自动打分：事实维 golden answers（embedding 余弦 + 关键词命中加权）、语气维 LLM-as-judge（本地 LM Studio，rubric 1~5 分，温度 0）。服务于知识层抽取质量评估（漏报目标 <10%）与 v1.7 正式评估铺路。
+
+```
+ramaria probe evaluate --results probe-results.json --dataset probe-dataset.json --output eval.json --json
+ramaria probe evaluate --results probe-results.json --no-tone-judge --output eval.json
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--results <FILE>` | 实验结果文件（`probe run` 产物），必选 |
+| `--dataset <FILE>` | 数据集文件（`probe build` 产物；提供时按 golden `reference` 精确评分，缺失退化为问题文本近似） |
+| `--variants <ids>` | 只评指定档位（逗号分隔 id，默认全部） |
+| `--output <FILE>` | 评分数值文件（`-` = stdout 输出评分 JSON） |
+| `--no-tone-judge` | 跳过语气维 LLM-as-judge（无本地 LM Studio 或想省时使用） |
+| `--json` | 信封输出（`{"ok":true,"data":{…}}`） |
+
+**输出结构**：`ProbeEvaluation`——档位 × 维度评分（`fact_score`/`tone_score`），逐题 `FactItemScore`（余弦/关键词命中/加权）；judge 不可用时 `judge_used=false` 标注，不阻断 fact 维评分。
+
+#### `ramaria probe report` — 生成档位对比报告（v1.6新增）
+
+根据 evaluate 评分与人工抽检校准生成档位对比表与定稿建议（markdown/JSON 双形态，按输出扩展名 `.md`/`.json` 分派）。
+
+```
+ramaria probe report --results probe-results.json --evaluation eval.json --output report.md
+ramaria probe report --results probe-results.json --evaluation eval.json --calibration manual.json --output report.json
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--results <FILE>` | 实验结果文件（`probe run` 产物），必选 |
+| `--evaluation <FILE>` | 评分数值文件（`probe evaluate` 产物） |
+| `--calibration <FILE>` | 人工抽检校准文件（JSON 数组 `{item_id, score}`；10%~20% 抽样与 judge 比对） |
+| `--output <FILE>` | 报告输出文件（`-` = stdout；`.md` markdown / `.json` JSON） |
+| `--json` | 信封输出 |
+
+**校准**：`read_manual_scores` 读取人工分数，`compute_calibration` 计算同分一致性 / 平均绝对差 / 偏差 / 校准系数；同分 <50% 或 `|偏差|>1.0` 时报告标注不一致，供人工复核。
+
+---
+
+### `ramaria fact` — 知识层事实查询（v1.6新增）
+
+查看 persona 的知识事实（v3.1 §5 知识层）——从事件抽取并仲裁后的结构化事实，按 ProfileField 分组，含历史版本链。**仅查询命令，双端均无 delete**（D-V16-003）。
+
+```
+ramaria fact list                              # 列出默认 persona（rama-0001）的 active 事实
+ramaria fact list --persona char-0001 --json   # 指定 persona + JSON 信封
+ramaria fact list --field interests            # 按 field 过滤
+ramaria fact show 3                            # 查看事实 #3 详情（含版本链）
+```
+
+| 子命令 | 说明 |
+|--------|------|
+| `list` | 列出 persona 的 active 事实（按 field 分组：basic_info/personal_status/interests/social/history/recent_context/speaking_style）；`--persona` 过滤、`--field` 过滤、`--limit/--offset` 分页、`--json` 信封输出 |
+| `show <ID>` | 单条事实详情（content/confidence/source/keyword_hint）+ 完整版本链（`version_of` 历史版本折叠展示） |
+
+**事实卡片字段**：`field`（类别徽标）、`content`（事实陈述，**非原文**）、`confidence`、`source`（event/manual）、`keyword_hint`。仅展示 `status=active` 事实；历史版本沿 `version_of` 链查看。**无 delete 命令**（双端一致，D-V16-003）。
+
 ---
 
 ### `ramaria rule` — 行为规则管理（v1.5 M5 新增）
@@ -510,6 +573,27 @@ ramaria probe run --dataset probe-dataset.json --output probe-results.json --jso
 | `memory` 默认 persona | 修正：`user-0001` 硬编码 → `rama-0001`（缺陷修复，查询默认对象变化） |
 | `probe dataset` → `probe build` | **M2 新增探针命令**：`probe build`（构建测试集）/ `probe run`（档位批量实验），`dataset` 保留为 alias；详见上文 `probe` 章节 |
 | `rule list/show/import/edit/enable/disable/delete/evidence` | **M5 新增行为规则管理命令**（v1.5 规则管理决策：UI 延后，仅后端 + CLI）；详见上文 `rule` 章节 |
+| `probe evaluate/report` | **v1.6 M4 新增探针评分命令**：`probe evaluate`（事实维 golden + 语气维 LLM-as-judge 自动评分）/ `probe report`（档位对比报告 + 定稿建议）；详见上文 `probe` 章节 |
+| `import qq --side` | **v1.6 M0 新增导入侧过滤**：`self\|other\|both`（默认 both），只处理某一侧时跳过侧消息不入库、该侧 persona 不创建（D-V16-011） |
+| `fact list/show` | **v1.6 M1 新增知识层查询命令**：查看 persona 结构化事实与版本链；**双端均无 delete**（D-V16-003）；详见上文 `fact` 章节 |
+| 默认画像 UID 语义 | **v1.6 M0 修正"我方/对方"数据库对齐（D-V16-011）**：新导入自动生成的"我方"画像 UID 前缀 `user-` / kind=user（对方仍 `char-` / kind=char）；旧库需按 v1.6 重建库升级路径，无数据回填 |
+
+---
+
+## 版本升级与重建库
+
+> **v1.6 破坏性变更（D-V16-014）**：所有 migration 已合并为单个 `20260815_v1.6_schema.sql` 基线，`persona_facts` 以版本化结构（status/tier/version_of/confidence/keyword_hint）直建。旧版数据库的 `_sqlx_migrations` 记录与该基线 checksum 不匹配，**无法自动迁移，需重建库**。
+
+从 v1.5（及更早）升级到 v1.6.0 的流程：
+
+1. **备份**：先备份旧库数据（如 `data/ramaria_assistant.db`），导出诊断/记忆以防意外。
+2. **重建**：删除旧库文件，作为全新库启动（v1.6 首次启动自动 `migrate!` 建新 schema）。
+3. **重新导入**：重新导入外部聊天记录（`ramaria import qq --file ... [--side self|other|both]`），重新生成 L1/L2/L3 与知识事实。v1.5 的三层生成精确缓存（`llm_response_cache`/`l2_cluster_fingerprints`）可复用，降低重新生成成本。
+4. **关键数据核对**：核对消息量、事件数、画像、知识事实与导入统计一致后投入使用。
+
+> 说明：项目当前无存量用户、v1.5 未正式发布，此刻整理成本最低；除本文外，`docs/dev-1.6/v1.6-decisions.md`（D-V16-014）与 `CHANGELOG.md` 亦标注了该破坏性变更。
+
+---
 
 ---
 

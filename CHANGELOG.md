@@ -7,6 +7,64 @@
 
 ---
 
+## [1.6.0] - 2026-08-26
+
+### 核心特性
+
+#### 知识层（v3.1 §5，知识深化）
+
+回答"ta 的事都能答上"——从记忆事件自动抽取结构化事实，分层、版本链仲裁、按需注入：
+
+- **事实抽取**（`ramaria-memory/src/fact/`）：LLM 从事件 paraphrase+attitude+keywords 抽取事实（标注 ProfileField）+ 规则兜底（LLM 不可用时关键词/模板规则）；触发条件事件 confidence ≥ 0.6 且客观/混合；主观事件额外抽取隐含偏好事实（conf=0.5 入 candidate，互证后提升 active）。
+- **判重**：同 field 语义余弦 ≥ 0.85 **且** 关键词交集 ≥ 1 → 不入库（双条件）。
+- **分层与时效**：稳定（需互证或 manual 覆盖）/ 动态（新覆盖旧留版本链，随事件衰减）/ 历史（只追加）。
+- **版本链仲裁**：manual > 多事件互证 > 单事件；互证 = ≥2 独立事件 + 语义余弦 ≥ 0.7 + valence 一致。
+- **规则判定器检索注入**（`render_knowledge_block`）：事实类疑问词 / 话题关键词命中 / 显式指代，零新增 LLM 调用；同 field 召回 + 向量检索（时效加权）；不命中/关闭 → 不注入（回退 v1.5 语义等价）。
+- **`[knowledge]` 配置组**：`auto_fact_detect=false` 默认关闭、判定器开关、判重/互证阈值、注入预算。
+- **CLI / UI**：`ramaria fact list/show`（按 `--persona/--field` 过滤 + `--json` 信封 + 版本链；**双端均无 delete**）+ 记忆页「知识」只读卡片（ProfileField 分组 + 历史版本折叠；`node --test` 前端纯逻辑测试引入）。
+
+#### 画像升级（v3.1 §3）
+
+"画像更准"：
+
+- 跨版本匹配阈值统一 **0.85**（`match_clusters_cross_version` 0.75 → 0.85）。
+- 冷启动先验校准：A5 收缩先验改用系统内已有人格画像的**跨用户经验分布**（首个 persona 回退统一默认）。
+- 降级事件置信度 `min(0.59, 0.35 + 0.02 × n_l1)` 封顶 0.59、恒 tentative。
+- Phase C 漂移检测**真实实现**：从 `persona_cluster_snapshots` samples JSON 恢复真实旧分布（替换硬编码 0/0.5）。
+- 以上均有独立配置开关，关闭后回退 v1.5 行为。
+
+#### 边界与隐私（v3.1 §11/§12）
+
+- 降级路径全覆盖：embedding 不可用（在线 utt 降级 L1/行为路由关键词/知识同 field 召回，离线 A4 跳过 + 行为层纯关键词聚类 β=0）、LLM 不可用（知识规则兜底/行为跳过该簇/L1 保留重试）、冷启动、数据稀疏——各路径均不阻塞主流程。
+- 原文通道白名单 + 检索/注入严格按 persona_uid 隔离（跨 persona 不可见）。
+- 日志脱敏：不记 L1 摘要全文（记 id/长度）、QQ 号、LLM 原始响应全文。
+
+#### 探针自动评分（T2）
+
+- `probe evaluate`：事实维 golden（embedding 余弦 + 关键词命中加权）+ 语气维 LLM-as-judge（本地 LM Studio，rubric 1~5，温度 0）。
+- `probe report`：档位对比表 + 定稿建议（markdown/JSON 双形态）；人工抽检 10%~20% 校准。
+- 知识层误报/漏报评估（目标漏报 <10%）。
+
+#### 启动前置与数据（M0）
+
+- CLI 一致性四项修复：`RAMARIA_DB_PATH` env、config.toml 经 `ConfigSyncService` 加载、embedding provider（native）、probe persona 按"对方"语义选择。
+- "我方/对方"数据库对齐（D-V16-011）：`build_persona_uid` 增加我方分支（self → `user-*`/kind=user，对方仍 `char-*`）+ `import --side self|other|both`（默认 both，跳过侧消息不入库、该侧 persona 不创建）+ 桌面导入面板选项。
+- 向量通道接线（D-V16-013）：L1/L2 embedding 真实入索引（`parse_doc_label` 前缀解析 + `CachedVectorIndex` 容量策略修正）；`enable_vector` 真实生效。
+- 探针性能：GPU 向量推理（candle CUDA，`[embedding].device`）+ 内容级去重（`UttBuilder` embedding_cache，幂等挂载）+ 行为层近期事件加权修正（recency_factor 真实生效，D-V16-007）。
+- `native.rs` `ensure_loaded` dimension 维度同步（构造-下载-validate 不再报"维度不匹配"）。
+
+#### 破坏性变更
+
+- **migrations 合并为单基线 `20260815_v1.6_schema.sql`**（v1.0 + v1.4/v1.5 增量 + v1.6 新结构）——旧库无法自动迁移，**需重建库**（备份 → 重建 → 重新导入 → 关键数据核对）；`persona_facts` 以版本化结构（status/tier/version_of/confidence/keyword_hint）直建。
+- "我方" persona kind 修正（self → user kind），白名单过滤天然排除我方。
+- 行为变更（非破坏）：画像阈值 0.75→0.85、降级置信度封顶 0.59、冷启动先验、向量通道激活——画像/检索输出可能变化，回归已更新。
+
+### 说明
+
+- utt 参数定稿（θ_gap/条数上限/top_k）与 D-P 聚类参数摸底档位实验**延后至 v1.7**（DeepSeek 平台无 `seed` 不保证复现，复跑一致性不可达）；v1.6 保留已完成前置（近期加权、GPU 推理、探针环境验证）。
+
+---
+
 ## [1.5.0] - 2026-08-15
 
 ### 核心特性
