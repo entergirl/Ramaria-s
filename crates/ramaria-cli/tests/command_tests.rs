@@ -1299,7 +1299,7 @@ async fn import_dry_run_missing_file_is_validation_error() {
         &app,
         &pool,
         ramaria_cli::commands::import_cmd::ImportArgs {
-            file: "nonexistent_file.json".to_string(),
+            file: std::path::PathBuf::from("nonexistent_file.json"),
             deep: false,
             dry_run: true,
             persona_self_name: None,

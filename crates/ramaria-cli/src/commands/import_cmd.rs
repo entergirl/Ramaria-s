@@ -17,7 +17,7 @@
 use anyhow::Context;
 use ramaria_importer::ImportSource;
 use sqlx::SqlitePool;
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 // =========================================================
@@ -28,7 +28,9 @@ use std::sync::Arc;
 /// 新增双画像参数（self/other 两方独立命名和 UID 指定）+ 导入侧过滤（--side）。
 pub struct ImportArgs {
     /// QQ 聊天记录文件路径（qq-chat-exporter v6.x JSON 格式）
-    pub file: String,
+    /// 使用 PathBuf 而非 String：Windows 下中文/非 UTF-8 路径经 clap String
+    /// 解析会做 UTF-8 校验失败或乱码，PathBuf 保留原生 OsString 语义。
+    pub file: PathBuf,
     /// 导入模式：fast（默认，仅 L0）或 deep（全管线）
     pub deep: bool,
     /// 仅解析预览（不写入数据库，输出结构化 JSON 摘要）
@@ -74,17 +76,23 @@ pub async fn run(
     pool: &SqlitePool,
     args: ImportArgs,
 ) -> anyhow::Result<()> {
-    let path = Path::new(&args.file);
+    let path = args.file.as_path();
 
     // Step 1: 文件校验（业务校验失败，exit code 4）
     if !path.exists() {
         return Err(anyhow::anyhow!(
-            ramaria_core::error::RamariaError::validation(format!("文件不存在: {}", args.file))
+            ramaria_core::error::RamariaError::validation(format!(
+                "文件不存在: {}",
+                args.file.display()
+            ))
         ));
     }
     if !path.is_file() {
         return Err(anyhow::anyhow!(
-            ramaria_core::error::RamariaError::validation(format!("路径不是文件: {}", args.file))
+            ramaria_core::error::RamariaError::validation(format!(
+                "路径不是文件: {}",
+                args.file.display()
+            ))
         ));
     }
 
@@ -105,7 +113,9 @@ pub async fn run(
     let mode = if args.deep { "深度" } else { "快速" };
     crate::ui::info(&format!(
         "🔍 正在分析文件: {} ({}导入模式, 切割间隔 {} 分钟)",
-        args.file, mode, args.gap
+        args.file.display(),
+        mode,
+        args.gap
     ));
 
     // Step 2: 格式检测
@@ -118,7 +128,7 @@ pub async fn run(
             ramaria_core::error::RamariaError::validation(format!(
                 "文件 '{}' 不是 QQ 聊天记录格式。\n\
                  请确认文件来自 shuakami/qq-chat-exporter v6.x 导出的 JSON 文件。",
-                args.file
+                args.file.display()
             ))
         ));
     }
@@ -149,7 +159,7 @@ pub async fn run(
     if args.dry_run {
         let preview = serde_json::json!({
             "dry_run": true,
-            "file": args.file,
+            "file": args.file.display().to_string(),
             "mode": if args.deep { "deep" } else { "fast" },
             "gap_minutes": args.gap,
             "side": match args.side {

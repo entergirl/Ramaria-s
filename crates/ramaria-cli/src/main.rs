@@ -383,7 +383,7 @@ enum ImportCmd {
     Qq {
         /// 聊天记录文件路径（QQ Chat Exporter v6.x JSON 格式）
         #[arg(short, long)]
-        file: String,
+        file: PathBuf,
 
         /// 深度导入模式（触发完整 L0→L1→L2→L3 记忆管线）
         #[arg(long)]

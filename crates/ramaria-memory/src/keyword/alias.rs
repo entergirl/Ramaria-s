@@ -102,10 +102,10 @@ impl AliasManager {
             (canonical_token.clone(), canonical_id),
         );
 
-        // 更新反向缓存：规范词文本 → ID（仅在首次或 ID 变更时）
+        // 更新反向缓存：规范词文本 → ID（首次注册或 ID 变更时覆盖旧值；
+        // 此前用 or_insert 在 ID 变更时保留旧 ID，与注释语义不符）
         self.canonical_id_by_text
-            .entry(canonical_token.as_str().to_string())
-            .or_insert(canonical_id);
+            .insert(canonical_token.as_str().to_string(), canonical_id);
 
         tracing::debug!(
             alias = alias_text,

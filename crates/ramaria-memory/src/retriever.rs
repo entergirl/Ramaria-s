@@ -295,6 +295,16 @@ impl Retriever {
 
     // ---- 索引构建 ----
 
+    /// 设置是否启用 BM25 通道，返回修改前的值。
+    ///
+    /// 供重建流程在 `RebuildConfig.rebuild_bm25=false` 时临时禁用 BM25 索引
+    /// 构建（仅加载文档映射），重建结束后恢复原值。
+    pub fn set_bm25_enabled(&mut self, enabled: bool) -> bool {
+        let prev = self.config.enable_bm25;
+        self.config.enable_bm25 = enabled;
+        prev
+    }
+
     /// 将 L1 文档添加到所有启用通道的索引中。
     ///
     /// 接受引用以避免调用方不必要的 clone；内部仅在存入 HashMap 时做一次 clone。

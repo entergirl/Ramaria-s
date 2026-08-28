@@ -52,10 +52,23 @@ pub fn extract_first_json_object(text: &str) -> Option<String> {
     let start = text.find('{')?;
     let chars: Vec<char> = text[start..].chars().collect();
     let mut depth = 0u32;
+    let mut in_string = false;
+    let mut escaped = false;
     let mut end_idx = 0usize;
 
     for (i, ch) in chars.iter().enumerate() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if *ch == '\\' {
+                escaped = true;
+            } else if *ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
         match ch {
+            '"' => in_string = true,
             '{' => depth += 1,
             '}' => {
                 if depth == 0 {
@@ -203,6 +216,21 @@ mod tests {
         // 嵌套对象 → 原样
         let input = r#"{"a": {"b": [1,2,3]}, "c": "d"}"#;
         assert_eq!(extract_first_json_object(input).unwrap(), input);
+        // 字符串内花括号不参与深度计数
+        let input = r#"{"a": "他说了{hi}然后走人", "b": 1} 后缀"#;
+        assert_eq!(
+            extract_first_json_object(input).unwrap(),
+            r#"{"a": "他说了{hi}然后走人", "b": 1}"#
+        );
+        // 字符串内转义引号不影响状态机
+        let input = r#"{"a": "含\"转义\"的{花括号}", "b": 2}"#;
+        assert_eq!(
+            extract_first_json_object(input).unwrap(),
+            r#"{"a": "含\"转义\"的{花括号}", "b": 2}"#
+        );
+        // 对象内字符串含 `}` 后正常闭合（未误截断）
+        let input = r#"{"a": "x}y", "c": 3} 尾"#;
+        assert_eq!(extract_first_json_object(input).unwrap(), r#"{"a": "x}y", "c": 3}"#);
         // 无 JSON → None
         assert!(extract_first_json_object("纯文本无JSON").is_none());
     }

@@ -153,9 +153,13 @@ impl IndexRebuilder {
 
         // 加载文档（BM25 是否构建由 RetrieverConfig.enable_bm25 控制）
         // index_l1/index_l2 接受引用，无需 clone；内部仅在存入 HashMap 时复制一次
-        if !self.config.rebuild_bm25 {
+        // rebuild_bm25=false 时临时禁用 BM25 通道（仅加载文档映射），加载结束后恢复
+        let restore_bm25 = if !self.config.rebuild_bm25 {
             warn!("BM25 重建已关闭，仅加载文档映射");
-        }
+            Some(retriever.set_bm25_enabled(false))
+        } else {
+            None
+        };
 
         let mut l1_count = 0usize;
         let mut l2_count = 0usize;
@@ -174,6 +178,11 @@ impl IndexRebuilder {
             if self.config.rebuild_bm25 && (i + 1) % self.config.batch_log_interval == 0 {
                 debug!(progress = i + 1, total = l2_docs.len(), "L2 索引构建中...");
             }
+        }
+
+        // 恢复 BM25 通道配置（仅当 rebuild_bm25=false 时非 None）
+        if let Some(prev) = restore_bm25 {
+            retriever.set_bm25_enabled(prev);
         }
 
         // 重建图谱索引
