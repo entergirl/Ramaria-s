@@ -101,6 +101,10 @@ pub struct ProbeVariant {
 }
 
 /// 探针实验结果（`probe run` 的输出；evaluate/report 读取用）。
+///
+/// 字段约定:
+/// - `variants`: 主实验明细（无 `--repeat` 时即单次结果；带 `--repeat N` 时为最后一次运行明细，供 evaluate/report 语义评分复用）。
+/// - `repeat`: 统计法多次运行（`--repeat N`）的逐次聚合（均值 ± 置信区间）；未使用 `--repeat` 时为 None。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProbeExperiment {
     pub dataset_file: String,
@@ -108,7 +112,52 @@ pub struct ProbeExperiment {
     pub persona_uid: String,
     pub rebuild_utt: bool,
     pub variants: Vec<ProbeVariantResult>,
+    /// 统计法（--repeat N）聚合结果；未指定时为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat: Option<ProbeRepeatMeta>,
     pub generated_at: String,
+}
+
+/// 统计法多次运行的聚合元数据（`probe run --repeat N`）。
+///
+/// 格式:
+/// - `count`: 重复次数 N。
+/// - `per_variant`: 每个档位的逐题统计（跨 N 次）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ProbeRepeatMeta {
+    pub count: usize,
+    pub per_variant: Vec<VariantRepeatStats>,
+}
+
+/// 单档位跨多次运行的逐题统计。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct VariantRepeatStats {
+    pub variant_id: String,
+    pub per_item: Vec<ItemRepeatStats>,
+}
+
+/// 单题跨多次运行的指标统计（均值 ± 置信区间）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ItemRepeatStats {
+    pub item_id: String,
+    pub reply_chars: MetricStat,
+    pub elapsed_ms: MetricStat,
+}
+
+/// 单一指标的统计摘要（均值 / 标准差 / 95% 置信区间）。
+///
+/// 说明:
+/// - `mean`: 样本均值。
+/// - `stddev`: 样本标准差（N=1 时为 0）。
+/// - `ci_low` / `ci_high`: 95% 置信区间，按 t 分布（N≥2）或样本均值（N=1）计算。
+/// - `n`: 样本量。
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct MetricStat {
+    pub mean: f64,
+    pub stddev: f64,
+    pub ci_low: f64,
+    pub ci_high: f64,
+    pub n: usize,
 }
 
 /// 单档位实验结果。
@@ -176,8 +225,11 @@ pub enum ProbeCmd {
         variants: Option<String>,
         /// 每档位最多跑题数（默认全部）
         limit: Option<usize>,
-        /// 是否按档位参数重建 utt 块（默认 true；θ_gap/条数档位必须重建才生效）
+        /// 是否按档位参数重建 utt 块（默认 true；θ_gap/条数档位必须重建才生效；
+        /// top_k 档位可用 --no-rebuild-utt 复用已建块）
         rebuild_utt: bool,
+        /// 统计法重复次数 N（多次运行取均值 ± 置信区间；默认 1 即不聚合）
+        repeat: Option<usize>,
         /// 结果输出文件（`-` = stdout 输出原始结果 JSON）
         output: Option<String>,
         json: bool,
@@ -226,6 +278,7 @@ pub async fn run(app: &Arc<ramaria_app::App>, cmd: ProbeCmd, yes: bool) -> anyho
             variants,
             limit,
             rebuild_utt,
+            repeat,
             output,
             json,
         } => {
@@ -235,6 +288,7 @@ pub async fn run(app: &Arc<ramaria_app::App>, cmd: ProbeCmd, yes: bool) -> anyho
                 variants,
                 limit,
                 rebuild_utt,
+                repeat,
                 output,
                 json,
                 yes,
@@ -287,37 +341,37 @@ pub async fn run(app: &Arc<ramaria_app::App>, cmd: ProbeCmd, yes: bool) -> anyho
 /// 默认档位组合。
 ///
 /// 设计:
-/// - baseline 即 v3.1 初值（θ_gap=30 / 条数=40 / top_k=3），作为对照基准。
+/// - baseline 即当前对照基准（θ_gap=10 / 条数=80 / top_k=3）。
 /// - 其余档位每次只动一个参数，便于归因单参数对输出质量的影响。
 /// - 档位参数与 `[utt]` 配置组字段一一对应，直接覆盖 `UttConfig` 生效。
 fn default_variants() -> Vec<ProbeVariant> {
     vec![
         ProbeVariant {
             id: "baseline".to_string(),
-            description: "v3.1 初值（对照基准）".to_string(),
-            theta_gap_minutes: 30,
-            max_msgs_per_block: 40,
-            retrieve_top_k: 3,
-        },
-        ProbeVariant {
-            id: "theta_gap_60".to_string(),
-            description: "θ_gap 上调至 60 分钟（相邻消息间隔更宽松，块更长）".to_string(),
-            theta_gap_minutes: 60,
-            max_msgs_per_block: 40,
-            retrieve_top_k: 3,
-        },
-        ProbeVariant {
-            id: "max_msgs_80".to_string(),
-            description: "条数上限上调至 80（块可容纳更多消息）".to_string(),
-            theta_gap_minutes: 30,
+            description: "对照基准（θ_gap=10/条数=80/top_k=3）".to_string(),
+            theta_gap_minutes: 10,
             max_msgs_per_block: 80,
             retrieve_top_k: 3,
         },
         ProbeVariant {
-            id: "top_k_1".to_string(),
-            description: "top_k 下调至 1（更保守的原文注入）".to_string(),
-            theta_gap_minutes: 30,
+            id: "theta_gap_60".to_string(),
+            description: "θ_gap 上调至 60 分钟（相对基准只动 θ_gap）".to_string(),
+            theta_gap_minutes: 60,
+            max_msgs_per_block: 80,
+            retrieve_top_k: 3,
+        },
+        ProbeVariant {
+            id: "max_msgs_40".to_string(),
+            description: "条数上限下调至 40（相对基准只动条数）".to_string(),
+            theta_gap_minutes: 10,
             max_msgs_per_block: 40,
+            retrieve_top_k: 3,
+        },
+        ProbeVariant {
+            id: "top_k_1".to_string(),
+            description: "top_k 下调至 1（相对基准只动 top_k，更保守的原文注入）".to_string(),
+            theta_gap_minutes: 10,
+            max_msgs_per_block: 80,
             retrieve_top_k: 1,
         },
     ]
@@ -798,6 +852,7 @@ async fn run_experiment(
     variants_filter: Option<String>,
     limit: Option<usize>,
     rebuild_utt: bool,
+    repeat: Option<usize>,
     output: Option<String>,
     json: bool,
     yes: bool,
@@ -818,13 +873,14 @@ async fn run_experiment(
     }
 
     // Step 2-5: 构建档位实验结果（隐私确认/配置基准/逐档位批量；单题失败不中断）
-    let experiment = build_experiment(
+    let experiment = build_experiment_with_repeat(
         app,
         &dataset,
         &dataset_path,
         variants_filter.as_deref(),
         limit,
         rebuild_utt,
+        repeat.unwrap_or(1),
         yes,
     )
     .await?;
@@ -904,8 +960,11 @@ pub async fn build_experiment(
         "probe run 开始"
     );
 
-    // Step 5: 逐档位实验
+    // Step 5: 逐档位实验（档位对齐：切分参数去重，同切分多档位复用已建块）
     let mut results = Vec::with_capacity(variants.len());
+    // 已按切分参数（θ_gap/条数）重建过的档位集合；top_k 不参与切分，复用已建块。
+    let mut rebuilt_cuts: std::collections::HashMap<(u32, u32), ()> =
+        std::collections::HashMap::new();
     for variant in &variants {
         // 覆盖 utt 三参数（档位基准 + 单参数变化）
         let mut variant_config = base_config.clone();
@@ -921,13 +980,23 @@ pub async fn build_experiment(
             "probe run 档位开始"
         );
 
-        // 按档位参数重建 utt 块（θ_gap/条数档位必须重建才生效；失败记 warn 继续）
-        if rebuild_utt && let Err(e) = rebuild_utt_for_config(app, &variant_config).await {
+        // 档位对齐：仅当收到重建指令且该切分参数（θ_gap/条数）尚未在本轮重建过时，
+        // 才重建 utt 块——同一切分下的多档位（仅 top_k 不同）复用已建块，embedding
+        // 调用数不随 top_k 档位倍增；top_k 变化不影响 utt 块切分。
+        // `rebuild_utt=false`（--no-rebuild-utt）时完全不重建，直接复用库中已建块。
+        let cut_key = (variant.theta_gap_minutes, variant.max_msgs_per_block);
+        if rebuild_utt
+            && !rebuilt_cuts.contains_key(&cut_key)
+            && let Err(e) = rebuild_utt_for_config(app, &variant_config).await
+        {
             tracing::warn!(
                 variant_id = %variant.id,
                 %e,
                 "档位 utt 块重建失败，本次档位可能未按目标参数生效"
             );
+        }
+        if rebuild_utt {
+            rebuilt_cuts.insert(cut_key, ());
         }
 
         let mut runs = Vec::new();
@@ -976,8 +1045,188 @@ pub async fn build_experiment(
         persona_uid: dataset.persona_uid.clone(),
         rebuild_utt,
         variants: results,
+        repeat: None,
         generated_at: now_iso8601(),
     })
+}
+
+/// 统计法多次运行（`probe run --repeat N >= 2`）。
+///
+/// 流程:
+/// 1. `repeat == 1`（或未指定）时等价于 `build_experiment` 单次运行。
+/// 2. `repeat >= 2` 时连续执行 N 次完整档位实验（每次独立调用 LLM，以 DeepSeek
+///    无 seed 的自然波动为统计样本），每次的档位/题项集合一致。
+/// 3. 按「档位 × item_id」跨 N 次配对，对 `reply_chars` / `elapsed_ms` 计算
+///    均值 / 标准差 / 95% 置信区间（t 分布），写入 `repeat` 聚合块；主 `variants`
+///    保留最后一次运行明细，供 evaluate/report 语义评分复用。
+///
+/// 说明:
+/// - 统计法为 M1/M5 共享工具链（D-V17-001）：档位对比以「多次均值 ± 置信区间」
+///   为口径，不期待单次命令逐字复现。
+#[allow(clippy::too_many_arguments)] // 参数与 build_experiment 一致（另加 repeat 聚合数）
+pub async fn build_experiment_with_repeat(
+    app: &Arc<ramaria_app::App>,
+    dataset: &ProbeDataset,
+    dataset_path: &Path,
+    variants_filter: Option<&str>,
+    limit: Option<usize>,
+    rebuild_utt: bool,
+    repeat: usize,
+    yes: bool,
+) -> anyhow::Result<ProbeExperiment> {
+    if repeat <= 1 {
+        return build_experiment(
+            app,
+            dataset,
+            dataset_path,
+            variants_filter,
+            limit,
+            rebuild_utt,
+            yes,
+        )
+        .await;
+    }
+
+    let mut rounds = Vec::with_capacity(repeat);
+    for i in 0..repeat {
+        tracing::info!(round = i + 1, total = repeat, "probe run 统计法重复轮开始");
+        rounds.push(
+            build_experiment(
+                app,
+                dataset,
+                dataset_path,
+                variants_filter,
+                limit,
+                rebuild_utt,
+                yes,
+            )
+            .await?,
+        );
+    }
+
+    let last = rounds.last().expect("repeat >= 2 必有最后一轮").clone();
+    let per_variant = aggregate_repeat_stats(&rounds);
+
+    Ok(ProbeExperiment {
+        dataset_file: last.dataset_file.clone(),
+        dataset_seed: last.dataset_seed,
+        persona_uid: last.persona_uid.clone(),
+        rebuild_utt: last.rebuild_utt,
+        variants: last.variants.clone(),
+        repeat: Some(ProbeRepeatMeta {
+            count: repeat,
+            per_variant,
+        }),
+        generated_at: now_iso8601(),
+    })
+}
+
+/// 跨 N 次运行聚合档位逐题统计（按 variant_id + item_id 配对）。
+///
+/// 配对规则:
+/// - 档位按 `variant_id` 对齐（数据集同档位过滤，各轮档位集合一致）。
+/// - 题项按 `item_id` 对齐（同为该档位的前 `limit`/全部题）。
+/// - 若某轮缺失某 item 的指标（正常不应发生），仅以实际出现的样本聚合，`n`
+///   反映真实样本量（`n >= 1`；`n == 1` 时置信区间退化为该样本均值，stddev=0）。
+fn aggregate_repeat_stats(rounds: &[ProbeExperiment]) -> Vec<VariantRepeatStats> {
+    let mut out = Vec::new();
+    // 以最后一轮的档位顺序为准（各轮一致）
+    let last = rounds.last().expect("至少一轮");
+    for vr in &last.variants {
+        let mut per_item = Vec::with_capacity(vr.runs.len());
+        for run in &vr.runs {
+            // 跨轮收集该 item 的指标
+            let mut chars = Vec::new();
+            let mut ms = Vec::new();
+            for round in rounds {
+                if let Some(vr2) = round
+                    .variants
+                    .iter()
+                    .find(|v| v.variant_id == vr.variant_id)
+                    && let Some(r) = vr2.runs.iter().find(|r| r.item_id == run.item_id)
+                {
+                    chars.push(r.metrics.reply_chars as f64);
+                    ms.push(r.metrics.elapsed_ms as f64);
+                }
+            }
+            per_item.push(ItemRepeatStats {
+                item_id: run.item_id.clone(),
+                reply_chars: metric_stat(&chars),
+                elapsed_ms: metric_stat(&ms),
+            });
+        }
+        out.push(VariantRepeatStats {
+            variant_id: vr.variant_id.clone(),
+            per_item,
+        });
+    }
+    out
+}
+
+/// 计算一组 f64 样本的均值 / 样本标准差 / 95% 置信区间。
+///
+/// 说明:
+/// - 空样本 → 全零（`n=0`）。
+/// - `n == 1` → mean 为该样本值、stddev=0、CI 退化为 [sample, sample]。
+/// - `n >= 2` → 学生氏 t 分布 95% 置信区间 `mean ± t_{n-1,0.975} * (std/sqrt(n))`，
+///   内置临界值（n 3~12 表查，超出用近似 `t ≈ 2.0`）。
+fn metric_stat(samples: &[f64]) -> MetricStat {
+    let n = samples.len();
+    if n == 0 {
+        return MetricStat {
+            mean: 0.0,
+            stddev: 0.0,
+            ci_low: 0.0,
+            ci_high: 0.0,
+            n: 0,
+        };
+    }
+    let mean = samples.iter().sum::<f64>() / n as f64;
+    if n == 1 {
+        return MetricStat {
+            mean,
+            stddev: 0.0,
+            ci_low: mean,
+            ci_high: mean,
+            n,
+        };
+    }
+    let variance = samples.iter().map(|s| (s - mean) * (s - mean)).sum::<f64>() / (n - 1) as f64;
+    let stddev = variance.sqrt();
+    let t = t_critical_975(n);
+    let half = t * stddev / (n as f64).sqrt();
+    MetricStat {
+        mean,
+        stddev,
+        ci_low: mean - half,
+        ci_high: mean + half,
+        n,
+    }
+}
+
+/// 学生氏 t 分布 95% 双尾临界值（自由度 n-1）。
+///
+/// 覆盖 n=2..=12（探针 N=2~5 常用）；更大 n 用近似 2.0。
+fn t_critical_975(n: usize) -> f64 {
+    // 下标 = n-2（自由度 1..=10）
+    const T: [f64; 11] = [
+        12.706, // n=2, df=1
+        4.303,  // n=3, df=2
+        3.182,  // n=4, df=3
+        2.776,  // n=5, df=4
+        2.571,  // n=6, df=5
+        2.447,  // n=7, df=6
+        2.365,  // n=8, df=7
+        2.306,  // n=9, df=8
+        2.262,  // n=10, df=9
+        2.228,  // n=11, df=10
+        2.201,  // n=12, df=11
+    ];
+    if n >= 2 && n - 2 < T.len() {
+        T[n - 2]
+    } else {
+        2.0
+    }
 }
 
 /// 加载生效配置（config.toml + DB 双写合并，与 `blocks rebuild` 一致）。
@@ -2654,6 +2903,27 @@ fn print_experiment_summary(experiment: &ProbeExperiment) {
             v.description
         );
     }
+    // 统计法（--repeat N）：展示各档位跨 N 次的均值（细目与置信区间见 --json/文件）
+    if let Some(rep) = &experiment.repeat {
+        println!(
+            "  统计法: {} 次运行，各档位平均（细目/95% 置信区间见 --json 或 --output）",
+            rep.count
+        );
+        for vs in &rep.per_variant {
+            let n = vs.per_item.len();
+            if n == 0 {
+                continue;
+            }
+            let chars_mean: f64 =
+                vs.per_item.iter().map(|s| s.reply_chars.mean).sum::<f64>() / n as f64;
+            let ms_mean: f64 =
+                vs.per_item.iter().map(|s| s.elapsed_ms.mean).sum::<f64>() / n as f64;
+            println!(
+                "    档位 {:<14} 平均回复 {:.1} 字符 / {:.1} ms（N={}）",
+                vs.variant_id, chars_mean, ms_mean, rep.count
+            );
+        }
+    }
     crate::ui::info("完整结果含每题 reply/metrics，可用 --json 或 --output 获取");
 }
 
@@ -2948,18 +3218,18 @@ mod tests {
     fn default_variants_are_representative_pairs() {
         let variants = default_variants();
         assert_eq!(variants.len(), 4);
-        // baseline 即 v3.1 初值
+        // baseline 即对照基准值
         let base = &variants[0];
         assert_eq!(base.id, "baseline");
-        assert_eq!(base.theta_gap_minutes, 30);
-        assert_eq!(base.max_msgs_per_block, 40);
+        assert_eq!(base.theta_gap_minutes, 10);
+        assert_eq!(base.max_msgs_per_block, 80);
         assert_eq!(base.retrieve_top_k, 3);
-        // 每个档位只动一个参数（相对 baseline）
+        // 每个档位只动一个参数（相对定稿基准 baseline）
         for v in &variants[1..] {
             let changed = [
-                v.theta_gap_minutes != 30,
-                v.max_msgs_per_block != 40,
-                v.retrieve_top_k != 3,
+                v.theta_gap_minutes != base.theta_gap_minutes,
+                v.max_msgs_per_block != base.max_msgs_per_block,
+                v.retrieve_top_k != base.retrieve_top_k,
             ]
             .iter()
             .filter(|b| **b)
@@ -2989,6 +3259,132 @@ mod tests {
         let ramaria_err = err.downcast_ref::<RamariaError>();
         assert!(matches!(ramaria_err, Some(RamariaError::Validation { .. })));
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ---- 统计法（--repeat）----
+
+    /// metric_stat：单样本退化为该值，stddev=0，CI=该值。
+    #[test]
+    fn metric_stat_single_sample_degenerates() {
+        let s = metric_stat(&[42.0]);
+        assert_eq!(s.n, 1);
+        assert_eq!(s.mean, 42.0);
+        assert_eq!(s.stddev, 0.0);
+        assert_eq!(s.ci_low, 42.0);
+        assert_eq!(s.ci_high, 42.0);
+    }
+
+    /// metric_stat：空样本 → 全零。
+    #[test]
+    fn metric_stat_empty_is_zero() {
+        let s = metric_stat(&[]);
+        assert_eq!(s.n, 0);
+        assert_eq!(s.mean, 0.0);
+        assert_eq!(s.stddev, 0.0);
+        assert_eq!(s.ci_low, 0.0);
+        assert_eq!(s.ci_high, 0.0);
+    }
+
+    /// metric_stat：多样本 → 均值正确、stddev 为样本标准差、CI 对称且随 n 增大收窄。
+    #[test]
+    fn metric_stat_multiple_mean_stddev_ci() {
+        let samples = [10.0, 12.0, 11.0]; // mean=11
+        let s = metric_stat(&samples);
+        assert_eq!(s.n, 3);
+        assert!((s.mean - 11.0).abs() < 1e-9, "均值应为 11, 实际 {}", s.mean);
+        // 样本标准差 = sqrt(((1)^2+(-1)^2+0)/2) = sqrt(1)=1
+        assert!(
+            (s.stddev - 1.0).abs() < 1e-9,
+            "stddev 应为 1, 实际 {}",
+            s.stddev
+        );
+        // t(2,0.975)=4.303, half = 4.303*1/sqrt(3)
+        let half = 4.303 / 3.0f64.sqrt();
+        assert!((s.ci_low - (11.0 - half)).abs() < 1e-6);
+        assert!((s.ci_high - (11.0 + half)).abs() < 1e-6);
+        assert!(s.ci_low < s.mean && s.mean < s.ci_high);
+    }
+
+    /// metric_stat：n 增大 → 置信区间收窄（同一分布更稳）。
+    #[test]
+    fn metric_stat_more_samples_narrower_ci() {
+        let small = metric_stat(&[10.0, 12.0, 11.0, 10.5, 11.2]);
+        let bigger = metric_stat(&[
+            10.0, 12.0, 11.0, 10.5, 11.2, 10.8, 11.4, 10.9, 11.1, 10.7, 11.3, 10.6, 11.0, 11.2,
+            10.9, 11.1, 10.8, 11.0, 10.9, 11.1, 11.0, 11.0, 11.0, 11.0,
+        ]);
+        let w_small = small.ci_high - small.ci_low;
+        let w_bigger = bigger.ci_high - bigger.ci_low;
+        assert!(
+            w_bigger < w_small,
+            "样本量增大后 CI 应收窄, 小 {w_small} vs 大 {w_bigger}"
+        );
+    }
+
+    /// t_critical_975：边界值正确且单调递减趋近于 2。
+    #[test]
+    fn t_critical_975_table_and_approximation() {
+        assert!((t_critical_975(2) - 12.706).abs() < 1e-6);
+        assert!((t_critical_975(5) - 2.776).abs() < 1e-6);
+        // 超表项 → 近似 2.0
+        assert_eq!(t_critical_975(100), 2.0);
+        // 单调递减（自由度越高，临界值越小）
+        assert!(t_critical_975(3) < t_critical_975(2));
+        assert!(t_critical_975(8) < t_critical_975(5));
+    }
+
+    /// aggregate_repeat_stats：按档位+item 配对，缺轮样本以实际计数。
+    #[test]
+    fn aggregate_repeat_stats_pairs_by_variant_and_item() {
+        // 构造两个 round 的 ProbeExperiment
+        fn round(item_chars: &[(usize, usize)]) -> ProbeExperiment {
+            let vr = ProbeVariantResult {
+                variant_id: "v1".to_string(),
+                description: "档位".to_string(),
+                params: VariantParams {
+                    theta_gap_minutes: 30,
+                    max_msgs_per_block: 40,
+                    retrieve_top_k: 3,
+                },
+                runs: item_chars
+                    .iter()
+                    .map(|(id, chars)| ProbeRunItem {
+                        item_id: format!("fact-{id:04}"),
+                        dimension: "fact".to_string(),
+                        question: "q".to_string(),
+                        reply: String::new(),
+                        metrics: ProbeMetrics {
+                            reply_chars: *chars,
+                            elapsed_ms: 100,
+                        },
+                        error: None,
+                    })
+                    .collect(),
+                failed_count: 0,
+            };
+            ProbeExperiment {
+                dataset_file: "d".to_string(),
+                dataset_seed: 1,
+                persona_uid: "p".to_string(),
+                rebuild_utt: true,
+                variants: vec![vr],
+                repeat: None,
+                generated_at: "t".to_string(),
+            }
+        }
+        let r1 = round(&[(1, 10), (2, 20)]);
+        let r2 = round(&[(1, 14), (2, 24)]);
+        let stats = aggregate_repeat_stats(&[r1, r2]);
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].per_item.len(), 2);
+        // item1: chars=[10,14] mean=12
+        let it1 = &stats[0].per_item[0];
+        assert_eq!(it1.item_id, "fact-0001");
+        assert!((it1.reply_chars.mean - 12.0).abs() < 1e-6);
+        assert_eq!(it1.reply_chars.n, 2);
+        // item2: chars=[20,24] mean=22
+        let it2 = &stats[0].per_item[1];
+        assert!((it2.reply_chars.mean - 22.0).abs() < 1e-6);
     }
 
     // ---- 输入文件缺失统一归业务校验失败（--results / --evaluation / --calibration / --dataset / --source）----

@@ -823,13 +823,13 @@ pub struct UttConfig {
     /// `false` 时行为回退 v1.3（不注入原文片段）。
     pub enabled: bool,
     /// 时间间隙阈值（分钟）：相邻消息间隔超过此值切分为新块。
-    /// 档位经 v1.5 探针对比定稿。
+    /// 默认 10（窄切分、更细粒度分块）。
     pub theta_gap_minutes: u32,
     /// 单块最大消息条数：超过此条数强制切分。
-    /// 档位经 v1.5 探针对比定稿。
+    /// 默认 80（更大块、更少切分）。
     pub max_msgs_per_block: u32,
     /// 对话时检索返回的 utt 块数量（top_k）。
-    /// 档位经 v1.5 探针对比定稿。
+    /// 默认 3（top_k=1 会显著劣化事实召回）。
     pub retrieve_top_k: u32,
     /// 原文片段注入的字符预算上限（所有块合计）。
     /// 超预算时按相似度从低到高丢弃整块，不做块内截断。
@@ -843,14 +843,14 @@ impl Default for UttConfig {
     /// 创建默认 utt 配置。
     ///
     /// 返回:
-    /// - 启用全链路，30 分钟间隙 / 40 条上限切分。
-    /// - 检索 top_k=3，注入预算 1500 字符。
+    /// - 启用全链路，10 分钟间隙 / 80 条上限切分。
+    /// - 检索 top_k=3（top_k=1 会显著劣化，故保留 3），注入预算 1500 字符。
     /// - 白名单 = 角色类 persona（char/anim/oc/hist）。
     fn default() -> Self {
         Self {
             enabled: true,
-            theta_gap_minutes: 30,
-            max_msgs_per_block: 40,
+            theta_gap_minutes: 10,
+            max_msgs_per_block: 80,
             retrieve_top_k: 3,
             max_block_chars: 1500,
             persona_kind_whitelist: vec![
@@ -1396,9 +1396,9 @@ mod tests {
 
         // 开关默认开启
         assert!(cfg.utt.enabled);
-        // 切分参数
-        assert_eq!(cfg.utt.theta_gap_minutes, 30);
-        assert_eq!(cfg.utt.max_msgs_per_block, 40);
+        // 切分参数（10/80）
+        assert_eq!(cfg.utt.theta_gap_minutes, 10);
+        assert_eq!(cfg.utt.max_msgs_per_block, 80);
         // 检索与预算
         assert_eq!(cfg.utt.retrieve_top_k, 3);
         assert_eq!(cfg.utt.max_block_chars, 1500);
@@ -1479,7 +1479,7 @@ provider = "lm-studio"
 "#;
         let cfg: RamariaConfig = toml::from_str(legacy_toml).expect("旧配置应可解析");
         assert!(cfg.utt.enabled, "缺失 [utt] 组应回退默认值");
-        assert_eq!(cfg.utt.theta_gap_minutes, 30);
+        assert_eq!(cfg.utt.theta_gap_minutes, 10);
         assert_eq!(cfg.examples.max_examples, 5);
         assert!(cfg.bridge.enabled);
     }
@@ -1494,7 +1494,7 @@ enabled = false
         let cfg: RamariaConfig = toml::from_str(partial_toml).expect("部分配置应可解析");
         assert!(!cfg.utt.enabled);
         // 未配置字段使用默认值
-        assert_eq!(cfg.utt.theta_gap_minutes, 30);
+        assert_eq!(cfg.utt.theta_gap_minutes, 10);
         assert_eq!(cfg.utt.persona_kind_whitelist.len(), 4);
         assert_eq!(cfg.examples.max_examples, 5);
     }

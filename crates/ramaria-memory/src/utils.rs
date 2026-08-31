@@ -230,7 +230,10 @@ mod tests {
         );
         // 对象内字符串含 `}` 后正常闭合（未误截断）
         let input = r#"{"a": "x}y", "c": 3} 尾"#;
-        assert_eq!(extract_first_json_object(input).unwrap(), r#"{"a": "x}y", "c": 3}"#);
+        assert_eq!(
+            extract_first_json_object(input).unwrap(),
+            r#"{"a": "x}y", "c": 3}"#
+        );
         // 无 JSON → None
         assert!(extract_first_json_object("纯文本无JSON").is_none());
     }

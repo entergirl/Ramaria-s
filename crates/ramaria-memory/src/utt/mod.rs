@@ -23,17 +23,17 @@ use ramaria_core::types::{Message, MessageRole};
 /// - `max_msgs_per_block`: 单块最大消息条数。超过此条数强制切分（单边合并可突破上限）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UttSplitterConfig {
-    /// 时间间隙阈值（分钟），默认 30
+    /// 时间间隙阈值（分钟），默认 10（窄切分、更细粒度分块）
     pub theta_gap_minutes: u32,
-    /// 单块最大消息条数，默认 40
+    /// 单块最大消息条数，默认 80（更大块、更少切分）
     pub max_msgs_per_block: u32,
 }
 
 impl Default for UttSplitterConfig {
     fn default() -> Self {
         Self {
-            theta_gap_minutes: 30,
-            max_msgs_per_block: 40,
+            theta_gap_minutes: 10,
+            max_msgs_per_block: 80,
         }
     }
 }
@@ -236,8 +236,8 @@ mod tests {
     #[test]
     fn splitter_config_defaults() {
         let c = UttSplitterConfig::default();
-        assert_eq!(c.theta_gap_minutes, 30);
-        assert_eq!(c.max_msgs_per_block, 40);
+        assert_eq!(c.theta_gap_minutes, 10);
+        assert_eq!(c.max_msgs_per_block, 80);
     }
 
     // ---- P0-2：NULL 会话目标 persona 推断 ----

@@ -323,10 +323,14 @@ enum ProbeArgs {
         #[arg(long)]
         limit: Option<usize>,
 
-        /// 按档位参数重建 utt 块（默认开启；θ_gap/条数档位必须重建才生效，
-        /// 用 --no-rebuild-utt 关闭）
-        #[arg(long, default_value_t = true)]
-        rebuild_utt: bool,
+        /// 不按档位参数重建 utt 块（复用库中已建块；θ_gap/条数档位仍需重建才生效，
+        /// 非切分档位——如仅 top_k 变化——可跳过重建复用已建块）
+        #[arg(long)]
+        no_rebuild_utt: bool,
+
+        /// 统计法重复次数 N（多次运行取均值 ± 置信区间；默认 1 即不聚合）
+        #[arg(long, default_value_t = 1)]
+        repeat: usize,
 
         /// 结果输出文件（`-` = stdout 输出原始结果 JSON）
         #[arg(long)]
@@ -1047,13 +1051,16 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
                     dataset,
                     variants,
                     limit,
-                    rebuild_utt,
+                    no_rebuild_utt,
+                    repeat,
                     output,
                 } => commands::probe::ProbeCmd::Run {
                     dataset,
                     variants,
                     limit,
-                    rebuild_utt,
+                    // clap 的 --no-rebuild-utt（默认 false）；内部 rebuild_utt=true 表示重建
+                    rebuild_utt: !no_rebuild_utt,
+                    repeat: (repeat > 1).then_some(repeat),
                     output,
                     json: cli.json,
                 },
@@ -1146,6 +1153,7 @@ fn init_tracing() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     /// 串行化 env 变量测试（多个 #[test] 并行时会互相干扰环境变量）。
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -1184,6 +1192,62 @@ mod tests {
         unsafe { std::env::remove_var("RAMARIA_DB_PATH") };
         let db = parse_db(&["ramaria", "status"]);
         assert_eq!(db, PathBuf::from("data/ramaria_assistant.db"));
+    }
+
+    /// `probe run --no-rebuild-utt` 可解析，且映射到内部 rebuild_utt=false。
+    #[test]
+    fn probe_run_no_rebuild_utt_flag_parses() {
+        let cli = Cli::try_parse_from(&[
+            "ramaria",
+            "probe",
+            "run",
+            "--dataset",
+            "d.json",
+            "--no-rebuild-utt",
+        ])
+        .expect("--no-rebuild-utt 应可解析");
+        match cli.command {
+            Commands::Probe(ProbeArgs::Run {
+                dataset,
+                no_rebuild_utt,
+                repeat,
+                ..
+            }) => {
+                assert_eq!(dataset, PathBuf::from("d.json"));
+                assert!(no_rebuild_utt, "--no-rebuild-utt 应置位");
+                assert_eq!(repeat, 1, "默认 repeat=1（不聚合）");
+            }
+            _ => panic!("应解析为 Probe::Run，实际解析为其他命令"),
+        }
+    }
+
+    /// `probe run --repeat N` 可解析，且默认不置 `--no-rebuild-utt`。
+    #[test]
+    fn probe_run_repeat_flag_parses() {
+        let cli = Cli::try_parse_from(&[
+            "ramaria",
+            "probe",
+            "run",
+            "--dataset",
+            "d.json",
+            "--repeat",
+            "5",
+        ])
+        .expect("--repeat 应可解析");
+        match cli.command {
+            Commands::Probe(ProbeArgs::Run {
+                repeat,
+                no_rebuild_utt,
+                ..
+            }) => {
+                assert_eq!(repeat, 5);
+                assert!(
+                    !no_rebuild_utt,
+                    "不带 --no-rebuild-utt 时默认应重建（rebuild_utt=true）"
+                );
+            }
+            _ => panic!("应解析为 Probe::Run，实际解析为其他命令"),
+        }
     }
 
     // =========================================================
@@ -1230,7 +1294,7 @@ mod tests {
         let db_path = dir.join("assistant.db");
 
         let (app, pool) = init_app(db_path).await.expect("init_app 应成功");
-        assert_eq!(app.config().utt.theta_gap_minutes, 30, "缺失时用默认值");
+        assert_eq!(app.config().utt.theta_gap_minutes, 10, "缺失时用默认值");
         assert!(
             dir.join("config.toml").exists(),
             "config.toml 缺失时应生成模板"
@@ -1247,7 +1311,7 @@ mod tests {
         std::fs::write(dir.join("config.toml"), "这不是合法的 TOML [[[").unwrap();
 
         let (app, pool) = init_app(db_path).await.expect("损坏 config 不应阻塞启动");
-        assert_eq!(app.config().utt.theta_gap_minutes, 30, "损坏时回退默认值");
+        assert_eq!(app.config().utt.theta_gap_minutes, 10, "损坏时回退默认值");
         pool.close().await;
         cleanup_temp_dir(&dir);
     }

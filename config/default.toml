@@ -234,14 +234,13 @@ log_full_prompt = false
 # 是否启用 utt 话语块全链路（false = 不注入原文）
 enabled = true
 # 时间间隙阈值（分钟）：相邻消息间隔超过此值切分为新块
-# 定稿说明：运行 `ramaria probe build/run` 档位对比后
-# 在此写入定稿值并标注依据
-theta_gap_minutes = 30
+# 10 分钟为窄切分（更细粒度分块），实证为各候选档位最优
+theta_gap_minutes = 10
 # 单块最大消息条数：超过此条数强制切分
-# 定稿说明：档位对比后写入定稿值并标注依据
-max_msgs_per_block = 40
+# 80 条上限（更大块、更少切分），实证与 40 条无显著差异
+max_msgs_per_block = 80
 # 对话时检索返回的 utt 块数量（top_k）
-# 定稿说明：档位对比后写入定稿值并标注依据
+# 3 路检索（top_k=1 显著劣化，保留 3）
 retrieve_top_k = 3
 # 原文片段注入的字符预算上限（所有块合计，超预算按相似度丢整块）
 max_block_chars = 1500

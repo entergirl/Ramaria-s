@@ -866,6 +866,51 @@ mod tests {
         assert!((0.0..=1.0).contains(&evidence_weight(0.8, 1, 2, 30)));
     }
 
+    /// T-V17-1-004：主路径下，旧事件 weight < 新事件 weight（D-V16-007 近期加权）。
+    #[test]
+    fn build_evidence_near_event_outweighs_old_event() {
+        let now = ramaria_core::types::now_ms();
+        let day = 86_400_000i64;
+        // 两个真实事件，salience 相同：一新（昨天）、一旧（200 天前）。
+        let cluster = RefinedCluster {
+            situation: BehaviorSituation {
+                keywords: vec!["加班".into(), "累".into()],
+                centroid: None,
+                response_centroid: None,
+                valence_mean: -0.4,
+                valence_std: 0.2,
+                sample_count: 2,
+                presentation_dist: Vec::new(),
+                situation_strength_mean: 3.5,
+                time_span_days: 200.0,
+                trait_refs: Vec::new(),
+            },
+            n_eff: 2.0,
+            cohesion: 0.8,
+            quality: 0.6,
+            member_event_ids: vec![1, 2],
+            member_events: vec![
+                crate::behavior::clustering::ClusterMember {
+                    event_id: 1,
+                    start_ms: now - day, // 近期
+                    salience: 0.8,
+                },
+                crate::behavior::clustering::ClusterMember {
+                    event_id: 2,
+                    start_ms: now - 200 * day, // 很旧
+                    salience: 0.8,
+                },
+            ],
+        };
+        let ev = build_evidence(&cluster, now, 30);
+        let near = ev.iter().find(|(id, _)| *id == 1).expect("有新事件").1;
+        let old = ev.iter().find(|(id, _)| *id == 2).expect("有旧事件").1;
+        assert!(
+            old < near,
+            "旧事件 weight 必须小于新事件 weight（D-V16-007 近期加权主路径）: old={old}, new={near}"
+        );
+    }
+
     // ---- 置信度与稳定性 ----
 
     #[test]

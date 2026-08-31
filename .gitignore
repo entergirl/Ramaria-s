@@ -54,6 +54,9 @@ desktop.ini
 /run-*.log
 /eval-*.log
 
+# 探针实验数据归档目录（原根目录 probe/run/eval-*.json 收拢于此，规则随目录一并迁移）
+/test-data/
+
 # 项目私有文档（开发、设计、决策）
 /docs/dev/
 /docs/dev-1.0/

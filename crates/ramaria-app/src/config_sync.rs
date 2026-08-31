@@ -1127,7 +1127,7 @@ mod tests {
         assert!(outcome.file_parse_errors.is_empty());
         assert!(service.config_path().exists(), "应生成模板文件");
         assert!(outcome.config.utt.enabled);
-        assert_eq!(outcome.config.utt.theta_gap_minutes, 30);
+        assert_eq!(outcome.config.utt.theta_gap_minutes, 10);
         assert_eq!(outcome.config.examples.max_examples, 5);
         assert!(outcome.config.bridge.enabled);
         // DB 无差异（均为默认）→ 无 mismatch
@@ -1216,7 +1216,7 @@ mod tests {
         let storage = Arc::new(MockStorage::default());
         let (service, dir) = temp_service(storage.clone());
 
-        // 先首启生成文件（默认值 theta=30）
+        // 先首启生成文件（默认值 theta=10）
         service.load().await.unwrap();
 
         // 模拟外部修改 DB 侧值（如旧版本直写 settings 表）
@@ -1225,7 +1225,7 @@ mod tests {
             .await
             .unwrap();
 
-        // 再次加载：文件（30）vs DB（60）→ mismatch → 以文件为准写回 DB
+        // 再次加载：文件（10）vs DB（60）→ mismatch → 以文件为准写回 DB
         let outcome = service.load().await.unwrap();
         assert!(
             outcome
@@ -1236,12 +1236,12 @@ mod tests {
             outcome.mismatches
         );
 
-        // DB 被回写为文件值 30
+        // DB 被回写为文件值 10
         let db_val = storage
             .get_setting("config.utt.theta_gap_minutes")
             .await
             .unwrap();
-        assert_eq!(db_val.as_deref(), Some("30"), "DB 应以文件为准回写");
+        assert_eq!(db_val.as_deref(), Some("10"), "DB 应以文件为准回写");
 
         let _ = std::fs::remove_dir_all(dir);
     }

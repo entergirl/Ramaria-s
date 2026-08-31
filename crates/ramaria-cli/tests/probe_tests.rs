@@ -19,7 +19,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::Stream;
-use ramaria_cli::commands::probe::{ProbeCmd, build_dataset, build_experiment};
+use ramaria_cli::commands::probe::{
+    ProbeCmd, build_dataset, build_experiment, build_experiment_with_repeat,
+};
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::traits::{ChatRequest, LlmProvider, StorageBackend, StreamDelta};
 use ramaria_core::types::{BackendConfig, LlmProvider as LlmProviderKind, ModelCapability};
@@ -272,10 +274,87 @@ async fn probe_run_batch_structure_with_mock_llm() {
             assert!(run.reply.contains("Hello"), "回复应来自 mock LLM");
         }
     }
-    // 档位参数与数据集一致
-    assert_eq!(experiment.variants[0].params.theta_gap_minutes, 30);
+    // 档位参数与数据集一致（baseline=定稿 10/80/3）
+    assert_eq!(experiment.variants[0].params.theta_gap_minutes, 10);
+    assert_eq!(experiment.variants[0].params.max_msgs_per_block, 80);
     assert_eq!(experiment.variants[1].params.theta_gap_minutes, 60);
+    assert_eq!(experiment.variants[2].params.max_msgs_per_block, 40);
     assert_eq!(experiment.variants[3].params.retrieve_top_k, 1);
+}
+
+/// `--repeat N`（统计法）：多次运行 → 产出 repeat 聚合块（均值/置信区间/逐项明细）。
+#[tokio::test]
+async fn probe_run_repeat_produces_stat_meta() {
+    let (app, _storage) = build_test_app();
+    let ds = build_dataset(&app, None, 2, 7, None).await; // 4 题
+    let experiment = build_experiment_with_repeat(
+        &app,
+        &ds,
+        &PathBuf::from("dataset.json"),
+        None,
+        None,
+        false,
+        2,
+        false,
+    )
+    .await
+    .expect("统计法实验应成功");
+
+    // repeat 聚合块存在且 count 正确
+    let repeat = experiment
+        .repeat
+        .as_ref()
+        .expect("repeat>=2 时必须产出 repeat 聚合块");
+    assert_eq!(repeat.count, 2);
+    assert_eq!(repeat.per_variant.len(), 4, "每个档位都有聚合统计");
+
+    // 每档位逐项统计：n>=2、均值/置信区间可用、与最后一次 variants 题数一致
+    for (i, vr) in experiment.variants.iter().enumerate() {
+        let vs = &repeat.per_variant[i];
+        assert_eq!(vs.variant_id, vr.variant_id);
+        assert_eq!(
+            vs.per_item.len(),
+            vr.runs.len(),
+            "聚合条目数应与运行题数一致"
+        );
+        for item in &vs.per_item {
+            assert!(item.reply_chars.n >= 2, "{} 应跨 2 轮聚合", item.item_id);
+            assert!(item.elapsed_ms.n >= 2);
+            assert!(item.reply_chars.mean >= 0.0);
+            assert!(
+                item.reply_chars.ci_low <= item.reply_chars.ci_high,
+                "{} CI 下界不得大于上界",
+                item.item_id
+            );
+        }
+    }
+
+    // 主 variants 保留最后一次运行明细（供 evaluate/report 复用）
+    assert_eq!(experiment.variants.len(), 4);
+    for v in &experiment.variants {
+        assert_eq!(v.runs.len(), 4);
+    }
+}
+
+/// `--repeat 1`（或省略）：不产出 repeat 聚合块（等价单次运行）。
+#[tokio::test]
+async fn probe_run_repeat_one_has_no_stat_meta() {
+    let (app, _storage) = build_test_app();
+    let ds = build_dataset(&app, None, 2, 7, None).await;
+    let experiment = build_experiment_with_repeat(
+        &app,
+        &ds,
+        &PathBuf::from("dataset.json"),
+        None,
+        None,
+        false,
+        1,
+        false,
+    )
+    .await
+    .expect("单次实验应成功");
+    assert!(experiment.repeat.is_none(), "repeat=1 不产出聚合块");
+    assert_eq!(experiment.variants.len(), 4);
 }
 
 /// 单题失败不中断批量：FailingLlm 下全部题失败但返回 Ok 且逐题记录原因。
