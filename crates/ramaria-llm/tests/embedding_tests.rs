@@ -7,7 +7,7 @@
 //!
 //! 说明:
 //! - 通过 `embedding-onnx` feature 的 ONNX 测试需要真实模型文件，
-//! 不在 CI 中运行，仅本地手动验证。
+//!   不在 CI 中运行，仅本地手动验证。
 
 use ramaria_core::traits::EmbeddingProvider;
 use ramaria_llm::embedding::noop::NoopEmbeddingProvider;

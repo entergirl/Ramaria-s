@@ -1046,15 +1046,16 @@ impl Default for CacheConfig {
 pub struct BehaviorConfig {
     /// 行为层总开关（false = 不学习/不路由，行为回退 v1.4）
     pub enabled: bool,
-    /// 密度聚类邻域相似度阈值 θ_nb（待实证：v3.1 初值 0.5，v1.6 探针定稿）
+    /// 密度聚类邻域相似度阈值 θ_nb：样本对相似度 ≥ 该值视为邻居。
+    /// 默认 0.65（实证可使 59 事件细分出 ≥2 个行为簇）。
     pub theta_nb: f64,
-    /// 核心样本最小邻居数 min_cluster_size（v3.1 默认 3，探针备选 2）
+    /// 核心样本最小邻居数 min_cluster_size（默认 3）。
     pub min_cluster_size: usize,
-    /// 增量归簇阈值 θ_join（v3.1 默认 0.7）
+    /// 增量归簇阈值 θ_join（默认 0.7）。
     pub theta_join: f64,
-    /// 反应通道权重 β1（待实证，v3.1 初值 0.4）
+    /// 反应通道权重 β1（默认 0.85，主导 paraphrase⊕attitude 语义）。
     pub beta1: f64,
-    /// 情境通道权重 β2（待实证，v3.1 初值 0.3）
+    /// 情境通道权重 β2（默认 0.10，情境关键词参与比对）。
     pub beta2: f64,
     /// 情境路由阈值 θ_route（默认 0.6，全部低于 → 不注入）
     pub theta_route: f64,
@@ -1080,15 +1081,15 @@ pub struct BehaviorConfig {
 }
 
 impl Default for BehaviorConfig {
-    /// 创建默认行为层配置（v3.1 初值 + 待实证标注）。
+    /// 创建默认行为层配置。
     fn default() -> Self {
         Self {
             enabled: true,
-            theta_nb: 0.5,
+            theta_nb: 0.65,
             min_cluster_size: 3,
             theta_join: 0.7,
-            beta1: 0.4,
-            beta2: 0.3,
+            beta1: 0.85,
+            beta2: 0.10,
             theta_route: 0.6,
             gamma: 0.7,
             top_n: 3,
@@ -1278,13 +1279,13 @@ mod tests {
         assert!((cfg.cache.l2_similarity_threshold - 0.95).abs() < f64::EPSILON);
         assert_eq!(cfg.cache.l2_recent_events_limit, 200);
 
-        // 行为层默认：初值 + 待实证标注
+        // 行为层默认
         assert!(cfg.behavior.enabled);
-        assert!((cfg.behavior.theta_nb - 0.5).abs() < f64::EPSILON);
+        assert!((cfg.behavior.theta_nb - 0.65).abs() < f64::EPSILON);
         assert_eq!(cfg.behavior.min_cluster_size, 3);
         assert!((cfg.behavior.theta_join - 0.7).abs() < f64::EPSILON);
-        assert!((cfg.behavior.beta1 - 0.4).abs() < f64::EPSILON);
-        assert!((cfg.behavior.beta2 - 0.3).abs() < f64::EPSILON);
+        assert!((cfg.behavior.beta1 - 0.85).abs() < f64::EPSILON);
+        assert!((cfg.behavior.beta2 - 0.10).abs() < f64::EPSILON);
         assert!((cfg.behavior.theta_route - 0.6).abs() < f64::EPSILON);
         assert!((cfg.behavior.gamma - 0.7).abs() < f64::EPSILON);
         assert_eq!(cfg.behavior.top_n, 3);

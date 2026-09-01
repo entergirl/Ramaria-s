@@ -51,3 +51,12 @@ ndarray = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true
+
+# 仅用于集成测试（含 D-P 聚类参数摸底，见 tests/dp_cluster_tuning.rs）。
+# ramaria-memory 提供行为聚类（density_cluster/fused_similarity/vectorize），
+# ramaria-storage 提供只读事件访问；均在 dev 构建拉入，不影响生产依赖。
+[dev-dependencies]
+ramaria-memory = { path = "../ramaria-memory" }
+ramaria-storage = { path = "../ramaria-storage" }
+sqlx.workspace = true
+

@@ -1486,9 +1486,9 @@ impl ClusterSnapshot {
         }
         let count = blob.len() / 4;
         let mut vec = Vec::with_capacity(count);
-        for chunk in blob.chunks_exact(4) {
-            let arr: [u8; 4] = chunk.try_into().unwrap();
-            vec.push(f32::from_le_bytes(arr));
+        // 长度已校验为 4 的倍数，as_chunks 余数恒为空，逐块还原 f32。
+        for chunk in blob.as_chunks::<4>().0 {
+            vec.push(f32::from_le_bytes(*chunk));
         }
         Some(vec)
     }
