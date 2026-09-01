@@ -17,8 +17,8 @@ use crate::behavior::{BehaviorRule, FeedbackLog};
 use crate::error::RamariaResult;
 use crate::types::{
     BackendConfig, ClusterSnapshot, EventRelation, EventSource, MemoryEvent, MemoryL1, Message,
-    MessageRole, ModelCapability, Persona, PersonaExample, PersonaFact, PersonalityTrait,
-    PrivacyConsent, ProfileField, Session, TraitEvidence, TraitStatus, UttBlock,
+    MessageRole, ModelCapability, Persona, PersonaExample, PersonaFact, PersonaStyleStats,
+    PersonalityTrait, PrivacyConsent, ProfileField, Session, TraitEvidence, TraitStatus, UttBlock,
 };
 
 // =========================================================
@@ -691,6 +691,33 @@ pub trait StorageBackend: Send + Sync {
             result.push((field, count));
         }
         Ok(result)
+    }
+
+    // -- Style Stats (persona_style_stats 表，表达层 A3) --
+    /// 按 persona 单行 upsert 风格统计（五维参数 + 样本量 + 基线引用 + 规则文本）。
+    ///
+    /// 说明:
+    /// - `persona_style_stats` 为增量表（只增不删，v1.7 非破坏变更）。
+    /// - 默认实现返回 `Unsupported`（存量 mock 无需实现即可编译）。
+    async fn upsert_style_stats(&self, _stats: &PersonaStyleStats) -> RamariaResult<()> {
+        Err(crate::error::RamariaError::unsupported(
+            "StorageBackend 未实现 persona_style_stats upsert",
+        ))
+    }
+    /// 按 persona 查询风格统计（注入侧读取规则文本 / 状态判断）。
+    ///
+    /// 默认实现返回 `Ok(None)`（存量 mock 无需实现即可编译）。
+    async fn get_style_stats(
+        &self,
+        _persona_uid: &str,
+    ) -> RamariaResult<Option<PersonaStyleStats>> {
+        Ok(None)
+    }
+    /// 查询全部风格统计（基线池更新 / CLI 诊断）。
+    ///
+    /// 默认实现返回空 Vec（存量 mock 无需实现即可编译）。
+    async fn list_style_stats(&self) -> RamariaResult<Vec<PersonaStyleStats>> {
+        Ok(Vec::new())
     }
 
     // -- Personality Traits (L3 性格层, id: i64) --

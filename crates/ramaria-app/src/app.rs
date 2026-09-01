@@ -164,6 +164,42 @@ impl App {
             });
         lifecycle.set_behavior_hook(hook);
 
+        // 注册风格统计封存钩子（v1.7 M2 A3）：封存时增量更新，失败记 warn 不阻塞封存
+        // 仅在 [style].enabled 时注册（关闭 → None，封存不触发，prompt 与 v1.6 语义等价）
+        let style_hook: Option<crate::session_lifecycle::StyleCloseHook> = if config.style.enabled {
+            let hook_storage = Arc::clone(&storage);
+            let hook_llm = Arc::clone(&llm);
+            let hook_config = config.style.clone();
+            Some(Arc::new(move |persona_uid: &str| {
+                let storage = Arc::clone(&hook_storage);
+                let llm = Arc::clone(&hook_llm);
+                let config = hook_config.clone();
+                let persona_uid = persona_uid.to_string();
+                Box::pin(async move {
+                    if let Err(e) = crate::app_style::style_incremental_update_core(
+                        storage.as_ref(),
+                        Some(llm.as_ref()),
+                        &config,
+                        &persona_uid,
+                    )
+                    .await
+                    {
+                        // 增量更新失败不阻塞封存主流程（注册式接入，静默降级链）
+                        tracing::warn!(
+                            persona_uid,
+                            error = %e,
+                            "风格统计增量更新失败（封存已正常完成，下次封存自动重试）"
+                        );
+                    }
+                })
+            }))
+        } else {
+            None
+        };
+        if let Some(style_hook) = style_hook {
+            lifecycle.set_style_hook(style_hook);
+        }
+
         let emb_info = embedding
             .as_ref()
             .map(|e| {

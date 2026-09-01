@@ -26,6 +26,7 @@ pub mod rebuild;
 pub mod retriever;
 pub mod rrf;
 mod similarity; // 内部共享工具（相似度统一实现，不暴露到公共 API）
+pub mod style;
 pub mod token_budget;
 mod utils;
 pub mod utt;
@@ -205,6 +206,12 @@ pub use inference::{
 
 // Keyword 关键词处理
 pub use keyword::AliasManager;
+
+// Style 表达层风格统计（A3）
+pub use style::{
+    BaselinePool, MetricKey, PersonaFreq, StyleSignificant, StyleStats, analyze_significance,
+    generate_style_rule, is_significant, render_template_rule, z_test,
+};
 
 // Init 冷启动
 pub use init::{

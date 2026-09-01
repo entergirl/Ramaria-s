@@ -175,6 +175,14 @@ pub struct PromptContext {
     /// - 非空 = 由 `render_knowledge_block` 渲染 `# 知识（知识层，按需）` 段落。
     /// - 只含 status=active 事实（版本链中仅当前生效参与注入）。
     pub knowledge_facts: Vec<PersonaFact>,
+    /// 新增: 自动风格规则文本（表达层 A3 统计产出，`style/rule_gen.rs`）。
+    ///
+    /// 字段约定:
+    /// - `None`/空 = 风格关闭或数据不足或无显著项 → 不注入（prompt 与 v1.6 语义等价）。
+    /// - `Some(rule)` = 由 `build_style_layer` 渲染 `## 自动风格规则` 子段；
+    ///   手工 `speaking_style` 存在时自动规则被覆盖（不注入，手工优先）。
+    /// - 只含统计生成的风格描述，不含原文消息文本。
+    pub style_rule_text: Option<String>,
 }
 
 // =========================================================
@@ -650,17 +658,32 @@ fn format_facts_for_prompt(facts: &[PersonaFact]) -> String {
 // 表达层（说话风格）: 说话风格 + 对话示例
 // =========================================================
 
-/// 组装表达层块（`# 说话风格（表达层）`）：说话风格 + 对话示例。
+/// 组装表达层块（`# 说话风格（表达层）`）：说话风格 + 自动风格规则 + 对话示例。
 ///
-/// 对应 Personality + Statement 两块；
-/// 两子段皆缺省时整体不产生段落。
+/// 对应 Personality + Statement 两块 + 自动风格规则子段（A3）。
+///
+/// 子段组合规则（手工覆盖优先，D-V17-004）:
+/// - 手工 `speaking_style`（persona.config）存在 → 只注入手工风格
+///   （自动风格规则被覆盖，不注入）。
+/// - 手工不存在且 `style_rule_text`（自动规则）非空 → 注入 `## 自动风格规则`。
+/// - 两子段皆缺省时整体不产生段落。
 fn build_style_layer(context: &PromptContext, config: &PromptConfig) -> String {
-    let mut sub: Vec<String> = Vec::with_capacity(2);
+    let mut sub: Vec<String> = Vec::with_capacity(3);
 
-    // 说话风格（persona.config 的 speaking_style）
+    // 说话风格（persona.config 的 speaking_style，手工 E_rules 优先）
     let style = build_personality(context);
     if !style.is_empty() {
         sub.push(style);
+    } else {
+        // 自动风格规则（A3 统计产出；手工覆盖时不注入）
+        if let Some(rule) = context
+            .style_rule_text
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            sub.push(format!("## 自动风格规则\n{rule}"));
+        }
     }
 
     // 对话示例（Few-shot）
@@ -918,6 +941,82 @@ mod tests {
         let result = assemble_prompt(&ctx, &config);
         assert!(result.contains("Ramaria"));
         assert!(result.contains("AI 助手"));
+    }
+
+    // ---- 表达层：自动风格规则注入（A3） ----
+
+    /// 构造无手工 speaking_style 的 persona（config 不含该字段）。
+    fn make_persona_without_manual_style() -> Persona {
+        Persona {
+            config: Some(r#"{"description":"一个喜欢编程的大学生"}"#.into()),
+            ..make_test_persona()
+        }
+    }
+
+    #[test]
+    fn auto_style_rule_injected_when_no_manual_style() {
+        // 自动规则存在 + 无手工 speaking_style → 注入 `## 自动风格规则`
+        let ctx = PromptContext {
+            persona: Some(make_persona_without_manual_style()),
+            style_rule_text: Some("你习惯使用口癖词「哇塞」，常聊「电影」等话题。".into()),
+            ..Default::default()
+        };
+        let result = assemble_prompt(&ctx, &PromptConfig::default());
+        assert!(
+            result.contains("## 自动风格规则"),
+            "自动风格规则应注入: {result}"
+        );
+        assert!(result.contains("口癖词「哇塞」"), "规则文本在 prompt 中");
+        assert!(
+            !result.contains("## 说话风格\n"),
+            "无手工风格时不产生手工子段"
+        );
+    }
+
+    #[test]
+    fn manual_style_overrides_auto_rule() {
+        // 手工 speaking_style 存在 → 只注入手工，自动规则被覆盖（手工优先，D-V17-004）
+        let ctx = PromptContext {
+            persona: Some(make_test_persona()),
+            style_rule_text: Some("自动规则文本不应出现".into()),
+            ..Default::default()
+        };
+        let result = assemble_prompt(&ctx, &PromptConfig::default());
+        assert!(result.contains("## 说话风格"), "手工风格子段存在");
+        assert!(result.contains("热情活泼"), "手工风格内容注入");
+        assert!(
+            !result.contains("## 自动风格规则"),
+            "手工覆盖优先，自动规则不注入: {result}"
+        );
+        assert!(!result.contains("自动规则文本不应出现"));
+    }
+
+    #[test]
+    fn no_style_rule_keeps_v16_prompt_equivalent() {
+        // style_rule_text=None（风格关闭/数据不足）→ prompt 与 v1.6 语义等价
+        // （不产生 `## 自动风格规则` 段落，回归红线 1）
+        let ctx = PromptContext {
+            persona: Some(make_persona_without_manual_style()),
+            style_rule_text: None,
+            ..Default::default()
+        };
+        let result = assemble_prompt(&ctx, &PromptConfig::default());
+        assert!(
+            !result.contains("## 自动风格规则"),
+            "无自动规则时 prompt 与 v1.6 语义等价: {result}"
+        );
+    }
+
+    #[test]
+    fn blank_style_rule_treated_as_missing() {
+        // 空白规则文本（防御）→ 不注入
+        let ctx = PromptContext {
+            persona: Some(make_persona_without_manual_style()),
+            style_rule_text: Some("   ".into()),
+            ..Default::default()
+        };
+        let result = assemble_prompt(&ctx, &PromptConfig::default());
+        assert!(!result.contains("## 自动风格规则"));
     }
 
     // ---- Insight 块测试 ----
@@ -1262,6 +1361,7 @@ mod tests {
             bridge_context: None,        // 默认无桥接内容
             behavior_decision: None,     // 默认无行为路由决策
             knowledge_facts: Vec::new(), // 默认无知识事实
+            style_rule_text: None,       // 默认无自动风格规则（v1.6 语义等价）
         };
         let config = PromptConfig::default();
         let result = assemble_prompt(&ctx, &config);

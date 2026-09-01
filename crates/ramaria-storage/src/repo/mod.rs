@@ -66,6 +66,7 @@ pub mod privacy_consent;
 pub mod schema_meta;
 pub mod sessions;
 pub mod settings;
+pub mod style_stats;
 pub mod traits;
 pub mod utt_blocks;
 

@@ -145,4 +145,13 @@ volatile_halflife_days = 30
 [embedding]
 device = "auto"
 
+[style]
+enabled = true
+auto_translate = true
+min_sample_count = 200
+top_n = 10
+relative_boost_ratio = 2.0
+min_frequency = 5
+z_critical = 2.0
+
 [misc]

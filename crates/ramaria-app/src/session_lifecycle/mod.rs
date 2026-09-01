@@ -75,10 +75,22 @@ pub struct SessionLifecycle {
     /// - 钩子内部自行处理失败（记 warn 不阻塞封存主流程，注册式接入）。
     /// - None = 未注册（行为层关闭或旧构造路径），封存不触发增量更新（等同 v1.4）。
     pub(crate) behavior_hook: Mutex<Option<BehaviorCloseHook>>,
+    /// 风格统计封存钩子（v1.7 M2 A3）：会话封存时触发风格统计增量更新。
+    ///
+    /// 职责:
+    /// - 与行为层同钩子位置（Step 2.7 后），手动/空闲两条封存路径均覆盖。
+    /// - 钩子内部自行处理失败（记 warn 不阻塞封存主流程，注册式接入）。
+    /// - None = 未注册（风格关闭或旧构造路径），封存不触发风格统计（等同 v1.6）。
+    pub(crate) style_hook: Mutex<Option<StyleCloseHook>>,
 }
 
 /// 行为层封存钩子类型：接收 persona_uid 的异步闭包（内部自行处理失败）。
 pub(crate) type BehaviorCloseHook = Arc<
+    dyn Fn(&str) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync,
+>;
+
+/// 风格统计封存钩子类型：接收 persona_uid 的异步闭包（内部自行处理失败）。
+pub(crate) type StyleCloseHook = Arc<
     dyn Fn(&str) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync,
 >;
 
@@ -98,6 +110,7 @@ impl SessionLifecycle {
             retriever: Mutex::new(None),
             embedding: Mutex::new(None),
             behavior_hook: Mutex::new(None),
+            style_hook: Mutex::new(None),
         }
     }
 
@@ -114,6 +127,21 @@ impl SessionLifecycle {
         });
         *guard = Some(hook);
         info!("SessionLifecycle: 行为层封存钩子已注册，封存时触发增量更新");
+    }
+
+    /// 注册风格统计封存钩子（v1.7 M2 A3）。
+    ///
+    /// 调用时机:
+    /// - 在 `App::new` 中完成 App 依赖组装后立即调用。
+    /// - 钩子接收 persona_uid，内部执行风格统计增量更新；
+    ///   任何失败由钩子自行记 warn（不阻塞封存主流程）。
+    pub fn set_style_hook(&self, hook: StyleCloseHook) {
+        let mut guard = self.style_hook.lock().unwrap_or_else(|e| {
+            error!("style_hook lock poisoned during set_style_hook: {e}");
+            e.into_inner()
+        });
+        *guard = Some(hook);
+        info!("SessionLifecycle: 风格统计封存钩子已注册，封存时触发增量更新");
     }
 
     /// 注入内存检索器引用。
@@ -399,6 +427,20 @@ impl SessionLifecycle {
                     && let Some(hook) = hook
                 {
                     hook(persona).await;
+                }
+
+                // Step 2.8: 风格统计增量更新（v1.7 M2 A3，与 L1 同钩子）
+                // 注册式接入：钩子内部失败记 warn 不阻塞封存（等同 v1.6 行为）
+                // 仅在 L1 生成成功路径触发（有真实对话内容才值得统计风格）
+                let style_hook = self
+                    .style_hook
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                if let Some(persona) = persona_uid.as_deref()
+                    && let Some(style_hook) = style_hook
+                {
+                    style_hook(persona).await;
                 }
 
                 // Step 3: 检查 L2 触发条件（路径 A：即时触发）

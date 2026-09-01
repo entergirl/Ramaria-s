@@ -129,6 +129,10 @@ pub struct RamariaConfig {
     #[serde(default)]
     pub embedding: EmbeddingConfig,
 
+    /// 风格统计配置（`[style]`，表达层风格自动学习 A3）。
+    #[serde(default)]
+    pub style: StyleConfig,
+
     /// 杂项（预留扩展位，当前无字段）
     #[serde(default)]
     pub misc: MiscConfig,
@@ -177,6 +181,7 @@ impl Default for RamariaConfig {
             behavior: BehaviorConfig::default(),
             knowledge: KnowledgeConfig::default(),
             embedding: EmbeddingConfig::default(),
+            style: StyleConfig::default(),
             misc: MiscConfig::default(),
         }
     }
@@ -1232,6 +1237,68 @@ impl Default for EmbeddingConfig {
 }
 
 // =========================================================
+// 风格统计配置（表达层 A3）
+// =========================================================
+
+/// 风格统计配置（`[style]`，表达层层次 2 自动学习）。
+///
+/// 职责:
+/// - 控制表达层风格统计（五维指标 + 显著性检验 + 自动规则生成）的开关与阈值。
+/// - `enabled=false` 时整链路关闭，prompt 注入回退 v1.6（无自动风格规则，
+///   回归红线 1 锁定）。
+/// - `auto_translate` 仅控制"LLM 离线翻译增强"是否启用；关闭或 LLM 不可用时
+///   仅使用确定性模板拼接（D-V17-002 模板优先）。
+///
+/// 阈值说明（v3.1 §7.2 / D-V17-003）:
+/// - `min_sample_count=200`：样本量低于此值时标注"数据不足"，不生成规则文本。
+/// - 显著性判定：`|z| ≥ z_critical` 且 `频次 ≥ min_frequency` 且 `n_p ≥ min_sample_count`；
+///   口癖词另加"相对超频比 > relative_boost_ratio"。
+///
+/// 兼容性说明:
+/// - struct 级 `#[serde(default)]`：config.toml 中 `[style]` 表只写部分键时
+///   缺失字段回退 `Default` 实现，避免解析失败。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StyleConfig {
+    /// 风格统计总开关（默认 true —— 自动为主可配置）。
+    /// `false` → 不统计、不生成规则、不注入，prompt 与 v1.6 语义等价。
+    pub enabled: bool,
+    /// LLM 离线翻译增强开关（默认 true —— 增强为可选，LLM 不可用静默降级模板）。
+    /// `false` → 仅模板拼接（确定性可测、零 LLM 依赖）。
+    pub auto_translate: bool,
+    /// 样本量阈值 n_p（默认 200 条消息）。
+    /// 低于此值时标注"数据不足"，不生成规则文本、不注入。
+    pub min_sample_count: u32,
+    /// 口癖词/话题词 Top-N（默认 10，文档范围 10~20）。
+    pub top_n: u32,
+    /// 口癖词相对超频比阈值（默认 2.0：persona 频率 / 全局频率 > 2）。
+    pub relative_boost_ratio: f64,
+    /// 显著项最小频次（默认 5 次：频次 ≥ 5 才参与显著性判定）。
+    pub min_frequency: u32,
+    /// z 临界值（默认 2.0：`|z| ≥ 2` 判定统计显著）。
+    pub z_critical: f64,
+}
+
+impl Default for StyleConfig {
+    /// 创建默认风格统计配置。
+    ///
+    /// 返回:
+    /// - 默认开启全链路（自动为主可配置），`auto_translate=true`（LLM 增强可选）。
+    /// - 显著性判定阈值：|z|≥2 且频次≥5 且 n_p≥200；口癖词相对超频比>2。
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            auto_translate: true,
+            min_sample_count: 200,
+            top_n: 10,
+            relative_boost_ratio: 2.0,
+            min_frequency: 5,
+            z_critical: 2.0,
+        }
+    }
+}
+
+// =========================================================
 // 单元测试
 // =========================================================
 
@@ -1385,6 +1452,36 @@ mod tests {
         assert!(json.contains("persona_kind_whitelist"));
         assert!(json.contains("max_examples"));
         assert!(json.contains("bridge"));
+        // 风格统计配置组（表达层 A3）
+        assert!(json.contains("style"));
+        assert!(json.contains("auto_translate"));
+        assert!(json.contains("min_sample_count"));
+        assert!(json.contains("relative_boost_ratio"));
+        assert!(json.contains("z_critical"));
+    }
+
+    #[test]
+    fn style_config_defaults() {
+        let cfg = RamariaConfig::default();
+        // 默认开启全链路（自动为主可配置）；关闭时回退 v1.6 prompt
+        assert!(cfg.style.enabled);
+        assert!(cfg.style.auto_translate);
+        // 显著性判定阈值（D-V17-003 / v3.1 §7.2）
+        assert_eq!(cfg.style.min_sample_count, 200);
+        assert_eq!(cfg.style.top_n, 10);
+        assert!((cfg.style.relative_boost_ratio - 2.0).abs() < f64::EPSILON);
+        assert_eq!(cfg.style.min_frequency, 5);
+        assert!((cfg.style.z_critical - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn style_config_disabled_falls_back_to_v16() {
+        // 关闭风格统计：整链路回退 v1.6（prompt 不含自动风格规则）
+        let mut cfg = RamariaConfig::default();
+        cfg.style.enabled = false;
+        assert!(!cfg.style.enabled);
+        // 其他阈值保持默认可独立配置
+        assert_eq!(cfg.style.min_sample_count, 200);
     }
 
     // =========================================================

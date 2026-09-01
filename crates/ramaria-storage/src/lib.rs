@@ -14,8 +14,8 @@ use ramaria_core::error::RamariaResult;
 use ramaria_core::traits::StorageBackend;
 use ramaria_core::types::{
     BackendConfig, ClusterSnapshot, EventRelation, EventSource, MemoryEvent, MemoryL1, Message,
-    Persona, PersonaExample, PersonaFact, PersonalityTrait, PrivacyConsent, ProfileField, Session,
-    TraitEvidence, TraitStatus, UttBlock, now_ms,
+    Persona, PersonaExample, PersonaFact, PersonaStyleStats, PersonalityTrait, PrivacyConsent,
+    ProfileField, Session, TraitEvidence, TraitStatus, UttBlock, now_ms,
 };
 use sqlx::SqlitePool;
 use uuid::Uuid;
@@ -266,6 +266,19 @@ impl StorageBackend for SqliteStorage {
     }
     async fn supersede_fact(&self, id: i64, at: i64) -> RamariaResult<()> {
         repo::facts::supersede(&self.pool, id, at).await
+    }
+
+    // =========================================================
+    // Style Stats（persona_style_stats，表达层 A3）
+    // =========================================================
+    async fn upsert_style_stats(&self, stats: &PersonaStyleStats) -> RamariaResult<()> {
+        repo::style_stats::upsert(&self.pool, stats).await
+    }
+    async fn get_style_stats(&self, persona_uid: &str) -> RamariaResult<Option<PersonaStyleStats>> {
+        repo::style_stats::get(&self.pool, persona_uid).await
+    }
+    async fn list_style_stats(&self) -> RamariaResult<Vec<PersonaStyleStats>> {
+        repo::style_stats::list_all(&self.pool).await
     }
 
     // =========================================================

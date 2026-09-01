@@ -95,9 +95,13 @@ pub fn judge_knowledge_query(user_message: &str, facts: &[PersonaFact]) -> Match
     }
 
     // 收集 facts 的全部关键词与 field 标签
+    // 排除 SpeakingStyle：风格规则由表达层注入，知识层只读引用、不作为检索触发源
     let mut topic_vocab: Vec<String> = Vec::new();
     let mut field_labels: Vec<&'static str> = Vec::new();
     for f in facts {
+        if f.field == ProfileField::SpeakingStyle {
+            continue;
+        }
         if let Some(kw) = &f.keyword_hint {
             for k in kw.split([',', '，', '、']) {
                 let t = k.trim();
@@ -157,8 +161,14 @@ pub fn retrieve_knowledge(
         return KnowledgeRetrieval::default();
     }
 
-    // 命中 → 召回全部 active facts（注入前按时效排序 + 预算裁剪）
-    let mut matched: Vec<PersonaFact> = query.facts.clone();
+    // 命中 → 召回 active facts（注入前按时效排序 + 预算裁剪）
+    // 排除 SpeakingStyle：风格规则由表达层注入，知识层不重复注入（只读引用无副作用）
+    let mut matched: Vec<PersonaFact> = query
+        .facts
+        .iter()
+        .filter(|f| f.field != ProfileField::SpeakingStyle)
+        .cloned()
+        .collect();
     // 排序：稳定/历史靠前（时效权重大者），volatile 按新鲜度靠前
     matched.sort_by(|a, b| {
         let wa = weight_of(a, now, halflife_days);
@@ -348,6 +358,40 @@ mod tests {
         };
         let r = retrieve_knowledge(&query, 0, 30);
         assert!(!r.is_triggered());
+    }
+
+    /// SpeakingStyle 不参与知识层检索注入（表达层已注入，知识层只读引用无副作用）。
+    #[test]
+    fn speaking_style_excluded_from_knowledge_injection() {
+        let mut style = fact(
+            ProfileField::SpeakingStyle,
+            "你习惯使用口癖词「哇塞」，说话节奏明快。",
+            "口癖,节奏",
+            FactTier::Stable,
+        );
+        style.keyword_hint = Some("哇塞,口癖".to_string());
+        let interests = fact(
+            ProfileField::Interests,
+            "喜欢科幻电影",
+            "电影,科幻",
+            FactTier::Stable,
+        );
+        let facts = vec![style, interests];
+
+        // 判定器不把 SpeakingStyle 字段词作为检索触发源
+        let level = judge_knowledge_query("ta 的说话风格是怎样的？", &facts);
+        assert_eq!(level, MatchLevel::None, "SpeakingStyle 不触发知识检索");
+
+        // 知识检索命中时召回排除 SpeakingStyle
+        let query = KnowledgeQuery {
+            user_message: "你喜欢看什么电影？".into(),
+            facts,
+            budget_chars: 500,
+        };
+        let r = retrieve_knowledge(&query, 0, 30);
+        assert!(r.is_triggered());
+        assert_eq!(r.matched.len(), 1, "仅召回 Interests，排除 SpeakingStyle");
+        assert_eq!(r.matched[0].field, ProfileField::Interests);
     }
 
     #[test]

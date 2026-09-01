@@ -199,6 +199,7 @@ async fn build_structured_prompt(
         bridge_context: None,          // 桥接内容由活跃路径（app_chat）注入，本 Stage 未接线
         behavior_decision: None,       // 行为路由由活跃路径（app_chat）注入，本 Stage 未接线
         knowledge_facts: Vec::new(),   // 知识层由活跃路径注入，本 Stage 未接线
+        style_rule_text: None,         // 自动风格规则由活跃路径（app_chat）注入，本 Stage 未接线
     };
 
     let config = PromptConfig {

@@ -398,6 +398,19 @@ impl App {
                     Vec::new()
                 });
 
+            // 自动风格规则（表达层 A3）：仅 [style].enabled 时加载
+            // 数据不足/无显著项 → None（不注入，prompt 与 v1.6 语义等价）
+            let style_rule_text = if self.config.style.enabled {
+                crate::app_style::load_style_rule(self.storage.as_ref(), &p.uid)
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(persona_uid = %p.uid, %e, "加载自动风格规则失败，跳过");
+                        None
+                    })
+            } else {
+                None
+            };
+
             // examples 由调用方（send_message）预选后传入：
             // v1.4 起注入侧按话题/情绪/长度评分轮换，
             // 并在记忆检索未命中时作风格兜底。
@@ -435,6 +448,8 @@ impl App {
                 // 知识层 active 事实（判定器命中后由 send_message 检索传入；
                 // 空 = 关闭/未命中 → prompt 不含知识块）
                 knowledge_facts,
+                // 自动风格规则（None = 风格关闭/数据不足 → prompt 与 v1.6 语义等价）
+                style_rule_text,
             };
 
             // examples.max_examples 经 RamariaConfig 传播，

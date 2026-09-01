@@ -23,6 +23,7 @@ pub mod app_privacy;
 pub mod app_retriever;
 pub mod app_setup;
 pub mod app_state;
+pub mod app_style;
 pub mod bridge;
 pub mod commands;
 pub mod config_sync;
