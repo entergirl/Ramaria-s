@@ -286,6 +286,135 @@ impl<'a> L1Summarizer<'a> {
         }
     }
 
+    /// 渐进式摘要（v1.7 B3，决策 D-V17-005）。
+    ///
+    /// 触发条件（`[l1.progressive]` 配置）:
+    /// - 会话消息数 > `msg_threshold`（默认 100），或
+    /// - 首末消息时间跨度 > `span_hours`（默认 24 小时）。
+    ///
+    /// 触发行为:
+    /// - 用 `tail_msg_count`（默认 60）作为单块消息数上限切分消息，逐块生成 L1；
+    ///   最后一块覆盖最新对话（封存只摘要尾部），前面各段独立成 L1 不跨段混合。
+    /// - 全部段 L1 写库且 `absorbed=false`（入候选池），L2 事件提取仍按封存触发
+    ///   （`list_unabsorbed_l1` 天然包含渐进式段 L1，无需额外缓冲结构）。
+    /// - 每段 L1 生成后写回关键词词典 + 倒排索引（与 `summarize_session` 一致）。
+    ///
+    /// 未触发:
+    /// - 委托 `summarize_session`（v1.6 行为：整会话 / 按 utt 切分），返回单元素列表。
+    ///
+    /// 容错:
+    /// - 某段 LLM 调用/解析失败 → 记 warn、该段不产出，其余段照常生成（不阻塞整体）。
+    /// - 全部段均失败 → 返回最后一个错误（与 v1.4 失败语义一致）。
+    ///
+    /// 参数:
+    /// - `session_id`: 已关闭的 session UUID。
+    /// - `progressive`: 渐进式摘要配置（未启用时直接回退 v1.6）。
+    ///
+    /// 返回:
+    /// - 成功时返回本次生成的全部 L1（触发时 ≥1 条，未触发时 1 条）。
+    pub async fn summarize_progressive(
+        &self,
+        session_id: Uuid,
+        progressive: &ramaria_core::config::L1ProgressiveConfig,
+    ) -> RamariaResult<Vec<MemoryL1>> {
+        // 1. 读取 session 全部消息
+        let messages = self.storage.list_messages(session_id).await.map_err(|e| {
+            warn!(%session_id, error=%e, "渐进式摘要：读取 session 消息失败");
+            RamariaError::storage(format!(
+                "渐进式摘要：读取 session {session_id} 消息失败: {e}"
+            ))
+        })?;
+
+        if messages.is_empty() {
+            return Err(RamariaError::validation(format!(
+                "session {session_id} 无消息，无法生成摘要"
+            )));
+        }
+
+        // 2. 触发判断：未启用或未达阈值 → 回退 v1.6 行为（整会话摘要）
+        if !progressive.enabled || !is_progressive_triggered(&messages, progressive) {
+            debug!(
+                %session_id,
+                msg_count = messages.len(),
+                progressive_enabled = progressive.enabled,
+                "渐进式摘要未触发，回退 v1.6 整会话摘要"
+            );
+            let l1 = self.summarize_session(session_id).await?;
+            return Ok(vec![l1]);
+        }
+
+        // 3. 触发：按 tail_msg_count 切分为段（每段 ≤ tail 条，尾块覆盖最新对话）
+        //    theta_gap 保持默认（10 分钟）：时间间隙大的消息也切分为独立段。
+        let splitter_cfg = crate::utt::UttSplitterConfig {
+            theta_gap_minutes: 10,
+            max_msgs_per_block: progressive.tail_msg_count.max(1),
+        };
+        let target = self.config.persona_uid.as_deref();
+        let chunks = crate::utt::splitter::split_messages(&messages, target, &splitter_cfg);
+
+        // 无目标发言（如全会话只有用户消息）→ 回退整会话摘要（与 summarize_session 语义一致）
+        if chunks.is_empty() {
+            debug!(%session_id, "渐进式摘要切分为空，回退整会话摘要");
+            let l1 = self.summarize_session(session_id).await?;
+            return Ok(vec![l1]);
+        }
+        debug!(%session_id, block_count = chunks.len(), "渐进式摘要按段生成");
+
+        // 4. 逐段生成（复用块级生成逻辑，块间注入上一块上文）
+        let mut generated: Vec<MemoryL1> = Vec::with_capacity(chunks.len());
+        let mut last_error: Option<RamariaError> = None;
+        for (i, chunk) in chunks.iter().enumerate() {
+            let prior_context = if i == 0 {
+                None
+            } else {
+                Some(build_prior_context(
+                    &chunks[i - 1],
+                    generated.last(),
+                    &self.config,
+                    &self.config.user_prefix,
+                    &self.config.assistant_prefix,
+                ))
+            };
+
+            match self
+                .generate_chunk_l1(session_id, chunk, prior_context.as_deref())
+                .await
+            {
+                Ok((l1, keywords)) => {
+                    // 段 L1 写库（absorbed=false 入候选池），供 L2 封存触发提取
+                    self.storage.save_memory_l1(&l1).await.map_err(|e| {
+                        warn!(%session_id, l1_id = %l1.id, error=%e, "渐进式段 L1 写库失败");
+                        RamariaError::storage(format!(
+                            "渐进式摘要：session {session_id} 段 L1 写库失败: {e}"
+                        ))
+                    })?;
+                    self.write_back_keywords(session_id, &l1, &keywords).await;
+                    debug!(%session_id, block_index = i, "渐进式段 {} L1 生成成功", i);
+                    generated.push(l1);
+                }
+                Err(e) => {
+                    warn!(%session_id, block_index = i, error=%e, "渐进式段 L1 生成失败（降级继续）");
+                    last_error = Some(e);
+                }
+            }
+        }
+
+        // 5. 返回（全部段失败 → 返回最后一个错误，与 v1.4 语义一致）
+        if generated.is_empty() {
+            return Err(last_error.unwrap_or_else(|| {
+                RamariaError::validation(format!("session {session_id} 全部渐进式段 L1 生成失败"))
+            }));
+        }
+        info!(
+            %session_id,
+            total_blocks = chunks.len(),
+            success_blocks = generated.len(),
+            tail_msg_count = progressive.tail_msg_count,
+            "渐进式摘要完成（按段生成 L1，段 L1 已入候选池）"
+        );
+        Ok(generated)
+    }
+
     // =========================================================
     // 内部方法
     // =========================================================
@@ -625,6 +754,35 @@ fn format_messages(
         lines.push(format!("{prefix}{}", msg.content));
     }
     lines.join("\n")
+}
+
+// =========================================================
+// B3 渐进式摘要：触发判断（v1.7）
+// =========================================================
+
+/// 判断会话是否触发渐进式摘要。
+///
+/// 规则（决策 D-V17-005）:
+/// - 消息数 > `cfg.msg_threshold`（默认 100），或
+/// - 首末消息时间跨度 > `cfg.span_hours`（默认 24 小时）。
+///
+/// 说明:
+/// - 消息列表需按时间升序（调用方保证：`list_messages` 返回升序）。
+/// - 单条消息跨度视为 0（不触发时间条件）。
+fn is_progressive_triggered(
+    messages: &[ramaria_core::types::Message],
+    cfg: &ramaria_core::config::L1ProgressiveConfig,
+) -> bool {
+    if messages.len() as u32 > cfg.msg_threshold {
+        return true;
+    }
+    if let (Some(first), Some(last)) = (messages.first(), messages.last()) {
+        let span_hours = (last.created_at.saturating_sub(first.created_at)) as f64 / 3_600_000.0;
+        if span_hours > cfg.span_hours as f64 {
+            return true;
+        }
+    }
+    false
 }
 
 // =========================================================
@@ -2065,5 +2223,192 @@ mod tests {
             last.user_message.contains("早上的消息") && last.user_message.contains("深夜的消息"),
             "整会话消息应全部进入 prompt"
         );
+    }
+
+    // =========================================================
+    // B3 渐进式摘要（v1.7，决策 D-V17-005）
+    // =========================================================
+
+    fn progressive_cfg() -> ramaria_core::config::L1ProgressiveConfig {
+        ramaria_core::config::L1ProgressiveConfig {
+            enabled: true,
+            msg_threshold: 10,
+            span_hours: 24,
+            tail_msg_count: 5,
+        }
+    }
+
+    /// 触发条件（条数边界）：恰好等于阈值不触发，超过阈值触发。
+    #[test]
+    fn progressive_trigger_by_count_boundary() {
+        let sid = Uuid::new_v4();
+        let msgs_10: Vec<Message> = (0..10).map(|i| user_msg(sid, i * 1000, "内容")).collect();
+        let cfg = ramaria_core::config::L1ProgressiveConfig {
+            msg_threshold: 10,
+            ..Default::default()
+        };
+        assert!(
+            !is_progressive_triggered(&msgs_10, &cfg),
+            "消息数恰好等于阈值不应触发"
+        );
+
+        let msgs_11: Vec<Message> = (0..11).map(|i| user_msg(sid, i * 1000, "内容")).collect();
+        assert!(
+            is_progressive_triggered(&msgs_11, &cfg),
+            "消息数超过阈值应触发"
+        );
+    }
+
+    /// 触发条件（时间跨度边界）：跨度恰好等于阈值不触发，超过阈值触发。
+    #[test]
+    fn progressive_trigger_by_span_boundary() {
+        let sid = Uuid::new_v4();
+        let span_23h = 23 * 3600 * 1000;
+        let msgs_23h = vec![user_msg(sid, 0, "开头"), user_msg(sid, span_23h, "结尾")];
+        let cfg = ramaria_core::config::L1ProgressiveConfig {
+            span_hours: 24,
+            ..Default::default()
+        };
+        assert!(
+            !is_progressive_triggered(&msgs_23h, &cfg),
+            "跨度 23h（≤ 阈值 24h）不应触发"
+        );
+
+        let msgs_25h = vec![
+            user_msg(sid, 0, "开头"),
+            user_msg(sid, 25 * 3600 * 1000, "结尾"),
+        ];
+        assert!(
+            is_progressive_triggered(&msgs_25h, &cfg),
+            "跨度 25h（> 阈值 24h）应触发"
+        );
+    }
+
+    /// 未启用（enabled=false）→ 委托 summarize_session（v1.6 行为：单条 L1）。
+    #[tokio::test]
+    async fn progressive_disabled_falls_back_to_single_l1() {
+        use crate::l1::mock::MockLlmProvider;
+        let sid = Uuid::new_v4();
+        let storage = MockStorage::new();
+        // 11 条消息（超过阈值 10），但 progressive 未启用 → 不触发
+        storage.add_messages(
+            sid,
+            (0..11)
+                .map(|i| user_msg(sid, i * 1000, "长会话内容"))
+                .collect(),
+        );
+        let llm = MockLlmProvider::new("test-model");
+        llm.set_response(llm_json("整会话摘要", None));
+
+        let cfg = ramaria_core::config::L1ProgressiveConfig {
+            enabled: false,
+            msg_threshold: 10,
+            span_hours: 24,
+            tail_msg_count: 5,
+        };
+        let summarizer = L1Summarizer::new(
+            &llm,
+            &storage,
+            L1SummarizerConfig {
+                utt_splitter: None, // 整会话单块，确保断言可控
+                persona_uid: Some("char-0001".into()),
+                ..Default::default()
+            },
+        );
+        let result = summarizer.summarize_progressive(sid, &cfg).await;
+        assert!(result.is_ok(), "未启用应成功: {:?}", result.err());
+        let l1_list = result.unwrap();
+        assert_eq!(l1_list.len(), 1, "未启用应只生成 1 条 L1");
+        assert_eq!(storage.saved_l1_entries().len(), 1, "写库 1 条");
+    }
+
+    /// 触发分段：12 条消息（> 阈值 10），tail=5 → 3 段 L1 全部写库（absorbed=0 入候选池）。
+    #[tokio::test]
+    async fn progressive_triggered_generates_multiple_l1_in_candidate_pool() {
+        use crate::l1::mock::MockLlmProvider;
+        let sid = Uuid::new_v4();
+        let storage = MockStorage::new();
+        // 交替 user/target 消息（块内必须含目标 persona 发言，split_messages 规则 3）；
+        // 12 条按 tail=5 切 5+5+2，尾块含双侧发言避免单边合并。
+        let msgs: Vec<Message> = (0..12)
+            .map(|i| {
+                if i % 2 == 0 {
+                    target_msg(sid, i * 1000, &format!("长会话消息 {i}"))
+                } else {
+                    user_msg(sid, i * 1000, &format!("长会话消息 {i}"))
+                }
+            })
+            .collect();
+        storage.add_messages(sid, msgs);
+        let llm = MockLlmProvider::new("test-model");
+        // 3 段 → 3 次 LLM 调用；第 2/3 段带上一块上文
+        llm.set_responses(vec![
+            llm_json("段 1 摘要", None),
+            llm_json("段 2 摘要", Some("延续")),
+            llm_json("段 3 摘要（尾部）", Some("延续")),
+        ]);
+
+        let summarizer = L1Summarizer::new(
+            &llm,
+            &storage,
+            L1SummarizerConfig {
+                utt_splitter: None,
+                persona_uid: Some("char-0001".into()),
+                ..Default::default()
+            },
+        );
+        let cfg = progressive_cfg();
+        let result = summarizer.summarize_progressive(sid, &cfg).await;
+        assert!(result.is_ok(), "触发分段应成功: {:?}", result.err());
+
+        let l1_list = result.unwrap();
+        assert_eq!(l1_list.len(), 3, "12 条消息 tail=5 应切 3 段");
+        let saved = storage.saved_l1_entries();
+        assert_eq!(saved.len(), 3, "3 段 L1 全部写库（入候选池）");
+        assert!(
+            saved.iter().all(|l1| !l1.absorbed),
+            "段 L1 必须 absorbed=false（未吸收，L2 封存触发可提取）"
+        );
+        assert!(
+            saved.last().unwrap().summary.contains("尾部"),
+            "最后一段应覆盖最新对话（封存只摘要尾部）"
+        );
+        assert!(
+            saved.last().unwrap().continuation.is_some(),
+            "第 2/3 段带上一块上文 → continuation 非空"
+        );
+    }
+
+    /// 未达触发阈值（消息数 ≤ 阈值且跨度 ≤ 阈值）→ 整会话 1 条 L1（v1.6 语义）。
+    #[tokio::test]
+    async fn progressive_not_triggered_single_l1() {
+        use crate::l1::mock::MockLlmProvider;
+        let sid = Uuid::new_v4();
+        let storage = MockStorage::new();
+        storage.add_messages(
+            sid,
+            vec![
+                user_msg(sid, 0, "短会话消息 1"),
+                user_msg(sid, 1000, "短会话消息 2"),
+            ],
+        );
+        let llm = MockLlmProvider::new("test-model");
+        llm.set_response(llm_json("短会话摘要", None));
+
+        let summarizer = L1Summarizer::new(
+            &llm,
+            &storage,
+            L1SummarizerConfig {
+                utt_splitter: None,
+                persona_uid: Some("char-0001".into()),
+                ..Default::default()
+            },
+        );
+        let cfg = progressive_cfg();
+        let result = summarizer.summarize_progressive(sid, &cfg).await;
+        assert!(result.is_ok(), "未触发应成功: {:?}", result.err());
+        let l1_list = result.unwrap();
+        assert_eq!(l1_list.len(), 1, "未触发应整会话 1 条 L1");
+        assert_eq!(storage.saved_l1_entries().len(), 1);
     }
 }

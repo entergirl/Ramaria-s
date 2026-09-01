@@ -260,6 +260,7 @@ pub fn l1_list_to_views(l1_list: &[ramaria_core::MemoryL1]) -> Vec<L1DocView> {
             persona_uid: l1.persona_uid.clone(),
             created_at: l1.created_at,
             salience: l1.salience,
+            last_accessed_at: l1.last_accessed_at,
         })
         .collect()
 }
@@ -310,6 +311,7 @@ mod tests {
             persona_uid: Some("user-0001".to_string()),
             created_at: 1000,
             salience: 0.5,
+            last_accessed_at: None,
         }
     }
 

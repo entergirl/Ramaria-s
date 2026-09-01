@@ -12,6 +12,8 @@
 use async_trait::async_trait;
 use ramaria_core::traits::ChatMessage;
 use ramaria_core::types::MemoryL1;
+use ramaria_memory::decay::DecayConfig;
+use ramaria_memory::retriever::SearchResult;
 
 use crate::pipeline::{PipelineContext, PipelineData, PipelineError, PipelineStage};
 
@@ -184,19 +186,63 @@ impl PipelineStage for StageLoadHistory {
         // ---- Step 4.5: 预加载近期 L1 摘要（跨 session 上下文注入） ----
         // 不依赖关键词匹配——近期摘要无条件注入 System Prompt Block C1。
         // 解决新 session 发"你好"时 LLM 完全不知道上次聊了什么的问题。
+        //
+        // v1.7 B4（决策 D-V17-006）：脉络加权注入——开启 `[retrieval] narrative_weighted`
+        // 时，以当前用户消息为话题依据，按"时间（衰减 × 访问加成）× 话题相关性"融合排序，
+        // 使"刚聊过 / 相关的话题"优先进入脉络；关闭或检索无结果时回退 v1.6
+        // "无条件取最近 N 条"（`list_recent_l1_by_persona`）。
         let actual_uid = input.persona_uid.as_deref().unwrap_or("rama-0001");
-        let recent_l1 = ctx
-            .storage
-            .list_recent_l1_by_persona(actual_uid, 3)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!(
-                    persona_uid = actual_uid,
-                    error = %e,
-                    "加载近期 L1 摘要失败，跨 session 上下文降级为空"
-                );
-                Vec::new()
-            });
+        let narrative_top_k = ctx.config.retrieval.narrative_top_k.max(1);
+        let recent_l1 = if ctx.config.retrieval.narrative_weighted {
+            let now = ramaria_core::types::now_ms();
+            let decay_config = DecayConfig::from_core(&ctx.config.decay, "l1");
+            let narrative_results = match ctx.retriever.read() {
+                Ok(retriever) => retriever.search_narrative(
+                    &input.user_input,
+                    actual_uid,
+                    narrative_top_k as usize,
+                    now,
+                    &decay_config,
+                ),
+                Err(e) => {
+                    tracing::error!(error = %e, "Retriever lock poisoned during narrative search");
+                    Vec::new()
+                }
+            };
+            if !narrative_results.is_empty() {
+                // 加权命中 → 转回 MemoryL1（脉络行格式与 v1.6 一致，缺 time_period/atmosphere
+                // 时显示纯摘要——加权优先保证话题相关性，展示次要）
+                narrative_results
+                    .iter()
+                    .filter_map(search_result_to_memory_l1)
+                    .collect::<Vec<MemoryL1>>()
+            } else {
+                // 检索无结果（无 L1 或 query 无相关性命中）→ 回退最近 N 条（v1.6 语义）
+                ctx.storage
+                    .list_recent_l1_by_persona(actual_uid, narrative_top_k)
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(
+                            persona_uid = actual_uid,
+                            error = %e,
+                            "加载近期 L1 摘要失败，跨 session 上下文降级为空"
+                        );
+                        Vec::new()
+                    })
+            }
+        } else {
+            ctx.storage
+                .list_recent_l1_by_persona(actual_uid, narrative_top_k)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        persona_uid = actual_uid,
+                        error = %e,
+                        "加载近期 L1 摘要失败，跨 session 上下文降级为空"
+                    );
+                    Vec::new()
+                })
+        };
 
         // 格式化近期摘要为可读文本行
         let recent_summaries: Vec<String> =
@@ -223,6 +269,42 @@ impl PipelineStage for StageLoadHistory {
 
         Ok(input)
     }
+}
+
+// =========================================================
+// 辅助函数: 脉络加权结果转换（v1.7 B4）
+// =========================================================
+
+/// 将脉络加权检索的 SearchResult 转换为 MemoryL1（供脉络行格式化）。
+///
+/// 说明:
+/// - 仅接受 L1 层结果（DocId::L1）；其他层（L2/图谱）不是脉络注入目标。
+/// - `time_period` / `atmosphere` 在 SearchResult 中不承载，置 None——
+///   脉络行退化为纯摘要格式（加权路径优先保证话题相关性，展示次要）。
+/// - `session_id` 置 nil：脉络行只用于上下文文本展示，不参与会话归属。
+fn search_result_to_memory_l1(sr: &SearchResult) -> Option<MemoryL1> {
+    let id = match &sr.doc_id {
+        ramaria_memory::bm25::DocId::L1(id) => *id,
+        _ => return None,
+    };
+    Some(MemoryL1 {
+        id,
+        session_id: uuid::Uuid::nil(),
+        summary: sr.doc_summary.clone(),
+        keywords: None,
+        time_period: None,
+        atmosphere: None,
+        valence: 0.0,
+        salience: 0.5,
+        absorbed: false,
+        created_at: sr.created_at,
+        last_accessed_at: sr.last_accessed_at,
+        persona_uid: sr.persona_uid.clone(),
+        context_json: None,
+        situation_strength: None,
+        evidence_notes: None,
+        continuation: None,
+    })
 }
 
 // =========================================================
@@ -423,6 +505,95 @@ mod tests {
         let output = result.expect("should succeed");
         assert!(output.recent_summaries.is_empty());
         assert!(output.last_active_at.is_none());
+    }
+
+    // =========================================================
+    // 脉络加权注入测试（v1.7 B4，决策 D-V17-006）
+    // =========================================================
+
+    /// narrative_weighted=true（默认）：以当前消息为话题依据，用 retriever.search_narrative
+    /// 加权注入脉络（话题相关优先），而非无条件取最近 N 条。
+    #[tokio::test]
+    async fn narrative_weighted_uses_topic_relevance() {
+        let storage = Arc::new(MockStorage::new());
+        let ctx = test_context(storage.clone(), Arc::new(MockLlm::local()), None);
+        // 注入两条 L1：一条与查询相关、一条不相关（相关条目应排前/被优先注入）。
+        // 使用真实时间戳（now - 天数）避免衰减下溢干扰话题排序。
+        let now = ramaria_core::types::now_ms();
+        {
+            let mut retriever = ctx.retriever.write().expect("retriever 锁可用");
+            retriever.index_l1(&ramaria_memory::retriever::L1DocView {
+                id: uuid::Uuid::new_v4(),
+                summary: "用户讨论了Rust异步编程".to_string(),
+                keywords: Some("Rust,编程".to_string()),
+                persona_uid: Some("rama-0001".to_string()),
+                created_at: now - 3 * 86_400_000,
+                salience: 0.5,
+                last_accessed_at: None,
+            });
+            retriever.index_l1(&ramaria_memory::retriever::L1DocView {
+                id: uuid::Uuid::new_v4(),
+                summary: "用户和朋友去吃了火锅".to_string(),
+                keywords: Some("社交,火锅".to_string()),
+                persona_uid: Some("rama-0001".to_string()),
+                created_at: now - 86_400_000,
+                salience: 0.5,
+                last_accessed_at: None,
+            });
+        }
+
+        let stage = StageLoadHistory::new();
+        let mut data = make_data(Some(ramaria_core::types::Session {
+            id: uuid::Uuid::new_v4(),
+            started_at: 1000,
+            ended_at: None,
+            persona_uid: Some("rama-0001".to_string()),
+        }));
+        // 当前消息话题：Rust
+        data.user_input = "Rust 编程".to_string();
+
+        let output = stage.execute(&ctx, data).await.expect("应成功");
+        assert!(!output.recent_summaries.is_empty(), "加权注入应有脉络结果");
+        assert!(
+            output.recent_summaries[0].contains("Rust"),
+            "话题相关的 L1 应优先注入，got: {:?}",
+            output.recent_summaries[0]
+        );
+    }
+
+    /// narrative_weighted=false：回退 v1.6 行为——无条件取最近 N 条
+    /// （list_recent_l1_by_persona，按创建时间降序）。
+    #[tokio::test]
+    async fn narrative_disabled_falls_back_to_recent_l1() {
+        let storage = Arc::new(MockStorage::new());
+        // storage 预填充最近 L1（v1.6 数据源）
+        let mut recent = MemoryL1::new(
+            uuid::Uuid::new_v4(),
+            "最近的一次对话摘要".into(),
+            Some("下午".into()),
+        );
+        recent.atmosphere = Some("轻松".into());
+        recent.created_at = 1_700_000_000_000;
+        storage.add_l1_summaries("rama-0001", vec![recent]);
+
+        let mut ctx = test_context(storage.clone(), Arc::new(MockLlm::local()), None);
+        ctx.config.retrieval.narrative_weighted = false; // 关闭加权 → 回退 v1.6
+
+        let stage = StageLoadHistory::new();
+        let mut data = make_data(Some(ramaria_core::types::Session {
+            id: uuid::Uuid::new_v4(),
+            started_at: 1000,
+            ended_at: None,
+            persona_uid: Some("rama-0001".to_string()),
+        }));
+        data.user_input = "完全不相关的话题".to_string();
+
+        let output = stage.execute(&ctx, data).await.expect("应成功");
+        assert_eq!(output.recent_summaries.len(), 1, "回退最近 N 条");
+        assert!(
+            output.recent_summaries[0].contains("最近的一次对话摘要"),
+            "v1.6 无条件取最近摘要"
+        );
     }
 
     #[tokio::test]

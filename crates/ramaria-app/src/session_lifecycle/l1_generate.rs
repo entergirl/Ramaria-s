@@ -241,6 +241,78 @@ impl SessionLifecycle {
         }
     }
 
+    /// 渐进式感知的 L1 摘要生成（v1.7 B3，决策 D-V17-005）。
+    ///
+    /// 行为:
+    /// - `[l1.progressive].enabled=true` 且触发条件满足（消息数 > 阈值 或 跨度 > 阈值）：
+    ///   按段生成多条 L1（每段独立写库、absorbed=0 入候选池），返回全部段 L1。
+    /// - 否则：委托 [`Self::generate_l1_summary`]（v1.6 行为，单条 L1）。
+    ///
+    /// 封存语义:
+    /// - 长会话在封存时按 `tail_msg_count` 切段，尾段覆盖最新对话（封存只摘要尾部）；
+    /// - L2 事件提取仍按封存触发（`check_l2_trigger` → `list_unabsorbed_l1` 天然包含段 L1）。
+    ///
+    /// 参数:
+    /// - 与 [`Self::generate_l1_summary`] 一致（persona_uid / 前缀覆盖 / backend max_tokens 传播）。
+    ///
+    /// 返回:
+    /// - 成功时返回本次生成的全部 L1（渐进式触发时 ≥1 条；未触发时 1 条）。
+    pub(super) async fn generate_l1_summaries(
+        &self,
+        storage: &dyn StorageBackend,
+        llm: &dyn LlmProvider,
+        session_id: Uuid,
+        persona_uid: Option<&str>,
+        user_prefix: Option<&str>,
+        assistant_prefix: Option<&str>,
+    ) -> RamariaResult<Vec<ramaria_core::types::MemoryL1>> {
+        let mut summarizer_config = L1SummarizerConfig::default();
+        if let Some(uid) = persona_uid {
+            summarizer_config.persona_uid = Some(uid.to_string());
+        }
+        if let Some(prefix) = user_prefix {
+            summarizer_config.user_prefix = prefix.to_string();
+        }
+        if let Some(prefix) = assistant_prefix {
+            summarizer_config.assistant_prefix = prefix.to_string();
+        }
+        // L1 输出预算从 backend_config 传播（与 generate_l1_summary 一致）
+        if let Ok(Some(backend)) = storage.get_backend_config().await {
+            let floor = summarizer_config.max_tokens;
+            summarizer_config.max_tokens = backend.max_tokens.max(floor);
+        }
+        let summarizer = L1Summarizer::new(llm, storage, summarizer_config);
+
+        // 渐进式配置快照（闭包需要 'static 数据，clone 后移入）
+        let progressive_cfg = self.config.l1.progressive.clone();
+
+        let job_manager = JobManager::with_defaults(storage);
+        let payload = serde_json::json!({ "session_id": session_id.to_string() }).to_string();
+
+        let result = job_manager
+            .execute_with_retry(JobType::L1Summary, Some(&payload), None, || {
+                summarize_progressive_with_summarizer(
+                    &summarizer,
+                    session_id,
+                    progressive_cfg.clone(),
+                )
+            })
+            .await;
+
+        match result {
+            Ok(_job_id) => {
+                // 摘要已写入存储，读取本 session 全部 L1（渐进式场景含多段）
+                let l1_list = storage.list_memory_l1(session_id).await?;
+                if l1_list.is_empty() {
+                    Err(RamariaError::validation("L1 摘要生成后无法读取"))
+                } else {
+                    Ok(l1_list)
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// 将 L1 摘要增量添加到 Retriever 内存索引（含向量通道接线）。
     ///
     /// 职责:
@@ -278,6 +350,7 @@ impl SessionLifecycle {
                         persona_uid: l1.persona_uid.clone(),
                         created_at: l1.created_at,
                         salience: l1.salience,
+                        last_accessed_at: l1.last_accessed_at,
                     };
                     retriever.index_l1_with_vector(&doc, vector);
                     info!(
@@ -360,6 +433,32 @@ pub(super) async fn summarize_with_summarizer(
         Err(e) => {
             // LLM 调用失败是可重试的（网络波动、服务暂时不可用等）
             warn!(%session_id, %e, "L1 摘要生成失败，将重试");
+            JobResult::Retryable(e.to_string())
+        }
+    }
+}
+
+/// 渐进式感知的 L1 摘要生成闭包（供 JobManager::execute_with_retry 使用）。
+pub(super) async fn summarize_progressive_with_summarizer(
+    summarizer: &L1Summarizer<'_>,
+    session_id: Uuid,
+    progressive: ramaria_core::config::L1ProgressiveConfig,
+) -> JobResult {
+    match summarizer
+        .summarize_progressive(session_id, &progressive)
+        .await
+    {
+        Ok(l1_list) => {
+            info!(
+                %session_id,
+                l1_count = l1_list.len(),
+                "L1 摘要生成成功（渐进式感知）"
+            );
+            JobResult::Success
+        }
+        Err(e) => {
+            // LLM 调用失败是可重试的（网络波动、服务暂时不可用等）
+            warn!(%session_id, %e, "L1 摘要生成失败（渐进式），将重试");
             JobResult::Retryable(e.to_string())
         }
     }

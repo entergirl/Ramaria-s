@@ -10,7 +10,11 @@
 //! 图检索评分公式:
 //! score = entity_match_score × relation_boost
 //! entity_match_score = matched_chars / max(entity_chars, query_chars) (Jaccard-like)
-//! relation_boost = 基础权重 × (1 + 0.5 × 边数量)
+//! relation_boost = 1.0 + Σ(关系权重 × 0.1)，出边与入边对称计入
+//!   - 每条被纳入的邻居边按其关系类型权重贡献 0.1 加成（TASK_STATUS=1.0 → 0.10/边，
+//!     TIME_ANCHOR=0.4 → 0.04/边），最终钳制到 [0.5, 2.0]。
+//!   - 出边与入边行为对称：入边（其他节点指向本实体）同样计入加成，
+//!     解决此前"出边计入、入边不计"的不对称问题（决策 D-V17-014-16）。
 
 use std::collections::HashMap;
 
@@ -303,7 +307,9 @@ impl GraphRetriever {
                 }
             }
 
-            // 入边（其他节点指向此实体）—— 使用预建索引 eds_to，O(1) 直接定位
+            // 入边（其他节点指向此实体）—— 使用预建索引 edges_to，O(1) 直接定位。
+            // 行为对称性（决策 D-V17-014-16）：入边与出边一样参与关系权重加成，
+            // 使"被引用"与"引用"对实体重要度贡献一致，避免评分方向偏差。
             if let Some(in_edges) = self.edges_to.get(&node.id) {
                 let edge_count = in_edges.len().min(config.max_edges_per_node);
                 for edge in in_edges.iter().take(edge_count) {
@@ -312,6 +318,15 @@ impl GraphRetriever {
                         if !related.contains(&source.entity_name) {
                             related.push(source.entity_name.clone());
                             rel_types.push(format!("←{}", edge.relation_type));
+
+                            // 关系权重加成（与出边一致：weight × 0.1）
+                            let weight = config
+                                .relation_weights
+                                .get(&edge.relation_type)
+                                .unwrap_or_else(|| {
+                                    config.relation_weights.get("__default__").unwrap_or(&0.5)
+                                });
+                            total_boost += *weight * 0.1;
                         }
                     }
                 }
@@ -504,6 +519,94 @@ mod tests {
         let r = make_test_retriever();
         let hits = r.search("Python 机器学习 数据清洗", &config);
         assert!(hits.len() <= 1);
+    }
+
+    // ---- 评分公式对齐（决策 D-V17-014-16）----
+    // 文档公式与实现对齐：relation_boost = 1.0 + Σ(关系权重 × 0.1)，出边/入边对称。
+    // 与搜索分数耦合的既有测试（search_scores_in_range）只断言范围，不受公式修正影响。
+
+    /// 构造仅有入边的实体：入边必须贡献与出边一致的关系权重加成。
+    #[test]
+    fn search_in_edge_contributes_boost() {
+        let mut r = GraphRetriever::new();
+        let nodes = vec![
+            (1i64, "Alpha".to_string(), "concept".to_string()),
+            (2, "Beta".to_string(), "concept".to_string()),
+        ];
+        // Beta → Alpha（TASK_STATUS，权重 1.0）：Alpha 只有入边
+        let edges = vec![(1i64, 2i64, 1i64, "TASK_STATUS".to_string())];
+        r.load(&nodes, &edges);
+
+        let config = GraphRetrieverConfig::default();
+
+        // 查询 "Al"（部分子序列匹配）：Alpha match_score = 2/5 = 0.4
+        let hits = r.search("Al", &config);
+        let alpha = hits
+            .iter()
+            .find(|h| h.entity_name == "Alpha")
+            .expect("Alpha 应命中");
+        // boost = 1.0 + TASK_STATUS(1.0)×0.1 = 1.10（仅入边贡献）
+        // score = 0.4 × 1.10 = 0.44
+        assert!(
+            (alpha.score - 0.44).abs() < 0.001,
+            "入边应贡献权重加成，got {}",
+            alpha.score
+        );
+        assert!(
+            alpha.related_entities.contains(&"Beta".to_string()),
+            "入边邻居应被收集"
+        );
+        assert!(
+            alpha
+                .relation_types
+                .iter()
+                .any(|t| t.contains("←TASK_STATUS")),
+            "入边关系类型应带 ← 前缀"
+        );
+    }
+
+    /// 出边与入边的 boost 行为对称：同样权重的边贡献相同加成。
+    ///
+    /// 构造: Gamma → Alpha（TASK_STATUS 权重 1.0）。
+    /// - Alpha 仅有入边（被引用）：boost = 1.0 + 1.0×0.1 = 1.10
+    /// - Gamma 仅有出边（引用）：boost = 1.0 + 1.0×0.1 = 1.10（对称）
+    #[test]
+    fn search_out_in_edge_boost_symmetric() {
+        let mut r = GraphRetriever::new();
+        let nodes = vec![
+            (1i64, "Alpha".to_string(), "concept".to_string()),
+            (3, "Gamma".to_string(), "concept".to_string()),
+        ];
+        let edges = vec![(1i64, 3i64, 1i64, "TASK_STATUS".to_string())];
+        r.load(&nodes, &edges);
+
+        let config = GraphRetrieverConfig::default();
+
+        // Alpha：仅有入边。查询 "Al" match_score=2/5=0.4
+        // boost = 1.0 + 1.0×0.1 = 1.10；score = 0.4 × 1.10 = 0.44
+        let hits = r.search("Al", &config);
+        let alpha = hits
+            .iter()
+            .find(|h| h.entity_name == "Alpha")
+            .expect("Alpha 应命中");
+        assert!(
+            (alpha.score - 0.44).abs() < 0.001,
+            "仅入边的 boost 应为 1.10，got {}",
+            alpha.score
+        );
+
+        // Gamma：仅有出边。查询 "Ga" match_score=2/5=0.4
+        // boost = 1.0 + 1.0×0.1 = 1.10；score = 0.4 × 1.10 = 0.44（与 Alpha 对称）
+        let hits = r.search("Ga", &config);
+        let gamma = hits
+            .iter()
+            .find(|h| h.entity_name == "Gamma")
+            .expect("Gamma 应命中");
+        assert!(
+            (gamma.score - 0.44).abs() < 0.001,
+            "入边/出边 boost 应对称，got {}",
+            gamma.score
+        );
     }
 
     #[test]

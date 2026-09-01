@@ -102,6 +102,10 @@ pub struct RamariaConfig {
     #[serde(default)]
     pub event_extraction: EventExtractionConfig,
 
+    /// L1 摘要配置（渐进式摘要 B3）
+    #[serde(default)]
+    pub l1: L1Config,
+
     /// utt 话语块（原文注入通道，v1.4 新增）
     #[serde(default)]
     pub utt: UttConfig,
@@ -174,6 +178,7 @@ impl Default for RamariaConfig {
             logging: LoggingConfig::default(),
             inference: InferenceConfig::default(),
             event_extraction: EventExtractionConfig::default(),
+            l1: L1Config::default(),
             utt: UttConfig::default(),
             examples: ExamplesConfig::default(),
             bridge: BridgeConfig::default(),
@@ -320,6 +325,23 @@ pub struct RetrievalConfig {
     pub retrieval_weight_l2: f64,
     /// L1 结果排序权重
     pub retrieval_weight_l1: f64,
+    /// 脉络加权注入开关（v1.7 B4）：跨会话近期摘要按"时间（衰减 × 访问加成）× 话题相关性"
+    /// 融合排序注入；`false` 回退 v1.6 的"无条件取最近 N 条"。
+    #[serde(default = "default_narrative_weighted")]
+    pub narrative_weighted: bool,
+    /// 脉络注入的最大条数（v1.7 B4），默认 3。
+    #[serde(default = "default_narrative_top_k")]
+    pub narrative_top_k: u32,
+}
+
+/// serde 默认值：脉络加权注入默认启用（自动为主可配置）。
+fn default_narrative_weighted() -> bool {
+    true
+}
+
+/// serde 默认值：脉络注入条数默认 3。
+fn default_narrative_top_k() -> u32 {
+    3
 }
 
 impl Default for RetrievalConfig {
@@ -340,6 +362,8 @@ impl Default for RetrievalConfig {
             graph_weight: 0.8,
             retrieval_weight_l2: 0.8,
             retrieval_weight_l1: 1.0,
+            narrative_weighted: true,
+            narrative_top_k: 3,
         }
     }
 }
@@ -527,6 +551,90 @@ impl Default for EventExtractionConfig {
             max_tokens: 8192,
             max_events: 5,
             degraded_confidence_enabled: true,
+        }
+    }
+}
+
+// =========================================================
+// L1 渐进式摘要配置（B3）
+// =========================================================
+
+/// L1 摘要相关配置（`[l1]`）。
+///
+/// 职责:
+/// - 承载渐进式摘要（B3）触发参数，长会话按段生成 L1、封存只摘要尾部。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct L1Config {
+    /// 渐进式摘要配置（`[l1.progressive]`）
+    #[serde(default)]
+    pub progressive: L1ProgressiveConfig,
+}
+
+impl Default for L1Config {
+    /// 创建默认 L1 配置。
+    ///
+    /// 返回:
+    /// - 渐进式摘要默认关闭（回退 v1.6 整会话/按 utt 切分行为）。
+    fn default() -> Self {
+        Self {
+            progressive: L1ProgressiveConfig::default(),
+        }
+    }
+}
+
+/// 渐进式摘要（B3）触发参数。
+///
+/// 职责:
+/// - 长会话（消息数 > `msg_threshold` 或跨度 > `span_hours`）在封存时按段生成 L1，
+///   每段独立成 L1（absorbed=0 入候选池），最后一段覆盖最新对话（尾部）。
+/// - 短会话未达触发条件时回退 v1.6 行为（整会话摘要，不额外切段）。
+///
+/// 设计依据:
+/// - 决策 D-V17-005：消息数>100 或跨度>24h（可配置）；段 L1 实时入缓冲；
+///   L2 提取仍封存触发；封存只摘要尾部。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct L1ProgressiveConfig {
+    /// 渐进式摘要总开关（默认 false——关闭时回退 v1.6 行为）。
+    #[serde(default = "default_progressive_enabled")]
+    pub enabled: bool,
+    /// 消息数触发阈值（默认 100 条）：会话消息数超过此值触发分段。
+    #[serde(default = "default_progressive_msg_threshold")]
+    pub msg_threshold: u32,
+    /// 时间跨度触发阈值（默认 24 小时）：首末消息跨度超过此值触发分段。
+    #[serde(default = "default_progressive_span_hours")]
+    pub span_hours: u32,
+    /// 单段最大消息条数（默认 60）：分段时每段不超过此值，尾段覆盖最新消息。
+    #[serde(default = "default_progressive_tail_msg_count")]
+    pub tail_msg_count: u32,
+}
+
+/// serde 默认值：渐进式摘要默认关闭（保守，回退 v1.6 行为）。
+fn default_progressive_enabled() -> bool {
+    false
+}
+
+/// serde 默认值：消息数触发阈值 100 条。
+fn default_progressive_msg_threshold() -> u32 {
+    100
+}
+
+/// serde 默认值：时间跨度触发阈值 24 小时。
+fn default_progressive_span_hours() -> u32 {
+    24
+}
+
+/// serde 默认值：单段最大消息条数 60。
+fn default_progressive_tail_msg_count() -> u32 {
+    60
+}
+
+impl Default for L1ProgressiveConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            msg_threshold: 100,
+            span_hours: 24,
+            tail_msg_count: 60,
         }
     }
 }

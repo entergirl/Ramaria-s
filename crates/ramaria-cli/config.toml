@@ -26,6 +26,8 @@ bm25_weight = 1.0
 graph_weight = 0.8
 retrieval_weight_l2 = 0.8
 retrieval_weight_l1 = 1.0
+narrative_weighted = true
+narrative_top_k = 3
 
 [decay]
 s_l0 = 10
@@ -85,6 +87,12 @@ temperature = 0.3
 max_tokens = 8192
 max_events = 5
 degraded_confidence_enabled = true
+
+[l1.progressive]
+enabled = false
+msg_threshold = 100
+span_hours = 24
+tail_msg_count = 60
 
 [utt]
 enabled = true

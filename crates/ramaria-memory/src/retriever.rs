@@ -17,6 +17,7 @@ use ramaria_core::error::RamariaResult;
 use ramaria_core::types::MemoryL1;
 
 use crate::bm25::{Bm25Config, Bm25Index, DocId};
+use crate::decay::{DecayConfig, calc_retention};
 use crate::graph_retriever::{GraphRetriever, GraphRetrieverConfig, graph_hits_to_rrf_pairs};
 use crate::rrf::{ChannelResult, FusedResult, RrfConfig, rrf_fuse};
 use crate::vector::{
@@ -88,6 +89,12 @@ pub struct SearchResult {
     pub share: Option<f64>,
     /// 文档创建时间（Unix 毫秒），用于时间衰减加权
     pub created_at: i64,
+    /// 最近访问时间（Unix 毫秒，L1 经 touch 接线刷新；L2 事件暂不追踪 → None）。
+    ///
+    /// 用途:
+    /// - 参与时间衰减排序（`decay::calc_retention`）：近期被检索命中的 L1
+    ///   获得访问加成（保底 `recent_boost_floor`），使"刚聊过的话题"更容易被召回。
+    pub last_accessed_at: Option<i64>,
     /// 文档标题/摘要（供 RAG 格式化使用）
     pub doc_summary: String,
 }
@@ -129,6 +136,8 @@ pub struct L1DocView {
     pub persona_uid: Option<String>,
     pub created_at: i64,
     pub salience: f64,
+    /// 最近访问时间（Unix 毫秒），检索命中经 touch 刷新后参与访问加成衰减。
+    pub last_accessed_at: Option<i64>,
 }
 
 /// L2 事件的检索视图。
@@ -375,6 +384,7 @@ impl Retriever {
             persona_uid: record.persona_uid.clone(),
             created_at: record.created_at,
             salience: record.salience,
+            last_accessed_at: record.last_accessed_at,
         };
         self.index_l1(&doc);
         tracing::info!(
@@ -658,13 +668,14 @@ impl Retriever {
 
         for f in &fused {
             // 优先从 BM25 预解析缓存获取（避免 label 字符串往返解析）
-            let (doc_id, persona_uid, share, created_at, summary, layer) =
+            let (doc_id, persona_uid, share, created_at, last_accessed_at, summary, layer) =
                 if let Some(data) = bm25_data.get(&f.doc_id) {
                     (
                         data.doc_id.clone(),
                         data.persona_uid.clone(),
                         data.share,
                         data.created_at,
+                        data.last_accessed_at,
                         data.summary.clone(),
                         data.layer.clone(),
                     )
@@ -675,13 +686,13 @@ impl Retriever {
                     // 可能是向量通道产生的 label（L1:uuid 或 L2:id 格式）
                     // 仍需字符串解析，但仅为向量通道结果
                     match parse_doc_label(&f.doc_id, &self.l1_docs, &self.l2_docs) {
-                        Some((did, puid, sh, ca, sum)) => {
+                        Some((did, puid, sh, ca, la, sum)) => {
                             let lyr = match &did {
                                 DocId::L1(_) => "l1".to_string(),
                                 DocId::L2(_) => "l2".to_string(),
                                 DocId::Graph(_) => "graph".to_string(),
                             };
-                            (did, puid, sh, ca, sum, lyr)
+                            (did, puid, sh, ca, la, sum, lyr)
                         }
                         None => continue, // 文档已被移除，跳过
                     }
@@ -705,6 +716,7 @@ impl Retriever {
                 persona_uid,
                 share,
                 created_at,
+                last_accessed_at,
                 doc_summary: summary,
             });
         }
@@ -785,6 +797,7 @@ impl Retriever {
                         persona_uid: doc.persona_uid.clone(),
                         share: None,
                         created_at: doc.created_at,
+                        last_accessed_at: doc.last_accessed_at,
                         doc_summary: doc.summary.clone(),
                     },
                 ));
@@ -811,6 +824,7 @@ impl Retriever {
                         persona_uid: Some(doc.persona_uid.clone()),
                         share: Some(doc.share),
                         created_at: doc.created_at,
+                        last_accessed_at: None, // L2 事件暂不追踪访问时间
                         doc_summary: format!("{} — {}", doc.title, doc.summary),
                     },
                 ));
@@ -858,6 +872,113 @@ impl Retriever {
     /// - `top_k`: 最大返回结果数。
     ///
     /// 返回:
+    /// 脉络加权检索（v1.7 B4，决策 D-V17-006）。
+    ///
+    /// 用途:
+    /// - 替代跨会话注入中"无条件取最近 N 条"（`list_recent_l1_by_persona`）：
+    ///   以当前用户消息为话题依据，按"时间（衰减 × 访问加成）× 话题相关性"
+    ///   融合排序，使"刚聊过 / 相关的话题"优先进入脉络注入。
+    ///
+    /// 排序公式:
+    /// - `score = BM25 相关性 × calc_retention(created_at, last_accessed_at, now, salience)`
+    /// - `calc_retention` 内含访问加成：近期被检索命中的 L1（`touch` 刷新
+    ///   `last_accessed_at` 后）保留率保底 `recent_boost_floor`，旧记忆更容易被召回。
+    ///
+    /// 兜底:
+    /// - 查询为空或 BM25 无相关性命中 → 按 `created_at` 降序回退最近 N 条，
+    ///   与 v1.6"无条件取最近几条"语义等价（不丢脉络）。
+    /// - 目标 persona 无 L1 → 空列表。
+    ///
+    /// 参数:
+    /// - `query`: 当前用户消息（话题相关性依据；空/空白时按时间兜底）。
+    /// - `persona_uid`: 目标人格（仅检索该 persona 的 L1 摘要）。
+    /// - `top_k`: 最多返回条数。
+    /// - `now_ms`: 当前时间（Unix 毫秒，衰减基准）。
+    /// - `decay_config`: 记忆层衰减配置（含访问加成参数）。
+    ///
+    /// 返回:
+    /// - 按融合分降序的 L1 SearchResult 列表（最多 top_k 条）。
+    pub fn search_narrative(
+        &self,
+        query: &str,
+        persona_uid: &str,
+        top_k: usize,
+        now_ms: i64,
+        decay_config: &DecayConfig,
+    ) -> Vec<SearchResult> {
+        if top_k == 0 {
+            return Vec::new();
+        }
+
+        // 1. 收集目标 persona 的 L1 文档（脉络注入只针对该 persona 的摘要）
+        let persona_docs: Vec<&L1DocView> = self
+            .l1_docs
+            .values()
+            .filter(|d| d.persona_uid.as_deref() == Some(persona_uid))
+            .collect();
+        if persona_docs.is_empty() {
+            return Vec::new();
+        }
+
+        // 2. 话题相关性：BM25 检索 query 命中 L1 文档（BM25 分数作为相关性）
+        //    BM25 索引可能包含其他 persona 的文档，此处按 id 过滤到本 persona。
+        let bm25_hits: std::collections::HashMap<uuid::Uuid, f64> = if !query.trim().is_empty() {
+            self.bm25_index
+                .search(query, &self.config.bm25)
+                .into_iter()
+                .filter_map(|(doc_id, score)| match doc_id {
+                    DocId::L1(id) => Some((id, score)),
+                    _ => None,
+                })
+                .collect()
+        } else {
+            std::collections::HashMap::new()
+        };
+
+        // 3. 融合打分：相关性 × 时间保留率（含访问加成）
+        let mut scored: Vec<(f64, &L1DocView)> = Vec::with_capacity(persona_docs.len());
+        for doc in persona_docs {
+            let bm25_raw = bm25_hits.get(&doc.id).copied().unwrap_or(0.0);
+            let retention = calc_retention(
+                doc.created_at,
+                doc.last_accessed_at,
+                now_ms,
+                doc.salience,
+                decay_config,
+            );
+            scored.push((bm25_raw * retention, doc));
+        }
+
+        // 4. 排序：有相关性命中 → 按融合分降序；否则按创建时间降序（最近优先兜底）
+        let has_relevance = scored.iter().any(|(s, _)| *s > 0.0);
+        if has_relevance {
+            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        } else {
+            // 按创建时间降序（最近优先兜底）：sort_by_key 升序后反转
+            scored.sort_by_key(|(_, doc)| doc.created_at);
+            scored.reverse();
+        }
+
+        // 5. 截取 top_k 并转换为 SearchResult
+        scored.truncate(top_k);
+        scored
+            .into_iter()
+            .map(|(score, doc)| SearchResult {
+                doc_id: DocId::L1(doc.id),
+                layer: "l1".to_string(),
+                rrf_score: score,
+                bm25_score: if score > 0.0 { Some(score) } else { None },
+                vector_score: None,
+                graph_score: None,
+                persona_uid: doc.persona_uid.clone(),
+                share: None,
+                created_at: doc.created_at,
+                last_accessed_at: doc.last_accessed_at,
+                doc_summary: doc.summary.clone(),
+            })
+            .collect()
+    }
+
     /// - 按 BM25 评分降序排列的 SearchResult 列表，最多 top_k 条。
     ///
     /// 说明:
@@ -923,6 +1044,7 @@ impl Retriever {
                 persona_uid: doc_data.persona_uid,
                 share: doc_data.share,
                 created_at: doc_data.created_at,
+                last_accessed_at: doc_data.last_accessed_at,
                 doc_summary: doc_data.summary,
             });
 
@@ -1154,6 +1276,7 @@ struct Bm25Resolved {
     persona_uid: Option<String>,
     share: Option<f64>,
     created_at: i64,
+    last_accessed_at: Option<i64>,
     summary: String,
     layer: String,
 }
@@ -1174,6 +1297,7 @@ fn resolve_bm25_doc(
                     persona_uid: doc.persona_uid.clone(),
                     share: None,
                     created_at: doc.created_at,
+                    last_accessed_at: doc.last_accessed_at,
                     summary: doc.summary.clone(),
                     layer: "l1".to_string(),
                 }
@@ -1184,6 +1308,7 @@ fn resolve_bm25_doc(
                     persona_uid: None,
                     share: None,
                     created_at: 0,
+                    last_accessed_at: None,
                     summary: "[已删除]".to_string(),
                     layer: "l1".to_string(),
                 }
@@ -1196,6 +1321,7 @@ fn resolve_bm25_doc(
                     persona_uid: Some(doc.persona_uid.clone()),
                     share: Some(doc.share),
                     created_at: doc.created_at,
+                    last_accessed_at: None, // L2 事件暂不追踪访问时间
                     summary: format!("{} — {}", doc.title, doc.summary),
                     layer: "l2".to_string(),
                 }
@@ -1205,6 +1331,7 @@ fn resolve_bm25_doc(
                     persona_uid: None,
                     share: None,
                     created_at: 0,
+                    last_accessed_at: None,
                     summary: "[已删除]".to_string(),
                     layer: "l2".to_string(),
                 }
@@ -1217,6 +1344,7 @@ fn resolve_bm25_doc(
                 persona_uid: None,
                 share: None,
                 created_at: 0,
+                last_accessed_at: None,
                 summary: format!("[图谱实体] {}", doc_id),
                 layer: "graph".to_string(),
             }
@@ -1228,17 +1356,26 @@ fn resolve_bm25_doc(
 ///
 /// 图谱实体没有对应数据库记录，因此返回实体名作为摘要。
 ///
-/// 返回: 元组 (DocId::Graph, None, None, 0, "[图谱实体] {name}", "graph")
+/// 返回: 元组 (DocId::Graph, None, None, 0, None, "[图谱实体] {name}", "graph")
 #[allow(clippy::type_complexity)]
 fn parse_graph_label(
     label: &str,
-) -> Option<(DocId, Option<String>, Option<f64>, i64, String, String)> {
+) -> Option<(
+    DocId,
+    Option<String>,
+    Option<f64>,
+    i64,
+    Option<i64>,
+    String,
+    String,
+)> {
     label.strip_prefix("graph:").map(|entity| {
         (
             DocId::Graph(entity.to_string()),
             None, // persona_uid（图谱实体不关联特定 persona）
             None, // share
             0,    // created_at（图谱实体无时间戳）
+            None, // last_accessed_at（图谱实体无访问时间）
             format!("[图谱实体] {}", entity),
             "graph".to_string(),
         )
@@ -1250,13 +1387,13 @@ fn parse_graph_label(
 /// 仅用于向量通道产生的 L1:/L2: 格式 label（BM25 已通过 `resolve_bm25_doc` 预解析，
 /// 图谱已通过 `parse_graph_label` 独立处理）。
 ///
-/// 返回: 元组 (DocId, persona_uid, share, created_at, summary)
+/// 返回: 元组 (DocId, persona_uid, share, created_at, last_accessed_at, summary)
 #[allow(clippy::type_complexity)]
 fn parse_doc_label(
     label: &str,
     l1_docs: &std::collections::HashMap<uuid::Uuid, L1DocView>,
     l2_docs: &std::collections::HashMap<i64, L2DocView>,
-) -> Option<(DocId, Option<String>, Option<f64>, i64, String)> {
+) -> Option<(DocId, Option<String>, Option<f64>, i64, Option<i64>, String)> {
     if let Some(uuid_str) = label
         .strip_prefix("L1:")
         .or_else(|| label.strip_prefix("l1:"))
@@ -1268,6 +1405,7 @@ fn parse_doc_label(
             doc.persona_uid.clone(),
             None, // L1 无 share
             doc.created_at,
+            doc.last_accessed_at,
             doc.summary.clone(),
         ))
     } else if let Some(id_str) = label
@@ -1281,6 +1419,7 @@ fn parse_doc_label(
             Some(doc.persona_uid.clone()),
             Some(doc.share),
             doc.created_at,
+            None, // L2 事件暂不追踪访问时间
             format!("{} — {}", doc.title, doc.summary),
         ))
     } else {
@@ -1342,6 +1481,7 @@ mod tests {
             persona_uid: Some("user-0001".to_string()),
             created_at: 1000,
             salience: 0.8,
+            last_accessed_at: None,
         });
 
         r.index_l1(&L1DocView {
@@ -1351,6 +1491,7 @@ mod tests {
             persona_uid: Some("user-0001".to_string()),
             created_at: 2000,
             salience: 0.6,
+            last_accessed_at: None,
         });
 
         // 添加 L2 事件
@@ -1400,6 +1541,7 @@ mod tests {
                 persona_uid: Some("user-0001".to_string()),
                 created_at: 1000,
                 salience: 0.8,
+                last_accessed_at: None,
             },
             Some(vec![1.0, 0.0, 0.0]),
         );
@@ -1456,6 +1598,7 @@ mod tests {
                 persona_uid: Some("user-0001".to_string()),
                 created_at: 1000,
                 salience: 0.8,
+                last_accessed_at: None,
             },
             Some(vec![1.0, 0.0, 0.0]),
         );
@@ -1497,6 +1640,7 @@ mod tests {
                 persona_uid: Some("user-0001".to_string()),
                 created_at: 3000 + i as i64,
                 salience: 0.5,
+                last_accessed_at: None,
             });
         }
 
@@ -1807,6 +1951,7 @@ mod tests {
                 persona_uid: Some("user-0001".to_string()),
                 created_at: 3000 + i as i64,
                 salience: 0.5,
+                last_accessed_at: None,
             });
         }
         let kw = vec![KeywordToken::new("Rust").unwrap()];
@@ -1825,6 +1970,7 @@ mod tests {
             persona_uid: Some("u1".to_string()),
             created_at: 1000,
             salience: 0.5,
+            last_accessed_at: None,
         });
         // 文档 B: 命中 2 个关键词
         r.index_l1(&L1DocView {
@@ -1834,6 +1980,7 @@ mod tests {
             persona_uid: Some("u1".to_string()),
             created_at: 2000,
             salience: 0.5,
+            last_accessed_at: None,
         });
 
         let kw = vec![
@@ -1887,10 +2034,74 @@ mod tests {
                 persona_uid: Some("user-0001".to_string()),
                 created_at: 3000 + i as i64,
                 salience: 0.5,
+                last_accessed_at: None,
             });
         }
         let results = r.search_substring("Rust", "user-0001", 2);
         assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn search_narrative_ranks_relevant_over_recent() {
+        // 脉络加权（决策 D-V17-006）：话题相关（BM25 命中）优先于更新的无关记忆。
+        // 使用真实时间戳（now - 天数），避免 1970 年小时间戳导致衰减下溢。
+        let mut r = Retriever::new();
+        let now = 1_700_000_000_000i64;
+        // 相关但更旧（3 天前）
+        r.index_l1(&L1DocView {
+            id: uuid::Uuid::new_v4(),
+            summary: "用户讨论了Rust异步编程".to_string(),
+            keywords: Some("Rust,编程".to_string()),
+            persona_uid: Some("user-0001".to_string()),
+            created_at: now - 3 * 86_400_000,
+            salience: 0.5,
+            last_accessed_at: None,
+        });
+        // 无关但更新（1 天前）
+        r.index_l1(&L1DocView {
+            id: uuid::Uuid::new_v4(),
+            summary: "用户和朋友去吃了火锅".to_string(),
+            keywords: Some("社交,火锅".to_string()),
+            persona_uid: Some("user-0001".to_string()),
+            created_at: now - 86_400_000,
+            salience: 0.5,
+            last_accessed_at: None,
+        });
+
+        let decay = DecayConfig::l1();
+        let results = r.search_narrative("Rust 编程", "user-0001", 3, now, &decay);
+
+        assert!(!results.is_empty(), "应命中 Rust 相关 L1");
+        assert!(
+            results[0].doc_summary.contains("Rust"),
+            "话题相关应排前（即使更旧），got: {}",
+            results[0].doc_summary
+        );
+        assert!(
+            results[0].bm25_score.unwrap_or(0.0) > 0.0,
+            "相关性命中应携带 BM25 分数"
+        );
+    }
+
+    #[test]
+    fn search_narrative_no_relevance_falls_back_to_recent() {
+        // 无相关性命中 → 按创建时间降序回退最近 N 条（v1.6 语义等价）。
+        let r = make_test_retriever();
+        let now = 1_000_000_000_000i64;
+        let decay = DecayConfig::l1();
+        let results = r.search_narrative("完全不相关", "user-0001", 3, now, &decay);
+
+        assert!(!results.is_empty(), "兜底应返回最近 L1");
+        // 火锅文档 created_at=2000 最新 → 应排第一
+        assert!(
+            results[0].doc_summary.contains("火锅"),
+            "无相关性命中应按时间兜底（最近优先），got: {}",
+            results[0].doc_summary
+        );
+        assert!(
+            results.iter().all(|sr| sr.bm25_score.is_none()),
+            "无相关性命中不应携带 BM25 分数"
+        );
     }
 
     #[test]

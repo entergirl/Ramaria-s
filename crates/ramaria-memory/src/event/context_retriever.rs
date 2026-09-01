@@ -255,6 +255,7 @@ mod tests {
             persona_uid: Some("user-0001".to_string()),
             created_at: 1000,
             salience: 0.8,
+            last_accessed_at: None,
         });
         r.index_l1(&L1DocView {
             id: uuid::Uuid::new_v4(),
@@ -263,6 +264,7 @@ mod tests {
             persona_uid: Some("user-0001".to_string()),
             created_at: 2000,
             salience: 0.6,
+            last_accessed_at: None,
         });
         r.index_l1(&L1DocView {
             id: uuid::Uuid::new_v4(),
@@ -271,6 +273,7 @@ mod tests {
             persona_uid: Some("user-0001".to_string()),
             created_at: 3000,
             salience: 0.5,
+            last_accessed_at: None,
         });
 
         r.index_l2(&L2DocView {

@@ -47,6 +47,7 @@ fn retriever_lru_eviction() {
             persona_uid: Some("user-0001".to_string()),
             created_at: (i + 1) as i64 * 1000, // 模拟递增时间戳
             salience: 0.5,
+            last_accessed_at: None,
         };
         retriever.index_l1(&doc);
     }
@@ -71,6 +72,7 @@ fn retriever_remove_l1() {
         persona_uid: Some("user-0001".to_string()),
         created_at: 1000,
         salience: 0.5,
+        last_accessed_at: None,
     };
     retriever.index_l1(&doc);
     assert_eq!(retriever.doc_count(), 1);
@@ -98,6 +100,7 @@ fn retriever_lru_unlimited() {
             persona_uid: None,
             created_at: i as i64,
             salience: 0.3,
+            last_accessed_at: None,
         };
         retriever.index_l1(&doc);
     }

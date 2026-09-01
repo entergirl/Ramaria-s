@@ -109,6 +109,7 @@ fn build_retriever(persona_uid: &str, l1s: &[(Uuid, String, String)]) -> Retriev
             persona_uid: Some(persona_uid.to_string()),
             created_at: now_ms(),
             salience: 0.6,
+            last_accessed_at: None,
         });
     }
     retriever

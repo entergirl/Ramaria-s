@@ -108,6 +108,9 @@ impl StorageBackend for SqliteStorage {
     async fn mark_l1_absorbed(&self, l1_ids: &[Uuid]) -> RamariaResult<()> {
         repo::memory_l1::mark_absorbed(&self.pool, l1_ids).await
     }
+    async fn touch_l1(&self, l1_ids: &[Uuid], now_ms: i64) -> RamariaResult<()> {
+        repo::memory_l1::touch(&self.pool, l1_ids, now_ms).await
+    }
     async fn delete_memory_l1_by_session(&self, session_id: Uuid) -> RamariaResult<usize> {
         repo::memory_l1::delete_by_session(&self.pool, session_id).await
     }
@@ -1747,6 +1750,113 @@ mod tests {
         storage.mark_l1_absorbed(&l1_ids[..3]).await.unwrap();
 
         let remaining = storage.list_unabsorbed_l1(&persona_uid).await.unwrap();
+        assert_eq!(remaining.len(), 2, "应剩余 2 条未吸收");
+    }
+
+    // =========================================================
+    // touch_l1 访问时间刷新测试（v1.7 touch 接线，决策 D-V17-006）
+    // =========================================================
+
+    #[tokio::test]
+    async fn touch_l1_updates_last_accessed_at() {
+        // 检索命中后 touch_l1 应刷新 last_accessed_at（激活 recent_boost_*）
+        let (storage, persona_uid, session_id) = setup_for_absorb().await;
+        let l1_ids = create_n_l1(&storage, session_id, &persona_uid, 2).await;
+
+        let before = storage.get_memory_l1(l1_ids[0]).await.unwrap().unwrap();
+        assert!(before.last_accessed_at.is_none(), "初始应无访问时间");
+
+        let now = now_ms();
+        storage.touch_l1(&l1_ids, now).await.unwrap();
+
+        for id in &l1_ids {
+            let l1 = storage.get_memory_l1(*id).await.unwrap().unwrap();
+            assert_eq!(
+                l1.last_accessed_at,
+                Some(now),
+                "touch 后 last_accessed_at 应刷新为 now"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn touch_l1_empty_slice_is_noop() {
+        // 空列表应直接成功（不产生错误、不影响既有记录）
+        let (storage, persona_uid, session_id) = setup_for_absorb().await;
+        let l1_ids = create_n_l1(&storage, session_id, &persona_uid, 3).await;
+
+        storage.touch_l1(&[], now_ms()).await.unwrap();
+
+        for id in &l1_ids {
+            let l1 = storage.get_memory_l1(*id).await.unwrap().unwrap();
+            assert!(l1.last_accessed_at.is_none(), "空 touch 不应改动访问时间");
+        }
+    }
+
+    #[tokio::test]
+    async fn touch_l1_only_updates_specified_ids() {
+        // 仅指定 ID 被刷新，未指定的保持原值
+        let (storage, persona_uid, session_id) = setup_for_absorb().await;
+        let l1_ids = create_n_l1(&storage, session_id, &persona_uid, 3).await;
+
+        let now = now_ms();
+        storage.touch_l1(&l1_ids[..2], now).await.unwrap();
+
+        let touched = storage.get_memory_l1(l1_ids[0]).await.unwrap().unwrap();
+        assert_eq!(touched.last_accessed_at, Some(now), "前 2 条应被刷新");
+        let untouched = storage.get_memory_l1(l1_ids[2]).await.unwrap().unwrap();
+        assert!(untouched.last_accessed_at.is_none(), "未指定 ID 不应被刷新");
+    }
+
+    // =========================================================
+    // mark_events_absorbed 事务化测试（v1.7 决策 D-V17-014-23）
+    // =========================================================
+    // 与 L1 版 mark_absorbed 对齐为事务化执行（杜绝事件半吸收），
+    // 批次边界与指定 ID 语义测试覆盖行为一致性。
+
+    #[tokio::test]
+    async fn mark_events_absorbed_empty_slice_is_noop() {
+        let (storage, persona_uid, _, _) = setup_with_persona().await;
+        let _id = create_test_event(&storage, &persona_uid, "事件A").await;
+
+        storage.mark_events_absorbed(&[]).await.unwrap();
+
+        let remaining = storage.list_unabsorbed_events(&persona_uid).await.unwrap();
+        assert_eq!(remaining.len(), 1, "空切片不应吸收任何事件");
+    }
+
+    #[tokio::test]
+    async fn mark_events_absorbed_batch_boundary_transactional() {
+        // 101 条事件跨批次（100 + 1）在单事务中全部吸收（无半吸收）
+        let (storage, persona_uid, _, _) = setup_with_persona().await;
+        let mut ids = Vec::new();
+        for i in 0..101 {
+            ids.push(create_test_event(&storage, &persona_uid, &format!("事件{i}")).await);
+        }
+
+        storage.mark_events_absorbed(&ids).await.unwrap();
+
+        let remaining = storage.list_unabsorbed_events(&persona_uid).await.unwrap();
+        assert!(
+            remaining.is_empty(),
+            "101 条跨批次应全部吸收（事务保证无半吸收），实际剩余: {}",
+            remaining.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn mark_events_absorbed_only_absorbs_specified_ids() {
+        // 仅指定事件被吸收，未指定的不受影响
+        let (storage, persona_uid, _, _) = setup_with_persona().await;
+        let mut ids = Vec::new();
+        for i in 0..5 {
+            ids.push(create_test_event(&storage, &persona_uid, &format!("事件{i}")).await);
+        }
+
+        // 只吸收前 3 条
+        storage.mark_events_absorbed(&ids[..3]).await.unwrap();
+
+        let remaining = storage.list_unabsorbed_events(&persona_uid).await.unwrap();
         assert_eq!(remaining.len(), 2, "应剩余 2 条未吸收");
     }
 

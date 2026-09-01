@@ -526,6 +526,27 @@ pub trait StorageBackend: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// 更新 L1 摘要的最后访问时间（检索命中接线，激活 `[decay] recent_boost_*` 访问加成）。
+    ///
+    /// 背景:
+    /// - 决策 D-V17-006 / 备忘 §二 7：`last_accessed_at` 之前只在写入时填充、永不再更新，
+    ///   导致 `[decay] enable_access_boost` 访问加成特性静默失效。
+    /// - 检索命中后由上层（`retrieve_memory` stage）调用，把命中 L1 的访问时间刷新到当前，
+    ///   使近期被检索的记忆在衰减排序中保底（`recent_boost_floor`）。
+    ///
+    /// 参数:
+    /// - `l1_ids`: 命中的 L1 摘要 id 列表。
+    /// - `now_ms`: 访问时间戳（Unix 毫秒），由调用方统一取 `now_ms()` 保证一致。
+    ///
+    /// 返回:
+    /// - `Ok(())`: 更新成功（空列表也视为成功）。
+    ///
+    /// 默认实现:
+    /// - 空操作 `Ok(())`，存量 mock 无需修改即可编译。
+    async fn touch_l1(&self, _l1_ids: &[Uuid], _now_ms: i64) -> RamariaResult<()> {
+        Ok(())
+    }
+
     // -- Personas (id: i64) --
     async fn create_persona(&self, persona: &Persona) -> RamariaResult<i64>;
     async fn get_persona_by_uid(&self, uid: &str) -> RamariaResult<Option<Persona>>;

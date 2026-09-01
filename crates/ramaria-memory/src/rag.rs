@@ -167,6 +167,7 @@ mod tests {
             persona_uid: Some("user-0001".to_string()),
             share,
             created_at: 1000,
+            last_accessed_at: None,
             doc_summary: summary.to_string(),
         }
     }

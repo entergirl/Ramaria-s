@@ -10,9 +10,11 @@
 
 use async_trait::async_trait;
 use ramaria_core::types::{PersonaKind, now_ms};
-use ramaria_memory::decay::{DecayConfig, calc_decay_r};
+use ramaria_memory::bm25::DocId;
+use ramaria_memory::decay::{DecayConfig, calc_retention};
 use ramaria_memory::rag::{RagConfig, filter_by_persona, format_context_text};
 use ramaria_memory::retriever::SearchRequest;
+use uuid::Uuid;
 
 use crate::pipeline::{PipelineContext, PipelineData, PipelineError, PipelineStage};
 
@@ -126,10 +128,13 @@ impl PipelineStage for StageRetrieveMemory {
 
         // 注：RAG 未命中不提前返回——utt 原文通道（5.5）独立于 RAG，仍需执行
         if !results.is_empty() {
-            // ---- 5.3 时间衰减：rrf_score × Ebbinghaus decay ----
+            // ---- 5.3 时间衰减：rrf_score × Ebbinghaus decay（含访问加成，v1.7 touch 接线）----
             let now = now_ms();
             let decay_config_l1 = DecayConfig::from_core(&ctx.config.decay, "l1");
             let decay_config_l2 = DecayConfig::from_core(&ctx.config.decay, "l2");
+
+            // 收集命中的 L1 文档 id（供 5.4 touch 接线刷新 last_accessed_at）
+            let mut touched_l1_ids: Vec<Uuid> = Vec::new();
 
             for r in &mut results {
                 let decay_config = if r.layer == "l2" {
@@ -140,16 +145,52 @@ impl PipelineStage for StageRetrieveMemory {
 
                 // salience: SearchResult 不携带此字段，使用中性值 0.5
                 let salience = 0.5;
-                let decay_factor = calc_decay_r(r.created_at, now, salience, decay_config);
+                // calc_retention = calc_decay_r + apply_access_boost：
+                // 近期被访问的 L1（last_accessed_at 已由 touch 刷新）保留率保底，
+                // 使"刚聊过的话题"在衰减排序中更易召回（决策 D-V17-006）。
+                let decay_factor = calc_retention(
+                    r.created_at,
+                    r.last_accessed_at,
+                    now,
+                    salience,
+                    decay_config,
+                );
                 r.rrf_score *= decay_factor;
+
+                if r.layer == "l1"
+                    && let DocId::L1(id) = r.doc_id
+                {
+                    touched_l1_ids.push(id);
+                }
 
                 tracing::trace!(
                     doc_id = %r.doc_id,
                     layer = %r.layer,
+                    last_accessed = ?r.last_accessed_at,
                     decay_factor = format!("{:.4}", decay_factor),
                     rrf_adjusted = format!("{:.4}", r.rrf_score),
-                    "时间衰减已应用"
+                    "时间衰减已应用（含访问加成）"
                 );
+            }
+
+            // ---- 5.4 touch 接线：检索命中更新 last_accessed_at（决策 D-V17-006 / 备忘 §二 7）----
+            // 异步更新不阻塞检索管线：失败仅 warn（本次降级为无访问加成），
+            // 成功使近期被检索的 L1 在下次检索中获得保底保留率（recent_boost_floor）。
+            // 注意：此处 await 在 retriever 锁释放之后执行（前面 read guard 已 drop）。
+            if !touched_l1_ids.is_empty() {
+                let ids_for_touch = touched_l1_ids;
+                if let Err(e) = ctx.storage.touch_l1(&ids_for_touch, now).await {
+                    tracing::warn!(
+                        count = ids_for_touch.len(),
+                        error = %e,
+                        "L1 访问时间刷新失败（touch 降级，访问加成本次不生效）"
+                    );
+                } else {
+                    tracing::debug!(
+                        count = ids_for_touch.len(),
+                        "L1 访问时间已刷新（touch 接线，激活 recent_boost_*）"
+                    );
+                }
             }
 
             // 重新按衰减后 rrf_score 降序排序
@@ -444,6 +485,59 @@ mod tests {
 
         let output = stage.execute(&ctx, data).await.expect("should succeed");
         assert!(output.utt_context.is_none(), "跨 persona 不可见");
+    }
+
+    // =========================================================
+    // touch 接线测试（v1.7，决策 D-V17-006 / 备忘 §二 7）
+    // =========================================================
+
+    /// 检索命中 L1 后必须调用 storage.touch_l1 刷新访问时间（激活 recent_boost_*）。
+    #[tokio::test]
+    async fn retrieval_hit_touches_l1_last_accessed() {
+        let storage = Arc::new(MockStorage::new());
+        let ctx = test_context(storage.clone(), Arc::new(MockLlm::local()), None);
+        // 注入一条可检索的 L1 文档（persona-0001）
+        {
+            let mut retriever = ctx.retriever.write().expect("retriever 锁可用");
+            retriever.index_l1(&ramaria_memory::retriever::L1DocView {
+                id: uuid::Uuid::new_v4(),
+                summary: "用户讨论了Rust编程语言".to_string(),
+                keywords: Some("Rust,编程".to_string()),
+                persona_uid: Some("persona-0001".to_string()),
+                created_at: 1000,
+                salience: 0.8,
+                last_accessed_at: None,
+            });
+        }
+
+        let stage = StageRetrieveMemory::new();
+        let data = make_data("Rust", Some("persona-0001"));
+
+        let output = stage.execute(&ctx, data).await.expect("应成功");
+        assert!(output.memory_context.is_some(), "L1 检索应命中并组装上下文");
+
+        let touched = storage.last_touched_l1_ids();
+        assert!(
+            !touched.is_empty(),
+            "检索命中后必须调用 touch_l1（接线访问加成）"
+        );
+    }
+
+    /// 检索无命中时不调用 touch_l1（无访问时间可刷新）。
+    #[tokio::test]
+    async fn retrieval_no_hit_does_not_touch() {
+        let storage = Arc::new(MockStorage::new());
+        let ctx = test_context(storage.clone(), Arc::new(MockLlm::local()), None);
+        // 空检索器 → 无命中
+        let stage = StageRetrieveMemory::new();
+        let data = make_data("完全不相关的内容", Some("persona-0001"));
+
+        let output = stage.execute(&ctx, data).await.expect("应成功");
+        assert!(output.memory_context.is_none());
+        assert!(
+            storage.last_touched_l1_ids().is_empty(),
+            "无命中不应触发 touch"
+        );
     }
 
     #[tokio::test]

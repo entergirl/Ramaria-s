@@ -206,6 +206,66 @@ pub async fn mark_absorbed(pool: &SqlitePool, l1_ids: &[Uuid]) -> RamariaResult<
     Ok(())
 }
 
+/// 更新指定 L1 摘要的最后访问时间（检索命中接线，激活 `[decay] recent_boost_*`）。
+///
+/// 职责:
+/// - 检索命中后把 `last_accessed_at` 刷新到当前时间，使近期被检索的记忆
+///   在下次检索的衰减排序中获得访问加成（保留率不低于 `recent_boost_floor`）。
+/// - 与 `mark_absorbed` 保持一致的分批事务策略，保证批量更新的原子性。
+///
+/// 参数:
+/// - `pool`: SQLite 连接池。
+/// - `l1_ids`: 命中的 L1 摘要 id 列表（空列表直接成功）。
+/// - `now_ms`: 访问时间戳（Unix 毫秒）。
+///
+/// 返回:
+/// - `Ok(())`: 更新成功。
+pub async fn touch(pool: &SqlitePool, l1_ids: &[Uuid], now_ms: i64) -> RamariaResult<()> {
+    if l1_ids.is_empty() {
+        return Ok(());
+    }
+
+    // 分批处理：每批最多 100 条，避免 SQL 语句过长（SQLite 默认参数限制 999 个）
+    const BATCH_SIZE: usize = 100;
+    // 事务包裹：与 mark_absorbed 对齐，保证批量刷新访问时间的原子性
+    let mut tx = pool
+        .begin()
+        .await
+        .storage_err("开启 L1 访问时间刷新事务失败")?;
+
+    for chunk in l1_ids.chunks(BATCH_SIZE) {
+        // 命名占位符：?1 = now_ms，?2..?N = l1 id。
+        // 注意：不可混用匿名 `?`（sqlx 会编号为 ?1 与手写 ?1 撞车）。
+        let placeholders: Vec<String> = (0..chunk.len()).map(|i| format!("?{}", i + 2)).collect();
+        let sql = format!(
+            "UPDATE memory_l1 SET last_accessed_at = ?1 WHERE id IN ({})",
+            placeholders.join(", ")
+        );
+
+        let mut query = sqlx::query(&sql).bind(now_ms);
+        for id in chunk {
+            query = query.bind(id.to_string());
+        }
+
+        query
+            .execute(&mut *tx)
+            .await
+            .storage_err(format!("刷新 {} 条 L1 访问时间失败", chunk.len()))?;
+    }
+
+    tx.commit()
+        .await
+        .storage_err("提交 L1 访问时间刷新事务失败")?;
+
+    tracing::debug!(
+        total = l1_ids.len(),
+        batches = l1_ids.len().div_ceil(BATCH_SIZE),
+        "L1 访问时间已刷新（touch）"
+    );
+
+    Ok(())
+}
+
 pub async fn list_unabsorbed(pool: &SqlitePool, persona_uid: &str) -> RamariaResult<Vec<MemoryL1>> {
     let rows = sqlx::query_as::<_, L1Row>(
         "SELECT id, session_id, summary, keywords, time_period, atmosphere, valence, salience,

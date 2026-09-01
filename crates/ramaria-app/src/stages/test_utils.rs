@@ -51,6 +51,8 @@ pub struct MockStorage {
     utt_blocks: Mutex<HashMap<Uuid, Vec<UttBlock>>>,
     /// 测试注入：bind_session_persona_uid 是否强制失败（降级路径测试）
     fail_bind: AtomicBool,
+    /// touch_l1 调用记录（v1.7 touch 接线测试）：最近一次 touch 的 L1 id 列表
+    touch_l1_ids: Mutex<Vec<Uuid>>,
 }
 
 impl Default for MockStorage {
@@ -72,7 +74,13 @@ impl MockStorage {
             personas: Mutex::new(HashMap::new()),
             utt_blocks: Mutex::new(HashMap::new()),
             fail_bind: AtomicBool::new(false),
+            touch_l1_ids: Mutex::new(Vec::new()),
         }
+    }
+
+    /// 返回最近一次 touch_l1 的 L1 id 列表（空表示从未调用）。
+    pub fn last_touched_l1_ids(&self) -> Vec<Uuid> {
+        self.touch_l1_ids.lock().unwrap().clone()
     }
 
     /// 测试注入：让 bind_session_persona_uid 返回错误（验证降级不阻塞发送）。
@@ -359,6 +367,12 @@ impl StorageBackend for MockStorage {
             .into_iter()
             .take(limit as usize)
             .collect())
+    }
+
+    async fn touch_l1(&self, l1_ids: &[Uuid], _now_ms: i64) -> RamariaResult<()> {
+        // 记录调用供 touch 接线测试断言（不真正修改内存数据）
+        *self.touch_l1_ids.lock().unwrap() = l1_ids.to_vec();
+        Ok(())
     }
 
     async fn create_persona(&self, p: &Persona) -> RamariaResult<i64> {

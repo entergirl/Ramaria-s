@@ -390,21 +390,24 @@ impl SessionLifecycle {
         // Step 2: 生成 L1 摘要（传入当前对话人格）
         // 对齐 Python `summarizer.summarize_session(session_id)`
         // 正常对话流程使用默认前缀（"用户：""助手："）
+        // v1.7 B3：渐进式感知——长会话（消息数/跨度超阈值）按段生成多条 L1，
+        // 段 L1 absorbed=0 入候选池，L2 仍封存触发；未触发时回退 v1.6 行为。
         match self
-            .generate_l1_summary(storage, llm, session_id, persona_uid.as_deref(), None, None)
+            .generate_l1_summaries(storage, llm, session_id, persona_uid.as_deref(), None, None)
             .await
         {
-            Ok(l1) => {
+            Ok(l1_list) => {
                 info!(
                     %session_id,
-                    l1_id = %l1.id,
-                    summary_len = l1.summary.chars().count(),
-                    "L1 摘要生成成功"
+                    l1_count = l1_list.len(),
+                    "L1 摘要生成成功（渐进式感知）"
                 );
 
-                // 增量更新 Retriever 内存索引
+                // 增量更新 Retriever 内存索引（每段 L1 都索引）
                 // 必须在 L2 级联检查前执行，确保后续 L2/L3 也能检索到新 L1
-                self.index_l1_into_retriever(&l1).await;
+                for l1 in &l1_list {
+                    self.index_l1_into_retriever(l1).await;
+                }
 
                 // Step 2.5: utt 话语块增量构建（v1.4，与 L1 同钩子）
                 // 失败降级记 warn 不阻塞封存（下次封存自动补齐）

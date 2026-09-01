@@ -40,6 +40,7 @@ impl App {
                     salience: l1.salience,
                     created_at: l1.created_at,
                     persona_uid: l1.persona_uid.clone(),
+                    last_accessed_at: l1.last_accessed_at,
                 });
             }
 
@@ -87,6 +88,7 @@ impl App {
                 salience: l1.salience,
                 created_at: l1.created_at,
                 persona_uid: l1.persona_uid.clone(),
+                last_accessed_at: l1.last_accessed_at,
             })),
             Err(e) => {
                 tracing::warn!(%e, "读取无主 L1 失败，跳过（导入摘要可能不可检索）");

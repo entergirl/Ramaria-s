@@ -168,12 +168,14 @@ impl ProviderBase {
     /// - `config`: 后端配置（含 capability）。
     /// - `api_key`: 可选 API key（LM Studio 为 None）。
     ///
-    /// 超时在函数体内固定为 120 秒（见 `OpenAiTransport::new`）。
+    /// 超时在函数体内固定为 600 秒（见 `OpenAiTransport::new`）。
+    /// 说明: v1.6 固定 120s 的 client 级超时会截断长生成（双重 120s 超时之一）；
+    /// 提升到 600s 与 SSE 整体超时对齐，长回复不再被 client 层提前掐断。
     ///
     /// 返回:
     /// - 成功时返回 ProviderBase 实例。
     pub fn new(config: BackendConfig, api_key: Option<String>) -> RamariaResult<Self> {
-        let transport = Arc::new(OpenAiTransport::new(config.base_url.clone(), api_key, 120)?);
+        let transport = Arc::new(OpenAiTransport::new(config.base_url.clone(), api_key, 600)?);
         Ok(Self {
             config,
             transport,

@@ -182,17 +182,27 @@ pub async fn list_recent_by_persona(
 ///
 /// 将 `absorbed` 设为 1，使这些事件不再出现在 `list_unabsorbed_events` 中。
 /// 使用批量 UPDATE 以支持大批量事件。
+///
+/// 事务语义（决策 D-V17-014-23）:
+/// - 与 L1 版 `memory_l1::mark_absorbed` 对齐为事务化执行，杜绝"事件半吸收"：
+///   任一批次失败时整体回滚，已吸收标记不会部分落库。
+/// - 批次内使用命名占位符（`?1, ?2, ...`），避免 SQL 过长（SQLite 默认参数限制 999 个）。
 pub async fn mark_absorbed(pool: &SqlitePool, event_ids: &[i64]) -> RamariaResult<()> {
     if event_ids.is_empty() {
         return Ok(());
     }
 
-    // 分批处理，每批最多 100 个 ID，避免 SQL 过长
-    for chunk in event_ids.chunks(100) {
-        let placeholders: Vec<String> = chunk.iter().map(|_| "?".to_string()).collect();
+    // 分批处理：每批最多 100 个 ID，避免 SQL 过长（与 memory_l1::mark_absorbed 对齐）
+    const BATCH_SIZE: usize = 100;
+
+    // 事务包裹：全部成功或全部回滚，杜绝事件半吸收
+    let mut tx = pool.begin().await.storage_err("开启事件吸收标记事务失败")?;
+
+    for chunk in event_ids.chunks(BATCH_SIZE) {
+        let placeholders: Vec<String> = (0..chunk.len()).map(|i| format!("?{}", i + 1)).collect();
         let sql = format!(
             "UPDATE memory_events SET absorbed = 1 WHERE id IN ({})",
-            placeholders.join(",")
+            placeholders.join(", ")
         );
 
         let mut query = sqlx::query(&sql);
@@ -200,10 +210,18 @@ pub async fn mark_absorbed(pool: &SqlitePool, event_ids: &[i64]) -> RamariaResul
             query = query.bind(*id);
         }
         query
-            .execute(pool)
+            .execute(&mut *tx)
             .await
-            .storage_err("标记事件已吸收失败")?;
+            .storage_err(format!("标记 {} 条事件已吸收失败", chunk.len()))?;
     }
+
+    tx.commit().await.storage_err("提交事件吸收标记事务失败")?;
+
+    tracing::info!(
+        total = event_ids.len(),
+        batches = event_ids.len().div_ceil(BATCH_SIZE),
+        "批量标记事件已吸收完成"
+    );
 
     Ok(())
 }
