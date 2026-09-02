@@ -292,7 +292,7 @@ enum ProbeArgs {
         #[arg(long)]
         persona: Option<String>,
 
-        /// 每维题数（默认 10，2 维共 20 题；v1.7 正式评估可扩大至 ≥30 题）
+        /// 每维题数（默认 10，3 维共 30 题；v1.7 正式评估可扩大至 ≥30 题）
         #[arg(long, default_value_t = ramaria_cli::commands::probe::DEFAULT_QUESTIONS_PER_DIM)]
         questions_per_dim: usize,
 
@@ -377,6 +377,12 @@ enum ProbeArgs {
         /// 报告输出文件（`-` = stdout；.md 为 markdown、.json 为 JSON）
         #[arg(long)]
         output: Option<String>,
+
+        /// 消融对比报告模式（M5a）：自动识别 F0 基线与 F1~F4（及 S 组 vs B1），
+        /// 按题目配对 Wilcoxon + Cohen's d + 95% CI + FDR 校正输出统计判定；
+        /// 需要 --evaluation 评分数值文件。
+        #[arg(long)]
+        ablation: bool,
     },
 }
 
@@ -1083,11 +1089,13 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
                     evaluation,
                     calibration,
                     output,
+                    ablation,
                 } => commands::probe::ProbeCmd::Report {
                     results,
                     evaluation,
                     calibration,
                     output,
+                    ablation,
                     json: cli.json,
                 },
             };
@@ -1218,6 +1226,37 @@ mod tests {
                 assert_eq!(repeat, 1, "默认 repeat=1（不聚合）");
             }
             _ => panic!("应解析为 Probe::Run，实际解析为其他命令"),
+        }
+    }
+
+    /// `probe report --ablation` 可解析（M5a 消融对比报告模式）。
+    #[test]
+    fn probe_report_ablation_flag_parses() {
+        let cli = Cli::try_parse_from(&[
+            "ramaria",
+            "probe",
+            "report",
+            "--results",
+            "r.json",
+            "--evaluation",
+            "e.json",
+            "--ablation",
+        ])
+        .expect("--ablation 应可解析");
+        match cli.command {
+            Commands::Probe(ProbeArgs::Report { ablation, .. }) => {
+                assert!(ablation, "--ablation 应置位");
+            }
+            _ => panic!("应解析为 Probe::Report"),
+        }
+        // 不带 --ablation → 默认 false（普通报告行为不变）
+        let cli2 = Cli::try_parse_from(&["ramaria", "probe", "report", "--results", "r.json"])
+            .expect("普通 report 应可解析");
+        match cli2.command {
+            Commands::Probe(ProbeArgs::Report { ablation, .. }) => {
+                assert!(!ablation, "默认 ablation=false");
+            }
+            _ => panic!("应解析为 Probe::Report"),
         }
     }
 

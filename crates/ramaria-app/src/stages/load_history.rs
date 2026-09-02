@@ -191,9 +191,18 @@ impl PipelineStage for StageLoadHistory {
         // 时，以当前用户消息为话题依据，按"时间（衰减 × 访问加成）× 话题相关性"融合排序，
         // 使"刚聊过 / 相关的话题"优先进入脉络；关闭或检索无结果时回退 v1.6
         // "无条件取最近 N 条"（`list_recent_l1_by_persona`）。
+        //
+        // 探针消融（脉络闸门，F4/B0/B1/S_*）：`ctx.config.injection.narrative=false`
+        // 时整段跳过（不查询 retriever/storage），recent_summaries/last_active_at 为空。
         let actual_uid = input.persona_uid.as_deref().unwrap_or("rama-0001");
         let narrative_top_k = ctx.config.retrieval.narrative_top_k.max(1);
-        let recent_l1 = if ctx.config.retrieval.narrative_weighted {
+        let recent_l1 = if !ctx.config.injection.narrative {
+            tracing::debug!(
+                persona_uid = actual_uid,
+                "脉络注入闸门关闭（探针消融），跳过近期 L1 摘要加载"
+            );
+            Vec::new()
+        } else if ctx.config.retrieval.narrative_weighted {
             let now = ramaria_core::types::now_ms();
             let decay_config = DecayConfig::from_core(&ctx.config.decay, "l1");
             let narrative_results = match ctx.retriever.read() {
@@ -594,6 +603,67 @@ mod tests {
             output.recent_summaries[0].contains("最近的一次对话摘要"),
             "v1.6 无条件取最近摘要"
         );
+    }
+
+    // =========================================================
+    // 注入闸门测试（探针消融 F4/B0/B1：脉络闸门关闭跳过 L1 加载）
+    // =========================================================
+
+    /// 脉络闸门关闭（`injection.narrative=false`）→ 跳过近期 L1 摘要加载，
+    /// recent_summaries / last_active_at 为空（即使 storage 有 L1 数据）。
+    #[tokio::test]
+    async fn injection_narrative_off_skips_l1_load() {
+        let storage = Arc::new(MockStorage::new());
+        let session_id = uuid::Uuid::new_v4();
+        // 预置 L1：若闸门不生效将被加载
+        let mut l1 = MemoryL1::new(session_id, "不应出现的摘要".into(), Some("下午".into()));
+        l1.created_at = 1_700_000_000_000;
+        storage.add_l1_summaries("rama-0001", vec![l1]);
+
+        let mut ctx = test_context(storage.clone(), Arc::new(MockLlm::local()), None);
+        ctx.config.injection.narrative = false;
+        let stage = StageLoadHistory::new();
+        let data = make_data(Some(ramaria_core::types::Session {
+            id: session_id,
+            started_at: 1000,
+            ended_at: None,
+            persona_uid: None,
+        }));
+
+        let result = stage.execute(&ctx, data).await;
+
+        assert!(result.is_ok());
+        let output = result.expect("应成功");
+        assert!(
+            output.recent_summaries.is_empty(),
+            "脉络闸门关闭时应跳过 L1 摘要加载"
+        );
+        assert!(output.last_active_at.is_none(), "last_active_at 应为空");
+    }
+
+    /// 脉络闸门开启（默认）→ 正常加载近期 L1（回归红线：默认行为不变）。
+    #[tokio::test]
+    async fn injection_narrative_on_still_loads_l1() {
+        let storage = Arc::new(MockStorage::new());
+        let session_id = uuid::Uuid::new_v4();
+        let mut l1 = MemoryL1::new(session_id, "应出现的摘要".into(), Some("上午".into()));
+        l1.created_at = 1_700_000_000_000;
+        storage.add_l1_summaries("rama-0001", vec![l1]);
+
+        let ctx = test_context(storage.clone(), Arc::new(MockLlm::local()), None);
+        let stage = StageLoadHistory::new();
+        let data = make_data(Some(ramaria_core::types::Session {
+            id: session_id,
+            started_at: 1000,
+            ended_at: None,
+            persona_uid: None,
+        }));
+
+        let result = stage.execute(&ctx, data).await;
+
+        assert!(result.is_ok());
+        let output = result.expect("应成功");
+        assert_eq!(output.recent_summaries.len(), 1, "闸门开启应正常加载 L1");
     }
 
     #[tokio::test]

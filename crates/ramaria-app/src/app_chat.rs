@@ -147,7 +147,14 @@ impl App {
         }
         let recent_summaries = result.recent_summaries;
         let last_active_at = result.last_active_at;
-        let memory_context = result.memory_context;
+        // RAG 相关记忆闸门（探针消融 B0 等关闭）：关闭时置空，
+        // ChatRequest 不携带 `<memory_context>`，但 RAG 检索 stage 仍执行
+        // （若 `injection.memory_rag=false` 时 stage 已跳过检索，此处恒 None）。
+        let memory_context = if config.injection.memory_rag {
+            result.memory_context
+        } else {
+            None
+        };
         let utt_context = result.utt_context;
         let bridge_context = result.bridge_context;
         let cfg = result
@@ -155,9 +162,9 @@ impl App {
             .expect("Stage 2 (CheckPrivacy) must set backend_config");
 
         // ---- Step 5.5: 行为层情境路由 ----
-        // [behavior].enabled=false / 未命中 / 路由失败 → None（静默降级，
+        // [behavior].enabled=false / 注入闸门关闭 / 未命中 / 路由失败 → None（静默降级，
         // prompt 不含行为块）；命中 → 合并主/次规则注入行为块。
-        let behavior_decision = if config.behavior.enabled {
+        let behavior_decision = if config.injection.behavior && config.behavior.enabled {
             // history_messages 为 ChatMessage（role+content），行为路由仅消费
             // role/content（查询构造），转换为轻量 Message 列表
             let route_messages: Vec<Message> = history_messages
@@ -192,9 +199,9 @@ impl App {
         };
 
         // ---- Step 5.6: 知识层判定器检索 ----
-        // [knowledge].auto_fact_detect=false / 判定器未命中 / 检索失败 → 空 facts，
-        // prompt 不含知识块（静默降级）。
-        let knowledge_facts = if config.knowledge.auto_fact_detect {
+        // [knowledge].auto_fact_detect=false / 注入闸门关闭 / 判定器未命中 / 检索失败
+        // → 空 facts，prompt 不含知识块（静默降级）。
+        let knowledge_facts = if config.injection.knowledge && config.knowledge.auto_fact_detect {
             crate::app_knowledge::load_knowledge_facts(
                 self.storage.as_ref(),
                 self.config.knowledge.clone(),
@@ -207,15 +214,20 @@ impl App {
         };
 
         // ---- Step 6: 构建 System Prompt（5-Block 装配器） ----
-        // examples 预选（v1.4）：评分轮换 + 记忆未命中兜底；enabled=false 回退 v1.3 静态注入
-        let examples = load_examples_for_input(
-            self.storage.as_ref(),
-            &config.examples,
-            persona_uid,
-            user_input,
-            memory_context.is_some(),
-        )
-        .await;
+        // examples 预选（v1.4）：评分轮换 + 记忆未命中兜底；enabled=false 回退 v1.3 静态注入；
+        // 注入闸门关闭（表达层消融）时不加载示例（空 → prompt 不含 ## 对话示例）。
+        let examples = if config.injection.examples {
+            load_examples_for_input(
+                self.storage.as_ref(),
+                &config.examples,
+                persona_uid,
+                user_input,
+                memory_context.is_some(),
+            )
+            .await
+        } else {
+            Vec::new()
+        };
         let system_prompt = self
             .build_system_prompt_with_context(
                 persona_uid,
@@ -227,6 +239,7 @@ impl App {
                 examples,
                 config.examples.max_examples as usize,
                 knowledge_facts,
+                &config.injection,
             )
             .await;
 
@@ -396,6 +409,7 @@ impl App {
         examples: Vec<ramaria_core::types::PersonaExample>,
         max_examples: usize,
         knowledge_facts: Vec<ramaria_core::types::PersonaFact>,
+        injection: &ramaria_core::config::InjectionGate,
     ) -> String {
         let actual_uid = persona_uid.unwrap_or("rama-0001");
 
@@ -433,9 +447,10 @@ impl App {
                     Vec::new()
                 });
 
-            // 自动风格规则（表达层 A3）：仅 [style].enabled 时加载
+            // 自动风格规则（表达层 A3）：仅 [style].enabled 且注入闸门开启时加载
+            // （探针消融 F3/B0/B1/S_* 关闭表达层时跳过加载）；
             // 数据不足/无显著项 → None（不注入，prompt 与 v1.6 语义等价）
-            let style_rule_text = if self.config.style.enabled {
+            let style_rule_text = if self.config.style.enabled && injection.speaking_style {
                 crate::app_style::load_style_rule(self.storage.as_ref(), &p.uid)
                     .await
                     .unwrap_or_else(|e| {
@@ -489,8 +504,17 @@ impl App {
 
             // examples.max_examples 经 RamariaConfig 传播，
             // 与 `load_examples_for_input` 的预选上限保持一致（双闸门）。
+            // 注入闸门映射（探针消融）：把 InjectionGate 逐子段翻译为 PromptConfig
+            // 渲染开关——行为/知识在数据层已置空（behavior_decision/knowledge_facts），
+            // 此处只需表达层与记忆块子段的渲染开关。
             let config = PromptConfig {
                 max_examples,
+                include_examples: injection.examples,
+                include_speaking_style: injection.speaking_style,
+                include_narrative: injection.narrative,
+                include_memory_rag: injection.memory_rag,
+                include_utt: injection.utt,
+                include_bridge: injection.bridge,
                 ..Default::default()
             };
             tracing::debug!(

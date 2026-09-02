@@ -141,9 +141,101 @@ pub struct RamariaConfig {
     #[serde(default)]
     pub feedback: FeedbackConfig,
 
+    /// 记忆注入层运行时间门（探针消融专用，仅内存不落盘）。
+    ///
+    /// 职责:
+    /// - 按"注入层"细粒度开关控制对话管线向 prompt 注入的各记忆段落，
+    ///   供消融评估（B0/B1/F0/F1~F4/S_*）在单次调用内真实关闭对应层。
+    /// - `#[serde(skip)]`：不写入 config.toml、不同步 DB settings——
+    ///   本闸门只存在于内存中，默认全开，任何配置持久化/加载后均回退全开，
+    ///   保证常规对话（未显式覆盖）行为与既有版本完全一致（回归红线）。
+    /// - 与既有语义开关（如 `[behavior].enabled`）是"与"关系：
+    ///   本闸门关闭 = 该层不注入；闸门开启 = 仍遵循既有语义开关。
+    #[serde(skip)]
+    pub injection: InjectionGate,
+
     /// 杂项（预留扩展位，当前无字段）
     #[serde(default)]
     pub misc: MiscConfig,
+}
+
+// =========================================================
+// 注入层运行时间门（探针消融专用，仅内存）
+// =========================================================
+
+/// 记忆注入层运行时间门——逐层控制对话 prompt 的记忆注入。
+///
+/// 职责:
+/// - 承载消融评估所需的每层 on/off 开关：行为 / 知识 / 表达（说话风格+示例）/
+///   utt 原文 / 脉络（近期对话脉络+桥接）/ RAG 相关记忆。
+/// - 全部默认开启：不修改本结构时，对话管线行为与既有版本完全一致。
+///
+/// 使用约定:
+/// - 本结构是"运行时内存开关"，不在 config.toml / DB settings 中持久化；
+///   探针等评估场景在克隆出的配置上修改后传入 `send_message_with_config`。
+/// - 字段与 prompt 段落一一对应（详见各字段注释），关闭后该段落不注入；
+///   对应"层"的定义与技术报告 §16.3 消融口径一致：
+///   - 行为层（`behavior`）: 情境-反应规则块。
+///   - 知识层（`knowledge`）: 事实卡片（动态检索的知识块）。
+///   - 表达层（`speaking_style` + `examples` + `utt`）: 说话风格 / 风格规则 /
+///     对话示例 / 原文样例（原文片段）。
+///   - 脉络层（`narrative` + `bridge`）: 近期对话脉络 / 桥接（上一会话尾部）。
+///   - RAG 相关记忆（`memory_rag`）: ChatRequest.memory_context（L1/L2/L3 摘要检索）。
+#[derive(Debug, Clone)]
+pub struct InjectionGate {
+    /// 行为规则注入（`## 行为规则`）。
+    pub behavior: bool,
+    /// 知识层事实卡片注入（`# 知识（知识层，按需）`）。
+    pub knowledge: bool,
+    /// 说话风格注入（`## 说话风格` / `## 自动风格规则`，表达层子段）。
+    pub speaking_style: bool,
+    /// 对话示例（Few-shot `## 对话示例`，表达层子段）。
+    pub examples: bool,
+    /// utt 原文片段注入（`## 原文片段`，表达层"原文样例"）。
+    pub utt: bool,
+    /// 近期对话脉络注入（`## 近期对话脉络`，脉络层）。
+    pub narrative: bool,
+    /// 桥接注入（`## 桥接（上一会话尾部）`，脉络层）。
+    pub bridge: bool,
+    /// RAG 相关历史记忆注入（`ChatRequest.memory_context`，摘要/转述通道）。
+    pub memory_rag: bool,
+}
+
+impl InjectionGate {
+    /// 全部开启（默认状态；ablation=None 时行为与既有版本一致）。
+    pub fn all_on() -> Self {
+        Self {
+            behavior: true,
+            knowledge: true,
+            speaking_style: true,
+            examples: true,
+            utt: true,
+            narrative: true,
+            bridge: true,
+            memory_rag: true,
+        }
+    }
+
+    /// 全部关闭（B0 无记忆注入：仅保留 persona 角色与当前对话）。
+    pub fn all_off() -> Self {
+        Self {
+            behavior: false,
+            knowledge: false,
+            speaking_style: false,
+            examples: false,
+            utt: false,
+            narrative: false,
+            bridge: false,
+            memory_rag: false,
+        }
+    }
+}
+
+impl Default for InjectionGate {
+    /// 默认全部开启（无覆盖时与既有版本行为一致）。
+    fn default() -> Self {
+        Self::all_on()
+    }
 }
 
 // =========================================================
@@ -192,6 +284,7 @@ impl Default for RamariaConfig {
             embedding: EmbeddingConfig::default(),
             style: StyleConfig::default(),
             feedback: FeedbackConfig::default(),
+            injection: InjectionGate::default(),
             misc: MiscConfig::default(),
         }
     }
@@ -1699,6 +1792,67 @@ enabled = false
         // 未配置字段使用默认值
         assert!(!cfg.feedback.auto_apply_weak_feedback);
         assert_eq!(cfg.feedback.continue_window_ms, 60_000);
+    }
+
+    // =========================================================
+    // 注入层运行时间门（InjectionGate，探针消融专用）
+    // =========================================================
+
+    /// 默认全开：无覆盖时对话管线注入行为与既有版本一致（回归红线）。
+    #[test]
+    fn injection_gate_defaults_all_on() {
+        let g = InjectionGate::default();
+        assert!(g.behavior);
+        assert!(g.knowledge);
+        assert!(g.speaking_style);
+        assert!(g.examples);
+        assert!(g.utt);
+        assert!(g.narrative);
+        assert!(g.bridge);
+        assert!(g.memory_rag);
+        let cfg = RamariaConfig::default();
+        assert!(
+            cfg.injection.behavior && cfg.injection.memory_rag,
+            "默认配置闸门全开"
+        );
+    }
+
+    /// 全关（B0 基座）与全开互为补集。
+    #[test]
+    fn injection_gate_off_is_complement_of_on() {
+        let on = InjectionGate::all_on();
+        let off = InjectionGate::all_off();
+        assert!(!off.behavior && !off.memory_rag && !off.narrative);
+        assert!(on.behavior && on.memory_rag && on.narrative);
+    }
+
+    /// 闸门不写入持久化：JSON/TOML 序列化不含 injection 键，
+    /// 反序列化回退默认全开（保持配置文件与 DB 键集稳定）。
+    #[test]
+    fn injection_gate_is_memory_only_not_persisted() {
+        let mut cfg = RamariaConfig::default();
+        cfg.injection.memory_rag = false;
+        cfg.injection.behavior = false;
+
+        // JSON 通道（backend_config / 信封等）：顶层无 `injection` 键。
+        // 注意不能用裸 "injection" 断言（`online_memory_injection` 亦含该子串）。
+        let json = serde_json::to_string(&cfg).unwrap();
+        let parsed_json: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(
+            parsed_json.get("injection").is_none(),
+            "injection 闸门不得序列化到 JSON"
+        );
+        let back_json: RamariaConfig = serde_json::from_str(&json).unwrap();
+        assert!(back_json.injection.memory_rag, "反序列化后闸门回退全开");
+
+        // TOML 通道（config.toml / ConfigSyncService）：无 `[injection]` 表。
+        let toml_text = toml::to_string(&cfg).unwrap();
+        assert!(
+            !toml_text.contains("[injection]"),
+            "injection 闸门不得序列化到 TOML"
+        );
+        let back_toml: RamariaConfig = toml::from_str(&toml_text).unwrap();
+        assert!(back_toml.injection.behavior, "TOML 反序列化后闸门回退全开");
     }
 
     #[test]

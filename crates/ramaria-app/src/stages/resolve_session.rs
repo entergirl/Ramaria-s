@@ -160,22 +160,27 @@ impl PipelineStage for StageResolveSession {
 
                 // v1.4 M5：桥接加载——新会话创建时取
                 // 最近一个已关闭会话的尾部原文（utt 块优先，降级末 N 条原文）。
-                // 开关关闭 / 白名单外 / 无上一会话 → 不注入（等同 v1.3），不阻塞。
-                let bridge = crate::bridge::load_bridge_context(
-                    ctx.storage.as_ref(),
-                    &ctx.config.bridge,
-                    &ctx.config.utt,
-                    input.persona_uid.as_deref(),
-                )
-                .await;
-                if let Some(content) = bridge.content {
-                    tracing::debug!(
-                        session_id = %s.id,
-                        source = ?bridge.source,
-                        chars = content.chars().count(),
-                        "新会话已加载桥接内容"
-                    );
-                    input.bridge_context = Some(content);
+                // 开关关闭 / 注入闸门关闭（探针消融 F4/B0/B1/S_*）/
+                // 白名单外 / 无上一会话 → 不注入（等同 v1.3），不阻塞。
+                if ctx.config.injection.bridge {
+                    let bridge = crate::bridge::load_bridge_context(
+                        ctx.storage.as_ref(),
+                        &ctx.config.bridge,
+                        &ctx.config.utt,
+                        input.persona_uid.as_deref(),
+                    )
+                    .await;
+                    if let Some(content) = bridge.content {
+                        tracing::debug!(
+                            session_id = %s.id,
+                            source = ?bridge.source,
+                            chars = content.chars().count(),
+                            "新会话已加载桥接内容"
+                        );
+                        input.bridge_context = Some(content);
+                    }
+                } else {
+                    tracing::debug!("桥接注入闸门关闭（探针消融），跳过桥接加载");
                 }
 
                 s

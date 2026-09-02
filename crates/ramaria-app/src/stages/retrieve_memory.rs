@@ -79,31 +79,62 @@ impl PipelineStage for StageRetrieveMemory {
         let query = &input.user_input;
         let persona_uid = input.persona_uid.as_deref();
 
+        // ---- 5.0 注入闸门（探针消融） ----
+        // RAG 相关记忆（`memory_rag`）与 utt 原文（`utt`）双通道均关闭时
+        // （B0 无记忆注入）直接返回：不生成 query embedding、不检索，避免无效开销。
+        let rag_active = ctx.config.injection.memory_rag;
+        let utt_active = ctx.config.injection.utt && ctx.config.utt.enabled;
+        if !rag_active && !utt_active {
+            tracing::debug!("记忆注入闸门全关（探针消融 B0），跳过记忆检索");
+            input.memory_context = None;
+            input.utt_context = None;
+            return Ok(input);
+        }
+
+        // utt 通道是否对本 persona 生效（原文白名单双闸门：开关 + persona 类型）。
+        // 查询向量仅在 RAG 或 utt（白名单内）需要时生成，避免无效 embedding 调用。
+        let utt_persona_allowed = persona_uid
+            .map(|puid| {
+                ctx.config
+                    .utt
+                    .persona_kind_whitelist
+                    .contains(&PersonaKind::from_uid(puid))
+            })
+            .unwrap_or(false);
+        let need_query_vec = rag_active || (utt_active && utt_persona_allowed);
+
         // ---- 5.1 尝试生成查询向量 ----
         // 先 clone Arc 出锁再 await，避免 MutexGuard 跨 .await
-        let query_vec: Option<Vec<f32>> = match &ctx.embedding {
-            Some(provider) if provider.is_available() => match provider.embed(query).await {
-                Ok(vec) => {
-                    tracing::debug!(dim = vec.len(), "查询向量已生成");
-                    Some(vec)
-                }
-                Err(e) => {
-                    tracing::warn!(%e, "查询向量生成失败，向量通道降级");
+        let query_vec: Option<Vec<f32>> = if !need_query_vec {
+            tracing::debug!("无需查询向量（注入闸门关闭，仅执行无需向量的通道）");
+            None
+        } else {
+            match &ctx.embedding {
+                Some(provider) if provider.is_available() => match provider.embed(query).await {
+                    Ok(vec) => {
+                        tracing::debug!(dim = vec.len(), "查询向量已生成");
+                        Some(vec)
+                    }
+                    Err(e) => {
+                        tracing::warn!(%e, "查询向量生成失败，向量通道降级");
+                        None
+                    }
+                },
+                Some(_) => {
+                    tracing::debug!("嵌入模型不可用，跳过向量通道");
                     None
                 }
-            },
-            Some(_) => {
-                tracing::debug!("嵌入模型不可用，跳过向量通道");
-                None
-            }
-            None => {
-                tracing::debug!("嵌入模型未配置，跳过向量通道");
-                None
+                None => {
+                    tracing::debug!("嵌入模型未配置，跳过向量通道");
+                    None
+                }
             }
         };
 
         // ---- 5.2 执行三通道检索（RwLock::read() 允许多读并发） ----
-        let mut results = {
+        // 探针消融：RAG 闸门关闭（`injection.memory_rag=false`，B0）时不执行检索，
+        // memory_context 恒 None；utt 原文通道（5.5）独立于 RAG 仍按需执行。
+        let mut results = if rag_active {
             let retriever = match ctx.retriever.read() {
                 Ok(guard) => guard,
                 Err(e) => {
@@ -124,6 +155,9 @@ impl PipelineStage for StageRetrieveMemory {
                 Some(qv) => retriever.search(&request, Some(qv)),
                 None => retriever.search(&request, None),
             }
+        } else {
+            tracing::debug!("RAG 相关记忆闸门关闭（探针消融），跳过三通道检索");
+            Vec::new()
         };
 
         // 注：RAG 未命中不提前返回——utt 原文通道（5.5）独立于 RAG，仍需执行
@@ -229,10 +263,11 @@ impl PipelineStage for StageRetrieveMemory {
         }
 
         // ---- 5.5 utt 原文块检索（v1.4，原文通道） ----
-        // 开关与白名单双闸门：关闭 / persona 类型不在白名单 → 不检索（行为回退 v1.3）。
+        // 开关与白名单双闸门：`[utt].enabled` / 注入闸门（探针消融 F3 等关闭）/
+        // persona 类型不在白名单 → 不检索（行为回退 v1.3）。
         // 原文是最高敏感层：仅按 persona_uid 精确隔离检索，不跨 persona 共享。
         let utt_cfg = &ctx.config.utt;
-        if utt_cfg.enabled {
+        if utt_active {
             if let Some(puid) = persona_uid {
                 let kind = PersonaKind::from_uid(puid);
                 if utt_cfg.persona_kind_whitelist.contains(&kind) {
@@ -278,7 +313,11 @@ impl PipelineStage for StageRetrieveMemory {
                 }
             }
         } else {
-            tracing::debug!("utt 配置关闭，跳过原文检索（等同 v1.3）");
+            tracing::debug!(
+                utt_enabled = ctx.config.utt.enabled,
+                injection_utt = ctx.config.injection.utt,
+                "utt 配置/注入闸门关闭，跳过原文检索（等同 v1.3）"
+            );
         }
 
         Ok(input)
@@ -356,6 +395,87 @@ mod tests {
         let result = stage.execute(&ctx, data).await;
 
         assert!(result.is_ok());
+    }
+
+    // =========================================================
+    // 注入闸门测试（探针消融 B0 / F3）
+    // =========================================================
+
+    /// 探针消融 B0：RAG 与 utt 双闸门关闭 → 直接返回，
+    /// memory_context / utt_context 均 None（不触发 embedding/检索）。
+    #[tokio::test]
+    async fn injection_gate_off_skips_all_retrieval() {
+        let mut ctx = test_context(
+            Arc::new(MockStorage::new()),
+            Arc::new(MockLlm::local()),
+            Some(Arc::new(MockEmbedding::new())),
+        );
+        ctx.config.injection.memory_rag = false;
+        ctx.config.injection.utt = false;
+        let stage = StageRetrieveMemory::new();
+        let data = make_data("你好", Some("rama-0001"));
+
+        let result = stage.execute(&ctx, data).await;
+
+        assert!(result.is_ok());
+        let output = result.expect("应成功");
+        assert!(
+            output.memory_context.is_none(),
+            "RAG 闸门关闭无 memory_context"
+        );
+        assert!(output.utt_context.is_none(), "utt 闸门关闭无 utt_context");
+    }
+
+    /// RAG 闸门开但 utt 闸门关（如 F3 −表达层）：RAG 路径正常执行（空检索器 → None），
+    /// utt 原文检索被跳过。
+    #[tokio::test]
+    async fn injection_rag_on_utt_off_runs_rag_only() {
+        let mut ctx = test_context(
+            Arc::new(MockStorage::new()),
+            Arc::new(MockLlm::local()),
+            Some(Arc::new(MockEmbedding::new())),
+        );
+        ctx.config.injection.utt = false; // memory_rag 保持默认开启
+        let stage = StageRetrieveMemory::new();
+        let data = make_data("测试查询", Some("rama-0001"));
+
+        let result = stage.execute(&ctx, data).await;
+
+        assert!(result.is_ok());
+        let output = result.expect("应成功");
+        // 空检索器 + utt 关闭 → 两通道均无输出，但 RAG 分支已执行（不报错）
+        assert!(output.memory_context.is_none());
+        assert!(output.utt_context.is_none());
+    }
+
+    /// F3 −表达层（utt 关闭）但检索器含 utt 块 → utt_context 不被填充。
+    #[tokio::test]
+    async fn injection_utt_off_ignores_seeded_utt_blocks() {
+        let mut ctx = test_context(
+            Arc::new(MockStorage::new()),
+            Arc::new(MockLlm::local()),
+            Some(Arc::new(MockEmbedding::new())),
+        );
+        // 注入一个 utt 块（若闸门不生效会被检索到）
+        seed_utt(
+            &ctx,
+            1,
+            "rama-0001",
+            "目标角色说过的原话内容",
+            Some(vec![0.1; 8]),
+        );
+        ctx.config.injection.utt = false;
+        let stage = StageRetrieveMemory::new();
+        let data = make_data("目标角色", Some("rama-0001"));
+
+        let result = stage.execute(&ctx, data).await;
+
+        assert!(result.is_ok());
+        let output = result.expect("应成功");
+        assert!(
+            output.utt_context.is_none(),
+            "utt 闸门关闭时不应填充原文片段"
+        );
     }
 
     #[tokio::test]

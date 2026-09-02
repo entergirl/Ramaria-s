@@ -147,8 +147,8 @@ async fn probe_build_empty_db_falls_back_to_fixture() {
         ds.persona_uid, "char-0001",
         "无白名单 persona 时默认 char-0001"
     );
-    assert_eq!(ds.items.len(), 20, "2 维 × 每维 10 题");
-    assert_eq!(ds.dimensions, vec!["tone", "fact"]);
+    assert_eq!(ds.items.len(), 30, "3 维 × 每维 10 题");
+    assert_eq!(ds.dimensions, vec!["tone", "fact", "emotion"]);
     assert_eq!(ds.variants.len(), 4, "代表配对 4 档位");
     assert!(
         ds.items.iter().all(|i| i.source == "fixture"),
@@ -164,6 +164,11 @@ async fn probe_build_empty_db_falls_back_to_fixture() {
         10,
         "fact 维度恰好 10 题"
     );
+    assert_eq!(
+        ds.items.iter().filter(|i| i.dimension == "emotion").count(),
+        10,
+        "emotion 维度恰好 10 题"
+    );
 }
 
 /// 有真实数据 → 真实数据优先，夹具仅补齐不足部分。
@@ -173,12 +178,13 @@ async fn probe_build_with_data_prefers_db_items() {
     let ds = build_dataset(&app, None, 10, 2026_0810, None).await;
 
     assert_eq!(ds.source, "db", "有真实数据时主来源为 db");
-    // 2 组 tone 配对 + 4 条事件 → 真实 6 题，夹具补齐 14 题
+    // 2 组 tone 配对 + 4 条事件 + 1 条情绪化消息（"今天上班好累"含情感线索）
+    // → 真实 7 题，夹具补齐 23 题
     let real = ds.items.iter().filter(|i| i.source == "db").count();
     let fixture = ds.items.iter().filter(|i| i.source == "fixture").count();
-    assert_eq!(real, 6, "真实数据 6 题（2 tone + 4 fact）");
-    assert_eq!(fixture, 14, "夹具补齐 14 题");
-    assert_eq!(ds.items.len(), 20);
+    assert_eq!(real, 7, "真实数据 7 题（2 tone + 4 fact + 1 emotion）");
+    assert_eq!(fixture, 23, "夹具补齐 23 题");
+    assert_eq!(ds.items.len(), 30);
     // 真实数据应排在每维前面
     let first_real_tone = ds.items.iter().find(|i| i.dimension == "tone").unwrap();
     assert_eq!(first_real_tone.source, "db");
@@ -210,7 +216,7 @@ async fn probe_build_dataset_serializes_to_valid_json() {
     let ds = build_dataset(&app, None, 3, 7, None).await;
     let json = serde_json::to_value(&ds).expect("数据集必须可序列化");
     assert!(json["items"].is_array());
-    assert_eq!(json["items"].as_array().unwrap().len(), 6);
+    assert_eq!(json["items"].as_array().unwrap().len(), 9, "3 维 × 3 题");
     assert!(json["variants"][0]["id"].is_string());
     assert!(json["items"][0]["question"].is_string());
     assert!(
@@ -246,11 +252,11 @@ async fn probe_build_command_runs_ok() {
 // probe run：档位批量实验
 // =========================================================
 
-/// 用小数据集（4 题）跑全部档位：输出结构断言（档位 → 输出 → 指标）。
+/// 用小数据集（6 题）跑全部档位：输出结构断言（档位 → 输出 → 指标）。
 #[tokio::test]
 async fn probe_run_batch_structure_with_mock_llm() {
     let (app, _storage) = build_test_app();
-    let ds = build_dataset(&app, None, 2, 7, None).await; // 2 维 × 2 题 = 4 题
+    let ds = build_dataset(&app, None, 2, 7, None).await; // 3 维 × 2 题 = 6 题
     let experiment = build_experiment(
         &app,
         &ds,
@@ -266,7 +272,7 @@ async fn probe_run_batch_structure_with_mock_llm() {
     assert_eq!(experiment.persona_uid, ds.persona_uid);
     assert_eq!(experiment.variants.len(), 4, "默认全部 4 档位");
     for variant in &experiment.variants {
-        assert_eq!(variant.runs.len(), 4, "每档位应跑全部 4 题");
+        assert_eq!(variant.runs.len(), 6, "每档位应跑全部 6 题");
         assert_eq!(variant.failed_count, 0, "MockLlm 下不应有失败");
         for run in &variant.runs {
             assert!(run.error.is_none(), "{} 不应报错", run.item_id);
@@ -286,7 +292,7 @@ async fn probe_run_batch_structure_with_mock_llm() {
 #[tokio::test]
 async fn probe_run_repeat_produces_stat_meta() {
     let (app, _storage) = build_test_app();
-    let ds = build_dataset(&app, None, 2, 7, None).await; // 4 题
+    let ds = build_dataset(&app, None, 2, 7, None).await; // 3 维 × 2 题 = 6 题
     let experiment = build_experiment_with_repeat(
         &app,
         &ds,
@@ -332,7 +338,7 @@ async fn probe_run_repeat_produces_stat_meta() {
     // 主 variants 保留最后一次运行明细（供 evaluate/report 复用）
     assert_eq!(experiment.variants.len(), 4);
     for v in &experiment.variants {
-        assert_eq!(v.runs.len(), 4);
+        assert_eq!(v.runs.len(), 6);
     }
 }
 
@@ -484,8 +490,8 @@ fn probe_dataset_alias_and_json_envelope() {
             .as_array()
             .map(|a| a.len())
             .unwrap_or(0),
-        20,
-        "默认 2 维 × 10 题"
+        30,
+        "默认 3 维 × 10 题"
     );
     assert_eq!(
         parsed["data"]["variants"]

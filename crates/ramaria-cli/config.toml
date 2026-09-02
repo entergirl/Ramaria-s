@@ -162,4 +162,14 @@ relative_boost_ratio = 2.0
 min_frequency = 5
 z_critical = 2.0
 
+[feedback]
+enabled = true
+auto_apply_weak_feedback = false
+correction_window_ms = 60000
+continue_window_ms = 60000
+dedup_window_ms = 30000
+s3_trend_window = 20
+s3_continue_trigger = 5
+s3_stop_trigger = 4
+
 [misc]
