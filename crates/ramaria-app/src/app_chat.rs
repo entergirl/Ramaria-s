@@ -110,6 +110,41 @@ impl App {
             .session
             .expect("Stage 3 (ResolveSession) must set session");
         let history_messages = result.history_messages;
+
+        // ---- Step 5.4: 弱反馈信号检测（H2，v1.7） ----
+        // S2 纠正 / S3 继续：检测"上一条助手回复 → 当前用户消息"的间隔与前缀。
+        // 当前用户消息尚未落库（在 stream_forward_task 中保存），此处构造检测序列：
+        // 把当前用户消息（当前时间戳）追加到已加载的会话消息末尾，作为检测输入的
+        // 最后一条；检测后不落库（仅用于信号判定），消息本体仍由后续管线保存。
+        // 静默降级：检测/写入失败记 warn 不阻塞对话；[feedback].enabled=false 跳过。
+        // 仅活跃 session 检测（超时封存不计入）；30s 去重由内部排除项处理。
+        if config.feedback.enabled {
+            let mut recent = match self.storage.list_messages(session.id).await {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::warn!(%e, "读取会话消息用于弱反馈检测失败，跳过");
+                    Vec::new()
+                }
+            };
+            // 追加当前用户消息作为检测输入的最后一条（时间戳取当前，供间隔判定）
+            recent.push(Message::new(
+                session.id,
+                MessageRole::User,
+                user_input.to_string(),
+                MessageSource::Local,
+            ));
+            if let Err(e) = crate::feedback::process_feedback_for_new_message(
+                self.storage.as_ref(),
+                &config.feedback,
+                session.id,
+                persona_uid,
+                &recent,
+            )
+            .await
+            {
+                tracing::warn!(%e, "弱反馈信号处理失败（不阻塞对话主流程）");
+            }
+        }
         let recent_summaries = result.recent_summaries;
         let last_active_at = result.last_active_at;
         let memory_context = result.memory_context;

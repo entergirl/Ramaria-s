@@ -156,9 +156,12 @@ pub fn decode_embedding(blob: &[u8]) -> RamariaResult<Vec<f32>> {
             blob.len()
         )));
     }
+    // 长度已校验为 4 的倍数，用 as_chunks 直接取完整块（无尾部残留）
     Ok(blob
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| f32::from_le_bytes(*c))
         .collect())
 }
 

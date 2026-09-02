@@ -137,6 +137,10 @@ pub struct RamariaConfig {
     #[serde(default)]
     pub style: StyleConfig,
 
+    /// 弱反馈环配置（`[feedback]`，自我修正闭环 H2）。
+    #[serde(default)]
+    pub feedback: FeedbackConfig,
+
     /// 杂项（预留扩展位，当前无字段）
     #[serde(default)]
     pub misc: MiscConfig,
@@ -187,6 +191,7 @@ impl Default for RamariaConfig {
             knowledge: KnowledgeConfig::default(),
             embedding: EmbeddingConfig::default(),
             style: StyleConfig::default(),
+            feedback: FeedbackConfig::default(),
             misc: MiscConfig::default(),
         }
     }
@@ -1407,6 +1412,73 @@ impl Default for StyleConfig {
 }
 
 // =========================================================
+// 弱反馈环配置（H2，自我修正闭环）
+// =========================================================
+
+/// 弱反馈环配置（`[feedback]`，S2/S3 自我修正闭环 H2）。
+///
+/// 职责:
+/// - 控制 S2 纠正 / S3 继续发言弱信号的采集与校准行为。
+/// - `auto_apply_weak_feedback` 默认关闭：弱信号只写入 `feedback_log`
+///   （审计），不自动修改任何规则/画像（回归红线 5）。
+/// - 检测窗口（`correction_window_ms` / `continue_window_ms`）：用户消息与
+///   上一条助手回复间隔在此窗口内才判为弱信号；超时（间隔更大）不累积。
+///
+/// 兼容性说明:
+/// - struct 级 `#[serde(default)]`：config.toml 中 `[feedback]` 表只写部分键时
+///   缺失字段回退 `Default` 实现，避免解析失败。
+/// - 关闭开关不破坏主流程：检测/写入失败均静默降级，不影响对话。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FeedbackConfig {
+    /// S2/S3 弱反馈环总开关（默认 true —— 自动采集可配置）。
+    /// `false` → 不检测、不写 feedback_log，行为回退 v1.6。
+    pub enabled: bool,
+    /// 弱反馈是否自动应用（默认 false）。
+    /// `false` → 弱信号仅写 feedback_log（审计），不触发候选复审/趋势统计的落库，
+    ///          规则与画像零自动修改（回归红线 5）。
+    /// `true` → 检测到 S2 纠正/ S3 趋势异常时标记候选复审（不自动覆盖规则本身）。
+    pub auto_apply_weak_feedback: bool,
+    /// S2 纠正前缀检测窗口（毫秒，默认 60000 = 60s）。
+    /// 用户消息与上一条助手回复间隔 ≤ 此值且命中纠正前缀 → S2 纠正信号。
+    pub correction_window_ms: u64,
+    /// S3 继续发言检测窗口（毫秒，默认 60000 = 60s）。
+    /// 用户消息与上一条助手回复间隔 ≤ 此值且非纠正 → S3 继续信号。
+    pub continue_window_ms: u64,
+    /// 同一目标重复反馈的去重窗口（毫秒，默认 30000 = 30s）。
+    /// 窗口内同一 persona+信号+目标不重复写入（避免短时连续消息累积重复反馈）。
+    pub dedup_window_ms: u64,
+    /// S3 趋势统计滑动窗口大小（默认 20 次）。
+    /// 取最近 N 个回合的继续/不继续结果做趋势判定。
+    pub s3_trend_window: u32,
+    /// S3 标记复审所需连续"继续"命中数（默认 5）。
+    pub s3_continue_trigger: u32,
+    /// S3 标记复审所需随后的连续"不继续"数（默认 4）。
+    pub s3_stop_trigger: u32,
+}
+
+impl Default for FeedbackConfig {
+    /// 创建默认弱反馈环配置。
+    ///
+    /// 返回:
+    /// - 默认开启采集（自动为主可配置），`auto_apply_weak_feedback=false`（保守）。
+    /// - 检测窗口 60s（S2/S3），去重窗口 30s。
+    /// - S3 趋势窗口 20 次，连续 ≥5 次继续后 4 次不继续 → 标记复审。
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            auto_apply_weak_feedback: false,
+            correction_window_ms: 60_000,
+            continue_window_ms: 60_000,
+            dedup_window_ms: 30_000,
+            s3_trend_window: 20,
+            s3_continue_trigger: 5,
+            s3_stop_trigger: 4,
+        }
+    }
+}
+
+// =========================================================
 // 单元测试
 // =========================================================
 
@@ -1566,6 +1638,10 @@ mod tests {
         assert!(json.contains("min_sample_count"));
         assert!(json.contains("relative_boost_ratio"));
         assert!(json.contains("z_critical"));
+        // 弱反馈环配置组（H2）
+        assert!(json.contains("feedback"));
+        assert!(json.contains("auto_apply_weak_feedback"));
+        assert!(json.contains("s3_trend_window"));
     }
 
     #[test]
@@ -1580,6 +1656,49 @@ mod tests {
         assert!((cfg.style.relative_boost_ratio - 2.0).abs() < f64::EPSILON);
         assert_eq!(cfg.style.min_frequency, 5);
         assert!((cfg.style.z_critical - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn feedback_config_defaults() {
+        let cfg = RamariaConfig::default();
+        // 默认开启采集，auto_apply 默认 false（回归红线 5：关闭时零自动修改）
+        assert!(cfg.feedback.enabled);
+        assert!(
+            !cfg.feedback.auto_apply_weak_feedback,
+            "auto_apply 默认关闭"
+        );
+        // 检测窗口 60s / 去重窗口 30s
+        assert_eq!(cfg.feedback.correction_window_ms, 60_000);
+        assert_eq!(cfg.feedback.continue_window_ms, 60_000);
+        assert_eq!(cfg.feedback.dedup_window_ms, 30_000);
+        // S3 趋势窗口 20，连续 ≥5 继续后 4 次不继续
+        assert_eq!(cfg.feedback.s3_trend_window, 20);
+        assert_eq!(cfg.feedback.s3_continue_trigger, 5);
+        assert_eq!(cfg.feedback.s3_stop_trigger, 4);
+    }
+
+    #[test]
+    fn feedback_config_disabled_zero_auto_modify() {
+        // 关闭 auto_apply：弱信号不自动修改规则/画像
+        let mut cfg = RamariaConfig::default();
+        cfg.feedback.auto_apply_weak_feedback = false;
+        assert!(!cfg.feedback.auto_apply_weak_feedback);
+        // 其余参数保持默认可独立配置
+        assert_eq!(cfg.feedback.correction_window_ms, 60_000);
+    }
+
+    #[test]
+    fn feedback_config_toml_partial_override() {
+        // 只配置部分键 → 缺失字段回退默认值
+        let toml_text = r#"
+[feedback]
+enabled = false
+"#;
+        let cfg: RamariaConfig = toml::from_str(toml_text).expect("部分配置应可解析");
+        assert!(!cfg.feedback.enabled);
+        // 未配置字段使用默认值
+        assert!(!cfg.feedback.auto_apply_weak_feedback);
+        assert_eq!(cfg.feedback.continue_window_ms, 60_000);
     }
 
     #[test]

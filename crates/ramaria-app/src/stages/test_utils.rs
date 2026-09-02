@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
 use futures::{Stream, stream};
+use ramaria_core::behavior::FeedbackLog;
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::traits::{
     ChatRequest, EmbeddingModelInfo, EmbeddingProvider, LlmProvider, StorageBackend, StreamDelta,
@@ -53,6 +54,10 @@ pub struct MockStorage {
     fail_bind: AtomicBool,
     /// touch_l1 调用记录（v1.7 touch 接线测试）：最近一次 touch 的 L1 id 列表
     touch_l1_ids: Mutex<Vec<Uuid>>,
+    /// feedback_log 记录（v1.7 H2 弱反馈测试）：按 persona 索引
+    feedback_logs: Mutex<Vec<ramaria_core::behavior::FeedbackLog>>,
+    /// settings 键值（v1.7 H2 复审队列 / S3 历史测试）
+    settings: Mutex<std::collections::HashMap<String, String>>,
 }
 
 impl Default for MockStorage {
@@ -75,6 +80,8 @@ impl MockStorage {
             utt_blocks: Mutex::new(HashMap::new()),
             fail_bind: AtomicBool::new(false),
             touch_l1_ids: Mutex::new(Vec::new()),
+            feedback_logs: Mutex::new(Vec::new()),
+            settings: Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -151,6 +158,17 @@ impl MockStorage {
         let list = map.entry(block.session_id).or_default();
         block.id = list.len() as i64 + 1;
         list.push(block);
+    }
+
+    /// 返回该 persona 的全部反馈日志（供弱反馈测试断言）。
+    pub fn feedback_logs_for(&self, persona_uid: &str) -> Vec<ramaria_core::behavior::FeedbackLog> {
+        self.feedback_logs
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.persona_uid == persona_uid)
+            .cloned()
+            .collect()
     }
 }
 
@@ -618,16 +636,26 @@ impl StorageBackend for MockStorage {
         Ok(())
     }
 
-    async fn get_setting(&self, _k: &str) -> RamariaResult<Option<String>> {
-        Ok(None)
+    async fn get_setting(&self, key: &str) -> RamariaResult<Option<String>> {
+        Ok(self.settings.lock().unwrap().get(key).cloned())
     }
 
-    async fn set_setting(&self, _k: &str, _v: &str) -> RamariaResult<()> {
+    async fn set_setting(&self, key: &str, value: &str) -> RamariaResult<()> {
+        self.settings
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), value.to_string());
         Ok(())
     }
 
     async fn list_settings(&self) -> RamariaResult<Vec<(String, String)>> {
-        Ok(Vec::new())
+        Ok(self
+            .settings
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect())
     }
 
     async fn insert_graph_node(&self, _n: &str, _t: &str, _l: Option<Uuid>) -> RamariaResult<i64> {
@@ -677,6 +705,30 @@ impl StorageBackend for MockStorage {
         _doc_id: &str,
     ) -> RamariaResult<Vec<(i64, String, String, String, String, f64, i64)>> {
         Ok(vec![])
+    }
+
+    // -- Feedback Log（v1.7 H2：S2/S3 弱反馈落库） --
+    async fn save_feedback_log(&self, log: &FeedbackLog) -> RamariaResult<i64> {
+        let mut logs = self.feedback_logs.lock().unwrap();
+        let id = logs.len() as i64 + 1;
+        let mut l = log.clone();
+        l.id = id;
+        logs.push(l);
+        Ok(id)
+    }
+
+    async fn list_feedback_logs_by_persona(
+        &self,
+        persona_uid: &str,
+    ) -> RamariaResult<Vec<FeedbackLog>> {
+        Ok(self
+            .feedback_logs
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.persona_uid == persona_uid)
+            .cloned()
+            .collect())
     }
 }
 

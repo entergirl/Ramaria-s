@@ -6,12 +6,14 @@
 //! - rule_gen: D4 规则生成（LLM 翻译 + 极性一致性校验 + 质控 + 参数化）
 //! - routing: D5 情境路由（查询构造 + 候选评分 + Top-N 合并）
 //! - incremental: D6 增量更新（归簇/待定池/衰减/漂移）
+//! - feedback: H2 弱反馈校准纯计算（S2 候选复审 + S3 滑动窗口趋势统计）
 //!
 //! 安全约束:
 //! - 不记录任何对话原文；聚类/规则只处理 paraphrase 与结构化字段
 //! - embedding 与 LLM 均经 trait 注入，便于 mock 确定性测试
 
 pub mod clustering;
+pub mod feedback;
 pub mod incremental;
 pub mod routing;
 pub mod rule_gen;
@@ -21,6 +23,10 @@ pub use clustering::{
     BehaviorClusterer, BehaviorSample, ClusterMember, DensityClusterResult, RefinedCluster,
     cosine_clipped, dedup_keywords, density_cluster, fused_similarity, jaccard, refine_cluster,
     sample_from_event, vectorize,
+};
+pub use feedback::{
+    ReviewCandidate, ReviewReason, TurnOutcome, detect_s3_review_trend,
+    s2_correction_review_candidate, s3_trend_review_candidate, turn_outcome_from_signal,
 };
 pub use incremental::{
     IncrementalUpdateOutcome, PendingEvent, PendingPool, assign_event_to_cluster,

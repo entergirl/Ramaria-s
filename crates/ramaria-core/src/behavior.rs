@@ -83,6 +83,20 @@ impl SignalType {
     pub fn is_strong(&self) -> bool {
         matches!(self, Self::Edit | Self::Disable)
     }
+
+    /// 反馈信号权重（v3.1 §9.1 信号分级 + D-V17-007 weight 修正）。
+    ///
+    /// 返回:
+    /// - S1 强信号（Edit / Disable）→ 1.0（直接校准）。
+    /// - S2 中信号（Correction）→ 0.6（候选复审，不自动覆盖）。
+    /// - S3 弱信号（Continue）→ 0.2（仅趋势统计）。
+    pub fn weight(&self) -> f64 {
+        match self {
+            Self::Edit | Self::Disable => 1.0,
+            Self::Correction => 0.6,
+            Self::Continue => 0.2,
+        }
+    }
 }
 
 // =========================================================
@@ -376,18 +390,19 @@ pub struct FeedbackLog {
 }
 
 impl FeedbackLog {
-    /// 创建一条 S1 反馈日志（weight 由信号类型决定）。
+    /// 创建一条反馈日志（weight 由信号类型决定，D-V17-007 weight 修正）。
     ///
     /// 参数:
     /// - `persona_uid`: 所属人格。
     /// - `target_type`: 标的类型。
     /// - `target_id`: 标的 id。
-    /// - `signal_type`: 信号类型（Edit/Disable 为 S1 强信号）。
+    /// - `signal_type`: 信号类型（Edit/Disable 为 S1 强信号，weight=1.0；
+    ///   Correction 为 S2 中信号 weight=0.6；Continue 为 S3 弱信号 weight=0.2）。
     /// - `session_id`: 干预发生的会话（可选）。
-    /// - `detail`: 编辑前后快照 JSON（可选）。
+    /// - `detail`: 快照 JSON（可选）。
     ///
     /// 返回:
-    /// - id=0（由存储层回填）、created_at=当前时间、weight 按 S1=1.0 的日志。
+    /// - id=0（由存储层回填）、created_at=当前时间、weight 按信号分级。
     pub fn new(
         persona_uid: impl Into<String>,
         target_type: TargetType,
@@ -402,7 +417,7 @@ impl FeedbackLog {
             target_type,
             target_id: target_id.into(),
             signal_type,
-            weight: if signal_type.is_strong() { 1.0 } else { 0.6 },
+            weight: signal_type.weight(),
             session_id,
             detail,
             created_at: now_ms(),
@@ -469,6 +484,41 @@ mod tests {
         assert_eq!(log.weight, 1.0);
         assert!(log.id == 0);
         assert!(log.created_at > 0);
+    }
+
+    #[test]
+    fn feedback_weight_grading_matches_signal_levels() {
+        // D-V17-007 weight 修正：S1=1.0 / S2(Correction)=0.6 / S3(Continue)=0.2
+        assert_eq!(SignalType::Edit.weight(), 1.0);
+        assert_eq!(SignalType::Disable.weight(), 1.0);
+        assert_eq!(SignalType::Correction.weight(), 0.6);
+        assert_eq!(SignalType::Continue.weight(), 0.2);
+        // S2 复审权重 > S3 趋势权重（消费方语义）
+        assert!(SignalType::Correction.weight() > SignalType::Continue.weight());
+    }
+
+    #[test]
+    fn feedback_log_s2_s3_weights_applied() {
+        // S2 纠正（Correction）→ weight 0.6
+        let s2 = FeedbackLog::new(
+            "char-0001",
+            TargetType::BehaviorRule,
+            "3",
+            SignalType::Correction,
+            None,
+            None,
+        );
+        assert!((s2.weight - 0.6).abs() < f64::EPSILON);
+        // S3 继续（Continue）→ weight 0.2
+        let s3 = FeedbackLog::new(
+            "char-0001",
+            TargetType::BehaviorRule,
+            "3",
+            SignalType::Continue,
+            None,
+            None,
+        );
+        assert!((s3.weight - 0.2).abs() < f64::EPSILON);
     }
 
     #[test]

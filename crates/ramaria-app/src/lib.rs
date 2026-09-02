@@ -30,6 +30,7 @@ pub mod config_sync;
 pub mod diagnostics;
 pub mod error_hint;
 pub mod eta;
+pub mod feedback;
 pub mod model_manager;
 pub mod pipeline;
 pub mod privacy;
