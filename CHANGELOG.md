@@ -7,6 +7,80 @@
 
 ---
 
+## [1.7.0] - 2026-09-04
+
+### 版本定位
+
+**「风格与闭环」**（2.0 路线 1.7 站）：表达层风格自动学会（A3，五维统计 + 显著性检验 + 自动规则生成）、长对话渐进式摘要 + 跨会话脉络按话题加权注入（B3/B4）、弱反馈自我修正闭环（H2 S2/S3）、正式四要素消融评估（J）。**全程不引入破坏性变更**：增量 migration（只增不删）、独立配置开关（关闭回退 v1.6 行为）、无 schema 结构变更。
+
+### 核心特性
+
+#### 风格统计（表达层 A3，v3.1 §7.2）
+
+"自动学会 ta 的说话风格"：
+
+- **五维风格指标**（`ramaria-memory/src/style/stat.rs`）：口癖词（相对超频 Top-N，复用 keyword 词表）+ 句式句长（分布均值/P25/P75、断句符频率）+ 标点（每 100 字感叹/问号/省略号/括号/波浪号）+ 情感表达（复用 `behavior/sentiment.rs` + 感叹词 + valence 标准差）+ 话题词汇偏好（名词词频 Top-N）；输出结构化参数（统计值 + 样本量）。分词复用 BM25 bigram + 内置停用词表。
+- **全局基线池 + 显著性检验**（`style/baseline.rs`）：全部 persona 归一化合并池（增量更新，settings 键 `style_baseline_pool_v1`，JSON 不含原文）；二项 z 检验（`|z|≥2` 且 频次≥5 且 n_p≥200；口癖词另加相对超频比>2）；增量更新（小样本全量重算、大样本滑动合并）；冷启动回退。
+- **自动规则文本生成**（`style/rule_gen.rs`）：模板拼接优先（确定性可测、零 LLM 降级）+ LLM 离线翻译增强（`[style].auto_translate` 开关，LLM 失败静默回退模板）；数据不足（n_p<200）标注不生成。
+- **SpeakingStyle 落库 + 注入**：规则文本写 `persona_facts(field=SpeakingStyle, source=event, status=active)`（走版本链）；`render_style_block` 注入表达层 prompt「# 说话风格（表达层）」段落 + `## 自动风格规则` 子段；手工 `speaking_style`/`E_rules` 优先覆盖；封存时增量统计钩子（复用 behavior_hook 模式，`[style].enabled=false` 不注册）；知识层检索注入排除 SpeakingStyle（只读引用无副作用）。关闭/数据不足 → 不注入（回退 v1.6 语义等价，回归断言锁定）。
+- **`persona_style_stats` 增量表** + `[style]` 配置组（enabled/auto_translate/min_sample_count=200/top_n/relative_boost_ratio=2.0/min_frequency=5/z_critical=2.0）。
+
+#### 渐进式摘要 + 脉络加权（B3/B4，v3.1 §6.4/§6.5）
+
+"长对话不丢信息、跨会话脉络按话题接续"：
+
+- **渐进式摘要**（`[l1.progressive]` 配置组，默认关闭）：触发（消息数>100 或跨度>24h，可配置）；段独立生成 L1（absorbed=0 实时入候选池 + 入 TopicBatcher 缓冲）；**L2 仍封存触发**（并发安全锁定）；封存只摘要尾部（tail_msg_count）。`L1Summarizer::summarize_progressive` 按 tail_msg_count 切段复用 `generate_chunk_l1`，尾段覆盖最新对话。
+- **流式超时/channel 满修复**：`transport.rs` SSE 超时分级——首事件 60s + 整体 600s（原双重 120s）；client 级超时 120→600；有界 channel 满时 `send().await` 背压（不静默丢 delta，接收端 drop 安全退出）。修复后长回复不截断、无静默丢 delta。
+- **脉络加权注入**（`[retrieval] narrative_weighted=true/narrative_top_k=3`）：`Retriever::search_narrative`（BM25 相关性 × `calc_retention` 含访问加成融合排序，无相关性命中按时间兜底）；替换 v1.6"无条件取最近几条"。关闭回退 v1.6。
+- **`MemoryL1::touch` 接线**：检索命中更新 `last_accessed_at`，激活 `[decay] recent_boost_*`（`calc_retention` 生效）；`SearchResult`/`L1DocView` 新增 `last_accessed_at` 全链传播。
+- **graph_retriever 评分公式对齐**：入边参与 boost（与出边对称 `weight×0.1`），模块文档公式更新为 `relation_boost = 1.0 + Σ(关系权重×0.1)`。
+- **mark_absorbed 事务化**：事件版逐批 autocommit 统一为事务化（`pool.begin()` + 命名占位符 + `tx.commit()`，BATCH_SIZE=100），杜绝事件半吸收。
+
+#### 弱反馈闭环（H2，v3.1 §9，S2/S3）
+
+"编辑过的规则与事实持续影响后续对话"——自我修正闭环（`feedback_log` 复用，v1.5 建表）：
+
+- **S2/S3 信号检测**（`ramaria-app/src/feedback.rs`）：助手回复→用户消息间隔 ≤ 60s + 纠正前缀（`不对/不是/应该说/其实`）→ S2；窗口内非纠正 → S3；间隔超窗口不计（沉默/中断≠负反馈）。`correction_prefix_match` 返回脱敏前缀词。
+- **weight 修正**：`core/behavior.rs` `SignalType::weight()`（S1=1.0 / S2(Correction)=0.6 / S3(Continue)=0.2），`FeedbackLog::new` 改用（替代原非强信号统一 0.6）。
+- **`feedback_log` S2/S3 写入 + 排除项**：`process_feedback_for_new_message` 检测 → `should_dedup_recent_feedback`（30s 去重）→ 写 feedback_log（detail 只存纠正前缀词/间隔/信号类型，**不含原文全文**）；中断/沉默由窗口保证不计；超时封存由"仅活跃 session 检测"结构性保证。
+- **校准机制**：S2 纠正 → 候选复审（不自动覆盖规则）；`ReviewCandidate`/`detect_s3_review_trend`（滑动窗口 20 次内连续 ≥5 Continue 后 ≥4 NotContinue → 标记复审）。
+- **`auto_apply_weak_feedback` 默认关闭**（`[feedback]` 配置组）：false 时仅写 feedback_log（审计），复审队列（settings 键 `feedback_review_queue_v1`）不落库 → 规则/画像零自动修改（回归红线 5）。
+
+#### 探针工具链扩展与消融评估（M5a + J，D-V17-015）
+
+扩展 probe 工具链以支撑 M5b 正式消融评估，所有扩展向后兼容（可选字段/新模式，M1 产物不受影响）：
+
+- **消融档位 Profile**：`AblationProfile` 枚举（B0/B1/F0/F1~F4/S_behavior/S_knowledge/S_expression/S_narrative，映射技术报告 §16.3 口径）；`RamariaConfig` 新增仅内存 `InjectionGate`（`#[serde(skip)]`，8 层全开默认；管线数据层闸门 + 渲染层闸门 `PromptConfig`，全关时整块省略）→ B0 无记忆块 / F1 无行为块可真实达成；`ablation=None` 与 M1 完全一致（契约测试锁定）。
+- **emotion 第三维**：`ProbeDimension::Emotion`；`probe build` 3 维（tone/fact/emotion，qpd×3）；emotion 候选 = 情绪化 user 消息（情感线索过滤）→ persona 原回复配对（golden）；`evaluate` 对 emotion 用确定性 rubric 0/0.5/1（情境极性×安慰/共情或喜悦标记计数），非事实召回。
+- **`--repeat` 逐轮评分聚合**：`evaluate` 检测 `repeat.per_variant[].rounds` → 每轮逐题评分取轮均分 → 跨 N 轮 mean/std/95%CI（t 分布），写入 `dimension_scores`（可选字段）。
+- **消融对比报告**：`probe report --ablation`（需 --evaluation）；自动识别 F0/B1 基线，按题目配对 Wilcoxon 符号秩检验 + Cohen's d + 95%CI + BH-FDR 校正；判定线 p_fdr<0.05 ∧ |d|≥0.3 ∧ CI 不含 0；辅助指标（平均回复字符/耗时/空回复率）。
+- **评估执行 J**（真实 CUDA + DeepSeek 全量，11 档 × 90 题 × repeat=3，0 failed）：D1 数据集（鸢九三维各 30 题 + golden）→ S 组前置单层验证 → B0/B1/F0 基线 → F1~F4 逐层消融 → 统计报告。结论：事实维记忆注入整体正向（B1>B0），完整体系 F0 未高于压缩基座 B1；F1~F4 逐层关闭均无显著（无关键层）；S_narrative 显著负向。数据与产物见 `main/test-data/probe-m5/`，报告 `docs/dev-1.7/test/probe-test-report-J-v17-20260903.md`。
+
+#### 探针定稿与环境陷阱修复（M0/M1）
+
+- **探针可复算性统计法**：`probe run --repeat N`（多次运行 + 均值/置信区间，`--json` 信封遵循 v1.5 §2.8/§2.9）；temperature=0.3。
+- **utt 参数定稿写默认配置**（档位实验，D-V15-014 基线 + 统计法 `--repeat 3`）：θ_gap **10** 分钟（10/30/60 中显著最优）、条数上限 **80**（40/80/100 无显著差异取大）、retrieve_top_k **3**（1 显著劣化）。`config/default.toml` + `config.rs` 已更新并注释标依据。
+- **D-P 聚类参数定稿**：θ_nb=**0.65** / β1=**0.85** / β2=**0.10**（β3=0.05），min_cluster_size=3。
+- **`--no-rebuild-utt`**：非切分档位复用已建 utt 块（embedding 调用数不随档位倍增）。
+- **环境陷阱/审查待办收口（D-V17-013/014）**：
+  - **CLI 中文路径编码**：`import qq --file` String→PathBuf（main.rs + import_cmd.rs + 测试适配），调用侧兜底文档化（`ProcessStartInfo.ArgumentList`）；**不新增 py/cmd 文件**。
+  - **exit code 4 修正**：`probe evaluate`/`report` `--results` 缺失时 exit code 由 1 修正为 4（业务校验失败语义）。
+  - **24 测试相关三项**：`extract_first_json_object` 括号深度感知解析（修复截断 JSON，+5 用例）；`RebuildConfig.rebuild_bm25=false` 实际禁用（`set_bm25_enabled` 临时禁用）；`alias.rs` ID 变更语义对齐（or_insert→insert）。
+  - `build_evidence` 单测补强（新旧事件 weight 对比断言）。
+  - 长任务后台执行 / CUDA 构建（VsDevShell + `cargo build --features ramaria-llm/cuda`）/ temperature 与 θ_gap 数据特性：**PowerShell 原生方案文档化**于 `docs/dev-1.7/test/`，不新增 py/cmd 文件。
+
+#### auto_fact_detect 决策（D-V17-011）
+
+M1 复核（定稿档位漏报率 20%，各档 10%~60%，无稳定 <10%）→ **未达标**；较 v1.6 T2（70%）显著改善；依决策按超标类目实装增强层，**具体实装范围待负责人裁决登记**（v1.7 未新增 auto_fact_detect 代码改动）。
+
+### 说明
+
+- **正式评估结论**（J）：四要素消融在 d1 数据集（鸢九，单 persona）未发现关键层——记忆注入整体正向但完整体系未超越压缩基座、逐层关闭无显著。工程结论与 2.0 改进方向（语气维人工抽检/本地 judge 补测、D2/D3 外部效度、S 组档位语义修正、高信号语料）记入 `docs/dev-1.7/备忘.md §九`，不阻塞 v1.7 发布。
+- 知识层漏报 33.9%（评估执行未达标）——列为 2.0 输入。
+- 待项目负责人验收：全量 `cargo test --workspace`；真实 LLM Smoke Test（风格规则注入/长对话分段/脉络加权/touch/弱反馈复审/探针定稿值/评估报告）。
+
+---
+
 ## [1.6.0] - 2026-08-26
 
 ### 核心特性
@@ -668,6 +742,10 @@ v1.2 新增：
 
 | 版本 | 日期 | 说明 |
 |------|------|------|
+| [v1.7.0](#170---2026-09-04) | 2026-09-04 | 风格与闭环：风格统计 A3 + 渐进式摘要/脉络加权 B3/B4 + 反馈环 H2 + 四要素消融评估 J + 探针定稿 + 环境陷阱修复 |
+| [v1.6.0](#160---2026-08-26) | 2026-08-26 | 知识深化：知识层事实抽取/分层/仲裁 + 画像升级 + 降级矩阵 + 探针自动评分 |
+| [v1.5.0](#150---2026-08-15) | 2026-08-15 | 行为驱动：行为层规则学习 + 驱动环注入 + 三层缓存 + B2 + utt 合并方向 |
+| [v1.4.0](#140---2026-08-08) | 2026-08-08 | 原文通道：utt 话语块 + examples 激活 + 桥接 + 驱动环骨架 + 设置双写 |
 | [v1.3.0](#130---2026-07-22) | 2026-07-22 | 算法深化：TopicBatcher + 关键词体系 + 校准权重链 + 三轨准入 + 分层收缩 + A8 + motives + L3 展示 + 审查修复 |
 | [v1.2.0](#120---2026-07-07) | 2026-07-07 | 深度打磨：Pipeline 架构重构 + L3 管线贯通 + 前端联动 + 后端修复 |
 | [v1.1.0](#110---2026-06-16) | 2026-06-16 | 首个增量版本：记忆管线接通 + 嵌入模型 + QQ 导入器 |

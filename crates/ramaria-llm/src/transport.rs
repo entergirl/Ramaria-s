@@ -1075,7 +1075,6 @@ mod tests {
     #[tokio::test]
     async fn stream_overall_timeout_sends_error() {
         use futures::StreamExt;
-        use futures::stream;
 
         // 无限发送 SSE 注释行（`: 心跳`）的 stream：服务端持续有数据但不产生事件、
         // 也永不 [DONE]——验证整体超时兜底。unfold 每 1ms 生成一行，流永不结束；

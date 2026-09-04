@@ -1,6 +1,6 @@
 {
   "name": "ramaria-desktop-frontend",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "private": true,
   "description": "Ramaria 桌面端前端（Tauri Webview）— 含前端纯逻辑测试（node --test，v1.6 M1 T-V16-1-011）",
   "scripts": {

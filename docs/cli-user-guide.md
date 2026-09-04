@@ -329,13 +329,13 @@ ramaria export --output ./my-memories.json  # 指定输出文件
 
 ---
 
-### `ramaria probe` — 探针实验（v1.5 M2 新增）
+### `ramaria probe` — 探针实验（v1.5 M2 新增；v1.7 扩展）
 
-自动化工具链：构建测试集 + 按参数档位批量跑对话管线，用于 utt 参数定稿（θ_gap / 条数上限 / top_k）与聚类参数摸底（见 docs/dev-1.5/v1.5-plan.md）。建立于 M1 `--json` 信封约定之上；实验设计与定稿结论见 `docs/dev-1.5/v1.5-probe-report.md`。
+自动化工具链：构建测试集 + 按参数档位批量跑对话管线，用于 utt 参数定稿（θ_gap / 条数上限 / top_k）与聚类参数摸底、消融评估（M5a/M5b）。建立于 M1 `--json` 信封约定之上；v1.7 起探针规模扩展为 3 维、支持统计法（`--repeat`）与消融档位（`ablation` Profile）与消融对比报告（`report --ablation`）。utt 参数已定稿（θ_gap=10 / 条数 80 / top_k=3，写默认配置）；定稿结论与评估报告见 `docs/dev-1.7/`（`v1.5-probe-report.md` 转正式 + `test/probe-test-report-J-v17-20260903.md`）。
 
 #### `ramaria probe build` — 构建测试集（旧名 `probe dataset`，保留 alias）
 
-从导入数据自动构建测试集（2 维「语气模仿 tone / 事实记忆 fact」× 每维 10 题），输出结构化 JSON 数据集。
+从导入数据自动构建测试集（3 维「语气模仿 tone / 事实记忆 fact / 情感表达 emotion」× 每维 10 题），输出结构化 JSON 数据集。
 
 ```
 ramaria probe build --output probe-dataset.json
@@ -363,6 +363,8 @@ ramaria probe dataset --output ds.json        # 旧名 alias，等价
 | max_msgs_80 | 30 | 80 | 3 | 条数上限上调（块更长） |
 | top_k_1 | 30 | 40 | 1 | top_k 下调（更保守的原文注入） |
 
+> 以上为 M1 utt 参数定稿实验的代表配对（v1.5 M2 遗留的对照档位）。utt 参数已定稿为 θ_gap=10 / 条数=80 / top_k=3（写默认配置）。**消融档位**（v1.7 M5）：数据集 `variants[]` 可含 `ablation` 字段（取值 `B0/B1/F0/F1/F2/F3/F4/S_behavior/S_knowledge/S_expression/S_narrative`），运行时对每档真实关闭/保留对应记忆注入层（`ablation` 缺失 = 完整体系，与 M1 行为一致）；`ramaria probe` 无独立 profile flag——档位由数据集文件携带，供 `evaluate`/`report --ablation` 配对对比。
+
 #### `ramaria probe run` — 档位批量实验
 
 按档位批量跑对话管线，结构化输出（档位 → 输出 → 指标），供 v1.6 T2 自动评分与 v1.7 T3 正式评估复用。
@@ -379,6 +381,7 @@ ramaria probe run --dataset ds.json --no-rebuild-utt --json
 | `--variants <ids>` | 只跑指定档位（逗号分隔 id，默认全部；无效 id 忽略） |
 | `--limit <N>` | 每档位最多跑题数（默认全部） |
 | `--rebuild-utt` / `--no-rebuild-utt` | 是否按档位参数重建 utt 块（默认开启；θ_gap/条数档位必须重建才生效。注意：开启会**清空并按新参数重建数据库中的 utt 块**） |
+| `--repeat <N>` | 统计法重复次数（v1.7 新增，默认 1）：同一档位跑 N 轮，输出含 `repeat.per_variant` 逐题统计与每轮 `rounds` 全量明细（供 evaluate 逐轮评分聚合）；`variants` 保留最后一轮单次快照。解决 DeepSeek 无 `seed` 复跑不一致（D-V17-001 统计法） |
 | `--output <FILE>` | 结果输出文件（`-` = stdout 输出原始结果 JSON） |
 | `--json` | M1 信封输出（`{"ok":true,"data":{…}}`） |
 
@@ -391,9 +394,9 @@ ramaria probe run --dataset ds.json --no-rebuild-utt --json
 - 每次对话会新建会话并写库（探针实验数据）；建议对副本数据库执行
 - 隐私红线：日志不记录完整问题与回复；数据集含参考文本（persona 原回复/事件摘要），注意保管
 
-#### `ramaria probe evaluate` — 对档位实验自动评分（v1.6新增）
+#### `ramaria probe evaluate` — 对档位实验自动评分（v1.6新增；v1.7 扩展）
 
-对 `probe run` 结果自动打分：事实维 golden answers（embedding 余弦 + 关键词命中加权）、语气维 LLM-as-judge（本地 LM Studio，rubric 1~5 分，温度 0）。服务于知识层抽取质量评估（漏报目标 <10%）与 v1.7 正式评估铺路。
+对 `probe run` 结果自动打分：事实维 golden answers（embedding 余弦 + 关键词命中加权）、语气维 LLM-as-judge（本地 LM Studio，rubric 1~5 分，温度 0，**线上后端自动跳过**）、情感维（v1.7 新增，确定性 rubric 0/0.5/1——情境极性 × 安慰/共情/喜悦标记计数，非事实召回）。服务于知识层抽取质量评估（漏报目标 <10%）与 v1.7 正式评估铺路。
 
 ```
 ramaria probe evaluate --results probe-results.json --dataset probe-dataset.json --output eval.json --json
@@ -409,15 +412,20 @@ ramaria probe evaluate --results probe-results.json --no-tone-judge --output eva
 | `--no-tone-judge` | 跳过语气维 LLM-as-judge（无本地 LM Studio 或想省时使用） |
 | `--json` | 信封输出（`{"ok":true,"data":{…}}`） |
 
-**输出结构**：`ProbeEvaluation`——档位 × 维度评分（`fact_score`/`tone_score`），逐题 `FactItemScore`（余弦/关键词命中/加权）；judge 不可用时 `judge_used=false` 标注，不阻断 fact 维评分。
+**输出结构**：`ProbeEvaluation`——档位 × 维度评分（`fact_score`/`tone_score`/`emotion_score`），逐题 `FactItemScore`（余弦/关键词命中/加权）；judge 不可用时 `judge_used=false` 标注，不阻断 fact 维评分。
 
-#### `ramaria probe report` — 生成档位对比报告（v1.6新增）
+**逐轮聚合（v1.7）**：当 `probe run` 用了 `--repeat N` 且结果含 `repeat.per_variant[].rounds` 时，`evaluate` 对每轮 reply 分别评分，聚合为 `dimension_scores[].{mean,std,ci95_low,ci95_high,n}`（n=轮数，t 分布置信区间）；`variants`（最后一轮）保留为单次快照不参与聚合。无 repeat 的旧结果行为不变。
 
-根据 evaluate 评分与人工抽检校准生成档位对比表与定稿建议（markdown/JSON 双形态，按输出扩展名 `.md`/`.json` 分派）。
+> **exit code**：`probe evaluate` / `probe report` 缺 `--results` 时返回 **exit code 4**（业务校验失败，v1.7 由 1 修正）。
+
+#### `ramaria probe report` — 生成档位对比报告（v1.6新增；v1.7 消融对比）
+
+根据 evaluate 评分与人工抽检校准生成档位对比表与定稿建议（markdown/JSON 双形态，按输出扩展名 `.md`/`.json` 分派）。v1.7 起支持 `--ablation` 消融对比模式。
 
 ```
 ramaria probe report --results probe-results.json --evaluation eval.json --output report.md
 ramaria probe report --results probe-results.json --evaluation eval.json --calibration manual.json --output report.json
+ramaria probe report --results probe-results.json --evaluation eval.json --ablation --output report-ablation.md
 ```
 
 | 参数 | 说明 |
@@ -426,9 +434,12 @@ ramaria probe report --results probe-results.json --evaluation eval.json --calib
 | `--evaluation <FILE>` | 评分数值文件（`probe evaluate` 产物） |
 | `--calibration <FILE>` | 人工抽检校准文件（JSON 数组 `{item_id, score}`；10%~20% 抽样与 judge 比对） |
 | `--output <FILE>` | 报告输出文件（`-` = stdout；`.md` markdown / `.json` JSON） |
+| `--ablation` | 消融对比报告模式（v1.7 新增，需提供 `--evaluation`，缺失 exit 4） |
 | `--json` | 信封输出 |
 
 **校准**：`read_manual_scores` 读取人工分数，`compute_calibration` 计算同分一致性 / 平均绝对差 / 偏差 / 校准系数；同分 <50% 或 `|偏差|>1.0` 时报告标注不一致，供人工复核。
+
+**`--ablation` 消融对比（v1.7）**：自动识别 F0（F 组）与 B1（S 组）基线，按题目配对执行 Wilcoxon 符号秩检验（正态近似、平均秩，n<5 返回 None 保守处理）+ Cohen's d + 95% CI + 全局 Benjamini-Hochberg FDR 校正；判定线 **p_fdr<0.05 ∧ |d|≥0.3 ∧ CI 不含 0 → 显著**（↑ 正向 / ↓ 负向 / → 无差异）；附辅助指标表（平均回复字符 / 耗时 / 空回复率）。对照档位由数据集 `variants[].ablation` 给出。
 
 ---
 
@@ -577,10 +588,20 @@ ramaria probe run --dataset probe-dataset.json --output probe-results.json --jso
 | `import qq --side` | **v1.6 M0 新增导入侧过滤**：`self\|other\|both`（默认 both），只处理某一侧时跳过侧消息不入库、该侧 persona 不创建（D-V16-011） |
 | `fact list/show` | **v1.6 M1 新增知识层查询命令**：查看 persona 结构化事实与版本链；**双端均无 delete**（D-V16-003）；详见上文 `fact` 章节 |
 | 默认画像 UID 语义 | **v1.6 M0 修正"我方/对方"数据库对齐（D-V16-011）**：新导入自动生成的"我方"画像 UID 前缀 `user-` / kind=user（对方仍 `char-` / kind=char）；旧库需按 v1.6 重建库升级路径，无数据回填 |
+| `probe run --repeat N` | **v1.7 M1 新增统计法**：同一档位多次运行取均值 ± 置信区间（D-V17-001，解决 DeepSeek 复跑不一致） |
+| `probe run --no-rebuild-utt` | **v1.7 M1 新增**：非切分档位复用已建 utt 块（embedding 调用数不随档位倍增） |
+| `probe build` 3 维 | **v1.7 M5a 扩展**：新增情感表达 emotion 维（qpd×3，30 题时共 90 题） |
+| `probe report --ablation` | **v1.7 M5a 新增消融对比报告**：配对 Wilcoxon + Cohen's d + CI + BH-FDR 判定 |
+| `probe evaluate/report` exit code | **v1.7 M1 修正**：`--results` 缺失时 exit code 由 1 修正为 4（业务校验失败语义） |
+| 风格规则注入 | **v1.7 M2 新增（A3）**：自动风格统计生成 SpeakingStyle 规则注入对话 prompt（`[style]` 配置，关闭回退 v1.6）；无需新 CLI 命令 |
+| 弱反馈闭环 | **v1.7 M4 新增（H2）**：S2/S3 弱信号检测写入 `feedback_log`（默认仅审计不自动改动）；无需新 CLI 命令 |
+| `import qq --file` 中文路径 | **v1.7 M0 修复**：文件路径参数改 `PathBuf`/`OsString` 承载，中文文件名导入冒烟通过 |
 
 ---
 
 ## 版本升级与重建库
+
+> **v1.7 无破坏性变更**：从 v1.6.0 升级到 v1.7.0 **无需重建库**。v1.7 仅新增 `persona_style_stats` 增量表（migration 只增不删），`feedback_log`/`persona_facts`/`behavior_rules` 结构不变；风格注入/渐进式摘要/脉络加权/弱反馈均为独立配置开关（默认值见 `config/default.toml` 的 `[style]`/`[l1.progressive]`/`[retrieval] narrative_weighted`/`[feedback]`），关闭即回退 v1.6 行为。旧库直接启动自动应用增量 migration 即可。
 
 > **v1.6 破坏性变更（D-V16-014）**：所有 migration 已合并为单个 `20260815_v1.6_schema.sql` 基线，`persona_facts` 以版本化结构（status/tier/version_of/confidence/keyword_hint）直建。旧版数据库的 `_sqlx_migrations` 记录与该基线 checksum 不匹配，**无法自动迁移，需重建库**。
 
