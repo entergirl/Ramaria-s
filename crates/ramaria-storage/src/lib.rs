@@ -1393,6 +1393,57 @@ mod tests {
         assert!(v >= 1);
     }
 
+    /// 单基线迁移：空库一次初始化后 `_sqlx_migrations` 恰有一条记录。
+    ///
+    /// 说明:
+    /// - 2.0 把此前的增量迁移序列合并为单个基线 SQL，空库初始化即得最终 schema。
+    /// - 若记录数大于 1，说明迁移目录混入了旧增量文件（破坏性变更纪律被破坏）。
+    #[tokio::test]
+    async fn single_baseline_runs_one_migration() {
+        let pool = database::init_test_pool()
+            .await
+            .expect("测试数据库初始化失败");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
+            .fetch_one(&pool)
+            .await
+            .expect("查询 migration 记录失败");
+        assert_eq!(count, 1, "2.0 单基线应只有一条 migration 记录");
+    }
+
+    /// 单基线包含风格统计表（此前为独立增量迁移），空库初始化后可直接读写。
+    #[tokio::test]
+    async fn style_stats_usable_after_single_baseline() {
+        use ramaria_core::types::{PersonaStyleStats, StyleRuleSource, StyleStatsStatus, now_ms};
+        let storage = setup().await;
+        let p = Persona::new(
+            "char-style".into(),
+            "风格角色".into(),
+            PersonaKind::Char,
+            1,
+            "local".into(),
+        );
+        storage.create_persona(&p).await.unwrap();
+
+        let stats = PersonaStyleStats {
+            persona_uid: "char-style".to_string(),
+            sample_count: 3,
+            stats_json: r#"{"metric":"mock"}"#.to_string(),
+            baseline_version: 0,
+            rule_text: None,
+            rule_source: StyleRuleSource::None,
+            status: StyleStatsStatus::Insufficient,
+            updated_at: now_ms(),
+        };
+        storage.upsert_style_stats(&stats).await.unwrap();
+        let got = storage
+            .get_style_stats("char-style")
+            .await
+            .unwrap()
+            .expect("风格统计应存在");
+        assert_eq!(got.persona_uid, "char-style");
+        assert_eq!(got.sample_count, 3);
+    }
+
     #[tokio::test]
     async fn privacy_consent_crud() {
         let storage = setup().await;

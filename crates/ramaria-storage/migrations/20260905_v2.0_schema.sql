@@ -1,16 +1,15 @@
 -- =========================================================
--- Ramaria v1.6 Schema —— 单基线合并（D-V16-014）
+-- Ramaria 2.0 Schema —— 单基线合并（D-V20-002）
 --
 -- 说明:
--- - 由 v1.0 基线 + v1.4/v1.5 增量 + v1.6 新结构合并为单一初始化基线，
---   替代 20260801 / 20260806 / 20260810 / 20260813 / 20260814 五份旧迁移。
--- - 破坏性变更（无存量用户 + v1.5 未正式发布）：既有开发库无法自动迁移，
---   需重建（备份 → 重建 → 重新导入 → 关键数据核对，见发布说明升级路径）。
--- - 所有最终列直接写入 CREATE TABLE 定义（不再使用增量 ALTER/UPDATE 迁移）。
--- - v1.6 新结构：`persona_facts` 版本化直建
---   （status = active|superseded|candidate / version_of / confidence / tier）。
+-- - 由 v1.6 基线（20260815_v1.6_schema.sql）+ v1.7 增量
+--   （20260901_v1.7_style_stats.sql，persona_style_stats）合并为
+--   单一 2.0 初始化基线，替代此前两份迁移文件。
+-- - 破坏性变更（无外部存量用户）：旧开发库无法在线增量升级，
+--   需重建（备份 → 重建 → 重新导入 → 数量核对，见升级路径文档）。
+-- - 所有最终列直接写入 CREATE TABLE 定义（不使用增量 ALTER/UPDATE）。
 -- - 时间字段统一 INTEGER（Unix 毫秒）。
--- - 全部使用 CREATE TABLE / CREATE INDEX；空库首次执行即可得最终 schema。
+-- - 全部使用 CREATE TABLE / CREATE INDEX；空库首次执行即得最终 schema。
 -- =========================================================
 
 -- =========================================================
@@ -162,7 +161,7 @@ CREATE TABLE event_sources (
 );
 
 -- =========================================================
--- L2 层 — persona_facts 事实库（v1.6 版本化直建，D-V16-001/014）
+-- L2 层 — persona_facts 事实库（v1.6 版本化直建）
 -- =========================================================
 -- 字段约定:
 -- - tier: 稳定 stable / 动态 volatile / 历史 historical（分层更新策略）。
@@ -258,6 +257,26 @@ CREATE TABLE persona_examples (
     created_at  INTEGER NOT NULL
 );
 CREATE INDEX idx_persona_examples_uid_sel ON persona_examples(persona_uid, selected);
+
+-- =========================================================
+-- 表达层 — persona_style_stats 风格统计（按 persona 单行 upsert）
+-- =========================================================
+-- 说明:
+-- - 存五维统计参数、样本量、基线引用与自动风格规则文本。
+-- - 隐私红线：stats_json 仅存统计参数（频率/计数/分布），
+--   不含原文消息文本；规则文本为自动生成的风格描述。
+
+CREATE TABLE persona_style_stats (
+    persona_uid      TEXT PRIMARY KEY NOT NULL REFERENCES personas(uid),
+    sample_count     INTEGER NOT NULL,            -- 统计样本量 n_p（消息条数）
+    stats_json       TEXT NOT NULL,               -- 五维统计参数（JSON，不含原文）
+    baseline_version INTEGER NOT NULL DEFAULT 0,  -- 全局基线池合并版本（基线引用）
+    rule_text        TEXT,                        -- 自动风格规则文本（NULL=未生成）
+    rule_source      TEXT NOT NULL DEFAULT 'none',-- none / template / llm
+    status           TEXT NOT NULL DEFAULT 'insufficient', -- insufficient / ready / no_significant
+    updated_at       INTEGER NOT NULL             -- 更新时间（Unix 毫秒）
+);
+CREATE INDEX idx_style_stats_status ON persona_style_stats(status);
 
 -- =========================================================
 -- 基础设施层 — 关键词 / BM25 / 图谱
@@ -379,7 +398,7 @@ CREATE TABLE settings (
 );
 
 -- =========================================================
--- v1.5 新增 — 三层生成缓存（C）/ L2 去重指纹
+-- 三层生成缓存（C）/ L2 去重指纹
 -- =========================================================
 
 CREATE TABLE llm_response_cache (
@@ -403,7 +422,7 @@ CREATE TABLE l2_cluster_fingerprints (
 CREATE INDEX idx_l2_cluster_fingerprints_created ON l2_cluster_fingerprints(created_at);
 
 -- =========================================================
--- v1.5 新增 — 行为层规则 + 反馈日志（v3.1 §4/§9）
+-- 行为层规则 + 反馈日志
 -- =========================================================
 
 CREATE TABLE behavior_rules (

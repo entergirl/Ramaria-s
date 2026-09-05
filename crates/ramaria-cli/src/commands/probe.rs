@@ -71,6 +71,37 @@ pub const ABLATION_PROFILE_NAMES: [&str; 11] = [
     "S_narrative",
 ];
 
+// =========================================================
+// 消融对照语义（真增量档设计，M0 冻结）
+// =========================================================
+// 消融档位回答三类不同的问题，必须区分口径:
+//
+// 1) 替代对照（既有 `S_*`，保留）:
+//    - 定义: B1 基座中"去掉 RAG 压缩摘要"，只保留目标专属层单独注入。
+//    - 闸门: memory_rag=false，仅目标专属层闸门为 true。
+//    - 回答问题: "目标层能否独立替代 RAG 摘要基座"，测的是单层替代能力。
+//    - 局限: J 消融证明该口径测不出"在 RAG 之上叠加一层的净增量"。
+//
+// 2) 净增量对照（`I_behavior` / `I_knowledge` / `I_expression` / `I_narrative`，
+//    后续评估里程碑实装，属未来档位，不在当前 Profile 集合内）:
+//    - 定义: B1 压缩摘要基座 + 仅叠加一个目标专属层，其余专属层全部关闭。
+//    - 闸门: memory_rag=true（保留 B1 基座），仅目标专属层闸门为 true，
+//      其余专属层（behavior/knowledge/speaking_style+examples+utt/narrative+bridge）为 false。
+//    - 回答问题: "在 RAG 摘要基座之上加一层的净增量"，与 B1 配对做统计检验。
+//
+// 3) 移除对照（`F1`~`F4`）与基线:
+//    - F1~F4: 全开（F0）基础上关闭对应专属层 → 回答"去掉某一层的边际损失"。
+//    - B0/B1/F0 为两个基线与完整体系锚点；F0 与 ablation=None 完全一致。
+//
+// 专属层 → 闸门集合映射（行为/knowledge/speaking_style/examples/utt/narrative/bridge）:
+// - 行为层: behavior
+// - 知识层: knowledge
+// - 表达层: speaking_style + examples + utt
+// - 脉络层: narrative + bridge
+// - RAG 摘要基座: memory_rag
+//
+// 关系表与统计检验要点见 `docs/dev-2.0/ablation-profile-mapping.md`。
+
 /// 消融档位 Profile。
 ///
 /// 职责:

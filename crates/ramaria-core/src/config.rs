@@ -401,6 +401,12 @@ impl Default for BackendSelection {
 /// 说明:
 /// - 具体检索算法在 `ramaria-storage` / `ramaria-memory` 中实现。
 /// - 此结构只定义参数，不执行检索。
+///
+/// 三路检索独立参数说明:
+/// - 本组为 **memory_rag 摘要路**（L1/L2 记忆摘要检索 + RRF 融合 + 脉络加权注入）
+///   的检索参数；L0/L1/L2 各层 top_k、相似度阈值、融合权重均只服务摘要路。
+/// - 原文样例路（utt）与知识路（fact）的检索参数分别在各自配置组独立定义，
+///   相互不共享本组数值。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetrievalConfig {
     /// L0 滑动窗口大小
@@ -1024,6 +1030,11 @@ pub struct MiscConfig {
 ///   助手/系统类 persona 不注入原文，行为与 v1.3 完全一致。
 /// - 原文是最高敏感层，关闭开关后注入行为整体回退 v1.3。
 ///
+/// 三路检索独立参数说明:
+/// - 本组为 **utt 原文路** 的专属切分与检索参数（时间间隙/单块条数/检索 top_k/
+///   注入预算）。各路记忆注入的检索参数按路归属独立组，避免跨路共享一组数值
+///   （例如以原文块的切分参数同时驱动摘要/知识路的召回）。
+///
 /// 兼容性说明:
 /// - struct 级 `#[serde(default)]`：config.toml 中 `[utt]` 表只写部分键时
 ///   （部分覆盖场景），缺失字段回退 `Default` 实现，避免解析失败。
@@ -1324,6 +1335,12 @@ impl Default for BehaviorConfig {
 /// 职责:
 /// - 控制知识层（persona_facts 生命周期 + 事实卡片注入）的开关与阈值。
 /// - 总开关关闭时知识层全链路禁用，prompt 不含知识块。
+///
+/// 三路检索独立参数说明:
+/// - 知识 fact 路的候选检索条数与路由阈值在本组独立配置
+///   （`retrieve_top_k` / `retrieve_threshold`），不再依赖其他路的检索参数。
+/// - 默认值 `0` / `0.0` 表示"与上一版本行为等价"（不做条数截断、沿用既有
+///   判定口径）；运行时独立接线后，显式配置值才实际生效。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KnowledgeConfig {
@@ -1343,6 +1360,16 @@ pub struct KnowledgeConfig {
     pub injection_budget_chars: usize,
     /// volatile 事实时效半衰期（天）。
     pub volatile_halflife_days: u32,
+    /// 知识 fact 路候选事实检索条数上限（本路独立参数）。
+    ///
+    /// `0` = 与上一版本行为等价：不按条数截断候选，仅按
+    /// `injection_budget_chars` 预算注入。大于 `0` 时按条数截断。
+    pub retrieve_top_k: u32,
+    /// 知识 fact 路检索路由阈值（θ_route，候选命中下限，本路独立参数）。
+    ///
+    /// `0.0` = 与上一版本行为等价：沿用既有关键词判定口径。
+    /// 大于 `0.0` 时为显式语义/关键词命中阈值。
+    pub retrieve_threshold: f64,
 }
 
 impl Default for KnowledgeConfig {
@@ -1352,6 +1379,7 @@ impl Default for KnowledgeConfig {
     /// - 自动抽取默认关闭（`auto_fact_detect=false`，需用户显式开启）。
     /// - 判重 0.85 / 互证 0.7。
     /// - 注入预算 800 字符；volatile 半衰期 30 天。
+    /// - 知识路独立检索参数默认 `0` / `0.0`（行为等价占位，不在阶段一定稿）。
     fn default() -> Self {
         Self {
             auto_fact_detect: false,
@@ -1361,6 +1389,8 @@ impl Default for KnowledgeConfig {
             corroboration_cosine_threshold: 0.7,
             injection_budget_chars: 800,
             volatile_halflife_days: 30,
+            retrieve_top_k: 0,
+            retrieve_threshold: 0.0,
         }
     }
 }
@@ -1646,6 +1676,12 @@ mod tests {
         assert!((cfg.knowledge.corroboration_cosine_threshold - 0.7).abs() < f64::EPSILON);
         assert_eq!(cfg.knowledge.injection_budget_chars, 800);
         assert_eq!(cfg.knowledge.volatile_halflife_days, 30);
+        // 三路检索独立字段默认值：知识路新增字段以 0/0.0 表示行为等价占位
+        assert_eq!(cfg.knowledge.retrieve_top_k, 0);
+        assert!((cfg.knowledge.retrieve_threshold - 0.0).abs() < f64::EPSILON);
+        // utt 路 / 摘要路各自生效值（阶段一与既有行为等价）
+        assert_eq!(cfg.utt.retrieve_top_k, 3);
+        assert_eq!(cfg.retrieval.l1_retrieve_top_k, 4);
 
         // 画像升级：三开关默认开启
         assert!(cfg.inference.upgrade.cross_version_threshold_085);
@@ -1654,6 +1690,92 @@ mod tests {
 
         // 事件提取降级动态置信度默认开启
         assert!(cfg.event_extraction.degraded_confidence_enabled);
+    }
+
+    /// 三路检索参数互不串扰：单独修改一路，另两路的默认值不受影响。
+    #[test]
+    fn three_road_retrieval_params_independent() {
+        let base = RamariaConfig::default();
+
+        // 修改 utt 原文路（如调大原文检索条数）不影响摘要路 / 知识路
+        let mut utt_tuned = RamariaConfig::default();
+        utt_tuned.utt.retrieve_top_k = 9;
+        utt_tuned.utt.theta_gap_minutes = 20;
+        assert_eq!(
+            utt_tuned.retrieval.l1_retrieve_top_k,
+            base.retrieval.l1_retrieve_top_k
+        );
+        assert_eq!(
+            utt_tuned.knowledge.retrieve_top_k,
+            base.knowledge.retrieve_top_k
+        );
+        assert!(
+            (utt_tuned.knowledge.retrieve_threshold - base.knowledge.retrieve_threshold).abs()
+                < f64::EPSILON
+        );
+
+        // 修改摘要路（RAG）不影响 utt 路 / 知识路
+        let mut rag_tuned = RamariaConfig::default();
+        rag_tuned.retrieval.l1_retrieve_top_k = 12;
+        rag_tuned.retrieval.similarity_threshold = 0.8;
+        assert_eq!(rag_tuned.utt.retrieve_top_k, base.utt.retrieve_top_k);
+        assert_eq!(
+            rag_tuned.knowledge.retrieve_top_k,
+            base.knowledge.retrieve_top_k
+        );
+
+        // 修改知识路不影响 utt 路 / 摘要路
+        let mut fact_tuned = RamariaConfig::default();
+        fact_tuned.knowledge.retrieve_top_k = 7;
+        fact_tuned.knowledge.retrieve_threshold = 0.75;
+        assert_eq!(fact_tuned.utt.retrieve_top_k, base.utt.retrieve_top_k);
+        assert_eq!(
+            fact_tuned.retrieval.l1_retrieve_top_k,
+            base.retrieval.l1_retrieve_top_k
+        );
+    }
+
+    /// 旧版配置布局（仅含既有键、不含新增知识路字段）仍可解析，
+    /// 新增字段回退默认值（行为与上一版本等价，旧配置读取兼容）。
+    #[test]
+    fn v17_config_layout_still_parses() {
+        let old_toml = r#"
+version = "1.7.0"
+
+[utt]
+enabled = true
+theta_gap_minutes = 10
+max_msgs_per_block = 80
+retrieve_top_k = 3
+max_block_chars = 1500
+
+[retrieval]
+l0_window_size = 3
+l0_retrieve_top_k = 3
+l1_retrieve_top_k = 4
+l2_retrieve_top_k = 2
+similarity_threshold = 0.6
+rrf_k = 60
+bm25_weight = 1.0
+graph_weight = 0.8
+retrieval_weight_l2 = 0.8
+retrieval_weight_l1 = 1.0
+narrative_weighted = true
+narrative_top_k = 3
+
+[knowledge]
+auto_fact_detect = false
+detector_enabled = true
+injection_budget_chars = 800
+"#;
+        let cfg: RamariaConfig = toml::from_str(old_toml).expect("旧版配置布局应可解析");
+        assert_eq!(cfg.utt.retrieve_top_k, 3);
+        assert_eq!(cfg.retrieval.l1_retrieve_top_k, 4);
+        // 新键未配置 → 回退默认（0 / 0.0 = 行为等价占位）
+        assert_eq!(cfg.knowledge.retrieve_top_k, 0);
+        assert!((cfg.knowledge.retrieve_threshold - 0.0).abs() < f64::EPSILON);
+        assert_eq!(cfg.knowledge.injection_budget_chars, 800);
+        assert!(cfg.knowledge.detector_enabled);
     }
 
     #[test]
