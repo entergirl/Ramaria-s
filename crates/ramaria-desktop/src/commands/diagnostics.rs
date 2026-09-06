@@ -277,3 +277,99 @@ fn generate_warnings(status: &std::collections::HashMap<String, String>) -> Vec<
 
     warnings
 }
+
+// =========================================================
+// 单元测试
+// =========================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 纯 ASCII 长文本（无换行）——字符边界与旧字节切片语义在此一致。
+    #[test]
+    fn truncate_preview_ascii_no_newline_truncates_with_marker() {
+        let text = "a".repeat(250);
+        let result = truncate_preview(&text, 200);
+        // hard 分支保留前 200 字符并追加 "\n..."（4 字节）
+        assert!(result.ends_with("\n..."));
+        assert_eq!(result.len(), 200 + 4);
+        assert_eq!(&result[..200], "a".repeat(200));
+    }
+
+    // 纯 ASCII 含换行——按换行优先截断，切到预算内最后一个换行前。
+    #[test]
+    fn truncate_preview_ascii_cuts_at_newline_within_budget() {
+        // 第 150 个字符处一个换行，预算 200 → 切到该换行前并加标记
+        let mut text = "x".repeat(150);
+        text.push('\n');
+        text.push_str(&"y".repeat(100));
+        let result = truncate_preview(&text, 200);
+        assert!(result.starts_with(&"x".repeat(150)));
+        assert!(!result[..150].contains('\n'));
+        assert!(result.ends_with("\n..."));
+    }
+
+    // 中文内容字符数 > 200（UTF-8 字节远超 200，release_notes 形态）——
+    // 回归旧字节切片 panic；不得 panic 且切在字符边界、不切开多字节字符。
+    #[test]
+    fn truncate_preview_chinese_no_panic_and_char_boundary() {
+        // 单中文字符 3 字节；250 字符 ≈ 750 字节 > 200 字节
+        let text = "中".repeat(250);
+        let result = truncate_preview(&text, 200);
+        // 保留前 200 个中文字符（600 字节）+"\n..."（4 字节）
+        assert!(result.ends_with("\n..."));
+        assert_eq!(result.len(), 200 * 3 + 4);
+        // 截断部分为完整 200 个中文字符（无半个多字节字符残留）
+        assert_eq!(result[..200 * 3].chars().count(), 200);
+    }
+
+    // 全中文且无换行——预算内找不到换行，走 hard boundary 分支，
+    // 保留前 200 字符并追加 \n...
+    #[test]
+    fn truncate_preview_all_chinese_no_newline_hard_boundary() {
+        let text = "汉".repeat(300);
+        let result = truncate_preview(&text, 200);
+        assert!(result.ends_with("\n..."));
+        assert_eq!(result.len(), 200 * 3 + 4);
+        assert_eq!(result[..200 * 3].chars().count(), 200);
+    }
+
+    // 中文含换行——按换行优先截断，切点不切开多字节字符。
+    #[test]
+    fn truncate_preview_chinese_cuts_at_newline() {
+        let mut text = "啊".repeat(100); // 100 字符 / 300 字节
+        text.push('\n');
+        text.push_str(&"啊".repeat(100)); // 总字符 201 > 200
+        let result = truncate_preview(&text, 200);
+        // 预算 200 内最后一个换行在字符位置 100 → 切到其前并加标记
+        assert_eq!(result, format!("{}\n...", "啊".repeat(100)));
+    }
+
+    // 短内容（≤ max_len）原样返回、不加截断标记。
+    #[test]
+    fn truncate_preview_short_content_returned_as_is() {
+        assert_eq!(truncate_preview("short", 200), "short");
+        assert_eq!(
+            truncate_preview("a".repeat(200).as_str(), 200),
+            "a".repeat(200)
+        );
+        let zh_short = "中文短内容";
+        assert_eq!(truncate_preview(zh_short, 200), zh_short);
+        assert_eq!(truncate_preview("", 200), "");
+    }
+
+    // 混合中英文且无换行——'a' 与中文均计 1 字符，切在字符边界。
+    #[test]
+    fn truncate_preview_mixed_ascii_chinese_boundary() {
+        // 恰好 200 字符（199 个 'a' + 1 个中文）→ 不截断
+        let at_max = format!("{}中", "a".repeat(199));
+        assert_eq!(truncate_preview(&at_max, 200), at_max);
+
+        // 201 字符超限 → 保留前 200 字符（199 个 'a' + 第 1 个'中'），
+        // 第 201 个'中'被切，追加 "\n..."；切点不切开多字节字符。
+        let over = format!("{}中中", "a".repeat(199));
+        let result = truncate_preview(&over, 200);
+        assert_eq!(result, format!("{}中\n...", "a".repeat(199)));
+    }
+}

@@ -50,6 +50,8 @@ pub async fn style_incremental_update_core(
     persona_uid: &str,
 ) -> RamariaResult<()> {
     // 1. 读取 persona 全部消息
+    // 风格统计需对该 persona 全部消息一次性计算五维分布，属离线分析路径，
+    // 故此处有意全量加载（浏览/展示请走 list_messages_by_persona_paginated）。
     let messages = storage.list_messages_by_persona(persona_uid).await?;
 
     // 2. 计算五维统计

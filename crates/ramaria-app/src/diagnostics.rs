@@ -4,7 +4,7 @@
 //! - 收集：日志(最近1000行)、配置(API key 脱敏)、数据库 schema 版本、系统信息。
 //! - 打包为 .zip 文件供用户手动发送给开发者排查问题。
 //! - 所有敏感信息（API key）在收集阶段即脱敏，写入 zip 前已安全。
-//! - 使用临时目录构建 zip，避免中断后留下半成品文件。
+//! - 先写同目录临时文件，成功后 `fs::rename` 原子替换目标，避免中断留下半成品覆盖旧文件。
 //! - 收集阶段错误不阻塞导出：缺失项记录占位文本而非报错退出。
 //!
 //! 安全约束:
@@ -295,10 +295,15 @@ fn redact_api_keys(content: &str) -> String {
 // 内部实现: zip 打包
 // =========================================================
 
+/// 临时文件名后缀：写入完成后通过原子重命名替换正式文件。
+const TEMP_SUFFIX: &str = ".part";
+
 /// 将收集到的诊断数据打包为 .zip 文件。
 ///
 /// 打包策略:
-/// - 使用临时文件构建，成功后移动到目标路径（原子性保证）。
+/// - 先将内容写入与目标同目录的临时文件（`{文件名}.part`），全部写入并 `finish`
+///   成功后再用 `std::fs::rename` 原子替换目标路径（Windows 下可原子覆盖已存在文件）。
+/// - 任一步失败返回 Err，并清理残留临时文件，不留半成品覆盖旧文件。
 /// - 使用 Deflated 压缩（平衡速度与体积）。
 /// - 每个文件一行写入，不在内存中构建完整 zip。
 ///
@@ -310,7 +315,7 @@ fn build_zip(
     logs: &str,
     config_content: &str,
 ) -> Result<u64, String> {
-    // 确保父目录存在
+    // 确保父目录存在（仅当父目录为非空路径）
     if let Some(parent) = output_path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -318,9 +323,48 @@ fn build_zip(
             .map_err(|e| format!("无法创建输出目录 '{}': {e}", parent.display()))?;
     }
 
-    // 创建 zip 文件
-    let file = std::fs::File::create(output_path)
-        .map_err(|e| format!("无法创建 zip 文件 '{}': {e}", output_path.display()))?;
+    // 临时文件与目标同目录，保证 rename 在同一文件系统内、可原子覆盖旧文件
+    let file_name = output_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .ok_or_else(|| format!("输出路径缺少文件名: '{}'", output_path.display()))?;
+    let temp_path = output_path.with_file_name(format!("{file_name}{TEMP_SUFFIX}"));
+
+    // 主体闭包：先写临时文件，成功后再原子替换目标；任何 Err 由外层清理临时文件
+    let result = (|| -> Result<u64, String> {
+        let bytes = write_zip(&temp_path, system_info, logs, config_content)?;
+        std::fs::rename(&temp_path, output_path).map_err(|e| {
+            format!(
+                "原子替换 zip 失败 '{}' → '{}': {e}",
+                temp_path.display(),
+                output_path.display()
+            )
+        })?;
+        Ok(bytes)
+    })();
+
+    if result.is_err() {
+        // 写入或 rename 中途失败：清理可能残留的临时文件，不留盘
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    result
+}
+
+/// 将诊断数据写入指定路径的 .zip 文件。
+///
+/// 参数:
+/// - `zip_path`: 目标 .zip 文件路径（由调用方决定为临时或正式路径）。
+///
+/// 返回:
+/// - 写入的字节数（文件大小）。
+fn write_zip(
+    zip_path: &Path,
+    system_info: &SystemInfo,
+    logs: &str,
+    config_content: &str,
+) -> Result<u64, String> {
+    let file = std::fs::File::create(zip_path)
+        .map_err(|e| format!("无法创建临时 zip 文件 '{}': {e}", zip_path.display()))?;
 
     let mut zip_writer = zip::ZipWriter::new(file);
 
@@ -486,5 +530,134 @@ mod tests {
 
         assert!(result.contains("未配置"));
         assert!(status.contains_key("config"));
+    }
+
+    // ── zip 打包: 原子写入 ──
+
+    fn sample_info() -> SystemInfo {
+        SystemInfo {
+            os: "windows".into(),
+            arch: "x86_64".into(),
+            family: "windows".into(),
+            app_version: "test".into(),
+            schema_version: "1".into(),
+            collected_at: "2026-06-15T12:00:00Z".into(),
+        }
+    }
+
+    /// 在系统临时目录下创建唯一的测试子目录，返回其绝对路径。
+    fn unique_dir(tag: &str) -> PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir =
+            std::env::temp_dir().join(format!("ramaria_diag_{tag}_{}_{stamp}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("创建测试临时目录失败");
+        dir
+    }
+
+    // 用 zip crate 读取并断言归档包含三份诊断文件。
+    fn assert_archive_has_three_files(zip_path: &Path) {
+        let file = std::fs::File::open(zip_path).expect("无法打开生成的 zip");
+        let mut archive = zip::ZipArchive::new(file).expect("生成的文件不是合法 zip");
+        let names: Vec<String> = (0..archive.len())
+            .map(|i| {
+                archive
+                    .by_index(i)
+                    .expect("读取归档条目失败")
+                    .name()
+                    .to_string()
+            })
+            .collect();
+        for expected in ["system.txt", "ramaria.log", "config.toml"] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "归档缺少条目 {expected}，实际: {names:?}"
+            );
+        }
+    }
+
+    // build_zip 生成有效归档：返回大小 > 0、目标存在、同目录无 .part 残留。
+    #[test]
+    fn build_zip_writes_valid_archive_and_cleans_temp() {
+        let dir = unique_dir("valid");
+        let target = dir.join("report.zip");
+        let info = sample_info();
+
+        let bytes =
+            build_zip(&target, &info, "log line 1\n", "[config]\nkey=1").expect("build_zip 应成功");
+
+        assert!(bytes > 0, "返回字节数应为正，得到 {bytes}");
+        assert_eq!(
+            std::fs::metadata(&target).expect("目标 zip 应存在").len(),
+            bytes,
+            "目标文件大小应与返回字节数一致"
+        );
+        assert!(
+            !dir.join("report.zip.part").exists(),
+            "成功后不应残留 .part 临时文件"
+        );
+        assert_archive_has_three_files(&target);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 目标已存在旧内容时，build_zip 用完整 zip 原子替换（不残留半成品或 temp）。
+    #[test]
+    fn build_zip_atomically_replaces_existing_target() {
+        let dir = unique_dir("replace");
+        let target = dir.join("report.zip");
+        // 预写一个旧内容文件（非 zip）
+        std::fs::write(&target, b"old stale content").expect("预写旧内容失败");
+        let info = sample_info();
+
+        let bytes = build_zip(&target, &info, "fresh log\n", "[config]\nfresh=1")
+            .expect("build_zip 应成功");
+
+        assert!(bytes > 0);
+        let size = std::fs::metadata(&target).expect("替换后目标应存在").len();
+        assert!(
+            size != b"old stale content".len() as u64,
+            "目标应被新 zip 替换而非保留旧内容长度"
+        );
+        assert!(
+            !dir.join("report.zip.part").exists(),
+            "替换后不应残留 .part 临时文件"
+        );
+        // 目标是合法 zip 且含三文件，证明旧内容已被完整覆盖
+        assert_archive_has_three_files(&target);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 失败路径（目标为已存在目录 → rename 失败）：返回 Err、无 .part 残留、
+    // 原目标（目录）保持不被半文件污染。锁定的是"失败不留半文件/temp"分支。
+    #[test]
+    fn build_zip_failure_leaves_no_partial_target() {
+        let dir = unique_dir("failure");
+        // 目标位置放一个目录：write 阶段写 .part 成功，rename 到该目录失败
+        let target = dir.join("report.zip");
+        std::fs::create_dir(&target).expect("创建目标目录失败");
+        let info = sample_info();
+
+        let err = build_zip(&target, &info, "log\n", "cfg\n").expect_err("目标为目录时应失败");
+
+        assert!(!err.is_empty(), "错误信息不应为空");
+        assert!(
+            !dir.join("report.zip.part").exists(),
+            "失败后不应残留 .part 临时文件"
+        );
+        assert!(
+            target.is_dir(),
+            "原目标目录应保持不变（未被半成品 zip 覆盖）"
+        );
+        // 目录内不应被写入任何文件
+        let entries: Vec<_> = std::fs::read_dir(&target)
+            .expect("读取目标目录失败")
+            .collect();
+        assert!(entries.is_empty(), "失败不应在目录内留下写入内容");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

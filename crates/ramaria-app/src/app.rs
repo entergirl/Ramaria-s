@@ -57,7 +57,7 @@ pub type SendMessageStream = Pin<Box<dyn Stream<Item = RamariaResult<StreamEvent
 /// let stream = app.send_message("你好", None, None).await?;
 /// ```
 pub struct App {
-    /// 存储后端（23 张表 CRUD）
+    /// 存储后端（27 张表 CRUD）
     pub(crate) storage: Arc<dyn StorageBackend>,
     /// 当前 LLM provider（Mutex 包裹，支持配置热更新）
     pub(crate) llm: Mutex<Arc<dyn LlmProvider>>,

@@ -16,6 +16,7 @@ pub mod parser;
 use std::path::Path;
 
 use ramaria_core::error::RamariaResult;
+use ramaria_core::privacy::mask_id;
 use ramaria_core::types::PersonaKind;
 use sqlx::SqlitePool;
 
@@ -135,7 +136,7 @@ pub fn build_persona_uid(
         } else {
             format!("{prefix}{provided}")
         };
-        tracing::debug!(uid = %uid_str, "使用用户显式指定的 persona UID");
+        tracing::debug!(uid = %mask_id(&uid_str), "使用用户显式指定的 persona UID");
         return uid_str;
     }
 
@@ -144,20 +145,20 @@ pub fn build_persona_uid(
         && !qq.is_empty()
     {
         let uid_str = format!("{prefix}{qq}");
-        tracing::debug!(uid = %uid_str, "使用 QQ 号生成 persona UID");
+        tracing::debug!(uid = %mask_id(&uid_str), "使用 QQ 号生成 persona UID");
         return uid_str;
     }
 
     // 级别 3: QQ 内部 UID（如 `user-u_example_uid`）
     if !uid.is_empty() {
         let uid_str = format!("{prefix}{uid}");
-        tracing::debug!(uid = %uid_str, "使用 QQ UID 生成 persona UID");
+        tracing::debug!(uid = %mask_id(&uid_str), "使用 QQ UID 生成 persona UID");
         return uid_str;
     }
 
     // 级别 4: 自动递增序号
     let uid_str = format!("{prefix}{fallback_seq:04}");
-    tracing::debug!(uid = %uid_str, seq = fallback_seq, "使用自动递增序号生成 persona UID");
+    tracing::debug!(uid = %mask_id(&uid_str), seq = fallback_seq, "使用自动递增序号生成 persona UID");
     uid_str
 }
 
@@ -191,8 +192,8 @@ pub async fn ensure_qq_persona(
     let existing = ramaria_storage::repo::personas::get_by_uid(pool, persona_uid).await?;
     if let Some(p) = existing {
         tracing::info!(
-            persona_uid = %p.uid,
-            persona_name = %p.name,
+            persona_uid = %mask_id(&p.uid),
+            persona_name = %mask_id(&p.name),
             "使用已有 persona（按 uid 匹配）"
         );
         return Ok(p.uid);
@@ -207,9 +208,9 @@ pub async fn ensure_qq_persona(
                 .await?;
         if let Some(p) = by_ref {
             tracing::info!(
-                existing_uid = %p.uid,
-                requested_uid = %persona_uid,
-                ref_id = %rid,
+                existing_uid = %mask_id(&p.uid),
+                requested_uid = %mask_id(persona_uid),
+                ref_id = %mask_id(rid),
                 "复用已有 persona（按 ref_id 匹配，uid 不同）"
             );
             return Ok(p.uid);
@@ -241,8 +242,8 @@ pub async fn ensure_qq_persona(
 
     let id = ramaria_storage::repo::personas::create(pool, &persona).await?;
     tracing::info!(
-        persona_uid = %persona.uid,
-        persona_name = %persona.name,
+        persona_uid = %mask_id(&persona.uid),
+        persona_name = %mask_id(&persona.name),
         persona_id = id,
         "已创建 QQ 导入 persona"
     );

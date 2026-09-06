@@ -1,7 +1,7 @@
 //! crates/ramaria-storage/src/lib.rs - Ramaria SQLite 存储层
 //!
 //! 设计特点:
-//! - 封装 SqlitePool，实现 `StoreCrud` + `StoreInfrastructure`（= `StorageBackend`，覆盖 24 张表）
+//! - 封装 SqlitePool，实现 `StoreCrud` + `StoreInfrastructure`（= `StorageBackend`，覆盖 27 张表）
 //! - Repository 模式：每个子模块负责一类实体的 SQL 操作与行映射
 //! - 所有可恢复错误统一转换为 RamariaError::Storage
 //! - 手动行映射避免 sqlx derive 侵入 core 层，保持零 I/O 约束
@@ -85,6 +85,15 @@ impl StoreCrud for SqliteStorage {
     }
     async fn list_messages_by_persona(&self, persona_uid: &str) -> RamariaResult<Vec<Message>> {
         repo::messages::list_by_persona(&self.pool, persona_uid).await
+    }
+    /// 覆写为高效 SQL 分页（`ORDER BY created_at DESC LIMIT ? OFFSET ?`）。
+    async fn list_messages_by_persona_paginated(
+        &self,
+        persona_uid: &str,
+        limit: i64,
+        offset: i64,
+    ) -> RamariaResult<Vec<Message>> {
+        repo::messages::list_by_persona_paginated(&self.pool, persona_uid, limit, offset).await
     }
     async fn get_last_message_time(&self, session_id: Uuid) -> RamariaResult<Option<i64>> {
         repo::messages::get_last_message_time(&self.pool, session_id).await
@@ -261,14 +270,8 @@ impl StoreCrud for SqliteStorage {
     ) -> RamariaResult<i64> {
         repo::facts::save_with_version(&self.pool, old, f).await
     }
-    async fn promote_fact_to_active(&self, id: i64) -> RamariaResult<()> {
-        repo::facts::promote_to_active(&self.pool, id).await
-    }
     async fn list_fact_versions(&self, seed_id: i64) -> RamariaResult<Vec<PersonaFact>> {
         repo::facts::list_versions(&self.pool, seed_id).await
-    }
-    async fn supersede_fact(&self, id: i64, at: i64) -> RamariaResult<()> {
-        repo::facts::supersede(&self.pool, id, at).await
     }
 
     // =========================================================
@@ -279,9 +282,6 @@ impl StoreCrud for SqliteStorage {
     }
     async fn get_style_stats(&self, persona_uid: &str) -> RamariaResult<Option<PersonaStyleStats>> {
         repo::style_stats::get(&self.pool, persona_uid).await
-    }
-    async fn list_style_stats(&self) -> RamariaResult<Vec<PersonaStyleStats>> {
-        repo::style_stats::list_all(&self.pool).await
     }
 
     // =========================================================
@@ -423,50 +423,6 @@ impl StoreInfrastructure for SqliteStorage {
         )
         .await
     }
-    async fn find_refs_by_keyword(
-        &self,
-        keyword_id: &str,
-    ) -> RamariaResult<Vec<(i64, String, String, String, String, f64, i64)>> {
-        let rows = repo::keyword::find_refs_by_keyword(&self.pool, keyword_id).await?;
-        Ok(rows
-            .into_iter()
-            .map(|r| {
-                (
-                    r.id,
-                    r.keyword_id,
-                    r.doc_type,
-                    r.doc_id,
-                    r.persona_uid,
-                    r.weight,
-                    r.created_at,
-                )
-            })
-            .collect())
-    }
-    async fn find_refs_by_doc(
-        &self,
-        doc_type: &str,
-        doc_id: &str,
-    ) -> RamariaResult<Vec<(i64, String, String, String, String, f64, i64)>> {
-        let rows = repo::keyword::find_refs_by_doc(&self.pool, doc_type, doc_id).await?;
-        Ok(rows
-            .into_iter()
-            .map(|r| {
-                (
-                    r.id,
-                    r.keyword_id,
-                    r.doc_type,
-                    r.doc_id,
-                    r.persona_uid,
-                    r.weight,
-                    r.created_at,
-                )
-            })
-            .collect())
-    }
-    async fn delete_refs_by_doc(&self, doc_type: &str, doc_id: &str) -> RamariaResult<u64> {
-        repo::keyword::delete_refs_by_doc(&self.pool, doc_type, doc_id).await
-    }
 
     // =========================================================
     // Privacy Consent（隐私确认）
@@ -528,34 +484,6 @@ impl StoreInfrastructure for SqliteStorage {
     }
 
     // =========================================================
-    // Conflict Queue（冲突队列）
-    // =========================================================
-    async fn create_conflict(
-        &self,
-        field: &str,
-        conflict_type: &str,
-        old_content: Option<&str>,
-        new_content: Option<&str>,
-        desc: Option<&str>,
-    ) -> RamariaResult<i64> {
-        repo::conflict_queue::create(
-            &self.pool,
-            field,
-            conflict_type,
-            old_content,
-            new_content,
-            desc,
-        )
-        .await
-    }
-    async fn list_pending_conflicts(&self) -> RamariaResult<Vec<(i64, String, String, String)>> {
-        repo::conflict_queue::list_pending(&self.pool).await
-    }
-    async fn resolve_conflict(&self, id: i64) -> RamariaResult<()> {
-        repo::conflict_queue::resolve(&self.pool, id).await
-    }
-
-    // =========================================================
     // Settings（全局运行配置）
     // =========================================================
     async fn get_setting(&self, key: &str) -> RamariaResult<Option<String>> {
@@ -566,48 +494,6 @@ impl StoreInfrastructure for SqliteStorage {
     }
     async fn list_settings(&self) -> RamariaResult<Vec<(String, String)>> {
         repo::settings::list_all(&self.pool).await
-    }
-
-    // =========================================================
-    // Graph（知识图谱）
-    // =========================================================
-    async fn insert_graph_node(
-        &self,
-        entity_name: &str,
-        entity_type: &str,
-        source_l1_id: Option<Uuid>,
-    ) -> RamariaResult<i64> {
-        repo::graph::insert_node(&self.pool, entity_name, entity_type, source_l1_id).await
-    }
-    async fn get_graph_node(
-        &self,
-        entity_name: &str,
-    ) -> RamariaResult<Option<(i64, String, String)>> {
-        repo::graph::get_node(&self.pool, entity_name).await
-    }
-    async fn insert_graph_edge(
-        &self,
-        source_id: i64,
-        target_id: i64,
-        relation_type: &str,
-        detail: Option<&str>,
-        source_l1_id: Option<Uuid>,
-    ) -> RamariaResult<i64> {
-        repo::graph::insert_edge(
-            &self.pool,
-            source_id,
-            target_id,
-            relation_type,
-            detail,
-            source_l1_id,
-        )
-        .await
-    }
-    async fn list_graph_edges(
-        &self,
-        source_id: i64,
-    ) -> RamariaResult<Vec<(i64, i64, i64, String)>> {
-        repo::graph::list_edges(&self.pool, source_id).await
     }
 
     // =========================================================
@@ -1117,7 +1003,7 @@ mod tests {
         assert_eq!(active[0].id, fresh_id);
     }
 
-    /// list_active_facts_by_persona：跨字段仅返回 active 事实。
+    /// list_active_facts_by_persona：跨字段仅返回 active 事实（superseded 旧版本被排除）。
     #[tokio::test]
     async fn fact_list_active_by_persona_excludes_superseded() {
         use ramaria_core::types::FactStatus;
@@ -1131,77 +1017,45 @@ mod tests {
         );
         storage.create_persona(&p).await.unwrap();
 
-        let f = PersonaFact::new(
+        // 先写入旧事实
+        let mut old = PersonaFact::new(
             "user-0003".into(),
             ramaria_core::types::ProfileField::Interests,
             "喜欢摄影".into(),
             FactSource::Manual,
         );
-        let id = storage.save_fact(&f).await.unwrap();
+        let old_id = storage.save_fact(&old).await.unwrap();
+        old.id = old_id;
 
-        // 置为 superseded
-        storage
-            .supersede_fact(id, ramaria_core::types::now_ms())
-            .await
-            .unwrap();
+        // 覆盖写：旧事实自动置 superseded，新事实 active（版本链推进）
+        let fresh = PersonaFact::new(
+            "user-0003".into(),
+            ramaria_core::types::ProfileField::Interests,
+            "喜欢旅行".into(),
+            FactSource::Manual,
+        );
+        let fresh_id = storage.save_fact_with_version(&old, &fresh).await.unwrap();
+        assert!(fresh_id > old_id);
 
+        let old_now = storage.get_fact_by_id(old_id).await.unwrap().unwrap();
+        assert_eq!(old_now.status, FactStatus::Superseded);
+
+        // active 查询只含新事实（不含 superseded 旧版本）
         let active = storage
             .list_active_facts_by_persona("user-0003")
             .await
             .unwrap();
-        assert!(active.is_empty(), "superseded 事实不应出现在 active 查询中");
+        assert_eq!(active.len(), 1, "superseded 事实不应出现在 active 查询中");
+        assert_eq!(active[0].id, fresh_id);
 
-        // 全部查询（CLI/版本链统计）仍包含 superseded
+        // 全部查询（CLI/版本链统计）仍包含 superseded 旧版本
         let all = storage
             .list_all_facts_by_persona("user-0003")
             .await
             .unwrap();
-        assert_eq!(all.len(), 1);
-        assert_eq!(all[0].status, FactStatus::Superseded);
-    }
-
-    /// candidate → active 提升（互证通过后）。
-    #[tokio::test]
-    async fn fact_promote_candidate_to_active() {
-        use ramaria_core::types::FactStatus;
-        let storage = setup().await;
-        let p = Persona::new(
-            "user-0004".into(),
-            "用户四".into(),
-            PersonaKind::User,
-            1,
-            "local".into(),
-        );
-        storage.create_persona(&p).await.unwrap();
-
-        // 主观隐含事实：status=candidate, tier=stable, confidence=0.5
-        let mut f = PersonaFact::new(
-            "user-0004".into(),
-            ramaria_core::types::ProfileField::Interests,
-            "偏好事实：不喜欢加班".into(),
-            FactSource::Event,
-        );
-        f.status = FactStatus::Candidate;
-        f.confidence = 0.5;
-        let id = storage.save_fact(&f).await.unwrap();
-
-        // 未提升前 active 查询不含 candidate
-        let active = storage
-            .list_active_facts_by_persona("user-0004")
-            .await
-            .unwrap();
-        assert!(active.is_empty());
-
-        // 互证通过 → 提升 active
-        storage.promote_fact_to_active(id).await.unwrap();
-        let got = storage.get_fact_by_id(id).await.unwrap().unwrap();
-        assert_eq!(got.status, FactStatus::Active);
-
-        let active = storage
-            .list_active_facts_by_persona("user-0004")
-            .await
-            .unwrap();
-        assert_eq!(active.len(), 1);
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().any(|f| f.status == FactStatus::Superseded));
+        assert!(all.iter().any(|f| f.status == FactStatus::Active));
     }
 
     /// get_fact_by_id 对不存在 id 返回 None（CLI show 缺省兜底）。
@@ -1475,31 +1329,6 @@ mod tests {
         assert_eq!(val.as_deref(), Some("full"));
         let all = storage.list_settings().await.unwrap();
         assert!(!all.is_empty());
-    }
-
-    #[tokio::test]
-    async fn graph_node_and_edge() {
-        let storage = setup().await;
-        let nid = storage
-            .insert_graph_node("Python", "module", None)
-            .await
-            .unwrap();
-        assert!(nid > 0);
-
-        let nid2 = storage
-            .insert_graph_node("Rust", "module", None)
-            .await
-            .unwrap();
-
-        let eid = storage
-            .insert_graph_edge(nid, nid2, "RelatedTo", None, None)
-            .await
-            .unwrap();
-        assert!(eid > 0);
-
-        let edges = storage.list_graph_edges(nid).await.unwrap();
-        assert_eq!(edges.len(), 1);
-        assert_eq!(edges[0].2, nid2);
     }
 
     // =========================================================
@@ -2173,6 +2002,60 @@ mod tests {
         // 枚举出的 session 集合覆盖该 persona 全部会话
         let sessions: std::collections::HashSet<_> = all.iter().map(|m| m.session_id).collect();
         assert!(sessions.contains(&session.id));
+    }
+
+    // trait 层 list_messages_by_persona_paginated 分页正确性（storage 覆写为高效 SQL）。
+    #[tokio::test]
+    async fn message_list_by_persona_paginated_works() {
+        let storage = setup().await;
+        let p = Persona::new(
+            "char-pg".into(),
+            "分页角色".into(),
+            PersonaKind::Char,
+            1,
+            "local".into(),
+        );
+        storage.create_persona(&p).await.unwrap();
+        let session = storage.create_session(Some("char-pg")).await.unwrap();
+
+        // 写入 7 条，created_at 从 base 递增，超过单页大小(3)。
+        let total = 7usize;
+        let base = 1_700_000_000_000i64;
+        for i in 0..total {
+            let msg = Message::new(
+                session.id,
+                MessageRole::User,
+                format!("分页消息{i}"),
+                MessageSource::Local,
+            )
+            .with_persona_uid(Some("char-pg".to_string()));
+            let mut m = msg;
+            m.created_at = base + i as i64;
+            storage.save_message(&m).await.unwrap();
+        }
+
+        // 第 1 页（最新 3 条，created_at DESC）。
+        let page1 = storage
+            .list_messages_by_persona_paginated("char-pg", 3, 0)
+            .await
+            .unwrap();
+        let p1_ts: Vec<i64> = page1.iter().map(|m| m.created_at).collect();
+        assert_eq!(p1_ts, (base + 4..=base + 6).rev().collect::<Vec<_>>());
+
+        // 末页（offset 6 → 余 1 条，页不满）。
+        let page3 = storage
+            .list_messages_by_persona_paginated("char-pg", 3, 6)
+            .await
+            .unwrap();
+        let p3_ts: Vec<i64> = page3.iter().map(|m| m.created_at).collect();
+        assert_eq!(p3_ts, vec![base]);
+
+        // offset 越界 → 空。
+        let beyond = storage
+            .list_messages_by_persona_paginated("char-pg", 3, 20)
+            .await
+            .unwrap();
+        assert!(beyond.is_empty(), "offset 越界应返回空页");
     }
 
     #[tokio::test]

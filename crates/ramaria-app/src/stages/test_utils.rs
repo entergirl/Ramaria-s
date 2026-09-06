@@ -621,25 +621,6 @@ impl StoreInfrastructure for MockStorage {
         Ok(Vec::new())
     }
 
-    async fn create_conflict(
-        &self,
-        _f: &str,
-        _t: &str,
-        _o: Option<&str>,
-        _n: Option<&str>,
-        _d: Option<&str>,
-    ) -> RamariaResult<i64> {
-        Ok(1)
-    }
-
-    async fn list_pending_conflicts(&self) -> RamariaResult<Vec<(i64, String, String, String)>> {
-        Ok(Vec::new())
-    }
-
-    async fn resolve_conflict(&self, _id: i64) -> RamariaResult<()> {
-        Ok(())
-    }
-
     async fn get_setting(&self, key: &str) -> RamariaResult<Option<String>> {
         Ok(self.settings.lock().unwrap().get(key).cloned())
     }
@@ -662,29 +643,6 @@ impl StoreInfrastructure for MockStorage {
             .collect())
     }
 
-    async fn insert_graph_node(&self, _n: &str, _t: &str, _l: Option<Uuid>) -> RamariaResult<i64> {
-        Ok(1)
-    }
-
-    async fn get_graph_node(&self, _n: &str) -> RamariaResult<Option<(i64, String, String)>> {
-        Ok(None)
-    }
-
-    async fn insert_graph_edge(
-        &self,
-        _s: i64,
-        _t: i64,
-        _r: &str,
-        _d: Option<&str>,
-        _l: Option<Uuid>,
-    ) -> RamariaResult<i64> {
-        Ok(1)
-    }
-
-    async fn list_graph_edges(&self, _s: i64) -> RamariaResult<Vec<(i64, i64, i64, String)>> {
-        Ok(Vec::new())
-    }
-
     async fn insert_keyword_ref(
         &self,
         _keyword_id: &str,
@@ -694,21 +652,6 @@ impl StoreInfrastructure for MockStorage {
         _weight: f64,
     ) -> RamariaResult<()> {
         Ok(())
-    }
-
-    async fn find_refs_by_keyword(
-        &self,
-        _keyword_id: &str,
-    ) -> RamariaResult<Vec<(i64, String, String, String, String, f64, i64)>> {
-        Ok(vec![])
-    }
-
-    async fn find_refs_by_doc(
-        &self,
-        _doc_type: &str,
-        _doc_id: &str,
-    ) -> RamariaResult<Vec<(i64, String, String, String, String, f64, i64)>> {
-        Ok(vec![])
     }
 
     // -- Feedback Log（v1.7 H2：S2/S3 弱反馈落库） --

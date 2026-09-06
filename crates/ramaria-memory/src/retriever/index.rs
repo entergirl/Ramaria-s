@@ -102,7 +102,8 @@ impl Retriever {
     ///
     /// 向量通道说明（接线）:
     /// - 本方法不生成向量（同步路径无 embedding provider），仅 BM25 + 内存文档；
-    /// - 向量由调用方在 embedding 可用时通过 [`index_l2_with_vector`] 写入。
+    /// - L2 的向量索引写入由 app 层在 embedding 可用时经向量索引实例直接完成
+    ///   （`vector_mut().add(...)`，label 与 `parse_doc_label` 匹配的 `L2:{id}`）。
     pub fn index_l2(&mut self, doc: &L2DocView) {
         // BM25 索引
         if self.config.enable_bm25 {
@@ -124,25 +125,6 @@ impl Retriever {
 
         // LRU 驱逐
         self.evict_if_needed();
-    }
-
-    /// 将 L2 事件连同向量加入索引（L2 embedding 真实入向量索引）。
-    ///
-    /// 参数:
-    /// - `doc`: L2 事件视图。
-    /// - `vector`: 事件向量（None = 无 embedding，仅入 BM25/内存）。
-    ///
-    /// 说明:
-    /// - label 统一 `make_vector_label("l2", id)`（大写 `L2:`，与 `parse_doc_label` 匹配）。
-    pub fn index_l2_with_vector(&mut self, doc: &L2DocView, vector: Option<Vec<f32>>) {
-        self.index_l2(doc);
-        if let Some(v) = vector {
-            self.vector_index.add(
-                &make_vector_label("l2", &doc.id.to_string()),
-                v,
-                doc.created_at,
-            );
-        }
     }
 
     /// 从整个检索器中移除一个 L1 文档（BM25 + HashMap）。

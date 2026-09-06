@@ -243,17 +243,6 @@ pub async fn save_with_version(
     Ok(new_id)
 }
 
-/// 升级 candidate → active（互证通过后提升）。
-pub async fn promote_to_active(pool: &SqlitePool, id: i64) -> RamariaResult<()> {
-    sqlx::query("UPDATE persona_facts SET status = 'active', updated_at = ? WHERE id = ?")
-        .bind(ramaria_core::types::now_ms())
-        .bind(id)
-        .execute(pool)
-        .await
-        .storage_err("升级事实状态失败")?;
-    Ok(())
-}
-
 /// 查询某事实的完整版本链（含自身，按 created_at 升序）。
 ///
 /// 说明:
@@ -286,17 +275,6 @@ pub async fn list_versions(pool: &SqlitePool, seed_id: i64) -> RamariaResult<Vec
     // 链头（最早版本）在前，当前版本在后
     chain.reverse();
     Ok(chain)
-}
-
-/// 将单条事实置 superseded（独立覆盖写；不开启事务，供上层仲裁原子化调用）。
-pub async fn supersede(pool: &SqlitePool, id: i64, at: i64) -> RamariaResult<()> {
-    sqlx::query("UPDATE persona_facts SET status = 'superseded', updated_at = ? WHERE id = ?")
-        .bind(at)
-        .bind(id)
-        .execute(pool)
-        .await
-        .storage_err("覆盖事实失败")?;
-    Ok(())
 }
 
 /// 按 persona_uid 一次性统计所有 ProfileField 的 fact 数量。

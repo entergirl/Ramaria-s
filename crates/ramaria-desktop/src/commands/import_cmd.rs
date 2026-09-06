@@ -12,6 +12,7 @@
 
 use crate::DesktopState;
 use crate::events::{EVENT_IMPORT_PROGRESS, ImportProgressPayload};
+use ramaria_core::privacy::mask_id;
 use ramaria_importer::ImportSource;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
@@ -236,7 +237,15 @@ pub async fn detect_qq_format(
 /// 返回:
 /// - `ImportResult` JSON 对象，包含报告摘要、统计信息和双画像标识。
 #[tauri::command]
-#[tracing::instrument(skip(state, app_handle))]
+#[tracing::instrument(skip(
+    state,
+    app_handle,
+    file_path,
+    persona_name,
+    self_persona_uid,
+    other_persona_name,
+    other_persona_uid
+))]
 #[allow(clippy::too_many_arguments)]
 pub async fn import_qq_chat(
     state: State<'_, DesktopState>,
@@ -360,12 +369,12 @@ pub async fn import_qq_chat(
             )
             .await
             .map_err(|e| {
-                tracing::error!(error = %e, self_uid = %self_uid, self_name = %self_name, "创建/查找导出者 persona 失败");
+                tracing::error!(error = %e, self_uid = %mask_id(&self_uid), self_name = %mask_id(&self_name), "创建/查找导出者 persona 失败");
                 format!("创建/查找导出者 persona 失败: {}", e)
             })?;
         tracing::info!(
-            persona_uid = %resolved,
-            persona_name = %self_name,
+            persona_uid = %mask_id(&resolved),
+            persona_name = %mask_id(&self_name),
             "导出者 Persona 已准备"
         );
         Some(resolved)
@@ -396,9 +405,9 @@ pub async fn import_qq_chat(
     );
 
     tracing::debug!(
-        other_uid = %other_default_uid,
-        other_name = %other_name,
-        other_ref_id = ?other_ref_id,
+        other_uid = %mask_id(&other_default_uid),
+        other_name = %mask_id(&other_name),
+        other_ref_id = ?other_ref_id.map(mask_id),
         "准备创建对方 persona"
     );
 
@@ -413,12 +422,12 @@ pub async fn import_qq_chat(
             )
             .await
             .map_err(|e| {
-                tracing::error!(error = %e, other_uid = %other_default_uid, other_name = %other_name, "创建/查找对方 persona 失败");
+                tracing::error!(error = %e, other_uid = %mask_id(&other_default_uid), other_name = %mask_id(&other_name), "创建/查找对方 persona 失败");
                 format!("创建/查找对方 persona 失败: {}", e)
             })?;
         tracing::info!(
-            persona_uid = %resolved,
-            persona_name = %other_name,
+            persona_uid = %mask_id(&resolved),
+            persona_name = %mask_id(&other_name),
             "对方 Persona 已准备"
         );
         Some(resolved)
@@ -430,9 +439,9 @@ pub async fn import_qq_chat(
     // Step 4: 执行导入（按 side 过滤消息；单侧模式下跳过侧 persona 为 None）
     tracing::debug!(
         sessions_count = sessions.len(),
-        self_persona = ?self_persona_uid_resolved,
-        other_persona = ?other_persona_uid_resolved,
-        self_id = %report.self_id,
+        self_persona = ?self_persona_uid_resolved.as_deref().map(mask_id),
+        other_persona = ?other_persona_uid_resolved.as_deref().map(mask_id),
+        self_id = %mask_id(&report.self_id),
         side = ?import_side,
         "准备执行快速导入"
     );
@@ -526,11 +535,11 @@ pub async fn import_qq_chat(
                 {
                     Ok(Some(_)) => l1_success += 1,
                     Ok(None) => {
-                        tracing::debug!(%sid, self_uid = %uid, "self: session 无消息，跳过 L1");
+                        tracing::debug!(%sid, self_uid = %mask_id(uid), "self: session 无消息，跳过 L1");
                     }
                     Err(e) => {
                         l1_failed += 1;
-                        tracing::warn!(%sid, self_uid = %uid, error = %e, "L1 摘要生成失败 (self, 非致命)");
+                        tracing::warn!(%sid, self_uid = %mask_id(uid), error = %e, "L1 摘要生成失败 (self, 非致命)");
                     }
                 }
                 l1_processed += 1;
@@ -549,11 +558,11 @@ pub async fn import_qq_chat(
                 {
                     Ok(Some(_)) => l1_success += 1,
                     Ok(None) => {
-                        tracing::debug!(%sid, other_uid = %uid, "other: session 无消息，跳过 L1");
+                        tracing::debug!(%sid, other_uid = %mask_id(uid), "other: session 无消息，跳过 L1");
                     }
                     Err(e) => {
                         l1_failed += 1;
-                        tracing::warn!(%sid, other_uid = %uid, error = %e, "L1 摘要生成失败 (other, 非致命)");
+                        tracing::warn!(%sid, other_uid = %mask_id(uid), error = %e, "L1 摘要生成失败 (other, 非致命)");
                     }
                 }
                 l1_processed += 1;
@@ -591,8 +600,8 @@ pub async fn import_qq_chat(
             l1_failed,
             l1_processed,
             total_sessions = total_sids,
-            self_uid = ?self_uid,
-            other_uid = ?other_uid,
+            self_uid = ?self_uid.as_deref().map(mask_id),
+            other_uid = ?other_uid.as_deref().map(mask_id),
             "L1 摘要全部生成完成（双方 persona 各有独立副本）"
         );
 
@@ -732,10 +741,101 @@ pub async fn import_qq_chat(
         sessions = sessions_written,
         messages = messages_written,
         mode = %result.mode,
-        self_persona = ?result.persona_uid,
-        other_persona = ?result.other_persona_uid,
+        self_persona = ?result.persona_uid.as_deref().map(mask_id),
+        other_persona = ?result.other_persona_uid.as_deref().map(mask_id),
         "QQ 聊天记录导入完成"
     );
 
     Ok(result)
+}
+
+// =========================================================
+// 隐私回归断言（日志脱敏 grep 审计，仅测试构建参与）
+// =========================================================
+
+#[cfg(test)]
+mod privacy_regression_tests {
+    //! 断言本文件的日志不直接落 QQ 号/昵称明文。
+    //!
+    //! 说明:
+    //! - 以源码文本静态断言，拦截"把 persona_uid/persona_name/self_id 等原值
+    //!   直接塞回 tracing 字段"的回归；不误伤已包 `mask_id` 的脱敏写法。
+    //! - 通过 `env!("CARGO_MANIFEST_DIR")` 定位本文件，不依赖测试运行时目录。
+    //! - 仅在 `cfg(test)` 参与，不影响生产构建。
+
+    fn self_source() -> String {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands/import_cmd.rs");
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("无法读取本文件用于隐私断言: {path:?} 错误: {e}"))
+    }
+
+    /// 取 `s` 在 `start` 起至多 `max_chars` 个字符的子串（保证不切开多字节 UTF-8）。
+    fn take_chars(s: &str, start: usize, max_chars: usize) -> String {
+        s[start..].chars().take(max_chars).collect()
+    }
+
+    /// 禁止出现的"字段直接 = 裸原值"日志形态（含其后的分隔逗号），
+    /// 若被重新引入即泄露 QQ 号/昵称明文。
+    ///
+    /// 字段名与值的 sigil/名称分开存储，运行时拼接，避免字面量出现在本文件
+    /// 源码中而干扰对"目标文件是否含原值日志"的静态判定。
+    const FORBIDDEN_FIELD_VALUE_PAIRS: &[(&str, char, &str)] = &[
+        ("persona_uid", '%', "resolved"),
+        ("persona_uid", '%', "self_uid"),
+        ("persona_uid", '%', "other_uid"),
+        ("persona_name", '%', "self_name"),
+        ("persona_name", '%', "other_name"),
+        ("self_uid", '%', "self_uid"),
+        ("other_uid", '%', "other_uid"),
+        ("other_uid", '%', "other_default_uid"),
+        ("self_name", '%', "self_name"),
+        ("other_name", '%', "other_name"),
+        ("self_id", '%', "report.self_id"),
+        ("other_ref_id", '?', "other_ref_id"),
+        ("self_uid", '%', "uid"),
+        ("other_uid", '%', "uid"),
+        ("self_persona", '?', "self_persona_uid_resolved"),
+        ("other_persona", '?', "other_persona_uid_resolved"),
+    ];
+
+    /// import_qq_chat 入口 span 必须 skip 的人参（否则 instrument 在 info 级
+    /// 自动记录 nickname / 显式 QQ UID 参数）。
+    const MUST_SKIP_ARGS: &[&str] = &[
+        "persona_name",
+        "self_persona_uid",
+        "other_persona_name",
+        "other_persona_uid",
+    ];
+
+    #[test]
+    fn no_raw_personal_field_in_logs() {
+        let src = self_source();
+        for &(field, sigil, value) in FORBIDDEN_FIELD_VALUE_PAIRS {
+            let forbidden = format!("{field} = {sigil}{value},");
+            assert!(
+                !src.contains(&forbidden),
+                "检测到日志把个人标识原值直接写入 tracing 字段（禁止形态 {forbidden:?}）——QQ 号/昵称不得明文落日志，须经 mask_id"
+            );
+        }
+    }
+
+    #[test]
+    fn instrument_skips_personal_args() {
+        let src = self_source();
+        // import_qq_chat 是文件中唯一采用多行 skip 列表的入口 span；
+        // 以其唯一前缀定位其 skip 块，确证敏感参数被跳过（否则 instrument
+        // 会在 info 级自动记录昵称/显式 QQ UID）。
+        let skip_start = src
+            .find("instrument(skip(\n    state,")
+            .unwrap_or_else(|| panic!("未找到 import_qq_chat 的 instrument skip 块"));
+        // 按字符取 skip 块文本（前 ~240 字符已覆盖整个 skip(...) 列表），避免字节切片切多字节
+        let skip_block = take_chars(&src, skip_start, 240);
+        for arg in MUST_SKIP_ARGS {
+            assert!(
+                skip_block.contains(arg),
+                "instrument skip 块必须包含 {arg}，否则该参数会在 info 级被自动记录（泄露昵称/QQ UID）"
+            );
+        }
+    }
 }

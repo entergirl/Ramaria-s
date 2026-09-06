@@ -16,6 +16,7 @@ use std::fs;
 use std::path::Path;
 
 use ramaria_core::error::{RamariaError, RamariaResult};
+use ramaria_core::privacy::mask_id;
 use sha2::{Digest, Sha256};
 
 use crate::error;
@@ -1052,10 +1053,10 @@ pub fn parse_qq_export(
 
     tracing::info!(
         file = %report.file_path,
-        self_name = %report.self_name,
-        chat_name = %report.chat_name,
+        self_name = %mask_id(&report.self_name),
+        chat_name = %mask_id(&report.chat_name),
         chat_type = %report.chat_type,
-        peer_uid = %report.other_uid,
+        peer_uid = %mask_id(&report.other_uid),
         total_raw = report.total_raw,
         "开始解析 QQ JSON 聊天记录 (v6.x)"
     );

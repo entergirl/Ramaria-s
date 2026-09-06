@@ -311,28 +311,6 @@ CREATE TABLE bm25_index (
     PRIMARY KEY (doc_id, layer)
 );
 
-CREATE TABLE graph_nodes (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    entity_name  TEXT NOT NULL UNIQUE,
-    entity_type  TEXT NOT NULL,
-    source_l1_id TEXT REFERENCES memory_l1(id),
-    created_at   INTEGER NOT NULL,
-    use_count    INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE TABLE graph_edges (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    source_node_id INTEGER NOT NULL REFERENCES graph_nodes(id),
-    target_node_id INTEGER NOT NULL REFERENCES graph_nodes(id),
-    relation_type  TEXT NOT NULL,
-    relation_detail TEXT,
-    source_l1_id   TEXT REFERENCES memory_l1(id),
-    created_at     INTEGER NOT NULL
-);
-CREATE INDEX idx_graph_edges_source ON graph_edges(source_node_id);
-CREATE INDEX idx_graph_edges_target ON graph_edges(target_node_id);
-CREATE INDEX idx_graph_edges_l1 ON graph_edges(source_l1_id);
-
 -- =========================================================
 -- 基础设施层 — 隐私 / 后端配置 / 后台任务
 -- =========================================================
@@ -365,22 +343,8 @@ CREATE TABLE background_jobs (
 );
 
 -- =========================================================
--- 基础设施层 — 冲突队列 / 推送 / 设置
+-- 基础设施层 — 推送 / 设置
 -- =========================================================
-
-CREATE TABLE conflict_queue (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    source_l1_id  TEXT REFERENCES memory_l1(id),
-    field         TEXT NOT NULL,
-    old_content   TEXT,
-    new_content   TEXT,
-    conflict_desc TEXT,
-    conflict_type TEXT NOT NULL,
-    status        TEXT NOT NULL DEFAULT 'pending',
-    created_at    INTEGER NOT NULL,
-    resolved_at   INTEGER
-);
-CREATE INDEX idx_conflict_status ON conflict_queue(status);
 
 CREATE TABLE pending_push (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,

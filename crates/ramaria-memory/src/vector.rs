@@ -382,17 +382,6 @@ impl<I: VectorIndex> CachedVectorIndex<I> {
         }
     }
 
-    /// 获取底层索引的不可变引用。
-    pub fn inner(&self) -> &I {
-        &self.inner
-    }
-
-    /// 获取底层索引的可变引用（会清空缓存）。
-    pub fn inner_mut(&mut self) -> &mut I {
-        self.cache.lock().unwrap().clear();
-        &mut self.inner
-    }
-
     /// 手动清空查询缓存。
     pub fn invalidate_cache(&self) {
         self.cache.lock().unwrap().clear();

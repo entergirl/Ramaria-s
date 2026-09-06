@@ -521,14 +521,6 @@ impl StoreCrud for MockStorage {
         Ok(self.add_fact_with_version(old, f.clone()))
     }
 
-    async fn promote_fact_to_active(&self, id: i64) -> RamariaResult<()> {
-        let mut facts = self.facts.lock().unwrap();
-        if let Some(f) = facts.iter_mut().find(|f| f.id == id) {
-            f.status = ramaria_core::types::FactStatus::Active;
-        }
-        Ok(())
-    }
-
     async fn list_fact_versions(&self, seed_id: i64) -> RamariaResult<Vec<PersonaFact>> {
         let facts = self.facts.lock().unwrap();
         let seed = match facts.iter().find(|f| f.id == seed_id) {
@@ -554,14 +546,6 @@ impl StoreCrud for MockStorage {
         }
         chain.reverse();
         Ok(chain)
-    }
-
-    async fn supersede_fact(&self, id: i64, _at: i64) -> RamariaResult<()> {
-        let mut facts = self.facts.lock().unwrap();
-        if let Some(f) = facts.iter_mut().find(|f| f.id == id) {
-            f.status = ramaria_core::types::FactStatus::Superseded;
-        }
-        Ok(())
     }
 
     async fn save_trait(&self, _t: &PersonalityTrait) -> RamariaResult<i64> {
@@ -708,25 +692,6 @@ impl StoreInfrastructure for MockStorage {
         Ok(Vec::new())
     }
 
-    async fn create_conflict(
-        &self,
-        _field: &str,
-        _conflict_type: &str,
-        _old_content: Option<&str>,
-        _new_content: Option<&str>,
-        _desc: Option<&str>,
-    ) -> RamariaResult<i64> {
-        Ok(1)
-    }
-
-    async fn list_pending_conflicts(&self) -> RamariaResult<Vec<(i64, String, String, String)>> {
-        Ok(Vec::new())
-    }
-
-    async fn resolve_conflict(&self, _id: i64) -> RamariaResult<()> {
-        Ok(())
-    }
-
     async fn get_setting(&self, key: &str) -> RamariaResult<Option<String>> {
         Ok(self.settings.lock().unwrap().get(key).cloned())
     }
@@ -749,40 +714,6 @@ impl StoreInfrastructure for MockStorage {
             .collect())
     }
 
-    async fn insert_graph_node(
-        &self,
-        _entity_name: &str,
-        _entity_type: &str,
-        _source_l1_id: Option<Uuid>,
-    ) -> RamariaResult<i64> {
-        Ok(1)
-    }
-
-    async fn get_graph_node(
-        &self,
-        _entity_name: &str,
-    ) -> RamariaResult<Option<(i64, String, String)>> {
-        Ok(None)
-    }
-
-    async fn insert_graph_edge(
-        &self,
-        _source_id: i64,
-        _target_id: i64,
-        _relation_type: &str,
-        _detail: Option<&str>,
-        _source_l1_id: Option<Uuid>,
-    ) -> RamariaResult<i64> {
-        Ok(1)
-    }
-
-    async fn list_graph_edges(
-        &self,
-        _source_id: i64,
-    ) -> RamariaResult<Vec<(i64, i64, i64, String)>> {
-        Ok(Vec::new())
-    }
-
     // =========================================================
     // Keyword Refs (Mock 空实现)
     // =========================================================
@@ -796,25 +727,6 @@ impl StoreInfrastructure for MockStorage {
         _weight: f64,
     ) -> RamariaResult<()> {
         Ok(())
-    }
-
-    async fn find_refs_by_keyword(
-        &self,
-        _keyword_id: &str,
-    ) -> RamariaResult<Vec<(i64, String, String, String, String, f64, i64)>> {
-        Ok(Vec::new())
-    }
-
-    async fn find_refs_by_doc(
-        &self,
-        _doc_type: &str,
-        _doc_id: &str,
-    ) -> RamariaResult<Vec<(i64, String, String, String, String, f64, i64)>> {
-        Ok(Vec::new())
-    }
-
-    async fn delete_refs_by_doc(&self, _doc_type: &str, _doc_id: &str) -> RamariaResult<u64> {
-        Ok(0)
     }
 
     // -- 行为规则（CLI 测试） --

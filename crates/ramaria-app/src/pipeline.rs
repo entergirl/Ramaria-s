@@ -211,7 +211,7 @@ pub trait PipelineStage: Send + Sync {
 /// - 可测试——可注入 mock 实现的 StorageBackend / LlmProvider
 ///
 /// 字段约定:
-/// - `storage`: 存储后端（23 张表 CRUD）
+/// - `storage`: 存储后端（27 张表 CRUD）
 /// - `llm`: 当前 LLM provider（配置热更新时由 App 替换）
 /// - `embedding`: 可选嵌入模型（None 表示未配置，进入 Degraded 状态）
 /// - `config`: 应用配置（只读快照）

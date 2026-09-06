@@ -62,10 +62,12 @@ fn bm25_search_finds_results() {
     assert!(results.iter().any(|sr| sr.doc_summary.contains("Rust")));
 }
 
-/// 向量通道接线：index_l1_with_vector / index_l2_with_vector
-/// 写入的 L1/L2 文档在带 query 向量的检索中被真实命中。
+/// 向量通道接线：经 `index_l1_with_vector`（L1 增量路径）与 app 全量 rebuild
+/// 路径（`index_l2` + 向量索引实例直接 `add`）写入的 L1/L2 文档，
+/// 在带 query 向量的检索中被真实命中。
 #[test]
 fn vector_channel_finds_indexed_l1_l2() {
+    use crate::vector::{VectorIndex, make_vector_label};
     let mut r = Retriever::new();
     let l1_id = uuid::Uuid::new_v4();
     r.index_l1_with_vector(
@@ -80,22 +82,23 @@ fn vector_channel_finds_indexed_l1_l2() {
         },
         Some(vec![1.0, 0.0, 0.0]),
     );
-    r.index_l2_with_vector(
-        &L2DocView {
-            id: 7,
-            title: "篮球比赛".to_string(),
-            summary: "参加了周末篮球比赛".to_string(),
-            keywords: None,
-            attitude: None,
-            paraphrase: None,
-            persona_uid: "user-0001".to_string(),
-            share: 0.9,
-            confidence: 0.9,
-            created_at: 2000,
-            salience: 0.7,
-        },
-        Some(vec![0.9, 0.1, 0.0]),
-    );
+    let l2_id: i64 = 7;
+    // L2 向量写入按 app 全量路径：`index_l2` 入 BM25/内存 + 向量索引实例直接 add。
+    r.index_l2(&L2DocView {
+        id: l2_id,
+        title: "篮球比赛".to_string(),
+        summary: "参加了周末篮球比赛".to_string(),
+        keywords: None,
+        attitude: None,
+        paraphrase: None,
+        persona_uid: "user-0001".to_string(),
+        share: 0.9,
+        confidence: 0.9,
+        created_at: 2000,
+        salience: 0.7,
+    });
+    let label = make_vector_label("l2", &l2_id.to_string());
+    r.vector_mut().add(&label, vec![0.9, 0.1, 0.0], 2000);
 
     let req = SearchRequest {
         query: "篮球".to_string(),

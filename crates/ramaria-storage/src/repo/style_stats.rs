@@ -68,19 +68,6 @@ pub async fn get(pool: &SqlitePool, persona_uid: &str) -> RamariaResult<Option<P
     row.map(StyleStatsRow::into_stats).transpose()
 }
 
-/// 查询全部风格统计（基线池更新 / CLI 诊断）。
-pub async fn list_all(pool: &SqlitePool) -> RamariaResult<Vec<PersonaStyleStats>> {
-    let rows = sqlx::query_as::<_, StyleStatsRow>(
-        "SELECT persona_uid, sample_count, stats_json, baseline_version, rule_text, \
-             rule_source, status, updated_at
-         FROM persona_style_stats ORDER BY updated_at DESC",
-    )
-    .fetch_all(pool)
-    .await
-    .storage_err("查询风格统计列表失败")?;
-    rows.into_iter().map(StyleStatsRow::into_stats).collect()
-}
-
 #[derive(sqlx::FromRow)]
 struct StyleStatsRow {
     persona_uid: String,

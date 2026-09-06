@@ -733,24 +733,6 @@ mod tests {
         async fn list_pending_jobs(&self) -> RamariaResult<Vec<(i64, String, Option<String>)>> {
             unimplemented!()
         }
-        async fn create_conflict(
-            &self,
-            _persona_uid: &str,
-            _field: &str,
-            _l1_value: Option<&str>,
-            _l2_value: Option<&str>,
-            _resolution: Option<&str>,
-        ) -> RamariaResult<i64> {
-            unimplemented!()
-        }
-        async fn list_pending_conflicts(
-            &self,
-        ) -> RamariaResult<Vec<(i64, String, String, String)>> {
-            unimplemented!()
-        }
-        async fn resolve_conflict(&self, _conflict_id: i64) -> RamariaResult<()> {
-            unimplemented!()
-        }
         async fn get_setting(&self, _key: &str) -> RamariaResult<Option<String>> {
             unimplemented!()
         }
@@ -758,36 +740,6 @@ mod tests {
             unimplemented!()
         }
         async fn list_settings(&self) -> RamariaResult<Vec<(String, String)>> {
-            unimplemented!()
-        }
-        async fn insert_graph_node(
-            &self,
-            _entity: &str,
-            _entity_type: &str,
-            _persona_uid: Option<Uuid>,
-        ) -> RamariaResult<i64> {
-            unimplemented!()
-        }
-        async fn get_graph_node(
-            &self,
-            _entity: &str,
-        ) -> RamariaResult<Option<(i64, String, String)>> {
-            unimplemented!()
-        }
-        async fn insert_graph_edge(
-            &self,
-            _from_id: i64,
-            _to_id: i64,
-            _kind: &str,
-            _attrs: Option<&str>,
-            _persona_uid: Option<Uuid>,
-        ) -> RamariaResult<i64> {
-            unimplemented!()
-        }
-        async fn list_graph_edges(
-            &self,
-            _from_id: i64,
-        ) -> RamariaResult<Vec<(i64, i64, i64, String)>> {
             unimplemented!()
         }
         async fn insert_keyword_ref(
@@ -798,19 +750,6 @@ mod tests {
             _persona_uid: &str,
             _weight: f64,
         ) -> RamariaResult<()> {
-            unimplemented!()
-        }
-        async fn find_refs_by_keyword(
-            &self,
-            _keyword_id: &str,
-        ) -> RamariaResult<Vec<(i64, String, String, String, String, f64, i64)>> {
-            unimplemented!()
-        }
-        async fn find_refs_by_doc(
-            &self,
-            _doc_type: &str,
-            _doc_id: &str,
-        ) -> RamariaResult<Vec<(i64, String, String, String, String, f64, i64)>> {
             unimplemented!()
         }
     }

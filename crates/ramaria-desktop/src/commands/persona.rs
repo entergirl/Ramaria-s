@@ -324,6 +324,9 @@ pub async fn regenerate_import_pipeline(
     tracing::info!(%persona_uid, "重新生成导入 session 的 L1 摘要并级联 L2/L3");
 
     // Step 1: 查找该 persona 所有消息所属的 session
+    // 说明：这是导入管线的离线重建路径，必须枚举该 persona 的全部消息以覆盖其
+    // 所有 session（截断会导致部分导入 session 未被重建 L1），故此处有意全量加载。
+    // 若未来出现 persona 消息的浏览/展示需求，须走分页查询而非此处全量拉取。
     let messages = state
         .app
         .storage()

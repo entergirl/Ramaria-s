@@ -371,22 +371,6 @@ impl StoreInfrastructure for MockStorage {
     async fn list_pending_jobs(&self) -> RamariaResult<Vec<(i64, String, Option<String>)>> {
         unimplemented!()
     }
-    async fn create_conflict(
-        &self,
-        _: &str,
-        _: &str,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-    ) -> RamariaResult<i64> {
-        unimplemented!()
-    }
-    async fn list_pending_conflicts(&self) -> RamariaResult<Vec<(i64, String, String, String)>> {
-        unimplemented!()
-    }
-    async fn resolve_conflict(&self, _: i64) -> RamariaResult<()> {
-        unimplemented!()
-    }
     async fn get_setting(&self, _: &str) -> RamariaResult<Option<String>> {
         unimplemented!()
     }
@@ -394,25 +378,6 @@ impl StoreInfrastructure for MockStorage {
         unimplemented!()
     }
     async fn list_settings(&self) -> RamariaResult<Vec<(String, String)>> {
-        unimplemented!()
-    }
-    async fn insert_graph_node(&self, _: &str, _: &str, _: Option<Uuid>) -> RamariaResult<i64> {
-        unimplemented!()
-    }
-    async fn get_graph_node(&self, _: &str) -> RamariaResult<Option<(i64, String, String)>> {
-        unimplemented!()
-    }
-    async fn insert_graph_edge(
-        &self,
-        _: i64,
-        _: i64,
-        _: &str,
-        _: Option<&str>,
-        _: Option<Uuid>,
-    ) -> RamariaResult<i64> {
-        unimplemented!()
-    }
-    async fn list_graph_edges(&self, _: i64) -> RamariaResult<Vec<(i64, i64, i64, String)>> {
         unimplemented!()
     }
 
@@ -426,19 +391,6 @@ impl StoreInfrastructure for MockStorage {
         _weight: f64,
     ) -> RamariaResult<()> {
         Ok(())
-    }
-    async fn find_refs_by_keyword(
-        &self,
-        _keyword_id: &str,
-    ) -> RamariaResult<Vec<(i64, String, String, String, String, f64, i64)>> {
-        Ok(vec![])
-    }
-    async fn find_refs_by_doc(
-        &self,
-        _doc_type: &str,
-        _doc_id: &str,
-    ) -> RamariaResult<Vec<(i64, String, String, String, String, f64, i64)>> {
-        Ok(vec![])
     }
 }
 

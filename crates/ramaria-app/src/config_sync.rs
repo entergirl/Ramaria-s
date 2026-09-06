@@ -994,19 +994,6 @@ mod tests {
         ) -> RamariaResult<()> {
             Ok(())
         }
-        async fn find_refs_by_keyword(
-            &self,
-            _k: &str,
-        ) -> RamariaResult<Vec<(i64, String, String, String, String, f64, i64)>> {
-            Ok(vec![])
-        }
-        async fn find_refs_by_doc(
-            &self,
-            _d: &str,
-            _i: &str,
-        ) -> RamariaResult<Vec<(i64, String, String, String, String, f64, i64)>> {
-            Ok(vec![])
-        }
         async fn save_privacy_consent(
             &self,
             _c: &ramaria_core::types::PrivacyConsent,
@@ -1050,24 +1037,6 @@ mod tests {
         async fn list_pending_jobs(&self) -> RamariaResult<Vec<(i64, String, Option<String>)>> {
             Ok(vec![])
         }
-        async fn create_conflict(
-            &self,
-            _f: &str,
-            _t: &str,
-            _o: Option<&str>,
-            _n: Option<&str>,
-            _d: Option<&str>,
-        ) -> RamariaResult<i64> {
-            Ok(1)
-        }
-        async fn list_pending_conflicts(
-            &self,
-        ) -> RamariaResult<Vec<(i64, String, String, String)>> {
-            Ok(vec![])
-        }
-        async fn resolve_conflict(&self, _i: i64) -> RamariaResult<()> {
-            Ok(())
-        }
         async fn get_setting(&self, key: &str) -> RamariaResult<Option<String>> {
             Ok(self.settings.lock().unwrap().get(key).cloned())
         }
@@ -1086,30 +1055,6 @@ mod tests {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect())
-        }
-        async fn insert_graph_node(
-            &self,
-            _e: &str,
-            _t: &str,
-            _l: Option<uuid::Uuid>,
-        ) -> RamariaResult<i64> {
-            Ok(1)
-        }
-        async fn get_graph_node(&self, _e: &str) -> RamariaResult<Option<(i64, String, String)>> {
-            Ok(None)
-        }
-        async fn insert_graph_edge(
-            &self,
-            _s: i64,
-            _t: i64,
-            _r: &str,
-            _d: Option<&str>,
-            _l: Option<uuid::Uuid>,
-        ) -> RamariaResult<i64> {
-            Ok(1)
-        }
-        async fn list_graph_edges(&self, _s: i64) -> RamariaResult<Vec<(i64, i64, i64, String)>> {
-            Ok(vec![])
         }
     }
 

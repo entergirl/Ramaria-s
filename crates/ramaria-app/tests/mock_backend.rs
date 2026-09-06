@@ -911,25 +911,6 @@ impl StoreInfrastructure for MockStorage {
         Ok(Vec::new())
     }
 
-    async fn create_conflict(
-        &self,
-        _field: &str,
-        _conflict_type: &str,
-        _old_content: Option<&str>,
-        _new_content: Option<&str>,
-        _desc: Option<&str>,
-    ) -> RamariaResult<i64> {
-        Ok(1)
-    }
-
-    async fn list_pending_conflicts(&self) -> RamariaResult<Vec<(i64, String, String, String)>> {
-        Ok(Vec::new())
-    }
-
-    async fn resolve_conflict(&self, _id: i64) -> RamariaResult<()> {
-        Ok(())
-    }
-
     async fn get_setting(&self, _key: &str) -> RamariaResult<Option<String>> {
         Ok(None)
     }
@@ -942,40 +923,6 @@ impl StoreInfrastructure for MockStorage {
         Ok(Vec::new())
     }
 
-    async fn insert_graph_node(
-        &self,
-        _entity_name: &str,
-        _entity_type: &str,
-        _source_l1_id: Option<Uuid>,
-    ) -> RamariaResult<i64> {
-        Ok(1)
-    }
-
-    async fn get_graph_node(
-        &self,
-        _entity_name: &str,
-    ) -> RamariaResult<Option<(i64, String, String)>> {
-        Ok(None)
-    }
-
-    async fn insert_graph_edge(
-        &self,
-        _source_id: i64,
-        _target_id: i64,
-        _relation_type: &str,
-        _detail: Option<&str>,
-        _source_l1_id: Option<Uuid>,
-    ) -> RamariaResult<i64> {
-        Ok(1)
-    }
-
-    async fn list_graph_edges(
-        &self,
-        _source_id: i64,
-    ) -> RamariaResult<Vec<(i64, i64, i64, String)>> {
-        Ok(Vec::new())
-    }
-
     async fn insert_keyword_ref(
         &self,
         _keyword_id: &str,
@@ -985,21 +932,6 @@ impl StoreInfrastructure for MockStorage {
         _weight: f64,
     ) -> RamariaResult<()> {
         Ok(())
-    }
-
-    async fn find_refs_by_keyword(
-        &self,
-        _keyword_id: &str,
-    ) -> RamariaResult<Vec<(i64, String, String, String, String, f64, i64)>> {
-        Ok(vec![])
-    }
-
-    async fn find_refs_by_doc(
-        &self,
-        _doc_type: &str,
-        _doc_id: &str,
-    ) -> RamariaResult<Vec<(i64, String, String, String, String, f64, i64)>> {
-        Ok(vec![])
     }
 
     // -- 行为规则（v1.5 M5 D） --

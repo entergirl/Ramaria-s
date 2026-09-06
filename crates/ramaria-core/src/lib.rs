@@ -11,6 +11,7 @@ pub mod behavior;
 pub mod config;
 pub mod error;
 pub mod keyword;
+pub mod privacy;
 pub mod text;
 pub mod traits;
 pub mod types;

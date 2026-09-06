@@ -3,6 +3,8 @@
 //! 设计特点:
 //! - id 使用 UUID v4（TEXT 主键），与 sessions 保持 ID 类型一致
 //! - 支持按 session_id 查询完整对话历史、按 persona_uid 过滤发言人消息
+//! - 会话/发言人的"全量查询"（list_by_session/list_by_persona）供需完整数据的
+//!   离线分析/重建路径使用；浏览/展示场景须走对应 *paginated 分页查询，避免全量回内存
 //! - find_by_fingerprint 用于历史导入去重（SHA-256 前 16 位 hex）
 //! - role/source 解析失败时记录 WARNING 日志并回退到安全默认值
 //! - UUID 解析异常时记录 WARNING，不静默吞错
@@ -170,6 +172,17 @@ pub async fn count_by_session(pool: &SqlitePool, session_id: Uuid) -> RamariaRes
     Ok(row.cnt as u32)
 }
 
+/// 按时间升序加载指定 session 的全部消息。
+///
+/// 说明:
+/// - **全量加载**，一次将整个 session 的消息 fetch 回内存。
+/// - 供需要完整会话数据的离线/分析路径使用：L1 摘要生成、utt 块切分、
+///   导入重建、会话导出等，均需基于会话全量数据计算，故保持全量语义。
+/// - 浏览/展示场景请使用 `list_by_session_paginated`（按 limit/offset 分页），
+///   避免把超长会话整段拉回内存。
+///
+/// 返回:
+/// - 按 `created_at ASC`（时间正序）排列的消息列表。
 pub async fn list_by_session(pool: &SqlitePool, session_id: Uuid) -> RamariaResult<Vec<Message>> {
     let rows = sqlx::query_as::<_, MessageRow>(
         "SELECT id, session_id, role, content, created_at, source, import_fingerprint, persona_uid
@@ -233,12 +246,19 @@ pub async fn find_by_fingerprint(
     row.map(|r| r.into_message()).transpose()
 }
 
-/// 按发言人查询全部消息（Persona-Aware RAG / 导入管线重建用）。
+/// 按发言人加载该 persona 的全部消息（离线分析/重建专用）。
 ///
-/// 去掉 `LIMIT 200`。调用方 `regenerate_import_pipeline`
-/// 依赖"某 persona 的全部消息"来枚举其所属 session 并重建 L1；
-/// 截断导致 129 个导入 session 中只有最近 4 个被覆盖（按钮名不副实）。
-/// 消息量级（万级）下全量加载可控；如未来需分页再引入显式 limit 参数。
+/// 说明:
+/// - **全量加载**，一次将该 persona 所有消息 fetch 回内存（不设 LIMIT）。
+/// - 供需要完整数据的一次性离线分析/重建路径使用：
+///   - A3 表达层风格统计（`app_style` 一次性分析 persona 全部消息）。
+///   - 导入管线重建（`regenerate_import_pipeline` 需枚举该 persona 全部
+///     session 并逐个重建 L1，截断会导致部分导入 session 未被覆盖）。
+/// - 消息量级（万级）下全量加载可控；**浏览/展示场景请使用
+///   `list_by_persona_paginated`**（分页），避免把大 persona 库整段拉回内存。
+///
+/// 返回:
+/// - 按 `created_at DESC`（最新在前）排列的消息列表。
 pub async fn list_by_persona(pool: &SqlitePool, persona_uid: &str) -> RamariaResult<Vec<Message>> {
     let rows = sqlx::query_as::<_, MessageRow>(
         "SELECT id, session_id, role, content, created_at, source, import_fingerprint, persona_uid
@@ -248,6 +268,43 @@ pub async fn list_by_persona(pool: &SqlitePool, persona_uid: &str) -> RamariaRes
     .fetch_all(pool)
     .await
     .storage_err("按 persona 查询消息失败")?;
+    rows.into_iter()
+        .map(|r| r.into_message())
+        .collect::<RamariaResult<Vec<_>>>()
+}
+
+/// 按创建时间降序分页加载指定 persona 的消息（浏览场景专用）。
+///
+/// 说明:
+/// - 返回与 `list_by_persona` 相同投影与排序（`created_at DESC`，最新在前）。
+/// - 通过 `LIMIT ? OFFSET ?` 在 SQL 层分页，避免大 persona 库全量回内存。
+/// - 供分页展示 persona 消息的场景使用；确需该 persona 全部消息的
+///   离线分析/重建路径仍走 `list_by_persona`。
+///
+/// 参数:
+/// - `pool`: 数据库连接池。
+/// - `persona_uid`: 目标 persona 的 UID。
+/// - `limit`: 每页最大条数。
+/// - `offset`: 分页偏移量（第一页为 0）。
+///
+/// 返回:
+/// - 按 `created_at DESC` 排序的当前页消息列表（末页或 offset 越界时可能为空）。
+pub async fn list_by_persona_paginated(
+    pool: &SqlitePool,
+    persona_uid: &str,
+    limit: i64,
+    offset: i64,
+) -> RamariaResult<Vec<Message>> {
+    let rows = sqlx::query_as::<_, MessageRow>(
+        "SELECT id, session_id, role, content, created_at, source, import_fingerprint, persona_uid
+         FROM messages WHERE persona_uid = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+    )
+    .bind(persona_uid)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await
+    .storage_err("按 persona 分页查询消息失败")?;
     rows.into_iter()
         .map(|r| r.into_message())
         .collect::<RamariaResult<Vec<_>>>()
@@ -408,5 +465,93 @@ mod tests {
             .unwrap()
             .expect("应命中");
         assert_eq!(hit.fingerprint.as_deref(), Some("fp-present"));
+    }
+
+    /// 构造某 persona 的 N 条消息，created_at 从 base 起逐条 +1。
+    async fn insert_persona_messages(
+        pool: &SqlitePool,
+        session_id: Uuid,
+        persona_uid: &str,
+        count: usize,
+        base_ts: i64,
+    ) {
+        for i in 0..count {
+            let mut m = make_message(session_id, Some(&format!("fp-pg-{persona_uid}-{i}")));
+            m.persona_uid = Some(persona_uid.to_string());
+            m.created_at = base_ts + i as i64;
+            save_import(pool, &m).await.expect("写入 persona 消息成功");
+        }
+    }
+
+    /// list_by_persona_paginated 分页正确性：页大小、页间排序、末页不满、offset 越界为空。
+    #[tokio::test]
+    async fn list_by_persona_paginated_pages_correctly() {
+        let pool = init_test_pool().await.expect("测试库初始化失败");
+        let session_id = setup_fixture(&pool).await;
+        // 插入超过页大小的消息（页大小 3，共 7 条），created_at 递增。
+        insert_persona_messages(&pool, session_id, "char-0001", 7, 1_000).await;
+
+        // 全量参照：created_at DESC（最新在前）。
+        let all = list_by_persona(&pool, "char-0001").await.unwrap();
+        assert_eq!(all.len(), 7);
+        // created_at 应为 1000..=1006，全量返回后整体降序。
+        let all_ts: Vec<i64> = all.iter().map(|m| m.created_at).collect();
+        assert_eq!(all_ts, (1000..=1006).rev().collect::<Vec<_>>());
+
+        // 第 1 页：limit 3 offset 0 → 最新 3 条 (1006,1005,1004)。
+        let page1 = list_by_persona_paginated(&pool, "char-0001", 3, 0)
+            .await
+            .unwrap();
+        let p1_ts: Vec<i64> = page1.iter().map(|m| m.created_at).collect();
+        assert_eq!(p1_ts, vec![1006, 1005, 1004]);
+
+        // 第 2 页：offset 3 → 中间 3 条 (1003,1002,1001)。
+        let page2 = list_by_persona_paginated(&pool, "char-0001", 3, 3)
+            .await
+            .unwrap();
+        let p2_ts: Vec<i64> = page2.iter().map(|m| m.created_at).collect();
+        assert_eq!(p2_ts, vec![1003, 1002, 1001]);
+
+        // 末页：offset 6 → 余下 1 条 (1000)，页不满。
+        let page3 = list_by_persona_paginated(&pool, "char-0001", 3, 6)
+            .await
+            .unwrap();
+        let p3_ts: Vec<i64> = page3.iter().map(|m| m.created_at).collect();
+        assert_eq!(p3_ts, vec![1000]);
+
+        // offset 越界 → 空。
+        let beyond = list_by_persona_paginated(&pool, "char-0001", 3, 9)
+            .await
+            .unwrap();
+        assert!(beyond.is_empty(), "offset 越界应返回空页");
+    }
+
+    /// persona 分页不跨 persona：只返回目标 persona 的消息。
+    #[tokio::test]
+    async fn list_by_persona_paginated_is_isolated_by_persona() {
+        let pool = init_test_pool().await.expect("测试库初始化失败");
+        let session_id = setup_fixture(&pool).await;
+        insert_persona_messages(&pool, session_id, "char-0001", 5, 2_000).await;
+
+        // 先建立 char-0002 persona 行（messages.persona_uid 有外键约束），
+        // 再写入其消息，验证不影响 char-0001 的分页结果。
+        sqlx::query(
+            "INSERT INTO personas (uid, name, kind, seq, source, created_at, updated_at) \
+             VALUES ('char-0002', '另一角色', 'char', 2, 'local', 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .expect("插入 char-0002 persona fixture 应成功");
+        insert_persona_messages(&pool, session_id, "char-0002", 3, 3_000).await;
+
+        let all = list_by_persona_paginated(&pool, "char-0001", 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 5);
+        assert!(
+            all.iter()
+                .all(|m| m.persona_uid.as_deref() == Some("char-0001")),
+            "分页结果应仅含目标 persona 消息"
+        );
     }
 }

@@ -342,7 +342,7 @@ pub trait LlmResponseCache: Send + Sync {
 /// - 承载会话/消息/L0-L1 记忆、画像（persona）、L2 事件与溯源、L3 性格与证据、
 ///   人格画像（facts/style/example/cluster）、原文话语块（utt）、行为规则与反馈日志等
 ///   业务对象的主 CRUD 与查询。
-/// - 与 [`StoreInfrastructure`]（基础设施）分离，避免单一巨 trait 承载全部 24 张表能力。
+/// - 与 [`StoreInfrastructure`]（基础设施）分离，避免单一巨 trait 承载全部 27 张表能力。
 ///
 /// 实现要求:
 /// - 具体实现位于 `ramaria-storage`。
@@ -387,8 +387,20 @@ pub trait StoreCrud: Send + Sync {
 
     // -- Message (L0) --
     async fn save_message(&self, message: &Message) -> RamariaResult<()>;
+    /// 全量加载指定 session 的全部消息。
+    ///
+    /// 说明:
+    /// - **全量加载**，一次返回该 session 所有消息，供需要完整会话数据的
+    ///   离线分析/重建路径（L1 摘要、utt 切分、导出等）使用。
+    /// - 浏览/展示场景请使用 `list_messages_paginated`（分页），避免超长会话全量回内存。
     async fn list_messages(&self, session_id: Uuid) -> RamariaResult<Vec<Message>>;
-    /// 按发言人查询消息（Persona-Aware RAG 的原话过滤）。
+    /// 全量加载指定 persona 的全部消息。
+    ///
+    /// 说明:
+    /// - **全量加载**，一次返回该 persona 所有消息，供一次性离线分析/重建路径
+    ///   （表达层风格统计、导入管线重建等）使用。
+    /// - 浏览/展示场景请使用 `list_messages_by_persona_paginated`（分页），
+    ///   避免大 persona 库全量回内存。
     async fn list_messages_by_persona(&self, persona_uid: &str) -> RamariaResult<Vec<Message>>;
 
     /// 按创建时间降序分页加载最近消息。
@@ -424,6 +436,41 @@ pub trait StoreCrud: Send + Sync {
             .take(end.saturating_sub(start))
             .collect())
     }
+
+    /// 按创建时间降序分页加载指定 persona 的消息（浏览场景专用）。
+    ///
+    /// 职责:
+    /// - 替代 `list_messages_by_persona` 全量加载，支持按 limit/offset 分页。
+    /// - 返回按 `created_at DESC`（最新在前）排序，调用方按需反转。
+    ///
+    /// 参数:
+    /// - `persona_uid`: 目标 persona 的 UID。
+    /// - `limit`: 每页最大条数。
+    /// - `offset`: 分页偏移量（第一页为 0）。
+    ///
+    /// 返回:
+    /// - 按 `created_at DESC` 排序的当前页消息列表。
+    ///
+    /// 默认实现:
+    /// - 委托 `list_messages_by_persona` 全量加载后手动排序截断（兼容存量实现）。
+    /// - 子 crate（ramaria-storage）应覆写为高效 SQL（`ORDER BY created_at DESC LIMIT ? OFFSET ?`）。
+    async fn list_messages_by_persona_paginated(
+        &self,
+        persona_uid: &str,
+        limit: i64,
+        offset: i64,
+    ) -> RamariaResult<Vec<Message>> {
+        let mut all = self.list_messages_by_persona(persona_uid).await?;
+        all.sort_by_key(|m| std::cmp::Reverse(m.created_at));
+        let start = offset as usize;
+        let end = (offset + limit).min(all.len() as i64) as usize;
+        Ok(all
+            .into_iter()
+            .skip(start)
+            .take(end.saturating_sub(start))
+            .collect())
+    }
+
     /// 获取指定 session 最后一条消息的时间（Unix 毫秒）。
     ///
     /// 职责:
@@ -669,17 +716,9 @@ pub trait StoreCrud: Send + Sync {
             "StoreCrud 未实现事实版本链覆盖写",
         ))
     }
-    /// 升级 candidate → active（互证通过后提升）。
-    async fn promote_fact_to_active(&self, _id: i64) -> RamariaResult<()> {
-        Ok(())
-    }
     /// 查询某事实的完整版本链（含自身，按 created_at 升序；链头最早在前）。
     async fn list_fact_versions(&self, _seed_id: i64) -> RamariaResult<Vec<PersonaFact>> {
         Ok(Vec::new())
-    }
-    /// 将单条事实置 superseded（独立覆盖写，供上层仲裁原子化）。
-    async fn supersede_fact(&self, _id: i64, _at: i64) -> RamariaResult<()> {
-        Ok(())
     }
     /// 按 persona_uid 一次性统计所有字段的 fact 数量（GROUP BY）。
     ///
@@ -731,12 +770,6 @@ pub trait StoreCrud: Send + Sync {
         _persona_uid: &str,
     ) -> RamariaResult<Option<PersonaStyleStats>> {
         Ok(None)
-    }
-    /// 查询全部风格统计（基线池更新 / CLI 诊断）。
-    ///
-    /// 默认实现返回空 Vec（存量 mock 无需实现即可编译）。
-    async fn list_style_stats(&self) -> RamariaResult<Vec<PersonaStyleStats>> {
-        Ok(Vec::new())
     }
 
     // -- Personality Traits (L3 性格层, id: i64) --
@@ -841,9 +874,8 @@ pub trait StoreCrud: Send + Sync {
 /// 存储后端抽象 trait（基础设施/系统分组）。
 ///
 /// 职责:
-/// - 承载关键词倒排索引、隐私确认、后端配置、schema/索引版本、后台任务队列、冲突队列、
-///   全局设置、知识图谱、L2 聚类去重指纹、事件去重查询、行为规则与反馈日志等非核心
-///   业务对象的表能力。
+/// - 承载关键词倒排索引、隐私确认、后端配置、schema/索引版本、后台任务队列、全局设置、
+///   L2 聚类去重指纹、事件去重查询、行为规则与反馈日志等非核心业务对象的表能力。
 /// - 与 [`StoreCrud`]（核心业务 CRUD）分离，避免单一巨 trait。
 ///
 /// 实现要求:
@@ -861,22 +893,6 @@ pub trait StoreInfrastructure: Send + Sync {
         persona_uid: &str,
         weight: f64,
     ) -> RamariaResult<()>;
-    /// 根据关键词文本查询所有引用（倒排查）。
-    async fn find_refs_by_keyword(
-        &self,
-        keyword_id: &str,
-    ) -> RamariaResult<Vec<(i64, String, String, String, String, f64, i64)>>;
-    /// 根据文档查询所有引用（正排查）。
-    async fn find_refs_by_doc(
-        &self,
-        doc_type: &str,
-        doc_id: &str,
-    ) -> RamariaResult<Vec<(i64, String, String, String, String, f64, i64)>>;
-    /// 删除指定文档的所有关键词引用。
-    async fn delete_refs_by_doc(&self, _doc_type: &str, _doc_id: &str) -> RamariaResult<u64> {
-        let _ = self;
-        Ok(0)
-    }
 
     // -- Privacy Consent --
     async fn save_privacy_consent(&self, consent: &PrivacyConsent) -> RamariaResult<()>;
@@ -909,45 +925,10 @@ pub trait StoreInfrastructure: Send + Sync {
     ) -> RamariaResult<()>;
     async fn list_pending_jobs(&self) -> RamariaResult<Vec<(i64, String, Option<String>)>>;
 
-    // -- Conflict Queue --
-    // 知识层冲突仲裁（事实覆盖写前的一致性检查）
-    async fn create_conflict(
-        &self,
-        field: &str,
-        conflict_type: &str,
-        old_content: Option<&str>,
-        new_content: Option<&str>,
-        desc: Option<&str>,
-    ) -> RamariaResult<i64>;
-    async fn list_pending_conflicts(&self) -> RamariaResult<Vec<(i64, String, String, String)>>;
-    async fn resolve_conflict(&self, id: i64) -> RamariaResult<()>;
-
     // -- Settings --
     async fn get_setting(&self, key: &str) -> RamariaResult<Option<String>>;
     async fn set_setting(&self, key: &str, value: &str) -> RamariaResult<()>;
     async fn list_settings(&self) -> RamariaResult<Vec<(String, String)>>;
-
-    // -- Graph --
-    async fn insert_graph_node(
-        &self,
-        entity_name: &str,
-        entity_type: &str,
-        source_l1_id: Option<Uuid>,
-    ) -> RamariaResult<i64>;
-    async fn get_graph_node(
-        &self,
-        entity_name: &str,
-    ) -> RamariaResult<Option<(i64, String, String)>>;
-    async fn insert_graph_edge(
-        &self,
-        source_id: i64,
-        target_id: i64,
-        relation_type: &str,
-        detail: Option<&str>,
-        source_l1_id: Option<Uuid>,
-    ) -> RamariaResult<i64>;
-    async fn list_graph_edges(&self, source_id: i64)
-    -> RamariaResult<Vec<(i64, i64, i64, String)>>;
 
     // =========================================================
     // L2 聚类去重指纹
