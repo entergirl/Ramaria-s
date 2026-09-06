@@ -5,8 +5,11 @@
 //! - `KeywordSet`: 保留插入顺序的去重集合，驱动 TopicBatcher 关键词图构建
 //! - `KeywordStatus`: 三态枚举（Canonical / Alias / Pending），支撑别名归一化管线
 //! - `KeywordRef`: 倒排索引引用枚举（L1/L2/Pool），关联关键词与业务文档
-//! - 纯类型层，零 I/O，零外部依赖（仅 serde），完全符合 ramaria-core 零 I/O 约束
-//! - KeywordSet/KeywordStatus/KeywordRef 三个类型：预留给 keyword_refs 消费路径（v1.6）
+//! - `KeywordQuery`: 类型安全检索查询参数（关键词集 + persona + 匹配策略 + top_k）
+//! - `MatchStrategy`: 字面匹配策略（Exact / Substring，按设计去除 Prefix）
+//! - 纯类型层，零 I/O，零外部依赖（仅 serde + uuid），完全符合 ramaria-core 零 I/O 约束
+//! - M3（T-V20-3-001）起 KeywordQuery/MatchStrategy 成为 keyword/index.rs、
+//!   keyword/composite.rs 的查询入口类型；KeywordRef 作为检索结果的文档标识返回
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -96,6 +99,22 @@ impl KeywordToken {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    /// 从已校验的标准化字符串创建（跳过重复校验）。
+    ///
+    /// # Safety
+    ///
+    /// 调用方须保证 `s` 已满足不变量（非空、trim、ASCII 小写、含字母数字、≤256 字节）。
+    /// 供内部确知已标准化的 token 复用（如 bigram/词典命中），避免二次构造开销。
+    #[inline]
+    pub fn from_validated(s: String) -> Self {
+        debug_assert!(!s.is_empty(), "KeywordToken 不能为空");
+        debug_assert!(
+            s.chars().any(|c| c.is_alphanumeric()),
+            "KeywordToken 需至少含一个字母数字字符: {s}"
+        );
+        Self(s)
+    }
 }
 
 impl fmt::Display for KeywordToken {
@@ -140,7 +159,7 @@ impl PartialEq<str> for KeywordToken {
 /// 性能说明:
 /// - 关键词集合通常 < 20 个，线性查找去重已足够
 /// - 避免引入 `indexmap` 等外部依赖
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeywordSet {
     tokens: Vec<KeywordToken>,
 }
@@ -322,36 +341,76 @@ impl Default for KeywordStatus {
 }
 
 // =========================================================
+// KeywordPoolRow — keyword_pool 词条装载行
+// =========================================================
+
+/// keyword_pool 词条装载行（KeywordService / KeywordPool 装载的最小数据形态）。
+///
+/// 职责:
+/// - 供 `ramaria-storage` 返回 keyword_pool 全量词条、`ramaria-memory` 装载
+///   `KeywordPool`（三态状态机）使用，零 I/O 纯数据行。
+/// - `rowid` 与 keyword_pool 的 rowid（INTEGER 主键）一致——`KeywordStatus::Alias` /
+///   `Pending` 的 `canonical_id` 即指向该行 id，装载时必须保留。
+///
+/// 字段约定:
+/// - `alias_status`: `NULL` / `"canonical"` → 规范词；`"alias"` → 已确认别名；
+///   `"pending"` → 待确认别名。
+/// - `canonical_id`: 指向的规范词行 id（规范词自身为 `NULL`）。
+/// - `canonical_keyword`: LEFT JOIN 解析出的规范词文本（展示用途；状态机装载不依赖）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeywordPoolRow {
+    /// keyword_pool.rowid（INTEGER 自增 rowid）
+    pub rowid: i64,
+    /// 标准化关键词文本
+    pub keyword: String,
+    /// 使用次数（每次自然出现 +1；手工种子为 0）
+    pub use_count: i64,
+    /// 创建时间（Unix 毫秒）
+    pub created_at: i64,
+    /// 别名状态文本（"canonical" / "alias" / "pending"，规范词可为 NULL）
+    pub alias_status: Option<String>,
+    /// 指向的规范词行 id（别名/待确认词条有值；规范词自身为 NULL）
+    pub canonical_id: Option<i64>,
+    /// 指向规范词的文本（LEFT JOIN 解析；规范词自身为 None）
+    pub canonical_keyword: Option<String>,
+}
+
+// =========================================================
 // KeywordRef — 倒排索引引用枚举
 // =========================================================
 
-/// 关键词倒排引用——标识一个关键词出现在哪些业务文档中。
+/// 关键词倒排引用——标识一个关键词出现在哪些业务文档 / 词典词条中。
 ///
-/// 职责:
-/// - 支撑 `keyword_refs` 倒排索引表的类型安全映射
-/// - 供精确匹配检索（`search_exact`）和关键词溯源使用
+/// # 语义约定（M3 消费路径定稿）
 ///
-/// 变体说明:
-/// - `L1`: 关键词出现在某条 L1 摘要中
-/// - `L2`: 关键词出现在某个 L2 事件的 keywords 字段中
-/// - `Pool`: 关键词自身在 keyword_pool 中的定义（无业务文档关联）
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// - 作为 `ramaria-memory` KeywordIndex / CompositeIndex 检索结果的**文档标识**返回，
+///   调用方依据 `doc_type()` + `doc_id_text()` 回查业务文档内容（对应
+///   `keyword_refs` 表 `(doc_type, doc_id)` 的语义主键形态）。
+/// - L1 摘要以 `memory_l1.id`（uuid）为稳定标识，与 Retriever 的 `L1DocView`/DocId::L1
+///   一致；L2 事件以事件表 INTEGER 主键标识。
+/// - `Pool` 表示 keyword_pool 中的词典词条自身（无业务文档关联），用于词典 / 模糊扩展。
+///
+/// # 为什么用 enum 而非多个结构体
+///
+/// 编译期内嵌 tag + data（无虚表指针），`match` 可由编译器穷尽检查，
+/// serde 序列化友好，与既有 `keyword_refs.doc_type` 口径一一对应。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum KeywordRef {
     /// 指向 L1 摘要的引用
     L1 {
-        /// L1 摘要的 id（UUID 字符串格式）
-        id: i64,
+        /// L1 摘要 id（uuid，与 memory_l1.id 一致）
+        id: uuid::Uuid,
         /// 所属 persona 的 uid
         persona_uid: String,
     },
     /// 指向 L2 事件的引用
     L2 {
-        /// L2 事件的 id（INTEGER 主键）
+        /// L2 事件 id（事件表 INTEGER 主键）
         id: i64,
         /// 所属 persona 的 uid
         persona_uid: String,
     },
-    /// 关键词池中的词条定义（无业务文档引用）
+    /// 关键词池中的词典词条定义（无业务文档引用）
     Pool {
         /// 标准化后的关键词文本
         keyword: String,
@@ -368,15 +427,14 @@ impl KeywordRef {
         }
     }
 
-    /// 返回文档 ID（供 DB 写入使用）。
+    /// 返回业务文档 id 的文本形态（与 `keyword_refs.doc_id` 落库口径一致）。
     ///
-    /// 返回:
-    /// - `L1`/`L2`: Some(id)
-    /// - `Pool`: None（关键词池条目无文档 ID）
-    pub fn doc_id(&self) -> Option<i64> {
+    /// - `L1`/`L2`: 返回主键文本（uuid / i64）。
+    /// - `Pool`: None（词典词条无业务文档 id）。
+    pub fn doc_id_text(&self) -> Option<String> {
         match self {
-            Self::L1 { id, .. } => Some(*id),
-            Self::L2 { id, .. } => Some(*id),
+            Self::L1 { id, .. } => Some(id.to_string()),
+            Self::L2 { id, .. } => Some(id.to_string()),
             Self::Pool { .. } => None,
         }
     }
@@ -389,6 +447,166 @@ impl KeywordRef {
             }
             Self::Pool { .. } => None,
         }
+    }
+
+    /// 返回单行可读标识（用于日志，不含文档正文，符合隐私红线）。
+    pub fn label(&self) -> String {
+        match self {
+            Self::L1 { id, .. } => format!("l1:{id}"),
+            Self::L2 { id, .. } => format!("l2:{id}"),
+            Self::Pool { keyword } => format!("pool:{keyword}"),
+        }
+    }
+}
+
+// =========================================================
+// MatchStrategy — 字面匹配策略
+// =========================================================
+
+/// 关键词匹配策略——KeywordIndex 检索时使用的字面匹配口径。
+///
+/// 设计决策（keyword-design §3.5）：**去除 Prefix 匹配**——前缀匹配是 UI 层补全功能
+/// 而非索引层检索策略，子串匹配（Substring）已覆盖全部有意义的"部分匹配"需求。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum MatchStrategy {
+    /// 精确匹配：仅当查询 token 与索引 token 完全相等时命中
+    Exact,
+    /// 子串匹配：查询 token 是索引 token 的子串时命中（如查"工作"命中"工作压力"）
+    Substring,
+}
+
+impl MatchStrategy {
+    /// 返回策略的简短标识（用于日志与配置）。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::Substring => "substring",
+        }
+    }
+}
+
+// =========================================================
+// KeywordQuery — 类型安全的检索查询参数
+// =========================================================
+
+/// 关键词检索查询——携带关键词集合、persona 隔离键、匹配策略与返回上限。
+///
+/// # 字段语义
+///
+/// - `keywords`: 待检索的标准关键词集合（应为已标准化 token）。
+/// - `persona_uid`: 文档归属隔离键；`None` 表示不过滤 persona（仅在明确需要
+///   全局检索时使用，默认应显式提供 persona）。
+/// - `top_k`: 最大返回条数，构造时钳制在 `1..=MAX_TOP_K`。
+/// - `strategy`: 字面匹配策略（Exact / Substring）。
+///
+/// # 构造约定
+///
+/// 通过 `KeywordQuery::builder(persona_uid)` 构建，保证 `top_k` 恒落在合法区间，
+/// 避免调用方传入 `0` 或超大值导致边界问题。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KeywordQuery {
+    /// 待检索的关键词集合
+    pub keywords: KeywordSet,
+    /// 文档归属 persona 隔离键（None = 不过滤）
+    pub persona_uid: Option<String>,
+    /// 最大返回条数（1..=MAX_TOP_K，构造时钳制）
+    pub top_k: usize,
+    /// 字面匹配策略
+    pub strategy: MatchStrategy,
+}
+
+/// KeywordQuery.top_k 的最大合法值（上限 100，防止单次检索返回过大集合）。
+pub const MAX_QUERY_TOP_K: usize = 100;
+
+/// KeywordQuery 默认 top_k。
+const DEFAULT_TOP_K: usize = 10;
+
+impl KeywordQuery {
+    /// 创建查询构建器。
+    ///
+    /// 参数:
+    /// - `persona_uid`: 文档归属 persona（`None` 表示全局不过滤，需调用方显式确认）。
+    ///
+    /// 返回:
+    /// - 以默认参数（Exact / top_k=10）为起点的构建器。
+    pub fn builder(persona_uid: Option<String>) -> KeywordQueryBuilder {
+        KeywordQueryBuilder {
+            keywords: KeywordSet::new(),
+            persona_uid,
+            top_k: DEFAULT_TOP_K,
+            strategy: MatchStrategy::Exact,
+        }
+    }
+
+    /// 校验并钳制查询参数（内部构造完成后调用，保证不变量）。
+    fn sanitize(&mut self) {
+        self.top_k = self.top_k.clamp(1, MAX_QUERY_TOP_K);
+    }
+}
+
+/// `KeywordQuery` 类型安全构建器。
+///
+/// 用法:
+/// ```
+/// use ramaria_core::keyword::{KeywordQuery, KeywordSet, KeywordToken, MatchStrategy};
+/// let mut set = KeywordSet::new();
+/// set.insert(KeywordToken::new("工作压力").unwrap());
+/// let q = KeywordQuery::builder(Some("user-0001".into()))
+///     .with_keywords(set)
+///     .top_k(5)
+///     .strategy(MatchStrategy::Substring)
+///     .build();
+/// assert_eq!(q.top_k, 5);
+/// ```
+#[derive(Debug, Clone)]
+pub struct KeywordQueryBuilder {
+    keywords: KeywordSet,
+    persona_uid: Option<String>,
+    top_k: usize,
+    strategy: MatchStrategy,
+}
+
+impl KeywordQueryBuilder {
+    /// 设置查询关键词集合。
+    pub fn with_keywords(mut self, keywords: KeywordSet) -> Self {
+        self.keywords = keywords;
+        self
+    }
+
+    /// 从 token 迭代器设置查询关键词集合。
+    pub fn keywords_from<I: IntoIterator<Item = KeywordToken>>(mut self, iter: I) -> Self {
+        self.keywords = iter.into_iter().collect();
+        self
+    }
+
+    /// 追加单个查询关键词。
+    pub fn add_keyword(mut self, token: KeywordToken) -> Self {
+        self.keywords.insert(token);
+        self
+    }
+
+    /// 设置最大返回条数（构造时钳制到 1..=100）。
+    pub fn top_k(mut self, k: usize) -> Self {
+        self.top_k = k.clamp(1, MAX_QUERY_TOP_K);
+        self
+    }
+
+    /// 设置字面匹配策略。
+    pub fn strategy(mut self, s: MatchStrategy) -> Self {
+        self.strategy = s;
+        self
+    }
+
+    /// 构建最终查询。
+    pub fn build(self) -> KeywordQuery {
+        let mut q = KeywordQuery {
+            keywords: self.keywords,
+            persona_uid: self.persona_uid,
+            top_k: self.top_k,
+            strategy: self.strategy,
+        };
+        q.sanitize();
+        q
     }
 }
 
@@ -643,17 +861,18 @@ mod tests {
 
     // ── KeywordRef 测试 ──
 
-    /// KeywordRef 各变体的 doc_type/doc_id/persona_uid 查询
+    /// KeywordRef 各变体的 doc_type/doc_id_text/persona_uid/label 查询
     #[test]
     fn keyword_ref_variants() {
+        let l1_id = uuid::Uuid::new_v4();
         let cases = vec![
             (
                 KeywordRef::L1 {
-                    id: 123,
+                    id: l1_id,
                     persona_uid: "p1".to_string(),
                 },
                 "l1",
-                Some(123),
+                Some(l1_id.to_string()),
                 Some("p1"),
             ),
             (
@@ -662,7 +881,7 @@ mod tests {
                     persona_uid: "p2".to_string(),
                 },
                 "l2",
-                Some(456),
+                Some("456".to_string()),
                 Some("p2"),
             ),
             (
@@ -676,8 +895,14 @@ mod tests {
         ];
         for (r, dt, did, pu) in cases {
             assert_eq!(r.doc_type(), dt);
-            assert_eq!(r.doc_id(), did);
+            assert_eq!(r.doc_id_text(), did);
             assert_eq!(r.persona_uid(), pu);
+            // label 用于日志，前缀应与 doc_type 一致
+            assert!(
+                r.label().starts_with(dt),
+                "label 应带 {dt} 前缀: {}",
+                r.label()
+            );
         }
     }
 
@@ -686,7 +911,7 @@ mod tests {
     fn keyword_ref_serde_roundtrip() {
         let cases = vec![
             KeywordRef::L1 {
-                id: 1,
+                id: uuid::Uuid::new_v4(),
                 persona_uid: "u1".into(),
             },
             KeywordRef::L2 {
@@ -702,5 +927,100 @@ mod tests {
             let deserialized: KeywordRef = serde_json::from_str(&json).unwrap();
             assert_eq!(r, deserialized, "JSON 往返失败: {}", json);
         }
+    }
+
+    /// KeywordRef::label 不含文档正文（隐私：仅类型 + 主键）
+    #[test]
+    fn keyword_ref_label_has_no_summary_text() {
+        let r = KeywordRef::L2 {
+            id: 7,
+            persona_uid: "user-0001".into(),
+        };
+        assert_eq!(r.label(), "l2:7");
+    }
+
+    // ── MatchStrategy 测试 ──
+
+    /// MatchStrategy 仅 Exact/Substring（无 Prefix），as_str 稳定
+    #[test]
+    fn match_strategy_variants() {
+        assert_eq!(MatchStrategy::Exact.as_str(), "exact");
+        assert_eq!(MatchStrategy::Substring.as_str(), "substring");
+        assert_ne!(MatchStrategy::Exact, MatchStrategy::Substring);
+    }
+
+    /// MatchStrategy serde 往返
+    #[test]
+    fn match_strategy_serde_roundtrip() {
+        for s in [MatchStrategy::Exact, MatchStrategy::Substring] {
+            let json = serde_json::to_string(&s).unwrap();
+            let back: MatchStrategy = serde_json::from_str(&json).unwrap();
+            assert_eq!(s, back);
+        }
+    }
+
+    // ── KeywordQuery 测试 ──
+
+    /// 默认构建参数：Exact / top_k=10 / persona 透传
+    #[test]
+    fn keyword_query_builder_defaults() {
+        let q = KeywordQuery::builder(Some("user-0001".into())).build();
+        assert_eq!(q.strategy, MatchStrategy::Exact);
+        assert_eq!(q.top_k, 10);
+        assert_eq!(q.persona_uid.as_deref(), Some("user-0001"));
+        assert!(q.keywords.is_empty());
+    }
+
+    /// top_k 钳制：0 / 超大值都收敛到 1..=100
+    #[test]
+    fn keyword_query_top_k_clamped() {
+        let low = KeywordQuery::builder(None).top_k(0).build();
+        assert_eq!(low.top_k, 1);
+        let high = KeywordQuery::builder(None).top_k(9999).build();
+        assert_eq!(high.top_k, MAX_QUERY_TOP_K);
+        let ok = KeywordQuery::builder(None).top_k(50).build();
+        assert_eq!(ok.top_k, 50);
+    }
+
+    /// 关键词集合与策略可配置
+    #[test]
+    fn keyword_query_full_build() {
+        let mut set = KeywordSet::new();
+        set.insert(KeywordToken::new("工作压力").unwrap());
+        set.insert(KeywordToken::new("加班").unwrap());
+        let q = KeywordQuery::builder(Some("user-1".into()))
+            .with_keywords(set)
+            .strategy(MatchStrategy::Substring)
+            .top_k(5)
+            .build();
+        assert_eq!(q.keywords.len(), 2);
+        assert_eq!(q.strategy, MatchStrategy::Substring);
+        assert_eq!(q.top_k, 5);
+    }
+
+    /// builder.keywords_from / add_keyword 便捷路径
+    #[test]
+    fn keyword_query_token_collection_helpers() {
+        let q = KeywordQuery::builder(None)
+            .keywords_from(vec![
+                KeywordToken::new("A").unwrap(),
+                KeywordToken::new("B").unwrap(),
+                KeywordToken::new("A").unwrap(), // 去重
+            ])
+            .add_keyword(KeywordToken::new("C").unwrap())
+            .build();
+        assert_eq!(q.keywords.len(), 3);
+    }
+
+    /// KeywordQuery serde 往返（构造钳制后不变量保持）
+    #[test]
+    fn keyword_query_serde_roundtrip() {
+        let q = KeywordQuery::builder(Some("p".into()))
+            .keywords_from(vec![KeywordToken::new("测试").unwrap()])
+            .top_k(3)
+            .build();
+        let json = serde_json::to_string(&q).unwrap();
+        let back: KeywordQuery = serde_json::from_str(&json).unwrap();
+        assert_eq!(q, back);
     }
 }

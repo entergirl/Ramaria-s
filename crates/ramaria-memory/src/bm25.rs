@@ -1,40 +1,43 @@
 //! crates/ramaria-memory/src/bm25.rs — BM25 全文检索引擎
 //!
 //! 设计特点:
-//! - 中文字符二元组（bigram）分词 + 英文按空白/标点切分，零外部依赖
+//! - 分词默认中文字符二元组（bigram）+ 英文按字母边界切分，零外部依赖
 //! - 标准 Okapi BM25 算法：k1=1.2, b=0.75
 //! - 在内存中构建倒排索引（term→doc→tf），支持增量添加/移除文档
-//! - 索引可序列化为 JSON 持久化到 bm25_index 表
+//! - 分词器为**实例级配置**：`Bm25Index` 默认空词典（=纯 bigram），可注入
+//!   keyword_pool 规范词启用词典增强分词（整词命中、消除跨词噪声）
 //! - 纯计算模块，零 I/O，不依赖数据库或异步运行时
 //!
 //! 设计决策（不依赖 jieba-rs）:
 //! - jieba-rs 依赖 C 编译环境，跨平台打包复杂
 //! - 中文 bigram 分词在 BM25 场景下效果与 jieba 分词相当（信息检索领域已验证）
 //! - 英文 token 按 Unicode 字母边界切分并小写化
-//! - 接入真实分词器时可替换为 Tokenizer trait
+//! - 分词统一委托 `keyword::normalizer` 标准化器，与 example_selector 共用同一
+//!   解析实现；`BigramWithDictionaryNormalizer` 空词典时与 `BigramNormalizer`
+//!   逐 token 等价，故默认路径行为恒定。
 
+use crate::keyword::normalizer::{
+    BigramNormalizer, BigramWithDictionaryNormalizer, KeywordNormalizer,
+};
 use std::collections::HashMap;
 
 // =========================================================
 // 分词器
 // =========================================================
 
-/// 中文/英文混合分词器。
+/// 中文/英文混合分词器（统一标准化器入口，keyword-design §4.5）。
 ///
-/// 策略:
+/// # 语义（由 `BigramNormalizer` 保证，与原内联实现逐字等价）
+///
 /// - 中文（ CJK 统一表意文字区段 U+4E00–U+9FFF，扩展 A 区 U+3400–U+4DBF）：
 ///   生成相邻字符二元组（bigram），如 "机器学习" → ["机器", "器学", "学习"]
-/// - 英文/数字：按 Unicode 字母/数字边界切分，小写化，过滤长度 < 2 的 token
+/// - 英文/数字：按 Unicode 字母/数字边界切分，小写化，过滤长度 < 2 **字节**的 token
 /// - 标点/空白：丢弃
+/// - 输出保持原始顺序且**不去重**（供 BM25 tf 统计）
 ///
-/// 与 `prompt::example_selector::extract_keywords` 的关系（v1.5 审查批 2）:
-/// - 两者主体逻辑（CJK bigram + 英文小写切分）几乎逐行相同，但**保留两处不合并**:
-///   1. 长度过滤阈值不同：本函数按 UTF-8 **字节数**（`buf.len() >= 2`）过滤，
-///      `extract_keywords` 按 **字符数**（`chars().count() >= 2`，小写化后）过滤——
-///      对独立多字节非 CJK 字母（如 "é"）二者输出集不同（本函数输出，example_selector 丢弃）。
-///   2. 输出形式不同：本函数保持原始顺序且**不去重**（供 BM25 tf 统计）；
-///      `extract_keywords` 排序并去重（供示例筛选关键词集合）。
-/// - 如需统一，需先对齐长度过滤阈值与去重语义（会改变本函数分词结果集）。
+/// 与 `prompt::example_selector::extract_keywords` 的关系（v1.5 审查批 2 / M3 收拢）:
+/// - 两者分词均委托 `BigramNormalizer`；差异仅保留在**消费侧后处理**：
+///   `extract_keywords` 排序去重并按字符数过滤（≥2），本函数保留字节数口径且不去重。
 ///
 /// 示例:
 /// ```rust
@@ -46,48 +49,11 @@ use std::collections::HashMap;
 /// assert!(tokens.contains(&"rust".to_string()));
 /// ```
 pub fn tokenize(text: &str) -> Vec<String> {
-    if text.is_empty() {
-        return Vec::new();
-    }
-
-    let chars: Vec<char> = text.chars().collect();
-    let mut tokens = Vec::with_capacity(chars.len() * 2);
-    let mut alpha_buf = String::with_capacity(32);
-
-    let flush_alpha = |buf: &mut String, out: &mut Vec<String>| {
-        if buf.len() >= 2 {
-            out.push(buf.to_lowercase());
-        }
-        buf.clear();
-    };
-
-    let is_cjk =
-        |c: char| -> bool { matches!(c, '\u{4E00}'..='\u{9FFF}' | '\u{3400}'..='\u{4DBF}') };
-
-    let is_alpha = |c: char| -> bool { c.is_alphanumeric() };
-
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
-
-        if is_cjk(c) {
-            flush_alpha(&mut alpha_buf, &mut tokens);
-            // 生成 bigram
-            if i + 1 < chars.len() && is_cjk(chars[i + 1]) {
-                let bigram: String = [c, chars[i + 1]].iter().collect();
-                tokens.push(bigram);
-            }
-            i += 1;
-        } else if is_alpha(c) {
-            alpha_buf.push(c);
-            i += 1;
-        } else {
-            flush_alpha(&mut alpha_buf, &mut tokens);
-            i += 1;
-        }
-    }
-    flush_alpha(&mut alpha_buf, &mut tokens);
-    tokens
+    BigramNormalizer
+        .normalize(text)
+        .into_iter()
+        .map(|t| t.into_inner())
+        .collect()
 }
 
 /// 对文本字段列表进行分词并合并去重。
@@ -160,6 +126,11 @@ struct Bm25Doc {
 /// - 维护文档集合的倒排索引
 /// - 提供 BM25 评分查询
 /// - 支持增量添加和移除文档
+/// - 承载**实例级**分词器（默认空词典 = 纯 bigram，可注入词典增强分词）
+///
+/// 字段约定:
+/// - `tokenizer`: 索引侧（`add_tokenized`）与查询侧（`search`）共用同一分词器，
+///   保证索引/查询口径一致；空词典时与 `BigramNormalizer` 逐 token 等价。
 #[derive(Debug, Clone, Default)]
 pub struct Bm25Index {
     /// 文档记录：doc_id → 文档内部表示
@@ -168,12 +139,45 @@ pub struct Bm25Index {
     df: HashMap<String, u32>,
     /// 所有文档的总词数之和
     total_tokens: u32,
+    /// 实例级分词器：空词典（默认）退化为纯 bigram
+    tokenizer: BigramWithDictionaryNormalizer,
 }
 
 impl Bm25Index {
-    /// 创建空的 BM25 索引。
+    /// 创建空的 BM25 索引（默认纯 bigram 分词，行为与 `tokenize` 自由函数一致）。
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 使用词典增强分词创建 BM25 索引。
+    ///
+    /// 参数:
+    /// - `keywords`: keyword_pool 规范词列表（可为空；空词典退化为纯 bigram）。
+    ///
+    /// 说明:
+    /// - 索引与查询统一按词典整词匹配，消除 bigram 跨词噪声（如 "作压"）。
+    pub fn with_dictionary(keywords: &[String]) -> Self {
+        Self {
+            tokenizer: BigramWithDictionaryNormalizer::from_dictionary(keywords),
+            ..Self::default()
+        }
+    }
+
+    /// 替换实例分词词典（供重建/热更新复用同一索引实例）。
+    ///
+    /// 参数:
+    /// - `keywords`: keyword_pool 规范词列表（空 = 清除词典，退化为纯 bigram）。
+    ///
+    /// 说明:
+    /// - 仅影响后续 `add_tokenized` / `search` 的分词口径；已添加的文档记录
+    ///   不会自动重分词，需由调用方在重建场景下清空后重新添加。
+    pub fn set_dictionary(&mut self, keywords: &[String]) {
+        self.tokenizer = BigramWithDictionaryNormalizer::from_dictionary(keywords);
+    }
+
+    /// 词典是否为空（空词典时索引/查询分词与纯 bigram 完全一致）。
+    pub fn dictionary_is_empty(&self) -> bool {
+        self.tokenizer.is_empty()
     }
 
     /// 返回索引中的文档总数。
@@ -226,11 +230,30 @@ impl Bm25Index {
 
     /// 通过分词后的 token 列表添加文档。
     ///
-    /// `tokenize_fields` 的输出 `Vec<String>` 直接移动所有权到 `add`，
-    /// 消除中间 clone 开销。
+    /// 说明:
+    /// - 使用索引实例当前分词器对字段文本分词（默认 = `tokenize_fields` 自由函数
+    ///   的纯 bigram 口径；注入词典后为词典增强口径），随后移动所有权到 `add`。
     pub fn add_tokenized(&mut self, doc_id: DocId, fields: &[&str]) {
-        let tokens = tokenize_fields(fields);
+        let tokens = self.tokenize_fields_with(fields);
         self.add(doc_id, tokens);
+    }
+
+    /// 按实例分词器对单段文本分词（索引与查询共用，保证口径一致）。
+    fn tokenize_with(&self, text: &str) -> Vec<String> {
+        self.tokenizer
+            .normalize(text)
+            .into_iter()
+            .map(|t| t.into_inner())
+            .collect()
+    }
+
+    /// 按实例分词器对字段列表分词并合并（不去重，供 BM25 词频统计）。
+    fn tokenize_fields_with(&self, fields: &[&str]) -> Vec<String> {
+        let mut all = Vec::new();
+        for field in fields {
+            all.extend(self.tokenize_with(field));
+        }
+        all
     }
 
     /// 移除一篇文档。
@@ -263,9 +286,12 @@ impl Bm25Index {
     ///
     /// 公式: score(D,Q) = Σ_{t∈Q∩D} IDF(t) · (f(t,D)·(k1+1)) / (f(t,D) + k1·(1−b + b·|D|/avgdl))
     ///
+    /// 说明:
+    /// - 查询按索引实例当前分词器切分（与索引构建口径一致；默认 = 纯 bigram）。
+    ///
     /// 返回按得分降序排列的列表。
     pub fn search(&self, query: &str, config: &Bm25Config) -> Vec<(DocId, f64)> {
-        let query_tokens = tokenize(query);
+        let query_tokens = self.tokenize_with(query);
         if query_tokens.is_empty() || self.docs.is_empty() {
             return Vec::new();
         }
@@ -483,5 +509,78 @@ mod tests {
 
         let display = DocId::L2(42).to_string();
         assert_eq!(display, "L2:42");
+    }
+
+    // ---- 词典增强分词迁移（默认无词典=现状回归 / 有词典=整词口径）----
+
+    /// 无词典默认路径回归：索引实例分词与自由函数 `tokenize`/`tokenize_fields` 逐 token 一致。
+    #[test]
+    fn default_no_dictionary_matches_free_tokenize() {
+        let index = Bm25Index::new();
+        assert!(index.dictionary_is_empty(), "默认分词器应为空词典");
+        assert!(
+            Bm25Index::with_dictionary(&[]).dictionary_is_empty(),
+            "空词典应退化"
+        );
+
+        let text = "最近工作压力很大";
+        let fields = [text, "学习Rust"];
+        assert_eq!(index.tokenize_with(text), tokenize(text));
+        assert_eq!(
+            index.tokenize_fields_with(&fields),
+            tokenize_fields(&fields)
+        );
+    }
+
+    /// 有词典时：文档整词命中、查询按整词切分、跨词噪声（如 "作压"）不再命中。
+    #[test]
+    fn dictionary_keeps_whole_word_and_removes_noise() {
+        let dict = ["工作压力".to_string()];
+        let mut index = Bm25Index::with_dictionary(&dict);
+        let config = Bm25Config::default();
+        let doc_id = DocId::L1(uuid::Uuid::new_v4());
+        index.add_tokenized(doc_id.clone(), &["工作压力很大"]);
+
+        // token 分布：词典整词 + 尾部 bigram，无跨词噪声
+        let tokens = index.tokenize_fields_with(&["工作压力很大"]);
+        assert!(tokens.contains(&"工作压力".to_string()));
+        assert!(tokens.contains(&"很大".to_string()));
+        assert!(
+            !tokens.contains(&"作压".to_string()),
+            "词典命中后不得产生跨词噪声 token"
+        );
+
+        // 查询 "工作压力" 整词命中；噪声 "作压" 不命中（纯 bigram 口径会命中）
+        let hit = index.search("工作压力", &config);
+        assert_eq!(hit.len(), 1, "整词查询应命中一篇文档");
+        assert_eq!(hit[0].0, doc_id);
+        assert!(
+            index.search("作压", &config).is_empty(),
+            "索引无噪声 token 时 '作压' 不应命中"
+        );
+    }
+
+    /// 词典热更新：重建场景先 set_dictionary 再覆盖文档，口径切换后噪声消失。
+    #[test]
+    fn set_dictionary_switches_tokenizer_on_rebuild() {
+        let mut index = Bm25Index::new();
+        let config = Bm25Config::default();
+        let doc_id = DocId::L1(uuid::Uuid::new_v4());
+
+        // 旧版本（纯 bigram）口径：噪声 "作压" 可命中
+        index.add_tokenized(doc_id.clone(), &["工作压力很大"]);
+        assert!(
+            !index.search("作压", &config).is_empty(),
+            "bigram 口径下 '作压' 应能命中（旧版行为基线）"
+        );
+
+        // 迁移：注入词典 → 覆盖重建同一文档 → 口径切为词典增强
+        index.set_dictionary(&["工作压力".to_string()]);
+        index.add_tokenized(doc_id.clone(), &["工作压力很大"]);
+        assert!(
+            index.search("作压", &config).is_empty(),
+            "词典口径下噪声命中应消失"
+        );
+        assert_eq!(index.search("工作压力", &config).len(), 1);
     }
 }

@@ -11,7 +11,9 @@
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::traits::{LlmProvider, StorageBackend};
 use ramaria_memory::job::{JobManager, JobResult, JobType};
+use ramaria_memory::keyword::KeywordNormalizer;
 use ramaria_memory::l1::{L1Summarizer, L1SummarizerConfig};
+use ramaria_memory::retriever::L1DocView;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -320,6 +322,7 @@ impl SessionLifecycle {
     ///   即可被 Stage 5 RAG 检索命中（决策见 docs/dev-1.2/v1.2-decisions.md）。
     /// - embedding 可用时为摘要生成向量并写入向量索引（此前增量路径不写向量，
     ///   导致新 L1 仅 BM25 可检索；全量 rebuild 才入向量索引）。
+    /// - 同钩子同步维护关键词服务镜像（倒排 + 词典池），镜像侧增强不改变检索输出。
     ///
     /// 容错（静默降级）:
     /// - Retriever 未注入（向后兼容）→ 静默跳过。
@@ -331,6 +334,15 @@ impl SessionLifecycle {
     pub(super) async fn index_l1_into_retriever(&self, l1: &ramaria_core::types::MemoryL1) {
         // 生成向量（embedding 可用时；失败/不可用 → None，BM25 检索不阻塞）
         let vector = self.embed_summary_vector(&l1.summary).await;
+        let doc = L1DocView {
+            id: l1.id,
+            summary: l1.summary.clone(),
+            keywords: l1.keywords.clone(),
+            persona_uid: l1.persona_uid.clone(),
+            created_at: l1.created_at,
+            salience: l1.salience,
+            last_accessed_at: l1.last_accessed_at,
+        };
 
         let ret_guard = match self.retriever.lock() {
             Ok(g) => g,
@@ -343,15 +355,6 @@ impl SessionLifecycle {
             // RwLock write() 用于索引写入（index_l1_with_vector 需要 &mut self）
             match retriever_arc.write() {
                 Ok(mut retriever) => {
-                    let doc = ramaria_memory::retriever::L1DocView {
-                        id: l1.id,
-                        summary: l1.summary.clone(),
-                        keywords: l1.keywords.clone(),
-                        persona_uid: l1.persona_uid.clone(),
-                        created_at: l1.created_at,
-                        salience: l1.salience,
-                        last_accessed_at: l1.last_accessed_at,
-                    };
                     retriever.index_l1_with_vector(&doc, vector);
                     info!(
                         l1_id = %l1.id,
@@ -364,6 +367,45 @@ impl SessionLifecycle {
                 }
             }
         }
+        // 关键词服务镜像增量（与 Retriever 同钩子；失败仅 warn 不阻塞主流程）
+        self.index_l1_into_keyword_service(&doc);
+    }
+
+    /// 将 L1 文档增量同步到关键词服务镜像（倒排文档 + 词典池累积）。
+    ///
+    /// 容错（静默降级，镜像侧增强）:
+    /// - KeywordService 未注入 → 静默跳过（等同旧版行为）。
+    /// - 锁污染 → warn 日志 + 跳过。
+    /// - 镜像维护为纯内存操作，不可失败；异常仅记 warn，不阻塞 L1 生成主流程。
+    fn index_l1_into_keyword_service(&self, doc: &L1DocView) {
+        let service = match self.keyword_service.lock() {
+            Ok(g) => g.clone(),
+            Err(e) => {
+                warn!("keyword_service lock poisoned during index_l1_into_keyword_service: {e}");
+                return;
+            }
+        };
+        let Some(service_arc) = service else {
+            return; // 未注入（向后兼容）
+        };
+        let mut guard = match service_arc.write() {
+            Ok(g) => g,
+            Err(e) => {
+                warn!("keyword_service 内部 Mutex poisoned: {e}");
+                return;
+            }
+        };
+        // 词典池累积：解析文档 keywords 字段（逗号分隔串）为标准化 token
+        let tokens = ramaria_memory::keyword::CommaSeparatedNormalizer
+            .normalize(doc.keywords.as_deref().unwrap_or(""));
+        guard.index_l1(doc);
+        guard.upsert_pool_tokens(&tokens, ramaria_core::types::now_ms());
+        info!(
+            l1_id = %doc.id,
+            token_count = tokens.len(),
+            persona_uid = ?doc.persona_uid,
+            "L1 摘要已镜像增量到关键词服务（倒排 + 词典池）"
+        );
     }
 
     /// 为 L1 摘要文本生成向量（embedding 可用时）。
@@ -578,5 +620,71 @@ mod tests {
         let results = guard.search(&req, None);
         assert!(!results.is_empty());
         assert!(results.iter().any(|sr| sr.doc_summary.contains("Rust")));
+    }
+
+    /// L1 摘要生成后的增量钩子同步维护关键词服务镜像（倒排 + 词典池）。
+    ///
+    /// 验证:
+    /// - 注入 KeywordService 后，`index_l1_into_retriever` 同步把该 L1 索引进镜像；
+    /// - 镜像词典池按 keywords 字段解析的 token 累积；
+    /// - 镜像文档可被关键词查询命中（persona 隔离正确）。
+    #[tokio::test]
+    async fn index_l1_into_retriever_syncs_keyword_service_mirror() {
+        let config = RamariaConfig::default();
+        let lifecycle = SessionLifecycle::new(config);
+
+        let retriever = Arc::new(RwLock::new(Retriever::new()));
+        let keyword_service = Arc::new(RwLock::new(ramaria_memory::keyword::KeywordService::new()));
+        lifecycle.set_retriever(Arc::clone(&retriever));
+        lifecycle.set_keyword_service(Arc::clone(&keyword_service));
+
+        let l1 = ramaria_core::types::MemoryL1 {
+            id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            summary: "用户最近工作压力很大，提到职场焦虑".to_string(),
+            keywords: Some("工作压力,职场焦虑".to_string()),
+            time_period: None,
+            atmosphere: None,
+            valence: 0.5,
+            salience: 0.8,
+            absorbed: false,
+            created_at: 1718000000000,
+            last_accessed_at: None,
+            persona_uid: Some("rama-0001".to_string()),
+            context_json: None,
+            situation_strength: None,
+            evidence_notes: None,
+            continuation: None,
+        };
+
+        lifecycle.index_l1_into_retriever(&l1).await;
+
+        // Retriever 与关键词镜像同步各含一条文档
+        assert_eq!(
+            retriever.read().unwrap().doc_count(),
+            1,
+            "Retriever 应索引该 L1"
+        );
+        let guard = keyword_service.read().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(guard.doc_count(), 1, "关键词镜像应含该 L1 文档");
+        assert_eq!(
+            guard.pool_len(),
+            2,
+            "词典池应累积 keywords 解析出的 2 个 token"
+        );
+        drop(guard);
+
+        // 镜像文档可被关键词查询命中（persona 限定）
+        let guard = keyword_service.read().unwrap_or_else(|e| e.into_inner());
+        let q = ramaria_core::keyword::KeywordQuery::builder(Some("rama-0001".to_string()))
+            .keywords_from(
+                ["工作压力"]
+                    .iter()
+                    .filter_map(|s| ramaria_core::keyword::KeywordToken::new(s)),
+            )
+            .top_k(5)
+            .build();
+        let hits = guard.composite().query(&q, None).await;
+        assert_eq!(hits.len(), 1, "增量 L1 应能被关键词查询命中");
     }
 }

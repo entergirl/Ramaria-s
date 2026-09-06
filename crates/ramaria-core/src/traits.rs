@@ -18,6 +18,7 @@ use uuid::Uuid;
 
 use crate::behavior::{BehaviorRule, FeedbackLog};
 use crate::error::RamariaResult;
+use crate::keyword::KeywordPoolRow;
 use crate::types::{
     BackendConfig, ClusterSnapshot, EventRelation, EventSource, MemoryEvent, MemoryL1, Message,
     MessageRole, ModelCapability, Persona, PersonaExample, PersonaFact, PersonaStyleStats,
@@ -869,7 +870,40 @@ pub trait StoreCrud: Send + Sync {
     // -- Keyword Pool --
     async fn upsert_keyword(&self, keyword: &str) -> RamariaResult<()>;
     async fn list_keywords(&self) -> RamariaResult<Vec<String>>;
+
+    /// 列出 keyword_pool 全部规范词文本（canonical_id IS NULL 的词条）。
+    ///
+    /// 用途: BM25 词典增强分词装载（keyword_pool 规范词 → 分词词典）。
+    /// 默认实现返回空列表（存量 mock 无需实现即可编译）。
+    async fn list_canonical_keywords(&self) -> RamariaResult<Vec<String>> {
+        Ok(Vec::new())
+    }
+
+    /// 列出 keyword_pool 全部词条行（含 rowid / 别名状态 / 规范词指向）。
+    ///
+    /// 用途: KeywordService 装载内存词典镜像（keyword_pool → KeywordPool 三态状态机）。
+    /// 默认实现返回空列表（存量 mock 无需实现即可编译）。
+    async fn list_keyword_pool_entries(&self) -> RamariaResult<Vec<KeywordPoolRow>> {
+        Ok(Vec::new())
+    }
 }
+
+// =========================================================
+// BM25 词典增强分词版本（settings 表键 + 版本号）
+// =========================================================
+
+/// settings 表键：BM25 词典增强分词的迁移版本。
+///
+/// 说明:
+/// - 仅与 BM25 索引的分词口径（纯 bigram / 词典增强）相关；
+///   与 schema_meta.index_version（记忆检索索引是否构建过）互不混用。
+pub const SETTING_BM25_INDEX_VERSION: &str = "bm25_index_version";
+
+/// BM25 分词旧版本：纯 bigram（settings 缺失/不可解析视为本版本）。
+pub const BM25_INDEX_VERSION_LEGACY: i32 = 1;
+
+/// BM25 分词当前版本：词典增强（keyword_pool 规范词注入）。
+pub const BM25_INDEX_VERSION_CURRENT: i32 = 2;
 
 /// 存储后端抽象 trait（基础设施/系统分组）。
 ///
@@ -929,6 +963,26 @@ pub trait StoreInfrastructure: Send + Sync {
     async fn get_setting(&self, key: &str) -> RamariaResult<Option<String>>;
     async fn set_setting(&self, key: &str, value: &str) -> RamariaResult<()>;
     async fn list_settings(&self) -> RamariaResult<Vec<(String, String)>>;
+
+    // -- BM25 词典增强分词版本 --
+    /// 读取 BM25 分词版本（settings 键 `bm25_index_version`）。
+    ///
+    /// 说明:
+    /// - 键缺失 / 值不可解析均视为旧版本 [`BM25_INDEX_VERSION_LEGACY`]（=1），
+    ///   表示索引仍为纯 bigram 口径，需要迁移到词典增强。
+    async fn get_bm25_index_version(&self) -> RamariaResult<i32> {
+        Ok(self
+            .get_setting(SETTING_BM25_INDEX_VERSION)
+            .await?
+            .and_then(|raw| raw.parse::<i32>().ok())
+            .unwrap_or(BM25_INDEX_VERSION_LEGACY))
+    }
+
+    /// 写入 BM25 分词版本（settings 键 `bm25_index_version`）。
+    async fn set_bm25_index_version(&self, version: i32) -> RamariaResult<()> {
+        self.set_setting(SETTING_BM25_INDEX_VERSION, &version.to_string())
+            .await
+    }
 
     // =========================================================
     // L2 聚类去重指纹

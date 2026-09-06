@@ -27,6 +27,7 @@ use ramaria_core::config::RamariaConfig;
 use ramaria_core::error::RamariaResult;
 use ramaria_core::traits::{EmbeddingProvider, LlmProvider, StorageBackend};
 use ramaria_core::types::now_ms;
+use ramaria_memory::keyword::KeywordService;
 use ramaria_memory::retriever::Retriever;
 use ramaria_memory::utt::builder::UttBuilder;
 use tracing::{debug, error, info, warn};
@@ -66,6 +67,13 @@ pub struct SessionLifecycle {
     pub(crate) idle_minutes: Arc<AtomicU32>,
     /// 内存检索器引用（L1 生成后增量更新），None 表示未注入（向后兼容）
     pub(crate) retriever: Mutex<Option<Arc<RwLock<Retriever>>>>,
+    /// 关键词服务引用（L1 生成后镜像增量），None 表示未注入（向后兼容）
+    ///
+    /// 职责:
+    /// - 与 Retriever 同钩子同步维护 KeywordService 镜像（倒排 + 词典池），
+    ///   仅内存镜像、不参与 Chat / Retriever 检索主链（镜像侧增强）。
+    /// - None = 未注册（旧构造路径 / 测试直构），L1 生成后不触发关键词镜像增量。
+    pub(crate) keyword_service: Mutex<Option<Arc<RwLock<KeywordService>>>>,
     /// embedding provider 引用（utt 块向量生成），None 表示未配置（块无向量）
     pub(crate) embedding: Mutex<Option<Arc<dyn EmbeddingProvider>>>,
     /// 行为层封存钩子（v1.5 M5 D6）：会话封存时触发行为规则增量更新。
@@ -108,6 +116,7 @@ impl SessionLifecycle {
             shutdown_flag: Arc::new(AtomicBool::new(false)),
             idle_minutes: Arc::new(AtomicU32::new(idle_minutes)),
             retriever: Mutex::new(None),
+            keyword_service: Mutex::new(None),
             embedding: Mutex::new(None),
             behavior_hook: Mutex::new(None),
             style_hook: Mutex::new(None),
@@ -159,6 +168,23 @@ impl SessionLifecycle {
         });
         *guard = Some(r);
         info!("SessionLifecycle: Retriever 引用已注入，L1 增量索引已启用");
+    }
+
+    /// 注入关键词服务引用（L1 生成后镜像增量）。
+    ///
+    /// 调用时机:
+    /// - 在 `App::new` 中，`KeywordService` 创建完成后立即调用。
+    ///
+    /// 说明:
+    /// - 与 [`set_retriever`] 同钩子注册：L1 摘要生成成功后同步维护关键词镜像。
+    /// - 未注入时 L1 生成行为与旧版完全一致（关键词镜像为空，不改变检索）。
+    pub fn set_keyword_service(&self, service: Arc<RwLock<KeywordService>>) {
+        let mut guard = self.keyword_service.lock().unwrap_or_else(|e| {
+            error!("keyword_service lock poisoned during set_keyword_service: {e}");
+            e.into_inner()
+        });
+        *guard = Some(service);
+        info!("SessionLifecycle: KeywordService 引用已注入，L1 关键词镜像增量已启用");
     }
 
     /// 注入 embedding provider 引用（utt 块向量生成）。

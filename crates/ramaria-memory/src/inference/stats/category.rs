@@ -12,6 +12,7 @@
 use super::config::{CalibratedWeightConfig, CategoryStats, EventEnrichment, MotiveStats};
 use super::weighted::{weighted_mean, weighted_ratio, weighted_variance};
 use super::weights::{compute_calibrated_weight, compute_simple_weights_batch};
+use crate::keyword::normalizer::{CommaSeparatedNormalizer, KeywordNormalizer};
 use ramaria_core::types::{MemoryEvent, Presentation};
 
 // =========================================================
@@ -20,9 +21,9 @@ use ramaria_core::types::{MemoryEvent, Presentation};
 
 /// 从事件的关键词中提取主分类标签。
 ///
-/// 策略:
-/// - 取 keywords 逗号分隔后的第一个非空标签作为主分类。
-/// - 若 keywords 为 None 或为空串，返回 "未分类"。
+/// 策略（M3 T-V20-3-002 收拢重复解析）:
+/// - 经 `CommaSeparatedNormalizer` 规范化关键词列表后取首个标签作为主分类。
+/// - 若 keywords 为 None / 空串 / 全纯标点，返回 "未分类"。
 ///
 /// 参数:
 /// - `event`: 待提取分类的事件。
@@ -34,12 +35,11 @@ pub fn extract_primary_category(event: &MemoryEvent) -> String {
         .keywords
         .as_ref()
         .and_then(|kw| {
-            let first = kw.split(',').next().unwrap_or("").trim();
-            if first.is_empty() {
-                None
-            } else {
-                Some(first.to_string())
-            }
+            CommaSeparatedNormalizer
+                .normalize(kw)
+                .into_iter()
+                .next()
+                .map(|t| t.into_inner())
         })
         .unwrap_or_else(|| "未分类".to_string())
 }

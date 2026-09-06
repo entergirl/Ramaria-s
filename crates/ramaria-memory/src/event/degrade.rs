@@ -10,6 +10,7 @@
 //! - `dynamic_confidence_enabled=false` 时回退固定 `default_confidence`（0.5）
 //! - 纯函数，不依赖 LLM 或存储
 
+use crate::keyword::normalizer::{CommaSeparatedNormalizer, KeywordNormalizer};
 use ramaria_core::types::{MemoryEvent, MemoryL1, Presentation, now_ms};
 
 // =========================================================
@@ -221,19 +222,18 @@ fn build_degraded_summary(l1_list: &[MemoryL1], max_chars: usize) -> String {
 ///
 /// 格式: 去重后的逗号分隔列表。
 ///
-/// 使用 `HashSet` 进行 O(1) 去重，替代原来的 `Vec::contains` O(n²) 实现。
-/// 降级路径仅在 LLM JSON 解析失败时调用，每次最多约 20 条 L1 记录，
-/// 性能影响极小，但 HashSet 语义更清晰。
+/// M3（T-V20-3-002）起逐条 L1 的 keywords 统一经 `CommaSeparatedNormalizer`
+/// 标准化（中英文逗号 / trim / ASCII 小写 / 去重 / 纯标点过滤），跨 L1 再按
+/// 标准化文本聚合去重，排序输出以保证稳定（便于测试）。
+/// 降级路径仅在 LLM JSON 解析失败时调用，每次最多约 20 条 L1 记录，性能影响极小。
 fn build_degraded_keywords(l1_list: &[MemoryL1]) -> Option<String> {
     use std::collections::HashSet;
+    let normalizer = CommaSeparatedNormalizer;
     let mut all_kw: HashSet<String> = HashSet::new();
     for l1 in l1_list {
-        if let Some(ref kws) = l1.keywords {
-            for kw in kws.split(',') {
-                let kw = kw.trim();
-                if !kw.is_empty() {
-                    all_kw.insert(kw.to_string());
-                }
+        if let Some(kws) = l1.keywords.as_deref() {
+            for token in normalizer.normalize(kws) {
+                all_kw.insert(token.into_inner());
             }
         }
     }
@@ -241,16 +241,9 @@ fn build_degraded_keywords(l1_list: &[MemoryL1]) -> Option<String> {
     if all_kw.is_empty() {
         None
     } else {
-        // 转为 Vec 后排序以保证输出稳定（便于测试）
-        let mut sorted: Vec<&String> = all_kw.iter().collect();
+        let mut sorted: Vec<String> = all_kw.into_iter().collect();
         sorted.sort();
-        Some(
-            sorted
-                .into_iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join(", "),
-        )
+        Some(sorted.join(", "))
     }
 }
 

@@ -205,7 +205,11 @@ pub use inference::{
 };
 
 // Keyword 关键词处理
-pub use keyword::AliasManager;
+pub use keyword::{
+    AliasConflict, AliasManager, BigramNormalizer, BigramWithDictionaryNormalizer,
+    CommaSeparatedNormalizer, CompositeIndex, CompositeIndexConfig, DefaultScoringStrategy,
+    FuzzyKeywordIndex, KeywordIndex, KeywordNormalizer, KeywordPool, PoolEntry, ScoringStrategy,
+};
 
 // Style 表达层风格统计（A3）
 pub use style::{

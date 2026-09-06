@@ -22,6 +22,7 @@ use ramaria_core::error::RamariaResult;
 use ramaria_core::traits::{EmbeddingProvider, LlmProvider, LlmResponseCache, StorageBackend};
 use ramaria_core::types::AppState;
 use ramaria_llm::keychain::Keychain;
+use ramaria_memory::keyword::KeywordService;
 use ramaria_memory::retriever::Retriever;
 use uuid::Uuid;
 
@@ -65,6 +66,8 @@ pub struct App {
     pub(crate) embedding: Mutex<Option<Arc<dyn EmbeddingProvider>>>,
     /// 内存检索器（RwLock 替代 Mutex，允许多读并发）
     pub(crate) retriever: Arc<RwLock<Retriever>>,
+    /// 关键词服务（KeywordPool + CompositeIndex 镜像；镜像侧增强，不参与检索主链）
+    pub(crate) keyword_service: Arc<RwLock<KeywordService>>,
     /// 应用配置
     pub(crate) config: ramaria_core::config::RamariaConfig,
     /// 当前应用状态
@@ -116,10 +119,13 @@ impl App {
         keychain: Arc<Keychain>,
     ) -> Self {
         let retriever = Arc::new(RwLock::new(Retriever::new()));
+        let keyword_service = Arc::new(RwLock::new(KeywordService::new()));
         let lifecycle = Arc::new(SessionLifecycle::new(config.clone()));
 
         // 注入 Retriever 到 SessionLifecycle，启用 L1 增量索引
         lifecycle.set_retriever(Arc::clone(&retriever));
+        // 注入 KeywordService 到 SessionLifecycle，启用 L1 关键词镜像增量（镜像侧增强）
+        lifecycle.set_keyword_service(Arc::clone(&keyword_service));
         // 注入 embedding 到 SessionLifecycle，启用 utt 块向量生成（v1.4）
         lifecycle.set_embedding(embedding.clone());
 
@@ -222,6 +228,7 @@ impl App {
             llm: Mutex::new(llm),
             embedding: Mutex::new(embedding),
             retriever,
+            keyword_service,
             config,
             state: Mutex::new(AppState::NeedsSetup),
             keychain,
@@ -284,6 +291,19 @@ impl App {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    // =========================================================
+    // 关键词服务访问（镜像侧增强，不改变 Chat / 检索主链）
+    // =========================================================
+
+    /// 获取关键词服务共享引用（克隆 Arc，供锁外读写）。
+    ///
+    /// 用途:
+    /// - 上层（M4 检索融合）经只读访问器读取 `pool` / `composite`；
+    /// - rebuild / 增量维护由 App 内部在重建与 L1 钩子处自动完成。
+    pub fn keyword_service(&self) -> Arc<RwLock<KeywordService>> {
+        Arc::clone(&self.keyword_service)
     }
 
     /// 启动后台任务（空闲检测 + L2/L3 定时检查）。

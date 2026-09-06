@@ -11,6 +11,7 @@
 use ramaria_core::behavior::{BehaviorRule, FeedbackLog};
 use ramaria_core::config::CacheEviction;
 use ramaria_core::error::RamariaResult;
+use ramaria_core::keyword::KeywordPoolRow;
 use ramaria_core::traits::{StoreCrud, StoreInfrastructure};
 use ramaria_core::types::{
     BackendConfig, ClusterSnapshot, EventRelation, EventSource, MemoryEvent, MemoryL1, Message,
@@ -398,6 +399,13 @@ impl StoreCrud for SqliteStorage {
         let tokens = repo::keyword::list_all(&self.pool).await?;
         Ok(tokens.into_iter().map(|t| t.into_inner()).collect())
     }
+    async fn list_canonical_keywords(&self) -> RamariaResult<Vec<String>> {
+        let rows = repo::keyword::list_canonicals(&self.pool).await?;
+        Ok(rows.into_iter().map(|r| r.keyword).collect())
+    }
+    async fn list_keyword_pool_entries(&self) -> RamariaResult<Vec<KeywordPoolRow>> {
+        repo::keyword::list_pool_rows(&self.pool).await
+    }
 }
 
 #[async_trait::async_trait]
@@ -663,7 +671,11 @@ impl ramaria_core::traits::LlmResponseCache for SqliteLlmCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ramaria_core::traits::LlmResponseCache;
+    use ramaria_core::keyword::KeywordToken;
+    use ramaria_core::traits::{
+        BM25_INDEX_VERSION_CURRENT, BM25_INDEX_VERSION_LEGACY, LlmResponseCache,
+        SETTING_BM25_INDEX_VERSION,
+    };
     use ramaria_core::types::{
         EventRelationKind, EvidenceDirection, FactSource, MessageRole, MessageSource, PersonaKind,
         TraitLayer, TraitSource, TraitStatus, now_ms,
@@ -1241,6 +1253,110 @@ mod tests {
         storage.upsert_keyword("工作").await.unwrap();
         let keywords = storage.list_keywords().await.unwrap();
         assert!(keywords.contains(&"工作".to_string()));
+    }
+
+    /// BM25 分词版本辅助：缺失默认旧版 1、读写往返、settings 键真实落库。
+    #[tokio::test]
+    async fn bm25_index_version_helper() {
+        let storage = setup().await;
+
+        // 键缺失 → 默认旧版本 1（None/缺失视为 1）
+        assert_eq!(storage.get_bm25_index_version().await.unwrap(), 1);
+        assert_eq!(
+            storage.get_bm25_index_version().await.unwrap(),
+            BM25_INDEX_VERSION_LEGACY
+        );
+
+        // 写 2 → 读 2 往返，且底层 settings 表键真实写入
+        storage
+            .set_bm25_index_version(BM25_INDEX_VERSION_CURRENT)
+            .await
+            .unwrap();
+        assert_eq!(
+            storage.get_bm25_index_version().await.unwrap(),
+            BM25_INDEX_VERSION_CURRENT
+        );
+        assert_eq!(
+            storage
+                .get_setting(SETTING_BM25_INDEX_VERSION)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("2")
+        );
+
+        // 非法值回退旧版（防御）
+        storage
+            .set_setting(SETTING_BM25_INDEX_VERSION, "not-a-number")
+            .await
+            .unwrap();
+        assert_eq!(
+            storage.get_bm25_index_version().await.unwrap(),
+            BM25_INDEX_VERSION_LEGACY
+        );
+    }
+
+    /// 规范词读取：仅返回 canonical（canonical_id IS NULL），排除 pending 别名。
+    #[tokio::test]
+    async fn list_canonical_keywords_excludes_aliases() {
+        let storage = setup().await;
+
+        // 规范词（canonical 形态）
+        let canonical = KeywordToken::new("工作压力").unwrap();
+        repo::keyword::upsert_with_alias(&storage.pool, &canonical, 0, "canonical")
+            .await
+            .unwrap();
+        // 纯 upsert（alias_status NULL）形态的规范词
+        storage.upsert_keyword("爬山").await.unwrap();
+        // pending 别名（指向 工作压力）——不应出现在规范词列表
+        let canonical_id: i64 =
+            sqlx::query_scalar("SELECT rowid FROM keyword_pool WHERE keyword = ?")
+                .bind("工作压力")
+                .fetch_one(&storage.pool)
+                .await
+                .unwrap();
+        let alias = KeywordToken::new("职场焦虑").unwrap();
+        repo::keyword::upsert_with_alias(&storage.pool, &alias, canonical_id, "pending")
+            .await
+            .unwrap();
+
+        let canonicals = storage.list_canonical_keywords().await.unwrap();
+        assert!(canonicals.contains(&"工作压力".to_string()));
+        assert!(canonicals.contains(&"爬山".to_string()));
+        assert!(
+            !canonicals.contains(&"职场焦虑".to_string()),
+            "pending 别名不应出现在规范词（词典）列表"
+        );
+    }
+
+    /// 全量词条行读取（StoreCrud trait 方法 → repo::list_pool_rows 接线）：
+    /// 返回行带 rowid / 别名状态 / 规范词指向。
+    #[tokio::test]
+    async fn list_keyword_pool_entries_via_trait() {
+        let storage = setup().await;
+        storage.upsert_keyword("工作压力").await.unwrap();
+        let canonical_id: i64 =
+            sqlx::query_scalar("SELECT rowid FROM keyword_pool WHERE keyword = ?")
+                .bind("工作压力")
+                .fetch_one(&storage.pool)
+                .await
+                .unwrap();
+        repo::keyword::upsert_with_alias(
+            &storage.pool,
+            &KeywordToken::new("职场焦虑").unwrap(),
+            canonical_id,
+            "pending",
+        )
+        .await
+        .unwrap();
+
+        let rows = storage.list_keyword_pool_entries().await.unwrap();
+        assert_eq!(rows.len(), 2, "规范词 + pending 别名共 2 条");
+        let canonical = rows.iter().find(|r| r.keyword == "工作压力").unwrap();
+        assert_eq!(canonical.rowid, canonical_id);
+        let pending = rows.iter().find(|r| r.keyword == "职场焦虑").unwrap();
+        assert_eq!(pending.alias_status.as_deref(), Some("pending"));
+        assert_eq!(pending.canonical_id, Some(canonical_id));
     }
 
     #[tokio::test]

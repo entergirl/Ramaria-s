@@ -13,6 +13,7 @@
 //! 依赖:
 //! - ramaria_core::types::PersonaExample: 对话示例结构体
 
+use crate::keyword::normalizer::{BigramNormalizer, KeywordNormalizer};
 use ramaria_core::types::PersonaExample;
 
 // =========================================================
@@ -230,67 +231,24 @@ impl ExampleSelector {
 
 /// 从用户输入中提取简单关键词。
 ///
-/// 策略:
-/// - **中文 (CJK)**：使用字符二元组（bigram）分词，与 BM25 分词策略一致。
-///   例如 "今天天气真好" → ["今天","天天","天气","气真","真好"]。
-///   独立 CJK 字符（如标点后的单字）**不输出**，与 BM25 tokenize 行为一致。
-/// - **英文/数字**：按 Unicode 字母/数字边界切分，小写化，过滤长度 < 2 的 token。
-/// - **标点/空白**：丢弃。
+/// # 实现（M3 T-V20-3-002 收拢重复解析）
 ///
-/// 返回:
-/// - 去重后的小写关键词列表，按字典序排列。
+/// 分词委托 `keyword::normalizer::BigramNormalizer`（与 `bm25::tokenize` 同一来源）；
+/// 本函数仅在消费侧保留差异化后处理:
 ///
-/// 与 `bm25::tokenize` 的关系（v1.5 审查批 2）:
-/// - 两者主体逻辑（CJK bigram + 英文小写切分）几乎逐行相同，但**保留两处不合并**:
-///   1. 长度过滤阈值不同：本函数按 **字符数**（`chars().count() >= 2`，小写化后）过滤，
-///      `bm25::tokenize` 按 UTF-8 **字节数**（`buf.len() >= 2`）过滤——
-///      对独立多字节非 CJK 字母（如 "é"）二者输出集不同（本函数丢弃，bm25 输出）。
-///   2. 输出形式不同：本函数排序并去重（供示例筛选关键词集合）；
-///      `bm25::tokenize` 保持原始顺序且不去重（供 BM25 tf 统计）。
-/// - 如需统一，需先对齐长度过滤阈值与去重语义（会改变本函数分词结果集）。
-///
-/// 说明:
-/// - 接入真实分词器后可替换为 jieba-rs 等实现。
+/// - **中文 (CJK)**：字符二元组（bigram），如 "今天天气真好" → ["今天","天天","天气","气真","真好"]；
+///   独立 CJK 字符（如标点后的单字）不输出。
+/// - **英文/数字**：按字母/数字边界切分，小写化，过滤后按**字符数 ≥ 2** 口径保留
+///   （区别于 bm25 的字节数口径——对独立多字节非 CJK 字母如 "é"，本函数丢弃）。
+/// - **排序去重**：按字典序去重输出（供示例筛选关键词集合）。
 pub fn extract_keywords(input: &str) -> Vec<String> {
-    let mut keywords: Vec<String> = Vec::new();
-    let chars: Vec<char> = input.chars().collect();
-    let mut alpha_buf = String::with_capacity(32);
-
-    let flush_alpha = |buf: &mut String, out: &mut Vec<String>| {
-        let trimmed = buf.trim().to_lowercase();
-        if trimmed.chars().count() >= 2 {
-            out.push(trimmed);
-        }
-        buf.clear();
-    };
-
-    let is_cjk =
-        |c: char| -> bool { matches!(c, '\u{4E00}'..='\u{9FFF}' | '\u{3400}'..='\u{4DBF}') };
-
-    let is_alpha = |c: char| -> bool { c.is_alphanumeric() };
-
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
-
-        if is_cjk(c) {
-            flush_alpha(&mut alpha_buf, &mut keywords);
-            // 生成 CJK bigram（仅当后续字符也是 CJK 时）
-            // 独立 CJK 字符不输出，与 BM25 tokenize 行为一致
-            if i + 1 < chars.len() && is_cjk(chars[i + 1]) {
-                let bigram: String = [c, chars[i + 1]].iter().collect();
-                keywords.push(bigram);
-            }
-            i += 1;
-        } else if is_alpha(c) {
-            alpha_buf.push(c);
-            i += 1;
-        } else {
-            flush_alpha(&mut alpha_buf, &mut keywords);
-            i += 1;
-        }
-    }
-    flush_alpha(&mut alpha_buf, &mut keywords);
+    let mut keywords: Vec<String> = BigramNormalizer
+        .normalize(input)
+        .into_iter()
+        // 字符数口径过滤（v1.5 消费侧差异，见函数头注释）
+        .filter(|t| t.as_str().chars().count() >= 2)
+        .map(|t| t.into_inner())
+        .collect();
 
     keywords.sort();
     keywords.dedup();

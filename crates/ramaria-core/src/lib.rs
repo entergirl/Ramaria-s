@@ -16,7 +16,10 @@ pub mod text;
 pub mod traits;
 pub mod types;
 
-pub use keyword::KeywordToken;
+pub use keyword::{
+    KeywordPoolRow, KeywordQuery, KeywordQueryBuilder, KeywordRef, KeywordSet, KeywordStatus,
+    KeywordToken, MAX_QUERY_TOP_K, MatchStrategy,
+};
 
 pub use behavior::{
     BehaviorEvidence, BehaviorParams, BehaviorRule, BehaviorSituation, FeedbackLog, RuleSource,

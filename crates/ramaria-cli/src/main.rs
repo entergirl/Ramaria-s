@@ -164,6 +164,10 @@ enum Commands {
     #[command(display_order = 45, subcommand)]
     Fact(FactCmd),
 
+    /// 关键词词典管理（list / show / seed / alias list|confirm|reject）[管理]
+    #[command(display_order = 46, subcommand)]
+    Keyword(KeywordCmd),
+
     /// 导出诊断信息（打包日志、配置、系统信息为 .zip）[管理]
     #[command(display_order = 43)]
     Diagnostics {
@@ -267,6 +271,44 @@ enum FactCmd {
     Show {
         /// 事实 id
         id: i64,
+    },
+}
+
+/// 关键词词典管理子命令。
+#[derive(Subcommand)]
+enum KeywordCmd {
+    /// 列出 keyword_pool 全部词条
+    List,
+    /// 查看单个词条详情
+    Show {
+        /// 关键词文本
+        keyword: String,
+    },
+    /// 手工注入规范词（幂等：已存在保持现状，不递增 use_count）
+    Seed {
+        /// 待注入的规范词文本（可多个）
+        #[arg(required = true)]
+        keyword: Vec<String>,
+    },
+    /// 待确认别名管理
+    #[command(subcommand)]
+    Alias(KeywordAliasCmd),
+}
+
+/// keyword alias 子命令。
+#[derive(Subcommand)]
+enum KeywordAliasCmd {
+    /// 列出待确认别名冲突（alias 文本 → 建议规范词）
+    List,
+    /// 确认别名合并（pending → alias）
+    Confirm {
+        /// 别名文本
+        alias: String,
+    },
+    /// 驳回别名（pending → 独立规范词）
+    Reject {
+        /// 别名文本
+        alias: String,
     },
 }
 
@@ -567,6 +609,7 @@ fn grouped_command() -> clap::Command {
         ("config", "管理"),
         ("persona", "管理"),
         ("diagnostics", "管理"),
+        ("keyword", "管理"),
         ("status", "高级"),
         ("probe", "高级"),
     ] {
@@ -978,6 +1021,29 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
                 FactCmd::Show { id } => commands::fact::FactCmd::Show { id },
             };
             commands::fact::run(app, cmd, cli.json).await?;
+        }
+        Commands::Keyword(sub) => {
+            let cmd = match sub {
+                KeywordCmd::List => commands::keyword_cmd::KeywordCmd::List,
+                KeywordCmd::Show { keyword } => commands::keyword_cmd::KeywordCmd::Show { keyword },
+                KeywordCmd::Seed { keyword } => {
+                    commands::keyword_cmd::KeywordCmd::Seed { keywords: keyword }
+                }
+                KeywordCmd::Alias(alias_sub) => {
+                    let action = match alias_sub {
+                        KeywordAliasCmd::List => commands::keyword_cmd::AliasAction::List,
+                        KeywordAliasCmd::Confirm { alias } => {
+                            commands::keyword_cmd::AliasAction::Confirm { alias }
+                        }
+                        KeywordAliasCmd::Reject { alias } => {
+                            commands::keyword_cmd::AliasAction::Reject { alias }
+                        }
+                    };
+                    commands::keyword_cmd::KeywordCmd::Alias(action)
+                }
+            };
+            // keyword 命令仅访问 keyword_pool，直接使用数据库连接池（无需 App 业务层）
+            commands::keyword_cmd::run(pool, cmd, cli.json, cli.yes).await?;
         }
         Commands::Export {
             format,

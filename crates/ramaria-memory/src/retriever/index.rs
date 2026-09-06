@@ -8,7 +8,7 @@
 use ramaria_core::error::RamariaResult;
 use ramaria_core::types::MemoryL1;
 
-use crate::bm25::{DocId, tokenize_fields};
+use crate::bm25::DocId;
 use crate::vector::{VectorIndex, make_vector_label};
 
 use super::Retriever;
@@ -26,10 +26,12 @@ impl Retriever {
     /// - 向量由调用方在 embedding 可用时通过 [`index_l1_with_vector`] 写入，
     ///   使 L1 文档真实进入向量索引（此前仅 rebuild 全量路径写入）。
     pub fn index_l1(&mut self, doc: &L1DocView) {
-        // BM25 索引
+        // BM25 索引：经实例分词器（默认纯 bigram；注入词典后为词典增强口径）
         if self.config.enable_bm25 {
-            let tokens = tokenize_fields(&[&doc.summary, doc.keywords.as_deref().unwrap_or("")]);
-            self.bm25_index.add(DocId::L1(doc.id), tokens);
+            self.bm25_index.add_tokenized(
+                DocId::L1(doc.id),
+                &[&doc.summary, doc.keywords.as_deref().unwrap_or("")],
+            );
         }
 
         self.l1_docs.insert(doc.id, doc.clone());
@@ -105,7 +107,7 @@ impl Retriever {
     /// - L2 的向量索引写入由 app 层在 embedding 可用时经向量索引实例直接完成
     ///   （`vector_mut().add(...)`，label 与 `parse_doc_label` 匹配的 `L2:{id}`）。
     pub fn index_l2(&mut self, doc: &L2DocView) {
-        // BM25 索引
+        // BM25 索引：经实例分词器（默认纯 bigram；注入词典后为词典增强口径）
         if self.config.enable_bm25 {
             let mut fields: Vec<&str> = vec![&doc.title, &doc.summary];
             if let Some(ref kw) = doc.keywords {
@@ -117,8 +119,7 @@ impl Retriever {
             if let Some(ref par) = doc.paraphrase {
                 fields.push(par.as_str());
             }
-            let tokens = tokenize_fields(&fields);
-            self.bm25_index.add(DocId::L2(doc.id), tokens);
+            self.bm25_index.add_tokenized(DocId::L2(doc.id), &fields);
         }
 
         self.l2_docs.insert(doc.id, doc.clone());

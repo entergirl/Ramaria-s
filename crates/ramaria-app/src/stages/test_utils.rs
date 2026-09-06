@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use futures::{Stream, stream};
 use ramaria_core::behavior::FeedbackLog;
 use ramaria_core::error::{RamariaError, RamariaResult};
+use ramaria_core::keyword::KeywordPoolRow;
 use ramaria_core::traits::{
     ChatRequest, EmbeddingModelInfo, EmbeddingProvider, LlmProvider, StorageBackend, StoreCrud,
     StoreInfrastructure, StreamDelta,
@@ -59,6 +60,8 @@ pub struct MockStorage {
     feedback_logs: Mutex<Vec<ramaria_core::behavior::FeedbackLog>>,
     /// settings 键值（v1.7 H2 复审队列 / S3 历史测试）
     settings: Mutex<std::collections::HashMap<String, String>>,
+    /// keyword_pool 规范词（BM25 词典增强分词迁移测试注入）
+    canonical_keywords: Mutex<Vec<String>>,
 }
 
 impl Default for MockStorage {
@@ -83,7 +86,16 @@ impl MockStorage {
             touch_l1_ids: Mutex::new(Vec::new()),
             feedback_logs: Mutex::new(Vec::new()),
             settings: Mutex::new(std::collections::HashMap::new()),
+            canonical_keywords: Mutex::new(Vec::new()),
         }
+    }
+
+    /// 测试注入：向 keyword_pool 规范词集合追加一个词条（供 BM25 词典迁移测试）。
+    pub fn seed_canonical_keyword(&self, keyword: &str) {
+        self.canonical_keywords
+            .lock()
+            .unwrap()
+            .push(keyword.to_string());
     }
 
     /// 返回最近一次 touch_l1 的 L1 id 列表（空表示从未调用）。
@@ -563,6 +575,30 @@ impl StoreCrud for MockStorage {
 
     async fn list_keywords(&self) -> RamariaResult<Vec<String>> {
         Ok(Vec::new())
+    }
+
+    async fn list_canonical_keywords(&self) -> RamariaResult<Vec<String>> {
+        Ok(self.canonical_keywords.lock().unwrap().clone())
+    }
+
+    async fn list_keyword_pool_entries(&self) -> RamariaResult<Vec<KeywordPoolRow>> {
+        // 供 app 层关键词服务镜像测试：把注入的规范词转成装载行（自增 rowid 模拟 DB）
+        Ok(self
+            .canonical_keywords
+            .lock()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .map(|(i, kw)| KeywordPoolRow {
+                rowid: i as i64 + 1,
+                keyword: kw.clone(),
+                use_count: 1,
+                created_at: 0,
+                alias_status: None,
+                canonical_id: None,
+                canonical_keyword: None,
+            })
+            .collect())
     }
 }
 

@@ -8,6 +8,7 @@
 //! - parse_keywords: 关键词字符串 → (存储串, KeywordToken 列表)。
 //! - 全部为纯函数/无 I/O；隐私红线：日志只记长度与字段，不记录原文。
 
+use crate::keyword::normalizer::{CommaSeparatedNormalizer, KeywordNormalizer};
 use ramaria_core::MemoryL1;
 use ramaria_core::keyword::KeywordToken;
 use ramaria_core::types::{EvidenceNote, MessageRole};
@@ -237,18 +238,16 @@ pub(super) fn normalize_optional_slot(value: Option<String>) -> Option<String> {
 ///
 /// 如果输入为空或仅含空白字符，返回 `(None, vec![])`。
 /// 返回 `Vec<KeywordToken>` 替代裸 `String`。
+///
+/// M3（T-V20-3-002）起分词委托 `CommaSeparatedNormalizer`（统一中英文逗号 / trim /
+/// ASCII 小写 / 去重 / 纯标点过滤），存储串仍保留 trim 后的原文形态。
 pub(super) fn parse_keywords(raw: Option<&str>) -> (Option<String>, Vec<KeywordToken>) {
     let cleaned = raw.map(|s| s.trim()).filter(|s| !s.is_empty());
     match cleaned {
         None => (None, vec![]),
         Some(s) => {
-            let list: Vec<KeywordToken> = s
-                .split(',')
-                .map(|k| k.trim())
-                .filter(|k| !k.is_empty())
-                .filter_map(KeywordToken::new)
-                .collect();
-            // 存储时使用逗号分隔字符串
+            let list: Vec<KeywordToken> = CommaSeparatedNormalizer.normalize(s);
+            // 存储时使用逗号分隔字符串（trim 后原文，与 v1.4 形态一致）
             (Some(s.to_string()), list)
         }
     }

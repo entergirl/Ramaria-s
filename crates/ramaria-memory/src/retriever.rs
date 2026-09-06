@@ -133,6 +133,18 @@ impl Retriever {
         &mut self.bm25_index
     }
 
+    /// 注入 BM25 词典增强分词词典（keyword_pool 规范词列表）。
+    ///
+    /// 参数:
+    /// - `keywords`: 词典词条（空 = 清除词典，索引/查询退化为纯 bigram）。
+    ///
+    /// 说明:
+    /// - 仅影响后续索引添加与查询的分词口径；存量索引文档需由重建流程
+    ///   （`clear` 后重新 `index_l1`/`index_l2`）应用新口径。
+    pub fn set_bm25_dictionary(&mut self, keywords: &[String]) {
+        self.bm25_index.set_dictionary(keywords);
+    }
+
     /// 获取内部向量索引的可变引用。
     pub fn vector_mut(&mut self) -> &mut CachedVectorIndex<BruteForceIndex> {
         &mut self.vector_index
