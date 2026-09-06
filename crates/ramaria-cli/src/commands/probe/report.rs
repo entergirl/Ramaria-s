@@ -2,9 +2,13 @@
 //!
 //! 设计特点:
 //! - 档位对比报告（`probe report`）：汇总各档位评分生成对比表，给出每维最佳档位与综合定稿建议。
-//! - 消融对比（--ablation）：F 组 / S 组按题目配对做 Wilcoxon 符号秩 + Cohen's d + 95% CI + BH-FDR 判定。
+//! - 消融对比（--ablation）：F 组（移除）/ S 组（替代）/ I 组（净增量）三类对照分别配对
+//!   做 Wilcoxon 符号秩 + Cohen's d + 95% CI + BH-FDR 判定，并按对照类型分栏表述
+//!   （D-V20-006：I_* 保留 B1 基座测净增量、S_* 去 RAG 摘要测替代）。
+//! - 辅助指标四件套（产物可复算）：证据链可追溯率 / 行为规则命中率 / 情境路由误用率 / 画像回归。
 //! - 人工抽检校准：比对 judge 与人工分数的一致性 / 偏差 / 校准系数（由校准文件驱动，可选）。
 //! - 知识层质量：基于评分数值中的事实维题目评估误报 / 漏报率（目标 <10%）。
+//! - 数据特性与外部效度局限声明必出（D-V20-005：单 persona、不做 D3 推广）。
 //! - 输出 markdown / JSON 双形态；配对非参检验等纯函数逻辑独立，便于单元测试。
 
 use std::path::Path;
@@ -41,6 +45,156 @@ pub struct ProbeReport {
     pub knowledge_quality: Option<KnowledgeQualityReport>,
     /// 消融对比报告（`probe report --ablation`；普通模式为 None）
     pub ablation: Option<AblationReport>,
+    /// 数据特性与外部效度局限声明（D-V20-005：仅单 persona 高信号数据，
+    /// 不做 D3 跨 persona 推广；judge/embedding 可用性等评估限制）。
+    pub limitations: Vec<String>,
+    /// 辅助指标四件套（D-V20-006：证据链可追溯率 / 行为规则命中率 /
+    /// 情境路由误用率 / 画像回归）。基于 run/eval 产物可复算的近似口径，
+    /// 语义与局限见 `AuxiliaryMetrics.annotation`。
+    pub auxiliary: AuxiliaryMetrics,
+}
+
+// =========================================================
+// 辅助指标四件套（M2-005，产物可复算近似）
+// =========================================================
+
+/// 辅助指标四件套。
+///
+/// 口径说明（技术报告 §16.4 定义的探针可复算近似，J 时未产出）:
+/// - `evidence_traceability_rate`（证据链可追溯率）: fact 题中模型回复
+///   对 golden 事件 reference 的覆盖率——以已有 `FactItemScore.score ≥ 0.5`
+///   （embedding 余弦 + 关键词命中的综合分）判定"回复可回溯到注入事件"的比例。
+/// - `behavior_rule_hit_rate`（行为规则命中率，代理口径）: 情绪情境题中
+///   模型给出"恰当回应"（emotion rubric ≥ 0.5，即命中安慰/共情或喜悦标记）
+///   的比例——代理"行为/共情规则在情境中被触发生效"。无 emotion 题为 None。
+/// - `situation_route_misuse_rate`（情境路由误用率，代理口径）: 情境极性被
+///   检出（situation_negative/positive）但回复为 0 分（未采用对应规则/冷漠）
+///   的题占"有极性样本"的比例——代理"路由识别到情境却未生效"的误用。
+/// - `profile_regression`（画像回归 / 跨轮输出稳定性）: 对带 `--repeat` 的档位，
+///   取其各维 `dimension_scores` 的跨轮 std 平均值（越小 = 输出越稳定，
+///   画像推断驱动无随机漂移）。无 repeat 逐轮明细时为 None。
+///
+/// 局限：以上为产物级近似（不读真实行为规则库/画像快照），仅用于工具链
+/// 交叉验证与结构对照；规则-事件一致性、知识准确率等人工抽样指标不在探针内。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AuxiliaryMetrics {
+    /// 证据链可追溯率（0.0~1.0；无 fact 题时 None）
+    pub evidence_traceability_rate: Option<f64>,
+    /// 行为规则命中率代理（0.0~1.0；无 emotion 题时 None）
+    pub behavior_rule_hit_rate: Option<f64>,
+    /// 情境路由误用率代理（0.0~1.0；无有极性样本时 None）
+    pub situation_route_misuse_rate: Option<f64>,
+    /// 画像回归 = 跨轮维度分数 std 均值（0.0~；无 repeat 明细时 None）
+    pub profile_regression_output_stability: Option<f64>,
+    /// 口径与局限说明（必出字段）
+    pub annotation: String,
+}
+
+/// 计算辅助指标四件套（基于 evaluation 产物，纯函数、可复算）。
+///
+/// 参数:
+/// - `evaluation`: probe evaluate 产物（含逐题 fact/emotion 评分与 repeat
+///   逐轮聚合 `dimension_scores`）。
+///
+/// 返回:
+/// - 四件套指标；无对应样本的单项为 None（标注口径而非报错）。
+pub(super) fn compute_auxiliary_metrics(evaluation: &ProbeEvaluation) -> AuxiliaryMetrics {
+    // ---- 证据链可追溯率：fact 题回复对 golden 事件的覆盖率 ----
+    let mut fact_total = 0usize;
+    let mut fact_traceable = 0usize;
+    // ---- 行为规则命中 / 情境路由误用：emotion 题（含极性检测与 rubric）----
+    let mut emotion_total = 0usize;
+    let mut emotion_appropriate = 0usize;
+    let mut polarized_total = 0usize;
+    let mut polarized_misuse = 0usize;
+    // ---- 画像回归：跨轮维度分 std 均值 ----
+    let mut cross_round_stds: Vec<f64> = Vec::new();
+
+    for v in &evaluation.variants {
+        for item in &v.items {
+            if item.error.is_some() {
+                continue;
+            }
+            match item.dimension.as_str() {
+                "fact" => {
+                    if let Some(f) = &item.fact {
+                        fact_total += 1;
+                        if f.score >= 0.5 {
+                            fact_traceable += 1;
+                        }
+                    }
+                }
+                "emotion" => {
+                    if let Some(e) = &item.emotion {
+                        emotion_total += 1;
+                        if e.score >= 0.5 {
+                            emotion_appropriate += 1;
+                        }
+                        // 路由误用代理：检测到情境极性但回复 0 分（规则未生效）。
+                        if e.situation_negative || e.situation_positive {
+                            polarized_total += 1;
+                            if e.score < 0.5 {
+                                polarized_misuse += 1;
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        // 画像回归：该档位若带 repeat 逐轮聚合，取各维跨轮 std 的均值。
+        if let Some(scores) = &v.dimension_scores
+            && !scores.is_empty()
+        {
+            let mean_std = scores.iter().map(|d| d.std).sum::<f64>() / scores.len() as f64;
+            cross_round_stds.push(mean_std);
+        }
+    }
+
+    let evidence_traceability_rate = if fact_total > 0 {
+        Some(fact_traceable as f64 / fact_total as f64)
+    } else {
+        None
+    };
+    let behavior_rule_hit_rate = if emotion_total > 0 {
+        Some(emotion_appropriate as f64 / emotion_total as f64)
+    } else {
+        None
+    };
+    let situation_route_misuse_rate = if polarized_total > 0 {
+        Some(polarized_misuse as f64 / polarized_total as f64)
+    } else {
+        None
+    };
+    let profile_regression_output_stability = if cross_round_stds.is_empty() {
+        None
+    } else {
+        Some(cross_round_stds.iter().sum::<f64>() / cross_round_stds.len() as f64)
+    };
+
+    // 口径与局限说明（必出）。
+    let mut note = String::from(
+        "辅助指标为探针产物可复算近似：证据链可追溯率=fact 回复对 golden 覆盖率 \
+         (score≥0.5)；行为规则命中/情境路由误用=emotion rubric 代理（读回复文本与极性，\
+         不读真实规则库）；画像回归=repeat 跨轮维度分 std 均值。规则-事件一致性/知识准确率等\
+         人工抽样指标不在探针内。",
+    );
+    if profile_regression_output_stability.is_none() {
+        note.push_str(" 画像回归缺项：未检测到 --repeat 逐轮明细（dimension_scores）。");
+    }
+    if evaluation.embedding_used {
+        note.push_str(" 事实维已含语义余弦。");
+    } else {
+        note.push_str(" 事实维为纯关键词命中（embedding 不可用）。");
+    }
+
+    AuxiliaryMetrics {
+        evidence_traceability_rate,
+        behavior_rule_hit_rate,
+        situation_route_misuse_rate,
+        profile_regression_output_stability,
+        annotation: note,
+    }
 }
 
 /// 档位报告行（评分对比表）。
@@ -121,15 +275,22 @@ pub struct KnowledgeQualityReport {
 /// 消融对比报告（`probe report --ablation`）。
 ///
 /// 结构:
-/// - `baseline_variant`: 消融基线档位 id（F 组为 F0，S 组为 B1）。
-/// - `rows`: 消融 vs 基线的逐"消融档位 × 维度"统计判定行。
+/// - `baseline_variant`: 主基线档位 id（优先 F0；仅含 S/I 组时为 B1）。
+/// - `rows`: 消融 vs 基线的逐"消融档位 × 维度"统计判定行，
+///   每行自带 `comparison_type`（removal / substitution / increment）与 `base_variant`，
+///   供报告把三类对照分栏表述。
 /// - `aux`: 参与对比各档位的辅助指标（回复长度/耗时/空回复率）。
 ///
-/// 判定线（D-V17-009）: `p_fdr < 0.05 ∧ |cohens_d| ≥ 0.3 ∧ CI 不含 0`
-/// → 显著；F 组 diff<0（移除后下降）或 S 组 diff>0（加入后上升）→ 该层有贡献。
+/// 对照语义（D-V20-006，口径见 `docs/dev-2.0/ablation-profile-mapping.md`）:
+/// - removal（F 组，基线 F0）: 全开中逐层关闭 → 回答"去掉某一层的边际损失"；
+/// - substitution（S 组，基线 B1）: 去 RAG 摘要、仅单专属层 → 回答"单层能否替代 RAG"；
+/// - increment（I 组，基线 B1）: B1 基座 + 单专属层 → 回答"在 RAG 之上叠加一层的净增量"。
+///
+/// 判定线（D-V17-009）: `p_fdr < 0.05 ∧ |cohens_d| ≥ 0.3 ∧ CI 不含 0` → 显著；
+/// 贡献方向见 `AblationComparisonRow.direction`。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AblationReport {
-    /// 消融基线档位 id（F0 或 B1）
+    /// 主基线档位 id（F0 或 B1）
     pub baseline_variant: String,
     /// 逐消融档位 × 维度统计判定
     pub rows: Vec<AblationComparisonRow>,
@@ -140,10 +301,15 @@ pub struct AblationReport {
 /// 单条消融对比（某消融档位 × 某维度，按题目配对）。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AblationComparisonRow {
-    /// 消融档位 id（如 F1 / S_behavior）
+    /// 消融档位 id（如 F1 / S_behavior / I_behavior）
     pub ablation_variant: String,
     /// 消融档位描述
     pub description: String,
+    /// 对照类型：removal（F 组逐层移除 vs F0）/ substitution（S 组替代，去 RAG 摘要 vs B1）/
+    /// increment（I 组净增量，B1 基座 + 单专属层 vs B1）。
+    pub comparison_type: String,
+    /// 实际对照基线档位 id（F 组为 F0；S/I 组为 B1）。
+    pub base_variant: String,
     /// 维度（fact / tone / emotion）
     pub dimension: String,
     /// 配对题数
@@ -287,22 +453,42 @@ pub(super) async fn run_report(
         None
     };
 
+    // 数据特性与外部效度局限声明（D-V20-005，报告必出字段）：
+    // 消融结论基于单 persona 高信号数据，不做 D3 跨 persona 推广。
+    let judge_used = evaluation.as_ref().map(|e| e.judge_used).unwrap_or(false);
+    let embedding_used = evaluation
+        .as_ref()
+        .map(|e| e.embedding_used)
+        .unwrap_or(false);
+    let limitations = build_limitations(&experiment, judge_used, embedding_used);
+
+    // 辅助指标四件套（D-V20-006）：有评分数值时可复算；缺失时给出空指标 + 说明。
+    let auxiliary = match evaluation.as_ref() {
+        Some(ev) => compute_auxiliary_metrics(ev),
+        None => AuxiliaryMetrics {
+            evidence_traceability_rate: None,
+            behavior_rule_hit_rate: None,
+            situation_route_misuse_rate: None,
+            profile_regression_output_stability: None,
+            annotation: "未提供评分数值文件（--evaluation），辅助指标不可计算".to_string(),
+        },
+    };
+
     let report = ProbeReport {
         results_file: results_path.display().to_string(),
         evaluation_file: evaluation_path.map(|p| p.display().to_string()),
         persona_uid: experiment.persona_uid.clone(),
         dataset_seed: experiment.dataset_seed,
-        judge_used: evaluation.as_ref().map(|e| e.judge_used).unwrap_or(false),
-        embedding_used: evaluation
-            .as_ref()
-            .map(|e| e.embedding_used)
-            .unwrap_or(false),
+        judge_used,
+        embedding_used,
         generated_at: super::now_iso8601(),
         variants: rows,
         recommendation,
         calibration,
         knowledge_quality,
         ablation: ablation_report,
+        limitations,
+        auxiliary,
     };
 
     // Step 7: 输出
@@ -345,6 +531,44 @@ pub(super) async fn run_report(
 
     print_report_summary(&report);
     Ok(())
+}
+
+/// 构建数据特性与外部效度局限声明（D-V20-005，报告必出字段）。
+///
+/// 内容（与任务验收口径一致）:
+/// - 仅单 persona 高信号数据 → 只作 D2 高信号效度，不做 D3 跨 persona 推广；
+/// - 语气维 judge / 事实维 embedding 可用性影响维度覆盖；
+/// - 采样规模（repeat 次数）决定统计法置信度。
+pub(super) fn build_limitations(
+    experiment: &ProbeExperiment,
+    judge_used: bool,
+    embedding_used: bool,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    // 外部效度边界：仅一份单人对单人记录，显式声明不推广跨 persona。
+    out.push(format!(
+        "外部效度局限：评估基于单 persona（{}）高信号数据，仅作 D2 高信号效度，\
+         不做 D3 跨 persona 普遍性推广；结论不得外推为产品级普遍主张",
+        experiment.persona_uid
+    ));
+    if !judge_used {
+        out.push(
+            "语气维缺失：本地 judge 不可用或未提供（tone 分空缺），语气维结论需人工抽检补足"
+                .to_string(),
+        );
+    }
+    if !embedding_used {
+        out.push("事实维降级：embedding 不可用，事实维退化为关键词命中（无语义余弦）".to_string());
+    }
+    if let Some(rep) = &experiment.repeat {
+        out.push(format!(
+            "统计法样本：repeat=N={}，逐轮评分聚合 n 以实际有效轮数为准",
+            rep.count
+        ));
+    } else {
+        out.push("统计法样本：本次为单次运行（无 --repeat），结论未做多次配对统计".to_string());
+    }
+    out
 }
 
 /// 构建定稿建议（每维最佳档位 + 综合建议）。
@@ -547,6 +771,8 @@ pub(super) fn build_ablation_report(
     struct RawRow<'a> {
         ablation: &'a VariantEvaluation,
         dimension: &'a str,
+        comparison_type: &'a str,
+        base_variant: &'a str,
         diffs: Vec<f64>,
         base_mean: f64,
         ablated_mean: f64,
@@ -559,7 +785,7 @@ pub(super) fn build_ablation_report(
     let mut raw_rows: Vec<RawRow> = Vec::new();
     let mut compared_ids: Vec<String> = Vec::new();
 
-    // F 组：F1~F4 逐层关闭 vs F0
+    // F 组（removal）：F1~F4 逐层关闭 vs F0——回答"去掉某一层的边际损失"。
     if let Some(base) = f0 {
         for name in ["F1", "F2", "F3", "F4"] {
             if let Some(ablated) = by_id.get(name) {
@@ -581,6 +807,8 @@ pub(super) fn build_ablation_report(
                     raw_rows.push(RawRow {
                         ablation: ablated,
                         dimension: dim,
+                        comparison_type: "removal",
+                        base_variant: base.variant_id.as_str(),
                         base_mean,
                         ablated_mean,
                         wilcoxon_p: wilcoxon_signed_rank_p(&diffs).unwrap_or(1.0),
@@ -596,9 +824,20 @@ pub(super) fn build_ablation_report(
         tracing::warn!("消融对比报告：未找到 F0 基线档位，F 组（F1~F4）无法对比");
     }
 
-    // S 组：单层注入 vs B1
+    // S 组（substitution）与 I 组（increment）均对照 B1，但对照口径不同：
+    // - S_*（替代）＝去 RAG 摘要、仅单专属层——回答"单层能否替代 RAG"；
+    // - I_*（净增量）＝B1 基座 + 单专属层——回答"在 RAG 之上叠加一层的净增量"。
     if let Some(base) = b1 {
-        for name in ["S_behavior", "S_knowledge", "S_expression", "S_narrative"] {
+        for (name, comparison_type) in [
+            ("S_behavior", "substitution"),
+            ("S_knowledge", "substitution"),
+            ("S_expression", "substitution"),
+            ("S_narrative", "substitution"),
+            ("I_behavior", "increment"),
+            ("I_knowledge", "increment"),
+            ("I_expression", "increment"),
+            ("I_narrative", "increment"),
+        ] {
             if let Some(ablated) = by_id.get(name) {
                 compared_ids.push(ablated.variant_id.clone());
                 for dim in dims {
@@ -618,6 +857,8 @@ pub(super) fn build_ablation_report(
                     raw_rows.push(RawRow {
                         ablation: ablated,
                         dimension: dim,
+                        comparison_type,
+                        base_variant: base.variant_id.as_str(),
                         base_mean,
                         ablated_mean,
                         wilcoxon_p: wilcoxon_signed_rank_p(&diffs).unwrap_or(1.0),
@@ -630,14 +871,12 @@ pub(super) fn build_ablation_report(
             }
         }
     } else {
-        tracing::warn!("消融对比报告：未找到 B1 基线档位，S 组（单层注入）无法对比");
+        tracing::warn!("消融对比报告：未找到 B1 基线档位，S 组（替代）与 I 组（净增量）无法对比");
     }
 
     // 多比较 FDR 校正（Benjamini–Hochberg，作用于全部候选行）。
     let p_raw: Vec<f64> = raw_rows.iter().map(|r| r.wilcoxon_p).collect();
     let p_fdr = bh_fdr_adjust(&p_raw);
-
-    let is_f_group = |ablation_name: &str| matches!(ablation_name, "F1" | "F2" | "F3" | "F4");
 
     let mut rows = Vec::with_capacity(raw_rows.len());
     for (raw, p_fdr) in raw_rows.into_iter().zip(p_fdr) {
@@ -645,47 +884,103 @@ pub(super) fn build_ablation_report(
         // 判定线：p_fdr<0.05 ∧ |d|≥0.3 ∧ CI 不含 0
         let ci_excludes_zero = raw.ci_low > 0.0 || raw.ci_high < 0.0;
         let significant = p_fdr < 0.05 && raw.cohens_d.abs() >= 0.3 && ci_excludes_zero;
-        // 方向语义：F 组关注"移除后下降"；S 组关注"加入后上升"。
+        // 均值差（消融档 − 基线档）。
         let mean_diff = raw.ablated_mean - raw.base_mean;
-        let (direction, annotation) = if significant {
-            if mean_diff < 0.0 {
-                (
-                    "down".to_string(),
-                    if is_f_group(ablation_name) {
+        // 方向语义按对照类型区分（D-V20-006 口径）：
+        // - removal（F 组 vs F0）：关注"移除后是否下降"；
+        // - substitution（S 组 vs B1）：去 RAG 摘要只留单层，关注"能否替代 RAG 基座"；
+        // - increment（I 组 vs B1）：B1 基座 + 单层，关注"叠加后是否净增"。
+        let (direction, annotation) = match raw.comparison_type {
+            "removal" => {
+                if !significant {
+                    (
+                        "none".to_string(),
+                        format!(
+                            "移除对照无显著差异（p_fdr={:.3}, |d|={:.2}）",
+                            p_fdr, raw.cohens_d
+                        ),
+                    )
+                } else if mean_diff < 0.0 {
+                    (
+                        "down".to_string(),
                         format!(
                             "移除该层后质量显著下降（{:.3}），该层对「{}」有贡献",
                             mean_diff, raw.dimension
-                        )
-                    } else {
-                        format!(
-                            "加入该层后质量显著下降（{:.3}），该层单独注入为负向",
-                            mean_diff
-                        )
-                    },
-                )
-            } else {
-                (
-                    "up".to_string(),
-                    if is_f_group(ablation_name) {
+                        ),
+                    )
+                } else {
+                    (
+                        "up".to_string(),
                         format!(
                             "移除该层后质量反升（{:.3}），该层在本维度疑似冗余/负作用",
                             mean_diff
-                        )
-                    } else {
-                        format!("加入该层后质量显著提升（{:.3}），该层有正向贡献", mean_diff)
-                    },
-                )
+                        ),
+                    )
+                }
             }
-        } else {
-            (
-                "none".to_string(),
-                format!("无显著差异（p_fdr={:.3}, |d|={:.2}）", p_fdr, raw.cohens_d),
-            )
+            "substitution" => {
+                // S 组：目标层在无 RAG 摘要时单独注入，与 B1（仅 RAG 摘要）比较。
+                if !significant {
+                    (
+                        "none".to_string(),
+                        format!(
+                            "替代对照无显著差异（p_fdr={:.3}, |d|={:.2}）",
+                            p_fdr, raw.cohens_d
+                        ),
+                    )
+                } else if mean_diff < 0.0 {
+                    (
+                        "down".to_string(),
+                        format!(
+                            "替代对照：去 RAG 摘要仅该层显著低于 B1（{:.3}），该层无法独立替代 RAG 摘要基座",
+                            mean_diff
+                        ),
+                    )
+                } else {
+                    (
+                        "up".to_string(),
+                        format!(
+                            "替代对照：去 RAG 摘要仅该层显著高于 B1（{:.3}），该层可独立替代 RAG 摘要基座",
+                            mean_diff
+                        ),
+                    )
+                }
+            }
+            _ => {
+                // increment（I 组）：B1 基座 + 该层，与 B1 比较净增量。
+                if !significant {
+                    (
+                        "none".to_string(),
+                        format!(
+                            "净增量对照无显著差异（p_fdr={:.3}, |d|={:.2}）",
+                            p_fdr, raw.cohens_d
+                        ),
+                    )
+                } else if mean_diff < 0.0 {
+                    (
+                        "down".to_string(),
+                        format!(
+                            "净增量对照：在 B1 基座上叠加该层显著下降（{:.3}），层叠加为负向（压缩/干扰）",
+                            mean_diff
+                        ),
+                    )
+                } else {
+                    (
+                        "up".to_string(),
+                        format!(
+                            "净增量对照：在 B1 基座上叠加该层显著提升（{:.3}），该层有正向净增量",
+                            mean_diff
+                        ),
+                    )
+                }
+            }
         };
 
         rows.push(AblationComparisonRow {
             ablation_variant: ablation_name.to_string(),
             description: raw.ablation.description.clone(),
+            comparison_type: raw.comparison_type.to_string(),
+            base_variant: raw.base_variant.to_string(),
             dimension: raw.dimension.to_string(),
             n_pairs: raw.diffs.len(),
             base_mean: raw.base_mean,
@@ -1156,7 +1451,7 @@ fn write_report_markdown(out: &str, report: &ProbeReport) -> anyhow::Result<()> 
 }
 
 /// 渲染 markdown 报告（档位对比表 + 定稿建议 + 校准 + 知识层质量）。
-fn render_report_markdown(report: &ProbeReport) -> String {
+pub(super) fn render_report_markdown(report: &ProbeReport) -> String {
     let mut md = String::new();
     md.push_str("# Ramaria 探针档位对比报告\n\n");
     md.push_str(&format!("- persona: `{}`\n", report.persona_uid));
@@ -1252,38 +1547,66 @@ fn render_report_markdown(report: &ProbeReport) -> String {
         md.push_str(&format!("- 结论：{}\n\n", kq.annotation));
     }
 
-    // 消融对比统计
+    // 消融对比统计（按对照类型分栏：removal 移除 / substitution 替代 / increment 净增量）
     if let Some(ab) = &report.ablation {
         md.push_str("## 消融对比统计\n\n");
-        md.push_str(&format!("- 基线档位：`{}`\n", ab.baseline_variant));
         md.push_str(
             "- 方法：按题目配对 Wilcoxon 符号秩检验 + Cohen's d + 95% CI；\
              多比较经 Benjamini–Hochberg FDR 校正\n",
         );
         md.push_str("- 判定线：p_fdr<0.05 ∧ |d|≥0.3 ∧ CI 不含 0\n\n");
-        md.push_str("| 消融档位 | 维度 | 基线 | 消融后 | Δ | p_fdr | d | 95%CI | 判定 |\n");
-        md.push_str("|------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|------|\n");
-        for r in &ab.rows {
-            md.push_str(&format!(
-                "| {} | {} | {:.3} | {:.3} | {:.3} | {:.4} | {:.2} | [{:.3}, {:.3}] | {}(n={}) |\n",
-                r.ablation_variant,
-                r.dimension,
-                r.base_mean,
-                r.ablated_mean,
-                r.mean_diff,
-                r.p_fdr,
-                r.cohens_d,
-                r.ci95_low,
-                r.ci95_high,
-                match (r.significant, r.direction.as_str()) {
-                    (true, "down") => "↓ 移除后下降（层有贡献）",
-                    (true, "up") => "↑ 差异显著",
-                    _ => "→ 无差异",
-                },
-                r.n_pairs
-            ));
+        md.push_str("- 对照语义（D-V20-006）：\n");
+        md.push_str("  - **removal（移除，基线 F0）**：全开中逐层关闭 → 去掉某一层的边际损失；\n");
+        md.push_str(
+            "  - **substitution（替代，基线 B1）**：去 RAG 摘要、仅单专属层 → 单层能否替代 RAG；\n",
+        );
+        md.push_str("  - **increment（净增量，基线 B1）**：B1 基座 + 单专属层 → RAG 之上叠加一层的净增量。\n\n");
+
+        let render_rows = |md: &mut String, label: &str, rows: &[&AblationComparisonRow]| {
+            md.push_str(&format!("### {label}\n\n"));
+            md.push_str(
+                "| 消融档位 | 基线 | 维度 | 基线均分 | 档位均分 | Δ | p_fdr | d | 95%CI | 判定 |\n",
+            );
+            md.push_str("|------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|------|\n");
+            for r in rows {
+                md.push_str(&format!(
+                    "| {} | {} | {} | {:.3} | {:.3} | {:.3} | {:.4} | {:.2} | [{:.3}, {:.3}] | {}(n={}) |\n",
+                    r.ablation_variant,
+                    r.base_variant,
+                    r.dimension,
+                    r.base_mean,
+                    r.ablated_mean,
+                    r.mean_diff,
+                    r.p_fdr,
+                    r.cohens_d,
+                    r.ci95_low,
+                    r.ci95_high,
+                    match (r.significant, r.direction.as_str()) {
+                        (true, "down") => "↓ 显著下降",
+                        (true, "up") => "↑ 显著提升",
+                        _ => "→ 无差异",
+                    },
+                    r.n_pairs
+                ));
+            }
+            md.push('\n');
+        };
+
+        for (label, ctype) in [
+            ("移除对照（F 组 vs F0）", "removal"),
+            ("替代对照（S 组 vs B1）", "substitution"),
+            ("净增量对照（I 组 vs B1）", "increment"),
+        ] {
+            let group: Vec<&AblationComparisonRow> = ab
+                .rows
+                .iter()
+                .filter(|r| r.comparison_type == ctype)
+                .collect();
+            if !group.is_empty() {
+                render_rows(&mut md, label, &group);
+            }
         }
-        md.push('\n');
+
         md.push_str("### 辅助指标\n\n");
         md.push_str("| 档位 | 平均回复(字符) | 平均耗时(ms) | 空回复率 | 成功/总 |\n");
         md.push_str("|------|:---:|:---:|:---:|:---:|\n");
@@ -1300,6 +1623,44 @@ fn render_report_markdown(report: &ProbeReport) -> String {
         }
         md.push('\n');
     }
+
+    // 辅助指标四件套（D-V20-006，产物可复算近似）
+    md.push_str("## 辅助指标（产物可复算）\n\n");
+    let fmt_opt = |v: Option<f64>| {
+        v.map(|x| format!("{:.1}%", x * 100.0))
+            .unwrap_or_else(|| "-".to_string())
+    };
+    md.push_str(&format!(
+        "- 证据链可追溯率：{}\n",
+        fmt_opt(report.auxiliary.evidence_traceability_rate)
+    ));
+    md.push_str(&format!(
+        "- 行为规则命中率（代理）：{}\n",
+        fmt_opt(report.auxiliary.behavior_rule_hit_rate)
+    ));
+    md.push_str(&format!(
+        "- 情境路由误用率（代理）：{}\n",
+        fmt_opt(report.auxiliary.situation_route_misuse_rate)
+    ));
+    match report.auxiliary.profile_regression_output_stability {
+        Some(s) => md.push_str(&format!("- 画像回归（跨轮维度 std 均值）：{:.4}\n", s)),
+        None => md.push_str("- 画像回归（跨轮维度 std 均值）：-（无 --repeat 明细）\n"),
+    }
+    md.push_str(&format!(
+        "- 口径与局限：{}\n\n",
+        report.auxiliary.annotation
+    ));
+
+    // 数据特性与外部效度局限（D-V20-005 必出字段）
+    md.push_str("## 数据特性与外部效度局限\n\n");
+    if report.limitations.is_empty() {
+        md.push_str("- （无附加局限说明）\n");
+    } else {
+        for l in &report.limitations {
+            md.push_str(&format!("- {l}\n"));
+        }
+    }
+    md.push('\n');
 
     md.push_str("---\n*由 `ramaria probe report` 自动生成，供 M5 定稿实验参考。*\n");
     md
@@ -1368,5 +1729,21 @@ fn print_report_summary(report: &ProbeReport) {
             sig
         );
     }
+    // 辅助指标四件套摘要（产物可复算近似）
+    let fmt_opt = |v: Option<f64>| {
+        v.map(|x| format!("{:.1}%", x * 100.0))
+            .unwrap_or_else(|| "-".to_string())
+    };
+    println!(
+        "辅助指标: 可追溯率={} 规则命中(代理)={} 路由误用(代理)={} 画像回归(std)={}",
+        fmt_opt(report.auxiliary.evidence_traceability_rate),
+        fmt_opt(report.auxiliary.behavior_rule_hit_rate),
+        fmt_opt(report.auxiliary.situation_route_misuse_rate),
+        report
+            .auxiliary
+            .profile_regression_output_stability
+            .map(|s| format!("{:.4}", s))
+            .unwrap_or_else(|| "-".to_string())
+    );
     crate::ui::info("用 --output 生成 markdown/JSON 报告文件");
 }

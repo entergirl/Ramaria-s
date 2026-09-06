@@ -3,7 +3,9 @@
 //! 设计特点:
 //! - `run_evaluate`：读取 probe run 实验结果，按档位逐题评分并输出评分数值文件 / JSON / 文本摘要。
 //! - 事实维：embedding 余弦 + 关键词 2-gram 命中加权；embedding 不可用退化为纯关键词。
-//! - 语气维：LLM-as-judge（rubric 1~5、温度 0、few-shot 锚定）；仅本地后端，线上自动跳过。
+//! - 语气维：LLM-as-judge（rubric 1~5、温度 0、few-shot 锚定）；仅本地后端
+//!   （LM Studio / 本地 Ollama）可用，线上后端自动跳过（隐私口径，D-V20-006）；
+//!   参考回复取数据集 persona 原回复（tone 题 reference），非提问文本。
 //! - 情感维：确定性 rubric（0/0.5/1 回应恰当性），安慰 / 喜悦标记词表驱动，零 LLM 依赖。
 //! - 统计法（--repeat N）：逐轮评分按"轮均分"跨 N 轮聚合 mean ± 95% CI（复用 run::metric_stat）。
 //! - 单题失败不中断批量；judge / embedding 缺失静默降级并标注；输出不含完整原文。
@@ -239,6 +241,22 @@ const FACT_KEYWORD_WEIGHT: f64 = 0.4;
 /// 事实维 cosine 未用时的纯关键词权重（embedding 不可用降级）。
 const FACT_KEYWORD_ONLY_WEIGHT: f64 = 1.0;
 
+/// 判断后端配置是否可作语气维本地 judge。
+///
+/// 本地判据（D-V20-006 隐私口径，仅本地 judge）:
+/// - provider 非线上（LM Studio / 未来本地 Ollama 均为非线上）；
+/// - base_url host 指向本机（localhost / 127.0.0.1 / ::1），兼容 LM Studio（:1234）
+///   与本地 Ollama（:11434）的 OpenAI-compatible 服务。
+///
+/// 线上后端（DeepSeek/OpenAI）与远程 host 一律返回 false（自动跳过并标注）。
+pub(super) fn is_local_backend(provider: ramaria_core::types::LlmProvider, base_url: &str) -> bool {
+    if provider.is_online() {
+        return false;
+    }
+    let lower = base_url.to_ascii_lowercase();
+    lower.contains("://localhost") || lower.contains("://127.0.0.1") || lower.contains("://[::1]")
+}
+
 // =========================================================
 // 执行 `probe evaluate`
 // =========================================================
@@ -303,14 +321,18 @@ pub(super) async fn run_evaluate(
         None
     } else {
         let llm = app.llm_clone();
-        // LM Studio 本地后端可直接用作 judge；线上后端（DeepSeek/OpenAI）为隐私考虑不自动判分
-        let provider_name = llm.config().provider.as_str();
-        if provider_name == "lm-studio" {
+        // 语气维 judge 仅限本地后端（隐私口径，D-V20-006）：本地 LM Studio / Ollama
+        // 可直接用作 judge；线上后端（DeepSeek/OpenAI）自动跳过并标注。
+        // 本地判据为"provider 非线上 ∧ base_url 指向本机"——兼容 LM Studio（:1234）
+        // 与本地 Ollama（:11434），不依赖 provider 名字符串（旧实现以 "lm-studio"
+        // 作字符串比对，与 as_str() 返回的 "lm_studio" 恒不等致本地也永不启用）。
+        let cfg = llm.config();
+        if is_local_backend(cfg.provider, &cfg.base_url) {
             Some(llm)
         } else {
             tracing::warn!(
-                provider = %provider_name,
-                "语气维 judge 仅支持本地 LM Studio（线上后端自动跳过并标注）"
+                provider = %cfg.provider.as_str(),
+                "语气维 judge 仅支持本地 LM Studio / Ollama（线上后端自动跳过并标注）"
             );
             None
         }
@@ -508,8 +530,10 @@ fn filter_variant_results(
 /// 从数据集文件加载 golden reference 索引（item_id → reference）。
 ///
 /// 说明:
-/// - 仅收集 fact 维度的 reference（事件摘要），作为事实维精确评分的 golden 参照。
-/// - reference 缺失的条目忽略（后续退化为问题文本近似）。
+/// - 收集 fact 维度的 reference（事件摘要）作为事实维精确评分的 golden 参照；
+///   同时收集 tone 维度的 reference（persona 原回复）作为语气维 judge 的"参考回复"
+///   （评分要求：候选回复与 persona 原回复在语气/风格上的相似度，而非与提问文本）。
+/// - reference 缺失的条目忽略（fact 题后续退化为问题文本近似；tone 题则标注缺参考）。
 pub(super) fn load_golden_references(
     dataset_path: &Path,
 ) -> anyhow::Result<std::collections::HashMap<String, String>> {
@@ -524,7 +548,7 @@ pub(super) fn load_golden_references(
 
     let mut map = std::collections::HashMap::new();
     for item in &dataset.items {
-        if item.dimension == "fact"
+        if matches!(item.dimension.as_str(), "fact" | "tone")
             && let Some(rev) = item.reference.clone().filter(|r| !r.trim().is_empty())
         {
             map.insert(item.id.clone(), rev);
@@ -583,8 +607,11 @@ async fn evaluate_item(
             }
         }
         "tone" => {
-            let tone = match judge {
-                Some(j) => match score_tone_item(j, run).await {
+            // 语气维 judge 参考回复 = persona 原回复（数据集 tone 题 reference），
+            // 而非提问文本（run.question）——评分比较对象是"候选回复 vs 原回复"。
+            let reference = golden.and_then(|g| g.get(&run.item_id).cloned());
+            let tone = match (judge, &reference) {
+                (Some(j), Some(rev)) => match score_tone_item(j, run, rev).await {
                     Ok(t) => Some(t),
                     Err(e) => {
                         // judge 单题失败不阻塞批量（记 warn，tone=None）
@@ -596,13 +623,21 @@ async fn evaluate_item(
                         None
                     }
                 },
-                None => None,
+                // judge 不可用或数据集未提供该题 reference → 无参考可比（不评，非错误）
+                (Some(_), None) => {
+                    tracing::debug!(
+                        item_id = %run.item_id,
+                        "probe evaluate tone 题缺 persona 原回复参考（需 --dataset），tone 分缺失"
+                    );
+                    None
+                }
+                (None, _) => None,
             };
             ItemEvaluation {
                 item_id: run.item_id.clone(),
                 dimension: run.dimension.clone(),
                 question: run.question.clone(),
-                reference: None,
+                reference,
                 reply_preview,
                 fact: None,
                 tone,
@@ -883,6 +918,7 @@ fn cosine_f32(a: &[f32], b: &[f32]) -> f64 {
 async fn score_tone_item(
     judge: &dyn LlmProvider,
     run: &ProbeRunItem,
+    reference: &str,
 ) -> anyhow::Result<ToneItemScore> {
     let request = ChatRequest {
         system_prompt: format!("{TONE_RUBRIC}\n\n{TONE_ANCHOR_EXAMPLES}"),
@@ -890,7 +926,7 @@ async fn score_tone_item(
         history: vec![],
         user_message: format!(
             "参考回复：{}\n候选回复：{}",
-            run.question, // question 为 tone 题的用户输入；reference 为 persona 原回复未随结果携带
+            reference, // tone 题参考 = persona 原回复（数据集 reference）
             run.reply
         ),
         temperature: 0.0,
@@ -1045,6 +1081,16 @@ fn print_evaluation_summary(evaluation: &ProbeEvaluation) {
             "  档位 {:<14} 事实维={:<6} 语气维={:<6} 情感维={:<6} 失败={} — {}",
             v.variant_id, fact, tone, emotion, v.failed_count, v.description
         );
+        // 统计法（--repeat N）逐轮评分聚合：展示各维 mean ± 95% CI（n=轮数）。
+        // 上表各行仍是最后一轮快照；这里给出跨轮聚合（M2-003 验收：可复算）。
+        if let Some(scores) = &v.dimension_scores {
+            for d in scores {
+                println!(
+                    "    ↳ {} 聚合: mean={:.3} ±95%CI [{:.3}, {:.3}] (std={:.3}, n={})",
+                    d.dimension, d.mean, d.ci95_low, d.ci95_high, d.std, d.n
+                );
+            }
+        }
     }
     if !evaluation.judge_used {
         crate::ui::info("语气维 judge 不可用或已跳过（tone 分为空），可运行 --json 查看标注");

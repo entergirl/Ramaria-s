@@ -31,14 +31,16 @@ pub(super) const DEFAULT_PERSONA: &str = "char-0001";
 
 /// 消融档位 Profile 名称集合（数据集 `variants[].ablation` 可取值）。
 ///
-/// 语义（技术报告 §16.3，口径与 D-V17-010 一致）:
+/// 语义（技术报告 §16.3，口径与 D-V17-010 / D-V20-006 一致）:
 /// - `B0`: 基线 A——无记忆注入（纯角色 + 当前对话）。
 /// - `B1`: 基线 B——压缩视图注入（仅摘要/转述 RAG，无原文无行为无知识）。
 /// - `F0`: 完整体系（行为+知识+表达+脉络全开，等同 ablation=None）。
 /// - `F1`~`F4`: 逐层关闭（−行为 / −知识 / −表达 / −脉络）。
 /// - `S_behavior` / `S_knowledge` / `S_expression` / `S_narrative`:
-///   前置单层验证——B1 基础上只单独注入该层（对照 B1 判定每层自身贡献）。
-pub const ABLATION_PROFILE_NAMES: [&str; 11] = [
+///   替代对照——去掉 RAG 摘要基座，只单独注入该层（对照 B1 判定"单层能否替代 RAG"）。
+/// - `I_behavior` / `I_knowledge` / `I_expression` / `I_narrative`:
+///   净增量对照——保留 B1 压缩摘要基座 + 仅叠加一个专属层（对照 B1 判定"在该层上的净增量"）。
+pub const ABLATION_PROFILE_NAMES: [&str; 15] = [
     "B0",
     "B1",
     "F0",
@@ -50,21 +52,24 @@ pub const ABLATION_PROFILE_NAMES: [&str; 11] = [
     "S_knowledge",
     "S_expression",
     "S_narrative",
+    "I_behavior",
+    "I_knowledge",
+    "I_expression",
+    "I_narrative",
 ];
 
 // =========================================================
-// 消融对照语义（真增量档设计，M0 冻结）
+// 消融对照语义（M0 冻结，M2 实装）
 // =========================================================
 // 消融档位回答三类不同的问题，必须区分口径:
 //
-// 1) 替代对照（既有 `S_*`，保留）:
+// 1) 替代对照（`S_behavior` / `S_knowledge` / `S_expression` / `S_narrative`）:
 //    - 定义: B1 基座中"去掉 RAG 压缩摘要"，只保留目标专属层单独注入。
 //    - 闸门: memory_rag=false，仅目标专属层闸门为 true。
 //    - 回答问题: "目标层能否独立替代 RAG 摘要基座"，测的是单层替代能力。
 //    - 局限: J 消融证明该口径测不出"在 RAG 之上叠加一层的净增量"。
 //
-// 2) 净增量对照（`I_behavior` / `I_knowledge` / `I_expression` / `I_narrative`，
-//    后续评估里程碑实装，属未来档位，不在当前 Profile 集合内）:
+// 2) 净增量对照（`I_behavior` / `I_knowledge` / `I_expression` / `I_narrative`）:
 //    - 定义: B1 压缩摘要基座 + 仅叠加一个目标专属层，其余专属层全部关闭。
 //    - 闸门: memory_rag=true（保留 B1 基座），仅目标专属层闸门为 true，
 //      其余专属层（behavior/knowledge/speaking_style+examples+utt/narrative+bridge）为 false。
@@ -86,9 +91,11 @@ pub const ABLATION_PROFILE_NAMES: [&str; 11] = [
 /// 消融档位 Profile。
 ///
 /// 职责:
-/// - 把技术报告 §16.3 的消融档位映射为 `RamariaConfig.injection`（注入层闸门）覆盖集，
-///   使 B0/B1/F0/F1~F4/S_* 在单次 `send_message` 内真实关闭/保留对应注入层。
+/// - 把技术报告 §16.3 / `ablation-profile-mapping.md` 的消融档位映射为
+///   `RamariaConfig.injection`（注入层闸门）覆盖集，使 B0/B1/F0/F1~F4/S_*/I_*
+///   在单次 `send_message` 内真实关闭/保留对应注入层。
 /// - `F0` 覆盖集为空（全开），与 `ablation=None` 行为完全一致（向后兼容）。
+/// - S 组为替代对照（去 RAG 摘要），I 组为净增量对照（保留 B1 RAG 基座）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AblationProfile {
     /// 基线 A：无记忆注入（纯角色 + 当前对话）。
@@ -105,14 +112,22 @@ pub enum AblationProfile {
     F3,
     /// −脉络层（关闭近期脉络与桥接）。
     F4,
-    /// 前置单层：B1 基础上单独注入行为层。
+    /// 替代对照：去 RAG 摘要、仅注入行为层（对照 B1 测"行为层能否替代 RAG"）。
     SBehavior,
-    /// 前置单层：B1 基础上单独注入知识层。
+    /// 替代对照：去 RAG 摘要、仅注入知识层。
     SKnowledge,
-    /// 前置单层：B1 基础上单独注入表达层。
+    /// 替代对照：去 RAG 摘要、仅注入表达层。
     SExpression,
-    /// 前置单层：B1 基础上单独注入脉络层。
+    /// 替代对照：去 RAG 摘要、仅注入脉络层。
     SNarrative,
+    /// 净增量对照：B1 基座 + 仅叠加行为层（对照 B1 测行为层净增量）。
+    IBehavior,
+    /// 净增量对照：B1 基座 + 仅叠加知识层。
+    IKnowledge,
+    /// 净增量对照：B1 基座 + 仅叠加表达层。
+    IExpression,
+    /// 净增量对照：B1 基座 + 仅叠加脉络层。
+    INarrative,
 }
 
 impl AblationProfile {
@@ -130,6 +145,10 @@ impl AblationProfile {
             "S_knowledge" => Some(Self::SKnowledge),
             "S_expression" => Some(Self::SExpression),
             "S_narrative" => Some(Self::SNarrative),
+            "I_behavior" => Some(Self::IBehavior),
+            "I_knowledge" => Some(Self::IKnowledge),
+            "I_expression" => Some(Self::IExpression),
+            "I_narrative" => Some(Self::INarrative),
             _ => None,
         }
     }
@@ -148,6 +167,10 @@ impl AblationProfile {
             Self::SKnowledge => "S_knowledge",
             Self::SExpression => "S_expression",
             Self::SNarrative => "S_narrative",
+            Self::IBehavior => "I_behavior",
+            Self::IKnowledge => "I_knowledge",
+            Self::IExpression => "I_expression",
+            Self::INarrative => "I_narrative",
         }
     }
 
@@ -161,10 +184,14 @@ impl AblationProfile {
             Self::F2 => "−知识层（关闭事实卡片注入）",
             Self::F3 => "−表达层（关闭原文样例与风格规则）",
             Self::F4 => "−脉络层（关闭近期脉络与桥接）",
-            Self::SBehavior => "前置单层：仅注入行为层（对照 B1）",
-            Self::SKnowledge => "前置单层：仅注入知识层（对照 B1）",
-            Self::SExpression => "前置单层：仅注入表达层（对照 B1）",
-            Self::SNarrative => "前置单层：仅注入脉络层（对照 B1）",
+            Self::SBehavior => "替代对照：去 RAG 摘要、仅注入行为层",
+            Self::SKnowledge => "替代对照：去 RAG 摘要、仅注入知识层",
+            Self::SExpression => "替代对照：去 RAG 摘要、仅注入表达层",
+            Self::SNarrative => "替代对照：去 RAG 摘要、仅注入脉络层",
+            Self::IBehavior => "净增量对照：B1 基座 + 行为层",
+            Self::IKnowledge => "净增量对照：B1 基座 + 知识层",
+            Self::IExpression => "净增量对照：B1 基座 + 表达层",
+            Self::INarrative => "净增量对照：B1 基座 + 脉络层",
         }
     }
 
@@ -173,7 +200,10 @@ impl AblationProfile {
     /// 说明:
     /// - `F0`/`ablation=None` → 全开（与 M1 行为完全一致，回归红线）。
     /// - `F1`~`F4` → 在全开基础上关闭对应层。
-    /// - `B0`/`B1`/`S_*` → 按"基座 + 单层"语义显式设置各闸门。
+    /// - `B0`/`B1`/`S_*`/`I_*` → 显式设置各闸门：
+    ///   - `B1` = 仅 RAG 摘要基座（memory_rag）；
+    ///   - `S_*`（替代对照）= 去 RAG 摘要、仅目标专属层（memory_rag=false）；
+    ///   - `I_*`（净增量对照）= B1 基座 + 仅目标专属层（memory_rag=true）。
     pub fn apply_to(self, config: &mut ramaria_core::config::RamariaConfig) {
         use ramaria_core::config::InjectionGate;
         let g = &mut config.injection;
@@ -210,23 +240,50 @@ impl AblationProfile {
                 g.bridge = false;
             }
             Self::SBehavior => {
+                // 替代对照：去掉 RAG 摘要基座，仅注入行为层。
+                *g = InjectionGate::all_off();
+                g.behavior = true;
+            }
+            Self::SKnowledge => {
+                // 替代对照：去掉 RAG 摘要基座，仅注入知识层。
+                *g = InjectionGate::all_off();
+                g.knowledge = true;
+            }
+            Self::SExpression => {
+                // 替代对照：去掉 RAG 摘要基座，仅注入表达层（风格+示例+原文样例）。
+                *g = InjectionGate::all_off();
+                g.speaking_style = true;
+                g.examples = true;
+                g.utt = true;
+            }
+            Self::SNarrative => {
+                // 替代对照：去掉 RAG 摘要基座，仅注入脉络层（近期脉络+桥接）。
+                *g = InjectionGate::all_off();
+                g.narrative = true;
+                g.bridge = true;
+            }
+            Self::IBehavior => {
+                // 净增量对照：B1 RAG 基座 + 仅叠加行为层。
                 *g = InjectionGate::all_off();
                 g.memory_rag = true;
                 g.behavior = true;
             }
-            Self::SKnowledge => {
+            Self::IKnowledge => {
+                // 净增量对照：B1 RAG 基座 + 仅叠加知识层。
                 *g = InjectionGate::all_off();
                 g.memory_rag = true;
                 g.knowledge = true;
             }
-            Self::SExpression => {
+            Self::IExpression => {
+                // 净增量对照：B1 RAG 基座 + 仅叠加表达层。
                 *g = InjectionGate::all_off();
                 g.memory_rag = true;
                 g.speaking_style = true;
                 g.examples = true;
                 g.utt = true;
             }
-            Self::SNarrative => {
+            Self::INarrative => {
+                // 净增量对照：B1 RAG 基座 + 仅叠加脉络层。
                 *g = InjectionGate::all_off();
                 g.memory_rag = true;
                 g.narrative = true;
@@ -236,12 +293,12 @@ impl AblationProfile {
     }
 }
 
-/// 构建消融档位 Profile 变体集合（F0 基线与 F1~F4、B0/B1、S_* 单层）。
+/// 构建消融档位 Profile 变体集合（B0/B1/F0、F1~F4、S_* 替代对照、I_* 净增量对照）。
 ///
 /// 说明:
 /// - utt 三参数取定稿基准（θ_gap=10 / 条数=80 / top_k=3，与 `baseline` 档位一致），
 ///   消融只改变记忆注入层（`ablation` 字段），不改变 utt 切分。
-/// - 供 M5b 数据集构建方把消融档位并入数据集 variants；M1 默认数据集不包含。
+/// - 供评估数据集构建方把消融档位并入数据集 variants；M1 默认数据集不包含。
 pub fn ablation_variants() -> Vec<ProbeVariant> {
     ABLATION_PROFILE_NAMES
         .iter()

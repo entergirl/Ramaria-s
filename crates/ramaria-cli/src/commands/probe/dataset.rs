@@ -178,6 +178,25 @@ async fn build_from_db(
         "probe build 从数据库收集候选"
     );
 
+    // 高情感选题：真实候选不足时显式告警（每维分别提示），并提示可用 --source
+    // 手动补充 JSON 数据源（替代纯人工造题，D-V20-006 高情感选题器口径）。
+    for (dim, n) in [
+        ("tone", tone_pairs.len()),
+        ("fact", fact_items.len()),
+        ("emotion", emotion_cands.len()),
+    ] {
+        if n < qpd {
+            tracing::warn!(
+                %persona_uid,
+                dimension = dim,
+                candidates = n,
+                required = qpd,
+                "probe build 维度真实候选不足，将用内置夹具补齐；\
+                 如需真实数据，可导入高情感记录后重跑或用 --source 手动补 JSON"
+            );
+        }
+    }
+
     // 确定性抽样 + 夹具补齐（每维恒有 qpd 题，档位实验规模稳定）
     let fixture_tone = fixture_tone_pairs();
     let fixture_fact = fixture_fact_events();

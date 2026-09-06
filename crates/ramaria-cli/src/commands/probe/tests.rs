@@ -14,11 +14,12 @@ use ramaria_core::types::PersonaKind;
 // 迁移后在此显式引入（根文件仅保留运行时 `use`，非测试编译零多余引用）。
 use super::evaluate::{
     FactItemScore, ItemEvaluation, ProbeEvaluation, VariantEvaluation,
-    aggregate_round_dimension_scores, load_golden_references, read_experiment, score_emotion_item,
+    aggregate_round_dimension_scores, is_local_backend, load_golden_references, read_experiment,
+    score_emotion_item,
 };
 use super::report::{
-    bh_fdr_adjust, build_ablation_report, cohens_d_paired, erf_approx, normal_cdf,
-    read_manual_scores, wilcoxon_signed_rank_p,
+    bh_fdr_adjust, build_ablation_report, cohens_d_paired, compute_auxiliary_metrics, erf_approx,
+    normal_cdf, read_manual_scores, wilcoxon_signed_rank_p,
 };
 use super::run::{aggregate_repeat_stats, filter_variants, metric_stat, t_critical_975};
 use super::types::DATASET_SCHEMA_VERSION;
@@ -329,6 +330,91 @@ fn load_golden_references_missing_file_is_validation_error() {
     assert!(matches!(ramaria_err, Some(RamariaError::Validation { .. })));
 }
 
+/// golden reference 索引应同时收集 fact（事件摘要）与 tone（persona 原回复）
+/// 两个维度的参考：tone 参考供语气维 judge 比较"候选回复 vs 原回复"。
+#[test]
+fn load_golden_references_collects_fact_and_tone() {
+    use super::types::{DatasetItem, ProbeDataset};
+    let dataset = ProbeDataset {
+        schema_version: DATASET_SCHEMA_VERSION,
+        seed: 1,
+        persona_uid: "char-0001".to_string(),
+        dimensions: vec!["tone".to_string(), "fact".to_string()],
+        questions_per_dimension: 2,
+        source: "db".to_string(),
+        generated_at: "t".to_string(),
+        variants: vec![],
+        items: vec![
+            DatasetItem {
+                id: "tone-0001".to_string(),
+                dimension: "tone".to_string(),
+                question: "今天上班好累".to_string(),
+                reference: Some("辛苦了，早点休息。工作是做不完的，身体才是自己的。".to_string()),
+                source: "db".to_string(),
+                source_ref: None,
+            },
+            DatasetItem {
+                id: "fact-0001".to_string(),
+                dimension: "fact".to_string(),
+                question: "还记得「团子」吗？".to_string(),
+                reference: Some("去年收养了一只三花猫，取名团子。".to_string()),
+                source: "db".to_string(),
+                source_ref: Some("养猫".to_string()),
+            },
+            // 空 reference 忽略
+            DatasetItem {
+                id: "tone-0002".to_string(),
+                dimension: "tone".to_string(),
+                question: "周末去爬山吗".to_string(),
+                reference: None,
+                source: "db".to_string(),
+                source_ref: None,
+            },
+        ],
+    };
+    let path =
+        std::env::temp_dir().join(format!("ramaria_probe_golden_{}.json", std::process::id()));
+    std::fs::write(&path, serde_json::to_string(&dataset).unwrap()).expect("写入数据集失败");
+    let map = load_golden_references(&path).expect("数据集应可加载");
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(map.len(), 2, "应收集 tone + fact 各一条非空 reference");
+    assert!(
+        map.contains_key("tone-0001"),
+        "tone 参考应收集（语气 judge 用）"
+    );
+    assert!(
+        map.contains_key("fact-0001"),
+        "fact 参考应收集（事实维 golden）"
+    );
+}
+
+/// 本地 judge 判定（D-V20-006 隐私口径）：本地 LM Studio（localhost:1234）
+/// 与本地 Ollama（localhost:11434）均为可用 judge；线上 DeepSeek/OpenAI 一律拒绝。
+#[test]
+fn is_local_backend_only_accepts_local_providers() {
+    use ramaria_core::types::LlmProvider as P;
+
+    // 本地 LM Studio（provider 非线上 + localhost host）
+    assert!(is_local_backend(P::LmStudio, "http://localhost:1234/v1"));
+    // 本地 Ollama（OpenAI-compatible，localhost:11434）
+    assert!(is_local_backend(P::LmStudio, "http://localhost:11434/v1"));
+    assert!(is_local_backend(P::LmStudio, "http://127.0.0.1:11434/v1"));
+    assert!(is_local_backend(P::LmStudio, "http://[::1]:1234/v1"));
+    // 线上后端一律拒绝（隐私：不调线上 judge）
+    assert!(!is_local_backend(
+        P::DeepSeek,
+        "https://api.deepseek.com/v1"
+    ));
+    assert!(!is_local_backend(P::OpenAI, "https://api.openai.com/v1"));
+    // 本地 provider 但指向远程 host → 拒绝（防误配外泄）
+    assert!(!is_local_backend(
+        P::LmStudio,
+        "https://remote.example.com/v1"
+    ));
+    assert!(!is_local_backend(P::LmStudio, ""));
+}
+
 // ---- fixture ----
 
 #[test]
@@ -536,10 +622,10 @@ fn build_from_file_missing_is_err() {
 // M5a 消融档位 Profile（D-V17-015 / 技术报告 §16.3）
 // =========================================================
 
-/// 全部 11 个名称可解析且往返一致；未知名称返回 None。
+/// 全部 15 个名称可解析且往返一致；未知名称返回 None。
 #[test]
 fn ablation_profile_parse_roundtrip_all_names() {
-    assert_eq!(ABLATION_PROFILE_NAMES.len(), 11);
+    assert_eq!(ABLATION_PROFILE_NAMES.len(), 15);
     for name in ABLATION_PROFILE_NAMES {
         let p = AblationProfile::parse_name(name).unwrap_or_else(|| panic!("名称 {name} 应可解析"));
         assert_eq!(p.name(), name, "解析后名称往返一致");
@@ -549,11 +635,11 @@ fn ablation_profile_parse_roundtrip_all_names() {
     assert!(AblationProfile::parse_name("f0").is_none(), "大小写敏感");
 }
 
-/// ablation_variants：11 档、id=Profile 名、utt 取定稿基准、ablation 回显。
+/// ablation_variants：15 档、id=Profile 名、utt 取定稿基准、ablation 回显。
 #[test]
 fn ablation_variants_shape_and_baseline_utt() {
     let variants = ablation_variants();
-    assert_eq!(variants.len(), 11);
+    assert_eq!(variants.len(), 15);
     for v in &variants {
         assert_eq!(
             v.ablation.as_deref(),
@@ -634,34 +720,69 @@ fn ablation_profile_f0_to_f4_gates() {
     assert!(f4.injection.speaking_style && f4.injection.examples && f4.injection.memory_rag);
 }
 
-/// S_* 前置单层：B1 基座（memory_rag）之上只开目标层。
+/// S_* 替代对照：去掉 RAG 摘要基座，仅开目标专属层（对照 B1 测单层替代能力）。
 #[test]
 fn ablation_profile_s_group_gates() {
     let mut sb = ramaria_core::config::RamariaConfig::default();
     AblationProfile::SBehavior.apply_to(&mut sb);
-    assert!(sb.injection.memory_rag && sb.injection.behavior);
+    assert!(sb.injection.behavior, "S_behavior 开行为层");
+    assert!(
+        !sb.injection.memory_rag,
+        "S_behavior 为替代对照：应去掉 RAG 摘要基座"
+    );
     assert!(!sb.injection.knowledge && !sb.injection.speaking_style);
     assert!(!sb.injection.examples && !sb.injection.utt);
     assert!(!sb.injection.narrative && !sb.injection.bridge);
 
     let mut sk = ramaria_core::config::RamariaConfig::default();
     AblationProfile::SKnowledge.apply_to(&mut sk);
-    assert!(sk.injection.memory_rag && sk.injection.knowledge);
-    assert!(!sk.injection.behavior);
+    assert!(sk.injection.knowledge);
+    assert!(!sk.injection.behavior && !sk.injection.memory_rag);
 
     let mut se = ramaria_core::config::RamariaConfig::default();
     AblationProfile::SExpression.apply_to(&mut se);
-    assert!(se.injection.memory_rag);
+    assert!(!se.injection.memory_rag, "S_expression 去掉 RAG 摘要基座");
     assert!(se.injection.speaking_style && se.injection.examples && se.injection.utt);
     assert!(!se.injection.behavior && !se.injection.knowledge);
     assert!(!se.injection.narrative && !se.injection.bridge);
 
     let mut sn = ramaria_core::config::RamariaConfig::default();
     AblationProfile::SNarrative.apply_to(&mut sn);
-    assert!(sn.injection.memory_rag);
+    assert!(!sn.injection.memory_rag, "S_narrative 去掉 RAG 摘要基座");
     assert!(sn.injection.narrative && sn.injection.bridge);
     assert!(!sn.injection.utt && !sn.injection.behavior && !sn.injection.knowledge);
     assert!(!sn.injection.speaking_style && !sn.injection.examples);
+}
+
+/// I_* 净增量对照：保留 B1 RAG 基座（memory_rag），仅叠加目标专属层。
+#[test]
+fn ablation_profile_i_group_gates() {
+    let mut ib = ramaria_core::config::RamariaConfig::default();
+    AblationProfile::IBehavior.apply_to(&mut ib);
+    assert!(ib.injection.memory_rag, "I_behavior 保留 B1 RAG 基座");
+    assert!(ib.injection.behavior, "I_behavior 叠加行为层");
+    assert!(!ib.injection.knowledge && !ib.injection.speaking_style);
+    assert!(!ib.injection.examples && !ib.injection.utt);
+    assert!(!ib.injection.narrative && !ib.injection.bridge);
+
+    let mut ik = ramaria_core::config::RamariaConfig::default();
+    AblationProfile::IKnowledge.apply_to(&mut ik);
+    assert!(ik.injection.memory_rag && ik.injection.knowledge);
+    assert!(!ik.injection.behavior);
+
+    let mut ie = ramaria_core::config::RamariaConfig::default();
+    AblationProfile::IExpression.apply_to(&mut ie);
+    assert!(ie.injection.memory_rag, "I_expression 保留 B1 RAG 基座");
+    assert!(ie.injection.speaking_style && ie.injection.examples && ie.injection.utt);
+    assert!(!ie.injection.behavior && !ie.injection.knowledge);
+    assert!(!ie.injection.narrative && !ie.injection.bridge);
+
+    let mut inn = ramaria_core::config::RamariaConfig::default();
+    AblationProfile::INarrative.apply_to(&mut inn);
+    assert!(inn.injection.memory_rag, "I_narrative 保留 B1 RAG 基座");
+    assert!(inn.injection.narrative && inn.injection.bridge);
+    assert!(!inn.injection.utt && !inn.injection.behavior && !inn.injection.knowledge);
+    assert!(!inn.injection.speaking_style && !inn.injection.examples);
 }
 
 /// ProbeVariant serde 向后兼容：旧数据集（无 ablation 字段）→ None；
@@ -998,7 +1119,7 @@ fn build_ablation_report_marks_removal_effect() {
     assert!(row.ci95_high < 0.0, "CI 不含 0");
 }
 
-/// S 组：B1（低分基座）vs S_behavior（高分单层）→ up 方向。
+/// S 组：B1（低分基座）vs S_behavior（高分单层）→ up 方向，类型=替代对照。
 #[test]
 fn build_ablation_report_s_group_positive() {
     let eval = ProbeEvaluation {
@@ -1032,4 +1153,360 @@ fn build_ablation_report_s_group_positive() {
     assert!(row.significant, "S_behavior 单层注入应显著正向");
     assert_eq!(row.direction, "up");
     assert!(row.mean_diff > 0.0);
+    assert_eq!(row.comparison_type, "substitution", "S 组应标注为替代对照");
+    assert_eq!(row.base_variant, "B1", "S 组基线为 B1");
+}
+
+/// I 组（净增量对照）：B1（低分基座）vs I_behavior（B1 基座 + 行为层，高分）
+/// → up 方向、comparison_type=increment（与 S 组替代对照可区分）。
+#[test]
+fn build_ablation_report_i_group_marks_increment() {
+    let eval = ProbeEvaluation {
+        results_file: String::new(),
+        persona_uid: "char-0001".into(),
+        dataset_seed: 1,
+        judge_used: false,
+        embedding_used: false,
+        generated_at: "t".into(),
+        variants: vec![
+            eval_variant_scores("B1", &[0.4, 0.4, 0.4, 0.4, 0.4]),
+            eval_variant_scores("I_behavior", &[0.75, 0.75, 0.75, 0.75, 0.75]),
+            eval_variant_scores("I_narrative", &[0.3, 0.3, 0.3, 0.3, 0.3]),
+        ],
+    };
+    let exp = ProbeExperiment {
+        dataset_file: String::new(),
+        dataset_seed: 1,
+        persona_uid: "char-0001".into(),
+        rebuild_utt: false,
+        variants: vec![],
+        repeat: None,
+        generated_at: "t".into(),
+    };
+    let report = build_ablation_report(&exp, &eval);
+
+    let ib = report
+        .rows
+        .iter()
+        .find(|r| r.ablation_variant == "I_behavior" && r.dimension == "fact")
+        .expect("应有 I_behavior/fact 行");
+    assert_eq!(ib.comparison_type, "increment", "I 组应标注为净增量对照");
+    assert_eq!(ib.base_variant, "B1", "I 组基线为 B1");
+    assert!(ib.significant, "I_behavior 叠加应显著正向");
+    assert_eq!(ib.direction, "up");
+    assert!(ib.mean_diff > 0.0, "B1 基座 + 行为层高于 B1 → 净增为正");
+
+    let inn = report
+        .rows
+        .iter()
+        .find(|r| r.ablation_variant == "I_narrative" && r.dimension == "fact")
+        .expect("应有 I_narrative/fact 行");
+    assert_eq!(inn.comparison_type, "increment");
+    assert_eq!(inn.direction, "down", "叠加后低于 B1 → 负向净增");
+    assert!(inn.significant);
+}
+
+/// 报告局限字段（D-V20-005 必出）：单 persona 局限 + 可用性标注。
+#[test]
+fn report_limitations_always_contain_external_validity_note() {
+    let exp = ProbeExperiment {
+        dataset_file: String::new(),
+        dataset_seed: 1,
+        persona_uid: "char-0001".into(),
+        rebuild_utt: false,
+        variants: vec![],
+        repeat: None,
+        generated_at: "t".into(),
+    };
+    let lim = super::report::build_limitations(&exp, false, true);
+    assert!(
+        lim.iter().any(|l| l.contains("单 persona")),
+        "局限声明必须包含单 persona 外部效度说明"
+    );
+    assert!(
+        lim.iter().any(|l| l.contains("语气维")),
+        "judge 不可用时应标注语气维缺失"
+    );
+    // embedding 可用时不出现降级说明
+    assert!(!lim.iter().any(|l| l.contains("embedding 不可用")));
+}
+
+// =========================================================
+// M2-005 辅助指标四件套（产物可复算近似）
+// =========================================================
+
+/// 构造带 fact/emotion 明细与跨轮聚合的评分数值档位（辅助指标测试用）。
+fn eval_variant_mixed() -> VariantEvaluation {
+    use super::evaluate::{DimensionScoreAgg, EmotionItemScore};
+    let item =
+        |id: &str, dim: &str, fact: Option<f64>, emo: Option<EmotionItemScore>| -> ItemEvaluation {
+            ItemEvaluation {
+                item_id: id.to_string(),
+                dimension: dim.to_string(),
+                question: "q".to_string(),
+                reference: None,
+                reply_preview: String::new(),
+                fact: fact.map(|score| FactItemScore {
+                    cosine: Some(score),
+                    keyword_hit: score,
+                    score,
+                }),
+                tone: None,
+                emotion: emo,
+                error: None,
+            }
+        };
+    let items = vec![
+        // fact 两条：0.9 可追溯 / 0.2 不可追溯 → 可追溯率 0.5
+        item("fact-0001", "fact", Some(0.9), None),
+        item("fact-0002", "fact", Some(0.2), None),
+        // emotion 两条：恰当 1.0（负面情境） / 不当 0.0（正面情境）→ 命中 0.5、误用 0.5
+        item(
+            "emotion-0001",
+            "emotion",
+            None,
+            Some(EmotionItemScore {
+                score: 1.0,
+                situation_negative: true,
+                situation_positive: false,
+                marker_hit: 3,
+            }),
+        ),
+        item(
+            "emotion-0002",
+            "emotion",
+            None,
+            Some(EmotionItemScore {
+                score: 0.0,
+                situation_negative: false,
+                situation_positive: true,
+                marker_hit: 0,
+            }),
+        ),
+    ];
+    VariantEvaluation {
+        variant_id: "v1".to_string(),
+        description: "d".to_string(),
+        params: VariantParams {
+            theta_gap_minutes: 10,
+            max_msgs_per_block: 80,
+            retrieve_top_k: 3,
+            ablation: None,
+        },
+        fact_score: None,
+        tone_score: None,
+        emotion_score: None,
+        dimension_scores: Some(vec![
+            DimensionScoreAgg {
+                dimension: "fact".to_string(),
+                mean: 0.5,
+                std: 0.1,
+                ci95_low: 0.4,
+                ci95_high: 0.6,
+                n: 3,
+            },
+            DimensionScoreAgg {
+                dimension: "emotion".to_string(),
+                mean: 0.5,
+                std: 0.2,
+                ci95_low: 0.3,
+                ci95_high: 0.7,
+                n: 3,
+            },
+        ]),
+        failed_count: 0,
+        items,
+    }
+}
+
+/// 四件套计算：可追溯率 / 规则命中 / 路由误用 / 画像回归均值可从构造产物复算。
+#[test]
+fn auxiliary_metrics_recomputable_from_product() {
+    let evaluation = ProbeEvaluation {
+        results_file: String::new(),
+        persona_uid: "char-0001".into(),
+        dataset_seed: 1,
+        judge_used: false,
+        embedding_used: true,
+        generated_at: "t".into(),
+        variants: vec![eval_variant_mixed()],
+    };
+    let m = compute_auxiliary_metrics(&evaluation);
+
+    // 证据链可追溯率：2 条 fact 中 1 条 score≥0.5 → 0.5
+    let t = m.evidence_traceability_rate.expect("有 fact 题应可算");
+    assert!((t - 0.5).abs() < 1e-9, "可追溯率应 0.5，实际 {t}");
+    // 行为规则命中率：2 条 emotion 中 1 条恰当 → 0.5
+    let h = m.behavior_rule_hit_rate.expect("有 emotion 题应可算");
+    assert!((h - 0.5).abs() < 1e-9, "规则命中率应 0.5，实际 {h}");
+    // 情境路由误用率：2 条有极性中 1 条 0 分 → 0.5
+    let u = m.situation_route_misuse_rate.expect("有极性样本应可算");
+    assert!((u - 0.5).abs() < 1e-9, "路由误用率应 0.5，实际 {u}");
+    // 画像回归：档位跨轮 std 均值 = (0.1+0.2)/2 = 0.15
+    let p = m
+        .profile_regression_output_stability
+        .expect("有 dimension_scores 应可算");
+    assert!(
+        (p - 0.15).abs() < 1e-9,
+        "画像回归 std 均值应 0.15，实际 {p}"
+    );
+    assert!(m.annotation.contains("可复算"), "annotation 应说明口径");
+}
+
+/// 空评分数值（无 fact/emotion/聚合）→ 各指标 None（标注缺项而非报错）。
+#[test]
+fn auxiliary_metrics_empty_variants_all_none() {
+    let evaluation = ProbeEvaluation {
+        results_file: String::new(),
+        persona_uid: "char-0001".into(),
+        dataset_seed: 1,
+        judge_used: false,
+        embedding_used: false,
+        generated_at: "t".into(),
+        variants: vec![],
+    };
+    let m = compute_auxiliary_metrics(&evaluation);
+    assert!(m.evidence_traceability_rate.is_none());
+    assert!(m.behavior_rule_hit_rate.is_none());
+    assert!(m.situation_route_misuse_rate.is_none());
+    assert!(m.profile_regression_output_stability.is_none());
+    assert!(!m.annotation.is_empty());
+}
+
+/// markdown 渲染快照断言（M2-006 验收：I/S 分栏 + 局限字段必出 + 辅助指标节）。
+///
+/// 构造一个带消融报告（含 I/S 行）与局限/辅助指标的 `ProbeReport`，
+/// 断言渲染文本包含三类对照小节、净增量/替代标注与局限声明节。
+#[test]
+fn render_report_markdown_sections_cover_i_s_columns_and_limitations() {
+    use super::report::{
+        AblationComparisonRow, AblationReport, AuxiliaryMetrics, KnowledgeQualityReport,
+        ProbeReport, Recommendation, VariantAuxMetrics,
+    };
+    // 手工构造最小报告（重点校验渲染分段，不依赖完整评分明细）。
+    let report = ProbeReport {
+        results_file: "r.json".into(),
+        evaluation_file: Some("e.json".into()),
+        persona_uid: "char-0001".into(),
+        dataset_seed: 1,
+        judge_used: false,
+        embedding_used: false,
+        generated_at: "t".into(),
+        variants: vec![],
+        recommendation: Recommendation {
+            per_dimension: vec![],
+            overall: "无".into(),
+        },
+        calibration: None,
+        knowledge_quality: Some(KnowledgeQualityReport {
+            sample_count: 0,
+            fact_hit_count: 0,
+            false_positive_rate: 0.0,
+            false_negative_rate: 0.0,
+            miss_target_met: false,
+            annotation: "无样本".into(),
+        }),
+        ablation: Some(AblationReport {
+            baseline_variant: "B1".into(),
+            rows: vec![
+                AblationComparisonRow {
+                    ablation_variant: "F1".into(),
+                    description: "移除".into(),
+                    comparison_type: "removal".into(),
+                    base_variant: "F0".into(),
+                    dimension: "fact".into(),
+                    n_pairs: 5,
+                    base_mean: 0.8,
+                    ablated_mean: 0.4,
+                    mean_diff: -0.4,
+                    wilcoxon_p: 0.01,
+                    p_fdr: 0.02,
+                    cohens_d: 0.9,
+                    ci95_low: -0.7,
+                    ci95_high: -0.1,
+                    significant: true,
+                    direction: "down".into(),
+                    annotation: "移除显著".into(),
+                },
+                AblationComparisonRow {
+                    ablation_variant: "S_behavior".into(),
+                    description: "替代".into(),
+                    comparison_type: "substitution".into(),
+                    base_variant: "B1".into(),
+                    dimension: "fact".into(),
+                    n_pairs: 5,
+                    base_mean: 0.4,
+                    ablated_mean: 0.8,
+                    mean_diff: 0.4,
+                    wilcoxon_p: 0.01,
+                    p_fdr: 0.02,
+                    cohens_d: 0.9,
+                    ci95_low: 0.1,
+                    ci95_high: 0.7,
+                    significant: true,
+                    direction: "up".into(),
+                    annotation: "替代对照显著".into(),
+                },
+                AblationComparisonRow {
+                    ablation_variant: "I_behavior".into(),
+                    description: "净增量".into(),
+                    comparison_type: "increment".into(),
+                    base_variant: "B1".into(),
+                    dimension: "fact".into(),
+                    n_pairs: 5,
+                    base_mean: 0.4,
+                    ablated_mean: 0.75,
+                    mean_diff: 0.35,
+                    wilcoxon_p: 0.01,
+                    p_fdr: 0.02,
+                    cohens_d: 0.9,
+                    ci95_low: 0.1,
+                    ci95_high: 0.6,
+                    significant: true,
+                    direction: "up".into(),
+                    annotation: "净增量显著".into(),
+                },
+            ],
+            aux: vec![VariantAuxMetrics {
+                variant_id: "B1".into(),
+                description: "基线".into(),
+                reply_chars_mean: 80.0,
+                elapsed_ms_mean: 1000.0,
+                empty_reply_rate: 0.0,
+                success_count: 30,
+                total_count: 30,
+            }],
+        }),
+        limitations: vec![
+            "外部效度局限：基于单 persona".into(),
+            "统计法样本：单次运行".into(),
+        ],
+        auxiliary: AuxiliaryMetrics {
+            evidence_traceability_rate: Some(0.5),
+            behavior_rule_hit_rate: Some(0.5),
+            situation_route_misuse_rate: Some(0.5),
+            profile_regression_output_stability: Some(0.15),
+            annotation: "产物可复算近似".into(),
+        },
+    };
+    let md = super::report::render_report_markdown(&report);
+
+    // 三类对照小节标题分栏
+    assert!(md.contains("移除对照（F 组 vs F0）"), "应渲染移除对照小节");
+    assert!(md.contains("替代对照（S 组 vs B1）"), "应渲染替代对照小节");
+    assert!(
+        md.contains("净增量对照（I 组 vs B1）"),
+        "应渲染净增量对照小节"
+    );
+    assert!(md.contains("F1"), "移除行应出现");
+    assert!(md.contains("S_behavior"), "替代行应出现");
+    assert!(md.contains("I_behavior"), "净增量行应出现");
+    // 局限声明节必出（含两条局限文本）
+    assert!(md.contains("数据特性与外部效度局限"), "局限节必出");
+    assert!(md.contains("基于单 persona"), "单 persona 局限文本应出现");
+    assert!(md.contains("统计法样本"), "repeat 局限文本应出现");
+    // 辅助指标四件套节
+    assert!(md.contains("辅助指标（产物可复算）"), "辅助指标节必出");
+    assert!(md.contains("证据链可追溯率"), "证据链可追溯率项应出现");
+    assert!(md.contains("画像回归"), "画像回归项应出现");
 }
