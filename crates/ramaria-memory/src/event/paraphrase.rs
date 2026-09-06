@@ -127,8 +127,8 @@ fn clean_paraphrase(raw: &str, max_chars: usize) -> String {
             || c == '\''
     });
 
-    // 截断到最大字符数
-    let truncated: String = text.chars().take(max_chars).collect();
+    // 截断到最大字符数（字符边界，不破坏 UTF-8）
+    let truncated = ramaria_core::text::truncate_chars_bare(text, max_chars);
 
     truncated.trim().to_string()
 }

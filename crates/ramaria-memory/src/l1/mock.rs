@@ -20,7 +20,7 @@ use ramaria_core::types::{
     Persona, PersonaExample, PersonaFact, PersonalityTrait, PrivacyConsent, ProfileField, Session,
     TraitEvidence, TraitStatus,
 };
-use ramaria_core::{LlmProviderTrait, RamariaError, RamariaResult, StorageBackend};
+use ramaria_core::{LlmProviderTrait, RamariaError, RamariaResult, StoreCrud, StoreInfrastructure};
 use uuid::Uuid;
 
 // =========================================================
@@ -158,7 +158,7 @@ impl MockStorage {
 }
 
 #[async_trait]
-impl StorageBackend for MockStorage {
+impl StoreCrud for MockStorage {
     // -- Session (unused by summarizer) --
     async fn create_session(&self, _persona_uid: Option<&str>) -> RamariaResult<Session> {
         unimplemented!()
@@ -330,7 +330,10 @@ impl StorageBackend for MockStorage {
     async fn list_keywords(&self) -> RamariaResult<Vec<String>> {
         Ok(self.keywords.lock().unwrap().clone())
     }
+}
 
+#[async_trait]
+impl StoreInfrastructure for MockStorage {
     // -- Privacy Consent --
     async fn save_privacy_consent(&self, _: &PrivacyConsent) -> RamariaResult<()> {
         unimplemented!()

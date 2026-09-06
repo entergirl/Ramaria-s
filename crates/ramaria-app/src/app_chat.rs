@@ -826,7 +826,7 @@ mod examples_tests {
     use super::load_examples_for_input;
     use crate::stages::test_utils::MockStorage;
     use ramaria_core::config::ExamplesConfig;
-    use ramaria_core::traits::StorageBackend;
+    use ramaria_core::traits::StoreCrud;
     use ramaria_core::types::PersonaExample;
     use std::sync::Arc;
 

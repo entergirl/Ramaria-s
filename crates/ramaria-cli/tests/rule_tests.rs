@@ -20,7 +20,8 @@ use common::{MockStorage, build_test_app, make_test_event};
 use ramaria_core::behavior::{
     BehaviorEvidence, BehaviorParams, BehaviorRule, BehaviorSituation, RuleSource, SignalType,
 };
-use ramaria_core::traits::StorageBackend;
+use ramaria_core::traits::StoreInfrastructure;
+
 use std::sync::Arc;
 
 use ramaria_cli::commands::rule::{RuleCmd, run};

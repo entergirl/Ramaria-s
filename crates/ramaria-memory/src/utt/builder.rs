@@ -445,6 +445,7 @@ pub fn render_block_text(chunk: &UttChunk, target_uid: &str, target_name: &str) 
 mod tests {
     use super::*;
     use ramaria_core::error::RamariaError;
+    use ramaria_core::traits::StoreCrud;
     use ramaria_core::types::{Message, MessageRole, MessageSource, Persona, PersonaKind};
     use ramaria_storage::SqliteStorage;
 

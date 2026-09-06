@@ -307,7 +307,7 @@ pub async fn run(
     }
 
     let (sessions_written, messages_written, session_ids) =
-        ramaria_importer::qq::QqImporter::execute_fast_import(
+        ramaria_importer::writer::ImportWriter::write_l0(
             pool,
             &sessions,
             self_persona_uid.as_deref(),

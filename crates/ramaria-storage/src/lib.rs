@@ -1,17 +1,17 @@
 //! crates/ramaria-storage/src/lib.rs - Ramaria SQLite 存储层
 //!
 //! 设计特点:
-//! - 封装 SqlitePool，实现 `StorageBackend` trait 的全部方法（覆盖 24 张表）
+//! - 封装 SqlitePool，实现 `StoreCrud` + `StoreInfrastructure`（= `StorageBackend`，覆盖 24 张表）
 //! - Repository 模式：每个子模块负责一类实体的 SQL 操作与行映射
 //! - 所有可恢复错误统一转换为 RamariaError::Storage
 //! - 手动行映射避免 sqlx derive 侵入 core 层，保持零 I/O 约束
-//! - 公共 API 与 `StorageBackend` trait 一致，供 app/memory 层依赖注入使用
+//! - 公共 API 与 `StorageBackend` 聚合 trait 一致，供 app/memory 层依赖注入使用
 //! - ID 类型对齐: TEXT 主键表用 Uuid，INTEGER AUTOINCREMENT 表用 i64
 
 use ramaria_core::behavior::{BehaviorRule, FeedbackLog};
 use ramaria_core::config::CacheEviction;
 use ramaria_core::error::RamariaResult;
-use ramaria_core::traits::StorageBackend;
+use ramaria_core::traits::{StoreCrud, StoreInfrastructure};
 use ramaria_core::types::{
     BackendConfig, ClusterSnapshot, EventRelation, EventSource, MemoryEvent, MemoryL1, Message,
     Persona, PersonaExample, PersonaFact, PersonaStyleStats, PersonalityTrait, PrivacyConsent,
@@ -35,7 +35,7 @@ impl SqliteStorage {
 }
 
 #[async_trait::async_trait]
-impl StorageBackend for SqliteStorage {
+impl StoreCrud for SqliteStorage {
     // =========================================================
     // Session 管理（会话生命周期）
     // =========================================================
@@ -398,7 +398,10 @@ impl StorageBackend for SqliteStorage {
         let tokens = repo::keyword::list_all(&self.pool).await?;
         Ok(tokens.into_iter().map(|t| t.into_inner()).collect())
     }
+}
 
+#[async_trait::async_trait]
+impl StoreInfrastructure for SqliteStorage {
     // =========================================================
     // Keyword Refs（关键词倒排索引）
     // =========================================================

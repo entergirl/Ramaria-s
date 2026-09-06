@@ -202,12 +202,12 @@ async fn fetch_latest_release(url: &str) -> Result<GitHubRelease, String> {
                     Err(format!(
                         "GitHub API 返回 HTML 页面（HTTP {code}），\n\
                          请求可能被代理/防火墙拦截。响应预览: {}",
-                        body_preview.chars().take(200).collect::<String>()
+                        ramaria_core::text::truncate_chars_bare(&body_preview, 200)
                     ))
                 } else {
                     Err(format!(
                         "GitHub API 返回错误状态码: {code}\n响应: {}",
-                        body_preview.chars().take(200).collect::<String>()
+                        ramaria_core::text::truncate_chars_bare(&body_preview, 200)
                     ))
                 }
             }
@@ -227,7 +227,7 @@ async fn fetch_latest_release(url: &str) -> Result<GitHubRelease, String> {
         return Err(format!(
             "GitHub API 返回非 JSON 内容类型: {content_type}\n\
              响应预览: {}",
-            body_preview.chars().take(200).collect::<String>()
+            ramaria_core::text::truncate_chars_bare(&body_preview, 200)
         ));
     }
 

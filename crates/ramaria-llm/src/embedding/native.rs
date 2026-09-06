@@ -3,7 +3,7 @@
 //! 设计特点:
 //! - 取代旧的 ONNX 方案，直接从 HuggingFace safetensors 格式加载嵌入模型
 //! - 支持 BERT 架构（bge-small-zh-v1.5，mean pooling）和 LLaMA/Qwen3 架构（last token pooling）
-//! - 架构通过 config.json 自动检测，维度在构造时确定（不依赖模型加载）
+//! - 架构通过 config.json 自动检测；维度先由构造时探测，模型加载成功后把实际维度同步回 model_info
 //! - 惰性加载：首次 `embed` 调用时才加载模型权重到内存
 //! - 线程安全：编码器通过 `Arc<Encoder>` 在 `Mutex` 内保护，推理时克隆 Arc 后立即释放锁
 //! - P-1 修复：推理操作在锁外执行（先 clone Arc → 释放锁 → 推理），不阻塞其他请求
@@ -139,6 +139,38 @@ impl Encoder {
             Self::LlamaHeadDim(_) => ModelArchitecture::LlamaHeadDim,
         }
     }
+}
+
+// =========================================================
+// 维度同步纯函数
+// =========================================================
+
+/// 把实际加载得到的向量维度同步到存储的模型信息维度槽。
+///
+/// 用途:
+/// - 模型权重加载完成后，若实际维度与构造时占位/猜测维度不同
+///   （先构造后下载流程中构造时可能为默认 384），此处修正为真实维度，
+///   使 `validate` 的维度一致性校验与实际模型一致。
+///
+/// 参数:
+/// - `stored`: 存储的维度槽（`model_info.dimension` 的可变借用）。
+/// - `actual`: 模型加载后得到的真实向量维度。
+///
+/// 返回:
+/// - `true`: 维度发生变更（stored 已更新为 actual）。
+/// - `false`: stored 与 actual 相同，未发生变更。
+///
+/// 说明:
+/// - 纯函数：无锁、无 I/O，便于并发/顺序单测覆盖"加载后维度同步"逻辑。
+/// - 仅在加载成功拿到 `actual` 后才调用；加载失败不进入此函数，
+///   因此失败路径保持旧维度不变。
+/// - 返回是否变更，便于调用方决定是否打"维度已同步"日志。
+fn sync_actual_dimension(stored: &mut usize, actual: usize) -> bool {
+    if *stored == actual {
+        return false;
+    }
+    *stored = actual;
+    true
 }
 
 // =========================================================
@@ -308,16 +340,17 @@ impl NativeEmbeddingProvider {
         // 维度同步：保存实际加载维度，覆盖构造时的占位/猜测值。
         // 先构造后下载流程中构造时维度可能为默认 384，此处更新为真实维度，
         // 使 validate 的"维度不匹配"校验与实际模型一致。
+        // 同步动作收敛到纯函数 sync_actual_dimension，便于独立单测。
         // 锁顺序：encoder 锁 → model_info 锁（model_info() 只持 model_info 锁，无反向嵌套，不死锁）。
         {
             let mut info = self.model_info.lock().unwrap_or_else(|e| e.into_inner());
-            if info.dimension != actual_dim {
+            let prev_dim = info.dimension;
+            if sync_actual_dimension(&mut info.dimension, actual_dim) {
                 tracing::info!(
-                    from = info.dimension,
-                    to = actual_dim,
+                    from = prev_dim,
+                    to = info.dimension,
                     "嵌入模型维度已同步为实际加载值"
                 );
-                info.dimension = actual_dim;
             }
         }
 
@@ -713,8 +746,8 @@ mod tests {
     /// 说明:
     /// - trait 签名按值返回后，读取路径全部走锁内 clone，无并发数据竞争
     ///   （维度同步的并发语义）。
-    /// - 真实模型加载维度同步需真实 safetensors 模型，属手动验证项
-    ///   （构造-下载-validate 流程：先构造 384 占位 → 加载后同步实际维度）。
+    /// - 模型加载的并发语义由 ensure_loaded 的 encoder 锁串行化保证；
+    ///   此处与 sync_actual_dimension 纯函数测试共同覆盖"维度同步并发正确性"。
     #[test]
     fn model_info_concurrent_reads_are_consistent() {
         let provider =
@@ -731,5 +764,54 @@ mod tests {
         for h in handles {
             h.join().unwrap();
         }
+    }
+
+    /// 维度同步纯函数：占位维度与真实维度不同时更新并返回变更标记。
+    #[test]
+    fn sync_actual_dimension_updates_when_different() {
+        let mut stored = 384usize;
+        let changed = sync_actual_dimension(&mut stored, 512);
+        assert!(changed);
+        assert_eq!(stored, 512);
+    }
+
+    /// 维度同步纯函数：真实维度与已存维度相同时不更新、返回未变更。
+    #[test]
+    fn sync_actual_dimension_noop_when_equal() {
+        let mut stored = 512usize;
+        let changed = sync_actual_dimension(&mut stored, 512);
+        assert!(!changed);
+        assert_eq!(stored, 512);
+    }
+
+    /// 维度同步纯函数：重复同步幂等，第二次起不再变更。
+    #[test]
+    fn sync_actual_dimension_is_idempotent() {
+        let mut stored = 384usize;
+        assert!(sync_actual_dimension(&mut stored, 768));
+        assert!(!sync_actual_dimension(&mut stored, 768));
+        assert_eq!(stored, 768);
+    }
+
+    /// 维度同步纯函数并发一致性：多个线程对同一共享维度槽做同步，结果确定且无 panic。
+    ///
+    /// 说明:
+    /// - 模拟 ensure_loaded 并发完成后的同步：所有线程都以同一真实维度写入，
+    ///   终值应为该维度；用 Mutex 串行化写，验证不引入数据竞争/悬挂。
+    #[test]
+    fn sync_actual_dimension_concurrent_is_consistent() {
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(384usize));
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let s = std::sync::Arc::clone(&slot);
+            handles.push(std::thread::spawn(move || {
+                let mut guard = s.lock().unwrap();
+                sync_actual_dimension(&mut guard, 512);
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(*slot.lock().unwrap(), 512);
     }
 }

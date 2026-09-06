@@ -772,6 +772,7 @@ fn backend_fields_equal(a: &BackendConfig, b: &BackendConfig) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ramaria_core::traits::StoreInfrastructure;
     use ramaria_core::types::{LlmProvider, PersonaKind};
     use std::sync::Mutex;
 
@@ -783,7 +784,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl StorageBackend for MockStorage {
+    impl ramaria_core::traits::StoreCrud for MockStorage {
         async fn create_session(
             &self,
             _p: Option<&str>,
@@ -979,6 +980,10 @@ mod tests {
         async fn list_keywords(&self) -> RamariaResult<Vec<String>> {
             Ok(vec![])
         }
+    }
+
+    #[async_trait::async_trait]
+    impl ramaria_core::traits::StoreInfrastructure for MockStorage {
         async fn insert_keyword_ref(
             &self,
             _k: &str,

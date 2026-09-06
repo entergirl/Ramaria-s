@@ -287,7 +287,7 @@ mod tests {
     use super::*;
     use crate::stages::test_utils::{MockStorage, simple_context};
     use futures::stream;
-    use ramaria_core::traits::StreamDelta;
+    use ramaria_core::traits::{StoreCrud, StreamDelta};
     use ramaria_core::types::Session;
     use std::sync::Arc;
     use uuid::Uuid;

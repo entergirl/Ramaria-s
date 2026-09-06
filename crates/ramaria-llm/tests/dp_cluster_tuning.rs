@@ -21,7 +21,7 @@
 
 #![cfg(feature = "embedding-native")]
 
-use ramaria_core::traits::{EmbeddingProvider, StorageBackend};
+use ramaria_core::traits::{EmbeddingProvider, StoreCrud};
 use ramaria_memory::behavior::{
     BehaviorSample, density_cluster, fused_similarity, sample_from_event, vectorize,
 };

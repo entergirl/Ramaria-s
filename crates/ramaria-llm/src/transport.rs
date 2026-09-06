@@ -741,7 +741,7 @@ fn parse_sse_line(line: &str) -> Option<RamariaResult<StreamDelta>> {
 /// - 4xx: 请求错误（模型名、参数等）
 /// - 5xx: 服务端错误
 fn http_error(status: u16, body: &str) -> RamariaError {
-    let summary: String = body.chars().take(500).collect();
+    let summary: String = ramaria_core::text::truncate_chars_bare(body, 500);
     let context = match status {
         401 => "LLM 鉴权失败 (HTTP 401): API key 无效或过期。请检查 keychain 中的密钥是否正确"
             .to_string(),

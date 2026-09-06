@@ -312,3 +312,101 @@ pub async fn save_import_batch(pool: &SqlitePool, msgs: &[Message]) -> RamariaRe
     tracing::debug!(count = written, "批量导入消息写入完成");
     Ok(written)
 }
+
+// =========================================================
+// 单元测试
+// =========================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::init_test_pool;
+    use ramaria_core::types::{Message, MessageRole, MessageSource};
+    use uuid::Uuid;
+
+    /// 插入 persona 与 session fixture，满足 messages 的外键约束。
+    async fn setup_fixture(pool: &SqlitePool) -> Uuid {
+        sqlx::query(
+            "INSERT INTO personas (uid, name, kind, seq, source, created_at, updated_at) \
+             VALUES ('char-0001', '测试', 'char', 1, 'local', 0, 0)",
+        )
+        .execute(pool)
+        .await
+        .expect("插入 persona fixture 应成功");
+        let session_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO sessions (id, started_at) VALUES (?, 0)")
+            .bind(session_id.to_string())
+            .execute(pool)
+            .await
+            .expect("插入 session fixture 应成功");
+        session_id
+    }
+
+    fn make_message(session_id: Uuid, fingerprint: Option<&str>) -> Message {
+        Message {
+            id: uuid::Uuid::new_v4(),
+            session_id,
+            role: MessageRole::User,
+            content: "内容".to_string(),
+            created_at: 1000,
+            source: MessageSource::Local,
+            fingerprint: fingerprint.map(|s| s.to_string()),
+            persona_uid: Some("char-0001".to_string()),
+        }
+    }
+
+    /// 同 fingerprint 二次写入被 UNIQUE 约束拒绝；不同 fingerprint 正常写入。
+    #[tokio::test]
+    async fn fingerprint_unique_rejects_duplicate() {
+        let pool = init_test_pool().await.expect("测试库初始化失败");
+        let session_id = setup_fixture(&pool).await;
+
+        // 首次写入成功
+        save_import(&pool, &make_message(session_id, Some("fp-same")))
+            .await
+            .expect("首次写入成功");
+
+        // 同 fingerprint 再次写入 → UNIQUE 冲突
+        let dup = make_message(session_id, Some("fp-same"));
+        let err = save_import(&pool, &dup)
+            .await
+            .expect_err("同指纹应被 UNIQUE 拒绝");
+        let unique_in_chain =
+            std::iter::successors(std::error::Error::source(&err), |e| e.source())
+                .map(|e| e.to_string())
+                .chain([err.to_string()])
+                .any(|msg| msg.contains("UNIQUE"));
+        assert!(
+            unique_in_chain,
+            "底层错误链应含 UNIQUE 约束冲突，实际: {err}"
+        );
+
+        // 不同 fingerprint 正常写入
+        save_import(&pool, &make_message(session_id, Some("fp-other")))
+            .await
+            .expect("不同指纹写入成功");
+        assert_eq!(count_by_session(&pool, session_id).await.unwrap(), 2);
+    }
+
+    /// find_by_fingerprint 能命中已入库指纹，未入库则返回 None。
+    #[tokio::test]
+    async fn find_by_fingerprint_hits_and_misses() {
+        let pool = init_test_pool().await.expect("测试库初始化失败");
+        let session_id = setup_fixture(&pool).await;
+
+        assert!(
+            find_by_fingerprint(&pool, "fp-present")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        save_import(&pool, &make_message(session_id, Some("fp-present")))
+            .await
+            .expect("写入成功");
+        let hit = find_by_fingerprint(&pool, "fp-present")
+            .await
+            .unwrap()
+            .expect("应命中");
+        assert_eq!(hit.fingerprint.as_deref(), Some("fp-present"));
+    }
+}

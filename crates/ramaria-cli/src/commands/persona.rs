@@ -482,9 +482,9 @@ fn extract_toml_block(content: &str, key: &str) -> Option<String> {
     Some(block_lines.join("\n"))
 }
 
-/// 将文本截断为指定最大字符数，添加 "..." 省略号。
+/// 将文本截断为指定最大字符数，添加统一省略号 `…`。
 ///
-/// 按字符边界截断，不破坏 UTF-8。
+/// 字符边界与省略号语义由 `ramaria_core::text::truncate_chars` 统一实现，不破坏 UTF-8。
 fn summarize_block(text: &str, max_chars: usize) -> String {
     // 先压缩多余空白为单个空格，便于单行展示
     let compressed: String = text
@@ -494,12 +494,7 @@ fn summarize_block(text: &str, max_chars: usize) -> String {
         .collect::<Vec<_>>()
         .join(" ");
 
-    if compressed.chars().count() <= max_chars {
-        compressed
-    } else {
-        let truncated: String = compressed.chars().take(max_chars).collect();
-        format!("{truncated}...")
-    }
+    ramaria_core::text::truncate_chars(&compressed, max_chars)
 }
 
 // =========================================================
@@ -565,11 +560,11 @@ mod tests {
     fn summarize_block_cases() {
         // 短文本原样
         assert_eq!(summarize_block("短文本", 100), "短文本");
-        // 超长截断：50 chars + "..."
+        // 超长截断：预算内含统一省略号 → 总长 50
         let long = "a".repeat(200);
         let result = summarize_block(&long, 50);
-        assert!(result.ends_with("..."));
-        assert_eq!(result.chars().count(), 53);
+        assert!(result.ends_with('…'));
+        assert_eq!(result.chars().count(), 50);
         // 多行合并为单行
         let text = "第一行\n第二行\n  第三行有空格  ";
         let result = summarize_block(text, 100);

@@ -5,9 +5,10 @@
 //! - `QqImporter` 实现 `ImportSource` trait，通过 `detect_format` 检测 JSON 格式
 //! - 快速导入：仅写 messages 表，标记 fingerprint 去重
 //! - 深度导入：创建 session → 写入 L0 → 关闭 session → 触发全管线
-//! - 双画像支持——按发送者分别关联 persona（self_persona_uid vs other_persona_uid）
-//! - `build_persona_uid` 提供 4 级优先级的 UID 生成策略
-//! - `ensure_qq_persona` 复用原有逻辑，每次调用创建/查找单个 persona
+//! - L0 会话/消息写入由通用写入层 `ImportWriter`（`crate::writer`）承担；
+//!   本模块负责 QQ 特有的解析与画像 UID 生成，不重复实现写入逻辑
+//! - `build_persona_uid` 提供 4 级优先级的 UID 生成策略（含 QQ 号级别 2/3）
+//! - `ensure_qq_persona` 每次调用创建/查找单个 source="qq" 的 persona
 //! - 完整覆盖 qce v6.x 全部 10 种语义化消息类型（text/reply/audio/json/file/video/forward/type_10/type_19/system）
 
 pub mod parser;
@@ -20,6 +21,10 @@ use sqlx::SqlitePool;
 
 use crate::traits::{ImportReport, ImportSource, ImportedSession};
 
+// 兼容历史引用：双画像"双方/导入侧"模型已上移至通用层，此处对外再导出。
+// 同时把 PersonaSide / ImportSide 带入本模块作用域（含测试）。
+pub use crate::traits::{ImportSide, PersonaSide};
+
 // =========================================================
 // QQ 导入器
 // =========================================================
@@ -29,164 +34,16 @@ use crate::traits::{ImportReport, ImportSource, ImportedSession};
 /// 职责:
 /// - 实现 `ImportSource` trait，提供 QQ 聊天记录的格式检测和解析能力。
 /// - 仅支持 qq-chat-exporter v6.x JSON 格式（语义化 type 名称）。
-/// - 提供 `execute_fast_import` 方法，执行完整的 L0 导入流程。
+///
+/// 说明:
+/// - L0 会话/消息写入不在此类型上（已上移至通用写入层 `crate::writer::ImportWriter`），
+///   调用方解析完成后以 `ImportWriter::write_l0` 写入。
 pub struct QqImporter;
 
 impl QqImporter {
     /// 创建新的 QQ 导入器。
     pub fn new() -> Self {
         Self
-    }
-
-    /// 执行快速导入：仅写入 messages 表（L0）。
-    ///
-    /// 双画像支持：
-    /// - 根据每条消息的发送者（`sender_uid == self_uid`）区分画像归属。
-    /// - 导出者本人的消息关联 `self_persona_uid`，对方消息关联 `other_persona_uid`。
-    ///
-    /// 导入侧过滤：
-    /// - `side` 控制只处理某一侧：`Me` 只写我方消息、`Other` 只写对方消息、
-    ///   `Both` 全部写入（默认）。跳过侧消息不入库；该侧 persona 由调用方不创建。
-    /// - 单侧模式下，跳过侧的 `persona_uid` 传 `None`（不会在消息中出现）；
-    ///   session 归属为处理侧 persona。
-    ///
-    /// 参数:
-    /// - `pool`: 数据库连接池。
-    /// - `sessions`: 解析后的 session 列表。
-    /// - `self_persona_uid`: 导出者本人的 persona 标识（`side=Other` 时为 None）。
-    /// - `other_persona_uid`: 对话对方的 persona 标识（`side=Me` 时为 None）。
-    /// - `self_uid`: 导出者的 QQ UID（用于与消息的 sender_uid 比较）。
-    /// - `side`: 导入侧过滤（self|other|both）。
-    ///
-    /// 返回:
-    /// - `(sessions_written, messages_written, session_ids)`: 写入统计及创建的 session UUID 列表。
-    ///
-    /// 说明:
-    /// - 每个 session 创建为已关闭的历史 session。
-    /// - 消息使用 `save_import` 写入，绕过 session 活跃状态检查。
-    /// - 返回的 session_ids 供调用方触发 L1 摘要等后处理。
-    pub async fn execute_fast_import(
-        pool: &SqlitePool,
-        sessions: &[ImportedSession],
-        self_persona_uid: Option<&str>,
-        other_persona_uid: Option<&str>,
-        self_uid: &str,
-        side: ImportSide,
-    ) -> RamariaResult<(usize, usize, Vec<uuid::Uuid>)> {
-        let mut sessions_written = 0usize;
-        let mut messages_written = 0usize;
-        let mut session_ids: Vec<uuid::Uuid> = Vec::new();
-        // 分别统计双方消息数，用于日志输出
-        let mut self_msg_count = 0usize;
-        let mut other_msg_count = 0usize;
-
-        for session in sessions {
-            // 过滤本 session 消息（按 side）：跳过侧消息不入库
-            let mut kept: Vec<(bool, &crate::traits::ParsedMessage)> = Vec::new();
-            for parsed in &session.messages {
-                let is_self = parsed.sender_uid == self_uid;
-                match (side, is_self) {
-                    (ImportSide::Me, false) | (ImportSide::Other, true) => continue,
-                    _ => {}
-                }
-                kept.push((is_self, parsed));
-            }
-
-            // 全部消息被过滤（单侧无该侧消息）→ 跳过该 session（不创建空 session）
-            if kept.is_empty() {
-                continue;
-            }
-
-            // 创建历史 session（已关闭）；归属为处理侧 persona
-            let owner = match side {
-                ImportSide::Me => self_persona_uid,
-                _ => other_persona_uid,
-            };
-            let Some(owner_uid) = owner else {
-                // 防御：单侧模式下归属侧 persona 必须已创建（调用方保证）
-                tracing::warn!("session 归属 persona 未创建，跳过该 session");
-                continue;
-            };
-
-            let db_session = ramaria_storage::repo::sessions::create_historical(
-                pool,
-                session.started_at,
-                session.ended_at,
-                owner_uid,
-            )
-            .await
-            .map_err(|e| {
-                tracing::error!(session_start = %session.started_at, error = %e, "创建历史 session 失败");
-                e
-            })?;
-
-            // 构造消息（按发送者分配 persona_uid；单侧模式下跳过侧不会出现）
-            let mut batch: Vec<ramaria_core::types::Message> = Vec::with_capacity(kept.len());
-            for (is_self, parsed) in kept {
-                let persona_for_msg = if is_self {
-                    self_msg_count += 1;
-                    self_persona_uid
-                } else {
-                    other_msg_count += 1;
-                    other_persona_uid
-                };
-                let Some(persona_uid) = persona_for_msg else {
-                    // 防御：单侧模式下不应出现跳过侧消息（已过滤），出现则丢弃记 warn
-                    tracing::warn!(
-                        sender = %parsed.sender_uid,
-                        "消息发送侧 persona 未创建，丢弃该消息（导入侧过滤不一致）"
-                    );
-                    continue;
-                };
-
-                batch.push(ramaria_core::types::Message {
-                    id: ramaria_core::types::new_id(),
-                    session_id: db_session.id,
-                    role: if parsed.role == "user" {
-                        ramaria_core::types::MessageRole::User
-                    } else {
-                        ramaria_core::types::MessageRole::Assistant
-                    },
-                    content: parsed.content.clone(),
-                    created_at: parsed.created_at,
-                    source: ramaria_core::types::MessageSource::Local,
-                    fingerprint: Some(parsed.fingerprint.clone()),
-                    persona_uid: Some(persona_uid.to_string()),
-                });
-            }
-
-            // 单事务批量写入（替代逐条 INSERT，显著降低大文件导入的 fsync 开销）
-            let written = ramaria_storage::repo::messages::save_import_batch(pool, &batch)
-                .await
-                .map_err(|e| {
-                    tracing::error!(session_id = %db_session.id, error = %e, "批量写入导入消息失败");
-                    e
-                })?;
-            let msg_count = written;
-
-            session_ids.push(db_session.id);
-            sessions_written += 1;
-            messages_written += msg_count;
-
-            if sessions_written.is_multiple_of(10) {
-                tracing::info!(
-                    sessions_written = sessions_written,
-                    total_sessions = sessions.len(),
-                    "快速导入进度"
-                );
-            }
-        }
-
-        tracing::info!(
-            self_messages = self_msg_count,
-            other_messages = other_msg_count,
-            self_persona = ?self_persona_uid,
-            other_persona = ?other_persona_uid,
-            side = ?side,
-            "双画像导入统计"
-        );
-
-        Ok((sessions_written, messages_written, session_ids))
     }
 }
 
@@ -219,74 +76,15 @@ impl ImportSource for QqImporter {
 // Persona UID 生成策略
 // =========================================================
 
-/// 导入侧（我方/对方），决定 persona UID 前缀与 kind。
+/// 返回某侧默认的 UID 前缀（含 `-`）。
 ///
-/// 语义:
-/// - `Me`（我方，导出者）: UID 前缀 `user-`，kind=user —— 白名单 kind 过滤
-///   （Char/Anim/Oc/Hist）天然排除我方，探针/画像始终面向"对方"。
-/// - `Other`（对方）: UID 前缀 `char-`，kind=char —— 与 v1.5 及以前一致。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PersonaSide {
-    /// 我方（导出者本人）
-    Me,
-    /// 对方（对话另一方）
-    Other,
-}
-
-impl PersonaSide {
-    /// 返回该侧默认的 UID 前缀（含 `-`）。
-    fn uid_prefix(self) -> &'static str {
-        match self {
-            PersonaSide::Me => "user-",
-            PersonaSide::Other => "char-",
-        }
-    }
-}
-
-/// 导入侧过滤选项（`import --side self|other|both`）。
-///
-/// 语义:
-/// - `Me`（self）: 只处理我方消息；跳过侧（对方）消息不入库、对方 persona 不创建。
-/// - `Other`: 只处理对方消息；我方 persona 不创建。
-/// - `Both`: 双方都处理（默认，与 v1.5 行为一致）。
-///
-/// 用途:
-/// - 调用方（CLI `--side` / 桌面导入面板）按选项控制 persona 创建与消息写入。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ImportSide {
-    /// 只处理我方（self）
-    Me,
-    /// 只处理对方（other）
-    Other,
-    /// 双方都处理（默认）
-    Both,
-}
-
-impl ImportSide {
-    /// 解析 CLI/前端字符串（`self`/`other`/`both`，大小写不敏感）。
-    ///
-    /// 返回:
-    /// - `Ok(Some(side))`: 合法值。
-    /// - `Ok(None)`: 空/未提供 → 默认 `Both`。
-    /// - `Err(msg)`: 非法值（业务校验失败提示）。
-    pub fn parse_cli(value: Option<&str>) -> Result<ImportSide, String> {
-        match value.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-            None | Some("") | Some("both") => Ok(ImportSide::Both),
-            Some("self") | Some("me") => Ok(ImportSide::Me),
-            Some("other") => Ok(ImportSide::Other),
-            Some(other) => Err(format!(
-                "不支持的导入侧: '{other}'（仅支持 self | other | both）"
-            )),
-        }
-    }
-
-    /// 该侧是否需要创建 persona（Both 时两侧都创建）。
-    pub fn needs_persona(self, side: PersonaSide) -> bool {
-        match self {
-            ImportSide::Both => true,
-            ImportSide::Me => side == PersonaSide::Me,
-            ImportSide::Other => side == PersonaSide::Other,
-        }
+/// QQ 约定: 我方（导出者）`user-`（kind=user，白名单 kind 过滤天然排除我方），
+/// 对方 `char-`（kind=char）。该映射是 QQ/项目 UID 命名约定，归属 QQ 侧，
+/// 不放在通用双画像模型（`PersonaSide`）中。
+fn side_uid_prefix(side: PersonaSide) -> &'static str {
+    match side {
+        PersonaSide::Me => "user-",
+        PersonaSide::Other => "char-",
     }
 }
 
@@ -323,7 +121,7 @@ pub fn build_persona_uid(
     uid: &str,
     fallback_seq: u32,
 ) -> String {
-    let prefix = side.uid_prefix();
+    let prefix = side_uid_prefix(side);
 
     // 级别 1: 用户显式指定（未以既有 kind 前缀开头时按侧补全）
     if let Some(provided) = user_provided_uid
@@ -564,220 +362,5 @@ mod tests {
             PersonaKind::Char,
             "char- 前缀保持 Char kind（对方）"
         );
-    }
-
-    // ── execute_fast_import 导入侧过滤 ──
-
-    /// 构造一个含 self + other 各 1 条消息的 session。
-    fn make_side_session(
-        self_content: &str,
-        other_content: &str,
-    ) -> crate::traits::ImportedSession {
-        crate::traits::ImportedSession {
-            messages: vec![
-                crate::traits::ParsedMessage {
-                    role: "user".to_string(),
-                    content: self_content.to_string(),
-                    created_at: 1100,
-                    fingerprint: format!("f-self-{self_content}"),
-                    sender_uid: "SELF_UID".to_string(),
-                    sender_uin: Some("10001".to_string()),
-                    sender_name: "我".to_string(),
-                },
-                crate::traits::ParsedMessage {
-                    role: "assistant".to_string(),
-                    content: other_content.to_string(),
-                    created_at: 1200,
-                    fingerprint: format!("f-other-{other_content}"),
-                    sender_uid: "OTHER_UID".to_string(),
-                    sender_uin: Some("20002".to_string()),
-                    sender_name: "对方".to_string(),
-                },
-            ],
-            started_at: 1000,
-            ended_at: 2000,
-        }
-    }
-
-    /// 创建单连接内存库（max_connections=1 保证 sqlite::memory: 共享同一库）。
-    async fn side_test_pool() -> sqlx::SqlitePool {
-        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-        let options = SqliteConnectOptions::new()
-            .filename(":memory:")
-            .foreign_keys(true);
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await
-            .unwrap();
-        // 最小 schema（sessions + messages，对应 create_historical / save_import_batch 所需列）
-        sqlx::query(
-            "CREATE TABLE sessions (
-                id TEXT PRIMARY KEY,
-                started_at INTEGER NOT NULL,
-                ended_at INTEGER,
-                persona_uid TEXT
-            )",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "CREATE TABLE messages (
-                id TEXT PRIMARY KEY,
-                session_id TEXT NOT NULL,
-                role TEXT NOT NULL,
-                content TEXT NOT NULL,
-                created_at INTEGER NOT NULL,
-                source TEXT NOT NULL,
-                import_fingerprint TEXT,
-                persona_uid TEXT
-            )",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        pool
-    }
-
-    async fn msg_count(pool: &sqlx::SqlitePool) -> i64 {
-        sqlx::query_scalar("SELECT COUNT(*) FROM messages")
-            .fetch_one(pool)
-            .await
-            .unwrap()
-    }
-
-    async fn msg_persona_uids(pool: &sqlx::SqlitePool) -> Vec<String> {
-        sqlx::query_scalar("SELECT persona_uid FROM messages ORDER BY created_at")
-            .fetch_all(pool)
-            .await
-            .unwrap()
-    }
-
-    async fn session_owner(pool: &sqlx::SqlitePool) -> Option<String> {
-        sqlx::query_scalar("SELECT persona_uid FROM sessions")
-            .fetch_one(pool)
-            .await
-            .unwrap()
-    }
-
-    /// side=self（Me）：只写我方消息，跳过侧（对方）零消息零 persona；session 归属我方。
-    #[tokio::test]
-    async fn execute_fast_import_side_me_filters_other() {
-        let pool = side_test_pool().await;
-        let sessions = vec![make_side_session("我的发言", "对方发言")];
-
-        let (sessions_written, messages_written, _) = QqImporter::execute_fast_import(
-            &pool,
-            &sessions,
-            Some("user-0001"),
-            None, // side=Me：对方 persona 不创建
-            "SELF_UID",
-            ImportSide::Me,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(sessions_written, 1);
-        assert_eq!(messages_written, 1, "跳过侧消息必须不入库");
-        assert_eq!(msg_count(&pool).await, 1);
-        assert_eq!(msg_persona_uids(&pool).await, vec!["user-0001".to_string()]);
-        assert_eq!(session_owner(&pool).await.as_deref(), Some("user-0001"));
-    }
-
-    /// side=other：只写对方消息，我方 persona 不创建；session 归属对方。
-    #[tokio::test]
-    async fn execute_fast_import_side_other_filters_self() {
-        let pool = side_test_pool().await;
-        let sessions = vec![make_side_session("我的发言", "对方发言")];
-
-        let (sessions_written, messages_written, _) = QqImporter::execute_fast_import(
-            &pool,
-            &sessions,
-            None, // side=Other：我方 persona 不创建
-            Some("char-0001"),
-            "SELF_UID",
-            ImportSide::Other,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(sessions_written, 1);
-        assert_eq!(messages_written, 1, "我方消息必须被过滤");
-        assert_eq!(msg_count(&pool).await, 1);
-        assert_eq!(msg_persona_uids(&pool).await, vec!["char-0001".to_string()]);
-        assert_eq!(session_owner(&pool).await.as_deref(), Some("char-0001"));
-    }
-
-    /// side=both（默认）：双方消息全部写入（与 v1.5 行为一致）。
-    #[tokio::test]
-    async fn execute_fast_import_side_both_keeps_all() {
-        let pool = side_test_pool().await;
-        let sessions = vec![make_side_session("我的发言", "对方发言")];
-
-        let (sessions_written, messages_written, _) = QqImporter::execute_fast_import(
-            &pool,
-            &sessions,
-            Some("user-0001"),
-            Some("char-0001"),
-            "SELF_UID",
-            ImportSide::Both,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(sessions_written, 1);
-        assert_eq!(messages_written, 2, "both 模式双方消息全部入库");
-        assert_eq!(
-            msg_persona_uids(&pool).await,
-            vec!["user-0001".to_string(), "char-0001".to_string()]
-        );
-    }
-
-    /// 单侧模式下 session 内全部为跳过侧消息 → 不创建空 session（零消息零 session）。
-    #[tokio::test]
-    async fn execute_fast_import_side_skips_empty_session() {
-        let pool = side_test_pool().await;
-        // 只有 self 消息的 session，side=Other → 全部过滤 → session 不创建
-        let sessions = vec![make_side_session("我的发言", "对方发言")];
-        let mut only_self = sessions;
-        only_self[0].messages.retain(|m| m.sender_uid == "SELF_UID");
-
-        let (sessions_written, messages_written, _) = QqImporter::execute_fast_import(
-            &pool,
-            &only_self,
-            None,
-            Some("char-0001"),
-            "SELF_UID",
-            ImportSide::Other,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(sessions_written, 0, "全过滤 session 不应创建");
-        assert_eq!(messages_written, 0);
-        assert_eq!(msg_count(&pool).await, 0);
-        let session_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(session_count, 0);
-    }
-
-    /// ImportSide::parse_cli 解析（self|other|both；非法值报错）。
-    #[test]
-    fn import_side_parse_cli() {
-        assert_eq!(ImportSide::parse_cli(None).unwrap(), ImportSide::Both);
-        assert_eq!(
-            ImportSide::parse_cli(Some("both")).unwrap(),
-            ImportSide::Both
-        );
-        assert_eq!(ImportSide::parse_cli(Some("SELF")).unwrap(), ImportSide::Me);
-        assert_eq!(ImportSide::parse_cli(Some("me")).unwrap(), ImportSide::Me);
-        assert_eq!(
-            ImportSide::parse_cli(Some("other")).unwrap(),
-            ImportSide::Other
-        );
-        assert!(ImportSide::parse_cli(Some("all")).is_err());
     }
 }

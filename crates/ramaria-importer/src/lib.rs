@@ -12,5 +12,8 @@
 pub mod error;
 pub mod qq;
 pub mod traits;
+pub mod writer;
 
-pub use traits::{ImportMode, ImportReport, ImportSource, ImportedSession, ParsedMessage};
+pub use traits::{
+    ImportMode, ImportReport, ImportSide, ImportSource, ImportedSession, ParsedMessage, PersonaSide,
+};

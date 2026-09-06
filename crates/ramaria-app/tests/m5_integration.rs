@@ -16,7 +16,7 @@ mod mock_backend;
 use futures::StreamExt;
 use ramaria_app::App;
 use ramaria_core::config::RamariaConfig;
-use ramaria_core::traits::StorageBackend;
+use ramaria_core::traits::{StorageBackend, StoreCrud};
 use ramaria_core::types::{
     AppState, BackendConfig, Message, MessageRole, MessageSource, Persona, PersonaKind, UttBlock,
 };

@@ -11,6 +11,7 @@ pub mod behavior;
 pub mod config;
 pub mod error;
 pub mod keyword;
+pub mod text;
 pub mod traits;
 pub mod types;
 
@@ -26,7 +27,8 @@ pub use config::RamariaConfig;
 pub use error::{RamariaError, RamariaResult};
 pub use traits::{
     ChatMessage, ChatRequest, Embedding, EmbeddingModelInfo, EmbeddingProvider,
-    LlmProvider as LlmProviderTrait, LlmResponseCache, StorageBackend, StreamDelta,
+    LlmProvider as LlmProviderTrait, LlmResponseCache, StorageBackend, StoreCrud,
+    StoreInfrastructure, StreamDelta,
 };
 pub use types::{
     AppState, BackendConfig, ClusterSnapshot, EventRelation, EventRelationKind, EventSource,

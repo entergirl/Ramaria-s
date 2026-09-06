@@ -429,6 +429,7 @@ async fn save_s3_history(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ramaria_core::traits::{StoreCrud, StoreInfrastructure};
     use ramaria_core::types::{MessageSource, new_id};
     use std::sync::Arc;
 

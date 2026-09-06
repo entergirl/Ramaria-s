@@ -13,8 +13,8 @@ mod notification;
 mod path_guard;
 mod tray;
 
-use ramaria_core::StorageBackend;
 use ramaria_core::traits::EmbeddingProvider;
+use ramaria_core::{StorageBackend, StoreInfrastructure};
 use sqlx::SqlitePool;
 use std::path::PathBuf;
 use std::sync::Arc;

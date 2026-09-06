@@ -204,18 +204,28 @@ pub async fn export_diagnostics(
 /// 将发布说明截断到指定字符数，保留完整句子（在最近的换行处截断）。
 ///
 /// 实现:
-/// - 若内容长度 ≤ max_len，直接返回。
-/// - 否则在 `max_len` 位置向前查找最近的 `\n`，在此处截断。
-/// - 若未找到换行符，则硬截断并在末尾加 `...`。
+/// - 若内容字符数 ≤ max_len，直接返回。
+/// - 否则在预算（字符数）内向前查找最近的 `\n`，在此处截断。
+/// - 若未找到换行符，则按字符边界硬截断并在末尾加 `\n...`。
+///
+/// 说明:
+/// - 按 Unicode 字符（而非 UTF-8 字节）截断，由 `ramaria_core::text::truncate_char_boundary`
+///   保证不切开多字节中文/emoji（避免旧字节切片在中文内容上的 panic）。
 fn truncate_preview(text: &str, max_len: usize) -> String {
-    if text.len() <= max_len {
+    if text.chars().count() <= max_len {
         return text.to_string();
     }
 
-    // 在 max_len 位置向前找最近的换行
-    let boundary = text[..max_len].rfind('\n').unwrap_or(max_len);
+    // 在预算（字符）内向前找最近的换行符（字符位置），截断到其前（不含换行）
+    let mut boundary: Option<usize> = None;
+    for (i, ch) in text.chars().take(max_len).enumerate() {
+        if ch == '\n' {
+            boundary = Some(i);
+        }
+    }
 
-    let truncated = &text[..boundary];
+    let cut = boundary.unwrap_or(max_len);
+    let truncated = ramaria_core::text::truncate_char_boundary(text, cut);
     format!("{truncated}\n...")
 }
 

@@ -130,6 +130,7 @@ pub fn send_chat_notification<R: Runtime>(
 /// 说明:
 /// - 按 Unicode 字符（而非字节）计数，正确处理中文等多字节字符
 /// - 超过 max_len 时截断到 max_len，不添加省略号（调用方负责添加）
+/// - 字符边界由 `ramaria_core::text::truncate_char_boundary` 统一实现
 ///
 /// 参数:
 /// - `s`: 原始字符串
@@ -138,34 +139,7 @@ pub fn send_chat_notification<R: Runtime>(
 /// 返回:
 /// - 截断后的字符串（如果原字符串 ≤ max_len 则返回原样的 &str）
 fn truncate_str(s: &str, max_len: usize) -> &str {
-    if max_len == 0 {
-        return "";
-    }
-    let char_count = s.chars().count();
-    if char_count <= max_len {
-        return s;
-    }
-
-    // 找到第 max_len 个字符的字节偏移
-    let mut byte_pos = 0;
-    let mut count = 0;
-    for (i, _) in s.char_indices() {
-        if count >= max_len {
-            break;
-        }
-        byte_pos = i;
-        count += 1;
-    }
-
-    // 如果刚好在字符边界结束，byte_pos 指向最后一个字符
-    // 需要包含这个字符的长度
-    if count == max_len && byte_pos < s.len() {
-        // 计算最后一个字符占用的字节数
-        let last_char = s[byte_pos..].chars().next().unwrap_or(' ');
-        &s[..byte_pos + last_char.len_utf8()]
-    } else {
-        &s[..byte_pos]
-    }
+    ramaria_core::text::truncate_char_boundary(s, max_len)
 }
 
 // =========================================================

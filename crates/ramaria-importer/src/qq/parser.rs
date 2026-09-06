@@ -10,11 +10,12 @@
 //! - Session 切割: 按 gap_minutes 时间间隔将消息流切割为独立会话
 //! - 完整诊断: 报告包含成功/降级/跳过 三类统计
 
+use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
-use ramaria_core::error::RamariaResult;
+use ramaria_core::error::{RamariaError, RamariaResult};
 use sha2::{Digest, Sha256};
 
 use crate::error;
@@ -450,12 +451,8 @@ fn parse_json_message(
                     .trim();
                 let reply_body = extract_reply_body(&raw_text);
 
-                // 截断过长的引用内容（超过 30 字符加 "…"）
-                let quoted_display = if quoted_content.chars().count() > 30 {
-                    format!("{}…", quoted_content.chars().take(30).collect::<String>())
-                } else {
-                    quoted_content.to_string()
-                };
+                // 截断过长的引用内容（统一字符边界工具，预算内含省略号）
+                let quoted_display = ramaria_core::text::truncate_chars(quoted_content, 30);
 
                 report.success_reply += 1;
                 format!("「回复 {quoted_sender}: {quoted_display}」{reply_body}")
@@ -479,12 +476,8 @@ fn parse_json_message(
         TYPE_JSON => {
             report.degraded_card += 1;
             if let Some(desc) = json_element_description(&elements) {
-                // 截断过长的描述（保留前 40 字符）
-                let truncated = if desc.chars().count() > 40 {
-                    format!("{}…", desc.chars().take(40).collect::<String>())
-                } else {
-                    desc
-                };
+                // 截断过长的描述（统一字符边界工具，预算内含省略号）
+                let truncated = ramaria_core::text::truncate_chars(&desc, 40);
                 tracing::debug!(time = %time_str, description = %truncated,
                     "JSON卡片→提取描述");
                 format!("[卡片: {truncated}]")
@@ -671,6 +664,304 @@ fn split_into_sessions(messages: &[ParsedMessage], gap_ms: i64) -> Vec<ImportedS
 }
 
 // =========================================================
+// 流式解析（顶层对象单趟消费，显著降低大文件峰值内存）
+// =========================================================
+// 说明:
+// - 不再把整份 JSON 物化为 `serde_json::Value` 树，而是用
+//   `serde_json::Deserializer` 配合自定义 Visitor 逐元素消费。
+// - chatInfo 为小块数据，捕获为单条 Value；messages 数组逐元素解码，
+//   每次仅持有单条消息，峰值内存从约 3~4× 文件降到约 1× 文件。
+// - 依赖 qce 导出顺序：顶层对象中 `chatInfo` 位于 `messages` 之前
+//   （该顺序由 shuakami/qq-chat-exporter v6.x 保证）。
+// - 语法错误从 deserializer 提取行/列位置结构化返回，不 panic。
+
+/// chatInfo 解析出的元信息，驱动消息角色映射与报告填充。
+struct ChatMeta {
+    /// 导出者 QQ 内部 UID。
+    self_uid: String,
+    /// 导出者显示名称。
+    self_name: String,
+    /// 导出者 QQ 号（chatInfo.selfUin），缺失或为空时为 None。
+    self_uin: Option<String>,
+    /// 对话名称。
+    chat_name: String,
+    /// 对话类型（private / group）。
+    chat_type: String,
+    /// 对话对方 QQ 内部 UID（chatInfo.peerUid）。
+    peer_uid: String,
+    /// 对话对方 QQ 号（chatInfo.peerUin），缺失或为空时为 None。
+    peer_uin: Option<String>,
+}
+
+impl ChatMeta {
+    /// 从 chatInfo Value 提取元信息，字段缺失时采用与整读解析一致的默认值。
+    fn from_value(v: &serde_json::Value) -> Self {
+        // QQ 号字段缺失或为空字符串时视为未提供（None）。
+        let opt_str = |key: &str| {
+            v.get(key)
+                .and_then(|x| x.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        };
+        Self {
+            self_uid: v
+                .get("selfUid")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            self_name: v
+                .get("selfName")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            self_uin: opt_str("selfUin"),
+            chat_name: v
+                .get("name")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            chat_type: v
+                .get("type")
+                .and_then(|x| x.as_str())
+                .unwrap_or("unknown")
+                .to_string(),
+            peer_uid: v
+                .get("peerUid")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            peer_uin: opt_str("peerUin"),
+        }
+    }
+}
+
+/// 单趟流式解析的累积上下文。
+///
+/// 字段职责:
+/// - `chat_meta`: 从 chatInfo 提取的元信息（消息角色映射依赖）。
+/// - `report`: 与整读解析同构的诊断报告，逐条消息累积统计。
+/// - `seen_keys`: 文件内 (id, timestamp) 去重集合。
+/// - `parsed_messages`: 按文件序去重后保留的首现消息解析结果（后按时间稳定排序）。
+/// - 形态标志位: 记录 chatInfo / messages 顶层字段出现与形态，供格式校验。
+struct ParseCtx {
+    chat_meta: Option<ChatMeta>,
+    report: ImportReport,
+    seen_keys: HashSet<(String, i64)>,
+    parsed_messages: Vec<ParsedMessage>,
+    chat_info_seen: bool,
+    messages_seen: bool,
+    messages_is_array: bool,
+}
+
+/// 顶层 map 的 seed：逐 key 流式分派。
+struct TopLevelSeed<'a> {
+    ctx: &'a mut ParseCtx,
+}
+
+impl<'de> DeserializeSeed<'de> for TopLevelSeed<'_> {
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::de::Deserializer<'de>,
+    {
+        deserializer.deserialize_map(TopLevelVisitor { ctx: self.ctx })
+    }
+}
+
+/// 顶层 map 的 visitor：识别 chatInfo 与 messages，其余 key 跳过。
+struct TopLevelVisitor<'a> {
+    ctx: &'a mut ParseCtx,
+}
+
+impl<'de> Visitor<'de> for TopLevelVisitor<'_> {
+    type Value = ();
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("QQ 导出 JSON 顶层对象")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let ctx = self.ctx;
+        while let Some(key) = map.next_key::<String>()? {
+            match key.as_str() {
+                "chatInfo" => {
+                    let v: serde_json::Value = map.next_value()?;
+                    ctx.chat_info_seen = true;
+                    ctx.chat_meta = Some(ChatMeta::from_value(&v));
+                }
+                "messages" => {
+                    map.next_value_seed(MessagesSeed { ctx: &mut *ctx })?;
+                }
+                _ => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// messages 数组的 seed：流式逐元素解码。
+struct MessagesSeed<'a> {
+    ctx: &'a mut ParseCtx,
+}
+
+impl<'de> DeserializeSeed<'de> for MessagesSeed<'_> {
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::de::Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(MessagesVisitor { ctx: self.ctx })
+    }
+}
+
+/// messages 值的 visitor。
+///
+/// 职责:
+/// - 数组形态（`visit_seq`）时逐元素解码为单条 Value 并复用既有单条解析。
+/// - 非数组形态（对象/标量/null）时只标记形态，不报错——交由上层按
+///   "缺少 messages" 的 format_mismatch 语义决策，与原整读解析一致。
+struct MessagesVisitor<'a> {
+    ctx: &'a mut ParseCtx,
+}
+
+impl<'de> Visitor<'de> for MessagesVisitor<'_> {
+    type Value = ();
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("messages 数组")
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let ctx = &mut *self.ctx;
+        ctx.messages_seen = true;
+        ctx.messages_is_array = true;
+        while let Some(elem) = seq.next_element::<serde_json::Value>()? {
+            consume_message(&mut *ctx, elem);
+        }
+        Ok(())
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        self.ctx.messages_seen = true;
+        // 消费完整对象以保证语法校验不因提前返回而遗漏尾部输入。
+        while map.next_key::<IgnoredAny>()?.is_some() {
+            map.next_value::<IgnoredAny>()?;
+        }
+        Ok(())
+    }
+
+    fn visit_str<E>(self, _v: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.ctx.messages_seen = true;
+        Ok(())
+    }
+
+    fn visit_string<E>(self, _v: String) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.ctx.messages_seen = true;
+        Ok(())
+    }
+
+    fn visit_i64<E>(self, _v: i64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.ctx.messages_seen = true;
+        Ok(())
+    }
+
+    fn visit_u64<E>(self, _v: u64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.ctx.messages_seen = true;
+        Ok(())
+    }
+
+    fn visit_f64<E>(self, _v: f64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.ctx.messages_seen = true;
+        Ok(())
+    }
+
+    fn visit_bool<E>(self, _v: bool) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.ctx.messages_seen = true;
+        Ok(())
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.ctx.messages_seen = true;
+        Ok(())
+    }
+}
+
+/// 处理单条 messages 元素：文件内去重、解析并计入报告。
+fn consume_message(ctx: &mut ParseCtx, elem: serde_json::Value) {
+    ctx.report.total_raw += 1;
+
+    let id = elem
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let ts = elem.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0);
+    let key = (id, ts);
+
+    // Layer 1 去重：文件内 (id, timestamp) 联合键，保留首现
+    if !ctx.seen_keys.insert(key) {
+        ctx.report.dedup_removed += 1;
+        return;
+    }
+
+    // 依赖 qce 导出顺序（chatInfo 在 messages 之前）以提供角色映射所需的元信息；
+    // 遇到该顺序不满足的异常结构时防御性跳过解析（不 panic）。
+    let Some(meta) = ctx.chat_meta.as_ref() else {
+        return;
+    };
+
+    let parsed = parse_json_message(&elem, &meta.self_uid, &meta.self_name, &mut ctx.report);
+    if let Some(msg) = parsed {
+        ctx.parsed_messages.push(msg);
+    }
+}
+
+/// 将 serde_json 解析错误转为带行列位置的 json_parse_error。
+fn json_parse_error_with_position(path: &Path, e: &serde_json::Error) -> RamariaError {
+    let line = e.line();
+    let detail = if line > 0 {
+        format!("{}（第 {line} 行第 {} 列）", e, e.column())
+    } else {
+        e.to_string()
+    };
+    error::json_parse_error(&path.display().to_string(), &detail)
+}
+
+// =========================================================
 // 主解析函数（对外接口）
 // =========================================================
 
@@ -698,78 +989,66 @@ pub fn parse_qq_export(
     }
 
     let gap_ms = (gap_minutes as i64) * 60 * 1000;
+    let gap_minutes_u = (gap_ms / 60_000) as u32;
 
-    // 读取并解码文件（多编码自动检测）
+    // 读取并解码文件（编码检测需要整读）
     let bytes =
         fs::read(file_path).map_err(|e| error::read_error(&file_path.display().to_string(), e))?;
     let json_str = decode_bytes(&bytes)?;
-    let raw_data: serde_json::Value = serde_json::from_str(&json_str)
-        .map_err(|e| error::json_parse_error(&file_path.display().to_string(), &e.to_string()))?;
 
-    // ── 校验 JSON 顶层结构 ──
-    let chat_info = match raw_data.get("chatInfo") {
-        Some(ci) => ci,
-        None => {
-            return Err(error::format_mismatch(
-                "QQ Chat Exporter JSON（含 chatInfo 字段）",
-                "请确认文件是由 shuakami/qq-chat-exporter v6.x 导出的 JSON 格式。",
-            ));
-        }
-    };
-    let raw_messages = match raw_data.get("messages").and_then(|m| m.as_array()) {
-        Some(msgs) => msgs,
-        None => {
-            return Err(error::format_mismatch(
-                "QQ Chat Exporter JSON（含 messages 数组）",
-                "文件中缺少 messages 字段。",
-            ));
-        }
+    let mut ctx = ParseCtx {
+        chat_meta: None,
+        report: ImportReport {
+            file_path: file_path.display().to_string(),
+            gap_minutes: gap_minutes_u,
+            ..Default::default()
+        },
+        seen_keys: HashSet::new(),
+        parsed_messages: Vec::new(),
+        chat_info_seen: false,
+        messages_seen: false,
+        messages_is_array: false,
     };
 
-    // ── 提取 meta 信息 ──
-    let self_uid = chat_info
-        .get("selfUid")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let self_name = chat_info
-        .get("selfName")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let self_uin = chat_info
-        .get("selfUin")
-        .and_then(|v| v.as_str())
-        .filter(|u| !u.is_empty());
-    let chat_name = chat_info.get("name").and_then(|v| v.as_str()).unwrap_or("");
-    let chat_type = chat_info
-        .get("type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
+    // ── 单趟流式消费顶层对象（chatInfo + messages 逐元素）──
+    {
+        let mut de = serde_json::Deserializer::from_str(&json_str);
+        TopLevelSeed { ctx: &mut ctx }
+            .deserialize(&mut de)
+            .map_err(|e| json_parse_error_with_position(file_path, &e))?;
+        de.end()
+            .map_err(|e| json_parse_error_with_position(file_path, &e))?;
+    }
 
-    // v6.x: 直接使用 chatInfo.peerUid/peerUin 作为对方标识，无需扫描消息列表
-    let peer_uid = chat_info
-        .get("peerUid")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let peer_uin = chat_info
-        .get("peerUin")
-        .and_then(|v| v.as_str())
-        .filter(|u| !u.is_empty());
+    // ── 校验顶层字段出现与形态（优先级与原整读解析一致）──
+    if !ctx.chat_info_seen {
+        return Err(error::format_mismatch(
+            "QQ Chat Exporter JSON（含 chatInfo 字段）",
+            "请确认文件是由 shuakami/qq-chat-exporter v6.x 导出的 JSON 格式。",
+        ));
+    }
+    if !ctx.messages_seen || !ctx.messages_is_array {
+        return Err(error::format_mismatch(
+            "QQ Chat Exporter JSON（含 messages 数组）",
+            "文件中缺少 messages 字段。",
+        ));
+    }
 
-    let mut report = ImportReport {
-        file_path: file_path.display().to_string(),
-        self_id: self_uid.to_string(),
-        self_name: self_name.to_string(),
-        self_uin: self_uin.map(|s| s.to_string()),
-        chat_name: chat_name.to_string(),
-        chat_type: chat_type.to_string(),
-        // 对方标识直接从 chatInfo 提取
-        other_uid: peer_uid.to_string(),
-        other_uin: peer_uin.map(|s| s.to_string()),
-        other_name: chat_name.to_string(),
-        total_raw: raw_messages.len(),
-        gap_minutes: (gap_ms / 60_000) as u32,
-        ..Default::default()
-    };
+    let meta = ctx
+        .chat_meta
+        .as_ref()
+        .expect("chatInfo_seen 为真时 chat_meta 必已填充");
+
+    let mut report = ctx.report;
+    report.self_id = meta.self_uid.clone();
+    report.self_name = meta.self_name.clone();
+    report.self_uin = meta.self_uin.clone();
+    report.chat_name = meta.chat_name.clone();
+    report.chat_type = meta.chat_type.clone();
+    // 对方标识直接从 chatInfo 提取（v6.x 无需扫描消息列表）
+    report.other_uid = meta.peer_uid.clone();
+    report.other_uin = meta.peer_uin.clone();
+    report.other_name = meta.chat_name.clone();
 
     tracing::info!(
         file = %report.file_path,
@@ -781,44 +1060,18 @@ pub fn parse_qq_export(
         "开始解析 QQ JSON 聊天记录 (v6.x)"
     );
 
-    // ── Layer 1 去重：文件内 (id, timestamp) 联合键 ──
-    let mut seen_keys: HashSet<(String, i64)> = HashSet::new();
-    let mut deduped_msgs: Vec<&serde_json::Value> = Vec::new();
-    for msg in raw_messages {
-        let key = (
-            msg.get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            msg.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0),
-        );
-        if seen_keys.contains(&key) {
-            report.dedup_removed += 1;
-            continue;
-        }
-        seen_keys.insert(key);
-        deduped_msgs.push(msg);
-    }
-
-    // ── 按时间戳升序排列 ──
-    deduped_msgs.sort_by_key(|m| m.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0));
-
-    // ── 逐条解析 ──
-    let mut parsed_messages: Vec<ParsedMessage> = Vec::new();
-    for raw_msg in &deduped_msgs {
-        if let Some(parsed) = parse_json_message(raw_msg, self_uid, self_name, &mut report) {
-            parsed_messages.push(parsed);
-        }
-    }
+    // ── 按时间戳升序稳定排序（去重后保留首现次序；与原整读解析一致）──
+    let mut parsed_messages = ctx.parsed_messages;
+    parsed_messages.sort_by_key(|m| m.created_at);
 
     // ── Session 切割 ──
     let sessions = split_into_sessions(&parsed_messages, gap_ms);
     report.session_count = sessions.len();
 
     // ── 时间范围 ──
-    if !parsed_messages.is_empty() {
-        report.time_start = ts_ms_to_date(parsed_messages.first().unwrap().created_at);
-        report.time_end = ts_ms_to_date(parsed_messages.last().unwrap().created_at);
+    if let (Some(first), Some(last)) = (parsed_messages.first(), parsed_messages.last()) {
+        report.time_start = ts_ms_to_date(first.created_at);
+        report.time_end = ts_ms_to_date(last.created_at);
     }
 
     tracing::info!(
@@ -1021,5 +1274,198 @@ mod tests {
             sender_uin: None,
             sender_name: String::new(),
         }
+    }
+
+    // -- 流式解析与整读解析快照等价 --
+
+    /// 写临时文件并运行给定解析闭包，返回 (sessions, report)。
+    fn run_with_file<T>(content: &str, f: impl FnOnce(&Path) -> T) -> T {
+        let path =
+            std::env::temp_dir().join(format!("ramaria_stream_eq_{}.json", std::process::id()));
+        std::fs::write(&path, content).expect("写入临时文件失败");
+        let result = f(&path);
+        let _ = std::fs::remove_file(&path);
+        result
+    }
+
+    /// 整读解析参考实现（即被流式解析取代前的旧逻辑），仅用于快照对照。
+    fn parse_qq_export_legacy(
+        file_path: &Path,
+        gap_minutes: u32,
+    ) -> RamariaResult<(Vec<ImportedSession>, ImportReport)> {
+        let gap_ms = (gap_minutes as i64) * 60 * 1000;
+        let json_str = std::fs::read_to_string(file_path).expect("读取临时文件失败");
+        let raw_data: serde_json::Value = serde_json::from_str(&json_str).expect("整读解析失败");
+
+        let chat_info = raw_data.get("chatInfo").expect("缺少 chatInfo");
+        let raw_messages = raw_data
+            .get("messages")
+            .and_then(|m| m.as_array())
+            .expect("缺少 messages 数组");
+
+        let self_uid = chat_info
+            .get("selfUid")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let self_name = chat_info
+            .get("selfName")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let self_uin = chat_info
+            .get("selfUin")
+            .and_then(|v| v.as_str())
+            .filter(|u| !u.is_empty());
+        let chat_name = chat_info.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let chat_type = chat_info
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let peer_uid = chat_info
+            .get("peerUid")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let peer_uin = chat_info
+            .get("peerUin")
+            .and_then(|v| v.as_str())
+            .filter(|u| !u.is_empty());
+
+        let mut report = ImportReport {
+            file_path: file_path.display().to_string(),
+            self_id: self_uid.to_string(),
+            self_name: self_name.to_string(),
+            self_uin: self_uin.map(|s| s.to_string()),
+            chat_name: chat_name.to_string(),
+            chat_type: chat_type.to_string(),
+            other_uid: peer_uid.to_string(),
+            other_uin: peer_uin.map(|s| s.to_string()),
+            other_name: chat_name.to_string(),
+            total_raw: raw_messages.len(),
+            gap_minutes,
+            ..Default::default()
+        };
+
+        let mut seen_keys: HashSet<(String, i64)> = HashSet::new();
+        let mut deduped: Vec<&serde_json::Value> = Vec::new();
+        for msg in raw_messages {
+            let key = (
+                msg.get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                msg.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0),
+            );
+            if seen_keys.contains(&key) {
+                report.dedup_removed += 1;
+                continue;
+            }
+            seen_keys.insert(key);
+            deduped.push(msg);
+        }
+        deduped.sort_by_key(|m| m.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0));
+
+        let mut parsed: Vec<ParsedMessage> = Vec::new();
+        for msg in &deduped {
+            if let Some(p) = parse_json_message(msg, self_uid, self_name, &mut report) {
+                parsed.push(p);
+            }
+        }
+        let sessions = split_into_sessions(&parsed, gap_ms);
+        report.session_count = sessions.len();
+        if !parsed.is_empty() {
+            report.time_start = ts_ms_to_date(parsed.first().unwrap().created_at);
+            report.time_end = ts_ms_to_date(parsed.last().unwrap().created_at);
+        }
+        if sessions.is_empty() {
+            report
+                .warnings
+                .push("未解析出任何有效消息（全部被跳过或不支持）".to_string());
+        }
+        Ok((sessions, report))
+    }
+
+    /// 构造一份含多种消息类型、重复、乱序时间戳的大导出。
+    fn big_mixed_export() -> String {
+        let chat = r#"{"chatInfo":{"selfUid":"u_self","selfName":"小明","selfUin":"10001","name":"小红","type":"private","peerUid":"u_peer","peerUin":"90002"},"messages":["#;
+        let mut body = String::new();
+        // 基础时间戳基座，按递增制造可排序流；插入重复与乱序。
+        let base = 1_700_000_000_000i64;
+        for i in 0..1500 {
+            let ts = base + i * 1000;
+            let sender = if i % 3 == 0 { "u_self" } else { "u_peer" };
+            let name = if i % 3 == 0 { "小明" } else { "小红" };
+            let content = format!("第 {i} 条消息内容用于快照对比");
+            if i > 0 {
+                body.push(',');
+            }
+            // 引入乱序（奇数条比顺序早 1ms）验证稳定排序不改变集合
+            let actual_ts = if i % 2 == 1 { ts - 1 } else { ts };
+            body.push_str(&format!(
+                r#"{{"id":"m_{i}","timestamp":{actual_ts},"type":"text","recalled":false,"system":false,"content":{{"text":"{content}","elements":[]}},"sender":{{"uid":"{sender}","name":"{name}"}}}}"#
+            ));
+        }
+        // 追加重复 id 的消息（同一 (id, ts) 应被去重）
+        body.push_str(&format!(
+            r#",{{"id":"m_0","timestamp":{},"type":"text","recalled":false,"system":false,"content":{{"text":"重复消息","elements":[]}},"sender":{{"uid":"u_self","name":"小明"}}}}"#,
+            base
+        ));
+        // 追加撤回与未知类型消息
+        body.push_str(&format!(
+            r#",{{"id":"recalled","timestamp":{},"type":"text","recalled":true,"system":false,"content":{{"text":"撤回","elements":[]}},"sender":{{"uid":"u_self","name":"小明"}}}}"#,
+            base + 100_000_000
+        ));
+        body.push_str(&format!(
+            r#",{{"id":"unknown","timestamp":{},"type":"future_type","recalled":false,"system":false,"content":{{"text":"未知","elements":[]}},"sender":{{"uid":"u_peer","name":"小红"}}}}"#,
+            base + 200_000_000
+        ));
+        format!("{chat}{body}]}}")
+    }
+
+    /// 流式解析与整读解析在大导出上的会话/报告快照完全一致。
+    #[test]
+    fn streaming_equals_whole_file_snapshot() {
+        let content = big_mixed_export();
+
+        let (stream_sessions, stream_report) =
+            run_with_file(&content, |p| parse_qq_export(p, 10).expect("流式解析失败"));
+        let (legacy_sessions, legacy_report) = run_with_file(&content, |p| {
+            parse_qq_export_legacy(p, 10).expect("整读解析失败")
+        });
+
+        // 会话结构等价：消息总数与逐条 (role, content, created_at) 一致
+        let flatten = |sessions: &[ImportedSession]| {
+            let mut v: Vec<(String, String, i64, String)> = Vec::new();
+            for s in sessions {
+                for m in &s.messages {
+                    v.push((
+                        m.role.clone(),
+                        m.content.clone(),
+                        m.created_at,
+                        m.fingerprint.clone(),
+                    ));
+                }
+            }
+            v
+        };
+        assert_eq!(
+            flatten(&stream_sessions),
+            flatten(&legacy_sessions),
+            "流式与整读解析的消息快照应一致"
+        );
+
+        // 报告关键统计一致
+        assert_eq!(stream_report.session_count, legacy_report.session_count);
+        assert_eq!(stream_report.total_raw, legacy_report.total_raw);
+        assert_eq!(stream_report.dedup_removed, legacy_report.dedup_removed);
+        assert_eq!(stream_report.total_success(), legacy_report.total_success());
+        assert_eq!(
+            stream_report.total_degraded(),
+            legacy_report.total_degraded()
+        );
+        assert_eq!(stream_report.total_skipped(), legacy_report.total_skipped());
+        assert_eq!(stream_report.unknown_types, legacy_report.unknown_types);
+        assert_eq!(stream_report.warnings.len(), legacy_report.warnings.len());
+        assert_eq!(stream_report.time_start, legacy_report.time_start);
+        assert_eq!(stream_report.time_end, legacy_report.time_end);
+        assert_eq!(stream_report.other_uid, legacy_report.other_uid);
     }
 }

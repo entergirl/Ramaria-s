@@ -81,12 +81,12 @@ fn is_cjk(ch: char) -> bool {
 }
 
 // =========================================================
-// 句子边界截断
+// 句子边界截断（委托统一字符边界工具）
 // =========================================================
 
 /// 在句子边界截断文本。
 ///
-/// 策略:
+/// 策略（语义由 `ramaria_core::text::truncate_chars_at_sentence_boundary` 统一实现）:
 /// - 在 `max_chars` 限制内寻找最近的句子终止符（`。！？\n`）。
 /// - 若找不到句子边界，在最后空白处截断。
 /// - 若无空白，直接按 `max_chars` 硬截断。
@@ -99,47 +99,7 @@ fn is_cjk(ch: char) -> bool {
 /// 返回:
 /// - 截断后的文本（含 `…` 后缀）。
 pub fn truncate_at_boundary(text: &str, max_chars: usize) -> String {
-    let total_chars = text.chars().count();
-    if total_chars <= max_chars {
-        return text.to_string();
-    }
-
-    // 在 max_chars 范围内寻找最后一个句子边界
-    let truncated: String = text.chars().take(max_chars).collect();
-    let boundary = find_last_sentence_boundary(&truncated);
-
-    match boundary {
-        Some(pos) => {
-            // pos 可能正好是最后一个字符（此时无需进一步截断，但需加 …）
-            let end = pos + 1; // include the boundary char
-            let result: String = truncated.chars().take(end).collect();
-            format!("{result}…")
-        }
-        None => {
-            // 无句子边界 → 在最后空白处截断
-            if let Some(pos) = truncated.rfind(char::is_whitespace) {
-                let result: String = truncated.chars().take(pos).collect();
-                format!("{result}…")
-            } else {
-                format!("{truncated}…")
-            }
-        }
-    }
-}
-
-/// 在字符串中查找最后一个句子终止符的位置（返回**字符**索引）。
-///
-/// 句子终止符: `。` `！` `？` `\n`
-///
-/// 说明:
-/// - `char_indices` 返回的是字节偏移，此处换算为字符索引，
-///   供调用方 `truncate_at_boundary` 按 `chars().take(end)` 使用，
-///   避免多字节（中文）场景下截断长度超预算。
-fn find_last_sentence_boundary(text: &str) -> Option<usize> {
-    text.char_indices()
-        .rev()
-        .find(|(_, ch)| matches!(ch, '。' | '！' | '？' | '\n'))
-        .map(|(idx, _)| text[..idx].chars().count())
+    ramaria_core::text::truncate_chars_at_sentence_boundary(text, max_chars)
 }
 
 // =========================================================

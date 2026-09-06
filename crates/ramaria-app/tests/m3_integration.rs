@@ -11,7 +11,7 @@ mod mock_backend;
 
 use mock_backend::{MockLlm, MockStorage};
 use ramaria_core::{
-    traits::{LlmProvider, StorageBackend},
+    traits::{LlmProvider, StoreCrud},
     types::{MemoryEvent, PersonalityTrait, Presentation, TraitLayer, TraitSource, TraitStatus},
 };
 use ramaria_memory::inference::{

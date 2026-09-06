@@ -788,6 +788,7 @@ async fn save_example_pairs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ramaria_core::traits::StoreCrud;
 
     #[test]
     fn session_lifecycle_creation() {

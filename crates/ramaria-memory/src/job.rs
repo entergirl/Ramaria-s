@@ -513,30 +513,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl StorageBackend for JobMockStorage {
-        async fn create_background_job(
-            &self,
-            _job_type: &str,
-            _payload: Option<&str>,
-        ) -> RamariaResult<i64> {
-            Ok(self
-                .next_id
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst))
-        }
-
-        async fn update_job_status(
-            &self,
-            job_id: i64,
-            status: &str,
-            _error_msg: Option<&str>,
-        ) -> RamariaResult<()> {
-            self.transitions
-                .lock()
-                .unwrap()
-                .push((job_id, status.to_string()));
-            Ok(())
-        }
-
+    impl ramaria_core::StoreCrud for JobMockStorage {
         async fn create_session(&self, _persona_uid: Option<&str>) -> RamariaResult<Session> {
             unimplemented!()
         }
@@ -701,6 +678,33 @@ mod tests {
         async fn list_keywords(&self) -> RamariaResult<Vec<String>> {
             unimplemented!()
         }
+    }
+
+    #[async_trait::async_trait]
+    impl ramaria_core::StoreInfrastructure for JobMockStorage {
+        async fn create_background_job(
+            &self,
+            _job_type: &str,
+            _payload: Option<&str>,
+        ) -> RamariaResult<i64> {
+            Ok(self
+                .next_id
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst))
+        }
+
+        async fn update_job_status(
+            &self,
+            job_id: i64,
+            status: &str,
+            _error_msg: Option<&str>,
+        ) -> RamariaResult<()> {
+            self.transitions
+                .lock()
+                .unwrap()
+                .push((job_id, status.to_string()));
+            Ok(())
+        }
+
         async fn save_privacy_consent(&self, _consent: &PrivacyConsent) -> RamariaResult<()> {
             unimplemented!()
         }

@@ -5,6 +5,8 @@
 //! - `ParsedMessage` 为解析后的中间表示，与存储层的 `Message` 解耦
 //! - `ImportReport` 提供完整的诊断信息：成功/降级/跳过 三类统计
 //! - `ImportMode` 区分快速导入（仅 L0）和深度导入（全管线）
+//! - `PersonaSide` / `ImportSide` 为导入源无关的"双人对话双方/导入侧过滤"模型，
+//!   供各导入源与通用写入层复用；平台特有的 UID/画像命名规则留在各导入源模块
 //! - ParsedMessage 新增 sender 标识字段，支持双画像导入
 //! - ImportReport 新增双方 QQ 号及对方标识字段，支持 UID 生成策略
 
@@ -33,6 +35,77 @@ impl std::fmt::Display for ImportMode {
         match self {
             Self::Fast => write!(f, "fast"),
             Self::Deep => write!(f, "deep"),
+        }
+    }
+}
+
+// =========================================================
+// 双人对话双方与导入侧过滤（导入源无关）
+// =========================================================
+
+///
+/// 双人对话中的一方（导出者本人 / 对话另一方）。
+///
+/// 职责:
+/// - 标识一次人对人导入中"谁是导出者（我方）"、"谁是对话对象（对方）"。
+/// - 供 `ImportSide` 过滤、会话归属和画像归属决策使用。
+///
+/// 说明:
+/// - 该模型对任何"导出者 + 对话对象"形式的聊天平台导入都成立，不绑定具体平台。
+/// - 各平台的画像命名规则（如 UID 前缀、kind 映射）由各导入源自行定义，不在此处承载。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersonaSide {
+    /// 我方（导出者本人）
+    Me,
+    /// 对方（对话另一方）
+    Other,
+}
+
+///
+/// 导入侧过滤选项（`import --side self|other|both`）。
+///
+/// 语义:
+/// - `Me`（self）: 只处理我方消息；跳过侧（对方）消息不入库、对方画像不创建。
+/// - `Other`: 只处理对方消息；我方画像不创建。
+/// - `Both`: 双方都处理（默认）。
+///
+/// 用途:
+/// - 调用方（CLI `--side` / 桌面导入面板）按选项控制画像创建与消息写入。
+/// - 通用写入层（`writer.rs`）按该过滤决定保留哪些消息、会话归属哪一方。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportSide {
+    /// 只处理我方（self）
+    Me,
+    /// 只处理对方（other）
+    Other,
+    /// 双方都处理（默认）
+    Both,
+}
+
+impl ImportSide {
+    /// 解析 CLI/前端字符串（`self`/`other`/`both`，大小写不敏感）。
+    ///
+    /// 返回:
+    /// - `Ok(Some(side))`: 合法值。
+    /// - `Ok(None)`: 空/未提供 → 默认 `Both`。
+    /// - `Err(msg)`: 非法值（业务校验失败提示）。
+    pub fn parse_cli(value: Option<&str>) -> Result<ImportSide, String> {
+        match value.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+            None | Some("") | Some("both") => Ok(ImportSide::Both),
+            Some("self") | Some("me") => Ok(ImportSide::Me),
+            Some("other") => Ok(ImportSide::Other),
+            Some(other) => Err(format!(
+                "不支持的导入侧: '{other}'（仅支持 self | other | both）"
+            )),
+        }
+    }
+
+    /// 该侧是否需要创建画像（Both 时两侧都创建）。
+    pub fn needs_persona(self, side: PersonaSide) -> bool {
+        match self {
+            ImportSide::Both => true,
+            ImportSide::Me => side == PersonaSide::Me,
+            ImportSide::Other => side == PersonaSide::Other,
         }
     }
 }

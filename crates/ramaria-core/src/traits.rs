@@ -6,6 +6,9 @@
 //! - 支持流式 LLM 响应，统一 request_id、delta、done 和 metadata 语义
 //! - 支持 embedding 模型下载、进度查询、可用性校验和批量向量化
 //! - Storage trait 暴露业务级 CRUD + 基础设施 CRUD，不泄露 sqlx 连接池或具体表结构
+//!
+//! Storage Backend 职责分组（巨 trait 拆分，行为等价）: 见模块内
+//! [`StoreCrud`]、[`StoreInfrastructure`] 与 [`StorageBackend`] 三组 trait 的定义注释。
 
 use std::pin::Pin;
 
@@ -333,11 +336,13 @@ pub trait LlmResponseCache: Send + Sync {
 // 存储后端抽象层
 // =========================================================
 
-/// 存储后端抽象 trait。
+/// 存储后端抽象 trait（业务对象 CRUD 分组）。
 ///
 /// 职责:
-/// - 定义 app 和 memory 层需要的业务级 CRUD + 基础设施 CRUD，覆盖全部 23 张表。
-/// - 隔离 SQLite/sqlx 细节，避免上层持有连接池或拼接 SQL。
+/// - 承载会话/消息/L0-L1 记忆、画像（persona）、L2 事件与溯源、L3 性格与证据、
+///   人格画像（facts/style/example/cluster）、原文话语块（utt）、行为规则与反馈日志等
+///   业务对象的主 CRUD 与查询。
+/// - 与 [`StoreInfrastructure`]（基础设施）分离，避免单一巨 trait 承载全部 24 张表能力。
 ///
 /// 实现要求:
 /// - 具体实现位于 `ramaria-storage`。
@@ -347,15 +352,8 @@ pub trait LlmResponseCache: Send + Sync {
 /// - TEXT 主键表（sessions/messages/memory_l1）使用 Uuid
 /// - INTEGER AUTOINCREMENT 表使用 i64
 /// - FK 列类型与目标表 PK 类型一致
-///
-/// 破坏性变更（vs 旧 StorageBackend）:
-/// - 删除: save_memory_l2, save_l2_sources, get_l2_sources, save_user_profile,
-/// get_current_profile, mark_profile_historical
-/// - 新增: personas, memory_events, event_relations, event_sources, persona_facts,
-/// personality_traits, trait_evidence, persona_examples, persona_cluster_snapshots,
-/// keyword_pool 十组方法
 #[async_trait]
-pub trait StorageBackend: Send + Sync {
+pub trait StoreCrud: Send + Sync {
     // -- Session --
     /// 创建新 session，可选的 persona_uid 用于 Session-Persona 绑定。
     ///
@@ -383,7 +381,7 @@ pub trait StorageBackend: Send + Sync {
         _persona_uid: &str,
     ) -> RamariaResult<()> {
         Err(crate::error::RamariaError::unsupported(
-            "StorageBackend 未实现 session persona_uid 回写绑定",
+            "StoreCrud 未实现 session persona_uid 回写绑定",
         ))
     }
 
@@ -668,7 +666,7 @@ pub trait StorageBackend: Send + Sync {
         _f: &PersonaFact,
     ) -> RamariaResult<i64> {
         Err(crate::error::RamariaError::unsupported(
-            "StorageBackend 未实现事实版本链覆盖写",
+            "StoreCrud 未实现事实版本链覆盖写",
         ))
     }
     /// 升级 candidate → active（互证通过后提升）。
@@ -722,7 +720,7 @@ pub trait StorageBackend: Send + Sync {
     /// - 默认实现返回 `Unsupported`（存量 mock 无需实现即可编译）。
     async fn upsert_style_stats(&self, _stats: &PersonaStyleStats) -> RamariaResult<()> {
         Err(crate::error::RamariaError::unsupported(
-            "StorageBackend 未实现 persona_style_stats upsert",
+            "StoreCrud 未实现 persona_style_stats upsert",
         ))
     }
     /// 按 persona 查询风格统计（注入侧读取规则文本 / 状态判断）。
@@ -791,7 +789,7 @@ pub trait StorageBackend: Send + Sync {
     /// 默认实现返回 `Unsupported` 错误（存量 mock 无需实现即可编译）。
     async fn insert_utt_block(&self, _block: &UttBlock) -> RamariaResult<i64> {
         Err(crate::error::RamariaError::unsupported(
-            "StorageBackend 未实现 utt_blocks 写入",
+            "StoreCrud 未实现 utt_blocks 写入",
         ))
     }
     /// 按 persona 查询全部话语块（原文按 persona 严格隔离）。
@@ -810,7 +808,7 @@ pub trait StorageBackend: Send + Sync {
     /// 默认实现返回 `Unsupported` 错误（存量 mock 无需实现即可编译）。
     async fn delete_utt_block(&self, _id: i64) -> RamariaResult<()> {
         Err(crate::error::RamariaError::unsupported(
-            "StorageBackend 未实现单块 utt_blocks 删除",
+            "StoreCrud 未实现单块 utt_blocks 删除",
         ))
     }
     /// 删除指定会话的全部话语块，返回删除行数。
@@ -838,7 +836,21 @@ pub trait StorageBackend: Send + Sync {
     // -- Keyword Pool --
     async fn upsert_keyword(&self, keyword: &str) -> RamariaResult<()>;
     async fn list_keywords(&self) -> RamariaResult<Vec<String>>;
+}
 
+/// 存储后端抽象 trait（基础设施/系统分组）。
+///
+/// 职责:
+/// - 承载关键词倒排索引、隐私确认、后端配置、schema/索引版本、后台任务队列、冲突队列、
+///   全局设置、知识图谱、L2 聚类去重指纹、事件去重查询、行为规则与反馈日志等非核心
+///   业务对象的表能力。
+/// - 与 [`StoreCrud`]（核心业务 CRUD）分离，避免单一巨 trait。
+///
+/// 实现要求:
+/// - 具体实现位于 `ramaria-storage`。
+/// - 所有可恢复错误应转换为 `RamariaError::Storage` 或更精确分类。
+#[async_trait]
+pub trait StoreInfrastructure: Send + Sync {
     // -- Keyword Refs --
     /// 插入一条关键词引用记录。
     async fn insert_keyword_ref(
@@ -882,10 +894,6 @@ pub trait StorageBackend: Send + Sync {
     async fn get_schema_version(&self) -> RamariaResult<i32>;
     async fn get_index_version(&self) -> RamariaResult<i32>;
     async fn set_index_version(&self, version: i32) -> RamariaResult<()>;
-
-    // =========================================================
-    // 基础设施方法 — 后台任务 / 冲突队列 / 推送 / 设置 / BM25 / 图谱
-    // =========================================================
 
     // -- Background Jobs --
     async fn create_background_job(
@@ -971,6 +979,7 @@ pub trait StorageBackend: Send + Sync {
         Ok(())
     }
 
+    // -- 事件去重（L2 维护） --
     /// 查询 persona 最近的事件（供新事件相似度去重比对）。
     ///
     /// 参数:
@@ -998,7 +1007,7 @@ pub trait StorageBackend: Send + Sync {
     /// 默认实现返回 `Unsupported` 错误（存量 mock 无需实现即可编译）。
     async fn save_behavior_rule(&self, _rule: &BehaviorRule) -> RamariaResult<i64> {
         Err(crate::error::RamariaError::unsupported(
-            "StorageBackend 未实现 behavior_rules 写入",
+            "StoreInfrastructure 未实现 behavior_rules 写入",
         ))
     }
 
@@ -1024,7 +1033,7 @@ pub trait StorageBackend: Send + Sync {
     /// 默认实现返回 `Unsupported` 错误。
     async fn update_behavior_rule(&self, _rule: &BehaviorRule) -> RamariaResult<()> {
         Err(crate::error::RamariaError::unsupported(
-            "StorageBackend 未实现 behavior_rules 更新",
+            "StoreInfrastructure 未实现 behavior_rules 更新",
         ))
     }
 
@@ -1033,7 +1042,7 @@ pub trait StorageBackend: Send + Sync {
     /// 默认实现返回 `Unsupported` 错误。
     async fn delete_behavior_rule(&self, _id: i64) -> RamariaResult<()> {
         Err(crate::error::RamariaError::unsupported(
-            "StorageBackend 未实现 behavior_rules 删除",
+            "StoreInfrastructure 未实现 behavior_rules 删除",
         ))
     }
 
@@ -1042,7 +1051,7 @@ pub trait StorageBackend: Send + Sync {
     /// 默认实现返回 `Unsupported` 错误。
     async fn set_rule_enabled(&self, _id: i64, _enabled: bool) -> RamariaResult<()> {
         Err(crate::error::RamariaError::unsupported(
-            "StorageBackend 未实现 behavior_rules enabled 切换",
+            "StoreInfrastructure 未实现 behavior_rules enabled 切换",
         ))
     }
 
@@ -1055,7 +1064,7 @@ pub trait StorageBackend: Send + Sync {
     /// 默认实现返回 `Unsupported` 错误。
     async fn save_feedback_log(&self, _log: &FeedbackLog) -> RamariaResult<i64> {
         Err(crate::error::RamariaError::unsupported(
-            "StorageBackend 未实现 feedback_log 写入",
+            "StoreInfrastructure 未实现 feedback_log 写入",
         ))
     }
 
@@ -1069,6 +1078,26 @@ pub trait StorageBackend: Send + Sync {
         Ok(Vec::new())
     }
 }
+
+// =========================================================
+// 存储后端聚合超级 trait
+// =========================================================
+
+/// 存储后端聚合 trait。
+///
+/// 职责:
+/// - 聚合 [`StoreCrud`]（业务对象 CRUD）与 [`StoreInfrastructure`]（基础设施），
+///   为调用方提供单一 bound / trait object 以引用完整存储能力，避免在泛型签名上
+///   罗列多个子 trait。
+///
+/// 实现说明:
+/// - 本 trait 无自身方法；对任何同时实现 `StoreCrud + StoreInfrastructure` 的类型
+///   由 blanket impl 自动满足，实现方无需再写 `impl StorageBackend for T {}`。
+/// - `dyn StorageBackend` 可通过 supertrait 调用 `StoreCrud`/`StoreInfrastructure`
+///   中的全部方法。
+pub trait StorageBackend: StoreCrud + StoreInfrastructure {}
+
+impl<T: StoreCrud + StoreInfrastructure> StorageBackend for T {}
 
 // =========================================================
 // 单元测试

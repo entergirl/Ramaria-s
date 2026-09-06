@@ -59,28 +59,23 @@ pub fn format_timestamp_iso(ms: i64) -> Option<String> {
 }
 
 // =========================================================
-// 字符串截断
+// 字符串截断（委托统一字符边界工具）
 // =========================================================
 
-/// 按字符（而非字节）截断字符串到指定长度。
+/// 按字符（而非字节）截断字符串到指定长度，超长追加统一省略号 `…`。
 ///
 /// 参数:
 /// - `s`: 原始字符串（可含 CJK 等多字节字符）。
-/// - `max_chars`: 最大字符数。
+/// - `max_chars`: 最大字符数（含省略号预留）。
 ///
 /// 返回:
-/// - 若 `s.chars.count <= max_chars`，返回原字符串的 clone。
-/// - 否则截取前 `max_chars - 3` 字符，追加 `"..."`。
+/// - 若 `s` 字符数 ≤ `max_chars`，返回原字符串的拷贝。
+/// - 否则截取前 `max_chars - 1` 字符并追加一个 `…`，结果总长恰为 `max_chars`。
 ///
 /// 说明:
-/// - 使用 `.chars` 迭代器保证不截断多字节 UTF-8 字符中间。
+/// - 字符边界与省略号语义由 `ramaria_core::text::truncate_chars` 统一实现。
 pub fn truncate(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max_chars.saturating_sub(3)).collect();
-        format!("{truncated}...")
-    }
+    ramaria_core::text::truncate_chars(s, max_chars)
 }
 
 // =========================================================
@@ -147,18 +142,18 @@ mod tests {
 
     // ---- truncate ----
 
-    /// truncate 各 (input, max) 参数化验证。
+    /// truncate 各 (input, max) 参数化验证（统一字符边界 + `…` 预算内含省略号）。
     #[test]
     fn truncate_cases() {
         let cases = [
-            ("hello", 10, "hello"), // 未超长原样
-            ("hello", 5, "hello"),  // 恰好边界
-            ("hello world", 8, "hello..."),
-            ("hello", 3, "..."),         // max=3 → 0 chars + "..."
-            ("你好世界", 4, "你好世界"), // CJK 1 char/字
-            ("你好世界", 3, "..."),
-            ("你好世界啊", 4, "你..."), // 5 chars > 4, 取 1 字 + "..."
-            ("", 10, ""),               // 空串
+            ("hello", 10, "hello"),         // 未超长原样
+            ("hello", 5, "hello"),          // 恰好边界
+            ("hello world", 8, "hello w…"), // 11>8 → 7 字符 + "…"
+            ("hello", 3, "he…"),            // max=3 → 2 字符 + "…"
+            ("你好世界", 4, "你好世界"),    // CJK 1 char/字，恰好边界
+            ("你好世界", 3, "你好…"),       // 5>3 → 2 字 + "…"
+            ("你好世界啊", 4, "你好世…"),   // 5>4 → 3 字 + "…"
+            ("", 10, ""),                   // 空串
         ];
         for (input, max, expected) in cases {
             assert_eq!(truncate(input, max), expected, "input={input:?} max={max}");

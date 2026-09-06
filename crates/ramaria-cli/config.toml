@@ -149,6 +149,8 @@ dedup_keyword_min = 1
 corroboration_cosine_threshold = 0.7
 injection_budget_chars = 800
 volatile_halflife_days = 30
+retrieve_top_k = 0
+retrieve_threshold = 0.0
 
 [embedding]
 device = "auto"

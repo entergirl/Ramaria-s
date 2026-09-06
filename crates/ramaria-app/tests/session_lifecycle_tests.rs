@@ -16,7 +16,7 @@ mod mock_backend;
 
 use ramaria_app::App;
 use ramaria_core::config::RamariaConfig;
-use ramaria_core::traits::StorageBackend;
+use ramaria_core::traits::{StorageBackend, StoreCrud, StoreInfrastructure};
 use ramaria_core::types::{AppState, BackendConfig, MessageRole, MessageSource};
 use ramaria_llm::keychain::Keychain;
 use std::sync::Arc;

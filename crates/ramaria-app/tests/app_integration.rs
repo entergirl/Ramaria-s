@@ -25,7 +25,7 @@ use ramaria_app::{
     ErrorHint, check_setup_status, confirm_privacy, determine_state, error_title, run_setup,
 };
 use ramaria_core::config::RamariaConfig;
-use ramaria_core::traits::StorageBackend;
+use ramaria_core::traits::{StoreCrud, StoreInfrastructure};
 use ramaria_core::types::{AppState, BackendConfig, LlmProvider as LlmProviderKind, MessageRole};
 use ramaria_llm::keychain::Keychain;
 

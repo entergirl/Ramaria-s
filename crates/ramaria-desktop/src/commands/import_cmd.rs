@@ -438,7 +438,7 @@ pub async fn import_qq_chat(
     );
 
     let (sessions_written, messages_written, session_ids) =
-        ramaria_importer::qq::QqImporter::execute_fast_import(
+        ramaria_importer::writer::ImportWriter::write_l0(
             &state.pool,
             &sessions,
             self_persona_uid_resolved.as_deref(),

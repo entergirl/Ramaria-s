@@ -214,7 +214,7 @@ impl PipelineStage for StageResolveSession {
 mod tests {
     use super::*;
     use crate::stages::test_utils::{MockLlm, MockStorage, test_context};
-    use ramaria_core::traits::StorageBackend;
+    use ramaria_core::traits::StoreCrud;
     use ramaria_core::types::AppState;
     use std::sync::Arc;
     use uuid::Uuid;

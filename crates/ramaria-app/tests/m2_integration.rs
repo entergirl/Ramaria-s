@@ -22,7 +22,7 @@ use ramaria_app::stages::{
 };
 use ramaria_app::stream_event::StreamEvent;
 use ramaria_core::config::RamariaConfig;
-use ramaria_core::traits::{EmbeddingProvider, LlmProvider, StorageBackend};
+use ramaria_core::traits::{EmbeddingProvider, LlmProvider, StorageBackend, StoreCrud};
 use ramaria_core::types::{AppState, MessageRole, Persona, PersonaKind};
 use ramaria_llm::keychain::Keychain;
 use ramaria_memory::retriever::Retriever;

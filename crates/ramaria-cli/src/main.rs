@@ -15,9 +15,9 @@ use ramaria_cli::ui;
 
 use anyhow::Context;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
-use ramaria_core::StorageBackend;
 use ramaria_core::error::RamariaError;
 use ramaria_core::traits::EmbeddingProvider;
+use ramaria_core::{StorageBackend, StoreInfrastructure};
 use sqlx::SqlitePool;
 use std::path::PathBuf;
 use std::sync::Arc;

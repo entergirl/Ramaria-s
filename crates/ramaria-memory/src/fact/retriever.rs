@@ -241,9 +241,7 @@ pub fn build_knowledge_injection(
     }
     // 预算裁剪：超预算保前部 + 截断提示（卡片为简洁陈述，一般不触发）
     let content = if cards.chars().count() > budget_chars {
-        let mut s: String = cards.chars().take(budget_chars.saturating_sub(1)).collect();
-        s.push('…');
-        s
+        ramaria_core::text::truncate_chars(&cards, budget_chars)
     } else {
         cards
     };

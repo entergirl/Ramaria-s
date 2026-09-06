@@ -11,7 +11,7 @@ mod mock_backend;
 
 use mock_backend::MockStorage;
 use ramaria_core::{
-    traits::{ChatRequest, LlmProvider, StorageBackend},
+    traits::{ChatRequest, LlmProvider, StoreCrud},
     types::{MemoryEvent, Presentation, TraitLayer, TraitStatus},
 };
 use ramaria_memory::inference::{

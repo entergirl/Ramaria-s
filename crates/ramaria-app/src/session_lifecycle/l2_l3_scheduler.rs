@@ -896,6 +896,7 @@ mod tests {
     use super::*;
     use crate::stages::test_utils::{MockLlm, MockStorage};
     use ramaria_core::config::RamariaConfig;
+    use ramaria_core::traits::StoreCrud;
     use ramaria_core::types::{Persona, PersonaKind};
     use std::sync::Arc;
 

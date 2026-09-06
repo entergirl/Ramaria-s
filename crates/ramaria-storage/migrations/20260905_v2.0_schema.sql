@@ -61,7 +61,7 @@ CREATE TABLE messages (
     content            TEXT NOT NULL,
     created_at         INTEGER NOT NULL,
     source             TEXT NOT NULL,
-    import_fingerprint TEXT,
+    import_fingerprint TEXT UNIQUE,  -- 跨文件导入去重：同指纹不可重复入库
     persona_uid        TEXT REFERENCES personas(uid)
 );
 CREATE INDEX idx_messages_session ON messages(session_id);

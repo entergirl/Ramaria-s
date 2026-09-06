@@ -26,7 +26,7 @@ use ramaria_core::behavior::{
 };
 use ramaria_core::config::RamariaConfig;
 use ramaria_core::error::RamariaError;
-use ramaria_core::traits::StorageBackend;
+use ramaria_core::traits::{StorageBackend, StoreCrud, StoreInfrastructure};
 use ramaria_core::types::{
     AppState, MemoryEvent, Message, MessageRole, MessageSource, Persona, PersonaKind, Presentation,
 };

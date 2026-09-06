@@ -16,7 +16,8 @@ use futures::{Stream, stream};
 use ramaria_core::behavior::FeedbackLog;
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::traits::{
-    ChatRequest, EmbeddingModelInfo, EmbeddingProvider, LlmProvider, StorageBackend, StreamDelta,
+    ChatRequest, EmbeddingModelInfo, EmbeddingProvider, LlmProvider, StorageBackend, StoreCrud,
+    StoreInfrastructure, StreamDelta,
 };
 use ramaria_core::types::{
     BackendConfig, ClusterSnapshot, EventRelation, MemoryEvent, MemoryL1, Message, ModelCapability,
@@ -173,7 +174,7 @@ impl MockStorage {
 }
 
 #[async_trait]
-impl StorageBackend for MockStorage {
+impl StoreCrud for MockStorage {
     async fn create_session(&self, persona_uid: Option<&str>) -> RamariaResult<Session> {
         let session = Session::with_persona(persona_uid.map(|s| s.to_string()));
         self.sessions
@@ -563,7 +564,10 @@ impl StorageBackend for MockStorage {
     async fn list_keywords(&self) -> RamariaResult<Vec<String>> {
         Ok(Vec::new())
     }
+}
 
+#[async_trait]
+impl StoreInfrastructure for MockStorage {
     async fn save_privacy_consent(&self, consent: &PrivacyConsent) -> RamariaResult<()> {
         self.privacy_consents.lock().unwrap().push(consent.clone());
         Ok(())

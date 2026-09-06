@@ -13,7 +13,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use futures::Stream;
-use ramaria_core::traits::{ChatRequest, StorageBackend, StreamDelta};
+use ramaria_core::traits::{ChatRequest, StoreCrud, StreamDelta};
 use ramaria_core::types::{
     BackendConfig, MemoryL1, ModelCapability, Persona, PersonaKind, Session, now_ms,
 };

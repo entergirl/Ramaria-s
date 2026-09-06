@@ -18,7 +18,7 @@ use common::{
     MockStorage, build_test_app, make_assistant_message, make_test_event, make_test_l1,
     make_test_persona, make_test_trait, make_user_message,
 };
-use ramaria_core::traits::StorageBackend;
+use ramaria_core::traits::{StoreCrud, StoreInfrastructure};
 use ramaria_core::types::{PersonaFact, PersonaKind};
 use std::sync::Arc;
 use uuid::Uuid;

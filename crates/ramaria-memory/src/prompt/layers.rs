@@ -216,7 +216,7 @@ pub fn allocate_memory_layer_budget(
             // `truncate_at_boundary` 在句子边界恰在窗口末尾时可能返回 max+1 字符
             // （含省略号），此处 clamp 保证预算不超支（防御）。
             let trimmed = truncate_at_boundary(rag_text, remaining);
-            out.rag = Some(fit_chars(trimmed, remaining));
+            out.rag = Some(ramaria_core::text::truncate_chars_bare(&trimmed, remaining));
             used += out.rag.as_ref().map_or(0, |s| s.chars().count());
         }
     }
@@ -281,19 +281,6 @@ fn keep_high_score_blocks(text: &str, max_chars: usize) -> String {
     }
 
     kept.join(BLOCK_SEPARATOR)
-}
-
-/// 将文本裁剪到不超过 `max_chars` 字符（超出时取前部，防御性 clamp）。
-///
-/// 用途: 上游截断函数（如 `truncate_at_boundary`）在边界条件下可能返回
-/// `max + 1` 字符，预算分配器统一在此收紧，保证脉络层总长 ≤ 预算。
-fn fit_chars(text: String, max_chars: usize) -> String {
-    let count = text.chars().count();
-    if count <= max_chars {
-        text
-    } else {
-        text.chars().take(max_chars).collect()
-    }
 }
 
 /// 从文本尾部（最近内容）截取最多 `max_chars` 字符。
@@ -716,14 +703,6 @@ mod tests {
     #[test]
     fn take_tail_zero_budget_returns_empty() {
         assert_eq!(take_tail("任何内容", 0), "", "预算 0 不产生省略号占位");
-    }
-
-    #[test]
-    fn fit_chars_clamps_over_budget() {
-        assert_eq!(fit_chars("短文本".to_string(), 100), "短文本");
-        let clamped = fit_chars("超预算文本内容".to_string(), 4);
-        assert_eq!(clamped.chars().count(), 4);
-        assert_eq!(fit_chars(String::new(), 0), "");
     }
 
     #[test]

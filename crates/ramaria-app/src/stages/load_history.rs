@@ -345,13 +345,8 @@ fn format_l1_as_context_line(l1: &MemoryL1) -> String {
         l1.summary.clone()
     };
 
-    // 截断到 120 字符
-    if base.chars().count() > 120 {
-        let truncated: String = base.chars().take(120).collect();
-        truncated + "…"
-    } else {
-        base
-    }
+    // 截断到 120 字符（统一字符边界工具，预算内含省略号）
+    ramaria_core::text::truncate_chars(&base, 120)
 }
 
 // =========================================================

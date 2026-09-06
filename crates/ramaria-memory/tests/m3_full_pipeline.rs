@@ -13,7 +13,7 @@
 mod common;
 
 use common::{MockLlm, create_persona, create_session, make_l1, mem_storage};
-use ramaria_core::traits::StorageBackend;
+use ramaria_core::traits::{StorageBackend, StoreCrud, StoreInfrastructure};
 use ramaria_core::types::now_ms;
 use ramaria_memory::event::{EventExtractor, EventExtractorConfig};
 use ramaria_memory::retriever::{L1DocView, Retriever};
