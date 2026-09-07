@@ -242,11 +242,23 @@ mod tests {
         let retriever = Arc::new(std::sync::RwLock::new(
             ramaria_memory::retriever::Retriever::new(),
         ));
+        let keyword_service = Arc::new(std::sync::RwLock::new(
+            ramaria_memory::keyword::KeywordService::new(),
+        ));
         let keychain = Arc::new(ramaria_llm::keychain::Keychain::new());
         let lifecycle = Arc::new(crate::session_lifecycle::SessionLifecycle::new(
             config.clone(),
         ));
-        let ctx = PipelineContext::new(storage, llm, None, config, retriever, keychain, lifecycle);
+        let ctx = PipelineContext::new(
+            storage,
+            llm,
+            None,
+            config,
+            retriever,
+            keyword_service,
+            keychain,
+            lifecycle,
+        );
 
         let stage = StageCallLlm::new();
         let data = full_data();

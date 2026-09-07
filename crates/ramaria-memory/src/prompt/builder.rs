@@ -68,6 +68,11 @@ pub struct PromptConfig {
     pub memory_layer_budget_chars: Option<usize>,
     /// 行为控制块字符预算上限（None = 默认 400 字符，固定小比例）
     pub behavior_block_max_chars: Option<usize>,
+    /// 知识层事实卡片字符预算上限（None = 默认 800 字符）。
+    ///
+    /// 与 `[knowledge].injection_budget_chars` 对齐：显式设置时真实生效，
+    /// `None` 时回退 `layers` 知识块默认预算（与既有行为等价）。
+    pub knowledge_block_max_chars: Option<usize>,
     /// 是否渲染"说话风格"子段（手工 speaking_style + 自动风格规则，表达层）。
     ///
     /// 探针消融（F3 / B0 / B1 / S_*）用：`false` 时该子段整体不产生，
@@ -101,6 +106,7 @@ impl Default for PromptConfig {
             current_time_str: String::new(),
             memory_layer_budget_chars: None,
             behavior_block_max_chars: None,
+            knowledge_block_max_chars: None,
             include_speaking_style: true,
             include_narrative: true,
             include_memory_rag: true,
@@ -302,8 +308,8 @@ pub fn assemble_prompt(context: &PromptContext, config: &PromptConfig) -> String
         // 行为层（None → 不产生段落）
         render_behavior_block(context, config).map_or(String::new(), |b| b.content),
         build_style_layer(context, config),
-        // 知识层槽位（无事实 → 不产生段落）
-        render_knowledge_block(context).map_or(String::new(), |b| b.content),
+        // 知识层槽位（无事实 → 不产生段落；预算经 PromptConfig 注入）
+        render_knowledge_block(context, config).map_or(String::new(), |b| b.content),
         build_memory(context, config),
         build_context_block(context),
     ] {

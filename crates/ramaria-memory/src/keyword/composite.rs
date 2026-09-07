@@ -6,7 +6,7 @@
 //!   查询时把查询词向量化后找语义相似词，再走精确倒排查（词级扩展而非文档级检索）
 //!
 //! 编排策略:
-//! ```
+//! ```text
 //! query(keywords, persona, top_k)
 //!   ├─ 1. KeywordIndex.exact_query      （精确命中优先）
 //!   │      └─ 结果不足且 enable_substring_fallback → 2

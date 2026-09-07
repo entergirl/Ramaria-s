@@ -297,10 +297,20 @@ fn test_context() -> PipelineContext {
     let llm: Arc<dyn LlmProvider> = Arc::new(TestLlm::new());
     let config = RamariaConfig::default();
     let retriever = Arc::new(RwLock::new(Retriever::new()));
+    let keyword_service = Arc::new(RwLock::new(ramaria_memory::keyword::KeywordService::new()));
     let keychain = Arc::new(Keychain::new());
     let lifecycle = Arc::new(SessionLifecycle::new(config.clone()));
 
-    PipelineContext::new(storage, llm, None, config, retriever, keychain, lifecycle)
+    PipelineContext::new(
+        storage,
+        llm,
+        None,
+        config,
+        retriever,
+        keyword_service,
+        keychain,
+        lifecycle,
+    )
 }
 
 // =========================================================

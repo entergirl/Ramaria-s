@@ -1,9 +1,16 @@
-//! crates/ramaria-memory/src/retriever/search.rs — Retriever 的三通道检索编排
+//! crates/ramaria-memory/src/retriever/search.rs — Retriever 的多通道检索编排
 //!
 //! 设计特点:
-//! - 实现统一 `search` 入口，编排 BM25/向量/图谱三通道并通过 RRF 融合
+//! - 实现统一 `search` 入口，编排 BM25/向量/图谱通道并通过 RRF 融合
+//! - 支持注入关键词镜像命中（KeywordService 在 app 层预取后传入）作为第四通道
 //! - 提供关键词精确检索、脉络加权检索与 BM25 子串检索等专项入口
 //! - 检索结果解析复用 helpers 中的预解析/字符串解析辅助函数
+//!
+//! 融合口径:
+//! - 关键词通道缺席（未注入 / 命中为空 / 开关关闭）时行为与既有三通道完全一致；
+//!   关键词通道有数据时才进入 `rrf_fuse_with_keyword` 四通道融合。
+//! - 关键词命中以 `(label, score)` 纯数据形式注入：label 复用向量通道
+//!   `L1:{uuid}` / `L2:{id}` 格式，经既有 `parse_doc_label` 解析，无句柄泄漏。
 
 use crate::bm25::DocId;
 use crate::decay::{DecayConfig, calc_retention};
@@ -19,19 +26,40 @@ use super::helpers::{
 use super::types::{L1DocView, SearchRequest, SearchResult};
 
 impl Retriever {
-    /// 执行三通道组合检索。
+    /// 执行多通道组合检索（不含关键词镜像通道）。
     ///
-    /// 流程:
-    /// 1. 各通道独立检索
-    /// 2. BM25 通道同时预解析 DocId→文档数据映射（避免后续 label 往返解析）
-    /// 3. 将结果转为统一的 ChannelResult<String> （label 作为 key）
-    /// 4. RRF 融合
-    /// 5. 将融合后的 label 解析为 SearchResult（BM25 用预解析缓存，图谱用字符串解析）
+    /// 说明:
+    /// - 等价于 `search_with_keyword_hits(request, query_vec, None)`：
+    ///   仅 BM25 + 向量 + 图谱三通道融合，行为与上一版本完全一致。
+    /// - 调用方如需关键词镜像作为第四通道，请改用 `search_with_keyword_hits`。
     ///
     /// 参数:
     /// - `request`: 检索请求
     /// - `query_vec`: 可选的 query 向量（若未提供则跳过向量通道）
     pub fn search(&self, request: &SearchRequest, query_vec: Option<&[f32]>) -> Vec<SearchResult> {
+        self.search_with_keyword_hits(request, query_vec, None)
+    }
+
+    /// 执行多通道组合检索（可含关键词镜像通道）。
+    ///
+    /// 流程:
+    /// 1. 各通道独立检索（BM25/向量/图谱 + 可选注入的关键词镜像命中）
+    /// 2. BM25 通道同时预解析 DocId→文档数据映射（避免后续 label 往返解析）
+    /// 3. 将结果转为统一的 ChannelResult<String> （label 作为 key）
+    /// 4. RRF 融合（关键词通道有数据时四通道融合；否则维持三通道既有语义）
+    /// 5. 将融合后的 label 解析为 SearchResult（BM25 用预解析缓存，图谱用字符串解析）
+    ///
+    /// 参数:
+    /// - `request`: 检索请求
+    /// - `query_vec`: 可选的 query 向量（若未提供则跳过向量通道）
+    /// - `keyword_hits`: 关键词镜像命中（label + score 列表；None/空 = 无关键词通道）。
+    ///   是否进入融合另受 `self.config.enable_keyword_channel` 控制。
+    pub fn search_with_keyword_hits(
+        &self,
+        request: &SearchRequest,
+        query_vec: Option<&[f32]>,
+        keyword_hits: Option<Vec<(String, f64)>>,
+    ) -> Vec<SearchResult> {
         use std::collections::HashMap;
 
         // 预解析缓存：BM25 label → 文档数据（避免 label 字符串往返解析）
@@ -98,38 +126,62 @@ impl Retriever {
             None
         };
 
+        // ---- 关键词镜像通道（外部注入；有数据且开关开启才进入融合） ----
+        let keyword_channel: Option<ChannelResult<String>> = if self.config.enable_keyword_channel {
+            match keyword_hits {
+                Some(hits) if !hits.is_empty() => Some(ChannelResult { results: hits }),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
         // ---- RRF 融合 ----
-        let fused: Vec<FusedResult<String>> = match (&vector_channel, &bm25_channel, &graph_channel)
-        {
-            (None, None, None) => return Vec::new(),
-            (Some(v), None, None) => crate::rrf::rrf_single_channel(v, &self.config.rrf)
-                .into_iter()
-                .take(request.top_k)
-                .collect(),
-            (None, Some(b), None) => crate::rrf::rrf_single_channel(b, &self.config.rrf)
-                .into_iter()
-                .take(request.top_k)
-                .collect(),
-            (None, None, Some(g)) => crate::rrf::rrf_single_channel(g, &self.config.rrf)
-                .into_iter()
-                .take(request.top_k)
-                .collect(),
-            (Some(v), Some(b), None) => crate::rrf::rrf_two_channels(v, b, &self.config.rrf)
-                .into_iter()
-                .take(request.top_k)
-                .collect(),
-            (Some(v), None, Some(g)) => crate::rrf::rrf_two_channels(v, g, &self.config.rrf)
-                .into_iter()
-                .take(request.top_k)
-                .collect(),
-            (None, Some(b), Some(g)) => crate::rrf::rrf_two_channels(b, g, &self.config.rrf)
-                .into_iter()
-                .take(request.top_k)
-                .collect(),
-            (Some(v), Some(b), Some(g)) => rrf_fuse(v, b, g, &self.config.rrf)
-                .into_iter()
-                .take(request.top_k)
-                .collect(),
+        // 关键词通道缺席 → 维持既有单/双/三通道 match（行为不变）；
+        // 关键词通道有数据 → 四通道融合（关键词命中为相关文档追加 keyword_weight 项）。
+        let fused: Vec<FusedResult<String>> = if let Some(keyword) = &keyword_channel {
+            crate::rrf::rrf_fuse_with_keyword(
+                vector_channel.as_ref(),
+                bm25_channel.as_ref(),
+                graph_channel.as_ref(),
+                keyword,
+                &self.config.rrf,
+            )
+            .into_iter()
+            .take(request.top_k)
+            .collect()
+        } else {
+            match (&vector_channel, &bm25_channel, &graph_channel) {
+                (None, None, None) => return Vec::new(),
+                (Some(v), None, None) => crate::rrf::rrf_single_channel(v, &self.config.rrf)
+                    .into_iter()
+                    .take(request.top_k)
+                    .collect(),
+                (None, Some(b), None) => crate::rrf::rrf_single_channel(b, &self.config.rrf)
+                    .into_iter()
+                    .take(request.top_k)
+                    .collect(),
+                (None, None, Some(g)) => crate::rrf::rrf_single_channel(g, &self.config.rrf)
+                    .into_iter()
+                    .take(request.top_k)
+                    .collect(),
+                (Some(v), Some(b), None) => crate::rrf::rrf_two_channels(v, b, &self.config.rrf)
+                    .into_iter()
+                    .take(request.top_k)
+                    .collect(),
+                (Some(v), None, Some(g)) => crate::rrf::rrf_two_channels(v, g, &self.config.rrf)
+                    .into_iter()
+                    .take(request.top_k)
+                    .collect(),
+                (None, Some(b), Some(g)) => crate::rrf::rrf_two_channels(b, g, &self.config.rrf)
+                    .into_iter()
+                    .take(request.top_k)
+                    .collect(),
+                (Some(v), Some(b), Some(g)) => rrf_fuse(v, b, g, &self.config.rrf)
+                    .into_iter()
+                    .take(request.top_k)
+                    .collect(),
+            }
         };
 
         // ---- 解析为 SearchResult ----

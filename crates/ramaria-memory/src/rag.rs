@@ -16,6 +16,7 @@
 //! - Block C (记忆上下文): 2-3 段 L1+L2 格式化文字
 
 use crate::retriever::SearchResult;
+use ramaria_core::config::RetrievalConfig;
 use ramaria_core::types::PersonaKind;
 
 // =========================================================
@@ -51,6 +52,32 @@ impl Default for RagConfig {
             max_memories: 5,
             max_summary_chars: 120,
             include_graph_entities: true,
+        }
+    }
+}
+
+impl RagConfig {
+    /// 从 core 检索配置（`[retrieval]` 组）组装摘要路 RAG 格式化配置。
+    ///
+    /// 说明:
+    /// - 映射 `rag_*` 系列字段；`persona_aware` 未暴露为配置键，恒为默认开启
+    ///   （与上一版本 `RagConfig::default()` 行为一致）。
+    /// - 默认配置下与 `RagConfig::default()` 完全一致（行为等价）。
+    ///
+    /// 参数:
+    /// - `core`: ramaria-core 的摘要路检索配置。
+    ///
+    /// 返回:
+    /// - 供 Persona-Aware 过滤与上下文格式化使用的 `RagConfig`。
+    pub fn from_retrieval_config(core: &RetrievalConfig) -> Self {
+        Self {
+            persona_aware: true,
+            share_threshold_user: core.rag_share_threshold_user,
+            share_threshold_char: core.rag_share_threshold_char,
+            share_threshold_rama: core.rag_share_threshold_rama,
+            max_memories: core.rag_max_memories as usize,
+            max_summary_chars: core.rag_max_summary_chars as usize,
+            include_graph_entities: core.rag_include_graph_entities,
         }
     }
 }
@@ -146,6 +173,40 @@ pub fn format_context_text(results: &[&SearchResult], config: &RagConfig) -> Str
 mod tests {
     use super::*;
     use crate::bm25::DocId;
+
+    /// 默认 core 检索配置组装后的 RagConfig 与 `RagConfig::default()` 一致（行为等价）。
+    #[test]
+    fn from_retrieval_config_default_equals_rag_default() {
+        let mapped = RagConfig::from_retrieval_config(&RetrievalConfig::default());
+        let base = RagConfig::default();
+        assert_eq!(mapped.persona_aware, base.persona_aware);
+        assert_eq!(mapped.share_threshold_user, base.share_threshold_user);
+        assert_eq!(mapped.share_threshold_char, base.share_threshold_char);
+        assert_eq!(mapped.share_threshold_rama, base.share_threshold_rama);
+        assert_eq!(mapped.max_memories, base.max_memories);
+        assert_eq!(mapped.max_summary_chars, base.max_summary_chars);
+        assert_eq!(mapped.include_graph_entities, base.include_graph_entities);
+    }
+
+    /// 显式修改 core 的 `rag_*` 字段 → 组装后的 RagConfig 真实生效（独立于其它路）。
+    #[test]
+    fn from_retrieval_config_maps_rag_fields() {
+        let mut core = RetrievalConfig::default();
+        core.rag_max_memories = 2;
+        core.rag_max_summary_chars = 40;
+        core.rag_share_threshold_user = 0.9;
+        core.rag_share_threshold_char = 0.8;
+        core.rag_share_threshold_rama = 0.1;
+        core.rag_include_graph_entities = false;
+
+        let mapped = RagConfig::from_retrieval_config(&core);
+        assert_eq!(mapped.max_memories, 2);
+        assert_eq!(mapped.max_summary_chars, 40);
+        assert_eq!(mapped.share_threshold_user, 0.9);
+        assert_eq!(mapped.share_threshold_char, 0.8);
+        assert_eq!(mapped.share_threshold_rama, 0.1);
+        assert!(!mapped.include_graph_entities);
+    }
 
     fn make_test_result(
         summary: &str,

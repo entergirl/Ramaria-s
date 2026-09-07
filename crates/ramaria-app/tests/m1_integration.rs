@@ -41,6 +41,9 @@ fn make_pipeline_context(
 ) -> PipelineContext {
     let config = RamariaConfig::default();
     let retriever = Arc::new(std::sync::RwLock::new(Retriever::new()));
+    let keyword_service = Arc::new(std::sync::RwLock::new(
+        ramaria_memory::keyword::KeywordService::new(),
+    ));
     let keychain = Arc::new(Keychain::new());
     let lifecycle = Arc::new(SessionLifecycle::new(config.clone()));
 
@@ -50,6 +53,7 @@ fn make_pipeline_context(
         embedding.map(|e| e as Arc<dyn EmbeddingProvider>),
         config,
         retriever,
+        keyword_service,
         keychain,
         lifecycle,
     )

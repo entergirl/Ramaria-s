@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use ramaria_core::traits::{LlmProvider, StorageBackend};
+use ramaria_core::traits::{EmbeddingProvider, LlmProvider, StorageBackend};
 use ramaria_core::types::{MemoryL1, now_ms};
 use ramaria_memory::event::{EventExtractor, EventExtractorConfig};
 use ramaria_memory::job::{JobManager, JobResult, JobType};
@@ -153,6 +153,21 @@ impl SessionLifecycle {
         other_persona_name: Option<String>,
     ) {
         let persona_owned = persona_uid.to_string();
+        // auto_fact_detect 增强抽取所需的配置快照（总开关门控）与 embedding 引用（可选）。
+        // 仅开关开启时读取 embedding（锁在 await 外释放，避免锁跨 await）。
+        let knowledge_enabled = self.config.knowledge.auto_fact_detect;
+        let knowledge_config = self.config.knowledge.clone();
+        let embedding: Option<Arc<dyn EmbeddingProvider>> = if knowledge_enabled {
+            self.embedding
+                .lock()
+                .unwrap_or_else(|e| {
+                    error!("embedding lock poisoned during run_l2_extraction: {e}");
+                    e.into_inner()
+                })
+                .clone()
+        } else {
+            None
+        };
         let job_manager = JobManager::with_defaults(storage);
         let payload = serde_json::json!({ "persona_uid": &persona_owned }).to_string();
 
@@ -188,7 +203,28 @@ impl SessionLifecycle {
                 };
                 let mut extractor = EventExtractor::new(llm, storage, config);
                 let uid = persona_owned.clone();
+                let know_enabled = knowledge_enabled;
+                let know_config = knowledge_config.clone();
+                let embedding_owned = embedding.clone();
                 async move {
+                    // auto_fact_detect 需要"本批 L1"作为线索→断言（策略②）输入：
+                    // 事件提取成功后本批 L1 会被标记 absorbed，故在提取前捕获待吸收列表。
+                    // 仅开关开启时预读，默认关闭路径不增加额外查询（保持既有行为）。
+                    let l1_batch = if know_enabled {
+                        match storage.list_unabsorbed_l1(&uid).await {
+                            Ok(v) => v,
+                            Err(e) => {
+                                warn!(
+                                    persona_uid = %uid,
+                                    error = %e,
+                                    "事实抽取：预读本批 L1 失败，降级为空（不阻塞事件提取）"
+                                );
+                                Vec::new()
+                            }
+                        }
+                    } else {
+                        Vec::new()
+                    };
                     match extractor.extract_events(&uid).await {
                         Ok(events) if events.is_empty() => {
                             info!(persona_uid = %uid, "L2 提取完成，无新事件");
@@ -200,6 +236,31 @@ impl SessionLifecycle {
                                 event_count = events.len(),
                                 "L2 事件提取完成"
                             );
+                            // auto_fact_detect 增强抽取：开关开启且本批有事件才执行；
+                            // 编排器内部静默降级，任何失败不改变 Job 结果、不阻塞 L3 级联。
+                            if know_enabled {
+                                let report = crate::app_fact_extract::run_fact_extraction(
+                                    storage,
+                                    &know_config,
+                                    &uid,
+                                    &l1_batch,
+                                    &events,
+                                    embedding_owned.as_deref(),
+                                )
+                                .await;
+                                info!(
+                                    persona_uid = %uid,
+                                    regular = report.regular_candidates,
+                                    implied = report.implied_candidates,
+                                    l1_evidence = report.l1_candidates,
+                                    deduped = report.deduped,
+                                    promoted = report.promoted_active,
+                                    overwritten = report.overwritten,
+                                    candidates_saved = report.candidates_saved,
+                                    errors = report.errors,
+                                    "auto_fact_detect 事实抽取完成（增强层）"
+                                );
+                            }
                             JobResult::Success
                         }
                         Err(e) => {

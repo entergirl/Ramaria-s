@@ -3,7 +3,8 @@
 //! 设计特点:
 //! - 承载检索配置、请求/响应、L1/L2/utt 文档检索视图等纯数据类型的声明
 //! - 类型经根模块 `retriever.rs` 以 `pub use` 再导出，维持 lib.rs 对外 API 不变
-//! - 仅声明字段与 derive，不含任何业务逻辑
+//! - 提供 core 检索配置 → 内存检索配置的纯函数映射（仅映射已明确接线的字段）
+//! - 数据声明部分不含业务逻辑，映射函数为确定性纯函数
 
 use crate::bm25::{Bm25Config, DocId};
 use crate::graph_retriever::GraphRetrieverConfig;
@@ -31,6 +32,8 @@ pub struct RetrieverConfig {
     pub enable_vector: bool,
     /// 是否启用图谱通道
     pub enable_graph: bool,
+    /// 是否启用关键词镜像通道（外部注入的关键词命中参与融合）
+    pub enable_keyword_channel: bool,
 }
 
 impl Default for RetrieverConfig {
@@ -43,6 +46,37 @@ impl Default for RetrieverConfig {
             enable_bm25: true,
             enable_vector: true,
             enable_graph: true,
+            enable_keyword_channel: true,
+        }
+    }
+}
+
+impl RetrieverConfig {
+    /// 从 core 检索配置（`[retrieval]` 组）映射摘要路的检索参数。
+    ///
+    /// 说明:
+    /// - 仅映射本批已明确接线的字段：RRF 融合平滑系数 k、BM25/图谱/关键词镜像
+    ///   通道权重、向量与关键词镜像通道开关；其余字段保持默认值（默认配置下与
+    ///   `RetrieverConfig::default()` 完全一致，行为与上一版本等价）。
+    /// - BM25 词典、向量维度等索引侧配置不属于检索参数，不在此映射。
+    ///
+    /// 参数:
+    /// - `core`: ramaria-core 的摘要路检索配置。
+    ///
+    /// 返回:
+    /// - 仅本批接线字段取自 `core` 的 `RetrieverConfig`。
+    pub fn from_retrieval_config(core: &ramaria_core::config::RetrievalConfig) -> Self {
+        Self {
+            rrf: RrfConfig {
+                k: core.rrf_k as f64,
+                bm25_weight: core.bm25_weight,
+                graph_weight: core.graph_weight,
+                keyword_weight: core.keyword_weight,
+                ..RrfConfig::default()
+            },
+            enable_vector: core.enable_vector,
+            enable_keyword_channel: core.enable_keyword_channel,
+            ..Self::default()
         }
     }
 }
@@ -171,4 +205,62 @@ pub struct UttHit {
     pub score: f64,
     /// 命中通道: `"vector"`（向量）或 `"substring"`（BM25 子串降级）
     pub channel: &'static str,
+}
+
+// =========================================================
+// 单元测试
+// =========================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ramaria_core::config::RetrievalConfig;
+
+    /// 默认 core 检索配置映射后与 `RetrieverConfig::default()` 一致（行为等价）。
+    #[test]
+    fn from_retrieval_config_default_equals_retriever_default() {
+        let mapped = RetrieverConfig::from_retrieval_config(&RetrievalConfig::default());
+        let base = RetrieverConfig::default();
+        // 已接线条目与默认一致
+        assert_eq!(mapped.rrf.k, base.rrf.k);
+        assert_eq!(mapped.rrf.bm25_weight, base.rrf.bm25_weight);
+        assert_eq!(mapped.rrf.graph_weight, base.rrf.graph_weight);
+        assert_eq!(mapped.rrf.keyword_weight, base.rrf.keyword_weight);
+        assert_eq!(mapped.enable_vector, base.enable_vector);
+        assert_eq!(
+            mapped.enable_keyword_channel, base.enable_keyword_channel,
+            "关键词镜像通道开关默认开启"
+        );
+        // 未接线条目保持默认（三通道开关、索引侧配置）
+        assert_eq!(mapped.enable_bm25, base.enable_bm25);
+        assert_eq!(mapped.enable_graph, base.enable_graph);
+        assert_eq!(mapped.vector.min_similarity, base.vector.min_similarity);
+        assert_eq!(mapped.bm25.k1, base.bm25.k1);
+        assert_eq!(mapped.graph.max_entities, base.graph.max_entities);
+    }
+
+    /// 显式配置 core 检索参数 → 映射函数真实传递本批已接线字段，且不影响其它组。
+    #[test]
+    fn from_retrieval_config_maps_wired_fields_only() {
+        let mut core = RetrievalConfig::default();
+        core.rrf_k = 90;
+        core.bm25_weight = 0.5;
+        core.graph_weight = 0.4;
+        core.keyword_weight = 0.7;
+        core.enable_vector = false;
+        core.enable_keyword_channel = false;
+
+        let mapped = RetrieverConfig::from_retrieval_config(&core);
+        assert_eq!(mapped.rrf.k, 90.0);
+        assert_eq!(mapped.rrf.bm25_weight, 0.5);
+        assert_eq!(mapped.rrf.graph_weight, 0.4);
+        assert_eq!(mapped.rrf.keyword_weight, 0.7);
+        assert!(!mapped.enable_vector);
+        assert!(!mapped.enable_keyword_channel);
+        // 其余检索通道仍默认开启（映射仅反映 [retrieval] 组的向量/关键词开关）
+        assert!(mapped.enable_bm25);
+        assert!(mapped.enable_graph);
+        // 未映射的 RRF top_k 保持默认
+        assert_eq!(mapped.rrf.top_k, RrfConfig::default().top_k);
+    }
 }

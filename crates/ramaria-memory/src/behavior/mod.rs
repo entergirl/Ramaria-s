@@ -34,8 +34,9 @@ pub use incremental::{
     sample_rule_similarity,
 };
 pub use routing::{
-    MergedDecision, QueryContext, RouteTarget, RoutingParams, RoutingResult, build_query_context,
-    merge_route_targets, query_side_jaccard, route_rules, score_rule, valence_conflicts,
+    MergedDecision, QueryContext, QueryKeywordNormalizer, RouteTarget, RoutingParams,
+    RoutingResult, build_query_context, build_query_context_with_normalizer, merge_route_targets,
+    query_side_jaccard, route_rules, score_rule, valence_conflicts,
 };
 pub use rule_gen::{
     BEHAVIOR_RULE_PROMPT_VERSION, BehaviorRuleGenerator, GeneratedRule, PolarityVerdict,

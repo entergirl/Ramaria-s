@@ -2,21 +2,30 @@
 //!
 //! 设计特点:
 //! - `KeywordService` 持有 `KeywordPool`（词典三态状态机）与 `CompositeIndex`
-//!   （关键词倒排镜像），对外提供装载 / 增量维护 / 查询所需的只读访问器
+//!   （关键词倒排镜像，以 `Arc` 持有），对外提供装载 / 增量维护 / 查询所需的只读访问器
 //! - 镜像侧增强：文档视图（L1/L2）与词典词条装载为纯内存镜像，不改动
 //!   Retriever / Chat 检索主链，也不重复写库（持久化由既有 summarizer / storage 负责）
 //! - `reset_docs_from_views` 与 `rebuild_retriever` 同源装载；`index_l1/index_l2/
 //!   remove_*` 提供增量维护（幂等）
+//! - `composite` 以 `Arc<CompositeIndex>` 持有：调用方可廉价取到只读共享引用后，
+//!   在 std 锁外 `await` 异步语义查询（避免读锁跨 await），写路径经
+//!   `Arc::make_mut` 在写锁内完成（多读单写安全）。
 //! - `rebuild_fuzzy` 用规范词构建词级语义索引：embedding 不可用 / 词典为空 /
 //!   构建失败 → 置 None 保持"精确 + 子串"两层降级（静默 warn，不抛错）
 //! - 纯内存零 I/O；`KeywordPoolRow`（core 数据行）为装载边界，不依赖数据库
 
-use ramaria_core::keyword::{KeywordPoolRow, KeywordRef, KeywordStatus, KeywordToken};
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use ramaria_core::keyword::{
+    KeywordPoolRow, KeywordQuery, KeywordRef, KeywordSet, KeywordStatus, KeywordToken,
+};
 use ramaria_core::traits::EmbeddingProvider;
 
 use crate::retriever::{L1DocView, L2DocView};
 
 use super::composite::{CompositeIndex, CompositeIndexConfig, FuzzyKeywordIndex};
+use super::normalizer::{BigramNormalizer, BigramWithDictionaryNormalizer, KeywordNormalizer};
 use super::pool::{KeywordPool, PoolEntry};
 
 // =========================================================
@@ -42,8 +51,8 @@ use super::pool::{KeywordPool, PoolEntry};
 pub struct KeywordService {
     /// 词典三态状态机（词条缓存）
     pool: KeywordPool,
-    /// 关键词倒排镜像（精确 + 子串 + 可选语义层）
-    composite: CompositeIndex,
+    /// 关键词倒排镜像（精确 + 子串 + 可选语义层；Arc 支持锁外异步查询共享）
+    composite: Arc<CompositeIndex>,
 }
 
 impl KeywordService {
@@ -51,12 +60,12 @@ impl KeywordService {
     pub fn new() -> Self {
         Self {
             pool: KeywordPool::new(),
-            composite: CompositeIndex::new(CompositeIndexConfig::default()),
+            composite: Arc::new(CompositeIndex::new(CompositeIndexConfig::default())),
         }
     }
 
     // =========================================================
-    // 只读访问器（供 M4 检索融合使用）
+    // 只读访问器（供检索融合使用）
     // =========================================================
 
     /// 词典池只读引用。
@@ -66,7 +75,21 @@ impl KeywordService {
 
     /// 关键词倒排镜像只读引用。
     pub fn composite(&self) -> &CompositeIndex {
-        &self.composite
+        self.composite.as_ref()
+    }
+
+    /// 关键词倒排镜像共享引用（廉价 clone Arc，供锁外异步查询）。
+    ///
+    /// 说明:
+    /// - 镜像为不可变数据；写路径经 `Arc::make_mut` 在写锁内替换，
+    ///   读侧持有的 Arc 始终指向一致快照（多读单写安全）。
+    pub fn composite_arc(&self) -> Arc<CompositeIndex> {
+        Arc::clone(&self.composite)
+    }
+
+    /// 词典池快照（词条文本 + 别名解析表；供锁外异步查询 / 路由查询侧规范化）。
+    pub fn pool_snapshot(&self) -> KeywordPoolSnapshot {
+        KeywordPoolSnapshot::from_pool(&self.pool)
     }
 
     /// 镜像已索引文档总数。
@@ -129,24 +152,36 @@ impl KeywordService {
     /// - L1 persona 为 None 时以空串兜底（KeywordRef 契约为 String）；
     ///   全局检索（persona 不过滤）仍可命中，persona 限定检索按隔离规则过滤。
     pub fn reset_docs_from_views(&mut self, l1: &[L1DocView], l2: &[L2DocView]) {
-        self.composite = CompositeIndex::new(CompositeIndexConfig::default());
+        let mut composite = CompositeIndex::new(CompositeIndexConfig::default());
         for doc in l1 {
-            self.index_l1(doc);
+            composite.index_parsed(
+                self.l1_ref(doc),
+                doc.keywords.as_deref(),
+                doc.salience,
+                doc.created_at,
+            );
         }
         for doc in l2 {
-            self.index_l2(doc);
+            composite.index_parsed(
+                self.l2_ref(doc),
+                doc.keywords.as_deref(),
+                doc.salience,
+                doc.created_at,
+            );
         }
+        self.composite = Arc::new(composite);
     }
 
     /// 清空倒排镜像（保留词典池；通常由下一轮全量装载接管）。
     pub fn clear_docs(&mut self) {
-        self.composite = CompositeIndex::new(CompositeIndexConfig::default());
+        self.composite = Arc::new(CompositeIndex::new(CompositeIndexConfig::default()));
     }
 
     /// 增量索引一篇 L1 文档（幂等：同文档覆盖）。
     pub fn index_l1(&mut self, doc: &L1DocView) -> usize {
-        self.composite.index_parsed(
-            self.l1_ref(doc),
+        let reff = self.l1_ref(doc);
+        Arc::make_mut(&mut self.composite).index_parsed(
+            reff,
             doc.keywords.as_deref(),
             doc.salience,
             doc.created_at,
@@ -156,8 +191,9 @@ impl KeywordService {
 
     /// 增量索引一篇 L2 事件文档（幂等：同文档覆盖）。
     pub fn index_l2(&mut self, doc: &L2DocView) -> usize {
-        self.composite.index_parsed(
-            self.l2_ref(doc),
+        let reff = self.l2_ref(doc);
+        Arc::make_mut(&mut self.composite).index_parsed(
+            reff,
             doc.keywords.as_deref(),
             doc.salience,
             doc.created_at,
@@ -167,17 +203,17 @@ impl KeywordService {
 
     /// 按 L1 id 移除镜像文档（跨 persona 安全：按 id 而非全等引用匹配）。
     pub fn remove_l1(&mut self, id: uuid::Uuid) -> bool {
-        self.composite.remove_doc_batch(&[id], &[]) > 0
+        Arc::make_mut(&mut self.composite).remove_doc_batch(&[id], &[]) > 0
     }
 
     /// 按 L2 id 移除镜像文档（跨 persona 安全：按 id 而非全等引用匹配）。
     pub fn remove_l2(&mut self, id: i64) -> bool {
-        self.composite.remove_doc_batch(&[], &[id]) > 0
+        Arc::make_mut(&mut self.composite).remove_doc_batch(&[], &[id]) > 0
     }
 
     /// 批量移除 L1/L2 镜像文档（幂等：不存在的 id 忽略）。
     pub fn remove_doc_batch(&mut self, l1_ids: &[uuid::Uuid], l2_ids: &[i64]) -> usize {
-        self.composite.remove_doc_batch(l1_ids, l2_ids)
+        Arc::make_mut(&mut self.composite).remove_doc_batch(l1_ids, l2_ids)
     }
 
     // =========================================================
@@ -186,7 +222,7 @@ impl KeywordService {
 
     /// 直接挂载语义扩展层（构建由调用方在锁外异步完成后写入，避免写锁跨 await）。
     pub fn set_fuzzy(&mut self, fuzzy: Option<FuzzyKeywordIndex>) {
-        self.composite.set_fuzzy(fuzzy);
+        Arc::make_mut(&mut self.composite).set_fuzzy(fuzzy);
     }
 
     /// 用规范词构建语义扩展层并挂载。
@@ -205,22 +241,22 @@ impl KeywordService {
         embedder: Option<&dyn EmbeddingProvider>,
     ) {
         let Some(embedder) = embedder else {
-            self.composite.set_fuzzy(None);
+            self.set_fuzzy(None);
             tracing::debug!("关键词语义层跳过：embedding 不可用（两层降级）");
             return;
         };
         if canonical_terms.is_empty() {
-            self.composite.set_fuzzy(None);
+            self.set_fuzzy(None);
             tracing::debug!("关键词语义层跳过：词典为空（无规范词）");
             return;
         }
         match FuzzyKeywordIndex::build(canonical_terms, embedder).await {
             Ok(fuzzy) => {
-                self.composite.set_fuzzy(Some(fuzzy));
+                self.set_fuzzy(Some(fuzzy));
                 tracing::info!(entry_count = canonical_terms.len(), "关键词语义层构建完成");
             }
             Err(e) => {
-                self.composite.set_fuzzy(None);
+                self.set_fuzzy(None);
                 tracing::warn!(error = %e, "关键词语义层构建失败（两层降级）");
             }
         }
@@ -250,6 +286,133 @@ impl KeywordService {
 impl Default for KeywordService {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// =========================================================
+// 词典池快照
+// =========================================================
+
+/// 词典池快照——词条文本与别名解析表的只读值形态。
+///
+/// 职责:
+/// - 供调用方在 std 读锁内一次性取出、释放锁后在 `await` 异步查询 / 路由评分中使用，
+///   避免持锁跨 await。
+/// - `dictionary`: 全量词条文本（canonical + alias + pending），驱动词典增强分词。
+/// - `resolve`: 别名 / 待确认词条 → 规范词文本（canonical 自身不收录）。
+#[derive(Debug, Clone, Default)]
+pub struct KeywordPoolSnapshot {
+    /// 全量词条文本（词典增强分词的候选完整词）
+    dictionary: Vec<String>,
+    /// 别名 → 规范词文本
+    resolve: HashMap<String, String>,
+}
+
+impl KeywordPoolSnapshot {
+    /// 从词典池构造快照。
+    pub fn from_pool(pool: &KeywordPool) -> Self {
+        let mut dictionary = Vec::with_capacity(pool.len());
+        let mut resolve = HashMap::new();
+        for entry in pool.iter() {
+            let text = entry.token.as_str().to_string();
+            dictionary.push(text.clone());
+            if let Some(canonical) = pool.resolve(&entry.token)
+                && canonical != &entry.token
+            {
+                // canonical 自反不收录（仅保留别名/待确认的归一映射）
+                resolve.insert(text, canonical.as_str().to_string());
+            }
+        }
+        Self {
+            dictionary,
+            resolve,
+        }
+    }
+
+    /// 词典是否为空（为空时查询退化为纯 bigram 口径）。
+    pub fn is_empty(&self) -> bool {
+        self.dictionary.is_empty()
+    }
+
+    /// 全量词条文本。
+    pub fn dictionary(&self) -> &[String] {
+        &self.dictionary
+    }
+
+    /// 别名解析表（token 文本 → 规范词文本）。
+    pub fn resolve(&self) -> &HashMap<String, String> {
+        &self.resolve
+    }
+}
+
+// =========================================================
+// 关键词镜像自由文本查询（锁外异步）
+// =========================================================
+
+/// 用自由文本查询关键词镜像，返回可与 Retriever label 融合的 `(label, score)`。
+///
+/// 说明:
+/// - 查询词构造：词典增强分词（词典 = 池全量词条，空池退化为纯 bigram），
+///   并对命中别名/待确认词条的 token 追加其规范词（union，提升召回）；
+///   无有效查询词 → 空。
+/// - 检索经 `CompositeIndex.query` 三级编排（精确 → 子串 → 语义），
+///   embedder 为 None（embedding 不可用）时自动两层降级。
+/// - 输出 label 复用 Retriever 向量通道格式（`L1:{uuid}` / `L2:{id}`），
+///   经既有 `parse_doc_label` 解析；`Pool` 词典词条不产出。
+///
+/// 用法:
+/// - 调用方先在锁内取 `composite_arc()` 与 `pool_snapshot()`，释放锁后传入本函数
+///   （避免 std 读锁跨 await），返回结果以纯数据交给检索融合。
+pub async fn query_text_labels(
+    composite: &CompositeIndex,
+    pool: &KeywordPoolSnapshot,
+    text: &str,
+    persona_uid: Option<&str>,
+    embedder: Option<&dyn EmbeddingProvider>,
+    top_k: usize,
+) -> Vec<(String, f64)> {
+    if text.trim().is_empty() || top_k == 0 || composite.doc_count() == 0 {
+        return Vec::new();
+    }
+
+    // 查询词集合（词典增强 + 别名归一扩展 + 去重）
+    let mut set: KeywordSet = KeywordSet::new();
+    if pool.is_empty() {
+        // 空词典：纯 bigram 口径（与既有 bm25 tokenize 等价）
+        for token in BigramNormalizer.normalize(text) {
+            set.insert(token);
+        }
+    } else {
+        let dict_normalizer = BigramWithDictionaryNormalizer::from_dictionary(pool.dictionary());
+        for token in dict_normalizer.normalize(text) {
+            set.insert(token.clone());
+            if let Some(canonical) = pool.resolve().get(token.as_str())
+                && let Some(ct) = KeywordToken::new(canonical)
+            {
+                set.insert(ct);
+            }
+        }
+    }
+    if set.is_empty() {
+        return Vec::new();
+    }
+
+    let query = KeywordQuery::builder(persona_uid.map(|s| s.to_string()))
+        .keywords_from(set)
+        .top_k(top_k)
+        .build();
+    let hits = composite.query(&query, embedder).await;
+    hits.into_iter()
+        .filter_map(|(reff, score)| keyword_ref_label(&reff).map(|label| (label, score)))
+        .collect()
+}
+
+/// KeywordRef → 检索 label（`L1:{uuid}` / `L2:{id}`；Pool 词典词条不产出）。
+fn keyword_ref_label(reff: &KeywordRef) -> Option<String> {
+    match reff {
+        KeywordRef::L1 { id, .. } => Some(format!("L1:{id}")),
+        KeywordRef::L2 { id, .. } => Some(format!("L2:{id}")),
+        KeywordRef::Pool { .. } => None,
     }
 }
 
@@ -614,5 +777,133 @@ mod tests {
         assert!(svc.composite().fuzzy().is_some());
         svc.set_fuzzy(None);
         assert!(svc.composite().fuzzy().is_none());
+    }
+
+    // ---- 词典快照 / 自由文本查询（检索融合接线） ----
+
+    #[test]
+    fn pool_snapshot_contains_dict_and_alias_resolve() {
+        let mut svc = KeywordService::new();
+        svc.load_pool_entries(&sample_rows());
+        let snapshot = svc.pool_snapshot();
+        // 词典含全量词条（canonical + alias + pending）
+        assert_eq!(snapshot.dictionary.len(), 4);
+        assert!(snapshot.dictionary.iter().any(|d| d == "工作压力"));
+        assert!(snapshot.dictionary.iter().any(|d| d == "职业倦怠"));
+        // 解析表仅含别名/待确认 → canonical
+        assert_eq!(
+            snapshot.resolve().get("职场焦虑").map(String::as_str),
+            Some("工作压力")
+        );
+        assert_eq!(
+            snapshot.resolve().get("职业倦怠").map(String::as_str),
+            Some("工作压力")
+        );
+        assert!(
+            snapshot.resolve().get("工作压力").is_none(),
+            "canonical 不收录自反映射"
+        );
+    }
+
+    #[test]
+    fn composite_arc_shares_same_mirror() {
+        let mut svc = KeywordService::new();
+        let id = uuid::Uuid::new_v4();
+        svc.index_l1(&l1_view(id, Some("p1"), Some("爬山")));
+        let arc = svc.composite_arc();
+        assert_eq!(arc.doc_count(), 1);
+        // Arc 与 service 指向同一份镜像（写后旧 Arc 仍指向旧快照）
+        svc.clear_docs();
+        assert_eq!(arc.doc_count(), 1, "旧 Arc 快照不受后续写影响");
+        assert_eq!(svc.doc_count(), 0);
+    }
+
+    /// 别名短语查询：用户文本含别名词 → 命中规范词关键词文档（label 与 retriever 兼容）。
+    #[tokio::test]
+    async fn query_text_labels_aliases_to_canonical_doc() {
+        let mut svc = KeywordService::new();
+        // 词典：canonical 工作压力 + pending 职场焦虑 → 工作压力
+        svc.load_pool_entries(&sample_rows());
+        let doc_id = uuid::Uuid::new_v4();
+        svc.index_l1(&l1_view(doc_id, Some("p1"), Some("工作压力")));
+
+        let hits = query_text_labels(
+            svc.composite(),
+            &svc.pool_snapshot(),
+            "最近职场焦虑",
+            Some("p1"),
+            None,
+            10,
+        )
+        .await;
+        assert_eq!(hits.len(), 1, "别名查询应命中规范词文档");
+        assert_eq!(hits[0].0, format!("L1:{doc_id}"));
+    }
+
+    /// 空词典（无池词条）→ 纯 bigram + 子串回退仍可命中。
+    #[tokio::test]
+    async fn query_text_labels_empty_pool_falls_back_bigram() {
+        let mut svc = KeywordService::new();
+        let doc_id = uuid::Uuid::new_v4();
+        // 无 pool 词条；镜像文档关键词含 "工作压力"
+        svc.index_l1(&l1_view(doc_id, Some("p1"), Some("工作压力")));
+
+        let hits = query_text_labels(
+            svc.composite(),
+            &svc.pool_snapshot(),
+            "工作压力很大",
+            Some("p1"),
+            None,
+            10,
+        )
+        .await;
+        assert!(
+            hits.iter().any(|(l, _)| l == &format!("L1:{doc_id}")),
+            "空词典时 bigram + 子串应命中（label 兼容）"
+        );
+    }
+
+    /// 无镜像文档 / 空文本 / persona 隔离下自由文本查询的降级语义。
+    #[tokio::test]
+    async fn query_text_labels_degrade_cases() {
+        let mut svc = KeywordService::new();
+        svc.load_pool_entries(&sample_rows());
+        // 无镜像文档 → 空
+        let hits = query_text_labels(
+            svc.composite(),
+            &svc.pool_snapshot(),
+            "工作压力",
+            Some("p1"),
+            None,
+            10,
+        )
+        .await;
+        assert!(hits.is_empty());
+
+        // 空文本 → 空
+        let doc_id = uuid::Uuid::new_v4();
+        svc.index_l1(&l1_view(doc_id, Some("p1"), Some("工作压力")));
+        let hits = query_text_labels(
+            svc.composite(),
+            &svc.pool_snapshot(),
+            "   ",
+            Some("p1"),
+            None,
+            10,
+        )
+        .await;
+        assert!(hits.is_empty());
+
+        // persona 隔离：查 p2 查不到 p1 文档
+        let hits = query_text_labels(
+            svc.composite(),
+            &svc.pool_snapshot(),
+            "工作压力",
+            Some("p2"),
+            None,
+            10,
+        )
+        .await;
+        assert!(hits.is_empty(), "跨 persona 隔离不命中");
     }
 }

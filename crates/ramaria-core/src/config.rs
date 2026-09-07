@@ -405,9 +405,16 @@ impl Default for BackendSelection {
 /// 三路检索独立参数说明:
 /// - 本组为 **memory_rag 摘要路**（L1/L2 记忆摘要检索 + RRF 融合 + 脉络加权注入）
 ///   的检索参数；L0/L1/L2 各层 top_k、相似度阈值、融合权重均只服务摘要路。
+/// - 本组同时承载摘要路 Persona-Aware RAG 的上下文格式化参数（`rag_*`），
+///   运行时组装为 `ramaria-memory::rag::RagConfig`（默认与既有默认行为等价）。
 /// - 原文样例路（utt）与知识路（fact）的检索参数分别在各自配置组独立定义，
 ///   相互不共享本组数值。
+///
+/// 兼容性说明:
+/// - struct 级 `#[serde(default)]`：config.toml 中 `[retrieval]` 表只写部分键时
+///   （含旧版本布局未含新增键），缺失字段回退 `Default` 实现，避免解析失败。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RetrievalConfig {
     /// L0 滑动窗口大小
     pub l0_window_size: u32,
@@ -425,6 +432,22 @@ pub struct RetrievalConfig {
     pub bm25_weight: f64,
     /// 图谱通道权重
     pub graph_weight: f64,
+    /// 向量通道开关（默认 true）。
+    ///
+    /// `false` 时关闭摘要路检索的向量通道（仅 BM25 + 图谱参与 RRF 融合），
+    /// 对应内存检索器 `RetrieverConfig.enable_vector`。
+    pub enable_vector: bool,
+    /// 关键词镜像通道开关（默认 true）。
+    ///
+    /// `false` 时摘要路检索不含关键词镜像（KeywordService CompositeIndex）
+    /// 这一第四通道，回退到仅 BM25 + 向量 + 图谱三通道的既有行为；
+    /// 对应内存检索器 `RetrieverConfig.enable_keyword_channel`。
+    pub enable_keyword_channel: bool,
+    /// 关键词镜像通道权重（默认 1.0）。
+    ///
+    /// 关键词镜像作为第四检索通道参与 RRF 融合时的权重，
+    /// 对应内存检索器 `RrfConfig.keyword_weight`（1.0 = 与向量通道同权重）。
+    pub keyword_weight: f64,
     /// L2 结果排序权重（<1.0 表示 L2 优先展示）
     pub retrieval_weight_l2: f64,
     /// L1 结果排序权重
@@ -436,6 +459,18 @@ pub struct RetrievalConfig {
     /// 脉络注入的最大条数（v1.7 B4），默认 3。
     #[serde(default = "default_narrative_top_k")]
     pub narrative_top_k: u32,
+    /// 摘要路 RAG 上下文格式化：最大记忆条目数（默认 5）。
+    pub rag_max_memories: u32,
+    /// 摘要路 RAG 上下文格式化：单条记忆摘要最大字符数（默认 120）。
+    pub rag_max_summary_chars: u32,
+    /// 摘要路 Persona-Aware 过滤：user 类型最低 share 阈值（默认 0.3）。
+    pub rag_share_threshold_user: f64,
+    /// 摘要路 Persona-Aware 过滤：char/anim/oc/hist 类型最低 share 阈值（默认 0.5）。
+    pub rag_share_threshold_char: f64,
+    /// 摘要路 Persona-Aware 过滤：rama 类型最低 share 阈值（默认 0.0，即全量）。
+    pub rag_share_threshold_rama: f64,
+    /// 摘要路 RAG 上下文格式化：是否包含图谱实体（默认 true）。
+    pub rag_include_graph_entities: bool,
 }
 
 /// serde 默认值：脉络加权注入默认启用（自动为主可配置）。
@@ -453,7 +488,8 @@ impl Default for RetrievalConfig {
     ///
     /// 返回:
     /// - 适合轻度聊天场景的 L0/L1/L2 检索规模。
-    /// - RRF k=60，BM25 权重 1.0，图谱权重 0.8。
+    /// - RRF k=60，BM25 权重 1.0，图谱权重 0.8；向量通道默认开启。
+    /// - 摘要路 RAG 格式化参数与 memory `RagConfig::default()` 一致（行为等价）。
     fn default() -> Self {
         Self {
             l0_window_size: 3,
@@ -464,10 +500,19 @@ impl Default for RetrievalConfig {
             rrf_k: 60,
             bm25_weight: 1.0,
             graph_weight: 0.8,
+            enable_vector: true,
+            enable_keyword_channel: true,
+            keyword_weight: 1.0,
             retrieval_weight_l2: 0.8,
             retrieval_weight_l1: 1.0,
             narrative_weighted: true,
             narrative_top_k: 3,
+            rag_max_memories: 5,
+            rag_max_summary_chars: 120,
+            rag_share_threshold_user: 0.3,
+            rag_share_threshold_char: 0.5,
+            rag_share_threshold_rama: 0.0,
+            rag_include_graph_entities: true,
         }
     }
 }
@@ -1621,6 +1666,25 @@ mod tests {
         assert_eq!(cfg.retrieval.l0_window_size, 3);
         assert_eq!(cfg.retrieval.rrf_k, 60);
         assert!((cfg.retrieval.similarity_threshold - 0.6).abs() < f64::EPSILON);
+        // 摘要路向量通道默认开启；RAG 格式化参数默认与既有行为等价
+        assert!(
+            cfg.retrieval.enable_vector,
+            "向量通道默认开启（与既有行为等价）"
+        );
+        assert!(
+            cfg.retrieval.enable_keyword_channel,
+            "关键词镜像通道默认开启（第四通道）"
+        );
+        assert!(
+            (cfg.retrieval.keyword_weight - 1.0).abs() < f64::EPSILON,
+            "关键词镜像通道权重默认 1.0"
+        );
+        assert_eq!(cfg.retrieval.rag_max_memories, 5);
+        assert_eq!(cfg.retrieval.rag_max_summary_chars, 120);
+        assert!((cfg.retrieval.rag_share_threshold_user - 0.3).abs() < f64::EPSILON);
+        assert!((cfg.retrieval.rag_share_threshold_char - 0.5).abs() < f64::EPSILON);
+        assert!((cfg.retrieval.rag_share_threshold_rama - 0.0).abs() < f64::EPSILON);
+        assert!(cfg.retrieval.rag_include_graph_entities);
 
         // 衰减参数
         assert_eq!(cfg.decay.s_l0, 10);
@@ -1718,10 +1782,28 @@ mod tests {
         let mut rag_tuned = RamariaConfig::default();
         rag_tuned.retrieval.l1_retrieve_top_k = 12;
         rag_tuned.retrieval.similarity_threshold = 0.8;
+        rag_tuned.retrieval.rrf_k = 90;
+        rag_tuned.retrieval.bm25_weight = 0.5;
+        rag_tuned.retrieval.graph_weight = 0.4;
+        rag_tuned.retrieval.enable_vector = false;
+        rag_tuned.retrieval.rag_max_memories = 8;
+        rag_tuned.retrieval.rag_max_summary_chars = 200;
+        rag_tuned.retrieval.rag_share_threshold_user = 0.4;
+        rag_tuned.retrieval.rag_share_threshold_char = 0.6;
+        rag_tuned.retrieval.rag_share_threshold_rama = 0.1;
+        rag_tuned.retrieval.rag_include_graph_entities = false;
         assert_eq!(rag_tuned.utt.retrieve_top_k, base.utt.retrieve_top_k);
+        assert_eq!(
+            rag_tuned.utt.max_msgs_per_block,
+            base.utt.max_msgs_per_block
+        );
         assert_eq!(
             rag_tuned.knowledge.retrieve_top_k,
             base.knowledge.retrieve_top_k
+        );
+        assert_eq!(
+            rag_tuned.knowledge.retrieve_threshold,
+            base.knowledge.retrieve_threshold
         );
 
         // 修改知识路不影响 utt 路 / 摘要路
@@ -1733,6 +1815,15 @@ mod tests {
             fact_tuned.retrieval.l1_retrieve_top_k,
             base.retrieval.l1_retrieve_top_k
         );
+        assert_eq!(
+            fact_tuned.retrieval.enable_vector,
+            base.retrieval.enable_vector
+        );
+        assert_eq!(
+            fact_tuned.retrieval.rag_max_memories,
+            base.retrieval.rag_max_memories
+        );
+        assert_eq!(fact_tuned.retrieval.rrf_k, base.retrieval.rrf_k);
     }
 
     /// 旧版配置布局（仅含既有键、不含新增知识路字段）仍可解析，
@@ -1776,6 +1867,14 @@ injection_budget_chars = 800
         assert!((cfg.knowledge.retrieve_threshold - 0.0).abs() < f64::EPSILON);
         assert_eq!(cfg.knowledge.injection_budget_chars, 800);
         assert!(cfg.knowledge.detector_enabled);
+        // 摘要路新增键未配置 → 回退默认（向量通道开、关键词镜像通道开、RAG 格式化默认）
+        assert!(cfg.retrieval.enable_vector);
+        assert!(cfg.retrieval.enable_keyword_channel);
+        assert!((cfg.retrieval.keyword_weight - 1.0).abs() < f64::EPSILON);
+        assert_eq!(cfg.retrieval.rag_max_memories, 5);
+        assert_eq!(cfg.retrieval.rag_max_summary_chars, 120);
+        assert!((cfg.retrieval.rag_share_threshold_user - 0.3).abs() < f64::EPSILON);
+        assert!(cfg.retrieval.rag_include_graph_entities);
     }
 
     #[test]

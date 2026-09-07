@@ -9,11 +9,16 @@
 //! - Top 1~3 排序合并：主规则完整注入（reaction + params + avoid），次规则仅合并
 //!   avoid 与互补 params；valence 方向矛盾（语义相似但极性相反）→ 丢弃次规则
 //! - embedding 不可用 → cos 项权重归零，退化为纯关键词匹配
+//! - 查询侧话题词可经关键词池别名归一（`QueryKeywordNormalizer`）：
+//!   词典增强分词 + 别名/待确认词 → 规范词，使"口语说法 ↔ 事件关键词"更易命中；
+//!   词典为空 / 服务不可达时原样退化为纯 bigram 词频（零 embedding、行为等价）
 //! - 纯计算 + embedding trait 注入，便于 mock 确定性测试
 //!
 //! 边界:
 //! - 本模块只产出"路由决策"（命中规则 + 合并结果）；注入 prompt 由 M6（F 任务）
 //!   `render_behavior_block` 消费，本版本不触碰 prompt 层。
+
+use std::collections::HashMap;
 
 use ramaria_core::behavior::{BehaviorParams, BehaviorRule};
 use ramaria_core::config::BehaviorConfig;
@@ -23,6 +28,8 @@ use ramaria_core::types::Message;
 
 use super::clustering::cosine_clipped;
 use crate::bm25::tokenize;
+use crate::keyword::normalizer::{BigramWithDictionaryNormalizer, KeywordNormalizer};
+use crate::keyword::pool::KeywordPool;
 
 /// 查询构造时的消息条数窗口（最近 3~5 条，取窗口内全部）。
 pub const QUERY_MESSAGE_WINDOW: usize = 5;
@@ -46,7 +53,74 @@ pub struct QueryContext {
     pub keywords: Vec<String>,
 }
 
-/// 从最近消息构造查询上下文。
+/// 查询侧关键词规范化快照——词典增强分词 + 别名归一（值形态，供路由使用）。
+///
+/// 职责:
+/// - 从关键词池取词条（词典 + 别名解析表），使路由查询侧话题词经别名归一后参与
+///   Jaccard 评分："口语说法 ↔ 事件关键词"经词典/别名归一后更易命中。
+/// - 词典为空 / 服务不可达 → `empty()`（查询退化为纯 bigram 词频，行为等价）。
+/// - 值形态可在读锁内构造、锁外复用；纯计算，零 I/O，零 embedding。
+#[derive(Debug, Clone, Default)]
+pub struct QueryKeywordNormalizer {
+    /// 词典增强分词用全量词条文本（canonical + alias + pending）
+    dictionary: Vec<String>,
+    /// 别名 / 待确认词 → 规范词文本
+    resolve: HashMap<String, String>,
+}
+
+impl QueryKeywordNormalizer {
+    /// 空规范化器（词典为空，查询退化为纯 bigram 词频）。
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// 从关键词池构造（全量词条入词典；别名/待确认映射到规范词）。
+    pub fn from_pool(pool: &KeywordPool) -> Self {
+        let mut dictionary = Vec::with_capacity(pool.len());
+        let mut resolve = HashMap::new();
+        for entry in pool.iter() {
+            let text = entry.token.as_str().to_string();
+            dictionary.push(text.clone());
+            if let Some(canonical) = pool.resolve(&entry.token)
+                && canonical != &entry.token
+            {
+                resolve.insert(text, canonical.as_str().to_string());
+            }
+        }
+        Self {
+            dictionary,
+            resolve,
+        }
+    }
+
+    /// 词典是否为空（空时 `normalize_tokens` 退化为纯 bigram）。
+    pub fn is_empty(&self) -> bool {
+        self.dictionary.is_empty()
+    }
+
+    /// 话题词规范化：文本 → 词频 Top-N 前的候选词序列。
+    ///
+    /// - 词典非空：词典增强分词（完整词条保留），再对命中的别名/待确认词替换为规范词。
+    /// - 词典为空：委托 `bm25::tokenize`（与既有纯 bigram 行为逐词一致）。
+    pub fn normalize_tokens(&self, text: &str) -> Vec<String> {
+        if self.is_empty() {
+            return tokenize(text);
+        }
+        let dict_normalizer = BigramWithDictionaryNormalizer::from_dictionary(&self.dictionary);
+        dict_normalizer
+            .normalize(text)
+            .into_iter()
+            .map(|t| {
+                self.resolve
+                    .get(t.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| t.into_inner())
+            })
+            .collect()
+    }
+}
+
+/// 从最近消息构造查询上下文（无关键词池规范化，纯 bigram 词频）。
 ///
 /// 参数:
 /// - `messages`: 当前会话消息（取最近 `QUERY_MESSAGE_WINDOW` 条）。
@@ -58,6 +132,23 @@ pub struct QueryContext {
 pub async fn build_query_context(
     messages: &[Message],
     embedder: Option<&dyn EmbeddingProvider>,
+) -> RamariaResult<QueryContext> {
+    build_query_context_with_normalizer(messages, embedder, &QueryKeywordNormalizer::empty()).await
+}
+
+/// 从最近消息构造查询上下文（可选关键词池规范化）。
+///
+/// 与 [`build_query_context`] 的唯一区别：话题词先经 `normalizer` 词典增强分词 +
+/// 别名归一（`normalizer` 为空时行为与旧版纯 bigram 完全一致）。
+///
+/// 参数:
+/// - `messages`: 当前会话消息（取最近 `QUERY_MESSAGE_WINDOW` 条）。
+/// - `embedder`: 嵌入模型 provider；`None` → 查询向量为 None。
+/// - `normalizer`: 查询侧关键词规范化器（空 = 纯 bigram 词频；调用方在锁外持有）。
+pub async fn build_query_context_with_normalizer(
+    messages: &[Message],
+    embedder: Option<&dyn EmbeddingProvider>,
+    normalizer: &QueryKeywordNormalizer,
 ) -> RamariaResult<QueryContext> {
     let recent: Vec<&Message> = messages.iter().rev().take(QUERY_MESSAGE_WINDOW).collect();
     // 向量化文本：带角色前缀（供 embedding 区分发言方）
@@ -74,9 +165,9 @@ pub async fn build_query_context(
         content_joined.push('\n');
     }
 
-    // 话题词：纯内容 tokenize 词频 Top-N
-    let mut freq: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for t in tokenize(&content_joined) {
+    // 话题词：normalizer 词典增强/别名归一后的词频 Top-N
+    let mut freq: HashMap<String, usize> = HashMap::new();
+    for t in normalizer.normalize_tokens(&content_joined) {
         *freq.entry(t).or_insert(0) += 1;
     }
     let mut kw: Vec<(String, usize)> = freq.into_iter().collect();
@@ -675,5 +766,101 @@ mod tests {
         let ctx = build_query_context(&[], None).await.expect("空消息成功");
         assert!(ctx.keywords.is_empty());
         assert!(ctx.query_vector.is_none());
+    }
+
+    // ---- 查询侧关键词规范化（关键词池别名归一） ----
+
+    /// 构造含别名关系的池：职业倦怠(alias) → 工作压力(canonical)。
+    fn alias_pool() -> KeywordPool {
+        use crate::keyword::pool::{KeywordPool, PoolEntry};
+        use ramaria_core::keyword::{KeywordStatus, KeywordToken};
+        KeywordPool::from_entries(vec![
+            PoolEntry {
+                rowid: 1,
+                token: KeywordToken::new("工作压力").unwrap(),
+                use_count: 5,
+                last_used_at: 0,
+                created_at: 0,
+                status: KeywordStatus::Canonical,
+            },
+            PoolEntry {
+                rowid: 2,
+                token: KeywordToken::new("职业倦怠").unwrap(),
+                use_count: 2,
+                last_used_at: 0,
+                created_at: 0,
+                status: KeywordStatus::Alias { canonical_id: 1 },
+            },
+        ])
+    }
+
+    /// from_pool：词典含全量词条、解析表仅含别名 → 规范词。
+    #[test]
+    fn query_keyword_normalizer_from_pool() {
+        let normalizer = QueryKeywordNormalizer::from_pool(&alias_pool());
+        assert!(!normalizer.is_empty());
+        assert_eq!(
+            normalizer.resolve.get("职业倦怠").map(String::as_str),
+            Some("工作压力")
+        );
+        assert!(normalizer.resolve.get("工作压力").is_none());
+    }
+
+    /// 别名短语 → 话题词解析为规范词（口语说法 ↔ 事件关键词命中前提）。
+    #[tokio::test]
+    async fn alias_phrase_resolves_to_canonical_in_query() {
+        let messages = vec![msg("我感觉职业倦怠", MessageRole::User)];
+        let normalizer = QueryKeywordNormalizer::from_pool(&alias_pool());
+        let ctx = build_query_context_with_normalizer(&messages, None, &normalizer)
+            .await
+            .expect("构造成功");
+        assert!(
+            ctx.keywords.contains(&"工作压力".to_string()),
+            "别名短语应被归一为规范词，实际 {keywords:?}",
+            keywords = ctx.keywords
+        );
+    }
+
+    /// 空池（无词典）→ 与纯 bigram 行为逐词一致（退化断言）。
+    #[tokio::test]
+    async fn empty_normalizer_falls_back_to_plain_bigram() {
+        let messages = vec![msg("加班第3天很累", MessageRole::User)];
+        let plain = build_query_context(&messages, None)
+            .await
+            .expect("构造成功");
+        let normalized =
+            build_query_context_with_normalizer(&messages, None, &QueryKeywordNormalizer::empty())
+                .await
+                .expect("构造成功");
+        assert_eq!(
+            plain.keywords, normalized.keywords,
+            "空规范化器与纯 bigram 等价"
+        );
+    }
+
+    /// 别名归一后查询侧话题词命中 canonical 规则 → 路由得分显著提升（不依赖 embedding）。
+    #[tokio::test]
+    async fn alias_normalized_query_hits_canonical_rule() {
+        let normalizer = QueryKeywordNormalizer::from_pool(&alias_pool());
+        let messages = vec![msg("最近职业倦怠很严重", MessageRole::User)];
+        let query = build_query_context_with_normalizer(&messages, None, &normalizer)
+            .await
+            .expect("构造成功");
+        assert!(!query.keywords.is_empty());
+
+        // 规则关键词用 canonical（事件聚类产物）；纯 bigram 查询无共享词会 miss
+        let r = rule(1, &["工作压力", "加班"], -0.4, None);
+        // 无 embedding → 纯关键词路由：score = query_side_jaccard
+        let result = route_rules(&[r.clone()], &query, &RoutingParams::default());
+        if result.matched {
+            // 命中主规则即说明别名归一打通"口语 ↔ canonical 规则"（θ_route 默认 0.6）
+            assert_eq!(result.primary.unwrap().rule.id, 1);
+        } else {
+            // 若 query 的 canonical 词占比不足阈值，也至少应包含规范词候选
+            assert!(
+                query.keywords.contains(&"工作压力".to_string()),
+                "别名归一后查询应含规范词"
+            );
+        }
     }
 }

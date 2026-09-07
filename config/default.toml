@@ -72,7 +72,8 @@ device = "auto"
 # =========================================================
 # 记忆检索参数（memory_rag 摘要路专属）
 # =========================================================
-# 控制混合 RAG 三通道（向量/BM25/图谱）的检索行为。
+# 控制混合 RAG 三通道（向量/BM25/图谱）的检索行为，
+# 并承载摘要路 Persona-Aware RAG 的上下文格式化参数（rag_*）。
 # 本组为摘要路（L1/L2 记忆摘要检索 + RRF 融合）的独立参数；
 # 原文样例路（[utt]）与知识路（[knowledge]）各有自己的检索参数，
 # 三路独立调参互不串扰（阶段一维持 v1.7 等价，参数定稿在后续阶段）。
@@ -94,6 +95,12 @@ rrf_k = 60
 bm25_weight = 1.0
 # 知识图谱通道权重
 graph_weight = 0.8
+# 向量通道开关（摘要路三通道之一）：false = 仅 BM25 + 图谱参与 RRF 融合
+enable_vector = true
+# 关键词镜像通道开关（摘要路第四通道）：false = 回退仅三通道（BM25 + 向量 + 图谱）
+enable_keyword_channel = true
+# 关键词镜像通道权重（参与 RRF 融合；1.0 = 与向量通道同权重）
+keyword_weight = 1.0
 # L2 结果排序权重（<1.0 表示 L2 优先展示）
 retrieval_weight_l2 = 0.8
 # L1 结果排序权重
@@ -103,6 +110,19 @@ retrieval_weight_l1 = 1.0
 narrative_weighted = true
 # 脉络注入的最大条数
 narrative_top_k = 3
+# ---- 摘要路 RAG 格式化参数（Persona-Aware 过滤 + 上下文格式；默认与既有行为等价）----
+# 上下文最大记忆条目数
+rag_max_memories = 5
+# 单条记忆摘要的最大字符数
+rag_max_summary_chars = 120
+# Persona-Aware 过滤：user 类型最低 share 阈值
+rag_share_threshold_user = 0.3
+# Persona-Aware 过滤：char/anim/oc/hist 类型最低 share 阈值
+rag_share_threshold_char = 0.5
+# Persona-Aware 过滤：rama 类型最低 share 阈值（0.0 = 全量）
+rag_share_threshold_rama = 0.0
+# 上下文格式化是否包含图谱实体
+rag_include_graph_entities = true
 
 # =========================================================
 # Ebbinghaus 遗忘曲线衰减参数
@@ -363,7 +383,9 @@ recent_days = 30
 # 总开关默认关闭：需用户显式开启才参与对话注入。
 
 [knowledge]
-# 自动事实检测总开关（默认 false，自动为主可配置；false → 不抽取不注入）
+# 自动事实检测总开关（默认 false，false → 不抽取、不注入，与上一版本完全一致）。
+# 开启后抽取走常规轨道（客观/混合达标事件）+ 增强轨道（主观/低置信事件字段感知隐含、
+# L1 保真线索→断言、低置信候选互证提升），作为召回的兜底而非主力。
 auto_fact_detect = false
 # 规则判定器开关（零新增 LLM 调用；false = 不检索注入）
 detector_enabled = true

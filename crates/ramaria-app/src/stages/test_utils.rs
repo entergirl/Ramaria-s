@@ -25,6 +25,7 @@ use ramaria_core::types::{
     Persona, PersonaExample, PersonaFact, PersonalityTrait, PrivacyConsent, ProfileField, Session,
     TraitEvidence, TraitStatus, UttBlock,
 };
+use ramaria_memory::keyword::KeywordService;
 use ramaria_memory::retriever::Retriever;
 use uuid::Uuid;
 
@@ -875,6 +876,7 @@ pub fn test_context(
 
     let config = ramaria_core::config::RamariaConfig::default();
     let retriever = Arc::new(RwLock::new(Retriever::new()));
+    let keyword_service = Arc::new(RwLock::new(KeywordService::new()));
     let keychain = Arc::new(ramaria_llm::keychain::Keychain::new());
     let lifecycle = Arc::new(SessionLifecycle::new(config.clone()));
 
@@ -884,6 +886,7 @@ pub fn test_context(
         embedding_dyn,
         config,
         retriever,
+        keyword_service,
         keychain,
         lifecycle,
     )

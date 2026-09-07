@@ -44,7 +44,8 @@ pub use decay::{
 
 // RRF
 pub use rrf::{
-    ChannelResult, FusedResult, RrfConfig, rrf_fuse, rrf_single_channel, rrf_two_channels,
+    ChannelResult, FusedResult, RrfConfig, rrf_fuse, rrf_fuse_with_keyword, rrf_single_channel,
+    rrf_two_channels,
 };
 
 // BM25 全文检索

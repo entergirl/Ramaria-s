@@ -455,11 +455,21 @@ fn render_behavior_decision(decision: &MergedDecision, max_chars: usize) -> Opti
 ///
 /// 消费 `PromptContext.knowledge_facts`（active 事实，由 `ramaria-app` 检索/判定后装配）。
 /// 渲染 `# 知识（知识层，按需）` 段落；空集 → `None`（不产生空段落）。
-pub fn render_knowledge_block(context: &PromptContext) -> Option<InjectionBlock> {
+///
+/// 预算:
+/// - 经 `config.knowledge_block_max_chars` 显式注入（与 `[knowledge].injection_budget_chars`
+///   对齐）；`None` 时回退本层默认预算 [`MAX_KNOWLEDGE_CHARS`]（800，行为等价）。
+pub fn render_knowledge_block(
+    context: &PromptContext,
+    config: &PromptConfig,
+) -> Option<InjectionBlock> {
     if context.knowledge_facts.is_empty() {
         return None;
     }
-    crate::fact::retriever::build_knowledge_injection(&context.knowledge_facts, MAX_KNOWLEDGE_CHARS)
+    let budget = config
+        .knowledge_block_max_chars
+        .unwrap_or(MAX_KNOWLEDGE_CHARS);
+    crate::fact::retriever::build_knowledge_injection(&context.knowledge_facts, budget)
 }
 
 /// 知识层注入预算（字符上限；对齐脉络层预算思路，固定小占比）。
@@ -733,7 +743,7 @@ mod tests {
             "行为层未命中/关闭 → 不产生段落"
         );
         assert!(
-            render_knowledge_block(&ctx).is_none(),
+            render_knowledge_block(&ctx, &PromptConfig::default()).is_none(),
             "无知识事实 → 不产生知识段落"
         );
     }
@@ -907,5 +917,58 @@ mod tests {
         };
         let text = render_behavior_decision(&decision, 400).expect("渲染成功");
         assert!(text.contains("相关话题"), "无关键词回退: {text}");
+    }
+
+    // ---- 知识层渲染与预算接线 ----
+
+    /// 构造一条 Interests active 事实。
+    fn knowledge_fact(content: &str) -> ramaria_core::types::PersonaFact {
+        use ramaria_core::types::FactSource;
+        let mut f = ramaria_core::types::PersonaFact::new(
+            "char-0001".into(),
+            ramaria_core::types::ProfileField::Interests,
+            content.into(),
+            FactSource::Event,
+        );
+        f.keyword_hint = Some("电影,科幻".to_string());
+        f
+    }
+
+    /// 默认预算（`knowledge_block_max_chars=None`）回退 800，与既有行为等价：
+    /// 短事实卡片完整渲染（不因预算接线改变默认输出）。
+    #[test]
+    fn render_knowledge_block_default_budget_matches_legacy() {
+        let ctx = PromptContext {
+            knowledge_facts: vec![knowledge_fact("喜欢科幻电影")],
+            ..Default::default()
+        };
+        let block = render_knowledge_block(&ctx, &PromptConfig::default())
+            .expect("知识事实存在时应渲染知识块");
+        assert_eq!(block.layer, LayerKind::Knowledge);
+        assert_eq!(block.title, "# 知识（知识层，按需）");
+        assert!(
+            block.content.contains("喜欢科幻电影"),
+            "内容: {}",
+            block.content
+        );
+    }
+
+    /// 显式预算（`knowledge_block_max_chars`）真实生效：长卡片被裁剪到预算内。
+    #[test]
+    fn render_knowledge_block_explicit_budget_truncates() {
+        let ctx = PromptContext {
+            knowledge_facts: vec![knowledge_fact("很喜欢阅读长篇科幻小说")],
+            ..Default::default()
+        };
+        let config = PromptConfig {
+            knowledge_block_max_chars: Some(6),
+            ..Default::default()
+        };
+        let block = render_knowledge_block(&ctx, &config).expect("知识事实存在时应渲染知识块");
+        assert!(
+            block.content.chars().count() <= 7,
+            "显式预算裁剪生效: {}",
+            block.content
+        );
     }
 }

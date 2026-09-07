@@ -42,6 +42,9 @@ fn make_ctx(
 ) -> PipelineContext {
     let config = RamariaConfig::default();
     let retriever = Arc::new(std::sync::RwLock::new(Retriever::new()));
+    let keyword_service = Arc::new(std::sync::RwLock::new(
+        ramaria_memory::keyword::KeywordService::new(),
+    ));
     let keychain = Arc::new(Keychain::new());
     let lifecycle = Arc::new(SessionLifecycle::new(config.clone()));
 
@@ -51,6 +54,7 @@ fn make_ctx(
         embedding.map(|e| e as Arc<dyn EmbeddingProvider>),
         config,
         retriever,
+        keyword_service,
         keychain,
         lifecycle,
     )
@@ -362,6 +366,9 @@ async fn llm_failure_produces_error_stream() {
         Arc::new(mock_backend::MockLlm::failing("mock connection refused"));
     let config = RamariaConfig::default();
     let retriever = Arc::new(std::sync::RwLock::new(Retriever::new()));
+    let keyword_service = Arc::new(std::sync::RwLock::new(
+        ramaria_memory::keyword::KeywordService::new(),
+    ));
     let keychain = Arc::new(Keychain::new());
     let lifecycle = Arc::new(SessionLifecycle::new(config.clone()));
     let ctx = PipelineContext::new(
@@ -370,6 +377,7 @@ async fn llm_failure_produces_error_stream() {
         None,
         config,
         retriever,
+        keyword_service,
         keychain,
         lifecycle,
     );

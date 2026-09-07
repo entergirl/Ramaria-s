@@ -213,8 +213,25 @@ pub async fn behavior_route(
     let embedding = app.embedding_provider();
     let config = app.config.behavior.clone();
 
-    let query =
-        ramaria_memory::behavior::build_query_context(messages, embedding.as_deref()).await?;
+    // 查询侧关键词规范化（关键词池别名归一 → 口语说法更易命中事件关键词）：
+    // 读锁内取值快照、释放后 await 查询（避免 std 锁跨 await）；池不可用/为空
+    // 时退化为纯 bigram 词频（v1.7 等价，零 embedding）。
+    let normalizer = match app.keyword_service().read() {
+        Ok(g) => ramaria_memory::behavior::QueryKeywordNormalizer::from_pool(g.pool()),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "关键词服务锁不可用，行为路由退化为纯 bigram"
+            );
+            ramaria_memory::behavior::QueryKeywordNormalizer::empty()
+        }
+    };
+    let query = ramaria_memory::behavior::build_query_context_with_normalizer(
+        messages,
+        embedding.as_deref(),
+        &normalizer,
+    )
+    .await?;
     let params = ramaria_memory::behavior::RoutingParams::from(&config);
     Ok(ramaria_memory::behavior::route_rules(
         &rules, &query, &params,

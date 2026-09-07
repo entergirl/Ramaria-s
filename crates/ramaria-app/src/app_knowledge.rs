@@ -10,7 +10,10 @@
 use ramaria_core::config::KnowledgeConfig;
 use ramaria_core::traits::StorageBackend;
 use ramaria_core::types::PersonaFact;
-use ramaria_memory::fact::retriever::{KnowledgeQuery, judge_knowledge_query, retrieve_knowledge};
+use ramaria_memory::fact::retriever::{
+    KnowledgeQuery, KnowledgeRetrievalOptions, judge_knowledge_query,
+    retrieve_knowledge_with_options,
+};
 
 /// 从存储加载 persona 的 active 事实并做判定器命中判断。
 ///
@@ -52,14 +55,20 @@ pub async fn load_knowledge_facts(
         return Vec::new();
     }
 
-    // 命中 → 召回（全量 active 按时效排序；渲染预算由 prompt 层裁剪）
+    // 命中 → 召回（active 事实按时效排序；top_k/θ 走 [knowledge] 独立检索参数，
+    // 0 / 0.0 = 不截断 / 不过滤，与上一版本等价；渲染预算由 prompt 层裁剪）
     let query = KnowledgeQuery {
         user_message: user_message.to_string(),
         facts: active,
         budget_chars: config.injection_budget_chars,
     };
+    let options = KnowledgeRetrievalOptions {
+        top_k: config.retrieve_top_k as usize,
+        threshold: config.retrieve_threshold,
+    };
     let now = ramaria_core::types::now_ms();
-    let retrieval = retrieve_knowledge(&query, now, config.volatile_halflife_days);
+    let retrieval =
+        retrieve_knowledge_with_options(&query, now, config.volatile_halflife_days, options);
     if retrieval.matched.is_empty() {
         Vec::new()
     } else {

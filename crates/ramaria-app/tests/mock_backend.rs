@@ -24,9 +24,10 @@ use ramaria_core::traits::{
     StoreInfrastructure, StreamDelta,
 };
 use ramaria_core::types::{
-    BackendConfig, ClusterSnapshot, EventRelation, FactStatus, LlmProvider as LlmProviderKind,
-    MemoryEvent, MemoryL1, Message, ModelCapability, Persona, PersonaExample, PersonaFact,
-    PersonalityTrait, PrivacyConsent, ProfileField, Session, TraitEvidence, TraitStatus, UttBlock,
+    BackendConfig, ClusterSnapshot, EventRelation, EventSource, FactStatus,
+    LlmProvider as LlmProviderKind, MemoryEvent, MemoryL1, Message, ModelCapability, Persona,
+    PersonaExample, PersonaFact, PersonalityTrait, PrivacyConsent, ProfileField, Session,
+    TraitEvidence, TraitStatus, UttBlock,
 };
 use uuid::Uuid;
 
@@ -76,6 +77,9 @@ pub struct MockStorage {
     facts: Mutex<HashMap<i64, PersonaFact>>,
     facts_by_persona: Mutex<HashMap<String, Vec<i64>>>,
     fact_seq: AtomicI64,
+    /// 事件 → 来源 L1 映射（event_sources）
+    event_sources: Mutex<Vec<EventSource>>,
+    event_source_seq: AtomicI64,
 }
 
 impl Default for MockStorage {
@@ -116,6 +120,8 @@ impl MockStorage {
             facts: Mutex::new(HashMap::new()),
             facts_by_persona: Mutex::new(HashMap::new()),
             fact_seq: AtomicI64::new(1),
+            event_sources: Mutex::new(Vec::new()),
+            event_source_seq: AtomicI64::new(1),
         }
     }
 
@@ -410,13 +416,13 @@ impl StoreCrud for MockStorage {
     async fn save_message(&self, message: &Message) -> RamariaResult<()> {
         // 只读约束——已关闭 session 不可写入新消息
         let sessions = self.sessions.lock().unwrap();
-        if let Some(session) = sessions.get(&message.session_id) {
-            if session.ended_at.is_some() {
-                return Err(RamariaError::validation(format!(
-                    "session {} 已关闭，不可写入新消息",
-                    message.session_id
-                )));
-            }
+        if let Some(session) = sessions.get(&message.session_id)
+            && session.ended_at.is_some()
+        {
+            return Err(RamariaError::validation(format!(
+                "session {} 已关闭，不可写入新消息",
+                message.session_id
+            )));
         }
         drop(sessions);
 
@@ -472,8 +478,19 @@ impl StoreCrud for MockStorage {
             .unwrap_or_default())
     }
 
-    async fn get_memory_l1(&self, _id: Uuid) -> RamariaResult<Option<MemoryL1>> {
-        Ok(None)
+    async fn get_memory_l1(&self, id: Uuid) -> RamariaResult<Option<MemoryL1>> {
+        // 扫描 persona 维度索引与 session 维度列表（add_l1_summaries 走 persona 索引）
+        let l1_by_persona = self.l1_by_persona.lock().unwrap();
+        if let Some(found) = l1_by_persona
+            .values()
+            .flatten()
+            .find(|l| l.id == id)
+            .cloned()
+        {
+            return Ok(Some(found));
+        }
+        let l1_list = self.l1_list.lock().unwrap();
+        Ok(l1_list.values().flatten().find(|l| l.id == id).cloned())
     }
 
     async fn mark_l1_absorbed(&self, _l1_ids: &[Uuid]) -> RamariaResult<()> {
@@ -604,11 +621,31 @@ impl StoreCrud for MockStorage {
 
     async fn save_event_source(
         &self,
-        _event_id: i64,
-        _l1_id: Uuid,
-        _weight: f64,
+        event_id: i64,
+        l1_id: Uuid,
+        weight: f64,
     ) -> RamariaResult<()> {
+        let id = self
+            .event_source_seq
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.event_sources.lock().unwrap().push(EventSource {
+            id,
+            event_id,
+            l1_id,
+            weight,
+        });
         Ok(())
+    }
+
+    async fn list_event_sources_by_event(&self, event_id: i64) -> RamariaResult<Vec<EventSource>> {
+        Ok(self
+            .event_sources
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|s| s.event_id == event_id)
+            .cloned()
+            .collect())
     }
 
     async fn save_fact(&self, fact: &PersonaFact) -> RamariaResult<i64> {
@@ -624,6 +661,34 @@ impl StoreCrud for MockStorage {
             .or_default()
             .push(id);
         Ok(id)
+    }
+
+    async fn save_fact_with_version(
+        &self,
+        old: &PersonaFact,
+        fresh: &PersonaFact,
+    ) -> RamariaResult<i64> {
+        // 模拟真实 save_fact_with_version 的原子语义：旧 active → superseded + 新 insert + 链指针
+        let new_id = self.fact_seq.fetch_add(1, Ordering::SeqCst);
+        let mut f = fresh.clone();
+        f.id = new_id;
+        f.status = FactStatus::Active;
+        f.version_of = Some(old.id);
+        {
+            let mut facts = self.facts.lock().unwrap();
+            if let Some(o) = facts.get_mut(&old.id) {
+                o.status = FactStatus::Superseded;
+                o.updated_at = f.updated_at;
+            }
+            facts.insert(new_id, f);
+        }
+        self.facts_by_persona
+            .lock()
+            .unwrap()
+            .entry(fresh.persona_uid.clone())
+            .or_default()
+            .push(new_id);
+        Ok(new_id)
     }
 
     async fn list_facts_by_persona(
@@ -846,6 +911,19 @@ impl StoreCrud for MockStorage {
 
 #[async_trait]
 impl StoreInfrastructure for MockStorage {
+    async fn list_recent_events(
+        &self,
+        persona_uid: &str,
+        limit: u32,
+    ) -> RamariaResult<Vec<MemoryEvent>> {
+        let mut events = self
+            .list_events_by_persona(persona_uid, 0, i64::MAX)
+            .await?;
+        events.sort_by_key(|e| std::cmp::Reverse(e.id));
+        events.truncate(limit as usize);
+        Ok(events)
+    }
+
     async fn save_privacy_consent(&self, consent: &PrivacyConsent) -> RamariaResult<()> {
         self.privacy_consents.lock().unwrap().push(consent.clone());
         Ok(())

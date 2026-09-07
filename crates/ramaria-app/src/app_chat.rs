@@ -155,6 +155,14 @@ impl App {
         } else {
             None
         };
+        // RAG 实际注入的文档覆盖集合：仅当记忆闸门开启且 memory_context 真正注入时
+        // 才消费 stage 记录的文档 label。消融档（memory_rag=false）下覆盖集合为空，
+        // 知识卡片不被 RAG 去重误伤，保持"关掉 RAG 后断言层仍兜底"的消融语义。
+        let rag_covered_labels = if memory_context.is_some() {
+            result.memory_doc_labels
+        } else {
+            Vec::new()
+        };
         let utt_context = result.utt_context;
         let bridge_context = result.bridge_context;
         let cfg = result
@@ -239,6 +247,10 @@ impl App {
                 examples,
                 config.examples.max_examples as usize,
                 knowledge_facts,
+                // RAG 实际注入的文档覆盖集合（供知识层注入去重；默认空）
+                &rag_covered_labels,
+                // 知识块渲染预算（core [knowledge].injection_budget_chars，默认 800）
+                Some(config.knowledge.injection_budget_chars),
                 &config.injection,
             )
             .await;
@@ -354,11 +366,19 @@ impl App {
         let storage = Arc::clone(&self.storage);
         let config = config.clone();
         let retriever = Arc::clone(&self.retriever);
+        let keyword_service = Arc::clone(&self.keyword_service);
         let keychain = Arc::clone(&self.keychain);
         let lifecycle = Arc::clone(&self.lifecycle);
 
         crate::pipeline::PipelineContext::new(
-            storage, llm, embedding, config, retriever, keychain, lifecycle,
+            storage,
+            llm,
+            embedding,
+            config,
+            retriever,
+            keyword_service,
+            keychain,
+            lifecycle,
         )
     }
 
@@ -385,6 +405,13 @@ impl App {
     /// - `examples`: 已选好的 Few-shot 示例（由 `load_examples_for_input` 评分轮换/兜底后传入）。
     /// - `max_examples`: examples 注入上限（来自生效配置 `examples.max_examples`，
     ///   v1.5 起由调用方传入以支持配置覆盖的探针场景）。
+    /// - `knowledge_facts`: 知识层判定器命中的 active facts（`# 知识（知识层，按需）`
+    ///   内容源；装配前经 RAG 覆盖/角色层去重，空集不产生段落）。
+    /// - `rag_covered_labels`: RAG 摘要实际注入的文档 label 集合（`L1:{uuid}`/`L2:{id}`）。
+    ///   知识层去重消费：同一事实已由 RAG 摘要文本覆盖则不重复注入（兜底语义不失效）。
+    ///   空集合 = RAG 未注入/闸门关闭 → 知识卡片不去重（回退既有兜底行为）。
+    /// - `knowledge_budget_chars`: 知识块渲染预算（对齐 core `[knowledge].injection_budget_chars`；
+    ///   `None` 使用 memory prompt 层默认预算）。
     ///
     /// 降级策略:
     /// - storage 读取失败 → 记录 warn 日志，使用空数据继续。
@@ -409,6 +436,8 @@ impl App {
         examples: Vec<ramaria_core::types::PersonaExample>,
         max_examples: usize,
         knowledge_facts: Vec<ramaria_core::types::PersonaFact>,
+        rag_covered_labels: &[String],
+        knowledge_budget_chars: Option<usize>,
         injection: &ramaria_core::config::InjectionGate,
     ) -> String {
         let actual_uid = persona_uid.unwrap_or("rama-0001");
@@ -475,6 +504,31 @@ impl App {
                 return prompt;
             }
 
+            // 知识层注入去重：RAG 摘要为主召回路径、断言知识为兜底。
+            // 装配前剔除两类重复——① 来源文档已进入 RAG 覆盖集合的事实（同一事实已由
+            // 摘要文本提供）；② 与角色层已知事实区同 id 的记录（角色区已展示，取后者去重）。
+            // 无来源引用（手工/冷启动等）或 RAG 未覆盖的事实保留，兜底注入不失效。
+            let knowledge_facts = if knowledge_facts.is_empty() {
+                knowledge_facts
+            } else {
+                let covered: std::collections::HashSet<String> =
+                    rag_covered_labels.iter().cloned().collect();
+                let deduped = ramaria_memory::fact::retriever::dedup_knowledge_facts(
+                    &knowledge_facts,
+                    &covered,
+                    &facts,
+                );
+                if deduped.len() != knowledge_facts.len() {
+                    tracing::debug!(
+                        persona_uid = %p.uid,
+                        before = knowledge_facts.len(),
+                        after = deduped.len(),
+                        "知识层注入去重（RAG 覆盖/角色层重复剔除）"
+                    );
+                }
+                deduped
+            };
+
             let ctx = PromptContext {
                 persona: Some(p.clone()),
                 facts,
@@ -495,8 +549,8 @@ impl App {
                 bridge_context: bridge_context.map(|s| s.to_string()),
                 // 行为层路由决策（None = 未命中/关闭）
                 behavior_decision,
-                // 知识层 active 事实（判定器命中后由 send_message 检索传入；
-                // 空 = 关闭/未命中 → prompt 不含知识块）
+                // 知识层 active 事实（判定器命中后由 send_message 检索传入，装配前已
+                // 按 RAG 覆盖/角色层去重；空 = 关闭/未命中/全部去重 → prompt 不含知识块）
                 knowledge_facts,
                 // 自动风格规则（None = 风格关闭/数据不足 → prompt 与 v1.6 语义等价）
                 style_rule_text,
@@ -515,6 +569,9 @@ impl App {
                 include_memory_rag: injection.memory_rag,
                 include_utt: injection.utt,
                 include_bridge: injection.bridge,
+                // 知识块渲染预算接线：core [knowledge].injection_budget_chars
+                // 默认 800 → Some(800)，与 layers 默认预算一致（行为等价）；显式值生效。
+                knowledge_block_max_chars: knowledge_budget_chars,
                 ..Default::default()
             };
             tracing::debug!(

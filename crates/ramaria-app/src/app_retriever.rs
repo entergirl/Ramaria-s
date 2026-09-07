@@ -6,7 +6,7 @@
 use ramaria_core::error::RamariaResult;
 use ramaria_core::traits::{BM25_INDEX_VERSION_CURRENT, BM25_INDEX_VERSION_LEGACY};
 use ramaria_memory::VectorIndex;
-use ramaria_memory::retriever::{L1DocView, L2DocView};
+use ramaria_memory::retriever::{L1DocView, L2DocView, RetrieverConfig};
 
 use super::app::App;
 
@@ -148,6 +148,10 @@ impl App {
                 tracing::error!("Retriever lock poisoned during rebuild: {e}");
                 e.into_inner()
             });
+            // 应用 core 检索配置（[retrieval] 组）到内存检索器：RRF 融合参数与向量通道开关
+            // 真实生效（默认配置下与 RetrieverConfig::default() 一致，行为等价）
+            *retriever.config_mut() =
+                RetrieverConfig::from_retrieval_config(&self.config.retrieval);
             retriever.clear();
 
             // BM25 词典增强：词典加载成功则应用（空词典 = 纯 bigram 等价口径）；
@@ -620,5 +624,34 @@ mod tests {
             .fuzzy()
             .expect("embedding 可用时应挂载 Fuzzy 层");
         assert!(fuzzy.is_ready());
+    }
+
+    /// core [retrieval] 配置经 rebuild 真实应用进内存检索器
+    /// （RRF 融合参数 + 向量通道开关，默认配置下行为等价）。
+    #[tokio::test]
+    async fn rebuild_applies_core_retrieval_config() {
+        let storage = Arc::new(crate::stages::test_utils::MockStorage::new());
+        storage.add_l1_summaries("", vec![make_l1(None, "用户喜欢喝咖啡")]);
+
+        let llm = crate::stages::test_utils::MockLlm::local();
+        let keychain = Arc::new(ramaria_llm::keychain::Keychain::new());
+        let mut config = ramaria_core::config::RamariaConfig::default();
+        config.retrieval.rrf_k = 90;
+        config.retrieval.bm25_weight = 0.5;
+        config.retrieval.graph_weight = 0.4;
+        config.retrieval.enable_vector = false;
+        let app = App::new_without_embedding(
+            storage as Arc<dyn ramaria_core::traits::StorageBackend>,
+            Arc::new(llm),
+            config,
+            keychain,
+        );
+
+        app.rebuild_retriever().await.unwrap();
+        let guard = app.retriever.read().unwrap_or_else(|e| e.into_inner());
+        assert!(!guard.config().enable_vector, "向量通道开关应随重建应用");
+        assert_eq!(guard.config().rrf.k, 90.0, "RRF 平滑系数应随重建应用");
+        assert_eq!(guard.config().rrf.bm25_weight, 0.5);
+        assert_eq!(guard.config().rrf.graph_weight, 0.4);
     }
 }

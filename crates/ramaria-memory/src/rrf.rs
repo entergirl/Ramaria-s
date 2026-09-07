@@ -2,10 +2,16 @@
 //!
 //! 设计特点:
 //! - 实现标准 Reciprocal Rank Fusion (RRF) 融合算法
-//! - 支持 2-3 通道: 向量检索 + BM25 关键词 + 知识图谱
+//! - 支持 2-4 通道: 向量检索 + BM25 关键词 + 知识图谱 + 关键词镜像（扩展）
 //! - 各通道权重和 RRF 平滑系数 K 可独立配置
 //! - 未出现在某通道中的文档使用惩罚排名 (penalty rank)
 //! - 纯数学模块，零 I/O，不依赖数据库或异步运行时
+//!
+//! 关键词镜像通道说明:
+//! - `rrf_fuse_with_keyword` 处理含关键词镜像（KeywordService CompositeIndex）
+//!   的融合场景；关键词通道缺席时继续使用既有单/双/三通道函数（行为不变）。
+//! - 新增通道不会改变既有向量/BM25/图谱三通道的贡献公式（向量权重恒 1，
+//!   bm25/graph 沿用各自权重），仅在关键词通道有结果时为相关文档追加一项。
 
 use std::collections::HashMap;
 
@@ -37,6 +43,7 @@ pub struct ChannelResult<I: Clone + std::hash::Hash + Eq> {
 /// - `k`: RRF 平滑系数，防止高 rank 的分数被过度惩罚。标准取值 60。
 /// - `bm25_weight`: BM25 通道相对于向量通道的权重，默认 1.0。
 /// - `graph_weight`: 图谱通道相对于向量通道的权重，默认 0.8。
+/// - `keyword_weight`: 关键词镜像通道相对于向量通道的权重，默认 1.0。
 /// - `top_k`: 融合后返回的最大文档数。
 #[derive(Debug, Clone)]
 pub struct RrfConfig {
@@ -46,6 +53,8 @@ pub struct RrfConfig {
     pub bm25_weight: f64,
     /// 图谱通道权重
     pub graph_weight: f64,
+    /// 关键词镜像通道权重
+    pub keyword_weight: f64,
     /// 融合后返回的最大结果条数
     pub top_k: usize,
 }
@@ -56,6 +65,7 @@ impl Default for RrfConfig {
             k: 60.0,
             bm25_weight: 1.0,
             graph_weight: 0.8,
+            keyword_weight: 1.0,
             top_k: 5,
         }
     }
@@ -332,6 +342,131 @@ pub fn rrf_fuse<I: Clone + std::hash::Hash + Eq + std::fmt::Debug>(
 }
 
 // =========================================================
+// 含关键词镜像通道的融合
+// =========================================================
+
+/// 向量 + BM25 + 图谱 + 关键词镜像四通道 RRF 融合。
+///
+/// 用法:
+/// - 当关键词镜像（KeywordService CompositeIndex）作为第四检索通道产生结果时使用；
+///   关键词通道缺席时继续走既有单/双/三通道函数（行为不变）。
+///
+/// 公式:
+/// - `RRF_score = [向量项] + bm25_weight·[BM25项] + graph_weight·[图谱项]
+///                + keyword_weight·[关键词项]`
+/// - 文档未出现在某通道时，该项以惩罚排名计；该通道整体缺席则不产生该项。
+/// - 向量通道权重恒为 1（与既有融合公式一致，保证三通道既有贡献延续）。
+///
+/// 参数:
+/// - `vector_results`: 向量通道结果（缺席传 None）。
+/// - `bm25_results`: BM25 通道结果（缺席传 None）。
+/// - `graph_results`: 图谱通道结果（缺席传 None）。
+/// - `keyword_results`: 关键词镜像通道结果（调用方保证有数据）。
+/// - `config`: RRF 融合配置（含 `keyword_weight`）。
+///
+/// 返回:
+/// - 按 RRF 分数降序排列的融合结果，最多 `config.top_k` 条。
+pub fn rrf_fuse_with_keyword<I: Clone + std::hash::Hash + Eq + std::fmt::Debug>(
+    vector_results: Option<&ChannelResult<I>>,
+    bm25_results: Option<&ChannelResult<I>>,
+    graph_results: Option<&ChannelResult<I>>,
+    keyword_results: &ChannelResult<I>,
+    config: &RrfConfig,
+) -> Vec<FusedResult<I>> {
+    let penalty = penalty_rank(config.top_k);
+
+    // 各通道排名映射：doc_id → (rank, raw_score)
+    let vector_ranks = vector_results.map(channel_rank_map);
+    let bm25_ranks = bm25_results.map(channel_rank_map);
+    let graph_ranks = graph_results.map(channel_rank_map);
+    let keyword_ranks: Option<std::collections::HashMap<&I, (f64, f64)>> =
+        Some(channel_rank_map(keyword_results));
+
+    // 收集所有出现的文档 ID（去重，保持首次出现顺序：vector → bm25 → graph → keyword）
+    let mut seen = std::collections::HashSet::new();
+    let mut all_ids: Vec<&I> = Vec::new();
+    for ch in [
+        vector_results,
+        bm25_results,
+        graph_results,
+        Some(keyword_results),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for (id, _) in &ch.results {
+            if seen.insert(id) {
+                all_ids.push(id);
+            }
+        }
+    }
+
+    let mut fused: Vec<FusedResult<I>> = all_ids
+        .iter()
+        .map(|id| {
+            let (v_rank, v_score) = rank_and_score(&vector_ranks, id, penalty);
+            let (b_rank, b_score) = rank_and_score(&bm25_ranks, id, penalty);
+            let (g_rank, g_score) = rank_and_score(&graph_ranks, id, penalty);
+            let (kw_rank, _) = rank_and_score(&keyword_ranks, id, penalty);
+
+            let mut rrf_score = 0.0;
+            if vector_results.is_some() {
+                rrf_score += 1.0 / (config.k + v_rank);
+            }
+            if bm25_results.is_some() {
+                rrf_score += config.bm25_weight / (config.k + b_rank);
+            }
+            if graph_results.is_some() {
+                rrf_score += config.graph_weight / (config.k + g_rank);
+            }
+            rrf_score += config.keyword_weight / (config.k + kw_rank);
+
+            FusedResult {
+                doc_id: (*id).clone(),
+                rrf_score,
+                vector_raw_score: v_score,
+                bm25_raw_score: b_score,
+                graph_raw_score: g_score,
+            }
+        })
+        .collect();
+
+    fused.sort_by(|a, b| {
+        b.rrf_score
+            .partial_cmp(&a.rrf_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    fused.truncate(config.top_k);
+    fused
+}
+
+/// 构建通道排名映射：doc_id → (rank, raw_score)（索引 0 对应 rank=1）。
+fn channel_rank_map<I: Clone + std::hash::Hash + Eq>(
+    ch: &ChannelResult<I>,
+) -> std::collections::HashMap<&I, (f64, f64)> {
+    ch.results
+        .iter()
+        .enumerate()
+        .map(|(idx, (id, score))| (id, ((idx + 1) as f64, *score)))
+        .collect()
+}
+
+/// 在排名映射中查询文档的 (rank, raw_score)；缺席或通道整体缺席时返回惩罚排名。
+fn rank_and_score<I: Clone + std::hash::Hash + Eq>(
+    ranks: &Option<std::collections::HashMap<&I, (f64, f64)>>,
+    id: &I,
+    penalty: f64,
+) -> (f64, Option<f64>) {
+    match ranks {
+        Some(map) => map
+            .get(id)
+            .map(|(r, s)| (*r, Some(*s)))
+            .unwrap_or((penalty, None)),
+        None => (penalty, None),
+    }
+}
+
+// =========================================================
 // 单元测试
 // =========================================================
 
@@ -581,5 +716,83 @@ mod tests {
                 "results should be sorted descending"
             );
         }
+    }
+
+    // --- rrf_fuse_with_keyword (四通道) ---
+
+    /// 关键词通道独有命中可把文档提升进 top（向量前 k 之外的文档进入结果）。
+    #[test]
+    fn keyword_channel_lifts_doc_into_top() {
+        // 向量返回恰好 top_k=4 条；关键词通道独有第 5 篇文档 E（rank 1）
+        let config = RrfConfig {
+            top_k: 4,
+            ..Default::default()
+        };
+        let vec = make_channel(vec![("a", 0.9), ("b", 0.8), ("c", 0.7), ("d", 0.6)]);
+        let bm25 = make_channel::<&str>(vec![]);
+        let graph = make_channel::<&str>(vec![]);
+        let keyword = make_channel(vec![("e", 0.9)]);
+
+        let fused = rrf_fuse_with_keyword(Some(&vec), Some(&bm25), Some(&graph), &keyword, &config);
+        let ids: Vec<&str> = fused.iter().map(|f| f.doc_id).collect();
+        assert!(
+            ids.contains(&"e"),
+            "关键词通道独有命中应进入 top，实际 {ids:?}"
+        );
+        // 关键词通道无 raw 字段暴露（e 非向量/BM25/图谱命中，其通道分数仅计入 rrf）
+        let e = fused.iter().find(|f| f.doc_id == "e").unwrap();
+        assert!(e.vector_raw_score.is_none());
+        assert!(e.bm25_raw_score.is_none());
+        assert!(e.graph_raw_score.is_none());
+    }
+
+    /// keyword_weight 参与融合：权重拉低后关键词独有命中退出 top（权重改变排序）。
+    #[test]
+    fn keyword_weight_changes_membership() {
+        let vec = make_channel(vec![("a", 0.9), ("b", 0.8), ("c", 0.7), ("d", 0.6)]);
+        let keyword = make_channel(vec![("e", 0.9)]);
+
+        let high = RrfConfig {
+            top_k: 4,
+            keyword_weight: 1.0,
+            ..Default::default()
+        };
+        let fused_high = rrf_fuse_with_keyword(Some(&vec), None, None, &keyword, &high);
+        assert!(
+            fused_high.iter().any(|f| f.doc_id == "e"),
+            "keyword_weight=1.0 时关键词独有命中应进入 top"
+        );
+
+        let low = RrfConfig {
+            top_k: 4,
+            keyword_weight: 0.05,
+            ..Default::default()
+        };
+        let fused_low = rrf_fuse_with_keyword(Some(&vec), None, None, &keyword, &low);
+        assert!(
+            !fused_low.iter().any(|f| f.doc_id == "e"),
+            "keyword_weight 过低时关键词独有命中应退出 top（权重参与融合）"
+        );
+    }
+
+    /// 仅关键词通道有数据 → 单通道语义仍可返回该文档。
+    #[test]
+    fn keyword_only_channel_returns_doc() {
+        let config = RrfConfig {
+            top_k: 5,
+            ..Default::default()
+        };
+        let keyword = make_channel(vec![("kw_only", 0.8), ("kw2", 0.6)]);
+
+        let fused = rrf_fuse_with_keyword(None, None, None, &keyword, &config);
+        assert_eq!(fused.len(), 2);
+        assert_eq!(fused[0].doc_id, "kw_only");
+        assert!(fused[0].rrf_score > 0.0);
+    }
+
+    /// 关键词通道权重默认值 1.0（与向量同权重）。
+    #[test]
+    fn keyword_weight_default_is_one() {
+        assert!((RrfConfig::default().keyword_weight - 1.0).abs() < f64::EPSILON);
     }
 }

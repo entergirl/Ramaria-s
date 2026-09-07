@@ -2,7 +2,8 @@
 //!
 //! 设计特点:
 //! - 对应 send_message 管线 Step 5: 记忆检索 + Persona-Aware RAG
-//! - 三通道检索：向量 + BM25 + 图谱，RRF 融合
+//! - 多通道检索：向量 + BM25 + 图谱（RRF 融合），关键词镜像作为第四通道
+//!   （app 层预取 `(label, score)` 纯数据后交同步 search 融合）
 //! - 嵌入模型不可用时降级为 BM25 + 图谱（向量通道权重=0）
 //! - 检索结果应用 Ebbinghaus 时间衰减，使近期记忆排序优于旧记忆
 //! - Persona-Aware 过滤：按 persona_uid + share 阈值双重过滤
@@ -131,7 +132,45 @@ impl PipelineStage for StageRetrieveMemory {
             }
         };
 
-        // ---- 5.2 执行三通道检索（RwLock::read() 允许多读并发） ----
+        // ---- 5.1.5 关键词镜像通道预取（混合检索第四通道） ----
+        // 镜像查询异步（语义层需 embedding），必须在检索器读锁之前完成；
+        // 预取后仅把 (label, score) 纯数据交给同步 search（无句柄泄漏）。
+        // 降级（全部静默，行为与三通道一致）：通道开关关闭 / 镜像无文档 /
+        // 查询词为空 / 返回空 / 服务锁不可用 → keyword_channel = None。
+        let mut keyword_channel: Option<Vec<(String, f64)>> = None;
+        if rag_active && ctx.config.retrieval.enable_keyword_channel {
+            let kw_top_k = ctx.config.retrieval.l1_retrieve_top_k as usize;
+            let mirror = match ctx.keyword_service.read() {
+                Ok(g) => Some((g.composite_arc(), g.pool_snapshot(), g.doc_count())),
+                Err(e) => {
+                    tracing::warn!(error = %e, "关键词服务锁不可用，跳过关键词通道");
+                    None
+                }
+            };
+            if let Some((composite, pool, doc_count)) = mirror {
+                if doc_count == 0 {
+                    tracing::debug!("关键词镜像无文档，跳过关键词通道");
+                } else {
+                    let hits = ramaria_memory::keyword::service::query_text_labels(
+                        &composite,
+                        &pool,
+                        query,
+                        persona_uid,
+                        ctx.embedding.as_deref(),
+                        kw_top_k,
+                    )
+                    .await;
+                    if hits.is_empty() {
+                        tracing::debug!("关键词镜像无命中，跳过关键词通道");
+                    } else {
+                        tracing::debug!(hits = hits.len(), "关键词镜像通道命中");
+                        keyword_channel = Some(hits);
+                    }
+                }
+            }
+        }
+
+        // ---- 5.2 执行多通道检索（RwLock::read() 允许多读并发） ----
         // 探针消融：RAG 闸门关闭（`injection.memory_rag=false`，B0）时不执行检索，
         // memory_context 恒 None；utt 原文通道（5.5）独立于 RAG 仍按需执行。
         let mut results = if rag_active {
@@ -151,12 +190,18 @@ impl PipelineStage for StageRetrieveMemory {
                 filter_share: true,
             };
 
-            match &query_vec {
-                Some(qv) => retriever.search(&request, Some(qv)),
-                None => retriever.search(&request, None),
+            match (&query_vec, keyword_channel) {
+                (Some(qv), Some(hits)) => {
+                    retriever.search_with_keyword_hits(&request, Some(qv), Some(hits))
+                }
+                (Some(qv), None) => retriever.search(&request, Some(qv)),
+                (None, Some(hits)) => {
+                    retriever.search_with_keyword_hits(&request, None, Some(hits))
+                }
+                (None, None) => retriever.search(&request, None),
             }
         } else {
-            tracing::debug!("RAG 相关记忆闸门关闭（探针消融），跳过三通道检索");
+            tracing::debug!("RAG 相关记忆闸门关闭（探针消融），跳过多通道检索");
             Vec::new()
         };
 
@@ -239,7 +284,8 @@ impl PipelineStage for StageRetrieveMemory {
                 .map(PersonaKind::from_uid)
                 .unwrap_or(PersonaKind::Rama);
 
-            let rag_config = RagConfig::default();
+            // 摘要路 RAG 格式化参数从 core [retrieval] 组组装（默认与既有行为等价）
+            let rag_config = RagConfig::from_retrieval_config(&ctx.config.retrieval);
             let filtered = filter_by_persona(&results, persona_kind, &rag_config);
 
             if filtered.is_empty() {
@@ -248,10 +294,22 @@ impl PipelineStage for StageRetrieveMemory {
             } else {
                 let context = format_context_text(&filtered, &rag_config);
 
+                // 记录"实际进入上下文文本"的文档标识（RAG 覆盖集合）。
+                // 语义边界: 与 format_context_text 同批——只取过滤后、受
+                // rag_max_memories 截断约束的文档（L1 uuid / L2 事件 id）；
+                // 图谱实体无文档映射，不纳入覆盖集合。
+                input.memory_doc_labels = filtered
+                    .iter()
+                    .take(rag_config.max_memories)
+                    .filter(|r| matches!(&r.doc_id, DocId::L1(_) | DocId::L2(_)))
+                    .map(|r| r.doc_id.to_string())
+                    .collect();
+
                 tracing::debug!(
                     total_results = results.len(),
                     filtered = filtered.len(),
                     context_chars = context.chars().count(),
+                    covered_labels = input.memory_doc_labels.len(),
                     "记忆上下文已组装（含时间衰减）"
                 );
 
@@ -697,5 +755,233 @@ mod tests {
 
         let output = stage.execute(&ctx, data).await.expect("should succeed");
         assert!(output.utt_context.is_some(), "向量通道应命中");
+    }
+
+    // =========================================================
+    // 关键词镜像通道（第四通道）测试
+    // =========================================================
+
+    /// 构造同时写入 retriever 与关键词镜像的 L1 文档。
+    fn seed_l1_both(ctx: &PipelineContext, doc_id: Uuid, summary: &str, keywords: Option<&str>) {
+        use ramaria_memory::retriever::L1DocView;
+        let view = L1DocView {
+            id: doc_id,
+            summary: summary.to_string(),
+            keywords: keywords.map(|s| s.to_string()),
+            persona_uid: Some("persona-0001".to_string()),
+            created_at: 1000,
+            salience: 0.8,
+            last_accessed_at: None,
+        };
+        {
+            let mut retriever = ctx.retriever.write().expect("retriever 锁可用");
+            retriever.index_l1(&view);
+        }
+        {
+            let mut svc = ctx.keyword_service.write().expect("keyword_service 锁可用");
+            svc.reset_docs_from_views(&[view], &[]);
+        }
+    }
+
+    /// 关键词镜像经别名归一可恢复 BM25 字面未命中的记忆（融合真实生效）。
+    #[tokio::test]
+    async fn keyword_channel_recovers_doc_via_alias_when_bm25_misses() {
+        use ramaria_core::keyword::KeywordPoolRow;
+        let ctx = test_context(
+            Arc::new(MockStorage::new()),
+            Arc::new(MockLlm::local()),
+            None, // embedding 不可用 → 两层镜像 + 无向量通道（纯字面融合）
+        );
+        let doc_id = Uuid::new_v4();
+        // 摘要刻意不含"职业倦怠/最近"等查询 bigram，确保 BM25 无法命中
+        seed_l1_both(
+            &ctx,
+            doc_id,
+            "用户跟我说加班到深夜真的很累",
+            Some("工作压力,加班"),
+        );
+
+        // 词典池：工作压力(canonical) + 职业倦怠(alias → 工作压力)
+        {
+            let mut svc = ctx.keyword_service.write().expect("keyword_service 锁可用");
+            svc.load_pool_entries(&[
+                KeywordPoolRow {
+                    rowid: 1,
+                    keyword: "工作压力".to_string(),
+                    use_count: 5,
+                    created_at: 0,
+                    alias_status: None,
+                    canonical_id: None,
+                    canonical_keyword: None,
+                },
+                KeywordPoolRow {
+                    rowid: 2,
+                    keyword: "职业倦怠".to_string(),
+                    use_count: 2,
+                    created_at: 0,
+                    alias_status: Some("alias".to_string()),
+                    canonical_id: Some(1),
+                    canonical_keyword: Some("工作压力".to_string()),
+                },
+            ]);
+        }
+
+        // 前置确认：纯 BM25 无法命中口语别名说法（无共享 bigram）
+        {
+            let guard = ctx.retriever.read().expect("retriever 锁可用");
+            let req = SearchRequest {
+                query: "最近职业倦怠怎么办".to_string(),
+                persona_uid: Some("persona-0001".to_string()),
+                top_k: 5,
+                filter_share: true,
+            };
+            let bm25_only = guard.search(&req, None);
+            assert!(
+                bm25_only.is_empty(),
+                "BM25 字面无共享 bigram，应无法命中（关键词通道的补足前提）"
+            );
+        }
+
+        let stage = StageRetrieveMemory::new();
+        let data = make_data("最近职业倦怠怎么办", Some("persona-0001"));
+        let output = stage.execute(&ctx, data).await.expect("应成功");
+        assert!(
+            output.memory_context.is_some(),
+            "关键词镜像经别名归一应命中并组装 RAG 上下文"
+        );
+    }
+
+    /// 关键词镜像通道开关关闭 → 检索回退三通道（BM25 字面命中仍正常）。
+    #[tokio::test]
+    async fn keyword_channel_disabled_keeps_bm25_behavior() {
+        let mut ctx = test_context(
+            Arc::new(MockStorage::new()),
+            Arc::new(MockLlm::local()),
+            None,
+        );
+        ctx.config.retrieval.enable_keyword_channel = false;
+        let doc_id = Uuid::new_v4();
+        seed_l1_both(
+            &ctx,
+            doc_id,
+            "用户最近工作压力很大常常加班",
+            Some("工作压力,加班"),
+        );
+
+        let stage = StageRetrieveMemory::new();
+        let data = make_data("工作压力", Some("persona-0001"));
+        let output = stage.execute(&ctx, data).await.expect("应成功");
+        assert!(
+            output.memory_context.is_some(),
+            "关闭关键词通道后 BM25 字面命中仍应组装上下文"
+        );
+    }
+
+    // =========================================================
+    // RAG 覆盖文档 label 传播（memory_doc_labels）
+    // =========================================================
+
+    /// 检索命中 L1 → memory_doc_labels 记录实际注入文本的 L1 label（`L1:{uuid}`）。
+    #[tokio::test]
+    async fn rag_hit_records_l1_doc_label() {
+        let ctx = test_context(
+            Arc::new(MockStorage::new()),
+            Arc::new(MockLlm::local()),
+            None,
+        );
+        let doc_id = Uuid::new_v4();
+        {
+            let mut retriever = ctx.retriever.write().expect("retriever 锁可用");
+            retriever.index_l1(&ramaria_memory::retriever::L1DocView {
+                id: doc_id,
+                summary: "用户讨论了Rust编程语言".to_string(),
+                keywords: Some("Rust,编程".to_string()),
+                persona_uid: Some("persona-0001".to_string()),
+                created_at: 1000,
+                salience: 0.8,
+                last_accessed_at: None,
+            });
+        }
+        let stage = StageRetrieveMemory::new();
+        let data = make_data("Rust", Some("persona-0001"));
+
+        let output = stage.execute(&ctx, data).await.expect("应成功");
+        assert!(output.memory_context.is_some(), "L1 检索应命中");
+        assert_eq!(
+            output.memory_doc_labels,
+            vec![format!("L1:{doc_id}")],
+            "RAG 覆盖集合应含实际注入的 L1 label"
+        );
+    }
+
+    /// 检索命中 L2 事件 → memory_doc_labels 记录 `L2:{id}`。
+    #[tokio::test]
+    async fn rag_hit_records_l2_doc_label() {
+        let ctx = test_context(
+            Arc::new(MockStorage::new()),
+            Arc::new(MockLlm::local()),
+            None,
+        );
+        // 注入 L2 事件（share 高，persona-0001 按 Char 类阈值 0.5 通过）
+        ctx.retriever.write().expect("retriever 锁可用").index_l2(
+            &ramaria_memory::retriever::L2DocView {
+                id: 42,
+                title: "完成Rust项目".to_string(),
+                summary: "用户完成了第一个Rust项目".to_string(),
+                keywords: Some("Rust,项目".to_string()),
+                attitude: Some("满意".to_string()),
+                paraphrase: None,
+                persona_uid: "persona-0001".to_string(),
+                share: 0.9,
+                confidence: 0.9,
+                created_at: 1000,
+                salience: 0.8,
+            },
+        );
+        let stage = StageRetrieveMemory::new();
+        let data = make_data("Rust", Some("persona-0001"));
+
+        let output = stage.execute(&ctx, data).await.expect("应成功");
+        assert!(output.memory_context.is_some(), "L2 检索应命中");
+        assert_eq!(
+            output.memory_doc_labels,
+            vec!["L2:42".to_string()],
+            "覆盖集合应含实际注入的 L2 label: {:?}",
+            output.memory_doc_labels
+        );
+    }
+
+    /// RAG 闸门关闭（探针消融 B0）：memory_context 置空，覆盖集合也为空。
+    #[tokio::test]
+    async fn rag_gate_off_yields_empty_doc_labels() {
+        let ctx = test_context(
+            Arc::new(MockStorage::new()),
+            Arc::new(MockLlm::local()),
+            None,
+        );
+        {
+            let mut retriever = ctx.retriever.write().expect("retriever 锁可用");
+            retriever.index_l1(&ramaria_memory::retriever::L1DocView {
+                id: Uuid::new_v4(),
+                summary: "用户讨论了Rust编程语言".to_string(),
+                keywords: Some("Rust,编程".to_string()),
+                persona_uid: Some("persona-0001".to_string()),
+                created_at: 1000,
+                salience: 0.8,
+                last_accessed_at: None,
+            });
+        }
+        let mut ctx = ctx;
+        ctx.config.injection.memory_rag = false;
+        ctx.config.injection.utt = false; // 关闭双闸门 → 跳过检索
+        let stage = StageRetrieveMemory::new();
+        let data = make_data("Rust", Some("persona-0001"));
+
+        let output = stage.execute(&ctx, data).await.expect("应成功");
+        assert!(output.memory_context.is_none());
+        assert!(
+            output.memory_doc_labels.is_empty(),
+            "RAG 闸门关闭 → 覆盖集合应为空"
+        );
     }
 }

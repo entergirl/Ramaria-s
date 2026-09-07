@@ -18,6 +18,7 @@ use ramaria_core::traits::{
 };
 use ramaria_core::types::{AppState, BackendConfig, Session};
 use ramaria_llm::keychain::Keychain;
+use ramaria_memory::keyword::KeywordService;
 use ramaria_memory::retriever::Retriever;
 use uuid::Uuid;
 
@@ -216,6 +217,7 @@ pub trait PipelineStage: Send + Sync {
 /// - `embedding`: 可选嵌入模型（None 表示未配置，进入 Degraded 状态）
 /// - `config`: 应用配置（只读快照）
 /// - `retriever`: 内存检索器（BM25 + 向量 + 图谱），需 Mutex 保护读写并发
+/// - `keyword_service`: 关键词服务镜像（词典池 + 倒排镜像；检索融合的第四通道）
 /// - `keychain`: OS keychain（API key 存取）
 /// - `lifecycle`: Session 生命周期编排器
 pub struct PipelineContext {
@@ -229,6 +231,8 @@ pub struct PipelineContext {
     pub config: RamariaConfig,
     /// 内存检索器（RwLock 替代 Mutex，允许多读并发）
     pub retriever: Arc<RwLock<Retriever>>,
+    /// 关键词服务镜像（KeywordPool + CompositeIndex；M4 检索融合第四通道数据源）
+    pub keyword_service: Arc<RwLock<KeywordService>>,
     /// OS keychain
     pub keychain: Arc<Keychain>,
     /// Session 生命周期编排器
@@ -244,17 +248,20 @@ impl PipelineContext {
     /// - `embedding`: 可选嵌入模型（None 表示未配置）。
     /// - `config`: 应用配置。
     /// - `retriever`: 检索器（Arc<RwLock> 包裹，支持并发读写）。
+    /// - `keyword_service`: 关键词服务镜像（Arc<RwLock> 包裹）。
     /// - `keychain`: OS keychain。
     /// - `lifecycle`: Session 生命周期编排器。
     ///
     /// 返回:
     /// - 可用于 `SendMessagePipeline::execute` 的共享上下文。
+    #[allow(clippy::too_many_arguments)] // 运行期共享依赖逐一显式注入（测试需构造缺省空服务）
     pub fn new(
         storage: Arc<dyn StorageBackend>,
         llm: Arc<dyn LlmProvider>,
         embedding: Option<Arc<dyn EmbeddingProvider>>,
         config: RamariaConfig,
         retriever: Arc<RwLock<Retriever>>,
+        keyword_service: Arc<RwLock<KeywordService>>,
         keychain: Arc<Keychain>,
         lifecycle: Arc<SessionLifecycle>,
     ) -> Self {
@@ -264,6 +271,7 @@ impl PipelineContext {
             embedding,
             config,
             retriever,
+            keyword_service,
             keychain,
             lifecycle,
         }
@@ -332,6 +340,15 @@ pub struct PipelineData {
     // === Stage 5: RetrieveMemory ===
     /// RAG 检索结果格式化文本（None 表示无相关记忆）
     pub memory_context: Option<String>,
+    /// 实际进入 RAG 上下文文本的文档 label 集合（`L1:{uuid}` / `L2:{id}`）。
+    ///
+    /// 字段约定:
+    /// - 仅记录被 Persona-Aware 过滤后且受 `rag.max_memories` 截断约束、
+    ///   真正格式化为上下文文本的文档（被过滤/超出预算的文档不记录）。
+    /// - RAG 闸门关闭 / 无命中 / 过滤后为空 → 空 Vec。
+    /// - 用途: 知识层注入去重（`fact::retriever::dedup_knowledge_facts`）消费，
+    ///   避免同一事实在 RAG 摘要与知识卡片间重复注入。
+    pub memory_doc_labels: Vec<String>,
 
     // === Stage 5.5: utt 原文块检索（v1.4） ===
     /// utt 原文片段（已按预算裁剪渲染；白名单外/未命中为 None，等同 v1.3）
@@ -396,6 +413,7 @@ impl PipelineData {
             recent_summaries: Vec::new(),
             last_active_at: None,
             memory_context: None,
+            memory_doc_labels: Vec::new(),
             utt_context: None,
             bridge_context: None,
             system_prompt: None,

@@ -6,13 +6,16 @@
 //! - 分层: stable（不轻易覆盖）/ volatile（新覆盖旧保留版本链，随事件时间衰减）/ historical（只追加）
 //! - 版本链仲裁: manual > 多事件互证 > 单事件（时间新者胜）；互证 = ≥2 独立事件 + 语义 ≥ 0.7 + valence 方向一致
 //! - 主观隐含事实: conf=0.5 入 candidate 轨道，互证后提升 active
+//! - auto_fact_detect 增强层（召回兜底）：
+//!   - extractor: 策略① 隐含事实按字段补全、策略② L1 保真线索→断言候选
+//!   - arbitration: 策略③ 候选互证提升判定（关键词交集降级，纯内存）
 //! - 规则判定器检索注入: 零新增 LLM 调用，不命中不注入（静默降级）
 //!
 //! 模块组织:
 //! - `dedup.rs`: 判重（纯逻辑，mock embedding 确定测试）
 //! - `tier.rs`: 分层决策 + 时效衰减
-//! - `arbitration.rs`: 冲突仲裁（互证/优先级/矛盾保护）
-//! - `extractor.rs`: 事实抽取（规则兜底 + LLM 可选）
+//! - `arbitration.rs`: 冲突仲裁 + 候选互证提升（互证/优先级/矛盾保护）
+//! - `extractor.rs`: 事实抽取（规则兜底 + LLM 可选）+ 增强策略①/②
 //! - `retriever.rs`: 规则判定器 + 同 field/向量召回 + 注入文本构造
 
 pub mod arbitration;
@@ -25,10 +28,17 @@ pub mod tier;
 // 公共类型与 re-export
 // =========================================================
 
-pub use arbitration::{ArbitrateOutcome, Arbitration, ArbitrationInput, Mutation};
+pub use arbitration::{
+    ArbitrateOutcome, Arbitration, ArbitrationInput, CorroborateVerdict, CorroborationInput,
+    Mutation, corroborate_candidates,
+};
 pub use dedup::{DedupInput, DedupVerdict, check_dedup};
 pub use extractor::{
-    ExtractInput, FactCandidate, FactExtractor, RuleExtractor, build_extract_prompt,
+    EXTRACT_CONFIDENCE_THRESHOLD, ExtractInput, FactCandidate, FactExtractor,
+    L1_EVIDENCE_CONFIDENCE, L1_EVIDENCE_MAX_CONTENT_CHARS, L1_EVIDENCE_MIN_CHARS,
+    MAX_TEXT_KEYWORDS, RuleExtractor, SUBJECTIVE_IMPLIED_CONFIDENCE, build_extract_prompt,
+    classify_event_field, extract_from_l1_evidence, extract_implied_fact_from_event,
+    extract_text_keywords, should_extract,
 };
 pub use retriever::{
     KnowledgeQuery, KnowledgeRetrieval, MatchLevel, build_knowledge_injection,
