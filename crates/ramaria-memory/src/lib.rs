@@ -232,12 +232,17 @@ pub use rebuild::{IndexRebuilder, RebuildConfig, RebuildStats, events_to_views, 
 
 // Prompt System Prompt 构建
 pub use prompt::{
-    builder::{PromptConfig, PromptContext, assemble_prompt, build_cross_session_narrative},
+    builder::{
+        CoordinatedPrompt, PromptConfig, PromptContext, PromptPart, PromptPartKind,
+        assemble_prompt, assemble_prompt_coordinated, build_cross_session_narrative,
+        join_prompt_parts, render_prompt_parts,
+    },
     example_selector::{ExampleSelector, ExampleSelectorConfig, extract_keywords},
     injection_guard::{MemoryInjectionStatus, apply_injection_guard, check_injection},
 };
 
 // Token Budget 管理
 pub use token_budget::{
-    BudgetedContext, TokenBudgetConfig, apply_token_budget, estimate_tokens, truncate_at_boundary,
+    BudgetedContext, CoordinatedInjection, TokenBudgetConfig, allocate_injection_budget,
+    apply_token_budget, estimate_tokens, truncate_at_boundary,
 };

@@ -17,9 +17,13 @@
 //! - 脉络层独立预算（≤ 30%），超限裁剪顺序：原文块 → 桥接头部
 //!   → 相关记忆 → 脉络保最近（预算分配器见 `layers.rs`）。
 //! - 助手类 persona（原文白名单外）不注入原文/桥接。
+//! - 结构化装配：`render_prompt_parts` 暴露固定骨架与四层注入块（`PromptPart`），
+//!   `assemble_prompt` 为其薄封装；协调预算开启时经
+//!   `assemble_prompt_coordinated` 按可配顺序保留高优先层。
 //!
 //! 依赖:
 //! - `ramaria_core::types`: Persona, PersonaFact, PersonalityTrait, PersonaExample
+//! - `ramaria_core::config`: InjectionSlot / InjectionBudgetConfig（协调预算）
 //! - `ramaria_memory::rag`: RAG 上下文格式化（由上层传入）
 //! - `prompt::layers`: 四层注入结构与预算分配器
 
@@ -28,9 +32,71 @@ use crate::prompt::layers::{
 };
 use crate::retriever::UttHit;
 use chrono::Local;
+use ramaria_core::config::InjectionSlot;
 use ramaria_core::types::{
     Persona, PersonaExample, PersonaFact, PersonalityTrait, ProfileField, TraitStatus,
 };
+
+// =========================================================
+// 样板文案常量（引导句/占位/默认规则集中管理）
+// =========================================================
+//
+// 约束（标签压缩/提示优化）:
+// - 本文件所有引导句/占位/默认规则文本统一收口为下方常量，函数只引用不内联，
+//   使"样板体积下降/每类引导句长度上限"可被单测直接断言（见 builder/tests.rs）。
+// - 语义等价铁律：压缩只精简引导措辞与样板重复，不删减注入内容本身
+//   （原文/事实/规则/风格/示例由上层数据源提供，本处仅骨架与引导）。
+// - 段落标题（`# 角色（行为层）` 等）为层结构标识，已被模板映射/探针/集成测试
+//   锁定，保持稳定；这里仅收纳随内容拼接的引导句与固定段落文本。
+
+/// Capacity 首段引导：身份 + 记忆能力 + 安全边界（含原"知识边界"默认三条
+/// 中与能力边界语义重叠的项，去重后不重复出现）。
+const CAPACITY_INTRO: &str = "# 能力边界\n\
+你是 Ramaria，能记住与用户的对话历史并在合适时机自然引用；\
+知识截至训练时间，不编造、不确定就说明；\
+不做医疗/法律/金融建议，不生成有害、违法或不道德内容。";
+
+/// 默认知识边界子段（无 persona 自定义边界时追加；仅保留原默认三条中
+/// "知识时效/不臆测"一条——能力、安全边界已由 [CAPACITY_INTRO] 覆盖）。
+const KNOWLEDGE_BOUNDARY_DEFAULT: &str = "\n\n## 知识边界\n\
+知识截至训练时间，不臆测未知的事实或日期。";
+
+/// 角色层无 persona 时的默认身份段（`# 角色（行为层）` 头部）。
+const ROLE_DEFAULT_TEXT: &str = "# 角色（行为层）\n\
+你是 Ramaria，一个有记忆能力、善解人意的 AI 助手，\
+能记住对话历史并在后续对话中自然引用。";
+
+/// 记忆层首段引导（说明记忆来源与引用时机）。
+const MEMORY_SECTION_INTRO: &str = "# 记忆（脉络层）\n\
+以下记忆信息是你了解用户的依据，仅在话题相关或用户主动提及时自然引用，不强行插入。";
+
+/// 近期对话脉络无摘要时的占位提示。
+const NARRATIVE_PLACEHOLDER: &str = "（你们是首次对话）";
+
+/// 相关历史记忆占位提示（无 RAG 命中时）。
+const RAG_PLACEHOLDER: &str = "（暂无直接相关的历史记忆）";
+
+/// 原文片段引导（utt 块；保留"勿逐字抄袭"边界）。
+const UTT_LEAD: &str = "以下是角色原话，供学习语气、用词与口癖（勿逐字抄袭）：\n";
+
+/// 桥接引导（上一会话尾部；保留"勿逐字引用/勿编造"边界）。
+const BRIDGE_LEAD: &str = "上一段对话结尾原文，用于保持连贯（勿逐字引用，勿编造未提及内容）：\n";
+
+/// 对话示例引导（Few-shot）。
+const STATEMENT_LEAD: &str = "参考以下示例的风格与节奏：";
+
+/// 无自定义规则时的最小化默认回复规则（两条合并原三条语义）。
+const CORE_RULES_DEFAULT: &str = "\n### 核心规则\n\
+- 用自然友好的语气回复，简洁不冗长。\n\
+- 不确定就如实说明。";
+
+/// 记忆引用规则段（标题 + 四条压缩规则；语义与压缩前四条一致：
+/// 时机/措辞/主动回溯 vs 被动响应/跨会话间隔策略）。
+const MEMORY_CITATION_RULES: &str = "\n### 记忆引用规则\n\
+1. **时机**：仅当与记忆明确相关才引用；打招呼或全新话题不硬插「上次我们聊到…」。\n\
+2. **措辞**：用「记得你之前…」等自然表达，不用「根据系统记录…」等机械措辞。\n\
+3. **主动回溯**：用户问「你还记得…吗」即主动邀请，可自由引用；否则仅在话题自然相关时引用。\n\
+4. **跨会话**：间隔短（几小时内）可在回复中自然衔接；间隔长（几天）先寒暄、观察用户是否延续。";
 
 // =========================================================
 // System Prompt 装配配置
@@ -156,7 +222,7 @@ pub struct PromptContext {
     /// 字段约定:
     /// - 按时间降序排列（最近在前）。
     /// - 每条为格式化好的摘要文本（含时间段和氛围）。
-    /// - 为空时显示"（这是你与用户的首次对话）"。
+    /// - 为空时显示"（你们是首次对话）"占位提示。
     pub recent_session_summaries: Vec<String>,
 
     /// 该 persona 最近一次活跃时间（当前语境块）
@@ -279,11 +345,126 @@ pub const TEMPLATE_LAYER_MAP: &[(&str, &str, &str)] = &[
 // 装配函数
 // =========================================================
 
+/// Prompt 部件类别：固定骨架或某注入通道。
+///
+/// 字段约定:
+/// - `Fixed`: 系统提示骨架（能力边界/角色层/当前时间），不参与注入预算裁剪。
+/// - `Injection(slot)`: 可协调注入块（行为/知识/表达/脉络四层之一），超预算时
+///   低优先通道可被整块丢弃（由协调预算机制处理）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptPartKind {
+    /// 固定骨架（始终保留）
+    Fixed,
+    /// 注入通道块
+    Injection(InjectionSlot),
+}
+
+/// System Prompt 的可组成单元（固定骨架或注入块）。
+///
+/// 职责:
+/// - 承载结构化装配中间产物，使上层能在块粒度执行注入预算协调后重组。
+/// - `content` 为已渲染文本；内容为空（或仅空白）时 join 自动跳过。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptPart {
+    /// 部件类别（决定是否参与注入预算裁剪）
+    pub kind: PromptPartKind,
+    /// 渲染内容（trim 为空表示该块不产生段落）
+    pub content: String,
+}
+
+/// 按四层模板顺序渲染全部 Prompt 部件。
+///
+/// 段落顺序（与 `assemble_prompt` 输出一致）:
+/// 能力边界(Fixed) → 角色层(Fixed) → 行为层(Inject Behavior) →
+/// 表达层(Inject Style) → 知识层(Inject Knowledge) → 脉络层(Inject Memory)
+/// → 当前时间(Fixed)。
+///
+/// 说明:
+/// - 空块（行为未命中/知识无事实/表达无内容）仍产生 `content=""` 的部件，
+///   join 时自动跳过；`assemble_prompt` 与其输出等价（行为等价重构）。
+pub fn render_prompt_parts(context: &PromptContext, config: &PromptConfig) -> Vec<PromptPart> {
+    vec![
+        PromptPart {
+            kind: PromptPartKind::Fixed,
+            content: build_capacity(config, context),
+        },
+        PromptPart {
+            kind: PromptPartKind::Fixed,
+            content: build_role_layer(context, config),
+        },
+        PromptPart {
+            kind: PromptPartKind::Injection(InjectionSlot::Behavior),
+            content: render_behavior_block(context, config).map_or(String::new(), |b| b.content),
+        },
+        PromptPart {
+            kind: PromptPartKind::Injection(InjectionSlot::Style),
+            content: build_style_layer(context, config),
+        },
+        PromptPart {
+            kind: PromptPartKind::Injection(InjectionSlot::Knowledge),
+            content: render_knowledge_block(context, config).map_or(String::new(), |b| b.content),
+        },
+        PromptPart {
+            kind: PromptPartKind::Injection(InjectionSlot::Memory),
+            content: build_memory(context, config),
+        },
+        PromptPart {
+            kind: PromptPartKind::Fixed,
+            content: build_context_block(context),
+        },
+    ]
+}
+
+/// 将 Prompt 部件序列拼接为完整 System Prompt（空块跳过，块间空行分隔）。
+pub fn join_prompt_parts(parts: &[PromptPart]) -> String {
+    parts
+        .iter()
+        .filter(|p| !p.content.trim().is_empty())
+        .map(|p| p.content.as_str())
+        .collect::<Vec<&str>>()
+        .join("\n\n")
+}
+
+// =========================================================
+// Prompt 体量度量（注入体量—回复长度结构对照）
+// =========================================================
+
+/// Prompt 文本体量（字符数 + token 估算）。
+///
+/// 职责:
+/// - 纯函数统计一段 prompt 的字符数与 token 估算（复用
+///   [`crate::token_budget::estimate_tokens`]），零 I/O。
+/// - 供"注入体量—回复长度对照"使用：对同一请求度量其 system_prompt 与各注入块
+///   体量，即可在真实回复长度数据上做结构对照（效果定论在 M8 高情感数据阶段）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PromptVolume {
+    /// UTF-8 字符数
+    pub chars: usize,
+    /// token 估算（中文 ≈ 2 chars/token、英文 ≈ 4 chars/token）
+    pub tokens: usize,
+}
+
+/// 统计 prompt 文本体量。
+///
+/// 参数:
+/// - `text`: 待统计文本（整条 system_prompt、注入块或骨架均可）。
+///
+/// 返回:
+/// - 字符数与 token 估算。
+pub fn measure_prompt_volume(text: &str) -> PromptVolume {
+    PromptVolume {
+        chars: text.chars().count(),
+        tokens: crate::token_budget::estimate_tokens(text),
+    }
+}
+
 /// 装配完整的四层 System Prompt。
 ///
 /// v2.0: 从 5-Block 格式重构为 CRISPE 七段式。
 /// 精简为四层结构（段落映射见 `TEMPLATE_LAYER_MAP`），
 /// 空块自动跳过（行为/知识槽位当前为空，不产生空段落）。
+/// 本函数为 `render_prompt_parts` + `join_prompt_parts` 的薄封装，
+/// 行为与既有装配完全一致（行为等价重构）。
 ///
 /// 参数:
 /// - `context`: 装配上下文（persona/facts/traits/examples 等）。
@@ -301,23 +482,75 @@ pub const TEMPLATE_LAYER_MAP: &[(&str, &str, &str)] = &[
 /// - 行为层未命中/关闭（`behavior_decision=None`）→ 不产生段落；
 ///   知识层无事实 → 不产生段落。
 pub fn assemble_prompt(context: &PromptContext, config: &PromptConfig) -> String {
-    let mut blocks: Vec<String> = Vec::with_capacity(7);
-    for block in [
-        build_capacity(config, context),
-        build_role_layer(context, config),
-        // 行为层（None → 不产生段落）
-        render_behavior_block(context, config).map_or(String::new(), |b| b.content),
-        build_style_layer(context, config),
-        // 知识层槽位（无事实 → 不产生段落；预算经 PromptConfig 注入）
-        render_knowledge_block(context, config).map_or(String::new(), |b| b.content),
-        build_memory(context, config),
-        build_context_block(context),
-    ] {
-        if !block.trim().is_empty() {
-            blocks.push(block);
-        }
+    join_prompt_parts(&render_prompt_parts(context, config))
+}
+
+/// 协调装配结果：裁剪后的 system_prompt + RAG 记忆上下文 + 统计。
+///
+/// 职责:
+/// - 供 app 编排层在 `[injection_budget].enabled=true` 时直接消费，
+///   替代"整条 system_prompt + memory_context 各占一摊"的旧式预算路径。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoordinatedPrompt {
+    /// 协调后的完整 system_prompt（固定骨架 + 保留的注入块）
+    pub system_prompt: String,
+    /// 协调后的 RAG 记忆上下文（`None` = 未注入 / 被整块丢弃）
+    pub memory_context: Option<String>,
+    /// 被整块丢弃的注入通道（低优先先被裁；RAG 整体丢弃时含 `Rag`）
+    pub dropped: Vec<InjectionSlot>,
+    /// 最终注入总 token（保留注入块 + RAG，≤ 协调预算）
+    pub injected_tokens: usize,
+    /// 是否触发过兜底句子截断（最高优先内容单块本身超总池）
+    pub fallback_truncated: bool,
+}
+
+/// 协调装配：RAG 基座与四层注入在统一 token 池内按优先级分配。
+///
+/// 语义（详见 `token_budget::allocate_injection_budget`）:
+/// - `budget` 为协调预算配置（core `[injection_budget]`）；`enabled=false` 时
+///   本函数退化为普通装配（`system_prompt` 与 `assemble_prompt` 等价，
+///   `memory_context` 原样保留——防御，正常调用方不进入）。
+/// - 固定骨架（能力边界/角色层/当前时间）不参与裁剪，始终完整保留。
+///
+/// 参数:
+/// - `context`: 装配上下文。
+/// - `config`: 装配配置（各层通道内渲染预算仍生效）。
+/// - `budget`: 注入协调预算配置。
+/// - `rag`: RAG 摘要文本（`None` = 无 RAG 注入）。
+pub fn assemble_prompt_coordinated(
+    context: &PromptContext,
+    config: &PromptConfig,
+    budget: &ramaria_core::config::InjectionBudgetConfig,
+    rag: Option<&str>,
+) -> CoordinatedPrompt {
+    let parts = render_prompt_parts(context, config);
+    let layers: Vec<(InjectionSlot, String)> = parts
+        .iter()
+        .filter_map(|p| match p.kind {
+            PromptPartKind::Injection(slot) => Some((slot, p.content.clone())),
+            PromptPartKind::Fixed => None,
+        })
+        .collect();
+    let alloc = crate::token_budget::allocate_injection_budget(&layers, rag, budget);
+
+    let dropped_set: std::collections::HashSet<InjectionSlot> =
+        alloc.dropped.iter().copied().collect();
+    let filtered: Vec<PromptPart> = parts
+        .into_iter()
+        .filter(|p| match p.kind {
+            PromptPartKind::Fixed => true,
+            PromptPartKind::Injection(slot) => !dropped_set.contains(&slot),
+        })
+        .collect();
+    let system_prompt = join_prompt_parts(&filtered);
+
+    CoordinatedPrompt {
+        system_prompt,
+        memory_context: alloc.memory_context,
+        dropped: alloc.dropped,
+        injected_tokens: alloc.injected_tokens,
+        fallback_truncated: alloc.fallback_truncated,
     }
-    blocks.join("\n\n")
 }
 
 // =========================================================
@@ -326,13 +559,7 @@ pub fn assemble_prompt(context: &PromptContext, config: &PromptConfig) -> String
 
 /// 组装能力边界块：AI 助手核心能力 + 知识边界（安全红线，非四层，前置保留）。
 fn build_capacity(config: &PromptConfig, context: &PromptContext) -> String {
-    let mut parts = vec![
-        "# 能力边界\n\
-         你是 Ramaria 记忆系统驱动的 AI 助手。你的核心能力是**记住与用户的对话历史，并在合适的时机自然引用**。\
-         你的知识截止于训练数据，不知道的事情不编造，不确定的信息会说明。\
-         你不提供医疗/法律/金融建议，不生成有害内容。"
-            .to_string(),
-    ];
+    let mut parts = vec![CAPACITY_INTRO.to_string()];
 
     // 知识边界（可选）
     if config.include_knowledge_boundary {
@@ -341,13 +568,7 @@ fn build_capacity(config: &PromptConfig, context: &PromptContext) -> String {
         {
             parts.push(format!("\n\n## 知识边界\n{boundary}"));
         } else {
-            parts.push(
-                "\n\n## 知识边界\n\
-                 - 不要编造你不知道的事实或日期。如果不确定，请诚实说明。\n\
-                 - 不提供医疗、法律或金融建议。\n\
-                 - 不生成有害、违法或不道德的内容。"
-                    .to_string(),
-            );
+            parts.push(KNOWLEDGE_BOUNDARY_DEFAULT.to_string());
         }
     }
 
@@ -366,15 +587,15 @@ fn build_role(context: &PromptContext) -> String {
             persona.name
         )];
 
-        // persona kind 描述
+        // persona kind 描述（一行式角色类型说明）
         let kind_desc = match persona.kind {
             ramaria_core::types::PersonaKind::Rama => "你是 Ramaria 助手自身。",
-            ramaria_core::types::PersonaKind::User => "你正在以用户的视角思考和回复。",
-            ramaria_core::types::PersonaKind::Char => "你正在扮演一个虚构角色。",
-            ramaria_core::types::PersonaKind::Anim => "你正在扮演一个动画角色。",
-            ramaria_core::types::PersonaKind::Oc => "你正在扮演一个原创角色（OC）。",
-            ramaria_core::types::PersonaKind::Hist => "你正在扮演一个历史人物。",
-            _ => "你正在扮演一个角色。",
+            ramaria_core::types::PersonaKind::User => "以用户的视角思考与回复。",
+            ramaria_core::types::PersonaKind::Char => "你扮演一个虚构角色。",
+            ramaria_core::types::PersonaKind::Anim => "你扮演一个动画角色。",
+            ramaria_core::types::PersonaKind::Oc => "你扮演一个原创角色（OC）。",
+            ramaria_core::types::PersonaKind::Hist => "你扮演一个历史人物。",
+            _ => "你扮演一个角色。",
         };
         parts.push(kind_desc.to_string());
 
@@ -388,10 +609,7 @@ fn build_role(context: &PromptContext) -> String {
 
         parts.join("\n")
     } else {
-        "# 角色（行为层）\n\
-         你是 Ramaria，一个具有记忆能力、善解人意的 AI 助手。\n\
-         你可以记住与用户的对话历史，并在后续对话中引用这些记忆。"
-            .to_string()
+        ROLE_DEFAULT_TEXT.to_string()
     }
 }
 
@@ -427,13 +645,7 @@ fn build_memory(context: &PromptContext, config: &PromptConfig) -> String {
 
     let mut parts: Vec<String> = Vec::with_capacity(2);
 
-    parts.push(
-        "# 记忆（脉络层）\n\
-               以下是你的记忆系统检索到的相关信息。你对用户的了解完全来源于此。\
-               请仔细阅读，在对话中自然地运用这些信息——但只在话题相关或用户主动提及时引用，\
-               不强行插入无关记忆。"
-            .to_string(),
-    );
+    parts.push(MEMORY_SECTION_INTRO.to_string());
 
     // 脉络层预算分配（独立预算，默认 1000 tokens × 30% × 2 = 600 字符）
     let budget = config
@@ -450,7 +662,7 @@ fn build_memory(context: &PromptContext, config: &PromptConfig) -> String {
     // 近期对话脉络（预算内保最近；预算不足时显示"首次对话"）
     if config.include_narrative {
         if alloc.summaries.is_empty() {
-            parts.push("\n\n## 近期对话脉络\n（这是你与用户的首次对话）".to_string());
+            parts.push(format!("\n\n## 近期对话脉络\n{}", NARRATIVE_PLACEHOLDER));
         } else {
             let narrative = build_cross_session_narrative(&alloc.summaries);
             let mut lines = vec!["\n\n## 近期对话脉络".to_string(), narrative];
@@ -469,14 +681,11 @@ fn build_memory(context: &PromptContext, config: &PromptConfig) -> String {
     if config.include_memory_rag {
         match &alloc.rag {
             Some(rag) if !rag.trim().is_empty() => {
-                parts.push(format!(
-                    "\n\n## 相关历史记忆\n\
-                     以下是与当前话题相关的历史记忆，请结合这些信息回复：\n\
-                     {rag}"
-                ));
+                // 段落标题已表明内容性质；引用时机由记忆层首段引导统一约束
+                parts.push(format!("\n\n## 相关历史记忆\n{rag}"));
             }
             _ => {
-                parts.push("\n\n## 相关历史记忆\n（暂无与当前话题直接相关的历史记忆）".to_string());
+                parts.push(format!("\n\n## 相关历史记忆\n{RAG_PLACEHOLDER}"));
             }
         }
     }
@@ -486,11 +695,7 @@ fn build_memory(context: &PromptContext, config: &PromptConfig) -> String {
         && let Some(utt) = &alloc.utt
         && !utt.trim().is_empty()
     {
-        parts.push(format!(
-            "\n\n## 原文片段\n\
-             以下是目标角色说过的原话（完整引用，不要逐字抄袭，仅学习其语气、用词与口癖）：\n\
-             {utt}"
-        ));
+        parts.push(format!("\n\n## 原文片段\n{UTT_LEAD}{utt}"));
     }
 
     // 桥接（上一会话尾部；预算不足/开关关闭/白名单外为 None → 不产生段落）
@@ -499,10 +704,8 @@ fn build_memory(context: &PromptContext, config: &PromptConfig) -> String {
         && !bridge.trim().is_empty()
     {
         parts.push(format!(
-            "\n\n## 桥接（上一会话尾部）\n\
-             以下是你上一段对话结尾的原文，用于保持对话连贯性（仅供衔接参考，\
-             不要逐字引用，也不要编造其中未提及的内容）：\n\
-             {bridge}"
+            "\n\n## 桥接（上一会话尾部）\n{}{}",
+            BRIDGE_LEAD, bridge
         ));
     }
 
@@ -779,11 +982,7 @@ fn build_statement(context: &PromptContext, config: &PromptConfig) -> String {
     }
 
     let mut lines: Vec<String> = Vec::new();
-    lines.push(
-        "## 对话示例\n\
-         以下是你在此人格下的对话示例，请参考其风格和节奏："
-            .to_string(),
-    );
+    lines.push(format!("## 对话示例\n{STATEMENT_LEAD}"));
 
     for (i, ex) in context
         .examples
@@ -829,31 +1028,12 @@ fn build_experiment_section(context: &PromptContext, config: &PromptConfig) -> S
         parts.push(format!("\n### 核心规则\n{rules}"));
     } else {
         // 最小化默认规则
-        parts.push(
-            "\n### 核心规则\n\
-             - 用自然、友好的语气回复。\n\
-             - 回复简洁明了，不冗长。\n\
-             - 不确定的事情请诚实说明。"
-                .to_string(),
-        );
+        parts.push(CORE_RULES_DEFAULT.to_string());
     }
 
-    // 记忆引用规则
+    // 记忆引用规则（含主动回溯 vs 被动响应的边界）
     if config.include_knowledge_boundary {
-        parts.push(
-            "\n### 记忆引用规则（极其重要）\n\
-             1. **时机判断**：仅当用户当前消息与记忆上下文明确相关时，才引用历史记忆。\
-             如果用户只是打招呼或开启全新话题，不要强行插入「上次我们聊到……」.\n\
-             2. **自然衔接**：引用记忆时用「记得你之前……」或类似自然表达，\
-             而不是「根据系统记录……」等机械措辞。\n\
-             3. **主动回溯 vs 被动响应**：如果用户说「你还记得我之前说的吗？」，\
-             这意味着用户主动邀请你回溯——此时可以自由引用记忆。如果用户没有提及，\
-             只在话题自然相关时引用。\n\
-             4. **跨 Session 连续性**：如果近期对话脉络显示你们之前聊过某个话题\
-             且对话间隔很短（几小时内），用户可能希望继续之前的话题——在回复中自然衔接。\
-             如果间隔较长（几天以上），先寒暄再观察用户是否主动延续。"
-                .to_string(),
-        );
+        parts.push(MEMORY_CITATION_RULES.to_string());
     }
 
     parts.join("")

@@ -3,6 +3,9 @@
 //! 设计特点:
 //! - `send_message` Steps 1-5 委托 `SendMessagePipeline` + 5 个独立 Stage 执行
 //! - Steps 6-10（System Prompt、Token Budget、LLM 调用、消息保存）保留为本文件逻辑
+//! - 注入协调预算（`[injection_budget]`，默认关闭）：开启时 Step 6 走
+//!   `build_system_prompt_coordinated`（RAG 基座 + 四层在统一池内按可配顺序分配），
+//!   关闭时走既有 `build_system_prompt_with_context`（行为逐字段等价 v1.7）
 //! - 自由函数: `load_persona_toml_prompt`（冷启动兜底）、`stream_forward_task`（流式转发）
 //! - 降级策略: 嵌入模型不可用 → 仅 BM25+图谱检索；persona.toml 缺失 → 默认 Ramaria prompt
 //! - 安全约束: 不记录完整 prompt 或用户消息；线上 LLM 调用前强制隐私确认
@@ -18,7 +21,9 @@ use ramaria_core::traits::{ChatRequest, StorageBackend};
 use ramaria_core::types::{Message, MessageRole, MessageSource, ProfileField, new_id, now_ms};
 use ramaria_memory::SHARED_CHAT_STYLE_RULES;
 use ramaria_memory::parse_persona_toml;
-use ramaria_memory::prompt::builder::{PromptConfig, PromptContext, assemble_prompt};
+use ramaria_memory::prompt::builder::{
+    PromptConfig, PromptContext, assemble_prompt, assemble_prompt_coordinated,
+};
 use ramaria_memory::token_budget::{self, TokenBudgetConfig};
 use uuid::Uuid;
 
@@ -150,7 +155,8 @@ impl App {
         // RAG 相关记忆闸门（探针消融 B0 等关闭）：关闭时置空，
         // ChatRequest 不携带 `<memory_context>`，但 RAG 检索 stage 仍执行
         // （若 `injection.memory_rag=false` 时 stage 已跳过检索，此处恒 None）。
-        let memory_context = if config.injection.memory_rag {
+        // `mut`：协调预算开启时 RAG 摘要可能被裁剪/丢弃，需回写最终结果。
+        let mut memory_context = if config.injection.memory_rag {
             result.memory_context
         } else {
             None
@@ -209,10 +215,13 @@ impl App {
         // ---- Step 5.6: 知识层判定器检索 ----
         // [knowledge].auto_fact_detect=false / 注入闸门关闭 / 判定器未命中 / 检索失败
         // → 空 facts，prompt 不含知识块（静默降级）。
+        // 数据读取与门控判定同源：均按本次生效配置（`config`，档位覆盖场景下
+        // 与 `self.config` 可不同）传入，保证 send_message_with_config 的
+        // "knowledge 检索参数/总开关按该配置执行"契约成立。
         let knowledge_facts = if config.injection.knowledge && config.knowledge.auto_fact_detect {
             crate::app_knowledge::load_knowledge_facts(
                 self.storage.as_ref(),
-                self.config.knowledge.clone(),
+                config.knowledge.clone(),
                 persona_uid.unwrap_or("rama-0001"),
                 user_input,
             )
@@ -236,8 +245,42 @@ impl App {
         } else {
             Vec::new()
         };
-        let system_prompt = self
-            .build_system_prompt_with_context(
+        // 注入协调预算开关（`[injection_budget]`，默认关闭 → 走既有装配路径）。
+        let coordinated_budget = &config.injection_budget;
+        let system_prompt = if coordinated_budget.enabled {
+            // 协调路径：RAG 基座 + 四层注入在统一 token 池内按可配顺序分配，
+            // 替代"整条 system_prompt 事后无差别截断 + RAG 独立成摊"。
+            let built = self
+                .build_system_prompt_coordinated(
+                    persona_uid,
+                    &recent_summaries,
+                    last_active_at.as_deref(),
+                    utt_context.as_deref(),
+                    bridge_context.as_deref(),
+                    behavior_decision,
+                    examples,
+                    config.examples.max_examples as usize,
+                    knowledge_facts,
+                    &rag_covered_labels,
+                    Some(config.knowledge.injection_budget_chars),
+                    &config.injection,
+                    memory_context.as_deref(),
+                    coordinated_budget,
+                    &config.layer_dedup,
+                )
+                .await;
+            // 协调可能裁剪/丢弃 RAG：以协调结果回写 memory_context（供 Step 7 使用）
+            memory_context = built.memory_context;
+            tracing::debug!(
+                request_id = %request_id,
+                dropped = ?built.dropped,
+                fallback_truncated = built.fallback_truncated,
+                injected_tokens = built.injected_tokens,
+                "注入协调预算已应用（system_prompt 内注入 + RAG）"
+            );
+            built.system_prompt
+        } else {
+            self.build_system_prompt_with_context(
                 persona_uid,
                 &recent_summaries,
                 last_active_at.as_deref(),
@@ -252,12 +295,22 @@ impl App {
                 // 知识块渲染预算（core [knowledge].injection_budget_chars，默认 800）
                 Some(config.knowledge.injection_budget_chars),
                 &config.injection,
+                // RAG 实际注入文本（层间仲裁的内容级保留参照；None = RAG 未注入）
+                memory_context.as_deref(),
+                // 层间证据去重与冲突仲裁配置（默认关闭 = 回退既有引用级去重）
+                &config.layer_dedup,
             )
-            .await;
+            .await
+        };
 
         // ---- Step 6.5: Token 预算管理 ----
         let context_window = cfg.capability.context_window as usize;
-        let budget_config = TokenBudgetConfig::new(context_window, cfg.max_tokens);
+        let mut budget_config = TokenBudgetConfig::new(context_window, cfg.max_tokens);
+        if coordinated_budget.enabled {
+            // 协调路径已在装配期把 system_prompt 内注入约束到协调池内（固定骨架
+            // 稳定且不入池）；此处放开整条句截断，避免对协调结果二次无差别裁剪。
+            budget_config.system_prompt_reserve = context_window;
+        }
         let budgeted = token_budget::apply_token_budget(
             &system_prompt,
             memory_context.as_deref(),
@@ -386,13 +439,15 @@ impl App {
     // 内部辅助方法
     // =========================================================
 
-    /// 构建 System Prompt（使用 5-Block 装配器，含跨 session 上下文）。
+    /// 加载 System Prompt 装配素材（普通 / 协调装配共享）。
     ///
     /// 流程:
     /// 1. 从 storage 加载当前 persona 的数据（persona/facts/traits/examples）。
     /// 2. 注入近期 L1 摘要（跨 session 上下文）和最后活跃时间。
-    /// 3. 调用 `assemble_prompt` 组装 5-Block System Prompt。
-    /// 4. 无 persona 数据时降级为基础 Ramaria 默认 prompt。
+    /// 3. 返回结构化上下文（`Structured`）或纯文本降级（`Plain`）。
+    ///    - 无 persona → `Plain`（默认 Ramaria prompt）。
+    ///    - persona 存在但 facts/traits 均为空且 persona.toml 可用 → `Plain`（冷启动）。
+    ///    - 其余 → `Structured(ctx, config)`（由调用方选择普通/协调装配）。
     ///
     /// 参数:
     /// - `persona_uid`: 人格标识。
@@ -412,6 +467,10 @@ impl App {
     ///   空集合 = RAG 未注入/闸门关闭 → 知识卡片不去重（回退既有兜底行为）。
     /// - `knowledge_budget_chars`: 知识块渲染预算（对齐 core `[knowledge].injection_budget_chars`；
     ///   `None` 使用 memory prompt 层默认预算）。
+    /// - `rag_text`: RAG 摘要实际注入文本（`memory_context`；`None` = RAG 未注入）。
+    ///   层间仲裁开启时作为"保留参照"做内容级判重（RAG 摘要为主）。
+    /// - `layer_dedup`: 层间证据去重与冲突仲裁配置（`[layer_dedup]`；默认关闭 =
+    ///   回退既有引用级去重，prompt 输出与既有版本逐字段等价）。
     ///
     /// 降级策略:
     /// - storage 读取失败 → 记录 warn 日志，使用空数据继续。
@@ -425,7 +484,7 @@ impl App {
     // 参数均为装配 5-Block prompt 所需的独立输入，打包成结构体反而降低可读性；
     // 由 `send_message_with_config` 统一传入（v1.5 探针配置覆盖场景）。
     #[allow(clippy::too_many_arguments)]
-    async fn build_system_prompt_with_context(
+    async fn load_prompt_material(
         &self,
         persona_uid: Option<&str>,
         recent_summaries: &[String],
@@ -439,7 +498,9 @@ impl App {
         rag_covered_labels: &[String],
         knowledge_budget_chars: Option<usize>,
         injection: &ramaria_core::config::InjectionGate,
-    ) -> String {
+        rag_text: Option<&str>,
+        layer_dedup: &ramaria_core::config::LayerDedupConfig,
+    ) -> LoadedPromptMaterial {
         let actual_uid = persona_uid.unwrap_or("rama-0001");
 
         // 尝试加载 persona 数据
@@ -501,15 +562,73 @@ impl App {
                 && let Some(prompt) = load_persona_toml_prompt(p.config.as_deref())
             {
                 tracing::info!("使用 persona.toml 加载的系统 prompt（无结构化画像）");
-                return prompt;
+                return LoadedPromptMaterial::Plain(prompt);
             }
 
             // 知识层注入去重：RAG 摘要为主召回路径、断言知识为兜底。
             // 装配前剔除两类重复——① 来源文档已进入 RAG 覆盖集合的事实（同一事实已由
             // 摘要文本提供）；② 与角色层已知事实区同 id 的记录（角色区已展示，取后者去重）。
             // 无来源引用（手工/冷启动等）或 RAG 未覆盖的事实保留，兜底注入不失效。
+            //
+            // `[layer_dedup]` 开启（默认关闭 = 回退既有引用级去重路径）时，在引用级之上
+            // 追加内容级去重与冲突仲裁（layer_guard）：剔除与角色区/RAG 摘要文本/行为规则
+            // 内容级重复的知识卡片，产出保留方引用（证据可追溯，日志不含原文）。
             let knowledge_facts = if knowledge_facts.is_empty() {
                 knowledge_facts
+            } else if layer_dedup.enabled {
+                use ramaria_memory::prompt::layer_guard::{
+                    LayerGuardInput, RetentionKind, RetentionReference, arbitrate_fact_layers,
+                };
+                let covered: std::collections::HashSet<String> =
+                    rag_covered_labels.iter().cloned().collect();
+                // 保留参照：RAG 摘要文本（RAG 为主）+ 行为规则 reaction（行为层优先）
+                let mut references: Vec<RetentionReference> = Vec::with_capacity(2);
+                if let Some(rag) = rag_text.map(str::trim).filter(|s| !s.is_empty()) {
+                    references.push(RetentionReference {
+                        kind: RetentionKind::RagSummary,
+                        text: rag,
+                    });
+                }
+                if let Some(reaction) = behavior_decision
+                    .as_ref()
+                    .and_then(|d| d.primary_rule.reaction.as_deref())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    references.push(RetentionReference {
+                        kind: RetentionKind::BehaviorRule,
+                        text: reaction,
+                    });
+                }
+                let outcome = arbitrate_fact_layers(
+                    &LayerGuardInput {
+                        knowledge: &knowledge_facts,
+                        role: &facts,
+                        references: &references,
+                        rag_covered_labels: &covered,
+                    },
+                    true,
+                );
+                if !outcome.traces.is_empty() {
+                    // 只记计数/原因类别/保留方引用，不记原文全文（隐私红线）
+                    tracing::debug!(
+                        persona_uid = %p.uid,
+                        before = knowledge_facts.len(),
+                        after = outcome.knowledge_facts.len(),
+                        reasons = ?outcome
+                            .traces
+                            .iter()
+                            .map(|t| t.reason.as_str())
+                            .collect::<Vec<_>>(),
+                        kept_refs = ?outcome
+                            .traces
+                            .iter()
+                            .map(|t| t.kept_ref.as_str())
+                            .collect::<Vec<_>>(),
+                        "层间证据去重与冲突仲裁已应用"
+                    );
+                }
+                outcome.knowledge_facts
             } else {
                 let covered: std::collections::HashSet<String> =
                     rag_covered_labels.iter().cloned().collect();
@@ -579,22 +698,165 @@ impl App {
                 facts = ctx.facts.len(),
                 traits = ctx.traits.len(),
                 examples = ctx.examples.len(),
-                "四层 System Prompt 已装配"
+                "四层 System Prompt 素材已加载"
             );
-            return assemble_prompt(&ctx, &config);
+            return LoadedPromptMaterial::Structured(Box::new(ctx), config);
         }
 
         // 降级：默认 Ramaria 基础 prompt
         tracing::info!("使用默认 Ramaria System Prompt（无 persona 数据）");
-        format!(
+        LoadedPromptMaterial::Plain(format!(
             "你是 Ramaria，一个具有记忆能力、善解人意的 AI 助手。\n\
              你可以记住与用户的对话历史，并在后续对话中引用这些记忆。\n\
              请用自然、友好的语气回复用户。如果用户提到之前聊过的内容，\
              请结合记忆上下文给出更有针对性的回复。\n\
              当前时间：{}",
             crate::now_timestamp_str()
-        )
+        ))
     }
+}
+
+impl App {
+    /// 构建 System Prompt（普通装配路径，行为与既有版本一致）。
+    ///
+    /// 说明:
+    /// - 消费 `load_prompt_material`：结构化素材走 `assemble_prompt`，
+    ///   纯文本降级（无 persona / 冷启动）原样返回。
+    ///
+    /// 参数见 `load_prompt_material`。
+    #[allow(clippy::too_many_arguments)]
+    async fn build_system_prompt_with_context(
+        &self,
+        persona_uid: Option<&str>,
+        recent_summaries: &[String],
+        last_active_at: Option<&str>,
+        utt_context: Option<&str>,
+        bridge_context: Option<&str>,
+        behavior_decision: Option<ramaria_memory::behavior::MergedDecision>,
+        examples: Vec<ramaria_core::types::PersonaExample>,
+        max_examples: usize,
+        knowledge_facts: Vec<ramaria_core::types::PersonaFact>,
+        rag_covered_labels: &[String],
+        knowledge_budget_chars: Option<usize>,
+        injection: &ramaria_core::config::InjectionGate,
+        rag_text: Option<&str>,
+        layer_dedup: &ramaria_core::config::LayerDedupConfig,
+    ) -> String {
+        match self
+            .load_prompt_material(
+                persona_uid,
+                recent_summaries,
+                last_active_at,
+                utt_context,
+                bridge_context,
+                behavior_decision,
+                examples,
+                max_examples,
+                knowledge_facts,
+                rag_covered_labels,
+                knowledge_budget_chars,
+                injection,
+                rag_text,
+                layer_dedup,
+            )
+            .await
+        {
+            LoadedPromptMaterial::Plain(prompt) => prompt,
+            LoadedPromptMaterial::Structured(ctx, config) => assemble_prompt(&ctx, &config),
+        }
+    }
+
+    /// 构建 System Prompt（注入协调预算装配路径，`[injection_budget].enabled=true`）。
+    ///
+    /// 说明:
+    /// - 与 `build_system_prompt_with_context` 共享 `load_prompt_material`；
+    ///   结构化素材走 `assemble_prompt_coordinated`（RAG 基座 + 四层在统一池内
+    ///   按可配顺序分配），纯文本降级仅对 RAG 做协调裁剪（无注入层块）。
+    /// - RAG 摘要经协调后可能被整块丢弃或句子边界截断（默认保留顺序下
+    ///   RAG 优先级最高，仅在 `order` 显式排后且预算紧张时发生）。
+    ///
+    /// 知识层去重说明（已知边界）:
+    /// - 知识去重在素材加载期按传入 `rag_covered_labels` 执行；协调将 RAG 整块
+    ///   丢弃属"RAG 被配为低优先且预算紧张"的显式取舍，此时知识卡仍按协调前
+    ///   覆盖集去重（保守去重）。去重/仲裁的精确一致化由层间去重任务覆盖。
+    ///
+    /// 参数:
+    /// - 参数同 `load_prompt_material`（含 `rag_text`/`layer_dedup`，此处 `rag` 即 rag_text）。
+    /// - `budget`: 注入协调预算配置（core `[injection_budget]`）。
+    ///
+    /// 返回:
+    /// - `CoordinatedPrompt`：协调后的 system_prompt / memory_context / 统计。
+    #[allow(clippy::too_many_arguments)]
+    async fn build_system_prompt_coordinated(
+        &self,
+        persona_uid: Option<&str>,
+        recent_summaries: &[String],
+        last_active_at: Option<&str>,
+        utt_context: Option<&str>,
+        bridge_context: Option<&str>,
+        behavior_decision: Option<ramaria_memory::behavior::MergedDecision>,
+        examples: Vec<ramaria_core::types::PersonaExample>,
+        max_examples: usize,
+        knowledge_facts: Vec<ramaria_core::types::PersonaFact>,
+        rag_covered_labels: &[String],
+        knowledge_budget_chars: Option<usize>,
+        injection: &ramaria_core::config::InjectionGate,
+        rag: Option<&str>,
+        budget: &ramaria_core::config::InjectionBudgetConfig,
+        layer_dedup: &ramaria_core::config::LayerDedupConfig,
+    ) -> ramaria_memory::prompt::builder::CoordinatedPrompt {
+        match self
+            .load_prompt_material(
+                persona_uid,
+                recent_summaries,
+                last_active_at,
+                utt_context,
+                bridge_context,
+                behavior_decision,
+                examples,
+                max_examples,
+                knowledge_facts,
+                rag_covered_labels,
+                knowledge_budget_chars,
+                injection,
+                rag,
+                layer_dedup,
+            )
+            .await
+        {
+            LoadedPromptMaterial::Plain(prompt) => {
+                let alloc =
+                    ramaria_memory::token_budget::allocate_injection_budget(&[], rag, budget);
+                ramaria_memory::prompt::builder::CoordinatedPrompt {
+                    system_prompt: prompt,
+                    memory_context: alloc.memory_context,
+                    dropped: alloc.dropped,
+                    injected_tokens: alloc.injected_tokens,
+                    fallback_truncated: alloc.fallback_truncated,
+                }
+            }
+            LoadedPromptMaterial::Structured(ctx, config) => {
+                assemble_prompt_coordinated(&ctx, &config, budget, rag)
+            }
+        }
+    }
+}
+
+// =========================================================
+// Prompt 装配素材（共享加载，供普通/协调装配消费）
+// =========================================================
+
+/// 已加载的 System Prompt 装配素材。
+///
+/// 职责:
+/// - 承载普通装配（`build_system_prompt_with_context`）与协调装配
+///   （`build_system_prompt_coordinated`）共享的 persona 数据加载结果。
+enum LoadedPromptMaterial {
+    /// 纯文本 prompt（无 persona / persona.toml 冷启动兜底），无可协调注入块。
+    Plain(String),
+    /// 结构化装配上下文（装箱压缩枚举体积；可经 `render_prompt_parts`
+    /// 拆分为固定骨架 + 注入块）。
+    Structured(Box<PromptContext>, PromptConfig),
 }
 
 // =========================================================

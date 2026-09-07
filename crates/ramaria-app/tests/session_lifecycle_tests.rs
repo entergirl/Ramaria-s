@@ -511,3 +511,75 @@ async fn save_and_close_ignores_stale_input_persona() {
         "过期前端内存值不应覆盖 DB 会话归属"
     );
 }
+
+// =========================================================
+// B3 渐进式摘要封存协同
+// =========================================================
+
+/// 渐进式开启 + 长会话封存 → 走 `close_session_pipeline` 生成**多段** absorbed=false
+/// 的 L1（入候选池），而非 v1.6 的单条整会话摘要。
+///
+/// 封存协同语义:
+/// - 段 L1 全部 `absorbed=false`（`list_unabsorbed_l1` 天然可见）；
+/// - 后续 `check_l2_trigger` 按未吸收 L1 计数时把段 L1 计入（候选池计数），
+///   一次长会话即可达到触发阈值，无需等待多次会话累积；
+/// - 尾段 L1 覆盖最新对话（封存只摘要尾部）。
+#[tokio::test]
+async fn save_and_close_progressive_long_session_writes_segment_l1s_to_candidate_pool() {
+    const L1_JSON: &str = r#"{"summary":"用户讨论了长会话片段","keywords":"长会话,排期","time_period":"下午","atmosphere":"平静","valence":0.0,"salience":0.5}"#;
+    let storage = Arc::new(MockStorage::new());
+    let llm = Arc::new(MockLlm::new(L1_JSON));
+    let mut config = RamariaConfig::default();
+    config.l1.progressive.enabled = true;
+    config.l1.progressive.msg_threshold = 4; // 6 条 > 4 → 触发
+    config.l1.progressive.tail_msg_count = 2; // 每段 ≤ 2 条 → 6 条切 3 段
+    let keychain = Arc::new(Keychain::new());
+    let app = App::new_without_embedding(
+        Arc::clone(&storage) as Arc<dyn StorageBackend>,
+        Arc::clone(&llm) as Arc<dyn ramaria_core::traits::LlmProvider>,
+        config,
+        keychain,
+    );
+    app.set_state(AppState::Ready);
+
+    // 手动创建绑定 char-0001 的会话，随后每轮**显式**发送到同一 session
+    // （send_message 支持指定已存在 session_id 复用——见
+    // send_message_with_explicit_session_id），避免自动创建分散到多 session。
+    let session = storage.create_session(Some("char-0001")).await.unwrap();
+    let sid = session.id;
+    use futures::StreamExt;
+    for i in 0..3 {
+        let mut stream = app
+            .send_message(&format!("长会话片段消息 {i}"), Some("char-0001"), Some(sid))
+            .await
+            .unwrap();
+        while let Some(event_result) = stream.next().await {
+            if matches!(event_result, Ok(ramaria_app::StreamEvent::Done { .. })) {
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    }
+    let msgs = storage.list_messages(sid).await.unwrap();
+    assert_eq!(msgs.len(), 6, "3 轮发送应同 session 累积 6 条消息");
+
+    // 封存：渐进式感知管线应产出多段 absorbed=false 的 L1
+    app.save_and_close_session(Some("char-0001")).await.unwrap();
+
+    let l1s = storage.list_memory_l1(sid).await.unwrap();
+    assert_eq!(
+        l1s.len(),
+        3,
+        "6 条消息按 tail=2 应生成 3 段 L1（封存协同的候选池地基），实际 {}",
+        l1s.len()
+    );
+    assert!(
+        l1s.iter().all(|l| !l.absorbed),
+        "段 L1 必须 absorbed=false（L2 候选池可见）"
+    );
+    assert!(
+        l1s.iter()
+            .all(|l| l.persona_uid.as_deref() == Some("char-0001")),
+        "段 L1 归属应来自 DB session persona"
+    );
+}

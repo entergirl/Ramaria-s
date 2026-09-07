@@ -53,11 +53,13 @@ pub(super) fn format_messages(
 ///
 /// 规则（决策 D-V17-005）:
 /// - 消息数 > `cfg.msg_threshold`（默认 100），或
-/// - 首末消息时间跨度 > `cfg.span_hours`（默认 24 小时）。
+/// - 最早/最晚消息时间跨度 > `cfg.span_hours`（默认 24 小时）。
 ///
 /// 说明:
-/// - 消息列表需按时间升序（调用方保证：`list_messages` 返回升序）。
-/// - 单条消息跨度视为 0（不触发时间条件）。
+/// - 时间跨度取 `created_at` 的 min/max，**不依赖输入排序**（storage 通常返回
+///   升序，但导入/mock 等路径可能乱序——按极值计算使触发判断确定性成立）。
+/// - 时间戳缺失（`created_at = 0`）经 `saturating_sub` 防御，不 panic；单条消息
+///   跨度视为 0（不触发时间条件）。
 pub(super) fn is_progressive_triggered(
     messages: &[ramaria_core::types::Message],
     cfg: &ramaria_core::config::L1ProgressiveConfig,
@@ -65,8 +67,13 @@ pub(super) fn is_progressive_triggered(
     if messages.len() as u32 > cfg.msg_threshold {
         return true;
     }
-    if let (Some(first), Some(last)) = (messages.first(), messages.last()) {
-        let span_hours = (last.created_at.saturating_sub(first.created_at)) as f64 / 3_600_000.0;
+    let (earliest, latest) = messages.iter().fold((None, None), |(min_ts, max_ts), m| {
+        let min_ts = Some(min_ts.map_or(m.created_at, |v: i64| v.min(m.created_at)));
+        let max_ts = Some(max_ts.map_or(m.created_at, |v: i64| v.max(m.created_at)));
+        (min_ts, max_ts)
+    });
+    if let (Some(earliest), Some(latest)) = (earliest, latest) {
+        let span_hours = (latest.saturating_sub(earliest)) as f64 / 3_600_000.0;
         if span_hours > cfg.span_hours as f64 {
             return true;
         }

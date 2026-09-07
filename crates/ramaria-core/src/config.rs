@@ -154,6 +154,20 @@ pub struct RamariaConfig {
     #[serde(skip)]
     pub injection: InjectionGate,
 
+    /// 注入协调预算（`[injection_budget]`，RAG 基座与四层注入的协调分配）。
+    ///
+    /// 默认关闭：不启用时对话管线走既有各层独立预算 + `apply_token_budget`
+    /// 整条截断路径，行为与既有版本逐字段等价（回归红线）。
+    #[serde(default)]
+    pub injection_budget: InjectionBudgetConfig,
+
+    /// 层间证据去重与冲突仲裁（`[layer_dedup]`，注入装配前的跨层去重）。
+    ///
+    /// 默认关闭：不启用时对话管线沿用既有知识层引用级去重（RAG 覆盖集合 +
+    /// 角色层同 id 剔除），行为与既有版本逐字段等价（回归红线）。
+    #[serde(default)]
+    pub layer_dedup: LayerDedupConfig,
+
     /// 杂项（预留扩展位，当前无字段）
     #[serde(default)]
     pub misc: MiscConfig,
@@ -285,6 +299,8 @@ impl Default for RamariaConfig {
             style: StyleConfig::default(),
             feedback: FeedbackConfig::default(),
             injection: InjectionGate::default(),
+            injection_budget: InjectionBudgetConfig::default(),
+            layer_dedup: LayerDedupConfig::default(),
             misc: MiscConfig::default(),
         }
     }
@@ -1647,6 +1663,153 @@ impl Default for FeedbackConfig {
 }
 
 // =========================================================
+// 注入协调预算（RAG 基座与四层注入的协调分配）
+// =========================================================
+
+/// 参与注入协调预算的通道。
+///
+/// 职责:
+/// - 标识一次记忆注入的组成通道：RAG 摘要（`memory_context` 独立 XML 通道）
+///   与 system prompt 内的四层注入块（行为/知识/表达/脉络）。
+/// - 供 `[injection_budget].order` 以强类型数组声明"超预算时的保留优先级"
+///   （数值小的排在前面、越优先保留）。
+///
+/// 字段约定:
+/// - `Rag`: RAG 基座（`ChatRequest.memory_context`，L1/L2/L3 摘要检索转述）。
+/// - `Behavior`: 行为层（情境-反应规则块）。
+/// - `Knowledge`: 知识层（事实卡片）。
+/// - `Style`: 表达层（说话风格 / 自动风格规则 / 对话示例）。
+/// - `Memory`: 脉络层（近期对话脉络 / 原文片段 / 桥接）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InjectionSlot {
+    /// RAG 基座摘要通道
+    Rag,
+    /// 行为层
+    Behavior,
+    /// 知识层
+    Knowledge,
+    /// 表达层
+    Style,
+    /// 脉络层
+    Memory,
+}
+
+impl InjectionSlot {
+    /// 返回通道的小写字符串标识（配置书写与日志用）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Rag => "rag",
+            Self::Behavior => "behavior",
+            Self::Knowledge => "knowledge",
+            Self::Style => "style",
+            Self::Memory => "memory",
+        }
+    }
+}
+
+impl std::fmt::Display for InjectionSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// 注入协调预算配置（`[injection_budget]`）。
+///
+/// 职责:
+/// - 为"RAG 基座 + 四层注入"建立统一协调池：`max_injection_tokens` 限定
+///   RAG 摘要与四层注入块合计的 token 上限（固定骨架不计入池），超限时按
+///   `order` 从低优先通道开始整块丢弃，高优先内容完整保留。
+/// - 阶段一默认关闭（`enabled=false`）：不启用时走既有各层独立预算 +
+///   `apply_token_budget` 整条截断路径，行为与既有版本逐字段等价。
+/// - 通道内渲染预算（行为/知识/脉络的字符预算）不受本池替代，本池是
+///   通道之上的"第二道总闸"。
+///
+/// 安全约束:
+/// - 本组只承载数量级预算与顺序，不含任何原文/隐私内容。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InjectionBudgetConfig {
+    /// 协调预算总开关（默认 false = 机制关闭，回退既有路径）。
+    pub enabled: bool,
+    /// RAG 摘要 + 四层注入合计 token 上限（默认 1000，机制起点非定稿值）。
+    ///
+    /// 说明:
+    /// - 固定骨架（能力边界/角色层/当前时间）不在池内，始终完整保留。
+    /// - 超限时按 `order` 从低优先通道开始整块丢弃；最高优先通道单块仍超池
+    ///   时在句子边界截断兜底，保证"总注入 ≤ 本值"恒成立。
+    pub max_injection_tokens: usize,
+    /// RAG 摘要独立 token 上限（默认 0）。
+    ///
+    /// `0` = 不设独立上限（仅受 `max_injection_tokens` 总池约束）；
+    /// `> 0` 时先按本值在句子边界截断 RAG 摘要，再参与总池协调。
+    pub max_rag_tokens: usize,
+    /// 超预算时的保留优先级（高优先在前，低优先先被整块丢弃）。
+    ///
+    /// 字段约定:
+    /// - 默认 `[rag, behavior, knowledge, style, memory]`：RAG 基座（事实召回
+    ///   主力）最先保留，随后按 行为 > 知识 > 表达 > 脉络 的层优先级。
+    /// - 未列出的通道视为比所有列出通道更低优先（最先被丢弃）；重复项取首个
+    ///   位置；空数组 = 不区分优先级、按装配顺序从尾部丢弃。
+    pub order: Vec<InjectionSlot>,
+}
+
+impl Default for InjectionBudgetConfig {
+    /// 创建默认注入协调预算配置。
+    ///
+    /// 返回:
+    /// - 机制默认关闭（不改变既有行为）；预算上限为机制起点值（阶段一不定稿，
+    ///   参数定稿在阶段二/M8 数据 Gate 之后）。
+    /// - 默认保留顺序：RAG 基座 > 行为 > 知识 > 表达 > 脉络。
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_injection_tokens: 1000,
+            max_rag_tokens: 0,
+            order: vec![
+                InjectionSlot::Rag,
+                InjectionSlot::Behavior,
+                InjectionSlot::Knowledge,
+                InjectionSlot::Style,
+                InjectionSlot::Memory,
+            ],
+        }
+    }
+}
+
+// =========================================================
+// 层间证据去重与冲突仲裁配置
+// =========================================================
+
+/// 层间证据去重与冲突仲裁配置（`[layer_dedup]`）。
+///
+/// 职责:
+/// - 承载注入装配前"同一事实跨层只注入一次、冲突按来源优先级保留"的独立开关。
+/// - 仅服务 prompt 渲染前的注入仲裁（`ramaria-memory::prompt::layer_guard`）；
+///   写库侧的事实版本链仲裁（`fact/arbitration.rs`）不读本配置。
+///
+/// 开关约定:
+/// - `enabled=false`（默认）→ 对话管线沿用既有知识层引用级去重（RAG 覆盖集合 +
+///   角色层同 id 剔除），prompt 输出与既有版本逐字段等价（回归红线）。
+/// - `enabled=true` → 装配前执行跨层内容级去重与冲突仲裁（默认关闭 = 回退 v1.7）。
+///
+/// 安全约束:
+/// - 本组只承载开关，不含原文/隐私内容。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LayerDedupConfig {
+    /// 层间证据去重与冲突仲裁总开关（默认 false = 机制关闭，回退既有路径）。
+    pub enabled: bool,
+}
+
+impl Default for LayerDedupConfig {
+    /// 创建默认层间去重配置（默认关闭）。
+    fn default() -> Self {
+        Self { enabled: false }
+    }
+}
+
+// =========================================================
 // 单元测试
 // =========================================================
 
@@ -2076,6 +2239,31 @@ enabled = false
         assert!(back_toml.injection.behavior, "TOML 反序列化后闸门回退全开");
     }
 
+    /// 层间去重默认关闭：序列化/反序列化后仍关闭（默认关闭 = 回退既有路径）。
+    #[test]
+    fn layer_dedup_default_off_and_survives_roundtrip() {
+        let cfg = RamariaConfig::default();
+        assert!(
+            !cfg.layer_dedup.enabled,
+            "层间去重默认关闭（回退既有知识层引用级去重）"
+        );
+
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back_json: RamariaConfig = serde_json::from_str(&json).unwrap();
+        assert!(!back_json.layer_dedup.enabled, "JSON 往返后保持关闭");
+
+        let toml_text = toml::to_string(&cfg).unwrap();
+        let back_toml: RamariaConfig = toml::from_str(&toml_text).unwrap();
+        assert!(!back_toml.layer_dedup.enabled, "TOML 往返后保持关闭");
+
+        // 显式开启后 JSON 往返保持开启（配置可被 CLI/评估覆盖）
+        let mut on = RamariaConfig::default();
+        on.layer_dedup.enabled = true;
+        let json_on = serde_json::to_string(&on).unwrap();
+        let back_on: RamariaConfig = serde_json::from_str(&json_on).unwrap();
+        assert!(back_on.layer_dedup.enabled, "显式开启应持久化");
+    }
+
     #[test]
     fn style_config_disabled_falls_back_to_v16() {
         // 关闭风格统计：整链路回退 v1.6（prompt 不含自动风格规则）
@@ -2216,5 +2404,130 @@ persona_kind_whitelist = ["char", "anim", "oc", "hist"]
                 PersonaKind::Hist
             ]
         );
+    }
+
+    // =========================================================
+    // 注入协调预算（[injection_budget]）配置测试
+    // =========================================================
+
+    #[test]
+    fn injection_budget_defaults_disabled() {
+        let cfg = RamariaConfig::default();
+        assert!(
+            !cfg.injection_budget.enabled,
+            "协调预算默认关闭（v1.7 等价）"
+        );
+        assert_eq!(cfg.injection_budget.max_injection_tokens, 1000);
+        assert_eq!(
+            cfg.injection_budget.max_rag_tokens, 0,
+            "0 = 无独立 RAG 上限"
+        );
+        assert_eq!(
+            cfg.injection_budget.order,
+            vec![
+                InjectionSlot::Rag,
+                InjectionSlot::Behavior,
+                InjectionSlot::Knowledge,
+                InjectionSlot::Style,
+                InjectionSlot::Memory,
+            ],
+            "默认保留顺序：RAG 基座 > 行为 > 知识 > 表达 > 脉络"
+        );
+    }
+
+    #[test]
+    fn injection_budget_toml_roundtrip_and_partial() {
+        // 旧/缺省配置文件（无 [injection_budget]）解析后回退默认（机制关闭）
+        let legacy = r#"
+version = "1.7.0"
+schema_version = 1
+"#;
+        let cfg: RamariaConfig = toml::from_str(legacy).expect("旧配置应可解析");
+        assert!(!cfg.injection_budget.enabled);
+        assert_eq!(cfg.injection_budget.max_injection_tokens, 1000);
+
+        // 显式开启（自定义上限与顺序）可经 TOML 无损恢复
+        let toml_text = r#"
+[injection_budget]
+enabled = true
+max_injection_tokens = 800
+max_rag_tokens = 300
+order = ["behavior", "knowledge", "rag", "style", "memory"]
+"#;
+        let cfg2: RamariaConfig = toml::from_str(toml_text).expect("协调预算 TOML 应可解析");
+        assert!(cfg2.injection_budget.enabled);
+        assert_eq!(cfg2.injection_budget.max_injection_tokens, 800);
+        assert_eq!(cfg2.injection_budget.max_rag_tokens, 300);
+        assert_eq!(
+            cfg2.injection_budget.order,
+            vec![
+                InjectionSlot::Behavior,
+                InjectionSlot::Knowledge,
+                InjectionSlot::Rag,
+                InjectionSlot::Style,
+                InjectionSlot::Memory,
+            ]
+        );
+
+        // serde JSON 往返保持类型
+        let json = serde_json::to_string(&cfg2).unwrap();
+        let back: RamariaConfig = serde_json::from_str(&json).unwrap();
+        assert!(back.injection_budget.enabled);
+        assert_eq!(back.injection_budget.order, cfg2.injection_budget.order);
+    }
+
+    #[test]
+    fn injection_budget_flat_map_includes_group() {
+        // config_sync 扁平化应自动覆盖本组（与 knowledge/style 同机制）
+        let cfg = RamariaConfig::default();
+        let flat = config_sync_flatten(&cfg);
+        assert_eq!(
+            flat.get("injection_budget.enabled"),
+            Some(&serde_json::json!(false)),
+            "协调预算组应参与 DB settings 扁平同步"
+        );
+        assert_eq!(
+            flat.get("injection_budget.max_injection_tokens"),
+            Some(&serde_json::json!(1000))
+        );
+    }
+
+    /// 提取 config_sync 使用的扁平化逻辑（避免跨 crate 依赖，保持本文件自洽）。
+    fn config_sync_flatten(
+        cfg: &RamariaConfig,
+    ) -> std::collections::BTreeMap<String, serde_json::Value> {
+        use std::collections::BTreeMap;
+        let mut out = BTreeMap::new();
+        let Ok(root) = serde_json::to_value(cfg) else {
+            return out;
+        };
+        let skip = ["version", "schema_version", "paths", "backend", "injection"];
+        let Some(obj) = root.as_object() else {
+            return out;
+        };
+        fn flatten(
+            prefix: &str,
+            value: &serde_json::Value,
+            out: &mut BTreeMap<String, serde_json::Value>,
+        ) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for (k, v) in map {
+                        let key = format!("{prefix}.{k}");
+                        flatten(&key, v, out);
+                    }
+                }
+                _ => {
+                    out.insert(prefix.to_string(), value.clone());
+                }
+            }
+        }
+        for (group, value) in obj {
+            if skip.contains(&group.as_str()) {
+                continue;
+            }
+            flatten(group, value, &mut out);
+        }
+        out
     }
 }

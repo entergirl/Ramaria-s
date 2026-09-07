@@ -863,4 +863,35 @@ mod tests {
             );
         }
     }
+
+    // ---- 空规则路径（behavior_rules=0）----
+
+    /// 空规则库（`behavior_rules=0`）→ 不 panic、matched=false、主/次为空。
+    ///
+    /// 说明:
+    /// - `route_rules` 对空切片直接返回静默降级结果（调用方不注入行为块，
+    ///   行为回退 v1.4）；本用例显式锁定空路径。
+    #[test]
+    fn route_empty_rules_returns_unmatched() {
+        let query = QueryContext {
+            query_vector: None,
+            keywords: vec!["加班".to_string()],
+        };
+        let result = route_rules(&[], &query, &RoutingParams::default());
+        assert!(!result.matched, "空规则库不应命中");
+        assert!(result.primary.is_none(), "空规则库无主规则");
+        assert!(result.secondary.is_empty(), "空规则库无次规则");
+    }
+
+    /// 空规则库 + 空查询（无消息）→ 不 panic、matched=false（上游双空路径安全）。
+    #[test]
+    fn route_empty_rules_empty_query_is_safe() {
+        let query = QueryContext {
+            query_vector: None,
+            keywords: vec![],
+        };
+        let result = route_rules(&[], &query, &RoutingParams::default());
+        assert!(!result.matched);
+        assert!(result.primary.is_none());
+    }
 }

@@ -5,6 +5,12 @@
 //! - 使用 provider capability.context_window 作为预算上限
 //! - 预算超出时记录 warn 日志（含 request_id、estimated、window），但不中断管线
 //! - 优先级: System Prompt > memory_context > 历史消息（新→旧）> 用户消息（完整保留）
+//! - 协调预算差异（`[injection_budget].enabled`）: 本 Stage 仅拿到整条
+//!   system_prompt（Stage 6 `build_prompt.rs` 未接线行为/知识/utt/桥接注入，
+//!   无法像生产装配路径那样逐层取舍）。协调启用时本 Stage 执行其可达成子集——
+//!   对 RAG（memory_context）应用独立上限/总池裁剪，并放开对整条 system_prompt
+//!   的二次句截断（交由装配期协调）。生产路径的逐层协调在 `app_chat.rs`
+//!   `build_system_prompt_coordinated` 完成。
 //! - 纯委托 token_budget 模块，Stage 自身不包含 token 估算逻辑
 //! - 输出填充 PipelineData 的 budgeted_* 字段供 Stage 8 使用
 
@@ -56,7 +62,7 @@ impl PipelineStage for StageTokenBudget {
 
     async fn execute(
         &self,
-        _ctx: &PipelineContext,
+        ctx: &PipelineContext,
         mut input: Self::Input,
     ) -> Result<Self::Output, PipelineError> {
         // 读取前序 Stage 产出
@@ -74,15 +80,40 @@ impl PipelineStage for StageTokenBudget {
             )
         })?;
 
+        // 协调预算（默认关闭）。差异说明见文件头：本 Stage 只执行协调可达成子集
+        // （RAG 独立上限/总池裁剪），逐层取舍由生产装配路径（app_chat）完成。
+        let coordinated = &ctx.config.injection_budget;
+        let mut memory_context = input.memory_context.clone();
+        if coordinated.enabled && memory_context.is_some() {
+            let alloc = token_budget::allocate_injection_budget(
+                &[],
+                memory_context.as_deref(),
+                coordinated,
+            );
+            if alloc.memory_context != memory_context {
+                tracing::debug!(
+                    request_id = %input.request_id,
+                    rag_capped = alloc.memory_context.is_some(),
+                    "StageTokenBudget: 协调预算已应用 RAG 上限/裁剪"
+                );
+            }
+            memory_context = alloc.memory_context;
+        }
+
         // 上下文窗口来自 provider capability，max_tokens 来自 backend_config
         let context_window = backend_config.capability.context_window as usize;
         let max_output_tokens = backend_config.max_tokens;
-        let budget_config = TokenBudgetConfig::new(context_window, max_output_tokens);
+        let mut budget_config = TokenBudgetConfig::new(context_window, max_output_tokens);
+        if coordinated.enabled {
+            // 装配期协调负责 system_prompt 注入总量（本 Stage 无逐层部件），
+            // 放开整条句截断，避免对协调结果二次无差别裁剪。
+            budget_config.system_prompt_reserve = context_window;
+        }
 
         // 调用 token_budget 模块做截断
         let budgeted = token_budget::apply_token_budget(
             system_prompt,
-            input.memory_context.as_deref(),
+            memory_context.as_deref(),
             &input.history_messages,
             &input.user_input,
             &budget_config,
@@ -319,4 +350,84 @@ mod tests {
     // 测试: estimated_tokens 字段被正确设置
     // （已在 small_conversation_within_window 中断言 estimated_tokens > 0）
     // =========================================================
+
+    // =========================================================
+    // 测试: 注入协调预算（[injection_budget]）——Stage 可达子集
+    // =========================================================
+
+    /// 构造超长 RAG memory_context（30 个中文字 ≈ 15 token）。
+    fn long_memory() -> String {
+        "一二三四五六七八九十甲乙丙丁戊己庚辛壬癸子丑寅卯".to_string()
+    }
+
+    /// 协调启用 + RAG 独立上限：memory_context 被裁剪到 cap 内。
+    #[tokio::test]
+    async fn coordinated_enabled_caps_memory_context() {
+        let mut ctx = simple_context();
+        ctx.config.injection_budget.enabled = true;
+        ctx.config.injection_budget.max_rag_tokens = 6;
+        let stage = StageTokenBudget::new();
+        let mut data = full_data();
+        data.memory_context = Some(long_memory());
+
+        let result = stage.execute(&ctx, data).await;
+        assert!(result.is_ok());
+        let output = result.expect("should succeed");
+
+        let rag = output.budgeted_memory_context.expect("RAG 应被保留但截断");
+        assert!(
+            token_budget::estimate_tokens(&rag) <= 6,
+            "RAG 上限裁剪: {}",
+            token_budget::estimate_tokens(&rag)
+        );
+        // 协调启用 → 不再对整条 system_prompt 二次句截断（小 prompt 保持原样）
+        assert_eq!(
+            output.budgeted_system_prompt.as_deref(),
+            output.system_prompt.as_deref(),
+            "协调启用时 system_prompt 不做整条二次裁剪"
+        );
+    }
+
+    /// 协调启用 + 总池小于 RAG：memory_context 被裁剪/丢弃，不超预算。
+    #[tokio::test]
+    async fn coordinated_enabled_total_pool_constrains_rag() {
+        let mut ctx = simple_context();
+        ctx.config.injection_budget.enabled = true;
+        ctx.config.injection_budget.max_injection_tokens = 5;
+        let stage = StageTokenBudget::new();
+        let mut data = full_data();
+        data.memory_context = Some(long_memory());
+
+        let result = stage.execute(&ctx, data).await;
+        assert!(result.is_ok());
+        let output = result.expect("should succeed");
+
+        match output.budgeted_memory_context {
+            Some(rag) => assert!(
+                token_budget::estimate_tokens(&rag) <= 5,
+                "总池约束 RAG: {}",
+                token_budget::estimate_tokens(&rag)
+            ),
+            None => {} // RAG 被丢弃也满足"不超预算"
+        }
+    }
+
+    /// 协调关闭（默认）：memory_context 不做独立 cap，回退既有行为。
+    #[tokio::test]
+    async fn coordinated_disabled_matches_legacy() {
+        let ctx = simple_context(); // injection_budget.enabled 默认 false
+        let stage = StageTokenBudget::new();
+        let mut data = full_data();
+        let memory = long_memory();
+        data.memory_context = Some(memory);
+
+        let result = stage.execute(&ctx, data).await;
+        assert!(result.is_ok());
+        let output = result.expect("should succeed");
+        // 大窗口 + 关闭协调 → memory_context 完整保留（既有行为）
+        assert_eq!(
+            output.budgeted_memory_context.as_deref(),
+            Some(long_memory().as_str())
+        );
+    }
 }

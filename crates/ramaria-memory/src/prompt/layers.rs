@@ -386,7 +386,7 @@ pub fn render_behavior_block(
 /// 输出格式（规则文本为主、结构化参数为辅）:
 /// ```text
 /// ## 行为规则
-/// 当聊到「加班」「累」等话题时：{reaction}
+/// 聊到「加班」「累」等话题时：{reaction}
 /// - 表达倾向：情感强度-0.42 · 主动程度0.82 · 详细度0.65 · 正式度0.58
 /// - 避免：深夜打扰、说教
 /// ```
@@ -417,12 +417,12 @@ fn render_behavior_decision(decision: &MergedDecision, max_chars: usize) -> Opti
 
     let reaction_line = match decision.primary_rule.reaction.as_deref() {
         Some(reaction) if !reaction.trim().is_empty() => reaction.trim().to_string(),
-        _ => "（候选规则，无规则文本，按表达倾向调整回应）".to_string(),
+        _ => "（候选规则，按表达倾向调整回应）".to_string(),
     };
 
     let mut lines = vec![
         "## 行为规则".to_string(),
-        format!("当聊到{kw_text}等话题时：{reaction_line}"),
+        format!("聊到{kw_text}等话题时：{reaction_line}"),
         format!(
             "- 表达倾向：情感强度{:.2} · 主动程度{:.2} · 详细度{:.2} · 正式度{:.2}",
             decision.merged_params.emotional_intensity,

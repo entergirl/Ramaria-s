@@ -253,6 +253,21 @@ async fn route_disabled_behavior_returns_unmatched() {
     assert!(!result.matched, "行为关闭 → 不路由（回退 v1.4）");
 }
 
+/// 空规则库（`behavior_rules=0`）+ 行为层开启 → behavior_route 不 panic、
+/// 返回 unmatched（调用方据此不注入行为块，行为回退 v1.4）。
+#[tokio::test]
+async fn route_empty_rule_set_returns_unmatched() {
+    let (storage, app) = make_app();
+    setup_persona(&storage, "char-0001").await;
+    // 未 learn / 未 import：该 persona 规则库为空
+    let result = behavior_route(&app, "char-0001", &[make_msg("加班")])
+        .await
+        .expect("路由成功");
+    assert!(!result.matched, "空规则库不应命中");
+    assert!(result.primary.is_none());
+    assert!(result.secondary.is_empty());
+}
+
 // =========================================================
 // 规则管理（D7）
 // =========================================================

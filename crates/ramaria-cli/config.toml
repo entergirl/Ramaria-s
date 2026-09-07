@@ -24,10 +24,19 @@ similarity_threshold = 0.6
 rrf_k = 60
 bm25_weight = 1.0
 graph_weight = 0.8
+enable_vector = true
+enable_keyword_channel = true
+keyword_weight = 1.0
 retrieval_weight_l2 = 0.8
 retrieval_weight_l1 = 1.0
 narrative_weighted = true
 narrative_top_k = 3
+rag_max_memories = 5
+rag_max_summary_chars = 120
+rag_share_threshold_user = 0.3
+rag_share_threshold_char = 0.5
+rag_share_threshold_rama = 0.0
+rag_include_graph_entities = true
 
 [decay]
 s_l0 = 10
@@ -173,5 +182,20 @@ dedup_window_ms = 30000
 s3_trend_window = 20
 s3_continue_trigger = 5
 s3_stop_trigger = 4
+
+[injection_budget]
+enabled = false
+max_injection_tokens = 1000
+max_rag_tokens = 0
+order = [
+    "rag",
+    "behavior",
+    "knowledge",
+    "style",
+    "memory",
+]
+
+[layer_dedup]
+enabled = false
 
 [misc]

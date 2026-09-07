@@ -491,3 +491,61 @@ async fn behavior_no_rule_no_block_for_assistant() {
     let prompt = &request.system_prompt;
     assert!(!prompt.contains("## 行为规则"), "无规则不产生行为块");
 }
+
+// =========================================================
+// 标签压缩回归：压缩后对话仍产生非空回复
+// =========================================================
+
+/// 样板文本压缩后，活跃路径发送消息仍正常产生非空流式回复
+/// （针对 J 观测"F0 回复被压短"的结构性治理——压缩注入样板不挤压回复本身）。
+#[tokio::test]
+async fn compressed_boilerplate_still_yields_non_empty_reply() {
+    let storage = Arc::new(MockStorage::new());
+    let reply = "记得呀，上次我们聊到海边，你想周末再去一次。";
+    let llm = Arc::new(MockLlm::new(reply));
+    let app = make_app(
+        Arc::clone(&storage),
+        Arc::clone(&llm),
+        RamariaConfig::default(),
+    );
+    setup_ready(&app, storage.as_ref()).await;
+
+    add_char_persona(&storage);
+    add_prev_session_with_utt(&storage);
+    app.rebuild_retriever().await.unwrap();
+
+    let mut stream = app
+        .send_message("继续上次的话题吧", Some("char-0001"), None)
+        .await
+        .expect("发送成功");
+    let mut collected = String::new();
+    let mut done_total: Option<usize> = None;
+    while let Some(ev) = stream.next().await {
+        match ev {
+            Ok(StreamEvent::Delta { content, .. }) => collected.push_str(&content),
+            Ok(StreamEvent::Done { total_chars, .. }) => done_total = Some(total_chars),
+            Ok(StreamEvent::Error { error, .. }) => panic!("流中出现错误: {error}"),
+            // StreamEvent 为 non_exhaustive：未来新增事件不参与本断言
+            Ok(_) => {}
+            Err(e) => panic!("流错误: {e}"),
+        }
+    }
+
+    assert!(!collected.trim().is_empty(), "压缩后应产生非空回复");
+    assert!(
+        collected.contains("海边"),
+        "回复应含模型实际输出: {collected}"
+    );
+    assert!(
+        done_total.is_some() && done_total.unwrap() >= collected.chars().count(),
+        "Done 事件应携带回复总字符数: {done_total:?} vs {}",
+        collected.chars().count()
+    );
+
+    // 结构化装配仍正常：四层段落标题齐全（压缩未破坏骨架）
+    let request = llm.last_request().expect("应记录最后一次请求");
+    let prompt = &request.system_prompt;
+    assert!(prompt.contains("# 能力边界"), "能力边界段缺失");
+    assert!(prompt.contains("# 角色（行为层）"), "角色层缺失");
+    assert!(prompt.contains("# 记忆（脉络层）"), "脉络层缺失");
+}

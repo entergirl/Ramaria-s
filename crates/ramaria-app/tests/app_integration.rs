@@ -367,3 +367,53 @@ async fn send_message_failing_llm_cases() {
         assert_eq!(delta_count, 0, "LLM 失败时不应有 Delta 事件");
     }
 }
+
+// =========================================================
+// 注入协调预算（[injection_budget].enabled=true）端到端路径
+// =========================================================
+
+/// 协调预算开启时 send_message 走协调装配路径，对话仍正常完成。
+///
+/// 覆盖:
+/// - 无 persona → Plain 降级 prompt；RAG 摘要经协调池裁剪（此处无记忆，
+///   memory_context=None → 协调空转）。
+/// - Step 6.5 以 context_window 为 system_prompt reserve（不再二次整条截断）。
+/// - 协调路径不改变对外流事件语义（Delta + Done）。
+#[tokio::test]
+async fn send_message_coordinated_budget_enabled_succeeds() {
+    let storage = Arc::new(MockStorage::new());
+    let llm = Arc::new(MockLlm::new("好的，我记住了。"));
+    let mut config = RamariaConfig::default();
+    config.injection_budget.enabled = true;
+    config.injection_budget.max_injection_tokens = 100;
+    let keychain = Arc::new(Keychain::new());
+    let app = App::new_without_embedding(
+        Arc::clone(&storage) as Arc<dyn ramaria_core::traits::StorageBackend>,
+        Arc::clone(&llm) as Arc<dyn ramaria_core::traits::LlmProvider>,
+        config,
+        keychain,
+    );
+
+    storage
+        .save_backend_config(&BackendConfig::lm_studio_default())
+        .await
+        .unwrap();
+    storage.set_index_version(1).await.unwrap();
+    app.refresh_setup_state().await.unwrap();
+    assert_eq!(app.current_state(), AppState::Degraded);
+
+    let mut stream = app.send_message("你好", None, None).await.unwrap();
+    let mut delta_count = 0usize;
+    let mut done_seen = false;
+    while let Some(event_result) = stream.next().await {
+        match event_result {
+            Ok(StreamEvent::Delta { .. }) => delta_count += 1,
+            Ok(StreamEvent::Done { .. }) => done_seen = true,
+            Ok(StreamEvent::Error { .. }) => {}
+            Ok(_) => {}
+            Err(_) => {}
+        }
+    }
+    assert!(done_seen, "协调路径流应以 Done 结束");
+    assert!(delta_count > 0, "协调路径流应包含文本增量");
+}

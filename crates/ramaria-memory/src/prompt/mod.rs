@@ -3,6 +3,7 @@
 //! 设计特点:
 //! - builder.rs: 四层 System Prompt 动态装配（v3.1 §8.2：角色/说话风格/知识/记忆）
 //! - layers.rs: 四层注入结构与预算分配器（脉络独立预算 ≤ 30%）
+//! - layer_guard.rs: 注入装配前层间证据去重与冲突仲裁（独立开关，默认关闭）
 //! - example_selector.rs: Few-shot 示例筛选 (按话题标签/情绪效价/消息长度)
 //! - injection_guard.rs: 线上记忆注入开关 (控制 Block C 是否发送到线上 LLM)
 //! - 数据来源: persona_facts + personality_traits + Persona-Aware RAG 检索结果
@@ -10,6 +11,7 @@
 pub mod builder;
 pub mod example_selector;
 pub mod injection_guard;
+pub mod layer_guard;
 pub mod layers;
 
 /// Prompt 模板版本常量（缓存失效键组成部分；决策记录见 docs/dev-1.5/v1.5-decisions.md）。
@@ -25,4 +27,7 @@ pub mod layers;
 ///   是否统一引用本常量（不应散落字面量）。
 /// - v1.5 M6 递增记录：行为层槽位填充（`render_behavior_block` 渲染 `## 行为规则`
 ///   小节，模板结构变更）→ 旧缓存自动失效，防跨版本误命中。
-pub const PROMPT_TEMPLATE_VERSION: &str = "20260814-v1.5.1";
+/// - v2.0 M5 递增记录：标签压缩/提示优化——builder.rs/layers.rs 样板引导句、
+///   占位与默认规则文本精简（能力边界/记忆引用规则等），语义等价但 prompt
+///   文本变更 → 旧缓存自动失效，防跨版本误命中。
+pub const PROMPT_TEMPLATE_VERSION: &str = "20260906-v2.0.0";

@@ -328,7 +328,7 @@ fn memory_without_rag_shows_placeholder() {
     let result = assemble_prompt(&ctx, &config);
 
     assert!(result.contains("首次对话"));
-    assert!(result.contains("暂无与当前话题直接相关的历史记忆"));
+    assert!(result.contains("暂无直接相关的历史记忆"));
 }
 
 #[test]
@@ -772,7 +772,7 @@ fn assemble_prompt_includes_bridge_section_only_when_present() {
         result2.contains("## 桥接（上一会话尾部）"),
         "桥接段落应出现"
     );
-    assert!(result2.contains("保持对话连贯性"), "应含衔接用途说明");
+    assert!(result2.contains("保持连贯"), "应含衔接用途说明");
     assert!(result2.contains("上次聊到这里"), "应含桥接原文内容");
 }
 
@@ -1092,5 +1092,273 @@ fn ablation_memory_subsections_off_omits_whole_block() {
     assert!(
         !result.contains("# 记忆（脉络层）"),
         "全部记忆子段关闭时整块省略: {result}"
+    );
+}
+
+// =========================================================
+// 结构化装配（render_prompt_parts / 协调预算 assemble_prompt_coordinated）
+// =========================================================
+
+/// 行为命中上下文（供行为层注入块出现于结构化输出）。
+fn behavior_hit_ctx() -> PromptContext {
+    use ramaria_core::behavior::{BehaviorParams, BehaviorRule, BehaviorSituation, RuleSource};
+    let mut rule = BehaviorRule::new(
+        "char-0001",
+        BehaviorSituation {
+            keywords: vec!["加班".to_string(), "累".to_string()],
+            centroid: None,
+            response_centroid: None,
+            valence_mean: -0.5,
+            valence_std: 0.2,
+            sample_count: 6,
+            presentation_dist: Vec::new(),
+            situation_strength_mean: 3.0,
+            time_span_days: 10.0,
+            trait_refs: Vec::new(),
+        },
+        Some("先共情再给建议，语气温和".to_string()),
+        BehaviorParams {
+            emotional_intensity: -0.42,
+            proactiveness: 0.82,
+            detail_level: 0.65,
+            formality: 0.58,
+        },
+        RuleSource::Auto,
+    );
+    rule.id = 1;
+    let mut ctx = make_full_ctx();
+    ctx.behavior_decision = Some(crate::behavior::MergedDecision {
+        primary_rule: rule,
+        merged_avoid: vec!["深夜打扰".to_string()],
+        merged_params: BehaviorParams {
+            emotional_intensity: -0.42,
+            proactiveness: 0.82,
+            detail_level: 0.65,
+            formality: 0.58,
+        },
+    });
+    ctx
+}
+
+/// 结构化输出与 assemble_prompt 逐字一致（行为等价重构的回归锁）。
+#[test]
+fn render_prompt_parts_joins_identically_to_assemble() {
+    let ctx = behavior_hit_ctx();
+    let config = PromptConfig::default();
+    let parts = render_prompt_parts(&ctx, &config);
+    // 7 个部件（含空块也保留，join 时跳过）
+    assert_eq!(parts.len(), 7);
+    // 固定骨架恰为 3 个
+    let fixed = parts
+        .iter()
+        .filter(|p| p.kind == PromptPartKind::Fixed)
+        .count();
+    assert_eq!(fixed, 3);
+    let injection_slots: Vec<InjectionSlot> = parts
+        .iter()
+        .filter_map(|p| match p.kind {
+            PromptPartKind::Injection(slot) => Some(slot),
+            PromptPartKind::Fixed => None,
+        })
+        .collect();
+    assert_eq!(
+        injection_slots,
+        vec![
+            InjectionSlot::Behavior,
+            InjectionSlot::Style,
+            InjectionSlot::Knowledge,
+            InjectionSlot::Memory,
+        ]
+    );
+    assert_eq!(join_prompt_parts(&parts), assemble_prompt(&ctx, &config));
+}
+
+/// 协调预算关闭时 assemble_prompt_coordinated 输出与 assemble_prompt 等价。
+#[test]
+fn coordinated_disabled_matches_plain_assemble() {
+    let ctx = behavior_hit_ctx();
+    let config = PromptConfig::default();
+    let budget = ramaria_core::config::InjectionBudgetConfig::default(); // enabled=false
+    let rag = "用户上次提到喜欢猫。";
+    let out = assemble_prompt_coordinated(&ctx, &config, &budget, Some(rag));
+    assert_eq!(out.system_prompt, assemble_prompt(&ctx, &config));
+    assert_eq!(
+        out.memory_context.as_deref(),
+        Some(rag),
+        "关闭时 RAG 原样保留"
+    );
+    assert!(out.dropped.is_empty());
+}
+
+/// 协调预算开启：总池超限时低优先整块丢弃，system_prompt 不再含被丢段落。
+#[test]
+fn coordinated_drops_low_priority_layer_blocks() {
+    let ctx = behavior_hit_ctx();
+    let config = PromptConfig::default();
+    // 极小池只保留固定骨架能放下的最高优先注入块；memory(脉络) 先被整块丢弃
+    let mut budget = ramaria_core::config::InjectionBudgetConfig::default();
+    budget.enabled = true;
+    budget.max_injection_tokens = 2;
+    let out = assemble_prompt_coordinated(&ctx, &config, &budget, None);
+    assert!(
+        out.dropped.contains(&InjectionSlot::Memory),
+        "脉络最低优先先丢"
+    );
+    // 固定骨架始终保留
+    assert!(out.system_prompt.contains("# 能力边界"));
+    assert!(out.system_prompt.contains("# 角色（行为层）"));
+    assert!(out.system_prompt.contains("# 当前时间"));
+    // 脉络块被整块丢弃（无段落标题与子段）
+    assert!(
+        !out.system_prompt.contains("# 记忆（脉络层）"),
+        "脉络块被丢: {}",
+        out.system_prompt
+    );
+    assert!(
+        out.injected_tokens <= 2,
+        "总注入 ≤ 预算: {}",
+        out.injected_tokens
+    );
+}
+
+/// 协调预算开启且 RAG 被保留：memory_context 返回协调后的 RAG，system_prompt 含注入。
+#[test]
+fn coordinated_keeps_rag_and_high_priority_layers() {
+    let ctx = behavior_hit_ctx();
+    let config = PromptConfig::default();
+    let mut budget = ramaria_core::config::InjectionBudgetConfig::default();
+    budget.enabled = true;
+    budget.max_injection_tokens = 2000; // 充裕覆盖 RAG + 四层注入
+    let rag = "用户上次提到喜欢猫，正在准备搬家。";
+    let out = assemble_prompt_coordinated(&ctx, &config, &budget, Some(rag));
+    // RAG（最高优先）保留
+    assert!(out.memory_context.is_some(), "RAG 基座优先保留");
+    // 未丢弃的层仍在 prompt 中；被丢层段落不出现
+    assert_eq!(
+        out.dropped,
+        Vec::<InjectionSlot>::new(),
+        "预算充足时无丢弃: {:?}",
+        out.dropped
+    );
+    assert!(out.system_prompt.contains("## 行为规则"), "行为层保留");
+    assert!(
+        out.system_prompt.contains("# 说话风格（表达层）"),
+        "表达层保留"
+    );
+    assert_eq!(
+        out.system_prompt,
+        assemble_prompt(&ctx, &config),
+        "预算充足时与普通装配等价"
+    );
+}
+
+// =========================================================
+// 样板体量对照（标签压缩/提示优化）
+// =========================================================
+
+/// 标签压缩改造前"固定骨架"渲染体量（字符数 / 估算 token）。
+///
+/// 口径: 在压缩改造前用同一骨架上下文（见 [`skeleton_context`]）实测——
+/// `assemble_prompt` 输出恰好由固定样板组成（能力边界 + 默认知识边界 + 默认角色
+/// + 回复规范默认规则/记忆引用规则 + 记忆层引导 + 首次对话占位 + 相关记忆占位
+/// + 当前时间），无任何注入数据内容，因此可作为"样板体积"的稳定代理。
+/// 实测记录: chars=849, tokens=393。
+const LEGACY_BOILERPLATE_CHARS: usize = 849;
+const LEGACY_BOILERPLATE_TOKENS: usize = 393;
+
+/// 构造"固定骨架"上下文（无注入内容、时间固定，保证体量稳定可断言）。
+fn skeleton_context() -> PromptContext {
+    PromptContext {
+        current_time_str: Some("2026-06-10 10:00".into()),
+        ..Default::default()
+    }
+}
+
+/// 骨架样板体量下降：压缩后总体积必须小于压缩前基线（防样板回退膨胀）。
+#[test]
+fn boilerplate_skeleton_shrunk_below_legacy() {
+    let prompt = assemble_prompt(&skeleton_context(), &PromptConfig::default());
+    let vol = measure_prompt_volume(&prompt);
+    assert!(
+        vol.chars < LEGACY_BOILERPLATE_CHARS,
+        "骨架字符数应低于压缩前基线 {LEGACY_BOILERPLATE_CHARS}，实际 {}",
+        vol.chars
+    );
+    assert!(
+        vol.tokens < LEGACY_BOILERPLATE_TOKENS,
+        "骨架估算 token 应低于压缩前基线 {LEGACY_BOILERPLATE_TOKENS}，实际 {}",
+        vol.tokens
+    );
+}
+
+/// 各样板引导句/占位文本长度上限（引导句压缩的逐项锁定）。
+///
+/// 上限给的是压缩后实际文本的宽裕余量（+10 左右），防后续"加长引导"悄悄回退。
+#[test]
+fn boilerplate_leads_stay_within_upper_bounds() {
+    let cases: &[(&str, &str, usize)] = &[
+        ("CAPACITY_INTRO", CAPACITY_INTRO, 130),
+        ("KNOWLEDGE_BOUNDARY_DEFAULT", KNOWLEDGE_BOUNDARY_DEFAULT, 60),
+        ("ROLE_DEFAULT_TEXT", ROLE_DEFAULT_TEXT, 110),
+        ("MEMORY_SECTION_INTRO", MEMORY_SECTION_INTRO, 90),
+        ("NARRATIVE_PLACEHOLDER", NARRATIVE_PLACEHOLDER, 20),
+        ("RAG_PLACEHOLDER", RAG_PLACEHOLDER, 30),
+        ("UTT_LEAD", UTT_LEAD, 60),
+        ("BRIDGE_LEAD", BRIDGE_LEAD, 60),
+        ("STATEMENT_LEAD", STATEMENT_LEAD, 40),
+        ("CORE_RULES_DEFAULT", CORE_RULES_DEFAULT, 90),
+        ("MEMORY_CITATION_RULES", MEMORY_CITATION_RULES, 230),
+    ];
+    for (name, text, limit) in cases {
+        let chars = text.chars().count();
+        assert!(
+            chars <= *limit,
+            "样板常量 {name} 超引导句上限 {limit}: 实际 {chars} 字符"
+        );
+    }
+}
+
+/// 压缩后保留关键指令（语义等价锁定——压缩只删引导措辞，不删行为约束）。
+#[test]
+fn compressed_boilerplate_keeps_essential_instructions() {
+    // 边界约束关键词逐条保留（防止后续压缩误删"勿逐字/勿编造"等安全语义）
+    assert!(UTT_LEAD.contains("勿逐字抄袭"), "utt 引导须保留防抄袭边界");
+    assert!(
+        BRIDGE_LEAD.contains("勿逐字引用"),
+        "桥接引导须保留防逐字边界"
+    );
+    assert!(BRIDGE_LEAD.contains("勿编造"), "桥接引导须保留防编造边界");
+    assert!(CAPACITY_INTRO.contains("不编造"), "能力边界须保留诚实约束");
+    assert!(
+        CAPACITY_INTRO.contains("不生成有害"),
+        "能力边界须保留安全约束"
+    );
+    assert!(
+        MEMORY_CITATION_RULES.contains("主动回溯"),
+        "记忆引用规则须保留主动回溯边界"
+    );
+    assert!(
+        MEMORY_CITATION_RULES.contains("跨会话") && MEMORY_CITATION_RULES.contains("间隔短"),
+        "记忆引用规则须保留跨会话间隔策略"
+    );
+    // 记忆层引导保留"引用时机"约束
+    assert!(MEMORY_SECTION_INTRO.contains("仅在话题相关或用户主动提及时自然引用"));
+}
+
+/// 度量函数基本正确性（字符数 + token 估算，复用 estimate_tokens）。
+#[test]
+fn measure_prompt_volume_counts_chars_and_tokens() {
+    let empty = measure_prompt_volume("");
+    assert_eq!(empty.chars, 0);
+    assert_eq!(empty.tokens, 0);
+
+    let vol = measure_prompt_volume("# 记忆（脉络层）\n你好世界 Hello");
+    assert_eq!(
+        vol.chars,
+        "# 记忆（脉络层）\n你好世界 Hello".chars().count()
+    );
+    assert_eq!(
+        vol.tokens,
+        crate::token_budget::estimate_tokens("# 记忆（脉络层）\n你好世界 Hello")
     );
 }

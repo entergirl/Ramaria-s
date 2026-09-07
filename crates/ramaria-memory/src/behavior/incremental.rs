@@ -510,6 +510,23 @@ mod tests {
         assert!(low.is_empty());
     }
 
+    /// 内聚成簇的必要条件是**两两**相似度 ≥ θ_join：
+    /// 同主题两条 + 异质一条（与任一成员关键词零重合）→ 不成簇
+    /// （验证 θ_join 内聚门槛不是"简单按数量凑簇"）。
+    #[test]
+    fn pending_pool_requires_pairwise_cohesion() {
+        let mut pool = PendingPool::new(&cfg());
+        // 两条同质（加班）+ 一条异质（养猫）——异质样本阻断内聚
+        pool.add(&event(100, "加班,累", -0.5));
+        pool.add(&event(101, "加班,累", -0.5));
+        pool.add(&event(102, "养猫,开心", 0.6));
+        let (formed, _low) = pool.advance(now_ms());
+        assert!(formed.is_empty(), "含异质样本的组不满足两两内聚，不应成簇");
+        // 三条全部仍在待定池（未成簇、未标记低置信）
+        assert_eq!(pool.events.len(), 3);
+        assert!(pool.events.iter().all(|e| !e.low_confidence));
+    }
+
     // ---- 证据衰减 ----
 
     #[test]
