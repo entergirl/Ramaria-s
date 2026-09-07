@@ -77,8 +77,8 @@ pub use l1::{L1Summarizer, L1SummarizerConfig};
 // Event Extractor & TopicBatcher
 pub use event::{
     DegradeConfig, EventExtractor, EventExtractorConfig, L1Item, ParaphraseConfig,
-    TopicBatcherConfig, TopicCluster, build_degraded_event, degraded_confidence,
-    generate_paraphrase,
+    TopicBatcherConfig, TopicCluster, build_degraded_event, compute_information_retention,
+    degraded_confidence, generate_paraphrase,
 };
 
 // Inference ( + + — 性格推断全管线)
@@ -99,6 +99,8 @@ pub use inference::{
     CategoryStats,
     // 因果链特征（A8）
     CausalChainFeatures,
+    CausalEmotionTrend,
+    CausalLatencyStats,
     ClassifiedEvents,
     ClusterAssignment,
     ClusterDescription,
@@ -165,6 +167,7 @@ pub use inference::{
     detect_category_drift,
     detect_dimension_drift,
     extract_causal_features,
+    extract_causal_features_extended,
     extract_primary_category,
     format_causal_features_text,
     generate_semantic_label,

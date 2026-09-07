@@ -7,6 +7,8 @@
 //! - 纯函数计算，零 I/O：输入消息列表，输出 StyleStats 摘要
 //! - 频率口径统一：计数 / 有效字符数（概率形式供二项 z 检验；展示 ×100）
 //! - 分词复用 BM25 bigram tokenize；停用词内置常量过滤通用高频词
+//! - 可选 canonical 词表（关键词体系）词典增强：整词优先、bigram 回退，
+//!   空词表时与纯 bigram 逐字一致（等价回退）
 
 use std::collections::HashMap;
 
@@ -16,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::behavior::sentiment::SentimentLexicon;
 use crate::bm25::tokenize;
+use crate::keyword::{BigramWithDictionaryNormalizer, KeywordNormalizer};
 
 // =========================================================
 // 停用词与感叹词表
@@ -295,7 +298,7 @@ impl Default for StyleStats {
 }
 
 impl StyleStats {
-    /// 计算指定 persona 的五维风格统计。
+    /// 计算指定 persona 的五维风格统计（纯 bigram 口径，与无词表行为等价）。
     ///
     /// 参数:
     /// - `messages`: 该 persona 的全部消息（按 persona_uid 过滤后的发言）。
@@ -304,6 +307,28 @@ impl StyleStats {
     /// 返回:
     /// - 五维统计摘要；消息为空时返回全零默认值（样本量 0，标注数据不足）。
     pub fn compute(messages: &[Message], config: &StyleConfig) -> Self {
+        Self::compute_with_keywords(messages, config, &[])
+    }
+
+    /// 计算五维风格统计，可携带关键词体系 canonical 词表做词典增强。
+    ///
+    /// 用法:
+    /// - `canonical_words` 为空 → 与 [`StyleStats::compute`] 完全一致（纯 bigram 回退）。
+    /// - `canonical_words` 非空 → 分词先做词典整词匹配（canonical 词优先作为候选词），
+    ///   未命中再回退 bigram；使口癖/话题候选与关键词体系对齐、避免组合词被 bigram 拆散。
+    ///
+    /// 参数:
+    /// - `messages`: 该 persona 的全部消息。
+    /// - `config`: 风格统计配置。
+    /// - `canonical_words`: 关键词体系 canonical 词文本快照（alias 归一后文本）。
+    ///
+    /// 返回:
+    /// - 五维统计摘要；消息为空时返回全零默认值。
+    pub fn compute_with_keywords(
+        messages: &[Message],
+        config: &StyleConfig,
+        canonical_words: &[String],
+    ) -> Self {
         if messages.is_empty() {
             return Self::default();
         }
@@ -317,6 +342,9 @@ impl StyleStats {
         let mut polarities: Vec<f64> = Vec::new();
         let lexicon = SentimentLexicon::builtin();
         let mut topic_counts: HashMap<String, u32> = HashMap::new();
+
+        // 词典增强分词器（canonical_words 空时退化为纯 bigram，构造期自动处理）
+        let dict_normalizer = BigramWithDictionaryNormalizer::from_dictionary(canonical_words);
 
         for msg in messages {
             let text = msg.content.trim();
@@ -358,8 +386,18 @@ impl StyleStats {
                 stats.sentiment_word_messages += 1;
             }
 
-            // 口癖词/话题词候选：bigram 分词后过滤停用词
-            for tok in tokenize(text) {
+            // 口癖词/话题词候选：canonical 词典增强分词（空词表 = 纯 bigram），
+            // 过滤停用词后统一累计（话题与口癖共用同一候选源，后续按口癖 Top-N 排除）
+            let toks: Vec<String> = if canonical_words.is_empty() {
+                tokenize(text)
+            } else {
+                dict_normalizer
+                    .normalize(text)
+                    .into_iter()
+                    .map(|t| t.into_inner())
+                    .collect()
+            };
+            for tok in toks {
                 if is_stop_word(&tok) {
                     continue;
                 }
@@ -417,6 +455,97 @@ impl StyleStats {
     pub fn has_enough_sample(&self, min_sample: u32) -> bool {
         self.sample_count >= min_sample
     }
+
+    /// 从 persona 消息中选取代表表达风格的原文样例（小样本兜底用）。
+    ///
+    /// 用法:
+    /// - 样本量不足（n_p < 阈值）不生成自动规则时，调用本方法取少量短句作为
+    ///   可读的风格参考（供画像展示；不参与显著性统计，也不作为规则注入文本）。
+    ///
+    /// 说明:
+    /// - 候选偏好：含高频非停用词（口癖/话题候选）的消息优先；命中数相同取短句。
+    /// - 兜底：候选命中为空时退回"最短非空消息"，保证小样本仍有可读样例。
+    /// - 样例含原文消息片段，**只供 persona 端内画像使用**；不得写入日志、基线池、
+    ///   评估产物（隐私红线），落库前由调用方标注来源。
+    ///
+    /// 参数:
+    /// - `messages`: 该 persona 的消息（应与统计输入一致，未过滤亦可——内部做空文本过滤）。
+    /// - `max_samples`: 返回样例条数上限。
+    /// - `max_chars`: 单条样例最大字符数（超出截断）。
+    ///
+    /// 返回:
+    /// - 去重后的样例文本列表（可能少于 `max_samples`；无消息/无文本时为空）。
+    pub fn pick_style_samples(
+        &self,
+        messages: &[Message],
+        max_samples: usize,
+        max_chars: usize,
+    ) -> Vec<String> {
+        if max_samples == 0 || max_chars == 0 {
+            return Vec::new();
+        }
+        // 候选词：口癖/话题高频词（已去停用词），作为"代表风格"的命中信号
+        let mut candidates: Vec<String> =
+            Vec::with_capacity(self.word_freq.len() + self.topic_freq.len());
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for (w, _) in self.word_freq.iter().chain(self.topic_freq.iter()) {
+            if seen.insert(w) {
+                candidates.push(w.clone());
+            }
+        }
+
+        // 每候选词只计一次命中（是否含该词），避免长消息因重复词占优
+        let mut scored: Vec<(usize, usize, String)> = Vec::new(); // (命中数, 字符数, 文本)
+        let mut nonempty: Vec<(usize, String)> = Vec::new();
+        for msg in messages {
+            let text = msg.content.trim();
+            if text.is_empty() {
+                continue;
+            }
+            let chars = text.chars().count();
+            if chars == 0 {
+                continue;
+            }
+            let hits = candidates
+                .iter()
+                .filter(|w| text.contains(w.as_str()))
+                .count();
+            if hits > 0 {
+                scored.push((hits, chars, text.to_string()));
+            } else {
+                nonempty.push((chars, text.to_string()));
+            }
+        }
+
+        // 命中优先：命中数降序、长度升序；不足再取最短消息兜底
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        nonempty.sort_by_key(|(chars, _)| *chars);
+
+        let mut out: Vec<String> = Vec::with_capacity(max_samples);
+        let mut added: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let push =
+            |text: &str, out: &mut Vec<String>, added: &mut std::collections::HashSet<String>| {
+                let clipped = truncate_chars(text, max_chars);
+                if !clipped.is_empty() && added.insert(clipped.clone()) {
+                    out.push(clipped);
+                }
+            };
+        for (_, _, text) in scored {
+            if out.len() >= max_samples {
+                break;
+            }
+            push(&text, &mut out, &mut added);
+        }
+        if out.len() < max_samples {
+            for (_, text) in nonempty {
+                if out.len() >= max_samples {
+                    break;
+                }
+                push(&text, &mut out, &mut added);
+            }
+        }
+        out
+    }
 }
 
 // =========================================================
@@ -465,6 +594,15 @@ fn count_occurrences(text: &str, needle: &str) -> u32 {
 /// 任一字符的出现总次数。
 fn count_any(text: &str, chars: &[char]) -> u32 {
     text.chars().filter(|c| chars.contains(c)).count() as u32
+}
+
+/// 按字符数截断文本（超出时保留前缀；返回去首尾空白）。
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let clipped: String = text.trim().chars().take(max_chars).collect();
+    clipped
 }
 
 /// 升序序列的分位数（线性插值口径，同常用统计约定）。
@@ -653,5 +791,92 @@ mod tests {
         assert!(!stats.has_enough_sample(200));
         stats.sample_count = 200;
         assert!(stats.has_enough_sample(200));
+    }
+
+    // ---- 关键词衔接：canonical 词典增强 / 空词表回退 ----
+
+    #[test]
+    fn compute_with_empty_canonical_matches_plain_compute() {
+        // 空词表回退 = 纯 bigram（与无词表入口行为一致）
+        let messages = [msg("工作压力很大"), msg("工作压力真的很大，最近压力好大")];
+        let plain = StyleStats::compute(&messages, &config());
+        let with_empty = StyleStats::compute_with_keywords(&messages, &config(), &[]);
+        assert_eq!(plain, with_empty);
+        assert!(
+            plain
+                .word_freq
+                .iter()
+                .any(|(w, _)| w == "工作" || w == "压力"),
+            "纯 bigram 应产出相邻二元组"
+        );
+    }
+
+    #[test]
+    fn canonical_dict_keeps_whole_word_as_candidate() {
+        // 词典增强：canonical 词"工作压力"整词进入候选，不拆出"作压"噪声
+        let messages = [msg("最近工作压力很大"), msg("工作压力让人睡不好")];
+        let canonical = vec!["工作压力".to_string()];
+        let stats = StyleStats::compute_with_keywords(&messages, &config(), &canonical);
+        assert!(
+            stats.word_freq.iter().any(|(w, _)| w == "工作压力"),
+            "canonical 词应整体成为风格候选: {:?}",
+            stats.word_freq
+        );
+        assert!(
+            !stats.word_freq.iter().any(|(w, _)| w == "作压"),
+            "不应出现词典命中的噪声二元组"
+        );
+    }
+
+    // ---- SpeakingStyle 原文样例兜底 ----
+
+    #[test]
+    fn pick_samples_prefers_messages_with_high_freq_words() {
+        let messages = [
+            msg("哇塞今天天气真好"),
+            msg("哇塞这本书也太好看了吧，哇塞"),
+            msg("我们一起去吃饭吧"),
+        ];
+        let cfg = config();
+        let stats = StyleStats::compute(&messages, &cfg);
+        let samples = stats.pick_style_samples(&messages, 2, 48);
+        assert!(!samples.is_empty(), "至少选出一条样例");
+        // 含"哇塞"（非停用高频）的消息优先于普通句
+        assert!(
+            samples.iter().any(|s| s.contains("哇塞")),
+            "样例应优先代表口癖词消息: {:?}",
+            samples
+        );
+    }
+
+    #[test]
+    fn pick_samples_truncates_long_messages_and_dedup() {
+        let long1 = "哇塞".repeat(30);
+        let messages = [msg(&format!("哇塞{long1}好长好长")), msg("哇塞短句")];
+        let cfg = config();
+        let stats = StyleStats::compute(&messages, &cfg);
+        let samples = stats.pick_style_samples(&messages, 3, 8);
+        assert!(!samples.is_empty());
+        for s in &samples {
+            assert!(s.chars().count() <= 8, "样例应截断到 max_chars: {s}");
+        }
+        // 长消息截断前缀与短句重复时去重
+        let mut seen = std::collections::HashSet::new();
+        for s in &samples {
+            assert!(seen.insert(s.clone()), "样例去重: {s}");
+        }
+    }
+
+    #[test]
+    fn pick_samples_empty_inputs() {
+        let cfg = config();
+        assert!(
+            StyleStats::default()
+                .pick_style_samples(&[], 3, 48)
+                .is_empty()
+        );
+        let messages = [msg("   "), msg("")];
+        let stats = StyleStats::compute(&messages, &cfg);
+        assert!(stats.pick_style_samples(&messages, 3, 48).is_empty());
     }
 }

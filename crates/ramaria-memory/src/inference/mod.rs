@@ -27,7 +27,8 @@ pub use calibration::{
     CalibrationConfig, CalibrationDiff, CalibrationTracker, compute_calibration_diff,
 };
 pub use causal::{
-    CausalChainFeatures, CyclePattern, extract_causal_features, format_causal_features_text,
+    CausalChainFeatures, CausalEmotionTrend, CausalLatencyStats, CyclePattern,
+    extract_causal_features, extract_causal_features_extended, format_causal_features_text,
 };
 pub use clustering::{
     AttitudeSample, CROSS_VERSION_MATCH_THRESHOLD, ClusterAssignment, ClusterDescription,

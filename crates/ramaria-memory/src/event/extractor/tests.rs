@@ -565,3 +565,71 @@ fn event_similarity_empty_text_is_zero() {
     let b = event_for_sim("", "", None);
     assert_eq!(event_text_similarity(&a, &b), 0.0, "空文本不应误判为相似");
 }
+
+// ---- remap_relation（LLM 关系索引 → 实际保存 DB id 映射）----
+
+/// 构造测试用关系（kind/weight/detail 不影响位置映射，使用占位值）。
+fn rel_output(from_index: usize, to_index: usize) -> EventRelationOutput {
+    EventRelationOutput {
+        from_index,
+        to_index,
+        kind: "RelatedTo".into(),
+        weight: 0.5,
+        detail: None,
+    }
+}
+
+/// 全部事件保存时，关系位置映射到对应 DB id。
+#[test]
+fn remap_relation_all_saved_maps_positions() {
+    let saved = vec![Some(10i64), Some(11), Some(12)];
+    assert_eq!(
+        EventExtractor::remap_relation(&rel_output(0, 2), &saved),
+        Some((10, 12))
+    );
+}
+
+/// 端点被相似度去重跳过（None）时，引用该端点的关系应丢弃而非错误连边。
+#[test]
+fn remap_relation_dedup_skipped_endpoint_drops() {
+    // 位置 1 未保存（去重跳过）
+    let saved = vec![Some(10i64), None, Some(12)];
+    // from → 未保存端点 / 未保存端点 → to：均应丢弃
+    assert_eq!(
+        EventExtractor::remap_relation(&rel_output(0, 1), &saved),
+        None
+    );
+    assert_eq!(
+        EventExtractor::remap_relation(&rel_output(1, 2), &saved),
+        None
+    );
+    // 两端点均已保存：正常映射
+    assert_eq!(
+        EventExtractor::remap_relation(&rel_output(0, 2), &saved),
+        Some((10, 12))
+    );
+}
+
+/// 索引越界（LLM 输出数组长度之外的引用）应丢弃。
+#[test]
+fn remap_relation_out_of_range_drops() {
+    let saved = vec![Some(10i64)];
+    assert_eq!(
+        EventExtractor::remap_relation(&rel_output(0, 1), &saved),
+        None
+    );
+    assert_eq!(
+        EventExtractor::remap_relation(&rel_output(1, 0), &saved),
+        None
+    );
+}
+
+/// 自引用（from == to）应丢弃，与既有守卫一致。
+#[test]
+fn remap_relation_self_reference_drops() {
+    let saved = vec![Some(10i64), Some(11)];
+    assert_eq!(
+        EventExtractor::remap_relation(&rel_output(1, 1), &saved),
+        None
+    );
+}

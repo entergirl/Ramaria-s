@@ -488,3 +488,82 @@ async fn l2_fingerprint_similar_event_deduped() {
     assert_eq!(recent.len(), 1, "相似事件不应重复入库");
     assert_eq!(recent[0].title, "项目延期");
 }
+
+/// 关系位置映射回归：LLM 返回 3 事件 + 3 关系，其中 events[1] 与已有事件近似重复
+/// 被去重跳过时——引用它的关系（0→1、1→2）必须丢弃，不得错误映射到其他事件；
+/// 端点均保存的关系（0→2）照常写入。
+#[tokio::test]
+async fn l2_relations_remap_after_partial_dedup_skip() {
+    use ramaria_core::types::MemoryEvent;
+
+    let storage = mem_storage().await;
+    let persona_uid = create_persona(&storage, "char-rel-dedup", "关系映射角色").await;
+    let session = create_session(&storage, Some(&persona_uid)).await;
+
+    // 预置 1 条已有事件：与 LLM 输出的 events[1] 完全一致 → 该位置将被去重跳过
+    let mut existing = MemoryEvent::new(
+        persona_uid.clone(),
+        "失眠加重".into(),
+        "用户因连续加班出现失眠症状，情绪低落。".into(),
+        now_ms() - 1000,
+        now_ms(),
+    );
+    existing.keywords = Some("工作压力,加班,失眠".into());
+    storage.save_event(&existing).await.unwrap();
+
+    // 5 条同主题 L1 → 单簇
+    for i in 0..5 {
+        storage
+            .save_memory_l1(&make_l1(
+                session.id,
+                &format!("工作压力摘要{i}"),
+                "工作,压力,加班",
+                &persona_uid,
+                0.5,
+                now_ms() - 60_000 + i as i64 * 1000,
+            ))
+            .await
+            .unwrap();
+    }
+
+    // 3 事件 + 3 关系；relations 索引引用 events 数组位置 0/1/2
+    const RSP: &str = r#"{
+      "events": [
+        {"title":"项目上线","summary":"用户推动项目如期上线，团队协作顺利。","keywords":"工作,项目,上线","confidence":0.85,"salience":0.7,"valence":0.5,"presentation":"objective","share":0.6,"attitude":null},
+        {"title":"失眠加重","summary":"用户因连续加班出现失眠症状，情绪低落。","keywords":"工作压力,加班,失眠","confidence":0.8,"salience":0.7,"valence":-0.5,"presentation":"objective","share":0.4,"attitude":null},
+        {"title":"晨跑计划","summary":"用户打算每周晨跑三次改善状态。","keywords":"健身,跑步,计划","confidence":0.7,"salience":0.5,"valence":0.5,"presentation":"objective","share":0.5,"attitude":null}
+      ],
+      "relations": [
+        {"from_index":0,"to_index":1,"kind":"CausedBy","weight":0.6,"detail":"上线压力导致失眠"},
+        {"from_index":0,"to_index":2,"kind":"RelatedTo","weight":0.5,"detail":"恢复计划相关"},
+        {"from_index":1,"to_index":2,"kind":"Timeline","weight":0.4,"detail":"先失眠后计划"}
+      ]
+    }"#;
+    let llm = MockLlm::new(RSP);
+    let mut extractor = EventExtractor::new(&llm, &storage, EventExtractorConfig::default());
+
+    let events = extractor
+        .extract_events(&persona_uid)
+        .await
+        .expect("提取成功");
+
+    // events[1] 与预置事件重复 → 被去重跳过：仅保存 events[0] 与 events[2]
+    assert_eq!(events.len(), 2, "去重后应保存 2 条新事件");
+    let titles: Vec<&str> = events.iter().map(|e| e.title.as_str()).collect();
+    assert!(titles.contains(&"项目上线"));
+    assert!(titles.contains(&"晨跑计划"));
+    assert!(!titles.contains(&"失眠加重"), "重复事件不应入库");
+
+    // 关系应仅剩 0→2（RelatedTo）；0→1、1→2 因端点未保存被丢弃
+    let relations = storage
+        .list_event_relations_by_persona(&persona_uid)
+        .await
+        .expect("查询关系成功");
+    assert_eq!(
+        relations.len(),
+        1,
+        "应仅写入端点均保存的 1 条关系，实际 {}",
+        relations.len()
+    );
+    assert_eq!(relations[0].kind.as_str(), "RelatedTo", "仅 0→2 关系应写入");
+}

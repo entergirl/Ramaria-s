@@ -768,6 +768,62 @@ mod tests {
         assert!(ctx.query_vector.is_none());
     }
 
+    // ---- 查询构造：embedding 调用故障 ----
+
+    /// 恒失败 mock embedding（模拟在线路由侧 embedding 服务故障）。
+    struct FailingQueryEmbedder;
+
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for FailingQueryEmbedder {
+        async fn embed(&self, _text: &str) -> RamariaResult<Vec<f32>> {
+            Err(ramaria_core::RamariaError::embedding("mock embedding 故障"))
+        }
+        async fn embed_batch(&self, _texts: &[&str]) -> RamariaResult<Vec<Vec<f32>>> {
+            Err(ramaria_core::RamariaError::embedding(
+                "mock embedding 批量故障",
+            ))
+        }
+        fn model_info(&self) -> ramaria_core::traits::EmbeddingModelInfo {
+            ramaria_core::traits::EmbeddingModelInfo {
+                model_id: "failing-query-embedder".into(),
+                dimension: 4,
+            }
+        }
+        async fn validate(&self) -> RamariaResult<()> {
+            Ok(())
+        }
+        async fn download_model(&self) -> RamariaResult<()> {
+            Ok(())
+        }
+        fn download_progress(&self) -> f64 {
+            1.0
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn build_query_context_embedding_failure_degrades_to_keywords() {
+        // embedding 调用故障（provider 存在但返回 Err）→ 查询向量为 None（记 warn），
+        // 话题词仍抽取；后续路由退化为纯关键词匹配（不 panic、不阻塞）。
+        let messages = vec![msg("加班很累", MessageRole::User)];
+        let ctx = build_query_context(&messages, Some(&FailingQueryEmbedder))
+            .await
+            .expect("embedding 故障不报错");
+        assert!(ctx.query_vector.is_none(), "查询向量应置 None");
+        assert!(!ctx.keywords.is_empty(), "话题词仍抽取");
+
+        // 纯关键词路由仍可命中同关键词规则（bigram 词集部分命中，θ 取 0.3 稳定断言）
+        let rule = rule(1, &["加班"], -0.4, None);
+        let params = RoutingParams {
+            theta_route: 0.3,
+            ..RoutingParams::default()
+        };
+        let result = route_rules(&[rule], &ctx, &params);
+        assert!(result.matched, "embedding 故障 → 纯关键词命中规则");
+    }
+
     // ---- 查询侧关键词规范化（关键词池别名归一） ----
 
     /// 构造含别名关系的池：职业倦怠(alias) → 工作压力(canonical)。

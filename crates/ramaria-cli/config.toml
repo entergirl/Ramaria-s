@@ -90,6 +90,8 @@ diff_alert_ratio = 0.3
 cross_version_threshold_085 = true
 cold_start_cross_user_prior = true
 drift_restore_real_distribution = true
+# 因果链注入扩展段（时延分布 + 情绪沿链走势）；false = 回退 v1.7 仅链长/循环模式
+causal_latency_emotion_trend = true
 
 [event_extraction]
 temperature = 0.3

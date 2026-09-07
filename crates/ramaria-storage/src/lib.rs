@@ -15,8 +15,9 @@ use ramaria_core::keyword::KeywordPoolRow;
 use ramaria_core::traits::{StoreCrud, StoreInfrastructure};
 use ramaria_core::types::{
     BackendConfig, ClusterSnapshot, EventRelation, EventSource, MemoryEvent, MemoryL1, Message,
-    Persona, PersonaExample, PersonaFact, PersonaStyleStats, PersonalityTrait, PrivacyConsent,
-    ProfileField, Session, TraitEvidence, TraitStatus, UttBlock, now_ms,
+    Persona, PersonaEventAggregate, PersonaExample, PersonaFact, PersonaStyleStats,
+    PersonalityTrait, PrivacyConsent, ProfileField, Session, TraitEvidence, TraitStatus, UttBlock,
+    now_ms,
 };
 use sqlx::SqlitePool;
 use uuid::Uuid;
@@ -193,6 +194,13 @@ impl StoreCrud for SqliteStorage {
 
     async fn mark_events_absorbed(&self, event_ids: &[i64]) -> RamariaResult<()> {
         repo::events::mark_absorbed(&self.pool, event_ids).await
+    }
+
+    async fn aggregate_persona_event_priors(
+        &self,
+        exclude_persona_uid: &str,
+    ) -> RamariaResult<Vec<PersonaEventAggregate>> {
+        repo::events::aggregate_persona_event_priors(&self.pool, exclude_persona_uid).await
     }
 
     // =========================================================
@@ -1483,6 +1491,34 @@ mod tests {
         storage.save_event(&ev).await.unwrap()
     }
 
+    /// 辅助：创建带推断信号属性的事件（valence/share/presentation 可设）。
+    async fn create_event_with_signals(
+        storage: &SqliteStorage,
+        persona_uid: &str,
+        title: &str,
+        valence: f64,
+        share: f64,
+        presentation: &str,
+    ) -> i64 {
+        use ramaria_core::types::Presentation;
+        let now = now_ms();
+        let mut ev = MemoryEvent::new(
+            persona_uid.into(),
+            title.into(),
+            "测试描述".into(),
+            now - 1000,
+            now,
+        );
+        ev.valence = valence;
+        ev.share = share;
+        ev.presentation = match presentation {
+            "objective" => Presentation::Objective,
+            "subjective" => Presentation::Subjective,
+            _ => Presentation::Mixed,
+        };
+        storage.save_event(&ev).await.unwrap()
+    }
+
     #[tokio::test]
     async fn list_unabsorbed_events_empty() {
         // 新建 persona 尚未有任何事件
@@ -1490,6 +1526,115 @@ mod tests {
 
         let events = storage.list_unabsorbed_events(&persona_uid).await.unwrap();
         assert!(events.is_empty(), "新 persona 应该没有未吸收事件");
+    }
+
+    // =========================================================
+    // aggregate_persona_event_priors（跨用户事件经验分布聚合）
+    // =========================================================
+
+    /// 辅助：创建其他 persona（返回其 uid）。
+    async fn create_extra_persona(storage: &SqliteStorage, uid: &str, name: &str) {
+        let p = Persona::new(
+            uid.into(),
+            name.into(),
+            PersonaKind::Char,
+            1,
+            "local".into(),
+        );
+        storage.create_persona(&p).await.unwrap();
+    }
+
+    /// 多 persona 场景：聚合返回除目标 persona 外各 persona 的 n/均值/占比。
+    #[tokio::test]
+    async fn aggregate_persona_event_priors_multiple_personas() {
+        let (storage, target_uid, _, _) = setup_with_persona().await;
+        create_extra_persona(&storage, "char-a", "角色A").await;
+        create_extra_persona(&storage, "char-b", "角色B").await;
+
+        // 目标 persona 自身事件（应被 exclude，不污染跨用户先验）
+        create_event_with_signals(&storage, &target_uid, "目标自身事件", 0.8, 0.9, "objective")
+            .await;
+
+        // char-a: 2 条（valence 0.2 / -0.4，share 0.6），presentation objective + subjective
+        create_event_with_signals(&storage, "char-a", "A1", 0.2, 0.6, "objective").await;
+        create_event_with_signals(&storage, "char-a", "A2", -0.4, 0.6, "subjective").await;
+
+        // char-b: 3 条（valence 全部 0.5，share 0.3），presentation 全部 mixed
+        for i in 0..3 {
+            create_event_with_signals(&storage, "char-b", &format!("B{i}"), 0.5, 0.3, "mixed")
+                .await;
+        }
+
+        let rows = storage
+            .aggregate_persona_event_priors(&target_uid)
+            .await
+            .unwrap();
+
+        // 排除目标 persona：仅返回 char-a / char-b
+        assert_eq!(rows.len(), 2, "应只聚合其他 persona：{rows:?}");
+        assert!(
+            rows.iter().all(|r| r.persona_uid != target_uid),
+            "目标 persona 自身事件不得进入聚合结果"
+        );
+
+        let char_a = rows
+            .iter()
+            .find(|r| r.persona_uid == "char-a")
+            .expect("应包含 char-a");
+        assert_eq!(char_a.n_events, 2);
+        assert!(
+            (char_a.valence_mean - (0.2 + -0.4) / 2.0).abs() < 1e-9,
+            "char-a valence 应为事件级均值，实际={}",
+            char_a.valence_mean
+        );
+        assert!((char_a.share_mean - 0.6).abs() < 1e-9);
+        assert!((char_a.obj_ratio - 0.5).abs() < 1e-9);
+        assert!((char_a.sub_ratio - 0.5).abs() < 1e-9);
+        assert!((char_a.mix_ratio - 0.0).abs() < 1e-9);
+
+        let char_b = rows
+            .iter()
+            .find(|r| r.persona_uid == "char-b")
+            .expect("应包含 char-b");
+        assert_eq!(char_b.n_events, 3);
+        assert!((char_b.valence_mean - 0.5).abs() < 1e-9);
+        assert!((char_b.share_mean - 0.3).abs() < 1e-9);
+        assert!((char_b.obj_ratio - 0.0).abs() < 1e-9);
+        assert!((char_b.sub_ratio - 0.0).abs() < 1e-9);
+        assert!((char_b.mix_ratio - 1.0).abs() < 1e-9);
+
+        // 三态占比和恒为 1
+        for row in &rows {
+            let sum = row.obj_ratio + row.sub_ratio + row.mix_ratio;
+            assert!(
+                (sum - 1.0).abs() < 1e-9,
+                "presentation 占比和应为1: {row:?}"
+            );
+        }
+    }
+
+    /// 空库（无任何事件）→ 返回空列表。
+    #[tokio::test]
+    async fn aggregate_persona_event_priors_empty_db_returns_empty() {
+        let storage = setup().await;
+        let rows = storage
+            .aggregate_persona_event_priors("user-none")
+            .await
+            .unwrap();
+        assert!(rows.is_empty(), "空库应返回空聚合结果");
+    }
+
+    /// 目标 persona 是系统内唯一有事件者 → 无其他 persona 来源，返回空。
+    #[tokio::test]
+    async fn aggregate_persona_event_priors_only_target_returns_empty() {
+        let (storage, target_uid, _, _) = setup_with_persona().await;
+        create_event_with_signals(&storage, &target_uid, "唯一事件", 0.1, 0.5, "mixed").await;
+
+        let rows = storage
+            .aggregate_persona_event_priors(&target_uid)
+            .await
+            .unwrap();
+        assert!(rows.is_empty(), "仅目标 persona 有事件时不应产生跨用户来源");
     }
 
     #[tokio::test]

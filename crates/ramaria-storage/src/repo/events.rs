@@ -8,7 +8,9 @@
 
 use crate::repo::StorageResultExt;
 use ramaria_core::error::RamariaResult;
-use ramaria_core::types::{EventRelation, EventSource, MemoryEvent, Presentation};
+use ramaria_core::types::{
+    EventRelation, EventSource, MemoryEvent, PersonaEventAggregate, Presentation,
+};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
@@ -224,6 +226,82 @@ pub async fn mark_absorbed(pool: &SqlitePool, event_ids: &[i64]) -> RamariaResul
     );
 
     Ok(())
+}
+
+// =========================================================
+// 跨用户事件级经验聚合（L3 冷启动先验数据源）
+// =========================================================
+
+/// SQL 聚合行的私有中间结构（避免 PersonaEventAggregate 依赖 sqlx）。
+#[derive(sqlx::FromRow)]
+struct PersonaEventAggregateRow {
+    persona_uid: String,
+    n_events: i64,
+    valence_mean: f64,
+    share_mean: f64,
+    obj_ratio: f64,
+    sub_ratio: f64,
+    mix_ratio: f64,
+}
+
+impl PersonaEventAggregateRow {
+    fn into_aggregate(self) -> PersonaEventAggregate {
+        PersonaEventAggregate::new(
+            self.persona_uid,
+            self.n_events.max(0) as u64,
+            self.valence_mean,
+            self.share_mean,
+            self.obj_ratio,
+            self.sub_ratio,
+            self.mix_ratio,
+        )
+    }
+}
+
+/// 聚合除目标 persona 外各 persona 的事件级经验分布（跨用户冷启动先验数据源）。
+///
+/// SQL 口径:
+/// - `n_events = COUNT(*)`：该 persona 的事件原始条数。
+/// - `valence_mean / share_mean = AVG(...)`：事件级简单均值（不含 salience 加权，
+///   与分类内 `CategoryStats` 口径不同，仅作跨 persona 经验方向锚点）。
+/// - presentation 三态占比 = 各态计数 / 总计数，和恒为 1
+///   （`memory_events.presentation` 存储为小写字符串 objective/subjective/mixed）。
+///
+/// 过滤语义:
+/// - 排除目标 persona（`exclude_persona_uid`）自身事件，避免自身样本污染"跨用户"先验。
+/// - 仅返回至少含 1 条事件的 persona 行；无事件的行无经验意义，直接剔除。
+///
+/// 说明:
+/// - 本函数只做原始 SQL 聚合；样本量阈值判定与加权合并由 ramaria-memory 负责。
+///
+/// 返回:
+/// - 按 persona_uid 升序的各已有人格画像聚合行；空库 / 无其他 persona 时返回空列表。
+pub async fn aggregate_persona_event_priors(
+    pool: &SqlitePool,
+    exclude_persona_uid: &str,
+) -> RamariaResult<Vec<PersonaEventAggregate>> {
+    let rows = sqlx::query_as::<_, PersonaEventAggregateRow>(
+        "SELECT persona_uid,
+                COUNT(*) AS n_events,
+                AVG(valence) AS valence_mean,
+                AVG(share) AS share_mean,
+                SUM(CASE WHEN presentation = 'objective' THEN 1.0 ELSE 0.0 END)
+                    / CAST(COUNT(*) AS REAL) AS obj_ratio,
+                SUM(CASE WHEN presentation = 'subjective' THEN 1.0 ELSE 0.0 END)
+                    / CAST(COUNT(*) AS REAL) AS sub_ratio,
+                SUM(CASE WHEN presentation = 'mixed' THEN 1.0 ELSE 0.0 END)
+                    / CAST(COUNT(*) AS REAL) AS mix_ratio
+         FROM memory_events
+         WHERE persona_uid <> ?
+         GROUP BY persona_uid
+         HAVING COUNT(*) > 0
+         ORDER BY persona_uid ASC",
+    )
+    .bind(exclude_persona_uid)
+    .fetch_all(pool)
+    .await
+    .storage_err("聚合跨用户事件经验分布失败")?;
+    Ok(rows.into_iter().map(|r| r.into_aggregate()).collect())
 }
 
 // =========================================================

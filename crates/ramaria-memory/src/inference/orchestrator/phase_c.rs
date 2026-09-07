@@ -2,7 +2,8 @@
 //!
 //! 设计特点:
 //! - run_phase_c_update: 加载活跃 traits 与证据 → 按语义匹配度分配新事件 → 置信度更新 → 持久化 → 漂移检测。
-//! - detect_and_summarize_drift: 对比 cluster_snapshots 旧分布与当前事件分布，产出 DriftSummary。
+//! - detect_and_summarize_drift: 对比 cluster_snapshots 旧分布（上一轮已吸收分布）与当前事件分布，产出 DriftSummary。
+//! - 真实分布恢复未启用 / 旧分布缺失 / 无判别信息的分类显式跳过，带 skipped_count 标注，不生成占位假数据。
 //! - restore_old_distribution: 从快照 samples JSON 恢复真实旧分布（valence/share 按 n_eff 展开）。
 //! - 事件-trait 匹配度基于最长公共子串的轻量语义估计，无额外 LLM/embedding 调用。
 
@@ -254,11 +255,13 @@ pub async fn run_phase_c_update(
         }
     };
 
+    let drift_skipped = drift_summary.as_ref().map(|s| s.skipped_count).unwrap_or(0);
     info!(
         persona_uid = %persona_owned,
         traits_updated,
         evidence_saved,
         has_significant_drift,
+        drift_skipped,
         "Phase C: 更新完成"
     );
 
@@ -276,9 +279,13 @@ pub async fn run_phase_c_update(
 // 漂移检测辅助
 // =========================================================
 
-/// 执行漂移检测：对比 cluster_snapshots 中的旧分布与新事件分布。
+/// 执行漂移检测：对比 cluster_snapshots 中旧分布（上一轮已吸收分布）与新事件分布。
 ///
-/// 从 storage 加载当前快照作为旧分布，从 events 中按 category 分组提取新分布。
+/// 流程:
+/// 1. 从 storage 加载各分类的当前（最新一期）快照作为旧分布来源。
+/// 2. `restore_real_distribution=false` 时整体显式跳过——不生成占位假数据。
+/// 3. 旧分布缺失 / 解析失败 / 无判别信息的分类显式跳过并累计 `skipped_count`。
+/// 4. 从 events 按 category 分组提取新分布，交 `run_drift_detection` 判定。
 async fn detect_and_summarize_drift(
     storage: &dyn StorageBackend,
     persona_uid: &str,
@@ -296,10 +303,25 @@ async fn detect_and_summarize_drift(
         categories_map.entry(cat).or_default().push(event);
     }
 
+    if !drift_config.restore_real_distribution {
+        warn!(
+            persona_uid,
+            candidate_categories = categories_map.len(),
+            "Phase C: 真实旧分布恢复未启用（restore_real_distribution=false），跳过漂移检测"
+        );
+        return Ok(DriftSummary {
+            categories: vec![],
+            review_count: 0,
+            any_drift: false,
+            skipped_count: categories_map.len(),
+        });
+    }
+
     let mut category_data: Vec<CategoryEventData> = Vec::new();
+    let mut skipped_count = 0usize;
 
     for (category, cat_events) in &categories_map {
-        // 加载该分类的旧快照数据
+        // 加载该分类的旧快照（当前/最新一期）
         let snapshots = storage
             .get_current_snapshots(persona_uid, category)
             .await
@@ -313,19 +335,8 @@ async fn detect_and_summarize_drift(
                 vec![]
             });
 
-        // 从快照提取旧分布。
-        // 开启开关时从 `persona_cluster_snapshots.samples` JSON 恢复真实旧分布；
-        // 关闭开关（`restore_real_distribution=false`）时回退硬编码占位（全 0 / 0.5）。
-        let (old_valences, old_shares, old_saliences) = if drift_config.restore_real_distribution {
-            restore_old_distribution(&snapshots)
-        } else {
-            // 旧版占位：快照数条 0.0 valence / 0.5 share，漂移检测实际不触发（all-zeros 守卫）。
-            (
-                snapshots.iter().map(|_s| 0.0).collect(),
-                snapshots.iter().map(|_s| 0.5).collect(),
-                Vec::<f64>::new(),
-            )
-        };
+        // 从快照 samples JSON 恢复真实旧分布（valence/share 按 n_eff 展开）。
+        let (old_valences, old_shares, old_saliences) = restore_old_distribution(&snapshots);
 
         // 从当前事件提取新分布
         let new_valences: Vec<f64> = cat_events.iter().map(|e| e.valence).collect();
@@ -333,20 +344,33 @@ async fn detect_and_summarize_drift(
         let new_saliences: Vec<f64> = cat_events.iter().map(|e| e.salience).collect();
         let new_confidences: Vec<f64> = cat_events.iter().map(|e| e.confidence).collect();
 
-        // 如果旧分布为空（新分类），跳过漂移检测。
-        // 快照缺失时记 warn 并跳过（静默降级，不阻塞主流程）。
-        if old_valences.is_empty() || old_valences.iter().all(|&v| v == 0.0) {
-            if old_valences.is_empty() {
+        // 旧分布无可用信息 → 显式跳过该分类并累计计数（不静默、不阻塞主流程）。
+        if old_valences.is_empty() {
+            if snapshots.is_empty() {
                 warn!(
                     persona_uid,
-                    category, "Phase C: 快照旧分布为空（samples 缺失或解析失败），跳过漂移检测"
+                    category, "Phase C: 无历史快照（新分类或上一轮快照未写入），跳过漂移检测"
                 );
             } else {
-                debug!(
+                warn!(
                     persona_uid,
-                    category, "Phase C: 新分类无旧分布，跳过漂移检测"
+                    category, "Phase C: 快照 samples 缺失或解析失败，旧分布为空，跳过漂移检测"
                 );
             }
+            skipped_count += 1;
+            continue;
+        }
+
+        // all-zeros 守卫仅防御"解析出的旧分布确无判别信息"的退化场景：
+        // valence 与 share 两组展开值同时全零时视为无信息可对比。
+        let valences_all_zero = old_valences.iter().all(|&v| v == 0.0);
+        let shares_all_zero = old_shares.iter().all(|&s| s == 0.0);
+        if valences_all_zero && shares_all_zero {
+            warn!(
+                persona_uid,
+                category, "Phase C: 解析出的旧分布无判别信息（valence/share 全零），跳过漂移检测"
+            );
+            skipped_count += 1;
             continue;
         }
 
@@ -368,10 +392,13 @@ async fn detect_and_summarize_drift(
             categories: vec![],
             review_count: 0,
             any_drift: false,
+            skipped_count,
         });
     }
 
-    Ok(run_drift_detection(&category_data, drift_config))
+    let mut summary = run_drift_detection(&category_data, drift_config);
+    summary.skipped_count += skipped_count;
+    Ok(summary)
 }
 
 /// 从 `persona_cluster_snapshots` 的 `samples` JSON 恢复真实旧分布。
@@ -537,4 +564,318 @@ pub(super) fn longest_common_substring_ratio(a: &[char], b: &[char]) -> f64 {
     }
 
     max_len as f64 / (n.min(m) as f64)
+}
+
+// =========================================================
+// 单元测试（内存 SQLite，真实 StorageBackend 快照语义）
+// =========================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ramaria_core::traits::StoreCrud;
+    use ramaria_core::types::{ClusterSnapshot, MemoryEvent, Persona, PersonaKind, Presentation};
+    use ramaria_storage::SqliteStorage;
+
+    /// 创建内存 SQLite 存储（跑 2.0 基线 migration，外键约束开启）。
+    async fn mem_storage() -> SqliteStorage {
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(":memory:")
+            .foreign_keys(true);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("内存测试数据库创建失败");
+        sqlx::migrate!("../ramaria-storage/migrations")
+            .run(&pool)
+            .await
+            .expect("测试 migration 失败");
+        SqliteStorage::new(pool)
+    }
+
+    /// 插入 persona 行，满足 persona_cluster_snapshots 的外键约束。
+    async fn insert_persona(storage: &SqliteStorage, uid: &str) {
+        let persona = Persona::new(
+            uid.into(),
+            "测试人格".into(),
+            PersonaKind::Char,
+            1,
+            "local".into(),
+        );
+        storage
+            .create_persona(&persona)
+            .await
+            .expect("插入 persona fixture 应成功");
+    }
+
+    /// 构造分类级快照聚合 samples JSON（与 L3 Phase A 持久化格式一致）。
+    fn snapshot_samples(category: &str, n_eff: f64, valence_mean: f64, share_mean: f64) -> String {
+        serde_json::json!({
+            "category": category,
+            "event_count": n_eff as u64,
+            "n_effective": n_eff,
+            "valence_mean": valence_mean,
+            "valence_std": 0.1,
+            "share_mean": share_mean,
+        })
+        .to_string()
+    }
+
+    /// 构造测试事件：keywords 首标签即分类，valence/share/confidence/salience 由参数给定。
+    fn make_event(id: i64, keywords: &str, valence: f64, share: f64) -> MemoryEvent {
+        let now = now_ms();
+        let mut ev = MemoryEvent::new(
+            "persona-drift".into(),
+            format!("事件 {id}"),
+            format!("摘要 {id}"),
+            now - 1000,
+            now,
+        );
+        ev.id = id;
+        ev.keywords = Some(keywords.into());
+        ev.valence = valence;
+        ev.share = share;
+        ev.salience = 0.5;
+        ev.confidence = 0.9;
+        ev.presentation = Presentation::Mixed;
+        ev
+    }
+
+    /// 写入一期旧快照（模拟上一轮已吸收画像分布）。
+    async fn seed_snapshot(storage: &SqliteStorage, uid: &str, category: &str, samples: String) {
+        let snap = ClusterSnapshot {
+            id: 0,
+            persona_uid: uid.to_string(),
+            category: category.to_string(),
+            cluster_label: format!("cluster_{category}"),
+            samples: Some(samples),
+            count: 10,
+            is_current: true,
+            created_at: now_ms(),
+            semantic_label: None,
+            semantic_label_embedding: None,
+        };
+        storage
+            .save_cluster_snapshot(&snap)
+            .await
+            .expect("写入快照 fixture 应成功");
+    }
+
+    /// 两期分布差异显著（上一轮 valence≈0.8、本轮≈0.1）→ 该分类触发重审。
+    #[tokio::test]
+    async fn detect_drift_triggers_on_two_round_snapshot_shift() {
+        let storage = mem_storage().await;
+        insert_persona(&storage, "persona-drift").await;
+        seed_snapshot(
+            &storage,
+            "persona-drift",
+            "工作",
+            snapshot_samples("工作", 10.0, 0.8, 0.6),
+        )
+        .await;
+
+        let events: Vec<MemoryEvent> = (0..10)
+            .map(|i| make_event(i, "工作,会议", 0.1, 0.6))
+            .collect();
+        let summary =
+            detect_and_summarize_drift(&storage, "persona-drift", &events, &DriftConfig::default())
+                .await
+                .expect("漂移检测应成功");
+
+        let work = summary
+            .categories
+            .iter()
+            .find(|c| c.category == "工作")
+            .expect("工作分类应进入检测");
+        assert!(work.needs_review, "valence 从 0.8 大幅降至 0.1 应触发漂移");
+        assert!(summary.any_drift);
+        assert_eq!(summary.skipped_count, 0, "有效对比不应产生跳过");
+    }
+
+    /// 两期分布基本一致 → 不触发重审。
+    #[tokio::test]
+    async fn detect_drift_no_trigger_when_distributions_similar() {
+        let storage = mem_storage().await;
+        insert_persona(&storage, "persona-drift").await;
+        seed_snapshot(
+            &storage,
+            "persona-drift",
+            "家庭",
+            snapshot_samples("家庭", 10.0, 0.4, 0.7),
+        )
+        .await;
+
+        let events: Vec<MemoryEvent> = (0..10)
+            .map(|i| make_event(i, "家庭,陪伴", 0.4, 0.7))
+            .collect();
+        let summary =
+            detect_and_summarize_drift(&storage, "persona-drift", &events, &DriftConfig::default())
+                .await
+                .expect("漂移检测应成功");
+
+        assert!(!summary.any_drift, "相同分布不应触发漂移");
+        assert_eq!(summary.categories[0].category, "家庭");
+        assert!(!summary.categories[0].needs_review);
+    }
+
+    /// 旧分布缺失（新分类、无历史快照）→ 该分类显式跳过并计数。
+    #[tokio::test]
+    async fn detect_drift_skips_category_missing_old_snapshot() {
+        let storage = mem_storage().await;
+        insert_persona(&storage, "persona-drift").await;
+        // 未写入任何快照
+        let events: Vec<MemoryEvent> = (0..5)
+            .map(|i| make_event(i, "社交,聚会", -0.2, 0.5))
+            .collect();
+        let summary =
+            detect_and_summarize_drift(&storage, "persona-drift", &events, &DriftConfig::default())
+                .await
+                .expect("漂移检测应成功");
+
+        assert!(summary.categories.is_empty(), "缺失旧分布不应产出检测结果");
+        assert!(!summary.any_drift);
+        assert_eq!(summary.skipped_count, 1, "应显式跳过并标注 1 个分类");
+    }
+
+    /// restore_real_distribution=false → 漂移检测整体显式跳过，不生成占位假数据。
+    #[tokio::test]
+    async fn detect_drift_disabled_skips_explicitly() {
+        let storage = mem_storage().await;
+        insert_persona(&storage, "persona-drift").await;
+        seed_snapshot(
+            &storage,
+            "persona-drift",
+            "工作",
+            snapshot_samples("工作", 10.0, 0.8, 0.6),
+        )
+        .await;
+
+        let events: Vec<MemoryEvent> = (0..10)
+            .map(|i| make_event(i, "工作,会议", 0.1, 0.6))
+            .collect();
+        let cfg = DriftConfig {
+            restore_real_distribution: false,
+            ..DriftConfig::default()
+        };
+        let summary = detect_and_summarize_drift(&storage, "persona-drift", &events, &cfg)
+            .await
+            .expect("漂移检测应成功");
+
+        assert!(
+            summary.categories.is_empty(),
+            "关闭真实恢复后不应产出检测结果"
+        );
+        assert!(!summary.any_drift);
+        assert_eq!(
+            summary.skipped_count, 1,
+            "关闭开关应显式跳过全部候选分类（此例 1 个）"
+        );
+    }
+
+    /// 旧分布无判别信息（valence/share 解析全零）→ 该分类显式跳过并计数，
+    /// 不产出假性漂移（空数据守卫，不 panic、不阻塞主流程）。
+    #[tokio::test]
+    async fn detect_drift_skips_category_when_old_distribution_all_zero() {
+        let storage = mem_storage().await;
+        insert_persona(&storage, "persona-drift-zero").await;
+        seed_snapshot(
+            &storage,
+            "persona-drift-zero",
+            "工作",
+            snapshot_samples("工作", 10.0, 0.0, 0.0), // valence/share 全零
+        )
+        .await;
+
+        let events: Vec<MemoryEvent> = (0..5)
+            .map(|i| make_event(i, "工作,会议", 0.3, 0.5))
+            .collect();
+        let summary = detect_and_summarize_drift(
+            &storage,
+            "persona-drift-zero",
+            &events,
+            &DriftConfig::default(),
+        )
+        .await
+        .expect("漂移检测应成功");
+
+        assert!(summary.categories.is_empty(), "全零旧分布不应产出检测结果");
+        assert!(!summary.any_drift);
+        assert_eq!(summary.skipped_count, 1, "应显式跳过并标注 1 个分类");
+    }
+
+    /// 空 new_traits（如 LLM 空数组响应下游）→ Phase C 早退：不 panic、零更新、
+    /// 不执行漂移检测（结构化返回全空，调用方据此不阻塞事件吸收）。
+    #[tokio::test]
+    async fn phase_c_empty_new_traits_returns_empty_no_drift() {
+        let storage = mem_storage().await;
+        insert_persona(&storage, "persona-empty-pc").await;
+
+        let result = run_phase_c_update(
+            &ConfidenceConfig::default(),
+            &DriftConfig::default(),
+            &storage,
+            "persona-empty-pc",
+            &[],
+            &[],
+            false,
+        )
+        .await
+        .expect("空 new_traits 不应报错");
+
+        assert_eq!(result.traits_updated, 0);
+        assert_eq!(result.evidence_saved, 0);
+        assert!(!result.has_significant_drift);
+        assert!(result.drift_categories.is_empty());
+        assert!(result.confidence_summary.is_none());
+        assert!(result.drift_summary.is_none());
+    }
+
+    /// 无活跃 trait（storage 无该 persona 的任何 trait）且 new_traits 非空 →
+    /// 活性过滤后为空 → 早退（不 panic、零更新）。
+    #[tokio::test]
+    async fn phase_c_no_active_traits_returns_empty() {
+        let storage = mem_storage().await;
+        insert_persona(&storage, "persona-noactive").await;
+        // 不写入任何 trait：活性过滤结果为空
+
+        let trait_fixture = ramaria_core::types::PersonalityTrait {
+            id: 0,
+            persona_uid: "persona-noactive".into(),
+            layer: ramaria_core::types::TraitLayer::Base,
+            trait_label: "尽责".into(),
+            meaning: "测试".into(),
+            not_meaning: None,
+            trigger: None,
+            suppress: None,
+            related: None,
+            seq: 0,
+            source: ramaria_core::types::TraitSource::Inferred,
+            ref_event_id: None,
+            ref_l1_id: None,
+            confidence: 0.5,
+            evidence: 1.0,
+            consistency: 0.5,
+            status: ramaria_core::types::TraitStatus::Active,
+            created_at: now_ms(),
+            updated_at: now_ms(),
+        };
+
+        let result = run_phase_c_update(
+            &ConfidenceConfig::default(),
+            &DriftConfig::default(),
+            &storage,
+            "persona-noactive",
+            &[trait_fixture],
+            &[],
+            false,
+        )
+        .await
+        .expect("无活跃 trait 不应报错");
+
+        assert_eq!(result.traits_updated, 0);
+        assert_eq!(result.evidence_saved, 0);
+        assert!(!result.has_significant_drift);
+        assert!(result.drift_summary.is_none());
+    }
 }

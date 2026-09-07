@@ -5,7 +5,7 @@
 //! - `check_l2_trigger` 遍历所有 persona，检查未吸收 L1 ≥ 阈值 → `run_l2_extraction`
 //! - `check_l3_trigger` 检查未吸收事件 ≥ 阈值或最早事件 > 天数 → `run_l3_inference`
 //! - L2 事件提取通过 JobManager 包裹，含指数退避重试（最多 3 次）
-//! - L3 全流程：Phase A 统计 → Phase B LLM 推断 → Phase C 置信度更新 + 漂移检测
+//! - L3 全流程：Phase A 统计 + 分层收缩 → Phase B LLM 推断 → Phase C 置信度更新 + 漂移检测
 //! - `spawn_l2_l3_scheduler` 后台线程（Thread B）每 24h 定时检查，首次延迟 5min
 //! - 所有 LLM 调用失败均不阻塞级联，仅记录 warn/error 日志
 
@@ -564,7 +564,7 @@ impl SessionLifecycle {
         }
     }
 
-    /// 执行 L3 性格推断（Phase A 统计 → Phase B LLM 推断 → Phase C 置信度更新）。
+    /// 执行 L3 性格推断（Phase A 统计+分层收缩 → Phase B LLM 推断 → Phase C 置信度更新）。
     ///
     /// 对齐 Python `profile_manager.extract_profile` + Rust inference 管线。
     ///
@@ -572,9 +572,14 @@ impl SessionLifecycle {
     /// - 通过 JobManager 创建 `PersonalityInference` 任务记录，
     ///   记录开始/完成/failed 时间，便于运维排查"何时对谁做了推断"。
     ///
-    /// - Phase A: 校准权重链 + 三轨准入 + 分层收缩 + 动机统计
+    /// - Phase A: 校准权重链 + 三轨准入 + 分层收缩（A5，真实执行）+ 动机统计。
+    ///   收缩发生在统计后、写快照与 Phase B 前，收缩后分布成为当轮快照与
+    ///   Phase B prompt 的输入（跨用户冷启动先验由
+    ///   `cold_start_cross_user_prior` 开关控制，见函数内接线）。
     /// - Phase B: LLM 三步结构化推断（注入因果链特征 + 动机维度）
     /// - Phase C: 校准化置信度更新 + 四维度漂移检测
+    /// - Phase C 后、事件吸收前：把本轮分布写入 cluster_snapshots（存档上一期），
+    ///   作为下一轮漂移检测对比的旧分布基准（避免同轮自比）。
     async fn run_l3_inference(
         &self,
         storage: &dyn StorageBackend,
@@ -622,10 +627,12 @@ impl SessionLifecycle {
         }
 
         // ---- 统计特征提取（纯数值，不调 LLM） ----
-        use ramaria_memory::inference::{StatsConfig, run_phase_a_stats};
+        use ramaria_memory::inference::{
+            ShrinkConfig, StatsConfig, apply_layered_shrinkage, run_phase_a_stats,
+        };
 
         let stats_config = StatsConfig::default();
-        let stats_summary = run_phase_a_stats(&events, &stats_config);
+        let mut stats_summary = run_phase_a_stats(&events, &stats_config);
 
         info!(
             persona_uid = %persona_owned,
@@ -635,50 +642,27 @@ impl SessionLifecycle {
             "L3 Phase A 统计完成"
         );
 
-        // 将统计结果持久化到 cluster_snapshots 表
-        let mut snapshot_count = 0usize;
-        for cat_stats in &stats_summary.categories {
-            let snapshot_json = serde_json::json!({
-                "category": cat_stats.category,
-                "event_count": cat_stats.event_count,
-                "n_effective": cat_stats.n_eff,
-                "valence_mean": cat_stats.valence_mean,
-                "valence_std": cat_stats.valence_std,
-                "share_mean": cat_stats.share_mean,
-            });
-
-            let snapshot = ramaria_core::types::ClusterSnapshot {
-                id: 0,
-                persona_uid: persona_owned.clone(),
-                category: cat_stats.category.clone(),
-                cluster_label: format!("cluster_{}", cat_stats.category),
-                samples: Some(snapshot_json.to_string()),
-                count: cat_stats.event_count as i32,
-                is_current: true,
-                created_at: now_ms(),
-                semantic_label: None,
-                semantic_label_embedding: None,
-            };
-
-            match storage.save_cluster_snapshot(&snapshot).await {
-                Ok(_) => snapshot_count += 1,
-                Err(e) => {
-                    warn!(
-                        persona_uid = %persona_owned,
-                        category = %cat_stats.category,
-                        error = %e,
-                        "写入聚类快照失败（单条跳过，不影响其他分类）"
-                    );
-                }
-            }
-        }
+        // ---- Phase A 内 A5：分层先验收缩（含跨用户冷启动先验） ----
+        // 语义：收缩修正后的分类分布是当轮画像推断的输入——后续写入的
+        // persona_cluster_snapshots 快照与 Phase B prompt 均使用收缩后数值
+        //（与 persona-algorithm A5 的顺序一致：统计 → 分层收缩 → 写快照 / Phase B）。
+        // γ 三元参数定稿留 M8 数据 Gate，此处使用 ShrinkConfig::default()。
+        let cross_user_prior_enabled = self.config.inference.upgrade.cold_start_cross_user_prior;
+        let shrink_gamma = apply_layered_shrinkage(
+            storage,
+            &mut stats_summary,
+            &persona_owned,
+            &ShrinkConfig::default(),
+            cross_user_prior_enabled,
+        )
+        .await;
 
         info!(
             persona_uid = %persona_owned,
+            gamma = shrink_gamma,
+            cross_user_prior_enabled,
             job_id,
-            snapshot_count,
-            total_categories = stats_summary.categories.len(),
-            "L3 Phase A 推断流程完成，开始 Phase B"
+            "L3 Phase A 分层收缩完成，开始 Phase B"
         );
 
         // ---- LLM 三步结构化推断 ----
@@ -688,12 +672,15 @@ impl SessionLifecycle {
         use ramaria_memory::inference::run_phase_b_inference;
 
         let inferrer_config = InferrerConfig::from(self.config.inference.inferrer.clone());
+        // A8 扩展特征（时延分布 + 情绪沿链走势）独立开关，默认开启
+        let causal_extended_enabled = self.config.inference.upgrade.causal_latency_emotion_trend;
         let phase_b_result = match run_phase_b_inference(
             llm,
             storage,
             &stats_summary,
             &persona_owned,
             &inferrer_config,
+            causal_extended_enabled,
         )
         .await
         {
@@ -760,6 +747,58 @@ impl SessionLifecycle {
                 // 失败不阻塞事件吸收标记——traits 已写入，confidence 保持初始值
             }
         };
+
+        // ---- 持久化本轮画像分布快照（作为下一轮漂移检测的旧分布基准） ----
+        // 语义：快照 = “上一轮已吸收画像分布”，供下一轮 Phase C 漂移检测对比。
+        // 因此写入必须在 Phase C 之后、事件吸收标记之前；本轮事件无论 Phase C 成败
+        // 都会在下方被标记吸收，故快照随本轮吸收一并持久化，避免下一轮读到的仍是
+        // 更早轮次的分布（同轮自比 / 跨轮累积均值）。
+        // 注意：stats_summary.categories 已在 Phase A 后经分层收缩（含跨用户先验），
+        // 写入快照的是收缩后分布——与 persona-algorithm A5 顺序一致。
+        let mut snapshot_count = 0usize;
+        for cat_stats in &stats_summary.categories {
+            let snapshot_json = serde_json::json!({
+                "category": cat_stats.category,
+                "event_count": cat_stats.event_count,
+                "n_effective": cat_stats.n_eff,
+                "valence_mean": cat_stats.valence_mean,
+                "valence_std": cat_stats.valence_std,
+                "share_mean": cat_stats.share_mean,
+            });
+
+            let snapshot = ramaria_core::types::ClusterSnapshot {
+                id: 0,
+                persona_uid: persona_owned.clone(),
+                category: cat_stats.category.clone(),
+                cluster_label: format!("cluster_{}", cat_stats.category),
+                samples: Some(snapshot_json.to_string()),
+                count: cat_stats.event_count as i32,
+                is_current: true,
+                created_at: now_ms(),
+                semantic_label: None,
+                semantic_label_embedding: None,
+            };
+
+            match storage.save_cluster_snapshot(&snapshot).await {
+                Ok(_) => snapshot_count += 1,
+                Err(e) => {
+                    warn!(
+                        persona_uid = %persona_owned,
+                        category = %cat_stats.category,
+                        error = %e,
+                        "写入聚类快照失败（单条跳过，不影响其他分类）"
+                    );
+                }
+            }
+        }
+
+        info!(
+            persona_uid = %persona_owned,
+            job_id,
+            snapshot_count,
+            total_categories = stats_summary.categories.len(),
+            "L3 画像分布快照已写入（作为下一轮漂移检测的旧分布基准）"
+        );
 
         // ---- 标记事件已吸收 ----
         let event_ids: Vec<i64> = events.iter().map(|e| e.id).collect();

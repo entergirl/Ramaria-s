@@ -16,7 +16,9 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::inference::{
-    causal::{extract_causal_features, format_causal_features_text},
+    causal::{
+        extract_causal_features, extract_causal_features_extended, format_causal_features_text,
+    },
     inferrer::{
         CategorySignal, ConsistencyAnalysis, InferenceResult, InferredTrait, InferrerConfig,
         PostProcessResult, build_step1_prompt, build_step2_prompt, build_step3_prompt,
@@ -49,6 +51,8 @@ use super::types::{PhaseBResult, PhaseBSource};
 /// - `stats`: Phase A 统计摘要。
 /// - `persona_uid`: 目标人格标识。
 /// - `config`: 推断器配置。
+/// - `causal_extended_enabled`: 是否注入 A8 扩展特征（时延分布 + 情绪沿链走势）。
+///   `false` → 回退 v1.7 仅注入链长/循环模式（文本逐字节等价）。
 ///
 /// 返回:
 /// - PhaseBResult：包含保存/更新/废弃的 trait 数量及推断来源。
@@ -58,6 +62,7 @@ pub async fn run_phase_b_inference(
     stats: &StatsSummary,
     persona_uid: &str,
     config: &InferrerConfig,
+    causal_extended_enabled: bool,
 ) -> RamariaResult<PhaseBResult> {
     let persona_owned = persona_uid.to_string();
 
@@ -92,13 +97,21 @@ pub async fn run_phase_b_inference(
                 .list_events_by_persona(&persona_owned, 0, 10000)
                 .await
                 .unwrap_or_default();
-            let features = extract_causal_features(&events, &relations);
+            // 独立开关：开启时补齐时延分布 + 情绪沿链走势扩展段；
+            // 关闭时回退 v1.7 路径（仅链长/循环模式），文本逐字节等价。
+            let features = if causal_extended_enabled {
+                extract_causal_features_extended(&events, &relations)
+            } else {
+                extract_causal_features(&events, &relations)
+            };
             let text = format_causal_features_text(&features);
             if !text.is_empty() {
                 debug!(
                     persona_uid = %persona_owned,
                     chain_length = features.chain_length,
                     cycle_count = features.cyclic_patterns.len(),
+                    latency_sampled = features.latency_stats.sampled_edge_count,
+                    emotion_sampled = features.emotion_trend.sampled_node_count,
                     "Phase B: 因果链特征提取完成"
                 );
             }

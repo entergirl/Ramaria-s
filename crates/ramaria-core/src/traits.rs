@@ -21,8 +21,9 @@ use crate::error::RamariaResult;
 use crate::keyword::KeywordPoolRow;
 use crate::types::{
     BackendConfig, ClusterSnapshot, EventRelation, EventSource, MemoryEvent, MemoryL1, Message,
-    MessageRole, ModelCapability, Persona, PersonaExample, PersonaFact, PersonaStyleStats,
-    PersonalityTrait, PrivacyConsent, ProfileField, Session, TraitEvidence, TraitStatus, UttBlock,
+    MessageRole, ModelCapability, Persona, PersonaEventAggregate, PersonaExample, PersonaFact,
+    PersonaStyleStats, PersonalityTrait, PrivacyConsent, ProfileField, Session, TraitEvidence,
+    TraitStatus, UttBlock,
 };
 
 // =========================================================
@@ -634,6 +635,27 @@ pub trait StoreCrud: Send + Sync {
     /// - 将 `memory_events.absorbed` 设为 1，使这些事件不再出现在 `list_unabsorbed_events` 中。
     /// - 幂等操作：已标记的事件重复调用无副作用。
     async fn mark_events_absorbed(&self, event_ids: &[i64]) -> RamariaResult<()>;
+
+    /// 聚合除目标 persona 外各 persona 的事件级经验分布（跨用户冷启动先验的数据源）。
+    ///
+    /// 语义:
+    /// - 返回"系统内其他已有人格画像"对 `memory_events` 的原始聚合行
+    ///   （n / valence、share 事件级均值 / presentation 三态占比），
+    ///   供 L3 分层收缩构造跨用户经验先验。
+    /// - 存储层只做原始 SQL 聚合；样本量阈值过滤与跨 persona 加权合并
+    ///   由调用方（ramaria-memory）按业务语义负责。
+    ///
+    /// 默认实现返回空列表——存量 mock / 未接入 SQL 聚合的后端无需改动即可编译；
+    /// 调用方拿到空列表时回退当前 persona 内先验（与 v1.7 行为等价）。
+    ///
+    /// 参数:
+    /// - `exclude_persona_uid`: 需排除的目标 persona（其自身事件不参与先验聚合）。
+    async fn aggregate_persona_event_priors(
+        &self,
+        _exclude_persona_uid: &str,
+    ) -> RamariaResult<Vec<PersonaEventAggregate>> {
+        Ok(Vec::new())
+    }
 
     // -- Event Relations (from_id/to_id: i64) --
     async fn save_event_relation(&self, rel: &EventRelation) -> RamariaResult<i64>;

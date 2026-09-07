@@ -1036,7 +1036,8 @@ impl Default for CalibrationConf {
 /// 画像升级开关。
 ///
 /// 职责:
-/// - 独立控制画像升级的四个增量（阈值 0.85 / 冷启动先验 / 降级置信度 / 漂移检测真实实现）。
+/// - 独立控制画像升级的四个增量（跨版本阈值 0.85 / 冷启动先验 / 漂移真实分布 /
+///   因果链时延与情绪走势扩展特征）。
 /// - 全部关闭时画像输出回退旧版行为。
 ///
 /// 兼容性说明:
@@ -1051,21 +1052,25 @@ pub struct InferenceUpgradeConfig {
     /// 冷启动先验是否使用跨用户经验分布。
     /// `false` → 回退当前 persona 内先验。
     pub cold_start_cross_user_prior: bool,
-    /// 漂移检测是否从 `persona_cluster_snapshots` 恢复真实旧分布。
-    /// `false` → 回退硬编码占位（全 0 / 0.5，all-zeros 守卫下不触发）。
+    /// 漂移检测是否从 `persona_cluster_snapshots` 恢复真实旧分布并执行检测。
+    /// `false` → 漂移检测整体显式跳过（无真实旧分布可对比，不生成占位假数据）。
     pub drift_restore_real_distribution: bool,
+    /// Phase B 因果链是否注入"时延分布 + 情绪沿链走势"扩展段。
+    /// `false` → 回退 v1.7 仅注入链长 / 循环模式（`extract_causal_features`）。
+    pub causal_latency_emotion_trend: bool,
 }
 
 impl Default for InferenceUpgradeConfig {
     /// 创建默认画像升级配置。
     ///
     /// 返回:
-    /// - 三个增量开关默认开启。
+    /// - 四个增量开关默认开启。
     fn default() -> Self {
         Self {
             cross_version_threshold_085: true,
             cold_start_cross_user_prior: true,
             drift_restore_real_distribution: true,
+            causal_latency_emotion_trend: true,
         }
     }
 }
@@ -1545,6 +1550,10 @@ impl Default for EmbeddingConfig {
 ///   回归红线 1 锁定）。
 /// - `auto_translate` 仅控制"LLM 离线翻译增强"是否启用；关闭或 LLM 不可用时
 ///   仅使用确定性模板拼接（D-V17-002 模板优先）。
+/// - `sample_fallback`：样本不足时不生成自动规则，但可写 SpeakingStyle
+///   原文样例事实供画像/展示（独立开关，关闭回退纯标注）。
+/// - `keyword_dict`：关键词体系衔接——存在 canonical 词表时风格候选
+///   走词典增强（整词优先），关闭或词表为空回退纯 bigram。
 ///
 /// 阈值说明（v3.1 §7.2 / D-V17-003）:
 /// - `min_sample_count=200`：样本量低于此值时标注"数据不足"，不生成规则文本。
@@ -1563,6 +1572,12 @@ pub struct StyleConfig {
     /// LLM 离线翻译增强开关（默认 true —— 增强为可选，LLM 不可用静默降级模板）。
     /// `false` → 仅模板拼接（确定性可测、零 LLM 依赖）。
     pub auto_translate: bool,
+    /// 小样本原文样例兜底开关（默认 true —— 样本不足时不生成自动规则，
+    /// 但仍写入 SpeakingStyle 原文样例事实供画像/展示；`false` 纯标注不写样例）。
+    pub sample_fallback: bool,
+    /// 关键词体系衔接开关（默认 true —— 存在 keyword_pool canonical 词表时风格候选
+    /// 走词典增强；`false` 或词表为空 → 回退纯 bigram）。
+    pub keyword_dict: bool,
     /// 样本量阈值 n_p（默认 200 条消息）。
     /// 低于此值时标注"数据不足"，不生成规则文本、不注入。
     pub min_sample_count: u32,
@@ -1586,6 +1601,8 @@ impl Default for StyleConfig {
         Self {
             enabled: true,
             auto_translate: true,
+            sample_fallback: true,
+            keyword_dict: true,
             min_sample_count: 200,
             top_n: 10,
             relative_boost_ratio: 2.0,
@@ -1910,10 +1927,11 @@ mod tests {
         assert_eq!(cfg.utt.retrieve_top_k, 3);
         assert_eq!(cfg.retrieval.l1_retrieve_top_k, 4);
 
-        // 画像升级：三开关默认开启
+        // 画像升级：四开关默认开启
         assert!(cfg.inference.upgrade.cross_version_threshold_085);
         assert!(cfg.inference.upgrade.cold_start_cross_user_prior);
         assert!(cfg.inference.upgrade.drift_restore_real_distribution);
+        assert!(cfg.inference.upgrade.causal_latency_emotion_trend);
 
         // 事件提取降级动态置信度默认开启
         assert!(cfg.event_extraction.degraded_confidence_enabled);

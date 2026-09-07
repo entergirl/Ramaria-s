@@ -16,12 +16,12 @@
 ///
 /// 职责:
 /// - 管理置换检验参数和显著性水平。
-/// - 控制是否从 `persona_cluster_snapshots` 恢复真实旧分布。
+/// - 控制漂移检测是否启用（需恢复真实旧分布才可对比）。
 ///
 /// 字段约定:
 /// - `alpha`: 显著性水平，锁定 0.05。
 /// - `n_permutations`: 置换次数，锁定 1000。
-/// - `restore_real_distribution`: 是否恢复真实旧分布；`false` 回退硬编码占位。
+/// - `restore_real_distribution`: 是否从快照恢复真实旧分布；`false` 表示漂移检测整体关闭。
 #[derive(Debug, Clone)]
 pub struct DriftConfig {
     /// 显著性水平（锁定 0.05）
@@ -29,7 +29,9 @@ pub struct DriftConfig {
     /// 置换检验次数（锁定 1000）
     pub n_permutations: usize,
     /// 是否从 `persona_cluster_snapshots` samples JSON 恢复真实旧分布。
-    /// `false` → 回退硬编码占位（全 0 / 0.5，all-zeros 守卫下漂移不触发）。
+    ///
+    /// `true`（默认）: 漂移检测对比上一轮快照真实分布与当前事件分布。
+    /// `false`: 漂移检测整体显式跳过（无真实旧分布可对比，不生成占位假数据）。
     pub restore_real_distribution: bool,
 }
 
@@ -48,6 +50,8 @@ impl From<ramaria_core::config::DriftConf> for DriftConfig {
         Self {
             alpha: conf.alpha,
             n_permutations: conf.n_permutations,
+            // 真实分布恢复由上层按 `InferenceUpgradeConfig.drift_restore_real_distribution`
+            // 显式覆盖；此处保持默认开启，避免在未接线场景静默关闭漂移检测。
             restore_real_distribution: true,
         }
     }
@@ -116,6 +120,11 @@ pub struct DriftSummary {
     pub review_count: usize,
     /// 是否任一分类触发了漂移
     pub any_drift: bool,
+    /// 因旧分布缺失/无判别信息/真实恢复未启用而未进入检测的候选分类数。
+    ///
+    /// 由上层编排（`detect_and_summarize_drift`）在按分类装配数据时累计；
+    /// `run_drift_detection` 收到的数据已过滤，恒为 0。
+    pub skipped_count: usize,
 }
 
 // =========================================================
@@ -457,6 +466,7 @@ pub fn run_drift_detection(
         categories,
         review_count,
         any_drift,
+        skipped_count: 0,
     }
 }
 
@@ -594,6 +604,56 @@ mod tests {
         };
         let result = detect_category_drift(&data, &config);
         assert!(!result.needs_review, "空数据不应触发重审");
+    }
+
+    /// 两期分布差异显著（旧 valence≈0.8×n、新≈0.1×n）→ 该分类触发重审。
+    ///
+    /// 模拟快照恢复后的"点质量旧分布"（valence_mean 按 n 重复展开）与
+    /// 本轮事件分布的对比，验证漂移检测在真实两期数据下可触发。
+    #[test]
+    fn run_drift_detection_triggers_on_two_round_shift() {
+        let config = DriftConfig::default();
+        let n = 10usize;
+        let data = vec![CategoryEventData {
+            category: "工作".into(),
+            old_valences: vec![0.8; n],
+            old_shares: vec![0.6; n],
+            old_saliences: vec![0.5; n],
+            old_confidences: vec![0.9; n],
+            new_valences: vec![0.1; n],
+            new_shares: vec![0.5; n],
+            new_saliences: vec![0.5; n],
+            new_confidences: vec![0.9; n],
+        }];
+        let summary = run_drift_detection(&data, &config);
+        assert_eq!(summary.categories.len(), 1);
+        assert!(
+            summary.categories[0].needs_review,
+            "valence 大幅变化应触发漂移"
+        );
+        assert!(summary.any_drift);
+        assert_eq!(summary.skipped_count, 0, "已装配的分类不产生跳过计数");
+    }
+
+    /// 两期分布基本一致（微小波动）→ 不触发重审。
+    #[test]
+    fn run_drift_detection_no_trigger_on_similar_distributions() {
+        let config = DriftConfig::default();
+        let n = 12usize;
+        let data = vec![CategoryEventData {
+            category: "家庭".into(),
+            old_valences: vec![0.4; n],
+            old_shares: vec![0.7; n],
+            old_saliences: vec![0.5; n],
+            old_confidences: vec![0.9; n],
+            new_valences: vec![0.4; n],
+            new_shares: vec![0.7; n],
+            new_saliences: vec![0.5; n],
+            new_confidences: vec![0.9; n],
+        }];
+        let summary = run_drift_detection(&data, &config);
+        assert!(!summary.any_drift, "相同分布不应触发漂移");
+        assert!(!summary.categories[0].needs_review);
     }
 
     #[test]

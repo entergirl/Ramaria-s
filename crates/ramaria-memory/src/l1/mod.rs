@@ -10,8 +10,8 @@
 pub mod prompt;
 pub mod summarizer;
 
-// 测试 mock
+// 测试 mock（crate 内其他测试模块复用）
 #[cfg(test)]
-mod mock;
+pub(crate) mod mock;
 
 pub use summarizer::{L1Summarizer, L1SummarizerConfig};

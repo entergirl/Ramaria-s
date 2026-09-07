@@ -325,7 +325,8 @@ async fn phase_b_produces_traits_with_mock_llm() {
     let before = storage.list_traits_by_persona("rama-0001").await.unwrap();
     assert!(before.is_empty(), "推断前应无 trait");
 
-    let result = run_phase_b_inference(&multi_llm, &*storage, &stats, "rama-0001", &config)
+    // mock 无事件关系 → causal 文本为空，causal_extended_enabled 传 true 与默认一致
+    let result = run_phase_b_inference(&multi_llm, &*storage, &stats, "rama-0001", &config, true)
         .await
         .expect("Phase B 应成功完成");
 
@@ -368,7 +369,8 @@ async fn phase_b_falls_back_to_mock_infer_on_llm_error() {
     let stats = make_stats_summary();
     let config = InferrerConfig::default();
 
-    let result = run_phase_b_inference(&failing_llm, &*storage, &stats, "rama-0001", &config)
+    // mock 无事件关系 → causal 文本为空，causal_extended_enabled 传 true 与默认一致
+    let result = run_phase_b_inference(&failing_llm, &*storage, &stats, "rama-0001", &config, true)
         .await
         .expect("降级到 mock_infer 后应成功完成");
 
@@ -418,7 +420,8 @@ async fn phase_b_incremental_update_with_existing_traits() {
     let stats = make_stats_summary();
     let config = InferrerConfig::default();
 
-    let result = run_phase_b_inference(&multi_llm, &*storage, &stats, "rama-0001", &config)
+    // mock 无事件关系 → causal 文本为空，causal_extended_enabled 传 true 与默认一致
+    let result = run_phase_b_inference(&multi_llm, &*storage, &stats, "rama-0001", &config, true)
         .await
         .expect("增量推断应成功");
 
@@ -437,7 +440,8 @@ async fn phase_c_confidence_and_evidence() {
     let multi_llm = MultiStepLlm::new(vec![step1_reply(), step2_reply(), step3_reply()]);
     let stats = make_stats_summary();
     let config = InferrerConfig::default();
-    let phase_b = run_phase_b_inference(&multi_llm, &*storage, &stats, persona_uid, &config)
+    // mock 无事件关系 → causal 文本为空，causal_extended_enabled 传 true 与默认一致
+    let phase_b = run_phase_b_inference(&multi_llm, &*storage, &stats, persona_uid, &config, true)
         .await
         .expect("Phase B 应成功");
 
@@ -505,7 +509,8 @@ async fn traits_have_structured_labels_for_system_prompt() {
     let multi_llm = MultiStepLlm::new(vec![step1_reply(), step2_reply(), step3_reply()]);
     let stats = make_stats_summary();
     let config = InferrerConfig::default();
-    run_phase_b_inference(&multi_llm, &*storage, &stats, persona_uid, &config)
+    // mock 无事件关系 → causal 文本为空，causal_extended_enabled 传 true 与默认一致
+    run_phase_b_inference(&multi_llm, &*storage, &stats, persona_uid, &config, true)
         .await
         .expect("Phase B 应成功");
 
@@ -540,7 +545,8 @@ async fn traits_can_format_as_block_a_text() {
     let multi_llm = MultiStepLlm::new(vec![step1_reply(), step2_reply(), step3_reply()]);
     let stats = make_stats_summary();
     let config = InferrerConfig::default();
-    run_phase_b_inference(&multi_llm, &*storage, &stats, persona_uid, &config)
+    // mock 无事件关系 → causal 文本为空，causal_extended_enabled 传 true 与默认一致
+    run_phase_b_inference(&multi_llm, &*storage, &stats, persona_uid, &config, true)
         .await
         .expect("Phase B 应成功");
 

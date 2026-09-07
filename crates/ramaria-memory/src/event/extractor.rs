@@ -331,6 +331,7 @@ impl<'a> EventExtractor<'a> {
             Vec::new()
         };
         let mut dedup_skipped = 0usize;
+        let mut truncated_events = 0usize;
 
         for (ci, cluster) in clusters.iter().enumerate() {
             let cluster_l1_ids: Vec<Uuid> = cluster.l1_items.iter().map(|i| i.id).collect();
@@ -417,9 +418,14 @@ impl<'a> EventExtractor<'a> {
                 }
             };
 
-            // 截断到 max_events（每簇）
-            let extracted: Vec<ExtractedEventJson> = parsed
-                .events
+            // 截断到 max_events（每簇）。
+            // 说明: LLM 输出超过上限时后段事件被丢弃，属已知压缩上限
+            // （prompt 与默认配置同以 5 为上限，通常仅在不遵守或配置调低时触发）。
+            // 记录丢弃数量供"事件漏抽"诊断。
+            let parsed_events = parsed.events;
+            let truncated_count = parsed_events.len().saturating_sub(self.config.max_events);
+            truncated_events += truncated_count;
+            let extracted: Vec<ExtractedEventJson> = parsed_events
                 .into_iter()
                 .take(self.config.max_events)
                 .collect();
@@ -448,9 +454,12 @@ impl<'a> EventExtractor<'a> {
                 }
             };
 
-            // 构建 MemoryEvent 并保存（记录 index→event_id 映射供 relations 使用）
-            let mut cluster_event_ids: Vec<i64> = Vec::with_capacity(extracted.len());
-            for ej in extracted {
+            // 构建 MemoryEvent 并保存。
+            // saved_by_position 与"提取后事件数组"等长、逐位置记录实际 DB id：
+            // 相似度去重跳过的位置保持 None，供 relations 按 LLM 输出位置正确映射
+            // （见 `remap_relation`，避免压缩保存列表下标把关系连到错误事件）。
+            let mut saved_by_position: Vec<Option<i64>> = vec![None; extracted.len()];
+            for (position, ej) in extracted.into_iter().enumerate() {
                 let mut event = Self::build_event(
                     persona_uid,
                     ej,
@@ -494,7 +503,7 @@ impl<'a> EventExtractor<'a> {
                     RamariaError::storage(format!("写入事件失败: {e}"))
                 })?;
                 event.id = event_id;
-                cluster_event_ids.push(event_id);
+                saved_by_position[position] = Some(event_id);
                 all_events.push(event.clone());
 
                 // event_sources
@@ -511,13 +520,15 @@ impl<'a> EventExtractor<'a> {
                 }
             }
 
-            // 写入事件关系
+            // 写入事件关系（按 LLM 输出位置映射到实际保存事件；
+            // 端点被相似度去重跳过的关系丢弃，不错误连边）。
+            let saved_position_count = saved_by_position.iter().flatten().count();
             if let Some(ref rels) = relations
                 && !rels.is_empty()
-                && cluster_event_ids.len() >= 2
+                && saved_position_count >= 2
             {
                 let saved_count = self
-                    .save_cluster_relations(rels, &cluster_event_ids, persona_uid, ci)
+                    .save_cluster_relations(rels, &saved_by_position, persona_uid, ci)
                     .await;
                 debug!(
                     %persona_uid,
@@ -556,6 +567,7 @@ impl<'a> EventExtractor<'a> {
             event_count = all_events.len(),
             absorbed_l1 = all_l1_ids.len(),
             dedup_skipped,
+            truncated_events,
             "事件提取完成"
         );
 
@@ -690,52 +702,38 @@ impl<'a> EventExtractor<'a> {
     /// 将 LLM 返回的事件关系写入 event_relations 表。
     ///
     /// 参数:
-    /// - `rels`: LLM 输出的关系列表（from_index/to_index 引用 events 数组索引）。
-    /// - `event_ids`: 本簇已保存事件的实际 DB ID 列表（与 events 数组顺序一致）。
+    /// - `rels`: LLM 输出的关系列表（from_index/to_index 引用提取结果 events 数组位置）。
+    /// - `saved_by_position`: 与提取结果等长的并行数组，记录每个位置对应的实际 DB id；
+    ///   相似度去重跳过/保存失败的位置为 `None`。
     /// - `persona_uid`: 人格标识（用于日志）。
     /// - `cluster_idx`: 簇索引（用于日志）。
+    ///
+    /// 说明:
+    /// - LLM 的索引引用"提取结果数组"位置，而不是"实际保存列表"位置。
+    ///   若按压缩后的保存列表直接取下标，相似度去重跳过后会把关系连到错误事件，
+    ///   故统一经 `remap_relation` 按位置解析实际端点（越界/未保存/自引用均丢弃）。
     ///
     /// 返回:
     /// - 成功写入的关系数量。
     async fn save_cluster_relations(
         &self,
         rels: &[EventRelationOutput],
-        event_ids: &[i64],
+        saved_by_position: &[Option<i64>],
         persona_uid: &str,
         cluster_idx: usize,
     ) -> usize {
         let mut saved_count: usize = 0;
+        let mut dropped_count: usize = 0;
         let now = now_ms();
 
         for rel in rels {
-            // 索引边界校验
-            if rel.from_index >= event_ids.len() || rel.to_index >= event_ids.len() {
-                warn!(
-                    %persona_uid,
-                    cluster_idx,
-                    from_index = rel.from_index,
-                    to_index = rel.to_index,
-                    event_count = event_ids.len(),
-                    "事件关系索引越界，跳过"
-                );
+            // 位置 → 实际 DB id；端点越界/未保存/自引用返回 None → 丢弃
+            let Some((from_id, to_id)) = Self::remap_relation(rel, saved_by_position) else {
+                dropped_count += 1;
                 continue;
-            }
-
-            // 不允许自引用
-            if rel.from_index == rel.to_index {
-                debug!(
-                    %persona_uid,
-                    cluster_idx,
-                    index = rel.from_index,
-                    "事件关系自引用，跳过"
-                );
-                continue;
-            }
+            };
 
             let kind = parse_relation_kind(&rel.kind);
-            let from_id = event_ids[rel.from_index];
-            let to_id = event_ids[rel.to_index];
-
             let event_rel = EventRelation {
                 id: 0,
                 from_id,
@@ -763,7 +761,38 @@ impl<'a> EventExtractor<'a> {
             }
         }
 
+        if dropped_count > 0 {
+            debug!(
+                %persona_uid,
+                cluster_idx,
+                dropped_relation_count = dropped_count,
+                "事件关系：部分关系端点未保存（相似度去重/越界/自引用），已丢弃"
+            );
+        }
+
         saved_count
+    }
+
+    /// 将单条 LLM 关系引用映射为实际保存事件的 DB id 对。
+    ///
+    /// 参数:
+    /// - `rel`: LLM 输出的关系（from_index/to_index 引用提取结果 events 数组位置）。
+    /// - `saved_by_position`: 与提取结果等长的并行数组，记录每个位置的实际 DB id，
+    ///   被相似度去重跳过/未保存的位置为 `None`。
+    ///
+    /// 返回:
+    /// - `Some((from_id, to_id))`: 两端点均已保存且非自引用。
+    /// - `None`: 端点越界、端点未保存或自引用——调用方应丢弃该关系。
+    fn remap_relation(
+        rel: &EventRelationOutput,
+        saved_by_position: &[Option<i64>],
+    ) -> Option<(i64, i64)> {
+        let from_id = saved_by_position.get(rel.from_index).copied().flatten()?;
+        let to_id = saved_by_position.get(rel.to_index).copied().flatten()?;
+        if from_id == to_id {
+            return None;
+        }
+        Some((from_id, to_id))
     }
 
     /// 从 TopicCluster 格式化 L1 摘要列表。

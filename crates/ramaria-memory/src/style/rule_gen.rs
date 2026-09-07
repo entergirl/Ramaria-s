@@ -554,6 +554,26 @@ mod tests {
     }
 
     #[test]
+    fn threshold_reached_resumes_significance_analysis() {
+        // 同一样本特征：n_p=199 无输出 → n_p=200 恢复（数据积累后自动恢复规则生成）
+        let pool = BaselinePool::new();
+        let mut below = StyleStats {
+            sample_count: 199,
+            total_chars: 2000,
+            ..Default::default()
+        };
+        assert!(
+            analyze_significance(&below, &pool, &config()).is_none(),
+            "199 条仍不足"
+        );
+        below.sample_count = 200;
+        assert!(
+            analyze_significance(&below, &pool, &config()).is_some(),
+            "200 条达阈值 → 恢复显著性分析（冷启动仅话题也返回 Some）"
+        );
+    }
+
+    #[test]
     fn cold_start_pool_returns_topics_only() {
         let stats = stats_with(100, 2000);
         let pool = BaselinePool::new();
@@ -650,6 +670,81 @@ mod tests {
             .await
             .expect("generate 不应失败");
         assert_eq!(rule, render_template_rule(&stats, &sig));
+    }
+
+    // ---- LLM 翻译增强降级（静默回退模板） ----
+
+    /// 恒失败 mock LLM（模拟翻译增强服务故障）。
+    struct FailingTranslateLlm {
+        capability: ramaria_core::types::ModelCapability,
+        config: ramaria_core::types::BackendConfig,
+    }
+
+    impl FailingTranslateLlm {
+        fn new() -> Self {
+            Self {
+                capability: ramaria_core::types::ModelCapability {
+                    provider: ramaria_core::types::LlmProvider::LmStudio,
+                    model_id: "mock".into(),
+                    base_url: "http://localhost:1234/v1".into(),
+                    supports_streaming: false,
+                    supports_json_mode: false,
+                    context_window: 4096,
+                    max_output_tokens: 4096,
+                },
+                config: ramaria_core::types::BackendConfig::lm_studio_default(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProviderTrait for FailingTranslateLlm {
+        async fn chat(&self, _request: &ChatRequest) -> RamariaResult<String> {
+            Err(ramaria_core::RamariaError::llm("mock 翻译 LLM 故障"))
+        }
+        async fn chat_stream(
+            &self,
+            _request: &ChatRequest,
+        ) -> RamariaResult<
+            std::pin::Pin<
+                Box<
+                    dyn futures::Stream<Item = RamariaResult<ramaria_core::traits::StreamDelta>>
+                        + Send,
+                >,
+            >,
+        > {
+            Err(ramaria_core::RamariaError::unsupported("mock 不支持流式"))
+        }
+        fn capability(&self) -> &ramaria_core::types::ModelCapability {
+            &self.capability
+        }
+        fn config(&self) -> &ramaria_core::types::BackendConfig {
+            &self.config
+        }
+        async fn validate(&self) -> RamariaResult<()> {
+            Ok(())
+        }
+        fn name(&self) -> &'static str {
+            "FailingTranslateLlm"
+        }
+    }
+
+    /// LLM 存在但翻译调用失败（auto_translate=true）→ warn 回退模板（不阻塞、不报错）。
+    #[tokio::test]
+    async fn generate_with_failing_llm_falls_back_to_template() {
+        let stats = stats_with(100, 2000);
+        let pool = baseline_pool_with(0.5);
+        let sig = analyze_significance(&stats, &pool, &config()).unwrap();
+        let llm = FailingTranslateLlm::new();
+        let rule = generate_style_rule(&stats, &sig, Some(&llm), true, 0.3)
+            .await
+            .expect("LLM 故障应静默回退模板（不报错）");
+        assert_eq!(
+            rule,
+            render_template_rule(&stats, &sig),
+            "翻译失败应返回模板文本"
+        );
+        assert!(!rule.trim().is_empty(), "模板含显著项时不应为空");
     }
 
     #[test]

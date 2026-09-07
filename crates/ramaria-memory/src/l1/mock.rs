@@ -17,8 +17,8 @@ use async_trait::async_trait;
 use ramaria_core::traits::{ChatRequest, StreamDelta};
 use ramaria_core::types::{
     BackendConfig, ClusterSnapshot, EventRelation, MemoryEvent, MemoryL1, Message, ModelCapability,
-    Persona, PersonaExample, PersonaFact, PersonalityTrait, PrivacyConsent, ProfileField, Session,
-    TraitEvidence, TraitStatus,
+    Persona, PersonaEventAggregate, PersonaExample, PersonaFact, PersonalityTrait, PrivacyConsent,
+    ProfileField, Session, TraitEvidence, TraitStatus,
 };
 use ramaria_core::{LlmProviderTrait, RamariaError, RamariaResult, StoreCrud, StoreInfrastructure};
 use uuid::Uuid;
@@ -125,6 +125,8 @@ pub struct MockStorage {
     messages: Mutex<HashMap<Uuid, Vec<Message>>>,
     l1_entries: Mutex<Vec<MemoryL1>>,
     keywords: Mutex<Vec<String>>,
+    /// 预设的跨用户事件聚合结果（None = 默认返回空列表；Some(Err) 模拟聚合失败降级）。
+    event_aggregate_result: Mutex<Option<Result<Vec<PersonaEventAggregate>, String>>>,
 }
 
 impl MockStorage {
@@ -133,6 +135,7 @@ impl MockStorage {
             messages: Mutex::new(HashMap::new()),
             l1_entries: Mutex::new(Vec::new()),
             keywords: Mutex::new(Vec::new()),
+            event_aggregate_result: Mutex::new(None),
         }
     }
 
@@ -154,6 +157,16 @@ impl MockStorage {
     /// 获取关键词 upsert 调用次数（用于断言）。
     pub fn keyword_count(&self) -> usize {
         self.keywords.lock().unwrap().len()
+    }
+
+    /// 预设 `aggregate_persona_event_priors` 的成功返回（跨用户聚合行）。
+    pub fn set_persona_event_aggregates(&self, rows: Vec<PersonaEventAggregate>) {
+        *self.event_aggregate_result.lock().unwrap() = Some(Ok(rows));
+    }
+
+    /// 预设 `aggregate_persona_event_priors` 失败（模拟 DB 聚合错误降级路径）。
+    pub fn set_persona_event_aggregate_error(&self, msg: &str) {
+        *self.event_aggregate_result.lock().unwrap() = Some(Err(msg.to_string()));
     }
 }
 
@@ -258,6 +271,18 @@ impl StoreCrud for MockStorage {
         unimplemented!()
     }
 
+    // -- 跨用户事件聚合（供 L3 分层收缩冷启动先验测试预设返回值）--
+    async fn aggregate_persona_event_priors(
+        &self,
+        _exclude_persona_uid: &str,
+    ) -> RamariaResult<Vec<PersonaEventAggregate>> {
+        match self.event_aggregate_result.lock().unwrap().clone() {
+            Some(Ok(rows)) => Ok(rows),
+            Some(Err(msg)) => Err(RamariaError::storage(msg)),
+            None => Ok(Vec::new()),
+        }
+    }
+
     // -- Event Relations --
     async fn save_event_relation(&self, _: &EventRelation) -> RamariaResult<i64> {
         unimplemented!()
@@ -285,7 +310,7 @@ impl StoreCrud for MockStorage {
         unimplemented!()
     }
     async fn list_traits_by_persona(&self, _: &str) -> RamariaResult<Vec<PersonalityTrait>> {
-        unimplemented!()
+        Ok(Vec::new())
     }
     async fn update_trait_confidence(&self, _: i64, _: f64, _: f64, _: f64) -> RamariaResult<()> {
         unimplemented!()

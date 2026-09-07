@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use ramaria_core::types::TraitLayer;
+use ramaria_core::types::{PersonaEventAggregate, TraitLayer};
 
 use crate::inference::stats::CategoryStats;
 
@@ -576,6 +576,75 @@ pub fn merge_cross_user_prior(persona_priors: &[ShrinkPrior]) -> ShrinkPrior {
 }
 
 // =========================================================
+// 聚合行 → 跨用户先验换算
+// =========================================================
+
+/// 跨用户经验先验要求的最少"其他 persona 来源"数量（排除目标 persona 后）。
+///
+/// 说明:
+/// - 系统内需存在至少一个已有人格画像作为经验来源，否则不存在"跨用户"语义。
+pub const MIN_CROSS_USER_PERSONA_SOURCES: usize = 1;
+
+/// 跨用户经验先验要求的最少总经验事件数。
+///
+/// 说明:
+/// - 口径与 γ 公式的样本量保底（`gamma_min_eff = 30`）对齐：低于该量级的事件
+///   分布本身不可靠，不应作为经验先验冒充"已校准分布"。
+/// - 事件数不足时回退当前 persona 内先验（既不借用杂讯，也不引入中性默认先验）。
+pub const MIN_CROSS_USER_TOTAL_EVENTS: u64 = 30;
+
+/// 将单条 persona 的事件级聚合行换算为收缩先验包。
+///
+/// 说明:
+/// - `n_events` 作为该 persona 在跨用户加权合并中的有效样本量权重。
+impl From<&PersonaEventAggregate> for ShrinkPrior {
+    fn from(agg: &PersonaEventAggregate) -> Self {
+        Self {
+            valence_mean: agg.valence_mean,
+            share_mean: agg.share_mean,
+            obj_ratio: agg.obj_ratio,
+            sub_ratio: agg.sub_ratio,
+            mix_ratio: agg.mix_ratio,
+            n_total_eff: agg.n_events as f64,
+        }
+    }
+}
+
+/// 从存储层聚合行构造跨用户经验先验（含样本量阈值判定）。
+///
+/// 判定口径:
+/// - 可用的"其他 persona 来源"数 ≥ [`MIN_CROSS_USER_PERSONA_SOURCES`]，
+///   且这些来源的事件总数 ≥ [`MIN_CROSS_USER_TOTAL_EVENTS`]；
+/// - 低于阈值时返回 `None`，由调用方回退当前 persona 内先验。
+///
+/// 设计约束:
+/// - 空 / 样本不足时返回 `None`，绝不回退中性默认先验 [`unified_default_prior`]
+///   ——中性先验只用于"系统内完全没有经验来源"的首个 persona 场景，
+///   不应在存在少量杂讯时冒充经验先验。
+///
+/// 参数:
+/// - `aggregates`: 存储层返回的其他 persona 聚合行（存储层已排除目标 persona）。
+///
+/// 返回:
+/// - `Some(ShrinkPrior)`: 合并后的跨用户经验先验。
+/// - `None`: 经验来源不足，调用方应回退当前 persona 内先验。
+pub fn build_cross_user_prior(aggregates: &[PersonaEventAggregate]) -> Option<ShrinkPrior> {
+    let usable: Vec<&PersonaEventAggregate> =
+        aggregates.iter().filter(|a| a.n_events > 0).collect();
+
+    if usable.len() < MIN_CROSS_USER_PERSONA_SOURCES {
+        return None;
+    }
+    let total_events: u64 = usable.iter().map(|a| a.n_events).sum();
+    if total_events < MIN_CROSS_USER_TOTAL_EVENTS {
+        return None;
+    }
+
+    let priors: Vec<ShrinkPrior> = usable.iter().map(|a| ShrinkPrior::from(*a)).collect();
+    Some(merge_cross_user_prior(&priors))
+}
+
+// =========================================================
 // 单元测试
 // =========================================================
 
@@ -1051,6 +1120,90 @@ mod tests {
         assert!((merged.valence_mean - 0.5).abs() < 1e-9);
         assert!((merged.share_mean - 0.6).abs() < 1e-9);
         assert!((merged.n_total_eff - 12.0).abs() < 1e-9);
+    }
+
+    // =========================================================
+    // 聚合行 → 跨用户先验换算
+    // =========================================================
+
+    fn make_agg(
+        persona_uid: &str,
+        n_events: u64,
+        valence: f64,
+        share: f64,
+    ) -> PersonaEventAggregate {
+        PersonaEventAggregate::new(persona_uid, n_events, valence, share, 0.4, 0.3, 0.3)
+    }
+
+    /// 聚合行字段到 ShrinkPrior 的换算（n_events 作为有效样本量）。
+    #[test]
+    fn aggregate_to_shrink_prior_maps_fields() {
+        let agg = make_agg("char-a", 40, 0.25, 0.62);
+        let prior = ShrinkPrior::from(&agg);
+        assert!((prior.valence_mean - 0.25).abs() < 1e-12);
+        assert!((prior.share_mean - 0.62).abs() < 1e-12);
+        assert!((prior.obj_ratio - 0.4).abs() < 1e-12);
+        assert!((prior.sub_ratio - 0.3).abs() < 1e-12);
+        assert!((prior.mix_ratio - 0.3).abs() < 1e-12);
+        assert!((prior.n_total_eff - 40.0).abs() < 1e-12);
+    }
+
+    /// 聚合行：空输入（系统内无其他 persona）→ None，不冒充中性先验。
+    #[test]
+    fn build_cross_user_prior_empty_returns_none() {
+        assert!(build_cross_user_prior(&[]).is_none());
+    }
+
+    /// 聚合行：单 persona 且事件充足 → Some（该 persona 自身即跨用户来源）。
+    #[test]
+    fn build_cross_user_prior_single_persona_enough() {
+        let rows = vec![make_agg("char-a", 40, 0.5, 0.6)];
+        let prior = build_cross_user_prior(&rows).expect("单 persona 事件充足应返回 Some");
+        assert!((prior.n_total_eff - 40.0).abs() < 1e-9);
+        assert!((prior.valence_mean - 0.5).abs() < 1e-9);
+    }
+
+    /// 聚合行：多 persona 按 n_events 加权合并。
+    #[test]
+    fn build_cross_user_prior_weighted_merge() {
+        // char-a: valence=0.6, n=30；char-b: valence=-0.2, n=10
+        // 加权 valence = (0.6*30 + (-0.2)*10)/40 = (18-2)/40 = 0.4
+        let rows = vec![
+            make_agg("char-a", 30, 0.6, 0.7),
+            make_agg("char-b", 10, -0.2, 0.3),
+        ];
+        let prior = build_cross_user_prior(&rows).expect("总事件充足应返回 Some");
+        assert!(
+            (prior.valence_mean - 0.4).abs() < 1e-9,
+            "v={}",
+            prior.valence_mean
+        );
+        assert!((prior.n_total_eff - 40.0).abs() < 1e-9);
+    }
+
+    /// 聚合行：总事件数低于阈值（< 30）→ None，避免借用不可靠杂讯。
+    #[test]
+    fn build_cross_user_prior_too_few_events_returns_none() {
+        let rows = vec![make_agg("char-a", 29, 0.5, 0.6)];
+        assert!(
+            build_cross_user_prior(&rows).is_none(),
+            "总事件不足 30 时应返回 None"
+        );
+    }
+
+    /// 聚合行：n_events = 0 的行被忽略（无事件即无经验来源）。
+    #[test]
+    fn build_cross_user_prior_skips_zero_event_rows() {
+        let rows = vec![
+            make_agg("char-a", 0, 0.5, 0.6),
+            make_agg("char-b", 40, 0.2, 0.4),
+        ];
+        let prior = build_cross_user_prior(&rows).expect("有效来源应返回 Some");
+        assert!(
+            (prior.n_total_eff - 40.0).abs() < 1e-9,
+            "0 事件行不应参与加权"
+        );
+        assert!((prior.valence_mean - 0.2).abs() < 1e-9);
     }
 
     /// `run_shrinkage_layered` 传入跨用户先验时，小样本分类向跨用户先验收缩。

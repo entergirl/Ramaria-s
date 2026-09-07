@@ -1313,6 +1313,71 @@ impl MemoryEvent {
     }
 }
 
+/// 单个 persona 的事件级经验分布聚合行（跨用户冷启动先验的数据源）。
+///
+/// 职责:
+/// - 由存储层对 `memory_events` 表做原始 SQL 聚合产生，供 L3 分层收缩
+///   构造系统内"已有人格画像的跨用户经验先验"。
+/// - 只承载存储层的聚合结果；样本量阈值判定与跨 persona 加权合并
+///   （业务语义）由 ramaria-memory 的 shrink 模块负责。
+///
+/// 字段约定:
+/// - `n_events`: 该 persona 参与聚合的事件条数（原始计数，非 salience 加权）。
+/// - `valence_mean` / `share_mean`: 事件级简单均值（AVG），取值范围与
+///   `MemoryEvent` 对应字段一致（valence -1.0..1.0、share 0.0..1.0）。
+/// - `obj_ratio` / `sub_ratio` / `mix_ratio`: presentation 三态的事件计数占比，和为 1。
+///
+/// 口径说明:
+/// - 本聚合行是"事件级"经验分布，不携带分类上下文与 salience 加权语义；
+///   与 Phase A 分类内 `CategoryStats`（salience 加权）口径不同，仅作为跨 persona
+///   的经验方向锚点，用于冷启动校准小样本分类。
+/// - `memory_events.presentation` 在 SQLite 中以小写字符串存储
+///   （`objective` / `subjective` / `mixed`）。
+#[derive(Debug, Clone)]
+pub struct PersonaEventAggregate {
+    /// 已有人格画像标识（存储层聚合时已排除目标 persona）
+    pub persona_uid: String,
+    /// 该 persona 参与聚合的事件条数
+    pub n_events: u64,
+    /// valence 事件级均值（-1.0..1.0）
+    pub valence_mean: f64,
+    /// share 事件级均值（0.0..1.0）
+    pub share_mean: f64,
+    /// presentation 三态中 objective 的占比
+    pub obj_ratio: f64,
+    /// presentation 三态中 subjective 的占比
+    pub sub_ratio: f64,
+    /// presentation 三态中 mixed 的占比
+    pub mix_ratio: f64,
+}
+
+impl PersonaEventAggregate {
+    /// 构造一条聚合行（存储层查询转换与测试构造使用）。
+    ///
+    /// 参数:
+    /// - 各字段含义见 struct 注释；`n_events` 必须 > 0 才表示存在经验来源。
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        persona_uid: impl Into<String>,
+        n_events: u64,
+        valence_mean: f64,
+        share_mean: f64,
+        obj_ratio: f64,
+        sub_ratio: f64,
+        mix_ratio: f64,
+    ) -> Self {
+        Self {
+            persona_uid: persona_uid.into(),
+            n_events,
+            valence_mean,
+            share_mean,
+            obj_ratio,
+            sub_ratio,
+            mix_ratio,
+        }
+    }
+}
+
 /// 事件关系——事件间语义关联。
 ///
 /// 字段约定:

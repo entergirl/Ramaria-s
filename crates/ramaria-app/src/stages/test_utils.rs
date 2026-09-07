@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
@@ -21,9 +21,9 @@ use ramaria_core::traits::{
     StoreInfrastructure, StreamDelta,
 };
 use ramaria_core::types::{
-    BackendConfig, ClusterSnapshot, EventRelation, MemoryEvent, MemoryL1, Message, ModelCapability,
-    Persona, PersonaExample, PersonaFact, PersonalityTrait, PrivacyConsent, ProfileField, Session,
-    TraitEvidence, TraitStatus, UttBlock,
+    BackendConfig, ClusterSnapshot, EventRelation, FactStatus, MemoryEvent, MemoryL1, Message,
+    ModelCapability, Persona, PersonaExample, PersonaFact, PersonaStyleStats, PersonalityTrait,
+    PrivacyConsent, ProfileField, Session, TraitEvidence, TraitStatus, UttBlock,
 };
 use ramaria_memory::keyword::KeywordService;
 use ramaria_memory::retriever::Retriever;
@@ -63,6 +63,14 @@ pub struct MockStorage {
     settings: Mutex<std::collections::HashMap<String, String>>,
     /// keyword_pool 规范词（BM25 词典增强分词迁移测试注入）
     canonical_keywords: Mutex<Vec<String>>,
+    /// persona 消息（按 persona_uid 索引，供风格统计等按 persona 全量读取）
+    persona_messages: Mutex<std::collections::HashMap<String, Vec<Message>>>,
+    /// persona_style_stats（按 persona_uid 单行）
+    style_stats: Mutex<std::collections::HashMap<String, PersonaStyleStats>>,
+    /// persona_facts（版本链支持：superseded + version_of）
+    facts: Mutex<std::collections::HashMap<i64, PersonaFact>>,
+    facts_by_persona: Mutex<std::collections::HashMap<String, Vec<i64>>>,
+    fact_seq: AtomicI64,
 }
 
 impl Default for MockStorage {
@@ -88,6 +96,11 @@ impl MockStorage {
             feedback_logs: Mutex::new(Vec::new()),
             settings: Mutex::new(std::collections::HashMap::new()),
             canonical_keywords: Mutex::new(Vec::new()),
+            persona_messages: Mutex::new(std::collections::HashMap::new()),
+            style_stats: Mutex::new(std::collections::HashMap::new()),
+            facts: Mutex::new(std::collections::HashMap::new()),
+            facts_by_persona: Mutex::new(std::collections::HashMap::new()),
+            fact_seq: AtomicI64::new(1),
         }
     }
 
@@ -97,6 +110,16 @@ impl MockStorage {
             .lock()
             .unwrap()
             .push(keyword.to_string());
+    }
+
+    /// 测试注入：按 persona 批量追加消息（供风格统计等按 persona 读取）。
+    pub fn add_persona_messages(&self, persona_uid: &str, messages: Vec<Message>) {
+        self.persona_messages
+            .lock()
+            .unwrap()
+            .entry(persona_uid.to_string())
+            .or_default()
+            .extend(messages);
     }
 
     /// 返回最近一次 touch_l1 的 L1 id 列表（空表示从未调用）。
@@ -324,8 +347,15 @@ impl StoreCrud for MockStorage {
             .unwrap_or_default())
     }
 
-    async fn list_messages_by_persona(&self, _uid: &str) -> RamariaResult<Vec<Message>> {
-        Ok(Vec::new())
+    async fn list_messages_by_persona(&self, uid: &str) -> RamariaResult<Vec<Message>> {
+        // 返回按 persona_uid 注入的消息（pipeline 单测大多不用此方法，注入为空时为空）。
+        Ok(self
+            .persona_messages
+            .lock()
+            .unwrap()
+            .get(uid)
+            .cloned()
+            .unwrap_or_default())
     }
 
     async fn save_memory_l1(&self, _m: &MemoryL1) -> RamariaResult<()> {
@@ -463,16 +493,100 @@ impl StoreCrud for MockStorage {
         Ok(())
     }
 
-    async fn save_fact(&self, _f: &PersonaFact) -> RamariaResult<i64> {
-        Ok(1)
+    async fn save_fact(&self, fact: &PersonaFact) -> RamariaResult<i64> {
+        let id = self.fact_seq.fetch_add(1, Ordering::SeqCst);
+        let mut f = fact.clone();
+        f.id = id;
+        f.status = FactStatus::Active;
+        let persona = f.persona_uid.clone();
+        self.facts.lock().unwrap().insert(id, f.clone());
+        self.facts_by_persona
+            .lock()
+            .unwrap()
+            .entry(persona)
+            .or_default()
+            .push(id);
+        Ok(id)
+    }
+
+    async fn save_fact_with_version(
+        &self,
+        old: &PersonaFact,
+        fresh: &PersonaFact,
+    ) -> RamariaResult<i64> {
+        // 模拟真实 save_fact_with_version：旧 active → superseded + 新 insert + version_of
+        let new_id = self.fact_seq.fetch_add(1, Ordering::SeqCst);
+        let mut f = fresh.clone();
+        f.id = new_id;
+        f.status = FactStatus::Active;
+        f.version_of = Some(old.id);
+        let persona = f.persona_uid.clone();
+        {
+            let mut facts = self.facts.lock().unwrap();
+            if let Some(o) = facts.get_mut(&old.id) {
+                o.status = FactStatus::Superseded;
+            }
+            facts.insert(new_id, f);
+        }
+        self.facts_by_persona
+            .lock()
+            .unwrap()
+            .entry(persona)
+            .or_default()
+            .push(new_id);
+        Ok(new_id)
     }
 
     async fn list_facts_by_persona(
         &self,
-        _uid: &str,
-        _field: ProfileField,
+        uid: &str,
+        field: ProfileField,
     ) -> RamariaResult<Vec<PersonaFact>> {
-        Ok(Vec::new())
+        let ids = self
+            .facts_by_persona
+            .lock()
+            .unwrap()
+            .get(uid)
+            .cloned()
+            .unwrap_or_default();
+        let facts = self.facts.lock().unwrap();
+        Ok(ids
+            .iter()
+            .filter_map(|id| facts.get(id).cloned())
+            .filter(|f| f.field == field)
+            .collect())
+    }
+
+    async fn list_active_facts_by_field(
+        &self,
+        uid: &str,
+        field: ProfileField,
+    ) -> RamariaResult<Vec<PersonaFact>> {
+        let ids = self
+            .facts_by_persona
+            .lock()
+            .unwrap()
+            .get(uid)
+            .cloned()
+            .unwrap_or_default();
+        let facts = self.facts.lock().unwrap();
+        Ok(ids
+            .iter()
+            .filter_map(|id| facts.get(id).cloned())
+            .filter(|f| f.field == field && matches!(f.status, FactStatus::Active))
+            .collect())
+    }
+
+    async fn upsert_style_stats(&self, stats: &PersonaStyleStats) -> RamariaResult<()> {
+        self.style_stats
+            .lock()
+            .unwrap()
+            .insert(stats.persona_uid.clone(), stats.clone());
+        Ok(())
+    }
+
+    async fn get_style_stats(&self, persona_uid: &str) -> RamariaResult<Option<PersonaStyleStats>> {
+        Ok(self.style_stats.lock().unwrap().get(persona_uid).cloned())
     }
 
     async fn save_trait(&self, _t: &PersonalityTrait) -> RamariaResult<i64> {

@@ -511,6 +511,95 @@ impl EmbeddingProvider for HashEmbedder {
     }
 }
 
+/// 恒失败 mock embedding：模拟 embedding 服务故障（批量与单条均返回 Err）。
+struct FailingEmbedder;
+
+#[async_trait::async_trait]
+impl EmbeddingProvider for FailingEmbedder {
+    async fn embed(&self, _text: &str) -> RamariaResult<Vec<f32>> {
+        Err(ramaria_core::RamariaError::embedding("mock embedding 故障"))
+    }
+    async fn embed_batch(&self, _texts: &[&str]) -> RamariaResult<Vec<Vec<f32>>> {
+        Err(ramaria_core::RamariaError::embedding(
+            "mock embedding 批量故障",
+        ))
+    }
+    fn model_info(&self) -> ramaria_core::traits::EmbeddingModelInfo {
+        ramaria_core::traits::EmbeddingModelInfo {
+            model_id: "failing-embedder".into(),
+            dimension: 4,
+        }
+    }
+    async fn validate(&self) -> RamariaResult<()> {
+        Ok(())
+    }
+    async fn download_model(&self) -> RamariaResult<()> {
+        Ok(())
+    }
+    fn download_progress(&self) -> f64 {
+        1.0
+    }
+    fn is_available(&self) -> bool {
+        true
+    }
+}
+
+#[tokio::test]
+async fn vectorize_with_failing_embedder_keeps_channels_empty() {
+    // embedding 调用故障（provider 存在但返回 Err）→ 批量失败回退逐条、逐条也失败 →
+    // 向量全部置 None（不 panic、不整体失败），由调用方降级纯关键词通道。
+    let mut evs: Vec<MemoryEvent> = Vec::new();
+    let mut ev = MemoryEvent::new("char-0001".into(), "标题".into(), "摘要".into(), 1, 2);
+    ev.id = 1;
+    ev.paraphrase = Some("感到疲惫".into());
+    ev.keywords = Some("加班,累".into());
+    evs.push(ev);
+
+    let mut samples = evs.iter().map(sample_from_event).collect::<Vec<_>>();
+    vectorize(&mut samples, &evs, Some(&FailingEmbedder))
+        .await
+        .expect("embedding 故障不报错（静默降级）");
+    assert!(samples[0].reaction_vector.is_none(), "反应通道应置空");
+    assert!(samples[0].situation_vector.is_none(), "情境通道应置空");
+}
+
+#[tokio::test]
+async fn cluster_events_with_failing_embedder_clusters_by_keywords() {
+    // 端到端：embedding 故障 → 聚类编排仍按关键词 Jaccard 分出簇（不 panic、不阻塞）。
+    let mut evs: Vec<MemoryEvent> = Vec::new();
+    for i in 0..4 {
+        let mut ev = MemoryEvent::new(
+            "char-0001".into(),
+            format!("标题{i}"),
+            format!("摘要{i}"),
+            1,
+            2,
+        );
+        ev.id = i;
+        ev.keywords = Some("加班,累".into());
+        evs.push(ev);
+    }
+    for i in 4..8 {
+        let mut ev = MemoryEvent::new(
+            "char-0001".into(),
+            format!("标题{i}"),
+            format!("摘要{i}"),
+            1,
+            2,
+        );
+        ev.id = i;
+        ev.keywords = Some("猫,可爱".into());
+        evs.push(ev);
+    }
+    let cfg = BehaviorConfig::default();
+    let clusterer = BehaviorClusterer::new(&cfg, Some(&FailingEmbedder));
+    let clusters = clusterer
+        .cluster_events(&evs)
+        .await
+        .expect("故障降级聚类成功");
+    assert_eq!(clusters.len(), 2, "embedding 故障 → 纯关键词仍分出两个簇");
+}
+
 #[tokio::test]
 async fn vectorize_fills_both_channels() {
     let mut evs: Vec<MemoryEvent> = Vec::new();
@@ -649,4 +738,193 @@ async fn cluster_events_high_outlier_retries_and_reports() {
     // 4 个同质核心事件成 1 簇；10 个互异孤立点不产生规则
     assert_eq!(clusters.len(), 1, "只有核心簇产生规则");
     assert_eq!(clusters[0].member_event_ids.len(), 4);
+}
+
+// =========================================================
+// 机制评估边界锁定（合成数据，确定性；辅助机制结论的可复现断言）
+// =========================================================
+
+/// 高维标准基 e_idx（dim 维）。
+fn basis(dim: usize, idx: usize) -> Vec<f32> {
+    let mut v = vec![0.0f32; dim];
+    v[idx % dim] = 1.0;
+    v
+}
+
+/// 沿"中心方向向量 + 每成员独立小扰动正交分量"生成簇成员：
+/// 中心 c 为单位向量，成员 k 的向量 = normalize(c + p · e_{7+3k})。
+/// 簇内余弦≈1/sqrt((1+p²)(1+p²))≈0.99；簇间余弦≈c_a·c_b（可由中心点积精确设定）。
+fn center_group(
+    dim: usize,
+    center: &[f32],
+    count: usize,
+    id_base: i64,
+    keywords: &[&str],
+    perturb: f64,
+) -> Vec<BehaviorSample> {
+    let cnorm: f64 = center
+        .iter()
+        .map(|&x| (x as f64).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    let c: Vec<f32> = center.iter().map(|&x| (x as f64 / cnorm) as f32).collect();
+    (0..count)
+        .map(|k| {
+            let extra = basis(dim, 7 + 3 * k); // 每成员独立扰动维（避开中心占用的 0..6 维）
+            let v: Vec<f64> = c
+                .iter()
+                .map(|&x| x as f64)
+                .zip(extra.iter())
+                .map(|(x, e)| x + perturb * *e as f64)
+                .collect();
+            let norm: f64 = v.iter().map(|x| x * x).sum::<f64>().sqrt();
+            let vec = v.iter().map(|&x| (x / norm) as f32).collect::<Vec<_>>();
+            sample(id_base + k as i64, keywords, Some(vec.clone()), Some(vec))
+        })
+        .collect()
+}
+
+/// 真孤立点：标准基 e_{dim_base + k}，彼此与任何簇都正交（余弦 0），关键词互异。
+fn isolated_group(dim: usize, dim_base: usize, count: usize, id_base: i64) -> Vec<BehaviorSample> {
+    (0..count)
+        .map(|k| {
+            let kw = format!("孤{k}");
+            let v = basis(dim, dim_base + k);
+            sample(id_base + k as i64, &[kw.as_str()], Some(v.clone()), Some(v))
+        })
+        .collect()
+}
+
+/// 正交三簇（簇间余弦=0）：中心 = e0 / e1 / e2，每簇 5 样本。
+fn well_separated_three(dim: usize, kw_sets: &[&[&str]]) -> Vec<BehaviorSample> {
+    let mut samples: Vec<BehaviorSample> = Vec::new();
+    for (ci, kw) in kw_sets.iter().enumerate() {
+        samples.extend(center_group(
+            dim,
+            &basis(dim, ci),
+            5,
+            (ci * 10) as i64,
+            kw,
+            0.05,
+        ));
+    }
+    samples
+}
+
+/// 边界锁定 1：机制在"高分离可分输入"上能正确检出多簇（3 正交簇，
+/// 各参数组合均 3 簇、0 孤立），即簇数塌缩不能归因于算法结构性缺陷。
+#[test]
+fn density_cluster_recovers_three_separated_clusters() {
+    let dim = 32;
+    let samples = well_separated_three(dim, &[&["加班", "累"], &["猫", "可爱"], &["爬山", "放松"]]);
+    for &(b1, b2) in &[
+        (0.85f64, 0.10f64), // 当前默认（β3=0.05）
+        (0.40, 0.30),       // β3=0.30（旧默认口径）
+        (0.0, 0.0),         // 纯关键词
+    ] {
+        for &ms in &[2usize, 3] {
+            let r = density_cluster(&samples, 0.65, ms, b1, b2);
+            assert_eq!(r.cluster_count, 3, "β1={b1} β2={b2} min={ms}");
+            assert!(r.outlier_ratio < 1e-9, "β1={b1} β2={b2} min={ms}");
+        }
+    }
+}
+
+/// 边界锁定 2：核心样本判定为"邻居数(不含自身) ≥ min_cluster_size"，
+/// 故默认 min=3 的实际最小可成簇大小为 4 样本——恰 3 样本的小簇整体孤置。
+/// 该口径与 HDBSCAN/态度聚类（含自身）不同，是"孤立点偏高"的机制贡献点，
+/// 是否在 M8 对齐口径由参数决策裁决，此处锁定现状行为。
+#[test]
+fn min_size_three_isolates_three_member_clusters() {
+    let dim = 32;
+    let mut samples: Vec<BehaviorSample> = Vec::new();
+    samples.extend(center_group(
+        dim,
+        &basis(dim, 0),
+        3,
+        0,
+        &["加班", "累"],
+        0.05,
+    ));
+    samples.extend(center_group(
+        dim,
+        &basis(dim, 1),
+        3,
+        10,
+        &["猫", "可爱"],
+        0.05,
+    ));
+    samples.extend(center_group(
+        dim,
+        &basis(dim, 2),
+        3,
+        20,
+        &["爬山", "放松"],
+        0.05,
+    ));
+    let r3 = density_cluster(&samples, 0.65, 3, 0.85, 0.10);
+    assert_eq!(r3.cluster_count, 0, "3 样本簇在 min=3 下不成簇");
+    assert!((r3.outlier_ratio - 1.0).abs() < 1e-9);
+    let r2 = density_cluster(&samples, 0.65, 2, 0.85, 0.10);
+    assert_eq!(r2.cluster_count, 3, "min=2 时 3 样本簇成簇");
+    assert!(r2.outlier_ratio < 1e-9);
+
+    let mut samples4: Vec<BehaviorSample> = Vec::new();
+    samples4.extend(center_group(
+        dim,
+        &basis(dim, 0),
+        4,
+        0,
+        &["加班", "累"],
+        0.05,
+    ));
+    samples4.extend(center_group(
+        dim,
+        &basis(dim, 1),
+        4,
+        10,
+        &["猫", "可爱"],
+        0.05,
+    ));
+    let r4 = density_cluster(&samples4, 0.65, 3, 0.85, 0.10);
+    assert_eq!(r4.cluster_count, 2, "4 样本簇在 min=3 下成簇");
+}
+
+/// 边界锁定 3：失败模式重试方向（孤立点超限 → 降 θ_nb）在"簇间相似度处于
+/// (θ_new, θ_old)"时会把可分离链焊成单簇，且真孤立点并不被回收（方向无保护）。
+/// 默认定稿数据下孤立点 42% < 60% 不触发该路径；此断言登记现状风险行为，
+/// 若后续为重试增加方向保护/回退，需同步更新本测试。
+#[tokio::test]
+async fn retry_theta_drop_welds_borderline_clusters() {
+    let dim = 64;
+    let cfg = BehaviorConfig::default();
+    // borderline 链：B=e0；A=0.6e0+0.8e1；C=0.6e0+0.8e2 → cos(B,A)=cos(B,C)≈0.6、cos(A,C)=0.36
+    let b = basis(dim, 0);
+    let mut a = vec![0.0f32; dim];
+    a[0] = 0.6;
+    a[1] = 0.8;
+    let mut c = vec![0.0f32; dim];
+    c[0] = 0.6;
+    c[2] = 0.8;
+    let mut samples: Vec<BehaviorSample> = Vec::new();
+    samples.extend(center_group(dim, &a, 5, 0, &["加班", "累"], 0.05));
+    samples.extend(center_group(dim, &b, 5, 10, &["猫", "可爱"], 0.05));
+    samples.extend(center_group(dim, &c, 5, 20, &["爬山", "放松"], 0.05));
+    samples.extend(isolated_group(dim, 20, 40, 100)); // 40 真孤立 → 孤立占比 40/55≈0.73>0.6
+
+    let bare = density_cluster(&samples, 0.65, cfg.min_cluster_size, cfg.beta1, cfg.beta2);
+    assert_eq!(bare.cluster_count, 3, "θ=0.65 时 3 簇可分离");
+    assert!(bare.outlier_ratio > cfg.max_outlier_ratio, "应触发重试");
+
+    let clusterer = BehaviorClusterer::new(&cfg, None);
+    let mut samples_copy = samples.clone();
+    let refined = clusterer
+        .cluster_samples(&[], &mut samples_copy)
+        .await
+        .expect("cluster_samples 成功");
+    assert_eq!(
+        refined.len(),
+        1,
+        "重试降 θ 把可分离 3 簇焊成 1 簇（方向无保护，登记风险行为）"
+    );
 }

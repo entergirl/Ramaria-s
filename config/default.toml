@@ -235,8 +235,10 @@ step_max_tokens = 2048
 cross_version_threshold_085 = true
 # 冷启动先验使用跨用户经验分布；false = 回退当前 persona 内先验
 cold_start_cross_user_prior = true
-# 漂移检测从 persona_cluster_snapshots 恢复真实旧分布；false = 回退硬编码占位
+# 漂移检测从 persona_cluster_snapshots 恢复真实旧分布并执行；false = 漂移检测整体显式跳过
 drift_restore_real_distribution = true
+# 因果链注入扩展段（时延分布 + 情绪沿链走势）；false = 回退 v1.7 仅链长/循环模式
+causal_latency_emotion_trend = true
 
 # =========================================================
 # L2 事件提取 LLM 参数
@@ -419,6 +421,12 @@ enabled = true
 # LLM 离线翻译增强开关（默认 true —— 增强为可选，LLM 不可用静默降级模板）
 # false = 仅模板拼接（确定性可测、零 LLM 依赖）
 auto_translate = true
+# 小样本原文样例兜底开关（默认 true —— 样本不足时不生成自动规则，
+# 但仍写入 SpeakingStyle 原文样例事实供画像/展示；false = 回退纯标注不写样例）
+sample_fallback = true
+# 关键词体系衔接开关（默认 true —— 存在 keyword_pool canonical 词表时
+# 风格候选走词典增强；false 或词表为空 = 回退纯 bigram）
+keyword_dict = true
 # 样本量阈值 n_p（默认 200 条消息）
 # 低于此值时标注"数据不足"，不生成规则文本、不注入
 min_sample_count = 200

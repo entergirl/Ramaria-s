@@ -881,7 +881,19 @@ impl StoreCrud for MockStorage {
         let id = self.snapshot_seq.fetch_add(1, Ordering::SeqCst);
         let mut new_s = s.clone();
         new_s.id = id;
-        self.cluster_snapshots.lock().unwrap().push(new_s);
+        let mut snaps = self.cluster_snapshots.lock().unwrap();
+        // 与 repo::cluster::save 对齐：写入 current 前先归档同 (persona, category) 旧 current。
+        if new_s.is_current {
+            for old in snaps.iter_mut() {
+                if old.persona_uid == new_s.persona_uid
+                    && old.category == new_s.category
+                    && old.is_current
+                {
+                    old.is_current = false;
+                }
+            }
+        }
+        snaps.push(new_s);
         Ok(id)
     }
 

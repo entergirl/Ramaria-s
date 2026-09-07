@@ -638,8 +638,9 @@ async fn full_pipeline_with_m4_features() {
     ]);
     let config = InferrerConfig::default();
 
-    // 3. 执行 Phase B
-    let phase_b_result = run_phase_b_inference(&llm, &storage, &stats, "persona-m4", &config).await;
+    // 3. 执行 Phase B（mock 无事件关系 → causal 文本为空，causal_extended_enabled 传 true 与默认一致）
+    let phase_b_result =
+        run_phase_b_inference(&llm, &storage, &stats, "persona-m4", &config, true).await;
 
     assert!(
         phase_b_result.is_ok(),
@@ -743,7 +744,9 @@ async fn full_pipeline_respects_calibrated_weights_in_output() {
     let llm = MultiStepLlm::new(vec![step1.into(), step2.into(), step3.into()]);
     let config = InferrerConfig::default();
 
-    let result = run_phase_b_inference(&llm, &storage, &stats, "persona-m4-cw", &config).await;
+    // mock 无事件关系 → causal 文本为空，causal_extended_enabled 传 true 与默认一致
+    let result =
+        run_phase_b_inference(&llm, &storage, &stats, "persona-m4-cw", &config, true).await;
     assert!(result.is_ok());
     let pb = result.unwrap();
 
@@ -789,8 +792,9 @@ async fn mock_infer_fallback_with_m4_stats() {
     let llm = MultiStepLlm::new(vec![step1.into(), step2.into()]);
     let config = InferrerConfig::default();
 
+    // mock 无事件关系 → causal 文本为空，causal_extended_enabled 传 true 与默认一致
     let result =
-        run_phase_b_inference(&llm, &storage, &stats, "persona-m4-fallback", &config).await;
+        run_phase_b_inference(&llm, &storage, &stats, "persona-m4-fallback", &config, true).await;
     assert!(result.is_ok(), "降级路径不应 panic");
     let pb = result.unwrap();
 
@@ -826,7 +830,9 @@ async fn llm_empty_traits_uses_llm_source_not_mock() {
     let llm = MultiStepLlm::new(vec![step1.into(), step2.into(), step3.into()]);
     let config = InferrerConfig::default();
 
-    let result = run_phase_b_inference(&llm, &storage, &stats, "persona-m4-empty", &config).await;
+    // mock 无事件关系 → causal 文本为空，causal_extended_enabled 传 true 与默认一致
+    let result =
+        run_phase_b_inference(&llm, &storage, &stats, "persona-m4-empty", &config, true).await;
     assert!(result.is_ok(), "空数组响应不应触发降级 panic");
     let pb = result.unwrap();
 

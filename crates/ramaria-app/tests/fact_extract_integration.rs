@@ -546,3 +546,30 @@ async fn valence_conflict_candidate_not_promoted() {
     let active = active_facts(&storage, "char-0001").await;
     assert!(active.is_empty(), "不应产生任何 active");
 }
+
+// =========================================================
+// 空数据冷启动：auto_fact_detect 开启但本批无 L1/事件
+// =========================================================
+
+/// 开关开启 + 空输入（无新 L1、无新事件）→ 报告全零、gated_off=false、
+/// 不 panic、不写任何事实（空数据静默降级，不阻塞主流程）。
+#[tokio::test]
+async fn auto_fact_detect_empty_batch_no_candidates_no_writes() {
+    let storage = MockStorage::new();
+    let cfg = enabled_knowledge();
+
+    let report = run_fact_extraction(&storage, &cfg, "char-0001", &[], &[], None).await;
+
+    assert!(!report.gated_off, "开关开启不应标记 gated_off");
+    assert_eq!(report.regular_candidates, 0);
+    assert_eq!(report.implied_candidates, 0);
+    assert_eq!(report.l1_candidates, 0);
+    assert_eq!(report.deduped, 0);
+    assert_eq!(report.promoted_active, 0);
+    assert_eq!(report.candidates_saved, 0);
+    assert_eq!(report.overwritten, 0);
+    assert_eq!(report.errors, 0, "空批不应产生错误");
+
+    let active = active_facts(&storage, "char-0001").await;
+    assert!(active.is_empty(), "空输入不应写入任何事实");
+}
