@@ -1,0 +1,420 @@
+/* css/views/debug.css — 调试面板（关键词/风格/评估，v2.0 M7）
+ * 设计: 仅引用 tokens 语义变量，随 [data-theme] 自动浅/深切换。
+ */
+
+.debug-page {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: var(--space-4) var(--space-6) var(--space-8);
+}
+
+/* ── 页签 ── */
+.debug-tabs {
+    display: flex;
+    gap: 2px;
+    background: var(--bg-subtle);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-md);
+    padding: 3px;
+    margin-bottom: var(--space-4);
+    overflow-x: auto;
+}
+
+.debug-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    border: none;
+    background: none;
+    border-radius: var(--radius-sm);
+    font-family: var(--font-body);
+    font-size: 13px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+
+.debug-tab:hover {
+    color: var(--text-primary);
+}
+
+.debug-tab.active {
+    background: var(--bg-card);
+    color: var(--text-primary);
+    font-weight: 500;
+    box-shadow: var(--shadow-sm);
+}
+
+.debug-tab-icon {
+    font-size: 14px;
+}
+
+/* ── 面板头部与工具栏 ── */
+.debug-panel-head {
+    margin-bottom: var(--space-3);
+}
+
+.debug-panel-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 4px;
+}
+
+.debug-panel-desc {
+    font-size: 12.5px;
+    color: var(--text-secondary);
+    line-height: 1.7;
+    max-width: 680px;
+}
+
+.debug-toolbar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    flex-wrap: wrap;
+    margin-bottom: var(--space-3);
+}
+
+.debug-select {
+    max-width: 260px;
+}
+
+.debug-eval-dir {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--text-tertiary);
+    word-break: break-all;
+    max-width: 480px;
+}
+
+/* ── 通用区块标题与统计 ── */
+.debug-section-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: var(--space-4) 0 var(--space-2);
+}
+
+.debug-subsection-title {
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    margin: var(--space-3) 0 var(--space-1);
+}
+
+.debug-stat-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+}
+
+.debug-stat {
+    background: var(--bg-card);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-md);
+    padding: var(--space-2) var(--space-4);
+    display: inline-flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 96px;
+}
+
+.debug-stat--ok { border-color: var(--pink-200); background: var(--pink-50); }
+.debug-stat--info { border-color: var(--blue-200); background: var(--blue-50); }
+.debug-stat--warn { border-color: var(--gray-200); background: var(--bg-subtle); }
+
+.debug-stat--mini {
+    min-width: 76px;
+    padding: var(--space-2) var(--space-3);
+}
+
+.debug-stat-value {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+}
+
+.debug-stat--mini .debug-stat-value {
+    font-size: 13px;
+    overflow-wrap: anywhere;
+}
+
+.debug-stat-label {
+    font-size: 11px;
+    color: var(--text-tertiary);
+}
+
+/* ── 别名行 ── */
+.debug-alias-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    flex-wrap: wrap;
+    background: var(--bg-card);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-md);
+    padding: var(--space-2) var(--space-3);
+    margin-bottom: var(--space-2);
+}
+
+.debug-alias-text {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+}
+
+.debug-alias-arrow {
+    color: var(--text-tertiary);
+}
+
+.debug-alias-actions {
+    display: inline-flex;
+    gap: var(--space-2);
+}
+
+/* ── 词条行 ── */
+.debug-kw-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+    padding: 4px var(--space-2);
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+    color: var(--text-primary);
+}
+
+.debug-kw-row:nth-child(odd) {
+    background: var(--bg-subtle);
+}
+
+.debug-kw-word {
+    color: var(--color-secondary);
+}
+
+.debug-kw-arrow {
+    color: var(--text-tertiary);
+    font-size: 12px;
+}
+
+.debug-kw-count {
+    margin-left: auto;
+    font-size: 11px;
+}
+
+/* ── 风格统计 ── */
+.debug-style-box {
+    margin-top: var(--space-1);
+}
+
+.debug-rule-text {
+    background: var(--bg-card);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-md);
+    padding: var(--space-3);
+    font-size: 13px;
+    line-height: 1.7;
+    color: var(--text-primary);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.debug-kv-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: var(--space-2);
+}
+
+.debug-kv-item {
+    background: var(--bg-card);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-md);
+    padding: var(--space-2) var(--space-3);
+}
+
+.debug-kv-item--wide {
+    grid-column: 1 / -1;
+}
+
+.debug-kv-label {
+    display: block;
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-bottom: 2px;
+}
+
+.debug-kv-value {
+    display: block;
+    font-size: 12.5px;
+    color: var(--text-primary);
+    word-break: break-word;
+}
+
+/* ── 评估产物 ── */
+.debug-file-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+}
+
+.debug-file-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    background: var(--bg-card);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-md);
+    padding: var(--space-2) var(--space-3);
+    cursor: pointer;
+    transition: border-color var(--dur-fast) var(--ease-out);
+}
+
+.debug-file-row:hover {
+    border-color: var(--border-blue);
+}
+
+.debug-file-name {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    color: var(--text-primary);
+    word-break: break-all;
+}
+
+.debug-file-size {
+    font-size: 11px;
+}
+
+.debug-file-open {
+    margin-left: auto;
+    font-size: 12px;
+    color: var(--color-secondary);
+    white-space: nowrap;
+}
+
+.debug-file-back-row {
+    margin-bottom: var(--space-2);
+}
+
+.debug-aux-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    padding: 6px var(--space-2);
+    border-bottom: 1px solid var(--border-light);
+    font-size: 13px;
+    color: var(--text-primary);
+}
+
+.debug-aux-item:last-child {
+    border-bottom: none;
+}
+
+.debug-variant {
+    background: var(--bg-card);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-md);
+    padding: var(--space-2) var(--space-3);
+    margin-bottom: var(--space-2);
+}
+
+.debug-variant-head {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-bottom: var(--space-2);
+}
+
+.debug-variant-gate {
+    font-size: 11.5px;
+    color: var(--text-tertiary);
+    margin: -4px 0 var(--space-2);
+}
+
+.debug-variant-scores {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+}
+
+.debug-score-chip {
+    background: var(--bg-subtle);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-full);
+    padding: 3px 12px;
+    font-size: 12.5px;
+    color: var(--text-primary);
+}
+
+.debug-score-chip em {
+    font-style: normal;
+    color: var(--text-tertiary);
+    font-size: 11px;
+}
+
+/* ── 空/错误/加载 ── */
+.debug-empty {
+    color: var(--text-tertiary);
+    font-size: 13px;
+    line-height: 1.8;
+    padding: var(--space-6);
+    text-align: center;
+    border: 1px dashed var(--border-default);
+    border-radius: var(--radius-lg);
+}
+
+.debug-note {
+    background: var(--bg-subtle);
+    border-left: 3px solid var(--pink-300);
+    border-radius: 0 var(--radius-md) var(--radius-md) 0;
+    padding: var(--space-2) var(--space-3);
+    font-size: 12.5px;
+    color: var(--text-secondary);
+    margin: var(--space-2) 0;
+}
+
+.debug-error {
+    padding: var(--space-10) var(--space-6);
+    text-align: center;
+    color: var(--text-secondary);
+}
+
+.debug-error-icon {
+    font-size: 28px;
+    margin-bottom: var(--space-2);
+}
+
+.debug-error-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: var(--space-1);
+}
+
+.debug-error-desc {
+    font-size: 12.5px;
+    color: var(--text-secondary);
+}
+
+.debug-tab-loading {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    color: var(--text-tertiary);
+    font-size: 13px;
+    padding: var(--space-6);
+}
+
+/* ── 窄屏 ── */
+@media (max-width: 640px) {
+    .debug-page { padding: var(--space-3) var(--space-3) var(--space-6); }
+    .debug-tab { padding: 8px 10px; font-size: 12.5px; }
+    .debug-kv-grid { grid-template-columns: 1fr; }
+}

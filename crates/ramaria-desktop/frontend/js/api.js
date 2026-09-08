@@ -757,6 +757,168 @@ var RamariaApi = (function () {
     }
 
  // =========================================================
+ // 11. 行为规则管理 (rules) — M7
+ // =========================================================
+
+/**
+ * 列出指定人格的行为规则。
+ *
+ * 参数:
+ * - `personaUid`: 可选，人格标识（缺省使用默认人格）。
+ *
+ * 返回:
+ * - { persona_uid, total, rules: [BehaviorRule] }
+ * - 每条 rule 含 id/enabled/source/reaction/avoid/params/confidence 等字段。
+ */
+    async function listRules(personaUid) {
+        var args = {};
+        if (personaUid) args.personaUid = personaUid;
+        return await _invoke('list_rules', args, '查询行为规则');
+    }
+
+/**
+ * 查询单条行为规则详情。
+ *
+ * 参数:
+ * - `ruleId`: 规则 ID。
+ */
+    async function getRule(ruleId) {
+        if (ruleId === undefined || ruleId === null) throw new Error('规则 ID 不能为空');
+        return await _invoke('get_rule', { ruleId: ruleId }, '查询规则详情');
+    }
+
+/**
+ * 启用 / 禁用行为规则。
+ *
+ * 参数:
+ * - `ruleId`: 规则 ID。
+ * - `enabled`: true 启用 / false 禁用。
+ */
+    async function setRuleEnabled(ruleId, enabled) {
+        if (ruleId === undefined || ruleId === null) throw new Error('规则 ID 不能为空');
+        return await _invoke('set_rule_enabled', { ruleId: ruleId, enabled: !!enabled }, '切换规则状态');
+    }
+
+/**
+ * 手工编辑行为规则（编辑后转为 Manual 强锚点并写 S1 反馈，与 CLI rule edit 一致）。
+ *
+ * 参数:
+ * - `ruleId`: 规则 ID。
+ * - `reaction`: 可选，新规则文本（不可为空）。
+ * - `avoid`: 可选，新禁忌列表（逗号分隔字符串）。
+ */
+    async function editRule(ruleId, reaction, avoid) {
+        if (ruleId === undefined || ruleId === null) throw new Error('规则 ID 不能为空');
+        var args = { ruleId: ruleId };
+        if (reaction !== undefined && reaction !== null) args.reaction = reaction;
+        if (avoid !== undefined && avoid !== null) args.avoid = avoid;
+        return await _invoke('edit_rule', args, '保存规则编辑');
+    }
+
+/**
+ * 查看规则证据链（只读，事件级结构化字段）。
+ *
+ * 参数:
+ * - `ruleId`: 规则 ID。
+ *
+ * 返回:
+ * - { rule_id, evidence: [{ event_id, weight, title, summary, paraphrase, keywords }] }
+ */
+    async function getRuleEvidence(ruleId) {
+        if (ruleId === undefined || ruleId === null) throw new Error('规则 ID 不能为空');
+        return await _invoke('rule_evidence', { ruleId: ruleId }, '查询规则证据');
+    }
+
+ // =========================================================
+ // 12. 关键词池只读 + 别名管理 (keywords) — M7
+ // =========================================================
+
+/**
+ * 列出关键词池全部词条（三态分层）。
+ *
+ * 返回:
+ * - { total, canonical_count, alias_count, pending_count, keywords: [...] }
+ * - 每条: { keyword, use_count, status, canonical_id, canonical_keyword, created_at }
+ */
+    async function listKeywords() {
+        return await _invoke('list_keywords', {}, '查询关键词池');
+    }
+
+/**
+ * 列出待确认别名冲突。
+ *
+ * 返回:
+ * - { total, aliases: [{ alias_id, alias_keyword, canonical_keyword, created_at }] }
+ */
+    async function listPendingAliases() {
+        return await _invoke('list_pending_aliases', {}, '查询待确认别名');
+    }
+
+/**
+ * 确认或驳回单个待确认别名。
+ *
+ * 参数:
+ * - `alias`: 别名文本。
+ * - `action`: "confirm" 合并到规范词 / "reject" 晋升独立规范词。
+ */
+    async function resolveAlias(alias, action) {
+        _require(alias, '别名');
+        return await _invoke('resolve_alias', { alias: alias, action: action }, action === 'confirm' ? '确认别名' : '驳回别名');
+    }
+
+ // =========================================================
+ // 13. 说话风格统计只读 (style) — M7
+ // =========================================================
+
+/**
+ * 查询指定人格的说话风格统计（只读）。
+ *
+ * 参数:
+ * - `personaUid`: 目标人格 UID。
+ *
+ * 返回:
+ * - null（无统计记录）或 { persona_uid, sample_count, baseline_version, status,
+ *   status_label, rule_source, rule_source_label, rule_text, stats_json, updated_at }
+ */
+    async function getStyleStats(personaUid) {
+        _require(personaUid, '人格 UID');
+        return await _invoke('get_style_stats', { personaUid: personaUid }, '查询说话风格统计');
+    }
+
+ // =========================================================
+ // 14. 评估调试只读面板 (evaluation) — M7
+ // =========================================================
+
+/**
+ * 弹出目录选择框，返回评估产物目录（取消返回 null）。
+ */
+    async function pickEvalDir() {
+        return await _invoke('pick_eval_dir', {}, '选择评估产物目录');
+    }
+
+/**
+ * 列出目录内 JSON 产物文件（按修改时间倒序）。
+ *
+ * 参数:
+ * - `dir`: 产物目录路径。
+ */
+    async function listEvalFiles(dir) {
+        _require(dir, '产物目录');
+        return await _invoke('list_eval_files', { dir: dir }, '列出评估产物');
+    }
+
+/**
+ * 读取并解析单个评估/报告产物 JSON（只读）。
+ *
+ * 参数:
+ * - `path`: 产物文件完整路径。
+ */
+    async function readEvalResult(path) {
+        _require(path, '产物路径');
+        return await _invoke('read_eval_result', { path: path }, '解析评估产物');
+    }
+
+ // =========================================================
  // 10. 诊断与更新 (diagnostics) — 新增
  // =========================================================
 
@@ -870,6 +1032,26 @@ var RamariaApi = (function () {
             listFull: listPersonasFull,
             updateInfo: updatePersonaInfo,
             refresh: refreshPersona,
+        },
+        rules: {
+            list: listRules,
+            get: getRule,
+            setEnabled: setRuleEnabled,
+            edit: editRule,
+            evidence: getRuleEvidence,
+        },
+        keywords: {
+            list: listKeywords,
+            pendingAliases: listPendingAliases,
+            resolveAlias: resolveAlias,
+        },
+        style: {
+            getStats: getStyleStats,
+        },
+        evaluation: {
+            pickDir: pickEvalDir,
+            listFiles: listEvalFiles,
+            readResult: readEvalResult,
         },
         diagnostics: {
             checkUpdate: checkUpdate,

@@ -49,6 +49,8 @@ var RamariaRouter = (function () {
         persona: '人格管理',
         import: '数据导入',
         settings: '设置',
+        rules: '规则管理',
+        debug: '调试面板',
         setup: '首次配置',
         progress: '处理中',
         error: '错误',

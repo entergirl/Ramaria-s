@@ -521,6 +521,22 @@ pub fn run() {
             commands::persona::update_persona_info,
             commands::persona::refresh_persona,
             commands::persona::regenerate_import_pipeline,
+            // ---- Rules（行为规则管理，M7）----
+            commands::rules::list_rules,
+            commands::rules::get_rule,
+            commands::rules::set_rule_enabled,
+            commands::rules::edit_rule,
+            commands::rules::rule_evidence,
+            // ---- Keywords（关键词池只读 + 别名，M7）----
+            commands::keywords::list_keywords,
+            commands::keywords::list_pending_aliases,
+            commands::keywords::resolve_alias,
+            // ---- Style（说话风格统计只读，M7）----
+            commands::style::get_style_stats,
+            // ---- Evaluation（评估调试只读面板，M7）----
+            commands::evaluation::pick_eval_dir,
+            commands::evaluation::list_eval_files,
+            commands::evaluation::read_eval_result,
             // ---- Diagnostics ----
             commands::diagnostics::check_update,
             commands::diagnostics::get_version,

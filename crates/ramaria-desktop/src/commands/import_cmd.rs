@@ -763,11 +763,16 @@ mod privacy_regression_tests {
     //! - 通过 `env!("CARGO_MANIFEST_DIR")` 定位本文件，不依赖测试运行时目录。
     //! - 仅在 `cfg(test)` 参与，不影响生产构建。
 
+    /// 读取本文件源码，并统一行尾为 LF。
+    ///
+    /// 说明:
+    /// - Windows 工作区可能以 CRLF 检出；统一为 LF 可避免行尾差异造成静态匹配假失败。
     fn self_source() -> String {
         let path =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands/import_cmd.rs");
         std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("无法读取本文件用于隐私断言: {path:?} 错误: {e}"))
+            .replace("\r\n", "\n")
     }
 
     /// 取 `s` 在 `start` 起至多 `max_chars` 个字符的子串（保证不切开多字节 UTF-8）。
@@ -823,11 +828,16 @@ mod privacy_regression_tests {
     #[test]
     fn instrument_skips_personal_args() {
         let src = self_source();
-        // import_qq_chat 是文件中唯一采用多行 skip 列表的入口 span；
-        // 以其唯一前缀定位其 skip 块，确证敏感参数被跳过（否则 instrument
-        // 会在 info 级自动记录昵称/显式 QQ UID）。
-        let skip_start = src
-            .find("instrument(skip(\n    state,")
+        // 以 import_qq_chat 函数签名定位其正上方的 #[tracing::instrument(skip(...))]
+        // 属性块：在签名前 400 字符内回溯最近一次 "instrument(skip(" 的起点即该
+        // skip 列表。与首参顺序/缩进/行尾无关，避免 rustfmt 或 CRLF 造成静态匹配假失败。
+        let fn_start = src
+            .find("pub async fn import_qq_chat(")
+            .expect("本文件必须包含 import_qq_chat 定义（用于定位其 instrument skip 块）");
+        let probe_start = fn_start.saturating_sub(400);
+        let skip_start = src[probe_start..fn_start]
+            .rfind("instrument(skip(")
+            .map(|off| probe_start + off)
             .unwrap_or_else(|| panic!("未找到 import_qq_chat 的 instrument skip 块"));
         // 按字符取 skip 块文本（前 ~240 字符已覆盖整个 skip(...) 列表），避免字节切片切多字节
         let skip_block = take_chars(&src, skip_start, 240);

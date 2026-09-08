@@ -7,10 +7,14 @@
 pub mod chat;
 pub mod config;
 pub mod diagnostics;
+pub mod evaluation;
 pub mod export;
 pub mod import_cmd;
 pub mod index_cmd;
+pub mod keywords;
 pub mod memory;
 pub mod persona;
+pub mod rules;
 pub mod session;
 pub mod setup;
+pub mod style;

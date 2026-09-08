@@ -125,6 +125,38 @@ var RamariaMarkdown = (function () {
     }
 
  /**
+ * HTML 实体解码（用于把已被转义一次的内容还原为原始字符）。
+ *
+ * 说明:
+ * - 仅解码本渲染器/清洗器会产生的五个实体（& < > " '）。
+ * - 顺序上把 `&amp;` 放在最后，避免先解码 `&amp;` 后其余替换又引入新的 `&`。
+ *
+ * 参数:
+ * - `str`: 可能含实体的字符串
+ *
+ * 返回:
+ * - 解码后的字符串
+ */
+    function _decodeEntities(str) {
+ // 先解数字实体（十进制/十六进制），再解五个命名实体；&amp; 最后处理，
+ // 避免其余替换产生的新 & 被重复解码。
+        return str
+            .replace(/&#x([0-9a-fA-F]+);/g, function (m, hex) {
+                var cp = parseInt(hex, 16);
+                return cp >= 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : m;
+            })
+            .replace(/&#(\d+);/g, function (m, dec) {
+                var cp = parseInt(dec, 10);
+                return cp >= 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : m;
+            })
+            .replace(/&lt;/g, '<')
+            .replace(/&gt;/g, '>')
+            .replace(/&quot;/g, '"')
+            .replace(/&#39;/g, "'")
+            .replace(/&amp;/g, '&');
+    }
+
+/**
  * 清理标签属性。
  *
  * 参数:
@@ -133,6 +165,12 @@ var RamariaMarkdown = (function () {
  *
  * 返回:
  * - 清理后的属性字符串（以空格开头），如果全部属性被移除则返回空串
+ *
+ * 说明（& 双重转义修复）:
+ * - 先对属性值做一次实体解码，再做协议检查与重新编码。
+ * - 否则输入/上一步已含 `&amp;`（如 markdown 链接 URL 的 `&`）会被二次编码成
+ *   `&amp;amp;`，浏览器解码后 href 中残留字面 `&amp;`——即 #24 双重转义缺陷。
+ * - 解码后重新编码保证最终输出恒为单次编码，且能拦截 `jav&#x61;script:` 类混淆。
  */
     function _cleanAttributes(tagName, attrStr) {
         var allowedForTag = ALLOWED_ATTRS[tagName] || [];
@@ -151,16 +189,17 @@ var RamariaMarkdown = (function () {
  // 跳过不在白名单中的属性
             if (allowedForTag.indexOf(attrName) === -1) continue;
 
-            var attrValue = match[2] || match[3] || match[4] || '';
+ // 先解码一次（还原上一步或输入中已存在的实体），避免二次编码
+            var attrValue = _decodeEntities(match[2] || match[3] || match[4] || '');
 
- // 对 href 做协议检查
+ // 对 href 做协议检查（解码后进行，可拦截实体混淆的危险协议）
             if (attrName === 'href') {
                 if (FORBIDDEN_PROTOCOLS.test(attrValue.trim())) {
                     attrValue = '#blocked';
                 }
             }
 
- // 重新编码属性值
+ // 重新编码属性值（恒为单次编码）
             result += ' ' + attrName + '="' + _escAttr(attrValue) + '"';
         }
 
@@ -386,8 +425,11 @@ var RamariaMarkdown = (function () {
         text = text.replace(/(?<!\*)\*([^*\n]+?)\*(?!\*)/g, '<em>$1</em>');
 
  // 链接 [text](url)
+ // 修复 & 双重转义（#24）: 整行已先经 _escHtml 转义（URL 中的 & 变为 &amp;），
+ // 此处需先把 URL 解码回原文再用 _escAttr 做单次属性编码；
+ // 否则 _escAttr 会把 &amp; 再编码成 &amp;amp;，最终 href 残留字面 &amp;。
         text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, function (match, linkText, url) {
-            var href = _escAttr(url);
+            var href = _escAttr(_decodeEntities(url));
             return '<a href="' + href + '" target="_blank" rel="noopener noreferrer">' + linkText + '</a>';
         });
 

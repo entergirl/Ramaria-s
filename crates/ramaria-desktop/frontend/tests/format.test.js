@@ -32,13 +32,21 @@ test('relativeTime: 小时前', () => {
   assert.ok(format.relativeTime(now - 2 * 3600000, now).includes('小时前'));
 });
 
-test('relativeTime: 昨天（昨天自然日）', () => {
-  // _todayStart 使用真实时钟：构造"昨天自然日 12:00"并与真实现在对比
-  const now = Date.now();
-  const today = new Date();
-  const yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1, 12, 0);
-  const text = format.relativeTime(yesterday.getTime(), now);
-  assert.ok(text.includes('昨天'), `昨天自然日应显示"昨天"，实际: ${text}`);
+test('relativeTime: 昨天（自然日差 1 且 ≥24h）显示昨天 HH:MM', () => {
+  // 固定参考时钟（本地时区 2026-09-08 12:00），与实现内部时钟解耦 → 确定性
+  const now = new Date(2026, 8, 8, 12, 0, 0).getTime();
+  const yesterdayNoon = new Date(2026, 8, 7, 12, 0, 0).getTime(); // 恰 24h
+  const text = format.relativeTime(yesterdayNoon, now);
+  assert.ok(text.startsWith('昨天'), `昨天自然日应显示"昨天 HH:MM"，实际: ${text}`);
+});
+
+test('relativeTime: 昨天自然日但不足 24h → 仍显示 X小时前', () => {
+  // 语义锁定：X小时前优先于"昨天"（24h 窗口规则），跨自然日不改变该口径
+  const now = new Date(2026, 8, 8, 10, 0, 0).getTime();
+  const yesterdayLate = new Date(2026, 8, 7, 23, 0, 0).getTime(); // 距 now 11h
+  const text = format.relativeTime(yesterdayLate, now);
+  assert.ok(text.includes('小时前'), `不足 24h 应显示小时前，实际: ${text}`);
+  assert.ok(!text.includes('昨天'), `不足 24h 不应显示昨天，实际: ${text}`);
 });
 
 test('relativeTime: 7 天内 X 天前', () => {

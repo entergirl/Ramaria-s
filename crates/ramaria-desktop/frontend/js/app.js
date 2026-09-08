@@ -87,6 +87,47 @@
         btnToggleTheme: $('btn-toggle-theme'),
     };
 
+ /** 启用调试（settings 裸键，重启后由本函数在启动时读取并应用） */
+    var DEBUG_SETTING_KEY = 'debug_enabled';
+ /** 侧边栏「调试」导航项（index.html 默认 hidden） */
+    var DEBUG_NAV_ID = 'nav-debug-item';
+
+ /**
+ * 从全局设置列表中读取 `debug_enabled`。
+ *
+ * 返回:
+ * - true / false（缺省视为 false）
+ */
+    function _debugEnabledFromSettings(settings) {
+        if (!settings || !Array.isArray(settings)) return false;
+        for (var i = 0; i < settings.length; i++) {
+            var item = settings[i];
+            if (item && item.key === DEBUG_SETTING_KEY) {
+                var v = item.value;
+                return v === true || v === 'true' || v === '1';
+            }
+        }
+        return false;
+    }
+
+ /**
+ * 应用调试模式（仅启动时调用；运行时改动需重启生效）。
+ *
+ * - Store.debugEnabled：供设置页（高级设置页签显隐）/视图做一次性判定。
+ * - 侧边栏「调试」入口显隐。
+ *
+ * 参数:
+ * - `enabled`: 本次启动是否启用调试。
+ */
+    function _applyDebugMode(enabled) {
+        RamariaStore.set('debugEnabled', !!enabled, true);
+        var item = $(DEBUG_NAV_ID);
+        if (item) {
+            item.classList.toggle('hidden', !enabled);
+        }
+        console.log('[App] 调试模式: ' + (enabled ? '开启（显示调试页）' : '关闭'));
+    }
+
  // =========================================================
  // 主题管理
  // =========================================================
@@ -347,6 +388,8 @@
         RamariaApi.config.getSettings().then(function (settings) {
             RamariaStore.set('settings', settings);
             console.log('[App] 全局设置已加载 (' + settings.length + ' 项)');
+            // 启动时应用"启用调试"：决定侧边栏「调试」入口与设置页高级页签
+            _applyDebugMode(_debugEnabledFromSettings(settings));
         }).catch(function (err) {
             console.warn('[App] 加载全局设置失败:', err.message || err);
         });

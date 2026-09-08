@@ -38,11 +38,39 @@ var RamariaSettingsView = (function () {
  /** 当前隐私状态 */
     var _privacyStatus = null;
 
+ /**
+  * 本次启动（会话）是否启用调试。
+  * 决定「高级设置」页签是否可见；由 app.js 在启动时读取 `debug_enabled` 设置后
+  * 写入 Store.debugEnabled，本视图仅在渲染时读取，不实时跟随开关改动（重启生效）。
+  */
+    var _debugEnabled = false;
+
  // =========================================================
  // DOM 快捷查询
  // =========================================================
 
     function $(id) { return document.getElementById(id); }
+
+ /**
+ * 读取当前启动的调试模式。
+ *
+ * 优先取 Store.debugEnabled（app.js 启动时写入）；缺省时回退解析
+ * Store.settings（防御启动竞态）。
+ */
+    function _currentDebugEnabled() {
+        var cached = RamariaStore.get('debugEnabled');
+        if (typeof cached === 'boolean') return cached;
+        var list = RamariaStore.get('settings');
+        if (list && Array.isArray(list)) {
+            for (var i = 0; i < list.length; i++) {
+                if (list[i] && list[i].key === 'debug_enabled') {
+                    var v = list[i].value;
+                    return v === true || v === 'true' || v === '1';
+                }
+            }
+        }
+        return false;
+    }
 
  // =========================================================
  // 渲染
@@ -62,11 +90,13 @@ var RamariaSettingsView = (function () {
         viewEl.appendChild(scroll);
 
  // ── v1.4 M6：基础/高级两级 Tab 框架 ──
+ // v2.0 M7：高级设置页签为"调试能力"，默认隐藏；设置页「启用调试」并重启后才显示
+        _debugEnabled = _currentDebugEnabled();
         var tabs = document.createElement('div');
         tabs.className = 'settings-tabs';
         tabs.innerHTML =
             '<button class="settings-tab-btn active" data-tab="basic">基础设置</button>' +
-            '<button class="settings-tab-btn" data-tab="advanced">高级设置</button>';
+            (_debugEnabled ? '<button class="settings-tab-btn" data-tab="advanced">高级设置</button>' : '');
         scroll.appendChild(tabs);
 
         var basicPane = document.createElement('div');
@@ -975,6 +1005,22 @@ var RamariaSettingsView = (function () {
             '<div class="settings-section-title">🔧 诊断与更新</div>' +
             '<div class="settings-section-desc">检查新版本或导出诊断信息以排查问题。</div>';
 
+ // ── 启用调试（v2.0 M7）：重启生效；开启后显示侧边栏「调试」与设置页「高级设置」──
+        var debugCard = document.createElement('div');
+        debugCard.className = 'settings-card';
+        debugCard.innerHTML =
+            '<div class="settings-form-group">' +
+                '<label class="settings-form-label">' +
+                    '<input type="checkbox" id="settings-debug-enabled"' + (_debugEnabled ? ' checked' : '') + ' /> ' +
+                    '启用调试（开发者模式）' +
+                '</label>' +
+                '<div class="settings-form-hint">' +
+                    '开启并<strong>重启 Ramaria</strong> 后：① 侧边栏出现「调试」页面；② 设置页出现「高级设置」页签。' +
+                    '关闭并重启则恢复默认（仅基础设置、无调试页）。' +
+                '</div>' +
+            '</div>';
+        section.appendChild(debugCard);
+
         var card = document.createElement('div');
         card.className = 'settings-card';
         card.innerHTML =
@@ -1002,6 +1048,29 @@ var RamariaSettingsView = (function () {
 
         var exportDiagBtn = $('settings-export-diagnostics');
         if (exportDiagBtn) exportDiagBtn.addEventListener('click', _handleExportDiagnostics);
+
+        var debugBox = $('settings-debug-enabled');
+        if (debugBox) debugBox.addEventListener('change', _handleDebugToggle);
+    }
+
+ /**
+ * 处理"启用调试"开关改动（v2.0 M7）。
+ *
+ * 语义: 立即写库（settings.debug_enabled），但 UI 生效需重启——
+ * 不即时改动侧边栏/高级设置页签，避免用户误以为马上生效。
+ */
+    async function _handleDebugToggle() {
+        var debugBox = $('settings-debug-enabled');
+        if (!debugBox) return;
+        var next = debugBox.checked;
+        try {
+            await RamariaApi.config.updateSetting('debug_enabled', next ? 'true' : 'false');
+            var action = next ? '启用' : '关闭';
+            RamariaToast.show('success', action + '调试已保存', '请重启 Ramaria 后生效');
+        } catch (err) {
+            debugBox.checked = !next; // 写库失败回滚勾选态
+            RamariaToast.show('error', '保存失败', err.message || '未知错误');
+        }
     }
 
  /**
@@ -1204,6 +1273,18 @@ var RamariaSettingsView = (function () {
                 { path: ['graph_weight'], label: '图谱通道权重', type: 'number', step: 0.1, min: 0, def: 0.8, hint: '图谱通道权重' },
                 { path: ['retrieval_weight_l2'], label: 'L2 排序权重', type: 'number', step: 0.1, min: 0, def: 0.8, hint: '<1.0 表示 L2 优先展示' },
                 { path: ['retrieval_weight_l1'], label: 'L1 排序权重', type: 'number', step: 0.1, min: 0, def: 1.0, hint: 'L1 结果排序权重' },
+                // —— v2.0 新增：向量/关键词通道与摘要路 RAG 参数（阶段一不定稿，机制开关先接入）——
+                { path: ['enable_vector'], label: '向量通道开关', type: 'bool', def: true, hint: 'false = 仅 BM25 + 图谱参与 RRF 融合' },
+                { path: ['enable_keyword_channel'], label: '关键词镜像通道', type: 'bool', def: true, hint: 'false = 回退三通道（BM25 + 向量 + 图谱）' },
+                { path: ['keyword_weight'], label: '关键词通道权重', type: 'number', step: 0.1, min: 0, def: 1.0, hint: '关键词镜像通道 RRF 权重（1.0 与向量同权）' },
+                { path: ['narrative_weighted'], label: '脉络加权注入', type: 'bool', def: true, hint: 'v1.7 B4：按时间×话题相关性融合排序；false 回退取最近 N 条' },
+                { path: ['narrative_top_k'], label: '脉络注入条数', type: 'number', min: 0, def: 3, hint: '脉络加权后注入的最大条数' },
+                { path: ['rag_max_memories'], label: 'RAG 上下文条数', type: 'number', min: 0, def: 5, hint: '摘要路记忆上下文最大条目数' },
+                { path: ['rag_max_summary_chars'], label: 'RAG 单条摘要字符', type: 'number', min: 0, def: 120, hint: '单条记忆摘要最大字符数' },
+                { path: ['rag_share_threshold_user'], label: 'Persona-Aware user 阈值', type: 'number', step: 0.05, min: 0, max: 1, def: 0.3, hint: 'user 类人格最低 share 过滤阈值' },
+                { path: ['rag_share_threshold_char'], label: 'Persona-Aware 角色阈值', type: 'number', step: 0.05, min: 0, max: 1, def: 0.5, hint: 'char/anim/oc/hist 类最低 share 过滤阈值' },
+                { path: ['rag_share_threshold_rama'], label: 'Persona-Aware rama 阈值', type: 'number', step: 0.05, min: 0, max: 1, def: 0.0, hint: 'rama 类最低 share 阈值（0 = 全量）' },
+                { path: ['rag_include_graph_entities'], label: '上下文含图谱实体', type: 'bool', def: true, hint: '摘要路上下文格式化是否包含图谱实体' },
             ],
         },
         {
@@ -1318,6 +1399,78 @@ var RamariaSettingsView = (function () {
             fields: [
                 { path: ['enabled'], label: '启用桥接', type: 'bool', def: true, hint: '关闭后新会话不加载桥接（等同 v1.3）' },
                 { path: ['max_chars'], label: '桥接字符预算', type: 'number', min: 50, def: 800, hint: '超限从头部截断、保最近' },
+            ],
+        },
+        {
+            key: 'knowledge',
+            title: '🧩 知识层（fact 路）',
+            desc: '事件→知识事实抽取、判重与注入参数；本组为知识路独立检索参数（与摘要路/原文路互不串扰）。',
+            fields: [
+                { path: ['auto_fact_detect'], label: '自动事实检测总开关', type: 'bool', def: false, hint: 'v2.0：开启后抽取走常规轨道 + 增强轨道；false 与 v1.7 完全一致' },
+                { path: ['detector_enabled'], label: '规则判定器开关', type: 'bool', def: true, hint: 'false = 不检索注入（零新增 LLM 调用）' },
+                { path: ['retrieve_top_k'], label: '检索条数上限', type: 'number', min: 0, def: 0, hint: '0 = 与 v1.7 等价（不按条数截断，仅按预算注入）' },
+                { path: ['retrieve_threshold'], label: '检索路由阈值', type: 'number', step: 0.05, min: 0, max: 1, def: 0.0, hint: '0.0 = 与 v1.7 等价（沿用既有判定口径）' },
+                { path: ['dedup_cosine_threshold'], label: '判重余弦阈值', type: 'number', step: 0.05, min: 0, max: 1, def: 0.85, hint: '同 field 语义 ≥0.85 且关键词交集 ≥1 判重复' },
+                { path: ['dedup_keyword_min'], label: '判重关键词下限', type: 'number', min: 1, def: 1, hint: '≥1 个共同词参与判重' },
+                { path: ['corroboration_cosine_threshold'], label: '互证余弦阈值', type: 'number', step: 0.05, min: 0, max: 1, def: 0.7, hint: '≥2 独立事件语义 ≥0.7 且 valence 一致才互证' },
+                { path: ['injection_budget_chars'], label: '事实卡片注入预算（字符）', type: 'number', min: 0, def: 800, hint: '超预算保前部' },
+                { path: ['volatile_halflife_days'], label: '动态事实时效半衰期（天）', type: 'number', min: 1, def: 30, hint: '随事件时间衰减' },
+            ],
+        },
+        {
+            key: 'style',
+            title: '🎨 说话风格（表达层）',
+            desc: '五维风格统计、显著性检验与自动规则生成（A3）；关闭整链路回退 v1.6 语义。',
+            fields: [
+                { path: ['enabled'], label: '风格统计总开关', type: 'bool', def: true, hint: 'false = 不统计、不生成规则、不注入' },
+                { path: ['auto_translate'], label: 'LLM 离线翻译增强', type: 'bool', def: true, hint: 'false = 仅模板拼接（确定性、零 LLM 依赖）' },
+                { path: ['sample_fallback'], label: '小样本原文样例兜底', type: 'bool', def: true, hint: '样本不足时写入 SpeakingStyle 样例事实供展示' },
+                { path: ['keyword_dict'], label: '关键词体系衔接', type: 'bool', def: true, hint: '词表存在时风格候选走词典增强；否则回退纯 bigram' },
+                { path: ['min_sample_count'], label: '样本量阈值 n_p', type: 'number', min: 1, def: 200, hint: '低于此值标注数据不足，不生成规则、不注入' },
+                { path: ['top_n'], label: '口癖/话题词 Top-N', type: 'number', min: 1, def: 10, hint: '文档范围 10~20' },
+                { path: ['relative_boost_ratio'], label: '相对超频比阈值', type: 'number', step: 0.1, min: 0, def: 2.0, hint: 'persona 频率 / 全局频率 > 此值视为口癖' },
+                { path: ['min_frequency'], label: '显著项最小频次', type: 'number', min: 1, def: 5, hint: '频次低于此值不参与显著性判定' },
+                { path: ['z_critical'], label: 'z 临界值', type: 'number', step: 0.1, min: 0, def: 2.0, hint: '|z| ≥ 此值判定统计显著' },
+            ],
+        },
+        {
+            key: 'injection_budget',
+            title: '📦 注入协调预算（v2.0）',
+            desc: 'RAG 摘要与四层注入纳入同一 token 池：超限按 order 从低优先整块丢弃。默认关闭时行为与既有版本等价。',
+            fields: [
+                { path: ['enabled'], label: '协调预算开关', type: 'bool', def: false, hint: 'false = 走既有独立预算路径（回归红线）' },
+                { path: ['max_injection_tokens'], label: '注入总 token 上限', type: 'number', min: 0, def: 1000, hint: '固定骨架（能力边界/角色/时间）不计入池' },
+                { path: ['max_rag_tokens'], label: 'RAG 独立 token 上限', type: 'number', min: 0, def: 0, hint: '0 = 不设独立上限，仅受总池约束' },
+            ],
+        },
+        {
+            key: 'layer_dedup',
+            title: '🧾 层间去重仲裁（v2.0）',
+            desc: '同一事实跨层去重与冲突仲裁（引用级 + 内容级覆盖）。默认关闭时走既有引用级去重路径。',
+            fields: [
+                { path: ['enabled'], label: '层间去重仲裁开关', type: 'bool', def: false, hint: 'false = 走既有引用级去重（行为不变）' },
+            ],
+        },
+        {
+            key: 'l1-progressive',
+            title: '📚 渐进式摘要 B3（v2.0）',
+            desc: '长会话（消息数/时间跨度超阈值）在封存时按段生成多个 L1。默认关闭，回退 v1.6 行为。',
+            fields: [
+                { path: ['l1', 'progressive', 'enabled'], label: '渐进式摘要开关', type: 'bool', def: false, hint: 'false = 整会话/按 utt 切分（v1.6）' },
+                { path: ['l1', 'progressive', 'msg_threshold'], label: '消息数触发阈值', type: 'number', min: 2, def: 100, hint: '超过此条数触发分段' },
+                { path: ['l1', 'progressive', 'span_hours'], label: '时间跨度阈值（小时）', type: 'number', min: 1, def: 24, hint: '首末消息跨度超过此值触发分段' },
+                { path: ['l1', 'progressive', 'tail_msg_count'], label: '尾段覆盖消息数', type: 'number', min: 1, def: 60, hint: '封存只摘要尾部最近 N 条消息' },
+            ],
+        },
+        {
+            key: 'inference-upgrade',
+            title: '🔃 画像升级开关（v2.0）',
+            desc: 'Phase A 后分层收缩与 Phase B/C 画像升级各增量的独立开关；全部关闭时画像输出回退旧版行为。',
+            fields: [
+                { path: ['inference', 'upgrade', 'cross_version_threshold_085'], label: '跨版本簇阈值 0.85', type: 'bool', def: true, hint: 'false = 回退旧值 0.75' },
+                { path: ['inference', 'upgrade', 'cold_start_cross_user_prior'], label: '跨用户冷启动先验', type: 'bool', def: true, hint: 'false = 回退 persona 内先验' },
+                { path: ['inference', 'upgrade', 'drift_restore_real_distribution'], label: '漂移检测真实恢复', type: 'bool', def: true, hint: 'false = 漂移检测整体显式跳过' },
+                { path: ['inference', 'upgrade', 'causal_latency_emotion_trend'], label: '因果时延+情绪走势', type: 'bool', def: true, hint: 'false = 回退 v1.7 仅链长/循环模式' },
             ],
         },
     ];

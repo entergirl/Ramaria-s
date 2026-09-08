@@ -39,6 +39,32 @@ test('render: 链接带安全属性', () => {
   assert.ok(html.includes('target="_blank"') || html.includes('target="_blank"'), `实际: ${html}`);
 });
 
+test('render: 链接 URL 含 & 仅单次转义（#24 双重转义回归）', () => {
+  // 缺陷历史：url 先被整行 _escHtml 转义为 &amp;，再被 _escAttr 二次编码 → &amp;amp;。
+  const html = md.render('[查询](https://example.com/search?a=1&b=2)');
+  assert.ok(html.includes('href="https://example.com/search?a=1&amp;b=2"'), `实际: ${html}`);
+  assert.ok(!html.includes('&amp;amp;'), `URL 不得双重转义，实际: ${html}`);
+});
+
+test('renderInline: 链接 URL 含 & 仅单次转义', () => {
+  const html = md.renderInline('[A](https://x.test/p?x=1&y=2)');
+  assert.ok(html.includes('href="https://x.test/p?x=1&amp;y=2"'), `实际: ${html}`);
+  assert.ok(!html.includes('&amp;amp;'), `URL 不得双重转义，实际: ${html}`);
+});
+
+test('sanitize: 属性值中的 &amp; 不被重复编码', () => {
+  const safe = md.sanitize('<a href="https://x.test/?q=1&amp;r=2">link</a>');
+  assert.ok(safe.includes('href="https://x.test/?q=1&amp;r=2"'), `实际: ${safe}`);
+  assert.ok(!safe.includes('&amp;amp;'), `属性值不得双重转义，实际: ${safe}`);
+});
+
+test('sanitize: 实体混淆的 javascript 协议被拦截', () => {
+  const safe = md.sanitize('<a href="jav&#x61;script:alert(1)">x</a>');
+  // 先解码再查协议 → 危险协议被替换为 #blocked，且 href 值按字符原样输出
+  assert.ok(!safe.includes('javascript:'), `危险协议应被拦截，实际: ${safe}`);
+  assert.ok(safe.includes('#blocked'), `应替换为 #blocked，实际: ${safe}`);
+});
+
 test('render: 代码块保护（块内标记不被误解析）', () => {
   const html = md.render('```\n**不是粗体**\n```');
   // 代码块内不应出现 <strong>

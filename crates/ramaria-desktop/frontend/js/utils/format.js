@@ -76,11 +76,21 @@ var RamariaFormat = (function () {
     }
 
  /**
- * 获取本地化的今天零点时间戳。
+ * 获取指定时刻所在自然日的零点时间戳（本地时区）。
+ *
+ * 参数:
+ * - `tsMs`: 参考时刻（毫秒时间戳）
+ *
+ * 返回:
+ * - 该自然日 00:00 的毫秒时间戳
+ *
+ * 说明:
+ * - 所有"今天/昨天"判定都基于同一个参考时刻（relativeTime 的 now 参数），
+ *   不再在函数内部重新取实时钟——修复"传入固定 now 仍受真实日期影响"的 flaky。
  */
-    function _todayStart() {
-        var now = new Date();
-        return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    function _dayStart(tsMs) {
+        var d = new Date(tsMs);
+        return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
     }
 
  // =========================================================
@@ -129,16 +139,18 @@ var RamariaFormat = (function () {
             return minutes + '分钟前';
         }
 
- // X小时前（24小时内）
+ // X小时前（24小时内，无论是否跨自然日）
         if (diffMs < DAY_MS) {
             var hours = Math.floor(diffMs / HOUR_MS);
             return hours + '小时前';
         }
 
- // 昨天（48小时内且跨天）
-        var todayStart = _todayStart();
-        var dateStart = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
-        if (dateStart === todayStart - DAY_MS) {
+ // 昨天（自然日差恰为 1，且已超过 24h 窗口）
+ // 参考时刻统一取传入的 nowMs，避免与函数内部实时钟不一致导致的跨天竞态。
+        var todayStart = _dayStart(nowMs);
+        var dateStart = _dayStart(date.getTime());
+        var dayDiff = Math.round((todayStart - dateStart) / DAY_MS);
+        if (dayDiff === 1) {
             return '昨天 ' + _pad2(date.getHours()) + ':' + _pad2(date.getMinutes());
         }
 
