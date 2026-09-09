@@ -160,6 +160,10 @@ enum Commands {
     #[command(display_order = 44, subcommand)]
     Rule(RuleCmd),
 
+    /// 表达层风格统计管理（update: 手动补跑风格统计，覆盖无封存来源的导入 persona）[管理]
+    #[command(display_order = 47, subcommand)]
+    Style(StyleCmd),
+
     /// 知识事实查询（list / show，只读）[管理]
     #[command(display_order = 45, subcommand)]
     Fact(FactCmd),
@@ -250,6 +254,17 @@ enum RuleCmd {
     /// 触发 persona 全量行为学习（基于全部事件重新聚类并生成/替换 Auto 规则）
     Relearn {
         /// 规则所属 persona（默认 rama-0001）
+        #[arg(long)]
+        persona: Option<String>,
+    },
+}
+
+/// 表达层风格统计管理子命令（update: 手动补跑表达层风格统计）。
+#[derive(Subcommand)]
+enum StyleCmd {
+    /// 触发 persona 风格统计增量更新（基于全部消息重新计算五维并生成/替换自动风格规则）
+    Update {
+        /// 目标 persona_uid（默认 rama-0001）
         #[arg(long)]
         persona: Option<String>,
     },
@@ -616,6 +631,7 @@ fn grouped_command() -> clap::Command {
         ("persona", "管理"),
         ("diagnostics", "管理"),
         ("keyword", "管理"),
+        ("style", "管理"),
         ("status", "高级"),
         ("probe", "高级"),
     ] {
@@ -1012,6 +1028,12 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
             };
             commands::rule::run(app, cmd, cli.json, cli.yes).await?;
         }
+        Commands::Style(sub) => {
+            let cmd = match sub {
+                StyleCmd::Update { persona } => commands::style::StyleCmd::Update { persona },
+            };
+            commands::style::run(app, cmd, cli.json).await?;
+        }
         Commands::Fact(sub) => {
             let cmd = match sub {
                 FactCmd::List {
@@ -1359,6 +1381,33 @@ mod tests {
                 );
             }
             _ => panic!("应解析为 Probe::Run，实际解析为其他命令"),
+        }
+    }
+
+    /// `ramaria style update` 可解析（无 --persona → 命令层回退默认 rama-0001）。
+    #[test]
+    fn style_update_parses_default_persona() {
+        let cli =
+            Cli::try_parse_from(&["ramaria", "style", "update"]).expect("style update 应可解析");
+        match cli.command {
+            Commands::Style(StyleCmd::Update { persona }) => {
+                assert!(persona.is_none(), "缺省 --persona 时在命令层用默认值");
+            }
+            _ => panic!("应解析为 Style::Update，实际解析为其他命令"),
+        }
+    }
+
+    /// `ramaria style update --persona <uid>` 可解析并透传 persona_uid。
+    #[test]
+    fn style_update_persona_flag_parses() {
+        let cli =
+            Cli::try_parse_from(&["ramaria", "style", "update", "--persona", "char-2766366159"])
+                .expect("--persona 应可解析");
+        match cli.command {
+            Commands::Style(StyleCmd::Update { persona }) => {
+                assert_eq!(persona.as_deref(), Some("char-2766366159"));
+            }
+            _ => panic!("应解析为 Style::Update，实际解析为其他命令"),
         }
     }
 

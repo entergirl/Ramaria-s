@@ -368,6 +368,25 @@ pub trait StoreCrud: Send + Sync {
     async fn list_sessions(&self) -> RamariaResult<Vec<Session>>;
     async fn delete_session(&self, session_id: Uuid) -> RamariaResult<()>;
 
+    /// 级联删除指定会话及其全部关联数据（消息 / utt 块 / L1 / 反馈日志等）。
+    ///
+    /// 职责:
+    /// - 供一次性合成会话（如 probe run 每题自动创建的测试 session）用完即删
+    ///   的场景使用：删除 session 前先按依赖顺序清理可能引用该 session 的
+    ///   关联数据，避免外键约束导致删除失败或遗留孤儿数据。
+    /// - 与 [`delete_session`] 的差异：本方法保证 session 及其关联数据整体移除，
+    ///   不要求调用方先手动清理子表。
+    ///
+    /// 说明:
+    /// - 仅做数据删除，**不触发**生命周期 / 封存 / 学习管线（调用方需在
+    ///   App 层另行清理 lifecycle 对已删除 session 的活跃引用）。
+    /// - 默认实现委托 [`delete_session`]：存量实现 / mock 的 `delete_session`
+    ///   已按自身数据模型清理关联数据，无需为本方法改动即可编译。
+    /// - `ramaria-storage` 覆写为事务内按依赖顺序显式删除各关联表。
+    async fn delete_session_cascade(&self, session_id: Uuid) -> RamariaResult<()> {
+        self.delete_session(session_id).await
+    }
+
     /// 回写绑定会话的 persona_uid（存量 NULL 会话归属修复）。
     ///
     /// 职责:

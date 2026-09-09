@@ -399,6 +399,31 @@ impl App {
             .await
     }
 
+    /// 彻底删除一次性/临时 session（探针合成对话等），不触发任何学习管线。
+    ///
+    /// 与 `save_and_close_session` 的差异:
+    /// - `save_and_close_session` 会生成 L1 摘要并级联 L2/L3/风格统计等学习；
+    /// - 本方法只做数据删除：storage 层级联移除 session 及其消息等关联数据，
+    ///   并同步清理 lifecycle 对已删除 session 的追踪（活跃指针 + 活跃时间缓存），
+    ///   避免后续空闲检测 / `save_and_close` 引用一个已不存在的 session。
+    ///
+    /// 说明:
+    /// - 供 probe run 等"模型自答合成对话"路径使用：测试 session 用完即删，
+    ///   不进入生命周期、不产生任何学习副作用。
+    /// - 若删除的 session 恰好是当前活跃 session，活跃指针会被置空；
+    ///   不影响后续真实对话（新会话发送时 resolve_session 会重新设置活跃指针）。
+    pub async fn delete_session_cascade(&self, session_id: Uuid) -> RamariaResult<()> {
+        self.storage.delete_session_cascade(session_id).await?;
+
+        // 同步清理 lifecycle 引用：活跃指针若指向该 session 则置空；
+        // 移除其活跃时间缓存，防止空闲检测把已删除 session 当活跃会话处理。
+        if self.lifecycle.get_active_session_id() == Some(session_id) {
+            self.lifecycle.set_active_session_id_public(None);
+        }
+        self.lifecycle.forget_session(session_id);
+        Ok(())
+    }
+
     /// 为已关闭的 session 重新生成 L1 摘要（手动重试）。
     ///
     /// 职责:

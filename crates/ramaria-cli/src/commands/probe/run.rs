@@ -16,6 +16,7 @@ use futures::StreamExt;
 use ramaria_core::config::RamariaConfig;
 use ramaria_core::error::RamariaError;
 use ramaria_memory::utt::builder::UttBuilder;
+use uuid::Uuid;
 
 use super::types::{
     AblationProfile, DATASET_SCHEMA_VERSION, DatasetItem, ItemRepeatStats, MetricStat,
@@ -509,6 +510,13 @@ async fn rebuild_utt_for_config(
 /// 降级策略:
 /// - `send_message` 本身失败（状态/隐私/存储）→ 记录 error，指标置零。
 /// - 流内 Error 事件 → 记录 error，reply 保留已收到的部分。
+///
+/// 残留清理（回归修复）:
+/// - probe 每题以 `session_id=None` 走 resolve_session 自动新建活跃 session，
+///   旧实现不关闭/删除 → 残留 session 被桌面端空闲检测误当真实对话关闭，
+///   触发 L1/风格统计/L2 学习，把模型自答的合成对话当成 persona 真实社交记录。
+/// - 本函数在题跑完（含发送失败与流内错误路径）后删除本次自动创建的测试
+///   session（含消息），不留任何残留、不进入生命周期、不触发学习。
 async fn run_single_question(
     app: &Arc<ramaria_app::App>,
     config: &RamariaConfig,
@@ -520,12 +528,19 @@ async fn run_single_question(
     let mut total_chars = 0usize;
     let mut error: Option<String> = None;
 
+    // 记录调用前的活跃 session：resolve_session 在 session_id=None 时把 lifecycle
+    // 活跃指针指向本次新建 session；顺序执行（无并发）下可用前后对比定位该 session。
+    let prev_active_session = app.get_active_session_id();
+
     let stream = match app
         .send_message_with_config(&item.question, Some(persona_uid), None, config)
         .await
     {
         Ok(s) => s,
         Err(e) => {
+            // 发送前失败：resolve_session 之后才创建 session，此处仍可能已创建，
+            // 统一按活跃指针变化清理本次新建的测试 session。
+            cleanup_probe_session(app, probe_created_session(app, prev_active_session)).await;
             return ProbeRunItem {
                 item_id: item.id.clone(),
                 dimension: item.dimension.clone(),
@@ -578,6 +593,11 @@ async fn run_single_question(
         "probe run 单题完成"
     );
 
+    // 流消费完毕（成功或流内错误）：删除本次自动创建的测试 session（含消息）。
+    // 注意必须在流结束后执行——stream_forward_task 保存消息完成后才关闭通道，
+    // 此时删除不会与后台保存产生竞态。
+    cleanup_probe_session(app, probe_created_session(app, prev_active_session)).await;
+
     let reply_chars = reply.chars().count();
     let reply = if total_chars > 0 {
         ramaria_core::text::truncate_chars_bare(&reply, total_chars)
@@ -595,6 +615,40 @@ async fn run_single_question(
             elapsed_ms: start.elapsed().as_millis(),
         },
         error,
+    }
+}
+
+/// 判断一次 `send_message` 是否为本次问题新建了测试 session。
+///
+/// resolve_session 在 `session_id=None` 时自动创建 session，并把 lifecycle 活跃
+/// 指针指向新 session。probe 顺序执行（单活跃假设），因此:
+/// - `prev_active=None` 且当前有活跃 → 该活跃即本次新建（可删）。
+/// - `prev_active` 存在但当前活跃 ≠ prev → 当前活跃为本次新建（可删）。
+/// - 其余（发送未到 resolve_session 阶段即失败等）→ 未新建 session，返回 None。
+fn probe_created_session(app: &Arc<ramaria_app::App>, prev_active: Option<Uuid>) -> Option<Uuid> {
+    let current = app.get_active_session_id();
+    match (prev_active, current) {
+        (None, Some(sid)) => Some(sid),
+        (Some(prev), Some(sid)) if sid != prev => Some(sid),
+        _ => None,
+    }
+}
+
+/// 删除探针测试 session（含消息）并清理 lifecycle 引用。
+///
+/// 说明:
+/// - 仅删除 probe 本次自动创建的合成测试 session，绝不触碰真实对话 session。
+/// - 删除失败记 warn 不中断批量（极端存储故障下的残余由负责人后续清理）。
+async fn cleanup_probe_session(app: &Arc<ramaria_app::App>, session_id: Option<Uuid>) {
+    let Some(session_id) = session_id else {
+        return;
+    };
+    if let Err(e) = app.delete_session_cascade(session_id).await {
+        tracing::warn!(
+            %session_id,
+            %e,
+            "probe run 清理测试 session 失败（该 session 可能残留）"
+        );
     }
 }
 

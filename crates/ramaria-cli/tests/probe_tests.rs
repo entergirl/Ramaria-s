@@ -23,7 +23,7 @@ use ramaria_cli::commands::probe::{
     ProbeCmd, build_dataset, build_experiment, build_experiment_with_repeat,
 };
 use ramaria_core::error::{RamariaError, RamariaResult};
-use ramaria_core::traits::{ChatRequest, LlmProvider, StorageBackend, StreamDelta};
+use ramaria_core::traits::{ChatRequest, LlmProvider, StorageBackend, StoreCrud, StreamDelta};
 use ramaria_core::types::{BackendConfig, LlmProvider as LlmProviderKind, ModelCapability};
 use uuid::Uuid;
 
@@ -440,6 +440,120 @@ async fn probe_run_limit_truncates_items() {
     for variant in &experiment.variants {
         assert_eq!(variant.runs.len(), 3, "每档位只跑 limit=3 题");
     }
+}
+
+/// 回归（残留 session 污染修复）：probe run 结束后不留任何残留 session。
+///
+/// 背景:
+/// - probe run 每题 `send_message(session_id=None)` → resolve_session 自动新建
+///   活跃 session；旧实现不清理，残留 session 被桌面端空闲检测误当真实对话关闭，
+///   触发 L1/风格统计/L2 学习，把模型自答的合成对话当成 persona 真实社交记录学习。
+/// - 修复后每题测试 session 用完即删（含消息），不进入生命周期、不触发学习。
+#[tokio::test]
+async fn probe_run_leaves_no_residual_sessions() {
+    let (app, storage) = build_test_app();
+    assert!(
+        storage
+            .list_sessions()
+            .await
+            .expect("读取 session 列表应成功")
+            .is_empty(),
+        "测试起点应无 session"
+    );
+
+    let ds = build_dataset(&app, None, 2, 7, None).await; // 3 维 × 2 题 = 6 题
+    let experiment = build_experiment(
+        &app,
+        &ds,
+        &PathBuf::from("dataset.json"),
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("档位实验应成功");
+    assert_eq!(experiment.variants.len(), 4);
+
+    let after = storage
+        .list_sessions()
+        .await
+        .expect("读取 session 列表应成功");
+    assert!(
+        after.is_empty(),
+        "probe run 不应留下残留活跃 session（当前残留 {} 个）",
+        after.len()
+    );
+    assert!(
+        app.get_active_session_id().is_none(),
+        "lifecycle 活跃指针应已清空，避免后续 save_and_close 引用已删除 session"
+    );
+}
+
+/// 回归（残留 session 污染修复）：`--repeat N` 统计法多次运行同样不留残留 session。
+#[tokio::test]
+async fn probe_run_repeat_leaves_no_residual_sessions() {
+    let (app, storage) = build_test_app();
+    let ds = build_dataset(&app, None, 2, 7, None).await; // 3 维 × 2 题 = 6 题
+    let experiment = build_experiment_with_repeat(
+        &app,
+        &ds,
+        &PathBuf::from("dataset.json"),
+        None,
+        None,
+        false,
+        2,
+        false,
+    )
+    .await
+    .expect("统计法实验应成功");
+    assert_eq!(experiment.variants.len(), 4);
+
+    let after = storage
+        .list_sessions()
+        .await
+        .expect("读取 session 列表应成功");
+    assert!(
+        after.is_empty(),
+        "repeat 统计法也不应留下残留活跃 session（当前残留 {} 个）",
+        after.len()
+    );
+    assert!(
+        app.get_active_session_id().is_none(),
+        "repeat 结束后 lifecycle 活跃指针应清空"
+    );
+}
+
+/// 回归（残留 session 污染修复）：单题全部失败路径也不留残留 session。
+#[tokio::test]
+async fn probe_run_all_failures_leave_no_residual_sessions() {
+    let (app, storage) = build_app_with_llm(Arc::new(FailingLlm::new()));
+    let ds = build_dataset(&app, None, 2, 7, None).await;
+    let experiment = build_experiment(
+        &app,
+        &ds,
+        &PathBuf::from("dataset.json"),
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("单题失败不应中断批量（返回 Ok）");
+
+    for variant in &experiment.variants {
+        assert_eq!(variant.failed_count, variant.runs.len());
+    }
+    let after = storage
+        .list_sessions()
+        .await
+        .expect("读取 session 列表应成功");
+    assert!(
+        after.is_empty(),
+        "发送/流错误路径也应清理自动创建的测试 session（当前残留 {} 个）",
+        after.len()
+    );
+    assert!(app.get_active_session_id().is_none());
 }
 
 /// 实验结果序列化为合法 JSON（probe run --json 信封的数据面）。

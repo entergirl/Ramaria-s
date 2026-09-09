@@ -115,6 +115,55 @@ pub async fn delete(pool: &SqlitePool, session_id: Uuid) -> RamariaResult<()> {
     Ok(())
 }
 
+/// 级联删除 session 及其全部关联数据（消息 / utt 块 / L1 / 反馈日志 / 示例）。
+///
+/// 职责:
+/// - 在单个 SQLite 事务内按外键依赖顺序删除，保证整体成功或整体回滚：
+///   1. utt_blocks（引用 messages 与 sessions）
+///   2. messages（引用 sessions；显式删除保证外键开关状态下均幂等）
+///   3. memory_l1（引用 sessions）
+///   4. persona_examples（引用 sessions）
+///   5. feedback_log（无外键，仅清理该 session 的审计残留）
+///   6. sessions 本体
+/// - 供 `StoreCrud::delete_session_cascade`（一次性合成会话清理）使用；
+///   普通会话删除仍走 [`delete`]，不触碰子表。
+pub async fn delete_cascade(pool: &SqlitePool, session_id: Uuid) -> RamariaResult<()> {
+    let sid = session_id.to_string();
+    let mut txn = pool.begin().await.storage_err("开启级联删除事务失败")?;
+    sqlx::query("DELETE FROM utt_blocks WHERE session_id = ?")
+        .bind(&sid)
+        .execute(&mut *txn)
+        .await
+        .storage_err("级联删除 utt_blocks 失败")?;
+    sqlx::query("DELETE FROM messages WHERE session_id = ?")
+        .bind(&sid)
+        .execute(&mut *txn)
+        .await
+        .storage_err("级联删除 messages 失败")?;
+    sqlx::query("DELETE FROM memory_l1 WHERE session_id = ?")
+        .bind(&sid)
+        .execute(&mut *txn)
+        .await
+        .storage_err("级联删除 memory_l1 失败")?;
+    sqlx::query("DELETE FROM persona_examples WHERE session_id = ?")
+        .bind(&sid)
+        .execute(&mut *txn)
+        .await
+        .storage_err("级联删除 persona_examples 失败")?;
+    sqlx::query("DELETE FROM feedback_log WHERE session_id = ?")
+        .bind(&sid)
+        .execute(&mut *txn)
+        .await
+        .storage_err("级联删除 feedback_log 失败")?;
+    sqlx::query("DELETE FROM sessions WHERE id = ?")
+        .bind(&sid)
+        .execute(&mut *txn)
+        .await
+        .storage_err("删除 session 失败")?;
+    txn.commit().await.storage_err("提交级联删除事务失败")?;
+    Ok(())
+}
+
 /// 创建一条历史 session（导入专用）。
 ///
 /// 职责:
@@ -170,5 +219,116 @@ impl SessionRow {
             ended_at: self.ended_at,
             persona_uid: self.persona_uid,
         })
+    }
+}
+
+// =========================================================
+// 单元测试
+// =========================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::init_test_pool;
+    use ramaria_core::types::{Message, MessageRole, MessageSource};
+
+    /// 插入 persona + session + 消息 + utt 块 fixture（验证级联删除的外键依赖顺序）。
+    ///
+    /// 返回 session_id。utt_blocks 同时引用 messages（start/end_msg_id）与 sessions，
+    /// 若不先删 utt_blocks 直接删 session 会被外键约束拒绝。
+    async fn setup_fixture(pool: &SqlitePool) -> Uuid {
+        sqlx::query(
+            "INSERT INTO personas (uid, name, kind, seq, source, created_at, updated_at) \
+             VALUES ('char-0001', '测试', 'char', 1, 'local', 0, 0)",
+        )
+        .execute(pool)
+        .await
+        .expect("插入 persona fixture 应成功");
+
+        let session = create(pool, Some("char-0001"))
+            .await
+            .expect("创建 session 成功");
+        let m1 = Message::new(
+            session.id,
+            MessageRole::User,
+            "问题一".to_string(),
+            MessageSource::Local,
+        );
+        let m2 = Message::new(
+            session.id,
+            MessageRole::Assistant,
+            "回复一".to_string(),
+            MessageSource::Online,
+        )
+        .with_persona_uid(Some("char-0001".to_string()));
+        crate::repo::messages::save_import(pool, &m1)
+            .await
+            .expect("插入消息 1 成功");
+        crate::repo::messages::save_import(pool, &m2)
+            .await
+            .expect("插入消息 2 成功");
+
+        sqlx::query(
+            "INSERT INTO utt_blocks \
+             (persona_uid, session_id, start_msg_id, end_msg_id, block_text, msg_count, \
+              time_span_ms, embedding, created_at) \
+             VALUES ('char-0001', ?, ?, ?, '测试话语块', 2, 1000, NULL, 0)",
+        )
+        .bind(session.id.to_string())
+        .bind(m1.id.to_string())
+        .bind(m2.id.to_string())
+        .execute(pool)
+        .await
+        .expect("插入 utt_blocks fixture 应成功");
+
+        session.id
+    }
+
+    /// 级联删除应移除 session 及其消息与 utt 块（utt 块引用顺序正确、无外键残留）。
+    #[tokio::test]
+    async fn delete_cascade_removes_session_and_dependents() {
+        let pool = init_test_pool().await.expect("测试库初始化成功");
+        let session_id = setup_fixture(&pool).await;
+
+        // 前置：session、2 条消息、1 个 utt 块均存在
+        assert!(get(&pool, session_id).await.unwrap().is_some());
+        assert_eq!(
+            crate::repo::messages::count_by_session(&pool, session_id)
+                .await
+                .unwrap(),
+            2
+        );
+
+        delete_cascade(&pool, session_id)
+            .await
+            .expect("级联删除成功");
+
+        assert!(
+            get(&pool, session_id).await.unwrap().is_none(),
+            "session 应已删除"
+        );
+        assert_eq!(
+            crate::repo::messages::count_by_session(&pool, session_id)
+                .await
+                .unwrap(),
+            0,
+            "session 消息应已级联删除"
+        );
+        let utt_count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM utt_blocks WHERE session_id = ?")
+                .bind(session_id.to_string())
+                .fetch_one(&pool)
+                .await
+                .expect("查询 utt_blocks 数量成功");
+        assert_eq!(utt_count.0, 0, "session 的 utt 块应已删除");
+    }
+
+    /// 删除不存在的 session 幂等成功（不报错）。
+    #[tokio::test]
+    async fn delete_cascade_missing_session_is_idempotent() {
+        let pool = init_test_pool().await.expect("测试库初始化成功");
+        delete_cascade(&pool, Uuid::new_v4())
+            .await
+            .expect("删除不存在的 session 应幂等成功");
     }
 }

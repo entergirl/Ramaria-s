@@ -339,6 +339,12 @@ pub(super) async fn run_evaluate(
     };
     let judge_used = judge.is_some();
 
+    // judge 请求间最小间隔（毫秒）：复用 [thresholds].cluster_delay_ms（语义
+    // "批量 LLM 请求间最小间隔"，默认 800；M8 服务本地 judge 时可调大至 ~1500）。
+    // 仅当 judge 可用时生效——纯事实维 evaluate（--no-tone-judge / 线上后端跳过）
+    // 不等待，避免无谓拖慢；delay=0 时 `llm_gate::inter_llm_delay` 内部直接跳过。
+    let judge_delay_ms = app.config().thresholds.cluster_delay_ms;
+
     tracing::info!(
         results = %results_path.display(),
         embedding_used,
@@ -375,6 +381,17 @@ pub(super) async fn run_evaluate(
                 _ => {}
             }
             items.push(item_eval);
+
+            // LLM-as-judge 请求间节流（本地 LM Studio / Ollama 需留间隔避免过载）：
+            // 在每次 judge 请求（evaluate_item 内部 tone 评分）完成后等待；
+            // judge 不可用（--no-tone-judge / 线上后端）时不等待。
+            if judge.is_some() {
+                ramaria_memory::llm_gate::inter_llm_delay(
+                    judge_delay_ms,
+                    "probe evaluate judge 请求间隔",
+                )
+                .await;
+            }
         }
 
         let fact_score = if fact_scores.is_empty() {
@@ -420,6 +437,7 @@ pub(super) async fn run_evaluate(
                             &embedder,
                             judge.as_deref(),
                             golden.as_ref(),
+                            judge_delay_ms,
                         )
                         .await
                     }
@@ -689,11 +707,17 @@ async fn evaluate_item(
 ///
 /// 返回按 fact → tone → emotion 排序的聚合记录；无任何有效轮时返回空。
 /// 单题失败跳过（该轮其余成功题仍计入），与主流程"单题失败不中断"一致。
+///
+/// 节流:
+/// - `judge_delay_ms` 为 judge 请求间最小间隔（毫秒）；judge 可用（`Some`）时
+///   在每次 `evaluate_item` 后等待该间隔，避免本地 judge 过载（同主流程口径）。
+/// - `judge` 为 `None`（纯事实维 evaluate）时不等待。
 pub(super) async fn aggregate_round_dimension_scores(
     rounds: &[ProbeVariantResult],
     embedder: &Option<Arc<dyn EmbeddingProvider>>,
     judge: Option<&dyn LlmProvider>,
     golden: Option<&std::collections::HashMap<String, String>>,
+    judge_delay_ms: u64,
 ) -> Vec<DimensionScoreAgg> {
     let mut fact_round_means: Vec<f64> = Vec::new();
     let mut tone_round_means: Vec<f64> = Vec::new();
@@ -705,6 +729,15 @@ pub(super) async fn aggregate_round_dimension_scores(
         let mut emotion_scores: Vec<f64> = Vec::new();
         for run in &round.runs {
             let item_eval = evaluate_item(run, embedder, judge, golden).await;
+            // LLM-as-judge 请求间节流（同主流程口径：judge 可用时每题后等待；
+            // judge 为 None 时不等待；delay=0 时 inter_llm_delay 内部跳过）。
+            if judge.is_some() {
+                ramaria_memory::llm_gate::inter_llm_delay(
+                    judge_delay_ms,
+                    "probe evaluate judge 请求间隔",
+                )
+                .await;
+            }
             if item_eval.error.is_some() {
                 continue;
             }

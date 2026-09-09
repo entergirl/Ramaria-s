@@ -927,7 +927,7 @@ fn fact_round(reply: &str) -> ProbeVariantResult {
 /// 空 rounds → 无聚合记录。
 #[tokio::test]
 async fn aggregate_round_scores_empty_returns_none() {
-    let agg = aggregate_round_dimension_scores(&[], &None, None, None).await;
+    let agg = aggregate_round_dimension_scores(&[], &None, None, None, 0).await;
     assert!(agg.is_empty());
 }
 
@@ -942,7 +942,7 @@ async fn aggregate_round_scores_pools_round_means() {
         fact_round(reference),
         fact_round(reference),
     ];
-    let agg = aggregate_round_dimension_scores(&rounds, &None, None, Some(&golden)).await;
+    let agg = aggregate_round_dimension_scores(&rounds, &None, None, Some(&golden), 0).await;
     assert_eq!(agg.len(), 1, "只有 fact 维聚合");
     assert_eq!(agg[0].dimension, "fact");
     assert_eq!(agg[0].n, 3, "有效轮数 = 3");
@@ -963,7 +963,7 @@ async fn aggregate_round_scores_captures_variation() {
         fact_round("不太记得了"),
         fact_round(reference),
     ];
-    let agg = aggregate_round_dimension_scores(&rounds, &None, None, Some(&golden)).await;
+    let agg = aggregate_round_dimension_scores(&rounds, &None, None, Some(&golden), 0).await;
     assert_eq!(agg[0].n, 3);
     assert!(
         agg[0].mean > 0.0 && agg[0].mean < 1.0,

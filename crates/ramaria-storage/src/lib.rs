@@ -59,6 +59,10 @@ impl StoreCrud for SqliteStorage {
     async fn delete_session(&self, session_id: Uuid) -> RamariaResult<()> {
         repo::sessions::delete(&self.pool, session_id).await
     }
+    /// 覆写为事务内按外键依赖顺序显式删除各关联表（消息/utt 块/L1/反馈/示例）。
+    async fn delete_session_cascade(&self, session_id: Uuid) -> RamariaResult<()> {
+        repo::sessions::delete_cascade(&self.pool, session_id).await
+    }
     async fn bind_session_persona_uid(
         &self,
         session_id: Uuid,

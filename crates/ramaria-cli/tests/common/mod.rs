@@ -32,8 +32,8 @@ use ramaria_core::traits::{
 };
 use ramaria_core::types::{
     BackendConfig, ClusterSnapshot, EventRelation, LlmProvider as LlmProviderKind, MemoryEvent,
-    MemoryL1, Message, ModelCapability, Persona, PersonaExample, PersonaFact, PersonalityTrait,
-    PrivacyConsent, ProfileField, Session, TraitEvidence, TraitStatus,
+    MemoryL1, Message, ModelCapability, Persona, PersonaExample, PersonaFact, PersonaStyleStats,
+    PersonalityTrait, PrivacyConsent, ProfileField, Session, TraitEvidence, TraitStatus,
 };
 use uuid::Uuid;
 
@@ -71,6 +71,8 @@ pub struct MockStorage {
     /// 知识事实（内存版版本链，CLI fact 契约测试）
     facts: Mutex<Vec<PersonaFact>>,
     fact_seq: AtomicI64,
+    /// 表达层风格统计（persona_style_stats，CLI style 命令测试）
+    style_stats: Mutex<HashMap<String, PersonaStyleStats>>,
 }
 
 impl MockStorage {
@@ -97,6 +99,7 @@ impl MockStorage {
             feedback_seq: AtomicI64::new(1),
             facts: Mutex::new(Vec::new()),
             fact_seq: AtomicI64::new(1),
+            style_stats: Mutex::new(HashMap::new()),
         }
     }
 
@@ -622,6 +625,22 @@ impl StoreCrud for MockStorage {
 
     async fn list_keywords(&self) -> RamariaResult<Vec<String>> {
         Ok(Vec::new())
+    }
+
+    // -- 表达层风格统计（persona_style_stats，CLI style 命令测试覆写默认实现） --
+
+    /// 按 persona 单行 upsert（内存 HashMap，persona_uid 主键语义）。
+    async fn upsert_style_stats(&self, stats: &PersonaStyleStats) -> RamariaResult<()> {
+        self.style_stats
+            .lock()
+            .unwrap()
+            .insert(stats.persona_uid.clone(), stats.clone());
+        Ok(())
+    }
+
+    /// 按 persona 查询风格统计（无记录返回 None）。
+    async fn get_style_stats(&self, persona_uid: &str) -> RamariaResult<Option<PersonaStyleStats>> {
+        Ok(self.style_stats.lock().unwrap().get(persona_uid).cloned())
     }
 }
 
