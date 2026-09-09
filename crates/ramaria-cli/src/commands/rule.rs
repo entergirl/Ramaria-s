@@ -1,8 +1,8 @@
 //! crates/ramaria-cli/src/commands/rule.rs - 行为规则管理命令
 //!
 //! 设计特点:
-//! - 子命令遵循 §2.9 动词词表：list/show/import/edit/enable/disable/delete/evidence
-//!   （`get` 仅 config 专用，规则详情用 `show`）
+//! - 子命令遵循 §2.9 动词词表：list/show/import/edit/enable/disable/delete/evidence/relearn
+//!   （`get` 仅 config 专用，规则详情用 `show`；relearn 触发 persona 全量行为学习）
 //! - 全部支持全局 `--json` 信封；stdout 只输出数据
 //! - delete 为破坏性操作：交互确认 / 非 TTY 或 `--yes` 自动通过（M1 B 项）
 //! - evidence 展示规则 → 事件 → 原文溯源链（只含结构化字段，原文不落日志）
@@ -54,6 +54,11 @@ pub enum RuleCmd {
     Delete { id: i64, force: bool },
     /// 展示规则证据链（规则 → 事件 → 原文摘要）
     Evidence { id: i64 },
+    /// 触发 persona 全量行为学习（基于全部事件重新聚类并生成/替换 Auto 规则）
+    Relearn {
+        /// 规则所属 persona
+        persona: Option<String>,
+    },
 }
 
 /// 默认规则所属 persona（与全局默认一致）。
@@ -89,6 +94,7 @@ pub async fn run(
         RuleCmd::Disable { id } => run_set_enabled(app, id, false, json).await,
         RuleCmd::Delete { id, force } => run_delete(app, id, force, json, yes).await,
         RuleCmd::Evidence { id } => run_evidence(app, id, json).await,
+        RuleCmd::Relearn { persona } => run_relearn(app, persona, json).await,
     }
 }
 
@@ -410,5 +416,52 @@ async fn run_evidence(app: &Arc<ramaria_app::App>, id: i64, json: bool) -> anyho
         }
     }
     crate::ui::separator();
+    Ok(())
+}
+
+// =========================================================
+// relearn
+// =========================================================
+
+/// 触发 persona 全量行为学习（事件 → 聚类 → 规则生成 → 替换旧 Auto 规则）。
+///
+/// 说明:
+/// - 无事件时返回空统计（不报错），用于手动补跑规则学习的幂等入口。
+/// - 调用 app 层 `behavior_learn`；行为层配置关闭时同样返回空统计。
+async fn run_relearn(
+    app: &Arc<ramaria_app::App>,
+    persona: Option<String>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let persona_uid = persona.unwrap_or_else(|| DEFAULT_RULE_PERSONA.to_string());
+    let outcome = ramaria_app::commands::behavior::behavior_learn(app, &persona_uid)
+        .await
+        .context("行为学习失败")?;
+
+    if json {
+        // BehaviorLearnOutcome 无 Serialize，按字段构造对象
+        let data = serde_json::json!({
+            "persona_uid": persona_uid,
+            "event_count": outcome.event_count,
+            "cluster_count": outcome.cluster_count,
+            "full_rule_count": outcome.full_rule_count,
+            "candidate_rule_count": outcome.candidate_rule_count,
+            "replaced_rule_count": outcome.replaced_rule_count,
+        });
+        return json::emit_ok(&data);
+    }
+
+    crate::ui::separator();
+    crate::ui::labeled("Persona", &persona_uid);
+    crate::ui::labeled("输入事件数", &outcome.event_count.to_string());
+    crate::ui::labeled("生成簇数", &outcome.cluster_count.to_string());
+    crate::ui::labeled("完整规则数", &outcome.full_rule_count.to_string());
+    crate::ui::labeled("候选规则数", &outcome.candidate_rule_count.to_string());
+    crate::ui::labeled(
+        "被替换旧 Auto 规则数",
+        &outcome.replaced_rule_count.to_string(),
+    );
+    crate::ui::separator();
+    crate::ui::success(&format!("人格 {persona_uid} 行为学习完成"));
     Ok(())
 }

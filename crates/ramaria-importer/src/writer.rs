@@ -48,6 +48,8 @@ impl ImportWriter {
     ///
     /// 去重:
     /// - 复用存储层指纹查重，指纹已在库中的消息跨文件去重跳过。
+    /// - 本批（write_l0 调用内）已见指纹集合去重：同一批次内指纹相同的消息
+    ///   （如同一通话记录被导出两次）跳过，避免撞 messages.import_fingerprint 全局 UNIQUE。
     /// - 只记计数与指纹尾段，不记消息内容/昵称/QQ 号。
     ///
     /// 参数:
@@ -81,6 +83,12 @@ impl ImportWriter {
         let mut other_msg_count = 0usize;
         // 跨文件去重统计：指纹已在库中被跳过的消息数（不记内容）
         let mut dedup_skipped = 0usize;
+        // 本批（write_l0 调用内、跨全部 session）已见的指纹集合：
+        // 数据库查重只覆盖"已提交历史"，同一批次内两条指纹相同的消息（如同一通话记录被
+        // 导出两次）若不在此拦截，会在 save_import_batch 撞 messages.import_fingerprint 的
+        // 全局 UNIQUE。此处与跨文件去重同语义，仅把去重范围扩到"本批已见"。
+        let mut seen_fingerprints: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         for session in sessions {
             // 过滤本 session 消息（按 side）：跳过侧消息不入库
@@ -90,6 +98,17 @@ impl ImportWriter {
                 match (side, is_self) {
                     (ImportSide::Me, false) | (ImportSide::Other, true) => continue,
                     _ => {}
+                }
+                // 本批已见指纹去重：重复 → 跳过（不记内容）
+                if !parsed.fingerprint.is_empty()
+                    && !seen_fingerprints.insert(parsed.fingerprint.clone())
+                {
+                    dedup_skipped += 1;
+                    tracing::debug!(
+                        fp_tail = %&parsed.fingerprint[parsed.fingerprint.len().saturating_sub(4)..],
+                        "消息在本批内指纹重复，跳过"
+                    );
+                    continue;
                 }
                 kept.push((is_self, parsed));
             }
@@ -471,6 +490,63 @@ mod tests {
         assert_eq!(sessions_written, 1, "session 仍会创建（去重只跳过消息）");
         assert_eq!(messages_written, 0, "同指纹消息应被跳过");
         // 库中仍只有预插的那一条
+        assert_eq!(msg_count(&pool).await, 1);
+    }
+
+    /// 同一 session 内两条指纹相同的消息（如同一通话记录被导出两次）→ 只写一条，
+    /// 不触发 messages.import_fingerprint 全局 UNIQUE（回归 T-V20-8-001 首次导入失败）。
+    #[tokio::test]
+    async fn write_l0_dedups_within_batch_same_fingerprint() {
+        let pool = test_pool().await;
+        let mut session = make_dedup_session("通话 - 通话时长 26:41", "fp-dup");
+        // 再压入一条指纹完全相同、content/时间相同的消息（QQChatExporter 重复导出形态）
+        session.messages.push(crate::traits::ParsedMessage {
+            role: "user".to_string(),
+            content: "通话 - 通话时长 26:41".to_string(),
+            created_at: 1100,
+            fingerprint: "fp-dup".to_string(),
+            sender_uid: "SELF_UID".to_string(),
+            sender_uin: Some("10001".to_string()),
+            sender_name: "我".to_string(),
+        });
+
+        let (sessions_written, messages_written, _) = ImportWriter::write_l0(
+            &pool,
+            &[session],
+            Some("user-0001"),
+            None,
+            "SELF_UID",
+            ImportSide::Me,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(sessions_written, 1, "session 正常创建");
+        assert_eq!(messages_written, 1, "同批重复指纹只写一条，不撞 UNIQUE");
+        assert_eq!(msg_count(&pool).await, 1);
+    }
+
+    /// 跨 session 重复指纹：第二个 session 仅含已在本批首见指纹的消息 →
+    /// 去重后 kept 为空 → 不创建空 session（与"全过滤 session 不创建"一致）。
+    #[tokio::test]
+    async fn write_l0_dedups_across_sessions_same_fingerprint() {
+        let pool = test_pool().await;
+        let s1 = make_dedup_session("我的发言", "fp-shared");
+        let s2 = make_dedup_session("我的发言", "fp-shared");
+
+        let (sessions_written, messages_written, _) = ImportWriter::write_l0(
+            &pool,
+            &[s1, s2],
+            Some("user-0001"),
+            None,
+            "SELF_UID",
+            ImportSide::Me,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(sessions_written, 1, "第二个全重复 session 不创建空 session");
+        assert_eq!(messages_written, 1, "首 session 写入一条，重复被跳过");
         assert_eq!(msg_count(&pool).await, 1);
     }
 

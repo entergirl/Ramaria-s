@@ -8,6 +8,7 @@
 //! - enable / disable: 状态切换 + disable 写 S1 反馈
 //! - delete: --yes 确认删除
 //! - evidence: 溯源链展示
+//! - relearn: 无事件 persona 触发全量学习返回空统计（不报错）
 //!
 //! 安全约束:
 //! - 全部使用 MockStorage + MockLlm，不触碰真实数据库/LLM。
@@ -302,4 +303,39 @@ async fn rule_evidence_missing_rule_errors() {
     let (app, _storage) = build_test_app();
     let cmd = RuleCmd::Evidence { id: 999 };
     assert!(run(&app, cmd, true, false).await.is_err(), "不存在应报错");
+}
+
+// =========================================================
+// relearn
+// =========================================================
+
+/// 无事件 persona 触发全量学习 → 返回空统计（event_count=0），不报错。
+///
+/// 覆盖 M8 前置入口：导入后手动生成规则时，空 persona 不得被当作错误。
+#[tokio::test]
+async fn rule_relearn_no_events_returns_empty_ok() {
+    let (app, storage) = build_test_app();
+    let cmd = RuleCmd::Relearn {
+        persona: Some("rama-0001".to_string()),
+    };
+    run(&app, cmd, true, false)
+        .await
+        .expect("relearn 在无事件时不应报错（返回空统计）");
+
+    // 无事件 → 未生成任何行为规则
+    let rules = storage
+        .list_behavior_rules_by_persona("rama-0001")
+        .await
+        .expect("查询行为规则成功");
+    assert!(rules.is_empty(), "无事件时不应生成行为规则");
+}
+
+/// 未指定 persona 时 relearn 回退默认 persona（rama-0001），无事件同样返回空统计。
+#[tokio::test]
+async fn rule_relearn_default_persona_empty_ok() {
+    let (app, _storage) = build_test_app();
+    let cmd = RuleCmd::Relearn { persona: None };
+    run(&app, cmd, true, false)
+        .await
+        .expect("默认 persona relearn 在无事件时不应报错");
 }

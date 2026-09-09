@@ -156,7 +156,7 @@ enum Commands {
     #[command(display_order = 42, subcommand)]
     Persona(PersonaCmd),
 
-    /// 行为规则管理（list / show / import / edit / enable / disable / delete / evidence）[管理]
+    /// 行为规则管理（list / show / import / edit / enable / disable / delete / evidence / relearn）[管理]
     #[command(display_order = 44, subcommand)]
     Rule(RuleCmd),
 
@@ -246,6 +246,12 @@ enum RuleCmd {
     Evidence {
         /// 规则 id
         id: i64,
+    },
+    /// 触发 persona 全量行为学习（基于全部事件重新聚类并生成/替换 Auto 规则）
+    Relearn {
+        /// 规则所属 persona（默认 rama-0001）
+        #[arg(long)]
+        persona: Option<String>,
     },
 }
 
@@ -1002,6 +1008,7 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
                 RuleCmd::Disable { id } => commands::rule::RuleCmd::Disable { id },
                 RuleCmd::Delete { id, force } => commands::rule::RuleCmd::Delete { id, force },
                 RuleCmd::Evidence { id } => commands::rule::RuleCmd::Evidence { id },
+                RuleCmd::Relearn { persona } => commands::rule::RuleCmd::Relearn { persona },
             };
             commands::rule::run(app, cmd, cli.json, cli.yes).await?;
         }
