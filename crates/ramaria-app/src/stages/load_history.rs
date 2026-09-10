@@ -7,6 +7,7 @@
 //! - 预加载近期 L1 摘要（跨 session 上下文注入），无条件注入 Block C1
 //! - 格式化 L1 摘要为可读文本行
 //! - 提取最后活跃时间字符串
+//! - 调用方预置上文（seed_history）前置拼接本 session 历史；预置为空时与既有行为一致
 //! - 空 session 不报错（新对话无历史消息为正常场景）
 
 use async_trait::async_trait;
@@ -23,6 +24,7 @@ use crate::pipeline::{PipelineContext, PipelineData, PipelineError, PipelineStag
 /// - 读取 PipelineData.session（由 Stage 3 设置），按 token 预算倒序分页加载消息
 /// - 每页 20 条，从最新消息倒序加载，直到达到消息上限或 token 预算（粗糙字符估算）
 /// - 将 Message 转换为 ChatMessage 格式供后续 TokenBudget / BuildRequest 使用
+/// - 调用方预置上文（PipelineData.seed_history）前置拼接在本 session 历史之前
 /// - 按 persona_uid 预加载近期 3 条 L1 摘要（跨 session 上下文）
 /// - 将 L1 摘要格式化为上下文文本行
 /// - 从最近 L1 提取最后活跃时间字符串
@@ -78,11 +80,15 @@ impl PipelineStage for StageLoadHistory {
     ///
     /// 参数:
     /// - `ctx`: 共享管线上下文（读取 storage）。
-    /// - `input`: 管线数据，读取 `session` 和 `persona_uid` 字段。
+    /// - `input`: 管线数据，读取 `session`、`persona_uid` 和 `seed_history` 字段。
     ///
     /// 返回:
-    /// - `Ok(data)`: 加载成功，`history_messages`、`recent_summaries`、`last_active_at` 已填充。
+    /// - `Ok(data)`: 加载成功，`history_messages`（调用方预置上文在前 + 本 session 历史）、
+    ///   `recent_summaries`、`last_active_at` 已填充。
     /// - `Err(Fatal)`: `session` 为 None（Stage 3 未执行或失败）。
+    ///
+    /// 说明:
+    /// - `seed_history` 为空（普通对话）时，合并结果与本 session 加载历史逐条一致。
     async fn execute(
         &self,
         ctx: &PipelineContext,
@@ -181,7 +187,12 @@ impl PipelineStage for StageLoadHistory {
             "历史消息已加载"
         );
 
-        input.history_messages = history_messages;
+        // 调用方预置上文（seed_history）前置拼接：seed 早于本 session 历史，
+        // 一次性会话（探针/评估）借此获得真实上文语境。seed 为空时结果与仅用
+        // DB 加载历史完全一致（普通对话行为等价）。
+        let mut merged = std::mem::take(&mut input.seed_history);
+        merged.extend(history_messages);
+        input.history_messages = merged;
 
         // ---- Step 4.5: 预加载近期 L1 摘要（跨 session 上下文注入） ----
         // 不依赖关键词匹配——近期摘要无条件注入 System Prompt Block C1。
@@ -432,6 +443,121 @@ mod tests {
         assert!(result.is_ok());
         let output = result.expect("empty session should succeed");
         assert!(output.history_messages.is_empty());
+    }
+
+    /// 新 session（DB 无消息）+ 预置上文非空 → `history_messages` 恰等于预置内容（顺序一致）。
+    #[tokio::test]
+    async fn seed_history_prepended_before_loaded() {
+        let storage = Arc::new(MockStorage::new());
+        let session_id = uuid::Uuid::new_v4();
+
+        let ctx = test_context(storage, Arc::new(MockLlm::local()), None);
+        let stage = StageLoadHistory::new();
+        let seed = vec![
+            ChatMessage {
+                role: MessageRole::User,
+                content: "昨晚在写 Rust".into(),
+            },
+            ChatMessage {
+                role: MessageRole::Assistant,
+                content: "写到哪一步了".into(),
+            },
+        ];
+        let data = make_data(Some(ramaria_core::types::Session {
+            id: session_id,
+            started_at: 1000,
+            ended_at: None,
+            persona_uid: None,
+        }))
+        .with_seed_history(seed.clone());
+
+        let output = stage.execute(&ctx, data).await.expect("应成功");
+
+        assert_eq!(output.history_messages.len(), seed.len());
+        for (got, expected) in output.history_messages.iter().zip(seed.iter()) {
+            assert_eq!(got.content, expected.content);
+            assert_eq!(got.role, expected.role);
+        }
+    }
+
+    /// 预置上文非空 + DB 有历史 → 预置在前、DB 历史在后（锁定"前置拼接"语义）。
+    #[tokio::test]
+    async fn seed_history_ordered_before_db_history() {
+        let storage = Arc::new(MockStorage::new());
+        let session_id = uuid::Uuid::new_v4();
+        storage.add_active_session(session_id);
+        storage.add_messages(
+            session_id,
+            vec![Message::new(
+                session_id,
+                MessageRole::User,
+                "本 session 的第一句".into(),
+                MessageSource::Local,
+            )],
+        );
+
+        let ctx = test_context(storage, Arc::new(MockLlm::local()), None);
+        let stage = StageLoadHistory::new();
+        let data = make_data(Some(ramaria_core::types::Session {
+            id: session_id,
+            started_at: 1000,
+            ended_at: None,
+            persona_uid: None,
+        }))
+        .with_seed_history(vec![ChatMessage {
+            role: MessageRole::User,
+            content: "更早的一句".into(),
+        }]);
+
+        let output = stage.execute(&ctx, data).await.expect("应成功");
+
+        let contents: Vec<&str> = output
+            .history_messages
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect();
+        assert_eq!(contents, vec!["更早的一句", "本 session 的第一句"]);
+    }
+
+    /// 预置上文为空 → `history_messages` 仍为 DB 加载的 session 历史，未被额外插入。
+    #[tokio::test]
+    async fn empty_seed_history_behaviour_unchanged() {
+        let storage = Arc::new(MockStorage::new());
+        let session_id = uuid::Uuid::new_v4();
+        storage.add_active_session(session_id);
+        storage.add_messages(
+            session_id,
+            vec![
+                Message::new(
+                    session_id,
+                    MessageRole::User,
+                    "你好".into(),
+                    MessageSource::Local,
+                ),
+                Message::new(
+                    session_id,
+                    MessageRole::Assistant,
+                    "你好！".into(),
+                    MessageSource::Online,
+                ),
+            ],
+        );
+
+        let ctx = test_context(storage, Arc::new(MockLlm::local()), None);
+        let stage = StageLoadHistory::new();
+        // 不调用 with_seed_history：seed_history 保持构造时的空 Vec
+        let data = make_data(Some(ramaria_core::types::Session {
+            id: session_id,
+            started_at: 1000,
+            ended_at: None,
+            persona_uid: None,
+        }));
+
+        let output = stage.execute(&ctx, data).await.expect("应成功");
+
+        assert_eq!(output.history_messages.len(), 2, "不应额外插入预置上文");
+        assert_eq!(output.history_messages[0].content, "你好");
+        assert_eq!(output.history_messages[1].content, "你好！");
     }
 
     #[tokio::test]

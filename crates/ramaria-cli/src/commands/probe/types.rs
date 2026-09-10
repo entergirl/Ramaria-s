@@ -342,6 +342,18 @@ pub struct ProbeDataset {
     pub items: Vec<DatasetItem>,
 }
 
+/// 数据集题项携带的上文对话轮次（时间正序，最后一条紧邻 question 之前）。
+///
+/// 说明:
+/// - `role` 为 "user"（我方/导出者一方）或 "assistant"（目标 persona 一方），
+///   与 `MessageRole` 对应；run 时转为 `ChatMessage` 预置到本轮历史。
+/// - 内容为库内原文（含导入时的 `[名字] ` 说话人前缀，与真实会话历史形态一致）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ContextTurn {
+    pub role: String,
+    pub content: String,
+}
+
 /// 单条测试问题。
 ///
 /// 字段约定:
@@ -351,6 +363,8 @@ pub struct ProbeDataset {
 ///   仅作人工/自动评分参考，不注入对话管线。
 /// - `source`: "db"（来自真实导入数据）或 "fixture"（内置夹具补齐）。
 /// - `source_ref`: 溯源标识（session 或事件），便于回查原始数据，不记录原文。
+/// - `context`: 该 question 之前紧邻的上文轮次（时间正序，不含 question 本身），
+///   run 时预置到本轮对话历史；无上文（夹具题 / 模板化问句）时为空。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DatasetItem {
     pub id: String,
@@ -359,6 +373,9 @@ pub struct DatasetItem {
     pub reference: Option<String>,
     pub source: String,
     pub source_ref: Option<String>,
+    /// 上文对话轮次（时间正序；旧数据集缺省为空 = 不加下文）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context: Vec<ContextTurn>,
 }
 
 /// 参数档位（代表配对：baseline 为 v3.1 初值，其余每次只动一个参数）。

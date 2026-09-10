@@ -15,11 +15,13 @@ use anyhow::Context;
 use futures::StreamExt;
 use ramaria_core::config::RamariaConfig;
 use ramaria_core::error::RamariaError;
+use ramaria_core::traits::ChatMessage;
+use ramaria_core::types::MessageRole;
 use ramaria_memory::utt::builder::UttBuilder;
 use uuid::Uuid;
 
 use super::types::{
-    AblationProfile, DATASET_SCHEMA_VERSION, DatasetItem, ItemRepeatStats, MetricStat,
+    AblationProfile, ContextTurn, DATASET_SCHEMA_VERSION, DatasetItem, ItemRepeatStats, MetricStat,
     ProbeDataset, ProbeExperiment, ProbeMetrics, ProbeRepeatMeta, ProbeRunItem, ProbeVariant,
     ProbeVariantResult, VariantParams, VariantRepeatStats,
 };
@@ -135,6 +137,18 @@ pub async fn build_experiment(
 
     // Step 3: 隐私确认（线上 provider 需确认；本地 LM Studio 直接通过）
     crate::privacy::ensure_privacy(app, yes).await?;
+
+    // Step 3.5: 检索器就绪保障。
+    //
+    // `App::new` 构造的是**空检索器**（见 `app.rs` 构造注释），必须显式
+    // `rebuild_retriever` 才会从存储装载 L1/L2 文档；档位实验此前只依赖
+    // `rebuild_utt_for_config` 内的重建调用，因此 `--no-rebuild-utt` 会连同
+    // 检索器装载一并跳过 —— RAG 记忆与知识通道静默失效，fact 维指标失真
+    // （表现为 B0/B1/F0 事实维趋同、回复答"没有相关记录"）。
+    // 此处无条件先装载一次，保证任何档位组合都在"检索器已就绪"前提下运行。
+    if let Err(e) = app.rebuild_retriever().await {
+        tracing::warn!(%e, "probe run 检索器装载失败，RAG 记忆可能缺失");
+    }
 
     // Step 4: 过滤档位（--variants；无效 id 记 warn 跳过）
     let variants = filter_variants(&dataset.variants, variants_filter);
@@ -505,11 +519,35 @@ async fn rebuild_utt_for_config(
     Ok(())
 }
 
+/// 把数据集题项的上文转为管线历史消息（role 字符串 → `MessageRole`）。
+///
+/// 说明:
+/// - `"user"` → `MessageRole::User`，其余（含 "assistant" 及未知取值）→ `MessageRole::Assistant`。
+/// - 保持输入顺序（时间正序）；内容原样透传（含库内 `[名字] ` 说话人前缀）。
+pub(super) fn seed_history_from_context(context: &[ContextTurn]) -> Vec<ChatMessage> {
+    context
+        .iter()
+        .map(|turn| ChatMessage {
+            role: if turn.role == "user" {
+                MessageRole::User
+            } else {
+                MessageRole::Assistant
+            },
+            content: turn.content.clone(),
+        })
+        .collect()
+}
+
 /// 跑单题对话并收集输出与指标。
 ///
 /// 降级策略:
 /// - `send_message` 本身失败（状态/隐私/存储）→ 记录 error，指标置零。
 /// - 流内 Error 事件 → 记录 error，reply 保留已收到的部分。
+///
+/// 语境补全:
+/// - 题项携带的 `context`（question 之前紧邻的上文）经 `seed_history_from_context`
+///   预置到本轮历史，使碎片化用户消息不再被孤立发给模型；预置内容不落库、
+///   不进生命周期、不触发学习（与既有探针 session 清理口径一致）。
 ///
 /// 残留清理（回归修复）:
 /// - probe 每题以 `session_id=None` 走 resolve_session 自动新建活跃 session，
@@ -528,12 +566,26 @@ async fn run_single_question(
     let mut total_chars = 0usize;
     let mut error: Option<String> = None;
 
+    // 预置上文（仅历史段，不落库）：隐私红线要求只记条数、不记内容
+    let seed_history = seed_history_from_context(&item.context);
+    tracing::debug!(
+        item_id = %item.id,
+        context_turns = seed_history.len(),
+        "probe run 单题预置上文"
+    );
+
     // 记录调用前的活跃 session：resolve_session 在 session_id=None 时把 lifecycle
     // 活跃指针指向本次新建 session；顺序执行（无并发）下可用前后对比定位该 session。
     let prev_active_session = app.get_active_session_id();
 
     let stream = match app
-        .send_message_with_config(&item.question, Some(persona_uid), None, config)
+        .send_message_with_history(
+            &item.question,
+            Some(persona_uid),
+            None,
+            config,
+            seed_history,
+        )
         .await
     {
         Ok(s) => s,

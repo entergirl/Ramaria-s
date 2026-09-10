@@ -475,6 +475,21 @@ fn pipeline_data_new_sets_input_fields() {
 }
 
 #[test]
+fn pipeline_data_seed_history_defaults_empty_and_settable() {
+    // 默认无预置上文（普通对话行为等价）
+    let data = PipelineData::new("test".to_string(), None, None, Uuid::new_v4());
+    assert!(data.seed_history.is_empty());
+
+    let data = data.with_seed_history(vec![ChatMessage {
+        role: MessageRole::User,
+        content: "预置上文".into(),
+    }]);
+    assert_eq!(data.seed_history.len(), 1);
+    assert_eq!(data.seed_history[0].content, "预置上文");
+    assert_eq!(data.seed_history[0].role, MessageRole::User);
+}
+
+#[test]
 fn pipeline_data_new_defaults_stage_outputs() {
     let data = PipelineData::new("test".to_string(), None, None, Uuid::new_v4());
     // Stage 1-3 产出应为 None

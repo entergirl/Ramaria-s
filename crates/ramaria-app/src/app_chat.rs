@@ -17,7 +17,7 @@ use std::sync::Arc;
 use futures::Stream;
 use futures::channel::mpsc;
 use ramaria_core::error::RamariaResult;
-use ramaria_core::traits::{ChatRequest, StorageBackend};
+use ramaria_core::traits::{ChatMessage, ChatRequest, StorageBackend};
 use ramaria_core::types::{Message, MessageRole, MessageSource, ProfileField, new_id, now_ms};
 use ramaria_memory::SHARED_CHAT_STYLE_RULES;
 use ramaria_memory::parse_persona_toml;
@@ -84,6 +84,52 @@ impl App {
         session_id: Option<Uuid>,
         config: &ramaria_core::config::RamariaConfig,
     ) -> RamariaResult<crate::app::SendMessageStream> {
+        // 普通对话路径：无预置上文，委托共用实现
+        self.send_message_inner(user_input, persona_uid, session_id, config, Vec::new())
+            .await
+    }
+
+    /// 同 `send_message_with_config`，但额外预置一段上文历史（时间正序）。
+    ///
+    /// 说明:
+    /// - `seed_history` 不落库、不参与本 session 的消息持久化，仅进入本轮 prompt 的历史段
+    ///   （与 DB 加载的 session 历史拼接，seed 在前）。
+    /// - 传空 Vec 时与 `send_message_with_config` 完全等价。
+    ///
+    /// 参数:
+    /// - 前四个参数同 `send_message_with_config`。
+    /// - `seed_history`: 调用方预置的上文（时间正序，早于本 session 历史）。
+    ///
+    /// 返回:
+    /// - 与 `send_message_with_config` 相同的 `SendMessageStream`。
+    pub async fn send_message_with_history(
+        &self,
+        user_input: &str,
+        persona_uid: Option<&str>,
+        session_id: Option<Uuid>,
+        config: &ramaria_core::config::RamariaConfig,
+        seed_history: Vec<ChatMessage>,
+    ) -> RamariaResult<crate::app::SendMessageStream> {
+        self.send_message_inner(user_input, persona_uid, session_id, config, seed_history)
+            .await
+    }
+
+    /// `send_message_with_config` / `send_message_with_history` 共用的管线实现。
+    ///
+    /// 参数:
+    /// - 前四个参数同 `send_message_with_config`。
+    /// - `seed_history`: 调用方预置的上文（时间正序）；空 Vec 即普通对话路径。
+    ///
+    /// 返回:
+    /// - 与 `send_message_with_config` 相同的 `SendMessageStream`。
+    async fn send_message_inner(
+        &self,
+        user_input: &str,
+        persona_uid: Option<&str>,
+        session_id: Option<Uuid>,
+        config: &ramaria_core::config::RamariaConfig,
+        seed_history: Vec<ChatMessage>,
+    ) -> RamariaResult<crate::app::SendMessageStream> {
         let request_id = new_id();
 
         // ---- 构建 PipelineContext + PipelineData（按传入配置执行） ----
@@ -94,7 +140,8 @@ impl App {
             session_id,
             request_id,
         )
-        .with_app_state(self.current_state());
+        .with_app_state(self.current_state())
+        .with_seed_history(seed_history);
 
         // ---- Steps 1-5: 委托 Pipeline 编排器 ----
         let pipeline = SendMessagePipeline::new(vec![

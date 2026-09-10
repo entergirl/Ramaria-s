@@ -4,6 +4,8 @@
 //! - `probe build` 数据集构建：来源优先级为数据源文件 > 数据库 > 内置夹具兜底（静默降级）。
 //! - tone / emotion / fact 三维候选收集与确定性抽样（seed 固定可复跑），不足部分用夹具补齐。
 //! - emotion 候选按用户消息情感线索（负面/正面触发词）筛选情境，复用语气模仿的配对机制。
+//! - tone / emotion 题项携带 question 之前紧邻的上文（容量上限 `CONTEXT_TURNS`），
+//!   供 run 时预置到本轮历史，避免碎片化用户消息被孤立发给模型而丢失社交语境。
 //! - 内置夹具在无真实数据或构建失败时兜底，仅含问题与参考文本，不包含对话原文。
 //! - 确定性伪随机（`DeterministicRng`）与时间戳（`now_iso8601`）复用根模块定义。
 
@@ -12,12 +14,19 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use ramaria_core::error::RamariaError;
-use ramaria_core::types::{MessageRole, PersonaKind};
+use ramaria_core::types::{Message, MessageRole, PersonaKind};
 
 use super::types::{
-    DATASET_SCHEMA_VERSION, DEFAULT_PERSONA, DatasetItem, ProbeDataset, ProbeVariant,
+    ContextTurn, DATASET_SCHEMA_VERSION, DEFAULT_PERSONA, DatasetItem, ProbeDataset, ProbeVariant,
 };
 use super::{DeterministicRng, now_iso8601};
+
+// =========================================================
+// 常量
+// =========================================================
+
+/// 题项携带的上文轮数（取 question 之前紧邻的最近 N 条消息，时间正序）。
+const CONTEXT_TURNS: usize = 6;
 
 // =========================================================
 // 默认档位（代表配对，各参数 2 档）
@@ -202,20 +211,28 @@ async fn build_from_db(
     let fixture_fact = fixture_fact_events();
     let fixture_emotion = fixture_emotion_pairs();
 
-    let (tone_items, tone_real) = sample_with_fallback(&tone_pairs, &fixture_tone, qpd, seed);
+    let (tone_items, tone_real) = sample_with_fallback(
+        &tone_pairs,
+        &fixture_tone
+            .into_iter()
+            .map(|(q, r)| (q, r, Vec::new()))
+            .collect::<Vec<_>>(),
+        qpd,
+        seed,
+    );
     let (fact_cands, fact_real) = sample_with_fallback(&fact_items, &fixture_fact, qpd, seed);
     let (emotion_cands, emotion_real) = sample_with_fallback(
         &emotion_cands,
         &fixture_emotion
             .into_iter()
-            .map(|(q, r)| (q, r, None))
+            .map(|(q, r)| (q, r, None, Vec::new()))
             .collect::<Vec<_>>(),
         qpd,
         seed,
     );
 
     let mut items = Vec::with_capacity(qpd * 3);
-    for (idx, (question, reference)) in tone_items.into_iter().enumerate() {
+    for (idx, (question, reference, context)) in tone_items.into_iter().enumerate() {
         let is_real = idx < tone_real;
         items.push(DatasetItem {
             id: format!("tone-{:04}", idx + 1),
@@ -224,6 +241,7 @@ async fn build_from_db(
             reference: Some(reference),
             source: if is_real { "db" } else { "fixture" }.to_string(),
             source_ref: None,
+            context,
         });
     }
     for (idx, (question, reference, event_title)) in fact_cands.into_iter().enumerate() {
@@ -235,9 +253,11 @@ async fn build_from_db(
             reference: Some(reference),
             source: if is_real { "db" } else { "fixture" }.to_string(),
             source_ref: Some(event_title),
+            // 事实维为模板化问句，不依赖即时上文
+            context: Vec::new(),
         });
     }
-    for (idx, (question, reference, src_ref)) in emotion_cands.into_iter().enumerate() {
+    for (idx, (question, reference, src_ref, context)) in emotion_cands.into_iter().enumerate() {
         let is_real = idx < emotion_real;
         items.push(DatasetItem {
             id: format!("emotion-{:04}", idx + 1),
@@ -246,6 +266,7 @@ async fn build_from_db(
             reference: Some(reference),
             source: if is_real { "db" } else { "fixture" }.to_string(),
             source_ref: src_ref,
+            context,
         });
     }
 
@@ -279,10 +300,18 @@ async fn build_from_db(
 /// ```json
 /// {
 ///   "persona_uid": "char-0001",
-///   "messages": [{"question": "...", "reply": "...", "source_ref": "..."}],
+///   "messages": [{
+///     "question": "...",
+///     "reply": "...",
+///     "source_ref": "...",
+///     "context": [{"role": "user", "content": "..."}]
+///   }],
 ///   "events":   [{"title": "...", "summary": "..."}]
 /// }
 /// ```
+///
+/// 说明: `messages[].context` 为该 question 之前紧邻的上文（时间正序），
+/// 可选；缺省为空即不加下文。
 pub async fn build_from_file(
     path: &Path,
     persona_uid: &str,
@@ -306,15 +335,22 @@ pub async fn build_from_file(
 
     // tone（全部 messages）与 emotion（仅含情感线索的 messages）同源筛选；
     // messages 需要非空 question 才能配对。
-    let tone_pairs: Vec<(String, String, Option<String>)> = raw
+    let tone_pairs: Vec<(String, String, Option<String>, Vec<ContextTurn>)> = raw
         .messages
         .iter()
         .filter(|m| !m.question.trim().is_empty())
-        .map(|m| (m.question.clone(), m.reply.clone(), m.source_ref.clone()))
+        .map(|m| {
+            (
+                m.question.clone(),
+                m.reply.clone(),
+                m.source_ref.clone(),
+                m.context.clone(),
+            )
+        })
         .collect();
-    let emotion_pairs: Vec<(String, String, Option<String>)> = tone_pairs
+    let emotion_pairs: Vec<(String, String, Option<String>, Vec<ContextTurn>)> = tone_pairs
         .iter()
-        .filter(|(q, _, _)| has_emotion_cue(q))
+        .filter(|(q, _, _, _)| has_emotion_cue(q))
         .cloned()
         .collect();
     let fact_cands: Vec<(String, String, String)> = raw
@@ -334,7 +370,7 @@ pub async fn build_from_file(
         &tone_pairs,
         &fixture_tone_pairs()
             .into_iter()
-            .map(|(q, r)| (q, r, None))
+            .map(|(q, r)| (q, r, None, Vec::new()))
             .collect::<Vec<_>>(),
         qpd,
         seed,
@@ -345,14 +381,14 @@ pub async fn build_from_file(
         &emotion_pairs,
         &fixture_emotion_pairs()
             .into_iter()
-            .map(|(q, r)| (q, r, None))
+            .map(|(q, r)| (q, r, None, Vec::new()))
             .collect::<Vec<_>>(),
         qpd,
         seed,
     );
 
     let mut items = Vec::with_capacity(qpd * 3);
-    for (idx, (question, reference, src_ref)) in tone_items.into_iter().enumerate() {
+    for (idx, (question, reference, src_ref, context)) in tone_items.into_iter().enumerate() {
         items.push(DatasetItem {
             id: format!("tone-{:04}", idx + 1),
             dimension: "tone".to_string(),
@@ -360,6 +396,7 @@ pub async fn build_from_file(
             reference: Some(reference),
             source: if idx < tone_real { "file" } else { "fixture" }.to_string(),
             source_ref: src_ref,
+            context,
         });
     }
     for (idx, (question, reference, title)) in fact_cands.into_iter().enumerate() {
@@ -370,9 +407,11 @@ pub async fn build_from_file(
             reference: Some(reference),
             source: if idx < fact_real { "file" } else { "fixture" }.to_string(),
             source_ref: Some(title),
+            // 事实维为模板化问句，不依赖即时上文
+            context: Vec::new(),
         });
     }
-    for (idx, (question, reference, src_ref)) in emotion_cands.into_iter().enumerate() {
+    for (idx, (question, reference, src_ref, context)) in emotion_cands.into_iter().enumerate() {
         items.push(DatasetItem {
             id: format!("emotion-{:04}", idx + 1),
             dimension: "emotion".to_string(),
@@ -385,6 +424,7 @@ pub async fn build_from_file(
             }
             .to_string(),
             source_ref: src_ref,
+            context,
         });
     }
 
@@ -420,6 +460,8 @@ pub fn build_from_fixture(persona_uid: &str, qpd: usize, seed: u64) -> ProbeData
             reference: Some(reference),
             source: "fixture".to_string(),
             source_ref: None,
+            // 夹具题无语境依赖，不带上文
+            context: Vec::new(),
         });
     }
     for (idx, (question, reference, title)) in fact_cands.into_iter().enumerate() {
@@ -430,6 +472,7 @@ pub fn build_from_fixture(persona_uid: &str, qpd: usize, seed: u64) -> ProbeData
             reference: Some(reference),
             source: "fixture".to_string(),
             source_ref: Some(title),
+            context: Vec::new(),
         });
     }
     for (idx, (question, reference)) in emotion_cands.into_iter().enumerate() {
@@ -440,6 +483,7 @@ pub fn build_from_fixture(persona_uid: &str, qpd: usize, seed: u64) -> ProbeData
             reference: Some(reference),
             source: "fixture".to_string(),
             source_ref: None,
+            context: Vec::new(),
         });
     }
 
@@ -514,12 +558,17 @@ pub fn select_target_persona(
 
 /// 收集语气模仿维度候选：persona 发言与其同会话前一条 user 消息配对。
 ///
-/// 返回 `(question, reference)` 列表（question = 用户消息，reference = persona 原回复）。
+/// 返回 `(question, reference, context)` 列表：
+/// - `question` = 用户消息；
+/// - `reference` = persona 原回复；
+/// - `context` = 该 question 之前紧邻的上文（时间正序，最多 `CONTEXT_TURNS` 条，
+///   不含 question 本身），供 run 时预置到本轮对话历史以恢复社交语境。
+///
 /// 查询失败按会话跳过（记 warn），不中断整体构建。
 async fn collect_tone_pairs(
     app: &Arc<ramaria_app::App>,
     persona_uid: &str,
-) -> Vec<(String, String)> {
+) -> Vec<(String, String, Vec<ContextTurn>)> {
     let sessions = match app.storage().list_sessions().await {
         Ok(s) => s,
         Err(e) => {
@@ -537,32 +586,78 @@ async fn collect_tone_pairs(
                 continue;
             }
         };
-        let mut last_user: Option<String> = None;
-        for m in &messages {
-            match m.role {
-                MessageRole::User => {
-                    last_user = Some(m.content.clone());
-                }
-                _ => {
-                    // 目标 persona 的发言：与其前一条 user 消息配对
-                    if m.persona_uid.as_deref() == Some(persona_uid)
-                        && let Some(q) = last_user.take()
-                    {
-                        pairs.push((q, m.content.clone()));
-                    }
-                }
+        pairs.extend(tone_pairs_from_messages(&messages, persona_uid));
+    }
+    pairs
+}
+
+/// 从单个会话的消息流提取"user 消息 → 目标 persona 回复"配对及其上文（纯函数）。
+///
+/// 配对语义（与既有口径一致）:
+/// - `user` 消息记为待配对 question；遇到 `persona_uid` 等于目标 persona 的
+///   非 user 消息即配对，并消费该 question（下一条 user 消息到来前不重复配对）。
+///
+/// 上文语义:
+/// - 取该 question 之前紧邻的窗口内容（时间正序，容量上限 `CONTEXT_TURNS`，
+///   超限弹出最早一条），不含 question 本身、也不含本轮 persona 回复。
+/// - 已消费的 question 与其 persona 回复继续计入窗口，供后续题项复用，
+///   与真实会话历史形态一致。
+/// - 角色映射: `User` → "user"，`Assistant` → "assistant"；`System`/`Tool` 等
+///   非对话角色既不参与配对也不进窗口。
+/// - 内容为库内原文（不剥离 `[名字] ` 说话人前缀）。
+pub(super) fn tone_pairs_from_messages(
+    messages: &[Message],
+    persona_uid: &str,
+) -> Vec<(String, String, Vec<ContextTurn>)> {
+    let mut pairs = Vec::new();
+    // 已见过的消息窗口（时间正序，容量上限 CONTEXT_TURNS）
+    let mut window: Vec<ContextTurn> = Vec::new();
+    // 当前待配对 question 之前紧邻的窗口快照（配对时作为该题项的上文）
+    let mut pending_context: Vec<ContextTurn> = Vec::new();
+    let mut last_user: Option<String> = None;
+
+    for m in messages {
+        match m.role {
+            MessageRole::User => {
+                last_user = Some(m.content.clone());
+                // 先取快照再入窗口：上文不含 question 本身
+                pending_context = window.clone();
+                push_context_turn(&mut window, "user", &m.content);
             }
+            MessageRole::Assistant => {
+                if m.persona_uid.as_deref() == Some(persona_uid)
+                    && let Some(question) = last_user.take()
+                {
+                    pairs.push((question, m.content.clone(), pending_context.clone()));
+                }
+                push_context_turn(&mut window, "assistant", &m.content);
+            }
+            // System / Tool 及未来扩展角色：既不作配对回复，也不进上文窗口
+            // （避免把系统提示等非对话内容当作历史对话轮次喂给模型）。
+            _ => {}
         }
     }
     pairs
 }
 
+/// 把一条消息计入上文窗口（超出 `CONTEXT_TURNS` 时弹出最早一条）。
+fn push_context_turn(window: &mut Vec<ContextTurn>, role: &str, content: &str) {
+    if window.len() >= CONTEXT_TURNS {
+        window.remove(0);
+    }
+    window.push(ContextTurn {
+        role: role.to_string(),
+        content: content.to_string(),
+    });
+}
+
 /// 收集情感表达维度候选：用户消息含情感线索 → persona 原回复配对。
 ///
-/// 返回 `(question, reference, source_ref)`：
+/// 返回 `(question, reference, source_ref, context)`：
 /// - `question` = 情绪化用户消息（情感线索命中）；
 /// - `reference` = persona 原回复（golden 参考，供人工/judge 校准）；
-/// - `source_ref` = 溯源标识（当前 None，保留扩展位）。
+/// - `source_ref` = 溯源标识（当前 None，保留扩展位）；
+/// - `context` = 该 question 之前紧邻的上文（同语气模仿维度口径）。
 ///
 /// 数据来源: 复用语气模仿的"user → persona 回复"配对机制（`collect_tone_pairs`），
 /// 再按用户消息的情感关键词（难过/生气/担心/开心等）筛出情绪化情境——
@@ -571,12 +666,12 @@ async fn collect_tone_pairs(
 async fn collect_emotion_pairs(
     app: &Arc<ramaria_app::App>,
     persona_uid: &str,
-) -> Vec<(String, String, Option<String>)> {
+) -> Vec<(String, String, Option<String>, Vec<ContextTurn>)> {
     let pairs = collect_tone_pairs(app, persona_uid).await;
     pairs
         .into_iter()
-        .filter(|(q, _)| has_emotion_cue(q))
-        .map(|(q, r)| (q, r, None))
+        .filter(|(q, _, _)| has_emotion_cue(q))
+        .map(|(q, r, context)| (q, r, None, context))
         .collect()
 }
 
@@ -775,6 +870,9 @@ struct SourceMessage {
     reply: String,
     #[serde(default)]
     source_ref: Option<String>,
+    /// 该 question 之前紧邻的上文（时间正序，可选）。
+    #[serde(default)]
+    context: Vec<ContextTurn>,
 }
 
 #[derive(Debug, serde::Deserialize)]

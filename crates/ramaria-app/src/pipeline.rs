@@ -290,7 +290,7 @@ impl PipelineContext {
 /// - 最终包含 LLM 流和输出流，供 send_message 返回
 ///
 /// 字段分组:
-/// - 输入参数: `user_input`, `persona_uid`, `session_id`, `request_id`
+/// - 输入参数: `user_input`, `persona_uid`, `session_id`, `request_id`, `seed_history`
 /// - Stage 1 (CheckState): `app_state`
 /// - Stage 2 (CheckPrivacy): `backend_config`
 /// - Stage 3 (ResolveSession): `session`
@@ -316,6 +316,11 @@ pub struct PipelineData {
     pub session_id: Option<Uuid>,
     /// 本次请求唯一标识
     pub request_id: Uuid,
+    /// 调用方预置的上文历史（时间正序，早于本 session 历史）。
+    ///
+    /// 用途: 探针/评估等"一次性会话"需要真实上文语境时，由调用方预置若干轮
+    /// 对话（不落库、不触发学习）；普通对话保持空（行为等价）。
+    pub seed_history: Vec<ChatMessage>,
 
     // === Stage 1: CheckState ===
     /// 应用当前状态（Ready / Degraded / FatalError 等）
@@ -406,6 +411,7 @@ impl PipelineData {
             persona_uid,
             session_id,
             request_id,
+            seed_history: Vec::new(),
             app_state: None,
             backend_config: None,
             session: None,
@@ -442,6 +448,22 @@ impl PipelineData {
     /// - 设置了 `app_state` 字段的 `PipelineData`（链式调用）。
     pub fn with_app_state(mut self, state: AppState) -> Self {
         self.app_state = Some(state);
+        self
+    }
+
+    /// 设置调用方预置的上文历史（时间正序）。
+    ///
+    /// 参数:
+    /// - `seed`: 预置的上文消息（早于本 session 历史），由 Stage 4 (LoadHistory)
+    ///   前置拼接到 DB 加载的 session 历史之前。
+    ///
+    /// 返回:
+    /// - 设置了 `seed_history` 字段的 `PipelineData`（链式调用）。
+    ///
+    /// 说明:
+    /// - 传空 `Vec` 与不调用本方法等价（`history_messages` 仅含 session 历史）。
+    pub fn with_seed_history(mut self, seed: Vec<ChatMessage>) -> Self {
+        self.seed_history = seed;
         self
     }
 }

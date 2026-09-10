@@ -210,29 +210,54 @@ pub(super) struct EmotionItemScore {
 }
 
 /// 语气维 judge 的 rubric 常量（1~5 档语义锚定）。
+///
+/// 长度中性约束（M8 tone judge 复核）:
+/// - 高情感社交语料的 persona 原回复普遍很短（实测均值约 15 字），而旧 rubric 与示例锚点
+///   均为多句书面回复，使 judge 形成"回复越长分越高"的长度偏置：实测各档位内
+///   Pearson(reply_len, tone) ≈ 0.58~0.78，且 |reply_len - ref_len| 与得分**正**相关
+///   （0.53）——即回复越偏离参考长度反而分越高，惩罚与参考同样简短的回复。
+/// - 该偏置会把"表达层把回复压到 persona 真实短句长度"误判为语气变差，故在 rubric 中
+///   显式加入长度中性指令。
 const TONE_RUBRIC: &str = "\
-请按 1~5 分评估「候选回复」在语气、风格上与「参考回复」的相似程度：
-1 分：语气/风格完全不像参考（生硬、机器人腔、明显偏离角色）；
+请按 1~5 分评估「候选回复」在语气、风格上与「参考回复」的相似程度（只比语气风格，不比内容多少、不比长短）：
+1 分：语气/风格完全不像参考（生硬、机器人口吻、书面助手腔）；
 2 分：略有相似但有明显偏差；
 3 分：基本相似，偶有偏差；
 4 分：语气/风格较贴近参考，偏差少；
 5 分：语气/风格高度贴近参考，几乎难辨。
+重要：不要按回复长短判分。日常社交聊天里回复常常很短，参考回复很短时，
+同样简短的候选回复完全可能是 5 分；写得冗长、像在解释或总结的回复反而应扣分。
 只输出一个整数分数（1~5），不要输出任何其他文字。";
 
 /// 语气维 judge 的示例锚定（few-shot，帮助 judge 稳定判分）。
+///
+/// 示例取自"短句社交聊天"分布（与高情感语料同域）：参考与候选长度相当，分数的差异
+/// 只由语气风格决定；避免示例本身把"长=好"当作锚点（旧示例的参考均为 30~45 字书面
+/// 回复、候选短的给 1~2 分，是长度偏置的来源之一）。
 const TONE_ANCHOR_EXAMPLES: &str = "\
-【示例 1】
-参考回复：别太往心里去，领导批评方案不代表否定你这个人。把意见一条条记下来，改完这版肯定能行。
-候选回复：不要太难过，领导不是否定你。把建议记录下来，改好就行。
-分数：4
-【示例 2】
-参考回复：周末我一般不安排太满。你想去哪里？公园散步或者找家安静的咖啡馆都行。
-候选回复：周末有空，你说去哪。
-分数：2
-【示例 3】
-参考回复：先观察一下是不是吃太快或者毛球。如果持续吐或者精神不好，尽快带去看医生比较稳妥。
-候选回复：赶紧去医院，别等了。
-分数：1";
+【示例 1】（参考很短、候选同样简短且风格一致 → 高分）
+参考回复：对啊对啊
+候选回复：对对对
+分数：5
+【示例 2】（候选写成书面助手腔、比参考啰嗦很多 → 低分）
+参考回复：我找一下
+候选回复：好的，我这就去数据库里帮您查询相关记录，还请您稍等片刻。
+分数：1
+【示例 3】（候选长度接近但语气仍有偏差 → 中间分）
+参考回复：哦哦
+候选回复：原来是这样啊，我明白了。
+分数：3
+【示例 4】（候选与参考长度不同但语气风格贴近 → 高分）
+参考回复：快九点吧
+候选回复：九点左右到
+分数：4";
+
+/// 语气维 judge 的 system prompt（rubric + few-shot 示例）。
+///
+/// 说明: 统一出口便于单测锁定"长度中性"口径不回退。
+pub(super) fn tone_judge_system_prompt() -> String {
+    format!("{TONE_RUBRIC}\n\n{TONE_ANCHOR_EXAMPLES}")
+}
 
 /// 事实维综合分权重（cosine 0.6 / keyword 0.4）。
 const FACT_COSINE_WEIGHT: f64 = 0.6;
@@ -954,7 +979,7 @@ async fn score_tone_item(
     reference: &str,
 ) -> anyhow::Result<ToneItemScore> {
     let request = ChatRequest {
-        system_prompt: format!("{TONE_RUBRIC}\n\n{TONE_ANCHOR_EXAMPLES}"),
+        system_prompt: tone_judge_system_prompt(),
         memory_context: None,
         history: vec![],
         user_message: format!(
@@ -965,7 +990,8 @@ async fn score_tone_item(
         temperature: 0.0,
         max_tokens: 16,
         request_id: Uuid::new_v4(),
-        template_version: "probe-judge-v1".to_string(),
+        // 模板版本参与 LLM 响应缓存键：口径修订即 bump，避免复用旧偏置评分缓存。
+        template_version: "probe-judge-v2".to_string(),
     };
 
     let raw = judge.chat(&request).await.map_err(|e| {

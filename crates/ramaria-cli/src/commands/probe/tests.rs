@@ -8,22 +8,25 @@
 //! - 覆盖缺失/非法输入文件统一归为业务校验失败（RamariaError::Validation）。
 
 use super::*;
-use ramaria_core::types::PersonaKind;
 
 // 以下为子模块中仅测试使用的内部函数/类型与统一错误类型，
 // 迁移后在此显式引入（根文件仅保留运行时 `use`，非测试编译零多余引用）。
+use super::dataset::tone_pairs_from_messages;
 use super::evaluate::{
     FactItemScore, ItemEvaluation, ProbeEvaluation, VariantEvaluation,
     aggregate_round_dimension_scores, is_local_backend, load_golden_references, read_experiment,
-    score_emotion_item,
+    score_emotion_item, tone_judge_system_prompt,
 };
 use super::report::{
     bh_fdr_adjust, build_ablation_report, cohens_d_paired, compute_auxiliary_metrics, erf_approx,
     normal_cdf, read_manual_scores, wilcoxon_signed_rank_p,
 };
-use super::run::{aggregate_repeat_stats, filter_variants, metric_stat, t_critical_975};
-use super::types::DATASET_SCHEMA_VERSION;
+use super::run::{
+    aggregate_repeat_stats, filter_variants, metric_stat, seed_history_from_context, t_critical_975,
+};
+use super::types::{ContextTurn, DATASET_SCHEMA_VERSION};
 use ramaria_core::error::RamariaError;
+use ramaria_core::types::{MessageRole, PersonaKind};
 use std::path::Path;
 
 // ---- DeterministicRng ----
@@ -352,6 +355,7 @@ fn load_golden_references_collects_fact_and_tone() {
                 reference: Some("辛苦了，早点休息。工作是做不完的，身体才是自己的。".to_string()),
                 source: "db".to_string(),
                 source_ref: None,
+                context: Vec::new(),
             },
             DatasetItem {
                 id: "fact-0001".to_string(),
@@ -360,6 +364,7 @@ fn load_golden_references_collects_fact_and_tone() {
                 reference: Some("去年收养了一只三花猫，取名团子。".to_string()),
                 source: "db".to_string(),
                 source_ref: Some("养猫".to_string()),
+                context: Vec::new(),
             },
             // 空 reference 忽略
             DatasetItem {
@@ -369,6 +374,7 @@ fn load_golden_references_collects_fact_and_tone() {
                 reference: None,
                 source: "db".to_string(),
                 source_ref: None,
+                context: Vec::new(),
             },
         ],
     };
@@ -413,6 +419,32 @@ fn is_local_backend_only_accepts_local_providers() {
         "https://remote.example.com/v1"
     ));
     assert!(!is_local_backend(P::LmStudio, ""));
+}
+
+/// 语气维 judge 口径（M8 复核）：必须显式声明"不按长短判分"，且 few-shot 给出
+/// "参考很短、候选同样简短 → 高分"的正锚点与"书面助手腔冗长候选 → 低分"的负锚点，
+/// 防止"越长分越高"的长度偏置回退（该偏置实测使长度-分数相关 0.58~0.78）。
+#[test]
+fn tone_judge_prompt_is_length_neutral() {
+    let prompt = tone_judge_system_prompt();
+    assert!(
+        prompt.contains("不要按回复长短判分"),
+        "rubric 必须显式禁止按长短判分"
+    );
+    assert!(
+        prompt.contains("同样简短的候选回复完全可能是 5 分"),
+        "rubric 必须说明短回复同样可判高分"
+    );
+    assert!(
+        prompt.contains("参考回复：对啊对啊\n候选回复：对对对\n分数：5"),
+        "few-shot 必须含短参考 + 短候选得 5 分的正锚点"
+    );
+    assert!(
+        prompt.contains(
+            "候选回复：好的，我这就去数据库里帮您查询相关记录，还请您稍等片刻。\n分数：1"
+        ),
+        "few-shot 必须含书面助手腔冗长候选得 1 分的负锚点"
+    );
 }
 
 // ---- fixture ----
@@ -538,6 +570,187 @@ fn dataset_roundtrip_json() {
     assert_eq!(back.items.len(), ds.items.len());
     assert_eq!(back.items[0].question, ds.items[0].question);
     assert_eq!(back.variants.len(), ds.variants.len());
+}
+
+// ---- 题项上文（context）----
+
+/// 含 context 的题项序列化 → 反序列化等价（新增字段可落盘/可读回）。
+#[test]
+fn dataset_item_context_serde_roundtrip() {
+    let item = DatasetItem {
+        id: "tone-0001".to_string(),
+        dimension: "tone".to_string(),
+        question: "我去（）".to_string(),
+        reference: Some("去哪呀".to_string()),
+        source: "db".to_string(),
+        source_ref: None,
+        context: vec![
+            ContextTurn {
+                role: "user".to_string(),
+                content: "[小明] 在吗".to_string(),
+            },
+            ContextTurn {
+                role: "assistant".to_string(),
+                content: "[小九] 在呀".to_string(),
+            },
+        ],
+    };
+    let json = serde_json::to_string(&item).expect("序列化失败");
+    assert!(
+        json.contains("\"context\""),
+        "非空 context 应序列化: {json}"
+    );
+    let back: DatasetItem = serde_json::from_str(&json).expect("反序列化失败");
+    assert_eq!(back.question, item.question);
+    assert_eq!(back.reference, item.reference);
+    assert_eq!(back.context.len(), 2);
+    assert_eq!(back.context[0].role, "user");
+    assert_eq!(back.context[0].content, "[小明] 在吗");
+    assert_eq!(back.context[1].role, "assistant");
+    assert_eq!(back.context[1].content, "[小九] 在呀");
+}
+
+/// 旧形态题项（无 context 字段）反序列化兼容：context 为空，且空值序列化时省略该键。
+#[test]
+fn dataset_item_without_context_deserializes_empty() {
+    let old = r#"{"id":"tone-0001","dimension":"tone","question":"今天好累",
+        "reference":"早点休息","source":"db","source_ref":null}"#;
+    let parsed: DatasetItem = serde_json::from_str(old).expect("旧数据集题项应可反序列化");
+    assert!(parsed.context.is_empty(), "缺 context 字段应默认为空");
+    // 空 context 序列化省略该键，不改变旧数据集文件的 byte 形态
+    let s = serde_json::to_string(&parsed).expect("序列化失败");
+    assert!(!s.contains("context"), "空 context 应省略: {s}");
+}
+
+/// 数据集上文 → 管线历史：role 字符串映射为 MessageRole，内容保序。
+#[test]
+fn seed_history_from_context_maps_roles() {
+    let context = vec![
+        ContextTurn {
+            role: "user".to_string(),
+            content: "[小明] 在吗".to_string(),
+        },
+        ContextTurn {
+            role: "assistant".to_string(),
+            content: "[小九] 在呀".to_string(),
+        },
+        ContextTurn {
+            role: "system".to_string(),
+            content: "未知角色".to_string(),
+        },
+    ];
+    let history = seed_history_from_context(&context);
+    assert_eq!(history.len(), 3);
+    assert_eq!(history[0].role, MessageRole::User);
+    assert_eq!(history[1].role, MessageRole::Assistant);
+    assert_eq!(
+        history[2].role,
+        MessageRole::Assistant,
+        "非 user 角色一律映射为 assistant"
+    );
+    let contents: Vec<&str> = history.iter().map(|m| m.content.as_str()).collect();
+    assert_eq!(contents, vec!["[小明] 在吗", "[小九] 在呀", "未知角色"]);
+    assert!(seed_history_from_context(&[]).is_empty());
+}
+
+/// 配对提取的上文取"question 之前紧邻的消息"，不含 question 本身；
+/// 已消费的 question 与 persona 回复继续计入窗口供后续题项复用。
+#[test]
+fn tone_pairs_from_messages_carries_preceding_context() {
+    use ramaria_core::types::{Message, MessageSource};
+    let sid = uuid::Uuid::new_v4();
+    let user = |content: &str| {
+        Message::new(
+            sid,
+            MessageRole::User,
+            content.to_string(),
+            MessageSource::Local,
+        )
+    };
+    let persona = |content: &str| {
+        Message::new(
+            sid,
+            MessageRole::Assistant,
+            content.to_string(),
+            MessageSource::Online,
+        )
+        .with_persona_uid(Some("char-0001".to_string()))
+    };
+
+    let messages = vec![
+        user("[小明] 在吗"),
+        persona("[小九] 在呀"),
+        user("[小明] 我去（）"),
+        persona("[小九] 去哪呀"),
+        user("[小明] 是呀"),
+        persona("[小九] 嗯嗯"),
+    ];
+    let pairs = tone_pairs_from_messages(&messages, "char-0001");
+    assert_eq!(pairs.len(), 3, "三对 user → persona 回复");
+
+    // 首题之前无消息 → 上文为空
+    assert_eq!(pairs[0].0, "[小明] 在吗");
+    assert_eq!(pairs[0].1, "[小九] 在呀");
+    assert!(pairs[0].2.is_empty(), "首题不应带上文");
+
+    // 次题上文 = 紧邻前文（时间正序），不含 question 本身
+    let ctx2: Vec<&str> = pairs[1].2.iter().map(|t| t.content.as_str()).collect();
+    assert_eq!(ctx2, vec!["[小明] 在吗", "[小九] 在呀"]);
+    assert_eq!(pairs[1].2[0].role, "user");
+    assert_eq!(pairs[1].2[1].role, "assistant");
+    assert!(
+        !ctx2.contains(&"[小明] 我去（）"),
+        "上文不得包含 question 本身（避免与 user_input 重复）"
+    );
+
+    // 第三题上文继续累积：前面的 question 与 persona 回复均计入窗口
+    let ctx3: Vec<&str> = pairs[2].2.iter().map(|t| t.content.as_str()).collect();
+    assert_eq!(
+        ctx3,
+        vec![
+            "[小明] 在吗",
+            "[小九] 在呀",
+            "[小明] 我去（）",
+            "[小九] 去哪呀"
+        ]
+    );
+}
+
+/// 上文窗口容量上限：只保留 question 之前最近的 6 条，更早的弹出。
+#[test]
+fn tone_pairs_context_window_capped() {
+    use ramaria_core::types::{Message, MessageSource};
+    let sid = uuid::Uuid::new_v4();
+    let user = |content: &str| {
+        Message::new(
+            sid,
+            MessageRole::User,
+            content.to_string(),
+            MessageSource::Local,
+        )
+    };
+    let persona = |content: &str| {
+        Message::new(
+            sid,
+            MessageRole::Assistant,
+            content.to_string(),
+            MessageSource::Online,
+        )
+        .with_persona_uid(Some("char-0001".to_string()))
+    };
+
+    let mut messages = Vec::new();
+    for i in 1..=5 {
+        messages.push(user(&format!("u{i}")));
+        messages.push(persona(&format!("p{i}")));
+    }
+    let pairs = tone_pairs_from_messages(&messages, "char-0001");
+    assert_eq!(pairs.len(), 5);
+
+    // 第五题（u5）之前共 8 条消息，窗口只保留最近 6 条（u1/p1 已被弹出）
+    let ctx5: Vec<&str> = pairs[4].2.iter().map(|t| t.content.as_str()).collect();
+    assert_eq!(ctx5.len(), 6, "上文窗口上限为 6 条");
+    assert_eq!(ctx5, vec!["u2", "p2", "u3", "p3", "u4", "p4"]);
 }
 
 // ---- 问题模板 ----
