@@ -3,7 +3,8 @@
 //! 设计特点:
 //! - 覆盖数据集构建（build / fixture 兜底 / 文件解析 / 序列化往返）与确定性抽样复现性。
 //! - 覆盖档位与消融 Profile（默认代表配对、F0~F4 / S_* / B0~B1 注入闸门映射）。
-//! - 覆盖自动评分（fact / tone / emotion 判定）、--repeat 逐轮聚合与旧格式向后兼容。
+//! - 覆盖自动评分（fact / tone / emotion 判定，含事实维长度中性多判据）、
+//!   --repeat 逐轮聚合与旧格式向后兼容。
 //! - 覆盖对比报告统计（Wilcoxon / Cohen's d / BH-FDR / normal-CDF）与消融显著性归因。
 //! - 覆盖缺失/非法输入文件统一归为业务校验失败（RamariaError::Validation）。
 
@@ -14,22 +15,25 @@ use super::*;
 use super::dataset::tone_pairs_from_messages;
 use super::evaluate::{
     FactItemScore, ItemEvaluation, ProbeEvaluation, VariantEvaluation,
-    aggregate_round_dimension_scores, is_local_backend, load_golden_references, read_experiment,
+    aggregate_round_dimension_scores, content_bigrams, fact_point_score, is_local_backend,
+    keyword_hit_norm_score, load_golden_references, read_experiment, reference_clauses,
     score_emotion_item, tone_judge_system_prompt,
 };
 use super::report::{
-    KnowledgeQualityScope, bh_fdr_adjust, build_ablation_report, cohens_d_paired, cohens_d_pooled,
-    compute_auxiliary_metrics, erf_approx, normal_cdf, read_manual_scores, student_t_cdf,
-    tost_equivalence, wilcoxon_signed_rank_p,
+    KnowledgeJudgeRates, KnowledgeQualityScope, bh_fdr_adjust, build_ablation_report,
+    cohens_d_paired, cohens_d_pooled, compute_auxiliary_metrics, erf_approx, normal_cdf,
+    read_manual_scores, student_t_cdf, tost_equivalence, wilcoxon_signed_rank_p,
 };
 use super::run::{
-    aggregate_repeat_stats, filter_variants, metric_stat, run_validity, seed_history_from_context,
-    t_critical_975,
+    STATEMENT_REGISTER_LEAD, aggregate_repeat_stats, effective_question, filter_variants,
+    metric_stat, run_validity, seed_history_from_context, t_critical_975,
 };
-use super::types::{ContextTurn, DATASET_SCHEMA_VERSION, VariantOverrides};
+use super::types::{ContextTurn, DATASET_SCHEMA_VERSION, ItemRegister, VariantOverrides};
 use ramaria_core::error::RamariaError;
+use ramaria_core::traits::{EmbeddingModelInfo, EmbeddingProvider};
 use ramaria_core::types::{MessageRole, PersonaKind};
 use std::path::Path;
+use std::sync::Arc;
 
 // ---- DeterministicRng ----
 
@@ -359,6 +363,7 @@ fn load_golden_references_collects_fact_and_tone() {
                 source: "db".to_string(),
                 source_ref: None,
                 context: Vec::new(),
+                register: ItemRegister::Chat,
             },
             DatasetItem {
                 id: "fact-0001".to_string(),
@@ -368,6 +373,7 @@ fn load_golden_references_collects_fact_and_tone() {
                 source: "db".to_string(),
                 source_ref: Some("养猫".to_string()),
                 context: Vec::new(),
+                register: ItemRegister::Chat,
             },
             // 空 reference 忽略
             DatasetItem {
@@ -378,6 +384,7 @@ fn load_golden_references_collects_fact_and_tone() {
                 source: "db".to_string(),
                 source_ref: None,
                 context: Vec::new(),
+                register: ItemRegister::Chat,
             },
         ],
     };
@@ -597,6 +604,7 @@ fn dataset_item_context_serde_roundtrip() {
                 content: "[小九] 在呀".to_string(),
             },
         ],
+        register: ItemRegister::Chat,
     };
     let json = serde_json::to_string(&item).expect("序列化失败");
     assert!(
@@ -623,6 +631,94 @@ fn dataset_item_without_context_deserializes_empty() {
     // 空 context 序列化省略该键，不改变旧数据集文件的 byte 形态
     let s = serde_json::to_string(&parsed).expect("序列化失败");
     assert!(!s.contains("context"), "空 context 应省略: {s}");
+}
+
+// ---- 题项体裁（register）与语域题面 ----
+
+/// 题项体裁 serde：`statement` 往返保留；旧 JSON 缺字段 → `Chat`；
+/// `Chat` 序列化时省略键（旧数据集反/序列化保持最小差异）。
+#[test]
+fn dataset_item_register_serde_roundtrip_and_backcompat() {
+    // 非缺省体裁 roundtrip：反序列化为 Statement 并原样序列化回。
+    let statement = r#"{"id":"fact-0001","dimension":"fact","question":"还记得「团子」吗？",
+        "reference":null,"source":"db","source_ref":null,"register":"statement"}"#;
+    let parsed: DatasetItem = serde_json::from_str(statement).expect("statement 题项应可反序列化");
+    assert_eq!(parsed.register, ItemRegister::Statement);
+    let json = serde_json::to_string(&parsed).expect("序列化失败");
+    assert!(
+        json.contains("\"register\":\"statement\""),
+        "非缺省体裁应序列化: {json}"
+    );
+    let back: DatasetItem = serde_json::from_str(&json).expect("往返失败");
+    assert_eq!(back.register, ItemRegister::Statement);
+
+    // 旧 JSON 缺字段 → 缺省 Chat（旧数据集兼容）。
+    let old = r#"{"id":"tone-0001","dimension":"tone","question":"今天好累",
+        "reference":"早点休息","source":"db","source_ref":null}"#;
+    let parsed: DatasetItem = serde_json::from_str(old).expect("旧数据集题项应可反序列化");
+    assert_eq!(parsed.register, ItemRegister::Chat, "缺字段应为缺省 Chat");
+
+    // 缺省 Chat 序列化省略键（byte 形态与旧数据集一致）。
+    let s = serde_json::to_string(&parsed).expect("序列化失败");
+    assert!(!s.contains("register"), "缺省 Chat 应省略: {s}");
+
+    // 显式 chat 与缺省等价。
+    let explicit = r#"{"id":"tone-0009","dimension":"tone","question":"q",
+        "reference":null,"source":"db","source_ref":null,"register":"chat"}"#;
+    let parsed: DatasetItem = serde_json::from_str(explicit).expect("chat 应可反序列化");
+    assert_eq!(parsed.register, ItemRegister::Chat);
+}
+
+/// 语域题面：`statement` = 原题面 + 换行 + 陈述引导；`chat` = 原题面逐字不变。
+#[test]
+fn effective_question_appends_statement_lead_only() {
+    let base = DatasetItem {
+        id: "fact-0001".to_string(),
+        dimension: "fact".to_string(),
+        question: "还记得「团子」这件事吗？".to_string(),
+        reference: Some("去年收养了一只三花猫，取名团子。".to_string()),
+        source: "db".to_string(),
+        source_ref: Some("养猫".to_string()),
+        context: Vec::new(),
+        register: ItemRegister::Chat,
+    };
+    // chat：逐字不变（社交聊天语域，与既有结果可比）。
+    assert_eq!(effective_question(&base), base.question);
+
+    // statement：原题面 + 换行 + 引导；题面本体保持在前、逐字不变。
+    let statement = DatasetItem {
+        register: ItemRegister::Statement,
+        ..base
+    };
+    let effective = effective_question(&statement);
+    assert_eq!(
+        effective,
+        format!("{}\n{}", statement.question, STATEMENT_REGISTER_LEAD)
+    );
+    assert!(
+        effective.starts_with(&statement.question),
+        "陈述题面应保留原题面前缀"
+    );
+    assert!(
+        effective.ends_with(STATEMENT_REGISTER_LEAD),
+        "引导应追加在题面末尾"
+    );
+}
+
+/// "零字数表述"口径锁定：陈述引导只做语域切换，不得含任何字数/篇幅表述
+/// （防回归：避免模型把引导当作复述长度约束而污染事实维评估）。
+#[test]
+fn statement_lead_contains_no_length_wording() {
+    for banned in ["字", "句", "篇幅", "长度"] {
+        assert!(
+            !STATEMENT_REGISTER_LEAD.contains(banned),
+            "陈述引导不得含字数/篇幅表述「{banned}」: {STATEMENT_REGISTER_LEAD}"
+        );
+    }
+    assert!(
+        !STATEMENT_REGISTER_LEAD.trim().is_empty(),
+        "陈述引导不得为空（语域切换需实际生效）"
+    );
 }
 
 /// 数据集上文 → 管线历史：role 字符串映射为 MessageRole，内容保序。
@@ -1195,7 +1291,7 @@ async fn aggregate_round_scores_empty_returns_none() {
     assert!(agg.is_empty());
 }
 
-/// 三轮回复与 golden 完全一致 → fact 轮均分恒 1.0，n=3、std=0、CI 退化。
+/// 三轮回复与 golden 完全一致 → fact 三口径轮均分恒 1.0，n=3、std=0、CI 退化。
 #[tokio::test]
 async fn aggregate_round_scores_pools_round_means() {
     let reference = "用户去年收养了一只猫，取名团子";
@@ -1207,13 +1303,16 @@ async fn aggregate_round_scores_pools_round_means() {
         fact_round(reference),
     ];
     let agg = aggregate_round_dimension_scores(&rounds, &None, None, Some(&golden), 0).await;
-    assert_eq!(agg.len(), 1, "只有 fact 维聚合");
-    assert_eq!(agg[0].dimension, "fact");
-    assert_eq!(agg[0].n, 3, "有效轮数 = 3");
-    assert!((agg[0].mean - 1.0).abs() < 1e-9, "满分均值应为 1.0");
-    assert_eq!(agg[0].std, 0.0);
-    assert!((agg[0].ci95_low - 1.0).abs() < 1e-9);
-    assert!((agg[0].ci95_high - 1.0).abs() < 1e-9);
+    assert_eq!(agg.len(), 3, "事实维三口径各一条聚合");
+    let fact = agg
+        .iter()
+        .find(|d| d.dimension == "fact")
+        .expect("应有 fact 聚合");
+    assert_eq!(fact.n, 3, "有效轮数 = 3");
+    assert!((fact.mean - 1.0).abs() < 1e-9, "满分均值应为 1.0");
+    assert_eq!(fact.std, 0.0);
+    assert!((fact.ci95_low - 1.0).abs() < 1e-9);
+    assert!((fact.ci95_high - 1.0).abs() < 1e-9);
 }
 
 /// 三轮回复质量不同 → 轮均分存在波动，mean 介于 (0,1)，std > 0，CI 有效。
@@ -1228,16 +1327,17 @@ async fn aggregate_round_scores_captures_variation() {
         fact_round(reference),
     ];
     let agg = aggregate_round_dimension_scores(&rounds, &None, None, Some(&golden), 0).await;
-    assert_eq!(agg[0].n, 3);
-    assert!(
-        agg[0].mean > 0.0 && agg[0].mean < 1.0,
-        "波动后均值应介于 0..1"
-    );
-    assert!(agg[0].std > 0.0, "质量波动应产生正 std");
-    assert!(agg[0].ci95_low < agg[0].mean && agg[0].mean < agg[0].ci95_high);
+    let fact = agg
+        .iter()
+        .find(|d| d.dimension == "fact")
+        .expect("应有 fact 聚合");
+    assert_eq!(fact.n, 3);
+    assert!(fact.mean > 0.0 && fact.mean < 1.0, "波动后均值应介于 0..1");
+    assert!(fact.std > 0.0, "质量波动应产生正 std");
+    assert!(fact.ci95_low < fact.mean && fact.mean < fact.ci95_high);
 }
 
-/// 旧评分数值文件（无 dimension_scores/emotion 字段）反序列化兼容。
+/// 旧评分数值文件（无 dimension_scores/emotion/fact 新判据字段）反序列化兼容。
 #[test]
 fn evaluation_variant_serde_backcompat_new_fields() {
     let old = r#"{
@@ -1249,9 +1349,300 @@ fn evaluation_variant_serde_backcompat_new_fields() {
     let parsed: VariantEvaluation = serde_json::from_str(old).unwrap();
     assert!(parsed.dimension_scores.is_none());
     assert!(parsed.emotion_score.is_none());
+    assert!(parsed.fact_score_norm.is_none(), "旧产物无长度归一均分");
+    assert!(parsed.fact_score_point.is_none(), "旧产物无事实点均分");
     // 空聚合序列化时省略 dimension_scores（保持最小差异）
     let s = serde_json::to_string(&parsed).unwrap();
     assert!(!s.contains("dimension_scores"), "None 聚合应省略: {s}");
+    assert!(!s.contains("fact_score_norm"), "None 均分应省略: {s}");
+    assert!(!s.contains("fact_score_point"), "None 均分应省略: {s}");
+}
+
+// =========================================================
+// 事实维多判据（旧 2-gram 覆盖 + 长度归一 + 子句级事实点）
+// =========================================================
+
+/// 内容 2-gram 提取：剔除含标点的组合与两侧皆功能字的组合。
+#[test]
+fn content_bigrams_filters_punct_and_function_pairs() {
+    // 任意一侧为标点 → 剔除
+    assert!(
+        content_bigrams("我，你").is_empty(),
+        "含标点的 2-gram 应剔除"
+    );
+    // 两侧皆为功能字 → 剔除
+    assert!(
+        content_bigrams("我是").is_empty(),
+        "两侧功能字的 2-gram 应剔除"
+    );
+    // 只有一侧为功能字 → 保留（内容字参与的组合仍计入）
+    assert_eq!(content_bigrams("团子是").len(), 2, "内容字参与的组合应保留");
+    // 不足 2 字 / 空串 → 无 2-gram
+    assert!(content_bigrams("猫").is_empty());
+    assert!(content_bigrams("").is_empty());
+}
+
+/// 长度归一命中率边界：一致 / 子串 / 无重叠 / 空回复 / 参考过短。
+#[test]
+fn keyword_hit_norm_score_extremes() {
+    let reference = "团子是三花猫";
+    assert!(
+        (keyword_hit_norm_score(reference, reference) - 1.0).abs() < 1e-9,
+        "回复与参考一致应满分"
+    );
+    assert!(
+        (keyword_hit_norm_score("团子", reference) - 1.0).abs() < 1e-9,
+        "回复为参考子串时分母取 min(参考, 回复) → 满分"
+    );
+    assert_eq!(keyword_hit_norm_score("唔唔唔唔", reference), 0.0, "无重叠");
+    assert_eq!(keyword_hit_norm_score("", reference), 0.0, "空回复");
+    assert_eq!(keyword_hit_norm_score("   ", reference), 0.0, "空白回复");
+    assert_eq!(
+        keyword_hit_norm_score("猫", "猫"),
+        0.0,
+        "参考无内容 2-gram（过短）"
+    );
+}
+
+/// 长度中性：短回复在旧口径（分母固定为参考 2-gram 总数）下被机械压低，新口径不再衰减。
+#[test]
+fn keyword_hit_norm_is_length_neutral_for_short_reply() {
+    let reference = "用户去年收养了一只猫，取名团子";
+    let reply = "团子";
+
+    // 复算旧口径（分母 = 参考全部 2-gram，含标点组合；分子 = 回复命中的参考 2-gram 数）。
+    let ref_chars: Vec<char> = reference.chars().collect();
+    let ref_all: std::collections::HashSet<(char, char)> =
+        ref_chars.windows(2).map(|w| (w[0], w[1])).collect();
+    let reply_chars: Vec<char> = reply.chars().collect();
+    let hit = reply_chars
+        .windows(2)
+        .filter(|w| ref_all.contains(&(w[0], w[1])))
+        .count();
+    assert_eq!(ref_all.len(), 14, "旧口径分母 = 参考 2-gram 总数");
+    assert_eq!(hit, 1, "旧口径分子 = 回复命中的参考 2-gram 数");
+    let old_score = hit as f64 / ref_all.len() as f64;
+    assert!(old_score < 0.1, "旧口径下短回复被压到 {old_score}");
+
+    // 新口径：命中数 / min(参考内容 2-gram 数, 回复内容 2-gram 数) = 3 / min(12, 3) → 1.0。
+    let norm = keyword_hit_norm_score(reply, reference);
+    assert!((norm - 1.0).abs() < 1e-9, "长度归一口径应满分，实际 {norm}");
+    assert!(norm > old_score, "短回复在长度归一口径下不被压低");
+}
+
+/// 事实点召回：按子句计分，部分体现 / 全覆盖 / 空回复 / 参考无有效子句。
+#[test]
+fn fact_point_score_counts_hit_clauses() {
+    let reference = "他养了猫，他喜欢狗。他怕蛇";
+    let one = fact_point_score("他养了猫", reference);
+    assert!(
+        (one - 1.0 / 3.0).abs() < 1e-9,
+        "3 个子句命中 1 个 → 1/3，实际 {one}"
+    );
+    assert!(
+        (fact_point_score(reference, reference) - 1.0).abs() < 1e-9,
+        "回复与参考一致应全命中"
+    );
+    assert_eq!(fact_point_score("", reference), 0.0, "空回复");
+    assert_eq!(fact_point_score("他养了猫", "，，"), 0.0, "参考无有效子句");
+}
+
+/// 参考子句切分：中英文标点均切分，丢弃 <2 字片段。
+#[test]
+fn reference_clauses_split_and_drop_short_segments() {
+    assert_eq!(reference_clauses("他养了猫，他喜欢狗。他怕蛇").len(), 3);
+    assert_eq!(reference_clauses("他养了猫,他喜欢狗.他怕蛇").len(), 3);
+    assert_eq!(
+        reference_clauses("猫，狗，他养了三花猫"),
+        vec!["他养了三花猫".to_string()],
+        "单字片段应丢弃"
+    );
+    assert_eq!(
+        reference_clauses("团子是三花猫"),
+        vec!["团子是三花猫".to_string()],
+        "无标点时整体为单子句"
+    );
+}
+
+/// 事实维子评分向后兼容：旧产物无新判据字段 → None；新产物可解析到 Some。
+#[test]
+fn fact_item_score_serde_backcompat_new_criteria() {
+    let old = r#"{"cosine":0.7,"keyword_hit":0.3,"score":0.54}"#;
+    let parsed: FactItemScore = serde_json::from_str(old).expect("旧事实维子评分应可反序列化");
+    assert_eq!(parsed.cosine, Some(0.7));
+    assert!(parsed.keyword_hit_norm.is_none(), "旧产物无长度归一判据");
+    assert!(parsed.fact_point.is_none(), "旧产物无事实点判据");
+    assert!(parsed.score_norm.is_none(), "旧产物无长度归一综合分");
+    assert!(parsed.score_point.is_none(), "旧产物无事实点综合分");
+
+    let new = r#"{"cosine":0.7,"keyword_hit":0.3,"score":0.54,
+        "keyword_hit_norm":1.0,"fact_point":0.3333333333333333,
+        "score_norm":0.82,"score_point":0.5533333333333333}"#;
+    let parsed: FactItemScore = serde_json::from_str(new).expect("新产物应可反序列化");
+    assert_eq!(parsed.keyword_hit_norm, Some(1.0));
+    let point = parsed.fact_point.expect("新产物应含事实点判据");
+    assert!((point - 1.0 / 3.0).abs() < 1e-12);
+    let norm = parsed.score_norm.expect("新产物应含长度归一综合分");
+    assert!((norm - 0.82).abs() < 1e-12);
+    let scored = parsed.score_point.expect("新产物应含事实点综合分");
+    assert!((scored - 0.5533333333333333).abs() < 1e-12);
+}
+
+/// 逐轮聚合纳入两个新事实维判据：无 embedder 降级时与纯函数逐轮均值一致。
+#[tokio::test]
+async fn aggregate_round_scores_includes_norm_and_point_dimensions() {
+    let reference = "他养了猫，他喜欢狗。他怕蛇";
+    let reply = "他养了猫";
+    let mut golden = std::collections::HashMap::new();
+    golden.insert("fact-0001".to_string(), reference.to_string());
+    let rounds: Vec<ProbeVariantResult> =
+        vec![fact_round(reply), fact_round(reply), fact_round(reply)];
+    let agg = aggregate_round_dimension_scores(&rounds, &None, None, Some(&golden), 0).await;
+    let dims: Vec<&str> = agg.iter().map(|d| d.dimension.as_str()).collect();
+    assert_eq!(
+        dims,
+        vec!["fact", "fact_norm", "fact_point"],
+        "事实维三口径各一条聚合"
+    );
+
+    let norm = agg
+        .iter()
+        .find(|d| d.dimension == "fact_norm")
+        .expect("应有 fact_norm 聚合");
+    let point = agg
+        .iter()
+        .find(|d| d.dimension == "fact_point")
+        .expect("应有 fact_point 聚合");
+    // 降级（无 embedding）时综合分 = 纯关键词项，故与纯函数值一致
+    let expect_norm = keyword_hit_norm_score(reply, reference);
+    let expect_point = fact_point_score(reply, reference);
+    assert!(
+        (norm.mean - expect_norm).abs() < 1e-9,
+        "长度归一均值应与纯函数一致：{} vs {expect_norm}",
+        norm.mean
+    );
+    assert!(
+        (point.mean - expect_point).abs() < 1e-9,
+        "事实点均值应与纯函数一致：{} vs {expect_point}",
+        point.mean
+    );
+    assert!(
+        (point.mean - 1.0 / 3.0).abs() < 1e-9,
+        "3 个子句命中 1 个 → 1/3，实际 {}",
+        point.mean
+    );
+    assert_eq!(norm.n, 3);
+    assert_eq!(point.n, 3);
+
+    // 旧口径（分母 = 参考 2-gram 总数 12，命中 3）冻结为 0.25；
+    // 新长度归一口径为 1.0：短回复不再被机械压低。
+    let old = agg
+        .iter()
+        .find(|d| d.dimension == "fact")
+        .expect("应有 fact 聚合");
+    assert!(
+        (old.mean - 0.25).abs() < 1e-9,
+        "旧 2-gram 覆盖口径应冻结为 0.25，实际 {}",
+        old.mean
+    );
+    assert!(norm.mean > old.mean, "长度归一口径应高于旧口径");
+}
+
+/// 固定向量 mock embedding：按文本查表返回预设向量（未命中返回 `[1.0, 0.0]`）。
+struct TableEmbedding {
+    table: Vec<(&'static str, Vec<f32>)>,
+}
+
+#[async_trait::async_trait]
+impl EmbeddingProvider for TableEmbedding {
+    async fn embed(&self, text: &str) -> ramaria_core::error::RamariaResult<Vec<f32>> {
+        Ok(self
+            .table
+            .iter()
+            .find(|(k, _)| *k == text)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| vec![1.0, 0.0]))
+    }
+
+    async fn embed_batch(
+        &self,
+        texts: &[&str],
+    ) -> ramaria_core::error::RamariaResult<Vec<Vec<f32>>> {
+        let mut out = Vec::with_capacity(texts.len());
+        for t in texts {
+            out.push(self.embed(t).await?);
+        }
+        Ok(out)
+    }
+
+    fn model_info(&self) -> EmbeddingModelInfo {
+        EmbeddingModelInfo {
+            model_id: "table-embedding".to_string(),
+            dimension: 2,
+        }
+    }
+
+    async fn validate(&self) -> ramaria_core::error::RamariaResult<()> {
+        Ok(())
+    }
+
+    async fn download_model(&self) -> ramaria_core::error::RamariaResult<()> {
+        Ok(())
+    }
+
+    fn download_progress(&self) -> f64 {
+        1.0
+    }
+
+    fn is_available(&self) -> bool {
+        true
+    }
+}
+
+/// cosine 可用时：新综合分与旧综合分同权重（0.6 / 0.4），仅关键词项不同。
+#[tokio::test]
+async fn fact_norm_and_point_scores_reuse_old_weights() {
+    let reference = "他养了猫，他喜欢狗。他怕蛇";
+    let reply = "他养了猫";
+    let mut golden = std::collections::HashMap::new();
+    golden.insert("fact-0001".to_string(), reference.to_string());
+    let embedder: Option<Arc<dyn EmbeddingProvider>> = Some(Arc::new(TableEmbedding {
+        table: vec![(reply, vec![1.0, 0.0]), (reference, vec![1.0, 1.0])],
+    }));
+    let rounds: Vec<ProbeVariantResult> = vec![fact_round(reply), fact_round(reply)];
+    let agg = aggregate_round_dimension_scores(&rounds, &embedder, None, Some(&golden), 0).await;
+
+    // 语义余弦 = [1,0] 与 [1,1] 的夹角余弦 = 1/√2
+    let cos = 1.0 / 2.0f64.sqrt();
+    let kw_norm = keyword_hit_norm_score(reply, reference);
+    let point = fact_point_score(reply, reference);
+    // 权重与事实维综合分一致：cosine 0.6 + 关键词项 0.4
+    let expect_old = 0.6 * cos + 0.4 * 0.25;
+    let expect_norm = 0.6 * cos + 0.4 * kw_norm;
+    let expect_point = 0.6 * cos + 0.4 * point;
+
+    let get = |name: &str| {
+        agg.iter()
+            .find(|d| d.dimension == name)
+            .unwrap_or_else(|| panic!("应有 {name} 聚合"))
+            .mean
+    };
+    let old = get("fact");
+    assert!(
+        (old - expect_old).abs() < 1e-9,
+        "旧综合分 {old} 应为 {expect_old}"
+    );
+    let norm = get("fact_norm");
+    assert!(
+        (norm - expect_norm).abs() < 1e-9,
+        "长度归一综合分 {norm} 应为 {expect_norm}"
+    );
+    let scored = get("fact_point");
+    assert!(
+        (scored - expect_point).abs() < 1e-9,
+        "事实点综合分 {scored} 应为 {expect_point}"
+    );
+    assert!(norm > old && scored > old, "新口径应高于旧口径（短回复）");
 }
 
 // =========================================================
@@ -1378,6 +1769,10 @@ fn eval_variant_scores(id: &str, scores: &[f64]) -> VariantEvaluation {
                 cosine: Some(*s),
                 keyword_hit: *s,
                 score: *s,
+                keyword_hit_norm: Some(*s),
+                fact_point: Some(*s),
+                score_norm: Some(*s),
+                score_point: Some(*s),
             }),
             tone: None,
             emotion: None,
@@ -1394,6 +1789,8 @@ fn eval_variant_scores(id: &str, scores: &[f64]) -> VariantEvaluation {
             ablation: Some(id.to_string()),
         },
         fact_score: None,
+        fact_score_norm: None,
+        fact_score_point: None,
         tone_score: None,
         emotion_score: None,
         dimension_scores: None,
@@ -1440,6 +1837,22 @@ fn build_ablation_report_marks_removal_effect() {
     assert!(row.mean_diff < 0.0);
     assert!(row.p_fdr < 0.05);
     assert!(row.ci95_high < 0.0, "CI 不含 0");
+
+    // 事实维两个重算口径同样纳入对照，供新旧判据分栏核对。
+    let dims_of_f1: Vec<&str> = report
+        .rows
+        .iter()
+        .filter(|r| r.ablation_variant == "F1")
+        .map(|r| r.dimension.as_str())
+        .collect();
+    assert!(
+        dims_of_f1.contains(&"fact_norm"),
+        "F1 应含 fact_norm 行，实际 {dims_of_f1:?}"
+    );
+    assert!(
+        dims_of_f1.contains(&"fact_point"),
+        "F1 应含 fact_point 行，实际 {dims_of_f1:?}"
+    );
 }
 
 /// S 组：B1（低分基座）vs S_behavior（高分单层）→ up 方向，类型=替代对照。
@@ -1576,6 +1989,10 @@ fn eval_variant_mixed() -> VariantEvaluation {
                     cosine: Some(score),
                     keyword_hit: score,
                     score,
+                    keyword_hit_norm: Some(score),
+                    fact_point: Some(score),
+                    score_norm: Some(score),
+                    score_point: Some(score),
                 }),
                 tone: None,
                 emotion: emo,
@@ -1620,6 +2037,8 @@ fn eval_variant_mixed() -> VariantEvaluation {
             ablation: None,
         },
         fact_score: None,
+        fact_score_norm: None,
+        fact_score_point: None,
         tone_score: None,
         emotion_score: None,
         dimension_scores: Some(vec![
@@ -1679,6 +2098,78 @@ fn auxiliary_metrics_recomputable_from_product() {
     assert!(m.annotation.contains("可复算"), "annotation 应说明口径");
 }
 
+/// 画像回归口径固定为 fact/tone/emotion 三维：新增事实维重算维度（fact_norm /
+/// fact_point）不计入，故 `dimension_scores` 额外含这两维时数值不变。
+#[test]
+fn profile_regression_ignores_fact_recalc_dimensions() {
+    use super::evaluate::DimensionScoreAgg;
+
+    let agg = |dim: &str, std: f64| DimensionScoreAgg {
+        dimension: dim.to_string(),
+        mean: 0.5,
+        std,
+        ci95_low: 0.4,
+        ci95_high: 0.6,
+        n: 3,
+    };
+    let variant = |dims: Vec<DimensionScoreAgg>| VariantEvaluation {
+        variant_id: "v1".to_string(),
+        description: "d".to_string(),
+        params: VariantParams {
+            theta_gap_minutes: 10,
+            max_msgs_per_block: 80,
+            retrieve_top_k: 3,
+            ablation: None,
+        },
+        fact_score: None,
+        fact_score_norm: None,
+        fact_score_point: None,
+        tone_score: None,
+        emotion_score: None,
+        dimension_scores: Some(dims),
+        failed_count: 0,
+        items: Vec::new(),
+    };
+    let eval_with = |dims: Vec<DimensionScoreAgg>| ProbeEvaluation {
+        results_file: String::new(),
+        persona_uid: "char-0001".into(),
+        dataset_seed: 1,
+        judge_used: false,
+        embedding_used: false,
+        generated_at: "t".into(),
+        variants: vec![variant(dims)],
+    };
+
+    let base = eval_with(vec![
+        agg("fact", 0.1),
+        agg("tone", 0.2),
+        agg("emotion", 0.3),
+    ]);
+    // 额外插入两个重算维度（std 明显不同），验证不参与既有口径的均值。
+    let with_recalc = eval_with(vec![
+        agg("fact", 0.1),
+        agg("fact_norm", 9.0),
+        agg("fact_point", 9.0),
+        agg("tone", 0.2),
+        agg("emotion", 0.3),
+    ]);
+
+    let base_std = compute_auxiliary_metrics(&base)
+        .profile_regression_output_stability
+        .expect("三维应有画像回归值");
+    let recalc_std = compute_auxiliary_metrics(&with_recalc)
+        .profile_regression_output_stability
+        .expect("三维应有画像回归值");
+    assert!(
+        (base_std - 0.2).abs() < 1e-12,
+        "三维 std 均值应为 (0.1+0.2+0.3)/3=0.2，实际 {base_std}"
+    );
+    assert!(
+        (recalc_std - base_std).abs() < 1e-12,
+        "新增事实维重算维度不应改变画像回归口径：{recalc_std} vs {base_std}"
+    );
+}
+
 /// 空评分数值（无 fact/emotion/聚合）→ 各指标 None（标注缺项而非报错）。
 #[test]
 fn auxiliary_metrics_empty_variants_all_none() {
@@ -1707,7 +2198,7 @@ fn auxiliary_metrics_empty_variants_all_none() {
 fn render_report_markdown_sections_cover_i_s_columns_and_limitations() {
     use super::report::{
         AblationComparisonRow, AblationReport, AuxiliaryMetrics, KnowledgeQualityReport,
-        ProbeReport, Recommendation, VariantAuxMetrics,
+        ProbeReport, Recommendation, VariantAuxMetrics, VariantStyleMetrics,
     };
     // 手工构造最小报告（重点校验渲染分段，不依赖完整评分明细）。
     let report = ProbeReport {
@@ -1734,6 +2225,32 @@ fn render_report_markdown_sections_cover_i_s_columns_and_limitations() {
                 false_positive_rate: 0.0,
                 false_negative_rate: 0.0,
                 miss_target_met: true,
+                judge_rates: vec![
+                    KnowledgeJudgeRates {
+                        judge: "legacy".to_string(),
+                        sample_count: 1,
+                        hit_rate: 1.0,
+                        false_positive_rate: 0.0,
+                        false_negative_rate: 0.0,
+                        miss_target_met: true,
+                    },
+                    KnowledgeJudgeRates {
+                        judge: "norm".to_string(),
+                        sample_count: 1,
+                        hit_rate: 1.0,
+                        false_positive_rate: 0.0,
+                        false_negative_rate: 0.0,
+                        miss_target_met: true,
+                    },
+                    KnowledgeJudgeRates {
+                        judge: "point".to_string(),
+                        sample_count: 1,
+                        hit_rate: 1.0,
+                        false_positive_rate: 0.0,
+                        false_negative_rate: 0.0,
+                        miss_target_met: true,
+                    },
+                ],
             },
             pooled: KnowledgeQualityScope {
                 scope: "pooled_all".to_string(),
@@ -1744,6 +2261,24 @@ fn render_report_markdown_sections_cover_i_s_columns_and_limitations() {
                 false_positive_rate: 0.0,
                 false_negative_rate: 0.5,
                 miss_target_met: false,
+                judge_rates: vec![
+                    KnowledgeJudgeRates {
+                        judge: "legacy".to_string(),
+                        sample_count: 2,
+                        hit_rate: 0.5,
+                        false_positive_rate: 0.0,
+                        false_negative_rate: 0.5,
+                        miss_target_met: false,
+                    },
+                    KnowledgeJudgeRates {
+                        judge: "norm".to_string(),
+                        sample_count: 0,
+                        hit_rate: 0.0,
+                        false_positive_rate: 0.0,
+                        false_negative_rate: 0.0,
+                        miss_target_met: false,
+                    },
+                ],
             },
             annotation: "双口径说明".to_string(),
         }),
@@ -1851,6 +2386,21 @@ fn render_report_markdown_sections_cover_i_s_columns_and_limitations() {
             profile_regression_output_stability: Some(0.15),
             annotation: "产物可复算近似".into(),
         },
+        style_metrics: vec![VariantStyleMetrics {
+            variant_id: "B1".into(),
+            description: "基线".into(),
+            reply_count: 30,
+            len_mean: 23.1,
+            len_median: 22.0,
+            len_le_30_rate: 0.8,
+            len_ref_overlap: Some(0.567),
+            tone_particle_rate: 0.878,
+            question_rate: 0.122,
+            exclaim_rate: 0.0,
+            repeat_rate: 0.0,
+            assistant_marker_rate: 0.011,
+            ref_len_mean: Some(15.9),
+        }],
     };
     let md = super::report::render_report_markdown(&report);
 
@@ -1881,6 +2431,16 @@ fn render_report_markdown_sections_cover_i_s_columns_and_limitations() {
         md.contains("知识层抽取质量评估（双口径）"),
         "知识层双口径小节必出"
     );
+    assert!(md.contains("| legacy |"), "知识层判据分栏应含 legacy 行");
+    assert!(md.contains("| norm |"), "知识层判据分栏应含 norm 行");
+    assert!(md.contains("| point |"), "知识层判据分栏应含 point 行");
+    // 客观风格形态指标节
+    assert!(
+        md.contains("风格形态指标（客观口径，对照语气 judge）"),
+        "风格形态指标节必出"
+    );
+    assert!(md.contains("参考重合"), "长度重合度列应出现");
+    assert!(md.contains("助手腔"), "助手腔列应出现");
 }
 
 // =========================================================
@@ -1908,6 +2468,10 @@ fn ablation_judgment_excludes_uncalibrated_emotion() {
                 cosine: Some(score),
                 keyword_hit: score,
                 score,
+                keyword_hit_norm: Some(score),
+                fact_point: Some(score),
+                score_norm: Some(score),
+                score_point: Some(score),
             }),
             tone: (dim == "tone").then_some(ToneItemScore {
                 score: score as u32,
@@ -1931,6 +2495,8 @@ fn ablation_judgment_excludes_uncalibrated_emotion() {
                 ablation: Some(id.to_string()),
             },
             fact_score: None,
+            fact_score_norm: None,
+            fact_score_point: None,
             tone_score: None,
             emotion_score: None,
             dimension_scores: None,
@@ -1968,8 +2534,13 @@ fn ablation_judgment_excludes_uncalibrated_emotion() {
     let ab = build_ablation_report(&exp, &eval);
     assert_eq!(
         ab.judgment_dimensions,
-        vec!["fact".to_string(), "tone".to_string()],
-        "判定维度仅事实维 + 语气维"
+        vec![
+            "fact".to_string(),
+            "fact_norm".to_string(),
+            "fact_point".to_string(),
+            "tone".to_string()
+        ],
+        "判定维度为事实维三口径（fact / fact_norm / fact_point）+ 语气维"
     );
     assert_eq!(ab.descriptive_dimensions, vec!["emotion".to_string()]);
     assert!(
@@ -1977,6 +2548,9 @@ fn ablation_judgment_excludes_uncalibrated_emotion() {
         "情感维不得出现在层价值判定行中"
     );
     assert!(ab.rows.iter().any(|r| r.dimension == "fact"));
+    // 两个事实维重算口径也成行（与旧 fact 口径并列，供新旧判据核对）。
+    assert!(ab.rows.iter().any(|r| r.dimension == "fact_norm"));
+    assert!(ab.rows.iter().any(|r| r.dimension == "fact_point"));
     assert!(ab.dimension_scope_note.contains("未校准"));
 
     // 渲染：描述性小节必出（用最小报告）
@@ -2004,6 +2578,7 @@ fn ablation_judgment_excludes_uncalibrated_emotion() {
                 false_positive_rate: 0.0,
                 false_negative_rate: 0.0,
                 miss_target_met: false,
+                judge_rates: vec![],
             },
             pooled: KnowledgeQualityScope {
                 scope: "pooled_all".to_string(),
@@ -2014,6 +2589,7 @@ fn ablation_judgment_excludes_uncalibrated_emotion() {
                 false_positive_rate: 0.0,
                 false_negative_rate: 0.0,
                 miss_target_met: false,
+                judge_rates: vec![],
             },
             annotation: "双口径".to_string(),
         }),
@@ -2035,11 +2611,12 @@ fn ablation_judgment_excludes_uncalibrated_emotion() {
             profile_regression_output_stability: None,
             annotation: "无".into(),
         },
+        style_metrics: vec![],
     };
     let md = super::report::render_report_markdown(&report);
     assert!(md.contains("描述性指标（不参与层价值判定）"));
     assert!(md.contains("口径未校准"));
-    assert!(md.contains("判定维度：fact / tone"));
+    assert!(md.contains("判定维度：fact / fact_norm / fact_point / tone"));
 }
 
 /// 知识层质量双口径：主口径只统计含记忆注入档位（B1/F0/I_*），
@@ -2081,6 +2658,73 @@ fn knowledge_quality_splits_memory_and_pooled_scopes() {
     // 口径说明同时提到两者
     assert!(kq.annotation.contains("含记忆注入"));
     assert!(kq.annotation.contains("全部档位池化"));
+    // 判据分栏：每口径恒有 legacy/norm/point 三行，legacy 行与扁平字段一致
+    let judges: Vec<&str> = kq
+        .primary
+        .judge_rates
+        .iter()
+        .map(|r| r.judge.as_str())
+        .collect();
+    assert_eq!(judges, vec!["legacy", "norm", "point"]);
+    let legacy = &kq.primary.judge_rates[0];
+    assert_eq!(legacy.sample_count, kq.primary.sample_count);
+    assert!((legacy.false_negative_rate - kq.primary.false_negative_rate).abs() < 1e-9);
+    assert!((legacy.hit_rate - 1.0).abs() < 1e-9);
+    assert!(legacy.miss_target_met);
+    // 合成题三口径同分 → 三行数值一致
+    for r in &kq.primary.judge_rates {
+        assert_eq!(r.sample_count, 4);
+        assert!((r.hit_rate - 1.0).abs() < 1e-9, "{r:?}");
+    }
+    // 对照口径（含 0.2 低分档）legacy 行与扁平字段一致
+    let pooled_legacy = &kq.pooled.judge_rates[0];
+    assert_eq!(pooled_legacy.sample_count, 8);
+    assert!((pooled_legacy.false_negative_rate - 0.5).abs() < 1e-9);
+    assert!((pooled_legacy.hit_rate - 0.5).abs() < 1e-9);
+    assert!(!pooled_legacy.miss_target_met);
+    // 判据附注：主口径逐判据漏报（三口径同分 → 均标为达标）
+    assert!(kq.annotation.contains("legacy 漏报"));
+    assert!(kq.annotation.contains("norm 漏报"));
+    assert!(kq.annotation.contains("point 漏报"));
+}
+
+/// 旧评分数值（缺 score_norm/score_point 字段）→ norm/point 口径样本为 0、不达标，
+/// legacy 行仍从扁平字段回填，渲染不 panic。
+#[test]
+fn knowledge_judge_rates_backcompat_without_new_judges() {
+    let mut variant = eval_variant_scores("B1", &[0.8, 0.2]);
+    for item in &mut variant.items {
+        if let Some(f) = item.fact.as_mut() {
+            f.score_norm = None;
+            f.score_point = None;
+        }
+    }
+    let eval = ProbeEvaluation {
+        results_file: "r".into(),
+        persona_uid: "u".into(),
+        dataset_seed: 1,
+        judge_used: false,
+        embedding_used: true,
+        generated_at: "t".into(),
+        variants: vec![variant],
+    };
+    let kq = super::report::assess_knowledge_quality(&eval);
+    // legacy：2 题（0.8 命中、0.2 漏报）→ 命中率 50% / 漏报率 50%
+    let legacy = &kq.primary.judge_rates[0];
+    assert_eq!(legacy.sample_count, 2);
+    assert!((legacy.hit_rate - 0.5).abs() < 1e-9);
+    assert!((legacy.false_negative_rate - 0.5).abs() < 1e-9);
+    assert!(!legacy.miss_target_met);
+    // norm/point：字段缺失 → 样本 0、率 0、不达标
+    for r in &kq.primary.judge_rates[1..] {
+        assert_eq!(r.sample_count, 0, "{r:?}");
+        assert_eq!(r.hit_rate, 0.0);
+        assert_eq!(r.false_negative_rate, 0.0);
+        assert!(!r.miss_target_met);
+    }
+    // 扁平字段仍取 legacy
+    assert_eq!(kq.primary.sample_count, 2);
+    assert_eq!(kq.primary.fact_hit_count, 1);
 }
 
 /// 检索器空载 → 本轮无效且告警；文档数 > 0 且通道有命中 → 有效无告警。
@@ -2144,4 +2788,105 @@ fn probe_experiment_diagnostics_serde_backcompat() {
     let d = roundtrip.diagnostics.expect("diagnostics 应保留");
     assert_eq!(d.retriever_doc_count, 129);
     assert!(d.valid);
+}
+
+// =========================================================
+// 风格形态指标（客观口径，对照短回复下区分力不足的语气 judge）
+// =========================================================
+
+/// 客观风格形态指标：长度形态 / 参考长度分布重合 / 语气词 / 疑问感叹 / 复读 / 助手腔，
+/// 且失败题与空回复不进样本；无评分数值（无 persona 参考）时重合度与参考均长为 None。
+#[test]
+fn style_metrics_compute_covers_length_and_marks() {
+    use super::report::compute_style_metrics;
+
+    // 1 档 5 题：4 条有效回复（含 1 条重复）+ 1 条失败（不计入）
+    let experiment: ProbeExperiment = serde_json::from_str(
+        r#"{
+          "dataset_file": "ds.json",
+          "dataset_seed": 1,
+          "persona_uid": "char-0001",
+          "rebuild_utt": false,
+          "variants": [{
+            "variant_id": "B1",
+            "description": "基线",
+            "params": {"theta_gap_minutes": 30, "max_msgs_per_block": 5, "retrieve_top_k": 5},
+            "failed_count": 1,
+            "runs": [
+              {"item_id":"tone-0001","dimension":"tone","question":"q","reply":"哦哦",
+               "metrics":{"reply_chars":2,"elapsed_ms":1},"error":null},
+              {"item_id":"tone-0002","dimension":"tone","question":"q","reply":"哦哦",
+               "metrics":{"reply_chars":2,"elapsed_ms":1},"error":null},
+              {"item_id":"tone-0003","dimension":"tone","question":"q","reply":"我找一下，你先看看？",
+               "metrics":{"reply_chars":11,"elapsed_ms":1},"error":null},
+              {"item_id":"tone-0004","dimension":"tone","question":"q","reply":"总的来说，我建议你这样做。",
+               "metrics":{"reply_chars":13,"elapsed_ms":1},"error":null},
+              {"item_id":"tone-0005","dimension":"tone","question":"q","reply":"",
+               "metrics":{"reply_chars":0,"elapsed_ms":1},"error":"失败"}
+            ]
+          }],
+          "generated_at": "t"
+        }"#,
+    )
+    .expect("实验产物反序列化");
+
+    // persona 参考（tone 题 reference）长度 [2, 4] → 均长 3.0
+    let evaluation: ProbeEvaluation = serde_json::from_str(
+        r#"{
+          "results_file": "r.json",
+          "persona_uid": "char-0001",
+          "dataset_seed": 1,
+          "judge_used": false,
+          "embedding_used": false,
+          "generated_at": "t",
+          "variants": [{
+            "variant_id": "B1",
+            "description": "基线",
+            "params": {"theta_gap_minutes": 30, "max_msgs_per_block": 5, "retrieve_top_k": 5},
+            "fact_score": null,
+            "tone_score": null,
+            "failed_count": 1,
+            "items": [
+              {"item_id":"tone-0001","dimension":"tone","question":"q","reference":"哦哦",
+               "reply_preview":"哦哦","fact":null,"tone":null,"emotion":null,"error":null},
+              {"item_id":"tone-0002","dimension":"tone","question":"q","reference":"我找一下",
+               "reply_preview":"哦哦","fact":null,"tone":null,"emotion":null,"error":null}
+            ]
+          }]
+        }"#,
+    )
+    .expect("评分产物反序列化");
+
+    let metrics = compute_style_metrics(&experiment, Some(&evaluation));
+    assert_eq!(metrics.len(), 1);
+    let m = &metrics[0];
+    assert_eq!(m.variant_id, "B1");
+    assert_eq!(m.reply_count, 4, "失败题与空回复不应计入");
+    // 长度 [2, 2, 10, 13] → 均长 6.75 / 中位 (2+10)/2 = 6.0
+    assert!((m.len_mean - 6.75).abs() < 1e-9, "{m:?}");
+    assert!((m.len_median - 6.0).abs() < 1e-9);
+    assert!((m.len_le_30_rate - 1.0).abs() < 1e-9);
+    // "哦哦" 出现 2 次 → 复读率 0.25
+    assert!((m.repeat_rate - 0.25).abs() < 1e-9);
+    // 语气词：仅 2 条 "哦哦" 命中（"我找一下，你先看看？" 不含语气词字符）
+    assert!((m.tone_particle_rate - 0.5).abs() < 1e-9);
+    assert!(
+        (m.question_rate - 0.25).abs() < 1e-9,
+        "仅 1 条以 ? / ？ 结尾"
+    );
+    assert_eq!(m.exclaim_rate, 0.0);
+    assert!(
+        (m.assistant_marker_rate - 0.25).abs() < 1e-9,
+        "含「总的来说」1 条"
+    );
+    // 长度直方图：回复 {0..4: 0.5, 10..14: 0.5} vs 参考 {0..4: 1.0} → 重合 0.5
+    assert!((m.ref_len_mean.expect("参考均长") - 3.0).abs() < 1e-9);
+    assert!((m.len_ref_overlap.expect("长度重合度") - 0.5).abs() < 1e-9);
+
+    // 无评分数值（无 persona 参考）→ 长度重合度与参考均长不可得，其余指标仍产出
+    let no_ref = compute_style_metrics(&experiment, None);
+    assert_eq!(no_ref[0].reply_count, 4);
+    assert!(no_ref[0].len_ref_overlap.is_none());
+    assert!(no_ref[0].ref_len_mean.is_none());
+    assert!((no_ref[0].len_mean - 6.75).abs() < 1e-9);
 }

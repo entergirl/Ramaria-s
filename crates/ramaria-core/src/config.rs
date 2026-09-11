@@ -195,6 +195,8 @@ pub struct RamariaConfig {
 ///     对话示例 / 原文样例（原文片段）。
 ///   - 脉络层（`narrative` + `bridge`）: 近期对话脉络 / 桥接（上一会话尾部）。
 ///   - RAG 相关记忆（`memory_rag`）: ChatRequest.memory_context（L1/L2/L3 摘要检索）。
+///   - 社交对话基调（`social_tone`）: 全局体裁约束，非记忆层；不参与记忆层消融，
+///     全开/全关档位均保持注入（详见字段注释）。
 #[derive(Debug, Clone)]
 pub struct InjectionGate {
     /// 行为规则注入（`## 行为规则`）。
@@ -213,6 +215,12 @@ pub struct InjectionGate {
     pub bridge: bool,
     /// RAG 相关历史记忆注入（`ChatRequest.memory_context`，摘要/转述通道）。
     pub memory_rag: bool,
+    /// 是否注入全局社交对话基调块（`### 社交对话基调`）。
+    ///
+    /// 基调是面向全部 persona 的体裁约束、非记忆层闸门：默认开启，
+    /// 关闭后 prompt 仅保留 persona 风格规则（供对照/语域切换）；
+    /// probe 的 statement 档按题关闭。
+    pub social_tone: bool,
 }
 
 impl InjectionGate {
@@ -227,6 +235,8 @@ impl InjectionGate {
             narrative: true,
             bridge: true,
             memory_rag: true,
+            // 基调是全局体裁约束：全开档位与默认路径保持一致注入。
+            social_tone: true,
         }
     }
 
@@ -241,6 +251,9 @@ impl InjectionGate {
             narrative: false,
             bridge: false,
             memory_rag: false,
+            // 基调是全局体裁约束、非记忆层闸门：不随 B0/B1/S_*/I_* 关闭，
+            // 保持这些档位既有消融语义与历史结果可比性。
+            social_tone: true,
         }
     }
 }
@@ -2226,6 +2239,24 @@ enabled = false
         let off = InjectionGate::all_off();
         assert!(!off.behavior && !off.memory_rag && !off.narrative);
         assert!(on.behavior && on.memory_rag && on.narrative);
+    }
+
+    /// 社交对话基调是全局体裁约束、非记忆层闸门：全关档位（B0 等消融）
+    /// 仍保持注入，全开与默认同样开启（保证既有消融语义与历史可比）。
+    #[test]
+    fn injection_gate_social_tone_survives_all_off() {
+        assert!(
+            InjectionGate::all_off().social_tone,
+            "全关档位不得关闭全局社交对话基调"
+        );
+        assert!(
+            InjectionGate::all_on().social_tone,
+            "全开档位应注入全局社交对话基调"
+        );
+        assert!(
+            InjectionGate::default().social_tone,
+            "默认闸门应注入全局社交对话基调"
+        );
     }
 
     /// 闸门不写入持久化：JSON/TOML 序列化不含 injection 键，

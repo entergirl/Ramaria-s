@@ -211,6 +211,8 @@ var RamariaProbe = (function () {
         // 常见整档评分键 → 中文标签
         var LABEL_MAP = {
             fact_score: '事实',
+            fact_score_norm: '事实(归一)',
+            fact_score_point: '事实(事实点)',
             tone_score: '语气',
             emotion_score: '情绪',
             fact_mean: '事实均值',
@@ -221,7 +223,8 @@ var RamariaProbe = (function () {
             score: '得分',
         };
 
-        var KEY_ORDER = ['fact_score', 'fact_mean', 'tone_score', 'tone_mean',
+        var KEY_ORDER = ['fact_score', 'fact_score_norm', 'fact_score_point',
+            'fact_mean', 'tone_score', 'tone_mean',
             'emotion_score', 'emotion_mean', 'overall', 'score', 'mean'];
 
         for (var i = 0; i < KEY_ORDER.length; i++) {
@@ -234,7 +237,13 @@ var RamariaProbe = (function () {
         // 若存在嵌套 dimension_scores 聚合（evaluate --repeat），并入主列表
         var dims = item.dimension_scores;
         if (dims && typeof dims === 'object' && !Array.isArray(dims)) {
-            var DIM_LABELS = { fact: '事实', tone: '语气', emotion: '情绪' };
+            var DIM_LABELS = {
+                fact: '事实',
+                fact_norm: '事实(归一)',
+                fact_point: '事实(事实点)',
+                tone: '语气',
+                emotion: '情绪',
+            };
             Object.keys(dims).forEach(function (key) {
                 var d = dims[key];
                 if (!d || typeof d !== 'object') return;

@@ -355,6 +355,29 @@ pub struct ContextTurn {
     pub content: String,
 }
 
+/// 题项答复体裁：`chat`（缺省，社交聊天）或 `statement`（陈述说明，可及性轨）。
+///
+/// 说明:
+/// - `statement` 题送入对话管线时追加陈述说明引导并关闭全局社交对话基调，
+///   用于对照两种语域下的事实召回表现。
+/// - `chat` 为缺省：旧数据集缺省即社交聊天语域；序列化时省略该键（最小差异）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ItemRegister {
+    /// 缺省：社交聊天语域。
+    #[default]
+    Chat,
+    /// 陈述说明语域（可及性轨）。
+    Statement,
+}
+
+impl ItemRegister {
+    /// 是否为缺省社交聊天体裁（`skip_serializing_if` 用：缺省时省略键）。
+    pub(super) fn is_chat(&self) -> bool {
+        matches!(self, Self::Chat)
+    }
+}
+
 /// 单条测试问题。
 ///
 /// 字段约定:
@@ -366,6 +389,8 @@ pub struct ContextTurn {
 /// - `source_ref`: 溯源标识（session 或事件），便于回查原始数据，不记录原文。
 /// - `context`: 该 question 之前紧邻的上文轮次（时间正序，不含 question 本身），
 ///   run 时预置到本轮对话历史；无上文（夹具题 / 模板化问句）时为空。
+/// - `register`: 答复体裁（缺省 `chat` 社交聊天 / `statement` 陈述说明），
+///   旧数据集缺省为 `chat`，序列化时缺省值省略键。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DatasetItem {
     pub id: String,
@@ -377,6 +402,9 @@ pub struct DatasetItem {
     /// 上文对话轮次（时间正序；旧数据集缺省为空 = 不加下文）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context: Vec<ContextTurn>,
+    /// 答复体裁（缺省 = Chat；旧数据集缺省兼容，序列化时 Chat 省略键）。
+    #[serde(default, skip_serializing_if = "ItemRegister::is_chat")]
+    pub register: ItemRegister,
 }
 
 /// 档位非 utt 参数覆盖（可选；`None` 字段使用配置基准值）。

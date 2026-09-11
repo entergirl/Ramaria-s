@@ -726,7 +726,7 @@ impl App {
             // 与 `load_examples_for_input` 的预选上限保持一致（双闸门）。
             // 注入闸门映射（探针消融）：把 InjectionGate 逐子段翻译为 PromptConfig
             // 渲染开关——行为/知识在数据层已置空（behavior_decision/knowledge_facts），
-            // 此处只需表达层与记忆块子段的渲染开关。
+            // 此处只需表达层、记忆块与全局体裁（基调）的渲染开关。
             let config = PromptConfig {
                 max_examples,
                 include_examples: injection.examples,
@@ -735,6 +735,9 @@ impl App {
                 include_memory_rag: injection.memory_rag,
                 include_utt: injection.utt,
                 include_bridge: injection.bridge,
+                // 全局社交对话基调（体裁约束，非记忆层）：默认开，probe 的
+                // statement 档经闸门关闭（陈述/知识表述语域对照）。
+                include_social_tone: injection.social_tone,
                 // 知识块渲染预算接线：core [knowledge].injection_budget_chars
                 // 默认 800 → Some(800)，与 layers 默认预算一致（行为等价）；显式值生效。
                 knowledge_block_max_chars: knowledge_budget_chars,

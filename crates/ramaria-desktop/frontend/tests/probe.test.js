@@ -107,6 +107,30 @@ test('summarize: evaluate 形态含 dimension_scores 聚合', () => {
   assert.ok(labels.includes('事实（逐轮）'), `实际标签: ${labels.join(',')}`);
 });
 
+test('summarize: 事实维重算口径（长度归一 / 事实点）标签可见', () => {
+  const v = {
+    judge_used: false,
+    variants: [
+      {
+        variant_id: 'B1',
+        fact_score: 0.44,
+        fact_score_norm: 0.52,
+        fact_score_point: 0.59,
+        dimension_scores: {
+          fact_norm: { mean: 0.52, n: 2 },
+          fact_point: { mean: 0.59, n: 2 },
+        },
+      },
+    ],
+  };
+  const s = probe.summarize(v);
+  const labels = s.variants[0].scores.map((x) => x.label);
+  assert.ok(labels.includes('事实(归一)'), `实际标签: ${labels.join(',')}`);
+  assert.ok(labels.includes('事实(事实点)'), `实际标签: ${labels.join(',')}`);
+  assert.ok(labels.includes('事实(归一)（逐轮）'), `实际标签: ${labels.join(',')}`);
+  assert.ok(labels.includes('事实(事实点)（逐轮）'), `实际标签: ${labels.join(',')}`);
+});
+
 test('summarize: run 形态可识别并返回空态', () => {
   const s = probe.summarize({ dataset_seed: 42, variants: [] });
   assert.equal(s.kind, 'run');

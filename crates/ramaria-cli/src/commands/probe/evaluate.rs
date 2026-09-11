@@ -2,7 +2,8 @@
 //!
 //! 设计特点:
 //! - `run_evaluate`：读取 probe run 实验结果，按档位逐题评分并输出评分数值文件 / JSON / 文本摘要。
-//! - 事实维：embedding 余弦 + 关键词 2-gram 命中加权；embedding 不可用退化为纯关键词。
+//! - 事实维：embedding 余弦 + 关键词项加权，关键词项并行三口径（旧 2-gram 覆盖 /
+//!   长度归一命中 / 子句级事实点召回）；embedding 不可用退化为纯关键词。
 //! - 语气维：LLM-as-judge（rubric 1~5、温度 0、few-shot 锚定）；仅本地后端
 //!   （LM Studio / 本地 Ollama）可用，线上后端自动跳过（隐私口径，D-V20-006）；
 //!   参考回复取数据集 persona 原回复（tone 题 reference），非提问文本。
@@ -93,6 +94,12 @@ pub(super) struct VariantEvaluation {
     pub params: VariantParams,
     /// 事实维均分（0.0~1.0；无 fact 题或全失败为 None）
     pub fact_score: Option<f64>,
+    /// 事实维长度归一均分（0.0~1.0；旧产物无此字段 → None）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fact_score_norm: Option<f64>,
+    /// 事实维事实点均分（0.0~1.0；旧产物无此字段 → None）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fact_score_point: Option<f64>,
     /// 语气维均分（1.0~5.0；judge 不可用或全失败为 None）
     pub tone_score: Option<f64>,
     /// 情感表达维均分（0.0~1.0 rubric；无 emotion 题或全失败为 None）。
@@ -116,7 +123,7 @@ pub(super) struct VariantEvaluation {
 /// 单维度的跨轮评分聚合（mean ± 95% CI）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(super) struct DimensionScoreAgg {
-    /// 维度名（fact / tone / emotion）
+    /// 维度名（fact / fact_norm / fact_point / tone / emotion）
     pub dimension: String,
     /// 跨轮均值
     pub mean: f64,
@@ -165,15 +172,44 @@ pub(super) struct ItemEvaluation {
     pub error: Option<String>,
 }
 
-/// 事实维单题评分（embedding 余弦 + 关键词命中加权）。
+/// 事实维单题评分（embedding 余弦 + 多判据关键词加权）。
+///
+/// 判据:
+/// - `cosine`: 回复与参考的语义相似度（embedding 不可用为 None）。
+/// - `keyword_hit`: 旧 2-gram 覆盖率，分母为**参考** 2-gram 总数——不随回复长度变化，
+///   短回复的分子天然偏小，会被机械压低；保留该口径仅用于双口径对照。
+/// - `keyword_hit_norm`: 长度归一命中率，分母为 `min(参考, 回复)` 内容 2-gram 数，
+///   不再随回复长度单调衰减。
+/// - `fact_point`: 参考子句中被回复命中至少一个内容 2-gram 的比例，衡量"回复体现了
+///   至少一个事实点"，与整段覆盖率互补（长摘要参考下短社交回复通常只覆盖部分事实点）。
+///
+/// 综合分:
+/// - `score`: 旧口径综合分（`0.6×cosine + 0.4×keyword_hit`），冻结不变以支持口径对照。
+/// - `score_norm` / `score_point`: 同权重，仅把关键词项替换为 `keyword_hit_norm` /
+///   `fact_point`；cosine 不可用时与旧口径一致，降级为纯关键词项。
+///
+/// 字段约定:
+/// - 四个新增字段均带 `#[serde(default)]`：旧评分数值文件无这些字段 → None。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(super) struct FactItemScore {
     /// 余弦相似度（-1.0~1.0；embedding 不可用为 None）
     pub cosine: Option<f64>,
-    /// 关键词命中率（0.0~1.0，参考文本 token 在回复中出现的比例）
+    /// 旧口径关键词命中率（0.0~1.0，参考 2-gram 在回复中出现的比例）
     pub keyword_hit: f64,
-    /// 综合分（0.0~1.0）
+    /// 旧口径综合分（0.0~1.0）
     pub score: f64,
+    /// 长度归一关键词命中率（0.0~1.0；旧产物无此字段 → None）
+    #[serde(default)]
+    pub keyword_hit_norm: Option<f64>,
+    /// 事实点召回（0.0~1.0；旧产物无此字段 → None）
+    #[serde(default)]
+    pub fact_point: Option<f64>,
+    /// 长度归一综合分（0.6×cosine + 0.4×keyword_hit_norm；cosine 不可用时降级为纯关键词）
+    #[serde(default)]
+    pub score_norm: Option<f64>,
+    /// 事实点综合分（0.6×cosine + 0.4×fact_point；cosine 不可用时降级为纯关键词）
+    #[serde(default)]
+    pub score_point: Option<f64>,
 }
 
 /// 语气维单题评分（LLM-as-judge）。
@@ -383,6 +419,8 @@ pub(super) async fn run_evaluate(
     for vr in &selected {
         let mut items = Vec::with_capacity(vr.runs.len());
         let mut fact_scores: Vec<f64> = Vec::new();
+        let mut fact_scores_norm: Vec<f64> = Vec::new();
+        let mut fact_scores_point: Vec<f64> = Vec::new();
         let mut tone_scores: Vec<u32> = Vec::new();
         let mut emotion_scores: Vec<f64> = Vec::new();
         let mut failed = 0usize;
@@ -394,7 +432,15 @@ pub(super) async fn run_evaluate(
             }
             // 汇总维度均分（仅成功题计入）
             match &item_eval.fact {
-                Some(f) if item_eval.error.is_none() => fact_scores.push(f.score),
+                Some(f) if item_eval.error.is_none() => {
+                    fact_scores.push(f.score);
+                    if let Some(s) = f.score_norm {
+                        fact_scores_norm.push(s);
+                    }
+                    if let Some(s) = f.score_point {
+                        fact_scores_point.push(s);
+                    }
+                }
                 _ => {}
             }
             match &item_eval.tone {
@@ -424,6 +470,16 @@ pub(super) async fn run_evaluate(
         } else {
             Some(fact_scores.iter().sum::<f64>() / fact_scores.len() as f64)
         };
+        let fact_score_norm = if fact_scores_norm.is_empty() {
+            None
+        } else {
+            Some(fact_scores_norm.iter().sum::<f64>() / fact_scores_norm.len() as f64)
+        };
+        let fact_score_point = if fact_scores_point.is_empty() {
+            None
+        } else {
+            Some(fact_scores_point.iter().sum::<f64>() / fact_scores_point.len() as f64)
+        };
         let tone_score = if tone_scores.is_empty() {
             None
         } else {
@@ -438,6 +494,8 @@ pub(super) async fn run_evaluate(
         tracing::info!(
             variant_id = %vr.variant_id,
             fact_score,
+            fact_score_norm,
+            fact_score_point,
             tone_score,
             emotion_score,
             failed,
@@ -479,6 +537,8 @@ pub(super) async fn run_evaluate(
             description: vr.description.clone(),
             params: vr.params.clone(),
             fact_score,
+            fact_score_norm,
+            fact_score_point,
             tone_score,
             emotion_score,
             dimension_scores,
@@ -730,7 +790,11 @@ async fn evaluate_item(
 /// - 跨 N 轮对轮均分计算 mean / std / 95% CI（t 分布，复用 `metric_stat`），
 ///   `n` = 有该维评分的有效轮数。
 ///
-/// 返回按 fact → tone → emotion 排序的聚合记录；无任何有效轮时返回空。
+/// 事实维按三口径分别聚合（`fact` = 旧 2-gram 覆盖口径，`fact_norm` = 长度归一口径，
+/// `fact_point` = 子句级事实点口径），三者的轮均分各自独立跨轮统计，互不合并。
+///
+/// 返回按 fact → fact_norm → fact_point → tone → emotion 排序的聚合记录；
+/// 无任何有效轮时返回空。
 /// 单题失败跳过（该轮其余成功题仍计入），与主流程"单题失败不中断"一致。
 ///
 /// 节流:
@@ -745,11 +809,15 @@ pub(super) async fn aggregate_round_dimension_scores(
     judge_delay_ms: u64,
 ) -> Vec<DimensionScoreAgg> {
     let mut fact_round_means: Vec<f64> = Vec::new();
+    let mut fact_norm_round_means: Vec<f64> = Vec::new();
+    let mut fact_point_round_means: Vec<f64> = Vec::new();
     let mut tone_round_means: Vec<f64> = Vec::new();
     let mut emotion_round_means: Vec<f64> = Vec::new();
 
     for round in rounds {
         let mut fact_scores: Vec<f64> = Vec::new();
+        let mut fact_norm_scores: Vec<f64> = Vec::new();
+        let mut fact_point_scores: Vec<f64> = Vec::new();
         let mut tone_scores: Vec<u32> = Vec::new();
         let mut emotion_scores: Vec<f64> = Vec::new();
         for run in &round.runs {
@@ -768,6 +836,12 @@ pub(super) async fn aggregate_round_dimension_scores(
             }
             if let Some(f) = &item_eval.fact {
                 fact_scores.push(f.score);
+                if let Some(s) = f.score_norm {
+                    fact_norm_scores.push(s);
+                }
+                if let Some(s) = f.score_point {
+                    fact_point_scores.push(s);
+                }
             }
             if let Some(t) = &item_eval.tone {
                 tone_scores.push(t.score);
@@ -779,6 +853,14 @@ pub(super) async fn aggregate_round_dimension_scores(
         if !fact_scores.is_empty() {
             fact_round_means.push(fact_scores.iter().sum::<f64>() / fact_scores.len() as f64);
         }
+        if !fact_norm_scores.is_empty() {
+            fact_norm_round_means
+                .push(fact_norm_scores.iter().sum::<f64>() / fact_norm_scores.len() as f64);
+        }
+        if !fact_point_scores.is_empty() {
+            fact_point_round_means
+                .push(fact_point_scores.iter().sum::<f64>() / fact_point_scores.len() as f64);
+        }
         if !tone_scores.is_empty() {
             tone_round_means
                 .push(tone_scores.iter().sum::<u32>() as f64 / tone_scores.len() as f64);
@@ -789,11 +871,23 @@ pub(super) async fn aggregate_round_dimension_scores(
         }
     }
 
-    let mut out = Vec::with_capacity(3);
+    let mut out = Vec::with_capacity(5);
     if !fact_round_means.is_empty() {
         out.push(DimensionScoreAgg::from_metric(
             "fact",
             &metric_stat(&fact_round_means),
+        ));
+    }
+    if !fact_norm_round_means.is_empty() {
+        out.push(DimensionScoreAgg::from_metric(
+            "fact_norm",
+            &metric_stat(&fact_norm_round_means),
+        ));
+    }
+    if !fact_point_round_means.is_empty() {
+        out.push(DimensionScoreAgg::from_metric(
+            "fact_point",
+            &metric_stat(&fact_point_round_means),
         ));
     }
     if !tone_round_means.is_empty() {
@@ -818,26 +912,34 @@ pub(super) async fn aggregate_round_dimension_scores(
 }
 
 // =========================================================
-// 事实维评分（golden：embedding 余弦 + 关键词命中）
+// 事实维评分（golden：embedding 余弦 + 多判据关键词项）
 // =========================================================
 
 /// 事实维单题评分。
 ///
-/// 评分公式:
-/// - embedding 可用: `综合分 = 0.6 × cosine(reply, reference) + 0.4 × 关键词命中率`。
-/// - embedding 不可用: `综合分 = 关键词命中率`（纯关键词降级，标注 embedding 未用）。
+/// 评分公式（三套口径，权重相同，仅关键词项不同）:
+/// - embedding 可用: `0.6 × cosine(reply, reference) + 0.4 × 关键词项`。
+/// - embedding 不可用: `关键词项`（纯关键词降级，标注 embedding 未用）。
+/// - 关键词项: 旧 2-gram 覆盖率（`score`）/ 长度归一命中率（`score_norm`）/
+///   子句级事实点召回（`score_point`）。
 ///
 /// 说明:
 /// - `reference` 为事实维 golden 参考（事件摘要）；`reply` 为模型对探针问题的回复。
-/// - 关键词命中率衡量 reply 是否涵盖 reference 中的关键信息（按 2-gram 字面重叠）。
-/// - cosine 为 reply 与 reference 的语义相似度（embedding 向量余弦）。
+/// - 旧口径 `score` 冻结不变：既保证历史产物可比，也支持"旧 2-gram 覆盖 vs
+///   长度中性口径"的双口径对照（短回复在旧口径下被机械压低）。
+/// - cosine 为 reply 与 reference 的语义相似度（embedding 向量余弦）；不可用
+///   （无 embedder 或调用失败）时三套口径一致降级为纯关键词项。
 async fn score_fact_item(
     reply: &str,
     reference: &str,
     embedder: Option<&dyn EmbeddingProvider>,
 ) -> FactItemScore {
-    // 关键词命中率：reference 的关键 2-gram 在 reply 中的覆盖比例
+    // 关键词命中率：reference 的关键 2-gram 在 reply 中的覆盖比例（旧口径，分母固定）
     let keyword_hit = keyword_hit_score(reply, reference);
+    // 长度中性口径：分母取 min(参考, 回复) 内容 2-gram 数
+    let keyword_hit_norm = keyword_hit_norm_score(reply, reference);
+    // 子句级口径：参考事实点被回复覆盖的比例
+    let fact_point = fact_point_score(reply, reference);
 
     // embedding 余弦：reply vs reference
     let cosine = match embedder {
@@ -858,10 +960,31 @@ async fn score_fact_item(
     }
     .clamp(0.0, 1.0);
 
+    // 长度归一 / 事实点综合分：与旧综合分同权重，仅替换关键词项；
+    // cosine 不可用时与旧口径一致，降级为纯关键词项。
+    let score_norm = Some(
+        match cosine {
+            Some(c) => FACT_COSINE_WEIGHT * c.max(0.0) + FACT_KEYWORD_WEIGHT * keyword_hit_norm,
+            None => FACT_KEYWORD_ONLY_WEIGHT * keyword_hit_norm,
+        }
+        .clamp(0.0, 1.0),
+    );
+    let score_point = Some(
+        match cosine {
+            Some(c) => FACT_COSINE_WEIGHT * c.max(0.0) + FACT_KEYWORD_WEIGHT * fact_point,
+            None => FACT_KEYWORD_ONLY_WEIGHT * fact_point,
+        }
+        .clamp(0.0, 1.0),
+    );
+
     FactItemScore {
         cosine,
         keyword_hit,
         score,
+        keyword_hit_norm: Some(keyword_hit_norm),
+        fact_point: Some(fact_point),
+        score_norm,
+        score_point,
     }
 }
 
@@ -902,6 +1025,89 @@ fn keyword_hit_score(reply: &str, reference: &str) -> f64 {
 
     // 命中率 = 命中 bigram 数 / reference bigram 总数（上限 1.0）
     (hit as f64 / ref_bigrams.len() as f64).clamp(0.0, 1.0)
+}
+
+/// 中文标点集合（内容 2-gram 过滤与子句切分用）。
+const FACT_PUNCT_CHARS: &[char] = &[
+    '，', '。', '；', '、', '！', '？', '…', '—', '～', '·', '「', '」', '『', '』', '（', '）',
+    '(', ')', '《', '》', '〈', '〉', '“', '”', '"', '\'', '‘', '’', '：', ':', ',', '.', '!', '?',
+    ';', '\n', '\r', '\t', ' ',
+];
+
+/// 高频功能字（内容 2-gram 过滤：两侧皆为功能字的 2-gram 不计入内容）。
+const FACT_STOP_CHARS: &[char] = &[
+    '的', '了', '是', '在', '有', '和', '与', '我', '你', '他', '她', '它', '们', '这', '那', '个',
+    '就', '都', '也', '还', '很', '太', '不', '没', '中', '上', '下', '之', '而', '及', '等', '把',
+    '被', '让', '给', '对', '从', '到', '为', '以', '于', '会', '能', '要', '说', '法', '做', '去',
+    '来', '后', '前',
+];
+
+/// 提取"内容 2-gram"：剔除含标点的 2-gram，以及两侧皆为功能字的 2-gram。
+pub(super) fn content_bigrams(s: &str) -> Vec<(char, char)> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = Vec::new();
+    for w in chars.windows(2) {
+        if FACT_PUNCT_CHARS.contains(&w[0]) || FACT_PUNCT_CHARS.contains(&w[1]) {
+            continue;
+        }
+        if FACT_STOP_CHARS.contains(&w[0]) && FACT_STOP_CHARS.contains(&w[1]) {
+            continue;
+        }
+        out.push((w[0], w[1]));
+    }
+    out
+}
+
+/// 参考切分为事实子句：按标点切分，保留字数 ≥2 的子句。
+pub(super) fn reference_clauses(reference: &str) -> Vec<String> {
+    reference
+        .split(|c: char| FACT_PUNCT_CHARS.contains(&c))
+        .map(|p| p.trim())
+        .filter(|p| p.chars().count() >= 2)
+        .map(|p| p.to_string())
+        .collect()
+}
+
+/// 长度归一关键词命中率（0.0~1.0）。
+///
+/// 公式: `命中内容 2-gram 数 / min(参考内容 2-gram 数, 回复内容 2-gram 数)`。
+/// 旧口径以参考 2-gram 总数为分母，回复越短分子越小，短回复被机械压低；
+/// 改用 `min(参考, 回复)` 后该分不再随回复长度单调衰减。
+/// 空回复 / 参考过短 / 任一侧无内容 2-gram → 0.0。
+pub(super) fn keyword_hit_norm_score(reply: &str, reference: &str) -> f64 {
+    let reply = reply.trim();
+    if reply.is_empty() {
+        return 0.0;
+    }
+    let ref_bg = content_bigrams(reference);
+    let reply_bg = content_bigrams(reply);
+    if ref_bg.is_empty() || reply_bg.is_empty() {
+        return 0.0;
+    }
+    let ref_set: std::collections::HashSet<(char, char)> = ref_bg.into_iter().collect();
+    let hit = reply_bg.iter().filter(|b| ref_set.contains(b)).count();
+    (hit as f64 / ref_set.len().min(reply_bg.len()) as f64).clamp(0.0, 1.0)
+}
+
+/// 事实点召回（0.0~1.0）：参考子句中被回复至少一个内容 2-gram 命中的子句占比。
+///
+/// 参考为多事实长摘要，简短社交回复通常只体现其中部分事实点；
+/// 该分衡量"回复是否体现了至少一个事实点"，与整段覆盖率互补。
+pub(super) fn fact_point_score(reply: &str, reference: &str) -> f64 {
+    let units = reference_clauses(reference);
+    if units.is_empty() {
+        return 0.0;
+    }
+    let reply_bg: std::collections::HashSet<(char, char)> =
+        content_bigrams(reply).into_iter().collect();
+    let hit = units
+        .iter()
+        .filter(|u| {
+            let ub = content_bigrams(u);
+            !ub.is_empty() && ub.iter().any(|b| reply_bg.contains(b))
+        })
+        .count();
+    hit as f64 / units.len() as f64
 }
 
 /// 回复信息密度打分（无参考可用时的近似，0.0~1.0）。

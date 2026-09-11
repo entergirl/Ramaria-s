@@ -22,9 +22,10 @@ use ramaria_memory::utt::builder::UttBuilder;
 use uuid::Uuid;
 
 use super::types::{
-    AblationProfile, ContextTurn, DATASET_SCHEMA_VERSION, DatasetItem, ItemRepeatStats, MetricStat,
-    ProbeDataset, ProbeExperiment, ProbeMetrics, ProbeRepeatMeta, ProbeRunDiagnostics,
-    ProbeRunItem, ProbeVariant, ProbeVariantResult, VariantParams, VariantRepeatStats,
+    AblationProfile, ContextTurn, DATASET_SCHEMA_VERSION, DatasetItem, ItemRegister,
+    ItemRepeatStats, MetricStat, ProbeDataset, ProbeExperiment, ProbeMetrics, ProbeRepeatMeta,
+    ProbeRunDiagnostics, ProbeRunItem, ProbeVariant, ProbeVariantResult, VariantParams,
+    VariantRepeatStats,
 };
 
 /// 执行 `probe run`。
@@ -246,14 +247,17 @@ pub async fn build_experiment(
             rebuilt_cuts.insert(cut_key, ());
         }
 
+        // 语域切换：在档位循环内克隆一次配置，题循环内按题覆盖社交基调闸门
+        // （statement 题关闭基调走陈述说明语域，chat 题保持社交聊天语域）。
+        let mut item_config = variant_config.clone();
         let mut runs = Vec::new();
         let mut failed = 0usize;
         let max_runs = limit
             .unwrap_or(dataset.items.len())
             .min(dataset.items.len());
         for item in dataset.items.iter().take(max_runs) {
-            let result =
-                run_single_question(app, &variant_config, &dataset.persona_uid, item).await;
+            item_config.injection.social_tone = item.register.is_chat();
+            let result = run_single_question(app, &item_config, &dataset.persona_uid, item).await;
             if result.error.is_some() {
                 failed += 1;
                 tracing::warn!(
@@ -692,6 +696,34 @@ pub(super) fn seed_history_from_context(context: &[ContextTurn]) -> Vec<ChatMess
         .collect()
 }
 
+// =========================================================
+// 题项语域切换（statement 陈述说明轨）
+// =========================================================
+
+/// 陈述说明体裁的题面引导（`statement` 题在原始题面后追加，`chat` 题不追加）。
+///
+/// 口径:
+/// - 只做语域切换：把题项从社交聊天切换为陈述说明，不携带任何字数/篇幅要求
+///   （不得出现"字 / 句 / 篇幅 / 长度"等表述），避免引导被理解为复述长度
+///   约束而污染事实维评估；对应单测锁定该口径。
+/// - `chat` 题不追加，题面逐字不变，保证既有社交语域结果可比。
+pub(super) const STATEMENT_REGISTER_LEAD: &str =
+    "（本题请以陈述说明的方式回答，把你记得的、与该问题相关的事实都讲出来。）";
+
+/// 题项实际送入对话管线的题面（按 `register` 切换语域）。
+///
+/// 说明:
+/// - `Chat`（缺省）→ 原始题面逐字不变（社交聊天语域）。
+/// - `Statement` → 原始题面 + 换行 + `STATEMENT_REGISTER_LEAD`（陈述说明语域）。
+/// - 只生成本次要送入管线的题面；`ProbeRunItem.question` 仍记录原始题面，
+///   评分侧参考兜底与情境判定依赖未追加引导的原题面。
+pub(super) fn effective_question(item: &DatasetItem) -> String {
+    match item.register {
+        ItemRegister::Chat => item.question.clone(),
+        ItemRegister::Statement => format!("{}\n{}", item.question, STATEMENT_REGISTER_LEAD),
+    }
+}
+
 /// 跑单题对话并收集输出与指标。
 ///
 /// 降级策略:
@@ -702,6 +734,10 @@ pub(super) fn seed_history_from_context(context: &[ContextTurn]) -> Vec<ChatMess
 /// - 题项携带的 `context`（question 之前紧邻的上文）经 `seed_history_from_context`
 ///   预置到本轮历史，使碎片化用户消息不再被孤立发给模型；预置内容不落库、
 ///   不进生命周期、不触发学习（与既有探针 session 清理口径一致）。
+///
+/// 语域补全:
+/// - `statement` 题经 `effective_question` 追加陈述说明引导后送入管线（社交基调
+///   由调用方按题关闭）；`ProbeRunItem.question` 仍记录原始题面。
 ///
 /// 残留清理（回归修复）:
 /// - probe 每题以 `session_id=None` 走 resolve_session 自动新建活跃 session，
@@ -732,14 +768,11 @@ async fn run_single_question(
     // 活跃指针指向本次新建 session；顺序执行（无并发）下可用前后对比定位该 session。
     let prev_active_session = app.get_active_session_id();
 
+    // 送入管线的题面按语域切换（statement 追加陈述引导）；`ProbeRunItem.question`
+    // 仍记录原始题面（评分侧参考兜底 / 情境判定依赖原题面）。
+    let question = effective_question(item);
     let stream = match app
-        .send_message_with_history(
-            &item.question,
-            Some(persona_uid),
-            None,
-            config,
-            seed_history,
-        )
+        .send_message_with_history(&question, Some(persona_uid), None, config, seed_history)
         .await
     {
         Ok(s) => s,

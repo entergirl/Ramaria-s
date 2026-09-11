@@ -10,7 +10,10 @@
 //!   significant_up / significant_down / equivalent / inconclusive。
 //! - 辅助指标四件套（产物可复算）：证据链可追溯率 / 行为规则命中率 / 情境路由误用率 / 画像回归。
 //! - 人工抽检校准：比对 judge 与人工分数的一致性 / 偏差 / 校准系数（由校准文件驱动，可选）。
-//! - 知识层质量：基于评分数值中的事实维题目评估误报 / 漏报率（目标 <10%）。
+//! - 知识层质量：基于评分数值中的事实维题目评估误报 / 漏报率（目标 <10%）；
+//!   双口径（含记忆注入 / 全部档位池化）× 三判据（legacy / norm / point）分栏。
+//! - 风格形态指标（客观口径）：长度分布 / 与 persona 参考的长度重合度 / 语气词率 /
+//!   疑问感叹率 / 复读率 / 助手腔标记率，作为语气 judge 的交叉验证口径。
 //! - 数据特性与外部效度局限声明必出（D-V20-005：单 persona、不做 D3 推广）。
 //! - 输出 markdown / JSON 双形态；配对非参检验等纯函数逻辑独立，便于单元测试。
 
@@ -20,7 +23,9 @@ use std::sync::Arc;
 use anyhow::Context;
 use ramaria_core::error::RamariaError;
 
-use super::evaluate::{ItemEvaluation, ProbeEvaluation, VariantEvaluation, read_experiment};
+use super::evaluate::{
+    FactItemScore, ItemEvaluation, ProbeEvaluation, VariantEvaluation, read_experiment,
+};
 use super::run::metric_stat;
 use super::types::{AblationProfile, ProbeExperiment, ProbeVariantResult, VariantParams};
 
@@ -39,6 +44,248 @@ use super::types::{AblationProfile, ProbeExperiment, ProbeVariantResult, Variant
 pub const EMOTION_DESCRIPTIVE_NOTE: &str = "情感维口径未校准：确定性 rubric 由「显式共情/喜悦标记词命中」驱动，\
 高亲密度口语语料下对 persona 短句风格系统性不利（实测全档 0.02~0.25）。该维为描述性指标，\
 仅作趋势参考，不参与层价值判定与参数定稿；层价值判定采用事实维 + 语气维双判据。";
+
+// =========================================================
+// 风格形态指标（客观口径，对照语气 judge）
+// =========================================================
+
+/// 语气词 / 口癖字符表：回复含任一字符即计该条命中。
+///
+/// 说明: 取高亲密度口语语料的高频句尾语气词与笑声拟声（榆：哦哦 / 我找一下 / 是联动！/ 对啊对啊）。
+const STYLE_TONE_PARTICLES: &[char] = &[
+    '呀', '啦', '哦', '诶', '啊', '嘛', '吧', '哈', '嗯', '咦', '哇', '唉', '噢', '咯', '嘞', '嘻',
+    '嘿', '呐', '嗷',
+];
+
+/// 助手腔标记词：回复含任一词即计该条为助手腔。
+///
+/// 说明: 与 `test-data/m8/prompt-tone-report.md` 的形态分析口径一致，用于检测短模板是否回退到助手腔。
+const STYLE_ASSISTANT_MARKERS: &[&str] = &[
+    "总的来说",
+    "综上",
+    "希望对你有帮助",
+    "希望这些",
+    "建议你",
+    "需要注意的是",
+    "首先",
+    "其次",
+    "作为一个",
+    "我可以帮你",
+    "如果你需要",
+    "总结一下",
+];
+
+/// 回复长度直方图分箱宽度（字）。
+const STYLE_LEN_BIN: usize = 5;
+/// 回复长度直方图封顶（字），超过按最后一箱计。
+const STYLE_LEN_CAP: usize = 60;
+/// "短回复"阈值（字）：新社交模板的目标区间为 20~30 字。
+const STYLE_SHORT_LEN: usize = 30;
+
+/// 档位回复的客观风格形态指标。
+///
+/// 说明:
+/// - 用途：语气 judge（`probe-judge-v2`）在 20~30 字短回复上区分力不足
+///   （见 `test-data/m8/tone-judge-review.md`），本组指标只依赖回复文本本身，
+///   作为语气维的**客观对照口径**，与 judge 结论交叉验证（4.1 语气维改造）。
+/// - `len_ref_overlap`：回复长度直方图与 persona 参考（tone 题 `reference`，即 persona
+///   原回复）长度直方图的重叠系数，分箱宽 5 字、60 字封顶，取 `Σ min(p_i, q_i)`，
+///   1.0 表示两个分布完全一致；无 tone 题参考时为 `None`。
+/// - 各 `*_rate` 按"回复条数"计（非按字数）；`repeat_rate` 为同档位内与其他题回复
+///   完全相同的条数占比（模板化复读检测）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct VariantStyleMetrics {
+    pub variant_id: String,
+    pub description: String,
+    /// 参与统计的有效回复条数（跨 repeat 全轮；无逐轮明细时取末轮）
+    pub reply_count: usize,
+    /// 回复字符数均值
+    pub len_mean: f64,
+    /// 回复字符数中位数
+    pub len_median: f64,
+    /// ≤30 字回复占比
+    pub len_le_30_rate: f64,
+    /// 与 persona 参考长度分布的重叠系数（无参考时为 None）
+    pub len_ref_overlap: Option<f64>,
+    /// 语气词 / 口癖命中率
+    pub tone_particle_rate: f64,
+    /// 以 ? / ？结尾的回复占比
+    pub question_rate: f64,
+    /// 以 ! / ！结尾的回复占比
+    pub exclaim_rate: f64,
+    /// 复读率（与同档位其它题回复完全相同的占比）
+    pub repeat_rate: f64,
+    /// 助手腔标记词命中率
+    pub assistant_marker_rate: f64,
+    /// persona 参考均长（无 tone 题参考时为 None）
+    pub ref_len_mean: Option<f64>,
+}
+
+/// 收集某档位的全部有效回复：优先取 `repeat` 逐轮明细（跨 N 轮），缺失时回退末轮。
+fn collect_variant_replies(experiment: &ProbeExperiment, variant_id: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(rs) = experiment
+        .repeat
+        .as_ref()
+        .and_then(|rep| rep.per_variant.iter().find(|r| r.variant_id == variant_id))
+    {
+        for round in &rs.rounds {
+            for it in &round.runs {
+                if it.error.is_none() && !it.reply.is_empty() {
+                    out.push(it.reply.clone());
+                }
+            }
+        }
+    }
+    let fallback = experiment
+        .variants
+        .iter()
+        .find(|v| v.variant_id == variant_id)
+        .filter(|_| out.is_empty());
+    if let Some(vr) = fallback {
+        for it in &vr.runs {
+            if it.error.is_none() && !it.reply.is_empty() {
+                out.push(it.reply.clone());
+            }
+        }
+    }
+    out
+}
+
+/// persona 参考长度分布（取 tone 题 `reference`，即 persona 原回复；按 item_id 去重）。
+fn persona_reference_lengths(evaluation: Option<&ProbeEvaluation>) -> Vec<usize> {
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    if let Some(ev) = evaluation {
+        for v in &ev.variants {
+            for it in &v.items {
+                let ref_text = it.reference.as_deref().filter(|_| it.dimension == "tone");
+                if let Some(r) = ref_text {
+                    seen.entry(it.item_id.clone())
+                        .or_insert_with(|| r.chars().count());
+                }
+            }
+        }
+    }
+    let mut out: Vec<usize> = seen.into_values().collect();
+    out.sort_unstable();
+    out
+}
+
+/// 长度直方图（归一化概率）。
+fn style_len_hist(lengths: &[usize]) -> std::collections::HashMap<usize, f64> {
+    let mut hist: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    for &l in lengths {
+        *hist
+            .entry((l / STYLE_LEN_BIN).min(STYLE_LEN_CAP / STYLE_LEN_BIN))
+            .or_insert(0) += 1;
+    }
+    let total = lengths.len().max(1) as f64;
+    hist.into_iter()
+        .map(|(k, v)| (k, v as f64 / total))
+        .collect()
+}
+
+/// 两个长度分布的重叠系数（`Σ min(p_i, q_i)`，1.0 = 完全一致）。
+fn style_len_overlap(a: &[usize], b: &[usize]) -> f64 {
+    let (ha, hb) = (style_len_hist(a), style_len_hist(b));
+    ha.keys()
+        .chain(hb.keys())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .map(|k| {
+            ha.get(k)
+                .copied()
+                .unwrap_or(0.0)
+                .min(hb.get(k).copied().unwrap_or(0.0))
+        })
+        .sum::<f64>()
+        .clamp(0.0, 1.0)
+}
+
+/// 中位数（输入需已升序）。
+fn median_of(sorted: &[usize]) -> f64 {
+    match sorted.len() {
+        0 => 0.0,
+        n if n % 2 == 1 => sorted[n / 2] as f64,
+        n => (sorted[n / 2 - 1] + sorted[n / 2]) as f64 / 2.0,
+    }
+}
+
+/// 计算全部档位的客观风格形态指标。
+pub(super) fn compute_style_metrics(
+    experiment: &ProbeExperiment,
+    evaluation: Option<&ProbeEvaluation>,
+) -> Vec<VariantStyleMetrics> {
+    let ref_lens = persona_reference_lengths(evaluation);
+    let ref_len_mean = if ref_lens.is_empty() {
+        None
+    } else {
+        Some(ref_lens.iter().sum::<usize>() as f64 / ref_lens.len() as f64)
+    };
+    experiment
+        .variants
+        .iter()
+        .map(|vr| {
+            let replies = collect_variant_replies(experiment, &vr.variant_id);
+            let lens: Vec<usize> = replies.iter().map(|r| r.chars().count()).collect();
+            let n = lens.len();
+            let div = n.max(1) as f64;
+            let mut sorted = lens.clone();
+            sorted.sort_unstable();
+            let unique = replies
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len();
+            let ends_with_any = |r: &String, marks: [char; 2]| {
+                let t = r.trim_end();
+                t.ends_with(marks[0]) || t.ends_with(marks[1])
+            };
+            VariantStyleMetrics {
+                variant_id: vr.variant_id.clone(),
+                description: vr.description.clone(),
+                reply_count: n,
+                len_mean: if n == 0 {
+                    0.0
+                } else {
+                    lens.iter().sum::<usize>() as f64 / div
+                },
+                len_median: median_of(&sorted),
+                len_le_30_rate: lens.iter().filter(|l| **l <= STYLE_SHORT_LEN).count() as f64 / div,
+                len_ref_overlap: if ref_lens.is_empty() || lens.is_empty() {
+                    None
+                } else {
+                    Some(style_len_overlap(&lens, &ref_lens))
+                },
+                tone_particle_rate: replies
+                    .iter()
+                    .filter(|r| r.chars().any(|c| STYLE_TONE_PARTICLES.contains(&c)))
+                    .count() as f64
+                    / div,
+                question_rate: replies
+                    .iter()
+                    .filter(|r| ends_with_any(r, ['？', '?']))
+                    .count() as f64
+                    / div,
+                exclaim_rate: replies
+                    .iter()
+                    .filter(|r| ends_with_any(r, ['！', '!']))
+                    .count() as f64
+                    / div,
+                repeat_rate: if n == 0 {
+                    0.0
+                } else {
+                    (n - unique) as f64 / div
+                },
+                assistant_marker_rate: replies
+                    .iter()
+                    .filter(|r| STYLE_ASSISTANT_MARKERS.iter().any(|m| r.contains(m)))
+                    .count() as f64
+                    / div,
+                ref_len_mean,
+            }
+        })
+        .collect()
+}
 
 /// 档位对比报告（`probe report` 的输出，markdown/JSON 双形态）。
 #[derive(Debug, Clone, serde::Serialize)]
@@ -69,6 +316,9 @@ pub struct ProbeReport {
     /// 情境路由误用率 / 画像回归）。基于 run/eval 产物可复算的近似口径，
     /// 语义与局限见 `AuxiliaryMetrics.annotation`。
     pub auxiliary: AuxiliaryMetrics,
+    /// 客观风格形态指标（对照语气 judge；无回复样本时为空）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub style_metrics: Vec<VariantStyleMetrics>,
 }
 
 // =========================================================
@@ -88,8 +338,10 @@ pub struct ProbeReport {
 ///   检出（situation_negative/positive）但回复为 0 分（未采用对应规则/冷漠）
 ///   的题占"有极性样本"的比例——代理"路由识别到情境却未生效"的误用。
 /// - `profile_regression`（画像回归 / 跨轮输出稳定性）: 对带 `--repeat` 的档位，
-///   取其各维 `dimension_scores` 的跨轮 std 平均值（越小 = 输出越稳定，
-///   画像推断驱动无随机漂移）。无 repeat 逐轮明细时为 None。
+///   取其 fact / tone / emotion **三维** `dimension_scores` 的跨轮 std 平均值
+///   （越小 = 输出越稳定，画像推断驱动无随机漂移）。事实维的长度归一 / 事实点
+///   重算口径（fact_norm / fact_point）属事实维内部对照，不并入本指标，保持既有口径可比。
+///   无 repeat 逐轮明细时为 None。
 ///
 /// 局限：以上为产物级近似（不读真实行为规则库/画像快照），仅用于工具链
 /// 交叉验证与结构对照；规则-事件一致性、知识准确率等人工抽样指标不在探针内。
@@ -101,7 +353,7 @@ pub struct AuxiliaryMetrics {
     pub behavior_rule_hit_rate: Option<f64>,
     /// 情境路由误用率代理（0.0~1.0；无有极性样本时 None）
     pub situation_route_misuse_rate: Option<f64>,
-    /// 画像回归 = 跨轮维度分数 std 均值（0.0~；无 repeat 明细时 None）
+    /// 画像回归 = fact/tone/emotion 三维跨轮分数 std 均值（0.0~；无 repeat 明细时 None）
     pub profile_regression_output_stability: Option<f64>,
     /// 口径与局限说明（必出字段）
     pub annotation: String,
@@ -112,6 +364,10 @@ pub struct AuxiliaryMetrics {
 /// 参数:
 /// - `evaluation`: probe evaluate 产物（含逐题 fact/emotion 评分与 repeat
 ///   逐轮聚合 `dimension_scores`）。
+///
+/// 说明:
+/// - 画像回归只取 fact / tone / emotion 三维（口径固定），
+///   `fact_norm` / `fact_point` 为事实维内部对照口径，不参与该指标。
 ///
 /// 返回:
 /// - 四件套指标；无对应样本的单项为 None（标注口径而非报错）。
@@ -124,7 +380,7 @@ pub(super) fn compute_auxiliary_metrics(evaluation: &ProbeEvaluation) -> Auxilia
     let mut emotion_appropriate = 0usize;
     let mut polarized_total = 0usize;
     let mut polarized_misuse = 0usize;
-    // ---- 画像回归：跨轮维度分 std 均值 ----
+    // ---- 画像回归：跨轮 fact/tone/emotion 三维 std 均值 ----
     let mut cross_round_stds: Vec<f64> = Vec::new();
 
     for v in &evaluation.variants {
@@ -159,12 +415,18 @@ pub(super) fn compute_auxiliary_metrics(evaluation: &ProbeEvaluation) -> Auxilia
                 _ => {}
             }
         }
-        // 画像回归：该档位若带 repeat 逐轮聚合，取各维跨轮 std 的均值。
-        if let Some(scores) = &v.dimension_scores
-            && !scores.is_empty()
-        {
-            let mean_std = scores.iter().map(|d| d.std).sum::<f64>() / scores.len() as f64;
-            cross_round_stds.push(mean_std);
+        // 画像回归：该档位若带 repeat 逐轮聚合，取 fact/tone/emotion 三维跨轮 std 的均值；
+        // fact_norm / fact_point 是事实维内部重算口径，计入会改变维度数、使指标不可比，故排除。
+        if let Some(scores) = &v.dimension_scores {
+            let base: Vec<f64> = scores
+                .iter()
+                .filter(|d| matches!(d.dimension.as_str(), "fact" | "tone" | "emotion"))
+                .map(|d| d.std)
+                .collect();
+            if !base.is_empty() {
+                let mean_std = base.iter().sum::<f64>() / base.len() as f64;
+                cross_round_stds.push(mean_std);
+            }
         }
     }
 
@@ -193,7 +455,7 @@ pub(super) fn compute_auxiliary_metrics(evaluation: &ProbeEvaluation) -> Auxilia
     let mut note = String::from(
         "辅助指标为探针产物可复算近似：证据链可追溯率=fact 回复对 golden 覆盖率 \
          (score≥0.5)；行为规则命中/情境路由误用=emotion rubric 代理（读回复文本与极性，\
-         不读真实规则库）；画像回归=repeat 跨轮维度分 std 均值。规则-事件一致性/知识准确率等\
+         不读真实规则库）；画像回归=repeat 跨轮 fact/tone/emotion 三维 std 均值。规则-事件一致性/知识准确率等\
          人工抽样指标不在探针内。",
     );
     if profile_regression_output_stability.is_none() {
@@ -215,12 +477,21 @@ pub(super) fn compute_auxiliary_metrics(evaluation: &ProbeEvaluation) -> Auxilia
 }
 
 /// 档位报告行（评分对比表）。
+///
+/// 字段约定:
+/// - `fact_score`: 事实维旧口径（2-gram 覆盖率）均分，冻结不变以支持历史口径对照。
+/// - `fact_score_norm` / `fact_score_point`: 事实维两个重算口径（长度归一 / 事实点），
+///   与 `fact_score` 并排展示，便于在新旧判据下核对；旧产物或未评分时为 None。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct VariantReportRow {
     pub variant_id: String,
     pub description: String,
     pub params: VariantParams,
     pub fact_score: Option<f64>,
+    /// 事实维长度归一均分（0.0~1.0；旧产物或未评分时 None）
+    pub fact_score_norm: Option<f64>,
+    /// 事实维事实点均分（0.0~1.0；旧产物或未评分时 None）
+    pub fact_score_point: Option<f64>,
     pub tone_score: Option<f64>,
     /// 情感表达维均分（0.0~1.0；无 emotion 题时为 None）
     pub emotion_score: Option<f64>,
@@ -283,11 +554,43 @@ pub struct KnowledgeQualityScope {
     pub variant_ids: Vec<String>,
     /// 样本数（事实维题数）
     pub sample_count: usize,
-    /// 事实命中数（score ≥ 0.5）
+    /// 事实命中数（旧判据 `score ≥ 0.5`）
     pub fact_hit_count: usize,
-    /// 误报率（score < 0.3）
+    /// 误报率（旧判据 `score < 0.3`）
     pub false_positive_rate: f64,
-    /// 漏报率（score < 0.4）
+    /// 漏报率（旧判据 `score < 0.4`）
+    pub false_negative_rate: f64,
+    /// 是否达漏报 <10% 目标（旧判据）
+    pub miss_target_met: bool,
+    /// 按判据口径（legacy / norm / point）分别汇总的质量指标。
+    ///
+    /// 说明:
+    /// - `0` 号元素恒为 `legacy`，其三个率与上面的扁平字段一一对应（扁平字段保留
+    ///   以兼容既有 JSON 消费方）。
+    /// - 旧评分数值文件无 `score_norm` / `score_point` → 对应判据样本数为 0，
+    ///   达标标记为 false。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub judge_rates: Vec<KnowledgeJudgeRates>,
+}
+
+/// 单一口径下、按判据口径分别汇总的知识层质量指标。
+///
+/// 说明:
+/// - 三套判据共用同一题集：`legacy`（旧 2-gram 覆盖，冻结）/ `norm`（长度归一
+///   命中率）/ `point`（子句级事实点召回）。
+/// - 阈值沿用旧口径（命中 ≥0.5 / 误报 <0.3 / 漏报 <0.4），使三口径在同一阈值下
+///   可比；口径差异只来自综合分的"关键词项"，cosine 权重三口径相同。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct KnowledgeJudgeRates {
+    /// 判据口径标识："legacy" / "norm" / "point"
+    pub judge: String,
+    /// 该口径下可用的样本数（字段缺失的旧产物为 0）
+    pub sample_count: usize,
+    /// 事实命中率（综合分 ≥0.5）
+    pub hit_rate: f64,
+    /// 误报率（综合分 <0.3）
+    pub false_positive_rate: f64,
+    /// 漏报率（综合分 <0.4）
     pub false_negative_rate: f64,
     /// 是否达漏报 <10% 目标
     pub miss_target_met: bool,
@@ -301,6 +604,8 @@ pub struct KnowledgeQualityScope {
 /// - `false_negative_rate`（漏报）：回复信息不足（score < 0.4），目标 <10%。
 /// - 双口径：主口径只统计含记忆注入档位（M8-006 终验口径）；对照口径池化全部档位
 ///   （含无记忆基线），用于说明两者差异来源。
+/// - 判据分栏：每个口径内再按 `judge_rates`（legacy / norm / point）分别给出命中/漏报，
+///   使短回复模板下的长度伪影（旧判据漏报虚高）可被直接对照。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct KnowledgeQualityReport {
     /// 主口径：含记忆注入档位（M8-006 终验口径）
@@ -339,7 +644,7 @@ pub struct AblationReport {
     pub rows: Vec<AblationComparisonRow>,
     /// 参与对比档位的辅助指标（mean ± CI / 空回复率）
     pub aux: Vec<VariantAuxMetrics>,
-    /// 参与层价值判定的维度（事实维 + 语气维）。
+    /// 参与层价值判定的维度（事实维三口径 fact / fact_norm / fact_point + 语气维 tone）。
     pub judgment_dimensions: Vec<String>,
     /// 展示但不参与判定的描述性维度（情感维，口径未校准）。
     pub descriptive_dimensions: Vec<String>,
@@ -361,7 +666,7 @@ pub struct AblationComparisonRow {
     pub comparison_type: String,
     /// 实际对照基线档位 id（F 组为 F0；S/I 组为 B1）。
     pub base_variant: String,
-    /// 维度（fact / tone / emotion）
+    /// 维度（fact / fact_norm / fact_point / tone；emotion 为描述性维度，仅在报告中展示）
     pub dimension: String,
     /// 配对题数
     pub n_pairs: usize,
@@ -481,6 +786,8 @@ pub(super) async fn run_report(
             description: vr.description.clone(),
             params: vr.params.clone(),
             fact_score: ev.and_then(|v| v.fact_score),
+            fact_score_norm: ev.and_then(|v| v.fact_score_norm),
+            fact_score_point: ev.and_then(|v| v.fact_score_point),
             tone_score: ev.and_then(|v| v.tone_score),
             emotion_score: ev.and_then(|v| v.emotion_score),
             success_count: success,
@@ -537,6 +844,10 @@ pub(super) async fn run_report(
         },
     };
 
+    // 客观风格形态指标：仅依赖 run 产物（回复文本）+ eval 产物（persona 参考长度），
+    // 用于对照区分力不足的短回复语气 judge。
+    let style_metrics = compute_style_metrics(&experiment, evaluation.as_ref());
+
     let report = ProbeReport {
         results_file: results_path.display().to_string(),
         evaluation_file: evaluation_path.map(|p| p.display().to_string()),
@@ -552,6 +863,7 @@ pub(super) async fn run_report(
         ablation: ablation_report,
         limitations,
         descriptive_metrics,
+        style_metrics,
         auxiliary,
     };
 
@@ -725,7 +1037,10 @@ type VariantDimScores = std::collections::HashMap<String, f64>;
 
 /// 从评分数值档位提取某维度的逐题分数（仅成功题）。
 ///
-/// 说明: tone 维 judge 分 1~5 直接作连续分使用；fact/emotion 维 0~1。
+/// 说明:
+/// - tone 维 judge 分 1~5 直接作连续分使用；fact/emotion 维 0~1。
+/// - `fact_norm` / `fact_point` 为事实维的重算口径，取自同一 fact 子评分的
+///   `score_norm` / `score_point`；旧产物缺该字段的题不参与配对。
 fn collect_variant_dim_scores(ev: &VariantEvaluation, dim: &str) -> VariantDimScores {
     let mut map = VariantDimScores::new();
     for item in &ev.items {
@@ -734,6 +1049,8 @@ fn collect_variant_dim_scores(ev: &VariantEvaluation, dim: &str) -> VariantDimSc
         }
         let score = match dim {
             "fact" => item.fact.as_ref().map(|s| s.score),
+            "fact_norm" => item.fact.as_ref().and_then(|s| s.score_norm),
+            "fact_point" => item.fact.as_ref().and_then(|s| s.score_point),
             "tone" => item.tone.as_ref().map(|s| s.score as f64),
             "emotion" => item.emotion.as_ref().map(|s| s.score),
             _ => None,
@@ -1020,6 +1337,11 @@ fn equivalence_annotation(
 /// 等效性检验: 显著性框架只能证明"存在差异"，无法证明"零净增量"（相关对照长期
 /// 只得到不显著）。故并行做 TOST（双单侧 t 检验），等效边界取 |d_av|=0.3
 /// （d_av 为合并 SD 口径），`tost_p < 0.05` 即判定"等效（无实质净增量）"。
+///
+/// 判定维度: 情感维口径未校准，不参与判定（仅报告展示数值）；事实维按三套判据分别
+/// 成行——`fact`（旧 2-gram 覆盖口径，计算逻辑未变）、`fact_norm`（长度归一口径）、
+/// `fact_point`（子句级事实点口径），另加语气维 `tone`。三套事实口径共用同一 FDR
+/// 校正池，故 `fact` 的 `p_fdr` 与只跑两维时的原报告可能略有差异，属预期。
 pub(super) fn build_ablation_report(
     experiment: &ProbeExperiment,
     evaluation: &ProbeEvaluation,
@@ -1051,8 +1373,14 @@ pub(super) fn build_ablation_report(
     let b1 = find_baseline(&["B1"]);
 
     // 待比较组：F 组（F1~F4 vs F0）与 S 组（S_* vs B1），按数据集实际出现的档位驱动。
-    // 判定维度只取事实维 + 语气维：情感维口径未校准，已移出层价值判定，仅在报告中展示数值。
-    let dims = ["fact", "tone"];
+    // 判定维度取事实维三口径 + 语气维：情感维口径未校准，已移出层价值判定，仅在报告中展示数值。
+    //
+    // 事实维同时跑三套判据口径，用于在新旧判据下分栏核对：
+    // - `fact` = 旧 2-gram 覆盖口径，计算逻辑未变；只是把它与两个重算口径一并纳入
+    //   FDR 校正池，故其 `p_fdr` 与原（两维）报告可能略有差异，属预期；
+    // - `fact_norm` = 长度归一口径（分母不随回复长度单调衰减）；
+    // - `fact_point` = 子句级事实点口径（回复覆盖参考事实点的比例）。
+    let dims = ["fact", "fact_norm", "fact_point", "tone"];
 
     // 先收集全部"候选行"（含未校正 p 值），再统一 FDR 校正后补判定字段。
     struct RawRow<'a> {
@@ -1691,6 +2019,34 @@ fn variant_uses_memory_injection(ablation: Option<&str>) -> bool {
     }
 }
 
+/// 汇总单一判据口径下的命中 / 误报 / 漏报。
+///
+/// 说明:
+/// - `selector` 从单题事实维评分中取出该判据的综合分；字段缺失（旧评分数值文件）
+///   返回 None，该题不计入该口径样本。
+/// - 阈值：命中 `≥0.5` / 误报 `<0.3` / 漏报 `<0.4`（沿用旧口径，三判据共用）。
+fn knowledge_judge_rates(
+    items: &[&ItemEvaluation],
+    judge: &str,
+    selector: impl Fn(&FactItemScore) -> Option<f64>,
+) -> KnowledgeJudgeRates {
+    let vals: Vec<f64> = items
+        .iter()
+        .filter_map(|i| i.fact.as_ref().and_then(&selector))
+        .collect();
+    let sample_count = vals.len();
+    let divisor = sample_count.max(1) as f64;
+    let false_negative_rate = vals.iter().filter(|v| **v < 0.4).count() as f64 / divisor;
+    KnowledgeJudgeRates {
+        judge: judge.to_string(),
+        sample_count,
+        hit_rate: vals.iter().filter(|v| **v >= 0.5).count() as f64 / divisor,
+        false_positive_rate: vals.iter().filter(|v| **v < 0.3).count() as f64 / divisor,
+        false_negative_rate,
+        miss_target_met: sample_count > 0 && false_negative_rate < 0.10,
+    }
+}
+
 /// 按给定事实维题集与档位集合汇总单一口径的质量指标。
 pub(super) fn summarize_knowledge_scope(
     scope: &str,
@@ -1698,27 +2054,15 @@ pub(super) fn summarize_knowledge_scope(
     variant_ids: Vec<String>,
     items: &[&ItemEvaluation],
 ) -> KnowledgeQualityScope {
-    let sample_count = items.len();
-    let fact_hit_count = items
-        .iter()
-        .filter(|i| i.fact.as_ref().map(|f| f.score >= 0.5).unwrap_or(false))
-        .count();
-    let false_positive = items
-        .iter()
-        .filter(|i| i.fact.as_ref().map(|f| f.score < 0.3).unwrap_or(false))
-        .count();
-    let false_negative = items
-        .iter()
-        .filter(|i| i.fact.as_ref().map(|f| f.score < 0.4).unwrap_or(false))
-        .count();
-    let (false_positive_rate, false_negative_rate) = if sample_count == 0 {
-        (0.0, 0.0)
-    } else {
-        (
-            false_positive as f64 / sample_count as f64,
-            false_negative as f64 / sample_count as f64,
-        )
-    };
+    // 判据口径：legacy（旧 2-gram 覆盖）/ norm（长度归一）/ point（子句级事实点）。
+    let judge_rates = vec![
+        knowledge_judge_rates(items, "legacy", |f| Some(f.score)),
+        knowledge_judge_rates(items, "norm", |f| f.score_norm),
+        knowledge_judge_rates(items, "point", |f| f.score_point),
+    ];
+    // 扁平字段（兼容既有消费方）取 legacy 口径。
+    let legacy = &judge_rates[0];
+    let sample_count = legacy.sample_count;
     let range = if variant_ids.is_empty() {
         "（无样本档位）".to_string()
     } else {
@@ -1729,10 +2073,11 @@ pub(super) fn summarize_knowledge_scope(
         description: format!("{label}：{range}，样本 {sample_count} 题"),
         variant_ids,
         sample_count,
-        fact_hit_count,
-        false_positive_rate,
-        false_negative_rate,
-        miss_target_met: sample_count > 0 && false_negative_rate < 0.10,
+        fact_hit_count: (legacy.hit_rate * sample_count as f64).round() as usize,
+        false_positive_rate: legacy.false_positive_rate,
+        false_negative_rate: legacy.false_negative_rate,
+        miss_target_met: legacy.miss_target_met,
+        judge_rates,
     }
 }
 
@@ -1801,6 +2146,37 @@ pub(super) fn assess_knowledge_quality(evaluation: &ProbeEvaluation) -> Knowledg
         )
     };
 
+    // 判据口径附注：逐判据列主口径漏报与达标情况（旧产物缺 norm/point 字段时自动略去）。
+    let judge_note = {
+        let rows: Vec<String> = primary
+            .judge_rates
+            .iter()
+            .filter(|r| r.sample_count > 0)
+            .map(|r| {
+                format!(
+                    "{} 漏报 {:.1}%（{}）",
+                    r.judge,
+                    r.false_negative_rate * 100.0,
+                    if r.miss_target_met {
+                        "达标"
+                    } else {
+                        "未达标"
+                    }
+                )
+            })
+            .collect();
+        if rows.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "事实维判据口径（主口径）：{}；三口径仅关键词项不同（legacy 旧 2-gram 覆盖 / \
+                 norm 长度归一 / point 子句级事实点），余弦权重相同。",
+                rows.join("、")
+            )
+        }
+    };
+    let annotation = format!("{annotation}{judge_note}");
+
     KnowledgeQualityReport {
         primary,
         pooled,
@@ -1848,11 +2224,21 @@ pub(super) fn render_report_markdown(report: &ProbeReport) -> String {
 
     // 档位对比表
     md.push_str("## 档位评分对比\n\n");
-    md.push_str("| 档位 | 事实维 | 语气维 | 情感维 | 成功/总 | 失败 | 说明 |\n");
-    md.push_str("|------|:---:|:---:|:---:|:---:|:---:|------|\n");
+    md.push_str(
+        "| 档位 | 事实维 | 事实(归一) | 事实(事实点) | 语气维 | 情感维 | 成功/总 | 失败 | 说明 |\n",
+    );
+    md.push_str("|------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|------|\n");
     for r in &report.variants {
         let fact = r
             .fact_score
+            .map(|s| format!("{:.2}", s))
+            .unwrap_or_else(|| "-".to_string());
+        let fact_norm = r
+            .fact_score_norm
+            .map(|s| format!("{:.2}", s))
+            .unwrap_or_else(|| "-".to_string());
+        let fact_point = r
+            .fact_score_point
             .map(|s| format!("{:.2}", s))
             .unwrap_or_else(|| "-".to_string());
         let tone = r
@@ -1864,9 +2250,11 @@ pub(super) fn render_report_markdown(report: &ProbeReport) -> String {
             .map(|s| format!("{:.2}", s))
             .unwrap_or_else(|| "-".to_string());
         md.push_str(&format!(
-            "| {} | {} | {} | {} | {}/{} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {}/{} | {} | {} |\n",
             r.variant_id,
             fact,
+            fact_norm,
+            fact_point,
             tone,
             emotion,
             r.success_count,
@@ -1912,31 +2300,99 @@ pub(super) fn render_report_markdown(report: &ProbeReport) -> String {
         md.push_str(&format!("- 标注：{}\n\n", c.annotation));
     }
 
-    // 知识层质量（双口径：主口径含记忆注入 / 对照口径全部档位池化）
+    // 知识层质量（双口径：主口径含记忆注入 / 对照口径全部档位池化；每口径按判据分栏）
     if let Some(kq) = &report.knowledge_quality {
-        md.push_str("## 知识层抽取质量评估（双口径）\n\n");
+        md.push_str("## 知识层抽取质量评估（双口径）— 按判据口径分栏\n\n");
+        md.push_str(
+            "- 判据口径：legacy（旧 2-gram 覆盖，冻结）/ norm（长度归一）/ point（子句级事实点）；\n",
+        );
+        md.push_str("  阈值三口径共用：命中 ≥0.5 / 误报 <0.3 / 漏报 <0.4；余弦权重相同。\n\n");
         // description 已自带「主口径/对照口径」标签，标题不再重复拼接 tag。
         for scope in [&kq.primary, &kq.pooled] {
             md.push_str(&format!("### {}\n\n", scope.description));
-            md.push_str(&format!(
-                "- 事实命中：{}/{}\n",
-                scope.fact_hit_count, scope.sample_count
-            ));
-            md.push_str(&format!(
-                "- 误报率：{:.1}%\n",
-                scope.false_positive_rate * 100.0
-            ));
-            md.push_str(&format!(
-                "- 漏报率：{:.1}%（目标 <10% → {})\n\n",
-                scope.false_negative_rate * 100.0,
-                if scope.miss_target_met {
-                    "达标"
-                } else {
-                    "未达标"
-                }
-            ));
+            md.push_str("| 判据口径 | 样本 | 命中率(≥0.5) | 误报率(<0.3) | 漏报率(<0.4) | 漏报目标(<10%) |\n");
+            md.push_str("|---|---|---|---|---|---|\n");
+            // 旧 JSON 无判据明细 → 由 legacy 扁平字段回填单行，保证渲染路径恒有输出。
+            let rows: Vec<KnowledgeJudgeRates> = if scope.judge_rates.is_empty() {
+                vec![KnowledgeJudgeRates {
+                    judge: "legacy".to_string(),
+                    sample_count: scope.sample_count,
+                    hit_rate: if scope.sample_count == 0 {
+                        0.0
+                    } else {
+                        scope.fact_hit_count as f64 / scope.sample_count as f64
+                    },
+                    false_positive_rate: scope.false_positive_rate,
+                    false_negative_rate: scope.false_negative_rate,
+                    miss_target_met: scope.miss_target_met,
+                }]
+            } else {
+                scope.judge_rates.clone()
+            };
+            for r in &rows {
+                md.push_str(&format!(
+                    "| {} | {} | {:.1}% | {:.1}% | {:.1}% | {} |\n",
+                    r.judge,
+                    r.sample_count,
+                    r.hit_rate * 100.0,
+                    r.false_positive_rate * 100.0,
+                    r.false_negative_rate * 100.0,
+                    if r.sample_count == 0 {
+                        "—"
+                    } else if r.miss_target_met {
+                        "达标"
+                    } else {
+                        "未达标"
+                    }
+                ));
+            }
+            md.push('\n');
         }
         md.push_str(&format!("- 结论：{}\n\n", kq.annotation));
+    }
+
+    // 客观风格形态指标（对照语气 judge；judge 在 20~30 字短回复上区分力不足）
+    if !report.style_metrics.is_empty() {
+        md.push_str("## 风格形态指标（客观口径，对照语气 judge）\n\n");
+        md.push_str(
+            "- 口径：只依赖回复文本，不依赖 judge。`参考重合` = 回复长度分布与 persona 参考\n",
+        );
+        md.push_str(
+            "  （tone 题 `reference`，persona 原回复）长度分布的重叠系数（分箱 5 字、60 字封顶），\n",
+        );
+        md.push_str("  1.0 表示分布一致；`≤30字` 为新社交模板的目标区间占比。\n");
+        md.push_str("- 用途：与语气维 judge 结论交叉验证；judge 判「无差异」时，本表可佐证差异确实不存在。\n\n");
+        let ref_mean = report
+            .style_metrics
+            .iter()
+            .find_map(|m| m.ref_len_mean)
+            .map(|v| format!("{v:.1}"))
+            .unwrap_or_else(|| "—".to_string());
+        md.push_str(&format!("- persona 参考均长：{ref_mean} 字\n\n"));
+        md.push_str(
+            "| 档位 | 均长 | 中位 | ≤30字 | 参考重合 | 语气词 | 疑问 | 感叹 | 复读 | 助手腔 |\n",
+        );
+        md.push_str("|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|\n");
+        for m in &report.style_metrics {
+            let overlap = m
+                .len_ref_overlap
+                .map(|v| format!("{v:.3}"))
+                .unwrap_or_else(|| "—".to_string());
+            md.push_str(&format!(
+                "| {} | {:.1} | {:.1} | {:.3} | {} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} |\n",
+                m.variant_id,
+                m.len_mean,
+                m.len_median,
+                m.len_le_30_rate,
+                overlap,
+                m.tone_particle_rate,
+                m.question_rate,
+                m.exclaim_rate,
+                m.repeat_rate,
+                m.assistant_marker_rate
+            ));
+        }
+        md.push('\n');
     }
 
     // 消融对比统计（按对照类型分栏：removal 移除 / substitution 替代 / increment 净增量）
@@ -2053,8 +2509,13 @@ pub(super) fn render_report_markdown(report: &ProbeReport) -> String {
         fmt_opt(report.auxiliary.situation_route_misuse_rate)
     ));
     match report.auxiliary.profile_regression_output_stability {
-        Some(s) => md.push_str(&format!("- 画像回归（跨轮维度 std 均值）：{:.4}\n", s)),
-        None => md.push_str("- 画像回归（跨轮维度 std 均值）：-（无 --repeat 明细）\n"),
+        Some(s) => md.push_str(&format!(
+            "- 画像回归（跨轮 fact/tone/emotion std 均值）：{:.4}\n",
+            s
+        )),
+        None => {
+            md.push_str("- 画像回归（跨轮 fact/tone/emotion std 均值）：-（无 --repeat 明细）\n")
+        }
     }
     md.push_str(&format!(
         "- 口径与局限：{}\n\n",
@@ -2090,6 +2551,14 @@ fn print_report_summary(report: &ProbeReport) {
             .fact_score
             .map(|s| format!("{:.2}", s))
             .unwrap_or_else(|| "-".to_string());
+        let fact_norm = r
+            .fact_score_norm
+            .map(|s| format!("{:.2}", s))
+            .unwrap_or_else(|| "-".to_string());
+        let fact_point = r
+            .fact_score_point
+            .map(|s| format!("{:.2}", s))
+            .unwrap_or_else(|| "-".to_string());
         let tone = r
             .tone_score
             .map(|s| format!("{:.2}", s))
@@ -2099,8 +2568,16 @@ fn print_report_summary(report: &ProbeReport) {
             .map(|s| format!("{:.2}", s))
             .unwrap_or_else(|| "-".to_string());
         println!(
-            "  档位 {:<14} 事实={:<6} 语气={:<6} 情感={:<6} 成功={}/{} — {}",
-            r.variant_id, fact, tone, emotion, r.success_count, r.total_count, r.description
+            "  档位 {:<14} 事实={:<6} 事实归一={:<6} 事实点={:<6} 语气={:<6} 情感={:<6} 成功={}/{} — {}",
+            r.variant_id,
+            fact,
+            fact_norm,
+            fact_point,
+            tone,
+            emotion,
+            r.success_count,
+            r.total_count,
+            r.description
         );
     }
     println!("定稿建议: {}", report.recommendation.overall);

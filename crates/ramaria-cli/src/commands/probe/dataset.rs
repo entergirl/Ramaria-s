@@ -17,8 +17,8 @@ use ramaria_core::error::RamariaError;
 use ramaria_core::types::{Message, MessageRole, PersonaKind};
 
 use super::types::{
-    ContextTurn, DATASET_SCHEMA_VERSION, DEFAULT_PERSONA, DatasetItem, ProbeDataset, ProbeVariant,
-    VariantOverrides,
+    ContextTurn, DATASET_SCHEMA_VERSION, DEFAULT_PERSONA, DatasetItem, ItemRegister, ProbeDataset,
+    ProbeVariant, VariantOverrides,
 };
 use super::{DeterministicRng, now_iso8601};
 
@@ -247,6 +247,7 @@ async fn build_from_db(
             source: if is_real { "db" } else { "fixture" }.to_string(),
             source_ref: None,
             context,
+            register: ItemRegister::Chat,
         });
     }
     for (idx, (question, reference, event_title)) in fact_cands.into_iter().enumerate() {
@@ -260,6 +261,7 @@ async fn build_from_db(
             source_ref: Some(event_title),
             // 事实维为模板化问句，不依赖即时上文
             context: Vec::new(),
+            register: ItemRegister::Chat,
         });
     }
     for (idx, (question, reference, src_ref, context)) in emotion_cands.into_iter().enumerate() {
@@ -272,6 +274,7 @@ async fn build_from_db(
             source: if is_real { "db" } else { "fixture" }.to_string(),
             source_ref: src_ref,
             context,
+            register: ItemRegister::Chat,
         });
     }
 
@@ -402,6 +405,7 @@ pub async fn build_from_file(
             source: if idx < tone_real { "file" } else { "fixture" }.to_string(),
             source_ref: src_ref,
             context,
+            register: ItemRegister::Chat,
         });
     }
     for (idx, (question, reference, title)) in fact_cands.into_iter().enumerate() {
@@ -414,6 +418,7 @@ pub async fn build_from_file(
             source_ref: Some(title),
             // 事实维为模板化问句，不依赖即时上文
             context: Vec::new(),
+            register: ItemRegister::Chat,
         });
     }
     for (idx, (question, reference, src_ref, context)) in emotion_cands.into_iter().enumerate() {
@@ -430,6 +435,7 @@ pub async fn build_from_file(
             .to_string(),
             source_ref: src_ref,
             context,
+            register: ItemRegister::Chat,
         });
     }
 
@@ -467,6 +473,7 @@ pub fn build_from_fixture(persona_uid: &str, qpd: usize, seed: u64) -> ProbeData
             source_ref: None,
             // 夹具题无语境依赖，不带上文
             context: Vec::new(),
+            register: ItemRegister::Chat,
         });
     }
     for (idx, (question, reference, title)) in fact_cands.into_iter().enumerate() {
@@ -478,6 +485,7 @@ pub fn build_from_fixture(persona_uid: &str, qpd: usize, seed: u64) -> ProbeData
             source: "fixture".to_string(),
             source_ref: Some(title),
             context: Vec::new(),
+            register: ItemRegister::Chat,
         });
     }
     for (idx, (question, reference)) in emotion_cands.into_iter().enumerate() {
@@ -489,6 +497,7 @@ pub fn build_from_fixture(persona_uid: &str, qpd: usize, seed: u64) -> ProbeData
             source: "fixture".to_string(),
             source_ref: None,
             context: Vec::new(),
+            register: ItemRegister::Chat,
         });
     }
 
