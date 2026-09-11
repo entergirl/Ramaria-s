@@ -312,6 +312,7 @@ pub fn ablation_variants() -> Vec<ProbeVariant> {
                 max_msgs_per_block: 80,
                 retrieve_top_k: 3,
                 ablation: Some(profile.name().to_string()),
+                overrides: VariantOverrides::default(),
             }
         })
         .collect()
@@ -378,6 +379,38 @@ pub struct DatasetItem {
     pub context: Vec<ContextTurn>,
 }
 
+/// 档位非 utt 参数覆盖（可选；`None` 字段使用配置基准值）。
+///
+/// 用途:
+/// - 档位原本只承载 `[utt]` 三参数与消融闸门；参数定稿需要对
+///   `[retrieval]` / `[knowledge]` 做单参数扫描，故以可选覆盖承载。
+/// - 未设置的字段保持配置基准，使"每个档位只动一个参数"的归因前提成立。
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct VariantOverrides {
+    /// `[retrieval].rag_max_memories` 覆盖（摘要路最大记忆条数）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rag_max_memories: Option<u32>,
+    /// `[retrieval].rag_max_summary_chars` 覆盖（单条摘要最大字符数）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rag_max_summary_chars: Option<u32>,
+    /// `[knowledge].retrieve_top_k` 覆盖（知识 fact 路条数截断）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knowledge_retrieve_top_k: Option<u32>,
+    /// `[knowledge].retrieve_threshold` 覆盖（知识 fact 路 θ_route）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knowledge_retrieve_threshold: Option<f64>,
+}
+
+impl VariantOverrides {
+    /// 是否为空（全字段 `None`；空值序列化时省略该键，保持旧数据集最小差异）。
+    pub fn is_empty(&self) -> bool {
+        self.rag_max_memories.is_none()
+            && self.rag_max_summary_chars.is_none()
+            && self.knowledge_retrieve_top_k.is_none()
+            && self.knowledge_retrieve_threshold.is_none()
+    }
+}
+
 /// 参数档位（代表配对：baseline 为 v3.1 初值，其余每次只动一个参数）。
 ///
 /// 字段与 `[utt]` 配置组一一对应（theta_gap_minutes / max_msgs_per_block / retrieve_top_k）。
@@ -396,6 +429,51 @@ pub struct ProbeVariant {
     /// 消融档位 Profile 名称（可选；None = 完整体系/无消融）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ablation: Option<String>,
+    /// 非 utt 参数覆盖（rag/knowledge）；空则完全使用配置基准值。
+    #[serde(default, skip_serializing_if = "VariantOverrides::is_empty")]
+    pub overrides: VariantOverrides,
+}
+
+/// 探针 run 的检索器有效性自检元数据（每次运行一份）。
+///
+/// 用途:
+/// - 跑数结束即可由元数据判定该轮实验是否有效，避免"检索器空载导致 RAG/知识通道
+///   静默失效"的整轮作废（此前 `--no-rebuild-utt` 曾触发该缺陷）。
+///
+/// 字段约定:
+/// - `retriever_doc_count` / `utt_doc_count`：检索器已装载的 L1+L2 文档数与 utt 原文块数。
+/// - `keyword_doc_count` / `keyword_pool_len`：关键词镜像文档数与词典池词条数。
+/// - `bm25_hits` / `vector_hits` / `graph_hits` / `keyword_hits` / `fused_hits`：
+///   自检查询（数据集前若干题）各通道命中合计，用于确认通道真实产出。
+/// - `valid`：检索器文档数 > 0 即为有效；`warnings` 非空时需人工复核。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ProbeRunDiagnostics {
+    /// 检索器文档数（L1 + L2）
+    pub retriever_doc_count: usize,
+    /// 检索器 utt 原文块数
+    pub utt_doc_count: usize,
+    /// 关键词镜像文档数
+    pub keyword_doc_count: usize,
+    /// 关键词词典池词条数
+    pub keyword_pool_len: usize,
+    /// embedding 是否可用（向量通道前提）
+    pub embeddings_available: bool,
+    /// 自检查询题数
+    pub probe_queries: usize,
+    /// 自检查询 BM25 通道命中合计
+    pub bm25_hits: usize,
+    /// 自检查询向量通道命中合计
+    pub vector_hits: usize,
+    /// 自检查询图谱通道命中合计
+    pub graph_hits: usize,
+    /// 自检查询关键词镜像通道命中合计
+    pub keyword_hits: usize,
+    /// 自检查询融合结果合计
+    pub fused_hits: usize,
+    /// 本轮是否有效（检索器文档数 > 0）
+    pub valid: bool,
+    /// 有效性告警（空 = 无告警）
+    pub warnings: Vec<String>,
 }
 
 /// 探针实验结果（`probe run` 的输出；evaluate/report 读取用）。
@@ -413,6 +491,9 @@ pub struct ProbeExperiment {
     /// 统计法（--repeat N）聚合结果；未指定时为 None。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeat: Option<ProbeRepeatMeta>,
+    /// 检索器有效性自检元数据（旧产物缺省为 None）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<ProbeRunDiagnostics>,
     pub generated_at: String,
 }
 

@@ -18,6 +18,7 @@ use ramaria_core::types::{Message, MessageRole, PersonaKind};
 
 use super::types::{
     ContextTurn, DATASET_SCHEMA_VERSION, DEFAULT_PERSONA, DatasetItem, ProbeDataset, ProbeVariant,
+    VariantOverrides,
 };
 use super::{DeterministicRng, now_iso8601};
 
@@ -47,6 +48,7 @@ pub fn default_variants() -> Vec<ProbeVariant> {
             max_msgs_per_block: 80,
             retrieve_top_k: 3,
             ablation: None,
+            overrides: VariantOverrides::default(),
         },
         ProbeVariant {
             id: "theta_gap_60".to_string(),
@@ -55,6 +57,7 @@ pub fn default_variants() -> Vec<ProbeVariant> {
             max_msgs_per_block: 80,
             retrieve_top_k: 3,
             ablation: None,
+            overrides: VariantOverrides::default(),
         },
         ProbeVariant {
             id: "max_msgs_40".to_string(),
@@ -63,6 +66,7 @@ pub fn default_variants() -> Vec<ProbeVariant> {
             max_msgs_per_block: 40,
             retrieve_top_k: 3,
             ablation: None,
+            overrides: VariantOverrides::default(),
         },
         ProbeVariant {
             id: "top_k_1".to_string(),
@@ -71,6 +75,7 @@ pub fn default_variants() -> Vec<ProbeVariant> {
             max_msgs_per_block: 80,
             retrieve_top_k: 1,
             ablation: None,
+            overrides: VariantOverrides::default(),
         },
     ]
 }

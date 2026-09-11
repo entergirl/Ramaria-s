@@ -5,6 +5,9 @@
 //! - 消融对比（--ablation）：F 组（移除）/ S 组（替代）/ I 组（净增量）三类对照分别配对
 //!   做 Wilcoxon 符号秩 + Cohen's d + 95% CI + BH-FDR 判定，并按对照类型分栏表述
 //!   （D-V20-006：I_* 保留 B1 基座测净增量、S_* 去 RAG 摘要测替代）。
+//! - 等效性检验：并行做 TOST（双单侧 t 检验），补上显著性框架无法证明"零净增量"的盲区；
+//!   等效边界取 |d_av|=0.3（合并 SD 口径），配合三态判定
+//!   significant_up / significant_down / equivalent / inconclusive。
 //! - 辅助指标四件套（产物可复算）：证据链可追溯率 / 行为规则命中率 / 情境路由误用率 / 画像回归。
 //! - 人工抽检校准：比对 judge 与人工分数的一致性 / 偏差 / 校准系数（由校准文件驱动，可选）。
 //! - 知识层质量：基于评分数值中的事实维题目评估误报 / 漏报率（目标 <10%）。
@@ -19,11 +22,23 @@ use ramaria_core::error::RamariaError;
 
 use super::evaluate::{ItemEvaluation, ProbeEvaluation, VariantEvaluation, read_experiment};
 use super::run::metric_stat;
-use super::types::{ProbeExperiment, ProbeVariantResult, VariantParams};
+use super::types::{AblationProfile, ProbeExperiment, ProbeVariantResult, VariantParams};
 
 // =========================================================
 // probe report：档位对比报告 + 定稿建议 + 校准 + 知识层质量评估
 // =========================================================
+
+/// 情感维口径声明（描述性指标，报告必出字段）。
+///
+/// 说明:
+/// - 当前口径为「显式共情/喜悦标记词命中数」的确定性 rubric。高亲密度口语语料的
+///   persona 真实回复极短且不含书面情绪词，实测全档 0.02~0.25，该口径对 persona
+///   短句风格系统性不利，构造效度尚未校准。
+/// - 因此情感维降级为描述性指标：报告仍展示其数值供趋势参考，但不参与层价值判定
+///   与参数定稿；层价值判定采用事实维 + 语气维双判据。
+pub const EMOTION_DESCRIPTIVE_NOTE: &str = "情感维口径未校准：确定性 rubric 由「显式共情/喜悦标记词命中」驱动，\
+高亲密度口语语料下对 persona 短句风格系统性不利（实测全档 0.02~0.25）。该维为描述性指标，\
+仅作趋势参考，不参与层价值判定与参数定稿；层价值判定采用事实维 + 语气维双判据。";
 
 /// 档位对比报告（`probe report` 的输出，markdown/JSON 双形态）。
 #[derive(Debug, Clone, serde::Serialize)]
@@ -48,6 +63,8 @@ pub struct ProbeReport {
     /// 数据特性与外部效度局限声明（D-V20-005：仅单 persona 高信号数据，
     /// 不做 D3 跨 persona 推广；judge/embedding 可用性等评估限制）。
     pub limitations: Vec<String>,
+    /// 描述性指标（不参与层价值判定）的口径声明（必出）。
+    pub descriptive_metrics: Vec<String>,
     /// 辅助指标四件套（D-V20-006：证据链可追溯率 / 行为规则命中率 /
     /// 情境路由误用率 / 画像回归）。基于 run/eval 产物可复算的近似口径，
     /// 语义与局限见 `AuxiliaryMetrics.annotation`。
@@ -251,20 +268,46 @@ pub struct CalibrationResult {
     pub annotation: String,
 }
 
+/// 知识层质量评估的单一统计口径（含样本范围与档位集合）。
+///
+/// 说明:
+/// - 同一份评分数值可按不同档位集合切分统计，口径差异必须显式标注，否则
+///   无记忆基线档位会把漏报率抬高、使指标不可比。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct KnowledgeQualityScope {
+    /// 口径标识："memory_injected"（含记忆注入）/ "pooled_all"（全部档位池化）
+    pub scope: String,
+    /// 人类可读口径说明（含档位集合与样本数）
+    pub description: String,
+    /// 该口径覆盖的档位 id 列表
+    pub variant_ids: Vec<String>,
+    /// 样本数（事实维题数）
+    pub sample_count: usize,
+    /// 事实命中数（score ≥ 0.5）
+    pub fact_hit_count: usize,
+    /// 误报率（score < 0.3）
+    pub false_positive_rate: f64,
+    /// 漏报率（score < 0.4）
+    pub false_negative_rate: f64,
+    /// 是否达漏报 <10% 目标
+    pub miss_target_met: bool,
+}
+
 /// 知识层抽取质量评估报告。
 ///
 /// 说明:
-/// - 基于事实维探针题评估知识层抽取质量：以「回复是否包含事件事实」判定命中/漏报。
-/// - `false_positive_rate`（误报）：判定器注入但回复未涵盖事实（答非所问）。
-/// - `false_negative_rate`（漏报）：回复未包含应有的事实信息（目标 <10%）。
+/// - 基于事实维探针题评估知识层抽取质量：以「回复是否涵盖事件事实」判定命中/漏报。
+/// - `false_positive_rate`（误报）：回复未涵盖应有事实（score < 0.3）。
+/// - `false_negative_rate`（漏报）：回复信息不足（score < 0.4），目标 <10%。
+/// - 双口径：主口径只统计含记忆注入档位（M8-006 终验口径）；对照口径池化全部档位
+///   （含无记忆基线），用于说明两者差异来源。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct KnowledgeQualityReport {
-    pub sample_count: usize,
-    pub fact_hit_count: usize,
-    pub false_positive_rate: f64,
-    pub false_negative_rate: f64,
-    /// 是否达到漏报 <10% 目标
-    pub miss_target_met: bool,
+    /// 主口径：含记忆注入档位（M8-006 终验口径）
+    pub primary: KnowledgeQualityScope,
+    /// 对照口径：全部档位池化（含无记忆基线，供可比性对照）
+    pub pooled: KnowledgeQualityScope,
+    /// 口径说明（必出）
     pub annotation: String,
 }
 
@@ -296,6 +339,14 @@ pub struct AblationReport {
     pub rows: Vec<AblationComparisonRow>,
     /// 参与对比档位的辅助指标（mean ± CI / 空回复率）
     pub aux: Vec<VariantAuxMetrics>,
+    /// 参与层价值判定的维度（事实维 + 语气维）。
+    pub judgment_dimensions: Vec<String>,
+    /// 展示但不参与判定的描述性维度（情感维，口径未校准）。
+    pub descriptive_dimensions: Vec<String>,
+    /// 维度范围说明（必出）。
+    pub dimension_scope_note: String,
+    /// 等效性检验口径说明（必出）：TOST + 等效边界语义。
+    pub equivalence_note: String,
 }
 
 /// 单条消融对比（某消融档位 × 某维度，按题目配对）。
@@ -326,6 +377,16 @@ pub struct AblationComparisonRow {
     pub p_fdr: f64,
     /// Cohen's d（配对 d_z = mean(diff)/sd(diff)；sd=0 时 ±10 标记远超阈值）
     pub cohens_d: f64,
+    /// 合并标准差标准化的 Cohen's d（d_av = mean(diff) / sd_av；sd_av = 两档位配对样本合并 SD）
+    pub cohens_d_pooled: f64,
+    /// TOST 等效边界（原始差分量纲；= 0.3 × sd_av，对应 |d_av| = 0.3）
+    pub equiv_bound: f64,
+    /// TOST 等效性检验 p 值（双单侧，t 分布 df = n_pairs − 1）
+    pub tost_p: f64,
+    /// 是否可判定等效（tost_p < 0.05）
+    pub equivalent: bool,
+    /// 综合判定：significant_up / significant_down / equivalent / inconclusive
+    pub verdict: String,
     /// 均值差 95% 置信区间（t 分布）
     pub ci95_low: f64,
     /// 均值差 95% 置信区间上界
@@ -461,6 +522,8 @@ pub(super) async fn run_report(
         .map(|e| e.embedding_used)
         .unwrap_or(false);
     let limitations = build_limitations(&experiment, judge_used, embedding_used);
+    // 描述性指标口径声明（必出）：情感维未校准，仅作展示、不参与层价值判定。
+    let descriptive_metrics = vec![EMOTION_DESCRIPTIVE_NOTE.to_string()];
 
     // 辅助指标四件套（D-V20-006）：有评分数值时可复算；缺失时给出空指标 + 说明。
     let auxiliary = match evaluation.as_ref() {
@@ -488,6 +551,7 @@ pub(super) async fn run_report(
         knowledge_quality,
         ablation: ablation_report,
         limitations,
+        descriptive_metrics,
         auxiliary,
     };
 
@@ -623,41 +687,27 @@ fn build_recommendation(rows: &[VariantReportRow]) -> Recommendation {
         },
     });
 
-    // 情感表达维：取 emotion_score 最高档位（rubric 0/0.5/1 回应恰当性）
-    let emotion_best = rows
-        .iter()
-        .filter(|r| r.emotion_score.is_some())
-        .max_by(|a, b| {
-            a.emotion_score
-                .partial_cmp(&b.emotion_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+    // 情感维口径未校准（描述性指标）：不给最佳档位建议，仅声明口径。
     per_dimension.push(DimensionRecommendation {
         dimension: "emotion".to_string(),
-        best_variant: emotion_best.map(|r| r.variant_id.clone()),
-        best_score: emotion_best.and_then(|r| r.emotion_score),
-        reason: match emotion_best {
-            Some(r) => format!(
-                "情感表达维最高分 {:.2}（档位 {}）；rubric 0/0.5/1 回应恰当性",
-                r.emotion_score.unwrap_or(0.0),
-                r.variant_id
-            ),
-            None => "无情感表达维评分（无 emotion 题或全部失败），无法给出情感维建议".to_string(),
-        },
+        best_variant: None,
+        best_score: None,
+        reason: EMOTION_DESCRIPTIVE_NOTE.to_string(),
     });
 
-    // 综合建议：若事实/语气/情感最佳档位一致 → 取该档位；否则提示需人工权衡
+    // 综合建议：以层价值判定维度（事实维 + 语气维）为准，两者最佳档位一致 → 取该档位；
+    // 否则提示需人工权衡。情感维为描述性指标，不参与一致性判定。
     let all_same = |best: Option<&VariantReportRow>, id: &str| {
         best.map(|r| r.variant_id == id).unwrap_or(false)
     };
     let overall = match fact_best {
-        Some(f) if all_same(tone_best, &f.variant_id) && all_same(emotion_best, &f.variant_id) => {
+        Some(f) if all_same(tone_best, &f.variant_id) => {
             format!(
-                "综合建议档位 {}（事实/语气/情感均最优）；需人工抽检校准后定稿",
+                "综合建议档位 {}（事实/语气均最优）；需人工抽检校准后定稿",
                 f.variant_id
             )
         }
-        _ => "各维最佳档位不一致，需结合人工抽检与消融实验（M5）权衡取舍".to_string(),
+        _ => "各维最佳档位不一致，需结合人工抽检与消融实验权衡取舍".to_string(),
     };
 
     Recommendation {
@@ -695,29 +745,261 @@ fn collect_variant_dim_scores(ev: &VariantEvaluation, dim: &str) -> VariantDimSc
     map
 }
 
-/// 按题目配对两个档位在某维度的差分样本。
+/// 按题目配对两个档位在某维度的差分样本与配对分数。
 ///
 /// 配对规则: 仅取两端都成功评分的 item_id（同一题目），
 /// `diffs = ablated − base`；两端任一缺失的题不参与配对。
+/// 返回 (diffs, base_mean, ablated_mean, base_scores, ablated_scores)。
 fn pair_dimension_diffs(
     ablated: &VariantDimScores,
     base: &VariantDimScores,
-) -> (Vec<f64>, f64, f64) {
+) -> (Vec<f64>, f64, f64, Vec<f64>, Vec<f64>) {
     let mut diffs = Vec::new();
-    let mut base_sum = 0.0;
-    let mut ablated_sum = 0.0;
+    let mut base_scores = Vec::new();
+    let mut ablated_scores = Vec::new();
     for (item_id, base_score) in base {
         if let Some(ablated_score) = ablated.get(item_id) {
             diffs.push(ablated_score - base_score);
-            base_sum += base_score;
-            ablated_sum += ablated_score;
+            base_scores.push(*base_score);
+            ablated_scores.push(*ablated_score);
         }
     }
     let n = diffs.len() as f64;
     if n == 0.0 {
-        return (diffs, 0.0, 0.0);
+        return (diffs, 0.0, 0.0, base_scores, ablated_scores);
     }
-    (diffs, base_sum / n, ablated_sum / n)
+    let base_mean = base_scores.iter().sum::<f64>() / n;
+    let ablated_mean = ablated_scores.iter().sum::<f64>() / n;
+    (diffs, base_mean, ablated_mean, base_scores, ablated_scores)
+}
+
+// =========================================================
+// 等效性检验（TOST）：证明"零净增量"
+// =========================================================
+
+/// 合并标准差标准化的 Cohen's d（d_av）。
+///
+/// 说明:
+/// - `sd_av = sqrt((var_base + var_ablated) / 2)`（样本方差，n≥2）。
+/// - 该口径反映"两个条件各自的离散度"，是等效边界的自然标尺；
+///   显著性判定仍用配对 d_z（`cohens_d_paired`），两者语义不同、不可互替。
+/// - 样本不足（n<2）或合并 SD 为 0 时返回 0.0。
+pub(super) fn cohens_d_pooled(base: &[f64], ablated: &[f64]) -> f64 {
+    let n = base.len().min(ablated.len());
+    if n < 2 {
+        return 0.0;
+    }
+    let mean = |xs: &[f64]| xs.iter().take(n).sum::<f64>() / n as f64;
+    let var = |xs: &[f64]| {
+        let m = mean(xs);
+        xs.iter().take(n).map(|x| (x - m) * (x - m)).sum::<f64>() / (n as f64 - 1.0)
+    };
+    let sd_av = ((var(base) + var(ablated)) / 2.0).sqrt();
+    if sd_av < 1e-12 {
+        return 0.0;
+    }
+    let diff_mean = ablated
+        .iter()
+        .take(n)
+        .zip(base.iter().take(n))
+        .map(|(a, b)| a - b)
+        .sum::<f64>()
+        / n as f64;
+    diff_mean / sd_av
+}
+
+/// TOST 等效性检验结果。
+#[derive(Debug, Clone, Copy)]
+pub(super) struct TostOutcome {
+    /// 原始差分量纲的等效边界（= bound_d × sd_av）
+    pub bound: f64,
+    /// TOST p 值（max(两个单侧 p)）
+    pub p: f64,
+    /// 是否可判定等效（p < 0.05）
+    pub equivalent: bool,
+}
+
+/// 配对样本的 TOST 等效性检验（t 分布，df = n − 1）。
+///
+/// 参数:
+/// - `diffs`: 配对差分样本（ablated − base）。
+/// - `base` / `ablated`: 配对分数向量（用于合并 SD 计算等效边界）。
+/// - `bound_d`: 标准化等效边界。
+///
+/// 返回:
+/// - n<2 或 SD 非法 → None（样本不足，调用方按不可判定处理）。
+pub(super) fn tost_equivalence(
+    diffs: &[f64],
+    base: &[f64],
+    ablated: &[f64],
+    bound_d: f64,
+) -> Option<TostOutcome> {
+    let n = diffs.len();
+    if n < 2 {
+        return None;
+    }
+    let n_f = n as f64;
+    let mean = diffs.iter().sum::<f64>() / n_f;
+    let var = diffs.iter().map(|d| (d - mean) * (d - mean)).sum::<f64>() / (n_f - 1.0);
+    let sd = var.sqrt();
+    if sd < 1e-12 {
+        // 差分为常数：无抽样波动，无法做 t 检验
+        return None;
+    }
+    // 合并 SD（两条件离散度）作为标准化标尺；只取前 n 项，
+    // 保证与 `diffs` 一一配对的样本对齐（正常调用路径三者等长）。
+    let var_of = |xs: &[f64]| {
+        let m = xs.iter().take(n).sum::<f64>() / n_f;
+        xs.iter().take(n).map(|x| (x - m) * (x - m)).sum::<f64>() / (n_f - 1.0)
+    };
+    let sd_av = ((var_of(base) + var_of(ablated)) / 2.0).sqrt();
+    if sd_av < 1e-12 {
+        return None;
+    }
+    let bound = bound_d * sd_av;
+    let se = sd / n_f.sqrt();
+    let df = n_f - 1.0;
+    // H0_low: mean <= -bound（上侧检验）；H0_high: mean >= +bound（下侧检验）
+    let t_low = (mean + bound) / se;
+    let t_high = (mean - bound) / se;
+    let p_low = 1.0 - student_t_cdf(t_low, df);
+    let p_high = student_t_cdf(t_high, df);
+    let p = p_low.max(p_high).clamp(0.0, 1.0);
+    Some(TostOutcome {
+        bound,
+        p,
+        equivalent: p < 0.05,
+    })
+}
+
+/// 学生氏 t 分布累积分布函数。
+///
+/// 说明:
+/// - 用正则化不完全贝塔函数计算（含 Lanczos ln Γ 与连分数），精度足以支撑
+///   p 值判定（相对误差 <1e-6 量级）。
+/// - df <= 0 或 t 为 NaN → 返回 0.5（退化，不 panic）。
+pub(super) fn student_t_cdf(t: f64, df: f64) -> f64 {
+    if !t.is_finite() || df <= 0.0 {
+        return 0.5;
+    }
+    let x = df / (df + t * t);
+    let ib = betai(df / 2.0, 0.5, x);
+    if t > 0.0 { 1.0 - 0.5 * ib } else { 0.5 * ib }
+}
+
+/// 正则化不完全贝塔函数 I_x(a,b)（Numerical Recipes 6.4）。
+fn betai(a: f64, b: f64, x: f64) -> f64 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    if x >= 1.0 {
+        return 1.0;
+    }
+    let ln_bt = ln_gamma(a + b) - ln_gamma(a) - ln_gamma(b) + a * x.ln() + b * (1.0 - x).ln();
+    let bt = ln_bt.exp();
+    if x < (a + 1.0) / (a + b + 2.0) {
+        bt * betacf(a, b, x) / a
+    } else {
+        1.0 - bt * betacf(b, a, 1.0 - x) / b
+    }
+}
+
+/// 不完全贝塔连分数（Numerical Recipes 6.4 betacf）。
+fn betacf(a: f64, b: f64, x: f64) -> f64 {
+    const MAX_ITER: usize = 200;
+    const EPS: f64 = 3.0e-12;
+    const FPMIN: f64 = 1.0e-300;
+    let qab = a + b;
+    let qap = a + 1.0;
+    let qam = a - 1.0;
+    let mut c = 1.0;
+    let mut d = 1.0 - qab * x / qap;
+    if d.abs() < FPMIN {
+        d = FPMIN;
+    }
+    d = 1.0 / d;
+    let mut h = d;
+    for m in 1..=MAX_ITER {
+        let m_f = m as f64;
+        let m2 = 2.0 * m_f;
+        let aa = m_f * (b - m_f) * x / ((qam + m2) * (a + m2));
+        d = 1.0 + aa * d;
+        if d.abs() < FPMIN {
+            d = FPMIN;
+        }
+        c = 1.0 + aa / c;
+        if c.abs() < FPMIN {
+            c = FPMIN;
+        }
+        d = 1.0 / d;
+        h *= d * c;
+        let aa = -(a + m_f) * (qab + m_f) * x / ((a + m2) * (qap + m2));
+        d = 1.0 + aa * d;
+        if d.abs() < FPMIN {
+            d = FPMIN;
+        }
+        c = 1.0 + aa / c;
+        if c.abs() < FPMIN {
+            c = FPMIN;
+        }
+        d = 1.0 / d;
+        let del = d * c;
+        h *= del;
+        if (del - 1.0).abs() < EPS {
+            break;
+        }
+    }
+    h
+}
+
+/// ln Γ(x)（Lanczos 近似，Numerical Recipes 6.1）。
+fn ln_gamma(x: f64) -> f64 {
+    const COF: [f64; 6] = [
+        76.18009172947146,
+        -86.50532032941677,
+        24.01409824083091,
+        -1.231739572450155,
+        0.1208650973866179e-2,
+        -0.5395239384953e-5,
+    ];
+    let mut y = x;
+    let mut tmp = x + 5.5;
+    tmp -= (x + 0.5) * tmp.ln();
+    let mut ser = 1.000000000190015;
+    for c in COF {
+        y += 1.0;
+        ser += c / y;
+    }
+    -tmp + (2.5066282746310005 * ser / x).ln()
+}
+
+/// 未达显著差异时的结论文案：区分"已证等效"与"样本量不足以判定"。
+///
+/// 说明:
+/// - 显著与等效互斥，本函数只在 `significant == false` 时被调用；
+/// - 等效分支报出等效边界（原始差分量纲）与 |d_av|，便于人工核对边界是否合理；
+/// - 不可判定分支同时报 p_fdr 与 tost_p，指向"提高重复次数/题量"的下一步。
+fn equivalence_annotation(
+    type_label: &str,
+    p_fdr: f64,
+    tost_p: f64,
+    equiv_bound: f64,
+    cohens_d_pooled: f64,
+    cohens_d: f64,
+    equivalent: bool,
+) -> String {
+    if equivalent {
+        format!(
+            "{type_label}：等效（TOST p={tost_p:.3} < 0.05，等效边界 Δ=±{equiv_bound:.4}，\
+             |d_av|={:.2}）→ 可判定该对照无实质净增量",
+            cohens_d_pooled.abs()
+        )
+    } else {
+        format!(
+            "{type_label}：既未达显著差异、亦未达统计等效（p_fdr={p_fdr:.3}, tost_p={tost_p:.3}, \
+             |d|={cohens_d:.2}）→ 样本量不足以判定"
+        )
+    }
 }
 
 /// 构建消融对比报告。
@@ -734,6 +1016,10 @@ fn pair_dimension_diffs(
 /// - 全部行 p 值经 Benjamini–Hochberg FDR 校正。
 ///
 /// 判定线（D-V17-009）: `p_fdr < 0.05 ∧ |d| ≥ 0.3 ∧ CI 不含 0` → 显著。
+///
+/// 等效性检验: 显著性框架只能证明"存在差异"，无法证明"零净增量"（相关对照长期
+/// 只得到不显著）。故并行做 TOST（双单侧 t 检验），等效边界取 |d_av|=0.3
+/// （d_av 为合并 SD 口径），`tost_p < 0.05` 即判定"等效（无实质净增量）"。
 pub(super) fn build_ablation_report(
     experiment: &ProbeExperiment,
     evaluation: &ProbeEvaluation,
@@ -765,7 +1051,8 @@ pub(super) fn build_ablation_report(
     let b1 = find_baseline(&["B1"]);
 
     // 待比较组：F 组（F1~F4 vs F0）与 S 组（S_* vs B1），按数据集实际出现的档位驱动。
-    let dims = ["fact", "tone", "emotion"];
+    // 判定维度只取事实维 + 语气维：情感维口径未校准，已移出层价值判定，仅在报告中展示数值。
+    let dims = ["fact", "tone"];
 
     // 先收集全部"候选行"（含未校正 p 值），再统一 FDR 校正后补判定字段。
     struct RawRow<'a> {
@@ -774,6 +1061,8 @@ pub(super) fn build_ablation_report(
         comparison_type: &'a str,
         base_variant: &'a str,
         diffs: Vec<f64>,
+        base_scores: Vec<f64>,
+        ablated_scores: Vec<f64>,
         base_mean: f64,
         ablated_mean: f64,
         wilcoxon_p: f64,
@@ -791,10 +1080,11 @@ pub(super) fn build_ablation_report(
             if let Some(ablated) = by_id.get(name) {
                 compared_ids.push(ablated.variant_id.clone());
                 for dim in dims {
-                    let (diffs, base_mean, ablated_mean) = pair_dimension_diffs(
-                        &collect_variant_dim_scores(ablated, dim),
-                        &collect_variant_dim_scores(base, dim),
-                    );
+                    let (diffs, base_mean, ablated_mean, base_scores, ablated_scores) =
+                        pair_dimension_diffs(
+                            &collect_variant_dim_scores(ablated, dim),
+                            &collect_variant_dim_scores(base, dim),
+                        );
                     if diffs.len() < 2 {
                         tracing::debug!(
                             ablation = name,
@@ -809,6 +1099,8 @@ pub(super) fn build_ablation_report(
                         dimension: dim,
                         comparison_type: "removal",
                         base_variant: base.variant_id.as_str(),
+                        base_scores,
+                        ablated_scores,
                         base_mean,
                         ablated_mean,
                         wilcoxon_p: wilcoxon_signed_rank_p(&diffs).unwrap_or(1.0),
@@ -841,10 +1133,11 @@ pub(super) fn build_ablation_report(
             if let Some(ablated) = by_id.get(name) {
                 compared_ids.push(ablated.variant_id.clone());
                 for dim in dims {
-                    let (diffs, base_mean, ablated_mean) = pair_dimension_diffs(
-                        &collect_variant_dim_scores(ablated, dim),
-                        &collect_variant_dim_scores(base, dim),
-                    );
+                    let (diffs, base_mean, ablated_mean, base_scores, ablated_scores) =
+                        pair_dimension_diffs(
+                            &collect_variant_dim_scores(ablated, dim),
+                            &collect_variant_dim_scores(base, dim),
+                        );
                     if diffs.len() < 2 {
                         tracing::debug!(
                             ablation = name,
@@ -859,6 +1152,8 @@ pub(super) fn build_ablation_report(
                         dimension: dim,
                         comparison_type,
                         base_variant: base.variant_id.as_str(),
+                        base_scores,
+                        ablated_scores,
                         base_mean,
                         ablated_mean,
                         wilcoxon_p: wilcoxon_signed_rank_p(&diffs).unwrap_or(1.0),
@@ -881,26 +1176,43 @@ pub(super) fn build_ablation_report(
     let mut rows = Vec::with_capacity(raw_rows.len());
     for (raw, p_fdr) in raw_rows.into_iter().zip(p_fdr) {
         let ablation_name = raw.ablation.variant_id.as_str();
-        // 判定线：p_fdr<0.05 ∧ |d|≥0.3 ∧ CI 不含 0
+        // 显著性判定线：p_fdr<0.05 ∧ |d_z|≥0.3 ∧ CI 不含 0
         let ci_excludes_zero = raw.ci_low > 0.0 || raw.ci_high < 0.0;
         let significant = p_fdr < 0.05 && raw.cohens_d.abs() >= 0.3 && ci_excludes_zero;
+        // 等效性判定：TOST 只能证伪"存在实质净增量"，用于补上显著性框架的盲区
+        // （长期只得到"不显著"时，无法区分"真的没增量"与"样本不足"）。
+        let tost = tost_equivalence(&raw.diffs, &raw.base_scores, &raw.ablated_scores, 0.3);
+        let (equiv_bound, tost_p, equivalent) = match tost {
+            Some(t) => (t.bound, t.p, t.equivalent),
+            None => (0.0, 1.0, false),
+        };
+        let cohens_d_pooled = cohens_d_pooled(&raw.base_scores, &raw.ablated_scores);
         // 均值差（消融档 − 基线档）。
         let mean_diff = raw.ablated_mean - raw.base_mean;
+        // 对照类型名（人类可读），三态结论文案共用。
+        let type_label = match raw.comparison_type {
+            "removal" => "移除对照",
+            "substitution" => "替代对照",
+            _ => "净增量对照",
+        };
+        // 未达显著时的结论文案（等效 / 不可判定），三类对照共用；
+        // 显著分支不使用，故只在需要时 clone。
+        let equivalence_text = equivalence_annotation(
+            type_label,
+            p_fdr,
+            tost_p,
+            equiv_bound,
+            cohens_d_pooled,
+            raw.cohens_d,
+            equivalent,
+        );
         // 方向语义按对照类型区分（D-V20-006 口径）：
         // - removal（F 组 vs F0）：关注"移除后是否下降"；
         // - substitution（S 组 vs B1）：去 RAG 摘要只留单层，关注"能否替代 RAG 基座"；
         // - increment（I 组 vs B1）：B1 基座 + 单层，关注"叠加后是否净增"。
         let (direction, annotation) = match raw.comparison_type {
             "removal" => {
-                if !significant {
-                    (
-                        "none".to_string(),
-                        format!(
-                            "移除对照无显著差异（p_fdr={:.3}, |d|={:.2}）",
-                            p_fdr, raw.cohens_d
-                        ),
-                    )
-                } else if mean_diff < 0.0 {
+                if significant && mean_diff < 0.0 {
                     (
                         "down".to_string(),
                         format!(
@@ -908,7 +1220,7 @@ pub(super) fn build_ablation_report(
                             mean_diff, raw.dimension
                         ),
                     )
-                } else {
+                } else if significant {
                     (
                         "up".to_string(),
                         format!(
@@ -916,19 +1228,13 @@ pub(super) fn build_ablation_report(
                             mean_diff
                         ),
                     )
+                } else {
+                    ("none".to_string(), equivalence_text.clone())
                 }
             }
             "substitution" => {
                 // S 组：目标层在无 RAG 摘要时单独注入，与 B1（仅 RAG 摘要）比较。
-                if !significant {
-                    (
-                        "none".to_string(),
-                        format!(
-                            "替代对照无显著差异（p_fdr={:.3}, |d|={:.2}）",
-                            p_fdr, raw.cohens_d
-                        ),
-                    )
-                } else if mean_diff < 0.0 {
+                if significant && mean_diff < 0.0 {
                     (
                         "down".to_string(),
                         format!(
@@ -936,7 +1242,7 @@ pub(super) fn build_ablation_report(
                             mean_diff
                         ),
                     )
-                } else {
+                } else if significant {
                     (
                         "up".to_string(),
                         format!(
@@ -944,19 +1250,13 @@ pub(super) fn build_ablation_report(
                             mean_diff
                         ),
                     )
+                } else {
+                    ("none".to_string(), equivalence_text.clone())
                 }
             }
             _ => {
                 // increment（I 组）：B1 基座 + 该层，与 B1 比较净增量。
-                if !significant {
-                    (
-                        "none".to_string(),
-                        format!(
-                            "净增量对照无显著差异（p_fdr={:.3}, |d|={:.2}）",
-                            p_fdr, raw.cohens_d
-                        ),
-                    )
-                } else if mean_diff < 0.0 {
+                if significant && mean_diff < 0.0 {
                     (
                         "down".to_string(),
                         format!(
@@ -964,7 +1264,7 @@ pub(super) fn build_ablation_report(
                             mean_diff
                         ),
                     )
-                } else {
+                } else if significant {
                     (
                         "up".to_string(),
                         format!(
@@ -972,8 +1272,18 @@ pub(super) fn build_ablation_report(
                             mean_diff
                         ),
                     )
+                } else {
+                    ("none".to_string(), equivalence_text)
                 }
             }
+        };
+        // 综合判定：显著优先（显著与等效互斥），否则区分"证得等效"与"证据不足"。
+        let verdict = if significant {
+            format!("significant_{direction}")
+        } else if equivalent {
+            "equivalent".to_string()
+        } else {
+            "inconclusive".to_string()
         };
 
         rows.push(AblationComparisonRow {
@@ -989,6 +1299,11 @@ pub(super) fn build_ablation_report(
             wilcoxon_p: raw.wilcoxon_p,
             p_fdr,
             cohens_d: raw.cohens_d,
+            cohens_d_pooled,
+            equiv_bound,
+            tost_p,
+            equivalent,
+            verdict,
             ci95_low: raw.ci_low,
             ci95_high: raw.ci_high,
             significant,
@@ -1020,6 +1335,13 @@ pub(super) fn build_ablation_report(
             .unwrap_or_default(),
         rows,
         aux,
+        judgment_dimensions: dims.iter().map(|d| d.to_string()).collect(),
+        descriptive_dimensions: vec!["emotion".to_string()],
+        dimension_scope_note: EMOTION_DESCRIPTIVE_NOTE.to_string(),
+        equivalence_note: "等效性检验：TOST（双单侧 t 检验，df=配对数−1），等效边界取 |d_av|=0.3，\
+            即原始差分 ±0.3×合并SD；tost_p<0.05 判定「等效（无实质净增量）」。\
+            显著性仍按配对 Wilcoxon + d_z + 95%CI + BH-FDR。"
+            .to_string(),
     }
 }
 
@@ -1348,78 +1670,140 @@ fn compute_calibration(
 // 知识层抽取质量评估（T-V16-4-005）
 // =========================================================
 
-/// 评估知识层抽取质量（误报 / 漏报率）。
+/// 判断某档位是否含记忆注入（RAG 摘要基座 memory_rag 开启）。
 ///
 /// 说明:
-/// - 基于评分数值中的 fact 题：以「回复是否充分回应事实性问题」判定命中。
-/// - 判定规则（无 reference 时的近似）:
-///   - `fact_hit`: 事实维 score ≥ 0.5（回复具体、信息充分）。
-///   - `false_positive`（误报）: score 低但判定器/知识注入本应提供事实（此处以 score < 0.3 计）。
-///   - `false_negative`（漏报）: score 居中但信息不足（score < 0.4 视为未充分回答事实）。
-/// - 漏报率目标 < 10%（D-V16-004）。
-fn assess_knowledge_quality(evaluation: &ProbeEvaluation) -> KnowledgeQualityReport {
-    let mut fact_items: Vec<&ItemEvaluation> = Vec::new();
-    for v in &evaluation.variants {
-        for item in &v.items {
-            if item.dimension == "fact" && item.fact.is_some() {
-                fact_items.push(item);
+/// - 复用 `AblationProfile::apply_to` 的闸门映射作为唯一真源，避免在此重复维护
+///   档位语义（B1/F0/F1~F4/I_* 为含记忆；B0/S_* 为不含记忆）。
+/// - `ablation=None`（无消融）等同完整体系，含记忆注入。
+/// - 未知档位名按完整体系处理（不误判为无记忆）。
+fn variant_uses_memory_injection(ablation: Option<&str>) -> bool {
+    match ablation {
+        None => true,
+        Some(name) => match AblationProfile::parse_name(name) {
+            Some(profile) => {
+                let mut cfg = ramaria_core::config::RamariaConfig::default();
+                profile.apply_to(&mut cfg);
+                cfg.injection.memory_rag
             }
-        }
+            None => true,
+        },
     }
+}
 
-    let sample_count = fact_items.len();
-    if sample_count == 0 {
-        return KnowledgeQualityReport {
-            sample_count: 0,
-            fact_hit_count: 0,
-            false_positive_rate: 0.0,
-            false_negative_rate: 0.0,
-            miss_target_met: false,
-            annotation: "无事实维样本，无法评估知识层质量".to_string(),
-        };
-    }
-
-    let fact_hit_count = fact_items
+/// 按给定事实维题集与档位集合汇总单一口径的质量指标。
+pub(super) fn summarize_knowledge_scope(
+    scope: &str,
+    label: &str,
+    variant_ids: Vec<String>,
+    items: &[&ItemEvaluation],
+) -> KnowledgeQualityScope {
+    let sample_count = items.len();
+    let fact_hit_count = items
         .iter()
         .filter(|i| i.fact.as_ref().map(|f| f.score >= 0.5).unwrap_or(false))
         .count();
-
-    // 误报：判定注入但回复未覆盖事实（score 低）——近似为 score < 0.3
-    let false_positive = fact_items
+    let false_positive = items
         .iter()
         .filter(|i| i.fact.as_ref().map(|f| f.score < 0.3).unwrap_or(false))
         .count();
-
-    // 漏报：回复未充分回答事实问题（score < 0.4 视为信息不足）
-    let false_negative = fact_items
+    let false_negative = items
         .iter()
         .filter(|i| i.fact.as_ref().map(|f| f.score < 0.4).unwrap_or(false))
         .count();
-
-    let false_positive_rate = false_positive as f64 / sample_count as f64;
-    let false_negative_rate = false_negative as f64 / sample_count as f64;
-    let miss_target_met = false_negative_rate < 0.10;
-
-    let annotation = if miss_target_met {
-        format!(
-            "漏报率 {:.1}% 达标（<10%）；误报率 {:.1}%",
-            false_negative_rate * 100.0,
-            false_positive_rate * 100.0
-        )
+    let (false_positive_rate, false_negative_rate) = if sample_count == 0 {
+        (0.0, 0.0)
     } else {
-        format!(
-            "漏报率 {:.1}% 未达标（目标 <10%）；误报率 {:.1}%；需优化知识抽取或检索召回",
-            false_negative_rate * 100.0,
-            false_positive_rate * 100.0
+        (
+            false_positive as f64 / sample_count as f64,
+            false_negative as f64 / sample_count as f64,
         )
     };
-
-    KnowledgeQualityReport {
+    let range = if variant_ids.is_empty() {
+        "（无样本档位）".to_string()
+    } else {
+        format!("档位 [{}]", variant_ids.join(", "))
+    };
+    KnowledgeQualityScope {
+        scope: scope.to_string(),
+        description: format!("{label}：{range}，样本 {sample_count} 题"),
+        variant_ids,
         sample_count,
         fact_hit_count,
         false_positive_rate,
         false_negative_rate,
-        miss_target_met,
+        miss_target_met: sample_count > 0 && false_negative_rate < 0.10,
+    }
+}
+
+/// 评估知识层抽取质量（双口径：含记忆注入 / 全部档位池化）。
+pub(super) fn assess_knowledge_quality(evaluation: &ProbeEvaluation) -> KnowledgeQualityReport {
+    let mut all_items: Vec<&ItemEvaluation> = Vec::new();
+    let mut memory_items: Vec<&ItemEvaluation> = Vec::new();
+    let mut all_ids: Vec<String> = Vec::new();
+    let mut memory_ids: Vec<String> = Vec::new();
+
+    for v in &evaluation.variants {
+        let memory = variant_uses_memory_injection(v.params.ablation.as_deref());
+        let mut counted = false;
+        for item in &v.items {
+            if item.dimension == "fact" && item.fact.is_some() {
+                all_items.push(item);
+                counted = true;
+                if memory {
+                    memory_items.push(item);
+                }
+            }
+        }
+        if counted {
+            all_ids.push(v.variant_id.clone());
+            if memory {
+                memory_ids.push(v.variant_id.clone());
+            }
+        }
+    }
+
+    let pooled = summarize_knowledge_scope(
+        "pooled_all",
+        "对照口径：全部档位池化（含无记忆基线）",
+        all_ids,
+        &all_items,
+    );
+    let primary = summarize_knowledge_scope(
+        "memory_injected",
+        "主口径：含记忆注入档位",
+        memory_ids,
+        &memory_items,
+    );
+
+    let annotation = if primary.sample_count == 0 {
+        format!(
+            "无含记忆注入档位样本，主口径不可用；对照口径（全部档位池化）样本 {} 题（漏报 {:.1}%）。\
+             无事实维样本时两口径均不可评估。",
+            pooled.sample_count,
+            pooled.false_negative_rate * 100.0
+        )
+    } else {
+        format!(
+            "主口径（含记忆注入档位，{} 档）漏报 {:.1}%（目标 <10% → {}）、误报 {:.1}%；\
+             对照口径（全部档位池化，含无记忆基线）漏报 {:.1}%、误报 {:.1}%。\
+             两口径差异全部来自无记忆档位，指标不可比；终验采用含记忆注入口径。",
+            primary.variant_ids.len(),
+            primary.false_negative_rate * 100.0,
+            if primary.miss_target_met {
+                "达标"
+            } else {
+                "未达标"
+            },
+            primary.false_positive_rate * 100.0,
+            pooled.false_negative_rate * 100.0,
+            pooled.false_positive_rate * 100.0,
+        )
+    };
+
+    KnowledgeQualityReport {
+        primary,
+        pooled,
         annotation,
     }
 }
@@ -1493,6 +1877,8 @@ pub(super) fn render_report_markdown(report: &ProbeReport) -> String {
     }
     md.push('\n');
 
+    md.push_str("> 情感维为描述性指标（口径未校准），不参与层价值判定。\n\n");
+
     // 定稿建议
     md.push_str("## 定稿建议\n\n");
     for d in &report.recommendation.per_dimension {
@@ -1526,24 +1912,30 @@ pub(super) fn render_report_markdown(report: &ProbeReport) -> String {
         md.push_str(&format!("- 标注：{}\n\n", c.annotation));
     }
 
-    // 知识层质量
+    // 知识层质量（双口径：主口径含记忆注入 / 对照口径全部档位池化）
     if let Some(kq) = &report.knowledge_quality {
-        md.push_str("## 知识层抽取质量评估\n\n");
-        md.push_str(&format!("- 样本数：{}（事实维）\n", kq.sample_count));
-        md.push_str(&format!("- 事实命中：{}\n", kq.fact_hit_count));
-        md.push_str(&format!(
-            "- 误报率：{:.1}%\n",
-            kq.false_positive_rate * 100.0
-        ));
-        md.push_str(&format!(
-            "- 漏报率：{:.1}%（目标 <10% → {})\n",
-            kq.false_negative_rate * 100.0,
-            if kq.miss_target_met {
-                "达标"
-            } else {
-                "未达标"
-            }
-        ));
+        md.push_str("## 知识层抽取质量评估（双口径）\n\n");
+        // description 已自带「主口径/对照口径」标签，标题不再重复拼接 tag。
+        for scope in [&kq.primary, &kq.pooled] {
+            md.push_str(&format!("### {}\n\n", scope.description));
+            md.push_str(&format!(
+                "- 事实命中：{}/{}\n",
+                scope.fact_hit_count, scope.sample_count
+            ));
+            md.push_str(&format!(
+                "- 误报率：{:.1}%\n",
+                scope.false_positive_rate * 100.0
+            ));
+            md.push_str(&format!(
+                "- 漏报率：{:.1}%（目标 <10% → {})\n\n",
+                scope.false_negative_rate * 100.0,
+                if scope.miss_target_met {
+                    "达标"
+                } else {
+                    "未达标"
+                }
+            ));
+        }
         md.push_str(&format!("- 结论：{}\n\n", kq.annotation));
     }
 
@@ -1554,13 +1946,19 @@ pub(super) fn render_report_markdown(report: &ProbeReport) -> String {
             "- 方法：按题目配对 Wilcoxon 符号秩检验 + Cohen's d + 95% CI；\
              多比较经 Benjamini–Hochberg FDR 校正\n",
         );
-        md.push_str("- 判定线：p_fdr<0.05 ∧ |d|≥0.3 ∧ CI 不含 0\n\n");
+        md.push_str("- 判定线：p_fdr<0.05 ∧ |d|≥0.3 ∧ CI 不含 0\n");
+        md.push_str(&format!("- {}\n\n", ab.equivalence_note));
         md.push_str("- 对照语义（D-V20-006）：\n");
         md.push_str("  - **removal（移除，基线 F0）**：全开中逐层关闭 → 去掉某一层的边际损失；\n");
         md.push_str(
             "  - **substitution（替代，基线 B1）**：去 RAG 摘要、仅单专属层 → 单层能否替代 RAG；\n",
         );
         md.push_str("  - **increment（净增量，基线 B1）**：B1 基座 + 单专属层 → RAG 之上叠加一层的净增量。\n\n");
+        md.push_str(&format!(
+            "- 判定维度：{}（描述性展示：{}）\n\n",
+            ab.judgment_dimensions.join(" / "),
+            ab.descriptive_dimensions.join(" / ")
+        ));
 
         let render_rows = |md: &mut String, label: &str, rows: &[&AblationComparisonRow]| {
             md.push_str(&format!("### {label}\n\n"));
@@ -1569,8 +1967,18 @@ pub(super) fn render_report_markdown(report: &ProbeReport) -> String {
             );
             md.push_str("|------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|------|\n");
             for r in rows {
+                // 判定列按三态 verdict 渲染，并附 TOST p 便于核对等效结论。
+                let verdict_cell = {
+                    let v = match r.verdict.as_str() {
+                        "significant_down" => "↓ 显著下降",
+                        "significant_up" => "↑ 显著提升",
+                        "equivalent" => "≡ 等效（无净增量）",
+                        _ => "? 不确定",
+                    };
+                    format!("{v}(n={}, TOST p={:.3})", r.n_pairs, r.tost_p)
+                };
                 md.push_str(&format!(
-                    "| {} | {} | {} | {:.3} | {:.3} | {:.3} | {:.4} | {:.2} | [{:.3}, {:.3}] | {}(n={}) |\n",
+                    "| {} | {} | {} | {:.3} | {:.3} | {:.3} | {:.4} | {:.2} | [{:.3}, {:.3}] | {} |\n",
                     r.ablation_variant,
                     r.base_variant,
                     r.dimension,
@@ -1581,12 +1989,7 @@ pub(super) fn render_report_markdown(report: &ProbeReport) -> String {
                     r.cohens_d,
                     r.ci95_low,
                     r.ci95_high,
-                    match (r.significant, r.direction.as_str()) {
-                        (true, "down") => "↓ 显著下降",
-                        (true, "up") => "↑ 显著提升",
-                        _ => "→ 无差异",
-                    },
-                    r.n_pairs
+                    verdict_cell,
                 ));
             }
             md.push('\n');
@@ -1623,6 +2026,13 @@ pub(super) fn render_report_markdown(report: &ProbeReport) -> String {
         }
         md.push('\n');
     }
+
+    // 描述性指标（口径未校准，不参与层价值判定）
+    md.push_str("## 描述性指标（不参与层价值判定）\n\n");
+    for note in &report.descriptive_metrics {
+        md.push_str(&format!("- {note}\n"));
+    }
+    md.push('\n');
 
     // 辅助指标四件套（D-V20-006，产物可复算近似）
     md.push_str("## 辅助指标（产物可复算）\n\n");
@@ -1710,14 +2120,16 @@ fn print_report_summary(report: &ProbeReport) {
     }
     if let Some(kq) = &report.knowledge_quality {
         println!(
-            "知识层: 误报 {:.1}% 漏报 {:.1}% {}",
-            kq.false_positive_rate * 100.0,
-            kq.false_negative_rate * 100.0,
-            if kq.miss_target_met {
+            "知识层（主口径 含记忆注入）: 样本 {} 误报 {:.1}% 漏报 {:.1}% {} | 对照口径（全量池化）漏报 {:.1}%",
+            kq.primary.sample_count,
+            kq.primary.false_positive_rate * 100.0,
+            kq.primary.false_negative_rate * 100.0,
+            if kq.primary.miss_target_met {
                 "（达标）"
             } else {
                 "（未达标）"
-            }
+            },
+            kq.pooled.false_negative_rate * 100.0
         );
     }
     if let Some(ab) = &report.ablation {

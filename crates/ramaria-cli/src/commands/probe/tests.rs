@@ -18,13 +18,15 @@ use super::evaluate::{
     score_emotion_item, tone_judge_system_prompt,
 };
 use super::report::{
-    bh_fdr_adjust, build_ablation_report, cohens_d_paired, compute_auxiliary_metrics, erf_approx,
-    normal_cdf, read_manual_scores, wilcoxon_signed_rank_p,
+    KnowledgeQualityScope, bh_fdr_adjust, build_ablation_report, cohens_d_paired, cohens_d_pooled,
+    compute_auxiliary_metrics, erf_approx, normal_cdf, read_manual_scores, student_t_cdf,
+    tost_equivalence, wilcoxon_signed_rank_p,
 };
 use super::run::{
-    aggregate_repeat_stats, filter_variants, metric_stat, seed_history_from_context, t_critical_975,
+    aggregate_repeat_stats, filter_variants, metric_stat, run_validity, seed_history_from_context,
+    t_critical_975,
 };
-use super::types::{ContextTurn, DATASET_SCHEMA_VERSION};
+use super::types::{ContextTurn, DATASET_SCHEMA_VERSION, VariantOverrides};
 use ramaria_core::error::RamariaError;
 use ramaria_core::types::{MessageRole, PersonaKind};
 use std::path::Path;
@@ -252,6 +254,7 @@ fn aggregate_repeat_stats_pairs_by_variant_and_item() {
             rebuild_utt: true,
             variants: vec![vr],
             repeat: None,
+            diagnostics: None,
             generated_at: "t".to_string(),
         }
     }
@@ -1015,6 +1018,7 @@ fn probe_variant_ablation_serde_backcompat() {
         max_msgs_per_block: 80,
         retrieve_top_k: 3,
         ablation: Some("F1".to_string()),
+        overrides: VariantOverrides::default(),
     };
     let json = serde_json::to_string(&v).unwrap();
     assert!(
@@ -1033,6 +1037,53 @@ fn probe_variant_ablation_serde_backcompat() {
     assert!(
         !plain_json.contains("ablation"),
         "None ablation 应省略: {plain_json}"
+    );
+}
+
+/// 档位参数覆盖 serde：旧数据集无 `overrides` 键 → 默认全 None（行为等价）；
+/// 带覆盖的档位往返保留；空覆盖序列化时省略该键。
+#[test]
+fn variant_overrides_serde_roundtrip_and_backcompat() {
+    // 旧格式（无 overrides）→ 默认空
+    let old = r#"{"id":"baseline","description":"d","theta_gap_minutes":10,
+        "max_msgs_per_block":80,"retrieve_top_k":3}"#;
+    let parsed: ProbeVariant = serde_json::from_str(old).unwrap();
+    assert!(parsed.overrides.is_empty(), "旧数据集 overrides 应为空");
+
+    // 新格式：带覆盖 → 往返保留；序列化含 overrides 键
+    let v = ProbeVariant {
+        id: "p_rag_mem_10".to_string(),
+        description: "rag_max_memories=10".to_string(),
+        theta_gap_minutes: 10,
+        max_msgs_per_block: 80,
+        retrieve_top_k: 3,
+        ablation: Some("B1".to_string()),
+        overrides: VariantOverrides {
+            rag_max_memories: Some(10),
+            rag_max_summary_chars: None,
+            knowledge_retrieve_top_k: None,
+            knowledge_retrieve_threshold: Some(0.3),
+        },
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert!(
+        json.contains("\"rag_max_memories\":10"),
+        "非空覆盖应序列化: {json}"
+    );
+    let back: ProbeVariant = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.overrides.rag_max_memories, Some(10));
+    assert_eq!(back.overrides.knowledge_retrieve_threshold, Some(0.3));
+    assert_eq!(back.overrides.rag_max_summary_chars, None);
+
+    // 空覆盖序列化省略该键（旧产物最小差异）
+    let plain = ProbeVariant {
+        overrides: VariantOverrides::default(),
+        ..v
+    };
+    let plain_json = serde_json::to_string(&plain).unwrap();
+    assert!(
+        !plain_json.contains("overrides"),
+        "空覆盖应省略: {plain_json}"
     );
 }
 
@@ -1241,6 +1292,64 @@ fn cohens_d_edge_cases() {
     assert_eq!(cohens_d_paired(&[]), 0.0);
 }
 
+/// 学生氏 t 分布 CDF 关键值（与 t 表比对）。
+#[test]
+fn student_t_cdf_key_values() {
+    assert!((student_t_cdf(0.0, 29.0) - 0.5).abs() < 1e-6);
+    // 单侧 0.025 分位：t(29, 0.975) = 2.045
+    assert!((student_t_cdf(2.045, 29.0) - 0.975).abs() < 5e-4);
+    assert!((student_t_cdf(-2.045, 29.0) - 0.025).abs() < 5e-4);
+    // 大样本趋近正态
+    assert!((student_t_cdf(1.96, 1_000_000.0) - 0.975).abs() < 5e-3);
+    // 退化输入不 panic
+    assert!((student_t_cdf(f64::NAN, 10.0) - 0.5).abs() < 1e-9);
+    assert!((student_t_cdf(1.0, 0.0) - 0.5).abs() < 1e-9);
+}
+
+/// TOST：近零效应 → 可判定等效；大效应 → 拒绝等效。
+///
+/// 关键对照：同一份"近零效应"数据在显著性框架下只能得到"不显著"，
+/// 只有 TOST 才能给出"等效（无实质净增量）"结论——这正是该检验的用途。
+#[test]
+fn tost_declares_equivalence_for_near_zero_effect() {
+    // 两档位分数几乎一致：得分本身宽幅分布（合并 SD 大），差分仅为 ±0.01 级微扰，
+    // 即"零净增量"的典型形态；等效边界（0.3×合并SD）远大于差分抽样误差。
+    let base: Vec<f64> = (0..30).map(|i| 0.2 + (i % 10) as f64 * 0.08).collect();
+    let ablated: Vec<f64> = base
+        .iter()
+        .enumerate()
+        .map(|(i, b)| b + if i % 3 == 0 { 0.01 } else { -0.005 })
+        .collect();
+    let diffs: Vec<f64> = ablated.iter().zip(&base).map(|(a, b)| a - b).collect();
+    let t = tost_equivalence(&diffs, &base, &ablated, 0.3).expect("n≥2 应可检验");
+    assert!(t.p < 0.05, "近零效应应判定等效，实际 tost_p={}", t.p);
+    assert!(t.equivalent);
+    assert!(t.bound > 0.0);
+    // 显著性框架下同一数据只能得到"不显著"（符号混合）
+    assert!(
+        wilcoxon_signed_rank_p(&diffs).expect("n≥5 应可检验") > 0.05,
+        "该数据不应出现显著差异"
+    );
+    // 同集合（差分恒 0）→ 合并 SD 口径的 d 为 0
+    assert_eq!(cohens_d_pooled(&base, &base), 0.0);
+
+    // 大效应：ablated 系统性高于 base（差值 ≈0.5，远超等效边界）
+    let ablated_big: Vec<f64> = base
+        .iter()
+        .enumerate()
+        .map(|(i, b)| b + 0.5 + (i % 4) as f64 * 0.01)
+        .collect();
+    let diffs_big: Vec<f64> = ablated_big.iter().zip(&base).map(|(a, b)| a - b).collect();
+    let t2 = tost_equivalence(&diffs_big, &base, &ablated_big, 0.3).expect("n≥2 应可检验");
+    assert!(t2.p > 0.05, "大效应不应判定等效，实际 tost_p={}", t2.p);
+    assert!(!t2.equivalent);
+
+    // 样本不足 → None（调用方按不可判定处理）
+    assert!(tost_equivalence(&[0.1], &[0.0], &[0.1], 0.3).is_none());
+    // 差分为常数（sd=0）→ 无抽样波动，不做 t 检验
+    assert!(tost_equivalence(&[0.5; 10], &[0.0; 10], &[0.5; 10], 0.3).is_none());
+}
+
 /// BH FDR：单调校正且首尾正确。
 #[test]
 fn bh_fdr_adjust_monotonic() {
@@ -1315,6 +1424,7 @@ fn build_ablation_report_marks_removal_effect() {
         rebuild_utt: false,
         variants: vec![],
         repeat: None,
+        diagnostics: None,
         generated_at: "t".into(),
     };
     let report = build_ablation_report(&exp, &eval);
@@ -1354,6 +1464,7 @@ fn build_ablation_report_s_group_positive() {
         rebuild_utt: false,
         variants: vec![],
         repeat: None,
+        diagnostics: None,
         generated_at: "t".into(),
     };
     let report = build_ablation_report(&exp, &eval);
@@ -1394,6 +1505,7 @@ fn build_ablation_report_i_group_marks_increment() {
         rebuild_utt: false,
         variants: vec![],
         repeat: None,
+        diagnostics: None,
         generated_at: "t".into(),
     };
     let report = build_ablation_report(&exp, &eval);
@@ -1429,6 +1541,7 @@ fn report_limitations_always_contain_external_validity_note() {
         rebuild_utt: false,
         variants: vec![],
         repeat: None,
+        diagnostics: None,
         generated_at: "t".into(),
     };
     let lim = super::report::build_limitations(&exp, false, true);
@@ -1612,12 +1725,27 @@ fn render_report_markdown_sections_cover_i_s_columns_and_limitations() {
         },
         calibration: None,
         knowledge_quality: Some(KnowledgeQualityReport {
-            sample_count: 0,
-            fact_hit_count: 0,
-            false_positive_rate: 0.0,
-            false_negative_rate: 0.0,
-            miss_target_met: false,
-            annotation: "无样本".into(),
+            primary: KnowledgeQualityScope {
+                scope: "memory_injected".to_string(),
+                description: "主口径：含记忆注入档位".to_string(),
+                variant_ids: vec!["B1".to_string()],
+                sample_count: 1,
+                fact_hit_count: 1,
+                false_positive_rate: 0.0,
+                false_negative_rate: 0.0,
+                miss_target_met: true,
+            },
+            pooled: KnowledgeQualityScope {
+                scope: "pooled_all".to_string(),
+                description: "对照口径：全部档位池化".to_string(),
+                variant_ids: vec!["B1".to_string(), "B0".to_string()],
+                sample_count: 2,
+                fact_hit_count: 1,
+                false_positive_rate: 0.0,
+                false_negative_rate: 0.5,
+                miss_target_met: false,
+            },
+            annotation: "双口径说明".to_string(),
         }),
         ablation: Some(AblationReport {
             baseline_variant: "B1".into(),
@@ -1635,6 +1763,11 @@ fn render_report_markdown_sections_cover_i_s_columns_and_limitations() {
                     wilcoxon_p: 0.01,
                     p_fdr: 0.02,
                     cohens_d: 0.9,
+                    cohens_d_pooled: 0.88,
+                    equiv_bound: 0.09,
+                    tost_p: 0.41,
+                    equivalent: false,
+                    verdict: "significant_down".into(),
                     ci95_low: -0.7,
                     ci95_high: -0.1,
                     significant: true,
@@ -1654,6 +1787,11 @@ fn render_report_markdown_sections_cover_i_s_columns_and_limitations() {
                     wilcoxon_p: 0.01,
                     p_fdr: 0.02,
                     cohens_d: 0.9,
+                    cohens_d_pooled: 0.88,
+                    equiv_bound: 0.09,
+                    tost_p: 0.44,
+                    equivalent: false,
+                    verdict: "significant_up".into(),
                     ci95_low: 0.1,
                     ci95_high: 0.7,
                     significant: true,
@@ -1673,6 +1811,11 @@ fn render_report_markdown_sections_cover_i_s_columns_and_limitations() {
                     wilcoxon_p: 0.01,
                     p_fdr: 0.02,
                     cohens_d: 0.9,
+                    cohens_d_pooled: 0.86,
+                    equiv_bound: 0.08,
+                    tost_p: 0.46,
+                    equivalent: false,
+                    verdict: "significant_up".into(),
                     ci95_low: 0.1,
                     ci95_high: 0.6,
                     significant: true,
@@ -1689,11 +1832,18 @@ fn render_report_markdown_sections_cover_i_s_columns_and_limitations() {
                 success_count: 30,
                 total_count: 30,
             }],
+            judgment_dimensions: vec!["fact".to_string(), "tone".to_string()],
+            descriptive_dimensions: vec!["emotion".to_string()],
+            dimension_scope_note: "情感维未校准".to_string(),
+            equivalence_note: "等效性检验：TOST（双单侧 t 检验），等效边界取 |d_av|=0.3；\
+                tost_p<0.05 判定「等效（无实质净增量）」。"
+                .to_string(),
         }),
         limitations: vec![
             "外部效度局限：基于单 persona".into(),
             "统计法样本：单次运行".into(),
         ],
+        descriptive_metrics: vec!["情感维口径未校准，为描述性指标".to_string()],
         auxiliary: AuxiliaryMetrics {
             evidence_traceability_rate: Some(0.5),
             behavior_rule_hit_rate: Some(0.5),
@@ -1714,6 +1864,7 @@ fn render_report_markdown_sections_cover_i_s_columns_and_limitations() {
     assert!(md.contains("F1"), "移除行应出现");
     assert!(md.contains("S_behavior"), "替代行应出现");
     assert!(md.contains("I_behavior"), "净增量行应出现");
+    assert!(md.contains("等效性检验"), "消融小节应渲染等效性口径说明");
     // 局限声明节必出（含两条局限文本）
     assert!(md.contains("数据特性与外部效度局限"), "局限节必出");
     assert!(md.contains("基于单 persona"), "单 persona 局限文本应出现");
@@ -1722,4 +1873,275 @@ fn render_report_markdown_sections_cover_i_s_columns_and_limitations() {
     assert!(md.contains("辅助指标（产物可复算）"), "辅助指标节必出");
     assert!(md.contains("证据链可追溯率"), "证据链可追溯率项应出现");
     assert!(md.contains("画像回归"), "画像回归项应出现");
+    assert!(
+        md.contains("描述性指标（不参与层价值判定）"),
+        "描述性指标小节必出"
+    );
+    assert!(
+        md.contains("知识层抽取质量评估（双口径）"),
+        "知识层双口径小节必出"
+    );
+}
+
+// =========================================================
+// 测量口径收口：情感维描述性降级 / 知识层双口径 / run 有效性自检
+// =========================================================
+
+/// 情感维口径未校准 → 报告明示为描述性指标，且消融判定维度不含情感维。
+#[test]
+fn ablation_judgment_excludes_uncalibrated_emotion() {
+    use super::evaluate::{EmotionItemScore, ToneItemScore};
+    use super::report::{
+        AblationReport, AuxiliaryMetrics, KnowledgeQualityReport, ProbeReport, Recommendation,
+        VariantAuxMetrics,
+    };
+
+    // 评测含 fact / tone / emotion 三维的 F0 与 F1
+    fn variant_with_dims(id: &str) -> VariantEvaluation {
+        let mk = |dim: &str, idx: usize, score: f64| ItemEvaluation {
+            item_id: format!("{dim}-{idx:04}"),
+            dimension: dim.to_string(),
+            question: String::new(),
+            reference: None,
+            reply_preview: String::new(),
+            fact: (dim == "fact").then_some(FactItemScore {
+                cosine: Some(score),
+                keyword_hit: score,
+                score,
+            }),
+            tone: (dim == "tone").then_some(ToneItemScore {
+                score: score as u32,
+                reason: None,
+            }),
+            emotion: (dim == "emotion").then_some(EmotionItemScore {
+                score,
+                situation_negative: true,
+                situation_positive: false,
+                marker_hit: 0,
+            }),
+            error: None,
+        };
+        VariantEvaluation {
+            variant_id: id.to_string(),
+            description: format!("{id} 档位"),
+            params: VariantParams {
+                theta_gap_minutes: 10,
+                max_msgs_per_block: 80,
+                retrieve_top_k: 3,
+                ablation: Some(id.to_string()),
+            },
+            fact_score: None,
+            tone_score: None,
+            emotion_score: None,
+            dimension_scores: None,
+            failed_count: 0,
+            items: vec![
+                mk("fact", 1, 0.9),
+                mk("fact", 2, 0.8),
+                mk("tone", 1, 5.0),
+                mk("tone", 2, 4.0),
+                mk("emotion", 1, 1.0),
+                mk("emotion", 2, 0.5),
+            ],
+        }
+    }
+
+    let eval = ProbeEvaluation {
+        results_file: String::new(),
+        persona_uid: "char-0001".into(),
+        dataset_seed: 1,
+        judge_used: false,
+        embedding_used: false,
+        generated_at: "t".into(),
+        variants: vec![variant_with_dims("F0"), variant_with_dims("F1")],
+    };
+    let exp = ProbeExperiment {
+        dataset_file: String::new(),
+        dataset_seed: 1,
+        persona_uid: "char-0001".into(),
+        rebuild_utt: false,
+        variants: vec![],
+        repeat: None,
+        diagnostics: None,
+        generated_at: "t".into(),
+    };
+    let ab = build_ablation_report(&exp, &eval);
+    assert_eq!(
+        ab.judgment_dimensions,
+        vec!["fact".to_string(), "tone".to_string()],
+        "判定维度仅事实维 + 语气维"
+    );
+    assert_eq!(ab.descriptive_dimensions, vec!["emotion".to_string()]);
+    assert!(
+        ab.rows.iter().all(|r| r.dimension != "emotion"),
+        "情感维不得出现在层价值判定行中"
+    );
+    assert!(ab.rows.iter().any(|r| r.dimension == "fact"));
+    assert!(ab.dimension_scope_note.contains("未校准"));
+
+    // 渲染：描述性小节必出（用最小报告）
+    let report = ProbeReport {
+        results_file: "r.json".into(),
+        evaluation_file: None,
+        persona_uid: "char-0001".into(),
+        dataset_seed: 1,
+        judge_used: false,
+        embedding_used: false,
+        generated_at: "t".into(),
+        variants: vec![],
+        recommendation: Recommendation {
+            per_dimension: vec![],
+            overall: "无".into(),
+        },
+        calibration: None,
+        knowledge_quality: Some(KnowledgeQualityReport {
+            primary: KnowledgeQualityScope {
+                scope: "memory_injected".to_string(),
+                description: "主口径".to_string(),
+                variant_ids: vec![],
+                sample_count: 0,
+                fact_hit_count: 0,
+                false_positive_rate: 0.0,
+                false_negative_rate: 0.0,
+                miss_target_met: false,
+            },
+            pooled: KnowledgeQualityScope {
+                scope: "pooled_all".to_string(),
+                description: "对照口径".to_string(),
+                variant_ids: vec![],
+                sample_count: 0,
+                fact_hit_count: 0,
+                false_positive_rate: 0.0,
+                false_negative_rate: 0.0,
+                miss_target_met: false,
+            },
+            annotation: "双口径".to_string(),
+        }),
+        ablation: Some(AblationReport {
+            baseline_variant: "F0".into(),
+            rows: vec![],
+            aux: Vec::<VariantAuxMetrics>::new(),
+            judgment_dimensions: ab.judgment_dimensions.clone(),
+            descriptive_dimensions: ab.descriptive_dimensions.clone(),
+            dimension_scope_note: ab.dimension_scope_note.clone(),
+            equivalence_note: ab.equivalence_note.clone(),
+        }),
+        limitations: vec!["单 persona".into()],
+        descriptive_metrics: vec![super::report::EMOTION_DESCRIPTIVE_NOTE.to_string()],
+        auxiliary: AuxiliaryMetrics {
+            evidence_traceability_rate: None,
+            behavior_rule_hit_rate: None,
+            situation_route_misuse_rate: None,
+            profile_regression_output_stability: None,
+            annotation: "无".into(),
+        },
+    };
+    let md = super::report::render_report_markdown(&report);
+    assert!(md.contains("描述性指标（不参与层价值判定）"));
+    assert!(md.contains("口径未校准"));
+    assert!(md.contains("判定维度：fact / tone"));
+}
+
+/// 知识层质量双口径：主口径只统计含记忆注入档位（B1/F0/I_*），
+/// 对照口径池化全部档位（含无记忆基线 B0/S_*）。
+#[test]
+fn knowledge_quality_splits_memory_and_pooled_scopes() {
+    // 4 个档位、每档 2 条 fact 题：B0（低）/ B1（高）/ S_behavior（低）/ I_behavior（高）。
+    // `eval_variant_scores` 已把 `params.ablation` 设为档位 id，口径判定按该名解析。
+    let eval = ProbeEvaluation {
+        results_file: String::new(),
+        persona_uid: "char-0001".into(),
+        dataset_seed: 1,
+        judge_used: false,
+        embedding_used: false,
+        generated_at: "t".into(),
+        variants: vec![
+            eval_variant_scores("B0", &[0.1, 0.1]),
+            eval_variant_scores("B1", &[0.9, 0.9]),
+            eval_variant_scores("S_behavior", &[0.2, 0.2]),
+            eval_variant_scores("I_behavior", &[0.8, 0.8]),
+        ],
+    };
+    let kq = super::report::assess_knowledge_quality(&eval);
+    // 主口径：仅 B1 + I_behavior（各 2 题，全部 ≥0.5 命中）
+    assert_eq!(kq.primary.scope, "memory_injected");
+    assert_eq!(kq.primary.sample_count, 4);
+    assert_eq!(kq.primary.fact_hit_count, 4);
+    assert!((kq.primary.false_negative_rate - 0.0).abs() < 1e-9);
+    assert!(kq.primary.miss_target_met);
+    let mut ids = kq.primary.variant_ids.clone();
+    ids.sort();
+    assert_eq!(ids, vec!["B1".to_string(), "I_behavior".to_string()]);
+    // 对照口径：全部 4 档 8 题
+    assert_eq!(kq.pooled.scope, "pooled_all");
+    assert_eq!(kq.pooled.sample_count, 8);
+    assert_eq!(kq.pooled.fact_hit_count, 4);
+    assert!((kq.pooled.false_negative_rate - 0.5).abs() < 1e-9);
+    assert_eq!(kq.pooled.variant_ids.len(), 4);
+    // 口径说明同时提到两者
+    assert!(kq.annotation.contains("含记忆注入"));
+    assert!(kq.annotation.contains("全部档位池化"));
+}
+
+/// 检索器空载 → 本轮无效且告警；文档数 > 0 且通道有命中 → 有效无告警。
+#[test]
+fn run_validity_flags_empty_retriever() {
+    let (valid, warnings) = run_validity(0, 0, true);
+    assert!(!valid, "检索器文档数为 0 应判定无效");
+    assert!(warnings.iter().any(|w| w.contains("检索器文档数为 0")));
+
+    let (valid, warnings) = run_validity(129, 12, true);
+    assert!(valid);
+    assert!(warnings.is_empty(), "正常轮次不应有告警: {warnings:?}");
+
+    // 文档数 > 0 但通道全空 → 有效但告警
+    let (valid, warnings) = run_validity(129, 0, true);
+    assert!(valid);
+    assert!(warnings.iter().any(|w| w.contains("四通道命中均为 0")));
+
+    // embedding 不可用 → 追加告警
+    let (_valid, warnings) = run_validity(129, 12, false);
+    assert!(warnings.iter().any(|w| w.contains("embedding 不可用")));
+}
+
+/// ProbeExperiment.diagnostics 向后兼容：旧产物无该字段 → None；新产物 roundtrip 保留。
+#[test]
+fn probe_experiment_diagnostics_serde_backcompat() {
+    let old = r#"{"dataset_file":"d","dataset_seed":1,"persona_uid":"p","rebuild_utt":false,
+        "variants":[],"generated_at":"t"}"#;
+    let parsed: ProbeExperiment = serde_json::from_str(old).expect("旧产物应可反序列化");
+    assert!(parsed.diagnostics.is_none());
+    // None 时序列化省略该键
+    let s = serde_json::to_string(&parsed).unwrap();
+    assert!(!s.contains("diagnostics"), "None diagnostics 应省略: {s}");
+
+    let with = ProbeExperiment {
+        dataset_file: "d".into(),
+        dataset_seed: 1,
+        persona_uid: "p".into(),
+        rebuild_utt: false,
+        variants: vec![],
+        repeat: None,
+        diagnostics: Some(ProbeRunDiagnostics {
+            retriever_doc_count: 129,
+            utt_doc_count: 167,
+            keyword_doc_count: 125,
+            keyword_pool_len: 125,
+            embeddings_available: true,
+            probe_queries: 5,
+            bm25_hits: 20,
+            vector_hits: 15,
+            graph_hits: 0,
+            keyword_hits: 8,
+            fused_hits: 25,
+            valid: true,
+            warnings: vec![],
+        }),
+        generated_at: "t".into(),
+    };
+    let roundtrip: ProbeExperiment =
+        serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap();
+    let d = roundtrip.diagnostics.expect("diagnostics 应保留");
+    assert_eq!(d.retriever_doc_count, 129);
+    assert!(d.valid);
 }

@@ -204,4 +204,16 @@ impl App {
     pub fn config(&self) -> &ramaria_core::config::RamariaConfig {
         &self.config
     }
+
+    /// 获取内存检索器的共享引用。
+    ///
+    /// 用途:
+    /// - 供探针/诊断做实验有效性自检：读取已装载文档数、执行自检检索并统计各通道命中。
+    ///
+    /// 说明:
+    /// - 仅供只读诊断使用。调用方须在拿到读锁后立即完成同步操作，
+    ///   不得跨 `.await` 持有读锁；需要异步 embedding 时先取值、再取锁。
+    pub fn retriever(&self) -> Arc<std::sync::RwLock<ramaria_memory::retriever::Retriever>> {
+        Arc::clone(&self.retriever)
+    }
 }

@@ -90,6 +90,22 @@ const CORE_RULES_DEFAULT: &str = "\n### 核心规则\n\
 - 用自然友好的语气回复，简洁不冗长。\n\
 - 不确定就如实说明。";
 
+/// 全局社交平台对话基调（无条件注入，优先级高于 persona 风格规则）。
+///
+/// 目的:
+/// - 对话发生在社交平台即时聊天场景；模型缺乏强约束时会回退"附和 + 反问需求 +
+///   解释总结"的助手腔，与 persona 真实社交语气偏离（实测 persona 真实句长均值
+///   约 15 字，模型回复 60~73 字）。
+/// - 该基调对全部 persona 无条件生效：人格风格规则只在其之上做个性化叠加，
+///   不替代基调。放在 `### 核心规则` 之前，体现"先定体裁、再定个性"。
+const SOCIAL_CHAT_TONE_RULES: &str = "\n### 社交对话基调（优先于任何其它规则）\n\
+你是聊天对象，不是助手。像在社交软件上打字一样回复：\n\
+1. 篇幅：每轮 1~3 句短句，整条一般不超过 30 字；不确定就只回一句。\n\
+2. 口吻：口语化，可用语气词（啊/呀/哦/嗯/啦/嘛）与叠字，可省略主语，不用书面连接词。\n\
+3. 禁止助手话术：不解释、不总结、不列点、不分步给建议；不反问「需要我帮你…吗」；不说「我理解你的感受」「希望这些对你有帮助」之类套话。\n\
+4. 禁止旁白：不写括号动作/神态（如「（看到你的消息）」），不代替对方说话。\n\
+5. 情绪优先：先接住对方的情绪或话题，再决定要不要多说一句。";
+
 /// 记忆引用规则段（标题 + 四条压缩规则；语义与压缩前四条一致：
 /// 时机/措辞/主动回溯 vs 被动响应/跨会话间隔策略）。
 const MEMORY_CITATION_RULES: &str = "\n### 记忆引用规则\n\
@@ -158,6 +174,11 @@ pub struct PromptConfig {
     pub include_utt: bool,
     /// 是否渲染记忆块中的"桥接"子段（`## 桥接（上一会话尾部）`，脉络层）。
     pub include_bridge: bool,
+    /// 是否注入全局社交对话基调（`### 社交对话基调`）。
+    ///
+    /// 默认 `true`：该基调是对全部 persona 无条件生效的体裁约束，
+    /// 关闭时行为回退到"仅有 persona 风格规则"的旧口径（供对照/回退）。
+    pub include_social_tone: bool,
 }
 
 impl Default for PromptConfig {
@@ -178,6 +199,7 @@ impl Default for PromptConfig {
             include_memory_rag: true,
             include_utt: true,
             include_bridge: true,
+            include_social_tone: true,
         }
     }
 }
@@ -834,7 +856,7 @@ fn build_role_layer(context: &PromptContext, config: &PromptConfig) -> String {
         }
     }
 
-    // 回复规范（核心规则 + 记忆引用规则；无自定义规则时使用最小化默认）
+    // 回复规范（社交基调 + 核心规则 + 记忆引用规则；无自定义规则时使用最小化默认）
     parts.push(build_experiment_section(context, config));
 
     parts.join("")
@@ -1013,15 +1035,29 @@ fn build_statement(context: &PromptContext, config: &PromptConfig) -> String {
 // 回复规范子段（角色层内）
 // =========================================================
 
-/// 组装回复规范子段（`## 回复规范`）：回复规则 + 记忆引用规则。
+/// 组装回复规范子段（`## 回复规范`）：社交对话基调 + 回复规则 + 记忆引用规则。
 ///
 /// v2.0: 合并原 SHARED_CHAT_STYLE_RULES（回复规则）和新增的记忆引用规则。
 /// 从独立 Experiment 块并入角色层；
 /// 记忆引用规则精确定义"主动回溯 vs 被动响应"的边界。
+///
+/// 子段顺序（决定"体裁约束 > 个性化 > 记忆引用边界"的效力层级）:
+/// 1. `### 社交对话基调` — 全局社交平台体裁约束（`include_social_tone` 控制），
+///    对全部 persona 无条件注入；人格规则只在其之上做个性化。
+/// 2. `### 核心规则` — persona 风格规则（`chat_style_rules`），缺失时用最小化默认。
+/// 3. `### 记忆引用规则` — 何时/如何引用记忆（随知识边界开关）。
+///
+/// 说明: 基调放在 persona 规则之前，使模型先定体裁、再定个性；
+/// persona 已有个性化规则时基调同样在场（兜底型默认规则替代不了全局约束）。
 fn build_experiment_section(context: &PromptContext, config: &PromptConfig) -> String {
     let mut parts: Vec<String> = vec!["## 回复规范".to_string()];
 
-    // 核心回复规则
+    // 全局社交对话基调（无条件注入，先于 persona 风格规则；体现"先定体裁、再定个性"）
+    if config.include_social_tone {
+        parts.push(SOCIAL_CHAT_TONE_RULES.to_string());
+    }
+
+    // 核心回复规则（persona 个性化规则；无则用最小化默认）
     if let Some(ref rules) = context.chat_style_rules
         && !rules.trim().is_empty()
     {

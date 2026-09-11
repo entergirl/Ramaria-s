@@ -17,13 +17,14 @@ use ramaria_core::config::RamariaConfig;
 use ramaria_core::error::RamariaError;
 use ramaria_core::traits::ChatMessage;
 use ramaria_core::types::MessageRole;
+use ramaria_memory::retriever::SearchRequest;
 use ramaria_memory::utt::builder::UttBuilder;
 use uuid::Uuid;
 
 use super::types::{
     AblationProfile, ContextTurn, DATASET_SCHEMA_VERSION, DatasetItem, ItemRepeatStats, MetricStat,
-    ProbeDataset, ProbeExperiment, ProbeMetrics, ProbeRepeatMeta, ProbeRunItem, ProbeVariant,
-    ProbeVariantResult, VariantParams, VariantRepeatStats,
+    ProbeDataset, ProbeExperiment, ProbeMetrics, ProbeRepeatMeta, ProbeRunDiagnostics,
+    ProbeRunItem, ProbeVariant, ProbeVariantResult, VariantParams, VariantRepeatStats,
 };
 
 /// 执行 `probe run`。
@@ -150,6 +151,10 @@ pub async fn build_experiment(
         tracing::warn!(%e, "probe run 检索器装载失败，RAG 记忆可能缺失");
     }
 
+    // Step 3.6: 实验有效性自检——检索器就绪度与各通道命中数写入元数据，
+    // 跑数结束即可判定该轮是否有效（检索器空载时输出告警）。
+    let diagnostics = collect_run_diagnostics(app, dataset, &dataset.persona_uid).await;
+
     // Step 4: 过滤档位（--variants；无效 id 记 warn 跳过）
     let variants = filter_variants(&dataset.variants, variants_filter);
 
@@ -197,12 +202,28 @@ pub async fn build_experiment(
             }
         }
 
+        // 档位非 utt 参数覆盖（rag/knowledge）：None 字段保持配置基准，
+        // 使参数扫描可按档位只变更目标参数而不串扰其它路。
+        if let Some(v) = variant.overrides.rag_max_memories {
+            variant_config.retrieval.rag_max_memories = v;
+        }
+        if let Some(v) = variant.overrides.rag_max_summary_chars {
+            variant_config.retrieval.rag_max_summary_chars = v;
+        }
+        if let Some(v) = variant.overrides.knowledge_retrieve_top_k {
+            variant_config.knowledge.retrieve_top_k = v;
+        }
+        if let Some(v) = variant.overrides.knowledge_retrieve_threshold {
+            variant_config.knowledge.retrieve_threshold = v;
+        }
+
         tracing::info!(
             variant_id = %variant.id,
             theta_gap_minutes = variant.theta_gap_minutes,
             max_msgs_per_block = variant.max_msgs_per_block,
             retrieve_top_k = variant.retrieve_top_k,
             ablation = ?variant.ablation,
+            overrides = ?variant.overrides,
             "probe run 档位开始"
         );
 
@@ -273,6 +294,7 @@ pub async fn build_experiment(
         rebuild_utt,
         variants: results,
         repeat: None,
+        diagnostics: Some(diagnostics),
         generated_at: super::now_iso8601(),
     })
 }
@@ -347,6 +369,7 @@ pub async fn build_experiment_with_repeat(
             count: repeat,
             per_variant,
         }),
+        diagnostics: last.diagnostics.clone(),
         generated_at: super::now_iso8601(),
     })
 }
@@ -517,6 +540,137 @@ async fn rebuild_utt_for_config(
         .await?;
     app.rebuild_retriever().await?;
     Ok(())
+}
+
+/// 依据检索器文档数、自检查询命中数与 embedding 可用性判定本轮有效性与告警。
+///
+/// 判定:
+/// - 检索器文档数为 0 → 无效（记忆/知识通道空转），告警；
+/// - 文档数 > 0 但四通道命中合计为 0 → 视为有效但告警（检索可能不可用）；
+/// - embedding 不可用 → 追加告警（向量通道缺失，事实维退化）。
+pub(super) fn run_validity(
+    retriever_doc_count: usize,
+    fused_hits: usize,
+    embeddings_available: bool,
+) -> (bool, Vec<String>) {
+    let mut warnings = Vec::new();
+    if retriever_doc_count == 0 {
+        warnings.push("检索器文档数为 0：记忆/知识通道空转，本轮 RAG 指标无效".to_string());
+    } else if fused_hits == 0 {
+        warnings.push("自检查询四通道命中均为 0：检索可能不可用，请核对索引与开关".to_string());
+    }
+    if !embeddings_available {
+        warnings.push("embedding 不可用：向量通道缺失，事实维退化为纯关键词".to_string());
+    }
+    (retriever_doc_count > 0, warnings)
+}
+
+/// 采集本轮检索器有效性自检元数据（文档数 + 自检查询各通道命中数）。
+///
+/// 说明:
+/// - 静态计数在检索器/关键词服务的读锁内同步取值，不跨 `.await` 持锁。
+/// - 自检查询取数据集前 5 题的问题文本，先锁外做 embedding，再分别经关键词镜像
+///   自由文本查询与检索器融合检索统计各通道命中；命中为 0 且文档数 > 0 时给出告警。
+/// - 检索器文档数为 0 直接判定本轮无效（RAG/知识通道空转）。
+async fn collect_run_diagnostics(
+    app: &Arc<ramaria_app::App>,
+    dataset: &ProbeDataset,
+    persona_uid: &str,
+) -> ProbeRunDiagnostics {
+    // 1. 静态计数（读锁内同步取值）
+    let retriever = app.retriever();
+    let (retriever_doc_count, utt_doc_count) = {
+        let guard = retriever.read().unwrap_or_else(|e| e.into_inner());
+        (guard.doc_count(), guard.utt_doc_count())
+    };
+    let keyword_service = app.keyword_service();
+    let (keyword_doc_count, keyword_pool_len, composite, pool) = {
+        let guard = keyword_service.read().unwrap_or_else(|e| e.into_inner());
+        (
+            guard.doc_count(),
+            guard.pool_len(),
+            guard.composite_arc(),
+            guard.pool_snapshot(),
+        )
+    };
+
+    let embeddings_available = app.is_embedding_available();
+    let embedder = app.embedding_provider();
+
+    // 2. 自检查询：数据集前 5 题
+    let queries: Vec<String> = dataset
+        .items
+        .iter()
+        .take(5)
+        .map(|item| item.question.clone())
+        .collect();
+    let mut bm25_hits = 0usize;
+    let mut vector_hits = 0usize;
+    let mut graph_hits = 0usize;
+    let mut keyword_hits = 0usize;
+    let mut fused_hits = 0usize;
+    for query in &queries {
+        // 查询向量：embedding 可用时生成，不可用则跳过向量通道（锁外 await）
+        let query_vec = match embedder.as_deref() {
+            Some(provider) => provider.embed(query).await.ok().filter(|v| !v.is_empty()),
+            None => None,
+        };
+        // 关键词镜像命中（锁外异步；词典增强 + 别名归一 + 三层降级）
+        let kw_hits = ramaria_memory::keyword::service::query_text_labels(
+            &composite,
+            &pool,
+            query,
+            Some(persona_uid),
+            embedder.as_deref(),
+            5,
+        )
+        .await;
+        keyword_hits += kw_hits.len();
+        // 检索器融合检索（含关键词通道）；读锁内仅同步检索，不跨 await
+        let results = {
+            let guard = retriever.read().unwrap_or_else(|e| e.into_inner());
+            guard.search_with_keyword_hits(
+                &SearchRequest {
+                    query: query.clone(),
+                    persona_uid: Some(persona_uid.to_string()),
+                    top_k: 5,
+                    filter_share: false,
+                },
+                query_vec.as_deref(),
+                Some(kw_hits),
+            )
+        };
+        fused_hits += results.len();
+        bm25_hits += results.iter().filter(|r| r.bm25_score.is_some()).count();
+        vector_hits += results.iter().filter(|r| r.vector_score.is_some()).count();
+        graph_hits += results.iter().filter(|r| r.graph_score.is_some()).count();
+    }
+
+    // 3. 有效性判定与告警
+    let (valid, warnings) = run_validity(retriever_doc_count, fused_hits, embeddings_available);
+    if !valid {
+        tracing::warn!(
+            retriever_doc_count,
+            utt_doc_count,
+            "probe run 有效性自检未通过：检索器空载"
+        );
+    }
+
+    ProbeRunDiagnostics {
+        retriever_doc_count,
+        utt_doc_count,
+        keyword_doc_count,
+        keyword_pool_len,
+        embeddings_available,
+        probe_queries: queries.len(),
+        bm25_hits,
+        vector_hits,
+        graph_hits,
+        keyword_hits,
+        fused_hits,
+        valid,
+        warnings,
+    }
 }
 
 /// 把数据集题项的上文转为管线历史消息（role 字符串 → `MessageRole`）。

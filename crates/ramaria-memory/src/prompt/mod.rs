@@ -30,4 +30,6 @@ pub mod layers;
 /// - v2.0 M5 递增记录：标签压缩/提示优化——builder.rs/layers.rs 样板引导句、
 ///   占位与默认规则文本精简（能力边界/记忆引用规则等），语义等价但 prompt
 ///   文本变更 → 旧缓存自动失效，防跨版本误命中。
-pub const PROMPT_TEMPLATE_VERSION: &str = "20260906-v2.0.0";
+/// - v2.0 M8 递增记录：新增全局「社交对话基调」约束块（`## 回复规范` 内无条件注入，
+///   修正助手腔），prompt 文本变更 → 旧缓存自动失效，防跨版本误命中。
+pub const PROMPT_TEMPLATE_VERSION: &str = "20260911-v2.0.0";

@@ -1275,19 +1275,44 @@ fn skeleton_context() -> PromptContext {
 }
 
 /// 骨架样板体量下降：压缩后总体积必须小于压缩前基线（防样板回退膨胀）。
+///
+/// 口径: 社交对话基调是有意新增的固定内容块（非既有引导句膨胀），
+/// 对照旧基线时以 `include_social_tone=false` 扣除，使"既有样板未回退膨胀"
+/// 的约束仍然成立；基调自身体量另作精确增量断言（防止基调之外再有增长）。
 #[test]
 fn boilerplate_skeleton_shrunk_below_legacy() {
-    let prompt = assemble_prompt(&skeleton_context(), &PromptConfig::default());
-    let vol = measure_prompt_volume(&prompt);
+    let base_config = PromptConfig {
+        include_social_tone: false,
+        ..Default::default()
+    };
+    let base = measure_prompt_volume(&assemble_prompt(&skeleton_context(), &base_config));
     assert!(
-        vol.chars < LEGACY_BOILERPLATE_CHARS,
+        base.chars < LEGACY_BOILERPLATE_CHARS,
         "骨架字符数应低于压缩前基线 {LEGACY_BOILERPLATE_CHARS}，实际 {}",
-        vol.chars
+        base.chars
     );
     assert!(
-        vol.tokens < LEGACY_BOILERPLATE_TOKENS,
+        base.tokens < LEGACY_BOILERPLATE_TOKENS,
         "骨架估算 token 应低于压缩前基线 {LEGACY_BOILERPLATE_TOKENS}，实际 {}",
-        vol.tokens
+        base.tokens
+    );
+
+    // 默认（含基调）骨架 = 既有骨架 + 基调块，增量恰为基调块自身体量
+    let with_tone = measure_prompt_volume(&assemble_prompt(
+        &skeleton_context(),
+        &PromptConfig::default(),
+    ));
+    assert_eq!(
+        with_tone.chars,
+        base.chars + SOCIAL_CHAT_TONE_RULES.chars().count(),
+        "基调块应按原文字符数精确叠加"
+    );
+    // token 估算在拼接边界非严格线性（±1 舍入），增量与基调自身体量对齐即可
+    let tone_tokens = crate::token_budget::estimate_tokens(SOCIAL_CHAT_TONE_RULES);
+    let token_delta = with_tone.tokens - base.tokens;
+    assert!(
+        token_delta.abs_diff(tone_tokens) <= 2,
+        "基调增量 token 应约等于基调自身体量 {tone_tokens}，实际 {token_delta}"
     );
 }
 
@@ -1308,6 +1333,7 @@ fn boilerplate_leads_stay_within_upper_bounds() {
         ("STATEMENT_LEAD", STATEMENT_LEAD, 40),
         ("CORE_RULES_DEFAULT", CORE_RULES_DEFAULT, 90),
         ("MEMORY_CITATION_RULES", MEMORY_CITATION_RULES, 230),
+        ("SOCIAL_CHAT_TONE_RULES", SOCIAL_CHAT_TONE_RULES, 288),
     ];
     for (name, text, limit) in cases {
         let chars = text.chars().count();
@@ -1343,6 +1369,67 @@ fn compressed_boilerplate_keeps_essential_instructions() {
     );
     // 记忆层引导保留"引用时机"约束
     assert!(MEMORY_SECTION_INTRO.contains("仅在话题相关或用户主动提及时自然引用"));
+}
+
+// =========================================================
+// 全局社交对话基调（无条件注入）
+// =========================================================
+
+/// 社交对话基调无条件注入：即使 persona 已有个性化风格规则也必须在场，
+/// 且顺序先于 `### 核心规则`（先定体裁、再定个性）。
+#[test]
+fn social_tone_block_injected_before_persona_rules() {
+    let ctx = PromptContext {
+        persona: Some(make_test_persona()),
+        chat_style_rules: Some("用||分隔短句，模仿社交平台打字节奏".to_string()),
+        ..Default::default()
+    };
+    let result = assemble_prompt(&ctx, &PromptConfig::default());
+    assert!(
+        result.contains("### 社交对话基调"),
+        "全局基调必须无条件注入"
+    );
+    assert!(
+        result.contains("用||分隔短句，模仿社交平台打字节奏"),
+        "persona 风格规则仍须注入（基调不替代个性）"
+    );
+    let tone_pos = result.find("### 社交对话基调").expect("基调存在");
+    let core_pos = result.find("### 核心规则").expect("核心规则存在");
+    assert!(tone_pos < core_pos, "基调应先于核心规则出现");
+}
+
+/// 基调开关关闭时回退旧口径（仅 persona 风格规则），且不产生基调块。
+#[test]
+fn social_tone_block_can_be_disabled() {
+    let ctx = PromptContext {
+        persona: Some(make_test_persona()),
+        chat_style_rules: Some("自定义规则".to_string()),
+        ..Default::default()
+    };
+    let config = PromptConfig {
+        include_social_tone: false,
+        ..Default::default()
+    };
+    let result = assemble_prompt(&ctx, &config);
+    assert!(!result.contains("### 社交对话基调"), "关闭后不得注入基调");
+    assert!(result.contains("自定义规则"), "persona 规则不受开关影响");
+}
+
+/// 基调文本锁定关键约束（防后续压缩误删"杜绝助手腔"的语义）。
+#[test]
+fn social_tone_locks_anti_assistant_constraints() {
+    for needle in [
+        "不是助手",
+        "不超过 30 字",
+        "不解释、不总结、不列点",
+        "不反问",
+        "不写括号动作",
+    ] {
+        assert!(
+            SOCIAL_CHAT_TONE_RULES.contains(needle),
+            "基调必须保留约束: {needle}"
+        );
+    }
 }
 
 /// 度量函数基本正确性（字符数 + token 估算，复用 estimate_tokens）。
