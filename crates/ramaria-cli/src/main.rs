@@ -156,7 +156,7 @@ enum Commands {
     #[command(display_order = 42, subcommand)]
     Persona(PersonaCmd),
 
-    /// 行为规则管理（list / show / import / edit / enable / disable / delete / evidence / relearn）[管理]
+    /// 行为规则管理（list / show / import / edit / enable / disable / delete / evidence / relearn / clusters）[管理]
     #[command(display_order = 44, subcommand)]
     Rule(RuleCmd),
 
@@ -256,6 +256,31 @@ enum RuleCmd {
         /// 规则所属 persona（默认 rama-0001）
         #[arg(long)]
         persona: Option<String>,
+    },
+    /// 统计行为聚类结构（只读：不写库、不调 LLM；缺省用配置值）
+    #[command(display_order = 100)]
+    Clusters {
+        /// 目标 persona（默认 rama-0001）
+        #[arg(long)]
+        persona: Option<String>,
+        /// θ_nb 覆盖（0.0-1.0；缺省用配置值）
+        #[arg(long)]
+        theta_nb: Option<f64>,
+        /// min_cluster_size 覆盖（≥1；缺省用配置值）
+        #[arg(long)]
+        min_cluster_size: Option<usize>,
+        /// β1 覆盖（≥0；与 β2 之和 ≤ 1；缺省用配置值）
+        #[arg(long)]
+        beta1: Option<f64>,
+        /// β2 覆盖（≥0；与 β1 之和 ≤ 1；缺省用配置值）
+        #[arg(long)]
+        beta2: Option<f64>,
+        /// θ_join 档位（0.0-1.0；可重复/多值）——给出任一值时启用 θ_join 时序增量模拟（只读）
+        #[arg(long, num_args = 1..)]
+        theta_join: Vec<f64>,
+        /// θ_join 模拟的前段事件占比（0.1-0.9；缺省 0.8）
+        #[arg(long, default_value_t = 0.8)]
+        split_ratio: f64,
     },
 }
 
@@ -535,6 +560,9 @@ enum SessionCmd {
         /// 可选的人格标识
         #[arg(long)]
         persona: Option<String>,
+        /// 渐进式感知重摘要：`[l1.progressive]` 开启且会话触发阈值时生成多段 L1（未触发回退单段）
+        #[arg(long)]
+        progressive: bool,
     },
 }
 
@@ -971,9 +999,11 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
                 SessionCmd::Summarize {
                     session_id,
                     persona,
+                    progressive,
                 } => commands::session::SessionCmd::Summarize {
                     session_id,
                     persona_uid: persona,
+                    progressive,
                 },
             };
             commands::session::run(app, cmd, cli.json, cli.yes).await?;
@@ -1025,6 +1055,23 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
                 RuleCmd::Delete { id, force } => commands::rule::RuleCmd::Delete { id, force },
                 RuleCmd::Evidence { id } => commands::rule::RuleCmd::Evidence { id },
                 RuleCmd::Relearn { persona } => commands::rule::RuleCmd::Relearn { persona },
+                RuleCmd::Clusters {
+                    persona,
+                    theta_nb,
+                    min_cluster_size,
+                    beta1,
+                    beta2,
+                    theta_join,
+                    split_ratio,
+                } => commands::rule::RuleCmd::Clusters {
+                    persona,
+                    theta_nb,
+                    min_cluster_size,
+                    beta1,
+                    beta2,
+                    theta_join,
+                    split_ratio,
+                },
             };
             commands::rule::run(app, cmd, cli.json, cli.yes).await?;
         }
@@ -1408,6 +1455,101 @@ mod tests {
                 assert_eq!(persona.as_deref(), Some("char-2766366159"));
             }
             _ => panic!("应解析为 Style::Update，实际解析为其他命令"),
+        }
+    }
+
+    /// `ramaria rule clusters` 无覆盖参数可解析（全部 None，命令层回退配置值）。
+    #[test]
+    fn rule_clusters_parses_without_overrides() {
+        let cli =
+            Cli::try_parse_from(&["ramaria", "rule", "clusters"]).expect("rule clusters 应可解析");
+        match cli.command {
+            Commands::Rule(RuleCmd::Clusters {
+                persona,
+                theta_nb,
+                min_cluster_size,
+                beta1,
+                beta2,
+                theta_join,
+                split_ratio,
+            }) => {
+                assert!(persona.is_none(), "缺省 --persona 时在命令层用默认值");
+                assert!(theta_nb.is_none() && min_cluster_size.is_none());
+                assert!(beta1.is_none() && beta2.is_none());
+                assert!(theta_join.is_empty(), "缺省不启用 θ_join 模拟");
+                assert!((split_ratio - 0.8).abs() < 1e-12, "缺省 split_ratio=0.8");
+            }
+            _ => panic!("应解析为 Rule::Clusters，实际解析为其他命令"),
+        }
+    }
+
+    /// `ramaria rule clusters` 聚类覆盖参数可解析并透传（不传 θ_join 时保持关闭）。
+    #[test]
+    fn rule_clusters_parses_all_overrides() {
+        let cli = Cli::try_parse_from(&[
+            "ramaria",
+            "rule",
+            "clusters",
+            "--persona",
+            "char-0001",
+            "--theta-nb",
+            "0.6",
+            "--min-cluster-size",
+            "2",
+            "--beta1",
+            "0.7",
+            "--beta2",
+            "0.2",
+        ])
+        .expect("rule clusters 覆盖参数应可解析");
+        match cli.command {
+            Commands::Rule(RuleCmd::Clusters {
+                persona,
+                theta_nb,
+                min_cluster_size,
+                beta1,
+                beta2,
+                theta_join,
+                split_ratio,
+            }) => {
+                assert_eq!(persona.as_deref(), Some("char-0001"));
+                assert_eq!(theta_nb, Some(0.6));
+                assert_eq!(min_cluster_size, Some(2));
+                assert_eq!(beta1, Some(0.7));
+                assert_eq!(beta2, Some(0.2));
+                assert!(theta_join.is_empty(), "未传 --theta-join 时不启用模拟");
+                assert!((split_ratio - 0.8).abs() < 1e-12);
+            }
+            _ => panic!("应解析为 Rule::Clusters，实际解析为其他命令"),
+        }
+    }
+
+    /// `ramaria rule clusters --theta-join` 多值/重复解析（启用 θ_join 时序增量模拟）。
+    #[test]
+    fn rule_clusters_parses_theta_join_multi_values() {
+        let cli = Cli::try_parse_from(&[
+            "ramaria",
+            "rule",
+            "clusters",
+            "--theta-join",
+            "0.6",
+            "0.7",
+            "--theta-join",
+            "0.8",
+            "--split-ratio",
+            "0.7",
+        ])
+        .expect("--theta-join/--split-ratio 应可解析");
+        match cli.command {
+            Commands::Rule(RuleCmd::Clusters {
+                theta_join,
+                split_ratio,
+                ..
+            }) => {
+                assert_eq!(theta_join, vec![0.6, 0.7, 0.8], "多值与重复出现按顺序累积");
+                assert!((split_ratio - 0.7).abs() < 1e-12);
+            }
+            _ => panic!("应解析为 Rule::Clusters，实际解析为其他命令"),
         }
     }
 

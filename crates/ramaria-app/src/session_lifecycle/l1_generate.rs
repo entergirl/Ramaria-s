@@ -162,6 +162,78 @@ impl SessionLifecycle {
             }
         }
     }
+
+    /// 为指定 session 重新生成 L1 摘要（渐进式感知）。
+    ///
+    /// 职责:
+    /// - 与封存路径 `save_and_close_session` 口径一致：`[l1.progressive]` 开启且
+    ///   会话触发阈值（消息数 / 时间跨度）时按段生成多条 L1；未开启或未触发时
+    ///   由 `generate_l1_summaries` 内部回退单段摘要。
+    /// - 供长会话的手动重摘要使用；`regenerate_l1` 保持单段口径不变。
+    ///
+    /// 参数:
+    /// - `session_id`: 目标 session，可已关闭或仍在活跃中（shutdown 场景）。
+    /// - `persona_uid`: 人格标识，用于 L1 归属。
+    /// - `user_prefix`: 覆盖默认"用户："前缀。`None` 使用默认。
+    /// - `assistant_prefix`: 覆盖默认"助手："前缀。`None` 使用默认。
+    ///
+    /// 返回:
+    /// - `Ok(l1_list)`: 本次生成的全部段 L1（未触发渐进时 1 段）。
+    /// - `Ok(vec![])`: session 无消息。
+    pub async fn regenerate_l1_progressive(
+        &self,
+        storage: &dyn StorageBackend,
+        llm: &dyn LlmProvider,
+        session_id: Uuid,
+        persona_uid: Option<&str>,
+        user_prefix: Option<&str>,
+        assistant_prefix: Option<&str>,
+    ) -> RamariaResult<Vec<ramaria_core::types::MemoryL1>> {
+        // 检查是否有消息可摘要（与既有重试路径同语义：无消息返回空列表而非报错）
+        let messages = storage.list_messages(session_id).await?;
+        if messages.is_empty() {
+            warn!(%session_id, "regenerate_l1_progressive: session 无消息，跳过");
+            return Ok(Vec::new());
+        }
+
+        info!(
+            %session_id,
+            ?persona_uid,
+            msg_count = messages.len(),
+            "手动重试 L1 摘要（渐进式感知）"
+        );
+
+        match self
+            .generate_l1_summaries(
+                storage,
+                llm,
+                session_id,
+                persona_uid,
+                user_prefix,
+                assistant_prefix,
+            )
+            .await
+        {
+            Ok(l1_list) => {
+                info!(
+                    %session_id,
+                    l1_count = l1_list.len(),
+                    "L1 重试成功（渐进式感知）"
+                );
+                // 增量更新 Retriever 索引（每段 L1 都索引，与既有重试路径一致）
+                for l1 in &l1_list {
+                    self.index_l1_into_retriever(l1).await;
+                }
+                // 触发 L2 检查（路径 A），保持与 regenerate_l1 一致的级联语义
+                self.check_l2_trigger(storage, llm).await;
+                Ok(l1_list)
+            }
+            Err(e) => {
+                error!(%session_id, %e, "L1 重试失败（渐进式感知）");
+                Err(e)
+            }
+        }
+    }
 }
 
 // =========================================================

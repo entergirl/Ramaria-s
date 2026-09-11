@@ -4,7 +4,7 @@
 //! - list: 列出所有会话（含状态、消息数、时间）
 //! - show: 显示指定会话的完整消息历史
 //! - delete: 删除指定会话及其关联消息（需确认；非 TTY 无 --yes 直接失败不挂起）
-//! - summarize: 为指定会话重新生成 L1 摘要
+//! - summarize: 为指定会话重新生成 L1 摘要（--progressive 渐进式感知多段输出）
 //! - --json 输出信封（时间戳 ISO-8601 UTC），文本模式表格化展示
 
 use anyhow::Context;
@@ -33,6 +33,8 @@ pub enum SessionCmd {
         session_id: String,
         /// 可选的人格标识
         persona_uid: Option<String>,
+        /// 渐进式感知重摘要（未开启或未触发阈值时回退单段）
+        progressive: bool,
     },
 }
 
@@ -52,7 +54,8 @@ pub async fn run(
         SessionCmd::Summarize {
             session_id,
             persona_uid,
-        } => summarize_session(app, &session_id, persona_uid.as_deref(), json).await,
+            progressive,
+        } => summarize_session(app, &session_id, persona_uid.as_deref(), progressive, json).await,
     }
 }
 
@@ -264,10 +267,16 @@ async fn delete_session(
 /// 使用场景:
 /// - save_and_close 中 L1 生成失败后的补救。
 /// - LLM 服务恢复后的批量补救。
+///
+/// 模式:
+/// - `progressive=false`: 单段摘要（既有口径，`--json` 输出摘要全文）。
+/// - `progressive=true`: 渐进式感知重摘要，与封存口径一致；多段 L1 时
+///   `--json` 只输出每段统计（id / 字符数 / 关键词数），不输出摘要全文。
 async fn summarize_session(
     app: &Arc<ramaria_app::App>,
     session_id: &str,
     persona_uid: Option<&str>,
+    progressive: bool,
     json: bool,
 ) -> anyhow::Result<()> {
     let sid = parse_session_uuid(session_id)?;
@@ -309,6 +318,10 @@ async fn summarize_session(
         session_id,
         messages.len()
     ));
+
+    if progressive {
+        return summarize_session_progressive(app, sid, persona_uid, json).await;
+    }
 
     match app.regenerate_l1(sid, persona_uid, None, None).await {
         Ok(Some(l1)) => {
@@ -355,6 +368,89 @@ async fn summarize_session(
     }
 
     Ok(())
+}
+
+/// 执行渐进式感知的 L1 重摘要（可多段）。
+///
+/// 输出约定:
+/// - `--json`: `data` 为 `{"session_id","segment_count","segments":[…]}`；
+///   每段仅含 `id` / `summary_chars` / `keywords_count` 统计字段，
+///   不含摘要全文（隐私约定：摘要正文不出现在命令行 JSON 输出）。
+/// - 文本模式: 打印段数与每段字符数、关键词数。
+///
+/// 空数据语义:
+/// - 段列表为空（如消息在检查与生成之间被删除）→ 与既有"无消息"分支一致。
+async fn summarize_session_progressive(
+    app: &Arc<ramaria_app::App>,
+    sid: uuid::Uuid,
+    persona_uid: Option<&str>,
+    json: bool,
+) -> anyhow::Result<()> {
+    match app
+        .regenerate_l1_progressive(sid, persona_uid, None, None)
+        .await
+    {
+        Ok(segments) if segments.is_empty() => {
+            if json {
+                // 与既有空数据信封一致（成功但无数据）
+                let data = serde_json::json!({
+                    "session_id": sid.to_string(),
+                    "generated": false,
+                    "reason": "no_messages",
+                });
+                return crate::json::emit_ok(&data);
+            }
+            crate::ui::info("该会话无消息，无法生成摘要");
+            Ok(())
+        }
+        Ok(segments) => {
+            if json {
+                let items: Vec<serde_json::Value> = segments.iter().map(segment_json).collect();
+                let data = serde_json::json!({
+                    "session_id": sid.to_string(),
+                    "segment_count": segments.len(),
+                    "segments": items,
+                });
+                return crate::json::emit_ok(&data);
+            }
+            crate::ui::success(&format!(
+                "L1 摘要生成成功（渐进式感知，共 {} 段）",
+                segments.len()
+            ));
+            println!();
+            for (idx, l1) in segments.iter().enumerate() {
+                crate::ui::labeled(
+                    &format!("段 {}", idx + 1),
+                    &format!(
+                        "{} 字符，关键词 {} 个",
+                        l1.summary.chars().count(),
+                        keywords_count(l1.keywords.as_deref())
+                    ),
+                );
+            }
+            Ok(())
+        }
+        Err(e) => {
+            crate::ui::print_error(&e);
+            anyhow::bail!("L1 摘要生成失败: {e}");
+        }
+    }
+}
+
+/// 单段 L1 的 JSON 统计视图（不含摘要全文）。
+fn segment_json(l1: &ramaria_core::types::MemoryL1) -> serde_json::Value {
+    serde_json::json!({
+        "id": l1.id.to_string(),
+        "summary_chars": l1.summary.chars().count(),
+        "keywords_count": keywords_count(l1.keywords.as_deref()),
+    })
+}
+
+/// 统计关键词字段（逗号分隔）中的关键词个数；缺失或全空为 0。
+fn keywords_count(keywords: Option<&str>) -> usize {
+    keywords
+        .map(|kw| kw.split(',').filter(|s| !s.trim().is_empty()).count())
+        .unwrap_or(0)
 }
 
 // 辅助函数已提取至 crate::util 模块：

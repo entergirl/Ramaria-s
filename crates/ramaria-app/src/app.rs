@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use futures::Stream;
 use ramaria_core::error::RamariaResult;
 use ramaria_core::traits::{EmbeddingProvider, LlmProvider, LlmResponseCache, StorageBackend};
-use ramaria_core::types::AppState;
+use ramaria_core::types::{AppState, MemoryL1};
 use ramaria_llm::keychain::Keychain;
 use ramaria_memory::keyword::KeywordService;
 use ramaria_memory::retriever::Retriever;
@@ -474,6 +474,44 @@ impl App {
         let llm = self.llm.lock().unwrap_or_else(|e| e.into_inner()).clone();
         self.lifecycle
             .regenerate_l1_no_cascade(
+                self.storage.as_ref(),
+                llm.as_ref(),
+                session_id,
+                persona_uid,
+                user_prefix,
+                assistant_prefix,
+            )
+            .await
+    }
+
+    /// 为指定 session 重新生成 L1 摘要（渐进式感知）。
+    ///
+    /// 职责:
+    /// - 与封存路径 `save_and_close_session` 口径一致：`[l1.progressive]` 开启且
+    ///   会话触发阈值（消息数 / 时间跨度）时按段生成多条 L1（每段独立写库、
+    ///   入候选池），未开启或未触发时自动回退单段摘要。
+    /// - 供长会话的手动重摘要使用；`regenerate_l1` 保持单段口径不变。
+    ///
+    /// 参数:
+    /// - `session_id`: 目标 session（通常是已关闭但需要重新摘要的 session）。
+    /// - `persona_uid`: 人格标识，用于 L1 归属。
+    /// - `user_prefix`: 覆盖默认"用户："前缀。`None` 使用默认。
+    /// - `assistant_prefix`: 覆盖默认"助手："前缀。`None` 使用默认。
+    ///
+    /// 返回:
+    /// - `Ok(l1_list)`: 本次生成的全部段 L1（未触发渐进时 1 段）。
+    /// - `Ok(vec![])`: session 无消息，无法生成。
+    /// - `Err`: 存储或 LLM 调用失败。
+    pub async fn regenerate_l1_progressive(
+        &self,
+        session_id: Uuid,
+        persona_uid: Option<&str>,
+        user_prefix: Option<&str>,
+        assistant_prefix: Option<&str>,
+    ) -> RamariaResult<Vec<MemoryL1>> {
+        let llm = self.llm.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        self.lifecycle
+            .regenerate_l1_progressive(
                 self.storage.as_ref(),
                 llm.as_ref(),
                 session_id,

@@ -752,7 +752,7 @@ impl Default for L1Config {
     /// 创建默认 L1 配置。
     ///
     /// 返回:
-    /// - 渐进式摘要默认关闭（回退 v1.6 整会话/按 utt 切分行为）。
+    /// - 渐进式摘要默认开启（关闭时回退 v1.6 整会话/按 utt 切分行为）。
     fn default() -> Self {
         Self {
             progressive: L1ProgressiveConfig::default(),
@@ -772,7 +772,7 @@ impl Default for L1Config {
 ///   L2 提取仍封存触发；封存只摘要尾部。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct L1ProgressiveConfig {
-    /// 渐进式摘要总开关（默认 false——关闭时回退 v1.6 行为）。
+    /// 渐进式摘要总开关（默认 true——关闭时回退 v1.6 行为）。
     #[serde(default = "default_progressive_enabled")]
     pub enabled: bool,
     /// 消息数触发阈值（默认 100 条）：会话消息数超过此值触发分段。
@@ -786,9 +786,9 @@ pub struct L1ProgressiveConfig {
     pub tail_msg_count: u32,
 }
 
-/// serde 默认值：渐进式摘要默认关闭（保守，回退 v1.6 行为）。
+/// serde 默认值：渐进式摘要默认开启（关闭时回退 v1.6 行为）。
 fn default_progressive_enabled() -> bool {
-    false
+    true
 }
 
 /// serde 默认值：消息数触发阈值 100 条。
@@ -809,7 +809,7 @@ fn default_progressive_tail_msg_count() -> u32 {
 impl Default for L1ProgressiveConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             msg_threshold: 100,
             span_hours: 24,
             tail_msg_count: 60,

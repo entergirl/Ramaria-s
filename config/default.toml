@@ -191,8 +191,8 @@ cluster_delay_ms = 800
 # 关闭时回退 v1.6 行为（整会话/按 utt 切分）。
 
 [l1.progressive]
-# 渐进式摘要总开关（默认 false）
-enabled = false
+# 渐进式摘要总开关（默认 true）
+enabled = true
 # 消息数触发阈值（超过此值触发分段）
 msg_threshold = 100
 # 时间跨度触发阈值（小时，首末消息跨度超过此值触发分段）

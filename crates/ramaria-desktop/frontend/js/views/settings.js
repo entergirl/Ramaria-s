@@ -1454,9 +1454,9 @@ var RamariaSettingsView = (function () {
         {
             key: 'l1-progressive',
             title: '📚 渐进式摘要 B3（v2.0）',
-            desc: '长会话（消息数/时间跨度超阈值）在封存时按段生成多个 L1。默认关闭，回退 v1.6 行为。',
+            desc: '长会话（消息数/时间跨度超阈值）在封存时按段生成多个 L1。默认开启，关闭时回退 v1.6 行为。',
             fields: [
-                { path: ['l1', 'progressive', 'enabled'], label: '渐进式摘要开关', type: 'bool', def: false, hint: 'false = 整会话/按 utt 切分（v1.6）' },
+                { path: ['l1', 'progressive', 'enabled'], label: '渐进式摘要开关', type: 'bool', def: true, hint: 'false = 整会话/按 utt 切分（v1.6）' },
                 { path: ['l1', 'progressive', 'msg_threshold'], label: '消息数触发阈值', type: 'number', min: 2, def: 100, hint: '超过此条数触发分段' },
                 { path: ['l1', 'progressive', 'span_hours'], label: '时间跨度阈值（小时）', type: 'number', min: 1, def: 24, hint: '首末消息跨度超过此值触发分段' },
                 { path: ['l1', 'progressive', 'tail_msg_count'], label: '尾段覆盖消息数', type: 'number', min: 1, def: 60, hint: '封存只摘要尾部最近 N 条消息' },

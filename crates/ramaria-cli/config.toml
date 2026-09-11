@@ -99,7 +99,7 @@ max_events = 5
 degraded_confidence_enabled = true
 
 [l1.progressive]
-enabled = false
+enabled = true
 msg_threshold = 100
 span_hours = 24
 tail_msg_count = 60
