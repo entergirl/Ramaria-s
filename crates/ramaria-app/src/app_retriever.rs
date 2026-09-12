@@ -4,6 +4,7 @@
 //! 职责: 从存储层加载 L1/L2 数据，构建内存检索索引（BM25 + 向量 + 图谱）。
 
 use ramaria_core::error::RamariaResult;
+use ramaria_core::lock::{read_recover, write_recover};
 use ramaria_core::traits::{BM25_INDEX_VERSION_CURRENT, BM25_INDEX_VERSION_LEGACY};
 use ramaria_memory::VectorIndex;
 use ramaria_memory::retriever::{L1DocView, L2DocView, RetrieverConfig};
@@ -144,10 +145,7 @@ impl App {
 
         // 4. 锁定检索器并批量索引（RwLock::write() 用于索引写入）
         {
-            let mut retriever = self.retriever.write().unwrap_or_else(|e| {
-                tracing::error!("Retriever lock poisoned during rebuild: {e}");
-                e.into_inner()
-            });
+            let mut retriever = write_recover(&self.retriever, "app_retriever.retriever");
             // 应用 core 检索配置（[retrieval] 组）到内存检索器：RRF 融合参数与向量通道开关
             // 真实生效（默认配置下与 RetrieverConfig::default() 一致，行为等价）
             *retriever.config_mut() =
@@ -256,10 +254,7 @@ impl App {
 
         // 2. 装载词典 + 重置倒排文档（写锁内同步维护）
         {
-            let mut guard = self.keyword_service.write().unwrap_or_else(|e| {
-                tracing::error!("keyword_service lock poisoned during rebuild: {e}");
-                e.into_inner()
-            });
+            let mut guard = write_recover(&self.keyword_service, "app_retriever.keyword_service");
             guard.load_pool_entries(&rows);
             guard.reset_docs_from_views(all_l1, all_l2);
             tracing::info!(
@@ -282,12 +277,9 @@ impl App {
     /// 4. 写锁挂载或置 None（构建失败静默降级，记 warn 不阻塞重建）。
     async fn rebuild_keyword_fuzzy(&self) {
         let service = self.keyword_service();
-        let terms = match service.read() {
-            Ok(g) => g.canonical_terms(),
-            Err(e) => {
-                tracing::warn!("keyword_service lock poisoned during fuzzy rebuild: {e}");
-                return;
-            }
+        let terms = {
+            let guard = read_recover(&service, "app_retriever.keyword_service");
+            guard.canonical_terms()
         };
         if terms.is_empty() {
             return;
@@ -312,12 +304,8 @@ impl App {
                 None
             }
         };
-        match service.write() {
-            Ok(mut guard) => guard.set_fuzzy(fuzzy),
-            Err(e) => {
-                tracing::warn!("keyword_service lock poisoned during fuzzy mount: {e}");
-            }
-        }
+        let mut guard = write_recover(&service, "app_retriever.keyword_service");
+        guard.set_fuzzy(fuzzy);
     }
 
     /// 读取 BM25 词典增强分词迁移决策。
@@ -435,7 +423,7 @@ mod tests {
         let total = app.rebuild_retriever().await.unwrap();
         assert!(total >= 1, "无主 L1 必须被加载进索引，实际 total={total}");
         // 检索器中的文档数应 ≥1（无主 L1 已入索引）
-        let guard = app.retriever.read().unwrap_or_else(|e| e.into_inner());
+        let guard = read_recover(&app.retriever, "app_retriever.retriever");
         assert!(guard.doc_count() >= 1, "检索器 doc_count 应为 ≥1");
     }
 
@@ -462,7 +450,7 @@ mod tests {
         );
 
         let search = |app: &App, query: &str| -> Vec<SearchResult> {
-            let guard = app.retriever.read().unwrap_or_else(|e| e.into_inner());
+            let guard = read_recover(&app.retriever, "app_retriever.retriever");
             guard.search(
                 &SearchRequest {
                     query: query.to_string(),
@@ -547,7 +535,7 @@ mod tests {
         // 服务镜像与加载文档一致（doc_count 级）
         let service = app.keyword_service();
         {
-            let guard = service.read().unwrap_or_else(|e| e.into_inner());
+            let guard = read_recover(&service, "app_retriever.keyword_service");
             assert_eq!(guard.doc_count(), total, "镜像文档数应与重建加载数一致");
             assert!(
                 guard.composite().fuzzy().is_none(),
@@ -557,7 +545,7 @@ mod tests {
 
         // 镜像维护不影响既有检索：镜像操作前后 search 结果一致
         let search = |app: &App| -> Vec<String> {
-            let guard = app.retriever.read().unwrap_or_else(|e| e.into_inner());
+            let guard = read_recover(&app.retriever, "app_retriever.retriever");
             guard
                 .search(
                     &SearchRequest {
@@ -575,7 +563,7 @@ mod tests {
         let before = search(&app);
         assert!(!before.is_empty(), "对照搜索应命中既有 L1");
         {
-            let mut guard = service.write().unwrap_or_else(|e| e.into_inner());
+            let mut guard = write_recover(&service, "app_retriever.keyword_service");
             guard.clear_docs(); // 模拟镜像被外部误操作清空
         }
         let after = search(&app);
@@ -585,7 +573,7 @@ mod tests {
         let total2 = app.rebuild_retriever().await.unwrap();
         assert_eq!(total2, total);
         {
-            let guard = service.read().unwrap_or_else(|e| e.into_inner());
+            let guard = read_recover(&service, "app_retriever.keyword_service");
             assert_eq!(guard.doc_count(), total2);
         }
     }
@@ -617,7 +605,7 @@ mod tests {
 
         app.rebuild_retriever().await.unwrap();
         let service = app.keyword_service();
-        let guard = service.read().unwrap_or_else(|e| e.into_inner());
+        let guard = read_recover(&service, "app_retriever.keyword_service");
         assert!(guard.pool_len() >= 1, "词典池应装载注入的规范词");
         let fuzzy = guard
             .composite()
@@ -648,7 +636,7 @@ mod tests {
         );
 
         app.rebuild_retriever().await.unwrap();
-        let guard = app.retriever.read().unwrap_or_else(|e| e.into_inner());
+        let guard = read_recover(&app.retriever, "app_retriever.retriever");
         assert!(!guard.config().enable_vector, "向量通道开关应随重建应用");
         assert_eq!(guard.config().rrf.k, 90.0, "RRF 平滑系数应随重建应用");
         assert_eq!(guard.config().rrf.bm25_weight, 0.5);

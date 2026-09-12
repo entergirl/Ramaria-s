@@ -17,6 +17,7 @@ use std::sync::Mutex;
 use chrono::{Local, TimeZone};
 use ramaria_core::config::UttConfig;
 use ramaria_core::error::RamariaResult;
+use ramaria_core::lock::lock_recover;
 use ramaria_core::traits::{EmbeddingProvider, StorageBackend};
 use ramaria_core::types::{Session, UttBlock};
 use tracing::{info, warn};
@@ -305,10 +306,7 @@ impl UttBuilder {
             let content_hash = content_hash(&block.block_text);
             // 内容级去重：命中缓存 → 复用向量，不触发新的 embedding 推理。
             let reused = if self.config.content_dedup {
-                let cached = self
-                    .embedding_cache
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
+                let cached = lock_recover(&self.embedding_cache, "utt_builder.embedding_cache")
                     .get(&content_hash)
                     .cloned();
                 match cached {
@@ -328,9 +326,7 @@ impl UttBuilder {
                     Ok(vec) => {
                         // 去重开启时写入缓存，供后续同内容块复用（锁内短操作，不跨 await）。
                         if self.config.content_dedup {
-                            self.embedding_cache
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
+                            lock_recover(&self.embedding_cache, "utt_builder.embedding_cache")
                                 .insert(content_hash, vec.clone());
                         }
                         block.embedding = Some(encode_embedding(&vec));

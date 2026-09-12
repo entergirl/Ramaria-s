@@ -36,6 +36,7 @@ use candle_nn::{Activation, Embedding, Linear, Module, RmsNorm, VarBuilder};
 use candle_transformers::models::qwen3::Config as Qwen3Config;
 use candle_transformers::utils::repeat_kv;
 use ramaria_core::error::RamariaResult;
+use ramaria_core::lock::lock_recover;
 use std::path::Path;
 use std::sync::Mutex;
 use tokenizers::Tokenizer;
@@ -604,7 +605,7 @@ impl LlamaHeadDimEncoder {
             })?;
 
         // Step 3: Forward pass（无状态前向：每序列独立推理，无 KV cache 累积问题）
-        let model = self.model.lock().unwrap_or_else(|e| e.into_inner());
+        let model = lock_recover(&self.model, "llama_head_dim.model");
         let hidden_states = model.forward(&input_ids).map_err(|e| {
             ramaria_core::error::RamariaError::embedding(format!(
                 "前向推理失败: {}。文本: '{}...'",

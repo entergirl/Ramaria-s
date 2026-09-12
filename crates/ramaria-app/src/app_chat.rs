@@ -17,6 +17,7 @@ use std::sync::Arc;
 use futures::Stream;
 use futures::channel::mpsc;
 use ramaria_core::error::RamariaResult;
+use ramaria_core::lock::lock_recover;
 use ramaria_core::traits::{ChatMessage, ChatRequest, StorageBackend};
 use ramaria_core::types::{Message, MessageRole, MessageSource, ProfileField, new_id, now_ms};
 use ramaria_memory::prompt::builder::{
@@ -404,7 +405,7 @@ impl App {
 
         // ---- Step 8: 调用 LLM ----
         // ★ 先 clone Arc 出锁再 await，避免 MutexGuard 跨 .await
-        let llm = { self.llm.lock().unwrap_or_else(|e| e.into_inner()).clone() };
+        let llm = { lock_recover(&self.llm, "app_chat.llm").clone() };
         let raw_stream = match llm.chat_stream(&chat_request).await {
             Ok(stream) => stream,
             Err(e) => {

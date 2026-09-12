@@ -9,6 +9,7 @@
 //! - `summarize_with_summarizer` 作为 JobManager 闭包的适配器
 
 use ramaria_core::error::{RamariaError, RamariaResult};
+use ramaria_core::lock::{lock_recover, write_recover};
 use ramaria_core::traits::{LlmProvider, StorageBackend};
 use ramaria_memory::job::{JobManager, JobResult, JobType};
 use ramaria_memory::keyword::KeywordNormalizer;
@@ -398,7 +399,7 @@ impl SessionLifecycle {
     ///
     /// 容错（静默降级）:
     /// - Retriever 未注入（向后兼容）→ 静默跳过。
-    /// - Mutex 锁污染 → warn 日志 + 跳过。
+    /// - 锁中毒 → 记 warn 并取回内部数据继续（不中断 L1 索引更新）。
     /// - embedding 不可用 / 向量生成失败 → 仅 BM25 索引（记 debug，不阻塞）。
     ///
     /// 参数:
@@ -416,28 +417,16 @@ impl SessionLifecycle {
             last_accessed_at: l1.last_accessed_at,
         };
 
-        let ret_guard = match self.retriever.lock() {
-            Ok(g) => g,
-            Err(e) => {
-                warn!("retriever lock poisoned during index_l1_into_retriever: {e}");
-                return;
-            }
-        };
+        let ret_guard = lock_recover(&self.retriever, "l1_generate.retriever");
         if let Some(ref retriever_arc) = *ret_guard {
             // RwLock write() 用于索引写入（index_l1_with_vector 需要 &mut self）
-            match retriever_arc.write() {
-                Ok(mut retriever) => {
-                    retriever.index_l1_with_vector(&doc, vector);
-                    info!(
-                        l1_id = %l1.id,
-                        persona_uid = ?l1.persona_uid,
-                        "L1 摘要已增量加入 Retriever 索引（BM25 + 向量），即时可检索"
-                    );
-                }
-                Err(e) => {
-                    warn!("retriever 内部 Mutex poisoned: {e}");
-                }
-            }
+            let mut retriever = write_recover(retriever_arc, "l1_generate.retriever");
+            retriever.index_l1_with_vector(&doc, vector);
+            info!(
+                l1_id = %l1.id,
+                persona_uid = ?l1.persona_uid,
+                "L1 摘要已增量加入 Retriever 索引（BM25 + 向量），即时可检索"
+            );
         }
         // 关键词服务镜像增量（与 Retriever 同钩子；失败仅 warn 不阻塞主流程）
         self.index_l1_into_keyword_service(&doc);
@@ -447,26 +436,14 @@ impl SessionLifecycle {
     ///
     /// 容错（静默降级，镜像侧增强）:
     /// - KeywordService 未注入 → 静默跳过（等同旧版行为）。
-    /// - 锁污染 → warn 日志 + 跳过。
+    /// - 锁中毒 → 记 warn 并取回内部数据继续（不中断镜像增量）。
     /// - 镜像维护为纯内存操作，不可失败；异常仅记 warn，不阻塞 L1 生成主流程。
     fn index_l1_into_keyword_service(&self, doc: &L1DocView) {
-        let service = match self.keyword_service.lock() {
-            Ok(g) => g.clone(),
-            Err(e) => {
-                warn!("keyword_service lock poisoned during index_l1_into_keyword_service: {e}");
-                return;
-            }
-        };
+        let service = lock_recover(&self.keyword_service, "l1_generate.keyword_service").clone();
         let Some(service_arc) = service else {
             return; // 未注入（向后兼容）
         };
-        let mut guard = match service_arc.write() {
-            Ok(g) => g,
-            Err(e) => {
-                warn!("keyword_service 内部 Mutex poisoned: {e}");
-                return;
-            }
-        };
+        let mut guard = write_recover(&service_arc, "l1_generate.keyword_service");
         // 词典池累积：解析文档 keywords 字段（逗号分隔串）为标准化 token
         let tokens = ramaria_memory::keyword::CommaSeparatedNormalizer
             .normalize(doc.keywords.as_deref().unwrap_or(""));
@@ -486,11 +463,7 @@ impl SessionLifecycle {
     /// - `Some(vec)`: 向量生成成功。
     /// - `None`: embedding 未配置 / 生成失败（BM25 降级，不阻塞）。
     async fn embed_summary_vector(&self, summary: &str) -> Option<Vec<f32>> {
-        let embedding = self
-            .embedding
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        let embedding = lock_recover(&self.embedding, "l1_generate.embedding").clone();
         match embedding {
             Some(provider) => match provider.embed(summary).await {
                 Ok(v) => Some(v),
@@ -586,6 +559,7 @@ pub(super) async fn summarize_progressive_with_summarizer(
 mod tests {
     use super::*;
     use ramaria_core::config::RamariaConfig;
+    use ramaria_core::lock::read_recover;
     use ramaria_memory::retriever::Retriever;
     use std::sync::{Arc, RwLock};
 
@@ -731,23 +705,24 @@ mod tests {
 
         lifecycle.index_l1_into_retriever(&l1).await;
 
-        // Retriever 与关键词镜像同步各含一条文档
+        // Retriever 与关键词镜像同步各含一条文档（读锁在块内即时释放，不跨 await）
         assert_eq!(
             retriever.read().unwrap().doc_count(),
             1,
             "Retriever 应索引该 L1"
         );
-        let guard = keyword_service.read().unwrap_or_else(|e| e.into_inner());
-        assert_eq!(guard.doc_count(), 1, "关键词镜像应含该 L1 文档");
-        assert_eq!(
-            guard.pool_len(),
-            2,
-            "词典池应累积 keywords 解析出的 2 个 token"
-        );
-        drop(guard);
+        {
+            let guard = read_recover(&keyword_service, "l1_generate.keyword_service");
+            assert_eq!(guard.doc_count(), 1, "关键词镜像应含该 L1 文档");
+            assert_eq!(
+                guard.pool_len(),
+                2,
+                "词典池应累积 keywords 解析出的 2 个 token"
+            );
+        }
 
-        // 镜像文档可被关键词查询命中（persona 限定）
-        let guard = keyword_service.read().unwrap_or_else(|e| e.into_inner());
+        // 镜像文档可被关键词查询命中（persona 限定）；
+        // 先取倒排镜像 Arc 快照并释放读锁，再在锁外 await 查询。
         let q = ramaria_core::keyword::KeywordQuery::builder(Some("rama-0001".to_string()))
             .keywords_from(
                 ["工作压力"]
@@ -756,7 +731,11 @@ mod tests {
             )
             .top_k(5)
             .build();
-        let hits = guard.composite().query(&q, None).await;
+        let composite = {
+            let guard = read_recover(&keyword_service, "l1_generate.keyword_service");
+            guard.composite_arc()
+        };
+        let hits = composite.query(&q, None).await;
         assert_eq!(hits.len(), 1, "增量 L1 应能被关键词查询命中");
     }
 }

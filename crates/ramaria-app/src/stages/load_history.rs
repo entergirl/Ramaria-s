@@ -11,6 +11,7 @@
 //! - 空 session 不报错（新对话无历史消息为正常场景）
 
 use async_trait::async_trait;
+use ramaria_core::lock::read_recover;
 use ramaria_core::traits::ChatMessage;
 use ramaria_core::types::MemoryL1;
 use ramaria_memory::decay::DecayConfig;
@@ -216,19 +217,14 @@ impl PipelineStage for StageLoadHistory {
         } else if ctx.config.retrieval.narrative_weighted {
             let now = ramaria_core::types::now_ms();
             let decay_config = DecayConfig::from_core(&ctx.config.decay, "l1");
-            let narrative_results = match ctx.retriever.read() {
-                Ok(retriever) => retriever.search_narrative(
+            let narrative_results = read_recover(&ctx.retriever, "load_history.retriever")
+                .search_narrative(
                     &input.user_input,
                     actual_uid,
                     narrative_top_k as usize,
                     now,
                     &decay_config,
-                ),
-                Err(e) => {
-                    tracing::error!(error = %e, "Retriever lock poisoned during narrative search");
-                    Vec::new()
-                }
-            };
+                );
             if !narrative_results.is_empty() {
                 // 加权命中 → 转回 MemoryL1（脉络行格式与 v1.6 一致，缺 time_period/atmosphere
                 // 时显示纯摘要——加权优先保证话题相关性，展示次要）

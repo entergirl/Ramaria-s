@@ -50,7 +50,7 @@ pub fn uuid_from_db(s: &str) -> crate::error::RamariaResult<Uuid> {
     })
 }
 
-/// 检查 UUID 是否为 nil（表示解析失败或未初始化）。
+/// 获取当前 Unix 毫秒时间戳。
 ///
 /// 返回当前 Unix 毫秒时间戳。
 ///
@@ -308,7 +308,7 @@ impl Message {
 /// - `time` / `who` / `cause` 为可选槽位，为 L2 事件提取提供因果线索（v1.4 B1）。
 ///
 /// 格式:
-/// - `text`: 必填，证据文本（校验要求 ≥ 5 字符）。
+/// - `text`: 必填，证据文本。结构体不做长度校验，非空与长度约束由提取侧保证。
 /// - `time`: 可选，事件发生的时间描述（如"上周三晚上"）。
 /// - `who`: 可选，涉及的人物/角色。
 /// - `cause`: 可选，可辨时的因果线索（缺失留空，供背景参考）。
@@ -318,7 +318,7 @@ impl Message {
 /// - 运行时不做兼容解析，读写均为新格式。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvidenceNote {
-    /// 证据文本（必填，≥ 5 字符）
+    /// 证据文本（必填；长度由提取侧约束，此处不校验）
     pub text: String,
     /// 事件发生的时间描述（可选）
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -486,9 +486,6 @@ impl MemoryL1 {
         self.last_accessed_at = Some(now_ms());
     }
 }
-
-/// 时间段的合法值集合。
-pub const TIME_PERIOD_OPTIONS: &[&str] = &["清晨", "上午", "下午", "傍晚", "夜间", "深夜"];
 
 // =========================================================
 // utt 话语块（v1.4 新增 — 原文注入通道的最小单元）
@@ -1673,15 +1670,20 @@ impl ClusterSnapshot {
     ///
     /// 返回:
     /// - `Some(Vec<f32>)` 如果 BLOB 长度是 4 的倍数；`None` 如果数据损坏或为空。
+    // 允许 clippy::manual_is_multiple_of：`usize::is_multiple_of` 需 Rust 1.87，
+    // 与 workspace 承诺的 `rust-version = 1.85` 不符，此处保留 `% 4` 判定。
+    #[allow(clippy::manual_is_multiple_of)]
     pub fn deserialize_embedding(blob: &[u8]) -> Option<Vec<f32>> {
-        if blob.is_empty() || !blob.len().is_multiple_of(4) {
+        // 用 `% 4` / `chunks_exact`（低版本稳定 API）而非 `is_multiple_of` / `as_chunks`，
+        // 保持 workspace `rust-version` 承诺的兼容下限。
+        if blob.is_empty() || blob.len() % 4 != 0 {
             return None;
         }
-        let count = blob.len() / 4;
-        let mut vec = Vec::with_capacity(count);
-        // 长度已校验为 4 的倍数，as_chunks 余数恒为空，逐块还原 f32。
-        for chunk in blob.as_chunks::<4>().0 {
-            vec.push(f32::from_le_bytes(*chunk));
+        let mut vec = Vec::with_capacity(blob.len() / 4);
+        // 长度已校验为 4 的倍数，`chunks_exact` 的余数恒为空，逐块还原 f32。
+        for chunk in blob.chunks_exact(4) {
+            // 索引 0..4 由 `chunks_exact(4)` 保证在界内，不产生越界 panic。
+            vec.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
         }
         Some(vec)
     }
@@ -2586,12 +2588,5 @@ mod tests {
             serde_json::to_string(&MessageSource::Online).unwrap(),
             r#""online""#
         );
-    }
-
-    #[test]
-    fn time_period_options() {
-        assert_eq!(TIME_PERIOD_OPTIONS.len(), 6);
-        assert!(TIME_PERIOD_OPTIONS.contains(&"清晨"));
-        assert!(TIME_PERIOD_OPTIONS.contains(&"深夜"));
     }
 }

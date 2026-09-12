@@ -1,7 +1,9 @@
 //! crates/ramaria-core/src/config.rs - Ramaria 应用配置类型模块
 //!
 //! 设计特点:
-//! - 按职责拆分配置域: 路径、后端、检索、衰减、Session、索引、日志、隐私
+//! - 按职责拆分配置域: 路径、后端、检索、衰减、Session、阈值、索引、日志、推断、
+//!   事件提取、L1 摘要、utt 话语块、示例、桥接、缓存、行为、知识、嵌入、风格、反馈、
+//!   注入协调预算、层间去重
 //! - 每组配置提供稳定默认值，保证首次启动和测试环境有一致行为
 //! - 支持 serde 序列化与反序列化，便于 CLI、GUI 和配置文件共享
 //! - 非敏感配置才允许进入 config.toml，API key 始终由 OS keychain 管理
@@ -333,6 +335,7 @@ impl Default for RamariaConfig {
 /// - 默认值为空字符串，由上层配置加载器根据平台和运行模式填充。
 /// - 开发模式可由 `RAMARIA_DATA_DIR` 或测试夹具覆盖。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PathConfig {
     /// SQLite 数据库路径。Windows 默认 `%APPDATA%\Ramaria\data\assistant.db`
     pub data_dir: String,
@@ -561,6 +564,7 @@ impl Default for RetrievalConfig {
 /// - t：距生成的天数
 /// - S：稳定性系数，越大衰减越慢
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DecayConfig {
     /// L0 稳定性系数（细节信息衰减最快）
     pub s_l0: u32,
@@ -612,6 +616,7 @@ impl Default for DecayConfig {
 /// - 优先沿用现有 Python session 行为。
 /// - 上层 app 编排层负责解释这些参数。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SessionConfig {
     /// 空闲超过此时长（分钟）自动触发 L1 摘要
     pub l1_idle_minutes: u32,
@@ -650,6 +655,7 @@ impl Default for SessionConfig {
 /// - 控制何时触发 L3 性格推断（路径 A 计数触发 + 路径 B 时间触发）。
 /// - 对齐 Python `MergerConfig` + `ProfileConfig` 的触发策略。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ThresholdConfig {
     /// 未吸收 L1 触发 L2 合并的条数阈值（路径 A）
     pub l2_trigger_count: u32,
@@ -660,9 +666,15 @@ pub struct ThresholdConfig {
     /// 最早未吸收事件触发 L3 推断的天数阈值（路径 B）
     pub l3_trigger_days: u32,
     /// L2 事件提取时簇间 LLM 请求间隔（毫秒），用于避免触发远程 API 速率限制。
-    /// `Default` 实现为 800（等待 800ms）；建议对 DeepSeek 等有速率限制的 API 调大。
-    #[serde(default)]
+    /// 默认 800（等待 800ms）；建议对 DeepSeek 等有速率限制的 API 调大。
+    /// 显式配置 `0` 合法（表示不等待），仅在键缺失时回退默认值。
+    #[serde(default = "default_cluster_delay_ms")]
     pub cluster_delay_ms: u64,
+}
+
+/// serde 默认值：簇间 LLM 请求间隔 800ms（与 `Default` 实现保持一致）。
+fn default_cluster_delay_ms() -> u64 {
+    800
 }
 
 impl Default for ThresholdConfig {
@@ -827,6 +839,7 @@ impl Default for L1ProgressiveConfig {
 /// - 控制 BM25 增量更新和周期性重建节奏。
 /// - 为后续向量索引和图谱索引配置预留扩展位置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct IndexConfig {
     /// BM25 增量合并阈值（缓冲区积累超过此条数触发合并）
     pub bm25_incremental_threshold: u32,
@@ -861,6 +874,7 @@ impl Default for IndexConfig {
 /// 安全约束:
 /// - `log_full_prompt` 默认关闭，开启前应由 UI/CLI 给出隐私警告。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LoggingConfig {
     /// 是否记录完整 prompt（默认关闭，需显式开启并警告）
     pub log_full_prompt: bool,
@@ -1258,16 +1272,6 @@ pub enum CacheEviction {
     Fifo,
 }
 
-impl CacheEviction {
-    /// 返回策略的 snake_case 名称（供日志与展示）。
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Lru => "lru",
-            Self::Fifo => "fifo",
-        }
-    }
-}
-
 /// 三层生成缓存配置。
 ///
 /// 职责:
@@ -1332,7 +1336,7 @@ impl Default for CacheConfig {
 /// - embedding 不可用 → 双通道向量通道关闭，退化为纯关键词 Jaccard 通道（β=0）。
 ///
 /// 字段约定:
-/// - `theta_nb`: 密度聚类邻域相似度阈值（待实证：初值 0.5，v3.1 建议真实数据 P50~P75）。
+/// - `theta_nb`: 密度聚类邻域相似度阈值（待实证：初值 0.65，v3.1 建议真实数据 P50~P75）。
 /// - `beta1` + `beta2`: 双通道融合权重，约束 β1 + β2 ≤ 1（关键词通道 = 1 − β1 − β2）。
 /// - `theta_route`: 路由阈值，全部候选低于此值 → 不注入（静默降级）。
 /// - `top_n`: 路由 Top-N 合并上限（主规则完整注入 + 次规则仅合并 avoid/params）。
@@ -1490,7 +1494,7 @@ impl Default for KnowledgeConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EmbeddingDevice {
-    /// 强制使用 CPU 推理（最保守，默认）。
+    /// 强制使用 CPU 推理（最保守；默认设备为 `Auto`，见 `EmbeddingDevice::default()`）。
     Cpu,
     /// 强制使用 CUDA GPU；不可用时回退 CPU。
     Cuda,
@@ -2419,6 +2423,69 @@ provider = "lm-studio"
         assert_eq!(cfg.utt.theta_gap_minutes, 10);
         assert_eq!(cfg.examples.max_examples, 5);
         assert!(cfg.bridge.enabled);
+    }
+
+    /// 六组基础配置（paths/decay/session/thresholds/index/logging）只写部分键时，
+    /// 缺失字段回退 `Default`，而不是让 `toml::from_str` 报 missing field
+    /// （后者会导致 config_sync 整体回退默认，用户显式键全部失效）。
+    #[test]
+    fn partial_group_keys_fall_back_to_defaults() {
+        let toml_text = r#"
+[paths]
+data_dir = "D:/ramaria/data"
+
+[decay]
+s_l0 = 5
+
+[session]
+l1_idle_minutes = 30
+
+[thresholds]
+l2_trigger_count = 9
+
+[index]
+bm25_incremental_threshold = 20
+
+[logging]
+log_full_prompt = true
+"#;
+        let cfg: RamariaConfig = toml::from_str(toml_text).expect("部分键配置应可解析");
+
+        // 路径组：显式键生效，其余键回退默认
+        assert_eq!(cfg.paths.data_dir, "D:/ramaria/data");
+        assert_eq!(cfg.paths.config_dir, "");
+
+        // 衰减组
+        assert_eq!(cfg.decay.s_l0, 5);
+        assert_eq!(cfg.decay.s_l1, 30);
+        assert!(cfg.decay.enable_access_boost);
+
+        // Session 组
+        assert_eq!(cfg.session.l1_idle_minutes, 30);
+        assert_eq!(cfg.session.max_history_messages, 40);
+
+        // 阈值组：缺 cluster_delay_ms 必须回退默认 800，而不是 serde 裸 default 的 0
+        assert_eq!(cfg.thresholds.l2_trigger_count, 9);
+        assert_eq!(cfg.thresholds.l3_trigger_count, 10);
+        assert_eq!(
+            cfg.thresholds.cluster_delay_ms, 800,
+            "缺 cluster_delay_ms 应回退 800，而非 0"
+        );
+
+        // 索引组
+        assert_eq!(cfg.index.bm25_incremental_threshold, 20);
+        assert_eq!(cfg.index.bm25_rebuild_interval, 300);
+
+        // 日志组
+        assert!(cfg.logging.log_full_prompt);
+    }
+
+    /// 显式配置 `cluster_delay_ms = 0` 仍被尊重（0 = 不等待，是合法用户值）。
+    #[test]
+    fn explicit_zero_cluster_delay_is_respected() {
+        let cfg: RamariaConfig =
+            toml::from_str("[thresholds]\ncluster_delay_ms = 0\n").expect("显式 0 应可解析");
+        assert_eq!(cfg.thresholds.cluster_delay_ms, 0);
     }
 
     #[test]

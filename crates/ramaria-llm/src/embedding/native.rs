@@ -27,6 +27,7 @@ use async_trait::async_trait;
 use candle_core::Device;
 use ramaria_core::config::EmbeddingDevice;
 use ramaria_core::error::{RamariaError, RamariaResult};
+use ramaria_core::lock::lock_recover;
 use ramaria_core::traits::{EmbeddingModelInfo, EmbeddingProvider};
 
 use super::models::{self, ModelArchitecture};
@@ -314,7 +315,7 @@ impl NativeEmbeddingProvider {
     ///
     /// 后续调用直接返回已缓存的编码器。
     fn ensure_loaded(&self) -> RamariaResult<()> {
-        let mut guard = self.encoder.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = lock_recover(&self.encoder, "embedding_native.encoder");
 
         if guard.is_some() {
             return Ok(());
@@ -343,7 +344,7 @@ impl NativeEmbeddingProvider {
         // 同步动作收敛到纯函数 sync_actual_dimension，便于独立单测。
         // 锁顺序：encoder 锁 → model_info 锁（model_info() 只持 model_info 锁，无反向嵌套，不死锁）。
         {
-            let mut info = self.model_info.lock().unwrap_or_else(|e| e.into_inner());
+            let mut info = lock_recover(&self.model_info, "embedding_native.model_info");
             let prev_dim = info.dimension;
             if sync_actual_dimension(&mut info.dimension, actual_dim) {
                 tracing::info!(
@@ -355,7 +356,7 @@ impl NativeEmbeddingProvider {
         }
 
         // 更新进度
-        *self.progress.lock().unwrap_or_else(|e| e.into_inner()) = 1.0;
+        *lock_recover(&self.progress, "embedding_native.progress") = 1.0;
 
         *guard = Some(Arc::new(encoder));
 
@@ -477,7 +478,7 @@ impl EmbeddingProvider for NativeEmbeddingProvider {
         // 编码器推理是 CPU 密集型操作（50ms-2s/条），持锁期间会串行化所有请求。
         // 修复后：锁仅保护 Arc 的读取（<1μs），推理不持锁。
         let encoder = {
-            let guard = self.encoder.lock().unwrap_or_else(|e| e.into_inner());
+            let guard = lock_recover(&self.encoder, "embedding_native.encoder");
             guard
                 .as_ref()
                 .ok_or_else(|| RamariaError::embedding("编码器未初始化 — 请先调用 ensure_loaded()"))
@@ -508,7 +509,7 @@ impl EmbeddingProvider for NativeEmbeddingProvider {
 
         // P-1 修复：先克隆 Arc 再释放锁，推理在锁外执行
         let encoder = {
-            let guard = self.encoder.lock().unwrap_or_else(|e| e.into_inner());
+            let guard = lock_recover(&self.encoder, "embedding_native.encoder");
             guard
                 .as_ref()
                 .ok_or_else(|| RamariaError::embedding("编码器未初始化"))
@@ -540,10 +541,7 @@ impl EmbeddingProvider for NativeEmbeddingProvider {
     fn model_info(&self) -> EmbeddingModelInfo {
         // 按值返回（trait 签名）：从 Mutex 内 clone，避免返回引用带来的并发竞争。
         // dimension 在 ensure_loaded 后为实际加载维度（构造时可能为占位 384）。
-        self.model_info
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        lock_recover(&self.model_info, "embedding_native.model_info").clone()
     }
 
     async fn validate(&self) -> RamariaResult<()> {
@@ -571,7 +569,7 @@ impl EmbeddingProvider for NativeEmbeddingProvider {
 
         // P-1 修复：先克隆 Arc 再释放锁，测试推理在锁外执行
         let encoder = {
-            let guard = self.encoder.lock().unwrap_or_else(|e| e.into_inner());
+            let guard = lock_recover(&self.encoder, "embedding_native.encoder");
             guard
                 .as_ref()
                 .ok_or_else(|| RamariaError::embedding("编码器未初始化"))
@@ -639,7 +637,7 @@ impl EmbeddingProvider for NativeEmbeddingProvider {
     }
 
     fn download_progress(&self) -> f64 {
-        *self.progress.lock().unwrap_or_else(|e| e.into_inner())
+        *lock_recover(&self.progress, "embedding_native.progress")
     }
 
     fn is_available(&self) -> bool {

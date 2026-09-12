@@ -7,18 +7,14 @@
 //! - 委托 `crate::privacy` 模块执行具体逻辑
 
 use ramaria_core::error::RamariaResult;
+use ramaria_core::lock::lock_recover;
 
 use super::App;
 
 impl App {
     /// 检查当前 provider 的隐私确认状态。
     pub async fn check_privacy(&self) -> RamariaResult<crate::privacy::PrivacyStatus> {
-        let cfg = self
-            .llm
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .config()
-            .clone();
+        let cfg = lock_recover(&self.llm, "app_privacy.llm").config().clone();
         crate::privacy::check_privacy(self.storage.as_ref(), cfg.provider, &cfg.base_url).await
     }
 
@@ -27,12 +23,7 @@ impl App {
     /// 参数:
     /// - `persistent`: 是否跨重启持久化。
     pub async fn confirm_privacy(&self, persistent: bool) -> RamariaResult<()> {
-        let cfg = self
-            .llm
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .config()
-            .clone();
+        let cfg = lock_recover(&self.llm, "app_privacy.llm").config().clone();
         crate::privacy::confirm_privacy(
             self.storage.as_ref(),
             cfg.provider,

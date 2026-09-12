@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use ramaria_core::lock::lock_recover;
 use ramaria_core::traits::{EmbeddingProvider, LlmProvider, StorageBackend};
 use ramaria_core::types::{MemoryL1, now_ms};
 use ramaria_memory::event::{EventExtractor, EventExtractorConfig};
@@ -158,13 +159,7 @@ impl SessionLifecycle {
         let knowledge_enabled = self.config.knowledge.auto_fact_detect;
         let knowledge_config = self.config.knowledge.clone();
         let embedding: Option<Arc<dyn EmbeddingProvider>> = if knowledge_enabled {
-            self.embedding
-                .lock()
-                .unwrap_or_else(|e| {
-                    error!("embedding lock poisoned during run_l2_extraction: {e}");
-                    e.into_inner()
-                })
-                .clone()
+            lock_recover(&self.embedding, "l2_l3_scheduler.embedding").clone()
         } else {
             None
         };

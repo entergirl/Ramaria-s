@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use ramaria_core::error::RamariaResult;
+use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::traits::{LlmProvider, StorageBackend};
 use ramaria_core::types::now_ms;
 use tracing::{debug, error, info, warn};
@@ -186,16 +186,23 @@ impl SessionLifecycle {
 /// 实现:
 /// - 使用 `StorageBackend::get_last_message_time` — 高效 `SELECT MAX(created_at)` 聚合，
 ///   不再全量加载消息列表。
-/// - 若 trait 实现未覆写（返回 None），回退到 `list_messages` 全量加载。
+/// - trait 实现未覆写该方法时返回 `Unsupported`（显式区分"未实现"与"确实无消息"）
+///   → 回退 `list_messages` 全量加载；属于已声明的降级路径，不视为故障。
 pub(super) async fn get_last_msg_time_from_db(
     storage: &dyn StorageBackend,
     session_id: Uuid,
 ) -> RamariaResult<Option<i64>> {
-    // 优先使用高效的 MAX 聚合查询
-    if let Some(time) = storage.get_last_message_time(session_id).await? {
-        return Ok(Some(time));
+    match storage.get_last_message_time(session_id).await {
+        // 高效路径：MAX 聚合直接命中
+        Ok(Some(time)) => return Ok(Some(time)),
+        // 已覆写但该 session 无消息
+        Ok(None) => {}
+        // 未覆写：回退全量加载（不视为故障）
+        Err(RamariaError::Unsupported { .. }) => {}
+        // 其余错误（存储故障等）仍向上传播
+        Err(e) => return Err(e),
     }
-    // 降级：全量加载消息取最后时间（仅当 trait 未覆写时发生）
+    // 降级：全量加载消息取最后时间
     let messages = storage.list_messages(session_id).await?;
     Ok(messages.iter().map(|m| m.created_at).max())
 }

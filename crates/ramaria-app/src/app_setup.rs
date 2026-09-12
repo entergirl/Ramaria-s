@@ -7,6 +7,7 @@
 //! - `refresh_setup_state`: 检查嵌入模型状态并刷新应用状态
 
 use ramaria_core::error::RamariaResult;
+use ramaria_core::lock::lock_recover;
 use ramaria_core::traits::LlmProvider;
 use ramaria_core::types::{AppState, BackendConfig};
 
@@ -29,7 +30,7 @@ impl App {
         let state = crate::setup::run_setup(self.storage.as_ref(), backend_config).await?;
 
         // Step 2: LLM 后端健康探测（最多 3 次，间隔 2s）
-        let llm = self.llm.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let llm = lock_recover(&self.llm, "app_setup.llm").clone();
         let health_ok = Self::probe_health_with_retry(llm.as_ref(), 3, 2).await;
 
         let final_state = if !health_ok {

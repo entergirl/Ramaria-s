@@ -25,12 +25,13 @@ use std::time::Duration;
 
 use ramaria_core::config::RamariaConfig;
 use ramaria_core::error::RamariaResult;
+use ramaria_core::lock::lock_recover;
 use ramaria_core::traits::{EmbeddingProvider, LlmProvider, StorageBackend};
 use ramaria_core::types::now_ms;
 use ramaria_memory::keyword::KeywordService;
 use ramaria_memory::retriever::Retriever;
 use ramaria_memory::utt::builder::UttBuilder;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 // =========================================================
@@ -130,10 +131,7 @@ impl SessionLifecycle {
     /// - 钩子接收 persona_uid，内部执行行为规则增量更新；
     ///   任何失败由钩子自行记 warn（不阻塞封存主流程）。
     pub fn set_behavior_hook(&self, hook: BehaviorCloseHook) {
-        let mut guard = self.behavior_hook.lock().unwrap_or_else(|e| {
-            error!("behavior_hook lock poisoned during set_behavior_hook: {e}");
-            e.into_inner()
-        });
+        let mut guard = lock_recover(&self.behavior_hook, "session_lifecycle.behavior_hook");
         *guard = Some(hook);
         info!("SessionLifecycle: 行为层封存钩子已注册，封存时触发增量更新");
     }
@@ -145,10 +143,7 @@ impl SessionLifecycle {
     /// - 钩子接收 persona_uid，内部执行风格统计增量更新；
     ///   任何失败由钩子自行记 warn（不阻塞封存主流程）。
     pub fn set_style_hook(&self, hook: StyleCloseHook) {
-        let mut guard = self.style_hook.lock().unwrap_or_else(|e| {
-            error!("style_hook lock poisoned during set_style_hook: {e}");
-            e.into_inner()
-        });
+        let mut guard = lock_recover(&self.style_hook, "session_lifecycle.style_hook");
         *guard = Some(hook);
         info!("SessionLifecycle: 风格统计封存钩子已注册，封存时触发增量更新");
     }
@@ -162,10 +157,7 @@ impl SessionLifecycle {
     /// 参数:
     /// - `r`: 与 App 共享的 Retriever（`Arc<RwLock<Retriever>>`）。
     pub fn set_retriever(&self, r: Arc<RwLock<Retriever>>) {
-        let mut guard = self.retriever.lock().unwrap_or_else(|e| {
-            error!("retriever lock poisoned during set_retriever: {e}");
-            e.into_inner()
-        });
+        let mut guard = lock_recover(&self.retriever, "session_lifecycle.retriever");
         *guard = Some(r);
         info!("SessionLifecycle: Retriever 引用已注入，L1 增量索引已启用");
     }
@@ -179,10 +171,7 @@ impl SessionLifecycle {
     /// - 与 [`set_retriever`] 同钩子注册：L1 摘要生成成功后同步维护关键词镜像。
     /// - 未注入时 L1 生成行为与旧版完全一致（关键词镜像为空，不改变检索）。
     pub fn set_keyword_service(&self, service: Arc<RwLock<KeywordService>>) {
-        let mut guard = self.keyword_service.lock().unwrap_or_else(|e| {
-            error!("keyword_service lock poisoned during set_keyword_service: {e}");
-            e.into_inner()
-        });
+        let mut guard = lock_recover(&self.keyword_service, "session_lifecycle.keyword_service");
         *guard = Some(service);
         info!("SessionLifecycle: KeywordService 引用已注入，L1 关键词镜像增量已启用");
     }
@@ -193,10 +182,7 @@ impl SessionLifecycle {
     /// - 在 `App::new` 中与 [`set_retriever`] 同时调用。
     /// - 未注入时 utt 块照常构建，仅无向量（检索走子串降级）。
     pub fn set_embedding(&self, embedding: Option<Arc<dyn EmbeddingProvider>>) {
-        let mut guard = self.embedding.lock().unwrap_or_else(|e| {
-            error!("embedding lock poisoned during set_embedding: {e}");
-            e.into_inner()
-        });
+        let mut guard = lock_recover(&self.embedding, "session_lifecycle.embedding");
         *guard = embedding;
         info!("SessionLifecycle: embedding 引用已注入，utt 块向量生成已启用");
     }
@@ -232,18 +218,18 @@ impl SessionLifecycle {
     ///
     /// 对齐 Python `SessionManager.active_session_id`。
     pub fn get_active_session_id(&self) -> Option<Uuid> {
-        *self.active_session_id.lock().unwrap_or_else(|e| {
-            error!("active_session_id lock poisoned: {e}");
-            e.into_inner()
-        })
+        *lock_recover(
+            &self.active_session_id,
+            "session_lifecycle.active_session_id",
+        )
     }
 
     /// 设置当前活跃 session ID（公共 API，供 App::send_message 自动创建 session）。
     pub fn set_active_session_id_public(&self, sid: Option<Uuid>) {
-        let mut guard = self.active_session_id.lock().unwrap_or_else(|e| {
-            error!("active_session_id lock poisoned during set: {e}");
-            e.into_inner()
-        });
+        let mut guard = lock_recover(
+            &self.active_session_id,
+            "session_lifecycle.active_session_id",
+        );
         *guard = sid;
     }
 
@@ -258,29 +244,29 @@ impl SessionLifecycle {
     /// Rust 在此做内存缓存以减少 DB 查询）。
     pub fn touch_session(&self, session_id: Uuid) {
         let now = now_ms();
-        let mut guard = self.session_last_active.lock().unwrap_or_else(|e| {
-            error!("session_last_active lock poisoned: {e}");
-            e.into_inner()
-        });
+        let mut guard = lock_recover(
+            &self.session_last_active,
+            "session_lifecycle.session_last_active",
+        );
         guard.insert(session_id, now);
         debug!(%session_id, last_active = now, "session 活跃时间已更新");
     }
 
     /// 获取 session 最后活跃时间（从内存缓存）。
     pub(super) fn last_active(&self, session_id: Uuid) -> Option<i64> {
-        let guard = self.session_last_active.lock().unwrap_or_else(|e| {
-            error!("session_last_active lock poisoned: {e}");
-            e.into_inner()
-        });
+        let guard = lock_recover(
+            &self.session_last_active,
+            "session_lifecycle.session_last_active",
+        );
         guard.get(&session_id).copied()
     }
 
     /// 移除 session 的活跃时间缓存（session 关闭后清理）。
     pub(super) fn forget_session(&self, session_id: Uuid) {
-        let mut guard = self.session_last_active.lock().unwrap_or_else(|e| {
-            error!("session_last_active lock poisoned during forget: {e}");
-            e.into_inner()
-        });
+        let mut guard = lock_recover(
+            &self.session_last_active,
+            "session_lifecycle.session_last_active",
+        );
         guard.remove(&session_id);
     }
 
@@ -447,11 +433,8 @@ impl SessionLifecycle {
                 // 注册式接入：钩子内部失败记 warn 不阻塞封存（等同 v1.4 行为）
                 // 仅在 L1 生成成功路径触发（有真实对话内容才值得更新行为模型）
                 // 注意：hook guard 须在 await 前释放（避免 std MutexGuard 跨 await）
-                let hook = self
-                    .behavior_hook
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone();
+                let hook =
+                    lock_recover(&self.behavior_hook, "session_lifecycle.behavior_hook").clone();
                 if let Some(persona) = persona_uid.as_deref()
                     && let Some(hook) = hook
                 {
@@ -461,11 +444,8 @@ impl SessionLifecycle {
                 // Step 2.8: 风格统计增量更新（v1.7 M2 A3，与 L1 同钩子）
                 // 注册式接入：钩子内部失败记 warn 不阻塞封存（等同 v1.6 行为）
                 // 仅在 L1 生成成功路径触发（有真实对话内容才值得统计风格）
-                let style_hook = self
-                    .style_hook
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone();
+                let style_hook =
+                    lock_recover(&self.style_hook, "session_lifecycle.style_hook").clone();
                 if let Some(persona) = persona_uid.as_deref()
                     && let Some(style_hook) = style_hook
                 {
@@ -552,14 +532,7 @@ impl SessionLifecycle {
         };
 
         // 先 clone Arc 出锁再 await，避免 MutexGuard 跨 .await
-        let embedder = self
-            .embedding
-            .lock()
-            .unwrap_or_else(|e| {
-                warn!("embedding lock poisoned during utt build: {e}");
-                e.into_inner()
-            })
-            .clone();
+        let embedder = lock_recover(&self.embedding, "session_lifecycle.embedding").clone();
 
         let builder = UttBuilder::from_config(&self.config.utt);
         match builder

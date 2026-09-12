@@ -32,8 +32,10 @@ use std::fmt;
 /// - 空字符串或纯空白无法构造（`new()` 返回 `None`）
 ///
 /// 安全约束:
-/// - 只能通过 `new()` 构造（保证标准化），不可直接访问内部 String
-/// - `as_str()` 只读访问，不暴露修改能力
+/// - `new()` 是唯一会执行完整标准化（trim + 小写 + 非空 + 长度）的构造入口。
+/// - 存在两个不做重复校验的旁路：`from_validated`（调用方保证已标准化）与
+///   derive 的 `Deserialize`（反序列化不校验不变量）；内部 String 不对外暴露可变引用，
+///   `as_str()` 只读访问。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct KeywordToken(String);
 
@@ -199,13 +201,6 @@ impl KeywordSet {
         self.tokens.iter()
     }
 
-    /// 返回排序后的关键词列表副本（按字母顺序，用于一致性输出）。
-    pub fn sorted(&self) -> Vec<KeywordToken> {
-        let mut sorted = self.tokens.clone();
-        sorted.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-        sorted
-    }
-
     /// 将关键词集合转换为 `Vec<String>`（标准化后的字符串）。
     pub fn into_strings(self) -> Vec<String> {
         self.tokens.into_iter().map(|t| t.into_inner()).collect()
@@ -221,11 +216,6 @@ impl KeywordSet {
         for token in iter {
             self.insert(token);
         }
-    }
-
-    /// 返回底层向量引用（供序列化用）。
-    pub fn as_vec(&self) -> &[KeywordToken] {
-        &self.tokens
     }
 }
 
@@ -751,18 +741,6 @@ mod tests {
         set.insert(KeywordToken::new("Y").unwrap());
         let strings: Vec<String> = set.into_iter().map(|t| t.into_inner()).collect();
         assert_eq!(strings, vec!["x", "y"]);
-    }
-
-    /// sorted 排序
-    #[test]
-    fn keyword_set_sorted() {
-        let mut set = KeywordSet::new();
-        set.insert(KeywordToken::new("工作").unwrap());
-        set.insert(KeywordToken::new("压力").unwrap());
-        let sorted = set.sorted();
-        // 按 Unicode 码点排序：压(U+538B) < 工(U+5DE5)
-        assert_eq!(sorted[0].as_str(), "压力");
-        assert_eq!(sorted[1].as_str(), "工作");
     }
 
     /// contains

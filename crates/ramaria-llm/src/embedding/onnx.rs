@@ -21,6 +21,7 @@ use async_trait::async_trait;
 use ndarray::{Array2, Axis, s};
 use ort::session::Session;
 use ramaria_core::error::{RamariaError, RamariaResult};
+use ramaria_core::lock::lock_recover;
 use ramaria_core::traits::{EmbeddingModelInfo, EmbeddingProvider};
 use tokenizers::Tokenizer;
 
@@ -521,7 +522,7 @@ impl OnnxEmbeddingProvider {
     /// - 加载失败时返回错误，不缓存失败状态（下次调用会重试）。
     /// - **不再修改 `self.model_info`**——维度已在构造时从 config.json 确定。
     fn ensure_loaded(&self) -> RamariaResult<()> {
-        let mut guard = self.session.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = lock_recover(&self.session, "embedding_onnx.session");
 
         if guard.is_some() {
             return Ok(());
@@ -547,7 +548,7 @@ impl OnnxEmbeddingProvider {
         *guard = Some(session);
 
         // 更新进度
-        *self.progress.lock().unwrap_or_else(|e| e.into_inner()) = 1.0;
+        *lock_recover(&self.progress, "embedding_onnx.progress") = 1.0;
 
         tracing::info!(dimension = actual_dim, "ONNX 嵌入模型加载完成");
         Ok(())
@@ -568,7 +569,7 @@ impl EmbeddingProvider for OnnxEmbeddingProvider {
         // 避免阻塞同线程上的其他异步任务（如流式 LLM 响应处理）。
         let text = text.to_string();
         tokio::task::block_in_place(|| {
-            let guard = self.session.lock().unwrap_or_else(|e| e.into_inner());
+            let guard = lock_recover(&self.session, "embedding_onnx.session");
             let session = guard
                 .as_ref()
                 .ok_or_else(|| RamariaError::validation("ONNX 会话未初始化"))?;
@@ -588,7 +589,7 @@ impl EmbeddingProvider for OnnxEmbeddingProvider {
 
         // 批量 ONNX 推理同样使用 block_in_place 避免阻塞 tokio 工作线程
         tokio::task::block_in_place(|| {
-            let guard = self.session.lock().unwrap_or_else(|e| e.into_inner());
+            let guard = lock_recover(&self.session, "embedding_onnx.session");
             let session = guard
                 .as_ref()
                 .ok_or_else(|| RamariaError::validation("ONNX 会话未初始化"))?;
@@ -630,7 +631,7 @@ impl EmbeddingProvider for OnnxEmbeddingProvider {
         // 加载并执行测试推理
         self.ensure_loaded()?;
 
-        let guard = self.session.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = lock_recover(&self.session, "embedding_onnx.session");
         let session = guard
             .as_ref()
             .ok_or_else(|| RamariaError::validation("ONNX 会话未初始化"))?;
@@ -669,7 +670,7 @@ impl EmbeddingProvider for OnnxEmbeddingProvider {
     }
 
     fn download_progress(&self) -> f64 {
-        *self.progress.lock().unwrap_or_else(|e| e.into_inner())
+        *lock_recover(&self.progress, "embedding_onnx.progress")
     }
 
     fn is_available(&self) -> bool {

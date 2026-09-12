@@ -18,6 +18,7 @@ use ramaria_core::behavior::{
     BehaviorRule, BehaviorSituation, FeedbackLog, RuleSource, SignalType, TargetType,
 };
 use ramaria_core::error::{RamariaError, RamariaResult};
+use ramaria_core::lock::{lock_recover, read_recover};
 use ramaria_core::traits::StorageBackend;
 use ramaria_core::types::{MemoryEvent, Message, now_ms};
 
@@ -104,7 +105,7 @@ pub async fn behavior_learn(app: &App, persona_uid: &str) -> RamariaResult<Behav
         return Ok(outcome);
     }
 
-    let llm = app.llm.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let llm = lock_recover(&app.llm, "commands_behavior.llm").clone();
     let embedding = app.embedding_provider();
     let config = app.config.behavior.clone();
     let storage = app.storage.as_ref();
@@ -214,17 +215,13 @@ pub async fn behavior_route(
     let config = app.config.behavior.clone();
 
     // 查询侧关键词规范化（关键词池别名归一 → 口语说法更易命中事件关键词）：
-    // 读锁内取值快照、释放后 await 查询（避免 std 锁跨 await）；池不可用/为空
+    // 读锁内取值快照、释放后 await 查询（避免 std 锁跨 await）；池为空
     // 时退化为纯 bigram 词频（v1.7 等价，零 embedding）。
-    let normalizer = match app.keyword_service().read() {
-        Ok(g) => ramaria_memory::behavior::QueryKeywordNormalizer::from_pool(g.pool()),
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "关键词服务锁不可用，行为路由退化为纯 bigram"
-            );
-            ramaria_memory::behavior::QueryKeywordNormalizer::empty()
-        }
+    // 服务锁中毒不降级：由 `read_recover` 记录 warn 并取回内部数据继续。
+    let keyword_service = app.keyword_service();
+    let normalizer = {
+        let guard = read_recover(&keyword_service, "commands_behavior.keyword_service");
+        ramaria_memory::behavior::QueryKeywordNormalizer::from_pool(guard.pool())
     };
     let query = ramaria_memory::behavior::build_query_context_with_normalizer(
         messages,
@@ -476,7 +473,7 @@ pub async fn behavior_incremental_update(app: &App, persona_uid: &str) -> Ramari
         return Ok(());
     }
     let storage = app.storage.clone();
-    let llm = app.llm.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let llm = lock_recover(&app.llm, "commands_behavior.llm").clone();
     let embedding = app.embedding_provider();
     let config = app.config.behavior.clone();
     let pending = app.behavior_pending.clone();
@@ -518,7 +515,7 @@ pub async fn behavior_incremental_update_core(
 
     // 2. 现有规则 + 待定池（克隆进出锁，避免 MutexGuard 跨 await）
     let mut rules = storage.list_behavior_rules_by_persona(persona_uid).await?;
-    let mut pool = pending.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let mut pool = lock_recover(pending, "commands_behavior.pending").clone();
 
     // 3. 计算增量更新指令
     let outcome = ramaria_memory::behavior::compute_incremental_update(
@@ -532,7 +529,7 @@ pub async fn behavior_incremental_update_core(
     .await?;
 
     // 计算完成后写回待定池（跨 await 期间锁已释放）
-    *pending.lock().unwrap_or_else(|e| e.into_inner()) = pool;
+    *lock_recover(pending, "commands_behavior.pending") = pool;
 
     // 4a. 归入规则 → 追加证据
     if !outcome.assigned.is_empty() {

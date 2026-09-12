@@ -269,6 +269,12 @@ impl StoreCrud for MockStorage {
         Ok(())
     }
 
+    /// 级联删除：本 mock 持有的关联数据已由 `delete_session` 一并清理，
+    /// 故显式委托（trait 默认实现为 Unsupported，需实现方显式 opt-in）。
+    async fn delete_session_cascade(&self, session_id: Uuid) -> RamariaResult<()> {
+        self.delete_session(session_id).await
+    }
+
     async fn save_message(&self, message: &Message) -> RamariaResult<()> {
         self.messages
             .lock()

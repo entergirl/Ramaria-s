@@ -15,6 +15,7 @@ use anyhow::Context;
 use futures::StreamExt;
 use ramaria_core::config::RamariaConfig;
 use ramaria_core::error::RamariaError;
+use ramaria_core::lock::read_recover;
 use ramaria_core::traits::ChatMessage;
 use ramaria_core::types::MessageRole;
 use ramaria_memory::retriever::SearchRequest;
@@ -584,12 +585,12 @@ async fn collect_run_diagnostics(
     // 1. 静态计数（读锁内同步取值）
     let retriever = app.retriever();
     let (retriever_doc_count, utt_doc_count) = {
-        let guard = retriever.read().unwrap_or_else(|e| e.into_inner());
+        let guard = read_recover(&retriever, "probe_run.retriever");
         (guard.doc_count(), guard.utt_doc_count())
     };
     let keyword_service = app.keyword_service();
     let (keyword_doc_count, keyword_pool_len, composite, pool) = {
-        let guard = keyword_service.read().unwrap_or_else(|e| e.into_inner());
+        let guard = read_recover(&keyword_service, "probe_run.keyword_service");
         (
             guard.doc_count(),
             guard.pool_len(),
@@ -632,7 +633,7 @@ async fn collect_run_diagnostics(
         keyword_hits += kw_hits.len();
         // 检索器融合检索（含关键词通道）；读锁内仅同步检索，不跨 await
         let results = {
-            let guard = retriever.read().unwrap_or_else(|e| e.into_inner());
+            let guard = read_recover(&retriever, "probe_run.retriever");
             guard.search_with_keyword_hits(
                 &SearchRequest {
                     query: query.clone(),

@@ -1,7 +1,8 @@
 //! crates/ramaria-core/src/error.rs - Ramaria 统一错误管理模块
 //!
 //! 设计特点:
-//! - 标准化错误分类: Config / Storage / Llm / Privacy / Index / Validation / Io / Unsupported
+//! - 标准化错误分类: Config / Storage / Llm / Serialization / Privacy / Index / Validation /
+//!   Io / Embedding / Unsupported
 //! - 统一公共 API 返回类型: `RamariaResult<T>`
 //! - 支持 trace_id 贯穿请求、检索、LLM 调用和后台任务生命周期
 //! - 支持 source 错误链，保留底层错误上下文，便于日志和 UI 诊断

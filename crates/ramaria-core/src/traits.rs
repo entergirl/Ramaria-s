@@ -380,11 +380,14 @@ pub trait StoreCrud: Send + Sync {
     /// 说明:
     /// - 仅做数据删除，**不触发**生命周期 / 封存 / 学习管线（调用方需在
     ///   App 层另行清理 lifecycle 对已删除 session 的活跃引用）。
-    /// - 默认实现委托 [`delete_session`]：存量实现 / mock 的 `delete_session`
-    ///   已按自身数据模型清理关联数据，无需为本方法改动即可编译。
+    /// - 必须显式覆写：默认实现返回 `Unsupported`，由实现方明确声明
+    ///   "是否支持级联删除"；不提供"悄悄退化为只删 session 行"的默认路径，
+    ///   避免未覆写后端调用后残留孤儿数据却无任何错误可见。
     /// - `ramaria-storage` 覆写为事务内按依赖顺序显式删除各关联表。
-    async fn delete_session_cascade(&self, session_id: Uuid) -> RamariaResult<()> {
-        self.delete_session(session_id).await
+    async fn delete_session_cascade(&self, _session_id: Uuid) -> RamariaResult<()> {
+        Err(crate::error::RamariaError::unsupported(
+            "StoreCrud 未实现会话级联删除（delete_session_cascade 需显式覆写）",
+        ))
     }
 
     /// 回写绑定会话的 persona_uid（存量 NULL 会话归属修复）。
@@ -496,13 +499,16 @@ pub trait StoreCrud: Send + Sync {
     ///
     /// 职责:
     /// - 供空闲检测线程判断 session 是否超过空闲阈值。
-    /// - 默认实现返回 `Ok(None)`，子 crate 应覆写为高效 SQL（`SELECT MAX(created_at)`）。
     ///
     /// 返回:
     /// - `Ok(Some(ms))`: 最后消息时间戳。
-    /// - `Ok(None)`: session 无消息或未实现。
+    /// - `Ok(None)`: session 无消息（仅已覆写实现可能返回）。
+    /// - `Err(Unsupported)`: 未覆写——显式区分"未实现"与"确实无消息"，
+    ///   调用方据此回退 `list_messages` 全量加载（`ramaria-app` 空闲检测）。
     async fn get_last_message_time(&self, _session_id: Uuid) -> RamariaResult<Option<i64>> {
-        Ok(None)
+        Err(crate::error::RamariaError::unsupported(
+            "StoreCrud 未实现最后消息时间查询（需覆写为 SELECT MAX(created_at)）",
+        ))
     }
 
     /// 统计指定 session 的消息数量。
@@ -923,9 +929,12 @@ pub trait StoreCrud: Send + Sync {
     /// 列出 keyword_pool 全部词条行（含 rowid / 别名状态 / 规范词指向）。
     ///
     /// 用途: KeywordService 装载内存词典镜像（keyword_pool → KeywordPool 三态状态机）。
-    /// 默认实现返回空列表（存量 mock 无需实现即可编译）。
+    /// 默认实现返回 `Unsupported`：显式区分"未接线"与"词表确实为空"，
+    /// 调用方（镜像装载 / 风格词典增强）拿到错误后按降级处理并记日志。
     async fn list_keyword_pool_entries(&self) -> RamariaResult<Vec<KeywordPoolRow>> {
-        Ok(Vec::new())
+        Err(crate::error::RamariaError::unsupported(
+            "StoreCrud 未实现 keyword_pool 词条装载查询",
+        ))
     }
 }
 
@@ -1060,15 +1069,18 @@ pub trait StoreInfrastructure: Send + Sync {
     ///
     /// 参数:
     /// - `persona_uid`: 目标人格。
-    /// - `limit`: 最多返回条数（默认实现忽略）。
+    /// - `limit`: 最多返回条数。
     ///
-    /// 默认实现返回空列表（不做相似度去重，保证可编译）。
+    /// 默认实现返回 `Unsupported`：显式区分"未接线"与"确实无事件"，
+    /// 调用方（事件相似度去重 / 事实互证）拿到错误后按未接线降级并记日志。
     async fn list_recent_events(
         &self,
         _persona_uid: &str,
         _limit: u32,
     ) -> RamariaResult<Vec<MemoryEvent>> {
-        Ok(Vec::new())
+        Err(crate::error::RamariaError::unsupported(
+            "StoreInfrastructure 未实现最近事件查询（事件去重比对需覆写）",
+        ))
     }
 
     // =========================================================
@@ -1226,5 +1238,248 @@ mod tests {
         };
         assert_eq!(info.dimension, 512);
         assert_eq!(info.model_id, "bge-small-zh");
+    }
+
+    // =========================================================
+    // 契约关键方法默认实现回归：未覆写 → 显式 Unsupported
+    // =========================================================
+
+    /// 最小存储后端 mock：只实现无默认值的必需方法，其余全部走 trait 默认实现。
+    ///
+    /// 用途:
+    /// - 验证"契约关键方法未覆写时返回 `Unsupported`"的约定，
+    ///   防止静默空结果被上层误读为"确实无数据"。
+    struct BareStore;
+
+    /// 统一错误体：所有必需方法返回 `Unsupported`。
+    macro_rules! bare_store_err {
+        () => {
+            Err(crate::error::RamariaError::unsupported("BareStore 未实现"))
+        };
+    }
+
+    #[async_trait]
+    impl StoreCrud for BareStore {
+        async fn create_session(&self, _: Option<&str>) -> RamariaResult<Session> {
+            bare_store_err!()
+        }
+        async fn close_session(&self, _: Uuid) -> RamariaResult<()> {
+            bare_store_err!()
+        }
+        async fn get_session(&self, _: Uuid) -> RamariaResult<Option<Session>> {
+            bare_store_err!()
+        }
+        async fn list_active_sessions(&self) -> RamariaResult<Vec<Session>> {
+            bare_store_err!()
+        }
+        async fn list_sessions(&self) -> RamariaResult<Vec<Session>> {
+            bare_store_err!()
+        }
+        async fn delete_session(&self, _: Uuid) -> RamariaResult<()> {
+            bare_store_err!()
+        }
+        async fn save_message(&self, _: &Message) -> RamariaResult<()> {
+            bare_store_err!()
+        }
+        async fn list_messages(&self, _: Uuid) -> RamariaResult<Vec<Message>> {
+            bare_store_err!()
+        }
+        async fn list_messages_by_persona(&self, _: &str) -> RamariaResult<Vec<Message>> {
+            bare_store_err!()
+        }
+        async fn save_memory_l1(&self, _: &MemoryL1) -> RamariaResult<()> {
+            bare_store_err!()
+        }
+        async fn list_memory_l1(&self, _: Uuid) -> RamariaResult<Vec<MemoryL1>> {
+            bare_store_err!()
+        }
+        async fn get_memory_l1(&self, _: Uuid) -> RamariaResult<Option<MemoryL1>> {
+            bare_store_err!()
+        }
+        async fn mark_l1_absorbed(&self, _: &[Uuid]) -> RamariaResult<()> {
+            bare_store_err!()
+        }
+        async fn list_unabsorbed_l1(&self, _: &str) -> RamariaResult<Vec<MemoryL1>> {
+            bare_store_err!()
+        }
+        async fn create_persona(&self, _: &Persona) -> RamariaResult<i64> {
+            bare_store_err!()
+        }
+        async fn get_persona_by_uid(&self, _: &str) -> RamariaResult<Option<Persona>> {
+            bare_store_err!()
+        }
+        async fn list_personas(&self) -> RamariaResult<Vec<Persona>> {
+            bare_store_err!()
+        }
+        async fn update_persona(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: Option<&str>,
+        ) -> RamariaResult<()> {
+            bare_store_err!()
+        }
+        async fn save_event(&self, _: &MemoryEvent) -> RamariaResult<i64> {
+            bare_store_err!()
+        }
+        async fn list_events_by_persona(
+            &self,
+            _: &str,
+            _: i64,
+            _: i64,
+        ) -> RamariaResult<Vec<MemoryEvent>> {
+            bare_store_err!()
+        }
+        async fn list_unabsorbed_events(&self, _: &str) -> RamariaResult<Vec<MemoryEvent>> {
+            bare_store_err!()
+        }
+        async fn mark_events_absorbed(&self, _: &[i64]) -> RamariaResult<()> {
+            bare_store_err!()
+        }
+        async fn save_event_relation(&self, _: &EventRelation) -> RamariaResult<i64> {
+            bare_store_err!()
+        }
+        async fn save_event_source(&self, _: i64, _: Uuid, _: f64) -> RamariaResult<()> {
+            bare_store_err!()
+        }
+        async fn save_fact(&self, _: &PersonaFact) -> RamariaResult<i64> {
+            bare_store_err!()
+        }
+        async fn list_facts_by_persona(
+            &self,
+            _: &str,
+            _: ProfileField,
+        ) -> RamariaResult<Vec<PersonaFact>> {
+            bare_store_err!()
+        }
+        async fn save_trait(&self, _: &PersonalityTrait) -> RamariaResult<i64> {
+            bare_store_err!()
+        }
+        async fn list_traits_by_persona(&self, _: &str) -> RamariaResult<Vec<PersonalityTrait>> {
+            bare_store_err!()
+        }
+        async fn update_trait_confidence(
+            &self,
+            _: i64,
+            _: f64,
+            _: f64,
+            _: f64,
+        ) -> RamariaResult<()> {
+            bare_store_err!()
+        }
+        async fn update_trait_status(&self, _: i64, _: TraitStatus) -> RamariaResult<()> {
+            bare_store_err!()
+        }
+        async fn save_evidence(&self, _: &TraitEvidence) -> RamariaResult<i64> {
+            bare_store_err!()
+        }
+        async fn list_evidence_by_trait(&self, _: i64) -> RamariaResult<Vec<TraitEvidence>> {
+            bare_store_err!()
+        }
+        async fn save_example(&self, _: &PersonaExample) -> RamariaResult<i64> {
+            bare_store_err!()
+        }
+        async fn list_selected_examples(&self, _: &str) -> RamariaResult<Vec<PersonaExample>> {
+            bare_store_err!()
+        }
+        async fn save_cluster_snapshot(&self, _: &ClusterSnapshot) -> RamariaResult<i64> {
+            bare_store_err!()
+        }
+        async fn get_current_snapshots(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> RamariaResult<Vec<ClusterSnapshot>> {
+            bare_store_err!()
+        }
+        async fn upsert_keyword(&self, _: &str) -> RamariaResult<()> {
+            bare_store_err!()
+        }
+        async fn list_keywords(&self) -> RamariaResult<Vec<String>> {
+            bare_store_err!()
+        }
+    }
+
+    #[async_trait]
+    impl StoreInfrastructure for BareStore {
+        async fn insert_keyword_ref(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: f64,
+        ) -> RamariaResult<()> {
+            bare_store_err!()
+        }
+        async fn save_privacy_consent(&self, _: &PrivacyConsent) -> RamariaResult<()> {
+            bare_store_err!()
+        }
+        async fn get_privacy_consent(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> RamariaResult<Option<PrivacyConsent>> {
+            bare_store_err!()
+        }
+        async fn save_backend_config(&self, _: &BackendConfig) -> RamariaResult<()> {
+            bare_store_err!()
+        }
+        async fn get_backend_config(&self) -> RamariaResult<Option<BackendConfig>> {
+            bare_store_err!()
+        }
+        async fn get_schema_version(&self) -> RamariaResult<i32> {
+            bare_store_err!()
+        }
+        async fn get_index_version(&self) -> RamariaResult<i32> {
+            bare_store_err!()
+        }
+        async fn set_index_version(&self, _: i32) -> RamariaResult<()> {
+            bare_store_err!()
+        }
+        async fn create_background_job(&self, _: &str, _: Option<&str>) -> RamariaResult<i64> {
+            bare_store_err!()
+        }
+        async fn update_job_status(&self, _: i64, _: &str, _: Option<&str>) -> RamariaResult<()> {
+            bare_store_err!()
+        }
+        async fn list_pending_jobs(&self) -> RamariaResult<Vec<(i64, String, Option<String>)>> {
+            bare_store_err!()
+        }
+        async fn get_setting(&self, _: &str) -> RamariaResult<Option<String>> {
+            bare_store_err!()
+        }
+        async fn set_setting(&self, _: &str, _: &str) -> RamariaResult<()> {
+            bare_store_err!()
+        }
+        async fn list_settings(&self) -> RamariaResult<Vec<(String, String)>> {
+            bare_store_err!()
+        }
+    }
+
+    /// 未覆写契约关键方法时必须显式报 `Unsupported`（错误可见），
+    /// 而不是静默返回空列表 / `None` 让上层误判为"确实无数据"。
+    #[test]
+    fn bare_store_contract_methods_return_unsupported() {
+        let store = BareStore;
+        let errors = vec![
+            futures::executor::block_on(store.delete_session_cascade(Uuid::new_v4()))
+                .expect_err("delete_session_cascade 未覆写应报错"),
+            futures::executor::block_on(store.get_last_message_time(Uuid::new_v4()))
+                .expect_err("get_last_message_time 未覆写应报错"),
+            futures::executor::block_on(store.list_recent_events("persona-1", 10))
+                .expect_err("list_recent_events 未覆写应报错"),
+            futures::executor::block_on(store.list_keyword_pool_entries())
+                .expect_err("list_keyword_pool_entries 未覆写应报错"),
+        ];
+        for err in errors {
+            assert_eq!(
+                err.category(),
+                "unsupported",
+                "未覆写方法应返回 Unsupported: {err}"
+            );
+        }
     }
 }

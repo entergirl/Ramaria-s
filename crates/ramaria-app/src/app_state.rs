@@ -10,6 +10,7 @@
 use std::sync::Arc;
 
 use ramaria_core::error::RamariaResult;
+use ramaria_core::lock::lock_recover;
 use ramaria_core::traits::{EmbeddingProvider, LlmProvider, StorageBackend};
 use ramaria_core::types::{AppState, BackendConfig};
 use ramaria_llm::keychain::Keychain;
@@ -23,10 +24,7 @@ impl App {
 
     /// 获取当前应用状态。
     pub fn current_state(&self) -> AppState {
-        *self.state.lock().unwrap_or_else(|e| {
-            tracing::error!("App state lock poisoned: {e}");
-            e.into_inner()
-        })
+        *lock_recover(&self.state, "app_state.state")
     }
 
     /// 设置应用状态。
@@ -38,10 +36,7 @@ impl App {
     /// - 状态变更会记录 info 日志，便于诊断。
     pub fn set_state(&self, new_state: AppState) {
         let old = {
-            let mut guard = self.state.lock().unwrap_or_else(|e| {
-                tracing::error!("App state lock poisoned during set_state: {e}");
-                e.into_inner()
-            });
+            let mut guard = lock_recover(&self.state, "app_state.state");
             let old = *guard;
             *guard = new_state;
             old
@@ -57,16 +52,12 @@ impl App {
 
     /// 获取后端配置引用。
     pub fn backend_config(&self) -> BackendConfig {
-        self.llm
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .config()
-            .clone()
+        lock_recover(&self.llm, "app_state.llm").config().clone()
     }
 
     /// 热更新 LLM provider（配置修改后调用，替换内存中的 provider 实例）。
     pub fn update_llm(&self, new_llm: Arc<dyn LlmProvider>) {
-        let mut guard = self.llm.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = lock_recover(&self.llm, "app_state.llm");
         tracing::info!(
             old_provider = guard.name(),
             new_provider = %new_llm.name(),
@@ -80,7 +71,7 @@ impl App {
     /// 返回:
     /// - 当前 LLM provider 的 `Arc<dyn LlmProvider>` 克隆。
     pub fn llm_clone(&self) -> Arc<dyn LlmProvider> {
-        self.llm.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        lock_recover(&self.llm, "app_state.llm").clone()
     }
 
     // =========================================================
@@ -107,10 +98,7 @@ impl App {
     /// - `Some(Arc<dyn EmbeddingProvider>)`: 嵌入模型已配置且可用。
     /// - `None`: 未配置或不可用。
     pub fn embedding_provider(&self) -> Option<Arc<dyn EmbeddingProvider>> {
-        self.embedding
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        lock_recover(&self.embedding, "app_state.embedding").clone()
     }
 
     /// 检查嵌入模型是否可用。
@@ -118,9 +106,7 @@ impl App {
     /// 返回:
     /// - `true`: 嵌入模型已配置且 `is_available` 返回 true。
     pub fn is_embedding_available(&self) -> bool {
-        self.embedding
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        lock_recover(&self.embedding, "app_state.embedding")
             .as_ref()
             .map(|e| e.is_available())
             .unwrap_or(false)
@@ -131,7 +117,7 @@ impl App {
     /// 参数:
     /// - `new_embedding`: 新的嵌入 provider（Some 或 None 表示卸载）。
     pub fn update_embedding(&self, new_embedding: Option<Arc<dyn EmbeddingProvider>>) {
-        let mut guard = self.embedding.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = lock_recover(&self.embedding, "app_state.embedding");
         match &new_embedding {
             Some(e) => tracing::info!(
                 model = %e.model_info().model_id,
@@ -155,7 +141,7 @@ impl App {
     /// - `Ok(false)`: 嵌入模型不可用，已进入 Degraded。
     pub async fn try_load_embedding(&self) -> RamariaResult<bool> {
         let emb = {
-            let guard = self.embedding.lock().unwrap_or_else(|e| e.into_inner());
+            let guard = lock_recover(&self.embedding, "app_state.embedding");
             guard.clone()
         };
 

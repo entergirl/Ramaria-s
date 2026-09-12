@@ -45,8 +45,9 @@ pub fn truncate_chars(s: &str, max_chars: usize) -> String {
     if max_chars == 1 {
         return "…".to_string();
     }
-    // 为省略号预留 1 字符：保留前 max_chars - 1 个字符
-    let mut out = String::with_capacity(s.len().min(max_chars * 4));
+    // 为省略号预留 1 字符：保留前 max_chars - 1 个字符。
+    // 容量估算用 saturating_mul 防御 max_chars 极大时的整数溢出（值仅影响预分配，不影响语义）。
+    let mut out = String::with_capacity(s.len().min(max_chars.saturating_mul(4)));
     for ch in s.chars().take(max_chars - 1) {
         out.push(ch);
     }

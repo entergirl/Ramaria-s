@@ -16,6 +16,7 @@ use futures::SinkExt;
 use futures::Stream;
 use futures::channel::mpsc;
 use ramaria_core::error::{RamariaError, RamariaResult};
+use ramaria_core::lock::{read_recover, write_recover};
 use ramaria_core::traits::StreamDelta;
 use std::pin::Pin;
 
@@ -47,10 +48,7 @@ impl Clone for OpenAiTransport {
         Self {
             base_url: self.base_url.clone(),
             api_key: std::sync::RwLock::new(
-                self.api_key
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone(),
+                read_recover(&self.api_key, "llm_transport.api_key").clone(),
             ),
             http: self.http.clone(),
         }
@@ -107,7 +105,7 @@ impl OpenAiTransport {
     /// 说明:
     /// - 用户修改 keychain 后，下一次请求即使用新 key，无需重建 provider。
     pub fn set_api_key(&self, api_key: Option<String>) {
-        *self.api_key.write().unwrap_or_else(|e| e.into_inner()) = api_key;
+        *write_recover(&self.api_key, "llm_transport.api_key") = api_key;
     }
 
     /// 返回 base_url 引用（供 validate 使用）。
@@ -129,11 +127,7 @@ impl OpenAiTransport {
     pub async fn send_authenticated_get(&self, url: &str) -> RamariaResult<reqwest::Response> {
         let mut req = self.http.get(url);
 
-        let api_key = self
-            .api_key
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        let api_key = read_recover(&self.api_key, "llm_transport.api_key").clone();
         if let Some(key) = api_key.as_ref() {
             req = req.header("Authorization", format!("Bearer {}", key));
         }
@@ -325,11 +319,7 @@ impl OpenAiTransport {
             .json(body)
             .header("Content-Type", "application/json");
 
-        let api_key = self
-            .api_key
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        let api_key = read_recover(&self.api_key, "llm_transport.api_key").clone();
         if let Some(key) = api_key.as_ref() {
             req = req.header("Authorization", format!("Bearer {}", key));
         }

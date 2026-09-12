@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use futures::Stream;
 use ramaria_core::error::RamariaResult;
+use ramaria_core::lock::lock_recover;
 use ramaria_core::traits::{EmbeddingProvider, LlmProvider, LlmResponseCache, StorageBackend};
 use ramaria_core::types::{AppState, MemoryL1};
 use ramaria_llm::keychain::Keychain;
@@ -267,7 +268,7 @@ impl App {
     /// 说明:
     /// - `None` 表示缓存未启用（`[cache].enabled=false`），行为回退 v1.4。
     pub fn set_llm_cache(&self, cache: Option<Arc<dyn LlmResponseCache>>) {
-        let mut guard = self.llm_cache.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = lock_recover(&self.llm_cache, "app.llm_cache");
         tracing::info!(cache_enabled = cache.is_some(), "LLM 响应精确缓存注入");
         *guard = cache;
     }
@@ -278,7 +279,7 @@ impl App {
     /// - 直接取 provider 的 `name()`，不触发网络调用、不构造新对象。
     /// - 配置热更新（`update_llm`）后反映最新 provider。
     pub fn llm_provider_name(&self) -> &'static str {
-        self.llm.lock().unwrap_or_else(|e| e.into_inner()).name()
+        lock_recover(&self.llm, "app.llm").name()
     }
 
     /// 获取当前 LLM 响应精确缓存（克隆 Arc，供锁外调用）。
@@ -287,10 +288,7 @@ impl App {
     /// - 后端配置热更新（`update_llm`）时复用同一缓存实例，
     ///   保证切换 provider 后缓存不失效（重跑导入仍命中）。
     pub fn llm_cache(&self) -> Option<Arc<dyn LlmResponseCache>> {
-        self.llm_cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        lock_recover(&self.llm_cache, "app.llm_cache").clone()
     }
 
     // =========================================================
@@ -319,7 +317,7 @@ impl App {
     pub fn start_background_tasks(&self) {
         // 检查是否已启动
         {
-            let guard = self.idle_handle.lock().unwrap_or_else(|e| e.into_inner());
+            let guard = lock_recover(&self.idle_handle, "app.idle_handle");
             if guard.is_some() {
                 tracing::info!("后台任务已启动，跳过重复调用");
                 return;
@@ -327,7 +325,7 @@ impl App {
         }
 
         let storage = Arc::clone(&self.storage);
-        let llm = self.llm.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let llm = lock_recover(&self.llm, "app.llm").clone();
 
         // 启动空闲检测线程
         let idle = self
@@ -338,14 +336,11 @@ impl App {
         let scheduler = self.lifecycle.spawn_l2_l3_scheduler(storage, llm);
 
         {
-            let mut guard = self.idle_handle.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = lock_recover(&self.idle_handle, "app.idle_handle");
             *guard = Some(idle);
         }
         {
-            let mut guard = self
-                .scheduler_handle
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut guard = lock_recover(&self.scheduler_handle, "app.scheduler_handle");
             *guard = Some(scheduler);
         }
 
@@ -393,7 +388,7 @@ impl App {
     /// 返回:
     /// - `Ok()`: 成功（无活跃 session 时也视为成功）。
     pub async fn save_and_close_session(&self, persona_uid: Option<&str>) -> RamariaResult<()> {
-        let llm = self.llm.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let llm = lock_recover(&self.llm, "app.llm").clone();
         self.lifecycle
             .save_and_close_session(self.storage.as_ref(), llm.as_ref(), persona_uid)
             .await
@@ -447,7 +442,7 @@ impl App {
         user_prefix: Option<&str>,
         assistant_prefix: Option<&str>,
     ) -> RamariaResult<Option<ramaria_core::types::MemoryL1>> {
-        let llm = self.llm.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let llm = lock_recover(&self.llm, "app.llm").clone();
         self.lifecycle
             .regenerate_l1(
                 self.storage.as_ref(),
@@ -471,7 +466,7 @@ impl App {
         user_prefix: Option<&str>,
         assistant_prefix: Option<&str>,
     ) -> RamariaResult<Option<ramaria_core::types::MemoryL1>> {
-        let llm = self.llm.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let llm = lock_recover(&self.llm, "app.llm").clone();
         self.lifecycle
             .regenerate_l1_no_cascade(
                 self.storage.as_ref(),
@@ -509,7 +504,7 @@ impl App {
         user_prefix: Option<&str>,
         assistant_prefix: Option<&str>,
     ) -> RamariaResult<Vec<MemoryL1>> {
-        let llm = self.llm.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let llm = lock_recover(&self.llm, "app.llm").clone();
         self.lifecycle
             .regenerate_l1_progressive(
                 self.storage.as_ref(),
@@ -531,7 +526,7 @@ impl App {
     /// - 两者独立检查，即使 L1 已全部吸收，仍会检查 L3。
     /// - 用于批量导入等场景，在全部 L1 生成后统一触发一次级联。
     pub async fn trigger_l2_check(&self) {
-        let llm = self.llm.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let llm = lock_recover(&self.llm, "app.llm").clone();
         let storage = self.storage.as_ref();
         let llm_ref = llm.as_ref();
 
@@ -579,19 +574,11 @@ impl App {
     /// - 在 Drop 中自动调用，也可显式调用。
     /// - 关闭活跃 session → 设置 shutdown_flag → 等待后台线程退出（最长 30s）。
     pub async fn shutdown(&self) {
-        let llm = self.llm.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let llm = lock_recover(&self.llm, "app.llm").clone();
 
-        let idle = self
-            .idle_handle
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take();
+        let idle = lock_recover(&self.idle_handle, "app.idle_handle").take();
 
-        let scheduler = self
-            .scheduler_handle
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take();
+        let scheduler = lock_recover(&self.scheduler_handle, "app.scheduler_handle").take();
 
         self.lifecycle
             .shutdown(self.storage.as_ref(), llm.as_ref(), idle, scheduler)

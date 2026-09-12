@@ -10,6 +10,7 @@
 //! - 空检索结果时返回 None（Block C2 显示"暂无相关历史记忆"）
 
 use async_trait::async_trait;
+use ramaria_core::lock::read_recover;
 use ramaria_core::types::{PersonaKind, now_ms};
 use ramaria_memory::bm25::DocId;
 use ramaria_memory::decay::{DecayConfig, calc_retention};
@@ -32,7 +33,7 @@ use crate::pipeline::{PipelineContext, PipelineData, PipelineError, PipelineStag
 /// - 嵌入模型未配置 → query_vec = None，仅 BM25 + 图谱
 /// - 嵌入模型不可用 → query_vec = None
 /// - 查询向量生成失败 → query_vec = None，warn 日志
-/// - 检索器锁中毒 → memory_context = None（不阻塞对话）
+/// - 检索器锁中毒 → warn 日志后恢复内部数据继续检索（不阻塞对话）
 /// - 检索结果为空 → memory_context = None
 ///
 /// 安全约束:
@@ -136,17 +137,19 @@ impl PipelineStage for StageRetrieveMemory {
         // 镜像查询异步（语义层需 embedding），必须在检索器读锁之前完成；
         // 预取后仅把 (label, score) 纯数据交给同步 search（无句柄泄漏）。
         // 降级（全部静默，行为与三通道一致）：通道开关关闭 / 镜像无文档 /
-        // 查询词为空 / 返回空 / 服务锁不可用 → keyword_channel = None。
+        // 查询词为空 / 返回空 → keyword_channel = None。
+        // 服务锁中毒不放弃通道：由 `read_recover` 记录 warn 并取回内部数据继续检索。
         let mut keyword_channel: Option<Vec<(String, f64)>> = None;
         if rag_active && ctx.config.retrieval.enable_keyword_channel {
             let kw_top_k = ctx.config.retrieval.l1_retrieve_top_k as usize;
-            let mirror = match ctx.keyword_service.read() {
-                Ok(g) => Some((g.composite_arc(), g.pool_snapshot(), g.doc_count())),
-                Err(e) => {
-                    tracing::warn!(error = %e, "关键词服务锁不可用，跳过关键词通道");
-                    None
-                }
-            };
+            let mirror = Some({
+                let guard = read_recover(&ctx.keyword_service, "retrieve_memory.keyword_service");
+                (
+                    guard.composite_arc(),
+                    guard.pool_snapshot(),
+                    guard.doc_count(),
+                )
+            });
             if let Some((composite, pool, doc_count)) = mirror {
                 if doc_count == 0 {
                     tracing::debug!("关键词镜像无文档，跳过关键词通道");
@@ -174,14 +177,7 @@ impl PipelineStage for StageRetrieveMemory {
         // 探针消融：RAG 闸门关闭（`injection.memory_rag=false`，B0）时不执行检索，
         // memory_context 恒 None；utt 原文通道（5.5）独立于 RAG 仍按需执行。
         let mut results = if rag_active {
-            let retriever = match ctx.retriever.read() {
-                Ok(guard) => guard,
-                Err(e) => {
-                    tracing::error!(error = %e, "Retriever lock poisoned");
-                    input.memory_context = None;
-                    return Ok(input);
-                }
-            };
+            let retriever = read_recover(&ctx.retriever, "retrieve_memory.retriever");
 
             let request = SearchRequest {
                 query: query.to_string(),
@@ -330,14 +326,7 @@ impl PipelineStage for StageRetrieveMemory {
                 let kind = PersonaKind::from_uid(puid);
                 if utt_cfg.persona_kind_whitelist.contains(&kind) {
                     let hits = {
-                        let retriever = match ctx.retriever.read() {
-                            Ok(guard) => guard,
-                            Err(e) => {
-                                tracing::error!(error = %e, "Retriever lock poisoned during utt search");
-                                input.utt_context = None;
-                                return Ok(input);
-                            }
-                        };
+                        let retriever = read_recover(&ctx.retriever, "retrieve_memory.retriever");
                         retriever.search_utt(
                             query,
                             query_vec.as_deref(),
