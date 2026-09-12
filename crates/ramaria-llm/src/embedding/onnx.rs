@@ -8,6 +8,12 @@
 //! - 惰性加载：`Session` 和 `Tokenizer` 仅在首次 `embed` 调用时初始化
 //! - 完整的错误日志：模型加载失败、tokenizer 缺失、推理异常均有明确错误信息
 //!
+//! 停用说明:
+//! - 本后端已停用：无 crate 启用 `embedding-onnx` feature，不承诺可编译，
+//!   计划后续版本移除；生产嵌入路径使用 `embedding-native`。
+//! - 已知局限：模型实际维度与 config.json 不一致时仅 warn，不回写 `model_info`
+//!   （由后续 `validate` 检测不匹配并报错）。
+//!
 //! BGE 模型格式要求:
 //! - 模型目录需包含: `model.onnx`（ONNX 模型）和 `tokenizer.json`（分词器配置）
 //! - 模型输入: input_ids (i64[batch, seq_len]), attention_mask (i64[batch, seq_len]),

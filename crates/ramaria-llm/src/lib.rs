@@ -8,7 +8,7 @@
 //! - 共享 transport 层抽象，避免三个 provider 重复实现 HTTP/SSE 逻辑
 //! - 通过 feature `embedding-native` 支持原生 safetensors 嵌入模型（candle 推理引擎）
 //! - 支持 BERT 架构（bge-small-zh-v1.5）和 LLaMA/Qwen3 架构（Qwen3-Embedding-0.6B）
-//! - 通过 feature `embedding-onnx` 提供 ONNX Runtime 后端
+//! - 旧 `embedding-onnx` ONNX Runtime 后端已停用：无 crate 启用该 feature，不承诺可编译，计划后续版本移除
 
 pub mod keychain;
 pub mod provider;

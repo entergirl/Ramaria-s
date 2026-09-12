@@ -131,8 +131,8 @@ fn extract_http_status(context: &str) -> Option<u16> {
 /// - 通过 `OpenAiTransport` 发送 HTTP 请求
 /// - 实现重试逻辑（`with_retry`）
 /// - 将 `ChatRequest`（trait 格式）组装为 OpenAI 消息数组
-/// - 可选接入 LLM 响应精确缓存（v1.5 C 三层生成缓存）：
-///   `chat()` 先按 `sha256(model_id + template_version + prompt)` 查缓存，
+/// - 可选接入 LLM 响应精确缓存（三层生成缓存）：
+///   `chat()` 先按 `sha256(model_id + template_version + 采样参数 + prompt)` 查缓存，
 ///   命中直接复用（不重复花费 API 账单）；查询/写入失败静默降级走 LLM。
 ///
 /// 安全约束:
@@ -185,6 +185,10 @@ impl ProviderBase {
     }
 
     /// 创建带自定义超时和重试配置的 ProviderBase。
+    ///
+    /// 说明:
+    /// - 当前仅测试路径调用（注入短超时、关闭重试以加速单测），保留备用。
+    #[allow(dead_code)]
     pub fn with_retry_config(
         config: BackendConfig,
         api_key: Option<String>,
@@ -263,9 +267,9 @@ impl ProviderBase {
     /// 返回:
     /// - 完整 assistant 回复文本。
     ///
-    /// 缓存行为（v1.5 C 三层生成缓存）:
+    /// 缓存行为（三层生成缓存）:
     /// - 已注入缓存（`with_cache`）且 `request.template_version` 非空时：
-    ///   1. 构造 key = sha256(model_id + template_version + messages JSON)；
+    ///   1. 构造 key = sha256(model_id + template_version + 采样参数 + messages JSON)；
     ///   2. 查询缓存：命中 → 记 `cache_hit=true` 日志并直接返回（不发 HTTP）；
     ///   3. 未命中 → 正常调 LLM，成功后写入缓存（写失败记 warn 继续）；
     ///   4. 查询失败 → 记 warn 后直接走 LLM（降级不阻塞）。
@@ -285,7 +289,13 @@ impl ProviderBase {
         if let Some(cache) = &self.cache
             && !request.template_version.trim().is_empty()
         {
-            let key = cache_key(model, &request.template_version, &messages);
+            let key = cache_key(
+                model,
+                &request.template_version,
+                temperature,
+                max_tokens,
+                &messages,
+            );
             match cache.get(&key).await {
                 Ok(Some(cached)) => {
                     tracing::info!(
@@ -551,10 +561,46 @@ impl ProviderBase {
 }
 
 // =========================================================
+// 构造期 keychain 读取
+// =========================================================
+
+/// 将 keychain 读取结果解析为构造期可用的 API key 与状态文案。
+///
+/// 语义:
+/// - `Ok(Some(key))` → `(Some(key), "已配置")`。
+/// - `Ok(None)` → `(None, "未配置")`（凭据不存在属正常状态）。
+/// - `Err(e)` → 记录 warn 后降级为 `(None, "读取失败(降级)")`：
+///   keychain 暂时不可用不阻断 provider 构造，调用 chat/validate 时会提示配置。
+///
+/// 参数:
+/// - `result`: `keychain.get_api_key(service)` 的返回值。
+/// - `service`: keychain service 名（仅用于日志定位，不记录 key 内容）。
+///
+/// 返回:
+/// - `(api_key, key_status)`: 构造期使用的 key 与状态文案（供日志记录）。
+pub fn resolve_constructor_key(
+    result: RamariaResult<Option<String>>,
+    service: &str,
+) -> (Option<String>, &'static str) {
+    match result {
+        Ok(Some(key)) => (Some(key), "已配置"),
+        Ok(None) => (None, "未配置"),
+        Err(e) => {
+            tracing::warn!(
+                service,
+                error = %e,
+                "keychain 读取 API key 失败，降级为未配置（调用时将提示配置）"
+            );
+            (None, "读取失败(降级)")
+        }
+    }
+}
+
+// =========================================================
 // 在线 Provider 实现宏（消除 DeepSeek/OpenAI 间的 ~97% 重复）
 // =========================================================
 
-/// 为在线 LLM provider 生成构造器（new / with_retry_config / with_cache / resolve_api_key）。
+/// 为在线 LLM provider 生成构造器（new / with_cache / resolve_api_key）。
 ///
 /// 与 `impl_online_provider!` 配套：该宏生成 trait 实现，本宏生成固有构造方法，
 /// 消除 DeepSeek/OpenAI 构造逻辑的重复（约 60 行）。
@@ -575,17 +621,16 @@ macro_rules! impl_online_provider_constructors {
             ///
             /// 返回:
             /// - 成功时返回 provider 实例。
-            /// - API key 不存在不在此处报错（延迟到 `chat`/`validate` 时检查）。
+            /// - API key 不存在或读取失败不在此处报错（延迟到 `chat`/`validate` 时检查）。
             pub fn new(
                 config: ramaria_core::types::BackendConfig,
                 keychain: std::sync::Arc<$crate::keychain::Keychain>,
             ) -> ramaria_core::error::RamariaResult<Self> {
-                let result = keychain.get_api_key($service);
-                let api_key = result.unwrap_or(None);
-                let key_status = match &api_key {
-                    Some(_) => "已配置",
-                    None => "未配置",
-                };
+                // keychain 读取失败在此降级为未配置（不阻断构造），调用时会提示用户。
+                let (api_key, key_status) = $crate::provider::resolve_constructor_key(
+                    keychain.get_api_key($service),
+                    $service,
+                );
 
                 let base = $crate::provider::ProviderBase::new(config, api_key)?;
 
@@ -595,23 +640,6 @@ macro_rules! impl_online_provider_constructors {
                     concat!($display, "Provider 已创建")
                 );
 
-                Ok(Self { base, keychain })
-            }
-
-            /// 创建带自定义重试配置的 $display Provider。
-            pub fn with_retry_config(
-                config: ramaria_core::types::BackendConfig,
-                keychain: std::sync::Arc<$crate::keychain::Keychain>,
-                timeout_secs: u64,
-                retry_config: $crate::provider::RetryConfig,
-            ) -> ramaria_core::error::RamariaResult<Self> {
-                let api_key = keychain.get_api_key($service).unwrap_or(None);
-                let base = $crate::provider::ProviderBase::with_retry_config(
-                    config,
-                    api_key,
-                    timeout_secs,
-                    retry_config,
-                )?;
                 Ok(Self { base, keychain })
             }
 
@@ -792,24 +820,37 @@ const INJECTION_PATTERNS: &[&str] = &[
 
 /// 构造 LLM 精确缓存 key。
 ///
-/// 缓存 key 公式（三层生成缓存精确缓存 + template_version 来源决策，见 docs/dev-1.5/v1.5-decisions.md）:
-/// `key = sha256_hex(model_id + template_version + canonical_messages_json)`
+/// 缓存 key 公式:
+/// `key = sha256_hex(model_id + template_version + temperature_le_bits + max_tokens_le + canonical_messages_json)`
 ///
 /// 参数:
 /// - `model_id`: `BackendConfig.capability.model_id`。
 /// - `template_version`: `ChatRequest.template_version`（prompt 模板版本常量）。
+/// - `temperature`: 采样温度，以 IEEE-754 位模式（`to_bits`）入哈希，消除浮点文本格式化歧义。
+/// - `max_tokens`: 最大输出 token 数。
 /// - `messages`: `build_messages` 组装后的 OpenAI 兼容消息数组。
 ///
 /// 说明:
 /// - prompt 部分使用消息数组的 canonical JSON（`serde_json::to_string`），
 ///   同一请求内容在重跑/重试时序列化结果稳定，保证同 key 同输出。
+/// - 采样参数（temperature / max_tokens）纳入 key：同 prompt 在不同采样参数下
+///   生成结果不同，必须区分缓存，避免跨参数误命中。
 /// - 模板版本变更 → key 变化 → 旧缓存不误命中（跨版本隔离）。
+/// - key 构成变更后旧缓存自动失效（无迁移动作，重新生成即重建缓存）。
 /// - 只输出哈希 hex，不包含任何原文（隐私红线：缓存表只存响应）。
-fn cache_key(model_id: &str, template_version: &str, messages: &[serde_json::Value]) -> String {
+fn cache_key(
+    model_id: &str,
+    template_version: &str,
+    temperature: f64,
+    max_tokens: u32,
+    messages: &[serde_json::Value],
+) -> String {
     let prompt_json = serde_json::to_string(messages).unwrap_or_default();
     let mut hasher = Sha256::new();
     hasher.update(model_id.as_bytes());
     hasher.update(template_version.as_bytes());
+    hasher.update(temperature.to_bits().to_le_bytes());
+    hasher.update(max_tokens.to_le_bytes());
     hasher.update(prompt_json.as_bytes());
     let digest = hasher.finalize();
     let mut hex = String::with_capacity(64);
@@ -1212,6 +1253,30 @@ mod tests {
         assert_eq!(base.provider_name(), "OpenAI");
     }
 
+    // ---- resolve_constructor_key ----
+
+    #[test]
+    fn resolve_constructor_key_configured() {
+        let (key, status) = resolve_constructor_key(Ok(Some("dummy-key".to_string())), "deepseek");
+        assert_eq!(key.as_deref(), Some("dummy-key"));
+        assert_eq!(status, "已配置");
+    }
+
+    #[test]
+    fn resolve_constructor_key_missing() {
+        let (key, status) = resolve_constructor_key(Ok(None), "deepseek");
+        assert!(key.is_none(), "未配置时应返回 None");
+        assert_eq!(status, "未配置");
+    }
+
+    #[test]
+    fn resolve_constructor_key_read_failure_degrades() {
+        let (key, status) =
+            resolve_constructor_key(Err(RamariaError::privacy("keychain 不可用")), "deepseek");
+        assert!(key.is_none(), "读取失败应降级为无 key");
+        assert_eq!(status, "读取失败(降级)");
+    }
+
     // ---- RetryConfig error discrimination ----
 
     #[test]
@@ -1342,15 +1407,29 @@ mod tests {
     fn cache_key_changes_with_template_version() {
         let messages = serde_json::json!([{"role": "system", "content": "你好"}]);
         let messages: Vec<serde_json::Value> = vec![messages];
-        let k1 = cache_key("model-a", "v1", &messages);
-        let k1_again = cache_key("model-a", "v1", &messages);
-        let k2 = cache_key("model-a", "v2", &messages);
-        let k3 = cache_key("model-b", "v1", &messages);
+        let k1 = cache_key("model-a", "v1", 0.3, 1024, &messages);
+        let k1_again = cache_key("model-a", "v1", 0.3, 1024, &messages);
+        let k2 = cache_key("model-a", "v2", 0.3, 1024, &messages);
+        let k3 = cache_key("model-b", "v1", 0.3, 1024, &messages);
 
         assert_eq!(k1, k1_again, "同输入应产生同 key（重跑稳定）");
         assert_eq!(k1.len(), 64, "SHA-256 hex 应为 64 字符");
         assert_ne!(k1, k2, "模板版本变更 → key 变化，跨版本不误命中");
         assert_ne!(k1, k3, "模型变更 → key 变化");
+    }
+
+    /// 采样参数纳入缓存 key：temperature / max_tokens 任一变更都必须产生不同 key。
+    #[test]
+    fn cache_key_changes_with_sampling_params() {
+        let messages: Vec<serde_json::Value> =
+            vec![serde_json::json!({"role": "user", "content": "你好"})];
+        let base = cache_key("model-a", "v1", 0.3, 1024, &messages);
+        let higher_temp = cache_key("model-a", "v1", 0.7, 1024, &messages);
+        let more_tokens = cache_key("model-a", "v1", 0.3, 2048, &messages);
+
+        assert_eq!(base.len(), 64, "SHA-256 hex 应为 64 字符");
+        assert_ne!(base, higher_temp, "temperature 变更 → key 变化");
+        assert_ne!(base, more_tokens, "max_tokens 变更 → key 变化");
     }
 
     #[tokio::test]
@@ -1362,7 +1441,7 @@ mod tests {
         // 命中路径通过预置 store 模拟：
         let request = chat_request("test");
         let messages = build_messages(&request);
-        let key = cache_key("test-model", "test", &messages);
+        let key = cache_key("test-model", "test", 0.3, 1024, &messages);
         cache
             .store
             .lock()

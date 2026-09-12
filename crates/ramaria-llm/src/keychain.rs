@@ -237,6 +237,55 @@ use platform::*;
 
 #[cfg(test)]
 mod tests {
+    //! 平台分支测试契约:
+    //! - 非 Windows: get/set/delete 均返回 Unsupported（无系统实现）。
+    //! - Windows: 读取确定不存在的 service 不返回 Ok(Some)（只读操作，不触碰真实凭据）。
+
+    use super::*;
+
     // （原 keychain_new_creates_instance / keychain_default_creates_instance
     //  无任何断言，Keychain 构造恒成功，已删除）
+
+    /// 非 Windows 平台存根：三个操作都应报 Unsupported，不得静默成功。
+    #[cfg(not(windows))]
+    #[test]
+    fn non_windows_stubs_return_unsupported() {
+        let keychain = Keychain::new();
+
+        let read = keychain.get_api_key("ramaria-tests-nonexistent");
+        assert!(read.is_err(), "非 Windows 读取应返回 Err");
+        assert_eq!(
+            read.unwrap_err().category(),
+            "unsupported",
+            "读取错误应分类为 unsupported"
+        );
+
+        let write = keychain.set_api_key("ramaria-tests-nonexistent", "dummy");
+        assert!(write.is_err(), "非 Windows 写入应返回 Err");
+        assert_eq!(
+            write.unwrap_err().category(),
+            "unsupported",
+            "写入错误应分类为 unsupported"
+        );
+
+        let delete = keychain.delete_api_key("ramaria-tests-nonexistent");
+        assert!(delete.is_err(), "非 Windows 删除应返回 Err");
+        assert_eq!(
+            delete.unwrap_err().category(),
+            "unsupported",
+            "删除错误应分类为 unsupported"
+        );
+    }
+
+    /// Windows：读取不存在的 service 必须 Ok(None) 或 Err，绝不能 Ok(Some)。
+    #[cfg(windows)]
+    #[test]
+    fn windows_read_missing_service_never_returns_some() {
+        let keychain = Keychain::new();
+        let result = keychain.get_api_key("ramaria-tests-nonexistent-9f1c7a2b");
+        assert!(
+            !matches!(&result, Ok(Some(_))),
+            "读取确定不存在的 service 不应返回 Ok(Some)，实际: {result:?}"
+        );
+    }
 }

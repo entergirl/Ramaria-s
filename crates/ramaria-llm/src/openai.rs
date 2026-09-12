@@ -42,7 +42,7 @@ pub struct OpenAIProvider {
     keychain: Arc<Keychain>,
 }
 
-// 构造器（new / with_retry_config / with_cache / resolve_api_key）由宏生成，
+// 构造器（new / with_cache / resolve_api_key）由宏生成，
 // 与 DeepSeek 共用同一实现（仅 service/display 名不同）。
 impl_online_provider_constructors!(OpenAIProvider, "openai", "OpenAI");
 

@@ -28,7 +28,7 @@ cuda = [
     "candle-nn/cuda",
     "candle-transformers/cuda",
 ]
-# 旧 ONNX 路径（保留兼容，Phase 2 后移除）
+# 旧 ONNX 路径（已停用：无 crate 启用该 feature，不承诺可编译，计划后续版本移除）
 embedding-onnx = ["dep:ort", "dep:tokenizers", "dep:ndarray"]
 
 [dependencies]

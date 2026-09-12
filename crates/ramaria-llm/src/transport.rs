@@ -9,7 +9,7 @@
 //! - 非流式请求（`stream: false`）直接解析完整 JSON 响应
 //! - 所有 HTTP 错误保留 status code 和响应体前 500 字符，便于诊断
 //! - 不记录 API key 或完整消息内容
-//! - SSE 单行 > 10KB 截断并 warn；流式整体 120s 超时保护
+//! - SSE 单行 > 10KB 截断并 warn；流式整体 600s 超时保护（首事件 60s 快速失败）
 
 use bytes::BytesMut;
 use futures::SinkExt;
@@ -256,7 +256,7 @@ impl OpenAiTransport {
     ///
     /// 实现:
     /// - 使用 `mpsc::channel(64)` 有界通道替代 unbounded，背压保护。
-    /// - `sse_read_loop` 内含 120s 整体超时保护。
+    /// - `sse_read_loop` 内含 600s 整体超时保护（首事件 60s 快速失败）。
     /// - 后台任务逐块从 `bytes_stream` 读取、拼接不完整行、逐行解析 SSE。
     /// - 当接收端丢弃 stream 时，后台任务自动退出（`tx.send` 返回错误）。
     pub async fn chat_stream(
@@ -287,7 +287,16 @@ impl OpenAiTransport {
 
         let status = response.status();
         if !status.is_success() {
-            let response_text = response.text().await.unwrap_or_default();
+            let response_text = match response.text().await {
+                Ok(text) => text,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "读取 HTTP 错误响应体失败，降级为空 body（保留状态码）"
+                    );
+                    String::new()
+                }
+            };
             return Err(http_error(status.as_u16(), &response_text));
         }
 
@@ -663,13 +672,14 @@ async fn process_chunk(
 ///
 /// 格式:
 /// - `data: {"choices": [{"delta": {"content": "..."}, "finish_reason": null}]}`: 增量文本
+/// - `data: {"error": {...}}`: 流内错误载荷，直接上抛错误
 /// - `data: [DONE]`: 流结束标记
 /// - `: ...` 或空行: 注释/心跳，返回 None 跳过
 ///
 /// 返回:
 /// - `Some(Ok(StreamDelta))`: 成功解析的增量
-/// - `Some(Err(...))`: JSON 解析失败
-/// - `None`: 注释行/空行/非 data 行，应跳过
+/// - `Some(Err(...))`: JSON 解析失败，或流内 `error` 载荷上抛
+/// - `None`: 注释行/空行/非 data 行/未知结构（无 choices 数组），应跳过
 fn parse_sse_line(line: &str) -> Option<RamariaResult<StreamDelta>> {
     let line = line.trim();
     if line.is_empty() || line.starts_with(':') {
@@ -693,16 +703,38 @@ fn parse_sse_line(line: &str) -> Option<RamariaResult<StreamDelta>> {
     // 解析 JSON chunk
     match serde_json::from_str::<serde_json::Value>(payload) {
         Ok(chunk) => {
+            // 流内错误载荷（如顶层 {"error": {...}}）必须上抛为错误：
+            // 上报错误而非空 delta，避免限流/鉴权失败被上层误认为空回复。
+            if let Some(error_obj) = chunk.get("error") {
+                return Some(Err(RamariaError::llm(format!(
+                    "SSE 流内错误: {}",
+                    summarize_stream_error(error_obj)
+                ))));
+            }
+
+            // choices 缺失或类型不符 = 未知结构；只记长度不落正文。
+            let choices = match chunk.get("choices").and_then(|c| c.as_array()) {
+                Some(choices) => choices,
+                None => {
+                    tracing::warn!(
+                        payload_len = payload.len(),
+                        "SSE 数据块 choices 缺失或非数组（且无 error 字段），已跳过（未知结构）"
+                    );
+                    return None;
+                }
+            };
+            if choices.is_empty() {
+                return None;
+            }
+
             // 提取 delta.content
-            let content = chunk["choices"][0]["delta"]["content"]
+            let content = choices[0]["delta"]["content"]
                 .as_str()
                 .unwrap_or("")
                 .to_string();
 
             // 检查 finish_reason
-            let finish_reason = chunk["choices"][0]["finish_reason"]
-                .as_str()
-                .map(|s| s.to_string());
+            let finish_reason = choices[0]["finish_reason"].as_str().map(|s| s.to_string());
 
             let done = finish_reason.is_some();
 
@@ -716,6 +748,54 @@ fn parse_sse_line(line: &str) -> Option<RamariaResult<StreamDelta>> {
             format!("SSE data 解析失败: {}", &payload[..payload.len().min(200)]),
             e,
         ))),
+    }
+}
+
+/// 将 SSE 流内 `error` 载荷压缩为可读的错误摘要。
+///
+/// 兼容形态:
+/// - object: 依次读取 `message` / `type` / `code` 字段，按序拼接（跳过缺失或空字段）。
+/// - string: 直接作为摘要文本。
+///
+/// 参数:
+/// - `error_obj`: `chunk["error"]` 对应的 JSON 值。
+///
+/// 返回:
+/// - 截断到 200 字符以内的摘要；无任何可读字段时返回 `"[未知错误形态]"`。
+///
+/// 说明:
+/// - 摘要仅用于错误链与日志诊断，不包含请求原文与 API key。
+fn summarize_stream_error(error_obj: &serde_json::Value) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    match error_obj {
+        serde_json::Value::String(text) => {
+            if !text.trim().is_empty() {
+                parts.push(text.clone());
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for key in ["message", "type", "code"] {
+                if let Some(value) = map.get(key) {
+                    let text = match value {
+                        serde_json::Value::String(s) => s.clone(),
+                        serde_json::Value::Number(n) => n.to_string(),
+                        _ => String::new(),
+                    };
+                    if !text.trim().is_empty() {
+                        parts.push(text);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    let summary = ramaria_core::text::truncate_chars_bare(&parts.join(" | "), 200);
+    if summary.trim().is_empty() {
+        "[未知错误形态]".to_string()
+    } else {
+        summary
     }
 }
 
@@ -812,6 +892,35 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// SSE 流内 error 载荷必须上抛为 llm 错误，不能被静默吞成空 delta。
+    #[test]
+    fn parse_sse_line_surfaces_error_payload() {
+        let line =
+            r#"data: {"error":{"message":"rate limited","type":"rate_limit_error","code":"429"}}"#;
+        let result = parse_sse_line(line).expect("error 载荷应返回 Some(Err)");
+        let err = result.expect_err("error 载荷应上抛错误");
+        assert_eq!(err.category(), "llm");
+        assert!(err.context().contains("rate limited"), "摘要应含 message");
+        assert!(err.context().contains("rate_limit_error"), "摘要应含 type");
+    }
+
+    /// 未知结构（无 choices 字段 / choices 为空数组）返回 None 跳过，不产生空 delta。
+    #[test]
+    fn parse_sse_line_skips_unknown_payload() {
+        assert!(parse_sse_line(r#"data: {"foo":"bar"}"#).is_none());
+        assert!(parse_sse_line(r#"data: {"choices":[]}"#).is_none());
+    }
+
+    /// summarize_stream_error 兼容 string 形态，并对无可读字段给出兜底文案。
+    #[test]
+    fn summarize_stream_error_string_and_fallback() {
+        let from_string = summarize_stream_error(&serde_json::json!("boom"));
+        assert_eq!(from_string, "boom");
+
+        let fallback = summarize_stream_error(&serde_json::json!({"unexpected": 1}));
+        assert_eq!(fallback, "[未知错误形态]");
     }
 
     // ---- http_error ----

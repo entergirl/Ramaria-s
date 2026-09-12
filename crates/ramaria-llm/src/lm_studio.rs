@@ -19,7 +19,7 @@ use ramaria_core::types::{BackendConfig, ModelCapability};
 use std::pin::Pin;
 use std::sync::Arc;
 
-use crate::provider::{ProviderBase, RetryConfig};
+use crate::provider::ProviderBase;
 
 // =========================================================
 // LmStudioProvider
@@ -59,16 +59,6 @@ impl LmStudioProvider {
             base_url = %base.transport().base_url(),
             "LmStudioProvider 已创建"
         );
-        Ok(Self { base })
-    }
-
-    /// 创建带自定义重试配置的 LM Studio Provider。
-    pub fn with_retry_config(
-        config: BackendConfig,
-        timeout_secs: u64,
-        retry_config: RetryConfig,
-    ) -> RamariaResult<Self> {
-        let base = ProviderBase::with_retry_config(config, None, timeout_secs, retry_config)?;
         Ok(Self { base })
     }
 

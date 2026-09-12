@@ -6,8 +6,8 @@
 //! - 覆盖：可用性检查、验证、空输入、批量操作、模型信息一致性
 //!
 //! 说明:
-//! - 通过 `embedding-onnx` feature 的 ONNX 测试需要真实模型文件，
-//!   不在 CI 中运行，仅本地手动验证。
+//! - ONNX 后端已停用（无 crate 启用 `embedding-onnx` feature），不存在对应的 ONNX
+//!   集成测试；本文件仅覆盖 `NoopEmbeddingProvider` 实现与 `EmbeddingProvider` trait 契约。
 
 use ramaria_core::traits::EmbeddingProvider;
 use ramaria_llm::embedding::noop::NoopEmbeddingProvider;
@@ -82,24 +82,4 @@ async fn trait_object_works() {
     assert_eq!(p.model_info().dimension, 384);
 }
 
-// =========================================================
-// 降级模式行为测试
-// =========================================================
-
-/// 模拟：嵌入模型缺失时，上层应能优雅降级
-#[test]
-fn degraded_mode_detection() {
-    // 模拟场景：App 检测到嵌入模型不可用
-    let provider = NoopEmbeddingProvider::new(384);
-    let embedding_available = provider.is_available();
-    assert!(!embedding_available);
-
-    // 降级：向量通道权重归零，BM25 + 图谱仍可用
-    let vector_weight: f64 = if embedding_available { 0.5 } else { 0.0 };
-    assert_eq!(vector_weight, 0.0);
-
-    let bm25_weight: f64 = 0.5;
-    let graph_weight: f64 = 0.5;
-    let total_weight = vector_weight + bm25_weight + graph_weight;
-    assert!(total_weight > 0.0, "降级模式下仍有检索通道可用");
-}
+// （原 degraded_mode_detection 用局部变量重算常量、断言恒真，未触达被测代码，已删除）
