@@ -523,7 +523,7 @@ async fn save_and_close_ignores_stale_input_persona() {
 /// - 段 L1 全部 `absorbed=false`（`list_unabsorbed_l1` 天然可见）；
 /// - 后续 `check_l2_trigger` 按未吸收 L1 计数时把段 L1 计入（候选池计数），
 ///   一次长会话即可达到触发阈值，无需等待多次会话累积；
-/// - 尾段 L1 覆盖最新对话（封存只摘要尾部）。
+/// - 尾段 L1 覆盖最新对话（按 `tail_msg_count` 切段、全段生成）。
 #[tokio::test]
 async fn save_and_close_progressive_long_session_writes_segment_l1s_to_candidate_pool() {
     const L1_JSON: &str = r#"{"summary":"用户讨论了长会话片段","keywords":"长会话,排期","time_period":"下午","atmosphere":"平静","valence":0.0,"salience":0.5}"#;

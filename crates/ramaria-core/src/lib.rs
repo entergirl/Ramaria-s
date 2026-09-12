@@ -36,9 +36,9 @@ pub use traits::{
     StoreInfrastructure, StreamDelta,
 };
 pub use types::{
-    AppState, BackendConfig, ClusterSnapshot, EventRelation, EventRelationKind, EventSource,
-    EvidenceDirection, FactSource, LlmProvider, MemoryEvent, MemoryL1, Message, MessageRole,
-    MessageSource, ModelCapability, Persona, PersonaExample, PersonaFact, PersonaKind,
+    AppState, BackendConfig, ClusterSnapshot, EventBatchWrite, EventRelation, EventRelationKind,
+    EventSource, EvidenceDirection, FactSource, LlmProvider, MemoryEvent, MemoryL1, Message,
+    MessageRole, MessageSource, ModelCapability, Persona, PersonaExample, PersonaFact, PersonaKind,
     PersonalityTrait, Presentation, PrivacyConsent, ProfileField, Session, TraitEvidence,
     TraitLayer, TraitSource, TraitStatus, new_id, now_ms, uuid_from_db, uuid_to_db,
 };

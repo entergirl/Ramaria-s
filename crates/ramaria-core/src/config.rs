@@ -752,7 +752,8 @@ impl Default for EventExtractionConfig {
 /// L1 摘要相关配置（`[l1]`）。
 ///
 /// 职责:
-/// - 承载渐进式摘要（B3）触发参数，长会话按段生成 L1、封存只摘要尾部。
+/// - 承载渐进式摘要（B3）触发参数：长会话按 `tail_msg_count` 切段、全段生成 L1
+///   （尾段覆盖最新对话）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct L1Config {
     /// 渐进式摘要配置（`[l1.progressive]`）
@@ -781,7 +782,7 @@ impl Default for L1Config {
 ///
 /// 设计依据:
 /// - 决策 D-V17-005：消息数>100 或跨度>24h（可配置）；段 L1 实时入缓冲；
-///   L2 提取仍封存触发；封存只摘要尾部。
+///   L2 提取仍封存触发；按 `tail_msg_count` 切段、全段生成（尾段覆盖最新）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct L1ProgressiveConfig {
     /// 渐进式摘要总开关（默认 true——关闭时回退 v1.6 行为）。

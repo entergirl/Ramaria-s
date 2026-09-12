@@ -612,9 +612,7 @@ fn push_reason(reasons: &mut Vec<String>, reason: impl Into<String>) {
     if reasons.len() >= 32 {
         return;
     }
-    let mut r = reason.into();
-    if r.chars().count() > 80 {
-        r = r.chars().take(80).collect();
-    }
+    let r: String = reason.into();
+    let r = ramaria_core::text::truncate_chars_bare(&r, 80);
     reasons.push(r);
 }

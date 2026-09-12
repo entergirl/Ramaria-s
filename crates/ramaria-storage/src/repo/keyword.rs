@@ -18,14 +18,18 @@ use crate::repo::StorageResultExt;
 // 别名归一化行结构（keyword-design §6.2）
 // =========================================================
 
-/// 规范词行（keyword_pool 中 canonical_id IS NULL 的词条）。
+/// 词条行（keyword_pool 的 rowid / keyword / use_count 三元组）。
+///
+/// 说明:
+/// - `list_canonicals` 返回规范词子集（canonical_id IS NULL）；
+/// - `list_established` 返回已确认词表（canonical + 已确认 alias）子集。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalRow {
     /// keyword_pool.rowid（INTEGER 自增 rowid）
     pub rowid: i64,
-    /// 规范词文本
+    /// 词条文本
     pub keyword: String,
-    /// 使用次数
+    /// 使用次数（alias 行为该 alias 自身的使用量）
     pub use_count: i64,
 }
 
@@ -257,6 +261,43 @@ pub async fn list_canonicals(pool: &SqlitePool) -> RamariaResult<Vec<CanonicalRo
     .fetch_all(pool)
     .await
     .storage_err("查询规范词列表失败")?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(rowid, keyword, use_count)| CanonicalRow {
+            rowid,
+            keyword,
+            use_count,
+        })
+        .collect())
+}
+
+/// 列出 keyword_pool 已确认词表（canonical + 已确认 alias，排除 pending）。
+///
+/// 返回:
+/// - `Vec<CanonicalRow>`，按 use_count 降序、keyword 升序（输出稳定）；
+///   alias 行的 `rowid` / `use_count` 为 alias 自身行值。
+///
+/// 说明:
+/// - 与内存侧 `KeywordPool::established_terms` 的口径对应关系:
+///   canonical = `alias_status` 为 NULL / `'canonical'`；
+///   alias = `alias_status = 'alias'` 且 `canonical_id IS NOT NULL`（已确认归一指向）；
+///   pending（`alias_status = 'pending'`）排除。
+/// - 缺 `canonical_id` 的 alias 属数据异常：本查询按未确认处理并排除；
+///   内存侧装载时对该异常兜底为 Canonical（防御不丢词），正常数据两口径一致。
+/// - 与 `list_canonicals`（仅 canonical_id IS NULL）并存，后者另作规范词专用用途。
+pub async fn list_established(pool: &SqlitePool) -> RamariaResult<Vec<CanonicalRow>> {
+    let rows = sqlx::query_as::<_, (i64, String, i64)>(
+        "SELECT rowid, keyword, use_count
+         FROM keyword_pool
+         WHERE alias_status IS NULL
+            OR alias_status = 'canonical'
+            OR (alias_status = 'alias' AND canonical_id IS NOT NULL)
+         ORDER BY use_count DESC, keyword ASC",
+    )
+    .fetch_all(pool)
+    .await
+    .storage_err("查询已确认词表失败")?;
 
     Ok(rows
         .into_iter()
@@ -720,6 +761,40 @@ mod tests {
         );
         // rowid 与 use_count 带回
         assert!(canonicals.iter().all(|r| r.rowid > 0));
+    }
+
+    #[tokio::test]
+    async fn test_list_established_includes_alias_excludes_pending() {
+        let pool = setup().await;
+        let (canonical_id, _) = seed_pending(&pool).await;
+
+        // 已确认 alias（指向 工作压力）
+        upsert_with_alias(
+            &pool,
+            &KeywordToken::new("职业倦怠").unwrap(),
+            canonical_id,
+            "alias",
+        )
+        .await
+        .unwrap();
+        // 孤儿 alias（canonical_id 缺失）——数据异常，按未确认排除
+        upsert_with_alias(&pool, &KeywordToken::new("孤儿别名").unwrap(), 0, "alias")
+            .await
+            .unwrap();
+
+        let established = list_established(&pool).await.unwrap();
+        let texts: Vec<&str> = established.iter().map(|r| r.keyword.as_str()).collect();
+        assert!(texts.contains(&"工作压力"), "canonical 保留");
+        assert!(texts.contains(&"职业倦怠"), "已确认 alias 入表");
+        assert!(!texts.contains(&"职场焦虑"), "pending 排除");
+        assert!(
+            !texts.contains(&"孤儿别名"),
+            "缺 canonical_id 的 alias 排除"
+        );
+        assert!(established.iter().all(|r| r.rowid > 0));
+        // 排序稳定：use_count 降序
+        let counts: Vec<i64> = established.iter().map(|r| r.use_count).collect();
+        assert!(counts.windows(2).all(|w| w[0] >= w[1]), "use_count 降序");
     }
 
     #[tokio::test]

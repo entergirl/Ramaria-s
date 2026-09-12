@@ -14,10 +14,10 @@ use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::keyword::KeywordPoolRow;
 use ramaria_core::traits::{StoreCrud, StoreInfrastructure};
 use ramaria_core::types::{
-    BackendConfig, ClusterSnapshot, EventRelation, EventSource, MemoryEvent, MemoryL1, Message,
-    Persona, PersonaEventAggregate, PersonaExample, PersonaFact, PersonaStyleStats,
-    PersonalityTrait, PrivacyConsent, ProfileField, Session, TraitEvidence, TraitStatus, UttBlock,
-    now_ms,
+    BackendConfig, ClusterSnapshot, EventBatchWrite, EventRelation, EventSource, MemoryEvent,
+    MemoryL1, Message, Persona, PersonaEventAggregate, PersonaExample, PersonaFact,
+    PersonaStyleStats, PersonalityTrait, PrivacyConsent, ProfileField, Session, TraitEvidence,
+    TraitStatus, UttBlock, now_ms,
 };
 use sqlx::SqlitePool;
 use uuid::Uuid;
@@ -230,6 +230,11 @@ impl StoreCrud for SqliteStorage {
         repo::events::save_source(&self.pool, event_id, l1_id, weight).await
     }
 
+    /// 单事务写入事件批次（事件 + 来源 + 关系 + L1 吸收标记）。
+    async fn save_event_batch(&self, batch: &EventBatchWrite) -> RamariaResult<Vec<i64>> {
+        repo::events::save_event_batch(&self.pool, batch).await
+    }
+
     async fn list_event_sources_by_event(&self, event_id: i64) -> RamariaResult<Vec<EventSource>> {
         repo::events::list_sources_by_event(&self.pool, event_id).await
     }
@@ -411,6 +416,10 @@ impl StoreCrud for SqliteStorage {
     }
     async fn list_canonical_keywords(&self) -> RamariaResult<Vec<String>> {
         let rows = repo::keyword::list_canonicals(&self.pool).await?;
+        Ok(rows.into_iter().map(|r| r.keyword).collect())
+    }
+    async fn list_established_keywords(&self) -> RamariaResult<Vec<String>> {
+        let rows = repo::keyword::list_established(&self.pool).await?;
         Ok(rows.into_iter().map(|r| r.keyword).collect())
     }
     async fn list_keyword_pool_entries(&self) -> RamariaResult<Vec<KeywordPoolRow>> {
@@ -932,6 +941,144 @@ mod tests {
         storage.save_event_source(ev_id, l1.id, 1.0).await.unwrap();
     }
 
+    // =========================================================
+    // 事件批次单事务写入（save_event_batch）
+    // =========================================================
+
+    /// 正常路径：2 事件 + 来源 + 关系 + absorbed 全量落库；
+    /// 返回 id 与 events 顺序一一对应。
+    #[tokio::test]
+    async fn save_event_batch_all_parts_persisted() {
+        let storage = setup().await;
+        let session = storage.create_session(None).await.unwrap();
+        let l1 = MemoryL1::new(session.id, "摘要".into(), None);
+        storage.save_memory_l1(&l1).await.unwrap();
+        let p = Persona::new(
+            "user-0001".into(),
+            "用户".into(),
+            PersonaKind::User,
+            1,
+            "local".into(),
+        );
+        storage.create_persona(&p).await.unwrap();
+
+        let now = now_ms();
+        let e1 = MemoryEvent::new("user-0001".into(), "A".into(), "desc-a".into(), now, now);
+        let e2 = MemoryEvent::new("user-0001".into(), "B".into(), "desc-b".into(), now, now);
+        let batch = EventBatchWrite {
+            events: vec![e1, e2],
+            sources: vec![(0, l1.id, 1.0), (1, l1.id, 0.5)],
+            relations: vec![(0, 1, EventRelationKind::CausedBy, 0.8)],
+            absorbed_l1_ids: vec![l1.id],
+        };
+
+        let ids = storage.save_event_batch(&batch).await.unwrap();
+        assert_eq!(ids.len(), 2, "返回 id 数应与事件数一致");
+        assert!(ids[0] > 0 && ids[1] > 0 && ids[0] != ids[1]);
+
+        // 事件落库且 id 与输入顺序对应
+        let events = storage
+            .list_events_by_persona("user-0001", 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 2);
+        let a = events
+            .iter()
+            .find(|e| e.title == "A")
+            .expect("事件 A 应落库");
+        let b = events
+            .iter()
+            .find(|e| e.title == "B")
+            .expect("事件 B 应落库");
+        assert_eq!(a.id, ids[0], "返回 id 应与 events 顺序对应");
+        assert_eq!(b.id, ids[1], "返回 id 应与 events 顺序对应");
+
+        // 来源落库
+        let sources_a = storage.list_event_sources_by_event(a.id).await.unwrap();
+        assert_eq!(sources_a.len(), 1);
+        assert_eq!(sources_a[0].l1_id, l1.id);
+        assert!((sources_a[0].weight - 1.0).abs() < 1e-9);
+        let sources_b = storage.list_event_sources_by_event(b.id).await.unwrap();
+        assert_eq!(sources_b.len(), 1);
+        assert!((sources_b[0].weight - 0.5).abs() < 1e-9);
+
+        // 关系落库
+        let relations = storage
+            .list_event_relations_by_persona("user-0001")
+            .await
+            .unwrap();
+        assert_eq!(relations.len(), 1);
+        assert_eq!(relations[0].from_id, a.id);
+        assert_eq!(relations[0].to_id, b.id);
+        assert_eq!(relations[0].kind, EventRelationKind::CausedBy);
+
+        // L1 已吸收
+        let l1_loaded = storage.get_memory_l1(l1.id).await.unwrap().unwrap();
+        assert!(l1_loaded.absorbed, "L1 应被批次事务标记为已吸收");
+    }
+
+    /// 失败回滚：sources 下标越界 → 整体回滚（事件不落库、L1 不吸收）。
+    #[tokio::test]
+    async fn save_event_batch_rolls_back_on_out_of_range_source() {
+        let storage = setup().await;
+        let session = storage.create_session(None).await.unwrap();
+        let l1 = MemoryL1::new(session.id, "摘要".into(), None);
+        storage.save_memory_l1(&l1).await.unwrap();
+        let p = Persona::new(
+            "user-0001".into(),
+            "用户".into(),
+            PersonaKind::User,
+            1,
+            "local".into(),
+        );
+        storage.create_persona(&p).await.unwrap();
+
+        let now = now_ms();
+        let e1 = MemoryEvent::new("user-0001".into(), "A".into(), "desc".into(), now, now);
+        let batch = EventBatchWrite {
+            events: vec![e1],
+            // 越界：批次仅 1 条事件（下标 0），下标 9 非法
+            sources: vec![(9, l1.id, 1.0)],
+            relations: vec![],
+            absorbed_l1_ids: vec![l1.id],
+        };
+
+        let err = storage
+            .save_event_batch(&batch)
+            .await
+            .expect_err("越界下标应报错");
+        assert_eq!(err.category(), "validation", "越界应返回 Validation: {err}");
+
+        // 整体回滚：无新事件、L1 未吸收
+        let events = storage
+            .list_events_by_persona("user-0001", 0, 10)
+            .await
+            .unwrap();
+        assert!(events.is_empty(), "失败批次不应残留事件行");
+        let l1_loaded = storage.get_memory_l1(l1.id).await.unwrap().unwrap();
+        assert!(!l1_loaded.absorbed, "失败批次不应标记 L1 吸收");
+    }
+
+    /// 空事件 + absorbed 非空 → 只标记吸收、返回空 ids。
+    #[tokio::test]
+    async fn save_event_batch_empty_events_marks_l1_only() {
+        let storage = setup().await;
+        let session = storage.create_session(None).await.unwrap();
+        let l1 = MemoryL1::new(session.id, "摘要".into(), None);
+        storage.save_memory_l1(&l1).await.unwrap();
+
+        let batch = EventBatchWrite {
+            events: vec![],
+            sources: vec![],
+            relations: vec![],
+            absorbed_l1_ids: vec![l1.id],
+        };
+        let ids = storage.save_event_batch(&batch).await.unwrap();
+        assert!(ids.is_empty(), "空事件批次应返回空 id 列表");
+        let l1_loaded = storage.get_memory_l1(l1.id).await.unwrap().unwrap();
+        assert!(l1_loaded.absorbed, "空事件批次仍应标记吸收");
+    }
+
     #[tokio::test]
     async fn persona_fact_crud() {
         let storage = setup().await;
@@ -1336,6 +1483,58 @@ mod tests {
         assert!(
             !canonicals.contains(&"职场焦虑".to_string()),
             "pending 别名不应出现在规范词（词典）列表"
+        );
+    }
+
+    /// 已确认词表读取：canonical + 已确认 alias 入表，pending 排除（与 memory 侧同口径）。
+    #[tokio::test]
+    async fn list_established_keywords_includes_alias_excludes_pending() {
+        let storage = setup().await;
+
+        // canonical 形态（alias_status = 'canonical'）
+        repo::keyword::upsert_with_alias(
+            &storage.pool,
+            &KeywordToken::new("工作压力").unwrap(),
+            0,
+            "canonical",
+        )
+        .await
+        .unwrap();
+        // 纯 upsert 形态（alias_status NULL）的规范词
+        storage.upsert_keyword("爬山").await.unwrap();
+        let canonical_id: i64 =
+            sqlx::query_scalar("SELECT rowid FROM keyword_pool WHERE keyword = ?")
+                .bind("工作压力")
+                .fetch_one(&storage.pool)
+                .await
+                .unwrap();
+
+        // 已确认 alias（指向 工作压力）
+        repo::keyword::upsert_with_alias(
+            &storage.pool,
+            &KeywordToken::new("职业倦怠").unwrap(),
+            canonical_id,
+            "alias",
+        )
+        .await
+        .unwrap();
+        // pending（指向 工作压力）——不应出现在已确认词表
+        repo::keyword::upsert_with_alias(
+            &storage.pool,
+            &KeywordToken::new("职场焦虑").unwrap(),
+            canonical_id,
+            "pending",
+        )
+        .await
+        .unwrap();
+
+        let established = storage.list_established_keywords().await.unwrap();
+        assert!(established.contains(&"工作压力".to_string()));
+        assert!(established.contains(&"爬山".to_string()));
+        assert!(established.contains(&"职业倦怠".to_string()));
+        assert!(
+            !established.contains(&"职场焦虑".to_string()),
+            "pending 别名不应出现在已确认词表"
         );
     }
 

@@ -807,7 +807,8 @@ impl SessionLifecycle {
                     );
                 }
                 Err(e) => {
-                    warn!(persona_uid = %persona_owned, error = %e, "L3 推断：标记事件吸收失败");
+                    // 标记幂等：下次 L3 会重新吸收，失败不阻断流程；错误级别提升以便可观测。
+                    error!(persona_uid = %persona_owned, error = %e, "L3 推断：标记事件吸收失败");
                 }
             }
         }

@@ -29,7 +29,7 @@
 
 "长对话不丢信息、跨会话脉络按话题接续"：
 
-- **渐进式摘要**（`[l1.progressive]` 配置组，默认关闭）：触发（消息数>100 或跨度>24h，可配置）；段独立生成 L1（absorbed=0 实时入候选池 + 入 TopicBatcher 缓冲）；**L2 仍封存触发**（并发安全锁定）；封存只摘要尾部（tail_msg_count）。`L1Summarizer::summarize_progressive` 按 tail_msg_count 切段复用 `generate_chunk_l1`，尾段覆盖最新对话。
+- **渐进式摘要**（`[l1.progressive]` 配置组，默认关闭）：触发（消息数>100 或跨度>24h，可配置）；按 `tail_msg_count` 切段、全段生成，每段独立成 L1（absorbed=0 实时入候选池 + 入 TopicBatcher 缓冲），尾段覆盖最新对话；**L2 仍封存触发**（并发安全锁定）。`L1Summarizer::summarize_progressive` 复用 `generate_chunk_l1`。
 - **流式超时/channel 满修复**：`transport.rs` SSE 超时分级——首事件 60s + 整体 600s（原双重 120s）；client 级超时 120→600；有界 channel 满时 `send().await` 背压（不静默丢 delta，接收端 drop 安全退出）。修复后长回复不截断、无静默丢 delta。
 - **脉络加权注入**（`[retrieval] narrative_weighted=true/narrative_top_k=3`）：`Retriever::search_narrative`（BM25 相关性 × `calc_retention` 含访问加成融合排序，无相关性命中按时间兜底）；替换 v1.6"无条件取最近几条"。关闭回退 v1.6。
 - **`MemoryL1::touch` 接线**：检索命中更新 `last_accessed_at`，激活 `[decay] recent_boost_*`（`calc_retention` 生效）；`SearchResult`/`L1DocView` 新增 `last_accessed_at` 全链传播。

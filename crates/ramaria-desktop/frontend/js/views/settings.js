@@ -1459,7 +1459,7 @@ var RamariaSettingsView = (function () {
                 { path: ['l1', 'progressive', 'enabled'], label: '渐进式摘要开关', type: 'bool', def: true, hint: 'false = 整会话/按 utt 切分（v1.6）' },
                 { path: ['l1', 'progressive', 'msg_threshold'], label: '消息数触发阈值', type: 'number', min: 2, def: 100, hint: '超过此条数触发分段' },
                 { path: ['l1', 'progressive', 'span_hours'], label: '时间跨度阈值（小时）', type: 'number', min: 1, def: 24, hint: '首末消息跨度超过此值触发分段' },
-                { path: ['l1', 'progressive', 'tail_msg_count'], label: '尾段覆盖消息数', type: 'number', min: 1, def: 60, hint: '封存只摘要尾部最近 N 条消息' },
+                { path: ['l1', 'progressive', 'tail_msg_count'], label: '尾段覆盖消息数', type: 'number', min: 1, def: 60, hint: '按此条数切段、全段生成（尾段覆盖最新）' },
             ],
         },
         {

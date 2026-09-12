@@ -271,39 +271,26 @@ impl App {
     /// 重建关键词服务语义层（Fuzzy）。
     ///
     /// 流程:
-    /// 1. 读锁取规范词（词典池装载已完成）；
-    /// 2. 规范词为空 / embedding 不可用 → 保持两层（Fuzzy 已由重置清空）；
-    /// 3. 锁外 await 词向量构建；
-    /// 4. 写锁挂载或置 None（构建失败静默降级，记 warn 不阻塞重建）。
+    /// 1. 读锁取已确认词表（canonical + alias，词典池装载已完成）；
+    /// 2. 锁外 `await` 词向量构建（避免写锁跨 await；embedding 不可用 / 词表为空 /
+    ///    构建失败 → 由 `build_fuzzy` 统一记日志并返回 None，两层降级不阻塞重建）；
+    /// 3. 写锁挂载（或置 None）。
     async fn rebuild_keyword_fuzzy(&self) {
         let service = self.keyword_service();
-        let terms = {
+        let (terms, provider) = {
             let guard = read_recover(&service, "app_retriever.keyword_service");
-            guard.canonical_terms()
-        };
-        if terms.is_empty() {
-            return;
-        }
-        let Some(provider) = self.embedding_provider() else {
-            return; // embedding 不可用：Fuzzy 保持 None（两层降级）
+            let terms: Vec<ramaria_core::keyword::KeywordToken> = guard
+                .pool()
+                .established_terms()
+                .into_iter()
+                .cloned()
+                .collect();
+            (terms, self.embedding_provider())
         };
 
-        let fuzzy = match ramaria_memory::keyword::FuzzyKeywordIndex::build(
-            &terms,
-            provider.as_ref(),
-        )
-        .await
-        {
-            Ok(f) => Some(f),
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    entry_count = terms.len(),
-                    "关键词语义层构建失败（两层降级，不阻塞重建）"
-                );
-                None
-            }
-        };
+        let fuzzy =
+            ramaria_memory::keyword::KeywordService::build_fuzzy(&terms, provider.as_deref()).await;
+
         let mut guard = write_recover(&service, "app_retriever.keyword_service");
         guard.set_fuzzy(fuzzy);
     }
@@ -312,7 +299,8 @@ impl App {
     ///
     /// 说明:
     /// - settings 键 `bm25_index_version` 缺失/不可解析视为旧版本（=1）。
-    /// - keyword_pool 规范词加载失败 → 记 warn 并返回 `apply_dictionary=false`，
+    /// - 词典来源为**已确认词表**（canonical + alias，排除 pending），与关键词镜像
+    ///   `KeywordPoolSnapshot` 同口径；加载失败 → 记 warn 并返回 `apply_dictionary=false`，
     ///   调用方保留既有的已注入分词器（已迁移索引不因一次读取失败回退口径）。
     /// - 仅当版本为旧版、且词典加载成功且非空时返回 `mark_v2=true`
     ///   （词典为空时重建与旧版等价，无需升级标记）。
@@ -325,12 +313,12 @@ impl App {
             }
         };
 
-        let dictionary = match self.storage.list_canonical_keywords().await {
+        let dictionary = match self.storage.list_established_keywords().await {
             Ok(kws) => kws,
             Err(e) => {
                 tracing::warn!(
                     error = %e,
-                    "加载 keyword_pool 规范词失败，本轮重建保留既有分词口径"
+                    "加载 keyword_pool 已确认词表失败，本轮重建保留既有分词口径"
                 );
                 return Bm25MigrationPlan {
                     dictionary: Vec::new(),

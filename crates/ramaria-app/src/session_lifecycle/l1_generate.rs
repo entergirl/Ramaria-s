@@ -324,7 +324,7 @@ impl SessionLifecycle {
     /// - 否则：委托 [`Self::generate_l1_summary`]（v1.6 行为，单条 L1）。
     ///
     /// 封存语义:
-    /// - 长会话在封存时按 `tail_msg_count` 切段，尾段覆盖最新对话（封存只摘要尾部）；
+    /// - 长会话在封存时按 `tail_msg_count` 切段、全段生成，尾段覆盖最新对话；
     /// - L2 事件提取仍按封存触发（`check_l2_trigger` → `list_unabsorbed_l1` 天然包含段 L1）。
     ///
     /// 参数:
@@ -438,17 +438,22 @@ impl SessionLifecycle {
     /// - KeywordService 未注入 → 静默跳过（等同旧版行为）。
     /// - 锁中毒 → 记 warn 并取回内部数据继续（不中断镜像增量）。
     /// - 镜像维护为纯内存操作，不可失败；异常仅记 warn，不阻塞 L1 生成主流程。
+    /// - 语义层（Fuzzy）不随增量重建（embedding 构建成本高，留待全量索引重建）；
+    ///   词表变化后按节流 warn 提示"语义层陈旧"，供观测与后续接线。
     fn index_l1_into_keyword_service(&self, doc: &L1DocView) {
         let service = lock_recover(&self.keyword_service, "l1_generate.keyword_service").clone();
         let Some(service_arc) = service else {
             return; // 未注入（向后兼容）
         };
+        let now_ms = ramaria_core::types::now_ms();
         let mut guard = write_recover(&service_arc, "l1_generate.keyword_service");
         // 词典池累积：解析文档 keywords 字段（逗号分隔串）为标准化 token
         let tokens = ramaria_memory::keyword::CommaSeparatedNormalizer
             .normalize(doc.keywords.as_deref().unwrap_or(""));
         guard.index_l1(doc);
-        guard.upsert_pool_tokens(&tokens, ramaria_core::types::now_ms());
+        guard.upsert_pool_tokens(&tokens, now_ms);
+        // 语义层陈旧可观测：词表已增量变化但语义层未重建（节流 5 分钟，日志不含词条文本）
+        guard.warn_if_fuzzy_stale(now_ms);
         info!(
             l1_id = %doc.id,
             token_count = tokens.len(),

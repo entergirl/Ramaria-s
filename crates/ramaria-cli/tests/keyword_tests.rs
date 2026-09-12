@@ -314,6 +314,46 @@ async fn keyword_alias_confirm_flow() {
     assert_eq!(alias.canonical_keyword.as_deref(), Some("工作压力"));
 }
 
+/// 已合并（alias）词条再次 confirm：幂等成功（不报 exit 4、不重复写库）。
+#[tokio::test]
+async fn keyword_alias_confirm_already_merged_is_idempotent_success() {
+    let pool = setup_pool().await;
+    seed_pending(&pool).await;
+
+    // 首次确认：pending → alias
+    run(
+        &pool,
+        KeywordCmd::Alias(AliasAction::Confirm {
+            alias: "职场焦虑".into(),
+        }),
+        true,
+        true,
+    )
+    .await
+    .expect("首次 confirm 应成功");
+
+    // 再次确认：目标状态已达成 → 幂等成功（不返回业务错误）
+    run(
+        &pool,
+        KeywordCmd::Alias(AliasAction::Confirm {
+            alias: "职场焦虑".into(),
+        }),
+        true,
+        true,
+    )
+    .await
+    .expect("已合并别名再次 confirm 应幂等成功");
+
+    // 状态与指向保持不变
+    let entries = kw_repo::list_entries(&pool).await.unwrap();
+    let merged = entries
+        .iter()
+        .find(|e| e.keyword == "职场焦虑")
+        .expect("词条应保留");
+    assert_eq!(merged.alias_status.as_deref(), Some("alias"));
+    assert_eq!(merged.canonical_keyword.as_deref(), Some("工作压力"));
+}
+
 #[tokio::test]
 async fn keyword_alias_reject_flow() {
     let pool = setup_pool().await;

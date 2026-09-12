@@ -8,7 +8,7 @@
 //! - 双画像支持——分别为导出者和对方创建独立 persona
 //! - `--persona` 向后兼容，行为等同于 `--persona-self-name`
 //! - L1 摘要 persona_uid 存 NULL，不绑定特定画像（避免记忆视图污染）
-//! - Persona 自动管理：查找或创建 source="qq" 的 persona（UID 生成策略: uin > uid > seq）
+//! - Persona 自动管理：查找或创建 source="qq" 的 persona（UID 生成策略: 显式指定 > uin > uid > seq）
 //! - 解析报告输出到 stderr 提示，数据输出遵循 stdout 纯净性（--json 信封）
 //! - 确认规则（M1 B 项）：`--yes` 自动确认；非 TTY 且无 `--yes` 不挂起、直接失败提示
 //! - 使用 ramaria-importer crate 做格式检测、解析和写入
@@ -306,17 +306,16 @@ pub async fn run(
         crate::ui::info("⚡ 执行快速导入（L0 → 触发 L1 摘要生成）...");
     }
 
-    let (sessions_written, messages_written, session_ids) =
-        ramaria_importer::writer::ImportWriter::write_l0(
-            pool,
-            &sessions,
-            self_persona_uid.as_deref(),
-            other_persona_uid.as_deref(),
-            &report.self_id,
-            args.side,
-        )
-        .await
-        .context("导入写入失败")?;
+    let outcome = ramaria_importer::writer::ImportWriter::write_l0(
+        pool,
+        &sessions,
+        self_persona_uid.as_deref(),
+        other_persona_uid.as_deref(),
+        &report.self_id,
+        args.side,
+    )
+    .await
+    .context("导入写入失败")?;
 
     // Step 6.5: 为每个导入的 session 触发 L1 摘要生成
     // L1 摘要 persona_uid 存 NULL
@@ -324,7 +323,7 @@ pub async fn run(
     let mut l1_ok = 0u32;
     let mut l1_skip = 0u32;
     let mut l1_err = 0u32;
-    for sid in &session_ids {
+    for sid in &outcome.session_ids {
         match app.regenerate_l1(*sid, None, None, None).await {
             Ok(Some(_)) => l1_ok += 1,
             Ok(None) => l1_skip += 1,
@@ -350,8 +349,15 @@ pub async fn run(
     // Step 7: 结果输出
     crate::ui::success(&format!(
         "✅ 导入完成: {} 个 session，{} 条消息",
-        sessions_written, messages_written
+        outcome.sessions_written, outcome.messages_written
     ));
+
+    if outcome.messages_dropped > 0 {
+        crate::ui::warn(&format!(
+            "⚠️  {} 条消息因画像缺失被丢弃",
+            outcome.messages_dropped
+        ));
+    }
 
     if report.total_skipped() > 0 {
         crate::ui::warn(&format!(
@@ -371,9 +377,10 @@ pub async fn run(
     if args.json {
         let data = serde_json::json!({
             "imported": true,
-            "sessions_written": sessions_written,
-            "messages_written": messages_written,
-            "session_ids": session_ids.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            "sessions_written": outcome.sessions_written,
+            "messages_written": outcome.messages_written,
+            "messages_dropped": outcome.messages_dropped,
+            "session_ids": outcome.session_ids.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
             "l1": {"ok": l1_ok, "skip": l1_skip, "err": l1_err},
             "skipped": report.total_skipped(),
         });

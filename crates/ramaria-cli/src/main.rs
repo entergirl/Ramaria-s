@@ -503,7 +503,7 @@ enum ImportCmd {
         #[arg(long)]
         persona_self_name: Option<String>,
 
-        /// 导出者 persona UID（可选，留空按优先级自动生成: uin > uid > seq）
+        /// 导出者 persona UID（可选，留空按优先级自动生成: 显式指定 > uin > uid > seq）
         #[arg(long)]
         persona_self_uid: Option<String>,
 

@@ -446,22 +446,32 @@ pub async fn import_qq_chat(
         "准备执行快速导入"
     );
 
-    let (sessions_written, messages_written, session_ids) =
-        ramaria_importer::writer::ImportWriter::write_l0(
-            &state.pool,
-            &sessions,
-            self_persona_uid_resolved.as_deref(),
-            other_persona_uid_resolved.as_deref(),
-            &report.self_id,
-            import_side,
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "导入写入失败");
-            format!("导入写入失败: {}", e)
-        })?;
+    let outcome = ramaria_importer::writer::ImportWriter::write_l0(
+        &state.pool,
+        &sessions,
+        self_persona_uid_resolved.as_deref(),
+        other_persona_uid_resolved.as_deref(),
+        &report.self_id,
+        import_side,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "导入写入失败");
+        format!("导入写入失败: {}", e)
+    })?;
 
-    tracing::info!(sessions_written, messages_written, "L0 写入完成");
+    tracing::info!(
+        sessions_written = outcome.sessions_written,
+        messages_written = outcome.messages_written,
+        messages_dropped = outcome.messages_dropped,
+        "L0 写入完成"
+    );
+    if outcome.messages_dropped > 0 {
+        tracing::warn!(
+            messages_dropped = outcome.messages_dropped,
+            "导入存在因画像缺失被丢弃的消息（不记录消息内容）"
+        );
+    }
 
     // Step 4.5: 为每个导入的 session 生成 L1 摘要（双方 persona 各一份）
     //
@@ -475,7 +485,7 @@ pub async fn import_qq_chat(
     //
     // 影响：LLM 调用量翻倍（N session × 2），但这是正确语义的必要代价。
     let app = state.app.clone();
-    let sids = session_ids.clone();
+    let sids = outcome.session_ids.clone();
     let is_deep = import_mode == ramaria_importer::ImportMode::Deep;
     let total_sids = sids.len();
     // 单侧模式（side=self/other）下，跳过侧 persona 为 None → 该侧 L1 摘要不生成
@@ -718,14 +728,18 @@ pub async fn import_qq_chat(
     let chat_name = report.chat_name;
 
     // 将 session_ids (Vec<Uuid>) 转为 Vec<String> 供前端使用
-    let session_id_strings: Vec<String> = session_ids.iter().map(|id| id.to_string()).collect();
+    let session_id_strings: Vec<String> = outcome
+        .session_ids
+        .iter()
+        .map(|id| id.to_string())
+        .collect();
 
     let result = ImportResult {
         success: true,
         mode: mode_str.clone(),
         report_summary,
-        sessions_written,
-        messages_written,
+        sessions_written: outcome.sessions_written,
+        messages_written: outcome.messages_written,
         persona_uid: self_persona_uid_resolved,
         persona_name: self_name.clone(),
         other_persona_uid: other_persona_uid_resolved,
@@ -738,8 +752,8 @@ pub async fn import_qq_chat(
     };
 
     tracing::info!(
-        sessions = sessions_written,
-        messages = messages_written,
+        sessions = result.sessions_written,
+        messages = result.messages_written,
         mode = %result.mode,
         self_persona = ?result.persona_uid.as_deref().map(mask_id),
         other_persona = ?result.other_persona_uid.as_deref().map(mask_id),

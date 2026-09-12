@@ -20,10 +20,10 @@ use crate::behavior::{BehaviorRule, FeedbackLog};
 use crate::error::RamariaResult;
 use crate::keyword::KeywordPoolRow;
 use crate::types::{
-    BackendConfig, ClusterSnapshot, EventRelation, EventSource, MemoryEvent, MemoryL1, Message,
-    MessageRole, ModelCapability, Persona, PersonaEventAggregate, PersonaExample, PersonaFact,
-    PersonaStyleStats, PersonalityTrait, PrivacyConsent, ProfileField, Session, TraitEvidence,
-    TraitStatus, UttBlock,
+    BackendConfig, ClusterSnapshot, EventBatchWrite, EventRelation, EventSource, MemoryEvent,
+    MemoryL1, Message, MessageRole, ModelCapability, Persona, PersonaEventAggregate,
+    PersonaExample, PersonaFact, PersonaStyleStats, PersonalityTrait, PrivacyConsent, ProfileField,
+    Session, TraitEvidence, TraitStatus, UttBlock,
 };
 
 // =========================================================
@@ -700,6 +700,20 @@ pub trait StoreCrud: Send + Sync {
     async fn save_event_source(&self, event_id: i64, l1_id: Uuid, weight: f64)
     -> RamariaResult<()>;
 
+    /// 单事务写入事件批次（事件 + 来源 + 关系 + L1 吸收标记）。
+    ///
+    /// 语义:
+    /// - 全事务：任一步失败整体回滚，杜绝"事件半写入/证据链缺失"；
+    /// - `EventBatchWrite` 内的下标越界返回 `Validation` 错误；
+    /// - 默认实现返回 `Unsupported`（未覆写的 mock 调用时错误可见）。
+    ///
+    /// 返回:
+    /// - 按 `batch.events` 顺序一一对应的事件数据库 id。
+    async fn save_event_batch(&self, batch: &EventBatchWrite) -> RamariaResult<Vec<i64>> {
+        let _ = batch;
+        Err(crate::error::RamariaError::unsupported("save_event_batch"))
+    }
+
     /// 查询指定事件的所有溯源 L1 记录。
     ///
     /// 职责:
@@ -920,9 +934,20 @@ pub trait StoreCrud: Send + Sync {
 
     /// 列出 keyword_pool 全部规范词文本（canonical_id IS NULL 的词条）。
     ///
-    /// 用途: BM25 词典增强分词装载（keyword_pool 规范词 → 分词词典）。
+    /// 说明: 生产词典装载（BM25 增强分词等）请优先用 `list_established_keywords`
+    /// （canonical + 已确认 alias，与内存侧 `KeywordPool::established_terms` 同口径）；
+    /// 本方法保留给仅需规范词集合的调用方。
     /// 默认实现返回空列表（存量 mock 无需实现即可编译）。
     async fn list_canonical_keywords(&self) -> RamariaResult<Vec<String>> {
+        Ok(Vec::new())
+    }
+
+    /// 列出 keyword_pool 已确认词表文本（canonical + 已确认 alias，排除 pending）。
+    ///
+    /// 用途: 与内存侧 `KeywordPool::established_terms` 同口径的词表装载
+    /// （BM25 词典增强分词等）；口径映射见 storage 侧 repo 实现注释。
+    /// 默认实现返回空列表（存量 mock 无需实现即可编译）。
+    async fn list_established_keywords(&self) -> RamariaResult<Vec<String>> {
         Ok(Vec::new())
     }
 

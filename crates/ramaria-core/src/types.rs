@@ -1436,6 +1436,28 @@ impl EventSource {
     }
 }
 
+/// 事件批次写入请求：把一批事件、其来源链接、事件关系与 L1 吸收标记放进单事务。
+///
+/// 职责:
+/// - 承载 L2 事件提取管线单次运行的整批写入结果，供存储层原子落库；
+/// - 任一环节失败时整体回滚，杜绝"事件半写入 / 证据链缺失"，
+///   使上层失败重试不会产生半批数据。
+///
+/// 下标约定:
+/// - `sources` / `relations` 中的下标均指向 `events` 数组位置
+///   （事件数据库 id 由事务内自增分配，写入前未知）。
+#[derive(Debug, Clone, Default)]
+pub struct EventBatchWrite {
+    /// 待写入事件（顺序与返回值 `event_ids` 一一对应）
+    pub events: Vec<MemoryEvent>,
+    /// 来源链接：(事件在 events 中的下标, L1 id, 权重)
+    pub sources: Vec<(usize, Uuid, f64)>,
+    /// 事件关系：(from 事件下标, to 事件下标, 关系类型, 权重)
+    pub relations: Vec<(usize, usize, EventRelationKind, f64)>,
+    /// 随本事务一并标记为已吸收的 L1 id（空则不执行 UPDATE）
+    pub absorbed_l1_ids: Vec<Uuid>,
+}
+
 /// 性格证据链——性格标签与事件之间的支撑/矛盾关系。
 ///
 /// 职责:

@@ -351,14 +351,35 @@ async fn run_alias_resolve(
             )))
         })?;
 
-    // 预取词条现状：非 pending 直接报业务错误；pending 则取规范词文本用于提示
+    // 预取词条现状：
+    // - confirm 且已是 alias（已合并）→ 幂等成功（目标状态已达成，不重复写库）；
+    // - 其余非 pending → 业务错误（exit 4）。
     let entry = find_entry(pool, &token).await?.ok_or_else(|| {
         anyhow::anyhow!(RamariaError::validation(format!("关键词 '{alias}' 不存在")))
     })?;
-    if status_of(&entry) != "pending" {
+    let status = status_of(&entry);
+    if status != "pending" {
+        if confirm && status == "alias" {
+            let canonical_text = entry
+                .canonical_keyword
+                .as_deref()
+                .unwrap_or("（规范词缺失）");
+            if json {
+                let data = serde_json::json!({
+                    "alias": alias,
+                    "canonical_keyword": canonical_text,
+                    "status": "alias",
+                    "already_applied": true,
+                });
+                return json::emit_ok(&data);
+            }
+            crate::ui::info(&format!(
+                "别名 '{alias}' 已是合并状态（→ 规范词 '{canonical_text}'），无需重复确认"
+            ));
+            return Ok(());
+        }
         return Err(anyhow::anyhow!(RamariaError::validation(format!(
-            "关键词 '{alias}' 当前状态为 {}，不是待确认别名（pending），无法{}；请先用 alias list 查看待确认冲突",
-            status_of(&entry),
+            "关键词 '{alias}' 当前状态为 {status}，不是待确认别名（pending），无法{}；请先用 alias list 查看待确认冲突",
             if confirm { "确认合并" } else { "驳回" }
         ))));
     }

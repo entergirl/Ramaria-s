@@ -696,6 +696,11 @@ impl StoreCrud for MockStorage {
         Ok(self.canonical_keywords.lock().unwrap().clone())
     }
 
+    /// 已确认词表（Mock 中与规范词同源；生产侧为 canonical + alias，排除 pending）。
+    async fn list_established_keywords(&self) -> RamariaResult<Vec<String>> {
+        Ok(self.canonical_keywords.lock().unwrap().clone())
+    }
+
     async fn list_keyword_pool_entries(&self) -> RamariaResult<Vec<KeywordPoolRow>> {
         // 供 app 层关键词服务镜像测试：把注入的规范词转成装载行（自增 rowid 模拟 DB）
         Ok(self
