@@ -5,14 +5,14 @@
 //! - migration runner：空库自动执行全部 migration 文件
 //! - WAL 模式默认启用，连接池最大 2 连接（本地应用场景）
 //! - 测试模式支持 `sqlite::memory:` 内存数据库
-//! - 开发模式默认路径 `rust/.ramaria-dev/assistant.db`
+//! - 开发模式默认路径 `main/.ramaria-dev/assistant.db`（相对进程工作目录）
 
 use ramaria_core::error::{RamariaError, RamariaResult};
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::path::PathBuf;
 
-/// 默认开发数据库路径（相对于 workspace 根 `rust/`）。
+/// 默认开发数据库路径（相对进程工作目录；仓库内运行时即 workspace 根 `main/`）。
 const DEV_DB_RELATIVE_PATH: &str = ".ramaria-dev/assistant.db";
 
 /// 初始化数据库连接池并执行 migration。
@@ -20,7 +20,7 @@ const DEV_DB_RELATIVE_PATH: &str = ".ramaria-dev/assistant.db";
 /// 参数:
 /// - `db_path`: 可选显式数据库路径。为 None 时按优先级查找：
 /// 1. `RAMARIA_DATA_DIR` 环境变量 + `/assistant.db`
-/// 2. 开发模式默认路径 `rust/.ramaria-dev/assistant.db`
+/// 2. 开发模式默认路径 `main/.ramaria-dev/assistant.db`（相对进程工作目录）
 ///
 /// 返回:
 /// - 成功时返回已连接且已执行 migration 的连接池。

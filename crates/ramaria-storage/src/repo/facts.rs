@@ -7,7 +7,7 @@
 
 use crate::repo::StorageResultExt;
 use crate::repo::parse_uuid_optional;
-use ramaria_core::error::RamariaResult;
+use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::types::{FactSource, FactStatus, FactTier, PersonaFact, ProfileField};
 use sqlx::SqlitePool;
 
@@ -199,6 +199,8 @@ pub async fn list_all_by_persona(
 /// 说明:
 /// - 同一事务内完成"旧 superseded + 新 insert"，避免中间态（覆盖写原子化）。
 /// - `old` 为被覆盖的 active 事实；`f` 为新事实（id 应为 0，由本函数回填）。
+/// - `old` 必须仍为 active；若已被其他路径置为 superseded，则返回 `Validation`
+///   错误并回滚（不产生第二条 active）。
 /// - 返回新事实 id。
 pub async fn save_with_version(
     pool: &SqlitePool,
@@ -207,13 +209,25 @@ pub async fn save_with_version(
 ) -> RamariaResult<i64> {
     let mut tx = pool.begin().await.storage_err("开启事实覆盖事务失败")?;
 
-    // 1. 旧事实置 superseded
-    sqlx::query("UPDATE persona_facts SET status = 'superseded', updated_at = ? WHERE id = ?")
-        .bind(f.updated_at)
-        .bind(old.id)
-        .execute(&mut *tx)
-        .await
-        .storage_err("覆盖旧事实失败")?;
+    // 1. 旧事实置 superseded（仅当仍为 active，阻断并发覆盖导致的版本链分叉）
+    let result = sqlx::query(
+        "UPDATE persona_facts SET status = 'superseded', updated_at = ? \
+         WHERE id = ? AND status = 'active'",
+    )
+    .bind(f.updated_at)
+    .bind(old.id)
+    .execute(&mut *tx)
+    .await
+    .storage_err("覆盖旧事实失败")?;
+
+    // 旧事实已不是 active（并发覆盖 / 调用方传入过期 old）：回滚本次覆盖，
+    // 避免同 field 出现多条 active。
+    if result.rows_affected() == 0 {
+        return Err(RamariaError::validation(format!(
+            "事实 {} 已不是 active 状态（可能已被并发覆盖），本次覆盖放弃；请重新读取最新版本后重试",
+            old.id
+        )));
+    }
 
     // 2. 新事实写入并回填 id
     let new_id = sqlx::query_scalar::<_, i64>(

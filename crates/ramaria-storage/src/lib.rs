@@ -1,7 +1,7 @@
 //! crates/ramaria-storage/src/lib.rs - Ramaria SQLite 存储层
 //!
 //! 设计特点:
-//! - 封装 SqlitePool，实现 `StoreCrud` + `StoreInfrastructure`（= `StorageBackend`，覆盖 27 张表）
+//! - 封装 SqlitePool，实现 `StoreCrud` + `StoreInfrastructure`（= `StorageBackend`，对应 schema 27 张表；`pending_push` 预留未接线）
 //! - Repository 模式：每个子模块负责一类实体的 SQL 操作与行映射
 //! - 所有可恢复错误统一转换为 RamariaError::Storage
 //! - 手动行映射避免 sqlx derive 侵入 core 层，保持零 I/O 约束
@@ -10,7 +10,7 @@
 
 use ramaria_core::behavior::{BehaviorRule, FeedbackLog};
 use ramaria_core::config::CacheEviction;
-use ramaria_core::error::RamariaResult;
+use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::keyword::KeywordPoolRow;
 use ramaria_core::traits::{StoreCrud, StoreInfrastructure};
 use ramaria_core::types::{
@@ -399,13 +399,11 @@ impl StoreCrud for SqliteStorage {
     // Keyword Pool（关键词词典）
     // =========================================================
     async fn upsert_keyword(&self, keyword: &str) -> RamariaResult<()> {
-        // 将 &str 转换为 KeywordToken 后委托 repo
-        if let Some(token) = ramaria_core::keyword::KeywordToken::new(keyword) {
-            repo::keyword::upsert(&self.pool, &token).await
-        } else {
-            tracing::warn!(keyword, "关键词无效，跳过 upsert");
-            Ok(())
-        }
+        // keyword_pool 只接受标准化后的合法词条；非法 token 显式报错，
+        // 避免"仅 warn 后 Ok(())"让调用方误以为写入成功（静默丢词）。
+        let token = ramaria_core::keyword::KeywordToken::new(keyword)
+            .ok_or_else(|| RamariaError::validation("关键词非法（空/超长），拒绝写入词条池"))?;
+        repo::keyword::upsert(&self.pool, &token).await
     }
     async fn list_keywords(&self) -> RamariaResult<Vec<String>> {
         let tokens = repo::keyword::list_all(&self.pool).await?;
@@ -2610,5 +2608,93 @@ mod tests {
             cache.get("k2").await.unwrap().is_none(),
             "LRU 应淘汰未命中的 k2"
         );
+    }
+
+    /// 复合索引齐备（过滤列 + 排序列成对，列表查询不再建临时 B-tree）。
+    #[tokio::test]
+    async fn schema_pair_indexes_present() {
+        let storage = setup().await;
+        let expected = [
+            "idx_messages_persona_created",
+            "idx_messages_session_created",
+            "idx_memory_l1_persona_created",
+            "idx_memory_events_persona_created",
+            "idx_utt_blocks_session_created",
+        ];
+        for name in expected {
+            let found: Option<String> = sqlx::query_scalar(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?",
+            )
+            .bind(name)
+            .fetch_optional(&storage.pool)
+            .await
+            .unwrap();
+            assert_eq!(found.as_deref(), Some(name), "缺少复合索引 {name}");
+        }
+    }
+
+    /// 非法关键词必须显式报错（不再 warn 后 Ok，避免静默丢词）。
+    #[tokio::test]
+    async fn upsert_keyword_rejects_invalid_token() {
+        let storage = setup().await;
+        let err = storage.upsert_keyword("").await.expect_err("空串应拒绝");
+        assert!(matches!(err, RamariaError::Validation { .. }));
+        // 合法词条仍可正常写入
+        storage.upsert_keyword("工作").await.unwrap();
+    }
+
+    /// 版本链并发防护：同一旧事实被覆盖两次时，第二次返回冲突且不产生第二条 active。
+    #[tokio::test]
+    async fn fact_double_supersede_conflict() {
+        let storage = setup().await;
+        let p = Persona::new(
+            "user-0004".into(),
+            "用户四".into(),
+            PersonaKind::User,
+            1,
+            "local".into(),
+        );
+        storage.create_persona(&p).await.unwrap();
+
+        let mut old = PersonaFact::new(
+            "user-0004".into(),
+            ramaria_core::types::ProfileField::PersonalStatus,
+            "当前情绪：平静".into(),
+            FactSource::Event,
+        );
+        let old_id = storage.save_fact(&old).await.unwrap();
+        old.id = old_id;
+
+        // 第一次覆盖成功
+        let fresh1 = PersonaFact::new(
+            "user-0004".into(),
+            ramaria_core::types::ProfileField::PersonalStatus,
+            "当前情绪：焦虑".into(),
+            FactSource::Event,
+        );
+        storage.save_fact_with_version(&old, &fresh1).await.unwrap();
+
+        // 第二次仍用已 superseded 的 old：必须报冲突，且不得再写入 active
+        let fresh2 = PersonaFact::new(
+            "user-0004".into(),
+            ramaria_core::types::ProfileField::PersonalStatus,
+            "当前情绪：兴奋".into(),
+            FactSource::Event,
+        );
+        let err = storage
+            .save_fact_with_version(&old, &fresh2)
+            .await
+            .expect_err("已 superseded 的旧事实应拒绝再次覆盖");
+        assert!(matches!(err, RamariaError::Validation { .. }));
+
+        let active = storage
+            .list_active_facts_by_field(
+                "user-0004",
+                ramaria_core::types::ProfileField::PersonalStatus,
+            )
+            .await
+            .unwrap();
+        assert_eq!(active.len(), 1, "同 field 只应保留一条 active");
+        assert_eq!(active[0].content, "当前情绪：焦虑");
     }
 }

@@ -9,7 +9,8 @@
 --   需重建（备份 → 重建 → 重新导入 → 数量核对，见升级路径文档）。
 -- - 所有最终列直接写入 CREATE TABLE 定义（不使用增量 ALTER/UPDATE）。
 -- - 时间字段统一 INTEGER（Unix 毫秒）。
--- - 全部使用 CREATE TABLE / CREATE INDEX；空库首次执行即得最终 schema。
+-- - 全部使用 CREATE TABLE / CREATE INDEX（另含 schema_meta 的 2 条版本键 INSERT OR IGNORE）；
+--   空库首次执行即得最终 schema。
 -- =========================================================
 
 -- =========================================================
@@ -67,6 +68,9 @@ CREATE TABLE messages (
 CREATE INDEX idx_messages_session ON messages(session_id);
 CREATE INDEX idx_messages_created_at ON messages(created_at);
 CREATE INDEX idx_messages_persona ON messages(persona_uid);
+-- 列表查询复合索引（过滤列 + 排序列成对，避免每次查询建临时 B-tree）
+CREATE INDEX idx_messages_session_created ON messages(session_id, created_at);
+CREATE INDEX idx_messages_persona_created ON messages(persona_uid, created_at);
 
 CREATE TABLE utt_blocks (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -83,6 +87,7 @@ CREATE TABLE utt_blocks (
 CREATE INDEX idx_utt_blocks_persona ON utt_blocks(persona_uid);
 CREATE INDEX idx_utt_blocks_session ON utt_blocks(session_id);
 CREATE INDEX idx_utt_blocks_created_at ON utt_blocks(created_at);
+CREATE INDEX idx_utt_blocks_session_created ON utt_blocks(session_id, created_at);
 
 -- =========================================================
 -- L1 层 — memory_l1 会话摘要
@@ -109,6 +114,7 @@ CREATE TABLE memory_l1 (
 CREATE INDEX idx_memory_l1_session ON memory_l1(session_id);
 CREATE INDEX idx_memory_l1_absorbed ON memory_l1(absorbed);
 CREATE INDEX idx_memory_l1_persona ON memory_l1(persona_uid);
+CREATE INDEX idx_memory_l1_persona_created ON memory_l1(persona_uid, created_at);
 
 -- =========================================================
 -- L2 层 — memory_events（事件层核心，FK→personas）
@@ -140,6 +146,7 @@ CREATE TABLE memory_events (
 );
 CREATE INDEX idx_memory_events_persona_start ON memory_events(persona_uid, start);
 CREATE INDEX idx_memory_events_share ON memory_events(share);
+CREATE INDEX idx_memory_events_persona_created ON memory_events(persona_uid, created_at);
 
 CREATE TABLE event_relations (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -169,6 +176,9 @@ CREATE TABLE event_sources (
 -- - version_of: 覆盖时新事实指向被替换事实 id；由旧事实经 supersede 置 superseded。
 -- - confidence: 0.0..1.0；主观隐含事实初始 0.5 入 candidate 轨道。
 -- - 检索与注入只取 status = 'active'。
+-- - 唯一性: 当前不加 (persona_uid, field) WHERE status='active' 的部分唯一索引——
+--   低置信互证提升路径会新增同 field 的 active（同 field 多 active 并存口径待定）；
+--   版本链并发分叉由 save_with_version 的 status='active' 守卫阻断。
 
 CREATE TABLE persona_facts (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -287,7 +297,7 @@ CREATE TABLE keyword_pool (
     use_count    INTEGER NOT NULL DEFAULT 0,
     last_used_at INTEGER,
     created_at   INTEGER NOT NULL,
-    canonical_id INTEGER,
+    canonical_id INTEGER,           -- 指向规范词条目的隐式 rowid；禁止对 keyword_pool 执行 VACUUM（会重排 rowid）
     alias_status TEXT    -- confirmed / pending / canonical
 );
 CREATE INDEX idx_keyword_alias ON keyword_pool(alias_status);
@@ -346,6 +356,7 @@ CREATE TABLE background_jobs (
 -- 基础设施层 — 推送 / 设置
 -- =========================================================
 
+-- 预留表：当前无仓储实现与调用方（推送能力未接线）
 CREATE TABLE pending_push (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     content    TEXT NOT NULL,

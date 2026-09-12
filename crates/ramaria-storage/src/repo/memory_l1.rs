@@ -327,14 +327,16 @@ pub async fn assign_persona_uid(
     let mut assigned = 0usize;
 
     for chunk in l1_ids.chunks(BATCH_SIZE) {
-        let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
+        // 命名占位符：?1 = persona_uid，?2..?N = l1 id。
+        // 不可混用匿名 `?`（sqlx 会自行为其编号，与手写编号撞车）。
+        let placeholders: Vec<String> = (0..chunk.len()).map(|i| format!("?{}", i + 2)).collect();
         let sql = format!(
-            "UPDATE memory_l1 SET persona_uid = ? \
+            "UPDATE memory_l1 SET persona_uid = ?1 \
              WHERE persona_uid IS NULL AND absorbed = 0 AND id IN ({})",
             placeholders.join(", ")
         );
 
-        // 参数顺序：第 1 个是 persona_uid，其余是 L1 id（与 SQL 占位符一一对应）
+        // 参数顺序：第 1 个是 persona_uid（?1），其余是 L1 id（?2..?N）
         let mut q = sqlx::query(&sql).bind(persona_uid);
         for id in chunk {
             q = q.bind(id.to_string());

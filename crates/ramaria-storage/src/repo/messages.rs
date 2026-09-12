@@ -230,7 +230,7 @@ pub async fn list_by_session_paginated(
         .collect::<RamariaResult<Vec<_>>>()
 }
 
-// 预留给 v1.6 跨文件导入去重（可选立项，见 docs/dev-1.6/备忘.md D-26-21）
+// 跨文件导入去重：导入器按 import_fingerprint 查询消息是否已入库
 pub async fn find_by_fingerprint(
     pool: &SqlitePool,
     fingerprint: &str,

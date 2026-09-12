@@ -43,8 +43,8 @@ impl RuleRow {
     ///
     /// 返回:
     /// - `Ok(rule)`: 解析成功。
-    /// - `Err(Validation)`: situation/params 等必需 JSON 损坏（记录 warn 并传播错误，
-    ///   由上层决定重试或跳过——不静默吞掉损坏数据）。
+    /// - `Err(Validation)`: situation/params/avoid/evidence 任一 JSON 损坏一律返回错误，
+    ///   不再降级为空列表（防止读-改-写把降级值固化、永久清空证据链）。
     fn into_rule(self) -> RamariaResult<BehaviorRule> {
         let situation: BehaviorSituation = serde_json::from_str(&self.situation).map_err(|e| {
             RamariaError::validation(format!(
@@ -58,21 +58,19 @@ impl RuleRow {
                 self.id, e
             ))
         })?;
-        let avoid: Vec<String> = serde_json::from_str(&self.avoid).unwrap_or_else(|e| {
-            tracing::warn!(
-                rule_id = self.id,
-                "behavior_rules.avoid JSON 损坏，回退空列表: {e}"
-            );
-            Vec::new()
-        });
+        let avoid: Vec<String> = serde_json::from_str(&self.avoid).map_err(|e| {
+            RamariaError::validation(format!(
+                "behavior_rules 行 {} avoid JSON 损坏: {}",
+                self.id, e
+            ))
+        })?;
         let evidence: Vec<BehaviorEvidence> =
-            serde_json::from_str(&self.evidence).unwrap_or_else(|e| {
-                tracing::warn!(
-                    rule_id = self.id,
-                    "behavior_rules.evidence JSON 损坏，回退空列表: {e}"
-                );
-                Vec::new()
-            });
+            serde_json::from_str(&self.evidence).map_err(|e| {
+                RamariaError::validation(format!(
+                    "behavior_rules 行 {} evidence JSON 损坏: {}",
+                    self.id, e
+                ))
+            })?;
 
         Ok(BehaviorRule {
             id: self.id,
@@ -177,6 +175,29 @@ pub async fn list_by_persona(
 /// - 以 `id` 定位，`created_at` 保持不变，`updated_at` 由调用方刷新。
 /// - 行不存在时返回 `Validation` 错误（id 无效）。
 pub async fn update(pool: &SqlitePool, rule: &BehaviorRule) -> RamariaResult<()> {
+    // 覆盖前校验库内原始 JSON 列：损坏时拒绝写入，
+    // 避免把读路径的降级值固化回库、永久清空证据链。
+    let raw: Option<(String, String)> =
+        sqlx::query_as("SELECT avoid, evidence FROM behavior_rules WHERE id = ?")
+            .bind(rule.id)
+            .fetch_optional(pool)
+            .await
+            .storage_err("读取行为规则原始 JSON 列失败")?;
+    let Some((raw_avoid, raw_evidence)) = raw else {
+        return Err(RamariaError::validation(format!(
+            "行为规则 {} 不存在，无法更新",
+            rule.id
+        )));
+    };
+    for (column, raw_json) in [("avoid", &raw_avoid), ("evidence", &raw_evidence)] {
+        if serde_json::from_str::<serde_json::Value>(raw_json).is_err() {
+            return Err(RamariaError::validation(format!(
+                "行为规则 {} 的 {} 列 JSON 已损坏，拒绝覆盖（请先修复原始数据）",
+                rule.id, column
+            )));
+        }
+    }
+
     let situation = serde_json::to_string(&rule.situation)
         .map_err(|e| RamariaError::serialization(format!("序列化 behavior situation 失败: {e}")))?;
     let params = serde_json::to_string(&rule.params)
@@ -412,5 +433,49 @@ mod tests {
         let got = get(&pool, id).await.expect("查询成功").expect("应命中");
         assert_eq!(got.source, RuleSource::Manual);
         assert_eq!(got.source.as_str(), "manual");
+    }
+
+    /// 直接改库注入损坏 JSON（模拟磁盘/外部写入造成的行级损坏）。
+    async fn corrupt_column(pool: &SqlitePool, id: i64, column: &str, value: &str) {
+        let sql = format!("UPDATE behavior_rules SET {column} = ? WHERE id = ?");
+        sqlx::query(&sql)
+            .bind(value)
+            .bind(id)
+            .execute(pool)
+            .await
+            .expect("注入损坏值应成功");
+    }
+
+    #[tokio::test]
+    async fn corrupted_evidence_visible_and_preserved() {
+        let pool = init_test_pool().await.expect("测试库初始化成功");
+        let id = save(&pool, &make_rule("char-0001", Some("文本")))
+            .await
+            .expect("保存成功");
+        corrupt_column(&pool, id, "evidence", "{not-json").await;
+
+        // 读取：损坏显式报错，不再降级为空证据链
+        let err = get(&pool, id).await.expect_err("损坏行应报错");
+        assert!(matches!(err, RamariaError::Validation { .. }));
+        assert!(list_by_persona(&pool, "char-0001").await.is_err());
+
+        // edit（update）拒绝覆盖损坏字段
+        let mut rule = make_rule("char-0001", Some("新文本"));
+        rule.id = id;
+        let err = update(&pool, &rule).await.expect_err("损坏列应拒绝覆盖");
+        assert!(matches!(err, RamariaError::Validation { .. }));
+
+        // enable 不受影响；损坏的原始值必须原样保留（证据链未被清空）
+        set_enabled(&pool, id, false)
+            .await
+            .expect("切换启用状态成功");
+        let raw: (String, bool) =
+            sqlx::query_as("SELECT evidence, enabled FROM behavior_rules WHERE id = ?")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("读取原始列成功");
+        assert_eq!(raw.0, "{not-json", "损坏的 evidence 不得被写回覆盖");
+        assert!(!raw.1);
     }
 }

@@ -3,7 +3,7 @@
 //! 设计特点:
 //! - 管理 `llm_response_cache` 表（v1.5 新增），LLM 响应精确缓存的持久化读写
 //! - key 为 sha256 哈希（只存响应不存原文输入，隐私红线）
-//! - get 命中时原子更新 last_accessed_at / hit_count（LRU 淘汰依据）
+//! - get 命中后以独立语句刷新 last_accessed_at / hit_count（失败仅 warn，不阻断命中返回）
 //! - evict_oldest 按访问时间（LRU）或写入时间（FIFO）淘汰最旧条目
 //! - put 使用 INSERT OR REPLACE，同 key 覆盖（key 即业务语义主键）
 
@@ -41,8 +41,8 @@ pub struct LlmCacheEntry {
 /// 按 key 查询缓存条目。
 ///
 /// 说明:
-/// - 命中时在同一事务内更新 `last_accessed_at` 与 `hit_count`，
-///   供 LRU 淘汰与审计统计使用。
+/// - 命中后以独立 UPDATE 语句刷新 `last_accessed_at` 与 `hit_count`
+///   （失败仅 warn、不阻断本次命中返回），供 LRU 淘汰与审计统计使用。
 /// - 未命中返回 `Ok(None)`，不视为错误。
 pub async fn get(
     pool: &SqlitePool,

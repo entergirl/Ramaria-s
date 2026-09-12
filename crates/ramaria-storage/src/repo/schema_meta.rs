@@ -2,7 +2,7 @@
 //!
 //! 设计特点:
 //! - 通过 key-value 表管理 schema_version 和 index_version
-//! - schema_version 在 migration 时写入，启动时校验——不匹配则阻止启动
+//! - schema_version 由 migration 写入；get_schema_version 供调用方显式校验（当前无启动期自动拦截）
 //! - index_version 由应用层管理，索引重建后递增
 //! - 版本值统一解析为 i32，非法值时返回 Storage 错误而非静默回退
 

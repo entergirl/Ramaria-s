@@ -498,35 +498,31 @@ pub async fn find_rowid(pool: &SqlitePool, keyword: &str) -> RamariaResult<Optio
 /// - `keyword`: 标准化后的规范词（KeywordToken Newtype）。
 ///
 /// 返回:
-/// - `true`: 词条原先不存在，已新插入（use_count 从 0 起，表示未经自然出现累积）。
+/// - `true`: 本次新插入（use_count 从 0 起，表示未经自然出现累积）。
 /// - `false`: 词条已存在，**保持已有行完全不动**（use_count/别名状态均不修改）。
 ///
 /// 说明:
+/// - 由主键冲突直接 DO NOTHING 保证并发幂等：并发调用同一词条恰好插入一次，
+///   不存在"先查后插"两方都判定不存在、第二次插入报错的竞态窗口。
 /// - 已存在词条即使为 pending/alias 也不触碰、不提示——由调用方依 `list_entries`
 ///   行视图判断现状（如"已是别名/待确认，可用 alias confirm/reject 处理"）。
 /// - 手工种子供词典增强分词（keyword_pool 规范词 → BigramWithDictionaryNormalizer
 ///   词典）消费，幂等性保证重复执行不递增 use_count、不改别名状态。
 pub async fn seed_canonical(pool: &SqlitePool, keyword: &KeywordToken) -> RamariaResult<bool> {
-    let exists: Option<i64> = sqlx::query_scalar("SELECT 1 FROM keyword_pool WHERE keyword = ?")
-        .bind(keyword.as_str())
-        .fetch_optional(pool)
-        .await
-        .storage_err("查询词条是否已存在失败")?;
-    if exists.is_some() {
-        return Ok(false);
-    }
-
     let now = ramaria_core::types::now_ms();
-    sqlx::query(
+    // 并发幂等：由主键冲突直接 DO NOTHING，不依赖"先查后插"
+    // （后者在并发下存在两方都判定不存在、第二次插入报错的窗口）。
+    let result = sqlx::query(
         "INSERT INTO keyword_pool (keyword, use_count, last_used_at, created_at, canonical_id, alias_status)
-         VALUES (?, 0, NULL, ?, NULL, NULL)",
+         VALUES (?, 0, NULL, ?, NULL, NULL)
+         ON CONFLICT(keyword) DO NOTHING",
     )
     .bind(keyword.as_str())
     .bind(now)
     .execute(pool)
     .await
     .storage_err("种子注入关键词失败")?;
-    Ok(true)
+    Ok(result.rows_affected() > 0)
 }
 
 // =========================================================
@@ -1000,5 +996,47 @@ mod tests {
         assert_eq!(alias.alias_status.as_deref(), Some("alias"));
         assert_eq!(alias.canonical_id, Some(canonical_id));
         assert_eq!(alias.canonical_keyword.as_deref(), Some("工作压力"));
+    }
+
+    #[tokio::test]
+    async fn test_seed_canonical_concurrent_is_idempotent() {
+        let pool = setup().await;
+        let kw = KeywordToken::new("并发词").unwrap();
+        let (a, b) = tokio::join!(seed_canonical(&pool, &kw), seed_canonical(&pool, &kw));
+        let inserted = [a.unwrap(), b.unwrap()];
+        assert_eq!(
+            inserted.iter().filter(|x| **x).count(),
+            1,
+            "并发 seed 同一词条恰好插入一次"
+        );
+        let entries = list_entries(&pool).await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].use_count, 0);
+    }
+
+    /// canonical_id 契约：别名行的 canonical_id 恒等于规范词行的隐式 rowid
+    /// （keyword_pool 无显式 INTEGER 主键，故禁止对该表执行 VACUUM）。
+    #[tokio::test]
+    async fn test_alias_points_to_canonical_rowid() {
+        let pool = setup().await;
+        let (canonical_id, alias_id) = seed_pending(&pool).await;
+        let stored: Option<i64> =
+            sqlx::query_scalar("SELECT canonical_id FROM keyword_pool WHERE rowid = ?")
+                .bind(alias_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            stored,
+            Some(canonical_id),
+            "别名 canonical_id 必须指向规范词 rowid"
+        );
+        assert_eq!(
+            get_canonical_name(&pool, alias_id)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("工作压力")
+        );
     }
 }
