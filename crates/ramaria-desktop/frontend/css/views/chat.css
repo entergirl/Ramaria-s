@@ -201,6 +201,11 @@
   border-color: var(--pink-400) !important;
 }
 
+/* 多气泡：同一回复按 `||` 契约拆分为多条气泡时的紧凑间距 */
+.msg-bubble-wrapper .msg-bubble + .msg-bubble {
+  margin-top: var(--space-1);
+}
+
 /* ── 元数据行（角色标签 + 人格 + 时间） ── */
 .msg-bubble-meta {
   display: flex;

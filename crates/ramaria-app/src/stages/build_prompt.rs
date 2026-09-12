@@ -11,9 +11,8 @@
 use async_trait::async_trait;
 use ramaria_core::traits::StorageBackend;
 use ramaria_core::types::{Persona, ProfileField};
-use ramaria_memory::SHARED_CHAT_STYLE_RULES;
-use ramaria_memory::parse_persona_toml;
 use ramaria_memory::prompt::builder::{PromptConfig, PromptContext, assemble_prompt};
+use ramaria_memory::{parse_persona_toml, resolve_chat_style_rules};
 
 use crate::pipeline::{PipelineContext, PipelineData, PipelineError, PipelineStage};
 
@@ -181,8 +180,8 @@ async fn build_structured_prompt(
         return prompt;
     }
 
-    // 正常路径：CRISPE 装配
-    let rules = resolve_chat_style_rules(persona);
+    // 正常路径：CRISPE 装配（回复规则：显式 E_rules 优先，缺省共享规则）
+    let rules = resolve_chat_style_rules(persona.config.as_deref());
     let ctx = PromptContext {
         persona: Some(persona.clone()),
         facts,
@@ -194,12 +193,13 @@ async fn build_structured_prompt(
         knowledge_boundary: None,
         current_time_str: Some(crate::now_timestamp_str()),
         weather: None,
-        chat_style_rules: Some(rules), // v2.0: 回复规则作为 Experiment 块注入
-        utt_context: None,             // 原文片段由活跃路径（app_chat）注入，本 Stage 未接线
-        bridge_context: None,          // 桥接内容由活跃路径（app_chat）注入，本 Stage 未接线
-        behavior_decision: None,       // 行为路由由活跃路径（app_chat）注入，本 Stage 未接线
-        knowledge_facts: Vec::new(),   // 知识层由活跃路径注入，本 Stage 未接线
-        style_rule_text: None,         // 自动风格规则由活跃路径（app_chat）注入，本 Stage 未接线
+        // 回复规则：显式 E_rules 优先、缺省共享规则；陈述档由 builder 门控回退中性默认
+        chat_style_rules: Some(rules),
+        utt_context: None,    // 原文片段由活跃路径（app_chat）注入，本 Stage 未接线
+        bridge_context: None, // 桥接内容由活跃路径（app_chat）注入，本 Stage 未接线
+        behavior_decision: None, // 行为路由由活跃路径（app_chat）注入，本 Stage 未接线
+        knowledge_facts: Vec::new(), // 知识层由活跃路径注入，本 Stage 未接线
+        style_rule_text: None, // 自动风格规则由活跃路径（app_chat）注入，本 Stage 未接线
     };
 
     let config = PromptConfig {
@@ -217,37 +217,6 @@ async fn build_structured_prompt(
     );
 
     assemble_prompt(&ctx, &config)
-}
-
-/// 解析当前 persona 的聊天回复风格规则。
-///
-/// 优先级:
-/// 1. 若 persona.config 中包含 `E_rules` 块 → 使用自定义规则。
-/// 2. 否则 → 使用共享社交平台口吻模板 `SHARED_CHAT_STYLE_RULES`。
-fn resolve_chat_style_rules(persona: &Persona) -> String {
-    // 尝试从 persona.config 中提取自定义 E_rules
-    if let Some(ref cfg) = persona.config
-        && let Ok(parsed) = ramaria_memory::parse_persona_toml(cfg)
-        && let Some(rules) = parsed
-            .blocks
-            .iter()
-            .find(|(k, _)| k == "E_rules")
-            .map(|(_, v)| v.clone())
-        && !rules.trim().is_empty()
-    {
-        tracing::debug!(
-            persona_uid = %persona.uid,
-            "使用 persona.config 中的自定义 E_rules"
-        );
-        return rules;
-    }
-
-    // 默认使用共享社交平台口吻
-    tracing::debug!(
-        persona_uid = %persona.uid,
-        "使用共享社交平台聊天口吻（无自定义 E_rules）"
-    );
-    SHARED_CHAT_STYLE_RULES.to_string()
 }
 
 // =========================================================
@@ -291,14 +260,8 @@ fn load_persona_toml_fallback(db_config: Option<&str>) -> Option<String> {
         .map(|(_, v)| v.as_str())
         .unwrap_or("");
 
-    let rules_block = parsed
-        .blocks
-        .iter()
-        .find(|(k, _)| k == "E_rules")
-        .map(|(_, v)| v.as_str())
-        .filter(|s| !s.trim().is_empty())
-        // 无自定义 E_rules 时使用共享社交平台口吻
-        .unwrap_or(SHARED_CHAT_STYLE_RULES);
+    // 回复规则：显式 E_rules 优先，缺省回退共享规则（与生产装配路径同一口径）
+    let rules_block = resolve_chat_style_rules(Some(content.as_str()));
 
     let name = &parsed.assistant_name;
     let time_str = crate::now_timestamp_str();

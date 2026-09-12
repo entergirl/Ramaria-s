@@ -80,10 +80,17 @@ fn role_with_persona() {
     let config = PromptConfig::default();
     let result = assemble_prompt(&ctx, &config);
 
-    assert!(result.contains("小明"));
-    assert!(result.contains("虚构角色"));
-    assert!(result.contains("编程"));
-    assert!(result.contains("emoji"));
+    assert!(result.contains("小明"), "角色名注入");
+    assert!(
+        result.contains("你是「小明」，有自己的脾气和说话习惯。"),
+        "kind 行按身份事实渲染"
+    );
+    assert!(
+        result.contains("场景：你在社交软件上和对方即时聊天"),
+        "场景行注入"
+    );
+    assert!(result.contains("编程"), "背景描述注入");
+    assert!(result.contains("emoji"), "手工风格注入");
     // 四层模板 markers
     assert!(result.contains("# 角色（行为层）"));
     assert!(result.contains("# 记忆（脉络层）"));
@@ -97,7 +104,32 @@ fn role_without_persona_uses_default() {
     let config = PromptConfig::default();
     let result = assemble_prompt(&ctx, &config);
     assert!(result.contains("Ramaria"));
-    assert!(result.contains("AI 助手"));
+    assert!(
+        result.contains("场景：你在社交软件上和对方即时聊天"),
+        "默认身份含场景行"
+    );
+    assert!(result.contains("你有自己的说话习惯"), "默认身份行");
+}
+
+/// 角色层与能力边界不再出现"AI 助手"身份声明（有 persona 与默认兜底两态）。
+#[test]
+fn role_and_capacity_never_claim_ai_assistant() {
+    let contexts = [
+        PromptContext {
+            persona: Some(make_test_persona()),
+            ..Default::default()
+        },
+        PromptContext::default(),
+    ];
+    for ctx in contexts {
+        let result = assemble_prompt(&ctx, &PromptConfig::default());
+        assert!(result.contains("# 能力边界"));
+        assert!(result.contains("# 角色（行为层）"));
+        assert!(
+            !result.contains("AI 助手"),
+            "角色层/能力边界不得含助手身份声明: {result}"
+        );
+    }
 }
 
 // ---- 表达层：自动风格规则注入（A3） ----
@@ -125,6 +157,10 @@ fn auto_style_rule_injected_when_no_manual_style() {
     );
     assert!(result.contains("口癖词「哇塞」"), "规则文本在 prompt 中");
     assert!(
+        result.contains("（以下是你的说话习惯。要求：按其表达，不复述该段文字。）"),
+        "自动风格规则带说话习惯引导行"
+    );
+    assert!(
         !result.contains("## 说话风格\n"),
         "无手工风格时不产生手工子段"
     );
@@ -141,6 +177,10 @@ fn manual_style_overrides_auto_rule() {
     let result = assemble_prompt(&ctx, &PromptConfig::default());
     assert!(result.contains("## 说话风格"), "手工风格子段存在");
     assert!(result.contains("热情活泼"), "手工风格内容注入");
+    assert!(
+        result.contains("（以下是你的说话习惯。要求：按其表达，不复述该段文字。）"),
+        "手工风格带说话习惯引导行"
+    );
     assert!(
         !result.contains("## 自动风格规则"),
         "手工覆盖优先，自动规则不注入: {result}"
@@ -310,8 +350,8 @@ fn memory_with_rag_only() {
     let config = PromptConfig::default();
     let result = assemble_prompt(&ctx, &config);
 
-    // 无近期摘要 → 首次对话提示
-    assert!(result.contains("首次对话"));
+    // 无近期摘要 → 无历史对话提示
+    assert!(result.contains("无历史对话"));
     // RAG 结果
     assert!(result.contains("喜欢猫"));
     assert!(result.contains("记忆（脉络层）"));
@@ -327,8 +367,8 @@ fn memory_without_rag_shows_placeholder() {
     let config = PromptConfig::default();
     let result = assemble_prompt(&ctx, &config);
 
-    assert!(result.contains("首次对话"));
-    assert!(result.contains("暂无直接相关的历史记忆"));
+    assert!(result.contains("无历史对话"));
+    assert!(result.contains("无相关记忆"));
 }
 
 #[test]
@@ -351,8 +391,9 @@ fn memory_with_recent_summaries_and_rag() {
     assert!(result.contains("Rust项目"));
     assert!(result.contains("相关历史记忆"));
     assert!(result.contains("橘猫"));
-    // 跨 session 叙事引导句
-    assert!(result.contains("此前与用户进行了"));
+    // 跨 session 叙事引导句（多条摘要 + 延续用途）
+    assert!(result.contains("你和对方聊过："));
+    assert!(result.contains("可据此继续话题"));
 }
 
 #[test]
@@ -366,7 +407,7 @@ fn memory_single_recent_summary() {
     let result = assemble_prompt(&ctx, &config);
 
     assert!(result.contains("近期对话脉络"));
-    assert!(result.contains("你此前与用户讨论过"));
+    assert!(result.contains("你和对方聊过："));
     assert!(result.contains("爬山"));
 }
 
@@ -376,9 +417,13 @@ fn memory_single_recent_summary() {
 fn cross_session_narrative_single() {
     let summaries = vec!["用户今天学习了Rust编程语言".to_string()];
     let narrative = build_cross_session_narrative(&summaries);
-    assert!(narrative.contains("你此前与用户讨论过"));
+    assert!(narrative.contains("你和对方聊过："));
     assert!(narrative.contains("Rust编程"));
     assert!(!narrative.contains("次对话"));
+    assert!(
+        !narrative.contains("可据此继续话题"),
+        "单条摘要不追加延续提示"
+    );
 }
 
 #[test]
@@ -389,8 +434,8 @@ fn cross_session_narrative_multiple() {
         "讨论了Python异步编程".to_string(),
     ];
     let narrative = build_cross_session_narrative(&summaries);
-    assert!(narrative.contains("你此前与用户进行了 3 次对话"));
-    assert!(narrative.contains("不久前"));
+    assert!(narrative.contains("你和对方聊过："));
+    assert!(narrative.contains("可据此继续话题"), "多条摘要给出延续用途");
 }
 
 #[test]
@@ -638,7 +683,7 @@ fn empty_context_produces_valid_prompt() {
 
     assert!(!result.is_empty());
     assert!(result.contains("Ramaria"));
-    assert!(result.contains("首次对话"));
+    assert!(result.contains("无历史对话"));
 }
 
 // =========================================================
@@ -772,7 +817,7 @@ fn assemble_prompt_includes_bridge_section_only_when_present() {
         result2.contains("## 桥接（上一会话尾部）"),
         "桥接段落应出现"
     );
-    assert!(result2.contains("保持连贯"), "应含衔接用途说明");
+    assert!(result2.contains("延续该话题继续对话"), "应含衔接用途说明");
     assert!(result2.contains("上次聊到这里"), "应含桥接原文内容");
 }
 
@@ -882,9 +927,9 @@ fn rama_persona_prompt_semantically_equivalent_to_v13() {
 
     // ---- 语义元素齐全 ----
     let semantic_elements = [
-        "# 能力边界",           // Capacity 安全边界
-        "记住与用户的对话历史", // 核心能力
-        "# 角色（行为层）",     // 角色身份
+        "# 能力边界",             // Capacity 安全边界
+        "你记得和对方过往的对话", // 核心能力
+        "# 角色（行为层）",       // 角色身份
         "Ramaria",
         "## 性格特征", // Insight traits
         "严谨",
@@ -1030,7 +1075,7 @@ fn ablation_b0_omits_memory_and_style_blocks() {
     assert!(!result.contains("## 相关历史记忆"));
     assert!(!result.contains("## 原文片段"));
     assert!(!result.contains("## 桥接"));
-    assert!(!result.contains("首次对话"), "B0 不应出现脉络占位");
+    assert!(!result.contains("无历史对话"), "B0 不应出现脉络占位");
     // 表达层（说话风格 + 自动风格规则 + 对话示例）不产生
     assert!(!result.contains("# 说话风格（表达层）"));
     assert!(!result.contains("## 自动风格规则"));
@@ -1053,7 +1098,7 @@ fn ablation_f4_omits_narrative_and_bridge_keeps_utt() {
     assert!(!result.contains("## 近期对话脉络"), "F4 应无脉络: {result}");
     assert!(!result.contains("## 桥接"), "F4 应无桥接");
     assert!(result.contains("## 原文片段"), "F4 保留原文样例");
-    assert!(!result.contains("首次对话"), "关闭脉络时不产生占位");
+    assert!(!result.contains("无历史对话"), "关闭脉络时不产生占位");
 }
 
 /// F3 −表达层：说话风格/自动风格规则/对话示例不渲染；记忆块仍保留。
@@ -1260,7 +1305,7 @@ fn coordinated_keeps_rag_and_high_priority_layers() {
 ///
 /// 口径: 在压缩改造前用同一骨架上下文（见 [`skeleton_context`]）实测——
 /// `assemble_prompt` 输出恰好由固定样板组成（能力边界 + 默认知识边界 + 默认角色
-/// + 回复规范默认规则/记忆引用规则 + 记忆层引导 + 首次对话占位 + 相关记忆占位
+/// + 回复规范默认规则/记忆引用规则 + 记忆层引导 + 无历史对话占位 + 无相关记忆占位
 /// + 当前时间），无任何注入数据内容，因此可作为"样板体积"的稳定代理。
 /// 实测记录: chars=849, tokens=393。
 const LEGACY_BOILERPLATE_CHARS: usize = 849;
@@ -1276,9 +1321,9 @@ fn skeleton_context() -> PromptContext {
 
 /// 骨架样板体量下降：压缩后总体积必须小于压缩前基线（防样板回退膨胀）。
 ///
-/// 口径: 社交对话基调是有意新增的固定内容块（非既有引导句膨胀），
+/// 口径: 社交对话基调与说话锚点是有意新增的固定内容块（非既有引导句膨胀），
 /// 对照旧基线时以 `include_social_tone=false` 扣除，使"既有样板未回退膨胀"
-/// 的约束仍然成立；基调自身体量另作精确增量断言（防止基调之外再有增长）。
+/// 的约束仍然成立；两块体量另作精确增量断言（防止两块之外再有增长）。
 #[test]
 fn boilerplate_skeleton_shrunk_below_legacy() {
     let base_config = PromptConfig {
@@ -1297,22 +1342,24 @@ fn boilerplate_skeleton_shrunk_below_legacy() {
         base.tokens
     );
 
-    // 默认（含基调）骨架 = 既有骨架 + 基调块，增量恰为基调块自身体量
+    // 默认（聊天档）骨架 = 陈述档骨架 + 基调块 + 说话锚点，增量恰为两块自身体量
     let with_tone = measure_prompt_volume(&assemble_prompt(
         &skeleton_context(),
         &PromptConfig::default(),
     ));
+    let chat_delta_chars = SOCIAL_CHAT_TONE_RULES.chars().count() + RESPONSE_ANCHOR.chars().count();
     assert_eq!(
         with_tone.chars,
-        base.chars + SOCIAL_CHAT_TONE_RULES.chars().count(),
-        "基调块应按原文字符数精确叠加"
+        base.chars + chat_delta_chars,
+        "基调块与说话锚点应按原文字符数精确叠加"
     );
-    // token 估算在拼接边界非严格线性（±1 舍入），增量与基调自身体量对齐即可
-    let tone_tokens = crate::token_budget::estimate_tokens(SOCIAL_CHAT_TONE_RULES);
+    // token 估算在拼接边界非严格线性（±1 舍入），增量与两块自身体量对齐即可
+    let chat_delta_tokens = crate::token_budget::estimate_tokens(SOCIAL_CHAT_TONE_RULES)
+        + crate::token_budget::estimate_tokens(RESPONSE_ANCHOR);
     let token_delta = with_tone.tokens - base.tokens;
     assert!(
-        token_delta.abs_diff(tone_tokens) <= 2,
-        "基调增量 token 应约等于基调自身体量 {tone_tokens}，实际 {token_delta}"
+        token_delta.abs_diff(chat_delta_tokens) <= 2,
+        "基调+锚点增量 token 应约等于两块自身体量 {chat_delta_tokens}，实际 {token_delta}"
     );
 }
 
@@ -1332,6 +1379,8 @@ fn boilerplate_leads_stay_within_upper_bounds() {
         ("BRIDGE_LEAD", BRIDGE_LEAD, 60),
         ("STATEMENT_LEAD", STATEMENT_LEAD, 40),
         ("CORE_RULES_DEFAULT", CORE_RULES_DEFAULT, 90),
+        ("STYLE_USAGE_LEAD", STYLE_USAGE_LEAD, 40),
+        ("RESPONSE_ANCHOR", RESPONSE_ANCHOR, 60),
         ("MEMORY_CITATION_RULES", MEMORY_CITATION_RULES, 230),
         ("SOCIAL_CHAT_TONE_RULES", SOCIAL_CHAT_TONE_RULES, 288),
     ];
@@ -1347,28 +1396,35 @@ fn boilerplate_leads_stay_within_upper_bounds() {
 /// 压缩后保留关键指令（语义等价锁定——压缩只删引导措辞，不删行为约束）。
 #[test]
 fn compressed_boilerplate_keeps_essential_instructions() {
-    // 边界约束关键词逐条保留（防止后续压缩误删"勿逐字/勿编造"等安全语义）
-    assert!(UTT_LEAD.contains("勿逐字抄袭"), "utt 引导须保留防抄袭边界");
+    // 边界约束关键词逐条保留（防止后续压缩误删"禁止照搬/不编造"等安全语义）
     assert!(
-        BRIDGE_LEAD.contains("勿逐字引用"),
-        "桥接引导须保留防逐字边界"
+        UTT_LEAD.contains("禁止照搬内容"),
+        "utt 引导须保留防照搬边界"
     );
-    assert!(BRIDGE_LEAD.contains("勿编造"), "桥接引导须保留防编造边界");
+    assert!(
+        BRIDGE_LEAD.contains("不重复原文"),
+        "桥接引导须保留防重复边界"
+    );
+    assert!(
+        BRIDGE_LEAD.contains("不编造未提及的内容"),
+        "桥接引导须保留防编造边界"
+    );
     assert!(CAPACITY_INTRO.contains("不编造"), "能力边界须保留诚实约束");
     assert!(
-        CAPACITY_INTRO.contains("不生成有害"),
+        CAPACITY_INTRO.contains("不生成对他人有害"),
         "能力边界须保留安全约束"
     );
     assert!(
-        MEMORY_CITATION_RULES.contains("主动回溯"),
-        "记忆引用规则须保留主动回溯边界"
+        MEMORY_CITATION_RULES.contains("你还记得"),
+        "记忆引用规则须保留主动询问边界"
     );
     assert!(
-        MEMORY_CITATION_RULES.contains("跨会话") && MEMORY_CITATION_RULES.contains("间隔短"),
-        "记忆引用规则须保留跨会话间隔策略"
+        MEMORY_CITATION_RULES.contains("相关才引用")
+            && MEMORY_CITATION_RULES.contains("打招呼或新话题不提及"),
+        "记忆引用规则须保留引用时机边界"
     );
     // 记忆层引导保留"引用时机"约束
-    assert!(MEMORY_SECTION_INTRO.contains("仅在话题相关或用户主动提及时自然引用"));
+    assert!(MEMORY_SECTION_INTRO.contains("仅在话题相关时自然提及"));
 }
 
 // =========================================================
@@ -1393,12 +1449,19 @@ fn social_tone_block_injected_before_persona_rules() {
         result.contains("用||分隔短句，模仿社交平台打字节奏"),
         "persona 风格规则仍须注入（基调不替代个性）"
     );
+    assert!(result.contains("### 说话锚点"), "聊天档应注入说话锚点");
     let tone_pos = result.find("### 社交对话基调").expect("基调存在");
     let core_pos = result.find("### 核心规则").expect("核心规则存在");
+    let anchor_pos = result.find("### 说话锚点").expect("说话锚点存在");
+    let memory_pos = result.find("### 记忆引用规则").expect("记忆引用规则存在");
     assert!(tone_pos < core_pos, "基调应先于核心规则出现");
+    assert!(
+        core_pos < anchor_pos && anchor_pos < memory_pos,
+        "说话锚点应位于核心规则之后、记忆引用规则之前"
+    );
 }
 
-/// 基调开关关闭时回退旧口径（仅 persona 风格规则），且不产生基调块。
+/// 基调开关关闭（陈述档）时不注入基调/说话锚点，核心规则回退中性默认。
 #[test]
 fn social_tone_block_can_be_disabled() {
     let ctx = PromptContext {
@@ -1412,18 +1475,26 @@ fn social_tone_block_can_be_disabled() {
     };
     let result = assemble_prompt(&ctx, &config);
     assert!(!result.contains("### 社交对话基调"), "关闭后不得注入基调");
-    assert!(result.contains("自定义规则"), "persona 规则不受开关影响");
+    assert!(!result.contains("### 说话锚点"), "关闭后不得注入说话锚点");
+    assert!(
+        !result.contains("自定义规则"),
+        "陈述档不注入 persona 风格规则"
+    );
+    assert!(
+        result.contains("不确定或不知道的内容直接说明"),
+        "陈述档核心规则回退中性默认"
+    );
 }
 
 /// 基调文本锁定关键约束（防后续压缩误删"杜绝助手腔"的语义）。
 #[test]
 fn social_tone_locks_anti_assistant_constraints() {
     for needle in [
-        "不是助手",
+        "不是服务对象",
         "不超过 30 字",
-        "不解释、不总结、不列点",
-        "不反问",
-        "不写括号动作",
+        "解释、总结、列点、给出方案",
+        "结尾反问「需要我帮你…吗」",
+        "括号内动作或神态描写",
     ] {
         assert!(
             SOCIAL_CHAT_TONE_RULES.contains(needle),

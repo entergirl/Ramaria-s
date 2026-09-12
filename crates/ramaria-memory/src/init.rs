@@ -30,46 +30,50 @@ use uuid::Uuid;
 /// 共享的社交平台聊天口吻（所有 persona 的默认回复规则）。
 ///
 /// 用途:
-/// - 当 persona 没有自定义 `E_rules` 块时注入此默认规则。
+/// - 当 persona 没有显式配置 `E_rules` 块时注入此默认规则。
 /// - 适用于导入创建的 persona（无 TOML 文件）和 user-0001 等系统 persona。
 ///
-/// 与 `config/personas/rama-0001.toml` 的 `[blocks].E_rules` 的关系:
-/// - 规则条目以"格式规则 / 风格规则 / 节奏规则"分类呈现（本文分层重写），
-///   toml 侧为更紧凑的平铺表述，两者规则语义一致、不互相矛盾。
-/// - 两者的"正确示例"对话保持逐字一致，帮助 LLM 建立统一的 || 短句直觉。
-/// - 示例刻意使用不含具体地点/场所/人物全名的通用话题，避免示例被当成用户真实处境。
+/// 与 persona 显式配置的关系:
+/// - 共享规则是默认内容；persona 显式配置 `E_rules` 时覆盖它。
+/// - 两者不再要求示例逐字一致。
 ///
-/// 分类说明:
-/// - 每条规则编号，便于 LLM 逐条执行和后续调试定位。
-/// - 增加正确示例段落，帮助 LLM 建立直觉。
-/// - "不主动翻历史"规则增加精确边界：用户主动提及时可以回应。
-pub const SHARED_CHAT_STYLE_RULES: &str = r#"以下是你说话的方式，每一条都必须执行。
+/// 内容约定:
+/// - 规则按"分条 / 接话 / 收尾"编号，便于 LLM 逐条执行与后续定位。
+/// - 示例刻意使用不含具体地点/场所/人物全名的通用话题，避免被当成用户真实处境。
+/// - 多条短句用 `||` 分隔（前后端多气泡契约）。
+pub const SHARED_CHAT_STYLE_RULES: &str = r#"回复格式要求：
+1. 分条：需要分条时用「||」分隔，一次最多 3 条，每条 1~2 句。
+2. 接话：从自己的内容接起；不重复对方的话。
+3. 收尾：说完即停；不追加计划、安排或其他延伸内容。
 
-## 格式规则
-1. **|| 断句**：所有回复必须用 || 分隔成多条短句。每条 1–2 句。即使内容很多也要拆发，不能写成一段。
-2. **长度限制**：对方说一句，你最多回 3 条。说完停，不续话。
+示例（模仿长度与分条方式，禁止照搬内容）：
+对方：下班路上有点累，还没吃饭
+你：草||先去吃饭
 
-## 风格规则
-3. **不反问**：句尾不出现"对吧""你觉得呢""是吧"等反问标记。
-4. **不给选项**：不说"你是想 A 还是 B""要不试试 A 或者 B"等二选一或多选句式。
-5. **不重复词头**：不重复对方消息的第一个词或短语开头。对方说"摸鱼"，不用"摸鱼摸得理直气壮"来接。
-6. **不主动翻历史**：不说"上次你提到……""之前你说过……""我记得你以前……"等主动回溯句式——除非用户主动问"你还记得……"。
-7. **不在结尾给计划**：不说"那今晚就……""要不我们……""那就这样吧"等提议/计划结尾。
-
-## 节奏规则
-8. **社交平台节奏**：模仿社交平台打字的自然节奏，用 || 断句而非逗号连接。每条是独立的语气片段。
-9. **短句优先**：每条 ≤2 句，保持轻快的对话感。不出现大段论述。
-
-## 正确示例
-对方："我现在在摸鱼，就想找人说说话"
-你："那挺好的||摸鱼就摸鱼||聊天也是正事"
-
-对方："下班路上有点累，还没吃饭"
-你："那就先吃饭||吃饱了再想别的"
-
-对方："今天天气不错，心情也跟着好了"
-你："那就好||好天气配好心情||难得"
+对方：今天又被组长怼了，烦
+你：怎么这样||换谁都得烦
 "#;
+
+/// 解析 persona 的聊天风格规则：显式 `E_rules` 优先，否则返回共享规则。
+///
+/// 参数:
+/// - `config`: persona 配置原文（persona.toml 文本），`None` 表示无配置。
+///
+/// 返回:
+/// - 能解析出非空 `E_rules` 块时返回该文本；否则返回 `SHARED_CHAT_STYLE_RULES`。
+pub fn resolve_chat_style_rules(config: Option<&str>) -> String {
+    let explicit = config
+        .and_then(|cfg| parse_persona_toml(cfg).ok())
+        .and_then(|parsed| {
+            parsed
+                .blocks
+                .into_iter()
+                .find_map(|(key, value)| (key == "E_rules").then_some(value))
+        })
+        .filter(|rules| !rules.trim().is_empty());
+
+    explicit.unwrap_or_else(|| SHARED_CHAT_STYLE_RULES.to_string())
+}
 
 // =========================================================
 // persona.toml 解析结构
@@ -947,21 +951,77 @@ A_persona = '你是黎杋枫。被问及"是否是AI"时温柔回避。'
         }
     }
 
-    /// 共享聊天口吻注入形状不回退：仍保留分层规则条目与通用闲聊示例。
+    /// 共享聊天口吻注入形状不回退：分条契约与通用闲聊示例仍在。
     #[test]
     fn shared_style_keeps_structured_shape() {
         let rules = SHARED_CHAT_STYLE_RULES;
-        // 三条通用闲聊示例（不涉具体地点），保证示例段落可建立 || 短句直觉
-        for line in [
-            "摸鱼就摸鱼||聊天也是正事",
-            "那就先吃饭||吃饱了再想别的",
-            "那就好||好天气配好心情||难得",
-        ] {
+        // 分条契约（前端按 || 拆分为多条气泡）
+        assert!(rules.contains("需要分条时用「||」分隔"), "缺少分条契约");
+        // 两组通用闲聊示例（不涉具体地点），保证示例段落可建立 || 短句直觉
+        for line in ["草||先去吃饭", "怎么这样||换谁都得烦"] {
             assert!(rules.contains(line), "缺少示例行: {line}");
         }
-        // 仍以 || 断句演示为骨架
-        assert!(rules.contains("|| 断句"));
+        // 示例以「对方 / 你」对写呈现
         assert!(rules.contains("对方："));
+        assert!(rules.contains("你："));
+    }
+
+    // =========================================================
+    // 聊天风格规则解析测试
+    // =========================================================
+
+    /// 显式非空 E_rules 优先于共享规则。
+    #[test]
+    fn resolve_chat_style_rules_prefers_explicit_e_rules() {
+        let config = r#"[identity]
+assistant_name = "测试"
+user_name = "用户"
+
+[blocks]
+E_rules = "自定义规则内容"
+"#;
+        assert_eq!(resolve_chat_style_rules(Some(config)), "自定义规则内容");
+    }
+
+    /// 无 E_rules 块时回退共享规则。
+    #[test]
+    fn resolve_chat_style_rules_falls_back_without_e_rules() {
+        let config = r#"[identity]
+assistant_name = "测试"
+user_name = "用户"
+
+[blocks]
+A_persona = "人设内容"
+"#;
+        assert_eq!(
+            resolve_chat_style_rules(Some(config)),
+            SHARED_CHAT_STYLE_RULES
+        );
+    }
+
+    /// 无配置、非法配置与空白 E_rules 均回退共享规则。
+    #[test]
+    fn resolve_chat_style_rules_falls_back_on_missing_or_invalid() {
+        let cases = [
+            None,
+            Some(""),
+            Some("这不是合法的 persona 配置"),
+            Some(
+                r#"[identity]
+assistant_name = "测试"
+
+[blocks]
+E_rules = "   "
+"#,
+            ),
+        ];
+        for case in cases {
+            assert_eq!(
+                resolve_chat_style_rules(case),
+                SHARED_CHAT_STYLE_RULES,
+                "case={case:?}"
+            );
+        }
     }
 
     // =========================================================

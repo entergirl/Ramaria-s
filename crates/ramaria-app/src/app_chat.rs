@@ -19,12 +19,11 @@ use futures::channel::mpsc;
 use ramaria_core::error::RamariaResult;
 use ramaria_core::traits::{ChatMessage, ChatRequest, StorageBackend};
 use ramaria_core::types::{Message, MessageRole, MessageSource, ProfileField, new_id, now_ms};
-use ramaria_memory::SHARED_CHAT_STYLE_RULES;
-use ramaria_memory::parse_persona_toml;
 use ramaria_memory::prompt::builder::{
     PromptConfig, PromptContext, assemble_prompt, assemble_prompt_coordinated,
 };
 use ramaria_memory::token_budget::{self, TokenBudgetConfig};
+use ramaria_memory::{parse_persona_toml, resolve_chat_style_rules};
 use uuid::Uuid;
 
 use crate::App;
@@ -708,7 +707,9 @@ impl App {
                 knowledge_boundary: None,
                 current_time_str: Some(crate::now_timestamp_str()),
                 weather: None,
-                chat_style_rules: None, // v2.0: 无自定义规则时使用最小化默认规则
+                // 回复规则：显式 E_rules 优先，缺省用共享规则（与 Stage 路径同一口径）；
+                // 陈述档由 builder 门控回退中性默认。
+                chat_style_rules: Some(resolve_chat_style_rules(p.config.as_deref())),
                 // v1.4: utt 原文片段（检索层已按白名单与预算过滤，None 等同 v1.3）
                 utt_context: utt_context.map(|s| s.to_string()),
                 // 桥接内容（桥接层已按白名单与预算过滤，None 表示未启用）
@@ -950,14 +951,8 @@ fn load_persona_toml_prompt(db_config: Option<&str>) -> Option<String> {
         .map(|(_, v)| v.as_str())
         .unwrap_or("");
 
-    let rules_block = parsed
-        .blocks
-        .iter()
-        .find(|(k, _)| k == "E_rules")
-        .map(|(_, v)| v.as_str())
-        .filter(|s| !s.trim().is_empty())
-        // 无自定义 E_rules 时使用共享社交平台口吻
-        .unwrap_or(SHARED_CHAT_STYLE_RULES);
+    // 回复规则：显式 E_rules 优先，缺省回退共享规则（与生产装配路径同一口径）
+    let rules_block = resolve_chat_style_rules(Some(content.as_str()));
 
     let name = &parsed.assistant_name;
     let time_str = crate::now_timestamp_str();
@@ -1439,5 +1434,110 @@ mod examples_tests {
         .await;
         assert_eq!(selected.len(), 2);
         assert_eq!(selected[0].partner, "B", "tags 命中更多的示例排前");
+    }
+}
+
+// =========================================================
+// 回复规则接线测试（生产装配路径）
+// =========================================================
+
+#[cfg(test)]
+mod prompt_rules_tests {
+    use super::{LoadedPromptMaterial, assemble_prompt};
+    use crate::App;
+    use crate::stages::test_utils::{MockLlm, MockStorage};
+    use ramaria_core::config::{InjectionGate, LayerDedupConfig, RamariaConfig};
+    use ramaria_core::traits::{StorageBackend, StoreCrud};
+    use ramaria_core::types::{FactSource, Persona, PersonaFact, PersonaKind, ProfileField};
+    use std::sync::Arc;
+
+    /// 构造含指定 persona.config 的 App；写入角色层事实以跳过冷启动兜底。
+    async fn app_with_persona_config(config: Option<&str>) -> App {
+        let storage = Arc::new(MockStorage::new());
+        let mut persona = Persona::new(
+            "char-0001".to_string(),
+            "小夏".to_string(),
+            PersonaKind::Char,
+            1,
+            "local".to_string(),
+        );
+        persona.config = config.map(|s| s.to_string());
+        storage.add_persona(persona);
+        storage
+            .save_fact(&PersonaFact::new(
+                "char-0001".to_string(),
+                ProfileField::BasicInfo,
+                "出生于上海".to_string(),
+                FactSource::Event,
+            ))
+            .await
+            .expect("保存角色层事实");
+
+        App::new_without_embedding(
+            storage as Arc<dyn StorageBackend>,
+            Arc::new(MockLlm::local()),
+            RamariaConfig::default(),
+            Arc::new(ramaria_llm::keychain::Keychain::new()),
+        )
+    }
+
+    /// 走生产素材加载 + 普通装配路径产出 system prompt。
+    async fn assembled_prompt(app: &App) -> String {
+        let injection = InjectionGate::default();
+        let layer_dedup = LayerDedupConfig::default();
+        let material = app
+            .load_prompt_material(
+                Some("char-0001"),
+                &[],
+                None,
+                None,
+                None,
+                None,
+                Vec::new(),
+                5,
+                Vec::new(),
+                &[],
+                None,
+                &injection,
+                None,
+                &layer_dedup,
+            )
+            .await;
+        match material {
+            LoadedPromptMaterial::Structured(ctx, config) => assemble_prompt(&ctx, &config),
+            LoadedPromptMaterial::Plain(_) => panic!("facts 非空时应走结构化装配"),
+        }
+    }
+
+    /// 无显式 E_rules：核心规则回退共享规则（含 || 分条契约）。
+    #[tokio::test]
+    async fn prompt_injects_shared_rules_without_explicit_e_rules() {
+        let app = app_with_persona_config(None).await;
+        let prompt = assembled_prompt(&app).await;
+        assert!(
+            prompt.contains("### 核心规则"),
+            "生产路径应注入核心规则子段:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("需要分条时用「||」分隔"),
+            "缺省 E_rules 时应回退共享规则:\n{prompt}"
+        );
+    }
+
+    /// 显式 E_rules：核心规则改用 persona 自定义规则（共享规则不注入）。
+    #[tokio::test]
+    async fn prompt_prefers_explicit_e_rules() {
+        let config =
+            "[identity]\nassistant_name = \"小夏\"\n\n[blocks]\nE_rules = \"自定义规则内容\"\n";
+        let app = app_with_persona_config(Some(config)).await;
+        let prompt = assembled_prompt(&app).await;
+        assert!(
+            prompt.contains("自定义规则内容"),
+            "应注入显式 E_rules:\n{prompt}"
+        );
+        assert!(
+            !prompt.contains("需要分条时用「||」分隔"),
+            "显式 E_rules 应覆盖共享规则:\n{prompt}"
+        );
     }
 }

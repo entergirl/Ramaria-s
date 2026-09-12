@@ -28,7 +28,7 @@ use ramaria_core::types::PersonaExample;
 /// - `tag_weight`: 话题匹配权重。默认 0.5。
 /// - `valence_weight`: 情绪匹配权重。默认 0.3。
 /// - `length_weight`: 长度适配权重。默认 0.2。
-/// - `ideal_length`: 理想回复长度（字符数）。默认 60。
+/// - `ideal_length`: 理想回复长度（字符数）。默认 20（对齐 persona 真实句长与目标 ≤30 字）。
 #[derive(Debug, Clone)]
 pub struct ExampleSelectorConfig {
     /// 最大返回示例数
@@ -41,7 +41,7 @@ pub struct ExampleSelectorConfig {
     pub valence_weight: f64,
     /// 长度适配权重
     pub length_weight: f64,
-    /// 理想回复长度
+    /// 理想回复长度（字符数；默认对齐 persona 真实句长与目标 ≤30 字）
     pub ideal_length: usize,
 }
 
@@ -53,7 +53,7 @@ impl Default for ExampleSelectorConfig {
             tag_weight: 0.5,
             valence_weight: 0.3,
             length_weight: 0.2,
-            ideal_length: 60,
+            ideal_length: 20,
         }
     }
 }
@@ -281,10 +281,11 @@ mod tests {
 
     #[test]
     fn select_returns_top_by_score() {
+        // 长度按默认理想值（20）分档：reply1 恰为理想长度、reply3 略长、reply2 明显偏长
         let candidates = vec![
-            make_example("reply1", Some("编程,Python"), 0.5, 60),
+            make_example("reply1", Some("编程,Python"), 0.5, 20),
             make_example("reply2", Some("游戏,娱乐"), 0.3, 100),
-            make_example("reply3", Some("编程,Rust"), 0.6, 50),
+            make_example("reply3", Some("编程,Rust"), 0.6, 30),
         ];
         let config = ExampleSelectorConfig::default();
         let keywords = extract_keywords("编程 Rust");
@@ -327,8 +328,9 @@ mod tests {
 
     #[test]
     fn select_deduplicates_by_reply() {
+        // 长度 20 贴近默认理想长度：保证 valence=0.9 的条目综合分占优
         let candidates = vec![
-            make_example("same_reply", Some("标签A"), 0.9, 50),
+            make_example("same_reply", Some("标签A"), 0.9, 20),
             make_example("same_reply", Some("标签B"), 0.5, 100),
         ];
         let config = ExampleSelectorConfig::default();
@@ -385,6 +387,16 @@ mod tests {
         let ex = make_example("reply", None, 0.0, 60);
         let score = ExampleSelector::compute_length_score(&ex, 60);
         assert!((score - 1.0).abs() < f64::EPSILON);
+    }
+
+    /// 默认理想长度对齐 persona 真实句长与 ≤30 字目标（防回退到长模板口径）。
+    #[test]
+    fn default_ideal_length_targets_short_replies() {
+        assert_eq!(
+            ExampleSelectorConfig::default().ideal_length,
+            20,
+            "默认理想长度应为 20 字符"
+        );
     }
 
     #[test]

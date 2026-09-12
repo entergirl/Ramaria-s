@@ -224,7 +224,7 @@ pub use style::{
 // Init 冷启动
 pub use init::{
     ColdStartConfig, ColdStartResult, PersonaToml, SHARED_CHAT_STYLE_RULES,
-    initialize_rama_persona, parse_persona_toml,
+    initialize_rama_persona, parse_persona_toml, resolve_chat_style_rules,
 };
 
 // Job 后台任务管理

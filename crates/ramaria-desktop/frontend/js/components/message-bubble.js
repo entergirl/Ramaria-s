@@ -16,6 +16,7 @@
  * - CSP-safe: 全部样式走 CSS 类，零内联 style（包括 innerHTML 中的 style 属性）
  * - 助手气泡左侧显示人格头像（首字母圆形），用户气泡右侧无头像
  * - persona_uid 为 null/空时按角色回退标签（user→"你"，assistant→"助手"）
+ * - 多气泡：助手回复按 `||` 契约拆分为多条气泡（历史回读与流式收尾同一拆分口径）
  *
  * 用法:
  * var bubble = RamariaMessageBubble.create({ id, role, content, persona_uid, created_at });
@@ -133,8 +134,12 @@ var RamariaMessageBubble = (function () {
             label = ROLE_LABELS[role] || ROLE_LABELS.system;
         }
 
- // ── 剥离导入消息的 [{name}] 前缀（纯展示层）──
-        var displayContent = _stripImportPrefix(msg.content || '');
+ // ── 内容分段：助手回复按 `||` 契约拆分为多条气泡；其它角色整段单泡 ──
+// 每条气泡各自剥离导入消息的 [{name}] 前缀（纯展示层）
+        var rawContent = msg.content || '';
+        var segments = role === 'assistant'
+            ? _splitAssistantBubbles(rawContent)
+            : [_stripImportPrefix(rawContent)];
 
  // wrapper
         var wrapper = document.createElement('div');
@@ -188,22 +193,66 @@ var RamariaMessageBubble = (function () {
             wrapper.appendChild(sysMeta);
         }
 
- // 气泡内容（使用剥离前缀后的 displayContent）
+ // 气泡内容（助手回复按契约拆分为多条气泡；其它角色单条）
+        for (var b = 0; b < segments.length; b++) {
+            wrapper.appendChild(_createBubbleEl(segments[b]));
+        }
+
+        return wrapper;
+    }
+
+/**
+ * 将助手回复文本按 `||` 契约拆分为展示段（每段各自剥离导入前缀）。
+ *
+ * 说明:
+ * - 分隔符契约与提示词「核心规则」一致；`RamariaBubble` 不可用时退化为单段。
+ * - 无有效分段（空内容）时返回单段，由 [_stripImportPrefix] 产出占位。
+ */
+    function _splitAssistantBubbles(content) {
+        var raw = (typeof RamariaBubble !== 'undefined' && RamariaBubble.splitBubbles)
+            ? RamariaBubble.splitBubbles(content)
+            : [content];
+        if (raw.length === 0) raw = [''];
+
+        var out = [];
+        for (var i = 0; i < raw.length; i++) {
+            out.push(_stripImportPrefix(raw[i]));
+        }
+        return out;
+    }
+
+/**
+ * 创建单个气泡元素（Markdown 渲染 + 异常兜底）。
+ */
+    function _createBubbleEl(text) {
         var bubble = document.createElement('div');
         bubble.className = 'msg-bubble';
 
         try {
-            bubble.innerHTML = RamariaMarkdown.render(displayContent);
+            bubble.innerHTML = RamariaMarkdown.render(text);
         } catch (err) {
             console.error('[MessageBubble] Markdown 渲染失败:', err);
             bubble.innerHTML = RamariaMarkdown.sanitize
-                ? RamariaMarkdown.sanitize(displayContent)
-                : _escHtml(displayContent);
+                ? RamariaMarkdown.sanitize(text)
+                : _escHtml(text);
         }
 
-        wrapper.appendChild(bubble);
+        return bubble;
+    }
 
-        return wrapper;
+/**
+ * 重建 wrapper 内的气泡（流式收尾：整段替换为按契约拆分的多条气泡）。
+ */
+    function _replaceBubbles(wrapper, content) {
+        var old = wrapper.querySelectorAll('.msg-bubble');
+        for (var i = 0; i < old.length; i++) {
+            wrapper.removeChild(old[i]);
+        }
+
+        var segments = _splitAssistantBubbles(content);
+        for (var j = 0; j < segments.length; j++) {
+            wrapper.appendChild(_createBubbleEl(segments[j]));
+        }
     }
 
  /**
@@ -310,19 +359,10 @@ var RamariaMessageBubble = (function () {
         if (!wrapper) return;
 
  // 移除流式标记
-        wrapper.removeAttribute('data-streaming');
+         wrapper.removeAttribute('data-streaming');
 
- // 更新气泡内容为 Markdown
-        var bubble = wrapper.querySelector('.msg-bubble');
-        if (bubble) {
-            bubble.classList.remove('msg-bubble--streaming');
-            try {
-                bubble.innerHTML = RamariaMarkdown.render(finalContent || '');
-            } catch (err) {
-                console.error('[MessageBubble] finalize Markdown 渲染失败:', err);
-                bubble.textContent = finalContent || '';
-            }
-        }
+ // 按 `||` 契约重建为多条气泡（与历史回读同一拆分口径）
+         _replaceBubbles(wrapper, finalContent || '');
 
  // 更新时间戳
         if (createdAt) {

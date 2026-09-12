@@ -49,70 +49,80 @@ use ramaria_core::types::{
 // - 段落标题（`# 角色（行为层）` 等）为层结构标识，已被模板映射/探针/集成测试
 //   锁定，保持稳定；这里仅收纳随内容拼接的引导句与固定段落文本。
 
-/// Capacity 首段引导：身份 + 记忆能力 + 安全边界（含原"知识边界"默认三条
-/// 中与能力边界语义重叠的项，去重后不重复出现）。
+/// Capacity 首段引导：记忆 / 未知 / 安全三条约束（身份声明由角色层承担，
+/// 不再重复"你是 Ramaria"；原"知识边界"重叠项已去重）。
 const CAPACITY_INTRO: &str = "# 能力边界\n\
-你是 Ramaria，能记住与用户的对话历史并在合适时机自然引用；\
-知识截至训练时间，不编造、不确定就说明；\
-不做医疗/法律/金融建议，不生成有害、违法或不道德内容。";
+- 记忆：你记得和对方过往的对话；相关时自然提起，不相关时不提。\n\
+- 未知：不确定或不知道的内容直接说明，不编造。\n\
+- 安全：不做医疗/法律/金融建议，不生成对他人有害、违法或人身攻击内容。";
 
 /// 默认知识边界子段（无 persona 自定义边界时追加；仅保留原默认三条中
 /// "知识时效/不臆测"一条——能力、安全边界已由 [CAPACITY_INTRO] 覆盖）。
 const KNOWLEDGE_BOUNDARY_DEFAULT: &str = "\n\n## 知识边界\n\
 知识截至训练时间，不臆测未知的事实或日期。";
 
-/// 角色层无 persona 时的默认身份段（`# 角色（行为层）` 头部）。
+/// 角色层无 persona 时的默认身份段（`# 角色（行为层）` 头部：场景行 + 默认身份行）。
 const ROLE_DEFAULT_TEXT: &str = "# 角色（行为层）\n\
-你是 Ramaria，一个有记忆能力、善解人意的 AI 助手，\
-能记住对话历史并在后续对话中自然引用。";
+场景：你在社交软件上和对方即时聊天（「对方」指正在和你聊天的人）。\n\
+你是 Ramaria，你有自己的说话习惯。";
 
-/// 记忆层首段引导（说明记忆来源与引用时机）。
+/// 记忆层首段引导（说明记忆内容性质与引用时机）。
 const MEMORY_SECTION_INTRO: &str = "# 记忆（脉络层）\n\
-以下记忆信息是你了解用户的依据，仅在话题相关或用户主动提及时自然引用，不强行插入。";
+以下是你的记忆内容。要求：仅在话题相关时自然提及；无相关内容时不提及。";
 
 /// 近期对话脉络无摘要时的占位提示。
-const NARRATIVE_PLACEHOLDER: &str = "（你们是首次对话）";
+const NARRATIVE_PLACEHOLDER: &str = "（无历史对话）";
 
 /// 相关历史记忆占位提示（无 RAG 命中时）。
-const RAG_PLACEHOLDER: &str = "（暂无直接相关的历史记忆）";
+const RAG_PLACEHOLDER: &str = "（无相关记忆）";
 
-/// 原文片段引导（utt 块；保留"勿逐字抄袭"边界）。
-const UTT_LEAD: &str = "以下是角色原话，供学习语气、用词与口癖（勿逐字抄袭）：\n";
+/// 原文片段引导（utt 块；保留防照搬边界）。
+const UTT_LEAD: &str = "以下是你过去的发言样本。用途：模仿其语气、用词与断句；禁止照搬内容。\n";
 
-/// 桥接引导（上一会话尾部；保留"勿逐字引用/勿编造"边界）。
-const BRIDGE_LEAD: &str = "上一段对话结尾原文，用于保持连贯（勿逐字引用，勿编造未提及内容）：\n";
+/// 桥接引导（上一会话尾部；保留不重复原文/不编造边界）。
+const BRIDGE_LEAD: &str =
+    "以下是上一段对话的结尾。要求：延续该话题继续对话；不重复原文；不编造未提及的内容。\n";
 
-/// 对话示例引导（Few-shot）。
-const STATEMENT_LEAD: &str = "参考以下示例的风格与节奏：";
+/// 对话示例引导（Few-shot；保留防照搬边界）。
+const STATEMENT_LEAD: &str =
+    "以下是你的说话示例。要求：模仿其长度、语气与断句方式；禁止照搬示例内容。";
 
-/// 无自定义规则时的最小化默认回复规则（两条合并原三条语义）。
+/// 说话风格子段引导行（手工/自动风格互斥渲染，共用同一引导；防风格描述被复述）。
+const STYLE_USAGE_LEAD: &str = "（以下是你的说话习惯。要求：按其表达，不复述该段文字。）";
+
+/// 无自定义规则时的中性默认回复规则（单行；兼作陈述档默认）。
 const CORE_RULES_DEFAULT: &str = "\n### 核心规则\n\
-- 用自然友好的语气回复，简洁不冗长。\n\
-- 不确定就如实说明。";
+- 不确定或不知道的内容直接说明，不编造。";
 
-/// 全局社交平台对话基调（无条件注入，优先级高于 persona 风格规则）。
+/// 全局社交平台对话基调（聊天档注入，优先级高于 persona 风格规则）。
 ///
 /// 目的:
 /// - 对话发生在社交平台即时聊天场景；模型缺乏强约束时会回退"附和 + 反问需求 +
 ///   解释总结"的助手腔，与 persona 真实社交语气偏离（实测 persona 真实句长均值
 ///   约 15 字，模型回复 60~73 字）。
-/// - 该基调对全部 persona 无条件生效：人格风格规则只在其之上做个性化叠加，
+/// - 该基调对全部 persona 生效：人格风格规则只在其之上做个性化叠加，
 ///   不替代基调。放在 `### 核心规则` 之前，体现"先定体裁、再定个性"。
 const SOCIAL_CHAT_TONE_RULES: &str = "\n### 社交对话基调（优先于任何其它规则）\n\
-你是聊天对象，不是助手。像在社交软件上打字一样回复：\n\
-1. 篇幅：每轮 1~3 句短句，整条一般不超过 30 字；不确定就只回一句。\n\
-2. 口吻：口语化，可用语气词（啊/呀/哦/嗯/啦/嘛）与叠字，可省略主语，不用书面连接词。\n\
-3. 禁止助手话术：不解释、不总结、不列点、不分步给建议；不反问「需要我帮你…吗」；不说「我理解你的感受」「希望这些对你有帮助」之类套话。\n\
-4. 禁止旁白：不写括号动作/神态（如「（看到你的消息）」），不代替对方说话。\n\
-5. 情绪优先：先接住对方的情绪或话题，再决定要不要多说一句。";
+对方是熟人，不是服务对象。\n\
+1. 长度：整条回复不超过 30 字；一般 1~2 句，不确定时只回 1 句。\n\
+2. 语体：口语化；可使用语气词（啊/呀/哦/嗯/啦/嘛）和叠字；省略主语；不使用书面词与连接词。\n\
+3. 禁止：解释、总结、列点、给出方案；括号内动作或神态描写；代替对方发言；结尾反问「需要我帮你…吗」。\n\
+4. 顺序：先回应对方的情绪或最后半句话，再表达自己的内容。\n\
+5. 取舍：无内容时不硬找话；说错话时直接改口。";
 
-/// 记忆引用规则段（标题 + 四条压缩规则；语义与压缩前四条一致：
-/// 时机/措辞/主动回溯 vs 被动响应/跨会话间隔策略）。
+/// 说话锚点（关键约束贴近生成位置的复述，置于 `### 核心规则` 之后）。
+///
+/// 复述长度（≤30 字）、`||` 多气泡分隔与语体底线（不解释/不列点/不写括号动作），
+/// 与 [SOCIAL_CHAT_TONE_RULES] 构成"角色层开头 + 回复规范末尾"各一次的约束；
+/// 陈述档（`include_social_tone=false`）不注入。
+const RESPONSE_ANCHOR: &str = "\n### 说话锚点\n\
+回复要求：整条 ≤30 字；多条用「||」分隔；口语化；不解释、不列点、不写括号动作。";
+
+/// 记忆引用规则段（标题 + 三条可判定约束：引用时机 / 表达方式 / 对方询问时）。
 const MEMORY_CITATION_RULES: &str = "\n### 记忆引用规则\n\
-1. **时机**：仅当与记忆明确相关才引用；打招呼或全新话题不硬插「上次我们聊到…」。\n\
-2. **措辞**：用「记得你之前…」等自然表达，不用「根据系统记录…」等机械措辞。\n\
-3. **主动回溯**：用户问「你还记得…吗」即主动邀请，可自由引用；否则仅在话题自然相关时引用。\n\
-4. **跨会话**：间隔短（几小时内）可在回复中自然衔接；间隔长（几天）先寒暄、观察用户是否延续。";
+1. 相关才引用：仅当记忆内容与当前话题相关时提及；打招呼或新话题不提及。\n\
+2. 表达方式：直接说内容（如「记得你说过…」）；禁止「根据记录」「系统记录」等表述。\n\
+3. 对方询问「你还记得…吗」时：直接回答记得的内容；对方未询问时按第 1 条执行。";
 
 // =========================================================
 // System Prompt 装配配置
@@ -162,7 +172,7 @@ pub struct PromptConfig {
     pub include_speaking_style: bool,
     /// 是否渲染记忆块中的"近期对话脉络"子段（`## 近期对话脉络`，脉络层）。
     ///
-    /// `false` 时不渲染该子段（含"首次对话"占位提示）。
+    /// `false` 时不渲染该子段（含"无历史对话"占位提示）。
     pub include_narrative: bool,
     /// 是否渲染记忆块中的"相关历史记忆"子段（`## 相关历史记忆`，RAG 摘要通道）。
     ///
@@ -174,10 +184,11 @@ pub struct PromptConfig {
     pub include_utt: bool,
     /// 是否渲染记忆块中的"桥接"子段（`## 桥接（上一会话尾部）`，脉络层）。
     pub include_bridge: bool,
-    /// 是否注入全局社交对话基调（`### 社交对话基调`）。
+    /// 是否注入全局社交对话基调（`### 社交对话基调`）与说话锚点（`### 说话锚点`）。
     ///
-    /// 默认 `true`：该基调是对全部 persona 无条件生效的体裁约束，
-    /// 关闭时行为回退到"仅有 persona 风格规则"的旧口径（供对照/回退）。
+    /// 默认 `true`（聊天档）：基调与锚点对全部 persona 生效；
+    /// 关闭（陈述档，可及性轨）时两者均不注入，`### 核心规则` 回退
+    /// [CORE_RULES_DEFAULT] 中性默认（不注入 persona 风格规则）。
     pub include_social_tone: bool,
 }
 
@@ -212,7 +223,7 @@ impl Default for PromptConfig {
 ///
 /// v2.0 新增字段:
 /// - `chat_style_rules`: 回复规则文本（Experiment 块）。由 Stage 6 的 `resolve_chat_style_rules` 提供。
-///   若为空则使用最小化默认规则。
+///   聊天档为空时使用中性默认规则；陈述档不注入。
 ///
 /// 职责:
 /// - 将分散的 persona 数据聚合为一次 System Prompt 构建的输入。
@@ -244,7 +255,7 @@ pub struct PromptContext {
     /// 字段约定:
     /// - 按时间降序排列（最近在前）。
     /// - 每条为格式化好的摘要文本（含时间段和氛围）。
-    /// - 为空时显示"（你们是首次对话）"占位提示。
+    /// - 为空时显示"（无历史对话）"占位提示。
     pub recent_session_summaries: Vec<String>,
 
     /// 该 persona 最近一次活跃时间（当前语境块）
@@ -262,7 +273,7 @@ pub struct PromptContext {
     /// v2.0 新增: 回复规则文本（Experiment 块）
     ///
     /// 由 Stage 6 的 `resolve_chat_style_rules` 提供。
-    /// 若为空则使用最小化默认规则。
+    /// 聊天档为空时使用中性默认规则；陈述档（`include_social_tone=false`）不注入。
     pub chat_style_rules: Option<String>,
 
     /// 新增: utt 原文片段（Memory 块 [原文片段] 小节，已按预算裁剪渲染）
@@ -500,7 +511,7 @@ pub fn measure_prompt_volume(text: &str) -> PromptVolume {
 /// - 无 traits 时省略角色层中的性格特征段。
 /// - 无 facts 时省略角色层中的已知事实段。
 /// - 无 examples 时省略表达层中的对话示例段。
-/// - 无 chat_style_rules 时使用最小化默认规则。
+/// - 无 chat_style_rules（或陈述档）时使用中性默认规则。
 /// - 行为层未命中/关闭（`behavior_decision=None`）→ 不产生段落；
 ///   知识层无事实 → 不产生段落。
 pub fn assemble_prompt(context: &PromptContext, config: &PromptConfig) -> String {
@@ -579,7 +590,7 @@ pub fn assemble_prompt_coordinated(
 // Capacity 块: 能力边界
 // =========================================================
 
-/// 组装能力边界块：AI 助手核心能力 + 知识边界（安全红线，非四层，前置保留）。
+/// 组装能力边界块：记忆/未知/安全约束 + 知识边界（安全红线，非四层，前置保留）。
 fn build_capacity(config: &PromptConfig, context: &PromptContext) -> String {
     let mut parts = vec![CAPACITY_INTRO.to_string()];
 
@@ -601,25 +612,35 @@ fn build_capacity(config: &PromptConfig, context: &PromptContext) -> String {
 // Role 块: 角色身份
 // =========================================================
 
-/// 组装角色身份段：角色身份 + persona 类型 + 背景描述（`# 角色（行为层）` 的头部）。
+/// 组装角色身份段：场景行 + 身份行（kind）+ 背景描述（`# 角色（行为层）` 的头部）。
 fn build_role(context: &PromptContext) -> String {
     if let Some(ref persona) = context.persona {
-        let mut parts = vec![format!(
-            "# 角色（行为层）\n你是「{}」，一位 AI 助手。",
-            persona.name
+        let mut parts = vec![String::from(
+            "# 角色（行为层）\n\
+             场景：你在社交软件上和对方即时聊天（「对方」指正在和你聊天的人）。",
         )];
 
-        // persona kind 描述（一行式角色类型说明）
+        // persona kind 描述（一行式身份事实；Anim/Hist 的作品名/时代名由
+        // persona 设定数据源提供，缺失时使用回退句）
         let kind_desc = match persona.kind {
-            ramaria_core::types::PersonaKind::Rama => "你是 Ramaria 助手自身。",
-            ramaria_core::types::PersonaKind::User => "以用户的视角思考与回复。",
-            ramaria_core::types::PersonaKind::Char => "你扮演一个虚构角色。",
-            ramaria_core::types::PersonaKind::Anim => "你扮演一个动画角色。",
-            ramaria_core::types::PersonaKind::Oc => "你扮演一个原创角色（OC）。",
-            ramaria_core::types::PersonaKind::Hist => "你扮演一个历史人物。",
-            _ => "你扮演一个角色。",
+            ramaria_core::types::PersonaKind::Rama => {
+                "你是 Ramaria，你有自己的说话习惯。".to_string()
+            }
+            ramaria_core::types::PersonaKind::User => {
+                format!("你以「{}」的视角说话。", persona.name)
+            }
+            ramaria_core::types::PersonaKind::Char | ramaria_core::types::PersonaKind::Oc => {
+                format!("你是「{}」，有自己的脾气和说话习惯。", persona.name)
+            }
+            ramaria_core::types::PersonaKind::Anim => {
+                format!("你是「{}」，说话的语气就是你的语气。", persona.name)
+            }
+            ramaria_core::types::PersonaKind::Hist => {
+                format!("你是「{}」，说话的语气符合你的身份和时代。", persona.name)
+            }
+            _ => format!("你是「{}」，有自己的说话习惯。", persona.name),
         };
-        parts.push(kind_desc.to_string());
+        parts.push(kind_desc);
 
         // config JSON 中的额外描述
         if let Some(ref cfg_json) = persona.config
@@ -681,7 +702,7 @@ fn build_memory(context: &PromptContext, config: &PromptConfig) -> String {
         budget,
     );
 
-    // 近期对话脉络（预算内保最近；预算不足时显示"首次对话"）
+    // 近期对话脉络（预算内保最近；预算不足时显示"无历史对话"）
     if config.include_narrative {
         if alloc.summaries.is_empty() {
             parts.push(format!("\n\n## 近期对话脉络\n{}", NARRATIVE_PLACEHOLDER));
@@ -775,13 +796,13 @@ pub fn render_utt_context(hits: &[UttHit], max_block_chars: usize) -> String {
 /// 从近期 L1 摘要构建跨 session 叙事引导句。
 ///
 /// 职责:
-/// - 将孤立的 L1 摘要串联为连贯的叙事脉络，告知 LLM"此前对话的总体进展"。
-/// - 使 LLM 能自然地引用此前对话，而非每次从零开始。
+/// - 将孤立的 L1 摘要串联为话题脉络，告知 LLM 与对方聊过哪些话题。
+/// - 多条摘要时追加用途指令，供 LLM 判断是否顺势延续话题。
 ///
 /// 算法:
 /// - 取最近 3 条摘要，提取前 30 字符作为话题锚点。
-/// - 按时间顺序串联为"你此前与用户讨论了 A、B、C 等话题"格式。
-/// - 添加时间提示（"最近一次对话发生在 XX"）。
+/// - 反转为主题时间线（最早→最近）后以"、"串联。
+/// - 单条输出"你和对方聊过：{话题}。"；多条追加"可据此继续话题"。
 ///
 /// 参数:
 /// - `summaries`: 按时间降序排列的 L1 摘要文本列表。
@@ -812,21 +833,12 @@ pub fn build_cross_session_narrative(summaries: &[String]) -> String {
     let count = timeline.len();
     let topic_list = timeline.join("、");
 
-    // 生成引导句
-    let narrative = if count == 1 {
-        format!("你此前与用户讨论过「{topic_list}」。")
+    // 生成引导句：话题事实 + 多条时的延续用途
+    if count == 1 {
+        format!("你和对方聊过：{topic_list}。")
     } else {
-        format!("你此前与用户进行了 {count} 次对话：讨论了「{topic_list}」。")
-    };
-
-    // 追加时间提示
-    let time_hint = if count >= 2 {
-        " 最近一次对话发生在不久前，用户可能希望继续之前的话题。"
-    } else {
-        " 用户可能希望继续之前的话题。"
-    };
-
-    narrative + time_hint
+        format!("你和对方聊过：{topic_list}。可据此继续话题。")
+    }
 }
 
 // =========================================================
@@ -856,13 +868,16 @@ fn build_role_layer(context: &PromptContext, config: &PromptConfig) -> String {
         }
     }
 
-    // 回复规范（社交基调 + 核心规则 + 记忆引用规则；无自定义规则时使用最小化默认）
+    // 回复规范（社交基调 + 核心规则 + 说话锚点 + 记忆引用规则；无自定义规则时使用中性默认）
     parts.push(build_experiment_section(context, config));
 
     parts.join("")
 }
 
 /// 将性格标签格式化为 prompt 文本，按 layer 分组。
+///
+/// 标签行在含义后追加条件边界：`｜会在：{trigger}｜不会在：{suppress}`；
+/// 触发/抑制条件缺失（None 或空白）时省略对应段，两者皆缺时保持原格式。
 fn format_traits_for_prompt(traits: &[PersonalityTrait], max_per_layer: usize) -> String {
     use ramaria_core::types::TraitLayer;
     use std::collections::BTreeMap;
@@ -893,6 +908,22 @@ fn format_traits_for_prompt(traits: &[PersonalityTrait], max_per_layer: usize) -
             let mut desc = format!("  - {}", t.trait_label);
             if !t.meaning.is_empty() {
                 desc.push_str(&format!("（{}）", t.meaning));
+            }
+            let trigger = t
+                .trigger
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            if let Some(trigger) = trigger {
+                desc.push_str(&format!("｜会在：{trigger}"));
+            }
+            let suppress = t
+                .suppress
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            if let Some(suppress) = suppress {
+                desc.push_str(&format!("｜不会在：{suppress}"));
             }
             lines.push(desc);
         }
@@ -961,7 +992,7 @@ fn build_style_layer(context: &PromptContext, config: &PromptConfig) -> String {
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            sub.push(format!("## 自动风格规则\n{rule}"));
+            sub.push(format!("## 自动风格规则\n{STYLE_USAGE_LEAD}\n{rule}"));
         }
     }
 
@@ -981,7 +1012,8 @@ fn build_style_layer(context: &PromptContext, config: &PromptConfig) -> String {
 ///
 /// v2.0: 从 Block A 中独立出来，作为独立段。
 /// 并入表达层作为子段；无 speaking_style 时返回空（不产生段落）。
-/// 从 persona.config JSON 的 `speaking_style` 字段提取。
+/// 从 persona.config JSON 的 `speaking_style` 字段提取；
+/// 正文前加使用引导行，避免风格描述被复述为介绍内容。
 fn build_personality(context: &PromptContext) -> String {
     if let Some(ref persona) = context.persona
         && let Some(ref cfg_json) = persona.config
@@ -989,7 +1021,7 @@ fn build_personality(context: &PromptContext) -> String {
         && let Some(style) = obj.get("speaking_style").and_then(|v| v.as_str())
         && !style.trim().is_empty()
     {
-        format!("## 说话风格\n{style}")
+        format!("## 说话风格\n{STYLE_USAGE_LEAD}\n{style}")
     } else {
         String::new()
     }
@@ -1035,39 +1067,46 @@ fn build_statement(context: &PromptContext, config: &PromptConfig) -> String {
 // 回复规范子段（角色层内）
 // =========================================================
 
-/// 组装回复规范子段（`## 回复规范`）：社交对话基调 + 回复规则 + 记忆引用规则。
+/// 组装回复规范子段（`## 回复规范`）：社交对话基调 + 核心规则 + 说话锚点 + 记忆引用规则。
 ///
-/// v2.0: 合并原 SHARED_CHAT_STYLE_RULES（回复规则）和新增的记忆引用规则。
-/// 从独立 Experiment 块并入角色层；
-/// 记忆引用规则精确定义"主动回溯 vs 被动响应"的边界。
+/// 子段顺序（决定"体裁约束 > 个性化 > 约束复述 > 记忆引用边界"的效力层级）:
+/// 1. `### 社交对话基调` — 聊天档体裁约束（`include_social_tone` 控制），
+///    对全部 persona 生效；人格规则只在其之上做个性化。
+/// 2. `### 核心规则` — persona 风格规则（`chat_style_rules`），缺失时用中性默认。
+/// 3. `### 说话锚点` — 长度/格式约束贴近生成位置的复述（随聊天档开关）。
+/// 4. `### 记忆引用规则` — 引用时机/表达方式/对方询问时的边界（随知识边界开关）。
 ///
-/// 子段顺序（决定"体裁约束 > 个性化 > 记忆引用边界"的效力层级）:
-/// 1. `### 社交对话基调` — 全局社交平台体裁约束（`include_social_tone` 控制），
-///    对全部 persona 无条件注入；人格规则只在其之上做个性化。
-/// 2. `### 核心规则` — persona 风格规则（`chat_style_rules`），缺失时用最小化默认。
-/// 3. `### 记忆引用规则` — 何时/如何引用记忆（随知识边界开关）。
-///
-/// 说明: 基调放在 persona 规则之前，使模型先定体裁、再定个性；
-/// persona 已有个性化规则时基调同样在场（兜底型默认规则替代不了全局约束）。
+/// 陈述档（`include_social_tone=false`）:
+/// - 不注入基调与说话锚点；
+/// - `### 核心规则` 一律回退 [CORE_RULES_DEFAULT] 中性默认（不注入 persona 规则），
+///   使可及性轨保持"零字数/零格式表述"口径。
 fn build_experiment_section(context: &PromptContext, config: &PromptConfig) -> String {
-    let mut parts: Vec<String> = vec!["## 回复规范".to_string()];
+    let mut parts: Vec<String> = vec!["\n\n## 回复规范".to_string()];
 
-    // 全局社交对话基调（无条件注入，先于 persona 风格规则；体现"先定体裁、再定个性"）
+    // 全局社交对话基调（聊天档注入，先于 persona 风格规则；体现"先定体裁、再定个性"）
     if config.include_social_tone {
         parts.push(SOCIAL_CHAT_TONE_RULES.to_string());
     }
 
-    // 核心回复规则（persona 个性化规则；无则用最小化默认）
-    if let Some(ref rules) = context.chat_style_rules
-        && !rules.trim().is_empty()
-    {
-        parts.push(format!("\n### 核心规则\n{rules}"));
-    } else {
-        // 最小化默认规则
-        parts.push(CORE_RULES_DEFAULT.to_string());
+    // 核心回复规则：聊天档用 persona 个性化规则（缺失时中性默认）；
+    // 陈述档一律回退中性默认（不注入个性化格式/风格规则）
+    let persona_rules = context
+        .chat_style_rules
+        .as_deref()
+        .filter(|s| !s.trim().is_empty());
+    match persona_rules {
+        Some(rules) if config.include_social_tone => {
+            parts.push(format!("\n### 核心规则\n{rules}"));
+        }
+        _ => parts.push(CORE_RULES_DEFAULT.to_string()),
     }
 
-    // 记忆引用规则（含主动回溯 vs 被动响应的边界）
+    // 说话锚点（关键约束贴近生成位置复述；陈述档不注入）
+    if config.include_social_tone {
+        parts.push(RESPONSE_ANCHOR.to_string());
+    }
+
+    // 记忆引用规则（引用时机/表达方式/对方询问时的边界）
     if config.include_knowledge_boundary {
         parts.push(MEMORY_CITATION_RULES.to_string());
     }

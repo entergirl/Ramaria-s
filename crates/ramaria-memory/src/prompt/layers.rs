@@ -26,6 +26,7 @@
 use crate::behavior::MergedDecision;
 use crate::prompt::builder::{PromptConfig, PromptContext};
 use crate::token_budget::truncate_at_boundary;
+use ramaria_core::behavior::BehaviorParams;
 
 // =========================================================
 // 四层注入结构
@@ -346,17 +347,22 @@ const BEHAVIOR_BLOCK_DEFAULT_MAX_CHARS: usize = 400;
 /// 行为块最小字符预算（低于标题+引导行长度时渲染残缺段落，防御性返回 None）。
 const BEHAVIOR_BLOCK_MIN_CHARS: usize = 24;
 
+/// 表达倾向程度词的中性区间下界（参数低于该值 → 输出低档程度词）。
+const BEHAVIOR_TENDENCY_LOW: f64 = 0.4;
+/// 表达倾向程度词的中性区间上界（参数高于该值 → 输出高档程度词）。
+const BEHAVIOR_TENDENCY_HIGH: f64 = 0.6;
+
 /// 行为层注入块渲染。
 ///
 /// 消费 `PromptContext.behavior_decision`（情境路由合并结果，由 `ramaria-app`
 /// 在对话管线中注入）：
 /// - `None`（未命中 / 行为关闭 / 路由失败降级）→ 返回 `None`，不产生段落。
-/// - `Some(decision)` → 渲染 `## 行为规则` 小节（reaction + params + avoid），
+/// - `Some(decision)` → 渲染 `## 行为规则` 小节（reaction + 表达倾向程度词 + avoid），
 ///   段落置于 `# 角色（行为层）` 之后，语义上归属角色段。
 ///
 /// 预算:
 /// - 行为控制块固定小比例（默认 400 字符，`PromptConfig.behavior_block_max_chars`
-///   可调），超限从头部截断保规则文本并加 `…`（规则文本为主、参数为辅）。
+///   可调），超限从头部截断保规则文本并加 `…`（规则文本为主、程度词为辅）。
 ///
 /// 参数:
 /// - `context`: 装配上下文（含行为路由决策）。
@@ -383,16 +389,17 @@ pub fn render_behavior_block(
 
 /// 将合并后的路由决策渲染为行为规则小节文本。
 ///
-/// 输出格式（规则文本为主、结构化参数为辅）:
+/// 输出格式（规则文本为主、程度词为辅）:
 /// ```text
 /// ## 行为规则
 /// 聊到「加班」「累」等话题时：{reaction}
-/// - 表达倾向：情感强度-0.42 · 主动程度0.82 · 详细度0.65 · 正式度0.58
+/// - 表达倾向：语气偏冷 · 更主动一点 · 说细一点
 /// - 避免：深夜打扰、说教
 /// ```
 ///
 /// 降级:
-/// - 候选规则（reaction 为空）→ 以"按表达倾向调整回应"占位（仅参数注入）。
+/// - 候选规则（reaction 为空）→ 以"按表达倾向调整回应"占位（程度词与避免行照常注入）。
+/// - 表达倾向：只渲染偏离中性（<0.4 或 >0.6）的维度；全部中性时不输出该行。
 /// - avoid 为空 → 不输出避免行。
 /// - 超预算 → 从头部截断保规则文本（reaction 优先），追加 `…`，总长 ≤ `max_chars`。
 ///
@@ -423,14 +430,10 @@ fn render_behavior_decision(decision: &MergedDecision, max_chars: usize) -> Opti
     let mut lines = vec![
         "## 行为规则".to_string(),
         format!("聊到{kw_text}等话题时：{reaction_line}"),
-        format!(
-            "- 表达倾向：情感强度{:.2} · 主动程度{:.2} · 详细度{:.2} · 正式度{:.2}",
-            decision.merged_params.emotional_intensity,
-            decision.merged_params.proactiveness,
-            decision.merged_params.detail_level,
-            decision.merged_params.formality
-        ),
     ];
+    if let Some(tendency_line) = format_behavior_tendency(&decision.merged_params) {
+        lines.push(tendency_line);
+    }
     if !decision.merged_avoid.is_empty() {
         lines.push(format!("- 避免：{}", decision.merged_avoid.join("、")));
     }
@@ -449,6 +452,46 @@ fn render_behavior_decision(decision: &MergedDecision, max_chars: usize) -> Opti
         return None;
     }
     Some(content)
+}
+
+/// 将行为参数映射为表达倾向程度词行。
+///
+/// 映射（阈值 0.4 / 0.6；区间内视为中性、不输出）:
+/// - 情感强度：<0.4 → 语气偏冷；>0.6 → 语气偏热
+/// - 主动程度：<0.4 → 安静一点；>0.6 → 更主动一点
+/// - 详细度：<0.4 → 说简一点；>0.6 → 说细一点
+/// - 正式度：<0.4 → 更随意；>0.6 → 偏正式
+///
+/// 返回:
+/// - 命中维度按上表顺序以 ` · ` 连接、加 `- 表达倾向：` 前缀；全部中性时返回 `None`。
+fn format_behavior_tendency(params: &BehaviorParams) -> Option<String> {
+    let mut terms: Vec<&str> = Vec::new();
+
+    if params.emotional_intensity < BEHAVIOR_TENDENCY_LOW {
+        terms.push("语气偏冷");
+    } else if params.emotional_intensity > BEHAVIOR_TENDENCY_HIGH {
+        terms.push("语气偏热");
+    }
+    if params.proactiveness < BEHAVIOR_TENDENCY_LOW {
+        terms.push("安静一点");
+    } else if params.proactiveness > BEHAVIOR_TENDENCY_HIGH {
+        terms.push("更主动一点");
+    }
+    if params.detail_level < BEHAVIOR_TENDENCY_LOW {
+        terms.push("说简一点");
+    } else if params.detail_level > BEHAVIOR_TENDENCY_HIGH {
+        terms.push("说细一点");
+    }
+    if params.formality < BEHAVIOR_TENDENCY_LOW {
+        terms.push("更随意");
+    } else if params.formality > BEHAVIOR_TENDENCY_HIGH {
+        terms.push("偏正式");
+    }
+
+    if terms.is_empty() {
+        return None;
+    }
+    Some(format!("- 表达倾向：{}", terms.join(" · ")))
 }
 
 /// 知识层注入块渲染（事实卡片）。
@@ -750,9 +793,13 @@ mod tests {
 
     // ---- 行为层渲染辅助 ----
 
-    /// 构造带 reaction/params/avoid 的合并决策（与 routing.rs 测试同构）。
-    fn make_decision(reaction: Option<&str>, avoid: &[&str]) -> MergedDecision {
-        use ramaria_core::behavior::{BehaviorParams, BehaviorRule, BehaviorSituation, RuleSource};
+    /// 构造带指定 params 的合并决策（与 routing.rs 测试同构）。
+    fn make_decision_with_params(
+        params: BehaviorParams,
+        reaction: Option<&str>,
+        avoid: &[&str],
+    ) -> MergedDecision {
+        use ramaria_core::behavior::{BehaviorRule, BehaviorSituation, RuleSource};
         let mut rule = BehaviorRule::new(
             "char-0001",
             BehaviorSituation {
@@ -768,25 +815,29 @@ mod tests {
                 trait_refs: Vec::new(),
             },
             reaction.map(|s| s.to_string()),
-            BehaviorParams {
-                emotional_intensity: -0.42,
-                proactiveness: 0.82,
-                detail_level: 0.65,
-                formality: 0.58,
-            },
+            params,
             RuleSource::Auto,
         );
         rule.id = 1;
         MergedDecision {
             primary_rule: rule,
             merged_avoid: avoid.iter().map(|s| s.to_string()).collect(),
-            merged_params: BehaviorParams {
+            merged_params: params,
+        }
+    }
+
+    /// 构造默认偏离参数（-0.42 / 0.82 / 0.65 / 0.58）的合并决策。
+    fn make_decision(reaction: Option<&str>, avoid: &[&str]) -> MergedDecision {
+        make_decision_with_params(
+            BehaviorParams {
                 emotional_intensity: -0.42,
                 proactiveness: 0.82,
                 detail_level: 0.65,
                 formality: 0.58,
             },
-        }
+            reaction,
+            avoid,
+        )
     }
 
     #[test]
@@ -810,28 +861,31 @@ mod tests {
             "reaction 注入: {content}"
         );
         assert!(
-            content.contains("情感强度-0.42") && content.contains("主动程度0.82"),
-            "params 注入: {content}"
+            content.contains("- 表达倾向：语气偏冷 · 更主动一点 · 说细一点"),
+            "params 程度词注入: {content}"
         );
         assert!(content.contains("深夜打扰"), "avoid 注入: {content}");
     }
 
     #[test]
     fn render_behavior_block_candidate_rule_without_reaction() {
-        // 候选规则（reaction=None）命中 → 仅参数注入，不产生空规则行
+        // 候选规则（reaction=None）命中 → 仅表达倾向程度词注入，不产生空规则行
         let decision = make_decision(None, &[]);
         let ctx = PromptContext {
             behavior_decision: Some(decision),
             ..Default::default()
         };
         let block = render_behavior_block(&ctx, &PromptConfig::default())
-            .expect("候选规则命中时仍渲染（仅参数）");
+            .expect("候选规则命中时仍渲染（仅程度词）");
         let content = &block.content;
         assert!(
             content.contains("按表达倾向调整回应"),
             "候选规则占位: {content}"
         );
-        assert!(content.contains("情感强度-0.42"), "参数注入: {content}");
+        assert!(
+            content.contains("- 表达倾向：语气偏冷 · 更主动一点 · 说细一点"),
+            "params 程度词注入: {content}"
+        );
         assert!(
             !content.contains("- 避免"),
             "空 avoid 不输出避免行: {content}"
@@ -891,7 +945,7 @@ mod tests {
 
     #[test]
     fn render_behavior_decision_no_keywords_fallback() {
-        use ramaria_core::behavior::{BehaviorParams, BehaviorRule, BehaviorSituation, RuleSource};
+        use ramaria_core::behavior::{BehaviorRule, BehaviorSituation, RuleSource};
         let rule = BehaviorRule::new(
             "char-0001",
             BehaviorSituation {
@@ -917,6 +971,102 @@ mod tests {
         };
         let text = render_behavior_decision(&decision, 400).expect("渲染成功");
         assert!(text.contains("相关话题"), "无关键词回退: {text}");
+    }
+
+    // ---- 表达倾向程度词映射 ----
+
+    #[test]
+    fn behavior_tendency_all_high_terms_in_order() {
+        let line = format_behavior_tendency(&BehaviorParams {
+            emotional_intensity: 0.9,
+            proactiveness: 0.9,
+            detail_level: 0.9,
+            formality: 0.9,
+        })
+        .expect("全高时应输出表达倾向行");
+        assert_eq!(
+            line,
+            "- 表达倾向：语气偏热 · 更主动一点 · 说细一点 · 偏正式"
+        );
+    }
+
+    #[test]
+    fn behavior_tendency_all_low_terms_in_order() {
+        let line = format_behavior_tendency(&BehaviorParams {
+            emotional_intensity: -0.9,
+            proactiveness: 0.1,
+            detail_level: 0.1,
+            formality: 0.1,
+        })
+        .expect("全低时应输出表达倾向行");
+        assert_eq!(line, "- 表达倾向：语气偏冷 · 安静一点 · 说简一点 · 更随意");
+    }
+
+    #[test]
+    fn behavior_tendency_all_neutral_yields_none() {
+        assert_eq!(
+            format_behavior_tendency(&BehaviorParams {
+                emotional_intensity: 0.5,
+                proactiveness: 0.5,
+                detail_level: 0.5,
+                formality: 0.5,
+            }),
+            None,
+            "全中性不输出表达倾向行"
+        );
+        // 边界 0.4 / 0.6 视为中性
+        assert_eq!(
+            format_behavior_tendency(&BehaviorParams {
+                emotional_intensity: 0.4,
+                proactiveness: 0.6,
+                detail_level: 0.4,
+                formality: 0.6,
+            }),
+            None,
+            "边界值视为中性"
+        );
+    }
+
+    #[test]
+    fn behavior_tendency_mixed_outputs_hits_only() {
+        // 情感 0.42 / 正式 0.58 中性；主动 0.82、详细 0.65 命中高档
+        let line = format_behavior_tendency(&BehaviorParams {
+            emotional_intensity: 0.42,
+            proactiveness: 0.82,
+            detail_level: 0.65,
+            formality: 0.58,
+        })
+        .expect("部分命中时应输出表达倾向行");
+        assert_eq!(line, "- 表达倾向：更主动一点 · 说细一点");
+    }
+
+    #[test]
+    fn render_behavior_decision_neutral_params_omit_tendency_line() {
+        let decision = make_decision_with_params(
+            BehaviorParams {
+                emotional_intensity: 0.5,
+                proactiveness: 0.5,
+                detail_level: 0.5,
+                formality: 0.5,
+            },
+            Some("规则文本"),
+            &["深夜打扰"],
+        );
+        let text = render_behavior_decision(&decision, 400).expect("渲染成功");
+        assert!(!text.contains("- 表达倾向"), "全中性不输出倾向行: {text}");
+        assert!(text.contains("规则文本"), "规则文本保留: {text}");
+        assert!(text.contains("- 避免：深夜打扰"), "avoid 行保留: {text}");
+    }
+
+    #[test]
+    fn render_behavior_decision_truncation_keeps_head_including_tendency() {
+        let decision = make_decision(Some("这是一段很长的规则文本内容，用于验证预算裁剪"), &[]);
+        // 预算 55：保前 54 字符（含 `- 表达倾向：` 前缀）+ `…`
+        let text = render_behavior_decision(&decision, 55).expect("渲染成功");
+        assert!(text.chars().count() <= 55, "总长 ≤ 预算: {text}");
+        assert!(text.ends_with('…'), "截断提示: {text}");
+        assert!(text.starts_with("## 行为规则"), "保前部: {text}");
+        assert!(text.contains("- 表达倾向："), "前部保留程度词行: {text}");
     }
 
     // ---- 知识层渲染与预算接线 ----
