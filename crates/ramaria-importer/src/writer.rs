@@ -14,9 +14,31 @@
 //!   本层不重复实现去重规则。
 
 use ramaria_core::error::RamariaResult;
+use ramaria_core::privacy::mask_id;
 use sqlx::SqlitePool;
 
 use crate::traits::{ImportSide, ImportedSession};
+
+// =========================================================
+// 写入结果
+// =========================================================
+
+/// L0 写入结果，供调用方展示统计并触发后续深度处理。
+///
+/// 字段约定:
+/// - `session_ids`: 已创建的历史 session UUID 列表，供调用方触发 L1 摘要等深度处理。
+/// - `messages_dropped`: 因画像缺失被丢弃的消息数（含整段 session 被丢弃的消息），
+///   调用方应将其作为"非静默降级"提示给用户，而不是仅存在于日志中。
+pub struct WriteOutcome {
+    /// 成功写入的 session 数
+    pub sessions_written: usize,
+    /// 成功写入的消息数
+    pub messages_written: usize,
+    /// 创建的 session UUID 列表（供调用方触发 L1 摘要等深度处理）
+    pub session_ids: Vec<uuid::Uuid>,
+    /// 因画像缺失被丢弃的消息数（含整段 session 被丢弃的消息）
+    pub messages_dropped: usize,
+}
 
 // =========================================================
 // 通用写入器
@@ -61,12 +83,13 @@ impl ImportWriter {
     /// - `side`: 导入侧过滤（self|other|both）。
     ///
     /// 返回:
-    /// - `(sessions_written, messages_written, session_ids)`: 写入统计及创建的 session UUID 列表。
+    /// - `WriteOutcome`: 写入统计、创建的 session UUID 列表与画像缺失丢弃计数。
     ///
     /// 说明:
     /// - 每个 session 创建为已关闭的历史 session。
     /// - 消息使用 `save_import_batch` 批量写入，绕过 session 活跃状态检查。
     /// - 返回的 session_ids 供调用方触发 L1 摘要等深度处理。
+    /// - 查重或批量写入失败时中止本批导入，并补偿删除刚创建的 session（不留半成品会话）。
     pub async fn write_l0(
         pool: &SqlitePool,
         sessions: &[ImportedSession],
@@ -74,10 +97,12 @@ impl ImportWriter {
         other_persona_uid: Option<&str>,
         self_uid: &str,
         side: ImportSide,
-    ) -> RamariaResult<(usize, usize, Vec<uuid::Uuid>)> {
+    ) -> RamariaResult<WriteOutcome> {
         let mut sessions_written = 0usize;
         let mut messages_written = 0usize;
         let mut session_ids: Vec<uuid::Uuid> = Vec::new();
+        // 因画像缺失被丢弃的消息数（含整段 session 被丢弃的消息）
+        let mut messages_dropped = 0usize;
         // 分别统计双方消息数，用于日志输出
         let mut self_msg_count = 0usize;
         let mut other_msg_count = 0usize;
@@ -118,14 +143,19 @@ impl ImportWriter {
                 continue;
             }
 
-            // 创建历史 session（已关闭）；归属为处理侧画像
+            // 创建历史 session（已关闭）；归属为处理侧画像（Both 模式归属对方）。
             let owner = match side {
                 ImportSide::Me => self_persona_uid,
-                _ => other_persona_uid,
+                ImportSide::Other | ImportSide::Both => other_persona_uid,
             };
             let Some(owner_uid) = owner else {
-                // 防御：单侧模式下归属侧画像必须已创建（调用方保证）
-                tracing::warn!("session 归属画像未创建，跳过该 session");
+                // 防御：处理侧归属画像必须已创建（调用方保证）
+                messages_dropped += kept.len();
+                tracing::warn!(
+                    kept = kept.len(),
+                    side = ?side,
+                    "session 归属画像未创建，跳过该 session 并将其消息计入丢弃数（导入侧过滤不一致）"
+                );
                 continue;
             };
 
@@ -146,24 +176,35 @@ impl ImportWriter {
             let mut batch: Vec<ramaria_core::types::Message> = Vec::with_capacity(kept.len());
             for (is_self, parsed) in kept {
                 // 跨文件去重：指纹已在库中 → 跳过（只记计数与指纹尾段，不记内容/昵称/QQ 号）
-                if !parsed.fingerprint.is_empty()
-                    && let Some(existing) = ramaria_storage::repo::messages::find_by_fingerprint(
+                if !parsed.fingerprint.is_empty() {
+                    match ramaria_storage::repo::messages::find_by_fingerprint(
                         pool,
                         &parsed.fingerprint,
                     )
                     .await
-                    .map_err(|e| {
-                        tracing::warn!(error = %e, "跨文件指纹查重失败，跳过查重继续导入");
-                        e
-                    })?
-                {
-                    dedup_skipped += 1;
-                    tracing::debug!(
-                        existing_id = %existing.id,
-                        fp_tail = %&parsed.fingerprint[parsed.fingerprint.len().saturating_sub(4)..],
-                        "消息已在库中，跨文件去重跳过"
-                    );
-                    continue;
+                    {
+                        Ok(Some(existing)) => {
+                            dedup_skipped += 1;
+                            tracing::debug!(
+                                existing_id = %existing.id,
+                                fp_tail = %&parsed.fingerprint[parsed.fingerprint.len().saturating_sub(4)..],
+                                "消息已在库中，跨文件去重跳过"
+                            );
+                            continue;
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            // 查重失败若继续导入，后续 UNIQUE 冲突会留下语义不明的错误；
+                            // 明确中止本批并补偿删除刚建 session（不留半成品会话）。
+                            tracing::error!(
+                                session_id = %db_session.id,
+                                error = %e,
+                                "跨文件指纹查重失败，中止本批导入"
+                            );
+                            rollback_created_session(pool, db_session.id).await;
+                            return Err(e);
+                        }
+                    }
                 }
 
                 let persona_for_msg = if is_self {
@@ -174,9 +215,11 @@ impl ImportWriter {
                     other_persona_uid
                 };
                 let Some(persona_uid) = persona_for_msg else {
-                    // 防御：单侧模式下不应出现跳过侧消息（已过滤），出现则丢弃记 warn
+                    // 防御：单侧模式下不应出现跳过侧消息（已过滤），出现则丢弃记 warn；
+                    // sender 为个人标识，日志只记掩码。
+                    messages_dropped += 1;
                     tracing::warn!(
-                        sender = %parsed.sender_uid,
+                        sender = %mask_id(&parsed.sender_uid),
                         "消息发送侧画像未创建，丢弃该消息（导入侧过滤不一致）"
                     );
                     continue;
@@ -198,14 +241,21 @@ impl ImportWriter {
                 });
             }
 
-            // 单事务批量写入（替代逐条 INSERT，显著降低大文件导入的 fsync 开销）
-            let written = ramaria_storage::repo::messages::save_import_batch(pool, &batch)
-                .await
-                .map_err(|e| {
-                    tracing::error!(session_id = %db_session.id, error = %e, "批量写入导入消息失败");
-                    e
-                })?;
-            let msg_count = written;
+            // 单事务批量写入（替代逐条 INSERT，显著降低大文件导入的 fsync 开销）；
+            // 失败时事务整体回滚，并补偿删除刚建 session（不留半成品会话）。
+            let msg_count =
+                match ramaria_storage::repo::messages::save_import_batch(pool, &batch).await {
+                    Ok(written) => written,
+                    Err(e) => {
+                        tracing::error!(
+                            session_id = %db_session.id,
+                            error = %e,
+                            "批量写入导入消息失败，中止本批导入"
+                        );
+                        rollback_created_session(pool, db_session.id).await;
+                        return Err(e);
+                    }
+                };
 
             session_ids.push(db_session.id);
             sessions_written += 1;
@@ -224,13 +274,45 @@ impl ImportWriter {
             self_messages = self_msg_count,
             other_messages = other_msg_count,
             dedup_skipped = dedup_skipped,
+            messages_dropped = messages_dropped,
             self_persona = ?self_persona_uid,
             other_persona = ?other_persona_uid,
             side = ?side,
             "双画像导入统计"
         );
 
-        Ok((sessions_written, messages_written, session_ids))
+        if messages_dropped > 0 {
+            tracing::warn!(
+                messages_dropped = messages_dropped,
+                "本次导入存在因画像缺失被丢弃的消息（详见上方逐条警告，不记录消息内容）"
+            );
+        }
+
+        Ok(WriteOutcome {
+            sessions_written,
+            messages_written,
+            session_ids,
+            messages_dropped,
+        })
+    }
+}
+
+/// 补偿删除本批新建的 session（写入失败回滚）。
+///
+/// 参数:
+/// - `pool`: 数据库连接池。
+/// - `session_id`: 需要删除的 session UUID。
+///
+/// 说明:
+/// - 供 `write_l0` 在查重或批量写入失败时调用，保持"失败不留半成品会话"。
+/// - 删除失败仅记录 error 日志（提示重跑导入可能重复创建该会话），不覆盖调用方的原始错误。
+async fn rollback_created_session(pool: &sqlx::SqlitePool, session_id: uuid::Uuid) {
+    if let Err(del_err) = ramaria_storage::repo::sessions::delete(pool, session_id).await {
+        tracing::error!(
+            session_id = %session_id,
+            error = %del_err,
+            "补偿删除已创建 session 失败，重跑导入可能重复创建该会话"
+        );
     }
 }
 
@@ -341,7 +423,7 @@ mod tests {
         let pool = test_pool().await;
         let sessions = vec![make_side_session("我的发言", "对方发言")];
 
-        let (sessions_written, messages_written, _) = ImportWriter::write_l0(
+        let outcome = ImportWriter::write_l0(
             &pool,
             &sessions,
             Some("user-0001"),
@@ -352,8 +434,8 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(sessions_written, 1);
-        assert_eq!(messages_written, 1, "跳过侧消息必须不入库");
+        assert_eq!(outcome.sessions_written, 1);
+        assert_eq!(outcome.messages_written, 1, "跳过侧消息必须不入库");
         assert_eq!(msg_count(&pool).await, 1);
         assert_eq!(msg_persona_uids(&pool).await, vec!["user-0001".to_string()]);
         assert_eq!(session_owner(&pool).await.as_deref(), Some("user-0001"));
@@ -365,7 +447,7 @@ mod tests {
         let pool = test_pool().await;
         let sessions = vec![make_side_session("我的发言", "对方发言")];
 
-        let (sessions_written, messages_written, _) = ImportWriter::write_l0(
+        let outcome = ImportWriter::write_l0(
             &pool,
             &sessions,
             None, // side=Other：我方画像不创建
@@ -376,8 +458,8 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(sessions_written, 1);
-        assert_eq!(messages_written, 1, "我方消息必须被过滤");
+        assert_eq!(outcome.sessions_written, 1);
+        assert_eq!(outcome.messages_written, 1, "我方消息必须被过滤");
         assert_eq!(msg_count(&pool).await, 1);
         assert_eq!(msg_persona_uids(&pool).await, vec!["char-0001".to_string()]);
         assert_eq!(session_owner(&pool).await.as_deref(), Some("char-0001"));
@@ -389,7 +471,7 @@ mod tests {
         let pool = test_pool().await;
         let sessions = vec![make_side_session("我的发言", "对方发言")];
 
-        let (sessions_written, messages_written, _) = ImportWriter::write_l0(
+        let outcome = ImportWriter::write_l0(
             &pool,
             &sessions,
             Some("user-0001"),
@@ -400,8 +482,8 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(sessions_written, 1);
-        assert_eq!(messages_written, 2, "both 模式双方消息全部入库");
+        assert_eq!(outcome.sessions_written, 1);
+        assert_eq!(outcome.messages_written, 2, "both 模式双方消息全部入库");
         assert_eq!(
             msg_persona_uids(&pool).await,
             vec!["user-0001".to_string(), "char-0001".to_string()]
@@ -417,7 +499,7 @@ mod tests {
         let mut only_self = sessions;
         only_self[0].messages.retain(|m| m.sender_uid == "SELF_UID");
 
-        let (sessions_written, messages_written, _) = ImportWriter::write_l0(
+        let outcome = ImportWriter::write_l0(
             &pool,
             &only_self,
             None,
@@ -428,8 +510,8 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(sessions_written, 0, "全过滤 session 不应创建");
-        assert_eq!(messages_written, 0);
+        assert_eq!(outcome.sessions_written, 0, "全过滤 session 不应创建");
+        assert_eq!(outcome.messages_written, 0);
         assert_eq!(msg_count(&pool).await, 0);
         let session_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
             .fetch_one(&pool)
@@ -476,7 +558,7 @@ mod tests {
         preseed_fingerprint(&pool, "fp-existing").await;
         let sessions = vec![make_dedup_session("我的发言", "fp-existing")];
 
-        let (sessions_written, messages_written, _) = ImportWriter::write_l0(
+        let outcome = ImportWriter::write_l0(
             &pool,
             &sessions,
             Some("user-0001"),
@@ -487,8 +569,11 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(sessions_written, 1, "session 仍会创建（去重只跳过消息）");
-        assert_eq!(messages_written, 0, "同指纹消息应被跳过");
+        assert_eq!(
+            outcome.sessions_written, 1,
+            "session 仍会创建（去重只跳过消息）"
+        );
+        assert_eq!(outcome.messages_written, 0, "同指纹消息应被跳过");
         // 库中仍只有预插的那一条
         assert_eq!(msg_count(&pool).await, 1);
     }
@@ -510,7 +595,7 @@ mod tests {
             sender_name: "我".to_string(),
         });
 
-        let (sessions_written, messages_written, _) = ImportWriter::write_l0(
+        let outcome = ImportWriter::write_l0(
             &pool,
             &[session],
             Some("user-0001"),
@@ -521,8 +606,11 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(sessions_written, 1, "session 正常创建");
-        assert_eq!(messages_written, 1, "同批重复指纹只写一条，不撞 UNIQUE");
+        assert_eq!(outcome.sessions_written, 1, "session 正常创建");
+        assert_eq!(
+            outcome.messages_written, 1,
+            "同批重复指纹只写一条，不撞 UNIQUE"
+        );
         assert_eq!(msg_count(&pool).await, 1);
     }
 
@@ -534,7 +622,7 @@ mod tests {
         let s1 = make_dedup_session("我的发言", "fp-shared");
         let s2 = make_dedup_session("我的发言", "fp-shared");
 
-        let (sessions_written, messages_written, _) = ImportWriter::write_l0(
+        let outcome = ImportWriter::write_l0(
             &pool,
             &[s1, s2],
             Some("user-0001"),
@@ -545,8 +633,14 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(sessions_written, 1, "第二个全重复 session 不创建空 session");
-        assert_eq!(messages_written, 1, "首 session 写入一条，重复被跳过");
+        assert_eq!(
+            outcome.sessions_written, 1,
+            "第二个全重复 session 不创建空 session"
+        );
+        assert_eq!(
+            outcome.messages_written, 1,
+            "首 session 写入一条，重复被跳过"
+        );
         assert_eq!(msg_count(&pool).await, 1);
     }
 
@@ -557,7 +651,7 @@ mod tests {
         preseed_fingerprint(&pool, "fp-existing").await;
         let sessions = vec![make_dedup_session("我的发言", "fp-new")];
 
-        let (sessions_written, messages_written, _) = ImportWriter::write_l0(
+        let outcome = ImportWriter::write_l0(
             &pool,
             &sessions,
             Some("user-0001"),
@@ -568,9 +662,100 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(sessions_written, 1);
-        assert_eq!(messages_written, 1, "不同指纹应正常写入");
+        assert_eq!(outcome.sessions_written, 1);
+        assert_eq!(outcome.messages_written, 1, "不同指纹应正常写入");
         assert_eq!(msg_count(&pool).await, 2);
+    }
+
+    /// 批量写入失败（同批两条空指纹消息撞 import_fingerprint UNIQUE）→
+    /// 返回 Err，且补偿删除本批刚创建的 session（不留半成品会话）。
+    #[tokio::test]
+    async fn write_l0_batch_failure_removes_created_session() {
+        let pool = test_pool().await;
+        // 空指纹绕过批内去重与跨文件查重，两条消息落入同一 batch 触发 UNIQUE 冲突
+        let mut session = make_dedup_session("第一条", "");
+        session.messages.push(crate::traits::ParsedMessage {
+            role: "user".to_string(),
+            content: "第二条".to_string(),
+            created_at: 1200,
+            fingerprint: String::new(),
+            sender_uid: "SELF_UID".to_string(),
+            sender_uin: Some("10001".to_string()),
+            sender_name: "我".to_string(),
+        });
+
+        let result = ImportWriter::write_l0(
+            &pool,
+            &[session],
+            Some("user-0001"),
+            None,
+            "SELF_UID",
+            ImportSide::Me,
+        )
+        .await;
+
+        assert!(result.is_err(), "批量写入失败应中止本批导入");
+        // 补偿删除：失败时既不留 session，也不留消息（批量事务整体回滚）
+        let session_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(session_count, 0, "失败批次创建的 session 应被补偿删除");
+        assert_eq!(msg_count(&pool).await, 0, "失败批次的批量写入应整体回滚");
+    }
+
+    /// 归属侧画像缺失（side=Me 且我方画像未创建）→ 该 session 不入库，
+    /// 已过滤待写消息全部计入 messages_dropped（不静默丢失统计）。
+    #[tokio::test]
+    async fn write_l0_owner_persona_missing_counts_dropped() {
+        let pool = test_pool().await;
+        let sessions = vec![make_side_session("我的发言", "对方发言")];
+
+        let outcome = ImportWriter::write_l0(
+            &pool,
+            &sessions,
+            None, // side=Me：我方画像未创建（防御场景）
+            Some("char-0001"),
+            "SELF_UID",
+            ImportSide::Me,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.sessions_written, 0);
+        assert_eq!(outcome.messages_written, 0);
+        assert!(
+            outcome.messages_dropped > 0,
+            "归属画像缺失时消息必须计入丢弃数"
+        );
+        assert_eq!(msg_count(&pool).await, 0);
+    }
+
+    /// side=Both 且我方画像缺失（防御场景）→ session 按既有口径归属对方，
+    /// 对方消息入库，我方消息在消息级逐条计入 messages_dropped。
+    #[tokio::test]
+    async fn write_l0_missing_self_persona_drops_self_messages() {
+        let pool = test_pool().await;
+        let sessions = vec![make_side_session("我的发言", "对方发言")];
+
+        let outcome = ImportWriter::write_l0(
+            &pool,
+            &sessions,
+            None, // 我方画像缺失（防御场景）
+            Some("char-0001"),
+            "SELF_UID",
+            ImportSide::Both,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            outcome.sessions_written, 1,
+            "Both 模式 session 归属对方画像"
+        );
+        assert_eq!(outcome.messages_written, 1, "对方消息应正常入库");
+        assert_eq!(outcome.messages_dropped, 1, "我方消息应计入丢弃数");
+        assert_eq!(msg_count(&pool).await, 1);
     }
 
     /// ImportSide::parse_cli 解析（self|other|both；非法值报错）。

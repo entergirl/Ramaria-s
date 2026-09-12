@@ -32,21 +32,3 @@ pub fn read_error(path: &str, source: std::io::Error) -> RamariaError {
 pub fn json_parse_error(path: &str, detail: &str) -> RamariaError {
     RamariaError::serialization(format!("解析 JSON 文件失败: {path} - {detail}"))
 }
-
-/// 创建编码检测错误。
-pub fn encoding_error(path: &str, encodings: &[&str], last_error: &str) -> RamariaError {
-    RamariaError::io(
-        format!("无法以任何编码读取文件 {path}，已尝试: {encodings:?}，最后错误: {last_error}"),
-        None,
-    )
-}
-
-/// 创建导入写入错误。
-pub fn import_write_error(detail: &str) -> RamariaError {
-    RamariaError::storage(format!("导入写入失败: {detail}"))
-}
-
-/// 创建 persona 找不到的错误。
-pub fn persona_not_found(uid: &str) -> RamariaError {
-    RamariaError::validation(format!("Persona 不存在: {uid}，请先创建该角色"))
-}

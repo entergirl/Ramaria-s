@@ -941,7 +941,15 @@ fn consume_message(ctx: &mut ParseCtx, elem: serde_json::Value) {
 
     // 依赖 qce 导出顺序（chatInfo 在 messages 之前）以提供角色映射所需的元信息；
     // 遇到该顺序不满足的异常结构时防御性跳过解析（不 panic）。
+    // 丢弃必须可观测：计入报告的 skipped_missing_meta，首条触发一次 warn（避免逐条刷屏）。
     let Some(meta) = ctx.chat_meta.as_ref() else {
+        ctx.report.skipped_missing_meta += 1;
+        if ctx.report.skipped_missing_meta == 1 {
+            tracing::warn!(
+                file = %ctx.report.file_path,
+                "检测到 messages 出现在 chatInfo 之前（或缺失 chatInfo），消息因缺少元信息被丢弃"
+            );
+        }
         return;
     };
 
@@ -1075,12 +1083,21 @@ pub fn parse_qq_export(
         report.time_end = ts_ms_to_date(last.created_at);
     }
 
+    if report.skipped_missing_meta > 0 {
+        tracing::warn!(
+            file = %report.file_path,
+            skipped_missing_meta = report.skipped_missing_meta,
+            "存在因缺少 chatInfo 元信息被丢弃的消息（messages 先于 chatInfo 出现或 chatInfo 缺失）"
+        );
+    }
+
     tracing::info!(
         sessions = report.session_count,
         success = report.total_success(),
         degraded = report.total_degraded(),
         skipped = report.total_skipped(),
         skipped_system = report.skipped_system,
+        skipped_missing_meta = report.skipped_missing_meta,
         dedup_removed = report.dedup_removed,
         "QQ JSON 解析完成"
     );

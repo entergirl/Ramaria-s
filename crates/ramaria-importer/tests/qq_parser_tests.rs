@@ -827,3 +827,30 @@ fn parse_json_fingerprint_consistent_with_dual_prefix() {
 // （原 parse_json_type_10_has_readable_text / parse_json_type_19_has_readable_text
 //  与 parse_json_type_10_red_envelope / parse_json_type_19_call 重复，已删除）
 // =========================================================
+
+// =========================================================
+// 顶层字段顺序异常：messages 先于 chatInfo
+// =========================================================
+
+#[test]
+fn parse_json_messages_before_chat_info_reports_missing_meta() {
+    // 消息被丢弃但必须可观测：计入 total_raw 与 skipped_missing_meta，不得静默消失。
+    let content = r#"{
+        "messages": [
+            {"id":"1","timestamp":1704067200000,"type":"text","recalled":false,"system":false,"content":{"text":"你好","elements":[]},"sender":{"uid":"u_self","name":"我"}}
+        ],
+        "chatInfo": {"selfUid": "u_self", "selfName": "我", "name": "好友", "type": "private", "peerUid": "u_friend"}
+    }"#;
+    let path = create_temp_json("messages_before_chatinfo", content);
+
+    let result = parser::parse_qq_export(Path::new(&path), 10);
+    cleanup(&path);
+
+    assert!(result.is_ok());
+    let (sessions, report) = result.unwrap();
+
+    assert!(sessions.is_empty(), "缺少元信息的消息不得进入 session");
+    assert_eq!(report.total_raw, 1);
+    assert_eq!(report.skipped_missing_meta, 1);
+    assert_eq!(report.total_skipped(), 1, "被丢弃的消息必须计入跳过统计");
+}

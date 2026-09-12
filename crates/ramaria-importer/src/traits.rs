@@ -242,6 +242,8 @@ pub struct ImportReport {
     pub skipped_empty: usize,
     /// 未知 type 的消息
     pub skipped_unknown: usize,
+    /// 因缺少 chatInfo 元信息（messages 先于 chatInfo 出现）而丢弃的消息数
+    pub skipped_missing_meta: usize,
     /// 遇到的未知 type 值列表
     pub unknown_types: Vec<String>,
 
@@ -280,9 +282,13 @@ impl ImportReport {
             + self.degraded_qce_unsupported
     }
 
-    /// 完全跳过的消息总数（含 system 消息跳过）。
+    /// 完全跳过的消息总数（含 system 消息跳过与缺失 chatInfo 元信息的丢弃）。
     pub fn total_skipped(&self) -> usize {
-        self.skipped_recalled + self.skipped_system + self.skipped_empty + self.skipped_unknown
+        self.skipped_recalled
+            + self.skipped_system
+            + self.skipped_empty
+            + self.skipped_unknown
+            + self.skipped_missing_meta
     }
 
     /// 生成人类可读的摘要文本。
@@ -349,12 +355,13 @@ impl ImportReport {
             self.degraded_qce_unsupported,
         ));
         s.push_str(&format!(
-            "❌ 跳过: {} 条（撤回 {}，系统 {}，空内容 {}，未知type {}）\n",
+            "❌ 跳过: {} 条（撤回 {}，系统 {}，空内容 {}，未知type {}，缺元信息 {}）\n",
             self.total_skipped(),
             self.skipped_recalled,
             self.skipped_system,
             self.skipped_empty,
             self.skipped_unknown,
+            self.skipped_missing_meta,
         ));
         if !self.unknown_types.is_empty() {
             s.push_str(&format!("  未知type: {:?}\n", self.unknown_types));
@@ -395,6 +402,7 @@ impl Default for ImportReport {
             skipped_system: 0,
             skipped_empty: 0,
             skipped_unknown: 0,
+            skipped_missing_meta: 0,
             unknown_types: Vec::new(),
             duplicate_check_enabled: false,
             duplicates_found: 0,
