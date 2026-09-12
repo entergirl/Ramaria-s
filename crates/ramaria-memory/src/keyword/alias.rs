@@ -4,7 +4,13 @@
 //! - `AliasManager`: 内存级别名管理器，注册/查询/建议合并一站式
 //! - 双缓存设计：`alias_to_canonical` 别名→规范词正向查询 + `canonical_id_by_text` 文本→ID 反向查询
 //! - 合并建议引擎：按 `use_count` 分析同类关键词，输出"高使用量同义词应合并"的建议
+//! - 所有对外入口（注册 / 查询 / 注销 / 计数注入）统一经 `KeywordToken::new` 标准化
+//!   （trim + ASCII 小写）：大小写与首尾空白差异命中同一映射
 //! - 纯逻辑层，不直接操作数据库（存储操作通过回调/注入实现）
+//!
+//! 未接线标注:
+//! - **未接线**：当前生产链路无 pending 写入者与建议引擎调用点（pending 行由
+//!   外部/手动写入）；本引擎与 `MergeSuggestion` 为预留能力，待后续版本接线。
 //!
 //! 预留给 keyword_refs 消费路径（v1.6 精确匹配检索）
 //!
@@ -32,9 +38,9 @@ use ramaria_core::keyword::KeywordToken;
 /// - 分析关键词使用量分布，输出合并建议
 ///
 /// 状态:
-/// - `alias_to_canonical`: 别名文本 → (规范词 KeywordToken, 规范词 keyword_pool.id)
-/// - `canonical_id_by_text`: 规范词文本 → keyword_pool.id（反向查询，验证存在性）
-/// - `use_counts`: 关键词文本 → 使用计数（从 DB 加载，用于合并建议引擎）
+/// - `alias_to_canonical`: 别名文本（标准化）→ (规范词 KeywordToken, 规范词 keyword_pool.id)
+/// - `canonical_id_by_text`: 规范词文本（标准化）→ keyword_pool.id（反向查询，验证存在性）
+/// - `use_counts`: 关键词文本（标准化）→ 使用计数（从 DB 加载，用于合并建议引擎）
 ///
 /// 线程安全:
 /// - AliasManager 不是 Send + Sync，由上层通过 Mutex 保护
@@ -45,11 +51,11 @@ use ramaria_core::keyword::KeywordToken;
 /// - 写入时同步写缓存 + 委托 DB 写入（通过外部回调）
 /// - 查询时优先查缓存（避免每次查询穿透到 DB）
 pub struct AliasManager {
-    /// 别名文本 → (规范词 KeywordToken, 规范词 ID)
+    /// 别名文本（标准化）→ (规范词 KeywordToken, 规范词 ID)
     alias_to_canonical: HashMap<String, (KeywordToken, i64)>,
-    /// 规范词文本 → keyword_pool.id（反向查询）
+    /// 规范词文本（标准化）→ keyword_pool.id（反向查询）
     canonical_id_by_text: HashMap<String, i64>,
-    /// 关键词使用计数（文本 → 使用次数）
+    /// 关键词使用计数（标准化文本 → 使用次数）
     use_counts: HashMap<String, u32>,
 }
 
@@ -76,11 +82,13 @@ impl AliasManager {
     ///
     /// 返回:
     /// - `Ok(())`: 注册成功。
-    /// - `Err(String)`: 别名与规范词相同（无意义循环别名）。
+    /// - `Err(String)`: 别名文本非法（空 / 超长）、规范词文本非法，
+    ///   或两者标准化后相同（无意义循环别名）。
     ///
     /// 说明:
-    /// - 如果 `alias_text` 已注册，覆盖旧映射。
-    /// - `canonical_text` 会自动通过 `KeywordToken::new()` 标准化。
+    /// - 别名与规范词文本均经 `KeywordToken::new()` 标准化（trim + ASCII 小写）
+    ///   后作为缓存 key；大小写/首尾空白差异命中同一映射。
+    /// - 如果标准化后的 `alias_text` 已注册，覆盖旧映射。
     /// - 不自动写入 DB——由调用方在外部完成持久化。
     pub fn register_alias(
         &mut self,
@@ -88,28 +96,30 @@ impl AliasManager {
         canonical_id: i64,
         canonical_text: &str,
     ) -> Result<(), String> {
-        // 阻止循环别名：别名不能指向自身
-        if alias_text == canonical_text {
+        let alias_token = KeywordToken::new(alias_text)
+            .ok_or_else(|| format!("别名文本无效（空或超长）: '{alias_text}'"))?;
+        let canonical_token = KeywordToken::new(canonical_text)
+            .ok_or_else(|| format!("规范词文本无效（空或超长）: '{canonical_text}'"))?;
+
+        // 阻止循环别名：标准化后相同即视为自指（大小写/空白差异不算不同词）
+        if alias_token == canonical_token {
             return Err(format!("别名不能指向自身: '{}' 与规范词相同", alias_text));
         }
 
-        let canonical_token = KeywordToken::new(canonical_text)
-            .ok_or_else(|| format!("规范词文本无效（空或纯空白）: '{}'", canonical_text))?;
-
-        // 更新正向缓存：别名 → (规范词, ID)
+        // 更新正向缓存：标准化别名 → (规范词, ID)
         self.alias_to_canonical.insert(
-            alias_text.to_string(),
+            alias_token.as_str().to_string(),
             (canonical_token.clone(), canonical_id),
         );
 
-        // 更新反向缓存：规范词文本 → ID（首次注册或 ID 变更时覆盖旧值；
+        // 更新反向缓存：规范词文本（标准化）→ ID（首次注册或 ID 变更时覆盖旧值；
         // 此前用 or_insert 在 ID 变更时保留旧 ID，与注释语义不符）
         self.canonical_id_by_text
             .insert(canonical_token.as_str().to_string(), canonical_id);
 
         tracing::debug!(
-            alias = alias_text,
-            canonical = %canonical_token,
+            alias_len = alias_token.as_str().len(),
+            canonical_len = canonical_token.as_str().len(),
             canonical_id,
             "别名注册成功"
         );
@@ -120,69 +130,74 @@ impl AliasManager {
     /// 根据别名文本查询规范词。
     ///
     /// 参数:
-    /// - `alias_text`: 待查询的别名文本。
+    /// - `alias_text`: 待查询的别名文本（内部经 `KeywordToken::new` 标准化后查表）。
     ///
     /// 返回:
     /// - `Some((KeywordToken, canonical_id))`: 查找到的规范词和 ID。
-    /// - `None`: 未找到别名映射（该关键词本身就是规范词，或不存在）。
+    /// - `None`: 未找到别名映射（该关键词本身就是规范词，或不存在，或文本非法）。
     ///
     /// 说明:
     /// - 只查缓存，不穿透 DB。
     /// - 调用方应先通过此方法查询，未命中时视关键词为 Canonical 状态。
     pub fn resolve_alias(&self, alias_text: &str) -> Option<(KeywordToken, i64)> {
+        let token = KeywordToken::new(alias_text)?;
         self.alias_to_canonical
-            .get(alias_text)
-            .map(|(token, id)| (token.clone(), *id))
+            .get(token.as_str())
+            .map(|(canonical, id)| (canonical.clone(), *id))
     }
 
     /// 根据别名文本查询规范词文本（便捷方法）。
     ///
     /// 参数:
-    /// - `alias_text`: 待查询的别名文本。
+    /// - `alias_text`: 待查询的别名文本（内部经 `KeywordToken::new` 标准化后查表）。
     ///
     /// 返回:
     /// - `Some(&str)`: 规范词文本。
-    /// - `None`: 未找到别名映射。
+    /// - `None`: 未找到别名映射或文本非法。
     pub fn resolve_alias_text(&self, alias_text: &str) -> Option<&str> {
+        let token = KeywordToken::new(alias_text)?;
         self.alias_to_canonical
-            .get(alias_text)
-            .map(|(token, _)| token.as_str())
+            .get(token.as_str())
+            .map(|(canonical, _)| canonical.as_str())
     }
 
     /// 注销别名映射。
     ///
     /// 参数:
-    /// - `alias_text`: 要注销的别名文本。
+    /// - `alias_text`: 要注销的别名文本（内部经 `KeywordToken::new` 标准化后定位）。
     ///
     /// 返回:
     /// - `true`: 成功注销。
-    /// - `false`: 别名不存在。
+    /// - `false`: 别名不存在或文本非法。
     ///
     /// 说明:
     /// - 不从 `canonical_id_by_text` 中删除规范词条目（其他别名可能仍使用）。
     pub fn unregister_alias(&mut self, alias_text: &str) -> bool {
-        self.alias_to_canonical.remove(alias_text).is_some()
+        let Some(token) = KeywordToken::new(alias_text) else {
+            return false;
+        };
+        self.alias_to_canonical.remove(token.as_str()).is_some()
     }
 
     /// 根据规范词文本查询 ID。
     ///
     /// 返回:
     /// - `Some(i64)`: 规范词 ID。
-    /// - `None`: 未缓存该规范词。
+    /// - `None`: 未缓存该规范词或文本非法。
     pub fn canonical_id(&self, canonical_text: &str) -> Option<i64> {
-        // 先尝试精确匹配，再尝试标准化后匹配
-        self.canonical_id_by_text
-            .get(canonical_text)
-            .copied()
-            .or_else(|| {
-                KeywordToken::new(canonical_text)
-                    .and_then(|t| self.canonical_id_by_text.get(t.as_str()).copied())
-            })
+        let token = KeywordToken::new(canonical_text)?;
+        self.canonical_id_by_text.get(token.as_str()).copied()
     }
 
     /// 判断关键词是否为别名（而非规范词）。
+    ///
+    /// 说明:
+    /// - 入参经 `KeywordToken::new` 标准化后查表；文本非法返回 false。
     pub fn is_alias(&self, keyword_text: &str) -> bool {
-        self.alias_to_canonical.contains_key(keyword_text)
+        match KeywordToken::new(keyword_text) {
+            Some(token) => self.alias_to_canonical.contains_key(token.as_str()),
+            None => false,
+        }
     }
 
     /// 返回所有已注册的别名映射条目数。
@@ -206,18 +221,30 @@ impl AliasManager {
     ///
     /// 说明:
     /// - 覆盖式设置（非增量累加）。
+    /// - key 经 `KeywordToken::new` 标准化后入库：非法文本（空 / 超长）丢弃；
+    ///   标准化后相同的 key 累加 use_count（大小写/空白差异归一为同一词）。
     /// - 建议在启动时从 keyword_pool 表 `SELECT keyword, use_count` 加载。
     pub fn load_use_counts(&mut self, counts: HashMap<String, u32>) {
-        self.use_counts = counts;
+        self.use_counts.clear();
+        for (text, count) in counts {
+            let Some(token) = KeywordToken::new(&text) else {
+                continue; // 非法文本静默丢弃
+            };
+            let entry = self.use_counts.entry(token.into_inner()).or_insert(0);
+            *entry = entry.saturating_add(count);
+        }
         tracing::debug!(count = self.use_counts.len(), "关键词使用计数已加载");
     }
 
     /// 获取指定关键词的使用计数。
     ///
     /// 返回:
-    /// - 使用次数（未记录时返回 0）。
+    /// - 使用次数（未记录或文本非法时返回 0）。
     pub fn use_count(&self, keyword_text: &str) -> u32 {
-        self.use_counts.get(keyword_text).copied().unwrap_or(0)
+        let Some(token) = KeywordToken::new(keyword_text) else {
+            return 0;
+        };
+        self.use_counts.get(token.as_str()).copied().unwrap_or(0)
     }
 }
 
@@ -258,6 +285,9 @@ impl AliasManager {
     ///
     /// 说明:
     /// - 当前为简化实现：仅通过文本相似性（编辑距离 < 3 或共享前缀）找出可能的同义词。
+    /// - 文本比对与查表与缓存 key 口径一致：均基于标准化文本（trim + ASCII 小写）。
+    /// - **未接线**：当前生产链路无建议引擎调用点，本方法与 `MergeSuggestion`
+    ///   为预留能力，待后续版本接线（详见模块头标注）。
     /// - 未来可接入 embedding 语义相似度提升匹配精度。
     pub fn suggest_merges(&self, min_use_for_suggestion: u32) -> Vec<MergeSuggestion> {
         if self.use_counts.is_empty() {
@@ -506,6 +536,48 @@ mod tests {
         assert!(!mgr.is_alias("a"));
     }
 
+    /// 大小写 / 首尾空白不同的 alias 注册与查询命中同一映射。
+    #[test]
+    fn alias_entries_normalized_for_case_and_whitespace() {
+        let mut mgr = AliasManager::new();
+        mgr.register_alias("  Work Stress ", 7, " 工作压力 ")
+            .unwrap();
+
+        // 注册与查询均按标准化文本命中
+        assert_eq!(mgr.resolve_alias_text("work stress"), Some("工作压力"));
+        assert_eq!(mgr.resolve_alias_text("WORK STRESS"), Some("工作压力"));
+        assert_eq!(mgr.resolve_alias_text("  work stress  "), Some("工作压力"));
+        assert!(mgr.is_alias("Work Stress"));
+        assert!(!mgr.is_alias("   "), "非法文本不视为别名");
+
+        let (token, id) = mgr.resolve_alias("WORK STRESS").expect("应命中");
+        assert_eq!(token.as_str(), "工作压力");
+        assert_eq!(id, 7);
+
+        // 注销同样按标准化命中；再次注销返回 false
+        assert!(mgr.unregister_alias(" WORK STRESS "));
+        assert!(!mgr.unregister_alias("work stress"));
+    }
+
+    /// 别名 / 规范词文本非法时注册被拒绝；归一后自指也被拒绝。
+    #[test]
+    fn invalid_alias_inputs_rejected() {
+        let mut mgr = AliasManager::new();
+        assert!(mgr.register_alias("", 1, "工作压力").is_err());
+        assert!(mgr.register_alias("   ", 1, "工作压力").is_err());
+        assert!(
+            mgr.register_alias(&"长".repeat(257), 1, "工作压力")
+                .is_err()
+        );
+        assert!(mgr.register_alias("别名", 1, "").is_err());
+        assert!(
+            mgr.register_alias(" Work Stress ", 1, "work stress")
+                .is_err(),
+            "归一后相同视为自指"
+        );
+        assert_eq!(mgr.alias_count(), 0);
+    }
+
     // ── 规范词 ID 查询 ──
 
     /// 通过文本查询规范词 ID
@@ -536,6 +608,28 @@ mod tests {
         assert_eq!(mgr.use_count("工作压力"), 15);
         assert_eq!(mgr.use_count("职场焦虑"), 8);
         assert_eq!(mgr.use_count("不存在的"), 0);
+    }
+
+    /// use_counts 键标准化：大小写/空白归一后累加、非法键丢弃、查询同样归一。
+    #[test]
+    fn use_counts_normalized_and_accumulated() {
+        let mut mgr = AliasManager::new();
+        let mut counts = HashMap::new();
+        counts.insert("Work Stress".into(), 3u32);
+        counts.insert(" work stress ".into(), 4u32);
+        counts.insert("   ".into(), 9u32); // 非法 → 丢弃
+        mgr.load_use_counts(counts);
+
+        assert_eq!(mgr.use_count("work stress"), 7, "归一后同键累加");
+        assert_eq!(mgr.use_count("WORK STRESS"), 7, "查询入参同样归一");
+        assert_eq!(mgr.use_count("work  stress"), 0, "不同文本不命中");
+        assert_eq!(mgr.use_count(""), 0, "非法查询文本返回 0");
+
+        // 覆盖式加载：再次加载替换旧计数（不残留）
+        let mut next = HashMap::new();
+        next.insert("Work Stress".into(), 2u32);
+        mgr.load_use_counts(next);
+        assert_eq!(mgr.use_count("work stress"), 2);
     }
 
     /// 无使用计数时合并建议为空

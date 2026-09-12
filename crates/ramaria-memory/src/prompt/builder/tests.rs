@@ -188,6 +188,228 @@ fn manual_style_overrides_auto_rule() {
     assert!(!result.contains("自动规则文本不应出现"));
 }
 
+// ---- TOML 形态 persona.config（persona.toml 原文）读取 ----
+
+/// TOML 形态配置：覆盖 `[identity].description`（背景行）与
+/// `[blocks].speaking_style`（手工说话风格）两个可选数据源。
+const TOML_PERSONA_CONFIG: &str = r#"[identity]
+    assistant_name = "黎杋枫"
+    user_name = "用户"
+    description = "知性稳重的学习伙伴"
+
+    [blocks]
+
+    A_persona = """
+    你是黎杋枫。性格知性稳重。
+    """
+
+    speaking_style = """
+    说话简短，偶尔用冷幽默。
+    """
+    "#;
+
+/// 构造 TOML 形态 config 的 persona（无 description 列值）。
+fn make_persona_with_toml_config() -> Persona {
+    Persona {
+        config: Some(TOML_PERSONA_CONFIG.into()),
+        description: None,
+        ..make_test_persona()
+    }
+}
+
+/// 构造 JSON 形态 config 且不含 description 的 persona（背景行"无来源"态）。
+fn make_persona_without_description() -> Persona {
+    Persona {
+        config: Some(r#"{"speaking_style":"热情活泼，喜欢用emoji"}"#.into()),
+        description: None,
+        ..make_test_persona()
+    }
+}
+
+/// 构造指定 kind 与 config 的 persona（Anim/Hist 数据源用例）。
+fn persona_with_kind(kind: PersonaKind, config: Option<&str>) -> Persona {
+    Persona {
+        kind,
+        config: config.map(str::to_string),
+        description: None,
+        ..make_test_persona()
+    }
+}
+
+/// TOML 形态 config 端到端：`[identity].description` → `背景：` 行；
+/// `[blocks].speaking_style` → `## 说话风格` 段。
+#[test]
+fn toml_config_renders_identity_description_and_speaking_style() {
+    let ctx = PromptContext {
+        persona: Some(make_persona_with_toml_config()),
+        ..Default::default()
+    };
+    let result = assemble_prompt(&ctx, &PromptConfig::default());
+
+    assert!(
+        result.contains("背景：知性稳重的学习伙伴"),
+        "TOML [identity].description 应渲染背景行: {result}"
+    );
+    assert!(
+        result.contains("## 说话风格"),
+        "TOML [blocks].speaking_style 应渲染说话风格段"
+    );
+    assert!(
+        result.contains("说话简短，偶尔用冷幽默。"),
+        "说话风格正文注入"
+    );
+    assert!(
+        !result.contains("## 自动风格规则"),
+        "手工风格存在时不注入自动风格规则"
+    );
+}
+
+/// 背景行数据源三态：`description` 列优先 → TOML 键 → 均无则不渲染。
+#[test]
+fn role_background_source_priority_column_then_toml_then_absent() {
+    let config = PromptConfig::default();
+
+    // ① 列值优先于 TOML [identity].description
+    let mut persona_with_column = make_persona_with_toml_config();
+    persona_with_column.description = Some("列上的描述".into());
+    let result = assemble_prompt(
+        &PromptContext {
+            persona: Some(persona_with_column),
+            ..Default::default()
+        },
+        &config,
+    );
+    assert!(result.contains("背景：列上的描述"), "列值优先: {result}");
+    assert!(
+        !result.contains("背景：知性稳重的学习伙伴"),
+        "列值命中后不再渲染 TOML 描述"
+    );
+
+    // ② 无列值 → TOML 键
+    let result = assemble_prompt(
+        &PromptContext {
+            persona: Some(make_persona_with_toml_config()),
+            ..Default::default()
+        },
+        &config,
+    );
+    assert!(result.contains("背景：知性稳重的学习伙伴"), "TOML 键生效");
+
+    // ③ 三处来源均无 → 不渲染背景行
+    let result = assemble_prompt(
+        &PromptContext {
+            persona: Some(make_persona_without_description()),
+            ..Default::default()
+        },
+        &config,
+    );
+    assert!(
+        !result.contains("背景："),
+        "无描述来源时不渲染背景行: {result}"
+    );
+}
+
+/// JSON 形态 config 的历史兼容：`description` 仍渲染为背景行。
+#[test]
+fn role_json_config_description_still_rendered_for_compatibility() {
+    let result = assemble_prompt(
+        &PromptContext {
+            persona: Some(make_test_persona()),
+            ..Default::default()
+        },
+        &PromptConfig::default(),
+    );
+    assert!(
+        result.contains("背景：一个喜欢编程的大学生"),
+        "JSON 兼容分支保留: {result}"
+    );
+}
+
+/// Anim/Hist 身份行读取 `[identity].work` / `[identity].era`，缺失回退通用句。
+#[test]
+fn role_anim_hist_read_identity_work_era_with_fallback() {
+    let config = PromptConfig::default();
+    let anim_toml = "[identity]\nassistant_name = \"小绿\"\nwork = \"某作品\"\n\n[blocks]\nA_persona = \"\"\"角色设定\"\"\"\n";
+    let hist_toml = "[identity]\nassistant_name = \"阿史\"\nera = \"唐朝\"\n\n[blocks]\nA_persona = \"\"\"角色设定\"\"\"\n";
+
+    let render = |persona: Persona| {
+        assemble_prompt(
+            &PromptContext {
+                persona: Some(persona),
+                ..Default::default()
+            },
+            &config,
+        )
+    };
+
+    // Anim：有 work → 作品名句
+    let result = render(persona_with_kind(PersonaKind::Anim, Some(anim_toml)));
+    assert!(
+        result.contains("你是《某作品》中的「小明」，说话的语气就是你的语气。"),
+        "Anim 作品名注入: {result}"
+    );
+    // Anim：无 config → 回退句
+    let result = render(persona_with_kind(PersonaKind::Anim, None));
+    assert!(
+        result.contains("你是「小明」，说话的语气就是你的语气。"),
+        "Anim 缺 work 回退: {result}"
+    );
+
+    // Hist：有 era → 时代句
+    let result = render(persona_with_kind(PersonaKind::Hist, Some(hist_toml)));
+    assert!(
+        result.contains("你是唐朝的「小明」，说话的语气符合你的身份和时代。"),
+        "Hist 时代注入: {result}"
+    );
+    // Hist：无 config → 回退句
+    let result = render(persona_with_kind(PersonaKind::Hist, None));
+    assert!(
+        result.contains("你是「小明」，说话的语气符合你的身份和时代。"),
+        "Hist 缺 era 回退: {result}"
+    );
+}
+
+/// 生产 persona（`config/personas/rama-0001.toml`）的显式规则形态锁定：
+/// `E_rules` 存在 → 核心规则 4 条（含"讲解"）且不注入共享规则的示例段
+/// （有意设计，防格式契约回归误判）。
+#[test]
+fn production_persona_explicit_rules_override_shared_examples() {
+    let persona_config = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../config/personas/rama-0001.toml"
+    ));
+    let rules = crate::init::resolve_chat_style_rules(Some(persona_config));
+
+    assert!(rules.contains("1. 分条"), "显式规则第 1 条: {rules}");
+    assert!(rules.contains("2. 接话"), "显式规则第 2 条");
+    assert!(rules.contains("3. 收尾"), "显式规则第 3 条");
+    assert!(rules.contains("4. 讲解"), "显式规则第 4 条（讲解）");
+    assert!(
+        !rules.contains("示例（模仿长度与分条方式"),
+        "显式规则不包含共享规则示例段"
+    );
+
+    // 端到端：显式规则（经 resolve_chat_style_rules 解析）进入 `## 回复规范` 核心规则段
+    let persona = Persona {
+        uid: "rama-0001".into(),
+        name: "Ramaria".into(),
+        kind: PersonaKind::Rama,
+        config: Some(persona_config.into()),
+        description: None,
+        ..make_test_persona()
+    };
+    let result = assemble_prompt(
+        &PromptContext {
+            persona: Some(persona),
+            chat_style_rules: Some(rules),
+            ..Default::default()
+        },
+        &PromptConfig::default(),
+    );
+    assert!(result.contains("4. 讲解"), "核心规则段含显式第 4 条");
+    assert!(!result.contains("先去吃饭"), "不注入共享规则示例");
+}
+
 #[test]
 fn no_style_rule_keeps_v16_prompt_equivalent() {
     // style_rule_text=None（风格关闭/数据不足）→ prompt 与 v1.6 语义等价

@@ -542,7 +542,9 @@ pub fn run_confidence_update(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ramaria_core::types::now_ms;
+
+    /// 固定测试基准时间（Unix 毫秒），保证用例不依赖真实时钟、连续运行结果一致。
+    const TEST_NOW_MS: i64 = 1_760_000_000_000;
 
     fn make_evidence(
         trait_id: i64,
@@ -551,7 +553,7 @@ mod tests {
         days_ago: f64,
         config: &ConfidenceConfig,
     ) -> TraitEvidence {
-        let now = now_ms();
+        let now = TEST_NOW_MS;
         let created_at = now - (days_ago * MS_PER_DAY) as i64;
         let decay = time_decay_weight(created_at, now, config);
         TraitEvidence {
@@ -575,7 +577,7 @@ mod tests {
     #[test]
     fn time_decay_cases() {
         let config = ConfidenceConfig::default();
-        let now = now_ms();
+        let now = TEST_NOW_MS;
         // 刚创建 → 权重接近 1.0
         let w = time_decay_weight(now, now, &config);
         assert!((w - 1.0).abs() < 0.01, "刚创建的事件权重应接近 1.0");
@@ -595,14 +597,14 @@ mod tests {
     #[test]
     fn e_total_empty() {
         let config = ConfidenceConfig::default();
-        let e = compute_e_total(&[], now_ms(), &config);
+        let e = compute_e_total(&[], TEST_NOW_MS, &config);
         assert!((e - 0.0).abs() < 1e-10);
     }
 
     #[test]
     fn e_total_computation() {
         let config = ConfidenceConfig::default();
-        let now = now_ms();
+        let now = TEST_NOW_MS;
         let ev1 = make_evidence(1, 1, 0.8, 0.0, &config); // 刚创建，score=0.8，decay≈1
         let ev2 = make_evidence(1, 2, 0.6, 0.0, &config); // 刚创建，score=0.6，decay≈1
         let evidence = vec![ev1, ev2];
@@ -614,7 +616,7 @@ mod tests {
     #[test]
     fn e_total_with_contradiction() {
         let config = ConfidenceConfig::default();
-        let now = now_ms();
+        let now = TEST_NOW_MS;
         let ev1 = make_evidence(1, 1, 0.9, 0.0, &config);
         let ev2 = make_evidence(1, 2, -0.7, 0.0, &config); // 矛盾证据
         let evidence = vec![ev1, ev2];
@@ -629,7 +631,7 @@ mod tests {
     #[test]
     fn consistency_cases() {
         let config = ConfidenceConfig::default();
-        let now = now_ms();
+        let now = TEST_NOW_MS;
         // 全支持 → 一致度 > 0.9
         let evidence = vec![
             make_evidence(1, 1, 0.9, 0.0, &config),
@@ -646,7 +648,7 @@ mod tests {
         assert!((c - 0.65).abs() < 0.01);
         assert!(c < 0.9, "混合证据一致度应偏低");
         // 无证据 → 0.5 中性
-        let c = compute_consistency(&[], now_ms(), &config);
+        let c = compute_consistency(&[], TEST_NOW_MS, &config);
         assert!((c - 0.5).abs() < 1e-10, "无证据时一致度应为 0.5 中性");
     }
 
@@ -717,7 +719,7 @@ mod tests {
     #[test]
     fn update_trait_confidence_new_evidence() {
         let config = ConfidenceConfig::default();
-        let now = now_ms();
+        let now = TEST_NOW_MS;
         let old_evidence = vec![
             make_evidence(1, 1, 0.9, 0.0, &config),
             make_evidence(1, 2, 0.8, 0.0, &config),
@@ -734,7 +736,7 @@ mod tests {
     #[test]
     fn update_trait_confidence_contradiction() {
         let config = ConfidenceConfig::default();
-        let now = now_ms();
+        let now = TEST_NOW_MS;
         let old_evidence = vec![
             make_evidence(1, 1, 0.9, 0.0, &config),
             make_evidence(1, 2, 0.8, 0.0, &config),
@@ -757,7 +759,7 @@ mod tests {
     #[test]
     fn run_confidence_update_batch() {
         let config = ConfidenceConfig::default();
-        let now = now_ms();
+        let now = TEST_NOW_MS;
         let evidence1 = vec![make_evidence(1, 1, 0.7, 0.0, &config)];
         let evidence2 = vec![make_evidence(2, 2, 0.6, 0.0, &config)];
 
@@ -778,7 +780,7 @@ mod tests {
     #[test]
     fn compute_e_total_calibrated_basic() {
         let config = ConfidenceConfig::default();
-        let now = now_ms();
+        let now = TEST_NOW_MS;
         let ev = make_evidence(1, 1, 0.8, 0.0, &config);
         // 校准权重 = 2.0（高重要性事件）
         let e = compute_e_total_calibrated(&[ev], &[2.0], now, &config);
@@ -789,7 +791,7 @@ mod tests {
     #[test]
     fn compute_e_total_calibrated_vs_original() {
         let config = ConfidenceConfig::default();
-        let now = now_ms();
+        let now = TEST_NOW_MS;
         let ev1 = make_evidence(1, 1, 0.8, 0.0, &config);
         let ev2 = make_evidence(1, 2, -0.5, 0.0, &config);
         let evidence = vec![ev1, ev2];
@@ -810,7 +812,7 @@ mod tests {
     #[test]
     fn compute_consistency_calibrated_high_weight_amplifies() {
         let config = ConfidenceConfig::default();
-        let now = now_ms();
+        let now = TEST_NOW_MS;
         // 证据1: 高支持(score=0.9) + 高权重(3.0)
         // 证据2: 中性(score=0.0) + 低权重(0.5)
         let ev1 = make_evidence(1, 1, 0.9, 0.0, &config);
@@ -836,7 +838,7 @@ mod tests {
     #[test]
     fn update_trait_confidence_calibrated_basic() {
         let config = ConfidenceConfig::default();
-        let now = now_ms();
+        let now = TEST_NOW_MS;
         let old_evidence = vec![make_evidence(1, 1, 0.9, 0.0, &config)];
         let old_weights = vec![1.5]; // 校准权重
         let new_data = vec![(1.2, now)]; // (calibrated_weight=1.2, created_at)

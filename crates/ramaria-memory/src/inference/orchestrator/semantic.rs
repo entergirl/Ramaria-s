@@ -5,6 +5,10 @@
 //! - persist_cluster_snapshots_with_semantic_labels: 语义标签 embedding → ClusterSnapshot 入库 → 跨版本匹配。
 //! - query_cross_version_matches: 便捷查询入口（供前端展示历史相似簇）。
 //! - 降级策略: embedding 不可用仅存文本标签；单簇失败不影响其他簇；无历史快照跳过匹配。
+//!
+//! 接线状态:
+//! - **预留未接线**: 生产 L3 快照在 `l2_l3_scheduler` 内联写入（`samples` 契约不同），
+//!   本语义标签管线当前无调用者，待产品裁决；若接线需先统一 `samples` 契约。
 
 use ramaria_core::{
     RamariaResult,
@@ -64,6 +68,10 @@ pub fn generate_semantic_labels_for_clusters(result: &ClusteringResult) -> Vec<S
 /// - Embedding provider 不可用时：仅保存文本语义标签，`semantic_label_embedding` 为 NULL。
 /// - Embedding 生成失败时：warn 日志 + 跳过该簇的 embedding（不阻塞其他簇）。
 /// - 跨版本匹配无历史数据时：正常保存新快照，跳过匹配。
+///
+/// 接线状态:
+/// - **预留未接线**: 生产 L3 快照在 `l2_l3_scheduler` 内联写入（`samples` 契约不同），
+///   本函数当前无调用者，待产品裁决；若接线需先统一 `samples` 契约。
 pub async fn persist_cluster_snapshots_with_semantic_labels(
     embedding_provider: Option<&dyn EmbeddingProvider>,
     storage: &dyn StorageBackend,
@@ -235,6 +243,10 @@ pub async fn persist_cluster_snapshots_with_semantic_labels(
 /// 查询该 persona 的历史簇匹配信息（便捷入口）。
 ///
 /// 用于前端展示：某个簇的语义标签在历史上是否出现过类似的倾向。
+///
+/// 接线状态:
+/// - **预留未接线**: 生产 L3 快照在 `l2_l3_scheduler` 内联写入（`samples` 契约不同），
+///   本函数当前无调用者，待产品裁决；若接线需先统一 `samples` 契约。
 ///
 /// 参数:
 /// - `storage`: 存储后端。

@@ -2,16 +2,16 @@
 //!
 //! 设计特点:
 //! - 实现标准 Reciprocal Rank Fusion (RRF) 融合算法
-//! - 支持 2-4 通道: 向量检索 + BM25 关键词 + 知识图谱 + 关键词镜像（扩展）
-//! - 各通道权重和 RRF 平滑系数 K 可独立配置
-//! - 未出现在某通道中的文档使用惩罚排名 (penalty rank)
+//! - 统一入口 `rrf_fuse_optional` 支持向量 / BM25 / 图谱 / 关键词镜像任意通道组合
+//! - 权重按通道身份取值（向量恒 1.0），不随入参位置变化，避免配置串用
+//! - 通道缺席不产生贡献项；通道存在但文档未命中使用惩罚排名 (penalty rank)
 //! - 纯数学模块，零 I/O，不依赖数据库或异步运行时
 //!
-//! 关键词镜像通道说明:
-//! - `rrf_fuse_with_keyword` 处理含关键词镜像（KeywordService CompositeIndex）
-//!   的融合场景；关键词通道缺席时继续使用既有单/双/三通道函数（行为不变）。
-//! - 新增通道不会改变既有向量/BM25/图谱三通道的贡献公式（向量权重恒 1，
-//!   bm25/graph 沿用各自权重），仅在关键词通道有结果时为相关文档追加一项。
+//! 通道组合说明:
+//! - 关键词镜像（KeywordService CompositeIndex）作为可选第四通道参与融合，
+//!   其原始分数不对外暴露，仅以 `keyword_weight` 计入 RRF 总分。
+//! - `rrf_single_channel` / `rrf_two_channels` / `rrf_fuse` / `rrf_fuse_with_keyword`
+//!   为固定通道组合的薄包装，统一委托 `rrf_fuse_optional` 执行融合。
 
 use std::collections::HashMap;
 
@@ -96,6 +96,27 @@ pub struct FusedResult<I> {
     pub graph_raw_score: Option<f64>,
 }
 
+/// 四通道可选结果集合（按通道身份固定，权重不随调用位置变化）。
+///
+/// 说明:
+/// - 通道缺席（None）→ 该项不参与融合（既不加分也不产生惩罚项）；
+/// - 通道存在但文档未命中 → 使用惩罚排名 `penalty_rank(config.top_k)`；
+/// - 权重按身份取值：向量恒 1.0、BM25 取 `config.bm25_weight`、
+///   图谱取 `config.graph_weight`、关键词镜像取 `config.keyword_weight`。
+///
+/// 字段约定:
+/// - 各字段为对应通道的排序结果；None 表示该通道缺席。
+pub struct OptionalChannels<'a, I: Clone + std::hash::Hash + Eq> {
+    /// 向量通道结果
+    pub vector: Option<&'a ChannelResult<I>>,
+    /// BM25 通道结果
+    pub bm25: Option<&'a ChannelResult<I>>,
+    /// 图谱通道结果
+    pub graph: Option<&'a ChannelResult<I>>,
+    /// 关键词镜像通道结果
+    pub keyword: Option<&'a ChannelResult<I>>,
+}
+
 // =========================================================
 // 核心融合函数
 // =========================================================
@@ -113,283 +134,39 @@ fn penalty_rank(top_k: usize) -> f64 {
     (top_k * 2 + 1) as f64
 }
 
-/// 对向量检索通道执行 RRF 融合。
+/// 对任意通道组合执行 RRF 融合（单/双/三/四通道统一入口）。
 ///
-/// 用法:
-/// - 当只有向量通道 (无 BM25、无图谱) 时使用。
+/// 说明:
+/// - 公式: `RRF_score = Σ_c weight_c / (k + rank_c)`，仅对"存在"的通道求和；
+///   文档未命中某存在通道时 rank_c 取惩罚排名。
+/// - 原始分数按通道身份写入 `FusedResult` 的对应字段（关键词镜像不对外暴露原始分数）。
 ///
 /// 参数:
-/// - `vector_results`: 向量通道的排序结果。
+/// - `channels`: 按通道身份组织的可选结果集合，权重与入参位置无关。
 /// - `config`: RRF 融合配置。
 ///
 /// 返回:
 /// - 按 RRF 分数降序排列的融合结果，最多 `config.top_k` 条。
-pub fn rrf_single_channel<I: Clone + std::hash::Hash + Eq + std::fmt::Debug>(
-    vector_results: &ChannelResult<I>,
-    config: &RrfConfig,
-) -> Vec<FusedResult<I>> {
-    let mut fused: Vec<FusedResult<I>> = vector_results
-        .results
-        .iter()
-        .enumerate()
-        .map(|(idx, (id, score))| {
-            let rank = (idx + 1) as f64;
-            let rrf_score = 1.0 / (config.k + rank);
-            FusedResult {
-                doc_id: id.clone(),
-                rrf_score,
-                vector_raw_score: Some(*score),
-                bm25_raw_score: None,
-                graph_raw_score: None,
-            }
-        })
-        .collect();
-
-    fused.sort_by(|a, b| {
-        b.rrf_score
-            .partial_cmp(&a.rrf_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    fused.truncate(config.top_k);
-    fused
-}
-
-/// 对向量 + BM25 双通道执行 RRF 融合。
-///
-/// 用法:
-/// - 标准双通道融合场景。
-///
-/// 公式:
-/// - RRF_score = 1.0 / (k + v_rank) + bm25_weight / (k + b_rank)
-///
-/// 参数:
-/// - `vector_results`: 向量通道的排序结果。
-/// - `bm25_results`: BM25 通道的排序结果。
-/// - `config`: RRF 融合配置。
-///
-/// 返回:
-/// - 按 RRF 分数降序排列的融合结果，最多 `config.top_k` 条。
-pub fn rrf_two_channels<I: Clone + std::hash::Hash + Eq + std::fmt::Debug>(
-    vector_results: &ChannelResult<I>,
-    bm25_results: &ChannelResult<I>,
+pub fn rrf_fuse_optional<I: Clone + std::hash::Hash + Eq + std::fmt::Debug>(
+    channels: &OptionalChannels<'_, I>,
     config: &RrfConfig,
 ) -> Vec<FusedResult<I>> {
     let penalty = penalty_rank(config.top_k);
 
-    // 构建 BM25 排名映射: doc_id → rank
-    let bm25_ranks: HashMap<&I, (f64, f64)> = bm25_results
-        .results
-        .iter()
-        .enumerate()
-        .map(|(idx, (id, score))| (id, ((idx + 1) as f64, *score)))
-        .collect();
-
-    // 收集所有出现的文档 ID（去重，保持首次出现顺序）
-    let mut seen = std::collections::HashSet::new();
-    let mut all_ids: Vec<&I> = Vec::new();
-    for (id, _) in vector_results
-        .results
-        .iter()
-        .chain(bm25_results.results.iter())
-    {
-        if seen.insert(id) {
-            all_ids.push(id);
-        }
-    }
-
-    // 构建向量排名映射
-    let vector_ranks: HashMap<&I, (f64, f64)> = vector_results
-        .results
-        .iter()
-        .enumerate()
-        .map(|(idx, (id, score))| (id, ((idx + 1) as f64, *score)))
-        .collect();
-
-    let mut fused: Vec<FusedResult<I>> = all_ids
-        .iter()
-        .map(|id| {
-            let (v_rank, v_score) = vector_ranks
-                .get(id)
-                .map(|(r, s)| (*r, Some(*s)))
-                .unwrap_or((penalty, None));
-
-            let (b_rank, b_score) = bm25_ranks
-                .get(id)
-                .map(|(r, s)| (*r, Some(*s)))
-                .unwrap_or((penalty, None));
-
-            let rrf_score = 1.0 / (config.k + v_rank) + config.bm25_weight / (config.k + b_rank);
-
-            FusedResult {
-                doc_id: (*id).clone(),
-                rrf_score,
-                vector_raw_score: v_score,
-                bm25_raw_score: b_score,
-                graph_raw_score: None,
-            }
-        })
-        .collect();
-
-    fused.sort_by(|a, b| {
-        b.rrf_score
-            .partial_cmp(&a.rrf_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    fused.truncate(config.top_k);
-    fused
-}
-
-/// 对向量 + BM25 + 图谱三通道执行 RRF 融合。
-///
-/// 用法:
-/// - 完整的三通道融合场景。
-///
-/// 公式:
-/// - RRF_score = 1.0/(k+v_rank) + bm25_weight/(k+b_rank) + graph_weight/(k+g_rank)
-///
-/// 参数:
-/// - `vector_results`: 向量通道结果。
-/// - `bm25_results`: BM25 通道结果。
-/// - `graph_results`: 图谱通道结果。
-/// - `config`: RRF 融合配置。
-///
-/// 返回:
-/// - 按 RRF 分数降序排列的融合结果，最多 `config.top_k` 条。
-pub fn rrf_fuse<I: Clone + std::hash::Hash + Eq + std::fmt::Debug>(
-    vector_results: &ChannelResult<I>,
-    bm25_results: &ChannelResult<I>,
-    graph_results: &ChannelResult<I>,
-    config: &RrfConfig,
-) -> Vec<FusedResult<I>> {
-    let penalty = penalty_rank(config.top_k);
-
-    // 构建三通道排名映射
-    let vector_ranks: HashMap<&I, (f64, f64)> = vector_results
-        .results
-        .iter()
-        .enumerate()
-        .map(|(idx, (id, score))| (id, ((idx + 1) as f64, *score)))
-        .collect();
-
-    let bm25_ranks: HashMap<&I, (f64, f64)> = bm25_results
-        .results
-        .iter()
-        .enumerate()
-        .map(|(idx, (id, score))| (id, ((idx + 1) as f64, *score)))
-        .collect();
-
-    let graph_ranks: HashMap<&I, (f64, f64)> = graph_results
-        .results
-        .iter()
-        .enumerate()
-        .map(|(idx, (id, score))| (id, ((idx + 1) as f64, *score)))
-        .collect();
-
-    // 收集所有出现的文档 ID (保持首次出现顺序)
-    let mut seen = std::collections::HashSet::new();
-    let mut all_ids: Vec<&I> = Vec::new();
-    for results in [
-        &vector_results.results,
-        &bm25_results.results,
-        &graph_results.results,
-    ] {
-        for (id, _) in results {
-            if seen.insert(id) {
-                all_ids.push(id);
-            }
-        }
-    }
-
-    let mut fused: Vec<FusedResult<I>> = all_ids
-        .iter()
-        .map(|id| {
-            let (v_rank, v_score) = vector_ranks
-                .get(id)
-                .map(|(r, s)| (*r, Some(*s)))
-                .unwrap_or((penalty, None));
-
-            let (b_rank, b_score) = bm25_ranks
-                .get(id)
-                .map(|(r, s)| (*r, Some(*s)))
-                .unwrap_or((penalty, None));
-
-            let (g_rank, g_score) = graph_ranks
-                .get(id)
-                .map(|(r, s)| (*r, Some(*s)))
-                .unwrap_or((penalty, None));
-
-            let rrf_score = 1.0 / (config.k + v_rank)
-                + config.bm25_weight / (config.k + b_rank)
-                + config.graph_weight / (config.k + g_rank);
-
-            FusedResult {
-                doc_id: (*id).clone(),
-                rrf_score,
-                vector_raw_score: v_score,
-                bm25_raw_score: b_score,
-                graph_raw_score: g_score,
-            }
-        })
-        .collect();
-
-    fused.sort_by(|a, b| {
-        b.rrf_score
-            .partial_cmp(&a.rrf_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    fused.truncate(config.top_k);
-    fused
-}
-
-// =========================================================
-// 含关键词镜像通道的融合
-// =========================================================
-
-/// 向量 + BM25 + 图谱 + 关键词镜像四通道 RRF 融合。
-///
-/// 用法:
-/// - 当关键词镜像（KeywordService CompositeIndex）作为第四检索通道产生结果时使用；
-///   关键词通道缺席时继续走既有单/双/三通道函数（行为不变）。
-///
-/// 公式:
-/// - `RRF_score = [向量项] + bm25_weight·[BM25项] + graph_weight·[图谱项]
-///                + keyword_weight·[关键词项]`
-/// - 文档未出现在某通道时，该项以惩罚排名计；该通道整体缺席则不产生该项。
-/// - 向量通道权重恒为 1（与既有融合公式一致，保证三通道既有贡献延续）。
-///
-/// 参数:
-/// - `vector_results`: 向量通道结果（缺席传 None）。
-/// - `bm25_results`: BM25 通道结果（缺席传 None）。
-/// - `graph_results`: 图谱通道结果（缺席传 None）。
-/// - `keyword_results`: 关键词镜像通道结果（调用方保证有数据）。
-/// - `config`: RRF 融合配置（含 `keyword_weight`）。
-///
-/// 返回:
-/// - 按 RRF 分数降序排列的融合结果，最多 `config.top_k` 条。
-pub fn rrf_fuse_with_keyword<I: Clone + std::hash::Hash + Eq + std::fmt::Debug>(
-    vector_results: Option<&ChannelResult<I>>,
-    bm25_results: Option<&ChannelResult<I>>,
-    graph_results: Option<&ChannelResult<I>>,
-    keyword_results: &ChannelResult<I>,
-    config: &RrfConfig,
-) -> Vec<FusedResult<I>> {
-    let penalty = penalty_rank(config.top_k);
-
-    // 各通道排名映射：doc_id → (rank, raw_score)
-    let vector_ranks = vector_results.map(channel_rank_map);
-    let bm25_ranks = bm25_results.map(channel_rank_map);
-    let graph_ranks = graph_results.map(channel_rank_map);
-    let keyword_ranks: Option<std::collections::HashMap<&I, (f64, f64)>> =
-        Some(channel_rank_map(keyword_results));
+    // 各通道排名映射：doc_id → (rank, raw_score)；缺席通道映射为 None
+    let vector_ranks: Option<HashMap<&I, (f64, f64)>> = channels.vector.map(channel_rank_map);
+    let bm25_ranks: Option<HashMap<&I, (f64, f64)>> = channels.bm25.map(channel_rank_map);
+    let graph_ranks: Option<HashMap<&I, (f64, f64)>> = channels.graph.map(channel_rank_map);
+    let keyword_ranks: Option<HashMap<&I, (f64, f64)>> = channels.keyword.map(channel_rank_map);
 
     // 收集所有出现的文档 ID（去重，保持首次出现顺序：vector → bm25 → graph → keyword）
     let mut seen = std::collections::HashSet::new();
     let mut all_ids: Vec<&I> = Vec::new();
     for ch in [
-        vector_results,
-        bm25_results,
-        graph_results,
-        Some(keyword_results),
+        channels.vector,
+        channels.bm25,
+        channels.graph,
+        channels.keyword,
     ]
     .into_iter()
     .flatten()
@@ -410,16 +187,18 @@ pub fn rrf_fuse_with_keyword<I: Clone + std::hash::Hash + Eq + std::fmt::Debug>(
             let (kw_rank, _) = rank_and_score(&keyword_ranks, id, penalty);
 
             let mut rrf_score = 0.0;
-            if vector_results.is_some() {
+            if channels.vector.is_some() {
                 rrf_score += 1.0 / (config.k + v_rank);
             }
-            if bm25_results.is_some() {
+            if channels.bm25.is_some() {
                 rrf_score += config.bm25_weight / (config.k + b_rank);
             }
-            if graph_results.is_some() {
+            if channels.graph.is_some() {
                 rrf_score += config.graph_weight / (config.k + g_rank);
             }
-            rrf_score += config.keyword_weight / (config.k + kw_rank);
+            if channels.keyword.is_some() {
+                rrf_score += config.keyword_weight / (config.k + kw_rank);
+            }
 
             FusedResult {
                 doc_id: (*id).clone(),
@@ -438,6 +217,146 @@ pub fn rrf_fuse_with_keyword<I: Clone + std::hash::Hash + Eq + std::fmt::Debug>(
     });
     fused.truncate(config.top_k);
     fused
+}
+
+/// 对向量检索通道执行 RRF 融合。
+///
+/// 用法:
+/// - 当只有向量通道 (无 BM25、无图谱、无关键词镜像) 时使用。
+/// - 内部委托 `rrf_fuse_optional`，向量权重恒为 1.0。
+///
+/// 参数:
+/// - `vector_results`: 向量通道的排序结果。
+/// - `config`: RRF 融合配置。
+///
+/// 返回:
+/// - 按 RRF 分数降序排列的融合结果，最多 `config.top_k` 条。
+pub fn rrf_single_channel<I: Clone + std::hash::Hash + Eq + std::fmt::Debug>(
+    vector_results: &ChannelResult<I>,
+    config: &RrfConfig,
+) -> Vec<FusedResult<I>> {
+    rrf_fuse_optional(
+        &OptionalChannels {
+            vector: Some(vector_results),
+            bm25: None,
+            graph: None,
+            keyword: None,
+        },
+        config,
+    )
+}
+
+/// 向量 + BM25 专用入口。
+///
+/// 用法:
+/// - 仅当检索结果确由"向量 + BM25"两通道构成时使用。
+/// - 两项权重按通道身份取值（向量恒 1.0、BM25 取 `config.bm25_weight`），
+///   与入参位置无关。
+/// - 其他通道组合请用 `rrf_fuse_optional`（避免用入参位置表达通道身份导致权重串用）。
+///
+/// 公式:
+/// - RRF_score = 1.0 / (k + v_rank) + bm25_weight / (k + b_rank)
+///
+/// 参数:
+/// - `vector_results`: 向量通道的排序结果。
+/// - `bm25_results`: BM25 通道的排序结果。
+/// - `config`: RRF 融合配置。
+///
+/// 返回:
+/// - 按 RRF 分数降序排列的融合结果，最多 `config.top_k` 条。
+pub fn rrf_two_channels<I: Clone + std::hash::Hash + Eq + std::fmt::Debug>(
+    vector_results: &ChannelResult<I>,
+    bm25_results: &ChannelResult<I>,
+    config: &RrfConfig,
+) -> Vec<FusedResult<I>> {
+    rrf_fuse_optional(
+        &OptionalChannels {
+            vector: Some(vector_results),
+            bm25: Some(bm25_results),
+            graph: None,
+            keyword: None,
+        },
+        config,
+    )
+}
+
+/// 对向量 + BM25 + 图谱三通道执行 RRF 融合。
+///
+/// 用法:
+/// - 当检索结果为完整的向量 + BM25 + 图谱三通道时使用。
+/// - 三通道权重按通道身份取值（向量恒 1.0、BM25 取 `config.bm25_weight`、
+///   图谱取 `config.graph_weight`）；其他通道组合请用 `rrf_fuse_optional`。
+///
+/// 公式:
+/// - RRF_score = 1.0/(k+v_rank) + bm25_weight/(k+b_rank) + graph_weight/(k+g_rank)
+///
+/// 参数:
+/// - `vector_results`: 向量通道结果。
+/// - `bm25_results`: BM25 通道结果。
+/// - `graph_results`: 图谱通道结果。
+/// - `config`: RRF 融合配置。
+///
+/// 返回:
+/// - 按 RRF 分数降序排列的融合结果，最多 `config.top_k` 条。
+pub fn rrf_fuse<I: Clone + std::hash::Hash + Eq + std::fmt::Debug>(
+    vector_results: &ChannelResult<I>,
+    bm25_results: &ChannelResult<I>,
+    graph_results: &ChannelResult<I>,
+    config: &RrfConfig,
+) -> Vec<FusedResult<I>> {
+    rrf_fuse_optional(
+        &OptionalChannels {
+            vector: Some(vector_results),
+            bm25: Some(bm25_results),
+            graph: Some(graph_results),
+            keyword: None,
+        },
+        config,
+    )
+}
+
+// =========================================================
+// 含关键词镜像通道的融合
+// =========================================================
+
+/// 向量 + BM25 + 图谱 + 关键词镜像四通道 RRF 融合。
+///
+/// 用法:
+/// - 当关键词镜像（KeywordService CompositeIndex）作为第四检索通道产生结果时使用；
+///   关键词通道缺席时改用 `rrf_fuse_optional` 或其他固定组合包装函数。
+/// - 前三通道可缺席（传 None），缺席通道不产生贡献项；关键词通道视为存在。
+///
+/// 公式:
+/// - `RRF_score = [向量项] + bm25_weight·[BM25项] + graph_weight·[图谱项]
+///                + keyword_weight·[关键词项]`
+/// - 文档未出现在某存在通道时，该项以惩罚排名计；通道整体缺席则不产生该项。
+/// - 向量通道权重恒为 1（与既有融合公式一致，保证三通道既有贡献延续）。
+///
+/// 参数:
+/// - `vector_results`: 向量通道结果（缺席传 None）。
+/// - `bm25_results`: BM25 通道结果（缺席传 None）。
+/// - `graph_results`: 图谱通道结果（缺席传 None）。
+/// - `keyword_results`: 关键词镜像通道结果（调用方保证有数据）。
+/// - `config`: RRF 融合配置（含 `keyword_weight`）。
+///
+/// 返回:
+/// - 按 RRF 分数降序排列的融合结果，最多 `config.top_k` 条。
+pub fn rrf_fuse_with_keyword<I: Clone + std::hash::Hash + Eq + std::fmt::Debug>(
+    vector_results: Option<&ChannelResult<I>>,
+    bm25_results: Option<&ChannelResult<I>>,
+    graph_results: Option<&ChannelResult<I>>,
+    keyword_results: &ChannelResult<I>,
+    config: &RrfConfig,
+) -> Vec<FusedResult<I>> {
+    rrf_fuse_optional(
+        &OptionalChannels {
+            vector: vector_results,
+            bm25: bm25_results,
+            graph: graph_results,
+            keyword: Some(keyword_results),
+        },
+        config,
+    )
 }
 
 /// 构建通道排名映射：doc_id → (rank, raw_score)（索引 0 对应 rank=1）。
@@ -794,5 +713,63 @@ mod tests {
     #[test]
     fn keyword_weight_default_is_one() {
         assert!((RrfConfig::default().keyword_weight - 1.0).abs() < f64::EPSILON);
+    }
+
+    // --- rrf_fuse_optional（按通道身份取权重） ---
+
+    /// 二通道融合按通道身份取权重：向量缺席、BM25 与图谱同时命中时，
+    /// 图谱项必须使用 graph_weight（修复前会被当成 bm25_weight 计权）。
+    #[test]
+    fn fusion_uses_channel_identity_weights() {
+        let config = RrfConfig {
+            top_k: 5,
+            bm25_weight: 0.4,
+            graph_weight: 0.9,
+            ..Default::default()
+        };
+        let bm25 = make_channel(vec![("x", 0.9)]);
+        let graph = make_channel(vec![("y", 0.8)]);
+        let fused = rrf_fuse_optional(
+            &OptionalChannels {
+                vector: None,
+                bm25: Some(&bm25),
+                graph: Some(&graph),
+                keyword: None,
+            },
+            &config,
+        );
+        // penalty = 5*2+1 = 11 → k+penalty = 71；命中项 k+rank = 61
+        let x = fused.iter().find(|f| f.doc_id == "x").unwrap();
+        let y = fused.iter().find(|f| f.doc_id == "y").unwrap();
+        assert!((x.rrf_score - (0.4 / 61.0 + 0.9 / 71.0)).abs() < 1e-9);
+        assert!((y.rrf_score - (0.4 / 71.0 + 0.9 / 61.0)).abs() < 1e-9);
+        assert_eq!(
+            fused[0].doc_id, "y",
+            "graph_weight 更高时图谱独有命中应排前"
+        );
+        // 原始分数槽位按通道身份写入（不因调用位置错位）
+        assert!(x.bm25_raw_score.is_some() && x.graph_raw_score.is_none());
+        assert!(y.graph_raw_score.is_some() && y.bm25_raw_score.is_none());
+    }
+
+    /// 通道缺席不产生惩罚项：仅向量通道存在时分数为 1/(k+rank)。
+    #[test]
+    fn absent_channels_contribute_nothing() {
+        let config = RrfConfig {
+            top_k: 3,
+            ..Default::default()
+        };
+        let vec = make_channel(vec![("a", 0.9), ("b", 0.8)]);
+        let fused = rrf_fuse_optional(
+            &OptionalChannels {
+                vector: Some(&vec),
+                bm25: None,
+                graph: None,
+                keyword: None,
+            },
+            &config,
+        );
+        assert_eq!(fused.len(), 2);
+        assert!((fused[0].rrf_score - 1.0 / 61.0).abs() < 1e-9);
     }
 }

@@ -1,12 +1,15 @@
 //! crates/ramaria-memory/src/keyword/index.rs — 关键词倒排索引
 //!
 //! 设计特点（keyword-design §5.1，P5/P6 解决）:
-//! - 内存倒排索引：`exact_inverted: KeywordToken → 文档位`，支撑精确 + 子串两级匹配
+//! - 内存倒排索引：`exact_inverted: KeywordToken → 文档位集合`，支撑精确 + 子串两级匹配
 //! - 文档元数据（salience / created_at / persona_uid）内置于文档表，
 //!   评分时按 `TF-IDF × Salience × Recency` 加权（时间衰减半衰期可配）
-//! - 子串匹配（查询 token 是索引 token 的子串，如查"工作"命中"工作压力"）直接对
-//!   唯一索引词集做包含判定，再经精确倒排回取文档——避免全文档扫描
-//! - 幂等语义：同文档重复 index 先移除旧记录；remove 支持批删（吸收/重建场景）
+//! - 子串匹配（查询 token 是索引 token 的子串，如查"工作"命中"工作压力"）经
+//!   "索引词 bigram 倒排"定位候选（含查询词全部 bigram 的超集），contains 过滤后
+//!   经精确倒排回取文档——避免逐查询词遍历全词表与全文档扫描
+//! - 幂等语义：同文档重复 index 先精准移除旧记录（不再全量重建倒排）；
+//!   remove 支持批删（吸收/重建场景，批删走 retain + 重建）
+//! - 文档容量上限可选（默认不限制）：超出后按 created_at 最旧驱逐
 //! - 纯内存纯函数，零 I/O，零异步；`ramaria-core` 的 `KeywordRef/KeywordQuery`
 //!   为对外类型边界（M3 T-V20-3-001 定稿）
 //!
@@ -14,7 +17,7 @@
 //! - 本文件只实现"按关键词集合检索已索引文档"，不含语义扩展（见 composite.rs）与
 //!   词典状态机（见 pool.rs）
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use ramaria_core::keyword::{KeywordQuery, KeywordRef, KeywordSet, KeywordToken, MatchStrategy};
 
@@ -105,13 +108,17 @@ impl ScoringStrategy for DefaultScoringStrategy {
 /// # 数据结构
 ///
 /// - `docs`: 全量文档记录（文档表，评分元数据所在）
-/// - `exact_inverted`: `KeywordToken → Vec<doc_idx>`（精确匹配主索引）
+/// - `exact_inverted`: `KeywordToken → HashSet<doc_idx>`（精确匹配主索引）
+/// - `token_bigrams`: `(char, char) → HashSet<KeywordToken>`（子串候选定位倒排：
+///   每个索引词的全部相邻字符对 → 该词；写路径维护、读路径只读）
+/// - `max_docs`: 文档容量上限（`None` = 不限制）
 ///
 /// # 复杂度
 ///
 /// - Exact: O(Q × postings_avg)，Q = 查询关键词数
-/// - Substring: O(U × avg_token_len)，U = 索引唯一词数（先找候选词再回取倒排，
-///   无需全文档扫描）
+/// - Substring: O(Q × candidate + hits)，candidate = 含查询词全部 bigram 的候选词
+///   （单字符查询词无 bigram → 退化为全词表扫描）
+/// - remove: O(被移除文档的 token 数 + 被搬移文档的 token 数)，不再全量重建倒排
 ///
 /// # 线程模型
 ///
@@ -121,8 +128,12 @@ impl ScoringStrategy for DefaultScoringStrategy {
 pub struct KeywordIndex {
     /// 文档表（doc_idx ↔ 文档记录）
     docs: Vec<DocEntry>,
-    /// 精确倒排：token → 出现该 token 的文档下标列表
-    exact_inverted: HashMap<KeywordToken, Vec<usize>>,
+    /// 精确倒排：token → 出现该 token 的文档下标集合
+    exact_inverted: HashMap<KeywordToken, HashSet<usize>>,
+    /// 子串候选倒排：字符 bigram → 含该 bigram 的索引词集合
+    token_bigrams: HashMap<(char, char), HashSet<KeywordToken>>,
+    /// 文档容量上限（`None` = 不限制）
+    max_docs: Option<usize>,
 }
 
 impl Default for KeywordIndex {
@@ -132,11 +143,13 @@ impl Default for KeywordIndex {
 }
 
 impl KeywordIndex {
-    /// 创建空索引。
+    /// 创建空索引（不设文档容量上限）。
     pub fn new() -> Self {
         Self {
             docs: Vec::new(),
             exact_inverted: HashMap::new(),
+            token_bigrams: HashMap::new(),
+            max_docs: None,
         }
     }
 
@@ -166,7 +179,7 @@ impl KeywordIndex {
             matches!(reff, KeywordRef::L1 { .. } | KeywordRef::L2 { .. }),
             "KeywordIndex 只接收 L1/L2 文档引用，Pool 词条走词典层"
         );
-        // 幂等：同文档先移除旧记录
+        // 幂等：同文档先精准移除旧记录（swap_remove + 倒排下标维护，不全量重建）
         self.remove(&reff);
 
         let doc_idx = self.docs.len();
@@ -176,9 +189,11 @@ impl KeywordIndex {
             self.exact_inverted
                 .entry(token.clone())
                 .or_default()
-                .push(doc_idx);
+                .insert(doc_idx);
+            insert_token_bigrams(&mut self.token_bigrams, token);
         }
         self.docs.push(entry);
+        self.evict_to_capacity();
     }
 
     /// 便捷入口：解析原始逗号分隔关键词串（如 memory_l1.keywords 字段）后索引。
@@ -199,26 +214,58 @@ impl KeywordIndex {
         self.docs.len()
     }
 
-    /// 按文档标识移除索引记录。
+    /// 按文档标识移除索引记录（精准维护倒排，不做全量重建）。
     ///
     /// 返回是否实际移除（不存在返回 false）。
+    ///
+    /// 说明:
+    /// - `swap_remove` 把末尾文档搬到被移除位置：先从被删文档的每个 token 的
+    ///   postings 中删除 `pos`（postings 空则连同子串候选倒排一并移除该 token），
+    ///   再把被搬移文档的全部 postings 下标 `last_idx` 修正为 `pos`。
     pub fn remove(&mut self, reff: &KeywordRef) -> bool {
         let Some(pos) = self.docs.iter().position(|d| &d.reff == reff) else {
             return false;
         };
-        self.docs.remove(pos);
+        let last_idx = self.docs.len() - 1;
+        let removed = self.docs.swap_remove(pos);
 
-        // 重建精确倒排（文档规模有限，重建成本可控且避免下标漂移的复杂维护）
-        self.rebuild_inverted();
+        // 被删文档：从其 token 的 postings 中删除 pos；postings 空则连键清理
+        for token in removed.keywords.iter() {
+            let emptied = match self.exact_inverted.get_mut(token) {
+                Some(postings) => {
+                    postings.remove(&pos);
+                    postings.is_empty()
+                }
+                None => false,
+            };
+            if emptied {
+                self.exact_inverted.remove(token);
+                remove_token_bigrams(&mut self.token_bigrams, token);
+            }
+        }
+
+        // 末尾文档被换到 pos：将其全部 postings 下标 last_idx 修正为 pos
+        if pos != last_idx {
+            let moved = &self.docs[pos];
+            for token in moved.keywords.iter() {
+                if let Some(postings) = self.exact_inverted.get_mut(token) {
+                    postings.remove(&last_idx);
+                    postings.insert(pos);
+                }
+            }
+        }
         true
     }
 
     /// 批量移除 L1/L2 文档。
     ///
     /// 返回实际移除条数（幂等：不存在即忽略）。
+    ///
+    /// 说明:
+    /// - 批量路径走 `retain` + 全量重建倒排（批量低频，避免逐条 swap 修正的复杂度）。
     pub fn remove_doc_batch(&mut self, l1_ids: &[uuid::Uuid], l2_ids: &[i64]) -> usize {
-        let l2_set: std::collections::HashSet<i64> = l2_ids.iter().copied().collect();
-        let l1_set: std::collections::HashSet<uuid::Uuid> = l1_ids.iter().copied().collect();
+        let l2_set: HashSet<i64> = l2_ids.iter().copied().collect();
+        let l1_set: HashSet<uuid::Uuid> = l1_ids.iter().copied().collect();
 
         let before = self.docs.len();
         self.docs.retain(|d| match &d.reff {
@@ -233,23 +280,68 @@ impl KeywordIndex {
         removed
     }
 
-    /// 全量清空索引。
+    /// 全量清空索引（保留容量上限配置）。
     pub fn clear(&mut self) {
         self.docs.clear();
         self.exact_inverted.clear();
+        self.token_bigrams.clear();
     }
 
-    /// 重建精确倒排（从文档表全量重算）。
+    /// 重建精确倒排与子串候选倒排（从文档表全量重算）。
     fn rebuild_inverted(&mut self) {
         self.exact_inverted.clear();
+        self.token_bigrams.clear();
         for (idx, entry) in self.docs.iter().enumerate() {
             for token in entry.keywords.iter() {
                 self.exact_inverted
                     .entry(token.clone())
                     .or_default()
-                    .push(idx);
+                    .insert(idx);
+                insert_token_bigrams(&mut self.token_bigrams, token);
             }
         }
+    }
+
+    /// 设置文档容量上限（`None` = 不限制）。
+    ///
+    /// 说明:
+    /// - 默认 `None`（既有行为不变）；上层可按镜像规模自行接线。
+    /// - 设置上限不会立即驱逐既有文档：由下一次 `index` 写入后统一按
+    ///   created_at 最旧驱逐（批量 remove + 重建路径）。
+    pub fn set_max_docs(&mut self, max: Option<usize>) {
+        self.max_docs = max;
+    }
+
+    /// 返回文档容量上限（`None` = 不限制）。
+    pub fn doc_capacity(&self) -> Option<usize> {
+        self.max_docs
+    }
+
+    /// 超出容量上限时按 created_at 最旧驱逐（默认 `None` → 空操作）。
+    fn evict_to_capacity(&mut self) {
+        let Some(max) = self.max_docs else {
+            return;
+        };
+        if self.docs.len() <= max {
+            return;
+        }
+
+        // 按 created_at 升序（最旧优先）取需驱逐的下标；稳定排序保证同时间戳按插入序
+        let mut order: Vec<usize> = (0..self.docs.len()).collect();
+        order.sort_by_key(|&idx| self.docs[idx].created_at);
+        let evict_count = self.docs.len() - max;
+
+        let mut l1_ids: Vec<uuid::Uuid> = Vec::new();
+        let mut l2_ids: Vec<i64> = Vec::new();
+        for &idx in order.iter().take(evict_count) {
+            match &self.docs[idx].reff {
+                KeywordRef::L1 { id, .. } => l1_ids.push(*id),
+                KeywordRef::L2 { id, .. } => l2_ids.push(*id),
+                // Pool 词条不入倒排索引（防御：理论不可达）
+                KeywordRef::Pool { .. } => {}
+            }
+        }
+        self.remove_doc_batch(&l1_ids, &l2_ids);
     }
 
     /// 返回已索引文档总数。
@@ -307,13 +399,22 @@ impl KeywordIndex {
                 }
             }
             MatchStrategy::Substring => {
-                // 候选词 = 唯一索引词中包含查询 token 者（含精确命中，天然覆盖）
+                // 候选词 = 唯一索引词中包含查询 token 者（含精确命中，天然覆盖）。
+                // 候选定位经"索引词 bigram 倒排"：含查询词全部 bigram 的索引词（超集），
+                // 再 contains 过滤；单字符查询词无 bigram → 退化为全词表扫描。
                 let mut candidate_tokens: Vec<&KeywordToken> = Vec::new();
                 for qt in query.keywords.iter() {
-                    for indexed in self.exact_inverted.keys() {
-                        if indexed.as_str().contains(qt.as_str()) {
-                            candidate_tokens.push(indexed);
-                        }
+                    match self.substring_candidates(qt) {
+                        Some(candidates) => candidate_tokens.extend(
+                            candidates
+                                .into_iter()
+                                .filter(|indexed| indexed.as_str().contains(qt.as_str())),
+                        ),
+                        None => candidate_tokens.extend(
+                            self.exact_inverted
+                                .keys()
+                                .filter(|indexed| indexed.as_str().contains(qt.as_str())),
+                        ),
                     }
                 }
                 // 去重候选词（同一 token 被多个查询词命中只计一次 IDF）
@@ -335,8 +436,11 @@ impl KeywordIndex {
             return Vec::new();
         }
 
-        // 2. 评分（idf_sum × salience 加权 × recency 衰减）
-        let mut scored: Vec<(KeywordRef, f64)> = Vec::with_capacity(matched.len());
+        // 2. 评分（idf_sum × salience 加权 × recency 衰减）。
+        //    同分次键（created_at）随评分预表化（doc_idx → created_at），
+        //    排序比较时 O(1) 查询，避免逐对按 KeywordRef 线性扫描文档表。
+        let mut created_at_by_idx: HashMap<usize, i64> = HashMap::with_capacity(matched.len());
+        let mut scored: Vec<(usize, f64)> = Vec::with_capacity(matched.len());
         for (idx, idf_sum) in matched {
             let entry = &self.docs[idx];
 
@@ -355,7 +459,8 @@ impl KeywordIndex {
             let age_days = ((now_ms - entry.created_at) as f64) / 86_400_000.0;
             let score = scorer.score(idf_sum, entry.salience, age_days);
             if score > 0.0 {
-                scored.push((entry.reff.clone(), score));
+                created_at_by_idx.insert(idx, entry.created_at);
+                scored.push((idx, score));
             }
         }
 
@@ -364,24 +469,59 @@ impl KeywordIndex {
             b.1.partial_cmp(&a.1)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| {
-                    let ca = self.created_at_of(&a.0);
-                    let cb = self.created_at_of(&b.0);
+                    let ca = created_at_by_idx.get(&a.0).copied().unwrap_or(0);
+                    let cb = created_at_by_idx.get(&b.0).copied().unwrap_or(0);
                     cb.cmp(&ca)
                 })
-                .then_with(|| a.0.label().cmp(&b.0.label()))
+                .then_with(|| {
+                    self.docs[a.0]
+                        .reff
+                        .label()
+                        .cmp(&self.docs[b.0].reff.label())
+                })
         });
 
         scored.truncate(query.top_k);
         scored
+            .into_iter()
+            .map(|(idx, score)| (self.docs[idx].reff.clone(), score))
+            .collect()
     }
 
-    /// 查文档创建时间（用于同分排序的稳定次键）。
-    fn created_at_of(&self, reff: &KeywordRef) -> i64 {
-        self.docs
-            .iter()
-            .find(|d| &d.reff == reff)
-            .map(|d| d.created_at)
-            .unwrap_or(0)
+    /// 子串层的候选索引词：包含查询词全部相邻字符 bigram 的索引词（contains 过滤前的超集）。
+    ///
+    /// 返回:
+    /// - `Some(candidates)`: 候选词集合（可能为空——任一 bigram 无倒排即无超集可能）。
+    /// - `None`: 查询词字符数 < 2（无 bigram），调用方需退化为全词表扫描。
+    ///
+    /// 说明:
+    /// - 候选仅是超集：任一 bigram 命中不能保证整词为子串（如索引词含全部 bigram
+    ///   但不连续），调用方仍须 `contains` 过滤——保证与全扫描逐位等价。
+    fn substring_candidates<'a>(&'a self, query: &KeywordToken) -> Option<Vec<&'a KeywordToken>> {
+        let pairs = adjacent_char_pairs(query.as_str());
+        if pairs.is_empty() {
+            return None;
+        }
+
+        let mut sets: Vec<&HashSet<KeywordToken>> = Vec::with_capacity(pairs.len());
+        for pair in pairs {
+            let Some(set) = self.token_bigrams.get(&pair) else {
+                return Some(Vec::new());
+            };
+            sets.push(set);
+        }
+
+        // 从最小集合出发做交集过滤，尽量减少后续 contains 的候选规模
+        sets.sort_by_key(|set| set.len());
+        let Some((smallest, rest)) = sets.split_first() else {
+            return Some(Vec::new());
+        };
+        Some(
+            smallest
+                .iter()
+                .filter(|token| rest.iter().all(|set| set.contains(*token)))
+                .collect(),
+        )
     }
 
     /// IDF = ln(1 + (N - df + 0.5) / (df + 0.5))，df 越大信息量越低。
@@ -391,6 +531,47 @@ impl KeywordIndex {
         }
         ((n_docs - df + 0.5) / (df + 0.5) + 1.0).ln()
     }
+}
+
+// =========================================================
+// 子串候选倒排辅助
+// =========================================================
+
+/// 把 token 的全部相邻字符 bigram 登记到子串候选倒排（幂等）。
+fn insert_token_bigrams(
+    map: &mut HashMap<(char, char), HashSet<KeywordToken>>,
+    token: &KeywordToken,
+) {
+    for pair in adjacent_char_pairs(token.as_str()) {
+        map.entry(pair).or_default().insert(token.clone());
+    }
+}
+
+/// 从子串候选倒排移除 token（token 已不在任何文档中时调用；集合空则连键删除）。
+fn remove_token_bigrams(
+    map: &mut HashMap<(char, char), HashSet<KeywordToken>>,
+    token: &KeywordToken,
+) {
+    for pair in adjacent_char_pairs(token.as_str()) {
+        let emptied = match map.get_mut(&pair) {
+            Some(set) => {
+                set.remove(token);
+                set.is_empty()
+            }
+            None => false,
+        };
+        if emptied {
+            map.remove(&pair);
+        }
+    }
+}
+
+/// 返回文本的全部相邻字符 bigram（如 "工作压力" → (工,作)/(作,压)/(压,力)）。
+///
+/// 字符数 < 2 时返回空列表（无 bigram）。
+fn adjacent_char_pairs(text: &str) -> Vec<(char, char)> {
+    let chars: Vec<char> = text.chars().collect();
+    chars.windows(2).map(|w| (w[0], w[1])).collect()
 }
 
 // =========================================================
@@ -520,6 +701,84 @@ mod tests {
         assert!(results.is_empty());
     }
 
+    /// 子串候选 bigram 倒排与"全词表 contains 扫描"逐位等价的基准实现。
+    fn substring_hits_full_scan(index: &KeywordIndex, query_token: &str) -> Vec<String> {
+        let mut hits: Vec<String> = index
+            .exact_inverted
+            .keys()
+            .filter(|t| t.as_str().contains(query_token))
+            .map(|t| t.as_str().to_string())
+            .collect();
+        hits.sort();
+        hits
+    }
+
+    /// 子串候选（bigram 倒排 + contains 过滤）与全扫描命中集合逐位一致。
+    ///
+    /// 覆盖：多字符命中 / 长查询词 / 单字符退化（无 bigram）/ 无命中 /
+    /// 含全部 bigram 但非子串的假阳性（必须经 contains 过滤剔除）。
+    #[test]
+    fn substring_bigram_candidates_match_full_scan() {
+        let mut index = KeywordIndex::new();
+        index.index_parsed(
+            l1_ref(uuid::Uuid::new_v4(), "p1"),
+            Some("工作压力, 爬山, 职场, aabbcc, 996"),
+            0.5,
+            NOW_MS,
+        );
+
+        let queries = [
+            "工作",
+            "工作压力",
+            "作压",
+            "压力",
+            "职场",
+            "工",
+            "爬",
+            "a",
+            "aabb",
+            "abc",
+            "996",
+            "不存在词xyz",
+        ];
+        for text in queries {
+            let qt = KeywordToken::new(text).expect("查询词应有效");
+            let mut expected = substring_hits_full_scan(&index, qt.as_str());
+            let mut actual: Vec<String> = match index.substring_candidates(&qt) {
+                Some(candidates) => candidates
+                    .into_iter()
+                    .filter(|t| t.as_str().contains(qt.as_str()))
+                    .map(|t| t.as_str().to_string())
+                    .collect(),
+                // 单字符查询词无 bigram → 子串层退化为全词表扫描
+                None => index
+                    .exact_inverted
+                    .keys()
+                    .filter(|t| t.as_str().contains(qt.as_str()))
+                    .map(|t| t.as_str().to_string())
+                    .collect(),
+            };
+            actual.sort();
+            expected.sort();
+            assert_eq!(actual, expected, "query={text:?} 命中集合应逐位等价");
+        }
+
+        // 假阳性：aabbcc 含 "abc" 的全部 bigram 但非其子串——候选为超集，
+        // 由 contains 过滤剔除（证明 bigram 倒排不是精确命中集）
+        let abc = KeywordToken::new("abc").unwrap();
+        let candidates = index
+            .substring_candidates(&abc)
+            .expect("多字符查询词应有候选");
+        assert!(
+            candidates.iter().any(|t| t.as_str() == "aabbcc"),
+            "超集候选应含假阳性 aabbcc"
+        );
+        assert_eq!(
+            substring_hits_full_scan(&index, "abc"),
+            Vec::<String>::new()
+        );
+    }
+
     // ---- 评分 ----
 
     /// recency：同为命中时，近期文档得分高于久远文档
@@ -628,6 +887,133 @@ mod tests {
                 .query(&q(&["甲"], None, MatchStrategy::Exact, 5))
                 .is_empty()
         );
+    }
+
+    /// 精准移除的倒排维护：swap_remove 下标修正、空 postings 连键清理、bigram 清理、
+    /// 共享 token 的 postings 重映射（被删文档与搬移文档共享 token）。
+    #[test]
+    fn remove_keeps_inverted_consistent() {
+        let mut index = KeywordIndex::new();
+        let keep_a = l1_ref(uuid::Uuid::new_v4(), "p1");
+        let remove = l1_ref(uuid::Uuid::new_v4(), "p1");
+        let keep_b = l1_ref(uuid::Uuid::new_v4(), "p1");
+
+        index.index_parsed(keep_a.clone(), Some("工作压力, 爬山"), 0.5, NOW_MS);
+        index.index_parsed(remove.clone(), Some("独有词"), 0.5, NOW_MS);
+        index.index_parsed(keep_b.clone(), Some("爬山, 露营"), 0.5, NOW_MS);
+
+        // 移除中间文档：末尾文档被 swap 到它的位置，剩余两篇仍可命中；
+        // "爬山" 为跨 3 篇的共享 token，其 postings 需从 {0,1,2} 修正为 {0,1}
+        assert!(index.remove(&remove));
+        assert_eq!(
+            index
+                .query(&q(&["工作压力"], Some("p1"), MatchStrategy::Exact, 5))
+                .len(),
+            1
+        );
+        assert_eq!(
+            index
+                .query(&q(&["爬山"], Some("p1"), MatchStrategy::Exact, 5))
+                .len(),
+            2,
+            "共享 token 的两篇文档都应命中"
+        );
+        assert_eq!(
+            index
+                .query(&q(&["露营"], Some("p1"), MatchStrategy::Exact, 5))
+                .len(),
+            1,
+            "搬移文档的独有 token 应以新下标命中"
+        );
+
+        // 被删文档的独有词：精确倒排与 bigram 倒排均清理
+        let unique = KeywordToken::new("独有词").unwrap();
+        assert!(!index.exact_inverted.contains_key(&unique));
+        assert!(
+            !index
+                .token_bigrams
+                .values()
+                .any(|set| set.contains(&unique))
+        );
+
+        // 重索引被搬移过的文档（幂等路径 + 下标修正后仍正确）
+        index.index_parsed(keep_b.clone(), Some("爬山, 露营"), 0.5, NOW_MS);
+        assert_eq!(index.doc_count(), 2);
+        assert_eq!(
+            index
+                .query(&q(&["爬山"], Some("p1"), MatchStrategy::Exact, 5))
+                .len(),
+            2
+        );
+        assert_eq!(
+            index
+                .query(&q(&["露营"], Some("p1"), MatchStrategy::Exact, 5))
+                .len(),
+            1
+        );
+    }
+
+    /// 容量上限：默认 None 不限制；设置上限后按 created_at 最旧驱逐。
+    #[test]
+    fn max_docs_evicts_oldest() {
+        let mut index = KeywordIndex::new();
+        assert_eq!(index.doc_capacity(), None, "默认不限制");
+
+        index.set_max_docs(Some(2));
+        let old_id = uuid::Uuid::new_v4();
+        let mid_id = uuid::Uuid::new_v4();
+        index.index_parsed(
+            l1_ref(old_id, "p1"),
+            Some("旧词"),
+            0.5,
+            NOW_MS - 20 * 86_400_000,
+        );
+        index.index_parsed(
+            l1_ref(mid_id, "p1"),
+            Some("中词"),
+            0.5,
+            NOW_MS - 10 * 86_400_000,
+        );
+        assert_eq!(index.doc_count(), 2, "未超上限不驱逐");
+        assert_eq!(index.doc_capacity(), Some(2));
+
+        // 第 3 篇写入触发驱逐：最旧的"旧词"文档被移除
+        index.index_parsed(
+            l1_ref(uuid::Uuid::new_v4(), "p1"),
+            Some("新词"),
+            0.5,
+            NOW_MS,
+        );
+        assert_eq!(index.doc_count(), 2);
+        assert!(
+            index
+                .query(&q(&["旧词"], Some("p1"), MatchStrategy::Exact, 5))
+                .is_empty(),
+            "最旧文档应被驱逐"
+        );
+        assert_eq!(
+            index
+                .query(&q(&["中词"], Some("p1"), MatchStrategy::Exact, 5))
+                .len(),
+            1
+        );
+        assert_eq!(
+            index
+                .query(&q(&["新词"], Some("p1"), MatchStrategy::Exact, 5))
+                .len(),
+            1
+        );
+
+        // 解除上限后恢复不限制
+        index.set_max_docs(None);
+        index.index_parsed(
+            l1_ref(uuid::Uuid::new_v4(), "p1"),
+            Some("追加词"),
+            0.5,
+            NOW_MS,
+        );
+        assert_eq!(index.doc_count(), 3);
+        assert_eq!(index.doc_capacity(), None);
     }
 
     /// 幂等重建：同 reff 重复 index 覆盖而非累积

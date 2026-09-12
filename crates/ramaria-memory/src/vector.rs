@@ -3,8 +3,8 @@
 //! 设计特点:
 //! - 定义 `VectorIndex` trait：统一的向量存储与检索接口
 //! - 提供 `BruteForceIndex`：暴力余弦相似度检索（无外部依赖）
-//! - 支持时间衰减加权（对接 `decay.rs` 的调整距离公式）
-//! - 接入真实 EmbeddingProvider 后可替换为 HNSW/Annoy 等高维索引
+//! - 预留时间衰减加权位（`VectorEntry::retention`），时间衰减由 `decay` 模块负责
+//! - 索引实现经 `VectorIndex` trait 解耦，预留替换位；当前仅内置 `BruteForceIndex`（零新增依赖）
 //! - 纯内存实现，不依赖数据库或异步运行时
 //!
 //! 设计决策:
@@ -14,6 +14,8 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+
+use ramaria_core::lock::lock_recover;
 
 // =========================================================
 // 核心类型
@@ -26,9 +28,11 @@ pub struct VectorEntry {
     pub vector: Vec<f32>,
     /// 关联的文档标识（供 retriever 层映射回 MemoryL1/MemoryEvent）
     pub doc_label: String,
-    /// 时间衰减因子 R（0.0..1.0），用于调整检索距离
-    /// distance_adjusted = cosine_distance / max(R, 0.1)
-    /// v1.6 向量通道决策联动（D-26-01）定夺
+    /// 时间衰减因子 R（0.0..1.0），用于调整检索相似度：
+    /// adjusted_similarity = similarity * retention。
+    ///
+    /// 当前仅由 `add` 固定写为 1.0（不随时间衰减）；检索结果层的时间
+    /// 衰减由 `decay` 模块统一计算，本字段仅预留加权位。
     pub retention: f64,
     /// 创建/更新时间（Unix 毫秒），用于时间衰减计算
     pub created_at: i64,
@@ -204,6 +208,13 @@ impl VectorIndex for BruteForceIndex {
     fn add(&mut self, label: &str, vector: Vec<f32>, created_at: i64) {
         let dim = vector.len();
 
+        // 0 维向量（空 embedding）不得被记为首个期望维度：一旦记录，
+        // 后续真实维度的向量会被全部拒绝，向量通道整体静默失效（只剩 BM25/关键词）。
+        if dim == 0 {
+            tracing::warn!(label = %label, "拒绝写入 0 维向量（空 embedding），该条不入向量索引");
+            return;
+        }
+
         if let Some(expected) = self.dimension {
             if expected != dim {
                 // trait 定义为无返回值（为了接口简洁），无法返回 Result。
@@ -306,11 +317,12 @@ impl VectorIndex for BruteForceIndex {
 
 /// 向量索引查询缓存配置。
 ///
-/// 对 BruteForceIndex 添加 LRU-style 查询结果缓存。
-/// 相同或高度相似的查询向量可直接返回缓存结果，避免 O(N·D) 全量扫描。
+/// 对 BruteForceIndex 添加 LRU 查询结果缓存。
+/// 量化 key 相同的查询向量可直接返回缓存结果，避免 O(N·D) 全量扫描。
 ///
 /// 缓存策略:
-/// - 对查询向量做量化哈希（float → u8 → u64），容忍微小浮点差异
+/// - 对查询向量做 L2 归一化 + 保号量化（i8）后哈希：同一查询向量必命中，
+///   方向差异明显的查询不会误命中
 /// - 缓存未命中 → 执行底层检索后存入缓存（使用 Mutex 实现 search(&self) 内部可变）
 /// - 命中 → LRU 提升（条目移到末尾，最近使用优先保留）；容量满时淘汰队头最久未使用
 /// - 索引变更（add/remove/clear）时清空全部缓存
@@ -338,7 +350,8 @@ type CacheEntries = Vec<(u64, usize, u64, Vec<VectorHit>)>;
 ///
 /// 职责:
 /// - 包装任意 `VectorIndex` 实现，透明添加查询缓存
-/// - 对查询向量做量化哈希以减少缓存 key 的浮点敏感性
+/// - 对查询向量做 L2 归一化 + 保号量化（i8）后哈希：同一查询向量必命中，
+///   方向差异明显的查询不会误命中
 /// - 索引变更时自动清空缓存
 /// - 使用 `Mutex` 实现搜索时的缓存读写（search 为 &self，缓存为内部可变）
 ///
@@ -352,9 +365,9 @@ type CacheEntries = Vec<(u64, usize, u64, Vec<VectorHit>)>;
 /// - 使用 `std::sync::Mutex` 替代 RefCell 以满足 `VectorIndex: Send + Sync` 约束
 /// - MutexGuard 仅在同线程内短期持有，不跨 .await，不会死锁
 ///
-/// 容量策略（LRU 修正）:
-/// - 原实现为 FIFO 驱逐（队头即最旧插入），已修正为 LRU：
-///   查询命中时条目移到队尾（最近使用），容量满时淘汰队头（最久未使用）。
+/// 容量策略（LRU）:
+/// - 查询命中时条目移到队尾（最近使用），容量满时淘汰队头（最久未使用）。
+/// - 容量上限按 `max_entries.max(1)` 生效：配置为 0 时退化为"仅保留最近一条"。
 /// - 已接线进 `Retriever`（`vector_index: CachedVectorIndex<BruteForceIndex>`）。
 #[derive(Debug)]
 pub struct CachedVectorIndex<I: VectorIndex> {
@@ -384,18 +397,19 @@ impl<I: VectorIndex> CachedVectorIndex<I> {
 
     /// 手动清空查询缓存。
     pub fn invalidate_cache(&self) {
-        self.cache.lock().unwrap().clear();
+        lock_recover(&self.cache, "CachedVectorIndex::invalidate_cache").clear();
     }
 
     /// 返回当前缓存条目数。
     pub fn cache_len(&self) -> usize {
-        self.cache.lock().unwrap().len()
+        lock_recover(&self.cache, "CachedVectorIndex::cache_len").len()
     }
 
-    /// 对查询向量做量化哈希。
+    /// 对查询向量做 L2 归一化 + 保号量化（i8）后折叠为 u64 哈希。
     ///
-    /// 将每个 f32 量化为 u8（0-255），然后折叠为 u64。
-    /// 对微小浮点差异不敏感（例如 0.123456 vs 0.123457 → 相同 u8）。
+    /// 先按 L2 范数归一化（零向量按全零处理，避免除零），再将每个分量
+    /// 保号量化到 [-127, 127] 并依次并入哈希。同一查询向量必命中同一缓存；
+    /// 方向差异明显的查询不会误命中。
     ///
     /// 参数:
     /// - `query`: 查询向量。
@@ -403,13 +417,23 @@ impl<I: VectorIndex> CachedVectorIndex<I> {
     /// 返回:
     /// - 量化后的 64 位哈希值。
     fn quantize_query(query: &[f32]) -> u64 {
+        // L2 归一化：只比较查询方向，整体缩放不影响缓存 key
+        let norm = query
+            .iter()
+            .map(|v| (*v as f64) * (*v as f64))
+            .sum::<f64>()
+            .sqrt();
+        // 零向量（含 NaN 分量）按 0 处理，避免除零；此时所有分量量化为 0
+        let inv_norm = if norm > 0.0 { 1.0 / norm } else { 0.0 };
+
         let mut hash: u64 = 0;
         for (i, &val) in query.iter().enumerate() {
-            // 将 f32 线性映射到 u8（0.0→0, 1.0→255, clamp 到 [0,1]）
-            let clamped = val.clamp(0.0_f32, 1.0_f32);
-            let quantized = (clamped * 255.0_f32) as u8;
-            // 旋转哈希，每个量化值影响不同位
-            hash = hash.wrapping_mul(31).wrapping_add(quantized as u64);
+            // 保号量化：归一化后映射到 [-127, 127]，负分量不再被折叠为 0
+            let quantized = ((val as f64) * inv_norm * 127.0)
+                .round()
+                .clamp(-127.0, 127.0) as i8;
+            // 旋转哈希，每个量化值影响不同位；以 i8 的字节位模式并入
+            hash = hash.wrapping_mul(31).wrapping_add((quantized as u8) as u64);
             // 混合位置信息
             hash ^= (i as u64).wrapping_mul(0x9E3779B97F4A7C15);
         }
@@ -427,7 +451,7 @@ impl<I: VectorIndex> CachedVectorIndex<I> {
 
 impl<I: VectorIndex + std::fmt::Display> std::fmt::Display for CachedVectorIndex<I> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let cache = self.cache.lock().unwrap();
+        let cache = lock_recover(&self.cache, "CachedVectorIndex::fmt");
         write!(
             f,
             "CachedVectorIndex(cache={}/{}, inner={})",
@@ -466,7 +490,7 @@ impl<I: VectorIndex> VectorIndex for CachedVectorIndex<I> {
 
         // 查找缓存（LRU：命中条目移到末尾，最近使用优先保留）
         {
-            let mut cache = self.cache.lock().unwrap();
+            let mut cache = lock_recover(&self.cache, "CachedVectorIndex::search.lookup");
             let hit_index = cache.iter().position(|(c_qhash, c_topk, c_sim, _)| {
                 *c_qhash == qhash && *c_topk == config.top_k && *c_sim == sim_key
             });
@@ -493,9 +517,12 @@ impl<I: VectorIndex> VectorIndex for CachedVectorIndex<I> {
         );
         let results = self.inner.search(query, config)?;
 
-        // 回填缓存（LRU 驱逐：超过最大条目时淘汰最久未使用——队列头部）
-        let mut cache = self.cache.lock().unwrap();
-        if cache.len() >= self.cache_config.max_entries {
+        // 回填缓存（LRU 驱逐：容量满时淘汰队头最久未使用）
+        // 容量下限保护为 1：`max_entries=0` 时退化为"仅保留最近一条"，
+        // 不再出现空表 `remove(0)` 越界 panic。
+        let mut cache = lock_recover(&self.cache, "CachedVectorIndex::search.fill");
+        let limit = self.cache_config.max_entries.max(1);
+        if cache.len() >= limit {
             cache.remove(0);
         }
         cache.push((qhash, config.top_k, sim_key, results.clone()));
@@ -614,6 +641,25 @@ mod tests {
             result,
             Err(VectorIndexError::DimensionMismatch { .. })
         ));
+    }
+
+    /// 0 维向量（空 embedding）不得被记为首个期望维度：
+    /// 一旦记录，后续真实维度会被全部拒绝，向量通道整体静默失效（只剩 BM25/关键词）。
+    #[test]
+    fn add_rejects_zero_dim_and_keeps_channel_usable() {
+        let mut idx = BruteForceIndex::new();
+
+        idx.add("empty", Vec::new(), 1000);
+        assert_eq!(idx.len(), 0, "0 维向量不入索引");
+        assert_eq!(idx.dimension(), None, "0 维不得被记为首个期望维度");
+
+        idx.add("doc1", vec![1.0, 0.0, 0.0], 1000);
+        assert_eq!(idx.len(), 1);
+        assert_eq!(idx.dimension(), Some(3));
+
+        let config = VectorIndexConfig::default();
+        let hits = idx.search(&[1.0, 0.0, 0.0], &config).unwrap();
+        assert_eq!(hits[0].doc_label, "doc1", "真实维度写入后向量通道仍可用");
     }
 
     #[test]
@@ -770,5 +816,55 @@ mod tests {
             assert_eq!(hits[0].doc_label, "a");
         }
         assert_eq!(idx.cache_len(), 1, "同查询命中缓存，不新增条目");
+    }
+
+    /// 负分量不得被折叠为同一缓存 key：
+    /// 量化若把负分量截断为 0，仅负分量不同的查询会误命中同一缓存并返回错误结果。
+    #[test]
+    fn cached_index_negative_components_do_not_collide() {
+        let mut inner = BruteForceIndex::new();
+        inner.add("a", vec![1.0, -0.9, 0.2], 1);
+        inner.add("b", vec![1.0, -0.1, 0.2], 2);
+        let cfg = VectorCacheConfig {
+            max_entries: 8,
+            enabled: true,
+        };
+        let idx = CachedVectorIndex::new(inner, Some(cfg));
+        let conf = VectorIndexConfig::default();
+
+        // q1 与 a 同向，q2 与 b 同向；两者仅负分量不同
+        let q1 = [1.0, -0.9, 0.2];
+        let hits1 = idx.search(&q1, &conf).unwrap();
+        assert_eq!(hits1[0].doc_label, "a");
+
+        let q2 = [1.0, -0.1, 0.2];
+        let hits2 = idx.search(&q2, &conf).unwrap();
+        assert_eq!(
+            hits2[0].doc_label, "b",
+            "负分量不同不得命中同一缓存 key（否则返回上一次的错误结果）"
+        );
+    }
+
+    /// `max_entries=0` 不得触发空表 `remove(0)` 越界 panic：
+    /// 容量下限保护为 1，退化为"仅保留最近一条"，两次不同查询结果各自正确。
+    #[test]
+    fn cached_index_zero_capacity_does_not_panic() {
+        let mut inner = BruteForceIndex::new();
+        inner.add("a", vec![1.0, 0.0, 0.0], 1);
+        inner.add("b", vec![0.0, 1.0, 0.0], 2);
+        let cfg = VectorCacheConfig {
+            max_entries: 0,
+            enabled: true,
+        };
+        let idx = CachedVectorIndex::new(inner, Some(cfg));
+        let conf = VectorIndexConfig::default();
+
+        let hits_a = idx.search(&[1.0, 0.0, 0.0], &conf).unwrap();
+        assert_eq!(hits_a[0].doc_label, "a");
+
+        let hits_b = idx.search(&[0.0, 1.0, 0.0], &conf).unwrap();
+        assert_eq!(hits_b[0].doc_label, "b");
+
+        assert_eq!(idx.cache_len(), 1, "容量 0 退化为仅保留最近一条");
     }
 }

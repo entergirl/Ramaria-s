@@ -4,6 +4,7 @@
 //! - 分词默认中文字符二元组（bigram）+ 英文按字母边界切分，零外部依赖
 //! - 标准 Okapi BM25 算法：k1=1.2, b=0.75
 //! - 在内存中构建倒排索引（term→doc→tf），支持增量添加/移除文档
+//! - 支持带结果上限的截断检索（最小堆 top-k）与词典代次观测（陈旧文档计数）
 //! - 分词器为**实例级配置**：`Bm25Index` 默认空词典（=纯 bigram），可注入
 //!   keyword_pool 规范词启用词典增强分词（整词命中、消除跨词噪声）
 //! - 纯计算模块，零 I/O，不依赖数据库或异步运行时
@@ -19,7 +20,8 @@
 use crate::keyword::normalizer::{
     BigramNormalizer, BigramWithDictionaryNormalizer, KeywordNormalizer,
 };
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
 
 // =========================================================
 // 分词器
@@ -118,19 +120,24 @@ struct Bm25Doc {
     term_freq: HashMap<String, u32>,
     /// 文档长度（总 token 数）
     doc_len: u32,
+    /// 写入时的分词词典代次
+    dict_epoch: u64,
 }
 
 /// BM25 内存索引。
 ///
 /// 职责:
 /// - 维护文档集合的倒排索引
-/// - 提供 BM25 评分查询
+/// - 提供 BM25 评分查询（全量 / 带结果上限两种模式）
 /// - 支持增量添加和移除文档
 /// - 承载**实例级**分词器（默认空词典 = 纯 bigram，可注入词典增强分词）
+/// - 跟踪词典代次，暴露按旧口径写入的陈旧文档数量
 ///
 /// 字段约定:
-/// - `tokenizer`: 索引侧（`add_tokenized`）与查询侧（`search`）共用同一分词器，
-///   保证索引/查询口径一致；空词典时与 `BigramNormalizer` 逐 token 等价。
+/// - `tokenizer`: 索引侧（`add_tokenized`）与查询侧（`search` / `search_limited`）
+///   共用同一分词器，保证索引/查询口径一致；空词典时与 `BigramNormalizer` 逐 token 等价。
+/// - `dict_epoch` / `dict_fingerprint`: 词典内容变化时推进的代次与顺序无关指纹，
+///   用于识别哪些文档仍按旧口径分词（`stale_doc_count`）。
 #[derive(Debug, Clone, Default)]
 pub struct Bm25Index {
     /// 文档记录：doc_id → 文档内部表示
@@ -141,6 +148,10 @@ pub struct Bm25Index {
     total_tokens: u32,
     /// 实例级分词器：空词典（默认）退化为纯 bigram
     tokenizer: BigramWithDictionaryNormalizer,
+    /// 当前分词词典代次（词典内容变化时递增）
+    dict_epoch: u64,
+    /// 当前词典内容的顺序无关指纹（空词典为 0）
+    dict_fingerprint: u64,
 }
 
 impl Bm25Index {
@@ -156,9 +167,13 @@ impl Bm25Index {
     ///
     /// 说明:
     /// - 索引与查询统一按词典整词匹配，消除 bigram 跨词噪声（如 "作压"）。
+    /// - 初始代次：空词典为 0，非空词典为 1；代次只增不减，供陈旧文档统计。
     pub fn with_dictionary(keywords: &[String]) -> Self {
+        let fingerprint = dictionary_fingerprint(keywords);
         Self {
             tokenizer: BigramWithDictionaryNormalizer::from_dictionary(keywords),
+            dict_fingerprint: fingerprint,
+            dict_epoch: if fingerprint == 0 { 0 } else { 1 },
             ..Self::default()
         }
     }
@@ -169,15 +184,48 @@ impl Bm25Index {
     /// - `keywords`: keyword_pool 规范词列表（空 = 清除词典，退化为纯 bigram）。
     ///
     /// 说明:
-    /// - 仅影响后续 `add_tokenized` / `search` 的分词口径；已添加的文档记录
-    ///   不会自动重分词，需由调用方在重建场景下清空后重新添加。
+    /// - 仅影响后续 `add_tokenized` / `search` 的分词口径；已有文档不会自动
+    ///   重分词，需由调用方在重建场景下清空后重新添加，可用 `stale_doc_count`
+    ///   检查尚未按新词典重建的文档数。
+    /// - 仅当词典内容（顺序无关指纹）发生变化时才推进代次并替换分词器；
+    ///   重复注入同一词典不会换代次。
     pub fn set_dictionary(&mut self, keywords: &[String]) {
+        let fingerprint = dictionary_fingerprint(keywords);
+        if fingerprint == self.dict_fingerprint {
+            // 词典内容未变化：代次与分词器保持原状
+            return;
+        }
+
+        self.dict_fingerprint = fingerprint;
+        self.dict_epoch = self.dict_epoch.saturating_add(1);
         self.tokenizer = BigramWithDictionaryNormalizer::from_dictionary(keywords);
+
+        // 词典切换不触发存量重分词：存在旧口径文档时提示调用方重建
+        let stale_docs = self.stale_doc_count();
+        if stale_docs > 0 {
+            tracing::warn!(
+                stale_docs,
+                "BM25 词典已切换：存量文档仍按旧口径分词，命中率可能下降，需清空后重建"
+            );
+        }
     }
 
     /// 词典是否为空（空词典时索引/查询分词与纯 bigram 完全一致）。
     pub fn dictionary_is_empty(&self) -> bool {
         self.tokenizer.is_empty()
+    }
+
+    /// 按旧分词词典代次写入、尚未重建的文档数。
+    ///
+    /// 说明:
+    /// - `set_dictionary` 只改变后续分词口径，已有文档不会自动重分词；
+    /// - 返回值大于 0 表示索引内为混合口径，命中率可能下降，调用方可据此
+    ///   清空索引并按新词典重建。
+    pub fn stale_doc_count(&self) -> usize {
+        self.docs
+            .values()
+            .filter(|doc| doc.dict_epoch != self.dict_epoch)
+            .count()
     }
 
     /// 返回索引中的文档总数。
@@ -196,7 +244,9 @@ impl Bm25Index {
 
     /// 增量添加一篇文档。
     ///
-    /// 若 doc_id 已存在，旧记录被替换（覆盖语义）。
+    /// 说明:
+    /// - 若 doc_id 已存在，旧记录被替换（覆盖语义）；
+    /// - 新文档盖当前词典代次，供 `stale_doc_count` 识别口径陈旧的文档。
     ///
     /// 接收 `Vec<String>` 的所有权以消除 clone 开销：
     /// 调用方（通常是 `tokenize_fields`）产出 tokens 后直接移动至此方法，
@@ -225,7 +275,14 @@ impl Bm25Index {
         }
 
         self.total_tokens += doc_len;
-        self.docs.insert(doc_id, Bm25Doc { term_freq, doc_len });
+        self.docs.insert(
+            doc_id,
+            Bm25Doc {
+                term_freq,
+                doc_len,
+                dict_epoch: self.dict_epoch,
+            },
+        );
     }
 
     /// 通过分词后的 token 列表添加文档。
@@ -282,22 +339,47 @@ impl Bm25Index {
         self.total_tokens = 0;
     }
 
-    /// 对查询文本执行 BM25 评分，返回所有文档的得分。
+    /// 对查询文本执行 BM25 评分，返回所有得分大于 0 的文档。
     ///
     /// 公式: score(D,Q) = Σ_{t∈Q∩D} IDF(t) · (f(t,D)·(k1+1)) / (f(t,D) + k1·(1−b + b·|D|/avgdl))
     ///
     /// 说明:
-    /// - 查询按索引实例当前分词器切分（与索引构建口径一致；默认 = 纯 bigram）。
+    /// - 查询按索引实例当前分词器切分（与索引构建口径一致；默认 = 纯 bigram）；
+    /// - 需要结果数量上限时用 `search_limited`，避免对全量命中排序与分配。
     ///
     /// 返回按得分降序排列的列表。
     pub fn search(&self, query: &str, config: &Bm25Config) -> Vec<(DocId, f64)> {
+        self.search_limited(query, config, 0)
+    }
+
+    /// 带结果上限的 BM25 检索。
+    ///
+    /// 参数:
+    /// - `query`: 查询文本，按索引实例当前分词器切分（与索引构建口径一致）；
+    /// - `config`: BM25 评分参数；
+    /// - `limit`: 结果数量上限；`0` 表示不限制（行为与 `search` 完全一致）。
+    ///
+    /// 返回:
+    /// - 按得分降序排列的 `(DocId, 分数)` 列表；`limit > 0` 时长度不超过 `limit`。
+    ///
+    /// 说明:
+    /// - `limit > 0` 时用容量为 `limit` 的最小堆维护前 `limit` 名，避免对全量
+    ///   命中排序与后续分配；仅得分大于 0 的文档参与排名。
+    /// - 同分文档按 `doc_id` 兜底排序，保证结果确定。
+    pub fn search_limited(
+        &self,
+        query: &str,
+        config: &Bm25Config,
+        limit: usize,
+    ) -> Vec<(DocId, f64)> {
         let query_tokens = self.tokenize_with(query);
         if query_tokens.is_empty() || self.docs.is_empty() {
             return Vec::new();
         }
 
         let n = self.docs.len() as f64;
-        let avgdl = self.avg_doc_len();
+        // 全空库（所有文档均无 token）时平均长度为 0，收紧下限避免除零
+        let avgdl = self.avg_doc_len().max(1e-9);
 
         // 查询词频
         let mut qf: HashMap<&str, u32> = HashMap::new();
@@ -305,42 +387,158 @@ impl Bm25Index {
             *qf.entry(t.as_str()).or_insert(0) += 1;
         }
 
-        let mut scores: Vec<(DocId, f64)> = Vec::with_capacity(self.docs.len());
-
-        for (doc_id, doc) in &self.docs {
-            let mut score = 0.0_f64;
-
-            for (qt, &q_tf) in &qf {
-                // 跳过不在索引中的查询词
-                let df = match self.df.get(*qt) {
-                    Some(&d) => d as f64,
-                    None => continue,
-                };
-
-                // IDF: log((N - df + 0.5) / (df + 0.5) + 1)
-                let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
-
-                // TF 分量
-                let tf = doc.term_freq.get(*qt).copied().unwrap_or(0) as f64;
-                let doc_len = doc.doc_len as f64;
-
-                let numerator = tf * (config.k1 + 1.0);
-                let denominator = tf + config.k1 * (1.0 - config.b + config.b * doc_len / avgdl);
-                let term_score = idf * numerator / denominator;
-
-                score += term_score * (q_tf as f64);
+        if limit == 0 {
+            // 不限制上限：收集全部有分文档后统一降序排序（上层通过 RRF 控制数量）
+            let mut scores: Vec<(DocId, f64)> = Vec::with_capacity(self.docs.len());
+            for (doc_id, doc) in &self.docs {
+                let score = self.score_doc(doc, &qf, n, avgdl, config);
+                if score > 0.0 {
+                    scores.push((doc_id.clone(), score));
+                }
             }
+            scores.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            return scores;
+        }
 
-            if score > 0.0 {
-                scores.push((doc_id.clone(), score));
+        // 限制上限：最小堆维护容量为 limit 的 top-k（堆满且新分更高才替换堆顶）
+        let mut heap: BinaryHeap<Reverse<ScoredDoc>> =
+            BinaryHeap::with_capacity(limit.min(self.docs.len()));
+        for (doc_id, doc) in &self.docs {
+            let score = self.score_doc(doc, &qf, n, avgdl, config);
+            if score <= 0.0 {
+                continue;
+            }
+            let item = ScoredDoc {
+                score,
+                doc_id: doc_id.clone(),
+            };
+            if heap.len() < limit {
+                heap.push(Reverse(item));
+                continue;
+            }
+            if let Some(Reverse(min)) = heap.peek() {
+                if item > *min {
+                    heap.pop();
+                    heap.push(Reverse(item));
+                }
             }
         }
 
-        // 按得分降序排序
-        scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        // 截取 top-k（默认返回全部有分的文档，上层通过 RRF 控制数量）
+        // 堆内无固定顺序，导出后统一降序（同分按 doc_id 兜底）
+        let mut scores: Vec<(DocId, f64)> = heap
+            .into_iter()
+            .map(|Reverse(item)| (item.doc_id, item.score))
+            .collect();
+        scores.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         scores
+    }
+
+    /// 计算单篇文档对查询词频表的 BM25 总分。
+    ///
+    /// 参数:
+    /// - `doc`: 待评分文档；
+    /// - `qf`: 查询词频表（查询分词后统计）；
+    /// - `n`: 文档总数；
+    /// - `avgdl`: 平均文档长度（调用方保证为正）；
+    /// - `config`: BM25 参数。
+    ///
+    /// 说明:
+    /// - 不在索引中的查询词直接跳过；词频为 0 的查询词也跳过，避免全空字段文档
+    ///   （doc_len = 0）在 b = 1 时出现 0/0 = NaN 污染整篇文档总分。
+    fn score_doc(
+        &self,
+        doc: &Bm25Doc,
+        qf: &HashMap<&str, u32>,
+        n: f64,
+        avgdl: f64,
+        config: &Bm25Config,
+    ) -> f64 {
+        let mut score = 0.0_f64;
+
+        for (qt, &q_tf) in qf {
+            // 跳过不在索引中的查询词
+            let df = match self.df.get(*qt) {
+                Some(&d) => d as f64,
+                None => continue,
+            };
+
+            // 词频为 0 时跳过：全空字段文档（doc_len = 0）在 b = 1 时 BM25 分母为
+            // 0，0/0 得到 NaN 会污染该文档总分并被 `score > 0.0` 静默丢弃
+            let tf = doc.term_freq.get(*qt).copied().unwrap_or(0) as f64;
+            if tf == 0.0 {
+                continue;
+            }
+
+            // IDF: log((N - df + 0.5) / (df + 0.5) + 1)
+            let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
+
+            // TF 分量
+            let doc_len = doc.doc_len as f64;
+            let numerator = tf * (config.k1 + 1.0);
+            let denominator = tf + config.k1 * (1.0 - config.b + config.b * doc_len / avgdl);
+            let term_score = idf * numerator / denominator;
+
+            score += term_score * (q_tf as f64);
+        }
+
+        score
+    }
+}
+
+// =========================================================
+// 模块私有辅助
+// =========================================================
+
+/// 计算词典指纹：对每个关键词做 FNV-1a 哈希后顺序无关累加，空列表返回 0。
+///
+/// 说明:
+/// - 仅用于判断词典内容是否变化（代次推进），不做安全用途；
+/// - 顺序无关保证同一词典以不同顺序传入时指纹一致，不会误判为换代。
+fn dictionary_fingerprint(keywords: &[String]) -> u64 {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    let mut acc: u64 = 0;
+    for keyword in keywords {
+        // 单个关键词独立计算 FNV-1a，再累加进总指纹
+        let mut hash = FNV_OFFSET_BASIS;
+        for byte in keyword.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        acc = acc.wrapping_add(hash);
+    }
+    acc
+}
+
+/// 堆内排序项：f64 分数不实现 `Ord`，手动用 `total_cmp` 实现（NaN 也参与比较，
+/// 不会 panic）；同分按 `doc_id` 兜底，保证堆裁剪结果确定。
+#[derive(Debug, Clone)]
+struct ScoredDoc {
+    score: f64,
+    doc_id: DocId,
+}
+
+impl PartialEq for ScoredDoc {
+    fn eq(&self, other: &Self) -> bool {
+        self.score.total_cmp(&other.score) == std::cmp::Ordering::Equal
+            && self.doc_id == other.doc_id
+    }
+}
+
+impl Eq for ScoredDoc {}
+
+impl PartialOrd for ScoredDoc {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ScoredDoc {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.score
+            .total_cmp(&other.score)
+            .then_with(|| self.doc_id.cmp(&other.doc_id))
     }
 }
 
@@ -498,6 +696,70 @@ mod tests {
         assert!(!results_eat.is_empty());
     }
 
+    /// 全空字段文档（doc_len = 0）在 b = 1 时不产生 NaN，正常文档的召回不受影响。
+    #[test]
+    fn empty_doc_with_b_equals_one_keeps_recall() {
+        let mut index = Bm25Index::new();
+        let config = Bm25Config { k1: 1.2, b: 1.0 };
+
+        // 全空字段文档：无任何 token，doc_len = 0
+        let empty_id = DocId::L1(uuid::Uuid::new_v4());
+        index.add(empty_id.clone(), Vec::new());
+
+        let doc_id = DocId::L1(uuid::Uuid::new_v4());
+        index.add_tokenized(doc_id.clone(), &["今天天气很好"]);
+
+        let results = index.search("天气", &config);
+        assert!(
+            results.iter().any(|(id, _)| *id == doc_id),
+            "含查询词的文档应被召回"
+        );
+        assert!(
+            results.iter().all(|(_, score)| score.is_finite()),
+            "返回分数必须有限（不得出现 NaN/Inf）"
+        );
+        assert!(
+            !results.iter().any(|(id, _)| *id == empty_id),
+            "全空文档无任何命中词，不应出现在结果中"
+        );
+    }
+
+    /// 带上限检索：返回 top-limit 且保持降序；limit = 0 与全量检索完全一致。
+    #[test]
+    fn search_limited_returns_top_k_descending() {
+        let mut index = Bm25Index::new();
+        let config = Bm25Config::default();
+
+        // 10 篇文档共享查询词「天气」，词频递增形成唯一的分数梯度
+        for i in 0..10usize {
+            let text = "天气".repeat(i + 1);
+            index.add_tokenized(DocId::L2(i as i64), &[text.as_str()]);
+        }
+
+        let all = index.search("天气", &config);
+        assert_eq!(all.len(), 10, "10 篇文档均含查询词");
+        assert_eq!(
+            index.search_limited("天气", &config, 0),
+            all,
+            "limit = 0 应与全量检索完全一致"
+        );
+
+        let top3 = index.search_limited("天气", &config, 3);
+        assert_eq!(top3.len(), 3);
+        assert_eq!(top3[0], all[0], "首位应与全量检索首位一致");
+        assert!(
+            top3.windows(2).all(|w| w[0].1 >= w[1].1),
+            "结果应保持分数降序"
+        );
+        assert!(
+            top3.iter().all(|(_, score)| *score >= all[3].1),
+            "top-3 分数应不低于全量第 4 名"
+        );
+
+        // 上限大于命中数时返回全部命中
+        assert_eq!(index.search_limited("天气", &config, 100), all);
+    }
+
     // ---- DocId Display ----
 
     #[test]
@@ -582,5 +844,29 @@ mod tests {
             "词典口径下噪声命中应消失"
         );
         assert_eq!(index.search("工作压力", &config).len(), 1);
+    }
+
+    /// 词典切换推进代次：存量文档标记为陈旧、覆盖重建后同步、重复注入不换代次。
+    #[test]
+    fn set_dictionary_marks_existing_docs_stale() {
+        let mut index = Bm25Index::new();
+        let doc_id = DocId::L1(uuid::Uuid::new_v4());
+        let dictionary = ["工作压力".to_string()];
+
+        // 默认无词典口径写入：文档与当前代次一致
+        index.add_tokenized(doc_id.clone(), &["工作压力很大"]);
+        assert_eq!(index.stale_doc_count(), 0);
+
+        // 切换词典：代次推进，存量文档标记为陈旧
+        index.set_dictionary(&dictionary);
+        assert_eq!(index.stale_doc_count(), 1);
+
+        // 覆盖重建同一文档：按新代次重新盖章
+        index.add_tokenized(doc_id.clone(), &["工作压力很大"]);
+        assert_eq!(index.stale_doc_count(), 0);
+
+        // 再次注入同一词典：指纹未变，不推进代次
+        index.set_dictionary(&dictionary);
+        assert_eq!(index.stale_doc_count(), 0);
     }
 }

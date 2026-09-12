@@ -525,7 +525,7 @@ impl StyleStats {
         let mut added: std::collections::HashSet<String> = std::collections::HashSet::new();
         let push =
             |text: &str, out: &mut Vec<String>, added: &mut std::collections::HashSet<String>| {
-                let clipped = truncate_chars(text, max_chars);
+                let clipped = ramaria_core::text::truncate_chars_bare(text.trim(), max_chars);
                 if !clipped.is_empty() && added.insert(clipped.clone()) {
                     out.push(clipped);
                 }
@@ -594,15 +594,6 @@ fn count_occurrences(text: &str, needle: &str) -> u32 {
 /// 任一字符的出现总次数。
 fn count_any(text: &str, chars: &[char]) -> u32 {
     text.chars().filter(|c| chars.contains(c)).count() as u32
-}
-
-/// 按字符数截断文本（超出时保留前缀；返回去首尾空白）。
-fn truncate_chars(text: &str, max_chars: usize) -> String {
-    if max_chars == 0 {
-        return String::new();
-    }
-    let clipped: String = text.trim().chars().take(max_chars).collect();
-    clipped
 }
 
 /// 升序序列的分位数（线性插值口径，同常用统计约定）。

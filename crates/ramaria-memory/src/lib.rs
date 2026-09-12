@@ -44,8 +44,8 @@ pub use decay::{
 
 // RRF
 pub use rrf::{
-    ChannelResult, FusedResult, RrfConfig, rrf_fuse, rrf_fuse_with_keyword, rrf_single_channel,
-    rrf_two_channels,
+    ChannelResult, FusedResult, OptionalChannels, RrfConfig, rrf_fuse, rrf_fuse_optional,
+    rrf_fuse_with_keyword, rrf_single_channel, rrf_two_channels,
 };
 
 // BM25 全文检索
@@ -179,7 +179,6 @@ pub use inference::{
     merge_cross_user_prior,
     mock_infer,
     permutation_test,
-    persist_cluster_snapshots_with_semantic_labels,
     post_process_inference,
     prefilter_events,
     promote_tentative_events,

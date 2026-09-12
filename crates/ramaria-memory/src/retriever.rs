@@ -54,11 +54,11 @@ mod tests;
 /// - L1/L2 文档视图完整存储在内存 HashMap 中，用于 BM25 搜索结果的文档解析。
 /// - 在 10k 文档规模下，内存占用约 5-15 MB，
 ///   完全在 200MB 空闲目标范围内。
-/// - 超过 LRU 容量上限时，按文档创建时间淘汰最旧条目，同时清理对应的 BM25 索引。
+/// - 超过 LRU 容量上限的 110% 时，批量淘汰最旧条目，同时清理对应的 BM25 索引。
 ///
 /// LRU 驱逐策略:
-/// - 当文档数超过 `lru_max_entries`（默认 50_000）时触发驱逐。
-/// - 驱逐从 BM25 索引和内存 HashMap 中同步移除最早创建的文档。
+/// - 当 L1/L2 文档数超过 `lru_max_entries`（默认 50_000）的 110% 时触发一次批量驱逐。
+/// - 一次驱逐"超出上限"的全部条目，从 BM25 索引和内存 HashMap 中同步移除最旧文档。
 /// - 驱逐阈值远高于典型场景（10k），在不影响常规使用的前提下防止内存无限增长。
 #[derive(Debug)]
 pub struct Retriever {
@@ -70,13 +70,16 @@ pub struct Retriever {
     vector_index: CachedVectorIndex<BruteForceIndex>,
     /// 图谱检索器
     graph_retriever: GraphRetriever,
-    /// LRU 容量上限：超过此值时驱逐最旧文档（0 表示不限制）
+    /// LRU 容量上限：超过此值的 110% 时批量驱逐最旧文档（0 表示不限制）
     lru_max_entries: usize,
+    /// utt 原文块容量上限：超过此值的 110% 时按创建时间驱逐最旧块（0 表示不限制）
+    utt_max_entries: usize,
     /// doc_id → L1 视图（BM25 结果解析用）
     l1_docs: std::collections::HashMap<uuid::Uuid, L1DocView>,
     /// doc_id → L2 视图（BM25 结果解析用）
     l2_docs: std::collections::HashMap<i64, L2DocView>,
-    /// utt 块 ID → 块视图（原文通道；不参与 LRU 驱逐，块数量级远小于 L1/L2）
+    /// utt 块 ID → 块视图（原文通道）；单设容量上限 `utt_max_entries`（默认 1 万块），
+    /// 超出上限时按创建时间驱逐最旧块
     utt_docs: std::collections::HashMap<i64, UttDocView>,
 }
 
@@ -85,6 +88,12 @@ pub struct Retriever {
 /// 此值远超 / 典型场景（~10k 文档），仅在长期大量导入场景下才会触发驱逐，
 /// 确保常规使用不受影响。
 pub const DEFAULT_LRU_MAX_ENTRIES: usize = 50_000;
+
+/// 默认 utt 原文块容量上限：10,000 块。
+///
+/// utt 块持有整块原文，单块体积远大于 L1/L2 视图，故单设上限；
+/// 超出时按创建时间驱逐最旧块并同步清理其 `L0:{id}` 向量（0 = 不限制）。
+pub const DEFAULT_UTT_MAX_ENTRIES: usize = 10_000;
 
 impl Retriever {
     /// 使用默认配置创建检索器。
@@ -95,6 +104,7 @@ impl Retriever {
             vector_index: CachedVectorIndex::new(BruteForceIndex::new(), None),
             graph_retriever: GraphRetriever::new(),
             lru_max_entries: DEFAULT_LRU_MAX_ENTRIES,
+            utt_max_entries: DEFAULT_UTT_MAX_ENTRIES,
             l1_docs: std::collections::HashMap::new(),
             l2_docs: std::collections::HashMap::new(),
             utt_docs: std::collections::HashMap::new(),
@@ -109,6 +119,7 @@ impl Retriever {
             vector_index: CachedVectorIndex::new(BruteForceIndex::new(), None),
             graph_retriever: GraphRetriever::new(),
             lru_max_entries: DEFAULT_LRU_MAX_ENTRIES,
+            utt_max_entries: DEFAULT_UTT_MAX_ENTRIES,
             l1_docs: std::collections::HashMap::new(),
             l2_docs: std::collections::HashMap::new(),
             utt_docs: std::collections::HashMap::new(),
@@ -117,7 +128,7 @@ impl Retriever {
 
     /// 设置 LRU 容量上限（0 表示不限制）。
     ///
-    /// 当 L1+L2 总文档数超过此值时，按 `created_at` 驱逐最早创建的文档。
+    /// 当 L1+L2 总文档数超过此值的 110% 时，按 `created_at` 批量驱逐最早创建的文档。
     /// 默认值: [`DEFAULT_LRU_MAX_ENTRIES`]（50,000）。
     pub fn set_lru_max_entries(&mut self, max_entries: usize) {
         self.lru_max_entries = max_entries;
@@ -126,6 +137,20 @@ impl Retriever {
     /// 获取当前 LRU 容量上限。
     pub fn lru_max_entries(&self) -> usize {
         self.lru_max_entries
+    }
+
+    /// 设置 utt 原文块容量上限（0 表示不限制）。
+    ///
+    /// 当 utt 块数超过此值的 110% 时，按 `created_at` 批量驱逐最旧块，
+    /// 并同步清理对应 `L0:{id}` 向量。
+    /// 默认值: [`DEFAULT_UTT_MAX_ENTRIES`]（10,000）。
+    pub fn set_utt_max_entries(&mut self, max_entries: usize) {
+        self.utt_max_entries = max_entries;
+    }
+
+    /// 获取当前 utt 原文块容量上限。
+    pub fn utt_max_entries(&self) -> usize {
+        self.utt_max_entries
     }
 
     /// 获取内部 BM25 索引的可变引用。
@@ -169,6 +194,7 @@ impl Retriever {
     ///
     /// 供重建流程在 `RebuildConfig.rebuild_bm25=false` 时临时禁用 BM25 索引
     /// 构建（仅加载文档映射），重建结束后恢复原值。
+    /// 该重建流程当前为预留路径（`IndexRebuilder` 无生产调用者，见 `rebuild.rs`）。
     pub fn set_bm25_enabled(&mut self, enabled: bool) -> bool {
         let prev = self.config.enable_bm25;
         self.config.enable_bm25 = enabled;

@@ -13,6 +13,10 @@
 //!   持久化迁移）由调用方（storage repo + 接线层）负责
 //! - pending 冲突的"相似度"由 AliasManager 计算后随登记写入，本池只按行存 Optional
 //!
+//! 未接线标注:
+//! - `Pending`（待审核别名）的**写入侧当前未接线**：生产链路暂无 Pending 生产者，
+//!   pending 行由外部/手动写入；本池只负责装载与 confirm/reject 状态迁移。
+//!
 //! 状态机图:
 //! ```text
 //! Unknown
@@ -128,6 +132,10 @@ impl KeywordPool {
     ///
     /// 已存在（无论 Canonical/Alias/Pending）→ 累加；不存在 → 插入为 Canonical。
     /// 插入的行 id 使用自增序列（超出既有最大行 id +1），模拟 SQLite rowid 语义。
+    ///
+    /// 注意:
+    /// - **非幂等（累加）**：重复调用同一 token 会反复递增 use_count；
+    ///   批内去重与重放防护由调用方（`KeywordService::upsert_pool_tokens`）负责。
     pub fn upsert(&mut self, token: KeywordToken, now_ms: i64) {
         if let Some(entry) = self.entries.iter_mut().find(|e| e.token == token) {
             entry.use_count += 1;
@@ -177,6 +185,28 @@ impl KeywordPool {
         });
         list.into_iter()
             .filter(|e| e.status.is_canonical())
+            .map(|e| &e.token)
+            .collect()
+    }
+
+    /// 已确认词表的词条 token（Canonical + Alias，**排除 Pending**）。
+    ///
+    /// 用途:
+    /// - 词典增强分词的词表来源（BM25 词典与关键词镜像词典同源口径）。
+    ///
+    /// 说明:
+    /// - 排序与 [`KeywordPool::list_canonicals`] 一致：use_count 降序、created_at 降序。
+    /// - Pending 词条尚未确认，**不参与分词 / 归一**：其文本既不进入词表，
+    ///   也不产生 alias → canonical 映射。
+    pub fn established_terms(&self) -> Vec<&KeywordToken> {
+        let mut list: Vec<&PoolEntry> = self.entries.iter().collect();
+        list.sort_by(|a, b| {
+            b.use_count
+                .cmp(&a.use_count)
+                .then_with(|| b.created_at.cmp(&a.created_at))
+        });
+        list.into_iter()
+            .filter(|e| !matches!(e.status, KeywordStatus::Pending { .. }))
             .map(|e| &e.token)
             .collect()
     }
@@ -347,6 +377,40 @@ mod tests {
         let canonicals = pool.list_canonicals();
         assert_eq!(canonicals.len(), 1); // 只有 工作压力 是 Canonical
         assert_eq!(canonicals[0].as_str(), "工作压力");
+    }
+
+    #[test]
+    fn established_terms_includes_alias_excludes_pending() {
+        let pool = sample_pool();
+        let terms: Vec<&str> = pool
+            .established_terms()
+            .into_iter()
+            .map(|t| t.as_str())
+            .collect();
+        // canonical 与 alias 入表、pending 排除；排序 use_count 降序（10 > 5）
+        assert_eq!(terms, vec!["工作压力", "职业倦怠"]);
+        assert!(!terms.contains(&"职场焦虑"), "pending 不参与词表");
+    }
+
+    #[test]
+    fn established_terms_sorted_like_canonicals() {
+        // use_count 相同 → created_at 降序（rowid 即时间序）
+        let pool = KeywordPool::from_entries(vec![
+            entry(1, "早词", 3, KeywordStatus::Canonical),
+            entry(2, "晚词", 3, KeywordStatus::Alias { canonical_id: 1 }),
+        ]);
+        let terms: Vec<&str> = pool
+            .established_terms()
+            .into_iter()
+            .map(|t| t.as_str())
+            .collect();
+        assert_eq!(terms, vec!["晚词", "早词"]);
+    }
+
+    #[test]
+    fn established_terms_empty_pool() {
+        let pool = KeywordPool::new();
+        assert!(pool.established_terms().is_empty());
     }
 
     // ---- pending 冲突 ----

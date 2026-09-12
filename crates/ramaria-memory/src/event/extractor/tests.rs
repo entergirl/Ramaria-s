@@ -566,7 +566,7 @@ fn event_similarity_empty_text_is_zero() {
     assert_eq!(event_text_similarity(&a, &b), 0.0, "空文本不应误判为相似");
 }
 
-// ---- remap_relation（LLM 关系索引 → 实际保存 DB id 映射）----
+// ---- remap_relation / map_cluster_relations（LLM 关系索引 → 批次下标映射）----
 
 /// 构造测试用关系（kind/weight/detail 不影响位置映射，使用占位值）。
 fn rel_output(from_index: usize, to_index: usize) -> EventRelationOutput {
@@ -579,47 +579,47 @@ fn rel_output(from_index: usize, to_index: usize) -> EventRelationOutput {
     }
 }
 
-/// 全部事件保存时，关系位置映射到对应 DB id。
+/// 全部事件进入批次时，关系位置映射到对应批次下标。
 #[test]
 fn remap_relation_all_saved_maps_positions() {
-    let saved = vec![Some(10i64), Some(11), Some(12)];
+    let batch_index = vec![Some(0usize), Some(1), Some(2)];
     assert_eq!(
-        EventExtractor::remap_relation(&rel_output(0, 2), &saved),
-        Some((10, 12))
+        EventExtractor::remap_relation(&rel_output(0, 2), &batch_index),
+        Some((0, 2))
     );
 }
 
 /// 端点被相似度去重跳过（None）时，引用该端点的关系应丢弃而非错误连边。
 #[test]
 fn remap_relation_dedup_skipped_endpoint_drops() {
-    // 位置 1 未保存（去重跳过）
-    let saved = vec![Some(10i64), None, Some(12)];
+    // 位置 1 未保存（去重跳过）；批次下标压缩后两条事件为 0/1
+    let batch_index = vec![Some(0usize), None, Some(1)];
     // from → 未保存端点 / 未保存端点 → to：均应丢弃
     assert_eq!(
-        EventExtractor::remap_relation(&rel_output(0, 1), &saved),
+        EventExtractor::remap_relation(&rel_output(0, 1), &batch_index),
         None
     );
     assert_eq!(
-        EventExtractor::remap_relation(&rel_output(1, 2), &saved),
+        EventExtractor::remap_relation(&rel_output(1, 2), &batch_index),
         None
     );
-    // 两端点均已保存：正常映射
+    // 两端点均已进入批次：正常映射
     assert_eq!(
-        EventExtractor::remap_relation(&rel_output(0, 2), &saved),
-        Some((10, 12))
+        EventExtractor::remap_relation(&rel_output(0, 2), &batch_index),
+        Some((0, 1))
     );
 }
 
 /// 索引越界（LLM 输出数组长度之外的引用）应丢弃。
 #[test]
 fn remap_relation_out_of_range_drops() {
-    let saved = vec![Some(10i64)];
+    let batch_index = vec![Some(0usize)];
     assert_eq!(
-        EventExtractor::remap_relation(&rel_output(0, 1), &saved),
+        EventExtractor::remap_relation(&rel_output(0, 1), &batch_index),
         None
     );
     assert_eq!(
-        EventExtractor::remap_relation(&rel_output(1, 0), &saved),
+        EventExtractor::remap_relation(&rel_output(1, 0), &batch_index),
         None
     );
 }
@@ -627,9 +627,26 @@ fn remap_relation_out_of_range_drops() {
 /// 自引用（from == to）应丢弃，与既有守卫一致。
 #[test]
 fn remap_relation_self_reference_drops() {
-    let saved = vec![Some(10i64), Some(11)];
+    let batch_index = vec![Some(0usize), Some(1)];
     assert_eq!(
-        EventExtractor::remap_relation(&rel_output(1, 1), &saved),
+        EventExtractor::remap_relation(&rel_output(1, 1), &batch_index),
         None
     );
+}
+
+/// 批次下标映射：保留关系的下标/类型/权重按批次口径输出，未保存端点关系丢弃。
+#[test]
+fn map_cluster_relations_maps_to_batch_indices() {
+    use ramaria_core::types::EventRelationKind;
+    // 提取结果 4 个位置；位置 1 去重跳过 → 批次下标 0/1/2
+    let batch_index = vec![Some(0usize), None, Some(1), Some(2)];
+    let rels = vec![
+        rel_output(0, 2),
+        rel_output(1, 3), // 端点 1 未保存 → 丢弃
+        rel_output(2, 3),
+    ];
+    let mapped = EventExtractor::map_cluster_relations(&rels, &batch_index, "p1", 0);
+    assert_eq!(mapped.len(), 2, "未保存端点的关系应丢弃");
+    assert_eq!(mapped[0], (0, 1, EventRelationKind::RelatedTo, 0.5));
+    assert_eq!(mapped[1], (1, 2, EventRelationKind::RelatedTo, 0.5));
 }

@@ -137,6 +137,10 @@ pub fn is_chat_message(msg: &Message) -> bool {
 ///
 /// 返回:
 /// - `Vec<u8>`：长度恒为 `vec.len() * 4`。
+///
+/// 说明:
+/// - 空向量编码为空 BLOB，而 `decode_embedding` 视空 BLOB 为非法输入并返回 `Validation`；
+///   调用方应避免把空向量（通常意味着 embedding 未产出）编码后落库。
 pub fn encode_embedding(vec: &[f32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(vec.len() * 4);
     for v in vec {
@@ -148,8 +152,19 @@ pub fn encode_embedding(vec: &[f32]) -> Vec<u8> {
 /// 将 f32 小端 BLOB 解码为向量。
 ///
 /// 错误:
-/// - BLOB 长度不是 4 的倍数 → `Validation` 错误（数据损坏防御）。
+/// - 空 BLOB（0 字节）→ `Validation`：0 维向量会使向量索引整体失效（首个期望维度被记为 0），
+///   调用方应按"无向量"降级处理，不得把空 BLOB 当作合法向量。
+/// - BLOB 长度不是 4 的倍数 → `Validation`（数据损坏防御）。
+///
+/// 说明:
+/// - 正常路径下 BLOB 长度恒为 `vec.len() * 4`（由 `encode_embedding` 编码产生），
+///   故合法输入非空且长度必为 4 的倍数。
 pub fn decode_embedding(blob: &[u8]) -> RamariaResult<Vec<f32>> {
+    if blob.is_empty() {
+        return Err(RamariaError::validation(
+            "embedding BLOB 为空（0 字节），拒绝解码为 0 维向量",
+        ));
+    }
     if !blob.len().is_multiple_of(4) {
         return Err(RamariaError::validation(format!(
             "embedding BLOB 长度 {} 不是 4 的倍数（数据损坏）",
@@ -193,9 +208,9 @@ mod tests {
     }
 
     #[test]
-    fn decode_empty_blob_is_empty_vector() {
-        let back = decode_embedding(&[]).unwrap();
-        assert!(back.is_empty());
+    fn decode_empty_blob_returns_validation_error() {
+        let err = decode_embedding(&[]).unwrap_err();
+        assert_eq!(err.category(), "validation");
     }
 
     #[test]

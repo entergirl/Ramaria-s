@@ -2,6 +2,7 @@
 //!
 //! 设计特点:
 //! - 从查询中提取潜在实体名 → 匹配 graph_nodes → 遍历 1-hop 边 → 评分
+//! - 实体匹配先经 bigram 倒排生成候选，避免每次查询扫描全部节点名
 //! - 支持 7 种关系类型的权重配置（TASK_STATUS/OBSTACLE 等权重高于一般 TIMELINE）
 //! - 返回结构化 GraphHit，包含实体名、关系链和置信度
 //! - 不直接访问数据库——通过闭包/回调注入存储操作，保持模块零 I/O
@@ -16,7 +17,7 @@
 //!   - 出边与入边行为对称：入边（其他节点指向本实体）同样计入加成，
 //!     解决此前"出边计入、入边不计"的不对称问题（决策 D-V17-014-16）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // =========================================================
 // 数据类型
@@ -76,8 +77,6 @@ pub struct GraphRetrieverConfig {
     pub relation_weights: HashMap<String, f64>,
     /// 实体匹配的最小相似度阈值
     pub min_match_ratio: f64,
-    /// 图谱通道在 RRF 中的权重
-    pub rrf_weight: f64,
 }
 
 impl Default for GraphRetrieverConfig {
@@ -102,7 +101,6 @@ impl Default for GraphRetrieverConfig {
             max_edges_per_node: 10,
             relation_weights: weights,
             min_match_ratio: 0.0,
-            rrf_weight: 0.8,
         }
     }
 }
@@ -127,6 +125,10 @@ pub struct GraphRetriever {
     edges_from: HashMap<i64, Vec<GraphEdge>>,
     /// 目标节点 id → 入边列表（预建索引，避免检索时 O(E) 全表扫描）
     edges_to: HashMap<i64, Vec<GraphEdge>>,
+    /// 实体名 bigram 倒排：相邻两字符 → 包含该 bigram 的实体名列表（候选生成用）
+    entity_bigrams: HashMap<(char, char), Vec<String>>,
+    /// 单字符实体名索引：字符 → 实体名列表（仅收录单字符实体名）
+    single_char_entities: HashMap<char, Vec<String>>,
 }
 
 impl GraphRetriever {
@@ -137,13 +139,15 @@ impl GraphRetriever {
             nodes_by_id: HashMap::new(),
             edges_from: HashMap::new(),
             edges_to: HashMap::new(),
+            entity_bigrams: HashMap::new(),
+            single_char_entities: HashMap::new(),
         }
     }
 
     /// 从外部数据加载图谱节点和边。
     ///
-    /// 同时构建出边（edges_from）和入边（edges_to）索引，使检索阶段
-    /// 收集邻居边的复杂度从 O(E) 降为 O(1) per entity。
+    /// 同时构建出边（edges_from）、入边（edges_to）与实体名倒排索引，
+    /// 使邻居边收集为 O(1) per entity、实体候选生成为 O(查询字符数)。
     ///
     /// 参数:
     /// - `nodes`: (id, entity_name, entity_type) 列表
@@ -153,6 +157,8 @@ impl GraphRetriever {
         self.nodes_by_id.clear();
         self.edges_from.clear();
         self.edges_to.clear();
+        self.entity_bigrams.clear();
+        self.single_char_entities.clear();
 
         for (id, name, etype) in nodes {
             let node = GraphNode {
@@ -160,6 +166,7 @@ impl GraphRetriever {
                 entity_name: name.clone(),
                 entity_type: etype.clone(),
             };
+            self.insert_index_entry(name);
             self.nodes.insert(name.clone(), node.clone());
             self.nodes_by_id.insert(*id, node);
         }
@@ -177,7 +184,12 @@ impl GraphRetriever {
     }
 
     /// 添加单个节点。
+    ///
+    /// 同名节点覆盖前先清理旧索引项，再按新名重建倒排索引，
+    /// 保证索引与节点集合始终同步。
     pub fn add_node(&mut self, node: GraphNode) {
+        self.remove_index_entry(&node.entity_name);
+        self.insert_index_entry(&node.entity_name);
         self.nodes.insert(node.entity_name.clone(), node.clone());
         self.nodes_by_id.insert(node.id, node);
     }
@@ -213,20 +225,154 @@ impl GraphRetriever {
         self.nodes_by_id.clear();
         self.edges_from.clear();
         self.edges_to.clear();
+        self.entity_bigrams.clear();
+        self.single_char_entities.clear();
+    }
+
+    /// 把一个实体名登记进倒排索引（bigram 与单字符各建一路）。
+    fn insert_index_entry(&mut self, name: &str) {
+        let chars: Vec<char> = name.chars().collect();
+        if chars.is_empty() {
+            return;
+        }
+
+        // 同一 bigram 在同一实体名中可能重复出现，先去重再登记，避免索引项膨胀。
+        let mut seen: HashSet<(char, char)> = HashSet::new();
+        for pair in chars.windows(2) {
+            let key = (pair[0], pair[1]);
+            if seen.insert(key) {
+                self.entity_bigrams
+                    .entry(key)
+                    .or_default()
+                    .push(name.to_string());
+            }
+        }
+
+        // 仅单字符实体名进入单字符索引：多字符实体统一由 bigram 路召回。
+        if let [c] = chars.as_slice() {
+            self.single_char_entities
+                .entry(*c)
+                .or_default()
+                .push(name.to_string());
+        }
+    }
+
+    /// 从倒排索引中移除一个实体名的全部条目（同名覆盖前调用）。
+    fn remove_index_entry(&mut self, name: &str) {
+        let chars: Vec<char> = name.chars().collect();
+
+        for pair in chars.windows(2) {
+            let key = (pair[0], pair[1]);
+            let list_is_empty = match self.entity_bigrams.get_mut(&key) {
+                Some(list) => {
+                    list.retain(|n| n != name);
+                    list.is_empty()
+                }
+                None => false,
+            };
+            if list_is_empty {
+                self.entity_bigrams.remove(&key);
+            }
+        }
+
+        if let [c] = chars.as_slice() {
+            let list_is_empty = match self.single_char_entities.get_mut(c) {
+                Some(list) => {
+                    list.retain(|n| n != name);
+                    list.is_empty()
+                }
+                None => false,
+            };
+            if list_is_empty {
+                self.single_char_entities.remove(c);
+            }
+        }
     }
 
     /// 从查询文本中提取候选实体。
     ///
     /// 策略:
-    /// - 将查询文本与所有 graph_nodes 的 entity_name 做子串匹配
+    /// - 查询长度 ≥ 2 时，先用相邻字符对查 bigram 倒排、查询字符查单字符索引生成候选，
+    ///   再对候选做精确子串匹配校验，避免每次查询扫描全部节点名
     /// - 支持中文长实体（如"机器学习项目"能匹配到"机器学习"和"项目"）
-    /// - 返回匹配的实体名列表，按匹配长度降序
+    /// - 单字符查询无法用 bigram 生成候选，退回全量扫描
+    /// - 返回匹配的实体名列表，按匹配比例降序
     pub fn extract_entities(&self, query: &str) -> Vec<(&str, f64)> {
         if query.is_empty() || self.nodes.is_empty() {
             return Vec::new();
         }
 
         let q_chars: Vec<char> = query.chars().collect();
+        let q_len = q_chars.len();
+
+        // 单字符查询无法用 bigram 生成候选：查询是单个字符时，
+        // "查询是实体子串"等价于该字符出现在实体名任意位置，需要全量扫描。
+        if q_len < 2 {
+            return self.extract_entities_full_scan(&q_chars);
+        }
+
+        let candidates = self.candidate_entities(&q_chars);
+        let mut matches: Vec<(&str, f64)> = Vec::new();
+
+        for entity_name in candidates {
+            let e_chars: Vec<char> = entity_name.chars().collect();
+            let e_len = e_chars.len();
+
+            if e_len == 0 {
+                continue;
+            }
+
+            // 候选只保证部分字符命中索引，仍需按原匹配公式做双向子串校验。
+            let match_len = if q_len >= e_len {
+                // 查询比实体长：实体是否是查询的子串
+                contains_subsequence(&q_chars, &e_chars) as usize * e_len
+            } else {
+                // 实体比查询长：查询是否是实体的子串
+                contains_subsequence(&e_chars, &q_chars) as usize * q_len
+            };
+
+            if match_len > 0 {
+                let ratio = match_len as f64 / e_len.max(q_len) as f64;
+                matches.push((entity_name, ratio));
+            }
+        }
+
+        // 按匹配比例降序
+        matches.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        matches
+    }
+
+    /// 由倒排索引生成候选实体名集合（引用 `nodes` 的 key，天然去重）。
+    ///
+    /// 两路召回并集:
+    /// - bigram 倒排: 查询的每个相邻字符对命中"实体名包含该 bigram"
+    /// - 单字符索引: 查询的每个字符命中"单字符实体名"
+    fn candidate_entities(&self, q_chars: &[char]) -> HashSet<&str> {
+        let mut candidate_names: HashSet<&str> = HashSet::new();
+
+        for pair in q_chars.windows(2) {
+            if let Some(names) = self.entity_bigrams.get(&(pair[0], pair[1])) {
+                candidate_names.extend(names.iter().map(|n| n.as_str()));
+            }
+        }
+        for c in q_chars {
+            if let Some(names) = self.single_char_entities.get(c) {
+                candidate_names.extend(names.iter().map(|n| n.as_str()));
+            }
+        }
+
+        // 索引中的名字统一映射回节点集合的 key 引用，顺带过滤索引与集合的潜在不同步。
+        candidate_names
+            .into_iter()
+            .filter_map(|name| self.nodes.get_key_value(name).map(|(key, _)| key.as_str()))
+            .collect()
+    }
+
+    /// 全量扫描实体名做子串匹配（无法通过倒排生成候选时的回退路径）。
+    ///
+    /// 单字符查询无法用 bigram 生成候选：查询是单个字符时，
+    /// "查询是实体子串"等价于该字符出现在实体名中，必须检查全部实体名。
+    fn extract_entities_full_scan(&self, q_chars: &[char]) -> Vec<(&str, f64)> {
         let q_len = q_chars.len();
         let mut matches: Vec<(&str, f64)> = Vec::new();
 
@@ -238,13 +384,10 @@ impl GraphRetriever {
                 continue;
             }
 
-            // 子串匹配
             let match_len = if q_len >= e_len {
-                // 查询比实体长：实体是否是查询的子串
-                contains_subsequence(&q_chars, &e_chars) as usize * e_len
+                contains_subsequence(q_chars, &e_chars) as usize * e_len
             } else {
-                // 实体比查询长：查询是否是实体的子串
-                contains_subsequence(&e_chars, &q_chars) as usize * q_len
+                contains_subsequence(&e_chars, q_chars) as usize * q_len
             };
 
             if match_len > 0 {
@@ -253,7 +396,6 @@ impl GraphRetriever {
             }
         }
 
-        // 按匹配比例降序
         matches.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         matches
     }
@@ -656,5 +798,150 @@ mod tests {
 
         let config = GraphRetrieverConfig::default();
         assert!(r.search("机器学习", &config).is_empty());
+    }
+
+    // ---- 倒排候选与全量扫描的等价性 ----
+    // 倒排索引只用于生成候选，最终仍以原匹配公式校验；以下用例锁定两者结果完全一致。
+
+    /// 复刻旧全量扫描算法，作为等价性基准。
+    fn full_scan_entities(r: &GraphRetriever, query: &str) -> Vec<(String, f64)> {
+        if query.is_empty() || r.nodes.is_empty() {
+            return Vec::new();
+        }
+
+        let q_chars: Vec<char> = query.chars().collect();
+        let q_len = q_chars.len();
+        let mut matches: Vec<(String, f64)> = Vec::new();
+
+        for entity_name in r.nodes.keys() {
+            let e_chars: Vec<char> = entity_name.chars().collect();
+            let e_len = e_chars.len();
+
+            if e_len == 0 {
+                continue;
+            }
+
+            let match_len = if q_len >= e_len {
+                contains_subsequence(&q_chars, &e_chars) as usize * e_len
+            } else {
+                contains_subsequence(&e_chars, &q_chars) as usize * q_len
+            };
+
+            if match_len > 0 {
+                let ratio = match_len as f64 / e_len.max(q_len) as f64;
+                matches.push((entity_name.clone(), ratio));
+            }
+        }
+
+        matches.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        matches
+    }
+
+    /// 断言新实现与全量扫描结果完全一致（实体名与 ratio 均一致）。
+    fn assert_entities_match_full_scan(r: &GraphRetriever, query: &str) {
+        let mut actual: Vec<(String, f64)> = r
+            .extract_entities(query)
+            .into_iter()
+            .map(|(name, ratio)| (name.to_string(), ratio))
+            .collect();
+        let mut expected = full_scan_entities(r, query);
+
+        actual.sort_by(|a, b| a.0.cmp(&b.0));
+        expected.sort_by(|a, b| a.0.cmp(&b.0));
+
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "query={query:?} 结果数量不一致: {actual:?} vs {expected:?}"
+        );
+        for (new_item, old_item) in actual.iter().zip(expected.iter()) {
+            assert_eq!(new_item.0, old_item.0, "query={query:?} 实体名不一致");
+            assert!(
+                (new_item.1 - old_item.1).abs() < 1e-9,
+                "query={query:?} 实体 {} 的 ratio 不一致: {} vs {}",
+                new_item.0,
+                new_item.1,
+                old_item.1
+            );
+        }
+    }
+
+    #[test]
+    fn entity_extraction_matches_full_scan() {
+        let r = make_test_retriever();
+        assert!(
+            !r.entity_bigrams.is_empty(),
+            "load 后应建立 bigram 倒排索引"
+        );
+
+        let queries = [
+            "机器学习",
+            "我在做机器学习项目",
+            "Python",
+            "数据清洗与TensorFlow",
+            "Al",
+            "今",
+            "",
+            "吃火锅",
+        ];
+        for query in queries {
+            assert_entities_match_full_scan(&r, query);
+        }
+    }
+
+    #[test]
+    fn extract_entities_single_char_query_matches_full_scan() {
+        let r = make_test_retriever();
+        for query in ["学", "P", "x", ""] {
+            assert_entities_match_full_scan(&r, query);
+        }
+    }
+
+    /// 单字符实体名必须由单字符索引召回，且多字符查询下与全量扫描等价。
+    #[test]
+    fn single_char_entity_indexed_and_matched() {
+        let mut r = GraphRetriever::new();
+        let nodes = vec![
+            (1i64, "A".to_string(), "concept".to_string()),
+            (2, "AB".to_string(), "concept".to_string()),
+            (3, "机器学习".to_string(), "project".to_string()),
+        ];
+        r.load(&nodes, &[]);
+
+        assert_eq!(
+            r.single_char_entities.get(&'A').map(|v| v.len()),
+            Some(1),
+            "单字符实体应进入单字符索引"
+        );
+        for query in ["AB", "A机器", "吃A", "机器学习"] {
+            assert_entities_match_full_scan(&r, query);
+        }
+    }
+
+    /// 同名节点覆盖后索引项不得重复累积，clear 后索引须一并清空。
+    #[test]
+    fn add_node_refreshes_index_without_duplicates() {
+        let mut r = GraphRetriever::new();
+        r.add_node(GraphNode {
+            id: 1,
+            entity_name: "机器学习".to_string(),
+            entity_type: "project".to_string(),
+        });
+        r.add_node(GraphNode {
+            id: 2,
+            entity_name: "机器学习".to_string(),
+            entity_type: "project".to_string(),
+        });
+        assert_eq!(
+            r.entity_bigrams.get(&('机', '器')).map(|v| v.len()),
+            Some(1)
+        );
+
+        r.clear();
+        assert!(r.entity_bigrams.is_empty(), "clear 后 bigram 倒排应清空");
+        assert!(
+            r.single_char_entities.is_empty(),
+            "clear 后单字符索引应清空"
+        );
     }
 }

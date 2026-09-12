@@ -1347,7 +1347,7 @@ async fn progressive_triggered_generates_multiple_l1_in_candidate_pool() {
     );
     assert!(
         saved.last().unwrap().summary.contains("尾部"),
-        "最后一段应覆盖最新对话（封存只摘要尾部）"
+        "最后一段应覆盖最新对话（按 tail_msg_count 切段、全段生成）"
     );
     assert!(
         saved.last().unwrap().continuation.is_some(),
@@ -1428,7 +1428,8 @@ fn progressive_trigger_uses_min_max_span_and_survives_anomalies() {
 }
 
 /// 仅由**时间跨度**触发的完整生成路径：跨 25h 的两簇消息按 10min 间隙切为两段，
-/// 每段独立生成 absorbed=false 的 L1，尾段覆盖最新对话（封存只摘要尾部）。
+/// 每段独立生成 absorbed=false 的 L1（按 `tail_msg_count` 切段、全段生成），
+/// 尾段覆盖最新对话。
 #[tokio::test]
 async fn progressive_span_triggered_path_generates_tail_l1s() {
     use crate::l1::mock::MockLlmProvider;

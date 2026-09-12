@@ -10,7 +10,9 @@
 //!   - 策略② 线索→断言覆盖：将 L1 保真线索（EvidenceNote）提升为断言级候选，
 //!     来源标记 FactSource::L1、置信 0.55（仍 <0.6 走 candidate 轨道）
 //! - 规则兜底（LLM 不可用时的关键词/模板提取，纯函数可测）
-//! - LLM 抽取封装 `FactExtractor`（依赖 LlmProvider，mock 友好）；`build_extract_prompt` 生成模板
+//! - LLM 抽取封装 `FactExtractor`（依赖 LlmProvider，mock 友好；**预留未接线**）：
+//!   生产事实抽取为 `app_fact_extract` 的规则 + embedding 路径（零新增 LLM 调用），
+//!   本封装当前无调用者，待产品裁决；`build_extract_prompt` 生成模板
 //!
 //! 分层归属:
 //! - ProfileField 映射见 `tier.rs`: BasicInfo/Interests/Social/SpeakingStyle → stable，
@@ -383,7 +385,11 @@ pub fn build_extract_prompt(event_text: &str, persona_name: &str) -> String {
 ///
 /// 职责:
 /// - 承载 LLM 抽取的信息收集与 JSON 解析。
-/// - LLM 调用失败时静默降级为规则兜底（`RuleExtractor`），不阻塞主流程。
+/// - LLM 失败由调用方决定降级；本封装不做规则兜底。
+///
+/// 接线状态:
+/// - **预留未接线**: 生产事实抽取为 `app_fact_extract` 的规则 + embedding 路径
+///   （零新增 LLM 调用）；本封装当前无调用者，待产品裁决。
 pub struct FactExtractor<'a> {
     llm: &'a dyn LlmProvider,
     temperature: f64,
@@ -424,6 +430,9 @@ impl<'a> FactExtractor<'a> {
 }
 
 /// 抽取输入（供编排层批量喂入）。
+///
+/// 接线状态:
+/// - **预留未接线**（无使用者）：生产事实抽取未走本输入结构，待产品裁决。
 #[derive(Debug, Clone)]
 pub struct ExtractInput {
     pub events: Vec<MemoryEvent>,

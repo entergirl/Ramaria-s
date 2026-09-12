@@ -796,11 +796,13 @@ mod tests {
     use ramaria_core::types::EventRelationKind;
     use ramaria_core::types::MemoryEvent;
     use ramaria_core::types::Presentation;
-    use ramaria_core::types::now_ms;
+
+    /// 固定测试基准时间（Unix 毫秒），保证用例不依赖真实时钟、连续运行结果一致。
+    const TEST_NOW_MS: i64 = 1_760_000_000_000;
 
     /// 创建测试用 MemoryEvent（最小字段集）。
     fn make_event(id: i64, keywords: &str) -> MemoryEvent {
-        let now = now_ms();
+        let now = TEST_NOW_MS;
         MemoryEvent {
             id,
             persona_uid: "test-persona".into(),

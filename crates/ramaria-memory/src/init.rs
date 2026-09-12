@@ -84,18 +84,25 @@ pub fn resolve_chat_style_rules(config: Option<&str>) -> String {
 /// 字段:
 /// - `assistant_name`: [identity] 节 assistant_name
 /// - `user_name`: [identity] 节 user_name
-/// - `blocks`: [blocks] 节所有键值对
+/// - `description`: [identity] 节 description（可选；背景描述，供对话 prompt 角色层使用）
+/// - `work`: [identity] 节 work（可选；`Anim` 类人格的作品名）
+/// - `era`: [identity] 节 era（可选；`Hist` 类人格的时代/时期名）
+/// - `blocks`: [blocks] 节所有键值对（`A_persona` / `E_rules` / `speaking_style` 等）
 #[derive(Debug, Clone)]
 pub struct PersonaToml {
     pub assistant_name: String,
     pub user_name: String,
+    pub description: Option<String>,
+    pub work: Option<String>,
+    pub era: Option<String>,
     pub blocks: Vec<(String, String)>,
 }
 
 /// 手动解析 persona.toml。
 ///
 /// 支持的格式（简化版 TOML 解析器）:
-/// - `[identity]` 节: key = "value"
+/// - `[identity]` 节: key = "value"（`assistant_name` / `user_name` 必选语义见下；
+///   `description` / `work` / `era` 为可选键，空串按"未设置"处理）
 /// - `[blocks]` 节: key = """...""" 或 key = "..."
 /// - 忽略空行和注释行（以 # 开头）
 ///
@@ -107,6 +114,9 @@ pub struct PersonaToml {
 pub fn parse_persona_toml(content: &str) -> RamariaResult<PersonaToml> {
     let mut assistant_name = String::new();
     let mut user_name = String::new();
+    let mut description: Option<String> = None;
+    let mut work: Option<String> = None;
+    let mut era: Option<String> = None;
     let mut blocks: Vec<(String, String)> = Vec::new();
 
     let mut current_section: Option<String> = None;
@@ -172,6 +182,10 @@ pub fn parse_persona_toml(content: &str) -> RamariaResult<PersonaToml> {
                 Some("identity") => match key.as_str() {
                     "assistant_name" => assistant_name = value,
                     "user_name" => user_name = value,
+                    // 可选键：空串/纯空白按"未设置"处理（避免渲染空背景行/空作品名）
+                    "description" => description = normalize_optional_value(value),
+                    "work" => work = normalize_optional_value(value),
+                    "era" => era = normalize_optional_value(value),
                     _ => debug!(key = %key, "忽略 [identity] 中未知字段"),
                 },
                 Some("blocks") => {
@@ -202,8 +216,21 @@ pub fn parse_persona_toml(content: &str) -> RamariaResult<PersonaToml> {
     Ok(PersonaToml {
         assistant_name,
         user_name,
+        description,
+        work,
+        era,
         blocks,
     })
+}
+
+/// 可选键值归一：去首尾空白后为空 → `None`（调用方据此判断"未设置"）。
+fn normalize_optional_value(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 // =========================================================

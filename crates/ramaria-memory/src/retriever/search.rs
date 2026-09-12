@@ -4,25 +4,23 @@
 //! - 实现统一 `search` 入口，编排 BM25/向量/图谱通道并通过 RRF 融合
 //! - 支持注入关键词镜像命中（KeywordService 在 app 层预取后传入）作为第四通道
 //! - 提供关键词精确检索、脉络加权检索与 BM25 子串检索等专项入口
-//! - 检索结果解析复用 helpers 中的预解析/字符串解析辅助函数
+//! - 检索结果解析复用 helpers 中的文档/label 解析与关键词计数辅助函数
 //!
 //! 融合口径:
-//! - 关键词通道缺席（未注入 / 命中为空 / 开关关闭）时行为与既有三通道完全一致；
-//!   关键词通道有数据时才进入 `rrf_fuse_with_keyword` 四通道融合。
+//! - 四通道（向量 / BM25 / 图谱 / 关键词镜像）统一经 `rrf_fuse_optional` 融合；
+//!   通道缺席（未启用 / 无结果 / 未注入）不产生贡献项，权重按通道身份取值。
 //! - 关键词命中以 `(label, score)` 纯数据形式注入：label 复用向量通道
 //!   `L1:{uuid}` / `L2:{id}` 格式，经既有 `parse_doc_label` 解析，无句柄泄漏。
 
 use crate::bm25::DocId;
 use crate::decay::{DecayConfig, calc_retention};
 use crate::graph_retriever::graph_hits_to_rrf_pairs;
-use crate::rrf::{ChannelResult, FusedResult, rrf_fuse};
+use crate::rrf::{ChannelResult, FusedResult, OptionalChannels, rrf_fuse_optional};
 use crate::vector::{VectorHit, VectorIndex};
 use ramaria_core::keyword::KeywordToken;
 
 use super::Retriever;
-use super::helpers::{
-    Bm25Resolved, count_keyword_matches, parse_doc_label, parse_graph_label, resolve_bm25_doc,
-};
+use super::helpers::{count_keyword_matches, parse_doc_label, parse_graph_label, resolve_bm25_doc};
 use super::types::{L1DocView, SearchRequest, SearchResult};
 
 impl Retriever {
@@ -30,7 +28,8 @@ impl Retriever {
     ///
     /// 说明:
     /// - 等价于 `search_with_keyword_hits(request, query_vec, None)`：
-    ///   仅 BM25 + 向量 + 图谱三通道融合，行为与上一版本完全一致。
+    ///   关键词镜像通道缺席，BM25 + 向量 + 图谱按启用情况参与统一融合入口，
+    ///   缺席通道不产生贡献项，行为语义与既有三通道一致。
     /// - 调用方如需关键词镜像作为第四通道，请改用 `search_with_keyword_hits`。
     ///
     /// 参数:
@@ -44,10 +43,9 @@ impl Retriever {
     ///
     /// 流程:
     /// 1. 各通道独立检索（BM25/向量/图谱 + 可选注入的关键词镜像命中）
-    /// 2. BM25 通道同时预解析 DocId→文档数据映射（避免后续 label 往返解析）
-    /// 3. 将结果转为统一的 ChannelResult<String> （label 作为 key）
-    /// 4. RRF 融合（关键词通道有数据时四通道融合；否则维持三通道既有语义）
-    /// 5. 将融合后的 label 解析为 SearchResult（BM25 用预解析缓存，图谱用字符串解析）
+    /// 2. 各通道结果转为统一的 ChannelResult<String>（label 作为 key）
+    /// 3. RRF 统一融合（通道可选、按通道身份取权重、缺席不产生贡献项）
+    /// 4. 融合截断后解析 label 为 SearchResult（文档已被移除则跳过）
     ///
     /// 参数:
     /// - `request`: 检索请求
@@ -60,26 +58,25 @@ impl Retriever {
         query_vec: Option<&[f32]>,
         keyword_hits: Option<Vec<(String, f64)>>,
     ) -> Vec<SearchResult> {
-        use std::collections::HashMap;
-
-        // 预解析缓存：BM25 label → 文档数据（避免 label 字符串往返解析）
-        let mut bm25_data: HashMap<String, Bm25Resolved> = HashMap::new();
-
         // ---- BM25 通道 ----
+        // 只取融合所需的候选量：按 request.top_k 的固定倍数超取（下限 64），
+        // 避免对全库命中逐条构造 label 与解析文档；label 解析延后到融合截断之后。
+        const BM25_OVERFETCH_MULTIPLIER: usize = 8;
+        const BM25_MIN_LIMIT: usize = 64;
         let bm25_channel = if self.config.enable_bm25 {
-            let raw_results = self.bm25_index.search(&request.query, &self.config.bm25);
+            let limit = request
+                .top_k
+                .saturating_mul(BM25_OVERFETCH_MULTIPLIER)
+                .max(BM25_MIN_LIMIT);
+            let raw_results =
+                self.bm25_index
+                    .search_limited(&request.query, &self.config.bm25, limit);
             if raw_results.is_empty() {
                 None
             } else {
                 let results: Vec<(String, f64)> = raw_results
                     .into_iter()
-                    .map(|(doc_id, score)| {
-                        let label = doc_id.to_string();
-                        // 预解析文档数据，避免后续 parse_doc_label 中的 UUID 解析开销
-                        let doc_data = resolve_bm25_doc(&doc_id, &self.l1_docs, &self.l2_docs);
-                        bm25_data.insert(label.clone(), doc_data);
-                        (label, score)
-                    })
+                    .map(|(doc_id, score)| (doc_id.to_string(), score))
                     .collect();
                 Some(ChannelResult { results })
             }
@@ -137,75 +134,37 @@ impl Retriever {
         };
 
         // ---- RRF 融合 ----
-        // 关键词通道缺席 → 维持既有单/双/三通道 match（行为不变）；
-        // 关键词通道有数据 → 四通道融合（关键词命中为相关文档追加 keyword_weight 项）。
-        let fused: Vec<FusedResult<String>> = if let Some(keyword) = &keyword_channel {
-            crate::rrf::rrf_fuse_with_keyword(
-                vector_channel.as_ref(),
-                bm25_channel.as_ref(),
-                graph_channel.as_ref(),
-                keyword,
-                &self.config.rrf,
-            )
-            .into_iter()
-            .take(request.top_k)
-            .collect()
-        } else {
-            match (&vector_channel, &bm25_channel, &graph_channel) {
-                (None, None, None) => return Vec::new(),
-                (Some(v), None, None) => crate::rrf::rrf_single_channel(v, &self.config.rrf)
-                    .into_iter()
-                    .take(request.top_k)
-                    .collect(),
-                (None, Some(b), None) => crate::rrf::rrf_single_channel(b, &self.config.rrf)
-                    .into_iter()
-                    .take(request.top_k)
-                    .collect(),
-                (None, None, Some(g)) => crate::rrf::rrf_single_channel(g, &self.config.rrf)
-                    .into_iter()
-                    .take(request.top_k)
-                    .collect(),
-                (Some(v), Some(b), None) => crate::rrf::rrf_two_channels(v, b, &self.config.rrf)
-                    .into_iter()
-                    .take(request.top_k)
-                    .collect(),
-                (Some(v), None, Some(g)) => crate::rrf::rrf_two_channels(v, g, &self.config.rrf)
-                    .into_iter()
-                    .take(request.top_k)
-                    .collect(),
-                (None, Some(b), Some(g)) => crate::rrf::rrf_two_channels(b, g, &self.config.rrf)
-                    .into_iter()
-                    .take(request.top_k)
-                    .collect(),
-                (Some(v), Some(b), Some(g)) => rrf_fuse(v, b, g, &self.config.rrf)
-                    .into_iter()
-                    .take(request.top_k)
-                    .collect(),
-            }
-        };
+        // 通道缺席不产生惩罚项；权重按通道身份取值（修复"向量缺席时图谱按 bm25_weight 计权"）。
+        // 融合阶段即按本次请求的 top_k 截断：否则 RrfConfig 的默认 top_k（5）会把
+        // core 配置的 l1_retrieve_top_k（如 12）静默截断。
+        let mut rrf_config = self.config.rrf.clone();
+        rrf_config.top_k = request.top_k;
+
+        let fused: Vec<FusedResult<String>> = rrf_fuse_optional(
+            &OptionalChannels {
+                vector: vector_channel.as_ref(),
+                bm25: bm25_channel.as_ref(),
+                graph: graph_channel.as_ref(),
+                keyword: keyword_channel.as_ref(),
+            },
+            &rrf_config,
+        );
+        if fused.is_empty() {
+            return Vec::new();
+        }
 
         // ---- 解析为 SearchResult ----
         let mut results: Vec<SearchResult> = Vec::with_capacity(fused.len());
 
         for f in &fused {
-            // 优先从 BM25 预解析缓存获取（避免 label 字符串往返解析）
+            // 图谱实体 label（`graph:{entity}`）优先解析；BM25 与向量通道共用
+            // `L1:{uuid}` / `L2:{id}` label 格式，解析统一由 `parse_doc_label` 承担；
+            // 文档已被移除则跳过。
             let (doc_id, persona_uid, share, created_at, last_accessed_at, summary, layer) =
-                if let Some(data) = bm25_data.get(&f.doc_id) {
-                    (
-                        data.doc_id.clone(),
-                        data.persona_uid.clone(),
-                        data.share,
-                        data.created_at,
-                        data.last_accessed_at,
-                        data.summary.clone(),
-                        data.layer.clone(),
-                    )
-                } else if let Some(data) = parse_graph_label(&f.doc_id) {
+                if let Some(data) = parse_graph_label(&f.doc_id) {
                     // 图谱实体：实体名作为摘要
                     data
                 } else {
-                    // 可能是向量通道产生的 label（L1:uuid 或 L2:id 格式）
-                    // 仍需字符串解析，但仅为向量通道结果
                     match parse_doc_label(&f.doc_id, &self.l1_docs, &self.l2_docs) {
                         Some((did, puid, sh, ca, la, sum)) => {
                             let lyr = match &did {
@@ -381,19 +340,7 @@ impl Retriever {
             .collect()
     }
 
-    /// 基于 BM25 的子串匹配检索。
-    ///
-    /// 用法:
-    /// - 将查询文本委托给 BM25 索引做 bigram 分词检索，
-    ///   实现子串级别的文本匹配（中文以双字 bigram 为单位）。
-    ///
-    /// 参数:
-    /// - `query`: 查询文本（如关键词拼接字符串）。
-    /// - `persona_uid`: 目标人格 UID（空字符串表示不过滤）。
-    /// - `top_k`: 最大返回结果数。
-    ///
-    /// 返回:
-    /// 脉络加权检索（v1.7 B4，决策 D-V17-006）。
+    /// 基于话题相关性与时间衰减的脉络加权检索。
     ///
     /// 用途:
     /// - 替代跨会话注入中"无条件取最近 N 条"（`list_recent_l1_by_persona`）：
@@ -407,7 +354,7 @@ impl Retriever {
     ///
     /// 兜底:
     /// - 查询为空或 BM25 无相关性命中 → 按 `created_at` 降序回退最近 N 条，
-    ///   与 v1.6"无条件取最近几条"语义等价（不丢脉络）。
+    ///   与既有"无条件取最近几条"语义等价（不丢脉络）。
     /// - 目标 persona 无 L1 → 空列表。
     ///
     /// 参数:
@@ -500,6 +447,18 @@ impl Retriever {
             .collect()
     }
 
+    /// 基于 BM25 的子串匹配检索。
+    ///
+    /// 用法:
+    /// - 将查询文本委托给 BM25 索引做 bigram 分词检索，
+    ///   实现子串级别的文本匹配（中文以双字 bigram 为单位）。
+    ///
+    /// 参数:
+    /// - `query`: 查询文本（如关键词拼接字符串）。
+    /// - `persona_uid`: 目标人格 UID（空字符串表示不过滤）。
+    /// - `top_k`: 最大返回结果数。
+    ///
+    /// 返回:
     /// - 按 BM25 评分降序排列的 SearchResult 列表，最多 top_k 条。
     ///
     /// 说明:
@@ -556,7 +515,7 @@ impl Retriever {
             }
 
             results.push(SearchResult {
-                doc_id,
+                doc_id: doc_data.doc_id,
                 layer: doc_data.layer,
                 rrf_score: bm25_score, // BM25 原始分数作为排名分数
                 bm25_score: Some(bm25_score),

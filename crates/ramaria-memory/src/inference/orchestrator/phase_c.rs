@@ -577,6 +577,9 @@ mod tests {
     use ramaria_core::types::{ClusterSnapshot, MemoryEvent, Persona, PersonaKind, Presentation};
     use ramaria_storage::SqliteStorage;
 
+    /// 固定测试基准时间（Unix 毫秒），保证用例不依赖真实时钟、连续运行结果一致。
+    const TEST_NOW_MS: i64 = 1_760_000_000_000;
+
     /// 创建内存 SQLite 存储（跑 2.0 基线 migration，外键约束开启）。
     async fn mem_storage() -> SqliteStorage {
         let options = sqlx::sqlite::SqliteConnectOptions::new()
@@ -624,7 +627,7 @@ mod tests {
 
     /// 构造测试事件：keywords 首标签即分类，valence/share/confidence/salience 由参数给定。
     fn make_event(id: i64, keywords: &str, valence: f64, share: f64) -> MemoryEvent {
-        let now = now_ms();
+        let now = TEST_NOW_MS;
         let mut ev = MemoryEvent::new(
             "persona-drift".into(),
             format!("事件 {id}"),
@@ -652,7 +655,7 @@ mod tests {
             samples: Some(samples),
             count: 10,
             is_current: true,
-            created_at: now_ms(),
+            created_at: TEST_NOW_MS,
             semantic_label: None,
             semantic_label_embedding: None,
         };
@@ -857,8 +860,8 @@ mod tests {
             evidence: 1.0,
             consistency: 0.5,
             status: ramaria_core::types::TraitStatus::Active,
-            created_at: now_ms(),
-            updated_at: now_ms(),
+            created_at: TEST_NOW_MS,
+            updated_at: TEST_NOW_MS,
         };
 
         let result = run_phase_c_update(

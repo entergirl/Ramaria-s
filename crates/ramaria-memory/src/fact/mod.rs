@@ -10,12 +10,14 @@
 //!   - extractor: 策略① 隐含事实按字段补全、策略② L1 保真线索→断言候选
 //!   - arbitration: 策略③ 候选互证提升判定（关键词交集降级，纯内存）
 //! - 规则判定器检索注入: 零新增 LLM 调用，不命中不注入（静默降级）
+//! - 生产事实抽取走 `app_fact_extract` 的规则 + embedding 路径（零新增 LLM 调用）；
+//!   `FactExtractor` LLM 抽取封装为预留未接线路径，待产品裁决
 //!
 //! 模块组织:
 //! - `dedup.rs`: 判重（纯逻辑，mock embedding 确定测试）
 //! - `tier.rs`: 分层决策 + 时效衰减
 //! - `arbitration.rs`: 冲突仲裁 + 候选互证提升（互证/优先级/矛盾保护）
-//! - `extractor.rs`: 事实抽取（规则兜底 + LLM 可选）+ 增强策略①/②
+//! - `extractor.rs`: 事实抽取（规则路径为生产主路径；LLM 封装为预留未接线）+ 增强策略①/②
 //! - `retriever.rs`: 规则判定器 + 同 field/向量召回 + 注入文本构造
 
 pub mod arbitration;

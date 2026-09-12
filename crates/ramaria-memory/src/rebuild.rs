@@ -1,19 +1,22 @@
 //! crates/ramaria-memory/src/rebuild.rs - Ramaria 索引重建编排器
 //!
 //! 设计特点:
-//! - 编排 BM25 + 向量 + 图谱三通道索引的全量重建
+//! - 编排 BM25 与图谱索引的全量重建（不含向量索引）
 //! - 通过 Retriever 持有各通道索引，调用方注入预加载的文档数据
-//! - 支持增量重建（仅重建指定通道）和全量重建
+//! - 支持按通道重建（仅重建指定通道）和全量重建
 //! - 不直接访问数据库——所有数据由调用方通过参数注入
 //! - 记录文档数量、耗时等观测指标
 //!
-//! 全量重建管线（README 核心特性）；v1.6 核查 desktop index 命令接线
+//! 预留未接线：当前生产重建路径在 app 层（清空 Retriever 后重新写入索引），本模块保留供离线/工具路径复用。
 //!
 //! 重建流程:
 //! 1. 清空 Retriever 全部索引（clear）
-//! 2. 逐条加载 L1/L2 文档到 Retriever（触发 BM25 + 向量索引）
+//! 2. 逐条加载 L1/L2 文档到 Retriever（重建 BM25 索引与内存文档映射）
 //! 3. 加载图谱节点和边到 GraphRetriever
 //! 4. 返回重建统计（文档数、节点数、边数、耗时）
+//!
+//! 边界说明:
+//! - 向量索引不在本模块重建范围：`index_l1`/`index_l2` 不写向量，向量需由调用方在 embedding 可用时另行写入。
 
 use crate::graph_retriever::GraphRetriever;
 use crate::retriever::{L1DocView, L2DocView, Retriever};
@@ -26,12 +29,12 @@ use tracing::{debug, info, warn};
 /// 索引重建配置。
 ///
 /// 字段约定:
-/// - `rebuild_bm25`: 是否重建 BM25 索引，默认 true。
+/// - `rebuild_bm25`: 是否重建 BM25 索引，默认 true；false 时仅加载文档映射（不构建 BM25 索引），完成后恢复原开关。
 /// - `rebuild_graph`: 是否重建图谱索引，默认 true。
 /// - `batch_log_interval`: 每处理多少条文档记录一次进度日志，默认 100。
 #[derive(Debug, Clone)]
 pub struct RebuildConfig {
-    /// 是否重建 BM25 索引
+    /// 是否重建 BM25 索引；false 时仅加载文档映射（不构建 BM25 索引），完成后恢复原开关
     pub rebuild_bm25: bool,
     /// 是否重建图谱索引
     pub rebuild_graph: bool,
@@ -88,6 +91,9 @@ impl std::fmt::Display for RebuildStats {
 /// - 管理 Retriever 的索引生命周期（清空→重载→统计）
 /// - 支持仅重建指定通道（BM25 / 图谱）
 ///
+/// 接线状态:
+/// - 当前无生产调用者（预留未接线），生产重建在 app 层完成。
+///
 /// 用法:
 /// ```
 /// use ramaria_memory::{IndexRebuilder, RebuildConfig, Retriever};
@@ -129,6 +135,10 @@ impl IndexRebuilder {
     ///
     /// 返回:
     /// - `RebuildStats`: 重建统计信息。
+    ///
+    /// 说明:
+    /// - 只重建 BM25 与图谱索引；不处理向量索引（见模块头边界说明）。
+    /// - `rebuild_bm25=false` 时临时禁用 BM25 通道，仅加载文档映射，加载结束后恢复原开关。
     pub fn rebuild_all(
         &mut self,
         retriever: &mut Retriever,

@@ -8,18 +8,18 @@
 //! - 激活 motives 字段写入 + event_relations 表写入
 //! - 触发条件: 未吸收 L1 ≥ 5 条 或 最早未吸收 L1 ≥ 7 天
 //! - TopicBatcher 将未吸收 L1 聚类为 TopicCluster，每簇独立调用 LLM 提取事件
-//! - 降级兜底: JSON 解析失败 → 退化为 confidence=0.5 混合事件
-//! - 事件写入后自动生成 paraphrase（attitude 存在且非空时）
-//! - 成功后批量标记 L1 为 absorbed + 写入 event_sources + event_relations
+//! - 降级兜底: LLM 调用失败或 JSON 解析失败 → 退化为低置信混合事件
+//! - 事件写入前自动生成 paraphrase（attitude 存在且非空时）
+//! - 全流程收集事件 / 来源 / 关系后在单事务内写入并标记 L1 吸收（任一步失败整体回滚）
 //! - 所有可恢复错误转换为 RamariaError，保留上下文
 
 use ramaria_core::traits::ChatRequest;
 use ramaria_core::types::now_ms;
 use ramaria_core::{
-    EventRelation, LlmProviderTrait, MemoryEvent, MemoryL1, RamariaError, RamariaResult,
-    StorageBackend,
+    EventBatchWrite, EventRelationKind, LlmProviderTrait, MemoryEvent, MemoryL1, RamariaError,
+    RamariaResult, StorageBackend,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use super::batcher::{L1Item, TopicBatcher, TopicBatcherConfig, TopicCluster};
@@ -190,24 +190,26 @@ impl<'a> EventExtractor<'a> {
     /// 流程:
     /// 1. 检查触发条件
     /// 2. 如果不满足触发条件，静默返回空 Vec
-    /// 3. 读取未吸收 L1，按 chat_partners 分组
-    /// 4. 截断到 batch 上限，格式化 L1 摘要列表
-    /// 5. 调用 LLM 提取事件
-    /// 6. 解析 JSON → 构建 MemoryEvent 列表
-    /// 7. 对每个事件: 生成 paraphrase（如果有 attitude）
-    /// 8. 写入事件 + event_sources
-    /// 9. 标记 L1 为 absorbed
+    /// 3. 读取未吸收 L1 并通过 TopicBatcher 语义聚类
+    /// 4. 对每个簇调用 LLM 提取事件（失败/解析失败时降级为低置信混合事件）
+    /// 5. 解析 JSON → 构建 MemoryEvent 列表（含 paraphrase 生成与相似度去重）
+    /// 6. 收集事件 + 来源链接 + 事件关系 + 待吸收 L1
+    /// 7. 单事务写入批次（事件 + 来源 + 关系 + L1 吸收标记）
     ///
     /// 注意:
-    /// - `event_relations` 写入已实现（v1.3，6 种关系类型提取，见 `save_cluster_relations`）。
-    ///   写入条件：LLM 返回 relations 且本簇事件数 ≥ 2；索引越界/自引用/写失败均降级 warn 不阻塞。
+    /// - `event_relations` 映射见 `map_cluster_relations`（6 种关系类型）。
+    ///   映射条件：LLM 返回 relations 且本簇已保存事件数 ≥ 2；
+    ///   索引越界/端点被相似度去重跳过/自引用均丢弃，不错误连边。
+    /// - 批次写入为全事务语义（`StorageBackend::save_event_batch`）：
+    ///   任一环节失败整体回滚并上抛，上层重试不会产生半批数据。
     ///
     /// 参数:
     /// - `persona_uid`: 分析对象的人格标识。传空字符串表示分析默认用户。
     ///
     /// 返回:
-    /// - 成功时返回提取的事件列表（可能为空）。
-    /// - LLM 调用失败时返回错误（上层应重试或降级）。
+    /// - 成功时返回提取的事件列表（可能为空；事件 id 已回填）。
+    /// - LLM 调用失败时返回错误（上层应重试或降级）；
+    ///   批次写入失败时整体回滚并返回错误。
     pub async fn extract_events(&mut self, persona_uid: &str) -> RamariaResult<Vec<MemoryEvent>> {
         // 1. 检查触发条件
         if !self.should_trigger(persona_uid).await? {
@@ -304,8 +306,10 @@ impl<'a> EventExtractor<'a> {
             "TopicBatcher 聚类完成"
         );
 
-        // 4. 对每个簇独立调用 LLM 提取事件
-        let mut all_events: Vec<MemoryEvent> = Vec::new();
+        // 4. 对每个簇独立调用 LLM 提取事件。
+        // 循环内只累积，不写库；循环结束后以单事务写入批次（失败整体回滚）。
+        // 下标约定: sources / relations 的下标均指向 batch.events 位置。
+        let mut batch = EventBatchWrite::default();
         let mut all_l1_ids: Vec<Uuid> = Vec::new();
 
         // 4.0 相似度去重事件池（v1.5）：取 persona 最近 N 条已有事件，
@@ -394,8 +398,13 @@ impl<'a> EventExtractor<'a> {
                 Err(e) => {
                     warn!(%persona_uid, %request_id, cluster_idx = ci, error=%e,
                         "簇 {} LLM 调用失败，触发降级", ci);
-                    let events = self.degrade_cluster(persona_uid, &cluster_l1).await?;
-                    all_events.extend(events);
+                    let (degraded_event, degraded_sources) =
+                        self.degrade_cluster(persona_uid, &cluster_l1);
+                    let batch_index = batch.events.len();
+                    batch.events.push(degraded_event);
+                    for (l1_id, weight) in degraded_sources {
+                        batch.sources.push((batch_index, l1_id, weight));
+                    }
                     all_l1_ids.extend(cluster_l1_ids);
                     continue;
                 }
@@ -411,8 +420,13 @@ impl<'a> EventExtractor<'a> {
                 Ok(result) if !result.events.is_empty() => result,
                 Ok(_) | Err(_) => {
                     warn!(%persona_uid, cluster_idx = ci, "簇 {} JSON 解析/空结果，触发降级", ci);
-                    let events = self.degrade_cluster(persona_uid, &cluster_l1).await?;
-                    all_events.extend(events);
+                    let (degraded_event, degraded_sources) =
+                        self.degrade_cluster(persona_uid, &cluster_l1);
+                    let batch_index = batch.events.len();
+                    batch.events.push(degraded_event);
+                    for (l1_id, weight) in degraded_sources {
+                        batch.sources.push((batch_index, l1_id, weight));
+                    }
                     all_l1_ids.extend(cluster_l1_ids);
                     continue;
                 }
@@ -454,11 +468,12 @@ impl<'a> EventExtractor<'a> {
                 }
             };
 
-            // 构建 MemoryEvent 并保存。
-            // saved_by_position 与"提取后事件数组"等长、逐位置记录实际 DB id：
-            // 相似度去重跳过的位置保持 None，供 relations 按 LLM 输出位置正确映射
-            // （见 `remap_relation`，避免压缩保存列表下标把关系连到错误事件）。
-            let mut saved_by_position: Vec<Option<i64>> = vec![None; extracted.len()];
+            // 构建 MemoryEvent 并累积到批次。
+            // batch_index_by_position 与"提取后事件数组"等长、逐位置记录事件在
+            // batch.events 中的下标：相似度去重跳过的位置保持 None，
+            // 供 relations 按 LLM 输出位置正确映射（见 `map_cluster_relations`，
+            // 避免压缩后的批次下标把关系连到错误事件）。
+            let mut batch_index_by_position: Vec<Option<usize>> = vec![None; extracted.len()];
             for (position, ej) in extracted.into_iter().enumerate() {
                 let mut event = Self::build_event(
                     persona_uid,
@@ -498,43 +513,34 @@ impl<'a> EventExtractor<'a> {
                     event.paraphrase = paraphrase;
                 }
 
-                let event_id = self.storage.save_event(&event).await.map_err(|e| {
-                    warn!(%persona_uid, error=%e, "写入 memory_event 失败");
-                    RamariaError::storage(format!("写入事件失败: {e}"))
-                })?;
-                event.id = event_id;
-                saved_by_position[position] = Some(event_id);
-                all_events.push(event.clone());
+                // 累积事件与来源（写入由循环结束后的单事务完成）
+                let batch_index = batch.events.len();
+                batch.events.push(event);
+                batch_index_by_position[position] = Some(batch_index);
 
-                // event_sources
+                // event_sources：簇内每条 L1 对该事件等权
                 for l1 in &cluster_l1 {
                     let weight = 1.0 / cluster_size as f64;
-                    if let Err(e) = self
-                        .storage
-                        .save_event_source(event_id, l1.id, weight)
-                        .await
-                    {
-                        warn!(%event_id, l1_id = %l1.id, error=%e,
-                            "写入 event_source 失败（非致命）");
-                    }
+                    batch.sources.push((batch_index, l1.id, weight));
                 }
             }
 
-            // 写入事件关系（按 LLM 输出位置映射到实际保存事件；
+            // 收集事件关系（按 LLM 输出位置映射到批次下标；
             // 端点被相似度去重跳过的关系丢弃，不错误连边）。
-            let saved_position_count = saved_by_position.iter().flatten().count();
+            let batch_position_count = batch_index_by_position.iter().flatten().count();
             if let Some(ref rels) = relations
                 && !rels.is_empty()
-                && saved_position_count >= 2
+                && batch_position_count >= 2
             {
-                let saved_count = self
-                    .save_cluster_relations(rels, &saved_by_position, persona_uid, ci)
-                    .await;
+                let mapped =
+                    Self::map_cluster_relations(rels, &batch_index_by_position, persona_uid, ci);
+                let mapped_count = mapped.len();
+                batch.relations.extend(mapped);
                 debug!(
                     %persona_uid,
                     cluster_idx = ci,
-                    saved_relation_count = saved_count,
-                    "事件关系写入完成"
+                    mapped_relation_count = mapped_count,
+                    "事件关系映射完成（随批次统一写入）"
                 );
             }
 
@@ -550,11 +556,34 @@ impl<'a> EventExtractor<'a> {
             .await;
         }
 
-        // 5. 批量标记 L1 为 absorbed
-        if !all_l1_ids.is_empty()
-            && let Err(e) = self.storage.mark_l1_absorbed(&all_l1_ids).await
-        {
-            warn!(%persona_uid, error=%e, "标记 L1 absorbed 失败（非致命）");
+        // 5. 单事务写入批次（事件 + 来源 + 关系 + L1 吸收标记）。
+        // 任一环节失败整体回滚并上抛：上层重试不会留下半批数据。
+        let absorbed_l1_count = all_l1_ids.len();
+        batch.absorbed_l1_ids = all_l1_ids;
+
+        let event_ids = self.storage.save_event_batch(&batch).await.map_err(|e| {
+            error!(%persona_uid, error = %e, "事件批次写入失败（整体回滚）");
+            RamariaError::storage(format!("写入事件批次失败: {e}"))
+        })?;
+
+        info!(
+            %persona_uid,
+            event_count = batch.events.len(),
+            source_count = batch.sources.len(),
+            relation_count = batch.relations.len(),
+            absorbed_l1_count,
+            "事件批次写入完成（单事务）"
+        );
+
+        // 用返回 id 回填事件（顺序与 batch.events 一致）
+        let mut all_events = batch.events;
+        debug_assert_eq!(
+            all_events.len(),
+            event_ids.len(),
+            "批次返回 id 数应与事件数一致"
+        );
+        for (event, id) in all_events.iter_mut().zip(event_ids.iter()) {
+            event.id = *id;
         }
 
         // 5.5 无产出登记指纹（v1.5）：
@@ -565,7 +594,7 @@ impl<'a> EventExtractor<'a> {
         info!(
             %persona_uid,
             event_count = all_events.len(),
-            absorbed_l1 = all_l1_ids.len(),
+            absorbed_l1 = absorbed_l1_count,
             dedup_skipped,
             truncated_events,
             "事件提取完成"
@@ -612,36 +641,28 @@ impl<'a> EventExtractor<'a> {
         }
     }
 
-    /// 对单个簇执行降级处理。
-    async fn degrade_cluster(
+    /// 单簇降级计算（纯计算，不写库）。
+    ///
+    /// 说明:
+    /// - 返回的降级事件与来源权重由调用方累积进 `EventBatchWrite`，
+    ///   随整批在单事务内写入；事件 id 由存储层在批次事务内回填。
+    ///
+    /// 返回:
+    /// - `(降级事件, 该簇 L1 及其来源权重列表)`。
+    fn degrade_cluster(
         &self,
         persona_uid: &str,
         l1_batch: &[&MemoryL1],
-    ) -> RamariaResult<Vec<MemoryEvent>> {
+    ) -> (MemoryEvent, Vec<(Uuid, f64)>) {
         let l1_owned: Vec<MemoryL1> = l1_batch.iter().map(|l| (*l).clone()).collect();
         let event = build_degraded_event(persona_uid, &l1_owned, &self.config.degrade);
-
-        let event_id = self
-            .storage
-            .save_event(&event)
-            .await
-            .map_err(|e| RamariaError::storage(format!("写入降级事件失败: {e}")))?;
-
-        let mut saved_event = event;
-        saved_event.id = event_id;
-
-        for l1 in l1_batch {
-            let weight = 1.0 / l1_batch.len() as f64;
-            if let Err(e) = self
-                .storage
-                .save_event_source(event_id, l1.id, weight)
-                .await
-            {
-                warn!(%event_id, l1_id = %l1.id, error=%e, "降级: event_source 写入失败（非致命）");
-            }
-        }
-
-        Ok(vec![saved_event])
+        let weight = if l1_batch.is_empty() {
+            0.0
+        } else {
+            1.0 / l1_batch.len() as f64
+        };
+        let sources = l1_batch.iter().map(|l1| (l1.id, weight)).collect();
+        (event, sources)
     }
 
     // =========================================================
@@ -699,66 +720,42 @@ impl<'a> EventExtractor<'a> {
         Ok(false)
     }
 
-    /// 将 LLM 返回的事件关系写入 event_relations 表。
+    /// 将 LLM 返回的事件关系映射为批次下标关系列表（纯计算，不写库）。
     ///
     /// 参数:
     /// - `rels`: LLM 输出的关系列表（from_index/to_index 引用提取结果 events 数组位置）。
-    /// - `saved_by_position`: 与提取结果等长的并行数组，记录每个位置对应的实际 DB id；
-    ///   相似度去重跳过/保存失败的位置为 `None`。
+    /// - `batch_index_by_position`: 与提取结果等长的并行数组，记录每个位置对应的事件
+    ///   在批次数组中的下标；相似度去重跳过/未保存的位置为 `None`。
     /// - `persona_uid`: 人格标识（用于日志）。
     /// - `cluster_idx`: 簇索引（用于日志）。
     ///
     /// 说明:
-    /// - LLM 的索引引用"提取结果数组"位置，而不是"实际保存列表"位置。
-    ///   若按压缩后的保存列表直接取下标，相似度去重跳过后会把关系连到错误事件，
-    ///   故统一经 `remap_relation` 按位置解析实际端点（越界/未保存/自引用均丢弃）。
+    /// - LLM 的索引引用"提取结果数组"位置，而不是"批次数组"位置。
+    ///   若按压缩后的批次列表直接取下标，相似度去重跳过后会把关系连到错误事件，
+    ///   故统一经 `remap_relation` 按位置解析（越界/未保存/自引用均丢弃）。
+    /// - 映射结果由调用方追加到 `EventBatchWrite.relations`，随整批单事务写入。
     ///
     /// 返回:
-    /// - 成功写入的关系数量。
-    async fn save_cluster_relations(
-        &self,
+    /// - 成功映射的关系列表（from/to 均为批次数组下标）。
+    fn map_cluster_relations(
         rels: &[EventRelationOutput],
-        saved_by_position: &[Option<i64>],
+        batch_index_by_position: &[Option<usize>],
         persona_uid: &str,
         cluster_idx: usize,
-    ) -> usize {
-        let mut saved_count: usize = 0;
+    ) -> Vec<(usize, usize, EventRelationKind, f64)> {
+        let mut mapped: Vec<(usize, usize, EventRelationKind, f64)> = Vec::new();
         let mut dropped_count: usize = 0;
-        let now = now_ms();
 
         for rel in rels {
-            // 位置 → 实际 DB id；端点越界/未保存/自引用返回 None → 丢弃
-            let Some((from_id, to_id)) = Self::remap_relation(rel, saved_by_position) else {
+            // 位置 → 批次下标；端点越界/未保存/自引用返回 None → 丢弃
+            let Some((from_idx, to_idx)) = Self::remap_relation(rel, batch_index_by_position)
+            else {
                 dropped_count += 1;
                 continue;
             };
 
             let kind = parse_relation_kind(&rel.kind);
-            let event_rel = EventRelation {
-                id: 0,
-                from_id,
-                to_id,
-                kind,
-                weight: rel.weight.clamp(0.0, 1.0),
-                created_at: now,
-            };
-
-            match self.storage.save_event_relation(&event_rel).await {
-                Ok(_) => {
-                    saved_count += 1;
-                }
-                Err(e) => {
-                    warn!(
-                        %persona_uid,
-                        cluster_idx,
-                        from_id,
-                        to_id,
-                        kind = %event_rel.kind.as_str(),
-                        error = %e,
-                        "写入 event_relation 失败（非致命）"
-                    );
-                }
-            }
+            mapped.push((from_idx, to_idx, kind, rel.weight.clamp(0.0, 1.0)));
         }
 
         if dropped_count > 0 {
@@ -770,29 +767,35 @@ impl<'a> EventExtractor<'a> {
             );
         }
 
-        saved_count
+        mapped
     }
 
-    /// 将单条 LLM 关系引用映射为实际保存事件的 DB id 对。
+    /// 将单条 LLM 关系引用映射为批次数组下标对。
     ///
     /// 参数:
     /// - `rel`: LLM 输出的关系（from_index/to_index 引用提取结果 events 数组位置）。
-    /// - `saved_by_position`: 与提取结果等长的并行数组，记录每个位置的实际 DB id，
-    ///   被相似度去重跳过/未保存的位置为 `None`。
+    /// - `batch_index_by_position`: 与提取结果等长的并行数组，记录每个位置对应的
+    ///   批次下标，被相似度去重跳过/未保存的位置为 `None`。
     ///
     /// 返回:
-    /// - `Some((from_id, to_id))`: 两端点均已保存且非自引用。
+    /// - `Some((from_idx, to_idx))`: 两端点均已进入批次且非自引用。
     /// - `None`: 端点越界、端点未保存或自引用——调用方应丢弃该关系。
     fn remap_relation(
         rel: &EventRelationOutput,
-        saved_by_position: &[Option<i64>],
-    ) -> Option<(i64, i64)> {
-        let from_id = saved_by_position.get(rel.from_index).copied().flatten()?;
-        let to_id = saved_by_position.get(rel.to_index).copied().flatten()?;
-        if from_id == to_id {
+        batch_index_by_position: &[Option<usize>],
+    ) -> Option<(usize, usize)> {
+        let from_idx = batch_index_by_position
+            .get(rel.from_index)
+            .copied()
+            .flatten()?;
+        let to_idx = batch_index_by_position
+            .get(rel.to_index)
+            .copied()
+            .flatten()?;
+        if from_idx == to_idx {
             return None;
         }
-        Some((from_id, to_id))
+        Some((from_idx, to_idx))
     }
 
     /// 从 TopicCluster 格式化 L1 摘要列表。

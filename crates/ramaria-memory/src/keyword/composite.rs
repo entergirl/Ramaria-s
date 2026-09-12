@@ -432,16 +432,20 @@ mod tests {
     use ramaria_core::keyword::{KeywordQuery, KeywordToken};
     use std::collections::HashMap;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     const NOW_MS: i64 = 2_000_000_000_000;
 
     /// 测试用确定性 mock embedding provider。
     ///
     /// 向量由文本哈希生成：同词必同向量、不同词向量正交（保证测试可复现且无随机性）。
+    /// 置位 `fail_embed` 后 embed/embed_batch 恒失败，用于覆盖 embedding 失败分支。
     struct MockEmbedder {
         dim: usize,
         // 文本 → 预设向量（供"语义相似"场景构造非零相关）
         overrides: Mutex<HashMap<String, Vec<f32>>>,
+        // embedding 失败开关（测试注入）
+        fail_embed: AtomicBool,
     }
 
     impl MockEmbedder {
@@ -449,7 +453,15 @@ mod tests {
             Self {
                 dim,
                 overrides: Mutex::new(overrides),
+                fail_embed: AtomicBool::new(false),
             }
+        }
+
+        /// 设置 embedding 失败开关：置位后 `embed` / `embed_batch` 恒失败。
+        ///
+        /// 用于覆盖 embedding 不可用时的降级分支（expand 返回空扩展、build 返回 Err）。
+        fn set_fail_embed(&self, fail: bool) {
+            self.fail_embed.store(fail, Ordering::SeqCst);
         }
 
         /// 确定性伪向量：文本哈希填充。
@@ -473,9 +485,15 @@ mod tests {
     #[async_trait::async_trait]
     impl ramaria_core::traits::EmbeddingProvider for MockEmbedder {
         async fn embed(&self, text: &str) -> RamariaResult<Vec<f32>> {
+            if self.fail_embed.load(Ordering::SeqCst) {
+                return Err(RamariaError::llm("mock embedding 失败（测试注入）"));
+            }
             Ok(self.vector_of(text))
         }
         async fn embed_batch(&self, texts: &[&str]) -> RamariaResult<Vec<Vec<f32>>> {
+            if self.fail_embed.load(Ordering::SeqCst) {
+                return Err(RamariaError::llm("mock embedding 失败（测试注入）"));
+            }
             Ok(texts.iter().map(|t| self.vector_of(t)).collect())
         }
         fn model_info(&self) -> ramaria_core::EmbeddingModelInfo {
@@ -655,20 +673,47 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// 查询词 embed 失败 → 返回空扩展（不 panic）
+    /// embedder 批量向量生成失败 → 构建返回 Err（上层据此降级为无 Fuzzy 层）
+    #[tokio::test]
+    async fn fuzzy_build_embed_error_propagates() {
+        let embedder = MockEmbedder::new(4, HashMap::new());
+        embedder.set_fail_embed(true);
+
+        let terms: Vec<KeywordToken> = ["工作压力", "职场焦虑"]
+            .iter()
+            .filter_map(|s| KeywordToken::new(s))
+            .collect();
+        let result = FuzzyKeywordIndex::build(&terms, &embedder).await;
+        assert!(
+            result.is_err(),
+            "embed_batch 失败应向上传播为 Err，而非静默构建出不可用索引"
+        );
+    }
+
+    /// 查询词 embed 失败 → 返回空扩展（不 panic、不产生错误结果）
     #[tokio::test]
     async fn fuzzy_expand_embed_error_empty() {
-        let embedder = MockEmbedder::new(4, HashMap::new());
+        // 预设"工作压力"与查询词"加班"同向量：若失败注入失效，扩展必然非空、
+        // 断言随即失败——保证本用例真正守住"embed 失败 → 空扩展"的失败分支
+        let mut overrides = HashMap::new();
+        overrides.insert("工作压力".to_string(), vec![1.0, 0.0, 0.0, 0.0]);
+        overrides.insert("加班".to_string(), vec![1.0, 0.0, 0.0, 0.0]);
+        let embedder = MockEmbedder::new(4, overrides);
+
         let terms: Vec<KeywordToken> = ["工作压力"]
             .iter()
             .filter_map(|s| KeywordToken::new(s))
             .collect();
         let fuzzy = FuzzyKeywordIndex::build(&terms, &embedder).await.unwrap();
-        // 查询词"加班"未在词典且 mock 生成非零向量；这里用"不存在"验证路径不 panic
-        let token = KeywordToken::new("不存在词").unwrap();
+
+        // 构建完成后注入 embedding 失败：expand 应静默降级为返回空
+        embedder.set_fail_embed(true);
+        let token = KeywordToken::new("加班").unwrap();
         let out = fuzzy.expand(&token, &embedder, 3).await;
-        // mock 是确定性哈希向量，cosine 大概率低于阈值 → 空；不断言具体值，只验证可运行
-        let _ = out;
+        assert!(
+            out.is_empty(),
+            "embedding 失败 → 返回空扩展，不 panic、不产生错误结果"
+        );
     }
 
     /// expand 自身词不扩展（跳过字面相同词条）

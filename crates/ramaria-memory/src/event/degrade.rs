@@ -254,9 +254,11 @@ fn build_degraded_keywords(l1_list: &[MemoryL1]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ramaria_core::types::now_ms;
     use ramaria_core::types::{MemoryL1, Presentation};
     use uuid::Uuid;
+
+    /// 固定测试基准时间（Unix 毫秒），保证用例不依赖真实时钟、连续运行结果一致。
+    const TEST_NOW_MS: i64 = 1_760_000_000_000;
 
     fn make_l1(
         session_id: Uuid,
@@ -275,7 +277,7 @@ mod tests {
             valence,
             salience,
             absorbed: false,
-            created_at: now_ms(),
+            created_at: TEST_NOW_MS,
             last_accessed_at: None,
             persona_uid: None,
             context_json: None,
@@ -451,7 +453,7 @@ mod tests {
 
     #[test]
     fn degraded_event_start_end_times() {
-        let now = now_ms();
+        let now = TEST_NOW_MS;
         let sid = Uuid::new_v4();
         let mut l1_old = make_l1(sid, "旧摘要", None, 0.0, 0.5);
         l1_old.created_at = now - 86_400_000; // 1 天前

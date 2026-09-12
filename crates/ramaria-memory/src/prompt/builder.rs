@@ -352,7 +352,7 @@ pub const LAYER_TEMPLATE: &str = "\
 pub const TEMPLATE_LAYER_MAP: &[(&str, &str, &str)] = &[
     (
         "# 能力边界",
-        "安全边界（AI 助手核心能力 + 知识边界）",
+        "安全边界（记忆 / 未知 / 安全三条约束 + 知识边界，无助手身份声明）",
         "Capacity（保留）",
     ),
     (
@@ -613,12 +613,22 @@ fn build_capacity(config: &PromptConfig, context: &PromptContext) -> String {
 // =========================================================
 
 /// 组装角色身份段：场景行 + 身份行（kind）+ 背景描述（`# 角色（行为层）` 的头部）。
+///
+/// 背景描述数据源（按优先级取值，均为空则不渲染该行）:
+/// 1. `persona.description` 列（GUI 可编辑的简要描述）；
+/// 2. `persona.config`（persona.toml 原文）`[identity].description` 可选键；
+/// 3. `persona.config` 的 JSON `description`（历史兼容：早期写入过 JSON 形态配置）。
+///
+/// `Anim` / `Hist` 的身份行读取 `[identity].work` / `[identity].era`（用户自设可选键），
+/// 缺失时回退通用句。
 fn build_role(context: &PromptContext) -> String {
     if let Some(ref persona) = context.persona {
         let mut parts = vec![String::from(
             "# 角色（行为层）\n\
              场景：你在社交软件上和对方即时聊天（「对方」指正在和你聊天的人）。",
         )];
+
+        let persona_toml = parse_persona_config(persona);
 
         // persona kind 描述（一行式身份事实；Anim/Hist 的作品名/时代名由
         // persona 设定数据源提供，缺失时使用回退句）
@@ -632,21 +642,58 @@ fn build_role(context: &PromptContext) -> String {
             ramaria_core::types::PersonaKind::Char | ramaria_core::types::PersonaKind::Oc => {
                 format!("你是「{}」，有自己的脾气和说话习惯。", persona.name)
             }
-            ramaria_core::types::PersonaKind::Anim => {
-                format!("你是「{}」，说话的语气就是你的语气。", persona.name)
-            }
-            ramaria_core::types::PersonaKind::Hist => {
-                format!("你是「{}」，说话的语气符合你的身份和时代。", persona.name)
-            }
+            ramaria_core::types::PersonaKind::Anim => match persona_toml
+                .as_ref()
+                .and_then(|parsed| parsed.work.as_deref())
+            {
+                Some(work) => {
+                    format!(
+                        "你是《{work}》中的「{}」，说话的语气就是你的语气。",
+                        persona.name
+                    )
+                }
+                None => format!("你是「{}」，说话的语气就是你的语气。", persona.name),
+            },
+            ramaria_core::types::PersonaKind::Hist => match persona_toml
+                .as_ref()
+                .and_then(|parsed| parsed.era.as_deref())
+            {
+                Some(era) => format!(
+                    "你是{era}的「{}」，说话的语气符合你的身份和时代。",
+                    persona.name
+                ),
+                None => format!("你是「{}」，说话的语气符合你的身份和时代。", persona.name),
+            },
             _ => format!("你是「{}」，有自己的说话习惯。", persona.name),
         };
         parts.push(kind_desc);
 
-        // config JSON 中的额外描述
-        if let Some(ref cfg_json) = persona.config
-            && let Ok(obj) = serde_json::from_str::<serde_json::Value>(cfg_json)
-            && let Some(desc) = obj.get("description").and_then(|v| v.as_str())
-        {
+        // 背景行：列值优先 → TOML [identity].description → JSON 兼容
+        let description = persona
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|desc| !desc.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                persona_toml
+                    .as_ref()
+                    .and_then(|parsed| parsed.description.clone())
+            })
+            .or_else(|| {
+                persona
+                    .config
+                    .as_deref()
+                    .and_then(|cfg| serde_json::from_str::<serde_json::Value>(cfg).ok())
+                    .and_then(|obj| {
+                        obj.get("description")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                    })
+                    .map(|desc| desc.trim().to_string())
+                    .filter(|desc| !desc.is_empty())
+            });
+        if let Some(desc) = description {
             parts.push(format!("背景：{desc}"));
         }
 
@@ -654,6 +701,19 @@ fn build_role(context: &PromptContext) -> String {
     } else {
         ROLE_DEFAULT_TEXT.to_string()
     }
+}
+
+/// 解析 persona 配置原文为结构化 persona.toml（解析失败 / 非 TOML 形态 → `None`）。
+///
+/// 说明:
+/// - `persona.config` 的真实存储形态是 persona.toml 原文（`persona reload` / 桌面端写入），
+///   历史上有 JSON 形态写入，故调用方在 TOML 解析失败时仍需保留 JSON 兼容分支。
+/// - 解析失败按"无配置"处理，不产生日志噪音（JSON 形态属预期输入）。
+fn parse_persona_config(persona: &Persona) -> Option<crate::init::PersonaToml> {
+    persona
+        .config
+        .as_deref()
+        .and_then(|cfg| crate::init::parse_persona_toml(cfg).ok())
 }
 
 // =========================================================
@@ -1011,19 +1071,42 @@ fn build_style_layer(context: &PromptContext, config: &PromptConfig) -> String {
 /// 组装说话风格子段（`## 说话风格`）。
 ///
 /// v2.0: 从 Block A 中独立出来，作为独立段。
-/// 并入表达层作为子段；无 speaking_style 时返回空（不产生段落）。
-/// 从 persona.config JSON 的 `speaking_style` 字段提取；
+/// 并入表达层作为子段；无 speaking_style 时返回空（不产生段落，由自动风格规则接管）。
+///
+/// 数据源（按优先级取值）:
+/// 1. `persona.config`（persona.toml 原文）`[blocks].speaking_style`（用户自设，与 `A_persona`/`E_rules` 同级）；
+/// 2. `persona.config` 的 JSON `speaking_style`（历史兼容）。
+///
 /// 正文前加使用引导行，避免风格描述被复述为介绍内容。
 fn build_personality(context: &PromptContext) -> String {
-    if let Some(ref persona) = context.persona
-        && let Some(ref cfg_json) = persona.config
-        && let Ok(obj) = serde_json::from_str::<serde_json::Value>(cfg_json)
-        && let Some(style) = obj.get("speaking_style").and_then(|v| v.as_str())
-        && !style.trim().is_empty()
-    {
-        format!("## 说话风格\n{STYLE_USAGE_LEAD}\n{style}")
-    } else {
-        String::new()
+    let Some(ref persona) = context.persona else {
+        return String::new();
+    };
+
+    let style = parse_persona_config(persona)
+        .and_then(|parsed| {
+            parsed
+                .blocks
+                .into_iter()
+                .find_map(|(key, value)| (key == "speaking_style").then_some(value))
+        })
+        .filter(|style| !style.trim().is_empty())
+        .or_else(|| {
+            persona
+                .config
+                .as_deref()
+                .and_then(|cfg| serde_json::from_str::<serde_json::Value>(cfg).ok())
+                .and_then(|obj| {
+                    obj.get("speaking_style")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                })
+                .filter(|style| !style.trim().is_empty())
+        });
+
+    match style {
+        Some(style) => format!("## 说话风格\n{STYLE_USAGE_LEAD}\n{style}"),
+        None => String::new(),
     }
 }
 

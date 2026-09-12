@@ -2,7 +2,7 @@
 //!
 //! 设计特点:
 //! - 管理 L1/L2 文档的 BM25 与向量索引写入、删除与全量重建
-//! - 内置 LRU 驱逐策略：超过 `lru_max_entries` 时按创建时间同步清理
+//! - 内置 LRU 驱逐策略：超过 `lru_max_entries` 的 110% 时按创建时间批量清理
 //! - 仅依赖 `Retriever` 的私有字段与配置开关，不引入新的对外能力
 
 use ramaria_core::error::RamariaResult;
@@ -14,12 +14,17 @@ use crate::vector::{VectorIndex, make_vector_label};
 use super::Retriever;
 use super::types::{L1DocView, L2DocView};
 
+/// 容量驱逐触发水位（超过上限的比例分母）：超过上限的 110% 时才触发一次批量驱逐。
+///
+/// L1/L2 与 utt 通道共用同一水位口径。
+pub(super) const EVICT_SLACK_DIVISOR: usize = 10;
+
 impl Retriever {
     /// 将 L1 文档添加到所有启用通道的索引中。
     ///
     /// 接受引用以避免调用方不必要的 clone；内部仅在存入 HashMap 时做一次 clone。
     ///
-    /// LRU 驱逐: 添加后若总文档数超过 `lru_max_entries`，按 `created_at` 驱逐最旧文档。
+    /// LRU 驱逐: 添加后若总文档数超过 `lru_max_entries` 的 110%，按 `created_at` 批量驱逐最旧文档。
     ///
     /// 向量通道说明（接线）:
     /// - 本方法不生成向量（同步路径无 embedding provider），仅 BM25 + 内存文档；
@@ -36,7 +41,7 @@ impl Retriever {
 
         self.l1_docs.insert(doc.id, doc.clone());
 
-        // LRU 驱逐: 总文档数超过上限时，从 BM25 和内存 HashMap 中同步清理最早文档
+        // LRU 驱逐: 总文档数超过上限的 110% 时，从 BM25 和内存 HashMap 中批量清理最早文档
         self.evict_if_needed();
     }
 
@@ -60,11 +65,11 @@ impl Retriever {
         }
     }
 
-    /// 将 `MemoryL1` 记录转换为 `L1DocView` 并增量添加到所有启用通道的索引中。
+    /// 将 `MemoryL1` 记录转换为 `L1DocView` 并增量添加到索引。
     ///
     /// 职责:
-    /// - 供 `SessionLifecycle` 在 L1 摘要生成成功后立即调用，
-    ///   确保新生成的 L1 文档无需等待全量 `rebuild_retriever` 即可被 Stage 5 RAG 检索命中。
+    /// - 预留入口：上层在 L1 摘要生成后做增量索引时可调用
+    ///   （当前生产路径由 app 层的 [`index_l1_with_vector`] 完成写入）。
     /// - 将 `MemoryL1`（来自 `ramaria-core` 的业务类型）转为内部 `L1DocView` 后委托给 [`index_l1`]。
     ///
     /// 参数:
@@ -75,7 +80,7 @@ impl Retriever {
     ///
     /// 说明:
     /// - 本方法总是返回 `Ok(())`——转换和 BM25 索引添加均为纯内存操作，不可失败。
-    /// - 向量索引暂不更新（需 EmbeddingProvider 生成 query 向量，由后续 rebuild 路径处理）。
+    /// - 本方法只写 BM25 与内存文档映射；向量写入需调用方提供 embedding，请用 [`index_l1_with_vector`]。
     pub fn index_l1_record(&mut self, record: &MemoryL1) -> RamariaResult<()> {
         let doc = L1DocView {
             id: record.id,
@@ -100,7 +105,7 @@ impl Retriever {
     /// 接受引用以避免调用方不必要的 clone；内部仅在存入 HashMap 时做一次 clone。
     /// 同时消除了之前因 borrow checker 限制而产生的临时 String 分配。
     ///
-    /// LRU 驱逐: 添加后若总文档数超过 `lru_max_entries`，按 `created_at` 驱逐最旧文档。
+    /// LRU 驱逐: 添加后若总文档数超过 `lru_max_entries` 的 110%，按 `created_at` 批量驱逐最旧文档。
     ///
     /// 向量通道说明（接线）:
     /// - 本方法不生成向量（同步路径无 embedding provider），仅 BM25 + 内存文档；
@@ -146,29 +151,34 @@ impl Retriever {
         self.l2_docs.remove(doc_id);
     }
 
-    /// LRU 驱逐: 当总文档数超过 `lru_max_entries` 时，按 `created_at` 驱逐最早创建的文档。
+    /// LRU 驱逐: 当总文档数超过 `lru_max_entries` 的 110% 时，批量驱逐最早创建的文档。
     ///
     /// 策略:
-    /// - 从所有文档中按 created_at 升序排列，移除最早的条目
-    /// - 同时从 BM25 索引和 HashMap 中同步删除，保持一致性
-    /// - 每次只驱逐超出部分（(l1 + l2) - lru_max_entries 条）
-    /// - `lru_max_entries == 0` 时跳过驱逐（无限制模式）
+    /// - 超过上限的 110% 时才触发，把逐条写入都做全量收集 + 排序摊薄为周期性批量；
+    /// - 一次驱逐"超出上限"的全部条目（约上限的 10%）；
+    /// - 稳态文档数位于上限 ~ 上限×110% 之间；
+    /// - `lru_max_entries == 0` 时不限制；
+    /// - 驱逐按 `created_at` 升序（最旧优先），BM25 与内存映射同步清理。
     ///
     /// 复杂度: O(n log n) 其中 n = l1_docs.len + l2_docs.len。
-    /// 仅在高文档数且超出上限时触发，性能影响可控。
+    /// 仅在超过水位时触发，触发频率经批量摊薄，性能影响可控。
     fn evict_if_needed(&mut self) {
         if self.lru_max_entries == 0 {
             return; // 无限制模式
         }
 
+        // 触发水位：超过上限的 110%
+        let trigger = self
+            .lru_max_entries
+            .saturating_add(self.lru_max_entries / EVICT_SLACK_DIVISOR);
         let total = self.l1_docs.len() + self.l2_docs.len();
-        let evict_count = total.saturating_sub(self.lru_max_entries);
-
-        if evict_count == 0 {
+        if total <= trigger {
             return;
         }
 
-        // 收集所有 (doc_id_string, created_at, is_l1, key_L1_uuid, key_L2_i64) 并按时间排序
+        let evict_count = total.saturating_sub(self.lru_max_entries);
+
+        // 收集所有 (created_at, is_l1, key_L1_uuid, key_L2_i64) 并按时间排序
         let mut entries: Vec<(i64, bool, uuid::Uuid, i64)> = Vec::with_capacity(total);
 
         for (uid, doc) in self.l1_docs.iter() {
@@ -215,7 +225,8 @@ impl Retriever {
     ///
     /// 清空现有索引，从 l1_docs 和 l2_docs 重新构建。
     ///
-    /// 接线候选：desktop index rebuild 命令（v1.6 核查）
+    /// 预留未接线：当前仅测试路径调用；生产重建走 app 层
+    /// （清空 Retriever 后重新 `index_l1`/`index_l2`）。
     pub fn rebuild_bm25(&mut self) {
         self.bm25_index.clear();
         let l1_snapshot: Vec<L1DocView> = self.l1_docs.values().cloned().collect();

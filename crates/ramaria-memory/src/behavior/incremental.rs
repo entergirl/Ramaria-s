@@ -142,9 +142,22 @@ impl PendingPool {
         }
     }
 
-    /// 加入一条待定事件。
+    /// 加入一条待定事件（入池时间取当前时钟）。
+    ///
+    /// 说明:
+    /// - 委托 `add_with_time` 实现；需要确定性时间的调用方（测试/回放）
+    ///   可直接使用 `add_with_time` 显式注入时间。
     pub fn add(&mut self, event: &ramaria_core::types::MemoryEvent) {
-        self.events.push(PendingEvent::from_event(event, now_ms()));
+        self.add_with_time(event, now_ms());
+    }
+
+    /// 加入一条待定事件，并显式指定入池时间（Unix 毫秒）。
+    ///
+    /// 参数:
+    /// - `event`: 待定事件。
+    /// - `now_ms`: 入池时间；`advance` 的过期判定以该时间为起点。
+    pub fn add_with_time(&mut self, event: &ramaria_core::types::MemoryEvent, now_ms: i64) {
+        self.events.push(PendingEvent::from_event(event, now_ms));
     }
 
     /// 推进待定池（每次会话封存后调用）。
@@ -374,6 +387,9 @@ mod tests {
     use ramaria_core::behavior::{BehaviorParams, BehaviorSituation};
     use ramaria_core::types::MemoryEvent;
 
+    /// 固定测试基准时间（Unix 毫秒），保证用例不依赖真实时钟、连续运行结果一致。
+    const TEST_NOW_MS: i64 = 1_760_000_000_000;
+
     fn rule(id: i64, keywords: &[&str], centroid: Option<Vec<f32>>) -> BehaviorRule {
         let mut r = BehaviorRule::new(
             "char-0001",
@@ -469,9 +485,9 @@ mod tests {
         let mut pool = PendingPool::new(&cfg());
         let events: Vec<MemoryEvent> = (0..3).map(|i| event(100 + i, "加班,累", -0.5)).collect();
         for ev in &events {
-            pool.add(ev);
+            pool.add_with_time(ev, TEST_NOW_MS);
         }
-        let (formed, low) = pool.advance(now_ms());
+        let (formed, low) = pool.advance(TEST_NOW_MS);
         assert_eq!(formed.len(), 1, "3 条同质事件成簇");
         assert_eq!(formed[0].len(), 3);
         assert!(low.is_empty());
@@ -481,18 +497,18 @@ mod tests {
     fn pending_pool_does_not_form_below_min_size() {
         let mut pool = PendingPool::new(&cfg());
         for i in 0..2 {
-            pool.add(&event(100 + i, "加班,累", -0.5));
+            pool.add_with_time(&event(100 + i, "加班,累", -0.5), TEST_NOW_MS);
         }
-        let (formed, _) = pool.advance(now_ms());
+        let (formed, _) = pool.advance(TEST_NOW_MS);
         assert!(formed.is_empty(), "2 条 < min_cluster_size 不成簇");
     }
 
     #[test]
     fn pending_pool_low_confidence_after_expiry() {
         let mut pool = PendingPool::new(&cfg());
-        pool.add(&event(1, "加班,累", -0.5));
+        pool.add_with_time(&event(1, "加班,累", -0.5), TEST_NOW_MS);
         // 入池后模拟超过 30 天
-        let far_future = now_ms() + 40 * 86_400_000;
+        let far_future = TEST_NOW_MS + 40 * 86_400_000;
         let (formed, low) = pool.advance(far_future);
         assert!(formed.is_empty());
         assert_eq!(low, vec![1], "超期未成簇 → 低置信");
@@ -502,8 +518,8 @@ mod tests {
     #[test]
     fn pending_pool_expired_low_confidence_not_re_flagged() {
         let mut pool = PendingPool::new(&cfg());
-        pool.add(&event(1, "加班,累", -0.5));
-        let far_future = now_ms() + 40 * 86_400_000;
+        pool.add_with_time(&event(1, "加班,累", -0.5), TEST_NOW_MS);
+        let far_future = TEST_NOW_MS + 40 * 86_400_000;
         pool.advance(far_future);
         // 再次推进不重复标记
         let (_, low) = pool.advance(far_future + 86_400_000);
@@ -517,10 +533,10 @@ mod tests {
     fn pending_pool_requires_pairwise_cohesion() {
         let mut pool = PendingPool::new(&cfg());
         // 两条同质（加班）+ 一条异质（养猫）——异质样本阻断内聚
-        pool.add(&event(100, "加班,累", -0.5));
-        pool.add(&event(101, "加班,累", -0.5));
-        pool.add(&event(102, "养猫,开心", 0.6));
-        let (formed, _low) = pool.advance(now_ms());
+        pool.add_with_time(&event(100, "加班,累", -0.5), TEST_NOW_MS);
+        pool.add_with_time(&event(101, "加班,累", -0.5), TEST_NOW_MS);
+        pool.add_with_time(&event(102, "养猫,开心", 0.6), TEST_NOW_MS);
+        let (formed, _low) = pool.advance(TEST_NOW_MS);
         assert!(formed.is_empty(), "含异质样本的组不满足两两内聚，不应成簇");
         // 三条全部仍在待定池（未成簇、未标记低置信）
         assert_eq!(pool.events.len(), 3);
