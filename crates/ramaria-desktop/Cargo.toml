@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[lints]
+workspace = true
+
 [lib]
 name = "ramaria_desktop_lib"
 crate-type = ["lib"]

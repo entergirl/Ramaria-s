@@ -2,7 +2,7 @@
 
 > 大模型懂一切，唯独不懂你。
 
-[![Rust](https://img.shields.io/badge/Rust-1.85%2B-orange)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/Rust-1.88%2B-orange)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Repo](https://img.shields.io/badge/GitHub-entergirl%2FRamaria--s-black)](https://github.com/entergirl/Ramaria-s)
 

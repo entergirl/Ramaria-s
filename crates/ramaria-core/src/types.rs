@@ -1670,20 +1670,17 @@ impl ClusterSnapshot {
     ///
     /// 返回:
     /// - `Some(Vec<f32>)` 如果 BLOB 长度是 4 的倍数；`None` 如果数据损坏或为空。
-    // 允许 clippy::manual_is_multiple_of：`usize::is_multiple_of` 需 Rust 1.87，
-    // 与 workspace 承诺的 `rust-version = 1.85` 不符，此处保留 `% 4` 判定。
-    #[allow(clippy::manual_is_multiple_of)]
     pub fn deserialize_embedding(blob: &[u8]) -> Option<Vec<f32>> {
-        // 用 `% 4` / `chunks_exact`（低版本稳定 API）而非 `is_multiple_of` / `as_chunks`，
-        // 保持 workspace `rust-version` 承诺的兼容下限。
-        if blob.is_empty() || blob.len() % 4 != 0 {
+        // `is_multiple_of` 需 Rust 1.87、`as_chunks` 需 Rust 1.88，
+        // 与 workspace `rust-version = 1.88` 一致。
+        if blob.is_empty() || !blob.len().is_multiple_of(4) {
             return None;
         }
-        let mut vec = Vec::with_capacity(blob.len() / 4);
-        // 长度已校验为 4 的倍数，`chunks_exact` 的余数恒为空，逐块还原 f32。
-        for chunk in blob.chunks_exact(4) {
-            // 索引 0..4 由 `chunks_exact(4)` 保证在界内，不产生越界 panic。
-            vec.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        let count = blob.len() / 4;
+        let mut vec = Vec::with_capacity(count);
+        // 长度已校验为 4 的倍数，as_chunks 余数恒为空，逐块还原 f32。
+        for chunk in blob.as_chunks::<4>().0 {
+            vec.push(f32::from_le_bytes(*chunk));
         }
         Some(vec)
     }

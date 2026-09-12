@@ -14,8 +14,13 @@ members = [
 [workspace.package]
 version = "1.7.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT"
+
+[workspace.lints.clippy]
+# 项目禁用 let-chains（开发约定）：`collapsible_if` 的合并建议依赖 let-chains，
+# 需要合并条件时改用 `.and_then()` / `.filter(|_| cond)` 表达，故全仓统一豁免该 lint。
+collapsible_if = "allow"
 
 [workspace.dependencies]
 # ---------- 异步运行时 ----------
