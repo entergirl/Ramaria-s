@@ -43,6 +43,9 @@ var RamariaSetupView = (function () {
     var _embeddingTestPassed = false;
     var _embeddingPath = '';
     var _submitting = false;
+/// document 级 Enter 监听是否已注册（render 会被多次调用，避免监听器累积：
+/// 累积后一次回车会重复触发 _goNext，导致跳步或多层弹窗）
+    var _docKeydownBound = false;
 
     function $(id) { return document.getElementById(id); }
 
@@ -173,13 +176,17 @@ var RamariaSetupView = (function () {
             '</div>' +
 
  // 线上字段
+// API Key 字段用 <form> 承载：浏览器规范要求密码输入框位于表单内（否则控制台告警）。
+// 该 form 无 action / 无提交按钮，提交事件在 _bindEvents 统一拦截（不会跳转或刷新）。
+// 输入框 autocomplete="new-password"：语义为"填写新密钥"（Chromium 官方建议值，
+// 缺省该属性会触发 [DOM] Input elements should have autocomplete 告警）
             '<div class="setup-field-group hidden" id="setup-api-fields">' +
-                '<div class="setup-field">' +
+                '<form class="setup-field" id="setup-api-key-form" autocomplete="off">' +
                     '<div class="setup-field-label">API Key <span class="setup-required">*</span></div>' +
                     '<input class="setup-field-input" id="setup-api-key" type="password" ' +
-                        'placeholder="sk-xxxxxxxxxxxxxxxx" autocomplete="off">' +
+                        'autocomplete="new-password" placeholder="sk-xxxxxxxxxxxxxxxx">' +
                     '<div class="setup-field-hint">从对应服务商获取（DeepSeek、OpenAI）</div>' +
-                '</div>' +
+                '</form>' +
                 '<div class="setup-field">' +
                     '<div class="setup-field-label">API 地址 <span class="setup-required">*</span></div>' +
                     '<input class="setup-field-input" id="setup-api-url" type="text" ' +
@@ -381,7 +388,16 @@ var RamariaSetupView = (function () {
  // =========================================================
 
     function _bindEvents() {
- // 模式切换
+// API Key 所在 form：仅用于满足"密码字段需在表单内"的浏览器规范
+// （Enter 已由下方 keydown 统一转下一步；这里兜底拦截表单默认提交，避免页面跳转/刷新）
+        var apiKeyForm = $('setup-api-key-form');
+        if (apiKeyForm) {
+            apiKeyForm.addEventListener('submit', function (e) {
+                e.preventDefault();
+            });
+        }
+
+// 模式切换
         var modeOptions = document.querySelectorAll('.setup-mode-option');
         for (var i = 0; i < modeOptions.length; i++) {
             modeOptions[i].addEventListener('click', function () {
@@ -407,13 +423,17 @@ var RamariaSetupView = (function () {
         var embeddingSkipBtn = $('setup-embedding-skip-btn');
         if (embeddingSkipBtn) embeddingSkipBtn.addEventListener('click', _skipEmbeddingModel);
 
- // 键盘 Enter 在表单中触发下一步
-        document.addEventListener('keydown', function (e) {
-            if (e.key === 'Enter' && e.target && e.target.closest('.setup-field-input')) {
-                e.preventDefault();
-                _goNext();
-            }
-        });
+ // 键盘 Enter 在表单中触发下一步（document 级：全程只注册一次）
+// 说明: Enter 的 preventDefault 同时阻止了表单的隐式提交（密码框所在的 form 不会被提交）
+        if (!_docKeydownBound) {
+            _docKeydownBound = true;
+            document.addEventListener('keydown', function (e) {
+                if (e.key === 'Enter' && e.target && e.target.closest('.setup-field-input')) {
+                    e.preventDefault();
+                    _goNext();
+                }
+            });
+        }
     }
 
     function _selectMode(mode) {

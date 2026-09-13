@@ -180,12 +180,17 @@ var RamariaSettingsView = (function () {
                 '<input class="settings-form-input" id="settings-model-id" type="text" ' +
                     'placeholder="留空使用默认模型" />' +
             '</div>' +
-            '<div class="settings-form-group" id="settings-api-key-group">' +
+            // API Key 字段组用 <form> 承载：浏览器规范要求密码输入框位于表单内（否则控制台告警）；
+            // 无 action / 无提交按钮，提交事件在 _bindBackendEvents 统一拦截
+            '<form class="settings-form-group" id="settings-api-key-group" autocomplete="off">' +
                 '<label class="settings-form-label">API Key</label>' +
+                // autocomplete="new-password"：语义为"填写新密钥"（Chromium 官方建议值，
+                // 缺省该属性会触发 [DOM] Input elements should have autocomplete 告警）；
+                // 同时让密码管理器不自动填充旧凭据
                 '<input class="settings-form-input" id="settings-api-key" type="password" ' +
-                    'placeholder="填入新 key 以更换，留空保持不变" />' +
+                    'autocomplete="new-password" placeholder="填入新 key 以更换，留空保持不变" />' +
                 '<div class="settings-form-hint">密钥存储于系统凭证管理器。当前 key：<span id="settings-api-key-hint" class="font-mono">加载中...</span></div>' +
-            '</div>' +
+            '</form>' +
             '<div class="settings-save-hint">' +
                 '<button class="btn btn-primary btn-sm" id="settings-save-backend">保存后端配置</button>' +
             '</div>';
@@ -198,10 +203,18 @@ var RamariaSettingsView = (function () {
     }
 
     function _bindBackendEvents() {
- // Provider 变化时调整 API Key 可见性和默认 URL
+// Provider 变化时调整 API Key 可见性和默认 URL
         var providerSelect = $('settings-provider');
         var apiKeyGroup = $('settings-api-key-group');
         var baseUrlInput = $('settings-base-url');
+
+// API Key 所在 form：仅用于满足"密码字段需在表单内"的浏览器规范；
+// 拦截默认提交，避免输入框内回车触发页面跳转（保存仍需点「保存后端配置」）
+        if (apiKeyGroup && apiKeyGroup.tagName === 'FORM') {
+            apiKeyGroup.addEventListener('submit', function (e) {
+                e.preventDefault();
+            });
+        }
 
         if (providerSelect && apiKeyGroup && baseUrlInput) {
             providerSelect.addEventListener('change', function () {
@@ -1342,7 +1355,7 @@ var RamariaSettingsView = (function () {
             title: '📜 日志',
             desc: '日志记录级别控制。',
             fields: [
-                { path: ['log_full_prompt'], label: '记录完整 Prompt', type: 'bool', def: false, hint: '记录完整 prompt 含记忆上下文与原文片段（隐私敏感，开启需弹窗确认）' },
+                { path: ['log_full_prompt'], label: '记录完整 Prompt', type: 'bool', def: false, hint: '预留项：当前版本未接线——无论开关取值都不会记录完整 Prompt（后续启用前会先更新隐私说明）' },
             ],
         },
         {
@@ -1660,8 +1673,8 @@ var RamariaSettingsView = (function () {
                 if (!logBox.checked) return;
                 RamariaModal.show({
                     title: '⚠️ 隐私确认',
-                    body: '开启后将把完整 prompt（含记忆上下文与原文片段）写入日志，' +
-                        '可能包含敏感信息。仅在排障时短期开启，用后请立即关闭。',
+                    body: '「记录完整 Prompt」为预留项：当前版本未接线，开启或关闭都不会把完整 prompt ' +
+                        '写入日志。确认仅保存开关取值，供后续版本启用时生效（届时会先更新隐私说明）。',
                     actions: [
                         { label: '取消', action: 'cancel', className: 'btn btn-secondary' },
                         { label: '确认开启', action: 'confirm', className: 'btn btn-danger' },

@@ -2,8 +2,8 @@
 # 规则：
 #   - Windows 编译 + 单元测试（v1.0 首发 Windows，macOS/Linux 延后）
 #   - 不跑真实 LLM，不下 embedding 模型，不打包 Tauri
-#   - 阻塞条件：cargo build / test / clippy / fmt 全部通过
-#   - 非阻塞条件：coverage / cargo-deny / cargo-audit 仅报告，不阻塞 PR
+#   - 阻塞条件：cargo build / test / clippy / fmt 全部通过；coverage 行覆盖率低于阈值即失败
+#   - 非阻塞条件：cargo-deny / cargo-audit 仅报告，不阻塞 PR
 
 name: CI
 
@@ -55,13 +55,14 @@ jobs:
       - name: Format check
         run: cargo fmt --all --check
 
-  # ---- 覆盖率报告（非阻塞） ----
-  # 使用 cargo-llvm-cov 生成行覆盖率报告。
+  # ---- 覆盖率报告（阈值阻塞） ----
+  # 使用 cargo-llvm-cov 生成行覆盖率报告，行覆盖率低于阈值即失败（拦截覆盖率回退）。
+  # 阈值口径：全局行覆盖率下限 80%；模块级目标（新模块 ≥85% / 重度修改模块 ≥80%）
+  # 见 docs/dev-2.0/v2.0-checklist.md「覆盖率目标」，按发布前人工核验执行。
   # 仅适用于 Windows（llvm-tools-preview 组件可用）。
   coverage:
     name: Coverage (llvm-cov)
     runs-on: windows-latest
-    continue-on-error: true  # 非阻塞：覆盖率不达标不阻止 PR 合并
 
     steps:
       - name: Checkout
@@ -87,9 +88,9 @@ jobs:
           restore-keys: windows-cov-
 
       - name: Run coverage
-        run: cargo llvm-cov --workspace --summary-only --lcov --output-path lcov.info
+        run: cargo llvm-cov --workspace --summary-only --lcov --output-path lcov.info --fail-under-lines 80
         # 注：--lcov --output-path 生成 lcov 格式报告，可上传到 Codecov/Coveralls
-        # 当前仅输出摘要到 CI 日志
+        # --fail-under-lines 80：全局行覆盖率 <80% 时本步骤失败（拦截覆盖率回退）
 
       - name: Show coverage summary
         run: cargo llvm-cov --workspace --summary-only

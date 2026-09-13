@@ -44,6 +44,9 @@ var RamariaStore = (function () {
  * - `streamingRequestId`: 当前流式请求的 request_id（null 表示无进行中流式）
  * - `backendConfig`: 后端配置 { provider, model_id, base_url, supports_streaming, ... }
  * - `settings`: 全局设置 [{ key, value }]
+ * - `debugEnabled`: 本次启动是否启用调试（开发者模式）。由 app.js 启动时按
+ * `debug_enabled` 设置写入；仅启动时判定，运行时改动需重启生效。设置页据此
+ * 显隐「高级设置」页签、app.js 据此显隐侧边栏「调试」入口
  * - `personas`: 已注册人格列表 [{ uid, name, kind, is_active, created_at }]
  * - `defaultPersonaUid`: 默认对话人格 UID（ 新增）
  */
@@ -57,6 +60,8 @@ var RamariaStore = (function () {
         streamingRequestId: null,
         backendConfig: null,
         settings: [],
+/// 本次启动是否启用调试（app.js 启动时写入；仅启动时判定，运行时改动需重启生效）
+        debugEnabled: false,
         personas: [],
         defaultPersonaUid: null,
         degradedReason: null,
@@ -331,6 +336,7 @@ var RamariaStore = (function () {
             streamingRequestId: null,
             backendConfig: null,
             settings: [],
+            debugEnabled: false,
             personas: [],
             defaultPersonaUid: null,
             degradedReason: null,

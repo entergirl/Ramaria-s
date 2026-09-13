@@ -1632,6 +1632,49 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// 默认配置模板必须与 `RamariaConfig::default()` 逐键一致。
+    ///
+    /// 背景:
+    /// - 首启生成的 config.toml 直接复制本模板（`DEFAULT_CONFIG_TEMPLATE`），
+    ///   模板缺段会让用户无法从文件发现新增配置开关（静默取结构默认）。
+    /// - 本用例按扁平键（跳过 version/schema_version/paths/backend）逐键比对
+    ///   模板解析值与结构默认值；新增配置组时必须同步模板。
+    #[test]
+    fn default_template_matches_config_defaults_key_by_key() {
+        let template: RamariaConfig =
+            toml::from_str(DEFAULT_CONFIG_TEMPLATE).expect("模板应为合法 TOML");
+        let template_flat = config_to_flat_map(&template);
+        let default_flat = config_to_flat_map(&RamariaConfig::default());
+
+        let missing: Vec<&String> = default_flat
+            .keys()
+            .filter(|key| !template_flat.contains_key(*key))
+            .collect();
+        assert!(missing.is_empty(), "模板缺少默认配置键: {missing:?}");
+
+        let unknown: Vec<&String> = template_flat
+            .keys()
+            .filter(|key| !default_flat.contains_key(*key))
+            .collect();
+        assert!(
+            unknown.is_empty(),
+            "模板含当前 schema 不存在的键: {unknown:?}"
+        );
+
+        let drifted: Vec<String> = default_flat
+            .iter()
+            .filter_map(|(key, default_value)| {
+                let template_value = template_flat.get(key)?;
+                (template_value != default_value)
+                    .then(|| format!("{key}: 模板={template_value} 默认={default_value}"))
+            })
+            .collect();
+        assert!(
+            drifted.is_empty(),
+            "模板默认值与结构默认值不一致: {drifted:?}"
+        );
+    }
+
     #[tokio::test]
     async fn first_startup_empty_db_keeps_commented_template() {
         // 首启且 DB 为空 → 文件内容 = 带注释的默认模板（保留说明注释）

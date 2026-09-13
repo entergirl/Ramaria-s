@@ -1,4 +1,4 @@
-# 珊瑚菌 · Ramaria v1.6
+# 珊瑚菌 · Ramaria 2.0
 
 > 大模型懂一切，唯独不懂你。
 
@@ -18,7 +18,7 @@ Ramaria 的核心能力：
 
 - **分层记忆（L0→L3）**：从对话中自动提取摘要和事件。它关注藏在语气、措辞、反应模式中的线索——一次下意识的抱怨、一个反复出现的偏好、一句欲言又止——这些细微信号会被识别为可追溯的事件，成为推断性格的原始材料。不同层级之间树状关联，可以从一个性格标签一路回溯到当初那条对话原文。
 - **自动人格推断**：把积累的事件当作一个人的行为样本，从中识别性格特征，让 AI 以这个人的身份和口吻与你对话。画像从真实对话数据中自然涌现，而非套用预设的性格模板。
-- **三通道混合检索**：结合语义相似度、关键词精确匹配和知识图谱关联三种方式检索记忆，模拟人脑"记起一件事"的方式，既不会遗漏相近意思的表述，也不会错过关键事实。
+- **多通道混合检索**：结合语义相似度、关键词精确匹配、知识图谱关联与关键词倒排镜像四种方式检索记忆（RRF 倒数排名融合），模拟人脑"记起一件事"的方式，既不会遗漏相近意思的表述，也不会错过关键事实。
 - **数据完全本地**：所有对话和记忆存储在本地 SQLite 数据库，不上传任何服务器。使用本地 LM Studio 时可完全断网运行。
 - **聊天记录导入**：支持导入 QQ 聊天记录，自动为参与对话的人建立独立的记忆和人格画像。
 - **原生桌面应用**：基于 Tauri 2 构建，含系统托盘、通知、凭据管理器集成。
@@ -36,7 +36,7 @@ Ramaria 的核心能力：
 | 更新机制 | 需重新训练 / 手动更新 | 实时写入，持续积累，全自动管线 |
 | 隐私控制 | 数据上传至训练方 / 第三方 | 全量本地化，LM Studio 模式完全不联网 |
 | 人格推断 | 固定 Prompt / 无 | 从对话事件中自动推断，Phase A/B/C 三级置信度 |
-| 检索精度 | 向量 / 关键词单一通道 | 三通道融合（向量 + BM25 + 图谱）+ Persona-Aware |
+| 检索精度 | 向量 / 关键词单一通道 | 多通道融合（向量 + BM25 + 图谱 + 关键词镜像）+ RRF + Persona-Aware |
 
 ---
 
@@ -59,14 +59,14 @@ ramaria-app  应用编排层（Pipeline + Stage 对话管线，状态机）
 
 | 模块 | 技术选型 | 职责 |
 |------|----------|------|
-| **ramaria-core** | 纯 Rust 类型系统 | 9 个枚举 + 9 个结构体 + StorageBackend trait（40+ 方法）+ LlmProvider trait |
+| **ramaria-core** | 纯 Rust 类型系统 | 核心类型 + 配置 + 错误体系 + StorageBackend 契约（StoreCrud / StoreInfrastructure 分组）+ LlmProvider / EmbeddingProvider trait |
 | **ramaria-storage** | SQLite（sqlx） | 27 张表 schema、21 个 Repository、手动行映射避免 derive 侵入 |
-| **ramaria-memory** | 自研管线 | 分层摘要→事件提取→性格推断、BM25+向量+图谱三通道 RAG、Ebbinghaus 衰减、RRF 融合、Token Budgeting |
-| **ramaria-llm** | reqwest + SSE | 3 后端适配器、SSE 流式传输、API Key 凭据管理器、指数退避重试、ONNX 嵌入模型 |
-| **ramaria-importer** | encoding_rs + sha2 | QQ 聊天记录解析（JSON + TXT）、快速/深度双模式、双画像自动创建 |
+| **ramaria-memory** | 自研管线 | 分层摘要→事件提取→性格推断、向量+BM25+图谱+关键词镜像多通道 RAG、Ebbinghaus 衰减、RRF 融合、Token Budgeting |
+| **ramaria-llm** | reqwest + candle | 3 后端适配器、SSE 流式传输、API Key 凭据管理器、指数退避重试、原生 safetensors 嵌入（bge-small-zh-v1.5 / Qwen3-Embedding-0.6B，CUDA 优先） |
+| **ramaria-importer** | encoding_rs + sha2 | QQ 聊天记录解析（QQChatExporter v6.x JSON，流式解析）、快速/深度双模式、双画像自动创建、指纹去重 |
 | **ramaria-app** | async-trait | CLI/Desktop 共用编排层，Pipeline+Stage 对话管线、状态机、隐私确认、流式事件模型、Session 生命周期管理、后台任务调度 |
-| **ramaria-cli** | clap derive | 11 个子命令、交互式 REPL、色彩输出 |
-| **ramaria-desktop** | Tauri 2 | 原生窗口、系统托盘、通知、CSP、Markdown 渲染、前端 JS（7 个视图） |
+| **ramaria-cli** | clap derive | 18 个子命令、交互式 REPL、`--json` 信封、色彩输出 |
+| **ramaria-desktop** | Tauri 2 | 原生窗口、系统托盘、通知、CSP、Markdown 渲染、前端 JS（7 个视图，含规则/调试） |
 
 ### 依赖关系（自底向上）
 
@@ -136,25 +136,27 @@ L0 原始消息（永久保留，不删除，不过滤，标记发言人）
 
 本项目维护 `keyword_pool` 词典表，每次 L1 生成时将历史词条作为候选列表喂给模型，引导模型优先复用已有词条——**让关键词随时间收敛而非发散**。
 
-### 三通道混合 RAG 检索
+### 多通道混合 RAG 检索
 
 ```
 用户消息 + persona_uid
   → Persona-Aware 过滤（按 share 分级过滤记忆）
-  → 三通道并行检索：
-      1. 向量通道（暴力搜索 BruteForceIndex）— 语义相似度
-      2. BM25 通道（自研全文索引）— 关键词精确匹配
+  → 四通道并行检索：
+      1. 向量通道（暴力搜索 BruteForceIndex + LRU）— 语义相似度
+      2. BM25 通道（自研全文索引，词典增强分词）— 关键词精确匹配
       3. 图谱通道（BFS 遍历实体关系）— 关联记忆召回
+      4. 关键词镜像通道（词池倒排 + 别名归一，可关）— 字面命中补强
   → Token Budgeting（超出上下文窗口时在句子边界截断）
-  → RRF（倒数排名融合）加权合并
+  → RRF（倒数排名融合）加权合并（缺通道不惩罚）
   → Ebbinghaus 遗忘曲线衰减（salience 越高衰减越慢）
   → Top-K 注入 System Prompt
 ```
 
-三通道互补设计：
+各通道互补设计：
 - **向量通道**：捕捉语义相近但用词不同的记忆（如「不开心」匹配「沮丧」）
 - **BM25 通道**：精确命中专有名词和事实（人名、地名、技术术语），弥补语义检索的不足
 - **图谱通道**：召回与当前话题实体相关的历史事件（如聊到「Python」，召回之前学 Rust 时的挫折经历做关联）
+- **关键词镜像通道**：以关键词池（规范词 + 别名）倒排命中同义表述，与 BM25/向量互补
 
 ### Ebbinghaus 遗忘曲线记忆衰减
 
@@ -196,7 +198,7 @@ crates/
 ├── ramaria-llm/           # LLM Provider（LM Studio / DeepSeek / OpenAI）
 ├── ramaria-importer/      # QQ 聊天记录导入
 ├── ramaria-app/           # 应用编排（Pipeline + Stage + Session 生命周期）
-├── ramaria-cli/           # CLI 入口（11 个子命令）
+├── ramaria-cli/           # CLI 入口（18 个子命令）
 └── ramaria-desktop/       # Tauri 2 桌面应用
 config/
 ├── default.toml           # 默认配置模板
@@ -209,7 +211,7 @@ tests/                     # 集成测试
 <summary>展开查看各 crate 内部目录</summary>
 
 **ramaria-core/src/**
-- `config.rs` — RamariaConfig 统一配置（11 个配置域）
+- `config.rs` — RamariaConfig 统一配置（按功能域分组，含 utt/examples/bridge/知识/风格/行为/注入预算/层间去重等）
 - `error.rs` — 错误类型体系（8 种错误变体）
 - `traits.rs` — StorageBackend（40+ 方法）、LlmProvider、EmbeddingProvider
 - `types.rs` — 9 枚举 + 9 结构体（MemoryEvent, Persona, Session...）
@@ -220,14 +222,14 @@ tests/                     # 集成测试
 - `repo/` — 21 个 Repository（每类实体一个模块）
 
 **ramaria-memory/src/**
-- `l1/` — L0→L1 摘要生成（prompt + summarizer + evidence_notes）
+- `l1/` — L0→L1 摘要生成（prompt + summarizer + evidence_notes + 渐进式分段）
 - `event/` — L1→L2 事件提取 + TopicBatcher（batcher/mod,graph,buffer）+ ContextRetriever
-- `keyword/` — BigramWithDictionaryNormalizer + AliasManager
+- `keyword/` — 标准化器（normalizer）/ 倒排索引（index）/ 复合 + 语义扩展（composite）/ 词池三态（pool）/ 会话镜像（service）
 - `inference/` — 性格推断 Phase A/B/C（stats, clustering, shrink, causal, inferrer, drift, confidence, orchestrator）
-- `bm25.rs` / `vector.rs` / `graph_retriever.rs` — 三通道检索
-- `retriever.rs` — Persona-Aware 混合检索器 + 增量索引
-- `decay.rs` / `rrf.rs` / `token_budget.rs` — 衰减 / 融合 / 预算
-- `prompt/` — 5-Block System Prompt 构建
+- `bm25.rs` / `vector.rs` / `graph_retriever.rs` — 检索通道（BM25 / 向量 / 图谱）
+- `retriever/` — Persona-Aware 混合检索器（索引 / 检索 / utt 通道）+ 增量索引
+- `decay.rs` / `rrf.rs` / `token_budget.rs` — 衰减 / 多通道融合 / 预算（含注入协调预算）
+- `prompt/` — 四段式 System Prompt 装配（v3.1 §8.2）+ 层间仲裁
 - `init.rs` / `rebuild.rs` / `job.rs` — 冷启动 / 全量重建 / 后台任务
 
 **ramaria-llm/src/**
@@ -235,11 +237,12 @@ tests/                     # 集成测试
 - `transport.rs` — SSE 流式传输 + 重试策略
 - `lm_studio.rs` / `deepseek.rs` / `openai.rs` — 三后端适配器
 - `keychain.rs` — OS 凭据管理器
-- `embedding/` — ONNX 嵌入模型
+- `embedding/` — 原生 safetensors 嵌入（candle；BERT / LLaMA-Qwen3 架构自动检测，旧 ONNX 实现已停用）
 
 **ramaria-importer/src/**
 - `traits.rs` — ImportSource trait
-- `qq/` — QQ 解析器 + 导入器（JSON + TXT）
+- `writer.rs` — 导入源无关的 L0 写入（查询去重 + 单事务批量写）
+- `qq/` — QQ 解析器 + 导入器（QQChatExporter v6.x JSON，流式解析）
 
 **ramaria-app/src/**
 - `app.rs` — App 状态机 + 核心编排
@@ -252,7 +255,7 @@ tests/                     # 集成测试
 
 **ramaria-cli/src/**
 - `main.rs` — clap 定义 + 全局选项
-- `commands/` — 11 个子命令实现
+- `commands/` — 18 个子命令实现
 
 **ramaria-desktop/**
 - `src/` — Tauri Commands + 系统托盘 + 通知
@@ -261,7 +264,7 @@ tests/                     # 集成测试
 
 </details>
 
-**规模统计**：8 个 crate、~210 个源文件、~104,000 行 Rust 源码（含测试）、1590+ 测试函数。
+**规模统计**：8 个 crate、285 个 Rust 源文件、~129,000 行 Rust 源码（含测试）、2400+ 测试函数。
 
 ---
 
@@ -278,7 +281,7 @@ tests/                     # 集成测试
 
 ### 桌面应用安装
 
-1. 下载 `Ramaria_1.7.0_x64-setup.exe` 安装程序
+1. 下载 `Ramaria_2.0.0_x64-setup.exe` 安装程序
 2. 双击运行安装程序，按向导完成安装
 3. 桌面出现 Ramaria 快捷方式，双击启动
 4. 首次启动自动进入配置向导：
@@ -300,23 +303,23 @@ ramaria ask "介绍一下你自己"
 # 交互式对话（REPL）
 ramaria chat
 
-# 查看 L1 摘要
-ramaria memory --layer l1
+# 查看 L1 摘要（层级别名：l1/summary、l2/events、l3/profile）
+ramaria memory l1
 
 # 查看 L2 事件
-ramaria memory --layer l2
+ramaria memory l2
 
 # 查看 L3 人格画像
-ramaria memory --layer l3
+ramaria memory l3
 
 # 管理会话
 ramaria session list
 ramaria session show <id>
 ramaria session delete <id>
 
-# 修改配置
-ramaria config set llm.provider deepseek
-ramaria config set llm.api_key sk-xxxx
+# 修改配置（键名：provider / base_url / model_id / temperature / max_tokens）
+ramaria config set provider deepseek
+ramaria config set base_url https://api.deepseek.com/v1
 
 # 导入 QQ 聊天记录
 ramaria import qq --file chat.json --deep
@@ -367,7 +370,22 @@ Ramaria 默认将所有对话数据与记忆存储在本地。详见 [`docs/priv
 
 ## 版本历史
 
-### v1.7.0（当前版本）
+### v2.0.0 — 2026-09-13（当前版本）
+
+**「完备与实证」**：一次补全记忆系统该有的能力（关键词地基、多通道检索、注入治理、画像收口、前端完备），再用一份高情感真实聊天记录做全档位实验，把参数与层价值一次性定稿。
+
+**破坏性变更（需重建库）**：migration 合并为单个 2.0 基线（`20260905_v2.0_schema.sql`，27 张表），旧库无法自动迁移——按「**备份 → 重建空库 → 重新导入 → 数量核对**」升级（见 `docs/dev-2.0/upgrade-path-2.0.md`）。
+
+**主要变化**：
+
+- 关键词体系补完：统一标准化器、倒排索引 + 语义扩展、词池三态（规范词/别名/待确认）与 `ramaria keyword`、BM25 词典增强与索引版本自动重建；关键词镜像成为摘要路第四通道。
+- 检索与注入：utt / RAG / 知识三路参数解耦；四通道 RRF 融合（缺通道不惩罚）；注入预算与层间去重机制落地（默认关闭）；提示词样板精简约 1/3。
+- 画像与记忆：漂移检测真实生效、跨用户先验与分层收缩接线、因果链补"时延 + 情绪走势"、重述级联失效校验、风格小样本兜底；渐进式摘要转正（长会话按 60 条/块切分；存量 config.toml 显式值不跟随默认）。
+- 知识与召回：auto_fact_detect 增强抽取（隐含事实 / 线索→断言 / 互证提升），RAG 为主召回、事实卡片为兜底。
+- 前端：规则管理页 + 调试面板（关键词/风格/评估只读）+ 设置页 2.0 配置组；XSS 与流式显示加固；前端纯逻辑测试。
+- 评估定稿：RAG 摘要基座为唯一显著正向通道，四层专属注入无正净增量，知识层漏报（可及性轨）2.5%，7 个数值参数维持 v1.7 定稿值；正式报告见 `docs/dev-2.0/test/v2.0-evaluation-report.md`。
+
+### v1.7.0 — 2026-09-04
 
 v1.7 是"风格与闭环"版本：让 persona 的表达风格自动被学会、长对话与跨会话记忆不丢信息，并通过自我修正闭环持续校准。全程无破坏性变更，旧库无需重建。
 
@@ -418,11 +436,11 @@ Rust 重写完成的首个正式发布版本。完整记忆管线（L0→L3）�
 
 ### 与 Python 版（v0.7.x）的关系
 
-Python 版位于项目根目录，已进入**维护模式**，不再活跃开发。Rust v1.5 是正式替代版本。
+Python 版位于项目根目录，已进入**维护模式**，不再活跃开发。Rust 2.0 是正式替代版本。
 
 - 两个版本不共享数据库 schema，Python 旧数据不可自动迁移
 - Python 版将继续保留于仓库，接收关键安全修复，但不增加新功能
-- 新用户建议直接使用 Rust v1.5
+- 新用户建议直接使用 Rust 2.0
 
 > 两个版本使用独立的 Git 仓库管理历史和远程地址。
 
@@ -430,9 +448,9 @@ Python 版位于项目根目录，已进入**维护模式**，不再活跃开发
 
 ## 路线图
 
-v1.5 已完成"行为驱动"（行为层全链路 + 驱动环接线 + 导入 ETA + 生成缓存 + 探针 CLI 骨架 + CLI 自动化改造）。后续按 2.0 路线推进（`docs/dev-2.0/roadmap.md`）：v1.6 知识深化（知识卡片 + 画像升级 + 探针自动评分 + utt/D 参数定稿）→ v1.7 风格与闭环（风格统计 + 反馈环 + 正式评估）→ 2.0 整合发布。
+v1.5 ~ v1.7 已按路线依次交付（行为驱动 → 知识深化 → 风格与闭环），**2.0 已完成整合发布**（关键词地基 + 多通道检索 + 注入治理 + 画像收口 + 前端完备 + 数据驱动的参数定稿，见本页版本历史与 `docs/dev-2.0/`）。后续版本方向以 `docs/dev-2.0/roadmap.md` 为准。
 
-以下功能已在架构中预留接口，进入 **延后（deferred）** 队列，不在 v1.5 发布范围内：
+以下功能已在架构中预留接口，进入 **延后（deferred）** 队列，不在 2.0 发布范围内：
 
 - Ollama / Anthropic Claude / 通义千问后端
 - 微信 / Telegram / Discord / Slack 导入器
