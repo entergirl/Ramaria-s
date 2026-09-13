@@ -18,7 +18,7 @@ use ramaria_core::types::{Message, MessageRole, PersonaKind};
 
 use super::types::{
     ContextTurn, DATASET_SCHEMA_VERSION, DEFAULT_PERSONA, DatasetItem, ItemRegister, ProbeDataset,
-    ProbeVariant, VariantOverrides,
+    ProbeVariant, VariantOverrides, ablation_variants,
 };
 use super::{DeterministicRng, now_iso8601};
 
@@ -84,7 +84,7 @@ pub fn default_variants() -> Vec<ProbeVariant> {
 // probe build：构建测试集
 // =========================================================
 
-/// 构建测试集（供命令与脚本复用；含 fixture 兜底降级）。
+/// 构建测试集（可选追加消融档位；含 fixture 兜底降级）。
 ///
 /// 数据来源优先级:
 /// 1. `--source <file>`: 显式指定的数据源文件（JSON，含 messages/events）。
@@ -93,21 +93,25 @@ pub fn default_variants() -> Vec<ProbeVariant> {
 ///
 /// 参数:
 /// - `source`: 显式数据源文件（None = 从数据库构建）。
+/// - `ablation`: 为 true 时在默认 4 档之后追加 `ablation_variants()` 的 15 档消融
+///   Profile（共 19 档）；消融只改注入层闸门、不改 utt 切分（与 `ablation_variants()`
+///   口径一致）。
 ///
 /// 返回:
 /// - 恒成功：文件/数据库路径失败时自动降级为内置夹具（静默降级 + warn）。
-pub async fn build_dataset(
+pub async fn build_dataset_with_ablation(
     app: &Arc<ramaria_app::App>,
     persona: Option<String>,
     questions_per_dim: usize,
     seed: u64,
     source: Option<&Path>,
+    ablation: bool,
 ) -> ProbeDataset {
     let qpd = questions_per_dim.max(1);
     let target = resolve_target_persona(app, persona.as_deref()).await;
 
     // 按数据来源构建：文件 > 数据库 > fixture 兜底
-    match source {
+    let mut ds = match source {
         Some(path) => match build_from_file(path, &target, qpd, seed).await {
             Ok(ds) => ds,
             Err(e) => {
@@ -127,10 +131,29 @@ pub async fn build_dataset(
                 build_from_fixture(&target, qpd, seed)
             }
         },
+    };
+
+    // `--ablation`：默认档位之后追加 15 档消融 Profile（id 即 Profile 名）
+    if ablation {
+        ds.variants.extend(ablation_variants());
     }
+    ds
+}
+
+/// 构建测试集（默认档位；等价于 `build_dataset_with_ablation(..., false)`）。
+pub async fn build_dataset(
+    app: &Arc<ramaria_app::App>,
+    persona: Option<String>,
+    questions_per_dim: usize,
+    seed: u64,
+    source: Option<&Path>,
+) -> ProbeDataset {
+    build_dataset_with_ablation(app, persona, questions_per_dim, seed, source, false).await
 }
 
 /// 执行 `probe build`（构建 + 输出）。
+// 参数为 `probe build` 的完整输入集合（含输出模式与消融开关），合并会降低可读性。
+#[allow(clippy::too_many_arguments)]
 pub async fn run_build(
     app: &Arc<ramaria_app::App>,
     persona: Option<String>,
@@ -139,11 +162,32 @@ pub async fn run_build(
     source: Option<PathBuf>,
     output: Option<String>,
     json: bool,
+    ablation: bool,
 ) -> anyhow::Result<()> {
-    let dataset = build_dataset(app, persona, questions_per_dim, seed, source.as_deref()).await;
+    let dataset = build_dataset_with_ablation(
+        app,
+        persona,
+        questions_per_dim,
+        seed,
+        source.as_deref(),
+        ablation,
+    )
+    .await;
 
     // 输出：--output 写数据集文件；--json 输出信封；文本模式打印摘要
     if let Some(out) = output.as_deref() {
+        // `-` + --json：stdout 只出一行信封，原始数据集放 data.raw（避免两段 JSON）
+        if out == "-" && json {
+            let data = serde_json::json!({
+                "file": "-",
+                "persona_uid": dataset.persona_uid,
+                "source": dataset.source,
+                "items": dataset.items.len(),
+                "variants": dataset.variants.len(),
+                "raw": &dataset,
+            });
+            return crate::json::emit_ok(&data);
+        }
         write_dataset_file(out, &dataset)?;
         if json {
             let data = serde_json::json!({
@@ -810,6 +854,8 @@ pub fn sample_with_fallback<T: Clone>(
 }
 
 /// 写数据集到文件（`-` 表示 stdout，输出原始数据集 JSON）。
+///
+/// 说明: `-` 直出 stdout（含库内原文，口径见模块头 CR-SEC-102 登记）。
 fn write_dataset_file(out: &str, dataset: &ProbeDataset) -> anyhow::Result<()> {
     let json = serde_json::to_string_pretty(dataset).context("数据集序列化失败")?;
     if out == "-" {

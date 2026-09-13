@@ -14,7 +14,10 @@
 //! - 确定性抽样：内置 xorshift64* 伪随机（无外部依赖），seed 相同则测试集完全一致。
 //! - 隐私口径：数据集为本地评估输入，含评估所需文本——问题、参考文本，以及
 //!   tone/emotion 题项紧邻的上文轮次（上限 6 条，用于恢复社交语境）；
-//!   日志不记录完整问题与回复/上文（用 id / 长度 / 条数代替），产物不出端。
+//!   日志不记录完整问题与回复/上文（用 id / 长度 / 条数代替）。
+//! - 产物出口范围（登记 CR-SEC-102）：数据集/结果/评分/报告默认落地为本地文件；
+//!   用户显式 `--output -` 时直出 stdout（含库内原文），属"本机工具链、不出端"的口径边界；
+//!   进一步收紧（如 `--redact`）需负责人裁定，当前不改变默认行为。
 
 use std::sync::Arc;
 
@@ -32,9 +35,10 @@ pub use types::*;
 // 测试集 dataset 构建与内置夹具兜底下沉至 dataset.rs；
 // 根模块经 `pub use` 沿用原名称（probe build / scoring 调用点不变）。
 pub use dataset::{
-    build_dataset, build_from_file, build_from_fixture, default_variants, fixture_emotion_pairs,
-    fixture_fact_events, fixture_tone_pairs, has_emotion_cue, has_negative_cue, has_positive_cue,
-    run_build, sample_with_fallback, select_target_persona,
+    build_dataset, build_dataset_with_ablation, build_from_file, build_from_fixture,
+    default_variants, fixture_emotion_pairs, fixture_fact_events, fixture_tone_pairs,
+    has_emotion_cue, has_negative_cue, has_positive_cue, run_build, sample_with_fallback,
+    select_target_persona,
 };
 
 // 档位实验 run 族下沉至 run.rs；对外 API（build_experiment / build_experiment_with_repeat）
@@ -66,8 +70,21 @@ pub async fn run(app: &Arc<ramaria_app::App>, cmd: ProbeCmd, yes: bool) -> anyho
             seed,
             source,
             output,
+            ablation,
             json,
-        } => run_build(app, persona, questions_per_dim, seed, source, output, json).await,
+        } => {
+            run_build(
+                app,
+                persona,
+                questions_per_dim,
+                seed,
+                source,
+                output,
+                json,
+                ablation,
+            )
+            .await
+        }
         ProbeCmd::Run {
             dataset,
             variants,

@@ -4,6 +4,7 @@
 //! - `ImportSource` trait 定义导入源的统一接口，便于扩展 QQ/微信/Telegram 等格式
 //! - `ParsedMessage` 为解析后的中间表示，与存储层的 `Message` 解耦
 //! - `ImportReport` 提供完整的诊断信息：成功/降级/跳过 三类统计
+//! - 摘要双形态：`summary` 保留原值供程序化消费，`summary_masked` 掩码昵称/账号供终端输出
 //! - `ImportMode` 区分快速导入（仅 L0）和深度导入（全管线）
 //! - `PersonaSide` / `ImportSide` 为导入源无关的"双人对话双方/导入侧过滤"模型，
 //!   供各导入源与通用写入层复用；平台特有的 UID/画像命名规则留在各导入源模块
@@ -11,6 +12,7 @@
 //! - ImportReport 新增双方 QQ 号及对方标识字段，支持 UID 生成策略
 
 use ramaria_core::error::RamariaResult;
+use ramaria_core::privacy::mask_id;
 use std::path::Path;
 
 // =========================================================
@@ -291,30 +293,59 @@ impl ImportReport {
             + self.skipped_missing_meta
     }
 
-    /// 生成人类可读的摘要文本。
+    /// 生成人类可读的摘要文本（原值形态）。
     ///
-    /// 新增导出者 QQ 号和对方标识信息。
+    /// 用途:
+    /// - 供 `--json` 信封与程序化消费：保留导出者/对方昵称与账号标识原值。
+    /// - CLI 终端默认走 `summary_masked`，不直接使用本方法输出。
     pub fn summary(&self) -> String {
+        self.render_summary(false)
+    }
+
+    /// 生成掩码版人类可读摘要（CLI 终端输出用）。
+    ///
+    /// 说明:
+    /// - 双方姓名 / UID / QQ 号经 `mask_id` 脱敏后渲染，避免终端输出泄露标识；
+    /// - 文件路径、时间范围与统计数字保持原样。
+    pub fn summary_masked(&self) -> String {
+        self.render_summary(true)
+    }
+
+    /// 摘要渲染实现；`masked=true` 时把双方姓名/UID/QQ 号替换为掩码。
+    fn render_summary(&self, masked: bool) -> String {
+        let id_of = |raw: &str| {
+            if masked {
+                mask_id(raw)
+            } else {
+                raw.to_string()
+            }
+        };
         let mut s = String::new();
         s.push_str(&format!("文件: {}\n", self.file_path));
-        s.push_str(&format!("导出者: {}（UID={}", self.self_name, self.self_id));
+        s.push_str(&format!(
+            "导出者: {}（UID={}",
+            id_of(&self.self_name),
+            id_of(&self.self_id)
+        ));
         if let Some(ref uin) = self.self_uin {
-            s.push_str(&format!(", QQ号={}", uin));
+            s.push_str(&format!(", QQ号={}", id_of(uin)));
         }
         s.push_str(")\n");
         if !self.other_uid.is_empty() {
             s.push_str(&format!(
                 "对话对象: {}（UID={}",
-                self.other_name, self.other_uid
+                id_of(&self.other_name),
+                id_of(&self.other_uid)
             ));
             if let Some(ref uin) = self.other_uin {
-                s.push_str(&format!(", QQ号={}", uin));
+                s.push_str(&format!(", QQ号={}", id_of(uin)));
             }
             s.push_str(")\n");
         } else {
             s.push_str(&format!(
                 "对话对象: {}（{}）\n",
-                self.chat_name, self.chat_type
+                id_of(&self.chat_name),
+                self.chat_type
             ));
         }
         s.push_str(&format!(
@@ -456,4 +487,59 @@ pub trait ImportSource: Send + Sync {
         file_path: &Path,
         gap_minutes: u32,
     ) -> RamariaResult<(Vec<ImportedSession>, ImportReport)>;
+}
+
+// =========================================================
+// 测试
+// =========================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 掩码版摘要不泄露昵称与账号标识；原值版保留既有输出。
+    #[test]
+    fn summary_masked_hides_identifiers() {
+        let report = ImportReport {
+            file_path: "x.json".into(),
+            self_id: "u_self_001".into(),
+            self_name: "导出者昵称A".into(),
+            self_uin: Some("123456789".into()),
+            chat_name: "对方昵称B".into(),
+            chat_type: "private".into(),
+            other_uid: "u_peer_001".into(),
+            other_uin: Some("987654321".into()),
+            other_name: "对方昵称B".into(),
+            ..Default::default()
+        };
+
+        let masked = report.summary_masked();
+        for raw in [
+            "123456789",
+            "987654321",
+            "导出者昵称A",
+            "对方昵称B",
+            "u_self_001",
+        ] {
+            assert!(
+                !masked.contains(raw),
+                "掩码摘要不应包含原值 {raw}: {masked}"
+            );
+        }
+        assert!(
+            masked.contains("12…89"),
+            "掩码摘要应含 mask_id 后的 QQ 号: {masked}"
+        );
+
+        let plain = report.summary();
+        for raw in [
+            "123456789",
+            "987654321",
+            "导出者昵称A",
+            "对方昵称B",
+            "u_self_001",
+        ] {
+            assert!(plain.contains(raw), "原值摘要应保留 {raw}: {plain}");
+        }
+    }
 }

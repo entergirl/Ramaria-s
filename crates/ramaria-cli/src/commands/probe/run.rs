@@ -83,6 +83,17 @@ pub(super) async fn run_experiment(
 
     // Step 6: 输出
     if let Some(out) = output.as_deref() {
+        // `-` + --json：stdout 只出一行信封，原始结果放 data.raw（避免两段 JSON）
+        if out == "-" && json {
+            let data = serde_json::json!({
+                "file": "-",
+                "persona_uid": experiment.persona_uid,
+                "variants": experiment.variants.len(),
+                "runs": run_count,
+                "raw": &experiment,
+            });
+            return crate::json::emit_ok(&data);
+        }
         write_experiment_file(out, &experiment)?;
         if json {
             let data = serde_json::json!({
@@ -923,6 +934,8 @@ pub(super) fn filter_variants(
 }
 
 /// 写实验结果到文件（`-` 表示 stdout，输出原始结果 JSON）。
+///
+/// 说明: `-` 直出 stdout（含库内原文，口径见模块头 CR-SEC-102 登记）。
 fn write_experiment_file(out: &str, experiment: &ProbeExperiment) -> anyhow::Result<()> {
     let json = serde_json::to_string_pretty(experiment).context("实验结果序列化失败")?;
     if out == "-" {

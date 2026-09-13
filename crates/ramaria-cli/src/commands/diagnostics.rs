@@ -4,6 +4,7 @@
 //! - `ramaria diagnostics --output <PATH>`: 收集诊断信息并打包为 .zip。
 //! - 使用 canonicalize + 前缀检查防护路径穿越。
 //! - 输出路径默认为当前目录下的 `ramaria-diagnostics-{timestamp}.zip`。
+//! - `--json` 输出信封（导出路径/文件大小/收集状态）；文本模式打印收集状态摘要。
 //! - 所有错误使用 anyhow::Result，由 main.rs 统一处理。
 //!
 //! 安全约束:
@@ -31,10 +32,12 @@ pub struct DiagnosticsArgs {
 /// - `app`: App 实例（读取配置）。
 /// - `pool`: 数据库连接池（读取 schema_meta 版本）。
 /// - `args`: 命令参数。
+/// - `json`: `--json` 信封输出（导出路径/文件大小/收集状态）。
 pub async fn run(
     app: &Arc<ramaria_app::App>,
     pool: &sqlx::SqlitePool,
     args: DiagnosticsArgs,
+    json: bool,
 ) -> anyhow::Result<()> {
     let output_path = match args.output {
         Some(p) => PathBuf::from(p),
@@ -72,6 +75,14 @@ pub async fn run(
     let report = ramaria_app::export_diagnostics(config, schema_version, &output_path)
         .await
         .context("诊断信息导出失败")?;
+
+    if json {
+        return crate::json::emit_ok(&serde_json::json!({
+            "file": report.output_path.display().to_string(),
+            "file_size_bytes": report.file_size_bytes,
+            "collection_status": report.collection_status,
+        }));
+    }
 
     crate::ui::success(&format!(
         "诊断信息已导出到: {}\n文件大小: {}",

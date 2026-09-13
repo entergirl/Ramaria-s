@@ -20,7 +20,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::Stream;
 use ramaria_cli::commands::probe::{
-    ProbeCmd, build_dataset, build_experiment, build_experiment_with_repeat,
+    ProbeCmd, build_dataset, build_dataset_with_ablation, build_experiment,
+    build_experiment_with_repeat,
 };
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::traits::{ChatRequest, LlmProvider, StorageBackend, StoreCrud, StreamDelta};
@@ -237,6 +238,7 @@ async fn probe_build_command_runs_ok() {
             seed: 1,
             source: None,
             output: None,
+            ablation: false,
             json: false,
         },
         false,
@@ -246,6 +248,46 @@ async fn probe_build_command_runs_ok() {
         result.is_ok(),
         "probe build 命令应成功（空库 fixture 兜底）"
     );
+}
+
+/// `--ablation`：默认 4 档后追加 15 档消融 Profile（契约）。
+#[tokio::test]
+async fn probe_build_ablation_appends_all_profiles() {
+    let (app, _storage) = build_test_app();
+    let ds = build_dataset_with_ablation(&app, None, 1, 7, None, true).await;
+    assert_eq!(ds.variants.len(), 19, "默认 4 档 + 消融 15 档");
+    assert!(
+        ds.variants
+            .iter()
+            .any(|v| v.id == "baseline" && v.ablation.is_none())
+    );
+    for name in [
+        "B0",
+        "B1",
+        "F0",
+        "F1",
+        "F2",
+        "F3",
+        "F4",
+        "S_behavior",
+        "S_knowledge",
+        "S_expression",
+        "S_narrative",
+        "I_behavior",
+        "I_knowledge",
+        "I_expression",
+        "I_narrative",
+    ] {
+        assert!(
+            ds.variants
+                .iter()
+                .any(|v| v.id == name && v.ablation.as_deref() == Some(name)),
+            "缺少消融档位 {name}"
+        );
+    }
+    // 默认路径不受影响
+    let plain = build_dataset(&app, None, 1, 7, None).await;
+    assert_eq!(plain.variants.len(), 4);
 }
 
 // =========================================================
@@ -614,6 +656,80 @@ fn probe_dataset_alias_and_json_envelope() {
             .unwrap_or(0),
         4
     );
+}
+
+/// `probe build --ablation --json`：stdout 恰一行信封，data.variants 为 19 档。
+#[test]
+fn probe_build_ablation_json_envelope() {
+    let out = run_cli(&["probe", "build", "--ablation", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "probe build --ablation 应成功");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 1, "stdout 应只含一行 JSON");
+    let parsed: serde_json::Value =
+        serde_json::from_str(lines[0]).expect("stdout 必须是合法 JSON（M1 信封）");
+    assert_eq!(parsed["ok"], true, "信封 ok 应为 true");
+    assert_eq!(
+        parsed["data"]["variants"]
+            .as_array()
+            .map(|a| a.len())
+            .unwrap_or(0),
+        19,
+        "默认 4 档 + 消融 15 档"
+    );
+}
+
+/// `--output -` + `--json`：stdout 单段信封，原始数据集在 data.raw。
+#[test]
+fn probe_build_output_stdout_json_single_envelope() {
+    let out = run_cli(&["probe", "build", "--output", "-", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "probe build --output - 应成功");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 1, "stdout 应恰一行信封（不得出现两段 JSON）");
+    let parsed: serde_json::Value =
+        serde_json::from_str(lines[0]).expect("stdout 必须是合法 JSON（M1 信封）");
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["data"]["file"], "-");
+    assert!(
+        parsed["data"]["raw"]["items"].is_array(),
+        "原始数据集应放在 data.raw"
+    );
+}
+
+/// `probe report --output - --json`：同型单段信封（原始报告在 data.raw）。
+#[test]
+fn probe_report_output_stdout_json_single_envelope() {
+    let dir = std::env::temp_dir().join(format!(
+        "ramaria_probe_report_stdout_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::create_dir_all(&dir);
+    let results = dir.join("results.json");
+    std::fs::write(&results, minimal_experiment_json()).expect("写入结果文件失败");
+
+    let out = run_cli(&[
+        "probe",
+        "report",
+        "--results",
+        results.to_str().unwrap(),
+        "--output",
+        "-",
+        "--json",
+    ]);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(out.status.code(), Some(0), "probe report --output - 应成功");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 1, "stdout 应恰一行信封（不得出现两段 JSON）");
+    let parsed: serde_json::Value =
+        serde_json::from_str(lines[0]).expect("stdout 必须是合法 JSON（M1 信封）");
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["data"]["file"], "-");
+    assert!(parsed["data"]["raw"].is_object(), "原始报告应放在 data.raw");
 }
 
 /// `--results` 文件缺失 → 业务校验失败 exit code=4（非通用失败 1），

@@ -639,6 +639,8 @@ pub enum ProbeCmd {
         source: Option<PathBuf>,
         /// 数据集输出文件（`-` = stdout；不指定时仅 --json 输出完整数据集）
         output: Option<String>,
+        /// 追加 15 档消融 Profile（B0/B1/F0/F1~F4/S_*/I_*），用于消融数据集构建
+        ablation: bool,
         json: bool,
     },
     /// 执行档位实验

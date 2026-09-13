@@ -10,16 +10,24 @@
 //! 安全约束:
 //! - 所有测试使用 MockStorage + MockLlm，不调用真实 LLM
 //! - 不访问 OS keychain（MockLlm 使用 LM Studio provider，无需 keychain）
-//! - 不读写文件系统（export 测试使用 stdout）
+//! - 文件写入仅限系统临时目录（config 双写 / export 落盘），不触碰仓库文件
 
 mod common;
 
+use async_trait::async_trait;
 use common::{
     MockStorage, build_test_app, make_assistant_message, make_test_event, make_test_l1,
     make_test_persona, make_test_trait, make_user_message,
 };
-use ramaria_core::traits::{StoreCrud, StoreInfrastructure};
-use ramaria_core::types::{PersonaFact, PersonaKind};
+use futures::Stream;
+use ramaria_core::error::{RamariaError, RamariaResult};
+use ramaria_core::traits::{
+    ChatRequest, LlmProvider, StorageBackend, StoreCrud, StoreInfrastructure, StreamDelta,
+};
+use ramaria_core::types::{
+    BackendConfig, LlmProvider as LlmProviderKind, ModelCapability, PersonaFact, PersonaKind,
+};
+use std::pin::Pin;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -83,6 +91,78 @@ async fn build_app_with_data() -> (Arc<ramaria_app::App>, Arc<MockStorage>) {
     storage.add_setting("language", "zh-CN");
 
     (app, storage)
+}
+
+/// 用指定 LLM provider 构造 ready 状态的测试 App。
+fn build_app_with_llm(llm: Arc<dyn LlmProvider>) -> (Arc<ramaria_app::App>, Arc<MockStorage>) {
+    use ramaria_app::App;
+    use ramaria_core::config::RamariaConfig;
+
+    let storage = Arc::new(MockStorage::new());
+    let keychain = Arc::new(ramaria_llm::keychain::Keychain::new());
+    let config = RamariaConfig::default();
+    let app = App::new_without_embedding(
+        Arc::clone(&storage) as Arc<dyn StorageBackend>,
+        llm,
+        config,
+        keychain,
+    );
+    app.set_state(ramaria_core::types::AppState::Ready);
+    (Arc::new(app), storage)
+}
+
+/// 恒失败的 Mock LLM（验证错误链保留 RamariaError source，退出码不退化）。
+struct FailingLlm {
+    model_capability: ModelCapability,
+    config: BackendConfig,
+}
+
+impl FailingLlm {
+    fn new() -> Self {
+        let config = BackendConfig::lm_studio_default();
+        Self {
+            model_capability: ModelCapability {
+                provider: LlmProviderKind::LmStudio,
+                model_id: "failing-model".into(),
+                base_url: "http://localhost:1234/v1".into(),
+                supports_streaming: true,
+                supports_json_mode: false,
+                context_window: 4096,
+                max_output_tokens: 4096,
+            },
+            config,
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for FailingLlm {
+    async fn chat(&self, _request: &ChatRequest) -> RamariaResult<String> {
+        Err(RamariaError::llm("mock: LLM 恒失败"))
+    }
+
+    async fn chat_stream(
+        &self,
+        _request: &ChatRequest,
+    ) -> RamariaResult<Pin<Box<dyn Stream<Item = RamariaResult<StreamDelta>> + Send>>> {
+        Err(RamariaError::llm("mock: LLM 恒失败"))
+    }
+
+    fn capability(&self) -> &ModelCapability {
+        &self.model_capability
+    }
+
+    fn config(&self) -> &BackendConfig {
+        &self.config
+    }
+
+    async fn validate(&self) -> RamariaResult<()> {
+        Ok(())
+    }
+
+    fn name(&self) -> &'static str {
+        "FailingLlm"
+    }
 }
 
 // =========================================================
@@ -167,6 +247,44 @@ async fn session_show_invalid_uuid() {
     )
     .await;
     assert!(result.is_err()); // 无效 UUID
+}
+
+/// session summarize 在 LLM 恒失败时返回的错误必须保留 RamariaError source
+/// （否则退出码退化为 1，破坏 3=LLM/Embedding/Storage 契约）。
+/// 注：L1 生成走 JobManager 自带重试（指数退避 ~3s），属预期耗时。
+#[tokio::test]
+async fn session_summarize_preserves_ramaria_error_for_exit_code() {
+    let (app, storage) = build_app_with_llm(Arc::new(FailingLlm::new()));
+    let sid = Uuid::new_v4();
+    storage.create_session_with_messages(
+        sid,
+        vec![
+            make_user_message(sid, "你好"),
+            make_assistant_message(sid, "你好！有什么我可以帮你的？"),
+        ],
+    );
+
+    let result = ramaria_cli::commands::session::run(
+        &app,
+        ramaria_cli::commands::session::SessionCmd::Summarize {
+            session_id: sid.to_string(),
+            persona_uid: None,
+            progressive: false,
+        },
+        false,
+        true,
+    )
+    .await;
+
+    let err = result.expect_err("LLM 恒失败应返回 Err");
+    let re = err
+        .chain()
+        .find_map(|e| e.downcast_ref::<RamariaError>())
+        .expect("必须保留 RamariaError source（否则退出码退化为 1）");
+    assert!(
+        matches!(re, RamariaError::Llm { .. }),
+        "L1 失败应映射为 Llm 类错误，实际: {re:?}"
+    );
 }
 
 // =========================================================
@@ -260,7 +378,13 @@ async fn config_get_custom_setting() {
 
 #[tokio::test]
 async fn config_set_valid_temperature() {
-    let (app, _storage) = build_test_app();
+    // 修复前：默认 App 的 config_dir="" → 相对路径 config.toml 落到 crate 根（cwd），
+    // 污染被跟踪文件；修复后必须只写临时目录。
+    let dir = temp_config_dir("temperature");
+    let (app, _storage) = build_test_app_with_config_dir(&dir);
+
+    let repo_config = std::path::Path::new("config.toml");
+    let before = std::fs::read_to_string(repo_config).ok();
 
     let result = ramaria_cli::commands::config::run(
         &app,
@@ -272,6 +396,19 @@ async fn config_set_valid_temperature() {
     )
     .await;
     assert!(result.is_ok());
+
+    let after = std::fs::read_to_string(repo_config).ok();
+    assert_eq!(
+        before, after,
+        "测试不得改写仓库内 crates/ramaria-cli/config.toml"
+    );
+    // 写入路径确实落在配置目录（临时目录），确保上面的断言不是在空路径上通过
+    assert!(
+        dir.join("config.toml").exists(),
+        "config set 应把 config.toml 写入配置目录（临时目录）"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
@@ -836,14 +973,14 @@ async fn export_markdown_to_file() {
 #[tokio::test]
 async fn index_rebuild() {
     let (app, _storage) = build_test_app();
-    let result = ramaria_cli::commands::index_cmd::run(&app).await;
+    let result = ramaria_cli::commands::index_cmd::run(&app, false).await;
     assert!(result.is_ok());
 }
 
 #[tokio::test]
 async fn index_rebuild_with_data() {
     let (app, _storage) = build_app_with_data().await;
-    let result = ramaria_cli::commands::index_cmd::run(&app).await;
+    let result = ramaria_cli::commands::index_cmd::run(&app, false).await;
     assert!(result.is_ok());
 }
 
@@ -1308,6 +1445,7 @@ async fn import_dry_run_missing_file_is_validation_error() {
             persona_other_uid: None,
             gap: 10,
             side: ramaria_importer::qq::ImportSide::Both,
+            no_report: false,
             yes: false,
             json: false,
         },
@@ -1471,4 +1609,196 @@ fn fact_no_delete_subcommand() {
         !help_text.contains("delete"),
         "help 不应含 delete 子命令（双端不做事实删除）"
     );
+}
+
+// =========================================================
+// 导入解析报告隐私契约（进程级）
+// =========================================================
+
+/// 导入解析报告：默认掩码、--no-report 关闭、--quiet 抑制（CLI-01 契约）。
+#[test]
+fn import_report_masked_no_report_and_quiet() {
+    // 最小 qq-chat-exporter v6.x JSON：chatInfo（含可识别昵称/QQ 号）+ 1 条 text 消息
+    let json = r#"{
+        "chatInfo": {
+            "name": "对方昵称B",
+            "type": "private",
+            "selfUid": "u_self_001",
+            "selfName": "导出者昵称A",
+            "selfUin": "123456789",
+            "peerUid": "u_peer_001",
+            "peerUin": "987654321"
+        },
+        "messages": [
+            {
+                "id": "m1",
+                "timestamp": 1700000000000,
+                "type": "text",
+                "content": { "text": "你好" }
+            }
+        ]
+    }"#;
+    let file_path = std::env::temp_dir().join(format!(
+        "ramaria_cli_import_report_{}.json",
+        std::process::id()
+    ));
+    std::fs::write(&file_path, json).expect("写入临时 QQ 导出文件失败");
+    let file_arg = file_path.to_string_lossy().to_string();
+
+    // 1) 默认：报告走掩码版（stderr 不含原值，含 mask_id 掩码形态）
+    let out = run_cli(&["import", "qq", "--file", file_arg.as_str(), "--dry-run"]);
+    assert_eq!(out.status.code(), Some(0), "dry-run 应成功退出");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("123456789"),
+        "stderr 不应含导出者 QQ 号原值: {stderr}"
+    );
+    assert!(
+        !stderr.contains("导出者昵称A"),
+        "stderr 不应含导出者昵称原值: {stderr}"
+    );
+    assert!(stderr.contains("12…89"), "stderr 应含掩码 QQ 号: {stderr}");
+
+    // 2) --no-report：完全关闭解析报告输出
+    let out = run_cli(&[
+        "import",
+        "qq",
+        "--file",
+        file_arg.as_str(),
+        "--dry-run",
+        "--no-report",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "--no-report 应成功退出");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("解析报告"),
+        "--no-report 不应输出解析报告: {stderr}"
+    );
+
+    // 3) --quiet：全局抑制 stderr 提示（报告属提示类输出）
+    let out = run_cli(&[
+        "import",
+        "qq",
+        "--file",
+        file_arg.as_str(),
+        "--dry-run",
+        "--quiet",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "--quiet 应成功退出");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("解析报告"),
+        "--quiet 应抑制解析报告: {stderr}"
+    );
+
+    let _ = std::fs::remove_file(&file_path);
+}
+
+// =========================================================
+// JSON 信封契约（进程级）
+// =========================================================
+// 覆盖:
+// - setup / chat 为交互式命令：--json 显式 unsupported（错误信封 + exit 4）
+// - blocks rebuild / index rebuild / diagnostics：--json 成功信封 + stdout 纯净性
+
+/// 交互式命令 setup 与 --json 不兼容：显式 unsupported（错误信封 + exit 4）。
+#[test]
+fn setup_json_is_explicitly_unsupported() {
+    let out = run_cli(&["setup", "--json"]);
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "setup --json 应显式失败（exit 4）"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 1, "stdout 应只含一行 JSON，实际: {stdout:?}");
+    let parsed: serde_json::Value = serde_json::from_str(lines[0]).expect("stdout 必须是合法 JSON");
+    assert_eq!(parsed["ok"], false, "信封 ok 应为 false");
+    assert_eq!(parsed["error"]["code"], 4);
+    assert!(
+        parsed["error"]["message"].is_string(),
+        "错误信封应含 message"
+    );
+}
+
+/// 交互式命令 chat 与 --json 不兼容：显式 unsupported（错误信封 + exit 4）。
+#[test]
+fn chat_json_is_explicitly_unsupported() {
+    let out = run_cli(&["chat", "--json"]);
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "chat --json 应显式失败（exit 4）"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 1, "stdout 应只含一行 JSON，实际: {stdout:?}");
+    let parsed: serde_json::Value = serde_json::from_str(lines[0]).expect("stdout 必须是合法 JSON");
+    assert_eq!(parsed["ok"], false, "信封 ok 应为 false");
+    assert_eq!(parsed["error"]["code"], 4);
+}
+
+/// blocks rebuild --json：成功信封（含 rebuilt 键），stdout 仅一行 JSON。
+#[test]
+fn blocks_rebuild_json_envelope() {
+    let out = run_cli(&["blocks", "rebuild", "--json"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "blocks rebuild --json 应成功退出"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 1, "stdout 应只含一行 JSON，实际: {stdout:?}");
+    let parsed: serde_json::Value = serde_json::from_str(lines[0]).expect("stdout 必须是合法 JSON");
+    assert_eq!(parsed["ok"], true, "信封 ok 应为 true");
+    assert!(parsed["data"].is_object(), "data 应为对象");
+    assert!(
+        parsed["data"]["rebuilt"].is_boolean(),
+        "data.rebuilt 应存在且为布尔"
+    );
+}
+
+/// index rebuild --json：成功信封（doc_count 为数字），stdout 仅一行 JSON。
+#[test]
+fn index_rebuild_json_envelope() {
+    let out = run_cli(&["index", "rebuild", "--json"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "index rebuild --json 应成功退出"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 1, "stdout 应只含一行 JSON，实际: {stdout:?}");
+    let parsed: serde_json::Value = serde_json::from_str(lines[0]).expect("stdout 必须是合法 JSON");
+    assert_eq!(parsed["ok"], true, "信封 ok 应为 true");
+    assert!(
+        parsed["data"]["doc_count"].is_number(),
+        "data.doc_count 应为数字"
+    );
+}
+
+/// diagnostics --json：成功信封（file 指向真实产物），结束后清理临时文件。
+#[test]
+fn diagnostics_json_envelope() {
+    let zip_path = std::env::temp_dir().join(format!("ramaria-diag-{}.zip", std::process::id()));
+    let zip_arg = zip_path.to_string_lossy().to_string();
+    let out = run_cli(&["diagnostics", "--json", "--output", zip_arg.as_str()]);
+    assert_eq!(out.status.code(), Some(0), "diagnostics --json 应成功退出");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 1, "stdout 应只含一行 JSON，实际: {stdout:?}");
+    let parsed: serde_json::Value = serde_json::from_str(lines[0]).expect("stdout 必须是合法 JSON");
+    assert_eq!(parsed["ok"], true, "信封 ok 应为 true");
+    let file = parsed["data"]["file"]
+        .as_str()
+        .expect("data.file 应为字符串");
+    assert!(
+        std::path::Path::new(file).exists(),
+        "导出文件应存在: {file}"
+    );
+    // 清理临时产物（以报告中 canonical 化后的路径为准）
+    let _ = std::fs::remove_file(file);
 }

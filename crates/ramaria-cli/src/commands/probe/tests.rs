@@ -2419,10 +2419,16 @@ fn render_report_markdown_sections_cover_i_s_columns_and_limitations() {
     assert!(md.contains("数据特性与外部效度局限"), "局限节必出");
     assert!(md.contains("基于单 persona"), "单 persona 局限文本应出现");
     assert!(md.contains("统计法样本"), "repeat 局限文本应出现");
-    // 辅助指标四件套节
+    // 辅助指标四件套节（渲染文本统一标注代理口径）
     assert!(md.contains("辅助指标（产物可复算）"), "辅助指标节必出");
-    assert!(md.contains("证据链可追溯率"), "证据链可追溯率项应出现");
-    assert!(md.contains("画像回归"), "画像回归项应出现");
+    for label in [
+        "证据链可追溯率（代理口径）",
+        "行为规则命中率（代理口径）",
+        "情境路由误用率（代理口径）",
+        "画像回归（代理口径",
+    ] {
+        assert!(md.contains(label), "辅助指标渲染缺少代理口径标注: {label}");
+    }
     assert!(
         md.contains("描述性指标（不参与层价值判定）"),
         "描述性指标小节必出"

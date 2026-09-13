@@ -453,7 +453,7 @@ pub(super) fn compute_auxiliary_metrics(evaluation: &ProbeEvaluation) -> Auxilia
 
     // 口径与局限说明（必出）。
     let mut note = String::from(
-        "辅助指标为探针产物可复算近似：证据链可追溯率=fact 回复对 golden 覆盖率 \
+        "辅助指标为探针产物可复算近似（代理口径）：证据链可追溯率=fact 回复对 golden 覆盖率 \
          (score≥0.5)；行为规则命中/情境路由误用=emotion rubric 代理（读回复文本与极性，\
          不读真实规则库）；画像回归=repeat 跨轮 fact/tone/emotion 三维 std 均值。规则-事件一致性/知识准确率等\
          人工抽样指标不在探针内。",
@@ -869,6 +869,18 @@ pub(super) async fn run_report(
 
     // Step 7: 输出
     if let Some(out) = output {
+        // `-` + --json：stdout 只出一行信封，原始报告放 data.raw（避免两段 JSON）
+        if out == "-" && json {
+            let data = serde_json::json!({
+                "file": "-",
+                "persona_uid": report.persona_uid,
+                "variants": report.variants.len(),
+                "calibration": report.calibration.is_some(),
+                "knowledge_quality": report.knowledge_quality.is_some(),
+                "raw": &report,
+            });
+            return crate::json::emit_ok(&data);
+        }
         // 按扩展名判断输出形态：.json → JSON；.md → markdown；其他按 --json 决定
         let is_json_file = out.ends_with(".json");
         if is_json_file || (json && !out.ends_with(".md")) {
@@ -2189,6 +2201,8 @@ pub(super) fn assess_knowledge_quality(evaluation: &ProbeEvaluation) -> Knowledg
 // =========================================================
 
 /// 写 JSON 报告到文件。
+///
+/// 说明: `-` 直出 stdout（含库内原文，口径见模块头 CR-SEC-102 登记）。
 fn write_report_json(out: &str, report: &ProbeReport) -> anyhow::Result<()> {
     let json = serde_json::to_string_pretty(report).context("报告 JSON 序列化失败")?;
     if out == "-" {
@@ -2200,6 +2214,8 @@ fn write_report_json(out: &str, report: &ProbeReport) -> anyhow::Result<()> {
 }
 
 /// 写 markdown 报告到文件。
+///
+/// 说明: `-` 直出 stdout（含库内原文，口径见模块头 CR-SEC-102 登记）。
 fn write_report_markdown(out: &str, report: &ProbeReport) -> anyhow::Result<()> {
     let md = render_report_markdown(report);
     if out == "-" {
@@ -2497,25 +2513,25 @@ pub(super) fn render_report_markdown(report: &ProbeReport) -> String {
             .unwrap_or_else(|| "-".to_string())
     };
     md.push_str(&format!(
-        "- 证据链可追溯率：{}\n",
+        "- 证据链可追溯率（代理口径）：{}\n",
         fmt_opt(report.auxiliary.evidence_traceability_rate)
     ));
     md.push_str(&format!(
-        "- 行为规则命中率（代理）：{}\n",
+        "- 行为规则命中率（代理口径）：{}\n",
         fmt_opt(report.auxiliary.behavior_rule_hit_rate)
     ));
     md.push_str(&format!(
-        "- 情境路由误用率（代理）：{}\n",
+        "- 情境路由误用率（代理口径）：{}\n",
         fmt_opt(report.auxiliary.situation_route_misuse_rate)
     ));
     match report.auxiliary.profile_regression_output_stability {
         Some(s) => md.push_str(&format!(
-            "- 画像回归（跨轮 fact/tone/emotion std 均值）：{:.4}\n",
+            "- 画像回归（代理口径，跨轮 fact/tone/emotion std 均值）：{:.4}\n",
             s
         )),
-        None => {
-            md.push_str("- 画像回归（跨轮 fact/tone/emotion std 均值）：-（无 --repeat 明细）\n")
-        }
+        None => md.push_str(
+            "- 画像回归（代理口径，跨轮 fact/tone/emotion std 均值）：-（无 --repeat 明细）\n",
+        ),
     }
     md.push_str(&format!(
         "- 口径与局限：{}\n\n",
@@ -2624,7 +2640,7 @@ fn print_report_summary(report: &ProbeReport) {
             .unwrap_or_else(|| "-".to_string())
     };
     println!(
-        "辅助指标: 可追溯率={} 规则命中(代理)={} 路由误用(代理)={} 画像回归(std)={}",
+        "辅助指标: 可追溯率(代理口径)={} 规则命中(代理口径)={} 路由误用(代理口径)={} 画像回归(代理口径,std)={}",
         fmt_opt(report.auxiliary.evidence_traceability_rate),
         fmt_opt(report.auxiliary.behavior_rule_hit_rate),
         fmt_opt(report.auxiliary.situation_route_misuse_rate),

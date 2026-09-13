@@ -6,7 +6,9 @@
 //! - `--force`：先清空全部 utt_blocks 再全量重建（切分参数 θ_gap/条数上限
 //!   变更后必须使用——增量语义只重切每会话最后一块，旧块不会按新参数重切）
 //! - 完成后自动刷新内存检索器（utt 向量通道 `L0:{utt_block_id}`）
+//! - `--json` 输出信封（rebuilt / force / 块计数 / embedding 统计 / 耗时 / 文档数）
 
+use anyhow::Context;
 use std::sync::Arc;
 
 use ramaria_memory::utt::builder::UttBuilder;
@@ -18,9 +20,9 @@ pub enum UttCmd {
 }
 
 /// 执行 utt 命令。
-pub async fn run(app: &Arc<ramaria_app::App>, cmd: UttCmd) -> anyhow::Result<()> {
+pub async fn run(app: &Arc<ramaria_app::App>, cmd: UttCmd, json: bool) -> anyhow::Result<()> {
     match cmd {
-        UttCmd::Rebuild { force } => rebuild(app, force).await,
+        UttCmd::Rebuild { force } => rebuild(app, force, json).await,
     }
 }
 
@@ -28,7 +30,8 @@ pub async fn run(app: &Arc<ramaria_app::App>, cmd: UttCmd) -> anyhow::Result<()>
 ///
 /// 参数:
 /// - `force`: 先清空全部 utt_blocks 再全量重建（切分参数变更后必须使用）。
-async fn rebuild(app: &Arc<ramaria_app::App>, force: bool) -> anyhow::Result<()> {
+/// - `json`: `--json` 信封输出（配置未启用与成功路径均输出结构化数据）。
+async fn rebuild(app: &Arc<ramaria_app::App>, force: bool, json: bool) -> anyhow::Result<()> {
     // 读取生效配置（config.toml + DB 双写合并），确保使用当前切分参数
     let config_path = std::path::PathBuf::from(&app.config().paths.config_dir).join("config.toml");
     let sync = ramaria_app::ConfigSyncService::new(app.storage().clone(), config_path);
@@ -38,6 +41,12 @@ async fn rebuild(app: &Arc<ramaria_app::App>, force: bool) -> anyhow::Result<()>
         .map_err(|e| anyhow::anyhow!("读取配置失败: {e}"))?;
 
     if !cfg.utt.enabled {
+        if json {
+            return crate::json::emit_ok(&serde_json::json!({
+                "rebuilt": false,
+                "reason": "utt_disabled",
+            }));
+        }
         crate::ui::warn("utt 配置未启用（[utt].enabled=false），跳过重建");
         return Ok(());
     }
@@ -70,8 +79,25 @@ async fn rebuild(app: &Arc<ramaria_app::App>, force: bool) -> anyhow::Result<()>
     let stats = builder
         .rebuild_all(app.storage().as_ref(), embedder)
         .await
-        .map_err(|e| anyhow::anyhow!("utt 全量构建失败: {e}"))?;
+        .context("utt 全量构建失败")?;
     let elapsed = start.elapsed();
+
+    // 刷新内存检索器（含 utt 向量通道），使新块立即可检索
+    let doc_count = app.rebuild_retriever().await.context("检索索引重建失败")?;
+
+    if json {
+        return crate::json::emit_ok(&serde_json::json!({
+            "rebuilt": true,
+            "force": force,
+            "chunks_created": stats.chunks_created,
+            "chunks_skipped": stats.chunks_skipped,
+            "chunks_removed": stats.chunks_removed,
+            "embedding_ok": stats.embedding_ok,
+            "embedding_failed": stats.embedding_failed,
+            "elapsed_ms": elapsed.as_millis() as u64,
+            "doc_count": doc_count,
+        }));
+    }
 
     crate::ui::success(&format!(
         "utt 块构建完成 — 新建 {} / 跳过 {} / 删除 {}，embedding 成功 {} / 失败 {}，耗时 {:.1}s",
@@ -82,12 +108,6 @@ async fn rebuild(app: &Arc<ramaria_app::App>, force: bool) -> anyhow::Result<()>
         stats.embedding_failed,
         elapsed.as_secs_f64()
     ));
-
-    // 刷新内存检索器（含 utt 向量通道），使新块立即可检索
-    let doc_count = app
-        .rebuild_retriever()
-        .await
-        .map_err(|e| anyhow::anyhow!("检索索引重建失败: {e}"))?;
     crate::ui::info(&format!("检索器已刷新（{doc_count} 篇文档）"));
 
     Ok(())

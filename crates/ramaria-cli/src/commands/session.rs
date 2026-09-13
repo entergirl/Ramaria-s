@@ -362,8 +362,9 @@ async fn summarize_session(
             crate::ui::warn("该会话无消息，无法生成摘要");
         }
         Err(e) => {
-            crate::ui::print_error(&e);
-            anyhow::bail!("L1 摘要生成失败: {e}");
+            // 保留 RamariaError 类型上抛：main 按错误链映射退出码
+            // （LLM/Embedding/Storage → 3，业务校验 → 4），不得降级为字符串
+            return Err(e.into());
         }
     }
 
@@ -431,8 +432,9 @@ async fn summarize_session_progressive(
             Ok(())
         }
         Err(e) => {
-            crate::ui::print_error(&e);
-            anyhow::bail!("L1 摘要生成失败: {e}");
+            // 保留 RamariaError 类型上抛：main 按错误链映射退出码
+            // （LLM/Embedding/Storage → 3，业务校验 → 4），不得降级为字符串
+            Err(e.into())
         }
     }
 }

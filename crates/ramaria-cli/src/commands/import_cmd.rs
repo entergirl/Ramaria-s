@@ -9,7 +9,7 @@
 //! - `--persona` 向后兼容，行为等同于 `--persona-self-name`
 //! - L1 摘要 persona_uid 存 NULL，不绑定特定画像（避免记忆视图污染）
 //! - Persona 自动管理：查找或创建 source="qq" 的 persona（UID 生成策略: 显式指定 > uin > uid > seq）
-//! - 解析报告输出到 stderr 提示，数据输出遵循 stdout 纯净性（--json 信封）
+//! - 解析报告默认以掩码版输出到 stderr 提示（`--no-report` 可关闭），数据输出遵循 stdout 纯净性（--json 信封）
 //! - 确认规则（M1 B 项）：`--yes` 自动确认；非 TTY 且无 `--yes` 不挂起、直接失败提示
 //! - 使用 ramaria-importer crate 做格式检测、解析和写入
 //! - 仅支持 qq-chat-exporter v6.x JSON 格式（语义化 type 名称）
@@ -47,6 +47,8 @@ pub struct ImportArgs {
     pub gap: u32,
     /// 导入侧过滤：self|other|both，默认 both
     pub side: ramaria_importer::qq::ImportSide,
+    /// 跳过解析报告输出（报告含导出者/对方标识，默认输出为掩码版）
+    pub no_report: bool,
     /// 跳过确认提示
     pub yes: bool,
     /// JSON 信封输出
@@ -65,7 +67,7 @@ pub struct ImportArgs {
 ///   流程:
 /// 1. 校验文件路径和扩展名
 /// 2. 格式检测（qq-chat-exporter JSON）
-/// 3. 文件解析 → 诊断报告输出（含双方标识信息）
+/// 3. 文件解析 → 诊断报告输出（默认掩码版，`--no-report` 关闭）
 /// 4. 用户确认（非 --yes 模式）
 /// 5. 双画像 Persona 准备（self + other 各调用一次 ensure_qq_persona）
 /// 6. 执行导入（fast/deep，按发送者分配 persona_uid）
@@ -136,9 +138,11 @@ pub async fn run(
     // Step 3: 文件解析
     let (sessions, report) = importer.parse(path, args.gap).context("文件解析失败")?;
 
-    // 打印解析报告（stderr 提示，不污染 stdout 数据流）
-    crate::ui::info("📊 解析报告:");
-    eprintln!("{}", report.summary());
+    // 打印解析报告（stderr 提示，不污染 stdout 数据流；默认掩码版，避免昵称/账号标识落盘）
+    if !args.no_report {
+        crate::ui::info("📊 解析报告:");
+        crate::ui::info(&report.summary_masked());
+    }
 
     if sessions.is_empty() {
         // --json 模式：输出空数据信封（agent 可区分“成功但无数据”与异常）

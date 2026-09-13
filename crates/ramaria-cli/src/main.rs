@@ -395,6 +395,10 @@ enum ProbeArgs {
         /// 数据集输出文件（`-` = stdout；不指定时 --json 输出完整数据集）
         #[arg(long)]
         output: Option<String>,
+
+        /// 追加 15 档消融 Profile（B0/B1/F0/F1~F4/S_*/I_*），用于消融数据集构建
+        #[arg(long)]
+        ablation: bool,
     },
 
     /// 按参数档位批量跑对话管线，结构化输出（档位 → 输出 → 指标）
@@ -522,6 +526,10 @@ enum ImportCmd {
         /// session 切割时间间隔（分钟），默认 10
         #[arg(long, default_value = "10")]
         gap: u32,
+
+        /// 不输出解析报告（报告含导出者/对方标识；默认输出为掩码版）
+        #[arg(long)]
+        no_report: bool,
     },
 }
 
@@ -628,6 +636,22 @@ async fn main() {
 
     let json_mode = cli.json;
 
+    // 交互式命令与 --json 不兼容：显式 unsupported（错误信封 + exit 4）。
+    // 在 App 初始化前拦截，避免生成 config.toml 等副作用。
+    if cli.json {
+        let interactive = match &cli.command {
+            Commands::Setup => Some("setup"),
+            Commands::Chat => Some("chat"),
+            _ => None,
+        };
+        if let Some(name) = interactive {
+            let err = anyhow::anyhow!(RamariaError::validation(format!(
+                "{name} 为交互式命令，不支持 --json 输出"
+            )));
+            exit_with_error(&err, true);
+        }
+    }
+
     // 初始化 App（后端不可用视为 exit code 3）
     let (app, pool) = match init_app(cli.db.clone()).await {
         Ok((a, p)) => (a, p),
@@ -642,10 +666,12 @@ async fn main() {
     }
 }
 
-/// 带分组的 clap Command（`ramaria help` 按 对话/记忆/数据/管理/高级 分组显示子命令）。
-fn grouped_command() -> clap::Command {
-    let mut cmd = Cli::command();
-    for (name, heading) in [
+/// 子命令帮助分组表（`(命令名, 分组标题)`）。
+///
+/// 说明: 新增顶层命令必须在此登记（有测试锁定完整性），
+/// 否则该命令在 `--help` 中会落到无分组区域。
+fn help_groups() -> Vec<(&'static str, &'static str)> {
+    vec![
         ("ask", "对话"),
         ("chat", "对话"),
         ("setup", "对话"),
@@ -657,12 +683,20 @@ fn grouped_command() -> clap::Command {
         ("session", "管理"),
         ("config", "管理"),
         ("persona", "管理"),
-        ("diagnostics", "管理"),
+        ("rule", "管理"),
+        ("fact", "管理"),
         ("keyword", "管理"),
         ("style", "管理"),
+        ("diagnostics", "管理"),
         ("status", "高级"),
         ("probe", "高级"),
-    ] {
+    ]
+}
+
+/// 带分组的 clap Command（`ramaria help` 按 对话/记忆/数据/管理/高级 分组显示子命令）。
+fn grouped_command() -> clap::Command {
+    let mut cmd = Cli::command();
+    for (name, heading) in help_groups() {
         cmd = cmd.mut_subcommand(name, |c| c.subcommand_help_heading(heading));
     }
     cmd
@@ -898,7 +932,10 @@ async fn init_app(db_path: PathBuf) -> anyhow::Result<(Arc<ramaria_app::App>, sq
             Arc::new(provider)
         }
         _ => {
-            anyhow::bail!("不支持的 LLM provider");
+            return Err(anyhow::anyhow!(RamariaError::unsupported(format!(
+                "不支持的 LLM provider: {}",
+                backend_config.provider.as_str()
+            ))));
         }
     };
 
@@ -977,12 +1014,12 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
         }
         Commands::Blocks(sub) => match sub {
             BlocksCmd::Rebuild { force } => {
-                commands::utt::run(app, commands::utt::UttCmd::Rebuild { force }).await?;
+                commands::utt::run(app, commands::utt::UttCmd::Rebuild { force }, cli.json).await?;
             }
         },
         Commands::Index(sub) => match sub {
             IndexCmd::Rebuild => {
-                commands::index_cmd::run(app).await?;
+                commands::index_cmd::run(app, cli.json).await?;
             }
         },
         Commands::Session(sub) => {
@@ -1147,6 +1184,7 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
                 persona_other_uid,
                 side,
                 gap,
+                no_report,
             } => {
                 // --persona 向后兼容（映射为 self_name）
                 let effective_self_name = persona_self_name.or(persona);
@@ -1160,6 +1198,7 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
                     persona_other_uid,
                     gap,
                     side,
+                    no_report,
                     // --force 与 --yes 双保险
                     yes: cli.yes || force,
                     json: cli.json,
@@ -1170,7 +1209,7 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
         },
         Commands::Diagnostics { output } => {
             let args = commands::diagnostics::DiagnosticsArgs { output };
-            commands::diagnostics::run(app, pool, args).await?;
+            commands::diagnostics::run(app, pool, args, cli.json).await?;
         }
         Commands::Status => {
             let args = commands::status::StatusArgs {
@@ -1187,12 +1226,14 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
                     seed,
                     source,
                     output,
+                    ablation,
                 } => commands::probe::ProbeCmd::Build {
                     persona,
                     questions_per_dim,
                     seed,
                     source,
                     output,
+                    ablation,
                     json: cli.json,
                 },
                 ProbeArgs::Run {
@@ -1553,6 +1594,25 @@ mod tests {
         }
     }
 
+    /// 帮助分组表必须覆盖全部顶层子命令，rule/fact 归"管理"分组。
+    #[test]
+    fn help_groups_cover_all_subcommands_and_rule_fact() {
+        let groups = help_groups();
+        // 全部顶层命令都有分组（防新增命令漏登记）
+        for sub in Cli::command().get_subcommands() {
+            let name = sub.get_name();
+            if name == "help" {
+                continue; // clap 自动生成的 help 子命令无需分组
+            }
+            assert!(
+                groups.iter().any(|(n, _)| *n == name),
+                "子命令 {name} 未在 help_groups 登记分组"
+            );
+        }
+        assert!(groups.contains(&("rule", "管理")), "rule 应归管理分组");
+        assert!(groups.contains(&("fact", "管理")), "fact 应归管理分组");
+    }
+
     // =========================================================
     // init_app 集成测试（真实 SQLite 临时库，不连网）
     // =========================================================
@@ -1721,5 +1781,23 @@ mod tests {
 
         pool.close().await;
         cleanup_temp_dir(&dir);
+    }
+
+    // =========================================================
+    // 退出码契约
+    // =========================================================
+
+    /// 退出码契约：anyhow 上下文包裹后仍按错误链中的 RamariaError 分类。
+    #[test]
+    fn exit_code_maps_ramaria_error_through_context_chain() {
+        let llm = anyhow::Error::from(RamariaError::llm("LLM 不可用")).context("L1 摘要生成失败");
+        assert_eq!(exit_code_for_error(&llm), 3);
+        let storage = anyhow::Error::from(RamariaError::storage("x")).context("索引重建失败");
+        assert_eq!(exit_code_for_error(&storage), 3);
+        let validation = anyhow::Error::from(RamariaError::validation("x")).context("y");
+        assert_eq!(exit_code_for_error(&validation), 4);
+        // 对照：降级为纯字符串的错误无法分类 → 退化为 1（修复前的缺陷形态）
+        let degraded = anyhow::anyhow!("L1 摘要生成失败: llm 不可用");
+        assert_eq!(exit_code_for_error(&degraded), 1);
     }
 }
