@@ -238,6 +238,195 @@ impl SessionLifecycle {
 }
 
 // =========================================================
+// L1 失败任务补扫（封存失败后的自动消费点）
+// =========================================================
+
+/// 单轮补扫最多重试的 L1 任务数（防止一次扫描长时间占用启动/定时线程）。
+const MAX_L1_RETRY_JOBS_PER_RUN: usize = 8;
+
+impl SessionLifecycle {
+    /// 补扫并重试 L1 摘要失败遗留的 pending 任务。
+    ///
+    /// 背景:
+    /// - 封存（`save_and_close_session`）中 L1 生成失败会登记 pending 的
+    ///   `l1_summary` 后台任务；若缺少消费点，摘要在 LLM 恢复后仍长期缺失。
+    /// - 本方法即该消费点：启动期延迟补扫一次 + L2/L3 定时线程每轮调用。
+    ///
+    /// 行为（逐条幂等，单条失败不影响其他任务）:
+    /// - 仅处理 `job_type == "l1_summary"` 的 pending 任务，单轮最多重试
+    ///   [`MAX_L1_RETRY_JOBS_PER_RUN`] 条（其余留待下一轮）。
+    /// - payload 缺失/非法 → 标记完成（无法重试，避免永久 pending）。
+    /// - 该 session 已有 L1（用户可能已手动重试）→ 标记完成，不重复调用 LLM。
+    /// - session 不存在或无消息 → 无法再产出摘要，标记完成（记 warn）。
+    /// - 补跑成功 → 标记完成；补跑失败 → 保持 pending 待下一轮（记 warn）。
+    ///
+    /// 返回:
+    /// - 本轮成功补跑出 L1 摘要的任务数。
+    pub(crate) async fn retry_pending_l1_jobs(
+        &self,
+        storage: &dyn StorageBackend,
+        llm: &dyn LlmProvider,
+    ) -> usize {
+        let pending = match storage.list_pending_jobs().await {
+            Ok(list) => list,
+            Err(e) => {
+                warn!(error = %e, "L1 补扫：查询 pending 任务失败，本轮跳过");
+                return 0;
+            }
+        };
+
+        let job_manager = JobManager::with_defaults(storage);
+        let mut scanned = 0usize;
+        let mut retried = 0usize;
+        let mut completed = 0usize;
+
+        for (job_id, job_type, payload) in pending {
+            if job_type != JobType::L1Summary.as_str() {
+                continue;
+            }
+            if retried >= MAX_L1_RETRY_JOBS_PER_RUN {
+                info!(
+                    limit = MAX_L1_RETRY_JOBS_PER_RUN,
+                    "L1 补扫：本轮已达重试上限，剩余任务留待下一轮"
+                );
+                break;
+            }
+            scanned += 1;
+
+            let Some((session_id, persona_uid)) = parse_l1_retry_payload(payload.as_deref()) else {
+                warn!(
+                    job_id,
+                    "L1 补扫：payload 缺失或非法，标记任务完成（无法重试）"
+                );
+                mark_l1_job_completed(&job_manager, job_id).await;
+                completed += 1;
+                continue;
+            };
+
+            // 已有 L1 → 视为已补跑（用户可能已手动 regenerate），标记完成
+            match storage.list_memory_l1(session_id).await {
+                Ok(l1_list) if !l1_list.is_empty() => {
+                    info!(
+                        job_id,
+                        %session_id,
+                        "L1 补扫：该会话已有 L1 摘要，标记任务完成"
+                    );
+                    mark_l1_job_completed(&job_manager, job_id).await;
+                    completed += 1;
+                    continue;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    warn!(
+                        job_id,
+                        %session_id,
+                        error = %e,
+                        "L1 补扫：查询 L1 失败，保持 pending 待下一轮"
+                    );
+                    continue;
+                }
+            }
+
+            // 会话不存在或无消息 → 不可能再产出 L1，标记完成避免永久 pending
+            match storage.list_messages(session_id).await {
+                Ok(messages) if messages.is_empty() => {
+                    warn!(job_id, %session_id, "L1 补扫：会话无消息，标记任务完成");
+                    mark_l1_job_completed(&job_manager, job_id).await;
+                    completed += 1;
+                    continue;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    warn!(
+                        job_id,
+                        %session_id,
+                        error = %e,
+                        "L1 补扫：读取会话消息失败，保持 pending 待下一轮"
+                    );
+                    continue;
+                }
+            }
+
+            // 通过 JobManager 记录 running（仅可观测性，标记失败不阻塞补跑）
+            if let Err(e) = job_manager.mark_running(job_id).await {
+                warn!(job_id, error = %e, "L1 补扫：标记 running 失败（继续补跑）");
+            }
+
+            retried += 1;
+            info!(job_id, %session_id, ?persona_uid, "L1 补扫：开始重试摘要生成");
+            match self
+                .regenerate_l1_progressive(
+                    storage,
+                    llm,
+                    session_id,
+                    persona_uid.as_deref(),
+                    None,
+                    None,
+                )
+                .await
+            {
+                Ok(l1_list) if !l1_list.is_empty() => {
+                    info!(
+                        job_id,
+                        %session_id,
+                        l1_count = l1_list.len(),
+                        "L1 补扫：摘要补跑成功"
+                    );
+                    mark_l1_job_completed(&job_manager, job_id).await;
+                    completed += 1;
+                }
+                Ok(_) => {
+                    warn!(job_id, %session_id, "L1 补扫：未产出摘要，保持 pending 待下一轮");
+                }
+                Err(e) => {
+                    warn!(
+                        job_id,
+                        %session_id,
+                        error = %e,
+                        "L1 补扫：重试失败，保持 pending 待下一轮（LLM 可能仍不可用）"
+                    );
+                }
+            }
+        }
+
+        if scanned > 0 {
+            info!(scanned, retried, completed, "L1 补扫完成");
+        }
+        completed
+    }
+}
+
+/// 标记 L1 补扫任务为完成（状态写失败仅记 warn，不阻塞补扫主流程）。
+async fn mark_l1_job_completed(job_manager: &JobManager<'_>, job_id: i64) {
+    if let Err(e) = job_manager.mark_completed(job_id).await {
+        warn!(
+            job_id,
+            error = %e,
+            "L1 补扫：标记任务完成失败（已补跑，仅状态未更新）"
+        );
+    }
+}
+
+/// 解析 L1 补扫任务 payload（封存失败登记时写入的 JSON）。
+///
+/// 结构:
+/// - `{"session_id": "<uuid>", "persona_uid": "<uid|空>", "reason": "..."}`
+///
+/// 返回:
+/// - `Some((session_id, persona_uid))`：`session_id` 合法即成功（persona 可为 None）。
+/// - `None`：payload 缺失、非 JSON 或 `session_id` 非法（该任务无法重试）。
+fn parse_l1_retry_payload(payload: Option<&str>) -> Option<(Uuid, Option<String>)> {
+    let value: serde_json::Value = serde_json::from_str(payload?).ok()?;
+    let session_id = Uuid::parse_str(value.get("session_id")?.as_str()?).ok()?;
+    let persona_uid = value
+        .get("persona_uid")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    Some((session_id, persona_uid))
+}
+
+// =========================================================
 // L1 摘要生成（内部辅助）
 // =========================================================
 
@@ -742,5 +931,36 @@ mod tests {
         };
         let hits = composite.query(&q, None).await;
         assert_eq!(hits.len(), 1, "增量 L1 应能被关键词查询命中");
+    }
+
+    // =========================================================
+    // L1 补扫 payload 解析
+    // =========================================================
+
+    /// payload 解析：合法 JSON（含/不含 persona）→ Some；缺失/非法 → None。
+    #[test]
+    fn parse_l1_retry_payload_cases() {
+        let sid = Uuid::new_v4();
+
+        let full = serde_json::json!({
+            "session_id": sid.to_string(),
+            "persona_uid": "char-0001",
+            "reason": "auto_retry_on_close"
+        })
+        .to_string();
+        let (parsed_sid, persona) = parse_l1_retry_payload(Some(&full)).expect("合法 payload");
+        assert_eq!(parsed_sid, sid);
+        assert_eq!(persona.as_deref(), Some("char-0001"));
+
+        // persona 为 null / 空串 → None（L1 归属走默认）
+        let no_persona = serde_json::json!({ "session_id": sid.to_string() }).to_string();
+        let (parsed_sid, persona) = parse_l1_retry_payload(Some(&no_persona)).expect("无 persona");
+        assert_eq!(parsed_sid, sid);
+        assert!(persona.is_none());
+
+        // 缺失 payload / 非法 JSON / session_id 非法 → None（任务无法重试）
+        assert!(parse_l1_retry_payload(None).is_none());
+        assert!(parse_l1_retry_payload(Some("not json")).is_none());
+        assert!(parse_l1_retry_payload(Some(r#"{"session_id": "not-a-uuid"}"#)).is_none());
     }
 }

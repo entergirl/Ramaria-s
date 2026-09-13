@@ -7,12 +7,14 @@
 //! - 各数据加载独立调用，单个失败不阻塞整体（warn 日志 + 跳过对应 Block）
 //! - 注入跨 session 上下文（recent_summaries / last_active_at），提升对话连续性
 //! - 纯函数式数据加载 + 装配，不持有可变状态
+//! - 未接线（预留）：生产对话管线（`app_chat.rs`）Steps 6-10 为内联实现，
+//!   本 Stage 仅由 `tests/m2_integration.rs` 组装使用；保留备用。
 
 use async_trait::async_trait;
 use ramaria_core::traits::StorageBackend;
 use ramaria_core::types::{Persona, ProfileField};
 use ramaria_memory::prompt::builder::{PromptConfig, PromptContext, assemble_prompt};
-use ramaria_memory::{parse_persona_toml, resolve_chat_style_rules};
+use ramaria_memory::resolve_chat_style_rules;
 
 use crate::pipeline::{PipelineContext, PipelineData, PipelineError, PipelineStage};
 
@@ -32,6 +34,9 @@ use crate::pipeline::{PipelineContext, PipelineData, PipelineError, PipelineStag
 /// 2. DB persona 存在 + facts+traits 均为空 → 尝试 persona.toml 冷启动兜底
 /// 3. DB persona 不存在 → 默认 Ramaria 基础 prompt
 /// 4. 各数据源加载失败 → warn 日志，跳过对应 Block（不中断管线）
+///
+/// 未接线（预留）：生产对话管线（`app_chat.rs`）Steps 6-10 为内联实现，
+/// 本 Stage 仅由 `tests/m2_integration.rs` 组装使用；保留备用。
 pub struct StageBuildPrompt;
 
 impl StageBuildPrompt {
@@ -171,7 +176,8 @@ async fn build_structured_prompt(
     // 优先从 DB persona.config 读取，其次回退到文件系统
     if facts.is_empty()
         && traits.is_empty()
-        && let Some(prompt) = load_persona_toml_fallback(persona.config.as_deref())
+        && let Some(prompt) =
+            crate::persona_prompt::load_persona_toml_prompt(persona.config.as_deref())
     {
         tracing::info!(
             persona_uid = %persona.uid,
@@ -217,84 +223,6 @@ async fn build_structured_prompt(
     );
 
     assemble_prompt(&ctx, &config)
-}
-
-// =========================================================
-// 降级路径：persona.toml 冷启动兜底
-// =========================================================
-
-/// 尝试加载 persona.toml 并构建基础 system prompt。
-///
-/// 数据来源优先级:
-/// 1. `db_config`: DB persona.config 中存储的 TOML 内容（setup 时写入）
-/// 2. 文件系统回退: `../config/personas/rama-0001.toml` → `../config/persona.toml`
-///
-/// 成功时返回由 A_persona + E_rules 组装的基础 prompt。
-/// 失败时返回 `None`，由上层降级到通用 prompt。
-fn load_persona_toml_fallback(db_config: Option<&str>) -> Option<String> {
-    let content = if let Some(cfg) = db_config {
-        // 优先使用 DB 中的 persona.toml 内容
-        if cfg.contains("[identity]") || cfg.contains("[blocks]") {
-            tracing::debug!("从 DB persona.config 加载 persona.toml");
-            cfg.to_string()
-        } else {
-            // config 字段是其他 JSON 格式，回退到文件系统
-            fallback_read_persona_toml()?
-        }
-    } else {
-        fallback_read_persona_toml()?
-    };
-
-    let parsed = match parse_persona_toml(&content) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(%e, "persona.toml 解析失败");
-            return None;
-        }
-    };
-
-    let persona_block = parsed
-        .blocks
-        .iter()
-        .find(|(k, _)| k == "A_persona")
-        .map(|(_, v)| v.as_str())
-        .unwrap_or("");
-
-    // 回复规则：显式 E_rules 优先，缺省回退共享规则（与生产装配路径同一口径）
-    let rules_block = resolve_chat_style_rules(Some(content.as_str()));
-
-    let name = &parsed.assistant_name;
-    let time_str = crate::now_timestamp_str();
-
-    Some(format!(
-        "你的名字是{name}。\n\n{persona_block}\n\n回复规则:\n{rules_block}\n\n\
-         当前时间：{time_str}\n\n\
-         你可以记住与用户的对话历史。如果用户提到之前聊过的内容，\
-         请结合记忆上下文给出更有针对性的回复。"
-    ))
-}
-
-/// 文件系统回退: 优先新路径 `../config/personas/rama-0001.toml`，其次旧路径。
-fn fallback_read_persona_toml() -> Option<String> {
-    // 优先尝试新路径（目录扫描模式，每文件 = 一个 persona）
-    let new_path = "../config/personas/rama-0001.toml";
-    if let Ok(c) = std::fs::read_to_string(new_path) {
-        tracing::debug!(%new_path, "从文件系统加载 persona.toml (新路径)");
-        return Some(c);
-    }
-
-    // 回退到旧路径
-    let old_path = "../config/persona.toml";
-    match std::fs::read_to_string(old_path) {
-        Ok(c) => {
-            tracing::debug!(%old_path, "从文件系统加载 persona.toml (旧路径兼容)");
-            Some(c)
-        }
-        Err(e) => {
-            tracing::debug!(%old_path, %e, "persona.toml 文件系统回退失败");
-            None
-        }
-    }
 }
 
 // =========================================================
@@ -437,7 +365,7 @@ mod tests {
     }
 
     // =========================================================
-    // 测试: load_persona_toml_fallback 失败返回 None
+    // 测试: persona_prompt::load_persona_toml_prompt 失败返回 None
     // （原 no_db_no_file / invalid_content 无断言冒烟测试已删除）
     // =========================================================
 }

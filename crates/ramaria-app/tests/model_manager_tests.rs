@@ -6,6 +6,7 @@
 //! - 不执行真实下载（需要网络），仅测试文件系统操作
 
 use ramaria_app::model_manager::ModelManager;
+use sha2::{Digest, Sha256};
 use std::fs;
 
 // =========================================================
@@ -147,6 +148,48 @@ fn verify_checksum_matches() {
         )
         .unwrap()
     );
+
+    cleanup(&root);
+}
+
+#[test]
+fn verify_checksum_against_computed_sha256() {
+    let root = temp_models_root();
+    let mgr = ModelManager::new(&root).unwrap();
+
+    let content: &[u8] = b"ramaria model checksum integration payload";
+    let expected = format!("{:x}", Sha256::digest(content));
+
+    let matched_file = root.join("matched.bin");
+    fs::write(&matched_file, content).unwrap();
+    assert!(mgr.verify_checksum(&matched_file, &expected).unwrap());
+
+    // 内容与校验和不匹配时返回 false
+    let mismatched_file = root.join("mismatched.bin");
+    fs::write(&mismatched_file, b"tampered content").unwrap();
+    assert!(!mgr.verify_checksum(&mismatched_file, &expected).unwrap());
+
+    cleanup(&root);
+}
+
+#[test]
+fn preset_checksum_is_bound_to_real_file_content() {
+    let preset = ModelManager::get_preset("bge-small-zh-v1.5").expect("bge 预置应存在");
+    let config_sha256 = preset
+        .files
+        .iter()
+        .find(|entry| entry.0 == "config.json")
+        .map(|entry| entry.1)
+        .expect("bge 预置应包含 config.json 的 SHA-256");
+
+    let root = temp_models_root();
+    let mgr = ModelManager::new(&root).unwrap();
+
+    let placeholder = root.join("config.json");
+    fs::write(&placeholder, b"{}").unwrap();
+
+    // 占位内容与真实文件校验和不匹配，防止校验和被绑定到错误文件
+    assert!(!mgr.verify_checksum(&placeholder, config_sha256).unwrap());
 
     cleanup(&root);
 }

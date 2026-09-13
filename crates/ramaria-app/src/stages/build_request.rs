@@ -7,6 +7,8 @@
 //! - system_prompt 使用预算后的截断版本，memory_context 使用截断后版本
 //! - 用户消息完整保留（不截断）
 //! - 不涉及 I/O，纯数据组装，零异步等待
+//! - 未接线（预留）：生产对话管线（`app_chat.rs`）Steps 6-10 为内联实现，
+//!   本 Stage 仅由 `tests/m2_integration.rs` 组装使用；保留备用。
 
 use async_trait::async_trait;
 use ramaria_core::error::RamariaError;
@@ -29,6 +31,9 @@ use crate::pipeline::{PipelineContext, PipelineData, PipelineError, PipelineStag
 /// - Stage 7 (TokenBudget): `budgeted_system_prompt`, `budgeted_memory_context`, `budgeted_history`
 /// - Stage 2 (CheckPrivacy): `backend_config` (temperature, max_tokens)
 /// - 输入参数: `user_input`, `request_id`
+///
+/// 未接线（预留）：生产对话管线（`app_chat.rs`）Steps 6-10 为内联实现，
+/// 本 Stage 仅由 `tests/m2_integration.rs` 组装使用；保留备用。
 pub struct StageBuildRequest;
 
 impl StageBuildRequest {

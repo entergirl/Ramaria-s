@@ -8,6 +8,8 @@
 //!   - Stage 10 检测到 output_stream 已预填充时直接透传，不执行保存逻辑
 //! - 上层 send_message 可通过检查 output_stream 区分正常路径和错误路径
 //! - 日志记录 request_id、session_id、provider 信息，便于问题定位
+//! - 未接线（预留）：生产对话管线（`app_chat.rs`）Steps 6-10 为内联实现，
+//!   本 Stage 仅由 `tests/m2_integration.rs` 组装使用；保留备用。
 
 use async_trait::async_trait;
 use futures::channel::mpsc;
@@ -32,6 +34,9 @@ use crate::stream_event::StreamEvent;
 /// - 本 Stage 不直接返回 `PipelineError`（LLM 调用失败仍返回 Ok）
 /// - 失败时构造 `StreamEvent::Error` 单事件流，通过 `data.output_stream` 透传给上层
 /// - 此设计使 send_message 的返回类型保持一致性：成功和失败均返回 `SendMessageStream`
+///
+/// 未接线（预留）：生产对话管线（`app_chat.rs`）Steps 6-10 为内联实现，
+/// 本 Stage 仅由 `tests/m2_integration.rs` 组装使用；保留备用。
 pub struct StageCallLlm;
 
 impl StageCallLlm {

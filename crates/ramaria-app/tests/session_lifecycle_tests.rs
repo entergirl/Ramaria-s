@@ -52,6 +52,24 @@ async fn setup_app_ready(storage: &dyn StorageBackend) {
     storage.save_backend_config(&cfg).await.unwrap();
 }
 
+/// 轮询等待异步条件成立：每 5ms 检查一次，最长 5s；超时即 panic（附带等待目标描述）。
+async fn wait_until<F, Fut>(what: &str, mut check: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if check().await {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("等待超时（5s）：{what}");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
+
 // =========================================================
 // 手动关闭
 // （原 manual_save_and_close_session 的完整流程已被
@@ -307,8 +325,18 @@ async fn send_message_with_explicit_session_id() {
         }
     }
 
-    // 给 tokio 一点时间完成 spawn 任务中的 save_message
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // 等待后台 spawn 任务把用户与助手消息落库
+    wait_until("指定 session 的消息已落库", || {
+        let storage = Arc::clone(&storage);
+        async move {
+            storage
+                .list_messages(sid)
+                .await
+                .map(|msgs| !msgs.is_empty())
+                .unwrap_or(false)
+        }
+    })
+    .await;
 
     // 验证消息已写入
     let msgs = storage.list_messages(sid).await.unwrap();
@@ -352,11 +380,24 @@ async fn l1_summary_uses_backend_config_max_tokens() {
             break;
         }
     }
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert!(
         app.get_active_session_id().is_some(),
         "send_message 后应有活跃 session"
     );
+    let sid = app
+        .get_active_session_id()
+        .expect("send_message 后应有活跃 session");
+    wait_until("用户与助手消息均已落库", || {
+        let storage = Arc::clone(&storage);
+        async move {
+            storage
+                .list_messages(sid)
+                .await
+                .map(|msgs| msgs.len() >= 2)
+                .unwrap_or(false)
+        }
+    })
+    .await;
 
     app.save_and_close_session(None).await.unwrap();
 
@@ -403,11 +444,24 @@ async fn l1_summary_max_tokens_has_floor() {
             break;
         }
     }
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert!(
         app.get_active_session_id().is_some(),
         "send_message 后应有活跃 session"
     );
+    let sid = app
+        .get_active_session_id()
+        .expect("send_message 后应有活跃 session");
+    wait_until("用户与助手消息均已落库", || {
+        let storage = Arc::clone(&storage);
+        async move {
+            storage
+                .list_messages(sid)
+                .await
+                .map(|msgs| msgs.len() >= 2)
+                .unwrap_or(false)
+        }
+    })
+    .await;
 
     app.save_and_close_session(None).await.unwrap();
 
@@ -454,8 +508,18 @@ async fn save_and_close_l1_uses_db_session_persona() {
             break;
         }
     }
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     let sid = app.get_active_session_id().expect("应有活跃 session");
+    wait_until("用户与助手消息均已落库", || {
+        let storage = Arc::clone(&storage);
+        async move {
+            storage
+                .list_messages(sid)
+                .await
+                .map(|msgs| msgs.len() >= 2)
+                .unwrap_or(false)
+        }
+    })
+    .await;
 
     // 保存时前端传 None（空闲保存/旧前端可能传 None 或过期内存值）
     app.save_and_close_session(None).await.unwrap();
@@ -497,8 +561,18 @@ async fn save_and_close_ignores_stale_input_persona() {
             break;
         }
     }
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     let sid = app.get_active_session_id().expect("应有活跃 session");
+    wait_until("用户与助手消息均已落库", || {
+        let storage = Arc::clone(&storage);
+        async move {
+            storage
+                .list_messages(sid)
+                .await
+                .map(|msgs| msgs.len() >= 2)
+                .unwrap_or(false)
+        }
+    })
+    .await;
 
     // 前端内存态过期（错误地传了 char-9999）→ 不应覆盖 DB 真相源
     app.save_and_close_session(Some("char-9999")).await.unwrap();
@@ -558,7 +632,19 @@ async fn save_and_close_progressive_long_session_writes_segment_l1s_to_candidate
                 break;
             }
         }
-        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        // 等待本轮用户与助手消息全部落库，确保封存时 6 条齐全
+        let expected_len = 2 * (i as usize + 1);
+        wait_until("本轮用户与助手消息均已落库", || {
+            let storage = Arc::clone(&storage);
+            async move {
+                storage
+                    .list_messages(sid)
+                    .await
+                    .map(|msgs| msgs.len() == expected_len)
+                    .unwrap_or(false)
+            }
+        })
+        .await;
     }
     let msgs = storage.list_messages(sid).await.unwrap();
     assert_eq!(msgs.len(), 6, "3 轮发送应同 session 累积 6 条消息");
@@ -582,4 +668,67 @@ async fn save_and_close_progressive_long_session_writes_segment_l1s_to_candidate
             .all(|l| l.persona_uid.as_deref() == Some("char-0001")),
         "段 L1 归属应来自 DB session persona"
     );
+}
+
+// =========================================================
+// L1 失败任务补扫（pending 任务的消费点）
+// =========================================================
+
+/// 封存时 L1 失败登记的 pending 任务，在补扫时自动补跑并标记完成；
+/// 已补跑（或已有 L1）的任务不会重复调用 LLM。
+#[tokio::test]
+async fn pending_l1_job_is_retried_and_completed() {
+    const L1_JSON: &str = r#"{"summary":"用户讨论了项目安排","keywords":"项目,排期","time_period":"下午","atmosphere":"紧张","valence":0.0,"salience":0.5}"#;
+    let storage = Arc::new(MockStorage::new());
+    let llm = Arc::new(MockLlm::new(L1_JSON));
+    let config = RamariaConfig::default();
+    let keychain = Arc::new(Keychain::new());
+    let app = App::new_without_embedding(
+        Arc::clone(&storage) as Arc<dyn StorageBackend>,
+        Arc::clone(&llm) as Arc<dyn ramaria_core::traits::LlmProvider>,
+        config,
+        keychain,
+    );
+    app.set_state(AppState::Ready);
+
+    // 模拟"L1 生成失败"的遗留现场：已关闭、绑定 char-0001 且含消息的会话（无 L1）
+    let session = storage.create_session(Some("char-0001")).await.unwrap();
+    let sid = session.id;
+    let msg = ramaria_core::types::Message::new(
+        sid,
+        MessageRole::User,
+        "我们讨论一下项目安排".into(),
+        MessageSource::Local,
+    );
+    storage.create_session_with_messages(sid, vec![msg]);
+    storage.close_session(sid).await.unwrap();
+
+    let payload = serde_json::json!({
+        "session_id": sid.to_string(),
+        "persona_uid": "char-0001",
+        "reason": "auto_retry_on_close"
+    })
+    .to_string();
+    let job_id = storage.add_pending_job("l1_summary", Some(&payload));
+
+    // 补扫：应补跑 1 条并标记完成
+    let retried = app.retry_pending_l1_jobs().await;
+    assert_eq!(retried, 1, "应有 1 条 L1 任务被补跑");
+
+    let l1s = storage.list_memory_l1(sid).await.unwrap();
+    assert!(!l1s.is_empty(), "补扫后 L1 摘要应已生成");
+    assert_eq!(
+        l1s[0].persona_uid.as_deref(),
+        Some("char-0001"),
+        "补扫生成的 L1 归属应取自任务 payload"
+    );
+    assert_eq!(
+        storage.job_status(job_id).as_deref(),
+        Some("completed"),
+        "补跑成功后任务不应再 pending"
+    );
+
+    // 幂等：再次补扫不应重复调用 LLM（任务已完成、L1 已存在）
+    let retried_again = app.retry_pending_l1_jobs().await;
+    assert_eq!(retried_again, 0, "已完成任务不应再次补跑");
 }

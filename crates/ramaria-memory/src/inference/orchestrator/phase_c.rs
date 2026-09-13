@@ -881,4 +881,126 @@ mod tests {
         assert!(!result.has_significant_drift);
         assert!(result.drift_summary.is_none());
     }
+
+    // =========================================================
+    // Phase C 编排：首轮判定与漂移检测衔接
+    // =========================================================
+
+    /// 构造并落库一个活跃 Base trait fixture，返回存储层回填 id 后的 trait。
+    ///
+    /// 说明:
+    /// - 对应 Phase B 产出的 trait 列表元素；`run_phase_c_update` 的实际数据源
+    ///   仍是 storage 中已落库的活跃 trait，本 fixture 保证非空且可被加载。
+    async fn seed_active_trait_fixture(storage: &SqliteStorage, uid: &str) -> PersonalityTrait {
+        let trait_fixture = PersonalityTrait {
+            id: 0,
+            persona_uid: uid.into(),
+            layer: ramaria_core::types::TraitLayer::Base,
+            trait_label: "尽责".into(),
+            meaning: "对任务有强烈的完成意愿".into(),
+            not_meaning: None,
+            trigger: None,
+            suppress: None,
+            related: None,
+            seq: 0,
+            source: ramaria_core::types::TraitSource::Inferred,
+            ref_event_id: None,
+            ref_l1_id: None,
+            confidence: 0.5,
+            evidence: 1.0,
+            consistency: 0.5,
+            status: TraitStatus::Active,
+            created_at: TEST_NOW_MS,
+            updated_at: TEST_NOW_MS,
+        };
+        let id = storage
+            .save_trait(&trait_fixture)
+            .await
+            .expect("落库 trait fixture 应成功");
+        PersonalityTrait {
+            id,
+            ..trait_fixture
+        }
+    }
+
+    /// Keep-only 轮不豁免漂移检测：Phase B 产出 trait_ids 非空即非首轮，
+    /// 即使标签/含义未变（traits_updated 为 0），is_first_round=false 时仍必须
+    /// 继续执行漂移检测，锁定"分布已漂移但标签未变"的轮次不被跳过。
+    #[tokio::test]
+    async fn phase_c_non_first_round_runs_drift_detection() {
+        let storage = mem_storage().await;
+        insert_persona(&storage, "persona-drift").await;
+        let trait_fixture = seed_active_trait_fixture(&storage, "persona-drift").await;
+        seed_snapshot(
+            &storage,
+            "persona-drift",
+            "工作",
+            snapshot_samples("工作", 10.0, 0.8, 0.6),
+        )
+        .await;
+
+        let events: Vec<MemoryEvent> = (0..10)
+            .map(|i| make_event(i, "工作,会议", 0.1, 0.6))
+            .collect();
+
+        let result = run_phase_c_update(
+            &ConfidenceConfig::default(),
+            &DriftConfig::default(),
+            &storage,
+            "persona-drift",
+            &[trait_fixture.clone()],
+            &events,
+            false,
+        )
+        .await
+        .expect("非首轮 Phase C 更新应成功");
+
+        assert!(result.drift_summary.is_some(), "非首轮必须执行漂移检测");
+        assert!(
+            result.has_significant_drift,
+            "旧分布 valence≈0.8、本轮≈0.1，应判定显著漂移"
+        );
+        assert!(
+            result.drift_categories.contains(&"工作".to_string()),
+            "工作分类应进入重审列表"
+        );
+    }
+
+    /// 首轮（Phase B 未产出任何 trait）无旧画像分布可对比：跳过漂移检测，
+    /// 结构化返回空漂移结果，不阻塞主流程；即便库中已有快照也不参与检测。
+    #[tokio::test]
+    async fn phase_c_first_round_skips_drift_detection() {
+        let storage = mem_storage().await;
+        insert_persona(&storage, "persona-drift").await;
+        let trait_fixture = seed_active_trait_fixture(&storage, "persona-drift").await;
+        seed_snapshot(
+            &storage,
+            "persona-drift",
+            "工作",
+            snapshot_samples("工作", 10.0, 0.8, 0.6),
+        )
+        .await;
+
+        let events: Vec<MemoryEvent> = (0..10)
+            .map(|i| make_event(i, "工作,会议", 0.1, 0.6))
+            .collect();
+
+        let result = run_phase_c_update(
+            &ConfidenceConfig::default(),
+            &DriftConfig::default(),
+            &storage,
+            "persona-drift",
+            &[trait_fixture.clone()],
+            &events,
+            true,
+        )
+        .await
+        .expect("首轮 Phase C 更新应成功");
+
+        assert!(
+            result.drift_summary.is_none(),
+            "首轮无旧分布，不应执行漂移检测"
+        );
+        assert!(!result.has_significant_drift, "首轮不应产生漂移结论");
+    }
 }

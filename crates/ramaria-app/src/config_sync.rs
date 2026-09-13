@@ -13,7 +13,7 @@
 //! - 本模块不记录完整配置内容，日志仅记录差异键名与失败上下文
 //! - 后端配置写回时保留既有 capability / embedding_model_path，避免覆盖丢失
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -31,6 +31,23 @@ const SKIP_FLAT_KEYS: &[&str] = &["version", "schema_version", "paths", "backend
 
 /// 默认配置模板（打包 `config/default.toml`，含完整注释说明）。
 const DEFAULT_CONFIG_TEMPLATE: &str = include_str!("../../../config/default.toml");
+
+/// 原子写入使用的临时文件后缀（写完后 `fs::rename` 替换目标）。
+const CONFIG_TEMP_SUFFIX: &str = ".part";
+
+/// 文件显式声明的键集（用于"以文件为准"的同步 diff）。
+///
+/// 背景:
+/// - `RamariaConfig` 反序列化会为缺失键填入默认值；若按"反序列化后的全键集"
+///   回写 DB，升级后新键（用户文件里没有）的默认值会覆盖 DB 中用户显式设置的值。
+/// - 因此同步只认"文件里真实写了"的键。
+#[derive(Debug, Default, Clone)]
+struct ExplicitFileKeys {
+    /// 点分键集合（跳过 version / schema_version / paths / backend）
+    flat: BTreeSet<String>,
+    /// 文件是否显式声明了 `[backend]` 组（未声明 → 后端组不参与回写）
+    has_backend_group: bool,
+}
 
 // =========================================================
 // 结果类型
@@ -135,9 +152,10 @@ impl ConfigSyncService {
     /// 返回:
     /// - `SyncOutcome`：生效配置与校验结果（调用方记录启动日志）。
     pub async fn load(&self) -> RamariaResult<SyncOutcome> {
-        // ---- Step 1: 读取文件侧 ----
+        // ---- Step 1: 读取文件侧（含"文件显式声明的键集"，供同步 diff 使用）----
         let mut file_parse_errors = Vec::new();
         let mut file_existed = true;
+        let mut explicit_keys = ExplicitFileKeys::default();
         let file_config: RamariaConfig = if !self.config_path.exists() {
             // 文件缺失：不在此处写模板（由下方首启分支统一决策写入，
             // 避免"模板写成功 + merged 写失败"留下合法模板导致下次启动
@@ -145,8 +163,11 @@ impl ConfigSyncService {
             file_existed = false;
             RamariaConfig::default()
         } else {
-            match self.read_file_config() {
-                Ok(cfg) => cfg,
+            match self.read_file_config_with_keys() {
+                Ok((cfg, keys)) => {
+                    explicit_keys = keys;
+                    cfg
+                }
                 Err(e) => {
                     file_parse_errors.push(e.to_string());
                     tracing::warn!(
@@ -194,7 +215,7 @@ impl ConfigSyncService {
 
         // ---- Step 3+4: 一致性校验 + 以文件为准回写 ----
         let (mismatches, db_write_failures) = self
-            .sync_db_to_file(&file_config, &db_flat, db_backend.as_ref())
+            .sync_db_to_file(&file_config, &explicit_keys, &db_flat, db_backend.as_ref())
             .await;
 
         Ok(SyncOutcome {
@@ -315,54 +336,66 @@ impl ConfigSyncService {
 
     /// 读取并解析 config.toml。
     fn read_file_config(&self) -> RamariaResult<RamariaConfig> {
+        self.read_file_config_with_keys().map(|(cfg, _)| cfg)
+    }
+
+    /// 读取并解析 config.toml，同时提取"文件显式声明的键集"。
+    ///
+    /// 返回:
+    /// - `(配置, 显式键集)`；键集用于同步 diff（只回写文件里真实写了的键）。
+    fn read_file_config_with_keys(&self) -> RamariaResult<(RamariaConfig, ExplicitFileKeys)> {
         let text = std::fs::read_to_string(&self.config_path).map_err(|e| {
             ramaria_core::error::RamariaError::io(
                 format!("读取 config.toml 失败: {}", self.config_path.display()),
                 Some(e),
             )
         })?;
-        toml::from_str(&text).map_err(|e| {
+        let cfg = toml::from_str(&text).map_err(|e| {
             ramaria_core::error::RamariaError::config(format!("解析 config.toml 失败: {e}"))
-        })
+        })?;
+        Ok((cfg, parse_explicit_file_keys(&text)))
     }
 
-    /// 将配置写为 config.toml（含版本头注释）。
+    /// 将配置写为 config.toml（保留文件头注释与未知键，原子替换）。
     fn write_file_config(&self, cfg: &RamariaConfig) -> RamariaResult<()> {
-        let text = toml::to_string_pretty(cfg).map_err(|e| {
+        let text = self.render_config_text(cfg)?;
+        atomic_write(&self.config_path, &text)
+    }
+
+    /// 渲染 config.toml 文本：序列化当前配置，并尽量保留用户文件中的既有内容。
+    ///
+    /// 保留策略（无 TOML 编辑器依赖下的保守合并）:
+    /// - 文件头注释块（开头的注释与空行）原样保留；
+    /// - 旧文件中"当前 schema 未知"的键（含未知分组）原样保留；
+    /// - 其余键以当前配置为准（分组内部注释不保留）。
+    fn render_config_text(&self, cfg: &RamariaConfig) -> RamariaResult<String> {
+        let mut root = toml::Value::try_from(cfg).map_err(|e| {
+            ramaria_core::error::RamariaError::config(format!("配置转换为 TOML 值失败: {e}"))
+        })?;
+
+        let mut header = String::new();
+        if let Ok(old_text) = std::fs::read_to_string(&self.config_path) {
+            header = leading_comment_block(&old_text);
+            if let Ok(toml::Value::Table(old_table)) = old_text.parse::<toml::Value>()
+                && let Some(new_table) = root.as_table_mut()
+            {
+                merge_unknown_keys(new_table, &old_table);
+            }
+        }
+
+        let body = toml::to_string_pretty(&root).map_err(|e| {
             ramaria_core::error::RamariaError::config(format!("序列化配置为 TOML 失败: {e}"))
         })?;
-        if let Some(parent) = self.config_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                ramaria_core::error::RamariaError::io(
-                    format!("创建配置目录失败: {}", parent.display()),
-                    Some(e),
-                )
-            })?;
+        if header.is_empty() {
+            Ok(body)
+        } else {
+            Ok(format!("{header}{body}"))
         }
-        std::fs::write(&self.config_path, text).map_err(|e| {
-            ramaria_core::error::RamariaError::io(
-                format!("写入 config.toml 失败: {}", self.config_path.display()),
-                Some(e),
-            )
-        })
     }
 
-    /// 生成默认模板文件（config.toml 缺失时调用）。
+    /// 生成默认模板文件（config.toml 缺失时调用，原子替换）。
     fn write_template_file(&self) -> RamariaResult<()> {
-        if let Some(parent) = self.config_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                ramaria_core::error::RamariaError::io(
-                    format!("创建配置目录失败: {}", parent.display()),
-                    Some(e),
-                )
-            })?;
-        }
-        std::fs::write(&self.config_path, DEFAULT_CONFIG_TEMPLATE).map_err(|e| {
-            ramaria_core::error::RamariaError::io(
-                format!("生成配置模板失败: {}", self.config_path.display()),
-                Some(e),
-            )
-        })
+        atomic_write(&self.config_path, DEFAULT_CONFIG_TEMPLATE)
     }
 
     // =========================================================
@@ -409,6 +442,7 @@ impl ConfigSyncService {
     ///
     /// 参数:
     /// - `file_cfg`: 文件侧配置（canonical）。
+    /// - `explicit_keys`: 文件**显式声明**的键集（缺失键不参与回写）。
     /// - `db_flat`: DB 侧 settings 真实键集。
     /// - `db_backend`: DB 侧 backend_config 表内容。
     ///
@@ -417,6 +451,7 @@ impl ConfigSyncService {
     async fn sync_db_to_file(
         &self,
         file_cfg: &RamariaConfig,
+        explicit_keys: &ExplicitFileKeys,
         db_flat: &BTreeMap<String, JsonValue>,
         db_backend: Option<&BackendConfig>,
     ) -> (Vec<MismatchEntry>, Vec<String>) {
@@ -426,9 +461,15 @@ impl ConfigSyncService {
         // ---- settings 组（除 backend/paths/version 外）----
         let file_flat = config_to_flat_map(file_cfg);
 
-        // 需要写回的键：值不同（mismatch）或 DB 缺失
+        // 需要写回的键：值不同（mismatch）或 DB 缺失。
+        // 只遍历"文件显式声明"的键：文件缺失的键是反序列化默认值，
+        // 不得用于覆盖 DB 中用户显式设置（存量用户升级后新增键缺失的回归点）。
         let mut keys_to_write: BTreeMap<String, JsonValue> = BTreeMap::new();
-        for (key, file_value) in &file_flat {
+        for key in &explicit_keys.flat {
+            let Some(file_value) = file_flat.get(key) else {
+                // 文件里写了但当前 schema 无此键（未知键）→ 不参与同步
+                continue;
+            };
             match db_flat.get(key) {
                 Some(db_value) if db_value == file_value => {
                     // 一致，无需写回
@@ -449,21 +490,24 @@ impl ConfigSyncService {
         }
 
         // ---- backend 组（backend_config 表）----
-        let file_backend = backend_config_from_selection(&file_cfg.backend, None);
-        let backend_mismatch = match db_backend {
-            Some(db_bc) => !backend_fields_equal(&file_backend, db_bc),
-            None => true, // DB 无记录 → 补齐
+        // 文件未显式声明 [backend] 时后端组不参与回写：否则默认值会覆盖 DB 用户配置。
+        let file_backend = if explicit_keys.has_backend_group {
+            Some(backend_config_from_selection(&file_cfg.backend, None))
+        } else {
+            None
         };
-        if backend_mismatch {
+        let backend_mismatch = match (&file_backend, db_backend) {
+            (Some(fb), Some(db_bc)) => !backend_fields_equal(fb, db_bc),
+            (Some(_), None) => true, // DB 无记录 → 补齐
+            (None, _) => false,
+        };
+        if backend_mismatch && let Some(fb) = &file_backend {
             let db_desc = db_backend
                 .map(|b| format!("provider={} model={}", b.provider, b.capability.model_id))
                 .unwrap_or_else(|| "（无记录）".to_string());
             mismatches.push(MismatchEntry {
                 key: "backend".to_string(),
-                file_value: format!(
-                    "provider={} model={}",
-                    file_backend.provider, file_backend.capability.model_id
-                ),
+                file_value: format!("provider={} model={}", fb.provider, fb.capability.model_id),
                 db_value: db_desc,
             });
         }
@@ -487,7 +531,7 @@ impl ConfigSyncService {
         }
 
         // 写回 backend_config 表（保留既有 capability / embedding_model_path）
-        if backend_mismatch {
+        if backend_mismatch && let Some(fb) = &file_backend {
             let existing = match self.storage.get_backend_config().await {
                 Ok(opt) => opt,
                 Err(e) => {
@@ -499,17 +543,17 @@ impl ConfigSyncService {
             };
             let merged = match existing {
                 Some(mut bc) => {
-                    bc.provider = file_backend.provider;
-                    bc.base_url = file_backend.base_url.clone();
-                    bc.embedding_model_id = file_backend.embedding_model_id.clone();
-                    bc.temperature = file_backend.temperature;
-                    bc.max_tokens = file_backend.max_tokens;
-                    bc.capability.provider = file_backend.capability.provider;
-                    bc.capability.model_id = file_backend.capability.model_id.clone();
-                    bc.capability.base_url = file_backend.capability.base_url.clone();
+                    bc.provider = fb.provider;
+                    bc.base_url = fb.base_url.clone();
+                    bc.embedding_model_id = fb.embedding_model_id.clone();
+                    bc.temperature = fb.temperature;
+                    bc.max_tokens = fb.max_tokens;
+                    bc.capability.provider = fb.capability.provider;
+                    bc.capability.model_id = fb.capability.model_id.clone();
+                    bc.capability.base_url = fb.capability.base_url.clone();
                     bc
                 }
-                None => file_backend.clone(),
+                None => fb.clone(),
             };
             if let Err(e) = self.storage.save_backend_config(&merged).await {
                 let msg = format!("backend_config 表写入失败: {e}");
@@ -707,6 +751,146 @@ fn format_value(value: &JsonValue) -> String {
         JsonValue::String(s) => s.clone(),
         other => other.to_string(),
     }
+}
+
+// =========================================================
+// 文件侧工具：显式键集 / 合并保留 / 原子写入
+// =========================================================
+
+/// 从原始 TOML 文本提取"文件显式声明的键集"。
+///
+/// 说明:
+/// - 空文件/解析失败 → 返回空键集（调用方在解析失败路径已回退默认配置，不会误回写）；
+/// - 跳过 version / schema_version / paths 组（与 `SKIP_FLAT_KEYS` 一致）；
+/// - `[backend]` 组单独标记（键集里不含点分键，回写策略见 `sync_db_to_file`）。
+fn parse_explicit_file_keys(text: &str) -> ExplicitFileKeys {
+    let mut keys = ExplicitFileKeys::default();
+
+    let Ok(value) = text.parse::<toml::Value>() else {
+        return keys;
+    };
+    let Some(table) = value.as_table() else {
+        return keys;
+    };
+
+    keys.has_backend_group = table.contains_key("backend");
+    collect_explicit_keys(table, "", &mut keys.flat);
+    keys.flat.retain(|key| {
+        !SKIP_FLAT_KEYS
+            .iter()
+            .any(|skip| key == skip || key.starts_with(&format!("{skip}.")))
+    });
+    keys
+}
+
+/// 递归收集叶子键为点分键（数组/标量均视为叶子）。
+fn collect_explicit_keys(table: &toml::value::Table, prefix: &str, out: &mut BTreeSet<String>) {
+    for (key, value) in table {
+        let full_key = if prefix.is_empty() {
+            key.clone()
+        } else {
+            format!("{prefix}.{key}")
+        };
+        match value {
+            toml::Value::Table(inner) if !inner.is_empty() => {
+                collect_explicit_keys(inner, &full_key, out);
+            }
+            _ => {
+                out.insert(full_key);
+            }
+        }
+    }
+}
+
+/// 取"文件头注释块"（文件开头的注释与空行；遇到首个非注释内容即停止）。
+///
+/// 用途:
+/// - 全量序列化会丢注释；此函数把用户写在文件头部的说明原样保留。
+/// - 非空返回值以换行结尾，便于与序列化正文直接拼接。
+fn leading_comment_block(text: &str) -> String {
+    let mut header = String::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            header.push_str(line);
+            header.push('\n');
+            continue;
+        }
+        break;
+    }
+    header
+}
+
+/// 把旧表中"当前 schema 未知"的键合并回新表，避免全量序列化丢数据。
+///
+/// 说明:
+/// - 双方同为表时递归合并（未知键可落在已知分组内）；
+/// - 新表已有的键以新表为准（配置值不反向覆盖）。
+fn merge_unknown_keys(new_table: &mut toml::value::Table, old_table: &toml::value::Table) {
+    for (key, old_value) in old_table {
+        match new_table.get_mut(key) {
+            Some(toml::Value::Table(new_inner)) => {
+                if let toml::Value::Table(old_inner) = old_value {
+                    merge_unknown_keys(new_inner, old_inner);
+                }
+            }
+            Some(_) => {}
+            None => {
+                new_table.insert(key.clone(), old_value.clone());
+            }
+        }
+    }
+}
+
+/// 原子写入文本文件：先写同目录 `{文件名}.part`，再 `fs::rename` 替换目标。
+///
+/// 说明:
+/// - 同目录临时文件保证 rename 在同一文件系统内、可原子覆盖旧文件；
+/// - 任一步失败都会清理临时文件，绝不留下半截目标文件（旧文件保持原样）。
+fn atomic_write(path: &Path, content: &str) -> RamariaResult<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            ramaria_core::error::RamariaError::io(
+                format!("创建配置目录失败: {}", parent.display()),
+                Some(e),
+            )
+        })?;
+    }
+
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .ok_or_else(|| {
+            ramaria_core::error::RamariaError::io(
+                format!("配置路径缺少文件名: {}", path.display()),
+                None,
+            )
+        })?;
+    let temp_path = path.with_file_name(format!("{file_name}{CONFIG_TEMP_SUFFIX}"));
+
+    let result = std::fs::write(&temp_path, content)
+        .map_err(|e| {
+            ramaria_core::error::RamariaError::io(
+                format!("写入临时配置文件失败: {}", temp_path.display()),
+                Some(e),
+            )
+        })
+        .and_then(|()| {
+            std::fs::rename(&temp_path, path).map_err(|e| {
+                ramaria_core::error::RamariaError::io(
+                    format!("原子替换配置文件失败: {}", path.display()),
+                    Some(e),
+                )
+            })
+        });
+
+    if result.is_err() {
+        // 失败路径清理可能残留的临时文件（不覆盖原始错误）
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    result
 }
 
 // =========================================================
@@ -1460,6 +1644,135 @@ mod tests {
             text, DEFAULT_CONFIG_TEMPLATE,
             "DB 为空时首启应保留带注释的模板原文"
         );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // =========================================================
+    // 同步 diff 只认"文件显式声明的键"（升级不覆盖 DB 显式值）
+    // =========================================================
+
+    /// 存量用户 config.toml 缺新键（升级场景）→ DB 中用户显式设置不得被文件默认值覆盖。
+    #[tokio::test]
+    async fn load_does_not_overwrite_db_keys_absent_from_file() {
+        let storage = Arc::new(MockStorage::default());
+        let (service, dir) = temp_service(storage.clone());
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 文件只显式声明 utt.theta_gap_minutes；其余键走反序列化默认值
+        std::fs::write(&service.config_path, "[utt]\ntheta_gap_minutes = 10\n").unwrap();
+
+        // DB 侧：theta 与文件不同（文件为准）；examples.max_examples 文件未声明（必须保留）
+        storage
+            .set_setting("config.utt.theta_gap_minutes", "45")
+            .await
+            .unwrap();
+        storage
+            .set_setting("config.examples.max_examples", "3")
+            .await
+            .unwrap();
+        // DB 后端为 DeepSeek，文件无 [backend] → 后端配置必须保留（不被默认 LM Studio 覆盖）
+        let bc = BackendConfig::deepseek_default();
+        storage.save_backend_config(&bc).await.unwrap();
+
+        let outcome = service.load().await.unwrap();
+
+        // 文件显式键：以文件为准回写 DB，并记入 mismatch
+        let theta = storage
+            .get_setting("config.utt.theta_gap_minutes")
+            .await
+            .unwrap();
+        assert_eq!(theta.as_deref(), Some("10"), "文件显式键应以文件为准");
+        assert!(
+            outcome
+                .mismatches
+                .iter()
+                .any(|m| m.key == "config.utt.theta_gap_minutes"),
+            "文件显式键不一致应记入 mismatch"
+        );
+
+        // 文件未声明的键：DB 显式值保留（默认值为 5，不得覆盖）
+        let max_examples = storage
+            .get_setting("config.examples.max_examples")
+            .await
+            .unwrap();
+        assert_eq!(
+            max_examples.as_deref(),
+            Some("3"),
+            "文件未声明的键不得被默认值覆盖"
+        );
+
+        // 文件未声明 [backend] → DB 后端配置保留
+        let db_backend = storage.get_backend_config().await.unwrap().unwrap();
+        assert_eq!(
+            db_backend.provider,
+            LlmProvider::DeepSeek,
+            "文件未声明 [backend] 时后端配置应保留"
+        );
+
+        // 生效配置以文件为准
+        assert_eq!(outcome.config.utt.theta_gap_minutes, 10);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 保存配置时保留文件头注释与未知键（全量序列化不丢用户手写内容）。
+    #[tokio::test]
+    async fn save_config_preserves_header_comments_and_unknown_keys() {
+        let storage = Arc::new(MockStorage::default());
+        let (service, dir) = temp_service(storage);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            &service.config_path,
+            "# 用户手写说明：不要删我\n# 第二行注释\n\n\
+             [utt]\ntheta_gap_minutes = 10\nfuture_key = \"keep-me\"\n\n\
+             [future_group]\nx = 1\n",
+        )
+        .unwrap();
+
+        let mut cfg = RamariaConfig::default();
+        cfg.utt.theta_gap_minutes = 25;
+        let result = service.save_config(&cfg).await;
+        assert!(result.file_ok, "文件写入应成功: {:?}", result.failures);
+
+        let text = std::fs::read_to_string(service.config_path()).unwrap();
+        assert!(
+            text.starts_with("# 用户手写说明：不要删我\n# 第二行注释\n"),
+            "文件头注释应保留:\n{text}"
+        );
+        assert!(
+            text.contains("future_key = \"keep-me\""),
+            "未知键应保留:\n{text}"
+        );
+        assert!(text.contains("[future_group]"), "未知分组应保留:\n{text}");
+        assert!(
+            !dir.join("config.toml.part").exists(),
+            "成功后不应残留临时文件"
+        );
+
+        // 合并结果仍是合法 TOML 且写入值生效
+        let parsed: RamariaConfig = toml::from_str(&text).expect("合并后应为合法 TOML");
+        assert_eq!(parsed.utt.theta_gap_minutes, 25);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 原子写入失败（目标被目录占位）→ 返回错误、无 `.part` 残留、原目标保持原样。
+    #[tokio::test]
+    async fn write_file_config_failure_leaves_no_part_file() {
+        let storage = Arc::new(MockStorage::default());
+        let (service, dir) = temp_service(storage);
+        std::fs::create_dir_all(service.config_path()).unwrap(); // 目标位置放目录 → rename 必失败
+
+        let err = service
+            .write_file_config(&RamariaConfig::default())
+            .expect_err("目标为目录时写入应失败");
+        assert!(!err.to_string().is_empty(), "错误信息不应为空");
+        assert!(
+            !dir.join("config.toml.part").exists(),
+            "失败后不应残留 .part 临时文件"
+        );
+        assert!(service.config_path().is_dir(), "原目标应保持不变");
 
         let _ = std::fs::remove_dir_all(dir);
     }

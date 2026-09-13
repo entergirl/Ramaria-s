@@ -13,6 +13,8 @@
 //!   `build_system_prompt_coordinated` 完成。
 //! - 纯委托 token_budget 模块，Stage 自身不包含 token 估算逻辑
 //! - 输出填充 PipelineData 的 budgeted_* 字段供 Stage 8 使用
+//! - 未接线（预留）：生产对话管线（`app_chat.rs`）Steps 6-10 为内联实现，
+//!   本 Stage 仅由 `tests/m2_integration.rs` 组装使用；保留备用。
 
 use async_trait::async_trait;
 use ramaria_core::error::RamariaError;
@@ -36,6 +38,9 @@ use crate::pipeline::{PipelineContext, PipelineData, PipelineError, PipelineStag
 /// - 上下文窗口来自 backend_config（Stage 2 产出）的 capability.context_window
 /// - 若 system_prompt 未设置（Stage 6 失败或未执行），返回 Fatal 错误
 /// - 预算超出上下文窗口时记录 warn 日志，不中断管线（LLM 可能仍能处理）
+///
+/// 未接线（预留）：生产对话管线（`app_chat.rs`）Steps 6-10 为内联实现，
+/// 本 Stage 仅由 `tests/m2_integration.rs` 组装使用；保留备用。
 pub struct StageTokenBudget;
 
 impl StageTokenBudget {

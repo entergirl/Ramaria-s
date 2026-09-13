@@ -239,23 +239,37 @@ async fn fetch_latest_release(url: &str) -> Result<GitHubRelease, String> {
     Ok(release)
 }
 
-/// 读取响应体预览（最多 4KB），用于错误诊断。
+/// 读取响应体预览，用于错误诊断。
 ///
 /// 说明:
 /// - 在非 200 状态码或非 JSON 响应时调用，帮助判断是限流、代理拦截还是其他问题。
-/// - 限制读取 4096 字节，防止恶意大响应撑爆内存。
+/// - 超长响应体按字符边界截断（最多 4096 字符），绝不切开多字节字符。
 /// - 读取失败时返回空字符串，不阻塞错误报告流程。
 async fn read_body_preview(response: reqwest::Response) -> String {
     match response.text().await {
-        Ok(body) => {
-            if body.len() > 4096 {
-                format!("{}... [截断，总长 {} 字节]", &body[..4096], body.len())
-            } else {
-                body
-            }
-        }
+        Ok(body) => format_body_preview(&body),
         Err(_) => String::new(),
     }
+}
+
+/// 将响应体转为诊断预览文本（超长时按字符边界截断并标注原始大小）。
+///
+/// 安全约束:
+/// - 必须按字符边界截断：响应体可能来自中文代理页/网关页，字节切片会 panic。
+/// - 预算按字符计（4096）；字节数仅用于判断是否需要标注"原始大小"。
+fn format_body_preview(body: &str) -> String {
+    const PREVIEW_BYTES: usize = 4096;
+
+    if body.len() <= PREVIEW_BYTES {
+        return body.to_string();
+    }
+
+    let head = ramaria_core::text::truncate_char_boundary(body, PREVIEW_BYTES);
+    if head.len() == body.len() {
+        // 字节数超预算但字符数未超预算：内容完整保留，无需截断标注
+        return body.to_string();
+    }
+    format!("{head}... [截断，总长 {} 字节]", body.len())
 }
 
 /// 简易 semver 版本比较。
@@ -333,6 +347,35 @@ mod tests {
     }
 
     // ── UpdateStatus 结构完整性 ──
+
+    // ── 响应体预览：多字节字符不 panic ──
+
+    /// 回归：含中文且超 4096 字节的响应体不得 panic（旧实现 `&body[..4096]` 会切在多字节字符中间）。
+    #[test]
+    fn test_body_preview_chinese_over_4096_bytes_no_panic() {
+        // 2000 个汉字 = 6000 字节 > 4096，但字符数未超预算：完整保留
+        let body = "中".repeat(2000);
+        let preview = format_body_preview(&body);
+        assert_eq!(preview, body, "字符数未超预算时应完整保留");
+
+        // 5000 个汉字 = 15000 字节：按字符边界截断到 4096 字符并标注原始大小
+        let long = "汉".repeat(5000);
+        let preview = format_body_preview(&long);
+        let head: String = preview.chars().take(4096).collect();
+        assert_eq!(head, "汉".repeat(4096), "应保留前 4096 个完整字符");
+        assert!(
+            preview.contains("[截断，总长 15000 字节]"),
+            "应标注原始字节数: {preview}"
+        );
+    }
+
+    /// 短响应体原样返回（不截断、不加标注）。
+    #[test]
+    fn test_body_preview_short_body_unchanged() {
+        assert_eq!(format_body_preview(""), "");
+        assert_eq!(format_body_preview("hello"), "hello");
+        assert_eq!(format_body_preview("错误响应"), "错误响应");
+    }
 
     #[test]
     fn test_update_status_current_version_is_pkg_version() {

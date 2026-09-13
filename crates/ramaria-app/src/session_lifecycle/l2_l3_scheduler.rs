@@ -617,8 +617,15 @@ impl SessionLifecycle {
             }
         };
 
-        if job_id > 0 {
-            let _ = job_manager.mark_running(job_id).await;
+        if job_id > 0
+            && let Err(e) = job_manager.mark_running(job_id).await
+        {
+            // 状态标记失败只影响可观测性，推断流程继续（不返回、不覆盖业务结果）
+            warn!(
+                job_id,
+                error = %e,
+                "标记 L3 推断任务 running 失败（继续执行，仅状态可观测性受影响）"
+            );
         }
 
         // ---- 统计特征提取（纯数值，不调 LLM） ----
@@ -692,10 +699,17 @@ impl SessionLifecycle {
             }
             Err(e) => {
                 error!(persona_uid = %persona_owned, error = %e, "L3 Phase B 推断失败");
-                if job_id > 0 {
-                    let _ = job_manager
+                if job_id > 0
+                    && let Err(mark_err) = job_manager
                         .mark_failed(job_id, &format!("Phase B 推断失败: {e}"))
-                        .await;
+                        .await
+                {
+                    // 标记失败不覆盖原始错误（原始错误已由上面的 error! 记录）
+                    warn!(
+                        job_id,
+                        error = %mark_err,
+                        "标记 L3 推断任务失败状态失败（不覆盖原始错误）"
+                    );
                 }
                 return;
             }
@@ -704,9 +718,9 @@ impl SessionLifecycle {
         // ---- 置信度更新 + 漂移检测 ----
         use ramaria_memory::inference::run_phase_c_update;
 
-        // 判断是否为首轮推断
-        let is_first_round =
-            phase_b_result.traits_updated == 0 && phase_b_result.traits_deprecated == 0;
+        // 判断是否为首轮推断：以"本轮是否产出活跃 trait"为准
+        // （稳定轮只产 Keep，traits_updated/deprecated 均为 0 但不是首轮）
+        let is_first_round = is_first_inference_round(&phase_b_result);
 
         let confidence_config = ConfidenceConfig::from(self.config.inference.confidence.clone());
         let mut drift_config = DriftConfig::from(self.config.inference.drift.clone());
@@ -829,6 +843,21 @@ impl SessionLifecycle {
 }
 
 // =========================================================
+// L3 首轮判定
+// =========================================================
+
+/// 判断本轮 L3 是否为首轮推断（= Phase B 未产出任何活跃 trait）。
+///
+/// 语义说明:
+/// - 首轮没有可对比的旧画像分布，漂移检测按语义跳过（`is_first_round=true`）。
+/// - "标签/含义未变"的稳定轮只产 `Keep`：`traits_updated` / `traits_deprecated`
+///   均为 0，但 `trait_ids` 非空——此时**不是首轮**，必须继续执行漂移检测，
+///   否则漂移发现会被推迟一整个推断周期。
+fn is_first_inference_round(phase_b_result: &ramaria_memory::inference::PhaseBResult) -> bool {
+    phase_b_result.trait_ids.is_empty()
+}
+
+// =========================================================
 // 后台线程 B：L2/L3 定时触发
 // =========================================================
 
@@ -887,6 +916,13 @@ impl SessionLifecycle {
     /// 对齐 Python `merger.check_and_merge` 的时间触发路径（路径 B）。
     async fn run_scheduled_l2_l3_check(&self, storage: &dyn StorageBackend, llm: &dyn LlmProvider) {
         debug!("L2/L3 定时检查开始");
+
+        // L1 补扫：消费封存时 L1 生成失败遗留的 pending 任务（LLM 恢复后自动补跑摘要），
+        // 使"失败登记"不再空转（启动补扫之外的周期性消费点）。
+        let l1_retried = self.retry_pending_l1_jobs(storage, llm).await;
+        if l1_retried > 0 {
+            info!(l1_retried, "L2/L3 定时检查：L1 补扫完成");
+        }
 
         let personas = match storage.list_personas().await {
             Ok(p) => p,
@@ -1178,5 +1214,42 @@ mod tests {
         assert_eq!(stats.pending_groups, 1, "应计入待下次组");
         let unbound_left = storage.list_recent_l1_by_persona("", 100).await.unwrap();
         assert_eq!(unbound_left.len(), 10, "不应发生任何归属");
+    }
+
+    // =========================================================
+    // L3 首轮判定（稳定轮不豁免漂移检测）
+    // =========================================================
+
+    /// 回归：Keep-only 稳定轮（traits_updated / traits_deprecated 均为 0，
+    /// 但本轮仍产出活跃 trait）不是首轮，必须继续执行漂移检测。
+    #[test]
+    fn keep_only_round_is_not_first_round() {
+        use ramaria_memory::inference::{PhaseBResult, PhaseBSource};
+
+        let keep_only = PhaseBResult {
+            traits_saved: 0,
+            traits_updated: 0,
+            traits_deprecated: 0,
+            source: PhaseBSource::LlmInference,
+            trait_ids: vec![1, 2],
+            traits: vec![],
+        };
+        assert!(
+            !is_first_inference_round(&keep_only),
+            "Keep-only 稳定轮不应被判为首轮（否则漂移检测被跳过）"
+        );
+
+        let no_trait = PhaseBResult {
+            traits_saved: 0,
+            traits_updated: 0,
+            traits_deprecated: 0,
+            source: PhaseBSource::MockFallback,
+            trait_ids: vec![],
+            traits: vec![],
+        };
+        assert!(
+            is_first_inference_round(&no_trait),
+            "仅当本轮无任何活跃 trait 时才视为首轮"
+        );
     }
 }

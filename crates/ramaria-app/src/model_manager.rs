@@ -40,7 +40,12 @@ pub const DEFAULT_MODEL_ID: &str = "bge-small-zh-v1.5";
 /// 每个模型包含:
 /// - model_id: 模型目录名
 /// - hf_repo: HuggingFace 仓库路径（org/repo）
-/// - files: 需要下载的文件列表（文件名, SHA-256 校验和，空字符串跳过）
+/// - files: 需要下载的文件列表（文件名 + SHA-256；空串 = 跳过校验）
+/// - estimated_size: 预估下载大小（字节）
+///
+/// 说明:
+/// - files 中的校验和绑定 HuggingFace 仓库 `main` 当前 revision 的文件内容；
+///   上游更新文件后必须同步更新预置校验和。
 #[derive(Debug, Clone)]
 pub struct ModelPreset {
     pub model_id: &'static str,
@@ -57,9 +62,18 @@ pub const MODEL_PRESETS: &[ModelPreset] = &[
         model_id: "bge-small-zh-v1.5",
         hf_repo: "BAAI/bge-small-zh-v1.5",
         files: &[
-            ("config.json", ""),
-            ("tokenizer.json", ""),
-            ("model.safetensors", ""),
+            (
+                "config.json",
+                "3853a7979202c348751b753e36f579c41d8da7d36af617d3d907e1fc9b441f2a",
+            ),
+            (
+                "tokenizer.json",
+                "48cea5d44424912a6fd1ea647bf4fe50b55ab8b1e5879c3275f80e339e8fae26",
+            ),
+            (
+                "model.safetensors",
+                "354763b9b1357bc9c44f62c6be2276321081ed2567773608c0d0785b61d5a026",
+            ),
         ],
         estimated_size: 100_000_000,
     },
@@ -68,9 +82,20 @@ pub const MODEL_PRESETS: &[ModelPreset] = &[
         model_id: "Qwen3-Embedding-0.6B",
         hf_repo: "Qwen/Qwen3-Embedding-0.6B",
         files: &[
-            ("config.json", ""),
-            ("tokenizer.json", ""),
-            ("model.safetensors", ""), // ⚠ 注意：Qwen3-Embedding-0.6B 可能为分片 safetensors
+            (
+                "config.json",
+                "b5bf1f51fc45be473a54718cef92448d90a1be001bf9b9a44b8c7f10a19feaa9",
+            ),
+            (
+                "tokenizer.json",
+                "def76fb086971c7867b829c23a26261e38d9d74e02139253b38aeb9df8b4b50a",
+            ),
+            // 当前 main 为单文件 model.safetensors（约 1.19GB），预置按单文件下载并已绑定其
+            // SHA-256；若上游改为分片 safetensors 需同步更新预置。
+            (
+                "model.safetensors",
+                "0437e45c94563b09e13cb7a64478fc406947a93cb34a7e05870fc8dcd48e23fd",
+            ),
         ],
         estimated_size: 1_200_000_000,
     },
@@ -127,6 +152,40 @@ fn build_http_client() -> RamariaResult<reqwest::Client> {
         .user_agent(format!("Ramaria/{}", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| RamariaError::validation(format!("创建 HTTP 客户端失败: {e}")))
+}
+
+// =========================================================
+// 断点续传辅助函数
+// =========================================================
+
+/// 解析 `Content-Range` 响应头中的起始偏移。
+///
+/// 参数:
+/// - `header`: `Content-Range` 头的原始字符串，格式为 `bytes {start}-{end}/{total}`。
+///
+/// 返回:
+/// - `Some(start)`: 起始偏移解析成功。
+/// - `None`: 头缺失、缺少 `bytes` 前缀、缺少 `-` 分隔或起始偏移不是合法数字。
+fn parse_content_range_start(header: &str) -> Option<u64> {
+    let rest = header.trim().strip_prefix("bytes ")?;
+    let (start, _) = rest.split_once('-')?;
+    start.trim().parse::<u64>().ok()
+}
+
+/// 判断是否允许在已有临时文件基础上追加续传。
+///
+/// 参数:
+/// - `existing_size`: 本地临时文件已下载的字节数。
+/// - `status_code`: 服务器响应状态码。
+///
+/// 返回:
+/// - 仅当 `existing_size > 0` 且服务器返回 `206 Partial Content` 时为 `true`。
+///
+/// 说明:
+/// - 服务器忽略 `Range` 请求返回 200 时，响应体是完整文件内容；
+///   此时若继续追加写入会损坏文件，必须从头重写。
+fn resume_append_allowed(existing_size: u64, status_code: u16) -> bool {
+    existing_size > 0 && status_code == 206
 }
 
 // =========================================================
@@ -554,8 +613,13 @@ impl ModelManager {
     /// 使用 `self.http_client`（在 `ModelManager::new` 中创建的可复用实例），
     /// 而非每次调用创建新 Client。好处:
     /// - 连接池复用，减少 TCP/TLS 握手开销（尤其是多文件下载时）
-    /// - 超时设置在构造时统一配置（connect_timeout: 30s, timeout: 3600s）
-    /// - 请求级超时由 tokio::time::timeout 包裹（见 `download_model` 的调用处）
+    /// - 超时设置在构造时统一配置（见 `build_http_client`）:
+    ///   `connect_timeout(30s)` 约束建立连接，`timeout(3600s)` 覆盖整个请求（含流式 body）
+    /// - 请求处无需额外包裹 `tokio::time::timeout`，客户端级超时已保证网络卡住时不会永久挂起
+    ///
+    /// 说明:
+    /// - 仅当服务器返回 206 且 `Content-Range` 起始偏移等于本地临时文件大小时追加续传；
+    ///   其余情况一律截断重写，避免服务器忽略 Range 返回 200 时把完整内容追加到旧数据尾部
     async fn download_single_file(
         &self,
         url: &str,
@@ -590,6 +654,20 @@ impl ModelManager {
             )));
         }
 
+        let status_code = status.as_u16();
+
+        // 服务器忽略 Range 返回 200 时，响应体是完整文件内容；
+        // 此时追加写入会损坏文件，必须放弃续传并从头重写
+        let append_existing = resume_append_allowed(existing_size, status_code);
+        if existing_size > 0 && !append_existing {
+            tracing::warn!(
+                file = %filename,
+                status = status_code,
+                existing_bytes = existing_size,
+                "服务器未返回 206 Partial Content，放弃断点续传并从头下载"
+            );
+        }
+
         // 获取总大小
         let total = if status == 206 {
             // 部分内容：从 Content-Range 头获取总大小
@@ -604,12 +682,36 @@ impl ModelManager {
             response.content_length().unwrap_or(0)
         };
 
+        // 允许追加时，服务器返回的起始偏移必须与本地进度一致，否则临时文件不可信
+        if append_existing {
+            let range_start = response
+                .headers()
+                .get("content-range")
+                .and_then(|v| v.to_str().ok())
+                .and_then(parse_content_range_start);
+
+            if range_start != Some(existing_size) {
+                if let Err(e) = fs::remove_file(dest) {
+                    tracing::warn!(
+                        file = %filename,
+                        error = %e,
+                        "清理断点续传临时文件失败"
+                    );
+                }
+                return Err(RamariaError::validation(format!(
+                    "文件 {} 断点续传范围不匹配，已清理临时文件，请重试（临时文件: {}）",
+                    filename,
+                    dest.display()
+                )));
+            }
+        }
+
         self.total_size.store(total, Ordering::SeqCst);
-        let mut downloaded = existing_size;
+        let mut downloaded = if append_existing { existing_size } else { 0 };
         self.downloaded.store(downloaded, Ordering::SeqCst);
 
-        // 打开文件（追加模式用于断点续传）
-        let mut file = if existing_size > 0 {
+        // 打开文件：允许续传时追加写，否则截断重写
+        let mut file = if append_existing {
             std::fs::OpenOptions::new()
                 .append(true)
                 .open(dest)
@@ -850,5 +952,53 @@ mod tests {
         assert!(!mgr.is_model_ready("bge-small-zh-v1.5"));
 
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// 测试预置模型校验和已填齐：非空、长度为 64、全为小写十六进制字符
+    #[test]
+    fn preset_checksums_are_filled() {
+        for preset in MODEL_PRESETS {
+            for &(filename, checksum) in preset.files {
+                assert!(
+                    !checksum.is_empty(),
+                    "{} 的 {} 缺少 SHA-256 校验和",
+                    preset.model_id,
+                    filename
+                );
+                assert_eq!(
+                    checksum.len(),
+                    64,
+                    "{} 的 {} SHA-256 校验和长度应为 64",
+                    preset.model_id,
+                    filename
+                );
+                assert!(
+                    checksum.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')),
+                    "{} 的 {} SHA-256 校验和应为小写十六进制",
+                    preset.model_id,
+                    filename
+                );
+            }
+        }
+    }
+
+    /// 测试 Content-Range 起始偏移解析
+    #[test]
+    fn parse_content_range_start_cases() {
+        assert_eq!(parse_content_range_start("bytes 100-999/1000"), Some(100));
+        assert_eq!(parse_content_range_start("bytes 0-0/1"), Some(0));
+        // 缺失、缺少 bytes 前缀、起始偏移非数字
+        assert_eq!(parse_content_range_start(""), None);
+        assert_eq!(parse_content_range_start("100-999/1000"), None);
+        assert_eq!(parse_content_range_start("bytes abc-999/1000"), None);
+    }
+
+    /// 测试断点续传追加条件：仅已有数据和 206 响应同时满足才允许追加
+    #[test]
+    fn resume_append_allowed_cases() {
+        assert!(!resume_append_allowed(0, 200));
+        assert!(!resume_append_allowed(100, 200));
+        assert!(!resume_append_allowed(0, 206));
+        assert!(resume_append_allowed(100, 206));
     }
 }

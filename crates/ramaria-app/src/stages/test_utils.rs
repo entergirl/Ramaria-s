@@ -55,6 +55,8 @@ pub struct MockStorage {
     utt_blocks: Mutex<HashMap<Uuid, Vec<UttBlock>>>,
     /// 测试注入：bind_session_persona_uid 是否强制失败（降级路径测试）
     fail_bind: AtomicBool,
+    /// 测试注入：list_personas 是否强制失败（检索器重建失败路径测试）
+    fail_list_personas: AtomicBool,
     /// touch_l1 调用记录（v1.7 touch 接线测试）：最近一次 touch 的 L1 id 列表
     touch_l1_ids: Mutex<Vec<Uuid>>,
     /// feedback_log 记录（v1.7 H2 弱反馈测试）：按 persona 索引
@@ -92,6 +94,7 @@ impl MockStorage {
             personas: Mutex::new(HashMap::new()),
             utt_blocks: Mutex::new(HashMap::new()),
             fail_bind: AtomicBool::new(false),
+            fail_list_personas: AtomicBool::new(false),
             touch_l1_ids: Mutex::new(Vec::new()),
             feedback_logs: Mutex::new(Vec::new()),
             settings: Mutex::new(std::collections::HashMap::new()),
@@ -130,6 +133,11 @@ impl MockStorage {
     /// 测试注入：让 bind_session_persona_uid 返回错误（验证降级不阻塞发送）。
     pub fn set_bind_fails(&self, fail: bool) {
         self.fail_bind.store(fail, Ordering::Relaxed);
+    }
+
+    /// 测试注入：让 list_personas 返回错误（验证检索器重建失败保留旧索引）。
+    pub fn set_list_personas_fails(&self, fail: bool) {
+        self.fail_list_personas.store(fail, Ordering::Relaxed);
     }
 
     /// 预填充一个活跃 session 并返回其 ID。
@@ -450,6 +458,11 @@ impl StoreCrud for MockStorage {
     }
 
     async fn list_personas(&self) -> RamariaResult<Vec<Persona>> {
+        if self.fail_list_personas.load(Ordering::Relaxed) {
+            return Err(RamariaError::unsupported(
+                "测试注入：list_personas 强制失败",
+            ));
+        }
         Ok(self.personas.lock().unwrap().values().cloned().collect())
     }
 

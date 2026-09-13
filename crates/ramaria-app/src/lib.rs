@@ -33,6 +33,7 @@ pub mod error_hint;
 pub mod eta;
 pub mod feedback;
 pub mod model_manager;
+mod persona_prompt;
 pub mod pipeline;
 pub mod privacy;
 pub mod session_lifecycle;

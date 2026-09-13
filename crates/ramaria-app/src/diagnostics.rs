@@ -10,7 +10,9 @@
 //! 安全约束:
 //! - API key 脱敏使用 `[REDACTED]` 替换，不可逆。
 //! - 不收集用户对话内容、记忆数据等隐私信息。
-//! - 日志可能含用户消息片段（前80字符截断），参见日志隐私策略。
+//! - 打包前对日志与配置做**二次脱敏**：绝对路径 → 仅保留文件名；消息类字段
+//!   的值（preview/content/message/...）→ 字符数占位（`<N chars>`），
+//!   杜绝原文片段随诊断包离开本机。
 //! - 输出路径使用与 CLI export 相同的 `canonicalize` + 前缀检查防护。
 
 use ramaria_core::config::RamariaConfig;
@@ -77,7 +79,8 @@ struct SystemInfo {
 ///
 /// 安全约束:
 /// - API key 在收集阶段即脱敏，写入前已不可逆。
-/// - 日志行中可能包含的用户消息已在日志层截断（≤ 80 字符），此处不加二次清洗。
+/// - 日志与配置在打包前经 [`redact_for_export`] 二次脱敏：绝对路径只留文件名，
+///   消息类字段值只留字符数（不落原文）。
 /// - 输出路径的安全性由调用方保证（CLI/Desktop 各自使用 canonicalize 防护）。
 ///
 /// 示例:
@@ -176,21 +179,23 @@ fn collect_logs(config: &RamariaConfig, status: &mut HashMap<String, String>) ->
             let start = total.saturating_sub(1000);
 
             let truncated: String = lines[start..].iter().map(|l| format!("{l}\n")).collect();
+            // 二次脱敏：绝对路径 → 文件名；消息类字段值 → 字符数（原文不出端）
+            let redacted = redact_for_export(&truncated);
 
             status.insert(
                 "logs".to_string(),
-                format!("ok: {}/{} lines", truncated.lines().count(), total),
+                format!("ok: {}/{} lines", redacted.lines().count(), total),
             );
             tracing::debug!(
                 total_lines = total,
-                collected = truncated.lines().count(),
-                "日志收集完成"
+                collected = redacted.lines().count(),
+                "日志收集完成（已二次脱敏）"
             );
 
             if start > 0 {
-                format!("# 最近 1000 行日志（共 {total} 行，已截断前 {start} 行）\n\n{truncated}")
+                format!("# 最近 1000 行日志（共 {total} 行，已截断前 {start} 行）\n\n{redacted}")
             } else {
-                format!("# 全部日志（共 {total} 行）\n\n{truncated}")
+                format!("# 全部日志（共 {total} 行）\n\n{redacted}")
             }
         }
         Err(e) => {
@@ -228,13 +233,16 @@ fn collect_config(config: &RamariaConfig, status: &mut HashMap<String, String>) 
 
     match std::fs::read_to_string(&config_path) {
         Ok(content) => {
-            let redacted = redact_api_keys(&content);
+            // 两道脱敏：API key → [REDACTED]；绝对路径 → 文件名（paths 组可能含本机路径）
+            let redacted = redact_for_export(&redact_api_keys(&content));
+            // 包头只写文件名，不写绝对路径（诊断包外发时不暴露本机目录结构）
+            let file_label = config_path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "config.toml".to_string());
             status.insert("config".to_string(), "ok".to_string());
             tracing::debug!(path = %config_path.display(), "配置收集完成（API key 已脱敏）");
-            format!(
-                "# 配置文件: {}\n# 注意：API key 已脱敏为 [REDACTED]\n\n{redacted}",
-                config_path.display()
-            )
+            format!("# 配置文件: {file_label}\n# 注意：API key 已脱敏为 [REDACTED]\n\n{redacted}")
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             // config.toml 不存在是预期行为：Ramaria 将配置存储在数据库中，不使用文件配置
@@ -289,6 +297,224 @@ fn redact_api_keys(content: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+// =========================================================
+// 内部实现: 导出前二次脱敏
+// =========================================================
+
+/// 消息类字段名（完整名，或 `xxx_preview` 形式的后缀名）。
+///
+/// 说明:
+/// - 命中即把字段值替换为字符数占位 `<N chars>`，避免原文随诊断包外发。
+/// - 不含 `*_len` 类长度字段（如 `msg_len=12` 本身已不含原文，保持可诊断性）。
+const SENSITIVE_FIELD_MARKERS: &[&str] = &[
+    "preview", "content", "text", "message", "msg", "reply", "input", "summary", "notes",
+    "excerpt", "snippet",
+];
+
+/// 导出前二次脱敏（日志与配置的统一入口）。
+///
+/// 规则:
+/// 1. 消息类字段值 → `<N chars>`（N 为字符数，不输出原文）；
+/// 2. 绝对路径（Windows 盘符 / UNC / Unix 绝对路径）→ 仅保留最后一段（文件名）。
+///
+/// 说明:
+/// - 保留行结构与空白，便于人工阅读与定位；
+/// - 该函数是"最后一道防线"，不依赖上游日志是否已做脱敏；
+/// - 字段值以空白分隔且未加引号时只能取到首个词（结构化日志的内容字段通常由
+///   Debug 格式化加引号，可完整覆盖）。
+fn redact_for_export(content: &str) -> String {
+    content
+        .split_inclusive('\n')
+        .map(redact_line)
+        .collect::<String>()
+}
+
+/// 单行脱敏：按空白切分 token（保留空白片段），逐 token 处理。
+fn redact_line(line: &str) -> String {
+    split_words_with_separators(line)
+        .into_iter()
+        .map(|(is_space, part)| {
+            if is_space {
+                part.to_string()
+            } else {
+                // 先按字段脱敏（可能吞掉带引号的值），再替换其中的绝对路径
+                redact_paths_in(&redact_sensitive_field(part))
+            }
+        })
+        .collect()
+}
+
+/// 按空白切分但保留空白片段（保证脱敏后行结构与空白原样保留）。
+fn split_words_with_separators(line: &str) -> Vec<(bool, &str)> {
+    let mut parts: Vec<(bool, &str)> = Vec::new();
+    let mut start = 0usize;
+    let mut current: Option<bool> = None;
+
+    for (i, ch) in line.char_indices() {
+        let is_space = ch.is_whitespace();
+        if current == Some(!is_space) {
+            parts.push((!is_space, &line[start..i]));
+            start = i;
+        }
+        current = Some(is_space);
+    }
+    if start < line.len() {
+        parts.push((current.unwrap_or(false), &line[start..]));
+    }
+    parts
+}
+
+/// 单个 token 的字段脱敏：`字段=值` 中字段命中敏感名单时，值替换为 `<N chars>`。
+fn redact_sensitive_field(token: &str) -> String {
+    let Some(eq) = token.find('=') else {
+        return token.to_string();
+    };
+    let name = token[..eq]
+        .trim_matches(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .to_ascii_lowercase();
+    if !is_sensitive_field_name(&name) {
+        return token.to_string();
+    }
+
+    let value = &token[eq + 1..];
+    if value.is_empty() {
+        return token.to_string();
+    }
+
+    // 值可能是 Debug `?` 格式化的引号包裹，也可能是 Display `%` 的裸文本
+    let quoted = value.len() >= 2
+        && ((value.starts_with('"') && value.ends_with('"'))
+            || (value.starts_with('\'') && value.ends_with('\'')));
+    let inner = if quoted {
+        &value[1..value.len() - 1]
+    } else {
+        value
+    };
+    let count = inner.chars().count();
+    let prefix = &token[..eq];
+    if quoted {
+        format!("{prefix}=\"<{count} chars>\"")
+    } else {
+        format!("{prefix}=<{count} chars>")
+    }
+}
+
+/// 字段名是否命中敏感名单（完整名，或 `xxx_preview` 形式的后缀名）。
+fn is_sensitive_field_name(name: &str) -> bool {
+    SENSITIVE_FIELD_MARKERS
+        .iter()
+        .any(|marker| name == *marker || name.ends_with(&format!("_{marker}")))
+}
+
+/// 替换 token 内的绝对路径为文件名（Windows 盘符 / UNC / Unix 绝对路径）。
+fn redact_paths_in(token: &str) -> String {
+    let mut out = String::with_capacity(token.len());
+    let mut i = 0usize;
+
+    while i < token.len() {
+        if let Some(len) = absolute_path_len_at(token, i) {
+            out.push_str(&path_file_name(&token[i..i + len]));
+            i += len;
+            continue;
+        }
+        // 不是路径起点：按 UTF-8 字符整体推进（不切开多字节字符）
+        let ch_len = token[i..].chars().next().map(char::len_utf8).unwrap_or(1);
+        out.push_str(&token[i..i + ch_len]);
+        i += ch_len;
+    }
+    out
+}
+
+/// 判断 `s[i..]` 是否以绝对路径开头；是则返回该路径片段长度（字节）。
+///
+/// 判定:
+/// - 路径必须起始于边界（token 起点或空白/引号/等号/括号等之后），
+///   避免把 URL（`https://...`）中的路径段误判为本地路径；
+/// - Windows：`X:\` / `X:/`；UNC：`\\server\share`；
+/// - Unix：`/xxx`（排除 `//` 与 `/` 后紧跟空白）。
+fn absolute_path_len_at(s: &str, i: usize) -> Option<usize> {
+    let bytes = s.as_bytes();
+    if i != 0 && !is_path_boundary(bytes[i - 1]) {
+        return None;
+    }
+
+    let windows_drive = i + 2 < bytes.len()
+        && bytes[i].is_ascii_alphabetic()
+        && bytes[i + 1] == b':'
+        && (bytes[i + 2] == b'\\' || bytes[i + 2] == b'/');
+    let unc = bytes[i] == b'\\' && i + 1 < bytes.len() && bytes[i + 1] == b'\\';
+    let unix = bytes[i] == b'/'
+        && i + 1 < bytes.len()
+        && bytes[i + 1] != b'/'
+        && !bytes[i + 1].is_ascii_whitespace();
+
+    if !(windows_drive || unc || unix) {
+        return None;
+    }
+
+    let mut end = i;
+    while end < bytes.len() && !is_path_terminator(bytes[end]) {
+        end += 1;
+    }
+    // 仅取到前缀/单个分隔符（如裸 "C:\"）时视为非路径，保持原文
+    if end <= i + 1 {
+        return None;
+    }
+    Some(end - i)
+}
+
+/// 路径起点允许的前导字节（排除词内斜杠与 URL 协议段）。
+fn is_path_boundary(b: u8) -> bool {
+    matches!(
+        b,
+        b' ' | b'\t'
+            | b'\n'
+            | b'\r'
+            | b'"'
+            | b'\''
+            | b'='
+            | b'('
+            | b'['
+            | b'{'
+            | b','
+            | b':'
+            | b'<'
+            | b'`'
+            | b'|'
+    )
+}
+
+/// 路径终止字节（路径片段到此为止，后续字符原样保留）。
+fn is_path_terminator(b: u8) -> bool {
+    b.is_ascii_whitespace()
+        || matches!(
+            b,
+            b'"' | b'\''
+                | b','
+                | b')'
+                | b']'
+                | b'}'
+                | b'>'
+                | b'<'
+                | b'|'
+                | b'*'
+                | b'?'
+                | b';'
+                | b'`'
+        )
+}
+
+/// 取路径最后一段（文件名）；空路径（如 `/`）返回 `<path>` 占位。
+fn path_file_name(path: &str) -> String {
+    let trimmed = path.trim_end_matches(['/', '\\']);
+    let last = trimmed.rsplit(['/', '\\']).next().unwrap_or("");
+    if last.is_empty() {
+        "<path>".to_string()
+    } else {
+        last.to_string()
+    }
 }
 
 // =========================================================
@@ -468,6 +694,66 @@ mod tests {
         assert!(!result.contains("my-secret"));
     }
 
+    // ── 导出前二次脱敏 ──
+
+    /// 消息类字段 → 字符数占位；长度类字段不受影响。
+    #[test]
+    fn redact_for_export_replaces_message_fields() {
+        let cases = [
+            (r#"preview="我想吃火锅""#, r#"preview="<5 chars>""#),
+            ("msg=hello", "msg=<5 chars>"),
+            ("user_input=\"hi\"", "user_input=\"<2 chars>\""),
+            // 长度字段本身不含原文，保持可诊断性
+            ("msg_len=12", "msg_len=12"),
+            ("content_len=3", "content_len=3"),
+            // 非敏感字段保持原样
+            ("dropped=Some(2)", "dropped=Some(2)"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(redact_for_export(input), expected, "input={input}");
+        }
+    }
+
+    /// 绝对路径 → 文件名；URL 与非路径文本不受影响；多语言内容不 panic。
+    #[test]
+    fn redact_for_export_replaces_absolute_paths() {
+        let cases = [
+            (
+                r"path=C:\Users\someone\Documents\ramaria.log",
+                "path=ramaria.log",
+            ),
+            (
+                "无法读取 /home/someone/private/ramaria.log",
+                "无法读取 ramaria.log",
+            ),
+            (r#""C:\Users\someone\AppData\Roaming""#, r#""Roaming""#),
+            ("dir=/tmp/", "dir=tmp"),
+            // URL 中的路径段不是本地路径，保持原样
+            (
+                "url=https://api.github.com/repos/entergirl/Ramaria-s",
+                "url=https://api.github.com/repos/entergirl/Ramaria-s",
+            ),
+            // 中文与路径混排不 panic、不切坏多字节字符
+            (
+                "导入到 C:\\用户\\文档\\导出.zip 完成",
+                "导入到 导出.zip 完成",
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(redact_for_export(input), expected, "input={input}");
+        }
+    }
+
+    /// 行结构与空白保留（脱敏不破坏日志可读性）。
+    #[test]
+    fn redact_for_export_keeps_line_structure() {
+        let input = "INFO x: a  preview=\"秘密内容\"\n\nWARN y: b\n";
+        let out = redact_for_export(input);
+        assert_eq!(out.lines().count(), 3, "行数应保持");
+        assert!(out.contains("INFO x: a  preview=\"<4 chars>\""));
+        assert!(out.ends_with('\n'), "末尾换行应保留");
+    }
+
     // ── system.txt 构建 ──
 
     #[test]
@@ -555,6 +841,82 @@ mod tests {
             std::env::temp_dir().join(format!("ramaria_diag_{tag}_{}_{stamp}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("创建测试临时目录失败");
         dir
+    }
+
+    /// 读取 zip 中指定条目的文本内容（测试辅助）。
+    fn read_zip_entry(zip_path: &Path, name: &str) -> String {
+        use std::io::Read;
+
+        let file = std::fs::File::open(zip_path).expect("无法打开生成的 zip");
+        let mut archive = zip::ZipArchive::new(file).expect("生成的文件不是合法 zip");
+        let mut entry = archive.by_name(name).expect("归档缺少目标条目");
+        let mut text = String::new();
+        entry.read_to_string(&mut text).expect("读取归档条目失败");
+        text
+    }
+
+    /// 端到端：导出包不含绝对路径与消息原文（二次脱敏后落盘）。
+    #[tokio::test]
+    async fn export_redacts_absolute_paths_and_message_previews() {
+        let dir = unique_dir("redact");
+        let log_dir = dir.join("logs");
+        let config_dir = dir.join("cfg");
+        std::fs::create_dir_all(&log_dir).expect("创建日志目录失败");
+        std::fs::create_dir_all(&config_dir).expect("创建配置目录失败");
+
+        // 日志：本机绝对路径（Windows + Unix）与结构化消息字段（含原文）
+        std::fs::write(
+            log_dir.join("ramaria.log"),
+            "INFO ramaria_app::chat: 收到消息 preview=\"我想吃火锅\" path=C:\\Users\\someone\\Documents\\ramaria.log\n\
+             WARN ramaria_app::io: 无法读取 /home/someone/private/ramaria.log\n",
+        )
+        .expect("写入日志失败");
+        // 配置：本机路径 + API key（TOML 中以 \\ 转义反斜杠）
+        std::fs::write(
+            config_dir.join("config.toml"),
+            "[paths]\ndata_dir = \"C:\\\\Users\\\\someone\\\\AppData\\\\Roaming\\\\Ramaria\"\napi_key = \"sk-secret\"\n",
+        )
+        .expect("写入配置失败");
+
+        let mut config = RamariaConfig::default();
+        config.paths.log_dir = log_dir.to_string_lossy().into_owned();
+        config.paths.config_dir = config_dir.to_string_lossy().into_owned();
+
+        let zip_path = dir.join("diag.zip");
+        let report = export_diagnostics(&config, "1".to_string(), &zip_path)
+            .await
+            .expect("导出诊断包应成功");
+        assert!(report.file_size_bytes > 0);
+
+        let logs = read_zip_entry(&zip_path, "ramaria.log");
+        assert!(
+            !logs.contains("C:\\Users"),
+            "日志不得含 Windows 绝对路径: {logs}"
+        );
+        assert!(
+            !logs.contains("/home/someone"),
+            "日志不得含 Unix 绝对路径: {logs}"
+        );
+        assert!(logs.contains("ramaria.log"), "应保留文件名便于定位: {logs}");
+        assert!(
+            logs.contains("preview=\"<5 chars>\""),
+            "消息预览应替换为字符数: {logs}"
+        );
+        assert!(!logs.contains("我想吃火锅"), "日志不得含消息原文");
+
+        let cfg = read_zip_entry(&zip_path, "config.toml");
+        assert!(!cfg.contains("Users"), "配置不得含绝对路径: {cfg}");
+        assert!(
+            cfg.contains("data_dir = \"Ramaria\""),
+            "路径应只保留最后一段: {cfg}"
+        );
+        assert!(cfg.contains("[REDACTED]"), "API key 仍应脱敏: {cfg}");
+        assert!(
+            cfg.contains("# 配置文件: config.toml"),
+            "包头只写文件名: {cfg}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // 用 zip crate 读取并断言归档包含三份诊断文件。

@@ -2,6 +2,8 @@
 //!
 //! 设计特点:
 //! - 管理全部 10 个 Pipeline Stage 的模块声明与 re-export
+//! - 10 个 Stage 中 1-5 已接入生产对话管线（`SendMessagePipeline`），6-10 为未接线（预留），
+//!   生产路径的 Steps 6-10 在 `app_chat.rs` 内联实现
 //! - 每个 Stage 独立文件，职责单一，可独立单元测试
 //! - Stage 通过 PipelineStage trait 统一接口，由 SendMessagePipeline 编排器按序执行
 
@@ -16,7 +18,6 @@ pub mod resolve_session;
 pub mod retrieve_memory;
 pub mod token_budget;
 
-#[cfg(test)]
 #[cfg(test)]
 pub(crate) mod test_utils;
 

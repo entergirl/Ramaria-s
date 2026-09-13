@@ -177,6 +177,16 @@ impl PipelineStage for StageRetrieveMemory {
         // 探针消融：RAG 闸门关闭（`injection.memory_rag=false`，B0）时不执行检索，
         // memory_context 恒 None；utt 原文通道（5.5）独立于 RAG 仍按需执行。
         let mut results = if rag_active {
+            // 索引健康提示：最近一次重建失败时，本轮检索基于旧索引（记忆可能不完整）。
+            // 不改变检索行为——旧索引仍可检索，仅提升可观测性。
+            if ctx
+                .retriever_rebuild_failed
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                tracing::warn!(
+                    "检索索引最近一次重建失败，本轮基于旧索引检索（记忆注入可能不完整）"
+                );
+            }
             let retriever = read_recover(&ctx.retriever, "retrieve_memory.retriever");
 
             let request = SearchRequest {

@@ -80,6 +80,9 @@ pub struct MockStorage {
     /// 事件 → 来源 L1 映射（event_sources）
     event_sources: Mutex<Vec<EventSource>>,
     event_source_seq: AtomicI64,
+    /// 后台任务（background_jobs 表）：id → (job_type, payload, status)
+    jobs: Mutex<HashMap<i64, (String, Option<String>, String)>>,
+    job_seq: AtomicI64,
 }
 
 impl Default for MockStorage {
@@ -122,7 +125,34 @@ impl MockStorage {
             fact_seq: AtomicI64::new(1),
             event_sources: Mutex::new(Vec::new()),
             event_source_seq: AtomicI64::new(1),
+            jobs: Mutex::new(HashMap::new()),
+            job_seq: AtomicI64::new(1),
         }
+    }
+
+    /// 便捷方法：登记一个 pending 后台任务（模拟"封存时 L1 失败"留下的重试登记）。
+    #[allow(dead_code)]
+    pub fn add_pending_job(&self, job_type: &str, payload: Option<&str>) -> i64 {
+        let id = self.job_seq.fetch_add(1, Ordering::Relaxed);
+        self.jobs.lock().unwrap().insert(
+            id,
+            (
+                job_type.to_string(),
+                payload.map(|p| p.to_string()),
+                "pending".to_string(),
+            ),
+        );
+        id
+    }
+
+    /// 便捷方法：读取某任务状态（None = 任务不存在）。
+    #[allow(dead_code)]
+    pub fn job_status(&self, job_id: i64) -> Option<String> {
+        self.jobs
+            .lock()
+            .unwrap()
+            .get(&job_id)
+            .map(|(_, _, status)| status.clone())
     }
 
     /// 便捷方法：创建会话并预填充消息。
@@ -982,23 +1012,44 @@ impl StoreInfrastructure for MockStorage {
 
     async fn create_background_job(
         &self,
-        _job_type: &str,
-        _payload: Option<&str>,
+        job_type: &str,
+        payload: Option<&str>,
     ) -> RamariaResult<i64> {
-        Ok(1)
+        let id = self.job_seq.fetch_add(1, Ordering::Relaxed);
+        self.jobs.lock().unwrap().insert(
+            id,
+            (
+                job_type.to_string(),
+                payload.map(|p| p.to_string()),
+                "pending".to_string(),
+            ),
+        );
+        Ok(id)
     }
 
     async fn update_job_status(
         &self,
-        _id: i64,
-        _status: &str,
+        id: i64,
+        status: &str,
         _error: Option<&str>,
     ) -> RamariaResult<()> {
+        if let Some(entry) = self.jobs.lock().unwrap().get_mut(&id) {
+            entry.2 = status.to_string();
+        }
         Ok(())
     }
 
     async fn list_pending_jobs(&self) -> RamariaResult<Vec<(i64, String, Option<String>)>> {
-        Ok(Vec::new())
+        let mut pending: Vec<(i64, String, Option<String>)> = self
+            .jobs
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, (_, _, status))| status == "pending")
+            .map(|(id, (job_type, payload, _))| (*id, job_type.clone(), payload.clone()))
+            .collect();
+        pending.sort_by_key(|(id, _, _)| *id);
+        Ok(pending)
     }
 
     async fn get_setting(&self, _key: &str) -> RamariaResult<Option<String>> {

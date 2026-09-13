@@ -8,6 +8,7 @@
 //! - SendMessagePipeline 编排器按顺序执行 Stage 序列，任一失败即中止
 //! - 向后兼容：App::send_message 对外接口不变，内部委托 SendMessagePipeline::execute
 
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
@@ -237,6 +238,13 @@ pub struct PipelineContext {
     pub keychain: Arc<Keychain>,
     /// Session 生命周期编排器
     pub lifecycle: Arc<SessionLifecycle>,
+    /// 检索索引健康标志：最近一次 `rebuild_retriever` 是否失败。
+    ///
+    /// 语义:
+    /// - `true` 表示共享检索器保留的是**旧索引**（重建失败/中断，索引未刷新）；
+    ///   旧索引仍可检索，Stage 5 据此告警提示"记忆注入可能不完整"。
+    /// - 未注入时默认 `false`（测试与旧构造路径行为不变）。
+    pub retriever_rebuild_failed: Arc<AtomicBool>,
 }
 
 impl PipelineContext {
@@ -274,7 +282,18 @@ impl PipelineContext {
             keyword_service,
             keychain,
             lifecycle,
+            retriever_rebuild_failed: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// 注入检索索引健康标志（与 `App` 共享同一标志位）。
+    ///
+    /// 用途:
+    /// - 生产构造路径由 `App::build_pipeline_context` 注入；
+    /// - 未注入时保持默认 `false`，Stage 5 不受影响。
+    pub fn with_retriever_rebuild_failed(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.retriever_rebuild_failed = flag;
+        self
     }
 }
 

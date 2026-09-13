@@ -14,7 +14,7 @@
 //! - API key 仅在 keychain 读取时出现，不缓存
 
 use std::pin::Pin;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use futures::Stream;
@@ -93,6 +93,12 @@ pub struct App {
     pub(crate) idle_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// 后台 L2/L3 定时检查线程句柄
     pub(crate) scheduler_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// 检索索引健康标志：最近一次 `rebuild_retriever` 是否失败。
+    ///
+    /// 语义:
+    /// - `true` = 重建失败/中断，共享检索器保留的是旧索引（仍可检索，但未刷新）。
+    /// - 供 Stage 5（记忆检索）告警，并经 `PipelineContext` 注入对话管线。
+    pub(crate) retriever_rebuild_failed: Arc<AtomicBool>,
 }
 
 impl App {
@@ -238,6 +244,7 @@ impl App {
             behavior_pending,
             idle_handle: Mutex::new(None),
             scheduler_handle: Mutex::new(None),
+            retriever_rebuild_failed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -333,7 +340,9 @@ impl App {
             .spawn_idle_checker(Arc::clone(&storage), Arc::clone(&llm));
 
         // 启动 L2/L3 定时检查线程
-        let scheduler = self.lifecycle.spawn_l2_l3_scheduler(storage, llm);
+        let scheduler = self
+            .lifecycle
+            .spawn_l2_l3_scheduler(storage, Arc::clone(&llm));
 
         {
             let mut guard = lock_recover(&self.idle_handle, "app.idle_handle");
@@ -344,7 +353,54 @@ impl App {
             *guard = Some(scheduler);
         }
 
+        // L1 补扫（启动消费点）：封存时 L1 生成失败会登记 pending `l1_summary` 任务，
+        // 此处延迟补跑一次（LLM 已恢复时摘要自动补齐，无需用户手动 regenerate）。
+        // 独立 spawn、不纳入 idle/scheduler 句柄：关闭时由 shutdown_flag 提前退出。
+        {
+            let lifecycle = Arc::clone(&self.lifecycle);
+            let retry_storage = Arc::clone(&self.storage);
+            let retry_llm = llm;
+            let shutdown = self.lifecycle.shutdown_flag();
+            tokio::spawn(async move {
+                // 延迟启动：先让索引重建/首轮对话完成，避免与启动期调用叠加
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                if shutdown.load(Ordering::Relaxed) {
+                    return;
+                }
+                let retried = lifecycle
+                    .retry_pending_l1_jobs(retry_storage.as_ref(), retry_llm.as_ref())
+                    .await;
+                if retried > 0 {
+                    tracing::info!(retried, "启动期 L1 补扫完成");
+                }
+            });
+        }
+
         tracing::info!("后台任务已全部启动");
+    }
+
+    /// 检索索引健康标志：最近一次重建是否失败（失败时索引为旧数据，仍可检索）。
+    ///
+    /// 用途:
+    /// - 诊断展示与 Stage 5 告警；不改变任何降级行为（旧索引照常检索）。
+    pub fn is_retriever_rebuild_failed(&self) -> bool {
+        self.retriever_rebuild_failed.load(Ordering::Relaxed)
+    }
+
+    /// 补扫并重试 L1 摘要失败遗留的 pending 任务（自动补跑摘要）。
+    ///
+    /// 职责:
+    /// - 消费封存路径（`save_and_close_session`）在 L1 生成失败时登记的
+    ///   pending `l1_summary` 任务，避免"失败登记"空转（摘要长期缺失）。
+    /// - 启动后台任务时延迟补扫一次；L2/L3 定时线程每轮也会调用（周期性消费点）。
+    ///
+    /// 返回:
+    /// - 本轮成功补跑出 L1 摘要的任务数（跳过/失败的任务不计入）。
+    pub async fn retry_pending_l1_jobs(&self) -> usize {
+        let llm = lock_recover(&self.llm, "app.llm").clone();
+        self.lifecycle
+            .retry_pending_l1_jobs(self.storage.as_ref(), llm.as_ref())
+            .await
     }
 
     // =========================================================
@@ -608,8 +664,7 @@ impl App {
     // 对外 API 不变，通过 `impl App` 块关联。
     //
     // 同时提取的自由函数：
-    // - `load_persona_toml_prompt` → `app_chat.rs`
-    // - `fallback_read_persona_toml` → `app_chat.rs`
+    // - `persona_prompt::{load_persona_toml_prompt, read_persona_toml_from_fs}` → `persona_prompt.rs`
     // - `stream_forward_task` → `app_chat.rs`
 }
 

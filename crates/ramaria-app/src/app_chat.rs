@@ -1,12 +1,15 @@
 //! crates/ramaria-app/src/app_chat.rs - 核心对话管线
 //!
 //! 设计特点:
-//! - `send_message` Steps 1-5 委托 `SendMessagePipeline` + 5 个独立 Stage 执行
-//! - Steps 6-10（System Prompt、Token Budget、LLM 调用、消息保存）保留为本文件逻辑
+//! - 生产对话管线只装配 Stage 1-5（`SendMessagePipeline` + 5 个独立 Stage）
+//! - Steps 6-10（System Prompt / Token Budget / ChatRequest / LLM 调用 / 消息持久化）
+//!   为本文件内联实现；`stages/{build_prompt,token_budget,build_request,call_llm,
+//!   persist_message}.rs` 为未接线（预留），仅供 `tests/m2_integration.rs` 组装验证
 //! - 注入协调预算（`[injection_budget]`，默认关闭）：开启时 Step 6 走
 //!   `build_system_prompt_coordinated`（RAG 基座 + 四层在统一池内按可配顺序分配），
 //!   关闭时走既有 `build_system_prompt_with_context`（行为逐字段等价 v1.7）
-//! - 自由函数: `load_persona_toml_prompt`（冷启动兜底）、`stream_forward_task`（流式转发）
+//! - 自由函数: `stream_forward_task`（流式转发）；persona.toml 冷启动加载复用
+//!   `crate::persona_prompt::load_persona_toml_prompt`
 //! - 降级策略: 嵌入模型不可用 → 仅 BM25+图谱检索；persona.toml 缺失 → 默认 Ramaria prompt
 //! - 安全约束: 不记录完整 prompt 或用户消息；线上 LLM 调用前强制隐私确认
 //! - 向后兼容：`send_message` 对外接口（参数/返回值）完全不变
@@ -23,8 +26,8 @@ use ramaria_core::types::{Message, MessageRole, MessageSource, ProfileField, new
 use ramaria_memory::prompt::builder::{
     PromptConfig, PromptContext, assemble_prompt, assemble_prompt_coordinated,
 };
+use ramaria_memory::resolve_chat_style_rules;
 use ramaria_memory::token_budget::{self, TokenBudgetConfig};
-use ramaria_memory::{parse_persona_toml, resolve_chat_style_rules};
 use uuid::Uuid;
 
 use crate::App;
@@ -41,9 +44,10 @@ use crate::stream_event::StreamEvent;
 impl App {
     /// 发送消息并获取流式回复。
     ///
-    /// 完整管线（Pipeline + Stage 模式）:
+    /// 完整管线:
     /// Steps 1-5 → `SendMessagePipeline` 编排 5 个独立 Stage
-    /// Steps 6-10 → 本方法继续执行（M2 将拆分为 Stage 6-10）
+    /// Steps 6-10（System Prompt / Token Budget / ChatRequest / LLM 调用 / 消息持久化）
+    /// → 本文件内联实现
     ///
     /// 参数:
     /// - `user_input`: 用户输入文本。
@@ -469,6 +473,8 @@ impl App {
         let keyword_service = Arc::clone(&self.keyword_service);
         let keychain = Arc::clone(&self.keychain);
         let lifecycle = Arc::clone(&self.lifecycle);
+        // 检索索引健康标志：与 App 共享同一标志位，供 Stage 5 在重建失败后告警
+        let retriever_rebuild_failed = Arc::clone(&self.retriever_rebuild_failed);
 
         crate::pipeline::PipelineContext::new(
             storage,
@@ -480,6 +486,7 @@ impl App {
             keychain,
             lifecycle,
         )
+        .with_retriever_rebuild_failed(retriever_rebuild_failed)
     }
 
     // =========================================================
@@ -606,7 +613,8 @@ impl App {
             // 优先从 DB persona.config 读取，其次回退到文件系统
             if facts.is_empty()
                 && traits.is_empty()
-                && let Some(prompt) = load_persona_toml_prompt(p.config.as_deref())
+                && let Some(prompt) =
+                    crate::persona_prompt::load_persona_toml_prompt(p.config.as_deref())
             {
                 tracing::info!("使用 persona.toml 加载的系统 prompt（无结构化画像）");
                 return LoadedPromptMaterial::Plain(prompt);
@@ -911,61 +919,6 @@ enum LoadedPromptMaterial {
     Structured(Box<PromptContext>, PromptConfig),
 }
 
-// =========================================================
-// persona.toml 直接加载（冷启动兜底，不依赖 LLM 结构化拆解）
-// =========================================================
-
-/// 尝试加载 persona.toml 并构建有温度的基础 system prompt。
-///
-/// 数据来源优先级:
-/// 1. `db_config`: 从 DB persona.config 中读取的 TOML 内容（setup 时写入）
-/// 2. 文件系统回退: `../config/persona.toml`（开发/迁移场景）
-///
-/// 成功时返回由 `A_persona` + `E_rules` 组装的基础系统 prompt。
-/// 失败时返回 `None`，由上层降级到通用 prompt。
-fn load_persona_toml_prompt(db_config: Option<&str>) -> Option<String> {
-    let content = if let Some(cfg) = db_config {
-        // 优先使用 DB 中的 persona.toml 内容
-        if cfg.contains("[identity]") || cfg.contains("[blocks]") {
-            tracing::debug!("从 DB persona.config 加载 persona.toml");
-            cfg.to_string()
-        } else {
-            // config 字段是其他 JSON 格式，回退到文件系统
-            fallback_read_persona_toml()?
-        }
-    } else {
-        fallback_read_persona_toml()?
-    };
-
-    let parsed = match parse_persona_toml(&content) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(%e, "persona.toml 解析失败");
-            return None;
-        }
-    };
-
-    let persona_block = parsed
-        .blocks
-        .iter()
-        .find(|(k, _)| k == "A_persona")
-        .map(|(_, v)| v.as_str())
-        .unwrap_or("");
-
-    // 回复规则：显式 E_rules 优先，缺省回退共享规则（与生产装配路径同一口径）
-    let rules_block = resolve_chat_style_rules(Some(content.as_str()));
-
-    let name = &parsed.assistant_name;
-    let time_str = crate::now_timestamp_str();
-
-    Some(format!(
-        "你的名字是{name}。\n\n{persona_block}\n\n回复规则:\n{rules_block}\n\n\
-         当前时间：{time_str}\n\n\
-         你可以记住与用户的对话历史。如果用户提到之前聊过的内容，\
-         请结合记忆上下文给出更有针对性的回复。"
-    ))
-}
-
 /// 预选 Few-shot 示例（v1.4 examples 激活）。
 ///
 /// 选择策略:
@@ -1042,33 +995,6 @@ async fn load_examples_for_input(
         "examples 评分轮换完成（记忆未命中兜底注入）"
     );
     selected
-}
-
-/// 文件系统回退: 优先尝试新路径 `../config/personas/rama-0001.toml`，其次旧路径 `../config/persona.toml`。
-///
-/// 说明:
-/// - 新路径为目录扫描模式，每文件 = 一个 persona。
-/// - 旧路径保留作为兼容回退，供未迁移的旧安装使用。
-fn fallback_read_persona_toml() -> Option<String> {
-    // 优先尝试新路径
-    let new_path = "../config/personas/rama-0001.toml";
-    if let Ok(c) = std::fs::read_to_string(new_path) {
-        tracing::debug!(%new_path, "从文件系统加载 persona.toml (新路径)");
-        return Some(c);
-    }
-
-    // 回退到旧路径
-    let old_path = "../config/persona.toml";
-    match std::fs::read_to_string(old_path) {
-        Ok(c) => {
-            tracing::debug!(%old_path, "从文件系统加载 persona.toml (旧路径兼容)");
-            Some(c)
-        }
-        Err(e) => {
-            tracing::debug!(%old_path, %e, "persona.toml 文件系统回退失败");
-            None
-        }
-    }
 }
 
 // =========================================================

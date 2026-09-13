@@ -9,6 +9,8 @@
 //! - 日志记录 request_id、session_id、reply_chars、duration_ms，便于性能监控
 //! - 不持有跨 .await 的 MutexGuard（所有 I/O 通过 ctx.storage）
 //! - 使用 `mpsc::channel(64)` 有界通道替代 unbounded，背压保护
+//! - 未接线（预留）：生产对话管线（`app_chat.rs`）Steps 6-10 为内联实现，
+//!   本 Stage 仅由 `tests/m2_integration.rs` 组装使用；保留备用。
 
 use std::sync::Arc;
 
@@ -42,6 +44,9 @@ use crate::stream_event::StreamEvent;
 /// 说明:
 /// - 本 Stage 立即返回 Ok（后台任务异步执行），不等待 LLM 流完成
 /// - send_message 接收 output_stream 后返回给 CLI/Desktop 消费
+///
+/// 未接线（预留）：生产对话管线（`app_chat.rs`）Steps 6-10 为内联实现，
+/// 本 Stage 仅由 `tests/m2_integration.rs` 组装使用；保留备用。
 pub struct StagePersistMessage;
 
 impl StagePersistMessage {

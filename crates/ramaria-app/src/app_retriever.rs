@@ -7,7 +7,7 @@ use ramaria_core::error::RamariaResult;
 use ramaria_core::lock::{read_recover, write_recover};
 use ramaria_core::traits::{BM25_INDEX_VERSION_CURRENT, BM25_INDEX_VERSION_LEGACY};
 use ramaria_memory::VectorIndex;
-use ramaria_memory::retriever::{L1DocView, L2DocView, RetrieverConfig};
+use ramaria_memory::retriever::{L1DocView, L2DocView, Retriever, RetrieverConfig};
 
 use super::app::App;
 
@@ -17,12 +17,37 @@ impl App {
     /// 说明:
     /// - 加载所有 L1 记忆条目和 L2 事件，转换为视图并索引到 Retriever。
     /// - 如果嵌入模型可用，为文档生成向量索引（向量通道）。
-    /// - 此操作会清空现有索引并重建。
     /// - 建议在应用启动和后台定期执行。
+    ///
+    /// 健壮性（重建原子性）:
+    /// - 新索引在**临时实例**上完整构建，成功后用一次写锁整体替换共享实例；
+    ///   读者要么看到旧索引（完整可用），要么看到新索引，不会读到半成品。
+    /// - 任一环节失败 → 旧索引保持不变，并置"重建失败"状态位供 Stage 5 告警。
     ///
     /// 返回:
     /// - 成功时返回索引的文档总数（L1 + L2）。
     pub async fn rebuild_retriever(&self) -> RamariaResult<usize> {
+        match self.rebuild_retriever_inner().await {
+            Ok(total) => {
+                self.retriever_rebuild_failed
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                Ok(total)
+            }
+            Err(e) => {
+                // 旧索引仍完整可用：置位状态位让 Stage 5 提示"记忆注入可能不完整"
+                self.retriever_rebuild_failed
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                tracing::warn!(
+                    error = %e,
+                    "检索器重建失败，保留旧索引继续可用（索引未刷新）"
+                );
+                Err(e)
+            }
+        }
+    }
+
+    /// 重建检索器的实际实现：锁外读取 + 临时实例构建 + 整体替换。
+    async fn rebuild_retriever_inner(&self) -> RamariaResult<usize> {
         // 1. 获取所有 persona
         let personas = self.storage.list_personas().await?;
 
@@ -143,55 +168,57 @@ impl App {
         // 3.5 BM25 词典增强分词迁移准备（锁外 I/O；任一步失败降级，不阻塞重建）
         let migration = self.prepare_bm25_migration().await;
 
-        // 4. 锁定检索器并批量索引（RwLock::write() 用于索引写入）
+        // 4. 在临时实例上构建完整索引，成功后整体替换（读者不会看到半成品索引）
+        let mut fresh = Retriever::new();
+        // 应用 core 检索配置（[retrieval] 组）到内存检索器：RRF 融合参数与向量通道开关
+        // 真实生效（默认配置下与 RetrieverConfig::default() 一致，行为等价）
+        *fresh.config_mut() = RetrieverConfig::from_retrieval_config(&self.config.retrieval);
+
+        // BM25 词典增强：词典加载成功则应用（空词典 = 纯 bigram 等价口径）；
+        // 加载失败保留既有分词器（已迁移的索引不因一次读取失败而回退口径）
+        if migration.apply_dictionary {
+            fresh.set_bm25_dictionary(&migration.dictionary);
+        }
+
+        // BM25 + 内存文档索引
+        for doc in &all_l1 {
+            fresh.index_l1(doc);
+        }
+        for doc in &all_l2 {
+            fresh.index_l2(doc);
+        }
+
+        // utt 原文通道（v1.4）：块向量在构建时已生成并存 BLOB，此处直接复用
+        // （无向量的块仍入内存文档，检索走子串降级）
+        for block in &all_utt {
+            fresh.index_utt_block(block);
+        }
+
+        // 向量索引（label 统一 make_vector_label，与增量路径一致；
+        // parse_doc_label 按 "L1:"/"L2:" 前缀解析，大小写均已兼容）
+        if embeddings_available {
+            for (id, vec, created_at) in &l1_vectors {
+                let label = ramaria_memory::vector::make_vector_label("l1", &id.to_string());
+                fresh.vector_mut().add(&label, vec.clone(), *created_at);
+            }
+            for (id, vec, created_at) in &l2_vectors {
+                let label = ramaria_memory::vector::make_vector_label("l2", &id.to_string());
+                fresh.vector_mut().add(&label, vec.clone(), *created_at);
+            }
+            tracing::info!(
+                l1 = l1_vectors.len(),
+                l2 = l2_vectors.len(),
+                "向量索引构建完成"
+            );
+        } else {
+            tracing::info!("嵌入模型不可用，跳过向量索引");
+        }
+
+        // 整体替换共享实例：单次赋值，读者要么拿到旧索引（完整可用），要么拿到新索引
         {
             let mut retriever = write_recover(&self.retriever, "app_retriever.retriever");
-            // 应用 core 检索配置（[retrieval] 组）到内存检索器：RRF 融合参数与向量通道开关
-            // 真实生效（默认配置下与 RetrieverConfig::default() 一致，行为等价）
-            *retriever.config_mut() =
-                RetrieverConfig::from_retrieval_config(&self.config.retrieval);
-            retriever.clear();
-
-            // BM25 词典增强：词典加载成功则应用（空词典 = 纯 bigram 等价口径）；
-            // 加载失败保留既有分词器（已迁移的索引不因一次读取失败而回退口径）
-            if migration.apply_dictionary {
-                retriever.set_bm25_dictionary(&migration.dictionary);
-            }
-
-            // BM25 + 内存文档索引
-            for doc in &all_l1 {
-                retriever.index_l1(doc);
-            }
-            for doc in &all_l2 {
-                retriever.index_l2(doc);
-            }
-
-            // utt 原文通道（v1.4）：块向量在构建时已生成并存 BLOB，此处直接复用
-            // （无向量的块仍入内存文档，检索走子串降级）
-            for block in &all_utt {
-                retriever.index_utt_block(block);
-            }
-
-            // 向量索引（label 统一 make_vector_label，与增量路径一致；
-            // parse_doc_label 按 "L1:"/"L2:" 前缀解析，大小写均已兼容）
-            if embeddings_available {
-                for (id, vec, created_at) in &l1_vectors {
-                    let label = ramaria_memory::vector::make_vector_label("l1", &id.to_string());
-                    retriever.vector_mut().add(&label, vec.clone(), *created_at);
-                }
-                for (id, vec, created_at) in &l2_vectors {
-                    let label = ramaria_memory::vector::make_vector_label("l2", &id.to_string());
-                    retriever.vector_mut().add(&label, vec.clone(), *created_at);
-                }
-                tracing::info!(
-                    l1 = l1_vectors.len(),
-                    l2 = l2_vectors.len(),
-                    "向量索引构建完成"
-                );
-            } else {
-                tracing::info!("嵌入模型不可用，跳过向量索引");
-            }
-        } // MutexGuard 在此释放
+            *retriever = fresh;
+        } // 写锁在此释放
 
         // 旧版本 + 词典已就绪 → 词典增强重建完成后升级版本标记（写库失败记 warn，
         // 不阻塞主流程：索引已是词典增强口径，下次重建会自动重试写标记）
@@ -629,5 +656,74 @@ mod tests {
         assert_eq!(guard.config().rrf.k, 90.0, "RRF 平滑系数应随重建应用");
         assert_eq!(guard.config().rrf.bm25_weight, 0.5);
         assert_eq!(guard.config().rrf.graph_weight, 0.4);
+    }
+
+    // =========================================================
+    // 重建原子性（失败保留旧索引）
+    // =========================================================
+
+    /// 重建失败（存储读取错误）→ 旧索引保持不变且仍可检索，健康标志置位；
+    /// 恢复后重建成功 → 标志复位。
+    #[tokio::test]
+    async fn rebuild_failure_keeps_old_index_searchable() {
+        let storage = Arc::new(crate::stages::test_utils::MockStorage::new());
+        storage.add_l1_summaries(
+            "",
+            vec![make_l1(None, "用户喜欢喝咖啡，每天上午必点一杯拿铁")],
+        );
+
+        let llm = crate::stages::test_utils::MockLlm::local();
+        let keychain = Arc::new(ramaria_llm::keychain::Keychain::new());
+        let config = ramaria_core::config::RamariaConfig::default();
+        let app = App::new_without_embedding(
+            storage.clone() as Arc<dyn ramaria_core::traits::StorageBackend>,
+            Arc::new(llm),
+            config,
+            keychain,
+        );
+
+        let search = |app: &App| -> Vec<SearchResult> {
+            let guard = read_recover(&app.retriever, "app_retriever.retriever");
+            guard.search(
+                &SearchRequest {
+                    query: "咖啡".to_string(),
+                    persona_uid: None,
+                    top_k: 10,
+                    filter_share: false,
+                },
+                None,
+            )
+        };
+
+        // 1) 首次重建成功 → 索引可检索、健康标志为 false
+        app.rebuild_retriever().await.unwrap();
+        assert!(
+            !app.is_retriever_rebuild_failed(),
+            "重建成功后健康标志应为 false"
+        );
+        let hits_before = search(&app);
+        assert!(!hits_before.is_empty(), "首次重建后应可检索");
+
+        // 2) 注入存储读取失败 → 重建报错、健康标志置位
+        storage.set_list_personas_fails(true);
+        let err = app
+            .rebuild_retriever()
+            .await
+            .expect_err("存储读取失败时重建应返回错误");
+        assert!(!err.to_string().is_empty(), "错误信息不应为空");
+        assert!(app.is_retriever_rebuild_failed(), "重建失败应置位健康标志");
+
+        // 3) 旧索引原子保留：失败后检索结果与失败前一致（未清空、未半成品）
+        let hits_after = search(&app);
+        assert!(!hits_after.is_empty(), "重建失败后旧索引必须仍可检索");
+        assert_eq!(hits_before.len(), hits_after.len(), "旧索引文档不应丢失");
+
+        // 4) 恢复后重建成功 → 标志复位
+        storage.set_list_personas_fails(false);
+        app.rebuild_retriever().await.unwrap();
+        assert!(
+            !app.is_retriever_rebuild_failed(),
+            "重建恢复后健康标志应复位"
+        );
     }
 }
