@@ -196,6 +196,17 @@
   position: relative;
 }
 
+/*
+ * 流式文本容器：保留换行与连续空格。
+ * 流式期间契约分隔符 `||` 会被临时渲染为换行（finalize 后按契约重排为多气泡），
+ * 默认的 white-space:normal 会把换行折叠成空格，导致预览与最终排版不一致。
+ */
+.msg-bubble-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: break-word;
+}
+
 /* 错误状态 */
 .msg-bubble--error {
   border-color: var(--pink-400) !important;

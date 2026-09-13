@@ -49,7 +49,7 @@ struct ExportMessage {
 /// - 导出结构：sessions[] 含 messages[]，每消息含 role/content/persona_uid/created_at
 /// - 路径安全检查：三层防御（canonicalize + 白名单 + 符号链接拒绝），复用 path_guard 模块
 #[tauri::command]
-#[tracing::instrument(skip(state))]
+#[tracing::instrument(skip(state, output_path))]
 pub async fn export_sessions_json(
     state: State<'_, DesktopState>,
     output_path: String,
@@ -97,10 +97,13 @@ pub async fn export_sessions_json(
 
     std::fs::write(&canonical, &json).map_err(|e| format!("写入文件失败: {}", e))?;
 
-    let output = canonical.to_string_lossy().to_string();
     let count = export_sessions.len();
-    tracing::info!(path = %output, session_count = count, "JSON 导出完成");
-    Ok(output)
+    tracing::info!(
+        file = %crate::path_guard::redact_path_label(&canonical),
+        session_count = count,
+        "JSON 导出完成"
+    );
+    Ok(canonical.to_string_lossy().to_string())
 }
 
 // =========================================================
@@ -119,7 +122,7 @@ pub async fn export_sessions_json(
 /// - 按会话分组，消息按角色标注（👤 用户 / 🤖 助手 / 🔧 系统）
 /// - 路径安全检查：三层防御（canonicalize + 白名单 + 符号链接拒绝），复用 path_guard 模块
 #[tauri::command]
-#[tracing::instrument(skip(state))]
+#[tracing::instrument(skip(state, output_path))]
 pub async fn export_sessions_markdown(
     state: State<'_, DesktopState>,
     output_path: String,
@@ -174,8 +177,11 @@ pub async fn export_sessions_markdown(
 
     std::fs::write(&canonical, &md).map_err(|e| format!("写入文件失败: {}", e))?;
 
-    let output = canonical.to_string_lossy().to_string();
     let count = sessions.len();
-    tracing::info!(path = %output, session_count = count, "Markdown 导出完成");
-    Ok(output)
+    tracing::info!(
+        file = %crate::path_guard::redact_path_label(&canonical),
+        session_count = count,
+        "Markdown 导出完成"
+    );
+    Ok(canonical.to_string_lossy().to_string())
 }

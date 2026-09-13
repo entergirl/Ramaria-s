@@ -12,7 +12,7 @@
  *
  * 设计特点:
  * - 所有 Tauri Event 监听在 enter 时注册、leave 时注销，防止事件泄漏
- * - 流式追加使用 RamariaMessageBubble.updateContent，打字光标 CSS 驱动
+ * - 流式追加使用 RamariaMessageBubble.updateStreamText（传累积全文快照），打字光标 CSS 驱动
  * - PersonaSelector 下拉联动 Store.personas，默认选中 rama-0001
  * - 空状态显示引导文案和快捷提示词
  * - 双层刷新策略：rAF（16ms/帧） + maxBatchTimer（32ms 安全网）防止标签页后台卡顿
@@ -71,8 +71,18 @@ var RamariaChatView = (function () {
  */
     var _msgCounter = 0;
 
- /** 流式追加文本缓冲（用于 rAF 批量更新） */
+ /** 流式追加文本缓冲（用于 rAF 批量更新；仅作渲染节流，不是全文真相源） */
     var _pendingDelta = '';
+
+/**
+ * 流式累积全文（与 DOM 解耦的真相源）。
+ *
+ * 由 chat-delta 逐条累加，不依赖 DOM 读取：
+ * 即使生成期间切换视图、清屏或气泡被移除，chat-done 时仍能拿到完整文本，
+ * 避免 finalContent 为空导致静默截断（CR2-COR-012）。
+ * 仅在新一轮发送开始时与收到 chat-done 后重置。
+ */
+    var _streamedText = '';
  /**
  * _pendingDelta 缓冲区最大字节数。
  *
@@ -906,6 +916,7 @@ var RamariaChatView = (function () {
             var streamingId = 'msg-' + requestId;
             _streamingMsgId = streamingId;
             _pendingDelta = '';
+            _streamedText = '';
 
             var bubble = RamariaMessageBubble.createStreaming({
                 id: streamingId,
@@ -949,6 +960,8 @@ var RamariaChatView = (function () {
             var delta = payload.content || '';
             if (!delta) return;
 
+ // 同步累积全文（真相源，供 chat-done 兜底）与批处理缓冲（仅渲染节流）
+            _streamedText += delta;
             _pendingDelta += delta;
 
  // 上限保护：_pendingDelta 超过阈值时强制刷新，防止标签页后台时内存无限增长
@@ -1002,8 +1015,8 @@ var RamariaChatView = (function () {
             console.error('[ChatView] 注册 chat-delta 监听失败:', err);
         });
 
- // chat-done（Rust 字段: request_id, backend_id, total_chars，无 content；
- // 完整内容已通过 chat-delta 送达 DOM，此处读 DOM 文本作为 finalContent）
+ // chat-done（Rust 字段: request_id, backend_id, total_chars, content）
+ // content = 后端回传的完整回复文本（CR2-COR-012 的首选全文来源）
         TauriBridge.listen('chat-done', function (event) {
             var payload = event.payload;
             if (!payload || !payload.request_id) return;
@@ -1021,14 +1034,8 @@ var RamariaChatView = (function () {
 
             var completedMsgId = _streamingMsgId;  // 在置空前保存
 
- // 从 DOM 读取已累积的完整文本（chat-delta 已逐字写入 .msg-bubble-text）
-            var finalContent = '';
-            if (completedMsgId) {
-                var textEl = document.querySelector(
-                    '.msg-bubble-wrapper[data-message-id="' + completedMsgId + '"] .msg-bubble-text'
-                );
-                if (textEl) finalContent = textEl.textContent || '';
-            }
+ // 解析最终全文（后端事件全文 → 前端累积 → DOM 兜底；不记录原文日志）
+            var finalContent = _resolveFinalContent(payload);
 
             var createdAt = Date.now();
             RamariaMessageBubble.finalize(completedMsgId, finalContent, createdAt);
@@ -1038,6 +1045,7 @@ var RamariaChatView = (function () {
             RamariaStore.set('streamingRequestId', null);
             _streamingMsgId = null;
             _pendingDelta = '';
+            _streamedText = '';
 
  // 追加助手消息到 Store
  // ★ 修复: 助手消息携带当前人格 UID，前端据此在左侧气泡显示"谁在回复"
@@ -1130,6 +1138,8 @@ var RamariaChatView = (function () {
  // 卸载流式优化
         _disableStreamOptimizations();
 
+ // 仅清渲染态；_streamedText 刻意保留：
+// 生成期间离开视图再返回时，已收到的文本不丢，余下部分由 chat-done 全文补齐
         _pendingDelta = '';
         _streamingMsgId = null;
     }
@@ -1196,7 +1206,8 @@ var RamariaChatView = (function () {
  * 说明:
  * - 由 rAF 回调和 maxBatchTimer 回调共享
  * - 清空 _pendingDelta 和两个定时器句柄
- * - 调用 RamariaMessageBubble.updateContent 写入 DOM
+ * - 调用 RamariaMessageBubble.updateStreamText 写入累积全文快照
+ *   （传全文而非增量：渲染结果与 _streamedText 恒一致，任一帧失败也不会截断）
  * - 触发滚动（通过 rAF 批量化，避免 layout thrashing）
  */
     function _flushDelta() {
@@ -1211,10 +1222,40 @@ var RamariaChatView = (function () {
         }
 
         if (_streamingMsgId && _pendingDelta) {
-            RamariaMessageBubble.updateContent(_streamingMsgId, _pendingDelta);
+            RamariaMessageBubble.updateStreamText(_streamingMsgId, _streamedText);
             _pendingDelta = '';
             _scrollToBottomBathed();
         }
+    }
+
+ /**
+ * 解析本轮回复的最终全文（CR2-COR-012）。
+ *
+ * 取值优先级:
+ * 1. `payload.content`：后端在 chat-done 回传的完整文本
+ *    （生成期间切换视图/丢 delta 也能补齐全文）；
+ * 2. `_streamedText`：前端累积文本（与 DOM 解耦的兜底）；
+ * 3. DOM 文本：最后兜底（兼容旧后端或异常路径）。
+ *
+ * 返回:
+ * - 最终全文（可能为空串；空串由气泡层渲染为 [空消息]，不会静默消失）。
+ *
+ * 说明: 不在此处记录任何回复原文日志（隐私口径）。
+ */
+    function _resolveFinalContent(payload) {
+        if (payload && typeof payload.content === 'string' && payload.content !== '') {
+            return payload.content;
+        }
+        if (_streamedText) return _streamedText;
+
+        var domText = '';
+        if (_streamingMsgId) {
+            var textEl = document.querySelector(
+                '.msg-bubble-wrapper[data-message-id="' + _streamingMsgId + '"] .msg-bubble-text'
+            );
+            if (textEl) domText = textEl.textContent || '';
+        }
+        return domText;
     }
 
  // =========================================================

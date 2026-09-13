@@ -76,7 +76,7 @@ pub struct ImportResult {
 /// - 用于前端"预览"步骤，让用户在导入前了解文件内容。
 /// - 与 `import_qq_chat` 共享解析逻辑，但跳过 persona 创建和消息写入。
 #[tauri::command]
-#[tracing::instrument(skip(_state), fields(file = %file_path))]
+#[tracing::instrument(skip(_state, file_path))]
 pub async fn analyze_qq_chat(
     _state: State<'_, DesktopState>,
     file_path: String,
@@ -87,12 +87,20 @@ pub async fn analyze_qq_chat(
     // 路径安全校验：三层防御（canonicalize + 白名单 + 符号链接拒绝）
     let real_path = crate::path_guard::validate_import_file_path(&file_path)?;
 
-    tracing::info!(gap_minutes = gap, path = %real_path.display(), "开始解析 QQ 聊天记录文件");
+    tracing::info!(
+        gap_minutes = gap,
+        file = %crate::path_guard::redact_path_label(&real_path),
+        "开始解析 QQ 聊天记录文件"
+    );
 
     let importer = ramaria_importer::qq::QqImporter::new();
 
     let is_qq = importer.detect_format(&real_path).map_err(|e| {
-        tracing::error!(error = %e, "格式检测失败");
+        // importer 错误文本内嵌文件路径，日志只记脱敏标签；完整原因经返回消息交前端
+        tracing::error!(
+            file = %crate::path_guard::redact_path_label(&real_path),
+            "格式检测失败"
+        );
         format!("格式检测失败: {}", e)
     })?;
 
@@ -102,7 +110,10 @@ pub async fn analyze_qq_chat(
     }
 
     let (_sessions, report) = importer.parse(&real_path, gap).map_err(|e| {
-        tracing::error!(error = %e, "文件解析失败");
+        tracing::error!(
+            file = %crate::path_guard::redact_path_label(&real_path),
+            "文件解析失败"
+        );
         format!("文件解析失败: {}", e)
     })?;
 
@@ -202,7 +213,7 @@ pub struct AnalysisReport {
 /// - 先检查文件存在性，再调用 ramaria-importer 的格式检测。
 /// - 格式检测基于文件内容（首字节判断 JSON vs 文本）而非扩展名。
 #[tauri::command]
-#[tracing::instrument(skip(_state))]
+#[tracing::instrument(skip(_state, file_path))]
 pub async fn detect_qq_format(
     _state: State<'_, DesktopState>,
     file_path: String,
@@ -294,8 +305,7 @@ pub async fn import_qq_chat(
     }
 
     tracing::info!(
-        file = %file_path,
-        real = %real_path.display(),
+        file = %crate::path_guard::redact_path_label(&real_path),
         mode = %mode_str,
         gap_minutes = gap,
         "开始 QQ 聊天记录导入"
@@ -827,6 +837,13 @@ mod privacy_regression_tests {
         "other_persona_uid",
     ];
 
+    /// 禁止出现的"路径原值"日志形态。
+    ///
+    /// 字段名前缀与值表达式后缀分开存储、运行时拼接，避免完整字面量出现在
+    /// 本文件源码中而干扰对"目标文件是否含路径原值日志"的静态判定。
+    const FORBIDDEN_PATH_LOG_FRAGMENTS: &[(&str, &str)] =
+        &[("= %real_path", ".display()"), ("= %file_path", ",")];
+
     #[test]
     fn no_raw_personal_field_in_logs() {
         let src = self_source();
@@ -835,6 +852,18 @@ mod privacy_regression_tests {
             assert!(
                 !src.contains(&forbidden),
                 "检测到日志把个人标识原值直接写入 tracing 字段（禁止形态 {forbidden:?}）——QQ 号/昵称不得明文落日志，须经 mask_id"
+            );
+        }
+    }
+
+    #[test]
+    fn no_raw_path_in_logs() {
+        let src = self_source();
+        for &(prefix, suffix) in FORBIDDEN_PATH_LOG_FRAGMENTS {
+            let forbidden = format!("{prefix}{suffix}");
+            assert!(
+                !src.contains(&forbidden),
+                "检测到日志把绝对路径原值直接写入 tracing 字段（禁止形态 {forbidden:?}）——路径须经 redact_path_label 脱敏"
             );
         }
     }

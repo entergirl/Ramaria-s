@@ -21,7 +21,7 @@
  * 用法:
  * var bubble = RamariaMessageBubble.create({ id, role, content, persona_uid, created_at });
  * var bubble = RamariaMessageBubble.createStreaming({ id: 'temp', role: 'assistant' });
- * RamariaMessageBubble.updateContent('temp', '新增内容');
+ * RamariaMessageBubble.updateStreamText('temp', '已累积的全文');
  * RamariaMessageBubble.finalize('temp', finalContent);
  *
  * 依赖:
@@ -92,10 +92,11 @@ var RamariaMessageBubble = (function () {
  * - 正常 AI 对话不会产生 `[{name}] ` 前缀，此操作安全无副作用。
  */
     function _stripImportPrefix(content) {
-        if (!content) return '';
- // 匹配行首的 [{任意字符}] 后跟可选空格
+// 空值/空串统一回退占位：避免渲染出不可见的空气泡（内容缺失要显式可见）
+        if (!content) return '[空消息]';
+// 匹配行首的 [{任意字符}] 后跟可选空格
         var stripped = content.replace(/^\[[^\]]+\]\s*/, '');
- // 极端情况：消息本身只有前缀无正文
+// 极端情况：消息本身只有前缀无正文
         if (!stripped.trim()) return '[空消息]';
         return stripped;
     }
@@ -206,13 +207,14 @@ var RamariaMessageBubble = (function () {
  *
  * 说明:
  * - 分隔符契约与提示词「核心规则」一致；`RamariaBubble` 不可用时退化为单段。
- * - 无有效分段（空内容）时返回单段，由 [_stripImportPrefix] 产出占位。
+ * - 无有效分段（纯分隔符/空白）时回退**原文单泡**：宁可原样展示，也不丢内容、
+ *   不渲染空气泡（CR2-COR-011）；真正的空内容由 [_stripImportPrefix] 产出占位。
  */
     function _splitAssistantBubbles(content) {
         var raw = (typeof RamariaBubble !== 'undefined' && RamariaBubble.splitBubbles)
             ? RamariaBubble.splitBubbles(content)
             : [content];
-        if (raw.length === 0) raw = [''];
+        if (raw.length === 0) raw = [content];
 
         var out = [];
         for (var i = 0; i < raw.length; i++) {
@@ -318,19 +320,22 @@ var RamariaMessageBubble = (function () {
     }
 
  /**
- * 向流式气泡追加内容。
+ * 用“已累积全文快照”刷新流式气泡文本。
  *
  * 参数:
  * - `msgId`: 消息 ID（与 createStreaming 中的 opts.id 对应）
- * - `delta`: 增量文本
+ * - `fullText`: 到目前为止的完整回复文本（非增量）
  *
  * 说明:
- * - 通过 data-message-id 查找气泡
- * - 追加内容到 .msg-bubble-text span
- * - 如果未找到气泡，静默忽略（可能 DOM 已被移除）
+ * - 通过 data-message-id 查找气泡；找不到（视图已切换/气泡被移除）时静默忽略，
+ *   调用方（chat.js）仍持有全文，chat-done 时会用完整内容补齐。
+ * - 流式期间把契约分隔符 `||` 临时渲染为换行（CR2-COR-012）：
+ *   避免生成过程中把 `||` 原样暴露给用户、finalize 时再“跳变”重排；
+ *   代码块/行内代码/URL 内的 `||` 由 RamariaBubble.streamDisplay 豁免，保持原样。
+ * - 使用 textContent 写入纯文本（不做 Markdown 渲染，避免半截语法抖动）。
  */
-    function updateContent(msgId, delta) {
-        if (!delta) return;
+    function updateStreamText(msgId, fullText) {
+        if (typeof fullText !== 'string') return;
 
         var wrapper = document.querySelector('.msg-bubble-wrapper[data-message-id="' + msgId + '"]');
         if (!wrapper) return;
@@ -338,7 +343,11 @@ var RamariaMessageBubble = (function () {
         var textEl = wrapper.querySelector('.msg-bubble-text');
         if (!textEl) return;
 
-        textEl.textContent += delta;
+        var display = (typeof RamariaBubble !== 'undefined' && RamariaBubble.streamDisplay)
+            ? RamariaBubble.streamDisplay(fullText)
+            : fullText.replace(/\|\|/g, '\n');
+
+        textEl.textContent = display;
     }
 
  /**
@@ -426,7 +435,7 @@ var RamariaMessageBubble = (function () {
     return {
         create: create,
         createStreaming: createStreaming,
-        updateContent: updateContent,
+        updateStreamText: updateStreamText,
         finalize: finalize,
         markError: markError,
     };

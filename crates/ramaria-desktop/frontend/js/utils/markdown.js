@@ -55,8 +55,14 @@ var RamariaMarkdown = (function () {
         'code': ['class']
     };
 
- /** 禁止的 URL 协议（防止 javascript: 等危险协议） */
+ /** 禁止的 URL 协议（防止 javascript: 等危险协议；显式保留 #blocked 语义） */
     var FORBIDDEN_PROTOCOLS = /^(javascript|data|vbscript|file):/i;
+
+ /** 允许的 URL 协议白名单（不在白名单内的 `scheme:` 一律拦截；无 scheme 的相对路径放行） */
+    var SAFE_PROTOCOLS = /^(https?|mailto):/i;
+
+ /** 通用 scheme 形态：字母开头 + 字母/数字/`+`/`-`/`.`，后接冒号 */
+    var ANY_SCHEME = /^[a-z][a-z0-9+.-]*:/;
 
  // =========================================================
  // 常量和正则
@@ -84,7 +90,8 @@ var RamariaMarkdown = (function () {
  * 说明:
  * - 使用正则匹配所有标签，逐个检查是否在白名单中
  * - 移除所有事件处理器属性（onclick 等）
- * - 检查链接的 href 协议，禁止 javascript:/data: 等
+ * - 检查链接的 href 协议：归一化（解码实体、剥离控制符）后按"白名单 + 黑名单"
+ *   判定，禁止 javascript:/data: 等以及任何未知 scheme
  * - 不依赖 DOMParser（某些受限环境可能不可用）
  */
     function sanitize(html) {
@@ -138,8 +145,9 @@ var RamariaMarkdown = (function () {
  * - 解码后的字符串
  */
     function _decodeEntities(str) {
- // 先解数字实体（十进制/十六进制），再解五个命名实体；&amp; 最后处理，
+ // 先解数字实体（十进制/十六进制），再解命名实体；&amp; 最后处理，
  // 避免其余替换产生的新 & 被重复解码。
+ // `&colon;` 一并还原为 `:`，否则 `java&colon;script:` 类写法会绕过协议判定。
         return str
             .replace(/&#x([0-9a-fA-F]+);/g, function (m, hex) {
                 var cp = parseInt(hex, 16);
@@ -153,7 +161,41 @@ var RamariaMarkdown = (function () {
             .replace(/&gt;/g, '>')
             .replace(/&quot;/g, '"')
             .replace(/&#39;/g, "'")
+            .replace(/&colon;/gi, ':')
             .replace(/&amp;/g, '&');
+    }
+
+ /**
+ * href 协议判定前的归一化（CR2-SEC-005）。
+ *
+ * 说明:
+ * - 浏览器解析 URL 时会剔除 ASCII 控制符与空白（TAB/换行/前导空格等），
+ *   因此 `java\tscript:` 这类混淆写法必须在判定前先还原为 `javascript:`，
+ *   否则协议黑名单可被绕过。
+ * - 顺带剔除 DEL（U+007F），封住同类控制符混淆面。
+ */
+    function _normalizeHref(value) {
+        return String(value).replace(/[\u0000-\u0020\u007f]/g, '');
+    }
+
+ /**
+ * 判定 href 是否安全（先归一化再比对）。
+ *
+ * 规则:
+ * - 空值、无 scheme（相对路径 / 锚点 / 协议相对 `//host`）→ 放行；
+ * - `http` / `https` / `mailto` → 放行；
+ * - 其余任何 `scheme:` 写法（javascript/data/vbscript/file/blob…）→ 拦截。
+ *
+ * 说明:
+ * - 由"黑名单"改为"白名单 + 黑名单"双保险：未知协议同样被拦截，
+ *   未知面不再依赖人工枚举。
+ */
+    function _isSafeHref(value) {
+        var v = _normalizeHref(value).toLowerCase();
+        if (v === '') return true;
+        if (FORBIDDEN_PROTOCOLS.test(v)) return false;
+        if (SAFE_PROTOCOLS.test(v)) return true;
+        return !ANY_SCHEME.test(v);
     }
 
 /**
@@ -192,9 +234,9 @@ var RamariaMarkdown = (function () {
  // 先解码一次（还原上一步或输入中已存在的实体），避免二次编码
             var attrValue = _decodeEntities(match[2] || match[3] || match[4] || '');
 
- // 对 href 做协议检查（解码后进行，可拦截实体混淆的危险协议）
+ // 对 href 做协议检查（解码 + 归一化后进行，可拦截实体/控制符双重混淆的危险协议）
             if (attrName === 'href') {
-                if (FORBIDDEN_PROTOCOLS.test(attrValue.trim())) {
+                if (!_isSafeHref(attrValue)) {
                     attrValue = '#blocked';
                 }
             }

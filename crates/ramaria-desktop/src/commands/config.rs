@@ -145,7 +145,7 @@ fn mask_api_key(key: &str) -> String {
 /// - provider 切换时需重新进行隐私确认
 /// - api_key 不为空时写入 OS keychain，为空则跳过
 #[tauri::command]
-#[tracing::instrument(skip(state))]
+#[tracing::instrument(skip(state, api_key, base_url))]
 pub async fn update_backend_config(
     state: State<'_, DesktopState>,
     provider: String,
@@ -179,7 +179,7 @@ pub async fn update_backend_config(
     let sync_result = config_sync.sync_backend_config(&new_config).await;
     if !sync_result.file_ok {
         tracing::warn!(
-            failures = ?sync_result.failures,
+            failures = sync_result.failures.len(),
             "后端配置已写入 DB，但 config.toml 同步失败（下次启动校验时提示）"
         );
     }
@@ -261,7 +261,7 @@ pub async fn get_settings(state: State<'_, DesktopState>) -> Result<Vec<SettingV
 /// 返回:
 /// - `"updated"` 表示设置已保存
 #[tauri::command]
-#[tracing::instrument(skip(state))]
+#[tracing::instrument(skip(state, value))]
 pub async fn update_setting(
     state: State<'_, DesktopState>,
     key: String,
@@ -335,7 +335,7 @@ pub struct UpdateConfigResultView {
 /// 安全约束:
 /// - 配置结构不含 API key；keychain 通道不受此命令影响。
 #[tauri::command]
-#[tracing::instrument(skip(state))]
+#[tracing::instrument(skip(state, config_json))]
 pub async fn update_full_config(
     state: State<'_, DesktopState>,
     config_json: String,

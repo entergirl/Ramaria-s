@@ -6,7 +6,7 @@
 //! - pending 别名可 confirm（合并到规范词）/ reject（晋升独立规范词），
 //!   语义与 CLI `keyword alias confirm/reject` 完全一致。
 //! - 无 seed 入口（前端只读视图，词条由学习管线/CLI 维护）。
-//! - 日志仅记录计数，不记录词条文本（CR-SEC-104 隐私口径）。
+//! - 日志不记录词条文本：仅计数或 `redact_text_label` 脱敏标签（CR-SEC-104 隐私口径）。
 
 use crate::DesktopState;
 use ramaria_core::keyword::KeywordToken;
@@ -184,7 +184,7 @@ pub async fn list_pending_aliases(
 /// 说明:
 /// - 词条不存在或非 pending 状态时返回业务校验错误（不写库）。
 #[tauri::command]
-#[tracing::instrument(skip(state))]
+#[tracing::instrument(skip(state, alias))]
 pub async fn resolve_alias(
     state: State<'_, DesktopState>,
     alias: String,
@@ -243,7 +243,11 @@ pub async fn resolve_alias(
     let new_status = if confirm { "alias" } else { "canonical" };
     let canonical_json = if confirm { Some(canonical_text) } else { None };
 
-    tracing::debug!(alias = %token.as_str(), action = action.as_str(), "别名状态迁移完成");
+    tracing::debug!(
+        alias = %crate::path_guard::redact_text_label(token.as_str()),
+        action = action.as_str(),
+        "别名状态迁移完成"
+    );
     Ok(AliasResolveResponse {
         alias: token.as_str().to_string(),
         canonical_keyword: canonical_json,

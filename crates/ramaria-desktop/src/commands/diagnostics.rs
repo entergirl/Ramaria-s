@@ -94,7 +94,6 @@ impl From<DiagnosticsReport> for DiagnosticsExportView {
 /// 返回:
 /// - `UpdateStatusView`: 含当前版本、最新版本、是否可更新、Release URL 和错误信息。
 #[tauri::command]
-#[tracing::instrument]
 pub async fn check_update() -> Result<UpdateStatusView, String> {
     tracing::info!("用户手动检查更新");
 
@@ -183,13 +182,15 @@ pub async fn export_diagnostics(
     let report = ramaria_app::diagnostics::export_diagnostics(config, schema_version, &output_path)
         .await
         .map_err(|e| {
+            // 日志只记错误分类：错误链可能内嵌绝对路径（zip 产物路径），
+            // 完整原因经返回消息交前端展示
             let msg = format!("诊断导出失败: {e}");
-            tracing::error!(error = %e, "诊断导出失败");
+            tracing::error!(category = e.category(), "诊断导出失败");
             msg
         })?;
 
     tracing::info!(
-        path = %report.output_path.display(),
+        file = %crate::path_guard::redact_path_label(&report.output_path),
         size = report.file_size_bytes,
         "诊断导出成功"
     );

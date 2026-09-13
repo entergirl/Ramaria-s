@@ -320,6 +320,11 @@ pub async fn get_l2_events(
 ///
 /// 返回:
 /// - JSON 数组，每项为 PersonalityTraitView
+///
+/// 接线状态（未接线/预留）:
+/// - 前端记忆页改用 `get_personality_profile`（含三层分层与 trigger/suppress 等字段），
+///   未调用本命令；
+/// - 保留该命令以提供扁平标签列表，是否接入 UI 或下线由负责人裁定。
 #[tauri::command]
 #[tracing::instrument(skip(state))]
 pub async fn get_l3_traits(
@@ -395,6 +400,10 @@ pub async fn get_l3_traits(
 ///
 /// 返回:
 /// - `"ok"`: 管线已触发，后台异步执行。
+///
+/// 接线状态（未接线/预留）:
+/// - 前端当前经导入流程与封存后的自动触发进入 L2/L3，未提供手动触发入口；
+/// - 保留该命令供人工补救（快速导入后手动启动深度处理），是否接入 UI 或下线由负责人裁定。
 #[tauri::command]
 #[tracing::instrument(skip(state))]
 pub async fn trigger_memory_pipeline(state: State<'_, DesktopState>) -> Result<String, String> {

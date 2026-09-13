@@ -444,6 +444,63 @@
   user-select: none;
 }
 
+/* ── 优先级列表（order 类型字段：如注入协调预算的通道保留顺序）──
+   行 = 序号 + 名称 + 上/下移按钮；顺序即保留优先级（高优先在前） */
+.settings-adv-order {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px 0 2px;
+}
+
+.settings-adv-order-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 4px 8px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.settings-adv-order-index {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-full);
+  background: var(--blue-50);
+  color: var(--color-secondary);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.settings-adv-order-name {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-adv-order-actions {
+  display: inline-flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.settings-adv-order-btn {
+  min-width: 26px;
+  padding: 1px 6px;
+  line-height: 1.4;
+}
+
+.settings-adv-order-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .settings-form-inline-label input[type="checkbox"] {
   accent-color: var(--color-primary);
 }

@@ -1251,15 +1251,26 @@ var RamariaSettingsView = (function () {
     /**
      * 高级配置组元数据（字段默认值与 ramaria-core/src/config.rs 的 Default 实现对齐）。
      *
+     * 组约定:
+     * - `key`: 组标识（DOM id 前缀；与配置段名不要求一致，如 `l1-progressive`）。
+     * - `section`: 本组配置在完整 `RamariaConfig` JSON 中的段路径（数组）。
+     *   字段的 `path` 为**组内相对路径**，读写时的完整路径 = `section.concat(path)`
+     *   （见 [_advConfigPath]）。缺失该前缀会导致读写落到错误的键上：
+     *   读取恒为空、保存静默无效（历史缺陷修复点）。
+     * - `title` / `desc`: 分组标题与说明（静态文案，直接进 innerHTML）。
+     *
      * 字段约定:
-     * - `path`: 配置 JSON 中的字段路径（数组，支持嵌套）。
-     * - `type`: `number` | `bool` | `whitelist`。
-     * - `def`: 默认值（恢复默认与默认值标注用；`whitelist` 为数组）。
-     * - `options`: 仅 `whitelist` 使用（可选值列表 {value, label}）。
+     * - `path`: 组内相对路径（数组，支持嵌套；完整路径由 `section` 前缀拼接）。
+     * - `type`: `number` | `bool` | `whitelist` | `order`。
+     * - `def`: 默认值（恢复默认与默认值标注用；`whitelist` / `order` 为数组）。
+     * - `options`: `whitelist` / `order` 使用（可选值列表 {value, label}）。
+     * - `order` 语义：数组顺序 = 保留优先级（高优先在前），UI 通过上/下移调整，
+     *   与 `ramaria-core` 的 `[injection_budget].order`（InjectionSlot 数组）对应。
      */
     var _ADVANCED_GROUPS = [
         {
             key: 'retrieval',
+            section: ['retrieval'],
             title: '🔍 检索参数',
             desc: '控制 L0/L1/L2 检索数量、相似度阈值与多通道融合权重，影响记忆召回质量。',
             fields: [
@@ -1289,6 +1300,7 @@ var RamariaSettingsView = (function () {
         },
         {
             key: 'decay',
+            section: ['decay'],
             title: '⏳ 记忆衰减',
             desc: 'Ebbinghaus 遗忘曲线参数，控制记忆随时间衰减的速度。',
             fields: [
@@ -1303,6 +1315,7 @@ var RamariaSettingsView = (function () {
         },
         {
             key: 'thresholds',
+            section: ['thresholds'],
             title: '🎚️ 记忆层触发阈值',
             desc: '控制 L2 合并与 L3 推断的触发条件（计数 + 时间双路径）。',
             fields: [
@@ -1315,6 +1328,7 @@ var RamariaSettingsView = (function () {
         },
         {
             key: 'index',
+            section: ['index'],
             title: '🗂️ 索引与 BM25',
             desc: 'BM25 增量合并与周期性重建节奏。',
             fields: [
@@ -1324,6 +1338,7 @@ var RamariaSettingsView = (function () {
         },
         {
             key: 'logging',
+            section: ['logging'],
             title: '📜 日志',
             desc: '日志记录级别控制。',
             fields: [
@@ -1332,6 +1347,7 @@ var RamariaSettingsView = (function () {
         },
         {
             key: 'inference',
+            section: ['inference'],
             title: '🔮 L3 推断',
             desc: 'Phase B/C 推断参数（温度、证据阈值、置信度、漂移检测、全量校准）。',
             fields: [
@@ -1350,22 +1366,25 @@ var RamariaSettingsView = (function () {
         },
         {
             key: 'event_extraction',
+            section: ['event_extraction'],
             title: '📇 事件提取',
             desc: 'L1→L2 事件提取器的 LLM 参数（独立于对话参数，JSON 输出需更大 token 预算）。',
             fields: [
                 { path: ['temperature'], label: '提取温度', type: 'number', step: 0.1, min: 0, max: 2, def: 0.3, hint: '事件提取 LLM 温度' },
                 { path: ['max_tokens'], label: '最大输出 tokens', type: 'number', min: 256, def: 8192, hint: '事件 JSON 输出预算' },
                 { path: ['max_events'], label: '单簇最大事件数', type: 'number', min: 1, def: 5, hint: '单簇最多提取的事件数' },
+                { path: ['degraded_confidence_enabled'], label: '降级事件动态置信度', type: 'bool', def: true, hint: 'true = 降级事件按 min(0.59, 0.35 + 0.02 × n_l1) 计算置信度（恒 tentative）；false = 回退固定 0.5' },
             ],
         },
         {
             key: 'utt',
+            section: ['utt'],
             title: '💬 utt 原文通道',
             desc: '原文话语块切分、检索与注入参数。原文是最高敏感层，白名单外 persona 不注入。',
             fields: [
                 { path: ['enabled'], label: '启用原文通道', type: 'bool', def: true, hint: '关闭后行为回退 v1.3（不注入原文片段）' },
-                { path: ['theta_gap_minutes'], label: '切分时间间隙（分钟）', type: 'number', min: 1, def: 30, hint: '相邻消息间隔超过此值切分为新块' },
-                { path: ['max_msgs_per_block'], label: '单块最大消息数', type: 'number', min: 1, def: 40, hint: '超过此条数强制切分' },
+                { path: ['theta_gap_minutes'], label: '切分时间间隙（分钟）', type: 'number', min: 1, def: 10, hint: '相邻消息间隔超过此值切分为新块（窄切分，更细粒度）' },
+                { path: ['max_msgs_per_block'], label: '单块最大消息数', type: 'number', min: 1, def: 80, hint: '超过此条数强制切分（更大块、更少切分）' },
                 { path: ['retrieve_top_k'], label: '检索块数 top_k', type: 'number', min: 0, def: 3, hint: '对话时检索返回的 utt 块数量' },
                 { path: ['max_block_chars'], label: '注入字符预算', type: 'number', min: 50, def: 1500, hint: '原文片段注入预算（超限按相似度丢整块）' },
                 {
@@ -1385,6 +1404,7 @@ var RamariaSettingsView = (function () {
         },
         {
             key: 'examples',
+            section: ['examples'],
             title: '🎭 示例注入',
             desc: 'Few-shot 示例的自学习抽取、评分轮换与兜底注入参数。',
             fields: [
@@ -1394,6 +1414,7 @@ var RamariaSettingsView = (function () {
         },
         {
             key: 'bridge',
+            section: ['bridge'],
             title: '🌉 会话桥接',
             desc: '新会话加载上一会话尾部原文，保持对话连贯性。',
             fields: [
@@ -1403,6 +1424,7 @@ var RamariaSettingsView = (function () {
         },
         {
             key: 'knowledge',
+            section: ['knowledge'],
             title: '🧩 知识层（fact 路）',
             desc: '事件→知识事实抽取、判重与注入参数；本组为知识路独立检索参数（与摘要路/原文路互不串扰）。',
             fields: [
@@ -1419,6 +1441,7 @@ var RamariaSettingsView = (function () {
         },
         {
             key: 'style',
+            section: ['style'],
             title: '🎨 说话风格（表达层）',
             desc: '五维风格统计、显著性检验与自动规则生成（A3）；关闭整链路回退 v1.6 语义。',
             fields: [
@@ -1435,16 +1458,32 @@ var RamariaSettingsView = (function () {
         },
         {
             key: 'injection_budget',
+            section: ['injection_budget'],
             title: '📦 注入协调预算（v2.0）',
             desc: 'RAG 摘要与四层注入纳入同一 token 池：超限按 order 从低优先整块丢弃。默认关闭时行为与既有版本等价。',
             fields: [
                 { path: ['enabled'], label: '协调预算开关', type: 'bool', def: false, hint: 'false = 走既有独立预算路径（回归红线）' },
                 { path: ['max_injection_tokens'], label: '注入总 token 上限', type: 'number', min: 0, def: 1000, hint: '固定骨架（能力边界/角色/时间）不计入池' },
                 { path: ['max_rag_tokens'], label: 'RAG 独立 token 上限', type: 'number', min: 0, def: 0, hint: '0 = 不设独立上限，仅受总池约束' },
+                {
+                    path: ['order'],
+                    label: '通道保留优先级（高优先在前）',
+                    type: 'order',
+                    def: ['rag', 'behavior', 'knowledge', 'style', 'memory'],
+                    options: [
+                        { value: 'rag', label: 'RAG 摘要' },
+                        { value: 'behavior', label: '行为层' },
+                        { value: 'knowledge', label: '知识层' },
+                        { value: 'style', label: '表达层' },
+                        { value: 'memory', label: '脉络层' },
+                    ],
+                    hint: '超预算时从列表末尾（最低优先）开始整块丢弃；未列出的通道视为最低优先',
+                },
             ],
         },
         {
             key: 'layer_dedup',
+            section: ['layer_dedup'],
             title: '🧾 层间去重仲裁（v2.0）',
             desc: '同一事实跨层去重与冲突仲裁（引用级 + 内容级覆盖）。默认关闭时走既有引用级去重路径。',
             fields: [
@@ -1453,24 +1492,26 @@ var RamariaSettingsView = (function () {
         },
         {
             key: 'l1-progressive',
+            section: ['l1', 'progressive'],
             title: '📚 渐进式摘要 B3（v2.0）',
             desc: '长会话（消息数/时间跨度超阈值）在封存时按段生成多个 L1。默认开启，关闭时回退 v1.6 行为。',
             fields: [
-                { path: ['l1', 'progressive', 'enabled'], label: '渐进式摘要开关', type: 'bool', def: true, hint: 'false = 整会话/按 utt 切分（v1.6）' },
-                { path: ['l1', 'progressive', 'msg_threshold'], label: '消息数触发阈值', type: 'number', min: 2, def: 100, hint: '超过此条数触发分段' },
-                { path: ['l1', 'progressive', 'span_hours'], label: '时间跨度阈值（小时）', type: 'number', min: 1, def: 24, hint: '首末消息跨度超过此值触发分段' },
-                { path: ['l1', 'progressive', 'tail_msg_count'], label: '尾段覆盖消息数', type: 'number', min: 1, def: 60, hint: '按此条数切段、全段生成（尾段覆盖最新）' },
+                { path: ['enabled'], label: '渐进式摘要开关', type: 'bool', def: true, hint: 'false = 整会话/按 utt 切分（v1.6）' },
+                { path: ['msg_threshold'], label: '消息数触发阈值', type: 'number', min: 2, def: 100, hint: '超过此条数触发分段' },
+                { path: ['span_hours'], label: '时间跨度阈值（小时）', type: 'number', min: 1, def: 24, hint: '首末消息跨度超过此值触发分段' },
+                { path: ['tail_msg_count'], label: '尾段覆盖消息数', type: 'number', min: 1, def: 60, hint: '按此条数切段、全段生成（尾段覆盖最新）' },
             ],
         },
         {
             key: 'inference-upgrade',
+            section: ['inference', 'upgrade'],
             title: '🔃 画像升级开关（v2.0）',
             desc: 'Phase A 后分层收缩与 Phase B/C 画像升级各增量的独立开关；全部关闭时画像输出回退旧版行为。',
             fields: [
-                { path: ['inference', 'upgrade', 'cross_version_threshold_085'], label: '跨版本簇阈值 0.85', type: 'bool', def: true, hint: 'false = 回退旧值 0.75' },
-                { path: ['inference', 'upgrade', 'cold_start_cross_user_prior'], label: '跨用户冷启动先验', type: 'bool', def: true, hint: 'false = 回退 persona 内先验' },
-                { path: ['inference', 'upgrade', 'drift_restore_real_distribution'], label: '漂移检测真实恢复', type: 'bool', def: true, hint: 'false = 漂移检测整体显式跳过' },
-                { path: ['inference', 'upgrade', 'causal_latency_emotion_trend'], label: '因果时延+情绪走势', type: 'bool', def: true, hint: 'false = 回退 v1.7 仅链长/循环模式' },
+                { path: ['cross_version_threshold_085'], label: '跨版本簇阈值 0.85', type: 'bool', def: true, hint: 'false = 回退旧值 0.75' },
+                { path: ['cold_start_cross_user_prior'], label: '跨用户冷启动先验', type: 'bool', def: true, hint: 'false = 回退 persona 内先验' },
+                { path: ['drift_restore_real_distribution'], label: '漂移检测真实恢复', type: 'bool', def: true, hint: 'false = 漂移检测整体显式跳过' },
+                { path: ['causal_latency_emotion_trend'], label: '因果时延+情绪走势', type: 'bool', def: true, hint: 'false = 回退 v1.7 仅链长/循环模式' },
             ],
         },
     ];
@@ -1551,6 +1592,15 @@ var RamariaSettingsView = (function () {
                 html += '</div>' +
                     '<div class="settings-form-hint">' + f.hint + '（默认：' + f.def.join(', ') + '）</div>' +
                 '</div>';
+            } else if (f.type === 'order') {
+                // 优先级列表：上下移动调整顺序（超预算时从末尾开始整块丢弃）
+                html += '<div class="settings-form-group">' +
+                    '<label class="settings-form-label">' + f.label + '</label>' +
+                    '<div class="settings-adv-order" id="' + fid + '" role="list">' +
+                        _orderItemsHtml(f, f.def) +
+                    '</div>' +
+                    '<div class="settings-form-hint">' + f.hint + '（默认：' + f.def.join(' → ') + '）</div>' +
+                '</div>';
             } else {
                 // 数值输入框：初始 value 预置默认值并以浅色字符显示（is-default），
                 // 提示"当前为默认值"；用户输入不同值后自动转深色（见 input 事件同步）
@@ -1595,6 +1645,14 @@ var RamariaSettingsView = (function () {
             }
         }
 
+        // 优先级列表：事件委托（容器内上下移动，重建行后无需重新绑定）
+        for (var k = 0; k < group.fields.length; k++) {
+            if (group.fields[k].type === 'order') {
+                var orderBox = $(_advFieldId(group, group.fields[k]));
+                if (orderBox) _bindOrderField(orderBox);
+            }
+        }
+
         // log_full_prompt 开启需显式隐私确认
         var logBox = $('settings-adv-logging-log_full_prompt');
         if (logBox) {
@@ -1623,6 +1681,146 @@ var RamariaSettingsView = (function () {
      */
     function _advFieldId(group, f) {
         return 'settings-adv-' + group.key + '-' + f.path.join('-');
+    }
+
+    /**
+     * 计算字段在完整配置对象中的绝对路径。
+     *
+     * 说明:
+     * - 元数据里字段 `path` 为组内相对路径，组级 `section` 给出配置段前缀；
+     *   读写完整 `RamariaConfig` JSON 必须使用本函数拼接结果。
+     * - 历史缺陷：早期实现直接用 `f.path` 读写，导致 `[utt]`/`[retrieval]` 等
+     *   组读到 undefined（表单恒显示默认值）、保存写到不存在的根键（静默无效）。
+     *
+     * 参数:
+     * - `group`: 组元数据（含 section）。
+     * - `f`: 字段元数据（含相对 path）。
+     *
+     * 返回:
+     * - 绝对路径数组。
+     */
+    function _advConfigPath(group, f) {
+        var section = Array.isArray(group.section) ? group.section : [];
+        return section.concat(f.path);
+    }
+
+    /**
+     * 按 value 查 `order` 字段的选项元数据（{value, label}）。
+     *
+     * 返回:
+     * - 命中项；未命中返回 null（调用方据此过滤未知通道）。
+     */
+    function _orderOption(f, value) {
+        for (var i = 0; i < f.options.length; i++) {
+            if (f.options[i].value === value) return f.options[i];
+        }
+        return null;
+    }
+
+    /**
+     * 归一化 `order` 字段的取值列表。
+     *
+     * 规则（与 ramaria-core `[injection_budget].order` 语义对齐）:
+     * - 非数组/空数组 → 回退默认顺序；
+     * - 过滤未知通道；重复项取首次出现位置；
+     * - 配置缺失的通道按选项表顺序补到末尾，保证 UI 五项齐全、可上下移动。
+     *
+     * 参数:
+     * - `f`: 字段元数据（含 options/def）。
+     * - `value`: 配置中的当前值（可能 undefined）。
+     *
+     * 返回:
+     * - 归一化后的通道顺序数组。
+     */
+    function _normalizeOrder(f, value) {
+        var raw = Array.isArray(value) ? value : f.def;
+        var out = [];
+        for (var i = 0; i < raw.length; i++) {
+            var v = raw[i];
+            if (typeof v !== 'string') continue;
+            if (!_orderOption(f, v)) continue;
+            if (out.indexOf(v) !== -1) continue;
+            out.push(v);
+        }
+        for (var j = 0; j < f.options.length; j++) {
+            if (out.indexOf(f.options[j].value) === -1) out.push(f.options[j].value);
+        }
+        return out;
+    }
+
+    /**
+     * 生成优先级列表的行 HTML（标签均为静态元数据，非用户输入）。
+     *
+     * 结构:
+     * - `.settings-adv-order-item[data-value]`：一行（序号 + 名称 + 上/下移按钮）；
+     * - 首行禁用「上移」、末行禁用「下移」，防止无效操作。
+     */
+    function _orderItemsHtml(f, values) {
+        var order = _normalizeOrder(f, values);
+        var html = '';
+        for (var i = 0; i < order.length; i++) {
+            var opt = _orderOption(f, order[i]);
+            if (!opt) continue;
+            var upDisabled = i === 0 ? ' disabled' : '';
+            var downDisabled = i === order.length - 1 ? ' disabled' : '';
+            html += '<div class="settings-adv-order-item" data-value="' + opt.value + '" role="listitem">' +
+                '<span class="settings-adv-order-index">' + (i + 1) + '</span>' +
+                '<span class="settings-adv-order-name">' + opt.label + '</span>' +
+                '<span class="settings-adv-order-actions">' +
+                    '<button type="button" class="btn btn-secondary btn-sm settings-adv-order-btn" data-dir="up" title="上移（提高保留优先级）"' + upDisabled + '>↑</button>' +
+                    '<button type="button" class="btn btn-secondary btn-sm settings-adv-order-btn" data-dir="down" title="下移（降低保留优先级）"' + downDisabled + '>↓</button>' +
+                '</span>' +
+            '</div>';
+        }
+        return html;
+    }
+
+    /**
+     * 绑定优先级列表的上/下移交互（事件委托，容器内行重建后无需重新绑定）。
+     */
+    function _bindOrderField(container) {
+        container.addEventListener('click', function (ev) {
+            // 沿父链定位带 data-dir 的按钮（不依赖 closest，兼容性更稳）
+            var target = ev.target;
+            var btn = null;
+            while (target && target !== container) {
+                if (target.getAttribute && target.getAttribute('data-dir')) {
+                    btn = target;
+                    break;
+                }
+                target = target.parentNode;
+            }
+            if (!btn) return;
+            ev.preventDefault();
+
+            var row = btn.parentNode ? btn.parentNode.parentNode : null;  // .settings-adv-order-item
+            if (!row || row.parentNode !== container) return;
+
+            var dir = btn.getAttribute('data-dir');
+            if (dir === 'up' && row.previousElementSibling) {
+                container.insertBefore(row, row.previousElementSibling);
+            } else if (dir === 'down' && row.nextElementSibling) {
+                container.insertBefore(row.nextElementSibling, row);
+            }
+            _refreshOrderIndexes(container);
+        });
+    }
+
+    /**
+     * 刷新优先级列表的序号与首尾按钮禁用态（移动后调用）。
+     */
+    function _refreshOrderIndexes(container) {
+        var rows = container.querySelectorAll('.settings-adv-order-item');
+        if (rows.length === 0) return;
+        for (var i = 0; i < rows.length; i++) {
+            var idxEl = rows[i].querySelector('.settings-adv-order-index');
+            if (idxEl) idxEl.textContent = String(i + 1);
+
+            var up = rows[i].querySelector('button[data-dir="up"]');
+            var down = rows[i].querySelector('button[data-dir="down"]');
+            if (up) up.disabled = (i === 0);
+            if (down) down.disabled = (i === rows.length - 1);
+        }
     }
 
     /**
@@ -1666,7 +1864,7 @@ var RamariaSettingsView = (function () {
         for (var i = 0; i < group.fields.length; i++) {
             var f = group.fields[i];
             var fid = _advFieldId(group, f);
-            var value = _advGetValue(cfg, f.path);
+            var value = _advGetValue(cfg, _advConfigPath(group, f));
             if (f.type === 'bool') {
                 if (value !== undefined) {
                     var box = $(fid);
@@ -1679,6 +1877,12 @@ var RamariaSettingsView = (function () {
                         var cb = $(fid + '-' + f.options[w].value);
                         if (cb) cb.checked = list.indexOf(f.options[w].value) !== -1;
                     }
+                }
+            } else if (f.type === 'order') {
+                // 重建整列：归一化（过滤未知通道 + 补齐缺失项）后按配置顺序渲染
+                var orderBox = $(fid);
+                if (orderBox) {
+                    orderBox.innerHTML = _orderItemsHtml(f, value);
                 }
             } else {
                 var input = $(fid);
@@ -1732,6 +1936,21 @@ var RamariaSettingsView = (function () {
                     if (cb && cb.checked) list.push(f.options[w].value);
                 }
                 value = list;
+            } else if (f.type === 'order') {
+                var orderContainer = $(fid);
+                if (!orderContainer) continue;
+                var orderRows = orderContainer.querySelectorAll('.settings-adv-order-item');
+                var orderList = [];
+                for (var k = 0; k < orderRows.length; k++) {
+                    var slot = orderRows[k].getAttribute('data-value');
+                    // 去重保持首次出现位置（与后端「重复项取首个位置」口径一致）
+                    if (slot && orderList.indexOf(slot) === -1) orderList.push(slot);
+                }
+                if (orderList.length === 0) {
+                    RamariaToast.show('warning', f.label + ' 不能为空');
+                    return null;
+                }
+                value = orderList;
             } else {
                 var input = $(fid);
                 if (!input) continue;
@@ -1755,7 +1974,7 @@ var RamariaSettingsView = (function () {
                     return null;
                 }
             }
-            entries.push({ path: f.path, value: value });
+            entries.push({ path: _advConfigPath(group, f), value: value });
         }
         return entries;
     }
@@ -1824,7 +2043,7 @@ var RamariaSettingsView = (function () {
             var cfg = JSON.parse(JSON.stringify(_fullConfig));
             for (var i = 0; i < group.fields.length; i++) {
                 var f = group.fields[i];
-                _advSetValue(cfg, f.path, JSON.parse(JSON.stringify(f.def)));
+                _advSetValue(cfg, _advConfigPath(group, f), JSON.parse(JSON.stringify(f.def)));
             }
 
             var result = await RamariaApi.config.updateFull(cfg);
@@ -1856,7 +2075,7 @@ var RamariaSettingsView = (function () {
                 var group = _ADVANCED_GROUPS[i];
                 for (var j = 0; j < group.fields.length; j++) {
                     var f = group.fields[j];
-                    _advSetValue(cfg, f.path, JSON.parse(JSON.stringify(f.def)));
+                    _advSetValue(cfg, _advConfigPath(group, f), JSON.parse(JSON.stringify(f.def)));
                 }
             }
             var result = await RamariaApi.config.updateFull(cfg);
@@ -1938,6 +2157,19 @@ var RamariaSettingsView = (function () {
 
     return {
         init: init,
+        /**
+         * 高级配置组元数据快照（深拷贝，只读）。
+         *
+         * 用途:
+         * - 默认值一致性回归（与 `config/default.toml` 逐键比对，防前端默认值漂移）；
+         * - 排障时查看前端认识的配置键集合与默认值。
+         *
+         * 返回:
+         * - `_ADVANCED_GROUPS` 的深拷贝；调用方修改不会影响设置页内部状态。
+         */
+        getAdvancedGroups: function () {
+            return JSON.parse(JSON.stringify(_ADVANCED_GROUPS));
+        },
         destroy: function () {
             for (var i = 0; i < _unregisterFns.length; i++) {
                 try { _unregisterFns[i](); } catch (_) { /* ignore */ }

@@ -52,7 +52,7 @@ pub struct SetupStatusView {
 /// - DeepSeek/OpenAI 场景下 api_key 必填
 /// - 配置保存后自动初始化默认人格（rama-0001）
 #[tauri::command]
-#[tracing::instrument(skip(state))]
+#[tracing::instrument(skip(state, api_key, base_url))]
 pub async fn run_setup(
     state: State<'_, DesktopState>,
     provider: String,
@@ -155,6 +155,11 @@ pub async fn run_setup(
 ///
 /// 返回:
 /// - SetupStatusView，包含各配置项完成情况和缺失项列表
+///
+/// 接线状态（未接线/预留）:
+/// - 前端设置页当前经 `refresh_setup_state` / `get_embedding_model` 获取状态，
+///   未调用本命令；
+/// - 保留该命令以提供更细的缺项诊断（`missing_items`），是否接入 UI 或下线由负责人裁定。
 #[tauri::command]
 #[tracing::instrument(skip(state))]
 pub async fn get_setup_status(state: State<'_, DesktopState>) -> Result<SetupStatusView, String> {
@@ -288,7 +293,7 @@ pub enum DegradedReason {
 /// - 创建 NativeEmbeddingProvider 并调用 `validate` 方法。
 /// - 若目录不存在或模型文件缺失，返回 valid=false + 原因说明。
 #[tauri::command]
-#[tracing::instrument]
+#[tracing::instrument(skip(path))]
 pub async fn validate_embedding_model(path: String) -> Result<EmbeddingValidationResult, String> {
     let model_dir = Path::new(&path);
 
@@ -315,7 +320,11 @@ pub async fn validate_embedding_model(path: String) -> Result<EmbeddingValidatio
             let dim = provider.model_info().dimension;
             match provider.validate().await {
                 Ok(()) => {
-                    tracing::info!(path = %path, dimension = dim, "嵌入模型校验通过");
+                    tracing::info!(
+                        file = %crate::path_guard::redact_path_label(Path::new(&path)),
+                        dimension = dim,
+                        "嵌入模型校验通过"
+                    );
                     Ok(EmbeddingValidationResult {
                         valid: true,
                         dimension: Some(dim),
@@ -323,7 +332,11 @@ pub async fn validate_embedding_model(path: String) -> Result<EmbeddingValidatio
                     })
                 }
                 Err(e) => {
-                    tracing::warn!(path = %path, error = %e, "嵌入模型校验失败");
+                    tracing::warn!(
+                        file = %crate::path_guard::redact_path_label(Path::new(&path)),
+                        error = %e,
+                        "嵌入模型校验失败"
+                    );
                     Ok(EmbeddingValidationResult {
                         valid: false,
                         dimension: Some(dim),
@@ -333,7 +346,11 @@ pub async fn validate_embedding_model(path: String) -> Result<EmbeddingValidatio
             }
         }
         Err(e) => {
-            tracing::warn!(path = %path, error = %e, "嵌入模型加载失败");
+            tracing::warn!(
+                file = %crate::path_guard::redact_path_label(Path::new(&path)),
+                error = %e,
+                "嵌入模型加载失败"
+            );
             Ok(EmbeddingValidationResult {
                 valid: false,
                 dimension: None,
@@ -358,7 +375,7 @@ pub async fn validate_embedding_model(path: String) -> Result<EmbeddingValidatio
 /// - path 为空时卸载嵌入模型（传入 None）。
 /// - 路径持久化到 BackendConfig（与 base_url 一致），下次启动自动加载。
 #[tauri::command]
-#[tracing::instrument(skip(state))]
+#[tracing::instrument(skip(state, path))]
 pub async fn save_embedding_model(
     state: State<'_, DesktopState>,
     path: String,
@@ -390,7 +407,7 @@ pub async fn save_embedding_model(
             .map_err(|e| format!("加载嵌入模型失败: {}", e))?;
 
         tracing::info!(
-            path = %path_trimmed,
+            file = %crate::path_guard::redact_path_label(Path::new(path_trimmed)),
             dimension = provider.model_info().dimension,
             "嵌入模型已加载，准备热更新"
         );
@@ -409,7 +426,7 @@ pub async fn save_embedding_model(
         .map_err(|e| format!("保存后端配置失败: {}", e))?;
 
     tracing::info!(
-        path = %config.embedding_model_path.as_deref().unwrap_or("(无)"),
+        has_model = config.embedding_model_path.is_some(),
         "嵌入模型配置已持久化"
     );
     Ok("ok".to_string())
@@ -596,21 +613,31 @@ fn scan_personas_dir() -> Vec<(String, String, String)> {
         Some(d) => d,
         None => {
             tracing::warn!(
-                candidates = ?candidates.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+                candidates = ?candidates
+                    .iter()
+                    .map(|p| crate::path_guard::redact_path_label(p))
+                    .collect::<Vec<_>>(),
                 "personas 目录不存在（已尝试所有候选路径）"
             );
             return Vec::new();
         }
     };
 
-    tracing::info!(dir = %dir.display(), "扫描 personas 目录");
+    tracing::info!(
+        dir = %crate::path_guard::redact_path_label(dir),
+        "扫描 personas 目录"
+    );
 
     let mut results: Vec<(String, String, String)> = Vec::new();
 
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) => {
-            tracing::warn!(%e, dir = %dir.display(), "读取 personas 目录失败");
+            tracing::warn!(
+                %e,
+                dir = %crate::path_guard::redact_path_label(dir),
+                "读取 personas 目录失败"
+            );
             return results;
         }
     };
@@ -630,7 +657,10 @@ fn scan_personas_dir() -> Vec<(String, String, String)> {
         let uid = match path.file_stem().and_then(|s| s.to_str()) {
             Some(s) => s.to_string(),
             None => {
-                tracing::warn!(path = %path.display(), "无法从文件名提取 UID，跳过");
+                tracing::warn!(
+                    file = %crate::path_guard::redact_path_label(&path),
+                    "无法从文件名提取 UID，跳过"
+                );
                 continue;
             }
         };
@@ -639,7 +669,11 @@ fn scan_personas_dir() -> Vec<(String, String, String)> {
         let content = match std::fs::read_to_string(&path) {
             Ok(c) => c,
             Err(e) => {
-                tracing::warn!(%e, path = %path.display(), "读取 persona 文件失败，跳过");
+                tracing::warn!(
+                    %e,
+                    file = %crate::path_guard::redact_path_label(&path),
+                    "读取 persona 文件失败，跳过"
+                );
                 continue;
             }
         };
@@ -647,7 +681,12 @@ fn scan_personas_dir() -> Vec<(String, String, String)> {
         // 从 TOML 中提取 assistant_name（简单行解析，零外部依赖）
         let name = extract_toml_assistant_name(&content).unwrap_or_else(|| uid.clone());
 
-        tracing::info!(%uid, %name, path = %path.display(), "发现人格文件");
+        tracing::info!(
+            %uid,
+            %name,
+            file = %crate::path_guard::redact_path_label(&path),
+            "发现人格文件"
+        );
         results.push((uid, name, content));
     }
 
@@ -659,11 +698,19 @@ fn scan_personas_dir() -> Vec<(String, String, String)> {
                 Ok(content) => {
                     let name = extract_toml_assistant_name(&content)
                         .unwrap_or_else(|| "Ramaria".to_string());
-                    tracing::info!(%name, path = %old_path.display(), "从旧路径加载 persona.toml（兼容回退）");
+                    tracing::info!(
+                        %name,
+                        file = %crate::path_guard::redact_path_label(old_path),
+                        "从旧路径加载 persona.toml（兼容回退）"
+                    );
                     results.push(("rama-0001".to_string(), name, content));
                 }
                 Err(e) => {
-                    tracing::warn!(%e, path = %old_path.display(), "读取旧 persona.toml 失败");
+                    tracing::warn!(
+                        %e,
+                        file = %crate::path_guard::redact_path_label(old_path),
+                        "读取旧 persona.toml 失败"
+                    );
                 }
             }
         }

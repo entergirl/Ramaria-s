@@ -849,12 +849,27 @@ var RamariaSetupView = (function () {
         }
     }
 
+    /**
+     * 更新初始化进度行（保存/初始化各阶段的状态文案）。
+     *
+     * 安全口径（CR2-SEC-004 同缺陷类）:
+     * - 文案一律经 textContent 写入，不经 innerHTML 拼接：
+     *   此处 `text` 可能携带后端错误信息（含用户输入回显），
+     *   走文本节点可保证即使内容含 `<`/`&` 也只按字面展示。
+     */
     function _updateInitLine(id, state, text) {
         var el = $(id);
         if (!el) return;
         var icon = state === 'ok' ? '✓' : state === 'fail' ? '✗' : '⏳';
         var cls = state === 'ok' ? 'setup-mark-ok' : state === 'fail' ? 'setup-mark-fail' : 'setup-mark-wait';
-        el.innerHTML = '<span class="' + cls + '">' + icon + '</span> ' + text;
+
+        // 重建行内容：先清空，再写入「图标 span + 纯文本」
+        el.textContent = '';
+        var mark = document.createElement('span');
+        mark.className = cls;
+        mark.textContent = icon;
+        el.appendChild(mark);
+        el.appendChild(document.createTextNode(' ' + text));
         el.classList.remove('hidden');
     }
 
@@ -862,6 +877,14 @@ var RamariaSetupView = (function () {
  // 摘要填充
  // =========================================================
 
+    /**
+     * 摘要填充（确认步骤展示本次将保存的配置）。
+     *
+     * 安全口径（CR2-SEC-004）:
+     * - 所有动态值（用户输入、模型路径）一律经 textContent 写入，不经 innerHTML 拼接，
+     *   保证取值路径本身不引入 HTML 解析面（CSP 禁内联脚本只是第二道防线）。
+     * - API Key 只显示固定掩码，明文与前缀都不回显（收敛肩窥泄露面）。
+     */
     function _fillSummary() {
         var box = $('setup-summary-box');
         if (!box) return;
@@ -869,30 +892,50 @@ var RamariaSetupView = (function () {
         var config = _collectConfig();
         var modeLabel = _currentMode === 'api' ? '☁ 线上 API' : '🖥 本地部署';
 
-        var apiKeyDisplay = '';
-        if (_currentMode === 'api' && config.apiKey) {
-            apiKeyDisplay = config.apiKey.length > 8
-                ? config.apiKey.slice(0, 8) + '…'
-                : config.apiKey;
+        // 重建而非追加：避免重复行与旧节点残留
+        box.textContent = '';
+
+        _appendSummaryRow(box, '对话模型模式：', modeLabel);
+        _appendSummaryRow(
+            box,
+            _currentMode === 'api' ? 'API 地址：' : '推理服务地址：',
+            config.baseUrl || '-'
+        );
+        _appendSummaryRow(box, '模型名称：', config.modelId || '-');
+
+        if (_currentMode === 'api') {
+            // 明文与前缀一律不回显：已填写只显示掩码，未填写给出明确提示
+            _appendSummaryRow(box, 'API Key：', config.apiKey ? '****' : '（未填写）');
         }
 
-        var lines = [
-            '<div><span class="setup-summary-dim">对话模型模式：</span>' + modeLabel + '</div>',
-            '<div><span class="setup-summary-dim">' + (_currentMode === 'api' ? 'API 地址' : '推理服务地址') + '：</span>' + (config.baseUrl || '-') + '</div>',
-            '<div><span class="setup-summary-dim">模型名称：</span>' + (config.modelId || '-') + '</div>',
-        ];
-        if (_currentMode === 'api' && apiKeyDisplay) {
-            lines.push('<div><span class="setup-summary-dim">API Key：</span>' + apiKeyDisplay + '</div>');
-        }
-
- // 嵌入模型状态
+// 嵌入模型状态
         if (_embeddingTestPassed) {
-            lines.push('<div><span class="setup-summary-dim">嵌入模型：</span>✓ 已配置（' + (_embeddingPath || '-') + '）</div>');
+            _appendSummaryRow(box, '嵌入模型：', '✓ 已配置（' + (_embeddingPath || '-') + '）');
         } else {
-            lines.push('<div class="text-pink"><span class="setup-summary-dim">嵌入模型：</span>⚠ 未配置（降级模式：仅 BM25 + 图谱）</div>');
+            _appendSummaryRow(box, '嵌入模型：', '⚠ 未配置（降级模式：仅 BM25 + 图谱）', 'text-pink');
         }
+    }
 
-        box.innerHTML = lines.join('');
+    /**
+     * 向摘要容器追加一行「标签 + 值」（全部走 textContent，零 innerHTML）。
+     *
+     * 参数:
+     * - `box`: 摘要容器元素。
+     * - `label`: 标签文案（走 `.setup-summary-dim` 样式）。
+     * - `value`: 值文案（用户输入/路径等动态内容）。
+     * - `className`: 可选，整行附加类名（如 `text-pink` 降级提示）。
+     */
+    function _appendSummaryRow(box, label, value, className) {
+        var row = document.createElement('div');
+        if (className) row.className = className;
+
+        var dim = document.createElement('span');
+        dim.className = 'setup-summary-dim';
+        dim.textContent = label;
+        row.appendChild(dim);
+        row.appendChild(document.createTextNode(value));
+
+        box.appendChild(row);
     }
 
  // =========================================================

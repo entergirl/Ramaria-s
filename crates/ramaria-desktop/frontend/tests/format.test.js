@@ -71,27 +71,28 @@ test('relativeTime: 未来时间安全回退（不抛异常）', () => {
   assert.equal(typeof text, 'string');
 });
 
-test('number: 千分位 + 负数 + 小数', () => {
+test('number: 千分位 + 负数 + 小数（精确等值）', () => {
+  // 精确等值：格式契约必须锁定（包含式断言会让位数/单位错误在测试中"绿"）
   assert.equal(format.number(1234567), '1,234,567');
-  assert.ok(String(format.number(-9999)).includes('9,999'));
-  assert.ok(String(format.number(1234.56)).includes('1,234'));
+  assert.equal(format.number(-9999), '-9,999');
+  assert.equal(format.number(1234.56), '1,234.56');
 });
 
-test('compactNumber: 万级缩写', () => {
-  const text = format.compactNumber(12345);
-  assert.ok(text.includes('万') || text.includes('k') || /1\.2/.test(text));
+test('compactNumber: 万/亿级缩写（精确等值）', () => {
+  assert.equal(format.compactNumber(12345), '1.2万');
+  assert.equal(format.compactNumber(9999), '9,999');
+  assert.equal(format.compactNumber(123456789), '1.2亿');
 });
 
-test('percent: 比例转百分比', () => {
+test('percent: 比例转百分比（精确等值）', () => {
   assert.equal(format.percent(0.85, 0), '85%');
-  // 两参数形态: 可能返回 '85.00%'
-  const text = format.percent(0.856, 2);
-  assert.ok(text.includes('%'));
+  assert.equal(format.percent(0.856, 2), '85.60%');
 });
 
-test('fileSize: 字节格式化', () => {
-  const text = format.fileSize(1536000, 1);
-  assert.ok(text.includes('MB') || text.includes('M'), `实际: ${text}`);
+test('fileSize: 字节格式化（精确等值）', () => {
+  assert.equal(format.fileSize(1536000, 1), '1.5 MB');
+  assert.equal(format.fileSize(512), '512 B');
+  assert.equal(format.fileSize(2048, 1), '2.0 KB');
 });
 
 test('duration: 秒转可读时长', () => {

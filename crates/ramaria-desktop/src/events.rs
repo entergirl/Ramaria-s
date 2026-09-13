@@ -54,6 +54,9 @@ pub struct ChatDonePayload {
     pub backend_id: Option<String>,
     /// 累计输出字符数
     pub total_chars: usize,
+    /// 完整回复文本（前端按此渲染最终消息，避免仅靠 DOM/增量累积在切换视图、delta 丢失时出现静默截断）；
+    /// 该字段不参与任何日志输出（隐私口径：不记录原文）
+    pub content: String,
 }
 
 /// 聊天错误事件负载。
@@ -88,11 +91,23 @@ impl ChatDeltaPayload {
 
 impl ChatDonePayload {
     /// 创建聊天完成事件负载。
-    pub fn new(request_id: String, backend_id: Option<String>, total_chars: usize) -> Self {
+    ///
+    /// 参数:
+    /// - `request_id`: 前端调用 send_message 时后端返回的唯一标识。
+    /// - `backend_id`: LLM 后端标识（如 "deepseek-chat"）。
+    /// - `total_chars`: 累计输出字符数。
+    /// - `content`: 完整回复文本；空串表示无全文可依，前端回退到增量累积渲染。
+    pub fn new(
+        request_id: String,
+        backend_id: Option<String>,
+        total_chars: usize,
+        content: String,
+    ) -> Self {
         Self {
             request_id,
             backend_id,
             total_chars,
+            content,
         }
     }
 }
@@ -260,10 +275,36 @@ mod tests {
 
     #[test]
     fn done_payload_serialization() {
-        let payload = ChatDonePayload::new("req-001".to_string(), Some("deepseek".into()), 42);
+        let payload = ChatDonePayload::new(
+            "req-001".to_string(),
+            Some("deepseek".into()),
+            42,
+            "完整回复".to_string(),
+        );
         let json = serde_json::to_string(&payload).expect("序列化失败");
-        assert!(json.contains("deepseek"));
-        assert!(json.contains("42"));
+        assert!(json.contains("完整回复"), "应含完整回复文本: {json}");
+        assert!(
+            json.contains(r#""request_id":"req-001""#),
+            "应含 request_id: {json}"
+        );
+        assert!(
+            json.contains(r#""backend_id":"deepseek""#),
+            "应含 backend_id: {json}"
+        );
+        assert!(
+            json.contains(r#""total_chars":42"#),
+            "应含 total_chars: {json}"
+        );
+    }
+
+    #[test]
+    fn done_payload_empty_content_serializes() {
+        let payload = ChatDonePayload::new("req-002".to_string(), None, 0, String::new());
+        let json = serde_json::to_string(&payload).expect("序列化失败");
+        assert!(
+            json.contains(r#""content":"""#),
+            "空 content 应序列化为空串字段: {json}"
+        );
     }
 
     #[test]

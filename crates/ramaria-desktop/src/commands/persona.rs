@@ -139,7 +139,7 @@ pub async fn list_personas_full(
 /// - DEBUG: 记录具体变更的字段
 /// - ERROR: 记录存储层错误
 #[tauri::command]
-#[tracing::instrument(skip(state))]
+#[tracing::instrument(skip(state, request))]
 pub async fn update_persona_info(
     state: State<'_, DesktopState>,
     uid: String,

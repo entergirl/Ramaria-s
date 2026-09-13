@@ -1,11 +1,16 @@
 //! crates/ramaria-desktop/src/lib.rs - Ramaria Tauri 桌面应用入口
 //!
 //! 设计特点:
-//! - 管理应用初始化全流程：数据库 → 配置 → LLM Provider → Embedding 恢复 → App 构造
+//! - 管理应用初始化全流程：数据库 → 配置同步 → 后端配置 → Embedding 恢复 → App 构造
 //! - 通过 Tauri managed state (`DesktopState`) 注入 `Arc<App>` 到所有 Command
-//! - 初始化失败时优雅降级：窗口仍可显示，但状态为 FatalError
 //! - 系统托盘在 Tauri setup 钩子中初始化
 //! - 所有 Command 只做参数转换 + 委托 ramaria-app，不写业务逻辑
+//!
+//! 日志与隐私:
+//! - 默认只开 `info` 级：桌面 crate 的 debug 日志含运行细节，而日志文件会随
+//!   诊断包外发；需要排查时用 `RUST_LOG` 显式开启 debug。
+//! - 日志不落绝对路径与用户原文：路径一律经 `path_guard::redact_path_label`
+//!   折叠为"文件名 + 短哈希"（由 `path_guard::privacy_audit_tests` 静态把关）。
 
 mod commands;
 mod events;
@@ -38,10 +43,15 @@ pub struct DesktopState {
     pub app: Arc<ramaria_app::App>,
     /// 数据库连接池（供导入器等直接访问 SQLite）
     pub pool: SqlitePool,
-    /// 数据库文件路径（诊断用）
-    pub db_path: PathBuf,
     /// config.toml 路径（配置双写同步服务用，v1.4）
     pub config_path: PathBuf,
+    /// 评估面板的"用户显式授权目录"（原生目录对话框选择结果）。
+    ///
+    /// 语义:
+    /// - 选择动作即授权：仅该目录（及其子目录）可被 `list_eval_files` /
+    ///   `read_eval_result` 只读访问，用于收敛"任意路径读取"面；
+    /// - 仅进程内有效（不持久化），重启后需重新选择。
+    pub eval_allowed_dirs: std::sync::Mutex<Vec<PathBuf>>,
 }
 
 // =========================================================
@@ -55,8 +65,9 @@ pub struct DesktopState {
 /// - 同时写入文件日志 `{log_dir}/ramaria.log`（每次启动覆盖旧日志）。
 /// - 使用 `Mutex<File>` 保证线程安全，文件在初始化时立即创建，无后台线程延迟。
 fn init_tracing(log_dir: &std::path::Path) {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,ramaria_desktop=debug"));
+    // 默认只开 info 级：桌面 crate 的 debug 日志含词条/路径等运行细节，而日志
+    // 文件会随诊断包外发；需要排查时用 RUST_LOG 显式开启（如 RUST_LOG=debug）。
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     // 日志文件：立即创建（create + truncate），避免异步写延迟
     let log_file_path = log_dir.join("ramaria.log");
@@ -90,7 +101,10 @@ fn init_tracing(log_dir: &std::path::Path) {
     // tracing_subscriber 的 fmt layer 通过 MakeWriter 写入时会自动添加换行符。
 
     tracing::info!("Ramaria Desktop v{} 启动", env!("CARGO_PKG_VERSION"));
-    tracing::info!(path = %log_file_path.display(), "日志文件已创建");
+    tracing::info!(
+        file = %path_guard::redact_path_label(&log_file_path),
+        "日志文件已创建"
+    );
 }
 
 // =========================================================
@@ -214,27 +228,32 @@ pub(crate) fn build_llm_provider(
 ///
 /// 流程:
 /// 1. 初始化数据库连接池 + 执行 migration
-/// 2. 读取已保存的后端配置（如有）
+/// 2. 配置双写同步：加载 config.toml + DB 两侧并做一致性校验（以文件为准）
 /// 3. 创建 Keychain
-/// 4. 根据配置创建 LLM Provider
-/// 5. 尝试恢复已保存的嵌入模型（如有）
-/// 6. 配置双写同步：加载 config.toml + DB 两侧并做一致性校验
+/// 4. 读取后端配置（同步后的 DB 为真相源，缺记录回退本地默认）
+/// 5. 尝试恢复已保存的嵌入模型（如有；计算设备取同步后的 `[embedding]` 配置）
+/// 6. 创建 LLM 缓存与 Provider
 /// 7. 构造 App 实例
 /// 8. 刷新应用状态
 ///
 /// 返回:
-/// - `Ok(App)` 初始化成功
+/// - `Ok((App, 连接池, config.toml 路径))` 初始化成功
 /// - `Err(String)` 初始化失败（含用户友好的错误描述）
+///
+/// 说明:
+/// - 后端配置只在同步之后读取一次：新库（DB 无 `[backend]` 记录）由同步
+///   从 config.toml 补齐，避免 LLM 误指向本地默认地址。
+/// - 日志中的路径一律经 `path_guard::redact_path_label` 折叠（日志随诊断包外发）。
 async fn init_app(
     data_dir: &PathBuf,
-) -> Result<(Arc<ramaria_app::App>, SqlitePool, PathBuf, PathBuf), String> {
+) -> Result<(Arc<ramaria_app::App>, SqlitePool, PathBuf), String> {
     let db_path = data_dir.join("assistant.db");
     let config_path = data_dir.join("config.toml");
 
     // 确保数据目录存在
     ensure_data_dir(data_dir).map_err(|e| format!("创建数据目录失败: {}", e))?;
 
-    tracing::info!(db = %db_path.display(), "初始化 App");
+    tracing::info!(db = %path_guard::redact_path_label(&db_path), "初始化 App");
 
     // Step 1: 初始化数据库连接池 + 执行 migration
     let pool = ramaria_storage::database::init_pool(Some(db_path.clone()))
@@ -243,66 +262,7 @@ async fn init_app(
 
     let storage = Arc::new(ramaria_storage::SqliteStorage::new(pool.clone()));
 
-    // Step 2: 读取已保存的后端配置（如有）
-    let backend_config = storage
-        .get_backend_config()
-        .await
-        .map_err(|e| format!("读取后端配置失败: {}", e))?
-        .unwrap_or_else(ramaria_core::types::BackendConfig::lm_studio_default);
-
-    // Step 3: 创建 Keychain
-    let keychain = Arc::new(ramaria_llm::keychain::Keychain::new());
-
-    // Step 5: 尝试恢复已保存的嵌入模型（复用 BackendConfig，与 base_url 一致）
-    let embedding: Option<Arc<dyn EmbeddingProvider>> = {
-        match &backend_config.embedding_model_path {
-            Some(saved_path) if !saved_path.is_empty() => {
-                let model_dir = std::path::Path::new(saved_path);
-                if !model_dir.exists() {
-                    tracing::warn!(
-                        path = %saved_path,
-                        "已保存的嵌入模型目录不存在，启动后将以降级模式运行"
-                    );
-                    None
-                } else {
-                    // 计算设备按 `[embedding]` 配置（cpu/cuda/auto；CUDA 不可用回退 CPU）。
-                    // config.toml 完整加载在 Step 6/7，此处仅读取设备配置。
-                    let device = std::fs::read_to_string(&config_path)
-                        .map(|text| ramaria_core::config::EmbeddingDevice::from_toml_str(&text))
-                        .unwrap_or_default();
-                    match ramaria_llm::embedding::native::create_native_provider_with_device(
-                        model_dir, device,
-                    ) {
-                        Ok(provider) => {
-                            let info = provider.model_info();
-                            tracing::info!(
-                                path = %saved_path,
-                                model_id = %info.model_id,
-                                dim = info.dimension,
-                                device = device.as_str(),
-                                "已恢复嵌入模型"
-                            );
-                            Some(Arc::new(provider) as Arc<dyn EmbeddingProvider>)
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                path = %saved_path,
-                                error = %e,
-                                "加载已保存的嵌入模型失败，启动后将以降级模式运行"
-                            );
-                            None
-                        }
-                    }
-                }
-            }
-            _ => {
-                tracing::debug!("无已保存的嵌入模型，跳过恢复");
-                None
-            }
-        }
-    };
-
-    // Step 6: 配置双写同步（v1.4）：加载 config.toml + DB 两侧，一致性校验以文件为准
+    // Step 2: 配置双写同步（v1.4）：加载 config.toml + DB 两侧，一致性校验以文件为准
     let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
     let config_sync = ramaria_app::ConfigSyncService::new(storage_dyn, config_path.clone());
     let sync_outcome = config_sync
@@ -311,7 +271,7 @@ async fn init_app(
         .map_err(|e| format!("配置同步加载失败: {}", e))?;
     if !sync_outcome.file_existed {
         tracing::info!(
-            path = %config_path.display(),
+            file = %path_guard::redact_path_label(&config_path),
             "config.toml 不存在，已生成含全部默认值的模板"
         );
     }
@@ -334,28 +294,75 @@ async fn init_app(
         tracing::warn!(error = %err, "DB 侧配置回写失败（降级不阻塞）");
     }
 
-    // Step 7: 构造 App（基于同步后的配置，填充实际路径）
+    // 生效配置（基于同步结果，填充实际路径）
     let mut config = sync_outcome.config;
     config.paths.data_dir = data_dir.to_string_lossy().to_string();
     config.paths.log_dir = data_dir.join("logs").to_string_lossy().to_string();
     config.paths.config_dir = data_dir.to_string_lossy().to_string();
     config.paths.vector_index_dir = data_dir.join("vectors").to_string_lossy().to_string();
 
-    // Step 7.4: 重新读取后端配置（BUG-M5b-01 修复）。
+    // Step 3: 创建 Keychain
+    let keychain = Arc::new(ramaria_llm::keychain::Keychain::new());
+
+    // Step 4: 读取后端配置（单次读取）。
     //
-    // Step 2 在 ConfigSyncService 同步之前读取 backend_config：
-    // 新库（backend_config 表无记录）回退 lm_studio_default()，
-    // 导致 LLM 指向 localhost:1234、忽略 config.toml 的 [backend]。
-    // Step 6 已把文件侧后端配置写回 DB（新库补齐记录），此处以同步后
-    // 的 DB 记录为 LLM provider 的真相源；极端情况仍为空（同步写回降级
-    // 失败）则保留旧值，避免无配置构建。
+    // 同步已把 config.toml 的 `[backend]` 写回 DB（新库补齐记录），因此此处以
+    // 同步后的 DB 记录为 LLM / 嵌入路径的真相源；极端情况仍无记录（同步写回
+    // 降级失败）则回退本地默认，避免无配置构建。
     let backend_config = storage
         .get_backend_config()
         .await
-        .map_err(|e| format!("重新读取后端配置失败: {}", e))?
-        .unwrap_or(backend_config);
+        .map_err(|e| format!("读取后端配置失败: {}", e))?
+        .unwrap_or_else(ramaria_core::types::BackendConfig::lm_studio_default);
 
-    // Step 7.5: 创建 LLM Provider（基于同步后的配置注入精确缓存，v1.5 C）
+    // Step 5: 尝试恢复已保存的嵌入模型（路径来自 BackendConfig）
+    let embedding: Option<Arc<dyn EmbeddingProvider>> = {
+        match &backend_config.embedding_model_path {
+            Some(saved_path) if !saved_path.is_empty() => {
+                let model_dir = std::path::Path::new(saved_path);
+                if !model_dir.exists() {
+                    tracing::warn!(
+                        model = %path_guard::redact_path_label(model_dir),
+                        "已保存的嵌入模型目录不存在，启动后将以降级模式运行"
+                    );
+                    None
+                } else {
+                    // 计算设备取同步后的 `[embedding] device`（cpu/cuda/auto；
+                    // CUDA 不可用回退 CPU），不再单独解析配置文件。
+                    let device = config.embedding.device;
+                    match ramaria_llm::embedding::native::create_native_provider_with_device(
+                        model_dir, device,
+                    ) {
+                        Ok(provider) => {
+                            let info = provider.model_info();
+                            tracing::info!(
+                                model = %path_guard::redact_path_label(model_dir),
+                                model_id = %info.model_id,
+                                dim = info.dimension,
+                                device = device.as_str(),
+                                "已恢复嵌入模型"
+                            );
+                            Some(Arc::new(provider) as Arc<dyn EmbeddingProvider>)
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                model = %path_guard::redact_path_label(model_dir),
+                                error = %e,
+                                "加载已保存的嵌入模型失败，启动后将以降级模式运行"
+                            );
+                            None
+                        }
+                    }
+                }
+            }
+            _ => {
+                tracing::debug!("无已保存的嵌入模型，跳过恢复");
+                None
+            }
+        }
+    };
+
+    // Step 6: 创建 LLM Provider（基于同步后的配置注入精确缓存，v1.5 C）
     //
     // 缓存策略（[cache] 配置组）：
     // - `enabled=true`（默认）：创建 SqliteLlmCache 并注入 provider，
@@ -378,8 +385,8 @@ async fn init_app(
         Arc::clone(&keychain),
         llm_cache.clone(),
     )?;
+    // Step 7: 构造 App 实例（缓存实例同时保存到 App，供热更新路径复用）
     let app = ramaria_app::App::new(storage, llm, embedding, config, keychain);
-    // 保存缓存实例引用：后端热更新（update_llm）时复用同一缓存
     app.set_llm_cache(llm_cache);
 
     // Step 8: 刷新状态
@@ -399,7 +406,7 @@ async fn init_app(
         "App 初始化完成"
     );
 
-    Ok((Arc::new(app), pool, db_path, config_path))
+    Ok((Arc::new(app), pool, config_path))
 }
 
 // =========================================================
@@ -433,7 +440,10 @@ pub fn run() {
 
     // Step 3: 初始化日志（输出到 stdout + 文件，文件立即创建）
     init_tracing(&data_dir.join("logs"));
-    tracing::info!(data_dir = %data_dir.display(), "数据目录已就绪");
+    tracing::info!(
+        dir = %path_guard::redact_path_label(&data_dir),
+        "数据目录已就绪"
+    );
 
     // 创建 tokio 运行时用于初始化
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -442,14 +452,13 @@ pub fn run() {
         .expect("创建 tokio 运行时失败");
 
     // 执行应用初始化
-    let (app, pool, db_path, config_path) = match rt.block_on(init_app(&data_dir)) {
+    //
+    // 初始化失败属不可恢复（无 storage / 无 LLM provider 时所有 Command 均不可用），
+    // 故记录错误后直接退出；用户可从日志与 stderr 获取失败原因。
+    let (app, pool, config_path) = match rt.block_on(init_app(&data_dir)) {
         Ok(result) => result,
         Err(e) => {
-            tracing::error!(error = %e, "应用初始化失败");
-            // 初始化失败时创建最小 DesktopState，状态为 FatalError
-            // 此时窗口仍可显示，但前端会看到 FatalError 状态
-            // 这需要至少一个最小可工作的 storage 和 llm provider
-            // 对于无法恢复的初始化错误，直接退出
+            tracing::error!(error = %e, "应用初始化失败，进程退出");
             eprintln!("致命错误: {}", e);
             std::process::exit(1);
         }
@@ -458,14 +467,17 @@ pub fn run() {
     let state = DesktopState {
         app,
         pool,
-        db_path: db_path.clone(),
         config_path,
+        eval_allowed_dirs: std::sync::Mutex::new(Vec::new()),
     };
 
     // 构建 Tauri 应用
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::default().build())
+        // 桌面通知插件：chat 回复完成且主窗口不可见时发送系统通知
+        // （notification.rs 经 NotificationExt 调用，未注册会在运行期 panic）
+        .plugin(tauri_plugin_notification::init())
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             // ---- Chat ----

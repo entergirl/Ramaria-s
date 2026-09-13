@@ -31,14 +31,14 @@ use tokio_stream::StreamExt;
 ///
 /// 事件流:
 /// - `chat-delta`: 每收到 LLM 增量文本时发射，携带 request_id 和 content
-/// - `chat-done`: LLM 回复完成时发射，携带 request_id 和统计信息
+/// - `chat-done`: LLM 回复完成时发射，携带 request_id、统计信息和完整回复文本
 /// - `chat-error`: LLM 调用出错时发射，携带 request_id 和错误详情
 ///
 /// 说明:
 /// - 此命令不会阻塞等待 LLM 完整回复，而是立即返回
 /// - 前端应监听上述三个事件来渲染回复内容
 #[tauri::command]
-#[tracing::instrument(skip(state, app_handle, message), fields(msg_len))]
+#[tracing::instrument(skip(state, app_handle, message))]
 pub async fn send_message(
     state: State<'_, DesktopState>,
     app_handle: AppHandle,
@@ -169,7 +169,7 @@ async fn process_message_stream(
 
     // 逐事件消费流（send_message 已返回 Pin<Box<dyn Stream>>）
     let mut total_chars: usize = 0;
-    // 累积完整回复文本（用于通知预览）
+    // 累积完整回复文本（用于通知预览与 chat-done 事件全文回传）
     let mut accumulated_text = String::new();
 
     while let Some(event_result) = stream.next().await {
@@ -192,7 +192,12 @@ async fn process_message_stream(
                 ..
             }) => {
                 total_chars = stream_total; // 以 StreamEvent 通知的为准
-                let payload = ChatDonePayload::new(request_id.clone(), backend_id, total_chars);
+                let payload = ChatDonePayload::new(
+                    request_id.clone(),
+                    backend_id,
+                    total_chars,
+                    accumulated_text.clone(),
+                );
                 if let Err(e) = handle.emit(crate::events::EVENT_CHAT_DONE, &payload) {
                     tracing::error!(
                         request_id = %request_id,
@@ -250,7 +255,12 @@ async fn process_message_stream(
     }
 
     // 流在未发射 Done 或 Error 的情况下意外结束，发送合成 Done
-    let payload = ChatDonePayload::new(request_id.clone(), None, total_chars);
+    let payload = ChatDonePayload::new(
+        request_id.clone(),
+        None,
+        total_chars,
+        accumulated_text.clone(),
+    );
     if let Err(e) = handle.emit(crate::events::EVENT_CHAT_DONE, &payload) {
         tracing::error!(
             request_id = %request_id,
@@ -338,14 +348,8 @@ pub async fn save_current_session(
 
     let sid = active_id.unwrap();
 
-    // 诊断：先查消息数
-    let msg_count = state
-        .app
-        .storage()
-        .list_messages(sid)
-        .await
-        .map(|ms| ms.len())
-        .unwrap_or(0);
+    // 诊断：仅取条数，避免全量加载会话消息
+    let msg_count = state.app.storage().count_messages(sid).await.unwrap_or(0);
     tracing::info!(%sid, msg_count, ?persona_uid, "save_current_session 开始");
 
     state

@@ -65,6 +65,39 @@ test('sanitize: 实体混淆的 javascript 协议被拦截', () => {
   assert.ok(safe.includes('#blocked'), `应替换为 #blocked，实际: ${safe}`);
 });
 
+test('sanitize: TAB/换行混淆的 javascript 协议被拦截（CR2-SEC-005）', () => {
+  // 浏览器 URL 解析会剔除 TAB/换行，协议判定前必须先归一化，否则黑名单被绕过
+  const tabbed = md.sanitize('<a href="java\tscript:alert(1)">x</a>');
+  assert.ok(!tabbed.includes('java\tscript:'), `TAB 混淆应被拦截，实际: ${tabbed}`);
+  assert.ok(tabbed.includes('#blocked'), `应替换为 #blocked，实际: ${tabbed}`);
+
+  const newlined = md.sanitize('<a href="java\nscript:alert(1)">x</a>');
+  assert.ok(newlined.includes('#blocked'), `换行混淆应被拦截，实际: ${newlined}`);
+});
+
+test('sanitize: 冒号实体混淆的 javascript 协议被拦截（CR2-SEC-005）', () => {
+  const safe = md.sanitize('<a href="javascript&colon;alert(1)">x</a>');
+  assert.ok(!safe.includes('javascript&colon;'), `冒号实体应被还原并拦截，实际: ${safe}`);
+  assert.ok(safe.includes('#blocked'), `应替换为 #blocked，实际: ${safe}`);
+});
+
+test('sanitize: 未知 scheme 一律拦截，正常 http(s)/相对路径放行', () => {
+  const unknown = md.sanitize('<a href="blob:https://evil.test/abc">x</a>');
+  assert.ok(unknown.includes('#blocked'), `未知 scheme 应被拦截，实际: ${unknown}`);
+
+  const https = md.sanitize('<a href="HTTPS://example.com/a?b=1">x</a>');
+  assert.ok(https.includes('href="HTTPS://example.com/a?b=1"'), `https 应放行，实际: ${https}`);
+
+  const relative = md.sanitize('<a href="/docs/page">x</a>');
+  assert.ok(relative.includes('href="/docs/page"'), `相对路径应放行，实际: ${relative}`);
+});
+
+test('render: TAB 混淆的链接在渲染链路同样被拦截', () => {
+  const html = md.render('[点我](java\tscript:alert(1))');
+  assert.ok(html.includes('#blocked'), `渲染链路应拦截，实际: ${html}`);
+  assert.ok(!html.includes('java\tscript:'), `不应保留混淆协议，实际: ${html}`);
+});
+
 test('render: 代码块保护（块内标记不被误解析）', () => {
   const html = md.render('```\n**不是粗体**\n```');
   // 代码块内不应出现 <strong>

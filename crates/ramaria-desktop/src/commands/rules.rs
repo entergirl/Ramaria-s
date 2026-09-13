@@ -98,6 +98,10 @@ pub async fn list_rules(
 ///
 /// 参数:
 /// - `rule_id`: 规则 ID。
+///
+/// 接线状态（未接线/预留）:
+/// - 前端规则页使用列表命令返回的完整规则对象渲染，未单独请求详情；
+/// - 保留该命令供后续详情面板使用，是否接入 UI 或下线由负责人裁定。
 #[tauri::command]
 #[tracing::instrument(skip(state))]
 pub async fn get_rule(state: State<'_, DesktopState>, rule_id: i64) -> Result<JsonValue, String> {
@@ -144,7 +148,7 @@ pub async fn set_rule_enabled(
 /// - `reaction`: 可选，新的规则文本（不可为空；缺省保留原值）。
 /// - `avoid`: 可选，新的禁忌列表（逗号分隔）。
 #[tauri::command]
-#[tracing::instrument(skip(state))]
+#[tracing::instrument(skip(state, reaction, avoid))]
 pub async fn edit_rule(
     state: State<'_, DesktopState>,
     rule_id: i64,
