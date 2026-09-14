@@ -15,9 +15,9 @@
 
 **无需安装**：仓库已构建的调试二进制位于 `target\debug\ramaria.exe`（仓库根下），包含全部命令（含 probe），直接执行即可。建议先 `cd` 到仓库根目录再运行，避免相对路径（默认数据库 `data/ramaria_assistant.db`）跑偏；也可创建 `ramaria.cmd` 快捷入口（内容：`@echo off` + `"%~dp0target\debug\ramaria.exe" %*`），之后在仓库根目录下直接敲 `ramaria`。
 
-### 从安装包
+### 关于发行安装包
 
-Windows 安装包将 `ramaria.exe` 安装到系统 PATH。
+Releases 页面的 Windows 安装包（`Ramaria_<版本>_x64-setup.exe`）只包含桌面应用，不附带 `ramaria` 命令行程序，也不会向系统 PATH 写入任何内容。使用 CLI 请按下方说明从源码编译。
 
 ### 从源码编译
 
@@ -172,14 +172,14 @@ ramaria utt rebuild               # 等价别名
 ```
 ramaria session list              # 列出所有会话
 ramaria session show <ID>         # 查看会话消息历史
-ramaria session delete <ID>       # 删除会话及其关联记忆
+ramaria session delete <ID>       # 删除会话（关联消息与该会话的 L1 摘要随级联删除）
 ```
 
 | 子命令 | 说明 |
 |--------|------|
 | `list` | 显示全部会话：ID、开始时间、结束时间、消息数。活跃会话标注"活跃" |
 | `show <ID>` | 按时间顺序展示该会话的全部消息（含 role 标记） |
-| `delete <ID>` | 删除会话及其全部消息。**不可逆**，需交互确认 |
+| `delete <ID>` | 删除会话，其关联消息与 L1 摘要按外键级联一并删除。**不可逆**，需交互确认 |
 
 ---
 
@@ -319,8 +319,8 @@ ramaria diagnostics --output ./my-diagnostics.zip
 
 **安全保证**：
 - API Key 在导出文件中不出现（全部替换为 `[REDACTED]`）
-- 日志中的用户消息已截断和哈希化
-- 输出路径有路径穿越防护（拒绝写入数据目录之外的路径）
+- 日志中的用户消息等敏感字段在打包时替换为字符数占位（`<N chars>`），不输出原文；绝对路径只保留文件名
+- 输出路径经过规范化校验：对父目录做 canonicalize 解析符号链接与相对路径，并拒绝根目录、盘符前缀等不安全的裸路径，防止路径穿越
 
 ---
 
@@ -360,7 +360,7 @@ ramaria export --output ./my-memories.json  # 指定输出文件
 
 ### `ramaria probe` — 探针实验（v1.5 M2 新增；v1.7 扩展）
 
-自动化工具链：构建测试集 + 按参数档位批量跑对话管线，用于 utt 参数定稿（θ_gap / 条数上限 / top_k）与聚类参数摸底、消融评估（M5a/M5b）。建立于 M1 `--json` 信封约定之上；v1.7 起探针规模扩展为 3 维、支持统计法（`--repeat`）与消融档位（`ablation` Profile）与消融对比报告（`report --ablation`）。utt 参数已定稿（θ_gap=10 / 条数 80 / top_k=3，写默认配置）；定稿结论与评估报告见 `docs/dev-1.7/`（`v1.5-probe-report.md` 转正式 + `test/probe-test-report-J-v17-20260903.md`）。
+自动化工具链：构建测试集 + 按参数档位批量跑对话管线，用于 utt 参数定稿（θ_gap / 条数上限 / top_k）与聚类参数摸底、消融评估（M5a/M5b）。建立于 M1 `--json` 信封约定之上；v1.7 起探针规模扩展为 3 维、支持统计法（`--repeat`）与消融档位（`ablation` Profile）与消融对比报告（`report --ablation`）。utt 参数已定稿（θ_gap=10 / 条数 80 / top_k=3，写默认配置），定稿过程与结论见 `CHANGELOG.md`。
 
 #### `ramaria probe build` — 构建测试集（旧名 `probe dataset`，保留 alias）
 
@@ -376,12 +376,12 @@ ramaria probe dataset --output ds.json        # 旧名 alias，等价
 | 参数 | 说明 |
 |------|------|
 | `--persona <UID>` | 目标 persona（默认自动选白名单内角色类 persona，兜底 `char-0001`） |
-| `--questions-per-dim <N>` | 每维题数（默认 10，共 20 题；v1.7 正式评估 ≥30 题时调大） |
+| `--questions-per-dim <N>` | 每维题数（默认 10，3 维共 30 题；需要更大规模评估时调大） |
 | `--seed <N>` | 抽样 seed（默认 `20260810`，固定可复跑：同 seed 输出相同测试集） |
 | `--source <FILE>` | 显式数据源文件（JSON：`{persona_uid, messages:[{question,reply,source_ref}], events:[{title,summary}]}`）；不指定则从数据库构建 |
 | `--output <FILE>` | 数据集输出文件（`-` = stdout）；不指定时 `--json` 输出完整数据集到 stdout |
 
-**降级**：数据库无真实数据 / 数据源文件处理失败时，自动以内置测试夹具数据兜底（记 warn，不报错），保证测试集恒有 `2 × 每维题数` 道题（真实数据在前，夹具补齐在后，每题 `source` 字段标注 `db`/`file`/`fixture`）。
+**降级**：数据库无真实数据 / 数据源文件处理失败时，自动以内置测试夹具数据兜底（记 warn，不报错），保证测试集恒有 `3 × 每维题数` 道题（tone / fact / emotion 三维各补齐到每维题数，真实数据在前，夹具补齐在后，每题 `source` 字段标注 `db`/`file`/`fixture`）。
 
 **档位组合**（代表配对，写进数据集供 run 使用）：
 
@@ -392,7 +392,7 @@ ramaria probe dataset --output ds.json        # 旧名 alias，等价
 | max_msgs_80 | 30 | 80 | 3 | 条数上限上调（块更长） |
 | top_k_1 | 30 | 40 | 1 | top_k 下调（更保守的原文注入） |
 
-> 以上为 M1 utt 参数定稿实验的代表配对（v1.5 M2 遗留的对照档位）。utt 参数已定稿为 θ_gap=10 / 条数=80 / top_k=3（写默认配置）。**消融档位**（v1.7 M5 → v2.0 扩至 15 档）：数据集 `variants[]` 可含 `ablation` 字段（取值 `B0/B1/F0/F1~F4` 锚点与移除、`S_behavior/S_knowledge/S_expression/S_narrative` 替代对照、`I_behavior/I_knowledge/I_expression/I_narrative` 净增量对照），运行时对每档真实关闭/保留对应记忆注入层（`ablation` 缺失 = 完整体系，与 M1 行为一致）；档位语义（`I_*` = B1 基座 + 单专属层；`S_*` = 去 RAG 摘要仅单层）见 `docs/dev-2.0/test/ablation-profile-mapping.md`。`ramaria probe` 无独立 profile flag——档位由数据集文件携带，供 `evaluate`/`report --ablation` 配对对比。
+> 以上为 M1 utt 参数定稿实验的代表配对（v1.5 M2 遗留的对照档位）。utt 参数已定稿为 θ_gap=10 / 条数=80 / top_k=3（写默认配置）。**消融档位**（v1.7 M5 → v2.0 扩至 15 档）：数据集 `variants[]` 可含 `ablation` 字段（取值 `B0/B1/F0/F1~F4` 锚点与移除、`S_behavior/S_knowledge/S_expression/S_narrative` 替代对照、`I_behavior/I_knowledge/I_expression/I_narrative` 净增量对照），运行时对每档真实关闭/保留对应记忆注入层（`ablation` 缺失 = 完整体系，与 M1 行为一致）；其中 `I_*` 表示 B1 基座加单个专属层、`S_*` 表示去除 RAG 摘要仅保留单层。`ramaria probe` 无独立 profile flag——档位由数据集文件携带，供 `evaluate`/`report --ablation` 配对对比。
 
 #### `ramaria probe run` — 档位批量实验
 
@@ -494,7 +494,7 @@ ramaria fact show 3                            # 查看事实 #3 详情（含版
 
 ### `ramaria rule` — 行为规则管理（v1.5 M5 新增）
 
-行为层（情境-反应规则）的管理命令：查看 persona 自动学习到的行为规则、手工导入、编辑/启用/禁用/删除，以及查看规则证据链（规则 → 事件 → 原文摘要溯源）。建立于 M1 `--json` 信封约定与 §2.9 动词词表之上；行为层设计见算法说明书 v3.1 §4 与 `docs/dev-1.5/v1.5-plan.md` §2.5。
+行为层（情境-反应规则）的管理命令：查看 persona 自动学习到的行为规则、手工导入、编辑/启用/禁用/删除，以及查看规则证据链（规则 → 事件 → 原文摘要溯源）。建立于 M1 `--json` 信封约定与 §2.9 动词词表之上；行为层设计对应算法说明书 v3.1 §4。
 
 ```
 ramaria rule list                              # 列出默认 persona（rama-0001）的规则
@@ -693,9 +693,7 @@ CLI 命名与输出约定变更（v1.5 起因"自动化友好改造"引入，后
 - `[injection_budget].enabled` 与 `[layer_dedup].enabled` 维持默认 `false`（实测不咬 / 结构性不可观测），无需改动。
 - 2.0 新增配置组已全部写入 `config/default.toml`（含 `[inference.confidence]`/`[inference.drift]`/`[inference.calibration]`/`[layer_dedup]` 等）；建议对照模板检查 `%APPDATA%\Ramaria\config.toml`。
 
-> 升级路径说明与核对清单另见 `docs/dev-2.0/upgrade-path-2.0.md`；变更记录见 `CHANGELOG.md` 的 `[2.0.0]` 段。
-
----
+> 完整变更记录见 `CHANGELOG.md` 的 `[2.0.0]` 段。
 
 ---
 
@@ -704,6 +702,3 @@ CLI 命名与输出约定变更（v1.5 起因"自动化友好改造"引入，后
 - 桌面使用指南：`docs/desktop-user-guide.md`
 - 隐私说明：`docs/privacy-notice.md`
 - 默认配置模板：`config/default.toml`
-- 2.0 升级路径：`docs/dev-2.0/upgrade-path-2.0.md`
-- 2.0 评估报告：`docs/dev-2.0/test/v2.0-evaluation-report.md`
-- 2.0 消融档位映射：`docs/dev-2.0/test/ablation-profile-mapping.md`

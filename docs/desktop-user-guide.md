@@ -23,9 +23,9 @@ Ramaria 桌面应用是一个本地运行的个人 AI 陪伴记忆系统。具�
 
 | 项目 | 要求 |
 |------|------|
-| 操作系统 | Windows 11（推荐）/ Windows 10 |
+| 操作系统 | Windows 11 / Windows 10 1809 及以上（64 位） |
 | 内存 | 8 GB+ 推荐 |
-| 磁盘 | 200 MB（不含模型下载） |
+| 磁盘 | 安装包约 8.4 MB，安装后程序本体约数十 MB；本地嵌入模型首次运行时另行下载（默认 bge-small-zh-v1.5 约 100 MB，可选 Qwen3-Embedding-0.6B 约 1.2 GB），LM Studio 对话模型需在 LM Studio 中单独下载 |
 | 运行环境 | 无需额外运行时 |
 
 ### 安装步骤
@@ -372,5 +372,4 @@ Ramaria 桌面应用是一个本地运行的个人 AI 陪伴记忆系统。具�
 - CLI 使用：`docs/cli-user-guide.md`
 - 隐私说明：`docs/privacy-notice.md`
 - 默认配置模板：`config/default.toml`
-- 2.0 升级路径：`docs/dev-2.0/upgrade-path-2.0.md`
-- 完整架构：`docs/dev/00-architecture/arch-plan.md`
+- 版本变更与 2.0 升级说明：`CHANGELOG.md`
