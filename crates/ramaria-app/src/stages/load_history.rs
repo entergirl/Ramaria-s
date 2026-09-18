@@ -409,6 +409,7 @@ mod tests {
             started_at: 1000,
             ended_at: None,
             persona_uid: None,
+            ..ramaria_core::types::Session::default()
         }));
 
         let result = stage.execute(&ctx, data).await;
@@ -432,6 +433,7 @@ mod tests {
             started_at: 1000,
             ended_at: None,
             persona_uid: None,
+            ..ramaria_core::types::Session::default()
         }));
 
         let result = stage.execute(&ctx, data).await;
@@ -464,6 +466,7 @@ mod tests {
             started_at: 1000,
             ended_at: None,
             persona_uid: None,
+            ..ramaria_core::types::Session::default()
         }))
         .with_seed_history(seed.clone());
 
@@ -499,6 +502,7 @@ mod tests {
             started_at: 1000,
             ended_at: None,
             persona_uid: None,
+            ..ramaria_core::types::Session::default()
         }))
         .with_seed_history(vec![ChatMessage {
             role: MessageRole::User,
@@ -547,6 +551,7 @@ mod tests {
             started_at: 1000,
             ended_at: None,
             persona_uid: None,
+            ..ramaria_core::types::Session::default()
         }));
 
         let output = stage.execute(&ctx, data).await.expect("应成功");
@@ -574,6 +579,7 @@ mod tests {
             started_at: 1000,
             ended_at: None,
             persona_uid: None,
+            ..ramaria_core::types::Session::default()
         }));
 
         let result = stage.execute(&ctx, data).await;
@@ -603,6 +609,7 @@ mod tests {
             started_at: 1000,
             ended_at: None,
             persona_uid: None,
+            ..ramaria_core::types::Session::default()
         }));
 
         let result = stage.execute(&ctx, data).await;
@@ -624,6 +631,7 @@ mod tests {
             started_at: 1000,
             ended_at: None,
             persona_uid: None,
+            ..ramaria_core::types::Session::default()
         }));
 
         let result = stage.execute(&ctx, data).await;
@@ -674,6 +682,7 @@ mod tests {
             started_at: 1000,
             ended_at: None,
             persona_uid: Some("rama-0001".to_string()),
+            ..ramaria_core::types::Session::default()
         }));
         // 当前消息话题：Rust
         data.user_input = "Rust 编程".to_string();
@@ -711,6 +720,7 @@ mod tests {
             started_at: 1000,
             ended_at: None,
             persona_uid: Some("rama-0001".to_string()),
+            ..ramaria_core::types::Session::default()
         }));
         data.user_input = "完全不相关的话题".to_string();
 
@@ -745,6 +755,7 @@ mod tests {
             started_at: 1000,
             ended_at: None,
             persona_uid: None,
+            ..ramaria_core::types::Session::default()
         }));
 
         let result = stage.execute(&ctx, data).await;
@@ -774,6 +785,7 @@ mod tests {
             started_at: 1000,
             ended_at: None,
             persona_uid: None,
+            ..ramaria_core::types::Session::default()
         }));
 
         let result = stage.execute(&ctx, data).await;

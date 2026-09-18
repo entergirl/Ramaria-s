@@ -409,6 +409,66 @@ pub trait StoreCrud: Send + Sync {
         ))
     }
 
+    /// 创建带来源通道的 session（外部入口专用）。
+    ///
+    /// 职责:
+    /// - 供外部入口（MCP / 未来社交通道）创建带 `channel` / `external_ref` 标识的会话：
+    ///   桌面端可按来源区分会话，外部入口可按标识续写同一对话。
+    ///
+    /// 默认实现:
+    /// - 返回 `Unsupported`：显式区分"未实现通道能力"与"创建成功"，
+    ///   避免静默退化为无通道会话导致来源信息丢失。
+    async fn create_session_in_channel(
+        &self,
+        _persona_uid: Option<&str>,
+        _channel: &str,
+        _external_ref: Option<&str>,
+    ) -> RamariaResult<Session> {
+        Err(crate::error::RamariaError::unsupported(
+            "StoreCrud 未实现带通道 session 创建（需覆写 create_session_in_channel）",
+        ))
+    }
+
+    /// 按 `(channel, external_ref)` 查询活跃会话。
+    ///
+    /// 职责:
+    /// - 外部入口续写定位：同一外部对话标识优先复用未关闭的会话。
+    ///
+    /// 返回:
+    /// - `Ok(Some(session))`: 命中的活跃会话（若数据异常存在多条，返回最近开始的一条）。
+    /// - `Ok(None)`: 无匹配活跃会话。
+    ///
+    /// 默认实现:
+    /// - 返回 `Unsupported`（错误可见，避免调用方把"未实现"误读为"无会话"而重复建会话）。
+    async fn find_active_session_by_channel(
+        &self,
+        _channel: &str,
+        _external_ref: Option<&str>,
+    ) -> RamariaResult<Option<Session>> {
+        Err(crate::error::RamariaError::unsupported(
+            "StoreCrud 未实现按通道查询活跃 session（需覆写 find_active_session_by_channel）",
+        ))
+    }
+
+    /// 条件更新抢占式关闭 session（幂等封存入口）。
+    ///
+    /// 职责:
+    /// - 多进程 / 多线程同时封存同一会话时，仅一个调用方"抢到"关闭权
+    ///   （`UPDATE ... SET ended_at = ? WHERE id = ? AND ended_at IS NULL`）。
+    /// - 抢到者继续生成 L1 摘要；未抢到者直接返回，避免重复摘要。
+    ///
+    /// 返回:
+    /// - `Ok(true)`: 本次调用完成了关闭（`ended_at` 由 NULL 变为当前时间）。
+    /// - `Ok(false)`: 会话已关闭或不存在（未抢占到）。
+    ///
+    /// 默认实现:
+    /// - 返回 `Unsupported`（幂等关闭语义由实现方显式声明，不提供静默退化路径）。
+    async fn close_session_if_active(&self, _session_id: Uuid) -> RamariaResult<bool> {
+        Err(crate::error::RamariaError::unsupported(
+            "StoreCrud 未实现条件关闭 session（需覆写 close_session_if_active）",
+        ))
+    }
+
     // -- Message (L0) --
     async fn save_message(&self, message: &Message) -> RamariaResult<()>;
     /// 全量加载指定 session 的全部消息。
@@ -1498,6 +1558,12 @@ mod tests {
                 .expect_err("list_recent_events 未覆写应报错"),
             futures::executor::block_on(store.list_keyword_pool_entries())
                 .expect_err("list_keyword_pool_entries 未覆写应报错"),
+            futures::executor::block_on(store.create_session_in_channel(None, "mcp", None))
+                .expect_err("create_session_in_channel 未覆写应报错"),
+            futures::executor::block_on(store.find_active_session_by_channel("mcp", None))
+                .expect_err("find_active_session_by_channel 未覆写应报错"),
+            futures::executor::block_on(store.close_session_if_active(Uuid::new_v4()))
+                .expect_err("close_session_if_active 未覆写应报错"),
         ];
         for err in errors {
             assert_eq!(

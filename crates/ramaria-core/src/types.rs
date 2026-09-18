@@ -149,18 +149,31 @@ impl std::fmt::Display for MessageRole {
 // 会话与原始消息（TEXT 主键表 — 使用 UUID）
 // =========================================================
 
+/// 本地会话通道标识（桌面 / CLI 产生的会话）。
+///
+/// 说明:
+/// - 与 `sessions.channel` 列的默认值一致；存量行升级后即为该通道。
+/// - 外部入口通道（如 `mcp`）在入口层各自声明，不使用本常量。
+pub const CHANNEL_LOCAL: &str = "local";
+
 /// 对话会话。
 ///
 /// 职责:
 /// - 表示一次连续对话生命周期。
 /// - 承载 L0 消息归属关系。
 /// - 为 session 结束后的 L1 摘要生成提供边界。
+/// - 记录会话来源通道与外部对话标识，支撑来源标注与外部入口的续写定位。
 ///
 /// 状态:
 /// - `ended_at = None`: 会话仍在进行中。
 /// - `ended_at = Some(...)`: 会话已关闭，可触发 L1 摘要。
 /// - `persona_uid = Some(...)`: 创建此 session 时使用的对话人格。
 /// - `persona_uid = None`: 存量 session 或未指定人格。
+///
+/// 通道约定:
+/// - `channel`: 会话来源通道（`local` / `mcp` / 后续社交通道等，开放集合）。
+/// - `external_ref`: 外部对话标识（客户端 conversation id 或客户端身份名）；
+///   本地会话为 None。同一 `(channel, external_ref)` 至多一个活跃会话。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: Uuid,
@@ -170,6 +183,10 @@ pub struct Session {
     pub ended_at: Option<i64>,
     /// 创建此 session 时绑定的对话人格 UID（可空兼容存量数据）
     pub persona_uid: Option<String>,
+    /// 会话来源通道（存量行升级后为 `local`）
+    pub channel: String,
+    /// 外部对话标识；本地会话为 None
+    pub external_ref: Option<String>,
 }
 
 impl Default for Session {
@@ -179,32 +196,64 @@ impl Default for Session {
 }
 
 impl Session {
-    /// 创建一个新的活跃 Session。
+    /// 创建一个新的活跃 Session（本地通道）。
     ///
     /// 返回:
-    /// - 带新 UUID、当前开始时间、未关闭状态、无 persona_uid 的 Session。
+    /// - 带新 UUID、当前开始时间、未关闭状态、无 persona_uid 的本地 Session。
     pub fn new() -> Self {
         Self {
             id: new_id(),
             started_at: now_ms(),
             ended_at: None,
             persona_uid: None,
+            channel: CHANNEL_LOCAL.to_string(),
+            external_ref: None,
         }
     }
 
-    /// 创建一个绑定人格的活跃 Session。
+    /// 创建一个绑定人格的活跃 Session（本地通道）。
     ///
     /// 参数:
     /// - `persona_uid`: 对话人格标识（None 表示 rama 自身）。
     ///
     /// 返回:
-    /// - 带新 UUID、当前开始时间、绑定 persona_uid 的 Session。
+    /// - 带新 UUID、当前开始时间、绑定 persona_uid 的本地 Session。
     pub fn with_persona(persona_uid: Option<String>) -> Self {
         Self {
             id: new_id(),
             started_at: now_ms(),
             ended_at: None,
             persona_uid,
+            channel: CHANNEL_LOCAL.to_string(),
+            external_ref: None,
+        }
+    }
+
+    /// 创建一个指定来源通道的活跃 Session。
+    ///
+    /// 用法:
+    /// - 外部入口（MCP / 未来社交通道）创建会话时使用，
+    ///   使会话在桌面按来源可区分、外部入口可按 `external_ref` 续写。
+    ///
+    /// 参数:
+    /// - `persona_uid`: 对话人格标识。
+    /// - `channel`: 来源通道（如 `mcp`）。
+    /// - `external_ref`: 外部对话标识（客户端 conversation id / 客户端名）。
+    ///
+    /// 返回:
+    /// - 带新 UUID、当前开始时间、指定通道信息的活跃 Session。
+    pub fn new_in_channel(
+        persona_uid: Option<String>,
+        channel: impl Into<String>,
+        external_ref: Option<String>,
+    ) -> Self {
+        Self {
+            id: new_id(),
+            started_at: now_ms(),
+            ended_at: None,
+            persona_uid,
+            channel: channel.into(),
+            external_ref,
         }
     }
 
@@ -2173,6 +2222,31 @@ mod tests {
     }
 
     #[test]
+    fn session_defaults_to_local_channel() {
+        let session = Session::new();
+        assert_eq!(session.channel, CHANNEL_LOCAL);
+        assert!(session.external_ref.is_none());
+
+        let session = Session::with_persona(Some("char-0001".into()));
+        assert_eq!(session.channel, CHANNEL_LOCAL);
+        assert_eq!(session.persona_uid.as_deref(), Some("char-0001"));
+    }
+
+    #[test]
+    fn session_new_in_channel_sets_channel_and_ref() {
+        let session = Session::new_in_channel(
+            Some("rama-0001".to_string()),
+            "mcp",
+            Some("client-A".to_string()),
+        );
+        assert_eq!(session.channel, "mcp");
+        assert_eq!(session.external_ref.as_deref(), Some("client-A"));
+        assert_eq!(session.persona_uid.as_deref(), Some("rama-0001"));
+        assert!(session.is_active());
+        assert!(session.started_at > 0);
+    }
+
+    #[test]
     fn message_creation() {
         let sid = new_id();
         let msg = Message::new(sid, MessageRole::User, "你好".into(), MessageSource::Local);
@@ -2194,11 +2268,15 @@ mod tests {
 
     #[test]
     fn session_message_serde_roundtrip() {
-        let session = Session::new();
+        let mut session = Session::new();
+        session.channel = "mcp".to_string();
+        session.external_ref = Some("client-A".to_string());
         let json = serde_json::to_string(&session).unwrap();
         let back: Session = serde_json::from_str(&json).unwrap();
         assert_eq!(session.id, back.id);
         assert_eq!(session.started_at, back.started_at);
+        assert_eq!(back.channel, "mcp");
+        assert_eq!(back.external_ref.as_deref(), Some("client-A"));
 
         let mut msg = Message::new(
             session.id,

@@ -149,6 +149,7 @@ impl MockStorage {
                 started_at: 1000,
                 ended_at: None,
                 persona_uid: None,
+                ..Session::default()
             },
         );
     }
@@ -167,6 +168,7 @@ impl MockStorage {
                 started_at: 1000,
                 ended_at: Some(ended_at),
                 persona_uid: None,
+                ..Session::default()
             },
         );
     }

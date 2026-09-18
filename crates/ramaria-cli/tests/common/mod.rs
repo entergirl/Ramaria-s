@@ -112,6 +112,7 @@ impl MockStorage {
                 started_at: 1_717_977_600_000, // 2024-06-10T08:00:00 UTC
                 ended_at: None,
                 persona_uid: None,
+                ..Session::default()
             },
         );
         self.messages.lock().unwrap().insert(session_id, messages);
@@ -126,6 +127,7 @@ impl MockStorage {
                 started_at: 1_717_977_600_000,
                 ended_at: Some(1_717_986_240_000), // 24h later
                 persona_uid: None,
+                ..Session::default()
             },
         );
     }
@@ -229,6 +231,7 @@ impl StoreCrud for MockStorage {
             started_at: 1_717_977_600_000,
             ended_at: None,
             persona_uid: persona_uid.map(|s| s.to_string()),
+            ..Session::default()
         };
         self.sessions
             .lock()

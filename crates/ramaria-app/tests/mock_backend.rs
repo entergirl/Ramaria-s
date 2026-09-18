@@ -165,6 +165,7 @@ impl MockStorage {
                 started_at: 1000,
                 ended_at: None,
                 persona_uid: None,
+                ..Session::default()
             },
         );
         self.messages.lock().unwrap().insert(session_id, messages);
@@ -192,6 +193,7 @@ impl MockStorage {
                 started_at: 1000,
                 ended_at: None,
                 persona_uid: None,
+                ..Session::default()
             },
         );
     }
@@ -206,6 +208,7 @@ impl MockStorage {
                 started_at: 1000,
                 ended_at: Some(2000),
                 persona_uid: None,
+                ..Session::default()
             },
         );
     }
@@ -344,6 +347,7 @@ impl StoreCrud for MockStorage {
             started_at: 1000,
             ended_at: None,
             persona_uid: persona_uid.map(|s| s.to_string()),
+            ..Session::default()
         };
         self.sessions
             .lock()

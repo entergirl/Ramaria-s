@@ -6,6 +6,7 @@ members = [
     "crates/ramaria-memory",
     "crates/ramaria-llm",
     "crates/ramaria-app",
+    "crates/ramaria-service",
     "crates/ramaria-cli",
     "crates/ramaria-desktop",
     "crates/ramaria-importer",

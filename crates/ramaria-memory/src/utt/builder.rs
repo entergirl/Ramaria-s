@@ -1055,6 +1055,7 @@ mod tests {
             started_at: 0,
             ended_at: None,
             persona_uid: None,
+            ..Session::default()
         };
         // P0-2 修复后：persona_uid=None 从消息首条 assistant 发言推断
         // 目标 = char-0001（与原归属一致）→ 幂等跳过，不产生新块

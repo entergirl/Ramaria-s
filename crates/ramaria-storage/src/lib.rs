@@ -70,6 +70,24 @@ impl StoreCrud for SqliteStorage {
     ) -> RamariaResult<()> {
         repo::sessions::bind_persona_uid(&self.pool, session_id, persona_uid).await
     }
+    async fn create_session_in_channel(
+        &self,
+        persona_uid: Option<&str>,
+        channel: &str,
+        external_ref: Option<&str>,
+    ) -> RamariaResult<Session> {
+        repo::sessions::create_in_channel(&self.pool, persona_uid, channel, external_ref).await
+    }
+    async fn find_active_session_by_channel(
+        &self,
+        channel: &str,
+        external_ref: Option<&str>,
+    ) -> RamariaResult<Option<Session>> {
+        repo::sessions::find_active_by_channel(&self.pool, channel, external_ref).await
+    }
+    async fn close_session_if_active(&self, session_id: Uuid) -> RamariaResult<bool> {
+        repo::sessions::close_if_active(&self.pool, session_id).await
+    }
 
     // =========================================================
     // Message（L0 原始消息）
@@ -1575,13 +1593,15 @@ mod tests {
         assert!(v >= 1);
     }
 
-    /// 单基线迁移：空库一次初始化后 `_sqlx_migrations` 恰有一条记录。
+    /// 迁移完整性：空库初始化后 `_sqlx_migrations` 记录数与迁移目录文件数一致。
     ///
     /// 说明:
-    /// - 2.0 把此前的增量迁移序列合并为单个基线 SQL，空库初始化即得最终 schema。
-    /// - 若记录数大于 1，说明迁移目录混入了旧增量文件（破坏性变更纪律被破坏）。
+    /// - 历史增量迁移已合并为单个基线 SQL，空库初始化即得基线 schema；
+    ///   其后新增能力以独立增量文件追加（只增不删，不修改既有迁移）。
+    /// - 若记录数少于文件数，说明初始化未完整执行；多于文件数说明迁移目录混入了
+    ///   已移除的文件（违反增量纪律）。
     #[tokio::test]
-    async fn single_baseline_runs_one_migration() {
+    async fn migration_records_match_directory() {
         let pool = database::init_test_pool()
             .await
             .expect("测试数据库初始化失败");
@@ -1589,7 +1609,59 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("查询 migration 记录失败");
-        assert_eq!(count, 1, "2.0 单基线应只有一条 migration 记录");
+        let files = std::fs::read_dir("./migrations")
+            .expect("读取迁移目录失败")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "sql"))
+            .count() as i64;
+        assert_eq!(
+            count, files,
+            "迁移记录数应与迁移目录中的 SQL 文件数一致（基线 + 增量）"
+        );
+        assert!(files >= 1, "至少应有一个基线迁移文件");
+    }
+
+    /// 会话通道列：空库初始化后 `sessions` 表含 channel / external_ref 与联合索引，
+    /// 且 `channel` 默认值保证存量行升级后取 `local`。
+    #[tokio::test]
+    async fn sessions_channel_columns_present() {
+        let pool = database::init_test_pool()
+            .await
+            .expect("测试数据库初始化失败");
+
+        let columns: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('sessions')")
+                .fetch_all(&pool)
+                .await
+                .expect("查询 sessions 表结构失败");
+        assert!(columns.contains(&"channel".to_string()), "缺少 channel 列");
+        assert!(
+            columns.contains(&"external_ref".to_string()),
+            "缺少 external_ref 列"
+        );
+
+        // channel 默认值：存量行（不显式写 channel）升级后取 'local'
+        let default_value: Option<String> = sqlx::query_scalar(
+            "SELECT dflt_value FROM pragma_table_info('sessions') WHERE name = 'channel'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("查询 channel 默认值失败");
+        assert_eq!(
+            default_value.as_deref(),
+            Some("'local'"),
+            "channel 默认值应为 'local'（存量行取默认值）"
+        );
+
+        let indexes: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_index_list('sessions')")
+                .fetch_all(&pool)
+                .await
+                .expect("查询 sessions 索引失败");
+        assert!(
+            indexes.contains(&"idx_sessions_channel_external_ref".to_string()),
+            "缺少 (channel, external_ref) 联合索引"
+        );
     }
 
     /// 单基线包含风格统计表（此前为独立增量迁移），空库初始化后可直接读写。

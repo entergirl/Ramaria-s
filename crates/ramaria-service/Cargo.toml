@@ -1,0 +1,24 @@
+[package]
+name = "ramaria-service"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ramaria-core = { path = "../ramaria-core" }
+ramaria-storage = { path = "../ramaria-storage" }
+ramaria-memory = { path = "../ramaria-memory" }
+# embedding-native：向量通道（原生 safetensors 推理）；与 CLI/桌面同一 feature 口径
+ramaria-llm = { path = "../ramaria-llm", features = ["embedding-native"] }
+tokio.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+sqlx.workspace = true
