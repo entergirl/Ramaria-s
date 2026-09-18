@@ -1,0 +1,948 @@
+//! crates/ramaria-service/src/ingest.rs - 回流写入用例（chat_ingest 的服务层实现）
+//!
+//! 设计特点:
+//! - 会话三态解析：显式外部对话标识（`conversation_id`）> 单流退化（同通道无标识流）>
+//!   新建会话；命中他人格占用的外部标识时不续写（另起，避免串人格）
+//! - 惰性封存体检：续写前检查该会话最后消息距今是否超过 `[session].l1_idle_minutes`，
+//!   超过则先封存（生成 L1）再另起，覆盖"进程刚启动 / 客户端跨天续写"的空档
+//! - 重复提交安全（两层，覆盖整段对话、不受读取窗口限制）：
+//!   1. 重发前缀跳过——与库内该对话消息尾部做后缀匹配，已入库的前缀不再重复写入；
+//!   2. 指纹去重——每条消息带确定性指纹（对话标识 + 角色 + 内容 + 出现序数），
+//!      入库前查库跳过（跨会话、跨进程均生效）
+//! - 去重依据取该对话**全部**消息键（`list_message_keys_by_channel_ref`，仅两列）：
+//!   长对话（数千条）也能精确计算出现序数，避免"窗口截断导致序数失准 → 重复写入"
+//! - 写入通道标识：新会话落 `channel` / `external_ref`，桌面可据此标注来源
+//! - 边界：空 messages / 空内容 / 越权人格显式报错或跳过（不静默写脏数据）；
+//!   惰性封存失败不阻塞写入（与 `finalize` 同口径）
+
+use std::collections::HashMap;
+
+use ramaria_core::error::{RamariaError, RamariaResult};
+use ramaria_core::types::{Message, MessageKey, MessageSource, Session, now_ms};
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
+
+use crate::engine::Engine;
+use crate::types::{CHANNEL_MCP, ChatTurn, DEFAULT_PERSONA_UID, IngestOutcome, IngestRequest};
+
+/// 兜底通道：请求未带通道时归入 MCP 通道。
+fn normalize_channel(channel: &str) -> String {
+    let trimmed = channel.trim();
+    if trimmed.is_empty() {
+        CHANNEL_MCP.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// 归一化外部对话标识（空白视为未提供，进入单流退化）。
+fn normalize_external_ref(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+// =========================================================
+// 用例入口
+// =========================================================
+
+/// 执行回流写入用例。
+///
+/// 流程:
+/// 1. 入参边界校验（messages 非空）与人格白名单校验；
+/// 2. 会话解析 + 惰性封存体检（命中超时会话则先封存再另起）；
+/// 3. 重发前缀跳过 + 逐条指纹去重 + 落库（`channel` / `external_ref` 已写入会话）；
+/// 4. `finalize=true` 时立即封存（触发 L1 与后续加工）；封存失败不回滚写入
+///    （记 error + `finalized=false`，摘要留待空闲检查或补扫重试）。
+///
+/// 参数:
+/// - `engine`: 服务层引擎。
+/// - `req`: 回流请求（消息 / 人格 / 外部对话标识 / 通道 / 是否收尾）。
+///
+/// 返回:
+/// - `session_id`（消息落库目标会话）、`written`、`deduplicated`、`finalized`。
+pub(crate) async fn run(engine: &Engine, req: IngestRequest) -> RamariaResult<IngestOutcome> {
+    if req.messages.is_empty() {
+        return Err(RamariaError::validation("messages 不能为空"));
+    }
+
+    let policy = engine.recall_policy();
+    let persona = req
+        .persona
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .unwrap_or(DEFAULT_PERSONA_UID)
+        .to_string();
+    if !policy.persona_allowed(&persona) {
+        tracing::warn!(persona = %persona, "回流请求的人格不在可写白名单内，拒绝写入");
+        // 文案区分读/写语义：白名单同时约束"可见"与"可写"，此处为写入侧拒绝
+        return Err(RamariaError::privacy(format!(
+            "人格 {persona} 不在可写白名单内（allowed_personas，与可见性共用同一白名单）"
+        )));
+    }
+
+    // 归属人格必须已存在（messages.persona_uid 有外键约束）：
+    // 显式报错优于让写入以底层 FOREIGN KEY 失败收场，也避免留下空会话残留
+    if engine
+        .storage_ref()
+        .get_persona_by_uid(&persona)
+        .await?
+        .is_none()
+    {
+        return Err(RamariaError::validation(format!(
+            "人格不存在: {persona}（请先在 Ramaria 完成初始化或改用已存在的人格）"
+        )));
+    }
+
+    let channel = normalize_channel(&req.channel);
+    let external_ref = normalize_external_ref(req.conversation_id.as_deref());
+    let storage = engine.storage_ref().as_ref();
+
+    // ---- 1. 会话解析（含惰性封存体检） ----
+    let session = resolve_session(engine, &channel, external_ref.as_deref(), &persona).await?;
+
+    // ---- 2. 重发前缀跳过 + 指纹去重 + 落库 ----
+    // 去重依据 = 该对话**全部**消息键（跨会话、仅 role + trim 正文两列）：
+    // 长对话也能精确计算出现序数，不因读取窗口截断而误判重复。
+    let history = match storage
+        .list_message_keys_by_channel_ref(&channel, external_ref.as_deref())
+        .await
+    {
+        Ok(keys) => keys,
+        Err(e) => {
+            // 读取失败不阻塞写入：退化为"无历史"（可能重复写入，但不丢数据）
+            tracing::warn!(error = %e, "读取该对话历史失败，本次按无历史处理");
+            Vec::new()
+        }
+    };
+    let skip = suffix_match_len(&history, &req.messages);
+    let mut ordinals = occurrence_counts(&history);
+    let fingerprint_key = external_ref.as_deref().unwrap_or(persona.as_str());
+
+    let mut written = 0usize;
+    let mut deduplicated = skip;
+    let base_ts = now_ms();
+
+    for (index, turn) in req.messages.iter().enumerate().skip(skip) {
+        let content = turn.content.trim();
+        if content.is_empty() {
+            tracing::warn!(index, "回流消息内容为空，跳过该条");
+            continue;
+        }
+
+        // 序数：同一 (角色, 内容) 在该对话内的第几次出现（跨进程 / 跨会话稳定）
+        let key = (turn.role.as_str().to_string(), content.to_string());
+        let ordinal = {
+            let counter = ordinals.entry(key).or_insert(0);
+            *counter += 1;
+            *counter
+        };
+        let fingerprint = ingest_fingerprint(fingerprint_key, turn.role.as_str(), content, ordinal);
+
+        // 指纹去重（防御：跨会话 / 跨进程重复提交）
+        match storage.find_message_by_fingerprint(&fingerprint).await {
+            Ok(Some(existing)) => {
+                tracing::debug!(
+                    existing_id = %existing.id,
+                    "回流消息指纹已存在，跳过（重复提交）"
+                );
+                deduplicated += 1;
+                continue;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "指纹查重失败，按未命中处理（可能重复写入）");
+            }
+        }
+
+        // 逐条落库：created_at 按提交顺序单调递增，保证会话内顺序稳定
+        let mut message = Message::new(
+            session.id,
+            turn.role.into(),
+            content.to_string(),
+            MessageSource::Local,
+        )
+        .with_persona_uid(Some(persona.clone()));
+        message.created_at = base_ts.saturating_add(index as i64);
+        message.fingerprint = Some(fingerprint);
+
+        storage.save_message(&message).await?;
+        written += 1;
+    }
+
+    // external_ref 可能含可识别信息（客户端自报标识），日志降级为 debug
+    tracing::info!(
+        session_id = %session.id,
+        channel = %channel,
+        has_external_ref = external_ref.is_some(),
+        written,
+        deduplicated,
+        "回流消息写入完成"
+    );
+    tracing::debug!(
+        session_id = %session.id,
+        external_ref = external_ref.as_deref().unwrap_or("none"),
+        "回流写入的对话标识（debug 级，避免 info 日志携带可识别信息）"
+    );
+
+    // ---- 3. 收尾封存（finalize） ----
+    // 封存失败不改变写入结果：消息已落库（主交付），摘要留待空闲检查或补扫生成；
+    // 此处记 error + `finalized=false` 让调用方看到"已写入但未摘要"，而非整调用失败。
+    let finalized = if req.finalize {
+        match crate::seal::run(engine, session.id).await {
+            Ok(outcome) => outcome.sealed,
+            Err(e) => {
+                tracing::error!(
+                    session_id = %session.id,
+                    error = %e,
+                    "finalize 封存失败（消息已落库，摘要将由空闲检查/补扫重试）"
+                );
+                false
+            }
+        }
+    } else {
+        false
+    };
+
+    Ok(IngestOutcome {
+        session_id: session.id,
+        written,
+        deduplicated,
+        finalized,
+    })
+}
+
+// =========================================================
+// 会话解析
+// =========================================================
+
+/// 解析目标会话：续写已有活跃会话，或新建会话（含惰性封存体检）。
+///
+/// 规则:
+/// 1. 按 `(channel, external_ref)` 查活跃会话；
+/// 2. 命中且归属人格一致（或会话未绑定）→ 检查空闲：
+///    - 超 `[session].l1_idle_minutes` → 先封存（生成 L1）再新建；
+///    - 未超 → 直接续写；
+/// 3. 命中但归属他人格 → 不续写（另起，避免串人格）；
+/// 4. 未命中 → 新建带通道标识的会话。
+///
+/// 参数:
+/// - `engine`: 服务层引擎。
+/// - `channel`: 来源通道。
+/// - `external_ref`: 外部对话标识（None = 单流退化）。
+/// - `persona`: 归属人格。
+async fn resolve_session(
+    engine: &Engine,
+    channel: &str,
+    external_ref: Option<&str>,
+    persona: &str,
+) -> RamariaResult<Session> {
+    let storage = engine.storage_ref().as_ref();
+
+    if let Some(existing) = storage
+        .find_active_session_by_channel(channel, external_ref)
+        .await?
+    {
+        let same_persona = existing
+            .persona_uid
+            .as_deref()
+            .map(|uid| uid == persona)
+            .unwrap_or(true);
+        if same_persona {
+            if session_idle(engine, existing.id).await? {
+                tracing::info!(
+                    session_id = %existing.id,
+                    idle_minutes = engine.config().session.l1_idle_minutes,
+                    "会话空闲超阈值，先封存再另起（惰性封存体检）"
+                );
+                // 封存失败不阻塞回流（与 finalize 分支同口径）：会话已被抢占关闭，
+                // 摘要留给空闲检查 / 补扫重试；此处若用 `?` 上抛会让"LLM 不可用"
+                // 直接吞掉本次用户消息（违反"LLM 不可用不阻塞主流程"）。
+                if let Err(e) = crate::seal::run(engine, existing.id).await {
+                    tracing::error!(
+                        session_id = %existing.id,
+                        error = %e,
+                        "惰性封存失败，继续另起新会话写入（摘要待空闲检查/补扫重试）"
+                    );
+                }
+            } else {
+                tracing::debug!(session_id = %existing.id, "续写已有活跃会话");
+                return Ok(existing);
+            }
+        } else {
+            tracing::warn!(
+                session_id = %existing.id,
+                existing_persona = existing.persona_uid.as_deref().unwrap_or("none"),
+                requested_persona = %persona,
+                "外部对话标识已被其他人格占用，另起新会话"
+            );
+        }
+    }
+
+    let session = storage
+        .create_session_in_channel(Some(persona), channel, external_ref)
+        .await?;
+    tracing::info!(
+        session_id = %session.id,
+        channel,
+        external_ref = external_ref.unwrap_or("none"),
+        persona,
+        "已创建带来源标识的新会话"
+    );
+    Ok(session)
+}
+
+/// 判断会话是否空闲超阈值（最后消息距今 > `[session].l1_idle_minutes`）。
+///
+/// 返回:
+/// - `Ok(true)`: 超阈值（需先封存）。
+/// - `Ok(false)`: 未超阈值 / 会话无消息（空会话视为可续写）。
+///
+/// 降级:
+/// - `get_last_message_time` 未覆写（Unsupported）→ 回退全量加载消息取最大值。
+async fn session_idle(engine: &Engine, session_id: Uuid) -> RamariaResult<bool> {
+    let storage = engine.storage_ref().as_ref();
+    let threshold_ms = engine.config().session.l1_idle_minutes as i64 * 60_000;
+
+    let last = match storage.get_last_message_time(session_id).await {
+        Ok(time) => time,
+        Err(RamariaError::Unsupported { .. }) => {
+            let messages = storage.list_messages(session_id).await?;
+            messages.iter().map(|m| m.created_at).max()
+        }
+        Err(e) => return Err(e),
+    };
+
+    let Some(last) = last else {
+        return Ok(false); // 空会话：无空闲概念，直接续写
+    };
+    Ok(now_ms().saturating_sub(last) >= threshold_ms)
+}
+
+// =========================================================
+// 去重辅助
+// =========================================================
+
+/// 计算"重发前缀"长度：库内消息尾部与本次提交头部的最长匹配条数。
+///
+/// 说明:
+/// - 客户端重复提交整段对话时，已入库的前缀不再重复写入（省去逐条指纹查询）；
+/// - 匹配按 (角色, 内容) 逐条比较（库内键已 TRIM，提交侧同样 trim），
+///   最多匹配 `min(库内条数, 提交条数)`；
+/// - 这是**正确性无关的优化**：即使不跳过，指纹也会把重复消息拦下。
+fn suffix_match_len(history: &[MessageKey], turns: &[ChatTurn]) -> usize {
+    let max = history.len().min(turns.len());
+    for len in (1..=max).rev() {
+        let tail = &history[history.len() - len..];
+        let head = &turns[..len];
+        let matched = tail.iter().zip(head).all(|(key, turn)| {
+            key.role == ramaria_core::types::MessageRole::from(turn.role)
+                && key.content == turn.content.trim()
+        });
+        if matched {
+            return len;
+        }
+    }
+    0
+}
+
+/// 统计库内消息中各 (角色, 内容) 的出现次数（指纹序数基数）。
+///
+/// 说明:
+/// - 覆盖整段对话（跨会话），序数因此精确：重复内容（如"嗯"）也能各自拿到稳定指纹。
+fn occurrence_counts(history: &[MessageKey]) -> HashMap<(String, String), usize> {
+    let mut counts: HashMap<(String, String), usize> = HashMap::new();
+    for key in history {
+        let pair = (key.role.as_str().to_string(), key.content.clone());
+        *counts.entry(pair).or_insert(0) += 1;
+    }
+    counts
+}
+
+/// 回流消息指纹（SHA-256 前 8 字节 → 16 位 hex，与导入去重同一机制）。
+///
+/// 组成: `对话标识 | 角色 | 内容 | 出现序数`
+///
+/// 说明:
+/// - 客户端不提供时间戳，故以"对话内出现序数"替代时间参与指纹，保证重复提交
+///   整段对话时同一条消息得到相同指纹（幂等），同时允许同一对话内重复内容（如"嗯"）
+///   各自拥有不同指纹。
+fn ingest_fingerprint(conversation_key: &str, role: &str, content: &str, ordinal: usize) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(format!("{conversation_key}|{role}|{content}|{ordinal}").as_bytes());
+    let digest = hasher.finalize();
+    digest[..8].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+// =========================================================
+// 单元测试
+// =========================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{
+        L1_JSON_REPLY, engine_with_db, engine_with_l1_reply, seed_channel_session, seed_persona,
+    };
+    use crate::types::ChatRole;
+    use ramaria_core::traits::{StoreCrud, StoreInfrastructure};
+
+    #[test]
+    fn suffix_match_skips_resent_prefix() {
+        let history = vec![
+            key(ramaria_core::types::MessageRole::User, "你好"),
+            key(ramaria_core::types::MessageRole::Assistant, "你好呀"),
+        ];
+        let turns = vec![
+            ChatTurn {
+                role: ChatRole::User,
+                content: "你好".to_string(),
+            },
+            ChatTurn {
+                role: ChatRole::Assistant,
+                content: "你好呀".to_string(),
+            },
+            ChatTurn {
+                role: ChatRole::User,
+                content: "今天聊聊工作".to_string(),
+            },
+        ];
+        assert_eq!(suffix_match_len(&history, &turns), 2, "已入库前缀应被跳过");
+
+        // 完全无关 → 不跳过
+        let fresh = vec![ChatTurn {
+            role: ChatRole::User,
+            content: "全新内容".to_string(),
+        }];
+        assert_eq!(suffix_match_len(&history, &fresh), 0);
+    }
+
+    /// 构造去重键（内容按写入口径 trim）。
+    fn key(role: ramaria_core::types::MessageRole, content: &str) -> MessageKey {
+        MessageKey {
+            role,
+            content: content.trim().to_string(),
+        }
+    }
+
+    #[test]
+    fn occurrence_counts_tracks_duplicates() {
+        let history = vec![
+            key(ramaria_core::types::MessageRole::User, "嗯"),
+            key(ramaria_core::types::MessageRole::User, "嗯"),
+        ];
+        let counts = occurrence_counts(&history);
+        assert_eq!(
+            counts.get(&("user".to_string(), "嗯".to_string())),
+            Some(&2),
+            "重复内容的出现次数应被累计"
+        );
+    }
+
+    #[test]
+    fn fingerprint_is_stable_and_ordinal_sensitive() {
+        let a = ingest_fingerprint("client-A", "user", "你好", 1);
+        let b = ingest_fingerprint("client-A", "user", "你好", 1);
+        let c = ingest_fingerprint("client-A", "user", "你好", 2);
+        let d = ingest_fingerprint("client-B", "user", "你好", 1);
+        assert_eq!(a, b, "同输入指纹稳定（重复提交幂等）");
+        assert_ne!(a, c, "序数不同 → 指纹不同（支持重复内容）");
+        assert_ne!(a, d, "对话标识不同 → 指纹不同（跨对话隔离）");
+        assert_eq!(a.len(), 16, "指纹为 16 位 hex");
+    }
+
+    #[test]
+    fn channel_and_ref_normalization() {
+        assert_eq!(normalize_channel("  "), CHANNEL_MCP);
+        assert_eq!(normalize_channel(" mcp "), "mcp");
+        assert_eq!(normalize_external_ref(Some("  ")), None);
+        assert_eq!(
+            normalize_external_ref(Some(" client-A ")),
+            Some("client-A".to_string())
+        );
+    }
+
+    fn turn(role: ChatRole, content: &str) -> ChatTurn {
+        ChatTurn {
+            role,
+            content: content.to_string(),
+        }
+    }
+
+    /// 首次写入：新建带通道会话 + 落库 + 通道字段正确。
+    #[tokio::test]
+    async fn ingest_creates_channel_session_and_writes() {
+        let (engine, storage, dir) = engine_with_db("ingest").await;
+        seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+
+        let outcome = engine
+            .ingest(IngestRequest {
+                messages: vec![
+                    turn(ChatRole::User, "你好，最近怎么样"),
+                    turn(ChatRole::Assistant, "挺好的，你呢"),
+                ],
+                persona: Some(DEFAULT_PERSONA_UID.to_string()),
+                conversation_id: Some("client-A".to_string()),
+                channel: CHANNEL_MCP.to_string(),
+                finalize: false,
+            })
+            .await
+            .expect("回流成功");
+
+        assert_eq!(outcome.written, 2);
+        assert_eq!(outcome.deduplicated, 0);
+        assert!(!outcome.finalized);
+
+        // 会话带通道标识
+        let session = storage
+            .get_session(outcome.session_id)
+            .await
+            .expect("查询成功")
+            .expect("会话应存在");
+        assert_eq!(session.channel, CHANNEL_MCP);
+        assert_eq!(session.external_ref.as_deref(), Some("client-A"));
+
+        // 消息落库且带归属
+        let messages = storage
+            .list_messages(outcome.session_id)
+            .await
+            .expect("查询消息成功");
+        assert_eq!(messages.len(), 2);
+        assert!(
+            messages
+                .iter()
+                .all(|m| m.persona_uid.as_deref() == Some(DEFAULT_PERSONA_UID)),
+            "回流消息应带 persona 归属"
+        );
+        assert!(messages.iter().all(|m| m.fingerprint.is_some()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 重复提交整段对话：前缀跳过 + 新消息写入（幂等）。
+    #[tokio::test]
+    async fn ingest_resubmit_is_idempotent() {
+        let (engine, storage, dir) = engine_with_db("ingest-idempotent").await;
+        seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+        let base = IngestRequest {
+            messages: vec![
+                turn(ChatRole::User, "第一句"),
+                turn(ChatRole::Assistant, "第一句回复"),
+            ],
+            persona: None,
+            conversation_id: Some("client-A".to_string()),
+            channel: CHANNEL_MCP.to_string(),
+            finalize: false,
+        };
+        engine.ingest(base).await.expect("首次回流成功");
+
+        // 原样重发 → 全部跳过
+        let again = engine
+            .ingest(IngestRequest {
+                messages: vec![
+                    turn(ChatRole::User, "第一句"),
+                    turn(ChatRole::Assistant, "第一句回复"),
+                ],
+                persona: None,
+                conversation_id: Some("client-A".to_string()),
+                channel: CHANNEL_MCP.to_string(),
+                finalize: false,
+            })
+            .await
+            .expect("重发成功");
+        assert_eq!(again.written, 0, "重发不应新增消息");
+        assert_eq!(again.deduplicated, 2, "前缀两条计入去重");
+
+        // 追加新消息 → 只写新增
+        let appended = engine
+            .ingest(IngestRequest {
+                messages: vec![
+                    turn(ChatRole::User, "第一句"),
+                    turn(ChatRole::Assistant, "第一句回复"),
+                    turn(ChatRole::User, "第二句"),
+                ],
+                persona: None,
+                conversation_id: Some("client-A".to_string()),
+                channel: CHANNEL_MCP.to_string(),
+                finalize: false,
+            })
+            .await
+            .expect("追加成功");
+        assert_eq!(appended.written, 1);
+        assert_eq!(appended.deduplicated, 2);
+
+        let messages = storage
+            .list_messages(appended.session_id)
+            .await
+            .expect("查询消息成功");
+        assert_eq!(messages.len(), 3, "库中应共 3 条（无重复）");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 同一对话内重复内容（如"嗯"）各自入库（指纹序数区分）。
+    #[tokio::test]
+    async fn ingest_keeps_repeated_identical_messages() {
+        let (engine, storage, dir) = engine_with_db("ingest-repeat").await;
+        seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+
+        let outcome = engine
+            .ingest(IngestRequest {
+                messages: vec![
+                    turn(ChatRole::User, "嗯"),
+                    turn(ChatRole::User, "嗯"),
+                    turn(ChatRole::User, "嗯"),
+                ],
+                persona: None,
+                conversation_id: Some("client-A".to_string()),
+                channel: CHANNEL_MCP.to_string(),
+                finalize: false,
+            })
+            .await
+            .expect("回流成功");
+
+        assert_eq!(outcome.written, 3, "重复内容应各自写入（序数区分指纹）");
+        let messages = storage
+            .list_messages(outcome.session_id)
+            .await
+            .expect("查询消息成功");
+        assert_eq!(messages.len(), 3);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 单流退化：无 conversation_id 时按通道无标识流续写（同一会话）。
+    #[tokio::test]
+    async fn ingest_without_conversation_id_reuses_stream() {
+        let (engine, storage, dir) = engine_with_db("ingest-null-ref").await;
+        seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+
+        let first = engine
+            .ingest(IngestRequest {
+                messages: vec![turn(ChatRole::User, "第一句")],
+                persona: None,
+                conversation_id: None,
+                channel: CHANNEL_MCP.to_string(),
+                finalize: false,
+            })
+            .await
+            .expect("首次回流成功");
+        let second = engine
+            .ingest(IngestRequest {
+                messages: vec![
+                    turn(ChatRole::User, "第一句"),
+                    turn(ChatRole::User, "第二句"),
+                ],
+                persona: None,
+                conversation_id: None,
+                channel: CHANNEL_MCP.to_string(),
+                finalize: false,
+            })
+            .await
+            .expect("二次回流成功");
+
+        assert_eq!(second.session_id, first.session_id, "无标识应续写同一会话");
+        assert_eq!(second.written, 1, "仅新增第二句");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 超时另起：活跃会话空闲超阈值 → 先封存（生成 L1）再新建会话写入。
+    #[tokio::test]
+    async fn ingest_seals_stale_session_and_starts_new_one() {
+        let (engine, storage, dir) = engine_with_l1_reply("ingest-stale", L1_JSON_REPLY).await;
+        seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+        // 20 分钟前的活跃会话（阈值默认 10 分钟）
+        let stale = seed_channel_session(
+            &storage,
+            DEFAULT_PERSONA_UID,
+            CHANNEL_MCP,
+            Some("client-A"),
+            2,
+            now_ms() - 20 * 60_000,
+        )
+        .await;
+
+        let outcome = engine
+            .ingest(IngestRequest {
+                messages: vec![turn(ChatRole::User, "新的一段对话")],
+                persona: None,
+                conversation_id: Some("client-A".to_string()),
+                channel: CHANNEL_MCP.to_string(),
+                finalize: false,
+            })
+            .await
+            .expect("回流成功");
+
+        assert_ne!(outcome.session_id, stale, "超时会话应封存后另起新会话");
+        assert_eq!(outcome.written, 1, "新消息应写入新会话");
+        let old = storage
+            .get_session(stale)
+            .await
+            .expect("查询成功")
+            .expect("旧会话应存在");
+        assert!(old.ended_at.is_some(), "旧会话应被关闭");
+        assert_eq!(
+            storage
+                .list_memory_l1(stale)
+                .await
+                .expect("读取 L1 成功")
+                .len(),
+            1,
+            "旧会话封存应生成 L1"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 惰性封存失败（LLM 不可用）不阻塞回流：仍另起新会话并写入消息。
+    #[tokio::test]
+    async fn ingest_survives_lazy_seal_failure() {
+        // 空回复 mock → L1 生成失败
+        let (engine, storage, dir) = engine_with_db("ingest-stale-fail").await;
+        seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+        let stale = seed_channel_session(
+            &storage,
+            DEFAULT_PERSONA_UID,
+            CHANNEL_MCP,
+            Some("client-A"),
+            2,
+            now_ms() - 20 * 60_000,
+        )
+        .await;
+
+        let outcome = engine
+            .ingest(IngestRequest {
+                messages: vec![turn(ChatRole::User, "封存失败也要写进来")],
+                persona: None,
+                conversation_id: Some("client-A".to_string()),
+                channel: CHANNEL_MCP.to_string(),
+                finalize: false,
+            })
+            .await
+            .expect("LLM 不可用不应让回流失败");
+
+        assert_eq!(outcome.written, 1, "消息应已落库");
+        assert_ne!(outcome.session_id, stale, "应另起新会话");
+        let old = storage
+            .get_session(stale)
+            .await
+            .expect("查询成功")
+            .expect("旧会话应存在");
+        assert!(old.ended_at.is_some(), "旧会话仍应被关闭");
+        assert!(
+            storage
+                .list_memory_l1(stale)
+                .await
+                .expect("读取 L1 成功")
+                .is_empty(),
+            "LLM 不可用时不生成 L1（待补扫）"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 长对话（>500 条、内容高重复）整段重发：去重依据覆盖全量，不因窗口截断重复写入。
+    #[tokio::test]
+    async fn ingest_long_conversation_resubmit_is_idempotent() {
+        let (engine, storage, dir) = engine_with_db("ingest-long").await;
+        seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+
+        // 600 条、仅 3 种不同内容：指纹序数一旦错位就会重复写入（回归窗口截断缺陷）
+        let turns: Vec<ChatTurn> = (0..600)
+            .map(|i| {
+                let content = format!("第 {} 条消息", i % 3);
+                turn(ChatRole::User, &content)
+            })
+            .collect();
+
+        let first = engine
+            .ingest(IngestRequest {
+                messages: turns.clone(),
+                persona: None,
+                conversation_id: Some("client-long".to_string()),
+                channel: CHANNEL_MCP.to_string(),
+                finalize: false,
+            })
+            .await
+            .expect("首次回流成功");
+        assert_eq!(first.written, 600);
+
+        let again = engine
+            .ingest(IngestRequest {
+                messages: turns,
+                persona: None,
+                conversation_id: Some("client-long".to_string()),
+                channel: CHANNEL_MCP.to_string(),
+                finalize: false,
+            })
+            .await
+            .expect("重发成功");
+
+        assert_eq!(again.written, 0, "长对话重发不得重复写入");
+        assert_eq!(again.deduplicated, 600, "全部应计入去重");
+        assert_eq!(
+            storage
+                .count_messages(again.session_id)
+                .await
+                .expect("计数成功"),
+            600,
+            "库中消息数不应增长"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 归属人格不存在 → Validation 错误（先于建会话检查，避免留下空会话）。
+    #[tokio::test]
+    async fn ingest_rejects_unknown_persona() {
+        let (engine, _storage, dir) = engine_with_db("ingest-unknown").await;
+
+        let err = engine
+            .ingest(IngestRequest {
+                messages: vec![turn(ChatRole::User, "你好")],
+                persona: Some("char-9999".to_string()),
+                conversation_id: None,
+                channel: CHANNEL_MCP.to_string(),
+                finalize: false,
+            })
+            .await
+            .expect_err("人格不存在应报错");
+        assert_eq!(err.category(), "validation");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 边界：空 messages → Validation 错误；越权人格 → Privacy 错误。
+    #[tokio::test]
+    async fn ingest_boundaries_are_explicit() {
+        let (engine, _storage, dir) = engine_with_db("ingest-bounds").await;
+
+        let err = engine
+            .ingest(IngestRequest {
+                messages: Vec::new(),
+                persona: None,
+                conversation_id: None,
+                channel: CHANNEL_MCP.to_string(),
+                finalize: false,
+            })
+            .await
+            .expect_err("空 messages 应报错");
+        assert_eq!(err.category(), "validation");
+
+        engine.set_recall_policy(
+            crate::recall::RecallPolicy::default()
+                .with_allowed_personas(vec!["char-0001".to_string()]),
+        );
+        let err = engine
+            .ingest(IngestRequest {
+                messages: vec![turn(ChatRole::User, "你好")],
+                persona: Some("char-0002".to_string()),
+                conversation_id: None,
+                channel: CHANNEL_MCP.to_string(),
+                finalize: false,
+            })
+            .await
+            .expect_err("越权人格应报错");
+        assert_eq!(err.category(), "privacy");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// finalize=true 且 LLM 可用：写入后立即封存并生成 L1。
+    #[tokio::test]
+    async fn ingest_finalize_seals_when_llm_available() {
+        let (engine, storage, dir) =
+            crate::test_support::engine_with_l1_reply("ingest-finalize", L1_JSON_REPLY).await;
+        seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+
+        let outcome = engine
+            .ingest(IngestRequest {
+                messages: vec![
+                    turn(ChatRole::User, "今天加班到很晚"),
+                    turn(ChatRole::Assistant, "辛苦了，早点休息"),
+                ],
+                persona: None,
+                conversation_id: Some("client-A".to_string()),
+                channel: CHANNEL_MCP.to_string(),
+                finalize: true,
+            })
+            .await
+            .expect("回流成功");
+
+        assert!(outcome.finalized, "LLM 可用时 finalize 应完成封存");
+        let session = storage
+            .get_session(outcome.session_id)
+            .await
+            .expect("查询会话应成功")
+            .expect("会话应存在");
+        assert!(session.ended_at.is_some(), "finalize 应关闭会话");
+        assert_eq!(
+            storage
+                .list_memory_l1(outcome.session_id)
+                .await
+                .expect("读取 L1 应成功")
+                .len(),
+            1,
+            "finalize 应生成 L1"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// finalize=true 但 LLM 不可用：消息写入成功，`finalized=false`（摘要留给空闲/补扫）。
+    #[tokio::test]
+    async fn ingest_finalize_failure_keeps_written_data() {
+        let (engine, storage, dir) = engine_with_db("ingest-finalize-fail").await;
+        seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+
+        let outcome = engine
+            .ingest(IngestRequest {
+                messages: vec![turn(ChatRole::User, "今天加班到很晚")],
+                persona: None,
+                conversation_id: None,
+                channel: CHANNEL_MCP.to_string(),
+                finalize: true,
+            })
+            .await
+            .expect("封存失败不应让回流整体失败");
+
+        assert_eq!(outcome.written, 1, "消息应已落库");
+        assert!(!outcome.finalized, "摘要未生成时 finalized 应为 false");
+        let session = storage
+            .get_session(outcome.session_id)
+            .await
+            .expect("查询会话应成功")
+            .expect("会话应存在");
+        assert!(session.ended_at.is_some(), "会话仍应被关闭（不阻塞新会话）");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 空内容消息跳过（不写脏数据，也不计入去重）。
+    #[tokio::test]
+    async fn ingest_skips_blank_content() {
+        let (engine, storage, dir) = engine_with_db("ingest-blank").await;
+        seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+
+        let outcome = engine
+            .ingest(IngestRequest {
+                messages: vec![
+                    turn(ChatRole::User, "   "),
+                    turn(ChatRole::User, "有效内容"),
+                ],
+                persona: None,
+                conversation_id: None,
+                channel: CHANNEL_MCP.to_string(),
+                finalize: false,
+            })
+            .await
+            .expect("回流成功");
+
+        assert_eq!(outcome.written, 1);
+        assert_eq!(outcome.deduplicated, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

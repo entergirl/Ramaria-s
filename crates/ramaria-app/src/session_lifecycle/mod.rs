@@ -13,7 +13,6 @@
 //! - Thread B → `l2_l3_scheduler::spawn_l2_l3_scheduler`
 //! - `force_close_current_session` → `save_and_close_session`
 
-pub mod example_extract;
 pub mod idle;
 pub mod l1_generate;
 pub mod l2_l3_scheduler;
@@ -560,14 +559,14 @@ impl SessionLifecycle {
         }
     }
 
-    /// examples 回复对抽取入库（封存钩子，v1.4）。
+    /// examples 回复对抽取入库（封存钩子）。
     ///
     /// 职责:
-    /// - 会话封存后抽取"对方消息 → persona 回复"相邻对（决策见 docs/dev-1.4/v1.4-decisions.md）入库为候选池。
-    /// - 入库前按 (partner, reply) 查重：重复回复对不重复入库（幂等）。
+    /// - 会话封存后抽取"对方消息 → persona 回复"相邻对并入库为候选池（幂等查重）。
+    /// - 抽取与入库实现位于 `ramaria_memory::example`，与服务层封存共用同一份。
     ///
     /// 降级（不阻塞封存）:
-    /// - `examples.enabled=false` → 跳过（行为回退 v1.3）。
+    /// - `examples.enabled=false` → 跳过（行为回退旧版）。
     /// - 会话读取/抽取/入库失败 → warn 日志，下次封存自动补齐。
     /// - 抽取结果为空（无有效回复对）→ 正常返回，记 debug。
     ///
@@ -578,66 +577,19 @@ impl SessionLifecycle {
         storage: &dyn StorageBackend,
         session_id: Uuid,
     ) {
-        if !self.config.examples.enabled {
-            debug!(%session_id, "examples 配置关闭，跳过回复对抽取（等同 v1.3）");
-            return;
-        }
-
-        let session = match storage.get_session(session_id).await {
-            Ok(Some(s)) => s,
-            Ok(None) => {
-                warn!(%session_id, "封存会话不存在，跳过 examples 抽取");
-                return;
-            }
-            Err(e) => {
-                warn!(%session_id, %e, "读取会话失败，跳过 examples 抽取");
-                return;
-            }
-        };
-        let Some(persona_uid) = session.persona_uid.as_deref() else {
-            // 存量 NULL 会话防御——从消息首条 assistant 发言推断
-            // 目标 persona；仍无法推断（纯用户会话）才跳过。
-            let messages = match storage.list_messages(session_id).await {
-                Ok(m) => m,
-                Err(e) => {
-                    warn!(%session_id, %e, "读取会话消息失败，跳过 examples 抽取");
-                    return;
-                }
-            };
-            let Some(inferred) = ramaria_memory::utt::infer_target_persona_from_messages(&messages)
-            else {
-                debug!(%session_id, "会话无绑定 persona 且无法从消息推断，跳过 examples 抽取");
-                return;
-            };
+        if let Err(e) = ramaria_memory::example::extract_and_save_for_session(
+            storage,
+            session_id,
+            &self.config.examples,
+        )
+        .await
+        {
             warn!(
                 %session_id,
-                persona_uid = %inferred,
-                "会话 persona_uid 为 NULL，已从消息推断目标 persona（存量兼容）"
+                %e,
+                "examples 回复对抽取入库失败（不阻塞封存，下次封存自动补齐）"
             );
-
-            let pairs = example_extract::extract_pairs(&messages, &inferred);
-            if pairs.is_empty() {
-                debug!(%session_id, "本会话无有效回复对，跳过入库");
-                return;
-            }
-            save_example_pairs(storage, session_id, &inferred, pairs).await;
-            return;
-        };
-
-        let messages = match storage.list_messages(session_id).await {
-            Ok(m) => m,
-            Err(e) => {
-                warn!(%session_id, %e, "读取会话消息失败，跳过 examples 抽取");
-                return;
-            }
-        };
-
-        let pairs = example_extract::extract_pairs(&messages, persona_uid);
-        if pairs.is_empty() {
-            debug!(%session_id, "本会话无有效回复对，跳过入库");
-            return;
         }
-        save_example_pairs(storage, session_id, persona_uid, pairs).await;
     }
 
     // =========================================================
@@ -704,80 +656,6 @@ impl SessionLifecycle {
 
         info!("SessionLifecycle shutdown 完成");
     }
-}
-
-// =========================================================
-// examples 回复对入库（extract_examples_for_session 共用）
-// =========================================================
-
-/// 把抽取的回复对查重后入库（幂等），并记录统计日志。
-///
-/// 职责:
-/// - 按 (persona_uid, partner, reply) 查重，重复回复对不重复入库。
-/// - 新入库示例进入候选池（selected=false），注入侧按评分轮换选择。
-/// - 单条失败仅 warn 不中断其余入库（不阻塞封存）。
-///
-/// 参数:
-/// - `storage`: 存储后端。
-/// - `session_id`: 来源会话。
-/// - `persona_uid`: 归属人格（已解析，可能来自消息推断）。
-/// - `pairs`: 抽取的回复对（非空，由调用方保证）。
-async fn save_example_pairs(
-    storage: &dyn StorageBackend,
-    session_id: Uuid,
-    persona_uid: &str,
-    pairs: Vec<example_extract::ExtractedPair>,
-) {
-    let mut saved = 0usize;
-    let mut skipped = 0usize;
-    for pair in pairs {
-        // 幂等查重：已存在相同回复对 → 跳过
-        match storage
-            .find_example_by_pair(persona_uid, &pair.partner, &pair.reply)
-            .await
-        {
-            Ok(Some(_)) => {
-                skipped += 1;
-                continue;
-            }
-            Ok(None) => {}
-            Err(e) => {
-                warn!(%session_id, %e, "examples 查重失败，跳过该回复对");
-                continue;
-            }
-        }
-
-        let mut example = ramaria_core::types::PersonaExample::new(
-            persona_uid.to_string(),
-            pair.partner,
-            pair.reply,
-        );
-        example.session_id = Some(session_id);
-        example.context = pair.context;
-        example.tags = if pair.tags.is_empty() {
-            None
-        } else {
-            Some(pair.tags)
-        };
-
-        match storage.save_example(&example).await {
-            Ok(id) => {
-                saved += 1;
-                info!(example_id = id, %session_id, persona_uid, "example 已入库");
-            }
-            Err(e) => {
-                warn!(%session_id, %e, "example 入库失败（不阻塞封存）");
-            }
-        }
-    }
-
-    info!(
-        %session_id,
-        persona_uid,
-        saved,
-        skipped,
-        "examples 回复对抽取入库完成"
-    );
 }
 
 // =========================================================

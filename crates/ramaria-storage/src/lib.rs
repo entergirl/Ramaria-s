@@ -125,6 +125,21 @@ impl StoreCrud for SqliteStorage {
     async fn count_messages(&self, session_id: Uuid) -> RamariaResult<u32> {
         repo::messages::count_by_session(&self.pool, session_id).await
     }
+    /// 覆写为指纹精确查询（外部入口回流去重）。
+    async fn find_message_by_fingerprint(
+        &self,
+        fingerprint: &str,
+    ) -> RamariaResult<Option<Message>> {
+        repo::messages::find_by_fingerprint(&self.pool, fingerprint).await
+    }
+    /// 覆写为跨会话按通道取去重键（外部对话重复提交去重）。
+    async fn list_message_keys_by_channel_ref(
+        &self,
+        channel: &str,
+        external_ref: Option<&str>,
+    ) -> RamariaResult<Vec<ramaria_core::types::MessageKey>> {
+        repo::messages::list_keys_by_channel_ref(&self.pool, channel, external_ref).await
+    }
 
     // =========================================================
     // Memory L1（单次会话摘要）

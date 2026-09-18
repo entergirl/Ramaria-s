@@ -5,25 +5,30 @@
 //! - 与传输无关：不依赖 app / cli / desktop / tauri，不持有界面或协议概念
 //! - 配置纪律：config.toml 为配置权威源（桌面 / CLI 双写同步以文件为准），本层只读不写回
 //! - 降级链：嵌入模型缺失 → 向量通道不可用（BM25 + 关键词镜像继续工作），不阻塞装配
-//! - 懒加载：检索索引在首次召回时构建，本层仅持有占位槽（避免进程启动即加载大库）
-//! - 用例挂载点：recall / ingest / seal / tick_idle 由召回与封存用例接入，未接入时返回明确 Unsupported
+//! - 懒加载：检索索引在首次召回时构建，本层仅持有占位槽（避免进程启动即加载大库）；
+//!   占位槽未加载期间产生的 L1 增量会置脏标记，保证下次加载重建不漏（见 `index_dirty`）
+//! - 用例挂载点：recall / ingest / seal / tick_idle / history / persona 均由用例实现接入
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use ramaria_core::config::{EmbeddingDevice, RamariaConfig};
 use ramaria_core::error::{RamariaError, RamariaResult};
-use ramaria_core::lock::read_recover;
+use ramaria_core::lock::{read_recover, write_recover};
 use ramaria_core::traits::{EmbeddingProvider, LlmProvider, LlmResponseCache, StorageBackend};
 use ramaria_core::types::{BackendConfig, LlmProvider as LlmProviderKind};
 use ramaria_llm::keychain::Keychain;
+use ramaria_memory::keyword::KeywordService;
 use ramaria_memory::retriever::Retriever;
 use ramaria_storage::SqliteStorage;
 use uuid::Uuid;
 
+use crate::recall::RecallPolicy;
+use crate::seal::SealHooks;
 use crate::types::{
-    HistoryRequest, HistoryResult, IngestOutcome, IngestRequest, RecallRequest, RecallResult,
-    SealOutcome,
+    HistoryRequest, HistoryResult, IngestOutcome, IngestRequest, PersonaCardRequest,
+    PersonaCardView, PersonaSummaryView, RecallRequest, RecallResult, SealOutcome,
 };
 
 // =========================================================
@@ -85,8 +90,17 @@ pub struct Engine {
     config: RamariaConfig,
     /// 数据库文件路径（诊断与客户端配置片段展示用）。
     db_path: PathBuf,
-    /// 内存检索器槽（懒加载占位；索引构建由召回用例接入）。
+    /// 内存检索器槽（懒加载：首次召回时由 `ensure_index_loaded` 构建并整体替换）。
     retriever: Arc<RwLock<Option<Retriever>>>,
+    /// 关键词镜像（倒排 + 词典池）：召回第四通道，L1 生成后增量维护。
+    keyword_mirror: Arc<RwLock<KeywordService>>,
+    /// 索引脏标记：L1 增量镜像时检索器尚未加载 → 置脏，
+    /// 保证下次加载（`ensure_index_loaded`）会重建，不在进程生命周期内漏掉该 L1。
+    index_dirty: Arc<AtomicBool>,
+    /// 召回隐私与边界策略（默认保守；入口层按 `[mcp]` 配置注入）。
+    recall_policy: Arc<RwLock<RecallPolicy>>,
+    /// 封存钩子（行为 / 风格 / L2 触发；未注册则跳过，见 [`SealHooks`]）。
+    seal_hooks: Arc<RwLock<SealHooks>>,
 }
 
 impl Engine {
@@ -165,6 +179,11 @@ impl Engine {
             db_path,
             // ---- 6. 检索器占位：首次召回时构建（懒加载）----
             retriever: Arc::new(RwLock::new(None)),
+            // ---- 7. 关键词镜像与策略 / 钩子：空镜像 + 默认保守策略 ----
+            keyword_mirror: Arc::new(RwLock::new(KeywordService::new())),
+            index_dirty: Arc::new(AtomicBool::new(false)),
+            recall_policy: Arc::new(RwLock::new(RecallPolicy::default())),
+            seal_hooks: Arc::new(RwLock::new(SealHooks::default())),
         })
     }
 
@@ -189,6 +208,10 @@ impl Engine {
             config,
             db_path: PathBuf::new(),
             retriever: Arc::new(RwLock::new(None)),
+            keyword_mirror: Arc::new(RwLock::new(KeywordService::new())),
+            index_dirty: Arc::new(AtomicBool::new(false)),
+            recall_policy: Arc::new(RwLock::new(RecallPolicy::default())),
+            seal_hooks: Arc::new(RwLock::new(SealHooks::default())),
         }
     }
 
@@ -232,76 +255,176 @@ impl Engine {
     }
 
     // =========================================================
-    // 用例挂载点
+    // 策略与钩子（入口层注入）
     // =========================================================
-    //
-    // 下列用例由后续里程碑接入实现；未接入时返回明确的 Unsupported 错误，
-    // 避免调用方把"未实现"误读为"无记忆 / 无历史"（错误可见纪律）。
+
+    /// 设置召回隐私与边界策略。
+    ///
+    /// 用法:
+    /// - 入口层（MCP / CLI / 桌面）在启动时按配置注入（`[mcp].allow_raw_text`、
+    ///   `allowed_personas` 等），未注入时保持默认保守值（原文不出端）。
+    ///
+    /// 参数:
+    /// - `policy`: 召回策略快照。
+    pub fn set_recall_policy(&self, policy: RecallPolicy) {
+        tracing::info!(
+            allow_raw_text = policy.allow_raw_text,
+            allowed_persona_rules = policy.allowed_personas.len(),
+            "召回策略已更新"
+        );
+        let mut guard = write_recover(&self.recall_policy, "engine.recall_policy");
+        *guard = policy;
+    }
+
+    /// 当前召回策略快照（副本）。
+    pub fn recall_policy(&self) -> RecallPolicy {
+        read_recover(&self.recall_policy, "engine.recall_policy").clone()
+    }
+
+    /// 注册封存钩子（行为 / 风格 / L2 触发；未注册的步骤在封存时跳过）。
+    ///
+    /// 用法:
+    /// - 入口层启动时注入：桌面 / CLI 复用既有 App 侧实现；MCP 进程未注册时
+    ///   仅跳过对应步骤（L1 / utt / examples 不受影响）。
+    pub fn set_seal_hooks(&self, hooks: SealHooks) {
+        tracing::info!(
+            behavior = hooks.behavior.is_some(),
+            style = hooks.style.is_some(),
+            l2_trigger = hooks.l2_trigger.is_some(),
+            "封存钩子已更新"
+        );
+        let mut guard = write_recover(&self.seal_hooks, "engine.seal_hooks");
+        *guard = hooks;
+    }
+
+    /// 当前封存钩子快照（Arc 克隆，供封存流程在锁外调用）。
+    pub fn seal_hooks(&self) -> SealHooks {
+        read_recover(&self.seal_hooks, "engine.seal_hooks").clone()
+    }
+
+    // =========================================================
+    // 用例入口
+    // =========================================================
 
     /// 召回用例：按对话片段与分层选择装配可直接使用的记忆上下文。
     ///
     /// 职责:
-    /// - 会话定位（可选）→ 检索（向量 / BM25 / 关键词镜像 / 脉络）→ Persona-Aware 过滤
-    ///   → 衰减重排 → 预算裁剪 → `context` 文本 + 结构化 `items`。
+    /// - 检索（向量 / BM25 / 关键词镜像 / 图谱，与在线管线同一份实现）→ Persona-Aware 过滤
+    ///   → 衰减重排 → 分层装配（行为 / 知识 / 表达 / 脉络 / 记忆 / 原文）→ 预算裁剪。
+    /// - `query` 与 `messages` 均为空时进入概览模式（时间线返回最近记忆）。
     ///
     /// 返回:
     /// - 成功时返回 `context` / `items` / `stats`。
-    /// - 未接入时返回 `Unsupported`。
-    pub async fn recall(&self, _req: RecallRequest) -> RamariaResult<RecallResult> {
-        Err(RamariaError::unsupported(
-            "recall 用例尚未接入（召回装配待接入服务层）",
-        ))
+    /// - 目标人格不在策略白名单时返回 `Privacy` 错误（越权可见性拒绝）。
+    pub async fn recall(&self, req: RecallRequest) -> RamariaResult<RecallResult> {
+        crate::recall::run(self, req).await
     }
 
     /// 写入用例：把外部对话回流入库（进 L0），使内容在桌面可见并参与后续记忆加工。
     ///
     /// 职责:
-    /// - 会话解析（显式标识 > 客户端名 > 单流退化）→ 惰性封存体检 → 指纹去重落库
+    /// - 会话解析（显式标识 > 单流退化）→ 惰性封存体检 → 重发跳过 + 指纹去重落库
     ///   → 可选封存（`finalize`）。
     ///
     /// 返回:
     /// - 成功时返回 `session_id` / `written` / `deduplicated` / `finalized`。
-    /// - 未接入时返回 `Unsupported`。
-    pub async fn ingest(&self, _req: IngestRequest) -> RamariaResult<IngestOutcome> {
-        Err(RamariaError::unsupported(
-            "ingest 用例尚未接入（会话解析与回流待接入服务层）",
-        ))
+    pub async fn ingest(&self, req: IngestRequest) -> RamariaResult<IngestOutcome> {
+        crate::ingest::run(self, req).await
     }
 
-    /// 封存用例：抢占式关闭会话并触发既有封存链路（L1 → utt → 行为与风格钩子 → L2 检查）。
+    /// 封存用例：抢占式关闭会话并触发封存链路（L1 → 索引镜像 → utt → examples → 钩子）。
     ///
     /// 职责:
-    /// - 条件更新抢占（`ended_at IS NULL`）；仅抢到者生成 L1，未抢到直接返回。
+    /// - 条件更新抢占（`ended_at IS NULL`）；仅抢到者生成 L1，未抢到直接返回
+    ///   （多进程 / 多线程同时封存时保证 L1 只生成一次）。
     ///
     /// 返回:
     /// - 成功时返回 `sealed` 与本次生成的 `l1_count`。
-    /// - 未接入时返回 `Unsupported`。
-    pub async fn seal(&self, _session_id: Uuid) -> RamariaResult<SealOutcome> {
-        Err(RamariaError::unsupported(
-            "seal 用例尚未接入（封存链路待接入服务层）",
-        ))
+    pub async fn seal(&self, session_id: Uuid) -> RamariaResult<SealOutcome> {
+        crate::seal::run(self, session_id).await
     }
 
     /// 空闲检查用例：遍历全库活跃会话，对超时者执行封存。
     ///
     /// 返回:
-    /// - 成功时返回本次封存的会话数量。
-    /// - 未接入时返回 `Unsupported`。
+    /// - 成功时返回本次封存的会话数量（抢占失败者不计入）。
     pub async fn tick_idle(&self) -> RamariaResult<usize> {
-        Err(RamariaError::unsupported(
-            "tick_idle 用例尚未接入（空闲检查待接入服务层）",
-        ))
+        crate::idle::tick(self).await
     }
 
     /// 会话历史用例：按会话或人格读取消息历史（分页）。
     ///
     /// 返回:
-    /// - 成功时返回 `messages` 与分页前的 `total`。
-    /// - 未接入时返回 `Unsupported`。
-    pub async fn history(&self, _req: HistoryRequest) -> RamariaResult<HistoryResult> {
-        Err(RamariaError::unsupported(
-            "history 用例尚未接入（会话历史读取待接入服务层）",
-        ))
+    /// - 成功时返回 `messages`（页内时间正序）与分页前的 `total`。
+    pub async fn history(&self, req: HistoryRequest) -> RamariaResult<HistoryResult> {
+        crate::session::history(self, req).await
+    }
+
+    /// 人格列表用例：列出全部人格摘要（uid / 名称 / 类型 / 来源 / 启用状态）。
+    pub async fn persona_list(&self) -> RamariaResult<Vec<PersonaSummaryView>> {
+        crate::persona::list(self).await
+    }
+
+    /// 人格卡片用例：性格画像 / 行为规则 / 表达风格 / 知识事实 / 数据成熟度。
+    pub async fn persona_card(&self, req: PersonaCardRequest) -> RamariaResult<PersonaCardView> {
+        crate::persona::card(self, req).await
+    }
+
+    /// 确保检索索引已加载（懒加载：首次召回前构建一次，重复调用为空操作）。
+    ///
+    /// 返回:
+    /// - `Ok(true)`: 本次调用完成了构建。
+    /// - `Ok(false)`: 索引此前已加载（或无需构建）。
+    pub async fn ensure_index_loaded(&self) -> RamariaResult<bool> {
+        crate::index::ensure_loaded(self).await
+    }
+
+    // =========================================================
+    // 内部依赖访问器（crate 内用例实现使用）
+    // =========================================================
+
+    /// 存储后端（crate 内用例实现使用）。
+    pub(crate) fn storage_ref(&self) -> &Arc<dyn StorageBackend> {
+        &self.storage
+    }
+
+    /// LLM provider（crate 内用例实现使用）。
+    pub(crate) fn llm_ref(&self) -> &Arc<dyn LlmProvider> {
+        &self.llm
+    }
+
+    /// 嵌入 provider（crate 内用例实现使用）。
+    pub(crate) fn embedding_ref(&self) -> Option<&Arc<dyn EmbeddingProvider>> {
+        self.embedding.as_ref()
+    }
+
+    /// 检索器懒加载槽（crate 内用例实现使用）。
+    pub(crate) fn retriever_slot(&self) -> &Arc<RwLock<Option<Retriever>>> {
+        &self.retriever
+    }
+
+    /// 关键词镜像（crate 内用例实现使用）。
+    pub(crate) fn keyword_mirror_ref(&self) -> &Arc<RwLock<KeywordService>> {
+        &self.keyword_mirror
+    }
+
+    // =========================================================
+    // 索引脏标记（懒加载与增量镜像的协同）
+    // =========================================================
+
+    /// 标记索引需要重建（增量镜像时检索器尚未加载 → 该批 L1 未进内存索引）。
+    pub(crate) fn mark_index_dirty(&self) {
+        self.index_dirty.store(true, Ordering::Release);
+    }
+
+    /// 查询索引是否需要重建。
+    pub(crate) fn index_dirty(&self) -> bool {
+        self.index_dirty.load(Ordering::Acquire)
+    }
+
+    /// 清除索引脏标记（重建开始前调用：构建期间新产生的增量会重新置脏）。
+    pub(crate) fn clear_index_dirty(&self) {
+        self.index_dirty.store(false, Ordering::Release);
     }
 }
 
@@ -572,19 +695,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 用例挂载点未接入时必须返回明确 Unsupported（错误可见，不静默成功）。
+    /// 用例入口可达：空库上的读用例返回结构完整的结果，写用例按边界显式报错。
     #[tokio::test]
-    async fn use_case_stubs_return_unsupported() {
-        let dir = temp_dir("stubs");
+    async fn use_cases_are_reachable_on_empty_db() {
+        let dir = temp_dir("usecases");
         let db_path = dir.join("assistant.db");
         let engine = Engine::open(db_path).await.expect("引擎装配应成功");
 
-        let err = engine
+        // 召回：空库 → 空结果（不报错），且进入概览模式（无 query / messages）
+        let result = engine
             .recall(RecallRequest::default())
             .await
-            .expect_err("recall 未接入应报错");
-        assert_eq!(err.category(), "unsupported");
+            .expect("空库召回应成功");
+        assert!(result.items.is_empty());
+        assert_eq!(result.stats.mode, crate::types::RecallMode::Overview);
 
+        // 写入：空 messages 是边界错误（显式 Validation，不静默成功）
         let err = engine
             .ingest(IngestRequest {
                 messages: Vec::new(),
@@ -594,26 +720,33 @@ mod tests {
                 finalize: false,
             })
             .await
-            .expect_err("ingest 未接入应报错");
-        assert_eq!(err.category(), "unsupported");
+            .expect_err("空 messages 应报错");
+        assert_eq!(err.category(), "validation");
 
-        let err = engine
-            .seal(Uuid::nil())
-            .await
-            .expect_err("seal 未接入应报错");
-        assert_eq!(err.category(), "unsupported");
+        // 封存：不存在的会话 → 未抢到（幂等语义，不报错）
+        let outcome = engine.seal(Uuid::nil()).await.expect("封存应成功返回");
+        assert!(!outcome.sealed);
+        assert_eq!(outcome.l1_count, 0);
 
-        let err = engine
-            .tick_idle()
-            .await
-            .expect_err("tick_idle 未接入应报错");
-        assert_eq!(err.category(), "unsupported");
+        // 空闲检查：无活跃会话 → 0
+        assert_eq!(engine.tick_idle().await.expect("空闲检查应成功"), 0);
 
-        let err = engine
+        // 历史：无 session_id / persona → 空结构
+        let history = engine
             .history(HistoryRequest::default())
             .await
-            .expect_err("history 未接入应报错");
-        assert_eq!(err.category(), "unsupported");
+            .expect("历史读取应成功");
+        assert!(history.session_id.is_none());
+        assert!(history.messages.is_empty());
+
+        // 人格列表：空库 → 空列表
+        assert!(
+            engine
+                .persona_list()
+                .await
+                .expect("人格列表应成功")
+                .is_empty()
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

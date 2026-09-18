@@ -21,7 +21,7 @@ use crate::error::RamariaResult;
 use crate::keyword::KeywordPoolRow;
 use crate::types::{
     BackendConfig, ClusterSnapshot, EventBatchWrite, EventRelation, EventSource, MemoryEvent,
-    MemoryL1, Message, MessageRole, ModelCapability, Persona, PersonaEventAggregate,
+    MemoryL1, Message, MessageKey, MessageRole, ModelCapability, Persona, PersonaEventAggregate,
     PersonaExample, PersonaFact, PersonaStyleStats, PersonalityTrait, PrivacyConsent, ProfileField,
     Session, TraitEvidence, TraitStatus, UttBlock,
 };
@@ -581,6 +581,49 @@ pub trait StoreCrud: Send + Sync {
     /// - 消息数量（无消息时为 0）。
     async fn count_messages(&self, session_id: Uuid) -> RamariaResult<u32> {
         Ok(self.list_messages(session_id).await?.len() as u32)
+    }
+
+    /// 按导入去重指纹查询消息（跨批次 / 跨会话去重）。
+    ///
+    /// 职责:
+    /// - 外部入口（导入 / MCP 回流）重复提交同一批消息时，凭指纹判定"该消息是否已入库"，
+    ///   避免重复落库与全局 UNIQUE 冲突。
+    ///
+    /// 返回:
+    /// - `Ok(Some(message))`: 指纹已存在（调用方跳过该条）。
+    /// - `Ok(None)`: 未命中（默认实现恒返回 None——未覆写的 mock 视为"库中无此指纹"）。
+    async fn find_message_by_fingerprint(
+        &self,
+        _fingerprint: &str,
+    ) -> RamariaResult<Option<Message>> {
+        Ok(None)
+    }
+
+    /// 按来源通道 + 外部对话标识读取消息去重键（外部入口重复提交去重）。
+    ///
+    /// 职责:
+    /// - 外部对话（MCP / 未来社交通道）按 `(channel, external_ref)` 取回其**全部**消息键
+    ///   （角色 + 正文，时间升序）：同一对话可能跨多个会话（空闲封存后另起），
+    ///   本查询跨会话取回，使去重范围覆盖整段对话。
+    /// - 供回流用例做"重发前缀跳过 + 指纹序数计算"（重复提交安全）。
+    ///
+    /// 参数:
+    /// - `channel`: 来源通道（如 `mcp`）。
+    /// - `external_ref`: 外部对话标识；`None` 表示该通道下无标识的单流会话。
+    ///
+    /// 返回:
+    /// - 按 `created_at ASC` 排列的消息键列表（默认实现返回空列表：未覆写的 mock 无历史）。
+    ///
+    /// 说明:
+    /// - 只取两列（role / content）而非整行：长对话（数千条）也能廉价全量取回，
+    ///   避免"读取窗口截断导致指纹序数失准"的重复写入风险；
+    /// - 调用方保证 `content` 已 trim（与 `messages.content` 写入口径一致）。
+    async fn list_message_keys_by_channel_ref(
+        &self,
+        _channel: &str,
+        _external_ref: Option<&str>,
+    ) -> RamariaResult<Vec<MessageKey>> {
+        Ok(Vec::new())
     }
 
     // -- Memory L1 --

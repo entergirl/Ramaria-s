@@ -12,6 +12,7 @@ pub mod behavior;
 pub mod bm25;
 pub mod decay;
 pub mod event;
+pub mod example;
 pub mod fact;
 pub mod graph_retriever;
 pub mod inference;
@@ -23,6 +24,7 @@ pub mod llm_gate;
 pub mod prompt;
 pub mod rag;
 pub mod rebuild;
+pub mod recall;
 pub mod retriever;
 pub mod rrf;
 mod similarity; // 内部共享工具（相似度统一实现，不暴露到公共 API）
@@ -71,8 +73,17 @@ pub use retriever::{
 // 注：PersonaKind 已统一到 ramaria_core::types，不再从此模块 re-export
 pub use rag::{RagConfig, filter_by_persona, format_context_text};
 
+// 召回装配共用实现（在线管线与服务层同源）
+pub use recall::{
+    KeywordMirrorSource, RecallChannels, RecallGates, RecallHit, RecallInput, RecallMemoryLayers,
+    RecallOutput, RetrieverSource, assemble_recall,
+};
+
 // L1 Summarizer
 pub use l1::{L1Summarizer, L1SummarizerConfig};
+
+// Examples 回复对抽取（examples 写侧）
+pub use example::{ExampleSaveStats, ExtractedPair, extract_and_save_for_session, extract_pairs};
 
 // Event Extractor & TopicBatcher
 pub use event::{

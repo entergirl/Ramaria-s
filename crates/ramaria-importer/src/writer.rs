@@ -367,12 +367,15 @@ mod tests {
             .await
             .unwrap();
         // 最小 schema（sessions + messages，对应 create_historical / save_import_batch 所需列）
+        // sessions 含 channel（导入会话落默认通道 'local'）与 external_ref（外部对话标识，导入为空）
         sqlx::query(
             "CREATE TABLE sessions (
                 id TEXT PRIMARY KEY,
                 started_at INTEGER NOT NULL,
                 ended_at INTEGER,
-                persona_uid TEXT
+                persona_uid TEXT,
+                channel TEXT NOT NULL DEFAULT 'local',
+                external_ref TEXT
             )",
         )
         .execute(&pool)

@@ -2,21 +2,17 @@
 //!
 //! 设计特点:
 //! - 对应 send_message 管线 Step 5: 记忆检索 + Persona-Aware RAG
+//! - 检索装配（多通道检索 / 衰减重排 / Persona-Aware 过滤 / 段落渲染 / utt 渲染）
+//!   统一位于 `ramaria_memory::recall::assemble_recall`：本 Stage 只做配置映射与结果搬运，
+//!   保证在线管线与服务层 recall 用例召回同源（同一份实现，两个入口）
 //! - 多通道检索：向量 + BM25 + 图谱（RRF 融合），关键词镜像作为第四通道
-//!   （app 层预取 `(label, score)` 纯数据后交同步 search 融合）
-//! - 嵌入模型不可用时降级为 BM25 + 图谱（向量通道权重=0）
-//! - 检索结果应用 Ebbinghaus 时间衰减，使近期记忆排序优于旧记忆
-//! - Persona-Aware 过滤：按 persona_uid + share 阈值双重过滤
+//! - 嵌入模型不可用时降级为 BM25 + 图谱（向量通道缺席）
 //! - 空检索结果时返回 None（Block C2 显示"暂无相关历史记忆"）
+//! - 索引重建失败时告警"记忆注入可能不完整"（宿主侧健康标志，不进共用实现）
 
 use async_trait::async_trait;
-use ramaria_core::lock::read_recover;
-use ramaria_core::types::{PersonaKind, now_ms};
-use ramaria_memory::bm25::DocId;
-use ramaria_memory::decay::{DecayConfig, calc_retention};
-use ramaria_memory::rag::{RagConfig, filter_by_persona, format_context_text};
-use ramaria_memory::retriever::SearchRequest;
-use uuid::Uuid;
+use ramaria_core::types::now_ms;
+use ramaria_memory::recall::{RecallGates, RecallInput, RecallMemoryLayers, assemble_recall};
 
 use crate::pipeline::{PipelineContext, PipelineData, PipelineError, PipelineStage};
 
@@ -78,305 +74,43 @@ impl PipelineStage for StageRetrieveMemory {
         ctx: &PipelineContext,
         mut input: Self::Input,
     ) -> Result<Self::Output, PipelineError> {
-        let query = &input.user_input;
-        let persona_uid = input.persona_uid.as_deref();
-
-        // ---- 5.0 注入闸门（探针消融） ----
-        // RAG 相关记忆（`memory_rag`）与 utt 原文（`utt`）双通道均关闭时
-        // （B0 无记忆注入）直接返回：不生成 query embedding、不检索，避免无效开销。
-        let rag_active = ctx.config.injection.memory_rag;
-        let utt_active = ctx.config.injection.utt && ctx.config.utt.enabled;
-        if !rag_active && !utt_active {
-            tracing::debug!("记忆注入闸门全关（探针消融 B0），跳过记忆检索");
-            input.memory_context = None;
-            input.utt_context = None;
-            return Ok(input);
-        }
-
-        // utt 通道是否对本 persona 生效（原文白名单双闸门：开关 + persona 类型）。
-        // 查询向量仅在 RAG 或 utt（白名单内）需要时生成，避免无效 embedding 调用。
-        let utt_persona_allowed = persona_uid
-            .map(|puid| {
-                ctx.config
-                    .utt
-                    .persona_kind_whitelist
-                    .contains(&PersonaKind::from_uid(puid))
-            })
-            .unwrap_or(false);
-        let need_query_vec = rag_active || (utt_active && utt_persona_allowed);
-
-        // ---- 5.1 尝试生成查询向量 ----
-        // 先 clone Arc 出锁再 await，避免 MutexGuard 跨 .await
-        let query_vec: Option<Vec<f32>> = if !need_query_vec {
-            tracing::debug!("无需查询向量（注入闸门关闭，仅执行无需向量的通道）");
-            None
-        } else {
-            match &ctx.embedding {
-                Some(provider) if provider.is_available() => match provider.embed(query).await {
-                    Ok(vec) => {
-                        tracing::debug!(dim = vec.len(), "查询向量已生成");
-                        Some(vec)
-                    }
-                    Err(e) => {
-                        tracing::warn!(%e, "查询向量生成失败，向量通道降级");
-                        None
-                    }
-                },
-                Some(_) => {
-                    tracing::debug!("嵌入模型不可用，跳过向量通道");
-                    None
-                }
-                None => {
-                    tracing::debug!("嵌入模型未配置，跳过向量通道");
-                    None
-                }
-            }
-        };
-
-        // ---- 5.1.5 关键词镜像通道预取（混合检索第四通道） ----
-        // 镜像查询异步（语义层需 embedding），必须在检索器读锁之前完成；
-        // 预取后仅把 (label, score) 纯数据交给同步 search（无句柄泄漏）。
-        // 降级（全部静默，行为与三通道一致）：通道开关关闭 / 镜像无文档 /
-        // 查询词为空 / 返回空 → keyword_channel = None。
-        // 服务锁中毒不放弃通道：由 `read_recover` 记录 warn 并取回内部数据继续检索。
-        let mut keyword_channel: Option<Vec<(String, f64)>> = None;
-        if rag_active && ctx.config.retrieval.enable_keyword_channel {
-            let kw_top_k = ctx.config.retrieval.l1_retrieve_top_k as usize;
-            let mirror = Some({
-                let guard = read_recover(&ctx.keyword_service, "retrieve_memory.keyword_service");
-                (
-                    guard.composite_arc(),
-                    guard.pool_snapshot(),
-                    guard.doc_count(),
-                )
-            });
-            if let Some((composite, pool, doc_count)) = mirror {
-                if doc_count == 0 {
-                    tracing::debug!("关键词镜像无文档，跳过关键词通道");
-                } else {
-                    let hits = ramaria_memory::keyword::service::query_text_labels(
-                        &composite,
-                        &pool,
-                        query,
-                        persona_uid,
-                        ctx.embedding.as_deref(),
-                        kw_top_k,
-                    )
-                    .await;
-                    if hits.is_empty() {
-                        tracing::debug!("关键词镜像无命中，跳过关键词通道");
-                    } else {
-                        tracing::debug!(hits = hits.len(), "关键词镜像通道命中");
-                        keyword_channel = Some(hits);
-                    }
-                }
-            }
-        }
-
-        // ---- 5.2 执行多通道检索（RwLock::read() 允许多读并发） ----
-        // 探针消融：RAG 闸门关闭（`injection.memory_rag=false`，B0）时不执行检索，
-        // memory_context 恒 None；utt 原文通道（5.5）独立于 RAG 仍按需执行。
-        let mut results = if rag_active {
-            // 索引健康提示：最近一次重建失败时，本轮检索基于旧索引（记忆可能不完整）。
-            // 不改变检索行为——旧索引仍可检索，仅提升可观测性。
-            if ctx
+        // 索引健康提示：最近一次重建失败时，本轮检索基于旧索引（记忆可能不完整）。
+        // 不改变检索行为——旧索引仍可检索，仅提升可观测性；且仅在摘要路检索真正生效时提示
+        // （双闸门全关的探针场景不检索，避免无意义告警）。
+        if ctx.config.injection.memory_rag
+            && ctx
                 .retriever_rebuild_failed
                 .load(std::sync::atomic::Ordering::Relaxed)
-            {
-                tracing::warn!(
-                    "检索索引最近一次重建失败，本轮基于旧索引检索（记忆注入可能不完整）"
-                );
-            }
-            let retriever = read_recover(&ctx.retriever, "retrieve_memory.retriever");
-
-            let request = SearchRequest {
-                query: query.to_string(),
-                persona_uid: persona_uid.map(|s| s.to_string()),
-                top_k: ctx.config.retrieval.l1_retrieve_top_k as usize,
-                filter_share: true,
-            };
-
-            match (&query_vec, keyword_channel) {
-                (Some(qv), Some(hits)) => {
-                    retriever.search_with_keyword_hits(&request, Some(qv), Some(hits))
-                }
-                (Some(qv), None) => retriever.search(&request, Some(qv)),
-                (None, Some(hits)) => {
-                    retriever.search_with_keyword_hits(&request, None, Some(hits))
-                }
-                (None, None) => retriever.search(&request, None),
-            }
-        } else {
-            tracing::debug!("RAG 相关记忆闸门关闭（探针消融），跳过多通道检索");
-            Vec::new()
-        };
-
-        // 注：RAG 未命中不提前返回——utt 原文通道（5.5）独立于 RAG，仍需执行
-        if !results.is_empty() {
-            // ---- 5.3 时间衰减：rrf_score × Ebbinghaus decay（含访问加成，v1.7 touch 接线）----
-            let now = now_ms();
-            let decay_config_l1 = DecayConfig::from_core(&ctx.config.decay, "l1");
-            let decay_config_l2 = DecayConfig::from_core(&ctx.config.decay, "l2");
-
-            // 收集命中的 L1 文档 id（供 5.4 touch 接线刷新 last_accessed_at）
-            let mut touched_l1_ids: Vec<Uuid> = Vec::new();
-
-            for r in &mut results {
-                let decay_config = if r.layer == "l2" {
-                    &decay_config_l2
-                } else {
-                    &decay_config_l1
-                };
-
-                // salience: SearchResult 不携带此字段，使用中性值 0.5
-                let salience = 0.5;
-                // calc_retention = calc_decay_r + apply_access_boost：
-                // 近期被访问的 L1（last_accessed_at 已由 touch 刷新）保留率保底，
-                // 使"刚聊过的话题"在衰减排序中更易召回（决策 D-V17-006）。
-                let decay_factor = calc_retention(
-                    r.created_at,
-                    r.last_accessed_at,
-                    now,
-                    salience,
-                    decay_config,
-                );
-                r.rrf_score *= decay_factor;
-
-                if r.layer == "l1"
-                    && let DocId::L1(id) = r.doc_id
-                {
-                    touched_l1_ids.push(id);
-                }
-
-                tracing::trace!(
-                    doc_id = %r.doc_id,
-                    layer = %r.layer,
-                    last_accessed = ?r.last_accessed_at,
-                    decay_factor = format!("{:.4}", decay_factor),
-                    rrf_adjusted = format!("{:.4}", r.rrf_score),
-                    "时间衰减已应用（含访问加成）"
-                );
-            }
-
-            // ---- 5.4 touch 接线：检索命中更新 last_accessed_at（决策 D-V17-006 / 备忘 §二 7）----
-            // 异步更新不阻塞检索管线：失败仅 warn（本次降级为无访问加成），
-            // 成功使近期被检索的 L1 在下次检索中获得保底保留率（recent_boost_floor）。
-            // 注意：此处 await 在 retriever 锁释放之后执行（前面 read guard 已 drop）。
-            if !touched_l1_ids.is_empty() {
-                let ids_for_touch = touched_l1_ids;
-                if let Err(e) = ctx.storage.touch_l1(&ids_for_touch, now).await {
-                    tracing::warn!(
-                        count = ids_for_touch.len(),
-                        error = %e,
-                        "L1 访问时间刷新失败（touch 降级，访问加成本次不生效）"
-                    );
-                } else {
-                    tracing::debug!(
-                        count = ids_for_touch.len(),
-                        "L1 访问时间已刷新（touch 接线，激活 recent_boost_*）"
-                    );
-                }
-            }
-
-            // 重新按衰减后 rrf_score 降序排序
-            results.sort_by(|a, b| {
-                b.rrf_score
-                    .partial_cmp(&a.rrf_score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-
-            // ---- 5.4 Persona-Aware 过滤 + 格式化 ----
-            let persona_kind = persona_uid
-                .map(PersonaKind::from_uid)
-                .unwrap_or(PersonaKind::Rama);
-
-            // 摘要路 RAG 格式化参数从 core [retrieval] 组组装（默认与既有行为等价）
-            let rag_config = RagConfig::from_retrieval_config(&ctx.config.retrieval);
-            let filtered = filter_by_persona(&results, persona_kind, &rag_config);
-
-            if filtered.is_empty() {
-                tracing::debug!("Persona-Aware 过滤后无结果");
-                input.memory_context = None;
-            } else {
-                let context = format_context_text(&filtered, &rag_config);
-
-                // 记录"实际进入上下文文本"的文档标识（RAG 覆盖集合）。
-                // 语义边界: 与 format_context_text 同批——只取过滤后、受
-                // rag_max_memories 截断约束的文档（L1 uuid / L2 事件 id）；
-                // 图谱实体无文档映射，不纳入覆盖集合。
-                input.memory_doc_labels = filtered
-                    .iter()
-                    .take(rag_config.max_memories)
-                    .filter(|r| matches!(&r.doc_id, DocId::L1(_) | DocId::L2(_)))
-                    .map(|r| r.doc_id.to_string())
-                    .collect();
-
-                tracing::debug!(
-                    total_results = results.len(),
-                    filtered = filtered.len(),
-                    context_chars = context.chars().count(),
-                    covered_labels = input.memory_doc_labels.len(),
-                    "记忆上下文已组装（含时间衰减）"
-                );
-
-                input.memory_context = Some(context);
-            }
-        } else {
-            tracing::debug!("无记忆上下文（utt 通道继续）");
-            input.memory_context = None;
+        {
+            tracing::warn!("检索索引最近一次重建失败，本轮基于旧索引检索（记忆注入可能不完整）");
         }
 
-        // ---- 5.5 utt 原文块检索（v1.4，原文通道） ----
-        // 开关与白名单双闸门：`[utt].enabled` / 注入闸门（探针消融 F3 等关闭）/
-        // persona 类型不在白名单 → 不检索（行为回退 v1.3）。
-        // 原文是最高敏感层：仅按 persona_uid 精确隔离检索，不跨 persona 共享。
-        let utt_cfg = &ctx.config.utt;
-        if utt_active {
-            if let Some(puid) = persona_uid {
-                let kind = PersonaKind::from_uid(puid);
-                if utt_cfg.persona_kind_whitelist.contains(&kind) {
-                    let hits = {
-                        let retriever = read_recover(&ctx.retriever, "retrieve_memory.retriever");
-                        retriever.search_utt(
-                            query,
-                            query_vec.as_deref(),
-                            utt_cfg.retrieve_top_k as usize,
-                            Some(puid),
-                        )
-                    };
-                    if !hits.is_empty() {
-                        let rendered = ramaria_memory::prompt::builder::render_utt_context(
-                            &hits,
-                            utt_cfg.max_block_chars as usize,
-                        );
-                        if !rendered.is_empty() {
-                            tracing::debug!(
-                                persona_uid = %puid,
-                                hits = hits.len(),
-                                budget_chars = utt_cfg.max_block_chars,
-                                "utt 原文片段已渲染（不记录内容）"
-                            );
-                            input.utt_context = Some(rendered);
-                        }
-                    } else {
-                        tracing::debug!(persona_uid = %puid, "utt 原文块无命中，跳过注入");
-                    }
-                } else {
-                    tracing::debug!(
-                        persona_uid = %puid,
-                        kind = %kind.as_str(),
-                        "persona 类型不在原文白名单，跳过原文注入（等同 v1.3）"
-                    );
-                }
-            }
-        } else {
-            tracing::debug!(
-                utt_enabled = ctx.config.utt.enabled,
-                injection_utt = ctx.config.injection.utt,
-                "utt 配置/注入闸门关闭，跳过原文检索（等同 v1.3）"
-            );
-        }
+        // 召回装配统一走共用实现（与 MCP 服务层 recall 用例同一份代码，保证召回同源）。
+        let output = assemble_recall(RecallInput {
+            retriever: &*ctx.retriever,
+            keyword_mirror: &*ctx.keyword_service,
+            storage: ctx.storage.as_ref(),
+            embedding: ctx.embedding.as_deref(),
+            query: &input.user_input,
+            persona_uid: input.persona_uid.as_deref(),
+            retrieval: &ctx.config.retrieval,
+            decay: &ctx.config.decay,
+            utt: &ctx.config.utt,
+            gates: RecallGates {
+                memory_rag: ctx.config.injection.memory_rag,
+                // utt 通道：注入闸门与配置开关双闸门合成（与既有行为一致）
+                utt: ctx.config.injection.utt && ctx.config.utt.enabled,
+            },
+            // 在线管线：摘要路两层（L1 + L2）全开（与既有行为一致）
+            memory_layers: RecallMemoryLayers::default(),
+            now_ms: now_ms(),
+        })
+        .await;
 
+        // 结果搬运：无命中 / 闸门关闭 / 白名单外均为 None，与既有 Stage 语义一致。
+        input.memory_context = output.memory_context;
+        input.memory_doc_labels = output.doc_labels;
+        input.utt_context = output.utt_context;
         Ok(input)
     }
 }
@@ -390,7 +124,9 @@ mod tests {
     use super::*;
     use crate::stages::test_utils::{MockEmbedding, MockLlm, MockStorage, test_context};
     use ramaria_core::types::AppState;
+    use ramaria_memory::retriever::SearchRequest;
     use std::sync::Arc;
+    use uuid::Uuid;
 
     fn make_data(query: &str, persona_uid: Option<&str>) -> PipelineData {
         let mut data = PipelineData::new(

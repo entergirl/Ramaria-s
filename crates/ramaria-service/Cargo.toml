@@ -22,3 +22,10 @@ toml.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 sqlx.workspace = true
+# 回流消息指纹（SHA-256 前 8 字节 hex，复用导入去重机制）
+sha2.workspace = true
+
+[dev-dependencies]
+# 服务层用例测试使用真实 SQLite（临时库）+ 最小 LLM mock，不引入网络依赖
+async-trait.workspace = true
+futures.workspace = true

@@ -12,7 +12,7 @@
 use crate::repo::StorageResultExt;
 use crate::repo::parse_uuid_required;
 use ramaria_core::error::{RamariaError, RamariaResult};
-use ramaria_core::types::{Message, MessageRole, MessageSource};
+use ramaria_core::types::{Message, MessageKey, MessageRole, MessageSource};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
@@ -244,6 +244,55 @@ pub async fn find_by_fingerprint(
     .await
     .storage_err("指纹查询失败")?;
     row.map(|r| r.into_message()).transpose()
+}
+
+/// 按来源通道 + 外部对话标识读取消息去重键（外部入口重复提交去重）。
+///
+/// 职责:
+/// - 同一个外部对话可能跨多个会话（空闲封存后另起），本查询经 sessions 关联跨会话取回
+///   该对话的**全部**消息键（角色 + trim 后正文），供回流用例做重发跳过与指纹序数计算。
+/// - 只取两列：长对话（数千条）也能廉价全量取回，避免"读取窗口截断 → 指纹序数失准 → 重复写入"。
+///
+/// 参数:
+/// - `channel`: 来源通道（`sessions.channel`）。
+/// - `external_ref`: 外部对话标识；`None` 表示该通道下无标识的单流会话。
+///
+/// 返回:
+/// - 按 `created_at ASC, id ASC` 排列的消息键列表（无匹配时为空）。
+///
+/// 说明:
+/// - 使用 `sessions.external_ref IS ?`（NULL 安全比较）：绑定 NULL 时等价 `IS NULL`；
+/// - 正文在 SQL 侧 `TRIM`，与写入口径（`save` 前调用方 trim）保持一致。
+pub async fn list_keys_by_channel_ref(
+    pool: &SqlitePool,
+    channel: &str,
+    external_ref: Option<&str>,
+) -> RamariaResult<Vec<MessageKey>> {
+    #[derive(sqlx::FromRow)]
+    struct MessageKeyRow {
+        role: String,
+        content: String,
+    }
+
+    let rows = sqlx::query_as::<_, MessageKeyRow>(
+        "SELECT m.role AS role, TRIM(m.content) AS content \
+         FROM messages m JOIN sessions s ON s.id = m.session_id \
+         WHERE s.channel = ? AND s.external_ref IS ? \
+         ORDER BY m.created_at ASC, m.id ASC",
+    )
+    .bind(channel)
+    .bind(external_ref)
+    .fetch_all(pool)
+    .await
+    .storage_err("按通道查询消息键失败")?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| MessageKey {
+            role: parse_role(&row.role),
+            content: row.content,
+        })
+        .collect())
 }
 
 /// 按发言人加载该 persona 的全部消息（离线分析/重建专用）。
@@ -553,5 +602,118 @@ mod tests {
                 .all(|m| m.persona_uid.as_deref() == Some("char-0001")),
             "分页结果应仅含目标 persona 消息"
         );
+    }
+
+    // =========================================================
+    // 通道 + 外部对话标识去重键查询（外部入口重复提交去重）
+    // =========================================================
+
+    /// 在指定通道/外部标识下建会话并写入 N 条消息
+    /// （created_at 自 base 递增；时间戳编号编入正文便于断言顺序）。
+    async fn insert_channel_messages(
+        pool: &SqlitePool,
+        channel: &str,
+        external_ref: Option<&str>,
+        count: usize,
+        base_ts: i64,
+    ) -> Uuid {
+        sqlx::query(
+            "INSERT INTO personas (uid, name, kind, seq, source, created_at, updated_at) \
+                     VALUES ('char-0001', '测试', 'char', 1, 'local', 0, 0) \
+                     ON CONFLICT(uid) DO NOTHING",
+        )
+        .execute(pool)
+        .await
+        .expect("插入 persona fixture 应成功");
+        let session_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sessions (id, started_at, channel, external_ref) VALUES (?, 0, ?, ?)",
+        )
+        .bind(session_id.to_string())
+        .bind(channel)
+        .bind(external_ref)
+        .execute(pool)
+        .await
+        .expect("插入通道 session fixture 应成功");
+        for i in 0..count {
+            let mut m = make_message(session_id, Some(&format!("fp-ch-{session_id}-{i}")));
+            m.content = format!("内容 {}", base_ts + i as i64);
+            m.created_at = base_ts + i as i64;
+            save_import(pool, &m).await.expect("写入通道消息成功");
+        }
+        session_id
+    }
+
+    /// 按 (channel, external_ref) 取去重键：跨会话、升序、通道/标识严格隔离、
+    /// NULL 安全、正文 SQL 侧 TRIM。
+    #[tokio::test]
+    async fn list_keys_by_channel_ref_scopes_and_orders() {
+        let pool = init_test_pool().await.expect("测试库初始化失败");
+
+        // 同一外部对话两个会话（模拟空闲封存后另起）
+        insert_channel_messages(&pool, "mcp", Some("client-A"), 3, 1_000).await;
+        insert_channel_messages(&pool, "mcp", Some("client-A"), 2, 2_000).await;
+        // 其它通道 / 其它标识 / 无标识会话：不应混入
+        insert_channel_messages(&pool, "mcp", Some("client-B"), 2, 3_000).await;
+        insert_channel_messages(&pool, "local", Some("client-A"), 2, 4_000).await;
+        insert_channel_messages(&pool, "mcp", None, 2, 5_000).await;
+
+        // 全量：跨会话 5 条，按 created_at ASC
+        let all = list_keys_by_channel_ref(&pool, "mcp", Some("client-A"))
+            .await
+            .expect("查询成功");
+        let contents: Vec<&str> = all.iter().map(|k| k.content.as_str()).collect();
+        assert_eq!(
+            contents,
+            vec![
+                "内容 1000",
+                "内容 1001",
+                "内容 1002",
+                "内容 2000",
+                "内容 2001"
+            ],
+            "应跨会话按时间升序返回去重键"
+        );
+        assert!(
+            all.iter().all(|k| k.role == MessageRole::User),
+            "角色应正确解析"
+        );
+
+        // 无标识会话：绑定 None 只命中 NULL 会话
+        let null_ref = list_keys_by_channel_ref(&pool, "mcp", None)
+            .await
+            .expect("查询成功");
+        assert_eq!(null_ref.len(), 2, "None 应命中无标识会话");
+        assert!(
+            null_ref.iter().all(|k| k.content.starts_with("内容 5")),
+            "无标识查询不应混入带标识会话的消息: {null_ref:?}"
+        );
+
+        // 不存在的通道 → 空
+        assert!(
+            list_keys_by_channel_ref(&pool, "telegram", Some("client-A"))
+                .await
+                .expect("查询成功")
+                .is_empty()
+        );
+
+        // 正文 TRIM：写入口径保留空白时，键按 trim 后返回
+        let session_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sessions (id, started_at, channel, external_ref) \
+             VALUES (?, 0, 'mcp', 'client-C')",
+        )
+        .bind(session_id.to_string())
+        .execute(&pool)
+        .await
+        .expect("插入 session fixture 应成功");
+        let mut padded = make_message(session_id, Some("fp-padded"));
+        padded.content = "  前后有空白  ".to_string();
+        save_import(&pool, &padded).await.expect("写入消息成功");
+        let keys = list_keys_by_channel_ref(&pool, "mcp", Some("client-C"))
+            .await
+            .expect("查询成功");
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].content, "前后有空白", "正文应在 SQL 侧 TRIM");
     }
 }

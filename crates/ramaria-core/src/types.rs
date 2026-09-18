@@ -278,6 +278,26 @@ impl Session {
     }
 }
 
+/// 消息去重键（角色 + 正文）。
+///
+/// 职责:
+/// - 外部入口（MCP / 未来社交通道）回流时的**精确去重输入**：按
+///   `(channel, external_ref)` 取回整段对话的键序列，用于
+///   ① 重发前缀跳过（新提交头部与库内尾部比对）、② 指纹序数计算
+///   （同一 `(role, content)` 在对话内的第几次出现）。
+///
+/// 语义约定:
+/// - `content` 为入库时 trim 后的正文（与 `messages.content` 一致）；
+/// - 不含 id / 时间戳：回流客户端不提供时间戳，去重不依赖时间；
+///   需要完整消息行（含元数据）时按会话读取（`list_messages` / 分页查询）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageKey {
+    /// 消息角色（用户 / 助手 / 系统 / 工具）
+    pub role: MessageRole,
+    /// 消息正文（已 trim）
+    pub content: String,
+}
+
 /// L0 原始消息。
 ///
 /// 职责:

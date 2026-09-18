@@ -4456,13 +4456,16 @@ dependencies = [
 name = "ramaria-service"
 version = "2.0.0"
 dependencies = [
+ "async-trait",
  "chrono",
+ "futures",
  "ramaria-core",
  "ramaria-llm",
  "ramaria-memory",
  "ramaria-storage",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "tokio",
  "toml 0.8.2",

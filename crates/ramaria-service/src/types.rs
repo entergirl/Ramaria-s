@@ -175,8 +175,8 @@ impl RecallMode {
 /// - `include`: 分层选择，缺省 [`RecallRequest::DEFAULT_INCLUDE`]。
 /// - `max_items`: 条目上限（1~[`MAX_ITEMS_LIMIT`]），缺省 [`DEFAULT_MAX_ITEMS`]。
 /// - `max_chars`: `context` 文本预算（字符），缺省 [`DEFAULT_MAX_CHARS`]。
-/// - `conversation_id`: 外部对话标识；提供时用于定位库内该对话历史参与检索去重，
-///   不提供则仅按 persona 做记忆召回。
+/// - `conversation_id`: 外部对话标识（数据属性）；**当前仅透传，未参与检索去重**——
+///   "当前对话库内历史不重复返回"的接线点见 `ramaria-service` 的 recall 模块说明。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RecallRequest {
     pub messages: Vec<ChatTurn>,

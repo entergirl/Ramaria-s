@@ -420,6 +420,79 @@ fn fact_doc_labels(fact: &PersonaFact) -> Vec<String> {
 }
 
 // =========================================================
+// 知识层按需检索（对话注入用例编排）
+// =========================================================
+
+/// 从存储加载 persona 的 active 事实并做判定器命中判断（对话注入用例编排）。
+///
+/// 职责:
+/// - 对话轮次知识层"兜底注入"的完整编排：读 active 事实 → 判定器命中判断
+///   → 时效重排召回（零新增 LLM 调用，纯规则）。
+/// - 在线管线与服务层 recall 用例共用同一份实现，避免两处口径漂移。
+///
+/// 参数:
+/// - `storage`: 存储后端。
+/// - `config`: `[knowledge]` 配置（判定器开关、检索 top_k / 阈值、时效半衰期、渲染预算）。
+/// - `persona_uid`: 目标 persona（严格隔离，跨 persona 不可见）。
+/// - `user_message`: 用户当前输入（判定器与召回输入）。
+///
+/// 返回:
+/// - 判定器命中且检索有结果 → 匹配的 active facts（按时效排序）。
+/// - 未命中 / 关闭 / 检索失败 → 空 Vec（不注入，不阻塞对话主流程）。
+pub async fn load_knowledge_facts_for_query(
+    storage: &dyn ramaria_core::traits::StorageBackend,
+    config: &ramaria_core::config::KnowledgeConfig,
+    persona_uid: &str,
+    user_message: &str,
+) -> Vec<PersonaFact> {
+    // 判定器关闭 → 不检索注入
+    if !config.detector_enabled {
+        return Vec::new();
+    }
+
+    // 读取活性事实（失败 → 降级为空，不阻塞）
+    let active = match storage.list_active_facts_by_persona(persona_uid).await {
+        Ok(facts) => facts,
+        Err(e) => {
+            tracing::warn!(
+                persona_uid,
+                error = %e,
+                "知识层检索：读取 active 事实失败，本次不注入"
+            );
+            return Vec::new();
+        }
+    };
+    if active.is_empty() {
+        return Vec::new();
+    }
+
+    // 判定器命中判断（未命中 → 不注入）
+    if judge_knowledge_query(user_message, &active) == MatchLevel::None {
+        return Vec::new();
+    }
+
+    // 命中 → 召回（active 事实按时效排序；top_k / 阈值走 [knowledge] 独立检索参数，
+    // 0 / 0.0 = 不截断 / 不过滤；渲染预算由调用方裁剪）
+    let query = KnowledgeQuery {
+        user_message: user_message.to_string(),
+        facts: active,
+        budget_chars: config.injection_budget_chars,
+    };
+    let options = KnowledgeRetrievalOptions {
+        top_k: config.retrieve_top_k as usize,
+        threshold: config.retrieve_threshold,
+    };
+    let now = ramaria_core::types::now_ms();
+    let retrieval =
+        retrieve_knowledge_with_options(&query, now, config.volatile_halflife_days, options);
+    if retrieval.matched.is_empty() {
+        Vec::new()
+    } else {
+        retrieval.matched
+    }
+}
+
+// =========================================================
 // 单元测试
 // =========================================================
 
