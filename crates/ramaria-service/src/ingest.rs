@@ -227,12 +227,16 @@ pub(crate) async fn run(engine: &Engine, req: IngestRequest) -> RamariaResult<In
 /// 3. 命中但归属他人格 → 不续写（另起，避免串人格）；
 /// 4. 未命中 → 新建带通道标识的会话。
 ///
+/// 用法:
+/// - 回流写入（`ingest`）与生成（`chat`）共用同一会话解析口径，保证两个入口
+///   对"同一外部标识是否续写"的判断一致。
+///
 /// 参数:
 /// - `engine`: 服务层引擎。
 /// - `channel`: 来源通道。
 /// - `external_ref`: 外部对话标识（None = 单流退化）。
 /// - `persona`: 归属人格。
-async fn resolve_session(
+pub(crate) async fn resolve_session(
     engine: &Engine,
     channel: &str,
     external_ref: Option<&str>,
@@ -301,7 +305,7 @@ async fn resolve_session(
 ///
 /// 降级:
 /// - `get_last_message_time` 未覆写（Unsupported）→ 回退全量加载消息取最大值。
-async fn session_idle(engine: &Engine, session_id: Uuid) -> RamariaResult<bool> {
+pub(crate) async fn session_idle(engine: &Engine, session_id: Uuid) -> RamariaResult<bool> {
     let storage = engine.storage_ref().as_ref();
     let threshold_ms = engine.config().session.l1_idle_minutes as i64 * 60_000;
 
@@ -386,7 +390,7 @@ mod tests {
         L1_JSON_REPLY, engine_with_db, engine_with_l1_reply, seed_channel_session, seed_persona,
     };
     use crate::types::ChatRole;
-    use ramaria_core::traits::{StoreCrud, StoreInfrastructure};
+    use ramaria_core::traits::StoreCrud;
 
     #[test]
     fn suffix_match_skips_resent_prefix() {

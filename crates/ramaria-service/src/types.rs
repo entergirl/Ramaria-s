@@ -309,6 +309,40 @@ pub struct IngestOutcome {
 }
 
 // =========================================================
+// 生成用例（chat_send）
+// =========================================================
+
+/// 生成请求（`chat_send` 入参）。
+///
+/// 字段约定:
+/// - `message`: 本轮用户消息（必填，空白视为非法）。
+/// - `persona`: 回复方人格 uid，缺省 [`DEFAULT_PERSONA_UID`]。
+/// - `session_id`: 复用会话；缺省按 `channel` + `conversation_id` 定位（无则新建）。
+/// - `conversation_id`: 外部对话标识；决定同一外部对话续写哪个会话。
+/// - `channel`: 会话来源通道（如 [`CHANNEL_MCP`]）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChatSendRequest {
+    pub message: String,
+    pub persona: Option<String>,
+    pub session_id: Option<Uuid>,
+    pub conversation_id: Option<String>,
+    pub channel: String,
+}
+
+/// 生成结果（`chat_send` 返回）。
+///
+/// 字段约定:
+/// - `reply`: 人格回复全文（未做截断，原样返回）。
+/// - `session_id`: 本轮对话所属会话（复用或新建）。
+/// - `chars`: 回复字符数（诊断与分页参考）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChatSendOutcome {
+    pub reply: String,
+    pub session_id: Uuid,
+    pub chars: usize,
+}
+
+// =========================================================
 // 封存用例（seal / tick_idle）
 // =========================================================
 

@@ -1,18 +1,18 @@
 //! crates/ramaria-app/src/app_chat.rs - 核心对话管线
 //!
 //! 设计特点:
-//! - 生产对话管线只装配 Stage 1-5（`SendMessagePipeline` + 5 个独立 Stage）
-//! - Steps 6-10（System Prompt / Token Budget / ChatRequest / LLM 调用 / 消息持久化）
+//! - 生产对话管线只装配 Stage 1-5（`SendMessagePipeline` + 5 个独立 Stage）；
+//!   Steps 6-10（System Prompt / Token Budget / ChatRequest / LLM 调用 / 消息持久化）
 //!   为本文件内联实现；`stages/{build_prompt,token_budget,build_request,call_llm,
 //!   persist_message}.rs` 为未接线（预留），仅供 `tests/m2_integration.rs` 组装验证
 //! - 注入协调预算（`[injection_budget]`，默认关闭）：开启时 Step 6 走
 //!   `build_system_prompt_coordinated`（RAG 基座 + 四层在统一池内按可配顺序分配），
-//!   关闭时走既有 `build_system_prompt_with_context`（行为逐字段等价 v1.7）
-//! - 自由函数: `stream_forward_task`（流式转发）；persona.toml 冷启动加载复用
-//!   `crate::persona_prompt::load_persona_toml_prompt`
+//!   关闭时走普通装配路径（行为逐字段等价）
+//! - 装配素材加载 / 普通装配 / 示例预选 / 行为路由为薄委托（实现见
+//!   `ramaria_memory::chat` / `ramaria_memory::behavior::orchestrate`，与 service / MCP 入口同源）
+//! - 自由函数: `stream_forward_task`（流式转发）
 //! - 降级策略: 嵌入模型不可用 → 仅 BM25+图谱检索；persona.toml 缺失 → 默认 Ramaria prompt
 //! - 安全约束: 不记录完整 prompt 或用户消息；线上 LLM 调用前强制隐私确认
-//! - 向后兼容：`send_message` 对外接口（参数/返回值）完全不变
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -22,11 +22,9 @@ use futures::channel::mpsc;
 use ramaria_core::error::RamariaResult;
 use ramaria_core::lock::lock_recover;
 use ramaria_core::traits::{ChatMessage, ChatRequest, StorageBackend};
-use ramaria_core::types::{Message, MessageRole, MessageSource, ProfileField, new_id, now_ms};
-use ramaria_memory::prompt::builder::{
-    PromptConfig, PromptContext, assemble_prompt, assemble_prompt_coordinated,
-};
-use ramaria_memory::resolve_chat_style_rules;
+use ramaria_core::types::{Message, MessageRole, MessageSource, new_id, now_ms};
+use ramaria_memory::chat::LoadedPromptMaterial;
+use ramaria_memory::prompt::builder::assemble_prompt_coordinated;
 use ramaria_memory::token_budget::{self, TokenBudgetConfig};
 use uuid::Uuid;
 
@@ -493,50 +491,16 @@ impl App {
     // 内部辅助方法
     // =========================================================
 
-    /// 加载 System Prompt 装配素材（普通 / 协调装配共享）。
-    ///
-    /// 流程:
-    /// 1. 从 storage 加载当前 persona 的数据（persona/facts/traits/examples）。
-    /// 2. 注入近期 L1 摘要（跨 session 上下文）和最后活跃时间。
-    /// 3. 返回结构化上下文（`Structured`）或纯文本降级（`Plain`）。
-    ///    - 无 persona → `Plain`（默认 Ramaria prompt）。
-    ///    - persona 存在但 facts/traits 均为空且 persona.toml 可用 → `Plain`（冷启动）。
-    ///    - 其余 → `Structured(ctx, config)`（由调用方选择普通/协调装配）。
+    /// 加载 System Prompt 装配素材（薄委托：实现与降级口径见
+    /// `ramaria_memory::chat::load_prompt_material`，与 service / MCP 入口同源）。
     ///
     /// 参数:
-    /// - `persona_uid`: 人格标识。
-    /// - `recent_summaries`: 近期 L1 摘要列表（预格式化文本）。
-    /// - `last_active_at`: 最后活跃时间字符串（YYYY-MM-DD HH:MM 格式）。
-    /// - `utt_context`: utt 原文片段（已按预算裁剪渲染；None 表示不注入，等同 v1.3）。
-    /// - `bridge_context`: 桥接内容（上一会话尾部原文，已按预算截断；None 表示不注入）。
-    /// - `behavior_decision`: 行为层路由合并决策（None = 未命中/关闭，
-    ///   不注入行为块，prompt 不含行为层段落）。
-    /// - `examples`: 已选好的 Few-shot 示例（由 `load_examples_for_input` 评分轮换/兜底后传入）。
-    /// - `max_examples`: examples 注入上限（来自生效配置 `examples.max_examples`，
-    ///   v1.5 起由调用方传入以支持配置覆盖的探针场景）。
-    /// - `knowledge_facts`: 知识层判定器命中的 active facts（`# 知识（知识层，按需）`
-    ///   内容源；装配前经 RAG 覆盖/角色层去重，空集不产生段落）。
-    /// - `rag_covered_labels`: RAG 摘要实际注入的文档 label 集合（`L1:{uuid}`/`L2:{id}`）。
-    ///   知识层去重消费：同一事实已由 RAG 摘要文本覆盖则不重复注入（兜底语义不失效）。
-    ///   空集合 = RAG 未注入/闸门关闭 → 知识卡片不去重（回退既有兜底行为）。
-    /// - `knowledge_budget_chars`: 知识块渲染预算（对齐 core `[knowledge].injection_budget_chars`；
-    ///   `None` 使用 memory prompt 层默认预算）。
-    /// - `rag_text`: RAG 摘要实际注入文本（`memory_context`；`None` = RAG 未注入）。
-    ///   层间仲裁开启时作为"保留参照"做内容级判重（RAG 摘要为主）。
-    /// - `layer_dedup`: 层间证据去重与冲突仲裁配置（`[layer_dedup]`；默认关闭 =
-    ///   回退既有引用级去重，prompt 输出与既有版本逐字段等价）。
+    /// - 与 `ramaria_memory::chat::PromptMaterialInputs` 字段一一对应
+    ///   （persona 数据 / 近期摘要 / utt / 桥接 / 行为决策 / 示例 / 知识事实 / 闸门与去重配置）。
     ///
-    /// 降级策略:
-    /// - storage 读取失败 → 记录 warn 日志，使用空数据继续。
-    /// - persona 不存在 → 使用默认 Ramaria 身份 prompt。
-    /// - facts/traits/examples 为空 → 对应 Block 自动省略（由 builder 处理）。
-    /// - recent_summaries 为空 → Block C1 显示"首次对话"提示。
-    /// - behavior_decision=None → 行为块不注入（静默降级，等同 v1.4）。
-    ///
-    /// 安全约束:
-    /// - 不在此处写入 system prompt 到日志（完整 prompt 仅发送到 LLM）。
-    // 参数均为装配 5-Block prompt 所需的独立输入，打包成结构体反而降低可读性；
-    // 由 `send_message_with_config` 统一传入（v1.5 探针配置覆盖场景）。
+    /// 返回:
+    /// - `Plain`: 无 persona / persona.toml 冷启动兜底（纯文本 prompt）。
+    /// - `Structured`: 结构化上下文 + 渲染配置（普通 / 协调装配共用）。
     #[allow(clippy::too_many_arguments)]
     async fn load_prompt_material(
         &self,
@@ -555,233 +519,75 @@ impl App {
         rag_text: Option<&str>,
         layer_dedup: &ramaria_core::config::LayerDedupConfig,
     ) -> LoadedPromptMaterial {
-        let actual_uid = persona_uid.unwrap_or("rama-0001");
+        let inputs = self.prompt_material_inputs(
+            persona_uid,
+            recent_summaries,
+            last_active_at,
+            utt_context,
+            bridge_context,
+            behavior_decision,
+            examples,
+            max_examples,
+            knowledge_facts,
+            rag_covered_labels,
+            knowledge_budget_chars,
+            injection,
+            rag_text,
+            layer_dedup,
+        );
+        ramaria_memory::chat::load_prompt_material(self.storage.as_ref(), &inputs).await
+    }
 
-        // 尝试加载 persona 数据
-        let persona = match self.storage.get_persona_by_uid(actual_uid).await {
-            Ok(Some(p)) => Some(p),
-            Ok(None) => {
-                tracing::debug!(%actual_uid, "persona 不存在，使用默认 prompt");
-                None
-            }
-            Err(e) => {
-                tracing::warn!(%actual_uid, %e, "加载 persona 失败，使用默认 prompt");
-                None
-            }
-        };
-
-        // 有 persona 数据时使用 5-Block 装配器
-        if let Some(ref p) = persona {
-            // 加载关联数据（各独立调用，失败单独降级）
-            let facts = self
-                .storage
-                .list_facts_by_persona(&p.uid, ProfileField::BasicInfo)
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::warn!(persona_uid = %p.uid, %e, "加载 facts 失败，跳过");
-                    Vec::new()
-                });
-
-            let traits = self
-                .storage
-                .list_traits_by_persona(&p.uid)
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::warn!(persona_uid = %p.uid, %e, "加载 traits 失败，跳过");
-                    Vec::new()
-                });
-
-            // 自动风格规则（表达层 A3）：仅 [style].enabled 且注入闸门开启时加载
-            // （探针消融 F3/B0/B1/S_* 关闭表达层时跳过加载）；
-            // 数据不足/无显著项 → None（不注入，prompt 与 v1.6 语义等价）
-            let style_rule_text = if self.config.style.enabled && injection.speaking_style {
-                crate::app_style::load_style_rule(self.storage.as_ref(), &p.uid)
-                    .await
-                    .unwrap_or_else(|e| {
-                        tracing::warn!(persona_uid = %p.uid, %e, "加载自动风格规则失败，跳过");
-                        None
-                    })
-            } else {
-                None
-            };
-
-            // examples 由调用方（send_message）预选后传入：
-            // v1.4 起注入侧按话题/情绪/长度评分轮换，
-            // 并在记忆检索未命中时作风格兜底。
-
-            // 冷启动兜底：facts/traits 均为空时，尝试加载 persona.toml
-            // 优先从 DB persona.config 读取，其次回退到文件系统
-            if facts.is_empty()
-                && traits.is_empty()
-                && let Some(prompt) =
-                    crate::persona_prompt::load_persona_toml_prompt(p.config.as_deref())
-            {
-                tracing::info!("使用 persona.toml 加载的系统 prompt（无结构化画像）");
-                return LoadedPromptMaterial::Plain(prompt);
-            }
-
-            // 知识层注入去重：RAG 摘要为主召回路径、断言知识为兜底。
-            // 装配前剔除两类重复——① 来源文档已进入 RAG 覆盖集合的事实（同一事实已由
-            // 摘要文本提供）；② 与角色层已知事实区同 id 的记录（角色区已展示，取后者去重）。
-            // 无来源引用（手工/冷启动等）或 RAG 未覆盖的事实保留，兜底注入不失效。
-            //
-            // `[layer_dedup]` 开启（默认关闭 = 回退既有引用级去重路径）时，在引用级之上
-            // 追加内容级去重与冲突仲裁（layer_guard）：剔除与角色区/RAG 摘要文本/行为规则
-            // 内容级重复的知识卡片，产出保留方引用（证据可追溯，日志不含原文）。
-            let knowledge_facts = if knowledge_facts.is_empty() {
-                knowledge_facts
-            } else if layer_dedup.enabled {
-                use ramaria_memory::prompt::layer_guard::{
-                    LayerGuardInput, RetentionKind, RetentionReference, arbitrate_fact_layers,
-                };
-                let covered: std::collections::HashSet<String> =
-                    rag_covered_labels.iter().cloned().collect();
-                // 保留参照：RAG 摘要文本（RAG 为主）+ 行为规则 reaction（行为层优先）
-                let mut references: Vec<RetentionReference> = Vec::with_capacity(2);
-                if let Some(rag) = rag_text.map(str::trim).filter(|s| !s.is_empty()) {
-                    references.push(RetentionReference {
-                        kind: RetentionKind::RagSummary,
-                        text: rag,
-                    });
-                }
-                if let Some(reaction) = behavior_decision
-                    .as_ref()
-                    .and_then(|d| d.primary_rule.reaction.as_deref())
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                {
-                    references.push(RetentionReference {
-                        kind: RetentionKind::BehaviorRule,
-                        text: reaction,
-                    });
-                }
-                let outcome = arbitrate_fact_layers(
-                    &LayerGuardInput {
-                        knowledge: &knowledge_facts,
-                        role: &facts,
-                        references: &references,
-                        rag_covered_labels: &covered,
-                    },
-                    true,
-                );
-                if !outcome.traces.is_empty() {
-                    // 只记计数/原因类别/保留方引用，不记原文全文（隐私红线）
-                    tracing::debug!(
-                        persona_uid = %p.uid,
-                        before = knowledge_facts.len(),
-                        after = outcome.knowledge_facts.len(),
-                        reasons = ?outcome
-                            .traces
-                            .iter()
-                            .map(|t| t.reason.as_str())
-                            .collect::<Vec<_>>(),
-                        kept_refs = ?outcome
-                            .traces
-                            .iter()
-                            .map(|t| t.kept_ref.as_str())
-                            .collect::<Vec<_>>(),
-                        "层间证据去重与冲突仲裁已应用"
-                    );
-                }
-                outcome.knowledge_facts
-            } else {
-                let covered: std::collections::HashSet<String> =
-                    rag_covered_labels.iter().cloned().collect();
-                let deduped = ramaria_memory::fact::retriever::dedup_knowledge_facts(
-                    &knowledge_facts,
-                    &covered,
-                    &facts,
-                );
-                if deduped.len() != knowledge_facts.len() {
-                    tracing::debug!(
-                        persona_uid = %p.uid,
-                        before = knowledge_facts.len(),
-                        after = deduped.len(),
-                        "知识层注入去重（RAG 覆盖/角色层重复剔除）"
-                    );
-                }
-                deduped
-            };
-
-            let ctx = PromptContext {
-                persona: Some(p.clone()),
-                facts,
-                traits,
-                examples,
-                // memory_context 由 send_message 在 ChatRequest 中单独注入，不在此处拼入
-                memory_context: None,
-                // 跨 session 上下文: 近期 L1 摘要 + 最后活跃时间
-                recent_session_summaries: recent_summaries.to_vec(),
-                last_active_at: last_active_at.map(|s| s.to_string()),
-                knowledge_boundary: None,
-                current_time_str: Some(crate::now_timestamp_str()),
-                weather: None,
-                // 回复规则：显式 E_rules 优先，缺省用共享规则（与 Stage 路径同一口径）；
-                // 陈述档由 builder 门控回退中性默认。
-                chat_style_rules: Some(resolve_chat_style_rules(p.config.as_deref())),
-                // v1.4: utt 原文片段（检索层已按白名单与预算过滤，None 等同 v1.3）
-                utt_context: utt_context.map(|s| s.to_string()),
-                // 桥接内容（桥接层已按白名单与预算过滤，None 表示未启用）
-                bridge_context: bridge_context.map(|s| s.to_string()),
-                // 行为层路由决策（None = 未命中/关闭）
-                behavior_decision,
-                // 知识层 active 事实（判定器命中后由 send_message 检索传入，装配前已
-                // 按 RAG 覆盖/角色层去重；空 = 关闭/未命中/全部去重 → prompt 不含知识块）
-                knowledge_facts,
-                // 自动风格规则（None = 风格关闭/数据不足 → prompt 与 v1.6 语义等价）
-                style_rule_text,
-            };
-
-            // examples.max_examples 经 RamariaConfig 传播，
-            // 与 `load_examples_for_input` 的预选上限保持一致（双闸门）。
-            // 注入闸门映射（探针消融）：把 InjectionGate 逐子段翻译为 PromptConfig
-            // 渲染开关——行为/知识在数据层已置空（behavior_decision/knowledge_facts），
-            // 此处只需表达层、记忆块与全局体裁（基调）的渲染开关。
-            let config = PromptConfig {
-                max_examples,
-                include_examples: injection.examples,
-                include_speaking_style: injection.speaking_style,
-                include_narrative: injection.narrative,
-                include_memory_rag: injection.memory_rag,
-                include_utt: injection.utt,
-                include_bridge: injection.bridge,
-                // 全局社交对话基调（体裁约束，非记忆层）：默认开，probe 的
-                // statement 档经闸门关闭（陈述/知识表述语域对照）。
-                include_social_tone: injection.social_tone,
-                // 知识块渲染预算接线：core [knowledge].injection_budget_chars
-                // 默认 800 → Some(800)，与 layers 默认预算一致（行为等价）；显式值生效。
-                knowledge_block_max_chars: knowledge_budget_chars,
-                ..Default::default()
-            };
-            tracing::debug!(
-                persona_uid = %p.uid,
-                facts = ctx.facts.len(),
-                traits = ctx.traits.len(),
-                examples = ctx.examples.len(),
-                "四层 System Prompt 素材已加载"
-            );
-            return LoadedPromptMaterial::Structured(Box::new(ctx), config);
+    /// 组装装配素材输入集合（素材加载薄委托的公共构造）。
+    ///
+    /// 说明:
+    /// - 14 个业务参数与 `ramaria_memory::chat::PromptMaterialInputs` 字段逐一对应；
+    /// - `style_enabled` 取主配置 `[style].enabled`（表达层风格子系统总开关，
+    ///   与注入闸门独立：关闭时不加载自动风格规则）。
+    #[allow(clippy::too_many_arguments)]
+    fn prompt_material_inputs<'a>(
+        &self,
+        persona_uid: Option<&'a str>,
+        recent_summaries: &'a [String],
+        last_active_at: Option<&'a str>,
+        utt_context: Option<&'a str>,
+        bridge_context: Option<&'a str>,
+        behavior_decision: Option<ramaria_memory::behavior::MergedDecision>,
+        examples: Vec<ramaria_core::types::PersonaExample>,
+        max_examples: usize,
+        knowledge_facts: Vec<ramaria_core::types::PersonaFact>,
+        rag_covered_labels: &'a [String],
+        knowledge_budget_chars: Option<usize>,
+        injection: &'a ramaria_core::config::InjectionGate,
+        rag_text: Option<&'a str>,
+        layer_dedup: &'a ramaria_core::config::LayerDedupConfig,
+    ) -> ramaria_memory::chat::PromptMaterialInputs<'a> {
+        ramaria_memory::chat::PromptMaterialInputs {
+            persona_uid,
+            recent_summaries,
+            last_active_at,
+            utt_context,
+            bridge_context,
+            behavior_decision,
+            examples,
+            max_examples,
+            knowledge_facts,
+            rag_covered_labels,
+            knowledge_budget_chars,
+            injection,
+            style_enabled: self.config.style.enabled,
+            rag_text,
+            layer_dedup,
         }
-
-        // 降级：默认 Ramaria 基础 prompt
-        tracing::info!("使用默认 Ramaria System Prompt（无 persona 数据）");
-        LoadedPromptMaterial::Plain(format!(
-            "你是 Ramaria，一个具有记忆能力、善解人意的 AI 助手。\n\
-             你可以记住与用户的对话历史，并在后续对话中引用这些记忆。\n\
-             请用自然、友好的语气回复用户。如果用户提到之前聊过的内容，\
-             请结合记忆上下文给出更有针对性的回复。\n\
-             当前时间：{}",
-            crate::now_timestamp_str()
-        ))
     }
 }
 
 impl App {
-    /// 构建 System Prompt（普通装配路径，行为与既有版本一致）。
+    /// 构建 System Prompt（普通装配路径，薄委托）。
     ///
     /// 说明:
-    /// - 消费 `load_prompt_material`：结构化素材走 `assemble_prompt`，
-    ///   纯文本降级（无 persona / 冷启动）原样返回。
+    /// - 调用 `ramaria_memory::chat::build_system_prompt`：结构化素材走 5-Block
+    ///   装配器，纯文本降级（无 persona / 冷启动）原样返回。
     ///
     /// 参数见 `load_prompt_material`。
     #[allow(clippy::too_many_arguments)]
@@ -802,28 +608,23 @@ impl App {
         rag_text: Option<&str>,
         layer_dedup: &ramaria_core::config::LayerDedupConfig,
     ) -> String {
-        match self
-            .load_prompt_material(
-                persona_uid,
-                recent_summaries,
-                last_active_at,
-                utt_context,
-                bridge_context,
-                behavior_decision,
-                examples,
-                max_examples,
-                knowledge_facts,
-                rag_covered_labels,
-                knowledge_budget_chars,
-                injection,
-                rag_text,
-                layer_dedup,
-            )
-            .await
-        {
-            LoadedPromptMaterial::Plain(prompt) => prompt,
-            LoadedPromptMaterial::Structured(ctx, config) => assemble_prompt(&ctx, &config),
-        }
+        let inputs = self.prompt_material_inputs(
+            persona_uid,
+            recent_summaries,
+            last_active_at,
+            utt_context,
+            bridge_context,
+            behavior_decision,
+            examples,
+            max_examples,
+            knowledge_facts,
+            rag_covered_labels,
+            knowledge_budget_chars,
+            injection,
+            rag_text,
+            layer_dedup,
+        );
+        ramaria_memory::chat::build_system_prompt(self.storage.as_ref(), &inputs).await
     }
 
     /// 构建 System Prompt（注入协调预算装配路径，`[injection_budget].enabled=true`）。
@@ -903,38 +704,15 @@ impl App {
 }
 
 // =========================================================
-// Prompt 装配素材（共享加载，供普通/协调装配消费）
+// 示例预选（薄委托）
 // =========================================================
 
-/// 已加载的 System Prompt 装配素材。
-///
-/// 职责:
-/// - 承载普通装配（`build_system_prompt_with_context`）与协调装配
-///   （`build_system_prompt_coordinated`）共享的 persona 数据加载结果。
-enum LoadedPromptMaterial {
-    /// 纯文本 prompt（无 persona / persona.toml 冷启动兜底），无可协调注入块。
-    Plain(String),
-    /// 结构化装配上下文（装箱压缩枚举体积；可经 `render_prompt_parts`
-    /// 拆分为固定骨架 + 注入块）。
-    Structured(Box<PromptContext>, PromptConfig),
-}
-
-/// 预选 Few-shot 示例（v1.4 examples 激活）。
-///
-/// 选择策略:
-/// - `examples.enabled=false` → 回退 v1.3：静态 `selected=1` 查询（`list_selected_examples`）。
-/// - `examples.enabled=true`：
-///   - 记忆检索命中（`memory_hit=true`）→ 不注入（避免与记忆内容重复）；
-///   - 记忆未命中 → 从候选池按话题/情绪/长度评分轮换选择，风格兜底。
-///
-/// 降级:
-/// - 候选池为空 / 存储失败 → 空列表（不注入，等同 v1.3）。
-/// - 评分选择不满足最低条数 → 空列表（example_selector 语义，不强制凑数）。
-///
-/// 安全约束:
-/// - 日志只记录数量，不记录示例内容。
+/// 预选 Few-shot 示例（薄委托：选择策略与降级口径见
+/// `ramaria_memory::chat::load_examples_for_input`，与 service / MCP 入口同源）。
 ///
 /// 参数:
+/// - `storage`: 存储后端。
+/// - `examples_cfg`: 示例配置（`[examples]`）。
 /// - `persona_uid`: 人格 UID（None 表示 rama 自身，回退 "rama-0001"）。
 /// - `user_input`: 用户当前输入（话题匹配关键词来源）。
 /// - `memory_hit`: 记忆检索是否命中（RAG 上下文非空）。
@@ -948,53 +726,14 @@ async fn load_examples_for_input(
     user_input: &str,
     memory_hit: bool,
 ) -> Vec<ramaria_core::types::PersonaExample> {
-    use ramaria_memory::prompt::example_selector::{ExampleSelector, ExampleSelectorConfig};
-
-    let uid = persona_uid.unwrap_or("rama-0001");
-
-    // v1.3 兼容路径：静态 selected 注入（无条件）
-    if !examples_cfg.enabled {
-        return storage
-            .list_selected_examples(uid)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!(persona_uid = %uid, %e, "加载 selected examples 失败，跳过");
-                Vec::new()
-            });
-    }
-
-    // v1.4 路径：记忆命中不重复注入（兜底语义）
-    if memory_hit {
-        tracing::debug!(persona_uid = %uid, "记忆检索命中，跳过 examples 兜底注入");
-        return Vec::new();
-    }
-
-    // 记忆未命中 → 候选池评分轮换（风格兜底）
-    let candidates = storage.list_all_examples(uid).await.unwrap_or_else(|e| {
-        tracing::warn!(persona_uid = %uid, %e, "加载 examples 候选池失败，跳过");
-        Vec::new()
-    });
-    if candidates.is_empty() {
-        tracing::debug!(persona_uid = %uid, "examples 候选池为空，跳过注入");
-        return Vec::new();
-    }
-
-    let keywords = ramaria_memory::prompt::example_selector::extract_keywords(user_input);
-    let keyword_refs: Vec<&str> = keywords.iter().map(|s| s.as_str()).collect();
-    let selector_config = ExampleSelectorConfig {
-        max_examples: examples_cfg.max_examples as usize,
-        ..ExampleSelectorConfig::default()
-    };
-
-    let selected = ExampleSelector::select(&candidates, &keyword_refs, 0.0, &selector_config);
-
-    tracing::debug!(
-        persona_uid = %uid,
-        candidates = candidates.len(),
-        selected = selected.len(),
-        "examples 评分轮换完成（记忆未命中兜底注入）"
-    );
-    selected
+    ramaria_memory::chat::load_examples_for_input(
+        storage,
+        examples_cfg,
+        persona_uid,
+        user_input,
+        memory_hit,
+    )
+    .await
 }
 
 // =========================================================
@@ -1370,12 +1109,13 @@ mod examples_tests {
 
 #[cfg(test)]
 mod prompt_rules_tests {
-    use super::{LoadedPromptMaterial, assemble_prompt};
     use crate::App;
     use crate::stages::test_utils::{MockLlm, MockStorage};
     use ramaria_core::config::{InjectionGate, LayerDedupConfig, RamariaConfig};
     use ramaria_core::traits::{StorageBackend, StoreCrud};
     use ramaria_core::types::{FactSource, Persona, PersonaFact, PersonaKind, ProfileField};
+    use ramaria_memory::chat::LoadedPromptMaterial;
+    use ramaria_memory::prompt::builder::assemble_prompt;
     use std::sync::Arc;
 
     /// 构造含指定 persona.config 的 App；写入角色层事实以跳过冷启动兜底。

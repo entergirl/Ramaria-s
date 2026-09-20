@@ -12,7 +12,7 @@ use ramaria_core::behavior::{BehaviorRule, FeedbackLog};
 use ramaria_core::config::CacheEviction;
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::keyword::KeywordPoolRow;
-use ramaria_core::traits::{StoreCrud, StoreInfrastructure};
+use ramaria_core::traits::{IndexCorpusStamp, StoreCrud, StoreInfrastructure};
 use ramaria_core::types::{
     BackendConfig, ClusterSnapshot, EventBatchWrite, EventRelation, EventSource, MemoryEvent,
     MemoryL1, Message, Persona, PersonaEventAggregate, PersonaExample, PersonaFact,
@@ -519,6 +519,11 @@ impl StoreInfrastructure for SqliteStorage {
     }
     async fn set_index_version(&self, version: i32) -> RamariaResult<()> {
         repo::schema_meta::set_index_version(&self.pool, version).await
+    }
+    async fn index_corpus_stamp(&self) -> RamariaResult<Option<IndexCorpusStamp>> {
+        Ok(Some(
+            repo::schema_meta::index_corpus_stamp(&self.pool).await?,
+        ))
     }
 
     // =========================================================
@@ -1484,6 +1489,34 @@ mod tests {
             storage.get_bm25_index_version().await.unwrap(),
             BM25_INDEX_VERSION_LEGACY
         );
+    }
+
+    /// 索引语料戳：空库为零值，写入 L1 后条数与时间戳同步变化。
+    #[tokio::test]
+    async fn index_corpus_stamp_tracks_writes() {
+        let storage = setup().await;
+
+        // 空库：全部为 0（默认值语义，无 NULL 泄漏）
+        let empty = storage
+            .index_corpus_stamp()
+            .await
+            .unwrap()
+            .expect("SQLite 后端应提供语料统计");
+        assert_eq!(empty, IndexCorpusStamp::default());
+
+        // 写入 L1 后：条数增加、最新写入时间非 0（跨进程刷新检测的触发源）
+        let session = storage.create_session(None).await.unwrap();
+        let l1 = MemoryL1::new(session.id, "用户提到最近在准备考试".to_string(), None);
+        storage.save_memory_l1(&l1).await.unwrap();
+
+        let stamp = storage.index_corpus_stamp().await.unwrap().unwrap();
+        assert_eq!(stamp.l1_count, 1);
+        assert!(stamp.l1_max_created_at > 0, "有写入时最新时间戳应非 0");
+        assert_ne!(stamp, empty, "语料变化必须体现在统计戳上");
+        // 其余语料未写入：保持 0
+        assert_eq!(stamp.event_count, 0);
+        assert_eq!(stamp.utt_count, 0);
+        assert_eq!(stamp.persona_count, 0);
     }
 
     /// 规范词读取：仅返回 canonical（canonical_id IS NULL），排除 pending 别名。

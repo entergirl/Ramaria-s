@@ -45,6 +45,36 @@ pub trait RetrieverSource {
     /// 参数:
     /// - `f`: 回调；参数为 `Some(&Retriever)`（已加载）或 `None`（未加载）。
     fn with_retriever<R>(&self, f: impl FnOnce(Option<&Retriever>) -> R) -> R;
+
+    /// 在检索器读锁内执行脉络加权检索（未加载 → 空结果）。
+    ///
+    /// 用途:
+    /// - 跨 session 脉络注入的加权素材来源：以当前用户消息为话题依据，按
+    ///   "时间（衰减 × 访问加成）× 话题相关性"融合排序；调用方按空结果
+    ///   回退"最近 N 条"路径。
+    ///
+    /// 参数:
+    /// - `query`: 当前用户消息（话题相关性依据）。
+    /// - `persona_uid`: 目标人格 uid（仅返回该 persona 的 L1 摘要）。
+    /// - `top_k`: 最多返回条数。
+    /// - `now_ms`: 当前时间（Unix 毫秒，衰减基准）。
+    /// - `decay_config`: 记忆层衰减配置（含访问加成参数）。
+    ///
+    /// 返回:
+    /// - 按融合分降序的 L1 `SearchResult` 列表（最多 `top_k` 条）。
+    ///
+    /// 默认实现:
+    /// - 返回空列表（未覆盖实现的降级，调用方按空结果处理）。
+    fn search_narrative(
+        &self,
+        _query: &str,
+        _persona_uid: &str,
+        _top_k: usize,
+        _now_ms: i64,
+        _decay_config: &DecayConfig,
+    ) -> Vec<SearchResult> {
+        Vec::new()
+    }
 }
 
 impl RetrieverSource for RwLock<Retriever> {
@@ -52,12 +82,38 @@ impl RetrieverSource for RwLock<Retriever> {
         let guard = read_recover(self, "recall.retriever");
         f(Some(&guard))
     }
+
+    fn search_narrative(
+        &self,
+        query: &str,
+        persona_uid: &str,
+        top_k: usize,
+        now_ms: i64,
+        decay_config: &DecayConfig,
+    ) -> Vec<SearchResult> {
+        let guard = read_recover(self, "recall.retriever");
+        guard.search_narrative(query, persona_uid, top_k, now_ms, decay_config)
+    }
 }
 
 impl RetrieverSource for RwLock<Option<Retriever>> {
     fn with_retriever<R>(&self, f: impl FnOnce(Option<&Retriever>) -> R) -> R {
         let guard = read_recover(self, "recall.retriever_slot");
         f(guard.as_ref())
+    }
+
+    fn search_narrative(
+        &self,
+        query: &str,
+        persona_uid: &str,
+        top_k: usize,
+        now_ms: i64,
+        decay_config: &DecayConfig,
+    ) -> Vec<SearchResult> {
+        let guard = read_recover(self, "recall.retriever_slot");
+        guard.as_ref().map_or_else(Vec::new, |r| {
+            r.search_narrative(query, persona_uid, top_k, now_ms, decay_config)
+        })
     }
 }
 

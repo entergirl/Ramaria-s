@@ -1,0 +1,30 @@
+[package]
+name = "ramaria-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Ramaria MCP 服务端（stdio 协议壳，业务经 ramaria-service）"
+
+[dependencies]
+# 官方 MCP Rust SDK（锁定版本：协议壳集中封装，升级只动本 crate）
+rmcp = { version = "=3.4.0", default-features = false, features = [
+    "server",
+    "macros",
+    "transport-io",
+] }
+# JSON Schema 派生（工具入参 schema；与 rmcp 内部同一 schemars 大版本）
+schemars = { version = "1", features = ["chrono04"] }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+
+ramaria-core = { path = "../ramaria-core" }
+ramaria-service = { path = "../ramaria-service" }
+
+[lints]
+workspace = true

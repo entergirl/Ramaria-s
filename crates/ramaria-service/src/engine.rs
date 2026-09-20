@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use ramaria_core::config::{EmbeddingDevice, RamariaConfig};
 use ramaria_core::error::{RamariaError, RamariaResult};
@@ -19,16 +19,19 @@ use ramaria_core::lock::{read_recover, write_recover};
 use ramaria_core::traits::{EmbeddingProvider, LlmProvider, LlmResponseCache, StorageBackend};
 use ramaria_core::types::{BackendConfig, LlmProvider as LlmProviderKind};
 use ramaria_llm::keychain::Keychain;
+use ramaria_memory::behavior::PendingPool;
 use ramaria_memory::keyword::KeywordService;
 use ramaria_memory::retriever::Retriever;
 use ramaria_storage::SqliteStorage;
 use uuid::Uuid;
 
+use crate::index::IndexStamp;
 use crate::recall::RecallPolicy;
 use crate::seal::SealHooks;
 use crate::types::{
-    HistoryRequest, HistoryResult, IngestOutcome, IngestRequest, PersonaCardRequest,
-    PersonaCardView, PersonaSummaryView, RecallRequest, RecallResult, SealOutcome,
+    ChatSendOutcome, ChatSendRequest, HistoryRequest, HistoryResult, IngestOutcome, IngestRequest,
+    PersonaCardRequest, PersonaCardView, PersonaSummaryView, RecallRequest, RecallResult,
+    SealOutcome,
 };
 
 // =========================================================
@@ -97,6 +100,10 @@ pub struct Engine {
     /// 索引脏标记：L1 增量镜像时检索器尚未加载 → 置脏，
     /// 保证下次加载（`ensure_index_loaded`）会重建，不在进程生命周期内漏掉该 L1。
     index_dirty: Arc<AtomicBool>,
+    /// 索引代次快照（构建时记录；召回前与库内比对 → 其他进程写入后刷新内存索引）。
+    index_stamp: Arc<RwLock<Option<IndexStamp>>>,
+    /// 行为层待定池（跨会话内存态：行为增量编排的归簇状态，与 app 侧同一机制）。
+    behavior_pending: Arc<Mutex<PendingPool>>,
     /// 召回隐私与边界策略（默认保守；入口层按 `[mcp]` 配置注入）。
     recall_policy: Arc<RwLock<RecallPolicy>>,
     /// 封存钩子（行为 / 风格 / L2 触发；未注册则跳过，见 [`SealHooks`]）。
@@ -175,6 +182,8 @@ impl Engine {
             storage,
             llm,
             embedding,
+            // 行为层待定池按生效配置初始化（与 app 侧同一机制）
+            behavior_pending: Arc::new(Mutex::new(PendingPool::new(&config.behavior))),
             config,
             db_path,
             // ---- 6. 检索器占位：首次召回时构建（懒加载）----
@@ -182,6 +191,7 @@ impl Engine {
             // ---- 7. 关键词镜像与策略 / 钩子：空镜像 + 默认保守策略 ----
             keyword_mirror: Arc::new(RwLock::new(KeywordService::new())),
             index_dirty: Arc::new(AtomicBool::new(false)),
+            index_stamp: Arc::new(RwLock::new(None)),
             recall_policy: Arc::new(RwLock::new(RecallPolicy::default())),
             seal_hooks: Arc::new(RwLock::new(SealHooks::default())),
         })
@@ -205,11 +215,13 @@ impl Engine {
             storage,
             llm,
             embedding,
+            behavior_pending: Arc::new(Mutex::new(PendingPool::new(&config.behavior))),
             config,
             db_path: PathBuf::new(),
             retriever: Arc::new(RwLock::new(None)),
             keyword_mirror: Arc::new(RwLock::new(KeywordService::new())),
             index_dirty: Arc::new(AtomicBool::new(false)),
+            index_stamp: Arc::new(RwLock::new(None)),
             recall_policy: Arc::new(RwLock::new(RecallPolicy::default())),
             seal_hooks: Arc::new(RwLock::new(SealHooks::default())),
         }
@@ -320,6 +332,18 @@ impl Engine {
         crate::recall::run(self, req).await
     }
 
+    /// 生成用例：以指定人格回复一条消息（记忆检索 + 五段式装配 + LLM）。
+    ///
+    /// 职责:
+    /// - 与在线管线同源：记忆上下文走共用召回、系统 Prompt 走共用装配（含脉络 / 行为 /
+    ///   知识 / 示例素材），生成后把用户消息与助手回复一并落库。
+    ///
+    /// 返回:
+    /// - 成功时返回 `reply` / `session_id` / `chars`。
+    pub async fn chat_send(&self, req: ChatSendRequest) -> RamariaResult<ChatSendOutcome> {
+        crate::chat::run(self, req).await
+    }
+
     /// 写入用例：把外部对话回流入库（进 L0），使内容在桌面可见并参与后续记忆加工。
     ///
     /// 职责:
@@ -408,6 +432,11 @@ impl Engine {
         &self.keyword_mirror
     }
 
+    /// 行为层待定池（crate 内编排与测试使用）。
+    pub(crate) fn behavior_pending_ref(&self) -> &Arc<Mutex<PendingPool>> {
+        &self.behavior_pending
+    }
+
     // =========================================================
     // 索引脏标记（懒加载与增量镜像的协同）
     // =========================================================
@@ -425,6 +454,21 @@ impl Engine {
     /// 清除索引脏标记（重建开始前调用：构建期间新产生的增量会重新置脏）。
     pub(crate) fn clear_index_dirty(&self) {
         self.index_dirty.store(false, Ordering::Release);
+    }
+
+    /// 记录索引代次快照（索引构建完成后调用）。
+    ///
+    /// 说明:
+    /// - 记录的是**构建前**读取的库内快照：构建窗口内其他进程新写入的内容
+    ///   会使下次比对不等 → 再刷新一次（收敛，不漏新记忆）。
+    pub(crate) fn record_index_stamp(&self, stamp: IndexStamp) {
+        let mut guard = write_recover(&self.index_stamp, "engine.index_stamp");
+        *guard = Some(stamp);
+    }
+
+    /// 当前已记录的索引代次快照（索引未构建过时为 None）。
+    pub(crate) fn index_stamp(&self) -> Option<IndexStamp> {
+        *read_recover(&self.index_stamp, "engine.index_stamp")
     }
 }
 

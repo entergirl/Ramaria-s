@@ -187,6 +187,17 @@ enum Commands {
     /// 探针实验（build: 构建测试集 / run: 档位批量实验）[高级]
     #[command(display_order = 51, subcommand)]
     Probe(ProbeArgs),
+
+    /// MCP 服务端（serve: 以 stdio 提供记忆与人格工具）[高级]
+    #[command(display_order = 52, subcommand)]
+    Mcp(McpCmd),
+}
+
+/// MCP 服务端子命令（供外部 MCP 客户端挂载）。
+#[derive(Subcommand)]
+enum McpCmd {
+    /// 以 stdio 启动 MCP 服务端（配置片段见桌面「设置 → MCP 接入」面板）
+    Serve,
 }
 
 /// 行为规则管理子命令（§2.9 词表：list/show/import/edit/enable/disable/delete/evidence）。
@@ -652,6 +663,18 @@ async fn main() {
         }
     }
 
+    // MCP 服务端：走与传输无关的服务层（不构造 App，避免重复连接池与宿主侧副作用）。
+    // stdio 协议期间 stdout 只允许协议消息，故本分支不输出任何数据。
+    if let Commands::Mcp(sub) = &cli.command {
+        let result = match sub {
+            McpCmd::Serve => commands::mcp::serve(cli.db.clone()).await,
+        };
+        if let Err(e) = result {
+            exit_with_error(&e, json_mode);
+        }
+        return;
+    }
+
     // 初始化 App（后端不可用视为 exit code 3）
     let (app, pool) = match init_app(cli.db.clone()).await {
         Ok((a, p)) => (a, p),
@@ -690,6 +713,7 @@ fn help_groups() -> Vec<(&'static str, &'static str)> {
         ("diagnostics", "管理"),
         ("status", "高级"),
         ("probe", "高级"),
+        ("mcp", "高级"),
     ]
 }
 
@@ -1284,6 +1308,12 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
             };
             commands::probe::run(app, cmd, cli.yes).await?;
         }
+        // mcp 在 App 初始化前分流（见 main：不构造 App，直接走服务层）；此处仅保证穷尽
+        Commands::Mcp(_) => {
+            return Err(anyhow::anyhow!(RamariaError::unsupported(
+                "mcp 命令应在 App 初始化前分流（内部错误）"
+            )));
+        }
     }
 
     Ok(())
@@ -1470,6 +1500,20 @@ mod tests {
             }
             _ => panic!("应解析为 Probe::Run，实际解析为其他命令"),
         }
+    }
+
+    /// `ramaria mcp serve` 可解析（MCP 服务端入口；--db 沿用全局参数）。
+    #[test]
+    fn mcp_serve_parses() {
+        let cli = Cli::try_parse_from(&["ramaria", "mcp", "serve"]).expect("mcp serve 应可解析");
+        assert!(
+            matches!(cli.command, Commands::Mcp(McpCmd::Serve)),
+            "应解析为 Mcp::Serve"
+        );
+        // --db 全局参数生效（MCP 宿主按此路径装配服务层引擎）
+        let cli = Cli::try_parse_from(&["ramaria", "--db", "d/x.db", "mcp", "serve"])
+            .expect("带 --db 的 mcp serve 应可解析");
+        assert_eq!(cli.db, PathBuf::from("d/x.db"));
     }
 
     /// `ramaria style update` 可解析（无 --persona → 命令层回退默认 rama-0001）。

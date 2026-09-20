@@ -1,39 +1,19 @@
 //! crates/ramaria-app/src/app_style.rs - 表达层风格统计编排用例（A3）
 //!
 //! 设计特点:
-//! - 封存钩子实现：读 persona 全部消息 → 五维统计 → 基线池更新 → 显著性检验
-//!   → 规则生成（模板/LLM）→ persona_style_stats 落库 + SpeakingStyle 事实落库
-//! - 注入读取：`load_style_rule` 从 persona_style_stats 读取规则文本（仅 Ready 状态）
-//! - 关键词衔接：从 keyword_pool 读 canonical 词表快照注入风格统计（词典增强），
-//!   读取失败/空词表静默回退纯 bigram（无词表即等价于纯 bigram，不依赖 KeywordService 服务态）
-//! - 小样本原文样例兜底：样本不足不生成自动规则时，
-//!   由既有消息选短样例写入 SpeakingStyle 样例事实（画像展示用），
-//!   注入仍走 persona_style_stats（Insufficient 不注入，prompt 等价）
-//! - 全局基线池持久化于 settings 表（键 `style_baseline_pool_v1`，JSON，不含原文）
-//! - 静默降级：任一环节失败记 warn 不阻塞封存；数据不足/无显著项不生成规则
-//! - 隐私红线：stats_json 与基线池只含统计参数，不含原文消息文本；样例事实仅在
-//!   persona_uid 隔离的画像库内保存（不含 QQ 号，日志不落样例原文）
+//! - 封存钩子编排：`style_incremental_update_core` 薄委托到 `ramaria_memory::style::orchestrate`
+//!   （读消息 → 统计 → 基线池 → 规则生成的实现由 memory 层提供）
+//! - 注入读取：`load_style_rule` 薄委托到 memory（从 persona_style_stats 读取规则文本，仅 Ready 状态）
 //! - 回归红线：`[style].enabled=false` 时本模块不执行（由调用方判断）
+//! - 隐私红线：注入只读取规则文本；统计产物（stats_json / 基线池）不含原文文本
 
 use ramaria_core::config::StyleConfig;
 use ramaria_core::error::RamariaResult;
 use ramaria_core::traits::{LlmProvider, StorageBackend};
-use ramaria_core::types::{
-    FactSource, PersonaFact, PersonaStyleStats, ProfileField, StyleRuleSource, StyleStatsStatus,
-};
-use ramaria_memory::style::{BaselinePool, StyleStats, analyze_significance, generate_style_rule};
-
-/// 全局基线池在 settings 表的存储键。
-const BASELINE_POOL_KEY: &str = "style_baseline_pool_v1";
-
-/// 风格规则 LLM 翻译增强温度（评估约定 0.3）。
-const STYLE_RULE_TEMPERATURE: f64 = 0.3;
-
-/// 小样本样例兜底的最大样例条数。
-const STYLE_SAMPLE_MAX_ITEMS: usize = 3;
-
-/// 小样本样例兜底的单条最大字符数（避免原文过长入库）。
-const STYLE_SAMPLE_MAX_CHARS: usize = 48;
+#[cfg(test)]
+use ramaria_core::types::{FactSource, PersonaFact, ProfileField, StyleStatsStatus};
+#[cfg(test)]
+use ramaria_memory::style::{BaselinePool, StyleStats};
 
 /// 执行 persona 风格统计增量更新（封存钩子，与行为层同钩子位置）。
 ///
@@ -66,224 +46,23 @@ pub async fn style_incremental_update_core(
     config: &StyleConfig,
     persona_uid: &str,
 ) -> RamariaResult<()> {
-    // 1. 读取 persona 全部消息
-    // 风格统计需对该 persona 全部消息一次性计算五维分布，属离线分析路径，
-    // 故此处有意全量加载（浏览/展示请走 list_messages_by_persona_paginated）。
-    let messages = storage.list_messages_by_persona(persona_uid).await?;
-
-    // 2. canonical 词表（关键词衔接：风格候选与关键词体系对齐；
-    //    `[style].keyword_dict=false` 或读取失败/无词表 → 回退纯 bigram，不阻塞统计）
-    let canonical_words = if config.keyword_dict {
-        load_canonical_keywords(storage).await
-    } else {
-        Vec::new()
-    };
-
-    // 3. 计算五维统计（canonical 词典增强）
-    let stats = StyleStats::compute_with_keywords(&messages, config, &canonical_words);
-
-    // 4. 加载基线池并按 persona 更新
-    let mut pool = load_baseline_pool(storage).await?;
-    pool.update_persona(persona_uid, &stats);
-
-    // 5. 显著性分析 + 规则生成
-    let (rule_text, rule_source, status) = match analyze_significance(&stats, &pool, config) {
-        None => {
-            // 数据不足：不生成规则；样例兜底写入画像事实（不注入，prompt 保持既有语义）
-            if config.sample_fallback && !messages.is_empty() {
-                let samples = stats.pick_style_samples(
-                    &messages,
-                    STYLE_SAMPLE_MAX_ITEMS,
-                    STYLE_SAMPLE_MAX_CHARS,
-                );
-                if !samples.is_empty() {
-                    let content = render_style_sample_content(&samples);
-                    upsert_speaking_style_fact_if_changed(storage, persona_uid, &content).await?;
-                }
-            }
-            (None, StyleRuleSource::None, StyleStatsStatus::Insufficient)
-        }
-        Some(sig) => {
-            let rule = generate_style_rule(
-                &stats,
-                &sig,
-                llm,
-                config.auto_translate,
-                STYLE_RULE_TEMPERATURE,
-            )
-            .await?;
-            if rule.trim().is_empty() {
-                (None, StyleRuleSource::None, StyleStatsStatus::NoSignificant)
-            } else {
-                // 5a. SpeakingStyle 事实落库（版本链：旧 superseded + 新 active）
-                let source = if config.auto_translate && llm.is_some() {
-                    StyleRuleSource::Llm
-                } else {
-                    StyleRuleSource::Template
-                };
-                upsert_speaking_style_fact(storage, persona_uid, &rule).await?;
-                (Some(rule), source, StyleStatsStatus::Ready)
-            }
-        }
-    };
-
-    // 6a. persona_style_stats 落库（单行 upsert）
-    let baseline_version = pool.n_personas() as u32;
-    let stats_json = serde_json::to_string(&stats).map_err(|e| {
-        tracing::warn!(error = %e, "序列化风格统计失败");
-        ramaria_core::error::RamariaError::serialization("序列化风格统计失败")
-    })?;
-    let record = PersonaStyleStats::new(
-        persona_uid.to_string(),
-        stats.sample_count,
-        stats_json,
-        baseline_version,
-        rule_text,
-        rule_source,
-        status,
-    );
-    storage.upsert_style_stats(&record).await?;
-
-    // 6b. 持久化基线池（含原文-free 的频率摘要）
-    save_baseline_pool(storage, &pool).await?;
-
-    tracing::info!(
-        persona_uid,
-        sample_count = stats.sample_count,
-        status = %status,
-        "风格统计增量更新完成"
-    );
-    Ok(())
+    ramaria_memory::style::orchestrate::incremental_update(storage, llm, config, persona_uid).await
 }
 
-/// 从 persona_style_stats 读取自动风格规则文本（注入侧）。
+/// 从 persona_style_stats 读取自动风格规则文本（注入侧，薄委托）。
 ///
 /// 返回:
 /// - `Ok(Some(rule))`: 状态为 Ready 且有规则文本（可注入）。
-/// - `Ok(None)`: 数据不足 / 无显著项 / 风格未统计（静默跳过，prompt 与 v1.6 等价）。
+/// - `Ok(None)`: 数据不足 / 无显著项 / 风格未统计（静默跳过，prompt 不含自动风格规则）。
 /// - `Err`: 读取失败（调用方降级为 None，不阻塞对话）。
+///
+/// 说明:
+/// - 实现见 `ramaria_memory::style::orchestrate::load_style_rule`（与 service / MCP 入口同源）。
 pub async fn load_style_rule(
     storage: &dyn StorageBackend,
     persona_uid: &str,
 ) -> RamariaResult<Option<String>> {
-    match storage.get_style_stats(persona_uid).await? {
-        Some(stats) if stats.status == StyleStatsStatus::Ready => {
-            Ok(stats.rule_text.filter(|t| !t.trim().is_empty()))
-        }
-        _ => Ok(None),
-    }
-}
-
-/// 读取 keyword_pool canonical 词表（关键词体系衔接）。
-///
-/// 说明:
-/// - canonical 语义 = keyword_pool 中 `alias_status` 为 NULL/"canonical" 的词条
-///   （alias/pending 归一后的规范词，与 keyword/service.rs 三态一致）。
-/// - 读取失败 / 无词条 → warn 并以空表返回（调用方回退纯 bigram，
-///   不阻塞封存）。词表仅作风格候选的词典增强输入，不建立 keyword→style 反向依赖。
-async fn load_canonical_keywords(storage: &dyn StorageBackend) -> Vec<String> {
-    let rows = match storage.list_keyword_pool_entries().await {
-        Ok(rows) => rows,
-        Err(e) => {
-            tracing::warn!(error = %e, "读取 canonical 词表失败，风格统计回退纯 bigram");
-            return Vec::new();
-        }
-    };
-    rows.into_iter()
-        .filter(|row| matches!(row.alias_status.as_deref(), None | Some("canonical")))
-        .map(|row| row.keyword)
-        .collect()
-}
-
-/// 落库 SpeakingStyle 事实（版本链：旧 active → superseded，新事实 → active）。
-///
-/// 说明:
-/// - 与知识层事实同一版本链机制（`save_fact_with_version`），
-///   知识层只读引用（检索注入已排除 SpeakingStyle，见 fact/retriever.rs）。
-/// - 无旧事实时直接新增。
-async fn upsert_speaking_style_fact(
-    storage: &dyn StorageBackend,
-    persona_uid: &str,
-    content: &str,
-) -> RamariaResult<()> {
-    let old = storage
-        .list_active_facts_by_field(persona_uid, ProfileField::SpeakingStyle)
-        .await?
-        .into_iter()
-        .next();
-    let new_fact = PersonaFact::new(
-        persona_uid.to_string(),
-        ProfileField::SpeakingStyle,
-        content.to_string(),
-        FactSource::Event,
-    );
-    match old {
-        Some(old_fact) => {
-            storage.save_fact_with_version(&old_fact, &new_fact).await?;
-        }
-        None => {
-            storage.save_fact(&new_fact).await?;
-        }
-    }
-    Ok(())
-}
-
-/// 幂等落库 SpeakingStyle 事实：active 事实内容相同则不写（避免重复版本链）。
-///
-/// 用法:
-/// - 小样本样例兜底每次封存都生成同一批样例，内容不变时跳过版本化写入。
-async fn upsert_speaking_style_fact_if_changed(
-    storage: &dyn StorageBackend,
-    persona_uid: &str,
-    content: &str,
-) -> RamariaResult<()> {
-    let current = storage
-        .list_active_facts_by_field(persona_uid, ProfileField::SpeakingStyle)
-        .await?
-        .into_iter()
-        .next();
-    if let Some(fact) = current
-        && fact.content == content
-    {
-        return Ok(());
-    }
-    upsert_speaking_style_fact(storage, persona_uid, content).await
-}
-
-/// 渲染样例兜底文本（画像数据，含标注；非自动规则）。
-///
-/// 说明:
-/// - 供小样本阶段 SpeakingStyle 画像保存可读的风格参考；自动规则生成后会被版本链覆盖。
-/// - 标注保持中性（"历史发言为例"），避免达阈值但无显著项时"样本不足"字样过时。
-fn render_style_sample_content(samples: &[String]) -> String {
-    let quoted: Vec<String> = samples.iter().map(|s| format!("「{s}」")).collect();
-    format!(
-        "（以历史发言为例，自动统计规则暂未生成）{}",
-        quoted.join("")
-    )
-}
-
-/// 从 settings 表加载全局基线池（不存在 → 空池，冷启动）。
-async fn load_baseline_pool(storage: &dyn StorageBackend) -> RamariaResult<BaselinePool> {
-    match storage.get_setting(BASELINE_POOL_KEY).await? {
-        Some(json) => serde_json::from_str(&json).map_err(|e| {
-            tracing::warn!(error = %e, "反序列化风格基线池失败，使用空池重建");
-            ramaria_core::error::RamariaError::serialization("反序列化风格基线池失败")
-        }),
-        None => Ok(BaselinePool::new()),
-    }
-}
-
-/// 保存全局基线池到 settings 表。
-async fn save_baseline_pool(
-    storage: &dyn StorageBackend,
-    pool: &BaselinePool,
-) -> RamariaResult<()> {
-    let json = serde_json::to_string(pool).map_err(|e| {
-        tracing::warn!(error = %e, "序列化风格基线池失败");
-        ramaria_core::error::RamariaError::serialization("序列化风格基线池失败")
-    })?;
-    storage.set_setting(BASELINE_POOL_KEY, &json).await
+    ramaria_memory::style::orchestrate::load_style_rule(storage, persona_uid).await
 }
 
 // =========================================================

@@ -664,7 +664,7 @@ impl App {
     // 对外 API 不变，通过 `impl App` 块关联。
     //
     // 同时提取的自由函数：
-    // - `persona_prompt::{load_persona_toml_prompt, read_persona_toml_from_fs}` → `persona_prompt.rs`
+    // - `persona_prompt::load_persona_toml_prompt` → `persona_prompt.rs`（薄委托到 memory）
     // - `stream_forward_task` → `app_chat.rs`
 }
 

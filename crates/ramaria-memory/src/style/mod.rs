@@ -8,6 +8,7 @@
 //! - 安全约束：统计参数与基线池不含原文消息文本（隐私红线）
 
 pub mod baseline;
+pub mod orchestrate;
 pub mod rule_gen;
 pub mod stat;
 

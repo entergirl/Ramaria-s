@@ -1083,6 +1083,35 @@ pub const BM25_INDEX_VERSION_LEGACY: i32 = 1;
 /// BM25 分词当前版本：词典增强（keyword_pool 规范词注入）。
 pub const BM25_INDEX_VERSION_CURRENT: i32 = 2;
 
+/// 记忆语料统计戳（跨进程索引刷新检测）。
+///
+/// 职责:
+/// - 以"条数 + 最新写入时间"刻画参与内存检索索引的四类语料（L1 摘要 / L2 事件 /
+///   utt 块 / 人格），供长驻进程（如 MCP 服务端）在召回前做低价探测：
+///   其他进程写入过新内容时，内存索引需要刷新。
+///
+/// 字段约定:
+/// - `*_count`: 对应表总条数（新增与删除都会引起变化）。
+/// - `*_max_created_at`: 对应表 `created_at` 最大值（毫秒时间戳，空表为 0）。
+///
+/// 安全约束:
+/// - 只含计数与时间戳，不含任何原文或隐私内容。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct IndexCorpusStamp {
+    /// 记忆 L1 摘要条数。
+    pub l1_count: i64,
+    /// 记忆 L1 摘要最新写入时间（毫秒时间戳，空表为 0）。
+    pub l1_max_created_at: i64,
+    /// L2 事件条数。
+    pub event_count: i64,
+    /// L2 事件最新写入时间（毫秒时间戳，空表为 0）。
+    pub event_max_created_at: i64,
+    /// utt 话语块条数。
+    pub utt_count: i64,
+    /// 人格条数。
+    pub persona_count: i64,
+}
+
 /// 存储后端抽象 trait（基础设施/系统分组）。
 ///
 /// 职责:
@@ -1122,6 +1151,22 @@ pub trait StoreInfrastructure: Send + Sync {
     async fn get_schema_version(&self) -> RamariaResult<i32>;
     async fn get_index_version(&self) -> RamariaResult<i32>;
     async fn set_index_version(&self, version: i32) -> RamariaResult<()>;
+
+    /// 读取记忆语料统计戳（跨进程索引刷新检测）。
+    ///
+    /// 用途:
+    /// - 长驻进程（MCP 服务端等）在召回前比对"库内语料是否变化"，
+    ///   决定是否刷新内存检索索引（其他进程写入后新记忆不能漏检索）。
+    ///
+    /// 返回:
+    /// - `Ok(Some(stamp))`: 存储提供统计（SQLite 后端）。
+    /// - `Ok(None)`: 后端不提供统计（内存 / mock），调用方回退同进程脏标记语义。
+    ///
+    /// 说明:
+    /// - 查询为常数级聚合（COUNT / MAX），可承受每次召回前调用。
+    async fn index_corpus_stamp(&self) -> RamariaResult<Option<IndexCorpusStamp>> {
+        Ok(None)
+    }
 
     // -- Background Jobs --
     async fn create_background_job(

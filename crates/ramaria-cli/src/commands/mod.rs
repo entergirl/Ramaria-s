@@ -14,6 +14,7 @@ pub mod fact;
 pub mod import_cmd;
 pub mod index_cmd;
 pub mod keyword_cmd;
+pub mod mcp;
 pub mod memory;
 pub mod persona;
 pub mod probe;

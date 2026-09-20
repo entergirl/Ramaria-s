@@ -8,6 +8,7 @@
 
 use crate::repo::StorageResultExt;
 use ramaria_core::error::{RamariaError, RamariaResult};
+use ramaria_core::traits::IndexCorpusStamp;
 use sqlx::SqlitePool;
 
 pub async fn get_schema_version(pool: &SqlitePool) -> RamariaResult<i32> {
@@ -41,4 +42,35 @@ pub async fn set_index_version(pool: &SqlitePool, version: i32) -> RamariaResult
         .await
         .storage_err("更新索引版本失败")?;
     Ok(())
+}
+
+/// 读取记忆语料统计戳（跨进程索引刷新检测）。
+///
+/// 说明:
+/// - 单条 SQL 的标量子查询聚合：返回参与内存检索索引的四类语料
+///   （L1 摘要 / L2 事件 / utt 块 / 人格）的条数与最新写入时间；
+/// - 只返回计数与时间戳，不含任何内容字段（隐私红线）；
+/// - 常数级开销，供长驻进程在每次召回前调用。
+pub async fn index_corpus_stamp(pool: &SqlitePool) -> RamariaResult<IndexCorpusStamp> {
+    let row = sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64)>(
+        "SELECT
+            (SELECT COUNT(*) FROM memory_l1),
+            (SELECT COALESCE(MAX(created_at), 0) FROM memory_l1),
+            (SELECT COUNT(*) FROM memory_events),
+            (SELECT COALESCE(MAX(created_at), 0) FROM memory_events),
+            (SELECT COUNT(*) FROM utt_blocks),
+            (SELECT COUNT(*) FROM personas)",
+    )
+    .fetch_one(pool)
+    .await
+    .storage_err("查询索引语料统计失败")?;
+
+    Ok(IndexCorpusStamp {
+        l1_count: row.0,
+        l1_max_created_at: row.1,
+        event_count: row.2,
+        event_max_created_at: row.3,
+        utt_count: row.4,
+        persona_count: row.5,
+    })
 }

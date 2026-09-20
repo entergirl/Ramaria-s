@@ -46,6 +46,8 @@ pub(crate) const L1_JSON_REPLY: &str = r#"{
 pub(crate) struct MockLlm {
     backend: BackendConfig,
     reply: Option<String>,
+    /// 为 true 时所有生成调用返回 Llm 错误（不发起网络调用）。
+    always_fail: bool,
 }
 
 impl MockLlm {
@@ -54,6 +56,7 @@ impl MockLlm {
         Self {
             backend: BackendConfig::lm_studio_default(),
             reply: None,
+            always_fail: false,
         }
     }
 
@@ -62,6 +65,16 @@ impl MockLlm {
         Self {
             backend: BackendConfig::lm_studio_default(),
             reply: Some(reply.to_string()),
+            always_fail: false,
+        }
+    }
+
+    /// 恒失败的 mock（模拟"LLM 后端不可用"，用于降级与不落半条写入的断言）。
+    pub(crate) fn failing() -> Self {
+        Self {
+            backend: BackendConfig::lm_studio_default(),
+            reply: None,
+            always_fail: true,
         }
     }
 }
@@ -69,6 +82,9 @@ impl MockLlm {
 #[async_trait::async_trait]
 impl LlmProvider for MockLlm {
     async fn chat(&self, _request: &ChatRequest) -> RamariaResult<String> {
+        if self.always_fail {
+            return Err(RamariaError::llm("MockLlm 恒失败（模拟 LLM 后端不可用）"));
+        }
         Ok(self.reply.clone().unwrap_or_default())
     }
 
@@ -129,6 +145,20 @@ pub(crate) async fn engine_with_l1_reply(
 
 /// 以指定 LLM 装配引擎（测试统一的装配入口）。
 async fn engine_with_llm(tag: &str, llm: MockLlm) -> (Engine, Arc<SqliteStorage>, PathBuf) {
+    engine_with_llm_and_config(tag, llm, RamariaConfig::default()).await
+}
+
+/// 装配一套"真实 SQLite + 恒失败 LLM + 无嵌入"的引擎（LLM 不可用降级路径）。
+pub(crate) async fn engine_with_failing_llm(tag: &str) -> (Engine, Arc<SqliteStorage>, PathBuf) {
+    engine_with_llm(tag, MockLlm::failing()).await
+}
+
+/// 以指定 LLM 与生效配置装配引擎（供需要覆盖阈值 / 开关等配置项的用例）。
+pub(crate) async fn engine_with_llm_and_config(
+    tag: &str,
+    llm: MockLlm,
+    config: RamariaConfig,
+) -> (Engine, Arc<SqliteStorage>, PathBuf) {
     let dir = temp_dir(tag);
     let db_path = dir.join("assistant.db");
     // 先做一次装配（建库 + migration），再以同一路径构造测试可见的存储句柄
@@ -144,7 +174,7 @@ async fn engine_with_llm(tag: &str, llm: MockLlm) -> (Engine, Arc<SqliteStorage>
         storage.clone() as Arc<dyn StorageBackend>,
         Arc::new(llm),
         None,
-        RamariaConfig::default(),
+        config,
     );
     (engine, storage, dir)
 }

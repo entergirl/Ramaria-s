@@ -10,6 +10,7 @@
 
 pub mod behavior;
 pub mod bm25;
+pub mod chat;
 pub mod decay;
 pub mod event;
 pub mod example;

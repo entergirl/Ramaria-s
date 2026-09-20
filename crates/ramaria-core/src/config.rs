@@ -170,6 +170,10 @@ pub struct RamariaConfig {
     #[serde(default)]
     pub layer_dedup: LayerDedupConfig,
 
+    /// MCP 接入配置（`[mcp]`，外部 MCP 客户端挂载的记忆服务）。
+    #[serde(default)]
+    pub mcp: McpConfig,
+
     /// 杂项（预留扩展位，当前无字段）
     #[serde(default)]
     pub misc: MiscConfig,
@@ -316,6 +320,7 @@ impl Default for RamariaConfig {
             injection: InjectionGate::default(),
             injection_budget: InjectionBudgetConfig::default(),
             layer_dedup: LayerDedupConfig::default(),
+            mcp: McpConfig::default(),
             misc: MiscConfig::default(),
         }
     }
@@ -1698,6 +1703,72 @@ impl Default for FeedbackConfig {
 }
 
 // =========================================================
+// MCP 接入（外部 MCP 客户端挂载的记忆服务）
+// =========================================================
+
+/// MCP 接入配置（`[mcp]`）。
+///
+/// 职责:
+/// - 承载 MCP 服务端的唯一开关面：总开关、写侧治理（回流写入 / 封存触发）、
+///   人格可见白名单、原文块开关与召回默认预算。
+/// - 桌面「MCP 接入」面板读写本组；`ramaria-mcp` 启动时按本组装配召回策略与工具门禁。
+///
+/// 字段约定:
+/// - `enabled`: 总开关，默认 false（用户在面板主动开启）。
+/// - `allow_ingest`: 写工具门禁（`chat_ingest` / `chat_send`），默认 true。
+/// - `allow_seal`: 是否允许 MCP 侧触发封存与摘要生成，默认 true；
+///   关闭时写工具只写不封存（`finalize=true` 与空闲封存都会消耗 LLM 并改变记忆状态）。
+/// - `allowed_personas`: 可见人格白名单，`["*"]` = 全部可见。
+/// - `allow_raw_text`: 是否允许返回 utt 原文块，默认 false（原文是最高敏感层）。
+/// - `max_items` / `max_chars`: 召回默认预算（缺省与上限由服务层归一化）。
+///
+/// 兼容性说明:
+/// - struct 级 `#[serde(default)]`：config.toml 中 `[mcp]` 表只写部分键时缺失字段回退默认值。
+/// - `enabled=false` 时 MCP 服务端不提供任何工具能力，对既有对话管线零影响。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct McpConfig {
+    /// MCP 接入总开关（默认 false）。
+    pub enabled: bool,
+    /// 是否允许外部对话回流写入（`chat_ingest` / `chat_send` 门禁，默认 true）。
+    pub allow_ingest: bool,
+    /// 是否允许 MCP 侧触发封存与摘要生成（默认 true）。
+    ///
+    /// 说明:
+    /// - 封存会调用 LLM 生成 L1 并改变记忆状态，故与写入开关分离；
+    /// - 关闭时写工具只写不封存，回执中说明本次未封存。
+    pub allow_seal: bool,
+    /// 可见人格白名单（`["*"]` = 全部可见；空列表按 `["*"]` 处理）。
+    pub allowed_personas: Vec<String>,
+    /// 是否允许返回 utt 原文块（默认 false —— 内容可能随对话发送给客户端所用模型）。
+    pub allow_raw_text: bool,
+    /// 召回条目默认上限（默认 5；上限由服务层钳制）。
+    pub max_items: u32,
+    /// 召回上下文文本默认预算（字符，默认 1200）。
+    pub max_chars: u32,
+}
+
+impl Default for McpConfig {
+    /// 创建默认 MCP 接入配置。
+    ///
+    /// 返回:
+    /// - 未开启（`enabled=false`，不启动即零影响）。
+    /// - 写侧默认放开（`allow_ingest` / `allow_seal` 均为 true，回流闭环开箱可用）。
+    /// - 读侧默认保守（全部人格可见、原文块关闭）。
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            allow_ingest: true,
+            allow_seal: true,
+            allowed_personas: vec!["*".to_string()],
+            allow_raw_text: false,
+            max_items: 5,
+            max_chars: 1200,
+        }
+    }
+}
+
+// =========================================================
 // 注入协调预算（RAG 基座与四层注入的协调分配）
 // =========================================================
 
@@ -2646,5 +2717,59 @@ order = ["behavior", "knowledge", "rag", "style", "memory"]
             flatten(group, value, &mut out);
         }
         out
+    }
+
+    // =========================================================
+    // MCP 接入（[mcp]）配置测试
+    // =========================================================
+
+    #[test]
+    fn mcp_config_defaults_follow_decisions() {
+        let cfg = RamariaConfig::default();
+        // 总开关默认关闭：未显式开启时 MCP 能力不可用，对既有功能零影响
+        assert!(!cfg.mcp.enabled, "MCP 接入默认关闭");
+        // 写侧默认放开（回流闭环开箱可用），封存为独立开关
+        assert!(cfg.mcp.allow_ingest, "回流写入默认开启");
+        assert!(cfg.mcp.allow_seal, "MCP 侧封存默认允许");
+        // 读侧默认保守：全部人格可见 + 原文块关闭
+        assert_eq!(cfg.mcp.allowed_personas, vec!["*".to_string()]);
+        assert!(!cfg.mcp.allow_raw_text, "原文块默认不出端");
+        // 召回默认预算与服务层默认常量同口径（5 / 1200）
+        assert_eq!(cfg.mcp.max_items, 5);
+        assert_eq!(cfg.mcp.max_chars, 1200);
+    }
+
+    #[test]
+    fn mcp_config_toml_roundtrip_and_partial() {
+        // 旧配置文件（无 [mcp]）解析后回退默认（未开启）
+        let legacy = r#"
+version = "2.0.0"
+schema_version = 1
+"#;
+        let cfg: RamariaConfig = toml::from_str(legacy).expect("旧配置应可解析");
+        assert!(!cfg.mcp.enabled);
+
+        // 显式配置可无损恢复；只写部分键时其余键回退默认值
+        let toml_text = r#"
+[mcp]
+enabled = true
+allowed_personas = ["rama-0001"]
+allow_raw_text = true
+"#;
+        let cfg2: RamariaConfig = toml::from_str(toml_text).expect("MCP 配置应可解析");
+        assert!(cfg2.mcp.enabled);
+        assert_eq!(cfg2.mcp.allowed_personas, vec!["rama-0001".to_string()]);
+        assert!(cfg2.mcp.allow_raw_text);
+        assert!(cfg2.mcp.allow_ingest, "未写的键回退默认值");
+        assert_eq!(cfg2.mcp.max_items, 5);
+
+        // 扁平化同步覆盖本组（settings 表 config.* 键）
+        let flat = config_sync_flatten(&cfg2);
+        assert_eq!(flat.get("mcp.enabled"), Some(&serde_json::json!(true)));
+        assert_eq!(
+            flat.get("mcp.allow_seal"),
+            Some(&serde_json::json!(true)),
+            "MCP 组应参与 DB settings 扁平同步"
+        );
     }
 }

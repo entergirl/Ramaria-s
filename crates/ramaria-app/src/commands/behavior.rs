@@ -2,7 +2,8 @@
 //!
 //! 设计特点:
 //! - 学习管线：事件 → 聚类（含 Manual 强锚点）→ 规则生成 → 替换旧 Auto 规则落库
-//! - 增量更新：封存时新事件归簇 / 待定池 / 证据衰减 / 漂移检测（落库由本层执行）
+//! - 增量更新：封存钩子薄委托（归簇/待定池/衰减/漂移编排在
+//!   `ramaria_memory::behavior::orchestrate`）
 //! - 情境路由：读规则 + 查询构造 → 路由决策（供 M6 prompt 注入）
 //! - 规则管理：list/show/edit/enable/disable/delete/import/evidence（D7）
 //! - 反馈环 H1：edit/disable 写 feedback_log（S1，weight=1.0，detail 编辑快照）；
@@ -18,9 +19,9 @@ use ramaria_core::behavior::{
     BehaviorRule, BehaviorSituation, FeedbackLog, RuleSource, SignalType, TargetType,
 };
 use ramaria_core::error::{RamariaError, RamariaResult};
-use ramaria_core::lock::{lock_recover, read_recover};
+use ramaria_core::lock::lock_recover;
 use ramaria_core::traits::StorageBackend;
-use ramaria_core::types::{MemoryEvent, Message, now_ms};
+use ramaria_core::types::{Message, now_ms};
 
 use crate::app::App;
 
@@ -190,49 +191,26 @@ pub async fn behavior_learn(app: &App, persona_uid: &str) -> RamariaResult<Behav
 // 情境路由
 // =========================================================
 
-/// 情境路由（对话时）：读规则 + 查询构造 → 路由决策。
+/// 情境路由（对话时）：读规则 + 查询构造 → 路由决策（薄委托）。
 ///
 /// 说明:
-/// - 仅启用中的规则参与路由；全低于阈值 → 静默降级（matched=false，等同 v1.4）。
+/// - 实现见 `ramaria_memory::behavior::orchestrate::route`（与 service / MCP 入口同源）；
+/// - 仅启用中的规则参与路由；全低于阈值 → 静默降级（matched=false）。
 /// - 返回结果由 M6（F 任务）注入 prompt 行为块。
 pub async fn behavior_route(
     app: &App,
     persona_uid: &str,
     messages: &[Message],
 ) -> RamariaResult<ramaria_memory::behavior::RoutingResult> {
-    if !app.config.behavior.enabled || messages.is_empty() {
-        return Ok(ramaria_memory::behavior::RoutingResult {
-            matched: false,
-            primary: None,
-            secondary: Vec::new(),
-        });
-    }
-    let rules = app
-        .storage
-        .list_behavior_rules_by_persona(persona_uid)
-        .await?;
     let embedding = app.embedding_provider();
-    let config = app.config.behavior.clone();
-
-    // 查询侧关键词规范化（关键词池别名归一 → 口语说法更易命中事件关键词）：
-    // 读锁内取值快照、释放后 await 查询（避免 std 锁跨 await）；池为空
-    // 时退化为纯 bigram 词频（v1.7 等价，零 embedding）。
-    // 服务锁中毒不降级：由 `read_recover` 记录 warn 并取回内部数据继续。
-    let keyword_service = app.keyword_service();
-    let normalizer = {
-        let guard = read_recover(&keyword_service, "commands_behavior.keyword_service");
-        ramaria_memory::behavior::QueryKeywordNormalizer::from_pool(guard.pool())
-    };
-    let query = ramaria_memory::behavior::build_query_context_with_normalizer(
-        messages,
+    ramaria_memory::behavior::orchestrate::route(
+        app.storage.as_ref(),
+        &app.config.behavior,
         embedding.as_deref(),
-        &normalizer,
+        persona_uid,
+        messages,
     )
-    .await?;
-    let params = ramaria_memory::behavior::RoutingParams::from(&config);
-    Ok(ramaria_memory::behavior::route_rules(
-        &rules, &query, &params,
-    ))
+    .await
 }
 
 // =========================================================
@@ -507,121 +485,13 @@ pub async fn behavior_incremental_update_core(
     pending: &std::sync::Mutex<ramaria_memory::behavior::PendingPool>,
     persona_uid: &str,
 ) -> RamariaResult<()> {
-    // 1. 未吸收事件（本会话新提取）
-    let new_events = storage.list_unabsorbed_events(persona_uid).await?;
-    if new_events.is_empty() {
-        return Ok(());
-    }
-
-    // 2. 现有规则 + 待定池（克隆进出锁，避免 MutexGuard 跨 await）
-    let mut rules = storage.list_behavior_rules_by_persona(persona_uid).await?;
-    let mut pool = lock_recover(pending, "commands_behavior.pending").clone();
-
-    // 3. 计算增量更新指令
-    let outcome = ramaria_memory::behavior::compute_incremental_update(
-        &new_events,
-        &mut rules,
-        &mut pool,
-        config,
+    ramaria_memory::behavior::orchestrate::incremental_update(
+        storage,
+        llm,
         embedding,
-        now_ms(),
+        config,
+        pending,
+        persona_uid,
     )
-    .await?;
-
-    // 计算完成后写回待定池（跨 await 期间锁已释放）
-    *lock_recover(pending, "commands_behavior.pending") = pool;
-
-    // 4a. 归入规则 → 追加证据
-    if !outcome.assigned.is_empty() {
-        // 归簇后"滚动更新簇统计 → 规则参数微调"：v1.5 做证据追加 + updated_at 刷新
-        // （完整参数重算留待全量重学，见完成记录）
-        let by_rule: std::collections::HashMap<i64, Vec<i64>> = outcome.assigned.iter().fold(
-            std::collections::HashMap::new(),
-            |mut m, &(event_id, rule_id)| {
-                m.entry(rule_id).or_default().push(event_id);
-                m
-            },
-        );
-        for (rule_id, event_ids) in by_rule {
-            if let Some(rule) = rules.iter_mut().find(|r| r.id == rule_id) {
-                for eid in event_ids {
-                    rule.evidence
-                        .push(ramaria_core::behavior::BehaviorEvidence {
-                            event_id: eid,
-                            weight: 0.5,
-                        });
-                }
-                rule.updated_at = now_ms();
-                storage.update_behavior_rule(rule).await?;
-            }
-        }
-    }
-
-    // 4b. 待定池成簇 → 生成新规则
-    if !outcome.new_cluster_event_ids.is_empty() {
-        for group in &outcome.new_cluster_event_ids {
-            // 读事件详情 → 样本 → 簇提炼 → 规则生成
-            let mut events: Vec<MemoryEvent> = Vec::new();
-            for &eid in group {
-                if let Some(ev) = storage.get_event(eid).await? {
-                    events.push(ev);
-                }
-            }
-            if events.is_empty() {
-                continue;
-            }
-            let mut samples: Vec<ramaria_memory::behavior::BehaviorSample> = events
-                .iter()
-                .map(ramaria_memory::behavior::sample_from_event)
-                .collect();
-            let clusterer = ramaria_memory::behavior::BehaviorClusterer::new(config, embedding);
-            let clusters = clusterer.cluster_samples(&events, &mut samples).await?;
-            for cluster in clusters {
-                let generator = ramaria_memory::behavior::BehaviorRuleGenerator::new(
-                    ramaria_memory::behavior::RuleGenConfig::from(config),
-                    llm,
-                );
-                let generated = generator.generate_rule(&cluster).await;
-                let mut rule = generated.rule;
-                rule.persona_uid = persona_uid.to_string();
-                rule.evidence.retain(|e| e.event_id > 0);
-                if rule.evidence.is_empty() && rule.has_reaction() {
-                    tracing::warn!("待定池成簇无真实证据，跳过规则生成");
-                    continue;
-                }
-                storage.save_behavior_rule(&rule).await?;
-                tracing::info!(
-                    rule_id = rule.id,
-                    reaction = rule.has_reaction(),
-                    "待定池成簇生成新行为规则"
-                );
-            }
-        }
-    }
-
-    // 4c. 证据衰减失效 → 降级（enabled=false，不删除——保留审计）
-    if !outcome.decayed_rule_ids.is_empty() {
-        for &rule_id in &outcome.decayed_rule_ids {
-            if let Some(rule) = rules.iter_mut().find(|r| r.id == rule_id) {
-                // 衰减后的证据权重已由 compute_incremental_update 原地修改
-                rule.enabled = false;
-                rule.updated_at = now_ms();
-                storage.update_behavior_rule(rule).await?;
-                tracing::warn!(
-                    rule_id,
-                    "行为规则证据衰减低于阈值，已降级为禁用（保留审计）"
-                );
-            }
-        }
-    }
-
-    // 4d. 漂移检测 → 告警（v1.5 仅日志；规则重构由全量重学承担）
-    if outcome.drift_triggered {
-        tracing::warn!(
-            persona_uid,
-            "检测到反应模式系统性漂移，建议执行行为规则全量重学（behavior learn）"
-        );
-    }
-
-    Ok(())
+    .await
 }

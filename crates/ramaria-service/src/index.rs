@@ -8,10 +8,13 @@
 //! - 降级链：嵌入模型缺失 / 批量向量化失败 → 仅 BM25 + 关键词镜像（不阻塞构建）；
 //!   关键词词表读取失败 → 空词典（纯 bigram 口径，行为可预期）
 //! - 增量镜像：L1 生成后同步进检索器与关键词镜像（不重建整库）
+//! - 代次刷新：召回前比对库内语料戳与 BM25 分词代次，其他进程写入 / 词典升级后
+//!   重建内存索引（同进程脏标记保留为加载窗口内的兜底）
 //! - 边界：本模块只做"内存索引维护"，不写数据库（除 L2/L3 无关的索引版本标记外）
 
 use ramaria_core::error::RamariaResult;
 use ramaria_core::lock::{read_recover, write_recover};
+use ramaria_core::traits::IndexCorpusStamp;
 use ramaria_core::types::{MemoryL1, now_ms};
 use ramaria_memory::keyword::service::KeywordService;
 use ramaria_memory::keyword::{CommaSeparatedNormalizer, KeywordNormalizer};
@@ -25,33 +28,94 @@ use crate::engine::Engine;
 const L2_LOAD_LIMIT: i64 = 1_000;
 
 // =========================================================
+// 索引代次（跨进程刷新检测）
+// =========================================================
+
+/// 索引代次快照：判定内存索引是否与库内语料一致。
+///
+/// 字段约定:
+/// - `bm25_version`: BM25 分词代次（settings 键 `bm25_index_version`）；
+///   词典升级后变化 → 本次重建按词典增强口径分词。
+/// - `corpus`: 记忆语料统计戳（L1 / 事件 / utt / 人格的条数与最新写入时间）；
+///   `None` = 后端不提供统计，退化为同进程脏标记语义（不误判为"已变化"）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexStamp {
+    pub bm25_version: i32,
+    pub corpus: Option<IndexCorpusStamp>,
+}
+
+/// 读取当前库内索引代次快照（读取失败按"不变化"处理并记 warn，不阻塞召回）。
+async fn read_stamp(engine: &Engine) -> IndexStamp {
+    let storage = engine.storage_ref().as_ref();
+
+    let bm25_version = match storage.get_bm25_index_version().await {
+        Ok(version) => version,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "读取 BM25 分词代次失败，本次按缺失口径比对（不影响召回本身）"
+            );
+            ramaria_core::traits::BM25_INDEX_VERSION_LEGACY
+        }
+    };
+
+    let corpus = match storage.index_corpus_stamp().await {
+        Ok(stamp) => stamp,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "读取索引语料统计失败，本次跳过跨进程刷新检测（同进程脏标记仍然生效）"
+            );
+            None
+        }
+    };
+
+    IndexStamp {
+        bm25_version,
+        corpus,
+    }
+}
+
+// =========================================================
 // 懒加载
 // =========================================================
 
-/// 确保检索索引已加载（懒加载，重复调用为空操作）。
+/// 确保检索索引已加载且与库内语料同代（懒加载 + 代次刷新）。
 ///
 /// 流程:
-/// 1. 已加载 → 直接返回 false；
-/// 2. 锁外收集文档视图（各 persona 的 L1/L2/utt + 无主 L1）；
-/// 3. 构建临时检索器（BM25 词典 + 文档索引 + 可选向量）；
-/// 4. 整体替换懒加载槽；
-/// 5. 关键词镜像装载（词典池 + 倒排文档 + 可选语义层）。
+/// 1. 读取库内代次快照（语料统计 + BM25 分词代次）；
+/// 2. 已加载、无脏标记、代次一致 → 直接返回 false；
+/// 3. 锁外收集文档视图（各 persona 的 L1/L2/utt + 无主 L1）；
+/// 4. 构建临时检索器（BM25 词典 + 文档索引 + 可选向量）；
+/// 5. 整体替换懒加载槽并记录代次；
+/// 6. 关键词镜像装载（词典池 + 倒排文档 + 可选语义层）。
 ///
 /// 参数:
 /// - `engine`: 服务层引擎。
 ///
 /// 返回:
-/// - `Ok(true)`: 本次调用完成构建（首次加载，或脏标记驱动的重建）。
+/// - `Ok(true)`: 本次调用完成构建（首次加载 / 脏标记重建 / 代次变化刷新）。
 /// - `Ok(false)`: 索引已就绪且无需重建。
 ///
 /// 说明:
-/// - 并发调用可能重复构建（幂等：最后一次替换生效）；代次刷新在后续里程碑接入。
+/// - 并发调用可能重复构建（幂等：最后一次替换生效）。
 /// - 脏标记协同（避免丢 L1）：加载窗口内封存产生的新 L1 进不了内存索引，其增量镜像会置脏；
 ///   本函数在开始构建前清脏，构建期间再产生的增量会重新置脏 → 下次调用再补一次（收敛）。
+/// - 代次协同（跨进程）：记录的是构建前读取的快照；构建窗口内其他进程的新写入
+///   会让下次比对不等 → 再刷新一次（收敛，不漏新记忆）。
 pub(crate) async fn ensure_loaded(engine: &Engine) -> RamariaResult<bool> {
-    // 已加载且无脏标记 → 无需重建；有脏标记 → 重建一次以覆盖加载窗口内漏掉的增量
+    let stamp = read_stamp(engine).await;
+
+    // 已加载且无脏标记 → 只需确认代次是否仍一致；一致则免构建
     if engine.is_retriever_loaded() && !engine.index_dirty() {
-        return Ok(false);
+        if engine.index_stamp() == Some(stamp) {
+            return Ok(false);
+        }
+        tracing::info!(
+            bm25_version = stamp.bm25_version,
+            corpus_tracked = stamp.corpus.is_some(),
+            "索引代次变化（其他进程写入或分词代次升级），重建内存索引"
+        );
     }
     // 构建开始前清脏：构建窗口内新产生的增量会重新置脏（保证不漏、且能收敛）
     engine.clear_index_dirty();
@@ -133,13 +197,17 @@ pub(crate) async fn ensure_loaded(engine: &Engine) -> RamariaResult<bool> {
     // ---- 5. 关键词镜像装载（词典池 + 倒排文档 + 语义层） ----
     sync_keyword_mirror(engine, &l1_views, &l2_views).await;
 
+    // ---- 6. 记录代次快照（构建前读取；构建窗口内的新写入会在下次比对时触发再刷新）----
+    engine.record_index_stamp(stamp);
+
     tracing::info!(
         l1 = l1_views.len(),
         l2 = l2_views.len(),
         utt = utt_blocks.len(),
         vectors = vectors_built,
         elapsed_ms = now_ms().saturating_sub(started),
-        "检索索引已加载（懒加载完成，共 {total} 条文档）"
+        bm25_version = stamp.bm25_version,
+        "检索索引已加载（共 {total} 条文档）"
     );
     Ok(true)
 }
@@ -530,6 +598,57 @@ mod tests {
         assert!(
             result.items.iter().any(|i| i.text.contains("咖啡")),
             "无主 L1 应可检索: {:?}",
+            result.items
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 代次刷新（跨进程场景）：另一连接写入新 L1 后，本引擎的已加载索引能感知并刷新。
+    #[tokio::test]
+    async fn cross_process_write_refreshes_index() {
+        let (engine, storage, dir) = engine_with_db("index-cross").await;
+        seed_persona(&storage, "char-0001").await;
+        engine.ensure_index_loaded().await.expect("加载成功");
+
+        // 库内无变化 → 代次一致，不重复构建
+        assert!(
+            !engine.ensure_index_loaded().await.expect("重复加载成功"),
+            "无变化时不应重建索引"
+        );
+
+        // 另一"进程"视角：同一库文件上的第二个存储句柄写入新 L1
+        let db_path = dir.join("assistant.db");
+        let pool = ramaria_storage::database::init_pool(Some(db_path))
+            .await
+            .expect("第二连接池应可创建");
+        let other_storage = SqliteStorage::new(pool);
+        let session = other_storage
+            .create_session(Some("char-0001"))
+            .await
+            .expect("创建会话");
+        let mut l1 = ramaria_core::types::MemoryL1::new(
+            session.id,
+            "用户最近迷上了夜跑，每周三次".to_string(),
+            None,
+        );
+        l1.persona_uid = Some("char-0001".to_string());
+        l1.keywords = Some("夜跑".to_string());
+        other_storage.save_memory_l1(&l1).await.expect("写入 L1");
+
+        // 本引擎召回：语料戳变化触发刷新，新记忆必须可见
+        let result = engine
+            .recall(RecallRequest {
+                query: Some("夜跑".to_string()),
+                persona: Some("char-0001".to_string()),
+                include: Some(vec![RecallLayer::L1]),
+                ..RecallRequest::default()
+            })
+            .await
+            .expect("召回成功");
+        assert!(
+            result.items.iter().any(|i| i.text.contains("夜跑")),
+            "跨进程写入的新 L1 应可检索: {:?}",
             result.items
         );
 

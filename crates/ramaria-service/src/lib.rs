@@ -11,14 +11,19 @@
 //!
 //! 模块划分:
 //! - `engine`：依赖装配（storage / config / LLM / embedding / 检索槽）与用例入口；
-//! - `index`：检索索引懒加载与 L1 增量镜像（召回前置）；
-//! - `recall` / `ingest` / `seal` / `idle` / `session` / `persona`：六类用例实现；
+//! - `index`：检索索引懒加载、代次刷新与 L1 增量镜像（召回前置）；
+//! - `recall` / `chat` / `ingest` / `seal` / `idle` / `session` / `persona`：用例实现；
+//! - `l2`：L2 事件提取触发（无 app 宿主的运行时用）；
+//! - `hooks`：默认封存钩子装配（行为 / 风格 / L2，供 MCP 等入口注册）；
 //! - 入口层（如 `ramaria-mcp`）只做协议包装，不承载业务逻辑。
 
+pub mod chat;
 pub mod engine;
+pub mod hooks;
 pub mod idle;
 pub mod index;
 pub mod ingest;
+pub mod l2;
 pub mod persona;
 pub mod recall;
 pub mod seal;
@@ -29,13 +34,14 @@ pub mod types;
 pub(crate) mod test_support;
 
 pub use engine::{Engine, EngineOptions};
+pub use hooks::default_seal_hooks;
 pub use recall::RecallPolicy;
 pub use seal::{SealHook, SealHooks};
 pub use types::{
-    BehaviorRuleView, ChatRole, ChatTurn, DEFAULT_HISTORY_LIMIT, DEFAULT_MAX_CHARS,
-    DEFAULT_MAX_ITEMS, DEFAULT_PERSONA_UID, DataMaturityView, FactView, HistoryMessageView,
-    HistoryRequest, HistoryResult, IngestOutcome, IngestRequest, MAX_ITEMS_LIMIT,
-    PersonaCardRequest, PersonaCardView, PersonaSection, PersonaSummaryView, RecallItem,
-    RecallLayer, RecallMode, RecallRequest, RecallResult, RecallStats, SealOutcome,
-    SessionSummaryView, StyleView, TraitView,
+    BehaviorRuleView, CHANNEL_MCP, ChatRole, ChatSendOutcome, ChatSendRequest, ChatTurn,
+    DEFAULT_HISTORY_LIMIT, DEFAULT_MAX_CHARS, DEFAULT_MAX_ITEMS, DEFAULT_PERSONA_UID,
+    DataMaturityView, FactView, HistoryMessageView, HistoryRequest, HistoryResult, IngestOutcome,
+    IngestRequest, MAX_ITEMS_LIMIT, PersonaCardRequest, PersonaCardView, PersonaSection,
+    PersonaSummaryView, RecallItem, RecallLayer, RecallMode, RecallRequest, RecallResult,
+    RecallStats, SealOutcome, SessionSummaryView, StyleView, TraitView,
 };

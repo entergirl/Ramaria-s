@@ -67,6 +67,9 @@ pub use update::{UpdateStatus, check_update};
 /// 返回当前时间的 `YYYY-MM-DD HH:MM` 字符串（本地时区）。
 ///
 /// 用途: 消息时间戳、System Prompt 当前时间等共享格式化。
+///
+/// 说明:
+/// - 实现见 `ramaria_memory::chat::now_timestamp_str`（与 service / MCP 入口同源）。
 pub(crate) fn now_timestamp_str() -> String {
-    chrono::Local::now().format("%Y-%m-%d %H:%M").to_string()
+    ramaria_memory::chat::now_timestamp_str()
 }

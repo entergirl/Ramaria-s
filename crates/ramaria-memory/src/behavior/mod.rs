@@ -15,6 +15,7 @@
 pub mod clustering;
 pub mod feedback;
 pub mod incremental;
+pub mod orchestrate;
 pub mod routing;
 pub mod rule_gen;
 pub mod sentiment;
