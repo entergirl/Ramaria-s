@@ -7,6 +7,7 @@
 //! - 不存储敏感信息（API key 等），仅保存非敏感运行参数
 
 use crate::repo::StorageResultExt;
+use crate::retry::with_busy_retry;
 use ramaria_core::error::RamariaResult;
 use sqlx::SqlitePool;
 
@@ -22,13 +23,17 @@ pub async fn get(pool: &SqlitePool, key: &str) -> RamariaResult<Option<String>> 
 
 pub async fn set(pool: &SqlitePool, key: &str, value: &str) -> RamariaResult<()> {
     let now = ramaria_core::types::now_ms();
-    sqlx::query("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)")
-        .bind(key)
-        .bind(value)
-        .bind(now)
-        .execute(pool)
-        .await
-        .storage_err("保存设置失败")?;
+    // 多进程写锁争用时有限重试，避免 database is locked 直接失败
+    with_busy_retry("保存设置", || async {
+        sqlx::query("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)")
+            .bind(key)
+            .bind(value)
+            .bind(now)
+            .execute(pool)
+            .await
+    })
+    .await
+    .storage_err("保存设置失败")?;
     Ok(())
 }
 

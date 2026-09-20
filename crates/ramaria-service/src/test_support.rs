@@ -179,6 +179,27 @@ pub(crate) async fn engine_with_llm_and_config(
     (engine, storage, dir)
 }
 
+/// 在**已存在的库路径**上装配第二台引擎（多进程并发场景的服务层等价物）。
+///
+/// 职责:
+/// - 模拟"桌面 + MCP 并存"：同一库文件、独立连接池与内存索引，各自持有 LLM provider；
+/// - 用于验证抢占幂等（同一会话只生成一份 L1）与写锁争用（并发写不报 locked）。
+///
+/// 参数:
+/// - `db_path`: 已由首台引擎建好并执行过 migration 的库文件路径。
+/// - `llm` / `config`: 第二台引擎的 LLM provider 与生效配置。
+pub(crate) async fn engine_on_existing_db(
+    db_path: &std::path::Path,
+    llm: MockLlm,
+    config: RamariaConfig,
+) -> Engine {
+    let pool = ramaria_storage::database::init_pool(Some(db_path.to_path_buf()))
+        .await
+        .expect("第二连接池应可创建");
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::new(pool));
+    Engine::from_parts(storage, Arc::new(llm), None, config)
+}
+
 // =========================================================
 // 造数
 // =========================================================

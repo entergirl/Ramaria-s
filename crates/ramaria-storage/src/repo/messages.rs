@@ -11,6 +11,7 @@
 
 use crate::repo::StorageResultExt;
 use crate::repo::parse_uuid_required;
+use crate::retry::with_busy_retry;
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::types::{Message, MessageKey, MessageRole, MessageSource};
 use sqlx::SqlitePool;
@@ -64,8 +65,11 @@ impl MessageRow {
 /// 参数:
 /// - `executor`: sqlx 执行器（连接池引用或事务内连接）。
 /// - `msg`: 待写入消息。
-/// - `err_ctx`: 失败时的错误上下文文案。
-async fn insert_message<'e, E>(executor: E, msg: &Message, err_ctx: &str) -> RamariaResult<()>
+///
+/// 返回:
+/// - 原始 `sqlx::Error`：写入口（save / save_import）需要在 [`with_busy_retry`]
+///   闭包内依据错误类型判断写锁忙，错误上下文由调用方在外层映射。
+async fn insert_message<'e, E>(executor: E, msg: &Message) -> Result<(), sqlx::Error>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
@@ -82,8 +86,7 @@ where
         .bind(&msg.fingerprint)
         .bind(&msg.persona_uid)
         .execute(executor)
-        .await
-        .storage_err(err_ctx)?;
+        .await?;
     Ok(())
 }
 
@@ -97,7 +100,11 @@ pub async fn save(pool: &SqlitePool, msg: &Message) -> RamariaResult<()> {
         )));
     }
 
-    insert_message(pool, msg, "保存消息失败").await
+    // 多进程写锁争用时有限重试，避免 database is locked 直接失败
+    with_busy_retry("保存消息", || async { insert_message(pool, msg).await })
+        .await
+        .storage_err("保存消息失败")?;
+    Ok(())
 }
 
 /// 检查 session 是否处于活跃状态（ended_at IS NULL）。
@@ -370,7 +377,13 @@ pub async fn list_by_persona_paginated(
 /// 参数:
 /// - `msg`: 待写入的消息，含 fingerprint 和 persona_uid。
 pub async fn save_import(pool: &SqlitePool, msg: &Message) -> RamariaResult<()> {
-    insert_message(pool, msg, "导入消息写入失败").await
+    // 多进程写锁争用时有限重试，避免 database is locked 直接失败
+    with_busy_retry("导入消息写入", || async {
+        insert_message(pool, msg).await
+    })
+    .await
+    .storage_err("导入消息写入失败")?;
+    Ok(())
 }
 
 /// 批量保存导入消息，包裹在显式 SQLite 事务中。
@@ -404,12 +417,9 @@ pub async fn save_import_batch(pool: &SqlitePool, msgs: &[Message]) -> RamariaRe
     let mut written = 0usize;
 
     for msg in msgs {
-        insert_message(
-            &mut *txn,
-            msg,
-            &format!("批量导入消息写入失败 (第 {} 条)", written + 1),
-        )
-        .await?;
+        insert_message(&mut *txn, msg)
+            .await
+            .storage_err(format!("批量导入消息写入失败 (第 {} 条)", written + 1))?;
         written += 1;
     }
 

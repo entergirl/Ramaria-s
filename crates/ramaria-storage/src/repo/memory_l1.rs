@@ -11,6 +11,7 @@
 
 use crate::repo::StorageResultExt;
 use crate::repo::parse_uuid_required;
+use crate::retry::with_busy_retry;
 use ramaria_core::error::RamariaResult;
 use ramaria_core::types::{EvidenceNote, MemoryL1};
 use sqlx::SqlitePool;
@@ -90,29 +91,33 @@ pub async fn save(pool: &SqlitePool, l1: &MemoryL1) -> RamariaResult<()> {
             ))
         })?;
 
-    sqlx::query(
-        "INSERT INTO memory_l1 (id, session_id, summary, keywords, time_period, atmosphere,
-         valence, salience, absorbed, created_at, last_accessed_at, persona_uid, context_json,
-         situation_strength, evidence_notes, continuation)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    )
-    .bind(l1.id.to_string())
-    .bind(l1.session_id.to_string())
-    .bind(&l1.summary)
-    .bind(&l1.keywords)
-    .bind(&l1.time_period)
-    .bind(&l1.atmosphere)
-    .bind(l1.valence)
-    .bind(l1.salience)
-    .bind(l1.absorbed as i64)
-    .bind(l1.created_at)
-    .bind(l1.last_accessed_at)
-    .bind(&l1.persona_uid)
-    .bind(&l1.context_json)
-    .bind(l1.situation_strength.map(|v| v as i64))
-    .bind(evidence_notes_json)
-    .bind(&l1.continuation)
-    .execute(pool)
+    // 多进程写锁争用时有限重试，避免 database is locked 直接失败
+    with_busy_retry("保存 L1 记忆", || async {
+        sqlx::query(
+            "INSERT INTO memory_l1 (id, session_id, summary, keywords, time_period, atmosphere,
+             valence, salience, absorbed, created_at, last_accessed_at, persona_uid, context_json,
+             situation_strength, evidence_notes, continuation)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(l1.id.to_string())
+        .bind(l1.session_id.to_string())
+        .bind(&l1.summary)
+        .bind(&l1.keywords)
+        .bind(&l1.time_period)
+        .bind(&l1.atmosphere)
+        .bind(l1.valence)
+        .bind(l1.salience)
+        .bind(l1.absorbed as i64)
+        .bind(l1.created_at)
+        .bind(l1.last_accessed_at)
+        .bind(&l1.persona_uid)
+        .bind(&l1.context_json)
+        .bind(l1.situation_strength.map(|v| v as i64))
+        .bind(evidence_notes_json.as_deref())
+        .bind(&l1.continuation)
+        .execute(pool)
+        .await
+    })
     .await
     .storage_err("保存 L1 记忆失败")?;
     Ok(())

@@ -9,6 +9,7 @@
 
 use crate::repo::StorageResultExt;
 use crate::repo::parse_uuid_required;
+use crate::retry::with_busy_retry;
 use ramaria_core::error::RamariaResult;
 use ramaria_core::types::{CHANNEL_LOCAL, Session};
 use sqlx::SqlitePool;
@@ -24,14 +25,20 @@ const SESSION_COLUMNS: &str = "id, started_at, ended_at, persona_uid, channel, e
 pub async fn create(pool: &SqlitePool, persona_uid: Option<&str>) -> RamariaResult<Session> {
     let now = ramaria_core::types::now_ms();
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO sessions (id, started_at, persona_uid, channel) VALUES (?, ?, ?, ?)")
+    // 多进程写锁争用时有限重试，避免 database is locked 直接失败
+    with_busy_retry("创建 session", || async {
+        sqlx::query(
+            "INSERT INTO sessions (id, started_at, persona_uid, channel) VALUES (?, ?, ?, ?)",
+        )
         .bind(id.to_string())
         .bind(now)
         .bind(persona_uid)
         .bind(CHANNEL_LOCAL)
         .execute(pool)
         .await
-        .storage_err("创建 session 失败")?;
+    })
+    .await
+    .storage_err("创建 session 失败")?;
     Ok(Session {
         id,
         started_at: now,
@@ -56,16 +63,20 @@ pub async fn create_in_channel(
 ) -> RamariaResult<Session> {
     let now = ramaria_core::types::now_ms();
     let id = Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO sessions (id, started_at, persona_uid, channel, external_ref) \
-         VALUES (?, ?, ?, ?, ?)",
-    )
-    .bind(id.to_string())
-    .bind(now)
-    .bind(persona_uid)
-    .bind(channel)
-    .bind(external_ref)
-    .execute(pool)
+    // 多进程写锁争用时有限重试，避免 database is locked 直接失败
+    with_busy_retry("创建带通道 session", || async {
+        sqlx::query(
+            "INSERT INTO sessions (id, started_at, persona_uid, channel, external_ref) \
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(id.to_string())
+        .bind(now)
+        .bind(persona_uid)
+        .bind(channel)
+        .bind(external_ref)
+        .execute(pool)
+        .await
+    })
     .await
     .storage_err("创建带通道 session 失败")?;
     Ok(Session {
@@ -124,23 +135,31 @@ pub async fn find_active_by_channel(
 /// - `Ok(false)`: 会话已关闭或不存在（未抢占到）。
 pub async fn close_if_active(pool: &SqlitePool, session_id: Uuid) -> RamariaResult<bool> {
     let now = ramaria_core::types::now_ms();
-    let result = sqlx::query("UPDATE sessions SET ended_at = ? WHERE id = ? AND ended_at IS NULL")
-        .bind(now)
-        .bind(session_id.to_string())
-        .execute(pool)
-        .await
-        .storage_err("条件关闭 session 失败")?;
+    // 多进程写锁争用时有限重试，避免 database is locked 直接失败
+    let result = with_busy_retry("条件关闭 session", || async {
+        sqlx::query("UPDATE sessions SET ended_at = ? WHERE id = ? AND ended_at IS NULL")
+            .bind(now)
+            .bind(session_id.to_string())
+            .execute(pool)
+            .await
+    })
+    .await
+    .storage_err("条件关闭 session 失败")?;
     Ok(result.rows_affected() > 0)
 }
 
 pub async fn close(pool: &SqlitePool, session_id: Uuid) -> RamariaResult<()> {
     let now = ramaria_core::types::now_ms();
-    sqlx::query("UPDATE sessions SET ended_at = ? WHERE id = ?")
-        .bind(now)
-        .bind(session_id.to_string())
-        .execute(pool)
-        .await
-        .storage_err("关闭 session 失败")?;
+    // 多进程写锁争用时有限重试，避免 database is locked 直接失败
+    with_busy_retry("关闭 session", || async {
+        sqlx::query("UPDATE sessions SET ended_at = ? WHERE id = ?")
+            .bind(now)
+            .bind(session_id.to_string())
+            .execute(pool)
+            .await
+    })
+    .await
+    .storage_err("关闭 session 失败")?;
     Ok(())
 }
 
@@ -160,12 +179,16 @@ pub async fn bind_persona_uid(
     session_id: Uuid,
     persona_uid: &str,
 ) -> RamariaResult<()> {
-    sqlx::query("UPDATE sessions SET persona_uid = ? WHERE id = ?")
-        .bind(persona_uid)
-        .bind(session_id.to_string())
-        .execute(pool)
-        .await
-        .storage_err("回写 session persona_uid 失败")?;
+    // 多进程写锁争用时有限重试，避免 database is locked 直接失败
+    with_busy_retry("回写 session persona_uid", || async {
+        sqlx::query("UPDATE sessions SET persona_uid = ? WHERE id = ?")
+            .bind(persona_uid)
+            .bind(session_id.to_string())
+            .execute(pool)
+            .await
+    })
+    .await
+    .storage_err("回写 session persona_uid 失败")?;
     Ok(())
 }
 

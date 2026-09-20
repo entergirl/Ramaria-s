@@ -1,4 +1,4 @@
-//! crates/ramaria-service/src/idle.rs - 空闲检查用例（tick_idle 的服务层实现）
+//! crates/ramaria-service/src/idle.rs - 空闲检查用例与宿主循环（tick_idle 的服务层实现）
 //!
 //! 设计特点:
 //! - 全库扫描：遍历 `sessions` 中**全部**活跃会话（含切换人格遗留在库的孤儿会话），
@@ -7,13 +7,32 @@
 //! - 抢占幂等：逐个走 `seal`（条件更新抢占），多进程同时扫描不会重复生成 L1
 //! - 请求间节流：连续封存时按 `[thresholds].cluster_delay_ms` 间隔（避免触发远端 LLM 限流）
 //! - 空会话跳过：无消息的会话不触发 LLM（保持既有语义）
+//! - 宿主循环（[`IdleLoop`]）：按 `[session].idle_check_interval_seconds` 周期调用本用例，
+//!   供长驻宿主（MCP 等）不用外部驱动即可自动封存超时会话；停止由原子标志收敛，
+//!   首次检查延后一个周期（给宿主启动留缓冲），封存耗时超过周期时按延迟补跑而非连续追赶
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use ramaria_core::config::RamariaConfig;
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::traits::StorageBackend;
 use ramaria_core::types::now_ms;
+use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::engine::Engine;
+
+// =========================================================
+// 宿主循环参数
+// =========================================================
+
+/// 空闲检查间隔下限（秒）：防配置误设过小造成热循环（配置缺省 60s，远大于下限）。
+pub const MIN_IDLE_CHECK_INTERVAL_SECONDS: u64 = 5;
+
+/// 关停等待上限（秒）：等待在途封存收敛；超时放弃等待（进程即将退出，不强杀任务）。
+const IDLE_LOOP_SHUTDOWN_TIMEOUT_SECONDS: u64 = 15;
 
 /// 执行一次空闲检查：对超时会话执行封存。
 ///
@@ -121,6 +140,157 @@ async fn last_message_time(
 }
 
 // =========================================================
+// 宿主循环（进程内空闲检查）
+// =========================================================
+
+/// 空闲检查循环选项。
+///
+/// 字段约定:
+/// - `interval_seconds`: 两次扫描之间的间隔（秒），最小 1 秒（tokio 定时器不接受 0）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdleLoopOptions {
+    interval_seconds: u64,
+}
+
+impl IdleLoopOptions {
+    /// 按生效配置构造（`[session].idle_check_interval_seconds`，夹取到下限）。
+    ///
+    /// 参数:
+    /// - `config`: 生效配置（服务层只读快照）。
+    pub fn from_config(config: &RamariaConfig) -> Self {
+        let configured = config.session.idle_check_interval_seconds as u64;
+        let interval_seconds = configured.max(MIN_IDLE_CHECK_INTERVAL_SECONDS);
+        if interval_seconds != configured {
+            tracing::warn!(
+                configured,
+                used = interval_seconds,
+                "空闲检查间隔配置过小，已按下限夹取（避免热循环）"
+            );
+        }
+        Self { interval_seconds }
+    }
+
+    /// 显式指定间隔（测试与特殊宿主使用；不做下限夹取，调用方自行保证不小于 1 秒）。
+    pub fn new(interval_seconds: u64) -> Self {
+        Self { interval_seconds }
+    }
+
+    /// 生效间隔（秒）。
+    pub fn interval_seconds(&self) -> u64 {
+        self.interval_seconds
+    }
+}
+
+/// 空闲检查循环句柄。
+///
+/// 职责:
+/// - 持有后台任务与停止标志：宿主退出时调用 [`IdleLoop::shutdown`] 优雅关停；
+/// - drop 时仅置停止位（任务在下一轮 tick 自行退出），不阻塞调用方。
+///
+/// 并发约定:
+/// - 循环与前台用例共享同一 `Engine`：会话封存走抢占式条件更新，多进程 / 多线程
+///   同时封存同一会话时只有一方生成 L1（幂等）。
+pub struct IdleLoop {
+    /// 停止标志（true = 循环应在下一轮退出）。
+    stop: Arc<AtomicBool>,
+    /// 后台任务句柄（`shutdown` 时取走并等待）。
+    handle: Option<JoinHandle<()>>,
+}
+
+impl IdleLoop {
+    /// 拉起空闲检查循环。
+    ///
+    /// 流程:
+    /// 1. 等待一个间隔（跳过定时器的首次立即触发，给宿主启动与首次调用留缓冲）；
+    /// 2. 每轮先检查停止标志，再执行一次 [`Engine::tick_idle`]；
+    /// 3. 单轮失败（库不可用 / LLM 不可用）只记日志，下一轮继续重试，不终止循环。
+    ///
+    /// 参数:
+    /// - `engine`: 服务层引擎（`Arc` 共享，循环与前台用例并发使用）。
+    /// - `options`: 循环选项（间隔）。
+    pub fn spawn(engine: Arc<Engine>, options: IdleLoopOptions) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_flag = Arc::clone(&stop);
+        // tokio 定时器要求非零周期：即使调用方传入 0 也退化为 1 秒
+        let interval_seconds = options.interval_seconds.max(1);
+
+        let handle = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(interval_seconds));
+            // 首个 tick 立即返回：消费掉，使第一次扫描发生在启动后一个间隔
+            ticker.tick().await;
+            // 封存耗时（LLM）可能超过间隔：延迟补跑，不连续追赶（避免堆积任务与限流）
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+            tracing::info!(
+                interval_seconds,
+                idle_minutes = engine.config().session.l1_idle_minutes,
+                "空闲检查循环已启动（宿主退出时优雅关停）"
+            );
+
+            loop {
+                ticker.tick().await;
+                if stop_flag.load(Ordering::Acquire) {
+                    tracing::info!("空闲检查循环收到停止信号，退出");
+                    return;
+                }
+                match tick(&engine).await {
+                    Ok(0) => tracing::debug!("空闲检查：本轮无需封存"),
+                    Ok(sealed) => {
+                        tracing::info!(sealed, "空闲检查：本轮已封存 {sealed} 个超时会话")
+                    }
+                    // 单轮失败不终止循环：库或 LLM 恢复后下一轮自然成功
+                    Err(e) => {
+                        tracing::error!(error = %e, "空闲检查失败，将在下一轮重试");
+                    }
+                }
+            }
+        });
+
+        Self {
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    /// 循环是否仍在运行（未收到停止信号且任务未结束）。
+    pub fn is_running(&self) -> bool {
+        match self.handle.as_ref() {
+            Some(handle) => !handle.is_finished() && !self.stop.load(Ordering::Acquire),
+            None => false,
+        }
+    }
+
+    /// 优雅关停：置停止位并等待在途的一轮扫描结束。
+    ///
+    /// 说明:
+    /// - 等待上限 [`IDLE_LOOP_SHUTDOWN_TIMEOUT_SECONDS`] 秒：在途封存可能正在调用 LLM，
+    ///   超时后放弃等待（任务随运行时退出结束），仅记 warn 不影响退出流程；
+    /// - 可重复调用（第二次为空操作）。
+    pub async fn shutdown(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        let Some(handle) = self.handle.take() else {
+            return;
+        };
+        let timeout = Duration::from_secs(IDLE_LOOP_SHUTDOWN_TIMEOUT_SECONDS);
+        match tokio::time::timeout(timeout, handle).await {
+            Ok(Ok(())) => tracing::info!("空闲检查循环已关停"),
+            Ok(Err(e)) => tracing::warn!(error = %e, "空闲检查循环异常结束"),
+            Err(_) => tracing::warn!(
+                timeout_seconds = IDLE_LOOP_SHUTDOWN_TIMEOUT_SECONDS,
+                "空闲检查循环未在超时内退出（可能正在封存），放弃等待"
+            ),
+        }
+    }
+}
+
+impl Drop for IdleLoop {
+    /// drop 只置停止位：不阻塞（宿主可能在同步语境中释放句柄），任务于下一轮自行退出。
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+    }
+}
+
+// =========================================================
 // 单元测试
 // =========================================================
 
@@ -128,9 +298,11 @@ async fn last_message_time(
 mod tests {
     use super::*;
     use crate::test_support::{
-        L1_JSON_REPLY, engine_with_l1_reply, seed_persona, seed_session_with_messages,
+        L1_JSON_REPLY, MockLlm, engine_on_existing_db, engine_with_l1_reply, seed_persona,
+        seed_session_with_messages,
     };
     use ramaria_core::traits::StoreCrud;
+    use std::time::Instant;
 
     /// 3 个会话 2 个超时：只封存超时的 2 个，未超时的保持活跃。
     #[tokio::test]
@@ -215,6 +387,118 @@ mod tests {
     async fn tick_without_sessions_returns_zero() {
         let (engine, _storage, dir) = engine_with_l1_reply("idle-none", L1_JSON_REPLY).await;
         assert_eq!(engine.tick_idle().await.expect("空闲检查应成功"), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // =========================================================
+    // 宿主循环（M4：进程内空闲检测）
+    // =========================================================
+
+    /// 选项夹取：配置小于下限时按 [`MIN_IDLE_CHECK_INTERVAL_SECONDS`] 处理（防热循环）。
+    #[test]
+    fn idle_loop_options_clamp_configured_interval() {
+        let mut config = RamariaConfig::default();
+        assert_eq!(
+            IdleLoopOptions::from_config(&config).interval_seconds(),
+            config.session.idle_check_interval_seconds as u64,
+            "配置缺省（60s）应原样生效"
+        );
+
+        config.session.idle_check_interval_seconds = 0;
+        assert_eq!(
+            IdleLoopOptions::from_config(&config).interval_seconds(),
+            MIN_IDLE_CHECK_INTERVAL_SECONDS,
+            "0 秒应被夹取到下限（tokio 定时器不接受零周期）"
+        );
+
+        // 显式构造不做夹取（测试与特殊宿主自行保证间隔合法）
+        assert_eq!(IdleLoopOptions::new(1).interval_seconds(), 1);
+    }
+
+    /// 循环自动封存：拉起后按间隔扫描，超时会话被封闭并生成 L1；关停后不再运行。
+    #[tokio::test]
+    async fn idle_loop_seals_timed_out_session_then_stops() {
+        let (engine, storage, dir) = engine_with_l1_reply("idle-loop", L1_JSON_REPLY).await;
+        seed_persona(&storage, "char-0001").await;
+        // 20 分钟前最后发言 → 超过 10 分钟空闲阈值
+        let session =
+            seed_session_with_messages(&storage, "char-0001", 2, now_ms() - 20 * 60_000).await;
+
+        // 间隔 1 秒（首次检查延后一个周期，不会在拉起瞬间就触发 LLM）
+        let engine = Arc::new(engine);
+        let mut idle_loop = engine.spawn_idle_loop_with(IdleLoopOptions::new(1));
+        assert!(idle_loop.is_running(), "拉起后循环应处于运行状态");
+
+        // 轮询等待自动封存（最多 6 秒）：不依赖固定 sleep，避免慢机偶发失败
+        let deadline = Instant::now() + Duration::from_secs(6);
+        let mut closed = false;
+        while Instant::now() < deadline {
+            let session_row = storage
+                .get_session(session)
+                .await
+                .expect("查询会话应成功")
+                .expect("会话应存在");
+            if session_row.ended_at.is_some() {
+                closed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(closed, "空闲检查循环应在间隔内自动封存超时会话");
+        assert_eq!(
+            storage
+                .list_memory_l1(session)
+                .await
+                .expect("读取 L1 应成功")
+                .len(),
+            1,
+            "自动封存应生成 L1 摘要"
+        );
+
+        // 优雅关停：置停止位并等待在途轮次结束
+        idle_loop.shutdown().await;
+        assert!(!idle_loop.is_running(), "关停后循环不应再运行");
+        // 重复关停为空操作（不阻塞、不报错）
+        idle_loop.shutdown().await;
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 多宿主并发（M4-004 的服务层等价物）：同一库上两台引擎同时扫描 → 只生成一份 L1。
+    #[tokio::test]
+    async fn concurrent_tick_from_two_engines_seals_once() {
+        let (engine_a, storage, dir) = engine_with_l1_reply("idle-concurrent", L1_JSON_REPLY).await;
+        seed_persona(&storage, "char-0001").await;
+        let session =
+            seed_session_with_messages(&storage, "char-0001", 4, now_ms() - 20 * 60_000).await;
+
+        // 第二台引擎：同一库文件、独立连接池与内存状态（模拟"桌面 + MCP"并存）
+        let engine_b = engine_on_existing_db(
+            &dir.join("assistant.db"),
+            MockLlm::with_reply(L1_JSON_REPLY),
+            RamariaConfig::default(),
+        )
+        .await;
+
+        // 并发扫描：条件更新抢占保证只有一方进入封存链路
+        let (result_a, result_b) = tokio::join!(engine_a.tick_idle(), engine_b.tick_idle());
+        let sealed_a = result_a.expect("引擎 A 空闲检查应成功");
+        let sealed_b = result_b.expect("引擎 B 空闲检查应成功");
+        assert_eq!(
+            sealed_a + sealed_b,
+            1,
+            "同一超时会话只允许一方抢到封存（抢占幂等）"
+        );
+        assert_eq!(
+            storage
+                .list_memory_l1(session)
+                .await
+                .expect("读取 L1 应成功")
+                .len(),
+            1,
+            "并发扫描不得产生重复 L1 摘要"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -9,7 +9,8 @@
 //!   关键词词表读取失败 → 空词典（纯 bigram 口径，行为可预期）
 //! - 增量镜像：L1 生成后同步进检索器与关键词镜像（不重建整库）
 //! - 代次刷新：召回前比对库内语料戳与 BM25 分词代次，其他进程写入 / 词典升级后
-//!   重建内存索引（同进程脏标记保留为加载窗口内的兜底）
+//!   重建内存索引（同进程脏标记保留为加载窗口内的兜底）；
+//!   代次变化触发的重建再受 `[index].refresh_interval_seconds` 冷却窗口约束（0 = 不节流）
 //! - 边界：本模块只做"内存索引维护"，不写数据库（除 L2/L3 无关的索引版本标记外）
 
 use ramaria_core::error::RamariaResult;
@@ -111,6 +112,17 @@ pub(crate) async fn ensure_loaded(engine: &Engine) -> RamariaResult<bool> {
         if engine.index_stamp() == Some(stamp) {
             return Ok(false);
         }
+        // 代次变化（其他进程写入 / 分词代次升级）触发的重建受配置的最小间隔约束：
+        // 冷却窗口内沿用现有索引（窗口过后的下一次召回在同一分支补上重建），
+        // 用于写入密集期抑制整库重建风暴；首次加载与同进程脏标记路径不受此约束。
+        if !engine.index_rebuild_cooldown_elapsed() {
+            tracing::debug!(
+                bm25_version = stamp.bm25_version,
+                interval_seconds = engine.config().index.refresh_interval_seconds,
+                "索引代次已变化，但在重建冷却窗口内：本次沿用现有索引"
+            );
+            return Ok(false);
+        }
         tracing::info!(
             bm25_version = stamp.bm25_version,
             corpus_tracked = stamp.corpus.is_some(),
@@ -197,8 +209,10 @@ pub(crate) async fn ensure_loaded(engine: &Engine) -> RamariaResult<bool> {
     // ---- 5. 关键词镜像装载（词典池 + 倒排文档 + 语义层） ----
     sync_keyword_mirror(engine, &l1_views, &l2_views).await;
 
-    // ---- 6. 记录代次快照（构建前读取；构建窗口内的新写入会在下次比对时触发再刷新）----
+    // ---- 6. 记录代次快照与构建完成时间（构建前读取；构建窗口内的新写入会在下次比对时触发再刷新）----
     engine.record_index_stamp(stamp);
+    // 记"完成时间"：冷却窗口按两次重建之间的实际间隔计算（含本次构建耗时）
+    engine.record_index_build_time(now_ms());
 
     tracing::info!(
         l1 = l1_views.len(),
@@ -413,16 +427,33 @@ fn l2_view(event: &ramaria_core::types::MemoryEvent) -> L2DocView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{engine_with_db, seed_l1 as seed_l1_raw, seed_persona};
-    use crate::types::{RecallLayer, RecallRequest};
+    use crate::test_support::{
+        MockLlm, engine_with_db, engine_with_llm_and_config, seed_l1 as seed_l1_raw, seed_persona,
+    };
+    use crate::types::{RecallLayer, RecallRequest, RecallResult};
+    use ramaria_core::config::RamariaConfig;
     use ramaria_core::traits::StoreCrud;
     use ramaria_core::types::{Message, MessageRole, MessageSource};
     use ramaria_storage::SqliteStorage;
+    use std::time::Duration;
     use uuid::Uuid;
 
     /// 造一条 L1（带"工作压力"关键词，便于关键词镜像/BM25 命中）。
     async fn seed_l1(storage: &SqliteStorage, persona: &str, summary: &str) -> Uuid {
         seed_l1_raw(storage, persona, summary, Some("工作压力"), 1_000).await
+    }
+
+    /// 以 L1 层检索模式召回一句（测试统一口径：只关心 L1 是否命中）。
+    async fn recall_l1(engine: &Engine, query: &str) -> RecallResult {
+        engine
+            .recall(RecallRequest {
+                query: Some(query.to_string()),
+                persona: Some("char-0001".to_string()),
+                include: Some(vec![RecallLayer::L1]),
+                ..RecallRequest::default()
+            })
+            .await
+            .expect("召回成功")
     }
 
     /// 懒加载：首次构建返回 true，重复调用返回 false；索引可命中。
@@ -637,19 +668,112 @@ mod tests {
         other_storage.save_memory_l1(&l1).await.expect("写入 L1");
 
         // 本引擎召回：语料戳变化触发刷新，新记忆必须可见
-        let result = engine
-            .recall(RecallRequest {
-                query: Some("夜跑".to_string()),
-                persona: Some("char-0001".to_string()),
-                include: Some(vec![RecallLayer::L1]),
-                ..RecallRequest::default()
-            })
-            .await
-            .expect("召回成功");
+        let result = recall_l1(&engine, "夜跑").await;
         assert!(
             result.items.iter().any(|i| i.text.contains("夜跑")),
             "跨进程写入的新 L1 应可检索: {:?}",
             result.items
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 降级链：无嵌入模型时不阻塞索引构建，BM25 / 关键词通道命中，向量通道缺席。
+    #[tokio::test]
+    async fn no_embedding_degrades_to_non_vector_channels() {
+        let (engine, storage, dir) = engine_with_db("index-degraded").await;
+        seed_persona(&storage, "char-0001").await;
+        seed_l1(&storage, "char-0001", "用户最近开始学习游泳，每周去两次").await;
+
+        // 测试脚手架不注入嵌入模型：向量通道不可用（真实进程对应的"模型缺失"降级场景）
+        assert!(
+            !engine.is_embedding_available(),
+            "无嵌入模型时应走降级链（不阻塞装配与索引构建）"
+        );
+        assert!(
+            engine
+                .ensure_index_loaded()
+                .await
+                .expect("降级路径也应构建成功"),
+            "首次召回应完成懒加载构建"
+        );
+        assert!(engine.is_retriever_loaded());
+
+        let result = recall_l1(&engine, "游泳").await;
+        assert!(
+            !result.items.is_empty(),
+            "嵌入缺失时 BM25 / 关键词镜像应仍能命中: {:?}",
+            result.items
+        );
+        assert_eq!(
+            result.stats.channels.get("vector").copied().unwrap_or(0),
+            0,
+            "无嵌入模型时向量通道不得有命中（统计口径）"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 刷新间隔：冷却窗口内检测到跨进程写入不重建（沿用现有索引），窗口过后的下次召回补上。
+    #[tokio::test]
+    async fn refresh_interval_defers_rebuild_within_cooldown() {
+        // 冷却窗口取 1 秒（配置项单位秒；生产默认 0 = 不节流，即时可见）
+        let mut config = RamariaConfig::default();
+        config.index.refresh_interval_seconds = 1;
+        let (engine, storage, dir) =
+            engine_with_llm_and_config("index-refresh", MockLlm::local(), config).await;
+        seed_persona(&storage, "char-0001").await;
+
+        assert!(
+            engine.ensure_index_loaded().await.expect("首次加载成功"),
+            "首次召回应完成懒加载构建"
+        );
+        // 首次懒加载不受冷却约束（构建照常发生），但构建完成后即进入冷却窗口
+        assert!(
+            !engine.index_rebuild_cooldown_elapsed(),
+            "刚构建完成应处于冷却窗口内（窗口从构建完成起算）"
+        );
+
+        // 另一"进程"写入新 L1（语料代次变化）：必须在同一库文件的第二个连接上写入，
+        // 模拟"桌面写、MCP 读"的跨进程场景
+        let db_path = dir.join("assistant.db");
+        let other = SqliteStorage::new(
+            ramaria_storage::database::init_pool(Some(db_path))
+                .await
+                .expect("第二连接池应可创建"),
+        );
+        seed_l1_raw(
+            &other,
+            "char-0001",
+            "用户最近迷上了夜跑",
+            Some("夜跑"),
+            2_000,
+        )
+        .await;
+        assert!(
+            !engine.index_rebuild_cooldown_elapsed(),
+            "构建后 1 秒内应处于冷却窗口"
+        );
+
+        // 冷却窗口内：不重建 → 沿用现有索引，新 L1 尚不可见
+        let within = recall_l1(&engine, "夜跑").await;
+        assert!(
+            within.items.is_empty(),
+            "冷却窗口内应沿用现有索引（抑制重建风暴）: {:?}",
+            within.items
+        );
+
+        // 窗口过后：下一次召回补上重建 → 新 L1 可见
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        assert!(
+            engine.index_rebuild_cooldown_elapsed(),
+            "超过刷新间隔后应允许重建"
+        );
+        let after = recall_l1(&engine, "夜跑").await;
+        assert!(
+            after.items.iter().any(|i| i.text.contains("夜跑")),
+            "窗口过后的召回应重建并命中新 L1: {:?}",
+            after.items
         );
 
         let _ = std::fs::remove_dir_all(&dir);

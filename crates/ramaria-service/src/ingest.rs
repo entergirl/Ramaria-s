@@ -387,9 +387,11 @@ fn ingest_fingerprint(conversation_key: &str, role: &str, content: &str, ordinal
 mod tests {
     use super::*;
     use crate::test_support::{
-        L1_JSON_REPLY, engine_with_db, engine_with_l1_reply, seed_channel_session, seed_persona,
+        L1_JSON_REPLY, MockLlm, engine_on_existing_db, engine_with_db, engine_with_l1_reply,
+        seed_channel_session, seed_persona,
     };
     use crate::types::ChatRole;
+    use ramaria_core::config::RamariaConfig;
     use ramaria_core::traits::StoreCrud;
 
     #[test]
@@ -946,6 +948,63 @@ mod tests {
 
         assert_eq!(outcome.written, 1);
         assert_eq!(outcome.deduplicated, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 多宿主并发写（M4-004 的服务层等价物）：两台引擎各自回流 → 均成功且无写锁报错。
+    #[tokio::test]
+    async fn concurrent_ingest_from_two_engines_succeeds() {
+        let (engine_a, storage, dir) = engine_with_db("ingest-concurrent").await;
+        seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+        // 第二台引擎：同一库文件、独立连接池（模拟"桌面 + MCP"并存写同一库）
+        let engine_b = engine_on_existing_db(
+            &dir.join("assistant.db"),
+            MockLlm::local(),
+            RamariaConfig::default(),
+        )
+        .await;
+
+        let (first, second) = tokio::join!(
+            engine_a.ingest(IngestRequest {
+                messages: vec![turn(ChatRole::User, "客户端 A 的第一句")],
+                persona: None,
+                conversation_id: Some("client-A".to_string()),
+                channel: CHANNEL_MCP.to_string(),
+                finalize: false,
+            }),
+            engine_b.ingest(IngestRequest {
+                messages: vec![turn(ChatRole::User, "客户端 B 的第一句")],
+                persona: None,
+                conversation_id: Some("client-B".to_string()),
+                channel: CHANNEL_MCP.to_string(),
+                finalize: false,
+            }),
+        );
+
+        let outcome_a = first.expect("客户端 A 回流不应因写锁失败");
+        let outcome_b = second.expect("客户端 B 回流不应因写锁失败");
+        assert_eq!(outcome_a.written, 1);
+        assert_eq!(outcome_b.written, 1);
+        assert_ne!(
+            outcome_a.session_id, outcome_b.session_id,
+            "不同外部对话标识应各自成会话"
+        );
+        // 两个会话均在库中可见（桌面可见回流内容的前提）
+        assert_eq!(
+            storage
+                .count_messages(outcome_a.session_id)
+                .await
+                .expect("统计消息应成功"),
+            1
+        );
+        assert_eq!(
+            storage
+                .count_messages(outcome_b.session_id)
+                .await
+                .expect("统计消息应成功"),
+            1
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

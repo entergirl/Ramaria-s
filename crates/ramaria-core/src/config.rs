@@ -843,6 +843,7 @@ impl Default for L1ProgressiveConfig {
 ///
 /// 职责:
 /// - 控制 BM25 增量更新和周期性重建节奏。
+/// - 控制内存索引跨进程刷新（代次比对触发重建）的重建节流。
 /// - 为后续向量索引和图谱索引配置预留扩展位置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -851,6 +852,14 @@ pub struct IndexConfig {
     pub bm25_incremental_threshold: u32,
     /// BM25 定时重建间隔（秒）
     pub bm25_rebuild_interval: u32,
+    /// 内存索引两次重建之间的最小间隔（秒）。
+    ///
+    /// 语义:
+    /// - `0`（默认）: 不节流——每次召回按代次比对，跨进程写入即时可见；
+    /// - 大于 `0`: 冷却窗口内检测到代次变化也不重建（沿用现有索引），
+    ///   窗口过后的下一次召回补上；用于写入密集期抑制整库重建风暴，
+    ///   代价是跨进程写入的可见延迟不超过该间隔。
+    pub refresh_interval_seconds: u32,
 }
 
 impl Default for IndexConfig {
@@ -859,10 +868,12 @@ impl Default for IndexConfig {
     /// 返回:
     /// - BM25 缓冲区积累 10 条后合并。
     /// - 每 300 秒进行一次重建检查。
+    /// - 内存索引重建不做节流（跨进程写入即时可见）。
     fn default() -> Self {
         Self {
             bm25_incremental_threshold: 10,
             bm25_rebuild_interval: 300,
+            refresh_interval_seconds: 0,
         }
     }
 }

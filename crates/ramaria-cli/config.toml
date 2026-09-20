@@ -63,6 +63,7 @@ cluster_delay_ms = 800
 [index]
 bm25_incremental_threshold = 10
 bm25_rebuild_interval = 300
+refresh_interval_seconds = 0
 
 [logging]
 log_full_prompt = false

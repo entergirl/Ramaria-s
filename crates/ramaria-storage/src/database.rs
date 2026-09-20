@@ -4,6 +4,7 @@
 //! - 封装 SqlitePool 初始化，支持默认路径、开发路径、环境变量覆盖
 //! - migration runner：空库自动执行全部 migration 文件
 //! - WAL 模式默认启用，连接池最大 2 连接（本地应用场景）
+//! - busy_timeout 默认 10 秒：多进程共用库时写锁串行，“等待”优于“失败”
 //! - 测试模式支持 `sqlite::memory:` 内存数据库
 //! - 开发模式默认路径 `main/.ramaria-dev/assistant.db`（相对进程工作目录）
 
@@ -11,11 +12,45 @@ use ramaria_core::error::{RamariaError, RamariaResult};
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// 默认开发数据库路径（相对进程工作目录；仓库内运行时即 workspace 根 `main/`）。
 const DEV_DB_RELATIVE_PATH: &str = ".ramaria-dev/assistant.db";
 
-/// 初始化数据库连接池并执行 migration。
+/// 默认写锁等待上限（秒）。
+///
+/// 说明:
+/// - 多进程并发写同一个库时，WAL 下写锁串行；等待写锁释放（而非直接失败）
+///   更符合本地应用的使用预期。
+pub const DEFAULT_BUSY_TIMEOUT_SECONDS: u64 = 10;
+
+/// 连接池初始化调优参数。
+///
+/// 职责:
+/// - 承载连接池初始化时可调的写锁等待与并发参数；默认值对应正式装配，
+///   多池并发测试等场景可按需覆盖。
+///
+/// 字段约定:
+/// - `busy_timeout`: 单条 SQL 等待写锁释放的上限（SQLite busy handler 超时）。
+/// - `max_connections`: 连接池最大连接数。
+#[derive(Debug, Clone, Copy)]
+pub struct PoolTuning {
+    /// 写锁等待上限。
+    pub busy_timeout: Duration,
+    /// 连接池最大连接数。
+    pub max_connections: u32,
+}
+
+impl Default for PoolTuning {
+    fn default() -> Self {
+        Self {
+            busy_timeout: Duration::from_secs(DEFAULT_BUSY_TIMEOUT_SECONDS),
+            max_connections: 2,
+        }
+    }
+}
+
+/// 初始化数据库连接池并执行 migration（默认调优参数）。
 ///
 /// 参数:
 /// - `db_path`: 可选显式数据库路径。为 None 时按优先级查找：
@@ -28,8 +63,30 @@ const DEV_DB_RELATIVE_PATH: &str = ".ramaria-dev/assistant.db";
 ///
 /// 说明:
 /// - 连接启用 WAL 模式和 foreign_keys。
+/// - 写锁等待上限取 [`PoolTuning::default`]（[`DEFAULT_BUSY_TIMEOUT_SECONDS`] 秒），
+///   多进程共库时等待写锁释放而非直接失败。
 /// - 首次启动时自动创建数据库文件并执行所有 migration。
 pub async fn init_pool(db_path: Option<PathBuf>) -> RamariaResult<SqlitePool> {
+    init_pool_with(db_path, PoolTuning::default()).await
+}
+
+/// 初始化数据库连接池并执行 migration（自定义调优参数）。
+///
+/// 参数:
+/// - `db_path`: 数据库路径解析规则同 [`init_pool`]。
+/// - `tuning`: 连接池调优参数（写锁等待上限与最大连接数）。
+///
+/// 返回:
+/// - 成功时返回已连接且已执行 migration 的连接池。
+/// - 失败时返回 Storage 错误。
+///
+/// 说明:
+/// - 连接启用 WAL 模式和 foreign_keys，写锁忙时最多等待 `tuning.busy_timeout`。
+/// - 首次启动时自动创建数据库文件并执行所有 migration。
+pub async fn init_pool_with(
+    db_path: Option<PathBuf>,
+    tuning: PoolTuning,
+) -> RamariaResult<SqlitePool> {
     let path = db_path.unwrap_or_else(|| {
         std::env::var("RAMARIA_DATA_DIR")
             .map(|d| PathBuf::from(d).join("assistant.db"))
@@ -46,10 +103,11 @@ pub async fn init_pool(db_path: Option<PathBuf>) -> RamariaResult<SqlitePool> {
         .filename(&path)
         .create_if_missing(true)
         .foreign_keys(true)
+        .busy_timeout(tuning.busy_timeout)
         .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
 
     let pool = SqlitePoolOptions::new()
-        .max_connections(2)
+        .max_connections(tuning.max_connections)
         .connect_with(options)
         .await
         .map_err(|e| {

@@ -7,17 +7,20 @@
 //! - 降级链：嵌入模型缺失 → 向量通道不可用（BM25 + 关键词镜像继续工作），不阻塞装配
 //! - 懒加载：检索索引在首次召回时构建，本层仅持有占位槽（避免进程启动即加载大库）；
 //!   占位槽未加载期间产生的 L1 增量会置脏标记，保证下次加载重建不漏（见 `index_dirty`）
+//! - 重建节流：跨进程代次变化触发的重建受 `[index].refresh_interval_seconds` 约束
+//!   （0 = 不节流，见 `index_rebuild_cooldown_elapsed`）
+//! - 宿主后台任务：进程内空闲检查循环由入口层拉起（`spawn_idle_loop`），退出时优雅关停
 //! - 用例挂载点：recall / ingest / seal / tick_idle / history / persona 均由用例实现接入
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use ramaria_core::config::{EmbeddingDevice, RamariaConfig};
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::lock::{read_recover, write_recover};
 use ramaria_core::traits::{EmbeddingProvider, LlmProvider, LlmResponseCache, StorageBackend};
-use ramaria_core::types::{BackendConfig, LlmProvider as LlmProviderKind};
+use ramaria_core::types::{BackendConfig, LlmProvider as LlmProviderKind, now_ms};
 use ramaria_llm::keychain::Keychain;
 use ramaria_memory::behavior::PendingPool;
 use ramaria_memory::keyword::KeywordService;
@@ -25,6 +28,7 @@ use ramaria_memory::retriever::Retriever;
 use ramaria_storage::SqliteStorage;
 use uuid::Uuid;
 
+use crate::idle::{IdleLoop, IdleLoopOptions};
 use crate::index::IndexStamp;
 use crate::recall::RecallPolicy;
 use crate::seal::SealHooks;
@@ -102,6 +106,10 @@ pub struct Engine {
     index_dirty: Arc<AtomicBool>,
     /// 索引代次快照（构建时记录；召回前与库内比对 → 其他进程写入后刷新内存索引）。
     index_stamp: Arc<RwLock<Option<IndexStamp>>>,
+    /// 内存索引最近一次构建完成时间（Unix 毫秒；0 = 尚未构建）。
+    /// 用途：`[index].refresh_interval_seconds` 生效时限制两次重建的最小间隔
+    /// （写入密集期抑制整库重建风暴，代价是刷新延迟不超过该间隔）。
+    last_index_build_ms: Arc<AtomicI64>,
     /// 行为层待定池（跨会话内存态：行为增量编排的归簇状态，与 app 侧同一机制）。
     behavior_pending: Arc<Mutex<PendingPool>>,
     /// 召回隐私与边界策略（默认保守；入口层按 `[mcp]` 配置注入）。
@@ -192,6 +200,7 @@ impl Engine {
             keyword_mirror: Arc::new(RwLock::new(KeywordService::new())),
             index_dirty: Arc::new(AtomicBool::new(false)),
             index_stamp: Arc::new(RwLock::new(None)),
+            last_index_build_ms: Arc::new(AtomicI64::new(0)),
             recall_policy: Arc::new(RwLock::new(RecallPolicy::default())),
             seal_hooks: Arc::new(RwLock::new(SealHooks::default())),
         })
@@ -222,6 +231,7 @@ impl Engine {
             keyword_mirror: Arc::new(RwLock::new(KeywordService::new())),
             index_dirty: Arc::new(AtomicBool::new(false)),
             index_stamp: Arc::new(RwLock::new(None)),
+            last_index_build_ms: Arc::new(AtomicI64::new(0)),
             recall_policy: Arc::new(RwLock::new(RecallPolicy::default())),
             seal_hooks: Arc::new(RwLock::new(SealHooks::default())),
         }
@@ -404,6 +414,33 @@ impl Engine {
     }
 
     // =========================================================
+    // 宿主后台任务
+    // =========================================================
+
+    /// 启动进程内空闲检查循环（超时会话按 `[session].l1_idle_minutes` 触发封存）。
+    ///
+    /// 用法:
+    /// - 长驻宿主（MCP 服务端等）启动时拉起，退出时 [`IdleLoop::shutdown`] 优雅关停；
+    /// - 桌面入口用自身生命周期线程（含状态机与桥接段逻辑），不复用本循环；
+    /// - 封存消耗 LLM 并改变记忆状态：入口层可自行按配置门禁决定是否拉起（如 `[mcp].allow_seal`）。
+    ///
+    /// 返回:
+    /// - 循环句柄；drop 或 [`IdleLoop::shutdown`] 均会置停止位。
+    pub fn spawn_idle_loop(self: &Arc<Self>) -> IdleLoop {
+        let options = IdleLoopOptions::from_config(&self.config);
+        IdleLoop::spawn(Arc::clone(self), options)
+    }
+
+    /// 以显式选项启动空闲检查循环（测试与需要非配置间隔的宿主使用）。
+    ///
+    /// 参数:
+    /// - `options`: 循环选项（间隔秒数）。生产路径应走
+    ///   [`IdleLoopOptions::from_config`]（含下限夹取，避免热循环）。
+    pub fn spawn_idle_loop_with(self: &Arc<Self>, options: IdleLoopOptions) -> IdleLoop {
+        IdleLoop::spawn(Arc::clone(self), options)
+    }
+
+    // =========================================================
     // 内部依赖访问器（crate 内用例实现使用）
     // =========================================================
 
@@ -469,6 +506,34 @@ impl Engine {
     /// 当前已记录的索引代次快照（索引未构建过时为 None）。
     pub(crate) fn index_stamp(&self) -> Option<IndexStamp> {
         *read_recover(&self.index_stamp, "engine.index_stamp")
+    }
+
+    /// 记录内存索引最近一次构建完成时间（索引构建成功后调用）。
+    pub(crate) fn record_index_build_time(&self, at_ms: i64) {
+        self.last_index_build_ms.store(at_ms, Ordering::Release);
+    }
+
+    /// 内存索引最近一次构建完成时间（Unix 毫秒；0 = 尚未构建）。
+    pub(crate) fn last_index_build_time(&self) -> i64 {
+        self.last_index_build_ms.load(Ordering::Acquire)
+    }
+
+    /// 判断当前是否允许重建内存索引（`[index].refresh_interval_seconds` 冷却窗口）。
+    ///
+    /// 语义:
+    /// - 允许重建：间隔配置为 0（不节流）、从未构建过、或距上次构建已完成超过间隔；
+    /// - 不允许：冷却窗口内——本次沿用现有索引，窗口过后的下一次召回补上重建
+    ///   （用于写入密集期抑制整库重建风暴；不适用于首次加载与同进程脏标记路径）。
+    pub(crate) fn index_rebuild_cooldown_elapsed(&self) -> bool {
+        let interval_seconds = self.config.index.refresh_interval_seconds;
+        if interval_seconds == 0 {
+            return true;
+        }
+        let last_build_ms = self.last_index_build_time();
+        if last_build_ms == 0 {
+            return true;
+        }
+        now_ms().saturating_sub(last_build_ms) >= interval_seconds as i64 * 1_000
     }
 }
 
@@ -790,6 +855,55 @@ mod tests {
                 .await
                 .expect("人格列表应成功")
                 .is_empty()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 重建冷却窗口：间隔为 0（默认）恒允许；配置间隔后按"最近构建完成时间"判定。
+    #[tokio::test]
+    async fn index_rebuild_cooldown_follows_config_interval() {
+        let dir = temp_dir("cooldown");
+        let db_path = dir.join("assistant.db");
+        let pool = ramaria_storage::database::init_pool(Some(db_path))
+            .await
+            .expect("初始化测试库应成功");
+        let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::new(pool));
+        let keychain = Arc::new(Keychain::new());
+        let llm = build_llm_provider(&BackendConfig::lm_studio_default(), &keychain, None)
+            .expect("构建本地 provider 应成功");
+
+        // 间隔 0（默认）: 不节流 —— 跨进程写入即时可见
+        let engine = Engine::from_parts(
+            Arc::clone(&storage),
+            Arc::clone(&llm),
+            None,
+            TestConfig::default(),
+        );
+        assert_eq!(engine.config().index.refresh_interval_seconds, 0);
+        engine.record_index_build_time(now_ms());
+        assert!(
+            engine.index_rebuild_cooldown_elapsed(),
+            "间隔为 0 时应恒允许重建"
+        );
+
+        // 间隔 60 秒: 从未构建 / 窗口内 / 超过窗口 三种判定
+        let mut config = TestConfig::default();
+        config.index.refresh_interval_seconds = 60;
+        let engine = Engine::from_parts(storage, llm, None, config);
+        assert!(
+            engine.index_rebuild_cooldown_elapsed(),
+            "从未构建过索引 → 允许（首次加载不受节流约束）"
+        );
+        engine.record_index_build_time(now_ms());
+        assert!(
+            !engine.index_rebuild_cooldown_elapsed(),
+            "刚构建完成 → 冷却窗口内不允许重建"
+        );
+        engine.record_index_build_time(now_ms() - 61_000);
+        assert!(
+            engine.index_rebuild_cooldown_elapsed(),
+            "距上次构建超过间隔 → 允许重建"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

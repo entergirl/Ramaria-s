@@ -7,6 +7,7 @@
 //! - 版本值统一解析为 i32，非法值时返回 Storage 错误而非静默回退
 
 use crate::repo::StorageResultExt;
+use crate::retry::with_busy_retry;
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::traits::IndexCorpusStamp;
 use sqlx::SqlitePool;
@@ -36,11 +37,15 @@ pub async fn get_index_version(pool: &SqlitePool) -> RamariaResult<i32> {
 }
 
 pub async fn set_index_version(pool: &SqlitePool, version: i32) -> RamariaResult<()> {
-    sqlx::query("INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('index_version', ?)")
-        .bind(version.to_string())
-        .execute(pool)
-        .await
-        .storage_err("更新索引版本失败")?;
+    // 多进程写锁争用时有限重试，避免 database is locked 直接失败
+    with_busy_retry("更新索引版本", || async {
+        sqlx::query("INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('index_version', ?)")
+            .bind(version.to_string())
+            .execute(pool)
+            .await
+    })
+    .await
+    .storage_err("更新索引版本失败")?;
     Ok(())
 }
 

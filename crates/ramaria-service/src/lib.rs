@@ -13,6 +13,7 @@
 //! - `engine`：依赖装配（storage / config / LLM / embedding / 检索槽）与用例入口；
 //! - `index`：检索索引懒加载、代次刷新与 L1 增量镜像（召回前置）；
 //! - `recall` / `chat` / `ingest` / `seal` / `idle` / `session` / `persona`：用例实现；
+//!   空闲检查同时提供宿主循环（`IdleLoop`），供长驻进程免外部驱动自动封存超时会话；
 //! - `l2`：L2 事件提取触发（无 app 宿主的运行时用）；
 //! - `hooks`：默认封存钩子装配（行为 / 风格 / L2，供 MCP 等入口注册）；
 //! - 入口层（如 `ramaria-mcp`）只做协议包装，不承载业务逻辑。
@@ -35,6 +36,7 @@ pub(crate) mod test_support;
 
 pub use engine::{Engine, EngineOptions};
 pub use hooks::default_seal_hooks;
+pub use idle::{IdleLoop, IdleLoopOptions, MIN_IDLE_CHECK_INTERVAL_SECONDS};
 pub use recall::RecallPolicy;
 pub use seal::{SealHook, SealHooks};
 pub use types::{

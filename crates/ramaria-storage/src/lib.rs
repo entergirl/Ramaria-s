@@ -24,6 +24,7 @@ use uuid::Uuid;
 
 pub mod database;
 pub mod repo;
+pub mod retry;
 
 /// SQLite 存储后端。
 pub struct SqliteStorage {
