@@ -12,6 +12,7 @@ use crate::repo::parse_uuid_required;
 use crate::retry::with_busy_retry;
 use ramaria_core::error::RamariaResult;
 use ramaria_core::types::{CHANNEL_LOCAL, Session};
+use sqlx::Row;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
@@ -122,6 +123,61 @@ pub async fn find_active_by_channel(
     .await
     .storage_err("查询通道活跃 session 失败")?;
     row.map(SessionRow::into_session).transpose()
+}
+
+/// 通道会话概览（外部入口的可见性统计）。
+///
+/// 职责:
+/// - 为入口层（如桌面「MCP 接入」面板）提供"该通道是否有客户端在用"的可见证据：
+///   活跃会话数 + 最近一条消息时间。stdio MCP 服务由外部客户端按需拉起，
+///   桌面侧无法直接观测其进程状态，只能以库内活动数据近似呈现。
+///
+/// 字段约定:
+/// - `active_sessions`: 该通道下未关闭（`ended_at IS NULL`）的会话数。
+/// - `last_activity_ms`: 该通道全部会话中最近一条消息的 `created_at`（Unix 毫秒）；
+///   该通道无任何消息时为 `None`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelOverview {
+    pub active_sessions: i64,
+    pub last_activity_ms: Option<i64>,
+}
+
+/// 统计指定通道的会话概览（活跃会话数 + 最近活动时间）。
+///
+/// 参数:
+/// - `channel`: 来源通道（如 `mcp` / `local`）。
+///
+/// 返回:
+/// - [`ChannelOverview`]；空通道返回 `active_sessions = 0` 且 `last_activity_ms = None`。
+///
+/// 说明:
+/// - 单条 SQL 以子查询完成两个聚合，避免两次往返（面板每次进入设置页调用一次）；
+/// - 只读查询，不参与写锁竞争。
+pub async fn channel_overview(pool: &SqlitePool, channel: &str) -> RamariaResult<ChannelOverview> {
+    let row = sqlx::query(
+        "SELECT \
+           (SELECT COUNT(*) FROM sessions WHERE channel = ? AND ended_at IS NULL) AS active_sessions, \
+           (SELECT MAX(m.created_at) FROM messages m \
+              JOIN sessions s ON m.session_id = s.id \
+             WHERE s.channel = ?) AS last_activity_ms",
+    )
+    .bind(channel)
+    .bind(channel)
+    .fetch_one(pool)
+    .await
+    .storage_err("统计通道会话概览失败")?;
+
+    let active_sessions: i64 = row
+        .try_get("active_sessions")
+        .storage_err("读取通道活跃会话数失败")?;
+    let last_activity_ms: Option<i64> = row
+        .try_get("last_activity_ms")
+        .storage_err("读取通道最近活动时间失败")?;
+
+    Ok(ChannelOverview {
+        active_sessions: active_sessions.max(0),
+        last_activity_ms,
+    })
 }
 
 /// 条件更新抢占式关闭 session（幂等封存入口）。
@@ -595,5 +651,61 @@ mod tests {
             .expect("查询成功")
             .expect("session 应存在");
         assert!(fetched.ended_at.is_some(), "关闭后 ended_at 应落库");
+    }
+
+    /// 通道概览：活跃会话数与最近活动时间按通道归组；关闭后活跃数下降。
+    #[tokio::test]
+    async fn channel_overview_counts_active_and_latest_activity() {
+        let pool = init_test_pool().await.expect("测试库初始化成功");
+
+        // 空通道：计数为 0、无活动时间（面板空状态）
+        let empty = channel_overview(&pool, "mcp")
+            .await
+            .expect("统计空通道成功");
+        assert_eq!(empty.active_sessions, 0);
+        assert_eq!(empty.last_activity_ms, None);
+
+        // mcp 通道两个会话 + local 通道一个会话（local 不应计入 mcp 统计）
+        let s1 = create_in_channel(&pool, Some("rama-0001"), "mcp", Some("client-A"))
+            .await
+            .expect("创建 mcp 会话 1 成功");
+        let s2 = create_in_channel(&pool, Some("rama-0001"), "mcp", Some("client-B"))
+            .await
+            .expect("创建 mcp 会话 2 成功");
+        let local = create(&pool, None).await.expect("创建本地会话成功");
+
+        for (session_id, ts) in [(s1.id, 1_000_i64), (s2.id, 2_000), (local.id, 9_000)] {
+            let mut m = Message::new(
+                session_id,
+                MessageRole::User,
+                "内容".to_string(),
+                MessageSource::Local,
+            );
+            m.created_at = ts;
+            crate::repo::messages::save_import(&pool, &m)
+                .await
+                .expect("插入消息成功");
+        }
+
+        let overview = channel_overview(&pool, "mcp")
+            .await
+            .expect("统计 mcp 通道成功");
+        assert_eq!(overview.active_sessions, 2, "两个 mcp 会话均活跃");
+        assert_eq!(
+            overview.last_activity_ms,
+            Some(2_000),
+            "最近活动取 mcp 通道消息，local 会话（9000）不计入"
+        );
+
+        // 关闭 s1：活跃数下降；最近活动时间不受影响（消息仍在库中）
+        assert!(
+            close_if_active(&pool, s1.id).await.expect("条件关闭成功"),
+            "首次关闭应抢到"
+        );
+        let after = channel_overview(&pool, "mcp")
+            .await
+            .expect("统计 mcp 通道成功");
+        assert_eq!(after.active_sessions, 1, "关闭一个会话后活跃数应下降");
+        assert_eq!(after.last_activity_ms, Some(2_000));
     }
 }

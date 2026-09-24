@@ -231,3 +231,75 @@ test('高级字段元数据形态合法（分组完整 / 路径唯一 / 类型�
     }
   }
 });
+
+// =========================================================
+// MCP 接入面板（v2.1 M5）：字段默认值与 config/default.toml 逐键一致
+// =========================================================
+
+if (typeof settingsView.getMcpFields !== 'function') {
+  throw new Error('settings.js 未暴露 getMcpFields()（MCP 面板元数据缺失）');
+}
+
+// 以伪组包装（section 前缀 + 字段元数据），复用高级组的路径解析口径
+const mcpFields = flattenFields([
+  { key: 'mcp', section: ['mcp'], fields: settingsView.getMcpFields() },
+]);
+
+test('MCP 面板字段默认值与 config/default.toml 逐键一致', () => {
+  const mismatches = [];
+
+  for (const [key, field] of Object.entries(mcpFields)) {
+    const templateValue = getByPath(templateConfig, key.split('.'));
+    if (templateValue === undefined) {
+      // 与高级组不同：MCP 面板字段必须全部收录于模板（面板保存走全量回写）
+      mismatches.push(`${key}: default.toml 未收录该键`);
+      continue;
+    }
+
+    const same = Array.isArray(field.def)
+      ? JSON.stringify(field.def) === JSON.stringify(templateValue)
+      : field.def === templateValue;
+
+    if (!same) {
+      mismatches.push(
+        `${key}: 前端 def=${JSON.stringify(field.def)} vs default.toml=${JSON.stringify(templateValue)}`
+      );
+    }
+  }
+
+  assert.deepEqual(mismatches, [], `MCP 面板默认值漂移:\n${mismatches.join('\n')}`);
+});
+
+test('MCP 面板：七键齐全且字段形态合法', () => {
+  const expected = [
+    'mcp.enabled',
+    'mcp.allow_ingest',
+    'mcp.allow_seal',
+    'mcp.allowed_personas',
+    'mcp.allow_raw_text',
+    'mcp.max_items',
+    'mcp.max_chars',
+  ];
+  assert.deepEqual(Object.keys(mcpFields).sort(), expected.slice().sort());
+
+  const allowedTypes = ['bool', 'number', 'string-list'];
+  for (const [key, field] of Object.entries(mcpFields)) {
+    assert.ok(allowedTypes.includes(field.type), `${key}: 未知类型 ${field.type}`);
+    assert.ok(field.label && field.hint, `${key}: 缺少 label/hint`);
+
+    if (field.type === 'bool') {
+      assert.equal(typeof field.def, 'boolean', `${key}: bool 默认值应为布尔`);
+    } else if (field.type === 'number') {
+      assert.equal(typeof field.def, 'number', `${key}: number 默认值应为数字`);
+      assert.ok(field.min !== undefined && field.max !== undefined, `${key}: 缺少取值边界`);
+    } else {
+      assert.ok(Array.isArray(field.def), `${key}: string-list 默认值应为数组`);
+    }
+  }
+});
+
+test('MCP 面板：白名单默认全部人格可见', () => {
+  // 经 JSON 往返归一：vm 沙箱数组的原型与宿主 realm 不同，直接 deepEqual 会误报
+  const def = JSON.parse(JSON.stringify(mcpFields['mcp.allowed_personas'].def));
+  assert.deepEqual(def, ['*']);
+});

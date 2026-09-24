@@ -501,4 +501,67 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// 循环与前台用例并存（并发手测的宿主层等价物）：空闲循环运行期间前台 `seal`
+    /// 照常工作，两者共同收敛全部超时会话，且每个会话恰好一份 L1（抢占幂等）。
+    #[tokio::test]
+    async fn idle_loop_and_foreground_seal_do_not_duplicate_l1() {
+        let (engine, storage, dir) = engine_with_l1_reply("idle-foreground", L1_JSON_REPLY).await;
+        seed_persona(&storage, "char-0001").await;
+        // 两个超时会话：一个由前台抢占，另一个交给循环
+        let session_front =
+            seed_session_with_messages(&storage, "char-0001", 2, now_ms() - 20 * 60_000).await;
+        let session_loop =
+            seed_session_with_messages(&storage, "char-0001", 2, now_ms() - 20 * 60_000).await;
+
+        let engine = Arc::new(engine);
+        let mut idle_loop = engine.spawn_idle_loop_with(IdleLoopOptions::new(1));
+
+        // 前台立即抢封存（与循环的首轮扫描并发）：抢到与否都是合法结果，
+        // 正确性由下方"每个会话恰好一份 L1"断言承担
+        let _ = engine.seal(session_front).await.expect("前台封存不应报错");
+
+        // 等待两个会话都被关闭（前台 + 循环共同收敛，上限 6 秒）
+        let deadline = Instant::now() + Duration::from_secs(6);
+        loop {
+            let front_closed = storage
+                .get_session(session_front)
+                .await
+                .expect("查询会话应成功")
+                .expect("会话应存在")
+                .ended_at
+                .is_some();
+            let loop_closed = storage
+                .get_session(session_loop)
+                .await
+                .expect("查询会话应成功")
+                .expect("会话应存在")
+                .ended_at
+                .is_some();
+            if front_closed && loop_closed {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "循环与前台应在上限内关闭全部超时会话"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // 并发封存不产生重复摘要：每个会话恰好一份 L1
+        for session in [session_front, session_loop] {
+            assert_eq!(
+                storage
+                    .list_memory_l1(session)
+                    .await
+                    .expect("读取 L1 应成功")
+                    .len(),
+                1,
+                "会话 {session} 应恰好一份 L1（抢占幂等）"
+            );
+        }
+
+        idle_loop.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -4,6 +4,7 @@
  * 职责:
  * - 后端配置（Provider / Base URL / Model ID / API Key）
  * - 隐私设置（隐私确认状态查看 / 记忆注入开关）
+ * - MCP 接入（外部客户端挂载开关 / 白名单 / 运行状态 / 配置片段复制）
  * - 数据管理（导出 JSON / 导出 Markdown / 重建索引）
  * - 诊断与更新（检查更新 / 导出诊断信息）
  * - 关于信息（版本号 / 许可证）
@@ -35,8 +36,14 @@ var RamariaSettingsView = (function () {
 
  /** 当前后端配置缓存 */
     var _backendConfig = null;
- /** 当前隐私状态 */
+    /** 当前隐私状态 */
     var _privacyStatus = null;
+    /** MCP 接入信息缓存（get_mcp_info 结果：库路径 / CLI 命令 / 活动统计） */
+    var _mcpInfo = null;
+    /** MCP 客户端配置片段（随 _mcpInfo 刷新重建） */
+    var _mcpSnippets = [];
+    /** 当前选中的客户端片段索引（客户端选择器） */
+    var _mcpClientIndex = 0;
 
  /**
   * 本次启动（会话）是否启用调试。
@@ -116,6 +123,7 @@ var RamariaSettingsView = (function () {
         _renderSessionSection(basicPane);
         _renderPrivacySection(basicPane);
         _renderDataDirSection(basicPane);
+        _renderMcpSection(basicPane);
         _renderDataSection(basicPane);
         _renderDiagnosticsSection(basicPane);
         _renderAboutSection(basicPane);
@@ -491,9 +499,637 @@ var RamariaSettingsView = (function () {
         }
     }
 
- // =========================================================
- // 会话区块（v1.4 M5：空闲自动保存时长滑动块）
- // =========================================================
+// =========================================================
+// MCP 接入区块（v2.1 M5：外部客户端挂载面板）
+// =========================================================
+
+    /**
+     * 「MCP 接入」面板字段元数据（数据驱动渲染 / 回显 / 保存 / 默认值回归比对）。
+     *
+     * 字段约定（与 `_ADVANCED_GROUPS` 的字段同构）:
+     * - `path`: 组内相对路径；完整配置路径 = ['mcp'].concat(path)。
+     * - `type`: `bool` | `number` | `string-list`。
+     * - `def`: 默认值，与 `config/default.toml` 的 `[mcp]` 组逐键一致（回归测试锁定）。
+     * - `min` / `max`: `number` 类型的前端校验边界（服务端仍会独立钳制）。
+     *
+     * 说明:
+     * - `allowed_personas`（`string-list`）交互为「全部人格可见」复选框 + uid 列表输入框，
+     *   渲染与收集逻辑单独处理；元数据 def 仍与模板一致，纳入默认值回归测试。
+     */
+    var _MCP_FIELDS = [
+        {
+            path: ['enabled'],
+            label: '启用 MCP 接入',
+            type: 'bool',
+            def: false,
+            hint: '总开关；关闭时外部客户端挂载成功但所有工具均不可用（返回可操作错误）',
+        },
+        {
+            path: ['allow_ingest'],
+            label: '允许外部写入回流',
+            type: 'bool',
+            def: true,
+            hint: '允许外部对话经 chat_ingest / chat_send 写回 Ramaria（桌面会话列表可见）',
+        },
+        {
+            path: ['allow_seal'],
+            label: '允许 MCP 侧封存与摘要',
+            type: 'bool',
+            def: true,
+            hint: '封存会调用 LLM 生成 L1 摘要并改变记忆状态；关闭后只写不封存',
+        },
+        {
+            path: ['allow_raw_text'],
+            label: '允许返回原文块',
+            type: 'bool',
+            def: false,
+            hint: '原文是最高敏感层，默认不出端；开启后原文片段可能随对话发送给客户端所用模型',
+        },
+        {
+            path: ['allowed_personas'],
+            label: '可见人格白名单',
+            type: 'string-list',
+            def: ['*'],
+            hint: '「*」表示全部人格可见；取消「全部人格可见」后输入具体人格 uid（逗号分隔）',
+        },
+        {
+            path: ['max_items'],
+            label: '召回条目上限',
+            type: 'number',
+            min: 1,
+            max: 20,
+            def: 5,
+            hint: 'memory_recall 默认返回条目数（1~20，超出按 20 截断）',
+        },
+        {
+            path: ['max_chars'],
+            label: '上下文文本预算（字符）',
+            type: 'number',
+            min: 100,
+            max: 20000,
+            def: 1200,
+            hint: 'memory_recall 返回 context 的字符预算（默认 1200）',
+        },
+    ];
+
+    /**
+     * MCP 面板字段的 DOM id（与元数据路径一一对应）。
+     */
+    function _mcpFieldId(f) {
+        return 'settings-mcp-' + f.path.join('-');
+    }
+
+    function _renderMcpSection(parent) {
+        var section = document.createElement('div');
+        section.className = 'settings-section';
+        section.innerHTML =
+            '<div class="settings-section-title">📡 MCP 接入</div>' +
+            '<div class="settings-section-desc">' +
+                '让 Claude Desktop / Cursor / OpenClaw 等外部客户端按 MCP 协议挂载 Ramaria 的记忆与人格。' +
+            '</div>';
+
+        // ── 运行状态卡（只读展示；MCP 服务由客户端按需拉起，以通道活动近似呈现）──
+        var statusCard = document.createElement('div');
+        statusCard.className = 'settings-card';
+        statusCard.innerHTML =
+            '<div class="settings-row">' +
+                '<div>' +
+                    '<div class="settings-row-label">接入状态</div>' +
+                    '<div class="settings-row-meta">配置开关状态；stdio 服务由客户端挂载时启动</div>' +
+                '</div>' +
+                '<span class="settings-row-value" id="settings-mcp-status">加载中...</span>' +
+            '</div>' +
+            '<div class="settings-row">' +
+                '<div>' +
+                    '<div class="settings-row-label">最近外部活动</div>' +
+                    '<div class="settings-row-meta">外部客户端最近一次写入消息的时间</div>' +
+                '</div>' +
+                '<span class="settings-row-value" id="settings-mcp-activity">-</span>' +
+            '</div>' +
+            '<div class="settings-row">' +
+                '<div>' +
+                    '<div class="settings-row-label">活跃外部会话</div>' +
+                    '<div class="settings-row-meta">未封存的 mcp 通道会话数</div>' +
+                '</div>' +
+                '<span class="settings-row-value" id="settings-mcp-active-sessions">-</span>' +
+            '</div>' +
+            '<div class="settings-row">' +
+                '<div>' +
+                    '<div class="settings-row-label">数据库路径</div>' +
+                    '<div class="settings-row-meta">客户端配置片段中的 --db 参数</div>' +
+                '</div>' +
+                '<span class="settings-row-value settings-code-inline settings-mcp-path" id="settings-mcp-db-path">-</span>' +
+            '</div>' +
+            '<div class="settings-actions">' +
+                '<button class="btn btn-secondary btn-sm" id="settings-mcp-copy-db-path">复制库路径</button>' +
+                '<button class="btn btn-secondary btn-sm" id="settings-mcp-refresh">刷新状态</button>' +
+            '</div>';
+        section.appendChild(statusCard);
+
+        // ── 隐私提示（挂载后内容随对话发送给客户端所用模型）──
+        var risk = document.createElement('div');
+        risk.className = 'settings-risk-banner';
+        risk.textContent =
+            '⚠️ 挂载 MCP 后，被检索到的记忆与外部对话回流内容会随对话发送给该客户端所使用的模型；' +
+            '原文块默认不出端，可用下方人格白名单与原文开关收紧可见范围。';
+        section.appendChild(risk);
+
+        // ── 配置卡（字段由元数据驱动渲染）──
+        var formCard = document.createElement('div');
+        formCard.className = 'settings-card';
+        var html = '';
+        for (var i = 0; i < _MCP_FIELDS.length; i++) {
+            html += _mcpFieldHtml(_MCP_FIELDS[i]);
+        }
+        html += '<div class="settings-form-hint">' +
+                    '配置在 MCP 连接启动时读取；修改后需在客户端重连（重启）MCP 连接才生效。' +
+                '</div>' +
+                '<div class="settings-save-hint">' +
+                    '<button class="btn btn-primary btn-sm" id="settings-mcp-save">保存 MCP 设置</button>' +
+                '</div>';
+        formCard.innerHTML = html;
+        section.appendChild(formCard);
+
+        // ── 客户端配置片段卡（复制即用）──
+        var snippetCard = document.createElement('div');
+        snippetCard.className = 'settings-card';
+        snippetCard.innerHTML =
+            '<div class="settings-form-group">' +
+                '<label class="settings-form-label">客户端配置片段</label>' +
+                '<select class="settings-form-select" id="settings-mcp-client-select">' +
+                    '<option>加载中...</option>' +
+                '</select>' +
+                '<div class="settings-form-hint" id="settings-mcp-client-file"></div>' +
+                '<textarea class="settings-mcp-textarea" id="settings-mcp-snippet" rows="9" readonly></textarea>' +
+                '<div class="settings-form-hint" id="settings-mcp-snippet-note"></div>' +
+            '</div>' +
+            '<div class="settings-actions">' +
+                '<button class="btn btn-secondary btn-sm" id="settings-mcp-copy-snippet">复制配置片段</button>' +
+            '</div>';
+        section.appendChild(snippetCard);
+
+        parent.appendChild(section);
+
+        // ── 事件绑定 ──
+        var saveBtn = $('settings-mcp-save');
+        if (saveBtn) saveBtn.addEventListener('click', _handleSaveMcp);
+
+        var refreshBtn = $('settings-mcp-refresh');
+        if (refreshBtn) {
+            refreshBtn.addEventListener('click', function () {
+                RamariaToast.show('info', '正在刷新 MCP 状态...');
+                _refreshMcpInfo();
+            });
+        }
+
+        var copyDbBtn = $('settings-mcp-copy-db-path');
+        if (copyDbBtn) copyDbBtn.addEventListener('click', _handleCopyMcpDbPath);
+
+        var copySnippetBtn = $('settings-mcp-copy-snippet');
+        if (copySnippetBtn) copySnippetBtn.addEventListener('click', _handleCopyMcpSnippet);
+
+        var selectEl = $('settings-mcp-client-select');
+        if (selectEl) {
+            selectEl.addEventListener('change', function () {
+                var idx = parseInt(selectEl.value, 10);
+                if (!isNaN(idx)) {
+                    _mcpClientIndex = idx;
+                    _renderMcpSnippetPicker();
+                }
+            });
+        }
+
+        // 白名单字段的「全部人格可见」开关联动（按元数据类型定位，不硬编码索引）
+        for (var k = 0; k < _MCP_FIELDS.length; k++) {
+            if (_MCP_FIELDS[k].type !== 'string-list') continue;
+            var allBox = $(_mcpFieldId(_MCP_FIELDS[k]) + '-all');
+            if (allBox) allBox.addEventListener('change', _handleMcpAllPersonasToggle);
+
+            // uid 输入即视为自定义：移除"默认值浅色"提示态
+            var uidEl = $(_mcpFieldId(_MCP_FIELDS[k]) + '-uids');
+            if (uidEl) {
+                uidEl.addEventListener('input', (function (el) {
+                    return function () { el.classList.remove('is-default'); };
+                })(uidEl));
+            }
+        }
+
+        // 数值输入框：输入时同步"默认值浅色字符"状态
+        for (var j = 0; j < _MCP_FIELDS.length; j++) {
+            (function (field) {
+                if (field.type !== 'number') return;
+                var input = $(_mcpFieldId(field));
+                if (input) {
+                    input.addEventListener('input', function () {
+                        _syncAdvancedInputDefault(input, field);
+                    });
+                }
+            })(_MCP_FIELDS[j]);
+        }
+    }
+
+    /**
+     * 渲染一个 MCP 面板字段的 HTML（由元数据驱动，与回显/收集共用同一 id 规则）。
+     */
+    function _mcpFieldHtml(f) {
+        var fid = _mcpFieldId(f);
+
+        if (f.type === 'bool') {
+            return '<div class="settings-form-group">' +
+                '<label class="settings-form-label">' +
+                    '<input type="checkbox" id="' + fid + '"' + (f.def ? ' checked' : '') + ' /> ' + f.label +
+                '</label>' +
+                '<div class="settings-form-hint">' + f.hint + '（默认：' + (f.def ? '开' : '关') + '）</div>' +
+            '</div>';
+        }
+
+        if (f.type === 'number') {
+            return '<div class="settings-form-group">' +
+                '<label class="settings-form-label">' + f.label + '</label>' +
+                '<input class="settings-form-input is-default" id="' + fid + '" type="number" value="' + f.def + '"' +
+                    (f.min !== undefined ? ' min="' + f.min + '"' : '') +
+                    (f.max !== undefined ? ' max="' + f.max + '"' : '') +
+                ' />' +
+                '<div class="settings-form-hint">' + f.hint + '（默认：' + f.def + '）</div>' +
+            '</div>';
+        }
+
+        // string-list：全部人格开关 + uid 列表输入（预留，元数据驱动）
+        return '<div class="settings-form-group">' +
+            '<label class="settings-form-label">' + f.label + '</label>' +
+            '<div class="settings-form-whitelist">' +
+                '<label class="settings-form-inline-label">' +
+                    '<input type="checkbox" id="' + fid + '-all" checked /> 全部人格可见' +
+                '</label>' +
+            '</div>' +
+            '<input class="settings-form-input is-default" id="' + fid + '-uids" type="text" ' +
+                'placeholder="rama-0001, char-0002" disabled />' +
+            '<div class="settings-form-hint">' + f.hint + '</div>' +
+        '</div>';
+    }
+
+    /**
+     * 回显 MCP 配置（进入设置页时调用）。
+     *
+     * 说明:
+     * - 白名单语义对齐服务端：`['*']` 或空数组均视为"全部人格可见"；
+     * - 数字输入框同步"默认值浅色字符"状态。
+     */
+    function _fillMcpForm(config) {
+        if (!config || !config.mcp) return;
+        var mcp = config.mcp;
+
+        for (var i = 0; i < _MCP_FIELDS.length; i++) {
+            var f = _MCP_FIELDS[i];
+            var key = f.path[0];
+            var fid = _mcpFieldId(f);
+
+            if (f.type === 'bool') {
+                var box = $(fid);
+                if (box && typeof mcp[key] === 'boolean') box.checked = mcp[key];
+            } else if (f.type === 'number') {
+                var input = $(fid);
+                if (input && typeof mcp[key] === 'number') {
+                    input.value = mcp[key];
+                    _syncAdvancedInputDefault(input, f);
+                }
+            }
+        }
+
+        // 白名单
+        var personas = Array.isArray(mcp.allowed_personas) ? mcp.allowed_personas : [];
+        var all = personas.length === 0 || personas.indexOf('*') !== -1;
+        var allBox = $('settings-mcp-allowed-personas-all');
+        var uidInput = $('settings-mcp-allowed-personas-uids');
+        if (allBox) allBox.checked = all;
+        if (uidInput) {
+            uidInput.disabled = all;
+            uidInput.value = all ? '' : personas.join(', ');
+            uidInput.classList.toggle('is-default', all || personas.length === 0);
+        }
+    }
+
+    /**
+     * 「全部人格可见」开关联动：勾选时禁用并清空 uid 输入框。
+     */
+    function _handleMcpAllPersonasToggle() {
+        var allBox = $('settings-mcp-allowed-personas-all');
+        var uidInput = $('settings-mcp-allowed-personas-uids');
+        if (!uidInput) return;
+        var all = !!(allBox && allBox.checked);
+        uidInput.disabled = all;
+        if (all) uidInput.value = '';
+    }
+
+    /**
+     * 解析人格 uid 列表输入（逗号/中文逗号/空白分隔，去空去重）。
+     */
+    function _parseUidList(text) {
+        if (!text) return [];
+        var parts = String(text).split(/[,，\s]+/);
+        var out = [];
+        for (var i = 0; i < parts.length; i++) {
+            var uid = parts[i].trim();
+            if (uid && out.indexOf(uid) === -1) out.push(uid);
+        }
+        return out;
+    }
+
+    /**
+     * 从面板收集 MCP 配置。
+     *
+     * 返回:
+     * - `{ mcp: {...} }`: 收集成功（可写回完整配置）；
+     * - `{ error: '...' }`: 校验失败（数值越界 / 白名单为空），调用方提示后中止保存。
+     */
+    function _collectMcpConfig() {
+        var mcp = {};
+
+        for (var i = 0; i < _MCP_FIELDS.length; i++) {
+            var f = _MCP_FIELDS[i];
+            var key = f.path[0];
+            var fid = _mcpFieldId(f);
+
+            if (f.type === 'bool') {
+                var box = $(fid);
+                mcp[key] = !!(box && box.checked);
+            } else if (f.type === 'number') {
+                var input = $(fid);
+                var raw = input ? input.value.trim() : '';
+                var value = parseInt(raw, 10);
+                if (isNaN(value)) {
+                    return { error: f.label + ' 不是有效数字' };
+                }
+                if (f.min !== undefined && value < f.min) {
+                    return { error: f.label + ' 不能小于 ' + f.min };
+                }
+                if (f.max !== undefined && value > f.max) {
+                    return { error: f.label + ' 不能大于 ' + f.max };
+                }
+                mcp[key] = value;
+            } else if (f.type === 'string-list') {
+                var allBox = $(fid + '-all');
+                var uidInput = $(fid + '-uids');
+                var all = !!(allBox && allBox.checked);
+                var uids = _parseUidList(uidInput ? uidInput.value : '');
+                if (all) {
+                    mcp[key] = ['*'];
+                } else if (uids.length === 0) {
+                    // 不写空数组：服务端把空列表按 ["*"]（全部可见）处理，与"收紧白名单"的
+                    // 用户意图相反，故要求显式输入至少一个 uid
+                    return { error: '请至少输入一个人格 uid，或勾选「全部人格可见」' };
+                } else {
+                    mcp[key] = uids;
+                }
+            }
+        }
+
+        return { mcp: mcp };
+    }
+
+    /**
+     * 保存 MCP 接入配置（统一写入口双写）。
+     */
+    async function _handleSaveMcp() {
+        try {
+            if (!_fullConfig) {
+                throw new Error('配置未加载，请刷新设置页后重试');
+            }
+
+            var collected = _collectMcpConfig();
+            if (collected.error) {
+                RamariaToast.show('warning', collected.error);
+                return;
+            }
+
+            var cfg = JSON.parse(JSON.stringify(_fullConfig));
+            cfg.mcp = collected.mcp;
+
+            var result = await RamariaApi.config.updateFull(cfg);
+            if (!_handleUpdateFullResult(result, 'MCP 接入设置已保存（客户端重连后生效）')) {
+                throw new Error('配置双写均失败');
+            }
+            _fullConfig = cfg;
+
+            // 保存后刷新运行状态与配置片段（启用开关 / 库路径展示随之更新）
+            await _refreshMcpInfo();
+        } catch (err) {
+            RamariaToast.show('error', '保存失败', err.message || '未知错误');
+        }
+    }
+
+    /**
+     * 刷新 MCP 接入信息（运行状态 + 配置片段素材）。
+     *
+     * 说明:
+     * - 查询失败按空处理并提示"-"，不阻塞面板其余操作（保存仍可用）。
+     */
+    async function _refreshMcpInfo() {
+        try {
+            _mcpInfo = await RamariaApi.mcp.getInfo();
+        } catch (err) {
+            console.error('[SettingsView] 查询 MCP 接入信息失败:', err);
+            _mcpInfo = null;
+        }
+        _fillMcpStatus(_mcpInfo);
+    }
+
+    /**
+     * 渲染 MCP 运行状态与配置片段。
+     */
+    function _fillMcpStatus(info) {
+        var statusEl = $('settings-mcp-status');
+        var activityEl = $('settings-mcp-activity');
+        var activeEl = $('settings-mcp-active-sessions');
+        var dbPathEl = $('settings-mcp-db-path');
+
+        if (!info) {
+            if (statusEl) statusEl.textContent = '查询失败';
+            if (activityEl) activityEl.textContent = '-';
+            if (activeEl) activeEl.textContent = '-';
+            if (dbPathEl) dbPathEl.textContent = '-';
+            _mcpSnippets = [];
+            _renderMcpSnippetPicker();
+            return;
+        }
+
+        if (statusEl) {
+            statusEl.textContent = info.enabled ? '✓ 已开启' : '未开启（工具不可用）';
+        }
+        if (activityEl) {
+            activityEl.textContent = info.lastActivityMs
+                ? RamariaFormat.relativeTime(info.lastActivityMs)
+                : '暂无外部活动';
+        }
+        if (activeEl) {
+            activeEl.textContent = (info.activeSessions || 0) + ' 个';
+        }
+        if (dbPathEl) {
+            dbPathEl.textContent = info.dbPath || '-';
+            dbPathEl.title = info.dbPath || '';
+        }
+
+        _mcpSnippets = buildMcpClientSnippets(info);
+        _renderMcpSnippetPicker();
+    }
+
+    /**
+     * 重建客户端片段选择器与文本框内容。
+     */
+    function _renderMcpSnippetPicker() {
+        var select = $('settings-mcp-client-select');
+        var fileEl = $('settings-mcp-client-file');
+        var textarea = $('settings-mcp-snippet');
+        var noteEl = $('settings-mcp-snippet-note');
+        if (!select) return;
+
+        if (_mcpSnippets.length === 0) {
+            select.innerHTML = '<option>（未获取到配置信息）</option>';
+            if (fileEl) fileEl.textContent = '';
+            if (textarea) textarea.value = '';
+            if (noteEl) noteEl.textContent = '';
+            return;
+        }
+
+        select.innerHTML = '';
+        for (var i = 0; i < _mcpSnippets.length; i++) {
+            var opt = document.createElement('option');
+            opt.value = String(i);
+            opt.textContent = _mcpSnippets[i].title;
+            select.appendChild(opt);
+        }
+        if (_mcpClientIndex >= _mcpSnippets.length) _mcpClientIndex = 0;
+        select.value = String(_mcpClientIndex);
+
+        var snippet = _mcpSnippets[_mcpClientIndex];
+        var hint = '配置文件位置：' + snippet.fileHint;
+        if (_mcpInfo && _mcpInfo.commandIsBundled === false) {
+            // 未探测到应用同目录的 CLI：提示 PATH 依赖，避免"复制后命令找不到"
+            hint += '；未探测到应用同目录的 ramaria 命令，请确保其所在目录在 PATH 中，' +
+                '或把片段中的 command 替换为 ramaria 可执行文件的绝对路径';
+        }
+        if (fileEl) fileEl.textContent = hint;
+        if (textarea) textarea.value = snippet.content;
+        if (noteEl) noteEl.textContent = snippet.note || '';
+    }
+
+    async function _handleCopyMcpDbPath() {
+        var dbPath = _mcpInfo && _mcpInfo.dbPath ? _mcpInfo.dbPath : '';
+        if (!dbPath) {
+            RamariaToast.show('warning', '数据库路径尚未加载');
+            return;
+        }
+        var ok = await _copyText(dbPath);
+        if (ok) {
+            RamariaToast.show('success', '已复制数据库路径');
+        } else {
+            RamariaToast.show('warning', '复制失败', '请手动从状态行选中复制');
+        }
+    }
+
+    async function _handleCopyMcpSnippet() {
+        if (_mcpSnippets.length === 0) {
+            RamariaToast.show('warning', '配置片段尚未加载');
+            return;
+        }
+        var snippet = _mcpSnippets[_mcpClientIndex];
+        if (!snippet) return;
+        var ok = await _copyText(snippet.content);
+        if (ok) {
+            RamariaToast.show('success', snippet.title + ' 配置片段已复制');
+        } else {
+            RamariaToast.show('warning', '复制失败', '请手动选中文本框内容复制');
+        }
+    }
+
+    /**
+     * 复制文本到剪贴板。
+     *
+     * 策略:
+     * 1. 优先 Clipboard API（Tauri WebView2 支持）；
+     * 2. 失败/不可用时回退临时 textarea + execCommand（旧内核兜底）。
+     *
+     * 返回:
+     * - `true`: 复制成功；`false`: 两条路径均失败（调用方提示手动复制）。
+     */
+    async function _copyText(text) {
+        if (!text) return false;
+
+        try {
+            if (typeof navigator !== 'undefined' && navigator.clipboard && navigator.clipboard.writeText) {
+                await navigator.clipboard.writeText(text);
+                return true;
+            }
+        } catch (err) {
+            console.warn('[SettingsView] Clipboard API 复制失败，尝试回退方案:', err);
+        }
+
+        try {
+            var ta = document.createElement('textarea');
+            ta.value = text;
+            ta.setAttribute('readonly', 'readonly');
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            var ok = document.execCommand('copy');
+            document.body.removeChild(ta);
+            return ok;
+        } catch (err) {
+            console.error('[SettingsView] 复制失败:', err);
+            return false;
+        }
+    }
+
+    /**
+     * 生成各客户端的 MCP 挂载配置片段（纯函数，面板展示与回归测试共用）。
+     *
+     * 参数:
+     * - `info`: `{ command, dbPath }`（get_mcp_info 返回值的子集）；任一缺失返回空数组。
+     *
+     * 返回:
+     * - 数组，每项 `{ key, title, fileHint, content, note? }`：
+     *   - `content` 为可直接粘贴的 JSON 文本（Windows 路径由 JSON.stringify 正确转义）；
+     *   - `note` 为补充说明（如 OpenClaw 的命令行添加方式）。
+     *
+     * 说明:
+     * - `--db` 是 CLI 全局参数，置于子命令前（与 `ramaria --db <path> status` 同一解析口径）；
+     * - 三个客户端均为 stdio 挂载，命令与参数结构一致，仅配置文件的字段层级不同
+     *   （Claude Desktop / Cursor 为 `mcpServers`，OpenClaw 为 `mcp.servers`）。
+     */
+    function buildMcpClientSnippets(info) {
+        if (!info || !info.command || !info.dbPath) return [];
+
+        var args = ['--db', info.dbPath, 'mcp', 'serve'];
+        var stdio = { command: info.command, args: args };
+
+        return [
+            {
+                key: 'claude-desktop',
+                title: 'Claude Desktop',
+                fileHint: '%APPDATA%\\Claude\\claude_desktop_config.json',
+                content: JSON.stringify({ mcpServers: { ramaria: stdio } }, null, 2),
+            },
+            {
+                key: 'cursor',
+                title: 'Cursor',
+                fileHint: '~/.cursor/mcp.json',
+                content: JSON.stringify({ mcpServers: { ramaria: stdio } }, null, 2),
+            },
+            {
+                key: 'openclaw',
+                title: 'OpenClaw',
+                fileHint: '~/.openclaw/openclaw.json（mcp.servers 段）',
+                content: JSON.stringify({ mcp: { servers: { ramaria: stdio } } }, null, 2),
+                note: '也可用命令行添加：openclaw mcp add ramaria --command ' + info.command +
+                    ' --arg --db --arg "' + info.dbPath + '" --arg mcp --arg serve',
+            },
+        ];
+    }
+
+// =========================================================
+// 会话区块（v1.4 M5：空闲自动保存时长滑动块）
+// =========================================================
 
     // 完整生效配置缓存（getFullConfig 回显 + 保存时回写）
     var _fullConfig = null;
@@ -2133,19 +2769,23 @@ var RamariaSettingsView = (function () {
                 console.error('[SettingsView] 加载嵌入模型配置失败:', err);
             }
 
- // 加载完整配置并回显（v1.4 M5 会话区块 + M6 基础/高级表单）
-            try {
-                _fullConfig = await RamariaApi.config.getFull();
-                _fillSessionForm(_fullConfig);
-                _fillMemoryInjectionForm(_fullConfig);
-                _fillDataDirForm(_fullConfig);
-                _fillAdvancedForms(_fullConfig);
-            } catch (err) {
-                console.error('[SettingsView] 加载完整配置失败:', err);
-            }
+ // 加载完整配置并回显（v1.4 M5 会话区块 + M6 基础/高级表单 + MCP 接入）
+             try {
+                 _fullConfig = await RamariaApi.config.getFull();
+                 _fillSessionForm(_fullConfig);
+                 _fillMemoryInjectionForm(_fullConfig);
+                 _fillDataDirForm(_fullConfig);
+                 _fillMcpForm(_fullConfig);
+                 _fillAdvancedForms(_fullConfig);
+             } catch (err) {
+                 console.error('[SettingsView] 加载完整配置失败:', err);
+             }
+
+ // 加载 MCP 接入信息（运行状态 + 客户端配置片段）
+             await _refreshMcpInfo();
 
  // 加载隐私状态
-            await _refreshPrivacyStatus();
+             await _refreshPrivacyStatus();
         });
         _unregisterFns.push(unreg);
 
@@ -2182,6 +2822,31 @@ var RamariaSettingsView = (function () {
          */
         getAdvancedGroups: function () {
             return JSON.parse(JSON.stringify(_ADVANCED_GROUPS));
+        },
+        /**
+         * MCP 接入面板字段元数据快照（深拷贝，只读）。
+         *
+         * 用途:
+         * - 默认值一致性回归（与 `config/default.toml` 的 `[mcp]` 组逐键比对）；
+         * - 排障时查看面板认识的配置键与默认值。
+         *
+         * 返回:
+         * - `_MCP_FIELDS` 的深拷贝；字段 `path` 为组内相对路径（前缀 `mcp`）。
+         */
+        getMcpFields: function () {
+            return JSON.parse(JSON.stringify(_MCP_FIELDS));
+        },
+        /**
+         * 生成各客户端 MCP 挂载配置片段（纯函数，只读）。
+         *
+         * 参数:
+         * - `info`: `{ command, dbPath }`（get_mcp_info 返回值的子集）。
+         *
+         * 返回:
+         * - 片段数组（`buildMcpClientSnippets` 的结果）。
+         */
+        buildMcpClientSnippets: function (info) {
+            return buildMcpClientSnippets(info);
         },
         destroy: function () {
             for (var i = 0; i < _unregisterFns.length; i++) {

@@ -504,3 +504,37 @@
 .settings-form-inline-label input[type="checkbox"] {
   accent-color: var(--color-primary);
 }
+
+/* =========================================================
+   MCP 接入面板（外部客户端挂载向导）
+   ========================================================= */
+
+/* 配置片段文本框：等宽字体、只读、可纵向拉伸 */
+.settings-mcp-textarea {
+  width: 100%;
+  min-height: 170px;
+  margin-top: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1.5px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-family: var(--font-mono);
+  line-height: 1.5;
+  color: var(--text-primary);
+  background: var(--bg-subtle);
+  outline: none;
+  resize: vertical;
+  white-space: pre;
+  overflow: auto;
+}
+
+.settings-mcp-textarea:focus {
+  border-color: var(--color-primary);
+}
+
+/* 状态行内的库路径：允许换行并限制宽度，避免撑破行布局 */
+.settings-mcp-path {
+  max-width: 60%;
+  word-break: break-all;
+  text-align: right;
+}

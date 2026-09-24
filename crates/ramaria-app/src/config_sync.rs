@@ -1759,6 +1759,123 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    // =========================================================
+    // [mcp] 组纳入双写同步（「MCP 接入」面板的配置通道）
+    // =========================================================
+
+    /// [mcp] 组七键纳入统一写入口：save 后 settings 表逐键可见、文件侧携带其值。
+    #[tokio::test]
+    async fn mcp_group_keys_are_covered_by_full_sync() {
+        let storage = Arc::new(MockStorage::default());
+        let (service, dir) = temp_service(storage.clone());
+
+        let mut cfg = RamariaConfig::default();
+        cfg.mcp.enabled = true;
+        cfg.mcp.allow_ingest = false;
+        cfg.mcp.allow_seal = false;
+        cfg.mcp.allowed_personas = vec!["rama-0001".to_string()];
+        cfg.mcp.allow_raw_text = true;
+        cfg.mcp.max_items = 8;
+        cfg.mcp.max_chars = 999;
+
+        let result = service.save_config(&cfg).await;
+        assert!(result.is_ok(), "双侧写入应成功: {:?}", result.failures);
+
+        // settings 表侧：标量键逐键断言（新增配置组必须自动纳入扁平化覆盖）
+        for (key, want) in [
+            ("config.mcp.enabled", "true"),
+            ("config.mcp.allow_ingest", "false"),
+            ("config.mcp.allow_seal", "false"),
+            ("config.mcp.allow_raw_text", "true"),
+            ("config.mcp.max_items", "8"),
+            ("config.mcp.max_chars", "999"),
+        ] {
+            let got = storage.get_setting(key).await.unwrap();
+            assert_eq!(got.as_deref(), Some(want), "键 {key} 应写入 settings");
+        }
+        // 白名单数组以 JSON 文本存储
+        let personas = storage
+            .get_setting("config.mcp.allowed_personas")
+            .await
+            .unwrap()
+            .expect("白名单键应写入 settings");
+        let parsed: JsonValue = serde_json::from_str(&personas).unwrap();
+        assert_eq!(parsed, serde_json::json!(["rama-0001"]));
+
+        // 文件侧：完整序列化应携带 [mcp] 全组
+        let text = std::fs::read_to_string(service.config_path()).unwrap();
+        let file_cfg: RamariaConfig = toml::from_str(&text).unwrap();
+        assert!(file_cfg.mcp.enabled);
+        assert!(!file_cfg.mcp.allow_seal);
+        assert_eq!(file_cfg.mcp.max_items, 8);
+        assert_eq!(file_cfg.mcp.allowed_personas, vec!["rama-0001".to_string()]);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 文件与 DB 的 [mcp] 键不一致：以文件为准回写 DB 并记入 mismatch（既有不一致处理口径）。
+    #[tokio::test]
+    async fn mcp_mismatch_is_resolved_by_file_side() {
+        let storage = Arc::new(MockStorage::default());
+        let (service, dir) = temp_service(storage.clone());
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 文件显式声明 [mcp].enabled = true（其余键走反序列化默认值）
+        std::fs::write(&service.config_path, "[mcp]\nenabled = true\n").unwrap();
+        // DB 侧为相反残值 → 应被文件回写
+        storage
+            .set_setting("config.mcp.enabled", "false")
+            .await
+            .unwrap();
+
+        let outcome = service.load().await.unwrap();
+
+        let enabled = storage.get_setting("config.mcp.enabled").await.unwrap();
+        assert_eq!(
+            enabled.as_deref(),
+            Some("true"),
+            "文件显式键应以文件为准回写 DB"
+        );
+        assert!(
+            outcome
+                .mismatches
+                .iter()
+                .any(|m| m.key == "config.mcp.enabled"),
+            "不一致应记入 mismatch: {:?}",
+            outcome.mismatches
+        );
+        assert!(outcome.config.mcp.enabled, "生效配置应取文件侧值");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 文件未声明的 [mcp] 键：DB 显式值保留（升级场景不被模板默认值覆盖）。
+    #[tokio::test]
+    async fn mcp_db_keys_absent_from_file_are_preserved() {
+        let storage = Arc::new(MockStorage::default());
+        let (service, dir) = temp_service(storage.clone());
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 文件只声明 [mcp].enabled（存量用户 config.toml 升级场景）
+        std::fs::write(&service.config_path, "[mcp]\nenabled = true\n").unwrap();
+        // DB 侧用户显式设置：max_items=9（文件未声明 → 不得被默认值 5 覆盖）
+        storage
+            .set_setting("config.mcp.max_items", "9")
+            .await
+            .unwrap();
+
+        service.load().await.unwrap();
+
+        let max_items = storage.get_setting("config.mcp.max_items").await.unwrap();
+        assert_eq!(
+            max_items.as_deref(),
+            Some("9"),
+            "文件未声明的键不得被默认值覆盖"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// 保存配置时保留文件头注释与未知键（全量序列化不丢用户手写内容）。
     #[tokio::test]
     async fn save_config_preserves_header_comments_and_unknown_keys() {

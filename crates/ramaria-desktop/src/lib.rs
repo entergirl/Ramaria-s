@@ -33,7 +33,7 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 ///
 /// 职责:
 /// - 持有 `Arc<App>` 实例，供所有 Command 调用 ramaria-app
-/// - 持有数据库路径（用于日志和诊断）
+/// - 持有数据库路径（诊断展示 / MCP 接入面板生成客户端配置片段）
 ///
 /// 安全约束:
 /// - `App` 内部已通过 Mutex/Arc 保证线程安全
@@ -45,6 +45,8 @@ pub struct DesktopState {
     pub pool: SqlitePool,
     /// config.toml 路径（配置双写同步服务用，v1.4）
     pub config_path: PathBuf,
+    /// assistant.db 路径（MCP 接入面板展示与配置片段生成用）
+    pub db_path: PathBuf,
     /// 评估面板的"用户显式授权目录"（原生目录对话框选择结果）。
     ///
     /// 语义:
@@ -237,7 +239,7 @@ pub(crate) fn build_llm_provider(
 /// 8. 刷新应用状态
 ///
 /// 返回:
-/// - `Ok((App, 连接池, config.toml 路径))` 初始化成功
+/// - `Ok((App, 连接池, config.toml 路径, assistant.db 路径))` 初始化成功
 /// - `Err(String)` 初始化失败（含用户友好的错误描述）
 ///
 /// 说明:
@@ -246,7 +248,7 @@ pub(crate) fn build_llm_provider(
 /// - 日志中的路径一律经 `path_guard::redact_path_label` 折叠（日志随诊断包外发）。
 async fn init_app(
     data_dir: &PathBuf,
-) -> Result<(Arc<ramaria_app::App>, SqlitePool, PathBuf), String> {
+) -> Result<(Arc<ramaria_app::App>, SqlitePool, PathBuf, PathBuf), String> {
     let db_path = data_dir.join("assistant.db");
     let config_path = data_dir.join("config.toml");
 
@@ -406,7 +408,7 @@ async fn init_app(
         "App 初始化完成"
     );
 
-    Ok((Arc::new(app), pool, config_path))
+    Ok((Arc::new(app), pool, config_path, db_path))
 }
 
 // =========================================================
@@ -455,7 +457,7 @@ pub fn run() {
     //
     // 初始化失败属不可恢复（无 storage / 无 LLM provider 时所有 Command 均不可用），
     // 故记录错误后直接退出；用户可从日志与 stderr 获取失败原因。
-    let (app, pool, config_path) = match rt.block_on(init_app(&data_dir)) {
+    let (app, pool, config_path, db_path) = match rt.block_on(init_app(&data_dir)) {
         Ok(result) => result,
         Err(e) => {
             tracing::error!(error = %e, "应用初始化失败，进程退出");
@@ -468,6 +470,7 @@ pub fn run() {
         app,
         pool,
         config_path,
+        db_path,
         eval_allowed_dirs: std::sync::Mutex::new(Vec::new()),
     };
 
@@ -519,6 +522,8 @@ pub fn run() {
             commands::config::update_setting,
             commands::config::get_full_config,
             commands::config::update_full_config,
+            // ---- MCP 接入（设置页面板）----
+            commands::mcp::get_mcp_info,
             // ---- Export ----
             commands::export::export_sessions_json,
             commands::export::export_sessions_markdown,

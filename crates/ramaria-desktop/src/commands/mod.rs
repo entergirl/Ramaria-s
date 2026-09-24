@@ -12,6 +12,7 @@ pub mod export;
 pub mod import_cmd;
 pub mod index_cmd;
 pub mod keywords;
+pub mod mcp;
 pub mod memory;
 pub mod persona;
 pub mod rules;

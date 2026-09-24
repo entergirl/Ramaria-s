@@ -486,6 +486,25 @@ var RamariaApi = (function () {
         return await _invoke('update_full_config', { configJson: json }, '保存完整配置');
     }
 
+// =========================================================
+// 4.5 MCP 接入 (mcp)
+// =========================================================
+
+/**
+ * 查询 MCP 接入信息（设置页「MCP 接入」面板）。
+ *
+ * 返回:
+ * - { enabled, dbPath, configPath, command, commandIsBundled, activeSessions, lastActivityMs }
+ *
+ * 说明:
+ * - 运行状态为"通道活动统计"（活跃外部会话数 + 最近消息时间）：stdio MCP 服务由
+ *   外部客户端按需拉起，桌面侧无法观测其进程状态，故以库内活动数据近似呈现；
+ * - 配置开关（enabled / allow_* / 白名单 / 预算）由 getFull 的 `mcp` 组回显与保存。
+ */
+    async function getMcpInfo() {
+        return await _invoke('get_mcp_info', {}, '查询 MCP 接入信息');
+    }
+
  // =========================================================
  // 5. 首次配置 (setup)
  // =========================================================
@@ -1005,6 +1024,9 @@ var RamariaApi = (function () {
             updateSetting: updateSetting,
             getFull: getFullConfig,
             updateFull: updateFullConfig,
+        },
+        mcp: {
+            getInfo: getMcpInfo,
         },
         setup: {
             run: runSetup,
