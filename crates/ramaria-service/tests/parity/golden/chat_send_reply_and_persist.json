@@ -1,0 +1,27 @@
+{
+  "chars": 6,
+  "messages": [
+    {
+      "content": "今天有点累，随便聊聊吧",
+      "role": "user"
+    },
+    {
+      "content": "嗯，我在听。",
+      "role": "assistant"
+    }
+  ],
+  "prompt": {
+    "history_len": 0,
+    "memory_context_chars": 0,
+    "memory_context_present": false,
+    "system_prompt_chars": 936,
+    "template_version": "20260912-v2.0.0",
+    "user_message": "今天有点累，随便聊聊吧"
+  },
+  "reply": "嗯，我在听。",
+  "session": {
+    "channel": "mcp",
+    "has_external_ref": true,
+    "message_count": 2
+  }
+}

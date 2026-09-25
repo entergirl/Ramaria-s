@@ -1,0 +1,25 @@
+{
+  "example_count": 2,
+  "l1": [
+    {
+      "atmosphere": "疲惫",
+      "keywords": "工作压力,加班",
+      "persona_uid": "char-parity-seal",
+      "salience": 0.75,
+      "situation_strength": 4,
+      "summary": "用户最近工作压力很大，常加班到深夜。",
+      "time_period": "夜间",
+      "valence": -0.5
+    }
+  ],
+  "outcome": {
+    "l1_count": 1,
+    "sealed": true
+  },
+  "pending_job_types": [],
+  "session": {
+    "ended": true,
+    "message_count": 4
+  },
+  "utt_block_count": 1
+}

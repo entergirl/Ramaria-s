@@ -1,0 +1,13 @@
+{
+  "cross_process_hit": true,
+  "dirty": {
+    "hit": true,
+    "rebuilt": true
+  },
+  "incremental_hit": true,
+  "lazy": {
+    "first_built": true,
+    "loaded": true,
+    "second_built": false
+  }
+}

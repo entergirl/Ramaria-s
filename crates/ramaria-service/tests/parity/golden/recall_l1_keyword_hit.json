@@ -1,0 +1,29 @@
+{
+  "channels": {
+    "bm25": 1,
+    "graph": 0,
+    "keyword": 1,
+    "vector": 3
+  },
+  "context_chars": 110,
+  "context_hits_query": true,
+  "items": [
+    {
+      "layer": "l1",
+      "score": 0.049126,
+      "text": "用户最近工作压力很大，常加班到深夜"
+    },
+    {
+      "layer": "l1",
+      "score": 0.043629,
+      "text": "用户周末去爬山，天气很好"
+    },
+    {
+      "layer": "l1",
+      "score": 0.042723,
+      "text": "用户喜欢喝手冲咖啡"
+    }
+  ],
+  "mode": "search",
+  "truncated": false
+}
