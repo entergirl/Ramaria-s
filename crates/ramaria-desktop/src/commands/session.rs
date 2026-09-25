@@ -32,6 +32,34 @@ pub struct SessionSummary {
     /// 会话绑定的人格 UID（NULL 表示存量旧数据）。
     /// 前端 SessionDrawer 据此按 persona 筛选会话列表。
     pub persona_uid: Option<String>,
+    /// 会话来源通道（`local` / `mcp`；v2.1 会话来源标注）。
+    ///
+    /// 用途:
+    /// - 前端会话抽屉据此标注外部来源（MCP 回流会话），完成定义要求
+    ///   「外部对话回流后桌面可见并标注来源」。
+    pub channel: String,
+    /// 外部对话标识（客户端 conversation id / 客户端身份名；本地会话为 None）。
+    pub external_ref: Option<String>,
+}
+
+/// 由存储层会话与消息数聚合构造前端摘要（字段映射的唯一入口，便于单测锁定）。
+///
+/// 参数:
+/// - `session`: 存储层会话记录。
+/// - `message_count`: 该会话消息数（`None` 表示聚合缺失，按 0 处理）。
+fn summary_from(
+    session: &ramaria_core::types::Session,
+    message_count: Option<u32>,
+) -> SessionSummary {
+    SessionSummary {
+        id: session.id.to_string(),
+        started_at: session.started_at,
+        ended_at: session.ended_at,
+        message_count: message_count.unwrap_or(0),
+        persona_uid: session.persona_uid.clone(),
+        channel: session.channel.clone(),
+        external_ref: session.external_ref.clone(),
+    }
 }
 
 /// 会话详情（含消息列表）。
@@ -84,18 +112,10 @@ pub async fn list_sessions(state: State<'_, DesktopState>) -> Result<Vec<Session
     // 单次聚合查询各会话消息数，替代逐会话 COUNT 的 N+1 查询
     let counts = message_counts_by_session(&state.pool).await;
 
-    let mut summaries = Vec::with_capacity(sorted.len());
-    for s in sorted {
-        let id = s.id.to_string();
-        let message_count = counts.get(&id).copied().unwrap_or(0);
-        summaries.push(SessionSummary {
-            id,
-            started_at: s.started_at,
-            ended_at: s.ended_at,
-            message_count,
-            persona_uid: s.persona_uid.clone(),
-        });
-    }
+    let summaries: Vec<SessionSummary> = sorted
+        .iter()
+        .map(|s| summary_from(s, counts.get(&s.id.to_string()).copied()))
+        .collect();
 
     tracing::debug!(count = summaries.len(), "list_sessions 完成");
     Ok(summaries)
@@ -324,13 +344,7 @@ pub async fn create_session(
 
     tracing::info!(session_id = %session.id, persona_uid = ?session.persona_uid, "新会话已创建");
 
-    Ok(SessionSummary {
-        id: session.id.to_string(),
-        started_at: session.started_at,
-        ended_at: session.ended_at,
-        message_count: 0,
-        persona_uid: session.persona_uid.clone(),
-    })
+    Ok(summary_from(&session, Some(0)))
 }
 
 // =========================================================
@@ -421,6 +435,28 @@ mod tests {
 
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 摘要映射：来源通道与外部标识透传（v2.1 桌面来源标注的数据源）。
+    #[test]
+    fn summary_maps_channel_and_external_ref() {
+        let mut session = ramaria_core::types::Session::new();
+        session.persona_uid = Some("rama-0001".to_string());
+        session.channel = "mcp".to_string();
+        session.external_ref = Some("client-A".to_string());
+
+        let summary = summary_from(&session, Some(3));
+        assert_eq!(summary.channel, "mcp", "通道应透传（前端据此标注来源）");
+        assert_eq!(summary.external_ref.as_deref(), Some("client-A"));
+        assert_eq!(summary.message_count, 3);
+        assert_eq!(summary.persona_uid.as_deref(), Some("rama-0001"));
+
+        // 本地会话：通道 local、无外部标识；消息数缺失按 0 处理
+        let local = ramaria_core::types::Session::new();
+        let summary = summary_from(&local, None);
+        assert_eq!(summary.channel, "local");
+        assert!(summary.external_ref.is_none());
+        assert_eq!(summary.message_count, 0);
     }
 
     /// 聚合查询：两个会话各 2 条 / 3 条，计数按会话正确归组。

@@ -258,6 +258,12 @@
   color: var(--blue-600);
 }
 
+/* 来源标注（v2.1：MCP 等外部通道回流会话；与导入标签同为来源类，配色区分） */
+.session-drawer-item-tag--source {
+  background: var(--pink-100);
+  color: var(--pink-600);
+}
+
 /* ── 元信息行 ── */
 .session-drawer-item-meta {
   font-size: 11px;

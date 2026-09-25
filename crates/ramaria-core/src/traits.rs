@@ -1182,6 +1182,27 @@ pub trait StoreInfrastructure: Send + Sync {
     ) -> RamariaResult<()>;
     async fn list_pending_jobs(&self) -> RamariaResult<Vec<(i64, String, Option<String>)>>;
 
+    /// 原子抢占 pending 任务（`pending` → `running`）。
+    ///
+    /// 用途:
+    /// - 多个消费方（桌面生命周期线程 / MCP 宿主空闲检查）并发补扫同一批任务时，
+    ///   只有抢占成功者执行该任务，避免重复加工（如重复生成同一份 L1 摘要）。
+    ///
+    /// 参数:
+    /// - `id`: 任务 id。
+    ///
+    /// 返回:
+    /// - `Ok(true)`: 本次调用抢占成功（调用方应执行该任务）。
+    /// - `Ok(false)`: 任务已被其他调用方抢占 / 已不在 pending（调用方应跳过）。
+    ///
+    /// 默认实现:
+    /// - 退化为「无条件置 running 并视为抢占成功」——不具备并发去重语义，
+    ///   仅适用于单消费方或测试 mock；SQLite 后端覆写为条件更新（`status = 'pending'` 才生效）。
+    async fn claim_pending_job(&self, id: i64) -> RamariaResult<bool> {
+        self.update_job_status(id, "running", None).await?;
+        Ok(true)
+    }
+
     // -- Settings --
     async fn get_setting(&self, key: &str) -> RamariaResult<Option<String>>;
     async fn set_setting(&self, key: &str, value: &str) -> RamariaResult<()>;

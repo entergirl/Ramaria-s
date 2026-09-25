@@ -463,6 +463,8 @@ impl SessionLifecycle {
                 );
                 // 创建 pending BackgroundJob，供后续 regenerate_l1 重试
                 // 对齐决策：L1 失败不阻塞 session 关闭，但需记录可重试任务
+                // 类型使用补偿登记专用值（l1_summary_retry）：与在途生成任务区分，
+                // 避免补扫消费方误取在途任务（并发场景会重复生成同一份 L1）
                 let payload = serde_json::json!({
                     "session_id": session_id.to_string(),
                     "persona_uid": persona_uid,
@@ -470,7 +472,10 @@ impl SessionLifecycle {
                 })
                 .to_string();
                 match storage
-                    .create_background_job("l1_summary", Some(&payload))
+                    .create_background_job(
+                        ramaria_memory::job::JobType::L1SummaryRetry.as_str(),
+                        Some(&payload),
+                    )
                     .await
                 {
                     Ok(job_id) => {

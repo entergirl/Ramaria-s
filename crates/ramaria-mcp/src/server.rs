@@ -54,6 +54,10 @@ pub struct RamariaMcpServer {
 
 impl RamariaMcpServer {
     /// 构造服务端（引擎已装配、策略与钩子已注入，见 `host`）。
+    ///
+    /// 说明:
+    /// - 门禁（召回策略 / 封存许可）由宿主装配时注入服务层，本构造器不重复注入；
+    ///   直接构造服务端的调用方（测试）需自行补上宿主步骤（见 `tests/protocol_e2e.rs`）。
     pub fn new(engine: Arc<Engine>, config: McpConfig) -> Self {
         Self {
             engine,

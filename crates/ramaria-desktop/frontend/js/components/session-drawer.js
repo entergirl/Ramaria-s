@@ -6,6 +6,7 @@
  * - 支持搜索过滤（按 persona 名称或会话时间）
  * - 点击会话项 → 通过回调通知 ChatView 加载该会话的消息
  * - 三种会话状态区分：活跃（绿色圆点）、已关闭（灰色时间戳）、导入（来源标签）
+ * - v2.1 来源标注：外部通道（如 MCP）回流会话显示「来源: MCP」标签（见 `sourceTag`）
  *
  * 设计特点:
  * - 独立组件，通过回调（onSelect）与 ChatView 解耦
@@ -382,19 +383,26 @@ var RamariaSessionDrawer = (function () {
             statusHtml = '<span class="' + statusClass + '">' + RamariaEscape.escapeHtml(closedTime) + '</span>';
         }
 
-        // 标题行：时间 + 状态标签
+        // 标题行：时间 + 状态标签 + 来源标签（v2.1：外部通道回流会话标注来源）
         var timeLabel = RamariaFormat ? RamariaFormat.smartTime(session.started_at) :
                         (session.started_at ? new Date(session.started_at).toLocaleDateString() : '未知时间');
         var tagHtml = '';
+
+        // 来源标签（MCP 等外部通道；本地会话不标注）——活跃与已关闭都展示
+        var source = _sourceTag(session);
+        if (source) {
+            tagHtml += '<span class="' + source.className + '" title="' +
+                RamariaEscape.escapeHtml(source.title) + '">' +
+                RamariaEscape.escapeHtml(source.text) + '</span>';
+        }
+
         if (isActive) {
-            tagHtml = '<span class="session-drawer-item-tag session-drawer-item-tag--active">活跃</span>';
-        } else {
+            tagHtml += '<span class="session-drawer-item-tag session-drawer-item-tag--active">活跃</span>';
+        } else if (_isImportedSession(session)) {
             // 判断是否为导入会话（persona_uid 以 char-/anim-/oc-/hist- 开头）
-            if (_isImportedSession(session)) {
-                var personaName = _getPersonaName(session.persona_uid);
-                tagHtml = '<span class="session-drawer-item-tag session-drawer-item-tag--import">导入: ' +
-                    RamariaEscape.escapeHtml(personaName) + '</span>';
-            }
+            var personaName = _getPersonaName(session.persona_uid);
+            tagHtml += '<span class="session-drawer-item-tag session-drawer-item-tag--import">导入: ' +
+                RamariaEscape.escapeHtml(personaName) + '</span>';
         }
 
         // 消息数
@@ -434,6 +442,34 @@ var RamariaSessionDrawer = (function () {
         });
 
         return item;
+    }
+
+    /**
+     * 计算会话「来源通道」标签（v2.1：MCP 回流会话在桌面标注来源）。
+     *
+     * 参数:
+     * - `session`: 会话摘要（含后端返回的 `channel` / `external_ref` 字段）。
+     *
+     * 返回:
+     * - `{ text, className, title }`: 非本地通道的来源标签；
+     * - `null`: 本地会话（`local` / 缺少通道字段的存量数据）不标注。
+     *
+     * 说明:
+     * - 通道文案映射集中在此（后续 telegram / qq 等通道沿用同一入口）；
+     * - `external_ref`（外部对话标识）放入 `title`，不占用标题行宽度。
+     */
+    function _sourceTag(session) {
+        var channel = session && session.channel ? String(session.channel) : '';
+        if (!channel || channel === 'local') return null;
+
+        var labels = { mcp: 'MCP' };
+        var label = labels[channel] || channel;
+        var ref = session.external_ref ? String(session.external_ref) : '';
+        return {
+            text: '来源: ' + label,
+            className: 'session-drawer-item-tag session-drawer-item-tag--source',
+            title: ref ? ('外部对话标识: ' + ref) : ('来源通道: ' + label),
+        };
     }
 
     /**
@@ -725,6 +761,15 @@ var RamariaSessionDrawer = (function () {
 
         /** 获取当前会话列表（只读快照） */
         getSessions: function () { return _sessions.slice(); },
+
+        /**
+         * 计算会话来源标签（v2.1 来源标注；供渲染复用与前端测试）。
+         *
+         * 返回:
+         * - `{ text, className, title }`：外部通道来源标签；
+         * - `null`：本地会话（不标注）。
+         */
+        sourceTag: _sourceTag,
     };
 })();
 

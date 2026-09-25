@@ -27,6 +27,8 @@ use tracing::{debug, error, info, warn};
 pub enum JobType {
     /// L0→L1 摘要生成
     L1Summary,
+    /// L1 摘要失败补偿登记（供补扫消费；与在途生成任务区分，见补扫实现）
+    L1SummaryRetry,
     /// L1→L2 事件提取
     EventExtract,
     /// L2→L3 性格推断（+B）
@@ -44,6 +46,9 @@ impl JobType {
     pub fn as_str(&self) -> &str {
         match self {
             JobType::L1Summary => "l1_summary",
+            // 说明: 补偿登记使用独立类型，避免补扫消费方误取"在途生成"任务
+            // （生成任务创建后到置 running 之间短暂处于 pending）
+            JobType::L1SummaryRetry => "l1_summary_retry",
             JobType::EventExtract => "event_extract",
             JobType::PersonalityInference => "personality_inference",
             JobType::Calibration => "calibration",
@@ -175,9 +180,10 @@ impl<'a> JobManager<'a> {
     /// - 现在按任务语义分类，便于日志告警、UI 展示和调用方针对性处理。
     fn error_for_job(&self, job_type: JobType, message: impl Into<String>) -> RamariaError {
         match job_type {
-            JobType::L1Summary | JobType::EventExtract | JobType::PersonalityInference => {
-                RamariaError::llm(message)
-            }
+            JobType::L1Summary
+            | JobType::L1SummaryRetry
+            | JobType::EventExtract
+            | JobType::PersonalityInference => RamariaError::llm(message),
             JobType::IndexRebuild => RamariaError::index(message),
             JobType::Calibration | JobType::Custom(_) => RamariaError::validation(message),
         }
@@ -215,6 +221,25 @@ impl<'a> JobManager<'a> {
             .await?;
         debug!(job_id = job_id, "后台任务开始执行");
         Ok(())
+    }
+
+    /// 原子抢占 pending 任务（`pending` → `running`）。
+    ///
+    /// 用途:
+    /// - 多个消费方（桌面生命周期线程 / MCP 宿主空闲检查）并发补扫同一批任务时，
+    ///   各消费方对同一任务调用本方法，只有返回 `true` 的一方执行，避免重复加工。
+    ///
+    /// 返回:
+    /// - `Ok(true)`: 抢占成功（调用方应执行该任务）。
+    /// - `Ok(false)`: 已被其他消费方抢占 / 已不在 pending（调用方应跳过）。
+    pub async fn claim_pending(&self, job_id: i64) -> RamariaResult<bool> {
+        let claimed = self.storage.claim_pending_job(job_id).await?;
+        if claimed {
+            debug!(job_id = job_id, "后台任务抢占成功（pending → running）");
+        } else {
+            debug!(job_id = job_id, "后台任务抢占失败（已被其他消费方取走）");
+        }
+        Ok(claimed)
     }
 
     /// 将任务状态标记为 completed。
@@ -430,6 +455,7 @@ mod tests {
     fn test_job_type_str_and_display() {
         let cases = [
             (JobType::L1Summary, "l1_summary"),
+            (JobType::L1SummaryRetry, "l1_summary_retry"),
             (JobType::EventExtract, "event_extract"),
             (JobType::PersonalityInference, "personality_inference"),
             (JobType::Calibration, "calibration"),

@@ -314,6 +314,9 @@ async fn start_server(engine: Arc<Engine>, config: McpConfig) -> (StdioClient, J
     let (server_io, client_io) = tokio::io::duplex(PIPE_CAPACITY);
     let (server_read, server_write) = tokio::io::split(server_io);
 
+    // 与宿主装配同口径：门禁先注入服务层再构造协议壳（本文件直接构造服务端，
+    // 不经过 `serve_stdio`，需自行补上宿主步骤；否则封存门禁默认放行）。
+    engine.set_seal_allowed(config.allow_seal);
     let server = RamariaMcpServer::new(engine, config);
     let server_task = tokio::spawn(async move {
         match server.serve((server_read, server_write)).await {

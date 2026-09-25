@@ -116,6 +116,14 @@ pub struct Engine {
     recall_policy: Arc<RwLock<RecallPolicy>>,
     /// 封存钩子（行为 / 风格 / L2 触发；未注册则跳过，见 [`SealHooks`]）。
     seal_hooks: Arc<RwLock<SealHooks>>,
+    /// 封存许可（服务层策略）：`false` 时禁止一切封存与摘要生成。
+    ///
+    /// 说明:
+    /// - 语义对应入口层配置（如 `[mcp].allow_seal`，D-V21-009：「只写不封存」）；
+    /// - 默认 `true`：桌面 / CLI / 测试路径行为不变；
+    /// - 门禁落在 `seal` 用例与空闲检查入口，避免「只写不封存」被惰性体检
+    ///   （续写超时会话先封存）或空闲循环绕过。
+    seal_allowed: AtomicBool,
 }
 
 impl Engine {
@@ -203,6 +211,7 @@ impl Engine {
             last_index_build_ms: Arc::new(AtomicI64::new(0)),
             recall_policy: Arc::new(RwLock::new(RecallPolicy::default())),
             seal_hooks: Arc::new(RwLock::new(SealHooks::default())),
+            seal_allowed: AtomicBool::new(true),
         })
     }
 
@@ -234,6 +243,7 @@ impl Engine {
             last_index_build_ms: Arc::new(AtomicI64::new(0)),
             recall_policy: Arc::new(RwLock::new(RecallPolicy::default())),
             seal_hooks: Arc::new(RwLock::new(SealHooks::default())),
+            seal_allowed: AtomicBool::new(true),
         }
     }
 
@@ -322,6 +332,26 @@ impl Engine {
     /// 当前封存钩子快照（Arc 克隆，供封存流程在锁外调用）。
     pub fn seal_hooks(&self) -> SealHooks {
         read_recover(&self.seal_hooks, "engine.seal_hooks").clone()
+    }
+
+    /// 设置封存许可（入口层按配置注入，如 `[mcp].allow_seal`）。
+    ///
+    /// 语义:
+    /// - `false`: 封存用例直接跳过（不关闭会话、不生成摘要、不消耗 LLM 做记忆加工）；
+    ///   写用例（`ingest` / `chat_send`）仍可正常写入，超时会话留待允许封存的
+    ///   宿主（桌面）或下次允许时的空闲检查处理；
+    /// - `true`: 恢复默认行为（抢占式封存与空闲检查照常）。
+    ///
+    /// 用法:
+    /// - 入口层启动时注入一次（进程级快照语义，与其它配置一致）。
+    pub fn set_seal_allowed(&self, allowed: bool) {
+        tracing::info!(allow_seal = allowed, "封存许可已更新（服务层门禁）");
+        self.seal_allowed.store(allowed, Ordering::Release);
+    }
+
+    /// 当前封存许可（`false` = 只写不封存）。
+    pub fn seal_allowed(&self) -> bool {
+        self.seal_allowed.load(Ordering::Acquire)
     }
 
     // =========================================================

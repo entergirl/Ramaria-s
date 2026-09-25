@@ -102,6 +102,10 @@ pub async fn serve_stdio(options: McpHostOptions) -> RamariaResult<()> {
             .with_allowed_personas(mcp_config.allowed_personas.clone()),
     );
 
+    // ---- 2b. 封存许可：写侧治理开关进入服务层强制门禁（D-V21-009） ----
+    // 关闭时：封存用例 / 惰性体检 / 空闲检查全部跳过（含摘要补扫），只保留写入
+    engine.set_seal_allowed(mcp_config.allow_seal);
+
     // ---- 3. 默认封存钩子（行为 / 风格 / L2 触发；MCP 进程不依赖 app） ----
     engine.set_seal_hooks(default_seal_hooks(&engine));
 

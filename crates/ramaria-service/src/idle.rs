@@ -18,7 +18,8 @@ use std::time::Duration;
 use ramaria_core::config::RamariaConfig;
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::traits::StorageBackend;
-use ramaria_core::types::now_ms;
+use ramaria_core::types::{MemoryL1, now_ms};
+use ramaria_memory::l1::{L1RetryObserver, MAX_L1_RETRY_JOBS_PER_RUN, retry_pending_l1_jobs};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -34,9 +35,11 @@ pub const MIN_IDLE_CHECK_INTERVAL_SECONDS: u64 = 5;
 /// 关停等待上限（秒）：等待在途封存收敛；超时放弃等待（进程即将退出，不强杀任务）。
 const IDLE_LOOP_SHUTDOWN_TIMEOUT_SECONDS: u64 = 15;
 
-/// 执行一次空闲检查：对超时会话执行封存。
+/// 执行一次空闲检查：补扫失败的 L1 摘要，并对超时会话执行封存。
 ///
 /// 流程:
+/// 0. L1 摘要补扫：消费封存失败遗留的 pending `l1_summary` 任务（先于本轮封存执行，
+///    避免本轮新登记的任务在同一轮被立即重试一次——LLM 不可用时白耗一次调用）；
 /// 1. 列出全部活跃会话；
 /// 2. 逐个读取最后消息时间（无消息 → 跳过）；
 /// 3. 超过 `[session].l1_idle_minutes` → 走 `seal` 用例（内部抢占，防止重复摘要）；
@@ -48,9 +51,37 @@ const IDLE_LOOP_SHUTDOWN_TIMEOUT_SECONDS: u64 = 15;
 /// 返回:
 /// - 本次实际封存的会话数量（未抢到 / 未超时 / 空会话不计入）。
 pub(crate) async fn tick(engine: &Engine) -> RamariaResult<usize> {
+    // 封存许可（服务层门禁）：关闭时不扫描、不封存、不做摘要补扫
+    // （MCP 宿主在 allow_seal=false 时已不拉起循环，此处为服务层兜底，
+    //   同时覆盖直接调用 `tick_idle` 的入口）
+    if !engine.seal_allowed() {
+        tracing::debug!("空闲检查：封存已禁用（服务层门禁），本轮跳过");
+        return Ok(0);
+    }
+
     let storage = engine.storage_ref().as_ref();
     let config = engine.config();
     let threshold_ms = config.session.l1_idle_minutes as i64 * 60_000;
+
+    // ---- 0. L1 摘要补扫（D4：MCP 独用时的消费点，与桌面共用同一实现） ----
+    // 背景：封存中 L1 生成失败会登记 pending `l1_summary`；桌面侧有启动期与 L2/L3 定时
+    // 消费点，MCP 独用（无桌面）时此前无人消费 → 摘要永久缺失。此处在空闲循环内兜底。
+    let retry_stats = retry_pending_l1_jobs(
+        storage,
+        engine.llm_ref().as_ref(),
+        &config.l1.progressive,
+        MAX_L1_RETRY_JOBS_PER_RUN,
+        &ServiceL1RetryObserver { engine },
+    )
+    .await;
+    if retry_stats.completed > 0 {
+        tracing::info!(
+            scanned = retry_stats.scanned,
+            attempted = retry_stats.attempted,
+            completed = retry_stats.completed,
+            "空闲检查：L1 摘要补扫完成"
+        );
+    }
 
     let sessions = storage.list_active_sessions().await?;
     if sessions.is_empty() {
@@ -136,6 +167,31 @@ async fn last_message_time(
             Ok(messages.iter().map(|m| m.created_at).max())
         }
         Err(e) => Err(e),
+    }
+}
+
+// =========================================================
+// L1 补扫宿主钩子（服务层实现）
+// =========================================================
+
+/// L1 补扫宿主钩子：L1 增量镜像 + 注册的 L2 触发钩子。
+///
+/// 说明:
+/// - 桌面侧由 `SessionLifecycle` 实现同一接口（Retriever / 关键词镜像 + L2 检查）；
+///   本实现走服务层镜像与宿主注册的钩子，保持两条消费路径同源（D-V21-012 原则）。
+struct ServiceL1RetryObserver<'a> {
+    engine: &'a Engine,
+}
+
+#[async_trait::async_trait]
+impl L1RetryObserver for ServiceL1RetryObserver<'_> {
+    async fn on_l1(&self, l1: &MemoryL1) {
+        crate::index::index_l1_into_mirrors(self.engine, l1).await;
+    }
+
+    async fn on_cascade(&self, persona_uid: Option<&str>) {
+        let hooks = self.engine.seal_hooks();
+        crate::seal::run_hook(&hooks.l2_trigger, persona_uid, "L2 触发检查（L1 补扫）").await;
     }
 }
 
@@ -298,10 +354,10 @@ impl Drop for IdleLoop {
 mod tests {
     use super::*;
     use crate::test_support::{
-        L1_JSON_REPLY, MockLlm, engine_on_existing_db, engine_with_l1_reply, seed_persona,
-        seed_session_with_messages,
+        L1_JSON_REPLY, MockLlm, engine_on_existing_db, engine_with_failing_llm,
+        engine_with_l1_reply, seed_persona, seed_session_with_messages,
     };
-    use ramaria_core::traits::StoreCrud;
+    use ramaria_core::traits::{StoreCrud, StoreInfrastructure};
     use std::time::Instant;
 
     /// 3 个会话 2 个超时：只封存超时的 2 个，未超时的保持活跃。
@@ -387,6 +443,200 @@ mod tests {
     async fn tick_without_sessions_returns_zero() {
         let (engine, _storage, dir) = engine_with_l1_reply("idle-none", L1_JSON_REPLY).await;
         assert_eq!(engine.tick_idle().await.expect("空闲检查应成功"), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 封存门禁（D-V21-009）：许可关闭时整轮跳过
+    /// （超时会话不封存、不生成 L1、会话保持活跃）。
+    #[tokio::test]
+    async fn tick_is_noop_when_seal_disabled() {
+        let (engine, storage, dir) = engine_with_l1_reply("idle-gated", L1_JSON_REPLY).await;
+        seed_persona(&storage, "char-0001").await;
+        let session =
+            seed_session_with_messages(&storage, "char-0001", 2, now_ms() - 20 * 60_000).await;
+
+        engine.set_seal_allowed(false);
+        assert_eq!(
+            engine.tick_idle().await.expect("空闲检查应成功"),
+            0,
+            "许可关闭时不应封存任何会话"
+        );
+
+        let row = storage
+            .get_session(session)
+            .await
+            .expect("查询应成功")
+            .expect("会话应存在");
+        assert!(row.ended_at.is_none(), "许可关闭时会话应保持活跃");
+        assert!(
+            storage
+                .list_memory_l1(session)
+                .await
+                .expect("读取 L1 应成功")
+                .is_empty(),
+            "许可关闭时不应生成 L1"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// L1 摘要补扫（D4）：封存中 L1 失败登记的 pending 任务，在 LLM 恢复后
+    /// 由空闲检查自动补跑（MCP 独用无桌面时的消费点）。
+    #[tokio::test]
+    async fn tick_consumes_pending_l1_retry_after_llm_recovers() {
+        let (engine, storage, dir) = engine_with_failing_llm("idle-retry").await;
+        seed_persona(&storage, "char-0001").await;
+        let session =
+            seed_session_with_messages(&storage, "char-0001", 2, now_ms() - 20 * 60_000).await;
+
+        // 第一轮：超时会话被抢占关闭，但 L1 生成失败 → 登记 pending 重试任务
+        // （返回 0：封存失败不计入成功数，但会话已被抢占关闭）
+        assert_eq!(
+            engine.tick_idle().await.expect("空闲检查应成功"),
+            0,
+            "L1 生成失败不应计入封存成功数"
+        );
+        let closed = storage
+            .get_session(session)
+            .await
+            .expect("查询会话应成功")
+            .expect("会话应存在");
+        assert!(closed.ended_at.is_some(), "超时会话应已被抢占关闭");
+        let pending = storage
+            .list_pending_jobs()
+            .await
+            .expect("查询 pending 应成功");
+        assert!(
+            pending
+                .iter()
+                .any(|(_, job_type, _)| job_type == "l1_summary_retry"),
+            "L1 失败应登记 l1_summary_retry pending 任务: {pending:?}"
+        );
+        assert!(
+            storage
+                .list_memory_l1(session)
+                .await
+                .expect("读取 L1 应成功")
+                .is_empty(),
+            "LLM 不可用时不应生成 L1"
+        );
+
+        // LLM 恢复：同库第二台引擎（成功 mock）执行空闲检查 → 先补扫 pending，产出摘要
+        let recovered = engine_on_existing_db(
+            &dir.join("assistant.db"),
+            MockLlm::with_reply(L1_JSON_REPLY),
+            RamariaConfig::default(),
+        )
+        .await;
+        assert_eq!(
+            recovered.tick_idle().await.expect("空闲检查应成功"),
+            0,
+            "会话已关闭，本轮无需封存"
+        );
+        assert_eq!(
+            storage
+                .list_memory_l1(session)
+                .await
+                .expect("读取 L1 应成功")
+                .len(),
+            1,
+            "LLM 恢复后空闲检查应补跑出 L1"
+        );
+        let remaining = storage
+            .list_pending_jobs()
+            .await
+            .expect("查询 pending 应成功");
+        assert!(
+            !remaining
+                .iter()
+                .any(|(_, job_type, _)| job_type == "l1_summary_retry"),
+            "补跑成功后任务不应再停留 pending: {remaining:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 补扫只消费补偿登记类型（`l1_summary_retry`）：在途生成任务（`l1_summary`）
+    /// 处于 pending 窗口时不得被误取（误取会重复生成同一会话的 L1）。
+    #[tokio::test]
+    async fn tick_retry_ignores_inflight_l1_generation_jobs() {
+        let (engine, storage, dir) = engine_with_l1_reply("idle-retry-type", L1_JSON_REPLY).await;
+        seed_persona(&storage, "char-0001").await;
+        let session =
+            seed_session_with_messages(&storage, "char-0001", 2, now_ms() - 20 * 60_000).await;
+        // 模拟"已在途生成"现场：会话已关闭 + 一条旧类型（l1_summary）pending 任务
+        storage
+            .close_session(session)
+            .await
+            .expect("关闭会话应成功");
+        let payload = serde_json::json!({ "session_id": session.to_string() }).to_string();
+        storage
+            .create_background_job("l1_summary", Some(&payload))
+            .await
+            .expect("登记任务应成功");
+
+        assert_eq!(engine.tick_idle().await.expect("空闲检查应成功"), 0);
+        assert!(
+            storage
+                .list_memory_l1(session)
+                .await
+                .expect("读取 L1 应成功")
+                .is_empty(),
+            "在途生成任务类型（l1_summary）不应被补扫消费"
+        );
+        let pending = storage
+            .list_pending_jobs()
+            .await
+            .expect("查询 pending 应成功");
+        assert!(
+            pending
+                .iter()
+                .any(|(_, job_type, _)| job_type == "l1_summary"),
+            "旧类型任务应保持原状态（由真正的执行方收敛）: {pending:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 补扫并发去重：两台引擎同时补扫同一 pending 补偿任务 →
+    /// 原子抢占保证只有一方执行，最终恰好一份 L1。
+    #[tokio::test]
+    async fn concurrent_retry_from_two_engines_generates_once() {
+        // 第一轮用恒失败 LLM：L1 失败 → 登记补偿任务（会话已被抢占关闭）
+        let (engine_a, storage, dir) = engine_with_failing_llm("idle-retry-race").await;
+        seed_persona(&storage, "char-0001").await;
+        let session =
+            seed_session_with_messages(&storage, "char-0001", 2, now_ms() - 20 * 60_000).await;
+        assert_eq!(engine_a.tick_idle().await.expect("空闲检查应成功"), 0);
+
+        // LLM 恢复：同一库上两台引擎并发补扫
+        let db_path = dir.join("assistant.db");
+        let engine_b = engine_on_existing_db(
+            &db_path,
+            MockLlm::with_reply(L1_JSON_REPLY),
+            RamariaConfig::default(),
+        )
+        .await;
+        let engine_c = engine_on_existing_db(
+            &db_path,
+            MockLlm::with_reply(L1_JSON_REPLY),
+            RamariaConfig::default(),
+        )
+        .await;
+        let (result_b, result_c) = tokio::join!(engine_b.tick_idle(), engine_c.tick_idle());
+        result_b.expect("空闲检查应成功");
+        result_c.expect("空闲检查应成功");
+
+        assert_eq!(
+            storage
+                .list_memory_l1(session)
+                .await
+                .expect("读取 L1 应成功")
+                .len(),
+            1,
+            "并发补扫不得产生重复 L1（原子抢占去重）"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -521,7 +771,10 @@ mod tests {
         // 正确性由下方"每个会话恰好一份 L1"断言承担
         let _ = engine.seal(session_front).await.expect("前台封存不应报错");
 
-        // 等待两个会话都被关闭（前台 + 循环共同收敛，上限 6 秒）
+        // 等待两个会话都被关闭且各有一份 L1（前台 + 循环共同收敛，上限 6 秒）
+        //
+        // 说明: 抢占（ended_at 置位）先于摘要写入完成，仅在"已关闭"时断言 L1 条数
+        // 会命中该时间窗导致偶发抖动；等待条件因此同时要求 L1 落库。
         let deadline = Instant::now() + Duration::from_secs(6);
         loop {
             let front_closed = storage
@@ -538,12 +791,22 @@ mod tests {
                 .expect("会话应存在")
                 .ended_at
                 .is_some();
-            if front_closed && loop_closed {
+            let front_l1 = storage
+                .list_memory_l1(session_front)
+                .await
+                .expect("读取 L1 应成功")
+                .len();
+            let loop_l1 = storage
+                .list_memory_l1(session_loop)
+                .await
+                .expect("读取 L1 应成功")
+                .len();
+            if front_closed && loop_closed && front_l1 == 1 && loop_l1 == 1 {
                 break;
             }
             assert!(
                 Instant::now() < deadline,
-                "循环与前台应在上限内关闭全部超时会话"
+                "循环与前台应在上限内关闭全部超时会话并各产出一份 L1（front_l1={front_l1}, loop_l1={loop_l1}）"
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }

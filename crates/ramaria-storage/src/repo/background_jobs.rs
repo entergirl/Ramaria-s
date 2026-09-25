@@ -79,3 +79,26 @@ pub async fn list_pending(pool: &SqlitePool) -> RamariaResult<Vec<(i64, String, 
         .map(|r| (r.id, r.job_type, r.payload))
         .collect())
 }
+
+/// 原子抢占 pending 任务（`pending` → `running`）。
+///
+/// 说明:
+/// - 条件更新（`WHERE id = ? AND status = 'pending'`）保证多个消费方
+///   （桌面生命周期线程 / MCP 宿主空闲检查）并发补扫时只有一方拿到执行权；
+/// - `finished_at` 与 [`update_status`] 口径一致（现状：每次状态迁移都写该列）。
+///
+/// 返回:
+/// - `true`: 抢占成功（调用方应执行该任务）。
+/// - `false`: 任务已被他人抢占 / 不存在 / 状态已不是 pending。
+pub async fn claim_pending(pool: &SqlitePool, id: i64) -> RamariaResult<bool> {
+    let now = ramaria_core::types::now_ms();
+    let result = sqlx::query(
+        "UPDATE background_jobs SET status = 'running', finished_at = ? WHERE id = ? AND status = 'pending'",
+    )
+    .bind(now)
+    .bind(id)
+    .execute(pool)
+    .await
+    .storage_err("抢占后台任务失败")?;
+    Ok(result.rows_affected() == 1)
+}

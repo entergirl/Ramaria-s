@@ -585,7 +585,7 @@ var RamariaSettingsView = (function () {
         section.innerHTML =
             '<div class="settings-section-title">📡 MCP 接入</div>' +
             '<div class="settings-section-desc">' +
-                '让 Claude Desktop / Cursor / OpenClaw 等外部客户端按 MCP 协议挂载 Ramaria 的记忆与人格。' +
+                '让 DeepSeek Harness（dsh）/ CodeBuddy / Trae 等客户端按 MCP 协议挂载 Ramaria 的记忆与人格。' +
             '</div>';
 
         // ── 运行状态卡（只读展示；MCP 服务由客户端按需拉起，以通道活动近似呈现）──
@@ -1002,11 +1002,11 @@ var RamariaSettingsView = (function () {
         select.value = String(_mcpClientIndex);
 
         var snippet = _mcpSnippets[_mcpClientIndex];
-        var hint = '配置文件位置：' + snippet.fileHint;
+        // fileHint 自带完整表述（通用片段为通用说明，dsh 为具体 patch 位置）
+        var hint = snippet.fileHint;
         if (_mcpInfo && _mcpInfo.commandIsBundled === false) {
             // 未探测到应用同目录的 CLI：提示 PATH 依赖，避免"复制后命令找不到"
-            hint += '；未探测到应用同目录的 ramaria 命令，请确保其所在目录在 PATH 中，' +
-                '或把片段中的 command 替换为 ramaria 可执行文件的绝对路径';
+            hint += '；未探测到应用同目录的 ramaria 命令，请确保其在 PATH 中或改用绝对路径';
         }
         if (fileEl) fileEl.textContent = hint;
         if (textarea) textarea.value = snippet.content;
@@ -1082,49 +1082,88 @@ var RamariaSettingsView = (function () {
     }
 
     /**
-     * 生成各客户端的 MCP 挂载配置片段（纯函数，面板展示与回归测试共用）。
+     * 生成 MCP 挂载配置片段（纯函数，面板展示与回归测试共用）。
      *
      * 参数:
      * - `info`: `{ command, dbPath }`（get_mcp_info 返回值的子集）；任一缺失返回空数组。
      *
      * 返回:
-     * - 数组，每项 `{ key, title, fileHint, content, note? }`：
-     *   - `content` 为可直接粘贴的 JSON 文本（Windows 路径由 JSON.stringify 正确转义）；
-     *   - `note` 为补充说明（如 OpenClaw 的命令行添加方式）。
+     * - 数组，每项 `{ key, title, format, fileHint, content, note }`：
+     *   - `format`: `json`（通用 mcpServers）| `yaml`（DeepSeek Harness 插件 patch）；
+     *   - `content`: 可直接粘贴的片段文本；
+     *   - `fileHint`: 放置位置提示；`note`: 补充说明。
      *
      * 说明:
-     * - `--db` 是 CLI 全局参数，置于子命令前（与 `ramaria --db <path> status` 同一解析口径）；
-     * - 三个客户端均为 stdio 挂载，命令与参数结构一致，仅配置文件的字段层级不同
-     *   （Claude Desktop / Cursor 为 `mcpServers`，OpenClaw 为 `mcp.servers`）。
+     * - 通用片段只保留最小公共字段（command + args）：覆盖 CodeBuddy / Trae 等
+     *   多数客户端的 `mcpServers` 结构（Windows 路径由 JSON.stringify 正确转义）；
+     * - DeepSeek Harness 为插件化配置（Cordis YAML patch），载体与 JSON 不同，
+     *   单独一段；YAML 内路径用单引号包裹（反斜杠不转义，可直接粘贴）；
+     * - `--db` 是 CLI 全局参数，置于 `mcp serve` 子命令之前（与 CLI 解析口径一致）。
      */
     function buildMcpClientSnippets(info) {
         if (!info || !info.command || !info.dbPath) return [];
 
         var args = ['--db', info.dbPath, 'mcp', 'serve'];
-        var stdio = { command: info.command, args: args };
 
         return [
             {
-                key: 'claude-desktop',
-                title: 'Claude Desktop',
-                fileHint: '%APPDATA%\\Claude\\claude_desktop_config.json',
-                content: JSON.stringify({ mcpServers: { ramaria: stdio } }, null, 2),
+                key: 'generic',
+                title: '通用配置（JSON）',
+                format: 'json',
+                fileHint: '在客户端的 MCP 配置中粘贴使用',
+                content: JSON.stringify(
+                    { mcpServers: { ramaria: { command: info.command, args: args } } },
+                    null,
+                    2
+                ),
+                note: '如面板要求选择传输类型，选 stdio',
             },
             {
-                key: 'cursor',
-                title: 'Cursor',
-                fileHint: '~/.cursor/mcp.json',
-                content: JSON.stringify({ mcpServers: { ramaria: stdio } }, null, 2),
-            },
-            {
-                key: 'openclaw',
-                title: 'OpenClaw',
-                fileHint: '~/.openclaw/openclaw.json（mcp.servers 段）',
-                content: JSON.stringify({ mcp: { servers: { ramaria: stdio } } }, null, 2),
-                note: '也可用命令行添加：openclaw mcp add ramaria --command ' + info.command +
-                    ' --arg --db --arg "' + info.dbPath + '" --arg mcp --arg serve',
+                key: 'dsh',
+                title: 'DeepSeek Harness（dsh）',
+                format: 'yaml',
+                fileHint: '合并进 $DSH_HOME/cordis.patch.yml（或 profiles/<名称>/cordis.patch.yml）的 patch 列表，不要覆盖已有内容',
+                content: _buildDshPatch(info.command, args),
+                note: '工具以 mcp__ramaria__<工具名> 暴露',
             },
         ];
+    }
+
+    /**
+     * 生成 DeepSeek Harness 的 MCP 客户端插件 patch（Cordis YAML）。
+     *
+     * 参数:
+     * - `command`: MCP 服务端可执行文件路径。
+     * - `args`: 启动参数（`--db <路径> mcp serve`）。
+     *
+     * 返回:
+     * - 可直接合并进 patch 文件的 `insert` 片段文本。
+     *
+     * 说明:
+     * - 一个插件实例对应一个 MCP server（`@deepseek-ai/dsh-mcp-client`）；
+     * - 字符串统一用单引号包裹并按 YAML 规则转义（内部单引号写成两个），
+     *   Windows 路径中的反斜杠保持原样、不被解释为转义序列。
+     */
+    function _buildDshPatch(command, args) {
+        var quotedArgs = [];
+        for (var i = 0; i < args.length; i++) {
+            quotedArgs.push(_yamlQuote(args[i]));
+        }
+        return '- insert:\n' +
+            '    - id: mcp-ramaria\n' +
+            "      name: '@deepseek-ai/dsh-mcp-client'\n" +
+            '      config:\n' +
+            '        serverName: ramaria\n' +
+            '        transport: stdio\n' +
+            '        command: ' + _yamlQuote(command) + '\n' +
+            '        args: [' + quotedArgs.join(', ') + ']\n';
+    }
+
+    /**
+     * YAML 单引号字符串（内部单引号以两个单引号转义）。
+     */
+    function _yamlQuote(text) {
+        return "'" + String(text).replace(/'/g, "''") + "'";
     }
 
 // =========================================================
@@ -2837,13 +2876,14 @@ var RamariaSettingsView = (function () {
             return JSON.parse(JSON.stringify(_MCP_FIELDS));
         },
         /**
-         * 生成各客户端 MCP 挂载配置片段（纯函数，只读）。
+         * 生成 MCP 挂载配置片段（纯函数，只读）。
          *
          * 参数:
          * - `info`: `{ command, dbPath }`（get_mcp_info 返回值的子集）。
          *
          * 返回:
-         * - 片段数组（`buildMcpClientSnippets` 的结果）。
+         * - 片段数组：通用配置（JSON）+ DeepSeek Harness（YAML），
+         *   结构见 `buildMcpClientSnippets`。
          */
         buildMcpClientSnippets: function (info) {
             return buildMcpClientSnippets(info);

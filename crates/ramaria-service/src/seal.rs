@@ -15,10 +15,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use ramaria_core::error::{RamariaError, RamariaResult};
+use ramaria_core::error::RamariaResult;
 use ramaria_core::types::MemoryL1;
-use ramaria_memory::job::{JobManager, JobResult, JobType};
-use ramaria_memory::l1::{L1Summarizer, L1SummarizerConfig};
+use ramaria_memory::job::JobType;
 use ramaria_memory::utt::builder::UttBuilder;
 use uuid::Uuid;
 
@@ -75,6 +74,21 @@ pub struct SealHooks {
 /// - `sealed`: 是否由本次调用抢到并完成封存（false = 未抢到，不重复生成 L1）；
 /// - `l1_count`: 本次生成的 L1 条数。
 pub(crate) async fn run(engine: &Engine, session_id: Uuid) -> RamariaResult<SealOutcome> {
+    // ---- 0. 封存许可（服务层门禁） ----
+    // 关闭时直接跳过（不抢占关闭、不生成摘要）：入口层配置（如 [mcp].allow_seal = false）
+    // 的语义是「只写不封存」，会话保持活跃，留待允许封存的宿主或下次允许时处理。
+    if !engine.seal_allowed() {
+        tracing::info!(
+            %session_id,
+            "封存已禁用（服务层门禁）：跳过本次封存与摘要生成（会话保持活跃）"
+        );
+        return Ok(SealOutcome {
+            session_id,
+            sealed: false,
+            l1_count: 0,
+        });
+    }
+
     let storage = engine.storage_ref().as_ref();
 
     // ---- 1. 抢占式关闭（幂等：仅一个调用方抢到） ----
@@ -153,10 +167,9 @@ pub(crate) async fn run(engine: &Engine, session_id: Uuid) -> RamariaResult<Seal
 /// 生成会话 L1 摘要（渐进式感知，与在线管线封存口径一致）。
 ///
 /// 实现要点:
-/// - `[l1.progressive]` 开启且会话超过阈值（消息数 / 时间跨度）时按段生成多条 L1；
-///   否则单条整会话摘要；
-/// - `max_tokens` 从 `backend_config` 传播并以下限钳制（防止 chat 的小预算截断结构化 JSON）；
-/// - 经 `JobManager` 包裹执行（含指数退避重试与任务可观测性）。
+/// - 编排与桌面共用 `ramaria_memory::l1::generate_l1_summaries`（同源，不重写第二套）：
+///   `[l1.progressive]` 触发时按段生成多条 L1，否则单条整会话摘要；
+///   `max_tokens` 从 `backend_config` 传播并以下限钳制；经 `JobManager` 包裹执行。
 ///
 /// 返回:
 /// - 成功时返回本会话的全部 L1（顺序与库内一致）。
@@ -165,88 +178,21 @@ async fn generate_l1(
     session_id: Uuid,
     persona_uid: Option<&str>,
 ) -> RamariaResult<Vec<MemoryL1>> {
-    let storage = engine.storage_ref().as_ref();
-    let config = engine.config();
-
-    let mut summarizer_config = L1SummarizerConfig::default();
-    if let Some(uid) = persona_uid {
-        summarizer_config.persona_uid = Some(uid.to_string());
-    }
-    // L1 输出预算从 backend_config 传播（下限钳制到 L1 默认值）
-    match storage.get_backend_config().await {
-        Ok(Some(backend)) => {
-            let floor = summarizer_config.max_tokens;
-            summarizer_config.max_tokens = backend.max_tokens.max(floor);
-            tracing::debug!(
-                max_tokens = summarizer_config.max_tokens,
-                "L1 摘要 max_tokens 已从 backend_config 传播"
-            );
-        }
-        Ok(None) => {
-            // 未配置 backend：属正常路径（首次运行 / 默认配置），用 L1 默认预算即可
-            tracing::debug!("backend_config 未配置，L1 摘要使用默认输出预算");
-        }
-        Err(e) => {
-            // 读取失败不阻塞摘要（仍按默认预算继续），但必须留痕便于排查
-            tracing::warn!(
-                error = %e,
-                max_tokens = summarizer_config.max_tokens,
-                "读取 backend_config 失败，L1 摘要使用默认输出预算"
-            );
-        }
-    }
-
-    let summarizer = L1Summarizer::new(engine.llm_ref().as_ref(), storage, summarizer_config);
-    let progressive = config.l1.progressive.clone();
-    let job_manager = JobManager::with_defaults(storage);
-    let payload = serde_json::json!({ "session_id": session_id.to_string() }).to_string();
-
-    let result = job_manager
-        .execute_with_retry(JobType::L1Summary, Some(&payload), None, || {
-            summarize_progressive(&summarizer, session_id, progressive.clone())
-        })
-        .await;
-
-    match result {
-        Ok(_job_id) => {
-            // 摘要已写入存储：读回本会话全部 L1（渐进式场景含多段）
-            let l1_list = storage.list_memory_l1(session_id).await?;
-            if l1_list.is_empty() {
-                Err(RamariaError::validation("L1 摘要生成后无法读取"))
-            } else {
-                Ok(l1_list)
-            }
-        }
-        Err(e) => Err(e),
-    }
-}
-
-/// L1 摘要生成闭包（供 `JobManager::execute_with_retry` 使用）。
-///
-/// 说明:
-/// - LLM 调用失败归类为可重试（网络波动 / 服务暂不可用）；
-/// - 成功但无内容也视为成功（该会话确实无可用摘要素材）。
-async fn summarize_progressive(
-    summarizer: &L1Summarizer<'_>,
-    session_id: Uuid,
-    progressive: ramaria_core::config::L1ProgressiveConfig,
-) -> JobResult {
-    match summarizer
-        .summarize_progressive(session_id, &progressive)
-        .await
-    {
-        Ok(l1_list) => {
-            tracing::info!(%session_id, l1_count = l1_list.len(), "L1 摘要生成成功");
-            JobResult::Success
-        }
-        Err(e) => {
-            tracing::warn!(%session_id, error = %e, "L1 摘要生成失败，将重试");
-            JobResult::Retryable(e.to_string())
-        }
-    }
+    let progressive = engine.config().l1.progressive.clone();
+    ramaria_memory::l1::generate_l1_summaries(
+        engine.storage_ref().as_ref(),
+        engine.llm_ref().as_ref(),
+        &progressive,
+        ramaria_memory::l1::L1GenerateRequest::new(session_id, persona_uid),
+    )
+    .await
 }
 
 /// 登记 L1 重试任务（摘要失败时补偿，供补扫路径消费）。
+///
+/// 类型说明:
+/// - 使用补偿登记专用类型 `l1_summary_retry`（[`JobType::L1SummaryRetry`]）：
+///   与在途生成任务（`l1_summary`）区分，避免补扫消费方误取在途任务造成重复摘要。
 async fn register_l1_retry(engine: &Engine, session_id: Uuid, persona_uid: Option<&str>) {
     let storage = engine.storage_ref().as_ref();
     let payload = serde_json::json!({
@@ -256,7 +202,7 @@ async fn register_l1_retry(engine: &Engine, session_id: Uuid, persona_uid: Optio
     })
     .to_string();
     match storage
-        .create_background_job("l1_summary", Some(&payload))
+        .create_background_job(JobType::L1SummaryRetry.as_str(), Some(&payload))
         .await
     {
         Ok(job_id) => {
@@ -342,8 +288,9 @@ async fn extract_examples(engine: &Engine, session_id: Uuid) {
 ///
 /// 说明:
 /// - 钩子内部自行处理失败（注册方约定），本层不重复捕获；
-/// - 会话无 persona 归属时不调用（钩子以 persona 为输入，无归属无从更新）。
-async fn run_hook(hook: &Option<SealHook>, persona_uid: Option<&str>, label: &str) {
+/// - 会话无 persona 归属时不调用（钩子以 persona 为输入，无归属无从更新）；
+/// - `pub(crate)`: 供 L1 补扫（`idle::tick`）在补跑成功后复用同一 L2 触发钩子。
+pub(crate) async fn run_hook(hook: &Option<SealHook>, persona_uid: Option<&str>, label: &str) {
     let (Some(hook), Some(persona_uid)) = (hook.as_ref(), persona_uid) else {
         tracing::debug!(hook = label, "封存钩子未注册或会话无归属，跳过");
         return;
@@ -454,6 +401,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 封存门禁（D-V21-009）：许可关闭时封存用例直接跳过
+    /// （不抢占关闭、不改会话状态、不调用 LLM 生成摘要）。
+    #[tokio::test]
+    async fn seal_is_noop_when_seal_disabled() {
+        let (engine, storage, dir) = engine_with_l1_reply("seal-gated", L1_JSON_REPLY).await;
+        seed_persona(&storage, "char-0001").await;
+        let session_id = seed_session_with_messages(&storage, "char-0001", 2, 1_000).await;
+
+        engine.set_seal_allowed(false);
+        let outcome = engine
+            .seal(session_id)
+            .await
+            .expect("封存应正常返回（跳过）");
+        assert!(!outcome.sealed, "许可关闭时不应执行封存");
+        assert_eq!(outcome.l1_count, 0);
+
+        let session = storage
+            .get_session(session_id)
+            .await
+            .expect("查询应成功")
+            .expect("会话应存在");
+        assert!(session.ended_at.is_none(), "许可关闭时不应关闭会话");
+        assert!(
+            storage
+                .list_memory_l1(session_id)
+                .await
+                .expect("读取 L1 应成功")
+                .is_empty(),
+            "许可关闭时不应生成 L1"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 空会话封存：会话关闭但无消息 → 不生成 L1（不调用 LLM）。
     #[tokio::test]
     async fn seal_empty_session_skips_l1() {
@@ -503,8 +484,8 @@ mod tests {
         assert!(
             pending
                 .iter()
-                .any(|(_, job_type, _)| job_type == "l1_summary"),
-            "L1 失败应登记 l1_summary 重试任务: {pending:?}"
+                .any(|(_, job_type, _)| job_type == "l1_summary_retry"),
+            "L1 失败应登记 l1_summary_retry 补偿任务: {pending:?}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

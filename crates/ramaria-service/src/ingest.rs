@@ -255,6 +255,16 @@ pub(crate) async fn resolve_session(
             .unwrap_or(true);
         if same_persona {
             if session_idle(engine, existing.id).await? {
+                // 封存门禁（D-V21-009 语义一致化）：关闭时不做惰性封存，也不另起会话，
+                // 直接续写原会话；会话边界与摘要留待允许封存的宿主 / 下次允许时处理。
+                if !engine.seal_allowed() {
+                    tracing::info!(
+                        session_id = %existing.id,
+                        idle_minutes = engine.config().session.l1_idle_minutes,
+                        "会话空闲超阈值但封存已禁用：续写原会话（不另起、不生成摘要）"
+                    );
+                    return Ok(existing);
+                }
                 tracing::info!(
                     session_id = %existing.id,
                     idle_minutes = engine.config().session.l1_idle_minutes,
@@ -697,6 +707,128 @@ mod tests {
                 .len(),
             1,
             "旧会话封存应生成 L1"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 封存门禁（D-V21-009 一致化）：续写超时会话时，许可关闭则续写原会话
+    /// （不封存、不另起、不生成 L1）；恢复许可后按既有口径先封存再另起。
+    #[tokio::test]
+    async fn ingest_lazy_seal_is_gated_by_seal_policy() {
+        let (engine, storage, dir) =
+            engine_with_l1_reply("ingest-stale-gated", L1_JSON_REPLY).await;
+        seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+        // 20 分钟前的活跃会话（阈值默认 10 分钟）：无门禁时会被惰性封存
+        let stale = seed_channel_session(
+            &storage,
+            DEFAULT_PERSONA_UID,
+            CHANNEL_MCP,
+            Some("client-A"),
+            2,
+            now_ms() - 20 * 60_000,
+        )
+        .await;
+
+        engine.set_seal_allowed(false);
+        let outcome = engine
+            .ingest(IngestRequest {
+                messages: vec![turn(ChatRole::User, "封存关闭期间的新消息")],
+                persona: None,
+                conversation_id: Some("client-A".to_string()),
+                channel: CHANNEL_MCP.to_string(),
+                finalize: false,
+            })
+            .await
+            .expect("回流成功");
+
+        assert_eq!(
+            outcome.session_id, stale,
+            "封存关闭时应续写原会话（不另起）"
+        );
+        let active = storage
+            .get_session(stale)
+            .await
+            .expect("查询成功")
+            .expect("会话应存在");
+        assert!(active.ended_at.is_none(), "封存关闭时会话应保持活跃");
+        assert!(
+            storage
+                .list_memory_l1(stale)
+                .await
+                .expect("读取 L1 成功")
+                .is_empty(),
+            "封存关闭时不得生成 L1（不消耗 LLM）"
+        );
+        assert_eq!(
+            storage
+                .list_messages(stale)
+                .await
+                .expect("查询消息成功")
+                .len(),
+            3,
+            "新消息应写入原会话"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 封存门禁：`finalize=true` 在许可关闭时只写不封存（会话保持活跃、无 L1）；
+    /// 恢复许可后同一对话再次 finalize 正常封存（服务层门禁为唯一裁决点）。
+    #[tokio::test]
+    async fn ingest_finalize_is_gated_by_seal_policy() {
+        let (engine, storage, dir) =
+            engine_with_l1_reply("ingest-finalize-gated", L1_JSON_REPLY).await;
+        seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+
+        engine.set_seal_allowed(false);
+        let first = engine
+            .ingest(IngestRequest {
+                messages: vec![turn(ChatRole::User, "第一段")],
+                persona: None,
+                conversation_id: Some("cb-gated".to_string()),
+                channel: CHANNEL_MCP.to_string(),
+                finalize: true,
+            })
+            .await
+            .expect("回流成功");
+        assert!(!first.finalized, "封存关闭时 finalize 应被跳过");
+        let session = storage
+            .get_session(first.session_id)
+            .await
+            .expect("查询成功")
+            .expect("会话应存在");
+        assert!(session.ended_at.is_none(), "会话应保持活跃");
+        assert!(
+            storage
+                .list_memory_l1(first.session_id)
+                .await
+                .expect("读取 L1 成功")
+                .is_empty(),
+            "封存关闭时不应生成 L1"
+        );
+
+        engine.set_seal_allowed(true);
+        let second = engine
+            .ingest(IngestRequest {
+                messages: vec![turn(ChatRole::User, "第二段")],
+                persona: None,
+                conversation_id: Some("cb-gated".to_string()),
+                channel: CHANNEL_MCP.to_string(),
+                finalize: true,
+            })
+            .await
+            .expect("回流成功");
+        assert_eq!(second.session_id, first.session_id, "未超时应续写同一会话");
+        assert!(second.finalized, "恢复许可后 finalize 应完成封存");
+        assert_eq!(
+            storage
+                .list_memory_l1(second.session_id)
+                .await
+                .expect("读取 L1 成功")
+                .len(),
+            1,
+            "恢复许可后应生成 L1"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

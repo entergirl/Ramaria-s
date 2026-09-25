@@ -3,7 +3,9 @@
 //! 设计特点:
 //! - 写工具：受总开关与写入开关（`allow_ingest`）双重门禁
 //! - 幂等语义：同一 `conversation_id` 重复提交安全（服务层指纹去重）
-//! - 封存治理：`finalize` 受 `allow_seal` 约束；关闭时只写不封存并在回执中说明
+//! - 封存治理：`finalize` 透传给服务层，封存许可由服务层门禁统一执行
+//!   （`[mcp].allow_seal` 在宿主启动时注入 `Engine::set_seal_allowed`，D-V21-009）；
+//!   关闭时只写不封存并在回执中说明
 //! - 回执透明：写入成功但封存未完成（LLM 不可用 / 已被其他进程封存）也给出说明
 //! - 会话标识：显式 `conversation_id` 优先，缺省用客户端身份名（见协议壳）
 
@@ -67,8 +69,9 @@ impl RamariaMcpServer {
             persona: Some(persona.clone()),
             conversation_id: Some(conversation_id),
             channel: CHANNEL_MCP.to_string(),
-            // allow_seal=false：只写不封存（回执中说明本次未触发摘要生成）
-            finalize: finalize_requested && seal_allowed,
+            // 是否封存由服务层门禁裁决（allow_seal=false 时 `seal` 用例直接跳过）：
+            // 此处透传调用方意图，回执依据配置与结果给出说明
+            finalize: finalize_requested,
         };
 
         match self.engine().ingest(request).await {

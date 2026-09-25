@@ -709,7 +709,8 @@ async fn pending_l1_job_is_retried_and_completed() {
         "reason": "auto_retry_on_close"
     })
     .to_string();
-    let job_id = storage.add_pending_job("l1_summary", Some(&payload));
+    // 补偿登记专用类型（与在途生成任务 l1_summary 区分，见 JobType::L1SummaryRetry）
+    let job_id = storage.add_pending_job("l1_summary_retry", Some(&payload));
 
     // 补扫：应补跑 1 条并标记完成
     let retried = app.retry_pending_l1_jobs().await;

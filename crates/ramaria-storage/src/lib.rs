@@ -549,6 +549,10 @@ impl StoreInfrastructure for SqliteStorage {
         repo::background_jobs::list_pending(&self.pool).await
     }
 
+    async fn claim_pending_job(&self, id: i64) -> RamariaResult<bool> {
+        repo::background_jobs::claim_pending(&self.pool, id).await
+    }
+
     // =========================================================
     // Settings（全局运行配置）
     // =========================================================
@@ -2380,6 +2384,40 @@ mod tests {
         assert!(
             !pending.iter().any(|(jid, _, _)| *jid == id),
             "running 状态的 job 不应出现在 pending 列表中"
+        );
+    }
+
+    /// 原子抢占：首次成功、重复失败、不存在返回 false（多消费方并发补扫去重的基础）。
+    #[tokio::test]
+    async fn background_job_claim_pending_is_atomic() {
+        let storage = setup().await;
+
+        let id = storage
+            .create_background_job("l1_summary_retry", Some(r#"{"session_id":"abc"}"#))
+            .await
+            .unwrap();
+
+        // 首次抢占成功 → 任务离开 pending 列表
+        assert!(
+            storage.claim_pending_job(id).await.unwrap(),
+            "首次抢占应成功"
+        );
+        let pending = storage.list_pending_jobs().await.unwrap();
+        assert!(
+            !pending.iter().any(|(jid, _, _)| *jid == id),
+            "抢占成功后任务不应出现在 pending 列表"
+        );
+
+        // 二次抢占失败（状态已不是 pending）
+        assert!(
+            !storage.claim_pending_job(id).await.unwrap(),
+            "重复抢占应返回 false"
+        );
+
+        // 不存在的任务 → false（不报错，调用方可安全跳过）
+        assert!(
+            !storage.claim_pending_job(999_999).await.unwrap(),
+            "不存在的任务应返回 false"
         );
     }
 

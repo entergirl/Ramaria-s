@@ -10,6 +10,8 @@
 # 前导 / 会把模式锚定在仓库根目录导致子目录不被忽略。
 # 目录名以点开头（.ramaria-dev），模式必须包含该点。
 .ramaria-dev/
+# v2.1 M6 端到端测试专用数据目录（复制自 .ramaria-dev，隔离日常库）
+.test-2.1/
 /data/
 *.db
 *.sqlite
