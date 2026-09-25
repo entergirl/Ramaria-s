@@ -2,7 +2,7 @@
 
 <img src="docs/images/logo.png" alt="Ramaria Logo" width="110">
 
-# 珊瑚菌 · Ramaria 2.0
+# 珊瑚菌 · Ramaria 2.1
 
 > 大模型懂一切，唯独不懂你。
 
@@ -42,6 +42,7 @@ Ramaria（珊瑚菌）正是为解决这一问题而设计。它是一款运行�
 | **记忆全程可见、可追溯** | 每段对话小结、重要事件与性格判断都可在「记忆」页查看，并能回溯到原始对话 |
 | **隐私优先** | 数据默认留在本机；本地模型模式下完全离线；API 密钥交由 Windows 系统保管 |
 | **原生桌面应用** | 双击安装、中文界面、系统托盘常驻，全部操作无需命令行 |
+| **接入外部对话前端（MCP）** | 通过 MCP 协议把记忆与人格接入 CodeBuddy、Trae 等支持本地工具的客户端；外部对话可回流到桌面查看并参与记忆加工 |
 
 **适用边界**：Ramaria 面向希望长期使用、并期待 AI 持续了解自己的用户；若仅需偶尔查询信息，通用网页版 AI 已可满足。
 
@@ -78,7 +79,7 @@ Ramaria 的记忆体系是自下而上的四层结构：
 | **人格** | 管理对话人格，默认为「黎杋枫」；导入 QQ 记录时会自动创建对应人格 |
 | **规则** | 查看自动学习到的行为规则（情境 → 反应），支持启用、禁用与手工编辑，每条规则附证据链 |
 | **导入** | 三步向导完成 QQ 聊天记录导入，支持快速与深度两种模式 |
-| **设置** | 切换模型后端、管理隐私开关、导出数据、检查更新 |
+| **设置** | 切换模型后端、管理隐私开关与 MCP 接入、导出数据、检查更新 |
 
 ---
 
@@ -88,12 +89,12 @@ Ramaria 的记忆体系是自下而上的四层结构：
 
 - **Windows 10（1809 及以上）/ Windows 11**（目前仅支持 Windows，macOS / Linux 已列入路线图）
 - 建议 8 GB 以上内存
-- 安装包约 8.4 MB；安装后程序本体约数十 MB（界面基于系统自带的 WebView2，无需另行安装运行环境）
+- 安装包约 8.5 MB；安装后程序本体约数十 MB（界面基于系统自带的 WebView2，无需另行安装运行环境）
 - 若启用本地嵌入模型，首次运行会另行下载：默认模型 bge-small-zh-v1.5 约 100 MB，可选的 Qwen3-Embedding-0.6B 约 1.2 GB；使用 LM Studio 时，对话模型同样需要在 LM Studio 中单独下载
 
 ### 第一步：下载安装包
 
-前往 [**v2.0.0 下载页**](https://github.com/entergirl/Ramaria-s/releases/tag/Ramaria-v2.0.0)，下载安装包 `Ramaria_2.0.0_x64-setup.exe`（约 8.35 MB），双击后按中文向导完成安装。历史版本见 [Releases 列表](https://github.com/entergirl/Ramaria-s/releases)。
+前往 [**v2.1.0 下载页**](https://github.com/entergirl/Ramaria-s/releases/tag/Ramaria-v2.1.0)，下载安装包 `Ramaria_2.1.0_x64-setup.exe`（约 8.47 MB），双击后按中文向导完成安装。历史版本见 [Releases 列表](https://github.com/entergirl/Ramaria-s/releases)。
 
 ### 第二步：选择模型后端
 
@@ -128,6 +129,9 @@ Ramaria 本身免费开源（MIT 协议）。费用仅来自所选的模型后�
 
 **Q：与 ChatGPT、豆包等通用 AI 有何区别？**
 通用 AI 以单次问答为主，不保留跨会话的个人记忆；Ramaria 会将使用者的经历、偏好与表达方式持续沉淀为本地记忆，在后续对话中自动调用，且这些记忆对使用者可见、可修改、可删除。
+
+**Q：如何让 CodeBuddy、Trae 等工具用上 Ramaria 的记忆？**
+在桌面「设置 → MCP 接入」打开总开关，复制面板给出的配置片段，粘贴到对应客户端的 MCP 配置中并重连即可；挂载后这些工具就能取用本机的记忆与人格，外部对话也可以回流到 Ramaria 的记忆页。默认关闭，随时可关。
 
 **Q：如何导入 QQ 聊天记录？**
 先通过 QQChatExporter（v6.x）将记录导出为 JSON 文件，再在「导入」页经三步向导完成。快速导入仅作存档，深度导入会进一步分析并生成性格画像。导入内容与本地对话同等对待，全部存储在本机。
@@ -167,15 +171,15 @@ Ramaria 本身免费开源（MIT 协议）。费用仅来自所选的模型后�
 
 ---
 
-## v2.0 更新要点
+## v2.1 更新要点
 
-2.0 版本主题为「完备与实证」：补齐记忆系统应有的完整能力，并以一份真实的高情感密度聊天记录完成全档位实验验证。面向使用者的主要改进：
+2.1 版本主题为「记忆服务化」：把记忆与人格能力开放给外部对话前端，同时保持桌面与 CLI 体验不变。面向使用者的主要改进：
 
-- **检索更准确**：四种通道并行检索（语义相似、关键词精确匹配、关系图谱、关键词镜像），兼顾近义表达与精确事实
-- **表达更贴近**：自动学习口癖、句长、标点习惯，以及特定情境下的反应模式
-- **事实更成体系**：聊天中分散的事实自动整理为知识卡片，问及相关问题时回答更准确
-- **记忆自然沉淀**：情感显著性越高的内容保留越久，琐碎信息逐步淡化
-- **界面更完整**：新增规则管理页，记忆、设置与导入流程进一步完善
+- **外部客户端可用记忆**：通过 MCP 协议接入 CodeBuddy、Trae、DeepSeek Harness 等客户端，挂载后即可调用本机的记忆与人格；桌面「设置 → MCP 接入」提供一键复制的配置片段
+- **回流在桌面可见**：外部对话可写回本地库，会话列表标注「来源: MCP」，内容照常参与摘要与记忆加工
+- **隐私开关齐备**：总开关默认关闭；人格白名单、原文开关、写入与封存开关按需收紧，面板附数据流向提示
+- **并发更稳**：多客户端与桌面同时运行不冲突，每个会话的摘要不会重复生成
+- **桌面与命令行照旧**：未开启 MCP 时行为与 2.0 完全一致；命令行新增 `ramaria mcp serve` 供脚本化挂载
 
 
 ---
@@ -213,9 +217,12 @@ Ramaria 本身免费开源（MIT 协议）。费用仅来自所选的模型后�
 采用「本地推理 + 云端辅助」混合架构，SQLite 全部本地存储，LLM 调用对三后端透明。
 
 ```
-Tauri 桌面应用 / CLI
-    ↓↑ Command / 函数调用
+Tauri 桌面应用 / CLI                            MCP 客户端（CodeBuddy / Trae / dsh 等）
+    ↓↑ Command / 函数调用                                ↓ stdio
 ramaria-app  应用编排层（Pipeline + Stage 对话管线，状态机）
+    │                                          ramaria-mcp     MCP 协议壳（六个工具）
+    │                                                ↓
+    │                                          ramaria-service 记忆服务用例层（召回 / 生成 / 写入 / 封存）
     ├── ramaria-memory     记忆管线（L0→L3）+ 混合 RAG + 性格推断（Phase A/B/C）
     ├── ramaria-llm        LLM Provider（LM Studio / DeepSeek / OpenAI）
     ├── ramaria-importer   聊天记录导入（QQ 解析 + 双模式导入）
@@ -236,8 +243,10 @@ ramaria-app  应用编排层（Pipeline + Stage 对话管线，状态机）
 | **ramaria-llm** | reqwest + candle | 3 后端适配器、SSE 流式传输、API Key 凭据管理器、指数退避重试、原生 safetensors 嵌入（bge-small-zh-v1.5 / Qwen3-Embedding-0.6B，CUDA 优先） |
 | **ramaria-importer** | encoding_rs + sha2 | QQ 聊天记录解析（QQChatExporter v6.x JSON，流式解析）、快速/深度双模式、双画像自动创建、指纹去重 |
 | **ramaria-app** | async-trait | CLI/Desktop 共用编排层，Pipeline+Stage 对话管线、状态机、隐私确认、流式事件模型、Session 生命周期管理、后台任务调度 |
-| **ramaria-cli** | clap derive | 18 个子命令、交互式 REPL、`--json` 信封、色彩输出 |
-| **ramaria-desktop** | Tauri 2 | 原生窗口、系统托盘、通知、CSP、Markdown 渲染、前端 JS（7 个视图，含规则/调试） |
+| **ramaria-service** | 纯 Rust 用例层 | 记忆服务化能力出口：召回装配、会话解析与封存、外部写入、人格读取、空闲检查（与传输无关，桌面与 MCP 共用） |
+| **ramaria-mcp** | rmcp（stdio） | MCP 协议壳：六个工具的 schema、门禁与白名单前置校验、结果包装（isError）；不含业务逻辑 |
+| **ramaria-cli** | clap derive | 19 个子命令、交互式 REPL、`--json` 信封、色彩输出 |
+| **ramaria-desktop** | Tauri 2 | 原生窗口、系统托盘、通知、CSP、Markdown 渲染、前端 JS（8 个视图，含规则/调试） |
 
 **依赖关系（自底向上）**
 
@@ -247,9 +256,11 @@ ramaria-core         零依赖，纯类型边界
   ├── ramaria-llm        依赖 core
   ├── ramaria-importer   依赖 core + storage
   └── ramaria-memory     依赖 core + storage
-        └── ramaria-app        依赖 core + storage + memory + llm + importer
-              ├── ramaria-cli       依赖 app + core + storage + llm
-              └── ramaria-desktop   依赖 app + core + storage + llm
+        ├── ramaria-app          依赖 core + storage + memory + llm + importer
+        │     ├── ramaria-cli         依赖 app + core + storage + llm
+        │     └── ramaria-desktop     依赖 app + core + storage + llm
+        └── ramaria-service      依赖 core + storage + memory + llm
+              └── ramaria-mcp         依赖 service + core
 ```
 
 </details>
@@ -339,7 +350,7 @@ docs/                      # 用户文档
 tests/                     # 集成测试
 ```
 
-**规模统计**：8 个 crate、285 个 Rust 源文件、约 129,000 行 Rust 源码（含测试）、2400+ 测试函数。
+**规模统计**：10 个 crate、319 个 Rust 源文件、约 17.1 万行 Rust 源码（含测试）、1769 + 800 个测试函数。
 
 ### CLI 快速参考
 
@@ -370,7 +381,21 @@ ramaria diagnostics --output diag.zip
 
 ## 版本历史
 
-### v2.0.0 — 2026-09-13（当前版本）
+### v2.1.0 — 2026-09-25（当前版本）
+
+**「记忆服务化」**：把记忆与人格能力抽为与传输无关的服务层，并以 MCP（stdio）服务端开放给外部对话前端——挂上即用本机的记忆与人格，外部对话可回流到桌面并参与记忆加工。
+
+**无破坏性变更**：仅一次增量 migration（会话表增通道列），旧库直接可用；未开启 MCP 时行为与 2.0 完全一致。
+
+**主要变化**：
+
+- MCP 接入：六个工具（取记忆 / 人格生成 / 对话回流 / 人格卡片 / 会话历史）；外部对话回流在桌面可见并标注「来源: MCP」
+- 桌面「设置 → MCP 接入」面板：总开关、运行状态、库路径复制、客户端配置片段一键复制（通用 JSON + DeepSeek Harness patch）、人格白名单、原文与写入开关、隐私提示
+- 新增服务层 `ramaria-service` 与协议壳 `ramaria-mcp` 两个模块；召回与封存共用同一份实现（MCP 与桌面结果同源）
+- 多进程加固：写冲突重试、封存抢占幂等、索引跨进程刷新、L1 失败补扫（桌面与 MCP 双消费点）
+- 稳定性修复：修复补扫误取在途任务导致的重复摘要问题（独立补偿类型 + 原子抢占双保险）
+
+### v2.0.0 — 2026-09-13
 
 **「完备与实证」**：一次补全记忆系统该有的能力（关键词地基、多通道检索、注入治理、画像收口、前端完备），再用一份高情感真实聊天记录做全档位实验，把参数与层价值一次性定稿。
 
@@ -432,7 +457,7 @@ Python 版已进入**维护模式**，不再活跃开发，与 Rust 版不共享
 
 ## 路线图
 
-以下功能已在架构中预留接口，进入延后（deferred）队列，不在 2.0 发布范围内：Ollama / Claude / 通义千问后端、微信 / Telegram / Discord / Slack 导入器、MCP Bridge、自动更新、TUI 模式、SQLCipher 加密、Portable 免安装模式、导入匿名化、知识图谱可视化、LoRA 微调、macOS / Linux 安装包、取消生成 / 编辑历史 / 分支对话、精确 token 化、Character Card 导出。
+以下功能已在架构中预留接口，进入延后（deferred）队列，不在 2.1 发布范围内：Ollama / Claude / 通义千问后端、微信 / Telegram / Discord / Slack 导入器、自动更新、TUI 模式、SQLCipher 加密、Portable 免安装模式、导入匿名化、知识图谱可视化、LoRA 微调、macOS / Linux 安装包、取消生成 / 编辑历史 / 分支对话、精确 token 化、Character Card 导出。
 
 > 如有需求，请在 [GitHub Issues](https://github.com/entergirl/Ramaria-s/issues) 提出。
 

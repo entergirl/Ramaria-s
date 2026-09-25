@@ -1,11 +1,11 @@
 # Ramaria CLI 使用指南
 
-> 版本：2.0（命令参考覆盖 setup / ask / chat / memory / blocks / index / import / export / session / config / persona / rule / style / fact / keyword / diagnostics / status / probe 共 18 个子命令）
+> 版本：2.1（命令参考覆盖 setup / ask / chat / memory / blocks / index / import / export / session / config / persona / rule / style / fact / keyword / diagnostics / status / probe / mcp 共 19 个子命令）
 > 适用平台：Windows / macOS / Linux（Windows 首发）
 
 ## 概述
 
-`ramaria` 是 Ramaria 的命令行入口，支持对话、记忆查询（L1/L2/L3）、话语块管理（blocks）、索引管理、会话管理、配置修改、人格管理、行为规则管理（rule）、风格统计（style）、知识事实查询（fact）、关键词词典管理（keyword）、数据导入/导出、诊断导出、状态探活（status）与探针实验（probe）。
+`ramaria` 是 Ramaria 的命令行入口，支持对话、记忆查询（L1/L2/L3）、话语块管理（blocks）、索引管理、会话管理、配置修改、人格管理、行为规则管理（rule）、风格统计（style）、知识事实查询（fact）、关键词词典管理（keyword）、数据导入/导出、诊断导出、状态探活（status）、探针实验（probe）与 MCP 服务端（`mcp serve`）。
 
 首次使用前需运行首次配置向导（`ramaria setup`）。**CLI 与桌面应用的数据目录相互独立**：CLI 的数据库由 `--db` 指定（默认 `data/ramaria_assistant.db`，`RAMARIA_DB_PATH` 覆盖）；桌面应用开发模式（`cargo tauri dev`）使用 `crates/ramaria-desktop/.ramaria-dev/`、生产模式使用 `%APPDATA%\Ramaria\data\`；API key 均保存在 Windows Credential Manager（不落盘）。
 
@@ -580,6 +580,21 @@ ramaria keyword alias reject "摸鱼"         # 驳回别名（pending → 独�
 
 ---
 
+### `ramaria mcp` — MCP 服务端（v2.1）
+
+以 stdio 启动 MCP 服务端，供外部对话前端（CodeBuddy / Trae / DeepSeek Harness 等）接入本系统的记忆与人格。
+
+```
+ramaria --db <库路径> mcp serve
+```
+
+- `mcp serve`：启动 stdio 服务端（六个工具：`memory_recall` / `chat_send` / `chat_ingest` / `persona_list` / `persona_get` / `chat_history`）；`--db` 须置于子命令之前。
+- 门禁与策略取自 `[mcp]` 配置组（默认关闭）：`enabled` / `allow_ingest` / `allow_seal` / `allowed_personas` / `allow_raw_text` / `max_items` / `max_chars`；配置在进程启动时读取，修改后需重连（重启）客户端侧连接。
+- stdout 仅承载协议消息，日志全部走 stderr；退出（传输关闭 / Ctrl+C）时优雅关停空闲检查与在途封存（最多等待 15 秒）。
+- 客户端配置片段（通用 `mcpServers` JSON 与 DeepSeek Harness 插件 patch）可在桌面「设置 → MCP 接入」一键复制。
+
+---
+
 ## 环境变量
 | 变量 | 说明 |
 |------|------|
@@ -673,6 +688,7 @@ CLI 命名与输出约定变更（v1.5 起因"自动化友好改造"引入，后
 | 风格规则注入 | **v1.7 M2 新增（A3）**：自动风格统计生成 SpeakingStyle 规则注入对话 prompt（`[style]` 配置，关闭回退 v1.6）；无需新 CLI 命令 |
 | 弱反馈闭环 | **v1.7 M4 新增（H2）**：S2/S3 弱信号检测写入 `feedback_log`（默认仅审计不自动改动）；无需新 CLI 命令 |
 | `import qq --file` 中文路径 | **v1.7 M0 修复**：文件路径参数改 `PathBuf`/`OsString` 承载，中文文件名导入冒烟通过 |
+| `mcp serve` | **v2.1 新增 MCP 服务端入口**：`ramaria mcp serve` 以 stdio 启动 MCP 服务端（六个工具，沿用全局 `--db`）；stdout 仅协议消息、日志走 stderr；桌面「设置 → MCP 接入」提供客户端配置片段，详见上文 `mcp` 章节 |
 
 ---
 
@@ -693,7 +709,9 @@ CLI 命名与输出约定变更（v1.5 起因"自动化友好改造"引入，后
 - `[injection_budget].enabled` 与 `[layer_dedup].enabled` 维持默认 `false`（实测不咬 / 结构性不可观测），无需改动。
 - 2.0 新增配置组已全部写入 `config/default.toml`（含 `[inference.confidence]`/`[inference.drift]`/`[inference.calibration]`/`[layer_dedup]` 等）；建议对照模板检查 `%APPDATA%\Ramaria\config.toml`。
 
-> 完整变更记录见 `CHANGELOG.md` 的 `[2.0.0]` 段。
+> **2.1 升级（无破坏性变更）**：仅新增一次增量 migration（`sessions` 增通道列与联合索引），旧库直接可用，无需重建；未开启 MCP 时行为与 2.0 一致。`[mcp]` 配置组默认关闭，在桌面「设置 → MCP 接入」中开启；MCP 服务端入口见上文 `ramaria mcp`。
+
+> 完整变更记录见 `CHANGELOG.md` 的 `[2.1.0]` / `[2.0.0]` 段。
 
 ---
 
