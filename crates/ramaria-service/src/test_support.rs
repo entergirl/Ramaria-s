@@ -13,7 +13,9 @@ use std::sync::Arc;
 
 use ramaria_core::config::RamariaConfig;
 use ramaria_core::error::{RamariaError, RamariaResult};
-use ramaria_core::traits::{ChatRequest, LlmProvider, StorageBackend, StoreCrud, StreamDelta};
+use ramaria_core::traits::{
+    ChatRequest, EmbeddingProvider, LlmProvider, StorageBackend, StoreCrud, StreamDelta,
+};
 use ramaria_core::types::{
     BackendConfig, MemoryL1, Message, MessageRole, MessageSource, ModelCapability, Persona,
     PersonaKind,
@@ -40,14 +42,20 @@ pub(crate) const L1_JSON_REPLY: &str = r#"{
 
 /// 最小 LLM mock：服务层用例测试不依赖真实 LLM，也不发起网络调用。
 ///
-/// 两种口径:
+/// 口径:
 /// - [`MockLlm::local`]：`chat` 返回空串（模拟"调用成功但无内容"，适合只读用例）；
-/// - [`MockLlm::with_reply`]：`chat` 返回固定文本（模拟"LLM 可用"，供封存生成 L1 等写用例）。
+/// - [`MockLlm::with_reply`]：`chat` 返回固定文本（模拟"LLM 可用"，供封存生成 L1 等写用例）；
+/// - [`MockLlm::failing`]：`chat` 恒失败（模拟后端不可用，覆盖降级与"不落半条"路径）；
+/// - [`MockLlm::with_health_failures`]：健康探测前 N 次失败（模拟后端启动中，覆盖探测重试）。
 pub(crate) struct MockLlm {
     backend: BackendConfig,
     reply: Option<String>,
     /// 为 true 时所有生成调用返回 Llm 错误（不发起网络调用）。
     always_fail: bool,
+    /// 健康探测剩余失败次数（递减；0 表示探测成功）。
+    health_failures: std::sync::atomic::AtomicUsize,
+    /// `chat` 调用计数（含失败；供"幂等跳过不重复调用 LLM"类断言使用）。
+    chat_calls: std::sync::atomic::AtomicUsize,
 }
 
 impl MockLlm {
@@ -57,6 +65,8 @@ impl MockLlm {
             backend: BackendConfig::lm_studio_default(),
             reply: None,
             always_fail: false,
+            health_failures: std::sync::atomic::AtomicUsize::new(0),
+            chat_calls: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -66,6 +76,8 @@ impl MockLlm {
             backend: BackendConfig::lm_studio_default(),
             reply: Some(reply.to_string()),
             always_fail: false,
+            health_failures: std::sync::atomic::AtomicUsize::new(0),
+            chat_calls: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -75,13 +87,30 @@ impl MockLlm {
             backend: BackendConfig::lm_studio_default(),
             reply: None,
             always_fail: true,
+            health_failures: std::sync::atomic::AtomicUsize::new(0),
+            chat_calls: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// 指定健康探测前 N 次失败（链式调用；N = 0 表示探测直接成功）。
+    pub(crate) fn with_health_failures(self, failures: usize) -> Self {
+        Self {
+            health_failures: std::sync::atomic::AtomicUsize::new(failures),
+            ..self
+        }
+    }
+
+    /// `chat` 调用次数（含成功与失败；健康探测不计入）。
+    pub(crate) fn chat_calls(&self) -> usize {
+        self.chat_calls.load(std::sync::atomic::Ordering::Acquire)
     }
 }
 
 #[async_trait::async_trait]
 impl LlmProvider for MockLlm {
     async fn chat(&self, _request: &ChatRequest) -> RamariaResult<String> {
+        self.chat_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if self.always_fail {
             return Err(RamariaError::llm("MockLlm 恒失败（模拟 LLM 后端不可用）"));
         }
@@ -110,8 +139,98 @@ impl LlmProvider for MockLlm {
         Ok(())
     }
 
+    /// 健康探测：按剩余失败次数返回错误（模拟后端启动中，之后转为可达）。
+    async fn health_check(&self) -> RamariaResult<()> {
+        use std::sync::atomic::Ordering;
+
+        if self.health_failures.load(Ordering::Acquire) > 0 {
+            self.health_failures.fetch_sub(1, Ordering::AcqRel);
+            return Err(RamariaError::llm("MockLlm 健康探测失败（模拟后端未就绪）"));
+        }
+        Ok(())
+    }
+
     fn name(&self) -> &'static str {
         "MockLlm"
+    }
+}
+
+// =========================================================
+// 最小嵌入 mock
+// =========================================================
+
+/// 最小嵌入 mock：确定性向量（无模型文件、无网络、无随机性）。
+///
+/// 职责:
+/// - 让"嵌入模型已加载"的路径在无模型环境下可测（热更新 / 读取 / 可用性判定）；
+/// - 提供固定维度，供维度断言复用。
+pub(crate) struct DeterministicEmbedding {
+    info: ramaria_core::traits::EmbeddingModelInfo,
+}
+
+impl DeterministicEmbedding {
+    /// 向量维度（足够区分测试文本即可）。
+    pub(crate) const DIMENSION: usize = 16;
+
+    /// 构造可用的嵌入 provider。
+    pub(crate) fn new() -> Self {
+        Self {
+            info: ramaria_core::traits::EmbeddingModelInfo {
+                model_id: "mock-deterministic-embedding".to_string(),
+                dimension: Self::DIMENSION,
+            },
+        }
+    }
+
+    /// 计算确定性向量（字符哈希分桶后 L2 归一化）。
+    fn vector(text: &str) -> Vec<f32> {
+        use std::hash::{Hash, Hasher};
+
+        let mut vector = vec![0.0_f32; Self::DIMENSION];
+        for ch in text.chars().filter(|ch| !ch.is_whitespace()) {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            ch.hash(&mut hasher);
+            let index = (hasher.finish() as usize) % Self::DIMENSION;
+            vector[index] += 1.0;
+        }
+        let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
+        if norm > 0.0 {
+            for value in &mut vector {
+                *value /= norm;
+            }
+        }
+        vector
+    }
+}
+
+#[async_trait::async_trait]
+impl ramaria_core::traits::EmbeddingProvider for DeterministicEmbedding {
+    async fn embed(&self, text: &str) -> RamariaResult<Vec<f32>> {
+        Ok(Self::vector(text))
+    }
+
+    async fn embed_batch(&self, texts: &[&str]) -> RamariaResult<Vec<Vec<f32>>> {
+        Ok(texts.iter().map(|text| Self::vector(text)).collect())
+    }
+
+    fn model_info(&self) -> ramaria_core::traits::EmbeddingModelInfo {
+        self.info.clone()
+    }
+
+    async fn validate(&self) -> RamariaResult<()> {
+        Ok(())
+    }
+
+    async fn download_model(&self) -> RamariaResult<()> {
+        Ok(())
+    }
+
+    fn download_progress(&self) -> f64 {
+        1.0
+    }
+
+    fn is_available(&self) -> bool {
+        true
     }
 }
 
@@ -159,6 +278,37 @@ pub(crate) async fn engine_with_llm_and_config(
     llm: MockLlm,
     config: RamariaConfig,
 ) -> (Engine, Arc<SqliteStorage>, PathBuf) {
+    assemble_engine(tag, Arc::new(llm), None, config).await
+}
+
+/// 以指定 LLM 与嵌入 provider 装配引擎（覆盖向量通道 / 状态机等用例）。
+pub(crate) async fn engine_with_llm_config_and_embedding(
+    tag: &str,
+    llm: MockLlm,
+    config: RamariaConfig,
+    embedding: Option<Arc<dyn EmbeddingProvider>>,
+) -> (Engine, Arc<SqliteStorage>, PathBuf) {
+    assemble_engine(tag, Arc::new(llm), embedding, config).await
+}
+
+/// 以共享句柄注入 LLM mock（调用计数等断言用），并可指定嵌入 provider。
+pub(crate) async fn engine_with_shared_llm(
+    tag: &str,
+    llm: Arc<MockLlm>,
+    config: RamariaConfig,
+    embedding: Option<Arc<dyn EmbeddingProvider>>,
+) -> (Engine, Arc<SqliteStorage>, PathBuf) {
+    let provider: Arc<dyn LlmProvider> = llm;
+    assemble_engine(tag, provider, embedding, config).await
+}
+
+/// 统一装配实现：建库（含 migration）→ 以注入依赖构造引擎。
+async fn assemble_engine(
+    tag: &str,
+    llm: Arc<dyn LlmProvider>,
+    embedding: Option<Arc<dyn EmbeddingProvider>>,
+    config: RamariaConfig,
+) -> (Engine, Arc<SqliteStorage>, PathBuf) {
     let dir = temp_dir(tag);
     let db_path = dir.join("assistant.db");
     // 先做一次装配（建库 + migration），再以同一路径构造测试可见的存储句柄
@@ -172,8 +322,8 @@ pub(crate) async fn engine_with_llm_and_config(
     ));
     let engine = Engine::from_parts(
         storage.clone() as Arc<dyn StorageBackend>,
-        Arc::new(llm),
-        None,
+        llm,
+        embedding,
         config,
     );
     (engine, storage, dir)

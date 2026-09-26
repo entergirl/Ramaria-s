@@ -81,11 +81,13 @@ pub(crate) async fn run(engine: &Engine, req: ChatSendRequest) -> RamariaResult<
 
     // ---- 3. 记忆上下文（共用召回；闸门口径与在线管线一致） ----
     engine.ensure_index_loaded().await?;
+    // 嵌入 provider 取快照后在锁外使用（缺失 → 共用召回内部降级为 BM25 + 关键词镜像）
+    let embedding = engine.embedding_ref();
     let recall = assemble_recall(RecallInput {
         retriever: &**engine.retriever_slot(),
         keyword_mirror: &**engine.keyword_mirror_ref(),
         storage,
-        embedding: engine.embedding_ref().map(|provider| provider.as_ref()),
+        embedding: embedding.as_deref(),
         query: message,
         persona_uid: Some(&persona),
         retrieval: &config.retrieval,
@@ -208,7 +210,9 @@ pub(crate) async fn run(engine: &Engine, req: ChatSendRequest) -> RamariaResult<
         input_chars = message.chars().count(),
         "生成用例开始（记忆检索与 Prompt 装配完成）"
     );
-    let reply = match engine.llm_ref().chat(&request).await {
+    // LLM provider 取快照后在锁外调用（热更新期间取到旧快照或新快照均自洽）
+    let llm = engine.llm_ref();
+    let reply = match llm.chat(&request).await {
         Ok(reply) => reply,
         Err(e) => {
             // LLM 失败不落库：避免库内留下没有回复的孤立用户消息
@@ -356,10 +360,12 @@ async fn route_behavior(
         })
         .collect();
 
+    // 嵌入 provider 取快照后在锁外使用（缺失 → 行为路由走无向量通道）
+    let embedding = engine.embedding_ref();
     match ramaria_memory::behavior::orchestrate::route(
         storage,
         &config.behavior,
-        engine.embedding_ref().map(|provider| provider.as_ref()),
+        embedding.as_deref(),
         persona,
         &route_messages,
     )

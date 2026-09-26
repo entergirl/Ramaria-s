@@ -3,7 +3,8 @@
 //! 设计特点:
 //! - 全库扫描：遍历 `sessions` 中**全部**活跃会话（含切换人格遗留在库的孤儿会话），
 //!   而非仅当前活跃会话——与在线管线空闲检测线程同一口径
-//! - 阈值口径：最后消息距今 > `[session].l1_idle_minutes`（默认 10 分钟）触发封存
+//! - 阈值口径：最后消息距今 > 给定阈值触发封存；缺省取 `[session].l1_idle_minutes`
+//!   （默认 10 分钟），宿主可传入运行时可变的阈值（热更新）
 //! - 抢占幂等：逐个走 `seal`（条件更新抢占），多进程同时扫描不会重复生成 L1
 //! - 请求间节流：连续封存时按 `[thresholds].cluster_delay_ms` 间隔（避免触发远端 LLM 限流）
 //! - 空会话跳过：无消息的会话不触发 LLM（保持既有语义）
@@ -18,8 +19,7 @@ use std::time::Duration;
 use ramaria_core::config::RamariaConfig;
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::traits::StorageBackend;
-use ramaria_core::types::{MemoryL1, now_ms};
-use ramaria_memory::l1::{L1RetryObserver, MAX_L1_RETRY_JOBS_PER_RUN, retry_pending_l1_jobs};
+use ramaria_core::types::now_ms;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -37,13 +37,9 @@ const IDLE_LOOP_SHUTDOWN_TIMEOUT_SECONDS: u64 = 15;
 
 /// 执行一次空闲检查：补扫失败的 L1 摘要，并对超时会话执行封存。
 ///
-/// 流程:
-/// 0. L1 摘要补扫：消费封存失败遗留的 pending `l1_summary` 任务（先于本轮封存执行，
-///    避免本轮新登记的任务在同一轮被立即重试一次——LLM 不可用时白耗一次调用）；
-/// 1. 列出全部活跃会话；
-/// 2. 逐个读取最后消息时间（无消息 → 跳过）；
-/// 3. 超过 `[session].l1_idle_minutes` → 走 `seal` 用例（内部抢占，防止重复摘要）；
-/// 4. 每封存一个会话后按 `[thresholds].cluster_delay_ms` 节流。
+/// 阈值口径:
+/// - 使用 `[session].l1_idle_minutes`（默认 10 分钟）；运行时可变的阈值
+///   （宿主热更新）走 [`tick_with_threshold`]。
 ///
 /// 参数:
 /// - `engine`: 服务层引擎。
@@ -51,6 +47,29 @@ const IDLE_LOOP_SHUTDOWN_TIMEOUT_SECONDS: u64 = 15;
 /// 返回:
 /// - 本次实际封存的会话数量（未抢到 / 未超时 / 空会话不计入）。
 pub(crate) async fn tick(engine: &Engine) -> RamariaResult<usize> {
+    tick_with_threshold(engine, engine.config().session.l1_idle_minutes).await
+}
+
+/// 执行一次空闲检查（空闲阈值由调用方给定）。
+///
+/// 流程:
+/// 0. L1 摘要补扫：消费封存失败遗留的 pending `l1_summary_retry` 任务（先于本轮封存执行，
+///    避免本轮新登记的任务在同一轮被立即重试一次——LLM 不可用时白耗一次调用）；
+/// 1. 列出全部活跃会话；
+/// 2. 逐个读取最后消息时间（无消息 → 跳过）；
+/// 3. 超过 `idle_minutes` → 走 `seal` 用例（内部抢占，防止重复摘要）；
+/// 4. 每封存一个会话后按 `[thresholds].cluster_delay_ms` 节流。
+///
+/// 参数:
+/// - `engine`: 服务层引擎。
+/// - `idle_minutes`: 空闲阈值（分钟）；由调用方给定，支持运行时热更新。
+///
+/// 返回:
+/// - 本次实际封存的会话数量（未抢到 / 未超时 / 空会话不计入）。
+pub(crate) async fn tick_with_threshold(
+    engine: &Engine,
+    idle_minutes: u32,
+) -> RamariaResult<usize> {
     // 封存许可（服务层门禁）：关闭时不扫描、不封存、不做摘要补扫
     // （MCP 宿主在 allow_seal=false 时已不拉起循环，此处为服务层兜底，
     //   同时覆盖直接调用 `tick_idle` 的入口）
@@ -61,19 +80,11 @@ pub(crate) async fn tick(engine: &Engine) -> RamariaResult<usize> {
 
     let storage = engine.storage_ref().as_ref();
     let config = engine.config();
-    let threshold_ms = config.session.l1_idle_minutes as i64 * 60_000;
+    let threshold_ms = idle_minutes as i64 * 60_000;
 
-    // ---- 0. L1 摘要补扫（D4：MCP 独用时的消费点，与桌面共用同一实现） ----
-    // 背景：封存中 L1 生成失败会登记 pending `l1_summary`；桌面侧有启动期与 L2/L3 定时
-    // 消费点，MCP 独用（无桌面）时此前无人消费 → 摘要永久缺失。此处在空闲循环内兜底。
-    let retry_stats = retry_pending_l1_jobs(
-        storage,
-        engine.llm_ref().as_ref(),
-        &config.l1.progressive,
-        MAX_L1_RETRY_JOBS_PER_RUN,
-        &ServiceL1RetryObserver { engine },
-    )
-    .await;
+    // ---- 0. L1 摘要补扫：消费封存失败遗留的 pending 任务，先于本轮封存执行
+    //      （避免本轮新登记的任务被立即重试一次——LLM 不可用时白耗一次调用） ----
+    let retry_stats = crate::lifecycle::l1::retry_pending_l1_jobs_with_stats(engine).await;
     if retry_stats.completed > 0 {
         tracing::info!(
             scanned = retry_stats.scanned,
@@ -120,7 +131,7 @@ pub(crate) async fn tick(engine: &Engine) -> RamariaResult<usize> {
         tracing::info!(
             session_id = %session.id,
             idle_minutes = %format!("{:.1}", idle_ms as f64 / 60_000.0),
-            threshold_minutes = config.session.l1_idle_minutes,
+            threshold_minutes = idle_minutes,
             "空闲检查：会话超时，执行封存"
         );
 
@@ -167,31 +178,6 @@ async fn last_message_time(
             Ok(messages.iter().map(|m| m.created_at).max())
         }
         Err(e) => Err(e),
-    }
-}
-
-// =========================================================
-// L1 补扫宿主钩子（服务层实现）
-// =========================================================
-
-/// L1 补扫宿主钩子：L1 增量镜像 + 注册的 L2 触发钩子。
-///
-/// 说明:
-/// - 桌面侧由 `SessionLifecycle` 实现同一接口（Retriever / 关键词镜像 + L2 检查）；
-///   本实现走服务层镜像与宿主注册的钩子，保持两条消费路径同源（D-V21-012 原则）。
-struct ServiceL1RetryObserver<'a> {
-    engine: &'a Engine,
-}
-
-#[async_trait::async_trait]
-impl L1RetryObserver for ServiceL1RetryObserver<'_> {
-    async fn on_l1(&self, l1: &MemoryL1) {
-        crate::index::index_l1_into_mirrors(self.engine, l1).await;
-    }
-
-    async fn on_cascade(&self, persona_uid: Option<&str>) {
-        let hooks = self.engine.seal_hooks();
-        crate::seal::run_hook(&hooks.l2_trigger, persona_uid, "L2 触发检查（L1 补扫）").await;
     }
 }
 
@@ -443,6 +429,34 @@ mod tests {
     async fn tick_without_sessions_returns_zero() {
         let (engine, _storage, dir) = engine_with_l1_reply("idle-none", L1_JSON_REPLY).await;
         assert_eq!(engine.tick_idle().await.expect("空闲检查应成功"), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 阈值参数化：`tick_with_threshold` 按传入阈值判定（0 分钟 → 刚活跃会话也视为超时）。
+    #[tokio::test]
+    async fn tick_with_threshold_uses_given_threshold() {
+        let (engine, storage, dir) = engine_with_l1_reply("idle-threshold", L1_JSON_REPLY).await;
+        seed_persona(&storage, "char-0001").await;
+        let session = seed_session_with_messages(&storage, "char-0001", 2, now_ms()).await;
+
+        // 缺省口径（10 分钟）：刚活跃 → 不封存
+        assert_eq!(tick(&engine).await.expect("空闲检查应成功"), 0);
+
+        // 阈值 0 分钟：立即视为超时 → 封存
+        assert_eq!(
+            tick_with_threshold(&engine, 0)
+                .await
+                .expect("空闲检查应成功"),
+            1,
+            "阈值 0 分钟时刚活跃会话也应封存"
+        );
+        let row = storage
+            .get_session(session)
+            .await
+            .expect("查询会话应成功")
+            .expect("会话应存在");
+        assert!(row.ended_at.is_some(), "会话应被关闭");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

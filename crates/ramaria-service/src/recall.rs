@@ -178,11 +178,13 @@ async fn search(
     if wants(RecallLayer::Raw) && !policy.allow_raw_text {
         tracing::debug!("原文层被隐私策略关闭（allow_raw_text=false），本次不返回原文块");
     }
+    // 嵌入 provider 取快照后在锁外使用（未配置 → 向量通道降级，检索走 BM25 + 关键词镜像）
+    let embedding = engine.embedding_ref();
     let memory_output = assemble_recall(RecallInput {
         retriever: &**engine.retriever_slot(),
         keyword_mirror: &**engine.keyword_mirror_ref(),
         storage: engine.storage_ref().as_ref(),
-        embedding: engine.embedding_ref().map(|e| e.as_ref()),
+        embedding: embedding.as_deref(),
         query,
         persona_uid: Some(persona),
         retrieval: &config.retrieval,

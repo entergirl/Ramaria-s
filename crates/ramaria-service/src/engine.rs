@@ -4,13 +4,15 @@
 //! - `Engine` 自持依赖装配：storage（连接池 + migration）→ 配置（只读）→ LLM → 嵌入（可选）→ 检索占位
 //! - 与传输无关：不依赖 app / cli / desktop / tauri，不持有界面或协议概念
 //! - 配置纪律：config.toml 为配置权威源（桌面 / CLI 双写同步以文件为准），本层只读不写回
+//! - 热更新：LLM 与嵌入 provider 以 `RwLock` 持有快照，后端配置 / 嵌入模型变更时整体替换；
+//!   读取路径取克隆后在锁外使用，异步代码不跨 `.await` 持锁
 //! - 降级链：嵌入模型缺失 → 向量通道不可用（BM25 + 关键词镜像继续工作），不阻塞装配
 //! - 懒加载：检索索引在首次召回时构建，本层仅持有占位槽（避免进程启动即加载大库）；
 //!   占位槽未加载期间产生的 L1 增量会置脏标记，保证下次加载重建不漏（见 `index_dirty`）
 //! - 重建节流：跨进程代次变化触发的重建受 `[index].refresh_interval_seconds` 约束
 //!   （0 = 不节流，见 `index_rebuild_cooldown_elapsed`）
 //! - 宿主后台任务：进程内空闲检查循环由入口层拉起（`spawn_idle_loop`），退出时优雅关停
-//! - 用例挂载点：recall / ingest / seal / tick_idle / history / persona 均由用例实现接入
+//! - 用例挂载点：recall / ingest / seal / tick_idle / history / persona / 模型管理均由用例实现接入
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -18,9 +20,11 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use ramaria_core::config::{EmbeddingDevice, RamariaConfig};
 use ramaria_core::error::{RamariaError, RamariaResult};
-use ramaria_core::lock::{read_recover, write_recover};
+use ramaria_core::lock::{lock_recover, read_recover, write_recover};
 use ramaria_core::traits::{EmbeddingProvider, LlmProvider, LlmResponseCache, StorageBackend};
-use ramaria_core::types::{BackendConfig, LlmProvider as LlmProviderKind, now_ms};
+use ramaria_core::types::{
+    AppState, BackendConfig, LlmProvider as LlmProviderKind, MemoryL1, now_ms,
+};
 use ramaria_llm::keychain::Keychain;
 use ramaria_memory::behavior::PendingPool;
 use ramaria_memory::keyword::KeywordService;
@@ -30,12 +34,14 @@ use uuid::Uuid;
 
 use crate::idle::{IdleLoop, IdleLoopOptions};
 use crate::index::IndexStamp;
+use crate::lifecycle::{Lifecycle, LifecycleOptions};
 use crate::recall::RecallPolicy;
 use crate::seal::SealHooks;
 use crate::types::{
-    ChatSendOutcome, ChatSendRequest, HistoryRequest, HistoryResult, IngestOutcome, IngestRequest,
-    PersonaCardRequest, PersonaCardView, PersonaSummaryView, RecallRequest, RecallResult,
-    SealOutcome,
+    ChatSendOutcome, ChatSendRequest, DegradedReason, EmbeddingModelView, EmbeddingValidation,
+    HistoryRequest, HistoryResult, IngestOutcome, IngestRequest, PersonaCardRequest,
+    PersonaCardView, PersonaSummaryView, RecallRequest, RecallResult, SealOutcome, SetupRequest,
+    SetupStatus,
 };
 
 // =========================================================
@@ -86,13 +92,22 @@ impl EngineOptions {
 /// 并发约定:
 /// - `Engine` 自身为 `Send + Sync`，可放入 `Arc` 跨任务共享。
 /// - 检索器槽为 `RwLock<Option<..>>`：检索读多写少，懒加载在首次召回时写入。
+/// - LLM / 嵌入 provider 为 `RwLock` 快照：热更新整体替换，读取方取克隆后在锁外使用
+///   （异步路径不持有锁跨 `.await`）。
 pub struct Engine {
     /// 存储后端（业务 CRUD + 基础设施）。
     storage: Arc<dyn StorageBackend>,
-    /// 当前 LLM provider（按 DB 侧 backend_config 装配）。
-    llm: Arc<dyn LlmProvider>,
-    /// 嵌入模型 provider（None = 向量通道降级，BM25 + 关键词镜像继续可用）。
-    embedding: Option<Arc<dyn EmbeddingProvider>>,
+    /// 当前 LLM provider 快照（按 DB 侧 backend_config 装配；后端配置变更时整体替换）。
+    llm: RwLock<Arc<dyn LlmProvider>>,
+    /// 嵌入模型 provider 快照（None = 向量通道降级，BM25 + 关键词镜像继续可用）。
+    embedding: RwLock<Option<Arc<dyn EmbeddingProvider>>>,
+    /// OS keychain（线上 provider 的 API key 来源；首次配置与后端配置热更新共用同一实例）。
+    keychain: Arc<Keychain>,
+    /// LLM 响应精确缓存（`[cache].enabled=false` 时为 None）。
+    /// 热更新 provider 时复用同一实例，保证切换后端后既有缓存不失效。
+    llm_cache: RwLock<Option<Arc<dyn LlmResponseCache>>>,
+    /// 应用状态机（首次配置 → 索引构建 → 就绪 / 降级）。
+    state: Mutex<AppState>,
     /// 生效配置（config.toml 为权威源；本层只读不写回）。
     config: RamariaConfig,
     /// 数据库文件路径（诊断与客户端配置片段展示用）。
@@ -126,6 +141,46 @@ pub struct Engine {
     seal_allowed: AtomicBool,
 }
 
+// =========================================================
+// 内部依赖访问器（crate 内用例实现使用）
+// =========================================================
+//
+// 说明:
+// - 统一返回 Arc 克隆（provider 快照）或引用（存储 / 锁槽），
+//   用例实现拿到的都是"已脱离锁"的句柄，异步路径不会跨 `.await` 持锁。
+
+impl Engine {
+    /// 存储后端（crate 内用例实现使用）。
+    pub(crate) fn storage_ref(&self) -> &Arc<dyn StorageBackend> {
+        &self.storage
+    }
+
+    /// LLM provider 快照（crate 内用例实现使用）。
+    pub(crate) fn llm_ref(&self) -> Arc<dyn LlmProvider> {
+        self.llm()
+    }
+
+    /// 嵌入 provider 快照（crate 内用例实现使用）。
+    pub(crate) fn embedding_ref(&self) -> Option<Arc<dyn EmbeddingProvider>> {
+        self.embedding()
+    }
+
+    /// 检索器懒加载槽（crate 内用例实现使用）。
+    pub(crate) fn retriever_slot(&self) -> &Arc<RwLock<Option<Retriever>>> {
+        &self.retriever
+    }
+
+    /// 关键词镜像（crate 内用例实现使用）。
+    pub(crate) fn keyword_mirror_ref(&self) -> &Arc<RwLock<KeywordService>> {
+        &self.keyword_mirror
+    }
+
+    /// 行为层待定池（crate 内编排与测试使用）。
+    pub(crate) fn behavior_pending_ref(&self) -> &Arc<Mutex<PendingPool>> {
+        &self.behavior_pending
+    }
+}
+
 impl Engine {
     /// 装配引擎（配置路径缺省：数据库同目录 `config.toml`）。
     ///
@@ -149,7 +204,7 @@ impl Engine {
     /// 1. 数据库连接池 + migration（`ramaria-storage`）；
     /// 2. 配置加载（只读，不写回 DB）；
     /// 3. 后端配置（DB 侧 `backend_config`，无记录回退 LM Studio 默认）；
-    /// 4. LLM provider（按 `[cache]` 配置注入精确缓存）；
+    /// 4. LLM provider（按 `[cache]` 配置注入精确缓存，缓存实例由引擎持有供热更新复用）；
     /// 5. 嵌入 provider（可选，缺失降级）；
     /// 6. 检索器占位（懒加载）。
     pub async fn open_with(options: EngineOptions) -> RamariaResult<Self> {
@@ -182,7 +237,7 @@ impl Engine {
             None
         };
         let keychain = Arc::new(Keychain::new());
-        let llm = build_llm_provider(&backend_config, &keychain, cache)?;
+        let llm = build_llm_provider(&backend_config, &keychain, cache.clone())?;
 
         // ---- 5. 嵌入 provider（可选，缺失降级）----
         let embedding = restore_embedding(&backend_config, config.embedding.device);
@@ -196,9 +251,10 @@ impl Engine {
 
         Ok(Self {
             storage,
-            llm,
-            embedding,
-            // 行为层待定池按生效配置初始化（与 app 侧同一机制）
+            llm: RwLock::new(llm),
+            embedding: RwLock::new(embedding),
+            keychain,
+            llm_cache: RwLock::new(cache),
             behavior_pending: Arc::new(Mutex::new(PendingPool::new(&config.behavior))),
             config,
             db_path,
@@ -212,6 +268,8 @@ impl Engine {
             recall_policy: Arc::new(RwLock::new(RecallPolicy::default())),
             seal_hooks: Arc::new(RwLock::new(SealHooks::default())),
             seal_allowed: AtomicBool::new(true),
+            // 状态机初值：首次配置判定由 setup 用例推进（装配阶段不做网络探测）
+            state: Mutex::new(AppState::NeedsSetup),
         })
     }
 
@@ -223,6 +281,7 @@ impl Engine {
     /// 说明:
     /// - 不创建连接池与迁移，不加载配置文件；调用方对依赖生命周期负责。
     /// - `db_path` 视为未设置（诊断信息为空路径）。
+    /// - keychain 使用系统默认实例；响应缓存默认未启用（注入路径由调用方自行装配 provider）。
     pub fn from_parts(
         storage: Arc<dyn StorageBackend>,
         llm: Arc<dyn LlmProvider>,
@@ -231,8 +290,10 @@ impl Engine {
     ) -> Self {
         Self {
             storage,
-            llm,
-            embedding,
+            llm: RwLock::new(llm),
+            embedding: RwLock::new(embedding),
+            keychain: Arc::new(Keychain::new()),
+            llm_cache: RwLock::new(None),
             behavior_pending: Arc::new(Mutex::new(PendingPool::new(&config.behavior))),
             config,
             db_path: PathBuf::new(),
@@ -244,6 +305,7 @@ impl Engine {
             recall_policy: Arc::new(RwLock::new(RecallPolicy::default())),
             seal_hooks: Arc::new(RwLock::new(SealHooks::default())),
             seal_allowed: AtomicBool::new(true),
+            state: Mutex::new(AppState::NeedsSetup),
         }
     }
 
@@ -256,19 +318,62 @@ impl Engine {
         &self.storage
     }
 
-    /// 当前 LLM provider（按值返回 Arc，便于移入异步任务）。
+    /// 当前 LLM provider 快照（读锁内克隆 Arc，调用方在锁外使用，可安全移入异步任务）。
     pub fn llm(&self) -> Arc<dyn LlmProvider> {
-        Arc::clone(&self.llm)
+        read_recover(&self.llm, "engine.llm").clone()
     }
 
-    /// 嵌入 provider（None = 向量通道降级）。
+    /// 嵌入 provider 快照（None = 向量通道降级）。
     pub fn embedding(&self) -> Option<Arc<dyn EmbeddingProvider>> {
-        self.embedding.clone()
+        read_recover(&self.embedding, "engine.embedding").clone()
     }
 
-    /// 向量通道是否可用（嵌入模型已加载）。
+    /// 向量通道是否可用（嵌入模型已加载且自测可用）。
+    ///
+    /// 说明:
+    /// - 判定包含 `is_available`（模型文件完整且未被标记降级），
+    ///   与桌面 / CLI 对"嵌入可用"的口径一致；
+    /// - 不发起推理调用，可高频调用（设置页轮询 / 每次召回前判定均可）。
     pub fn is_embedding_available(&self) -> bool {
-        self.embedding.is_some()
+        read_recover(&self.embedding, "engine.embedding")
+            .as_ref()
+            .is_some_and(|provider| provider.is_available())
+    }
+
+    /// OS keychain 引用（线上 provider 的 API key 读写）。
+    pub fn keychain(&self) -> &Keychain {
+        &self.keychain
+    }
+
+    /// OS keychain（Arc 克隆，供 provider 构造移入异步任务）。
+    pub fn keychain_arc(&self) -> Arc<Keychain> {
+        Arc::clone(&self.keychain)
+    }
+
+    /// 当前 LLM 响应精确缓存（None = `[cache].enabled=false`）。
+    ///
+    /// 用途:
+    /// - 热更新 provider 时复用同一实例，切换后端后既有缓存不失效。
+    pub fn llm_cache(&self) -> Option<Arc<dyn LlmResponseCache>> {
+        read_recover(&self.llm_cache, "engine.llm_cache").clone()
+    }
+
+    /// 当前应用状态（首次配置 → 索引构建 → 就绪 / 降级）。
+    pub fn current_state(&self) -> AppState {
+        *lock_recover(&self.state, "engine.state")
+    }
+
+    /// 设置应用状态（状态变更记 info 日志，便于诊断流程卡点）。
+    pub fn set_state(&self, state: AppState) {
+        let old = {
+            let mut guard = lock_recover(&self.state, "engine.state");
+            let old = *guard;
+            *guard = state;
+            old
+        };
+        if old != state {
+            tracing::info!(from = %old, to = %state, "应用状态变更");
+        }
     }
 
     /// 生效配置引用（只读）。
@@ -444,14 +549,162 @@ impl Engine {
     }
 
     // =========================================================
+    // 记忆管线手动触发
+    // =========================================================
+
+    /// 手动触发 L2 事件提取检查（全 persona 扫描 + L3 级联）。
+    ///
+    /// 用法:
+    /// - 宿主手动触发（批量导入后补检查等场景），与后台调度共用同一份实现；
+    /// - 内部失败只记日志，不向调用方抛错。
+    pub async fn trigger_l2_check(&self) {
+        let storage = self.storage_ref().as_ref();
+
+        tracing::info!("trigger_l2_check: 开始遍历 persona...");
+
+        // L1 → L2（仅检查未吸收 L1）
+        crate::lifecycle::l2_l3::check_l2_trigger(self, None).await;
+
+        // L2 → L3（独立检查未吸收事件，即使 L1 已全部吸收）
+        let personas = match storage.list_personas().await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, "trigger_l2_check: 查询 persona 列表失败，跳过 L3");
+                return;
+            }
+        };
+
+        for persona in &personas {
+            let unabsorbed_events = match storage.list_unabsorbed_events(&persona.uid).await {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!(persona_uid = %persona.uid, error = %e, "查询未吸收事件失败");
+                    continue;
+                }
+            };
+
+            tracing::info!(
+                persona_uid = %persona.uid,
+                persona_name = %persona.name,
+                unabsorbed_event_count = unabsorbed_events.len(),
+                "检查 L3 触发条件"
+            );
+
+            crate::lifecycle::l2_l3::check_l3_trigger(self, None, &persona.uid).await;
+        }
+    }
+
+    /// 手动触发指定 persona 的 L3 性格推断检查。
+    ///
+    /// 用法:
+    /// - 宿主手动触发（批量导入后补检查等场景），与后台调度共用同一份实现；
+    /// - 未吸收事件达到阈值（或最早事件超龄）时执行推断，否则直接返回；
+    /// - 内部失败只记日志，不向调用方抛错。
+    pub async fn trigger_l3_check(&self, persona_uid: &str) {
+        crate::lifecycle::l2_l3::check_l3_trigger(self, None, persona_uid).await;
+    }
+
+    // =========================================================
+    // L1 摘要手动重生成与补扫
+    // =========================================================
+
+    /// 为指定会话重新生成单段 L1 摘要（手动重试，末尾触发 L2 检查）。
+    ///
+    /// 用法:
+    /// - 供封存中 L1 生成失败后的手动补救；会话可已关闭，也可仍在活跃中；
+    /// - 单段口径：即使开启渐进式配置也按单段生成（与封存路径口径不同）。
+    ///
+    /// 返回:
+    /// - `Ok(Some(l1))`: 生成成功（已写库并增量镜像，可立即召回）；
+    /// - `Ok(None)`: 会话无消息（跳过）。
+    pub async fn regenerate_l1(
+        &self,
+        session_id: Uuid,
+        persona_uid: Option<&str>,
+        user_prefix: Option<&str>,
+        assistant_prefix: Option<&str>,
+    ) -> RamariaResult<Option<MemoryL1>> {
+        crate::lifecycle::l1::regenerate_l1(
+            self,
+            session_id,
+            persona_uid,
+            user_prefix,
+            assistant_prefix,
+        )
+        .await
+    }
+
+    /// 生成单段 L1 摘要但不触发 L2 级联（幂等；供批量导入场景）。
+    ///
+    /// 用法:
+    /// - 与 [`Engine::regenerate_l1`] 相同，但跳过末尾 L2 检查；
+    ///   调用方应在全部 L1 生成完成后自行触发级联；
+    /// - 幂等：目标 persona 已有 L1 时不重复生成（返回 `Ok(None)`）。
+    ///
+    /// 返回:
+    /// - `Ok(Some(l1))`: 本次生成成功；
+    /// - `Ok(None)`: 会话无消息，或已有目标 persona 的 L1（跳过）。
+    pub async fn regenerate_l1_no_cascade(
+        &self,
+        session_id: Uuid,
+        persona_uid: Option<&str>,
+        user_prefix: Option<&str>,
+        assistant_prefix: Option<&str>,
+    ) -> RamariaResult<Option<MemoryL1>> {
+        crate::lifecycle::l1::regenerate_l1_no_cascade(
+            self,
+            session_id,
+            persona_uid,
+            user_prefix,
+            assistant_prefix,
+        )
+        .await
+    }
+
+    /// 为指定会话重新生成 L1 摘要（渐进式感知口径）。
+    ///
+    /// 用法:
+    /// - 与封存路径口径一致：`[l1.progressive]` 开启且会话触发阈值（消息数 / 时间跨度）时
+    ///   按段生成多条 L1，未触发时回退单段摘要；末尾触发 L2 检查。
+    ///
+    /// 返回:
+    /// - `Ok(l1_list)`: 本次生成的全部段 L1（未触发渐进时为 1 条）；
+    /// - `Ok(vec![])`: 会话无消息。
+    pub async fn regenerate_l1_progressive(
+        &self,
+        session_id: Uuid,
+        persona_uid: Option<&str>,
+        user_prefix: Option<&str>,
+        assistant_prefix: Option<&str>,
+    ) -> RamariaResult<Vec<MemoryL1>> {
+        crate::lifecycle::l1::regenerate_l1_progressive(
+            self,
+            session_id,
+            persona_uid,
+            user_prefix,
+            assistant_prefix,
+        )
+        .await
+    }
+
+    /// 补扫封存失败遗留的 L1 摘要任务（宿主启动与定时消费点）。
+    ///
+    /// 返回:
+    /// - 本轮成功补跑出 L1 摘要的任务数。
+    pub async fn retry_pending_l1_jobs(&self) -> usize {
+        crate::lifecycle::l1::retry_pending_l1_jobs(self).await
+    }
+
+    // =========================================================
     // 宿主后台任务
     // =========================================================
 
     /// 启动进程内空闲检查循环（超时会话按 `[session].l1_idle_minutes` 触发封存）。
     ///
     /// 用法:
-    /// - 长驻宿主（MCP 服务端等）启动时拉起，退出时 [`IdleLoop::shutdown`] 优雅关停；
-    /// - 桌面入口用自身生命周期线程（含状态机与桥接段逻辑），不复用本循环；
+    /// - 仅需"超时会话自动封存"的轻量宿主（MCP 服务端等）启动时拉起，退出时
+    ///   [`IdleLoop::shutdown`] 优雅关停；
+    /// - 需要活跃指针与 L2/L3 调度的宿主改用 [`Engine::start_lifecycle`]（同一份空闲检查实现）；
     /// - 封存消耗 LLM 并改变记忆状态：入口层可自行按配置门禁决定是否拉起（如 `[mcp].allow_seal`）。
     ///
     /// 返回:
@@ -470,38 +723,151 @@ impl Engine {
         IdleLoop::spawn(Arc::clone(self), options)
     }
 
+    /// 拉起会话生命周期（活跃指针 / 空闲检查 / L2-L3 调度 / 关停）。
+    ///
+    /// 用法:
+    /// - 长驻宿主启动时按选项拉起（见 [`LifecycleOptions`]：桌面 / MCP / 单次执行），
+    ///   退出时调用 [`Lifecycle::shutdown`] 优雅关停；
+    /// - 仅需空闲封存的轻量宿主可继续使用 [`Engine::spawn_idle_loop`]。
+    ///
+    /// 返回:
+    /// - 生命周期容器句柄（持有引擎，引擎不反向持有容器，避免引用环）。
+    pub fn start_lifecycle(self: &Arc<Self>, options: LifecycleOptions) -> Arc<Lifecycle> {
+        Lifecycle::start(Arc::clone(self), options)
+    }
+
     // =========================================================
-    // 内部依赖访问器（crate 内用例实现使用）
+    // 依赖热更新（后端配置 / 嵌入模型变更时整体替换快照）
     // =========================================================
 
-    /// 存储后端（crate 内用例实现使用）。
-    pub(crate) fn storage_ref(&self) -> &Arc<dyn StorageBackend> {
-        &self.storage
+    /// 热更新 LLM provider（后端配置变更后整体替换）。
+    ///
+    /// 参数:
+    /// - `provider`: 已构造好的新 provider（线上 provider 需已注入 keychain 密钥来源）。
+    ///
+    /// 说明:
+    /// - 并发读取方取到的是替换前或替换后的完整快照，不存在"半个 provider"的中间态；
+    /// - 缓存实例不在本方法内替换（由 [`Engine::llm_cache`] 持有，构造新 provider 时复用）。
+    pub fn update_llm(&self, provider: Arc<dyn LlmProvider>) {
+        let new_name = provider.name();
+        let old = {
+            let mut guard = write_recover(&self.llm, "engine.llm");
+            std::mem::replace(&mut *guard, provider)
+        };
+        tracing::info!(
+            old_provider = old.name(),
+            new_provider = new_name,
+            "LLM provider 已热更新"
+        );
     }
 
-    /// LLM provider（crate 内用例实现使用）。
-    pub(crate) fn llm_ref(&self) -> &Arc<dyn LlmProvider> {
-        &self.llm
+    /// 热更新嵌入 provider（加载 / 卸载模型后整体替换）。
+    ///
+    /// 参数:
+    /// - `provider`: `Some` 为加载（向量通道就绪），`None` 为卸载（向量通道降级）。
+    ///
+    /// 说明:
+    /// - 替换只影响后续召回与索引构建；既有内存索引在下一次懒加载刷新时重建
+    ///   （与"跨进程写入后刷新"同一路径）。
+    pub fn update_embedding(&self, provider: Option<Arc<dyn EmbeddingProvider>>) {
+        match provider.as_ref() {
+            Some(provider) => {
+                let info = provider.model_info();
+                tracing::info!(
+                    model = %info.model_id,
+                    dimension = info.dimension,
+                    "嵌入模型已热更新（向量通道就绪）"
+                );
+            }
+            None => tracing::info!("嵌入模型已卸载（向量通道降级，BM25 + 关键词镜像继续可用）"),
+        }
+        let mut guard = write_recover(&self.embedding, "engine.embedding");
+        *guard = provider;
     }
 
-    /// 嵌入 provider（crate 内用例实现使用）。
-    pub(crate) fn embedding_ref(&self) -> Option<&Arc<dyn EmbeddingProvider>> {
-        self.embedding.as_ref()
+    // =========================================================
+    // 首次配置用例（状态机推进与缺项诊断）
+    // =========================================================
+
+    /// 读取首次配置缺项诊断（后端配置 / 模型选择 / 索引 / 嵌入四项）。
+    pub async fn check_setup_status(&self) -> RamariaResult<SetupStatus> {
+        crate::setup::check(self).await
     }
 
-    /// 检索器懒加载槽（crate 内用例实现使用）。
-    pub(crate) fn retriever_slot(&self) -> &Arc<RwLock<Option<Retriever>>> {
-        &self.retriever
+    /// 执行首次配置：密钥入 keychain → 后端配置落库 → provider 热替换 → 健康探测 → 推进状态机。
+    ///
+    /// 返回:
+    /// - 探测通过时返回按缺项诊断判定的状态；全部失败返回 `Degraded`（不报错）。
+    pub async fn run_setup(&self, req: &SetupRequest) -> RamariaResult<AppState> {
+        crate::setup::run(self, req).await
     }
 
-    /// 关键词镜像（crate 内用例实现使用）。
-    pub(crate) fn keyword_mirror_ref(&self) -> &Arc<RwLock<KeywordService>> {
-        &self.keyword_mirror
+    /// 刷新应用状态（索引构建完成 / 嵌入热加载 / 配置变更后调用）。
+    pub async fn refresh_setup_state(&self) -> RamariaResult<AppState> {
+        crate::setup::refresh(self).await
     }
 
-    /// 行为层待定池（crate 内编排与测试使用）。
-    pub(crate) fn behavior_pending_ref(&self) -> &Arc<Mutex<PendingPool>> {
-        &self.behavior_pending
+    /// 探测当前 LLM 后端可达性（最多 3 次、间隔 2 秒）。
+    ///
+    /// 返回:
+    /// - `true`: 至少一次探测通过；`false`: 全部失败。
+    ///
+    /// 用途:
+    /// - 入口层的「测试连接」动作；与首次配置使用的探测实现同一份（重试口径一致）。
+    pub async fn probe_llm_health(&self) -> bool {
+        let llm = self.llm_ref();
+        crate::setup::probe_health_with_retry(
+            llm.as_ref(),
+            crate::setup::HEALTH_PROBE_ATTEMPTS,
+            crate::setup::HEALTH_PROBE_INTERVAL_SECONDS,
+        )
+        .await
+    }
+
+    // =========================================================
+    // 模型管理用例（后端配置 / 嵌入模型）
+    // =========================================================
+
+    /// 更新 LLM 后端配置并热加载 provider（写入 keychain → 落库 → 重建 → 替换）。
+    ///
+    /// 参数:
+    /// - `config`: 新的后端配置（provider / base_url / model / 嵌入路径等）。
+    /// - `api_key`: 可选的线上 provider 密钥；`None` 或空白表示不更新密钥。
+    ///
+    /// 返回:
+    /// - 成功时返回 `Ok(())`，此后读取路径取到新 provider。
+    pub async fn update_backend_config(
+        &self,
+        config: &BackendConfig,
+        api_key: Option<&str>,
+    ) -> RamariaResult<()> {
+        crate::model::update_backend_config(self, config, api_key).await
+    }
+
+    /// 校验指定目录能否作为嵌入模型使用（无副作用探测）。
+    ///
+    /// 返回:
+    /// - `valid=false` + `reason` 表达目录缺失 / 加载失败 / 推理失败，不抛错。
+    pub async fn validate_embedding_model(&self, path: &str) -> RamariaResult<EmbeddingValidation> {
+        crate::model::validate_embedding_model(path, self.config.embedding.device).await
+    }
+
+    /// 保存嵌入模型配置并热加载（`None` 或空白路径 = 卸载）。
+    ///
+    /// 返回:
+    /// - 成功时内存 provider 与持久化路径同时生效；加载失败时保持原状态不变。
+    pub async fn save_embedding_model(&self, path: Option<&str>) -> RamariaResult<()> {
+        crate::model::save_embedding_model(self, path).await
+    }
+
+    /// 读取当前嵌入模型配置（已加载 → 维度 / 可用性；未加载 → 配置中的路径）。
+    pub async fn embedding_model(&self) -> RamariaResult<Option<EmbeddingModelView>> {
+        crate::model::embedding_model(self).await
+    }
+
+    /// 读取当前降级原因（非 `Degraded` 状态返回 `None`）。
+    pub async fn degraded_reason(&self) -> RamariaResult<Option<DegradedReason>> {
+        crate::model::degraded_reason(self).await
     }
 
     // =========================================================
@@ -632,7 +998,10 @@ fn load_config_readonly(config_path: &Path, db_path: &Path) -> RamariaConfig {
 /// - `backend_config`: 后端配置（provider / base_url / model）。
 /// - `keychain`: 线上 provider 的 API key 来源（本地 provider 不使用）。
 /// - `cache`: 精确缓存（`[cache].enabled=false` 时为 None）。
-fn build_llm_provider(
+///
+/// 说明:
+/// - 装配与后端配置热更新共用本函数，保证两处的 provider 构造口径与缓存注入条件一致。
+pub(crate) fn build_llm_provider(
     backend_config: &BackendConfig,
     keychain: &Arc<Keychain>,
     cache: Option<Arc<dyn LlmResponseCache>>,

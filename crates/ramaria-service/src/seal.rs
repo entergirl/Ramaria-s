@@ -240,7 +240,9 @@ async fn build_utt(
     };
 
     let builder = UttBuilder::from_config(&config.utt);
-    let embedder = engine.embedding_ref().map(|e| e.as_ref());
+    // 嵌入 provider 取快照后在锁外使用（不可用 → 块照常入库，无向量）
+    let embedding = engine.embedding_ref();
+    let embedder = embedding.as_deref();
     match builder
         .build_session(engine.storage_ref().as_ref(), session, embedder)
         .await

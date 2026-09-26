@@ -318,8 +318,9 @@ async fn sync_keyword_mirror(engine: &Engine, l1_views: &[L1DocView], l2_views: 
             .cloned()
             .collect()
     };
+    // 嵌入 provider 取快照后在锁外使用（缺失 → 语义层降级为无向量构建）
     let provider = engine.embedding_ref();
-    let fuzzy = KeywordService::build_fuzzy(&terms, provider.map(|e| e.as_ref())).await;
+    let fuzzy = KeywordService::build_fuzzy(&terms, provider.as_deref()).await;
     {
         let mirror = engine.keyword_mirror_ref();
         let mut guard = write_recover(mirror, "index.keyword_mirror");
