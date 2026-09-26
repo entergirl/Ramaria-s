@@ -9,6 +9,8 @@
 //! - role/source 解析失败时记录 WARNING 日志并回退到安全默认值
 //! - UUID 解析异常时记录 WARNING，不静默吞错
 
+use std::collections::HashMap;
+
 use crate::repo::StorageResultExt;
 use crate::repo::parse_uuid_required;
 use crate::retry::with_busy_retry;
@@ -177,6 +179,42 @@ pub async fn count_by_session(pool: &SqlitePool, session_id: Uuid) -> RamariaRes
         .storage_err("统计消息数量失败")?;
 
     Ok(row.cnt as u32)
+}
+
+/// 聚合全部会话的消息数量（`GROUP BY session_id`），供会话列表一次取回全部计数。
+///
+/// 职责:
+/// - 单条聚合查询替代逐会话 COUNT 的 N+1 查询。
+///
+/// 返回:
+/// - 会话 UUID → 消息条数的映射；只包含有消息的会话
+///   （无消息会话由调用方按 0 处理，与桌面列表降级口径一致）。
+///
+/// 说明:
+/// - 单行 session_id 解析失败时记录 WARNING 并跳过（防御历史脏数据，不阻塞列表）。
+pub async fn count_by_sessions(pool: &SqlitePool) -> RamariaResult<HashMap<Uuid, u32>> {
+    let rows = sqlx::query_as::<_, (String, i64)>(
+        "SELECT session_id, COUNT(*) AS cnt FROM messages GROUP BY session_id",
+    )
+    .fetch_all(pool)
+    .await
+    .storage_err("聚合会话消息数量失败")?;
+
+    let mut counts = HashMap::with_capacity(rows.len());
+    for (session_id, cnt) in rows {
+        match ramaria_core::types::uuid_from_db(&session_id) {
+            Ok(id) => {
+                counts.insert(id, cnt.max(0) as u32);
+            }
+            Err(_) => {
+                tracing::warn!(
+                    raw_id = %session_id,
+                    "messages.session_id UUID 解析失败，聚合计数已跳过该行"
+                );
+            }
+        }
+    }
+    Ok(counts)
 }
 
 /// 按时间升序加载指定 session 的全部消息。

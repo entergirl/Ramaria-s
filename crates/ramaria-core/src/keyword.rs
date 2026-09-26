@@ -366,6 +366,36 @@ pub struct KeywordPoolRow {
 }
 
 // =========================================================
+// PendingAliasRow — 待确认别名冲突行
+// =========================================================
+
+/// 待确认别名冲突行（`alias_status='pending'`，join 出规范词文本）。
+///
+/// 职责:
+/// - 供存储层返回 keyword_pool 中待裁决的别名词条，上层（关键词用例）据此
+///   展示冲突并执行确认 / 驳回迁移；零 I/O 纯数据行。
+///
+/// 字段约定:
+/// - `alias_id`: 别名词条 rowid（`keyword_pool` 的 INTEGER 主键），确认 / 驳回按此定位词条。
+/// - `alias_keyword`: 别名文本（标准化后）。
+/// - `canonical_id`: 建议合并到的规范词 rowid。
+/// - `canonical_keyword`: 规范词文本（join 解析，展示用途）。
+/// - `created_at`: 登记时间（Unix 毫秒）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingAliasRow {
+    /// 别名词条 rowid
+    pub alias_id: i64,
+    /// 别名文本
+    pub alias_keyword: String,
+    /// 建议合并到的规范词 rowid
+    pub canonical_id: i64,
+    /// 规范词文本
+    pub canonical_keyword: String,
+    /// 登记时间（Unix 毫秒）
+    pub created_at: i64,
+}
+
+// =========================================================
 // KeywordRef — 倒排索引引用枚举
 // =========================================================
 

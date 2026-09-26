@@ -1,0 +1,33 @@
+{
+  "delta_text": "嗯，我在听。",
+  "done": {
+    "backend_id": "stop",
+    "has_session_id": true,
+    "total_chars": 6
+  },
+  "event_kinds": [
+    "delta",
+    "delta",
+    "delta",
+    "delta",
+    "delta",
+    "delta",
+    "done"
+  ],
+  "messages": [
+    {
+      "content": "今天有点累，随便聊聊吧",
+      "role": "user",
+      "source": "local"
+    },
+    {
+      "content": "嗯，我在听。",
+      "role": "assistant",
+      "source": "online"
+    }
+  ],
+  "session": {
+    "channel": "local",
+    "message_count": 2
+  }
+}

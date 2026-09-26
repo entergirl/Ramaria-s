@@ -8,10 +8,12 @@
 //! - 公共 API 与 `StorageBackend` 聚合 trait 一致，供 app/memory 层依赖注入使用
 //! - ID 类型对齐: TEXT 主键表用 Uuid，INTEGER AUTOINCREMENT 表用 i64
 
+use std::collections::HashMap;
+
 use ramaria_core::behavior::{BehaviorRule, FeedbackLog};
 use ramaria_core::config::CacheEviction;
 use ramaria_core::error::{RamariaError, RamariaResult};
-use ramaria_core::keyword::KeywordPoolRow;
+use ramaria_core::keyword::{KeywordPoolRow, PendingAliasRow};
 use ramaria_core::traits::{IndexCorpusStamp, StoreCrud, StoreInfrastructure};
 use ramaria_core::types::{
     BackendConfig, ClusterSnapshot, EventBatchWrite, EventRelation, EventSource, MemoryEvent,
@@ -126,6 +128,10 @@ impl StoreCrud for SqliteStorage {
     async fn count_messages(&self, session_id: Uuid) -> RamariaResult<u32> {
         repo::messages::count_by_session(&self.pool, session_id).await
     }
+    /// 覆写为单条 GROUP BY 聚合（会话列表一次取回全部计数，替代逐会话 COUNT）。
+    async fn count_messages_by_session(&self) -> RamariaResult<HashMap<Uuid, u32>> {
+        repo::messages::count_by_sessions(&self.pool).await
+    }
     /// 覆写为指纹精确查询（外部入口回流去重）。
     async fn find_message_by_fingerprint(
         &self,
@@ -225,6 +231,10 @@ impl StoreCrud for SqliteStorage {
         limit: i64,
     ) -> RamariaResult<Vec<MemoryEvent>> {
         repo::events::list_events_by_persona(&self.pool, persona_uid, offset, limit).await
+    }
+    /// 覆写为 `SELECT COUNT(*)`（事件浏览的分页总数）。
+    async fn count_events_by_persona(&self, persona_uid: &str) -> RamariaResult<u64> {
+        repo::events::count_by_persona(&self.pool, persona_uid).await
     }
     async fn list_unabsorbed_events(&self, persona_uid: &str) -> RamariaResult<Vec<MemoryEvent>> {
         repo::events::list_unabsorbed_events(&self.pool, persona_uid).await
@@ -458,6 +468,18 @@ impl StoreCrud for SqliteStorage {
     }
     async fn list_keyword_pool_entries(&self) -> RamariaResult<Vec<KeywordPoolRow>> {
         repo::keyword::list_pool_rows(&self.pool).await
+    }
+    /// 覆写为 join 规范词文本的待确认别名查询。
+    async fn list_pending_aliases(&self) -> RamariaResult<Vec<PendingAliasRow>> {
+        repo::keyword::list_pending_aliases(&self.pool).await
+    }
+    /// 覆写为条件 UPDATE（仅命中 pending 行，未命中返回 false）。
+    async fn confirm_keyword_alias(&self, alias_id: i64) -> RamariaResult<bool> {
+        repo::keyword::confirm_alias(&self.pool, alias_id).await
+    }
+    /// 覆写为条件 UPDATE（仅命中 pending 行，未命中返回 false）。
+    async fn reject_keyword_alias(&self, alias_id: i64) -> RamariaResult<bool> {
+        repo::keyword::reject_alias(&self.pool, alias_id).await
     }
 }
 
@@ -1637,6 +1659,144 @@ mod tests {
         let pending = rows.iter().find(|r| r.keyword == "职场焦虑").unwrap();
         assert_eq!(pending.alias_status.as_deref(), Some("pending"));
         assert_eq!(pending.canonical_id, Some(canonical_id));
+    }
+
+    /// 会话消息计数聚合：多会话按会话归组，无消息会话不出现在映射中。
+    #[tokio::test]
+    async fn count_messages_by_session_aggregates_per_session() {
+        let storage = setup().await;
+        let s1 = storage.create_session(None).await.unwrap();
+        let s2 = storage.create_session(None).await.unwrap();
+        let empty = storage.create_session(None).await.unwrap();
+
+        for (session_id, count) in [(&s1.id, 2_i64), (&s2.id, 3_i64)] {
+            for i in 0..count {
+                let mut m = Message::new(
+                    *session_id,
+                    MessageRole::User,
+                    format!("m{i}"),
+                    MessageSource::Local,
+                );
+                m.created_at = 1_000 + i;
+                storage.save_message(&m).await.unwrap();
+            }
+        }
+
+        let counts = storage.count_messages_by_session().await.unwrap();
+        assert_eq!(counts.get(&s1.id).copied(), Some(2));
+        assert_eq!(counts.get(&s2.id).copied(), Some(3));
+        assert_eq!(counts.len(), 2, "聚合只应包含有消息的会话");
+        assert!(
+            !counts.contains_key(&empty.id),
+            "无消息会话不应出现在聚合映射中（调用方按 0 处理）"
+        );
+    }
+
+    /// 事件计数：按 persona 隔离统计，无事件 persona 返回 0。
+    #[tokio::test]
+    async fn count_events_by_persona_counts_scoped() {
+        let storage = setup().await;
+        let p = Persona::new(
+            "char-count".into(),
+            "计数角色".into(),
+            PersonaKind::Char,
+            1,
+            "local".into(),
+        );
+        storage.create_persona(&p).await.unwrap();
+
+        for i in 0_i64..3 {
+            let ev = MemoryEvent::new(
+                "char-count".to_string(),
+                format!("事件{i}"),
+                "摘要".to_string(),
+                1_000 + i,
+                2_000 + i,
+            );
+            storage.save_event(&ev).await.unwrap();
+        }
+
+        assert_eq!(
+            storage.count_events_by_persona("char-count").await.unwrap(),
+            3
+        );
+        assert_eq!(
+            storage.count_events_by_persona("char-other").await.unwrap(),
+            0,
+            "无事件 persona 计数应为 0"
+        );
+    }
+
+    /// 待确认别名链路：列表 → 确认（pending 迁移为 alias）→ 驳回；未命中返回 false。
+    #[tokio::test]
+    async fn keyword_alias_pending_flow_via_trait() {
+        let storage = setup().await;
+        storage.upsert_keyword("工作压力").await.unwrap();
+        let canonical_id: i64 =
+            sqlx::query_scalar("SELECT rowid FROM keyword_pool WHERE keyword = ?")
+                .bind("工作压力")
+                .fetch_one(&storage.pool)
+                .await
+                .unwrap();
+
+        // 两条 pending：一条用于确认、一条用于驳回
+        for alias in ["职场焦虑", "职业倦怠"] {
+            repo::keyword::upsert_with_alias(
+                &storage.pool,
+                &KeywordToken::new(alias).unwrap(),
+                canonical_id,
+                "pending",
+            )
+            .await
+            .unwrap();
+        }
+
+        let pending = storage.list_pending_aliases().await.unwrap();
+        assert_eq!(pending.len(), 2);
+        let anxious = pending
+            .iter()
+            .find(|p| p.alias_keyword == "职场焦虑")
+            .expect("职场焦虑应为待确认别名");
+        assert_eq!(anxious.canonical_id, canonical_id);
+        assert_eq!(anxious.canonical_keyword, "工作压力");
+        assert!(anxious.created_at > 0);
+
+        // 确认：pending → alias；重复确认未命中返回 false
+        assert!(
+            storage
+                .confirm_keyword_alias(anxious.alias_id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !storage
+                .confirm_keyword_alias(anxious.alias_id)
+                .await
+                .unwrap()
+        );
+
+        // 驳回：另一条 pending → 独立规范词；重复驳回未命中返回 false
+        let burnout = pending
+            .iter()
+            .find(|p| p.alias_keyword == "职业倦怠")
+            .expect("职业倦怠应为待确认别名");
+        assert!(
+            storage
+                .reject_keyword_alias(burnout.alias_id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !storage
+                .reject_keyword_alias(burnout.alias_id)
+                .await
+                .unwrap()
+        );
+
+        // 全链路收尾：pending 清空；不存在的 rowid 同样未命中
+        assert!(storage.list_pending_aliases().await.unwrap().is_empty());
+        assert!(!storage.confirm_keyword_alias(999_999).await.unwrap());
+        assert!(!storage.reject_keyword_alias(999_999).await.unwrap());
     }
 
     #[tokio::test]

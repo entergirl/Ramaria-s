@@ -1,18 +1,23 @@
 //! crates/ramaria-service/src/types.rs - 服务层用例数据结构
 //!
 //! 设计特点:
-//! - 与传输无关的纯数据：serde 可序列化，不出现 stdio / Tauri / HTTP 概念
-//! - 字段口径对齐工具契约（memory_recall / chat_send / chat_ingest / persona_* / chat_history）
+//! - 与传输无关的纯数据：不出现 stdio / Tauri / HTTP 概念（工具契约结构体均可 serde 序列化）
+//! - 字段口径对齐工具契约（memory_recall / chat_send / chat_ingest / persona_* / chat_history）；
+//!   交互入口的流式生成请求（`ChatStreamRequest`）承载配置覆盖与预置上文，不做 serde 序列化
 //! - 默认值与边界以常量集中声明，入口层（MCP schema）与用例层共用同一口径，避免双处定义漂移
 //! - 时间字段对外统一 ISO-8601 UTC 字符串；毫秒时间戳由用例层在映射时转换
 //! - 枚举序列化统一小写，与 MCP 客户端 JSON 约定一致
 //! - 结构体仅承载数据，不含行为；业务语义由用例层（engine / recall / ingest 等）实现
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use ramaria_core::config::RamariaConfig;
+use ramaria_core::traits::ChatMessage;
 use ramaria_core::types::{
-    FactTier, LlmProvider, MessageRole, PersonaKind, ProfileField, StyleStatsStatus, TraitLayer,
+    FactSource, FactStatus, FactTier, LlmProvider, MessageRole, MessageSource, PersonaKind,
+    Presentation, ProfileField, StyleStatsStatus, TraitLayer, TraitSource, TraitStatus,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -340,6 +345,24 @@ pub struct ChatSendOutcome {
     pub reply: String,
     pub session_id: Uuid,
     pub chars: usize,
+}
+
+/// 流式生成请求（交互入口使用，返回增量事件流）。
+///
+/// 字段约定:
+/// - `message`: 本轮用户消息（必填，空白视为非法）。
+/// - `persona`: 回复方人格 uid，缺省 [`DEFAULT_PERSONA_UID`]；会话已绑定人格时以会话归属为准。
+/// - `session_id`: 复用会话；缺省时新建会话（交互入口语义，含新会话桥接）。
+/// - `seed_history`: 调用方预置上文（时间正序）：不落库、仅进入本轮 prompt 历史段
+///   （与库内历史拼接，seed 在前）。
+/// - `config_override`: 配置覆盖（档位实验用）；`None` = 引擎生效配置。
+#[derive(Debug, Clone)]
+pub struct ChatStreamRequest {
+    pub message: String,
+    pub persona: Option<String>,
+    pub session_id: Option<Uuid>,
+    pub seed_history: Vec<ChatMessage>,
+    pub config_override: Option<Arc<RamariaConfig>>,
 }
 
 // =========================================================
@@ -719,6 +742,439 @@ pub enum DegradedReason {
     BothUnavailable,
     /// 其它未知原因（两者均可用但仍处于降级状态）。
     Unknown,
+}
+
+// =========================================================
+// 记忆浏览用例（L1 / L2 / L3 / 性格画像 / 事实 / 证据链）
+// =========================================================
+
+/// L1 记忆浏览请求。
+///
+/// 字段约定:
+/// - `persona`: 目标人格 uid（None = 不过滤；未吸收口径下必填）。
+/// - `unabsorbed_only`: false = 按会话收集摘要的统一排序口径（桌面）；
+///   true = 只读未吸收摘要（按 persona 全量取回后分页）。
+/// - `limit`: 返回条数上限（缺省 200；桌面口径再按 1000 截断）。
+/// - `offset`: 分页偏移（缺省 0）。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct L1BrowseRequest {
+    pub persona: Option<String>,
+    pub unabsorbed_only: bool,
+    pub limit: Option<u32>,
+    pub offset: Option<u32>,
+}
+
+/// L1 记忆摘要浏览视图。
+///
+/// 字段约定:
+/// - `keywords` / `atmosphere` / `time_period` / `context_json`: 摘要伴随字段（原始可能为空）。
+/// - `valence` / `salience`: 情绪效价与情感显著性；`created_at`: 创建时间（Unix 毫秒）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct L1MemoryView {
+    pub id: Uuid,
+    pub session_id: Uuid,
+    pub summary: String,
+    pub keywords: Option<String>,
+    pub atmosphere: Option<String>,
+    pub time_period: Option<String>,
+    pub context_json: Option<String>,
+    pub valence: f64,
+    pub salience: f64,
+    pub persona_uid: Option<String>,
+    pub created_at: i64,
+}
+
+/// L1 记忆浏览响应。
+///
+/// 字段约定:
+/// - `total`: 排序后、分页前的条数（调用方据此判断是否还有下一页）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct L1BrowsePage {
+    pub items: Vec<L1MemoryView>,
+    pub total: usize,
+}
+
+/// L2 事件浏览请求。
+///
+/// 字段约定:
+/// - `persona`: 目标人格 uid（None = 合并全部人格事件后统一排序）。
+/// - `limit`: 返回条数上限（缺省 200，上限 1000）。
+/// - `offset`: 分页偏移（缺省 0；仅 persona 口径生效）。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct L2BrowseRequest {
+    pub persona: Option<String>,
+    pub limit: Option<u32>,
+    pub offset: Option<u32>,
+}
+
+/// L2 事件浏览视图。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct L2EventView {
+    pub id: i64,
+    pub persona_uid: String,
+    pub title: String,
+    pub summary: String,
+    pub keywords: Option<String>,
+    pub valence: f64,
+    pub confidence: f64,
+    pub presentation: Presentation,
+    pub share: f64,
+    pub attitude: Option<String>,
+    pub salience: f64,
+    pub created_at: i64,
+}
+
+/// L2 事件浏览响应。
+///
+/// 字段约定:
+/// - `total`: 分页前的条数（persona 口径为全量计数；合并口径为各人格取回后的合并条数）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct L2BrowsePage {
+    pub items: Vec<L2EventView>,
+    pub total: usize,
+}
+
+/// L3 性格标签浏览视图（扁平列表条目）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct L3TraitView {
+    pub id: i64,
+    pub persona_uid: String,
+    pub layer: TraitLayer,
+    pub label: String,
+    pub meaning: String,
+    pub confidence: f64,
+    pub evidence: f64,
+    pub consistency: f64,
+    pub status: TraitStatus,
+    pub created_at: i64,
+}
+
+/// L3 三层性格画像视图（按 base / primary / accent 分组）。
+///
+/// 字段约定:
+/// - 每层仅含生效（Active）标签，层内按 `seq` 升序；无画像时三层均为空数组（非错误）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PersonalityProfileView {
+    pub persona_uid: String,
+    /// 底色层
+    pub base: Vec<TraitDetailView>,
+    /// 主色调层
+    pub primary: Vec<TraitDetailView>,
+    /// 点缀层
+    pub accent: Vec<TraitDetailView>,
+}
+
+/// 单条性格标签的详细视图（三层画像展示用，含浮现 / 抑制等伴随字段）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TraitDetailView {
+    pub id: i64,
+    pub label: String,
+    pub meaning: String,
+    pub confidence: f64,
+    pub evidence: f64,
+    pub consistency: f64,
+    pub layer: TraitLayer,
+    pub not_meaning: Option<String>,
+    pub trigger: Option<String>,
+    pub suppress: Option<String>,
+    pub related: Option<String>,
+    pub seq: i32,
+    pub source: TraitSource,
+    pub status: TraitStatus,
+    pub created_at: i64,
+}
+
+/// 画像数据状态视图（数据量指示器）。
+///
+/// 状态约定:
+/// - `insufficient`: 有效样本量 < 5，画像不可信；
+/// - `preliminary`: 5 ≤ 有效样本量 < 20，初步画像；
+/// - `trusted`: 有效样本量 ≥ 20，画像相对稳定。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProfileStatusView {
+    pub persona_uid: String,
+    /// 有效样本量（生效标签的 evidence 之和）
+    pub n_total_eff: f64,
+    /// 生效标签数量
+    pub active_trait_count: usize,
+    /// 状态标识: "insufficient" / "preliminary" / "trusted"
+    pub status: String,
+    /// 状态描述文本（供直接展示）
+    pub status_text: String,
+}
+
+/// 性格标签证据链请求。
+///
+/// 字段约定:
+/// - `persona`: 目标人格 uid（必填；事件与 L1 溯源按此人隔离查询）。
+/// - `trait_id`: 目标性格标签 ID（须为正整数）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TraitEvidenceRequest {
+    pub persona: String,
+    pub trait_id: i64,
+}
+
+/// 完整证据链视图（一条 trait 与其全部支撑 / 矛盾事件的溯源）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TraitEvidenceView {
+    pub trait_id: i64,
+    pub trait_label: String,
+    /// 证据总数
+    pub total_evidence: usize,
+    pub support_count: usize,
+    pub contradict_count: usize,
+    pub neutral_count: usize,
+    /// 证据事件链（按证据创建时间降序；单条查询失败的事件跳过）
+    pub evidence_events: Vec<EvidenceEventView>,
+}
+
+/// 证据链中的事件视图。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvidenceEventView {
+    pub event_id: i64,
+    pub title: String,
+    pub summary: String,
+    pub confidence: f64,
+    pub valence: f64,
+    pub salience: f64,
+    pub attitude: Option<String>,
+    pub paraphrase: Option<String>,
+    pub motives: Option<String>,
+    /// 事件关联的 L1 溯源列表（引用不存在的 L1 跳过）
+    pub l1_sources: Vec<EvidenceL1SourceView>,
+}
+
+/// 证据链中的 L1 溯源视图。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvidenceL1SourceView {
+    pub l1_id: Uuid,
+    pub summary: String,
+    /// L1 证据片段（结构化证据线索的文本槽位）
+    pub evidence_notes: Vec<String>,
+    pub atmosphere: Option<String>,
+    pub valence: f64,
+    /// L1 对事件的贡献权重
+    pub weight: f64,
+}
+
+/// 知识事实浏览请求。
+///
+/// 字段约定:
+/// - `persona`: 目标人格 uid（必填）。
+/// - `field`: 可选字段过滤（None = 全部字段）。
+/// - `limit`: 返回条数上限（None = 全部；默认值由调用点决定）。
+/// - `offset`: 分页偏移（缺省 0）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FactBrowseRequest {
+    pub persona: String,
+    pub field: Option<ProfileField>,
+    pub limit: Option<u32>,
+    pub offset: Option<u32>,
+}
+
+/// 知识事实条目视图（全字段；内容为陈述句，非原文）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FactEntryView {
+    /// 事实 id
+    pub id: i64,
+    /// 字段归属人格
+    pub persona_uid: String,
+    pub field: ProfileField,
+    pub content: String,
+    /// 来源（event / manual / l1）
+    pub source: FactSource,
+    /// 生命周期状态（active / superseded / candidate）
+    pub status: FactStatus,
+    /// 分层（stable / volatile / historical）
+    pub tier: FactTier,
+    /// 覆盖链：被替换事实 id（沿此可展开历史版本）
+    pub version_of: Option<i64>,
+    pub confidence: f64,
+    /// 关键词（判重 / 检索提示）
+    pub keyword_hint: Option<String>,
+    /// 来源事件 id
+    pub ref_event_id: Option<i64>,
+    /// 来源 L1 id
+    pub ref_l1_id: Option<Uuid>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// 知识事实浏览响应。
+///
+/// 字段约定:
+/// - `total`: 分页前的条数（调用方据此判断是否还有下一页）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FactBrowsePage {
+    pub items: Vec<FactEntryView>,
+    pub total: usize,
+}
+
+/// 单条事实详情（含完整版本链）。
+///
+/// 字段约定:
+/// - `versions`: 含自身的完整版本链（链头最早在前）；单版本事实仅含自身。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FactDetailView {
+    pub fact: FactEntryView,
+    pub versions: Vec<FactEntryView>,
+}
+
+/// 按字段分组的知识事实视图（含版本链折叠数据）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GroupedFactsView {
+    pub persona_uid: String,
+    /// 按字段展示名分组: { field_label: [活跃事实] }
+    pub grouped: HashMap<String, Vec<FactEntryView>>,
+    /// 版本链查找: { fact_id: [旧→新版本链] }（仅多版本事实入表）
+    pub versions: HashMap<i64, Vec<FactEntryView>>,
+}
+
+// =========================================================
+// 会话浏览用例（会话列表 / 会话消息）
+// =========================================================
+
+/// 会话列表浏览请求。
+///
+/// 字段约定:
+/// - `limit`: 返回条数上限（None = 全部；Some(0) 按下界 1 处理）。
+/// - `offset`: 分页偏移（缺省 0）。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SessionBrowseRequest {
+    pub limit: Option<u32>,
+    pub offset: Option<u32>,
+}
+
+/// 会话列表浏览响应。
+///
+/// 字段约定:
+/// - `items`: 会话摘要（按开始时间倒序；消息计数聚合失败时计数按 0 处理）。
+/// - `total`: 分页前的会话数。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionBrowsePage {
+    pub items: Vec<SessionSummaryView>,
+    pub total: usize,
+}
+
+/// 会话消息浏览请求。
+///
+/// 字段约定:
+/// - `session_id`: 目标会话。
+/// - `limit`: 每页条数（None = 全量加载，时间正序；Some 走最新在前分页后翻正）。
+/// - `offset`: 分页偏移（仅分页路径生效，负数按 0 处理）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionMessagesRequest {
+    pub session_id: Uuid,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+/// 会话消息浏览响应。
+///
+/// 字段约定:
+/// - `total`: 会话消息总数（与分页无关）。
+/// - `has_more`: 是否还有更早的消息未返回（仅分页路径有效；全量加载恒为 false）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionMessagesView {
+    pub session_id: Uuid,
+    pub total: u32,
+    pub has_more: bool,
+    pub messages: Vec<SessionMessageView>,
+}
+
+/// 消息浏览条目视图。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionMessageView {
+    pub id: Uuid,
+    pub role: MessageRole,
+    pub content: String,
+    pub created_at: i64,
+    pub source: MessageSource,
+    pub persona_uid: Option<String>,
+}
+
+// =========================================================
+// 关键词用例（关键词池列表 / 待确认别名 / 别名裁决）
+// =========================================================
+
+/// 关键词池词条视图。
+///
+/// 字段约定:
+/// - `status`: 三态字符串（canonical / alias / pending）。
+/// - `canonical_id` / `canonical_keyword`: 指向的规范词（规范词自身为 None）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KeywordEntryView {
+    pub keyword: String,
+    /// 使用次数（自然出现 +1；手工种子为 0）
+    pub use_count: i64,
+    pub status: String,
+    pub canonical_id: Option<i64>,
+    pub canonical_keyword: Option<String>,
+    pub created_at: i64,
+}
+
+/// 关键词池列表视图（三态计数 + 全量词条）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KeywordPoolView {
+    pub total: usize,
+    pub canonical_count: usize,
+    pub alias_count: usize,
+    pub pending_count: usize,
+    pub keywords: Vec<KeywordEntryView>,
+}
+
+/// 待确认别名视图。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingAliasView {
+    /// 别名词条 rowid（裁决时定位行）
+    pub alias_id: i64,
+    /// 别名文本
+    pub alias: String,
+    /// 建议合并到的规范词文本
+    pub canonical: String,
+    pub created_at: i64,
+}
+
+/// 别名裁决动作。
+///
+/// 格式:
+/// - 序列化为小写字符串：`confirm` / `reject`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AliasAction {
+    /// 确认合并（pending → alias）
+    Confirm,
+    /// 驳回晋升（pending → canonical）
+    Reject,
+}
+
+/// 别名裁决请求。
+///
+/// 字段约定:
+/// - `alias`: 待处理的别名文本（标准化后比较）。
+/// - `action`: 裁决动作（确认 / 驳回）。
+/// - `already_applied_ok`: confirm 且词条已是 alias 时的处置——true = 幂等成功
+///   （不写库，`already_applied` 置位）；false = 报业务校验错误。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AliasResolveRequest {
+    pub alias: String,
+    pub action: AliasAction,
+    pub already_applied_ok: bool,
+}
+
+/// 别名裁决结果。
+///
+/// 字段约定:
+/// - `alias`: 标准化后的别名文本。
+/// - `canonical_keyword`: confirm 后指向的规范词文本（reject 后为 None）。
+/// - `status`: 裁决后的状态（`alias` / `canonical`）。
+/// - `already_applied`: true = 本次未写库（目标状态此前已达成，幂等路径）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AliasResolveOutcome {
+    pub alias: String,
+    pub canonical_keyword: Option<String>,
+    pub status: String,
+    pub already_applied: bool,
 }
 
 // =========================================================
@@ -1156,5 +1612,122 @@ mod tests {
             let json = serde_json::to_string(&reason).expect("序列化成功");
             assert_eq!(json, format!("\"{expected}\""));
         }
+    }
+
+    /// 浏览 / 关键词用例：请求默认值与分页字段形态。
+    #[test]
+    fn browse_request_defaults() {
+        let l1 = L1BrowseRequest::default();
+        assert!(l1.persona.is_none());
+        assert!(!l1.unabsorbed_only, "L1 默认走按会话收集口径");
+        assert_eq!(l1.limit, None);
+        assert_eq!(l1.offset, None);
+
+        let l2 = L2BrowseRequest::default();
+        assert!(l2.persona.is_none());
+        assert_eq!(l2.limit, None);
+
+        let sessions = SessionBrowseRequest::default();
+        assert_eq!(sessions.limit, None, "会话列表缺省返回全部");
+        assert_eq!(sessions.offset, None);
+
+        let messages = SessionMessagesRequest {
+            session_id: Uuid::nil(),
+            limit: None,
+            offset: None,
+        };
+        assert!(messages.limit.is_none(), "limit=None 表示全量加载");
+    }
+
+    /// 浏览 / 关键词用例：代表性视图 serde 往返与枚举口径。
+    #[test]
+    fn browse_and_keyword_views_serde_roundtrip() {
+        // 别名裁决动作枚举口径（confirm / reject）
+        for (action, expected) in [
+            (AliasAction::Confirm, "confirm"),
+            (AliasAction::Reject, "reject"),
+        ] {
+            let json = serde_json::to_string(&action).expect("序列化成功");
+            assert_eq!(json, format!("\"{expected}\""));
+            let back: AliasAction = serde_json::from_str(&json).expect("反序列化成功");
+            assert_eq!(action, back);
+        }
+
+        // L1 摘要视图往返
+        let l1 = L1MemoryView {
+            id: Uuid::nil(),
+            session_id: Uuid::nil(),
+            summary: "用户最近在准备考试".to_string(),
+            keywords: Some("考试".to_string()),
+            atmosphere: Some("专注".to_string()),
+            time_period: Some("夜间".to_string()),
+            context_json: None,
+            valence: 0.2,
+            salience: 0.7,
+            persona_uid: Some("char-0001".to_string()),
+            created_at: 1_756_000_000_000,
+        };
+        let json = serde_json::to_string(&l1).expect("序列化成功");
+        let back: L1MemoryView = serde_json::from_str(&json).expect("反序列化成功");
+        assert_eq!(l1, back);
+
+        // L2 事件视图往返（presentation 小写序列化）
+        let event = L2EventView {
+            id: 7,
+            persona_uid: "char-0001".to_string(),
+            title: "备考冲刺".to_string(),
+            summary: "连续几天复习到深夜".to_string(),
+            keywords: Some("考试,复习".to_string()),
+            valence: -0.1,
+            confidence: 0.8,
+            presentation: Presentation::Subjective,
+            share: 0.5,
+            attitude: Some("有点紧张但坚持".to_string()),
+            salience: 0.6,
+            created_at: 1_756_000_000_000,
+        };
+        let json = serde_json::to_string(&event).expect("序列化成功");
+        assert!(
+            json.contains("\"presentation\":\"subjective\""),
+            "presentation 应小写序列化: {json}"
+        );
+        let back: L2EventView = serde_json::from_str(&json).expect("反序列化成功");
+        assert_eq!(event, back);
+
+        // 事实条目视图往返（枚举字段口径）
+        let fact = FactEntryView {
+            id: 3,
+            persona_uid: "char-0001".to_string(),
+            field: ProfileField::Interests,
+            content: "喜欢露营".to_string(),
+            source: FactSource::Manual,
+            status: FactStatus::Active,
+            tier: FactTier::Stable,
+            version_of: None,
+            confidence: 0.9,
+            keyword_hint: Some("露营".to_string()),
+            ref_event_id: None,
+            ref_l1_id: None,
+            created_at: 1_000,
+            updated_at: 2_000,
+        };
+        let json = serde_json::to_string(&fact).expect("序列化成功");
+        assert!(json.contains("\"field\":\"interests\""));
+        assert!(json.contains("\"status\":\"active\""));
+        assert!(json.contains("\"source\":\"manual\""));
+        let back: FactEntryView = serde_json::from_str(&json).expect("反序列化成功");
+        assert_eq!(fact, back);
+
+        // 别名裁决结果（reject 后 canonical_keyword 为 null）
+        let outcome = AliasResolveOutcome {
+            alias: "职场焦虑".to_string(),
+            canonical_keyword: None,
+            status: "canonical".to_string(),
+            already_applied: false,
+        };
+        let json = serde_json::to_string(&outcome).expect("序列化成功");
+        assert!(json.contains("\"canonical_keyword\":null"));
+        let back: AliasResolveOutcome = serde_json::from_str(&json).expect("反序列化成功");
+        assert_eq!(outcome, back);
     }
 }

@@ -17,6 +17,7 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
+use ramaria_core::config::RamariaConfig;
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::types::{PersonaFact, PersonalityTrait, StyleStatsStatus, now_ms};
 use ramaria_memory::prompt::builder::build_cross_session_narrative;
@@ -49,7 +50,8 @@ const NARRATIVE_RECENT_L1: u32 = 5;
 ///   在服务层强制执行（协议壳只做参数校验，不承担隐私判断）。
 ///
 /// 字段约定:
-/// - `allow_raw_text`: 是否允许返回 utt 原文块（默认 false —— 原文是最高敏感层）；
+/// - `allow_raw_text`: 是否允许返回 utt 原文块（装配缺省按配置闸门映射，见
+///   [`RecallPolicy::from_config`]；显式注入的保守值为 false —— 原文是最高敏感层）；
 /// - `allowed_personas`: 可见人格白名单，`["*"]` 表示全部可见。
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecallPolicy {
@@ -68,6 +70,28 @@ impl Default for RecallPolicy {
 }
 
 impl RecallPolicy {
+    /// 从配置映射缺省策略（装配层缺省口径）。
+    ///
+    /// 职责:
+    /// - 把配置闸门映射为服务层缺省策略：`allow_raw_text = [injection].utt × [utt].enabled`；
+    /// - 人格白名单缺省不收紧（`["*"]` 全部可见），由宿主按需注入。
+    ///
+    /// 参数:
+    /// - `config`: 当前生效配置。
+    ///
+    /// 返回:
+    /// - 原文开关与配置闸门一致的策略快照。
+    ///
+    /// 说明:
+    /// - 宿主可在装配后经 `Engine::set_recall_policy` 覆盖收紧（如关闭原文 / 限制人格）；
+    ///   显式注入方不受缺省影响（注入值整体替换）。
+    pub fn from_config(config: &RamariaConfig) -> Self {
+        Self {
+            allow_raw_text: config.injection.utt && config.utt.enabled,
+            allowed_personas: vec!["*".to_string()],
+        }
+    }
+
     /// 链式设置原文开关。
     pub fn with_allow_raw_text(mut self, allow: bool) -> Self {
         self.allow_raw_text = allow;
@@ -762,7 +786,9 @@ fn push_section(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{engine_with_db, seed_l1 as seed_l1_raw, seed_persona};
+    use crate::test_support::{
+        MockLlm, engine_with_db, engine_with_llm_and_config, seed_l1 as seed_l1_raw, seed_persona,
+    };
     use crate::types::{ChatRole, ChatTurn};
     use ramaria_core::traits::StoreCrud;
     use ramaria_core::types::{FactSource, FactTier, ProfileField};
@@ -786,6 +812,77 @@ mod tests {
         let policy = RecallPolicy::default();
         assert!(!policy.allow_raw_text, "默认不返回原文块");
         assert!(policy.persona_allowed("char-0001"), "默认全部人格可见");
+    }
+
+    /// 配置映射：原文开关 = `[injection].utt` × `[utt].enabled`；白名单缺省不收紧。
+    #[test]
+    fn policy_from_config_maps_utt_gates() {
+        let config = RamariaConfig::default();
+        let policy = RecallPolicy::from_config(&config);
+        assert!(policy.allow_raw_text, "默认配置：两闸门开启 → 原文层开放");
+        assert_eq!(
+            policy.allowed_personas,
+            vec!["*".to_string()],
+            "缺省不收紧人格白名单"
+        );
+
+        let mut injection_off = RamariaConfig::default();
+        injection_off.injection.utt = false;
+        assert!(
+            !RecallPolicy::from_config(&injection_off).allow_raw_text,
+            "注入闸门关闭 → 原文层关闭"
+        );
+
+        let mut utt_off = RamariaConfig::default();
+        utt_off.utt.enabled = false;
+        assert!(
+            !RecallPolicy::from_config(&utt_off).allow_raw_text,
+            "utt 链路关闭 → 原文层关闭"
+        );
+    }
+
+    /// Engine 装配缺省：策略随配置映射（默认配置开放原文；配置关闭 utt 则关闭）。
+    #[tokio::test]
+    async fn engine_default_policy_follows_config() {
+        let (engine, _storage, dir) = engine_with_llm_and_config(
+            "policy-default",
+            MockLlm::local(),
+            RamariaConfig::default(),
+        )
+        .await;
+        assert!(
+            engine.recall_policy().allow_raw_text,
+            "默认配置装配 → 原文层开放"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut utt_off = RamariaConfig::default();
+        utt_off.utt.enabled = false;
+        let (engine, _storage, dir) =
+            engine_with_llm_and_config("policy-utt-off", MockLlm::local(), utt_off).await;
+        assert!(
+            !engine.recall_policy().allow_raw_text,
+            "配置关闭 utt → 原文层关闭"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 宿主覆盖优先：`set_recall_policy` 注入值整体替换装配缺省。
+    #[tokio::test]
+    async fn engine_policy_override_beats_default() {
+        let (engine, _storage, dir) = engine_with_db("policy-override").await;
+        assert!(
+            engine.recall_policy().allow_raw_text,
+            "装配缺省为配置映射（默认配置开放原文）"
+        );
+
+        engine.set_recall_policy(RecallPolicy::default());
+        assert!(
+            !engine.recall_policy().allow_raw_text,
+            "注入的保守策略覆盖装配缺省"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1084,6 +1181,8 @@ mod tests {
     async fn raw_layer_requires_policy_allow() {
         let (engine, storage, dir) = engine_with_db("raw").await;
         seed_persona(&storage, "char-0001").await;
+        // 本用例验证"策略关闭"分支：显式注入保守策略（装配缺省由配置映射决定）
+        engine.set_recall_policy(RecallPolicy::default());
 
         let result = engine
             .recall(RecallRequest {

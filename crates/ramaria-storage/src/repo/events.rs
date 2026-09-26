@@ -121,6 +121,19 @@ pub async fn list_events_by_persona(
     Ok(rows.into_iter().map(|r| r.into_event()).collect())
 }
 
+/// 统计指定 persona 的事件数量（`SELECT COUNT(*)`，浏览分页总数）。
+///
+/// 返回:
+/// - 该 persona 的事件总数（无事件时为 0）。
+pub async fn count_by_persona(pool: &SqlitePool, persona_uid: &str) -> RamariaResult<u64> {
+    let cnt: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memory_events WHERE persona_uid = ?")
+        .bind(persona_uid)
+        .fetch_one(pool)
+        .await
+        .storage_err("统计事件数量失败")?;
+    Ok(cnt.max(0) as u64)
+}
+
 /// 按 id 查询单条事件（证据链溯源用）。
 ///
 /// 返回:

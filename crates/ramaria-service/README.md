@@ -21,7 +21,9 @@
 | `engine` | `Engine`（用例入口）/ `EngineOptions` / `from_parts` / 配置用例（`load_full_config` / `reload_config` / `save_config` / `sync_backend_config`） |
 | `config` | `ConfigWriter`（双写 / 一致性校验 / 模板生成 / 原子写入）/ `SyncOutcome` / `SyncWriteResult` / `MismatchEntry` |
 | `types` | `RecallRequest` / `ChatSendRequest` / `IngestRequest` / `SealOutcome` / `PersonaCardView` 等纯数据 |
-| `recall` / `chat` / `ingest` / `seal` | 四条主用例实现（crate 内 `pub(crate) run`） |
+| `recall` / `chat` / `ingest` / `seal` | 四条主用例实现（crate 内 `pub(crate) run`）；`chat` 同时提供流式入口（`stream`，经 `Engine::chat_stream` 暴露） |
+| `stream_event` | 流式事件领域模型（`StreamEvent`：delta / done / error）与事件流句柄（`ChatStreamHandle` / `ChatEventStream`） |
+| `privacy` / `bridge` / `feedback` | 生成编排的伴随能力：隐私确认 / 新会话桥接 / 弱反馈检测 |
 | `idle` | `IdleLoop` / `IdleLoopOptions` / `tick`（无生命周期宿主的轻量循环） |
 | `lifecycle` | `Lifecycle` / `LifecycleOptions`（活跃指针 / 手动关闭 / 空闲阈值热更新 / 循环句柄 / 关停）；`lifecycle::l1`（`regenerate_l1*` 与补扫）/ `lifecycle::l2_l3`（L2 触发与 L3 推断调度） |
 | `index` | 索引懒加载 / 显式重建 / 增量镜像（`ensure_loaded` / `rebuild` / `index_l1_into_mirrors`） |

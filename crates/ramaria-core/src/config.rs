@@ -629,7 +629,7 @@ pub struct SessionConfig {
     pub idle_check_interval_seconds: u32,
     /// L2 定时检查间隔（秒）
     pub l2_check_interval_seconds: u32,
-    /// 对话历史最大保留消息数
+    /// 对话历史加载条数上限（进入上下文的历史窗口；分页倒序加载）
     pub max_history_messages: u32,
     /// 会话历史字符预算上限（消息内容 + role 标记的粗略字符数；超限保留最近内容）
     pub max_history_chars: u32,
@@ -640,14 +640,14 @@ impl Default for SessionConfig {
     ///
     /// 返回:
     /// - 10 分钟空闲触发 L1。
-    /// - 最多保留 40 条对话历史供上下文使用。
+    /// - 最多加载 200 条对话历史供上下文使用。
     /// - 历史窗口字符预算 6000。
     fn default() -> Self {
         Self {
             l1_idle_minutes: 10,
             idle_check_interval_seconds: 60,
             l2_check_interval_seconds: 86400,
-            max_history_messages: 40,
+            max_history_messages: 200,
             max_history_chars: 6000,
         }
     }
@@ -2550,7 +2550,7 @@ log_full_prompt = true
 
         // Session 组
         assert_eq!(cfg.session.l1_idle_minutes, 30);
-        assert_eq!(cfg.session.max_history_messages, 40);
+        assert_eq!(cfg.session.max_history_messages, 200);
         assert_eq!(cfg.session.max_history_chars, 6000);
 
         // 阈值组：缺 cluster_delay_ms 必须回退默认 800，而不是 serde 裸 default 的 0

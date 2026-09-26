@@ -14,6 +14,10 @@ use sqlx::SqlitePool;
 
 use crate::repo::StorageResultExt;
 
+// 待确认别名冲突行的定义位于 ramaria-core 关键词类型模块（存储 trait 与展示层共用同一
+// 数据形态），此处再导出供存储侧调用点按原路径引用。
+pub use ramaria_core::keyword::PendingAliasRow;
+
 // =========================================================
 // 别名归一化行结构（keyword-design §6.2）
 // =========================================================
@@ -31,21 +35,6 @@ pub struct CanonicalRow {
     pub keyword: String,
     /// 使用次数（alias 行为该 alias 自身的使用量）
     pub use_count: i64,
-}
-
-/// 待确认别名冲突行（alias_status='pending'，join 出规范词文本）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PendingAliasRow {
-    /// 别名词条 rowid
-    pub alias_id: i64,
-    /// 别名文本
-    pub alias_keyword: String,
-    /// 建议合并到的规范词 rowid
-    pub canonical_id: i64,
-    /// 规范词文本
-    pub canonical_keyword: String,
-    /// 登记时间（Unix 毫秒）
-    pub created_at: i64,
 }
 
 /// keyword_pool 全字段行视图（M3 CLI list/show 与词典装载共用）。

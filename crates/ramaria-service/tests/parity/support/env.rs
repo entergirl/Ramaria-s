@@ -3,7 +3,8 @@
 //! 设计特点:
 //! - 真实存储：每个环境一个临时 SQLite 文件（执行全量 migration），用例在真实存储语义上
 //!   执行；不使用内存 mock 顶替（与"行为等价"验证目标一致）
-//! - 依赖注入：`Engine::from_parts` 注入脚本化 LLM 与预计算向量嵌入，不触网、不加载模型
+//! - 依赖注入：`Engine::from_parts` 注入脚本化 LLM / 预计算向量嵌入 / 保守召回策略，
+//!   不触网、不加载模型
 //! - 隔离性：目录名含纳秒时间戳与进程内自增序号，多测试并行互不干扰
 //! - 清理双保险：显式 `cleanup()` 先释放引擎与存储引用、再优雅关闭连接池并删除目录；
 //!   未显式清理时 `Drop` 兜底删除（失败仅记录，不影响测试结论）
@@ -19,7 +20,7 @@ use ramaria_core::traits::{EmbeddingProvider, LlmProvider, StorageBackend};
 use ramaria_storage::SqliteStorage;
 use sqlx::SqlitePool;
 
-use ramaria_service::Engine;
+use ramaria_service::{Engine, RecallPolicy};
 
 use super::error::{ParityError, ParityResult};
 use super::log;
@@ -94,12 +95,16 @@ impl ParityEnv {
         let embedding = Arc::new(DeterministicEmbedding::new());
         // 具体类型 → trait 对象的隐式上转（`Arc<DeterministicEmbedding>` → `Arc<dyn EmbeddingProvider>`）
         let embedding_provider: Arc<dyn EmbeddingProvider> = embedding.clone();
-        let engine = Arc::new(Engine::from_parts(
+        let engine = Engine::from_parts(
             Arc::clone(&storage) as Arc<dyn StorageBackend>,
             llm,
             Some(embedding_provider),
             config,
-        ));
+        );
+        // 对照环境对齐 MCP 宿主装配口径：装配层显式注入保守策略（原文不出端、全部人格可见），
+        // 不依赖服务层的配置映射缺省——对照基线按冻结口径比对。
+        engine.set_recall_policy(RecallPolicy::default());
+        let engine = Arc::new(engine);
 
         Ok(Self {
             dir,

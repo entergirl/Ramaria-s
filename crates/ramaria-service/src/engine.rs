@@ -41,11 +41,16 @@ use crate::index::IndexStamp;
 use crate::lifecycle::{Lifecycle, LifecycleOptions};
 use crate::recall::RecallPolicy;
 use crate::seal::SealHooks;
+use crate::stream_event::ChatStreamHandle;
 use crate::types::{
-    ChatSendOutcome, ChatSendRequest, DegradedReason, EmbeddingModelView, EmbeddingValidation,
-    HistoryRequest, HistoryResult, IngestOutcome, IngestRequest, PersonaCardRequest,
-    PersonaCardView, PersonaSummaryView, RecallRequest, RecallResult, SealOutcome, SetupRequest,
-    SetupStatus,
+    AliasResolveOutcome, AliasResolveRequest, ChatSendOutcome, ChatSendRequest, ChatStreamRequest,
+    DegradedReason, EmbeddingModelView, EmbeddingValidation, FactBrowsePage, FactBrowseRequest,
+    FactDetailView, GroupedFactsView, HistoryRequest, HistoryResult, IngestOutcome, IngestRequest,
+    KeywordPoolView, L1BrowsePage, L1BrowseRequest, L2BrowsePage, L2BrowseRequest, L3TraitView,
+    PendingAliasView, PersonaCardRequest, PersonaCardView, PersonaSummaryView,
+    PersonalityProfileView, ProfileStatusView, RecallRequest, RecallResult, SealOutcome,
+    SessionBrowsePage, SessionBrowseRequest, SessionMessagesRequest, SessionMessagesView,
+    SetupRequest, SetupStatus, TraitEvidenceRequest, TraitEvidenceView,
 };
 
 // =========================================================
@@ -141,9 +146,9 @@ pub struct Engine {
     /// - `true` = 最近一次构建失败，共享检索器保留的是旧索引（仍可检索，但未刷新）；
     /// - 构建成功后复位；供诊断展示与宿主告警（记忆注入可能不完整）。
     index_rebuild_failed: Arc<AtomicBool>,
-    /// 行为层待定池（跨会话内存态：行为增量编排的归簇状态，与 app 侧同一机制）。
+    /// 行为层待定池（跨会话内存态：行为增量编排的归簇状态）。
     behavior_pending: Arc<Mutex<PendingPool>>,
-    /// 召回隐私与边界策略（默认保守；入口层按 `[mcp]` 配置注入）。
+    /// 召回隐私与边界策略（装配时按配置闸门映射缺省；入口层可按需注入覆盖）。
     recall_policy: Arc<RwLock<RecallPolicy>>,
     /// 封存钩子（行为 / 风格 / L2 触发；未注册则跳过，见 [`SealHooks`]）。
     seal_hooks: Arc<RwLock<SealHooks>>,
@@ -265,6 +270,9 @@ impl Engine {
             "服务层引擎装配完成"
         );
 
+        // 召回策略缺省按配置闸门映射（宿主可在装配后注入覆盖）
+        let recall_policy = RecallPolicy::from_config(&config);
+
         Ok(Self {
             storage,
             llm: RwLock::new(llm),
@@ -277,13 +285,13 @@ impl Engine {
             db_path,
             // ---- 6. 检索器占位：首次召回时构建（懒加载）----
             retriever: Arc::new(RwLock::new(None)),
-            // ---- 7. 关键词镜像与策略 / 钩子：空镜像 + 默认保守策略 ----
+            // ---- 7. 关键词镜像与策略 / 钩子：空镜像 + 配置映射策略 ----
             keyword_mirror: Arc::new(RwLock::new(KeywordService::new())),
             index_dirty: Arc::new(AtomicBool::new(false)),
             index_stamp: Arc::new(RwLock::new(None)),
             last_index_build_ms: Arc::new(AtomicI64::new(0)),
             index_rebuild_failed: Arc::new(AtomicBool::new(false)),
-            recall_policy: Arc::new(RwLock::new(RecallPolicy::default())),
+            recall_policy: Arc::new(RwLock::new(recall_policy)),
             seal_hooks: Arc::new(RwLock::new(SealHooks::default())),
             seal_allowed: AtomicBool::new(true),
             // 状态机初值：首次配置判定由 setup 用例推进（装配阶段不做网络探测）
@@ -306,6 +314,8 @@ impl Engine {
         embedding: Option<Arc<dyn EmbeddingProvider>>,
         config: RamariaConfig,
     ) -> Self {
+        // 召回策略缺省按配置闸门映射（宿主可在装配后注入覆盖）
+        let recall_policy = RecallPolicy::from_config(&config);
         Self {
             storage,
             llm: RwLock::new(llm),
@@ -322,7 +332,7 @@ impl Engine {
             index_stamp: Arc::new(RwLock::new(None)),
             last_index_build_ms: Arc::new(AtomicI64::new(0)),
             index_rebuild_failed: Arc::new(AtomicBool::new(false)),
-            recall_policy: Arc::new(RwLock::new(RecallPolicy::default())),
+            recall_policy: Arc::new(RwLock::new(recall_policy)),
             seal_hooks: Arc::new(RwLock::new(SealHooks::default())),
             seal_allowed: AtomicBool::new(true),
             state: Mutex::new(AppState::NeedsSetup),
@@ -423,8 +433,9 @@ impl Engine {
     /// 设置召回隐私与边界策略。
     ///
     /// 用法:
-    /// - 入口层（MCP / CLI / 桌面）在启动时按配置注入（`[mcp].allow_raw_text`、
-    ///   `allowed_personas` 等），未注入时保持默认保守值（原文不出端）。
+    /// - 入口层按需注入覆盖装配缺省（如按 `[mcp].allow_raw_text`、
+    ///   `allowed_personas` 收紧口径）；未注入时使用 [`RecallPolicy::from_config`]
+    ///   的配置映射缺省。
     ///
     /// 参数:
     /// - `policy`: 召回策略快照。
@@ -446,8 +457,8 @@ impl Engine {
     /// 注册封存钩子（行为 / 风格 / L2 触发；未注册的步骤在封存时跳过）。
     ///
     /// 用法:
-    /// - 入口层启动时注入：桌面 / CLI 复用既有 App 侧实现；MCP 进程未注册时
-    ///   仅跳过对应步骤（L1 / utt / examples 不受影响）。
+    /// - 入口层启动时注入（可用 `default_seal_hooks` / `full_seal_hooks` 两套默认装配）；
+    ///   未注册的步骤在封存时跳过（L1 / utt / examples 不受影响）。
     pub fn set_seal_hooks(&self, hooks: SealHooks) {
         tracing::info!(
             behavior = hooks.behavior.is_some(),
@@ -514,6 +525,23 @@ impl Engine {
         crate::chat::run(self, req).await
     }
 
+    /// 流式生成用例：以指定人格回复一条消息，返回增量事件流句柄（交互入口消费）。
+    ///
+    /// 职责:
+    /// - 与非流式生成同源：参数校验 / 状态与隐私门禁 / 会话定位 / 历史窗口 / 记忆召回 /
+    ///   Prompt 装配 / Token 预算为同一份实现；
+    /// - 生成侧差异：用户消息先落库，增量按事件流转发，助手回复仅在无错且非空时落库；
+    ///   流打不开时不落库并返回只含一个 Error 事件的流。
+    ///
+    /// 返回:
+    /// - 成功时返回 `ChatStreamHandle`（会话定位 + 事件流）；前置编排失败返回对应错误。
+    pub async fn chat_stream(
+        self: &Arc<Self>,
+        req: ChatStreamRequest,
+    ) -> RamariaResult<ChatStreamHandle> {
+        crate::chat::stream(self, req).await
+    }
+
     /// 写入用例：把外部对话回流入库（进 L0），使内容在桌面可见并参与后续记忆加工。
     ///
     /// 职责:
@@ -552,6 +580,111 @@ impl Engine {
     /// - 成功时返回 `messages`（页内时间正序）与分页前的 `total`。
     pub async fn history(&self, req: HistoryRequest) -> RamariaResult<HistoryResult> {
         crate::session::history(self, req).await
+    }
+
+    // =========================================================
+    // 记忆与会话浏览用例
+    // =========================================================
+
+    /// L1 记忆浏览用例：按会话收集摘要（桌面口径）或按 persona 取未吸收摘要（CLI 口径）。
+    ///
+    /// 返回:
+    /// - `items`（分页后的摘要视图）与 `total`（排序后、分页前的条数）。
+    pub async fn memory_l1(&self, req: L1BrowseRequest) -> RamariaResult<L1BrowsePage> {
+        crate::browse::l1(self, req).await
+    }
+
+    /// L2 事件浏览用例：persona 过滤分页（分页前总数）或全人格合并后统一排序截断。
+    ///
+    /// 返回:
+    /// - `items` 与 `total`（分页前的条数）。
+    pub async fn memory_l2(&self, req: L2BrowseRequest) -> RamariaResult<L2BrowsePage> {
+        crate::browse::l2(self, req).await
+    }
+
+    /// L3 性格标签浏览用例（扁平列表；persona 缺省时合并全部人格）。
+    pub async fn memory_l3(&self, persona: Option<&str>) -> RamariaResult<Vec<L3TraitView>> {
+        crate::browse::l3(self, persona).await
+    }
+
+    /// L3 三层性格画像用例（base / primary / accent 分组，仅生效标签；人格不存在报错）。
+    pub async fn personality_profile(
+        &self,
+        persona_uid: &str,
+    ) -> RamariaResult<PersonalityProfileView> {
+        crate::browse::personality_profile(self, persona_uid).await
+    }
+
+    /// 画像数据状态用例（有效样本量与可信度区间：insufficient / preliminary / trusted）。
+    pub async fn profile_status(&self, persona_uid: &str) -> RamariaResult<ProfileStatusView> {
+        crate::browse::profile_status(self, persona_uid).await
+    }
+
+    /// 性格标签证据链用例：trait → 证据记录 → 事件 → L1 溯源 → 证据片段。
+    ///
+    /// 返回:
+    /// - 单元素列表（证据链视图）；无证据记录时返回单条空链（非错误）。
+    pub async fn memory_trait_evidence(
+        &self,
+        req: TraitEvidenceRequest,
+    ) -> RamariaResult<Vec<TraitEvidenceView>> {
+        crate::browse::trait_evidence(self, req).await
+    }
+
+    /// 知识事实浏览用例：活跃事实，可选按字段过滤后分页。
+    ///
+    /// 返回:
+    /// - `items`（全字段视图）与 `total`（分页前的条数）。
+    pub async fn memory_facts(&self, req: FactBrowseRequest) -> RamariaResult<FactBrowsePage> {
+        crate::browse::facts(self, req).await
+    }
+
+    /// 单条事实详情用例：含完整版本链（链头最早在前）；不存在时返回 `None`。
+    pub async fn memory_fact_detail(&self, id: i64) -> RamariaResult<Option<FactDetailView>> {
+        crate::browse::fact_detail(self, id).await
+    }
+
+    /// 知识事实分组用例：按字段分组 + 多版本事实的版本链折叠数据。
+    pub async fn memory_facts_grouped(&self, persona: &str) -> RamariaResult<GroupedFactsView> {
+        crate::browse::facts_grouped(self, persona).await
+    }
+
+    /// 会话列表浏览用例：开始时间倒序 + 消息计数聚合 + 分页（`limit` 缺省返回全部）。
+    pub async fn session_list(
+        &self,
+        req: SessionBrowseRequest,
+    ) -> RamariaResult<SessionBrowsePage> {
+        crate::browse::sessions(self, req).await
+    }
+
+    /// 会话消息浏览用例：全量正序（`limit` 为 None）或最新在前分页后翻正。
+    pub async fn session_messages(
+        &self,
+        req: SessionMessagesRequest,
+    ) -> RamariaResult<SessionMessagesView> {
+        crate::browse::session_messages(self, req).await
+    }
+
+    /// 关键词池列表用例（三态计数 + 全量词条）。
+    pub async fn keyword_list(&self) -> RamariaResult<KeywordPoolView> {
+        crate::keyword::list(self).await
+    }
+
+    /// 待确认别名列表用例（pending，别名 → 建议规范词）。
+    pub async fn keyword_pending_aliases(&self) -> RamariaResult<Vec<PendingAliasView>> {
+        crate::keyword::pending_aliases(self).await
+    }
+
+    /// 别名裁决用例：确认合并（pending → alias）/ 驳回晋升（pending → canonical）。
+    ///
+    /// 说明:
+    /// - confirm 且已是 alias 时按 `already_applied_ok` 选择幂等成功或报错
+    ///   （调用入口各自口径）。
+    pub async fn keyword_resolve_alias(
+        &self,
+        req: AliasResolveRequest,
+    ) -> RamariaResult<AliasResolveOutcome> {
+        crate::keyword::resolve_alias(self, req).await
     }
 
     /// 人格列表用例：列出全部人格摘要（uid / 名称 / 类型 / 来源 / 启用状态）。

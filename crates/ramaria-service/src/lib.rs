@@ -17,29 +17,39 @@
 //! - `setup`：首次配置用例（缺项诊断、状态机推进、后端健康探测）；
 //! - `recall` / `chat` / `ingest` / `seal` / `idle` / `session` / `persona`：用例实现；
 //!   空闲检查同时提供宿主循环（`IdleLoop`），供长驻进程免外部驱动自动封存超时会话；
+//! - `browse`：记忆与会话浏览用例（L1 / L2 / L3 / 事实 / 证据链 / 会话列表与消息）；
+//! - `keyword`：关键词词典用例（列表 / 待确认别名 / 别名裁决状态机）；
 //! - `l2`：L2 事件提取触发（无 app 宿主的运行时用）；
 //! - `lifecycle`：会话生命周期容器（活跃指针 / 手动关闭 / 空闲检查线程 / L2-L3 调度 / 关停）
 //!   与 L1 摘要重生成 / 补扫，后台定时链路与手动触发共用；
 //! - `fact_extract`：知识事实自动抽取编排（`[knowledge].auto_fact_detect` 增强层）；
 //! - `hooks`：封存钩子默认装配（轻量链 / 完整链两套，供入口按响应语义注册）；
+//! - `stream_event`：流式事件领域模型（Delta / Done / Error）与事件流句柄；
+//! - `privacy` / `bridge` / `feedback`：隐私确认、新会话桥接、弱反馈检测（生成编排的伴随能力）；
 //! - 入口层（如 `ramaria-mcp`）只做协议包装，不承载业务逻辑。
 
+pub mod bridge;
+pub mod browse;
 pub mod chat;
 pub mod config;
 pub mod engine;
 pub mod fact_extract;
+pub mod feedback;
 pub mod hooks;
 pub mod idle;
 pub mod index;
 pub mod ingest;
+pub mod keyword;
 pub mod l2;
 pub mod lifecycle;
 pub mod model;
 pub mod persona;
+pub mod privacy;
 pub mod recall;
 pub mod seal;
 pub mod session;
 pub mod setup;
+pub mod stream_event;
 pub mod types;
 
 #[cfg(test)]
@@ -53,12 +63,20 @@ pub use lifecycle::{Lifecycle, LifecycleOptions};
 pub use model::validate_embedding_model;
 pub use recall::RecallPolicy;
 pub use seal::{SealHook, SealHooks};
+pub use stream_event::{ChatEventStream, ChatStreamHandle, StreamEvent};
 pub use types::{
-    BehaviorRuleView, CHANNEL_MCP, ChatRole, ChatSendOutcome, ChatSendRequest, ChatTurn,
-    DEFAULT_HISTORY_LIMIT, DEFAULT_MAX_CHARS, DEFAULT_MAX_ITEMS, DEFAULT_PERSONA_UID,
-    DataMaturityView, DegradedReason, EmbeddingModelView, EmbeddingValidation, FactView,
+    AliasAction, AliasResolveOutcome, AliasResolveRequest, BehaviorRuleView, CHANNEL_MCP, ChatRole,
+    ChatSendOutcome, ChatSendRequest, ChatStreamRequest, ChatTurn, DEFAULT_HISTORY_LIMIT,
+    DEFAULT_MAX_CHARS, DEFAULT_MAX_ITEMS, DEFAULT_PERSONA_UID, DataMaturityView, DegradedReason,
+    EmbeddingModelView, EmbeddingValidation, EvidenceEventView, EvidenceL1SourceView,
+    FactBrowsePage, FactBrowseRequest, FactDetailView, FactEntryView, FactView, GroupedFactsView,
     HistoryMessageView, HistoryRequest, HistoryResult, IngestOutcome, IngestRequest,
-    MAX_ITEMS_LIMIT, PersonaCardRequest, PersonaCardView, PersonaSection, PersonaSummaryView,
-    RecallItem, RecallLayer, RecallMode, RecallRequest, RecallResult, RecallStats, SealOutcome,
-    SessionSummaryView, SetupRequest, SetupStatus, StyleView, TraitView,
+    KeywordEntryView, KeywordPoolView, L1BrowsePage, L1BrowseRequest, L1MemoryView, L2BrowsePage,
+    L2BrowseRequest, L2EventView, L3TraitView, MAX_ITEMS_LIMIT, PendingAliasView,
+    PersonaCardRequest, PersonaCardView, PersonaSection, PersonaSummaryView,
+    PersonalityProfileView, ProfileStatusView, RecallItem, RecallLayer, RecallMode, RecallRequest,
+    RecallResult, RecallStats, SealOutcome, SessionBrowsePage, SessionBrowseRequest,
+    SessionMessageView, SessionMessagesRequest, SessionMessagesView, SessionSummaryView,
+    SetupRequest, SetupStatus, StyleView, TraitDetailView, TraitEvidenceRequest, TraitEvidenceView,
+    TraitView,
 };

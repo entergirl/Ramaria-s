@@ -10,6 +10,7 @@
 //! Storage Backend 职责分组（巨 trait 拆分，行为等价）: 见模块内
 //! [`StoreCrud`]、[`StoreInfrastructure`] 与 [`StorageBackend`] 三组 trait 的定义注释。
 
+use std::collections::HashMap;
 use std::pin::Pin;
 
 use async_trait::async_trait;
@@ -18,7 +19,7 @@ use uuid::Uuid;
 
 use crate::behavior::{BehaviorRule, FeedbackLog};
 use crate::error::RamariaResult;
-use crate::keyword::KeywordPoolRow;
+use crate::keyword::{KeywordPoolRow, PendingAliasRow};
 use crate::types::{
     BackendConfig, ClusterSnapshot, EventBatchWrite, EventRelation, EventSource, MemoryEvent,
     MemoryL1, Message, MessageKey, MessageRole, ModelCapability, Persona, PersonaEventAggregate,
@@ -583,6 +584,31 @@ pub trait StoreCrud: Send + Sync {
         Ok(self.list_messages(session_id).await?.len() as u32)
     }
 
+    /// 聚合各会话的消息数量（会话列表一次取回全部计数）。
+    ///
+    /// 职责:
+    /// - 供会话浏览列表展示每条会话的真实消息数，替代逐会话调用
+    ///   `count_messages` 的 N+1 查询。
+    ///
+    /// 返回:
+    /// - 会话 ID → 消息条数的映射；**无消息的会话不出现在映射中**
+    ///   （调用方对缺失项按 0 处理，与 SQL `GROUP BY` 的结果形态一致）。
+    ///
+    /// 默认实现:
+    /// - 遍历 `list_sessions()` 逐会话 `count_messages`（兼容非 SQL 后端）；
+    ///   `ramaria-storage` 覆写为单条 `GROUP BY` 聚合查询。
+    async fn count_messages_by_session(&self) -> RamariaResult<HashMap<Uuid, u32>> {
+        let sessions = self.list_sessions().await?;
+        let mut counts = HashMap::with_capacity(sessions.len());
+        for session in sessions {
+            let count = self.count_messages(session.id).await?;
+            if count > 0 {
+                counts.insert(session.id, count);
+            }
+        }
+        Ok(counts)
+    }
+
     /// 按导入去重指纹查询消息（跨批次 / 跨会话去重）。
     ///
     /// 职责:
@@ -753,6 +779,24 @@ pub trait StoreCrud: Send + Sync {
         limit: i64,
     ) -> RamariaResult<Vec<MemoryEvent>>;
     async fn list_unabsorbed_events(&self, persona_uid: &str) -> RamariaResult<Vec<MemoryEvent>>;
+
+    /// 统计指定 persona 的事件数量（事件浏览的分页总数）。
+    ///
+    /// 职责:
+    /// - 供事件浏览在分页查询时取回分页前的总条数（调用方据此判断是否还有更早数据）。
+    ///
+    /// 返回:
+    /// - 该 persona 的事件总数（无事件时为 0）。
+    ///
+    /// 默认实现:
+    /// - 委托 `list_events_by_persona` 全量加载后取长度（兼容非 SQL 后端）；
+    ///   `ramaria-storage` 覆写为 `SELECT COUNT(*)`。
+    async fn count_events_by_persona(&self, persona_uid: &str) -> RamariaResult<u64> {
+        Ok(self
+            .list_events_by_persona(persona_uid, 0, i64::MAX)
+            .await?
+            .len() as u64)
+    }
 
     /// 标记事件已被 L3 推断吸收。
     ///
@@ -1062,6 +1106,56 @@ pub trait StoreCrud: Send + Sync {
     async fn list_keyword_pool_entries(&self) -> RamariaResult<Vec<KeywordPoolRow>> {
         Err(crate::error::RamariaError::unsupported(
             "StoreCrud 未实现 keyword_pool 词条装载查询",
+        ))
+    }
+
+    /// 列出 keyword_pool 中全部待确认别名冲突（`alias_status='pending'`）。
+    ///
+    /// 返回:
+    /// - 待确认别名行列表（别名 rowid / 别名文本 / 指向的规范词 rowid 与文本 / 登记时间）。
+    ///
+    /// 默认实现:
+    /// - 返回 `Unsupported`：显式区分"未接线"与"确无待确认项"，避免调用方
+    ///   把未实现误读为"没有待裁决冲突"；`ramaria-storage` 覆写为 join 规范词文本的查询。
+    async fn list_pending_aliases(&self) -> RamariaResult<Vec<PendingAliasRow>> {
+        Err(crate::error::RamariaError::unsupported(
+            "StoreCrud 未实现待确认别名查询",
+        ))
+    }
+
+    /// 确认别名：把 `alias_status='pending'` 的词条迁移为 `'alias'`（合并到规范词）。
+    ///
+    /// 参数:
+    /// - `alias_id`: 别名词条 rowid（来自 `list_pending_aliases` / 词条行视图）。
+    ///
+    /// 返回:
+    /// - `Ok(true)`: 本次完成迁移（条件更新命中）。
+    /// - `Ok(false)`: 未命中（词条不存在 / 非 pending / 缺规范词指向——状态已变化，未写库）。
+    ///
+    /// 默认实现:
+    /// - 返回 `Unsupported`（写语义由实现方显式声明）；
+    ///   `ramaria-storage` 覆写为条件 UPDATE（仅命中 pending 行）。
+    async fn confirm_keyword_alias(&self, _alias_id: i64) -> RamariaResult<bool> {
+        Err(crate::error::RamariaError::unsupported(
+            "StoreCrud 未实现别名确认迁移",
+        ))
+    }
+
+    /// 驳回别名：把 `alias_status='pending'` 的词条晋升为独立规范词（清除规范词指向）。
+    ///
+    /// 参数:
+    /// - `alias_id`: 别名词条 rowid（来自 `list_pending_aliases` / 词条行视图）。
+    ///
+    /// 返回:
+    /// - `Ok(true)`: 本次完成迁移（条件更新命中）。
+    /// - `Ok(false)`: 未命中（词条不存在 / 非 pending——状态已变化，未写库）。
+    ///
+    /// 默认实现:
+    /// - 返回 `Unsupported`（写语义由实现方显式声明）；
+    ///   `ramaria-storage` 覆写为条件 UPDATE（仅命中 pending 行）。
+    async fn reject_keyword_alias(&self, _alias_id: i64) -> RamariaResult<bool> {
+        Err(crate::error::RamariaError::unsupported(
+            "StoreCrud 未实现别名驳回迁移",
         ))
     }
 }

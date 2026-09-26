@@ -26,7 +26,5 @@ sqlx.workspace = true
 sha2.workspace = true
 # L1 补扫宿主钩子（实现 ramaria-memory 的 L1RetryObserver 异步 trait）
 async-trait.workspace = true
-
-[dev-dependencies]
-# 服务层用例测试使用真实 SQLite（临时库）+ 最小 LLM mock，不引入网络依赖
+# 流式事件流类型（增量生成契约的宿主消费侧）
 futures.workspace = true

@@ -8,13 +8,14 @@
 //!   避免每个模块各写一套 mock 导致口径漂移
 //! - 调用方负责删除临时目录（`std::fs::remove_dir_all`）
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use ramaria_core::config::RamariaConfig;
 use ramaria_core::error::{RamariaError, RamariaResult};
+use ramaria_core::keyword::PendingAliasRow;
 use ramaria_core::traits::{
     ChatRequest, EmbeddingProvider, LlmProvider, StorageBackend, StoreCrud, StoreInfrastructure,
     StreamDelta,
@@ -22,7 +23,7 @@ use ramaria_core::traits::{
 use ramaria_core::types::{
     BackendConfig, ClusterSnapshot, EventRelation, MemoryEvent, MemoryL1, Message, MessageRole,
     MessageSource, ModelCapability, Persona, PersonaExample, PersonaFact, PersonaKind,
-    PersonalityTrait, PrivacyConsent, ProfileField, Session, TraitEvidence, TraitStatus,
+    PersonalityTrait, PrivacyConsent, ProfileField, Session, TraitEvidence, TraitStatus, UttBlock,
 };
 use ramaria_storage::SqliteStorage;
 use uuid::Uuid;
@@ -48,29 +49,41 @@ pub(crate) const L1_JSON_REPLY: &str = r#"{
 ///
 /// 口径:
 /// - [`MockLlm::local`]：`chat` 返回空串（模拟"调用成功但无内容"，适合只读用例）；
-/// - [`MockLlm::with_reply`]：`chat` 返回固定文本（模拟"LLM 可用"，供封存生成 L1 等写用例）；
-/// - [`MockLlm::failing`]：`chat` 恒失败（模拟后端不可用，覆盖降级与"不落半条"路径）；
+/// - [`MockLlm::with_reply`]：`chat` 返回固定文本、流式发单片段（模拟"LLM 可用"）；
+/// - [`MockLlm::with_stream_chunks`]：流式按序发多片段（末片 `done=true`）；
+/// - [`MockLlm::stream_fails_after`]：流式先发片段再返回错误（模拟"流中错误"）；
+/// - [`MockLlm::failing`]：生成调用恒失败（模拟后端不可用，覆盖降级与"不落半条"路径）；
+/// - [`MockLlm::online`]：线上 provider（DeepSeek）口径的 mock（本地不发网络请求）；
 /// - [`MockLlm::with_health_failures`]：健康探测前 N 次失败（模拟后端启动中，覆盖探测重试）。
 pub(crate) struct MockLlm {
     backend: BackendConfig,
     reply: Option<String>,
     /// 为 true 时所有生成调用返回 Llm 错误（不发起网络调用）。
     always_fail: bool,
+    /// 流式片段脚本（None = 由 `reply` 决定：Some 发单片段、None 发空流）。
+    stream_chunks: Option<Vec<String>>,
+    /// 为 true 时流式先发完脚本片段再返回错误（模拟"流中错误"）。
+    stream_fails_after_chunks: bool,
     /// 健康探测剩余失败次数（递减；0 表示探测成功）。
     health_failures: std::sync::atomic::AtomicUsize,
-    /// `chat` 调用计数（含失败；供"幂等跳过不重复调用 LLM"类断言使用）。
+    /// 生成调用计数（`chat` 与 `chat_stream` 合计，含失败；健康探测不计入）。
     chat_calls: std::sync::atomic::AtomicUsize,
+    /// 已收到的生成请求（按调用顺序；供 Prompt 结构断言使用，不落日志）。
+    requests: std::sync::Mutex<Vec<ChatRequest>>,
 }
 
 impl MockLlm {
-    /// 本地 LM Studio 口径的 mock（无 API key、无网络；chat 返回空串）。
+    /// 本地 LM Studio 口径的 mock（无 API key、无网络；chat 返回空串、流式为空流）。
     pub(crate) fn local() -> Self {
         Self {
             backend: BackendConfig::lm_studio_default(),
             reply: None,
             always_fail: false,
+            stream_chunks: None,
+            stream_fails_after_chunks: false,
             health_failures: std::sync::atomic::AtomicUsize::new(0),
             chat_calls: std::sync::atomic::AtomicUsize::new(0),
+            requests: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -80,8 +93,11 @@ impl MockLlm {
             backend: BackendConfig::lm_studio_default(),
             reply: Some(reply.to_string()),
             always_fail: false,
+            stream_chunks: None,
+            stream_fails_after_chunks: false,
             health_failures: std::sync::atomic::AtomicUsize::new(0),
             chat_calls: std::sync::atomic::AtomicUsize::new(0),
+            requests: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -91,8 +107,42 @@ impl MockLlm {
             backend: BackendConfig::lm_studio_default(),
             reply: None,
             always_fail: true,
+            stream_chunks: None,
+            stream_fails_after_chunks: false,
             health_failures: std::sync::atomic::AtomicUsize::new(0),
             chat_calls: std::sync::atomic::AtomicUsize::new(0),
+            requests: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// 线上 provider（DeepSeek）口径的 mock（供隐私门禁用例；不发网络请求、不含真实 key）。
+    pub(crate) fn online() -> Self {
+        Self {
+            backend: BackendConfig::deepseek_default(),
+            reply: None,
+            always_fail: false,
+            stream_chunks: None,
+            stream_fails_after_chunks: false,
+            health_failures: std::sync::atomic::AtomicUsize::new(0),
+            chat_calls: std::sync::atomic::AtomicUsize::new(0),
+            requests: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// 构造"流式多片段"mock（按序发出片段；末片 `done=true`）。
+    pub(crate) fn with_stream_chunks(chunks: &[&str]) -> Self {
+        Self {
+            stream_chunks: Some(chunks.iter().map(|chunk| chunk.to_string()).collect()),
+            ..Self::local()
+        }
+    }
+
+    /// 构造"流中错误"mock（先发片段再返回 Llm 错误，模拟流式生成中断）。
+    pub(crate) fn stream_fails_after(chunks: &[&str]) -> Self {
+        Self {
+            stream_chunks: Some(chunks.iter().map(|chunk| chunk.to_string()).collect()),
+            stream_fails_after_chunks: true,
+            ..Self::local()
         }
     }
 
@@ -104,17 +154,29 @@ impl MockLlm {
         }
     }
 
-    /// `chat` 调用次数（含成功与失败；健康探测不计入）。
+    /// 生成调用次数（`chat` 与 `chat_stream` 合计，含成功与失败；健康探测不计入）。
     pub(crate) fn chat_calls(&self) -> usize {
         self.chat_calls.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// 已收到的生成请求副本（按调用顺序；供 Prompt 结构断言）。
+    pub(crate) fn requests(&self) -> Vec<ChatRequest> {
+        self.requests
+            .lock()
+            .expect("MockLlm 的请求记录锁不应中毒")
+            .clone()
     }
 }
 
 #[async_trait::async_trait]
 impl LlmProvider for MockLlm {
-    async fn chat(&self, _request: &ChatRequest) -> RamariaResult<String> {
+    async fn chat(&self, request: &ChatRequest) -> RamariaResult<String> {
         self.chat_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.requests
+            .lock()
+            .expect("MockLlm 的请求记录锁不应中毒")
+            .push(request.clone());
         if self.always_fail {
             return Err(RamariaError::llm("MockLlm 恒失败（模拟 LLM 后端不可用）"));
         }
@@ -123,12 +185,53 @@ impl LlmProvider for MockLlm {
 
     async fn chat_stream(
         &self,
-        _request: &ChatRequest,
+        request: &ChatRequest,
     ) -> RamariaResult<
         std::pin::Pin<Box<dyn futures::Stream<Item = RamariaResult<StreamDelta>> + Send>>,
     > {
-        // 服务层用例不消费流式回复；显式报错避免测试误以为有真实生成能力
-        Err(RamariaError::unsupported("MockLlm 不支持流式生成"))
+        self.chat_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.requests
+            .lock()
+            .expect("MockLlm 的请求记录锁不应中毒")
+            .push(request.clone());
+        if self.always_fail {
+            return Err(RamariaError::llm("MockLlm 恒失败（模拟 LLM 后端不可用）"));
+        }
+
+        // 片段脚本：显式脚本优先；否则由固定回复决定（空回复 → 空流）
+        let chunks: Vec<String> = match &self.stream_chunks {
+            Some(chunks) => chunks.clone(),
+            None => match &self.reply {
+                Some(reply) if !reply.is_empty() => vec![reply.clone()],
+                _ => Vec::new(),
+            },
+        };
+        // 流中错误模式下不标记终止片段（done=true 是终止信号，错误在其后送达）
+        let last = chunks.len().saturating_sub(1);
+        let terminal = !self.stream_fails_after_chunks;
+        let mut items: Vec<RamariaResult<StreamDelta>> = chunks
+            .into_iter()
+            .enumerate()
+            .map(|(index, content)| {
+                let is_last = index == last;
+                Ok(StreamDelta {
+                    content,
+                    done: terminal && is_last,
+                    metadata: if terminal && is_last {
+                        Some("stop".to_string())
+                    } else {
+                        None
+                    },
+                })
+            })
+            .collect();
+        if self.stream_fails_after_chunks {
+            items.push(Err(RamariaError::llm(
+                "MockLlm 流中错误（模拟流式生成中断）",
+            )));
+        }
+        Ok(Box::pin(futures::stream::iter(items)))
     }
 
     fn capability(&self) -> &ModelCapability {
@@ -168,7 +271,8 @@ impl LlmProvider for MockLlm {
 /// 口径:
 /// - 按调用次序消费回复队列；队列用尽后回落空串（模拟"调用成功但无内容"）；
 /// - 调用次数可查询，用于断言"链路的下一轮 LLM 调用是否被发起"；
-/// - 流式生成不支持（服务层用例不消费流式回复）；恒失败口径见 [`MockLlm::failing`]。
+/// - 流式调用消费下一条脚本回复并以单片段发出（多步链路可覆盖）；
+///   恒失败口径见 [`MockLlm::failing`]。
 pub(crate) struct ScriptedLlm {
     replies: std::sync::Mutex<VecDeque<String>>,
     chat_calls: std::sync::atomic::AtomicUsize,
@@ -211,8 +315,20 @@ impl LlmProvider for ScriptedLlm {
     ) -> RamariaResult<
         std::pin::Pin<Box<dyn futures::Stream<Item = RamariaResult<StreamDelta>> + Send>>,
     > {
-        // 服务层用例不消费流式回复；显式报错避免测试误以为有真实生成能力
-        Err(RamariaError::unsupported("ScriptedLlm 不支持流式生成"))
+        self.chat_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let reply = self
+            .replies
+            .lock()
+            .expect("脚本化 LLM 的回复队列锁不应中毒")
+            .pop_front()
+            .unwrap_or_default();
+        let items = vec![Ok(StreamDelta {
+            content: reply,
+            done: true,
+            metadata: Some("stop".to_string()),
+        })];
+        Ok(Box::pin(futures::stream::iter(items)))
     }
 
     fn capability(&self) -> &ModelCapability {
@@ -385,6 +501,10 @@ impl StoreCrud for FailableStorage {
         self.inner.list_messages_by_persona(persona_uid).await
     }
 
+    async fn count_messages_by_session(&self) -> RamariaResult<HashMap<Uuid, u32>> {
+        self.inner.count_messages_by_session().await
+    }
+
     async fn save_memory_l1(&self, memory: &MemoryL1) -> RamariaResult<()> {
         self.inner.save_memory_l1(memory).await
     }
@@ -448,6 +568,10 @@ impl StoreCrud for FailableStorage {
         self.inner
             .list_events_by_persona(persona_uid, offset, limit)
             .await
+    }
+
+    async fn count_events_by_persona(&self, persona_uid: &str) -> RamariaResult<u64> {
+        self.inner.count_events_by_persona(persona_uid).await
     }
 
     async fn list_unabsorbed_events(&self, persona_uid: &str) -> RamariaResult<Vec<MemoryEvent>> {
@@ -549,6 +673,18 @@ impl StoreCrud for FailableStorage {
 
     async fn list_keywords(&self) -> RamariaResult<Vec<String>> {
         self.inner.list_keywords().await
+    }
+
+    async fn list_pending_aliases(&self) -> RamariaResult<Vec<PendingAliasRow>> {
+        self.inner.list_pending_aliases().await
+    }
+
+    async fn confirm_keyword_alias(&self, alias_id: i64) -> RamariaResult<bool> {
+        self.inner.confirm_keyword_alias(alias_id).await
+    }
+
+    async fn reject_keyword_alias(&self, alias_id: i64) -> RamariaResult<bool> {
+        self.inner.reject_keyword_alias(alias_id).await
     }
 }
 
@@ -889,4 +1025,63 @@ pub(crate) async fn seed_channel_session(
         .expect("创建通道会话应成功");
     seed_messages(storage, session.id, persona, count, base_ts).await;
     session.id
+}
+
+/// 造一个带消息的已关闭会话（供桥接与封存后读取用例）。
+pub(crate) async fn seed_closed_session_with_messages(
+    storage: &SqliteStorage,
+    persona: &str,
+    count: usize,
+    base_ts: i64,
+) -> Uuid {
+    let session = storage
+        .create_session(Some(persona))
+        .await
+        .expect("创建会话应成功");
+    seed_messages(storage, session.id, persona, count, base_ts).await;
+    storage
+        .close_session(session.id)
+        .await
+        .expect("关闭会话应成功");
+    session.id
+}
+
+/// 造一条 utt 话语块（供桥接一级来源 / 原文通道用例）。
+///
+/// 前置条件:
+/// - 目标会话已有消息（块的消息区间外键指向真实消息）。
+///
+/// 返回:
+/// - 落库后的块 id。
+pub(crate) async fn seed_utt_block(
+    storage: &SqliteStorage,
+    session_id: Uuid,
+    persona: &str,
+    block_text: &str,
+) -> i64 {
+    let messages = storage
+        .list_messages(session_id)
+        .await
+        .expect("读取会话消息应成功");
+    let start_msg_id = messages
+        .first()
+        .map(|message| message.id)
+        .expect("utt 块来源会话应已有消息");
+    let end_msg_id = messages
+        .last()
+        .map(|message| message.id)
+        .expect("utt 块来源会话应已有消息");
+    let block = UttBlock::new(
+        persona.to_string(),
+        session_id,
+        start_msg_id,
+        end_msg_id,
+        block_text.to_string(),
+        messages.len().max(1) as u32,
+        60_000,
+    );
+    storage
+        .insert_utt_block(&block)
+        .await
+        .expect("插入 utt 块应成功")
 }

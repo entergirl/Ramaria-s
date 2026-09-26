@@ -162,8 +162,8 @@ l1_idle_minutes = 10
 idle_check_interval_seconds = 60
 # L2/L3 定时检查间隔（秒）
 l2_check_interval_seconds = 86400
-# 对话历史最大保留消息数（供 System Prompt 上下文使用）
-max_history_messages = 40
+# 对话历史加载条数上限（供 System Prompt 上下文使用；分页倒序加载）
+max_history_messages = 200
 # 对话历史字符预算上限（消息内容 + role 标记的粗略字符数；超限保留最近内容）
 max_history_chars = 6000
 

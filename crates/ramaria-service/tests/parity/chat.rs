@@ -5,31 +5,43 @@
 //!   便于同一实现重复执行时的快照可比
 //! - 快照只含稳定字段：回复与字符数 / 会话通道与消息数 / 消息序列（角色 + 内容）/
 //!   Prompt 结构指标（各段长度、是否含记忆上下文、模板版本）；**不落 Prompt 全文**（隐私红线）
-//! - 覆盖三条链路：基线一致（golden 冻结）、跨隔离环境等价（`assert_parity`）、
-//!   会话续写（同一外部标识落在同一会话）、LLM 不可用时"不落半条"（库内不产生孤立用户消息）
+//! - 覆盖链路：基线一致（golden 冻结）、跨隔离环境等价（`assert_parity` / `assert_stable`）、
+//!   会话续写（同一外部标识落在同一会话）、LLM 不可用时"不落半条"（库内不产生孤立用户消息）、
+//!   流式事件序列（delta → done）与长会话历史窗口上限
 //! - 输出入口：`snapshot_of` 是"某一实现在该 fixture 上的规范化输出"的唯一入口，
 //!   同形状快照可直接送入 `assert_parity` 比对
 
 use std::sync::Arc;
 
+use futures::StreamExt;
 use ramaria_core::traits::{LlmProvider, StoreCrud};
-use ramaria_service::types::ChatSendRequest;
-use ramaria_service::{CHANNEL_MCP, DEFAULT_PERSONA_UID};
+use ramaria_core::types::AppState;
+use ramaria_service::types::{ChatSendRequest, ChatStreamRequest};
+use ramaria_service::{CHANNEL_MCP, DEFAULT_PERSONA_UID, StreamEvent};
 use serde_json::json;
 
 use crate::support::{
     GoldenStore, ParityEnv, ParityError, ParityResult, ScriptedLlm, Snapshot, assert_parity,
-    fixtures,
+    assert_stable, fixtures,
 };
 
 /// 场景名（同时作为 golden 基线文件名）。
 const SCENARIO: &str = "chat_send_reply_and_persist";
+
+/// 流式场景名（同时作为 golden 基线文件名）。
+const STREAM_SCENARIO: &str = "chat_stream_delta_done";
+
+/// 历史窗口场景名（同时作为 golden 基线文件名）。
+const HISTORY_SCENARIO: &str = "chat_history_window_limit";
 
 /// 首轮用户消息（固定文本，便于历史与落库断言）。
 const USER_MESSAGE: &str = "今天有点累，随便聊聊吧";
 
 /// 脚本回复（短句，字符数断言简洁）。
 const REPLY: &str = "嗯，我在听。";
+
+/// 历史窗口场景的消息条数（超过默认加载上限 200，验证窗口截断）。
+const HISTORY_SEED_MESSAGES: usize = 250;
 
 // =========================================================
 // 场景执行
@@ -122,6 +134,137 @@ async fn env_with_script(tag: &str) -> ParityResult<(ParityEnv, Arc<ScriptedLlm>
     let llm_dyn: Arc<dyn LlmProvider> = Arc::clone(&llm) as Arc<dyn LlmProvider>;
     let env = ParityEnv::with_llm(tag, llm_dyn).await?;
     Ok((env, llm))
+}
+
+/// 在给定环境上执行一轮流式生成，产出规范化快照。
+///
+/// 说明:
+/// - 交互入口需要就绪状态（状态门禁），fixture 后显式置 `Ready`；
+/// - 快照只含稳定字段：事件类型序列 / 增量文本 / Done 字段 / 落库消息（角色 + 来源 + 内容）。
+async fn stream_snapshot(env: &ParityEnv) -> ParityResult<Snapshot> {
+    fixture(env).await?;
+    env.engine().set_state(AppState::Ready);
+
+    let handle = env
+        .engine()
+        .chat_stream(ChatStreamRequest {
+            message: USER_MESSAGE.to_string(),
+            persona: Some(DEFAULT_PERSONA_UID.to_string()),
+            session_id: None,
+            seed_history: Vec::new(),
+            config_override: None,
+        })
+        .await
+        .map_err(|e| ParityError::env("执行流式生成", e))?;
+
+    let session_id = handle.session_id;
+    let mut event_kinds: Vec<String> = Vec::new();
+    let mut delta_text = String::new();
+    let mut done: Option<(bool, Option<String>, usize)> = None;
+    let mut stream = handle.events;
+    while let Some(item) = stream.next().await {
+        let event = item.map_err(|e| ParityError::env("消费流式事件", e))?;
+        event_kinds.push(event.kind().to_string());
+        match &event {
+            StreamEvent::Delta { content, .. } => delta_text.push_str(content),
+            StreamEvent::Done {
+                session_id,
+                backend_id,
+                total_chars,
+                ..
+            } => done = Some((session_id.is_some(), backend_id.clone(), *total_chars)),
+            _ => {}
+        }
+    }
+    let (has_session_id, backend_id, total_chars) =
+        done.ok_or_else(|| ParityError::env("执行流式生成", "事件流应包含 Done 事件"))?;
+
+    let session = env
+        .storage()
+        .get_session(session_id)
+        .await
+        .map_err(|e| ParityError::env("读取流式生成会话", e))?
+        .ok_or_else(|| ParityError::env("读取流式生成会话", "会话应存在"))?;
+    let messages = env
+        .storage()
+        .list_messages(session_id)
+        .await
+        .map_err(|e| ParityError::env("读取流式生成会话消息", e))?;
+
+    Ok(Snapshot::new(
+        STREAM_SCENARIO,
+        json!({
+            "event_kinds": event_kinds,
+            "delta_text": delta_text,
+            "done": {
+                "has_session_id": has_session_id,
+                "backend_id": backend_id,
+                "total_chars": total_chars,
+            },
+            "session": {
+                "channel": session.channel,
+                "message_count": messages.len(),
+            },
+            "messages": messages
+                .iter()
+                .map(|message| json!({
+                    "role": message.role,
+                    "source": message.source,
+                    "content": message.content.clone(),
+                }))
+                .collect::<Vec<_>>(),
+        }),
+    ))
+}
+
+/// 在给定环境上执行"长会话历史窗口"场景，产出规范化快照。
+///
+/// 说明:
+/// - 会话预置 `HISTORY_SEED_MESSAGES` 条消息（超过默认加载上限 200）；
+/// - 快照只取结构指标：进入 Prompt 的历史条数与会话消息总数（不落历史全文）。
+async fn history_window_snapshot(env: &ParityEnv, llm: &ScriptedLlm) -> ParityResult<Snapshot> {
+    fixture(env).await?;
+    let session_id = fixtures::seed_active_session(
+        env.storage(),
+        DEFAULT_PERSONA_UID,
+        HISTORY_SEED_MESSAGES,
+        fixtures::fixture_ts(0),
+    )
+    .await?;
+
+    let outcome = env
+        .engine()
+        .chat_send(ChatSendRequest {
+            message: USER_MESSAGE.to_string(),
+            persona: Some(DEFAULT_PERSONA_UID.to_string()),
+            session_id: Some(session_id),
+            conversation_id: None,
+            channel: CHANNEL_MCP.to_string(),
+        })
+        .await
+        .map_err(|e| ParityError::env("执行生成用例", e))?;
+
+    let recorded = llm.requests();
+    let last_request = recorded
+        .last()
+        .ok_or_else(|| ParityError::env("读取 LLM 请求", "应至少记录一次请求"))?;
+    let message_count = env
+        .storage()
+        .list_messages(session_id)
+        .await
+        .map_err(|e| ParityError::env("读取生成会话消息", e))?
+        .len();
+
+    Ok(Snapshot::new(
+        HISTORY_SCENARIO,
+        json!({
+            "reply": outcome.reply,
+            "chars": outcome.chars,
+            "history_len": last_request.history.len(),
+            "user_message": last_request.user_message.clone(),
+            "session_message_count": message_count,
+        }),
+    ))
 }
 
 // =========================================================
@@ -265,4 +408,100 @@ async fn chat_llm_failure_leaves_no_partial_write() {
     }
 
     env.cleanup().await;
+}
+
+/// 流式事件序列稳定：Delta… → Done 的事件序列、Done 字段与落库结果
+/// 在两个隔离环境上一致，并与冻结基线逐字段一致。
+#[tokio::test]
+async fn chat_stream_events_are_stable_and_match_golden() {
+    let (first_env, first_llm) = env_with_script("chat-stream-a")
+        .await
+        .expect("首个对照环境应可构建");
+    let first = stream_snapshot(&first_env)
+        .await
+        .expect("流式场景应执行成功");
+    assert_eq!(first_llm.call_count(), 1, "一轮生成应只调用一次 LLM");
+    first_env.cleanup().await;
+
+    let (replay_env, _replay_llm) = env_with_script("chat-stream-b")
+        .await
+        .expect("第二个对照环境应可构建");
+    let replay = stream_snapshot(&replay_env)
+        .await
+        .expect("流式场景应执行成功");
+    replay_env.cleanup().await;
+
+    assert_stable("chat/stream-delta-done", &first, &replay);
+
+    // 关键行为断言：delta… → done、增量拼接为回复全文、落库两条消息
+    let kinds: Vec<&str> = first.value()["event_kinds"]
+        .as_array()
+        .expect("事件序列应为数组")
+        .iter()
+        .filter_map(|item| item.as_str())
+        .collect();
+    assert!(kinds.len() >= 2, "应至少包含一个增量与一个完成事件");
+    assert!(
+        kinds[..kinds.len() - 1].iter().all(|kind| *kind == "delta"),
+        "完成事件之前应全为增量事件: {kinds:?}"
+    );
+    assert_eq!(kinds[kinds.len() - 1], "done");
+    assert_eq!(first.value()["delta_text"].as_str(), Some(REPLY));
+    assert_eq!(first.value()["done"]["has_session_id"], json!(true));
+    assert_eq!(first.value()["done"]["backend_id"].as_str(), Some("stop"));
+    assert_eq!(
+        first.value()["done"]["total_chars"].as_u64(),
+        Some(REPLY.chars().count() as u64)
+    );
+    assert_eq!(
+        first.value()["session"]["message_count"].as_u64(),
+        Some(2),
+        "流式成功应落库用户消息与助手回复两条"
+    );
+
+    let outcome = GoldenStore::new()
+        .expect("基线仓库应可定位")
+        .assert_or_record(&first)
+        .expect("基线比对或首次生成应成功");
+    assert!(
+        !outcome.is_updated(),
+        "未开启更新模式时不应覆盖基线（{outcome:?}）"
+    );
+}
+
+/// 历史窗口上限：长会话（250 条消息）进入 Prompt 的历史为默认上限 200 条，
+/// 两个隔离环境产出等价快照，并与冻结基线逐字段一致。
+#[tokio::test]
+async fn chat_history_window_is_stable_and_match_golden() {
+    let (first_env, first_llm) = env_with_script("chat-history-a")
+        .await
+        .expect("首个对照环境应可构建");
+    let first = history_window_snapshot(&first_env, &first_llm)
+        .await
+        .expect("历史窗口场景应执行成功");
+    assert_eq!(
+        first.value()["history_len"].as_u64(),
+        Some(200),
+        "默认加载上限 200 应生效"
+    );
+    first_env.cleanup().await;
+
+    let (replay_env, replay_llm) = env_with_script("chat-history-b")
+        .await
+        .expect("第二个对照环境应可构建");
+    let replay = history_window_snapshot(&replay_env, &replay_llm)
+        .await
+        .expect("历史窗口场景应执行成功");
+    replay_env.cleanup().await;
+
+    assert_stable("chat/history-window-limit", &first, &replay);
+
+    let outcome = GoldenStore::new()
+        .expect("基线仓库应可定位")
+        .assert_or_record(&first)
+        .expect("基线比对或首次生成应成功");
+    assert!(
+        !outcome.is_updated(),
+        "未开启更新模式时不应覆盖基线（{outcome:?}）"
+    );
 }
