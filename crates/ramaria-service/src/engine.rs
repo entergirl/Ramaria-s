@@ -16,6 +16,8 @@
 //!   （0 = 不节流，见 `index_rebuild_cooldown_elapsed`）
 //! - 宿主后台任务：进程内空闲检查循环由入口层拉起（`spawn_idle_loop`），退出时优雅关停
 //! - 用例挂载点：recall / ingest / seal / tick_idle / history / persona / 模型管理均由用例实现接入
+//! - 底层连接池：装配时保留 `SqlitePool` 句柄，供导入等以 `&SqlitePool` 为入口的用例使用
+//!   （注入构造可经 `attach_sqlite_pool` 附着）
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -33,12 +35,15 @@ use ramaria_memory::behavior::PendingPool;
 use ramaria_memory::keyword::KeywordService;
 use ramaria_memory::retriever::Retriever;
 use ramaria_storage::SqliteStorage;
+use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use crate::config::{ConfigWriter, SyncOutcome, SyncWriteResult};
+use crate::diagnostics::{DiagnosticsReport, DiagnosticsRequest};
 use crate::idle::{IdleLoop, IdleLoopOptions};
 use crate::index::IndexStamp;
 use crate::lifecycle::{Lifecycle, LifecycleOptions};
+use crate::persona::PersonaRegenerateOutcome;
 use crate::recall::RecallPolicy;
 use crate::seal::SealHooks;
 use crate::stream_event::ChatStreamHandle;
@@ -127,6 +132,13 @@ pub struct Engine {
     config_path: PathBuf,
     /// 数据库文件路径（诊断与客户端配置片段展示用）。
     db_path: PathBuf,
+    /// 底层 SQLite 连接池句柄（导入等以 `&SqlitePool` 为入口的用例使用；未附着时为 None）。
+    ///
+    /// 语义:
+    /// - `open_with` 装配时自动附着；注入构造（`from_parts`）默认未附着，
+    ///   由宿主 / 测试经 [`Engine::attach_sqlite_pool`] 附着；
+    /// - 句柄为连接池的克隆（内部共享），读取方取克隆后在锁外使用。
+    pool: RwLock<Option<SqlitePool>>,
     /// 内存检索器槽（懒加载：首次召回时由 `ensure_index_loaded` 构建并整体替换）。
     retriever: Arc<RwLock<Option<Retriever>>>,
     /// 关键词镜像（倒排 + 词典池）：召回第四通道，L1 生成后增量维护。
@@ -234,6 +246,8 @@ impl Engine {
         // ---- 1. 数据库连接池 + migration ----
         let pool = ramaria_storage::database::init_pool(Some(db_path.clone())).await?;
         let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::new(pool.clone()));
+        // 连接池句柄随引擎保留（缓存装配会消费一份克隆，先留出引擎侧句柄）
+        let engine_pool = pool.clone();
 
         // ---- 2. 配置加载（只读，不双写）----
         let config_path = options
@@ -283,6 +297,7 @@ impl Engine {
             config: RwLock::new(Arc::new(config)),
             config_path,
             db_path,
+            pool: RwLock::new(Some(engine_pool)),
             // ---- 6. 检索器占位：首次召回时构建（懒加载）----
             retriever: Arc::new(RwLock::new(None)),
             // ---- 7. 关键词镜像与策略 / 钩子：空镜像 + 配置映射策略 ----
@@ -326,6 +341,7 @@ impl Engine {
             config: RwLock::new(Arc::new(config)),
             config_path: PathBuf::new(),
             db_path: PathBuf::new(),
+            pool: RwLock::new(None),
             retriever: Arc::new(RwLock::new(None)),
             keyword_mirror: Arc::new(RwLock::new(KeywordService::new())),
             index_dirty: Arc::new(AtomicBool::new(false)),
@@ -419,6 +435,26 @@ impl Engine {
     /// 数据库文件路径（`from_parts` 构造时为空路径）。
     pub fn db_path(&self) -> &Path {
         &self.db_path
+    }
+
+    /// 底层 SQLite 连接池（未附着时为 None）；读锁内克隆句柄后释放锁。
+    ///
+    /// 用法:
+    /// - 以 `&SqlitePool` 为入口的用例（如导入）在入口层取句柄使用；
+    /// - `open_with` 装配路径自动携带，`from_parts` 注入路径需先
+    ///   [`Engine::attach_sqlite_pool`]。
+    pub fn sqlite_pool(&self) -> Option<SqlitePool> {
+        read_recover(&self.pool, "engine.pool").clone()
+    }
+
+    /// 附着底层 SQLite 连接池（宿主 / 测试已持有连接池时复用）。
+    ///
+    /// 用法:
+    /// - 注入构造（`from_parts`）不创建连接池；需要导入等连接的用例时，
+    ///   由持有方在本方法附着（`open_with` 装配路径无需调用）。
+    pub fn attach_sqlite_pool(&self, pool: SqlitePool) {
+        let mut guard = write_recover(&self.pool, "engine.pool");
+        *guard = Some(pool);
     }
 
     /// 检索索引是否已加载（懒加载占位状态）。
@@ -695,6 +731,17 @@ impl Engine {
     /// 人格卡片用例：性格画像 / 行为规则 / 表达风格 / 知识事实 / 数据成熟度。
     pub async fn persona_card(&self, req: PersonaCardRequest) -> RamariaResult<PersonaCardView> {
         crate::persona::card(self, req).await
+    }
+
+    /// 重生成某人格在导入会话中的 L1 摘要（不含 L2/L3 级联，宿主按需触发）。
+    ///
+    /// 返回:
+    /// - 逐会话重生成计数与提示文案；级联（L2/L3）由宿主在拿到结果后自行触发。
+    pub async fn regenerate_persona_l1(
+        &self,
+        persona_uid: &str,
+    ) -> RamariaResult<PersonaRegenerateOutcome> {
+        crate::persona::regenerate_import_l1(self, persona_uid).await
     }
 
     /// 确保检索索引已加载（懒加载：首次召回前构建一次，重复调用为空操作）。
@@ -1121,6 +1168,22 @@ impl Engine {
     /// 读取当前降级原因（非 `Degraded` 状态返回 `None`）。
     pub async fn degraded_reason(&self) -> RamariaResult<Option<DegradedReason>> {
         crate::model::degraded_reason(self).await
+    }
+
+    // =========================================================
+    // 诊断导出用例
+    // =========================================================
+
+    /// 导出诊断信息为 .zip（日志 / 配置 / 系统信息；敏感内容先脱敏再打包）。
+    ///
+    /// 说明:
+    /// - 配置快照在本方法内读取，收集与打包在锁外进行；
+    /// - 收集阶段错误不阻塞导出；写入经同目录临时文件原子替换。
+    pub async fn export_diagnostics(
+        &self,
+        req: DiagnosticsRequest,
+    ) -> RamariaResult<DiagnosticsReport> {
+        crate::diagnostics::export(self, req).await
     }
 
     // =========================================================
@@ -1727,6 +1790,34 @@ mod tests {
             .list_personas()
             .await
             .expect("注入的存储应可查询");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 连接池门面：注入构造默认未附着；附着后读取返回共享句柄；装配路径自动携带。
+    #[tokio::test]
+    async fn attach_sqlite_pool_roundtrip() {
+        let dir = temp_dir("pool-attach");
+        let db_path = dir.join("assistant.db");
+        let pool = ramaria_storage::database::init_pool(Some(db_path.clone()))
+            .await
+            .expect("初始化测试库应成功");
+        let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::new(pool.clone()));
+        let keychain = Arc::new(Keychain::new());
+        let llm = build_llm_provider(&BackendConfig::lm_studio_default(), &keychain, None)
+            .expect("构建本地 provider 应成功");
+
+        let engine = Engine::from_parts(storage, llm, None, TestConfig::default());
+        assert!(engine.sqlite_pool().is_none(), "注入构造默认不携带连接池");
+        engine.attach_sqlite_pool(pool);
+        assert!(engine.sqlite_pool().is_some(), "附着后应可读取连接池句柄");
+
+        // 装配路径（open_with）自动携带连接池句柄
+        let engine = Engine::open(db_path).await.expect("引擎装配应成功");
+        assert!(
+            engine.sqlite_pool().is_some(),
+            "装配路径应自动携带连接池句柄"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

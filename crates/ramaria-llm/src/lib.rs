@@ -8,6 +8,7 @@
 //! - 共享 transport 层抽象，避免三个 provider 重复实现 HTTP/SSE 逻辑
 //! - 通过 feature `embedding-native` 支持原生 safetensors 嵌入模型（candle 推理引擎）
 //! - 支持 BERT 架构（bge-small-zh-v1.5）和 LLaMA/Qwen3 架构（Qwen3-Embedding-0.6B）
+//! - 嵌入模型文件生命周期（下载 / SHA-256 校验 / 断点续传 / 目录管理）由 `model_manager` 承接
 //! - 旧 `embedding-onnx` ONNX Runtime 后端已停用：无 crate 启用该 feature，不承诺可编译，计划后续版本移除
 
 pub mod keychain;
@@ -21,3 +22,11 @@ pub mod openai;
 
 // Embedding Provider 实现（可选 feature）
 pub mod embedding;
+
+// 嵌入模型文件管理（下载 / 校验 / 目录管理，仅供上层编排调用）
+pub mod model_manager;
+
+pub use model_manager::{
+    DEFAULT_MODEL_ID, DownloadProgress, MODEL_PRESETS, ModelManager, ModelPreset,
+    default_models_root,
+};

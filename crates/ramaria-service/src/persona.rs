@@ -1,14 +1,20 @@
-//! crates/ramaria-service/src/persona.rs - 人格读取用例（persona_list / persona_get）
+//! crates/ramaria-service/src/persona.rs - 人格读取与重生成用例（persona_list / persona_get / regenerate_import_l1）
 //!
 //! 设计特点:
-//! - 纯读取：人格摘要列表与人格卡片（性格画像 / 行为规则 / 表达风格 / 知识事实 / 数据成熟度）
-//! - 严格按 persona_uid 隔离：卡片只读取目标人格的记录，不跨人格聚合
-//! - 逐段独立降级：任一段读取失败记 warn 并返回空段，不阻塞整张卡片
-//! - 条目上限：各段最多返回 [`MAX_CARD_ITEMS`] 条（避免大库把整张卡片撑爆）
-//! - 隐私：卡片不含 utt 原文块（原文是最高敏感层，按召回策略单独控制）
+//! - 人格读取：人格摘要列表与人格卡片（性格画像 / 行为规则 / 表达风格 / 知识事实 / 数据成熟度）
+//! - 人格重生成：导入失败后的离线重建路径（全量消息枚举 → 会话去重 → 逐会话 L1 重生成，含连续失败早停）
+//! - 严格按 persona_uid 隔离：读取与重生成只处理目标人格的记录，不跨人格聚合
+//! - 逐段独立降级：卡片任一段读取失败记 warn 并返回空段，不阻塞整张卡片
+//! - 条目上限：卡片各段最多返回 [`MAX_CARD_ITEMS`] 条（避免大库把整张卡片撑爆）
+//! - 隐私：卡片不含 utt 原文块；日志中的个人标识经 `mask_id` 脱敏
+
+use std::collections::HashSet;
 
 use ramaria_core::error::{RamariaError, RamariaResult};
+use ramaria_core::privacy::mask_id;
 use ramaria_core::types::{ProfileField, TraitStatus};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::engine::Engine;
 use crate::types::{
@@ -279,5 +285,463 @@ async fn maturity_view(
             .count(),
         fact_count,
         example_count,
+    }
+}
+
+// =========================================================
+// regenerate_import_l1（人格 L1 重生成）
+// =========================================================
+
+/// 外层连续失败阈值：单 session 内部已有重试与退避，外层连续 3 次失败即判定 LLM 不可用。
+const MAX_CONSECUTIVE_L1_FAILURES: u32 = 3;
+
+/// 人格 L1 重生成结果（供宿主构造用户提示与统计展示）。
+///
+/// 字段约定:
+/// - `l1_regenerated` / `l1_failed`: 生成成功 / 失败的会话数（单会话内部重试耗尽后才计入失败）。
+/// - `total_sessions`: 参与重生成的会话总数（含跳过与未处理会话）。
+/// - `early_terminated`: 是否因连续失败提前终止。
+/// - `remaining_skipped`: 提前终止时未处理的会话数（未提前终止为 0）。
+/// - `message`: 面向用户的提示文案。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PersonaRegenerateOutcome {
+    pub l1_regenerated: usize,
+    pub l1_failed: usize,
+    pub total_sessions: usize,
+    pub early_terminated: bool,
+    pub remaining_skipped: usize,
+    pub message: String,
+}
+
+/// 为某人格的导入会话重新生成 L1 摘要（导入失败后的离线重建路径）。
+///
+/// 流程:
+/// 1. 校验 UID 非空并确认人格存在（否则返回业务校验错误）；
+/// 2. 全量枚举该人格消息并推导会话列表（去重按消息枚举顺序保留首次出现，顺序确定）；
+/// 3. 逐会话按单段口径重生成 L1，连续失败达 [`MAX_CONSECUTIVE_L1_FAILURES`] 次判定 LLM 不可用并提前终止；
+/// 4. 按成功 / 部分失败 / 提前终止三个分支构造提示文案。
+///
+/// 参数:
+/// - `engine`: 服务层引擎。
+/// - `persona_uid`: 目标人格 UID。
+///
+/// 返回:
+/// - 计数与提示文案；空 UID 与人格不存在返回 `Validation` 错误。
+///
+/// 说明:
+/// - L2/L3 级联不在本用例内触发：宿主拿到结果后自行触发 [`Engine::trigger_l2_check`]
+///   （提示文案中的"L2/L3 正在后台处理中"即指该宿主行为，避免阻塞当前调用）。
+/// - 幂等：会话已有目标人格的 L1 时按跳过处理（不计成功 / 失败，也不影响连续失败计数）。
+pub(crate) async fn regenerate_import_l1(
+    engine: &Engine,
+    persona_uid: &str,
+) -> RamariaResult<PersonaRegenerateOutcome> {
+    if persona_uid.trim().is_empty() {
+        return Err(RamariaError::validation("人格 UID 不能为空"));
+    }
+
+    let storage = engine.storage_ref();
+    if storage.get_persona_by_uid(persona_uid).await?.is_none() {
+        return Err(RamariaError::validation(format!(
+            "人格不存在: uid={persona_uid}"
+        )));
+    }
+
+    tracing::info!(
+        persona_uid = %mask_id(persona_uid),
+        "重新生成导入会话的 L1 摘要"
+    );
+
+    // 离线重建路径：必须覆盖该人格的全部会话，故全量枚举其消息（不做截断）；
+    // 若将来出现 persona 消息的浏览 / 展示需求，须另走分页查询。
+    let messages = storage.list_messages_by_persona(persona_uid).await?;
+
+    // 会话去重：按消息枚举顺序保留首次出现（确定性顺序便于复现），
+    // 不使用 HashSet 的迭代顺序，避免会话处理顺序随哈希随机化漂移。
+    let mut seen_sessions = HashSet::new();
+    let mut session_ids: Vec<Uuid> = Vec::new();
+    for message in &messages {
+        if seen_sessions.insert(message.session_id) {
+            session_ids.push(message.session_id);
+        }
+    }
+
+    if session_ids.is_empty() {
+        return Ok(PersonaRegenerateOutcome {
+            l1_regenerated: 0,
+            l1_failed: 0,
+            total_sessions: 0,
+            early_terminated: false,
+            remaining_skipped: 0,
+            message: "该人格没有关联的导入消息，无需处理。".to_string(),
+        });
+    }
+
+    tracing::info!(
+        persona_uid = %mask_id(persona_uid),
+        session_count = session_ids.len(),
+        message_count = messages.len(),
+        "找到关联的导入 session，开始重新生成 L1"
+    );
+
+    let total = session_ids.len();
+    let mut l1_regenerated = 0usize;
+    let mut l1_failed = 0usize;
+    let mut consecutive_failures: u32 = 0;
+    let mut early_terminated = false;
+    let mut remaining_skipped = 0usize;
+
+    for (idx, sid) in session_ids.iter().enumerate() {
+        match engine
+            .regenerate_l1_no_cascade(*sid, Some(persona_uid), None, None)
+            .await
+        {
+            Ok(Some(_)) => {
+                l1_regenerated += 1;
+                consecutive_failures = 0;
+                tracing::debug!(session_id = %sid, "L1 重新生成成功");
+            }
+            Ok(None) => {
+                // 会话已有目标人格的 L1：幂等跳过，不计成功 / 失败，也不影响连续失败计数
+                tracing::debug!(session_id = %sid, "L1 无需生成，跳过");
+            }
+            Err(e) => {
+                l1_failed += 1;
+                consecutive_failures += 1;
+                tracing::warn!(
+                    session_id = %sid,
+                    error = %e,
+                    consecutive_failures,
+                    "L1 重新生成失败"
+                );
+
+                if consecutive_failures >= MAX_CONSECUTIVE_L1_FAILURES {
+                    remaining_skipped = total.saturating_sub(idx + 1);
+                    tracing::warn!(
+                        persona_uid = %mask_id(persona_uid),
+                        consecutive_failures,
+                        l1_regenerated,
+                        l1_failed,
+                        remaining_skipped,
+                        "L1 连续失败达到上限，判定 LLM 不可用，跳过剩余会话"
+                    );
+                    early_terminated = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    tracing::info!(
+        persona_uid = %mask_id(persona_uid),
+        l1_regenerated,
+        l1_failed,
+        total,
+        early_terminated,
+        remaining_skipped,
+        "L1 重新生成完成"
+    );
+
+    let message = if early_terminated {
+        format!(
+            "L1 连续失败 {MAX_CONSECUTIVE_L1_FAILURES} 次，已提前终止。成功 {l1_regenerated}/{total}, 失败 {l1_failed}。请确认 LLM 模型已连接后重试。剩余 {remaining_skipped} 个 session 未处理。"
+        )
+    } else if l1_failed > 0 {
+        format!(
+            "L1 重新生成完成: 成功 {l1_regenerated}/{total}, 失败 {l1_failed}。请确认 LLM 模型已连接。L2/L3 正在后台处理中..."
+        )
+    } else {
+        format!("L1 全部重新生成成功 ({l1_regenerated}/{total})。L2/L3 正在后台处理中...")
+    };
+
+    Ok(PersonaRegenerateOutcome {
+        l1_regenerated,
+        l1_failed,
+        total_sessions: total,
+        early_terminated,
+        remaining_skipped,
+        message,
+    })
+}
+
+// =========================================================
+// 单元测试
+// =========================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{
+        L1_JSON_REPLY, ScriptedLlm, engine_with_db, engine_with_failing_llm, engine_with_l1_reply,
+        engine_with_shared_scripted_llm, seed_persona, seed_session_with_messages,
+    };
+    use ramaria_core::config::RamariaConfig;
+    use ramaria_core::traits::StoreCrud;
+    use ramaria_core::types::MemoryL1;
+    use ramaria_storage::SqliteStorage;
+    use std::sync::Arc;
+
+    /// 造一个"已有目标人格 L1"的会话（带消息；供幂等跳过路径用例）。
+    async fn seed_session_with_persona_l1(
+        storage: &SqliteStorage,
+        persona: &str,
+        count: usize,
+        base_ts: i64,
+    ) -> Uuid {
+        let session = seed_session_with_messages(storage, persona, count, base_ts).await;
+        let mut l1 = MemoryL1::new(session, "既有摘要".to_string(), None);
+        l1.persona_uid = Some(persona.to_string());
+        storage
+            .save_memory_l1(&l1)
+            .await
+            .expect("写入既有 L1 应成功");
+        session
+    }
+
+    /// 空 UID（含纯空白）：返回业务校验错误。
+    #[tokio::test]
+    async fn regenerate_rejects_blank_uid() {
+        let (engine, _storage, dir) = engine_with_db("persona-regen-blank-uid").await;
+
+        let err = engine
+            .regenerate_persona_l1("   ")
+            .await
+            .expect_err("空 UID 应返回错误");
+        assert_eq!(err.category(), "validation", "应为业务校验错误: {err}");
+        assert!(
+            err.to_string().contains("人格 UID 不能为空"),
+            "错误文案应提示 UID 为空: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 人格不存在：返回业务校验错误（文案含目标 UID）。
+    #[tokio::test]
+    async fn regenerate_rejects_missing_persona() {
+        let (engine, storage, dir) = engine_with_db("persona-regen-missing").await;
+        seed_persona(&storage, "char-0001").await;
+
+        let err = engine
+            .regenerate_persona_l1("char-missing")
+            .await
+            .expect_err("人格不存在应返回错误");
+        assert_eq!(err.category(), "validation", "应为业务校验错误: {err}");
+        assert!(
+            err.to_string().contains("人格不存在: uid=char-missing"),
+            "错误文案应含目标 UID: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 该人格无消息：返回零计数与"无需处理"提示，不触达 LLM。
+    #[tokio::test]
+    async fn regenerate_returns_noop_without_messages() {
+        let (engine, storage, dir) =
+            engine_with_l1_reply("persona-regen-noop", L1_JSON_REPLY).await;
+        seed_persona(&storage, "char-0001").await;
+
+        let outcome = engine
+            .regenerate_persona_l1("char-0001")
+            .await
+            .expect("无消息应正常返回");
+        assert_eq!(outcome.total_sessions, 0);
+        assert_eq!(outcome.l1_regenerated, 0);
+        assert_eq!(outcome.l1_failed, 0);
+        assert!(!outcome.early_terminated);
+        assert_eq!(outcome.remaining_skipped, 0);
+        assert_eq!(outcome.message, "该人格没有关联的导入消息，无需处理。");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 多会话全部成功：逐会话产出绑定人格的 L1，计数与提示为全成功分支。
+    #[tokio::test]
+    async fn regenerate_all_sessions_succeed() {
+        let (engine, storage, dir) =
+            engine_with_l1_reply("persona-regen-success", L1_JSON_REPLY).await;
+        seed_persona(&storage, "char-0001").await;
+        let session_a = seed_session_with_messages(&storage, "char-0001", 3, 2_000).await;
+        let session_b = seed_session_with_messages(&storage, "char-0001", 2, 1_000).await;
+
+        let outcome = engine
+            .regenerate_persona_l1("char-0001")
+            .await
+            .expect("重生成应成功");
+        assert_eq!(outcome.total_sessions, 2);
+        assert_eq!(outcome.l1_regenerated, 2);
+        assert_eq!(outcome.l1_failed, 0);
+        assert!(!outcome.early_terminated);
+        assert_eq!(outcome.remaining_skipped, 0);
+        assert_eq!(
+            outcome.message,
+            "L1 全部重新生成成功 (2/2)。L2/L3 正在后台处理中..."
+        );
+
+        for session in [session_a, session_b] {
+            let l1_list = storage
+                .list_memory_l1(session)
+                .await
+                .expect("读取 L1 应成功");
+            assert_eq!(l1_list.len(), 1, "每个会话应恰有一条 L1");
+            assert_eq!(
+                l1_list[0].persona_uid.as_deref(),
+                Some("char-0001"),
+                "L1 应绑定目标人格"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 部分失败未达早停阈值：成功 / 失败计数如实上报，提示为失败分支。
+    #[tokio::test]
+    async fn regenerate_reports_partial_failure_without_early_stop() {
+        // 脚本队列仅一条有效回复：处理顺序在前的会话成功；其后的会话耗尽队列后
+        // 拿到的空回复解析失败，内部重试均失败 → 计入失败，但未达连续失败阈值。
+        let llm = Arc::new(ScriptedLlm::replies(&[L1_JSON_REPLY]));
+        let (engine, storage, dir) = engine_with_shared_scripted_llm(
+            "persona-regen-partial",
+            llm,
+            RamariaConfig::default(),
+            None,
+        )
+        .await;
+        seed_persona(&storage, "char-0001").await;
+        let ok_session = seed_session_with_messages(&storage, "char-0001", 2, 2_000).await;
+        let fail_session = seed_session_with_messages(&storage, "char-0001", 2, 1_000).await;
+
+        let outcome = engine
+            .regenerate_persona_l1("char-0001")
+            .await
+            .expect("部分失败应正常返回");
+        assert_eq!(outcome.total_sessions, 2);
+        assert_eq!(outcome.l1_regenerated, 1);
+        assert_eq!(outcome.l1_failed, 1);
+        assert!(!outcome.early_terminated, "失败未达阈值不应提前终止");
+        assert_eq!(outcome.remaining_skipped, 0);
+        assert_eq!(
+            outcome.message,
+            "L1 重新生成完成: 成功 1/2, 失败 1。请确认 LLM 模型已连接。L2/L3 正在后台处理中..."
+        );
+
+        assert_eq!(
+            storage
+                .list_memory_l1(ok_session)
+                .await
+                .expect("读取 L1 应成功")
+                .len(),
+            1,
+            "成功会话应产出 L1"
+        );
+        assert!(
+            storage
+                .list_memory_l1(fail_session)
+                .await
+                .expect("读取 L1 应成功")
+                .is_empty(),
+            "失败会话不应残留 L1"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 连续失败达到阈值：提前终止并报告跳过数量，跳过的会话未被处理。
+    #[tokio::test]
+    async fn regenerate_stops_after_consecutive_failures() {
+        let (engine, storage, dir) = engine_with_failing_llm("persona-regen-early-stop").await;
+        seed_persona(&storage, "char-0001").await;
+        let session_1 = seed_session_with_messages(&storage, "char-0001", 3, 4_000).await;
+        let session_2 = seed_session_with_messages(&storage, "char-0001", 3, 3_000).await;
+        let session_3 = seed_session_with_messages(&storage, "char-0001", 3, 2_000).await;
+        let session_skipped = seed_session_with_messages(&storage, "char-0001", 3, 1_000).await;
+
+        let outcome = engine
+            .regenerate_persona_l1("char-0001")
+            .await
+            .expect("失败路径应返回结果而非错误");
+        assert_eq!(outcome.total_sessions, 4);
+        assert_eq!(outcome.l1_regenerated, 0);
+        assert_eq!(outcome.l1_failed, 3, "连续 3 次失败后应停止");
+        assert!(outcome.early_terminated, "应提前终止");
+        assert_eq!(outcome.remaining_skipped, 1, "应跳过剩余 1 个会话");
+        assert_eq!(
+            outcome.message,
+            "L1 连续失败 3 次，已提前终止。成功 0/4, 失败 3。请确认 LLM 模型已连接后重试。剩余 1 个 session 未处理。"
+        );
+
+        for session in [session_1, session_2, session_3] {
+            assert!(
+                storage
+                    .list_memory_l1(session)
+                    .await
+                    .expect("读取 L1 应成功")
+                    .is_empty(),
+                "失败的会话不应残留 L1"
+            );
+        }
+        assert!(
+            storage
+                .list_memory_l1(session_skipped)
+                .await
+                .expect("读取 L1 应成功")
+                .is_empty(),
+            "提前终止后跳过的会话不应被处理"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 幂等跳过（已有目标人格 L1）夹在失败之间：不重置连续失败计数，也不计入成功。
+    #[tokio::test]
+    async fn regenerate_skip_does_not_reset_failure_streak() {
+        let (engine, storage, dir) = engine_with_failing_llm("persona-regen-skip-streak").await;
+        seed_persona(&storage, "char-0001").await;
+        // 处理顺序按消息时间倒序：失败、跳过、失败、失败、未处理
+        let fail_a = seed_session_with_messages(&storage, "char-0001", 3, 5_000).await;
+        let skipped = seed_session_with_persona_l1(&storage, "char-0001", 2, 4_000).await;
+        let fail_b = seed_session_with_messages(&storage, "char-0001", 3, 3_000).await;
+        let fail_c = seed_session_with_messages(&storage, "char-0001", 3, 2_000).await;
+        let fail_unprocessed = seed_session_with_messages(&storage, "char-0001", 3, 1_000).await;
+
+        let outcome = engine
+            .regenerate_persona_l1("char-0001")
+            .await
+            .expect("失败路径应返回结果而非错误");
+        assert_eq!(outcome.total_sessions, 5);
+        assert_eq!(outcome.l1_regenerated, 0, "跳过不计入成功");
+        assert_eq!(
+            outcome.l1_failed, 3,
+            "跳过不重置连续失败计数：第 4 个失败不应发生"
+        );
+        assert!(outcome.early_terminated, "应在第 3 次连续失败时提前终止");
+        assert_eq!(outcome.remaining_skipped, 1);
+        assert_eq!(
+            outcome.message,
+            "L1 连续失败 3 次，已提前终止。成功 0/5, 失败 3。请确认 LLM 模型已连接后重试。剩余 1 个 session 未处理。"
+        );
+
+        assert_eq!(
+            storage
+                .list_memory_l1(skipped)
+                .await
+                .expect("读取 L1 应成功")
+                .len(),
+            1,
+            "跳过会话应保留既有 L1"
+        );
+        for session in [fail_a, fail_b, fail_c, fail_unprocessed] {
+            assert!(
+                storage
+                    .list_memory_l1(session)
+                    .await
+                    .expect("读取 L1 应成功")
+                    .is_empty(),
+                "失败 / 未处理会话不应有 L1"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

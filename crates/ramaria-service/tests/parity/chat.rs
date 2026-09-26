@@ -14,15 +14,15 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
-use ramaria_core::traits::{LlmProvider, StoreCrud};
-use ramaria_core::types::AppState;
+use ramaria_core::traits::{ChatRequest, LlmProvider, StoreCrud};
+use ramaria_core::types::{AppState, CHANNEL_LOCAL};
 use ramaria_service::types::{ChatSendRequest, ChatStreamRequest};
 use ramaria_service::{CHANNEL_MCP, DEFAULT_PERSONA_UID, StreamEvent};
 use serde_json::json;
 
 use crate::support::{
-    GoldenStore, ParityEnv, ParityError, ParityResult, ScriptedLlm, Snapshot, assert_parity,
-    assert_stable, fixtures,
+    AppEnv, GoldenStore, ParityEnv, ParityError, ParityResult, ScriptedLlm, Snapshot,
+    assert_parity, assert_stable, fixtures,
 };
 
 /// 场景名（同时作为 golden 基线文件名）。
@@ -42,6 +42,12 @@ const REPLY: &str = "嗯，我在听。";
 
 /// 历史窗口场景的消息条数（超过默认加载上限 200，验证窗口截断）。
 const HISTORY_SEED_MESSAGES: usize = 250;
+
+/// 逐字对照场景名（快照标签，不写基线）。
+const CROSS_SCENARIO: &str = "chat/app-vs-service";
+
+/// 逐字对照的既有会话消息条数（落在默认加载窗口内，避开窗口截断口径）。
+const CROSS_HISTORY_MESSAGES: usize = 4;
 
 // =========================================================
 // 场景执行
@@ -504,4 +510,167 @@ async fn chat_history_window_is_stable_and_match_golden() {
         !outcome.is_updated(),
         "未开启更新模式时不应覆盖基线（{outcome:?}）"
     );
+}
+
+// =========================================================
+// 逐字对照（应用装配 vs 服务装配）
+// =========================================================
+
+/// 取最后一个生成请求（每轮恰有一次生成调用）。
+fn last_request(requests: Vec<ChatRequest>) -> ParityResult<ChatRequest> {
+    requests
+        .into_iter()
+        .last()
+        .ok_or_else(|| ParityError::env("读取生成请求", "应至少记录一次请求"))
+}
+
+/// 生成结果快照（两侧同形；渠道与外部标识两侧口径不同，不进入快照）。
+fn chat_value(
+    reply: &str,
+    request: &ChatRequest,
+    messages: &[ramaria_core::types::Message],
+) -> serde_json::Value {
+    json!({
+        "reply": reply,
+        "chars": reply.chars().count(),
+        "messages": messages
+            .iter()
+            .map(|message| json!({
+                "role": message.role,
+                "content": message.content.clone(),
+            }))
+            .collect::<Vec<_>>(),
+        "session": {
+            "message_count": messages.len(),
+        },
+        "prompt": {
+            "system_prompt_chars": request.system_prompt.chars().count(),
+            "memory_context_present": request.memory_context.is_some(),
+            "memory_context_chars": request
+                .memory_context
+                .as_ref()
+                .map(|text| text.chars().count())
+                .unwrap_or(0),
+            "history_len": request.history.len(),
+            "user_message": request.user_message.clone(),
+            "template_version": request.template_version.clone(),
+        },
+    })
+}
+
+/// 应用装配：向既有会话发送一条消息（消费事件流），产出回复 / 落库 / 生成请求结构快照。
+async fn cross_snapshot_app(env: &AppEnv) -> ParityResult<Snapshot> {
+    fixtures::seed_persona(env.storage(), DEFAULT_PERSONA_UID).await?;
+    let session_id = fixtures::seed_active_session(
+        env.storage(),
+        DEFAULT_PERSONA_UID,
+        CROSS_HISTORY_MESSAGES,
+        fixtures::fixture_ts(0),
+    )
+    .await?;
+    env.setup_ready().await?;
+
+    let mut stream = env
+        .app()
+        .send_message(USER_MESSAGE, Some(DEFAULT_PERSONA_UID), Some(session_id))
+        .await
+        .map_err(|e| ParityError::env("应用装配发送对照消息", e))?;
+
+    let mut reply = String::new();
+    while let Some(item) = stream.next().await {
+        let event = item.map_err(|e| ParityError::env("应用装配消费对照事件流", e))?;
+        if let ramaria_app::StreamEvent::Delta { content, .. } = event {
+            reply.push_str(&content);
+        }
+    }
+
+    let request = last_request(env.llm().requests())?;
+    let messages = env
+        .storage()
+        .list_messages(session_id)
+        .await
+        .map_err(|e| ParityError::env("应用装配读取对照会话消息", e))?;
+    Ok(Snapshot::new(
+        CROSS_SCENARIO,
+        chat_value(&reply, &request, &messages),
+    ))
+}
+
+/// 服务装配：向既有会话发送一条消息，产出回复 / 落库 / 生成请求结构快照。
+async fn cross_snapshot_service(env: &ParityEnv, llm: &ScriptedLlm) -> ParityResult<Snapshot> {
+    fixtures::seed_persona(env.storage(), DEFAULT_PERSONA_UID).await?;
+    let session_id = fixtures::seed_active_session(
+        env.storage(),
+        DEFAULT_PERSONA_UID,
+        CROSS_HISTORY_MESSAGES,
+        fixtures::fixture_ts(0),
+    )
+    .await?;
+
+    let outcome = env
+        .engine()
+        .chat_send(ChatSendRequest {
+            message: USER_MESSAGE.to_string(),
+            persona: Some(DEFAULT_PERSONA_UID.to_string()),
+            session_id: Some(session_id),
+            conversation_id: None,
+            channel: CHANNEL_LOCAL.to_string(),
+        })
+        .await
+        .map_err(|e| ParityError::env("服务装配发送对照消息", e))?;
+
+    let request = last_request(llm.requests())?;
+    let messages = env
+        .storage()
+        .list_messages(session_id)
+        .await
+        .map_err(|e| ParityError::env("服务装配读取对照会话消息", e))?;
+    Ok(Snapshot::new(
+        CROSS_SCENARIO,
+        chat_value(&outcome.reply, &request, &messages),
+    ))
+}
+
+/// 逐字对照：回复内容 / 落库消息序列 / 生成请求结构在两侧等价。
+///
+/// 口径说明:
+/// - 两侧为同一 fixture（同一人格 + 同一会话的 4 条历史消息），各发同一条消息到该会话；
+/// - 渠道与外部标识两侧口径不同（本地会话无外部标识），不进入快照；
+/// - 生成请求结构只取稳定指标（长度 / 是否携带记忆上下文 / 历史条数 / 模板版本），不落请求全文。
+#[tokio::test]
+async fn chat_reply_and_request_are_equivalent_between_app_and_service() {
+    let app_env = AppEnv::with_llm("chat-cross-app", Arc::new(ScriptedLlm::reply(REPLY)))
+        .await
+        .expect("应用装配对照环境应可构建");
+    let left = cross_snapshot_app(&app_env)
+        .await
+        .expect("应用装配生成场景应执行成功");
+    app_env.cleanup().await;
+
+    let service_llm = Arc::new(ScriptedLlm::reply(REPLY));
+    let service_env = ParityEnv::with_llm(
+        "chat-cross-service",
+        Arc::clone(&service_llm) as Arc<dyn LlmProvider>,
+    )
+    .await
+    .expect("服务装配对照环境应可构建");
+    let right = cross_snapshot_service(&service_env, &service_llm)
+        .await
+        .expect("服务装配生成场景应执行成功");
+    service_env.cleanup().await;
+
+    // 关键行为锚点：回复落库、历史进入请求（对照面成立）
+    assert_eq!(left.value()["reply"].as_str(), Some(REPLY));
+    assert_eq!(
+        left.value()["session"]["message_count"].as_u64(),
+        Some((CROSS_HISTORY_MESSAGES + 2) as u64),
+        "历史 4 条 + 本轮用户消息 + 助手回复"
+    );
+    assert_eq!(
+        left.value()["prompt"]["history_len"].as_u64(),
+        Some(CROSS_HISTORY_MESSAGES as u64),
+        "既有会话历史应进入本轮生成请求"
+    );
+
+    assert_parity(CROSS_SCENARIO, &left, &right);
 }

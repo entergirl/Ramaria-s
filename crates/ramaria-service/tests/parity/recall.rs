@@ -10,12 +10,20 @@
 //! - 输出入口：`snapshot_of` 是"某一实现在该 fixture 上的规范化输出"的唯一入口，
 //!   同形状快照可直接送入 `assert_parity` 比对
 
+use std::sync::Arc;
+
+use futures::StreamExt;
+use ramaria_core::traits::{ChatRequest, LlmProvider};
+use ramaria_core::types::CHANNEL_LOCAL;
 use ramaria_service::RecallPolicy;
-use ramaria_service::types::{RecallLayer, RecallRequest};
+use ramaria_service::types::{ChatSendRequest, RecallLayer, RecallRequest};
+use ramaria_storage::SqliteStorage;
 use serde_json::json;
 
+use crate::support::env::DEFAULT_ASSISTANT_REPLY;
 use crate::support::{
-    GoldenStore, ParityEnv, ParityError, ParityResult, Snapshot, assert_parity, fixtures,
+    AppEnv, GoldenStore, ParityEnv, ParityError, ParityResult, ScriptedLlm, Snapshot,
+    assert_parity, fixtures,
 };
 
 /// 场景名（同时作为 golden 基线文件名）。
@@ -26,6 +34,9 @@ const PERSONA: &str = "char-parity-recall";
 
 /// 查询词（与第一条 L1 强相关）。
 const QUERY: &str = "工作压力";
+
+/// 逐字对照场景名（快照标签，不写基线）。
+const CROSS_SCENARIO: &str = "recall/app-vs-service";
 
 // =========================================================
 // 场景执行
@@ -200,4 +211,156 @@ async fn recall_rejects_persona_outside_whitelist() {
     assert_eq!(error.category(), "privacy", "应返回隐私类错误: {error}");
 
     env.cleanup().await;
+}
+
+// =========================================================
+// 逐字对照（应用装配 vs 服务装配）
+// =========================================================
+
+/// 造逐字对照 fixture：persona 与 3 条不同主题的 L1（与既有场景同文本 / 同时间偏移）。
+async fn seed_cross_fixture(storage: &SqliteStorage) -> ParityResult<()> {
+    fixtures::seed_persona(storage, PERSONA).await?;
+    fixtures::seed_l1(
+        storage,
+        PERSONA,
+        "用户最近工作压力很大，常加班到深夜",
+        Some("工作压力,加班"),
+        fixtures::fixture_ts(0),
+    )
+    .await?;
+    fixtures::seed_l1(
+        storage,
+        PERSONA,
+        "用户周末去爬山，天气很好",
+        Some("爬山,周末"),
+        fixtures::fixture_ts(-86_400_000),
+    )
+    .await?;
+    fixtures::seed_l1(
+        storage,
+        PERSONA,
+        "用户喜欢喝手冲咖啡",
+        Some("咖啡"),
+        fixtures::fixture_ts(-172_800_000),
+    )
+    .await?;
+    Ok(())
+}
+
+/// 取最后一个生成请求（本路径每轮恰有一次生成调用）。
+fn last_request(requests: Vec<ChatRequest>) -> ParityResult<ChatRequest> {
+    requests
+        .into_iter()
+        .last()
+        .ok_or_else(|| ParityError::env("读取生成请求", "应至少记录一次请求"))
+}
+
+/// 召回产物快照（两侧同形）。
+fn recall_value(request: &ChatRequest) -> serde_json::Value {
+    json!({
+        "memory_context": request.memory_context.clone(),
+        "memory_context_chars": request
+            .memory_context
+            .as_ref()
+            .map(|text| text.chars().count())
+            .unwrap_or(0),
+        "memory_context_present": request.memory_context.is_some(),
+        "history_len": request.history.len(),
+        "user_message": request.user_message.clone(),
+    })
+}
+
+/// 应用装配：重建索引 → 发送查询消息（消费事件流）→ 取生成请求中的召回产物。
+async fn cross_snapshot_app(env: &AppEnv) -> ParityResult<Snapshot> {
+    seed_cross_fixture(env.storage()).await?;
+    env.setup_ready().await?;
+    env.app()
+        .rebuild_retriever()
+        .await
+        .map_err(|e| ParityError::env("应用装配重建索引", e))?;
+
+    let mut stream = env
+        .app()
+        .send_message(QUERY, Some(PERSONA), None)
+        .await
+        .map_err(|e| ParityError::env("应用装配发送查询消息", e))?;
+    while let Some(item) = stream.next().await {
+        item.map_err(|e| ParityError::env("应用装配消费查询事件流", e))?;
+    }
+
+    let request = last_request(env.llm().requests())?;
+    Ok(Snapshot::new(CROSS_SCENARIO, recall_value(&request)))
+}
+
+/// 服务装配：加载索引 → 发送查询消息 → 取生成请求中的召回产物。
+async fn cross_snapshot_service(env: &ParityEnv, llm: &ScriptedLlm) -> ParityResult<Snapshot> {
+    seed_cross_fixture(env.storage()).await?;
+    env.engine()
+        .ensure_index_loaded()
+        .await
+        .map_err(|e| ParityError::env("服务装配加载索引", e))?;
+    env.engine()
+        .chat_send(ChatSendRequest {
+            message: QUERY.to_string(),
+            persona: Some(PERSONA.to_string()),
+            session_id: None,
+            conversation_id: None,
+            channel: CHANNEL_LOCAL.to_string(),
+        })
+        .await
+        .map_err(|e| ParityError::env("服务装配发送查询消息", e))?;
+
+    let request = last_request(llm.requests())?;
+    Ok(Snapshot::new(CROSS_SCENARIO, recall_value(&request)))
+}
+
+/// 逐字对照：注入生成请求的记忆上下文（召回结果的用户可见形态）在两侧等价。
+///
+/// 观测口径:
+/// - 生成入口没有独立的召回读取面，召回结果以"注入生成请求的记忆上下文"为观测量
+///   （即用户可见的召回产物），两侧从各自生成请求中逐字读取；
+/// - fixture 只有摘要层（不造原文块），两侧重建索引后各发同一条查询消息；
+/// - 上下文内的分数标注按两位小数渲染，对运行时间基准只有量级远小于显示精度的差异。
+#[tokio::test]
+async fn recall_injected_context_is_equivalent_between_app_and_service() {
+    let app_env = AppEnv::with_llm(
+        "recall-cross-app",
+        Arc::new(ScriptedLlm::reply(DEFAULT_ASSISTANT_REPLY)),
+    )
+    .await
+    .expect("应用装配对照环境应可构建");
+    let left = cross_snapshot_app(&app_env)
+        .await
+        .expect("应用装配召回场景应执行成功");
+    assert!(
+        app_env.embedding().call_count() > 0,
+        "应用装配重建索引应触发向量化（向量通道参与检索）"
+    );
+    app_env.cleanup().await;
+
+    let service_llm = Arc::new(ScriptedLlm::reply(DEFAULT_ASSISTANT_REPLY));
+    let service_env = ParityEnv::with_llm(
+        "recall-cross-service",
+        Arc::clone(&service_llm) as Arc<dyn LlmProvider>,
+    )
+    .await
+    .expect("服务装配对照环境应可构建");
+    let right = cross_snapshot_service(&service_env, &service_llm)
+        .await
+        .expect("服务装配召回场景应执行成功");
+    service_env.cleanup().await;
+
+    // 关键行为锚点：召回命中注入，且上下文包含命中的摘要文本（否则对照无观测面）
+    assert_eq!(
+        left.value()["memory_context_present"].as_bool(),
+        Some(true),
+        "召回应命中并注入记忆上下文"
+    );
+    let context = left.value()["memory_context"].as_str().unwrap_or_default();
+    assert!(
+        context.contains(QUERY),
+        "记忆上下文应包含命中摘要的查询词: {context}"
+    );
+
+    assert_parity(CROSS_SCENARIO, &left, &right);
 }

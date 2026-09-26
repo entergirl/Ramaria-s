@@ -8,12 +8,18 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+# QQ 聊天记录导入用例（解析 / L0 写入 / L1 批量生成与 ETA / 深度处理触发）
+importer = ["dep:ramaria-importer"]
+
 [dependencies]
 ramaria-core = { path = "../ramaria-core" }
 ramaria-storage = { path = "../ramaria-storage" }
 ramaria-memory = { path = "../ramaria-memory" }
 # embedding-native：向量通道（原生 safetensors 推理）；与 CLI/桌面同一 feature 口径
 ramaria-llm = { path = "../ramaria-llm", features = ["embedding-native"] }
+ramaria-importer = { path = "../ramaria-importer", optional = true }
 tokio.workspace = true
 tracing.workspace = true
 serde.workspace = true
@@ -28,3 +34,11 @@ sha2.workspace = true
 async-trait.workspace = true
 # 流式事件流类型（增量生成契约的宿主消费侧）
 futures.workspace = true
+# 版本检查（GitHub Release API，连接 / 总超时保护）
+reqwest.workspace = true
+# 诊断导出打包（同目录临时文件 + 原子替换）
+zip = "2"
+
+[dev-dependencies]
+# 平行对照接缝：对照测试用应用装配（仅 dev 依赖，不进生产依赖图）
+ramaria-app = { path = "../ramaria-app" }

@@ -86,7 +86,7 @@ ramaria-memory / ramaria-llm / ramaria-importer
 | 桌面命令与页面 | `ramaria-desktop/src/commands/*.rs` + `frontend/js/`（调用封装 `api.js`） |
 | CLI 子命令与输出 | `ramaria-cli/src/main.rs`（clap 定义）+ `src/commands/`；`--json` 信封 `src/json.rs` |
 | MCP 工具（schema / 错误映射） | `ramaria-mcp/src/tools/` + `src/server.rs`（只做协议包装，不含业务逻辑） |
-| 导入（QQ 记录） | `ramaria-importer/src/qq/` |
+| 导入（QQ 记录） | 解析与写入实现 `ramaria-importer/src/qq/`；服务层用例 `ramaria-service/src/import.rs`（`importer` feature） |
 | 模型下载 / 校验 / 嵌入 | `ramaria-llm/src/embedding/`；服务层编排 `ramaria-service/src/model.rs`（收敛后） |
 | 版本检查 / 诊断导出 | `ramaria-service/src/{update,diagnostics}.rs`（收敛后） |
 | 契约面变更前 | 先读 `../docs/dev-2.2/test/contract-baseline.md`（零变更口径） |
@@ -98,11 +98,13 @@ ramaria-memory / ramaria-llm / ramaria-importer
 ## 5. 验证与提交前自查
 
 1. `cargo check`（编译）
-2. `cargo test -j 2 -p <改动 crate>`（分 crate；CLI 必带 `-j 2`）
+2. `cargo test -j 2 -p <改动 crate>`（分 crate；CLI 必带 `-j 2`；改到 `ramaria-service` 的导入用例时加 `--features importer`）
 3. `cargo clippy -j 2 --workspace -- -D warnings`（静态检查）
 4. `cargo fmt --all --check`（格式）
 5. 涉及前端：`cd crates/ramaria-desktop/frontend; node --test "tests/*.test.js"`
 6. 涉及契约面：与 `../docs/dev-2.2/test/contract-baseline.md` 逐项对照
 7. 结构收敛期附加：纯结构重构不夹带行为变更；发现问题登记候选池，不顺手修
+
+> 本机已知环境问题：`cargo test` 在 `-j 2` 下编译大 crate（`ramaria-cli` / `ramaria-desktop`）时偶发 `os error 1455（页面文件太小）` 与链接器 `STATUS_STACK_BUFFER_OVERRUN`，表现为 `E0463 / E0462 / E0786` 等"找不到 crate / 元数据无效"的级联假错误；处置为重试或改用 `-j 1`，与代码无关。
 
 全量 `cargo test --workspace` 与 git 提交由项目负责人执行。

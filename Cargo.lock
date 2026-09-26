@@ -4516,10 +4516,13 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "ramaria-app",
  "ramaria-core",
+ "ramaria-importer",
  "ramaria-llm",
  "ramaria-memory",
  "ramaria-storage",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "sha2",
@@ -4528,6 +4531,7 @@ dependencies = [
  "toml 0.8.2",
  "tracing",
  "uuid",
+ "zip 2.4.2",
 ]
 
 [[package]]

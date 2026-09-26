@@ -11,14 +11,17 @@
 //! - 校验可解释：目录缺失 / 加载失败 / 推理失败三类原因都以文本回传，
 //!   设置页直接展示，不靠日志排查
 //! - 缓存复用：热更新 provider 时沿用引擎持有的精确缓存实例，切换后端后既有缓存不失效
+//! - 模型文件管理：根目录解析 / 列表 / 就绪与体积查询 / 删除 / 下载均委派
+//!   `ramaria-llm` 模型管理器，本层只做编排与错误分类
 //! - 安全约束：API key 只经 OS keychain 读写（本地 provider 跳过），日志不记密钥内容
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::traits::EmbeddingProvider;
 use ramaria_core::types::{AppState, BackendConfig, LlmProvider};
+use ramaria_llm::model_manager::{ModelManager, ProgressCallback};
 
 use crate::engine::{Engine, build_llm_provider};
 use crate::types::{DegradedReason, EmbeddingModelView, EmbeddingValidation};
@@ -314,6 +317,97 @@ pub(crate) async fn degraded_reason(engine: &Engine) -> RamariaResult<Option<Deg
 }
 
 // =========================================================
+// 模型文件管理编排（列表 / 就绪 / 体积 / 删除 / 下载）
+// =========================================================
+
+/// 解析嵌入模型根目录（`None` = 平台默认目录）。
+///
+/// 参数:
+/// - `override_path`: 宿主指定的模型根目录（设置页自定义路径）；`None` 时取默认。
+///
+/// 返回:
+/// - 模型根目录路径（不保证已存在，由模型管理器按需创建）。
+pub fn models_root(override_path: Option<&Path>) -> PathBuf {
+    match override_path {
+        Some(path) => path.to_path_buf(),
+        None => ramaria_llm::model_manager::default_models_root(),
+    }
+}
+
+/// 列出已安装的模型（三个必需文件齐全的模型目录名）。
+pub fn list_models(root: Option<&Path>) -> RamariaResult<Vec<String>> {
+    let manager = ModelManager::new(models_root(root))?;
+    manager.list_installed_models()
+}
+
+/// 判定模型是否已就绪（config.json / model.safetensors / tokenizer.json 齐全）。
+///
+/// 说明:
+/// - 管理器初始化失败（目录 / HTTP 客户端构造）按"未就绪"处理，不抛错。
+pub fn is_model_ready(model_id: &str, root: Option<&Path>) -> bool {
+    match ModelManager::new(models_root(root)) {
+        Ok(manager) => manager.is_model_ready(model_id),
+        Err(e) => {
+            tracing::warn!(error = %e, "模型管理器初始化失败，判定为未就绪");
+            false
+        }
+    }
+}
+
+/// 获取模型目录占用的磁盘空间（字节；管理器初始化失败返回 0）。
+pub fn model_size(model_id: &str, root: Option<&Path>) -> u64 {
+    match ModelManager::new(models_root(root)) {
+        Ok(manager) => manager.model_size(model_id),
+        Err(e) => {
+            tracing::warn!(error = %e, "模型管理器初始化失败，体积按 0 返回");
+            0
+        }
+    }
+}
+
+/// 模型删除结果。
+///
+/// 字段约定:
+/// - `removed`: 本次是否实际删除（`false` = 目标模型本就不存在）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoveModelOutcome {
+    /// 是否实际删除（false = 本就不存在）
+    pub removed: bool,
+}
+
+/// 删除指定模型的所有文件（幂等）。
+///
+/// 返回:
+/// - `removed = true`: 目标目录存在且已删除；
+/// - `removed = false`: 目标目录不存在（幂等成功，不报错）。
+pub fn remove_model(model_id: &str, root: Option<&Path>) -> RamariaResult<RemoveModelOutcome> {
+    let manager = ModelManager::new(models_root(root))?;
+    let dir = manager.model_dir(model_id);
+    if !dir.exists() {
+        tracing::info!(model_id, "模型目录不存在，删除按幂等成功处理");
+        return Ok(RemoveModelOutcome { removed: false });
+    }
+    manager.remove_model(model_id)?;
+    Ok(RemoveModelOutcome { removed: true })
+}
+
+/// 下载嵌入模型（断点续传 + SHA-256 校验 + 原子替换，由模型管理器实现）。
+///
+/// 参数:
+/// - `model_id`: 模型标识（须在预置清单内，否则发起网络请求前即失败）。
+/// - `root`: 模型根目录覆盖（`None` 用平台默认）。
+/// - `progress`: 可选下载进度回调。
+pub async fn download_model(
+    model_id: &str,
+    root: Option<&Path>,
+    progress: Option<ProgressCallback>,
+) -> RamariaResult<()> {
+    let manager = ModelManager::new(models_root(root))?;
+    tracing::info!(model_id, "开始下载嵌入模型");
+    manager.download_model(model_id, progress).await
+}
+
+// =========================================================
 // 单元测试
 // =========================================================
 
@@ -527,6 +621,90 @@ mod tests {
             "所有快照都应来自已装配的 provider"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 模型根目录解析：显式覆盖优先，否则取平台默认。
+    #[test]
+    fn models_root_prefers_override() {
+        let override_path = PathBuf::from("D:/custom/models");
+        assert_eq!(
+            models_root(Some(override_path.as_path())),
+            override_path,
+            "显式路径应原样返回"
+        );
+        assert_eq!(
+            models_root(None),
+            ramaria_llm::model_manager::default_models_root(),
+            "未提供覆盖时应取平台默认目录"
+        );
+    }
+
+    /// 列表用例：空根目录 → 空列表（管理器按需创建目录）。
+    #[test]
+    fn list_models_empty_root_returns_empty() {
+        let dir = temp_dir("model-list");
+        let models = list_models(Some(dir.as_path())).expect("列表用例应成功");
+        assert!(models.is_empty(), "空目录不应有已安装模型: {models:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 就绪与体积用例：三个必需文件齐全 → 就绪且体积 > 0。
+    #[test]
+    fn model_ready_and_size_follow_required_files() {
+        let dir = temp_dir("model-ready");
+        let model_id = "bge-small-zh-v1.5";
+        let model_dir = dir.join(model_id);
+        std::fs::create_dir_all(&model_dir).expect("创建模型目录应成功");
+        std::fs::write(model_dir.join("config.json"), b"{}").expect("写入 config 应成功");
+        std::fs::write(model_dir.join("model.safetensors"), vec![0u8; 512])
+            .expect("写入权重应成功");
+        std::fs::write(model_dir.join("tokenizer.json"), b"{}").expect("写入 tokenizer 应成功");
+
+        assert!(is_model_ready(model_id, Some(dir.as_path())));
+        assert!(model_size(model_id, Some(dir.as_path())) > 0);
+        // 未创建的模型目录 → 未就绪
+        assert!(!is_model_ready("nonexistent-model", Some(dir.as_path())));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 删除用例：不存在 → 幂等成功（`removed = false`）；存在 → 删除并报 `removed = true`；二次删除幂等。
+    #[test]
+    fn remove_model_is_idempotent_and_reports_removed() {
+        let dir = temp_dir("model-remove");
+
+        let missing = remove_model("nonexistent-model", Some(dir.as_path()))
+            .expect("删除不存在的模型应幂等成功");
+        assert!(!missing.removed, "不存在的模型应报告未删除");
+
+        let model_id = "bge-small-zh-v1.5";
+        let model_dir = dir.join(model_id);
+        std::fs::create_dir_all(&model_dir).expect("创建模型目录应成功");
+        std::fs::write(model_dir.join("config.json"), b"{}").expect("写入模型文件应成功");
+
+        let removed = remove_model(model_id, Some(dir.as_path())).expect("删除存在的模型应成功");
+        assert!(removed.removed, "存在的模型应报告已删除");
+        assert!(!model_dir.exists(), "模型目录应已被删除");
+
+        let again = remove_model(model_id, Some(dir.as_path())).expect("二次删除应幂等成功");
+        assert!(!again.removed, "二次删除应报告未删除");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 下载用例：未知 model_id → 预置校验失败（发起网络请求前返回配置错误）。
+    #[tokio::test]
+    async fn download_model_unknown_id_fails_before_network() {
+        let dir = temp_dir("model-download");
+        let err = download_model("nonexistent-model", Some(dir.as_path()), None)
+            .await
+            .expect_err("未知模型应报错");
+        assert_eq!(err.category(), "config");
+        assert!(
+            err.context().contains("不支持的模型"),
+            "错误应说明模型不在预置清单: {err}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -11,13 +11,18 @@
 
 use std::sync::Arc;
 
+use futures::StreamExt;
 use ramaria_core::traits::{LlmProvider, StoreCrud, StoreInfrastructure};
+use ramaria_core::types::CHANNEL_LOCAL;
+use ramaria_service::types::ChatSendRequest;
+use ramaria_storage::SqliteStorage;
 use serde_json::json;
 use uuid::Uuid;
 
+use crate::support::env::DEFAULT_ASSISTANT_REPLY;
 use crate::support::{
-    GoldenStore, ParityEnv, ParityError, ParityResult, ScriptedLlm, Snapshot, assert_stable,
-    fixtures,
+    AppEnv, GoldenStore, ParityEnv, ParityError, ParityResult, ScriptedLlm, Snapshot,
+    assert_parity, assert_stable, fixtures,
 };
 
 /// 场景名（同时作为 golden 基线文件名）。
@@ -36,6 +41,12 @@ const L1_JSON_REPLY: &str = r#"{
   "salience": 0.8,
   "situation_strength": 4
 }"#;
+
+/// 逐字对照场景名（快照标签，不写基线）。
+const CROSS_SCENARIO: &str = "seal/app-vs-service";
+
+/// 逐字对照的用户消息（合成数据；发一轮消息以建立并激活会话）。
+const CROSS_MESSAGE: &str = "今天有点累，随便聊聊吧";
 
 // =========================================================
 // 场景执行
@@ -227,4 +238,193 @@ async fn seal_second_call_does_not_regenerate_l1() {
     assert_eq!(l1_count, 1, "库中应只有一条 L1（抢占幂等）");
 
     env.cleanup().await;
+}
+
+// =========================================================
+// 逐字对照（应用装配 vs 服务装配）
+// =========================================================
+
+/// 应用装配：发一条消息建立并激活会话 → 手动保存并关闭会话；返回会话 id。
+///
+/// 说明:
+/// - 会话由生成入口自动创建并设置活跃指针；手动保存关闭经活跃指针对目标会话生效，
+///   这是该入口下获得"活跃会话"的既有方式。
+async fn app_send_and_close(env: &AppEnv) -> ParityResult<Uuid> {
+    fixtures::seed_persona(env.storage(), PERSONA).await?;
+    // 生成入口有状态门禁：先完成就绪装配再发送
+    env.setup_ready().await?;
+
+    let mut stream = env
+        .app()
+        .send_message(CROSS_MESSAGE, Some(PERSONA), None)
+        .await
+        .map_err(|e| ParityError::env("应用装配发送对照消息", e))?;
+
+    let mut session_id = None;
+    while let Some(item) = stream.next().await {
+        let event = item.map_err(|e| ParityError::env("应用装配消费对照事件流", e))?;
+        if let ramaria_app::StreamEvent::Done { session_id: id, .. } = event {
+            session_id = id;
+        }
+    }
+    let session_id = session_id
+        .ok_or_else(|| ParityError::env("应用装配消费对照事件流", "事件流应携带会话标识"))?;
+
+    env.app()
+        .save_and_close_session(Some(PERSONA))
+        .await
+        .map_err(|e| ParityError::env("应用装配保存并关闭对照会话", e))?;
+    Ok(session_id)
+}
+
+/// 服务装配：发一条消息建立会话 → 注册完整封存钩子链 → 封存；返回会话 id。
+async fn service_send_and_seal(env: &ParityEnv) -> ParityResult<Uuid> {
+    fixtures::seed_persona(env.storage(), PERSONA).await?;
+
+    let outcome = env
+        .engine()
+        .chat_send(ChatSendRequest {
+            message: CROSS_MESSAGE.to_string(),
+            persona: Some(PERSONA.to_string()),
+            session_id: None,
+            conversation_id: None,
+            channel: CHANNEL_LOCAL.to_string(),
+        })
+        .await
+        .map_err(|e| ParityError::env("服务装配发送对照消息", e))?;
+
+    env.engine()
+        .set_seal_hooks(ramaria_service::full_seal_hooks(env.engine().as_ref()));
+    env.engine()
+        .seal(outcome.session_id)
+        .await
+        .map_err(|e| ParityError::env("服务装配封存对照会话", e))?;
+    Ok(outcome.session_id)
+}
+
+/// 读取封存产物的可观测状态（两侧同形；只取数据库可观测项）。
+async fn read_seal_state(
+    storage: &SqliteStorage,
+    session_id: Uuid,
+) -> ParityResult<serde_json::Value> {
+    let l1_list = storage
+        .list_memory_l1(session_id)
+        .await
+        .map_err(|e| ParityError::env("读取封存后的 L1", e))?;
+    let session = storage
+        .get_session(session_id)
+        .await
+        .map_err(|e| ParityError::env("读取封存后的会话", e))?
+        .ok_or_else(|| ParityError::env("读取封存后的会话", "会话应存在"))?;
+    let message_count = storage
+        .list_messages(session_id)
+        .await
+        .map_err(|e| ParityError::env("读取会话消息", e))?
+        .len();
+    let pending_jobs = storage
+        .list_pending_jobs()
+        .await
+        .map_err(|e| ParityError::env("读取待定后台任务", e))?;
+    let utt_count = storage
+        .list_utt_blocks_by_persona(PERSONA)
+        .await
+        .map_err(|e| ParityError::env("读取 utt 话语块", e))?
+        .len();
+    let example_count = storage
+        .list_all_examples(PERSONA)
+        .await
+        .map_err(|e| ParityError::env("读取对话示例", e))?
+        .len();
+
+    let l1_snapshot: Vec<serde_json::Value> = l1_list
+        .iter()
+        .map(|l1| {
+            json!({
+                "summary": l1.summary.clone(),
+                "keywords": l1.keywords.clone(),
+                "time_period": l1.time_period.clone(),
+                "atmosphere": l1.atmosphere.clone(),
+                "valence": l1.valence,
+                "salience": l1.salience,
+                "situation_strength": l1.situation_strength,
+                "persona_uid": l1.persona_uid.clone(),
+            })
+        })
+        .collect();
+
+    Ok(json!({
+        "session": {
+            "ended": session.ended_at.is_some(),
+            "message_count": message_count,
+        },
+        "l1": l1_snapshot,
+        "utt_block_count": utt_count,
+        "example_count": example_count,
+        "pending_job_types": pending_jobs
+            .iter()
+            .map(|(_, job_type, _)| job_type.clone())
+            .collect::<Vec<_>>(),
+    }))
+}
+
+/// 逐字对照：封存产物的可观测状态在两侧等价。
+///
+/// 口径说明:
+/// - 两侧为同一 fixture（同一人格、同一轮消息）与同一脚本回复序列（助手回复 → L1 摘要 JSON）；
+/// - 左侧由生成入口建立并激活会话后手动保存关闭，右侧由生成入口建立会话后显式封存；
+/// - 快照只取数据库可观测产物（会话结束 / L1 字段 / utt / 示例 / 待定任务），不落 id 与时间戳。
+#[tokio::test]
+async fn seal_app_and_service_products_are_equivalent() {
+    let app_env = AppEnv::with_llm(
+        "seal-cross-app",
+        Arc::new(ScriptedLlm::replies(&[
+            DEFAULT_ASSISTANT_REPLY,
+            L1_JSON_REPLY,
+        ])),
+    )
+    .await
+    .expect("应用装配对照环境应可构建");
+    let app_session = app_send_and_close(&app_env)
+        .await
+        .expect("应用装配封存场景应执行成功");
+    let app_value = read_seal_state(app_env.storage(), app_session)
+        .await
+        .expect("应用装配封存产物应可读取");
+    app_env.cleanup().await;
+
+    let service_llm: Arc<dyn LlmProvider> = Arc::new(ScriptedLlm::replies(&[
+        DEFAULT_ASSISTANT_REPLY,
+        L1_JSON_REPLY,
+    ]));
+    let service_env = ParityEnv::with_llm("seal-cross-service", service_llm)
+        .await
+        .expect("服务装配对照环境应可构建");
+    let service_session = service_send_and_seal(&service_env)
+        .await
+        .expect("服务装配封存场景应执行成功");
+    let service_value = read_seal_state(service_env.storage(), service_session)
+        .await
+        .expect("服务装配封存产物应可读取");
+    service_env.cleanup().await;
+
+    // 关键行为锚点：会话已关闭、消息完整落库、短会话生成单条 L1（对照面成立）
+    let left = Snapshot::new(CROSS_SCENARIO, app_value);
+    assert_eq!(
+        left.value()["session"]["ended"].as_bool(),
+        Some(true),
+        "封存后会话应已关闭"
+    );
+    assert_eq!(
+        left.value()["session"]["message_count"].as_u64(),
+        Some(2),
+        "一轮消息应落库用户消息与助手回复两条"
+    );
+    assert_eq!(
+        left.value()["l1"].as_array().map(Vec::len),
+        Some(1),
+        "短会话应生成单条 L1"
+    );
+
+    let right = Snapshot::new(CROSS_SCENARIO, service_value);
+    assert_parity(CROSS_SCENARIO, &left, &right);
 }

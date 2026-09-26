@@ -26,13 +26,21 @@
 //! - `hooks`：封存钩子默认装配（轻量链 / 完整链两套，供入口按响应语义注册）；
 //! - `stream_event`：流式事件领域模型（Delta / Done / Error）与事件流句柄；
 //! - `privacy` / `bridge` / `feedback`：隐私确认、新会话桥接、弱反馈检测（生成编排的伴随能力）；
+//! - `eta`：导入进度分层 EMA 预估（纯计算，无 I/O）；`update`：GitHub Release 版本检查；
+//! - `error_hint`：错误到用户提示映射（标题 / 明细 / 可重试标记）；
+//! - `diagnostics`：诊断信息导出用例（日志 / 配置脱敏 + 原子替换）；
+//! - `import`：QQ 聊天记录导入用例（解析 / L0 写入 / L1 批量生成与 ETA / 深度触发，
+//!   `importer` feature 下编译）；
 //! - 入口层（如 `ramaria-mcp`）只做协议包装，不承载业务逻辑。
 
 pub mod bridge;
 pub mod browse;
 pub mod chat;
 pub mod config;
+pub mod diagnostics;
 pub mod engine;
+pub mod error_hint;
+pub mod eta;
 pub mod fact_extract;
 pub mod feedback;
 pub mod hooks;
@@ -51,16 +59,32 @@ pub mod session;
 pub mod setup;
 pub mod stream_event;
 pub mod types;
+pub mod update;
+
+#[cfg(feature = "importer")]
+pub mod import;
 
 #[cfg(test)]
 pub(crate) mod test_support;
 
 pub use config::{ConfigWriter, MismatchEntry, SyncOutcome, SyncWriteResult};
+pub use diagnostics::{DiagnosticsReport, DiagnosticsRequest};
 pub use engine::{Engine, EngineOptions};
+pub use error_hint::{ErrorHint, error_detail, error_title, is_retryable};
+pub use eta::{EtaEstimator, PhaseEma, PhaseKind, linear_remaining};
 pub use hooks::{default_seal_hooks, full_seal_hooks};
 pub use idle::{IdleLoop, IdleLoopOptions, MIN_IDLE_CHECK_INTERVAL_SECONDS};
+#[cfg(feature = "importer")]
+pub use import::{
+    AnalysisReport, AnalyzeRequest, ImportDoneSummary, ImportL0Outcome, ImportL1Outcome,
+    ImportL1Plan, ImportL1Progress, ImportMode, ImportProgressSink, ImportRequest,
+};
 pub use lifecycle::{Lifecycle, LifecycleOptions};
-pub use model::validate_embedding_model;
+pub use model::{
+    RemoveModelOutcome, download_model, is_model_ready, list_models, model_size, models_root,
+    remove_model, validate_embedding_model,
+};
+pub use persona::PersonaRegenerateOutcome;
 pub use recall::RecallPolicy;
 pub use seal::{SealHook, SealHooks};
 pub use stream_event::{ChatEventStream, ChatStreamHandle, StreamEvent};
@@ -80,3 +104,4 @@ pub use types::{
     SetupRequest, SetupStatus, StyleView, TraitDetailView, TraitEvidenceRequest, TraitEvidenceView,
     TraitView,
 };
+pub use update::{UpdateStatus, check_update};

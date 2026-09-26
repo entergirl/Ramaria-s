@@ -19,12 +19,15 @@ use ramaria_storage::SqliteStorage;
 use serde_json::json;
 
 use crate::support::{
-    GoldenStore, ParityEnv, ParityError, ParityResult, ScriptedLlm, Snapshot, assert_stable,
-    fixtures,
+    AppEnv, GoldenStore, ParityEnv, ParityError, ParityResult, ScriptedLlm, Snapshot,
+    assert_parity, assert_stable, fixtures,
 };
 
 /// 场景名（同时作为 golden 基线文件名）。
 const SCENARIO: &str = "index_lazy_load_and_refresh";
+
+/// 逐字对照场景名（快照标签，不写基线）。
+const CROSS_SCENARIO: &str = "index/app-vs-service";
 
 /// 封存脚本回复：摘要含"攀岩"（供增量可检索断言）。
 const CLIMBING_L1_REPLY: &str = r#"{
@@ -342,4 +345,132 @@ async fn index_snapshot_is_stable_across_env_groups() {
         .await
         .expect("重复索引场景应执行成功");
     assert_stable("index/lazy-load-and-refresh", &first, &replay);
+}
+
+// =========================================================
+// 逐字对照（应用装配 vs 服务装配）
+// =========================================================
+
+/// 造逐字对照 fixture：persona 与 2 条关键词不同的 L1。
+async fn seed_cross_fixture(storage: &SqliteStorage) -> ParityResult<()> {
+    fixtures::seed_persona(storage, DEFAULT_PERSONA_UID).await?;
+    fixtures::seed_l1(
+        storage,
+        DEFAULT_PERSONA_UID,
+        "用户最近在学游泳，每周去两次",
+        Some("游泳"),
+        fixtures::fixture_ts(0),
+    )
+    .await?;
+    fixtures::seed_l1(
+        storage,
+        DEFAULT_PERSONA_UID,
+        "用户最近开始夜跑，每周三次",
+        Some("夜跑"),
+        fixtures::fixture_ts(1_000),
+    )
+    .await?;
+    Ok(())
+}
+
+/// 读取重建结果快照（两侧同形）。
+async fn rebuild_value(
+    storage: &SqliteStorage,
+    doc_total: usize,
+    rebuild_failed: bool,
+) -> ParityResult<serde_json::Value> {
+    let index_version = storage
+        .get_index_version()
+        .await
+        .map_err(|e| ParityError::env("读取索引版本", e))?;
+    let bm25_index_version = storage
+        .get_bm25_index_version()
+        .await
+        .map_err(|e| ParityError::env("读取 BM25 分词版本", e))?;
+    Ok(json!({
+        "doc_total": doc_total,
+        "index_version": index_version,
+        "bm25_index_version": bm25_index_version,
+        "rebuild_failed": rebuild_failed,
+    }))
+}
+
+/// 应用装配：全量重建内存检索索引。
+async fn cross_snapshot_app(env: &AppEnv) -> ParityResult<Snapshot> {
+    seed_cross_fixture(env.storage()).await?;
+    // 两侧重建前显式对齐索引版本（同一"已构建"起始状态）
+    env.storage()
+        .set_index_version(1)
+        .await
+        .map_err(|e| ParityError::env("对齐索引版本", e))?;
+    let total = env
+        .app()
+        .rebuild_retriever()
+        .await
+        .map_err(|e| ParityError::env("应用装配重建索引", e))?;
+    let failed = env.app().is_retriever_rebuild_failed();
+    let value = rebuild_value(env.storage(), total, failed).await?;
+    Ok(Snapshot::new(CROSS_SCENARIO, value))
+}
+
+/// 服务装配：全量重建内存检索索引。
+async fn cross_snapshot_service(env: &ParityEnv) -> ParityResult<Snapshot> {
+    seed_cross_fixture(env.storage()).await?;
+    // 两侧重建前显式对齐索引版本（同一"已构建"起始状态）
+    env.storage()
+        .set_index_version(1)
+        .await
+        .map_err(|e| ParityError::env("对齐索引版本", e))?;
+    let total = env
+        .engine()
+        .rebuild_index()
+        .await
+        .map_err(|e| ParityError::env("服务装配重建索引", e))?;
+    let failed = env.engine().is_index_rebuild_failed();
+    let value = rebuild_value(env.storage(), total, failed).await?;
+    Ok(Snapshot::new(CROSS_SCENARIO, value))
+}
+
+/// 逐字对照：索引重建的文档数与版本状态在两侧等价。
+///
+/// 口径说明:
+/// - 两侧为同一 fixture（同一人格 + 2 条关键词不同的 L1），各以全量重建路径构建索引；
+/// - 快照取重建返回值与存储可读的版本 / 告警位（不比较索引内部结构与向量）；
+/// - 索引版本在两侧重建前显式对齐为同一已构建状态，对照只看重建后的读取值。
+#[tokio::test]
+async fn index_rebuild_outputs_are_equivalent_between_app_and_service() {
+    let app_env = AppEnv::new("index-cross-app")
+        .await
+        .expect("应用装配对照环境应可构建");
+    let left = cross_snapshot_app(&app_env)
+        .await
+        .expect("应用装配重建场景应执行成功");
+    app_env.cleanup().await;
+
+    let service_env = ParityEnv::new("index-cross-service")
+        .await
+        .expect("服务装配对照环境应可构建");
+    let right = cross_snapshot_service(&service_env)
+        .await
+        .expect("服务装配重建场景应执行成功");
+    service_env.cleanup().await;
+
+    // 关键行为锚点：2 条 L1 全部进入索引、重建成功且版本处于已构建态（对照面成立）
+    assert_eq!(
+        left.value()["doc_total"].as_u64(),
+        Some(2),
+        "2 条 L1 应全部进入索引"
+    );
+    assert_eq!(
+        left.value()["rebuild_failed"].as_bool(),
+        Some(false),
+        "重建应成功"
+    );
+    assert_eq!(
+        left.value()["index_version"].as_i64(),
+        Some(1),
+        "重建后索引版本应处于已构建态"
+    );
+
+    assert_parity(CROSS_SCENARIO, &left, &right);
 }

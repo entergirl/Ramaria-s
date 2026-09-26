@@ -171,7 +171,11 @@ impl Drop for ParityEnv {
 // =========================================================
 
 /// 生成唯一临时目录路径（不创建；由连接池初始化创建父目录）。
-fn unique_temp_dir(tag: &str) -> PathBuf {
+///
+/// 说明:
+/// - 目录名含时间戳与进程内自增序号，多个对照环境（含应用装配侧）共用同一序号源，
+///   并行建立时互不冲突。
+pub(super) fn unique_temp_dir(tag: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_nanos())
