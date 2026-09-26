@@ -697,17 +697,18 @@ mod tests {
             "The quick brown fox jumps over the lazy dog. This is a longer sentence for testing.";
         let tokens = estimate_tokens(text);
         // 87 chars mostly latin → ~87/4 ≈ 22 tokens
-        assert!(tokens >= 15 && tokens <= 30, "got {tokens}");
+        assert!((15..=30).contains(&tokens), "got {tokens}");
     }
 
     // ---- 注入协调预算（allocate_injection_budget） ----
 
     /// 构造启用/停用 + 指定总池上限的协调配置。
     fn cfg(enabled: bool, max_tokens: usize) -> InjectionBudgetConfig {
-        let mut c = InjectionBudgetConfig::default();
-        c.enabled = enabled;
-        c.max_injection_tokens = max_tokens;
-        c
+        InjectionBudgetConfig {
+            enabled,
+            max_injection_tokens: max_tokens,
+            ..Default::default()
+        }
     }
 
     /// 固定 3 token 的中文测试段（6 汉字 ≈ 3 token）。

@@ -9,5 +9,11 @@
     "first_built": true,
     "loaded": true,
     "second_built": false
+  },
+  "rebuild": {
+    "failed": false,
+    "hit": true,
+    "index_version": 1,
+    "total": 2
   }
 }

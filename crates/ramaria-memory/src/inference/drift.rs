@@ -496,7 +496,7 @@ mod tests {
             match expected {
                 Some(exp) => assert!((w - exp).abs() < 1e-10, "a={a:?} b={b:?} 期望 {exp}"),
                 None => {
-                    assert!(w >= 0.0 && w <= 1.0, "a={a:?} b={b:?} 应在 [0,1]");
+                    assert!((0.0..=1.0).contains(&w), "a={a:?} b={b:?} 应在 [0,1]");
                 }
             }
         }

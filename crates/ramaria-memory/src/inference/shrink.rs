@@ -1116,7 +1116,7 @@ mod tests {
     #[test]
     fn merge_cross_user_prior_single() {
         let prior = make_prior(0.5, 0.6, 12.0);
-        let merged = merge_cross_user_prior(&[prior.clone()]);
+        let merged = merge_cross_user_prior(std::slice::from_ref(&prior));
         assert!((merged.valence_mean - 0.5).abs() < 1e-9);
         assert!((merged.share_mean - 0.6).abs() < 1e-9);
         assert!((merged.n_total_eff - 12.0).abs() < 1e-9);

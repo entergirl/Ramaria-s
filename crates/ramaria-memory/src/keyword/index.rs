@@ -793,12 +793,7 @@ mod tests {
             0.5,
             NOW_MS - 60 * 86_400_000,
         );
-        index.index_parsed(
-            l1_ref(new_id, "p1"),
-            Some("爬山"),
-            0.5,
-            NOW_MS - 1 * 86_400_000,
-        );
+        index.index_parsed(l1_ref(new_id, "p1"), Some("爬山"), 0.5, NOW_MS - 86_400_000);
         let results =
             index.query_with_time(&q(&["爬山"], Some("p1"), MatchStrategy::Exact, 10), NOW_MS);
         assert_eq!(results.len(), 2);
@@ -1102,7 +1097,7 @@ mod tests {
         let newer = l1_ref(uuid::Uuid::new_v4(), "p1");
         let older = l1_ref(uuid::Uuid::new_v4(), "p1");
         index.index_parsed(older.clone(), Some("爬山"), 0.5, NOW_MS - 10 * 86_400_000);
-        index.index_parsed(newer.clone(), Some("爬山"), 0.5, NOW_MS - 1 * 86_400_000);
+        index.index_parsed(newer.clone(), Some("爬山"), 0.5, NOW_MS - 86_400_000);
         let results =
             index.query_with_time(&q(&["爬山"], Some("p1"), MatchStrategy::Exact, 5), NOW_MS);
         assert_eq!(results[0].0, newer);

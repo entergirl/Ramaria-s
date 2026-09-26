@@ -370,7 +370,13 @@ impl L1RetryObserver for ServiceL1RetryObserver<'_> {
 
     async fn on_cascade(&self, persona_uid: Option<&str>) {
         let hooks = self.engine.seal_hooks();
-        crate::seal::run_hook(&hooks.l2_trigger, persona_uid, "L2 触发检查（L1 补扫）").await;
+        crate::seal::run_hook(
+            self.engine,
+            &hooks.l2_trigger,
+            persona_uid,
+            "L2 触发检查（L1 补扫）",
+        )
+        .await;
     }
 }
 

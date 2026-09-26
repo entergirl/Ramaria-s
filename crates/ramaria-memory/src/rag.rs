@@ -191,13 +191,15 @@ mod tests {
     /// 显式修改 core 的 `rag_*` 字段 → 组装后的 RagConfig 真实生效（独立于其它路）。
     #[test]
     fn from_retrieval_config_maps_rag_fields() {
-        let mut core = RetrievalConfig::default();
-        core.rag_max_memories = 2;
-        core.rag_max_summary_chars = 40;
-        core.rag_share_threshold_user = 0.9;
-        core.rag_share_threshold_char = 0.8;
-        core.rag_share_threshold_rama = 0.1;
-        core.rag_include_graph_entities = false;
+        let core = RetrievalConfig {
+            rag_max_memories: 2,
+            rag_max_summary_chars: 40,
+            rag_share_threshold_user: 0.9,
+            rag_share_threshold_char: 0.8,
+            rag_share_threshold_rama: 0.1,
+            rag_include_graph_entities: false,
+            ..Default::default()
+        };
 
         let mapped = RagConfig::from_retrieval_config(&core);
         assert_eq!(mapped.max_memories, 2);

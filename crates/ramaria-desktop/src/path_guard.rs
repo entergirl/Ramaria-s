@@ -545,8 +545,7 @@ mod tests {
 
         // temp 目录通常不在白名单内，预期失败但错误消息应清晰
         // 如果 temp 目录恰好是用户主目录下的子目录（极少），可能成功
-        if result.is_err() {
-            let err = result.unwrap_err();
+        if let Err(err) = result {
             assert!(
                 err.contains("授权") || err.contains("拒绝"),
                 "错误消息应说明白名单限制: {}",

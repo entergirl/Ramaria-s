@@ -999,8 +999,10 @@ fn ablation_profile_b0_b1_gates() {
 /// F0 全开（与 None 等同）；F1~F4 在全开基础上只关对应层。
 #[test]
 fn ablation_profile_f0_to_f4_gates() {
-    let mut cfg = ramaria_core::config::RamariaConfig::default();
-    cfg.injection = ramaria_core::config::InjectionGate::all_off();
+    let mut cfg = ramaria_core::config::RamariaConfig {
+        injection: ramaria_core::config::InjectionGate::all_off(),
+        ..Default::default()
+    };
     AblationProfile::F0.apply_to(&mut cfg);
     assert!(cfg.injection.behavior && cfg.injection.memory_rag && cfg.injection.utt);
     assert!(cfg.injection.narrative && cfg.injection.bridge);

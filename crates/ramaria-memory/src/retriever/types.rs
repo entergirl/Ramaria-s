@@ -242,13 +242,15 @@ mod tests {
     /// 显式配置 core 检索参数 → 映射函数真实传递本批已接线字段，且不影响其它组。
     #[test]
     fn from_retrieval_config_maps_wired_fields_only() {
-        let mut core = RetrievalConfig::default();
-        core.rrf_k = 90;
-        core.bm25_weight = 0.5;
-        core.graph_weight = 0.4;
-        core.keyword_weight = 0.7;
-        core.enable_vector = false;
-        core.enable_keyword_channel = false;
+        let core = RetrievalConfig {
+            rrf_k: 90,
+            bm25_weight: 0.5,
+            graph_weight: 0.4,
+            keyword_weight: 0.7,
+            enable_vector: false,
+            enable_keyword_channel: false,
+            ..Default::default()
+        };
 
         let mapped = RetrieverConfig::from_retrieval_config(&core);
         assert_eq!(mapped.rrf.k, 90.0);

@@ -46,6 +46,7 @@ fn make_event(
 }
 
 /// 构造测试用 MemoryEvent（含 situation_strength）。
+#[allow(clippy::too_many_arguments)]
 fn make_event_with_situation(
     title: &str,
     summary: &str,
@@ -1684,6 +1685,7 @@ fn cross_category_metrics_with_calibrated_weights() {
 // =========================================================
 
 /// 构造带 motives 字段的测试事件。
+#[allow(clippy::too_many_arguments)]
 fn make_event_with_motives(
     title: &str,
     summary: &str,

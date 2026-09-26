@@ -216,7 +216,7 @@ async fn user_message_has_persona_uid() {
     // 消费输出流确保后台任务完成
     let mut output = result.expect("should succeed");
     let mut stream = output.output_stream.take().unwrap();
-    while let Some(_) = stream.next().await {}
+    while stream.next().await.is_some() {}
 
     // 获取 session 并验证消息
     let session = output.session.as_ref().unwrap();
@@ -270,7 +270,7 @@ async fn persona_switch_creates_new_session_with_correct_persona() {
 
     // 消费流
     let mut stream1 = out1.output_stream.unwrap();
-    while let Some(_) = stream1.next().await {}
+    while stream1.next().await.is_some() {}
 
     // 第二轮：切换 persona "char-0002"，前端传新 session_id=None
     let pipeline2 = full_pipeline();
@@ -292,7 +292,7 @@ async fn persona_switch_creates_new_session_with_correct_persona() {
 
     // 消费流
     let mut stream2 = out2.output_stream.unwrap();
-    while let Some(_) = stream2.next().await {}
+    while stream2.next().await.is_some() {}
 
     // 验证两条消息各自归属正确的 persona
     let msgs1 = storage.list_messages(sid1).await.unwrap();

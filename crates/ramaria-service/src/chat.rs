@@ -125,7 +125,7 @@ pub(crate) async fn run(engine: &Engine, req: ChatSendRequest) -> RamariaResult<
 
     // ---- 5. 行为层情境路由（关闭 / 未命中 / 失败 → 不注入行为块） ----
     let behavior_decision =
-        route_behavior(engine, storage, config, &persona, session.id, &history).await;
+        route_behavior(engine, storage, &config, &persona, session.id, &history).await;
 
     // ---- 6. 知识层判定器检索（关闭 / 未命中 / 失败 → 空，不注入知识块） ----
     let knowledge_facts = if config.injection.knowledge && config.knowledge.auto_fact_detect {

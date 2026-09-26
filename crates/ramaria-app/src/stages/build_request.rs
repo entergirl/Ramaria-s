@@ -214,7 +214,9 @@ mod tests {
 
     #[tokio::test]
     async fn missing_field_returns_fatal() {
-        let cases: Vec<(&str, fn(&mut PipelineData))> = vec![
+        // 缺项用例：标签 + 就地篡改函数
+        type Case = (&'static str, fn(&mut PipelineData));
+        let cases: Vec<Case> = vec![
             ("system_prompt", |d| d.budgeted_system_prompt = None),
             ("backend_config", |d| d.backend_config = None),
         ];

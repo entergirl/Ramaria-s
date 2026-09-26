@@ -1,14 +1,17 @@
 //! crates/ramaria-service/src/engine.rs - 服务层引擎装配与用例挂载点
 //!
 //! 设计特点:
-//! - `Engine` 自持依赖装配：storage（连接池 + migration）→ 配置（只读）→ LLM → 嵌入（可选）→ 检索占位
+//! - `Engine` 自持依赖装配：storage（连接池 + migration）→ 配置（快照）→ LLM → 嵌入（可选）→ 检索占位
 //! - 与传输无关：不依赖 app / cli / desktop / tauri，不持有界面或协议概念
-//! - 配置纪律：config.toml 为配置权威源（桌面 / CLI 双写同步以文件为准），本层只读不写回
-//! - 热更新：LLM 与嵌入 provider 以 `RwLock` 持有快照，后端配置 / 嵌入模型变更时整体替换；
+//! - 配置纪律：config.toml 为配置权威源（双写以文件为准）；装配路径只读，
+//!   写入只经配置用例（双写 / 热重载，见 [`Engine::save_config`]）
+//! - 热更新：LLM / 嵌入 provider 与配置以 `RwLock` 持有快照，变更经用例整体替换；
 //!   读取路径取克隆后在锁外使用，异步代码不跨 `.await` 持锁
 //! - 降级链：嵌入模型缺失 → 向量通道不可用（BM25 + 关键词镜像继续工作），不阻塞装配
 //! - 懒加载：检索索引在首次召回时构建，本层仅持有占位槽（避免进程启动即加载大库）；
 //!   占位槽未加载期间产生的 L1 增量会置脏标记，保证下次加载重建不漏（见 `index_dirty`）
+//! - 显式重建：`rebuild_index` 强制全量重建（跳过早退与冷却窗口），构建失败保留旧索引
+//!   并置"重建失败"告警位（`is_index_rebuild_failed`，供诊断展示与宿主告警）
 //! - 重建节流：跨进程代次变化触发的重建受 `[index].refresh_interval_seconds` 约束
 //!   （0 = 不节流，见 `index_rebuild_cooldown_elapsed`）
 //! - 宿主后台任务：进程内空闲检查循环由入口层拉起（`spawn_idle_loop`），退出时优雅关停
@@ -32,6 +35,7 @@ use ramaria_memory::retriever::Retriever;
 use ramaria_storage::SqliteStorage;
 use uuid::Uuid;
 
+use crate::config::{ConfigWriter, SyncOutcome, SyncWriteResult};
 use crate::idle::{IdleLoop, IdleLoopOptions};
 use crate::index::IndexStamp;
 use crate::lifecycle::{Lifecycle, LifecycleOptions};
@@ -94,6 +98,7 @@ impl EngineOptions {
 /// - 检索器槽为 `RwLock<Option<..>>`：检索读多写少，懒加载在首次召回时写入。
 /// - LLM / 嵌入 provider 为 `RwLock` 快照：热更新整体替换，读取方取克隆后在锁外使用
 ///   （异步路径不持有锁跨 `.await`）。
+/// - 生效配置同为 `RwLock` 快照：配置用例（双写 / 热重载）整体替换，读取方取克隆后在锁外使用。
 pub struct Engine {
     /// 存储后端（业务 CRUD + 基础设施）。
     storage: Arc<dyn StorageBackend>,
@@ -108,8 +113,13 @@ pub struct Engine {
     llm_cache: RwLock<Option<Arc<dyn LlmResponseCache>>>,
     /// 应用状态机（首次配置 → 索引构建 → 就绪 / 降级）。
     state: Mutex<AppState>,
-    /// 生效配置（config.toml 为权威源；本层只读不写回）。
-    config: RamariaConfig,
+    /// 生效配置快照（config.toml 为权威源；经配置用例（双写 / 热重载）整体替换 Arc）。
+    ///
+    /// 快照语义与 LLM / 嵌入 provider 一致：读取方在锁内克隆内层 Arc 后释放锁，
+    /// 异步路径不持有锁跨 `.await`；写入方整体替换内层 Arc。
+    config: RwLock<Arc<RamariaConfig>>,
+    /// 实际使用的配置文件路径（`from_parts` 构造时为空路径）。
+    config_path: PathBuf,
     /// 数据库文件路径（诊断与客户端配置片段展示用）。
     db_path: PathBuf,
     /// 内存检索器槽（懒加载：首次召回时由 `ensure_index_loaded` 构建并整体替换）。
@@ -125,6 +135,12 @@ pub struct Engine {
     /// 用途：`[index].refresh_interval_seconds` 生效时限制两次重建的最小间隔
     /// （写入密集期抑制整库重建风暴，代价是刷新延迟不超过该间隔）。
     last_index_build_ms: Arc<AtomicI64>,
+    /// 检索索引"重建失败"告警位：最近一次构建尝试失败且旧索引未刷新。
+    ///
+    /// 语义:
+    /// - `true` = 最近一次构建失败，共享检索器保留的是旧索引（仍可检索，但未刷新）；
+    /// - 构建成功后复位；供诊断展示与宿主告警（记忆注入可能不完整）。
+    index_rebuild_failed: Arc<AtomicBool>,
     /// 行为层待定池（跨会话内存态：行为增量编排的归簇状态，与 app 侧同一机制）。
     behavior_pending: Arc<Mutex<PendingPool>>,
     /// 召回隐私与边界策略（默认保守；入口层按 `[mcp]` 配置注入）。
@@ -256,7 +272,8 @@ impl Engine {
             keychain,
             llm_cache: RwLock::new(cache),
             behavior_pending: Arc::new(Mutex::new(PendingPool::new(&config.behavior))),
-            config,
+            config: RwLock::new(Arc::new(config)),
+            config_path,
             db_path,
             // ---- 6. 检索器占位：首次召回时构建（懒加载）----
             retriever: Arc::new(RwLock::new(None)),
@@ -265,6 +282,7 @@ impl Engine {
             index_dirty: Arc::new(AtomicBool::new(false)),
             index_stamp: Arc::new(RwLock::new(None)),
             last_index_build_ms: Arc::new(AtomicI64::new(0)),
+            index_rebuild_failed: Arc::new(AtomicBool::new(false)),
             recall_policy: Arc::new(RwLock::new(RecallPolicy::default())),
             seal_hooks: Arc::new(RwLock::new(SealHooks::default())),
             seal_allowed: AtomicBool::new(true),
@@ -295,13 +313,15 @@ impl Engine {
             keychain: Arc::new(Keychain::new()),
             llm_cache: RwLock::new(None),
             behavior_pending: Arc::new(Mutex::new(PendingPool::new(&config.behavior))),
-            config,
+            config: RwLock::new(Arc::new(config)),
+            config_path: PathBuf::new(),
             db_path: PathBuf::new(),
             retriever: Arc::new(RwLock::new(None)),
             keyword_mirror: Arc::new(RwLock::new(KeywordService::new())),
             index_dirty: Arc::new(AtomicBool::new(false)),
             index_stamp: Arc::new(RwLock::new(None)),
             last_index_build_ms: Arc::new(AtomicI64::new(0)),
+            index_rebuild_failed: Arc::new(AtomicBool::new(false)),
             recall_policy: Arc::new(RwLock::new(RecallPolicy::default())),
             seal_hooks: Arc::new(RwLock::new(SealHooks::default())),
             seal_allowed: AtomicBool::new(true),
@@ -376,9 +396,14 @@ impl Engine {
         }
     }
 
-    /// 生效配置引用（只读）。
-    pub fn config(&self) -> &RamariaConfig {
-        &self.config
+    /// 生效配置快照（读锁内克隆 Arc，调用方在锁外使用）。
+    pub fn config(&self) -> Arc<RamariaConfig> {
+        read_recover(&self.config, "engine.config").clone()
+    }
+
+    /// 实际使用的配置文件路径（`from_parts` 构造时为空路径）。
+    pub fn config_path(&self) -> &Path {
+        &self.config_path
     }
 
     /// 数据库文件路径（`from_parts` 构造时为空路径）。
@@ -544,8 +569,27 @@ impl Engine {
     /// 返回:
     /// - `Ok(true)`: 本次调用完成了构建。
     /// - `Ok(false)`: 索引此前已加载（或无需构建）。
+    ///
+    /// 说明:
+    /// - 构建失败时置"重建失败"告警位并上抛错误（旧索引保持可用，
+    ///   见 [`Engine::is_index_rebuild_failed`]）；
+    /// - 构建完成后写回索引版本（供首次配置状态机判定"索引已构建"）。
     pub async fn ensure_index_loaded(&self) -> RamariaResult<bool> {
         crate::index::ensure_loaded(self).await
+    }
+
+    /// 强制全量重建内存检索索引（跳过懒加载早退与冷却窗口）。
+    ///
+    /// 职责:
+    /// - 供宿主显式刷新（批量导入完成 / 设置变更 / 诊断修复等场景）调用；
+    /// - 与懒加载路径共用同一构建实现，重建后立即生效
+    ///   （不受 `[index].refresh_interval_seconds` 约束）。
+    ///
+    /// 返回:
+    /// - `Ok(total)`: 重建完成，`total` 为 L1 + L2 文档总数（不含 utt 块）。
+    /// - `Err(..)`: 构建失败——旧索引保持可用、告警位置位并上抛错误。
+    pub async fn rebuild_index(&self) -> RamariaResult<usize> {
+        crate::index::rebuild(self).await
     }
 
     // =========================================================
@@ -710,7 +754,7 @@ impl Engine {
     /// 返回:
     /// - 循环句柄；drop 或 [`IdleLoop::shutdown`] 均会置停止位。
     pub fn spawn_idle_loop(self: &Arc<Self>) -> IdleLoop {
-        let options = IdleLoopOptions::from_config(&self.config);
+        let options = IdleLoopOptions::from_config(self.config().as_ref());
         IdleLoop::spawn(Arc::clone(self), options)
     }
 
@@ -786,6 +830,81 @@ impl Engine {
     }
 
     // =========================================================
+    // 配置用例（双写同步与热重载）
+    // =========================================================
+
+    /// 只读加载完整配置（config.toml 与 DB 侧合并，无写副作用）。
+    ///
+    /// 说明:
+    /// - 等价 `ConfigWriter::load_config_only`：文件缺失 / 解析失败时以 DB 侧为准；
+    /// - 不更新内存快照、不写任何一侧（设置页回显等只读场景）。
+    pub async fn load_full_config(&self) -> RamariaResult<RamariaConfig> {
+        let writer = self.config_writer()?;
+        writer.load_config_only().await
+    }
+
+    /// 重新加载配置：一致性校验（文件为准）→ 回写 DB → 热重载内存快照。
+    ///
+    /// 说明:
+    /// - 校验规则见 `ConfigWriter::load`（文件缺失 / 损坏路径以 DB 为准且不回写 DB）；
+    /// - 成功后以合并结果整体替换内存快照（后续用例读取生效）；
+    /// - 热重载范围：仅配置快照；后台循环阈值（如空闲分钟数）由宿主持有的
+    ///   生命周期容器热更新，本用例不联动；行为待定池（`PendingPool`）保持既有内存态。
+    pub async fn reload_config(&self) -> RamariaResult<SyncOutcome> {
+        let writer = self.config_writer()?;
+        let outcome = writer.load().await?;
+        self.replace_config_snapshot(outcome.config.clone());
+        Ok(outcome)
+    }
+
+    /// 保存完整配置：文件与 DB 双写（settings / backend_config 表），成功后热重载内存快照。
+    ///
+    /// 说明:
+    /// - 单侧写失败降级不阻塞：结果经 `SyncWriteResult` 回传（调用方展示提示）；
+    /// - 双侧全部成功时替换内存快照（后续用例读取生效），失败时保持原快照；
+    /// - API key 不经本用例：密钥始终由 OS keychain 管理，配置结构本身不含密钥。
+    pub async fn save_config(&self, cfg: &RamariaConfig) -> RamariaResult<SyncWriteResult> {
+        let writer = self.config_writer()?;
+        let result = writer.save_config(cfg).await;
+        if result.is_ok() {
+            self.replace_config_snapshot(cfg.clone());
+        }
+        Ok(result)
+    }
+
+    /// 同步后端配置到文件侧 `[backend]` 组（保留文件侧其它字段与未知键）。
+    ///
+    /// 说明:
+    /// - 仅文件侧：DB 侧由调用方（后端配置用例）先行写入，保持表 / 文件一致；
+    /// - 文件损坏时拒绝覆盖（保留现场，返回失败明细）。
+    pub async fn sync_backend_config(
+        &self,
+        backend: &BackendConfig,
+    ) -> RamariaResult<SyncWriteResult> {
+        let writer = self.config_writer()?;
+        Ok(writer.sync_backend_config(backend).await)
+    }
+
+    /// 构造配置用例句柄（`config_path` 为空时返回显式错误）。
+    fn config_writer(&self) -> RamariaResult<ConfigWriter> {
+        if self.config_path.as_os_str().is_empty() {
+            return Err(RamariaError::config(
+                "引擎未设置 config_path，无法执行配置读写用例",
+            ));
+        }
+        Ok(ConfigWriter::new(
+            Arc::clone(&self.storage),
+            self.config_path.clone(),
+        ))
+    }
+
+    /// 整体替换内存配置快照（仅由配置用例调用；不重建行为待定池等既有内存态）。
+    fn replace_config_snapshot(&self, cfg: RamariaConfig) {
+        let mut guard = write_recover(&self.config, "engine.config");
+        *guard = Arc::new(cfg);
+    }
+
+    // =========================================================
     // 首次配置用例（状态机推进与缺项诊断）
     // =========================================================
 
@@ -828,7 +947,8 @@ impl Engine {
     // 模型管理用例（后端配置 / 嵌入模型）
     // =========================================================
 
-    /// 更新 LLM 后端配置并热加载 provider（写入 keychain → 落库 → 重建 → 替换）。
+    /// 更新 LLM 后端配置并热加载 provider（密钥入 keychain → 配置落库 → provider 热替换
+    /// → 文件侧 `[backend]` 组同步）。
     ///
     /// 参数:
     /// - `config`: 新的后端配置（provider / base_url / model / 嵌入路径等）。
@@ -849,7 +969,7 @@ impl Engine {
     /// 返回:
     /// - `valid=false` + `reason` 表达目录缺失 / 加载失败 / 推理失败，不抛错。
     pub async fn validate_embedding_model(&self, path: &str) -> RamariaResult<EmbeddingValidation> {
-        crate::model::validate_embedding_model(path, self.config.embedding.device).await
+        crate::model::validate_embedding_model(path, self.config().embedding.device).await
     }
 
     /// 保存嵌入模型配置并热加载（`None` 或空白路径 = 卸载）。
@@ -889,6 +1009,19 @@ impl Engine {
         self.index_dirty.store(false, Ordering::Release);
     }
 
+    /// 检索索引最近一次重建是否失败（失败时共享检索器保留旧索引，仍可检索）。
+    ///
+    /// 用途:
+    /// - 诊断展示与宿主告警；不改变任何降级行为（旧索引照常检索）。
+    pub fn is_index_rebuild_failed(&self) -> bool {
+        self.index_rebuild_failed.load(Ordering::Acquire)
+    }
+
+    /// 设置检索索引"重建失败"告警位（构建成功复位 / 失败置位，由索引构建路径调用）。
+    pub(crate) fn set_index_rebuild_failed(&self, failed: bool) {
+        self.index_rebuild_failed.store(failed, Ordering::Release);
+    }
+
     /// 记录索引代次快照（索引构建完成后调用）。
     ///
     /// 说明:
@@ -921,7 +1054,7 @@ impl Engine {
     /// - 不允许：冷却窗口内——本次沿用现有索引，窗口过后的下一次召回补上重建
     ///   （用于写入密集期抑制整库重建风暴；不适用于首次加载与同进程脏标记路径）。
     pub(crate) fn index_rebuild_cooldown_elapsed(&self) -> bool {
-        let interval_seconds = self.config.index.refresh_interval_seconds;
+        let interval_seconds = self.config().index.refresh_interval_seconds;
         if interval_seconds == 0 {
             return true;
         }
@@ -948,8 +1081,8 @@ fn default_config_path(db_path: &Path) -> PathBuf {
 /// 只读加载配置：读取 `config.toml` 并填充实际路径；缺失 / 解析失败回退默认值。
 ///
 /// 说明:
-/// - 与桌面 / CLI 的双写同步不同，本层不生成模板、不回写 DB（无副作用的只读装配）。
-/// - 路径字段以数据库所在目录为数据根填充（与 CLI / 桌面同一约定）。
+/// - 装配路径不生成模板、不回写 DB（无副作用的只读装配；写入只经配置用例）。
+/// - 路径字段以数据库所在目录为数据根填充（与入口层同一约定）。
 fn load_config_readonly(config_path: &Path, db_path: &Path) -> RamariaConfig {
     let mut config = if config_path.exists() {
         match std::fs::read_to_string(config_path) {
@@ -1168,6 +1301,131 @@ mod tests {
         // 只读纪律：装配过程不得改写配置文件
         let after = std::fs::read_to_string(dir.join("config.toml")).expect("读取配置应成功");
         assert_eq!(before, after, "服务层装配不得写回 config.toml");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 配置双写用例：带 config_path 装配后，save_config 双侧落盘并热重载内存快照。
+    #[tokio::test]
+    async fn save_config_updates_in_memory_snapshot() {
+        let dir = temp_dir("config-save");
+        let db_path = dir.join("assistant.db");
+        let config_path = dir.join("config.toml");
+        let engine =
+            Engine::open_with(EngineOptions::new(db_path).with_config_path(config_path.clone()))
+                .await
+                .expect("引擎装配应成功");
+
+        // 装配期只读：未生成配置文件，快照为默认值
+        assert!(!config_path.exists(), "装配不得写回 config.toml");
+        assert_eq!(engine.config().session.l1_idle_minutes, 10);
+
+        let mut cfg = engine.config().as_ref().clone();
+        cfg.session.l1_idle_minutes = 42;
+        let result = engine.save_config(&cfg).await.expect("保存配置应成功");
+        assert!(result.is_ok(), "双侧写入应成功: {:?}", result.failures);
+
+        // 内存快照已热重载（后续用例读取生效）
+        assert_eq!(
+            engine.config().session.l1_idle_minutes,
+            42,
+            "save_config 后快照应更新"
+        );
+
+        // 文件侧与 DB 侧同步落盘
+        let text = std::fs::read_to_string(&config_path).expect("读取配置应成功");
+        let file_cfg: TestConfig = toml::from_str(&text).expect("文件应为合法 TOML");
+        assert_eq!(file_cfg.session.l1_idle_minutes, 42);
+        let stored = engine
+            .storage()
+            .get_setting("config.session.l1_idle_minutes")
+            .await
+            .expect("读取 settings 应成功");
+        assert_eq!(stored.as_deref(), Some("42"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 配置重载用例：文件改值后 reload → 快照与 DB 对齐（以文件为准回写）。
+    #[tokio::test]
+    async fn reload_config_reads_file_and_writes_db() {
+        let dir = temp_dir("config-reload");
+        let db_path = dir.join("assistant.db");
+        let config_path = dir.join("config.toml");
+        std::fs::write(&config_path, "[utt]\ntheta_gap_minutes = 30\n").expect("写入配置应成功");
+
+        let engine =
+            Engine::open_with(EngineOptions::new(db_path).with_config_path(config_path.clone()))
+                .await
+                .expect("引擎装配应成功");
+        assert_eq!(engine.config().utt.theta_gap_minutes, 30);
+
+        // 外部直写 DB 制造不一致残值
+        engine
+            .storage()
+            .set_setting("config.utt.theta_gap_minutes", "60")
+            .await
+            .expect("写入 settings 应成功");
+        // 文件改值 → reload：一致性校验以文件为准回写 DB，并热重载快照
+        std::fs::write(&config_path, "[utt]\ntheta_gap_minutes = 25\n").expect("写入配置应成功");
+        let outcome = engine.reload_config().await.expect("重载应成功");
+
+        assert_eq!(outcome.config.utt.theta_gap_minutes, 25);
+        assert!(
+            outcome
+                .mismatches
+                .iter()
+                .any(|m| m.key == "config.utt.theta_gap_minutes"),
+            "不一致应记入 mismatch: {:?}",
+            outcome.mismatches
+        );
+        assert_eq!(
+            engine.config().utt.theta_gap_minutes,
+            25,
+            "reload 后快照应与文件一致"
+        );
+        let stored = engine
+            .storage()
+            .get_setting("config.utt.theta_gap_minutes")
+            .await
+            .expect("读取 settings 应成功");
+        assert_eq!(stored.as_deref(), Some("25"), "DB 应以文件为准回写");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 配置用例边界：注入构造（空 config_path）调用配置用例返回显式错误，不 panic。
+    #[tokio::test]
+    async fn config_writer_requires_config_path() {
+        let (engine, _storage, dir) = crate::test_support::engine_with_db("config-no-path").await;
+        assert!(
+            engine.config_path().as_os_str().is_empty(),
+            "注入构造不携带配置路径"
+        );
+
+        let err = engine
+            .save_config(&TestConfig::default())
+            .await
+            .expect_err("空 config_path 应报错");
+        assert_eq!(err.category(), "config");
+
+        let err = engine
+            .reload_config()
+            .await
+            .expect_err("空 config_path 应报错");
+        assert_eq!(err.category(), "config");
+
+        let err = engine
+            .load_full_config()
+            .await
+            .expect_err("空 config_path 应报错");
+        assert_eq!(err.category(), "config");
+
+        let err = engine
+            .sync_backend_config(&BackendConfig::lm_studio_default())
+            .await
+            .expect_err("空 config_path 应报错");
+        assert_eq!(err.category(), "config");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

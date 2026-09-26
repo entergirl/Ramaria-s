@@ -859,7 +859,7 @@ mod tests {
             normalizer.resolve.get("职业倦怠").map(String::as_str),
             Some("工作压力")
         );
-        assert!(normalizer.resolve.get("工作压力").is_none());
+        assert!(!normalizer.resolve.contains_key("工作压力"));
     }
 
     /// 别名短语 → 话题词解析为规范词（口语说法 ↔ 事件关键词命中前提）。
@@ -907,7 +907,7 @@ mod tests {
         // 规则关键词用 canonical（事件聚类产物）；纯 bigram 查询无共享词会 miss
         let r = rule(1, &["工作压力", "加班"], -0.4, None);
         // 无 embedding → 纯关键词路由：score = query_side_jaccard
-        let result = route_rules(&[r.clone()], &query, &RoutingParams::default());
+        let result = route_rules(std::slice::from_ref(&r), &query, &RoutingParams::default());
         if result.matched {
             // 命中主规则即说明别名归一打通"口语 ↔ canonical 规则"（θ_route 默认 0.6）
             assert_eq!(result.primary.unwrap().rule.id, 1);

@@ -432,12 +432,12 @@ mod tests {
         // 时间跨度 ≥ 1 天（不同事件不同 L1）→ 独立
         assert!(independent_pair(
             &evidence(1, "l1a", 0, false, true),
-            &evidence(2, "l1b", 86400_000 * 2, false, true)
+            &evidence(2, "l1b", 86_400_000 * 2, false, true)
         ));
         // 同日但不同批 TopicBatch → 独立
         assert!(independent_pair(
             &evidence(1, "l1a", 0, false, true),
-            &evidence(2, "l1b", 3600_000, true, true)
+            &evidence(2, "l1b", 3_600_000, true, true)
         ));
     }
 
@@ -459,7 +459,7 @@ mod tests {
                 semantic: 0.9,
             },
             CorroborateCandidate {
-                evidence: evidence(2, "l1b", 86400_000 * 5, false, true),
+                evidence: evidence(2, "l1b", 86_400_000 * 5, false, true),
                 semantic: 0.85,
             },
         ];
@@ -509,7 +509,7 @@ mod tests {
                 semantic: 0.9,
             },
             CorroborateCandidate {
-                evidence: evidence(2, "l1b", 86400_000 * 2, false, false), // 方向不一致
+                evidence: evidence(2, "l1b", 86_400_000 * 2, false, false), // 方向不一致
                 semantic: 0.9,
             },
         ];
@@ -636,7 +636,7 @@ mod tests {
             event_input(
                 2,
                 "l1b",
-                86400_000 * 3,
+                86_400_000 * 3,
                 false,
                 true,
                 "下午继续跑步，心情不错",
@@ -691,7 +691,7 @@ mod tests {
             event_input(
                 2,
                 "l1b",
-                86400_000 * 3,
+                86_400_000 * 3,
                 false,
                 true,
                 "终于放松很开心",
@@ -712,7 +712,7 @@ mod tests {
         // 事件 keywords 为空 → 从 content 提取 bigram（候选 content 含"跑步"同主题）
         let events = vec![
             event_input(1, "l1a", 0, false, true, "早上坚持跑步很快乐", &[]),
-            event_input(2, "l1b", 86400_000 * 3, false, true, "跑步让人心情好", &[]),
+            event_input(2, "l1b", 86_400_000 * 3, false, true, "跑步让人心情好", &[]),
         ];
         let verdicts = corroborate_candidates(&[cand], &events);
         assert!(
@@ -730,7 +730,7 @@ mod tests {
             event_input(
                 2,
                 "l1b",
-                86400_000 * 3,
+                86_400_000 * 3,
                 false,
                 true,
                 "做菜很有意思",

@@ -47,7 +47,7 @@ pub(crate) async fn check(engine: &Engine) -> RamariaResult<SetupStatus> {
 ///
 /// 参数:
 /// - `engine`: 服务层引擎。
-/// - `embedding_available`: 嵌入可用性（读状态取引擎快照；首次配置流程按既有口径固定为 `false`）。
+/// - `embedding_available`: 嵌入可用性（读状态取引擎快照）。
 ///
 /// 检查项:
 /// 1. 后端配置：`backend_config` 是否有记录；
@@ -121,7 +121,8 @@ pub(crate) fn determine_state(status: &SetupStatus) -> AppState {
 /// - `req`: 向导提交的后端选择（provider / model / base_url / api_key）。
 ///
 /// 返回:
-/// - 探测通过时返回按缺项诊断判定的状态（通常为 `Indexing`，索引构建完成后转 `Ready`）；
+/// - 探测通过时返回按缺项诊断判定的状态：索引待构建为 `Indexing`，索引已构建且
+///   嵌入可用为 `Ready`，嵌入不可用为 `Degraded`；
 /// - 探测全部失败时返回 `Degraded`（不报错，用户可修正配置后重试）；
 /// - 线上 provider 缺少 API key 返回 `Validation`（先于任何写入返回）。
 ///
@@ -185,13 +186,12 @@ pub(crate) async fn apply(engine: &Engine, req: &SetupRequest) -> RamariaResult<
 ///
 /// 返回:
 /// - 探测失败 → `Degraded`（配置已落库，用户可修正后重试）；
-/// - 探测通过 → 按缺项诊断判定（口径与既有实现一致：本步骤只看"配置完整度 + 索引状态"，
-///   嵌入可用性固定按不可用参与判定，因此本步骤不会直接判定为 `Ready`；
-///   嵌入加载完成后由 [`refresh`] 推进到 `Ready`）。
+/// - 探测通过 → 按缺项诊断判定（配置完整度 + 索引状态 + 嵌入可用性；
+///   三者齐备时本步骤直接判定为 `Ready`，嵌入缺失时为 `Degraded`）。
 pub(crate) async fn advance_state(engine: &Engine, health_ok: bool) -> RamariaResult<AppState> {
     let state = if health_ok {
         tracing::info!(provider = %engine.llm().name(), "LLM 后端健康检查通过");
-        determine_state(&check_with(engine, false).await?)
+        determine_state(&check(engine).await?)
     } else {
         tracing::warn!(
             provider = %engine.llm().name(),
@@ -272,6 +272,7 @@ mod tests {
     use super::*;
     use crate::test_support::{
         DeterministicEmbedding, MockLlm, engine_with_db, engine_with_llm_and_config,
+        engine_with_llm_config_and_embedding,
     };
     use ramaria_core::traits::{EmbeddingProvider, StoreInfrastructure};
     use ramaria_core::types::LlmProvider as LlmProviderKind;
@@ -285,6 +286,42 @@ mod tests {
             base_url: base_url.to_string(),
             api_key: None,
         }
+    }
+
+    /// 启动本地 mock HTTP 服务：对任意请求返回 200（供健康探测通过）。
+    ///
+    /// 说明:
+    /// - 返回 mock 服务 base_url；循环接受连接以吸收探测重试；
+    /// - 服务任务随测试 runtime 结束而终止。
+    async fn spawn_mock_health_server() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("绑定 mock 端口应成功");
+        let addr = listener.local_addr().expect("获取 mock 地址应成功");
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                // 读到请求头结束即可（GET 无 body）
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 1024];
+                while buf.len() < 8192 {
+                    match socket.read(&mut tmp).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    }
+                    if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}";
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        format!("http://127.0.0.1:{}/v1", addr.port())
     }
 
     /// 缺项诊断：空库缺后端 / 模型 / 嵌入三项；显式置索引版本为 0 后补第四项；
@@ -461,7 +498,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 状态推进：探测失败一律 Degraded；探测通过按缺项诊断判定（嵌入固定按不可用参与）。
+    /// 状态推进：探测失败一律 Degraded；探测通过按缺项诊断判定（含嵌入可用性）。
     #[tokio::test]
     async fn advance_state_follows_probe_and_diagnostics() {
         let (engine, storage, dir) = engine_with_db("setup-advance").await;
@@ -497,9 +534,13 @@ mod tests {
             AppState::Degraded
         );
 
-        // 嵌入可用后由刷新路径推进到 Ready（run_setup 步骤本身不判定 Ready）
+        // 嵌入可用后：推进路径与刷新路径均判定 Ready
         let embedding: Arc<dyn EmbeddingProvider> = Arc::new(DeterministicEmbedding::new());
         engine.update_embedding(Some(embedding));
+        assert_eq!(
+            advance_state(&engine, true).await.expect("推进应成功"),
+            AppState::Ready
+        );
         assert_eq!(
             engine.refresh_setup_state().await.expect("刷新应成功"),
             AppState::Ready
@@ -508,20 +549,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 健康探测失败的重试口径：探测实现本身覆盖（见 `probe_health_retries_until_success`），
-    /// 这里验证首次配置端到端在探测失败时降级而非报错。
+    /// 探测失败：配置写入成功后探测失败 → 降级为 Degraded，配置保留（用户可修正后重试）。
+    ///
+    /// 说明:
+    /// - "探测失败"以 `advance_state(false)` 作为输入直接构造：探测重试口径由
+    ///   `probe_health_retries_until_success` 覆盖，本用例聚焦失败时的降级与配置保留；
+    /// - 配置写入走真实路径（`apply`：真实 provider 构建与热替换），地址不参与探测。
     #[tokio::test]
     async fn run_degrades_when_probe_fails() {
-        // 探测前 3 次全部失败的 LLM：与生产路径 3 次尝试口径一致
-        let (engine, storage, dir) = engine_with_llm_and_config(
-            "setup-degraded",
-            MockLlm::local().with_health_failures(3),
-            ramaria_core::config::RamariaConfig::default(),
-        )
-        .await;
+        let (engine, storage, dir) = engine_with_db("setup-degraded").await;
 
-        let state = engine
-            .run_setup(&local_request("http://localhost:7778/v1"))
+        // 配置写入（真实 provider 构建与热替换）
+        apply(&engine, &local_request("http://127.0.0.1:9/v1"))
+            .await
+            .expect("配置写入应成功");
+
+        // 探测失败输入 → 状态推进为 Degraded（不报错）
+        let state = advance_state(&engine, false)
             .await
             .expect("探测失败也应成功返回（降级而非报错）");
         assert_eq!(state, AppState::Degraded);
@@ -534,6 +578,75 @@ mod tests {
                 .is_some(),
             "探测失败不影响配置落库（用户可修正后重试）"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 首次配置：配置就绪 + 索引已构建 + 嵌入可用 → 直接返回 Ready（无需二次刷新推进）。
+    ///
+    /// 健康探测对象为配置写入后重建的真实 provider，故用本地 mock 服务让探测通过，
+    /// 聚焦状态判定本身。
+    #[tokio::test]
+    async fn run_setup_reaches_ready_when_embedding_available() {
+        let health_url = spawn_mock_health_server().await;
+        let embedding: Arc<dyn EmbeddingProvider> = Arc::new(DeterministicEmbedding::new());
+        let (engine, storage, dir) = engine_with_llm_config_and_embedding(
+            "setup-ready",
+            MockLlm::local(),
+            ramaria_core::config::RamariaConfig::default(),
+            Some(embedding),
+        )
+        .await;
+        storage
+            .save_backend_config(&BackendConfig::lm_studio_default())
+            .await
+            .expect("保存后端配置应成功");
+        storage
+            .set_index_version(1)
+            .await
+            .expect("写入索引版本应成功");
+
+        let state = engine
+            .run_setup(&local_request(&health_url))
+            .await
+            .expect("首次配置应成功");
+        assert_eq!(
+            state,
+            AppState::Ready,
+            "配置就绪 + 索引已建 + 嵌入可用时应直接判定 Ready"
+        );
+        assert_eq!(engine.current_state(), AppState::Ready);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 首次配置：配置就绪 + 索引已构建但嵌入缺失 → Degraded（向量通道降级，不阻塞）。
+    ///
+    /// 探测经本地 mock 服务通过，确保降级原因只来自嵌入缺失而非探测失败。
+    #[tokio::test]
+    async fn run_setup_stays_degraded_without_embedding() {
+        let health_url = spawn_mock_health_server().await;
+        let (engine, storage, dir) = engine_with_llm_and_config(
+            "setup-no-embedding",
+            MockLlm::local(),
+            ramaria_core::config::RamariaConfig::default(),
+        )
+        .await;
+        storage
+            .save_backend_config(&BackendConfig::lm_studio_default())
+            .await
+            .expect("保存后端配置应成功");
+        storage
+            .set_index_version(1)
+            .await
+            .expect("写入索引版本应成功");
+
+        let state = engine
+            .run_setup(&local_request(&health_url))
+            .await
+            .expect("首次配置应成功");
+        assert_eq!(state, AppState::Degraded, "嵌入缺失时首次配置应降级");
+        assert_eq!(engine.current_state(), AppState::Degraded);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

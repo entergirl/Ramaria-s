@@ -8,7 +8,9 @@
 //! - 失败补偿：L1 生成失败登记 `l1_summary` pending 任务（与在线管线同一补偿语义，
 //!   由补扫路径消费重试），会话本身仍视为已关闭（不阻塞用户继续新会话）
 //! - 钩子注册式接入：行为规则 / 风格统计 / L2 触发的算法实现位于内核与宿主，
-//!   本层只按位置调用，未注册则跳过（避免在服务层重复实现第二套算法）
+//!   本层只按位置调用（引擎以借用传入），未注册则跳过（不在服务层重写第二套算法）
+//! - 钩子不持有 Engine：依赖在调用时经传入的引擎引用读取，
+//!   避免 Engine ↔ 钩子引用环导致长驻进程内存不回收
 //! - 隐私：日志只记计数与 ID，不记摘要与原文全文
 
 use std::future::Future;
@@ -28,22 +30,29 @@ use crate::types::SealOutcome;
 // 封存钩子（宿主注册）
 // =========================================================
 
-/// 封存钩子：接收 persona_uid，内部自行处理失败（不阻塞封存主流程）。
+/// 封存钩子：接收引擎引用与 persona_uid，内部自行处理失败（不阻塞封存主流程）。
 ///
 /// 实现要求（注册方契约）:
 /// - 钩子内部必须自行捕获并记录错误（与在线管线的注册式接入口径一致）——
 ///   本层不重复捕获，也不对钩子做 panic 隔离；
 /// - **不得 panic**：panic 会穿越封存主流程上抛（L1 与 utt 已生成，会话已关闭，
 ///   但调用方会收到错误）；如需兜底请在钩子内部 `catch_unwind`；
-/// - 不得长时间阻塞（封存是用户可感知的收尾路径）。
-pub type SealHook = Arc<dyn Fn(&str) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+/// - 不得长时间阻塞（封存是用户可感知的收尾路径）；
+/// - **不得持有 Engine**：依赖在调用时经参数借用读取，钩子本身不保存引擎引用
+///   或引擎内部依赖的装配期快照，避免 Engine ↔ 钩子引用环。
+pub type SealHook = Arc<
+    dyn for<'a> Fn(&'a Engine, &'a str) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>
+        + Send
+        + Sync,
+>;
 
 /// 封存钩子集合（未注册的步骤跳过）。
 ///
 /// 字段约定:
 /// - `behavior`: 行为规则增量更新（宿主实现，`[behavior].enabled` 时注册）；
 /// - `style`: 风格统计增量更新（宿主实现，`[style].enabled` 时注册）；
-/// - `l2_trigger`: L2 事件提取触发检查（宿主实现：桌面 / CLI 复用既有调度链）。
+/// - `l2_trigger`: L2 事件提取触发检查（链路形态由装配方决定：
+///   单 persona 最小触发，或全 persona 提取 + 知识事实抽取 + L3 级联）。
 #[derive(Clone, Default)]
 pub struct SealHooks {
     pub behavior: Option<SealHook>,
@@ -149,9 +158,27 @@ pub(crate) async fn run(engine: &Engine, session_id: Uuid) -> RamariaResult<Seal
 
     // ---- 7. 宿主钩子（行为 / 风格 / L2 触发；未注册则跳过） ----
     let hooks = engine.seal_hooks();
-    run_hook(&hooks.behavior, persona_uid.as_deref(), "行为规则增量更新").await;
-    run_hook(&hooks.style, persona_uid.as_deref(), "风格统计增量更新").await;
-    run_hook(&hooks.l2_trigger, persona_uid.as_deref(), "L2 触发检查").await;
+    run_hook(
+        engine,
+        &hooks.behavior,
+        persona_uid.as_deref(),
+        "行为规则增量更新",
+    )
+    .await;
+    run_hook(
+        engine,
+        &hooks.style,
+        persona_uid.as_deref(),
+        "风格统计增量更新",
+    )
+    .await;
+    run_hook(
+        engine,
+        &hooks.l2_trigger,
+        persona_uid.as_deref(),
+        "L2 触发检查",
+    )
+    .await;
 
     Ok(SealOutcome {
         session_id,
@@ -290,15 +317,21 @@ async fn extract_examples(engine: &Engine, session_id: Uuid) {
 ///
 /// 说明:
 /// - 钩子内部自行处理失败（注册方约定），本层不重复捕获；
+/// - 引擎以借用传入（钩子契约：不持有引擎，见 [`SealHook`]）；
 /// - 会话无 persona 归属时不调用（钩子以 persona 为输入，无归属无从更新）；
-/// - `pub(crate)`: 供 L1 补扫（`idle::tick`）在补跑成功后复用同一 L2 触发钩子。
-pub(crate) async fn run_hook(hook: &Option<SealHook>, persona_uid: Option<&str>, label: &str) {
+/// - `pub(crate)`: 供 L1 补扫在补跑成功后复用同一 L2 触发钩子。
+pub(crate) async fn run_hook(
+    engine: &Engine,
+    hook: &Option<SealHook>,
+    persona_uid: Option<&str>,
+    label: &str,
+) {
     let (Some(hook), Some(persona_uid)) = (hook.as_ref(), persona_uid) else {
         tracing::debug!(hook = label, "封存钩子未注册或会话无归属，跳过");
         return;
     };
     tracing::debug!(hook = label, persona_uid, "调用封存钩子");
-    hook(persona_uid).await;
+    hook(engine, persona_uid).await;
 }
 
 // =========================================================
@@ -504,11 +537,11 @@ mod tests {
         let style_calls = Arc::new(AtomicUsize::new(0));
         let l2_calls = Arc::new(AtomicUsize::new(0));
         let make_hook = |counter: Arc<AtomicUsize>| -> SealHook {
-            Arc::new(move |_persona: &str| {
+            Arc::new(move |_engine: &Engine, _persona: &str| {
                 let counter = Arc::clone(&counter);
                 Box::pin(async move {
                     counter.fetch_add(1, Ordering::SeqCst);
-                })
+                }) as Pin<Box<dyn Future<Output = ()> + Send + '_>>
             })
         };
         engine.set_seal_hooks(SealHooks {

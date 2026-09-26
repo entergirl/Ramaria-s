@@ -639,7 +639,7 @@ fn compute_relevance_meaning_match() {
     // "工作" vs meaning: "任" has 1 char overlap with "任务"...
     // Actually this is hard to guarantee with char-level LCS on Chinese.
     // The point is: meaning provides a richer target for matching.
-    assert!(relevance >= 0.0 && relevance <= 1.0);
+    assert!((0.0..=1.0).contains(&relevance));
 }
 
 #[test]

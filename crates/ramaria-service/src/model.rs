@@ -2,7 +2,8 @@
 //!
 //! 设计特点:
 //! - 后端配置写入即生效：配置落库（`backend_config`，真相源）→ 重建 provider → 整体替换内存快照，
-//!   后续对话与记忆加工立即使用新 provider，无需重启进程
+//!   并尽力同步文件侧 `[backend]` 组（失败只记日志，不阻塞）；后续对话与记忆加工立即使用新
+//!   provider，无需重启进程
 //! - 嵌入模型按路径加载：校验 / 保存 / 读取 / 卸载四个动作覆盖设置页全部交互，
 //!   卸载（空路径）与加载走同一用例，避免"只改配置不换实例"的半生效状态
 //! - 降级不阻塞：嵌入模型缺失 / 不可用只影响向量通道（BM25 + 关键词镜像继续工作），
@@ -30,8 +31,9 @@ use crate::types::{DegradedReason, EmbeddingModelView, EmbeddingValidation};
 ///
 /// 流程:
 /// 1. API key 写入 keychain（仅线上 provider；先写密钥再落配置，避免"配置指向无密钥后端"的中间态）；
-/// 2. 后端配置落库（`backend_config` 为真相源；config.toml 同步由配置用例负责）；
-/// 3. 重建 provider（复用引擎持有的精确缓存）→ 整体替换内存快照。
+/// 2. 后端配置落库（`backend_config` 为真相源）；
+/// 3. 重建 provider（复用引擎持有的精确缓存）→ 整体替换内存快照；
+/// 4. 文件侧 `[backend]` 组同步（`config_path` 已设置时；失败只记日志，不改变成功语义）。
 ///
 /// 参数:
 /// - `engine`: 服务层引擎。
@@ -72,6 +74,26 @@ pub(crate) async fn update_backend_config(
     let keychain = engine.keychain_arc();
     let provider = build_llm_provider(config, &keychain, engine.llm_cache())?;
     engine.update_llm(provider);
+
+    // ---- 4. 文件侧同步（尽力而为：保持 config.toml 的 [backend] 组与表一致） ----
+    if !engine.config_path().as_os_str().is_empty() {
+        match engine.sync_backend_config(config).await {
+            Ok(result) => {
+                if !result.file_ok {
+                    tracing::warn!(
+                        failures = result.failures.len(),
+                        "后端配置已落库，但 config.toml 同步失败（下次加载校验以文件为准）"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "后端配置已落库，但 config.toml 同步失败（降级不阻塞）"
+                );
+            }
+        }
+    }
 
     tracing::info!(
         provider = %config.provider,
@@ -374,6 +396,39 @@ mod tests {
             .update_backend_config(&config, Some("sk-should-be-ignored"))
             .await
             .expect("本地 provider 更新应成功");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 后端配置更新：`config_path` 已设置时同步文件侧 `[backend]` 组，其它组保留。
+    #[tokio::test]
+    async fn update_backend_config_syncs_file_side_backend_group() {
+        let dir = temp_dir("model-file-sync");
+        let db_path = dir.join("assistant.db");
+        let config_path = dir.join("config.toml");
+        std::fs::write(&config_path, "[utt]\ntheta_gap_minutes = 12\n").expect("写入配置应成功");
+        let engine = Engine::open_with(
+            crate::engine::EngineOptions::new(db_path).with_config_path(config_path.clone()),
+        )
+        .await
+        .expect("引擎装配应成功");
+
+        let mut config = BackendConfig::lm_studio_default();
+        config.base_url = "http://localhost:7778/v1".to_string();
+        config.capability.base_url = "http://localhost:7778/v1".to_string();
+        config.capability.model_id = "qwen-file-sync".to_string();
+        engine
+            .update_backend_config(&config, None)
+            .await
+            .expect("后端配置更新应成功");
+
+        // 文件侧 [backend] 组已同步，其它组保留
+        let text = std::fs::read_to_string(&config_path).expect("读取配置应成功");
+        let file_cfg: ramaria_core::config::RamariaConfig =
+            toml::from_str(&text).expect("文件应为合法 TOML");
+        assert_eq!(file_cfg.backend.model_id, "qwen-file-sync");
+        assert_eq!(file_cfg.backend.base_url, "http://localhost:7778/v1");
+        assert_eq!(file_cfg.utt.theta_gap_minutes, 12, "文件侧其它组应保留");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

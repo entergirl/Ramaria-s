@@ -2,17 +2,17 @@
 //!
 //! 设计特点:
 //! - 覆盖合并后的索引语义要点：懒加载（只构建一次）/ 加载后增量可检索 /
-//!   跨进程写入按代次刷新 / 未加载窗口的脏标记重建
+//!   跨进程写入按代次刷新 / 未加载窗口的脏标记重建 / 显式重建（写回索引版本）
 //! - 跨进程等价物：在同一库文件上开第二个连接池写入 L1，模拟"桌面写、MCP 读"场景，
 //!   不引入真实多进程
-//! - 快照只含布尔与计数：四个场景的结论指标；索引内部结构与向量不落盘
+//! - 快照只含布尔与计数：各场景的结论指标；索引内部结构与向量不落盘
 //! - fixture 时间固定偏移：保证跨进程写入的 L1 与本地语料戳判定稳定
 //! - 输出入口：`snapshot_of` 是"某一实现在该 fixture 上的规范化输出"的唯一入口，
 //!   同形状快照可直接送入 `assert_parity` 比对
 
 use std::sync::Arc;
 
-use ramaria_core::traits::LlmProvider;
+use ramaria_core::traits::{LlmProvider, StoreInfrastructure};
 use ramaria_service::types::{RecallLayer, RecallRequest};
 use ramaria_service::{DEFAULT_PERSONA_UID, Engine};
 use ramaria_storage::SqliteStorage;
@@ -178,11 +178,62 @@ async fn scenario_dirty_rebuild(tag: &str) -> ParityResult<(bool, bool)> {
     Ok((rebuilt, hit))
 }
 
-/// 在给定库文件与标签上执行索引场景，产出规范化快照（内部使用两个隔离环境）。
+/// 场景 C：显式全量重建（`rebuild_index`）→ 文档数 / 告警位 / 检索命中 / 索引版本。
+///
+/// 返回:
+/// - `(文档总数, 告警位, 检索命中, 索引版本)`。
+async fn scenario_explicit_rebuild(tag: &str) -> ParityResult<(usize, bool, bool, i32)> {
+    let env = ParityEnv::new(tag).await?;
+    let engine = env.engine();
+
+    fixtures::seed_persona(env.storage(), DEFAULT_PERSONA_UID).await?;
+    fixtures::seed_l1(
+        env.storage(),
+        DEFAULT_PERSONA_UID,
+        "用户最近在学游泳，每周去两次",
+        Some("游泳"),
+        fixtures::fixture_ts(0),
+    )
+    .await?;
+    fixtures::seed_l1(
+        env.storage(),
+        DEFAULT_PERSONA_UID,
+        "用户最近开始夜跑，每周三次",
+        Some("夜跑"),
+        fixtures::fixture_ts(1_000),
+    )
+    .await?;
+
+    // 显式置 0（"尚未构建"）→ 重建完成后应写回 1
+    env.storage()
+        .set_index_version(0)
+        .await
+        .map_err(|e| ParityError::env("写入索引版本", e))?;
+
+    let total = engine
+        .rebuild_index()
+        .await
+        .map_err(|e| ParityError::env("显式重建索引", e))?;
+    let failed = engine.is_index_rebuild_failed();
+    let hits = recall_l1_texts(engine, "夜跑").await?;
+    let hit = hits.iter().any(|text| text.contains("夜跑"));
+    let index_version = env
+        .storage()
+        .get_index_version()
+        .await
+        .map_err(|e| ParityError::env("读取索引版本", e))?;
+
+    env.cleanup().await;
+    Ok((total, failed, hit, index_version))
+}
+
+/// 在给定库文件与标签上执行索引场景，产出规范化快照（内部使用三个隔离环境）。
 async fn snapshot_of(tag: &str) -> ParityResult<Snapshot> {
     let (first_built, second_built, loaded, incremental_hit, cross_process_hit) =
         scenario_lazy_and_refresh(&format!("{tag}-lazy")).await?;
     let (dirty_rebuilt, dirty_hit) = scenario_dirty_rebuild(&format!("{tag}-dirty")).await?;
+    let (rebuild_total, rebuild_failed, rebuild_hit, rebuild_index_version) =
+        scenario_explicit_rebuild(&format!("{tag}-rebuild")).await?;
 
     Ok(Snapshot::new(
         SCENARIO,
@@ -198,6 +249,12 @@ async fn snapshot_of(tag: &str) -> ParityResult<Snapshot> {
                 "rebuilt": dirty_rebuilt,
                 "hit": dirty_hit,
             },
+            "rebuild": {
+                "total": rebuild_total,
+                "failed": rebuild_failed,
+                "hit": rebuild_hit,
+                "index_version": rebuild_index_version,
+            },
         }),
     ))
 }
@@ -206,14 +263,14 @@ async fn snapshot_of(tag: &str) -> ParityResult<Snapshot> {
 // 测试
 // =========================================================
 
-/// 基线一致：索引场景四个结论指标与冻结基线一致。
+/// 基线一致：索引场景各结论指标与冻结基线一致。
 #[tokio::test]
 async fn index_snapshot_matches_golden_baseline() {
     let snapshot = snapshot_of("index-golden")
         .await
         .expect("索引场景应执行成功");
 
-    // 关键行为断言：懒加载只构建一次；增量 / 跨进程 / 脏标记三条路径均命中
+    // 关键行为断言：懒加载只构建一次；增量 / 跨进程 / 脏标记 / 显式重建各路径结论正确
     assert_eq!(
         snapshot.value()["lazy"]["first_built"].as_bool(),
         Some(true),
@@ -238,6 +295,26 @@ async fn index_snapshot_matches_golden_baseline() {
         snapshot.value()["dirty"]["hit"].as_bool(),
         Some(true),
         "加载窗口内的 L1 不应漏检索（脏标记重建）"
+    );
+    assert_eq!(
+        snapshot.value()["rebuild"]["total"].as_u64(),
+        Some(2),
+        "显式重建返回的文档数应为加载的 L1 总数"
+    );
+    assert_eq!(
+        snapshot.value()["rebuild"]["failed"].as_bool(),
+        Some(false),
+        "显式重建成功后告警位应为 false"
+    );
+    assert_eq!(
+        snapshot.value()["rebuild"]["hit"].as_bool(),
+        Some(true),
+        "显式重建后写入的 L1 应可检索"
+    );
+    assert_eq!(
+        snapshot.value()["rebuild"]["index_version"].as_i64(),
+        Some(1),
+        "显式重建应写回索引版本 1"
     );
 
     let outcome = GoldenStore::new()

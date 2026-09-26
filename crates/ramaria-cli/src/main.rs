@@ -1418,7 +1418,7 @@ mod tests {
     /// `probe run --no-rebuild-utt` 可解析，且映射到内部 rebuild_utt=false。
     #[test]
     fn probe_run_no_rebuild_utt_flag_parses() {
-        let cli = Cli::try_parse_from(&[
+        let cli = Cli::try_parse_from([
             "ramaria",
             "probe",
             "run",
@@ -1445,7 +1445,7 @@ mod tests {
     /// `probe report --ablation` 可解析（M5a 消融对比报告模式）。
     #[test]
     fn probe_report_ablation_flag_parses() {
-        let cli = Cli::try_parse_from(&[
+        let cli = Cli::try_parse_from([
             "ramaria",
             "probe",
             "report",
@@ -1463,7 +1463,7 @@ mod tests {
             _ => panic!("应解析为 Probe::Report"),
         }
         // 不带 --ablation → 默认 false（普通报告行为不变）
-        let cli2 = Cli::try_parse_from(&["ramaria", "probe", "report", "--results", "r.json"])
+        let cli2 = Cli::try_parse_from(["ramaria", "probe", "report", "--results", "r.json"])
             .expect("普通 report 应可解析");
         match cli2.command {
             Commands::Probe(ProbeArgs::Report { ablation, .. }) => {
@@ -1476,7 +1476,7 @@ mod tests {
     /// `probe run --repeat N` 可解析，且默认不置 `--no-rebuild-utt`。
     #[test]
     fn probe_run_repeat_flag_parses() {
-        let cli = Cli::try_parse_from(&[
+        let cli = Cli::try_parse_from([
             "ramaria",
             "probe",
             "run",
@@ -1505,13 +1505,13 @@ mod tests {
     /// `ramaria mcp serve` 可解析（MCP 服务端入口；--db 沿用全局参数）。
     #[test]
     fn mcp_serve_parses() {
-        let cli = Cli::try_parse_from(&["ramaria", "mcp", "serve"]).expect("mcp serve 应可解析");
+        let cli = Cli::try_parse_from(["ramaria", "mcp", "serve"]).expect("mcp serve 应可解析");
         assert!(
             matches!(cli.command, Commands::Mcp(McpCmd::Serve)),
             "应解析为 Mcp::Serve"
         );
         // --db 全局参数生效（MCP 宿主按此路径装配服务层引擎）
-        let cli = Cli::try_parse_from(&["ramaria", "--db", "d/x.db", "mcp", "serve"])
+        let cli = Cli::try_parse_from(["ramaria", "--db", "d/x.db", "mcp", "serve"])
             .expect("带 --db 的 mcp serve 应可解析");
         assert_eq!(cli.db, PathBuf::from("d/x.db"));
     }
@@ -1520,7 +1520,7 @@ mod tests {
     #[test]
     fn style_update_parses_default_persona() {
         let cli =
-            Cli::try_parse_from(&["ramaria", "style", "update"]).expect("style update 应可解析");
+            Cli::try_parse_from(["ramaria", "style", "update"]).expect("style update 应可解析");
         match cli.command {
             Commands::Style(StyleCmd::Update { persona }) => {
                 assert!(persona.is_none(), "缺省 --persona 时在命令层用默认值");
@@ -1533,7 +1533,7 @@ mod tests {
     #[test]
     fn style_update_persona_flag_parses() {
         let cli =
-            Cli::try_parse_from(&["ramaria", "style", "update", "--persona", "char-2766366159"])
+            Cli::try_parse_from(["ramaria", "style", "update", "--persona", "char-2766366159"])
                 .expect("--persona 应可解析");
         match cli.command {
             Commands::Style(StyleCmd::Update { persona }) => {
@@ -1547,7 +1547,7 @@ mod tests {
     #[test]
     fn rule_clusters_parses_without_overrides() {
         let cli =
-            Cli::try_parse_from(&["ramaria", "rule", "clusters"]).expect("rule clusters 应可解析");
+            Cli::try_parse_from(["ramaria", "rule", "clusters"]).expect("rule clusters 应可解析");
         match cli.command {
             Commands::Rule(RuleCmd::Clusters {
                 persona,
@@ -1571,7 +1571,7 @@ mod tests {
     /// `ramaria rule clusters` 聚类覆盖参数可解析并透传（不传 θ_join 时保持关闭）。
     #[test]
     fn rule_clusters_parses_all_overrides() {
-        let cli = Cli::try_parse_from(&[
+        let cli = Cli::try_parse_from([
             "ramaria",
             "rule",
             "clusters",
@@ -1612,7 +1612,7 @@ mod tests {
     /// `ramaria rule clusters --theta-join` 多值/重复解析（启用 θ_join 时序增量模拟）。
     #[test]
     fn rule_clusters_parses_theta_join_multi_values() {
-        let cli = Cli::try_parse_from(&[
+        let cli = Cli::try_parse_from([
             "ramaria",
             "rule",
             "clusters",

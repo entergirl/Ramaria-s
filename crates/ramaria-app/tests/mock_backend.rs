@@ -35,6 +35,9 @@ use uuid::Uuid;
 // MockStorage
 // =========================================================
 
+/// 后台任务表（background_jobs 表）内存存储：id → (job_type, payload, status)。
+type JobStore = Mutex<HashMap<i64, (String, Option<String>, String)>>;
+
 /// 内存 Mock StorageBackend 实现。
 ///
 /// 职责:
@@ -80,8 +83,8 @@ pub struct MockStorage {
     /// 事件 → 来源 L1 映射（event_sources）
     event_sources: Mutex<Vec<EventSource>>,
     event_source_seq: AtomicI64,
-    /// 后台任务（background_jobs 表）：id → (job_type, payload, status)
-    jobs: Mutex<HashMap<i64, (String, Option<String>, String)>>,
+    /// 后台任务（background_jobs 表）。
+    jobs: JobStore,
     job_seq: AtomicI64,
 }
 

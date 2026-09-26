@@ -777,10 +777,15 @@ mod tests {
 
     #[test]
     fn has_enough_sample_boundary() {
-        let mut stats = StyleStats::default();
-        stats.sample_count = 199;
+        let stats = StyleStats {
+            sample_count: 199,
+            ..Default::default()
+        };
         assert!(!stats.has_enough_sample(200));
-        stats.sample_count = 200;
+        let stats = StyleStats {
+            sample_count: 200,
+            ..Default::default()
+        };
         assert!(stats.has_enough_sample(200));
     }
 

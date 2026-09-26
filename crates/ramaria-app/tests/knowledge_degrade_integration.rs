@@ -80,8 +80,10 @@ async fn detector_disabled_returns_empty() {
     let storage = MockStorage::new();
     storage.add_fact(active_fact("char-0001", "喜欢科幻电影", "电影,科幻"));
 
-    let mut config = KnowledgeConfig::default();
-    config.detector_enabled = false; // 关闭判定器
+    let config = KnowledgeConfig {
+        detector_enabled: false, // 关闭判定器
+        ..Default::default()
+    };
     let facts = load_knowledge_facts(&storage, config, "char-0001", "你喜欢什么电影？").await;
 
     assert!(

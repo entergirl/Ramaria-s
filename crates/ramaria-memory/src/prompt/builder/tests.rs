@@ -891,7 +891,7 @@ fn behavior_block_budget_applied_in_assemble() {
     let behavior_pos = result.find("## 行为规则").expect("行为块存在");
     // 截取行为块文本（到下一个段落标题或结尾）
     let tail = &result[behavior_pos..];
-    let block_len = tail.find("\n\n# ").map(|p| p).unwrap_or(tail.len());
+    let block_len = tail.find("\n\n# ").unwrap_or(tail.len());
     let block = &tail[..block_len];
     assert!(block.chars().count() <= 24, "行为块 ≤ 预算: {block}");
     assert!(block.ends_with('…'), "截断提示: {block}");
@@ -1463,9 +1463,11 @@ fn coordinated_drops_low_priority_layer_blocks() {
     let ctx = behavior_hit_ctx();
     let config = PromptConfig::default();
     // 极小池只保留固定骨架能放下的最高优先注入块；memory(脉络) 先被整块丢弃
-    let mut budget = ramaria_core::config::InjectionBudgetConfig::default();
-    budget.enabled = true;
-    budget.max_injection_tokens = 2;
+    let budget = ramaria_core::config::InjectionBudgetConfig {
+        enabled: true,
+        max_injection_tokens: 2,
+        ..Default::default()
+    };
     let out = assemble_prompt_coordinated(&ctx, &config, &budget, None);
     assert!(
         out.dropped.contains(&InjectionSlot::Memory),
@@ -1493,9 +1495,11 @@ fn coordinated_drops_low_priority_layer_blocks() {
 fn coordinated_keeps_rag_and_high_priority_layers() {
     let ctx = behavior_hit_ctx();
     let config = PromptConfig::default();
-    let mut budget = ramaria_core::config::InjectionBudgetConfig::default();
-    budget.enabled = true;
-    budget.max_injection_tokens = 2000; // 充裕覆盖 RAG + 四层注入
+    let budget = ramaria_core::config::InjectionBudgetConfig {
+        enabled: true,
+        max_injection_tokens: 2000, // 充裕覆盖 RAG + 四层注入
+        ..Default::default()
+    };
     let rag = "用户上次提到喜欢猫，正在准备搬家。";
     let out = assemble_prompt_coordinated(&ctx, &config, &budget, Some(rag));
     // RAG（最高优先）保留
@@ -1526,9 +1530,9 @@ fn coordinated_keeps_rag_and_high_priority_layers() {
 /// 标签压缩改造前"固定骨架"渲染体量（字符数 / 估算 token）。
 ///
 /// 口径: 在压缩改造前用同一骨架上下文（见 [`skeleton_context`]）实测——
-/// `assemble_prompt` 输出恰好由固定样板组成（能力边界 + 默认知识边界 + 默认角色
-/// + 回复规范默认规则/记忆引用规则 + 记忆层引导 + 无历史对话占位 + 无相关记忆占位
-/// + 当前时间），无任何注入数据内容，因此可作为"样板体积"的稳定代理。
+/// `assemble_prompt` 输出恰好由固定样板组成（能力边界 + 默认知识边界 + 默认角色 +
+/// 回复规范默认规则/记忆引用规则 + 记忆层引导 + 无历史对话占位 + 无相关记忆占位 +
+/// 当前时间），无任何注入数据内容，因此可作为"样板体积"的稳定代理。
 /// 实测记录: chars=849, tokens=393。
 const LEGACY_BOILERPLATE_CHARS: usize = 849;
 const LEGACY_BOILERPLATE_TOKENS: usize = 393;

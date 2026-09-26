@@ -693,22 +693,36 @@ mod tests {
         let mut idle_loop = engine.spawn_idle_loop_with(IdleLoopOptions::new(1));
         assert!(idle_loop.is_running(), "拉起后循环应处于运行状态");
 
-        // 轮询等待自动封存（最多 6 秒）：不依赖固定 sleep，避免慢机偶发失败
+        // 轮询等待自动封存完成（最多 6 秒）：不依赖固定 sleep，避免慢机偶发失败；
+        // 同时等待"会话已关闭 + L1 已落库"——抢占关闭与 L1 生成落库之间存在窗口，
+        // 只看关闭会在窗口内误判为"未生成 L1"。
         let deadline = Instant::now() + Duration::from_secs(6);
-        let mut closed = false;
         while Instant::now() < deadline {
             let session_row = storage
                 .get_session(session)
                 .await
                 .expect("查询会话应成功")
                 .expect("会话应存在");
-            if session_row.ended_at.is_some() {
-                closed = true;
+            let l1_count = storage
+                .list_memory_l1(session)
+                .await
+                .expect("读取 L1 应成功")
+                .len();
+            if session_row.ended_at.is_some() && l1_count == 1 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        assert!(closed, "空闲检查循环应在间隔内自动封存超时会话");
+        // 跳出后按最终状态断言（超时同样走到这里，给出准确的失败原因）
+        let session_row = storage
+            .get_session(session)
+            .await
+            .expect("查询会话应成功")
+            .expect("会话应存在");
+        assert!(
+            session_row.ended_at.is_some(),
+            "空闲检查循环应在间隔内自动封存超时会话"
+        );
         assert_eq!(
             storage
                 .list_memory_l1(session)

@@ -255,7 +255,9 @@ mod tests {
 
     #[tokio::test]
     async fn missing_field_returns_fatal() {
-        let cases: Vec<(&str, fn(&mut PipelineData))> = vec![
+        // 缺项用例：标签 + 就地篡改函数
+        type Case = (&'static str, fn(&mut PipelineData));
+        let cases: Vec<Case> = vec![
             ("system_prompt", |d| d.system_prompt = None), // 未设置 Stage 6 产出
             ("backend_config", |d| d.backend_config = None), // 未设置 Stage 2 产出
         ];
@@ -407,13 +409,13 @@ mod tests {
         assert!(result.is_ok());
         let output = result.expect("should succeed");
 
-        match output.budgeted_memory_context {
-            Some(rag) => assert!(
+        // RAG 被丢弃也满足"不超预算"，故仅在有值时断言
+        if let Some(rag) = output.budgeted_memory_context {
+            assert!(
                 token_budget::estimate_tokens(&rag) <= 5,
                 "总池约束 RAG: {}",
                 token_budget::estimate_tokens(&rag)
-            ),
-            None => {} // RAG 被丢弃也满足"不超预算"
+            );
         }
     }
 

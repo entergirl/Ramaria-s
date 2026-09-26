@@ -948,7 +948,7 @@ mod tests {
             &DriftConfig::default(),
             &storage,
             "persona-drift",
-            &[trait_fixture.clone()],
+            std::slice::from_ref(&trait_fixture),
             &events,
             false,
         )
@@ -990,7 +990,7 @@ mod tests {
             &DriftConfig::default(),
             &storage,
             "persona-drift",
-            &[trait_fixture.clone()],
+            std::slice::from_ref(&trait_fixture),
             &events,
             true,
         )

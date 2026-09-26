@@ -109,8 +109,10 @@ mod tests {
     async fn assert_insufficient_closed_loop(sample_fallback: bool) {
         let storage = MockStorage::new();
         storage.add_persona_messages("char-0001", insufficient_messages());
-        let mut cfg = StyleConfig::default();
-        cfg.sample_fallback = sample_fallback;
+        let cfg = StyleConfig {
+            sample_fallback,
+            ..Default::default()
+        };
 
         style_incremental_update_core(&storage, None, &cfg, "char-0001")
             .await
@@ -319,8 +321,10 @@ mod tests {
                 .map(|_| msg("最近工作压力好大，晚上都在想工作压力的事"))
                 .collect(),
         );
-        let mut cfg = StyleConfig::default();
-        cfg.keyword_dict = false; // 关闭词表衔接 → 回退纯 bigram
+        let cfg = StyleConfig {
+            keyword_dict: false, // 关闭词表衔接 → 回退纯 bigram
+            ..Default::default()
+        };
         style_incremental_update_core(&storage, None, &cfg, "char-0001")
             .await
             .expect("更新成功");

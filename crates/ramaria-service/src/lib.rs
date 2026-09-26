@@ -11,6 +11,7 @@
 //!
 //! 模块划分:
 //! - `engine`：依赖装配（storage / config / LLM / embedding / 检索槽）与用例入口；
+//! - `config`：配置双写用例（config.toml ↔ settings / backend_config 表，一致性校验与模板生成）；
 //! - `index`：检索索引懒加载、代次刷新与 L1 增量镜像（召回前置）；
 //! - `model`：模型管理用例（后端配置热更新、嵌入模型校验 / 加载 / 读取、降级原因）；
 //! - `setup`：首次配置用例（缺项诊断、状态机推进、后端健康探测）；
@@ -20,10 +21,11 @@
 //! - `lifecycle`：会话生命周期容器（活跃指针 / 手动关闭 / 空闲检查线程 / L2-L3 调度 / 关停）
 //!   与 L1 摘要重生成 / 补扫，后台定时链路与手动触发共用；
 //! - `fact_extract`：知识事实自动抽取编排（`[knowledge].auto_fact_detect` 增强层）；
-//! - `hooks`：默认封存钩子装配（行为 / 风格 / L2，供 MCP 等入口注册）；
+//! - `hooks`：封存钩子默认装配（轻量链 / 完整链两套，供入口按响应语义注册）；
 //! - 入口层（如 `ramaria-mcp`）只做协议包装，不承载业务逻辑。
 
 pub mod chat;
+pub mod config;
 pub mod engine;
 pub mod fact_extract;
 pub mod hooks;
@@ -43,8 +45,9 @@ pub mod types;
 #[cfg(test)]
 pub(crate) mod test_support;
 
+pub use config::{ConfigWriter, MismatchEntry, SyncOutcome, SyncWriteResult};
 pub use engine::{Engine, EngineOptions};
-pub use hooks::default_seal_hooks;
+pub use hooks::{default_seal_hooks, full_seal_hooks};
 pub use idle::{IdleLoop, IdleLoopOptions, MIN_IDLE_CHECK_INTERVAL_SECONDS};
 pub use lifecycle::{Lifecycle, LifecycleOptions};
 pub use model::validate_embedding_model;

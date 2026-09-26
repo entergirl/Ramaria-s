@@ -436,7 +436,7 @@ mod tests {
         assert!(out.contains("第三行内容"), "应保留最近内容: {out}");
         assert!(out.contains("前文已省略"), "应含省略标记");
         // 截断后实际内容（不含标记行）≤ 预算
-        let body = out.split('\n').last().unwrap_or("");
+        let body = out.split('\n').next_back().unwrap_or("");
         assert!(body.chars().count() <= 10, "保留内容不应超预算");
     }
 
@@ -453,7 +453,7 @@ mod tests {
         let text = "这是一条非常长的消息内容，远超预算";
         let out = truncate_from_head(text, 8);
         assert!(!out.is_empty());
-        let body = out.split('\n').last().unwrap_or("");
+        let body = out.split('\n').next_back().unwrap_or("");
         assert!(body.chars().count() <= 8);
         assert!(body.contains("预算"), "应保留末尾字符");
     }

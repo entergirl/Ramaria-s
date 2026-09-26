@@ -2,7 +2,7 @@
 //!
 //! 设计特点:
 //! - `check_l2_trigger`：遍历全部 persona，未吸收 L1 ≥ 阈值 → 事件提取；另处理无主 L1 归属
-//! - `check_l3_trigger`：未吸收事件 ≥ 阈值或最早事件超龄 → 性格推断
+//! - `check_l3_trigger`：未吸收事件 ≥ 计数阈值，或时间线（`> 0`）下最早事件超龄 → 性格推断
 //! - L2 提取经 `JobManager` 包裹（指数退避重试）；成功后按开关执行知识事实抽取并级联 L3
 //! - L3 全流程：Phase A 统计 + 分层收缩 → Phase B LLM 推断 → Phase C 置信度更新 + 漂移检测
 //! - `spawn_scheduler` 后台定时任务：先延迟再周期检查（按 60 秒分片感知停止位）
@@ -505,17 +505,24 @@ async fn process_unbound_l1_for_l2(
 
 /// 检查 L3 性格推断触发条件。
 ///
-/// 触发条件：未吸收事件 ≥ 阈值（默认 10 条）或最早事件 > 阈值天数（默认 30 天）。
+/// 触发条件（任一满足）:
+/// - 计数线：未吸收事件数 ≥ `[thresholds].l3_trigger_count`（默认 10 条；`0` = 有事件即触发）；
+/// - 时间线：`[thresholds].l3_trigger_days` > 0 且最早事件超过该天数
+///   （默认 30 天；`0` = 不按时间触发，与定时路径同约定）。
 ///
 /// 参数:
 /// - `engine`: 服务层引擎。
 /// - `shutdown`: 宿主停止位；本函数不做停止位中断，参数保留以对齐调度链调用口径。
 /// - `persona_uid`: 目标人格。
+///
+/// 返回:
+/// - `true`: 本次启动了性格推断；
+/// - `false`: 未触发（无未吸收事件或条件不满足）。
 pub(crate) async fn check_l3_trigger(
     engine: &Engine,
     shutdown: Option<&AtomicBool>,
     persona_uid: &str,
-) {
+) -> bool {
     // 停止位中断由调用方轮次循环承担；本函数不额外检查。
     let _ = shutdown;
 
@@ -524,12 +531,12 @@ pub(crate) async fn check_l3_trigger(
         Ok(e) => e,
         Err(e) => {
             warn!(persona_uid, %e, "L3 触发检查：查询未吸收事件失败");
-            return;
+            return false;
         }
     };
 
     if events.is_empty() {
-        return;
+        return false;
     }
 
     let now = now_ms();
@@ -540,13 +547,15 @@ pub(crate) async fn check_l3_trigger(
         .map(|min_time| (now - min_time) as f64 / (1000.0 * 86400.0))
         .unwrap_or(0.0);
 
-    // L3 触发条件来自配置（阈值计数与天数）
+    // L3 触发条件来自配置：计数线 `0` = 有未吸收事件即触发；
+    // 时间线 `0` = 不按时间触发（与定时路径同一约定）
     let trigger_count = engine.config().thresholds.l3_trigger_count as usize;
     let trigger_days = engine.config().thresholds.l3_trigger_days as f64;
 
-    let should_trigger = events.len() >= trigger_count || oldest_event_age_days >= trigger_days;
+    let count_fired = events.len() >= trigger_count;
+    let time_fired = trigger_days > 0.0 && oldest_event_age_days >= trigger_days;
 
-    if should_trigger {
+    if count_fired || time_fired {
         info!(
             persona_uid,
             event_count = events.len(),
@@ -554,6 +563,7 @@ pub(crate) async fn check_l3_trigger(
             "L3 触发条件满足，启动性格推断"
         );
         run_l3_inference(engine, persona_uid).await;
+        true
     } else {
         info!(
             persona_uid,
@@ -564,6 +574,7 @@ pub(crate) async fn check_l3_trigger(
             "L3 触发条件未满足（需要 {} 条未吸收事件或最早事件 > {} 天，当前 {} 条 {:.1} 天）",
             trigger_count, trigger_days, events.len(), oldest_event_age_days
         );
+        false
     }
 }
 
@@ -876,9 +887,10 @@ fn is_first_inference_round(phase_b_result: &ramaria_memory::inference::PhaseBRe
 ///
 /// 逻辑:
 /// - 首轮检查延迟 `first_delay_seconds` 秒执行（避开宿主启动阶段）；
-/// - 之后每 `interval_seconds` 秒检查一轮，遍历所有 persona：
-///   - 最早未吸收 L1 > 7 天 → 触发 L2 事件提取
-///   - 最早未吸收事件 > 30 天 → 触发 L3 性格推断
+/// - 之后每 `interval_seconds` 秒检查一轮，遍历所有 persona（时间线阈值来自配置，
+///   `> 0` 才启用）：
+///   - 最早未吸收 L1 超过 `[thresholds].l2_trigger_days` 天 → 触发 L2 事件提取
+///   - 最早未吸收事件超过 `[thresholds].l3_trigger_days` 天 → 触发 L3 性格推断
 /// - 停止位置位后退出；等待按 60 秒分片，每片感知一次停止位。
 ///
 /// 参数:
@@ -925,9 +937,9 @@ pub(crate) fn spawn_scheduler(
 ///
 /// 流程:
 /// 1. L1 补扫：消费封存失败遗留的摘要任务；
-/// 2. 遍历所有 persona：
-///    - 最早未吸收 L1 > 7 天 → 触发 L2 事件提取（时间触发路径）；
-///    - 最早未吸收事件 > 30 天 → 触发 L3 性格推断（时间触发路径）；
+/// 2. 遍历所有 persona（时间线阈值来自配置，`> 0` 才启用）：
+///    - 最早未吸收 L1 超过 `[thresholds].l2_trigger_days` 天 → 触发 L2 事件提取（时间触发路径）；
+///    - 最早未吸收事件超过 `[thresholds].l3_trigger_days` 天 → 触发 L3 性格推断（时间触发路径）；
 /// 3. 无主 L1 按时间阈值（`[thresholds].l2_trigger_days`）归属并触发提取。
 ///
 /// 参数:
@@ -954,6 +966,9 @@ pub(crate) async fn run_scheduled_check(engine: &Engine, shutdown: Option<&Atomi
 
     let now = now_ms();
     let ms_per_day: i64 = 86_400_000;
+    // 时间线阈值来自配置：`> 0` 才启用该时间线（`0` = 不按时间触发；计数线不受影响）
+    let l2_trigger_days = engine.config().thresholds.l2_trigger_days as f64;
+    let l3_trigger_days = engine.config().thresholds.l3_trigger_days as f64;
 
     for persona in &personas {
         if shutdown_requested(shutdown) {
@@ -961,17 +976,18 @@ pub(crate) async fn run_scheduled_check(engine: &Engine, shutdown: Option<&Atomi
         }
 
         // ---- L2 时间触发 ----
-        // 最早未吸收 L1 > 7 天则触发
+        // 最早未吸收 L1 超过配置阈值天数则触发（阈值 > 0 才启用）
         match storage.list_unabsorbed_l1(&persona.uid).await {
             Ok(l1_list) => {
                 if let Some(oldest) = l1_list.iter().map(|l| l.created_at).min() {
                     let age_days = (now - oldest) as f64 / ms_per_day as f64;
-                    if age_days >= 7.0 {
+                    if l2_trigger_days > 0.0 && age_days >= l2_trigger_days {
                         info!(
                             persona_uid = %persona.uid,
                             %age_days,
                             l1_count = l1_list.len(),
-                            "L2 定时触发（路径 B：最早未吸收 L1 > 7 天）"
+                            trigger_days = l2_trigger_days,
+                            "L2 定时触发（路径 B：最早未吸收 L1 超过阈值天数）"
                         );
                         // 定时路径也确定对话另一方
                         let other_name = if personas.len() == 2 {
@@ -992,17 +1008,18 @@ pub(crate) async fn run_scheduled_check(engine: &Engine, shutdown: Option<&Atomi
         }
 
         // ---- L3 时间触发 ----
-        // 最早未吸收事件 > 30 天则触发
+        // 最早未吸收事件超过配置阈值天数则触发（阈值 > 0 才启用）
         match storage.list_unabsorbed_events(&persona.uid).await {
             Ok(events) => {
                 if let Some(oldest) = events.iter().map(|e| e.start).min() {
                     let age_days = (now - oldest) as f64 / ms_per_day as f64;
-                    if age_days >= 30.0 {
+                    if l3_trigger_days > 0.0 && age_days >= l3_trigger_days {
                         info!(
                             persona_uid = %persona.uid,
                             %age_days,
                             event_count = events.len(),
-                            "L3 定时触发（路径 B：最早未吸收事件 > 30 天）"
+                            trigger_days = l3_trigger_days,
+                            "L3 定时触发（路径 B：最早未吸收事件超过阈值天数）"
                         );
                         run_l3_inference(engine, &persona.uid).await;
                     }
@@ -1048,6 +1065,7 @@ mod tests {
     };
     use ramaria_core::config::RamariaConfig;
     use ramaria_core::traits::{StoreCrud, StoreInfrastructure};
+    use ramaria_core::types::MemoryEvent;
     use std::time::Instant;
 
     /// 空库（无 persona）：检查正常返回，不产生任何任务。
@@ -1237,7 +1255,10 @@ mod tests {
         let (engine, storage, dir) = engine_with_db("l2l3-l3-none").await;
         seed_persona(&storage, "char-0001").await;
 
-        check_l3_trigger(&engine, None, "char-0001").await;
+        assert!(
+            !check_l3_trigger(&engine, None, "char-0001").await,
+            "无未吸收事件不应触发推断"
+        );
 
         let pending = storage.list_pending_jobs().await.expect("查询任务应成功");
         assert!(
@@ -1245,6 +1266,98 @@ mod tests {
                 .iter()
                 .any(|(_, job_type, _)| job_type == JobType::PersonalityInference.as_str()),
             "无未吸收事件不应创建性格推断任务: {pending:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 即时路径：L3 时间线阈值 `0` = 不按时间触发 —— 超龄事件保持未吸收、不启动推断。
+    #[tokio::test]
+    async fn instant_check_zero_l3_days_disables_age_trigger() {
+        let mut config = RamariaConfig::default();
+        config.thresholds.l3_trigger_days = 0;
+        let (engine, storage, dir) =
+            engine_with_llm_and_config("l2l3-l3-zero", MockLlm::local(), config).await;
+        seed_persona(&storage, "char-0001").await;
+
+        // 40 天前的事件：即使超过默认 30 天，阈值 0 下也不应触发
+        let start = now_ms() - 40 * 86_400_000;
+        let mut event = MemoryEvent::new(
+            "char-0001".to_string(),
+            "旧事件".to_string(),
+            "很久以前发生的事件".to_string(),
+            start,
+            start + 3_600_000,
+        );
+        event.confidence = 0.8;
+        storage.save_event(&event).await.expect("写入事件应成功");
+
+        assert!(
+            !check_l3_trigger(&engine, None, "char-0001").await,
+            "时间线阈值 0 时不应按事件年龄触发推断"
+        );
+        let unabsorbed = storage
+            .list_unabsorbed_events("char-0001")
+            .await
+            .expect("查询未吸收事件应成功");
+        assert_eq!(unabsorbed.len(), 1, "未触发时事件应保持未吸收");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 即时路径：L3 时间线阈值大于 0 时生效 —— 超龄事件触发推断（对照 `0` 值关闭）。
+    #[tokio::test]
+    async fn instant_check_age_trigger_fires_when_days_enabled() {
+        let mut config = RamariaConfig::default();
+        config.thresholds.l3_trigger_days = 1;
+        let (engine, storage, dir) =
+            engine_with_llm_and_config("l2l3-l3-age", MockLlm::local(), config).await;
+        seed_persona(&storage, "char-0001").await;
+
+        // 2 天前的事件：超过自定义阈值 1 天 → 应触发
+        let start = now_ms() - 2 * 86_400_000;
+        let mut event = MemoryEvent::new(
+            "char-0001".to_string(),
+            "工作压力事件".to_string(),
+            "用户最近工作压力很大".to_string(),
+            start,
+            start + 3_600_000,
+        );
+        event.confidence = 0.8;
+        storage.save_event(&event).await.expect("写入事件应成功");
+
+        assert!(
+            check_l3_trigger(&engine, None, "char-0001").await,
+            "时间线阈值大于 0 且事件超龄时应触发推断"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 即时路径：时间线阈值 `0` 不影响计数线 —— 未吸收事件达计数阈值仍触发。
+    #[tokio::test]
+    async fn instant_check_count_trigger_ignores_disabled_age_line() {
+        let mut config = RamariaConfig::default();
+        config.thresholds.l3_trigger_days = 0;
+        config.thresholds.l3_trigger_count = 1;
+        let (engine, storage, dir) =
+            engine_with_llm_and_config("l2l3-l3-count", MockLlm::local(), config).await;
+        seed_persona(&storage, "char-0001").await;
+
+        let start = now_ms() - 3_600_000;
+        let mut event = MemoryEvent::new(
+            "char-0001".to_string(),
+            "工作压力事件".to_string(),
+            "用户最近工作压力很大".to_string(),
+            start,
+            start + 600_000,
+        );
+        event.confidence = 0.8;
+        storage.save_event(&event).await.expect("写入事件应成功");
+
+        assert!(
+            check_l3_trigger(&engine, None, "char-0001").await,
+            "时间线关闭不影响计数线：达计数阈值即触发"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1270,6 +1383,292 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         handle.await.expect("调度任务不应 panic");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // =========================================================
+    // 定时检查时间线（配置驱动）
+    // =========================================================
+
+    /// 定时检查：L2 时间线按 `[thresholds].l2_trigger_days` 判定 —— 2 天前的未吸收
+    /// L1 超过自定义阈值（1 天）时触发提取，L1 被吸收且有事件产出。
+    #[tokio::test]
+    async fn scheduled_check_uses_configured_l2_days() {
+        let mut config = RamariaConfig::default();
+        config.thresholds.l2_trigger_days = 1;
+        // 测试不等待簇间节流（生产默认 800ms）
+        config.thresholds.cluster_delay_ms = 0;
+        let (engine, storage, dir) = engine_with_llm_and_config(
+            "l2l3-sched-l2",
+            MockLlm::with_reply(r#"{"events": []}"#),
+            config,
+        )
+        .await;
+        seed_persona(&storage, "char-0001").await;
+        // 3 条 2 天前的未吸收 L1（关键词连通 → 单簇）；计数阈值 5 未满足
+        let two_days_ago = now_ms() - 2 * 86_400_000;
+        for i in 0..3 {
+            seed_l1(
+                &storage,
+                "char-0001",
+                "用户最近工作压力很大",
+                Some("工作压力"),
+                two_days_ago + i,
+            )
+            .await;
+        }
+
+        run_scheduled_check(&engine, None).await;
+
+        let unabsorbed = storage
+            .list_unabsorbed_l1("char-0001")
+            .await
+            .expect("查询未吸收 L1 应成功");
+        assert!(
+            unabsorbed.is_empty(),
+            "超过自定义天数阈值应触发提取并吸收 L1: {unabsorbed:?}"
+        );
+        let events = storage
+            .list_events_by_persona("char-0001", 0, 100)
+            .await
+            .expect("查询事件应成功");
+        assert!(!events.is_empty(), "触发提取应有事件产出（降级事件亦可）");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 定时检查：L2 时间线阈值 `0` = 不按时间触发 —— 未吸收 L1 保持未吸收、无事件产出。
+    #[tokio::test]
+    async fn scheduled_check_zero_l2_days_disables_age_trigger() {
+        let mut config = RamariaConfig::default();
+        config.thresholds.l2_trigger_days = 0;
+        config.thresholds.cluster_delay_ms = 0;
+        let (engine, storage, dir) = engine_with_llm_and_config(
+            "l2l3-sched-l2-zero",
+            MockLlm::with_reply(r#"{"events": []}"#),
+            config,
+        )
+        .await;
+        seed_persona(&storage, "char-0001").await;
+        // 3 条 10 天前的未吸收 L1：即使超过默认 7 天，阈值 0 下也不应触发
+        let long_ago = now_ms() - 10 * 86_400_000;
+        for i in 0..3 {
+            seed_l1(
+                &storage,
+                "char-0001",
+                "用户最近工作压力很大",
+                Some("工作压力"),
+                long_ago + i,
+            )
+            .await;
+        }
+
+        run_scheduled_check(&engine, None).await;
+
+        let unabsorbed = storage
+            .list_unabsorbed_l1("char-0001")
+            .await
+            .expect("查询未吸收 L1 应成功");
+        assert_eq!(unabsorbed.len(), 3, "阈值 0 时时间线不触发，L1 保持未吸收");
+        let events = storage
+            .list_events_by_persona("char-0001", 0, 100)
+            .await
+            .expect("查询事件应成功");
+        assert!(events.is_empty(), "未触发不应产出事件");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 定时检查：L3 时间线按 `[thresholds].l3_trigger_days` 判定 —— 2 天前的未吸收
+    /// 事件超过自定义阈值（1 天）时触发推断，事件被吸收。
+    #[tokio::test]
+    async fn scheduled_check_uses_configured_l3_days() {
+        let mut config = RamariaConfig::default();
+        config.thresholds.l3_trigger_days = 1;
+        let (engine, storage, dir) =
+            engine_with_llm_and_config("l2l3-sched-l3", MockLlm::local(), config).await;
+        seed_persona(&storage, "char-0001").await;
+
+        let start = now_ms() - 2 * 86_400_000;
+        let mut event = MemoryEvent::new(
+            "char-0001".to_string(),
+            "工作压力事件".to_string(),
+            "用户最近工作压力很大".to_string(),
+            start,
+            start + 3_600_000,
+        );
+        event.confidence = 0.8; // ≥ 0.6 才参与性格推断
+        storage.save_event(&event).await.expect("写入事件应成功");
+
+        run_scheduled_check(&engine, None).await;
+
+        let unabsorbed = storage
+            .list_unabsorbed_events("char-0001")
+            .await
+            .expect("查询未吸收事件应成功");
+        assert!(
+            unabsorbed.is_empty(),
+            "超过自定义天数阈值应触发 L3 推断并吸收事件: {unabsorbed:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 定时检查：L3 时间线阈值 `0` = 不按时间触发 —— 未吸收事件保持未吸收。
+    #[tokio::test]
+    async fn scheduled_check_zero_l3_days_disables_age_trigger() {
+        let mut config = RamariaConfig::default();
+        config.thresholds.l3_trigger_days = 0;
+        let (engine, storage, dir) =
+            engine_with_llm_and_config("l2l3-sched-l3-zero", MockLlm::local(), config).await;
+        seed_persona(&storage, "char-0001").await;
+
+        // 40 天前的事件：即使超过默认 30 天，阈值 0 下也不应触发
+        let start = now_ms() - 40 * 86_400_000;
+        let mut event = MemoryEvent::new(
+            "char-0001".to_string(),
+            "旧事件".to_string(),
+            "很久以前发生的事件".to_string(),
+            start,
+            start + 3_600_000,
+        );
+        event.confidence = 0.8;
+        storage.save_event(&event).await.expect("写入事件应成功");
+
+        run_scheduled_check(&engine, None).await;
+
+        let unabsorbed = storage
+            .list_unabsorbed_events("char-0001")
+            .await
+            .expect("查询未吸收事件应成功");
+        assert_eq!(unabsorbed.len(), 1, "阈值 0 时时间线不触发，事件保持未吸收");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 定时检查：默认阈值（7 天）行为回归 —— 8 天前的未吸收 L1 触发提取，
+    /// 6 天前的保持未吸收。
+    #[tokio::test]
+    async fn scheduled_check_default_l2_days_behavior() {
+        let mut config = RamariaConfig::default();
+        config.thresholds.cluster_delay_ms = 0;
+        let (engine, storage, dir) = engine_with_llm_and_config(
+            "l2l3-sched-default",
+            MockLlm::with_reply(r#"{"events": []}"#),
+            config,
+        )
+        .await;
+        seed_persona(&storage, "char-0001").await;
+        seed_persona(&storage, "char-0002").await;
+        // char-0001：3 条 8 天前的 L1（超过默认 7 天）→ 应触发
+        let over_age = now_ms() - 8 * 86_400_000;
+        for i in 0..3 {
+            seed_l1(
+                &storage,
+                "char-0001",
+                "用户最近工作压力很大",
+                Some("工作压力"),
+                over_age + i,
+            )
+            .await;
+        }
+        // char-0002：3 条 6 天前的 L1（未达默认 7 天）→ 不应触发
+        let within_age = now_ms() - 6 * 86_400_000;
+        for i in 0..3 {
+            seed_l1(
+                &storage,
+                "char-0002",
+                "用户最近睡眠质量不好",
+                Some("睡眠"),
+                within_age + i,
+            )
+            .await;
+        }
+
+        run_scheduled_check(&engine, None).await;
+
+        let triggered = storage
+            .list_unabsorbed_l1("char-0001")
+            .await
+            .expect("查询未吸收 L1 应成功");
+        assert!(
+            triggered.is_empty(),
+            "默认 7 天阈值下 8 天前的 L1 应触发提取"
+        );
+        let pending = storage
+            .list_unabsorbed_l1("char-0002")
+            .await
+            .expect("查询未吸收 L1 应成功");
+        assert_eq!(
+            pending.len(),
+            3,
+            "6 天前的 L1 未达默认 7 天阈值，保持未吸收"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 定时检查：默认阈值（30 天）行为回归 —— 40 天前的未吸收事件触发推断并吸收，
+    /// 20 天前的保持未吸收。
+    #[tokio::test]
+    async fn scheduled_check_default_l3_days_behavior() {
+        let (engine, storage, dir) = engine_with_llm_and_config(
+            "l2l3-sched-default-l3",
+            MockLlm::local(),
+            RamariaConfig::default(),
+        )
+        .await;
+        seed_persona(&storage, "char-0001").await;
+        seed_persona(&storage, "char-0002").await;
+
+        let over_age = now_ms() - 40 * 86_400_000;
+        let mut triggered_event = MemoryEvent::new(
+            "char-0001".to_string(),
+            "旧事件".to_string(),
+            "很久以前发生的事件".to_string(),
+            over_age,
+            over_age + 3_600_000,
+        );
+        triggered_event.confidence = 0.8;
+        storage
+            .save_event(&triggered_event)
+            .await
+            .expect("写入事件应成功");
+
+        let within_age = now_ms() - 20 * 86_400_000;
+        let mut pending_event = MemoryEvent::new(
+            "char-0002".to_string(),
+            "近期事件".to_string(),
+            "近期发生的事件".to_string(),
+            within_age,
+            within_age + 3_600_000,
+        );
+        pending_event.confidence = 0.8;
+        storage
+            .save_event(&pending_event)
+            .await
+            .expect("写入事件应成功");
+
+        run_scheduled_check(&engine, None).await;
+
+        let triggered = storage
+            .list_unabsorbed_events("char-0001")
+            .await
+            .expect("查询未吸收事件应成功");
+        assert!(
+            triggered.is_empty(),
+            "默认 30 天阈值下 40 天前的事件应触发推断并吸收"
+        );
+        let pending = storage
+            .list_unabsorbed_events("char-0002")
+            .await
+            .expect("查询未吸收事件应成功");
+        assert_eq!(
+            pending.len(),
+            1,
+            "20 天前的事件未达默认 30 天阈值，保持未吸收"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -173,9 +173,11 @@ mod tests {
 
     #[test]
     fn constants_are_reasonable() {
-        // 确保常量值在合理范围内
-        assert!(MAX_TITLE_LEN > 0 && MAX_TITLE_LEN <= 120);
-        assert!(MAX_BODY_LEN > 0 && MAX_BODY_LEN <= 500);
-        assert!(CHAT_PREVIEW_LEN > 0 && CHAT_PREVIEW_LEN <= 200);
+        // 确保常量值在合理范围内（编译期断言：越界即编译失败）
+        const {
+            assert!(MAX_TITLE_LEN > 0 && MAX_TITLE_LEN <= 120);
+            assert!(MAX_BODY_LEN > 0 && MAX_BODY_LEN <= 500);
+            assert!(CHAT_PREVIEW_LEN > 0 && CHAT_PREVIEW_LEN <= 200);
+        }
     }
 }

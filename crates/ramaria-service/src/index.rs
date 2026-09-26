@@ -1,21 +1,25 @@
-//! crates/ramaria-service/src/index.rs - 检索索引懒加载与增量镜像
+//! crates/ramaria-service/src/index.rs - 检索索引构建、懒加载与增量镜像
 //!
 //! 设计特点:
 //! - 懒加载：首次召回前构建一次（进程启动不为大库付加载代价），构建完成后整体替换
+//! - 显式重建：`rebuild` 跳过懒加载早退与冷却窗口，供宿主手动刷新整库索引
 //! - 原子替换：新索引在临时实例上完整构建，成功后一次写入替换；读者要么见旧索引，
-//!   要么见新索引，不会读到半成品
+//!   要么见新索引，不会读到半成品；构建失败旧索引保持可用并置"重建失败"告警位
 //! - 数据来源与在线管线一致：各 persona 的未吸收 L1 + L2 事件 + utt 块，另加无主 L1
 //! - 降级链：嵌入模型缺失 / 批量向量化失败 → 仅 BM25 + 关键词镜像（不阻塞构建）；
 //!   关键词词表读取失败 → 空词典（纯 bigram 口径，行为可预期）
+//! - BM25 词典增强迁移：旧分词版本 + 已确认词表非空 → 重建切为词典增强口径并写回版本标记
 //! - 增量镜像：L1 生成后同步进检索器与关键词镜像（不重建整库）
 //! - 代次刷新：召回前比对库内语料戳与 BM25 分词代次，其他进程写入 / 词典升级后
 //!   重建内存索引（同进程脏标记保留为加载窗口内的兜底）；
 //!   代次变化触发的重建再受 `[index].refresh_interval_seconds` 冷却窗口约束（0 = 不节流）
-//! - 边界：本模块只做"内存索引维护"，不写数据库（除 L2/L3 无关的索引版本标记外）
+//! - 边界：本模块只做"内存索引维护"，不写数据库（除索引版本 / BM25 分词版本标记外）
 
 use ramaria_core::error::RamariaResult;
 use ramaria_core::lock::{read_recover, write_recover};
-use ramaria_core::traits::IndexCorpusStamp;
+use ramaria_core::traits::{
+    BM25_INDEX_VERSION_CURRENT, BM25_INDEX_VERSION_LEGACY, IndexCorpusStamp,
+};
 use ramaria_core::types::{MemoryL1, now_ms};
 use ramaria_memory::keyword::service::KeywordService;
 use ramaria_memory::keyword::{CommaSeparatedNormalizer, KeywordNormalizer};
@@ -56,7 +60,7 @@ async fn read_stamp(engine: &Engine) -> IndexStamp {
                 error = %e,
                 "读取 BM25 分词代次失败，本次按缺失口径比对（不影响召回本身）"
             );
-            ramaria_core::traits::BM25_INDEX_VERSION_LEGACY
+            BM25_INDEX_VERSION_LEGACY
         }
     };
 
@@ -78,7 +82,7 @@ async fn read_stamp(engine: &Engine) -> IndexStamp {
 }
 
 // =========================================================
-// 懒加载
+// 懒加载与显式重建
 // =========================================================
 
 /// 确保检索索引已加载且与库内语料同代（懒加载 + 代次刷新）。
@@ -86,10 +90,7 @@ async fn read_stamp(engine: &Engine) -> IndexStamp {
 /// 流程:
 /// 1. 读取库内代次快照（语料统计 + BM25 分词代次）；
 /// 2. 已加载、无脏标记、代次一致 → 直接返回 false；
-/// 3. 锁外收集文档视图（各 persona 的 L1/L2/utt + 无主 L1）；
-/// 4. 构建临时检索器（BM25 词典 + 文档索引 + 可选向量）；
-/// 5. 整体替换懒加载槽并记录代次；
-/// 6. 关键词镜像装载（词典池 + 倒排文档 + 可选语义层）。
+/// 3. 否则走 [`build_and_swap`] 完整构建路径（清脏后构建）。
 ///
 /// 参数:
 /// - `engine`: 服务层引擎。
@@ -102,8 +103,9 @@ async fn read_stamp(engine: &Engine) -> IndexStamp {
 /// - 并发调用可能重复构建（幂等：最后一次替换生效）。
 /// - 脏标记协同（避免丢 L1）：加载窗口内封存产生的新 L1 进不了内存索引，其增量镜像会置脏；
 ///   本函数在开始构建前清脏，构建期间再产生的增量会重新置脏 → 下次调用再补一次（收敛）。
-/// - 代次协同（跨进程）：记录的是构建前读取的快照；构建窗口内其他进程的新写入
+/// - 代次协同（跨进程）：构建时记录的是构建前读取的快照；构建窗口内其他进程的新写入
 ///   会让下次比对不等 → 再刷新一次（收敛，不漏新记忆）。
+/// - 构建失败时置"重建失败"告警位并上抛错误（旧索引保持可用，见 [`build_and_swap`]）。
 pub(crate) async fn ensure_loaded(engine: &Engine) -> RamariaResult<bool> {
     let stamp = read_stamp(engine).await;
 
@@ -132,7 +134,65 @@ pub(crate) async fn ensure_loaded(engine: &Engine) -> RamariaResult<bool> {
     // 构建开始前清脏：构建窗口内新产生的增量会重新置脏（保证不漏、且能收敛）
     engine.clear_index_dirty();
 
+    build_and_swap(engine).await?;
+    Ok(true)
+}
+
+/// 强制全量重建内存检索索引（跳过懒加载早退与冷却窗口）。
+///
+/// 用法:
+/// - 宿主显式刷新（批量导入完成 / 设置变更 / 诊断修复等场景）调用；
+/// - 与懒加载路径共用同一构建实现，不受 `[index].refresh_interval_seconds` 约束。
+///
+/// 返回:
+/// - `Ok(total)`: 重建完成，`total` 为 L1 + L2 文档总数（不含 utt 块）。
+/// - `Err(..)`: 构建失败（旧索引保持可用，告警位置位）。
+pub(crate) async fn rebuild(engine: &Engine) -> RamariaResult<usize> {
+    build_and_swap(engine).await
+}
+
+/// 构建新索引并整体替换懒加载槽（懒加载与显式重建共用的完整构建路径）。
+///
+/// 流程:
+/// 1. 读取库内代次快照（构建前读取，构建完成后记录供下次比对）；
+/// 2. 锁外收集文档视图（各 persona 的未吸收 L1 / L2 事件 / utt 块 + 无主 L1）；
+/// 3. 评估 BM25 词典增强迁移决策（已确认词表 + 分词版本标记）；
+/// 4. 临时检索器构建（检索配置 + 词典 + 文档索引 + 可选向量）；
+/// 5. 整体替换懒加载槽（读者不读半成品）；
+/// 6. 词典增强迁移完成后写回分词版本标记；
+/// 7. 关键词镜像装载（词典池 + 倒排文档 + 语义层）；
+/// 8. 记录代次快照与构建完成时间，写回索引版本（失败只记日志）。
+///
+/// 返回:
+/// - `Ok(total)`: 构建完成，`total` 为 L1 + L2 文档总数（不含 utt 块）。
+/// - `Err(..)`: 关键读取失败（旧索引保持可用），并置"重建失败"告警位。
+///
+/// 降级:
+/// - persona 事件 / utt 块 / 词典 / 向量读取失败按降级链处理，不阻塞构建；
+/// - 成功完成后复位"重建失败"告警位（供诊断展示与宿主告警）。
+async fn build_and_swap(engine: &Engine) -> RamariaResult<usize> {
+    match build_and_swap_inner(engine).await {
+        Ok(total) => {
+            engine.set_index_rebuild_failed(false);
+            Ok(total)
+        }
+        Err(e) => {
+            // 旧索引仍完整可用：置位告警位供宿主提示"记忆注入可能不完整"
+            engine.set_index_rebuild_failed(true);
+            tracing::warn!(
+                error = %e,
+                "检索器重建失败，保留旧索引继续可用（索引未刷新）"
+            );
+            Err(e)
+        }
+    }
+}
+
+/// [`build_and_swap`] 的实际构建实现（告警位维护在外层）。
+async fn build_and_swap_inner(engine: &Engine) -> RamariaResult<usize> {
     let storage = engine.storage_ref().as_ref();
+    // 构建前读取代次快照；构建窗口内的新写入会在下次比对时触发再刷新
+    let stamp = read_stamp(engine).await;
     let started = now_ms();
 
     // ---- 1. 视图收集（锁外 I/O） ----
@@ -173,18 +233,15 @@ pub(crate) async fn ensure_loaded(engine: &Engine) -> RamariaResult<bool> {
 
     let total = l1_views.len() + l2_views.len();
 
-    // ---- 2. 临时实例构建（含 BM25 词典） ----
+    // ---- 2. BM25 词典增强迁移决策（词表 + 分词版本标记） ----
+    let migration = prepare_bm25_migration(engine).await;
+
+    // ---- 3. 临时实例构建（检索配置 + 词典 + 文档索引 + 可选向量） ----
     let mut fresh = Retriever::new();
     *fresh.config_mut() = RetrieverConfig::from_retrieval_config(&engine.config().retrieval);
-    match storage.list_established_keywords().await {
-        Ok(dictionary) => {
-            if !dictionary.is_empty() {
-                fresh.set_bm25_dictionary(&dictionary);
-            }
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "加载 BM25 词典失败，本次按纯 bigram 口径构建");
-        }
+    if migration.apply_dictionary {
+        // 空词典 = 纯 bigram 等价口径：重建总是显式注入，保证口径可预期
+        fresh.set_bm25_dictionary(&migration.dictionary);
     }
     for doc in &l1_views {
         fresh.index_l1(doc);
@@ -195,24 +252,52 @@ pub(crate) async fn ensure_loaded(engine: &Engine) -> RamariaResult<bool> {
     for block in &utt_blocks {
         fresh.index_utt_block(block);
     }
-
-    // ---- 3. 向量索引（嵌入可用时批量生成；失败降级为仅 BM25 + 关键词） ----
     let vectors_built = build_vectors(engine, &mut fresh, &l1_views, &l2_views).await;
 
-    // ---- 4. 整体替换懒加载槽 ----
+    // ---- 4. 整体替换懒加载槽（此后读者要么见旧索引，要么见新索引）----
     {
         let slot = engine.retriever_slot();
         let mut guard = write_recover(slot, "index.retriever_slot");
         *guard = Some(fresh);
     }
 
-    // ---- 5. 关键词镜像装载（词典池 + 倒排文档 + 语义层） ----
+    // ---- 5. 词典增强迁移版本写回（索引已是词典增强口径；失败下次重建自动重试）----
+    if migration.mark_v2 {
+        match storage
+            .set_bm25_index_version(BM25_INDEX_VERSION_CURRENT)
+            .await
+        {
+            Ok(()) => {
+                tracing::info!(
+                    version = BM25_INDEX_VERSION_CURRENT,
+                    "BM25 词典增强分词迁移完成"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "写入 BM25 分词版本失败（索引已按词典增强重建，下次重建自动重试）"
+                );
+            }
+        }
+    }
+
+    // ---- 6. 关键词镜像装载（词典池 + 倒排文档 + 语义层） ----
     sync_keyword_mirror(engine, &l1_views, &l2_views).await;
 
-    // ---- 6. 记录代次快照与构建完成时间（构建前读取；构建窗口内的新写入会在下次比对时触发再刷新）----
+    // ---- 7. 记录代次快照与构建完成时间 ----
     engine.record_index_stamp(stamp);
     // 记"完成时间"：冷却窗口按两次重建之间的实际间隔计算（含本次构建耗时）
     engine.record_index_build_time(now_ms());
+
+    // ---- 8. 标记索引已构建（判定只看 `== 0`，写 1 表"已构建"）----
+    // 供首次配置状态机判定"索引待构建"项消失；写入失败只记日志，不影响内存索引可用性。
+    if let Err(e) = storage.set_index_version(1).await {
+        tracing::warn!(
+            error = %e,
+            "写入索引版本失败（内存索引已可用，首次配置状态判定可能滞后）"
+        );
+    }
 
     tracing::info!(
         l1 = l1_views.len(),
@@ -223,7 +308,66 @@ pub(crate) async fn ensure_loaded(engine: &Engine) -> RamariaResult<bool> {
         bm25_version = stamp.bm25_version,
         "检索索引已加载（共 {total} 条文档）"
     );
-    Ok(true)
+    Ok(total)
+}
+
+/// 读取 BM25 词典增强分词迁移决策。
+///
+/// 说明:
+/// - settings 键 `bm25_index_version` 缺失 / 不可解析视为旧版本（纯 bigram）；
+/// - 词典来源为已确认词表（canonical + 已确认 alias，排除 pending）；
+///   读取失败 → 记 warn 并返回 `apply_dictionary=false`（本次不注入词典）、`mark_v2=false`；
+/// - 仅当分词版本非当前、且词典非空时 `mark_v2=true`
+///   （词典为空时重建与旧版等价，无需升级标记）。
+async fn prepare_bm25_migration(engine: &Engine) -> Bm25MigrationPlan {
+    let storage = engine.storage_ref().as_ref();
+
+    let current_version = match storage.get_bm25_index_version().await {
+        Ok(version) => version,
+        Err(e) => {
+            tracing::warn!(error = %e, "读取 BM25 分词版本失败，按旧版本处理并尝试迁移");
+            BM25_INDEX_VERSION_LEGACY
+        }
+    };
+
+    let dictionary = match storage.list_established_keywords().await {
+        Ok(dictionary) => dictionary,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "加载已确认词表失败，本轮重建不注入词典（保留纯 bigram 口径）"
+            );
+            return Bm25MigrationPlan {
+                dictionary: Vec::new(),
+                apply_dictionary: false,
+                mark_v2: false,
+            };
+        }
+    };
+
+    let mark_v2 = current_version != BM25_INDEX_VERSION_CURRENT && !dictionary.is_empty();
+    tracing::info!(
+        current_version,
+        current = BM25_INDEX_VERSION_CURRENT,
+        dict_size = dictionary.len(),
+        mark_v2,
+        "BM25 词典增强分词检查完成"
+    );
+    Bm25MigrationPlan {
+        dictionary,
+        apply_dictionary: true,
+        mark_v2,
+    }
+}
+
+/// BM25 词典增强分词迁移计划（构建前评估，整体替换成功后按需写回版本标记）。
+struct Bm25MigrationPlan {
+    /// 词典词条（空 = 纯 bigram 口径）。
+    dictionary: Vec<String>,
+    /// 是否把词典应用到本次重建（词表读取失败时为 false → 本次不注入词典）。
+    apply_dictionary: bool,
+    /// 重建成功后是否写回 `bm25_index_version = 当前版本`。
+    mark_v2: bool,
 }
 
 /// 为临时检索器构建向量索引（嵌入不可用 / 失败时静默降级）。
@@ -429,13 +573,20 @@ fn l2_view(event: &ramaria_core::types::MemoryEvent) -> L2DocView {
 mod tests {
     use super::*;
     use crate::test_support::{
-        MockLlm, engine_with_db, engine_with_llm_and_config, seed_l1 as seed_l1_raw, seed_persona,
+        DeterministicEmbedding, MockLlm, engine_with_db, engine_with_failable_storage,
+        engine_with_llm_and_config, engine_with_llm_config_and_embedding, seed_l1 as seed_l1_raw,
+        seed_persona,
     };
     use crate::types::{RecallLayer, RecallRequest, RecallResult};
     use ramaria_core::config::RamariaConfig;
-    use ramaria_core::traits::StoreCrud;
+    use ramaria_core::lock::{read_recover, write_recover};
+    use ramaria_core::traits::{
+        EmbeddingProvider, SETTING_BM25_INDEX_VERSION, StoreCrud, StoreInfrastructure,
+    };
     use ramaria_core::types::{Message, MessageRole, MessageSource};
+    use ramaria_memory::retriever::{SearchRequest, SearchResult};
     use ramaria_storage::SqliteStorage;
+    use std::sync::Arc;
     use std::time::Duration;
     use uuid::Uuid;
 
@@ -455,6 +606,20 @@ mod tests {
             })
             .await
             .expect("召回成功")
+    }
+
+    /// 直接读取已构建检索器上的检索结果（不经过 recall 的 persona 过滤与镜像通道）。
+    fn search_docs(engine: &Engine, query: &str) -> Vec<SearchResult> {
+        let guard = read_recover(engine.retriever_slot(), "index.retriever_slot");
+        guard.as_ref().expect("索引应已构建").search(
+            &SearchRequest {
+                query: query.to_string(),
+                persona_uid: None,
+                top_k: 10,
+                filter_share: false,
+            },
+            None,
+        )
     }
 
     /// 懒加载：首次构建返回 true，重复调用返回 false；索引可命中。
@@ -478,6 +643,48 @@ mod tests {
             .await
             .expect("召回成功");
         assert!(!result.items.is_empty(), "懒加载后应能检索到 L1");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 索引版本写入：首次构建成功后写 `1`（供首次配置状态机判定"索引已构建"）；
+    /// 沿用已加载索引的早退分支不写。
+    #[tokio::test]
+    async fn ensure_loaded_marks_index_version_after_build() {
+        let (engine, storage, dir) = engine_with_db("index-version").await;
+        seed_persona(&storage, "char-0001").await;
+        seed_l1(&storage, "char-0001", "用户最近工作压力很大，常常加班").await;
+
+        // 显式置 0 表示"尚未构建"（键缺失时按存储层口径视为已构建）
+        storage
+            .set_index_version(0)
+            .await
+            .expect("写入索引版本应成功");
+
+        assert!(engine.ensure_index_loaded().await.expect("加载成功"));
+        assert_eq!(
+            storage
+                .get_index_version()
+                .await
+                .expect("读取索引版本应成功"),
+            1,
+            "构建完成后应写入索引版本 1"
+        );
+
+        // 沿用已加载索引的早退分支不写版本
+        storage
+            .set_index_version(0)
+            .await
+            .expect("写入索引版本应成功");
+        assert!(!engine.ensure_index_loaded().await.expect("重复加载成功"));
+        assert_eq!(
+            storage
+                .get_index_version()
+                .await
+                .expect("读取索引版本应成功"),
+            0,
+            "早退分支不应写入索引版本"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -776,6 +983,282 @@ mod tests {
             "窗口过后的召回应重建并命中新 L1: {:?}",
             after.items
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 显式重建加载无主 L1（persona_uid IS NULL）：导入数据重建后进入索引。
+    #[tokio::test]
+    async fn rebuild_loads_unbound_l1() {
+        let (engine, storage, dir) = engine_with_db("index-rebuild-unbound").await;
+        seed_persona(&storage, "char-0001").await;
+        // 无主 L1：不绑定 persona（persona_uid 保持 None）
+        let session = storage.create_session(None).await.expect("创建会话");
+        let l1 = ramaria_core::types::MemoryL1::new(
+            session.id,
+            "用户喜欢喝咖啡，每天上午必点一杯拿铁".to_string(),
+            None,
+        );
+        storage.save_memory_l1(&l1).await.expect("写入 L1");
+
+        let total = engine.rebuild_index().await.expect("重建应成功");
+        assert!(total >= 1, "无主 L1 必须被加载进索引，实际 total={total}");
+        let guard = read_recover(engine.retriever_slot(), "index.retriever_slot");
+        assert!(
+            guard.as_ref().expect("索引应已构建").doc_count() >= 1,
+            "检索器 doc_count 应为 ≥1"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 显式重建返回 L1 + L2 文档总数，并写回索引版本（供首次配置状态机判定）。
+    #[tokio::test]
+    async fn rebuild_index_returns_document_total() {
+        let (engine, storage, dir) = engine_with_db("index-rebuild-total").await;
+        seed_persona(&storage, "char-0001").await;
+        seed_l1(&storage, "char-0001", "用户喜欢喝咖啡").await;
+        seed_l1(&storage, "char-0001", "用户最近开始学习游泳").await;
+
+        // 显式置 0 表示"尚未构建"（键缺失时按存储层口径视为已构建）
+        storage
+            .set_index_version(0)
+            .await
+            .expect("写入索引版本应成功");
+
+        let total = engine.rebuild_index().await.expect("重建应成功");
+        assert_eq!(total, 2, "返回值应为 L1 + L2 视图总数");
+        assert_eq!(
+            storage
+                .get_index_version()
+                .await
+                .expect("读取索引版本应成功"),
+            1,
+            "重建完成后应写回索引版本 1"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// BM25 词典增强分词迁移：词表就绪后重建切为词典增强口径并写回版本标记。
+    ///
+    /// 步骤:
+    /// 1. 分词版本缺失 + 词表为空 → 重建后不写版本标记；纯 bigram 口径下跨词噪声
+    ///    （"作压"）能命中（旧口径基线）；
+    /// 2. 注入已确认规范词 → 再次重建：版本标记写为当前版本；整词查询命中；
+    ///    跨词噪声不再命中。
+    #[tokio::test]
+    async fn bm25_dictionary_migration_upgrades_and_removes_noise() {
+        let (engine, storage, dir) = engine_with_db("index-bm25-migration").await;
+        seed_persona(&storage, "char-0001").await;
+        seed_l1(&storage, "char-0001", "最近工作压力很大常常加班").await;
+
+        // 1) 词表为空：不升级版本标记（重建与旧版等价），纯 bigram 口径可检索
+        engine.rebuild_index().await.expect("首次重建应成功");
+        let setting_before = storage
+            .get_setting(SETTING_BM25_INDEX_VERSION)
+            .await
+            .expect("读取设置应成功");
+        assert!(
+            setting_before.is_none(),
+            "词表为空时不应写入版本标记，实际 {setting_before:?}"
+        );
+        assert!(
+            !search_docs(&engine, "作压").is_empty(),
+            "迁移前旧索引（纯 bigram）应可检索：'作压' 噪声命中为旧口径基线"
+        );
+
+        // 2) 词表就绪：再次重建触发迁移
+        storage
+            .upsert_keyword("工作压力")
+            .await
+            .expect("写入规范词应成功");
+        engine.rebuild_index().await.expect("迁移重建应成功");
+        let setting_after = storage
+            .get_setting(SETTING_BM25_INDEX_VERSION)
+            .await
+            .expect("读取设置应成功");
+        assert_eq!(
+            setting_after.as_deref(),
+            Some("2"),
+            "迁移完成后版本标记应为当前版本 2"
+        );
+        assert!(
+            search_docs(&engine, "工作压力")
+                .iter()
+                .any(|r| r.doc_summary.contains("工作压力")),
+            "词典整词查询应命中文档（索引可检索）"
+        );
+        assert!(
+            search_docs(&engine, "作压").is_empty(),
+            "词典口径下跨词噪声 '作压' 不应命中"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 重建后关键词镜像与加载文档一致；镜像维护不影响检索器：
+    /// 镜像被外部清空不改变检索结果，再次重建恢复（幂等收敛）。
+    #[tokio::test]
+    async fn rebuild_syncs_keyword_service_mirror_and_preserves_search() {
+        let (engine, storage, dir) = engine_with_db("index-mirror").await;
+        seed_persona(&storage, "char-0001").await;
+        seed_l1(
+            &storage,
+            "char-0001",
+            "用户喜欢喝咖啡，每天上午必点一杯拿铁",
+        )
+        .await;
+        seed_l1(
+            &storage,
+            "char-0001",
+            "用户最近工作压力很大，常常加班到深夜",
+        )
+        .await;
+
+        let total = engine.rebuild_index().await.expect("重建应成功");
+        assert!(total >= 2, "应加载 ≥2 条 L1，实际 {total}");
+
+        // 镜像与加载文档一致（doc_count 级）
+        let mirror = engine.keyword_mirror_ref();
+        {
+            let guard = read_recover(mirror, "index.keyword_mirror");
+            assert_eq!(guard.doc_count(), total, "镜像文档数应与重建加载数一致");
+        }
+
+        // 镜像维护不影响既有检索：镜像清空前后 search 结果一致
+        let search_summaries = |engine: &Engine| -> Vec<String> {
+            search_docs(engine, "工作压力")
+                .into_iter()
+                .map(|r| r.doc_summary)
+                .collect()
+        };
+        let before = search_summaries(&engine);
+        assert!(!before.is_empty(), "对照检索应命中既有 L1");
+        {
+            let mut guard = write_recover(mirror, "index.keyword_mirror");
+            guard.clear_docs(); // 模拟镜像被外部误操作清空
+        }
+        let after = search_summaries(&engine);
+        assert_eq!(before, after, "镜像操作不得改变 Retriever 检索结果");
+
+        // 再次重建 → 镜像恢复与视图一致（幂等收敛）
+        let total2 = engine.rebuild_index().await.expect("再次重建应成功");
+        assert_eq!(total2, total);
+        {
+            let guard = read_recover(mirror, "index.keyword_mirror");
+            assert_eq!(guard.doc_count(), total2, "再次重建后镜像文档数应恢复");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 嵌入可用 + 词典非空 → 重建后关键词镜像挂载 Fuzzy 语义层（可用分支）。
+    #[tokio::test]
+    async fn rebuild_with_embedding_and_pool_mounts_fuzzy() {
+        let embedding: Option<Arc<dyn EmbeddingProvider>> =
+            Some(Arc::new(DeterministicEmbedding::new()));
+        let (engine, storage, dir) = engine_with_llm_config_and_embedding(
+            "index-fuzzy",
+            MockLlm::local(),
+            RamariaConfig::default(),
+            embedding,
+        )
+        .await;
+        seed_persona(&storage, "char-0001").await;
+        seed_l1(
+            &storage,
+            "char-0001",
+            "用户最近工作压力很大，常常加班到深夜",
+        )
+        .await;
+        storage
+            .upsert_keyword("工作压力")
+            .await
+            .expect("写入规范词应成功");
+
+        engine.rebuild_index().await.expect("重建应成功");
+        let mirror = engine.keyword_mirror_ref();
+        let guard = read_recover(mirror, "index.keyword_mirror");
+        assert!(guard.pool_len() >= 1, "词典池应装载注入的规范词");
+        let fuzzy = guard
+            .composite()
+            .fuzzy()
+            .expect("嵌入可用时应挂载 Fuzzy 层");
+        assert!(fuzzy.is_ready());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// core `[retrieval]` 配置经重建真实应用进内存检索器
+    /// （RRF 融合参数 + 向量通道开关，默认配置下行为等价）。
+    #[tokio::test]
+    async fn rebuild_applies_core_retrieval_config() {
+        let mut config = RamariaConfig::default();
+        config.retrieval.rrf_k = 90;
+        config.retrieval.bm25_weight = 0.5;
+        config.retrieval.graph_weight = 0.4;
+        config.retrieval.enable_vector = false;
+        let (engine, storage, dir) =
+            engine_with_llm_and_config("index-retrieval-config", MockLlm::local(), config).await;
+        seed_persona(&storage, "char-0001").await;
+        seed_l1(&storage, "char-0001", "用户喜欢喝咖啡").await;
+
+        engine.rebuild_index().await.expect("重建应成功");
+        let guard = read_recover(engine.retriever_slot(), "index.retriever_slot");
+        let retriever = guard.as_ref().expect("索引应已构建");
+        assert!(
+            !retriever.config().enable_vector,
+            "向量通道开关应随重建应用"
+        );
+        assert_eq!(retriever.config().rrf.k, 90.0, "RRF 平滑系数应随重建应用");
+        assert_eq!(retriever.config().rrf.bm25_weight, 0.5);
+        assert_eq!(retriever.config().rrf.graph_weight, 0.4);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 重建失败（存储读取错误）→ 旧索引保持不变且仍可检索，告警位置位；
+    /// 恢复后重建成功 → 告警位复位。
+    #[tokio::test]
+    async fn rebuild_failure_keeps_old_index_searchable() {
+        let (engine, storage, failable, dir) =
+            engine_with_failable_storage("index-rebuild-failure").await;
+        seed_persona(&storage, "char-0001").await;
+        seed_l1(
+            &storage,
+            "char-0001",
+            "用户喜欢喝咖啡，每天上午必点一杯拿铁",
+        )
+        .await;
+
+        // 1) 首次重建成功 → 索引可检索、告警位为 false
+        engine.rebuild_index().await.expect("首次重建应成功");
+        assert!(
+            !engine.is_index_rebuild_failed(),
+            "重建成功后告警位应为 false"
+        );
+        let hits_before = search_docs(&engine, "咖啡");
+        assert!(!hits_before.is_empty(), "首次重建后应可检索");
+
+        // 2) 注入存储读取失败 → 重建报错、告警位置位
+        failable.set_fail_list_personas(true);
+        let err = engine
+            .rebuild_index()
+            .await
+            .expect_err("存储读取失败时重建应返回错误");
+        assert!(!err.to_string().is_empty(), "错误信息不应为空");
+        assert!(engine.is_index_rebuild_failed(), "重建失败应置位告警位");
+
+        // 3) 旧索引原子保留：失败后检索结果与失败前一致（未清空、未半成品）
+        let hits_after = search_docs(&engine, "咖啡");
+        assert!(!hits_after.is_empty(), "重建失败后旧索引必须仍可检索");
+        assert_eq!(hits_before.len(), hits_after.len(), "旧索引文档不应丢失");
+
+        // 4) 恢复后重建成功 → 告警位复位
+        failable.set_fail_list_personas(false);
+        engine.rebuild_index().await.expect("恢复后重建应成功");
+        assert!(!engine.is_index_rebuild_failed(), "重建恢复后告警位应复位");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

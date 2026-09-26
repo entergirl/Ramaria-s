@@ -118,6 +118,7 @@ impl LlmProvider for MultiStepLlm {
 // =========================================================
 
 /// 构造测试用 MemoryEvent（带 motives 字段和 situation_strength）。
+#[allow(clippy::too_many_arguments)]
 fn make_event(
     title: &str,
     summary: &str,

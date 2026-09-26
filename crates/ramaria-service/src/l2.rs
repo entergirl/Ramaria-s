@@ -108,7 +108,7 @@ mod tests {
         let count = check_and_extract(
             engine.storage_ref().as_ref(),
             engine.llm_ref().as_ref(),
-            engine.config(),
+            &engine.config(),
             "char-0001",
         )
         .await
@@ -142,7 +142,7 @@ mod tests {
         let count = check_and_extract(
             engine.storage_ref().as_ref(),
             engine.llm_ref().as_ref(),
-            engine.config(),
+            &engine.config(),
             "char-0001",
         )
         .await

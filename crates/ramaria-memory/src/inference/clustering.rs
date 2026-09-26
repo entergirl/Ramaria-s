@@ -1033,7 +1033,8 @@ mod tests {
         let snap = make_hist_snapshot(1, "t", emb, "c");
 
         // 宽松阈值 0.75：0.80 ≥ 0.75 → 匹配
-        let loose = match_clusters_cross_version(&[1.0_f32, 0.0], &[snap.clone()], 0.75);
+        let loose =
+            match_clusters_cross_version(&[1.0_f32, 0.0], std::slice::from_ref(&snap), 0.75);
         assert_eq!(loose.matched_count, 1, "阈值 0.75 时 0.80 应匹配");
 
         // 收紧阈值 0.85：0.80 < 0.85 → 不匹配

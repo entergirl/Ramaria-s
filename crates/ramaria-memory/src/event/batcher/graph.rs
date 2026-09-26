@@ -668,10 +668,6 @@ mod tests {
         assert_eq!(result[0].len(), 5);
     }
 
-    /// 设置很小的 max_cluster_size 强制大分量被拆分
-    /// （原 split_large_component_with_small_max 的守卫条件恒为假：
-    ///  两组关键词 Jaccard=0 实际构成 2 个独立连通分量，断言永不执行，已删除）
-
     /// 无边的连通分量（孤立节点组）不可拆分
     #[test]
     fn bisect_no_edges_returns_none() {
