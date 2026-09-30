@@ -38,7 +38,3 @@ futures.workspace = true
 reqwest.workspace = true
 # 诊断导出打包（同目录临时文件 + 原子替换）
 zip = "2"
-
-[dev-dependencies]
-# 平行对照接缝：对照测试用应用装配（仅 dev 依赖，不进生产依赖图）
-ramaria-app = { path = "../ramaria-app" }

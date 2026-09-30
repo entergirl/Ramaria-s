@@ -24,7 +24,7 @@
 ## 相邻契约
 
 - 依赖：`ramaria-core`（类型 / 错误）与存储（经 trait）。
-- 被依赖：`ramaria-service`（收敛后导入用例）/ `ramaria-app`（收敛前的 `model_manager` / 导入编排），以 `importer` feature gate 启用。
+- 被依赖：`ramaria-service`（导入用例），以 `importer` feature gate 启用。
 - **禁止**：UI 依赖。
 
 ## 常见改动落点

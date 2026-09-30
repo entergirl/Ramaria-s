@@ -3,7 +3,7 @@
 //! 设计特点:
 //! - 与传输无关的能力层：召回、写入、封存、会话解析、空闲检查、人格读取六类用例
 //! - 依赖方向单向：入口（CLI / 桌面 / MCP / 未来社交通道）→ service → 内核，反向禁止
-//! - 禁止依赖 `ramaria-app` / `ramaria-cli` / `ramaria-desktop` / `tauri`（分层纪律）
+//! - 禁止依赖 `ramaria-cli` / `ramaria-desktop` / `tauri` 等入口层（分层纪律）
 //! - 请求与响应为纯数据结构（`types` 模块），不出现 stdio / Tauri / HTTP 概念
 //! - 通道（channel / external_ref）是数据属性而非算法输入
 //! - 召回同源：记忆层检索复用 `ramaria_memory::recall`（在线管线同一份实现）

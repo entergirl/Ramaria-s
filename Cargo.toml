@@ -5,7 +5,6 @@ members = [
     "crates/ramaria-storage",
     "crates/ramaria-memory",
     "crates/ramaria-llm",
-    "crates/ramaria-app",
     "crates/ramaria-service",
     "crates/ramaria-mcp",
     "crates/ramaria-cli",

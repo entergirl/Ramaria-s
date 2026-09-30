@@ -4,14 +4,13 @@
 //! - fixture 固定：单 persona + 4 条消息的活跃会话（短会话 → 单条 L1，与用例测试同口径）
 //! - 快照只含稳定字段：抢占结果 / L1 关键字段 / 会话结束状态 / 待定任务类型 / utt 与示例计数；
 //!   不落 id、时间戳与 LLM 原始输出（易变值与隐私红线均不进入快照）
-//! - 三层验证：基线一致（golden 冻结）、跨隔离环境确定性（`assert_stable`）、
-//!   抢占幂等（二次封存不重复生成 L1）
-//! - 输出入口：`snapshot_of` 是"某一实现在该 fixture 上的规范化输出"的唯一入口，
-//!   同形状快照可直接送入 `assert_parity` 比对（比较与报告实现与 `assert_stable` 共用）
+//! - 验证维度：基线一致（golden 冻结）、跨隔离环境确定性（`assert_stable`）、
+//!   抢占幂等（二次封存不重复生成 L1）、手动关闭产物基线（完整钩子链下的端到端产物）
+//! - 输出入口：`snapshot_of` 是"该 fixture 上的规范化输出"的唯一入口，
+//!   快照直接送入 `GoldenStore` 冻结或比对（比较与报告实现与 `assert_stable` 共用）
 
 use std::sync::Arc;
 
-use futures::StreamExt;
 use ramaria_core::traits::{LlmProvider, StoreCrud, StoreInfrastructure};
 use ramaria_core::types::CHANNEL_LOCAL;
 use ramaria_service::types::ChatSendRequest;
@@ -21,8 +20,8 @@ use uuid::Uuid;
 
 use crate::support::env::DEFAULT_ASSISTANT_REPLY;
 use crate::support::{
-    AppEnv, GoldenStore, ParityEnv, ParityError, ParityResult, ScriptedLlm, Snapshot,
-    assert_parity, assert_stable, fixtures,
+    GoldenStore, ParityEnv, ParityError, ParityResult, ScriptedLlm, Snapshot, assert_stable,
+    fixtures,
 };
 
 /// 场景名（同时作为 golden 基线文件名）。
@@ -42,11 +41,11 @@ const L1_JSON_REPLY: &str = r#"{
   "situation_strength": 4
 }"#;
 
-/// 逐字对照场景名（快照标签，不写基线）。
-const CROSS_SCENARIO: &str = "seal/app-vs-service";
+/// 手动关闭产物场景名（同时作为 golden 基线文件名）。
+const MANUAL_CLOSE_SCENARIO: &str = "seal_manual_close_products";
 
-/// 逐字对照的用户消息（合成数据；发一轮消息以建立并激活会话）。
-const CROSS_MESSAGE: &str = "今天有点累，随便聊聊吧";
+/// 手动关闭场景的用户消息（合成数据；发一轮消息以建立会话）。
+const MANUAL_CLOSE_MESSAGE: &str = "今天有点累，随便聊聊吧";
 
 // =========================================================
 // 场景执行
@@ -241,50 +240,17 @@ async fn seal_second_call_does_not_regenerate_l1() {
 }
 
 // =========================================================
-// 逐字对照（应用装配 vs 服务装配）
+// 手动关闭产物场景（完整封存钩子链）
 // =========================================================
 
-/// 应用装配：发一条消息建立并激活会话 → 手动保存并关闭会话；返回会话 id。
-///
-/// 说明:
-/// - 会话由生成入口自动创建并设置活跃指针；手动保存关闭经活跃指针对目标会话生效，
-///   这是该入口下获得"活跃会话"的既有方式。
-async fn app_send_and_close(env: &AppEnv) -> ParityResult<Uuid> {
-    fixtures::seed_persona(env.storage(), PERSONA).await?;
-    // 生成入口有状态门禁：先完成就绪装配再发送
-    env.setup_ready().await?;
-
-    let mut stream = env
-        .app()
-        .send_message(CROSS_MESSAGE, Some(PERSONA), None)
-        .await
-        .map_err(|e| ParityError::env("应用装配发送对照消息", e))?;
-
-    let mut session_id = None;
-    while let Some(item) = stream.next().await {
-        let event = item.map_err(|e| ParityError::env("应用装配消费对照事件流", e))?;
-        if let ramaria_app::StreamEvent::Done { session_id: id, .. } = event {
-            session_id = id;
-        }
-    }
-    let session_id = session_id
-        .ok_or_else(|| ParityError::env("应用装配消费对照事件流", "事件流应携带会话标识"))?;
-
-    env.app()
-        .save_and_close_session(Some(PERSONA))
-        .await
-        .map_err(|e| ParityError::env("应用装配保存并关闭对照会话", e))?;
-    Ok(session_id)
-}
-
-/// 服务装配：发一条消息建立会话 → 注册完整封存钩子链 → 封存；返回会话 id。
-async fn service_send_and_seal(env: &ParityEnv) -> ParityResult<Uuid> {
+/// 发一条消息建立会话 → 注册完整封存钩子链 → 封存；返回会话 id。
+async fn send_and_seal(env: &ParityEnv) -> ParityResult<Uuid> {
     fixtures::seed_persona(env.storage(), PERSONA).await?;
 
     let outcome = env
         .engine()
         .chat_send(ChatSendRequest {
-            message: CROSS_MESSAGE.to_string(),
+            message: MANUAL_CLOSE_MESSAGE.to_string(),
             persona: Some(PERSONA.to_string()),
             session_id: None,
             conversation_id: None,
@@ -302,7 +268,7 @@ async fn service_send_and_seal(env: &ParityEnv) -> ParityResult<Uuid> {
     Ok(outcome.session_id)
 }
 
-/// 读取封存产物的可观测状态（两侧同形；只取数据库可观测项）。
+/// 读取封存产物的可观测状态（只取数据库可观测项）。
 async fn read_seal_state(
     storage: &SqliteStorage,
     session_id: Uuid,
@@ -367,64 +333,54 @@ async fn read_seal_state(
     }))
 }
 
-/// 逐字对照：封存产物的可观测状态在两侧等价。
+/// 基线一致：手动关闭（完整封存钩子链）的可观测产物与冻结基线逐字段一致。
 ///
 /// 口径说明:
-/// - 两侧为同一 fixture（同一人格、同一轮消息）与同一脚本回复序列（助手回复 → L1 摘要 JSON）；
-/// - 左侧由生成入口建立并激活会话后手动保存关闭，右侧由生成入口建立会话后显式封存；
+/// - fixture：同一人格、同一轮消息与同一脚本回复序列（助手回复 → L1 摘要 JSON）；
+/// - 由生成入口建立会话后显式封存，覆盖"生成 → 封存 → L1 / utt / 示例 / 待定任务"完整链路；
 /// - 快照只取数据库可观测产物（会话结束 / L1 字段 / utt / 示例 / 待定任务），不落 id 与时间戳。
 #[tokio::test]
-async fn seal_app_and_service_products_are_equivalent() {
-    let app_env = AppEnv::with_llm(
-        "seal-cross-app",
-        Arc::new(ScriptedLlm::replies(&[
-            DEFAULT_ASSISTANT_REPLY,
-            L1_JSON_REPLY,
-        ])),
-    )
-    .await
-    .expect("应用装配对照环境应可构建");
-    let app_session = app_send_and_close(&app_env)
-        .await
-        .expect("应用装配封存场景应执行成功");
-    let app_value = read_seal_state(app_env.storage(), app_session)
-        .await
-        .expect("应用装配封存产物应可读取");
-    app_env.cleanup().await;
-
-    let service_llm: Arc<dyn LlmProvider> = Arc::new(ScriptedLlm::replies(&[
+async fn seal_manual_close_products_match_golden_baseline() {
+    let llm: Arc<dyn LlmProvider> = Arc::new(ScriptedLlm::replies(&[
         DEFAULT_ASSISTANT_REPLY,
         L1_JSON_REPLY,
     ]));
-    let service_env = ParityEnv::with_llm("seal-cross-service", service_llm)
+    let env = ParityEnv::with_llm("seal-manual-close", llm)
         .await
-        .expect("服务装配对照环境应可构建");
-    let service_session = service_send_and_seal(&service_env)
+        .expect("封存对照环境应可构建");
+    let session = send_and_seal(&env)
         .await
-        .expect("服务装配封存场景应执行成功");
-    let service_value = read_seal_state(service_env.storage(), service_session)
+        .expect("手动关闭封存场景应执行成功");
+    let value = read_seal_state(env.storage(), session)
         .await
-        .expect("服务装配封存产物应可读取");
-    service_env.cleanup().await;
+        .expect("封存产物应可读取");
+    let snapshot = Snapshot::new(MANUAL_CLOSE_SCENARIO, value);
 
-    // 关键行为锚点：会话已关闭、消息完整落库、短会话生成单条 L1（对照面成立）
-    let left = Snapshot::new(CROSS_SCENARIO, app_value);
+    // 关键行为锚点：会话已关闭、消息完整落库、短会话生成单条 L1（观测面成立）
     assert_eq!(
-        left.value()["session"]["ended"].as_bool(),
+        snapshot.value()["session"]["ended"].as_bool(),
         Some(true),
         "封存后会话应已关闭"
     );
     assert_eq!(
-        left.value()["session"]["message_count"].as_u64(),
+        snapshot.value()["session"]["message_count"].as_u64(),
         Some(2),
         "一轮消息应落库用户消息与助手回复两条"
     );
     assert_eq!(
-        left.value()["l1"].as_array().map(Vec::len),
+        snapshot.value()["l1"].as_array().map(Vec::len),
         Some(1),
         "短会话应生成单条 L1"
     );
 
-    let right = Snapshot::new(CROSS_SCENARIO, service_value);
-    assert_parity(CROSS_SCENARIO, &left, &right);
+    let outcome = GoldenStore::new()
+        .expect("基线仓库应可定位")
+        .assert_or_record(&snapshot)
+        .expect("基线比对或首次生成应成功");
+    assert!(
+        !outcome.is_updated(),
+        "未开启更新模式时不应覆盖基线（{outcome:?}）"
+    );
+
+    env.cleanup().await;
 }

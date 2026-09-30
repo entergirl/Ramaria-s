@@ -7,8 +7,8 @@
 //!   不引入真实多进程
 //! - 快照只含布尔与计数：各场景的结论指标；索引内部结构与向量不落盘
 //! - fixture 时间固定偏移：保证跨进程写入的 L1 与本地语料戳判定稳定
-//! - 输出入口：`snapshot_of` 是"某一实现在该 fixture 上的规范化输出"的唯一入口，
-//!   同形状快照可直接送入 `assert_parity` 比对
+//! - 输出入口：`snapshot_of` 是"该 fixture 上的规范化输出"的唯一入口，
+//!   快照直接送入 `GoldenStore` 冻结或比对
 
 use std::sync::Arc;
 
@@ -19,15 +19,15 @@ use ramaria_storage::SqliteStorage;
 use serde_json::json;
 
 use crate::support::{
-    AppEnv, GoldenStore, ParityEnv, ParityError, ParityResult, ScriptedLlm, Snapshot,
-    assert_parity, assert_stable, fixtures,
+    GoldenStore, ParityEnv, ParityError, ParityResult, ScriptedLlm, Snapshot, assert_stable,
+    fixtures,
 };
 
 /// 场景名（同时作为 golden 基线文件名）。
 const SCENARIO: &str = "index_lazy_load_and_refresh";
 
-/// 逐字对照场景名（快照标签，不写基线）。
-const CROSS_SCENARIO: &str = "index/app-vs-service";
+/// 显式重建产物场景名（同时作为 golden 基线文件名）。
+const REBUILD_SCENARIO: &str = "index_rebuild_products";
 
 /// 封存脚本回复：摘要含"攀岩"（供增量可检索断言）。
 const CLIMBING_L1_REPLY: &str = r#"{
@@ -395,28 +395,10 @@ async fn rebuild_value(
     }))
 }
 
-/// 应用装配：全量重建内存检索索引。
-async fn cross_snapshot_app(env: &AppEnv) -> ParityResult<Snapshot> {
+/// 显式重建：全量重建内存检索索引，产出规范化快照。
+async fn rebuild_snapshot(env: &ParityEnv) -> ParityResult<Snapshot> {
     seed_cross_fixture(env.storage()).await?;
-    // 两侧重建前显式对齐索引版本（同一"已构建"起始状态）
-    env.storage()
-        .set_index_version(1)
-        .await
-        .map_err(|e| ParityError::env("对齐索引版本", e))?;
-    let total = env
-        .app()
-        .rebuild_retriever()
-        .await
-        .map_err(|e| ParityError::env("应用装配重建索引", e))?;
-    let failed = env.app().is_retriever_rebuild_failed();
-    let value = rebuild_value(env.storage(), total, failed).await?;
-    Ok(Snapshot::new(CROSS_SCENARIO, value))
-}
-
-/// 服务装配：全量重建内存检索索引。
-async fn cross_snapshot_service(env: &ParityEnv) -> ParityResult<Snapshot> {
-    seed_cross_fixture(env.storage()).await?;
-    // 两侧重建前显式对齐索引版本（同一"已构建"起始状态）
+    // 重建前显式对齐索引版本（"已构建"起始状态）
     env.storage()
         .set_index_version(1)
         .await
@@ -428,49 +410,47 @@ async fn cross_snapshot_service(env: &ParityEnv) -> ParityResult<Snapshot> {
         .map_err(|e| ParityError::env("服务装配重建索引", e))?;
     let failed = env.engine().is_index_rebuild_failed();
     let value = rebuild_value(env.storage(), total, failed).await?;
-    Ok(Snapshot::new(CROSS_SCENARIO, value))
+    Ok(Snapshot::new(REBUILD_SCENARIO, value))
 }
 
-/// 逐字对照：索引重建的文档数与版本状态在两侧等价。
+/// 基线一致：显式重建的文档数与版本状态与冻结基线逐字段一致。
 ///
 /// 口径说明:
-/// - 两侧为同一 fixture（同一人格 + 2 条关键词不同的 L1），各以全量重建路径构建索引；
+/// - fixture：同一人格 + 2 条关键词不同的 L1，以全量重建路径构建索引；
 /// - 快照取重建返回值与存储可读的版本 / 告警位（不比较索引内部结构与向量）；
-/// - 索引版本在两侧重建前显式对齐为同一已构建状态，对照只看重建后的读取值。
+/// - 索引版本在重建前显式对齐为已构建状态，只看重建后的读取值。
 #[tokio::test]
-async fn index_rebuild_outputs_are_equivalent_between_app_and_service() {
-    let app_env = AppEnv::new("index-cross-app")
+async fn index_rebuild_products_match_golden_baseline() {
+    let env = ParityEnv::new("index-rebuild")
         .await
-        .expect("应用装配对照环境应可构建");
-    let left = cross_snapshot_app(&app_env)
-        .await
-        .expect("应用装配重建场景应执行成功");
-    app_env.cleanup().await;
+        .expect("索引对照环境应可构建");
+    let snapshot = rebuild_snapshot(&env).await.expect("重建场景应执行成功");
 
-    let service_env = ParityEnv::new("index-cross-service")
-        .await
-        .expect("服务装配对照环境应可构建");
-    let right = cross_snapshot_service(&service_env)
-        .await
-        .expect("服务装配重建场景应执行成功");
-    service_env.cleanup().await;
-
-    // 关键行为锚点：2 条 L1 全部进入索引、重建成功且版本处于已构建态（对照面成立）
+    // 关键行为锚点：2 条 L1 全部进入索引、重建成功且版本处于已构建态（观测面成立）
     assert_eq!(
-        left.value()["doc_total"].as_u64(),
+        snapshot.value()["doc_total"].as_u64(),
         Some(2),
         "2 条 L1 应全部进入索引"
     );
     assert_eq!(
-        left.value()["rebuild_failed"].as_bool(),
+        snapshot.value()["rebuild_failed"].as_bool(),
         Some(false),
         "重建应成功"
     );
     assert_eq!(
-        left.value()["index_version"].as_i64(),
+        snapshot.value()["index_version"].as_i64(),
         Some(1),
         "重建后索引版本应处于已构建态"
     );
 
-    assert_parity(CROSS_SCENARIO, &left, &right);
+    let outcome = GoldenStore::new()
+        .expect("基线仓库应可定位")
+        .assert_or_record(&snapshot)
+        .expect("基线比对或首次生成应成功");
+    assert!(
+        !outcome.is_updated(),
+        "未开启更新模式时不应覆盖基线（{outcome:?}）"
+    );
+
+    env.cleanup().await;
 }

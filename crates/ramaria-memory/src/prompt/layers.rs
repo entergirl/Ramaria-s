@@ -19,7 +19,7 @@
 //!
 //! 安全约束：
 //! - 原文级内容（utt/桥接）在此模块仅做预算裁剪，不做内容改写；
-//!   白名单过滤在检索/加载层完成（`ramaria-app`），本模块不感知 persona 类型。
+//!   白名单过滤在检索/加载层完成（`ramaria-service`），本模块不感知 persona 类型。
 //! - 本模块为纯函数，零 I/O，不写日志（原文内容不落日志由上层保证）。
 //! - 行为块只消费路由决策（规则文本/参数/avoid），不接触事件原文与对话原文。
 
@@ -354,8 +354,8 @@ const BEHAVIOR_TENDENCY_HIGH: f64 = 0.6;
 
 /// 行为层注入块渲染。
 ///
-/// 消费 `PromptContext.behavior_decision`（情境路由合并结果，由 `ramaria-app`
-/// 在对话管线中注入）：
+/// 消费 `PromptContext.behavior_decision`（情境路由合并结果，由 `ramaria-service`
+/// 在生成用例中注入）：
 /// - `None`（未命中 / 行为关闭 / 路由失败降级）→ 返回 `None`，不产生段落。
 /// - `Some(decision)` → 渲染 `## 行为规则` 小节（reaction + 表达倾向程度词 + avoid），
 ///   段落置于 `# 角色（行为层）` 之后，语义上归属角色段。
@@ -496,7 +496,7 @@ fn format_behavior_tendency(params: &BehaviorParams) -> Option<String> {
 
 /// 知识层注入块渲染（事实卡片）。
 ///
-/// 消费 `PromptContext.knowledge_facts`（active 事实，由 `ramaria-app` 检索/判定后装配）。
+/// 消费 `PromptContext.knowledge_facts`（active 事实，由 `ramaria-service` 检索/判定后装配）。
 /// 渲染 `# 知识（知识层，按需）` 段落；空集 → `None`（不产生空段落）。
 ///
 /// 预算:

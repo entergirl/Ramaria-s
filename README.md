@@ -219,10 +219,9 @@ Ramaria 本身免费开源（MIT 协议）。费用仅来自所选的模型后�
 ```
 Tauri 桌面应用 / CLI                            MCP 客户端（CodeBuddy / Trae / dsh 等）
     ↓↑ Command / 函数调用                                ↓ stdio
-ramaria-app  应用编排层（Pipeline + Stage 对话管线，状态机）
     │                                          ramaria-mcp     MCP 协议壳（六个工具）
     │                                                ↓
-    │                                          ramaria-service 记忆服务用例层（召回 / 生成 / 写入 / 封存）
+    └───────────────────────────────────→ ramaria-service  唯一能力层（召回 / 生成 / 写入 / 封存 / 会话生命周期）
     ├── ramaria-memory     记忆管线（L0→L3）+ 混合 RAG + 性格推断（Phase A/B/C）
     ├── ramaria-llm        LLM Provider（LM Studio / DeepSeek / OpenAI）
     ├── ramaria-importer   聊天记录导入（QQ 解析 + 双模式导入）
@@ -242,7 +241,6 @@ ramaria-app  应用编排层（Pipeline + Stage 对话管线，状态机）
 | **ramaria-memory** | 自研管线 | 分层摘要→事件提取→性格推断、向量+BM25+图谱+关键词镜像多通道 RAG、Ebbinghaus 衰减、RRF 融合、Token Budgeting |
 | **ramaria-llm** | reqwest + candle | 3 后端适配器、SSE 流式传输、API Key 凭据管理器、指数退避重试、原生 safetensors 嵌入（bge-small-zh-v1.5 / Qwen3-Embedding-0.6B，CUDA 优先） |
 | **ramaria-importer** | encoding_rs + sha2 | QQ 聊天记录解析（QQChatExporter v6.x JSON，流式解析）、快速/深度双模式、双画像自动创建、指纹去重 |
-| **ramaria-app** | async-trait | CLI/Desktop 共用编排层，Pipeline+Stage 对话管线、状态机、隐私确认、流式事件模型、Session 生命周期管理、后台任务调度 |
 | **ramaria-service** | 纯 Rust 用例层 | 记忆服务化能力出口：召回装配、会话解析与封存、外部写入、人格读取、空闲检查（与传输无关，桌面与 MCP 共用） |
 | **ramaria-mcp** | rmcp（stdio） | MCP 协议壳：六个工具的 schema、门禁与白名单前置校验、结果包装（isError）；不含业务逻辑 |
 | **ramaria-cli** | clap derive | 19 个子命令、交互式 REPL、`--json` 信封、色彩输出 |
@@ -256,10 +254,9 @@ ramaria-core         零依赖，纯类型边界
   ├── ramaria-llm        依赖 core
   ├── ramaria-importer   依赖 core + storage
   └── ramaria-memory     依赖 core + storage
-        ├── ramaria-app          依赖 core + storage + memory + llm + importer
-        │     ├── ramaria-cli         依赖 app + core + storage + llm
-        │     └── ramaria-desktop     依赖 app + core + storage + llm
-        └── ramaria-service      依赖 core + storage + memory + llm
+        └── ramaria-service      依赖 core + storage + memory + llm（+ importer，feature 启用）
+              ├── ramaria-cli         依赖 service + core + storage + memory + mcp + importer
+              ├── ramaria-desktop     依赖 service + core + importer
               └── ramaria-mcp         依赖 service + core
 ```
 
@@ -340,8 +337,9 @@ crates/
 ├── ramaria-memory/        # 记忆管线 + RAG + 性格推断
 ├── ramaria-llm/           # LLM Provider（LM Studio / DeepSeek / OpenAI）
 ├── ramaria-importer/      # QQ 聊天记录导入
-├── ramaria-app/           # 应用编排（Pipeline + Stage + Session 生命周期）
-├── ramaria-cli/           # CLI 入口（18 个子命令）
+├── ramaria-service/       # 唯一能力层（用例：召回 / 生成 / 封存 / 会话生命周期）
+├── ramaria-mcp/           # MCP 协议壳（stdio，六个工具）
+├── ramaria-cli/           # CLI 入口（19 个子命令）
 └── ramaria-desktop/       # Tauri 2 桌面应用
 config/
 ├── default.toml           # 默认配置模板
@@ -350,7 +348,7 @@ docs/                      # 用户文档
 tests/                     # 集成测试
 ```
 
-**规模统计**：10 个 crate、319 个 Rust 源文件、约 17.1 万行 Rust 源码（含测试）、1769 + 800 个测试函数。
+**规模统计**：9 个 crate（目录 / 模块 / 测试分布见 `../docs/architecture-ai-agent.md`）。
 
 ### CLI 快速参考
 

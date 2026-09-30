@@ -24,7 +24,7 @@
 ## 相邻契约
 
 - 依赖：`ramaria-service`（用例）+ `ramaria-core`（类型 / 错误）。
-- **禁止**：业务逻辑（检索 / 封存 / 装配一律经 `ramaria-service`）、`tauri`、直接依赖 `ramaria-app`。
+- **禁止**：业务逻辑（检索 / 封存 / 装配一律经 `ramaria-service`）、`tauri`。
 - 宿主差异：MCP 注册轻量封存钩子链、不开启 L2/L3 常驻调度（结构收敛期行为保持不变）。
 
 ## 常见改动落点

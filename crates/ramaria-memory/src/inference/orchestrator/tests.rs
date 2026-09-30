@@ -3,7 +3,7 @@
 //! 设计特点:
 //! - 覆盖 JSON 三步解析/转换/分层先验/语义匹配度/漂移旧分布恢复等纯函数。
 //! - 全部使用合成数据，不依赖真实 LLM/embedding/数据库，可离线确定性运行。
-//! - 异步集成测试（Phase B/C 全链路 + mock LLM）位于 ramaria-app 集成测试中。
+//! - 异步集成测试（Phase B/C 全链路 + mock LLM）位于服务层集成测试目标。
 
 use super::phase_b::{
     convert_to_personality_traits, parse_category_signals, parse_consistency_analysis,
@@ -258,7 +258,7 @@ fn make_test_stats() -> StatsSummary {
 // =========================================================
 // 纯函数边界测试（无需 StorageBackend/LlmProvider mock）
 // 说明: 异步集成测试（Phase B/C 全链路 + mock LLM）在
-//       `crates/ramaria-app/tests/m3_integration.rs` 中。
+//       `crates/ramaria-service/tests/suites/inference.rs` 中。
 // =========================================================
 
 // ---- PhaseBResult / PhaseCResult 构造与字段 ----

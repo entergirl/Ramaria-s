@@ -1,0 +1,7 @@
+{
+  "history_len": 0,
+  "memory_context": "[相关记忆]\n1. (L1) 用户最近工作压力很大，常加班到深夜 [score=0.05]\n2. (L1) 用户周末去爬山，天气很好 [score=0.04]\n3. (L1) 用户喜欢喝手冲咖啡 [score=0.04]",
+  "memory_context_chars": 110,
+  "memory_context_present": true,
+  "user_message": "工作压力"
+}

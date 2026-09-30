@@ -34,7 +34,7 @@
 ## 相邻契约
 
 - 依赖：`ramaria-core` / `ramaria-storage` / `ramaria-memory` / `ramaria-llm`（embedding-native）。
-- **禁止依赖任何入口层**：`ramaria-app` / `ramaria-cli` / `ramaria-desktop` / `tauri`（编译期约束）。
+- **禁止依赖任何入口层**：`ramaria-cli` / `ramaria-desktop` / `tauri`（编译期约束）。
 - 被依赖：`ramaria-mcp`（协议壳）、`ramaria-cli` / `ramaria-desktop`（收敛后直连）。
 - 宿主差异一律由装配选项 / 策略 / 钩子表达（不写第二份代码）。
 

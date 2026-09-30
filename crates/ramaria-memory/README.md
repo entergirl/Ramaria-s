@@ -30,7 +30,7 @@
 ## 相邻契约
 
 - 依赖：`ramaria-core`、`ramaria-storage`；LLM/嵌入仅经 trait 注入（**不依赖具体 provider**）。
-- 被依赖：`ramaria-service`（与收敛前的 `ramaria-app`）、CLI 探针（例外登记：允许直连算法原语）。
+- 被依赖：`ramaria-service`、CLI 探针（例外登记：允许直连算法原语）。
 - **禁止**：硬编码 DeepSeek/OpenAI/LM Studio、网络依赖、UI 概念。
 
 ## 常见改动落点

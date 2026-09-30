@@ -565,7 +565,7 @@ pub trait StoreCrud: Send + Sync {
     /// - `Ok(Some(ms))`: 最后消息时间戳。
     /// - `Ok(None)`: session 无消息（仅已覆写实现可能返回）。
     /// - `Err(Unsupported)`: 未覆写——显式区分"未实现"与"确实无消息"，
-    ///   调用方据此回退 `list_messages` 全量加载（`ramaria-app` 空闲检测）。
+    ///   调用方据此回退 `list_messages` 全量加载（`ramaria-service` 空闲检查）。
     async fn get_last_message_time(&self, _session_id: Uuid) -> RamariaResult<Option<i64>> {
         Err(crate::error::RamariaError::unsupported(
             "StoreCrud 未实现最后消息时间查询（需覆写为 SELECT MAX(created_at)）",

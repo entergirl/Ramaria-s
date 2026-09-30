@@ -36,7 +36,7 @@
 
 ---
 
-## 3. crate 地图（当前 10 个；结构收敛后 9 个）
+## 3. crate 地图（9 个）
 
 | crate | 职责（一句话） | 入口文件 | 导航 |
 |-------|----------------|----------|------|
@@ -44,7 +44,6 @@
 | `ramaria-storage` | SQLite schema / Repository / migration | `src/lib.rs`、`migrations/` | [README](crates/ramaria-storage/README.md) |
 | `ramaria-memory` | L0→L3 管线、检索融合、Prompt 装配、共用召回 | `src/lib.rs` | [README](crates/ramaria-memory/README.md) |
 | `ramaria-llm` | LLM provider、SSE 流式、keychain、原生嵌入 | `src/lib.rs` | [README](crates/ramaria-llm/README.md) |
-| `ramaria-app` | 应用编排层（**结构收敛后并入 service 并移除**） | `src/lib.rs` | [README](crates/ramaria-app/README.md) |
 | `ramaria-service` | 唯一能力层：引擎装配 + 用例（召回 / 生成 / 写入 / 封存 / 空闲 / 人格） | `src/lib.rs` | [README](crates/ramaria-service/README.md) |
 | `ramaria-mcp` | MCP 协议壳（stdio，6 工具） | `src/lib.rs` | [README](crates/ramaria-mcp/README.md) |
 | `ramaria-cli` | CLI 入口（19 子命令）+ 评估探针 | `src/main.rs` | [README](crates/ramaria-cli/README.md) |
@@ -55,9 +54,10 @@
 
 ```text
 ramaria-cli / ramaria-desktop            ramaria-mcp
-         ↓                                  ↓
-    ramaria-app                     ramaria-service
-         ↓                                  ↓
+         └───────────────┬─────────────────┘
+                         ↓
+                  ramaria-service
+                         ↓
 ramaria-memory / ramaria-llm / ramaria-importer
          ↓
    ramaria-storage
@@ -65,7 +65,7 @@ ramaria-memory / ramaria-llm / ramaria-importer
     ramaria-core
 ```
 
-结构收敛目标态：`ramaria-app` 移除，入口全部直连 `ramaria-service`（服务层为唯一能力层，禁止依赖任何入口层）。
+入口（CLI / 桌面 / MCP）全部直连 `ramaria-service`；服务层为唯一能力层，禁止依赖任何入口层。
 
 ---
 

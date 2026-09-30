@@ -23,7 +23,7 @@ pub mod layers;
 ///   模板变更后旧缓存自动失效，防止跨版本误命中（回归红线：缓存命中不改变输出语义）。
 ///
 /// 修改提醒:
-/// - 修改本常量时同步检查 `ramaria-app` / `ramaria-memory` 各 ChatRequest 构造点
+/// - 修改本常量时同步检查 `ramaria-service` / `ramaria-memory` 各 ChatRequest 构造点
 ///   是否统一引用本常量（不应散落字面量）。
 /// - v1.5 M6 递增记录：行为层槽位填充（`render_behavior_block` 渲染 `## 行为规则`
 ///   小节，模板结构变更）→ 旧缓存自动失效，防跨版本误命中。

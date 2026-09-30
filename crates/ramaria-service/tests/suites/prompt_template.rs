@@ -1,0 +1,480 @@
+//! crates/ramaria-service/tests/suites/prompt_template.rs - 提示词分层装配与开关回退用例
+//!
+//! 设计特点:
+//! - 覆盖分层模板在生成链路上的实际渲染：记忆 / 原文块 / 桥接 / 示例 / 行为各段
+//! - 覆盖特性关闭后的回退语义：utt / bridge / examples 关闭时降级为静态选择
+//! - 覆盖示例条数上限的传播与全关闭时的最小语义
+//! - 断言经 mock LLM 记录的生成请求，只使用确定性 fixture 文本
+
+use std::sync::Arc;
+
+use ramaria_core::config::RamariaConfig;
+use ramaria_core::traits::{LlmProvider, StoreCrud};
+use ramaria_core::types::{Persona, PersonaExample, PersonaKind, UttBlock};
+use ramaria_service::{Engine, StreamEvent};
+use uuid::Uuid;
+
+use crate::support::engine_env::{build_engine, mark_ready, send_stream};
+use crate::support::mock_backend::{MockLlm, MockStorage};
+
+// =========================================================
+// 辅助函数
+// =========================================================
+
+/// 构造并推进到"对话可用"状态的引擎（MockStorage + MockLlm，无嵌入）。
+async fn build_ready_engine(
+    storage: &Arc<MockStorage>,
+    llm: &Arc<MockLlm>,
+    config: RamariaConfig,
+) -> Arc<Engine> {
+    let engine = build_engine(
+        Arc::clone(storage),
+        Arc::clone(llm) as Arc<dyn LlmProvider>,
+        config,
+    );
+    mark_ready(&engine).await.expect("就绪推进应成功");
+    engine
+}
+
+/// 发送消息并消费完整个事件流（无 session_id → 创建新会话）。
+async fn send_and_drain(engine: &Arc<Engine>, text: &str, persona: Option<&str>) {
+    send_stream(engine, text, persona, None).await;
+}
+
+/// 注册角色类 persona（含 speaking_style，激活表达层段落）。
+fn add_char_persona(storage: &MockStorage) {
+    let mut p = Persona::new(
+        "char-0001".to_string(),
+        "小夏".to_string(),
+        PersonaKind::Char,
+        1,
+        "local".to_string(),
+    );
+    p.config =
+        Some(r#"{"description":"测试角色","speaking_style":"热情活泼，喜欢用emoji"}"#.into());
+    storage.add_persona(p);
+}
+
+/// 构造角色类 persona 的上一会话 + utt 块（桥接与 utt 检索共用数据源）。
+fn add_prev_session_with_utt(storage: &MockStorage) {
+    let prev = Uuid::new_v4();
+    storage.add_closed_session(prev);
+    storage.add_utt_block(UttBlock {
+        id: 1,
+        persona_uid: "char-0001".to_string(),
+        session_id: prev,
+        start_msg_id: Uuid::new_v4(),
+        end_msg_id: Uuid::new_v4(),
+        block_text: "[2026-08-01 20:00] 小夏: 上次我们聊到海边\n[2026-08-01 20:01] 用户: 嗯嗯"
+            .to_string(),
+        msg_count: 2,
+        time_span_ms: 60_000,
+        embedding: None,
+        created_at: 1_700_000_000_000,
+    });
+}
+
+/// 构造候选示例（tags 逗号分隔，selected 可控）。
+fn make_example(partner: &str, reply: &str, tags: Option<&str>, selected: bool) -> PersonaExample {
+    let mut e = PersonaExample::new(
+        "char-0001".to_string(),
+        partner.to_string(),
+        reply.to_string(),
+    );
+    e.tags = tags.map(|s| s.to_string());
+    e.selected = selected;
+    e
+}
+
+// =========================================================
+// 四层模板端到端
+// =========================================================
+
+/// 角色类 persona 全链路（utt 块 + 桥接 + 表达层）：四层段落齐全，
+/// 知识槽位为空不产生段落。
+#[tokio::test]
+async fn four_layer_template_rendered_in_active_path() {
+    let storage = Arc::new(MockStorage::new());
+    let llm = Arc::new(MockLlm::new("好的。"));
+    let engine = build_ready_engine(&storage, &llm, RamariaConfig::default()).await;
+
+    add_char_persona(&storage);
+    add_prev_session_with_utt(&storage);
+    // utt 块入检索索引（引擎装配不自动重建，测试显式调用）
+    engine.rebuild_index().await.unwrap();
+
+    send_and_drain(&engine, "继续上次的话题吧", Some("char-0001")).await;
+
+    let request = llm.last_request().expect("应记录最后一次请求");
+    let prompt = &request.system_prompt;
+
+    // ---- 四层段落标题 ----
+    assert!(prompt.contains("# 能力边界"), "能力边界段缺失");
+    assert!(prompt.contains("# 角色（行为层）"), "角色层缺失");
+    assert!(prompt.contains("# 说话风格（表达层）"), "表达层缺失");
+    assert!(prompt.contains("# 记忆（脉络层）"), "脉络层缺失");
+    assert!(prompt.contains("# 当前时间"), "当前时间段缺失");
+
+    // ---- 知识槽位为空 → 不产生段落 ----
+    assert!(
+        !prompt.contains("# 知识（知识层，按需）"),
+        "知识槽位为空不应产生段落"
+    );
+
+    // ---- 原文片段 + 桥接并存（双通道） ----
+    assert!(prompt.contains("## 原文片段"), "utt 检索命中应注入原文片段");
+    assert!(prompt.contains("## 桥接（上一会话尾部）"), "桥接应注入");
+    assert!(prompt.contains("上次我们聊到海边"), "桥接内容保留");
+
+    // ---- 表达层内容（speaking_style） ----
+    assert!(prompt.contains("热情活泼"), "表达层应含 speaking_style");
+}
+
+// =========================================================
+// 配置传播
+// =========================================================
+
+/// [utt].enabled=false → 不检索不注入原文片段（行为回退既有静态模板）。
+#[tokio::test]
+async fn utt_disabled_falls_back_to_v13() {
+    let mut cfg = RamariaConfig::default();
+    cfg.utt.enabled = false;
+
+    let storage = Arc::new(MockStorage::new());
+    let llm = Arc::new(MockLlm::new("好的。"));
+    let engine = build_ready_engine(&storage, &llm, cfg).await;
+
+    add_char_persona(&storage);
+    add_prev_session_with_utt(&storage);
+    engine.rebuild_index().await.unwrap();
+
+    send_and_drain(&engine, "继续上次的话题吧", Some("char-0001")).await;
+
+    let request = llm.last_request().expect("应记录最后一次请求");
+    let prompt = &request.system_prompt;
+    assert!(
+        !prompt.contains("## 原文片段"),
+        "utt.enabled=false 不应注入原文片段"
+    );
+    // 桥接开关独立：仍应注入（互不干扰）
+    assert!(
+        prompt.contains("## 桥接（上一会话尾部）"),
+        "桥接不受 utt 开关影响"
+    );
+}
+
+/// [bridge].enabled=false → 不加载桥接（行为回退既有静态模板）。
+#[tokio::test]
+async fn bridge_disabled_falls_back_to_v13() {
+    let mut cfg = RamariaConfig::default();
+    cfg.bridge.enabled = false;
+
+    let storage = Arc::new(MockStorage::new());
+    let llm = Arc::new(MockLlm::new("好的。"));
+    let engine = build_ready_engine(&storage, &llm, cfg).await;
+
+    add_char_persona(&storage);
+    add_prev_session_with_utt(&storage);
+    engine.rebuild_index().await.unwrap();
+
+    send_and_drain(&engine, "继续上次的话题吧", Some("char-0001")).await;
+
+    let request = llm.last_request().expect("应记录最后一次请求");
+    let prompt = &request.system_prompt;
+    assert!(
+        !prompt.contains("## 桥接（上一会话尾部）"),
+        "bridge.enabled=false 不应注入桥接"
+    );
+    // utt 检索不受影响
+    assert!(
+        prompt.contains("## 原文片段"),
+        "utt 注入不受 bridge 开关影响"
+    );
+}
+
+/// [examples].enabled=false → 回退静态 selected 查询：
+/// 仅 selected 示例注入，候选池（未选中）不注入。
+#[tokio::test]
+async fn examples_disabled_uses_static_selected() {
+    let mut cfg = RamariaConfig::default();
+    cfg.examples.enabled = false;
+
+    let storage = Arc::new(MockStorage::new());
+    let llm = Arc::new(MockLlm::new("好的。"));
+    let engine = build_ready_engine(&storage, &llm, cfg).await;
+
+    add_char_persona(&storage);
+    // 候选池：1 条 selected + 2 条未选中
+    storage.add_example(
+        "char-0001",
+        make_example("你好", "静态选中示例回复", Some("问候"), true),
+    );
+    storage.add_example(
+        "char-0001",
+        make_example("在吗", "候选池未选中一", None, false),
+    );
+    storage.add_example(
+        "char-0001",
+        make_example("干嘛", "候选池未选中二", None, false),
+    );
+
+    // 记忆未命中（检索器空）→ 关闭评分轮换后仍无条件注入 selected
+    send_and_drain(&engine, "你好", Some("char-0001")).await;
+
+    let request = llm.last_request().expect("应记录最后一次请求");
+    let prompt = &request.system_prompt;
+    assert!(prompt.contains("静态选中示例回复"), "静态 selected 应注入");
+    assert!(!prompt.contains("候选池未选中"), "未选中示例不应注入");
+}
+
+/// [examples].max_examples 传播：候选池 4 条 + max_examples=2 →
+/// 注入示例 ≤ 2 条（`load_examples_for_input` 与装配层双闸门一致）。
+#[tokio::test]
+async fn examples_max_examples_propagated() {
+    let mut cfg = RamariaConfig::default();
+    cfg.examples.max_examples = 2;
+
+    let storage = Arc::new(MockStorage::new());
+    let llm = Arc::new(MockLlm::new("好的。"));
+    let engine = build_ready_engine(&storage, &llm, cfg).await;
+
+    add_char_persona(&storage);
+    for i in 0..4 {
+        storage.add_example(
+            "char-0001",
+            make_example(
+                &format!("话题{i}"),
+                &format!("示例回复内容{i}"),
+                Some("话题,测试"),
+                false,
+            ),
+        );
+    }
+
+    // 记忆未命中 → 候选池评分轮换（风格兜底）
+    send_and_drain(&engine, "话题", Some("char-0001")).await;
+
+    let request = llm.last_request().expect("应记录最后一次请求");
+    let prompt = &request.system_prompt;
+    let example_count = prompt.matches("示例 ").count();
+    assert!(
+        example_count <= 2,
+        "max_examples=2 应注入 ≤2 条，实际 {example_count} 条"
+    );
+    assert!(example_count >= 1, "候选池非空应至少注入 1 条");
+}
+
+/// 三开关全关 → prompt 无任何特性新增段落（语义等价既有静态模板）。
+#[tokio::test]
+async fn all_v14_features_disabled_returns_v13_semantics() {
+    let mut cfg = RamariaConfig::default();
+    cfg.utt.enabled = false;
+    cfg.bridge.enabled = false;
+    cfg.examples.enabled = false;
+
+    let storage = Arc::new(MockStorage::new());
+    let llm = Arc::new(MockLlm::new("好的。"));
+    let engine = build_ready_engine(&storage, &llm, cfg).await;
+
+    add_char_persona(&storage);
+    add_prev_session_with_utt(&storage);
+    storage.add_example(
+        "char-0001",
+        make_example("你好", "静态示例回复", Some("问候"), true),
+    );
+    engine.rebuild_index().await.unwrap();
+
+    send_and_drain(&engine, "继续上次的话题吧", Some("char-0001")).await;
+
+    let request = llm.last_request().expect("应记录最后一次请求");
+    let prompt = &request.system_prompt;
+
+    // 特性新增段落全部不出现
+    assert!(!prompt.contains("## 原文片段"), "utt 关闭：无原文片段");
+    assert!(
+        !prompt.contains("## 桥接（上一会话尾部）"),
+        "bridge 关闭：无桥接"
+    );
+    // 既有内容保留（四层模板内）
+    assert!(prompt.contains("# 角色（行为层）"));
+    assert!(prompt.contains("# 记忆（脉络层）"));
+    assert!(prompt.contains("## 近期对话脉络"), "v1.3 脉络保留");
+    assert!(prompt.contains("## 回复规范"), "v1.3 回复规范保留");
+    // examples 走静态 selected（既有行为）
+    assert!(
+        prompt.contains("静态示例回复"),
+        "examples 关闭回退静态 selected"
+    );
+}
+
+// =========================================================
+// 驱动环接线——行为控制块注入
+// =========================================================
+
+/// 发送消息并返回会话标识（供后续轮次复用会话）。
+async fn send_and_get_session(
+    engine: &Arc<Engine>,
+    text: &str,
+    persona: Option<&str>,
+    session: Option<Uuid>,
+) -> Option<Uuid> {
+    Some(send_stream(engine, text, persona, session).await.session_id)
+}
+
+/// 注册角色类 persona（行为规则学习/路由目标）。
+async fn setup_behavior_persona(storage: &MockStorage) {
+    storage
+        .create_persona(&Persona::new(
+            "char-0001".to_string(),
+            "小夏".to_string(),
+            PersonaKind::Char,
+            0,
+            "local".into(),
+        ))
+        .await
+        .expect("persona 创建成功");
+}
+
+/// 行为命中：情境路由命中 → `## 行为规则` 块注入 prompt（reaction + params + avoid）。
+///
+/// 说明:
+/// - 手工导入 Manual 规则而非 learn：避免 mock LLM 翻译响应污染
+///   对话历史（assistant 消息会进入路由查询窗口）；MockLlm 空回复 →
+///   assistant 消息不落库，历史仅含用户消息，查询侧 Jaccard 纯净命中。
+#[tokio::test]
+async fn behavior_rule_injected_when_route_hits() {
+    let storage = Arc::new(MockStorage::new());
+    let llm = Arc::new(MockLlm::new("")); // 空回复：assistant 消息不入历史
+    let engine = build_ready_engine(&storage, &llm, RamariaConfig::default()).await;
+
+    setup_behavior_persona(&storage).await;
+    // 手工导入规则：关键词 [加班]，reaction + avoid（enabled 默认 true）
+    engine
+        .behavior_import_rule(
+            "char-0001",
+            r#"{
+            "situation": {"keywords": ["加班"], "valence_mean": -0.5, "valence_std": 0.1, "sample_count": 6},
+            "reaction": "先共情再给建议，语气疲惫但温和。",
+            "params": {"emotional_intensity": -0.4, "proactiveness": 0.7, "detail_level": 0.6, "formality": 0.3},
+            "avoid": ["深夜"]
+        }"#,
+        )
+        .await
+        .expect("导入成功");
+
+    // 第一轮建立会话（history 为空 → 行为路由不命中）
+    let sid = send_and_get_session(&engine, "加班", Some("char-0001"), None)
+        .await
+        .expect("首轮应返回 session_id");
+    // 第二轮：历史含"加班" → 查询侧 Jaccard=1.0 ≥ θ_route → 行为块注入
+    send_and_get_session(&engine, "继续聊聊", Some("char-0001"), Some(sid)).await;
+
+    let request = llm.last_request().expect("应记录最后一次请求");
+    let prompt = &request.system_prompt;
+    assert!(prompt.contains("## 行为规则"), "行为块缺失: {prompt}");
+    assert!(
+        prompt.contains("先共情再给建议"),
+        "reaction 未注入: {prompt}"
+    );
+    assert!(prompt.contains("深夜"), "avoid 未注入: {prompt}");
+    assert!(prompt.contains("表达倾向"), "params 未注入: {prompt}");
+}
+
+/// [behavior].enabled=false → 不路由不注入，prompt 与既有静态模板语义等价（回归红线）。
+#[tokio::test]
+async fn behavior_disabled_no_behavior_block() {
+    let mut cfg = RamariaConfig::default();
+    cfg.behavior.enabled = false;
+
+    let storage = Arc::new(MockStorage::new());
+    let llm = Arc::new(MockLlm::new(""));
+    let engine = build_ready_engine(&storage, &llm, cfg).await;
+
+    setup_behavior_persona(&storage).await;
+    // 存在可命中的规则（但行为关闭 → 不路由）
+    engine
+        .behavior_import_rule(
+            "char-0001",
+            r#"{
+            "situation": {"keywords": ["加班"], "valence_mean": -0.5, "valence_std": 0.1, "sample_count": 6},
+            "reaction": "先共情再给建议。",
+            "avoid": ["深夜"]
+        }"#,
+        )
+        .await
+        .expect("导入成功");
+
+    let sid = send_and_get_session(&engine, "加班", Some("char-0001"), None)
+        .await
+        .expect("首轮 session_id");
+    send_and_get_session(&engine, "继续聊聊", Some("char-0001"), Some(sid)).await;
+
+    let request = llm.last_request().expect("应记录最后一次请求");
+    let prompt = &request.system_prompt;
+    assert!(!prompt.contains("## 行为规则"), "行为关闭不注入行为块");
+    assert!(!prompt.contains("先共情再给建议"), "规则文本不泄漏");
+}
+
+/// 无规则（助手 persona 未学习）→ 无行为块（回归红线：助手类 persona 无回归）。
+#[tokio::test]
+async fn behavior_no_rule_no_block_for_assistant() {
+    let storage = Arc::new(MockStorage::new());
+    let llm = Arc::new(MockLlm::new("好的。"));
+    let engine = build_ready_engine(&storage, &llm, RamariaConfig::default()).await;
+
+    // 未注册规则：直接对话（不学习）
+    let sid = send_and_get_session(&engine, "你好", Some("rama-0001"), None)
+        .await
+        .expect("首轮 session_id");
+    send_and_get_session(&engine, "今天天气不错", Some("rama-0001"), Some(sid)).await;
+
+    let request = llm.last_request().expect("应记录最后一次请求");
+    let prompt = &request.system_prompt;
+    assert!(!prompt.contains("## 行为规则"), "无规则不产生行为块");
+}
+
+// =========================================================
+// 标签压缩回归：压缩后对话仍产生非空回复
+// =========================================================
+
+/// 样板文本压缩后，活跃路径发送消息仍正常产生非空流式回复
+/// （针对观测到的"回复被压短"问题的结构性治理——压缩注入样板不挤压回复本身）。
+#[tokio::test]
+async fn compressed_boilerplate_still_yields_non_empty_reply() {
+    let storage = Arc::new(MockStorage::new());
+    let reply = "记得呀，上次我们聊到海边，你想周末再去一次。";
+    let llm = Arc::new(MockLlm::new(reply));
+    let engine = build_ready_engine(&storage, &llm, RamariaConfig::default()).await;
+
+    add_char_persona(&storage);
+    add_prev_session_with_utt(&storage);
+    engine.rebuild_index().await.unwrap();
+
+    let outcome = send_stream(&engine, "继续上次的话题吧", Some("char-0001"), None).await;
+    if let Some(error) = &outcome.error {
+        panic!("流中出现错误: {error}");
+    }
+    let collected = outcome.text;
+    let done_total: Option<usize> = outcome.events.iter().find_map(|event| match event {
+        StreamEvent::Done { total_chars, .. } => Some(*total_chars),
+        _ => None,
+    });
+
+    assert!(!collected.trim().is_empty(), "压缩后应产生非空回复");
+    assert!(
+        collected.contains("海边"),
+        "回复应含模型实际输出: {collected}"
+    );
+    assert!(
+        done_total.is_some() && done_total.unwrap() >= collected.chars().count(),
+        "Done 事件应携带回复总字符数: {done_total:?} vs {}",
+        collected.chars().count()
+    );
+
+    // 结构化装配仍正常：四层段落标题齐全（压缩未破坏骨架）
+    let request = llm.last_request().expect("应记录最后一次请求");
+    let prompt = &request.system_prompt;
+    assert!(prompt.contains("# 能力边界"), "能力边界段缺失");
+    assert!(prompt.contains("# 角色（行为层）"), "角色层缺失");
+    assert!(prompt.contains("# 记忆（脉络层）"), "脉络层缺失");
+}

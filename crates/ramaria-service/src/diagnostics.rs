@@ -946,8 +946,8 @@ mod tests {
         // 日志：本机绝对路径（Windows + Unix）与结构化消息字段（含原文）
         std::fs::write(
             log_dir.join("ramaria.log"),
-            "INFO ramaria_app::chat: 收到消息 preview=\"我想吃火锅\" path=C:\\Users\\someone\\Documents\\ramaria.log\n\
-             WARN ramaria_app::io: 无法读取 /home/someone/private/ramaria.log\n",
+            "INFO ramaria_service::chat: 收到消息 preview=\"我想吃火锅\" path=C:\\Users\\someone\\Documents\\ramaria.log\n\
+             WARN ramaria_service::io: 无法读取 /home/someone/private/ramaria.log\n",
         )
         .expect("写入日志失败");
         // 配置：本机路径 + API key（TOML 中以 \\ 转义反斜杠）

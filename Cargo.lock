@@ -4336,29 +4336,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
-name = "ramaria-app"
-version = "2.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "futures",
- "ramaria-core",
- "ramaria-importer",
- "ramaria-llm",
- "ramaria-memory",
- "ramaria-storage",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
- "toml 0.8.2",
- "tracing",
- "uuid",
- "zip 2.4.2",
-]
-
-[[package]]
 name = "ramaria-cli"
 version = "2.1.0"
 dependencies = [
@@ -4510,7 +4487,6 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
- "ramaria-app",
  "ramaria-core",
  "ramaria-importer",
  "ramaria-llm",
