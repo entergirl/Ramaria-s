@@ -2,7 +2,6 @@
 
 > 定位：SQLite 存储层——schema（27 张表基线 + 增量迁移）、Repository 模式 CRUD、索引存取、重试。
 > 上游 SSOT：`../../../docs/dev/00-architecture/arch-decisions-unified.md`（§4 数据与存储）；表结构与接口现状见 `../../../docs/architecture-ai-agent.md`。
-> 状态：导航骨架（结构收敛期建立，收口阶段定稿）。
 
 ## 职责
 
@@ -24,7 +23,7 @@
 ## 相邻契约
 
 - 依赖：`ramaria-core`（类型 / trait / 错误）。
-- 被依赖：`ramaria-memory`、`ramaria-service`、入口层（经 service 或不直接依赖）。
+- 被依赖：`ramaria-memory` / `ramaria-importer` / `ramaria-service`；入口（CLI / 桌面）经服务层使用，不直接依赖。
 - **禁止**：LLM / 网络 / UI / 业务聚合逻辑。
 
 ## 常见改动落点
@@ -34,7 +33,7 @@
 | 新增表 / 列 | `migrations/*.sql`（只增不删；破坏性变更须负责人授权） | `ramaria-core/src/types.rs` + `repo/*` + `../../../docs/architecture-ai-agent.md` |
 | 新增/修改查询 | `src/repo/<entity>.rs` | `ramaria-core/src/traits.rs` 的 trait 方法 + 各 mock 实现 |
 | 连接池参数 | `src/database.rs`（`PoolTuning`） | 决策基线 §18 参数纪律 |
-| 会话级联删除 | `src/repo/sessions.rs`（`delete_cascade`） | 桌面 `delete_session` command 行为 |
+| 会话级联删除 | `src/repo/sessions.rs`（`delete_cascade`） | 服务层删除用例（CLI / 桌面共用） |
 
 ## 验证
 

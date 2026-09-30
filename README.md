@@ -2,7 +2,7 @@
 
 <img src="docs/images/logo.png" alt="Ramaria Logo" width="110">
 
-# 珊瑚菌 · Ramaria 2.1
+# 珊瑚菌 · Ramaria 2.2
 
 > 大模型懂一切，唯独不懂你。
 
@@ -94,7 +94,7 @@ Ramaria 的记忆体系是自下而上的四层结构：
 
 ### 第一步：下载安装包
 
-前往 [**v2.1.0 下载页**](https://github.com/entergirl/Ramaria-s/releases/tag/Ramaria-v2.1.0)，下载安装包 `Ramaria_2.1.0_x64-setup.exe`（约 8.47 MB），双击后按中文向导完成安装。历史版本见 [Releases 列表](https://github.com/entergirl/Ramaria-s/releases)。
+前往 [**v2.1.0 下载页**](https://github.com/entergirl/Ramaria-s/releases/tag/Ramaria-v2.1.0)，下载安装包 `Ramaria_2.1.0_x64-setup.exe`（约 8.47 MB），双击后按中文向导完成安装。历史版本见 [Releases 列表](https://github.com/entergirl/Ramaria-s/releases)。（2.2.0 为内部结构版本，不设发行版、不提供安装包）
 
 ### 第二步：选择模型后端
 
@@ -379,7 +379,17 @@ ramaria diagnostics --output diag.zip
 
 ## 版本历史
 
-### v2.1.0 — 2026-09-25（当前版本）
+### v2.2.0 — 2026-09-30（当前版本；内部结构版本，不设发行版）
+
+**「内部结构收敛」**：把应用内部的编排逻辑全部并入服务层，桌面 / 命令行 / 外部接入三个入口由此共享同一套实现——此后所有新能力都在唯一实现上生长。**本版本无用户可见新功能**：对外能力与 2.1 一致，行为零变更；随版登记修复了一小批既有问题。
+
+**主要变化**：
+
+- 内部收敛：应用编排层并入服务层后移除（workspace 10 → 9 crate）；封存、对话、召回、索引重建、空闲与定时调度各只有一份实现
+- 缺陷修复：设置页「导出诊断信息」的保存对话框恢复正常（此前点击无响应）；索引缺失时自动重建并进入就绪；首次配置完成后正常进入对话界面；外部接入（MCP）的对话历史窗口与桌面统一；L2 / L3 定时触发阈值改为读取配置（默认 7 / 30 天不变）
+- 升级：无破坏性变更、无 schema 变更，无需重建库，旧数据直接可用；本版不提供安装包（不设发行版）
+
+### v2.1.0 — 2026-09-25
 
 **「记忆服务化」**：把记忆与人格能力抽为与传输无关的服务层，并以 MCP（stdio）服务端开放给外部对话前端——挂上即用本机的记忆与人格，外部对话可回流到桌面并参与记忆加工。
 
@@ -449,13 +459,13 @@ Rust 重写完成的首个正式版本：完整记忆管线（L0→L3）、事�
 
 ### 与 Python 版（v0.7.x）的关系
 
-Python 版已进入**维护模式**，不再活跃开发，与 Rust 版不共享数据库 schema，新用户建议直接使用 Rust 2.0。
+Python 版已进入**维护模式**，不再活跃开发，与 Rust 版不共享数据库 schema，新用户建议直接使用 Rust 版。
 
 ---
 
 ## 路线图
 
-以下功能已在架构中预留接口，进入延后（deferred）队列，不在 2.1 发布范围内：Ollama / Claude / 通义千问后端、微信 / Telegram / Discord / Slack 导入器、自动更新、TUI 模式、SQLCipher 加密、Portable 免安装模式、导入匿名化、知识图谱可视化、LoRA 微调、macOS / Linux 安装包、取消生成 / 编辑历史 / 分支对话、精确 token 化、Character Card 导出。
+以下功能已在架构中预留接口，进入延后（deferred）队列，不在 2.2 发布范围内：Ollama / Claude / 通义千问后端、微信 / Telegram / Discord / Slack 导入器、自动更新、TUI 模式、SQLCipher 加密、Portable 免安装模式、导入匿名化、知识图谱可视化、LoRA 微调、macOS / Linux 安装包、取消生成 / 编辑历史 / 分支对话、精确 token 化、Character Card 导出。
 
 > 如有需求，请在 [GitHub Issues](https://github.com/entergirl/Ramaria-s/issues) 提出。
 

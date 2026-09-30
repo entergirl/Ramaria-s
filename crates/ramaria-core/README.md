@@ -2,7 +2,6 @@
 
 > 定位：核心类型边界（零 I/O）——配置、错误体系、抽象 trait、业务数据类型、锁与文本辅助。
 > 上游 SSOT：`../../../docs/dev/00-architecture/arch-decisions-unified.md`（§3.1 职责 / §4 数据与存储 / §18 参数基线）；代码级现状见 `../../../docs/architecture-ai-agent.md`。
-> 状态：导航骨架（结构收敛期建立，收口阶段定稿）。
 
 ## 职责
 
@@ -20,13 +19,13 @@
 | `error` | `RamariaError`、`RamariaResult`、分类构造器 |
 | `traits` | `StoreCrud` / `StoreInfrastructure` / `StorageBackend` / `LlmProvider` / `EmbeddingProvider` / `ChatRequest` / `StreamDelta` |
 | `types` | 全部业务数据类型与 `now_ms` / `new_id` 等基础函数 |
-| `lock` | `read_recover` / `write_recover`（Poisoned 锁恢复） |
+| `lock` | `lock_recover` / `read_recover` / `write_recover`（Poisoned 锁恢复） |
 | `behavior` / `keyword` / `privacy` / `text` | 行为规则与反馈类型、关键词类型、隐私确认类型、文本辅助 |
 
 ## 相邻契约
 
 - 依赖：**无**（仅标准库与 serde 等基础库）。**禁止**引入 sqlx / reqwest / tokio / 数据库 / 网络。
-- 被依赖：全部 crate（storage / memory / llm / app / service / mcp / cli / desktop / importer）。
+- 被依赖：全部 crate（storage / memory / llm / importer / service / mcp / cli / desktop）。
 
 ## 常见改动落点
 

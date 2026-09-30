@@ -112,7 +112,7 @@ pub async fn check_update() -> Result<UpdateStatusView, String> {
 /// - 与 `check_update` 不同，此命令不访问网络。
 ///
 /// 返回:
-/// - 当前版本号字符串，如 "2.1.0"。
+/// - 当前版本号字符串。
 #[tauri::command]
 pub fn get_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()

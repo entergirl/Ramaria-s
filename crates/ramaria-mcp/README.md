@@ -2,7 +2,6 @@
 
 > 定位：MCP 协议壳（stdio）——工具 schema、参数校验、结果包装与错误映射；不含业务逻辑。
 > 上游 SSOT：`../../../docs/dev/07-mcp/mcp-spec.md`（工具契约 / 门禁 / 并发约束）、`../../../docs/dev-2.2/test/contract-baseline.md`（§5 工具基线）。
-> 状态：导航骨架（结构收敛期建立，收口阶段定稿）。
 
 ## 职责
 
@@ -25,13 +24,13 @@
 
 - 依赖：`ramaria-service`（用例）+ `ramaria-core`（类型 / 错误）。
 - **禁止**：业务逻辑（检索 / 封存 / 装配一律经 `ramaria-service`）、`tauri`。
-- 宿主差异：MCP 注册轻量封存钩子链、不开启 L2/L3 常驻调度（结构收敛期行为保持不变）。
+- 宿主差异：MCP 注册轻量封存钩子链（`default_seal_hooks`）、维持空闲检查（`IdleLoop`），不开启 L2/L3 常驻调度（D-V22-016 / D-V22-024）。
 
 ## 常见改动落点
 
 | 改动 | 落点 | 连带 |
 |------|------|------|
-| 新增 / 修改工具 | `src/tools/<name>.rs` + `src/server.rs` 的 `tool_router()` | `docs/dev/07-mcp/mcp-spec.md` + 契约基线 §5 + 协议测试断言 |
+| 新增 / 修改工具 | `src/tools/<name>.rs` + `src/server.rs` 的 `tool_router()` | `../../../docs/dev/07-mcp/mcp-spec.md` + 契约基线 §5 + 协议测试断言 |
 | 入参字段 / 默认值 | `src/params.rs` | 与服务层 `types.rs` 口径对齐（避免双处定义） |
 | 错误映射 | `src/result.rs` | 工具错误一律结果内返回 |
 | 门禁策略 | `src/server.rs` | `[mcp]` 配置（`config/default.toml`） |
