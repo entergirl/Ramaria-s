@@ -4,7 +4,7 @@
 //! - 定义前端通过 Tauri Event 接收的所有事件负载结构
 //! - 所有类型实现 Serialize，确保 JSON 序列化到前端一致
 //! - 事件名称固定为字符串常量，前端和 Rust 端共享契约
-//! - 聊天流式事件（Delta/Done/Error）对齐 ramaria_app::StreamEvent
+//! - 聊天流式事件（Delta/Done/Error）对齐 ramaria_service::StreamEvent
 //! - 应用状态变更事件独立于聊天事件，便于前端状态管理
 
 use serde::Serialize;

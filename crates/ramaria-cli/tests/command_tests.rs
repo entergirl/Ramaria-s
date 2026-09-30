@@ -16,7 +16,7 @@ mod common;
 
 use async_trait::async_trait;
 use common::{
-    MockStorage, build_test_app, make_assistant_message, make_test_event, make_test_l1,
+    MockStorage, build_test_engine, make_assistant_message, make_test_event, make_test_l1,
     make_test_persona, make_test_trait, make_user_message,
 };
 use futures::Stream;
@@ -35,9 +35,9 @@ use uuid::Uuid;
 // 辅助函数
 // =========================================================
 
-/// 构造一个有数据的测试 App（含 2 个 session + 消息 + L1 + L2 + L3 + settings）
-async fn build_app_with_data() -> (Arc<ramaria_app::App>, Arc<MockStorage>) {
-    let (app, storage) = build_test_app();
+/// 构造一个有数据的测试引擎（含 2 个 session + 消息 + L1 + L2 + L3 + settings）
+async fn build_engine_with_data() -> (Arc<ramaria_service::Engine>, Arc<MockStorage>) {
+    let (engine, storage) = build_test_engine();
 
     // Session 1: 有消息
     let sid1 = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
@@ -90,25 +90,26 @@ async fn build_app_with_data() -> (Arc<ramaria_app::App>, Arc<MockStorage>) {
     storage.add_setting("theme", "dark");
     storage.add_setting("language", "zh-CN");
 
-    (app, storage)
+    (engine, storage)
 }
 
-/// 用指定 LLM provider 构造 ready 状态的测试 App。
-fn build_app_with_llm(llm: Arc<dyn LlmProvider>) -> (Arc<ramaria_app::App>, Arc<MockStorage>) {
-    use ramaria_app::App;
+/// 用指定 LLM provider 构造 ready 状态的测试引擎。
+fn build_engine_with_llm(
+    llm: Arc<dyn LlmProvider>,
+) -> (Arc<ramaria_service::Engine>, Arc<MockStorage>) {
     use ramaria_core::config::RamariaConfig;
+    use ramaria_service::Engine;
 
     let storage = Arc::new(MockStorage::new());
-    let keychain = Arc::new(ramaria_llm::keychain::Keychain::new());
     let config = RamariaConfig::default();
-    let app = App::new_without_embedding(
+    let engine = Engine::from_parts(
         Arc::clone(&storage) as Arc<dyn StorageBackend>,
         llm,
+        None,
         config,
-        keychain,
     );
-    app.set_state(ramaria_core::types::AppState::Ready);
-    (Arc::new(app), storage)
+    engine.set_state(ramaria_core::types::AppState::Ready);
+    (Arc::new(engine), storage)
 }
 
 /// 恒失败的 Mock LLM（验证错误链保留 RamariaError source，退出码不退化）。
@@ -171,9 +172,9 @@ impl LlmProvider for FailingLlm {
 
 #[tokio::test]
 async fn session_list_empty() {
-    let (app, _storage) = build_test_app();
+    let (engine, _storage) = build_test_engine();
     let result = ramaria_cli::commands::session::run(
-        &app,
+        &engine,
         ramaria_cli::commands::session::SessionCmd::List {
             limit: None,
             offset: 0,
@@ -188,9 +189,9 @@ async fn session_list_empty() {
 
 #[tokio::test]
 async fn session_list_with_data() {
-    let (app, _storage) = build_app_with_data().await;
+    let (engine, _storage) = build_engine_with_data().await;
     let result = ramaria_cli::commands::session::run(
-        &app,
+        &engine,
         ramaria_cli::commands::session::SessionCmd::List {
             limit: None,
             offset: 0,
@@ -204,10 +205,10 @@ async fn session_list_with_data() {
 
 #[tokio::test]
 async fn session_show_existing() {
-    let (app, _storage) = build_app_with_data().await;
+    let (engine, _storage) = build_engine_with_data().await;
     let sid = "11111111-1111-1111-1111-111111111111";
     let result = ramaria_cli::commands::session::run(
-        &app,
+        &engine,
         ramaria_cli::commands::session::SessionCmd::Show {
             session_id: sid.to_string(),
         },
@@ -220,10 +221,10 @@ async fn session_show_existing() {
 
 #[tokio::test]
 async fn session_show_nonexistent() {
-    let (app, _storage) = build_test_app();
+    let (engine, _storage) = build_test_engine();
     let sid = "99999999-9999-9999-9999-999999999999";
     let result = ramaria_cli::commands::session::run(
-        &app,
+        &engine,
         ramaria_cli::commands::session::SessionCmd::Show {
             session_id: sid.to_string(),
         },
@@ -236,9 +237,9 @@ async fn session_show_nonexistent() {
 
 #[tokio::test]
 async fn session_show_invalid_uuid() {
-    let (app, _storage) = build_test_app();
+    let (engine, _storage) = build_test_engine();
     let result = ramaria_cli::commands::session::run(
-        &app,
+        &engine,
         ramaria_cli::commands::session::SessionCmd::Show {
             session_id: "not-a-uuid".to_string(),
         },
@@ -254,7 +255,7 @@ async fn session_show_invalid_uuid() {
 /// 注：L1 生成走 JobManager 自带重试（指数退避 ~3s），属预期耗时。
 #[tokio::test]
 async fn session_summarize_preserves_ramaria_error_for_exit_code() {
-    let (app, storage) = build_app_with_llm(Arc::new(FailingLlm::new()));
+    let (engine, storage) = build_engine_with_llm(Arc::new(FailingLlm::new()));
     let sid = Uuid::new_v4();
     storage.create_session_with_messages(
         sid,
@@ -265,7 +266,7 @@ async fn session_summarize_preserves_ramaria_error_for_exit_code() {
     );
 
     let result = ramaria_cli::commands::session::run(
-        &app,
+        &engine,
         ramaria_cli::commands::session::SessionCmd::Summarize {
             session_id: sid.to_string(),
             persona_uid: None,
@@ -293,9 +294,9 @@ async fn session_summarize_preserves_ramaria_error_for_exit_code() {
 
 #[tokio::test]
 async fn config_list_default() {
-    let (app, _storage) = build_test_app();
+    let (engine, _storage) = build_test_engine();
     let result = ramaria_cli::commands::config::run(
-        &app,
+        &engine,
         ramaria_cli::commands::config::ConfigCmd::List,
         false,
     )
@@ -305,12 +306,12 @@ async fn config_list_default() {
 
 #[tokio::test]
 async fn config_list_with_settings() {
-    let (app, storage) = build_test_app();
+    let (engine, storage) = build_test_engine();
     storage.add_setting("theme", "dark");
     storage.add_setting("language", "zh-CN");
 
     let result = ramaria_cli::commands::config::run(
-        &app,
+        &engine,
         ramaria_cli::commands::config::ConfigCmd::List,
         false,
     )
@@ -320,11 +321,11 @@ async fn config_list_with_settings() {
 
 #[tokio::test]
 async fn config_get_known_keys() {
-    let (app, _storage) = build_test_app();
+    let (engine, _storage) = build_test_engine();
 
     // provider
     let result = ramaria_cli::commands::config::run(
-        &app,
+        &engine,
         ramaria_cli::commands::config::ConfigCmd::Get {
             key: "provider".to_string(),
         },
@@ -335,7 +336,7 @@ async fn config_get_known_keys() {
 
     // state
     let result = ramaria_cli::commands::config::run(
-        &app,
+        &engine,
         ramaria_cli::commands::config::ConfigCmd::Get {
             key: "state".to_string(),
         },
@@ -347,10 +348,10 @@ async fn config_get_known_keys() {
 
 #[tokio::test]
 async fn config_get_unknown_key() {
-    let (app, _storage) = build_test_app();
+    let (engine, _storage) = build_test_engine();
 
     let result = ramaria_cli::commands::config::run(
-        &app,
+        &engine,
         ramaria_cli::commands::config::ConfigCmd::Get {
             key: "nonexistent_key_xyz".to_string(),
         },
@@ -362,11 +363,11 @@ async fn config_get_unknown_key() {
 
 #[tokio::test]
 async fn config_get_custom_setting() {
-    let (app, storage) = build_test_app();
+    let (engine, storage) = build_test_engine();
     storage.add_setting("theme", "dark");
 
     let result = ramaria_cli::commands::config::run(
-        &app,
+        &engine,
         ramaria_cli::commands::config::ConfigCmd::Get {
             key: "theme".to_string(),
         },
@@ -378,16 +379,16 @@ async fn config_get_custom_setting() {
 
 #[tokio::test]
 async fn config_set_valid_temperature() {
-    // 修复前：默认 App 的 config_dir="" → 相对路径 config.toml 落到 crate 根（cwd），
-    // 污染被跟踪文件；修复后必须只写临时目录。
+    // 配置双写需要真实库与配置文件：本测试使用临时目录承接双写产物，
+    // 不得改写到 crate 根（cwd）下的被跟踪文件。
     let dir = temp_config_dir("temperature");
-    let (app, _storage) = build_test_app_with_config_dir(&dir);
+    let engine = build_config_test_engine(&dir).await;
 
     let repo_config = std::path::Path::new("config.toml");
     let before = std::fs::read_to_string(repo_config).ok();
 
     let result = ramaria_cli::commands::config::run(
-        &app,
+        &engine,
         ramaria_cli::commands::config::ConfigCmd::Set {
             key: "temperature".to_string(),
             value: "0.8".to_string(),
@@ -408,15 +409,16 @@ async fn config_set_valid_temperature() {
         "config set 应把 config.toml 写入配置目录（临时目录）"
     );
 
+    close_engine_pool(&engine).await;
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
 async fn config_set_invalid_temperature() {
-    let (app, _storage) = build_test_app();
+    let (engine, _storage) = build_test_engine();
 
     let result = ramaria_cli::commands::config::run(
-        &app,
+        &engine,
         ramaria_cli::commands::config::ConfigCmd::Set {
             key: "temperature".to_string(),
             value: "not-a-number".to_string(),
@@ -429,11 +431,11 @@ async fn config_set_invalid_temperature() {
 
 #[tokio::test]
 async fn config_set_custom_setting() {
-    let (app, storage) = build_test_app();
+    let (engine, storage) = build_test_engine();
     storage.add_setting("theme", "dark");
 
     let result = ramaria_cli::commands::config::run(
-        &app,
+        &engine,
         ramaria_cli::commands::config::ConfigCmd::Set {
             key: "theme".to_string(),
             value: "light".to_string(),
@@ -448,11 +450,11 @@ async fn config_set_custom_setting() {
 
 #[tokio::test]
 async fn config_set_unknown_key_rejected() {
-    let (app, storage) = build_test_app();
+    let (engine, storage) = build_test_engine();
 
     // 未知 key（如 backend.provider）必须报错，且不得写入 settings 表（避免静默假成功）
     let result = ramaria_cli::commands::config::run(
-        &app,
+        &engine,
         ramaria_cli::commands::config::ConfigCmd::Set {
             key: "backend.provider".to_string(),
             value: "deepseek".to_string(),
@@ -465,27 +467,16 @@ async fn config_set_unknown_key_rejected() {
     assert!(setting.is_none());
 }
 
-/// 构造带指定 config_dir 的测试 App（config.toml 双写测试需要真实文件目录，
-/// 默认空 config_dir 会把文件写到测试工作区，污染仓库）。
-fn build_test_app_with_config_dir(
-    dir: &std::path::Path,
-) -> (Arc<ramaria_app::App>, Arc<MockStorage>) {
-    use ramaria_app::App;
-    use ramaria_core::config::RamariaConfig;
-
-    let storage = Arc::new(MockStorage::new());
-    let llm = Arc::new(common::MockLlm::new("Hello, World!"));
-    let keychain = Arc::new(ramaria_llm::keychain::Keychain::new());
-    let mut config = RamariaConfig::default();
-    config.paths.config_dir = dir.to_string_lossy().to_string();
-    let app = App::new_without_embedding(
-        Arc::clone(&storage) as Arc<dyn ramaria_core::StorageBackend>,
-        llm,
-        config,
-        keychain,
-    );
-    app.set_state(ramaria_core::types::AppState::Ready);
-    (Arc::new(app), storage)
+/// 构造带指定配置目录的测试引擎（配置双写测试需要真实库与配置文件；
+/// 注入构造不携带库路径，无法执行配置读写用例，故此处装配真实临时库）。
+async fn build_config_test_engine(dir: &std::path::Path) -> Arc<ramaria_service::Engine> {
+    let engine = ramaria_service::Engine::open_with(
+        ramaria_service::EngineOptions::new(dir.join("assistant.db"))
+            .with_config_path(dir.join("config.toml")),
+    )
+    .await
+    .expect("配置双写测试引擎装配应成功");
+    Arc::new(engine)
 }
 
 /// 创建唯一临时测试目录（自动清理）。
@@ -499,14 +490,21 @@ fn temp_config_dir(tag: &str) -> std::path::PathBuf {
     dir
 }
 
+/// 关闭引擎持有的连接池句柄（Windows 下删除临时目录前需释放文件句柄）。
+async fn close_engine_pool(engine: &ramaria_service::Engine) {
+    if let Some(pool) = engine.sqlite_pool() {
+        pool.close().await;
+    }
+}
+
 #[tokio::test]
 async fn config_set_provider_persists_to_config_toml() {
     let dir = temp_config_dir("provider");
-    let (app, storage) = build_test_app_with_config_dir(&dir);
+    let engine = build_config_test_engine(&dir).await;
 
     // 设置 provider
     let result = ramaria_cli::commands::config::run(
-        &app,
+        &engine,
         ramaria_cli::commands::config::ConfigCmd::Set {
             key: "provider".to_string(),
             value: "deepseek".to_string(),
@@ -517,7 +515,12 @@ async fn config_set_provider_persists_to_config_toml() {
     assert!(result.is_ok());
 
     // 1) DB 侧已更新
-    let saved = storage.get_backend_config().await.unwrap().unwrap();
+    let saved = engine
+        .storage()
+        .get_backend_config()
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(saved.provider, ramaria_core::types::LlmProvider::DeepSeek);
 
     // 2) config.toml 文件侧已同步（[backend] 组）
@@ -528,33 +531,38 @@ async fn config_set_provider_persists_to_config_toml() {
         "config.toml 应包含 deepseek: {content}"
     );
 
-    // 3) 模拟重启：ConfigSyncService::load() 以文件为准回写 →
+    // 3) 模拟重启：配置同步以文件为准回写 →
     //    文件与 DB 一致 → 无 mismatch → DB 不被覆盖回默认值
-    let sync = ramaria_app::ConfigSyncService::new(storage.clone(), config_path.clone());
-    let outcome = sync.load().await.unwrap();
+    let outcome = engine.reload_config().await.unwrap();
     assert!(
         outcome.mismatches.is_empty(),
         "重启后文件与 DB 应一致: {:?}",
         outcome.mismatches
     );
-    let saved = storage.get_backend_config().await.unwrap().unwrap();
+    let saved = engine
+        .storage()
+        .get_backend_config()
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
         saved.provider,
         ramaria_core::types::LlmProvider::DeepSeek,
         "重启后 provider 不得被覆盖回默认值"
     );
 
+    close_engine_pool(&engine).await;
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
 async fn config_embedding_model_path_roundtrip() {
     let dir = temp_config_dir("embed");
-    let (app, storage) = build_test_app_with_config_dir(&dir);
+    let engine = build_config_test_engine(&dir).await;
 
     // 设置
     let result = ramaria_cli::commands::config::run(
-        &app,
+        &engine,
         ramaria_cli::commands::config::ConfigCmd::Set {
             key: "embedding_model_path".to_string(),
             value: "/models/bge-m3.gguf".to_string(),
@@ -563,7 +571,12 @@ async fn config_embedding_model_path_roundtrip() {
     )
     .await;
     assert!(result.is_ok());
-    let saved = storage.get_backend_config().await.unwrap().unwrap();
+    let saved = engine
+        .storage()
+        .get_backend_config()
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
         saved.embedding_model_path.as_deref(),
         Some("/models/bge-m3.gguf")
@@ -571,7 +584,7 @@ async fn config_embedding_model_path_roundtrip() {
 
     // 读取（未配置时应输出 (未设置)，设置后正常返回）
     let result = ramaria_cli::commands::config::run(
-        &app,
+        &engine,
         ramaria_cli::commands::config::ConfigCmd::Get {
             key: "embedding_model_path".to_string(),
         },
@@ -582,7 +595,7 @@ async fn config_embedding_model_path_roundtrip() {
 
     // 清空（空字符串视为清除）
     let result = ramaria_cli::commands::config::run(
-        &app,
+        &engine,
         ramaria_cli::commands::config::ConfigCmd::Set {
             key: "embedding_model_path".to_string(),
             value: "".to_string(),
@@ -591,12 +604,17 @@ async fn config_embedding_model_path_roundtrip() {
     )
     .await;
     assert!(result.is_ok());
-    let saved = storage.get_backend_config().await.unwrap().unwrap();
+    let saved = engine
+        .storage()
+        .get_backend_config()
+        .await
+        .unwrap()
+        .unwrap();
     assert!(saved.embedding_model_path.is_none());
 
     // 清空后读取仍成功
     let result = ramaria_cli::commands::config::run(
-        &app,
+        &engine,
         ramaria_cli::commands::config::ConfigCmd::Get {
             key: "embedding_model_path".to_string(),
         },
@@ -604,14 +622,17 @@ async fn config_embedding_model_path_roundtrip() {
     )
     .await;
     assert!(result.is_ok());
+
+    close_engine_pool(&engine).await;
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
 async fn config_set_invalid_provider() {
-    let (app, _storage) = build_test_app();
+    let (engine, _storage) = build_test_engine();
 
     let result = ramaria_cli::commands::config::run(
-        &app,
+        &engine,
         ramaria_cli::commands::config::ConfigCmd::Set {
             key: "provider".to_string(),
             value: "unknown_provider".to_string(),
@@ -628,10 +649,10 @@ async fn config_set_invalid_provider() {
 
 #[tokio::test]
 async fn memory_unknown_layer() {
-    let (app, _storage) = build_test_app();
+    let (engine, _storage) = build_test_engine();
 
     let result = ramaria_cli::commands::memory::run(
-        &app,
+        &engine,
         ramaria_cli::commands::memory::MemoryArgs {
             layer: "l4".to_string(),
             persona: None,
@@ -646,10 +667,10 @@ async fn memory_unknown_layer() {
 
 #[tokio::test]
 async fn memory_l1_empty() {
-    let (app, _storage) = build_test_app();
+    let (engine, _storage) = build_test_engine();
 
     let result = ramaria_cli::commands::memory::run(
-        &app,
+        &engine,
         ramaria_cli::commands::memory::MemoryArgs {
             layer: "l1".to_string(),
             persona: None,
@@ -664,12 +685,12 @@ async fn memory_l1_empty() {
 
 #[tokio::test]
 async fn memory_l1_with_data() {
-    let (app, storage) = build_test_app();
+    let (engine, storage) = build_test_engine();
     let sid = Uuid::new_v4();
     storage.add_l1(sid, make_test_l1(sid, "测试摘要内容"));
 
     let result = ramaria_cli::commands::memory::run(
-        &app,
+        &engine,
         ramaria_cli::commands::memory::MemoryArgs {
             layer: "l1".to_string(),
             persona: None,
@@ -684,10 +705,10 @@ async fn memory_l1_with_data() {
 
 #[tokio::test]
 async fn memory_l2_empty() {
-    let (app, _storage) = build_test_app();
+    let (engine, _storage) = build_test_engine();
 
     let result = ramaria_cli::commands::memory::run(
-        &app,
+        &engine,
         ramaria_cli::commands::memory::MemoryArgs {
             layer: "l2".to_string(),
             persona: None,
@@ -702,11 +723,11 @@ async fn memory_l2_empty() {
 
 #[tokio::test]
 async fn memory_l2_with_data() {
-    let (app, storage) = build_test_app();
+    let (engine, storage) = build_test_engine();
     storage.add_event("user-0001", make_test_event(1, "测试事件"));
 
     let result = ramaria_cli::commands::memory::run(
-        &app,
+        &engine,
         ramaria_cli::commands::memory::MemoryArgs {
             layer: "l2".to_string(),
             persona: None,
@@ -721,10 +742,10 @@ async fn memory_l2_with_data() {
 
 #[tokio::test]
 async fn memory_l3_empty() {
-    let (app, _storage) = build_test_app();
+    let (engine, _storage) = build_test_engine();
 
     let result = ramaria_cli::commands::memory::run(
-        &app,
+        &engine,
         ramaria_cli::commands::memory::MemoryArgs {
             layer: "l3".to_string(),
             persona: None,
@@ -739,14 +760,14 @@ async fn memory_l3_empty() {
 
 #[tokio::test]
 async fn memory_l3_with_data() {
-    let (app, storage) = build_test_app();
+    let (engine, storage) = build_test_engine();
     storage.add_personality_trait(
         "user-0001",
         make_test_trait("测试标签", ramaria_core::types::TraitLayer::Base),
     );
 
     let result = ramaria_cli::commands::memory::run(
-        &app,
+        &engine,
         ramaria_cli::commands::memory::MemoryArgs {
             layer: "l3".to_string(),
             persona: None,
@@ -761,7 +782,7 @@ async fn memory_l3_with_data() {
 
 #[tokio::test]
 async fn memory_l3_all_layers() {
-    let (app, storage) = build_test_app();
+    let (engine, storage) = build_test_engine();
     storage.add_personality_trait(
         "user-0001",
         make_test_trait("Base标签", ramaria_core::types::TraitLayer::Base),
@@ -776,7 +797,7 @@ async fn memory_l3_all_layers() {
     );
 
     let result = ramaria_cli::commands::memory::run(
-        &app,
+        &engine,
         ramaria_cli::commands::memory::MemoryArgs {
             layer: "l3".to_string(),
             persona: None,
@@ -791,10 +812,10 @@ async fn memory_l3_all_layers() {
 
 #[tokio::test]
 async fn memory_with_persona_filter() {
-    let (app, _storage) = build_test_app();
+    let (engine, _storage) = build_test_engine();
 
     let result = ramaria_cli::commands::memory::run(
-        &app,
+        &engine,
         ramaria_cli::commands::memory::MemoryArgs {
             layer: "l1".to_string(),
             persona: Some("user-0001".to_string()),
@@ -813,11 +834,11 @@ async fn memory_with_persona_filter() {
 
 #[tokio::test]
 async fn export_json_empty() {
-    let (app, _storage) = build_test_app();
+    let (engine, _storage) = build_test_engine();
 
     // → output: Some("-") 输出到 stdout，避免依赖 exports/ 目录存在。
     let result = ramaria_cli::commands::export::run(
-        &app,
+        &engine,
         ramaria_cli::commands::export::ExportArgs {
             format: "json".to_string(),
             persona: None,
@@ -831,10 +852,10 @@ async fn export_json_empty() {
 
 #[tokio::test]
 async fn export_json_with_data() {
-    let (app, _storage) = build_app_with_data().await;
+    let (engine, _storage) = build_engine_with_data().await;
 
     let result = ramaria_cli::commands::export::run(
-        &app,
+        &engine,
         ramaria_cli::commands::export::ExportArgs {
             format: "json".to_string(),
             persona: None,
@@ -848,10 +869,10 @@ async fn export_json_with_data() {
 
 #[tokio::test]
 async fn export_json_with_persona() {
-    let (app, _storage) = build_app_with_data().await;
+    let (engine, _storage) = build_engine_with_data().await;
 
     let result = ramaria_cli::commands::export::run(
-        &app,
+        &engine,
         ramaria_cli::commands::export::ExportArgs {
             format: "json".to_string(),
             persona: Some("user-0001".to_string()),
@@ -865,10 +886,10 @@ async fn export_json_with_persona() {
 
 #[tokio::test]
 async fn export_markdown_empty() {
-    let (app, _storage) = build_test_app();
+    let (engine, _storage) = build_test_engine();
 
     let result = ramaria_cli::commands::export::run(
-        &app,
+        &engine,
         ramaria_cli::commands::export::ExportArgs {
             format: "markdown".to_string(),
             persona: None,
@@ -882,10 +903,10 @@ async fn export_markdown_empty() {
 
 #[tokio::test]
 async fn export_markdown_with_data() {
-    let (app, _storage) = build_app_with_data().await;
+    let (engine, _storage) = build_engine_with_data().await;
 
     let result = ramaria_cli::commands::export::run(
-        &app,
+        &engine,
         ramaria_cli::commands::export::ExportArgs {
             format: "markdown".to_string(),
             persona: None,
@@ -899,10 +920,10 @@ async fn export_markdown_with_data() {
 
 #[tokio::test]
 async fn export_invalid_format() {
-    let (app, _storage) = build_test_app();
+    let (engine, _storage) = build_test_engine();
 
     let result = ramaria_cli::commands::export::run(
-        &app,
+        &engine,
         ramaria_cli::commands::export::ExportArgs {
             format: "xml".to_string(),
             persona: None,
@@ -916,11 +937,11 @@ async fn export_invalid_format() {
 
 #[tokio::test]
 async fn export_json_to_file() {
-    let (app, _storage) = build_app_with_data().await;
+    let (engine, _storage) = build_engine_with_data().await;
     let tmp_file = std::env::temp_dir().join("ramaria_test_export.json");
 
     let result = ramaria_cli::commands::export::run(
-        &app,
+        &engine,
         ramaria_cli::commands::export::ExportArgs {
             format: "json".to_string(),
             persona: None,
@@ -942,11 +963,11 @@ async fn export_json_to_file() {
 
 #[tokio::test]
 async fn export_markdown_to_file() {
-    let (app, _storage) = build_app_with_data().await;
+    let (engine, _storage) = build_engine_with_data().await;
     let tmp_file = std::env::temp_dir().join("ramaria_test_export.md");
 
     let result = ramaria_cli::commands::export::run(
-        &app,
+        &engine,
         ramaria_cli::commands::export::ExportArgs {
             format: "markdown".to_string(),
             persona: None,
@@ -972,16 +993,61 @@ async fn export_markdown_to_file() {
 
 #[tokio::test]
 async fn index_rebuild() {
-    let (app, _storage) = build_test_app();
-    let result = ramaria_cli::commands::index_cmd::run(&app, false).await;
+    let (engine, _storage) = build_test_engine();
+    let result = ramaria_cli::commands::index_cmd::run(&engine, false).await;
     assert!(result.is_ok());
 }
 
 #[tokio::test]
 async fn index_rebuild_with_data() {
-    let (app, _storage) = build_app_with_data().await;
-    let result = ramaria_cli::commands::index_cmd::run(&app, false).await;
+    let (engine, _storage) = build_engine_with_data().await;
+    let result = ramaria_cli::commands::index_cmd::run(&engine, false).await;
     assert!(result.is_ok());
+}
+
+/// 缺索引的库：对话前索引确保完成一次构建并刷新状态（脱离待构建状态）。
+#[tokio::test]
+async fn ensure_retriever_loaded_refreshes_state_after_rebuild() {
+    let dir = temp_config_dir("ensure-index");
+    let engine = build_config_test_engine(&dir).await;
+
+    // 配置就绪（本地 provider）+ 构造"缺索引"库（删除 migration 预置的索引版本键）
+    engine
+        .storage()
+        .save_backend_config(&BackendConfig::lm_studio_default())
+        .await
+        .expect("保存后端配置应成功");
+    let pool = engine.sqlite_pool().expect("引擎应持有连接池");
+    sqlx::query("DELETE FROM schema_meta WHERE key = 'index_version'")
+        .execute(&pool)
+        .await
+        .expect("删除索引版本键应成功");
+
+    // 入口装配刷新：缺索引 → Indexing
+    assert_eq!(
+        engine.refresh_setup_state().await.expect("刷新应成功"),
+        ramaria_core::types::AppState::Indexing
+    );
+
+    // 对话前确保：重建写回版本 + 刷新状态；无嵌入模型 → Degraded
+    ramaria_cli::commands::ask::ensure_retriever_loaded(&engine).await;
+    assert_eq!(
+        engine
+            .storage()
+            .get_index_version()
+            .await
+            .expect("读取索引版本应成功"),
+        1,
+        "重建完成后应写回索引版本 1"
+    );
+    assert_eq!(
+        engine.current_state(),
+        ramaria_core::types::AppState::Degraded,
+        "重建 + 刷新后应脱离待构建状态"
+    );
+
+    close_engine_pool(&engine).await;
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // =========================================================
@@ -994,9 +1060,9 @@ async fn index_rebuild_with_data() {
 
 #[tokio::test]
 async fn persona_show_empty() {
-    let (app, _storage) = build_test_app();
+    let (engine, _storage) = build_test_engine();
     let result = ramaria_cli::commands::persona::run(
-        &app,
+        &engine,
         ramaria_cli::commands::persona::PersonaCmd::Show,
         false,
     )
@@ -1007,7 +1073,7 @@ async fn persona_show_empty() {
 
 #[tokio::test]
 async fn persona_show_with_data() {
-    let (app, storage) = build_test_app();
+    let (engine, storage) = build_test_engine();
 
     // 添加一个带完整 TOML config 的 persona
     let config = r#"[identity]
@@ -1036,7 +1102,7 @@ E_rules = """
     ));
 
     let result = ramaria_cli::commands::persona::run(
-        &app,
+        &engine,
         ramaria_cli::commands::persona::PersonaCmd::Show,
         false,
     )
@@ -1046,7 +1112,7 @@ E_rules = """
 
 #[tokio::test]
 async fn persona_show_with_minimal_persona() {
-    let (app, storage) = build_test_app();
+    let (engine, storage) = build_test_engine();
 
     // 无 config 的 persona（最简情况）
     storage.add_persona(make_test_persona(
@@ -1057,7 +1123,7 @@ async fn persona_show_with_minimal_persona() {
     ));
 
     let result = ramaria_cli::commands::persona::run(
-        &app,
+        &engine,
         ramaria_cli::commands::persona::PersonaCmd::Show,
         false,
     )
@@ -1067,11 +1133,11 @@ async fn persona_show_with_minimal_persona() {
 
 #[tokio::test]
 async fn persona_reload_directory_not_found() {
-    let (app, _storage) = build_test_app();
+    let (engine, _storage) = build_test_engine();
     // reload 依赖 `../config/personas/` 目录，测试环境中通常不存在
     // 此处验证错误提示是否正常
     let result = ramaria_cli::commands::persona::run(
-        &app,
+        &engine,
         ramaria_cli::commands::persona::PersonaCmd::Reload { uid: None },
         false,
     )
@@ -1089,9 +1155,9 @@ async fn persona_reload_directory_not_found() {
 
 #[tokio::test]
 async fn persona_reload_specific_nonexistent_uid() {
-    let (app, _storage) = build_test_app();
+    let (engine, _storage) = build_test_engine();
     let result = ramaria_cli::commands::persona::run(
-        &app,
+        &engine,
         ramaria_cli::commands::persona::PersonaCmd::Reload {
             uid: Some("nonexistent-999".to_string()),
         },
@@ -1105,7 +1171,7 @@ async fn persona_reload_specific_nonexistent_uid() {
 #[tokio::test]
 async fn persona_storage_update_works() {
     // 验证 MockStorage 的 update_persona 能正确更新数据
-    let (app, storage) = build_test_app();
+    let (engine, storage) = build_test_engine();
 
     storage.add_persona(make_test_persona(
         "rama-0001",
@@ -1115,13 +1181,14 @@ async fn persona_storage_update_works() {
     ));
 
     // 通过 storage trait 更新
-    app.storage()
+    engine
+        .storage()
         .update_persona("rama-0001", "新名称", None, Some("new config"), None)
         .await
         .expect("update_persona 应成功");
 
     // 验证更新结果
-    let updated = app
+    let updated = engine
         .storage()
         .get_persona_by_uid("rama-0001")
         .await
@@ -1134,9 +1201,9 @@ async fn persona_storage_update_works() {
 
 #[tokio::test]
 async fn persona_storage_update_nonexistent_fails() {
-    let (app, _storage) = build_test_app();
+    let (engine, _storage) = build_test_engine();
 
-    let result = app
+    let result = engine
         .storage()
         .update_persona("nonexistent-uid", "name", None, None, None)
         .await;
@@ -1149,17 +1216,17 @@ async fn persona_storage_update_nonexistent_fails() {
 
 #[tokio::test]
 async fn privacy_local_provider_passes() {
-    let (app, _storage) = build_test_app();
+    let (engine, _storage) = build_test_engine();
     // MockLlm 使用 LM Studio（本地 provider），确保隐私确认直接通过
-    let result = ramaria_cli::privacy::ensure_privacy(&app, false).await;
+    let result = ramaria_cli::privacy::ensure_privacy(&engine, false).await;
     assert!(result.is_ok());
 }
 
 #[tokio::test]
 async fn privacy_with_yes_flag() {
-    let (app, _storage) = build_test_app();
+    let (engine, _storage) = build_test_engine();
     // --yes 标记，本地 provider 也应正常通过
-    let result = ramaria_cli::privacy::ensure_privacy(&app, true).await;
+    let result = ramaria_cli::privacy::ensure_privacy(&engine, true).await;
     assert!(result.is_ok());
 }
 
@@ -1169,7 +1236,7 @@ async fn privacy_with_yes_flag() {
 
 #[tokio::test]
 async fn session_delete_via_storage() {
-    let (_app, storage) = build_test_app();
+    let (_engine, storage) = build_test_engine();
     let sid = Uuid::new_v4();
     storage.create_session_with_messages(sid, vec![make_user_message(sid, "test")]);
 
@@ -1293,10 +1360,10 @@ fn blocks_and_utt_alias() {
 /// memory 层级别名双支持：summary/events/profile 与 l1/l2/l3 等价。
 #[tokio::test]
 async fn memory_layer_aliases_ok() {
-    let (app, _storage) = build_test_app();
+    let (engine, _storage) = build_test_engine();
     for layer in ["summary", "events", "profile"] {
         let result = ramaria_cli::commands::memory::run(
-            &app,
+            &engine,
             ramaria_cli::commands::memory::MemoryArgs {
                 layer: layer.to_string(),
                 persona: None,
@@ -1313,9 +1380,9 @@ async fn memory_layer_aliases_ok() {
 /// memory 未知层级纠错提示：可用值 summary/events/profile（或 l1/l2/l3）。
 #[tokio::test]
 async fn memory_unknown_layer_suggestion() {
-    let (app, _storage) = build_test_app();
+    let (engine, _storage) = build_test_engine();
     let result = ramaria_cli::commands::memory::run(
-        &app,
+        &engine,
         ramaria_cli::commands::memory::MemoryArgs {
             layer: "l4".to_string(),
             persona: None,
@@ -1335,9 +1402,9 @@ async fn memory_unknown_layer_suggestion() {
 /// persona list：空数据不报错。
 #[tokio::test]
 async fn persona_list_empty() {
-    let (app, _storage) = build_test_app();
+    let (engine, _storage) = build_test_engine();
     let result = ramaria_cli::commands::persona::run(
-        &app,
+        &engine,
         ramaria_cli::commands::persona::PersonaCmd::List {
             limit: None,
             offset: 0,
@@ -1351,7 +1418,7 @@ async fn persona_list_empty() {
 /// persona list：结构化字段（uid/name/kind）不报错。
 #[tokio::test]
 async fn persona_list_with_data() {
-    let (app, storage) = build_test_app();
+    let (engine, storage) = build_test_engine();
     storage.add_persona(make_test_persona(
         "rama-0001",
         "黎杋枫",
@@ -1365,7 +1432,7 @@ async fn persona_list_with_data() {
         None,
     ));
     let result = ramaria_cli::commands::persona::run(
-        &app,
+        &engine,
         ramaria_cli::commands::persona::PersonaCmd::List {
             limit: None,
             offset: 0,
@@ -1376,12 +1443,12 @@ async fn persona_list_with_data() {
     assert!(result.is_ok());
 }
 
-/// status 命令（agent 探活）：mock app 可执行。
+/// status 命令（agent 探活）：mock 引擎可执行。
 #[tokio::test]
 async fn status_command_ok() {
-    let (app, _storage) = build_test_app();
+    let (engine, _storage) = build_test_engine();
     let result = ramaria_cli::commands::status::run(
-        &app,
+        &engine,
         ramaria_cli::commands::status::StatusArgs {
             db_path: std::path::PathBuf::from("data/test.db"),
             json: false,
@@ -1397,11 +1464,11 @@ async fn status_command_ok() {
 #[tokio::test]
 async fn config_set_model_id_roundtrip() {
     let dir = temp_config_dir("model");
-    let (app, storage) = build_test_app_with_config_dir(&dir);
+    let engine = build_config_test_engine(&dir).await;
 
     // 设置 model_id（写入 capability.model_id，与 get_config 对称）
     let result = ramaria_cli::commands::config::run(
-        &app,
+        &engine,
         ramaria_cli::commands::config::ConfigCmd::Set {
             key: "model_id".to_string(),
             value: "qwen3-8b".to_string(),
@@ -1410,12 +1477,17 @@ async fn config_set_model_id_roundtrip() {
     )
     .await;
     assert!(result.is_ok());
-    let saved = storage.get_backend_config().await.unwrap().unwrap();
+    let saved = engine
+        .storage()
+        .get_backend_config()
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(saved.capability.model_id, "qwen3-8b");
 
     // 空值拒绝
     let result = ramaria_cli::commands::config::run(
-        &app,
+        &engine,
         ramaria_cli::commands::config::ConfigCmd::Set {
             key: "model_id".to_string(),
             value: "".to_string(),
@@ -1425,16 +1497,15 @@ async fn config_set_model_id_roundtrip() {
     .await;
     assert!(result.is_err());
 
+    close_engine_pool(&engine).await;
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
 async fn import_dry_run_missing_file_is_validation_error() {
-    let (app, _storage) = build_test_app();
-    let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+    let (engine, _storage) = build_test_engine();
     let result = ramaria_cli::commands::import_cmd::run(
-        &app,
-        &pool,
+        &engine,
         ramaria_cli::commands::import_cmd::ImportArgs {
             file: std::path::PathBuf::from("nonexistent_file.json"),
             deep: false,
@@ -1484,17 +1555,23 @@ fn make_test_fact(
 /// fact list：空数据 → 空数组（命令级）。
 #[tokio::test]
 async fn fact_list_empty_returns_empty() {
-    let (app, _storage) = build_test_app();
-    let facts = ramaria_app::commands::fact::fact_list(&app, "rama-0001", None)
+    let (engine, _storage) = build_test_engine();
+    let page = engine
+        .memory_facts(ramaria_service::FactBrowseRequest {
+            persona: "rama-0001".to_string(),
+            field: None,
+            limit: None,
+            offset: None,
+        })
         .await
         .unwrap();
-    assert!(facts.is_empty(), "无数据时应返回空数组");
+    assert!(page.items.is_empty(), "无数据时应返回空数组");
 }
 
 /// fact list：有数据返回 active 事实，按 field 过滤生效（命令级）。
 #[tokio::test]
 async fn fact_list_filters_by_field() {
-    let (app, storage) = build_test_app();
+    let (engine, storage) = build_test_engine();
     use ramaria_core::types::{FactStatus, ProfileField};
     // 两条不同 field 的 active 事实 + 一条 superseded（不应出现在 active list）
     let interest = make_test_fact("rama-0001", ProfileField::Interests, "喜欢科幻电影");
@@ -1506,17 +1583,30 @@ async fn fact_list_filters_by_field() {
     storage.add_fact(old);
 
     // 不按 field：只返回 active 两条
-    let all = ramaria_app::commands::fact::fact_list(&app, "rama-0001", None)
+    let page = engine
+        .memory_facts(ramaria_service::FactBrowseRequest {
+            persona: "rama-0001".to_string(),
+            field: None,
+            limit: None,
+            offset: None,
+        })
         .await
         .unwrap();
+    let all = page.items;
     assert_eq!(all.len(), 2, "superseded 不应出现在 active list");
     assert!(all.iter().all(|f| f.status == FactStatus::Active));
 
     // 按 field=interests：仅兴趣
-    let interests =
-        ramaria_app::commands::fact::fact_list(&app, "rama-0001", Some(ProfileField::Interests))
-            .await
-            .unwrap();
+    let page = engine
+        .memory_facts(ramaria_service::FactBrowseRequest {
+            persona: "rama-0001".to_string(),
+            field: Some(ProfileField::Interests),
+            limit: None,
+            offset: None,
+        })
+        .await
+        .unwrap();
+    let interests = page.items;
     assert_eq!(interests.len(), 1);
     assert_eq!(interests[0].content, "喜欢科幻电影");
 }
@@ -1524,7 +1614,7 @@ async fn fact_list_filters_by_field() {
 /// fact show：单条详情 + 完整版本链（命令级，链头最早在前）。
 #[tokio::test]
 async fn fact_show_versions_chain() {
-    let (app, storage) = build_test_app();
+    let (engine, storage) = build_test_engine();
     use ramaria_core::types::ProfileField;
 
     // 版本链：旧事实 → 新事实（新 version_of 指向旧）
@@ -1534,10 +1624,13 @@ async fn fact_show_versions_chain() {
     let fresh = make_test_fact("rama-0001", ProfileField::RecentContext, "当前情绪：焦虑");
     let fresh_id = storage.add_fact_with_version(&old_now, fresh);
 
-    // app 用例读取版本链：链头最早在前（旧 → 新）
-    let chain = ramaria_app::commands::fact::fact_versions(&app, fresh_id)
+    // 服务层用例读取版本链：链头最早在前（旧 → 新）
+    let detail = engine
+        .memory_fact_detail(fresh_id)
         .await
-        .unwrap();
+        .unwrap()
+        .expect("事实应存在");
+    let chain = detail.versions;
     assert_eq!(chain.len(), 2, "版本链应含旧新两版");
     assert_eq!(chain[0].id, old_id);
     assert_eq!(chain[1].id, fresh_id);
@@ -1548,10 +1641,7 @@ async fn fact_show_versions_chain() {
     );
 
     // show 单条（新事实 active）
-    let f = ramaria_app::commands::fact::fact_get(&app, fresh_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let f = detail.fact;
     assert_eq!(f.status, ramaria_core::types::FactStatus::Active);
 }
 

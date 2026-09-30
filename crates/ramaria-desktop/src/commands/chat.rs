@@ -2,18 +2,21 @@
 //!
 //! 设计特点:
 //! - `send_message`: 异步启动 LLM 流式对话，立即返回 request_id，通过 Tauri Event 推送增量内容
+//! - 流式事件桥：消费服务层的流式事件（增量 / 完成 / 错误），逐个发射 Tauri 事件
+//! - 活跃会话指针在拿到流式句柄后由桌面设置（服务层不反向持有生命周期容器）
 //! - `get_app_state`: 返回当前应用状态，前端据此决定显示哪个界面
-//! - `check_privacy` / `confirm_privacy`: 委托 ramaria_app 的隐私确认流程
+//! - `check_privacy` / `confirm_privacy`: 委托服务层隐私确认流程
 //! - 所有错误通过 ChatErrorPayload 格式返回，包含用户友好的标题和详情
 //! - 不写业务逻辑，只做参数校验 + 委托调用 + 事件发射
 
 use crate::DesktopState;
 use crate::events::{ChatDeltaPayload, ChatDonePayload, ChatErrorPayload};
 use crate::notification;
-use ramaria_app::error_hint;
+use futures::StreamExt;
+use ramaria_core::error::RamariaError;
+use ramaria_service::{ChatStreamRequest, ErrorHint, StreamEvent};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
-use tokio_stream::StreamExt;
 
 // =========================================================
 // send_message — 核心对话命令
@@ -65,74 +68,37 @@ pub async fn send_message(
         "收到 send_message 请求"
     );
 
-    // ---- 克隆必要资源以供后台任务使用 ----
-    let app = state.app.clone();
-    let handle = app_handle.clone();
-
+    // ---- 会话预检：已关闭 / 不存在的会话自动重建 ----
+    // 前端竞态窗口可能传入已关闭（手动保存或空闲超时）或已删除的会话，
+    // 预检命中时先新建会话再进入生成，避免直接收到"会话已关闭"错误。
     let persona_uid_owned = persona_uid.clone();
-    let mut session_id_parsed: Option<uuid::Uuid> = session_id
+    let parsed_session_id: Option<uuid::Uuid> = session_id
         .as_ref()
         .and_then(|s| uuid::Uuid::parse_str(s).ok());
-
-    // ---- 会话关闭自动重建 ----
-    // 对齐 CLI `try_send_or_recreate`:
-    // 若前端传入的 session 已被关闭（手动保存或空闲超时），自动创建新 session 并重试，
-    // 避免前端竞态窗口导致"会话已关闭，请开启新对话"错误。
-    if let Some(sid) = session_id_parsed {
-        match app.storage().get_session(sid).await {
-            Ok(Some(s)) if s.ended_at.is_some() => {
-                // Session 已关闭 → 自动创建新 session（绑定当前 persona_uid）
-                match app.storage().create_session(persona_uid.as_deref()).await {
-                    Ok(new_s) => {
-                        tracing::info!(
-                            old_session_id = %sid,
-                            new_session_id = %new_s.id,
-                            "检测到已关闭 session，自动创建新 session 并重试"
-                        );
-                        session_id_parsed = Some(new_s.id);
-                    }
-                    Err(e) => {
-                        tracing::error!(%sid, %e, "自动创建新 session 失败");
-                        return Err(format!("会话已关闭且无法自动创建新会话: {e}"));
-                    }
-                }
-            }
-            Ok(Some(_)) => {
-                // Session 仍活跃，正常使用
-            }
-            Ok(None) => {
-                // Session 不存在（可能被删除），也创建新 session（绑定当前 persona_uid）
-                match app.storage().create_session(persona_uid.as_deref()).await {
-                    Ok(new_s) => {
-                        tracing::info!(
-                            old_session_id = %sid,
-                            new_session_id = %new_s.id,
-                            "session 不存在，自动创建新 session"
-                        );
-                        session_id_parsed = Some(new_s.id);
-                    }
-                    Err(e) => {
-                        tracing::error!(%sid, %e, "自动创建新 session 失败（session 不存在）");
-                        return Err(format!("会话不存在且无法自动创建新会话: {e}"));
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!(%sid, %e, "查询 session 状态失败，尝试使用原 session");
-                // 保守策略：无法确认状态时仍使用原 session，让 App::send_message 做最终校验
-            }
-        }
-    }
+    let effective_session_id = match parsed_session_id {
+        Some(sid) => Some(
+            state
+                .engine
+                .resolve_send_session(persona_uid.as_deref(), Some(sid))
+                .await
+                .map_err(|e| format!("无法自动创建新会话: {e}"))?,
+        ),
+        None => None,
+    };
 
     // ---- 启动后台流处理任务 ----
+    let engine = Arc::clone(&state.engine);
+    let lifecycle = Arc::clone(&state.lifecycle);
+    let handle = app_handle.clone();
     tokio::spawn(async move {
         process_message_stream(
-            app,
+            engine,
+            lifecycle,
             handle,
             rid_for_task,
             trimmed,
             persona_uid_owned,
-            session_id_parsed,
+            effective_session_id,
         )
         .await;
     });
@@ -140,45 +106,59 @@ pub async fn send_message(
     Ok(request_id)
 }
 
-/// 后台任务：消费 send_message 返回的流，逐个发射 Tauri 事件。
+/// 后台任务：消费服务层流式事件并逐个发射 Tauri 事件。
 async fn process_message_stream(
-    app: Arc<ramaria_app::App>,
-    handle: AppHandle,
+    engine: Arc<ramaria_service::Engine>,
+    lifecycle: Arc<ramaria_service::Lifecycle>,
+    app_handle: AppHandle,
     request_id: String,
     message: String,
     persona_uid: Option<String>,
     session_id: Option<uuid::Uuid>,
 ) {
-    // 调用 App::send_message 获取流
-    let mut stream = match app
-        .send_message(&message, persona_uid.as_deref(), session_id)
+    // 调用服务层流式生成用例获取事件流
+    let chat_handle = match engine
+        .chat_stream(ChatStreamRequest {
+            message,
+            persona: persona_uid,
+            session_id,
+            seed_history: Vec::new(),
+            config_override: None,
+        })
         .await
     {
-        Ok(s) => s,
+        Ok(chat_handle) => chat_handle,
         Err(e) => {
-            // send_message 本身失败（状态检查、隐私确认等）
-            emit_chat_error(&handle, &request_id, &e);
+            // 前置编排失败（状态检查、隐私确认等）
+            emit_chat_error(&app_handle, &request_id, &e);
             tracing::error!(
                 request_id = %request_id,
                 error = %e,
-                "send_message 调用失败"
+                "chat_stream 调用失败"
             );
             return;
         }
     };
 
-    // 逐事件消费流（send_message 已返回 Pin<Box<dyn Stream>>）
+    // ---- 活跃会话指针与活跃时间 ----
+    // 服务层不反向持有生命周期容器：本轮对话的会话归属由桌面记录，
+    // 供"手动保存 / 空闲检测"与后续消息复用同一会话。
+    lifecycle.set_active_session_id(Some(chat_handle.session_id));
+    lifecycle.touch_session(chat_handle.session_id);
+
+    // 逐事件消费流
+    let mut stream = chat_handle.events;
     let mut total_chars: usize = 0;
     // 累积完整回复文本（用于通知预览与 chat-done 事件全文回传）
     let mut accumulated_text = String::new();
 
     while let Some(event_result) = stream.next().await {
         match event_result {
-            Ok(ramaria_app::StreamEvent::Delta { content, .. }) => {
+            Ok(StreamEvent::Delta { content, .. }) => {
                 total_chars += content.chars().count();
                 accumulated_text.push_str(&content);
                 let payload = ChatDeltaPayload::new(request_id.clone(), content);
-                if let Err(e) = handle.emit(crate::events::EVENT_CHAT_DELTA, &payload) {
+                if let Err(e) = app_handle.emit(crate::events::EVENT_CHAT_DELTA, &payload) {
                     tracing::error!(
                         request_id = %request_id,
                         error = %e,
@@ -186,7 +166,7 @@ async fn process_message_stream(
                     );
                 }
             }
-            Ok(ramaria_app::StreamEvent::Done {
+            Ok(StreamEvent::Done {
                 backend_id,
                 total_chars: stream_total,
                 ..
@@ -198,7 +178,7 @@ async fn process_message_stream(
                     total_chars,
                     accumulated_text.clone(),
                 );
-                if let Err(e) = handle.emit(crate::events::EVENT_CHAT_DONE, &payload) {
+                if let Err(e) = app_handle.emit(crate::events::EVENT_CHAT_DONE, &payload) {
                     tracing::error!(
                         request_id = %request_id,
                         error = %e,
@@ -212,21 +192,19 @@ async fn process_message_stream(
                 );
 
                 // ---- 发送桌面通知（窗口不可见时） ----
-                notification::send_chat_notification(&handle, &accumulated_text, total_chars);
+                notification::send_chat_notification(&app_handle, &accumulated_text, total_chars);
 
                 return;
             }
-            Ok(ramaria_app::StreamEvent::Error { error, .. }) => {
-                let hint = error_hint::ErrorHint::from_error(
-                    &ramaria_core::error::RamariaError::llm(error.clone()),
-                );
+            Ok(StreamEvent::Error { error, .. }) => {
+                let hint = ErrorHint::from_error(&RamariaError::llm(error.clone()));
                 let payload = ChatErrorPayload::new(
                     request_id.clone(),
                     hint.title,
                     hint.detail,
                     hint.retryable,
                 );
-                if let Err(e) = handle.emit(crate::events::EVENT_CHAT_ERROR, &payload) {
+                if let Err(e) = app_handle.emit(crate::events::EVENT_CHAT_ERROR, &payload) {
                     tracing::error!(
                         request_id = %request_id,
                         error = %e,
@@ -243,7 +221,7 @@ async fn process_message_stream(
                 );
             }
             Err(e) => {
-                emit_chat_error(&handle, &request_id, &e);
+                emit_chat_error(&app_handle, &request_id, &e);
                 tracing::error!(
                     request_id = %request_id,
                     error = %e,
@@ -261,7 +239,7 @@ async fn process_message_stream(
         total_chars,
         accumulated_text.clone(),
     );
-    if let Err(e) = handle.emit(crate::events::EVENT_CHAT_DONE, &payload) {
+    if let Err(e) = app_handle.emit(crate::events::EVENT_CHAT_DONE, &payload) {
         tracing::error!(
             request_id = %request_id,
             error = %e,
@@ -276,13 +254,13 @@ async fn process_message_stream(
 
     // 流意外结束时也发送通知（如果有累积文本）
     if !accumulated_text.is_empty() {
-        notification::send_chat_notification(&handle, &accumulated_text, total_chars);
+        notification::send_chat_notification(&app_handle, &accumulated_text, total_chars);
     }
 }
 
 /// 辅助函数：将 RamariaError 转换为 ChatErrorPayload 并发射 `chat-error` 事件。
-fn emit_chat_error(handle: &AppHandle, request_id: &str, err: &ramaria_core::error::RamariaError) {
-    let hint = error_hint::ErrorHint::from_error(err);
+fn emit_chat_error(handle: &AppHandle, request_id: &str, err: &RamariaError) {
+    let hint = ErrorHint::from_error(err);
     let payload = ChatErrorPayload::new(
         request_id.to_string(),
         hint.title,
@@ -312,7 +290,7 @@ fn emit_chat_error(handle: &AppHandle, request_id: &str, err: &ramaria_core::err
 /// - 前端在加载时调用此命令，根据返回值决定显示哪个页面
 #[tauri::command]
 pub async fn get_app_state(state: State<'_, DesktopState>) -> Result<String, String> {
-    let app_state = state.app.current_state();
+    let app_state = state.engine.current_state();
     tracing::debug!(state = %app_state.as_str(), "get_app_state 查询");
     Ok(app_state.as_str().to_string())
 }
@@ -324,7 +302,7 @@ pub async fn get_app_state(state: State<'_, DesktopState>) -> Result<String, Str
 /// 手动保存当前对话：关闭活跃 session → 生成 L1 摘要 → 不清屏，下次消息自动创建新 session。
 ///
 /// 参数:
-/// - `persona_uid`: 当前对话人格 UID，用于 L1 摘要归属（可选，默认不限定）。
+/// - `persona_uid`: 当前对话人格 UID（仅用于诊断日志；L1 摘要归属以会话记录为准）。
 ///
 /// 对齐 Python `POST /save` 路由和 `SessionManager.force_close_current_session`。
 ///
@@ -335,34 +313,30 @@ pub async fn save_current_session(
     state: State<'_, DesktopState>,
     persona_uid: Option<String>,
 ) -> Result<String, String> {
-    let active_id = state.app.get_active_session_id();
-
-    if active_id.is_none() {
+    let Some(sid) = state.lifecycle.active_session_id() else {
         tracing::info!("save_current_session: 无活跃 session");
         return Ok(serde_json::json!({
             "status": "no_active_session",
             "l1_generated": false
         })
         .to_string());
-    }
+    };
 
-    let sid = active_id.unwrap();
-
-    // 诊断：仅取条数，避免全量加载会话消息
-    let msg_count = state.app.storage().count_messages(sid).await.unwrap_or(0);
+    // 诊断：仅取条数，避免全量加载会话消息（计数失败按 0 处理）
+    let msg_count = state.engine.count_session_messages(sid).await;
     tracing::info!(%sid, msg_count, ?persona_uid, "save_current_session 开始");
 
+    // 手动保存：抢占式关闭活跃会话并触发封存链路
     state
-        .app
-        .save_and_close_session(persona_uid.as_deref())
+        .lifecycle
+        .close_active_session()
         .await
         .map_err(|e| format!("保存对话失败: {}", e))?;
 
     // 验证 L1 是否生成
     let l1_entries = state
-        .app
-        .storage()
-        .list_memory_l1(sid)
+        .engine
+        .memory_l1_by_session(sid)
         .await
         .map_err(|e| format!("查询 L1 状态失败: {}", e))?;
 
@@ -423,7 +397,7 @@ pub async fn generate_l1(
         uuid::Uuid::parse_str(&session_id).map_err(|e| format!("session_id 格式无效: {e}"))?;
 
     let result = state
-        .app
+        .engine
         .regenerate_l1(sid, persona_uid.as_deref(), None, None)
         .await
         .map_err(|e| format!("L1 生成失败: {e}"))?;
@@ -464,16 +438,16 @@ pub async fn generate_l1(
 #[tauri::command]
 pub async fn check_privacy(state: State<'_, DesktopState>) -> Result<serde_json::Value, String> {
     let status = state
-        .app
+        .engine
         .check_privacy()
         .await
         .map_err(|e| format!("检查隐私状态失败: {}", e))?;
 
     let json = match &status {
-        ramaria_app::PrivacyStatus::NotNeeded => {
+        ramaria_service::PrivacyStatus::NotNeeded => {
             serde_json::json!({ "status": "NotNeeded" })
         }
-        ramaria_app::PrivacyStatus::Confirmed {
+        ramaria_service::PrivacyStatus::Confirmed {
             persistent,
             confirmed_at,
         } => {
@@ -483,7 +457,7 @@ pub async fn check_privacy(state: State<'_, DesktopState>) -> Result<serde_json:
                 "confirmed_at": confirmed_at,
             })
         }
-        ramaria_app::PrivacyStatus::NeedsConfirmation {
+        ramaria_service::PrivacyStatus::NeedsConfirmation {
             provider_name,
             base_url,
         } => {
@@ -516,7 +490,7 @@ pub async fn confirm_privacy(
     persistent: bool,
 ) -> Result<String, String> {
     state
-        .app
+        .engine
         .confirm_privacy(persistent)
         .await
         .map_err(|e| format!("记录隐私确认失败: {}", e))?;

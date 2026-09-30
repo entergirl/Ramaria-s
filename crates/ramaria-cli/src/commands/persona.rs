@@ -9,7 +9,7 @@
 //! - 不提供 CLI 逐字段编辑命令，保持简洁
 
 use anyhow::Context;
-use ramaria_core::types::{Persona, PersonaKind};
+use ramaria_service::{Engine, PersonaFileAction, PersonaFullView, PersonaLoadMode};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -74,14 +74,14 @@ pub enum PersonaCmd {
 /// 运行 persona 子命令分发。
 ///
 /// 参数:
-/// - `app`: App 实例引用。
+/// - `engine`: 服务层引擎引用。
 /// - `cmd`: Persona 子命令。
 /// - `json`: JSON 信封输出。
-pub async fn run(app: &Arc<ramaria_app::App>, cmd: PersonaCmd, json: bool) -> anyhow::Result<()> {
+pub async fn run(engine: &Arc<Engine>, cmd: PersonaCmd, json: bool) -> anyhow::Result<()> {
     match cmd {
-        PersonaCmd::List { limit, offset } => run_list(app, json, limit, offset).await,
-        PersonaCmd::Show => run_show(app, json).await,
-        PersonaCmd::Reload { uid } => run_reload(app, uid).await,
+        PersonaCmd::List { limit, offset } => run_list(engine, json, limit, offset).await,
+        PersonaCmd::Show => run_show(engine, json).await,
+        PersonaCmd::Reload { uid } => run_reload(engine, uid).await,
     }
 }
 
@@ -95,14 +95,13 @@ pub async fn run(app: &Arc<ramaria_app::App>, cmd: PersonaCmd, json: bool) -> an
 /// - 文本模式：紧凑表格（uid / 名称 / kind / 来源 / 状态）。
 /// - 支持 --limit/--offset 分页（列表命令统一约定）。
 async fn run_list(
-    app: &Arc<ramaria_app::App>,
+    engine: &Arc<Engine>,
     json: bool,
     limit: Option<usize>,
     offset: usize,
 ) -> anyhow::Result<()> {
-    let personas = app
-        .storage()
-        .list_personas()
+    let personas = engine
+        .persona_list_full()
         .await
         .context("查询 persona 列表失败")?;
 
@@ -117,9 +116,9 @@ async fn run_list(
                 serde_json::json!({
                     "uid": p.uid,
                     "name": p.name,
-                    "kind": p.kind.as_str(),
+                    "kind": p.kind,
                     "source": p.source,
-                    "active": p.active,
+                    "active": p.is_active,
                 })
             })
             .collect();
@@ -146,9 +145,9 @@ async fn run_list(
             "  {:<16}  {:<20}  {:<6}  {:<10}  {}",
             p.uid,
             p.name,
-            p.kind.as_str(),
+            p.kind,
             p.source,
-            if p.active { "活跃" } else { "停用" }
+            if p.is_active { "活跃" } else { "停用" }
         );
     }
     Ok(())
@@ -161,13 +160,12 @@ async fn run_list(
 /// 展示所有已注册人格的基本信息。
 ///
 /// 说明:
-/// - 从 storage.list_personas 读取全部活跃 persona。
+/// - 从服务层读取人格全字段列表。
 /// - 解析 config 字段中的 TOML 内容，提取 assistant_name 和人设/规则摘要。
 /// - 无 persona 时输出引导提示。
-async fn run_show(app: &Arc<ramaria_app::App>, json: bool) -> anyhow::Result<()> {
-    let personas = app
-        .storage()
-        .list_personas()
+async fn run_show(engine: &Arc<Engine>, json: bool) -> anyhow::Result<()> {
+    let personas = engine
+        .persona_list_full()
         .await
         .context("查询 persona 列表失败")?;
 
@@ -179,9 +177,9 @@ async fn run_show(app: &Arc<ramaria_app::App>, json: bool) -> anyhow::Result<()>
                 serde_json::json!({
                     "uid": p.uid,
                     "name": p.name,
-                    "kind": p.kind.as_str(),
+                    "kind": p.kind,
                     "source": p.source,
-                    "active": p.active,
+                    "active": p.is_active,
                     "config": p.config,
                 })
             })
@@ -216,11 +214,11 @@ async fn run_show(app: &Arc<ramaria_app::App>, json: bool) -> anyhow::Result<()>
 }
 
 /// 格式化输出单个 persona。
-fn display_persona(p: &Persona) {
+fn display_persona(p: &PersonaFullView) {
     println!("  UID:     {}", p.uid);
     println!("  名称:    {}", p.name);
-    println!("  类型:    {}", p.kind.as_str());
-    println!("  状态:    {}", if p.active { "活跃" } else { "已停用" });
+    println!("  类型:    {}", p.kind);
+    println!("  状态:    {}", if p.is_active { "活跃" } else { "已停用" });
 
     // 解析 config 中的 TOML 内容提取关键信息
     if let Some(ref config) = p.config {
@@ -255,9 +253,9 @@ fn display_persona(p: &Persona) {
 /// 流程:
 /// 1. 验证目录存在。
 /// 2. 收集 .toml 文件（可按 --uid 筛选）。
-/// 3. 逐个文件读取 → 解析 assistant_name → 创建或更新 DB 记录。
+/// 3. 逐个文件读取 → 解析 assistant_name → 创建或更新 DB 记录（已存在则同步文件内容）。
 /// 4. 输出加载结果摘要。
-async fn run_reload(app: &Arc<ramaria_app::App>, uid: Option<String>) -> anyhow::Result<()> {
+async fn run_reload(engine: &Arc<Engine>, uid: Option<String>) -> anyhow::Result<()> {
     let dir = personas_dir();
 
     if !dir.exists() {
@@ -271,7 +269,7 @@ async fn run_reload(app: &Arc<ramaria_app::App>, uid: Option<String>) -> anyhow:
         return Err(anyhow::anyhow!("路径不是目录: {}", dir.display()));
     }
 
-    // 收集要处理的文件
+    // 收集要处理的文件（文件名用于逐文件结果展示）
     let files = collect_toml_files(&dir, uid.as_deref())?;
 
     if files.is_empty() {
@@ -291,25 +289,36 @@ async fn run_reload(app: &Arc<ramaria_app::App>, uid: Option<String>) -> anyhow:
     crate::ui::separator();
     println!();
 
+    // 导入用例：已存在记录按文件内容同步（名称 / 配置）
+    let outcomes = engine
+        .persona_load_from_dir(&dir, uid.as_deref(), PersonaLoadMode::CreateOrUpdate)
+        .await?;
+
     let mut success_count = 0u32;
     let mut error_count = 0u32;
 
-    for path in &files {
+    for (path, outcome) in files.iter().zip(outcomes.iter()) {
         let filename = path
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "?".to_string());
 
-        match reload_single_file(app, path).await {
-            Ok(uid_loaded) => {
-                crate::ui::success(&format!("{filename} → {uid_loaded}"));
+        match outcome.action {
+            PersonaFileAction::Created | PersonaFileAction::Updated => {
+                crate::ui::success(&format!("{filename} → {}", outcome.uid));
                 success_count += 1;
             }
-            Err(e) => {
-                crate::ui::warn(&format!("{filename}: {e}"));
-                tracing::error!(path = %path.display(), error = %e, "人格文件加载失败");
+            PersonaFileAction::Failed => {
+                crate::ui::warn(&format!("{filename}: {}", outcome.message));
+                tracing::error!(
+                    path = %path.display(),
+                    error = %outcome.message,
+                    "人格文件加载失败"
+                );
                 error_count += 1;
             }
+            // 其余动作（如仅创建缺失模式的跳过）在本命令口径下不会出现，防御性忽略
+            _ => {}
         }
     }
 
@@ -361,61 +370,6 @@ fn collect_toml_files(dir: &Path, target_uid: Option<&str>) -> anyhow::Result<Ve
     // 确保处理顺序可预测
     files.sort();
     Ok(files)
-}
-
-/// 加载单个 .toml 文件：解析 → 读取 DB → 创建或更新。
-///
-/// 返回:
-/// - 成功时返回加载的 persona UID。
-async fn reload_single_file(app: &Arc<ramaria_app::App>, path: &Path) -> anyhow::Result<String> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("读取文件失败: {}", path.display()))?;
-
-    // 从文件名提取 UID
-    let uid = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "无法从文件名提取 UID: {}。文件名必须为 <uid>.toml 格式（如 rama-0001.toml）",
-                path.display()
-            )
-        })?;
-
-    // 提取人格名称
-    let name =
-        crate::util::extract_toml_value(&content, "assistant_name").unwrap_or_else(|| uid.clone());
-
-    // 推断人格类型
-    let kind = PersonaKind::from_uid(&uid);
-
-    // 检查是否已存在
-    let existing = app
-        .storage()
-        .get_persona_by_uid(&uid)
-        .await
-        .context("查询已有 persona 失败")?;
-
-    if existing.is_some() {
-        // 更新已有 persona 的 name 和 config
-        app.storage()
-            .update_persona(&uid, &name, None, Some(&content), None)
-            .await
-            .with_context(|| format!("更新 persona 失败: {uid}"))?;
-        tracing::info!(%uid, %name, "reload: 已更新 persona");
-    } else {
-        // 创建新 persona
-        let mut persona = Persona::new(uid.clone(), name.clone(), kind, 1, "file".to_string());
-        persona.config = Some(content.clone());
-        app.storage()
-            .create_persona(&persona)
-            .await
-            .with_context(|| format!("创建 persona 失败: {uid}"))?;
-        tracing::info!(%uid, %name, kind = %kind.as_str(), "reload: 已创建新 persona");
-    }
-
-    Ok(uid)
 }
 
 // =========================================================
@@ -504,6 +458,7 @@ fn summarize_block(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ramaria_core::types::PersonaKind;
 
     // 注: extract_toml_value 的单元测试已移至 crate::util 模块，
     // 此处仅保留 extract_toml_block / summarize_block / PersonaKind::from_uid 的测试。

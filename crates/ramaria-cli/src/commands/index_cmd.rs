@@ -7,25 +7,32 @@
 //! - 记录 tracing 日志用于诊断
 
 use anyhow::Context;
+use ramaria_service::Engine;
 use std::sync::Arc;
 
 /// 重建索引。
 ///
 /// 参数:
 /// - `json`: `--json` 信封输出（stdout 仅一行结构化数据）。
-pub async fn run(app: &Arc<ramaria_app::App>, json: bool) -> anyhow::Result<()> {
+pub async fn run(engine: &Arc<Engine>, json: bool) -> anyhow::Result<()> {
     crate::ui::info("正在重建检索索引...");
     crate::ui::info("这可能需要一些时间，取决于数据量大小。");
 
     let start = std::time::Instant::now();
     // 保留 RamariaError source：main 按错误链映射退出码（不可用时为 3）
-    let count = app.rebuild_retriever().await.context("索引重建失败")?;
+    let count = engine.rebuild_index().await.context("索引重建失败")?;
     let elapsed = start.elapsed();
+
+    // 重建已写回索引版本：刷新状态使状态机与事实对齐
+    // （缺索引的库在本次构建后脱离待构建状态）
+    if let Err(e) = engine.refresh_setup_state().await {
+        tracing::warn!(error = %e, "重建后刷新应用状态失败（降级不阻塞）");
+    }
 
     if json {
         return crate::json::emit_ok(&serde_json::json!({
             "doc_count": count,
-            "state": app.current_state().as_str(),
+            "state": engine.current_state().as_str(),
             "elapsed_ms": elapsed.as_millis() as u64,
         }));
     }
@@ -36,7 +43,7 @@ pub async fn run(app: &Arc<ramaria_app::App>, json: bool) -> anyhow::Result<()> 
     ));
 
     // 显示当前状态
-    let state = app.current_state();
+    let state = engine.current_state();
     crate::ui::info(&format!("当前应用状态: {}", state.as_str()));
 
     Ok(())

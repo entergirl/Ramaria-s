@@ -4,8 +4,10 @@
 //! - agent 探活入口：应用状态 / 配置摘要 / DB 路径 / 版本
 //! - --json 输出遵循 M1 信封（stdout 仅含 JSON），非 TTY 可执行
 //! - 文本输出保持既有风格（labeled 对齐）
-//! - 不访问 LLM、不触发网络，仅读取已初始化的 App 状态
+//! - 不访问 LLM、不触发网络，仅读取已初始化的引擎状态
 
+use ramaria_core::types::BackendConfig;
+use ramaria_service::Engine;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -18,9 +20,13 @@ pub struct StatusArgs {
 }
 
 /// 执行 status 命令。
-pub async fn run(app: &Arc<ramaria_app::App>, args: StatusArgs) -> anyhow::Result<()> {
-    let cfg = app.backend_config();
-    let state = app.current_state();
+pub async fn run(engine: &Arc<Engine>, args: StatusArgs) -> anyhow::Result<()> {
+    // 后端配置：库内记录为准，无记录回退本地默认值
+    let cfg = engine
+        .backend_config()
+        .await?
+        .unwrap_or_else(BackendConfig::lm_studio_default);
+    let state = engine.current_state();
     let version = env!("CARGO_PKG_VERSION");
 
     if args.json {

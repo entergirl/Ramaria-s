@@ -257,7 +257,7 @@ async fn build_and_swap_inner(engine: &Engine) -> RamariaResult<usize> {
     // ---- 4. 整体替换懒加载槽（此后读者要么见旧索引，要么见新索引）----
     {
         let slot = engine.retriever_slot();
-        let mut guard = write_recover(slot, "index.retriever_slot");
+        let mut guard = write_recover(&*slot, "index.retriever_slot");
         *guard = Some(fresh);
     }
 
@@ -440,8 +440,8 @@ async fn sync_keyword_mirror(engine: &Engine, l1_views: &[L1DocView], l2_views: 
     };
 
     {
-        let mirror = engine.keyword_mirror_ref();
-        let mut guard = write_recover(mirror, "index.keyword_mirror");
+        let mirror = engine.keyword_mirror();
+        let mut guard = write_recover(&*mirror, "index.keyword_mirror");
         guard.load_pool_entries(&rows);
         guard.reset_docs_from_views(l1_views, l2_views);
         tracing::info!(
@@ -453,8 +453,8 @@ async fn sync_keyword_mirror(engine: &Engine, l1_views: &[L1DocView], l2_views: 
 
     // 语义层：锁内取词表 → 锁外构建 → 锁内挂载（避免 std 写锁跨 await）
     let terms: Vec<ramaria_core::keyword::KeywordToken> = {
-        let mirror = engine.keyword_mirror_ref();
-        let guard = read_recover(mirror, "index.keyword_mirror");
+        let mirror = engine.keyword_mirror();
+        let guard = read_recover(&*mirror, "index.keyword_mirror");
         guard
             .pool()
             .established_terms()
@@ -466,8 +466,8 @@ async fn sync_keyword_mirror(engine: &Engine, l1_views: &[L1DocView], l2_views: 
     let provider = engine.embedding_ref();
     let fuzzy = KeywordService::build_fuzzy(&terms, provider.as_deref()).await;
     {
-        let mirror = engine.keyword_mirror_ref();
-        let mut guard = write_recover(mirror, "index.keyword_mirror");
+        let mirror = engine.keyword_mirror();
+        let mut guard = write_recover(&*mirror, "index.keyword_mirror");
         guard.set_fuzzy(fuzzy);
     }
 }
@@ -503,7 +503,7 @@ pub(crate) async fn index_l1_into_mirrors(engine: &Engine, l1: &MemoryL1) {
     // 检索器增量
     {
         let slot = engine.retriever_slot();
-        let mut guard = write_recover(slot, "index.retriever_slot");
+        let mut guard = write_recover(&*slot, "index.retriever_slot");
         if let Some(retriever) = guard.as_mut() {
             retriever.index_l1_with_vector(&doc, vector);
             tracing::debug!(l1_id = %l1.id, "L1 已增量加入检索器索引");
@@ -522,8 +522,8 @@ pub(crate) async fn index_l1_into_mirrors(engine: &Engine, l1: &MemoryL1) {
     {
         let tokens = CommaSeparatedNormalizer.normalize(doc.keywords.as_deref().unwrap_or(""));
         let now = now_ms();
-        let mirror = engine.keyword_mirror_ref();
-        let mut guard = write_recover(mirror, "index.keyword_mirror");
+        let mirror = engine.keyword_mirror();
+        let mut guard = write_recover(&*mirror, "index.keyword_mirror");
         guard.index_l1(&doc);
         guard.upsert_pool_tokens(&tokens, now);
         // 语义层陈旧可观测（节流 5 分钟，日志不含词条文本）
@@ -610,7 +610,8 @@ mod tests {
 
     /// 直接读取已构建检索器上的检索结果（不经过 recall 的 persona 过滤与镜像通道）。
     fn search_docs(engine: &Engine, query: &str) -> Vec<SearchResult> {
-        let guard = read_recover(engine.retriever_slot(), "index.retriever_slot");
+        let slot = engine.retriever_slot();
+        let guard = read_recover(&*slot, "index.retriever_slot");
         guard.as_ref().expect("索引应已构建").search(
             &SearchRequest {
                 query: query.to_string(),
@@ -655,7 +656,7 @@ mod tests {
         seed_persona(&storage, "char-0001").await;
         seed_l1(&storage, "char-0001", "用户最近工作压力很大，常常加班").await;
 
-        // 显式置 0 表示"尚未构建"（键缺失时按存储层口径视为已构建）
+        // 显式置 0（"尚未构建"），与缺键口径一致
         storage
             .set_index_version(0)
             .await
@@ -1003,7 +1004,8 @@ mod tests {
 
         let total = engine.rebuild_index().await.expect("重建应成功");
         assert!(total >= 1, "无主 L1 必须被加载进索引，实际 total={total}");
-        let guard = read_recover(engine.retriever_slot(), "index.retriever_slot");
+        let slot = engine.retriever_slot();
+        let guard = read_recover(&*slot, "index.retriever_slot");
         assert!(
             guard.as_ref().expect("索引应已构建").doc_count() >= 1,
             "检索器 doc_count 应为 ≥1"
@@ -1020,7 +1022,7 @@ mod tests {
         seed_l1(&storage, "char-0001", "用户喜欢喝咖啡").await;
         seed_l1(&storage, "char-0001", "用户最近开始学习游泳").await;
 
-        // 显式置 0 表示"尚未构建"（键缺失时按存储层口径视为已构建）
+        // 显式置 0（"尚未构建"），与缺键口径一致
         storage
             .set_index_version(0)
             .await
@@ -1120,9 +1122,9 @@ mod tests {
         assert!(total >= 2, "应加载 ≥2 条 L1，实际 {total}");
 
         // 镜像与加载文档一致（doc_count 级）
-        let mirror = engine.keyword_mirror_ref();
+        let mirror = engine.keyword_mirror();
         {
-            let guard = read_recover(mirror, "index.keyword_mirror");
+            let guard = read_recover(&*mirror, "index.keyword_mirror");
             assert_eq!(guard.doc_count(), total, "镜像文档数应与重建加载数一致");
         }
 
@@ -1136,7 +1138,7 @@ mod tests {
         let before = search_summaries(&engine);
         assert!(!before.is_empty(), "对照检索应命中既有 L1");
         {
-            let mut guard = write_recover(mirror, "index.keyword_mirror");
+            let mut guard = write_recover(&*mirror, "index.keyword_mirror");
             guard.clear_docs(); // 模拟镜像被外部误操作清空
         }
         let after = search_summaries(&engine);
@@ -1146,7 +1148,7 @@ mod tests {
         let total2 = engine.rebuild_index().await.expect("再次重建应成功");
         assert_eq!(total2, total);
         {
-            let guard = read_recover(mirror, "index.keyword_mirror");
+            let guard = read_recover(&*mirror, "index.keyword_mirror");
             assert_eq!(guard.doc_count(), total2, "再次重建后镜像文档数应恢复");
         }
 
@@ -1178,8 +1180,8 @@ mod tests {
             .expect("写入规范词应成功");
 
         engine.rebuild_index().await.expect("重建应成功");
-        let mirror = engine.keyword_mirror_ref();
-        let guard = read_recover(mirror, "index.keyword_mirror");
+        let mirror = engine.keyword_mirror();
+        let guard = read_recover(&*mirror, "index.keyword_mirror");
         assert!(guard.pool_len() >= 1, "词典池应装载注入的规范词");
         let fuzzy = guard
             .composite()
@@ -1205,7 +1207,8 @@ mod tests {
         seed_l1(&storage, "char-0001", "用户喜欢喝咖啡").await;
 
         engine.rebuild_index().await.expect("重建应成功");
-        let guard = read_recover(engine.retriever_slot(), "index.retriever_slot");
+        let slot = engine.retriever_slot();
+        let guard = read_recover(&*slot, "index.retriever_slot");
         let retriever = guard.as_ref().expect("索引应已构建");
         assert!(
             !retriever.config().enable_vector,

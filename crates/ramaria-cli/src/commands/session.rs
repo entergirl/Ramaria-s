@@ -1,14 +1,15 @@
 //! crates/ramaria-cli/src/commands/session.rs - 会话管理命令
 //!
 //! 设计特点:
-//! - list: 列出所有会话（含状态、消息数、时间）
+//! - list: 列出所有会话（含状态、时间）
 //! - show: 显示指定会话的完整消息历史
-//! - delete: 删除指定会话及其关联消息（需确认；非 TTY 无 --yes 直接失败不挂起）
+//! - delete: 删除指定会话（需确认；非 TTY 无 --yes 直接失败不挂起）
 //! - summarize: 为指定会话重新生成 L1 摘要（--progressive 渐进式感知多段输出）
 //! - --json 输出信封（时间戳 ISO-8601 UTC），文本模式表格化展示
 
 use anyhow::Context;
 use ramaria_core::error::RamariaError;
+use ramaria_service::{Engine, SessionBrowseRequest, SessionMessagesRequest};
 use std::sync::Arc;
 
 /// session 命令的子命令。
@@ -40,50 +41,58 @@ pub enum SessionCmd {
 
 /// 执行 session 命令。
 pub async fn run(
-    app: &Arc<ramaria_app::App>,
+    engine: &Arc<Engine>,
     cmd: SessionCmd,
     json: bool,
     auto_yes: bool,
 ) -> anyhow::Result<()> {
     match cmd {
-        SessionCmd::List { limit, offset } => list_sessions(app, json, limit, offset).await,
-        SessionCmd::Show { session_id } => show_session(app, &session_id, json).await,
+        SessionCmd::List { limit, offset } => list_sessions(engine, json, limit, offset).await,
+        SessionCmd::Show { session_id } => show_session(engine, &session_id, json).await,
         SessionCmd::Delete { session_id, force } => {
-            delete_session(app, &session_id, auto_yes || force, json).await
+            delete_session(engine, &session_id, auto_yes || force, json).await
         }
         SessionCmd::Summarize {
             session_id,
             persona_uid,
             progressive,
-        } => summarize_session(app, &session_id, persona_uid.as_deref(), progressive, json).await,
+        } => {
+            summarize_session(
+                engine,
+                &session_id,
+                persona_uid.as_deref(),
+                progressive,
+                json,
+            )
+            .await
+        }
     }
 }
 
 /// 列出所有会话（支持 --limit/--offset 分页）。
 async fn list_sessions(
-    app: &Arc<ramaria_app::App>,
+    engine: &Arc<Engine>,
     json: bool,
     limit: Option<usize>,
     offset: usize,
 ) -> anyhow::Result<()> {
-    let sessions = app
-        .storage()
-        .list_sessions()
+    let page = engine
+        .session_list(SessionBrowseRequest {
+            limit: limit.and_then(|value| u32::try_from(value).ok()),
+            offset: u32::try_from(offset).ok(),
+        })
         .await
         .context("查询会话列表失败")?;
-
-    // 分页：先跳过 offset 条，再取 limit 条（limit=None 表示全部）
-    let page_limit = limit.unwrap_or(usize::MAX);
-    let paged: Vec<_> = sessions.iter().skip(offset).take(page_limit).collect();
+    let sessions = &page.items;
 
     if json {
-        let items: Vec<serde_json::Value> = paged
+        let items: Vec<serde_json::Value> = sessions
             .iter()
             .map(|s| {
                 serde_json::json!({
                     "id": s.id.to_string(),
-                    "started_at": crate::util::format_timestamp_iso(s.started_at),
-                    "ended_at": s.ended_at.and_then(crate::util::format_timestamp_iso),
+                    "started_at": crate::util::format_timestamp_iso(s.started_at.timestamp_millis()),
+                    "ended_at": s.ended_at.map(|t| t.timestamp_millis()).and_then(crate::util::format_timestamp_iso),
                     "persona_uid": s.persona_uid,
                     "status": if s.ended_at.is_some() { "ended" } else { "active" },
                 })
@@ -93,27 +102,27 @@ async fn list_sessions(
         return crate::json::emit_ok(&data);
     }
 
-    if paged.is_empty() {
+    if sessions.is_empty() {
         crate::ui::info("暂无会话记录");
         return Ok(());
     }
 
     println!();
     crate::ui::separator();
-    println!("  会话列表（{} 条）", paged.len());
+    println!("  会话列表（{} 条）", sessions.len());
     crate::ui::separator();
     println!();
     println!("  {:<38}  {:<12}  创建时间", "Session ID", "状态");
     println!("  {:-<38}  {:-<12}  {:-<20}", "", "", "");
 
-    for s in &paged {
+    for s in sessions {
         let status = if s.ended_at.is_some() {
             "已结束"
         } else {
             "进行中"
         };
-        let time =
-            crate::util::format_timestamp(s.started_at).unwrap_or_else(|| "未知".to_string());
+        let time = crate::util::format_timestamp(s.started_at.timestamp_millis())
+            .unwrap_or_else(|| "未知".to_string());
         println!("  {}  {:<12}  {}", s.id, status, time);
     }
 
@@ -121,14 +130,10 @@ async fn list_sessions(
 }
 
 /// 查看指定会话的消息历史。
-async fn show_session(
-    app: &Arc<ramaria_app::App>,
-    session_id: &str,
-    json: bool,
-) -> anyhow::Result<()> {
+async fn show_session(engine: &Arc<Engine>, session_id: &str, json: bool) -> anyhow::Result<()> {
     let sid = parse_session_uuid(session_id)?;
 
-    let session = app
+    let session = engine
         .storage()
         .get_session(sid)
         .await
@@ -140,11 +145,15 @@ async fn show_session(
             )))
         })?;
 
-    let messages = app
-        .storage()
-        .list_messages(sid)
+    let view = engine
+        .session_messages(SessionMessagesRequest {
+            session_id: sid,
+            limit: None,
+            offset: None,
+        })
         .await
         .context("查询消息失败")?;
+    let messages = &view.messages;
 
     if json {
         let msg_items: Vec<serde_json::Value> = messages
@@ -193,7 +202,7 @@ async fn show_session(
         return Ok(());
     }
 
-    for msg in &messages {
+    for msg in messages {
         let role_icon = match msg.role {
             ramaria_core::types::MessageRole::User => "\x1b[36m👤 用户\x1b[0m",
             ramaria_core::types::MessageRole::Assistant => "\x1b[32m🤖 AI\x1b[0m",
@@ -229,7 +238,7 @@ fn parse_session_uuid(session_id: &str) -> anyhow::Result<uuid::Uuid> {
 /// - `--yes` 自动确认；
 /// - 非 TTY 且无 `--yes` 不挂起，直接失败（业务校验失败，exit code 4）。
 async fn delete_session(
-    app: &Arc<ramaria_app::App>,
+    engine: &Arc<Engine>,
     session_id: &str,
     auto_yes: bool,
     json: bool,
@@ -249,10 +258,7 @@ async fn delete_session(
         return Ok(());
     }
 
-    app.storage()
-        .delete_session(sid)
-        .await
-        .context("删除会话失败")?;
+    engine.delete_session(sid).await.context("删除会话失败")?;
 
     if json {
         let data = serde_json::json!({ "session_id": sid.to_string(), "deleted": true });
@@ -273,7 +279,7 @@ async fn delete_session(
 /// - `progressive=true`: 渐进式感知重摘要，与封存口径一致；多段 L1 时
 ///   `--json` 只输出每段统计（id / 字符数 / 关键词数），不输出摘要全文。
 async fn summarize_session(
-    app: &Arc<ramaria_app::App>,
+    engine: &Arc<Engine>,
     session_id: &str,
     persona_uid: Option<&str>,
     progressive: bool,
@@ -282,7 +288,7 @@ async fn summarize_session(
     let sid = parse_session_uuid(session_id)?;
 
     // 检查 session 存在
-    let _session = app
+    let _session = engine
         .storage()
         .get_session(sid)
         .await
@@ -293,13 +299,16 @@ async fn summarize_session(
             )))
         })?;
 
-    let messages = app
-        .storage()
-        .list_messages(sid)
+    let view = engine
+        .session_messages(SessionMessagesRequest {
+            session_id: sid,
+            limit: None,
+            offset: None,
+        })
         .await
         .context("查询消息失败")?;
 
-    if messages.is_empty() {
+    if view.messages.is_empty() {
         // --json 模式：输出空数据信封（agent 可区分“成功但无数据”与异常，stdout 纯净性不破坏）
         if json {
             let data = serde_json::json!({
@@ -316,14 +325,14 @@ async fn summarize_session(
     crate::ui::info(&format!(
         "正在为会话 {} 生成 L1 摘要（{} 条消息）...",
         session_id,
-        messages.len()
+        view.messages.len()
     ));
 
     if progressive {
-        return summarize_session_progressive(app, sid, persona_uid, json).await;
+        return summarize_session_progressive(engine, sid, persona_uid, json).await;
     }
 
-    match app.regenerate_l1(sid, persona_uid, None, None).await {
+    match engine.regenerate_l1(sid, persona_uid, None, None).await {
         Ok(Some(l1)) => {
             if json {
                 let data = serde_json::json!({
@@ -382,12 +391,12 @@ async fn summarize_session(
 /// 空数据语义:
 /// - 段列表为空（如消息在检查与生成之间被删除）→ 与既有"无消息"分支一致。
 async fn summarize_session_progressive(
-    app: &Arc<ramaria_app::App>,
+    engine: &Arc<Engine>,
     sid: uuid::Uuid,
     persona_uid: Option<&str>,
     json: bool,
 ) -> anyhow::Result<()> {
-    match app
+    match engine
         .regenerate_l1_progressive(sid, persona_uid, None, None)
         .await
     {

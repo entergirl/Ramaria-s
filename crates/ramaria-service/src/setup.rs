@@ -53,7 +53,7 @@ pub(crate) async fn check(engine: &Engine) -> RamariaResult<SetupStatus> {
 /// 1. 后端配置：`backend_config` 是否有记录；
 /// 2. 模型选择：线上 provider 要求 `capability.model_id` 非空，本地 provider 视为已选；
 /// 3. 索引状态：`schema_meta.index_version == 0` 表示尚未构建
-///    （该键缺失时按存储层既有口径视为已构建）。
+///    （该键缺失时同样按未构建口径返回 `0`）。
 async fn check_with(engine: &Engine, embedding_available: bool) -> RamariaResult<SetupStatus> {
     let storage = engine.storage_ref().as_ref();
     let backend_config = storage.get_backend_config().await?;
@@ -330,13 +330,13 @@ mod tests {
     async fn check_reports_missing_items_on_empty_db() {
         let (engine, storage, dir) = engine_with_db("setup-empty").await;
 
-        // 索引版本键缺失时存储层按"已构建"口径返回：故空库只缺三项
+        // 空库 migration 预置索引版本 1：只缺后端 / 模型 / 嵌入三项
         let status = engine.check_setup_status().await.expect("诊断应成功");
         assert!(!status.backend_configured);
         assert!(!status.model_selected);
         assert!(
             !status.needs_indexing,
-            "索引版本键缺失按已构建口径（存储层默认值）"
+            "migration 预置索引版本 1，空库按已构建口径"
         );
         assert!(!status.embedding_available);
         assert!(!status.is_complete());
@@ -750,5 +750,60 @@ mod tests {
         // 尝试次数为 0：按 1 次处理（不出现零次探测）
         let llm = MockLlm::local();
         assert!(probe_health_with_retry(&llm, 0, 0).await);
+    }
+
+    /// 缺索引版本的空库：判定未构建 → 一次重建写回版本（幂等）→ 刷新后推进到 Ready。
+    ///
+    /// 说明:
+    /// - 构造"缺键"库（删除 migration 预置的索引版本键），模拟从未写过索引版本的老库；
+    /// - 重建连续执行两次验证幂等；收敛后按嵌入可用性判定状态（本用例嵌入可用 → Ready）。
+    #[tokio::test]
+    async fn missing_index_version_converges_after_rebuild() {
+        let embedding: Arc<dyn EmbeddingProvider> = Arc::new(DeterministicEmbedding::new());
+        let (engine, storage, dir) = engine_with_llm_config_and_embedding(
+            "setup-missing-version",
+            MockLlm::local(),
+            ramaria_core::config::RamariaConfig::default(),
+            Some(embedding),
+        )
+        .await;
+        storage
+            .save_backend_config(&BackendConfig::lm_studio_default())
+            .await
+            .expect("保存后端配置应成功");
+
+        // 删除 migration 预置的索引版本键：构造"缺键"库
+        let pool = engine.sqlite_pool().expect("测试库应附着连接池");
+        sqlx::query("DELETE FROM schema_meta WHERE key = 'index_version'")
+            .execute(&pool)
+            .await
+            .expect("删除索引版本键应成功");
+
+        // 缺键 → 判定未构建 → Indexing
+        let status = engine.check_setup_status().await.expect("诊断应成功");
+        assert!(status.needs_indexing, "缺键应判定为未构建");
+        assert_eq!(
+            engine.refresh_setup_state().await.expect("刷新应成功"),
+            AppState::Indexing
+        );
+
+        // 一次重建（幂等：连续两次）→ 版本写回 1 → 状态推进到 Ready
+        engine.rebuild_index().await.expect("重建应成功");
+        engine.rebuild_index().await.expect("重复重建应成功");
+        assert_eq!(
+            storage
+                .get_index_version()
+                .await
+                .expect("读取索引版本应成功"),
+            1,
+            "重建完成后应写回索引版本 1"
+        );
+        assert_eq!(
+            engine.refresh_setup_state().await.expect("刷新应成功"),
+            AppState::Ready,
+            "重建 + 刷新后应推进到 Ready"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

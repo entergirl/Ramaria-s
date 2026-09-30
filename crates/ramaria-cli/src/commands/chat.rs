@@ -3,8 +3,8 @@
 //! 设计特点:
 //! - 简单 REPL 循环（不做 ratatui）
 //! - 支持 /exit、/quit 退出，/clear 清屏，/save 手动保存对话
-//! - 启动后台任务（空闲检测 + L2/L3 定时检查），对齐 Python Thread A/B
-//! - 退出时自动调用 save_and_close_session（shutdown hook）
+//! - 拉起会话生命周期容器（活跃指针 / 空闲检测 / L2/L3 调度 / 手动关闭）
+//! - 退出时自动关闭活跃会话（生命周期容器的关停语义）
 //! - 流式输出 AI 回复
 //! - Ctrl+C 优雅退出
 //! - session 被后台空闲检测关闭后，下次发消息自动创建新 session
@@ -13,25 +13,27 @@
 use anyhow::Context;
 use futures::StreamExt;
 use ramaria_core::types::Session;
+use ramaria_service::{
+    ChatStreamHandle, ChatStreamRequest, Engine, Lifecycle, LifecycleOptions, StreamEvent,
+};
 use std::sync::Arc;
 
 /// 启动交互式对话 REPL。
 ///
 /// 增强:
-/// - 启动后台空闲检测 + L2/L3 定时检查
+/// - 启动生命周期容器（空闲检测 + L2/L3 定时检查）
 /// - 支持 `/save` 手动保存并关闭当前 session
 /// - 退出时自动关闭活跃 session
 /// - 空闲超时后自动重建 session（无感切换）
-pub async fn run(app: &Arc<ramaria_app::App>, yes: bool) -> anyhow::Result<()> {
+pub async fn run(engine: &Arc<Engine>, yes: bool) -> anyhow::Result<()> {
     // 隐私确认
-    crate::privacy::ensure_privacy(app, yes).await?;
+    crate::privacy::ensure_privacy(engine, yes).await?;
 
     // 加载检索索引（CLI 单命令进程，启动时检索器为空；失败降级不阻塞）
-    crate::commands::ask::ensure_retriever_loaded(app).await;
+    crate::commands::ask::ensure_retriever_loaded(engine).await;
 
-    // 启动后台任务（空闲检测 + L2/L3 定时检查）
-    // 对齐 Python `SessionManager.start` 启动 Thread A + Thread B
-    app.start_background_tasks();
+    // 拉起会话生命周期（活跃指针 / 空闲检查 / L2/L3 调度），与桌面宿主同一套实现
+    let lifecycle = engine.start_lifecycle(LifecycleOptions::desktop());
 
     println!();
     crate::ui::separator();
@@ -47,11 +49,7 @@ pub async fn run(app: &Arc<ramaria_app::App>, yes: bool) -> anyhow::Result<()> {
     println!();
 
     // 创建新 session（mutable：空闲关闭后自动重建）
-    let mut session = app
-        .storage()
-        .create_session(None)
-        .await
-        .context("创建会话失败")?;
+    let mut session = engine.create_session(None).await.context("创建会话失败")?;
 
     tracing::info!(session_id = %session.id, "REPL 会话已创建");
 
@@ -74,7 +72,7 @@ pub async fn run(app: &Arc<ramaria_app::App>, yes: bool) -> anyhow::Result<()> {
 
         // 处理内置命令
         if trimmed.starts_with('/') {
-            match handle_command(trimmed, app, &mut session).await {
+            match handle_command(trimmed, engine, &lifecycle, &mut session).await {
                 CommandAction::Continue => {}
                 CommandAction::Exit => break,
             }
@@ -82,8 +80,9 @@ pub async fn run(app: &Arc<ramaria_app::App>, yes: bool) -> anyhow::Result<()> {
         }
 
         // 发送消息（含自动重建逻辑）
-        let mut stream = match try_send_or_recreate(app, trimmed, &mut session).await {
-            Ok(s) => s,
+        let mut handle = match try_send_or_recreate(engine, &lifecycle, trimmed, &mut session).await
+        {
+            Ok(handle) => handle,
             Err(e) => {
                 crate::ui::print_error(&e);
                 continue;
@@ -95,18 +94,18 @@ pub async fn run(app: &Arc<ramaria_app::App>, yes: bool) -> anyhow::Result<()> {
         let mut has_content = false;
         let mut formatter = crate::ui::PersonaFormatter::new();
 
-        while let Some(event_result) = stream.next().await {
+        while let Some(event_result) = handle.events.next().await {
             match event_result {
                 Ok(event) => match event {
-                    ramaria_app::stream_event::StreamEvent::Delta { content, .. } => {
+                    StreamEvent::Delta { content, .. } => {
                         let formatted = formatter.feed(&content);
                         if !formatted.is_empty() {
                             crate::ui::write_delta(&formatted);
                         }
                         has_content = true;
                     }
-                    ramaria_app::stream_event::StreamEvent::Done { .. } => {}
-                    ramaria_app::stream_event::StreamEvent::Error { error, .. } => {
+                    StreamEvent::Done { .. } => {}
+                    StreamEvent::Error { error, .. } => {
                         eprintln!();
                         crate::ui::warn(&format!("LLM 错误: {error}"));
                     }
@@ -131,9 +130,8 @@ pub async fn run(app: &Arc<ramaria_app::App>, yes: bool) -> anyhow::Result<()> {
 
     println!();
 
-    // 退出时自动保存并关闭活跃 session
-    // 对齐 Python `SessionManager.stop` 的 shutdown hook
-    if let Err(e) = app.save_and_close_session(None).await {
+    // 退出时自动保存并关闭活跃 session（生命周期容器的关停语义）
+    if let Err(e) = lifecycle.close_active_session().await {
         crate::ui::warn(&format!("退出时保存对话失败: {e}"));
     } else {
         crate::ui::info("对话已保存。");
@@ -152,16 +150,17 @@ pub async fn run(app: &Arc<ramaria_app::App>, yes: bool) -> anyhow::Result<()> {
 /// 对齐 Python REPL 中 session 关闭后自动重建的行为。
 ///
 /// 返回:
-/// - `Ok(stream)`: 消息已发送，返回流式响应。
+/// - `Ok(handle)`: 消息已发送，返回事件流句柄。
 /// - `Err`: 两次尝试均失败（含新 session 创建失败）。
 async fn try_send_or_recreate(
-    app: &Arc<ramaria_app::App>,
+    engine: &Arc<Engine>,
+    lifecycle: &Arc<Lifecycle>,
     input: &str,
     session: &mut Session,
-) -> Result<ramaria_app::SendMessageStream, ramaria_core::error::RamariaError> {
+) -> Result<ChatStreamHandle, ramaria_core::error::RamariaError> {
     // 第一次尝试：使用当前 session
-    match app.send_message(input, None, Some(session.id)).await {
-        Ok(stream) => return Ok(stream),
+    match send_stream(engine, lifecycle, input, session.id).await {
+        Ok(handle) => return Ok(handle),
         Err(e) => {
             let err_str = e.to_string();
             // 仅当 session 已关闭时才自动重建（其他错误直接返回）
@@ -177,7 +176,7 @@ async fn try_send_or_recreate(
     }
 
     // 重建 session
-    let new_session = app.storage().create_session(None).await.map_err(|e| {
+    let new_session = engine.create_session(None).await.map_err(|e| {
         ramaria_core::error::RamariaError::storage(format!(
             "创建新会话失败（原 session {} 已关闭）: {e}",
             session.id
@@ -199,8 +198,33 @@ async fn try_send_or_recreate(
         "REPL 自动重建 session 完成，重试发送消息"
     );
 
-    // 第二次尝试：使用新 session 重试
-    app.send_message(input, None, Some(session.id)).await
+    // 第二次尝试：使用新 session
+    send_stream(engine, lifecycle, input, session.id).await
+}
+
+/// 发送一条消息并登记活跃指针（生命周期容器侧）。
+///
+/// 说明:
+/// - 事件流句柄的会话归属由宿主登记为活跃会话并刷新活跃时间
+///   （服务层不反向持有生命周期容器）。
+async fn send_stream(
+    engine: &Arc<Engine>,
+    lifecycle: &Arc<Lifecycle>,
+    input: &str,
+    session_id: uuid::Uuid,
+) -> Result<ChatStreamHandle, ramaria_core::error::RamariaError> {
+    let handle = engine
+        .chat_stream(ChatStreamRequest {
+            message: input.to_string(),
+            persona: None,
+            session_id: Some(session_id),
+            seed_history: Vec::new(),
+            config_override: None,
+        })
+        .await?;
+    lifecycle.set_active_session_id(Some(handle.session_id));
+    lifecycle.touch_session(handle.session_id);
+    Ok(handle)
 }
 
 /// REPL 内置命令的处理结果。
@@ -212,11 +236,12 @@ enum CommandAction {
 /// 处理 REPL 内置命令。
 ///
 /// `/save` 命令：手动保存并关闭当前对话。
-/// `/save` 后 session 被更新为待重建状态（id 不变但已关闭），
-/// 下次发消息时 `try_send_or_recreate` 自动创建新 session。
+/// `/save` 后 session 被更新为新会话（下次消息直接使用），
+/// 新建失败时保持原 session，`try_send_or_recreate` 会在下次发消息时自动重试。
 async fn handle_command(
     input: &str,
-    app: &Arc<ramaria_app::App>,
+    engine: &Arc<Engine>,
+    lifecycle: &Arc<Lifecycle>,
     session: &mut Session,
 ) -> CommandAction {
     match input {
@@ -232,12 +257,12 @@ async fn handle_command(
         "/save" => {
             // 手动保存对话（不清屏，next 消息自动创建新 session）
             let old_sid = session.id;
-            match app.save_and_close_session(None).await {
-                Ok(()) => {
+            match lifecycle.close_active_session().await {
+                Ok(_) => {
                     println!("── 对话已保存 ──");
                     crate::ui::info("当前对话已保存，下次消息将自动开始新对话。");
                     // 尝试创建新 session 以便下次消息直接使用
-                    match app.storage().create_session(None).await {
+                    match engine.create_session(None).await {
                         Ok(new_s) => {
                             *session = new_s;
                             tracing::info!(

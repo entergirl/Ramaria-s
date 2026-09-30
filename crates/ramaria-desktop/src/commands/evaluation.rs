@@ -1,7 +1,7 @@
-//! crates/ramaria-desktop/src/commands/evaluation.rs - 评估调试只读面板命令（M7）
+//! crates/ramaria-desktop/src/commands/evaluation.rs - 评估调试只读面板命令
 //!
 //! 设计特点:
-//! - 只读面板，服务 M8：选择 probe 产物目录 → 列出 JSON 产物 → 解析单个结果文件。
+//! - 只读面板（查看 probe 产物）：选择产物目录 → 列出 JSON 产物 → 解析单个结果文件。
 //! - 目录经原生目录选择对话框获取（不信任前端直接传入任意路径做写操作；
 //!   读取仍限定 .json 后缀 + 大小上限防误读）。
 //! - 读取范围收敛为"允许根目录集合"：用户主目录白名单 ∪ 数据目录 ∪ 用户显式
@@ -63,13 +63,13 @@ pub struct EvalFileListResponse {
 ///
 /// 说明:
 /// - 用户主目录白名单由 `path_guard::read_allowed_roots` 统一提供；
+/// - 数据目录取数据库文件所在目录（与启动期数据根同一约定）；
 /// - 显式授权目录来自原生目录对话框的选择结果（本次会话内有效）；
 /// - 集合为空时调用方应拒绝读取。
 fn eval_allowed_roots(state: &DesktopState) -> Vec<PathBuf> {
     let mut extra: Vec<PathBuf> = Vec::new();
-    let data_dir = state.app.config().paths.data_dir.clone();
-    if !data_dir.is_empty() {
-        extra.push(PathBuf::from(data_dir));
+    if let Some(data_dir) = state.engine.db_path().parent() {
+        extra.push(data_dir.to_path_buf());
     }
     extra.extend(
         lock_recover(&state.eval_allowed_dirs, "desktop.eval_allowed_dirs")
@@ -97,7 +97,12 @@ pub async fn pick_eval_dir(
     state: State<'_, DesktopState>,
 ) -> Result<Option<String>, String> {
     // 默认定位到数据目录（评估产物常存放于 test-data/ 或 data dir 下）
-    let start_dir = state.app.config().paths.data_dir.clone();
+    let start_dir = state
+        .engine
+        .db_path()
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
     let dialog = app_handle.dialog().file();
     let dialog = if start_dir.is_empty() {
         dialog

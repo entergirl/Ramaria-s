@@ -16,7 +16,7 @@
 
 mod common;
 
-use common::build_test_app;
+use common::build_test_engine;
 use ramaria_core::traits::StoreCrud;
 use ramaria_core::types::StyleStatsStatus;
 
@@ -32,11 +32,11 @@ use ramaria_cli::commands::style::{StyleCmd, run};
 /// 且统计记录确实写回 `persona_style_stats` 供后续达阈值时自动恢复规则生成。
 #[tokio::test]
 async fn style_update_empty_persona_ok_insufficient() {
-    let (app, storage) = build_test_app();
+    let (engine, storage) = build_test_engine();
     let cmd = StyleCmd::Update {
         persona: Some("rama-0001".to_string()),
     };
-    run(&app, cmd, true)
+    run(&engine, cmd, true)
         .await
         .expect("空 persona 风格统计不应报错（零消息冷启动）");
 
@@ -58,9 +58,9 @@ async fn style_update_empty_persona_ok_insufficient() {
 /// 未指定 persona → 回退默认 persona（rama-0001），空数据同样不报错。
 #[tokio::test]
 async fn style_update_default_persona_ok() {
-    let (app, _storage) = build_test_app();
+    let (engine, _storage) = build_test_engine();
     let cmd = StyleCmd::Update { persona: None };
-    run(&app, cmd, true)
+    run(&engine, cmd, true)
         .await
         .expect("默认 persona 空数据风格统计不应报错");
 }

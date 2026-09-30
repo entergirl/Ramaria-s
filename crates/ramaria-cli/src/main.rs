@@ -7,7 +7,7 @@
 //! - exit code 约定：0 成功 / 2 参数错(clap) / 3 LLM 或后端不可用 / 4 业务校验失败
 //! - `ramaria help` 按 对话/记忆/数据/管理/高级 分组（subcommand_help_heading）
 //! - blocks 为 canonical 命令名，utt 保留为 alias
-//! - App 统一初始化（DB → storage → LLM → App）
+//! - Engine 统一初始化（DB → 引擎装配 → 配置双写 → 后端对齐）
 
 // 命令模块通过 lib.rs 暴露（pub mod），以供集成测试使用
 use ramaria_cli::commands;
@@ -16,9 +16,8 @@ use ramaria_cli::ui;
 use anyhow::Context;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use ramaria_core::error::RamariaError;
-use ramaria_core::traits::EmbeddingProvider;
-use ramaria_core::{StorageBackend, StoreInfrastructure};
-use sqlx::SqlitePool;
+use ramaria_core::types::BackendConfig;
+use ramaria_service::{Engine, EngineOptions};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -648,7 +647,7 @@ async fn main() {
     let json_mode = cli.json;
 
     // 交互式命令与 --json 不兼容：显式 unsupported（错误信封 + exit 4）。
-    // 在 App 初始化前拦截，避免生成 config.toml 等副作用。
+    // 在引擎初始化前拦截，避免生成 config.toml 等副作用。
     if cli.json {
         let interactive = match &cli.command {
             Commands::Setup => Some("setup"),
@@ -663,7 +662,7 @@ async fn main() {
         }
     }
 
-    // MCP 服务端：走与传输无关的服务层（不构造 App，避免重复连接池与宿主侧副作用）。
+    // MCP 服务端：走与传输无关的服务层（不构造应用层实例，避免重复连接池与宿主侧副作用）。
     // stdio 协议期间 stdout 只允许协议消息，故本分支不输出任何数据。
     if let Commands::Mcp(sub) = &cli.command {
         let result = match sub {
@@ -675,14 +674,14 @@ async fn main() {
         return;
     }
 
-    // 初始化 App（后端不可用视为 exit code 3）
-    let (app, pool) = match init_app(cli.db.clone()).await {
-        Ok((a, p)) => (a, p),
+    // 初始化服务层引擎（后端不可用视为 exit code 3）
+    let engine = match init_app(cli.db.clone()).await {
+        Ok(engine) => engine,
         Err(e) => exit_with_error(&e, json_mode),
     };
 
     // 调度命令
-    let result = dispatch(&app, &pool, cli).await;
+    let result = dispatch(&engine, cli).await;
 
     if let Err(e) = result {
         exit_with_error(&e, json_mode);
@@ -770,48 +769,39 @@ fn exit_with_error(err: &anyhow::Error, json_mode: bool) -> ! {
 }
 
 // =========================================================
-// App 初始化
+// 引擎初始化
 // =========================================================
 
-/// 初始化 App：连接数据库 → 迁移 → 配置双写同步 → 恢复 embedding → 创建 LLM → 构造 App。
+/// 初始化服务层引擎：连接数据库 → 迁移 → 配置双写链路 → 后端配置对齐 → 恢复状态。
 ///
-/// 返回 (App实例, 数据库连接池)。连接池供导入器等需要直接访问 SQLite 的命令使用。
+/// 返回装配完成的服务层引擎句柄（存储连接池由引擎持有，导入等用例经其取用）。
 ///
 /// CLI 初始化（启动前置）:
-/// - config.toml 经 `ConfigSyncService` 加载（对齐桌面端 lib.rs:297-327），
-///   `[utt]` 等配置组对 CLI 对话链路生效；缺失生成模板、损坏回退默认记 warn。
-/// - 恢复已保存的 embedding provider（`backend_config.embedding_model_path`），
-///   目录存在时创建 native provider；缺失/失败 → `None`（BM25 降级记 warn，不阻塞）。
-async fn init_app(db_path: PathBuf) -> anyhow::Result<(Arc<ramaria_app::App>, sqlx::SqlitePool)> {
-    tracing::info!(db = %db_path.display(), "初始化 App");
+/// - config.toml 经服务层配置用例加载：缺失生成模板、损坏回退默认记 warn，
+///   一致性校验以文件为准并回写 DB，`[utt]` 等配置组对对话链路生效；
+/// - 后端配置以同步后的库内记录为真相源：装配时按旧记录构建的 provider
+///   与同步结果不一致时热更新（新库首次启动按 config.toml 的 `[backend]` 生效）；
+/// - 恢复已保存的嵌入模型；缺失 / 加载失败 → 向量通道降级（BM25 + 关键词镜像继续可用）。
+async fn init_app(db_path: PathBuf) -> anyhow::Result<Arc<Engine>> {
+    tracing::info!(db = %db_path.display(), "初始化引擎");
 
-    // Step 1: 初始化数据库连接池 + 执行 migration
-    let pool = ramaria_storage::database::init_pool(Some(db_path.clone()))
-        .await
-        .context("数据库初始化失败")?;
-
-    let storage = Arc::new(ramaria_storage::SqliteStorage::new(pool.clone()));
-
-    // Step 2: 读取已保存的后端配置（如有）
-    let backend_config = storage
-        .get_backend_config()
-        .await
-        .context("读取后端配置失败")?
-        .unwrap_or_else(ramaria_core::types::BackendConfig::lm_studio_default);
-
-    // Step 3: 创建 Keychain
-    let keychain = Arc::new(ramaria_llm::keychain::Keychain::new());
-
-    // Step 4: 配置双写同步（v1.4+）：加载 config.toml + DB 两侧，
-    // 一致性校验以文件为准（config.toml 与数据库同级目录，约定同桌面端）。
-    let data_dir = db_path
+    let config_path = db_path
         .parent()
         .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."));
-    let config_path = data_dir.join("config.toml");
-    let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
-    let config_sync = ramaria_app::ConfigSyncService::new(storage_dyn, config_path.clone());
-    let sync_outcome = config_sync.load().await.context("配置同步加载失败")?;
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("config.toml");
+
+    // Step 1: 装配服务层引擎（连接池 + migration + 配置读取 + LLM / 嵌入恢复）
+    let engine = Arc::new(
+        Engine::open_with(
+            EngineOptions::new(db_path.clone()).with_config_path(config_path.clone()),
+        )
+        .await?,
+    );
+
+    // Step 2: 配置双写链路：加载 config.toml + DB 两侧，
+    // 一致性校验以文件为准（config.toml 与数据库同级目录，约定同桌面端）。
+    let sync_outcome = engine.reload_config().await.context("配置同步加载失败")?;
     if !sync_outcome.file_existed {
         tracing::info!(
             path = %config_path.display(),
@@ -837,160 +827,59 @@ async fn init_app(db_path: PathBuf) -> anyhow::Result<(Arc<ramaria_app::App>, sq
         tracing::warn!(error = %err, "DB 侧配置回写失败（降级不阻塞）");
     }
 
-    // Step 5: 构造 App 配置（基于同步后的配置，填充实际路径；缓存策略取 [cache] 配置组）
-    let mut config = sync_outcome.config;
-    config.paths.data_dir = data_dir.to_string_lossy().to_string();
-    config.paths.log_dir = data_dir.join("logs").to_string_lossy().to_string();
-    config.paths.config_dir = data_dir.to_string_lossy().to_string();
-    config.paths.vector_index_dir = data_dir.join("vectors").to_string_lossy().to_string();
-
-    // Step 6: 尝试恢复已保存的嵌入模型（对齐桌面端加载逻辑）。
-    // 目录存在 → 创建 native provider（向量通道真实可用）；
-    // 目录缺失 / 创建失败 → None（BM25 降级，记 warn 不阻塞启动）。
-    let embedding: Option<Arc<dyn EmbeddingProvider>> = {
-        match &backend_config.embedding_model_path {
-            Some(saved_path) if !saved_path.is_empty() => {
-                let model_dir = std::path::Path::new(saved_path);
-                if !model_dir.exists() {
-                    tracing::warn!(
-                        path = %saved_path,
-                        "已保存的嵌入模型目录不存在，CLI 将以 BM25 降级模式运行"
-                    );
-                    None
-                } else {
-                    // 按 `[embedding]` 配置选择计算设备（cpu/cuda/auto；CUDA 不可用回退 CPU）。
-                    let device = config.embedding.device;
-                    match ramaria_llm::embedding::native::create_native_provider_with_device(
-                        model_dir, device,
-                    ) {
-                        Ok(provider) => {
-                            let info = provider.model_info();
-                            tracing::info!(
-                                path = %saved_path,
-                                model_id = %info.model_id,
-                                dim = info.dimension,
-                                device = device.as_str(),
-                                "已恢复嵌入模型（向量通道可用）"
-                            );
-                            Some(Arc::new(provider) as Arc<dyn EmbeddingProvider>)
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                path = %saved_path,
-                                error = %e,
-                                "加载已保存的嵌入模型失败，CLI 将以 BM25 降级模式运行"
-                            );
-                            None
-                        }
-                    }
-                }
-            }
-            _ => {
-                tracing::debug!("无已保存的嵌入模型，跳过恢复");
-                None
-            }
-        }
-    };
-
-    // Step 6.5: 重新读取后端配置（BUG-M5b-01 修复）。
+    // Step 3: 后端配置对齐。
     //
-    // Step 2 在 ConfigSyncService 同步之前读取 backend_config：
-    // 新库（backend_config 表无记录）回退 lm_studio_default()，
-    // 导致 LLM 指向 localhost:1234、忽略 config.toml 的 [backend]。
-    // Step 4 已把文件侧后端配置写回 DB（新库补齐记录），此处以同步后
-    // 的 DB 记录为 LLM provider 的真相源；极端情况仍为空（同步写回降级
-    // 失败）则保留旧值，避免无配置构建。
-    let backend_config = storage
-        .get_backend_config()
+    // 装配阶段按同步前的库内记录构建 provider（新库无记录时回退 lm_studio_default），
+    // 同步完成后以库内记录为真相源：与当前 provider 不一致时热更新，
+    // 使 config.toml 的 `[backend]`（新库首次启动）或文件侧变更立即生效。
+    let backend_config = engine
+        .backend_config()
         .await
         .context("重新读取后端配置失败")?
-        .unwrap_or(backend_config);
+        .unwrap_or_else(BackendConfig::lm_studio_default);
+    if !backend_matches(&engine.llm().config().clone(), &backend_config) {
+        engine
+            .update_backend_config(&backend_config, None)
+            .await
+            .context("后端配置热更新失败")?;
+    }
 
-    // Step 7: 创建 LLM Provider（按 [cache] 配置注入精确缓存）
-    //
-    // - `config.cache.enabled`（默认 true）：创建 SqliteLlmCache 并注入 provider，
-    //   重跑导入/重试/失败恢复场景命中缓存不重复花费 API 账单；
-    // - 缓存实例同时保存到 App（set_llm_cache），供热更新路径复用。
-    let llm_cache: Option<Arc<dyn ramaria_core::traits::LlmResponseCache>> = if config.cache.enabled
-    {
-        Some(Arc::new(ramaria_storage::SqliteLlmCache::new(
-            pool.clone(),
-            config.cache.max_entries,
-            config.cache.eviction,
-        )))
-    } else {
-        None
-    };
-    let llm: Arc<dyn ramaria_core::LlmProviderTrait> = match backend_config.provider {
-        ramaria_core::types::LlmProvider::LmStudio => {
-            let provider = ramaria_llm::lm_studio::LmStudioProvider::new(backend_config.clone())
-                .context("创建 LM Studio provider 失败")?;
-            let provider = match &llm_cache {
-                Some(cache) => provider.with_cache(Arc::clone(cache)),
-                None => provider,
-            };
-            Arc::new(provider)
-        }
-        ramaria_core::types::LlmProvider::DeepSeek => {
-            let provider = ramaria_llm::deepseek::DeepSeekProvider::new(
-                backend_config.clone(),
-                Arc::clone(&keychain),
-            )
-            .context("创建 DeepSeek provider 失败")?;
-            let provider = match &llm_cache {
-                Some(cache) => provider.with_cache(Arc::clone(cache)),
-                None => provider,
-            };
-            Arc::new(provider)
-        }
-        ramaria_core::types::LlmProvider::OpenAI => {
-            let provider = ramaria_llm::openai::OpenAIProvider::new(
-                backend_config.clone(),
-                Arc::clone(&keychain),
-            )
-            .context("创建 OpenAI provider 失败")?;
-            let provider = match &llm_cache {
-                Some(cache) => provider.with_cache(Arc::clone(cache)),
-                None => provider,
-            };
-            Arc::new(provider)
-        }
-        _ => {
-            return Err(anyhow::anyhow!(RamariaError::unsupported(format!(
-                "不支持的 LLM provider: {}",
-                backend_config.provider.as_str()
-            ))));
-        }
-    };
-
-    // Step 8: 构造 App（注入 embedding；None = 向量通道降级）
-    let app = ramaria_app::App::new(storage, llm, embedding, config, keychain);
-    // 保存缓存实例引用：后端热更新（update_llm）时复用同一缓存
-    app.set_llm_cache(llm_cache);
-    let app = Arc::new(app);
-
-    // Step 9: 刷新状态
-    app.refresh_setup_state()
+    // Step 4: 刷新状态
+    engine
+        .refresh_setup_state()
         .await
         .context("刷新应用状态失败")?;
 
     tracing::info!(
-        state = %app.current_state().as_str(),
+        state = %engine.current_state().as_str(),
         provider = %backend_config.provider.as_str(),
-        "App 初始化完成"
+        "引擎初始化完成"
     );
 
-    Ok((app, pool))
+    Ok(engine)
+}
+
+/// 判断 provider 快照与同步后的后端配置是否等价。
+///
+/// 说明:
+/// - 比较字段与后端配置同步口径一致（provider / 地址 / 模型 / 温度 / 输出预算），
+///   等价时跳过 provider 重建，避免无谓的热更新与文件重写。
+fn backend_matches(active: &BackendConfig, synced: &BackendConfig) -> bool {
+    active.provider == synced.provider
+        && active.base_url == synced.base_url
+        && active.capability.model_id == synced.capability.model_id
+        && (active.temperature - synced.temperature).abs() < f64::EPSILON
+        && active.max_tokens == synced.max_tokens
 }
 
 // =========================================================
 // 命令调度
 // =========================================================
 
-async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> anyhow::Result<()> {
+async fn dispatch(engine: &Arc<Engine>, cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Commands::Setup => {
-            commands::setup::run(app, cli.skip_validate).await?;
+            commands::setup::run(engine, cli.skip_validate).await?;
         }
         Commands::Ask {
             message,
@@ -1016,10 +905,10 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
                 json: cli.json || json,
                 yes: cli.yes,
             };
-            commands::ask::run(app, args).await?;
+            commands::ask::run(engine, args).await?;
         }
         Commands::Chat => {
-            commands::chat::run(app, cli.yes).await?;
+            commands::chat::run(engine, cli.yes).await?;
         }
         Commands::Memory {
             layer,
@@ -1034,16 +923,17 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
                 offset,
                 json: cli.json,
             };
-            commands::memory::run(app, args).await?;
+            commands::memory::run(engine, args).await?;
         }
         Commands::Blocks(sub) => match sub {
             BlocksCmd::Rebuild { force } => {
-                commands::utt::run(app, commands::utt::UttCmd::Rebuild { force }, cli.json).await?;
+                commands::utt::run(engine, commands::utt::UttCmd::Rebuild { force }, cli.json)
+                    .await?;
             }
         },
         Commands::Index(sub) => match sub {
             IndexCmd::Rebuild => {
-                commands::index_cmd::run(app, cli.json).await?;
+                commands::index_cmd::run(engine, cli.json).await?;
             }
         },
         Commands::Session(sub) => {
@@ -1067,7 +957,7 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
                     progressive,
                 },
             };
-            commands::session::run(app, cmd, cli.json, cli.yes).await?;
+            commands::session::run(engine, cmd, cli.json, cli.yes).await?;
         }
         Commands::Config(sub) => {
             let cmd = match sub {
@@ -1075,7 +965,7 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
                 ConfigCmd::Get { key } => commands::config::ConfigCmd::Get { key },
                 ConfigCmd::Set { key, value } => commands::config::ConfigCmd::Set { key, value },
             };
-            commands::config::run(app, cmd, cli.json).await?;
+            commands::config::run(engine, cmd, cli.json).await?;
         }
         Commands::Persona(sub) => {
             let cmd = match sub {
@@ -1085,7 +975,7 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
                 PersonaCmd::Show => commands::persona::PersonaCmd::Show,
                 PersonaCmd::Reload { uid } => commands::persona::PersonaCmd::Reload { uid },
             };
-            commands::persona::run(app, cmd, cli.json).await?;
+            commands::persona::run(engine, cmd, cli.json).await?;
         }
         Commands::Rule(sub) => {
             let cmd = match sub {
@@ -1134,13 +1024,13 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
                     split_ratio,
                 },
             };
-            commands::rule::run(app, cmd, cli.json, cli.yes).await?;
+            commands::rule::run(engine, cmd, cli.json, cli.yes).await?;
         }
         Commands::Style(sub) => {
             let cmd = match sub {
                 StyleCmd::Update { persona } => commands::style::StyleCmd::Update { persona },
             };
-            commands::style::run(app, cmd, cli.json).await?;
+            commands::style::run(engine, cmd, cli.json).await?;
         }
         Commands::Fact(sub) => {
             let cmd = match sub {
@@ -1157,7 +1047,7 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
                 },
                 FactCmd::Show { id } => commands::fact::FactCmd::Show { id },
             };
-            commands::fact::run(app, cmd, cli.json).await?;
+            commands::fact::run(engine, cmd, cli.json).await?;
         }
         Commands::Keyword(sub) => {
             let cmd = match sub {
@@ -1179,8 +1069,8 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
                     commands::keyword_cmd::KeywordCmd::Alias(action)
                 }
             };
-            // keyword 命令仅访问 keyword_pool，直接使用数据库连接池（无需 App 业务层）
-            commands::keyword_cmd::run(pool, cmd, cli.json, cli.yes).await?;
+            // keyword 命令经服务层关键词用例访问 keyword_pool
+            commands::keyword_cmd::run(engine, cmd, cli.json, cli.yes).await?;
         }
         Commands::Export {
             format,
@@ -1193,7 +1083,7 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
                 output,
                 json: cli.json,
             };
-            commands::export::run(app, args).await?;
+            commands::export::run(engine, args).await?;
         }
         Commands::Import(sub) => match sub {
             ImportCmd::Qq {
@@ -1227,20 +1117,19 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
                     yes: cli.yes || force,
                     json: cli.json,
                 };
-                // 导入命令需要 App（触发 L1 摘要）和数据库连接池
-                commands::import_cmd::run(app, pool, args).await?;
+                commands::import_cmd::run(engine, args).await?;
             }
         },
         Commands::Diagnostics { output } => {
             let args = commands::diagnostics::DiagnosticsArgs { output };
-            commands::diagnostics::run(app, pool, args, cli.json).await?;
+            commands::diagnostics::run(engine, args, cli.json).await?;
         }
         Commands::Status => {
             let args = commands::status::StatusArgs {
                 db_path: cli.db,
                 json: cli.json,
             };
-            commands::status::run(app, args).await?;
+            commands::status::run(engine, args).await?;
         }
         Commands::Probe(sub) => {
             let cmd = match sub {
@@ -1306,12 +1195,13 @@ async fn dispatch(app: &Arc<ramaria_app::App>, pool: &SqlitePool, cli: Cli) -> a
                     json: cli.json,
                 },
             };
-            commands::probe::run(app, cmd, cli.yes).await?;
+            // 探针命令经服务层引擎执行（部分算法原语由探针模块直接调用）
+            commands::probe::run(engine, cmd, cli.yes).await?;
         }
-        // mcp 在 App 初始化前分流（见 main：不构造 App，直接走服务层）；此处仅保证穷尽
+        // mcp 在引擎初始化前分流（见 main：直接走服务层引擎）；此处仅保证穷尽
         Commands::Mcp(_) => {
             return Err(anyhow::anyhow!(RamariaError::unsupported(
-                "mcp 命令应在 App 初始化前分流（内部错误）"
+                "mcp 命令应在引擎初始化前分流（内部错误）"
             )));
         }
     }
@@ -1368,13 +1258,14 @@ fn init_tracing() {
 }
 
 // =========================================================
-// 单元测试（cli 参数解析，不启动 App）
+// 单元测试（cli 参数解析，不启动引擎）
 // =========================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::Parser;
+    use ramaria_core::traits::StoreInfrastructure;
 
     /// 串行化 env 变量测试（多个 #[test] 并行时会互相干扰环境变量）。
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -1676,6 +1567,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// 释放引擎持有的连接池句柄（Windows 下删除临时目录前需关闭文件句柄）。
+    async fn close_engine_pool(engine: &Engine) {
+        if let Some(pool) = engine.sqlite_pool() {
+            pool.close().await;
+        }
+    }
+
     /// 断言 config.toml 参数被 CLI 链路读取。
     #[tokio::test]
     async fn init_app_loads_config_toml() {
@@ -1684,13 +1582,13 @@ mod tests {
         // 预写 config.toml：`[utt] theta_gap_minutes = 45`（与默认 30 不同，用于断言读取生效）
         std::fs::write(dir.join("config.toml"), "[utt]\ntheta_gap_minutes = 45\n").unwrap();
 
-        let (app, pool) = init_app(db_path).await.expect("init_app 应成功");
+        let engine = init_app(db_path).await.expect("init_app 应成功");
         assert_eq!(
-            app.config().utt.theta_gap_minutes,
+            engine.config().utt.theta_gap_minutes,
             45,
             "config.toml 的 [utt] 参数必须被 CLI 链路读取"
         );
-        pool.close().await;
+        close_engine_pool(&engine).await;
         cleanup_temp_dir(&dir);
     }
 
@@ -1700,13 +1598,13 @@ mod tests {
         let dir = temp_test_dir("missing");
         let db_path = dir.join("assistant.db");
 
-        let (app, pool) = init_app(db_path).await.expect("init_app 应成功");
-        assert_eq!(app.config().utt.theta_gap_minutes, 10, "缺失时用默认值");
+        let engine = init_app(db_path).await.expect("init_app 应成功");
+        assert_eq!(engine.config().utt.theta_gap_minutes, 10, "缺失时用默认值");
         assert!(
             dir.join("config.toml").exists(),
             "config.toml 缺失时应生成模板"
         );
-        pool.close().await;
+        close_engine_pool(&engine).await;
         cleanup_temp_dir(&dir);
     }
 
@@ -1717,9 +1615,13 @@ mod tests {
         let db_path = dir.join("assistant.db");
         std::fs::write(dir.join("config.toml"), "这不是合法的 TOML [[[").unwrap();
 
-        let (app, pool) = init_app(db_path).await.expect("损坏 config 不应阻塞启动");
-        assert_eq!(app.config().utt.theta_gap_minutes, 10, "损坏时回退默认值");
-        pool.close().await;
+        let engine = init_app(db_path).await.expect("损坏 config 不应阻塞启动");
+        assert_eq!(
+            engine.config().utt.theta_gap_minutes,
+            10,
+            "损坏时回退默认值"
+        );
+        close_engine_pool(&engine).await;
         cleanup_temp_dir(&dir);
     }
 
@@ -1738,21 +1640,20 @@ mod tests {
         storage.save_backend_config(&backend).await.unwrap();
         pool.close().await;
 
-        let (app, pool) = init_app(db_path).await.expect("embedding 缺失不应阻塞启动");
+        let engine = init_app(db_path).await.expect("embedding 缺失不应阻塞启动");
         assert!(
-            !app.is_embedding_available(),
+            !engine.is_embedding_available(),
             "模型目录不存在时 embedding 不可用（BM25 降级）"
         );
-        pool.close().await;
+        close_engine_pool(&engine).await;
         cleanup_temp_dir(&dir);
     }
 
-    /// BUG-M5b-01 回归：新库（backend_config 表无记录）首次启动，
-    /// config.toml 的 `[backend]`（deepseek）必须在 ConfigSyncService 同步后
-    /// 生效，而不是回退 lm_studio_default() 指向 localhost:1234。
+    /// 新库（backend_config 表无记录）首次启动：config.toml 的 `[backend]`（deepseek）
+    /// 必须经配置同步后生效，而不是回退 lm_studio_default() 指向 localhost:1234。
     ///
-    /// 复现路径：init_app 在同步前读取 backend_config → 空库回退 LM Studio →
-    /// L1/L2 全失败（首次导入因此失败）。
+    /// 回归背景：装配时库内无后端配置会回退 LM Studio，导致 L1/L2 全失败
+    /// （首次导入因此失败）；同步完成后的库内记录必须成为 provider 的真相源。
     #[tokio::test]
     async fn init_app_uses_config_toml_backend_on_fresh_db() {
         let dir = temp_test_dir("backend");
@@ -1764,16 +1665,16 @@ mod tests {
         )
         .unwrap();
 
-        let (app, pool) = init_app(db_path).await.expect("init_app 应成功");
+        let engine = init_app(db_path).await.expect("init_app 应成功");
         assert_eq!(
-            app.llm_provider_name(),
+            engine.llm().name(),
             "DeepSeek",
             "新库首次启动必须采用 config.toml 的 [backend]（BUG-M5b-01）"
         );
 
         // 同步后 DB backend_config 也应记录 deepseek（文件为准回写）
-        let storage = ramaria_storage::SqliteStorage::new(pool.clone());
-        let bc = storage
+        let bc = engine
+            .storage()
             .get_backend_config()
             .await
             .expect("读取 backend_config 应成功")
@@ -1788,11 +1689,11 @@ mod tests {
             "base_url 应以文件为准"
         );
 
-        pool.close().await;
+        close_engine_pool(&engine).await;
         cleanup_temp_dir(&dir);
     }
 
-    /// BUG-M5b-01 对照：DB 已保存 LM Studio 但 config.toml 指定 deepseek → 以文件为准。
+    /// 库内已保存 LM Studio 但 config.toml 指定 deepseek → 以文件为准。
     ///
     /// 覆盖"文件与 DB 不一致"场景：同步写回 DB 后，LLM 应使用文件侧的 deepseek。
     #[tokio::test]
@@ -1816,14 +1717,14 @@ mod tests {
             .unwrap();
         pool.close().await;
 
-        let (app, pool) = init_app(db_path).await.expect("init_app 应成功");
+        let engine = init_app(db_path).await.expect("init_app 应成功");
         assert_eq!(
-            app.llm_provider_name(),
+            engine.llm().name(),
             "DeepSeek",
             "文件与 DB 不一致时应以 config.toml 为准"
         );
 
-        pool.close().await;
+        close_engine_pool(&engine).await;
         cleanup_temp_dir(&dir);
     }
 

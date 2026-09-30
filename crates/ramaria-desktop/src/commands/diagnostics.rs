@@ -1,17 +1,16 @@
 //! crates/ramaria-desktop/src/commands/diagnostics.rs - 诊断与更新 Tauri Commands
 //!
 //! 设计特点:
-//! - `check_update`: 调用 ramaria_app::check_update，返回版本比较结果。
-//! - `export_diagnostics`: 弹出保存对话框 → 调用 ramaria_app::export_diagnostics → 打包 zip。
+//! - `check_update`: 委托服务层版本检查，返回版本比较结果。
+//! - `export_diagnostics`: 弹出保存对话框 → 委托服务层收集并打包 zip。
 //! - 所有命令返回 `Result<T, String>`，便于前端显示中文错误消息。
 //! - 使用 Tauri AppHandle 弹出原生保存对话框（tauri-plugin-dialog）。
 //!
 //! 安全约束:
 //! - 导出路径由用户通过原生对话框指定，不信任前端传入的路径。
-//! - API key 脱敏在 export_diagnostics 内部完成，不可逆。
+//! - API key 脱敏在服务层导出用例内部完成，不可逆。
 
-use ramaria_app::DiagnosticsReport;
-use ramaria_app::update::UpdateStatus;
+use ramaria_service::{DiagnosticsReport, DiagnosticsRequest, UpdateStatus};
 use serde::Serialize;
 use std::path::PathBuf;
 use tauri::{AppHandle, State};
@@ -89,7 +88,7 @@ impl From<DiagnosticsReport> for DiagnosticsExportView {
 
 /// 检查是否有新版本可用。
 ///
-/// 调用 ramaria_app::check_update，将结果转换为前端友好的视图结构。
+/// 调用服务层版本检查，将结果转换为前端友好的视图结构。
 ///
 /// 返回:
 /// - `UpdateStatusView`: 含当前版本、最新版本、是否可更新、Release URL 和错误信息。
@@ -97,7 +96,7 @@ impl From<DiagnosticsReport> for DiagnosticsExportView {
 pub async fn check_update() -> Result<UpdateStatusView, String> {
     tracing::info!("用户手动检查更新");
 
-    let status = ramaria_app::update::check_update().await;
+    let status = ramaria_service::check_update().await;
 
     if let Some(ref err) = status.error {
         tracing::warn!(error = %err, "版本检查遇到问题");
@@ -123,12 +122,12 @@ pub fn get_version() -> String {
 ///
 /// 流程:
 /// 1. 弹出原生保存对话框，默认文件名为 `ramaria-diagnostics-{日期}.zip`。
-/// 2. 用户确认后，调用 `ramaria_app::export_diagnostics` 收集并打包。
+/// 2. 用户确认后，委托服务层收集并打包（日志 / 配置 / 系统信息）。
 /// 3. 返回导出结果视图（文件路径 + 大小）。
 ///
 /// 参数:
 /// - `app_handle`: Tauri AppHandle，用于弹出原生对话框。
-/// - `state`: 桌面状态（含 App 实例和数据库连接池）。
+/// - `state`: 桌面状态（含服务层引擎）。
 #[tauri::command]
 #[tracing::instrument(skip(app_handle, state))]
 pub async fn export_diagnostics(
@@ -158,28 +157,22 @@ pub async fn export_diagnostics(
     // `FilePath` 转换为 `PathBuf`（FilePath 实现了 Display trait，通过字符串转换）
     let output_path: PathBuf = PathBuf::from(file_path.to_string());
 
-    // 2. 读取 schema 版本（从 schema_meta 表）
-    let schema_version = match sqlx::query_scalar::<_, String>(
-        "SELECT value FROM schema_meta WHERE key = 'schema_version'",
-    )
-    .fetch_optional(&state.pool)
-    .await
-    {
-        Ok(Some(v)) => v,
-        Ok(None) => {
-            // schema_meta 表可能没有这个 key，使用默认值
-            tracing::debug!("schema_meta 表无 schema_version 记录，使用默认值 '1'");
-            "1".to_string()
-        }
+    // 2. 读取 schema 版本（服务层用例；读取失败降级为 "unknown"，不阻塞导出）
+    let schema_version = match state.engine.schema_version().await {
+        Ok(v) => v.to_string(),
         Err(e) => {
-            tracing::warn!(error = %e, "读取 schema_meta 失败");
+            tracing::warn!(error = %e, "读取 schema 版本失败，诊断包按 unknown 记录");
             "unknown".to_string()
         }
     };
 
     // 3. 执行诊断导出
-    let config = state.app.config();
-    let report = ramaria_app::diagnostics::export_diagnostics(config, schema_version, &output_path)
+    let report = state
+        .engine
+        .export_diagnostics(DiagnosticsRequest {
+            output_path,
+            schema_version,
+        })
         .await
         .map_err(|e| {
             // 日志只记错误分类：错误链可能内嵌绝对路径（zip 产物路径），

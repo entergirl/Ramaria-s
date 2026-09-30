@@ -1,15 +1,16 @@
-//! crates/ramaria-desktop/src/commands/rules.rs - 行为规则管理 Tauri Commands（M7）
+//! crates/ramaria-desktop/src/commands/rules.rs - 行为规则管理 Tauri Commands
 //!
 //! 设计特点:
-//! - 对接既有 `ramaria rule` 同一行为层用例（ramaria_app::commands::behavior），
+//! - 委托服务层行为规则用例（与 CLI `ramaria rule` 同一份实现），
 //!   不新增后端语义，保证 CLI 与 GUI 行为一致。
-//! - list / get / edit / enable / disable / evidence，**不提供 delete**（回归红线 7）。
+//! - list / get / edit / enable / disable / evidence，**不提供 delete**（回归红线）。
 //! - edit/disable 沿用行为层 S1 反馈与 Manual 强锚点语义（与 CLI 一致）。
 //! - 返回前端友好视图；仅记录 id/条数等日志，不记录规则文本/原文。
 //! - 隐私：evidence 只返回结构化脱敏字段（title/summary/paraphrase/keywords）。
 
 use crate::DesktopState;
 use ramaria_core::behavior::BehaviorRule;
+use ramaria_service::RuleEvidenceItem;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use tauri::State;
@@ -47,7 +48,7 @@ fn rule_to_json(rule: &BehaviorRule) -> JsonValue {
 }
 
 /// 规则证据项序列化（结构字段含 title/summary/paraphrase，均为脱敏视图）。
-fn evidence_item_to_json(item: &ramaria_app::commands::behavior::RuleEvidenceItem) -> JsonValue {
+fn evidence_item_to_json(item: &RuleEvidenceItem) -> JsonValue {
     serde_json::json!({
         "event_id": item.event_id,
         "weight": item.weight,
@@ -76,9 +77,11 @@ pub async fn list_rules(
     persona_uid: Option<String>,
 ) -> Result<RuleListResponse, String> {
     let persona_uid = persona_uid.unwrap_or_else(|| DEFAULT_RULE_PERSONA.to_string());
-    let rules = ramaria_app::commands::behavior::behavior_list_rules(&state.app, &persona_uid)
+    let rules = state
+        .engine
+        .behavior_list_rules(&persona_uid)
         .await
-        .map_err(|e| format!("查询行为规则失败: {e}"))?;
+        .map_err(|e| crate::commands::service_error_message(&e, "查询行为规则失败"))?;
 
     let rules_json: Vec<JsonValue> = rules.iter().map(rule_to_json).collect();
     tracing::debug!(persona_uid = %persona_uid, total = rules_json.len(), "list_rules 完成");
@@ -105,9 +108,11 @@ pub async fn list_rules(
 #[tauri::command]
 #[tracing::instrument(skip(state))]
 pub async fn get_rule(state: State<'_, DesktopState>, rule_id: i64) -> Result<JsonValue, String> {
-    let rule = ramaria_app::commands::behavior::behavior_get_rule(&state.app, rule_id)
+    let rule = state
+        .engine
+        .behavior_get_rule(rule_id)
         .await
-        .map_err(|e| format!("查询行为规则失败: {e}"))?
+        .map_err(|e| crate::commands::service_error_message(&e, "查询行为规则失败"))?
         .ok_or_else(|| format!("行为规则 {rule_id} 不存在"))?;
 
     Ok(rule_to_json(&rule))
@@ -129,9 +134,11 @@ pub async fn set_rule_enabled(
     rule_id: i64,
     enabled: bool,
 ) -> Result<JsonValue, String> {
-    ramaria_app::commands::behavior::behavior_set_rule_enabled(&state.app, rule_id, enabled, None)
+    state
+        .engine
+        .behavior_set_rule_enabled(rule_id, enabled, None)
         .await
-        .map_err(|e| format!("切换规则状态失败: {e}"))?;
+        .map_err(|e| crate::commands::service_error_message(&e, "切换规则状态失败"))?;
 
     tracing::debug!(rule_id, enabled, "规则状态已切换");
     Ok(serde_json::json!({ "id": rule_id, "enabled": enabled }))
@@ -159,9 +166,11 @@ pub async fn edit_rule(
         return Err("请至少提供 reaction 或 avoid 之一".to_string());
     }
 
-    let mut rule = ramaria_app::commands::behavior::behavior_get_rule(&state.app, rule_id)
+    let mut rule = state
+        .engine
+        .behavior_get_rule(rule_id)
         .await
-        .map_err(|e| format!("查询行为规则失败: {e}"))?
+        .map_err(|e| crate::commands::service_error_message(&e, "查询行为规则失败"))?
         .ok_or_else(|| format!("行为规则 {rule_id} 不存在"))?;
 
     if let Some(r) = reaction {
@@ -179,9 +188,11 @@ pub async fn edit_rule(
             .collect();
     }
 
-    ramaria_app::commands::behavior::behavior_edit_rule(&state.app, &mut rule, None)
+    state
+        .engine
+        .behavior_edit_rule(&mut rule, None)
         .await
-        .map_err(|e| format!("编辑行为规则失败: {e}"))?;
+        .map_err(|e| crate::commands::service_error_message(&e, "编辑行为规则失败"))?;
 
     tracing::debug!(rule_id, "规则已编辑（转为 Manual）");
     Ok(rule_to_json(&rule))
@@ -201,9 +212,11 @@ pub async fn rule_evidence(
     state: State<'_, DesktopState>,
     rule_id: i64,
 ) -> Result<RuleEvidenceResponse, String> {
-    let items = ramaria_app::commands::behavior::behavior_rule_evidence(&state.app, rule_id)
+    let items = state
+        .engine
+        .behavior_rule_evidence(rule_id)
         .await
-        .map_err(|e| format!("查询规则证据失败: {e}"))?;
+        .map_err(|e| crate::commands::service_error_message(&e, "查询规则证据失败"))?;
 
     let evidence: Vec<JsonValue> = items.iter().map(evidence_item_to_json).collect();
     tracing::debug!(rule_id, count = evidence.len(), "rule_evidence 完成");

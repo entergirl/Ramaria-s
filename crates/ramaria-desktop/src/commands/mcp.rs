@@ -11,7 +11,6 @@
 //!   活动统计失败降级为 0 / None 不阻塞面板
 
 use crate::DesktopState;
-use ramaria_storage::repo::sessions as sessions_repo;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use tauri::State;
@@ -19,9 +18,6 @@ use tauri::State;
 // =========================================================
 // 常量
 // =========================================================
-
-/// MCP 入口的会话通道标识（与 `ramaria-service` 的 `CHANNEL_MCP` 保持一致）。
-const CHANNEL_MCP: &str = "mcp";
 
 /// PATH 回退的 CLI 命令名（未探测到同目录可执行文件时使用）。
 const CLI_COMMAND_FALLBACK: &str = "ramaria";
@@ -65,25 +61,28 @@ pub struct McpInfoView {
 /// - [`McpInfoView`]：配置开关 + 库/配置路径 + CLI 命令 + 通道活动统计。
 ///
 /// 说明:
-/// - 配置读取复用 `ConfigSyncService::load_config_only`（与设置页其它区块同源的只读视图）；
+/// - 配置读取复用服务层的只读加载（与设置页其它区块同源的只读视图）；
 /// - 活动统计查询失败按空处理（面板仍可展示与保存配置，活动信息降级为"暂无"）。
 #[tauri::command]
 #[tracing::instrument(skip(state))]
 pub async fn get_mcp_info(state: State<'_, DesktopState>) -> Result<McpInfoView, String> {
     // ---- 配置（只读，无写副作用） ----
-    let config_sync =
-        ramaria_app::ConfigSyncService::new(state.app.storage().clone(), state.config_path.clone());
-    let config = config_sync
-        .load_config_only()
+    let config = state
+        .engine
+        .load_full_config()
         .await
         .map_err(|e| format!("读取配置失败: {}", e))?;
 
     // ---- 通道活动统计（降级不阻塞） ----
-    let overview = match sessions_repo::channel_overview(&state.pool, CHANNEL_MCP).await {
+    let overview = match state
+        .engine
+        .channel_overview(ramaria_service::CHANNEL_MCP)
+        .await
+    {
         Ok(overview) => overview,
         Err(e) => {
             tracing::warn!(error = %e, "统计 MCP 通道会话概览失败，活动信息降级为默认值");
-            sessions_repo::ChannelOverview {
+            ramaria_service::ChannelOverviewView {
                 active_sessions: 0,
                 last_activity_ms: None,
             }
@@ -102,8 +101,8 @@ pub async fn get_mcp_info(state: State<'_, DesktopState>) -> Result<McpInfoView,
 
     Ok(McpInfoView {
         enabled: config.mcp.enabled,
-        db_path: state.db_path.to_string_lossy().to_string(),
-        config_path: state.config_path.to_string_lossy().to_string(),
+        db_path: state.engine.db_path().to_string_lossy().to_string(),
+        config_path: state.engine.config_path().to_string_lossy().to_string(),
         command,
         command_is_bundled,
         active_sessions: overview.active_sessions,

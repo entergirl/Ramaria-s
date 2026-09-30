@@ -23,12 +23,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
+use ramaria_core::behavior::BehaviorRule;
 use ramaria_core::config::{EmbeddingDevice, RamariaConfig};
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::lock::{lock_recover, read_recover, write_recover};
 use ramaria_core::traits::{EmbeddingProvider, LlmProvider, LlmResponseCache, StorageBackend};
 use ramaria_core::types::{
-    AppState, BackendConfig, LlmProvider as LlmProviderKind, MemoryL1, now_ms,
+    AppState, BackendConfig, LlmProvider as LlmProviderKind, MemoryL1, Session, now_ms,
 };
 use ramaria_llm::keychain::Keychain;
 use ramaria_memory::behavior::PendingPool;
@@ -38,25 +39,32 @@ use ramaria_storage::SqliteStorage;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+use crate::behavior::{BehaviorLearnOutcome, RuleEvidenceItem};
 use crate::config::{ConfigWriter, SyncOutcome, SyncWriteResult};
 use crate::diagnostics::{DiagnosticsReport, DiagnosticsRequest};
+use crate::export::{ExportData, ExportDataRequest};
 use crate::idle::{IdleLoop, IdleLoopOptions};
 use crate::index::IndexStamp;
 use crate::lifecycle::{Lifecycle, LifecycleOptions};
-use crate::persona::PersonaRegenerateOutcome;
+use crate::persona::{PersonaLoadMode, PersonaRegenerateOutcome};
+use crate::privacy::PrivacyStatus;
 use crate::recall::RecallPolicy;
 use crate::seal::SealHooks;
 use crate::stream_event::ChatStreamHandle;
+use crate::style::StyleStatsView;
 use crate::types::{
-    AliasResolveOutcome, AliasResolveRequest, ChatSendOutcome, ChatSendRequest, ChatStreamRequest,
-    DegradedReason, EmbeddingModelView, EmbeddingValidation, FactBrowsePage, FactBrowseRequest,
-    FactDetailView, GroupedFactsView, HistoryRequest, HistoryResult, IngestOutcome, IngestRequest,
-    KeywordPoolView, L1BrowsePage, L1BrowseRequest, L2BrowsePage, L2BrowseRequest, L3TraitView,
-    PendingAliasView, PersonaCardRequest, PersonaCardView, PersonaSummaryView,
-    PersonalityProfileView, ProfileStatusView, RecallRequest, RecallResult, SealOutcome,
-    SessionBrowsePage, SessionBrowseRequest, SessionMessagesRequest, SessionMessagesView,
-    SetupRequest, SetupStatus, TraitEvidenceRequest, TraitEvidenceView,
+    AliasResolveOutcome, AliasResolveRequest, ChannelOverviewView, ChatSendOutcome,
+    ChatSendRequest, ChatStreamRequest, DegradedReason, EmbeddingModelView, EmbeddingValidation,
+    FactBrowsePage, FactBrowseRequest, FactDetailView, GroupedFactsView, HistoryRequest,
+    HistoryResult, IngestOutcome, IngestRequest, KeywordPoolView, KeywordSeedOutcome, L1BrowsePage,
+    L1BrowseRequest, L1MemoryView, L2BrowsePage, L2BrowseRequest, L3TraitView, PendingAliasView,
+    PersonaCardRequest, PersonaCardView, PersonaFileOutcome, PersonaFullView, PersonaSummaryView,
+    PersonaUpdateRequest, PersonalityProfileView, ProfileStatusView, RecallRequest, RecallResult,
+    SealOutcome, SessionBrowsePage, SessionBrowseRequest, SessionDetailView,
+    SessionMessagesRequest, SessionMessagesView, SetupRequest, SetupStatus, TraitEvidenceRequest,
+    TraitEvidenceView,
 };
+use crate::utt::UttRebuildOutcome;
 
 // =========================================================
 // 装配选项
@@ -198,16 +206,6 @@ impl Engine {
         self.embedding()
     }
 
-    /// 检索器懒加载槽（crate 内用例实现使用）。
-    pub(crate) fn retriever_slot(&self) -> &Arc<RwLock<Option<Retriever>>> {
-        &self.retriever
-    }
-
-    /// 关键词镜像（crate 内用例实现使用）。
-    pub(crate) fn keyword_mirror_ref(&self) -> &Arc<RwLock<KeywordService>> {
-        &self.keyword_mirror
-    }
-
     /// 行为层待定池（crate 内编排与测试使用）。
     pub(crate) fn behavior_pending_ref(&self) -> &Arc<Mutex<PendingPool>> {
         &self.behavior_pending
@@ -278,7 +276,7 @@ impl Engine {
         let embedding = restore_embedding(&backend_config, config.embedding.device);
 
         tracing::info!(
-            db = %db_path.display(),
+            db = %path_log_label(&db_path),
             provider = %llm.name(),
             embedding = embedding.is_some(),
             "服务层引擎装配完成"
@@ -462,6 +460,27 @@ impl Engine {
         read_recover(&self.retriever, "engine.retriever").is_some()
     }
 
+    /// 检索器槽句柄（探针与诊断的只读访问使用）。
+    ///
+    /// 语义:
+    /// - 返回懒加载槽的共享句柄（`Arc` 克隆，可在锁外跨任务使用）；
+    ///   槽内为 `None` 表示索引尚未构建，调用方按只读用途适配
+    ///   （如探针读取文档数 / 执行自检查询）；
+    /// - 读写锁纪律：调用方在锁内只做同步操作，不跨 `.await` 持锁。
+    pub fn retriever_slot(&self) -> Arc<RwLock<Option<Retriever>>> {
+        Arc::clone(&self.retriever)
+    }
+
+    /// 关键词镜像句柄（探针与诊断的只读访问使用）。
+    ///
+    /// 语义:
+    /// - 返回关键词镜像（倒排 + 词典池）的共享句柄（`Arc` 克隆，可在锁外跨任务使用）；
+    ///   镜像内容随索引重建与 L1 增量维护，写入路径由索引用例持有；
+    /// - 读写锁纪律：调用方在锁内只做同步操作，不跨 `.await` 持锁。
+    pub fn keyword_mirror(&self) -> Arc<RwLock<KeywordService>> {
+        Arc::clone(&self.keyword_mirror)
+    }
+
     // =========================================================
     // 策略与钩子（入口层注入）
     // =========================================================
@@ -618,6 +637,50 @@ impl Engine {
         crate::session::history(self, req).await
     }
 
+    /// 会话创建用例：新建空白会话（可绑定人格）。
+    ///
+    /// 返回:
+    /// - 新会话核心记录；宿主自行映射为各自既有响应结构。
+    pub async fn create_session(&self, persona_uid: Option<&str>) -> RamariaResult<Session> {
+        crate::session::create(self, persona_uid).await
+    }
+
+    /// 会话删除用例：仅删除会话行本身（关联数据由外键级联规则清理）。
+    ///
+    /// 说明:
+    /// - 会话不存在时幂等成功（与存储层删除语义一致）。
+    pub async fn delete_session(&self, session_id: Uuid) -> RamariaResult<()> {
+        crate::session::delete(self, session_id).await
+    }
+
+    /// 会话级联删除用例：事务内按依赖顺序清理全部关联数据后删除会话行。
+    ///
+    /// 说明:
+    /// - 供一次性合成会话（如探针）用完即删的场景使用：不触发封存 / 学习管线；
+    /// - 宿主若持有生命周期容器，需在删除后自行清理活跃指针与活跃时间缓存。
+    pub async fn delete_session_cascade(&self, session_id: Uuid) -> RamariaResult<()> {
+        crate::session::delete_cascade(self, session_id).await
+    }
+
+    /// 解析发送目标会话（会话预检与自动重建）。
+    ///
+    /// 语义:
+    /// - 指定会话存在且未关闭 → 原样返回；
+    /// - 指定会话不存在或已关闭 → 新建会话（绑定人格）并返回其 id；
+    /// - 存储查询失败 → 保守返回原会话（由生成路径做最终校验）；
+    /// - 未指定会话（`None`）→ 新建会话（绑定人格）并返回。
+    ///
+    /// 用途:
+    /// - 交互入口在进入生成前调用，避免前端竞态窗口把已关闭 / 已删除的会话 id
+    ///   传入后收到"会话已关闭"错误。
+    pub async fn resolve_send_session(
+        &self,
+        persona_uid: Option<&str>,
+        session_id: Option<Uuid>,
+    ) -> RamariaResult<Uuid> {
+        crate::session::resolve_send_session(self, persona_uid, session_id).await
+    }
+
     // =========================================================
     // 记忆与会话浏览用例
     // =========================================================
@@ -628,6 +691,14 @@ impl Engine {
     /// - `items`（分页后的摘要视图）与 `total`（排序后、分页前的条数）。
     pub async fn memory_l1(&self, req: L1BrowseRequest) -> RamariaResult<L1BrowsePage> {
         crate::browse::l1(self, req).await
+    }
+
+    /// L1 摘要按会话读取用例（封存结果的核对口径）。
+    ///
+    /// 返回:
+    /// - 目标会话的全部摘要视图；会话不存在或无摘要均返回空列表（不报错）。
+    pub async fn memory_l1_by_session(&self, session_id: Uuid) -> RamariaResult<Vec<L1MemoryView>> {
+        crate::browse::l1_by_session(self, session_id).await
     }
 
     /// L2 事件浏览用例：persona 过滤分页（分页前总数）或全人格合并后统一排序截断。
@@ -701,6 +772,51 @@ impl Engine {
         crate::browse::session_messages(self, req).await
     }
 
+    /// 会话详情用例：会话元数据 + 消息页（全量或分页后翻正）。
+    ///
+    /// 返回:
+    /// - 会话不存在时返回 `Validation` 错误。
+    pub async fn session_detail(
+        &self,
+        session_id: Uuid,
+        limit: Option<i64>,
+        offset: Option<i64>,
+    ) -> RamariaResult<SessionDetailView> {
+        crate::browse::session_detail(self, session_id, limit, offset).await
+    }
+
+    /// 会话消息计数用例（诊断用；查询失败按 0 处理，不阻塞主流程）。
+    pub async fn count_session_messages(&self, session_id: Uuid) -> usize {
+        crate::browse::count_session_messages(self, session_id).await
+    }
+
+    /// 通道会话概览用例：该通道的活跃会话数与最近活动时间（只读聚合）。
+    pub async fn channel_overview(&self, channel: &str) -> RamariaResult<ChannelOverviewView> {
+        crate::browse::channel_overview(self, channel).await
+    }
+
+    // =========================================================
+    // 导出与 utt 重建用例
+    // =========================================================
+
+    /// 会话导出数据装配用例（会话集合 + 消息 + 人格 L1 摘要段）。
+    ///
+    /// 说明:
+    /// - 只做数据装配；JSON / Markdown 文本生成与文件写出属入口能力；
+    /// - `total_sessions` 为过滤前全部会话数，`sessions` 为过滤并分页后的装配结果。
+    pub async fn export_sessions(&self, req: ExportDataRequest) -> RamariaResult<ExportData> {
+        crate::export::collect(self, req).await
+    }
+
+    /// utt 话语块重建用例（可选 `--force` 全量重切，完成后刷新检索索引）。
+    ///
+    /// 说明:
+    /// - 以当前生效配置的 `[utt]` 组为切分参数；配置未启用时 `rebuilt = false`；
+    /// - `force = true` 先清空全部旧块再全量重建（切分参数变更后必须使用）。
+    pub async fn rebuild_utt_blocks(&self, force: bool) -> RamariaResult<UttRebuildOutcome> {
+        crate::utt::rebuild(self, force).await
+    }
+
     /// 关键词池列表用例（三态计数 + 全量词条）。
     pub async fn keyword_list(&self) -> RamariaResult<KeywordPoolView> {
         crate::keyword::list(self).await
@@ -723,6 +839,15 @@ impl Engine {
         crate::keyword::resolve_alias(self, req).await
     }
 
+    /// 关键词 seed 用例：幂等手工注入规范词（已存在保持现状）。
+    ///
+    /// 说明:
+    /// - 整体校验（任一非法即报错、不部分写入）后去重，保留首次出现顺序；
+    ///   新词条 use_count 从 0 起，已存在词条不递增 use_count、不改别名状态。
+    pub async fn keyword_seed(&self, keywords: &[String]) -> RamariaResult<KeywordSeedOutcome> {
+        crate::keyword::seed(self, keywords).await
+    }
+
     /// 人格列表用例：列出全部人格摘要（uid / 名称 / 类型 / 来源 / 启用状态）。
     pub async fn persona_list(&self) -> RamariaResult<Vec<PersonaSummaryView>> {
         crate::persona::list(self).await
@@ -731,6 +856,69 @@ impl Engine {
     /// 人格卡片用例：性格画像 / 行为规则 / 表达风格 / 知识事实 / 数据成熟度。
     pub async fn persona_card(&self, req: PersonaCardRequest) -> RamariaResult<PersonaCardView> {
         crate::persona::card(self, req).await
+    }
+
+    /// 人格全字段列表用例（含 ref_id / avatar / config / description / 更新时间）。
+    pub async fn persona_list_full(&self) -> RamariaResult<Vec<PersonaFullView>> {
+        crate::persona::list_full(self).await
+    }
+
+    /// 人格信息更新用例（名称 / 头像 / 描述；配置内容由文件导入通道管理）。
+    ///
+    /// 返回:
+    /// - 更新后回读的完整视图；uid 为空 / 人格不存在返回 `Validation` 错误。
+    pub async fn persona_update_info(
+        &self,
+        uid: &str,
+        req: PersonaUpdateRequest,
+    ) -> RamariaResult<PersonaFullView> {
+        crate::persona::update_info(self, uid, req).await
+    }
+
+    /// 人格文件导入用例：从目录扫描 `.toml` 文件（文件名 = uid）创建或同步记录。
+    ///
+    /// 参数:
+    /// - `dir`: 人格文件目录（目录解析由调用方负责；目录不可读返回 `Io` 错误）。
+    /// - `uid_filter`: 只处理指定 uid（文件名 stem 精确匹配）；`None` 表示全部。
+    /// - `mode`: 记录已存在时的处置模式（创建或更新 / 仅创建缺失跳过）。
+    ///
+    /// 返回:
+    /// - 每个文件的处理结果（新建 / 更新 / 跳过 / 失败），单文件失败不中断其余文件。
+    pub async fn persona_load_from_dir(
+        &self,
+        dir: &Path,
+        uid_filter: Option<&str>,
+        mode: PersonaLoadMode,
+    ) -> RamariaResult<Vec<PersonaFileOutcome>> {
+        crate::persona::load_from_dir(self, dir, uid_filter, mode).await
+    }
+
+    /// 人格文件导入用例（单个文件；旧单文件布局兼容路径）。
+    ///
+    /// 参数:
+    /// - `path`: 人格文件路径（旧布局的文件名不携带 uid，uid 由调用方显式给出）。
+    /// - `uid`: 目标人格 uid（旧单文件布局使用固定的 `rama-0001`）。
+    /// - `fallback_name`: 文件缺少 `assistant_name` 时的名称兜底。
+    /// - `mode`: 记录已存在时的处置模式（创建或更新 / 仅创建缺失跳过）。
+    ///
+    /// 返回:
+    /// - 本文件的处理结果（新建 / 更新 / 跳过 / 失败）；失败转为结果条目（不上抛）。
+    pub async fn persona_load_file(
+        &self,
+        path: &Path,
+        uid: &str,
+        fallback_name: &str,
+        mode: PersonaLoadMode,
+    ) -> PersonaFileOutcome {
+        crate::persona::load_file(self, path, uid, fallback_name, mode).await
+    }
+
+    /// 确保系统用户人格（user-0001）存在（幂等）。
+    ///
+    /// 返回:
+    /// - `Ok(true)`: 本次创建；`Ok(false)`: 已存在（未做任何写入）。
+    pub async fn persona_ensure_user(&self) -> RamariaResult<bool> {
+        crate::persona::ensure_user(self).await
     }
 
     /// 重生成某人格在导入会话中的 L1 摘要（不含 L2/L3 级联，宿主按需触发）。
@@ -742,6 +930,123 @@ impl Engine {
         persona_uid: &str,
     ) -> RamariaResult<PersonaRegenerateOutcome> {
         crate::persona::regenerate_import_l1(self, persona_uid).await
+    }
+
+    // =========================================================
+    // 行为规则与表达风格用例
+    // =========================================================
+
+    /// 行为规则列表用例：按 persona 列出全部规则（含禁用项）。
+    ///
+    /// 返回:
+    /// - 全量规则列表（存储层稳定排序）。
+    pub async fn behavior_list_rules(&self, persona_uid: &str) -> RamariaResult<Vec<BehaviorRule>> {
+        crate::behavior::list_rules(self, persona_uid).await
+    }
+
+    /// 行为规则详情用例：按 id 查询单条规则。
+    ///
+    /// 返回:
+    /// - `Ok(Some(rule))`: 规则存在；`Ok(None)`: 规则不存在（空态，非错误）。
+    pub async fn behavior_get_rule(&self, id: i64) -> RamariaResult<Option<BehaviorRule>> {
+        crate::behavior::get_rule(self, id).await
+    }
+
+    /// 行为规则启停用例：禁用写 S1 反馈日志（启用不写，非干预信号）。
+    ///
+    /// 参数:
+    /// - `id`: 规则 id。
+    /// - `enabled`: true = 启用，false = 禁用。
+    /// - `session_id`: 干预发生的会话（可选，审计关联）。
+    pub async fn behavior_set_rule_enabled(
+        &self,
+        id: i64,
+        enabled: bool,
+        session_id: Option<&str>,
+    ) -> RamariaResult<()> {
+        crate::behavior::set_rule_enabled(self, id, enabled, session_id).await
+    }
+
+    /// 行为规则编辑用例：全量覆盖 + 转 Manual 强锚点 + 写编辑前后快照反馈。
+    ///
+    /// 参数:
+    /// - `rule`: 编辑后的完整规则（id 定位）。
+    /// - `session_id`: 干预发生的会话（可选，审计关联）。
+    pub async fn behavior_edit_rule(
+        &self,
+        rule: &mut BehaviorRule,
+        session_id: Option<&str>,
+    ) -> RamariaResult<()> {
+        crate::behavior::edit_rule(self, rule, session_id).await
+    }
+
+    /// 行为规则删除用例（破坏性操作，调用方负责确认）。
+    pub async fn behavior_delete_rule(&self, id: i64) -> RamariaResult<()> {
+        crate::behavior::delete_rule(self, id).await
+    }
+
+    /// 行为规则导入用例：宽松 JSON 校验（非法拒绝），导入规则 source=Manual。
+    ///
+    /// 参数:
+    /// - `persona_uid`: 规则所属人格。
+    /// - `json`: 规则 JSON（含 situation / reaction / params / avoid 字段）。
+    ///
+    /// 返回:
+    /// - 新规则 id（Manual，自动生效）。
+    pub async fn behavior_import_rule(&self, persona_uid: &str, json: &str) -> RamariaResult<i64> {
+        crate::behavior::import_rule(self, persona_uid, json).await
+    }
+
+    /// 行为规则证据链用例：规则 → 事件 → 脱敏视图（权重降序，脏引用跳过）。
+    ///
+    /// 返回:
+    /// - 证据项列表；规则不存在时返回业务校验错误。
+    pub async fn behavior_rule_evidence(&self, id: i64) -> RamariaResult<Vec<RuleEvidenceItem>> {
+        crate::behavior::rule_evidence(self, id).await
+    }
+
+    /// 行为规则全量学习用例：事件 → 聚类（含 Manual 锚点）→ 规则生成 → 替换旧 Auto。
+    ///
+    /// 返回:
+    /// - 学习统计；`[behavior].enabled=false` 时返回空统计。
+    pub async fn behavior_learn(&self, persona_uid: &str) -> RamariaResult<BehaviorLearnOutcome> {
+        crate::behavior::learn(self, persona_uid).await
+    }
+
+    /// 行为规则增量更新用例（封存钩子核心，供宿主手动触发）。
+    ///
+    /// 说明:
+    /// - 处理 persona 未吸收事件：归簇 / 待定池推进 / 证据衰减 / 漂移检测并落库；
+    /// - `[behavior].enabled=false` 时直接返回。
+    pub async fn behavior_incremental_update(&self, persona_uid: &str) -> RamariaResult<()> {
+        crate::behavior::incremental_update(self, persona_uid).await
+    }
+
+    /// 风格统计增量更新用例（封存钩子核心，供宿主手动补跑）。
+    ///
+    /// 说明:
+    /// - 全量消息 → 五维统计 → 基线显著性 → 规则文本生成 / 替换落库（幂等）；
+    /// - LLM 不可用 / 失败由核心静默降级为模板生成；开关由调用方判断。
+    pub async fn style_incremental_update(&self, persona_uid: &str) -> RamariaResult<()> {
+        crate::style::incremental_update(self, persona_uid).await
+    }
+
+    /// 自动风格规则读取用例（注入侧）：仅 Ready 状态返回非空规则文本。
+    ///
+    /// 返回:
+    /// - `Ok(Some(rule))`: 可注入的规则文本；
+    /// - `Ok(None)`: 数据不足 / 无显著项 / 未统计（静默跳过）。
+    pub async fn style_load_rule(&self, persona_uid: &str) -> RamariaResult<Option<String>> {
+        crate::style::load_style_rule(self.storage_ref().as_ref(), persona_uid).await
+    }
+
+    /// 说话风格统计读取用例：单行统计视图。
+    ///
+    /// 返回:
+    /// - `Ok(Some(view))`: 样本量 / 状态与标签 / 规则来源与标签 / 规则文本 / 统计 JSON / 更新时间；
+    /// - `Ok(None)`: 该人格未统计过（空态，非错误）。
+    pub async fn style_stats(&self, persona_uid: &str) -> RamariaResult<Option<StyleStatsView>> {
+        crate::style::stats(self, persona_uid).await
     }
 
     /// 确保检索索引已加载（懒加载：首次召回前构建一次，重复调用为空操作）。
@@ -1010,6 +1315,65 @@ impl Engine {
     }
 
     // =========================================================
+    // 设置与元信息用例
+    // =========================================================
+
+    /// 设置列表用例：读取全部设置项（`settings` 表键值对）。
+    ///
+    /// 返回:
+    /// - 空库返回空列表（非错误）；返回键集合与过滤口径保持现状。
+    pub async fn settings_list(&self) -> RamariaResult<Vec<(String, String)>> {
+        crate::settings::list(self).await
+    }
+
+    /// 设置读取用例：读取单个设置项（缺失键返回 None，不报错）。
+    pub async fn setting_get(&self, key: &str) -> RamariaResult<Option<String>> {
+        crate::settings::get(self, key).await
+    }
+
+    /// 设置写入用例：写入单个设置项（已存在键覆盖写）。
+    ///
+    /// 返回:
+    /// - 空键返回 `Validation` 错误（文案与桌面现状一致）。
+    pub async fn setting_set(&self, key: &str, value: &str) -> RamariaResult<()> {
+        crate::settings::set(self, key, value).await
+    }
+
+    /// 读取 DB 侧后端配置（`backend_config` 表）。
+    ///
+    /// 返回:
+    /// - `Ok(None)`: 无记录（回退口径由调用方按各自现状决定）。
+    pub async fn backend_config(&self) -> RamariaResult<Option<BackendConfig>> {
+        crate::settings::backend_config(self).await
+    }
+
+    /// 读取数据库 schema 版本（`schema_meta` 表；键缺失按 1，非法值报错）。
+    pub async fn schema_version(&self) -> RamariaResult<i32> {
+        crate::settings::schema_version(self).await
+    }
+
+    // =========================================================
+    // 隐私确认用例
+    // =========================================================
+
+    /// 检查当前后端的隐私确认状态。
+    ///
+    /// 说明:
+    /// - 判定输入（provider / base_url）取 DB 侧后端配置，与桌面 / CLI 现状同源；
+    /// - 无后端配置记录时按本地 provider 默认值判定（无需确认）。
+    pub async fn check_privacy(&self) -> RamariaResult<PrivacyStatus> {
+        crate::privacy::check(self).await
+    }
+
+    /// 记录当前后端的隐私确认。
+    ///
+    /// 参数:
+    /// - `persistent`: 是否跨重启持久化（勾选"下次不再提醒"）。
+    pub async fn confirm_privacy(&self, persistent: bool) -> RamariaResult<()> {
+        crate::privacy::confirm(self, persistent).await
+    }
+
+    // =========================================================
     // 配置用例（双写同步与热重载）
     // =========================================================
 
@@ -1032,7 +1396,10 @@ impl Engine {
     ///   生命周期容器热更新，本用例不联动；行为待定池（`PendingPool`）保持既有内存态。
     pub async fn reload_config(&self) -> RamariaResult<SyncOutcome> {
         let writer = self.config_writer()?;
-        let outcome = writer.load().await?;
+        let mut outcome = writer.load().await?;
+        // 路径字段由装配持有（config.toml 的 paths 组只表达展示性空值）：热重载保留现快照值，
+        // 避免日志目录 / 配置目录随重载丢失（诊断导出等功能依赖这些路径）
+        outcome.config.paths = self.config().paths.clone();
         self.replace_config_snapshot(outcome.config.clone());
         Ok(outcome)
     }
@@ -1047,7 +1414,10 @@ impl Engine {
         let writer = self.config_writer()?;
         let result = writer.save_config(cfg).await;
         if result.is_ok() {
-            self.replace_config_snapshot(cfg.clone());
+            // 路径字段由装配持有（保存的配置不含本机路径）：热重载时保留现快照值
+            let mut next = cfg.clone();
+            next.paths = self.config().paths.clone();
+            self.replace_config_snapshot(next);
         }
         Ok(result)
     }
@@ -1266,6 +1636,13 @@ impl Engine {
 // 装配辅助（文件内私有）
 // =========================================================
 
+/// 取路径的文件名用于日志（完整路径不进日志，避免暴露本机目录结构）。
+fn path_log_label(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "<unknown>".to_string())
+}
+
 /// 默认配置文件路径：数据库同目录 `config.toml`。
 fn default_config_path(db_path: &Path) -> PathBuf {
     db_path
@@ -1286,7 +1663,7 @@ fn load_config_readonly(config_path: &Path, db_path: &Path) -> RamariaConfig {
                 Ok(parsed) => parsed,
                 Err(e) => {
                     tracing::warn!(
-                        path = %config_path.display(),
+                        path = %path_log_label(config_path),
                         error = %e,
                         "config.toml 解析失败，回退默认配置"
                     );
@@ -1295,7 +1672,7 @@ fn load_config_readonly(config_path: &Path, db_path: &Path) -> RamariaConfig {
             },
             Err(e) => {
                 tracing::warn!(
-                    path = %config_path.display(),
+                    path = %path_log_label(config_path),
                     error = %e,
                     "config.toml 读取失败，回退默认配置"
                 );
@@ -1304,7 +1681,7 @@ fn load_config_readonly(config_path: &Path, db_path: &Path) -> RamariaConfig {
         }
     } else {
         tracing::debug!(
-            path = %config_path.display(),
+            path = %path_log_label(config_path),
             "config.toml 不存在，使用默认配置"
         );
         RamariaConfig::default()
@@ -1391,7 +1768,7 @@ fn restore_embedding(
     let model_dir = Path::new(saved_path);
     if !model_dir.exists() {
         tracing::warn!(
-            path = %saved_path,
+            path = %path_log_label(model_dir),
             "已保存的嵌入模型目录不存在，向量通道降级（BM25 + 关键词镜像继续可用）"
         );
         return None;
@@ -1401,7 +1778,7 @@ fn restore_embedding(
         Ok(provider) => {
             let info = provider.model_info();
             tracing::info!(
-                path = %saved_path,
+                path = %path_log_label(model_dir),
                 model_id = %info.model_id,
                 dim = info.dimension,
                 device = device.as_str(),
@@ -1411,7 +1788,7 @@ fn restore_embedding(
         }
         Err(e) => {
             tracing::warn!(
-                path = %saved_path,
+                path = %path_log_label(model_dir),
                 error = %e,
                 "加载已保存的嵌入模型失败，向量通道降级（BM25 + 关键词镜像继续可用）"
             );
@@ -1466,6 +1843,27 @@ mod tests {
         // 默认配置生效
         assert_eq!(engine.config().session.l1_idle_minutes, 10);
         assert_eq!(engine.db_path(), db_path.as_path());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 探针只读访问器：装配后检索器槽未加载（None）、关键词镜像为空。
+    #[tokio::test]
+    async fn probe_handles_expose_empty_state_after_assembly() {
+        let dir = temp_dir("probe-handles");
+        let db_path = dir.join("assistant.db");
+        let engine = Engine::open(db_path).await.expect("引擎装配应成功");
+
+        let retriever = engine.retriever_slot();
+        assert!(
+            read_recover(&retriever, "engine.probe.retriever").is_none(),
+            "装配阶段检索器槽应为空（懒加载占位）"
+        );
+
+        let mirror = engine.keyword_mirror();
+        let guard = read_recover(&mirror, "engine.probe.keyword_mirror");
+        assert_eq!(guard.doc_count(), 0, "装配阶段关键词镜像应为空");
+        assert_eq!(guard.pool_len(), 0);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -122,6 +122,13 @@ fn keychain_service(provider: LlmProvider) -> RamariaResult<&'static str> {
     }
 }
 
+/// 取路径的文件名用于日志（完整路径不进日志，避免暴露本机目录结构）。
+fn path_log_label(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "<unknown>".to_string())
+}
+
 // =========================================================
 // 嵌入模型校验 / 保存 / 读取
 // =========================================================
@@ -145,13 +152,13 @@ pub async fn validate_embedding_model(
     let model_dir = Path::new(path);
 
     if !model_dir.exists() {
-        tracing::warn!(path, "嵌入模型校验：目录不存在");
+        tracing::warn!(path = %path_log_label(model_dir), "嵌入模型校验：目录不存在");
         return Ok(EmbeddingValidation::invalid(format!(
             "模型目录不存在: {path}"
         )));
     }
     if !model_dir.is_dir() {
-        tracing::warn!(path, "嵌入模型校验：路径不是目录");
+        tracing::warn!(path = %path_log_label(model_dir), "嵌入模型校验：路径不是目录");
         return Ok(EmbeddingValidation::invalid(format!(
             "路径不是目录: {path}"
         )));
@@ -162,7 +169,7 @@ pub async fn validate_embedding_model(
             let dimension = provider.model_info().dimension;
             match provider.validate().await {
                 Ok(()) => {
-                    tracing::info!(path, dimension, "嵌入模型校验通过");
+                    tracing::info!(path = %path_log_label(model_dir), dimension, "嵌入模型校验通过");
                     Ok(EmbeddingValidation {
                         valid: true,
                         dimension: Some(dimension),
@@ -170,7 +177,11 @@ pub async fn validate_embedding_model(
                     })
                 }
                 Err(e) => {
-                    tracing::warn!(path, error = %e, "嵌入模型校验失败（模型可加载但推理失败）");
+                    tracing::warn!(
+                        path = %path_log_label(model_dir),
+                        error = %e,
+                        "嵌入模型校验失败（模型可加载但推理失败）"
+                    );
                     Ok(EmbeddingValidation {
                         valid: false,
                         dimension: Some(dimension),
@@ -180,7 +191,11 @@ pub async fn validate_embedding_model(
             }
         }
         Err(e) => {
-            tracing::warn!(path, error = %e, "嵌入模型校验失败（模型加载失败）");
+            tracing::warn!(
+                path = %path_log_label(model_dir),
+                error = %e,
+                "嵌入模型校验失败（模型加载失败）"
+            );
             Ok(EmbeddingValidation {
                 valid: false,
                 dimension: None,
@@ -231,7 +246,7 @@ pub(crate) async fn save_embedding_model(engine: &Engine, path: Option<&str>) ->
             )?;
             let info = provider.model_info();
             tracing::info!(
-                path,
+                path = %path_log_label(model_dir),
                 model = %info.model_id,
                 dimension = info.dimension,
                 "嵌入模型已加载，准备热更新"

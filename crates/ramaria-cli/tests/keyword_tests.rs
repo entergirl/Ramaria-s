@@ -14,10 +14,17 @@
 //!   不触碰 MockStorage / 真实 LLM。
 //! - 不访问 OS keychain、不连网。
 
+mod common;
+
+use ramaria_core::config::RamariaConfig;
 use ramaria_core::error::RamariaError;
 use ramaria_core::keyword::KeywordToken;
+use ramaria_core::traits::StorageBackend;
+use ramaria_service::Engine;
+use ramaria_storage::SqliteStorage;
 use sqlx::SqlitePool;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use ramaria_cli::commands::keyword_cmd::{AliasAction, KeywordCmd, run};
@@ -45,12 +52,24 @@ fn temp_db_path(tag: &str) -> PathBuf {
     dir.join("kw.db")
 }
 
-/// 新建真实 SQLite 连接池（空库，自动执行 migration）。
-async fn setup_pool() -> SqlitePool {
+/// 新建真实 SQLite 连接池 + 服务层引擎（空库，自动执行 migration）。
+///
+/// 返回 (引擎, 连接池)：引擎经注入构造装配并附着同一连接池，
+/// 连接池供测试直接造数与断言。
+async fn setup_engine() -> (Arc<Engine>, SqlitePool) {
     let db = temp_db_path("func");
-    ramaria_storage::database::init_pool(Some(db))
+    let pool = ramaria_storage::database::init_pool(Some(db))
         .await
-        .expect("初始化测试数据库失败")
+        .expect("初始化测试数据库失败");
+    let storage = Arc::new(SqliteStorage::new(pool.clone()));
+    let engine = Engine::from_parts(
+        storage as Arc<dyn StorageBackend>,
+        Arc::new(common::MockLlm::new("keyword-test")),
+        None,
+        RamariaConfig::default(),
+    );
+    engine.attach_sqlite_pool(pool.clone());
+    (Arc::new(engine), pool)
 }
 
 /// 预置 canonical + pending 别名（职场焦虑 → 工作压力）。
@@ -111,16 +130,16 @@ async fn entry_texts(pool: &SqlitePool) -> Vec<String> {
 
 #[tokio::test]
 async fn keyword_list_empty_json_ok() {
-    let pool = setup_pool().await;
-    let result = run(&pool, KeywordCmd::List, true, false).await;
+    let (engine, _pool) = setup_engine().await;
+    let result = run(&engine, KeywordCmd::List, true, false).await;
     assert!(result.is_ok(), "空库 list --json 应成功输出空列表");
 }
 
 #[tokio::test]
 async fn keyword_show_missing_is_validation_error() {
-    let pool = setup_pool().await;
+    let (engine, _pool) = setup_engine().await;
     let result = run(
-        &pool,
+        &engine,
         KeywordCmd::Show {
             keyword: "不存在的词".into(),
         },
@@ -134,9 +153,9 @@ async fn keyword_show_missing_is_validation_error() {
 
 #[tokio::test]
 async fn keyword_show_invalid_text_is_validation_error() {
-    let pool = setup_pool().await;
+    let (engine, _pool) = setup_engine().await;
     let result = run(
-        &pool,
+        &engine,
         KeywordCmd::Show {
             keyword: "   ".into(),
         },
@@ -150,10 +169,10 @@ async fn keyword_show_invalid_text_is_validation_error() {
 
 #[tokio::test]
 async fn keyword_seed_then_list_shows_entry() {
-    let pool = setup_pool().await;
+    let (engine, pool) = setup_engine().await;
     // seed 两个规范词
     run(
-        &pool,
+        &engine,
         KeywordCmd::Seed {
             keywords: vec!["工作压力".into(), "爬山".into()],
         },
@@ -177,17 +196,17 @@ async fn keyword_seed_then_list_shows_entry() {
     assert!(entries.iter().all(|e| e.canonical_id.is_none()));
 
     // list --json 亦成功
-    run(&pool, KeywordCmd::List, true, false)
+    run(&engine, KeywordCmd::List, true, false)
         .await
         .expect("seed 后 list 应成功");
 }
 
 #[tokio::test]
 async fn keyword_seed_idempotent_preserves_use_count() {
-    let pool = setup_pool().await;
+    let (engine, pool) = setup_engine().await;
     // 先手工种子，再自然 upsert 两次（use_count=2）
     run(
-        &pool,
+        &engine,
         KeywordCmd::Seed {
             keywords: vec!["工作压力".into()],
         },
@@ -205,7 +224,7 @@ async fn keyword_seed_idempotent_preserves_use_count() {
 
     // 再次 seed：幂等，不递增 use_count
     run(
-        &pool,
+        &engine,
         KeywordCmd::Seed {
             keywords: vec!["工作压力".into()],
         },
@@ -221,12 +240,12 @@ async fn keyword_seed_idempotent_preserves_use_count() {
 
 #[tokio::test]
 async fn keyword_seed_keeps_existing_pending_untouched() {
-    let pool = setup_pool().await;
+    let (engine, pool) = setup_engine().await;
     let alias_id = seed_pending(&pool).await;
 
     // 对 pending 别名词条执行 seed：保持状态不动、不递增 use_count
     run(
-        &pool,
+        &engine,
         KeywordCmd::Seed {
             keywords: vec!["职场焦虑".into()],
         },
@@ -253,10 +272,10 @@ async fn keyword_seed_keeps_existing_pending_untouched() {
 
 #[tokio::test]
 async fn keyword_seed_invalid_any_rejected_without_partial_write() {
-    let pool = setup_pool().await;
+    let (engine, pool) = setup_engine().await;
     // 任一无效输入整体拒绝（不部分写入）
     let result = run(
-        &pool,
+        &engine,
         KeywordCmd::Seed {
             keywords: vec!["合法词".into(), "   ".into()],
         },
@@ -278,17 +297,17 @@ async fn keyword_seed_invalid_any_rejected_without_partial_write() {
 
 #[tokio::test]
 async fn keyword_alias_confirm_flow() {
-    let pool = setup_pool().await;
+    let (engine, pool) = setup_engine().await;
     seed_pending(&pool).await;
 
     // alias list 可见待确认冲突
-    run(&pool, KeywordCmd::Alias(AliasAction::List), true, false)
+    run(&engine, KeywordCmd::Alias(AliasAction::List), true, false)
         .await
         .expect("alias list --json 应成功");
 
     // confirm（--yes 自动确认）
     run(
-        &pool,
+        &engine,
         KeywordCmd::Alias(AliasAction::Confirm {
             alias: "职场焦虑".into(),
         }),
@@ -317,12 +336,12 @@ async fn keyword_alias_confirm_flow() {
 /// 已合并（alias）词条再次 confirm：幂等成功（不报 exit 4、不重复写库）。
 #[tokio::test]
 async fn keyword_alias_confirm_already_merged_is_idempotent_success() {
-    let pool = setup_pool().await;
+    let (engine, pool) = setup_engine().await;
     seed_pending(&pool).await;
 
     // 首次确认：pending → alias
     run(
-        &pool,
+        &engine,
         KeywordCmd::Alias(AliasAction::Confirm {
             alias: "职场焦虑".into(),
         }),
@@ -334,7 +353,7 @@ async fn keyword_alias_confirm_already_merged_is_idempotent_success() {
 
     // 再次确认：目标状态已达成 → 幂等成功（不返回业务错误）
     run(
-        &pool,
+        &engine,
         KeywordCmd::Alias(AliasAction::Confirm {
             alias: "职场焦虑".into(),
         }),
@@ -356,11 +375,11 @@ async fn keyword_alias_confirm_already_merged_is_idempotent_success() {
 
 #[tokio::test]
 async fn keyword_alias_reject_flow() {
-    let pool = setup_pool().await;
+    let (engine, pool) = setup_engine().await;
     seed_pending(&pool).await;
 
     run(
-        &pool,
+        &engine,
         KeywordCmd::Alias(AliasAction::Reject {
             alias: "职场焦虑".into(),
         }),
@@ -390,9 +409,9 @@ async fn keyword_alias_reject_flow() {
 
 #[tokio::test]
 async fn keyword_alias_confirm_nonexistent_is_validation_error() {
-    let pool = setup_pool().await;
+    let (engine, _pool) = setup_engine().await;
     let result = run(
-        &pool,
+        &engine,
         KeywordCmd::Alias(AliasAction::Confirm {
             alias: "不存在的词".into(),
         }),
@@ -406,10 +425,10 @@ async fn keyword_alias_confirm_nonexistent_is_validation_error() {
 
 #[tokio::test]
 async fn keyword_alias_confirm_non_pending_is_validation_error() {
-    let pool = setup_pool().await;
+    let (engine, _pool) = setup_engine().await;
     // 仅注入规范词（canonical，非 pending）
     run(
-        &pool,
+        &engine,
         KeywordCmd::Seed {
             keywords: vec!["工作压力".into()],
         },
@@ -420,7 +439,7 @@ async fn keyword_alias_confirm_non_pending_is_validation_error() {
     .expect("seed 应成功");
 
     let result = run(
-        &pool,
+        &engine,
         KeywordCmd::Alias(AliasAction::Confirm {
             alias: "工作压力".into(),
         }),
@@ -434,9 +453,9 @@ async fn keyword_alias_confirm_non_pending_is_validation_error() {
 
 #[tokio::test]
 async fn keyword_alias_reject_nonexistent_is_validation_error() {
-    let pool = setup_pool().await;
+    let (engine, _pool) = setup_engine().await;
     let result = run(
-        &pool,
+        &engine,
         KeywordCmd::Alias(AliasAction::Reject {
             alias: "不存在的词".into(),
         }),
@@ -454,10 +473,10 @@ async fn keyword_alias_reject_nonexistent_is_validation_error() {
 
 #[tokio::test]
 async fn keyword_seed_feeds_dictionary_segmentation() {
-    let pool = setup_pool().await;
+    let (engine, pool) = setup_engine().await;
     // seed "工作压力" → 成为 keyword_pool 规范词
     run(
-        &pool,
+        &engine,
         KeywordCmd::Seed {
             keywords: vec!["工作压力".into()],
         },

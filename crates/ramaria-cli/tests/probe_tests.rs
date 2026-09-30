@@ -28,13 +28,26 @@ use ramaria_core::traits::{ChatRequest, LlmProvider, StorageBackend, StoreCrud, 
 use ramaria_core::types::{BackendConfig, LlmProvider as LlmProviderKind, ModelCapability};
 use uuid::Uuid;
 
-use common::{
-    MockStorage, build_test_app, make_assistant_message, make_test_event, make_user_message,
-};
+use common::{MockStorage, make_assistant_message, make_test_event, make_user_message};
 
-/// 构造带 persona 消息 + 事件的测试 App（probe build 真实数据路径）。
-fn build_app_with_probe_data() -> (Arc<ramaria_app::App>, Arc<MockStorage>) {
-    let (app, storage) = build_test_app();
+/// 构造 ready 状态的测试引擎（探针链路走服务层引擎）。
+fn build_probe_engine() -> (Arc<ramaria_service::Engine>, Arc<MockStorage>) {
+    let storage = Arc::new(MockStorage::new());
+    let llm = Arc::new(common::MockLlm::new("Hello, World!"));
+    let config = ramaria_core::config::RamariaConfig::default();
+    let engine = ramaria_service::Engine::from_parts(
+        Arc::clone(&storage) as Arc<dyn StorageBackend>,
+        llm,
+        None,
+        config,
+    );
+    engine.set_state(ramaria_core::types::AppState::Ready);
+    (Arc::new(engine), storage)
+}
+
+/// 构造带 persona 消息 + 事件的测试引擎（probe build 真实数据路径）。
+fn build_engine_with_probe_data() -> (Arc<ramaria_service::Engine>, Arc<MockStorage>) {
+    let (engine, storage) = build_probe_engine();
     storage.add_persona(common::make_test_persona(
         "char-0001",
         "角色一",
@@ -54,7 +67,7 @@ fn build_app_with_probe_data() -> (Arc<ramaria_app::App>, Arc<MockStorage>) {
     for i in 1..=4 {
         storage.add_event("char-0001", make_test_event(i, &format!("测试事件{i}")));
     }
-    (app, storage)
+    (engine, storage)
 }
 
 /// 构造带指定 persona_uid 的 assistant 消息（语气模仿配对的 persona 发言）。
@@ -64,19 +77,20 @@ fn persona_reply(session_id: Uuid, content: &str) -> ramaria_core::types::Messag
     m
 }
 
-/// 用指定 LLM provider 构造 ready 状态的 App。
-fn build_app_with_llm(llm: Arc<dyn LlmProvider>) -> (Arc<ramaria_app::App>, Arc<MockStorage>) {
+/// 用指定 LLM provider 构造 ready 状态的引擎。
+fn build_engine_with_llm(
+    llm: Arc<dyn LlmProvider>,
+) -> (Arc<ramaria_service::Engine>, Arc<MockStorage>) {
     let storage = Arc::new(MockStorage::new());
-    let keychain = Arc::new(ramaria_llm::keychain::Keychain::new());
     let config = ramaria_core::config::RamariaConfig::default();
-    let app = ramaria_app::App::new_without_embedding(
+    let engine = ramaria_service::Engine::from_parts(
         Arc::clone(&storage) as Arc<dyn StorageBackend>,
         llm,
+        None,
         config,
-        keychain,
     );
-    app.set_state(ramaria_core::types::AppState::Ready);
-    (Arc::new(app), storage)
+    engine.set_state(ramaria_core::types::AppState::Ready);
+    (Arc::new(engine), storage)
 }
 
 /// 恒失败的 Mock LLM（验证单题失败不中断批量）。
@@ -140,8 +154,8 @@ impl LlmProvider for FailingLlm {
 /// 空数据库 → 全部使用内置夹具兜底（M2 验收：fixture 兜底路径）。
 #[tokio::test]
 async fn probe_build_empty_db_falls_back_to_fixture() {
-    let (app, _storage) = build_test_app();
-    let ds = build_dataset(&app, None, 10, 2026_0810, None).await;
+    let (engine, _storage) = build_probe_engine();
+    let ds = build_dataset(&engine, None, 10, 2026_0810, None).await;
 
     assert_eq!(ds.source, "fixture", "空库应降级为夹具数据");
     assert_eq!(
@@ -175,8 +189,8 @@ async fn probe_build_empty_db_falls_back_to_fixture() {
 /// 有真实数据 → 真实数据优先，夹具仅补齐不足部分。
 #[tokio::test]
 async fn probe_build_with_data_prefers_db_items() {
-    let (app, _storage) = build_app_with_probe_data();
-    let ds = build_dataset(&app, None, 10, 2026_0810, None).await;
+    let (engine, _storage) = build_engine_with_probe_data();
+    let ds = build_dataset(&engine, None, 10, 2026_0810, None).await;
 
     assert_eq!(ds.source, "db", "有真实数据时主来源为 db");
     // 2 组 tone 配对 + 4 条事件 + 1 条情绪化消息（"今天上班好累"含情感线索）
@@ -197,9 +211,9 @@ async fn probe_build_with_data_prefers_db_items() {
 /// 同 seed 复跑产生完全相同的测试集（验收：seed 可复跑）。
 #[tokio::test]
 async fn probe_build_same_seed_reproducible() {
-    let (app, _storage) = build_app_with_probe_data();
-    let a = build_dataset(&app, None, 10, 42, None).await;
-    let b = build_dataset(&app, None, 10, 42, None).await;
+    let (engine, _storage) = build_engine_with_probe_data();
+    let a = build_dataset(&engine, None, 10, 42, None).await;
+    let b = build_dataset(&engine, None, 10, 42, None).await;
 
     let ids_a: Vec<String> = a.items.iter().map(|i| i.id.clone()).collect();
     let ids_b: Vec<String> = b.items.iter().map(|i| i.id.clone()).collect();
@@ -213,8 +227,8 @@ async fn probe_build_same_seed_reproducible() {
 /// 数据集可序列化为合法 JSON 且结构完整（probe build --json 的数据面）。
 #[tokio::test]
 async fn probe_build_dataset_serializes_to_valid_json() {
-    let (app, _storage) = build_test_app();
-    let ds = build_dataset(&app, None, 3, 7, None).await;
+    let (engine, _storage) = build_probe_engine();
+    let ds = build_dataset(&engine, None, 3, 7, None).await;
     let json = serde_json::to_value(&ds).expect("数据集必须可序列化");
     assert!(json["items"].is_array());
     assert_eq!(json["items"].as_array().unwrap().len(), 9, "3 维 × 3 题");
@@ -229,9 +243,9 @@ async fn probe_build_dataset_serializes_to_valid_json() {
 /// 命令级入口：`probe build` 返回 Ok（输出路径由进程级测试覆盖）。
 #[tokio::test]
 async fn probe_build_command_runs_ok() {
-    let (app, _storage) = build_test_app();
+    let (engine, _storage) = build_probe_engine();
     let result = ramaria_cli::commands::probe::run(
-        &app,
+        &engine,
         ProbeCmd::Build {
             persona: None,
             questions_per_dim: 5,
@@ -253,8 +267,8 @@ async fn probe_build_command_runs_ok() {
 /// `--ablation`：默认 4 档后追加 15 档消融 Profile（契约）。
 #[tokio::test]
 async fn probe_build_ablation_appends_all_profiles() {
-    let (app, _storage) = build_test_app();
-    let ds = build_dataset_with_ablation(&app, None, 1, 7, None, true).await;
+    let (engine, _storage) = build_probe_engine();
+    let ds = build_dataset_with_ablation(&engine, None, 1, 7, None, true).await;
     assert_eq!(ds.variants.len(), 19, "默认 4 档 + 消融 15 档");
     assert!(
         ds.variants
@@ -286,7 +300,7 @@ async fn probe_build_ablation_appends_all_profiles() {
         );
     }
     // 默认路径不受影响
-    let plain = build_dataset(&app, None, 1, 7, None).await;
+    let plain = build_dataset(&engine, None, 1, 7, None).await;
     assert_eq!(plain.variants.len(), 4);
 }
 
@@ -297,10 +311,10 @@ async fn probe_build_ablation_appends_all_profiles() {
 /// 用小数据集（6 题）跑全部档位：输出结构断言（档位 → 输出 → 指标）。
 #[tokio::test]
 async fn probe_run_batch_structure_with_mock_llm() {
-    let (app, _storage) = build_test_app();
-    let ds = build_dataset(&app, None, 2, 7, None).await; // 3 维 × 2 题 = 6 题
+    let (engine, _storage) = build_probe_engine();
+    let ds = build_dataset(&engine, None, 2, 7, None).await; // 3 维 × 2 题 = 6 题
     let experiment = build_experiment(
-        &app,
+        &engine,
         &ds,
         &PathBuf::from("dataset.json"),
         None,
@@ -333,10 +347,10 @@ async fn probe_run_batch_structure_with_mock_llm() {
 /// `--repeat N`（统计法）：多次运行 → 产出 repeat 聚合块（均值/置信区间/逐项明细）。
 #[tokio::test]
 async fn probe_run_repeat_produces_stat_meta() {
-    let (app, _storage) = build_test_app();
-    let ds = build_dataset(&app, None, 2, 7, None).await; // 3 维 × 2 题 = 6 题
+    let (engine, _storage) = build_probe_engine();
+    let ds = build_dataset(&engine, None, 2, 7, None).await; // 3 维 × 2 题 = 6 题
     let experiment = build_experiment_with_repeat(
-        &app,
+        &engine,
         &ds,
         &PathBuf::from("dataset.json"),
         None,
@@ -387,10 +401,10 @@ async fn probe_run_repeat_produces_stat_meta() {
 /// `--repeat 1`（或省略）：不产出 repeat 聚合块（等价单次运行）。
 #[tokio::test]
 async fn probe_run_repeat_one_has_no_stat_meta() {
-    let (app, _storage) = build_test_app();
-    let ds = build_dataset(&app, None, 2, 7, None).await;
+    let (engine, _storage) = build_probe_engine();
+    let ds = build_dataset(&engine, None, 2, 7, None).await;
     let experiment = build_experiment_with_repeat(
-        &app,
+        &engine,
         &ds,
         &PathBuf::from("dataset.json"),
         None,
@@ -408,10 +422,10 @@ async fn probe_run_repeat_one_has_no_stat_meta() {
 /// 单题失败不中断批量：FailingLlm 下全部题失败但返回 Ok 且逐题记录原因。
 #[tokio::test]
 async fn probe_run_single_failure_does_not_abort_batch() {
-    let (app, _storage) = build_app_with_llm(Arc::new(FailingLlm::new()));
-    let ds = build_dataset(&app, None, 2, 7, None).await;
+    let (engine, _storage) = build_engine_with_llm(Arc::new(FailingLlm::new()));
+    let ds = build_dataset(&engine, None, 2, 7, None).await;
     let experiment = build_experiment(
-        &app,
+        &engine,
         &ds,
         &PathBuf::from("dataset.json"),
         None,
@@ -440,10 +454,10 @@ async fn probe_run_single_failure_does_not_abort_batch() {
 /// --variants 过滤：只跑指定档位（无效 id 忽略）。
 #[tokio::test]
 async fn probe_run_variants_filter() {
-    let (app, _storage) = build_test_app();
-    let ds = build_dataset(&app, None, 1, 7, None).await;
+    let (engine, _storage) = build_probe_engine();
+    let ds = build_dataset(&engine, None, 1, 7, None).await;
     let experiment = build_experiment(
-        &app,
+        &engine,
         &ds,
         &PathBuf::from("dataset.json"),
         Some("baseline,top_k_1,nonexistent"),
@@ -465,10 +479,10 @@ async fn probe_run_variants_filter() {
 /// --limit：每档位最多跑指定题数。
 #[tokio::test]
 async fn probe_run_limit_truncates_items() {
-    let (app, _storage) = build_test_app();
-    let ds = build_dataset(&app, None, 10, 7, None).await; // 20 题
+    let (engine, _storage) = build_probe_engine();
+    let ds = build_dataset(&engine, None, 10, 7, None).await; // 20 题
     let experiment = build_experiment(
-        &app,
+        &engine,
         &ds,
         &PathBuf::from("dataset.json"),
         None,
@@ -487,13 +501,13 @@ async fn probe_run_limit_truncates_items() {
 /// 回归（残留 session 污染修复）：probe run 结束后不留任何残留 session。
 ///
 /// 背景:
-/// - probe run 每题 `send_message(session_id=None)` → resolve_session 自动新建
-///   活跃 session；旧实现不清理，残留 session 被桌面端空闲检测误当真实对话关闭，
-///   触发 L1/风格统计/L2 学习，把模型自答的合成对话当成 persona 真实社交记录学习。
-/// - 修复后每题测试 session 用完即删（含消息），不进入生命周期、不触发学习。
+/// - probe run 每题以 `session_id=None` 新建测试 session（服务层按请求创建）；
+///   残留 session 会被桌面端空闲检测误当真实对话关闭，触发 L1/风格统计/L2 学习，
+///   把模型自答的合成对话当成 persona 真实社交记录学习。
+/// - 每题测试 session 用完即删（含消息），不进入生命周期、不触发学习。
 #[tokio::test]
 async fn probe_run_leaves_no_residual_sessions() {
-    let (app, storage) = build_test_app();
+    let (engine, storage) = build_probe_engine();
     assert!(
         storage
             .list_sessions()
@@ -503,9 +517,9 @@ async fn probe_run_leaves_no_residual_sessions() {
         "测试起点应无 session"
     );
 
-    let ds = build_dataset(&app, None, 2, 7, None).await; // 3 维 × 2 题 = 6 题
+    let ds = build_dataset(&engine, None, 2, 7, None).await; // 3 维 × 2 题 = 6 题
     let experiment = build_experiment(
-        &app,
+        &engine,
         &ds,
         &PathBuf::from("dataset.json"),
         None,
@@ -526,19 +540,24 @@ async fn probe_run_leaves_no_residual_sessions() {
         "probe run 不应留下残留活跃 session（当前残留 {} 个）",
         after.len()
     );
+    let active = storage
+        .list_active_sessions()
+        .await
+        .expect("读取活跃会话应成功");
     assert!(
-        app.get_active_session_id().is_none(),
-        "lifecycle 活跃指针应已清空，避免后续 save_and_close 引用已删除 session"
+        active.is_empty(),
+        "不应留有活跃会话（当前活跃 {} 个）",
+        active.len()
     );
 }
 
 /// 回归（残留 session 污染修复）：`--repeat N` 统计法多次运行同样不留残留 session。
 #[tokio::test]
 async fn probe_run_repeat_leaves_no_residual_sessions() {
-    let (app, storage) = build_test_app();
-    let ds = build_dataset(&app, None, 2, 7, None).await; // 3 维 × 2 题 = 6 题
+    let (engine, storage) = build_probe_engine();
+    let ds = build_dataset(&engine, None, 2, 7, None).await; // 3 维 × 2 题 = 6 题
     let experiment = build_experiment_with_repeat(
-        &app,
+        &engine,
         &ds,
         &PathBuf::from("dataset.json"),
         None,
@@ -560,19 +579,24 @@ async fn probe_run_repeat_leaves_no_residual_sessions() {
         "repeat 统计法也不应留下残留活跃 session（当前残留 {} 个）",
         after.len()
     );
+    let active = storage
+        .list_active_sessions()
+        .await
+        .expect("读取活跃会话应成功");
     assert!(
-        app.get_active_session_id().is_none(),
-        "repeat 结束后 lifecycle 活跃指针应清空"
+        active.is_empty(),
+        "repeat 结束后不应留有活跃会话（当前活跃 {} 个）",
+        active.len()
     );
 }
 
 /// 回归（残留 session 污染修复）：单题全部失败路径也不留残留 session。
 #[tokio::test]
 async fn probe_run_all_failures_leave_no_residual_sessions() {
-    let (app, storage) = build_app_with_llm(Arc::new(FailingLlm::new()));
-    let ds = build_dataset(&app, None, 2, 7, None).await;
+    let (engine, storage) = build_engine_with_llm(Arc::new(FailingLlm::new()));
+    let ds = build_dataset(&engine, None, 2, 7, None).await;
     let experiment = build_experiment(
-        &app,
+        &engine,
         &ds,
         &PathBuf::from("dataset.json"),
         None,
@@ -595,16 +619,20 @@ async fn probe_run_all_failures_leave_no_residual_sessions() {
         "发送/流错误路径也应清理自动创建的测试 session（当前残留 {} 个）",
         after.len()
     );
-    assert!(app.get_active_session_id().is_none());
+    let active = storage
+        .list_active_sessions()
+        .await
+        .expect("读取活跃会话应成功");
+    assert!(active.is_empty(), "失败路径也不应留有活跃会话");
 }
 
 /// 实验结果序列化为合法 JSON（probe run --json 信封的数据面）。
 #[tokio::test]
 async fn probe_run_result_serializes_to_valid_json() {
-    let (app, _storage) = build_test_app();
-    let ds = build_dataset(&app, None, 1, 7, None).await;
+    let (engine, _storage) = build_probe_engine();
+    let ds = build_dataset(&engine, None, 1, 7, None).await;
     let experiment = build_experiment(
-        &app,
+        &engine,
         &ds,
         &PathBuf::from("dataset.json"),
         None,

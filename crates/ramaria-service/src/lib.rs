@@ -17,8 +17,13 @@
 //! - `setup`：首次配置用例（缺项诊断、状态机推进、后端健康探测）；
 //! - `recall` / `chat` / `ingest` / `seal` / `idle` / `session` / `persona`：用例实现；
 //!   空闲检查同时提供宿主循环（`IdleLoop`），供长驻进程免外部驱动自动封存超时会话；
+//! - `settings`：设置键值与元信息读取用例（settings 表读写 / 后端配置 / schema 版本 / 密钥掩码）；
 //! - `browse`：记忆与会话浏览用例（L1 / L2 / L3 / 事实 / 证据链 / 会话列表与消息）；
-//! - `keyword`：关键词词典用例（列表 / 待确认别名 / 别名裁决状态机）；
+//! - `behavior`：行为规则用例（管理 / 学习 / 证据链 / 增量更新，与封存钩子同源）；
+//! - `style`：表达风格统计用例（增量更新 / 规则读取 / 统计视图）；
+//! - `keyword`：关键词词典用例（列表 / 幂等注入 / 待确认别名 / 别名裁决状态机）；
+//! - `export`：会话导出数据装配用例（会话集合 + 消息 + 人格 L1 摘要段）；
+//! - `utt`：utt 话语块重建用例（配置读取 / 强制重切 / 索引刷新）；
 //! - `l2`：L2 事件提取触发（无 app 宿主的运行时用）；
 //! - `lifecycle`：会话生命周期容器（活跃指针 / 手动关闭 / 空闲检查线程 / L2-L3 调度 / 关停）
 //!   与 L1 摘要重生成 / 补扫，后台定时链路与手动触发共用；
@@ -33,6 +38,7 @@
 //!   `importer` feature 下编译）；
 //! - 入口层（如 `ramaria-mcp`）只做协议包装，不承载业务逻辑。
 
+pub mod behavior;
 pub mod bridge;
 pub mod browse;
 pub mod chat;
@@ -41,6 +47,7 @@ pub mod diagnostics;
 pub mod engine;
 pub mod error_hint;
 pub mod eta;
+pub mod export;
 pub mod fact_extract;
 pub mod feedback;
 pub mod hooks;
@@ -56,10 +63,13 @@ pub mod privacy;
 pub mod recall;
 pub mod seal;
 pub mod session;
+pub mod settings;
 pub mod setup;
 pub mod stream_event;
+pub mod style;
 pub mod types;
 pub mod update;
+pub mod utt;
 
 #[cfg(feature = "importer")]
 pub mod import;
@@ -67,11 +77,13 @@ pub mod import;
 #[cfg(test)]
 pub(crate) mod test_support;
 
+pub use behavior::{BehaviorLearnOutcome, RuleEvidenceItem};
 pub use config::{ConfigWriter, MismatchEntry, SyncOutcome, SyncWriteResult};
 pub use diagnostics::{DiagnosticsReport, DiagnosticsRequest};
 pub use engine::{Engine, EngineOptions};
 pub use error_hint::{ErrorHint, error_detail, error_title, is_retryable};
 pub use eta::{EtaEstimator, PhaseEma, PhaseKind, linear_remaining};
+pub use export::{ExportData, ExportDataRequest, ExportSessionData};
 pub use hooks::{default_seal_hooks, full_seal_hooks};
 pub use idle::{IdleLoop, IdleLoopOptions, MIN_IDLE_CHECK_INTERVAL_SECONDS};
 #[cfg(feature = "importer")]
@@ -84,24 +96,29 @@ pub use model::{
     RemoveModelOutcome, download_model, is_model_ready, list_models, model_size, models_root,
     remove_model, validate_embedding_model,
 };
-pub use persona::PersonaRegenerateOutcome;
+pub use persona::{PersonaLoadMode, PersonaRegenerateOutcome};
+pub use privacy::PrivacyStatus;
 pub use recall::RecallPolicy;
 pub use seal::{SealHook, SealHooks};
+pub use settings::mask_api_key;
 pub use stream_event::{ChatEventStream, ChatStreamHandle, StreamEvent};
+pub use style::StyleStatsView;
 pub use types::{
-    AliasAction, AliasResolveOutcome, AliasResolveRequest, BehaviorRuleView, CHANNEL_MCP, ChatRole,
-    ChatSendOutcome, ChatSendRequest, ChatStreamRequest, ChatTurn, DEFAULT_HISTORY_LIMIT,
-    DEFAULT_MAX_CHARS, DEFAULT_MAX_ITEMS, DEFAULT_PERSONA_UID, DataMaturityView, DegradedReason,
-    EmbeddingModelView, EmbeddingValidation, EvidenceEventView, EvidenceL1SourceView,
-    FactBrowsePage, FactBrowseRequest, FactDetailView, FactEntryView, FactView, GroupedFactsView,
-    HistoryMessageView, HistoryRequest, HistoryResult, IngestOutcome, IngestRequest,
-    KeywordEntryView, KeywordPoolView, L1BrowsePage, L1BrowseRequest, L1MemoryView, L2BrowsePage,
-    L2BrowseRequest, L2EventView, L3TraitView, MAX_ITEMS_LIMIT, PendingAliasView,
-    PersonaCardRequest, PersonaCardView, PersonaSection, PersonaSummaryView,
-    PersonalityProfileView, ProfileStatusView, RecallItem, RecallLayer, RecallMode, RecallRequest,
-    RecallResult, RecallStats, SealOutcome, SessionBrowsePage, SessionBrowseRequest,
-    SessionMessageView, SessionMessagesRequest, SessionMessagesView, SessionSummaryView,
-    SetupRequest, SetupStatus, StyleView, TraitDetailView, TraitEvidenceRequest, TraitEvidenceView,
-    TraitView,
+    AliasAction, AliasResolveOutcome, AliasResolveRequest, BehaviorRuleView, CHANNEL_MCP,
+    ChannelOverviewView, ChatRole, ChatSendOutcome, ChatSendRequest, ChatStreamRequest, ChatTurn,
+    DEFAULT_HISTORY_LIMIT, DEFAULT_MAX_CHARS, DEFAULT_MAX_ITEMS, DEFAULT_PERSONA_UID,
+    DataMaturityView, DegradedReason, EmbeddingModelView, EmbeddingValidation, EvidenceEventView,
+    EvidenceL1SourceView, FactBrowsePage, FactBrowseRequest, FactDetailView, FactEntryView,
+    FactView, GroupedFactsView, HistoryMessageView, HistoryRequest, HistoryResult, IngestOutcome,
+    IngestRequest, KeywordEntryView, KeywordPoolView, KeywordSeedItem, KeywordSeedOutcome,
+    L1BrowsePage, L1BrowseRequest, L1MemoryView, L2BrowsePage, L2BrowseRequest, L2EventView,
+    L3TraitView, MAX_ITEMS_LIMIT, PendingAliasView, PersonaCardRequest, PersonaCardView,
+    PersonaFileAction, PersonaFileOutcome, PersonaFullView, PersonaSection, PersonaSummaryView,
+    PersonaUpdateRequest, PersonalityProfileView, ProfileStatusView, RecallItem, RecallLayer,
+    RecallMode, RecallRequest, RecallResult, RecallStats, SealOutcome, SessionBrowsePage,
+    SessionBrowseRequest, SessionDetailView, SessionMessageView, SessionMessagesRequest,
+    SessionMessagesView, SessionSummaryView, SetupRequest, SetupStatus, StyleView, TraitDetailView,
+    TraitEvidenceRequest, TraitEvidenceView, TraitView,
 };
 pub use update::{UpdateStatus, check_update};
+pub use utt::UttRebuildOutcome;

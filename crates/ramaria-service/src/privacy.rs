@@ -6,6 +6,8 @@
 //! - `confirm_privacy` 记录用户同意并持久化到 storage
 //! - 本地 provider（LM Studio）自动通过，不需要隐私确认
 //! - provider 或 base_url 变更时需重新确认
+//! - 引擎门面（[`check`] / [`confirm`]）的判定输入取 DB 侧后端配置，
+//!   与桌面 / CLI 现状同源（无记录按本地 provider 默认值）
 //!
 //! 安全约束:
 //! - 隐私确认仅记录决策（同意/不同意），不涉及 API key
@@ -13,7 +15,9 @@
 
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::traits::StorageBackend;
-use ramaria_core::types::{LlmProvider, PrivacyConsent};
+use ramaria_core::types::{BackendConfig, LlmProvider, PrivacyConsent};
+
+use crate::engine::Engine;
 
 // =========================================================
 // 隐私检查结果
@@ -177,12 +181,55 @@ pub async fn require_privacy(
 }
 
 // =========================================================
+// 引擎门面（判定输入取 DB 侧后端配置）
+// =========================================================
+
+/// 检查当前后端的隐私确认状态。
+///
+/// 说明:
+/// - 判定输入（provider / base_url）取 DB 侧 `backend_config`，与桌面 / CLI 现状同源；
+/// - 无后端配置记录时按本地 provider 默认值判定（无需确认）。
+pub(crate) async fn check(engine: &Engine) -> RamariaResult<PrivacyStatus> {
+    let backend = effective_backend_config(engine).await?;
+    check_privacy(
+        engine.storage_ref().as_ref(),
+        backend.provider,
+        &backend.base_url,
+    )
+    .await
+}
+
+/// 记录当前后端的隐私确认（provider / base_url 取 DB 侧后端配置）。
+///
+/// 参数:
+/// - `persistent`: 是否跨重启持久化（勾选"下次不再提醒"）。
+pub(crate) async fn confirm(engine: &Engine, persistent: bool) -> RamariaResult<()> {
+    let backend = effective_backend_config(engine).await?;
+    confirm_privacy(
+        engine.storage_ref().as_ref(),
+        backend.provider,
+        &backend.base_url,
+        persistent,
+    )
+    .await
+}
+
+/// DB 侧后端配置（无记录回退本地 provider 默认值）。
+async fn effective_backend_config(engine: &Engine) -> RamariaResult<BackendConfig> {
+    Ok(engine
+        .backend_config()
+        .await?
+        .unwrap_or_else(BackendConfig::lm_studio_default))
+}
+
+// =========================================================
 // 单元测试
 // =========================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ramaria_core::traits::StoreInfrastructure;
 
     #[test]
     fn privacy_status_variants() {
@@ -216,5 +263,86 @@ mod tests {
         for (provider, expected) in cases {
             assert_eq!(provider.is_online(), expected, "{provider:?}");
         }
+    }
+
+    /// 引擎门面：本地 provider（无后端配置记录，缺省回退）无需确认。
+    #[tokio::test]
+    async fn engine_check_local_provider_not_needed() {
+        let (engine, _storage, dir) = crate::test_support::engine_with_db("privacy-local").await;
+
+        let status = engine.check_privacy().await.expect("检查应成功");
+        assert_eq!(status, PrivacyStatus::NotNeeded);
+        assert!(status.is_confirmed());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 引擎门面：线上 provider 未确认 → NeedsConfirmation（含展示信息）。
+    #[tokio::test]
+    async fn engine_check_online_provider_needs_confirmation() {
+        let (engine, storage, dir) = crate::test_support::engine_with_db("privacy-online").await;
+        storage
+            .save_backend_config(&BackendConfig::deepseek_default())
+            .await
+            .expect("保存后端配置应成功");
+
+        let status = engine.check_privacy().await.expect("检查应成功");
+        match status {
+            PrivacyStatus::NeedsConfirmation {
+                provider_name,
+                base_url,
+            } => {
+                assert_eq!(provider_name, "deepseek", "展示名取 provider 稳定标识");
+                assert_eq!(base_url, "https://api.deepseek.com/v1");
+            }
+            other => panic!("应为 NeedsConfirmation，实际 {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 引擎门面：确认后返回 Confirmed，persistent 标记与确认记录一致。
+    #[tokio::test]
+    async fn engine_confirm_privacy_marks_confirmed() {
+        let (engine, storage, dir) = crate::test_support::engine_with_db("privacy-confirmed").await;
+        storage
+            .save_backend_config(&BackendConfig::deepseek_default())
+            .await
+            .expect("保存后端配置应成功");
+
+        engine.confirm_privacy(true).await.expect("确认应成功");
+        match engine.check_privacy().await.expect("检查应成功") {
+            PrivacyStatus::Confirmed {
+                persistent,
+                confirmed_at,
+            } => {
+                assert!(persistent);
+                assert!(confirmed_at > 0);
+            }
+            other => panic!("确认后应为 Confirmed，实际 {other:?}"),
+        }
+
+        // 确认记录按 provider + base_url 粒度落库
+        let consent = storage
+            .get_privacy_consent("deepseek", "https://api.deepseek.com/v1")
+            .await
+            .expect("读取确认记录应成功")
+            .expect("确认记录应存在");
+        assert!(consent.persistent);
+
+        // 临时确认（persistent=false）：语义如实回传
+        let (engine2, storage2, dir2) = crate::test_support::engine_with_db("privacy-temp").await;
+        storage2
+            .save_backend_config(&BackendConfig::openai_default())
+            .await
+            .expect("保存后端配置应成功");
+        engine2.confirm_privacy(false).await.expect("确认应成功");
+        match engine2.check_privacy().await.expect("检查应成功") {
+            PrivacyStatus::Confirmed { persistent, .. } => assert!(!persistent),
+            other => panic!("确认后应为 Confirmed，实际 {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir2);
     }
 }

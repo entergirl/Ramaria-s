@@ -3,13 +3,13 @@
 //! 设计特点:
 //! - MockStorage: 内存 HashMap 实现的 StorageBackend，支持预填充测试数据
 //! - MockLlm: 返回预设回复的 LlmProvider
-//! - build_test_app: 一键构造 ready 状态的 App 实例供 CLI 命令测试
+//! - build_test_engine: 一键构造 ready 状态的服务层引擎实例供 CLI 命令测试
 //! - 不调用真实 LLM、不触碰文件系统、不访问 OS keychain
 //!
 //! 安全约束:
 //! - 不使用真实 API key 或网络请求
 //! - 所有 mock 都是 Send + Sync
-//! - 测试间通过独立 App 实例完全隔离
+//! - 测试间通过独立引擎实例完全隔离
 //!
 //! 注意: 本文件的所有 pub 项均由其他测试文件（command_tests.rs / ui_tests.rs）
 //! 通过 `mod common;` 引用使用。Rust 编译器在单独分析本文件时会误报 dead_code，
@@ -985,33 +985,32 @@ impl EmbeddingProvider for MockEmbedding {
 }
 
 // =========================================================
-// App 构造器
+// 引擎构造器
 // =========================================================
 
-/// 构造一个 Ready 状态的测试 App 实例。
+/// 构造一个 Ready 状态的测试引擎实例。
 ///
-/// 使用 LM Studio provider（本地，无需隐私确认），MockStorage 和 MockLlm。
-/// 返回 (Arc<App>, Arc<MockStorage>) 以便测试代码可直接操作 mock 数据。
-pub fn build_test_app() -> (Arc<ramaria_app::App>, Arc<MockStorage>) {
-    use ramaria_app::App;
+/// 使用 MockStorage 与 MockLlm（无嵌入模型，向量通道降级）。
+/// 返回 (Arc<Engine>, Arc<MockStorage>) 以便测试代码可直接操作 mock 数据。
+pub fn build_test_engine() -> (Arc<ramaria_service::Engine>, Arc<MockStorage>) {
     use ramaria_core::config::RamariaConfig;
+    use ramaria_service::Engine;
 
     let storage = Arc::new(MockStorage::new());
     let llm = Arc::new(MockLlm::new("Hello, World!"));
-    let keychain = Arc::new(ramaria_llm::keychain::Keychain::new());
     let config = RamariaConfig::default();
 
-    let app = App::new_without_embedding(
+    let engine = Engine::from_parts(
         Arc::clone(&storage) as Arc<dyn StorageBackend>,
         llm,
+        None,
         config,
-        keychain,
     );
 
     // 设置为 Ready 状态以跳过 setup 检查
-    app.set_state(ramaria_core::types::AppState::Ready);
+    engine.set_state(ramaria_core::types::AppState::Ready);
 
-    (Arc::new(app), storage)
+    (Arc::new(engine), storage)
 }
 
 /// 构造测试用的 Message。

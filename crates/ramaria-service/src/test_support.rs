@@ -879,7 +879,11 @@ pub(crate) async fn engine_with_shared_scripted_llm(
     assemble_engine(tag, provider, embedding, config).await
 }
 
-/// 统一装配实现：建库（含 migration）→ 以注入依赖构造引擎。
+/// 统一装配实现：建库（含 migration）→ 以注入依赖构造引擎 → 附着连接池句柄。
+///
+/// 说明:
+/// - 连接池附着对齐生产装配（`open_with`）的形态：以 `&SqlitePool` 为入口的
+///   用例（导入 / 通道概览等）在测试引擎上可直接使用。
 async fn assemble_engine(
     tag: &str,
     llm: Arc<dyn LlmProvider>,
@@ -892,17 +896,17 @@ async fn assemble_engine(
     let _ = Engine::open_with(EngineOptions::new(db_path.clone()))
         .await
         .expect("引擎装配应成功");
-    let storage = Arc::new(SqliteStorage::new(
-        ramaria_storage::database::init_pool(Some(db_path))
-            .await
-            .expect("测试库初始化应成功"),
-    ));
+    let pool = ramaria_storage::database::init_pool(Some(db_path))
+        .await
+        .expect("测试库初始化应成功");
+    let storage = Arc::new(SqliteStorage::new(pool.clone()));
     let engine = Engine::from_parts(
         storage.clone() as Arc<dyn StorageBackend>,
         llm,
         embedding,
         config,
     );
+    engine.attach_sqlite_pool(pool);
     (engine, storage, dir)
 }
 

@@ -1,7 +1,7 @@
 //! crates/ramaria-service/src/browse.rs - 记忆与会话浏览用例（查询用例组）
 //!
 //! 设计特点:
-//! - 纯读取：L1 / L2 / L3 / 性格画像 / 事实 / 证据链 / 会话列表 / 会话消息，不修改任何状态
+//! - 纯读取：L1 / L2 / L3 / 性格画像 / 事实 / 证据链 / 会话列表 / 会话消息与详情，不修改任何状态
 //! - 单份实现覆盖两条调用链路：桌面口径与 CLI 口径的差异由请求参数表达（未吸收过滤 / 分页），
 //!   不写第二份实现
 //! - 逐段独立降级：消息计数聚合失败按 0 处理、证据链单条查询失败跳过，不阻塞整体读取
@@ -11,22 +11,25 @@
 
 use std::cmp::Reverse;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use ramaria_core::error::{RamariaError, RamariaResult};
+use ramaria_core::traits::StorageBackend;
 use ramaria_core::types::{
     EvidenceDirection, MemoryEvent, MemoryL1, Message, PersonaFact, PersonalityTrait, TraitLayer,
     TraitStatus,
 };
+use uuid::Uuid;
 
 use crate::engine::Engine;
 use crate::types::{
-    EvidenceEventView, EvidenceL1SourceView, FactBrowsePage, FactBrowseRequest, FactDetailView,
-    FactEntryView, GroupedFactsView, L1BrowsePage, L1BrowseRequest, L1MemoryView, L2BrowsePage,
-    L2BrowseRequest, L2EventView, L3TraitView, PersonalityProfileView, ProfileStatusView,
-    SessionBrowsePage, SessionBrowseRequest, SessionMessageView, SessionMessagesRequest,
-    SessionMessagesView, SessionSummaryView, TraitDetailView, TraitEvidenceRequest,
-    TraitEvidenceView,
+    ChannelOverviewView, EvidenceEventView, EvidenceL1SourceView, FactBrowsePage,
+    FactBrowseRequest, FactDetailView, FactEntryView, GroupedFactsView, L1BrowsePage,
+    L1BrowseRequest, L1MemoryView, L2BrowsePage, L2BrowseRequest, L2EventView, L3TraitView,
+    PersonalityProfileView, ProfileStatusView, SessionBrowsePage, SessionBrowseRequest,
+    SessionDetailView, SessionMessageView, SessionMessagesRequest, SessionMessagesView,
+    SessionSummaryView, TraitDetailView, TraitEvidenceRequest, TraitEvidenceView,
 };
 
 // =========================================================
@@ -120,6 +123,31 @@ pub(crate) async fn l1(engine: &Engine, req: L1BrowseRequest) -> RamariaResult<L
         "L1 记忆浏览完成"
     );
     Ok(L1BrowsePage { items, total })
+}
+
+/// 按会话读取 L1 摘要（封存结果的核对口径）。
+///
+/// 语义:
+/// - 返回目标会话的全部摘要（存储层顺序）；会话不存在或无摘要均返回空列表（不报错）。
+///
+/// 参数:
+/// - `engine`: 服务层引擎。
+/// - `session_id`: 目标会话。
+///
+/// 返回:
+/// - L1 摘要视图列表（空列表表示该会话尚无摘要）。
+pub(crate) async fn l1_by_session(
+    engine: &Engine,
+    session_id: Uuid,
+) -> RamariaResult<Vec<L1MemoryView>> {
+    let storage = engine.storage_ref();
+    let list = storage.list_memory_l1(session_id).await?;
+    tracing::debug!(
+        %session_id,
+        returned = list.len(),
+        "L1 摘要按会话读取完成"
+    );
+    Ok(list.iter().map(l1_view).collect())
 }
 
 // =========================================================
@@ -700,22 +728,7 @@ pub(crate) async fn session_messages(
         return Err(RamariaError::validation(format!("会话不存在: {sid}")));
     }
 
-    let (messages, total, has_more) = match req.limit {
-        None => {
-            let messages = storage.list_messages(sid).await?;
-            let total = messages.len() as u32;
-            (messages, total, false)
-        }
-        Some(limit) => {
-            let limit = limit.clamp(1, MAX_MESSAGE_PAGE);
-            let offset = req.offset.unwrap_or(0).max(0);
-            let mut messages = storage.list_messages_paginated(sid, limit, offset).await?;
-            messages.reverse();
-            let total = storage.count_messages(sid).await?;
-            let has_more = (offset + limit) < i64::from(total);
-            (messages, total, has_more)
-        }
-    };
+    let (messages, total, has_more) = message_page(storage, sid, req.limit, req.offset).await?;
 
     tracing::debug!(
         %sid,
@@ -728,7 +741,129 @@ pub(crate) async fn session_messages(
         session_id: sid,
         total,
         has_more,
-        messages: messages.iter().map(message_view).collect(),
+        messages,
+    })
+}
+
+/// 会话详情读取（会话元数据 + 消息页）。
+///
+/// 流程:
+/// 1. 读取会话记录（不存在 → `Validation` 错误）；
+/// 2. 读取消息页（与 [`session_messages`] 同一实现：全量正序或分页后翻正）；
+/// 3. 组装元数据与消息页。
+///
+/// 参数:
+/// - `engine`: 服务层引擎。
+/// - `session_id`: 目标会话。
+/// - `limit` / `offset`: 消息分页（`limit` 为 None 全量加载）。
+///
+/// 返回:
+/// - 会话详情视图；会话不存在时返回 `Validation` 错误。
+pub(crate) async fn session_detail(
+    engine: &Engine,
+    session_id: Uuid,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> RamariaResult<SessionDetailView> {
+    let storage = engine.storage_ref();
+    let session = storage
+        .get_session(session_id)
+        .await?
+        .ok_or_else(|| RamariaError::validation(format!("会话不存在: {session_id}")))?;
+
+    let (messages, total, has_more) = message_page(storage, session_id, limit, offset).await?;
+
+    tracing::debug!(
+        %session_id,
+        returned = messages.len(),
+        total,
+        has_more,
+        "会话详情读取完成"
+    );
+    Ok(SessionDetailView {
+        id: session.id,
+        started_at: to_datetime(session.started_at),
+        ended_at: session.ended_at.and_then(DateTime::from_timestamp_millis),
+        persona_uid: session.persona_uid,
+        total_messages: total,
+        has_more,
+        messages,
+    })
+}
+
+/// 会话消息计数（诊断用；查询失败按 0 处理）。
+///
+/// 说明:
+/// - 供入口记录"该会话有多少条消息"的诊断日志，不承载业务判定；
+/// - 查询失败不报错（计数缺失不影响主流程），仅记 warn。
+pub(crate) async fn count_session_messages(engine: &Engine, session_id: Uuid) -> usize {
+    match engine.storage_ref().count_messages(session_id).await {
+        Ok(count) => count as usize,
+        Err(e) => {
+            tracing::warn!(%session_id, error = %e, "会话消息计数失败，按 0 处理");
+            0
+        }
+    }
+}
+
+/// 读取会话消息页（全量正序或最新在前分页后翻正）。
+///
+/// 返回:
+/// - `(消息视图, total, has_more)`；`total` 为会话消息总数，`has_more` 仅分页路径有效。
+async fn message_page(
+    storage: &Arc<dyn StorageBackend>,
+    session_id: Uuid,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> RamariaResult<(Vec<SessionMessageView>, u32, bool)> {
+    match limit {
+        None => {
+            let messages = storage.list_messages(session_id).await?;
+            let total = messages.len() as u32;
+            Ok((messages.iter().map(message_view).collect(), total, false))
+        }
+        Some(limit) => {
+            let limit = limit.clamp(1, MAX_MESSAGE_PAGE);
+            let offset = offset.unwrap_or(0).max(0);
+            let mut messages = storage
+                .list_messages_paginated(session_id, limit, offset)
+                .await?;
+            messages.reverse();
+            let total = storage.count_messages(session_id).await?;
+            let has_more = (offset + limit) < i64::from(total);
+            Ok((messages.iter().map(message_view).collect(), total, has_more))
+        }
+    }
+}
+
+/// 通道会话概览读取（活跃会话数 + 最近活动时间）。
+///
+/// 参数:
+/// - `engine`: 服务层引擎（需持有 SQLite 连接池句柄）。
+/// - `channel`: 来源通道（如 `mcp` / `local`）。
+///
+/// 返回:
+/// - [`ChannelOverviewView`]；空通道返回 `active_sessions = 0` 且 `last_activity_ms = None`。
+///
+/// 说明:
+/// - 只读聚合查询，供宿主展示通道活动（如桌面 MCP 接入面板）；
+/// - 单条 SQL 以子查询完成两个聚合，避免两次往返。
+pub(crate) async fn channel_overview(
+    engine: &Engine,
+    channel: &str,
+) -> RamariaResult<ChannelOverviewView> {
+    let pool = engine
+        .sqlite_pool()
+        .ok_or_else(|| RamariaError::storage("统计通道概览需要 SQLite 连接池（注入构造未附着）"))?;
+    let overview = ramaria_storage::repo::sessions::channel_overview(&pool, channel).await?;
+    tracing::debug!(
+        chain = %channel,
+        active_sessions = overview.active_sessions,
+        "通道会话概览读取完成"
+    );
+    Ok(ChannelOverviewView {
+        active_sessions: overview.active_sessions,
+        last_activity_ms: overview.last_activity_ms,
     })
 }
 
@@ -869,7 +1004,10 @@ fn message_view(m: &Message) -> SessionMessageView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{engine_with_db, seed_l1, seed_messages, seed_persona};
+    use crate::test_support::{
+        engine_with_db, seed_channel_session, seed_l1, seed_messages, seed_persona,
+        seed_session_with_messages,
+    };
     use ramaria_core::traits::StoreCrud;
     use ramaria_core::types::{
         EvidenceNote, FactSource, MessageRole, MessageSource, PersonaFact, ProfileField,
@@ -1660,6 +1798,151 @@ mod tests {
         assert_eq!(view.total, 0);
         assert!(view.messages.is_empty());
         assert!(!view.has_more);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 会话详情：元数据 + 消息页字段逐项；分页 has_more 口径与消息浏览一致。
+    #[tokio::test]
+    async fn session_detail_returns_metadata_and_message_page() {
+        let (engine, storage, dir) = engine_with_db("browse-session-detail").await;
+        seed_persona(&storage, "char-0001").await;
+        let session = storage
+            .create_session(Some("char-0001"))
+            .await
+            .expect("创建会话应成功");
+        seed_messages(&storage, session.id, "char-0001", 5, 1_000).await;
+
+        // 全量：元数据透传 + 消息时间正序 + has_more false
+        let detail = engine
+            .session_detail(session.id, None, None)
+            .await
+            .expect("详情读取应成功");
+        assert_eq!(detail.id, session.id);
+        assert_eq!(detail.started_at.timestamp_millis(), session.started_at);
+        assert_eq!(detail.ended_at, None);
+        assert_eq!(detail.persona_uid.as_deref(), Some("char-0001"));
+        assert_eq!(detail.total_messages, 5);
+        assert!(!detail.has_more);
+        let contents: Vec<&str> = detail.messages.iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(contents[0], "消息内容 0");
+        assert_eq!(contents[4], "消息内容 4");
+
+        // 分页：最新 2 条（页内时间正序）+ has_more true
+        let paged = engine
+            .session_detail(session.id, Some(2), None)
+            .await
+            .expect("详情读取应成功");
+        assert_eq!(paged.total_messages, 5);
+        assert!(paged.has_more);
+        let contents: Vec<&str> = paged.messages.iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(contents, vec!["消息内容 3", "消息内容 4"]);
+
+        // 不存在会话：业务校验错误
+        let err = engine
+            .session_detail(Uuid::new_v4(), None, None)
+            .await
+            .expect_err("不存在的会话应显式报错");
+        assert_eq!(err.category(), "validation");
+        assert!(err.to_string().contains("会话不存在"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 会话消息计数：正常计数；不存在会话按 0（诊断口径，不报错）。
+    #[tokio::test]
+    async fn count_session_messages_tolerates_missing_session() {
+        let (engine, storage, dir) = engine_with_db("browse-count-messages").await;
+        seed_persona(&storage, "char-0001").await;
+        let session = storage
+            .create_session(Some("char-0001"))
+            .await
+            .expect("创建会话应成功");
+        seed_messages(&storage, session.id, "char-0001", 3, 1_000).await;
+
+        assert_eq!(engine.count_session_messages(session.id).await, 3);
+        assert_eq!(engine.count_session_messages(Uuid::new_v4()).await, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 按会话读取 L1：空会话返回空列表；写入后字段与存储一致（不报错）。
+    #[tokio::test]
+    async fn l1_by_session_returns_session_summaries() {
+        let (engine, storage, dir) = engine_with_db("browse-l1-by-session").await;
+        seed_persona(&storage, "char-0001").await;
+        let session_id = seed_session_with_messages(&storage, "char-0001", 2, 1_000).await;
+
+        // 空会话：空列表（非错误）
+        let empty = engine
+            .memory_l1_by_session(session_id)
+            .await
+            .expect("按会话查询应成功");
+        assert!(empty.is_empty(), "无摘要会话应返回空列表");
+
+        // 写入两条摘要：全部返回且字段透传
+        for (idx, summary) in ["第一段", "第二段"].iter().enumerate() {
+            let mut l1 = MemoryL1::new(session_id, summary.to_string(), None);
+            l1.persona_uid = Some("char-0001".to_string());
+            l1.created_at = 2_000 + idx as i64;
+            storage.save_memory_l1(&l1).await.expect("写入 L1 应成功");
+        }
+
+        let items = engine
+            .memory_l1_by_session(session_id)
+            .await
+            .expect("按会话查询应成功");
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().all(|item| item.session_id == session_id));
+        assert!(
+            items
+                .iter()
+                .all(|item| item.persona_uid.as_deref() == Some("char-0001")),
+            "归属应随摘要透传"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 通道概览：空通道为 0 / None；仅统计目标通道（local 不计入）；关闭后活跃数下降。
+    #[tokio::test]
+    async fn channel_overview_counts_active_and_latest_activity() {
+        let (engine, storage, dir) = engine_with_db("browse-channel-overview").await;
+        seed_persona(&storage, "char-0001").await;
+
+        // 空通道：计数 0、无活动时间
+        let empty = engine
+            .channel_overview("mcp")
+            .await
+            .expect("统计空通道应成功");
+        assert_eq!(empty.active_sessions, 0);
+        assert_eq!(empty.last_activity_ms, None);
+
+        // mcp 通道两个会话 + local 通道一个会话（local 不应计入 mcp 统计）
+        seed_channel_session(&storage, "char-0001", "mcp", Some("client-A"), 1, 1_000).await;
+        let s2 =
+            seed_channel_session(&storage, "char-0001", "mcp", Some("client-B"), 1, 2_000).await;
+        seed_channel_session(&storage, "char-0001", "local", None, 1, 9_000).await;
+
+        let overview = engine
+            .channel_overview("mcp")
+            .await
+            .expect("统计 mcp 通道应成功");
+        assert_eq!(overview.active_sessions, 2, "两个 mcp 会话均活跃");
+        assert_eq!(
+            overview.last_activity_ms,
+            Some(2_000),
+            "最近活动取 mcp 通道消息，local 会话（9000）不计入"
+        );
+
+        // 关闭一个会话：活跃数下降；最近活动时间不受影响（消息仍在库中）
+        storage.close_session(s2).await.expect("关闭会话应成功");
+        let after = engine
+            .channel_overview("mcp")
+            .await
+            .expect("再次统计应成功");
+        assert_eq!(after.active_sessions, 1, "关闭一个会话后活跃数应下降");
+        assert_eq!(after.last_activity_ms, Some(2_000));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

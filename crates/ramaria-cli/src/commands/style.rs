@@ -2,18 +2,18 @@
 //!
 //! 设计特点:
 //! - 子命令遵循动词词表：update —— 手动补跑 persona 表达层风格统计
-//!   （复用 app 层 `style_incremental_update_core`，与会话封存钩子同一核心）
+//!   （委托服务层风格用例，与会话封存钩子同一核心）
 //! - 背景：风格统计日常由"会话封存钩子"驱动；QQ 导入等不触发封存的路径
 //!   从未生成自动风格规则，需手动补跑（覆盖无封存来源的 persona）
-//! - 核心函数返回 `()`，命令在调用后读回 `persona_style_stats` 展示结果
+//! - 命令在调用后读回 `persona_style_stats` 展示结果
 //!   （sample_count / status / rule_source / rule_text）
 //! - 全部支持全局 `--json` 信封；stdout 只输出数据
-//! - 不改动 app_style.rs 既有逻辑：仅复用核心函数与读回统计
 //!
 //! 安全约束:
-//! - 输出仅含统计参数与自动规则文本（不含消息原文，与 app_style 隐私红线一致）
+//! - 输出仅含统计参数与自动规则文本（不含消息原文，与风格层隐私红线一致）
 
 use anyhow::Context;
+use ramaria_service::Engine;
 use std::sync::Arc;
 
 use crate::json;
@@ -38,12 +38,12 @@ const DEFAULT_STYLE_PERSONA: &str = "rama-0001";
 /// 运行 style 子命令分发。
 ///
 /// 参数:
-/// - `app`: App 实例引用。
+/// - `engine`: 服务层引擎引用。
 /// - `cmd`: Style 子命令。
 /// - `json`: JSON 信封输出。
-pub async fn run(app: &Arc<ramaria_app::App>, cmd: StyleCmd, json: bool) -> anyhow::Result<()> {
+pub async fn run(engine: &Arc<Engine>, cmd: StyleCmd, json: bool) -> anyhow::Result<()> {
     match cmd {
-        StyleCmd::Update { persona } => run_update(app, persona, json).await,
+        StyleCmd::Update { persona } => run_update(engine, persona, json).await,
     }
 }
 
@@ -54,34 +54,26 @@ pub async fn run(app: &Arc<ramaria_app::App>, cmd: StyleCmd, json: bool) -> anyh
 /// 触发 persona 风格统计增量更新，并读回统计结果展示。
 ///
 /// 说明:
-/// - 复用 app 层 `style_incremental_update_core`（全量消息 → 五维统计 → 基线
-///   显著性 → 规则生成/替换落库），与封存钩子同一实现，幂等可重复执行。
-/// - LLM 以 `llm_clone()` 锁外克隆传递（同 app 封存钩子的 `Some(llm)` 模式）；
-///   LLM 不可用/失败由核心内部静默降级为模板生成，不阻塞命令。
+/// - 委托服务层用例（全量消息 → 五维统计 → 基线显著性 → 规则生成/替换落库），
+///   与封存钩子同一实现，幂等可重复执行。
+/// - LLM 不可用/失败由核心内部静默降级为模板生成，不阻塞命令。
 /// - 空数据/无显著项不报错：落库 status=Insufficient / NoSignificant 并正常返回。
-/// - 核心返回 `()`，此处调用后读回 `persona_style_stats` 展示更新结果。
+/// - 调用后读回 `persona_style_stats` 展示更新结果。
 async fn run_update(
-    app: &Arc<ramaria_app::App>,
+    engine: &Arc<Engine>,
     persona: Option<String>,
     json: bool,
 ) -> anyhow::Result<()> {
     let persona_uid = persona.unwrap_or_else(|| DEFAULT_STYLE_PERSONA.to_string());
 
-    let storage = Arc::clone(app.storage());
-    let llm = app.llm_clone();
-    let config = app.config().style.clone();
-    ramaria_app::app_style::style_incremental_update_core(
-        storage.as_ref(),
-        Some(llm.as_ref()),
-        &config,
-        &persona_uid,
-    )
-    .await
-    .context("风格统计增量更新失败")?;
+    engine
+        .style_incremental_update(&persona_uid)
+        .await
+        .context("风格统计增量更新失败")?;
 
     // 读回统计记录（核心已 upsert 成功，正常必有记录）
-    let stats = storage
-        .get_style_stats(&persona_uid)
+    let stats = engine
+        .style_stats(&persona_uid)
         .await
         .context("读取风格统计结果失败")?
         .ok_or_else(|| anyhow::anyhow!("风格统计更新完成后未找到 {persona_uid} 的统计记录"))?;
@@ -91,27 +83,23 @@ async fn run_update(
         let data = serde_json::json!({
             "persona_uid": persona_uid,
             "sample_count": stats.sample_count,
-            "status": stats.status.as_str(),
-            "rule_source": stats.rule_source.as_str(),
+            "status": stats.status,
+            "rule_source": stats.rule_source,
             "rule_text": stats.rule_text,
             "baseline_version": stats.baseline_version,
         });
         return json::emit_ok(&data);
     }
 
-    let status_label = match stats.status {
-        ramaria_core::types::StyleStatsStatus::Insufficient => {
-            "Insufficient（数据不足，未生成规则）"
-        }
-        ramaria_core::types::StyleStatsStatus::Ready => "Ready（规则已生成，可注入）",
-        ramaria_core::types::StyleStatsStatus::NoSignificant => {
-            "NoSignificant（样本足够但无显著项）"
-        }
+    let status_label = match stats.status.as_str() {
+        "ready" => "Ready（规则已生成，可注入）",
+        "no_significant" => "NoSignificant（样本足够但无显著项）",
+        _ => "Insufficient（数据不足，未生成规则）",
     };
-    let source_label = match stats.rule_source {
-        ramaria_core::types::StyleRuleSource::None => "未生成",
-        ramaria_core::types::StyleRuleSource::Template => "Template（模板生成）",
-        ramaria_core::types::StyleRuleSource::Llm => "LLM（翻译增强）",
+    let source_label = match stats.rule_source.as_str() {
+        "template" => "Template（模板生成）",
+        "llm" => "LLM（翻译增强）",
+        _ => "未生成",
     };
 
     crate::ui::separator();

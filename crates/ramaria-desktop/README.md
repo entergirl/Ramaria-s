@@ -23,7 +23,7 @@
 
 ## 相邻契约
 
-- 依赖：`ramaria-service`（收敛后）/ `ramaria-app`（收敛前）+ `ramaria-core`；Tauri 框架。
+- 依赖：`ramaria-service`（含 `importer` feature）+ `ramaria-importer` + `ramaria-core`；Tauri 框架。
 - **禁止**：记忆业务逻辑（一律经服务层用例）；`ramaria-service` 反向依赖本 crate。
 - 契约面：command 名 / 参数 / 返回与契约基线逐项一致；前端 `api.js` 保持零改动。
 

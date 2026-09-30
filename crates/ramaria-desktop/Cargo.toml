@@ -17,12 +17,11 @@ name = "ramaria-desktop"
 path = "src/main.rs"
 
 [dependencies]
-ramaria-app = { path = "../ramaria-app" }
 ramaria-core = { path = "../ramaria-core" }
-ramaria-storage = { path = "../ramaria-storage" }
-ramaria-llm = { path = "../ramaria-llm", features = ["embedding-native"] }
+# importer feature：QQ 聊天记录导入用例（解析 / L0 写入 / L1 批量生成 / 深度触发）
+ramaria-service = { path = "../ramaria-service", features = ["importer"] }
+# 导入侧过滤参数解析（ImportSide::parse_cli，与 CLI 同一枚举）
 ramaria-importer = { path = "../ramaria-importer" }
-ramaria-memory = { path = "../ramaria-memory" }
 
 # ---------- Tauri 2 ----------
 tauri = { version = "2", features = ["tray-icon"] }
@@ -34,7 +33,6 @@ serde_json = "1"
 
 # ---------- 异步 ----------
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-tokio-stream = { version = "0.1", features = ["sync"] }
 futures = { workspace = true }
 
 # ---------- 工具 ----------
@@ -42,7 +40,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
-sqlx = { workspace = true }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

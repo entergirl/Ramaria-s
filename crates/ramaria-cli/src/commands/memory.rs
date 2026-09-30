@@ -10,6 +10,7 @@
 
 use anyhow::Context;
 use ramaria_core::error::RamariaError;
+use ramaria_service::{Engine, L1BrowseRequest};
 use std::sync::Arc;
 
 /// memory 命令参数。
@@ -41,7 +42,7 @@ fn resolve_layer(layer: &str) -> Option<&'static str> {
 }
 
 /// 执行 memory 命令。
-pub async fn run(app: &Arc<ramaria_app::App>, args: MemoryArgs) -> anyhow::Result<()> {
+pub async fn run(engine: &Arc<Engine>, args: MemoryArgs) -> anyhow::Result<()> {
     let canonical = match resolve_layer(&args.layer) {
         Some(l) => l,
         None => {
@@ -53,9 +54,9 @@ pub async fn run(app: &Arc<ramaria_app::App>, args: MemoryArgs) -> anyhow::Resul
         }
     };
     match canonical {
-        "l1" => show_l1(app, &args).await,
-        "l2" => show_l2(app, &args).await,
-        "l3" => show_l3(app, &args).await,
+        "l1" => show_l1(engine, &args).await,
+        "l2" => show_l2(engine, &args).await,
+        "l3" => show_l3(engine, &args).await,
         _ => unreachable!("resolve_layer 仅返回 l1/l2/l3"),
     }
 }
@@ -69,19 +70,23 @@ fn default_persona(args: &MemoryArgs) -> &str {
 // L1 摘要展示
 // =========================================================
 
-async fn show_l1(app: &Arc<ramaria_app::App>, args: &MemoryArgs) -> anyhow::Result<()> {
+async fn show_l1(engine: &Arc<Engine>, args: &MemoryArgs) -> anyhow::Result<()> {
     let persona_uid = default_persona(args);
-    let memories = app
-        .storage()
-        .list_unabsorbed_l1(persona_uid)
+    // 未吸收口径（与既有 CLI 展示一致）
+    let page = engine
+        .memory_l1(L1BrowseRequest {
+            persona: Some(persona_uid.to_string()),
+            unabsorbed_only: true,
+            limit: Some(args.limit as u32),
+            offset: Some(args.offset as u32),
+        })
         .await
         .context("查询 L1 记忆失败")?;
 
     if args.json {
-        let items: Vec<serde_json::Value> = memories
+        let items: Vec<serde_json::Value> = page
+            .items
             .iter()
-            .skip(args.offset)
-            .take(args.limit)
             .map(|mem| {
                 serde_json::json!({
                     "id": mem.id.to_string(),
@@ -98,13 +103,13 @@ async fn show_l1(app: &Arc<ramaria_app::App>, args: &MemoryArgs) -> anyhow::Resu
         let data = serde_json::json!({
             "layer": "l1",
             "persona_uid": persona_uid,
-            "total": memories.len(),
+            "total": page.total,
             "items": items,
         });
         return crate::json::emit_ok(&data);
     }
 
-    if memories.is_empty() {
+    if page.total == 0 {
         crate::ui::info(&format!("{persona_uid} 暂无未吸收的 L1 记忆"));
         return Ok(());
     }
@@ -113,16 +118,11 @@ async fn show_l1(app: &Arc<ramaria_app::App>, args: &MemoryArgs) -> anyhow::Resu
     crate::ui::separator();
     println!(
         "  L1 记忆摘要 — {persona_uid}（{} 条）",
-        memories.len().min(args.limit)
+        page.total.min(args.limit)
     );
     crate::ui::separator();
 
-    for (i, mem) in memories
-        .iter()
-        .skip(args.offset)
-        .take(args.limit)
-        .enumerate()
-    {
+    for (i, mem) in page.items.iter().enumerate() {
         println!();
         println!("  [{i}] {}", mem.id);
         crate::ui::labeled("会话", &mem.session_id.to_string());
@@ -134,12 +134,11 @@ async fn show_l1(app: &Arc<ramaria_app::App>, args: &MemoryArgs) -> anyhow::Resu
         crate::ui::labeled("显著性", &format!("{:.2}", mem.salience));
     }
 
-    if memories.len() > args.limit {
+    if page.total > args.limit {
         println!();
         crate::ui::info(&format!(
             "（仅显示前 {} 条，共 {} 条）",
-            args.limit,
-            memories.len()
+            args.limit, page.total
         ));
     }
 
@@ -150,11 +149,12 @@ async fn show_l1(app: &Arc<ramaria_app::App>, args: &MemoryArgs) -> anyhow::Resu
 // L2 事件展示
 // =========================================================
 
-async fn show_l2(app: &Arc<ramaria_app::App>, args: &MemoryArgs) -> anyhow::Result<()> {
+async fn show_l2(engine: &Arc<Engine>, args: &MemoryArgs) -> anyhow::Result<()> {
     let persona_uid = default_persona(args);
     // 查询全量后在 CLI 层分页：保证 JSON `total` 为分页前总数（与 L1/L3 一致，
-    // 供 agent 判断有无下一页；SQL LIMIT 传 i64::MAX 等价无限制，事件数不会接近该值）
-    let all_events = app
+    // 供 agent 判断有无下一页；SQL LIMIT 传 i64::MAX 等价无限制，事件数不会接近该值）。
+    // 事件时间范围（start / end）为展示列，需从事件本体读取，故直接读取事件集合。
+    let all_events = engine
         .storage()
         .list_events_by_persona(persona_uid, 0, i64::MAX)
         .await
@@ -220,11 +220,10 @@ async fn show_l2(app: &Arc<ramaria_app::App>, args: &MemoryArgs) -> anyhow::Resu
 // L3 性格标签展示
 // =========================================================
 
-async fn show_l3(app: &Arc<ramaria_app::App>, args: &MemoryArgs) -> anyhow::Result<()> {
+async fn show_l3(engine: &Arc<Engine>, args: &MemoryArgs) -> anyhow::Result<()> {
     let persona_uid = default_persona(args);
-    let traits = app
-        .storage()
-        .list_traits_by_persona(persona_uid)
+    let traits = engine
+        .memory_l3(Some(persona_uid))
         .await
         .context("查询 L3 性格标签失败")?;
 
@@ -234,7 +233,7 @@ async fn show_l3(app: &Arc<ramaria_app::App>, args: &MemoryArgs) -> anyhow::Resu
             .map(|t| {
                 serde_json::json!({
                     "id": t.id,
-                    "trait_label": t.trait_label,
+                    "trait_label": t.label,
                     "meaning": t.meaning,
                     "layer": format!("{:?}", t.layer).to_lowercase(),
                     "confidence": t.confidence,
@@ -300,7 +299,7 @@ async fn show_l3(app: &Arc<ramaria_app::App>, args: &MemoryArgs) -> anyhow::Resu
     Ok(())
 }
 
-fn print_trait_group(label: &str, traits: &[&ramaria_core::types::PersonalityTrait]) {
+fn print_trait_group(label: &str, traits: &[&ramaria_service::L3TraitView]) {
     if traits.is_empty() {
         return;
     }
@@ -314,7 +313,7 @@ fn print_trait_group(label: &str, traits: &[&ramaria_core::types::PersonalityTra
         };
         println!(
             "    {status_mark} {} (置信度: {:.2})",
-            t.trait_label,
+            t.label,
             t.confidence * 100.0
         );
         if !t.meaning.is_empty() {

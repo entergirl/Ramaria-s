@@ -8,6 +8,7 @@
 //! - 遵循隐私约定：输出用事实陈述（非原文），日志不含事实全文
 
 use anyhow::Context;
+use ramaria_service::{Engine, FactBrowseRequest};
 use std::sync::Arc;
 
 use crate::json;
@@ -39,15 +40,15 @@ pub enum FactCmd {
 const DEFAULT_FACT_PERSONA: &str = "rama-0001";
 
 /// 运行 fact 子命令分发。
-pub async fn run(app: &Arc<ramaria_app::App>, cmd: FactCmd, json: bool) -> anyhow::Result<()> {
+pub async fn run(engine: &Arc<Engine>, cmd: FactCmd, json: bool) -> anyhow::Result<()> {
     match cmd {
         FactCmd::List {
             persona,
             field,
             limit,
             offset,
-        } => run_list(app, persona, field, limit, offset, json).await,
-        FactCmd::Show { id } => run_show(app, id, json).await,
+        } => run_list(engine, persona, field, limit, offset, json).await,
+        FactCmd::Show { id } => run_show(engine, id, json).await,
     }
 }
 
@@ -77,7 +78,7 @@ fn parse_field(s: &str) -> anyhow::Result<ProfileField> {
 
 /// 列出 persona 的 active 事实。
 async fn run_list(
-    app: &Arc<ramaria_app::App>,
+    engine: &Arc<Engine>,
     persona: Option<String>,
     field: Option<String>,
     limit: Option<usize>,
@@ -91,16 +92,17 @@ async fn run_list(
         None => None,
     };
 
-    let mut facts = ramaria_app::commands::fact::fact_list(app, &persona_uid, field_parsed)
+    let page = engine
+        .memory_facts(FactBrowseRequest {
+            persona: persona_uid.clone(),
+            field: field_parsed,
+            limit: limit.and_then(|value| u32::try_from(value).ok()),
+            offset: u32::try_from(offset).ok(),
+        })
         .await
         .context("查询知识事实失败")?;
-
-    let total = facts.len();
-    if let Some(limit) = limit {
-        facts = facts.into_iter().skip(offset).take(limit).collect();
-    } else if offset > 0 {
-        facts = facts.into_iter().skip(offset).collect();
-    }
+    let total = page.total;
+    let facts = page.items;
 
     if json {
         let data = serde_json::json!({
@@ -143,8 +145,9 @@ async fn run_list(
 // =========================================================
 
 /// 查看单条事实详情（含版本链）。
-async fn run_show(app: &Arc<ramaria_app::App>, id: i64, json: bool) -> anyhow::Result<()> {
-    let fact = ramaria_app::commands::fact::fact_get(app, id)
+async fn run_show(engine: &Arc<Engine>, id: i64, json: bool) -> anyhow::Result<()> {
+    let detail = engine
+        .memory_fact_detail(id)
         .await
         .context("查询知识事实失败")?
         .ok_or_else(|| {
@@ -152,9 +155,8 @@ async fn run_show(app: &Arc<ramaria_app::App>, id: i64, json: bool) -> anyhow::R
             ramaria_core::error::RamariaError::validation(format!("知识事实 {id} 不存在"))
         })?;
 
-    let versions = ramaria_app::commands::fact::fact_versions(app, id)
-        .await
-        .context("查询事实版本链失败")?;
+    let fact = &detail.fact;
+    let versions = &detail.versions;
 
     if json {
         let data = serde_json::json!({

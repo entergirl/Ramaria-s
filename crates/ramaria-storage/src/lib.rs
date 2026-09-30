@@ -454,6 +454,13 @@ impl StoreCrud for SqliteStorage {
             .ok_or_else(|| RamariaError::validation("关键词非法（空/超长），拒绝写入词条池"))?;
         repo::keyword::upsert(&self.pool, &token).await
     }
+    /// 覆写为主键冲突 DO NOTHING 的幂等注入（已存在保持现状，不改任何列）。
+    async fn seed_keyword_canonical(&self, keyword: &str) -> RamariaResult<bool> {
+        // 与 upsert_keyword 同一防御口径：非法词条显式拒绝，不静默丢词。
+        let token = ramaria_core::keyword::KeywordToken::new(keyword)
+            .ok_or_else(|| RamariaError::validation("关键词非法（空/超长），拒绝写入词条池"))?;
+        repo::keyword::seed_canonical(&self.pool, &token).await
+    }
     async fn list_keywords(&self) -> RamariaResult<Vec<String>> {
         let tokens = repo::keyword::list_all(&self.pool).await?;
         Ok(tokens.into_iter().map(|t| t.into_inner()).collect())
@@ -1804,6 +1811,31 @@ mod tests {
         let storage = setup().await;
         let v = storage.get_schema_version().await.unwrap();
         assert!(v >= 1);
+    }
+
+    /// 索引版本：缺键按未构建（0）返回；显式写 0 / 1 读写往返一致。
+    #[tokio::test]
+    async fn index_version_defaults_to_unbuilt_and_roundtrips() {
+        let storage = setup().await;
+
+        // 删除 migration 预置值 → 缺键按未构建口径返回 0
+        sqlx::query("DELETE FROM schema_meta WHERE key = 'index_version'")
+            .execute(&storage.pool)
+            .await
+            .expect("删除索引版本键应成功");
+        assert_eq!(
+            storage.get_index_version().await.unwrap(),
+            0,
+            "缺键应按未构建（0）返回"
+        );
+
+        // 显式写 1 → 读回 1
+        storage.set_index_version(1).await.unwrap();
+        assert_eq!(storage.get_index_version().await.unwrap(), 1);
+
+        // 显式写 0 → 读回 0（尚未构建）
+        storage.set_index_version(0).await.unwrap();
+        assert_eq!(storage.get_index_version().await.unwrap(), 0);
     }
 
     /// 迁移完整性：空库初始化后 `_sqlx_migrations` 记录数与迁移目录文件数一致。

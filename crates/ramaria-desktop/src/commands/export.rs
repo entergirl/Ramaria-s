@@ -2,12 +2,15 @@
 //!
 //! 设计特点:
 //! - export_sessions_json / export_sessions_markdown: 导出对话数据为文件
+//! - 数据装配委托服务层导出用例（会话集合 + 消息），本模块负责 JSON / Markdown
+//!   渲染与文件写出（两入口渲染结构不同，渲染属入口能力）
 //! - 使用 Tauri dialog 选择保存路径（前端调用 open/save dialog 后传入路径）
 //! - JSON 格式：结构化 sessions → messages → L1 记忆
 //! - Markdown 格式：人类可读的对话记录
 //! - 导出路径安全校验：canonicalize + 白名单 + 符号链接拒绝，复用 path_guard 模块
 
 use crate::DesktopState;
+use ramaria_service::ExportDataRequest;
 use serde::Serialize;
 use tauri::State;
 
@@ -57,37 +60,29 @@ pub async fn export_sessions_json(
     // 路径安全校验（文件可能尚不存在，校验父目录）
     let canonical = crate::path_guard::validate_export_path(&output_path)?;
 
-    let sessions = state
-        .app
-        .storage()
-        .list_sessions()
+    let data = state
+        .engine
+        .export_sessions(ExportDataRequest::default())
         .await
-        .map_err(|e| format!("查询会话列表失败: {}", e))?;
+        .map_err(|e| crate::commands::service_error_message(&e, "查询导出数据失败"))?;
 
-    let mut export_sessions: Vec<ExportSession> = Vec::new();
-
-    for session in &sessions {
-        let messages = state
-            .app
-            .storage()
-            .list_messages(session.id)
-            .await
-            .map_err(|e| format!("查询消息失败 ({}): {}", session.id, e))?;
-
-        let export_msgs: Vec<ExportMessage> = messages
-            .into_iter()
+    let mut export_sessions: Vec<ExportSession> = Vec::with_capacity(data.sessions.len());
+    for entry in &data.sessions {
+        let export_msgs: Vec<ExportMessage> = entry
+            .messages
+            .iter()
             .map(|m| ExportMessage {
                 role: m.role.as_str().to_string(),
-                content: m.content,
-                persona_uid: m.persona_uid,
+                content: m.content.clone(),
+                persona_uid: m.persona_uid.clone(),
                 created_at: m.created_at,
             })
             .collect();
 
         export_sessions.push(ExportSession {
-            id: session.id.to_string(),
-            started_at: session.started_at,
-            ended_at: session.ended_at,
+            id: entry.session.id.to_string(),
+            started_at: entry.session.started_at,
+            ended_at: entry.session.ended_at,
             messages: export_msgs,
         });
     }
@@ -130,12 +125,11 @@ pub async fn export_sessions_markdown(
     // 路径安全校验（文件可能尚不存在，校验父目录）
     let canonical = crate::path_guard::validate_export_path(&output_path)?;
 
-    let sessions = state
-        .app
-        .storage()
-        .list_sessions()
+    let data = state
+        .engine
+        .export_sessions(ExportDataRequest::default())
         .await
-        .map_err(|e| format!("查询会话列表失败: {}", e))?;
+        .map_err(|e| crate::commands::service_error_message(&e, "查询导出数据失败"))?;
 
     let mut md = String::new();
     md.push_str("# Ramaria 对话导出\n\n");
@@ -145,21 +139,14 @@ pub async fn export_sessions_markdown(
     ));
     md.push_str("---\n\n");
 
-    for (i, session) in sessions.iter().enumerate() {
-        let start_time = chrono::DateTime::from_timestamp_millis(session.started_at)
+    for (i, entry) in data.sessions.iter().enumerate() {
+        let start_time = chrono::DateTime::from_timestamp_millis(entry.session.started_at)
             .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
             .unwrap_or_else(|| "未知时间".to_string());
 
         md.push_str(&format!("## 会话 {} — {}\n\n", i + 1, start_time));
 
-        let messages = state
-            .app
-            .storage()
-            .list_messages(session.id)
-            .await
-            .map_err(|e| format!("查询消息失败 ({}): {}", session.id, e))?;
-
-        for msg in &messages {
+        for msg in &entry.messages {
             let role_icon = match msg.role {
                 ramaria_core::types::MessageRole::User => "👤 **用户**",
                 ramaria_core::types::MessageRole::Assistant => "🤖 **助手**",
@@ -177,7 +164,7 @@ pub async fn export_sessions_markdown(
 
     std::fs::write(&canonical, &md).map_err(|e| format!("写入文件失败: {}", e))?;
 
-    let count = sessions.len();
+    let count = data.sessions.len();
     tracing::info!(
         file = %crate::path_guard::redact_path_label(&canonical),
         session_count = count,

@@ -15,6 +15,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use ramaria_core::error::RamariaError;
 use ramaria_core::types::{Message, MessageRole, PersonaKind};
+use ramaria_service::Engine;
 
 use super::types::{
     ContextTurn, DATASET_SCHEMA_VERSION, DEFAULT_PERSONA, DatasetItem, ItemRegister, ProbeDataset,
@@ -100,7 +101,7 @@ pub fn default_variants() -> Vec<ProbeVariant> {
 /// 返回:
 /// - 恒成功：文件/数据库路径失败时自动降级为内置夹具（静默降级 + warn）。
 pub async fn build_dataset_with_ablation(
-    app: &Arc<ramaria_app::App>,
+    engine: &Arc<Engine>,
     persona: Option<String>,
     questions_per_dim: usize,
     seed: u64,
@@ -108,7 +109,7 @@ pub async fn build_dataset_with_ablation(
     ablation: bool,
 ) -> ProbeDataset {
     let qpd = questions_per_dim.max(1);
-    let target = resolve_target_persona(app, persona.as_deref()).await;
+    let target = resolve_target_persona(engine, persona.as_deref()).await;
 
     // 按数据来源构建：文件 > 数据库 > fixture 兜底
     let mut ds = match source {
@@ -124,7 +125,7 @@ pub async fn build_dataset_with_ablation(
                 build_from_fixture(&target, qpd, seed)
             }
         },
-        None => match build_from_db(app, &target, qpd, seed).await {
+        None => match build_from_db(engine, &target, qpd, seed).await {
             Ok(ds) => ds,
             Err(e) => {
                 tracing::warn!(%e, "probe build 数据库构建失败，降级为内置夹具数据");
@@ -142,20 +143,20 @@ pub async fn build_dataset_with_ablation(
 
 /// 构建测试集（默认档位；等价于 `build_dataset_with_ablation(..., false)`）。
 pub async fn build_dataset(
-    app: &Arc<ramaria_app::App>,
+    engine: &Arc<Engine>,
     persona: Option<String>,
     questions_per_dim: usize,
     seed: u64,
     source: Option<&Path>,
 ) -> ProbeDataset {
-    build_dataset_with_ablation(app, persona, questions_per_dim, seed, source, false).await
+    build_dataset_with_ablation(engine, persona, questions_per_dim, seed, source, false).await
 }
 
 /// 执行 `probe build`（构建 + 输出）。
 // 参数为 `probe build` 的完整输入集合（含输出模式与消融开关），合并会降低可读性。
 #[allow(clippy::too_many_arguments)]
 pub async fn run_build(
-    app: &Arc<ramaria_app::App>,
+    engine: &Arc<Engine>,
     persona: Option<String>,
     questions_per_dim: usize,
     seed: u64,
@@ -165,7 +166,7 @@ pub async fn run_build(
     ablation: bool,
 ) -> anyhow::Result<()> {
     let dataset = build_dataset_with_ablation(
-        app,
+        engine,
         persona,
         questions_per_dim,
         seed,
@@ -219,14 +220,14 @@ pub async fn run_build(
 
 /// 从数据库构建测试集（tone 维度配对 persona 发言、fact 维度使用 L2 事件）。
 async fn build_from_db(
-    app: &Arc<ramaria_app::App>,
+    engine: &Arc<Engine>,
     persona_uid: &str,
     qpd: usize,
     seed: u64,
 ) -> anyhow::Result<ProbeDataset> {
-    let tone_pairs = collect_tone_pairs(app, persona_uid).await;
-    let fact_items = collect_fact_events(app, persona_uid).await;
-    let emotion_cands = collect_emotion_pairs(app, persona_uid).await;
+    let tone_pairs = collect_tone_pairs(engine, persona_uid).await;
+    let fact_items = collect_fact_events(engine, persona_uid).await;
+    let emotion_cands = collect_emotion_pairs(engine, persona_uid).await;
 
     tracing::info!(
         %persona_uid,
@@ -571,8 +572,8 @@ pub fn build_from_fixture(persona_uid: &str, qpd: usize, seed: u64) -> ProbeData
 /// - 白名单 kind 过滤（Char/Anim/Oc/Hist）天然排除"我方"（kind=user），
 ///   探针目标始终为"对方" persona；
 /// - 多个对方 persona 时取列表第一个（稳定可复跑），不引入发言量排序。
-async fn resolve_target_persona(app: &Arc<ramaria_app::App>, explicit: Option<&str>) -> String {
-    match app.storage().list_personas().await {
+async fn resolve_target_persona(engine: &Arc<Engine>, explicit: Option<&str>) -> String {
+    match engine.storage().list_personas().await {
         Ok(personas) => select_target_persona(&personas, explicit),
         Err(e) => {
             tracing::warn!(%e, "读取 persona 列表失败，使用默认 persona");
@@ -624,10 +625,10 @@ pub fn select_target_persona(
 ///
 /// 查询失败按会话跳过（记 warn），不中断整体构建。
 async fn collect_tone_pairs(
-    app: &Arc<ramaria_app::App>,
+    engine: &Arc<Engine>,
     persona_uid: &str,
 ) -> Vec<(String, String, Vec<ContextTurn>)> {
-    let sessions = match app.storage().list_sessions().await {
+    let sessions = match engine.storage().list_sessions().await {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(%e, "probe build 读取会话列表失败，语气模仿维度无候选");
@@ -637,7 +638,7 @@ async fn collect_tone_pairs(
 
     let mut pairs = Vec::new();
     for session in &sessions {
-        let messages = match app.storage().list_messages(session.id).await {
+        let messages = match engine.storage().list_messages(session.id).await {
             Ok(m) => m,
             Err(e) => {
                 tracing::warn!(session_id = %session.id, %e, "probe build 读取会话消息失败，跳过该会话");
@@ -722,10 +723,10 @@ fn push_context_turn(window: &mut Vec<ContextTurn>, role: &str, content: &str) {
 /// 情感维度评估"persona 面对情绪化用户消息时的回应恰当性"（rubric 0/0.5/1），
 /// 而非事实召回。
 async fn collect_emotion_pairs(
-    app: &Arc<ramaria_app::App>,
+    engine: &Arc<Engine>,
     persona_uid: &str,
 ) -> Vec<(String, String, Option<String>, Vec<ContextTurn>)> {
-    let pairs = collect_tone_pairs(app, persona_uid).await;
+    let pairs = collect_tone_pairs(engine, persona_uid).await;
     pairs
         .into_iter()
         .filter(|(q, _, _)| has_emotion_cue(q))
@@ -798,10 +799,10 @@ const EMOTION_POSITIVE_CUES: [&str; 10] = [
 /// 返回 `(question, reference, title)`（reference = 事件摘要，title 用于溯源）。
 /// 查询失败记 warn 后返回空（由上层夹具兜底）。
 async fn collect_fact_events(
-    app: &Arc<ramaria_app::App>,
+    engine: &Arc<Engine>,
     persona_uid: &str,
 ) -> Vec<(String, String, String)> {
-    let events = match app
+    let events = match engine
         .storage()
         .list_events_by_persona(persona_uid, 0, 10_000)
         .await

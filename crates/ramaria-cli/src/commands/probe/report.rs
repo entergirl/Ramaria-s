@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use ramaria_core::error::RamariaError;
+use ramaria_service::Engine;
 
 use super::evaluate::{
     FactItemScore, ItemEvaluation, ProbeEvaluation, VariantEvaluation, read_experiment,
@@ -736,7 +737,7 @@ pub struct VariantAuxMetrics {
 /// 6. `--ablation` 模式 → 自动识别 F0/B1 基线生成消融对比统计。
 /// 7. 输出 markdown / JSON 双形态。
 pub(super) async fn run_report(
-    _app: &Arc<ramaria_app::App>,
+    _engine: &Arc<Engine>,
     results_path: &Path,
     evaluation_path: Option<&Path>,
     calibration_path: Option<&Path>,

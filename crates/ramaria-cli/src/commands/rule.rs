@@ -21,6 +21,7 @@ use ramaria_memory::behavior::{
     RuleDegradeReason, RuleGenConfig, compute_incremental_update, density_cluster,
     fused_similarity, quality_gate, refine_cluster, sample_from_event, vectorize,
 };
+use ramaria_service::Engine;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -97,34 +98,29 @@ const DEFAULT_RULE_PERSONA: &str = "rama-0001";
 /// 运行 rule 子命令分发。
 ///
 /// 参数:
-/// - `app`: App 实例引用。
+/// - `engine`: 服务层引擎引用。
 /// - `cmd`: Rule 子命令。
 /// - `json`: JSON 信封输出。
 /// - `yes`: 自动确认所有确认点（delete 等）。
-pub async fn run(
-    app: &Arc<ramaria_app::App>,
-    cmd: RuleCmd,
-    json: bool,
-    yes: bool,
-) -> anyhow::Result<()> {
+pub async fn run(engine: &Arc<Engine>, cmd: RuleCmd, json: bool, yes: bool) -> anyhow::Result<()> {
     match cmd {
         RuleCmd::List {
             persona,
             limit,
             offset,
-        } => run_list(app, persona, limit, offset, json).await,
-        RuleCmd::Show { id } => run_show(app, id, json).await,
-        RuleCmd::Import { file, persona } => run_import(app, &file, persona, json).await,
+        } => run_list(engine, persona, limit, offset, json).await,
+        RuleCmd::Show { id } => run_show(engine, id, json).await,
+        RuleCmd::Import { file, persona } => run_import(engine, &file, persona, json).await,
         RuleCmd::Edit {
             id,
             reaction,
             avoid,
-        } => run_edit(app, id, reaction, avoid, json).await,
-        RuleCmd::Enable { id } => run_set_enabled(app, id, true, json).await,
-        RuleCmd::Disable { id } => run_set_enabled(app, id, false, json).await,
-        RuleCmd::Delete { id, force } => run_delete(app, id, force, json, yes).await,
-        RuleCmd::Evidence { id } => run_evidence(app, id, json).await,
-        RuleCmd::Relearn { persona } => run_relearn(app, persona, json).await,
+        } => run_edit(engine, id, reaction, avoid, json).await,
+        RuleCmd::Enable { id } => run_set_enabled(engine, id, true, json).await,
+        RuleCmd::Disable { id } => run_set_enabled(engine, id, false, json).await,
+        RuleCmd::Delete { id, force } => run_delete(engine, id, force, json, yes).await,
+        RuleCmd::Evidence { id } => run_evidence(engine, id, json).await,
+        RuleCmd::Relearn { persona } => run_relearn(engine, persona, json).await,
         RuleCmd::Clusters {
             persona,
             theta_nb,
@@ -135,7 +131,7 @@ pub async fn run(
             split_ratio,
         } => {
             run_clusters(
-                app,
+                engine,
                 persona,
                 theta_nb,
                 min_cluster_size,
@@ -156,14 +152,15 @@ pub async fn run(
 
 /// 列出 persona 的行为规则。
 async fn run_list(
-    app: &Arc<ramaria_app::App>,
+    engine: &Arc<Engine>,
     persona: Option<String>,
     limit: Option<usize>,
     offset: usize,
     json: bool,
 ) -> anyhow::Result<()> {
     let persona_uid = persona.unwrap_or_else(|| DEFAULT_RULE_PERSONA.to_string());
-    let mut rules = ramaria_app::commands::behavior::behavior_list_rules(app, &persona_uid)
+    let mut rules = engine
+        .behavior_list_rules(&persona_uid)
         .await
         .context("查询行为规则失败")?;
 
@@ -221,8 +218,9 @@ async fn run_list(
 // =========================================================
 
 /// 查看单条规则详情。
-async fn run_show(app: &Arc<ramaria_app::App>, id: i64, json: bool) -> anyhow::Result<()> {
-    let rule = ramaria_app::commands::behavior::behavior_get_rule(app, id)
+async fn run_show(engine: &Arc<Engine>, id: i64, json: bool) -> anyhow::Result<()> {
+    let rule = engine
+        .behavior_get_rule(id)
         .await
         .context("查询行为规则失败")?
         .ok_or_else(|| anyhow::anyhow!("行为规则 {id} 不存在"))?;
@@ -276,7 +274,7 @@ async fn run_show(app: &Arc<ramaria_app::App>, id: i64, json: bool) -> anyhow::R
 
 /// 手工导入规则（JSON 校验在行为层执行）。
 async fn run_import(
-    app: &Arc<ramaria_app::App>,
+    engine: &Arc<Engine>,
     file: &str,
     persona: Option<String>,
     json: bool,
@@ -294,7 +292,8 @@ async fn run_import(
         std::fs::read_to_string(file).with_context(|| format!("读取文件 {file} 失败"))?
     };
 
-    let id = ramaria_app::commands::behavior::behavior_import_rule(app, &persona_uid, &content)
+    let id = engine
+        .behavior_import_rule(&persona_uid, &content)
         .await
         .context("规则导入校验失败")?;
 
@@ -316,7 +315,7 @@ async fn run_import(
 
 /// 编辑规则（reaction / avoid；编辑后转为 Manual 并写 S1 反馈）。
 async fn run_edit(
-    app: &Arc<ramaria_app::App>,
+    engine: &Arc<Engine>,
     id: i64,
     reaction: Option<String>,
     avoid: Option<String>,
@@ -325,7 +324,8 @@ async fn run_edit(
     if reaction.is_none() && avoid.is_none() {
         anyhow::bail!("请至少提供 --reaction 或 --avoid 之一");
     }
-    let mut rule = ramaria_app::commands::behavior::behavior_get_rule(app, id)
+    let mut rule = engine
+        .behavior_get_rule(id)
         .await
         .context("查询行为规则失败")?
         .ok_or_else(|| anyhow::anyhow!("行为规则 {id} 不存在"))?;
@@ -345,7 +345,8 @@ async fn run_edit(
             .collect();
     }
 
-    ramaria_app::commands::behavior::behavior_edit_rule(app, &mut rule, None)
+    engine
+        .behavior_edit_rule(&mut rule, None)
         .await
         .context("编辑行为规则失败")?;
 
@@ -364,12 +365,13 @@ async fn run_edit(
 
 /// 启用/禁用规则（disable 写 S1 反馈）。
 async fn run_set_enabled(
-    app: &Arc<ramaria_app::App>,
+    engine: &Arc<Engine>,
     id: i64,
     enabled: bool,
     json: bool,
 ) -> anyhow::Result<()> {
-    ramaria_app::commands::behavior::behavior_set_rule_enabled(app, id, enabled, None)
+    engine
+        .behavior_set_rule_enabled(id, enabled, None)
         .await
         .context("切换规则状态失败")?;
 
@@ -388,14 +390,15 @@ async fn run_set_enabled(
 
 /// 删除规则（破坏性操作：确认 / --yes / --force）。
 async fn run_delete(
-    app: &Arc<ramaria_app::App>,
+    engine: &Arc<Engine>,
     id: i64,
     force: bool,
     json: bool,
     yes: bool,
 ) -> anyhow::Result<()> {
     // 先确认规则存在（避免删除不存在的 id 静默成功）
-    ramaria_app::commands::behavior::behavior_get_rule(app, id)
+    engine
+        .behavior_get_rule(id)
         .await
         .context("查询行为规则失败")?
         .ok_or_else(|| anyhow::anyhow!("行为规则 {id} 不存在"))?;
@@ -413,7 +416,8 @@ async fn run_delete(
         return Ok(());
     }
 
-    ramaria_app::commands::behavior::behavior_delete_rule(app, id)
+    engine
+        .behavior_delete_rule(id)
         .await
         .context("删除行为规则失败")?;
 
@@ -430,8 +434,9 @@ async fn run_delete(
 // =========================================================
 
 /// 展示规则证据链（规则 → 事件 → 原文摘要，只含结构化字段）。
-async fn run_evidence(app: &Arc<ramaria_app::App>, id: i64, json: bool) -> anyhow::Result<()> {
-    let items = ramaria_app::commands::behavior::behavior_rule_evidence(app, id)
+async fn run_evidence(engine: &Arc<Engine>, id: i64, json: bool) -> anyhow::Result<()> {
+    let items = engine
+        .behavior_rule_evidence(id)
         .await
         .context("查询规则证据失败")?;
 
@@ -479,14 +484,15 @@ async fn run_evidence(app: &Arc<ramaria_app::App>, id: i64, json: bool) -> anyho
 ///
 /// 说明:
 /// - 无事件时返回空统计（不报错），用于手动补跑规则学习的幂等入口。
-/// - 调用 app 层 `behavior_learn`；行为层配置关闭时同样返回空统计。
+/// - 调用服务层行为用例；行为层配置关闭时同样返回空统计。
 async fn run_relearn(
-    app: &Arc<ramaria_app::App>,
+    engine: &Arc<Engine>,
     persona: Option<String>,
     json: bool,
 ) -> anyhow::Result<()> {
     let persona_uid = persona.unwrap_or_else(|| DEFAULT_RULE_PERSONA.to_string());
-    let outcome = ramaria_app::commands::behavior::behavior_learn(app, &persona_uid)
+    let outcome = engine
+        .behavior_learn(&persona_uid)
         .await
         .context("行为学习失败")?;
 
@@ -531,7 +537,7 @@ const MAX_SIMILARITY_PAIRS: usize = 500_000;
 /// - `ramaria rule clusters [--persona <uid>] [--theta-nb <f64>] [--min-cluster-size <n>] [--beta1 <f64>] [--beta2 <f64>] [--theta-join <f64>...] [--split-ratio <f64>]`
 ///
 /// 参数:
-/// - `app`: App 实例引用。
+/// - `engine`: 服务层引擎引用。
 /// - `persona`: 目标 persona（None = 默认 persona）。
 /// - `theta_nb` / `min_cluster_size` / `beta1` / `beta2`: 本次计算的参数覆盖（None = 取行为配置值）。
 /// - `theta_join`: θ_join 档位列表（空 = 不启用时序增量模拟）。
@@ -550,7 +556,7 @@ const MAX_SIMILARITY_PAIRS: usize = 500_000;
 // 与 probe run 的 `run_experiment` 采用同一 allow 约定。
 #[allow(clippy::too_many_arguments)]
 async fn run_clusters(
-    app: &Arc<ramaria_app::App>,
+    engine: &Arc<Engine>,
     persona: Option<String>,
     theta_nb: Option<f64>,
     min_cluster_size: Option<usize>,
@@ -564,7 +570,7 @@ async fn run_clusters(
 
     // 本次计算参数：行为配置克隆 + CLI 覆盖（仅本次计算，不回写配置）；
     // 克隆体同时用于管线口径复刻与质控闸门阈值派生（RuleGenConfig::from）
-    let mut behavior = app.config().behavior.clone();
+    let mut behavior = engine.config().behavior.clone();
     if let Some(v) = theta_nb {
         behavior.theta_nb = v;
     }
@@ -586,7 +592,7 @@ async fn run_clusters(
     let beta3 = (1.0 - beta1 - beta2).max(0.0);
 
     // 事件（只读查询）
-    let events = app
+    let events = engine
         .storage()
         .list_events_by_persona(&persona_uid, 0, i64::MAX)
         .await
@@ -600,7 +606,7 @@ async fn run_clusters(
 
     // 样本与双通道向量化（embedding 不可用 → 纯关键词降级，不阻塞）
     let mut samples: Vec<BehaviorSample> = events.iter().map(sample_from_event).collect();
-    let embedder = app.embedding_provider();
+    let embedder = engine.embedding();
     let embedding_available = embedder.is_some();
     vectorize(&mut samples, &events, embedder.as_deref())
         .await

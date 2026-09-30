@@ -204,9 +204,11 @@ async fn search(
     }
     // 嵌入 provider 取快照后在锁外使用（未配置 → 向量通道降级，检索走 BM25 + 关键词镜像）
     let embedding = engine.embedding_ref();
+    let retriever = engine.retriever_slot();
+    let keyword_mirror = engine.keyword_mirror();
     let memory_output = assemble_recall(RecallInput {
-        retriever: &**engine.retriever_slot(),
-        keyword_mirror: &**engine.keyword_mirror_ref(),
+        retriever: &*retriever,
+        keyword_mirror: &*keyword_mirror,
         storage: engine.storage_ref().as_ref(),
         embedding: embedding.as_deref(),
         query,

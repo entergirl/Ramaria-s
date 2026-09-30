@@ -10,7 +10,7 @@
 
 use anyhow::Context;
 use futures::StreamExt;
-use ramaria_app::SendMessageStream;
+use ramaria_service::{ChatEventStream, ChatStreamRequest, Engine, StreamEvent};
 use std::sync::Arc;
 
 /// ask 命令参数。
@@ -31,15 +31,20 @@ pub struct AskArgs {
 
 /// 确保检索索引已加载（ask/chat 共用，幂等）。
 ///
-/// CLI 为"单命令进程"：每次启动检索器为空，必须先调用 `rebuild_retriever`
+/// CLI 为"单命令进程"：每次启动检索器为空，必须先重建
 /// 从存储层构建内存索引，否则 L1/L2/utt 记忆检索恒为空。
 ///
 /// 降级策略:
-/// - 重建成功但日志提示文档数即可；失败记 warn，不阻塞对话（对话仍有桥接 + LLM）。
-pub async fn ensure_retriever_loaded(app: &Arc<ramaria_app::App>) {
-    match app.rebuild_retriever().await {
+/// - 重建成功但日志提示文档数即可；失败记 warn，不阻塞对话（对话仍有桥接 + LLM）；
+/// - 重建成功后再刷新应用状态：重建已写回索引版本，状态机随之与事实对齐
+///   （缺索引的库在本次构建后脱离待构建状态，对话门禁可放行）。
+pub async fn ensure_retriever_loaded(engine: &Arc<Engine>) {
+    match engine.rebuild_index().await {
         Ok(count) => {
             tracing::info!(docs = count, "对话前检索索引已加载");
+            if let Err(e) = engine.refresh_setup_state().await {
+                tracing::warn!(%e, "重建后刷新应用状态失败（降级不阻塞）");
+            }
         }
         Err(e) => {
             tracing::warn!(%e, "加载检索索引失败，本次对话记忆检索不可用（降级不阻塞）");
@@ -48,17 +53,17 @@ pub async fn ensure_retriever_loaded(app: &Arc<ramaria_app::App>) {
 }
 
 /// 执行 ask 命令。
-pub async fn run(app: &Arc<ramaria_app::App>, args: AskArgs) -> anyhow::Result<()> {
+pub async fn run(engine: &Arc<Engine>, args: AskArgs) -> anyhow::Result<()> {
     // Step 0: 加载检索索引（CLI 为单命令进程，启动时检索器为空；
-    //        必须先 rebuild 才能命中 L1/L2/utt 记忆检索）。
+    //        必须先重建才能命中 L1/L2/utt 记忆检索）。
     //        失败降级记 warn，不阻塞对话。
-    ensure_retriever_loaded(app).await;
+    ensure_retriever_loaded(engine).await;
 
     // Step 1: 隐私确认
-    crate::privacy::ensure_privacy(app, args.yes).await?;
+    crate::privacy::ensure_privacy(engine, args.yes).await?;
 
     // Step 2: 解析可选参数
-    let persona_uid = args.persona.as_deref();
+    let persona_uid = args.persona.clone();
     let session_id = args
         .session
         .as_deref()
@@ -67,10 +72,17 @@ pub async fn run(app: &Arc<ramaria_app::App>, args: AskArgs) -> anyhow::Result<(
         .context("无效的 session UUID")?;
 
     // Step 3: 发送消息
-    let stream: SendMessageStream = app
-        .send_message(&args.message, persona_uid, session_id)
+    let handle = engine
+        .chat_stream(ChatStreamRequest {
+            message: args.message,
+            persona: persona_uid,
+            session_id,
+            seed_history: Vec::new(),
+            config_override: None,
+        })
         .await
         .context("发送消息失败")?;
+    let stream = handle.events;
 
     // Step 4: 消费流
     if args.json {
@@ -89,7 +101,7 @@ pub async fn run(app: &Arc<ramaria_app::App>, args: AskArgs) -> anyhow::Result<(
 }
 
 /// 流式输出：逐字打印到 stdout，`||` 自动替换为换行（人格短句渲染）。
-async fn consume_streaming(mut stream: SendMessageStream) -> anyhow::Result<()> {
+async fn consume_streaming(mut stream: ChatEventStream) -> anyhow::Result<()> {
     let mut total_chars = 0usize;
     let mut has_error = false;
     let mut formatter = crate::ui::PersonaFormatter::new();
@@ -97,7 +109,7 @@ async fn consume_streaming(mut stream: SendMessageStream) -> anyhow::Result<()> 
     while let Some(event_result) = stream.next().await {
         match event_result {
             Ok(event) => match event {
-                ramaria_app::stream_event::StreamEvent::Delta { content, .. } => {
+                StreamEvent::Delta { content, .. } => {
                     // 通过 PersonaFormatter 处理 || → 换行
                     let formatted = formatter.feed(&content);
                     if !formatted.is_empty() {
@@ -105,12 +117,12 @@ async fn consume_streaming(mut stream: SendMessageStream) -> anyhow::Result<()> 
                     }
                     total_chars += content.chars().count();
                 }
-                ramaria_app::stream_event::StreamEvent::Done {
+                StreamEvent::Done {
                     total_chars: tc, ..
                 } => {
                     total_chars = tc;
                 }
-                ramaria_app::stream_event::StreamEvent::Error { error, .. } => {
+                StreamEvent::Error { error, .. } => {
                     has_error = true;
                     eprintln!();
                     crate::ui::warn(&format!("LLM 返回错误: {error}"));
@@ -143,18 +155,18 @@ async fn consume_streaming(mut stream: SendMessageStream) -> anyhow::Result<()> 
 }
 
 /// 非流式输出：等待完整回复后一次性打印。`||` 替换为换行。
-async fn consume_full(mut stream: SendMessageStream) -> anyhow::Result<()> {
+async fn consume_full(mut stream: ChatEventStream) -> anyhow::Result<()> {
     let mut full_reply = String::new();
     let mut has_error = false;
 
     while let Some(event_result) = stream.next().await {
         match event_result {
             Ok(event) => match event {
-                ramaria_app::stream_event::StreamEvent::Delta { content, .. } => {
+                StreamEvent::Delta { content, .. } => {
                     full_reply.push_str(&content);
                 }
-                ramaria_app::stream_event::StreamEvent::Done { .. } => {}
-                ramaria_app::stream_event::StreamEvent::Error { error, .. } => {
+                StreamEvent::Done { .. } => {}
+                StreamEvent::Error { error, .. } => {
                     has_error = true;
                     eprintln!();
                     crate::ui::warn(&format!("LLM 返回错误: {error}"));
@@ -184,7 +196,7 @@ async fn consume_full(mut stream: SendMessageStream) -> anyhow::Result<()> {
 ///
 /// StreamEvent 已实现 Serialize，
 /// 输出为合法 JSON（修复 v1.4 用 Debug 格式输出非合法 JSON 的问题）。
-async fn consume_json(mut stream: SendMessageStream) -> anyhow::Result<()> {
+async fn consume_json(mut stream: ChatEventStream) -> anyhow::Result<()> {
     while let Some(event_result) = stream.next().await {
         match event_result {
             Ok(event) => match serialize_event_line(&event) {
@@ -211,7 +223,7 @@ async fn consume_json(mut stream: SendMessageStream) -> anyhow::Result<()> {
 /// 返回:
 /// - `Some(line)`: 合法 JSON 行（含 `type` 标签）。
 /// - `None`: 序列化失败（不应发生，StreamEvent 为简单结构）。
-fn serialize_event_line(event: &ramaria_app::stream_event::StreamEvent) -> Option<String> {
+fn serialize_event_line(event: &StreamEvent) -> Option<String> {
     serde_json::to_string(event).ok()
 }
 
@@ -219,9 +231,7 @@ fn serialize_event_line(event: &ramaria_app::stream_event::StreamEvent) -> Optio
 ///
 /// 输出形态: `{"type":"done","reply":"…","session_id":"…","total_chars":N}`。
 /// 流中出现错误时输出 error 事件且不输出 done（与事件流语义一致）。
-async fn consume_json_aggregate(mut stream: SendMessageStream) -> anyhow::Result<()> {
-    use ramaria_app::stream_event::StreamEvent;
-
+async fn consume_json_aggregate(mut stream: ChatEventStream) -> anyhow::Result<()> {
     let mut full_reply = String::new();
     let mut session_id: Option<String> = None;
     let mut total_chars = 0usize;
@@ -290,7 +300,6 @@ async fn consume_json_aggregate(mut stream: SendMessageStream) -> anyhow::Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ramaria_app::stream_event::StreamEvent;
     use uuid::Uuid;
 
     /// `ask --json` 事件流每行必须是合法 JSON 且带 type 标签。

@@ -17,10 +17,10 @@ use ramaria_core::config::RamariaConfig;
 use ramaria_core::error::RamariaError;
 use ramaria_core::lock::read_recover;
 use ramaria_core::traits::ChatMessage;
-use ramaria_core::types::MessageRole;
+use ramaria_core::types::{MessageRole, now_ms};
 use ramaria_memory::retriever::SearchRequest;
 use ramaria_memory::utt::builder::UttBuilder;
-use uuid::Uuid;
+use ramaria_service::{ChatStreamRequest, Engine, StreamEvent};
 
 use super::types::{
     AblationProfile, ContextTurn, DATASET_SCHEMA_VERSION, DatasetItem, ItemRegister,
@@ -36,11 +36,10 @@ use super::types::{
 /// 2. 加载生效配置（config.toml + DB 双写合并）作为档位基准。
 /// 3. 逐档位：覆盖 utt 三参数 →（可选）按档位参数重建 utt 块 → 逐题跑对话管线。
 /// 4. 单题/单档位失败均不中断其余（记 warn + 记录失败原因）。
-// 参数为命令入口的完整输入集合（含输出模式与隐私透传），合并会降低可读性；
-// 与 app_chat.rs 的 `build_system_prompt_with_context` 采用同一 allow 约定。
+// 参数为命令入口的完整输入集合（含输出模式与隐私透传），合并会降低可读性。
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_experiment(
-    app: &Arc<ramaria_app::App>,
+    engine: &Arc<Engine>,
     dataset_path: PathBuf,
     variants_filter: Option<String>,
     limit: Option<usize>,
@@ -67,7 +66,7 @@ pub(super) async fn run_experiment(
 
     // Step 2-5: 构建档位实验结果（隐私确认/配置基准/逐档位批量；单题失败不中断）
     let experiment = build_experiment_with_repeat(
-        app,
+        engine,
         &dataset,
         &dataset_path,
         variants_filter.as_deref(),
@@ -130,7 +129,7 @@ pub(super) async fn run_experiment(
 /// 4. 逐档位：覆盖 utt 三参数 →（可选）按档位参数重建 utt 块 → 逐题跑对话管线。
 /// 5. 单题/单档位失败均不中断其余（记 warn + 记录失败原因）。
 pub async fn build_experiment(
-    app: &Arc<ramaria_app::App>,
+    engine: &Arc<Engine>,
     dataset: &ProbeDataset,
     dataset_path: &Path,
     variants_filter: Option<&str>,
@@ -146,27 +145,26 @@ pub async fn build_experiment(
         );
     }
 
-    // Step 2: 加载生效配置作为档位基准（失败降级为 App 默认配置）
-    let base_config = load_effective_config(app).await;
+    // Step 2: 加载生效配置作为档位基准（失败降级为引擎默认配置）
+    let base_config = load_effective_config(engine).await;
 
     // Step 3: 隐私确认（线上 provider 需确认；本地 LM Studio 直接通过）
-    crate::privacy::ensure_privacy(app, yes).await?;
+    ensure_privacy_with_engine(engine, yes).await?;
 
     // Step 3.5: 检索器就绪保障。
     //
-    // `App::new` 构造的是**空检索器**（见 `app.rs` 构造注释），必须显式
-    // `rebuild_retriever` 才会从存储装载 L1/L2 文档；档位实验此前只依赖
-    // `rebuild_utt_for_config` 内的重建调用，因此 `--no-rebuild-utt` 会连同
+    // 引擎的检索索引槽为懒加载（首次召回前为空、不装载任何文档）；档位实验此前
+    // 只依赖 `rebuild_utt_for_config` 内的重建调用，因此 `--no-rebuild-utt` 会连同
     // 检索器装载一并跳过 —— RAG 记忆与知识通道静默失效，fact 维指标失真
     // （表现为 B0/B1/F0 事实维趋同、回复答"没有相关记录"）。
-    // 此处无条件先装载一次，保证任何档位组合都在"检索器已就绪"前提下运行。
-    if let Err(e) = app.rebuild_retriever().await {
+    // 此处无条件先重建一次，保证任何档位组合都在"检索器已就绪"前提下运行。
+    if let Err(e) = engine.rebuild_index().await {
         tracing::warn!(%e, "probe run 检索器装载失败，RAG 记忆可能缺失");
     }
 
     // Step 3.6: 实验有效性自检——检索器就绪度与各通道命中数写入元数据，
     // 跑数结束即可判定该轮是否有效（检索器空载时输出告警）。
-    let diagnostics = collect_run_diagnostics(app, dataset, &dataset.persona_uid).await;
+    let diagnostics = collect_run_diagnostics(engine, dataset, &dataset.persona_uid).await;
 
     // Step 4: 过滤档位（--variants；无效 id 记 warn 跳过）
     let variants = filter_variants(&dataset.variants, variants_filter);
@@ -247,7 +245,7 @@ pub async fn build_experiment(
         let cut_key = (variant.theta_gap_minutes, variant.max_msgs_per_block);
         if rebuild_utt
             && !rebuilt_cuts.contains_key(&cut_key)
-            && let Err(e) = rebuild_utt_for_config(app, &variant_config).await
+            && let Err(e) = rebuild_utt_for_config(engine, &variant_config).await
         {
             tracing::warn!(
                 variant_id = %variant.id,
@@ -269,7 +267,8 @@ pub async fn build_experiment(
             .min(dataset.items.len());
         for item in dataset.items.iter().take(max_runs) {
             item_config.injection.social_tone = item.register.is_chat();
-            let result = run_single_question(app, &item_config, &dataset.persona_uid, item).await;
+            let result =
+                run_single_question(engine, &item_config, &dataset.persona_uid, item).await;
             if result.error.is_some() {
                 failed += 1;
                 tracing::warn!(
@@ -333,7 +332,7 @@ pub async fn build_experiment(
 ///   为口径，不期待单次命令逐字复现。
 #[allow(clippy::too_many_arguments)] // 参数与 build_experiment 一致（另加 repeat 聚合数）
 pub async fn build_experiment_with_repeat(
-    app: &Arc<ramaria_app::App>,
+    engine: &Arc<Engine>,
     dataset: &ProbeDataset,
     dataset_path: &Path,
     variants_filter: Option<&str>,
@@ -344,7 +343,7 @@ pub async fn build_experiment_with_repeat(
 ) -> anyhow::Result<ProbeExperiment> {
     if repeat <= 1 {
         return build_experiment(
-            app,
+            engine,
             dataset,
             dataset_path,
             variants_filter,
@@ -360,7 +359,7 @@ pub async fn build_experiment_with_repeat(
         tracing::info!(round = i + 1, total = repeat, "probe run 统计法重复轮开始");
         rounds.push(
             build_experiment(
-                app,
+                engine,
                 dataset,
                 dataset_path,
                 variants_filter,
@@ -518,15 +517,13 @@ pub(super) fn t_critical_975(n: usize) -> f64 {
 }
 
 /// 加载生效配置（config.toml + DB 双写合并，与 `blocks rebuild` 一致）。
-/// 加载失败记 warn 并降级为 App 默认配置（不阻塞探针）。
-async fn load_effective_config(app: &Arc<ramaria_app::App>) -> RamariaConfig {
-    let config_path = PathBuf::from(&app.config().paths.config_dir).join("config.toml");
-    let sync = ramaria_app::ConfigSyncService::new(app.storage().clone(), config_path);
-    match sync.load_config_only().await {
+/// 加载失败记 warn 并降级为引擎默认配置（不阻塞探针）。
+async fn load_effective_config(engine: &Arc<Engine>) -> RamariaConfig {
+    match engine.load_full_config().await {
         Ok(cfg) => cfg,
         Err(e) => {
-            tracing::warn!(%e, "读取生效配置失败，档位基准使用 App 默认配置");
-            app.config().clone()
+            tracing::warn!(%e, "读取生效配置失败，档位基准使用引擎默认配置");
+            engine.config().as_ref().clone()
         }
     }
 }
@@ -538,23 +535,24 @@ async fn load_effective_config(app: &Arc<ramaria_app::App>) -> RamariaConfig {
 /// - embedding 不可用时块照常入库（仅无向量，检索退化为关键词通道）。
 /// - 失败返回 Err，由调用方记 warn 后继续（档位实验不中断）。
 async fn rebuild_utt_for_config(
-    app: &Arc<ramaria_app::App>,
+    engine: &Arc<Engine>,
     config: &RamariaConfig,
 ) -> anyhow::Result<()> {
-    let sessions = app.storage().list_sessions().await?;
+    let sessions = engine.storage().list_sessions().await?;
     for session in &sessions {
-        app.storage()
+        engine
+            .storage()
             .delete_utt_blocks_by_session(session.id)
             .await?;
     }
     let builder = UttBuilder::from_config(&config.utt);
-    let embedding = app.embedding_provider();
+    let embedding = engine.embedding();
     let embedder: Option<&dyn ramaria_core::EmbeddingProvider> =
         embedding.as_ref().map(|arc| arc.as_ref());
     builder
-        .rebuild_all(app.storage().as_ref(), embedder)
+        .rebuild_all(engine.storage().as_ref(), embedder)
         .await?;
-    app.rebuild_retriever().await?;
+    engine.rebuild_index().await?;
     Ok(())
 }
 
@@ -589,17 +587,20 @@ pub(super) fn run_validity(
 ///   自由文本查询与检索器融合检索统计各通道命中；命中为 0 且文档数 > 0 时给出告警。
 /// - 检索器文档数为 0 直接判定本轮无效（RAG/知识通道空转）。
 async fn collect_run_diagnostics(
-    app: &Arc<ramaria_app::App>,
+    engine: &Arc<Engine>,
     dataset: &ProbeDataset,
     persona_uid: &str,
 ) -> ProbeRunDiagnostics {
-    // 1. 静态计数（读锁内同步取值）
-    let retriever = app.retriever();
+    // 1. 静态计数（读锁内同步取值；索引尚未加载时按 0 计）
+    let retriever = engine.retriever_slot();
     let (retriever_doc_count, utt_doc_count) = {
         let guard = read_recover(&retriever, "probe_run.retriever");
-        (guard.doc_count(), guard.utt_doc_count())
+        match guard.as_ref() {
+            Some(retriever) => (retriever.doc_count(), retriever.utt_doc_count()),
+            None => (0, 0),
+        }
     };
-    let keyword_service = app.keyword_service();
+    let keyword_service = engine.keyword_mirror();
     let (keyword_doc_count, keyword_pool_len, composite, pool) = {
         let guard = read_recover(&keyword_service, "probe_run.keyword_service");
         (
@@ -610,8 +611,8 @@ async fn collect_run_diagnostics(
         )
     };
 
-    let embeddings_available = app.is_embedding_available();
-    let embedder = app.embedding_provider();
+    let embeddings_available = engine.is_embedding_available();
+    let embedder = engine.embedding();
 
     // 2. 自检查询：数据集前 5 题
     let queries: Vec<String> = dataset
@@ -645,16 +646,19 @@ async fn collect_run_diagnostics(
         // 检索器融合检索（含关键词通道）；读锁内仅同步检索，不跨 await
         let results = {
             let guard = read_recover(&retriever, "probe_run.retriever");
-            guard.search_with_keyword_hits(
-                &SearchRequest {
-                    query: query.clone(),
-                    persona_uid: Some(persona_uid.to_string()),
-                    top_k: 5,
-                    filter_share: false,
-                },
-                query_vec.as_deref(),
-                Some(kw_hits),
-            )
+            match guard.as_ref() {
+                Some(retriever) => retriever.search_with_keyword_hits(
+                    &SearchRequest {
+                        query: query.clone(),
+                        persona_uid: Some(persona_uid.to_string()),
+                        top_k: 5,
+                        filter_share: false,
+                    },
+                    query_vec.as_deref(),
+                    Some(kw_hits),
+                ),
+                None => Vec::new(),
+            }
         };
         fused_hits += results.len();
         bm25_hits += results.iter().filter(|r| r.bm25_score.is_some()).count();
@@ -739,7 +743,7 @@ pub(super) fn effective_question(item: &DatasetItem) -> String {
 /// 跑单题对话并收集输出与指标。
 ///
 /// 降级策略:
-/// - `send_message` 本身失败（状态/隐私/存储）→ 记录 error，指标置零。
+/// - 前置编排失败（状态/隐私/索引装载）→ 记录 error，指标置零。
 /// - 流内 Error 事件 → 记录 error，reply 保留已收到的部分。
 ///
 /// 语境补全:
@@ -751,14 +755,14 @@ pub(super) fn effective_question(item: &DatasetItem) -> String {
 /// - `statement` 题经 `effective_question` 追加陈述说明引导后送入管线（社交基调
 ///   由调用方按题关闭）；`ProbeRunItem.question` 仍记录原始题面。
 ///
-/// 残留清理（回归修复）:
-/// - probe 每题以 `session_id=None` 走 resolve_session 自动新建活跃 session，
-///   旧实现不关闭/删除 → 残留 session 被桌面端空闲检测误当真实对话关闭，
-///   触发 L1/风格统计/L2 学习，把模型自答的合成对话当成 persona 真实社交记录。
-/// - 本函数在题跑完（含发送失败与流内错误路径）后删除本次自动创建的测试
-///   session（含消息），不留任何残留、不进入生命周期、不触发学习。
+/// 残留清理:
+/// - 每题以 `session_id=None` 由服务层新建测试 session；残留 session 会被桌面端
+///   空闲检测误当真实对话关闭，触发 L1/风格统计/L2 学习，把模型自答的合成对话
+///   当成 persona 真实社交记录。
+/// - 本函数在题跑完（含流内错误路径）后按句柄会话删除本次新建的测试 session
+///   （含消息），不进入生命周期、不触发学习。
 async fn run_single_question(
-    app: &Arc<ramaria_app::App>,
+    engine: &Arc<Engine>,
     config: &RamariaConfig,
     persona_uid: &str,
     item: &DatasetItem,
@@ -776,22 +780,26 @@ async fn run_single_question(
         "probe run 单题预置上文"
     );
 
-    // 记录调用前的活跃 session：resolve_session 在 session_id=None 时把 lifecycle
-    // 活跃指针指向本次新建 session；顺序执行（无并发）下可用前后对比定位该 session。
-    let prev_active_session = app.get_active_session_id();
-
     // 送入管线的题面按语域切换（statement 追加陈述引导）；`ProbeRunItem.question`
     // 仍记录原始题面（评分侧参考兜底 / 情境判定依赖原题面）。
     let question = effective_question(item);
-    let stream = match app
-        .send_message_with_history(&question, Some(persona_uid), None, config, seed_history)
+    // 调用窗口起点：前置编排失败时用于定位本次可能新建的测试 session
+    let call_started_ms = now_ms();
+    let handle = match engine
+        .chat_stream(ChatStreamRequest {
+            message: question,
+            persona: Some(persona_uid.to_string()),
+            session_id: None,
+            seed_history,
+            config_override: Some(Arc::new(config.clone())),
+        })
         .await
     {
-        Ok(s) => s,
+        Ok(handle) => handle,
         Err(e) => {
-            // 发送前失败：resolve_session 之后才创建 session，此处仍可能已创建，
-            // 统一按活跃指针变化清理本次新建的测试 session。
-            cleanup_probe_session(app, probe_created_session(app, prev_active_session)).await;
+            // 前置编排失败：会话可能已在创建后中断（召回前置的索引装载故障），
+            // 按调用窗口尽力清理本次新建的测试 session。
+            cleanup_probe_session_after_error(engine, persona_uid, call_started_ms).await;
             return ProbeRunItem {
                 item_id: item.id.clone(),
                 dimension: item.dimension.clone(),
@@ -806,21 +814,21 @@ async fn run_single_question(
         }
     };
 
-    let mut stream = stream;
+    // 句柄携带本次流式生成的会话定位；流消费完成后按该 id 清理
+    let session_id = handle.session_id;
+    let mut stream = handle.events;
     while let Some(event_result) = stream.next().await {
         match event_result {
             Ok(event) => match event {
-                ramaria_app::stream_event::StreamEvent::Delta { content, .. } => {
+                StreamEvent::Delta { content, .. } => {
                     reply.push_str(&content);
                 }
-                ramaria_app::stream_event::StreamEvent::Done {
+                StreamEvent::Done {
                     total_chars: tc, ..
                 } => {
                     total_chars = tc;
                 }
-                ramaria_app::stream_event::StreamEvent::Error { error: e, .. }
-                    if error.is_none() =>
-                {
+                StreamEvent::Error { error: e, .. } if error.is_none() => {
                     error = Some(e);
                 }
                 _ => {
@@ -844,10 +852,16 @@ async fn run_single_question(
         "probe run 单题完成"
     );
 
-    // 流消费完毕（成功或流内错误）：删除本次自动创建的测试 session（含消息）。
-    // 注意必须在流结束后执行——stream_forward_task 保存消息完成后才关闭通道，
+    // 流消费完毕（成功或流内错误）：删除本次新建的测试 session（含消息）。
+    // 注意必须在流结束后执行——转发任务保存消息完成后才关闭通道，
     // 此时删除不会与后台保存产生竞态。
-    cleanup_probe_session(app, probe_created_session(app, prev_active_session)).await;
+    if let Err(e) = engine.delete_session_cascade(session_id).await {
+        tracing::warn!(
+            %session_id,
+            %e,
+            "probe run 清理测试 session 失败（该 session 可能残留）"
+        );
+    }
 
     let reply_chars = reply.chars().count();
     let reply = if total_chars > 0 {
@@ -869,37 +883,133 @@ async fn run_single_question(
     }
 }
 
-/// 判断一次 `send_message` 是否为本次问题新建了测试 session。
+/// 前置编排失败后清理本次可能新建的测试会话（尽力而为）。
 ///
-/// resolve_session 在 `session_id=None` 时自动创建 session，并把 lifecycle 活跃
-/// 指针指向新 session。probe 顺序执行（单活跃假设），因此:
-/// - `prev_active=None` 且当前有活跃 → 该活跃即本次新建（可删）。
-/// - `prev_active` 存在但当前活跃 ≠ prev → 当前活跃为本次新建（可删）。
-/// - 其余（发送未到 resolve_session 阶段即失败等）→ 未新建 session，返回 None。
-fn probe_created_session(app: &Arc<ramaria_app::App>, prev_active: Option<Uuid>) -> Option<Uuid> {
-    let current = app.get_active_session_id();
-    match (prev_active, current) {
-        (None, Some(sid)) => Some(sid),
-        (Some(prev), Some(sid)) if sid != prev => Some(sid),
-        _ => None,
+/// 说明:
+/// - 生成用例在会话定位之后仍可能失败（召回前置的索引装载故障）：此时测试会话
+///   已创建但调用方拿不到句柄，按"调用窗口内创建 + 本次人格 + 无消息"定位候选；
+/// - 定位不到或删除失败仅记 warn（极端存储故障下的残余由负责人后续清理）；
+///   有消息的会话绝不删除（不触碰真实对话）。
+async fn cleanup_probe_session_after_error(
+    engine: &Arc<Engine>,
+    persona_uid: &str,
+    call_started_ms: i64,
+) {
+    let sessions = match engine.storage().list_active_sessions().await {
+        Ok(sessions) => sessions,
+        Err(e) => {
+            tracing::warn!(%e, "probe run 失败后读取活跃会话失败，跳过残留清理");
+            return;
+        }
+    };
+    for session in sessions {
+        if session.started_at < call_started_ms {
+            continue;
+        }
+        if session.persona_uid.as_deref() != Some(persona_uid) {
+            continue;
+        }
+        let messages = match engine.storage().list_messages(session.id).await {
+            Ok(messages) => messages,
+            Err(_) => continue,
+        };
+        if !messages.is_empty() {
+            continue;
+        }
+        if let Err(e) = engine.delete_session_cascade(session.id).await {
+            tracing::warn!(
+                session_id = %session.id,
+                %e,
+                "probe run 清理前置失败时创建的测试 session 失败（该 session 可能残留）"
+            );
+        } else {
+            tracing::info!(
+                session_id = %session.id,
+                "probe run 已清理前置失败时创建的测试 session"
+            );
+        }
     }
 }
 
-/// 删除探针测试 session（含消息）并清理 lifecycle 引用。
+/// 线上 provider 的隐私确认（服务层引擎路径）。
 ///
 /// 说明:
-/// - 仅删除 probe 本次自动创建的合成测试 session，绝不触碰真实对话 session。
-/// - 删除失败记 warn 不中断批量（极端存储故障下的残余由负责人后续清理）。
-async fn cleanup_probe_session(app: &Arc<ramaria_app::App>, session_id: Option<Uuid>) {
-    let Some(session_id) = session_id else {
-        return;
-    };
-    if let Err(e) = app.delete_session_cascade(session_id).await {
-        tracing::warn!(
-            %session_id,
-            %e,
-            "probe run 清理测试 session 失败（该 session 可能残留）"
-        );
+/// - 本地 LM Studio 直接通过（不触发确认流程）；
+/// - 线上 provider（DeepSeek/OpenAI）需要用户交互确认，`--yes` 自动确认；
+/// - 非 TTY 且无 `--yes` 时确认直接失败不挂起。
+async fn ensure_privacy_with_engine(
+    engine: &Arc<Engine>,
+    auto_yes: bool,
+) -> ramaria_core::error::RamariaResult<()> {
+    use ramaria_service::PrivacyStatus;
+
+    let status = engine.check_privacy().await?;
+
+    match status {
+        PrivacyStatus::NotNeeded => {
+            tracing::debug!("本地 provider，无需隐私确认");
+            Ok(())
+        }
+        PrivacyStatus::Confirmed { .. } => {
+            tracing::info!("隐私已确认，继续");
+            Ok(())
+        }
+        PrivacyStatus::NeedsConfirmation {
+            provider_name,
+            base_url,
+        } => {
+            if auto_yes {
+                tracing::warn!(
+                    provider = %provider_name,
+                    base_url = %base_url,
+                    "--yes 自动确认隐私提醒"
+                );
+                eprintln!("\x1b[33m⚠ 隐私提醒: 消息将发送至 {provider_name} ({base_url})\x1b[0m");
+                eprintln!("  使用 --yes 已自动确认。数据将离开本机。");
+                engine.confirm_privacy(true).await?;
+                return Ok(());
+            }
+
+            eprintln!();
+            eprintln!("\x1b[33m══════════════════════════════════════════\x1b[0m");
+            eprintln!("\x1b[33m  隐私提醒\x1b[0m");
+            eprintln!("\x1b[33m══════════════════════════════════════════\x1b[0m");
+            eprintln!();
+            eprintln!("  你正在使用线上 AI 服务：");
+            eprintln!("    服务商: {provider_name}");
+            eprintln!("    地址  : {base_url}");
+            eprintln!();
+            eprintln!("  你的对话内容将发送至该服务商的服务器。");
+            eprintln!("  请确认你已阅读并同意该服务商的隐私政策。");
+            eprintln!();
+
+            let confirmed = crate::ui::confirm("是否同意将数据发送至线上服务？", auto_yes)
+                .map_err(|e| {
+                    ramaria_core::error::RamariaError::validation(format!("隐私确认失败: {e}"))
+                })?;
+
+            if !confirmed {
+                tracing::warn!(provider = %provider_name, "用户拒绝隐私确认");
+                return Err(ramaria_core::error::RamariaError::validation(
+                    "用户拒绝隐私确认。无法使用线上 AI 服务。请切换为本地 LM Studio 或重新确认。",
+                ));
+            }
+
+            let persistent = crate::ui::confirm("是否记住此选择（下次不再询问）？", auto_yes)
+                .map_err(|e| {
+                    ramaria_core::error::RamariaError::validation(format!("隐私确认失败: {e}"))
+                })?;
+            engine.confirm_privacy(persistent).await?;
+
+            crate::ui::success("隐私确认完成");
+            Ok(())
+        }
+        _ => {
+            // PrivacyStatus 为 #[non_exhaustive]，保守拒绝未知状态
+            Err(ramaria_core::error::RamariaError::validation(
+                "未知的隐私状态。请检查应用配置后重试。",
+            ))
+        }
     }
 }
 

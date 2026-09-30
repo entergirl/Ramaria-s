@@ -1079,6 +1079,24 @@ pub trait StoreCrud: Send + Sync {
     async fn upsert_keyword(&self, keyword: &str) -> RamariaResult<()>;
     async fn list_keywords(&self) -> RamariaResult<Vec<String>>;
 
+    /// 幂等手工注入规范词（已存在保持现状：不递增 use_count、不改别名状态）。
+    ///
+    /// 参数:
+    /// - `keyword`: 标准化后的规范词文本。
+    ///
+    /// 返回:
+    /// - `Ok(true)`: 本次新插入（use_count 从 0 起，表示未经自然出现累积）；
+    /// - `Ok(false)`: 词条已存在（未做任何修改）。
+    ///
+    /// 默认实现:
+    /// - 返回 `Unsupported`（写语义由实现方显式声明）；
+    ///   `ramaria-storage` 覆写为主键冲突 DO NOTHING 的插入（并发幂等）。
+    async fn seed_keyword_canonical(&self, _keyword: &str) -> RamariaResult<bool> {
+        Err(crate::error::RamariaError::unsupported(
+            "StoreCrud 未实现关键词幂等注入",
+        ))
+    }
+
     /// 列出 keyword_pool 全部规范词文本（canonical_id IS NULL 的词条）。
     ///
     /// 说明: 生产词典装载（BM25 增强分词等）请优先用 `list_established_keywords`

@@ -62,7 +62,11 @@ pub use report::{
 };
 
 /// probe 命令入口（probe 不需要交互确认，yes 参数供线上 provider 隐私确认透传）。
-pub async fn run(app: &Arc<ramaria_app::App>, cmd: ProbeCmd, yes: bool) -> anyhow::Result<()> {
+pub async fn run(
+    engine: &Arc<ramaria_service::Engine>,
+    cmd: ProbeCmd,
+    yes: bool,
+) -> anyhow::Result<()> {
     match cmd {
         ProbeCmd::Build {
             persona,
@@ -74,7 +78,7 @@ pub async fn run(app: &Arc<ramaria_app::App>, cmd: ProbeCmd, yes: bool) -> anyho
             json,
         } => {
             run_build(
-                app,
+                engine,
                 persona,
                 questions_per_dim,
                 seed,
@@ -95,7 +99,7 @@ pub async fn run(app: &Arc<ramaria_app::App>, cmd: ProbeCmd, yes: bool) -> anyho
             json,
         } => {
             run_experiment(
-                app,
+                engine,
                 dataset,
                 variants,
                 limit,
@@ -116,7 +120,7 @@ pub async fn run(app: &Arc<ramaria_app::App>, cmd: ProbeCmd, yes: bool) -> anyho
             json,
         } => {
             run_evaluate(
-                app,
+                engine,
                 &results,
                 dataset.as_deref(),
                 variants.as_deref(),
@@ -135,7 +139,7 @@ pub async fn run(app: &Arc<ramaria_app::App>, cmd: ProbeCmd, yes: bool) -> anyho
             json,
         } => {
             run_report(
-                app,
+                engine,
                 &results,
                 evaluation.as_deref(),
                 calibration.as_deref(),

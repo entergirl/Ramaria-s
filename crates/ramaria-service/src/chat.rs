@@ -665,9 +665,11 @@ async fn step_recall(
     // 嵌入 provider 取快照后在锁外使用（缺失 → 共用召回内部降级为 BM25 + 关键词镜像）
     let embedding = engine.embedding_ref();
     let policy = engine.recall_policy();
+    let retriever = engine.retriever_slot();
+    let keyword_mirror = engine.keyword_mirror();
     let recall = assemble_recall(RecallInput {
-        retriever: &**engine.retriever_slot(),
-        keyword_mirror: &**engine.keyword_mirror_ref(),
+        retriever: &*retriever,
+        keyword_mirror: &*keyword_mirror,
         storage,
         embedding: embedding.as_deref(),
         query: message,
@@ -750,9 +752,10 @@ async fn step_load_narrative(
     persona: &str,
     message: &str,
 ) -> ramaria_memory::chat::NarrativeMaterial {
+    let retriever = engine.retriever_slot();
     load_narrative_material(
         storage,
-        &**engine.retriever_slot(),
+        &*retriever,
         &config.retrieval,
         &config.decay,
         config.injection.narrative,

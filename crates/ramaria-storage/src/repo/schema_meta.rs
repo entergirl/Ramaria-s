@@ -3,7 +3,7 @@
 //! 设计特点:
 //! - 通过 key-value 表管理 schema_version 和 index_version
 //! - schema_version 由 migration 写入；get_schema_version 供调用方显式校验（当前无启动期自动拦截）
-//! - index_version 由应用层管理，索引重建后递增
+//! - index_version 由应用层管理，索引重建完成后写入；键缺失按未构建（0）返回
 //! - 版本值统一解析为 i32，非法值时返回 Storage 错误而非静默回退
 
 use crate::repo::StorageResultExt;
@@ -30,7 +30,7 @@ pub async fn get_index_version(pool: &SqlitePool) -> RamariaResult<i32> {
             .fetch_optional(pool)
             .await
             .storage_err("查询索引版本失败")?
-            .unwrap_or_else(|| "1".to_string());
+            .unwrap_or_else(|| "0".to_string());
     version_str
         .parse()
         .map_err(|_| RamariaError::storage("index_version 值非法"))

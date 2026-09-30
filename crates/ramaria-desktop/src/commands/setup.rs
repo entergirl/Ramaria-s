@@ -8,11 +8,8 @@
 //! - init_default_personas: 创建 user-0001 + 扫描 personas/ 目录批量注册人格
 
 use crate::DesktopState;
-use ramaria_core::traits::EmbeddingProvider;
-use ramaria_core::types::{BackendConfig, Persona, PersonaKind};
 use serde::Serialize;
 use std::path::Path;
-use std::sync::Arc;
 use tauri::State;
 
 // =========================================================
@@ -75,67 +72,29 @@ pub async fn run_setup(
         }
     }
 
-    // ---- 保存 API key 到 keychain ----
-    if let Some(ref key) = api_key {
-        if !key.trim().is_empty() && llm_provider.is_online() {
-            let service = match llm_provider {
-                ramaria_core::types::LlmProvider::DeepSeek => "deepseek",
-                ramaria_core::types::LlmProvider::OpenAI => "openai",
-                _ => unreachable!(),
-            };
-            state
-                .app
-                .keychain()
-                .set_api_key(service, key)
-                .map_err(|e| format!("保存 API key 到 keychain 失败: {}", e))?;
-            tracing::info!(provider = %provider, "API key 已写入 keychain");
-        }
-    }
-
-    // ---- 构建后端配置（保留已保存的嵌入模型路径）----
-    // 先读取当前配置中的 embedding_model_path，防止被 overwrite
-    let existing_embedding_path = state
-        .app
-        .storage()
-        .get_backend_config()
-        .await
-        .map_err(|e| format!("读取后端配置失败: {}", e))?
-        .and_then(|c| c.embedding_model_path);
-
-    let mut config =
-        BackendConfig::new_with_defaults(llm_provider, base_url.clone(), model_id.clone());
-    config.embedding_model_path = existing_embedding_path;
-
+    // ---- 执行设置流程（密钥入 keychain → 配置落库与文件同步 → provider 热替换 → 状态推进） ----
+    let request = ramaria_service::SetupRequest {
+        provider: llm_provider,
+        model_id: model_id.clone(),
+        base_url: base_url.clone(),
+        api_key,
+    };
     state
-        .app
-        .storage()
-        .save_backend_config(&config)
+        .engine
+        .run_setup(&request)
         .await
-        .map_err(|e| format!("保存后端配置失败: {}", e))?;
+        .map_err(|e| format!("设置流程失败: {}", e))?;
 
     // ---- ★ 初始化默认人格（user-0001 + 扫描 personas/ 目录） ----
     // 桌面端此前缺失此步骤，导致对话页/记忆页的人格选择器为空。
     // 对齐 CLI 的 create_initial_personas 行为。
-    init_default_personas(&state)
+    init_default_personas(&state.engine)
         .await
         .map_err(|e| format!("初始化人格失败: {}", e))?;
 
-    // ---- 执行设置流程（含 LLM 连接验证） ----
-    let new_state = state
-        .app
-        .run_setup(&config)
-        .await
-        .map_err(|e| format!("设置流程失败: {}", e))?;
-
-    // ---- ★ 热更新 LLM provider，确保后续对话使用新配置 ----
-    // 复用 App 持有的精确缓存实例（v1.5 C）：切换后端后缓存不失效
-    let new_llm: Arc<dyn ramaria_core::traits::LlmProvider> = crate::build_llm_provider(
-        llm_provider,
-        &config,
-        state.app.keychain_arc(),
-        state.app.llm_cache(),
-    )?;
-    state.app.update_llm(new_llm);
+    // ---- 索引待构建时完成一次构建（缺索引的库），随后返回推进后的状态 ----
+    crate::ensure_index_ready(&state.engine).await;
+    let new_state = state.engine.current_state();
 
     tracing::info!(
         provider = %provider,
@@ -163,14 +122,13 @@ pub async fn run_setup(
 #[tauri::command]
 #[tracing::instrument(skip(state))]
 pub async fn get_setup_status(state: State<'_, DesktopState>) -> Result<SetupStatusView, String> {
-    let storage = state.app.storage();
-    let embedding_available = state.app.is_embedding_available();
-
-    let status = ramaria_app::setup::check_setup_status(storage.as_ref(), embedding_available)
+    let status = state
+        .engine
+        .check_setup_status()
         .await
         .map_err(|e| format!("查询设置状态失败: {}", e))?;
 
-    let current_state = state.app.current_state();
+    let current_state = state.engine.current_state();
 
     let view = SetupStatusView {
         backend_configured: status.backend_configured,
@@ -206,7 +164,7 @@ pub async fn get_setup_status(state: State<'_, DesktopState>) -> Result<SetupSta
 #[tracing::instrument(skip(state))]
 pub async fn refresh_setup_state(state: State<'_, DesktopState>) -> Result<String, String> {
     let new_state = state
-        .app
+        .engine
         .refresh_setup_state()
         .await
         .map_err(|e| format!("刷新状态失败: {}", e))?;
@@ -236,8 +194,8 @@ pub async fn refresh_setup_state(state: State<'_, DesktopState>) -> Result<Strin
 #[tauri::command]
 #[tracing::instrument(skip(state))]
 pub async fn test_llm_connection(state: State<'_, DesktopState>) -> Result<String, String> {
-    // ★ 先 clone Arc 出锁再 await，避免 MutexGuard 跨 .await
-    let llm = state.app.llm_clone();
+    // ★ 先取 provider 快照（Arc 克隆）再 await，避免持有锁跨 .await
+    let llm = state.engine.llm();
 
     llm.validate()
         .await
@@ -290,74 +248,25 @@ pub enum DegradedReason {
 /// - `EmbeddingValidationResult`: valid=true 且 dimension 有值表示校验通过。
 ///
 /// 说明:
-/// - 创建 NativeEmbeddingProvider 并调用 `validate` 方法。
-/// - 若目录不存在或模型文件缺失，返回 valid=false + 原因说明。
+/// - 校验不通过（目录缺失 / 加载失败 / 推理失败）以 valid=false + 原因返回，不抛错。
 #[tauri::command]
-#[tracing::instrument(skip(path))]
-pub async fn validate_embedding_model(path: String) -> Result<EmbeddingValidationResult, String> {
-    let model_dir = Path::new(&path);
+#[tracing::instrument(skip(state, path))]
+pub async fn validate_embedding_model(
+    state: State<'_, DesktopState>,
+    path: String,
+) -> Result<EmbeddingValidationResult, String> {
+    let result = state
+        .engine
+        .validate_embedding_model(&path)
+        .await
+        .map_err(|e| format!("校验嵌入模型失败: {}", e))?;
 
-    // 检查目录是否存在
-    if !model_dir.exists() {
-        return Ok(EmbeddingValidationResult {
-            valid: false,
-            dimension: None,
-            reason: Some(format!("模型目录不存在: {}", path)),
-        });
-    }
-
-    if !model_dir.is_dir() {
-        return Ok(EmbeddingValidationResult {
-            valid: false,
-            dimension: None,
-            reason: Some(format!("路径不是目录: {}", path)),
-        });
-    }
-
-    // 尝试创建 provider 并校验
-    match ramaria_llm::embedding::native::create_native_provider(model_dir) {
-        Ok(provider) => {
-            let dim = provider.model_info().dimension;
-            match provider.validate().await {
-                Ok(()) => {
-                    tracing::info!(
-                        file = %crate::path_guard::redact_path_label(Path::new(&path)),
-                        dimension = dim,
-                        "嵌入模型校验通过"
-                    );
-                    Ok(EmbeddingValidationResult {
-                        valid: true,
-                        dimension: Some(dim),
-                        reason: None,
-                    })
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        file = %crate::path_guard::redact_path_label(Path::new(&path)),
-                        error = %e,
-                        "嵌入模型校验失败"
-                    );
-                    Ok(EmbeddingValidationResult {
-                        valid: false,
-                        dimension: Some(dim),
-                        reason: Some(format!("模型文件存在但推理失败: {}", e)),
-                    })
-                }
-            }
-        }
-        Err(e) => {
-            tracing::warn!(
-                file = %crate::path_guard::redact_path_label(Path::new(&path)),
-                error = %e,
-                "嵌入模型加载失败"
-            );
-            Ok(EmbeddingValidationResult {
-                valid: false,
-                dimension: None,
-                reason: Some(format!("模型加载失败: {}", e)),
-            })
-        }
-    }
+    // 校验结果透传（valid=false + reason 表达失败原因）
+    Ok(EmbeddingValidationResult {
+        valid: result.valid,
+        dimension: result.dimension,
+        reason: result.reason,
+    })
 }
 
 // ---- save_embedding_model ----
@@ -371,64 +280,28 @@ pub async fn validate_embedding_model(path: String) -> Result<EmbeddingValidatio
 /// - `"ok"`: 保存成功。
 ///
 /// 说明:
-/// - path 非空时创建 NativeEmbeddingProvider 并通过 `app.update_embedding` 热加载。
-/// - path 为空时卸载嵌入模型（传入 None）。
-/// - 路径持久化到 BackendConfig（与 base_url 一致），下次启动自动加载。
+/// - path 非空时加载模型并热更新（路径持久化，下次启动自动加载）。
+/// - path 为空时卸载嵌入模型。
+/// - 加载失败时不修改内存 provider 与持久化配置（保持原状态下可用）。
 #[tauri::command]
 #[tracing::instrument(skip(state, path))]
 pub async fn save_embedding_model(
     state: State<'_, DesktopState>,
     path: String,
 ) -> Result<String, String> {
+    // 目录存在性预检（空路径 = 卸载，不预检；保持既有错误文案）
     let path_trimmed = path.trim();
-
-    // ---- 读当前 BackendConfig ----
-    let mut config = state
-        .app
-        .storage()
-        .get_backend_config()
-        .await
-        .map_err(|e| format!("读取后端配置失败: {}", e))?
-        .unwrap_or_else(BackendConfig::lm_studio_default);
-
-    if path_trimmed.is_empty() {
-        // 卸载嵌入模型
-        state.app.update_embedding(None);
-        config.embedding_model_path = None;
-        tracing::info!("嵌入模型已卸载");
-    } else {
-        let model_dir = Path::new(path_trimmed);
-        if !model_dir.exists() {
-            return Err(format!("模型目录不存在: {}", path_trimmed));
-        }
-
-        // 创建 provider
-        let provider = ramaria_llm::embedding::native::create_native_provider(model_dir)
-            .map_err(|e| format!("加载嵌入模型失败: {}", e))?;
-
-        tracing::info!(
-            file = %crate::path_guard::redact_path_label(Path::new(path_trimmed)),
-            dimension = provider.model_info().dimension,
-            "嵌入模型已加载，准备热更新"
-        );
-
-        let provider: Arc<dyn EmbeddingProvider> = Arc::new(provider);
-        state.app.update_embedding(Some(provider));
-        config.embedding_model_path = Some(path_trimmed.to_string());
+    if !path_trimmed.is_empty() && !Path::new(path_trimmed).exists() {
+        return Err(format!("模型目录不存在: {}", path_trimmed));
     }
 
-    // ---- 持久化到 BackendConfig（复用 LLM 的 save_backend_config 模式） ----
     state
-        .app
-        .storage()
-        .save_backend_config(&config)
+        .engine
+        .save_embedding_model(Some(path.as_str()))
         .await
-        .map_err(|e| format!("保存后端配置失败: {}", e))?;
+        .map_err(|e| format!("加载嵌入模型失败: {}", e))?;
 
-    tracing::info!(
-        has_model = config.embedding_model_path.is_some(),
-        "嵌入模型配置已持久化"
-    );
+    tracing::info!("嵌入模型配置已持久化");
     Ok("ok".to_string())
 }
 
@@ -443,38 +316,18 @@ pub async fn save_embedding_model(
 pub async fn get_embedding_model(
     state: State<'_, DesktopState>,
 ) -> Result<Option<EmbeddingModelView>, String> {
-    let provider_opt = state.app.embedding_provider();
+    let view = state
+        .engine
+        .embedding_model()
+        .await
+        .map_err(|e| format!("读取后端配置失败: {}", e))?;
 
-    match provider_opt {
-        Some(provider) => {
-            let info = provider.model_info();
-            let is_avail = provider.is_available();
-            Ok(Some(EmbeddingModelView {
-                model_path: None, // model_id 通常不暴露本地路径
-                valid: is_avail,
-                dimension: Some(info.dimension),
-            }))
-        }
-        None => {
-            // 从 BackendConfig 读取已保存路径（用于 UI 预填，复用 LLM base_url 模式）
-            let config = state
-                .app
-                .storage()
-                .get_backend_config()
-                .await
-                .map_err(|e| format!("读取后端配置失败: {}", e))?
-                .unwrap_or_else(BackendConfig::lm_studio_default);
-
-            match config.embedding_model_path {
-                Some(saved_path) if !saved_path.is_empty() => Ok(Some(EmbeddingModelView {
-                    model_path: Some(saved_path),
-                    valid: false,
-                    dimension: None,
-                })),
-                _ => Ok(None),
-            }
-        }
-    }
+    // 服务层视图字段与桌面视图一致，直接映射
+    Ok(view.map(|v| EmbeddingModelView {
+        model_path: v.model_path,
+        valid: v.valid,
+        dimension: v.dimension,
+    }))
 }
 
 // ---- get_degraded_reason ----
@@ -484,6 +337,7 @@ pub async fn get_embedding_model(
 /// 返回:
 /// - `"embedding_missing"`: 嵌入模型缺失，向量搜索不可用。
 /// - `"llm_unavailable"`: LLM provider 不可用。
+/// - `"both_unavailable"`: LLM 与嵌入模型同时不可用。
 /// - `"unknown"`: 其他未知原因。
 /// - `null`: 当前未处于 Degraded 状态。
 #[tauri::command]
@@ -491,24 +345,21 @@ pub async fn get_embedding_model(
 pub async fn get_degraded_reason(
     state: State<'_, DesktopState>,
 ) -> Result<Option<DegradedReason>, String> {
-    let current_state = state.app.current_state();
+    let reason = state
+        .engine
+        .degraded_reason()
+        .await
+        .map_err(|e| format!("查询降级原因失败: {}", e))?;
 
-    if current_state != ramaria_core::types::AppState::Degraded {
-        return Ok(None);
-    }
-
-    let embedding_ok = state.app.is_embedding_available();
-    let llm = state.app.llm_clone();
-
-    // 检查 LLM 是否可用
-    let llm_ok = llm.validate().await.is_ok();
-
-    match (llm_ok, embedding_ok) {
-        (false, false) => Ok(Some(DegradedReason::BothUnavailable)),
-        (false, true) => Ok(Some(DegradedReason::LlmUnavailable)),
-        (true, false) => Ok(Some(DegradedReason::EmbeddingMissing)),
-        _ => Ok(Some(DegradedReason::Unknown)),
-    }
+    // 服务层原因分类映射为桌面视图枚举（序列化口径一致）
+    Ok(reason.map(|reason| match reason {
+        ramaria_service::DegradedReason::EmbeddingMissing => DegradedReason::EmbeddingMissing,
+        ramaria_service::DegradedReason::LlmUnavailable => DegradedReason::LlmUnavailable,
+        ramaria_service::DegradedReason::BothUnavailable => DegradedReason::BothUnavailable,
+        ramaria_service::DegradedReason::Unknown => DegradedReason::Unknown,
+        // non_exhaustive 兜底：未知分类按"其它原因"
+        _ => DegradedReason::Unknown,
+    }))
 }
 
 // =========================================================
@@ -519,108 +370,39 @@ pub async fn get_degraded_reason(
 ///
 /// 流程:
 /// 1. 创建 `user-0001`（本地用户，如已存在则跳过）
-/// 2. 扫描 `config/personas/` 目录下所有 `.toml` 文件
-/// 3. 对每个文件创建对应的 persona 记录（文件名=UID，TOML内容=config）
+/// 2. 扫描 `config/personas/` 目录并导入全部 `.toml` 文件（文件名=UID，内容=config）
+/// 3. 目录无文件时尝试旧单文件路径 `config/persona.toml`（兼容回退）
 ///
 /// 降级策略:
 /// - 目录不存在 → 仅创建 user-0001，记录 warn 日志
 /// - 单文件读取失败 → 跳过该文件，继续处理其他文件
 /// - persona 已存在 → 跳过（幂等）
-/// - assistant_name 提取失败 → 回退使用 UID 作为 name
 ///
 /// 路径解析（cargo tauri dev 从 crates/ramaria-desktop/ 运行）:
 /// - 主路径: `../../config/personas` → workspace 根 `rust/config/personas/`
 /// - 回退路径: `../config/personas`（兼容 workspace 根运行场景）
-async fn init_default_personas(state: &State<'_, DesktopState>) -> Result<(), String> {
-    let storage = state.app.storage();
-
-    // ---- Step 1: 确保 user-0001 存在 ----
-    if storage
-        .get_persona_by_uid("user-0001")
+async fn init_default_personas(engine: &ramaria_service::Engine) -> Result<(), String> {
+    // ---- Step 1: 确保 user-0001 存在（幂等） ----
+    engine
+        .persona_ensure_user()
         .await
-        .map_err(|e| format!("查询 user-0001 失败: {}", e))?
-        .is_none()
-    {
-        let user = Persona::new(
-            "user-0001".to_string(),
-            "用户".to_string(),
-            PersonaKind::User,
-            1,
-            "system".to_string(),
-        );
-        storage
-            .create_persona(&user)
-            .await
-            .map_err(|e| format!("创建 user-0001 失败: {}", e))?;
-        tracing::info!("已创建 persona: user-0001 (用户)");
-    } else {
-        tracing::debug!("user-0001 已存在，跳过创建");
-    }
+        .map_err(|e| format!("创建 user-0001 失败: {}", e))?;
 
-    // ---- Step 2: 扫描 personas/ 目录 ----
-    let persona_entries = scan_personas_dir();
-    if persona_entries.is_empty() {
-        tracing::warn!("未找到人格文件。请将 .toml 文件放入 config/personas/ 目录");
-        tracing::warn!("示例: config/personas/rama-0001.toml");
-        return Ok(());
-    }
-
-    // ---- Step 3: 逐文件创建 persona ----
-    for (uid, name, config_content) in persona_entries {
-        // 幂等：已存在的 persona 跳过
-        if storage
-            .get_persona_by_uid(&uid)
-            .await
-            .map_err(|e| format!("查询 persona {} 失败: {}", uid, e))?
-            .is_some()
-        {
-            tracing::debug!(%uid, "persona 已存在，跳过创建");
-            continue;
-        }
-
-        let kind = PersonaKind::from_uid(&uid);
-        let mut persona = Persona::new(uid.clone(), name.clone(), kind, 1, "file".to_string());
-        persona.config = Some(config_content);
-
-        storage
-            .create_persona(&persona)
-            .await
-            .map_err(|e| format!("创建 persona {} 失败: {}", uid, e))?;
-
-        tracing::info!(%uid, %name, "已创建 persona");
-    }
-
-    Ok(())
-}
-
-/// 扫描 `config/personas/` 目录，返回所有 `.toml` 文件的信息。
-///
-/// 返回:
-/// - `Vec<(uid, assistant_name, raw_toml_content)>`
-///
-/// 路径策略（多级回退）:
-/// - `../../config/personas`（cargo tauri dev 从 crates/ramaria-desktop/ 运行）
-/// - `../config/personas`（兼容直接 cargo run 或 workspace 根运行）
-fn scan_personas_dir() -> Vec<(String, String, String)> {
-    // 多级路径回退：寻找 personas 目录
+    // ---- Step 2: 目录解析（多级回退） ----
     let candidates = [
         Path::new("../../config/personas"),
         Path::new("../config/personas"),
     ];
-
     let dir = candidates.iter().find(|p| p.exists() && p.is_dir());
-    let dir = match dir {
-        Some(d) => d,
-        None => {
-            tracing::warn!(
-                candidates = ?candidates
-                    .iter()
-                    .map(|p| crate::path_guard::redact_path_label(p))
-                    .collect::<Vec<_>>(),
-                "personas 目录不存在（已尝试所有候选路径）"
-            );
-            return Vec::new();
-        }
+    let Some(dir) = dir else {
+        tracing::warn!(
+            candidates = ?candidates
+                .iter()
+                .map(|p| crate::path_guard::redact_path_label(p))
+                .collect::<Vec<_>>(),
+            "personas 目录不存在（已尝试所有候选路径）"
+        );
+        return Ok(());
     };
 
     tracing::info!(
@@ -628,129 +410,66 @@ fn scan_personas_dir() -> Vec<(String, String, String)> {
         "扫描 personas 目录"
     );
 
-    let mut results: Vec<(String, String, String)> = Vec::new();
-
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
+    // ---- Step 3: 目录导入（服务层用例；已存在跳过，失败不阻塞） ----
+    let outcomes = match engine
+        .persona_load_from_dir(dir, None, ramaria_service::PersonaLoadMode::CreateMissing)
+        .await
+    {
+        Ok(outcomes) => outcomes,
         Err(e) => {
-            tracing::warn!(
-                %e,
-                dir = %crate::path_guard::redact_path_label(dir),
-                "读取 personas 目录失败"
-            );
-            return results;
+            tracing::warn!(error = %e, "读取 personas 目录失败，跳过人格文件导入");
+            return Ok(());
         }
     };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-
-        // 仅处理 .toml 文件
-        if !path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("toml"))
-        {
-            continue;
-        }
-
-        // 文件名（不含扩展名）= persona UID
-        let uid = match path.file_stem().and_then(|s| s.to_str()) {
-            Some(s) => s.to_string(),
-            None => {
-                tracing::warn!(
-                    file = %crate::path_guard::redact_path_label(&path),
-                    "无法从文件名提取 UID，跳过"
-                );
-                continue;
-            }
-        };
-
-        // 读取文件内容
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(
-                    %e,
-                    file = %crate::path_guard::redact_path_label(&path),
-                    "读取 persona 文件失败，跳过"
-                );
-                continue;
-            }
-        };
-
-        // 从 TOML 中提取 assistant_name（简单行解析，零外部依赖）
-        let name = extract_toml_assistant_name(&content).unwrap_or_else(|| uid.clone());
-
-        tracing::info!(
-            %uid,
-            %name,
-            file = %crate::path_guard::redact_path_label(&path),
-            "发现人格文件"
-        );
-        results.push((uid, name, content));
+    if !outcomes.is_empty() {
+        return Ok(());
     }
 
-    // 兼容回退：新目录无文件时尝试旧单文件路径
-    if results.is_empty() {
-        let old_path = Path::new("../../config/persona.toml");
-        if old_path.exists() {
-            match std::fs::read_to_string(old_path) {
-                Ok(content) => {
-                    let name = extract_toml_assistant_name(&content)
-                        .unwrap_or_else(|| "Ramaria".to_string());
-                    tracing::info!(
-                        %name,
-                        file = %crate::path_guard::redact_path_label(old_path),
-                        "从旧路径加载 persona.toml（兼容回退）"
-                    );
-                    results.push(("rama-0001".to_string(), name, content));
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        %e,
-                        file = %crate::path_guard::redact_path_label(old_path),
-                        "读取旧 persona.toml 失败"
-                    );
-                }
-            }
-        }
-    }
-
-    results
+    // ---- Step 4: 旧单文件兼容回退（目录无 .toml 时） ----
+    load_legacy_persona_file(engine).await
 }
 
-/// 从 TOML 内容中提取 `assistant_name` 字段值。
+/// 旧单文件布局的兼容回退：`config/persona.toml` → `rama-0001`。
 ///
 /// 说明:
-/// - 使用行级简单解析，不引入 toml crate 依赖
-/// - 支持 `assistant_name = "值"` 格式（允许值中含空格）
-/// - 提取失败时返回 None，调用方回退使用 UID
-fn extract_toml_assistant_name(content: &str) -> Option<String> {
-    for line in content.lines() {
-        let trimmed = line.trim();
+/// - 仅在 `config/personas/` 目录存在但无 `.toml` 文件时调用；
+/// - 旧文件不存在时给出"未找到人格文件"引导提示；
+/// - 已存在的 `rama-0001` 跳过（幂等）；导入失败不阻塞启动流程。
+async fn load_legacy_persona_file(engine: &ramaria_service::Engine) -> Result<(), String> {
+    let old_path = Path::new("../../config/persona.toml");
+    if !old_path.exists() {
+        tracing::warn!("未找到人格文件。请将 .toml 文件放入 config/personas/ 目录");
+        tracing::warn!("示例: config/personas/rama-0001.toml");
+        return Ok(());
+    }
 
-        // 跳过注释和空行
-        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('[') {
-            continue;
+    // 旧布局文件名不携带 uid：显式按 rama-0001 导入，名称缺失时回退 Ramaria
+    let outcome = engine
+        .persona_load_file(
+            old_path,
+            "rama-0001",
+            "Ramaria",
+            ramaria_service::PersonaLoadMode::CreateMissing,
+        )
+        .await;
+
+    match outcome.action {
+        ramaria_service::PersonaFileAction::Skipped => {
+            tracing::debug!("rama-0001 已存在，跳过创建（旧单文件回退）");
         }
-
-        // 匹配 `assistant_name = "珊瑚菌"` 或 bare word
-        if let Some(rest) = trimmed.strip_prefix("assistant_name") {
-            let rest = rest.trim();
-            if let Some(eq_pos) = rest.find('=') {
-                let value = rest[eq_pos + 1..].trim();
-                // 去除双引号或单引号包裹
-                if (value.starts_with('"') && value.ends_with('"'))
-                    || (value.starts_with('\'') && value.ends_with('\''))
-                {
-                    return Some(value[1..value.len() - 1].to_string());
-                }
-                // bare word（无引号）
-                if !value.is_empty() {
-                    return Some(value.to_string());
-                }
-            }
+        ramaria_service::PersonaFileAction::Failed => {
+            tracing::warn!(
+                file = %crate::path_guard::redact_path_label(old_path),
+                error = %outcome.message,
+                "旧 persona.toml 加载失败（兼容回退，跳过）"
+            );
+        }
+        _ => {
+            tracing::info!(
+                file = %crate::path_guard::redact_path_label(old_path),
+                "从旧路径加载 persona.toml（兼容回退）"
+            );
         }
     }
-    None
+    Ok(())
 }

@@ -17,7 +17,7 @@
 
 mod common;
 
-use common::{MockStorage, build_test_app, make_test_event};
+use common::{MockStorage, build_test_engine, make_test_event};
 use ramaria_core::behavior::{
     BehaviorEvidence, BehaviorParams, BehaviorRule, BehaviorSituation, RuleSource, SignalType,
 };
@@ -74,14 +74,14 @@ async fn seed_rule(storage: &Arc<MockStorage>, persona: &str) -> i64 {
 
 #[tokio::test]
 async fn rule_list_empty_json_ok() {
-    let (app, _storage) = build_test_app();
+    let (engine, _storage) = build_test_engine();
     let cmd = RuleCmd::List {
         persona: None,
         limit: Some(100),
         offset: 0,
     };
     // 空数据 → 成功输出空信封（agent 可区分「成功无数据」与异常）
-    run(&app, cmd, true, false).await.expect("list 成功");
+    run(&engine, cmd, true, false).await.expect("list 成功");
 }
 
 // =========================================================
@@ -90,8 +90,9 @@ async fn rule_list_empty_json_ok() {
 
 #[tokio::test]
 async fn rule_import_invalid_json_rejected() {
-    let (app, _storage) = build_test_app();
-    let err = ramaria_app::commands::behavior::behavior_import_rule(&app, "rama-0001", "不是 JSON")
+    let (engine, _storage) = build_test_engine();
+    let err = engine
+        .behavior_import_rule("rama-0001", "不是 JSON")
         .await
         .expect_err("非法 JSON 应拒绝");
     assert!(matches!(
@@ -102,14 +103,11 @@ async fn rule_import_invalid_json_rejected() {
 
 #[tokio::test]
 async fn rule_import_missing_fields_rejected() {
-    let (app, _storage) = build_test_app();
-    let err = ramaria_app::commands::behavior::behavior_import_rule(
-        &app,
-        "rama-0001",
-        r#"{"reaction": "x"}"#,
-    )
-    .await
-    .expect_err("缺 situation 应拒绝");
+    let (engine, _storage) = build_test_engine();
+    let err = engine
+        .behavior_import_rule("rama-0001", r#"{"reaction": "x"}"#)
+        .await
+        .expect_err("缺 situation 应拒绝");
     assert!(matches!(
         err,
         ramaria_core::error::RamariaError::Validation { .. }
@@ -118,13 +116,14 @@ async fn rule_import_missing_fields_rejected() {
 
 #[tokio::test]
 async fn rule_import_valid_creates_manual_rule() {
-    let (app, storage) = build_test_app();
+    let (engine, storage) = build_test_engine();
     let json = r#"{
         "situation": {"keywords": ["失眠"], "valence_mean": -0.6},
         "reaction": "当聊到失眠时，倾向轻声安慰。",
         "avoid": ["睡前聊工作"]
     }"#;
-    let id = ramaria_app::commands::behavior::behavior_import_rule(&app, "rama-0001", json)
+    let id = engine
+        .behavior_import_rule("rama-0001", json)
         .await
         .expect("合法导入成功");
     let rule = storage
@@ -144,21 +143,24 @@ async fn rule_import_valid_creates_manual_rule() {
 
 #[tokio::test]
 async fn rule_show_missing_errors() {
-    let (app, _storage) = build_test_app();
+    let (engine, _storage) = build_test_engine();
     let cmd = RuleCmd::Show { id: 999 };
-    assert!(run(&app, cmd, true, false).await.is_err(), "不存在应报错");
+    assert!(
+        run(&engine, cmd, true, false).await.is_err(),
+        "不存在应报错"
+    );
 }
 
 #[tokio::test]
 async fn rule_edit_manualizes_and_writes_feedback() {
-    let (app, storage) = build_test_app();
+    let (engine, storage) = build_test_engine();
     let id = seed_rule(&storage, "rama-0001").await;
     let cmd = RuleCmd::Edit {
         id,
         reaction: Some("编辑后的规则文本".into()),
         avoid: Some("深夜,加班".into()),
     };
-    run(&app, cmd, true, false).await.expect("编辑成功");
+    run(&engine, cmd, true, false).await.expect("编辑成功");
 
     let rule = storage.get_behavior_rule(id).await.unwrap().unwrap();
     assert_eq!(
@@ -181,7 +183,7 @@ async fn rule_edit_manualizes_and_writes_feedback() {
 
 #[tokio::test]
 async fn rule_edit_without_fields_errors() {
-    let (app, storage) = build_test_app();
+    let (engine, storage) = build_test_engine();
     let id = seed_rule(&storage, "rama-0001").await;
     let cmd = RuleCmd::Edit {
         id,
@@ -189,17 +191,17 @@ async fn rule_edit_without_fields_errors() {
         avoid: None,
     };
     assert!(
-        run(&app, cmd, true, false).await.is_err(),
+        run(&engine, cmd, true, false).await.is_err(),
         "无修改字段应报错"
     );
 }
 
 #[tokio::test]
 async fn rule_disable_writes_feedback() {
-    let (app, storage) = build_test_app();
+    let (engine, storage) = build_test_engine();
     let id = seed_rule(&storage, "rama-0001").await;
     let cmd = RuleCmd::Disable { id };
-    run(&app, cmd, true, false).await.expect("禁用成功");
+    run(&engine, cmd, true, false).await.expect("禁用成功");
     assert!(
         !storage
             .get_behavior_rule(id)
@@ -219,11 +221,11 @@ async fn rule_disable_writes_feedback() {
 
 #[tokio::test]
 async fn rule_enable_reenables() {
-    let (app, storage) = build_test_app();
+    let (engine, storage) = build_test_engine();
     let id = seed_rule(&storage, "rama-0001").await;
     storage.set_rule_enabled(id, false).await.expect("先禁用");
     let cmd = RuleCmd::Enable { id };
-    run(&app, cmd, true, false).await.expect("启用成功");
+    run(&engine, cmd, true, false).await.expect("启用成功");
     assert!(
         storage
             .get_behavior_rule(id)
@@ -236,29 +238,29 @@ async fn rule_enable_reenables() {
 
 #[tokio::test]
 async fn rule_delete_with_yes_confirms() {
-    let (app, storage) = build_test_app();
+    let (engine, storage) = build_test_engine();
     let id = seed_rule(&storage, "rama-0001").await;
     let cmd = RuleCmd::Delete { id, force: true };
-    run(&app, cmd, true, true).await.expect("删除成功");
+    run(&engine, cmd, true, true).await.expect("删除成功");
     assert!(storage.get_behavior_rule(id).await.unwrap().is_none());
 }
 
 #[tokio::test]
 async fn rule_delete_missing_errors() {
-    let (app, _storage) = build_test_app();
+    let (engine, _storage) = build_test_engine();
     let cmd = RuleCmd::Delete {
         id: 999,
         force: true,
     };
     assert!(
-        run(&app, cmd, true, true).await.is_err(),
+        run(&engine, cmd, true, true).await.is_err(),
         "删除不存在应报错"
     );
 }
 
 #[tokio::test]
 async fn rule_evidence_traces_chain() {
-    let (app, storage) = build_test_app();
+    let (engine, storage) = build_test_engine();
     // 预置事件（persona 归属不影响 id 溯源）
     let mut ev = make_test_event(1, "加班事件");
     ev.keywords = Some("加班,累".into());
@@ -289,7 +291,8 @@ async fn rule_evidence_traces_chain() {
     }];
     let id = storage.save_behavior_rule(&rule).await.expect("保存成功");
 
-    let items = ramaria_app::commands::behavior::behavior_rule_evidence(&app, id)
+    let items = engine
+        .behavior_rule_evidence(id)
         .await
         .expect("证据链查询成功");
     assert_eq!(items.len(), 1, "溯源到预置事件");
@@ -300,9 +303,12 @@ async fn rule_evidence_traces_chain() {
 
 #[tokio::test]
 async fn rule_evidence_missing_rule_errors() {
-    let (app, _storage) = build_test_app();
+    let (engine, _storage) = build_test_engine();
     let cmd = RuleCmd::Evidence { id: 999 };
-    assert!(run(&app, cmd, true, false).await.is_err(), "不存在应报错");
+    assert!(
+        run(&engine, cmd, true, false).await.is_err(),
+        "不存在应报错"
+    );
 }
 
 // =========================================================
@@ -314,11 +320,11 @@ async fn rule_evidence_missing_rule_errors() {
 /// 覆盖 M8 前置入口：导入后手动生成规则时，空 persona 不得被当作错误。
 #[tokio::test]
 async fn rule_relearn_no_events_returns_empty_ok() {
-    let (app, storage) = build_test_app();
+    let (engine, storage) = build_test_engine();
     let cmd = RuleCmd::Relearn {
         persona: Some("rama-0001".to_string()),
     };
-    run(&app, cmd, true, false)
+    run(&engine, cmd, true, false)
         .await
         .expect("relearn 在无事件时不应报错（返回空统计）");
 
@@ -333,9 +339,9 @@ async fn rule_relearn_no_events_returns_empty_ok() {
 /// 未指定 persona 时 relearn 回退默认 persona（rama-0001），无事件同样返回空统计。
 #[tokio::test]
 async fn rule_relearn_default_persona_empty_ok() {
-    let (app, _storage) = build_test_app();
+    let (engine, _storage) = build_test_engine();
     let cmd = RuleCmd::Relearn { persona: None };
-    run(&app, cmd, true, false)
+    run(&engine, cmd, true, false)
         .await
         .expect("默认 persona relearn 在无事件时不应报错");
 }

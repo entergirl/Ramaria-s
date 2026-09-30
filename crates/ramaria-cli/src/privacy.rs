@@ -1,18 +1,19 @@
 //! crates/ramaria-cli/src/privacy.rs - 线上隐私确认流程
 //!
 //! 设计特点:
-//! - 调用 ramaria-app 的隐私检查 API（复用隐私确认逻辑）
+//! - 调用服务层隐私门面（引擎包装隐私查询与确认记录）
 //! - 线上 provider 首次使用必须显式确认
-//! - `--yes` 参数允许跳过交互确认（需显式指定 provider）
+//! - `--yes` 参数允许跳过交互确认
 //! - 本地 LM Studio 无需隐私确认
 //! - 记录 tracing 日志用于审计
 
 use ramaria_core::error::RamariaResult;
+use ramaria_service::{Engine, PrivacyStatus};
 
 /// 确保线上 provider 的隐私已确认。
 ///
 /// 参数:
-/// - `app`: App 实例引用。
+/// - `engine`: 服务层引擎引用。
 /// - `auto_yes`: 是否使用 `--yes` 跳过交互确认。
 ///
 /// 返回:
@@ -23,21 +24,21 @@ use ramaria_core::error::RamariaResult;
 /// - 本地 LM Studio 直接通过（不触发确认流程）。
 /// - 线上 provider（DeepSeek/OpenAI）需要用户交互确认。
 /// - `--yes` 只在显式指定了线上 provider 时生效。
-pub async fn ensure_privacy(app: &ramaria_app::App, auto_yes: bool) -> RamariaResult<()> {
-    // 委托给 ramaria-app 的隐私检查
-    let status = app.check_privacy().await?;
+pub async fn ensure_privacy(engine: &Engine, auto_yes: bool) -> RamariaResult<()> {
+    // 委托给服务层隐私门面（判定输入取库内后端配置）
+    let status = engine.check_privacy().await?;
 
     match status {
-        ramaria_app::privacy::PrivacyStatus::NotNeeded => {
+        PrivacyStatus::NotNeeded => {
             // 本地 provider，无需确认
             tracing::debug!("本地 provider，无需隐私确认");
             Ok(())
         }
-        ramaria_app::privacy::PrivacyStatus::Confirmed { .. } => {
+        PrivacyStatus::Confirmed { .. } => {
             tracing::info!("隐私已确认，继续");
             Ok(())
         }
-        ramaria_app::privacy::PrivacyStatus::NeedsConfirmation {
+        PrivacyStatus::NeedsConfirmation {
             provider_name,
             base_url,
         } => {
@@ -50,7 +51,7 @@ pub async fn ensure_privacy(app: &ramaria_app::App, auto_yes: bool) -> RamariaRe
                 );
                 eprintln!("\x1b[33m⚠ 隐私提醒: 消息将发送至 {provider_name} ({base_url})\x1b[0m");
                 eprintln!("  使用 --yes 已自动确认。数据将离开本机。");
-                app.confirm_privacy(true).await?;
+                engine.confirm_privacy(true).await?;
                 return Ok(());
             }
 
@@ -85,7 +86,7 @@ pub async fn ensure_privacy(app: &ramaria_app::App, auto_yes: bool) -> RamariaRe
                 .map_err(|e| {
                     ramaria_core::error::RamariaError::validation(format!("隐私确认失败: {e}"))
                 })?;
-            app.confirm_privacy(persistent).await?;
+            engine.confirm_privacy(persistent).await?;
 
             crate::ui::success("隐私确认完成");
             Ok(())

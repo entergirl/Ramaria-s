@@ -17,6 +17,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use ramaria_core::error::RamariaError;
 use ramaria_core::traits::{ChatRequest, EmbeddingProvider, LlmProvider};
+use ramaria_service::Engine;
 use uuid::Uuid;
 
 use super::dataset::{has_negative_cue, has_positive_cue};
@@ -333,7 +334,7 @@ pub(super) fn is_local_backend(provider: ramaria_core::types::LlmProvider, base_
 ///    - 语气维: LLM-as-judge（rubric 1~5、温度 0、示例锚定）；LLM 不可用 → 跳过并标注。
 /// 5. 单题失败不中断批量（记 warn + error 字段）。
 pub(super) async fn run_evaluate(
-    app: &Arc<ramaria_app::App>,
+    engine: &Arc<Engine>,
     results_path: &Path,
     dataset_path: Option<&Path>,
     variants_filter: Option<&str>,
@@ -371,7 +372,7 @@ pub(super) async fn run_evaluate(
     let selected: Vec<ProbeVariantResult> = filter_variant_results(&experiment, variants_filter);
 
     // Step 4: 初始化评分器（embedding / judge）
-    let embedder = app.embedding_provider();
+    let embedder = engine.embedding();
     let embedding_used = embedder.as_ref().map(|e| e.is_available()).unwrap_or(false);
     if !embedding_used {
         tracing::warn!("embedding 不可用，事实维退化为纯关键词评分");
@@ -381,7 +382,7 @@ pub(super) async fn run_evaluate(
         tracing::info!("--no-tone-judge：跳过语气维 LLM-as-judge");
         None
     } else {
-        let llm = app.llm_clone();
+        let llm = engine.llm();
         // 语气维 judge 仅限本地后端（隐私口径，D-V20-006）：本地 LM Studio / Ollama
         // 可直接用作 judge；线上后端（DeepSeek/OpenAI）自动跳过并标注。
         // 本地判据为"provider 非线上 ∧ base_url 指向本机"——兼容 LM Studio（:1234）
@@ -404,7 +405,7 @@ pub(super) async fn run_evaluate(
     // "批量 LLM 请求间最小间隔"，默认 800；M8 服务本地 judge 时可调大至 ~1500）。
     // 仅当 judge 可用时生效——纯事实维 evaluate（--no-tone-judge / 线上后端跳过）
     // 不等待，避免无谓拖慢；delay=0 时 `llm_gate::inter_llm_delay` 内部直接跳过。
-    let judge_delay_ms = app.config().thresholds.cluster_delay_ms;
+    let judge_delay_ms = engine.config().thresholds.cluster_delay_ms;
 
     tracing::info!(
         results = %results_path.display(),

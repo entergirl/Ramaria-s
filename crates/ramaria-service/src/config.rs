@@ -171,7 +171,7 @@ impl ConfigWriter {
                 Err(e) => {
                     file_parse_errors.push(e.to_string());
                     tracing::warn!(
-                        path = %self.config_path.display(),
+                        path = %path_log_label(&self.config_path),
                         error = %e,
                         "config.toml 解析失败，回退默认值并以 DB 侧配置继续"
                     );
@@ -198,7 +198,7 @@ impl ConfigWriter {
                 };
                 if let Err(e) = write_result {
                     tracing::warn!(
-                        path = %self.config_path.display(),
+                        path = %path_log_label(&self.config_path),
                         error = %e,
                         "首启生成 config.toml 失败（下次启动将重新同步）"
                     );
@@ -271,7 +271,7 @@ impl ConfigWriter {
                 result.file_ok = false;
                 let msg = format!("config.toml 写入失败: {e}");
                 result.failures.push(msg.clone());
-                tracing::warn!(path = %self.config_path.display(), error = %e, "配置文件写入失败");
+                tracing::warn!(path = %path_log_label(&self.config_path), error = %e, "配置文件写入失败");
             }
         }
 
@@ -847,6 +847,13 @@ fn merge_unknown_keys(new_table: &mut toml::value::Table, old_table: &toml::valu
             }
         }
     }
+}
+
+/// 取路径的文件名用于日志（完整路径不进日志，避免暴露本机目录结构）。
+fn path_log_label(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "<unknown>".to_string())
 }
 
 /// 原子写入文本文件：先写同目录 `{文件名}.part`，再 `fs::rename` 替换目标。

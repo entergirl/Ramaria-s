@@ -1,10 +1,11 @@
 //! crates/ramaria-desktop/src/lib.rs - Ramaria Tauri 桌面应用入口
 //!
 //! 设计特点:
-//! - 管理应用初始化全流程：数据库 → 配置同步 → 后端配置 → Embedding 恢复 → App 构造
-//! - 通过 Tauri managed state (`DesktopState`) 注入 `Arc<App>` 到所有 Command
+//! - 管理应用初始化全流程：服务层引擎装配（连接池 / migration / 配置 / LLM / 嵌入）
+//!   → 配置双写链路 → 封存钩子链注册 → 生命周期拉起
+//! - 通过 Tauri managed state (`DesktopState`) 注入引擎 / 生命周期到所有 Command
+//! - 全部业务命令经服务层用例执行；桌面只保留事件桥、托盘与通知等宿主能力
 //! - 系统托盘在 Tauri setup 钩子中初始化
-//! - 所有 Command 只做参数转换 + 委托 ramaria-app，不写业务逻辑
 //!
 //! 日志与隐私:
 //! - 默认只开 `info` 级：桌面 crate 的 debug 日志含运行细节，而日志文件会随
@@ -18,10 +19,7 @@ mod notification;
 mod path_guard;
 mod tray;
 
-use ramaria_core::traits::EmbeddingProvider;
-use ramaria_core::{StorageBackend, StoreInfrastructure};
-use sqlx::SqlitePool;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
@@ -32,21 +30,18 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 /// Tauri 托管状态，注入到所有 Command 中。
 ///
 /// 职责:
-/// - 持有 `Arc<App>` 实例，供所有 Command 调用 ramaria-app
-/// - 持有数据库路径（诊断展示 / MCP 接入面板生成客户端配置片段）
+/// - 持有服务层引擎：全部业务命令的统一用例入口
+/// - 持有生命周期容器：活跃会话指针、空闲自动保存与后台调度
+/// - 持有评估面板的"用户显式授权目录"
 ///
 /// 安全约束:
-/// - `App` 内部已通过 Mutex/Arc 保证线程安全
+/// - 各实例内部已通过 Mutex/Arc 保证线程安全
 /// - DesktopState 自身为 Send + Sync
 pub struct DesktopState {
-    /// 应用核心实例
-    pub app: Arc<ramaria_app::App>,
-    /// 数据库连接池（供导入器等直接访问 SQLite）
-    pub pool: SqlitePool,
-    /// config.toml 路径（配置双写同步服务用，v1.4）
-    pub config_path: PathBuf,
-    /// assistant.db 路径（MCP 接入面板展示与配置片段生成用）
-    pub db_path: PathBuf,
+    /// 服务层引擎（对话 / 会话 / 配置 / 模型等用例入口）
+    pub engine: Arc<ramaria_service::Engine>,
+    /// 服务层生命周期容器（活跃指针 / 空闲检查 / L2-L3 调度 / 关停）
+    pub lifecycle: Arc<ramaria_service::Lifecycle>,
     /// 评估面板的"用户显式授权目录"（原生目录对话框选择结果）。
     ///
     /// 语义:
@@ -98,10 +93,7 @@ fn init_tracing(log_dir: &std::path::Path) {
         .with(file_layer)
         .init();
 
-    // 注意：需手动添加换行，因为 tracing_subscriber 的 layer 不会自动在每条日志后加换行
-    // 实际上 fmt::layer 会自动处理，但直接写 File 时需要确认。
     // tracing_subscriber 的 fmt layer 通过 MakeWriter 写入时会自动添加换行符。
-
     tracing::info!("Ramaria Desktop v{} 启动", env!("CARGO_PKG_VERSION"));
     tracing::info!(
         file = %path_guard::redact_path_label(&log_file_path),
@@ -150,7 +142,7 @@ fn determine_data_dir() -> PathBuf {
 }
 
 /// 确保数据目录存在。
-fn ensure_data_dir(path: &PathBuf) -> std::io::Result<()> {
+fn ensure_data_dir(path: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(path)?;
 
     // 同时确保子目录存在
@@ -161,114 +153,83 @@ fn ensure_data_dir(path: &PathBuf) -> std::io::Result<()> {
 }
 
 // =========================================================
-// LLM Provider 构造
-// =========================================================
-
-/// 按 provider 类型构造 LLM Provider（三处调用收敛为单点实现）。
-///
-/// 参数:
-/// - `provider`: LLM 后端类型（LmStudio / DeepSeek / OpenAI）
-/// - `config`: 后端配置（含 base_url / model_id / capability）
-/// - `keychain`: OS keychain 实例（线上 provider 构造时读取 API key）
-/// - `cache`: LLM 响应精确缓存（v1.5 C；None = 不注入，行为回退 v1.4）
-///
-/// 返回:
-/// - `Ok(Arc<dyn LlmProvider>)` 构造成功
-/// - `Err(String)` 构造失败（用户友好的中文错误描述）
-///
-/// 说明:
-/// - 供 `init_app` / `update_backend_config` / `run_setup` 共用，
-///   保证三处 cache 注入条件与错误文案一致。
-pub(crate) fn build_llm_provider(
-    provider: ramaria_core::types::LlmProvider,
-    config: &ramaria_core::types::BackendConfig,
-    keychain: Arc<ramaria_llm::keychain::Keychain>,
-    cache: Option<Arc<dyn ramaria_core::traits::LlmResponseCache>>,
-) -> Result<Arc<dyn ramaria_core::traits::LlmProvider>, String> {
-    let provider_arc: Arc<dyn ramaria_core::traits::LlmProvider> = match provider {
-        ramaria_core::types::LlmProvider::LmStudio => {
-            let instance = ramaria_llm::lm_studio::LmStudioProvider::new(config.clone())
-                .map_err(|e| format!("创建 LM Studio provider 失败: {}", e))?;
-            let instance = match &cache {
-                Some(cache) => instance.with_cache(Arc::clone(cache)),
-                None => instance,
-            };
-            Arc::new(instance)
-        }
-        ramaria_core::types::LlmProvider::DeepSeek => {
-            let instance =
-                ramaria_llm::deepseek::DeepSeekProvider::new(config.clone(), Arc::clone(&keychain))
-                    .map_err(|e| format!("创建 DeepSeek provider 失败: {}", e))?;
-            let instance = match &cache {
-                Some(cache) => instance.with_cache(Arc::clone(cache)),
-                None => instance,
-            };
-            Arc::new(instance)
-        }
-        ramaria_core::types::LlmProvider::OpenAI => {
-            let instance =
-                ramaria_llm::openai::OpenAIProvider::new(config.clone(), Arc::clone(&keychain))
-                    .map_err(|e| format!("创建 OpenAI provider 失败: {}", e))?;
-            let instance = match &cache {
-                Some(cache) => instance.with_cache(Arc::clone(cache)),
-                None => instance,
-            };
-            Arc::new(instance)
-        }
-        _ => {
-            return Err(format!("不支持的 LLM provider: {}", provider.as_str()));
-        }
-    };
-    Ok(provider_arc)
-}
-
-// =========================================================
 // 应用初始化
 // =========================================================
 
-/// 初始化 ramaria-app 实例。
-///
-/// 流程:
-/// 1. 初始化数据库连接池 + 执行 migration
-/// 2. 配置双写同步：加载 config.toml + DB 两侧并做一致性校验（以文件为准）
-/// 3. 创建 Keychain
-/// 4. 读取后端配置（同步后的 DB 为真相源，缺记录回退本地默认）
-/// 5. 尝试恢复已保存的嵌入模型（如有；计算设备取同步后的 `[embedding]` 配置）
-/// 6. 创建 LLM 缓存与 Provider
-/// 7. 构造 App 实例
-/// 8. 刷新应用状态
-///
-/// 返回:
-/// - `Ok((App, 连接池, config.toml 路径, assistant.db 路径))` 初始化成功
-/// - `Err(String)` 初始化失败（含用户友好的错误描述）
+/// 索引待构建时完成一次构建并刷新状态。
 ///
 /// 说明:
-/// - 后端配置只在同步之后读取一次：新库（DB 无 `[backend]` 记录）由同步
-///   从 config.toml 补齐，避免 LLM 误指向本地默认地址。
+/// - 仅在应用状态为"索引待构建"（`Indexing`）时动作：缺索引的库在入口侧一次性收敛
+///   （构建写回索引版本后状态机推进）；普通库不产生任何动作；
+/// - 构建失败保持现状（记 warn），可由用户稍后手动重建。
+pub(crate) async fn ensure_index_ready(engine: &ramaria_service::Engine) {
+    if engine.current_state() != ramaria_core::types::AppState::Indexing {
+        return;
+    }
+    match engine.ensure_index_loaded().await {
+        Ok(_) => {
+            if let Err(e) = engine.refresh_setup_state().await {
+                tracing::warn!(error = %e, "索引构建后刷新应用状态失败（降级不阻塞）");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "索引构建失败，保持待构建状态（可稍后手动重建）"
+            );
+        }
+    }
+}
+
+/// 桌面运行时的装配产物。
+///
+/// 字段约定:
+/// - `engine`: 服务层引擎（全部业务用例入口）；
+/// - `lifecycle`: 服务层生命周期容器（活跃指针 / 空闲检查 / L2-L3 调度 / 关停）。
+struct DesktopRuntime {
+    engine: Arc<ramaria_service::Engine>,
+    lifecycle: Arc<ramaria_service::Lifecycle>,
+}
+
+/// 初始化桌面运行时。
+///
+/// 流程:
+/// 1. 装配服务层引擎（连接池 + migration + 配置加载 + LLM / 嵌入恢复）；
+/// 2. 配置双写链路：加载 config.toml + DB 两侧，一致性校验（以文件为准）并回写；
+/// 3. 注册完整封存钩子链（行为 + 风格 + L2→L3 级联 + 知识抽取）；
+/// 4. 拉起生命周期容器（空闲检查 + L2/L3 调度 + 启动期补扫全开）；
+/// 5. 刷新启动状态；
+/// 6. 索引未构建时在启动期完成一次构建并再次刷新状态。
+///
+/// 返回:
+/// - 成功时返回桌面运行时（引擎 / 生命周期）；
+/// - 失败时返回用户友好的错误描述（进程退出由调用方处理）。
+///
+/// 说明:
+/// - 空闲检测与 L2/L3 调度统一由服务层生命周期负责，避免两套后台循环并存；
 /// - 日志中的路径一律经 `path_guard::redact_path_label` 折叠（日志随诊断包外发）。
-async fn init_app(
-    data_dir: &PathBuf,
-) -> Result<(Arc<ramaria_app::App>, SqlitePool, PathBuf, PathBuf), String> {
+async fn init_runtime(data_dir: &Path) -> Result<DesktopRuntime, String> {
     let db_path = data_dir.join("assistant.db");
     let config_path = data_dir.join("config.toml");
 
     // 确保数据目录存在
     ensure_data_dir(data_dir).map_err(|e| format!("创建数据目录失败: {}", e))?;
 
-    tracing::info!(db = %path_guard::redact_path_label(&db_path), "初始化 App");
+    tracing::info!(db = %path_guard::redact_path_label(&db_path), "初始化引擎");
 
-    // Step 1: 初始化数据库连接池 + 执行 migration
-    let pool = ramaria_storage::database::init_pool(Some(db_path.clone()))
+    // Step 1: 装配服务层引擎（连接池 / migration / 配置 / LLM / 嵌入）
+    let engine = Arc::new(
+        ramaria_service::Engine::open_with(
+            ramaria_service::EngineOptions::new(db_path.clone())
+                .with_config_path(config_path.clone()),
+        )
         .await
-        .map_err(|e| format!("数据库初始化失败: {}", e))?;
+        .map_err(|e| format!("引擎装配失败: {}", e))?,
+    );
 
-    let storage = Arc::new(ramaria_storage::SqliteStorage::new(pool.clone()));
-
-    // Step 2: 配置双写同步（v1.4）：加载 config.toml + DB 两侧，一致性校验以文件为准
-    let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
-    let config_sync = ramaria_app::ConfigSyncService::new(storage_dyn, config_path.clone());
-    let sync_outcome = config_sync
-        .load()
+    // Step 2: 配置双写链路：加载 config.toml + DB 两侧，一致性校验以文件为准
+    let sync_outcome = engine
+        .reload_config()
         .await
         .map_err(|e| format!("配置同步加载失败: {}", e))?;
     if !sync_outcome.file_existed {
@@ -296,119 +257,28 @@ async fn init_app(
         tracing::warn!(error = %err, "DB 侧配置回写失败（降级不阻塞）");
     }
 
-    // 生效配置（基于同步结果，填充实际路径）
-    let mut config = sync_outcome.config;
-    config.paths.data_dir = data_dir.to_string_lossy().to_string();
-    config.paths.log_dir = data_dir.join("logs").to_string_lossy().to_string();
-    config.paths.config_dir = data_dir.to_string_lossy().to_string();
-    config.paths.vector_index_dir = data_dir.join("vectors").to_string_lossy().to_string();
+    // Step 3: 注册封存钩子（桌面 = 完整链：行为 + 风格 + L2→L3 级联 + 知识抽取）
+    engine.set_seal_hooks(ramaria_service::full_seal_hooks(&engine));
 
-    // Step 3: 创建 Keychain
-    let keychain = Arc::new(ramaria_llm::keychain::Keychain::new());
+    // Step 4: 拉起生命周期（空闲检查 + L2/L3 调度 + 启动期补扫全开）
+    let lifecycle = engine.start_lifecycle(ramaria_service::LifecycleOptions::desktop());
 
-    // Step 4: 读取后端配置（单次读取）。
-    //
-    // 同步已把 config.toml 的 `[backend]` 写回 DB（新库补齐记录），因此此处以
-    // 同步后的 DB 记录为 LLM / 嵌入路径的真相源；极端情况仍无记录（同步写回
-    // 降级失败）则回退本地默认，避免无配置构建。
-    let backend_config = storage
-        .get_backend_config()
-        .await
-        .map_err(|e| format!("读取后端配置失败: {}", e))?
-        .unwrap_or_else(ramaria_core::types::BackendConfig::lm_studio_default);
-
-    // Step 5: 尝试恢复已保存的嵌入模型（路径来自 BackendConfig）
-    let embedding: Option<Arc<dyn EmbeddingProvider>> = {
-        match &backend_config.embedding_model_path {
-            Some(saved_path) if !saved_path.is_empty() => {
-                let model_dir = std::path::Path::new(saved_path);
-                if !model_dir.exists() {
-                    tracing::warn!(
-                        model = %path_guard::redact_path_label(model_dir),
-                        "已保存的嵌入模型目录不存在，启动后将以降级模式运行"
-                    );
-                    None
-                } else {
-                    // 计算设备取同步后的 `[embedding] device`（cpu/cuda/auto；
-                    // CUDA 不可用回退 CPU），不再单独解析配置文件。
-                    let device = config.embedding.device;
-                    match ramaria_llm::embedding::native::create_native_provider_with_device(
-                        model_dir, device,
-                    ) {
-                        Ok(provider) => {
-                            let info = provider.model_info();
-                            tracing::info!(
-                                model = %path_guard::redact_path_label(model_dir),
-                                model_id = %info.model_id,
-                                dim = info.dimension,
-                                device = device.as_str(),
-                                "已恢复嵌入模型"
-                            );
-                            Some(Arc::new(provider) as Arc<dyn EmbeddingProvider>)
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                model = %path_guard::redact_path_label(model_dir),
-                                error = %e,
-                                "加载已保存的嵌入模型失败，启动后将以降级模式运行"
-                            );
-                            None
-                        }
-                    }
-                }
-            }
-            _ => {
-                tracing::debug!("无已保存的嵌入模型，跳过恢复");
-                None
-            }
-        }
-    };
-
-    // Step 6: 创建 LLM Provider（基于同步后的配置注入精确缓存，v1.5 C）
-    //
-    // 缓存策略（[cache] 配置组）：
-    // - `enabled=true`（默认）：创建 SqliteLlmCache 并注入 provider，
-    //   重跑/重试/失败恢复场景命中缓存不重复花费 API 账单；
-    // - `enabled=false`：不注入缓存，LLM 调用行为回退 v1.4。
-    // - 缓存实例同时保存到 App（`set_llm_cache`），供热更新路径复用。
-    let llm_cache: Option<Arc<dyn ramaria_core::traits::LlmResponseCache>> = if config.cache.enabled
-    {
-        Some(Arc::new(ramaria_storage::SqliteLlmCache::new(
-            pool.clone(),
-            config.cache.max_entries,
-            config.cache.eviction,
-        )))
-    } else {
-        None
-    };
-    let llm: Arc<dyn ramaria_core::LlmProviderTrait> = build_llm_provider(
-        backend_config.provider,
-        &backend_config,
-        Arc::clone(&keychain),
-        llm_cache.clone(),
-    )?;
-    // Step 7: 构造 App 实例（缓存实例同时保存到 App，供热更新路径复用）
-    let app = ramaria_app::App::new(storage, llm, embedding, config, keychain);
-    app.set_llm_cache(llm_cache);
-
-    // Step 8: 刷新状态
-    app.refresh_setup_state()
+    // Step 5: 刷新启动状态
+    engine
+        .refresh_setup_state()
         .await
         .map_err(|e| format!("刷新应用状态失败: {}", e))?;
 
-    // Step 9: 如果状态为 Ready，启动后台任务（空闲检测 + L2/L3 定时检查）
-    if app.current_state() == ramaria_core::AppState::Ready {
-        app.start_background_tasks();
-        tracing::info!("后台任务已启动");
-    }
+    // Step 6: 索引未构建的库在启动期完成一次构建并刷新状态
+    ensure_index_ready(&engine).await;
 
     tracing::info!(
-        state = %app.current_state().as_str(),
-        provider = %backend_config.provider.as_str(),
-        "App 初始化完成"
+        state = %engine.current_state().as_str(),
+        provider = %engine.llm().name(),
+        "桌面运行时初始化完成"
     );
 
-    Ok((Arc::new(app), pool, config_path, db_path))
+    Ok(DesktopRuntime { engine, lifecycle })
 }
 
 // =========================================================
@@ -421,7 +291,7 @@ async fn init_app(
 /// 1. 确定数据目录
 /// 2. 确保目录存在（含 logs/ 子目录）
 /// 3. 初始化日志（stdout + 文件）
-/// 4. 初始化 ramaria-app（异步）
+/// 4. 初始化桌面运行时（引擎 / 生命周期，异步）
 /// 5. 构建 Tauri Builder 并注入状态和命令
 /// 6. 在 setup 钩子中初始化系统托盘
 /// 7. 运行应用
@@ -457,7 +327,7 @@ pub fn run() {
     //
     // 初始化失败属不可恢复（无 storage / 无 LLM provider 时所有 Command 均不可用），
     // 故记录错误后直接退出；用户可从日志与 stderr 获取失败原因。
-    let (app, pool, config_path, db_path) = match rt.block_on(init_app(&data_dir)) {
+    let runtime = match rt.block_on(init_runtime(&data_dir)) {
         Ok(result) => result,
         Err(e) => {
             tracing::error!(error = %e, "应用初始化失败，进程退出");
@@ -467,10 +337,8 @@ pub fn run() {
     };
 
     let state = DesktopState {
-        app,
-        pool,
-        config_path,
-        db_path,
+        engine: runtime.engine,
+        lifecycle: runtime.lifecycle,
         eval_allowed_dirs: std::sync::Mutex::new(Vec::new()),
     };
 
@@ -538,19 +406,19 @@ pub fn run() {
             commands::persona::update_persona_info,
             commands::persona::refresh_persona,
             commands::persona::regenerate_import_pipeline,
-            // ---- Rules（行为规则管理，M7）----
+            // ---- Rules（行为规则管理）----
             commands::rules::list_rules,
             commands::rules::get_rule,
             commands::rules::set_rule_enabled,
             commands::rules::edit_rule,
             commands::rules::rule_evidence,
-            // ---- Keywords（关键词池只读 + 别名，M7）----
+            // ---- Keywords（关键词池只读 + 别名）----
             commands::keywords::list_keywords,
             commands::keywords::list_pending_aliases,
             commands::keywords::resolve_alias,
-            // ---- Style（说话风格统计只读，M7）----
+            // ---- Style（说话风格统计只读）----
             commands::style::get_style_stats,
-            // ---- Evaluation（评估调试只读面板，M7）----
+            // ---- Evaluation（评估调试只读面板）----
             commands::evaluation::pick_eval_dir,
             commands::evaluation::list_eval_files,
             commands::evaluation::read_eval_result,
@@ -559,6 +427,7 @@ pub fn run() {
             commands::diagnostics::get_version,
             commands::diagnostics::export_diagnostics,
             // ---- System ----
+            commands::dialog::save_file_dialog,
             tray::confirm_close_action,
         ])
         .setup(move |app| {

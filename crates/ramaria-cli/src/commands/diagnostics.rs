@@ -9,9 +9,10 @@
 //!
 //! 安全约束:
 //! - 导出路径通过 canonicalize 防护路径穿越。
-//! - API key 脱敏在 export_diagnostics 内部完成。
+//! - API key 脱敏在诊断导出用例内部完成。
 
 use anyhow::Context;
+use ramaria_service::{DiagnosticsRequest, Engine};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -25,20 +26,14 @@ pub struct DiagnosticsArgs {
 ///
 /// 流程:
 /// 1. 确定输出路径（用户指定 → 默认 `ramaria-diagnostics-{timestamp}.zip`）。
-/// 2. 调用 `ramaria_app::export_diagnostics` 收集系统信息、日志、配置。
-/// 3. 打包为 .zip 文件。
+/// 2. 读取数据库 schema 版本（读取失败降级为 "unknown"，不阻塞导出）。
+/// 3. 收集系统信息、日志、配置并打包为 .zip 文件。
 ///
 /// 参数:
-/// - `app`: App 实例（读取配置）。
-/// - `pool`: 数据库连接池（读取 schema_meta 版本）。
+/// - `engine`: 服务层引擎（配置快照提供日志与配置目录）。
 /// - `args`: 命令参数。
 /// - `json`: `--json` 信封输出（导出路径/文件大小/收集状态）。
-pub async fn run(
-    app: &Arc<ramaria_app::App>,
-    pool: &sqlx::SqlitePool,
-    args: DiagnosticsArgs,
-    json: bool,
-) -> anyhow::Result<()> {
+pub async fn run(engine: &Arc<Engine>, args: DiagnosticsArgs, json: bool) -> anyhow::Result<()> {
     let output_path = match args.output {
         Some(p) => PathBuf::from(p),
         None => PathBuf::from(default_diagnostics_path()),
@@ -52,27 +47,21 @@ pub async fn run(
         output_path.display()
     ));
 
-    // 读取 schema 版本
-    let schema_version = match sqlx::query_scalar::<_, String>(
-        "SELECT value FROM schema_meta WHERE key = 'schema_version'",
-    )
-    .fetch_optional(pool)
-    .await
-    {
-        Ok(Some(v)) => v,
-        Ok(None) => {
-            tracing::debug!("schema_meta 表无 schema_version 记录，使用默认值 '1'");
-            "1".to_string()
-        }
+    // 读取 schema 版本（读取失败降级为 "unknown"，不阻塞导出）
+    let schema_version = match engine.schema_version().await {
+        Ok(version) => version.to_string(),
         Err(e) => {
-            tracing::warn!(error = %e, "读取 schema_meta 失败");
+            tracing::warn!(error = %e, "读取 schema 版本失败，诊断包按 unknown 记录");
             "unknown".to_string()
         }
     };
 
     // 执行诊断导出
-    let config = app.config();
-    let report = ramaria_app::export_diagnostics(config, schema_version, &output_path)
+    let report = engine
+        .export_diagnostics(DiagnosticsRequest {
+            output_path,
+            schema_version,
+        })
         .await
         .context("诊断信息导出失败")?;
 

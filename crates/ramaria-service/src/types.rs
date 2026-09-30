@@ -532,6 +532,83 @@ pub struct PersonaCardView {
 }
 
 // =========================================================
+// 人格管理用例（全字段列表 / 信息更新 / 文件导入）
+// =========================================================
+
+/// 人格完整信息视图。
+///
+/// 职责:
+/// - 供人格管理页展示与编辑使用；与 [`PersonaSummaryView`] 的区别是包含
+///   `ref_id` / `avatar` / `config` / `description` / `updated_at` 等完整字段。
+///
+/// 字段约定:
+/// - `kind`: 人格类型的稳定字符串标识（`user` / `rama` / `char` / `anim` / `oc` / `hist`）。
+/// - `is_active`: 是否启用（契约字段名为 `is_active`，与摘要视图的 `active` 区分）。
+/// - `created_at` / `updated_at`: Unix 毫秒时间戳。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PersonaFullView {
+    pub uid: String,
+    pub name: String,
+    pub kind: String,
+    pub source: String,
+    /// 来源方原始 ID（跨渠道去重用）
+    pub ref_id: Option<String>,
+    /// 头像 URL 或路径
+    pub avatar: Option<String>,
+    /// 人格配置内容（全量文本）
+    pub config: Option<String>,
+    /// 人格简要描述
+    pub description: Option<String>,
+    /// 是否启用
+    pub is_active: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// 人格信息更新请求（仅用户可编辑字段）。
+///
+/// 字段约定:
+/// - 各字段均为可选：`None` 表示不更新对应字段（沿用库中现值）。
+/// - `description`: `Some("")` 表示清空描述（与 `None` 行为不同）。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PersonaUpdateRequest {
+    pub name: Option<String>,
+    pub avatar: Option<String>,
+    pub description: Option<String>,
+}
+
+/// 人格文件导入动作（单文件结果）。
+///
+/// 格式:
+/// - 序列化为小写字符串：`created` / `updated` / `skipped` / `failed`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum PersonaFileAction {
+    /// 新建（库中无该 uid 记录）
+    Created,
+    /// 更新（库中已有记录，按文件内容同步名称与配置）
+    Updated,
+    /// 跳过（仅创建缺失模式下记录已存在，未做任何写入）
+    Skipped,
+    /// 失败（读取 / 查询 / 写入错误；不影响其余文件）
+    Failed,
+}
+
+/// 人格文件导入的单文件结果条目。
+///
+/// 字段约定:
+/// - `uid`: 目标人格 uid（取自文件名 stem；文件名无法解析时为文件名的可读形态）。
+/// - `action`: 本次导入对该文件执行的动作。
+/// - `message`: 面向调用方的结果消息（成功为摘要，失败含具体原因）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PersonaFileOutcome {
+    pub uid: String,
+    pub action: PersonaFileAction,
+    pub message: String,
+}
+
+// =========================================================
 // 会话读取用例（session 摘要 / chat_history）
 // =========================================================
 
@@ -618,7 +695,7 @@ pub struct HistoryResult {
 /// - `model_selected`: 线上 provider 已填 model_id；本地 provider 视为已选
 ///   （模型由本地推理服务侧决定，配置层不强制）。
 /// - `needs_indexing`: 记忆索引尚未构建（`schema_meta.index_version == 0`；
-///   该键缺失时按存储层既有口径视为已构建）。
+///   该键缺失时按未构建口径返回 `0`）。
 /// - `embedding_available`: 嵌入模型已加载且可用（向量通道就绪）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetupStatus {
@@ -1082,6 +1159,24 @@ pub struct SessionMessagesView {
     pub messages: Vec<SessionMessageView>,
 }
 
+/// 会话详情视图（会话元数据 + 消息页）。
+///
+/// 字段约定:
+/// - `started_at` / `ended_at`: 会话起止时间（UTC；未关闭时 `ended_at` 为 None）。
+/// - `total_messages`: 会话消息总数（与分页无关）。
+/// - `has_more`: 是否还有更早的消息未返回（全量加载恒为 false）。
+/// - `messages`: 消息页（时间正序）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionDetailView {
+    pub id: Uuid,
+    pub started_at: DateTime<Utc>,
+    pub ended_at: Option<DateTime<Utc>>,
+    pub persona_uid: Option<String>,
+    pub total_messages: u32,
+    pub has_more: bool,
+    pub messages: Vec<SessionMessageView>,
+}
+
 /// 消息浏览条目视图。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionMessageView {
@@ -1091,6 +1186,17 @@ pub struct SessionMessageView {
     pub created_at: i64,
     pub source: MessageSource,
     pub persona_uid: Option<String>,
+}
+
+/// 通道会话概览视图（通道活动统计）。
+///
+/// 字段约定:
+/// - `active_sessions`: 该通道未关闭会话数；
+/// - `last_activity_ms`: 该通道最近一条消息时间（Unix 毫秒）；无活动为 None。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelOverviewView {
+    pub active_sessions: i64,
+    pub last_activity_ms: Option<i64>,
 }
 
 // =========================================================
@@ -1175,6 +1281,30 @@ pub struct AliasResolveOutcome {
     pub canonical_keyword: Option<String>,
     pub status: String,
     pub already_applied: bool,
+}
+
+/// 关键词 seed 单条结果。
+///
+/// 字段约定:
+/// - `inserted`: true = 本次新插入（use_count 从 0 起）；false = 词条已存在（保持现状）。
+/// - `status`: 处理后的词条状态（canonical / alias / pending）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KeywordSeedItem {
+    pub keyword: String,
+    pub inserted: bool,
+    pub status: String,
+}
+
+/// 关键词 seed 结果。
+///
+/// 字段约定:
+/// - `seeded` / `skipped`: 新插入 / 已存在跳过的条数之和恒等于 `results.len()`；
+/// - `results`: 去重后的逐条结果（保留首次出现顺序）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KeywordSeedOutcome {
+    pub seeded: usize,
+    pub skipped: usize,
+    pub results: Vec<KeywordSeedItem>,
 }
 
 // =========================================================
@@ -1567,6 +1697,78 @@ mod tests {
         assert_eq!(view, back);
     }
 
+    /// 人格管理视图：JSON 字段名与桌面契约逐字对齐（snake_case，`is_active`）。
+    #[test]
+    fn persona_management_views_serde() {
+        let view = PersonaFullView {
+            uid: "char-0001".to_string(),
+            name: "小林".to_string(),
+            kind: "char".to_string(),
+            source: "file".to_string(),
+            ref_id: Some("qq-123456".to_string()),
+            avatar: Some("avatar.png".to_string()),
+            config: Some("assistant_name = \"小林\"".to_string()),
+            description: Some("大学同学".to_string()),
+            is_active: true,
+            created_at: 1_000,
+            updated_at: 2_000,
+        };
+        let json = serde_json::to_string(&view).expect("序列化成功");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("JSON 解析成功");
+        for key in [
+            "uid",
+            "name",
+            "kind",
+            "source",
+            "ref_id",
+            "avatar",
+            "config",
+            "description",
+            "is_active",
+            "created_at",
+            "updated_at",
+        ] {
+            assert!(value.get(key).is_some(), "字段 {key} 应存在于 JSON: {json}");
+        }
+        assert!(value.get("isActive").is_none(), "不应输出 camelCase 字段名");
+        let back: PersonaFullView = serde_json::from_str(&json).expect("反序列化成功");
+        assert_eq!(view, back);
+
+        // 更新请求：三个可选字段缺省为 None
+        let req = PersonaUpdateRequest::default();
+        assert!(req.name.is_none() && req.avatar.is_none() && req.description.is_none());
+        let json = serde_json::to_string(&PersonaUpdateRequest {
+            name: Some("新名字".to_string()),
+            avatar: None,
+            description: Some(String::new()),
+        })
+        .expect("序列化成功");
+        assert!(json.contains("\"description\":\"\""), "空描述应可表达清空");
+
+        // 文件导入动作：小写序列化口径
+        for (action, expected) in [
+            (PersonaFileAction::Created, "created"),
+            (PersonaFileAction::Updated, "updated"),
+            (PersonaFileAction::Skipped, "skipped"),
+            (PersonaFileAction::Failed, "failed"),
+        ] {
+            let json = serde_json::to_string(&action).expect("序列化成功");
+            assert_eq!(json, format!("\"{expected}\""));
+            let back: PersonaFileAction = serde_json::from_str(&json).expect("反序列化成功");
+            assert_eq!(action, back);
+        }
+
+        // 结果条目往返
+        let outcome = PersonaFileOutcome {
+            uid: "char-0001".to_string(),
+            action: PersonaFileAction::Updated,
+            message: "已更新 persona: char-0001 (小林)".to_string(),
+        };
+        let json = serde_json::to_string(&outcome).expect("序列化成功");
+        let back: PersonaFileOutcome = serde_json::from_str(&json).expect("反序列化成功");
+        assert_eq!(outcome, back);
+    }
+
     /// 模型管理视图：可选字段缺省时不出现，降级原因按蛇形小写序列化。
     #[test]
     fn model_management_types_serde() {
@@ -1671,6 +1873,31 @@ mod tests {
         let back: L1MemoryView = serde_json::from_str(&json).expect("反序列化成功");
         assert_eq!(l1, back);
 
+        // 会话详情视图往返（UTC 时间与消息条目）
+        let detail = SessionDetailView {
+            id: Uuid::nil(),
+            started_at: fixed_time(1_756_000_000_000),
+            ended_at: None,
+            persona_uid: Some("char-0001".to_string()),
+            total_messages: 1,
+            has_more: false,
+            messages: vec![SessionMessageView {
+                id: Uuid::nil(),
+                role: MessageRole::User,
+                content: "你好".to_string(),
+                created_at: 1_756_000_000_001,
+                source: MessageSource::Local,
+                persona_uid: Some("char-0001".to_string()),
+            }],
+        };
+        let json = serde_json::to_string(&detail).expect("序列化成功");
+        assert!(
+            json.contains("\"role\":\"user\""),
+            "role 应小写序列化: {json}"
+        );
+        let back: SessionDetailView = serde_json::from_str(&json).expect("反序列化成功");
+        assert_eq!(detail, back);
+
         // L2 事件视图往返（presentation 小写序列化）
         let event = L2EventView {
             id: 7,
@@ -1729,5 +1956,26 @@ mod tests {
         assert!(json.contains("\"canonical_keyword\":null"));
         let back: AliasResolveOutcome = serde_json::from_str(&json).expect("反序列化成功");
         assert_eq!(outcome, back);
+
+        // 关键词 seed 结果（逐条 inserted / status 口径）
+        let seed = KeywordSeedOutcome {
+            seeded: 1,
+            skipped: 1,
+            results: vec![
+                KeywordSeedItem {
+                    keyword: "工作压力".to_string(),
+                    inserted: true,
+                    status: "canonical".to_string(),
+                },
+                KeywordSeedItem {
+                    keyword: "职场焦虑".to_string(),
+                    inserted: false,
+                    status: "pending".to_string(),
+                },
+            ],
+        };
+        let json = serde_json::to_string(&seed).expect("序列化成功");
+        let back: KeywordSeedOutcome = serde_json::from_str(&json).expect("反序列化成功");
+        assert_eq!(seed, back);
     }
 }

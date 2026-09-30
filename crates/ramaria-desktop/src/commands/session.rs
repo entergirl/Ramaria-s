@@ -1,19 +1,13 @@
 //! crates/ramaria-desktop/src/commands/session.rs - 会话管理 Tauri Commands
 //!
 //! 设计特点:
-//! - list_sessions / get_session / delete_session / create_session: 委托 StorageBackend
-//! - 所有返回值经过序列化，前端可直接解析 JSON
+//! - list_sessions / get_session / delete_session / create_session: 委托服务层会话用例
+//! - 所有返回值经过序列化，前端可直接解析 JSON（字段结构保持既有契约）
+//! - 服务层的时间类型转换为毫秒时间戳，与前端既有展示口径一致
 //! - 删除操作需要二次确认（前端处理），后端只执行删除
-//! - 不保留业务逻辑，纯数据访问封装
 
 use crate::DesktopState;
-use ramaria_core::traits::StorageBackend;
-use ramaria_core::types::Message;
 use serde::Serialize;
-use sqlx::Row;
-use sqlx::SqlitePool;
-use std::collections::HashMap;
-use std::sync::Arc;
 use tauri::State;
 use uuid::Uuid;
 
@@ -27,7 +21,7 @@ pub struct SessionSummary {
     pub id: String,
     pub started_at: i64,
     pub ended_at: Option<i64>,
-    /// 消息数量（通过 `SELECT COUNT(*)` 实时查询）
+    /// 消息数量（服务层聚合查询结果）
     pub message_count: u32,
     /// 会话绑定的人格 UID（NULL 表示存量旧数据）。
     /// 前端 SessionDrawer 据此按 persona 筛选会话列表。
@@ -42,7 +36,7 @@ pub struct SessionSummary {
     pub external_ref: Option<String>,
 }
 
-/// 由存储层会话与消息数聚合构造前端摘要（字段映射的唯一入口，便于单测锁定）。
+/// 由存储层会话与消息数聚合构造前端摘要（新建会话路径的字段映射入口）。
 ///
 /// 参数:
 /// - `session`: 存储层会话记录。
@@ -59,6 +53,22 @@ fn summary_from(
         persona_uid: session.persona_uid.clone(),
         channel: session.channel.clone(),
         external_ref: session.external_ref.clone(),
+    }
+}
+
+/// 由服务层会话摘要视图构造前端摘要（列表路径的字段映射入口，便于单测锁定）。
+///
+/// 参数:
+/// - `view`: 服务层会话列表条目（时间类型为 UTC，转换毫秒时间戳透出）。
+fn summary_from_view(view: &ramaria_service::SessionSummaryView) -> SessionSummary {
+    SessionSummary {
+        id: view.id.to_string(),
+        started_at: view.started_at.timestamp_millis(),
+        ended_at: view.ended_at.as_ref().map(|dt| dt.timestamp_millis()),
+        message_count: view.message_count,
+        persona_uid: view.persona_uid.clone(),
+        channel: view.channel.clone(),
+        external_ref: view.external_ref.clone(),
     }
 }
 
@@ -87,6 +97,33 @@ pub struct MessageView {
     pub created_at: i64,
 }
 
+/// 由服务层会话详情视图构造前端详情（字段映射的唯一入口，便于单测锁定）。
+///
+/// 参数:
+/// - `view`: 服务层会话详情视图（时间类型为 UTC，转换毫秒时间戳透出）。
+fn detail_from_view(view: &ramaria_service::SessionDetailView) -> SessionDetail {
+    SessionDetail {
+        id: view.id.to_string(),
+        started_at: view.started_at.timestamp_millis(),
+        ended_at: view.ended_at.as_ref().map(|dt| dt.timestamp_millis()),
+        persona_uid: view.persona_uid.clone(),
+        total_messages: view.total_messages,
+        has_more: view.has_more,
+        messages: view.messages.iter().map(message_view).collect(),
+    }
+}
+
+/// 由服务层消息视图构造前端消息视图。
+fn message_view(m: &ramaria_service::SessionMessageView) -> MessageView {
+    MessageView {
+        id: m.id.to_string(),
+        role: m.role.as_str().to_string(),
+        content: m.content.clone(),
+        persona_uid: m.persona_uid.clone(),
+        created_at: m.created_at,
+    }
+}
+
 // =========================================================
 // list_sessions — 列出所有会话
 // =========================================================
@@ -98,127 +135,24 @@ pub struct MessageView {
 #[tauri::command]
 #[tracing::instrument(skip(state))]
 pub async fn list_sessions(state: State<'_, DesktopState>) -> Result<Vec<SessionSummary>, String> {
-    let sessions = state
-        .app
-        .storage()
-        .list_sessions()
+    let page = state
+        .engine
+        .session_list(ramaria_service::SessionBrowseRequest {
+            limit: None,
+            offset: None,
+        })
         .await
         .map_err(|e| format!("查询会话列表失败: {}", e))?;
 
-    // 按 started_at 倒序排列
-    let mut sorted = sessions;
-    sorted.sort_by_key(|b| std::cmp::Reverse(b.started_at));
-
-    // 单次聚合查询各会话消息数，替代逐会话 COUNT 的 N+1 查询
-    let counts = message_counts_by_session(&state.pool).await;
-
-    let summaries: Vec<SessionSummary> = sorted
-        .iter()
-        .map(|s| summary_from(s, counts.get(&s.id.to_string()).copied()))
-        .collect();
+    let summaries: Vec<SessionSummary> = page.items.iter().map(summary_from_view).collect();
 
     tracing::debug!(count = summaries.len(), "list_sessions 完成");
     Ok(summaries)
 }
 
-/// 单查询聚合各会话消息数（`GROUP BY session_id`），替代逐会话 COUNT 的 N+1 查询。
-///
-/// 返回:
-/// - 会话 UUID 文本 → 消息数；查询失败时仅告警并返回空表（列表仍可展示，
-///   消息数降级为 0，不阻塞会话列表）。
-async fn message_counts_by_session(pool: &SqlitePool) -> HashMap<String, u32> {
-    // 本 crate 未启用 sqlx 的 macros feature，使用运行时查询配合 Row::try_get 解码
-    let rows = sqlx::query("SELECT session_id, COUNT(*) AS cnt FROM messages GROUP BY session_id")
-        .fetch_all(pool)
-        .await;
-
-    let rows = match rows {
-        Ok(rows) => rows,
-        Err(e) => {
-            tracing::warn!(error = %e, "聚合会话消息数失败，消息数降级为 0");
-            return HashMap::new();
-        }
-    };
-
-    // GROUP BY 只返回有消息的会话；COUNT 解码异常时按 0 处理，不阻塞列表
-    let mut counts = HashMap::with_capacity(rows.len());
-    for row in rows {
-        let session_id: String = match row.try_get("session_id") {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(error = %e, "聚合行缺少 session_id 字段，已跳过");
-                continue;
-            }
-        };
-        let cnt: i64 = row.try_get("cnt").unwrap_or(0);
-        counts.insert(session_id, cnt.max(0) as u32);
-    }
-    counts
-}
-
 // =========================================================
 // get_session — 获取会话详情（含消息）
 // =========================================================
-
-/// 单页消息条数上限（防御超大分页请求）。
-const MAX_MESSAGE_PAGE: i64 = 1000;
-
-/// 加载指定会话的消息（全量或按最新在前分页）。
-///
-/// 语义:
-/// - `limit` 为 `None`: 走全量加载（时间正序），返回
-///   `(全部消息, 总数 = 消息条数, false)`，保持前端不传参时的既有行为；
-/// - `limit` 为 `Some(l)`: 按最新在前分页（`created_at DESC`），返回前反转为
-///   时间正序，便于调用方直接按对话顺序渲染；`has_more` 表示是否还有更早
-///   的消息未返回。
-///
-/// 参数:
-/// - `storage`: 存储后端。
-/// - `session_id`: 会话 UUID。
-/// - `limit`: 每页条数（`None` 表示全量加载）。
-/// - `offset`: 分页偏移量（仅分页时生效，负数按 0 处理）。
-///
-/// 返回:
-/// - `(消息列表, 消息总数, 是否还有更早消息)`。
-///
-/// 说明:
-/// - 长会话应由调用方传 `limit`/`offset` 分页，避免一次性把全部消息拉回内存；
-/// - 单页条数经 `MAX_MESSAGE_PAGE` 钳制，防御超大分页请求。
-async fn load_session_messages(
-    storage: &Arc<dyn StorageBackend>,
-    session_id: Uuid,
-    limit: Option<i64>,
-    offset: Option<i64>,
-) -> Result<(Vec<Message>, u32, bool), String> {
-    match limit {
-        None => {
-            let messages = storage
-                .list_messages(session_id)
-                .await
-                .map_err(|e| format!("查询消息失败: {e}"))?;
-            let total = messages.len() as u32;
-            Ok((messages, total, false))
-        }
-        Some(l) => {
-            let limit = l.clamp(1, MAX_MESSAGE_PAGE);
-            let offset = offset.unwrap_or(0).max(0);
-
-            // 分页按最新在前（created_at DESC）查询，返回前反转为时间正序
-            let mut messages = storage
-                .list_messages_paginated(session_id, limit, offset)
-                .await
-                .map_err(|e| format!("查询消息失败: {e}"))?;
-            messages.reverse();
-
-            let total = storage
-                .count_messages(session_id)
-                .await
-                .map_err(|e| format!("统计消息数失败: {e}"))?;
-            let has_more = (offset + limit) < total as i64;
-            Ok((messages, total, has_more))
-        }
-    }
-}
 
 /// 获取指定会话的详情，包含该会话下的消息。
 ///
@@ -239,45 +173,28 @@ pub async fn get_session(
 ) -> Result<SessionDetail, String> {
     let sid = Uuid::parse_str(&session_id).map_err(|e| format!("无效的会话 ID: {}", e))?;
 
-    let session = state
-        .app
-        .storage()
-        .get_session(sid)
+    // 会话元数据与消息页由服务层一次读取（存在性校验含在内）
+    let detail = state
+        .engine
+        .session_detail(sid, limit, offset)
         .await
-        .map_err(|e| format!("查询会话失败: {}", e))?
-        .ok_or_else(|| format!("会话不存在: {}", session_id))?;
-
-    let (messages, total_messages, has_more) =
-        load_session_messages(state.app.storage(), sid, limit, offset).await?;
-
-    let msg_views: Vec<MessageView> = messages
-        .into_iter()
-        .map(|m| MessageView {
-            id: m.id.to_string(),
-            role: m.role.as_str().to_string(),
-            content: m.content,
-            persona_uid: m.persona_uid,
-            created_at: m.created_at,
-        })
-        .collect();
+        .map_err(|e| {
+            if e.category() == "validation" {
+                format!("会话不存在: {}", session_id)
+            } else {
+                format!("查询会话失败: {}", e)
+            }
+        })?;
 
     tracing::debug!(
         session_id = %session_id,
-        message_count = msg_views.len(),
-        total_messages = total_messages,
-        has_more = has_more,
+        message_count = detail.messages.len(),
+        total_messages = detail.total_messages,
+        has_more = detail.has_more,
         "get_session 完成"
     );
 
-    Ok(SessionDetail {
-        id: session.id.to_string(),
-        started_at: session.started_at,
-        ended_at: session.ended_at,
-        persona_uid: session.persona_uid.clone(),
-        total_messages,
-        has_more,
-        messages: msg_views,
-    })
+    Ok(detail_from_view(&detail))
 }
 
 // =========================================================
@@ -307,8 +224,7 @@ pub async fn delete_session(
     let sid = Uuid::parse_str(&session_id).map_err(|e| format!("无效的会话 ID: {}", e))?;
 
     state
-        .app
-        .storage()
+        .engine
         .delete_session(sid)
         .await
         .map_err(|e| format!("删除会话失败: {}", e))?;
@@ -325,7 +241,7 @@ pub async fn delete_session(
 ///
 /// 参数:
 /// - `persona_uid`: 绑定的人格 UID（None 表示暂不绑定，发送消息时由
-///   resolve_session 回写绑定）。
+///   会话定位回写绑定）。
 ///
 /// 返回:
 /// - SessionSummary（新会话的摘要信息）
@@ -336,8 +252,7 @@ pub async fn create_session(
     persona_uid: Option<String>,
 ) -> Result<SessionSummary, String> {
     let session = state
-        .app
-        .storage()
+        .engine
         .create_session(persona_uid.as_deref())
         .await
         .map_err(|e| format!("创建会话失败: {}", e))?;
@@ -354,88 +269,6 @@ pub async fn create_session(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ramaria_core::types::{Message, MessageRole, MessageSource};
-    use ramaria_storage::SqliteStorage;
-    use ramaria_storage::database::init_pool;
-
-    /// 创建临时目录 + 真实 SQLite 库（已执行 migration），返回 (目录, 连接池)。
-    async fn setup_pool() -> (std::path::PathBuf, SqlitePool) {
-        let dir =
-            std::env::temp_dir().join(format!("ramaria-desktop-session-test-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).expect("创建测试临时目录失败");
-        let pool = init_pool(Some(dir.join("test.db")))
-            .await
-            .expect("测试库初始化失败");
-        (dir, pool)
-    }
-
-    /// 写入 `count` 条测试消息（created_at 从固定基准起逐条 +1，保证分页排序确定）。
-    async fn insert_messages(storage: &Arc<dyn StorageBackend>, session_id: Uuid, count: i64) {
-        for i in 0..count {
-            let mut m = Message::new(
-                session_id,
-                MessageRole::User,
-                format!("m{i}"),
-                MessageSource::Local,
-            );
-            m.created_at = 1_700_000_000_000 + i;
-            storage.save_message(&m).await.expect("写入测试消息失败");
-        }
-    }
-
-    /// 分页语义：最新在前分页、返回时间正序、总数与 has_more 正确、全量与超限防御。
-    #[tokio::test]
-    async fn load_session_messages_paginates_latest_first() {
-        let (dir, pool) = setup_pool().await;
-        let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::new(pool.clone()));
-        let session = storage
-            .create_session(None)
-            .await
-            .expect("创建测试会话失败");
-        insert_messages(&storage, session.id, 5).await;
-
-        // 最新一页：limit 2 offset 0 → m3、m4（分页最新在前，返回前反转为时间正序）
-        let (messages, total, has_more) =
-            load_session_messages(&storage, session.id, Some(2), Some(0))
-                .await
-                .expect("分页查询失败");
-        let contents: Vec<&str> = messages.iter().map(|m| m.content.as_str()).collect();
-        assert_eq!(contents, ["m3", "m4"]);
-        assert_eq!(total, 5);
-        assert!(has_more);
-
-        // 最后一页：limit 2 offset 4 → m0，无更早消息
-        let (messages, total, has_more) =
-            load_session_messages(&storage, session.id, Some(2), Some(4))
-                .await
-                .expect("末页查询失败");
-        let contents: Vec<&str> = messages.iter().map(|m| m.content.as_str()).collect();
-        assert_eq!(contents, ["m0"]);
-        assert_eq!(total, 5);
-        assert!(!has_more);
-
-        // 全量：limit None → 5 条时间正序，has_more 恒为 false
-        let (messages, total, has_more) = load_session_messages(&storage, session.id, None, None)
-            .await
-            .expect("全量查询失败");
-        let contents: Vec<&str> = messages.iter().map(|m| m.content.as_str()).collect();
-        assert_eq!(contents, ["m0", "m1", "m2", "m3", "m4"]);
-        assert_eq!(total, 5);
-        assert!(!has_more);
-
-        // 超限防御：limit 0 被钳制到下界 1 → 仅最新 1 条
-        let (messages, total, has_more) =
-            load_session_messages(&storage, session.id, Some(0), None)
-                .await
-                .expect("下界钳制查询失败");
-        let contents: Vec<&str> = messages.iter().map(|m| m.content.as_str()).collect();
-        assert_eq!(contents, ["m4"]);
-        assert_eq!(total, 5);
-        assert!(has_more);
-
-        pool.close().await;
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
     /// 摘要映射：来源通道与外部标识透传（v2.1 桌面来源标注的数据源）。
     #[test]
@@ -459,28 +292,97 @@ mod tests {
         assert_eq!(summary.message_count, 0);
     }
 
-    /// 聚合查询：两个会话各 2 条 / 3 条，计数按会话正确归组。
-    #[tokio::test]
-    async fn message_counts_by_session_aggregates_per_session() {
-        let (dir, pool) = setup_pool().await;
-        let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::new(pool.clone()));
-        let s1 = storage
-            .create_session(None)
-            .await
-            .expect("创建测试会话失败");
-        let s2 = storage
-            .create_session(None)
-            .await
-            .expect("创建测试会话失败");
-        insert_messages(&storage, s1.id, 2).await;
-        insert_messages(&storage, s2.id, 3).await;
+    /// 摘要映射：服务层视图（UTC 时间）转换为毫秒时间戳，字段逐项透传。
+    #[test]
+    fn summary_from_view_maps_fields_and_timestamps() {
+        use chrono::{DateTime, Utc};
 
-        let counts = message_counts_by_session(&pool).await;
-        assert_eq!(counts.get(&s1.id.to_string()).copied(), Some(2));
-        assert_eq!(counts.get(&s2.id.to_string()).copied(), Some(3));
-        assert_eq!(counts.len(), 2, "聚合结果只应包含有消息的会话");
+        let session_id = Uuid::new_v4();
+        let started =
+            DateTime::<Utc>::from_timestamp_millis(1_700_000_000_000).expect("合法毫秒时间戳");
+        let ended =
+            DateTime::<Utc>::from_timestamp_millis(1_700_000_060_000).expect("合法毫秒时间戳");
+        let view = ramaria_service::SessionSummaryView {
+            id: session_id,
+            started_at: started,
+            ended_at: Some(ended),
+            persona_uid: Some("char-0001".to_string()),
+            channel: "local".to_string(),
+            external_ref: None,
+            message_count: 7,
+        };
 
-        pool.close().await;
-        let _ = std::fs::remove_dir_all(&dir);
+        let summary = summary_from_view(&view);
+        assert_eq!(summary.id, session_id.to_string());
+        assert_eq!(summary.started_at, 1_700_000_000_000);
+        assert_eq!(summary.ended_at, Some(1_700_000_060_000));
+        assert_eq!(summary.message_count, 7);
+        assert_eq!(summary.persona_uid.as_deref(), Some("char-0001"));
+        assert_eq!(summary.channel, "local");
+        assert!(summary.external_ref.is_none());
+
+        // 未关闭会话：ended_at 为 None 保持
+        let open = ramaria_service::SessionSummaryView {
+            ended_at: None,
+            ..view
+        };
+        assert!(summary_from_view(&open).ended_at.is_none());
+    }
+
+    /// 详情映射：服务层视图（UTC 时间）转换为毫秒时间戳，消息字段逐项透传。
+    #[test]
+    fn detail_from_view_maps_fields_and_messages() {
+        use chrono::{DateTime, Utc};
+        use ramaria_core::types::{MessageRole, MessageSource};
+
+        let session_id = Uuid::new_v4();
+        let started =
+            DateTime::<Utc>::from_timestamp_millis(1_700_000_000_000).expect("合法毫秒时间戳");
+        let ended =
+            DateTime::<Utc>::from_timestamp_millis(1_700_000_060_000).expect("合法毫秒时间戳");
+        let view = ramaria_service::SessionDetailView {
+            id: session_id,
+            started_at: started,
+            ended_at: Some(ended),
+            persona_uid: Some("char-0001".to_string()),
+            total_messages: 9,
+            has_more: true,
+            messages: vec![ramaria_service::SessionMessageView {
+                id: Uuid::new_v4(),
+                role: MessageRole::User,
+                content: "你好".to_string(),
+                created_at: 1_700_000_030_000,
+                source: MessageSource::Local,
+                persona_uid: Some("char-0001".to_string()),
+            }],
+        };
+
+        let detail = detail_from_view(&view);
+        assert_eq!(detail.id, session_id.to_string());
+        assert_eq!(detail.started_at, 1_700_000_000_000);
+        assert_eq!(detail.ended_at, Some(1_700_000_060_000));
+        assert_eq!(detail.persona_uid.as_deref(), Some("char-0001"));
+        assert_eq!(detail.total_messages, 9);
+        assert!(detail.has_more);
+        assert_eq!(detail.messages.len(), 1);
+        let msg = &detail.messages[0];
+        assert_eq!(msg.id, view.messages[0].id.to_string());
+        assert_eq!(msg.role, "user");
+        assert_eq!(msg.content, "你好");
+        assert_eq!(msg.persona_uid.as_deref(), Some("char-0001"));
+        assert_eq!(msg.created_at, 1_700_000_030_000);
+
+        // 未关闭会话：ended_at 为 None 保持；全量加载 has_more false
+        let open = ramaria_service::SessionDetailView {
+            ended_at: None,
+            has_more: false,
+            total_messages: 0,
+            messages: Vec::new(),
+            ..view
+        };
+        let detail = detail_from_view(&open);
+        assert!(detail.ended_at.is_none());
+        assert!(!detail.has_more);
+        assert!(detail.messages.is_empty());
     }
 }

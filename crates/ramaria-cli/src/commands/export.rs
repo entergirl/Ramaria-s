@@ -2,7 +2,7 @@
 //!
 //! 设计特点:
 //! - 支持 JSON 和 Markdown 两种导出格式
-//! - JSON: 结构化的 sessions → messages → L1 memories → L2 events
+//! - JSON: 结构化的 sessions → messages → L1 memories
 //! - Markdown: 人类可读的对话记录
 //! - --persona 筛选特定 persona 的数据
 //! - --output 指定输出文件（默认 stdout）
@@ -10,6 +10,7 @@
 //! - 导出路径使用 canonicalize + 前缀检查防护路径穿越
 
 use anyhow::Context;
+use ramaria_service::{Engine, ExportDataRequest};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -27,10 +28,10 @@ pub struct ExportArgs {
 }
 
 /// 执行 export 命令。
-pub async fn run(app: &Arc<ramaria_app::App>, args: ExportArgs) -> anyhow::Result<()> {
+pub async fn run(engine: &Arc<Engine>, args: ExportArgs) -> anyhow::Result<()> {
     match args.format.as_str() {
-        "json" => export_json(app, &args).await,
-        "markdown" | "md" => export_markdown(app, &args).await,
+        "json" => export_json(engine, &args).await,
+        "markdown" | "md" => export_markdown(engine, &args).await,
         other => anyhow::bail!("不支持的导出格式: '{other}'。支持: json / markdown"),
     }
 }
@@ -39,36 +40,21 @@ pub async fn run(app: &Arc<ramaria_app::App>, args: ExportArgs) -> anyhow::Resul
 // JSON 导出
 // =========================================================
 
-async fn export_json(app: &Arc<ramaria_app::App>, args: &ExportArgs) -> anyhow::Result<()> {
-    let sessions = app
-        .storage()
-        .list_sessions()
+async fn export_json(engine: &Arc<Engine>, args: &ExportArgs) -> anyhow::Result<()> {
+    let data = engine
+        .export_sessions(ExportDataRequest {
+            persona: args.persona.clone(),
+            limit: None,
+            offset: None,
+        })
         .await
         .context("查询会话失败")?;
 
     let mut export_data: Vec<serde_json::Value> = Vec::new();
 
-    for session in &sessions {
-        let messages = app
-            .storage()
-            .list_messages(session.id)
-            .await
-            .unwrap_or_default();
-
-        // Persona 筛选：仅保留含指定 persona_uid 的消息所属的会话
-        if let Some(ref persona_filter) = args.persona {
-            let has_matching = messages
-                .iter()
-                .any(|m| m.persona_uid.as_deref() == Some(persona_filter.as_str()));
-            if !has_matching {
-                tracing::debug!(
-                    session_id = %session.id,
-                    persona = %persona_filter,
-                    "跳过无匹配 persona 的会话"
-                );
-                continue;
-            }
-        }
+    for session_data in &data.sessions {
+        let session = &session_data.session;
+        let messages = &session_data.messages;
 
         let session_json = serde_json::json!({
             "session_id": session.id.to_string(),
@@ -89,11 +75,7 @@ async fn export_json(app: &Arc<ramaria_app::App>, args: &ExportArgs) -> anyhow::
 
     // 添加 L1 记忆
     if let Some(ref persona_uid) = args.persona {
-        let l1_memories = app
-            .storage()
-            .list_unabsorbed_l1(persona_uid)
-            .await
-            .unwrap_or_default();
+        let l1_memories = data.l1_memories.as_deref().unwrap_or(&[]);
 
         let l1_json = serde_json::json!({
             "type": "l1_memories",
@@ -125,21 +107,21 @@ async fn export_json(app: &Arc<ramaria_app::App>, args: &ExportArgs) -> anyhow::
     // --json 信封模式：stdout 只输出信封（数据在 data.content 或 written_to 指向的文件）
     if args.json {
         if args.output.as_deref() == Some("-") {
-            let data = serde_json::json!({ "format": "json", "content": json_output });
-            return crate::json::emit_ok(&data);
+            let envelope = serde_json::json!({ "format": "json", "content": json_output });
+            return crate::json::emit_ok(&envelope);
         }
         let written_to = write_output(&json_output, args.output.as_deref(), "json")?;
-        let data = serde_json::json!({
+        let envelope = serde_json::json!({
             "format": "json",
             "written_to": written_to,
-            "sessions": sessions.len(),
+            "sessions": data.total_sessions,
         });
-        return crate::json::emit_ok(&data);
+        return crate::json::emit_ok(&envelope);
     }
 
     write_output(&json_output, args.output.as_deref(), "json")?;
 
-    crate::ui::success(&format!("已导出 {} 个会话", sessions.len()));
+    crate::ui::success(&format!("已导出 {} 个会话", data.total_sessions));
     Ok(())
 }
 
@@ -147,10 +129,13 @@ async fn export_json(app: &Arc<ramaria_app::App>, args: &ExportArgs) -> anyhow::
 // Markdown 导出
 // =========================================================
 
-async fn export_markdown(app: &Arc<ramaria_app::App>, args: &ExportArgs) -> anyhow::Result<()> {
-    let sessions = app
-        .storage()
-        .list_sessions()
+async fn export_markdown(engine: &Arc<Engine>, args: &ExportArgs) -> anyhow::Result<()> {
+    let data = engine
+        .export_sessions(ExportDataRequest {
+            persona: args.persona.clone(),
+            limit: None,
+            offset: None,
+        })
         .await
         .context("查询会话失败")?;
 
@@ -164,34 +149,22 @@ async fn export_markdown(app: &Arc<ramaria_app::App>, args: &ExportArgs) -> anyh
 
     let mut exported_count = 0usize;
 
-    for session in &sessions {
-        let messages = app
-            .storage()
-            .list_messages(session.id)
-            .await
-            .unwrap_or_default();
+    for session_data in &data.sessions {
+        let session = &session_data.session;
+        let messages = &session_data.messages;
 
         if messages.is_empty() {
             continue;
         }
 
-        // Persona 筛选：仅保留含指定 persona_uid 消息的会话
-        if let Some(ref persona_filter) = args.persona {
-            let has_matching = messages
-                .iter()
-                .any(|m| m.persona_uid.as_deref() == Some(persona_filter.as_str()));
-            if !has_matching {
-                continue;
-            }
-        }
-
+        // Persona 过滤已在导出数据装配层完成（仅保留含目标 persona_uid 消息的会话）
         exported_count += 1;
         md.push_str(&format!("## 会话 {}\n\n", session.id));
         if let Some(ts) = crate::util::format_timestamp(session.started_at) {
             md.push_str(&format!("*创建时间: {ts}*\n\n"));
         }
 
-        for msg in &messages {
+        for msg in messages {
             let role_label = match msg.role {
                 ramaria_core::types::MessageRole::User => "**👤 用户**",
                 ramaria_core::types::MessageRole::Assistant => "**🤖 AI**",
@@ -212,16 +185,16 @@ async fn export_markdown(app: &Arc<ramaria_app::App>, args: &ExportArgs) -> anyh
     // --json 信封模式：stdout 只输出信封（数据在 data.content 或 written_to 指向的文件）
     if args.json {
         if args.output.as_deref() == Some("-") {
-            let data = serde_json::json!({ "format": "markdown", "content": md });
-            return crate::json::emit_ok(&data);
+            let envelope = serde_json::json!({ "format": "markdown", "content": md });
+            return crate::json::emit_ok(&envelope);
         }
         let written_to = write_output(&md, args.output.as_deref(), "md")?;
-        let data = serde_json::json!({
+        let envelope = serde_json::json!({
             "format": "markdown",
             "written_to": written_to,
             "sessions": exported_count,
         });
-        return crate::json::emit_ok(&data);
+        return crate::json::emit_ok(&envelope);
     }
 
     write_output(&md, args.output.as_deref(), "md")?;

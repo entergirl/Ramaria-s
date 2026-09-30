@@ -13,12 +13,11 @@ name = "ramaria"
 path = "src/main.rs"
 
 [dependencies]
-ramaria-app = { path = "../ramaria-app" }
 ramaria-core = { path = "../ramaria-core" }
 ramaria-mcp = { path = "../ramaria-mcp" }
 ramaria-memory = { path = "../ramaria-memory" }
+ramaria-service = { path = "../ramaria-service", features = ["importer"] }
 ramaria-storage = { path = "../ramaria-storage" }
-ramaria-llm = { path = "../ramaria-llm", features = ["embedding-native"] }
 ramaria-importer = { path = "../ramaria-importer" }
 clap.workspace = true
 serde.workspace = true

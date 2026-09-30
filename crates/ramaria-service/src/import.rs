@@ -256,6 +256,28 @@ pub trait ImportProgressSink: Send + Sync {
 // 用例入口
 // =========================================================
 
+/// 探测文件是否为 QQ 聊天记录支持的格式（桌面 / CLI 共用）。
+///
+/// 说明:
+/// - 检测基于文件内容特征（qq-chat-exporter v6.x JSON），扩展名白名单与
+///   文件存在性校验由调用方自行处理；
+/// - 探测失败（读取 / 编码级错误）记 warn 后上抛结构化错误，入口按需补错误前缀。
+///
+/// 参数:
+/// - `_engine`: 服务层引擎（探测不依赖引擎，保留参数与其余用例入口一致）；
+/// - `path`: 待检测文件路径。
+///
+/// 返回:
+/// - `Ok(true)`: 文件格式匹配；
+/// - `Ok(false)`: 格式不匹配（调用方按各自文案提示用户）。
+pub(crate) async fn detect_format(_engine: &Engine, path: &Path) -> RamariaResult<bool> {
+    let importer = QqImporter::new();
+    let is_qq = importer.detect_format(path).inspect_err(|_| {
+        tracing::warn!(file = %path_log_label(path), "QQ 聊天记录格式检测失败");
+    })?;
+    Ok(is_qq)
+}
+
 /// 解析 QQ 聊天记录文件，返回诊断报告（不写入数据库）。
 ///
 /// 流程:
@@ -282,11 +304,7 @@ pub(crate) async fn analyze(
         "开始解析 QQ 聊天记录文件"
     );
 
-    let importer = QqImporter::new();
-
-    let is_qq = importer.detect_format(path).inspect_err(|_| {
-        tracing::warn!(file = %path_log_label(path), "QQ 聊天记录格式检测失败");
-    })?;
+    let is_qq = detect_format(_engine, path).await?;
 
     if !is_qq {
         tracing::warn!(file = %path_log_label(path), "文件不是 QQ 聊天记录格式");
@@ -295,6 +313,8 @@ pub(crate) async fn analyze(
             path.display()
         )));
     }
+
+    let importer = QqImporter::new();
 
     let (_sessions, report) = importer.parse(path, req.gap_minutes).inspect_err(|_| {
         tracing::warn!(file = %path_log_label(path), "QQ 聊天记录文件解析失败");
@@ -370,11 +390,7 @@ pub(crate) async fn write_l0(
     );
 
     // ---- 1. 格式检测与文件解析 ----
-    let importer = QqImporter::new();
-
-    let is_qq = importer.detect_format(path).inspect_err(|_| {
-        tracing::warn!(file = %path_log_label(path), "QQ 聊天记录格式检测失败");
-    })?;
+    let is_qq = detect_format(engine, path).await?;
 
     if !is_qq {
         return Err(RamariaError::validation(format!(
@@ -383,6 +399,7 @@ pub(crate) async fn write_l0(
         )));
     }
 
+    let importer = QqImporter::new();
     let (sessions, report) = importer.parse(path, req.gap_minutes).inspect_err(|_| {
         tracing::warn!(file = %path_log_label(path), "QQ 聊天记录文件解析失败");
     })?;
@@ -808,6 +825,15 @@ pub fn done_summary(
 // =========================================================
 
 impl Engine {
+    /// 探测文件是否为 QQ 聊天记录支持的格式（桌面 / CLI 共用）。
+    ///
+    /// 说明:
+    /// - 文件存在性 / 路径与扩展名白名单校验由入口负责（各自现状口径）；
+    /// - 探测失败时返回结构化错误，入口按需补错误前缀。
+    pub async fn detect_qq_format(&self, path: &Path) -> RamariaResult<bool> {
+        detect_format(self, path).await
+    }
+
     /// 解析 QQ 聊天记录文件并返回诊断报告（不写入数据库）。
     pub async fn analyze_qq_import(&self, req: AnalyzeRequest) -> RamariaResult<AnalysisReport> {
         analyze(self, req).await
@@ -996,6 +1022,39 @@ mod tests {
         }
 
         fn on_done(&self, _summary: &ImportDoneSummary) {}
+    }
+
+    // ---- 格式探测 ----
+
+    /// QQ JSON 匹配；无特征普通 JSON 不匹配；文件不存在返回 Io 错误。
+    #[tokio::test]
+    async fn detect_format_distinguishes_qq_json() {
+        let (engine, _pool, _storage, dir) = import_engine("import-detect").await;
+
+        let qq_path = dir.join("qq_export.json");
+        std::fs::write(&qq_path, qq_export_json()).expect("写入导出文件应成功");
+        assert!(
+            engine.detect_qq_format(&qq_path).await.expect("探测应成功"),
+            "含 chatInfo/messages 的 JSON 应判定为 QQ 格式"
+        );
+
+        let plain_path = dir.join("plain.json");
+        std::fs::write(&plain_path, r#"{"hello":"world"}"#).expect("写入普通 JSON 应成功");
+        assert!(
+            !engine
+                .detect_qq_format(&plain_path)
+                .await
+                .expect("探测应成功"),
+            "无 QQ 特征的 JSON 不应判定为匹配"
+        );
+
+        let err = engine
+            .detect_qq_format(&dir.join("missing.json"))
+            .await
+            .expect_err("文件不存在应返回错误");
+        assert_eq!(err.category(), "io", "读取失败应为 Io 错误: {err}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ---- 解析 ----

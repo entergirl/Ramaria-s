@@ -1,8 +1,10 @@
-//! crates/ramaria-service/src/keyword.rs - 关键词词典用例（列表 / 待确认别名 / 别名裁决）
+//! crates/ramaria-service/src/keyword.rs - 关键词词典用例（列表 / 幂等注入 / 待确认别名 / 别名裁决）
 //!
 //! 设计特点:
 //! - 只读列表 + 别名裁决状态机：三态（canonical / alias / pending）展示与
 //!   pending → alias（确认合并）/ canonical（驳回晋升）迁移
+//! - seed 幂等注入：整体校验后去重，已存在词条保持现状（不递增 use_count、
+//!   不改别名状态），新词条从 use_count 0 起写入
 //! - 入口差异由参数表达：confirm 且词条已是 alias 时，`already_applied_ok = false`
 //!   报业务校验错误、`true` 幂等返回成功（不写库）
 //! - 非法输入显式校验：关键词文本经 `KeywordToken` 标准化（空 / 超长拒绝），
@@ -15,7 +17,7 @@ use ramaria_core::keyword::KeywordToken;
 use crate::engine::Engine;
 use crate::types::{
     AliasAction, AliasResolveOutcome, AliasResolveRequest, KeywordEntryView, KeywordPoolView,
-    PendingAliasView,
+    KeywordSeedItem, KeywordSeedOutcome, PendingAliasView,
 };
 
 // =========================================================
@@ -93,6 +95,81 @@ pub(crate) async fn list(engine: &Engine) -> RamariaResult<KeywordPoolView> {
         alias_count,
         pending_count,
         keywords,
+    })
+}
+
+// =========================================================
+// 关键词 seed（幂等手工注入）
+// =========================================================
+
+/// 幂等手工注入规范词（对应入口的 `keyword seed`）。
+///
+/// 流程:
+/// 1. 整体解析校验（任一非法即报错，不部分写入）；
+/// 2. 去重（保留首次出现顺序；重复注入同一词条只计一次）；
+/// 3. 已存在词条保持现状（如实回传其状态，不写库）；
+///    新词条幂等插入（并发下由主键冲突 DO NOTHING 兜底，use_count 从 0 起）。
+///
+/// 参数:
+/// - `engine`: 服务层引擎。
+/// - `keywords`: 待注入的规范词文本列表（未标准化的原始输入）。
+///
+/// 返回:
+/// - `KeywordSeedOutcome`：新插入 / 跳过计数与逐条结果；
+///   空输入返回空结果（非错误），非法词条返回业务校验错误。
+pub(crate) async fn seed(
+    engine: &Engine,
+    keywords: &[String],
+) -> RamariaResult<KeywordSeedOutcome> {
+    // 先整体解析校验（任一无效即报错，不部分写入）
+    let mut tokens: Vec<KeywordToken> = Vec::with_capacity(keywords.len());
+    for raw in keywords {
+        tokens.push(parse_keyword(raw)?);
+    }
+
+    // 去重（保留首次出现顺序；重复注入同一词条只计一次）
+    let mut seen: Vec<String> = Vec::with_capacity(tokens.len());
+    tokens.retain(|token| {
+        let text = token.as_str().to_string();
+        if seen.contains(&text) {
+            false
+        } else {
+            seen.push(text);
+            true
+        }
+    });
+
+    // 已存在词条：保持现状（如实回传状态，不写库）；新词条走幂等插入
+    let entries = engine.storage_ref().list_keyword_pool_entries().await?;
+    let mut results: Vec<KeywordSeedItem> = Vec::with_capacity(tokens.len());
+
+    for token in &tokens {
+        let keyword = token.as_str();
+        let item = match entries.iter().find(|entry| entry.keyword == keyword) {
+            Some(existing) => KeywordSeedItem {
+                keyword: keyword.to_string(),
+                inserted: false,
+                status: status_of(&existing.alias_status).to_string(),
+            },
+            None => {
+                let inserted = engine.storage_ref().seed_keyword_canonical(keyword).await?;
+                KeywordSeedItem {
+                    keyword: keyword.to_string(),
+                    inserted,
+                    status: "canonical".to_string(),
+                }
+            }
+        };
+        results.push(item);
+    }
+
+    let seeded = results.iter().filter(|item| item.inserted).count();
+    let skipped = results.len() - seeded;
+    tracing::debug!(seeded, skipped, "关键词 seed 完成");
+    Ok(KeywordSeedOutcome {
+        seeded,
+        skipped,
+        results,
     })
 }
 
@@ -550,6 +627,120 @@ mod tests {
         );
 
         pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- seed（幂等注入） ----
+
+    /// 新词注入：use_count 从 0 起；二次注入幂等（保持现状、不递增计数）。
+    #[tokio::test]
+    async fn seed_inserts_then_is_idempotent() {
+        let (engine, _storage, dir) = engine_with_db("keyword-seed-idempotent").await;
+
+        let outcome = engine
+            .keyword_seed(&["工作压力".to_string(), "加班".to_string()])
+            .await
+            .expect("seed 应成功");
+        assert_eq!(outcome.seeded, 2);
+        assert_eq!(outcome.skipped, 0);
+        assert_eq!(outcome.results.len(), 2);
+        assert!(
+            outcome
+                .results
+                .iter()
+                .all(|item| item.inserted && item.status == "canonical"),
+            "新词条应全部为 canonical 且标记新插入"
+        );
+
+        // 二次注入同一词条：幂等保持现状
+        let outcome = engine
+            .keyword_seed(&["工作压力".to_string()])
+            .await
+            .expect("seed 应成功");
+        assert_eq!(outcome.seeded, 0);
+        assert_eq!(outcome.skipped, 1);
+        assert!(!outcome.results[0].inserted);
+
+        let view = engine.keyword_list().await.expect("列表应成功");
+        assert_eq!(view.total, 2);
+        let work = view
+            .keywords
+            .iter()
+            .find(|k| k.keyword == "工作压力")
+            .expect("词条应存在");
+        assert_eq!(work.use_count, 0, "重复注入不得递增 use_count");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 已存在别名词条：回传现状状态且不触碰（不递增 use_count、不改别名状态）。
+    #[tokio::test]
+    async fn seed_keeps_existing_alias_state() {
+        let (engine, _storage, dir) = engine_with_db("keyword-seed-existing").await;
+        let pool = open_pool(&dir).await;
+        seed_pending_aliases(&pool, &["职场焦虑"]).await;
+
+        let outcome = engine
+            .keyword_seed(&["职场焦虑".to_string()])
+            .await
+            .expect("seed 应成功");
+        assert_eq!(outcome.seeded, 0);
+        assert_eq!(outcome.skipped, 1);
+        assert!(!outcome.results[0].inserted);
+        assert_eq!(outcome.results[0].status, "pending");
+
+        // 现状未被触碰：仍为 pending 且指向规范词
+        let view = engine.keyword_list().await.expect("列表应成功");
+        let item = view
+            .keywords
+            .iter()
+            .find(|k| k.keyword == "职场焦虑")
+            .expect("词条应存在");
+        assert_eq!(item.status, "pending");
+        assert_eq!(item.canonical_keyword.as_deref(), Some("工作压力"));
+
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 去重与空输入：重复文本只处理一次、文本经标准化；空输入返回空结果。
+    #[tokio::test]
+    async fn seed_dedupes_and_accepts_empty_input() {
+        let (engine, _storage, dir) = engine_with_db("keyword-seed-dedupe").await;
+
+        let outcome = engine
+            .keyword_seed(&[
+                "工作压力".to_string(),
+                "工作压力".to_string(),
+                " 加班 ".to_string(),
+            ])
+            .await
+            .expect("seed 应成功");
+        assert_eq!(outcome.results.len(), 2, "重复文本应去重");
+        assert_eq!(outcome.results[1].keyword, "加班", "文本应经标准化");
+
+        let empty = engine.keyword_seed(&[]).await.expect("空输入应成功");
+        assert_eq!(empty.seeded, 0);
+        assert_eq!(empty.skipped, 0);
+        assert!(empty.results.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 非法词条：整体报错且不部分写入（其余合法词条也不会被注入）。
+    #[tokio::test]
+    async fn seed_rejects_invalid_without_partial_write() {
+        let (engine, _storage, dir) = engine_with_db("keyword-seed-invalid").await;
+
+        let err = engine
+            .keyword_seed(&["工作压力".to_string(), "   ".to_string()])
+            .await
+            .expect_err("空白词条应报错");
+        assert_eq!(err.category(), "validation");
+
+        let view = engine.keyword_list().await.expect("列表应成功");
+        assert_eq!(view.total, 0, "整体校验失败不得部分写入");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
