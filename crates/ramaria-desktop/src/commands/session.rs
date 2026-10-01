@@ -1,10 +1,9 @@
 //! crates/ramaria-desktop/src/commands/session.rs - 会话管理 Tauri Commands
 //!
 //! 设计特点:
-//! - list_sessions / get_session / delete_session / create_session: 委托服务层会话用例
+//! - list_sessions / get_session / create_session: 委托服务层会话用例
 //! - 所有返回值经过序列化，前端可直接解析 JSON（字段结构保持既有契约）
 //! - 服务层的时间类型转换为毫秒时间戳，与前端既有展示口径一致
-//! - 删除操作需要二次确认（前端处理），后端只执行删除
 
 use crate::DesktopState;
 use serde::Serialize;
@@ -195,42 +194,6 @@ pub async fn get_session(
     );
 
     Ok(detail_from_view(&detail))
-}
-
-// =========================================================
-// delete_session — 删除会话
-// =========================================================
-
-/// 删除指定会话及其关联的所有消息。
-///
-/// 参数:
-/// - `session_id`: 会话 UUID 字符串
-///
-/// 返回:
-/// - `"deleted"` 表示删除成功
-///
-/// 说明:
-/// - 前端应先弹出确认对话框，确认后才调用此命令
-///
-/// 接线状态（未接线/预留）:
-/// - 前端 `api.js` 已提供会话删除包装，但当前无视图调用（会话抽屉未提供删除入口）；
-/// - 保留该命令以维持会话管理 API 完整性，是否接入 UI 或下线由负责人裁定。
-#[tauri::command]
-#[tracing::instrument(skip(state))]
-pub async fn delete_session(
-    state: State<'_, DesktopState>,
-    session_id: String,
-) -> Result<String, String> {
-    let sid = Uuid::parse_str(&session_id).map_err(|e| format!("无效的会话 ID: {}", e))?;
-
-    state
-        .engine
-        .delete_session(sid)
-        .await
-        .map_err(|e| format!("删除会话失败: {}", e))?;
-
-    tracing::info!(session_id = %session_id, "会话已删除");
-    Ok("deleted".to_string())
 }
 
 // =========================================================

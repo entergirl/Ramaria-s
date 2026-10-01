@@ -5,7 +5,7 @@
 //! - 事实维：embedding 余弦 + 关键词项加权，关键词项并行三口径（旧 2-gram 覆盖 /
 //!   长度归一命中 / 子句级事实点召回）；embedding 不可用退化为纯关键词。
 //! - 语气维：LLM-as-judge（rubric 1~5、温度 0、few-shot 锚定）；仅本地后端
-//!   （LM Studio / 本地 Ollama）可用，线上后端自动跳过（隐私口径，D-V20-006）；
+//!   （LM Studio / 本地 Ollama）可用，线上后端自动跳过（隐私口径）；
 //!   参考回复取数据集 persona 原回复（tone 题 reference），非提问文本。
 //! - 情感维：确定性 rubric（0/0.5/1 回应恰当性），安慰 / 喜悦标记词表驱动，零 LLM 依赖。
 //! - 统计法（--repeat N）：逐轮评分按"轮均分"跨 N 轮聚合 mean ± 95% CI（复用 run::metric_stat）。
@@ -104,10 +104,10 @@ pub(super) struct VariantEvaluation {
     /// 语气维均分（1.0~5.0；judge 不可用或全失败为 None）
     pub tone_score: Option<f64>,
     /// 情感表达维均分（0.0~1.0 rubric；无 emotion 题或全失败为 None）。
-    /// `#[serde(default)]`：旧评分数值文件（M5a 前无此维度）反序列化回退 None。
+    /// `#[serde(default)]`：旧评分数值文件无此字段时反序列化回退 None。
     #[serde(default)]
     pub emotion_score: Option<f64>,
-    /// 统计法（`--repeat N`）逐轮评分聚合（M5a T-003）。
+    /// 统计法（`--repeat N`）逐轮评分聚合。
     ///
     /// 格式:
     /// - 每个维度一条聚合记录；观测单位 = "轮"——每轮先对该轮全部题取维度均分，
@@ -248,9 +248,9 @@ pub(super) struct EmotionItemScore {
 
 /// 语气维 judge 的 rubric 常量（1~5 档语义锚定）。
 ///
-/// 长度中性约束（M8 tone judge 复核）:
-/// - 高情感社交语料的 persona 原回复普遍很短（实测均值约 15 字），而旧 rubric 与示例锚点
-///   均为多句书面回复，使 judge 形成"回复越长分越高"的长度偏置：实测各档位内
+/// 长度中性约束:
+/// - 高情感社交语料的 persona 原回复普遍很短（实测均值约 15 字），若 rubric 与示例锚点
+///   均为多句书面回复，judge 易形成"回复越长分越高"的长度偏置：实测各档位内
 ///   Pearson(reply_len, tone) ≈ 0.58~0.78，且 |reply_len - ref_len| 与得分**正**相关
 ///   （0.53）——即回复越偏离参考长度反而分越高，惩罚与参考同样简短的回复。
 /// - 该偏置会把"表达层把回复压到 persona 真实短句长度"误判为语气变差，故在 rubric 中
@@ -269,8 +269,8 @@ const TONE_RUBRIC: &str = "\
 /// 语气维 judge 的示例锚定（few-shot，帮助 judge 稳定判分）。
 ///
 /// 示例取自"短句社交聊天"分布（与高情感语料同域）：参考与候选长度相当，分数的差异
-/// 只由语气风格决定；避免示例本身把"长=好"当作锚点（旧示例的参考均为 30~45 字书面
-/// 回复、候选短的给 1~2 分，是长度偏置的来源之一）。
+/// 只由语气风格决定；避免示例本身把"长=好"当作锚点（多句书面参考、候选短的给 1~2 分，
+/// 是长度偏置的来源之一）。
 const TONE_ANCHOR_EXAMPLES: &str = "\
 【示例 1】（参考很短、候选同样简短且风格一致 → 高分）
 参考回复：对啊对啊
@@ -305,7 +305,7 @@ const FACT_KEYWORD_ONLY_WEIGHT: f64 = 1.0;
 
 /// 判断后端配置是否可作语气维本地 judge。
 ///
-/// 本地判据（D-V20-006 隐私口径，仅本地 judge）:
+/// 本地判据（隐私口径：仅本地 judge）:
 /// - provider 非线上（LM Studio / 未来本地 Ollama 均为非线上）；
 /// - base_url host 指向本机（localhost / 127.0.0.1 / ::1），兼容 LM Studio（:1234）
 ///   与本地 Ollama（:11434）的 OpenAI-compatible 服务。
@@ -383,11 +383,11 @@ pub(super) async fn run_evaluate(
         None
     } else {
         let llm = engine.llm();
-        // 语气维 judge 仅限本地后端（隐私口径，D-V20-006）：本地 LM Studio / Ollama
+        // 语气维 judge 仅限本地后端（隐私口径）：本地 LM Studio / Ollama
         // 可直接用作 judge；线上后端（DeepSeek/OpenAI）自动跳过并标注。
         // 本地判据为"provider 非线上 ∧ base_url 指向本机"——兼容 LM Studio（:1234）
-        // 与本地 Ollama（:11434），不依赖 provider 名字符串（旧实现以 "lm-studio"
-        // 作字符串比对，与 as_str() 返回的 "lm_studio" 恒不等致本地也永不启用）。
+        // 与本地 Ollama（:11434），不依赖 provider 名字符串（名字形态与 as_str() 返回值
+        // 不一致，字符串比对会误判为不匹配、致本地后端永不启用）。
         let cfg = llm.config();
         if is_local_backend(cfg.provider, &cfg.base_url) {
             Some(llm)
@@ -402,7 +402,7 @@ pub(super) async fn run_evaluate(
     let judge_used = judge.is_some();
 
     // judge 请求间最小间隔（毫秒）：复用 [thresholds].cluster_delay_ms（语义
-    // "批量 LLM 请求间最小间隔"，默认 800；M8 服务本地 judge 时可调大至 ~1500）。
+    // "批量 LLM 请求间最小间隔"，默认 800；本地 judge 批量较大时可调大至 ~1500）。
     // 仅当 judge 可用时生效——纯事实维 evaluate（--no-tone-judge / 线上后端跳过）
     // 不等待，避免无谓拖慢；delay=0 时 `llm_gate::inter_llm_delay` 内部直接跳过。
     let judge_delay_ms = engine.config().thresholds.cluster_delay_ms;
@@ -504,7 +504,7 @@ pub(super) async fn run_evaluate(
             "probe evaluate 档位完成"
         );
 
-        // ---- M5a T-003：统计法（--repeat N）逐轮评分聚合 ----
+        // ---- 统计法（--repeat N）逐轮评分聚合 ----
         // run 文件 `repeat.per_variant[].rounds` 保留每一轮的完整 reply；
         // 若存在，则对每轮分别评分后按"轮均分"跨 N 轮聚合 mean ± 95% CI。
         // 主 variants（最后一轮快照）不参与聚合（保持单次快照语义）。
@@ -795,7 +795,7 @@ async fn evaluate_item(
     }
 }
 
-/// 统计法逐轮评分聚合（M5a T-003）。
+/// 统计法逐轮评分聚合。
 ///
 /// 对 `--repeat N` 保留的每一轮完整结果（`rounds`）分别评分，
 /// 按"轮"为观测单位聚合：
@@ -1362,7 +1362,7 @@ fn print_evaluation_summary(evaluation: &ProbeEvaluation) {
             v.variant_id, fact, tone, emotion, v.failed_count, v.description
         );
         // 统计法（--repeat N）逐轮评分聚合：展示各维 mean ± 95% CI（n=轮数）。
-        // 上表各行仍是最后一轮快照；这里给出跨轮聚合（M2-003 验收：可复算）。
+        // 上表各行仍是最后一轮快照；这里给出跨轮聚合（可复算）。
         if let Some(scores) = &v.dimension_scores {
             for d in scores {
                 println!(

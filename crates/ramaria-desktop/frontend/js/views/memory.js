@@ -214,8 +214,8 @@ var RamariaMemoryView = (function () {
 
         try {
             // 并行加载 L1/L2/L3 画像 + 画像状态 + 知识事实
-            // L3 改用 get_personality_profile（含完整 TraitDetailView 字段），
-            // 而非 get_l3_traits（不含 trigger/suppress/not_meaning/related/seq）
+            // L3 使用 get_personality_profile（含完整 TraitDetailView 字段：
+            // trigger/suppress/not_meaning/related/seq 齐备）
             var results = await Promise.allSettled([
                 RamariaApi.memory.getL1(_currentPersonaUid, 500),
                 RamariaApi.memory.getL2(_currentPersonaUid, 500),
@@ -589,7 +589,7 @@ var RamariaMemoryView = (function () {
  * 渲染 L3 性格画像面板。
  *
  * 参数:
- * - `items`: L3 trait 数组（来自 getL3Traits API）。
+ * - `items`: L3 trait 数组（来自 getProfile API）。
  * - `profileStatus`: 画像数据状态对象（来自 getProfileStatus API），
  *    含 n_total_eff / active_trait_count / status / status_text。
  */
@@ -1106,6 +1106,7 @@ var RamariaMemoryView = (function () {
  * 1. 后端查找该 persona 的所有关联 session
  * 2. 对每个 session 重新生成 L1 摘要（persona_uid=NULL，幂等覆盖）
  * 3. L1 全部完成后触发 L2→L3 级联（后台异步）
+ * 4. 追加触发一次全局 L2→L3 后台管线（其余 persona 的未吸收 L1 统一收敛）
  */
     async function _handleTriggerPipeline() {
         if (_pipelineRunning) {
@@ -1128,7 +1129,16 @@ var RamariaMemoryView = (function () {
         try {
             var result = await RamariaApi.memory.regenerateImportPipeline(_currentPersonaUid);
 
- // 解析结果
+// 追加触发一次全局 L2→L3 后台管线（其余 persona 的未吸收 L1 统一收敛）。
+// 该触发失败只记控制台告警：深度处理主结果已在上方提示，不叠加提示干扰判断；
+// 命令返回 "ok" 即视为后台任务已提交，不等待其执行完成。
+            try {
+                await RamariaApi.memory.triggerPipeline();
+            } catch (pipelineErr) {
+                console.warn('[MemoryView] 触发全局记忆管线失败（不影响深度处理结果）:', pipelineErr);
+            }
+
+// 解析结果
             var l1Regenerated = (result && result.l1_regenerated) ? result.l1_regenerated : 0;
             var l1Failed = (result && result.l1_failed) ? result.l1_failed : 0;
             var totalSessions = (result && result.total_sessions) ? result.total_sessions : 0;

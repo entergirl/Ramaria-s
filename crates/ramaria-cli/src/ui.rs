@@ -1,10 +1,10 @@
 //! crates/ramaria-cli/src/ui.rs - 终端输出与格式化工具
 //!
 //! 设计特点:
-//! - stdout 只输出数据（--json 信封或文本数据）；状态/提示/警告走 stderr（M1 A 项）
+//! - stdout 只输出数据（--json 信封或文本数据）；状态/提示/警告走 stderr
 //! - 统一错误输出格式（红色 "✗" 前缀 + 错误链），错误始终输出（不受 --quiet 抑制）
 //! - --quiet 抑制 info/success/warn 等提示类输出（仅保留错误）
-//! - confirm 支持 --yes 自动确认；非 TTY 且无 --yes 时不挂起、直接失败提示（M1 B 项）
+//! - confirm 支持 --yes 自动确认；非 TTY 且无 --yes 时不挂起、直接失败提示
 //! - 流式文本增量输出（不换行追加）
 //! - 敏感信息遮蔽（API key 显示为 "***"）
 //! - read_secret 通过 Windows Console API 隐藏回显（非明文暴露）
@@ -48,9 +48,22 @@ pub fn print_error(err: &ramaria_core::error::RamariaError) {
     }
 }
 
-/// 打印错误后退出进程。
-pub fn fatal(err: &ramaria_core::error::RamariaError, exit_code: i32) -> ! {
-    print_error(err);
+/// 打印入口统一映射后的错误与诊断用原因链，然后退出进程。
+///
+/// 参数:
+/// - `message`: 入口统一映射生成的用户可见文案（json 信封与文本模式同源）；
+/// - `err`: 结构化错误；`原因:` 链仅供诊断输出，不参与用户文案；
+/// - `exit_code`: 与 exit code 约定一致的退出码。
+pub fn fatal_message(message: &str, err: &ramaria_core::error::RamariaError, exit_code: i32) -> ! {
+    let mut stderr = io::stderr().lock();
+    let _ = writeln!(stderr, "\x1b[31m✗ 错误:\x1b[0m {message}");
+
+    // 输出 source 链（如有）
+    let mut source = err.source();
+    while let Some(s) = source {
+        let _ = writeln!(stderr, "      原因: {s}");
+        source = s.source();
+    }
     std::process::exit(exit_code);
 }
 
@@ -101,12 +114,28 @@ pub fn warn(msg: &str) {
 
 /// 输出分隔线。
 pub fn separator() {
-    println!("{}", "-".repeat(60));
+    println!("{}", separator_line());
+}
+
+/// 分隔线文本（与 [`separator`] 同一口径）。
+///
+/// 说明:
+/// - 供需要先组装完整文本块再一次性输出的命令复用一个渲染口径。
+pub fn separator_line() -> String {
+    "-".repeat(60)
 }
 
 /// 输出带标签的值（等宽对齐）。
 pub fn labeled(label: &str, value: &str) {
-    println!("  {label:<20} {value}");
+    println!("{}", labeled_line(label, value));
+}
+
+/// 带标签值的文本行（与 [`labeled`] 同一口径，不含换行）。
+///
+/// 说明:
+/// - 供需要先组装完整文本块再一次性输出的命令复用，避免对齐口径分叉。
+pub fn labeled_line(label: &str, value: &str) -> String {
+    format!("  {label:<20} {value}")
 }
 
 // =========================================================
@@ -367,7 +396,7 @@ pub fn read_secret(prompt: &str) -> io::Result<String> {
 ///
 /// 说明:
 /// - 非 TTY（管道/脚本/agent 调用）且无 `--yes` 时不挂起等待输入，
-///   直接返回错误并提示使用 `--yes` 或 `--force`（M1 B 项）。
+///   直接返回错误并提示使用 `--yes` 或 `--force`。
 pub fn confirm(prompt: &str, auto_yes: bool) -> io::Result<bool> {
     if auto_yes {
         return Ok(true);
@@ -523,4 +552,22 @@ mod persona_formatter_tests {
 
     // （原 write_persona_delta_integration 与 basic_double_pipe_replacement
     //  同模式且断言更弱，已删除）
+
+    // ---- 文本行渲染（分隔线与标签对齐）----
+
+    /// 分隔线宽度与标签列宽固定，供组装完整文本块的命令复用。
+    #[test]
+    fn separator_and_labeled_line_render() {
+        assert_eq!(separator_line().chars().count(), 60);
+        assert!(separator_line().chars().all(|c| c == '-'));
+
+        let line = labeled_line("标题", "事件一");
+        assert!(line.starts_with("  标题 "), "应保留缩进与标签: {line:?}");
+        let prefix_chars = line.chars().count() - "事件一".chars().count();
+        assert_eq!(
+            prefix_chars,
+            2 + 20 + 1,
+            "标签列宽应与 labeled 的对齐口径一致: {line:?}"
+        );
+    }
 }

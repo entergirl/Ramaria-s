@@ -3,6 +3,8 @@
 //! 设计特点:
 //! - 委托服务层关键词用例：展示 keyword_pool 三态（canonical / alias / pending）
 //!   与使用次数
+//! - 待确认别名列表前 best-effort 触发建议生成（扫描使用量 → 相似词对落库），
+//!   生成失败仅记日志，不影响列表返回
 //! - pending 别名可 confirm（合并到规范词）/ reject（晋升独立规范词），
 //!   语义与 CLI `keyword alias confirm/reject` 一致（桌面口径：非 pending 报错）
 //! - 无 seed 入口（前端只读视图，词条由学习管线/CLI 维护）
@@ -120,11 +122,19 @@ pub async fn list_keywords(state: State<'_, DesktopState>) -> Result<KeywordPool
 // =========================================================
 
 /// 列出全部待确认别名冲突（pending，别名 → 建议规范词）。
+///
+/// 说明:
+/// - 列表前先 best-effort 扫描词池与内存镜像使用量生成待确认项；
+///   生成失败只记日志，不影响列表返回（返回现有待确认项）。
 #[tauri::command]
 #[tracing::instrument(skip(state))]
 pub async fn list_pending_aliases(
     state: State<'_, DesktopState>,
 ) -> Result<PendingAliasResponse, String> {
+    if let Err(e) = state.engine.keyword_suggest_pending_aliases(None).await {
+        tracing::warn!(error = %e, "待确认别名生成失败（忽略，返回现有列表）");
+    }
+
     let pending = state
         .engine
         .keyword_pending_aliases()

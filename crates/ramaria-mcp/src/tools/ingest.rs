@@ -9,7 +9,7 @@
 //! - 回执透明：写入成功但封存未完成（LLM 不可用 / 已被其他进程封存）也给出说明
 //! - 会话标识：显式 `conversation_id` 优先，缺省用客户端身份名（见协议壳）
 
-use ramaria_service::{CHANNEL_MCP, DEFAULT_PERSONA_UID, IngestRequest};
+use ramaria_service::{CHANNEL_MCP, DEFAULT_PERSONA_UID, IngestRequest, entry_error_message};
 use rmcp::ErrorData;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -110,7 +110,8 @@ impl RamariaMcpServer {
             Err(e) => {
                 tracing::warn!(persona = %persona, error = %e, "chat_ingest 执行失败");
                 Ok(tool_error(format!(
-                    "写入失败：{e}。可检查库文件权限与人格 uid 后重试（重复提交同一对话是安全的）"
+                    "{}。可检查库文件权限与人格 uid 后重试（重复提交同一对话是安全的）",
+                    entry_error_message(&e, "写入失败")
                 )))
             }
         }

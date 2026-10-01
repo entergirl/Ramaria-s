@@ -20,6 +20,8 @@ use std::sync::Arc;
 pub struct DiagnosticsArgs {
     /// 输出文件路径（可选，默认自动生成）
     pub output: Option<String>,
+    /// 统一脱敏开关（诊断导出始终脱敏，此处为脚本统一传参兼容，幂等）
+    pub redact: bool,
 }
 
 /// 执行 diagnostics 命令。
@@ -34,6 +36,9 @@ pub struct DiagnosticsArgs {
 /// - `args`: 命令参数。
 /// - `json`: `--json` 信封输出（导出路径/文件大小/收集状态）。
 pub async fn run(engine: &Arc<Engine>, args: DiagnosticsArgs, json: bool) -> anyhow::Result<()> {
+    // 诊断导出链路始终执行脱敏；--redact 为统一传参兼容（幂等，不改变行为）
+    tracing::debug!(redact = args.redact, "诊断导出脱敏开关（始终生效）");
+
     let output_path = match args.output {
         Some(p) => PathBuf::from(p),
         None => PathBuf::from(default_diagnostics_path()),

@@ -670,3 +670,34 @@ async fn recall_overview_on_empty_db() {
         "context 应为可拼接的文本字段"
     );
 }
+
+// =========================================================
+// 用例：工具级错误文案（业务错误原文直出）
+// =========================================================
+
+/// 服务层业务错误原样作为工具错误文案（不叠加类别前缀），并保留可操作后缀。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn persona_get_missing_uid_reports_business_message() {
+    let db = TempDb::new("persona-missing");
+    let engine = open_engine(db.path()).await;
+    seed_persona(&engine, DEFAULT_PERSONA_UID).await;
+    let (mut client, _server) = start_server(engine, enabled_config()).await;
+    client.handshake("client-a").await;
+
+    let reply = client
+        .call_tool("persona_get", json!({ "uid": "char-missing" }))
+        .await;
+    let message = reply.expect_error("persona_get（人格不存在）");
+    assert!(
+        message.starts_with("人格不存在: char-missing"),
+        "业务错误应原文直出: {message}"
+    );
+    assert!(
+        !message.contains("validation error"),
+        "不应包含英文类别串: {message}"
+    );
+    assert!(
+        message.contains("persona_list"),
+        "应保留可操作后缀: {message}"
+    );
+}

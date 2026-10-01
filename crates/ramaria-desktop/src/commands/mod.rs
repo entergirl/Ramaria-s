@@ -3,7 +3,7 @@
 //! 设计特点:
 //! - 聚合所有 Tauri Command 子模块
 //! - 每个子模块只做参数转换 + 委托服务层用例，不写业务逻辑
-//! - 提供服务层错误到前端文案的统一转换（业务校验原文直出，技术错误附场景前缀）
+//! - 提供服务层错误到前端文案的统一转换（委托服务层入口映射：业务校验原文直出，技术错误附场景前缀）
 
 pub mod chat;
 pub mod config;
@@ -39,16 +39,40 @@ pub mod style;
 /// - 用户可读的中文文案。
 ///
 /// 说明:
-/// - 业务校验错误（`validation`）取上下文原文：其文案已是面向用户的完整描述，
-///   不再叠加英文分类前缀；
-/// - 其他错误保留结构化展示并附场景前缀（如 `查询记忆失败: storage error: …`）。
+/// - 文案口径由服务层 [`ramaria_service::entry_error_message`] 唯一提供：
+///   业务校验 / 隐私类错误原文直出；其余类别 `{场景}: {类别标题}: {原因}`。
 pub(crate) fn service_error_message(
     err: &ramaria_core::error::RamariaError,
     context: &str,
 ) -> String {
-    if err.category() == "validation" {
-        err.context().to_string()
-    } else {
-        format!("{context}: {err}")
+    ramaria_service::entry_error_message(err, context)
+}
+
+// =========================================================
+// 单元测试
+// =========================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ramaria_core::error::RamariaError;
+
+    /// 业务校验错误：原文直出（不叠加场景前缀）。
+    #[test]
+    fn validation_error_message_is_verbatim() {
+        let err = RamariaError::validation("会话不存在: abc");
+        assert_eq!(
+            service_error_message(&err, "查询会话失败"),
+            "会话不存在: abc"
+        );
+    }
+
+    /// 技术错误：场景 + 中文类别标题 + 原因（不复现英文类别串）。
+    #[test]
+    fn technical_error_message_has_scene_and_title() {
+        let err = RamariaError::storage("磁盘只读");
+        let message = service_error_message(&err, "查询记忆失败");
+        assert_eq!(message, "查询记忆失败: 数据库错误: 磁盘只读");
+        assert!(!message.contains("storage error"), "{message}");
     }
 }

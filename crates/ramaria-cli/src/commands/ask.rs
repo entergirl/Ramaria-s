@@ -195,7 +195,7 @@ async fn consume_full(mut stream: ChatEventStream) -> anyhow::Result<()> {
 /// JSON 事件流输出：每行一个 JSON 对象（`{"type":"delta|done|error",...}`）。
 ///
 /// StreamEvent 已实现 Serialize，
-/// 输出为合法 JSON（修复 v1.4 用 Debug 格式输出非合法 JSON 的问题）。
+/// 输出为合法 JSON。
 async fn consume_json(mut stream: ChatEventStream) -> anyhow::Result<()> {
     while let Some(event_result) = stream.next().await {
         match event_result {

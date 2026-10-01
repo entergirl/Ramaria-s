@@ -2,7 +2,6 @@
 //!
 //! 设计特点:
 //! - run_setup: 执行完整的首次配置流程（保存配置 → 验证连接 → 初始化人格）
-//! - get_setup_status: 返回当前配置状态的详细诊断
 //! - refresh_setup_state: 刷新应用状态机，前端据此更新 UI
 //! - 所有错误返回用户友好的中文描述
 //! - init_default_personas: 创建 user-0001 + 扫描 personas/ 目录批量注册人格
@@ -11,22 +10,6 @@ use crate::DesktopState;
 use serde::Serialize;
 use std::path::Path;
 use tauri::State;
-
-// =========================================================
-// 前端展示用结构体
-// =========================================================
-
-/// 设置状态视图。
-#[derive(Debug, Clone, Serialize)]
-pub struct SetupStatusView {
-    pub backend_configured: bool,
-    pub model_selected: bool,
-    pub needs_indexing: bool,
-    pub embedding_available: bool,
-    pub is_complete: bool,
-    pub missing_items: Vec<String>,
-    pub current_state: String,
-}
 
 // =========================================================
 // run_setup — 执行首次配置
@@ -104,52 +87,6 @@ pub async fn run_setup(
     );
 
     Ok(format!("setup_complete:{}", new_state.as_str()))
-}
-
-// =========================================================
-// get_setup_status — 查询设置状态
-// =========================================================
-
-/// 查询当前应用设置状态的详细信息。
-///
-/// 返回:
-/// - SetupStatusView，包含各配置项完成情况和缺失项列表
-///
-/// 接线状态（未接线/预留）:
-/// - 前端设置页当前经 `refresh_setup_state` / `get_embedding_model` 获取状态，
-///   未调用本命令；
-/// - 保留该命令以提供更细的缺项诊断（`missing_items`），是否接入 UI 或下线由负责人裁定。
-#[tauri::command]
-#[tracing::instrument(skip(state))]
-pub async fn get_setup_status(state: State<'_, DesktopState>) -> Result<SetupStatusView, String> {
-    let status = state
-        .engine
-        .check_setup_status()
-        .await
-        .map_err(|e| format!("查询设置状态失败: {}", e))?;
-
-    let current_state = state.engine.current_state();
-
-    let view = SetupStatusView {
-        backend_configured: status.backend_configured,
-        model_selected: status.model_selected,
-        needs_indexing: status.needs_indexing,
-        embedding_available: status.embedding_available,
-        is_complete: status.is_complete(),
-        missing_items: status
-            .missing_items()
-            .into_iter()
-            .map(|s| s.to_string())
-            .collect(),
-        current_state: current_state.as_str().to_string(),
-    };
-
-    tracing::debug!(
-        is_complete = view.is_complete,
-        state = %view.current_state,
-        "get_setup_status 完成"
-    );
-    Ok(view)
 }
 
 // =========================================================

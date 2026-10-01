@@ -8,9 +8,10 @@
 //!   （trim + ASCII 小写）：大小写与首尾空白差异命中同一映射
 //! - 纯逻辑层，不直接操作数据库（存储操作通过回调/注入实现）
 //!
-//! 未接线标注:
-//! - **未接线**：当前生产链路无 pending 写入者与建议引擎调用点（pending 行由
-//!   外部/手动写入）；本引擎与 `MergeSuggestion` 为预留能力，待后续版本接线。
+//! 接线状态:
+//! - 合并建议引擎由服务层关键词用例消费：按关键词池与内存镜像使用量扫描相似词对，
+//!   经过滤后把建议结果以 `pending` 形式落库（待确认别名），供人工裁决；
+//!   本模块只做纯逻辑（注册 / 解析 / 建议），不直接操作数据库。
 //!
 //! 预留给 keyword_refs 消费路径（v1.6 精确匹配检索）
 //!
@@ -124,6 +125,33 @@ impl AliasManager {
             "别名注册成功"
         );
 
+        Ok(())
+    }
+
+    /// 注册一个规范词文本到 ID 的映射（不建立别名关系）。
+    ///
+    /// 参数:
+    /// - `canonical_text`: 规范词文本（经 `KeywordToken::new` 标准化）。
+    /// - `canonical_id`: 规范词在 keyword_pool 中的 id。
+    ///
+    /// 返回:
+    /// - `Ok(())`: 注册成功。
+    /// - `Err(String)`: 规范词文本非法（空 / 超长）。
+    ///
+    /// 说明:
+    /// - 仅写入反向查询缓存（规范词文本 → ID）：供合并建议引擎识别"已是规范词"，
+    ///   已登记规范词不再作为建议别名（不会被自动降级）。
+    /// - 不写入别名映射；别名注册请用 `register_alias`。
+    /// - `canonical_id` 重复注册时覆盖旧值（词条重建 / id 变更场景）。
+    pub fn register_canonical(
+        &mut self,
+        canonical_text: &str,
+        canonical_id: i64,
+    ) -> Result<(), String> {
+        let token = KeywordToken::new(canonical_text)
+            .ok_or_else(|| format!("规范词文本无效（空或超长）: '{canonical_text}'"))?;
+        self.canonical_id_by_text
+            .insert(token.as_str().to_string(), canonical_id);
         Ok(())
     }
 
@@ -284,10 +312,10 @@ impl AliasManager {
     /// - 合并建议列表，按建议优先级降序排列（高使用量别名优先）。
     ///
     /// 说明:
-    /// - 当前为简化实现：仅通过文本相似性（编辑距离 < 3 或共享前缀）找出可能的同义词。
+    /// - 当前为简化实现：按共享字符 / 编辑距离 / 包含关系找出可能的同义词。
     /// - 文本比对与查表与缓存 key 口径一致：均基于标准化文本（trim + ASCII 小写）。
-    /// - **未接线**：当前生产链路无建议引擎调用点，本方法与 `MergeSuggestion`
-    ///   为预留能力，待后续版本接线（详见模块头标注）。
+    /// - 调用方（服务层关键词建议用例）负责把已建立词表注册进本管理器，
+    ///   并在落库前过滤已存在词条——本方法只产出候选相似对，不保证可直接写入。
     /// - 未来可接入 embedding 语义相似度提升匹配精度。
     pub fn suggest_merges(&self, min_use_for_suggestion: u32) -> Vec<MergeSuggestion> {
         if self.use_counts.is_empty() {
@@ -682,6 +710,42 @@ mod tests {
         assert!(!suggestions.is_empty());
         // 建议应将"流行词"提为新的规范词
         assert!(suggestions[0].reason.contains("使用量高于当前规范词"));
+    }
+
+    /// 注册规范词：只写反向查询缓存，不建立别名映射；非法文本拒绝。
+    #[test]
+    fn register_canonical_registers_id_without_alias() {
+        let mut mgr = AliasManager::new();
+        mgr.register_canonical("工作压力", 7).unwrap();
+        assert_eq!(mgr.canonical_id("工作压力"), Some(7));
+        assert_eq!(mgr.canonical_count(), 1);
+        assert_eq!(mgr.alias_count(), 0, "不建立别名映射");
+        assert!(!mgr.is_alias("工作压力"));
+
+        assert!(mgr.register_canonical("   ", 1).is_err(), "非法文本应拒绝");
+        assert!(mgr.register_canonical(&"长".repeat(257), 1).is_err());
+
+        // 注册与查询均按标准化文本命中；重复注册覆盖旧 ID
+        mgr.register_canonical(" 工作压力 ", 9).unwrap();
+        assert_eq!(mgr.canonical_id("工作压力"), Some(9));
+    }
+
+    /// 已注册规范词不参与合并建议（不会作为建议别名被降级）。
+    #[test]
+    fn registered_canonical_skips_suggestion() {
+        let mut mgr = AliasManager::new();
+        mgr.register_canonical("工作压力", 1).unwrap();
+        let mut counts = HashMap::new();
+        counts.insert("工作压力".into(), 20u32);
+        counts.insert("职场压力".into(), 10u32);
+        mgr.load_use_counts(counts);
+
+        let suggestions = mgr.suggest_merges(3);
+        assert!(
+            suggestions.iter().all(|s| s.alias_text != "工作压力"),
+            "已登记规范词不得作为建议别名"
+        );
+        assert!(suggestions.is_empty(), "规范词被跳过后无剩余配对");
     }
 
     // ── 清空缓存 ──

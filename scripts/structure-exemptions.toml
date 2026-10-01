@@ -1,0 +1,16 @@
+# Ramaria 结构红线例外清单
+#
+# 用途:
+# - 由同目录 check_structure.py 读取，登记结构上不可再拆分的超标文件
+# - 命中登记条目的超标文件不计入阻断清单，改列"例外（登记）"节
+#
+# 字段:
+# - path: 相对 main/ 的 posix 路径，支持 fnmatch 通配（如 crates/*/src/mod.rs）
+# - reason: 登记理由（必填，非空字符串）
+# - date: 登记日期，格式 YYYY-MM-DD（必填）
+#
+# 示例条目（取消注释并填写后生效）:
+# [[exemption]]
+# path = "crates/ramaria-storage/src/lib.rs"
+# reason = "migration 常量与 schema 定义结构上不可再切"
+# date = "YYYY-MM-DD"

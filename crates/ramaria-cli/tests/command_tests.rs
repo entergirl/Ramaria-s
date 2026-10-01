@@ -843,6 +843,7 @@ async fn export_json_empty() {
             format: "json".to_string(),
             persona: None,
             output: Some("-".to_string()),
+            redact: false,
             json: false,
         },
     )
@@ -860,6 +861,7 @@ async fn export_json_with_data() {
             format: "json".to_string(),
             persona: None,
             output: Some("-".to_string()),
+            redact: false,
             json: false,
         },
     )
@@ -877,6 +879,7 @@ async fn export_json_with_persona() {
             format: "json".to_string(),
             persona: Some("user-0001".to_string()),
             output: Some("-".to_string()),
+            redact: false,
             json: false,
         },
     )
@@ -894,6 +897,7 @@ async fn export_markdown_empty() {
             format: "markdown".to_string(),
             persona: None,
             output: Some("-".to_string()),
+            redact: false,
             json: false,
         },
     )
@@ -911,6 +915,7 @@ async fn export_markdown_with_data() {
             format: "markdown".to_string(),
             persona: None,
             output: Some("-".to_string()),
+            redact: false,
             json: false,
         },
     )
@@ -928,6 +933,7 @@ async fn export_invalid_format() {
             format: "xml".to_string(),
             persona: None,
             output: None,
+            redact: false,
             json: false,
         },
     )
@@ -946,6 +952,7 @@ async fn export_json_to_file() {
             format: "json".to_string(),
             persona: None,
             output: Some(tmp_file.to_string_lossy().to_string()),
+            redact: false,
             json: false,
         },
     )
@@ -972,6 +979,7 @@ async fn export_markdown_to_file() {
             format: "markdown".to_string(),
             persona: None,
             output: Some(tmp_file.to_string_lossy().to_string()),
+            redact: false,
             json: false,
         },
     )

@@ -50,21 +50,10 @@ pub struct MemoryEventView {
     pub attitude: String,
     pub salience: f64,
     pub created_at: i64,
-}
-
-/// L3 性格标签视图。
-#[derive(Debug, Clone, Serialize)]
-pub struct PersonalityTraitView {
-    pub id: i64,
-    pub persona_uid: String,
-    pub layer: String,
-    pub label: String,
-    pub meaning: String,
-    pub confidence: f64,
-    pub evidence: f64,
-    pub consistency: f64,
-    pub status: String,
-    pub created_at: i64,
+    /// 事件开始时间（Unix 毫秒）
+    pub start: i64,
+    /// 事件结束时间（Unix 毫秒）
+    pub end: i64,
 }
 
 /// Persona 摘要视图。
@@ -259,58 +248,12 @@ pub async fn get_l2_events(
             attitude: e.attitude.unwrap_or_default(),
             salience: e.salience,
             created_at: e.created_at,
+            start: e.start,
+            end: e.end,
         })
         .collect();
 
     tracing::debug!(count = views.len(), "get_l2_events 完成");
-    Ok(views)
-}
-
-// =========================================================
-// get_l3_traits — 查询 L3 性格标签
-// =========================================================
-
-/// 查询 L3 结构化性格画像标签。
-///
-/// 参数:
-/// - `persona_uid`: 可选，按人格过滤
-///
-/// 返回:
-/// - JSON 数组，每项为 PersonalityTraitView。
-///
-/// 接线状态（未接线/预留）:
-/// - 前端记忆页改用 `get_personality_profile`（含三层分层与 trigger/suppress 等字段），
-///   未调用本命令；
-/// - 保留该命令以提供扁平标签列表，是否接入 UI 或下线由负责人裁定。
-#[tauri::command]
-#[tracing::instrument(skip(state))]
-pub async fn get_l3_traits(
-    state: State<'_, DesktopState>,
-    persona_uid: Option<String>,
-) -> Result<Vec<PersonalityTraitView>, String> {
-    let traits = state
-        .engine
-        .memory_l3(persona_uid.as_deref())
-        .await
-        .map_err(|e| crate::commands::service_error_message(&e, "查询 L3 性格标签失败"))?;
-
-    let views: Vec<PersonalityTraitView> = traits
-        .into_iter()
-        .map(|t| PersonalityTraitView {
-            id: t.id,
-            persona_uid: t.persona_uid,
-            layer: t.layer.as_str().to_string(),
-            label: t.label,
-            meaning: t.meaning,
-            confidence: t.confidence,
-            evidence: t.evidence,
-            consistency: t.consistency,
-            status: t.status.as_str().to_string(),
-            created_at: t.created_at,
-        })
-        .collect();
-
-    tracing::debug!(count = views.len(), "get_l3_traits 完成");
     Ok(views)
 }
 
@@ -329,9 +272,9 @@ pub async fn get_l3_traits(
 /// 返回:
 /// - `"ok"`: 管线已触发，后台异步执行。
 ///
-/// 接线状态（未接线/预留）:
-/// - 前端当前经导入流程与封存后的自动触发进入 L2/L3，未提供手动触发入口；
-/// - 保留该命令供人工补救（快速导入后手动启动深度处理），是否接入 UI 或下线由负责人裁定。
+/// 接线:
+/// - 由前端"深度处理导入的消息"按钮触发：L1 重新生成后追加调用本命令，
+///   作为遍历全部 persona 的全局补救入口。
 #[tauri::command]
 #[tracing::instrument(skip(state))]
 pub async fn trigger_memory_pipeline(state: State<'_, DesktopState>) -> Result<String, String> {
@@ -373,9 +316,9 @@ pub struct PersonalityProfileView {
 
 /// 单条性格标签的详细视图——用于三层分层展示。
 ///
-/// 与 `PersonalityTraitView` 的区别:
-/// - 包含 trigger/suppress/not_meaning/related 等前端三层展示所需字段。
-/// - 包含 evidence 字段（有效证据量），供前端渲染置信度条。
+/// 字段约定:
+/// - 含 trigger/suppress/not_meaning/related 等前端三层展示所需字段。
+/// - 含 evidence 字段（有效证据量），供前端渲染置信度条。
 #[derive(Debug, Clone, Serialize)]
 pub struct TraitDetailView {
     /// 内部 ID（用于后续 get_trait_evidence 查询）

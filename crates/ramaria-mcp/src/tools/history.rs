@@ -6,7 +6,7 @@
 //! - 白名单双路径：`persona` 入参与会话归属人格都要通过可见性校验（防越权读取）
 //! - 参数校验在协议壳完成：UUID 解析失败给出明确提示，不下抛到服务层
 
-use ramaria_service::HistoryRequest;
+use ramaria_service::{HistoryRequest, entry_error_message};
 use rmcp::ErrorData;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -85,7 +85,7 @@ impl RamariaMcpServer {
                 }
                 Err(e) => {
                     tracing::warn!(session_id = %id, error = %e, "chat_history 读取会话失败");
-                    return Ok(tool_error(format!("读取会话失败：{e}")));
+                    return Ok(tool_error(entry_error_message(&e, "读取会话失败")));
                 }
             }
         }
@@ -107,7 +107,7 @@ impl RamariaMcpServer {
             }
             Err(e) => {
                 tracing::warn!(error = %e, "chat_history 执行失败");
-                Ok(tool_error(format!("读取会话历史失败：{e}")))
+                Ok(tool_error(entry_error_message(&e, "读取会话历史失败")))
             }
         }
     }

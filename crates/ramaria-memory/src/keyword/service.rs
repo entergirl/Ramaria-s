@@ -125,7 +125,7 @@ impl KeywordService {
     ///   `NULL`/`"canonical"` → 规范词；`"alias"` → 已确认别名；
     ///   `"pending"` → 待确认别名。
     /// - alias / pending 行缺少 `canonical_id`（数据异常）时兜底为 Canonical，不丢弃词条。
-    /// - `"pending"` 词条的**写入侧当前未接线**（生产链路暂无生产者，行由外部/手动写入）；
+    /// - `"pending"` 词条由服务层关键词建议用例自动登记（相似词对经筛选后落库）；
     ///   装载后 pending 不参与词表/归一（见 `KeywordPool::established_terms`）。
     pub fn load_pool_entries(&mut self, rows: &[KeywordPoolRow]) {
         let entries: Vec<PoolEntry> = rows.iter().filter_map(to_pool_entry).collect();

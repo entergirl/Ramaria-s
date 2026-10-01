@@ -9,8 +9,8 @@
  * - **不提供删除路径**（回归红线 7，事实/规则只增不删入口）
  *
  * 设计特点:
- * - 对接 T-V20-3 起既有后端：list_rules / get_rule / set_rule_enabled / edit_rule /
- *   rule_evidence 均为 CLI `ramaria rule` 同源命令。
+ * - 对接既有后端：list_rules / set_rule_enabled / edit_rule / rule_evidence
+ *   均为 CLI `ramaria rule` 同源命令。
  * - 数据含结构化字段；所有动态文本先 escapeHtml。
  * - 全部交互经 RamariaModal / RamariaToast；空/加载/错误态齐备。
  *

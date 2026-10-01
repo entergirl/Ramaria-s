@@ -10,7 +10,7 @@
 use anyhow::Context;
 use ramaria_core::error::RamariaError;
 use ramaria_core::types::BackendConfig;
-use ramaria_service::Engine;
+use ramaria_service::{BackendConfigWriteOptions, Engine};
 use std::sync::Arc;
 
 /// config 命令的子命令。
@@ -369,26 +369,21 @@ async fn set_config(
         }
     }
 
-    // 保存后端配置（库内记录为真相源）
-    engine
-        .storage()
-        .save_backend_config(&cfg)
+    // 保存后端配置：落库（真相源）+ 文件侧 [backend] 组同步（本次设置不重建 provider）。
+    // 否则下次启动配置同步以文件为准回写 DB，会把本次设置覆盖回旧值。
+    let outcome = engine
+        .write_backend_config(
+            &cfg,
+            BackendConfigWriteOptions {
+                api_key: None,
+                hot_swap: false,
+                sync_file: true,
+            },
+        )
         .await
         .context("保存配置失败")?;
-
-    // 同步 [backend] 组到 config.toml（与桌面端更新后端配置同通道）。
-    // 否则下次启动配置同步以文件为准回写 DB，会把本次设置覆盖回旧值。
-    match engine.sync_backend_config(&cfg).await {
-        Ok(result) => {
-            if !result.file_ok {
-                crate::ui::warn(
-                    "config.toml 写入失败（DB 侧仍生效，但下次启动可能以文件为准覆盖）",
-                );
-            }
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "config.toml 同步失败（降级不阻塞）");
-        }
+    if !outcome.file_ok {
+        crate::ui::warn("config.toml 写入失败（DB 侧仍生效，但下次启动可能以文件为准覆盖）");
     }
 
     // 刷新状态

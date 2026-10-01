@@ -305,11 +305,13 @@ ramaria import qq --file chat.json --side other
 ```
 ramaria diagnostics
 ramaria diagnostics --output ./my-diagnostics.zip
+ramaria diagnostics --redact --output ./my-diagnostics.zip  # 兼容脚本统一传参
 ```
 
 | 参数 | 说明 |
 |------|------|
 | `--output <PATH>` | 输出文件路径（默认 `ramaria-diagnostics-{时间戳}.zip`） |
+| `--redact` | 统一脱敏开关：诊断导出始终脱敏，此开关为脚本统一传参兼容（幂等，可省略） |
 
 **导出内容**：
 - 最近 1000 行日志（`ramaria.log`）
@@ -343,18 +345,21 @@ ramaria status --json
 
 ```
 ramaria export                    # 导出为 JSON（默认）
-ramaria export --format markdown  # 导出为 Markdown
+ramaria export markdown           # 导出为 Markdown（也接受 md 别名）
 ramaria export --output ./my-memories.json  # 指定输出文件
+ramaria export --redact --output ./redacted.json  # 脱敏导出
 ```
 
 | 参数 | 说明 |
 |------|------|
-| `--format <json/markdown>` | 导出格式（默认 `json`） |
-| `--output <PATH>` | 输出文件路径（默认 `./ramaria-export.{json,md}` 带时间戳） |
+| `[format]` | 导出格式：`json` / `markdown`（或 `md`），默认 `json`；位置参数 |
+| `--persona <UID>` | 按 persona_uid 筛选会话，并附加该人格的未吸收 L1 摘要段 |
+| `--output <PATH>` | 输出文件路径（缺省 `exports/export_{时间戳}.{json,md}`；`-` 表示输出到 stdout） |
+| `--redact` | 脱敏导出：消息正文与 L1 摘要替换为 `<N chars>`（字符数），其余字段不变；默认关闭 |
 
 **导出内容**：
-- **JSON**：完整结构化数据 — `sessions` → `messages` → `memory_l1` → `memory_events` → `personality_traits`
-- **Markdown**：人类可读格式 — 按会话分组，包含消息对话、L1 摘要、L2 事件等
+- **JSON**：带版本信封的结构化数据（`ramaria_export`：`version` / `exported_at` / `sessions[]`）— 会话含 `session_id` / `started_at` / `ended_at` / `messages[]`，消息含 `role` / `content` / `source` / `created_at`（UTC，`YYYY-MM-DD HH:MM`）；指定 `--persona` 时附加 `l1_memories` 摘要段（`persona_uid` / `count` / `items`）
+- **Markdown**：人类可读格式 — 按会话分组；跳过无消息会话，无可导出会话时提示且不写文件
 
 ---
 

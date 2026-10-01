@@ -133,27 +133,11 @@ async fn list_sessions(
 async fn show_session(engine: &Arc<Engine>, session_id: &str, json: bool) -> anyhow::Result<()> {
     let sid = parse_session_uuid(session_id)?;
 
-    let session = engine
-        .storage()
-        .get_session(sid)
+    let detail = engine
+        .session_detail(sid, None, None)
         .await
-        .context("查询会话失败")?
-        .ok_or_else(|| {
-            // 业务校验失败（会话不存在，exit code 4）
-            anyhow::anyhow!(RamariaError::validation(format!(
-                "会话不存在: {session_id}"
-            )))
-        })?;
-
-    let view = engine
-        .session_messages(SessionMessagesRequest {
-            session_id: sid,
-            limit: None,
-            offset: None,
-        })
-        .await
-        .context("查询消息失败")?;
-    let messages = &view.messages;
+        .map_err(|e| anyhow::Error::new(e).context("查询会话失败"))?;
+    let messages = &detail.messages;
 
     if json {
         let msg_items: Vec<serde_json::Value> = messages
@@ -170,10 +154,10 @@ async fn show_session(engine: &Arc<Engine>, session_id: &str, json: bool) -> any
             .collect();
         let data = serde_json::json!({
             "session": {
-                "id": session.id.to_string(),
-                "started_at": crate::util::format_timestamp_iso(session.started_at),
-                "ended_at": session.ended_at.and_then(crate::util::format_timestamp_iso),
-                "persona_uid": session.persona_uid,
+                "id": detail.id.to_string(),
+                "started_at": crate::util::format_timestamp_iso(detail.started_at.timestamp_millis()),
+                "ended_at": detail.ended_at.map(|t| t.timestamp_millis()).and_then(crate::util::format_timestamp_iso),
+                "persona_uid": detail.persona_uid,
             },
             "messages": msg_items,
         });
@@ -182,16 +166,16 @@ async fn show_session(engine: &Arc<Engine>, session_id: &str, json: bool) -> any
 
     println!();
     crate::ui::separator();
-    println!("  会话: {}", session.id);
+    println!("  会话: {}", detail.id);
     crate::ui::labeled(
         "状态",
-        if session.ended_at.is_some() {
+        if detail.ended_at.is_some() {
             "已结束"
         } else {
             "进行中"
         },
     );
-    if let Some(ts) = crate::util::format_timestamp(session.started_at) {
+    if let Some(ts) = crate::util::format_timestamp(detail.started_at.timestamp_millis()) {
         crate::ui::labeled("创建时间", &ts);
     }
     crate::ui::labeled("消息数", &messages.len().to_string());
@@ -234,7 +218,7 @@ fn parse_session_uuid(session_id: &str) -> anyhow::Result<uuid::Uuid> {
 
 /// 删除指定会话。
 ///
-/// 确认规则（M1 B 项）:
+/// 确认规则:
 /// - `--yes` 自动确认；
 /// - 非 TTY 且无 `--yes` 不挂起，直接失败（业务校验失败，exit code 4）。
 async fn delete_session(
@@ -287,18 +271,6 @@ async fn summarize_session(
 ) -> anyhow::Result<()> {
     let sid = parse_session_uuid(session_id)?;
 
-    // 检查 session 存在
-    let _session = engine
-        .storage()
-        .get_session(sid)
-        .await
-        .context("查询会话失败")?
-        .ok_or_else(|| {
-            anyhow::anyhow!(RamariaError::validation(format!(
-                "会话不存在: {session_id}"
-            )))
-        })?;
-
     let view = engine
         .session_messages(SessionMessagesRequest {
             session_id: sid,
@@ -306,7 +278,7 @@ async fn summarize_session(
             offset: None,
         })
         .await
-        .context("查询消息失败")?;
+        .map_err(|e| anyhow::Error::new(e).context("查询消息失败"))?;
 
     if view.messages.is_empty() {
         // --json 模式：输出空数据信封（agent 可区分“成功但无数据”与异常，stdout 纯净性不破坏）

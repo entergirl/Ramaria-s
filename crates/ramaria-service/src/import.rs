@@ -4,7 +4,7 @@
 //! - 管线分段：解析预览（`analyze`）→ L0 写入（`write_l0`）→ L1 批量生成（`generate_l1`）
 //!   → 深度处理触发（`trigger_deep`），宿主按导入模式组合调用，不写第二份导入实现
 //! - 双画像：导出者与对方分别准备 `source="qq"` 的 persona（UID 生成策略与文件解析口径
-//!   由 `ramaria-importer` 承担），L1 摘要按 persona 各生成一份
+//!   由 `ramaria-importer` 承担），L1 摘要按 persona 各生成一份；结果中的画像名以库内实际注册名为准
 //! - 进度与 ETA：逐 session 经 `ImportProgressSink` 回调（分层 EMA 预估见 `crate::eta`），
 //!   宿主负责把回调转发为自身事件通道
 //! - 静默降级：单次 L1 生成失败只记 warn 并计入失败计数，不中断批量（完成提示由宿主汇总）
@@ -21,6 +21,7 @@ use ramaria_importer::qq::{
     ImportSide, PersonaSide, QqImporter, build_persona_uid, ensure_qq_persona,
 };
 use ramaria_importer::writer::ImportWriter;
+use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use crate::engine::Engine;
@@ -142,13 +143,13 @@ pub struct ImportL0Outcome {
     pub messages_dropped: usize,
     /// 导出者画像 UID（导入侧过滤跳过时为 None）
     pub persona_uid: Option<String>,
-    /// 导出者画像名称（与 `self_name` 同源，取文件解析名）
+    /// 导出者画像名称（库内实际注册名；画像未创建或回读失败时为请求覆盖名 / 文件解析名）
     pub persona_name: String,
     /// 对方画像 UID（导入侧过滤跳过时为 None）
     pub other_persona_uid: Option<String>,
-    /// 对方画像名称
+    /// 对方画像名称（库内实际注册名；画像未创建或回读失败时为请求覆盖名 / 文件解析名）
     pub other_persona_name: String,
-    /// 导出者名称（从文件中解析）
+    /// 导出者名称（从文件中解析，供预览对照；与 `persona_name` 可能不同）
     pub self_name: String,
     /// 对话对象名称
     pub chat_name: String,
@@ -361,7 +362,8 @@ pub(crate) async fn analyze(
 /// 1. 连接池与扩展名校验；
 /// 2. 格式检测与文件解析（空会话显式报错）；
 /// 3. 双画像准备（按导入侧过滤：UID 优先级 > QQ 号 > 平台 UID > 递增序号）；
-/// 4. `ImportWriter::write_l0` 写入会话与消息（指纹去重，失败补偿删除会话）。
+/// 4. `ImportWriter::write_l0` 写入会话与消息（指纹去重，失败补偿删除会话）；
+///    画像名从库内回读上报（回读失败回退请求覆盖名 / 文件解析名）。
 ///
 /// 参数:
 /// - `engine`: 服务层引擎（须已附着 SQLite 连接池）；
@@ -436,7 +438,8 @@ pub(crate) async fn write_l0(
         .unwrap_or(0);
 
     // 2a. 导出者（我方）：UID 前缀 user-（kind=user）；导入侧过滤跳过时不创建
-    let self_name = req
+    // 请求覆盖名仅作创建入参；复用既有 persona 时以库内名为准（结果构建阶段回读）
+    let self_requested_name = req
         .persona_name
         .clone()
         .unwrap_or_else(|| report.self_name.clone());
@@ -448,21 +451,25 @@ pub(crate) async fn write_l0(
         max_qq_seq + 1,
     );
     let self_persona_uid = if req.side.needs_persona(PersonaSide::Me) {
-        let resolved =
-            ensure_qq_persona(&pool, &self_default_uid, &self_name, Some(&report.self_id))
-                .await
-                .map_err(|e| {
-                    tracing::error!(
-                        error = %e,
-                        persona_uid = %mask_id(&self_default_uid),
-                        persona_name = %mask_id(&self_name),
-                        "创建/查找导出者 persona 失败"
-                    );
-                    e
-                })?;
+        let resolved = ensure_qq_persona(
+            &pool,
+            &self_default_uid,
+            &self_requested_name,
+            Some(&report.self_id),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                error = %e,
+                persona_uid = %mask_id(&self_default_uid),
+                persona_name = %mask_id(&self_requested_name),
+                "创建/查找导出者 persona 失败"
+            );
+            e
+        })?;
         tracing::info!(
             persona_uid = %mask_id(&resolved),
-            persona_name = %mask_id(&self_name),
+            persona_name = %mask_id(&self_requested_name),
             "导出者 Persona 已准备"
         );
         Some(resolved)
@@ -560,8 +567,16 @@ pub(crate) async fn write_l0(
     let time_range = report_time_range(&report);
     let report_summary = report.summary();
     let skipped_count = report.total_skipped();
+    // 文件解析名：预览对照口径，与画像实际注册名（`persona_name`）区分
     let self_name = report.self_name;
     let chat_name = report.chat_name;
+
+    // 画像名从库内回读（复用既有 persona 时可能与请求覆盖名 / 文件解析名不同）；
+    // 回读失败只记 warn 并回退展示名，不阻塞导入
+    let persona_name =
+        resolve_persona_name(&pool, self_persona_uid.as_deref(), &self_requested_name).await;
+    let other_persona_name =
+        resolve_persona_name(&pool, other_persona_uid.as_deref(), &other_name).await;
 
     Ok(ImportL0Outcome {
         report_summary,
@@ -569,9 +584,9 @@ pub(crate) async fn write_l0(
         messages_written: outcome.messages_written,
         messages_dropped: outcome.messages_dropped,
         persona_uid: self_persona_uid,
-        persona_name: self_name.clone(),
+        persona_name,
         other_persona_uid,
-        other_persona_name: other_name,
+        other_persona_name,
         self_name,
         chat_name,
         time_range,
@@ -913,6 +928,40 @@ fn path_log_label(path: &Path) -> String {
         .unwrap_or_else(|| "<unknown>".to_string())
 }
 
+/// 回读 persona 在库内的实际注册名（不阻塞导入）。
+///
+/// 说明:
+/// - persona 可能按 uid / ref_id 复用既有条目，上报名以库内值为准；
+/// - `persona_uid` 为 None（导入侧过滤跳过）或回读失败时返回 `fallback`
+///   （请求覆盖名 / 文件解析名），仅记 warn。
+async fn resolve_persona_name(
+    pool: &SqlitePool,
+    persona_uid: Option<&str>,
+    fallback: &str,
+) -> String {
+    let Some(uid) = persona_uid else {
+        return fallback.to_string();
+    };
+    match ramaria_storage::repo::personas::get_by_uid(pool, uid).await {
+        Ok(Some(persona)) => persona.name,
+        Ok(None) => {
+            tracing::warn!(
+                persona_uid = %mask_id(uid),
+                "回读 persona 名称未命中（回退请求覆盖名 / 文件解析名）"
+            );
+            fallback.to_string()
+        }
+        Err(error) => {
+            tracing::warn!(
+                persona_uid = %mask_id(uid),
+                error = %error,
+                "回读 persona 名称失败（回退请求覆盖名 / 文件解析名，不阻塞导入）"
+            );
+            fallback.to_string()
+        }
+    }
+}
+
 // =========================================================
 // 单元测试
 // =========================================================
@@ -924,6 +973,7 @@ mod tests {
 
     use ramaria_core::config::RamariaConfig;
     use ramaria_core::traits::{StorageBackend, StoreCrud};
+    use ramaria_core::types::{Persona, PersonaKind};
     use ramaria_storage::SqliteStorage;
     use sqlx::SqlitePool;
 
@@ -1124,6 +1174,20 @@ mod tests {
         assert!(qq_personas.iter().any(|p| p.uid == "user-10001"));
         assert!(qq_personas.iter().any(|p| p.uid == "char-90002"));
 
+        // 画像名上报库内实际注册名（新建路径与请求名 / 文件解析名一致）
+        let self_persona = ramaria_storage::repo::personas::get_by_uid(&pool, "user-10001")
+            .await
+            .expect("读取导出者 persona 应成功")
+            .expect("导出者 persona 应存在");
+        assert_eq!(outcome.persona_name, self_persona.name);
+        assert_eq!(outcome.persona_name, "小明");
+        let other_persona = ramaria_storage::repo::personas::get_by_uid(&pool, "char-90002")
+            .await
+            .expect("读取对方 persona 应成功")
+            .expect("对方 persona 应存在");
+        assert_eq!(outcome.other_persona_name, other_persona.name);
+        assert_eq!(outcome.other_persona_name, "小红");
+
         // 消息按 session 落库（每个 session 2 条）
         let mut total_messages = 0usize;
         for session_id in &outcome.session_ids {
@@ -1134,6 +1198,73 @@ mod tests {
                 .len();
         }
         assert_eq!(total_messages, 4);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 复用既有 persona：结果上报库内实际名（请求覆盖名不落库也不上报）。
+    #[tokio::test]
+    async fn write_l0_reports_stored_persona_name_when_reusing_existing() {
+        let (engine, pool, _storage, dir) = import_engine("import-reuse-name").await;
+        let file_path = dir.join("export.json");
+        std::fs::write(&file_path, qq_export_json()).expect("写入导出文件应成功");
+
+        // 预置既有 persona：uid 与导入解析一致，名称与请求覆盖名 / 文件解析名均不同
+        let existing = Persona::new(
+            "user-10001".to_string(),
+            "旧名".to_string(),
+            PersonaKind::User,
+            1,
+            "qq".to_string(),
+        );
+        ramaria_storage::repo::personas::create(&pool, &existing)
+            .await
+            .expect("预置 persona 应成功");
+
+        let mut req = import_request(&file_path);
+        req.persona_name = Some("新名".to_string());
+        let outcome = engine.import_qq_l0(req).await.expect("L0 导入应成功");
+
+        assert_eq!(
+            outcome.persona_name, "旧名",
+            "复用既有 persona 时应上报库内实际名"
+        );
+        let stored = ramaria_storage::repo::personas::get_by_uid(&pool, "user-10001")
+            .await
+            .expect("读取 persona 应成功")
+            .expect("既有 persona 应仍存在");
+        assert_eq!(stored.name, "旧名", "请求覆盖名不应改写既有 persona 名称");
+        assert_eq!(outcome.self_name, "小明", "self_name 保持文件解析名口径");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 新建 persona：请求覆盖名即实际创建名，结果按库内回读上报（双方）。
+    #[tokio::test]
+    async fn write_l0_reports_created_name_with_overrides() {
+        let (engine, pool, _storage, dir) = import_engine("import-create-name").await;
+        let file_path = dir.join("export.json");
+        std::fs::write(&file_path, qq_export_json()).expect("写入导出文件应成功");
+
+        let mut req = import_request(&file_path);
+        req.persona_name = Some("导出者备注名".to_string());
+        req.other_persona_name = Some("对方备注名".to_string());
+        let outcome = engine.import_qq_l0(req).await.expect("L0 导入应成功");
+
+        assert_eq!(outcome.persona_name, "导出者备注名");
+        assert_eq!(outcome.other_persona_name, "对方备注名");
+        assert_eq!(outcome.self_name, "小明", "self_name 仍为文件解析名");
+
+        let self_persona = ramaria_storage::repo::personas::get_by_uid(&pool, "user-10001")
+            .await
+            .expect("读取导出者 persona 应成功")
+            .expect("导出者 persona 应存在");
+        assert_eq!(self_persona.name, "导出者备注名");
+        let other_persona = ramaria_storage::repo::personas::get_by_uid(&pool, "char-90002")
+            .await
+            .expect("读取对方 persona 应成功")
+            .expect("对方 persona 应存在");
+        assert_eq!(other_persona.name, "对方备注名");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1323,6 +1454,33 @@ mod tests {
         assert!(
             err.context().contains("attach_sqlite_pool"),
             "错误应指向连接池附着入口: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 画像名回读降级：未指定 uid / 未命中 / 查询报错均回退展示名（不阻塞导入）。
+    #[tokio::test]
+    async fn resolve_persona_name_falls_back_to_display_name() {
+        let (_engine, pool, _storage, dir) = import_engine("import-name-fallback").await;
+
+        assert_eq!(
+            resolve_persona_name(&pool, None, "回退名").await,
+            "回退名",
+            "导入侧过滤跳过时应回退展示名"
+        );
+        assert_eq!(
+            resolve_persona_name(&pool, Some("user-9999"), "回退名").await,
+            "回退名",
+            "uid 未命中应回退展示名"
+        );
+
+        // 连接池关闭 → 查询报错 → 回退展示名（warn 日志，不向外抛错）
+        pool.close().await;
+        assert_eq!(
+            resolve_persona_name(&pool, Some("user-10001"), "回退名").await,
+            "回退名",
+            "查询报错应回退展示名"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

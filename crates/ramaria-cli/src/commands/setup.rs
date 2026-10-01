@@ -10,7 +10,7 @@
 //! - 错误信息清晰，每步可重试
 
 use anyhow::Context;
-use ramaria_core::types::{BackendConfig, PersonaKind};
+use ramaria_core::types::BackendConfig;
 use ramaria_service::{Engine, PersonaFileAction, PersonaLoadMode};
 use std::path::Path;
 use std::sync::Arc;
@@ -315,39 +315,7 @@ async fn create_initial_personas(engine: &Arc<Engine>) -> anyhow::Result<()> {
     if !handled {
         let old_path = Path::new("../config/persona.toml");
         if old_path.exists() {
-            match std::fs::read_to_string(old_path) {
-                Ok(content) => {
-                    legacy_found = true;
-                    let name = crate::util::extract_toml_value(&content, "assistant_name")
-                        .unwrap_or_else(|| "Ramaria".to_string());
-                    tracing::info!(%name, path = %old_path.display(), "从旧路径加载 persona.toml（兼容回退）");
-                    if engine
-                        .storage()
-                        .get_persona_by_uid("rama-0001")
-                        .await?
-                        .is_none()
-                    {
-                        let kind = PersonaKind::from_uid("rama-0001");
-                        let mut persona = ramaria_core::types::Persona::new(
-                            "rama-0001".to_string(),
-                            name.clone(),
-                            kind,
-                            1,
-                            "file".to_string(),
-                        );
-                        persona.config = Some(content);
-                        engine
-                            .storage()
-                            .create_persona(&persona)
-                            .await
-                            .with_context(|| "创建 persona 失败: rama-0001")?;
-                        crate::ui::info(&format!("已创建 persona: rama-0001 ({name})"));
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(%e, path = %old_path.display(), "读取旧 persona.toml 失败");
-                }
-            }
+            legacy_found = load_legacy_persona_file(engine, old_path).await;
         }
     }
 
@@ -359,3 +327,53 @@ async fn create_initial_personas(engine: &Arc<Engine>) -> anyhow::Result<()> {
 
     Ok(())
 }
+
+/// 旧单文件布局的兼容回退：`config/persona.toml` → `rama-0001`。
+///
+/// 行为:
+/// - 仅创建缺失：记录不存在时新建（`config` = 文件全文）；已存在时跳过（不写库）；
+/// - 读取 / 查询 / 写入失败记 warn 并继续（不阻塞向导）。
+///
+/// 参数:
+/// - `engine`: 服务层引擎。
+/// - `old_path`: 旧单文件路径（存在性由调用方预判）。
+///
+/// 返回:
+/// - `true`: 旧文件已处理（新建或跳过）；`false`: 处理失败（按未命中处理）。
+async fn load_legacy_persona_file(engine: &Arc<Engine>, old_path: &Path) -> bool {
+    let outcome = engine
+        .persona_load_file(
+            old_path,
+            "rama-0001",
+            "Ramaria",
+            PersonaLoadMode::CreateMissing,
+        )
+        .await;
+
+    match outcome.action {
+        PersonaFileAction::Created => {
+            tracing::info!(path = %old_path.display(), "从旧路径加载 persona.toml（兼容回退）");
+            crate::ui::info(&outcome.message);
+            true
+        }
+        PersonaFileAction::Updated | PersonaFileAction::Skipped => {
+            tracing::info!(path = %old_path.display(), "从旧路径加载 persona.toml（兼容回退）");
+            true
+        }
+        _ => {
+            tracing::warn!(
+                path = %old_path.display(),
+                error = %outcome.message,
+                "旧 persona.toml 加载失败（跳过，不阻塞向导）"
+            );
+            false
+        }
+    }
+}
+
+// =========================================================
+// 单元测试
+// =========================================================
+
+#[cfg(test)]
+mod tests;

@@ -488,6 +488,18 @@ impl StoreCrud for SqliteStorage {
     async fn reject_keyword_alias(&self, alias_id: i64) -> RamariaResult<bool> {
         repo::keyword::reject_alias(&self.pool, alias_id).await
     }
+    /// 覆写为主键冲突 DO NOTHING 的幂等登记（已存在行保持现状，不改状态与计数）。
+    async fn upsert_pending_alias(
+        &self,
+        alias: &str,
+        canonical_id: i64,
+        use_count: u32,
+    ) -> RamariaResult<bool> {
+        // 与 upsert_keyword 同一防御口径：非法词条显式拒绝，不静默丢词。
+        let token = ramaria_core::keyword::KeywordToken::new(alias)
+            .ok_or_else(|| RamariaError::validation("关键词非法（空/超长），拒绝写入词条池"))?;
+        repo::keyword::upsert_pending(&self.pool, &token, canonical_id, use_count).await
+    }
 }
 
 #[async_trait::async_trait]
@@ -1806,6 +1818,48 @@ mod tests {
         assert!(!storage.reject_keyword_alias(999_999).await.unwrap());
     }
 
+    /// 待确认别名登记（StoreCrud trait 方法 → repo::upsert_pending 接线）：
+    /// 首次插入 true、重复 false 且不改状态，列表指针正确；非法文本显式拒绝。
+    #[tokio::test]
+    async fn upsert_pending_alias_via_trait() {
+        let storage = setup().await;
+        storage.upsert_keyword("工作压力").await.unwrap();
+        let canonical_id: i64 =
+            sqlx::query_scalar("SELECT rowid FROM keyword_pool WHERE keyword = ?")
+                .bind("工作压力")
+                .fetch_one(&storage.pool)
+                .await
+                .unwrap();
+
+        assert!(
+            storage
+                .upsert_pending_alias("职场压力", canonical_id, 4)
+                .await
+                .unwrap(),
+            "首次登记应插入"
+        );
+        assert!(
+            !storage
+                .upsert_pending_alias("职场压力", canonical_id, 9)
+                .await
+                .unwrap(),
+            "重复登记应未命中"
+        );
+
+        let pending = storage.list_pending_aliases().await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].alias_keyword, "职场压力");
+        assert_eq!(pending[0].canonical_id, canonical_id);
+        assert_eq!(pending[0].canonical_keyword, "工作压力");
+
+        // 非法文本显式拒绝（不静默丢词）
+        let err = storage
+            .upsert_pending_alias("   ", canonical_id, 1)
+            .await
+            .expect_err("空文本应拒绝");
+        assert!(matches!(err, RamariaError::Validation { .. }));
+    }
+
     #[tokio::test]
     async fn schema_version() {
         let storage = setup().await;
@@ -1836,6 +1890,108 @@ mod tests {
         // 显式写 0 → 读回 0（尚未构建）
         storage.set_index_version(0).await.unwrap();
         assert_eq!(storage.get_index_version().await.unwrap(), 0);
+    }
+
+    /// 新库（空库）初始化后索引版本为未构建（0）：空库首启应走"构建 → 就绪"真实链路，
+    /// 而不是按预置的"已构建"口径跳过构建。
+    #[tokio::test]
+    async fn fresh_db_starts_with_unbuilt_index_version() {
+        let storage = setup().await;
+        assert_eq!(
+            storage.get_index_version().await.unwrap(),
+            0,
+            "空库初始化后索引版本应为 0（尚未构建）"
+        );
+    }
+
+    /// 索引版本修正迁移语义：仅空库（四张业务表均无行）把"已构建"值修正为 0；
+    /// 任一业务表有行时保持原值不动（既有库零改动）。
+    #[tokio::test]
+    async fn index_version_migration_only_touches_empty_db() {
+        let pool = database::init_test_pool()
+            .await
+            .expect("测试数据库初始化失败");
+        let storage = SqliteStorage::new(pool.clone());
+        let migration_sql = include_str!("../migrations/20261001_v2.3_index_version.sql");
+
+        // 迁移文本覆盖四张业务表的空库判定（防漏检：任一表有行都必须阻止修正）
+        for table in ["sessions", "messages", "memory_l1", "memory_events"] {
+            assert!(
+                migration_sql.contains(table),
+                "迁移应包含 {table} 表的空库判定"
+            );
+        }
+
+        // ---- 空库分支：预置值 1 → 迁移执行后修正为 0 ----
+        storage.set_index_version(1).await.unwrap();
+        sqlx::raw_sql(migration_sql)
+            .execute(&pool)
+            .await
+            .expect("空库执行迁移 SQL 应成功");
+        assert_eq!(
+            storage.get_index_version().await.unwrap(),
+            0,
+            "空库应被修正为未构建（0）"
+        );
+
+        // ---- 有业务数据分支：四表任一有行 → 值保持 1 不变（模拟既有库升级启动） ----
+        // 表间存在外键引用（messages / memory_l1 → sessions，memory_events → personas），
+        // 本用例只验证"表内是否有行"的判定，关闭外键检查以逐表独立造数。
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&pool)
+            .await
+            .expect("关闭外键检查应成功");
+        let now = now_ms();
+        let cases: [(&str, String); 4] = [
+            (
+                "sessions",
+                format!("INSERT INTO sessions (id, started_at) VALUES ('seed-session', {now})"),
+            ),
+            (
+                "messages",
+                format!(
+                    "INSERT INTO messages (id, session_id, role, content, created_at, source) \
+                     VALUES ('seed-message', 'seed-session', 'user', 'x', {now}, 'local')"
+                ),
+            ),
+            (
+                "memory_l1",
+                format!(
+                    "INSERT INTO memory_l1 (id, session_id, summary, created_at) \
+                     VALUES ('seed-l1', 'seed-session', 'x', {now})"
+                ),
+            ),
+            (
+                "memory_events",
+                format!(
+                    "INSERT INTO memory_events (id, persona_uid, title, summary, start, \"end\", created_at) \
+                     VALUES (1, 'seed-persona', 'x', 'x', {now}, {now}, {now})"
+                ),
+            ),
+        ];
+        for (table, insert_sql) in cases {
+            for clear in ["messages", "memory_l1", "memory_events", "sessions"] {
+                sqlx::query(&format!("DELETE FROM {clear}"))
+                    .execute(&pool)
+                    .await
+                    .expect("清空业务表应成功");
+            }
+            storage.set_index_version(1).await.unwrap();
+            sqlx::query(&insert_sql)
+                .execute(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("向 {table} 写入种子行应成功: {e}"));
+
+            sqlx::raw_sql(migration_sql)
+                .execute(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("{table} 有数据时执行迁移 SQL 应成功: {e}"));
+            assert_eq!(
+                storage.get_index_version().await.unwrap(),
+                1,
+                "{table} 有业务数据时索引版本不得被修正"
+            );
+        }
     }
 
     /// 迁移完整性：空库初始化后 `_sqlx_migrations` 记录数与迁移目录文件数一致。

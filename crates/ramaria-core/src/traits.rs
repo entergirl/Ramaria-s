@@ -1176,6 +1176,32 @@ pub trait StoreCrud: Send + Sync {
             "StoreCrud 未实现别名驳回迁移",
         ))
     }
+
+    /// 幂等登记待确认别名（`alias_status='pending'`，指向建议合并的规范词）。
+    ///
+    /// 参数:
+    /// - `alias`: 标准化后的别名文本。
+    /// - `canonical_id`: 建议合并到的规范词 rowid。
+    /// - `use_count`: 观测使用计数（≥1；仅首次插入写入）。
+    ///
+    /// 返回:
+    /// - `Ok(true)`: 本次新插入；
+    /// - `Ok(false)`: 词条已存在（任意状态，未做任何修改）。
+    ///
+    /// 默认实现:
+    /// - 返回 `Unsupported`（写语义由实现方显式声明）；
+    ///   `ramaria-storage` 覆写为主键冲突 DO NOTHING 的插入
+    ///   （并发幂等；不把已建立状态改写为 pending）。
+    async fn upsert_pending_alias(
+        &self,
+        _alias: &str,
+        _canonical_id: i64,
+        _use_count: u32,
+    ) -> RamariaResult<bool> {
+        Err(crate::error::RamariaError::unsupported(
+            "StoreCrud 未实现待确认别名登记",
+        ))
+    }
 }
 
 // =========================================================
@@ -1779,6 +1805,8 @@ mod tests {
                 .expect_err("list_recent_events 未覆写应报错"),
             futures::executor::block_on(store.list_keyword_pool_entries())
                 .expect_err("list_keyword_pool_entries 未覆写应报错"),
+            futures::executor::block_on(store.upsert_pending_alias("压力", 1, 3))
+                .expect_err("upsert_pending_alias 未覆写应报错"),
             futures::executor::block_on(store.create_session_in_channel(None, "mcp", None))
                 .expect_err("create_session_in_channel 未覆写应报错"),
             futures::executor::block_on(store.find_active_session_by_channel("mcp", None))

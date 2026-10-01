@@ -120,7 +120,7 @@ pub(super) async fn run_experiment(
     Ok(())
 }
 
-/// 构建档位实验结果（供命令输出与 v1.6 T2 自动评分复用）。
+/// 构建档位实验结果（供命令输出与自动评分复用）。
 ///
 /// 流程:
 /// 1. 校验数据集（schema 版本不匹配记 warn 继续）。
@@ -190,9 +190,9 @@ pub async fn build_experiment(
         variant_config.utt.max_msgs_per_block = variant.max_msgs_per_block;
         variant_config.utt.retrieve_top_k = variant.retrieve_top_k;
 
-        // M5a 消融扩展：档位带 `ablation` 时，在 utt 覆盖后应用
-        // 注入层闸门（B0/B1/F0/F1~F4/S_*）。`ablation=None`（M1 旧数据集）
-        // 时零覆盖——行为与 M1 完全一致（回归红线 6/兼容性要求）。
+        // 消融扩展：档位带 `ablation` 时，在 utt 覆盖后应用
+        // 注入层闸门（B0/B1/F0/F1~F4/S_*）。`ablation=None`（旧数据集）
+        // 时零覆盖——行为与未启用消融完全一致（兼容性要求）。
         if let Some(profile_name) = variant.ablation.as_deref() {
             match AblationProfile::parse_name(profile_name) {
                 Some(profile) => {
@@ -324,11 +324,11 @@ pub async fn build_experiment(
 ///    均值 / 标准差 / 95% 置信区间（t 分布），写入 `repeat` 聚合块；同时在该档位
 ///    `repeat.per_variant[].rounds` 保留**每一轮**的完整结果明细（逐轮全量 reply），
 ///    供 evaluate/report 对每轮 reply 分别语义评分后聚合 fact_score 均值 ± CI
-///    （缺口 A，M5-005 配对统计口径）。主 `variants` 仍保留最后一次运行明细，
+///    （配对统计口径）。主 `variants` 仍保留最后一次运行明细，
 ///    供单次评定/兼容读取复用。
 ///
 /// 说明:
-/// - 统计法为 M1/M5 共享工具链（D-V17-001）：档位对比以「多次均值 ± 置信区间」
+/// - 统计法为档位对比共享工具链：档位对比以「多次均值 ± 置信区间」
 ///   为口径，不期待单次命令逐字复现。
 #[allow(clippy::too_many_arguments)] // 参数与 build_experiment 一致（另加 repeat 聚合数）
 pub async fn build_experiment_with_repeat(
@@ -397,9 +397,9 @@ pub async fn build_experiment_with_repeat(
 /// - 若某轮缺失某 item 的指标（正常不应发生），仅以实际出现的样本聚合，`n`
 ///   反映真实样本量（`n >= 1`；`n == 1` 时置信区间退化为该样本均值，stddev=0）。
 ///
-/// 缺口 A（M1 报告 §6 登记项）：`rounds` 保留该档位**每一轮**的完整 `ProbeVariantResult`
+/// `rounds` 保留该档位**每一轮**的完整 `ProbeVariantResult`
 /// （含逐轮全量 reply），供 evaluate/report 对每轮 reply 分别语义评分后聚合 fact_score
-/// 的均值 ± 置信区间（M5-005 配对统计口径）。
+/// 的均值 ± 置信区间（配对统计口径）。
 pub(super) fn aggregate_repeat_stats(rounds: &[ProbeExperiment]) -> Vec<VariantRepeatStats> {
     let mut out = Vec::new();
     // 以最后一轮的档位顺序为准（各轮一致）

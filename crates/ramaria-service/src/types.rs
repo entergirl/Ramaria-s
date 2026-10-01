@@ -885,6 +885,10 @@ pub struct L2BrowseRequest {
 }
 
 /// L2 事件浏览视图。
+///
+/// 字段约定:
+/// - `start` / `end`: 事件起止时间（Unix 毫秒，与 `MemoryEvent` 同口径）；
+///   `created_at` 为事件写入时间，两者不同义。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct L2EventView {
     pub id: i64,
@@ -899,6 +903,10 @@ pub struct L2EventView {
     pub attitude: Option<String>,
     pub salience: f64,
     pub created_at: i64,
+    /// 事件开始时间（Unix 毫秒）
+    pub start: i64,
+    /// 事件结束时间（Unix 毫秒）
+    pub end: i64,
 }
 
 /// L2 事件浏览响应。
@@ -1305,6 +1313,25 @@ pub struct KeywordSeedOutcome {
     pub seeded: usize,
     pub skipped: usize,
     pub results: Vec<KeywordSeedItem>,
+}
+
+/// 关键词别名建议结果。
+///
+/// 字段约定:
+/// - `scanned_tokens`: 参与分析的词条数（关键词池行与内存镜像的使用量按文本合并后）；
+/// - `suggestions`: 相似度引擎产出的原始建议数（尚未过滤）；
+/// - `inserted`: 本次新登记的待确认别名数；
+/// - `skipped`: 因已存在词条 / 已建立状态 / 单条写入落败而跳过的建议数；
+/// - `truncated`: 因单次运行登记上限而未处理的建议数；
+/// - `message`: 面向入口的汇总提示（计数口径与上述字段一致）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KeywordSuggestionOutcome {
+    pub scanned_tokens: usize,
+    pub suggestions: usize,
+    pub inserted: usize,
+    pub skipped: usize,
+    pub truncated: usize,
+    pub message: String,
 }
 
 // =========================================================
@@ -1912,11 +1939,17 @@ mod tests {
             attitude: Some("有点紧张但坚持".to_string()),
             salience: 0.6,
             created_at: 1_756_000_000_000,
+            start: 1_756_000_000_000,
+            end: 1_756_001_800_000,
         };
         let json = serde_json::to_string(&event).expect("序列化成功");
         assert!(
             json.contains("\"presentation\":\"subjective\""),
             "presentation 应小写序列化: {json}"
+        );
+        assert!(
+            json.contains("\"start\":1756000000000") && json.contains("\"end\":1756001800000"),
+            "事件起止时间应随视图序列化: {json}"
         );
         let back: L2EventView = serde_json::from_str(&json).expect("反序列化成功");
         assert_eq!(event, back);

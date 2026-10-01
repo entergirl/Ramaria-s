@@ -4,7 +4,7 @@
 //! - 档位对比报告（`probe report`）：汇总各档位评分生成对比表，给出每维最佳档位与综合定稿建议。
 //! - 消融对比（--ablation）：F 组（移除）/ S 组（替代）/ I 组（净增量）三类对照分别配对
 //!   做 Wilcoxon 符号秩 + Cohen's d + 95% CI + BH-FDR 判定，并按对照类型分栏表述
-//!   （D-V20-006：I_* 保留 B1 基座测净增量、S_* 去 RAG 摘要测替代）。
+//!   （I_* 保留 B1 基座测净增量、S_* 去 RAG 摘要测替代）。
 //! - 等效性检验：并行做 TOST（双单侧 t 检验），补上显著性框架无法证明"零净增量"的盲区；
 //!   等效边界取 |d_av|=0.3（合并 SD 口径），配合三态判定
 //!   significant_up / significant_down / equivalent / inconclusive。
@@ -14,7 +14,7 @@
 //!   双口径（含记忆注入 / 全部档位池化）× 三判据（legacy / norm / point）分栏。
 //! - 风格形态指标（客观口径）：长度分布 / 与 persona 参考的长度重合度 / 语气词率 /
 //!   疑问感叹率 / 复读率 / 助手腔标记率，作为语气 judge 的交叉验证口径。
-//! - 数据特性与外部效度局限声明必出（D-V20-005：单 persona、不做 D3 推广）。
+//! - 数据特性与外部效度局限声明必出（单 persona、不做跨 persona 推广）。
 //! - 输出 markdown / JSON 双形态；配对非参检验等纯函数逻辑独立，便于单元测试。
 
 use std::path::Path;
@@ -60,7 +60,7 @@ const STYLE_TONE_PARTICLES: &[char] = &[
 
 /// 助手腔标记词：回复含任一词即计该条为助手腔。
 ///
-/// 说明: 与 `test-data/m8/prompt-tone-report.md` 的形态分析口径一致，用于检测短模板是否回退到助手腔。
+/// 说明: 用于检测短模板是否回退到助手腔。
 const STYLE_ASSISTANT_MARKERS: &[&str] = &[
     "总的来说",
     "综上",
@@ -86,9 +86,8 @@ const STYLE_SHORT_LEN: usize = 30;
 /// 档位回复的客观风格形态指标。
 ///
 /// 说明:
-/// - 用途：语气 judge（`probe-judge-v2`）在 20~30 字短回复上区分力不足
-///   （见 `test-data/m8/tone-judge-review.md`），本组指标只依赖回复文本本身，
-///   作为语气维的**客观对照口径**，与 judge 结论交叉验证（4.1 语气维改造）。
+/// - 用途：语气 judge（`probe-judge-v2`）在 20~30 字短回复上区分力不足，
+///   本组指标只依赖回复文本本身，作为语气维的**客观对照口径**，与 judge 结论交叉验证。
 /// - `len_ref_overlap`：回复长度直方图与 persona 参考（tone 题 `reference`，即 persona
 ///   原回复）长度直方图的重叠系数，分箱宽 5 字、60 字封顶，取 `Σ min(p_i, q_i)`，
 ///   1.0 表示两个分布完全一致；无 tone 题参考时为 `None`。
@@ -308,12 +307,12 @@ pub struct ProbeReport {
     pub knowledge_quality: Option<KnowledgeQualityReport>,
     /// 消融对比报告（`probe report --ablation`；普通模式为 None）
     pub ablation: Option<AblationReport>,
-    /// 数据特性与外部效度局限声明（D-V20-005：仅单 persona 高信号数据，
-    /// 不做 D3 跨 persona 推广；judge/embedding 可用性等评估限制）。
+    /// 数据特性与外部效度局限声明（仅单 persona 高信号数据，
+    /// 不做跨 persona 推广；judge/embedding 可用性等评估限制）。
     pub limitations: Vec<String>,
     /// 描述性指标（不参与层价值判定）的口径声明（必出）。
     pub descriptive_metrics: Vec<String>,
-    /// 辅助指标四件套（D-V20-006：证据链可追溯率 / 行为规则命中率 /
+    /// 辅助指标四件套（证据链可追溯率 / 行为规则命中率 /
     /// 情境路由误用率 / 画像回归）。基于 run/eval 产物可复算的近似口径，
     /// 语义与局限见 `AuxiliaryMetrics.annotation`。
     pub auxiliary: AuxiliaryMetrics,
@@ -323,12 +322,12 @@ pub struct ProbeReport {
 }
 
 // =========================================================
-// 辅助指标四件套（M2-005，产物可复算近似）
+// 辅助指标四件套（产物可复算近似）
 // =========================================================
 
 /// 辅助指标四件套。
 ///
-/// 口径说明（技术报告 §16.4 定义的探针可复算近似，J 时未产出）:
+/// 口径说明（基于产物可复算的近似口径）:
 /// - `evidence_traceability_rate`（证据链可追溯率）: fact 题中模型回复
 ///   对 golden 事件 reference 的覆盖率——以已有 `FactItemScore.score ≥ 0.5`
 ///   （embedding 余弦 + 关键词命中的综合分）判定"回复可回溯到注入事件"的比例。
@@ -603,13 +602,13 @@ pub struct KnowledgeJudgeRates {
 /// - 基于事实维探针题评估知识层抽取质量：以「回复是否涵盖事件事实」判定命中/漏报。
 /// - `false_positive_rate`（误报）：回复未涵盖应有事实（score < 0.3）。
 /// - `false_negative_rate`（漏报）：回复信息不足（score < 0.4），目标 <10%。
-/// - 双口径：主口径只统计含记忆注入档位（M8-006 终验口径）；对照口径池化全部档位
+/// - 双口径：主口径只统计含记忆注入档位；对照口径池化全部档位
 ///   （含无记忆基线），用于说明两者差异来源。
 /// - 判据分栏：每个口径内再按 `judge_rates`（legacy / norm / point）分别给出命中/漏报，
 ///   使短回复模板下的长度伪影（旧判据漏报虚高）可被直接对照。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct KnowledgeQualityReport {
-    /// 主口径：含记忆注入档位（M8-006 终验口径）
+    /// 主口径：含记忆注入档位
     pub primary: KnowledgeQualityScope,
     /// 对照口径：全部档位池化（含无记忆基线，供可比性对照）
     pub pooled: KnowledgeQualityScope,
@@ -618,7 +617,7 @@ pub struct KnowledgeQualityReport {
 }
 
 // =========================================================
-// 消融对比报告（M5a T-004：配对 Wilcoxon + Cohen's d + CI + FDR）
+// 消融对比报告（配对 Wilcoxon + Cohen's d + CI + FDR）
 // =========================================================
 
 /// 消融对比报告（`probe report --ablation`）。
@@ -630,12 +629,12 @@ pub struct KnowledgeQualityReport {
 ///   供报告把三类对照分栏表述。
 /// - `aux`: 参与对比各档位的辅助指标（回复长度/耗时/空回复率）。
 ///
-/// 对照语义（D-V20-006，口径见 `docs/dev-2.0/ablation-profile-mapping.md`）:
+/// 对照语义:
 /// - removal（F 组，基线 F0）: 全开中逐层关闭 → 回答"去掉某一层的边际损失"；
 /// - substitution（S 组，基线 B1）: 去 RAG 摘要、仅单专属层 → 回答"单层能否替代 RAG"；
 /// - increment（I 组，基线 B1）: B1 基座 + 单专属层 → 回答"在 RAG 之上叠加一层的净增量"。
 ///
-/// 判定线（D-V17-009）: `p_fdr < 0.05 ∧ |cohens_d| ≥ 0.3 ∧ CI 不含 0` → 显著；
+/// 判定线: `p_fdr < 0.05 ∧ |cohens_d| ≥ 0.3 ∧ CI 不含 0` → 显著；
 /// 贡献方向见 `AblationComparisonRow.direction`。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AblationReport {
@@ -822,8 +821,8 @@ pub(super) async fn run_report(
         None
     };
 
-    // 数据特性与外部效度局限声明（D-V20-005，报告必出字段）：
-    // 消融结论基于单 persona 高信号数据，不做 D3 跨 persona 推广。
+    // 数据特性与外部效度局限声明（报告必出字段）：
+    // 消融结论基于单 persona 高信号数据，不做跨 persona 推广。
     let judge_used = evaluation.as_ref().map(|e| e.judge_used).unwrap_or(false);
     let embedding_used = evaluation
         .as_ref()
@@ -833,7 +832,7 @@ pub(super) async fn run_report(
     // 描述性指标口径声明（必出）：情感维未校准，仅作展示、不参与层价值判定。
     let descriptive_metrics = vec![EMOTION_DESCRIPTIVE_NOTE.to_string()];
 
-    // 辅助指标四件套（D-V20-006）：有评分数值时可复算；缺失时给出空指标 + 说明。
+    // 辅助指标四件套：有评分数值时可复算；缺失时给出空指标 + 说明。
     let auxiliary = match evaluation.as_ref() {
         Some(ev) => compute_auxiliary_metrics(ev),
         None => AuxiliaryMetrics {
@@ -922,10 +921,10 @@ pub(super) async fn run_report(
     Ok(())
 }
 
-/// 构建数据特性与外部效度局限声明（D-V20-005，报告必出字段）。
+/// 构建数据特性与外部效度局限声明（报告必出字段）。
 ///
-/// 内容（与任务验收口径一致）:
-/// - 仅单 persona 高信号数据 → 只作 D2 高信号效度，不做 D3 跨 persona 推广；
+/// 内容:
+/// - 仅单 persona 高信号数据 → 效度结论仅限本数据范围，不做跨 persona 推广；
 /// - 语气维 judge / 事实维 embedding 可用性影响维度覆盖；
 /// - 采样规模（repeat 次数）决定统计法置信度。
 pub(super) fn build_limitations(
@@ -1042,7 +1041,7 @@ fn build_recommendation(rows: &[VariantReportRow]) -> Recommendation {
 }
 
 // =========================================================
-// 消融对比报告实现（M5a T-004）
+// 消融对比报告实现
 // =========================================================
 
 /// 供消融配对的逐维度"item_id → 分数"索引。
@@ -1345,7 +1344,7 @@ fn equivalence_annotation(
 /// - 均值差 95% CI（t 分布，复用 `metric_stat`）；
 /// - 全部行 p 值经 Benjamini–Hochberg FDR 校正。
 ///
-/// 判定线（D-V17-009）: `p_fdr < 0.05 ∧ |d| ≥ 0.3 ∧ CI 不含 0` → 显著。
+/// 判定线: `p_fdr < 0.05 ∧ |d| ≥ 0.3 ∧ CI 不含 0` → 显著。
 ///
 /// 等效性检验: 显著性框架只能证明"存在差异"，无法证明"零净增量"（相关对照长期
 /// 只得到不显著）。故并行做 TOST（双单侧 t 检验），等效边界取 |d_av|=0.3
@@ -1547,7 +1546,7 @@ pub(super) fn build_ablation_report(
             raw.cohens_d,
             equivalent,
         );
-        // 方向语义按对照类型区分（D-V20-006 口径）：
+        // 方向语义按对照类型区分：
         // - removal（F 组 vs F0）：关注"移除后是否下降"；
         // - substitution（S 组 vs B1）：去 RAG 摘要只留单层，关注"能否替代 RAG 基座"；
         // - increment（I 组 vs B1）：B1 基座 + 单层，关注"叠加后是否净增"。
@@ -1853,7 +1852,7 @@ pub(super) fn bh_fdr_adjust(p_values: &[f64]) -> Vec<f64> {
 }
 
 // =========================================================
-// 人工抽检校准（T-V16-4-004）
+// 人工抽检校准
 // =========================================================
 
 /// 读取人工抽检校准文件。
@@ -2008,7 +2007,7 @@ fn compute_calibration(
 }
 
 // =========================================================
-// 知识层抽取质量评估（T-V16-4-005）
+// 知识层抽取质量评估
 // =========================================================
 
 /// 判断某档位是否含记忆注入（RAG 摘要基座 memory_rag 开启）。
@@ -2507,7 +2506,7 @@ pub(super) fn render_report_markdown(report: &ProbeReport) -> String {
     }
     md.push('\n');
 
-    // 辅助指标四件套（D-V20-006，产物可复算近似）
+    // 辅助指标四件套（产物可复算近似）
     md.push_str("## 辅助指标（产物可复算）\n\n");
     let fmt_opt = |v: Option<f64>| {
         v.map(|x| format!("{:.1}%", x * 100.0))
@@ -2539,7 +2538,7 @@ pub(super) fn render_report_markdown(report: &ProbeReport) -> String {
         report.auxiliary.annotation
     ));
 
-    // 数据特性与外部效度局限（D-V20-005 必出字段）
+    // 数据特性与外部效度局限（报告必出字段）
     md.push_str("## 数据特性与外部效度局限\n\n");
     if report.limitations.is_empty() {
         md.push_str("- （无附加局限说明）\n");

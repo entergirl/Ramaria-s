@@ -1,23 +1,30 @@
-//! crates/ramaria-service/src/keyword.rs - 关键词词典用例（列表 / 幂等注入 / 待确认别名 / 别名裁决）
+//! crates/ramaria-service/src/keyword.rs - 关键词词典用例（列表 / 幂等注入 / 待确认别名 / 建议与裁决）
 //!
 //! 设计特点:
 //! - 只读列表 + 别名裁决状态机：三态（canonical / alias / pending）展示与
 //!   pending → alias（确认合并）/ canonical（驳回晋升）迁移
 //! - seed 幂等注入：整体校验后去重，已存在词条保持现状（不递增 use_count、
 //!   不改别名状态），新词条从 use_count 0 起写入
+//! - 待确认别名建议：汇总关键词池与内存镜像使用量，把相似词对经筛选后登记为
+//!   pending（单次运行有登记上限；已建立词条不重复登记）
 //! - 入口差异由参数表达：confirm 且词条已是 alias 时，`already_applied_ok = false`
 //!   报业务校验错误、`true` 幂等返回成功（不写库）
 //! - 非法输入显式校验：关键词文本经 `KeywordToken` 标准化（空 / 超长拒绝），
 //!   词条不存在 / 非 pending 均返回业务校验错误，不静默成功
 //! - 日志脱敏：别名文本在日志中只保留长度与短哈希标签，正文不入日志
 
+use std::collections::HashMap;
+
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::keyword::KeywordToken;
+use ramaria_core::lock::read_recover;
+use ramaria_core::traits::StorageBackend;
+use ramaria_memory::keyword::AliasManager;
 
 use crate::engine::Engine;
 use crate::types::{
     AliasAction, AliasResolveOutcome, AliasResolveRequest, KeywordEntryView, KeywordPoolView,
-    KeywordSeedItem, KeywordSeedOutcome, PendingAliasView,
+    KeywordSeedItem, KeywordSeedOutcome, KeywordSuggestionOutcome, PendingAliasView,
 };
 
 // =========================================================
@@ -291,6 +298,229 @@ pub(crate) async fn resolve_alias(
 }
 
 // =========================================================
+// 待确认别名建议（扫描使用量 → 相似词对 → 落库）
+// =========================================================
+
+/// 建议扫描的最小使用量阈值（低于此值不参与建议）。
+///
+/// 取值理由: 过滤仅出现 1-2 次的偶然用词——噪声大且归一收益低；
+/// 3 次是"重复出现、值得归一"的最小观测信号。
+pub const DEFAULT_SUGGEST_MIN_USE: u32 = 3;
+
+/// 单次运行最多登记的待确认别名数（超出部分本轮不写，避免一次刷出大量条目）。
+pub const MAX_PENDING_SUGGESTIONS_PER_RUN: usize = 50;
+
+/// 词条本地状态（筛选与指针解析用；与 keyword_pool 三态一致）。
+enum PoolSlot {
+    /// 规范词（携带 rowid，作为待确认别名的指针）
+    Canonical(i64),
+    /// 已确认别名
+    Alias,
+    /// 待确认别名
+    Pending,
+}
+
+/// 扫描关键词使用量，把相似词对登记为待确认别名（pending）。
+///
+/// 流程:
+/// 1. 汇总使用量：keyword_pool 行计数与内存镜像计数按文本相加
+///    （镜像为空 / 未装载时仅用词池计数）；
+/// 2. 已建立词表登记：canonical 行注册为规范词、alias 行注册为已确认别名，
+///    建议引擎据此跳过已归一 / 已裁决词条；
+/// 3. 调用建议引擎，逐条筛选后落库：
+///    - 别名与规范词文本相同、或别名已存在于词池（任意状态）→ 跳过；
+///    - 建议目标已存在但不是规范词（alias / pending）→ 跳过（不做反向改指）；
+///    - 建议目标不存在 → 幂等注入为规范词后再取其 rowid 作为指针；
+///    - 单次运行最多登记 [`MAX_PENDING_SUGGESTIONS_PER_RUN`] 条，超出计入 `truncated`。
+///
+/// 参数:
+/// - `engine`: 服务层引擎。
+/// - `min_use`: 最小使用量阈值（None 时取 [`DEFAULT_SUGGEST_MIN_USE`]）。
+///
+/// 返回:
+/// - 建议结果（扫描 / 建议 / 登记 / 跳过 / 截断计数与汇总提示）。
+///
+/// 说明:
+/// - 本用例为机会性生产：单条建议的注入 / 登记失败记 warn 并继续，不阻塞整体；
+///   词池读取失败返回错误，由调用入口按 best-effort 处理。
+/// - 日志只记录计数与阈值，不记录词条文本。
+pub(crate) async fn suggest_pending_aliases(
+    engine: &Engine,
+    min_use: Option<u32>,
+) -> RamariaResult<KeywordSuggestionOutcome> {
+    let min_use = min_use.unwrap_or(DEFAULT_SUGGEST_MIN_USE);
+    let storage = engine.storage_ref();
+
+    // ---- 1. 使用量汇总：词池行计数 + 内存镜像计数 ----
+    let entries = storage.list_keyword_pool_entries().await?;
+    let mut use_counts: HashMap<String, u32> = HashMap::with_capacity(entries.len());
+    for entry in &entries {
+        use_counts.insert(entry.keyword.clone(), count_to_u32(entry.use_count));
+    }
+    {
+        let mirror = engine.keyword_mirror();
+        let guard = read_recover(&*mirror, "keyword.suggest.mirror");
+        for entry in guard.pool().iter() {
+            let slot = use_counts
+                .entry(entry.token.as_str().to_string())
+                .or_insert(0);
+            *slot = slot.saturating_add(count_to_u32(entry.use_count));
+        }
+    }
+
+    // ---- 2. 已建立词表登记（pending 未确认，不登记） ----
+    let mut manager = AliasManager::new();
+    for entry in &entries {
+        match status_of(&entry.alias_status) {
+            "canonical" => {
+                if let Err(e) = manager.register_canonical(&entry.keyword, entry.rowid) {
+                    tracing::debug!(error = %e, "规范词登记跳过（文本非法）");
+                }
+            }
+            "alias" => match (entry.canonical_id, entry.canonical_keyword.as_deref()) {
+                (Some(canonical_id), Some(canonical_text)) => {
+                    if let Err(e) =
+                        manager.register_alias(&entry.keyword, canonical_id, canonical_text)
+                    {
+                        tracing::debug!(error = %e, "别名登记跳过（文本非法）");
+                    }
+                }
+                _ => tracing::debug!(rowid = entry.rowid, "别名行缺规范词指向，跳过登记"),
+            },
+            _ => {}
+        }
+    }
+
+    let scanned_tokens = use_counts.len();
+    manager.load_use_counts(use_counts);
+    let suggestions = manager.suggest_merges(min_use);
+
+    // ---- 3. 筛选与落库（本地状态随登记实时更新） ----
+    let mut states: HashMap<String, PoolSlot> = HashMap::with_capacity(entries.len());
+    for entry in &entries {
+        let slot = match status_of(&entry.alias_status) {
+            "canonical" => PoolSlot::Canonical(entry.rowid),
+            "alias" => PoolSlot::Alias,
+            _ => PoolSlot::Pending,
+        };
+        states.insert(entry.keyword.clone(), slot);
+    }
+
+    let mut inserted = 0usize;
+    let mut skipped = 0usize;
+    let mut truncated = 0usize;
+    let mut attempted = 0usize;
+
+    for suggestion in &suggestions {
+        if suggestion.alias_text == suggestion.canonical_text {
+            skipped += 1;
+            continue;
+        }
+        if states.contains_key(&suggestion.alias_text) {
+            skipped += 1;
+            continue;
+        }
+        if attempted >= MAX_PENDING_SUGGESTIONS_PER_RUN {
+            truncated += 1;
+            continue;
+        }
+        let canonical_id = match states.get(&suggestion.canonical_text) {
+            Some(PoolSlot::Canonical(rowid)) => *rowid,
+            Some(_) => {
+                skipped += 1;
+                continue;
+            }
+            None => {
+                if let Err(e) = storage
+                    .seed_keyword_canonical(&suggestion.canonical_text)
+                    .await
+                {
+                    tracing::warn!(error = %e, "规范词注入失败，跳过该条合并建议");
+                    skipped += 1;
+                    continue;
+                }
+                match canonical_rowid(storage.as_ref(), &suggestion.canonical_text).await {
+                    Ok(Some(rowid)) => {
+                        states.insert(
+                            suggestion.canonical_text.clone(),
+                            PoolSlot::Canonical(rowid),
+                        );
+                        rowid
+                    }
+                    Ok(None) => {
+                        skipped += 1;
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "规范词 rowid 查询失败，跳过该条合并建议");
+                        skipped += 1;
+                        continue;
+                    }
+                }
+            }
+        };
+
+        attempted += 1;
+        let use_count = suggestion.alias_use_count.max(1);
+        match storage
+            .upsert_pending_alias(&suggestion.alias_text, canonical_id, use_count)
+            .await
+        {
+            Ok(true) => {
+                inserted += 1;
+                states.insert(suggestion.alias_text.clone(), PoolSlot::Pending);
+            }
+            // 并发 / 竞态：词条在筛选后出现，保持现状不覆盖
+            Ok(false) => skipped += 1,
+            Err(e) => {
+                tracing::warn!(error = %e, "待确认别名登记失败，跳过该条合并建议");
+                skipped += 1;
+            }
+        }
+    }
+
+    let message = format!(
+        "扫描 {scanned_tokens} 个词条，产生 {} 条合并建议：新增 {inserted} 条待确认别名，跳过 {skipped} 条，{truncated} 条因超过单次上限未处理",
+        suggestions.len()
+    );
+    tracing::info!(
+        scanned = scanned_tokens,
+        suggestions = suggestions.len(),
+        inserted,
+        skipped,
+        truncated,
+        min_use,
+        "关键词别名建议完成"
+    );
+
+    Ok(KeywordSuggestionOutcome {
+        scanned_tokens,
+        suggestions: suggestions.len(),
+        inserted,
+        skipped,
+        truncated,
+        message,
+    })
+}
+
+/// 重新读取词池行，解析指定文本的规范词 rowid（存在但不是规范词 → None）。
+async fn canonical_rowid(
+    storage: &dyn StorageBackend,
+    keyword: &str,
+) -> RamariaResult<Option<i64>> {
+    let entries = storage.list_keyword_pool_entries().await?;
+    Ok(entries
+        .into_iter()
+        .find(|entry| entry.keyword == keyword && status_of(&entry.alias_status) == "canonical")
+        .map(|entry| entry.rowid))
+}
+
+/// i64 计数转换到 u32（负值按 0、溢出饱和）。
+fn count_to_u32(value: i64) -> u32 {
+    value.clamp(0, i64::from(u32::MAX)) as u32
+}
+
+// =========================================================
 // 日志脱敏（文件内私有）
 // =========================================================
 
@@ -324,423 +554,4 @@ fn fnv1a32(bytes: &[u8]) -> u32 {
 // =========================================================
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test_support::engine_with_db;
-    use ramaria_storage::repo::keyword as kw_repo;
-
-    /// 打开与引擎同一库文件的连接池（造 pending 别名等测试数据用）。
-    async fn open_pool(dir: &std::path::Path) -> sqlx::SqlitePool {
-        ramaria_storage::database::init_pool(Some(dir.join("assistant.db")))
-            .await
-            .expect("打开测试库连接池应成功")
-    }
-
-    /// 造一个规范词「工作压力」+ 若干 pending 别名，返回规范词 rowid。
-    async fn seed_pending_aliases(pool: &sqlx::SqlitePool, aliases: &[&str]) -> i64 {
-        kw_repo::upsert_with_alias(
-            pool,
-            &KeywordToken::new("工作压力").unwrap(),
-            0,
-            "canonical",
-        )
-        .await
-        .expect("写入规范词应成功");
-        let canonical_id = kw_repo::find_rowid(pool, "工作压力")
-            .await
-            .expect("查询 rowid 应成功")
-            .expect("规范词应存在");
-        for alias in aliases {
-            kw_repo::upsert_with_alias(
-                pool,
-                &KeywordToken::new(alias).unwrap(),
-                canonical_id,
-                "pending",
-            )
-            .await
-            .expect("写入待确认别名应成功");
-        }
-        canonical_id
-    }
-
-    /// 三态映射：None / canonical / alias / pending / 未知取值兜底。
-    #[test]
-    fn status_mapping_covers_three_states() {
-        assert_eq!(status_of(&None), "canonical");
-        assert_eq!(status_of(&Some("canonical".to_string())), "canonical");
-        assert_eq!(status_of(&Some("alias".to_string())), "alias");
-        assert_eq!(status_of(&Some("pending".to_string())), "pending");
-        assert_eq!(status_of(&Some("weird".to_string())), "canonical");
-    }
-
-    /// 文本校验：空 / 纯空白 / 超长拒绝；正常文本标准化。
-    #[test]
-    fn keyword_token_validation_rejects_invalid() {
-        assert!(parse_keyword("").is_err());
-        assert!(parse_keyword("   ").is_err());
-        assert!(parse_keyword(&"x".repeat(300)).is_err());
-        assert_eq!(parse_keyword("  工作压力  ").unwrap().as_str(), "工作压力");
-        assert_eq!(
-            parse_keyword("Work Stress").unwrap().as_str(),
-            "work stress",
-            "英文应小写化"
-        );
-    }
-
-    /// 日志脱敏标签：只保留长度与哈希，不出现正文。
-    #[test]
-    fn redact_label_keeps_length_and_hash_only() {
-        let label = redact_text_label("职场焦虑");
-        assert!(
-            label.starts_with("<4 chars>#"),
-            "标签应只含长度与哈希: {label}"
-        );
-        assert!(!label.contains("职场"), "标签不应包含正文: {label}");
-        assert_eq!(label, redact_text_label("职场焦虑"), "同一文本标签应稳定");
-        assert_ne!(label, redact_text_label("职业倦怠"), "不同文本标签应可区分");
-    }
-
-    /// 列表：三态计数与词条字段（pending 携带规范词指向）。
-    #[tokio::test]
-    async fn list_reports_three_state_counts() {
-        let (engine, _storage, dir) = engine_with_db("keyword-list").await;
-        let pool = open_pool(&dir).await;
-        let canonical_id = seed_pending_aliases(&pool, &["职场焦虑"]).await;
-        kw_repo::upsert_with_alias(
-            &pool,
-            &KeywordToken::new("职业倦怠").unwrap(),
-            canonical_id,
-            "alias",
-        )
-        .await
-        .expect("写入已确认别名应成功");
-
-        let view = engine.keyword_list().await.expect("关键词列表应成功");
-        assert_eq!(view.total, 3);
-        assert_eq!(view.canonical_count, 1);
-        assert_eq!(view.alias_count, 1);
-        assert_eq!(view.pending_count, 1);
-
-        let pending = view
-            .keywords
-            .iter()
-            .find(|k| k.keyword == "职场焦虑")
-            .expect("pending 别名应出现");
-        assert_eq!(pending.status, "pending");
-        assert_eq!(pending.canonical_id, Some(canonical_id));
-        assert_eq!(pending.canonical_keyword.as_deref(), Some("工作压力"));
-
-        let canonical = view
-            .keywords
-            .iter()
-            .find(|k| k.keyword == "工作压力")
-            .expect("规范词应出现");
-        assert_eq!(canonical.status, "canonical");
-        assert_eq!(canonical.canonical_id, None);
-        assert_eq!(canonical.canonical_keyword, None);
-
-        pool.close().await;
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 待确认别名列表形状：alias_id / alias / canonical / created_at。
-    #[tokio::test]
-    async fn pending_alias_list_shape() {
-        let (engine, _storage, dir) = engine_with_db("keyword-pending").await;
-        let pool = open_pool(&dir).await;
-        seed_pending_aliases(&pool, &["职场焦虑", "职业倦怠"]).await;
-
-        let list = engine
-            .keyword_pending_aliases()
-            .await
-            .expect("待确认别名列表应成功");
-        assert_eq!(list.len(), 2);
-        let anxious = list
-            .iter()
-            .find(|p| p.alias == "职场焦虑")
-            .expect("职场焦虑应出现");
-        assert!(anxious.alias_id > 0);
-        assert_eq!(anxious.canonical, "工作压力");
-        assert!(anxious.created_at > 0);
-
-        pool.close().await;
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 裁决全流程：确认成功 → 再次确认（桌面报错 / 幂等口径成功）→ 驳回成功 → 再次驳回报错。
-    #[tokio::test]
-    async fn resolve_alias_confirm_then_reject() {
-        let (engine, _storage, dir) = engine_with_db("keyword-resolve").await;
-        let pool = open_pool(&dir).await;
-        seed_pending_aliases(&pool, &["职场焦虑", "职业倦怠"]).await;
-
-        // 确认合并成功
-        let outcome = engine
-            .keyword_resolve_alias(AliasResolveRequest {
-                alias: "职场焦虑".to_string(),
-                action: AliasAction::Confirm,
-                already_applied_ok: false,
-            })
-            .await
-            .expect("确认合并应成功");
-        assert_eq!(outcome.alias, "职场焦虑");
-        assert_eq!(outcome.canonical_keyword.as_deref(), Some("工作压力"));
-        assert_eq!(outcome.status, "alias");
-        assert!(!outcome.already_applied);
-
-        // 再次确认：桌面口径（already_applied_ok=false）报业务校验错误
-        let err = engine
-            .keyword_resolve_alias(AliasResolveRequest {
-                alias: "职场焦虑".to_string(),
-                action: AliasAction::Confirm,
-                already_applied_ok: false,
-            })
-            .await
-            .expect_err("已是 alias 时桌面口径应报错");
-        assert_eq!(err.category(), "validation");
-
-        // 再次确认：幂等口径成功且不写库
-        let idempotent = engine
-            .keyword_resolve_alias(AliasResolveRequest {
-                alias: "职场焦虑".to_string(),
-                action: AliasAction::Confirm,
-                already_applied_ok: true,
-            })
-            .await
-            .expect("幂等口径应成功");
-        assert!(idempotent.already_applied);
-        assert_eq!(idempotent.status, "alias");
-        assert_eq!(idempotent.canonical_keyword.as_deref(), Some("工作压力"));
-
-        // 驳回晋升成功
-        let rejected = engine
-            .keyword_resolve_alias(AliasResolveRequest {
-                alias: "职业倦怠".to_string(),
-                action: AliasAction::Reject,
-                already_applied_ok: true,
-            })
-            .await
-            .expect("驳回应成功");
-        assert_eq!(rejected.status, "canonical");
-        assert_eq!(rejected.canonical_keyword, None);
-        assert!(!rejected.already_applied);
-
-        // 再次驳回：非 pending 一律报错
-        let err = engine
-            .keyword_resolve_alias(AliasResolveRequest {
-                alias: "职业倦怠".to_string(),
-                action: AliasAction::Reject,
-                already_applied_ok: true,
-            })
-            .await
-            .expect_err("非 pending 驳回应报错");
-        assert_eq!(err.category(), "validation");
-
-        // 落库状态核对：pending 清空、alias 1 条、规范词 2 条
-        let view = engine.keyword_list().await.expect("关键词列表应成功");
-        assert_eq!(view.pending_count, 0);
-        assert_eq!(view.alias_count, 1);
-        assert_eq!(view.canonical_count, 2);
-
-        pool.close().await;
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 不存在 / 非 pending / 非法文本：一律业务校验错误，不写库。
-    #[tokio::test]
-    async fn resolve_alias_rejects_missing_and_non_pending() {
-        let (engine, _storage, dir) = engine_with_db("keyword-invalid").await;
-        let pool = open_pool(&dir).await;
-        kw_repo::upsert_with_alias(
-            &pool,
-            &KeywordToken::new("工作压力").unwrap(),
-            0,
-            "canonical",
-        )
-        .await
-        .expect("写入规范词应成功");
-
-        // 规范词（非 pending）确认
-        let err = engine
-            .keyword_resolve_alias(AliasResolveRequest {
-                alias: "工作压力".to_string(),
-                action: AliasAction::Confirm,
-                already_applied_ok: true,
-            })
-            .await
-            .expect_err("非 pending 确认应报错");
-        assert_eq!(err.category(), "validation");
-
-        // 词条不存在
-        let err = engine
-            .keyword_resolve_alias(AliasResolveRequest {
-                alias: "不存在的词".to_string(),
-                action: AliasAction::Confirm,
-                already_applied_ok: true,
-            })
-            .await
-            .expect_err("词条不存在应报错");
-        assert_eq!(err.category(), "validation");
-        assert!(
-            err.to_string().contains("不存在"),
-            "错误应提示不存在: {err}"
-        );
-
-        // 非法文本（纯空白）
-        let err = engine
-            .keyword_resolve_alias(AliasResolveRequest {
-                alias: "   ".to_string(),
-                action: AliasAction::Reject,
-                already_applied_ok: true,
-            })
-            .await
-            .expect_err("空别名应报错");
-        assert_eq!(err.category(), "validation");
-
-        pool.close().await;
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 竞争失败路径：pending 行缺规范词指向（数据异常）时条件更新未命中，
-    /// 返回「状态已变化」业务校验错误。
-    #[tokio::test]
-    async fn resolve_alias_reports_changed_state() {
-        let (engine, _storage, dir) = engine_with_db("keyword-changed").await;
-        let pool = open_pool(&dir).await;
-        // alias_status='pending' 但缺 canonical_id：行视图按 pending 展示，条件更新不会命中
-        kw_repo::upsert_with_alias(&pool, &KeywordToken::new("孤儿别名").unwrap(), 0, "pending")
-            .await
-            .expect("写入异常别名行应成功");
-
-        let err = engine
-            .keyword_resolve_alias(AliasResolveRequest {
-                alias: "孤儿别名".to_string(),
-                action: AliasAction::Confirm,
-                already_applied_ok: false,
-            })
-            .await
-            .expect_err("条件更新未命中应报错");
-        assert_eq!(err.category(), "validation");
-        assert!(
-            err.to_string().contains("状态已变化"),
-            "错误应提示状态已变化: {err}"
-        );
-
-        pool.close().await;
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    // ---- seed（幂等注入） ----
-
-    /// 新词注入：use_count 从 0 起；二次注入幂等（保持现状、不递增计数）。
-    #[tokio::test]
-    async fn seed_inserts_then_is_idempotent() {
-        let (engine, _storage, dir) = engine_with_db("keyword-seed-idempotent").await;
-
-        let outcome = engine
-            .keyword_seed(&["工作压力".to_string(), "加班".to_string()])
-            .await
-            .expect("seed 应成功");
-        assert_eq!(outcome.seeded, 2);
-        assert_eq!(outcome.skipped, 0);
-        assert_eq!(outcome.results.len(), 2);
-        assert!(
-            outcome
-                .results
-                .iter()
-                .all(|item| item.inserted && item.status == "canonical"),
-            "新词条应全部为 canonical 且标记新插入"
-        );
-
-        // 二次注入同一词条：幂等保持现状
-        let outcome = engine
-            .keyword_seed(&["工作压力".to_string()])
-            .await
-            .expect("seed 应成功");
-        assert_eq!(outcome.seeded, 0);
-        assert_eq!(outcome.skipped, 1);
-        assert!(!outcome.results[0].inserted);
-
-        let view = engine.keyword_list().await.expect("列表应成功");
-        assert_eq!(view.total, 2);
-        let work = view
-            .keywords
-            .iter()
-            .find(|k| k.keyword == "工作压力")
-            .expect("词条应存在");
-        assert_eq!(work.use_count, 0, "重复注入不得递增 use_count");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 已存在别名词条：回传现状状态且不触碰（不递增 use_count、不改别名状态）。
-    #[tokio::test]
-    async fn seed_keeps_existing_alias_state() {
-        let (engine, _storage, dir) = engine_with_db("keyword-seed-existing").await;
-        let pool = open_pool(&dir).await;
-        seed_pending_aliases(&pool, &["职场焦虑"]).await;
-
-        let outcome = engine
-            .keyword_seed(&["职场焦虑".to_string()])
-            .await
-            .expect("seed 应成功");
-        assert_eq!(outcome.seeded, 0);
-        assert_eq!(outcome.skipped, 1);
-        assert!(!outcome.results[0].inserted);
-        assert_eq!(outcome.results[0].status, "pending");
-
-        // 现状未被触碰：仍为 pending 且指向规范词
-        let view = engine.keyword_list().await.expect("列表应成功");
-        let item = view
-            .keywords
-            .iter()
-            .find(|k| k.keyword == "职场焦虑")
-            .expect("词条应存在");
-        assert_eq!(item.status, "pending");
-        assert_eq!(item.canonical_keyword.as_deref(), Some("工作压力"));
-
-        pool.close().await;
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 去重与空输入：重复文本只处理一次、文本经标准化；空输入返回空结果。
-    #[tokio::test]
-    async fn seed_dedupes_and_accepts_empty_input() {
-        let (engine, _storage, dir) = engine_with_db("keyword-seed-dedupe").await;
-
-        let outcome = engine
-            .keyword_seed(&[
-                "工作压力".to_string(),
-                "工作压力".to_string(),
-                " 加班 ".to_string(),
-            ])
-            .await
-            .expect("seed 应成功");
-        assert_eq!(outcome.results.len(), 2, "重复文本应去重");
-        assert_eq!(outcome.results[1].keyword, "加班", "文本应经标准化");
-
-        let empty = engine.keyword_seed(&[]).await.expect("空输入应成功");
-        assert_eq!(empty.seeded, 0);
-        assert_eq!(empty.skipped, 0);
-        assert!(empty.results.is_empty());
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 非法词条：整体报错且不部分写入（其余合法词条也不会被注入）。
-    #[tokio::test]
-    async fn seed_rejects_invalid_without_partial_write() {
-        let (engine, _storage, dir) = engine_with_db("keyword-seed-invalid").await;
-
-        let err = engine
-            .keyword_seed(&["工作压力".to_string(), "   ".to_string()])
-            .await
-            .expect_err("空白词条应报错");
-        assert_eq!(err.category(), "validation");
-
-        let view = engine.keyword_list().await.expect("列表应成功");
-        assert_eq!(view.total, 0, "整体校验失败不得部分写入");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-}
+mod tests;

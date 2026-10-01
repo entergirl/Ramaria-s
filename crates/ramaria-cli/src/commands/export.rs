@@ -1,16 +1,15 @@
 //! crates/ramaria-cli/src/commands/export.rs - 数据导出命令
 //!
 //! 设计特点:
-//! - 支持 JSON 和 Markdown 两种导出格式
-//! - JSON: 结构化的 sessions → messages → L1 memories
+//! - 载荷渲染统一由服务层提供（JSON / Markdown），本模块只做输出编排
+//! - JSON: 带版本信封的会话 / 消息结构，--persona 时附 L1 摘要段
 //! - Markdown: 人类可读的对话记录
-//! - --persona 筛选特定 persona 的数据
-//! - --output 指定输出文件（默认 stdout）
-//! - 敏感信息不出现在导出中（API key 等）
+//! - --redact 脱敏：消息正文与 L1 摘要替换为 <N chars>
+//! - --output 指定输出文件（缺省 exports/export_{timestamp}.{ext}；`-` = stdout）
 //! - 导出路径使用 canonicalize + 前缀检查防护路径穿越
 
 use anyhow::Context;
-use ramaria_service::{Engine, ExportDataRequest};
+use ramaria_service::{Engine, ExportDataRequest, render_sessions_json, render_sessions_markdown};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -23,6 +22,8 @@ pub struct ExportArgs {
     pub persona: Option<String>,
     /// 输出文件路径（默认 exports/ 目录；`-` 表示 stdout）
     pub output: Option<String>,
+    /// 脱敏输出：消息正文与 L1 摘要替换为 <N chars>
+    pub redact: bool,
     /// 全局 --json 信封模式：stdout 输出 `{"ok":true,"data":{...}}` 信封
     pub json: bool,
 }
@@ -50,59 +51,8 @@ async fn export_json(engine: &Arc<Engine>, args: &ExportArgs) -> anyhow::Result<
         .await
         .context("查询会话失败")?;
 
-    let mut export_data: Vec<serde_json::Value> = Vec::new();
-
-    for session_data in &data.sessions {
-        let session = &session_data.session;
-        let messages = &session_data.messages;
-
-        let session_json = serde_json::json!({
-            "session_id": session.id.to_string(),
-            "started_at": crate::util::format_timestamp(session.started_at),
-            "ended_at": crate::util::format_timestamp(session.ended_at.unwrap_or(0)),
-            "messages": messages.iter().map(|m| {
-                serde_json::json!({
-                    "role": m.role.as_str(),
-                    "content": m.content,
-                    "source": m.source.to_string(),
-                    "created_at": crate::util::format_timestamp(m.created_at),
-                })
-            }).collect::<Vec<_>>(),
-        });
-
-        export_data.push(session_json);
-    }
-
-    // 添加 L1 记忆
-    if let Some(ref persona_uid) = args.persona {
-        let l1_memories = data.l1_memories.as_deref().unwrap_or(&[]);
-
-        let l1_json = serde_json::json!({
-            "type": "l1_memories",
-            "persona_uid": persona_uid,
-            "count": l1_memories.len(),
-            "items": l1_memories.iter().map(|m| {
-                serde_json::json!({
-                    "id": m.id.to_string(),
-                    "session_id": m.session_id.to_string(),
-                    "summary": m.summary,
-                    "valence": m.valence,
-                    "salience": m.salience,
-                    "created_at": crate::util::format_timestamp(m.created_at),
-                })
-            }).collect::<Vec<_>>(),
-        });
-
-        export_data.push(l1_json);
-    }
-
-    let json_output = serde_json::to_string_pretty(&serde_json::json!({
-        "ramaria_export": {
-            "version": "0.1.0",
-            "exported_at": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-            "sessions": export_data,
-        }
-    }))?;
+    // 载荷结构由服务层统一渲染（CLI / 桌面同源）
+    let json_output = render_sessions_json(&data, args.redact);
 
     // --json 信封模式：stdout 只输出信封（数据在 data.content 或 written_to 指向的文件）
     if args.json {
@@ -139,67 +89,37 @@ async fn export_markdown(engine: &Arc<Engine>, args: &ExportArgs) -> anyhow::Res
         .await
         .context("查询会话失败")?;
 
-    let mut md = String::new();
-    md.push_str("# Ramaria 对话导出\n\n");
-    md.push_str(&format!(
-        "导出时间: {}\n\n",
-        chrono::Utc::now().format("%Y-%m-%d %H:%M UTC")
-    ));
-    md.push_str("---\n\n");
-
-    let mut exported_count = 0usize;
-
-    for session_data in &data.sessions {
-        let session = &session_data.session;
-        let messages = &session_data.messages;
-
-        if messages.is_empty() {
-            continue;
-        }
-
-        // Persona 过滤已在导出数据装配层完成（仅保留含目标 persona_uid 消息的会话）
-        exported_count += 1;
-        md.push_str(&format!("## 会话 {}\n\n", session.id));
-        if let Some(ts) = crate::util::format_timestamp(session.started_at) {
-            md.push_str(&format!("*创建时间: {ts}*\n\n"));
-        }
-
-        for msg in messages {
-            let role_label = match msg.role {
-                ramaria_core::types::MessageRole::User => "**👤 用户**",
-                ramaria_core::types::MessageRole::Assistant => "**🤖 AI**",
-                ramaria_core::types::MessageRole::System => "*⚙ 系统*",
-                _ => "*❓ 未知*",
-            };
-            md.push_str(&format!("{role_label}\n\n"));
-            md.push_str(&msg.content);
-            md.push_str("\n\n---\n\n");
-        }
-    }
-
-    if exported_count == 0 {
+    // 无消息会话由渲染层跳过；全部为空时返回 None（不写文件，保持与旧行为一致的提示）
+    let Some(markdown) = render_sessions_markdown(&data, args.redact) else {
         crate::ui::info("没有可导出的会话数据");
         return Ok(());
-    }
+    };
+    let exported_sessions = data
+        .sessions
+        .iter()
+        .filter(|entry| !entry.messages.is_empty())
+        .count();
 
     // --json 信封模式：stdout 只输出信封（数据在 data.content 或 written_to 指向的文件）
     if args.json {
         if args.output.as_deref() == Some("-") {
-            let envelope = serde_json::json!({ "format": "markdown", "content": md });
+            let envelope = serde_json::json!({ "format": "markdown", "content": markdown });
             return crate::json::emit_ok(&envelope);
         }
-        let written_to = write_output(&md, args.output.as_deref(), "md")?;
+        let written_to = write_output(&markdown, args.output.as_deref(), "md")?;
         let envelope = serde_json::json!({
             "format": "markdown",
             "written_to": written_to,
-            "sessions": exported_count,
+            "sessions": exported_sessions,
         });
         return crate::json::emit_ok(&envelope);
     }
 
-    write_output(&md, args.output.as_deref(), "md")?;
+    write_output(&markdown, args.output.as_deref(), "md")?;
 
-    crate::ui::success(&format!("已导出 {} 个会话为 Markdown 格式", exported_count));
+    crate::ui::success(&format!(
+        "已导出 {exported_sessions} 个会话为 Markdown 格式"
+    ));
     Ok(())
 }
 

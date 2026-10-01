@@ -2,9 +2,11 @@
 //!
 //! 设计特点:
 //! - 子命令词表：list / show / seed / alias list|confirm|reject
-//! - list/show/alias list: 经服务层关键词用例只读查询 keyword_pool（三态视图）
+//! - list/show/alias list: 经服务层关键词用例查询 keyword_pool（三态视图）
 //! - seed: 幂等手工注入规范词（use_count 从 0 起，重复执行不改 use_count/别名状态），
 //!   供词典增强分词（keyword_pool 规范词 → 分词词典）消费
+//! - alias list: 输出前 best-effort 触发建议生成（扫描使用量 → 相似词对落库），
+//!   生成失败仅提示，不影响列表输出与 `--json` 信封结构
 //! - alias confirm/reject: 写操作，遵循确认惯例（--yes 自动通过；非 TTY 无 --yes 直接失败）；
 //!   不存在 / 非 pending 均报业务校验错误（exit 4）；已合并（alias）再次 confirm 幂等成功
 //! - 全部支持全局 `--json` 信封；stdout 只输出数据；日志/提示不记录关键词原文（仅 rowid/count）
@@ -259,7 +261,15 @@ async fn run_seed(engine: &Arc<Engine>, keywords: &[String], json: bool) -> anyh
 // =========================================================
 
 /// 列出待确认别名冲突（alias → 建议规范词）。
+///
+/// 说明:
+/// - 列输出前先 best-effort 扫描词池与内存镜像使用量生成待确认项；
+///   生成失败只提示，不影响列表输出。
 async fn run_alias_list(engine: &Arc<Engine>, json: bool) -> anyhow::Result<()> {
+    if let Err(e) = engine.keyword_suggest_pending_aliases(None).await {
+        crate::ui::warn(&format!("待确认别名生成失败（忽略）：{e}"));
+    }
+
     let pending = engine
         .keyword_pending_aliases()
         .await

@@ -22,9 +22,18 @@
 
 ## 相邻契约
 
-- 依赖：`ramaria-service`（用例，含 `importer` feature）+ `ramaria-core`；`ramaria-mcp`（`mcp serve` 宿主装配）；`ramaria-memory`（探针算法原语，例外登记）；`ramaria-importer`（导入解析）；`ramaria-storage` 仅测试夹具使用。
-- **禁止**：Tauri 依赖；写业务编排逻辑（除探针例外）。
+- 依赖：`ramaria-service`（用例，含 `importer` feature）+ `ramaria-core`；`ramaria-mcp`（`mcp serve` 宿主装配）；`ramaria-memory`（探针 / 工具例外算法原语）；`ramaria-importer`（导入解析）；`ramaria-storage` 仅测试夹具使用。
+- **禁止**：Tauri 依赖；写业务编排逻辑（除探针 / 工具例外）。
 - 与桌面共享同一数据库时注意多进程写锁（busy_timeout 等待语义）。
+
+## 直查口径（摘要）
+
+入口不得经存储句柄（`engine.storage()` 等）做业务查询 / 业务写入；例外仅两类，新增须登记：
+
+- **探针**：`commands/probe/**` 直连 `ramaria-memory` 算法原语与评估数据读取；
+- **工具**：`commands/rule.rs` 的 `clusters` 直连事件只读与聚类原语（调参 / 诊断，不属产品能力面）。
+
+清单与判定标准（SSOT）：`../../../docs/dev/01-setup/setup-code-agent-guide.md` §4；新增例外须先在版本决策记录登记，再在清单追加。
 
 ## 常见改动落点
 

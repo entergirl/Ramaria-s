@@ -5,6 +5,7 @@
 //! - 每条提示包含: 简短摘要（title）+ 详细建议（detail）
 //! - 支持可重试标记（retryable），供 UI 决定是否显示"重试"按钮
 //! - 未识别类别保守提示"查看日志"，不泄露内部错误细节
+//! - 提供入口统一文案映射（`entry_error_message`）：业务类原文直出，技术类单一场景前缀
 //!
 //! 安全约束:
 //! - 不暴露 API key、完整路径或数据库内部信息
@@ -178,6 +179,37 @@ pub fn is_retryable(err: &RamariaError) -> bool {
 }
 
 // =========================================================
+// 入口统一文案映射
+// =========================================================
+
+/// 入口统一错误文案（单一映射点，各入口只调用一次）。
+///
+/// 参数:
+/// - `err`: 服务层返回的统一错误。
+/// - `scene`: 调用场景描述（如 `"查询记忆失败"`）；为空时不加场景前缀。
+///
+/// 返回:
+/// - `validation` / `privacy`: 错误上下文原文直出（业务文案逐字保留，不叠加任何前缀）；
+/// - 其余类别: `{scene}: {类别标题}: {原因}`（类别标题取 [`ErrorHint`] 中文标题，原因取 `err.context()`）。
+///
+/// 说明:
+/// - 不重复拼接错误类别串（不使用 `RamariaError` 的 Display），避免双重前缀；
+/// - 文案仅含类别标题与已面向用户的上下文，不携带 source 链等诊断细节。
+pub fn entry_error_message(err: &RamariaError, scene: &str) -> String {
+    match err.category() {
+        "validation" | "privacy" => err.context().to_string(),
+        _ => {
+            let title = ErrorHint::from_error(err).title;
+            if scene.is_empty() {
+                format!("{title}: {}", err.context())
+            } else {
+                format!("{scene}: {title}: {}", err.context())
+            }
+        }
+    }
+}
+
+// =========================================================
 // 单元测试
 // =========================================================
 
@@ -237,5 +269,50 @@ mod tests {
         assert_eq!(error_title(&err), "LLM 服务错误");
         assert!(is_retryable(&err));
         assert!(!error_detail(&err).is_empty());
+    }
+
+    /// 入口统一文案：业务类（validation / privacy）原文直出，不叠加场景与类别前缀。
+    #[test]
+    fn entry_error_message_business_categories_are_verbatim() {
+        let validation = RamariaError::validation("会话不存在: abc");
+        assert_eq!(
+            entry_error_message(&validation, "查询会话失败"),
+            "会话不存在: abc"
+        );
+
+        let privacy = RamariaError::privacy("请先完成隐私确认");
+        assert_eq!(
+            entry_error_message(&privacy, "生成回复失败"),
+            "请先完成隐私确认"
+        );
+    }
+
+    /// 入口统一文案：技术类 = `{场景}: {类别标题}: {原因}`（标题取 error_hint，不复现英文类别串）。
+    #[test]
+    fn entry_error_message_technical_categories_have_scene_and_title() {
+        let cases: Vec<(RamariaError, &str)> = vec![
+            (RamariaError::storage("磁盘只读"), "数据库错误"),
+            (RamariaError::llm("连接超时"), "LLM 服务错误"),
+            (RamariaError::config("缺少必需字段"), "配置错误"),
+            (RamariaError::index("索引损坏"), "索引错误"),
+            (RamariaError::io("读取失败", None), "文件读写错误"),
+            (RamariaError::unsupported("功能未实现"), "功能不可用"),
+        ];
+        for (err, title) in cases {
+            let message = entry_error_message(&err, "查询记忆失败");
+            assert_eq!(
+                message,
+                format!("查询记忆失败: {title}: {}", err.context()),
+                "{err:?}"
+            );
+            assert!(!message.contains("error:"), "不应复现英文类别串: {message}");
+        }
+    }
+
+    /// 入口统一文案：场景为空时退化为 `{类别标题}: {原因}`（不伪造场景词）。
+    #[test]
+    fn entry_error_message_without_scene_omits_prefix() {
+        let err = RamariaError::storage("磁盘只读");
+        assert_eq!(entry_error_message(&err, ""), "数据库错误: 磁盘只读");
     }
 }

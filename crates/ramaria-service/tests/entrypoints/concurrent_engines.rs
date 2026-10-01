@@ -106,6 +106,11 @@ async fn three_entry_shapes_share_one_db_and_seal_each_session_once() {
         .save_backend_config(&BackendConfig::lm_studio_default())
         .await
         .expect("后端配置应写入成功");
+    // 显式标记索引已构建：本用例聚焦三入口并发，不覆盖索引构建链路
+    desktop_storage
+        .set_index_version(1)
+        .await
+        .expect("写入索引版本应成功");
     let session_a = seed_timed_out_session(desktop_storage.as_ref(), PERSONA, idle_minutes)
         .await
         .expect("超时会话 A 应造数成功");

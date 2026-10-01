@@ -1,15 +1,16 @@
-//! crates/ramaria-service/src/export.rs - 会话导出数据装配用例
+//! crates/ramaria-service/src/export.rs - 会话导出装配与载荷渲染模块
 //!
 //! 设计特点:
-//! - 只做数据装配：按会话收集全量消息与人格关联的未吸收 L1 摘要；
-//!   JSON / Markdown 文本生成与文件写出属入口能力（两侧渲染结构不同，不在本层统一）
+//! - 装配：按会话收集全量消息与人格关联的未吸收 L1 摘要（分页作用于过滤后的集合）
+//! - 渲染：JSON / Markdown 载荷由本层单一实现，入口（CLI / 桌面）共用，不写第二份渲染
+//! - 脱敏：`redact` 开关将消息正文与 L1 摘要替换为 `<N chars>`（字符数），其余字段不变
 //! - 人格过滤：仅保留含目标 persona_uid 消息的会话（消息集合保持全量，不按消息二次过滤）
-//! - 分页：作用于过滤后的会话集合（offset 缺省 0；limit 缺省全量，`Some(0)` 按下界 1 处理）
 //! - 计数口径：`total_sessions` 为过滤前全部会话数，`sessions` 为过滤并分页后的装配结果
-//! - 隐私：日志只记计数，消息正文与摘要不进日志
+//! - 隐私：日志只记计数；渲染不落日志，消息正文与摘要不进日志
 
+use chrono::TimeZone;
 use ramaria_core::error::RamariaResult;
-use ramaria_core::types::{MemoryL1, Message, Session};
+use ramaria_core::types::{MemoryL1, Message, MessageRole, Session};
 
 use crate::engine::Engine;
 
@@ -46,12 +47,15 @@ pub struct ExportSessionData {
 /// 字段约定:
 /// - `total_sessions`: 过滤前的全部会话数（分页无关）。
 /// - `sessions`: 过滤并分页后的会话数据（含各自全量消息）。
+/// - `l1_persona`: 请求指定的人格（`None` = 未指定）；供 L1 段回填 `persona_uid`，
+///   使空列表（该人格无未吸收摘要）时仍保留请求值。
 /// - `l1_memories`: 指定人格时的未吸收 L1 摘要段（`None` = 未指定人格；
 ///   空列表 = 该人格无未吸收摘要）。
 #[derive(Debug, Clone)]
 pub struct ExportData {
     pub total_sessions: usize,
     pub sessions: Vec<ExportSessionData>,
+    pub l1_persona: Option<String>,
     pub l1_memories: Option<Vec<MemoryL1>>,
 }
 
@@ -119,8 +123,178 @@ pub(crate) async fn collect(engine: &Engine, req: ExportDataRequest) -> RamariaR
     Ok(ExportData {
         total_sessions,
         sessions,
+        l1_persona: req.persona.clone(),
         l1_memories,
     })
+}
+
+// =========================================================
+// 载荷渲染（入口共用）
+// =========================================================
+
+/// 导出载荷格式版本（与 crate 版本无关）。
+///
+/// 说明:
+/// - 表示 `ramaria_export` 信封内载荷的结构版本，载荷结构不兼容变化时递增；
+/// - CLI / 桌面共用同一常量，避免两侧硬编码分叉。
+pub const EXPORT_FORMAT_VERSION: &str = "0.1.0";
+
+/// 渲染会话导出 JSON 载荷（CLI / 桌面共用）。
+///
+/// 参数:
+/// - `data`: 导出装配结果。
+/// - `redact`: 脱敏开关；`true` 时消息正文与 L1 摘要替换为 `<N chars>`（字符数），其余字段不变。
+///
+/// 返回:
+/// - `{"ramaria_export": {"version", "exported_at", "sessions": [...]}}` 的格式化 JSON 文本；
+///   `data.l1_memories` 为 `Some` 时在 `sessions` 数组末尾附加 `l1_memories` 段
+///   （`persona_uid` 取 `data.l1_persona`，空列表时同样保留请求人格）。
+///
+/// 说明:
+/// - 时间字段统一为 `%Y-%m-%d %H:%M`（UTC）；`ended_at` 为 `None`（未关闭）时输出 `null`；
+/// - 会话集合不做空消息过滤（过滤只作用于 Markdown 渲染）；
+/// - 序列化异常返回降级载荷（不 panic）。
+pub fn render_sessions_json(data: &ExportData, redact: bool) -> String {
+    let mut sections: Vec<serde_json::Value> = data
+        .sessions
+        .iter()
+        .map(|entry| {
+            serde_json::json!({
+                "session_id": entry.session.id.to_string(),
+                "started_at": format_timestamp(entry.session.started_at),
+                "ended_at": format_timestamp(entry.session.ended_at.unwrap_or(0)),
+                "messages": entry.messages.iter().map(|message| {
+                    serde_json::json!({
+                        "role": message.role.as_str(),
+                        "content": render_body(&message.content, redact),
+                        "source": message.source.to_string(),
+                        "created_at": format_timestamp(message.created_at),
+                    })
+                }).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+
+    if let Some(l1_memories) = data.l1_memories.as_deref() {
+        // persona 口径：取请求指定的人格；列表为空时同样保留请求值
+        sections.push(serde_json::json!({
+            "type": "l1_memories",
+            "persona_uid": data.l1_persona.as_deref(),
+            "count": l1_memories.len(),
+            "items": l1_memories.iter().map(|memory| {
+                serde_json::json!({
+                    "id": memory.id.to_string(),
+                    "session_id": memory.session_id.to_string(),
+                    "summary": render_body(&memory.summary, redact),
+                    "valence": memory.valence,
+                    "salience": memory.salience,
+                    "created_at": format_timestamp(memory.created_at),
+                })
+            }).collect::<Vec<_>>(),
+        }));
+    }
+
+    let payload = serde_json::json!({
+        "ramaria_export": {
+            "version": EXPORT_FORMAT_VERSION,
+            "exported_at": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            "sessions": sections,
+        }
+    });
+
+    serde_json::to_string_pretty(&payload).unwrap_or_else(|error| {
+        // 内存值 → 文本的序列化不可失败；此分支仅作防御，保证调用方不面对 panic
+        tracing::warn!(%error, "导出 JSON 序列化失败，返回降级载荷");
+        degraded_export_json()
+    })
+}
+
+/// 渲染会话导出 Markdown 载荷（CLI / 桌面共用）。
+///
+/// 参数:
+/// - `data`: 导出装配结果。
+/// - `redact`: 脱敏开关；`true` 时消息正文替换为 `<N chars>`（字符数）。
+///
+/// 返回:
+/// - `Some(...)`: 至少一个会话含消息时的 Markdown 文本；头部含导出时间
+///   （`%Y-%m-%d %H:%M UTC`），逐会话输出标题、创建时间与角色标签。
+/// - `None`: 全部会话均无消息（调用方按"没有可导出的会话数据"处理，不写文件）。
+///
+/// 说明:
+/// - 无消息会话跳过；角色标签: 用户 / AI / 系统 / 未知（未识别角色回退）。
+pub fn render_sessions_markdown(data: &ExportData, redact: bool) -> Option<String> {
+    let mut markdown = String::new();
+    markdown.push_str("# Ramaria 对话导出\n\n");
+    markdown.push_str(&format!(
+        "导出时间: {}\n\n",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M UTC")
+    ));
+    markdown.push_str("---\n\n");
+
+    let mut exported_sessions = 0usize;
+    for entry in &data.sessions {
+        if entry.messages.is_empty() {
+            continue;
+        }
+        exported_sessions += 1;
+        markdown.push_str(&format!("## 会话 {}\n\n", entry.session.id));
+        if let Some(started_at) = format_timestamp(entry.session.started_at) {
+            markdown.push_str(&format!("*创建时间: {started_at}*\n\n"));
+        }
+
+        for message in &entry.messages {
+            let role_label = match message.role {
+                MessageRole::User => "**👤 用户**",
+                MessageRole::Assistant => "**🤖 AI**",
+                MessageRole::System => "*⚙ 系统*",
+                _ => "*❓ 未知*",
+            };
+            markdown.push_str(&format!("{role_label}\n\n"));
+            markdown.push_str(&render_body(&message.content, redact));
+            markdown.push_str("\n\n---\n\n");
+        }
+    }
+
+    if exported_sessions == 0 {
+        return None;
+    }
+    Some(markdown)
+}
+
+// =========================================================
+// 渲染辅助（私有）
+// =========================================================
+
+/// 渲染可能脱敏的文本字段：开关打开时替换为 `<N chars>`（N 为字符数，不输出原文）。
+fn render_body(text: &str, redact: bool) -> String {
+    if redact {
+        format!("<{} chars>", text.chars().count())
+    } else {
+        text.to_string()
+    }
+}
+
+/// 将 Unix 毫秒时间戳格式化为 `%Y-%m-%d %H:%M`（UTC）。
+///
+/// 返回:
+/// - `Some("2024-06-10 08:00")`: 有效时间戳（ms > 0）。
+/// - `None`: ms ≤ 0（无效时间戳；JSON 输出 `null`，Markdown 省略该行）。
+fn format_timestamp(ms: i64) -> Option<String> {
+    if ms <= 0 {
+        return None;
+    }
+    let secs = ms / 1000;
+    chrono::Utc
+        .timestamp_opt(secs, ((ms % 1000) * 1_000_000) as u32)
+        .single()
+        .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+}
+
+/// 序列化异常时的降级 JSON 载荷：保留信封与格式版本，会话集合为空。
+fn degraded_export_json() -> String {
+    format!(
+        "{{\"ramaria_export\":{{\"version\":\"{EXPORT_FORMAT_VERSION}\",\"exported_at\":\"\",\"sessions\":[]}}}}"
+    )
 }
 
 // =========================================================
@@ -128,120 +302,4 @@ pub(crate) async fn collect(engine: &Engine, req: ExportDataRequest) -> RamariaR
 // =========================================================
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test_support::{engine_with_db, seed_l1, seed_persona, seed_session_with_messages};
-
-    /// 空库：装配返回空集合（非错误），无人格过滤时不带 L1 段。
-    #[tokio::test]
-    async fn collect_empty_db_returns_empty_result() {
-        let (engine, _storage, dir) = engine_with_db("export-empty").await;
-
-        let data = engine
-            .export_sessions(ExportDataRequest::default())
-            .await
-            .expect("空库装配应成功");
-        assert_eq!(data.total_sessions, 0);
-        assert!(data.sessions.is_empty());
-        assert!(data.l1_memories.is_none());
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 无过滤：全部会话与全量消息逐会话装配（总数与消息数口径）。
-    #[tokio::test]
-    async fn collect_without_filter_exports_all_sessions() {
-        let (engine, storage, dir) = engine_with_db("export-all").await;
-        seed_persona(&storage, "char-0001").await;
-        seed_persona(&storage, "char-0002").await;
-        seed_session_with_messages(&storage, "char-0001", 3, 1_000).await;
-        seed_session_with_messages(&storage, "char-0002", 2, 2_000).await;
-
-        let data = engine
-            .export_sessions(ExportDataRequest::default())
-            .await
-            .expect("装配应成功");
-        assert_eq!(data.total_sessions, 2);
-        assert_eq!(data.sessions.len(), 2);
-        assert!(
-            data.sessions.iter().all(|s| !s.messages.is_empty()),
-            "每个会话应装配全量消息"
-        );
-        let message_total: usize = data.sessions.iter().map(|s| s.messages.len()).sum();
-        assert_eq!(message_total, 5, "消息数应为两会话之和");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 人格过滤：仅保留含目标 persona_uid 消息的会话；指定人格时装配 L1 段。
-    #[tokio::test]
-    async fn collect_filters_by_persona_and_includes_l1() {
-        let (engine, storage, dir) = engine_with_db("export-filter").await;
-        seed_persona(&storage, "char-0001").await;
-        seed_persona(&storage, "char-0002").await;
-        seed_session_with_messages(&storage, "char-0001", 2, 1_000).await;
-        seed_session_with_messages(&storage, "char-0002", 2, 2_000).await;
-        // seed_l1 会为承载摘要自动建一个无消息会话（外键依赖）：总数计 3 个会话
-        seed_l1(
-            &storage,
-            "char-0001",
-            "工作压力摘要",
-            Some("工作压力"),
-            3_000,
-        )
-        .await;
-
-        let data = engine
-            .export_sessions(ExportDataRequest {
-                persona: Some("char-0001".to_string()),
-                limit: None,
-                offset: None,
-            })
-            .await
-            .expect("装配应成功");
-        assert_eq!(data.total_sessions, 3, "总数口径为过滤前全部会话");
-        assert_eq!(
-            data.sessions.len(),
-            1,
-            "仅保留含匹配人格消息的会话（无消息会话不计入）"
-        );
-        assert!(
-            data.sessions[0]
-                .messages
-                .iter()
-                .all(|m| m.persona_uid.as_deref() == Some("char-0001")),
-            "过滤后的会话应只含目标人格相关数据"
-        );
-        let l1 = data.l1_memories.expect("指定人格时应装配 L1 段");
-        assert_eq!(l1.len(), 1);
-        assert_eq!(l1[0].summary, "工作压力摘要");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 分页：offset / limit 作用于过滤后的会话集合；总数仍为过滤前口径。
-    #[tokio::test]
-    async fn collect_pages_filtered_sessions() {
-        let (engine, storage, dir) = engine_with_db("export-page").await;
-        seed_persona(&storage, "char-0001").await;
-        seed_session_with_messages(&storage, "char-0001", 1, 1_000).await;
-        seed_session_with_messages(&storage, "char-0001", 1, 2_000).await;
-        seed_session_with_messages(&storage, "char-0001", 1, 3_000).await;
-
-        let data = engine
-            .export_sessions(ExportDataRequest {
-                persona: None,
-                limit: Some(1),
-                offset: Some(1),
-            })
-            .await
-            .expect("装配应成功");
-        assert_eq!(data.total_sessions, 3, "总数不随分页变化");
-        assert_eq!(data.sessions.len(), 1, "offset 1 + limit 1 应只余一条");
-
-        // 无人格指定：不带 L1 段
-        assert!(data.l1_memories.is_none());
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-}
+mod tests;

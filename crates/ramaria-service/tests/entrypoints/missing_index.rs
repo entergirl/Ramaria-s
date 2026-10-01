@@ -1,10 +1,10 @@
-//! crates/ramaria-service/tests/entrypoints/missing_index.rs - 缺索引版本自愈用例
+//! crates/ramaria-service/tests/entrypoints/missing_index.rs - 索引未构建自愈用例
 //!
 //! 设计特点:
-//! - 构造"缺键库"（`schema_meta` 中 `index_version` 键删除）：缺键按未构建（0）判定，
-//!   `needs_indexing = true` → 状态为 `Indexing`
-//! - 覆盖两条入口自愈路径：启动路径（`ensure_index_loaded` + 刷新状态）与
-//!   CLI 重建路径（`rebuild_index` + 刷新状态）；两者均写回索引版本 1
+//! - 新库首启：migration 后 `index_version` 为未构建（0）→ `needs_indexing = true` →
+//!   状态为 `Indexing`，经一次真实构建写回 1 后推进 `Ready`
+//! - 缺键库自愈：`schema_meta` 中 `index_version` 键删除后同样按未构建（0）判定，
+//!   覆盖 CLI 重建路径（`rebuild_index` + 刷新状态）
 //! - 无嵌入环境验证降级：重建不阻塞，状态推进到 `Degraded`
 
 use std::sync::Arc;
@@ -70,37 +70,23 @@ async fn missing_index_version_self_heals_on_startup_flow() {
         .await
         .expect("后端配置应写入成功");
 
-    // 正常库（migration 预置索引版本）：不判待构建
-    let before = engine.check_setup_status().await.expect("诊断应成功");
-    assert!(
-        !before.needs_indexing,
-        "migration 预置索引版本时不应判待构建（实际 {before:?}）"
-    );
-
-    // 构造缺键库
-    delete_schema_meta_key(&db, "index_version")
-        .await
-        .expect("删除索引版本键应成功");
-
+    // 新库迁移后索引版本为 0（未构建）：首启即判定待构建
     let status = engine.check_setup_status().await.expect("诊断应成功");
     assert!(status.backend_configured, "后端配置应已就绪");
     assert!(status.model_selected, "本地 provider 模型选择应视为完成");
-    assert!(
-        status.needs_indexing,
-        "缺键应按未构建判定（needs_indexing=true）"
-    );
+    assert!(status.needs_indexing, "新库迁移后索引版本为 0，应判待构建");
     assert!(status.embedding_available, "确定性嵌入应判定可用");
     assert_eq!(
         engine.refresh_setup_state().await.expect("刷新状态应成功"),
         AppState::Indexing,
-        "缺键库刷新后状态应为 Indexing"
+        "新库首启刷新后状态应为 Indexing"
     );
 
     // ---- 启动自愈：Indexing → 一次构建 + 刷新状态 ----
     let built = engine
         .ensure_index_loaded()
         .await
-        .expect("缺键库启动自愈应完成构建");
+        .expect("新库首启应完成一次构建");
     assert!(built, "索引此前未加载，首次调用应完成构建");
     assert_eq!(
         engine.refresh_setup_state().await.expect("刷新状态应成功"),

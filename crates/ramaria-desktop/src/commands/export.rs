@@ -2,39 +2,15 @@
 //!
 //! 设计特点:
 //! - export_sessions_json / export_sessions_markdown: 导出对话数据为文件
-//! - 数据装配委托服务层导出用例（会话集合 + 消息），本模块负责 JSON / Markdown
-//!   渲染与文件写出（两入口渲染结构不同，渲染属入口能力）
+//! - 数据装配与载荷渲染均委托服务层（与 CLI 同源，JSON / Markdown 结构逐字段一致）
 //! - 使用 Tauri dialog 选择保存路径（前端调用 open/save dialog 后传入路径）
-//! - JSON 格式：结构化 sessions → messages → L1 记忆
-//! - Markdown 格式：人类可读的对话记录
+//! - Markdown 无可导出会话时返回错误且不写文件
 //! - 导出路径安全校验：canonicalize + 白名单 + 符号链接拒绝，复用 path_guard 模块
 
 use crate::DesktopState;
-use ramaria_service::ExportDataRequest;
-use serde::Serialize;
+use ramaria_service::{ExportData, ExportDataRequest};
+use std::path::Path;
 use tauri::State;
-
-// =========================================================
-// 导出数据结构
-// =========================================================
-
-/// 导出用会话结构。
-#[derive(Debug, Clone, Serialize)]
-struct ExportSession {
-    id: String,
-    started_at: i64,
-    ended_at: Option<i64>,
-    messages: Vec<ExportMessage>,
-}
-
-/// 导出用消息结构。
-#[derive(Debug, Clone, Serialize)]
-struct ExportMessage {
-    role: String,
-    content: String,
-    persona_uid: Option<String>,
-    created_at: i64,
-}
 
 // =========================================================
 // export_sessions_json — 导出 JSON 格式
@@ -49,7 +25,7 @@ struct ExportMessage {
 /// - 导出文件的绝对路径
 ///
 /// 说明:
-/// - 导出结构：sessions[] 含 messages[]，每消息含 role/content/persona_uid/created_at
+/// - 文件内容由服务层渲染：`ramaria_export` 信封 + 版本 + 会话 / 消息字段（与 CLI 同结构）
 /// - 路径安全检查：三层防御（canonicalize + 白名单 + 符号链接拒绝），复用 path_guard 模块
 #[tauri::command]
 #[tracing::instrument(skip(state, output_path))]
@@ -66,33 +42,9 @@ pub async fn export_sessions_json(
         .await
         .map_err(|e| crate::commands::service_error_message(&e, "查询导出数据失败"))?;
 
-    let mut export_sessions: Vec<ExportSession> = Vec::with_capacity(data.sessions.len());
-    for entry in &data.sessions {
-        let export_msgs: Vec<ExportMessage> = entry
-            .messages
-            .iter()
-            .map(|m| ExportMessage {
-                role: m.role.as_str().to_string(),
-                content: m.content.clone(),
-                persona_uid: m.persona_uid.clone(),
-                created_at: m.created_at,
-            })
-            .collect();
+    write_export_json_file(&canonical, &data)?;
 
-        export_sessions.push(ExportSession {
-            id: entry.session.id.to_string(),
-            started_at: entry.session.started_at,
-            ended_at: entry.session.ended_at,
-            messages: export_msgs,
-        });
-    }
-
-    let json = serde_json::to_string_pretty(&export_sessions)
-        .map_err(|e| format!("序列化 JSON 失败: {}", e))?;
-
-    std::fs::write(&canonical, &json).map_err(|e| format!("写入文件失败: {}", e))?;
-
-    let count = export_sessions.len();
+    let count = data.sessions.len();
     tracing::info!(
         file = %crate::path_guard::redact_path_label(&canonical),
         session_count = count,
@@ -114,7 +66,8 @@ pub async fn export_sessions_json(
 /// - 导出文件的绝对路径
 ///
 /// 说明:
-/// - 按会话分组，消息按角色标注（👤 用户 / 🤖 助手 / 🔧 系统）
+/// - 文件内容由服务层渲染（按会话分组，角色标签与 CLI 一致；跳过无消息会话）
+/// - 全部会话无消息时不写文件，返回"没有可导出的会话数据"
 /// - 路径安全检查：三层防御（canonicalize + 白名单 + 符号链接拒绝），复用 path_guard 模块
 #[tauri::command]
 #[tracing::instrument(skip(state, output_path))]
@@ -131,38 +84,7 @@ pub async fn export_sessions_markdown(
         .await
         .map_err(|e| crate::commands::service_error_message(&e, "查询导出数据失败"))?;
 
-    let mut md = String::new();
-    md.push_str("# Ramaria 对话导出\n\n");
-    md.push_str(&format!(
-        "导出时间: {}\n\n",
-        chrono::Local::now().format("%Y-%m-%d %H:%M")
-    ));
-    md.push_str("---\n\n");
-
-    for (i, entry) in data.sessions.iter().enumerate() {
-        let start_time = chrono::DateTime::from_timestamp_millis(entry.session.started_at)
-            .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-            .unwrap_or_else(|| "未知时间".to_string());
-
-        md.push_str(&format!("## 会话 {} — {}\n\n", i + 1, start_time));
-
-        for msg in &entry.messages {
-            let role_icon = match msg.role {
-                ramaria_core::types::MessageRole::User => "👤 **用户**",
-                ramaria_core::types::MessageRole::Assistant => "🤖 **助手**",
-                ramaria_core::types::MessageRole::System => "🔧 **系统**",
-                ramaria_core::types::MessageRole::Tool => "🛠 **工具**",
-                _ => "❓ **未知**",
-            };
-            md.push_str(&format!("{}\n\n", role_icon));
-            md.push_str(&msg.content);
-            md.push_str("\n\n---\n\n");
-        }
-
-        md.push('\n');
-    }
-
-    std::fs::write(&canonical, &md).map_err(|e| format!("写入文件失败: {}", e))?;
+    write_export_markdown_file(&canonical, &data)?;
 
     let count = data.sessions.len();
     tracing::info!(
@@ -171,4 +93,143 @@ pub async fn export_sessions_markdown(
         "Markdown 导出完成"
     );
     Ok(canonical.to_string_lossy().to_string())
+}
+
+// =========================================================
+// 文件写出（服务层渲染 → 落盘）
+// =========================================================
+
+/// 渲染并写出 JSON 导出文件（桌面不脱敏；载荷与 CLI 同源）。
+fn write_export_json_file(canonical: &Path, data: &ExportData) -> Result<(), String> {
+    let json = ramaria_service::render_sessions_json(data, false);
+    std::fs::write(canonical, &json).map_err(|e| format!("写入文件失败: {}", e))
+}
+
+/// 渲染并写出 Markdown 导出文件；无可导出会话时返回错误且不写文件。
+fn write_export_markdown_file(canonical: &Path, data: &ExportData) -> Result<(), String> {
+    match ramaria_service::render_sessions_markdown(data, false) {
+        Some(markdown) => {
+            std::fs::write(canonical, markdown).map_err(|e| format!("写入文件失败: {}", e))
+        }
+        None => Err("没有可导出的会话数据".to_string()),
+    }
+}
+
+// =========================================================
+// 单元测试
+// =========================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ramaria_core::types::{Message, MessageRole, MessageSource, Session};
+    use ramaria_service::ExportSessionData;
+    use uuid::Uuid;
+
+    /// 固定时间样例：2024-06-10 08:00 UTC。
+    const T0: i64 = 1_718_006_400_000;
+
+    /// 系统临时目录下的唯一测试文件路径。
+    fn temp_export_file(tag: &str, ext: &str) -> std::path::PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!(
+            "ramaria_export_{tag}_{}_{stamp}.{ext}",
+            std::process::id()
+        ))
+    }
+
+    /// 构造一个含单条用户消息的导出样例。
+    fn sample_data() -> ExportData {
+        let session_id =
+            Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("固定 UUID");
+        let mut message = Message::new(
+            session_id,
+            MessageRole::User,
+            "你好".to_string(),
+            MessageSource::Local,
+        );
+        message.created_at = T0;
+        ExportData {
+            total_sessions: 1,
+            sessions: vec![ExportSessionData {
+                session: Session {
+                    id: session_id,
+                    started_at: T0,
+                    ended_at: None,
+                    persona_uid: None,
+                    channel: "local".to_string(),
+                    external_ref: None,
+                },
+                messages: vec![message],
+            }],
+            l1_persona: None,
+            l1_memories: None,
+        }
+    }
+
+    /// JSON 写出内容与服务层渲染逐字段一致（仅 exported_at 为渲染时刻需归一）。
+    #[test]
+    fn json_export_file_matches_service_render() {
+        let path = temp_export_file("json", "json");
+        let data = sample_data();
+        write_export_json_file(&path, &data).expect("写出应成功");
+
+        let mut written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("读取应成功"))
+                .expect("写出内容应为合法 JSON");
+        let mut expected: serde_json::Value =
+            serde_json::from_str(&ramaria_service::render_sessions_json(&data, false))
+                .expect("渲染结果应为合法 JSON");
+        written["ramaria_export"]["exported_at"] = serde_json::json!("<normalized>");
+        expected["ramaria_export"]["exported_at"] = serde_json::json!("<normalized>");
+
+        assert_eq!(written, expected, "桌面输出应与服务层渲染逐字段一致");
+        assert_eq!(
+            written["ramaria_export"]["version"],
+            ramaria_service::EXPORT_FORMAT_VERSION
+        );
+        assert_eq!(
+            written["ramaria_export"]["sessions"][0]["messages"][0]["content"],
+            "你好"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Markdown 写出内容与服务层渲染一致（导出时间行取渲染时刻，比对时剔除）。
+    #[test]
+    fn markdown_export_file_matches_service_render() {
+        let path = temp_export_file("markdown", "md");
+        let data = sample_data();
+        write_export_markdown_file(&path, &data).expect("写出应成功");
+
+        let written = std::fs::read_to_string(&path).expect("读取应成功");
+        let expected = ramaria_service::render_sessions_markdown(&data, false).expect("应可导出");
+        let strip_export_time = |text: &str| {
+            text.lines()
+                .filter(|line| !line.starts_with("导出时间: "))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert_eq!(strip_export_time(&written), strip_export_time(&expected));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 全部会话无消息：Markdown 返回错误且不写文件。
+    #[test]
+    fn markdown_export_empty_returns_err_without_file() {
+        let path = temp_export_file("markdown-empty", "md");
+        let mut data = sample_data();
+        for entry in &mut data.sessions {
+            entry.messages.clear();
+        }
+
+        let error = write_export_markdown_file(&path, &data).expect_err("无可导出会话应报错");
+        assert_eq!(error, "没有可导出的会话数据");
+        assert!(!path.exists(), "失败时不应写文件");
+    }
 }

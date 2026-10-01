@@ -26,12 +26,12 @@ pub const DEFAULT_QUESTIONS_PER_DIM: usize = 10;
 pub(super) const DEFAULT_PERSONA: &str = "char-0001";
 
 // =========================================================
-// 消融档位 Profile（M5a，D-V17-015 / 技术报告 §16.3）
+// 消融档位 Profile
 // =========================================================
 
 /// 消融档位 Profile 名称集合（数据集 `variants[].ablation` 可取值）。
 ///
-/// 语义（技术报告 §16.3，口径与 D-V17-010 / D-V20-006 一致）:
+/// 语义:
 /// - `B0`: 基线 A——无记忆注入（纯角色 + 当前对话）。
 /// - `B1`: 基线 B——压缩视图注入（仅摘要/转述 RAG，无原文无行为无知识）。
 /// - `F0`: 完整体系（行为+知识+表达+脉络全开，等同 ablation=None）。
@@ -59,7 +59,7 @@ pub const ABLATION_PROFILE_NAMES: [&str; 15] = [
 ];
 
 // =========================================================
-// 消融对照语义（M0 冻结，M2 实装）
+// 消融对照语义
 // =========================================================
 // 消融档位回答三类不同的问题，必须区分口径:
 //
@@ -67,7 +67,7 @@ pub const ABLATION_PROFILE_NAMES: [&str; 15] = [
 //    - 定义: B1 基座中"去掉 RAG 压缩摘要"，只保留目标专属层单独注入。
 //    - 闸门: memory_rag=false，仅目标专属层闸门为 true。
 //    - 回答问题: "目标层能否独立替代 RAG 摘要基座"，测的是单层替代能力。
-//    - 局限: J 消融证明该口径测不出"在 RAG 之上叠加一层的净增量"。
+//    - 局限: 该口径测不出"在 RAG 之上叠加一层的净增量"。
 //
 // 2) 净增量对照（`I_behavior` / `I_knowledge` / `I_expression` / `I_narrative`）:
 //    - 定义: B1 压缩摘要基座 + 仅叠加一个目标专属层，其余专属层全部关闭。
@@ -86,12 +86,10 @@ pub const ABLATION_PROFILE_NAMES: [&str; 15] = [
 // - 脉络层: narrative + bridge
 // - RAG 摘要基座: memory_rag
 //
-// 关系表与统计检验要点见 `docs/dev-2.0/ablation-profile-mapping.md`。
-
 /// 消融档位 Profile。
 ///
 /// 职责:
-/// - 把技术报告 §16.3 / `ablation-profile-mapping.md` 的消融档位映射为
+/// - 把消融档位映射为
 ///   `RamariaConfig.injection`（注入层闸门）覆盖集，使 B0/B1/F0/F1~F4/S_*/I_*
 ///   在单次 `send_message` 内真实关闭/保留对应注入层。
 /// - `F0` 覆盖集为空（全开），与 `ablation=None` 行为完全一致（向后兼容）。
@@ -198,7 +196,7 @@ impl AblationProfile {
     /// 把本档位映射为 `RamariaConfig.injection`（注入层闸门）覆盖集。
     ///
     /// 说明:
-    /// - `F0`/`ablation=None` → 全开（与 M1 行为完全一致，回归红线）。
+    /// - `F0`/`ablation=None` → 全开（行为与未启用消融完全一致，兼容性要求）。
     /// - `F1`~`F4` → 在全开基础上关闭对应层。
     /// - `B0`/`B1`/`S_*`/`I_*` → 显式设置各闸门：
     ///   - `B1` = 仅 RAG 摘要基座（memory_rag）；
@@ -298,7 +296,7 @@ impl AblationProfile {
 /// 说明:
 /// - utt 三参数取定稿基准（θ_gap=10 / 条数=80 / top_k=3，与 `baseline` 档位一致），
 ///   消融只改变记忆注入层（`ablation` 字段），不改变 utt 切分。
-/// - 供评估数据集构建方把消融档位并入数据集 variants；M1 默认数据集不包含。
+/// - 供评估数据集构建方把消融档位并入数据集 variants；默认构建的数据集不包含。
 pub fn ablation_variants() -> Vec<ProbeVariant> {
     ABLATION_PROFILE_NAMES
         .iter()
@@ -439,14 +437,14 @@ impl VariantOverrides {
     }
 }
 
-/// 参数档位（代表配对：baseline 为 v3.1 初值，其余每次只动一个参数）。
+/// 参数档位（代表配对：baseline 取定稿基准值，其余每次只动一个参数）。
 ///
 /// 字段与 `[utt]` 配置组一一对应（theta_gap_minutes / max_msgs_per_block / retrieve_top_k）。
 ///
-/// M5a 消融扩展:
+/// 消融扩展:
 /// - `ablation`: 可选消融档位 Profile 名称（`AblationProfile`）。
-///   `None`（默认/旧数据集）→ 行为与 M1 完全一致（utr 三参数覆盖，无层闸门）。
-///   序列化时省略（向后兼容：M1 旧数据集文件不受影响）。
+///   `None`（默认/旧数据集）→ 不应用层闸门，仅做 utt 三参数覆盖（行为与未启用消融一致）。
+///   序列化时省略（向后兼容：旧数据集文件不受影响）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProbeVariant {
     pub id: String,
@@ -538,11 +536,11 @@ pub struct ProbeRepeatMeta {
 
 /// 单档位跨多次运行的逐题统计。
 ///
-/// 说明（缺口 A 第一步，M1 报告 §6 登记项）:
+/// 说明:
 /// - `per_item`: 每题跨 N 次运行的字符数/耗时均值 ± 置信区间（累积统计摘要）。
 /// - `rounds`: 该档位在**每一轮**运行时的完整结果明细（`ProbeVariantResult`，逐轮全量
 ///   reply 保留于此）。供 evaluate 对"每一轮 reply"分别语义评分后，跨 N 轮聚合
-///   fact_score 的均值 ± 置信区间（M5-005 配对统计口径），不再只评最后一轮。
+///   fact_score 的均值 ± 置信区间（配对统计口径），不再只评最后一轮。
 /// - 向后兼容: `rounds` 序列化时为空则省略（`skip_serializing_if`）；缺失（`serde_default`）
 ///   反序列化时为空，旧实验文件（无逐轮明细）仍可正常读取（其 repeat 块无逐轮 reply，
 ///   对应的逐轮评分聚合不可用，属预期降级）。
@@ -592,7 +590,7 @@ pub struct ProbeVariantResult {
 
 /// 档位参数（结果中的可读形态，与 ProbeVariant 字段一致）。
 ///
-/// M5a 消融扩展: `ablation` 记录该档位使用的消融 Profile（可选；None 表示无消融）。
+/// 消融扩展: `ablation` 记录该档位使用的消融 Profile（可选；None 表示无消融）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct VariantParams {
     pub theta_gap_minutes: u32,
@@ -615,7 +613,7 @@ pub struct ProbeRunItem {
     pub error: Option<String>,
 }
 
-/// 单题可测指标（探针阶段：长度与耗时；语义质量由 v1.6 T2 自动评分）。
+/// 单题可测指标（长度与耗时；语义质量由自动评分补足）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProbeMetrics {
     /// 回复字符数
@@ -684,7 +682,7 @@ pub enum ProbeCmd {
         calibration: Option<PathBuf>,
         /// 报告输出文件（`-` = stdout；.md 为 markdown、.json 为 JSON）
         output: Option<String>,
-        /// 消融对比报告模式（M5a T-004）
+        /// 消融对比报告模式
         ablation: bool,
         json: bool,
     },

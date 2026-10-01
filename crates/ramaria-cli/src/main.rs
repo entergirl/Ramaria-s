@@ -5,6 +5,7 @@
 //! - 全局 --json：统一信封 `{"ok":true,"data":…}` / `{"ok":false,"error":{"code":…,"message":"…"}}`
 //! - stdout 只输出数据；状态/提示/警告走 stderr（ui::info/success/warn 已改 eprintln）
 //! - exit code 约定：0 成功 / 2 参数错(clap) / 3 LLM 或后端不可用 / 4 业务校验失败
+//! - 错误文案经服务层统一映射：业务类原文直出，技术类 `{场景}: {类别标题}: {原因}`（json 与文本同源）
 //! - `ramaria help` 按 对话/记忆/数据/管理/高级 分组（subcommand_help_heading）
 //! - blocks 为 canonical 命令名，utt 保留为 alias
 //! - Engine 统一初始化（DB → 引擎装配 → 配置双写 → 后端对齐）
@@ -138,9 +139,13 @@ enum Commands {
         #[arg(long)]
         persona: Option<String>,
 
-        /// 输出文件路径（默认 stdout，`-` 表示 stdout）
+        /// 输出文件路径（缺省 exports/export_{timestamp}.{ext}；`-` = stdout）
         #[arg(short, long)]
         output: Option<String>,
+
+        /// 脱敏输出：消息正文与 L1 摘要替换为 <N chars>
+        #[arg(long)]
+        redact: bool,
     },
 
     /// 会话管理 [管理]
@@ -177,6 +182,10 @@ enum Commands {
         /// 输出文件路径（默认: ramaria-diagnostics-{timestamp}.zip）
         #[arg(short, long)]
         output: Option<String>,
+
+        /// 诊断导出始终脱敏；该开关为脚本统一传参兼容（幂等）
+        #[arg(long)]
+        redact: bool,
     },
 
     /// 应用状态探活（agent 使用：状态/配置摘要/DB 路径）[高级]
@@ -199,7 +208,7 @@ enum McpCmd {
     Serve,
 }
 
-/// 行为规则管理子命令（§2.9 词表：list/show/import/edit/enable/disable/delete/evidence）。
+/// 行为规则管理子命令（动词词表：list/show/import/edit/enable/disable/delete/evidence）。
 #[derive(Subcommand)]
 enum RuleCmd {
     /// 列出行为规则（按 persona 筛选）
@@ -383,14 +392,14 @@ enum BlocksCmd {
 /// 探针子命令。
 #[derive(Subcommand)]
 enum ProbeArgs {
-    /// 构建测试集（原 `probe dataset`，动词化后保留 alias）
+    /// 构建测试集（`dataset` 保留为 alias）
     #[command(visible_alias = "dataset")]
     Build {
         /// 目标 persona_uid（默认自动选择白名单内角色类 persona，兜底 char-0001）
         #[arg(long)]
         persona: Option<String>,
 
-        /// 每维题数（默认 10，3 维共 30 题；v1.7 正式评估可扩大至 ≥30 题）
+        /// 每维题数（默认 10，3 维共 30 题；正式评估可扩大至 ≥30 题）
         #[arg(long, default_value_t = ramaria_cli::commands::probe::DEFAULT_QUESTIONS_PER_DIM)]
         questions_per_dim: usize,
 
@@ -480,7 +489,7 @@ enum ProbeArgs {
         #[arg(long)]
         output: Option<String>,
 
-        /// 消融对比报告模式（M5a）：自动识别 F0 基线与 F1~F4（及 S 组 vs B1），
+        /// 消融对比报告模式：自动识别 F0 基线与 F1~F4（及 S 组 vs B1），
         /// 按题目配对 Wilcoxon + Cohen's d + 95% CI + FDR 校正输出统计判定；
         /// 需要 --evaluation 评分数值文件。
         #[arg(long)]
@@ -751,19 +760,58 @@ fn exit_code_for_error(err: &anyhow::Error) -> i32 {
     1
 }
 
+/// 入口错误文案的固定兜底场景（错误链中没有 anyhow 上下文时使用）。
+const FALLBACK_ERROR_SCENE: &str = "命令执行失败";
+
+/// 在 anyhow 错误链中定位服务层统一错误。
+fn find_ramaria_error(err: &anyhow::Error) -> Option<&RamariaError> {
+    err.chain().find_map(|e| e.downcast_ref::<RamariaError>())
+}
+
+/// 错误链最外层上下文文本（链首即服务层错误本身时视为无上下文）。
+fn outermost_context(err: &anyhow::Error) -> Option<String> {
+    let first = err.chain().next()?;
+    if first.downcast_ref::<RamariaError>().is_some() {
+        return None;
+    }
+    Some(first.to_string())
+}
+
+/// 服务层错误的入口统一文案；`None` 表示错误链中没有服务层错误（走纯 anyhow 渲染）。
+///
+/// 场景取 anyhow 链最外层上下文文本，缺省用 [`FALLBACK_ERROR_SCENE`]；
+/// 业务类（validation / privacy）由映射函数原文直出，场景不参与拼接。
+fn mapped_error_message(err: &anyhow::Error) -> Option<(&RamariaError, String)> {
+    let ramaria_err = find_ramaria_error(err)?;
+    let scene = outermost_context(err).unwrap_or_else(|| FALLBACK_ERROR_SCENE.to_string());
+    Some((
+        ramaria_err,
+        ramaria_service::entry_error_message(ramaria_err, &scene),
+    ))
+}
+
 /// 按 exit code 约定输出错误并退出进程。
 ///
 /// json 模式下先向 stdout 输出错误信封（`{"ok":false,"error":{...}}`），
 /// 文本错误始终走 stderr，随后以约定 exit code 退出。
+///
+/// 说明:
+/// - 错误链中存在服务层错误时，json 信封与文本模式共用同一条统一映射文案
+///   （业务类原文直出；技术类 `{场景}: {类别标题}: {原因}`）；
+/// - 纯 anyhow 错误维持原渲染（`{err:#}` 单行链）。
 fn exit_with_error(err: &anyhow::Error, json_mode: bool) -> ! {
     let code = exit_code_for_error(err);
-    if json_mode {
-        // 错误信封走 stdout（agent 直接取 stdout 即纯数据，含错误）
-        ramaria_cli::json::emit_err(code, &format!("{err:#}"));
+
+    if let Some((ramaria_err, message)) = mapped_error_message(err) {
+        if json_mode {
+            // 错误信封走 stdout（agent 直接取 stdout 即纯数据，含错误）
+            ramaria_cli::json::emit_err(code, &message);
+        }
+        ui::fatal_message(&message, ramaria_err, code);
     }
-    // 检查是否有 RamariaError source
-    if let Some(ramaria_err) = err.downcast_ref::<RamariaError>() {
-        ui::fatal(ramaria_err, code);
+
+    if json_mode {
+        ramaria_cli::json::emit_err(code, &format!("{err:#}"));
     }
     ui::fatal_anyhow(err, code);
 }
@@ -1076,11 +1124,13 @@ async fn dispatch(engine: &Arc<Engine>, cli: Cli) -> anyhow::Result<()> {
             format,
             persona,
             output,
+            redact,
         } => {
             let args = commands::export::ExportArgs {
                 format,
                 persona,
                 output,
+                redact,
                 json: cli.json,
             };
             commands::export::run(engine, args).await?;
@@ -1120,8 +1170,8 @@ async fn dispatch(engine: &Arc<Engine>, cli: Cli) -> anyhow::Result<()> {
                 commands::import_cmd::run(engine, args).await?;
             }
         },
-        Commands::Diagnostics { output } => {
-            let args = commands::diagnostics::DiagnosticsArgs { output };
+        Commands::Diagnostics { output, redact } => {
+            let args = commands::diagnostics::DiagnosticsArgs { output, redact };
             commands::diagnostics::run(engine, args, cli.json).await?;
         }
         Commands::Status => {
@@ -1333,7 +1383,7 @@ mod tests {
         }
     }
 
-    /// `probe report --ablation` 可解析（M5a 消融对比报告模式）。
+    /// `probe report --ablation` 可解析（消融对比报告模式）。
     #[test]
     fn probe_report_ablation_flag_parses() {
         let cli = Cli::try_parse_from([
@@ -1744,5 +1794,49 @@ mod tests {
         // 对照：降级为纯字符串的错误无法分类 → 退化为 1（修复前的缺陷形态）
         let degraded = anyhow::anyhow!("L1 摘要生成失败: llm 不可用");
         assert_eq!(exit_code_for_error(&degraded), 1);
+    }
+
+    /// 入口统一文案：业务类原文直出；技术类场景 + 中文类别标题 + 原因；无上下文用兜底场景。
+    #[test]
+    fn entry_message_maps_through_context_chain() {
+        // validation：被 anyhow 上下文包裹后，用户可见消息仍是业务原文（exit 4 路径）
+        let validation = anyhow::Error::from(RamariaError::validation("会话不存在: abc"))
+            .context("查询会话失败");
+        let (_, message) = mapped_error_message(&validation).expect("应识别服务层错误");
+        assert_eq!(message, "会话不存在: abc");
+
+        // privacy：同业务类，原文直出
+        let privacy =
+            anyhow::Error::from(RamariaError::privacy("请先完成隐私确认")).context("生成回复失败");
+        let (_, message) = mapped_error_message(&privacy).expect("应识别服务层错误");
+        assert_eq!(message, "请先完成隐私确认");
+
+        // storage + 上下文：场景 + 中文类别标题 + 原因（不复现英文类别串）
+        let storage =
+            anyhow::Error::from(RamariaError::storage("磁盘只读")).context("索引重建失败");
+        let (_, message) = mapped_error_message(&storage).expect("应识别服务层错误");
+        assert_eq!(message, "索引重建失败: 数据库错误: 磁盘只读");
+        assert!(
+            !message.contains("storage error"),
+            "不应复现英文类别串: {message}"
+        );
+
+        // 多层上下文：场景取最外层上下文文本
+        let nested = anyhow::Error::from(RamariaError::index("索引损坏"))
+            .context("调用方标记")
+            .context("命令层");
+        let (_, message) = mapped_error_message(&nested).expect("应识别服务层错误");
+        assert_eq!(message, "命令层: 索引错误: 索引损坏");
+
+        // 无 anyhow 上下文：退化为固定兜底场景
+        let bare = anyhow::Error::from(RamariaError::llm("连接超时"));
+        let (_, message) = mapped_error_message(&bare).expect("应识别服务层错误");
+        assert_eq!(
+            message,
+            format!("{FALLBACK_ERROR_SCENE}: LLM 服务错误: 连接超时")
+        );
+
+        // 纯 anyhow 错误：不进入统一映射（维持现状渲染路径）
+        assert!(mapped_error_message(&anyhow::anyhow!("读取配置失败: boom")).is_none());
     }
 }

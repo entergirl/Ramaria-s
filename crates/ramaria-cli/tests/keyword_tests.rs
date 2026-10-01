@@ -124,6 +124,16 @@ async fn entry_texts(pool: &SqlitePool) -> Vec<String> {
         .collect()
 }
 
+/// 直接向关键词镜像注入 token 计数（模拟封存链路的内存镜像累积，不落库）。
+fn inject_mirror_tokens(engine: &Engine, texts: &[&str], times: usize) {
+    let tokens: Vec<KeywordToken> = texts.iter().filter_map(|t| KeywordToken::new(t)).collect();
+    let mirror = engine.keyword_mirror();
+    let mut guard = ramaria_core::lock::write_recover(&*mirror, "keyword.tests.mirror");
+    for _ in 0..times {
+        guard.upsert_pool_tokens(&tokens, 1_700_000_000_000);
+    }
+}
+
 // =========================================================
 // list / seed / show（函数级）
 // =========================================================
@@ -465,6 +475,25 @@ async fn keyword_alias_reject_nonexistent_is_validation_error() {
     .await;
     let err = result.expect_err("不存在词条 reject 应报错");
     assert_validation(&err);
+}
+
+/// alias list 触发建议生成：镜像使用量经列表路径落库为 pending（生成 → 列表可用）。
+#[tokio::test]
+async fn keyword_alias_list_generates_pending_from_mirror() {
+    let (engine, pool) = setup_engine().await;
+    // 镜像：工作压力 4 次、职场压力 3 次（未持久化词，使用量决定合并方向）
+    inject_mirror_tokens(&engine, &["工作压力"], 4);
+    inject_mirror_tokens(&engine, &["职场压力"], 3);
+
+    // alias list 输出前 best-effort 生成待确认项
+    run(&engine, KeywordCmd::Alias(AliasAction::List), true, false)
+        .await
+        .expect("alias list --json 应成功");
+
+    let pending = kw_repo::list_pending_aliases(&pool).await.unwrap();
+    assert_eq!(pending.len(), 1, "列表路径应生成待确认项");
+    assert_eq!(pending[0].alias_keyword, "职场压力");
+    assert_eq!(pending[0].canonical_keyword, "工作压力");
 }
 
 // =========================================================

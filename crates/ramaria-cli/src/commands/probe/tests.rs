@@ -275,7 +275,7 @@ fn aggregate_repeat_stats_pairs_by_variant_and_item() {
     // item2: chars=[20,24] mean=22
     let it2 = &stats[0].per_item[1];
     assert!((it2.reply_chars.mean - 22.0).abs() < 1e-6);
-    // 缺口 A：rounds 保留该档位每一轮的完整结果明细（逐轮全量 reply）
+    // rounds 保留该档位每一轮的完整结果明细（逐轮全量 reply）
     assert_eq!(stats[0].rounds.len(), 2, "应保留两轮的完整结果");
     // round1 item chars=10 / round2 item chars=14
     assert_eq!(stats[0].rounds[0].runs[0].metrics.reply_chars, 10);
@@ -284,7 +284,7 @@ fn aggregate_repeat_stats_pairs_by_variant_and_item() {
     assert_eq!(stats[0].rounds[1].runs.len(), 2);
 }
 
-/// 缺口 A 向后兼容：旧 repeat 聚合 JSON 无 `rounds` 字段时反序列化为空，
+/// 向后兼容：旧 repeat 聚合 JSON 无 `rounds` 字段时反序列化为空，
 /// 序列化时空 `rounds` 被省略（不破坏旧文件读/写与契约）。
 #[test]
 fn repeat_rounds_serde_roundtrip_and_backcompat() {
@@ -405,7 +405,7 @@ fn load_golden_references_collects_fact_and_tone() {
     );
 }
 
-/// 本地 judge 判定（D-V20-006 隐私口径）：本地 LM Studio（localhost:1234）
+/// 本地 judge 判定（隐私口径）：本地 LM Studio（localhost:1234）
 /// 与本地 Ollama（localhost:11434）均为可用 judge；线上 DeepSeek/OpenAI 一律拒绝。
 #[test]
 fn is_local_backend_only_accepts_local_providers() {
@@ -431,7 +431,7 @@ fn is_local_backend_only_accepts_local_providers() {
     assert!(!is_local_backend(P::LmStudio, ""));
 }
 
-/// 语气维 judge 口径（M8 复核）：必须显式声明"不按长短判分"，且 few-shot 给出
+/// 语气维 judge 口径：必须显式声明"不按长短判分"，且 few-shot 给出
 /// "参考很短、候选同样简短 → 高分"的正锚点与"书面助手腔冗长候选 → 低分"的负锚点，
 /// 防止"越长分越高"的长度偏置回退（该偏置实测使长度-分数相关 0.58~0.78）。
 #[test]
@@ -931,7 +931,7 @@ fn build_from_file_missing_is_err() {
 }
 
 // =========================================================
-// M5a 消融档位 Profile（D-V17-015 / 技术报告 §16.3）
+// 消融档位 Profile
 // =========================================================
 
 /// 全部 15 个名称可解析且往返一致；未知名称返回 None。
@@ -1126,7 +1126,7 @@ fn probe_variant_ablation_serde_backcompat() {
     let back: ProbeVariant = serde_json::from_str(&json).unwrap();
     assert_eq!(back.ablation.as_deref(), Some("F1"));
 
-    // ablation=None 序列化时省略该键（保持 M1 旧产物最小差异）。
+    // ablation=None 序列化时省略该键（保持旧产物最小差异）。
     let plain = ProbeVariant {
         ablation: None,
         ..v
@@ -1199,7 +1199,7 @@ fn ablation_f0_equivalent_to_none() {
 }
 
 // =========================================================
-// M5a emotion 第三维（T-V17-5a-002）
+// emotion 第三维
 // =========================================================
 
 /// 情感线索判定：负面/正面触发词命中；中性消息不命中。
@@ -1257,7 +1257,7 @@ fn emotion_rubric_neutral_situation() {
 }
 
 // =========================================================
-// M5a --repeat 逐轮评分聚合（T-V17-5a-003）
+// --repeat 逐轮评分聚合
 // =========================================================
 
 /// 构造一个含单条 fact 题的轮次结果。
@@ -1648,7 +1648,7 @@ async fn fact_norm_and_point_scores_reuse_old_weights() {
 }
 
 // =========================================================
-// M5a 消融对比报告统计（T-V17-5a-004）
+// 消融对比报告统计
 // =========================================================
 
 /// erf / 正态 CDF 关键值：cdf(0)=0.5，cdf(1.96)≈0.975。
@@ -1946,7 +1946,7 @@ fn build_ablation_report_i_group_marks_increment() {
     assert!(inn.significant);
 }
 
-/// 报告局限字段（D-V20-005 必出）：单 persona 局限 + 可用性标注。
+/// 报告局限字段（必出）：单 persona 局限 + 可用性标注。
 #[test]
 fn report_limitations_always_contain_external_validity_note() {
     let exp = ProbeExperiment {
@@ -1973,7 +1973,7 @@ fn report_limitations_always_contain_external_validity_note() {
 }
 
 // =========================================================
-// M2-005 辅助指标四件套（产物可复算近似）
+// 辅助指标四件套（产物可复算近似）
 // =========================================================
 
 /// 构造带 fact/emotion 明细与跨轮聚合的评分数值档位（辅助指标测试用）。
@@ -2192,7 +2192,7 @@ fn auxiliary_metrics_empty_variants_all_none() {
     assert!(!m.annotation.is_empty());
 }
 
-/// markdown 渲染快照断言（M2-006 验收：I/S 分栏 + 局限字段必出 + 辅助指标节）。
+/// markdown 渲染快照断言（I/S 分栏 + 局限字段必出 + 辅助指标节）。
 ///
 /// 构造一个带消融报告（含 I/S 行）与局限/辅助指标的 `ProbeReport`，
 /// 断言渲染文本包含三类对照小节、净增量/替代标注与局限声明节。

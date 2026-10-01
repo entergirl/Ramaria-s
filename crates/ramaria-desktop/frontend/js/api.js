@@ -2,7 +2,7 @@
  * js/api.js — Ramaria TauriBridge 上层通信封装
  *
  * 职责:
- * - 将全部 21 个 Tauri Command 封装为语义化的 API 方法
+ * - 封装各业务 Tauri Command 为语义化的 API 方法（不含托盘与文件对话框旁路）
  * - 统一错误包装：Rust 返回的字符串错误转换为 Error 对象，含中文友好消息
  * - 不操作 DOM，不管理状态（状态由 Store 管理）
  * - 所有方法返回 Promise，调用方可用 async/await 或 .then/.catch
@@ -200,17 +200,6 @@ var RamariaApi = (function () {
         return await _invoke('create_session', args, '创建会话');
     }
 
- /**
- * 删除会话及其关联消息。
- *
- * 参数:
- * - `sessionId`: 会话 UUID 字符串
- */
-    async function deleteSession(sessionId) {
-        _require(sessionId, '会话 ID');
-        return await _invoke('delete_session', { sessionId: sessionId }, '删除会话');
-    }
-
  // =========================================================
  // 3. 记忆查看 (memory)
  // =========================================================
@@ -250,7 +239,8 @@ var RamariaApi = (function () {
  * - `limit`: 可选，返回条数上限（默认 50，最大 200）
  *
  * 返回:
- * - [{ id, persona_uid, title, summary, keywords, valence, confidence, presentation, share, attitude, salience, created_at }]
+ * - [{ id, persona_uid, title, summary, keywords, valence, confidence, presentation, share, attitude, salience, created_at, start, end }]
+ *   `start` / `end`: 事件起止时间（Unix 毫秒）；`created_at` 为写入时间，展示时间列沿用 `created_at`
  */
     async function getL2Events(personaUid, limit) {
         var args = {};
@@ -259,24 +249,9 @@ var RamariaApi = (function () {
         return await _invoke('get_l2_events', args, '查询 L2 事件');
     }
 
- /**
- * 查询 L3 性格画像标签。
- *
- * 参数:
- * - `personaUid`: 可选，按人格过滤
- *
- * 返回:
- * - [{ id, persona_uid, layer, label, meaning, confidence, evidence, consistency, status, created_at }]
- */
-    async function getL3Traits(personaUid) {
-        var args = {};
-        if (personaUid) args.personaUid = personaUid;
-        return await _invoke('get_l3_traits', args, '查询 L3 性格标签');
-    }
-
-// =========================================================
-// L3 性格画像查询
-// =========================================================
+ // =========================================================
+ // L3 性格画像查询
+ // =========================================================
 
 /**
  * 查询指定人格的完整三层性格画像（base/primary/accent）。
@@ -536,16 +511,6 @@ var RamariaApi = (function () {
     }
 
  /**
- * 查询设置状态详情。
- *
- * 返回:
- * - { backend_configured, model_selected, needs_indexing, is_complete, missing_items, current_state }
- */
-    async function getSetupStatus() {
-        return await _invoke('get_setup_status', {}, '查询设置状态');
-    }
-
- /**
  * 刷新应用状态机。
  *
  * 返回:
@@ -796,18 +761,7 @@ var RamariaApi = (function () {
     }
 
 /**
- * 查询单条行为规则详情。
- *
- * 参数:
- * - `ruleId`: 规则 ID。
- */
-    async function getRule(ruleId) {
-        if (ruleId === undefined || ruleId === null) throw new Error('规则 ID 不能为空');
-        return await _invoke('get_rule', { ruleId: ruleId }, '查询规则详情');
-    }
-
-/**
- * 启用 / 禁用行为规则。
+* 启用 / 禁用行为规则。
  *
  * 参数:
  * - `ruleId`: 规则 ID。
@@ -1003,13 +957,11 @@ var RamariaApi = (function () {
             list: listSessions,
             get: getSession,
             create: createSession,
-            delete: deleteSession,
         },
         memory: {
             getPersonas: getPersonas,
             getL1: getL1Memories,
             getL2: getL2Events,
-            getL3: getL3Traits,
             getProfile: getPersonalityProfile,
             getEvidence: getTraitEvidence,
             getProfileStatus: getProfileStatus,
@@ -1030,7 +982,6 @@ var RamariaApi = (function () {
         },
         setup: {
             run: runSetup,
-            getStatus: getSetupStatus,
             refresh: refreshSetupState,
             validateEmbeddingModel: validateEmbeddingModel,
             saveEmbeddingModel: saveEmbeddingModel,
@@ -1057,7 +1008,6 @@ var RamariaApi = (function () {
         },
         rules: {
             list: listRules,
-            get: getRule,
             setEnabled: setRuleEnabled,
             edit: editRule,
             evidence: getRuleEvidence,

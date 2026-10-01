@@ -7,7 +7,7 @@
 //! - 幂等说明：同一消息可能生成不同回复（生成本质非幂等），注解如实标注
 //! - 降级提示：LLM 不可用时返回可操作错误（提示检查后端设置），不返回空回复
 
-use ramaria_service::{CHANNEL_MCP, ChatSendRequest, DEFAULT_PERSONA_UID};
+use ramaria_service::{CHANNEL_MCP, ChatSendRequest, DEFAULT_PERSONA_UID, entry_error_message};
 use rmcp::ErrorData;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -89,7 +89,8 @@ impl RamariaMcpServer {
             Err(e) => {
                 tracing::warn!(persona = %persona, error = %e, "chat_send 执行失败");
                 Ok(tool_error(format!(
-                    "生成失败：{e}。可检查 LLM 后端是否可用（桌面「设置 → 后端」）与人格 uid 后重试"
+                    "{}。可检查 LLM 后端是否可用（桌面「设置 → 后端」）与人格 uid 后重试",
+                    entry_error_message(&e, "生成失败")
                 )))
             }
         }

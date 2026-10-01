@@ -32,7 +32,7 @@
 //! - `stream_event`：流式事件领域模型（Delta / Done / Error）与事件流句柄；
 //! - `privacy` / `bridge` / `feedback`：隐私确认、新会话桥接、弱反馈检测（生成编排的伴随能力）；
 //! - `eta`：导入进度分层 EMA 预估（纯计算，无 I/O）；`update`：GitHub Release 版本检查；
-//! - `error_hint`：错误到用户提示映射（标题 / 明细 / 可重试标记）；
+//! - `error_hint`：错误到用户提示映射（标题 / 明细 / 可重试标记 / 入口统一文案）；
 //! - `diagnostics`：诊断信息导出用例（日志 / 配置脱敏 + 原子替换）；
 //! - `import`：QQ 聊天记录导入用例（解析 / L0 写入 / L1 批量生成与 ETA / 深度触发，
 //!   `importer` feature 下编译）；
@@ -81,9 +81,12 @@ pub use behavior::{BehaviorLearnOutcome, RuleEvidenceItem};
 pub use config::{ConfigWriter, MismatchEntry, SyncOutcome, SyncWriteResult};
 pub use diagnostics::{DiagnosticsReport, DiagnosticsRequest};
 pub use engine::{Engine, EngineOptions};
-pub use error_hint::{ErrorHint, error_detail, error_title, is_retryable};
+pub use error_hint::{ErrorHint, entry_error_message, error_detail, error_title, is_retryable};
 pub use eta::{EtaEstimator, PhaseEma, PhaseKind, linear_remaining};
-pub use export::{ExportData, ExportDataRequest, ExportSessionData};
+pub use export::{
+    EXPORT_FORMAT_VERSION, ExportData, ExportDataRequest, ExportSessionData, render_sessions_json,
+    render_sessions_markdown,
+};
 pub use hooks::{default_seal_hooks, full_seal_hooks};
 pub use idle::{IdleLoop, IdleLoopOptions, MIN_IDLE_CHECK_INTERVAL_SECONDS};
 #[cfg(feature = "importer")]
@@ -91,10 +94,11 @@ pub use import::{
     AnalysisReport, AnalyzeRequest, ImportDoneSummary, ImportL0Outcome, ImportL1Outcome,
     ImportL1Plan, ImportL1Progress, ImportMode, ImportProgressSink, ImportRequest,
 };
+pub use index::IndexBuildFailure;
 pub use lifecycle::{Lifecycle, LifecycleOptions};
 pub use model::{
-    RemoveModelOutcome, download_model, is_model_ready, list_models, model_size, models_root,
-    remove_model, validate_embedding_model,
+    BackendConfigWriteOptions, BackendConfigWriteOutcome, RemoveModelOutcome, download_model,
+    is_model_ready, list_models, model_size, models_root, remove_model, validate_embedding_model,
 };
 pub use persona::{PersonaLoadMode, PersonaRegenerateOutcome};
 pub use privacy::PrivacyStatus;
@@ -111,14 +115,15 @@ pub use types::{
     EvidenceL1SourceView, FactBrowsePage, FactBrowseRequest, FactDetailView, FactEntryView,
     FactView, GroupedFactsView, HistoryMessageView, HistoryRequest, HistoryResult, IngestOutcome,
     IngestRequest, KeywordEntryView, KeywordPoolView, KeywordSeedItem, KeywordSeedOutcome,
-    L1BrowsePage, L1BrowseRequest, L1MemoryView, L2BrowsePage, L2BrowseRequest, L2EventView,
-    L3TraitView, MAX_ITEMS_LIMIT, PendingAliasView, PersonaCardRequest, PersonaCardView,
-    PersonaFileAction, PersonaFileOutcome, PersonaFullView, PersonaSection, PersonaSummaryView,
-    PersonaUpdateRequest, PersonalityProfileView, ProfileStatusView, RecallItem, RecallLayer,
-    RecallMode, RecallRequest, RecallResult, RecallStats, SealOutcome, SessionBrowsePage,
-    SessionBrowseRequest, SessionDetailView, SessionMessageView, SessionMessagesRequest,
-    SessionMessagesView, SessionSummaryView, SetupRequest, SetupStatus, StyleView, TraitDetailView,
-    TraitEvidenceRequest, TraitEvidenceView, TraitView,
+    KeywordSuggestionOutcome, L1BrowsePage, L1BrowseRequest, L1MemoryView, L2BrowsePage,
+    L2BrowseRequest, L2EventView, L3TraitView, MAX_ITEMS_LIMIT, PendingAliasView,
+    PersonaCardRequest, PersonaCardView, PersonaFileAction, PersonaFileOutcome, PersonaFullView,
+    PersonaSection, PersonaSummaryView, PersonaUpdateRequest, PersonalityProfileView,
+    ProfileStatusView, RecallItem, RecallLayer, RecallMode, RecallRequest, RecallResult,
+    RecallStats, SealOutcome, SessionBrowsePage, SessionBrowseRequest, SessionDetailView,
+    SessionMessageView, SessionMessagesRequest, SessionMessagesView, SessionSummaryView,
+    SetupRequest, SetupStatus, StyleView, TraitDetailView, TraitEvidenceRequest, TraitEvidenceView,
+    TraitView,
 };
 pub use update::{UpdateStatus, check_update};
 pub use utt::UttRebuildOutcome;

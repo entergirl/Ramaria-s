@@ -1,13 +1,13 @@
 //! crates/ramaria-cli/src/commands/rule.rs - 行为规则管理命令
 //!
 //! 设计特点:
-//! - 子命令遵循 §2.9 动词词表：list/show/import/edit/enable/disable/delete/evidence/relearn
+//! - 子命令遵循动词词表：list/show/import/edit/enable/disable/delete/evidence/relearn
 //!   （`get` 仅 config 专用，规则详情用 `show`；relearn 触发 persona 全量行为学习）
 //! - clusters 为只读统计：读事件 → 双通道向量化 → 原始口径密度聚类 → 输出簇结构与相似度分布，
 //!   并追加 min−1 反事实对照、含 θ_nb 重试的管线口径/质控闸门估算（规则产出量），
 //!   以及可选的 θ_join 时序增量模拟（留一：前段建簇 → 后段逐条喂入增量管线）
 //! - 全部支持全局 `--json` 信封；stdout 只输出数据
-//! - delete 为破坏性操作：交互确认 / 非 TTY 或 `--yes` 自动通过（M1 B 项）
+//! - delete 为破坏性操作：交互确认 / 非 TTY 或 `--yes` 自动通过
 //! - evidence 展示规则 → 事件 → 原文溯源链（只含结构化字段，原文不落日志）
 //! - edit/disable 触发 H1 S1 反馈写入（行为层内部处理）
 

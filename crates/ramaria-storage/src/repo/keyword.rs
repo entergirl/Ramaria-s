@@ -389,6 +389,45 @@ pub async fn reject_alias(pool: &SqlitePool, alias_id: i64) -> RamariaResult<boo
     Ok(result.rows_affected() > 0)
 }
 
+/// 幂等登记待确认别名（`alias_status='pending'`，指向建议合并的规范词）。
+///
+/// 参数:
+/// - `alias`: 标准化后的别名文本（KeywordToken Newtype）。
+/// - `canonical_id`: 建议合并到的规范词 rowid（调用方保证指向真实词条）。
+/// - `use_count`: 观测使用计数（仅首次插入写入，取 ≥1）。
+///
+/// 返回:
+/// - `true`: 本次新插入（携带观测计数与登记时间）；
+/// - `false`: 词条已存在（任意状态，**保持已有行完全不动**）。
+///
+/// 说明:
+/// - 由主键冲突直接 DO NOTHING 保证并发幂等：并发登记同一别名恰好插入一次，
+///   已存在词条（canonical / alias / pending）不被改写为 pending。
+/// - 与 `upsert_with_alias` 的差异：后者是通用写入口（冲突时递增 use_count 并
+///   COALESCE 更新状态），本函数是"建议落库"专用入口，冲突时零改动。
+pub async fn upsert_pending(
+    pool: &SqlitePool,
+    alias: &KeywordToken,
+    canonical_id: i64,
+    use_count: u32,
+) -> RamariaResult<bool> {
+    let now = ramaria_core::types::now_ms();
+    let result = sqlx::query(
+        "INSERT INTO keyword_pool (keyword, use_count, last_used_at, created_at, canonical_id, alias_status)
+         VALUES (?, ?, ?, ?, ?, 'pending')
+         ON CONFLICT(keyword) DO NOTHING",
+    )
+    .bind(alias.as_str())
+    .bind(i64::from(use_count.max(1)))
+    .bind(now)
+    .bind(now)
+    .bind(canonical_id)
+    .execute(pool)
+    .await
+    .storage_err("登记待确认别名失败")?;
+    Ok(result.rows_affected() > 0)
+}
+
 /// 查询所有 keyword_pool 条目的使用量映射（文本 → 使用次数）。
 ///
 /// 返回:
@@ -1102,5 +1141,102 @@ mod tests {
                 .as_deref(),
             Some("工作压力")
         );
+    }
+
+    // ── pending 幂等登记（建议落库）──
+
+    /// 首次登记 true 且携带观测计数；重复登记 false 且不改动已有行（状态 / 指针 / 计数）。
+    #[tokio::test]
+    async fn test_upsert_pending_inserts_then_is_idempotent() {
+        let pool = setup().await;
+        let (canonical_id, _) = seed_pending(&pool).await;
+        let alias = KeywordToken::new("压力").unwrap();
+
+        assert!(
+            upsert_pending(&pool, &alias, canonical_id, 5)
+                .await
+                .unwrap(),
+            "新别名首次登记应插入"
+        );
+
+        let entries = list_entries(&pool).await.unwrap();
+        let pending = entries
+            .iter()
+            .find(|e| e.keyword == "压力")
+            .expect("pending 别名应存在");
+        assert_eq!(pending.alias_status.as_deref(), Some("pending"));
+        assert_eq!(pending.canonical_id, Some(canonical_id));
+        assert_eq!(pending.canonical_keyword.as_deref(), Some("工作压力"));
+        assert_eq!(pending.use_count, 5, "use_count 取观测计数");
+
+        // 重复登记（换观测计数）→ false 且整行保持不动
+        assert!(
+            !upsert_pending(&pool, &alias, canonical_id, 9)
+                .await
+                .unwrap(),
+            "已存在词条重复登记应未命中"
+        );
+        let entries = list_entries(&pool).await.unwrap();
+        let pending = entries
+            .iter()
+            .find(|e| e.keyword == "压力")
+            .expect("pending 别名应保留");
+        assert_eq!(pending.use_count, 5, "重复登记不得改写 use_count");
+        assert_eq!(pending.alias_status.as_deref(), Some("pending"));
+
+        // 待确认列表可列出且指针正确（另含 seed_pending 预置的「职场焦虑」）
+        let listed = list_pending_aliases(&pool).await.unwrap();
+        assert_eq!(listed.len(), 2);
+        let mine = listed
+            .iter()
+            .find(|row| row.alias_keyword == "压力")
+            .expect("新登记别名应出现在待确认列表");
+        assert_eq!(mine.canonical_id, canonical_id);
+        assert_eq!(mine.canonical_keyword, "工作压力");
+    }
+
+    /// 已存在规范词不被登记改写：对 canonical 行登记 pending → false 且状态不变。
+    #[tokio::test]
+    async fn test_upsert_pending_keeps_existing_canonical() {
+        let pool = setup().await;
+        upsert_with_alias(
+            &pool,
+            &KeywordToken::new("工作压力").unwrap(),
+            0,
+            "canonical",
+        )
+        .await
+        .unwrap();
+        upsert_with_alias(
+            &pool,
+            &KeywordToken::new("职场压力").unwrap(),
+            0,
+            "canonical",
+        )
+        .await
+        .unwrap();
+        let canonical_id = rowid_of(&pool, "工作压力").await;
+
+        assert!(
+            !upsert_pending(
+                &pool,
+                &KeywordToken::new("职场压力").unwrap(),
+                canonical_id,
+                4
+            )
+            .await
+            .unwrap(),
+            "已存在词条不应被改写为 pending"
+        );
+
+        let entries = list_entries(&pool).await.unwrap();
+        let existing = entries
+            .iter()
+            .find(|e| e.keyword == "职场压力")
+            .expect("规范词应保留");
+        assert_eq!(existing.alias_status.as_deref(), Some("canonical"));
+        assert_eq!(existing.canonical_id, None);
+        assert_eq!(existing.use_count, 1);
+        assert!(list_pending_aliases(&pool).await.unwrap().is_empty());
     }
 }

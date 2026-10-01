@@ -925,6 +925,8 @@ fn l2_view(e: &MemoryEvent) -> L2EventView {
         attitude: e.attitude.clone(),
         salience: e.salience,
         created_at: e.created_at,
+        start: e.start,
+        end: e.end,
     }
 }
 
@@ -1216,6 +1218,19 @@ mod tests {
         assert_eq!(page.items[0].title, "事件3");
         assert_eq!(page.items[1].title, "事件2");
         assert_eq!(page.items[0].persona_uid, "char-0001");
+        // 事件起止时间随视图透出（与底层事件逐项一致）
+        assert_eq!(page.items[0].start, 1_030, "start 应取自事件开始时间");
+        assert_eq!(page.items[0].end, 2_030, "end 应取自事件结束时间");
+        for item in &page.items {
+            let event = storage
+                .get_event(item.id)
+                .await
+                .expect("查询事件应成功")
+                .expect("事件应存在");
+            assert_eq!(item.start, event.start, "start 应与底层事件一致");
+            assert_eq!(item.end, event.end, "end 应与底层事件一致");
+            assert_eq!(item.created_at, event.created_at, "created_at 口径不变");
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1242,6 +1257,7 @@ mod tests {
         assert_eq!(page.total, 4, "total 为合并后（截断前）条数");
         let titles: Vec<&str> = page.items.iter().map(|e| e.title.as_str()).collect();
         assert_eq!(titles, vec!["二B", "二A", "一B"], "应按创建时间倒序截断");
+        assert_eq!(page.items[0].start, 4_000, "合并口径同样透出事件起止时间");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

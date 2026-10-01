@@ -15,7 +15,7 @@
 //!   代次变化触发的重建再受 `[index].refresh_interval_seconds` 冷却窗口约束（0 = 不节流）
 //! - 边界：本模块只做"内存索引维护"，不写数据库（除索引版本 / BM25 分词版本标记外）
 
-use ramaria_core::error::RamariaResult;
+use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::lock::{read_recover, write_recover};
 use ramaria_core::traits::{
     BM25_INDEX_VERSION_CURRENT, BM25_INDEX_VERSION_LEGACY, IndexCorpusStamp,
@@ -47,6 +47,18 @@ const L2_LOAD_LIMIT: i64 = 1_000;
 pub struct IndexStamp {
     pub bm25_version: i32,
     pub corpus: Option<IndexCorpusStamp>,
+}
+
+/// 最近一次索引构建失败记录（供诊断导出与宿主提示）。
+///
+/// 字段约定:
+/// - `reason`: 失败原因的脱敏文本（已折叠为单行；路径只留文件名、消息类字段只留字符数，
+///   不含用户原文）；
+/// - `at_ms`: 记录时间（Unix 毫秒）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexBuildFailure {
+    pub reason: String,
+    pub at_ms: i64,
 }
 
 /// 读取当前库内索引代次快照（读取失败按"不变化"处理并记 warn，不阻塞召回）。
@@ -174,11 +186,14 @@ async fn build_and_swap(engine: &Engine) -> RamariaResult<usize> {
     match build_and_swap_inner(engine).await {
         Ok(total) => {
             engine.set_index_rebuild_failed(false);
+            engine.clear_index_build_failure();
             Ok(total)
         }
         Err(e) => {
-            // 旧索引仍完整可用：置位告警位供宿主提示"记忆注入可能不完整"
+            // 旧索引仍完整可用：置位告警位供宿主提示"记忆注入可能不完整"，
+            // 并记录脱敏失败原因供诊断导出（不改变返回错误与降级语义）
             engine.set_index_rebuild_failed(true);
+            engine.record_index_build_failure(redact_failure_reason(&e));
             tracing::warn!(
                 error = %e,
                 "检索器重建失败，保留旧索引继续可用（索引未刷新）"
@@ -186,6 +201,13 @@ async fn build_and_swap(engine: &Engine) -> RamariaResult<usize> {
             Err(e)
         }
     }
+}
+
+/// 构造失败原因文本：复用诊断导出的二次脱敏口径（路径只留文件名、
+/// 消息类字段只留字符数），并折叠为单行供状态摘要展示（不含用户原文）。
+fn redact_failure_reason(error: &RamariaError) -> String {
+    let text = crate::diagnostics::redact_for_export(&error.to_string());
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// [`build_and_swap`] 的实际构建实现（告警位维护在外层）。
@@ -1262,6 +1284,57 @@ mod tests {
         failable.set_fail_list_personas(false);
         engine.rebuild_index().await.expect("恢复后重建应成功");
         assert!(!engine.is_index_rebuild_failed(), "重建恢复后告警位应复位");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 构建失败记录：失败置入脱敏原因（保留可诊断关键字、折叠为单行）；恢复成功后清除。
+    #[tokio::test]
+    async fn build_failure_record_tracks_and_clears() {
+        let (engine, storage, failable, dir) =
+            engine_with_failable_storage("index-failure-record").await;
+        seed_persona(&storage, "char-0001").await;
+        seed_l1(
+            &storage,
+            "char-0001",
+            "用户喜欢喝咖啡，每天上午必点一杯拿铁",
+        )
+        .await;
+
+        // 首次成功：无失败记录
+        engine.rebuild_index().await.expect("首次重建应成功");
+        assert!(
+            engine.index_build_failure().is_none(),
+            "构建成功后不得保留失败记录"
+        );
+
+        // 失败：置入脱敏原因（保留可诊断关键字、折叠为单行、时间戳有效）
+        failable.set_fail_list_personas(true);
+        let err = engine
+            .rebuild_index()
+            .await
+            .expect_err("存储读取失败时重建应报错");
+        assert!(!err.to_string().is_empty(), "错误信息不应为空");
+        let failure = engine.index_build_failure().expect("失败后应有失败记录");
+        assert!(
+            failure.reason.contains("list_personas"),
+            "原因应保留可诊断信息: {}",
+            failure.reason
+        );
+        assert!(
+            !failure.reason.contains('\n') && !failure.reason.contains('\r'),
+            "原因应折叠为单行: {}",
+            failure.reason
+        );
+        assert!(failure.at_ms > 0, "记录时间应为有效时间戳");
+
+        // 恢复成功：失败记录清除
+        failable.set_fail_list_personas(false);
+        engine.rebuild_index().await.expect("恢复后重建应成功");
+        assert!(
+            engine.index_build_failure().is_none(),
+            "恢复后应清除失败记录"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

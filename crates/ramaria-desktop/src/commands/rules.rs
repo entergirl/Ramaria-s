@@ -3,7 +3,7 @@
 //! 设计特点:
 //! - 委托服务层行为规则用例（与 CLI `ramaria rule` 同一份实现），
 //!   不新增后端语义，保证 CLI 与 GUI 行为一致。
-//! - list / get / edit / enable / disable / evidence，**不提供 delete**（回归红线）。
+//! - list / edit / enable / disable / evidence，**不提供 delete**（回归红线）。
 //! - edit/disable 沿用行为层 S1 反馈与 Manual 强锚点语义（与 CLI 一致）。
 //! - 返回前端友好视图；仅记录 id/条数等日志，不记录规则文本/原文。
 //! - 隐私：evidence 只返回结构化脱敏字段（title/summary/paraphrase/keywords）。
@@ -91,31 +91,6 @@ pub async fn list_rules(
         total: rules_json.len(),
         rules: rules_json,
     })
-}
-
-// =========================================================
-// get_rule — 规则详情
-// =========================================================
-
-/// 查看单条行为规则详情。
-///
-/// 参数:
-/// - `rule_id`: 规则 ID。
-///
-/// 接线状态（未接线/预留）:
-/// - 前端规则页使用列表命令返回的完整规则对象渲染，未单独请求详情；
-/// - 保留该命令供后续详情面板使用，是否接入 UI 或下线由负责人裁定。
-#[tauri::command]
-#[tracing::instrument(skip(state))]
-pub async fn get_rule(state: State<'_, DesktopState>, rule_id: i64) -> Result<JsonValue, String> {
-    let rule = state
-        .engine
-        .behavior_get_rule(rule_id)
-        .await
-        .map_err(|e| crate::commands::service_error_message(&e, "查询行为规则失败"))?
-        .ok_or_else(|| format!("行为规则 {rule_id} 不存在"))?;
-
-    Ok(rule_to_json(&rule))
 }
 
 // =========================================================

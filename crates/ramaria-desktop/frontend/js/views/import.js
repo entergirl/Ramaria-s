@@ -664,6 +664,13 @@ var ImportView = (function () {
         }
         html += '</div>';
 
+// 导入人格（库内实际注册名，可能与文件解析名不同）
+        if (result.personaName) {
+            html += '<div class="import-report-details">';
+            html += '<strong>人格：</strong> ' + RamariaEscape.escapeHtml(result.personaName);
+            html += '</div>';
+        }
+
         if (result.reportSummary) {
             html += '<div class="import-result-summary">' + RamariaEscape.escapeHtml(result.reportSummary) + '</div>';
         }
@@ -1032,6 +1039,7 @@ var ImportView = (function () {
                     messagesWritten: result.messages_written || 0,
                     mode: result.mode || _importMode,
                     reportSummary: result.report_summary || '',
+                    personaName: result.persona_name || '',
                 };
 
  // 保存 persona 信息供导航使用

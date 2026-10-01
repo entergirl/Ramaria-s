@@ -91,6 +91,10 @@ struct SystemInfo {
 /// - `config.toml`: 当前配置文件内容（API key 已脱敏为 `[REDACTED]`）。
 /// - `system.txt`: OS / 架构 / 版本 / schema 版本 / 采集时间。
 ///
+/// 报告字段:
+/// - `collection_status` 含各收集步骤状态；其中 `index_build` 取值为
+///   `ok` / `failed: <脱敏原因>` / `not_built`（检索索引构建状态，供失败诊断）。
+///
 /// 安全约束:
 /// - API key 在收集阶段即脱敏，写入前已不可逆。
 /// - 日志与配置在打包前经 [`redact_for_export`] 二次脱敏：绝对路径只留文件名，
@@ -121,7 +125,10 @@ pub(crate) async fn export(
     // 3. 收集配置（API key 脱敏）
     let config_content = collect_config(config.as_ref(), &mut status);
 
-    // 4. 打包为 zip
+    // 4. 收集检索索引构建状态（最近失败原因 / 已构建 / 未构建）
+    collect_index_build_status(engine, &mut status);
+
+    // 5. 打包为 zip
     let output_path = req.output_path;
     let file_size = build_zip(&output_path, &system_info, &logs, &config_content)
         .map_err(|e| RamariaError::io(format!("生成诊断 zip 文件失败: {e}"), None))?;
@@ -287,6 +294,21 @@ fn collect_config(config: &RamariaConfig, status: &mut HashMap<String, String>) 
     }
 }
 
+/// 收集检索索引构建状态：`ok` / `failed: <脱敏原因>` / `not_built`。
+///
+/// 口径:
+/// - 最近一次构建失败 → `failed: <原因>`（原因在记录时已脱敏，不含用户原文）；
+/// - 无失败且成功构建过（构建完成时间非零）→ `ok`；
+/// - 否则 → `not_built`（尚未触发过懒加载 / 自愈构建）。
+fn collect_index_build_status(engine: &Engine, status: &mut HashMap<String, String>) {
+    let value = match engine.index_build_failure() {
+        Some(failure) => format!("failed: {}", failure.reason),
+        None if engine.last_index_build_time() > 0 => "ok".to_string(),
+        None => "not_built".to_string(),
+    };
+    status.insert("index_build".to_string(), value);
+}
+
 /// 对配置文件内容做 API key 脱敏。
 ///
 /// 脱敏规则:
@@ -336,7 +358,7 @@ const SENSITIVE_FIELD_MARKERS: &[&str] = &[
     "excerpt", "snippet",
 ];
 
-/// 导出前二次脱敏（日志与配置的统一入口）。
+/// 二次脱敏原语（日志 / 配置导出与诊断摘要的统一入口）。
 ///
 /// 规则:
 /// 1. 消息类字段值 → `<N chars>`（N 为字符数，不输出原文）；
@@ -344,10 +366,11 @@ const SENSITIVE_FIELD_MARKERS: &[&str] = &[
 ///
 /// 说明:
 /// - 保留行结构与空白，便于人工阅读与定位；
-/// - 该函数是"最后一道防线"，不依赖上游日志是否已做脱敏；
+/// - 该函数是"最后一道防线"，不依赖上游日志是否已做脱敏；同时供索引构建失败原因等
+///   诊断摘要文本的脱敏复用（统一口径，避免两套脱敏实现）；
 /// - 字段值以空白分隔且未加引号时只能取到首个词（结构化日志的内容字段通常由
 ///   Debug 格式化加引号，可完整覆盖）。
-fn redact_for_export(content: &str) -> String {
+pub(crate) fn redact_for_export(content: &str) -> String {
     content
         .split_inclusive('\n')
         .map(redact_line)
@@ -999,6 +1022,98 @@ mod tests {
         assert!(
             cfg.contains("# 配置文件: config.toml"),
             "包头只写文件名: {cfg}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 检索索引构建状态进入诊断收集：未构建 / 失败（脱敏原因）/ 已构建三态。
+    #[tokio::test]
+    async fn export_reports_index_build_status() {
+        let dir = unique_dir("index-status");
+        let mut config = RamariaConfig::default();
+        config.paths.log_dir = dir.join("logs").to_string_lossy().into_owned();
+        config.paths.config_dir = dir.join("cfg").to_string_lossy().into_owned();
+
+        // 组装带失败注入的引擎（真实 SQLite + 可失败存储包装）
+        let pool = ramaria_storage::database::init_pool(Some(dir.join("assistant.db")))
+            .await
+            .expect("测试库初始化应成功");
+        let inner = std::sync::Arc::new(ramaria_storage::SqliteStorage::new(pool));
+        let failable = std::sync::Arc::new(crate::test_support::FailableStorage::new(inner));
+        let engine = crate::engine::Engine::from_parts(
+            std::sync::Arc::clone(&failable)
+                as std::sync::Arc<dyn ramaria_core::traits::StorageBackend>,
+            std::sync::Arc::new(crate::test_support::MockLlm::local()),
+            None,
+            config,
+        );
+
+        // 1) 未构建 → not_built
+        let report = engine
+            .export_diagnostics(DiagnosticsRequest {
+                output_path: dir.join("diag-1.zip"),
+                schema_version: "1".to_string(),
+            })
+            .await
+            .expect("导出诊断包应成功");
+        assert_eq!(
+            report
+                .collection_status
+                .get("index_build")
+                .map(String::as_str),
+            Some("not_built"),
+            "未构建时收集状态应为 not_built: {:?}",
+            report.collection_status
+        );
+
+        // 2) 构建失败 → failed: <脱敏原因>（保留可诊断信息、折叠为单行）
+        failable.set_fail_list_personas(true);
+        engine
+            .rebuild_index()
+            .await
+            .expect_err("失败注入下重建应报错");
+        let report = engine
+            .export_diagnostics(DiagnosticsRequest {
+                output_path: dir.join("diag-2.zip"),
+                schema_version: "1".to_string(),
+            })
+            .await
+            .expect("导出诊断包应成功");
+        let failed = report
+            .collection_status
+            .get("index_build")
+            .cloned()
+            .unwrap_or_default();
+        assert!(failed.starts_with("failed: "), "失败态前缀: {failed}");
+        assert!(
+            failed.contains("list_personas"),
+            "应保留可诊断信息: {failed}"
+        );
+        assert!(!failed.contains('\n'), "失败原因应折叠为单行: {failed}");
+
+        // 3) 恢复后成功构建 → ok（失败记录清除）
+        failable.set_fail_list_personas(false);
+        engine.rebuild_index().await.expect("恢复后重建应成功");
+        assert!(
+            engine.index_build_failure().is_none(),
+            "构建成功后失败记录应清除"
+        );
+        let report = engine
+            .export_diagnostics(DiagnosticsRequest {
+                output_path: dir.join("diag-3.zip"),
+                schema_version: "1".to_string(),
+            })
+            .await
+            .expect("导出诊断包应成功");
+        assert_eq!(
+            report
+                .collection_status
+                .get("index_build")
+                .map(String::as_str),
+            Some("ok"),
+            "成功构建后收集状态应为 ok: {:?}",
+            report.collection_status
         );
 
         let _ = std::fs::remove_dir_all(&dir);

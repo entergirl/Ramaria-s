@@ -1,16 +1,16 @@
 //! crates/ramaria-service/src/model.rs - 模型管理用例（LLM 后端与嵌入模型热更新）
 //!
 //! 设计特点:
-//! - 后端配置写入即生效：配置落库（`backend_config`，真相源）→ 重建 provider → 整体替换内存快照，
-//!   并尽力同步文件侧 `[backend]` 组（失败只记日志，不阻塞）；后续对话与记忆加工立即使用新
-//!   provider，无需重启进程
+//! - 后端配置写入单一入口：显式选项控制 keychain / 落库 / provider 热替换 / 文件侧同步，
+//!   配置落库为真相源；写入结果汇总各步骤完成情况与失败原因（文件侧失败只记日志，不阻塞）
+//! - 热替换即生效：重建 provider 沿用引擎持有的精确缓存实例，切换后端后既有缓存不失效，
+//!   后续对话与记忆加工立即使用新 provider，无需重启进程
 //! - 嵌入模型按路径加载：校验 / 保存 / 读取 / 卸载四个动作覆盖设置页全部交互，
 //!   卸载（空路径）与加载走同一用例，避免"只改配置不换实例"的半生效状态
 //! - 降级不阻塞：嵌入模型缺失 / 不可用只影响向量通道（BM25 + 关键词镜像继续工作），
 //!   用例不因嵌入缺失返回错误
 //! - 校验可解释：目录缺失 / 加载失败 / 推理失败三类原因都以文本回传，
 //!   设置页直接展示，不靠日志排查
-//! - 缓存复用：热更新 provider 时沿用引擎持有的精确缓存实例，切换后端后既有缓存不失效
 //! - 模型文件管理：根目录解析 / 列表 / 就绪与体积查询 / 删除 / 下载均委派
 //!   `ramaria-llm` 模型管理器，本层只做编排与错误分类
 //! - 安全约束：API key 只经 OS keychain 读写（本地 provider 跳过），日志不记密钥内容
@@ -30,33 +30,72 @@ use crate::types::{DegradedReason, EmbeddingModelView, EmbeddingValidation};
 // LLM 后端配置更新
 // =========================================================
 
-/// 更新 LLM 后端配置并热加载新 provider。
+/// 后端配置写入选项（显式控制各步骤是否执行）。
 ///
-/// 流程:
-/// 1. API key 写入 keychain（仅线上 provider；先写密钥再落配置，避免"配置指向无密钥后端"的中间态）；
-/// 2. 后端配置落库（`backend_config` 为真相源）；
-/// 3. 重建 provider（复用引擎持有的精确缓存）→ 整体替换内存快照；
-/// 4. 文件侧 `[backend]` 组同步（`config_path` 已设置时；失败只记日志，不改变成功语义）。
+/// 职责:
+/// - 让调用方按场景组合写入步骤（如仅落库 + 文件同步，或仅热替换），避免"写库顺带热替换"的隐性语义。
+///
+/// 字段约定:
+/// - `api_key`: 有值且为线上 provider 时写入 keychain；`None` 表示不更新密钥；
+/// - `hot_swap`: 是否重建 provider 并热替换引擎 LLM 快照；
+/// - `sync_file`: 是否同步 config.toml 的 `[backend]` 组。
+#[derive(Debug, Clone)]
+pub struct BackendConfigWriteOptions {
+    /// 线上 provider 的新密钥（None = 不更新）
+    pub api_key: Option<String>,
+    /// 是否重建 provider 并热替换（false = 跳过该步骤）
+    pub hot_swap: bool,
+    /// 是否同步 config.toml 的 [backend] 组
+    pub sync_file: bool,
+}
+
+/// 后端配置写入结果（各步骤完成情况）。
+///
+/// 字段约定:
+/// - `db_ok`: 配置是否已落库（真相源）；
+/// - `provider_updated`: 是否已重建并热替换 provider（未执行热替换时为 false）；
+/// - `file_ok`: config.toml 的 `[backend]` 组是否同步成功（未执行同步或失败时为 false）；
+/// - `failures`: 未成功步骤的失败原因（不含密钥内容）。
+#[derive(Debug, Clone)]
+pub struct BackendConfigWriteOutcome {
+    /// 配置是否已落库
+    pub db_ok: bool,
+    /// 是否已重建并热替换 provider
+    pub provider_updated: bool,
+    /// config.toml [backend] 组是否同步成功
+    pub file_ok: bool,
+    /// 失败原因（不含密钥内容）
+    pub failures: Vec<String>,
+}
+
+/// 写入 LLM 后端配置（按显式选项执行：keychain → 落库 → 热替换 → 文件同步）。
 ///
 /// 参数:
-/// - `engine`: 服务层引擎。
-/// - `config`: 新的后端配置（provider / base_url / model / 嵌入路径等）。
-/// - `api_key`: 可选的线上 provider 密钥；`None` 或空白表示不更新密钥（沿用 keychain 现值）。
+/// - `engine`: 服务层引擎；
+/// - `config`: 新的后端配置（provider / base_url / model / 嵌入路径等）；
+/// - `options`: 写入选项（各步骤开关，见 [`BackendConfigWriteOptions`]）。
 ///
 /// 返回:
-/// - 成功时返回 `Ok(())`，此后读取路径取到的是新 provider。
-/// - 密钥写入失败返回 `Privacy`；配置落库失败返回 `Storage`；provider 构造失败返回对应错误。
+/// - `Ok(outcome)`: 配置已落库（`db_ok=true`）；文件侧同步失败不改变成功语义，
+///   只记录日志并汇总到 `failures`（见 [`BackendConfigWriteOutcome`]）；
+/// - `Err`: 密钥写入失败返回 `Privacy`；配置落库失败返回 `Storage`；
+///   热替换时 provider 构造失败返回对应错误（此时配置已落库，下次启动装配按新配置重试）。
 ///
 /// 说明:
-/// - provider 构造失败时配置已落库：下次启动装配会按新配置重试，调用方可提示用户修正后重试；
+/// - 步骤顺序固定：先写密钥再落配置，避免"配置指向无密钥后端"的中间态；
+/// - 热替换失败时不再执行文件同步（与"配置已落库、provider 未替换"的中间态一致）；
 /// - 本地 provider（LM Studio）不需要 API key，传入密钥只记 debug 并跳过。
-pub(crate) async fn update_backend_config(
+pub(crate) async fn write_backend_config(
     engine: &Engine,
     config: &BackendConfig,
-    api_key: Option<&str>,
-) -> RamariaResult<()> {
+    options: &BackendConfigWriteOptions,
+) -> RamariaResult<BackendConfigWriteOutcome> {
     // ---- 1. API key（仅线上 provider；本地 provider 无需密钥） ----
-    let key = api_key.map(str::trim).filter(|value| !value.is_empty());
+    let key = options
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     if let Some(key) = key {
         if config.provider.is_online() {
             let service = keychain_service(config.provider)?;
@@ -72,19 +111,30 @@ pub(crate) async fn update_backend_config(
 
     // ---- 2. 后端配置落库（DB 为真相源） ----
     engine.storage_ref().save_backend_config(config).await?;
+    let mut outcome = BackendConfigWriteOutcome {
+        db_ok: true,
+        provider_updated: false,
+        file_ok: false,
+        failures: Vec::new(),
+    };
 
     // ---- 3. 重建 provider 并热替换（复用精确缓存，保证切换后端后缓存不失效） ----
-    let keychain = engine.keychain_arc();
-    let provider = build_llm_provider(config, &keychain, engine.llm_cache())?;
-    engine.update_llm(provider);
+    if options.hot_swap {
+        let keychain = engine.keychain_arc();
+        let provider = build_llm_provider(config, &keychain, engine.llm_cache())?;
+        engine.update_llm(provider);
+        outcome.provider_updated = true;
+    }
 
     // ---- 4. 文件侧同步（尽力而为：保持 config.toml 的 [backend] 组与表一致） ----
-    if !engine.config_path().as_os_str().is_empty() {
+    if options.sync_file {
         match engine.sync_backend_config(config).await {
             Ok(result) => {
-                if !result.file_ok {
+                outcome.file_ok = result.file_ok;
+                outcome.failures.extend(result.failures);
+                if !outcome.file_ok {
                     tracing::warn!(
-                        failures = result.failures.len(),
+                        failures = outcome.failures.len(),
                         "后端配置已落库，但 config.toml 同步失败（下次加载校验以文件为准）"
                     );
                 }
@@ -94,6 +144,7 @@ pub(crate) async fn update_backend_config(
                     error = %e,
                     "后端配置已落库，但 config.toml 同步失败（降级不阻塞）"
                 );
+                outcome.failures.push(format!("config.toml 同步失败: {e}"));
             }
         }
     }
@@ -102,8 +153,39 @@ pub(crate) async fn update_backend_config(
         provider = %config.provider,
         model = %config.capability.model_id,
         base_url = %config.base_url,
-        "后端配置已更新并热加载"
+        db_ok = outcome.db_ok,
+        provider_updated = outcome.provider_updated,
+        file_ok = outcome.file_ok,
+        "后端配置写入完成"
     );
+    Ok(outcome)
+}
+
+/// 更新 LLM 后端配置并热加载新 provider（完整写入：密钥 → 落库 → 热替换 → 文件同步）。
+///
+/// 参数:
+/// - `engine`: 服务层引擎；
+/// - `config`: 新的后端配置（provider / base_url / model / 嵌入路径等）；
+/// - `api_key`: 可选的线上 provider 密钥；`None` 或空白表示不更新密钥（沿用 keychain 现值）。
+///
+/// 返回:
+/// - 成功时返回 `Ok(())`，此后读取路径取到的是新 provider；
+/// - 错误语义与 `write_backend_config` 一致；文件侧同步失败只记日志，不改变成功语义。
+///
+/// 说明:
+/// - 本函数是 `write_backend_config` 的完整选项薄包装；
+///   只需"落库 + 文件同步"或只需热替换的调用方应直接使用 `write_backend_config` 并给出显式选项。
+pub(crate) async fn update_backend_config(
+    engine: &Engine,
+    config: &BackendConfig,
+    api_key: Option<&str>,
+) -> RamariaResult<()> {
+    let options = BackendConfigWriteOptions {
+        api_key: api_key.map(str::to_string),
+        hot_swap: true,
+        sync_file: true,
+    };
+    write_backend_config(engine, config, &options).await?;
     Ok(())
 }
 
@@ -423,303 +505,31 @@ pub async fn download_model(
 }
 
 // =========================================================
+// 引擎门面
+// =========================================================
+
+impl Engine {
+    /// 写入 LLM 后端配置（显式选项：keychain / 落库 / 热替换 / 文件同步）。
+    ///
+    /// 参数:
+    /// - `config`: 新的后端配置（provider / base_url / model / 嵌入路径等）；
+    /// - `options`: 写入选项（各步骤开关，见 [`BackendConfigWriteOptions`]）。
+    ///
+    /// 返回:
+    /// - 各步骤完成情况与失败原因（见 [`BackendConfigWriteOutcome`]）；
+    /// - 错误语义与用例实现一致：密钥 / 落库 / 热替换失败按分类返回，文件侧失败不阻塞。
+    pub async fn write_backend_config(
+        &self,
+        config: &BackendConfig,
+        options: BackendConfigWriteOptions,
+    ) -> RamariaResult<BackendConfigWriteOutcome> {
+        write_backend_config(self, config, &options).await
+    }
+}
+
+// =========================================================
 // 单元测试
 // =========================================================
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test_support::{MockLlm, engine_with_db, temp_dir};
-    use ramaria_core::config::EmbeddingDevice;
-    use ramaria_core::traits::StoreInfrastructure;
-
-    /// 校验用例：目录不存在 / 路径不是目录 → valid=false + 原因，不抛错。
-    #[tokio::test]
-    async fn validate_reports_missing_path_without_error() {
-        let dir = temp_dir("model-validate");
-        let missing = dir.join("not-a-model");
-
-        let result = validate_embedding_model(
-            missing.to_string_lossy().as_ref(),
-            EmbeddingDevice::default(),
-        )
-        .await
-        .expect("校验用例不应抛错");
-        assert!(!result.valid);
-        assert!(result.dimension.is_none());
-        assert!(
-            result.reason.as_deref().unwrap_or("").contains("不存在"),
-            "原因应说明目录缺失，实际: {:?}",
-            result.reason
-        );
-
-        // 路径存在但不是目录（用文件顶上）
-        let file = dir.join("model.txt");
-        std::fs::write(&file, b"x").expect("写入测试文件应成功");
-        let result =
-            validate_embedding_model(file.to_string_lossy().as_ref(), EmbeddingDevice::default())
-                .await
-                .expect("校验用例不应抛错");
-        assert!(!result.valid);
-        assert!(
-            result.reason.as_deref().unwrap_or("").contains("不是目录"),
-            "原因应说明路径类型错误，实际: {:?}",
-            result.reason
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 后端配置更新：配置落库 + provider 热替换后立即生效（无需重建引擎）。
-    #[tokio::test]
-    async fn update_backend_config_hot_swaps_provider() {
-        let (engine, storage, dir) = engine_with_db("model-hot-llm").await;
-        assert_eq!(engine.llm().name(), "MockLlm", "注入的 provider 应生效");
-
-        let mut config = BackendConfig::lm_studio_default();
-        config.base_url = "http://localhost:8888/v1".to_string();
-        config.capability.base_url = "http://localhost:8888/v1".to_string();
-        config.capability.model_id = "qwen-test".to_string();
-
-        // 本地 provider：无密钥写入，仅落库 + 热替换
-        engine
-            .update_backend_config(&config, None)
-            .await
-            .expect("后端配置更新应成功");
-
-        // 热替换后立即生效：新 provider 使用新 base_url
-        let llm = engine.llm();
-        assert_eq!(llm.name(), "LM Studio");
-        assert_eq!(llm.config().base_url, "http://localhost:8888/v1");
-
-        // 配置已落库（下次启动装配依据）
-        let saved = storage
-            .get_backend_config()
-            .await
-            .expect("读取后端配置应成功")
-            .expect("后端配置应已落库");
-        assert_eq!(saved.capability.model_id, "qwen-test");
-
-        // 本地 provider 传入密钥：跳过 keychain 写入，不影响配置更新
-        engine
-            .update_backend_config(&config, Some("sk-should-be-ignored"))
-            .await
-            .expect("本地 provider 更新应成功");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 后端配置更新：`config_path` 已设置时同步文件侧 `[backend]` 组，其它组保留。
-    #[tokio::test]
-    async fn update_backend_config_syncs_file_side_backend_group() {
-        let dir = temp_dir("model-file-sync");
-        let db_path = dir.join("assistant.db");
-        let config_path = dir.join("config.toml");
-        std::fs::write(&config_path, "[utt]\ntheta_gap_minutes = 12\n").expect("写入配置应成功");
-        let engine = Engine::open_with(
-            crate::engine::EngineOptions::new(db_path).with_config_path(config_path.clone()),
-        )
-        .await
-        .expect("引擎装配应成功");
-
-        let mut config = BackendConfig::lm_studio_default();
-        config.base_url = "http://localhost:7778/v1".to_string();
-        config.capability.base_url = "http://localhost:7778/v1".to_string();
-        config.capability.model_id = "qwen-file-sync".to_string();
-        engine
-            .update_backend_config(&config, None)
-            .await
-            .expect("后端配置更新应成功");
-
-        // 文件侧 [backend] 组已同步，其它组保留
-        let text = std::fs::read_to_string(&config_path).expect("读取配置应成功");
-        let file_cfg: ramaria_core::config::RamariaConfig =
-            toml::from_str(&text).expect("文件应为合法 TOML");
-        assert_eq!(file_cfg.backend.model_id, "qwen-file-sync");
-        assert_eq!(file_cfg.backend.base_url, "http://localhost:7778/v1");
-        assert_eq!(file_cfg.utt.theta_gap_minutes, 12, "文件侧其它组应保留");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 嵌入模型保存与卸载：热更新后立即生效，路径持久化；空路径卸载。
-    #[tokio::test]
-    async fn save_embedding_model_loads_and_unloads() {
-        let (engine, storage, dir) = engine_with_db("model-hot-embedding").await;
-        assert!(!engine.is_embedding_available(), "初始应无嵌入模型");
-
-        // 目录不存在 → 显式校验错误，且不改变现状
-        let err = engine
-            .save_embedding_model(Some("/definitely/not/a/model/dir"))
-            .await
-            .expect_err("目录不存在应报错");
-        assert_eq!(err.category(), "validation");
-        assert!(!engine.is_embedding_available());
-
-        // 注入可用 provider（模拟"模型加载成功"后的热替换）
-        let embedding = Arc::new(crate::test_support::DeterministicEmbedding::new());
-        engine.update_embedding(Some(embedding));
-        assert!(engine.is_embedding_available(), "热更新后向量通道应可用");
-        let view = engine
-            .embedding_model()
-            .await
-            .expect("读取嵌入模型应成功")
-            .expect("应返回已加载模型视图");
-        assert!(view.valid);
-        assert_eq!(
-            view.dimension,
-            Some(crate::test_support::DeterministicEmbedding::DIMENSION)
-        );
-
-        // 配置中留路径但未加载：供 UI 预填
-        let mut config = storage
-            .get_backend_config()
-            .await
-            .expect("读取后端配置应成功")
-            .unwrap_or_else(BackendConfig::lm_studio_default);
-        config.embedding_model_path = Some("/saved/model/path".to_string());
-        storage
-            .save_backend_config(&config)
-            .await
-            .expect("保存后端配置应成功");
-        engine.update_embedding(None);
-        let view = engine
-            .embedding_model()
-            .await
-            .expect("读取嵌入模型应成功")
-            .expect("应按已保存路径返回视图");
-        assert_eq!(view.model_path.as_deref(), Some("/saved/model/path"));
-        assert!(!view.valid, "未加载时不应视为可用");
-
-        // 卸载：provider 与持久化路径一并清空
-        engine.save_embedding_model(None).await.expect("卸载应成功");
-        assert!(!engine.is_embedding_available());
-        assert!(
-            engine
-                .embedding_model()
-                .await
-                .expect("读取嵌入模型应成功")
-                .is_none(),
-            "卸载后读取应返回 None"
-        );
-        let saved = storage
-            .get_backend_config()
-            .await
-            .expect("读取后端配置应成功")
-            .expect("后端配置应存在");
-        assert!(saved.embedding_model_path.is_none());
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 热更新并发读：写侧替换 provider 期间，读侧取到的始终是完整快照。
-    #[tokio::test]
-    async fn hot_swap_is_visible_to_concurrent_readers() {
-        let (engine, _storage, dir) = engine_with_db("model-hot-concurrent").await;
-        engine.update_llm(Arc::new(MockLlm::with_reply("第一代")));
-
-        // 读侧持续取快照（与写侧交替）；名称与配置必须成对来自同一 provider
-        let mut names = Vec::new();
-        for index in 0..16 {
-            if index % 4 == 0 {
-                engine.update_llm(Arc::new(MockLlm::with_reply("新一代")));
-            }
-            let llm = engine.llm();
-            names.push(llm.name());
-            assert!(
-                llm.config().base_url.starts_with("http://"),
-                "快照读到的 provider 配置应完整"
-            );
-        }
-        assert!(
-            names.iter().all(|name| *name == "MockLlm"),
-            "所有快照都应来自已装配的 provider"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 模型根目录解析：显式覆盖优先，否则取平台默认。
-    #[test]
-    fn models_root_prefers_override() {
-        let override_path = PathBuf::from("D:/custom/models");
-        assert_eq!(
-            models_root(Some(override_path.as_path())),
-            override_path,
-            "显式路径应原样返回"
-        );
-        assert_eq!(
-            models_root(None),
-            ramaria_llm::model_manager::default_models_root(),
-            "未提供覆盖时应取平台默认目录"
-        );
-    }
-
-    /// 列表用例：空根目录 → 空列表（管理器按需创建目录）。
-    #[test]
-    fn list_models_empty_root_returns_empty() {
-        let dir = temp_dir("model-list");
-        let models = list_models(Some(dir.as_path())).expect("列表用例应成功");
-        assert!(models.is_empty(), "空目录不应有已安装模型: {models:?}");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 就绪与体积用例：三个必需文件齐全 → 就绪且体积 > 0。
-    #[test]
-    fn model_ready_and_size_follow_required_files() {
-        let dir = temp_dir("model-ready");
-        let model_id = "bge-small-zh-v1.5";
-        let model_dir = dir.join(model_id);
-        std::fs::create_dir_all(&model_dir).expect("创建模型目录应成功");
-        std::fs::write(model_dir.join("config.json"), b"{}").expect("写入 config 应成功");
-        std::fs::write(model_dir.join("model.safetensors"), vec![0u8; 512])
-            .expect("写入权重应成功");
-        std::fs::write(model_dir.join("tokenizer.json"), b"{}").expect("写入 tokenizer 应成功");
-
-        assert!(is_model_ready(model_id, Some(dir.as_path())));
-        assert!(model_size(model_id, Some(dir.as_path())) > 0);
-        // 未创建的模型目录 → 未就绪
-        assert!(!is_model_ready("nonexistent-model", Some(dir.as_path())));
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 删除用例：不存在 → 幂等成功（`removed = false`）；存在 → 删除并报 `removed = true`；二次删除幂等。
-    #[test]
-    fn remove_model_is_idempotent_and_reports_removed() {
-        let dir = temp_dir("model-remove");
-
-        let missing = remove_model("nonexistent-model", Some(dir.as_path()))
-            .expect("删除不存在的模型应幂等成功");
-        assert!(!missing.removed, "不存在的模型应报告未删除");
-
-        let model_id = "bge-small-zh-v1.5";
-        let model_dir = dir.join(model_id);
-        std::fs::create_dir_all(&model_dir).expect("创建模型目录应成功");
-        std::fs::write(model_dir.join("config.json"), b"{}").expect("写入模型文件应成功");
-
-        let removed = remove_model(model_id, Some(dir.as_path())).expect("删除存在的模型应成功");
-        assert!(removed.removed, "存在的模型应报告已删除");
-        assert!(!model_dir.exists(), "模型目录应已被删除");
-
-        let again = remove_model(model_id, Some(dir.as_path())).expect("二次删除应幂等成功");
-        assert!(!again.removed, "二次删除应报告未删除");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 下载用例：未知 model_id → 预置校验失败（发起网络请求前返回配置错误）。
-    #[tokio::test]
-    async fn download_model_unknown_id_fails_before_network() {
-        let dir = temp_dir("model-download");
-        let err = download_model("nonexistent-model", Some(dir.as_path()), None)
-            .await
-            .expect_err("未知模型应报错");
-        assert_eq!(err.category(), "config");
-        assert!(
-            err.context().contains("不支持的模型"),
-            "错误应说明模型不在预置清单: {err}"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-}
+mod tests;

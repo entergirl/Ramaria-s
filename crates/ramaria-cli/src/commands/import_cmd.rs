@@ -9,7 +9,7 @@
 //! - `--persona` 向后兼容，行为等同于 `--persona-self-name`
 //! - L1 摘要 persona_uid 存 NULL，不绑定特定画像（避免记忆视图污染）
 //! - 解析报告默认以掩码版输出到 stderr 提示（`--no-report` 可关闭），数据输出遵循 stdout 纯净性（--json 信封）
-//! - 确认规则（M1 B 项）：`--yes` 自动确认；非 TTY 且无 `--yes` 不挂起、直接失败提示
+//! - 确认规则：`--yes` 自动确认；非 TTY 且无 `--yes` 不挂起、直接失败提示
 //! - 仅支持 qq-chat-exporter v6.x JSON 格式（语义化 type 名称）
 
 use anyhow::Context;

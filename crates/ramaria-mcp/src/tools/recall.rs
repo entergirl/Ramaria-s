@@ -6,7 +6,7 @@
 //! - 概览模式：不传 `query` 且 `messages` 为空时按时间线返回最近记忆
 //! - 隐私：人格白名单前置校验；原文块是否出端由注入的召回策略决定
 
-use ramaria_service::{DEFAULT_PERSONA_UID, RecallRequest};
+use ramaria_service::{DEFAULT_PERSONA_UID, RecallRequest, entry_error_message};
 use rmcp::ErrorData;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -78,7 +78,8 @@ impl RamariaMcpServer {
             Err(e) => {
                 tracing::warn!(persona = %persona, error = %e, "memory_recall 执行失败");
                 Ok(tool_error(format!(
-                    "召回失败：{e}。可检查人格 uid 是否正确、库文件是否可读后重试"
+                    "{}。可检查人格 uid 是否正确、库文件是否可读后重试",
+                    entry_error_message(&e, "召回失败")
                 )))
             }
         }

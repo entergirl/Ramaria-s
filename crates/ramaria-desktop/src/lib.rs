@@ -360,7 +360,6 @@ pub fn run() {
             commands::chat::confirm_privacy,
             // ---- Setup ----
             commands::setup::run_setup,
-            commands::setup::get_setup_status,
             commands::setup::refresh_setup_state,
             commands::setup::test_llm_connection,
             // ---- Embedding ----
@@ -371,13 +370,11 @@ pub fn run() {
             // ---- Session ----
             commands::session::list_sessions,
             commands::session::get_session,
-            commands::session::delete_session,
             commands::session::create_session,
             // ---- Memory ----
             commands::memory::get_personas,
             commands::memory::get_l1_memories,
             commands::memory::get_l2_events,
-            commands::memory::get_l3_traits,
             commands::memory::trigger_memory_pipeline,
             commands::memory::get_personality_profile,
             commands::memory::get_trait_evidence,
@@ -408,7 +405,6 @@ pub fn run() {
             commands::persona::regenerate_import_pipeline,
             // ---- Rules（行为规则管理）----
             commands::rules::list_rules,
-            commands::rules::get_rule,
             commands::rules::set_rule_enabled,
             commands::rules::edit_rule,
             commands::rules::rule_evidence,

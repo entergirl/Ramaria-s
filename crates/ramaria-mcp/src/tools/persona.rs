@@ -6,7 +6,7 @@
 //! - 分段可选：`persona_get` 可按分段取用，避免一次性拉取全部画像数据
 //! - 空库语义：无人格时返回空列表（不是错误）
 
-use ramaria_service::PersonaCardRequest;
+use ramaria_service::{PersonaCardRequest, entry_error_message};
 use rmcp::ErrorData;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -51,7 +51,7 @@ impl RamariaMcpServer {
             }
             Err(e) => {
                 tracing::warn!(error = %e, "persona_list 执行失败");
-                Ok(tool_error(format!("读取人格列表失败：{e}")))
+                Ok(tool_error(entry_error_message(&e, "读取人格列表失败")))
             }
         }
     }
@@ -99,7 +99,8 @@ impl RamariaMcpServer {
             Err(e) => {
                 tracing::warn!(uid = %uid, error = %e, "persona_get 执行失败");
                 Ok(tool_error(format!(
-                    "读取人格卡片失败：{e}。可先用 persona_list 确认 uid 是否正确"
+                    "{}。可先用 persona_list 确认 uid 是否正确",
+                    entry_error_message(&e, "读取人格卡片失败")
                 )))
             }
         }

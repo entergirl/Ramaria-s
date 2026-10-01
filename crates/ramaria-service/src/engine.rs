@@ -11,7 +11,8 @@
 //! - 懒加载：检索索引在首次召回时构建，本层仅持有占位槽（避免进程启动即加载大库）；
 //!   占位槽未加载期间产生的 L1 增量会置脏标记，保证下次加载重建不漏（见 `index_dirty`）
 //! - 显式重建：`rebuild_index` 强制全量重建（跳过早退与冷却窗口），构建失败保留旧索引
-//!   并置"重建失败"告警位（`is_index_rebuild_failed`，供诊断展示与宿主告警）
+//!   并置"重建失败"告警位与失败原因记录（`is_index_rebuild_failed` / `index_build_failure`，
+//!   供诊断展示与宿主告警）
 //! - 重建节流：跨进程代次变化触发的重建受 `[index].refresh_interval_seconds` 约束
 //!   （0 = 不节流，见 `index_rebuild_cooldown_elapsed`）
 //! - 宿主后台任务：进程内空闲检查循环由入口层拉起（`spawn_idle_loop`），退出时优雅关停
@@ -44,7 +45,7 @@ use crate::config::{ConfigWriter, SyncOutcome, SyncWriteResult};
 use crate::diagnostics::{DiagnosticsReport, DiagnosticsRequest};
 use crate::export::{ExportData, ExportDataRequest};
 use crate::idle::{IdleLoop, IdleLoopOptions};
-use crate::index::IndexStamp;
+use crate::index::{IndexBuildFailure, IndexStamp};
 use crate::lifecycle::{Lifecycle, LifecycleOptions};
 use crate::persona::{PersonaLoadMode, PersonaRegenerateOutcome};
 use crate::privacy::PrivacyStatus;
@@ -56,13 +57,13 @@ use crate::types::{
     AliasResolveOutcome, AliasResolveRequest, ChannelOverviewView, ChatSendOutcome,
     ChatSendRequest, ChatStreamRequest, DegradedReason, EmbeddingModelView, EmbeddingValidation,
     FactBrowsePage, FactBrowseRequest, FactDetailView, GroupedFactsView, HistoryRequest,
-    HistoryResult, IngestOutcome, IngestRequest, KeywordPoolView, KeywordSeedOutcome, L1BrowsePage,
-    L1BrowseRequest, L1MemoryView, L2BrowsePage, L2BrowseRequest, L3TraitView, PendingAliasView,
-    PersonaCardRequest, PersonaCardView, PersonaFileOutcome, PersonaFullView, PersonaSummaryView,
-    PersonaUpdateRequest, PersonalityProfileView, ProfileStatusView, RecallRequest, RecallResult,
-    SealOutcome, SessionBrowsePage, SessionBrowseRequest, SessionDetailView,
-    SessionMessagesRequest, SessionMessagesView, SetupRequest, SetupStatus, TraitEvidenceRequest,
-    TraitEvidenceView,
+    HistoryResult, IngestOutcome, IngestRequest, KeywordPoolView, KeywordSeedOutcome,
+    KeywordSuggestionOutcome, L1BrowsePage, L1BrowseRequest, L1MemoryView, L2BrowsePage,
+    L2BrowseRequest, L3TraitView, PendingAliasView, PersonaCardRequest, PersonaCardView,
+    PersonaFileOutcome, PersonaFullView, PersonaSummaryView, PersonaUpdateRequest,
+    PersonalityProfileView, ProfileStatusView, RecallRequest, RecallResult, SealOutcome,
+    SessionBrowsePage, SessionBrowseRequest, SessionDetailView, SessionMessagesRequest,
+    SessionMessagesView, SetupRequest, SetupStatus, TraitEvidenceRequest, TraitEvidenceView,
 };
 use crate::utt::UttRebuildOutcome;
 
@@ -166,6 +167,13 @@ pub struct Engine {
     /// - `true` = 最近一次构建失败，共享检索器保留的是旧索引（仍可检索，但未刷新）；
     /// - 构建成功后复位；供诊断展示与宿主告警（记忆注入可能不完整）。
     index_rebuild_failed: Arc<AtomicBool>,
+    /// 检索索引最近一次构建失败的原因记录（脱敏原因文本 + 记录时间）。
+    ///
+    /// 语义:
+    /// - `Some(..)` = 最近一次构建失败；构建成功后清除；
+    /// - 供诊断导出与宿主提示携带可诊断原因；读取方取克隆后在锁外使用
+    ///   （异步路径不持锁跨 `.await`）。
+    index_build_failure: Arc<RwLock<Option<IndexBuildFailure>>>,
     /// 行为层待定池（跨会话内存态：行为增量编排的归簇状态）。
     behavior_pending: Arc<Mutex<PendingPool>>,
     /// 召回隐私与边界策略（装配时按配置闸门映射缺省；入口层可按需注入覆盖）。
@@ -304,6 +312,7 @@ impl Engine {
             index_stamp: Arc::new(RwLock::new(None)),
             last_index_build_ms: Arc::new(AtomicI64::new(0)),
             index_rebuild_failed: Arc::new(AtomicBool::new(false)),
+            index_build_failure: Arc::new(RwLock::new(None)),
             recall_policy: Arc::new(RwLock::new(recall_policy)),
             seal_hooks: Arc::new(RwLock::new(SealHooks::default())),
             seal_allowed: AtomicBool::new(true),
@@ -346,6 +355,7 @@ impl Engine {
             index_stamp: Arc::new(RwLock::new(None)),
             last_index_build_ms: Arc::new(AtomicI64::new(0)),
             index_rebuild_failed: Arc::new(AtomicBool::new(false)),
+            index_build_failure: Arc::new(RwLock::new(None)),
             recall_policy: Arc::new(RwLock::new(recall_policy)),
             seal_hooks: Arc::new(RwLock::new(SealHooks::default())),
             seal_allowed: AtomicBool::new(true),
@@ -846,6 +856,19 @@ impl Engine {
     ///   新词条 use_count 从 0 起，已存在词条不递增 use_count、不改别名状态。
     pub async fn keyword_seed(&self, keywords: &[String]) -> RamariaResult<KeywordSeedOutcome> {
         crate::keyword::seed(self, keywords).await
+    }
+
+    /// 关键词别名建议用例：扫描词池与内存镜像使用量，把相似词对登记为待确认别名。
+    ///
+    /// 说明:
+    /// - `min_use` 为 None 时取服务层默认阈值（过滤仅出现 1-2 次的偶然用词）；
+    /// - 单次运行最多登记固定条数，超出部分本轮不写（结果中携带截断计数）；
+    /// - 调用入口按 best-effort 处理错误（建议生成不阻塞列表 / 主流程）。
+    pub async fn keyword_suggest_pending_aliases(
+        &self,
+        min_use: Option<u32>,
+    ) -> RamariaResult<KeywordSuggestionOutcome> {
+        crate::keyword::suggest_pending_aliases(self, min_use).await
     }
 
     /// 人格列表用例：列出全部人格摘要（uid / 名称 / 类型 / 来源 / 启用状态）。
@@ -1586,6 +1609,32 @@ impl Engine {
     /// 设置检索索引"重建失败"告警位（构建成功复位 / 失败置位，由索引构建路径调用）。
     pub(crate) fn set_index_rebuild_failed(&self, failed: bool) {
         self.index_rebuild_failed.store(failed, Ordering::Release);
+    }
+
+    /// 最近一次索引构建失败记录（脱敏原因 + 时间戳；未失败 / 已恢复为 `None`）。
+    ///
+    /// 用途:
+    /// - 诊断导出携带可诊断原因；不改变任何降级行为（旧索引照常检索）。
+    pub fn index_build_failure(&self) -> Option<IndexBuildFailure> {
+        read_recover(&self.index_build_failure, "engine.index_build_failure").clone()
+    }
+
+    /// 记录索引构建失败原因（由索引构建路径在失败分支调用）。
+    ///
+    /// 参数:
+    /// - `reason`: 脱敏后的原因文本（路径只留文件名、消息类字段只留字符数，不含用户原文）。
+    pub(crate) fn record_index_build_failure(&self, reason: String) {
+        let mut guard = write_recover(&self.index_build_failure, "engine.index_build_failure");
+        *guard = Some(IndexBuildFailure {
+            reason,
+            at_ms: now_ms(),
+        });
+    }
+
+    /// 清除索引构建失败记录（构建成功后复位）。
+    pub(crate) fn clear_index_build_failure(&self) {
+        let mut guard = write_recover(&self.index_build_failure, "engine.index_build_failure");
+        *guard = None;
     }
 
     /// 记录索引代次快照（索引构建完成后调用）。

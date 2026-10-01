@@ -238,7 +238,7 @@ async fn build_from_db(
     );
 
     // 高情感选题：真实候选不足时显式告警（每维分别提示），并提示可用 --source
-    // 手动补充 JSON 数据源（替代纯人工造题，D-V20-006 高情感选题器口径）。
+    // 手动补充 JSON 数据源（替代纯人工造题，高情感选题口径）。
     for (dim, n) in [
         ("tone", tone_pairs.len()),
         ("fact", fact_items.len()),
@@ -946,7 +946,7 @@ struct SourceEvent {
 /// 内置语气模仿夹具（(用户问题, persona 原回复) 配对）。
 ///
 /// 内容说明: 示例角色 persona（char-0001）的典型回应风格——
-/// 工作吐槽安抚、生活建议、情绪陪伴，覆盖 v1.5「行为驱动」的目标情境。
+/// 工作吐槽安抚、生活建议、情绪陪伴，覆盖「行为驱动」的目标情境。
 pub fn fixture_tone_pairs() -> Vec<(String, String)> {
     vec![
         (

@@ -324,32 +324,27 @@ mod tests {
         format!("http://127.0.0.1:{}/v1", addr.port())
     }
 
-    /// 缺项诊断：空库缺后端 / 模型 / 嵌入三项；显式置索引版本为 0 后补第四项；
+    /// 缺项诊断：空库缺后端 / 模型 / 索引 / 嵌入四项；显式置索引版本为已构建后去掉索引项；
     /// 本地 / 线上 provider 的模型选择口径不同。
     #[tokio::test]
     async fn check_reports_missing_items_on_empty_db() {
         let (engine, storage, dir) = engine_with_db("setup-empty").await;
 
-        // 空库 migration 预置索引版本 1：只缺后端 / 模型 / 嵌入三项
+        // 空库 migration 后索引版本为 0（未构建）：缺后端 / 模型 / 索引 / 嵌入四项
         let status = engine.check_setup_status().await.expect("诊断应成功");
         assert!(!status.backend_configured);
         assert!(!status.model_selected);
         assert!(
-            !status.needs_indexing,
-            "migration 预置索引版本 1，空库按已构建口径"
+            status.needs_indexing,
+            "新库迁移后索引版本为 0，空库按未构建口径"
         );
         assert!(!status.embedding_available);
         assert!(!status.is_complete());
-        assert_eq!(status.missing_items().len(), 3, "缺后端 / 模型 / 嵌入");
-
-        // 显式标记索引待构建：缺项清单补上索引项
-        storage
-            .set_index_version(0)
-            .await
-            .expect("写入索引版本应成功");
-        let status = engine.check_setup_status().await.expect("诊断应成功");
-        assert!(status.needs_indexing);
-        assert_eq!(status.missing_items().len(), 4, "四项全缺");
+        assert_eq!(
+            status.missing_items().len(),
+            4,
+            "缺后端 / 模型 / 索引 / 嵌入"
+        );
         assert!(
             status
                 .missing_items()
@@ -357,6 +352,15 @@ mod tests {
                 .any(|item| item.contains("索引")),
             "缺项应包含索引项"
         );
+
+        // 显式标记索引已构建：缺项清单去掉索引项
+        storage
+            .set_index_version(1)
+            .await
+            .expect("写入索引版本应成功");
+        let status = engine.check_setup_status().await.expect("诊断应成功");
+        assert!(!status.needs_indexing);
+        assert_eq!(status.missing_items().len(), 3, "缺后端 / 模型 / 嵌入");
 
         // 本地 provider：模型选择视为完成
         storage
