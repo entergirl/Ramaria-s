@@ -1,5 +1,7 @@
 # Ramaria cargo-deny 配置
-# 
+#
+# 当前无 CI 消费（License Check job 已移除），保留待恢复。
+#
 # 策略：
 #   - 允许 MIT / Apache-2.0 / BSD / ISC / Unicode 等宽松许可证
 #   - 拒绝 GPL / AGPL / LGPL 等 copyleft 许可证（Ramaria 独立分发，不强制开源）

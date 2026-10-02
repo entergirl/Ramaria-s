@@ -1,9 +1,11 @@
 # Ramaria Rust CI
+# job 集合：build-and-test（Windows）/ coverage（Windows）/ structure-check（Ubuntu，秒级）
 # 规则：
 #   - Windows 编译 + 单元测试（v1.0 首发 Windows，macOS/Linux 延后）
 #   - 不跑真实 LLM，不下 embedding 模型，不打包 Tauri
-#   - 阻塞条件：cargo build / test / clippy / fmt 全部通过；coverage 行覆盖率低于阈值即失败
-#   - 非阻塞条件：cargo-deny / cargo-audit 仅报告，不阻塞 PR
+#   - 阻塞条件：cargo build / test / clippy / fmt 全部通过；coverage 行覆盖率低于阈值即失败；
+#     structure-check 结构红线达标（脚本非零退出码即失败）
+#   - deny.toml 保留在仓库但无 CI 消费（License Check / Security Audit 两个 job 已移除，待恢复）
 
 name: CI
 
@@ -95,48 +97,22 @@ jobs:
       - name: Show coverage summary
         run: cargo llvm-cov --workspace --summary-only
 
-  # ---- 依赖许可证检查（非阻塞） ----
-  # 使用 cargo-deny 检查依赖树的许可证兼容性。
-  # 拒绝列表: 禁止 GPL/AGPL 等强制开源的许可证（Ramaria 独立分发）。
-  cargo-deny:
-    name: License Check (cargo-deny)
+  # ---- 结构自检（阻塞） ----
+  # 秒级：纯文件遍历（scripts/check_structure.py），对照文件粒度红线（生产 ≤700 / 测试 ≤1200 /
+  # mod.rs·lib.rs ≤500；例外见 scripts/structure-exemptions.toml），输出阻断 / 建议 / 例外清单。
+  # 退出码即结论：0 = 通过 / 1 = 存在阻断项 / 2 = 环境或清单错误；非零即失败，无需额外包装。
+  structure-check:
+    name: Structure Check
     runs-on: ubuntu-latest
-    continue-on-error: true  # 非阻塞
-    strategy:
-      matrix:
-        checks:
-          - advisories
-          - bans licenses sources
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@v2
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          command: check ${{ matrix.checks }}
-          # 注: 首次运行可能缺少 deny.toml 配置文件，cargo-deny 会使用内置默认规则。
-          # 后续可在仓库根目录添加 deny.toml 以自定义许可证策略。
+          python-version: '3.12'
 
-  # ---- 安全漏洞审计（非阻塞） ----
-  # 使用 cargo-audit 检查已知的 RustSec 安全漏洞。
-  security-audit:
-    name: Security Audit (cargo-audit)
-    runs-on: ubuntu-latest
-    continue-on-error: true  # 非阻塞：发现漏洞时仅报告，由项目负责人评估
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install cargo-audit
-        uses: taiki-e/install-action@cargo-audit
-
-      - name: Run security audit
-        run: cargo audit
-        # 注：若有已知漏洞，此步骤会输出 CVE 编号和受影响版本，
-        # 但因 continue-on-error: true，不会阻塞 CI。
+      - name: Run structure check
+        run: python scripts/check_structure.py

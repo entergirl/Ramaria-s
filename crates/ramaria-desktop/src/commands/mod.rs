@@ -16,6 +16,7 @@ pub mod index_cmd;
 pub mod keywords;
 pub mod mcp;
 pub mod memory;
+pub mod memory_view;
 pub mod persona;
 pub mod rules;
 pub mod session;
