@@ -14,3 +14,8 @@
 # path = "crates/ramaria-storage/src/lib.rs"
 # reason = "migration 常量与 schema 定义结构上不可再切"
 # date = "YYYY-MM-DD"
+
+[[exemption]]
+path = "crates/ramaria-core/src/traits/store_crud.rs"
+reason = "StoreCrud 单一 trait 契约定义（890 行），trait 体结构上不可跨文件拆分"
+date = "2026-10-02"
