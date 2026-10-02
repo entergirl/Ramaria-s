@@ -25,7 +25,7 @@
 const CURRENT_SCHEMA_VERSION: u32 = 1;
 
 /// 当前 Ramaria 应用版本号（与 workspace Cargo.toml 保持同步）。
-const CURRENT_APP_VERSION: &str = "2.2.0";
+const CURRENT_APP_VERSION: &str = "2.3.0";
 
 mod channels;
 mod core;
