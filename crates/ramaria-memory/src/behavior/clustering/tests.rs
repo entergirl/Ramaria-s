@@ -6,7 +6,9 @@
 
 use super::*;
 use ramaria_core::config::BehaviorConfig;
-use ramaria_core::types::Presentation;
+use ramaria_core::error::RamariaResult;
+use ramaria_core::traits::EmbeddingProvider;
+use ramaria_core::types::{MemoryEvent, Presentation};
 
 fn sample(
     event_id: i64,

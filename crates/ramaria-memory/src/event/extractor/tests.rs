@@ -3,7 +3,11 @@
 //! 设计特点:
 //! - 覆盖事件 JSON 解析、字段归一化、去重指纹、关系提取与响应分派等纯逻辑。
 //! - 使用合成事件与 mock LLM/存储，不依赖真实 LLM/embedding。
+use super::parse::{
+    EventRelationOutput, EventResponse, parse_relation_kind, timestamp_to_date_str,
+};
 use super::*;
+use crate::TopicCluster;
 use ramaria_core::types::Presentation;
 use ramaria_core::types::now_ms;
 use uuid::Uuid;
