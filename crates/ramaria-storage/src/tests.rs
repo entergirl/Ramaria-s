@@ -1,0 +1,2634 @@
+//! crates/ramaria-storage/src/tests.rs - Ramaria 存储层集成测试模块
+//!
+//! 设计特点:
+//! - 覆盖 SqliteStorage 的 StoreCrud / StoreInfrastructure 代理接线（会话、消息、L1/L2/L3、关键词、后台任务、设置等）
+//! - 覆盖 SqliteLlmCache 的读写、计数与 LRU/FIFO 容量淘汰
+//! - 覆盖 baseline migration：建表、索引与版本元数据核对
+//! - 统一以 init_test_pool 构建空库，用例间相互独立
+//! - 通过 `use super::*` 保留 crate 内部访问能力（含 storage.pool 的直接访问）
+
+use super::*;
+use ramaria_core::config::CacheEviction;
+use ramaria_core::error::RamariaError;
+use ramaria_core::keyword::KeywordToken;
+use ramaria_core::traits::{
+    BM25_INDEX_VERSION_CURRENT, BM25_INDEX_VERSION_LEGACY, IndexCorpusStamp, LlmResponseCache,
+    SETTING_BM25_INDEX_VERSION, StoreCrud, StoreInfrastructure,
+};
+use ramaria_core::types::{
+    EventBatchWrite, EventRelation, EventRelationKind, EvidenceDirection, FactSource, MemoryEvent,
+    MemoryL1, Message, MessageRole, MessageSource, Persona, PersonaFact, PersonaKind,
+    PersonalityTrait, PrivacyConsent, TraitEvidence, TraitLayer, TraitSource, TraitStatus,
+    UttBlock, now_ms,
+};
+use uuid::Uuid;
+
+async fn setup() -> SqliteStorage {
+    let pool = database::init_test_pool()
+        .await
+        .expect("测试数据库初始化失败");
+    SqliteStorage::new(pool)
+}
+
+#[tokio::test]
+async fn session_crud() {
+    let storage = setup().await;
+    let session = storage.create_session(None).await.unwrap();
+    assert!(session.ended_at.is_none());
+
+    let got = storage.get_session(session.id).await.unwrap().unwrap();
+    assert_eq!(got.id, session.id);
+
+    storage.close_session(session.id).await.unwrap();
+    let closed = storage.get_session(session.id).await.unwrap().unwrap();
+    assert!(closed.ended_at.is_some());
+}
+
+// =========================================================
+// Session-Persona 绑定测试
+// =========================================================
+
+/// 创建 session 时可传入 persona_uid，get 时正确返回。
+#[tokio::test]
+async fn session_with_persona_uid() {
+    let storage = setup().await;
+    let session = storage.create_session(Some("user-0001")).await.unwrap();
+
+    assert_eq!(session.persona_uid.as_deref(), Some("user-0001"));
+    assert!(session.ended_at.is_none());
+
+    // get 应返回相同 persona_uid
+    let got = storage.get_session(session.id).await.unwrap().unwrap();
+    assert_eq!(got.persona_uid.as_deref(), Some("user-0001"));
+}
+
+/// 存量兼容：不传 persona_uid 时，session.persona_uid 为 None。
+#[tokio::test]
+async fn session_without_persona_uid_compatible() {
+    let storage = setup().await;
+    let session = storage.create_session(None).await.unwrap();
+
+    assert!(session.persona_uid.is_none());
+    assert!(session.ended_at.is_none());
+
+    // get 应返回 None
+    let got = storage.get_session(session.id).await.unwrap().unwrap();
+    assert!(got.persona_uid.is_none());
+}
+
+/// 活跃 session 列表正确返回 persona_uid。
+#[tokio::test]
+async fn active_sessions_preserve_persona_uid() {
+    let storage = setup().await;
+
+    let s1 = storage.create_session(Some("char-0001")).await.unwrap();
+    let s2 = storage.create_session(Some("char-0002")).await.unwrap();
+    let _s3 = storage.create_session(None).await.unwrap();
+
+    let active = storage.list_active_sessions().await.unwrap();
+    // 所有 session 都是活跃的
+    assert!(active.len() >= 3);
+
+    let got1 = active.iter().find(|s| s.id == s1.id).unwrap();
+    assert_eq!(got1.persona_uid.as_deref(), Some("char-0001"));
+
+    let got2 = active.iter().find(|s| s.id == s2.id).unwrap();
+    assert_eq!(got2.persona_uid.as_deref(), Some("char-0002"));
+}
+
+/// 全部 session 列表正确返回 persona_uid。
+#[tokio::test]
+async fn all_sessions_preserve_persona_uid() {
+    let storage = setup().await;
+
+    let s = storage.create_session(Some("rama-0001")).await.unwrap();
+    storage.close_session(s.id).await.unwrap();
+
+    let all = storage.list_sessions().await.unwrap();
+    let got = all.iter().find(|x| x.id == s.id).unwrap();
+    assert_eq!(got.persona_uid.as_deref(), Some("rama-0001"));
+}
+
+#[tokio::test]
+async fn message_crud() {
+    let storage = setup().await;
+    let session = storage.create_session(None).await.unwrap();
+    let msg = Message::new(
+        session.id,
+        MessageRole::User,
+        "测试消息".into(),
+        MessageSource::Local,
+    );
+    storage.save_message(&msg).await.unwrap();
+
+    let msgs = storage.list_messages(session.id).await.unwrap();
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0].content, "测试消息");
+}
+
+#[tokio::test]
+async fn message_with_persona_uid() {
+    let storage = setup().await;
+    // 先创建 persona，否则 FK 约束会失败
+    let p = Persona::new(
+        "user-0001".into(),
+        "用户".into(),
+        PersonaKind::User,
+        1,
+        "local".into(),
+    );
+    storage.create_persona(&p).await.unwrap();
+
+    let session = storage.create_session(None).await.unwrap();
+    let mut msg = Message::new(
+        session.id,
+        MessageRole::User,
+        "你好".into(),
+        MessageSource::Local,
+    );
+    msg.persona_uid = Some("user-0001".into());
+    storage.save_message(&msg).await.unwrap();
+
+    let msgs = storage.list_messages(session.id).await.unwrap();
+    assert_eq!(msgs[0].persona_uid.as_deref(), Some("user-0001"));
+}
+
+#[tokio::test]
+async fn memory_l1_crud() {
+    let storage = setup().await;
+    let session = storage.create_session(None).await.unwrap();
+    let l1 = MemoryL1::new(session.id, "摘要".into(), Some("上午".into()));
+    storage.save_memory_l1(&l1).await.unwrap();
+
+    let list = storage.list_memory_l1(session.id).await.unwrap();
+    assert_eq!(list.len(), 1);
+}
+
+#[tokio::test]
+async fn persona_crud() {
+    let storage = setup().await;
+    let p = Persona::new(
+        "user-0001".into(),
+        "测试用户".into(),
+        PersonaKind::User,
+        1,
+        "local".into(),
+    );
+    let id = storage.create_persona(&p).await.unwrap();
+    assert!(id > 0, "INSERT 后应返回有效的自增 id");
+
+    let got = storage
+        .get_persona_by_uid("user-0001")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(got.name, "测试用户");
+    assert_eq!(got.id, id);
+
+    let all = storage.list_personas().await.unwrap();
+    assert!(!all.is_empty());
+}
+
+#[tokio::test]
+async fn memory_event_crud() {
+    let storage = setup().await;
+    let p = Persona::new(
+        "user-0001".into(),
+        "用户".into(),
+        PersonaKind::User,
+        1,
+        "local".into(),
+    );
+    storage.create_persona(&p).await.unwrap();
+
+    let now = now_ms();
+    let ev = MemoryEvent::new(
+        "user-0001".into(),
+        "事件".into(),
+        "描述".into(),
+        now - 1000,
+        now,
+    );
+    let ev_id = storage.save_event(&ev).await.unwrap();
+    assert!(ev_id > 0);
+
+    let events = storage
+        .list_events_by_persona("user-0001", 0, 10)
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].title, "事件");
+    assert_eq!(events[0].id, ev_id);
+}
+
+#[tokio::test]
+async fn event_relation_crud() {
+    let storage = setup().await;
+    let p = Persona::new(
+        "user-0001".into(),
+        "用户".into(),
+        PersonaKind::User,
+        1,
+        "local".into(),
+    );
+    storage.create_persona(&p).await.unwrap();
+    let now = now_ms();
+    let e1 = MemoryEvent::new("user-0001".into(), "A".into(), "desc".into(), now, now);
+    let e2 = MemoryEvent::new("user-0001".into(), "B".into(), "desc".into(), now, now);
+    let id1 = storage.save_event(&e1).await.unwrap();
+    let id2 = storage.save_event(&e2).await.unwrap();
+
+    let rel = EventRelation::new(id1, id2, EventRelationKind::CausedBy);
+    let rel_id = storage.save_event_relation(&rel).await.unwrap();
+    assert!(rel_id > 0);
+}
+
+#[tokio::test]
+async fn event_source_crud() {
+    let storage = setup().await;
+    let session = storage.create_session(None).await.unwrap();
+    let l1 = MemoryL1::new(session.id, "摘要".into(), None);
+    storage.save_memory_l1(&l1).await.unwrap();
+    let p = Persona::new(
+        "user-0001".into(),
+        "用户".into(),
+        PersonaKind::User,
+        1,
+        "local".into(),
+    );
+    storage.create_persona(&p).await.unwrap();
+    let now = now_ms();
+    let ev = MemoryEvent::new("user-0001".into(), "E".into(), "desc".into(), now, now);
+    let ev_id = storage.save_event(&ev).await.unwrap();
+
+    storage.save_event_source(ev_id, l1.id, 1.0).await.unwrap();
+}
+
+// =========================================================
+// 事件批次单事务写入（save_event_batch）
+// =========================================================
+
+/// 正常路径：2 事件 + 来源 + 关系 + absorbed 全量落库；
+/// 返回 id 与 events 顺序一一对应。
+#[tokio::test]
+async fn save_event_batch_all_parts_persisted() {
+    let storage = setup().await;
+    let session = storage.create_session(None).await.unwrap();
+    let l1 = MemoryL1::new(session.id, "摘要".into(), None);
+    storage.save_memory_l1(&l1).await.unwrap();
+    let p = Persona::new(
+        "user-0001".into(),
+        "用户".into(),
+        PersonaKind::User,
+        1,
+        "local".into(),
+    );
+    storage.create_persona(&p).await.unwrap();
+
+    let now = now_ms();
+    let e1 = MemoryEvent::new("user-0001".into(), "A".into(), "desc-a".into(), now, now);
+    let e2 = MemoryEvent::new("user-0001".into(), "B".into(), "desc-b".into(), now, now);
+    let batch = EventBatchWrite {
+        events: vec![e1, e2],
+        sources: vec![(0, l1.id, 1.0), (1, l1.id, 0.5)],
+        relations: vec![(0, 1, EventRelationKind::CausedBy, 0.8)],
+        absorbed_l1_ids: vec![l1.id],
+    };
+
+    let ids = storage.save_event_batch(&batch).await.unwrap();
+    assert_eq!(ids.len(), 2, "返回 id 数应与事件数一致");
+    assert!(ids[0] > 0 && ids[1] > 0 && ids[0] != ids[1]);
+
+    // 事件落库且 id 与输入顺序对应
+    let events = storage
+        .list_events_by_persona("user-0001", 0, 10)
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 2);
+    let a = events
+        .iter()
+        .find(|e| e.title == "A")
+        .expect("事件 A 应落库");
+    let b = events
+        .iter()
+        .find(|e| e.title == "B")
+        .expect("事件 B 应落库");
+    assert_eq!(a.id, ids[0], "返回 id 应与 events 顺序对应");
+    assert_eq!(b.id, ids[1], "返回 id 应与 events 顺序对应");
+
+    // 来源落库
+    let sources_a = storage.list_event_sources_by_event(a.id).await.unwrap();
+    assert_eq!(sources_a.len(), 1);
+    assert_eq!(sources_a[0].l1_id, l1.id);
+    assert!((sources_a[0].weight - 1.0).abs() < 1e-9);
+    let sources_b = storage.list_event_sources_by_event(b.id).await.unwrap();
+    assert_eq!(sources_b.len(), 1);
+    assert!((sources_b[0].weight - 0.5).abs() < 1e-9);
+
+    // 关系落库
+    let relations = storage
+        .list_event_relations_by_persona("user-0001")
+        .await
+        .unwrap();
+    assert_eq!(relations.len(), 1);
+    assert_eq!(relations[0].from_id, a.id);
+    assert_eq!(relations[0].to_id, b.id);
+    assert_eq!(relations[0].kind, EventRelationKind::CausedBy);
+
+    // L1 已吸收
+    let l1_loaded = storage.get_memory_l1(l1.id).await.unwrap().unwrap();
+    assert!(l1_loaded.absorbed, "L1 应被批次事务标记为已吸收");
+}
+
+/// 失败回滚：sources 下标越界 → 整体回滚（事件不落库、L1 不吸收）。
+#[tokio::test]
+async fn save_event_batch_rolls_back_on_out_of_range_source() {
+    let storage = setup().await;
+    let session = storage.create_session(None).await.unwrap();
+    let l1 = MemoryL1::new(session.id, "摘要".into(), None);
+    storage.save_memory_l1(&l1).await.unwrap();
+    let p = Persona::new(
+        "user-0001".into(),
+        "用户".into(),
+        PersonaKind::User,
+        1,
+        "local".into(),
+    );
+    storage.create_persona(&p).await.unwrap();
+
+    let now = now_ms();
+    let e1 = MemoryEvent::new("user-0001".into(), "A".into(), "desc".into(), now, now);
+    let batch = EventBatchWrite {
+        events: vec![e1],
+        // 越界：批次仅 1 条事件（下标 0），下标 9 非法
+        sources: vec![(9, l1.id, 1.0)],
+        relations: vec![],
+        absorbed_l1_ids: vec![l1.id],
+    };
+
+    let err = storage
+        .save_event_batch(&batch)
+        .await
+        .expect_err("越界下标应报错");
+    assert_eq!(err.category(), "validation", "越界应返回 Validation: {err}");
+
+    // 整体回滚：无新事件、L1 未吸收
+    let events = storage
+        .list_events_by_persona("user-0001", 0, 10)
+        .await
+        .unwrap();
+    assert!(events.is_empty(), "失败批次不应残留事件行");
+    let l1_loaded = storage.get_memory_l1(l1.id).await.unwrap().unwrap();
+    assert!(!l1_loaded.absorbed, "失败批次不应标记 L1 吸收");
+}
+
+/// 空事件 + absorbed 非空 → 只标记吸收、返回空 ids。
+#[tokio::test]
+async fn save_event_batch_empty_events_marks_l1_only() {
+    let storage = setup().await;
+    let session = storage.create_session(None).await.unwrap();
+    let l1 = MemoryL1::new(session.id, "摘要".into(), None);
+    storage.save_memory_l1(&l1).await.unwrap();
+
+    let batch = EventBatchWrite {
+        events: vec![],
+        sources: vec![],
+        relations: vec![],
+        absorbed_l1_ids: vec![l1.id],
+    };
+    let ids = storage.save_event_batch(&batch).await.unwrap();
+    assert!(ids.is_empty(), "空事件批次应返回空 id 列表");
+    let l1_loaded = storage.get_memory_l1(l1.id).await.unwrap().unwrap();
+    assert!(l1_loaded.absorbed, "空事件批次仍应标记吸收");
+}
+
+#[tokio::test]
+async fn persona_fact_crud() {
+    let storage = setup().await;
+    let p = Persona::new(
+        "user-0001".into(),
+        "用户".into(),
+        PersonaKind::User,
+        1,
+        "local".into(),
+    );
+    storage.create_persona(&p).await.unwrap();
+
+    let fact = PersonaFact::new(
+        "user-0001".into(),
+        ramaria_core::types::ProfileField::BasicInfo,
+        "姓名：小明".into(),
+        FactSource::L1,
+    );
+    let fact_id = storage.save_fact(&fact).await.unwrap();
+    assert!(fact_id > 0);
+
+    let facts = storage
+        .list_facts_by_persona("user-0001", ramaria_core::types::ProfileField::BasicInfo)
+        .await
+        .unwrap();
+    assert_eq!(facts.len(), 1);
+    assert_eq!(facts[0].id, fact_id);
+}
+
+// =========================================================
+// persona_facts 版本化 repo 测试
+// =========================================================
+
+/// 事务化版本链覆盖写：旧事实置 superseded + 新事实写入（version_of 指向旧 id）。
+#[tokio::test]
+async fn fact_version_chain_overwrite_atomic() {
+    use ramaria_core::types::FactStatus;
+    let storage = setup().await;
+    let p = Persona::new(
+        "user-0002".into(),
+        "用户二".into(),
+        PersonaKind::User,
+        1,
+        "local".into(),
+    );
+    storage.create_persona(&p).await.unwrap();
+
+    let mut old = PersonaFact::new(
+        "user-0002".into(),
+        ramaria_core::types::ProfileField::PersonalStatus,
+        "当前情绪：平静".into(),
+        FactSource::Event,
+    );
+    let old_id = storage.save_fact(&old).await.unwrap();
+    old.id = old_id;
+
+    // 新事实覆盖旧事实：旧置 superseded、新写入且 version_of 指向旧
+    let fresh = PersonaFact::new(
+        "user-0002".into(),
+        ramaria_core::types::ProfileField::PersonalStatus,
+        "当前情绪：焦虑".into(),
+        FactSource::Event,
+    );
+    let fresh_id = storage.save_fact_with_version(&old, &fresh).await.unwrap();
+    assert!(fresh_id > old_id);
+
+    // 旧事实已 superseded
+    let old_now = storage.get_fact_by_id(old_id).await.unwrap().unwrap();
+    assert_eq!(old_now.status, FactStatus::Superseded);
+
+    // 新事实 active 且 version_of 指向旧 id
+    let fresh_now = storage.get_fact_by_id(fresh_id).await.unwrap().unwrap();
+    assert_eq!(fresh_now.status, FactStatus::Active);
+    assert_eq!(fresh_now.version_of, Some(old_id));
+
+    // 版本链：从新事实回溯到旧事实（链头最早在前）
+    let chain = storage.list_fact_versions(fresh_id).await.unwrap();
+    assert_eq!(chain.len(), 2);
+    assert_eq!(chain[0].id, old_id);
+    assert_eq!(chain[1].id, fresh_id);
+
+    // active 查询只返回新事实（不含 superseded 旧事实）
+    let active = storage
+        .list_active_facts_by_field(
+            "user-0002",
+            ramaria_core::types::ProfileField::PersonalStatus,
+        )
+        .await
+        .unwrap();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].id, fresh_id);
+}
+
+/// list_active_facts_by_persona：跨字段仅返回 active 事实（superseded 旧版本被排除）。
+#[tokio::test]
+async fn fact_list_active_by_persona_excludes_superseded() {
+    use ramaria_core::types::FactStatus;
+    let storage = setup().await;
+    let p = Persona::new(
+        "user-0003".into(),
+        "用户三".into(),
+        PersonaKind::User,
+        1,
+        "local".into(),
+    );
+    storage.create_persona(&p).await.unwrap();
+
+    // 先写入旧事实
+    let mut old = PersonaFact::new(
+        "user-0003".into(),
+        ramaria_core::types::ProfileField::Interests,
+        "喜欢摄影".into(),
+        FactSource::Manual,
+    );
+    let old_id = storage.save_fact(&old).await.unwrap();
+    old.id = old_id;
+
+    // 覆盖写：旧事实自动置 superseded，新事实 active（版本链推进）
+    let fresh = PersonaFact::new(
+        "user-0003".into(),
+        ramaria_core::types::ProfileField::Interests,
+        "喜欢旅行".into(),
+        FactSource::Manual,
+    );
+    let fresh_id = storage.save_fact_with_version(&old, &fresh).await.unwrap();
+    assert!(fresh_id > old_id);
+
+    let old_now = storage.get_fact_by_id(old_id).await.unwrap().unwrap();
+    assert_eq!(old_now.status, FactStatus::Superseded);
+
+    // active 查询只含新事实（不含 superseded 旧版本）
+    let active = storage
+        .list_active_facts_by_persona("user-0003")
+        .await
+        .unwrap();
+    assert_eq!(active.len(), 1, "superseded 事实不应出现在 active 查询中");
+    assert_eq!(active[0].id, fresh_id);
+
+    // 全部查询（CLI/版本链统计）仍包含 superseded 旧版本
+    let all = storage
+        .list_all_facts_by_persona("user-0003")
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 2);
+    assert!(all.iter().any(|f| f.status == FactStatus::Superseded));
+    assert!(all.iter().any(|f| f.status == FactStatus::Active));
+}
+
+/// get_fact_by_id 对不存在 id 返回 None（CLI show 缺省兜底）。
+#[tokio::test]
+async fn fact_get_by_id_missing_returns_none() {
+    let storage = setup().await;
+    let got = storage.get_fact_by_id(99999).await.unwrap();
+    assert!(got.is_none());
+}
+
+/// 验证 GROUP BY 查询正确统计各字段数量。
+#[tokio::test]
+async fn count_all_facts_for_persona_grouped() {
+    let storage = setup().await;
+    let p = Persona::new(
+        "user-0001".into(),
+        "用户".into(),
+        PersonaKind::User,
+        1,
+        "local".into(),
+    );
+    storage.create_persona(&p).await.unwrap();
+
+    // 写入 3 条不同字段的 fact
+    let f1 = PersonaFact::new(
+        "user-0001".into(),
+        ramaria_core::types::ProfileField::BasicInfo,
+        "姓名：小明".into(),
+        FactSource::L1,
+    );
+    let f2 = PersonaFact::new(
+        "user-0001".into(),
+        ramaria_core::types::ProfileField::Interests,
+        "喜欢编程".into(),
+        FactSource::Manual,
+    );
+    let f3 = PersonaFact::new(
+        "user-0001".into(),
+        ramaria_core::types::ProfileField::Interests,
+        "喜欢阅读".into(),
+        FactSource::Manual,
+    );
+    storage.save_fact(&f1).await.unwrap();
+    storage.save_fact(&f2).await.unwrap();
+    storage.save_fact(&f3).await.unwrap();
+
+    let counts = storage
+        .count_all_facts_for_persona("user-0001")
+        .await
+        .unwrap();
+    assert_eq!(counts.len(), 7, "应返回全部 7 个 ProfileField");
+
+    // BasicInfo: 1 条
+    let basic_count = counts
+        .iter()
+        .find(|(f, _)| *f == ramaria_core::types::ProfileField::BasicInfo)
+        .map(|(_, c)| *c)
+        .unwrap_or(0);
+    assert_eq!(basic_count, 1);
+
+    // Interests: 2 条
+    let interests_count = counts
+        .iter()
+        .find(|(f, _)| *f == ramaria_core::types::ProfileField::Interests)
+        .map(|(_, c)| *c)
+        .unwrap_or(0);
+    assert_eq!(interests_count, 2);
+
+    // PersonalStatus: 0 条（未写入）
+    let ps_count = counts
+        .iter()
+        .find(|(f, _)| *f == ramaria_core::types::ProfileField::PersonalStatus)
+        .map(|(_, c)| *c)
+        .unwrap_or(0);
+    assert_eq!(ps_count, 0, "未写入的字段应返回 0");
+
+    // 总计数应为 3
+    let total: usize = counts.iter().map(|(_, c)| c).sum();
+    assert_eq!(total, 3);
+}
+
+/// 验证无记录 persona 返回全 0。
+#[tokio::test]
+async fn count_all_facts_for_persona_empty() {
+    let storage = setup().await;
+    let p = Persona::new(
+        "user-empty".into(),
+        "用户".into(),
+        PersonaKind::User,
+        1,
+        "local".into(),
+    );
+    storage.create_persona(&p).await.unwrap();
+
+    let counts = storage
+        .count_all_facts_for_persona("user-empty")
+        .await
+        .unwrap();
+    assert_eq!(counts.len(), 7);
+    let total: usize = counts.iter().map(|(_, c)| c).sum();
+    assert_eq!(total, 0, "无 fact 时总计应为 0");
+}
+
+#[tokio::test]
+async fn personality_trait_crud() {
+    let storage = setup().await;
+    let p = Persona::new(
+        "user-0001".into(),
+        "用户".into(),
+        PersonaKind::User,
+        1,
+        "local".into(),
+    );
+    storage.create_persona(&p).await.unwrap();
+
+    let pt = PersonalityTrait::new(
+        "user-0001".into(),
+        TraitLayer::Base,
+        "温和".into(),
+        "待人温和".into(),
+        TraitSource::Inferred,
+        0,
+    );
+    let pt_id = storage.save_trait(&pt).await.unwrap();
+    assert!(pt_id > 0);
+
+    let traits = storage.list_traits_by_persona("user-0001").await.unwrap();
+    assert_eq!(traits.len(), 1);
+    assert_eq!(traits[0].trait_label, "温和");
+    assert_eq!(traits[0].id, pt_id);
+
+    // 更新置信度
+    storage
+        .update_trait_confidence(pt_id, 0.8, 5.0, 0.9)
+        .await
+        .unwrap();
+    // 更新状态
+    storage
+        .update_trait_status(pt_id, TraitStatus::Deprecated)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn trait_evidence_crud() {
+    let storage = setup().await;
+    let p = Persona::new(
+        "user-0001".into(),
+        "用户".into(),
+        PersonaKind::User,
+        1,
+        "local".into(),
+    );
+    storage.create_persona(&p).await.unwrap();
+    let pt = PersonalityTrait::new(
+        "user-0001".into(),
+        TraitLayer::Base,
+        "温和".into(),
+        "待人温和".into(),
+        TraitSource::Inferred,
+        0,
+    );
+    let pt_id = storage.save_trait(&pt).await.unwrap();
+    let now = now_ms();
+    let ev = MemoryEvent::new("user-0001".into(), "事件".into(), "描述".into(), now, now);
+    let ev_id = storage.save_event(&ev).await.unwrap();
+
+    let evidence = TraitEvidence::new(pt_id, ev_id, EvidenceDirection::Support, 0.8);
+    let evd_id = storage.save_evidence(&evidence).await.unwrap();
+    assert!(evd_id > 0);
+
+    let list = storage.list_evidence_by_trait(pt_id).await.unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].id, evd_id);
+    assert_eq!(list[0].trait_id, pt_id);
+    assert_eq!(list[0].event_id, ev_id);
+}
+
+#[tokio::test]
+async fn keyword_upsert() {
+    let storage = setup().await;
+    storage.upsert_keyword("工作").await.unwrap();
+    storage.upsert_keyword("工作").await.unwrap();
+    let keywords = storage.list_keywords().await.unwrap();
+    assert!(keywords.contains(&"工作".to_string()));
+}
+
+/// BM25 分词版本辅助：缺失默认旧版 1、读写往返、settings 键真实落库。
+#[tokio::test]
+async fn bm25_index_version_helper() {
+    let storage = setup().await;
+
+    // 键缺失 → 默认旧版本 1（None/缺失视为 1）
+    assert_eq!(storage.get_bm25_index_version().await.unwrap(), 1);
+    assert_eq!(
+        storage.get_bm25_index_version().await.unwrap(),
+        BM25_INDEX_VERSION_LEGACY
+    );
+
+    // 写 2 → 读 2 往返，且底层 settings 表键真实写入
+    storage
+        .set_bm25_index_version(BM25_INDEX_VERSION_CURRENT)
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.get_bm25_index_version().await.unwrap(),
+        BM25_INDEX_VERSION_CURRENT
+    );
+    assert_eq!(
+        storage
+            .get_setting(SETTING_BM25_INDEX_VERSION)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("2")
+    );
+
+    // 非法值回退旧版（防御）
+    storage
+        .set_setting(SETTING_BM25_INDEX_VERSION, "not-a-number")
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.get_bm25_index_version().await.unwrap(),
+        BM25_INDEX_VERSION_LEGACY
+    );
+}
+
+/// 索引语料戳：空库为零值，写入 L1 后条数与时间戳同步变化。
+#[tokio::test]
+async fn index_corpus_stamp_tracks_writes() {
+    let storage = setup().await;
+
+    // 空库：全部为 0（默认值语义，无 NULL 泄漏）
+    let empty = storage
+        .index_corpus_stamp()
+        .await
+        .unwrap()
+        .expect("SQLite 后端应提供语料统计");
+    assert_eq!(empty, IndexCorpusStamp::default());
+
+    // 写入 L1 后：条数增加、最新写入时间非 0（跨进程刷新检测的触发源）
+    let session = storage.create_session(None).await.unwrap();
+    let l1 = MemoryL1::new(session.id, "用户提到最近在准备考试".to_string(), None);
+    storage.save_memory_l1(&l1).await.unwrap();
+
+    let stamp = storage.index_corpus_stamp().await.unwrap().unwrap();
+    assert_eq!(stamp.l1_count, 1);
+    assert!(stamp.l1_max_created_at > 0, "有写入时最新时间戳应非 0");
+    assert_ne!(stamp, empty, "语料变化必须体现在统计戳上");
+    // 其余语料未写入：保持 0
+    assert_eq!(stamp.event_count, 0);
+    assert_eq!(stamp.utt_count, 0);
+    assert_eq!(stamp.persona_count, 0);
+}
+
+/// 规范词读取：仅返回 canonical（canonical_id IS NULL），排除 pending 别名。
+#[tokio::test]
+async fn list_canonical_keywords_excludes_aliases() {
+    let storage = setup().await;
+
+    // 规范词（canonical 形态）
+    let canonical = KeywordToken::new("工作压力").unwrap();
+    repo::keyword::upsert_with_alias(&storage.pool, &canonical, 0, "canonical")
+        .await
+        .unwrap();
+    // 纯 upsert（alias_status NULL）形态的规范词
+    storage.upsert_keyword("爬山").await.unwrap();
+    // pending 别名（指向 工作压力）——不应出现在规范词列表
+    let canonical_id: i64 = sqlx::query_scalar("SELECT rowid FROM keyword_pool WHERE keyword = ?")
+        .bind("工作压力")
+        .fetch_one(&storage.pool)
+        .await
+        .unwrap();
+    let alias = KeywordToken::new("职场焦虑").unwrap();
+    repo::keyword::upsert_with_alias(&storage.pool, &alias, canonical_id, "pending")
+        .await
+        .unwrap();
+
+    let canonicals = storage.list_canonical_keywords().await.unwrap();
+    assert!(canonicals.contains(&"工作压力".to_string()));
+    assert!(canonicals.contains(&"爬山".to_string()));
+    assert!(
+        !canonicals.contains(&"职场焦虑".to_string()),
+        "pending 别名不应出现在规范词（词典）列表"
+    );
+}
+
+/// 已确认词表读取：canonical + 已确认 alias 入表，pending 排除（与 memory 侧同口径）。
+#[tokio::test]
+async fn list_established_keywords_includes_alias_excludes_pending() {
+    let storage = setup().await;
+
+    // canonical 形态（alias_status = 'canonical'）
+    repo::keyword::upsert_with_alias(
+        &storage.pool,
+        &KeywordToken::new("工作压力").unwrap(),
+        0,
+        "canonical",
+    )
+    .await
+    .unwrap();
+    // 纯 upsert 形态（alias_status NULL）的规范词
+    storage.upsert_keyword("爬山").await.unwrap();
+    let canonical_id: i64 = sqlx::query_scalar("SELECT rowid FROM keyword_pool WHERE keyword = ?")
+        .bind("工作压力")
+        .fetch_one(&storage.pool)
+        .await
+        .unwrap();
+
+    // 已确认 alias（指向 工作压力）
+    repo::keyword::upsert_with_alias(
+        &storage.pool,
+        &KeywordToken::new("职业倦怠").unwrap(),
+        canonical_id,
+        "alias",
+    )
+    .await
+    .unwrap();
+    // pending（指向 工作压力）——不应出现在已确认词表
+    repo::keyword::upsert_with_alias(
+        &storage.pool,
+        &KeywordToken::new("职场焦虑").unwrap(),
+        canonical_id,
+        "pending",
+    )
+    .await
+    .unwrap();
+
+    let established = storage.list_established_keywords().await.unwrap();
+    assert!(established.contains(&"工作压力".to_string()));
+    assert!(established.contains(&"爬山".to_string()));
+    assert!(established.contains(&"职业倦怠".to_string()));
+    assert!(
+        !established.contains(&"职场焦虑".to_string()),
+        "pending 别名不应出现在已确认词表"
+    );
+}
+
+/// 全量词条行读取（StoreCrud trait 方法 → repo::list_pool_rows 接线）：
+/// 返回行带 rowid / 别名状态 / 规范词指向。
+#[tokio::test]
+async fn list_keyword_pool_entries_via_trait() {
+    let storage = setup().await;
+    storage.upsert_keyword("工作压力").await.unwrap();
+    let canonical_id: i64 = sqlx::query_scalar("SELECT rowid FROM keyword_pool WHERE keyword = ?")
+        .bind("工作压力")
+        .fetch_one(&storage.pool)
+        .await
+        .unwrap();
+    repo::keyword::upsert_with_alias(
+        &storage.pool,
+        &KeywordToken::new("职场焦虑").unwrap(),
+        canonical_id,
+        "pending",
+    )
+    .await
+    .unwrap();
+
+    let rows = storage.list_keyword_pool_entries().await.unwrap();
+    assert_eq!(rows.len(), 2, "规范词 + pending 别名共 2 条");
+    let canonical = rows.iter().find(|r| r.keyword == "工作压力").unwrap();
+    assert_eq!(canonical.rowid, canonical_id);
+    let pending = rows.iter().find(|r| r.keyword == "职场焦虑").unwrap();
+    assert_eq!(pending.alias_status.as_deref(), Some("pending"));
+    assert_eq!(pending.canonical_id, Some(canonical_id));
+}
+
+/// 会话消息计数聚合：多会话按会话归组，无消息会话不出现在映射中。
+#[tokio::test]
+async fn count_messages_by_session_aggregates_per_session() {
+    let storage = setup().await;
+    let s1 = storage.create_session(None).await.unwrap();
+    let s2 = storage.create_session(None).await.unwrap();
+    let empty = storage.create_session(None).await.unwrap();
+
+    for (session_id, count) in [(&s1.id, 2_i64), (&s2.id, 3_i64)] {
+        for i in 0..count {
+            let mut m = Message::new(
+                *session_id,
+                MessageRole::User,
+                format!("m{i}"),
+                MessageSource::Local,
+            );
+            m.created_at = 1_000 + i;
+            storage.save_message(&m).await.unwrap();
+        }
+    }
+
+    let counts = storage.count_messages_by_session().await.unwrap();
+    assert_eq!(counts.get(&s1.id).copied(), Some(2));
+    assert_eq!(counts.get(&s2.id).copied(), Some(3));
+    assert_eq!(counts.len(), 2, "聚合只应包含有消息的会话");
+    assert!(
+        !counts.contains_key(&empty.id),
+        "无消息会话不应出现在聚合映射中（调用方按 0 处理）"
+    );
+}
+
+/// 事件计数：按 persona 隔离统计，无事件 persona 返回 0。
+#[tokio::test]
+async fn count_events_by_persona_counts_scoped() {
+    let storage = setup().await;
+    let p = Persona::new(
+        "char-count".into(),
+        "计数角色".into(),
+        PersonaKind::Char,
+        1,
+        "local".into(),
+    );
+    storage.create_persona(&p).await.unwrap();
+
+    for i in 0_i64..3 {
+        let ev = MemoryEvent::new(
+            "char-count".to_string(),
+            format!("事件{i}"),
+            "摘要".to_string(),
+            1_000 + i,
+            2_000 + i,
+        );
+        storage.save_event(&ev).await.unwrap();
+    }
+
+    assert_eq!(
+        storage.count_events_by_persona("char-count").await.unwrap(),
+        3
+    );
+    assert_eq!(
+        storage.count_events_by_persona("char-other").await.unwrap(),
+        0,
+        "无事件 persona 计数应为 0"
+    );
+}
+
+/// 待确认别名链路：列表 → 确认（pending 迁移为 alias）→ 驳回；未命中返回 false。
+#[tokio::test]
+async fn keyword_alias_pending_flow_via_trait() {
+    let storage = setup().await;
+    storage.upsert_keyword("工作压力").await.unwrap();
+    let canonical_id: i64 = sqlx::query_scalar("SELECT rowid FROM keyword_pool WHERE keyword = ?")
+        .bind("工作压力")
+        .fetch_one(&storage.pool)
+        .await
+        .unwrap();
+
+    // 两条 pending：一条用于确认、一条用于驳回
+    for alias in ["职场焦虑", "职业倦怠"] {
+        repo::keyword::upsert_with_alias(
+            &storage.pool,
+            &KeywordToken::new(alias).unwrap(),
+            canonical_id,
+            "pending",
+        )
+        .await
+        .unwrap();
+    }
+
+    let pending = storage.list_pending_aliases().await.unwrap();
+    assert_eq!(pending.len(), 2);
+    let anxious = pending
+        .iter()
+        .find(|p| p.alias_keyword == "职场焦虑")
+        .expect("职场焦虑应为待确认别名");
+    assert_eq!(anxious.canonical_id, canonical_id);
+    assert_eq!(anxious.canonical_keyword, "工作压力");
+    assert!(anxious.created_at > 0);
+
+    // 确认：pending → alias；重复确认未命中返回 false
+    assert!(
+        storage
+            .confirm_keyword_alias(anxious.alias_id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !storage
+            .confirm_keyword_alias(anxious.alias_id)
+            .await
+            .unwrap()
+    );
+
+    // 驳回：另一条 pending → 独立规范词；重复驳回未命中返回 false
+    let burnout = pending
+        .iter()
+        .find(|p| p.alias_keyword == "职业倦怠")
+        .expect("职业倦怠应为待确认别名");
+    assert!(
+        storage
+            .reject_keyword_alias(burnout.alias_id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !storage
+            .reject_keyword_alias(burnout.alias_id)
+            .await
+            .unwrap()
+    );
+
+    // 全链路收尾：pending 清空；不存在的 rowid 同样未命中
+    assert!(storage.list_pending_aliases().await.unwrap().is_empty());
+    assert!(!storage.confirm_keyword_alias(999_999).await.unwrap());
+    assert!(!storage.reject_keyword_alias(999_999).await.unwrap());
+}
+
+/// 待确认别名登记（StoreCrud trait 方法 → repo::upsert_pending 接线）：
+/// 首次插入 true、重复 false 且不改状态，列表指针正确；非法文本显式拒绝。
+#[tokio::test]
+async fn upsert_pending_alias_via_trait() {
+    let storage = setup().await;
+    storage.upsert_keyword("工作压力").await.unwrap();
+    let canonical_id: i64 = sqlx::query_scalar("SELECT rowid FROM keyword_pool WHERE keyword = ?")
+        .bind("工作压力")
+        .fetch_one(&storage.pool)
+        .await
+        .unwrap();
+
+    assert!(
+        storage
+            .upsert_pending_alias("职场压力", canonical_id, 4)
+            .await
+            .unwrap(),
+        "首次登记应插入"
+    );
+    assert!(
+        !storage
+            .upsert_pending_alias("职场压力", canonical_id, 9)
+            .await
+            .unwrap(),
+        "重复登记应未命中"
+    );
+
+    let pending = storage.list_pending_aliases().await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].alias_keyword, "职场压力");
+    assert_eq!(pending[0].canonical_id, canonical_id);
+    assert_eq!(pending[0].canonical_keyword, "工作压力");
+
+    // 非法文本显式拒绝（不静默丢词）
+    let err = storage
+        .upsert_pending_alias("   ", canonical_id, 1)
+        .await
+        .expect_err("空文本应拒绝");
+    assert!(matches!(err, RamariaError::Validation { .. }));
+}
+
+#[tokio::test]
+async fn schema_version() {
+    let storage = setup().await;
+    let v = storage.get_schema_version().await.unwrap();
+    assert!(v >= 1);
+}
+
+/// 索引版本：缺键按未构建（0）返回；显式写 0 / 1 读写往返一致。
+#[tokio::test]
+async fn index_version_defaults_to_unbuilt_and_roundtrips() {
+    let storage = setup().await;
+
+    // 删除 migration 预置值 → 缺键按未构建口径返回 0
+    sqlx::query("DELETE FROM schema_meta WHERE key = 'index_version'")
+        .execute(&storage.pool)
+        .await
+        .expect("删除索引版本键应成功");
+    assert_eq!(
+        storage.get_index_version().await.unwrap(),
+        0,
+        "缺键应按未构建（0）返回"
+    );
+
+    // 显式写 1 → 读回 1
+    storage.set_index_version(1).await.unwrap();
+    assert_eq!(storage.get_index_version().await.unwrap(), 1);
+
+    // 显式写 0 → 读回 0（尚未构建）
+    storage.set_index_version(0).await.unwrap();
+    assert_eq!(storage.get_index_version().await.unwrap(), 0);
+}
+
+/// 新库（空库）初始化后索引版本为未构建（0）：空库首启应走"构建 → 就绪"真实链路，
+/// 而不是按预置的"已构建"口径跳过构建。
+#[tokio::test]
+async fn fresh_db_starts_with_unbuilt_index_version() {
+    let storage = setup().await;
+    assert_eq!(
+        storage.get_index_version().await.unwrap(),
+        0,
+        "空库初始化后索引版本应为 0（尚未构建）"
+    );
+}
+
+/// 索引版本修正迁移语义：仅空库（四张业务表均无行）把"已构建"值修正为 0；
+/// 任一业务表有行时保持原值不动（既有库零改动）。
+#[tokio::test]
+async fn index_version_migration_only_touches_empty_db() {
+    let pool = database::init_test_pool()
+        .await
+        .expect("测试数据库初始化失败");
+    let storage = SqliteStorage::new(pool.clone());
+    let migration_sql = include_str!("../migrations/20261001_v2.3_index_version.sql");
+
+    // 迁移文本覆盖四张业务表的空库判定（防漏检：任一表有行都必须阻止修正）
+    for table in ["sessions", "messages", "memory_l1", "memory_events"] {
+        assert!(
+            migration_sql.contains(table),
+            "迁移应包含 {table} 表的空库判定"
+        );
+    }
+
+    // ---- 空库分支：预置值 1 → 迁移执行后修正为 0 ----
+    storage.set_index_version(1).await.unwrap();
+    sqlx::raw_sql(migration_sql)
+        .execute(&pool)
+        .await
+        .expect("空库执行迁移 SQL 应成功");
+    assert_eq!(
+        storage.get_index_version().await.unwrap(),
+        0,
+        "空库应被修正为未构建（0）"
+    );
+
+    // ---- 有业务数据分支：四表任一有行 → 值保持 1 不变（模拟既有库升级启动） ----
+    // 表间存在外键引用（messages / memory_l1 → sessions，memory_events → personas），
+    // 本用例只验证"表内是否有行"的判定，关闭外键检查以逐表独立造数。
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&pool)
+        .await
+        .expect("关闭外键检查应成功");
+    let now = now_ms();
+    let cases: [(&str, String); 4] = [
+        (
+            "sessions",
+            format!("INSERT INTO sessions (id, started_at) VALUES ('seed-session', {now})"),
+        ),
+        (
+            "messages",
+            format!(
+                "INSERT INTO messages (id, session_id, role, content, created_at, source) \
+                 VALUES ('seed-message', 'seed-session', 'user', 'x', {now}, 'local')"
+            ),
+        ),
+        (
+            "memory_l1",
+            format!(
+                "INSERT INTO memory_l1 (id, session_id, summary, created_at) \
+                 VALUES ('seed-l1', 'seed-session', 'x', {now})"
+            ),
+        ),
+        (
+            "memory_events",
+            format!(
+                "INSERT INTO memory_events (id, persona_uid, title, summary, start, \"end\", created_at) \
+                 VALUES (1, 'seed-persona', 'x', 'x', {now}, {now}, {now})"
+            ),
+        ),
+    ];
+    for (table, insert_sql) in cases {
+        for clear in ["messages", "memory_l1", "memory_events", "sessions"] {
+            sqlx::query(&format!("DELETE FROM {clear}"))
+                .execute(&pool)
+                .await
+                .expect("清空业务表应成功");
+        }
+        storage.set_index_version(1).await.unwrap();
+        sqlx::query(&insert_sql)
+            .execute(&pool)
+            .await
+            .unwrap_or_else(|e| panic!("向 {table} 写入种子行应成功: {e}"));
+
+        sqlx::raw_sql(migration_sql)
+            .execute(&pool)
+            .await
+            .unwrap_or_else(|e| panic!("{table} 有数据时执行迁移 SQL 应成功: {e}"));
+        assert_eq!(
+            storage.get_index_version().await.unwrap(),
+            1,
+            "{table} 有业务数据时索引版本不得被修正"
+        );
+    }
+}
+
+/// 迁移完整性：空库初始化后 `_sqlx_migrations` 记录数与迁移目录文件数一致。
+///
+/// 说明:
+/// - 历史增量迁移已合并为单个基线 SQL，空库初始化即得基线 schema；
+///   其后新增能力以独立增量文件追加（只增不删，不修改既有迁移）。
+/// - 若记录数少于文件数，说明初始化未完整执行；多于文件数说明迁移目录混入了
+///   已移除的文件（违反增量纪律）。
+#[tokio::test]
+async fn migration_records_match_directory() {
+    let pool = database::init_test_pool()
+        .await
+        .expect("测试数据库初始化失败");
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
+        .fetch_one(&pool)
+        .await
+        .expect("查询 migration 记录失败");
+    let files = std::fs::read_dir("./migrations")
+        .expect("读取迁移目录失败")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "sql"))
+        .count() as i64;
+    assert_eq!(
+        count, files,
+        "迁移记录数应与迁移目录中的 SQL 文件数一致（基线 + 增量）"
+    );
+    assert!(files >= 1, "至少应有一个基线迁移文件");
+}
+
+/// 会话通道列：空库初始化后 `sessions` 表含 channel / external_ref 与联合索引，
+/// 且 `channel` 默认值保证存量行升级后取 `local`。
+#[tokio::test]
+async fn sessions_channel_columns_present() {
+    let pool = database::init_test_pool()
+        .await
+        .expect("测试数据库初始化失败");
+
+    let columns: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('sessions')")
+        .fetch_all(&pool)
+        .await
+        .expect("查询 sessions 表结构失败");
+    assert!(columns.contains(&"channel".to_string()), "缺少 channel 列");
+    assert!(
+        columns.contains(&"external_ref".to_string()),
+        "缺少 external_ref 列"
+    );
+
+    // channel 默认值：存量行（不显式写 channel）升级后取 'local'
+    let default_value: Option<String> = sqlx::query_scalar(
+        "SELECT dflt_value FROM pragma_table_info('sessions') WHERE name = 'channel'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("查询 channel 默认值失败");
+    assert_eq!(
+        default_value.as_deref(),
+        Some("'local'"),
+        "channel 默认值应为 'local'（存量行取默认值）"
+    );
+
+    let indexes: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_index_list('sessions')")
+        .fetch_all(&pool)
+        .await
+        .expect("查询 sessions 索引失败");
+    assert!(
+        indexes.contains(&"idx_sessions_channel_external_ref".to_string()),
+        "缺少 (channel, external_ref) 联合索引"
+    );
+}
+
+/// 单基线包含风格统计表（此前为独立增量迁移），空库初始化后可直接读写。
+#[tokio::test]
+async fn style_stats_usable_after_single_baseline() {
+    use ramaria_core::types::{PersonaStyleStats, StyleRuleSource, StyleStatsStatus, now_ms};
+    let storage = setup().await;
+    let p = Persona::new(
+        "char-style".into(),
+        "风格角色".into(),
+        PersonaKind::Char,
+        1,
+        "local".into(),
+    );
+    storage.create_persona(&p).await.unwrap();
+
+    let stats = PersonaStyleStats {
+        persona_uid: "char-style".to_string(),
+        sample_count: 3,
+        stats_json: r#"{"metric":"mock"}"#.to_string(),
+        baseline_version: 0,
+        rule_text: None,
+        rule_source: StyleRuleSource::None,
+        status: StyleStatsStatus::Insufficient,
+        updated_at: now_ms(),
+    };
+    storage.upsert_style_stats(&stats).await.unwrap();
+    let got = storage
+        .get_style_stats("char-style")
+        .await
+        .unwrap()
+        .expect("风格统计应存在");
+    assert_eq!(got.persona_uid, "char-style");
+    assert_eq!(got.sample_count, 3);
+}
+
+#[tokio::test]
+async fn privacy_consent_crud() {
+    let storage = setup().await;
+    let consent = PrivacyConsent::new(
+        ramaria_core::types::LlmProvider::DeepSeek,
+        "https://api.deepseek.com/v1".into(),
+        true,
+    );
+    storage.save_privacy_consent(&consent).await.unwrap();
+    let got = storage
+        .get_privacy_consent("deepseek", "https://api.deepseek.com/v1")
+        .await
+        .unwrap();
+    assert!(got.is_some());
+    assert_eq!(
+        got.unwrap().provider,
+        ramaria_core::types::LlmProvider::DeepSeek
+    );
+}
+
+#[tokio::test]
+async fn settings_crud() {
+    let storage = setup().await;
+    storage.set_setting("profile_mode", "full").await.unwrap();
+    let val = storage.get_setting("profile_mode").await.unwrap();
+    assert_eq!(val.as_deref(), Some("full"));
+    let all = storage.list_settings().await.unwrap();
+    assert!(!all.is_empty());
+}
+
+// =========================================================
+// list_unabsorbed_events & update_persona 补充测试
+// =========================================================
+
+/// 辅助：创建含 persona 和 L1 的完整测试上下文。
+async fn setup_with_persona() -> (SqliteStorage, String, i64, uuid::Uuid) {
+    let storage = setup().await;
+    let p = Persona::new(
+        "user-test".into(),
+        "测试角色".into(),
+        PersonaKind::User,
+        1,
+        "local".into(),
+    );
+    let persona_id = storage.create_persona(&p).await.unwrap();
+
+    let session = storage.create_session(None).await.unwrap();
+    let l1 = MemoryL1::new(session.id, "测试摘要".into(), Some("上午".into()));
+    storage.save_memory_l1(&l1).await.unwrap();
+
+    (storage, "user-test".to_string(), persona_id, l1.id)
+}
+
+/// 辅助：创建 MemoryEvent 并关联到 persona。
+async fn create_test_event(storage: &SqliteStorage, persona_uid: &str, title: &str) -> i64 {
+    let now = now_ms();
+    let ev = MemoryEvent::new(
+        persona_uid.into(),
+        title.into(),
+        "测试描述".into(),
+        now - 1000,
+        now,
+    );
+    storage.save_event(&ev).await.unwrap()
+}
+
+/// 辅助：创建带推断信号属性的事件（valence/share/presentation 可设）。
+async fn create_event_with_signals(
+    storage: &SqliteStorage,
+    persona_uid: &str,
+    title: &str,
+    valence: f64,
+    share: f64,
+    presentation: &str,
+) -> i64 {
+    use ramaria_core::types::Presentation;
+    let now = now_ms();
+    let mut ev = MemoryEvent::new(
+        persona_uid.into(),
+        title.into(),
+        "测试描述".into(),
+        now - 1000,
+        now,
+    );
+    ev.valence = valence;
+    ev.share = share;
+    ev.presentation = match presentation {
+        "objective" => Presentation::Objective,
+        "subjective" => Presentation::Subjective,
+        _ => Presentation::Mixed,
+    };
+    storage.save_event(&ev).await.unwrap()
+}
+
+#[tokio::test]
+async fn list_unabsorbed_events_empty() {
+    // 新建 persona 尚未有任何事件
+    let (storage, persona_uid, _, _) = setup_with_persona().await;
+
+    let events = storage.list_unabsorbed_events(&persona_uid).await.unwrap();
+    assert!(events.is_empty(), "新 persona 应该没有未吸收事件");
+}
+
+// =========================================================
+// aggregate_persona_event_priors（跨用户事件经验分布聚合）
+// =========================================================
+
+/// 辅助：创建其他 persona（返回其 uid）。
+async fn create_extra_persona(storage: &SqliteStorage, uid: &str, name: &str) {
+    let p = Persona::new(
+        uid.into(),
+        name.into(),
+        PersonaKind::Char,
+        1,
+        "local".into(),
+    );
+    storage.create_persona(&p).await.unwrap();
+}
+
+/// 多 persona 场景：聚合返回除目标 persona 外各 persona 的 n/均值/占比。
+#[tokio::test]
+async fn aggregate_persona_event_priors_multiple_personas() {
+    let (storage, target_uid, _, _) = setup_with_persona().await;
+    create_extra_persona(&storage, "char-a", "角色A").await;
+    create_extra_persona(&storage, "char-b", "角色B").await;
+
+    // 目标 persona 自身事件（应被 exclude，不污染跨用户先验）
+    create_event_with_signals(&storage, &target_uid, "目标自身事件", 0.8, 0.9, "objective").await;
+
+    // char-a: 2 条（valence 0.2 / -0.4，share 0.6），presentation objective + subjective
+    create_event_with_signals(&storage, "char-a", "A1", 0.2, 0.6, "objective").await;
+    create_event_with_signals(&storage, "char-a", "A2", -0.4, 0.6, "subjective").await;
+
+    // char-b: 3 条（valence 全部 0.5，share 0.3），presentation 全部 mixed
+    for i in 0..3 {
+        create_event_with_signals(&storage, "char-b", &format!("B{i}"), 0.5, 0.3, "mixed").await;
+    }
+
+    let rows = storage
+        .aggregate_persona_event_priors(&target_uid)
+        .await
+        .unwrap();
+
+    // 排除目标 persona：仅返回 char-a / char-b
+    assert_eq!(rows.len(), 2, "应只聚合其他 persona：{rows:?}");
+    assert!(
+        rows.iter().all(|r| r.persona_uid != target_uid),
+        "目标 persona 自身事件不得进入聚合结果"
+    );
+
+    let char_a = rows
+        .iter()
+        .find(|r| r.persona_uid == "char-a")
+        .expect("应包含 char-a");
+    assert_eq!(char_a.n_events, 2);
+    assert!(
+        (char_a.valence_mean - (0.2 + -0.4) / 2.0).abs() < 1e-9,
+        "char-a valence 应为事件级均值，实际={}",
+        char_a.valence_mean
+    );
+    assert!((char_a.share_mean - 0.6).abs() < 1e-9);
+    assert!((char_a.obj_ratio - 0.5).abs() < 1e-9);
+    assert!((char_a.sub_ratio - 0.5).abs() < 1e-9);
+    assert!((char_a.mix_ratio - 0.0).abs() < 1e-9);
+
+    let char_b = rows
+        .iter()
+        .find(|r| r.persona_uid == "char-b")
+        .expect("应包含 char-b");
+    assert_eq!(char_b.n_events, 3);
+    assert!((char_b.valence_mean - 0.5).abs() < 1e-9);
+    assert!((char_b.share_mean - 0.3).abs() < 1e-9);
+    assert!((char_b.obj_ratio - 0.0).abs() < 1e-9);
+    assert!((char_b.sub_ratio - 0.0).abs() < 1e-9);
+    assert!((char_b.mix_ratio - 1.0).abs() < 1e-9);
+
+    // 三态占比和恒为 1
+    for row in &rows {
+        let sum = row.obj_ratio + row.sub_ratio + row.mix_ratio;
+        assert!(
+            (sum - 1.0).abs() < 1e-9,
+            "presentation 占比和应为1: {row:?}"
+        );
+    }
+}
+
+/// 空库（无任何事件）→ 返回空列表。
+#[tokio::test]
+async fn aggregate_persona_event_priors_empty_db_returns_empty() {
+    let storage = setup().await;
+    let rows = storage
+        .aggregate_persona_event_priors("user-none")
+        .await
+        .unwrap();
+    assert!(rows.is_empty(), "空库应返回空聚合结果");
+}
+
+/// 目标 persona 是系统内唯一有事件者 → 无其他 persona 来源，返回空。
+#[tokio::test]
+async fn aggregate_persona_event_priors_only_target_returns_empty() {
+    let (storage, target_uid, _, _) = setup_with_persona().await;
+    create_event_with_signals(&storage, &target_uid, "唯一事件", 0.1, 0.5, "mixed").await;
+
+    let rows = storage
+        .aggregate_persona_event_priors(&target_uid)
+        .await
+        .unwrap();
+    assert!(rows.is_empty(), "仅目标 persona 有事件时不应产生跨用户来源");
+}
+
+#[tokio::test]
+async fn list_unabsorbed_events_some() {
+    let (storage, persona_uid, _, _) = setup_with_persona().await;
+
+    // 创建 3 个事件
+    let id1 = create_test_event(&storage, &persona_uid, "事件A").await;
+    let id2 = create_test_event(&storage, &persona_uid, "事件B").await;
+    let id3 = create_test_event(&storage, &persona_uid, "事件C").await;
+
+    let events = storage.list_unabsorbed_events(&persona_uid).await.unwrap();
+    assert_eq!(events.len(), 3, "应返回全部 3 个未吸收事件");
+    let ids: Vec<i64> = events.iter().map(|e| e.id).collect();
+    assert!(ids.contains(&id1));
+    assert!(ids.contains(&id2));
+    assert!(ids.contains(&id3));
+}
+
+#[tokio::test]
+async fn list_unabsorbed_events_only_matching_persona() {
+    let (storage, persona_uid, _, _) = setup_with_persona().await;
+
+    // 创建第二个 persona
+    let p2 = Persona::new(
+        "char-test".into(),
+        "角色".into(),
+        PersonaKind::Char,
+        1,
+        "local".into(),
+    );
+    storage.create_persona(&p2).await.unwrap();
+
+    create_test_event(&storage, &persona_uid, "用户事件").await;
+    create_test_event(&storage, "char-test", "角色事件").await;
+
+    let events = storage.list_unabsorbed_events(&persona_uid).await.unwrap();
+    assert_eq!(events.len(), 1, "只应返回 user-test 的事件");
+    assert_eq!(events[0].title, "用户事件");
+}
+
+#[tokio::test]
+async fn update_persona_name() {
+    let (storage, persona_uid, _, _) = setup_with_persona().await;
+
+    // 更新名称
+    storage
+        .update_persona(&persona_uid, "新名称", None, None, None)
+        .await
+        .unwrap();
+
+    let updated = storage
+        .get_persona_by_uid(&persona_uid)
+        .await
+        .unwrap()
+        .expect("persona 应存在");
+    assert_eq!(updated.name, "新名称");
+}
+
+#[tokio::test]
+async fn update_persona_avatar_and_config() {
+    let (storage, persona_uid, _, _) = setup_with_persona().await;
+
+    // 更新头像和 config JSON
+    storage
+        .update_persona(
+            &persona_uid,
+            "测试角色", // name 不变
+            Some("avatar_url_here"),
+            Some(r#"{"description":"更新后的描述"}"#),
+            None, // description 保持旧值
+        )
+        .await
+        .unwrap();
+
+    let updated = storage
+        .get_persona_by_uid(&persona_uid)
+        .await
+        .unwrap()
+        .expect("persona 应存在");
+    assert_eq!(updated.avatar.as_deref(), Some("avatar_url_here"));
+    assert!(updated.config.is_some());
+    assert!(updated.config.unwrap().contains("更新后的描述"));
+}
+
+#[tokio::test]
+async fn update_persona_partial_fields() {
+    // 只更新部分字段，验证未指定的字段不被覆盖
+    let (storage, persona_uid, _, _) = setup_with_persona().await;
+
+    // 先设置头像
+    storage
+        .update_persona(&persona_uid, "测试角色", Some("old_avatar"), None, None)
+        .await
+        .unwrap();
+
+    // 再只更新 config，头像应保持不变
+    storage
+        .update_persona(
+            &persona_uid,
+            "测试角色",
+            None, // avatar 传 None 不更新
+            Some(r#"{"key":"value"}"#),
+            None, // description 保持旧值
+        )
+        .await
+        .unwrap();
+
+    let updated = storage
+        .get_persona_by_uid(&persona_uid)
+        .await
+        .unwrap()
+        .expect("persona 应存在");
+    assert_eq!(
+        updated.avatar.as_deref(),
+        Some("old_avatar"),
+        "未传入 avatar 时应保持旧值"
+    );
+    assert!(updated.config.is_some());
+}
+
+// =========================================================
+// mark_absorbed 批次边界测试
+// =========================================================
+// 验证 BATCH_SIZE=100 的分批逻辑在所有边界条件下正确工作。
+// 由于 mark_absorbed 内部以 100 条为单位分批，需要确保:
+// - 恰好 100 条 → 单批次
+// - 101 条 → 两个批次（100 + 1）
+// - 200 条 → 两个批次（100 + 100）
+
+/// 创建 N 条 L1 记忆并返回它们的 ID 列表。
+async fn create_n_l1(
+    storage: &SqliteStorage,
+    session_id: uuid::Uuid,
+    persona_uid: &str,
+    n: usize,
+) -> Vec<uuid::Uuid> {
+    let mut ids = Vec::with_capacity(n);
+    for i in 0..n {
+        let l1 = MemoryL1::new(
+            session_id,
+            format!("测试摘要 #{i}"),
+            Some(format!("时段-{i}")),
+        );
+        // 手动设置 persona_uid（MemoryL1::new 不支持该字段）
+        let mut l1_with_persona = l1;
+        // 通过直接构造覆盖 persona_uid 字段
+        // MemoryL1 结构体的字段为 pub，可以直接赋值
+        l1_with_persona.persona_uid = Some(persona_uid.to_string());
+        storage.save_memory_l1(&l1_with_persona).await.unwrap();
+        ids.push(l1_with_persona.id);
+    }
+    ids
+}
+
+/// 辅助：创建 persona + session 用于 mark_absorbed 测试。
+async fn setup_for_absorb() -> (SqliteStorage, String, uuid::Uuid) {
+    let storage = setup().await;
+    let persona_uid = "absorb-test".to_string();
+    let p = Persona::new(
+        persona_uid.clone(),
+        "吸收测试".into(),
+        PersonaKind::User,
+        100,
+        "local".into(),
+    );
+    storage.create_persona(&p).await.unwrap();
+    let session = storage.create_session(None).await.unwrap();
+    (storage, persona_uid, session.id)
+}
+
+#[tokio::test]
+async fn mark_absorbed_empty_slice_is_noop() {
+    // 空切片应直接返回 Ok，不产生错误
+    let (storage, persona_uid, session_id) = setup_for_absorb().await;
+    let _l1_ids = create_n_l1(&storage, session_id, &persona_uid, 3).await;
+
+    // 标记空切片，应成功
+    storage.mark_l1_absorbed(&[]).await.unwrap();
+
+    // 原有记录应仍未吸收
+    let remaining = storage.list_unabsorbed_l1(&persona_uid).await.unwrap();
+    assert_eq!(remaining.len(), 3);
+}
+
+#[tokio::test]
+async fn mark_absorbed_single_item() {
+    // 单条记录吸收
+    let (storage, persona_uid, session_id) = setup_for_absorb().await;
+    let l1_ids = create_n_l1(&storage, session_id, &persona_uid, 1).await;
+    let target = &[l1_ids[0]];
+
+    storage.mark_l1_absorbed(target).await.unwrap();
+
+    let remaining = storage.list_unabsorbed_l1(&persona_uid).await.unwrap();
+    assert!(
+        remaining.is_empty(),
+        "吸收后应无未吸收记录，实际: {remaining:?}"
+    );
+}
+
+#[tokio::test]
+async fn mark_absorbed_exactly_100_items() {
+    // 恰好 100 条（单批次边界值，BATCH_SIZE = 100）
+    let (storage, persona_uid, session_id) = setup_for_absorb().await;
+    let l1_ids = create_n_l1(&storage, session_id, &persona_uid, 100).await;
+
+    storage.mark_l1_absorbed(&l1_ids).await.unwrap();
+
+    let remaining = storage.list_unabsorbed_l1(&persona_uid).await.unwrap();
+    assert!(
+        remaining.is_empty(),
+        "100 条应全部吸收，实际剩余: {}",
+        remaining.len()
+    );
+}
+
+#[tokio::test]
+async fn mark_absorbed_101_items_crosses_batch_boundary() {
+    // 101 条，跨越批次边界（100 + 1），验证事务中多批次原子性
+    let (storage, persona_uid, session_id) = setup_for_absorb().await;
+    let l1_ids = create_n_l1(&storage, session_id, &persona_uid, 101).await;
+
+    storage.mark_l1_absorbed(&l1_ids).await.unwrap();
+
+    let remaining = storage.list_unabsorbed_l1(&persona_uid).await.unwrap();
+    assert!(
+        remaining.is_empty(),
+        "101 条跨批次应全部吸收，实际剩余: {}",
+        remaining.len()
+    );
+}
+
+#[tokio::test]
+async fn mark_absorbed_200_items_two_full_batches() {
+    // 200 条，恰好两个完整批次（100 + 100）
+    let (storage, persona_uid, session_id) = setup_for_absorb().await;
+    let l1_ids = create_n_l1(&storage, session_id, &persona_uid, 200).await;
+
+    storage.mark_l1_absorbed(&l1_ids).await.unwrap();
+
+    let remaining = storage.list_unabsorbed_l1(&persona_uid).await.unwrap();
+    assert!(
+        remaining.is_empty(),
+        "200 条应全部吸收，实际剩余: {}",
+        remaining.len()
+    );
+}
+
+#[tokio::test]
+async fn mark_absorbed_only_absorbs_specified_ids() {
+    // 仅指定 ID 被吸收，未指定的不受影响
+    let (storage, persona_uid, session_id) = setup_for_absorb().await;
+    let l1_ids = create_n_l1(&storage, session_id, &persona_uid, 5).await;
+
+    // 只吸收前 3 条
+    storage.mark_l1_absorbed(&l1_ids[..3]).await.unwrap();
+
+    let remaining = storage.list_unabsorbed_l1(&persona_uid).await.unwrap();
+    assert_eq!(remaining.len(), 2, "应剩余 2 条未吸收");
+}
+
+// =========================================================
+// touch_l1 访问时间刷新测试（v1.7 touch 接线，决策 D-V17-006）
+// =========================================================
+
+#[tokio::test]
+async fn touch_l1_updates_last_accessed_at() {
+    // 检索命中后 touch_l1 应刷新 last_accessed_at（激活 recent_boost_*）
+    let (storage, persona_uid, session_id) = setup_for_absorb().await;
+    let l1_ids = create_n_l1(&storage, session_id, &persona_uid, 2).await;
+
+    let before = storage.get_memory_l1(l1_ids[0]).await.unwrap().unwrap();
+    assert!(before.last_accessed_at.is_none(), "初始应无访问时间");
+
+    let now = now_ms();
+    storage.touch_l1(&l1_ids, now).await.unwrap();
+
+    for id in &l1_ids {
+        let l1 = storage.get_memory_l1(*id).await.unwrap().unwrap();
+        assert_eq!(
+            l1.last_accessed_at,
+            Some(now),
+            "touch 后 last_accessed_at 应刷新为 now"
+        );
+    }
+}
+
+#[tokio::test]
+async fn touch_l1_empty_slice_is_noop() {
+    // 空列表应直接成功（不产生错误、不影响既有记录）
+    let (storage, persona_uid, session_id) = setup_for_absorb().await;
+    let l1_ids = create_n_l1(&storage, session_id, &persona_uid, 3).await;
+
+    storage.touch_l1(&[], now_ms()).await.unwrap();
+
+    for id in &l1_ids {
+        let l1 = storage.get_memory_l1(*id).await.unwrap().unwrap();
+        assert!(l1.last_accessed_at.is_none(), "空 touch 不应改动访问时间");
+    }
+}
+
+#[tokio::test]
+async fn touch_l1_only_updates_specified_ids() {
+    // 仅指定 ID 被刷新，未指定的保持原值
+    let (storage, persona_uid, session_id) = setup_for_absorb().await;
+    let l1_ids = create_n_l1(&storage, session_id, &persona_uid, 3).await;
+
+    let now = now_ms();
+    storage.touch_l1(&l1_ids[..2], now).await.unwrap();
+
+    let touched = storage.get_memory_l1(l1_ids[0]).await.unwrap().unwrap();
+    assert_eq!(touched.last_accessed_at, Some(now), "前 2 条应被刷新");
+    let untouched = storage.get_memory_l1(l1_ids[2]).await.unwrap().unwrap();
+    assert!(untouched.last_accessed_at.is_none(), "未指定 ID 不应被刷新");
+}
+
+// =========================================================
+// mark_events_absorbed 事务化测试（v1.7 决策 D-V17-014-23）
+// =========================================================
+// 与 L1 版 mark_absorbed 对齐为事务化执行（杜绝事件半吸收），
+// 批次边界与指定 ID 语义测试覆盖行为一致性。
+
+#[tokio::test]
+async fn mark_events_absorbed_empty_slice_is_noop() {
+    let (storage, persona_uid, _, _) = setup_with_persona().await;
+    let _id = create_test_event(&storage, &persona_uid, "事件A").await;
+
+    storage.mark_events_absorbed(&[]).await.unwrap();
+
+    let remaining = storage.list_unabsorbed_events(&persona_uid).await.unwrap();
+    assert_eq!(remaining.len(), 1, "空切片不应吸收任何事件");
+}
+
+#[tokio::test]
+async fn mark_events_absorbed_batch_boundary_transactional() {
+    // 101 条事件跨批次（100 + 1）在单事务中全部吸收（无半吸收）
+    let (storage, persona_uid, _, _) = setup_with_persona().await;
+    let mut ids = Vec::new();
+    for i in 0..101 {
+        ids.push(create_test_event(&storage, &persona_uid, &format!("事件{i}")).await);
+    }
+
+    storage.mark_events_absorbed(&ids).await.unwrap();
+
+    let remaining = storage.list_unabsorbed_events(&persona_uid).await.unwrap();
+    assert!(
+        remaining.is_empty(),
+        "101 条跨批次应全部吸收（事务保证无半吸收），实际剩余: {}",
+        remaining.len()
+    );
+}
+
+#[tokio::test]
+async fn mark_events_absorbed_only_absorbs_specified_ids() {
+    // 仅指定事件被吸收，未指定的不受影响
+    let (storage, persona_uid, _, _) = setup_with_persona().await;
+    let mut ids = Vec::new();
+    for i in 0..5 {
+        ids.push(create_test_event(&storage, &persona_uid, &format!("事件{i}")).await);
+    }
+
+    // 只吸收前 3 条
+    storage.mark_events_absorbed(&ids[..3]).await.unwrap();
+
+    let remaining = storage.list_unabsorbed_events(&persona_uid).await.unwrap();
+    assert_eq!(remaining.len(), 2, "应剩余 2 条未吸收");
+}
+
+// =========================================================
+// background_jobs CRUD 集成测试
+// =========================================================
+
+#[tokio::test]
+async fn background_job_create_and_list_pending() {
+    let storage = setup().await;
+
+    // 创建两个不同类型、不同 payload 的 job
+    let id1 = storage
+        .create_background_job("l2_extraction", Some(r#"{"session_id":"abc"}"#))
+        .await
+        .unwrap();
+    let id2 = storage
+        .create_background_job("personality_inference", Some(r#"{"persona_uid":"u1"}"#))
+        .await
+        .unwrap();
+
+    assert!(id1 > 0, "job ID 应为正整数");
+    assert!(id2 > 0, "job ID 应为正整数");
+    assert_ne!(id1, id2, "不同 job 应有不同 ID");
+
+    // list_pending 应包含两个 job
+    let pending = storage.list_pending_jobs().await.unwrap();
+    assert_eq!(pending.len(), 2);
+
+    // 验证 job_type 和 payload 正确返回
+    let job1 = pending.iter().find(|(id, _, _)| *id == id1).unwrap();
+    assert_eq!(job1.1, "l2_extraction");
+    assert_eq!(job1.2.as_deref(), Some(r#"{"session_id":"abc"}"#));
+
+    let job2 = pending.iter().find(|(id, _, _)| *id == id2).unwrap();
+    assert_eq!(job2.1, "personality_inference");
+}
+
+#[tokio::test]
+async fn background_job_update_status_removes_from_pending() {
+    let storage = setup().await;
+
+    let id = storage
+        .create_background_job("reindex", None)
+        .await
+        .unwrap();
+
+    // 更新状态为 running，job 应从 pending 列表中移除
+    storage
+        .update_job_status(id, "running", None)
+        .await
+        .unwrap();
+
+    let pending = storage.list_pending_jobs().await.unwrap();
+    assert!(
+        !pending.iter().any(|(jid, _, _)| *jid == id),
+        "running 状态的 job 不应出现在 pending 列表中"
+    );
+}
+
+/// 原子抢占：首次成功、重复失败、不存在返回 false（多消费方并发补扫去重的基础）。
+#[tokio::test]
+async fn background_job_claim_pending_is_atomic() {
+    let storage = setup().await;
+
+    let id = storage
+        .create_background_job("l1_summary_retry", Some(r#"{"session_id":"abc"}"#))
+        .await
+        .unwrap();
+
+    // 首次抢占成功 → 任务离开 pending 列表
+    assert!(
+        storage.claim_pending_job(id).await.unwrap(),
+        "首次抢占应成功"
+    );
+    let pending = storage.list_pending_jobs().await.unwrap();
+    assert!(
+        !pending.iter().any(|(jid, _, _)| *jid == id),
+        "抢占成功后任务不应出现在 pending 列表"
+    );
+
+    // 二次抢占失败（状态已不是 pending）
+    assert!(
+        !storage.claim_pending_job(id).await.unwrap(),
+        "重复抢占应返回 false"
+    );
+
+    // 不存在的任务 → false（不报错，调用方可安全跳过）
+    assert!(
+        !storage.claim_pending_job(999_999).await.unwrap(),
+        "不存在的任务应返回 false"
+    );
+}
+
+#[tokio::test]
+async fn background_job_with_error() {
+    let storage = setup().await;
+
+    let id = storage
+        .create_background_job("data_migration", Some(r#"{"version":2}"#))
+        .await
+        .unwrap();
+
+    // 更新为 failed 并记录错误信息
+    storage
+        .update_job_status(id, "failed", Some("磁盘空间不足"))
+        .await
+        .unwrap();
+
+    // failed 的 job 也不应在 pending 中
+    let pending = storage.list_pending_jobs().await.unwrap();
+    assert!(
+        !pending.iter().any(|(jid, _, _)| *jid == id),
+        "failed 状态的 job 不应出现在 pending 列表中"
+    );
+}
+
+#[tokio::test]
+async fn background_job_empty_payload() {
+    let storage = setup().await;
+
+    let id = storage
+        .create_background_job("health_check", None)
+        .await
+        .unwrap();
+
+    let pending = storage.list_pending_jobs().await.unwrap();
+    let job = pending.iter().find(|(jid, _, _)| *jid == id).unwrap();
+    assert_eq!(job.1, "health_check");
+    assert!(job.2.is_none(), "无 payload 时应为 None");
+}
+
+// =========================================================
+// Utt Blocks（原文话语块）
+// =========================================================
+
+/// 辅助：创建 persona + session + 若干消息，返回 (storage, persona_uid, session_id)。
+async fn setup_utt_context() -> (SqliteStorage, String, Uuid) {
+    let storage = setup().await;
+    let p = Persona::new(
+        "char-0001".into(),
+        "测试角色".into(),
+        PersonaKind::Char,
+        1,
+        "local".into(),
+    );
+    storage.create_persona(&p).await.unwrap();
+    let session = storage.create_session(Some("char-0001")).await.unwrap();
+
+    // 插入 3 条消息作为块内原文（utt_blocks FK→messages）
+    for (i, text) in ["你好呀", "最近怎么样", "挺好的"].iter().enumerate() {
+        let msg = Message::new(
+            session.id,
+            MessageRole::User,
+            text.to_string(),
+            MessageSource::Local,
+        )
+        .with_persona_uid(Some("char-0001".to_string()));
+        // 时间递增，保证 created_at 有序
+        let mut m = msg;
+        m.created_at = 1_700_000_000_000 + i as i64 * 60_000;
+        storage.save_message(&m).await.unwrap();
+    }
+    (storage, "char-0001".to_string(), session.id)
+}
+
+#[tokio::test]
+async fn utt_block_insert_and_get_latest() {
+    let (storage, persona_uid, session_id) = setup_utt_context().await;
+    let messages = storage.list_messages(session_id).await.unwrap();
+
+    let block = UttBlock::new(
+        persona_uid.clone(),
+        session_id,
+        messages[0].id,
+        messages[2].id,
+        "你好呀\n最近怎么样\n挺好的".to_string(),
+        3,
+        120_000,
+    );
+    let id = storage.insert_utt_block(&block).await.unwrap();
+    assert!(id > 0, "插入应返回自增 id");
+
+    let latest = storage
+        .get_latest_utt_block_by_session(session_id)
+        .await
+        .unwrap()
+        .expect("会话应有最新话语块");
+    assert_eq!(latest.id, id);
+    assert_eq!(latest.persona_uid, persona_uid);
+    assert_eq!(latest.msg_count, 3);
+    assert_eq!(latest.time_span_ms, 120_000);
+    assert_eq!(latest.block_text, "你好呀\n最近怎么样\n挺好的");
+    assert!(latest.embedding.is_none(), "未设置 embedding 时应为 None");
+}
+
+#[tokio::test]
+async fn utt_block_list_by_persona_isolation() {
+    let (storage, persona_uid, session_id) = setup_utt_context().await;
+    let messages = storage.list_messages(session_id).await.unwrap();
+
+    // persona A 插入 2 个块
+    for n in 0..2 {
+        let block = UttBlock::new(
+            persona_uid.clone(),
+            session_id,
+            messages[0].id,
+            messages[2].id,
+            format!("块{n}"),
+            1,
+            0,
+        );
+        storage.insert_utt_block(&block).await.unwrap();
+    }
+
+    // persona B（不同 uid）查询 → 严格隔离，看不到 persona A 的块
+    let other = storage
+        .list_utt_blocks_by_persona("char-9999")
+        .await
+        .unwrap();
+    assert!(other.is_empty(), "跨 persona 不应看到原文块");
+
+    let mine = storage
+        .list_utt_blocks_by_persona(&persona_uid)
+        .await
+        .unwrap();
+    assert_eq!(mine.len(), 2, "应返回本人 persona 的全部块");
+    assert_eq!(mine[0].block_text, "块0");
+    assert_eq!(mine[1].block_text, "块1");
+}
+
+#[tokio::test]
+async fn utt_block_latest_returns_newest() {
+    let (storage, persona_uid, session_id) = setup_utt_context().await;
+    let messages = storage.list_messages(session_id).await.unwrap();
+
+    // 按时间顺序插入 3 个块
+    let mut last_id = 0;
+    for n in 0..3 {
+        let block = UttBlock::new(
+            persona_uid.clone(),
+            session_id,
+            messages[0].id,
+            messages[2].id,
+            format!("块{n}"),
+            1,
+            0,
+        );
+        last_id = storage.insert_utt_block(&block).await.unwrap();
+    }
+
+    let latest = storage
+        .get_latest_utt_block_by_session(session_id)
+        .await
+        .unwrap()
+        .expect("应有最新块");
+    assert_eq!(latest.id, last_id, "应返回最后插入的块");
+    assert_eq!(latest.block_text, "块2");
+}
+
+// list_messages_by_persona 不再截断（原 LIMIT 200），
+// 导入管线重建能枚举该 persona 的全部消息与 session
+#[tokio::test]
+async fn message_list_by_persona_returns_all_over_200() {
+    let storage = setup().await;
+    let p = Persona::new(
+        "char-p22".into(),
+        "P2-2 角色".into(),
+        PersonaKind::Char,
+        1,
+        "local".into(),
+    );
+    storage.create_persona(&p).await.unwrap();
+    let session = storage.create_session(Some("char-p22")).await.unwrap();
+
+    // 写入 250 条消息（> 原 LIMIT 200），横跨 3 个 session 更贴近导入场景
+    let total = 250usize;
+    for i in 0..total {
+        let msg = Message::new(
+            session.id,
+            MessageRole::User,
+            format!("消息{i}"),
+            MessageSource::Local,
+        )
+        .with_persona_uid(Some("char-p22".to_string()));
+        let mut m = msg;
+        m.created_at = 1_700_000_000_000 + i as i64 * 1000;
+        storage.save_message(&m).await.unwrap();
+    }
+
+    let all = storage.list_messages_by_persona("char-p22").await.unwrap();
+    assert_eq!(all.len(), total, "应返回全部 {} 条消息而非截断", total);
+
+    // 枚举出的 session 集合覆盖该 persona 全部会话
+    let sessions: std::collections::HashSet<_> = all.iter().map(|m| m.session_id).collect();
+    assert!(sessions.contains(&session.id));
+}
+
+// trait 层 list_messages_by_persona_paginated 分页正确性（storage 覆写为高效 SQL）。
+#[tokio::test]
+async fn message_list_by_persona_paginated_works() {
+    let storage = setup().await;
+    let p = Persona::new(
+        "char-pg".into(),
+        "分页角色".into(),
+        PersonaKind::Char,
+        1,
+        "local".into(),
+    );
+    storage.create_persona(&p).await.unwrap();
+    let session = storage.create_session(Some("char-pg")).await.unwrap();
+
+    // 写入 7 条，created_at 从 base 递增，超过单页大小(3)。
+    let total = 7usize;
+    let base = 1_700_000_000_000i64;
+    for i in 0..total {
+        let msg = Message::new(
+            session.id,
+            MessageRole::User,
+            format!("分页消息{i}"),
+            MessageSource::Local,
+        )
+        .with_persona_uid(Some("char-pg".to_string()));
+        let mut m = msg;
+        m.created_at = base + i as i64;
+        storage.save_message(&m).await.unwrap();
+    }
+
+    // 第 1 页（最新 3 条，created_at DESC）。
+    let page1 = storage
+        .list_messages_by_persona_paginated("char-pg", 3, 0)
+        .await
+        .unwrap();
+    let p1_ts: Vec<i64> = page1.iter().map(|m| m.created_at).collect();
+    assert_eq!(p1_ts, (base + 4..=base + 6).rev().collect::<Vec<_>>());
+
+    // 末页（offset 6 → 余 1 条，页不满）。
+    let page3 = storage
+        .list_messages_by_persona_paginated("char-pg", 3, 6)
+        .await
+        .unwrap();
+    let p3_ts: Vec<i64> = page3.iter().map(|m| m.created_at).collect();
+    assert_eq!(p3_ts, vec![base]);
+
+    // offset 越界 → 空。
+    let beyond = storage
+        .list_messages_by_persona_paginated("char-pg", 3, 20)
+        .await
+        .unwrap();
+    assert!(beyond.is_empty(), "offset 越界应返回空页");
+}
+
+#[tokio::test]
+async fn utt_block_delete_by_session() {
+    let (storage, persona_uid, session_id) = setup_utt_context().await;
+    let messages = storage.list_messages(session_id).await.unwrap();
+
+    for n in 0..3 {
+        let block = UttBlock::new(
+            persona_uid.clone(),
+            session_id,
+            messages[0].id,
+            messages[2].id,
+            format!("块{n}"),
+            1,
+            0,
+        );
+        storage.insert_utt_block(&block).await.unwrap();
+    }
+
+    let deleted = storage
+        .delete_utt_blocks_by_session(session_id)
+        .await
+        .unwrap();
+    assert_eq!(deleted, 3, "应删除 3 个块");
+
+    let remaining = storage
+        .list_utt_blocks_by_persona(&persona_uid)
+        .await
+        .unwrap();
+    assert!(remaining.is_empty(), "删除后不应残留块");
+
+    // 幂等：再次删除返回 0
+    let again = storage
+        .delete_utt_blocks_by_session(session_id)
+        .await
+        .unwrap();
+    assert_eq!(again, 0);
+}
+
+#[tokio::test]
+async fn utt_block_empty_session_returns_none() {
+    let (storage, _, session_id) = setup_utt_context().await;
+    let latest = storage
+        .get_latest_utt_block_by_session(session_id)
+        .await
+        .unwrap();
+    assert!(latest.is_none(), "无块会话应返回 None");
+}
+
+#[tokio::test]
+async fn utt_block_embedding_roundtrip() {
+    let (storage, persona_uid, session_id) = setup_utt_context().await;
+    let messages = storage.list_messages(session_id).await.unwrap();
+
+    // 构造 4 维 f32 向量的小端 BLOB
+    let vector = vec![0.1f32, 0.2, 0.3, 0.4];
+    let blob: Vec<u8> = vector.iter().flat_map(|v| v.to_le_bytes()).collect();
+
+    let mut block = UttBlock::new(
+        persona_uid,
+        session_id,
+        messages[0].id,
+        messages[2].id,
+        "带向量的块".to_string(),
+        3,
+        60_000,
+    );
+    block.embedding = Some(blob);
+    storage.insert_utt_block(&block).await.unwrap();
+
+    let latest = storage
+        .get_latest_utt_block_by_session(session_id)
+        .await
+        .unwrap()
+        .expect("应有块");
+    let stored = latest.embedding.expect("embedding 应往返保留");
+    assert_eq!(stored.len(), 16, "4 × f32 = 16 字节");
+    let back: Vec<f32> = stored
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    assert_eq!(back, vector);
+}
+
+// =========================================================
+// examples repo（v1.4）
+// =========================================================
+
+async fn setup_example_persona(storage: &SqliteStorage) -> String {
+    let persona = ramaria_core::types::Persona::new(
+        "char-0001".to_string(),
+        "测试角色".to_string(),
+        ramaria_core::types::PersonaKind::Char,
+        1,
+        "local".to_string(),
+    );
+    storage.create_persona(&persona).await.unwrap();
+    "char-0001".to_string()
+}
+
+fn example(uid: &str, partner: &str, reply: &str) -> ramaria_core::types::PersonaExample {
+    let mut e = ramaria_core::types::PersonaExample::new(
+        uid.to_string(),
+        partner.to_string(),
+        reply.to_string(),
+    );
+    e.tags = Some("测试,话题".to_string());
+    e.context = Some("前文".to_string());
+    e
+}
+
+#[tokio::test]
+async fn examples_repo_save_and_list_all() {
+    let storage = setup().await;
+    let uid = setup_example_persona(&storage).await;
+
+    storage
+        .save_example(&example(&uid, "问题甲", "回复内容甲"))
+        .await
+        .unwrap();
+    storage
+        .save_example(&example(&uid, "问题乙", "回复内容乙"))
+        .await
+        .unwrap();
+
+    let all = storage.list_all_examples(&uid).await.unwrap();
+    assert_eq!(all.len(), 2, "候选池应包含全部示例");
+    assert!(all.iter().all(|e| e.persona_uid == uid));
+
+    // 新入库示例为候选（selected=false）→ list_selected 兼容路径为空
+    let selected = storage.list_selected_examples(&uid).await.unwrap();
+    assert!(selected.is_empty(), "候选池示例不进入静态 selected 路径");
+
+    // 跨 persona 隔离
+    let other = storage.list_all_examples("char-9999").await.unwrap();
+    assert!(other.is_empty());
+}
+
+#[tokio::test]
+async fn examples_repo_find_by_pair() {
+    let storage = setup().await;
+    let uid = setup_example_persona(&storage).await;
+    storage
+        .save_example(&example(&uid, "问题甲", "回复内容甲"))
+        .await
+        .unwrap();
+
+    let hit = storage
+        .find_example_by_pair(&uid, "问题甲", "回复内容甲")
+        .await
+        .unwrap();
+    assert!(hit.is_some(), "相同回复对应查重命中");
+    assert_eq!(hit.unwrap().id, 1);
+
+    // 内容不同 / 归属不同 → 未命中
+    assert!(
+        storage
+            .find_example_by_pair(&uid, "问题甲", "回复内容乙")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        storage
+            .find_example_by_pair("char-9999", "问题甲", "回复内容甲")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn examples_repo_list_selected_respects_flag() {
+    let storage = setup().await;
+    let uid = setup_example_persona(&storage).await;
+
+    let mut sel = example(&uid, "问题甲", "回复内容甲");
+    sel.selected = true;
+    storage.save_example(&sel).await.unwrap();
+    storage
+        .save_example(&example(&uid, "问题乙", "回复内容乙"))
+        .await
+        .unwrap();
+
+    let selected = storage.list_selected_examples(&uid).await.unwrap();
+    assert_eq!(selected.len(), 1, "仅 selected=1 的示例被静态路径返回");
+    assert_eq!(selected[0].partner, "问题甲");
+
+    let all = storage.list_all_examples(&uid).await.unwrap();
+    assert_eq!(all.len(), 2, "候选池路径返回全部");
+}
+
+#[tokio::test]
+async fn examples_repo_save_roundtrip_fields() {
+    let storage = setup().await;
+    let uid = setup_example_persona(&storage).await;
+    let session = storage.create_session(Some(&uid)).await.unwrap();
+
+    let mut e = example(&uid, "问题甲", "回复内容甲");
+    e.session_id = Some(session.id);
+    storage.save_example(&e).await.unwrap();
+
+    let all = storage.list_all_examples(&uid).await.unwrap();
+    assert_eq!(all.len(), 1);
+    let got = &all[0];
+    assert_eq!(got.session_id, e.session_id);
+    assert_eq!(got.tags.as_deref(), Some("测试,话题"));
+    assert_eq!(got.context.as_deref(), Some("前文"));
+    assert_eq!(got.length, 5, "length = reply 字符数");
+    assert!(!got.selected);
+}
+
+// =========================================================
+// SqliteLlmCache 容量自淘汰（v1.5 C）
+// =========================================================
+
+/// 写入三条记录（间隔 2ms 保证时间戳可区分顺序），
+/// 返回各 key 供断言。
+async fn fill_cache(cache: &SqliteLlmCache) {
+    for (key, resp) in [("k1", "r1"), ("k2", "r2"), ("k3", "r3")] {
+        cache
+            .put(key, resp, "test-model", "test-version")
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+}
+
+#[tokio::test]
+async fn llm_cache_evicts_lru_beyond_capacity() {
+    let pool = database::init_test_pool().await.expect("测试库初始化失败");
+    let cache = SqliteLlmCache::new(pool, 2, CacheEviction::Lru);
+    fill_cache(&cache).await;
+
+    // 容量 2，写入 3 条 → 自动淘汰最旧 1 条
+    assert_eq!(cache.count().await.unwrap(), 2);
+    assert!(
+        cache.get("k1").await.unwrap().is_none(),
+        "LRU 应淘汰最早写入的 k1"
+    );
+    assert_eq!(cache.get("k3").await.unwrap().as_deref(), Some("r3"));
+}
+
+#[tokio::test]
+async fn llm_cache_evicts_fifo_beyond_capacity() {
+    let pool = database::init_test_pool().await.expect("测试库初始化失败");
+    let cache = SqliteLlmCache::new(pool, 2, CacheEviction::Fifo);
+    fill_cache(&cache).await;
+
+    // FIFO 按写入顺序淘汰：即便 k3 先被访问，淘汰的仍是 early 写入的 k1
+    assert_eq!(cache.count().await.unwrap(), 2);
+    assert!(
+        cache.get("k1").await.unwrap().is_none(),
+        "FIFO 应按写入时间淘汰最早的 k1"
+    );
+    assert_eq!(cache.get("k3").await.unwrap().as_deref(), Some("r3"));
+}
+
+#[tokio::test]
+async fn llm_cache_unlimited_capacity_keeps_all() {
+    let pool = database::init_test_pool().await.expect("测试库初始化失败");
+    // max_entries=0 表示不限制容量
+    let cache = SqliteLlmCache::new(pool, 0, CacheEviction::Lru);
+    fill_cache(&cache).await;
+    assert_eq!(cache.count().await.unwrap(), 3, "不限制容量时不应淘汰");
+}
+
+#[tokio::test]
+async fn llm_cache_hit_refreshes_lru_order() {
+    let pool = database::init_test_pool().await.expect("测试库初始化失败");
+    let cache = SqliteLlmCache::new(pool, 2, CacheEviction::Lru);
+    for (key, resp) in [("k1", "r1"), ("k2", "r2")] {
+        cache.put(key, resp, "m", "v").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+    // 命中 k1 刷新其访问时间 → 之后写入 k3 时应淘汰 k2（而非 k1）
+    assert_eq!(cache.get("k1").await.unwrap().as_deref(), Some("r1"));
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    cache.put("k3", "r3", "m", "v").await.unwrap();
+    assert_eq!(cache.count().await.unwrap(), 2);
+    assert!(
+        cache.get("k1").await.unwrap().is_some(),
+        "被命中的 k1 应保留"
+    );
+    assert!(
+        cache.get("k2").await.unwrap().is_none(),
+        "LRU 应淘汰未命中的 k2"
+    );
+}
+
+/// 复合索引齐备（过滤列 + 排序列成对，列表查询不再建临时 B-tree）。
+#[tokio::test]
+async fn schema_pair_indexes_present() {
+    let storage = setup().await;
+    let expected = [
+        "idx_messages_persona_created",
+        "idx_messages_session_created",
+        "idx_memory_l1_persona_created",
+        "idx_memory_events_persona_created",
+        "idx_utt_blocks_session_created",
+    ];
+    for name in expected {
+        let found: Option<String> =
+            sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?")
+                .bind(name)
+                .fetch_optional(&storage.pool)
+                .await
+                .unwrap();
+        assert_eq!(found.as_deref(), Some(name), "缺少复合索引 {name}");
+    }
+}
+
+/// 非法关键词必须显式报错（不再 warn 后 Ok，避免静默丢词）。
+#[tokio::test]
+async fn upsert_keyword_rejects_invalid_token() {
+    let storage = setup().await;
+    let err = storage.upsert_keyword("").await.expect_err("空串应拒绝");
+    assert!(matches!(err, RamariaError::Validation { .. }));
+    // 合法词条仍可正常写入
+    storage.upsert_keyword("工作").await.unwrap();
+}
+
+/// 版本链并发防护：同一旧事实被覆盖两次时，第二次返回冲突且不产生第二条 active。
+#[tokio::test]
+async fn fact_double_supersede_conflict() {
+    let storage = setup().await;
+    let p = Persona::new(
+        "user-0004".into(),
+        "用户四".into(),
+        PersonaKind::User,
+        1,
+        "local".into(),
+    );
+    storage.create_persona(&p).await.unwrap();
+
+    let mut old = PersonaFact::new(
+        "user-0004".into(),
+        ramaria_core::types::ProfileField::PersonalStatus,
+        "当前情绪：平静".into(),
+        FactSource::Event,
+    );
+    let old_id = storage.save_fact(&old).await.unwrap();
+    old.id = old_id;
+
+    // 第一次覆盖成功
+    let fresh1 = PersonaFact::new(
+        "user-0004".into(),
+        ramaria_core::types::ProfileField::PersonalStatus,
+        "当前情绪：焦虑".into(),
+        FactSource::Event,
+    );
+    storage.save_fact_with_version(&old, &fresh1).await.unwrap();
+
+    // 第二次仍用已 superseded 的 old：必须报冲突，且不得再写入 active
+    let fresh2 = PersonaFact::new(
+        "user-0004".into(),
+        ramaria_core::types::ProfileField::PersonalStatus,
+        "当前情绪：兴奋".into(),
+        FactSource::Event,
+    );
+    let err = storage
+        .save_fact_with_version(&old, &fresh2)
+        .await
+        .expect_err("已 superseded 的旧事实应拒绝再次覆盖");
+    assert!(matches!(err, RamariaError::Validation { .. }));
+
+    let active = storage
+        .list_active_facts_by_field(
+            "user-0004",
+            ramaria_core::types::ProfileField::PersonalStatus,
+        )
+        .await
+        .unwrap();
+    assert_eq!(active.len(), 1, "同 field 只应保留一条 active");
+    assert_eq!(active[0].content, "当前情绪：焦虑");
+}

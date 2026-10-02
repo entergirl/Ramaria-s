@@ -1,0 +1,552 @@
+//! crates/ramaria-service/src/setup/tests.rs - Ramaria 首次配置模块测试
+//!
+//! 设计特点:
+//! - 由 setup.rs 以 `#[cfg(test)] mod tests;` 收纳：覆盖缺项诊断 / 状态判定与推进 /
+//!   配置写入 / 健康探测 / 重建收敛五条路径
+//! - 真实 SQLite（临时文件库 + 全量 migration）：断言状态推进与配置落库口径
+//! - 健康探测以本地 mock HTTP 服务与 mock LLM 驱动，不连外网、不访问 OS keychain
+//!
+//! 安全约束:
+//! - 全部数据为合成样例；不使用真实 API key、不连网、不使用真实用户数据。
+
+use super::*;
+use crate::test_support::{
+    DeterministicEmbedding, MockLlm, engine_with_db, engine_with_llm_and_config,
+    engine_with_llm_config_and_embedding,
+};
+use ramaria_core::traits::{EmbeddingProvider, StoreInfrastructure};
+use ramaria_core::types::LlmProvider as LlmProviderKind;
+use std::sync::Arc;
+
+/// 构造首次配置请求（本地 provider：无需 API key）。
+fn local_request(base_url: &str) -> SetupRequest {
+    SetupRequest {
+        provider: LlmProviderKind::LmStudio,
+        model_id: "local-model".to_string(),
+        base_url: base_url.to_string(),
+        api_key: None,
+    }
+}
+
+/// 启动本地 mock HTTP 服务：对任意请求返回 200（供健康探测通过）。
+///
+/// 说明:
+/// - 返回 mock 服务 base_url；循环接受连接以吸收探测重试；
+/// - 服务任务随测试 runtime 结束而终止。
+async fn spawn_mock_health_server() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("绑定 mock 端口应成功");
+    let addr = listener.local_addr().expect("获取 mock 地址应成功");
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            // 读到请求头结束即可（GET 无 body）
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 1024];
+            while buf.len() < 8192 {
+                match socket.read(&mut tmp).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                }
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}";
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.shutdown().await;
+        }
+    });
+    format!("http://127.0.0.1:{}/v1", addr.port())
+}
+
+/// 缺项诊断：空库缺后端 / 模型 / 索引 / 嵌入四项；显式置索引版本为已构建后去掉索引项；
+/// 本地 / 线上 provider 的模型选择口径不同。
+#[tokio::test]
+async fn check_reports_missing_items_on_empty_db() {
+    let (engine, storage, dir) = engine_with_db("setup-empty").await;
+
+    // 空库 migration 后索引版本为 0（未构建）：缺后端 / 模型 / 索引 / 嵌入四项
+    let status = engine.check_setup_status().await.expect("诊断应成功");
+    assert!(!status.backend_configured);
+    assert!(!status.model_selected);
+    assert!(
+        status.needs_indexing,
+        "新库迁移后索引版本为 0，空库按未构建口径"
+    );
+    assert!(!status.embedding_available);
+    assert!(!status.is_complete());
+    assert_eq!(
+        status.missing_items().len(),
+        4,
+        "缺后端 / 模型 / 索引 / 嵌入"
+    );
+    assert!(
+        status
+            .missing_items()
+            .iter()
+            .any(|item| item.contains("索引")),
+        "缺项应包含索引项"
+    );
+
+    // 显式标记索引已构建：缺项清单去掉索引项
+    storage
+        .set_index_version(1)
+        .await
+        .expect("写入索引版本应成功");
+    let status = engine.check_setup_status().await.expect("诊断应成功");
+    assert!(!status.needs_indexing);
+    assert_eq!(status.missing_items().len(), 3, "缺后端 / 模型 / 嵌入");
+
+    // 本地 provider：模型选择视为完成
+    storage
+        .save_backend_config(&BackendConfig::lm_studio_default())
+        .await
+        .expect("保存后端配置应成功");
+    let status = engine.check_setup_status().await.expect("诊断应成功");
+    assert!(status.backend_configured);
+    assert!(status.model_selected, "本地 provider 不强制 model_id");
+
+    // 线上 provider 且 model_id 为空：模型选择未完成
+    let online = BackendConfig::new_with_defaults(
+        LlmProviderKind::DeepSeek,
+        "https://api.deepseek.com/v1".to_string(),
+        String::new(),
+    );
+    storage
+        .save_backend_config(&online)
+        .await
+        .expect("保存后端配置应成功");
+    let status = engine.check_setup_status().await.expect("诊断应成功");
+    assert!(
+        !status.model_selected,
+        "线上 provider 空 model_id 应视为未选模型"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 状态判定：各组合逐一对应 NeedsSetup / Indexing / Degraded / Ready。
+#[test]
+fn determine_state_cases() {
+    let cases = [
+        (
+            SetupStatus {
+                backend_configured: false,
+                model_selected: false,
+                needs_indexing: false,
+                embedding_available: false,
+            },
+            AppState::NeedsSetup,
+        ),
+        (
+            SetupStatus {
+                backend_configured: true,
+                model_selected: false,
+                needs_indexing: false,
+                embedding_available: true,
+            },
+            AppState::NeedsSetup,
+        ),
+        (
+            SetupStatus {
+                backend_configured: true,
+                model_selected: true,
+                needs_indexing: true,
+                embedding_available: true,
+            },
+            AppState::Indexing,
+        ),
+        (
+            SetupStatus {
+                backend_configured: true,
+                model_selected: true,
+                needs_indexing: false,
+                embedding_available: false,
+            },
+            AppState::Degraded,
+        ),
+        (
+            SetupStatus {
+                backend_configured: true,
+                model_selected: true,
+                needs_indexing: false,
+                embedding_available: true,
+            },
+            AppState::Ready,
+        ),
+    ];
+    for (status, expected) in cases {
+        assert_eq!(
+            determine_state(&status),
+            expected,
+            "状态判定不符: {status:?}"
+        );
+    }
+}
+
+/// 配置写入：落库 + provider 热替换 + 保留嵌入路径（重跑幂等），不依赖网络。
+#[tokio::test]
+async fn apply_persists_config_and_preserves_embedding_path() {
+    let (engine, storage, dir) = engine_with_db("setup-apply").await;
+
+    // 预置嵌入模型路径：模拟"上一次已配置嵌入模型"
+    let mut seeded = BackendConfig::lm_studio_default();
+    seeded.embedding_model_path = Some("/saved/embedding/model".to_string());
+    storage
+        .save_backend_config(&seeded)
+        .await
+        .expect("保存后端配置应成功");
+
+    let request = local_request("http://localhost:7777/v1");
+    let applied = apply(&engine, &request).await.expect("配置写入应成功");
+    assert_eq!(applied.base_url, "http://localhost:7777/v1");
+    assert_eq!(applied.capability.model_id, "local-model");
+
+    // 配置已落库且嵌入路径保留
+    let saved = storage
+        .get_backend_config()
+        .await
+        .expect("读取配置应成功")
+        .expect("配置应存在");
+    assert_eq!(saved.base_url, "http://localhost:7777/v1");
+    assert_eq!(
+        saved.embedding_model_path.as_deref(),
+        Some("/saved/embedding/model"),
+        "重跑向导不得清空已保存的嵌入模型路径"
+    );
+
+    // provider 已热替换（新 provider 使用新 base_url）
+    assert_eq!(engine.llm().name(), "LM Studio");
+    assert_eq!(engine.llm().config().base_url, "http://localhost:7777/v1");
+
+    // 幂等：再次提交同一配置，结果一致
+    let again = apply(&engine, &request).await.expect("重复配置应成功");
+    assert_eq!(again.base_url, applied.base_url);
+    assert_eq!(again.capability.model_id, applied.capability.model_id);
+    assert_eq!(again.embedding_model_path, applied.embedding_model_path);
+    let saved_again = storage
+        .get_backend_config()
+        .await
+        .expect("读取配置应成功")
+        .expect("配置应存在");
+    assert_eq!(
+        saved_again.embedding_model_path.as_deref(),
+        Some("/saved/embedding/model")
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 状态推进：探测失败一律 Degraded；探测通过按缺项诊断判定（含嵌入可用性）。
+#[tokio::test]
+async fn advance_state_follows_probe_and_diagnostics() {
+    let (engine, storage, dir) = engine_with_db("setup-advance").await;
+    storage
+        .save_backend_config(&BackendConfig::lm_studio_default())
+        .await
+        .expect("保存后端配置应成功");
+
+    // 探测失败：配置完整性无关，直接降级
+    assert_eq!(
+        advance_state(&engine, false).await.expect("推进应成功"),
+        AppState::Degraded
+    );
+    assert_eq!(engine.current_state(), AppState::Degraded);
+
+    // 探测通过 + 索引待构建 → Indexing
+    storage
+        .set_index_version(0)
+        .await
+        .expect("写入索引版本应成功");
+    assert_eq!(
+        advance_state(&engine, true).await.expect("推进应成功"),
+        AppState::Indexing
+    );
+
+    // 探测通过 + 索引已构建 + 嵌入不可用 → Degraded
+    storage
+        .set_index_version(1)
+        .await
+        .expect("写入索引版本应成功");
+    assert_eq!(
+        advance_state(&engine, true).await.expect("推进应成功"),
+        AppState::Degraded
+    );
+
+    // 嵌入可用后：推进路径与刷新路径均判定 Ready
+    let embedding: Arc<dyn EmbeddingProvider> = Arc::new(DeterministicEmbedding::new());
+    engine.update_embedding(Some(embedding));
+    assert_eq!(
+        advance_state(&engine, true).await.expect("推进应成功"),
+        AppState::Ready
+    );
+    assert_eq!(
+        engine.refresh_setup_state().await.expect("刷新应成功"),
+        AppState::Ready
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 探测失败：配置写入成功后探测失败 → 降级为 Degraded，配置保留（用户可修正后重试）。
+///
+/// 说明:
+/// - "探测失败"以 `advance_state(false)` 作为输入直接构造：探测重试口径由
+///   `probe_health_retries_until_success` 覆盖，本用例聚焦失败时的降级与配置保留；
+/// - 配置写入走真实路径（`apply`：真实 provider 构建与热替换），地址不参与探测。
+#[tokio::test]
+async fn run_degrades_when_probe_fails() {
+    let (engine, storage, dir) = engine_with_db("setup-degraded").await;
+
+    // 配置写入（真实 provider 构建与热替换）
+    apply(&engine, &local_request("http://127.0.0.1:9/v1"))
+        .await
+        .expect("配置写入应成功");
+
+    // 探测失败输入 → 状态推进为 Degraded（不报错）
+    let state = advance_state(&engine, false)
+        .await
+        .expect("探测失败也应成功返回（降级而非报错）");
+    assert_eq!(state, AppState::Degraded);
+    assert_eq!(engine.current_state(), AppState::Degraded);
+    assert!(
+        storage
+            .get_backend_config()
+            .await
+            .expect("读取配置应成功")
+            .is_some(),
+        "探测失败不影响配置落库（用户可修正后重试）"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 首次配置：配置就绪 + 索引已构建 + 嵌入可用 → 直接返回 Ready（无需二次刷新推进）。
+///
+/// 健康探测对象为配置写入后重建的真实 provider，故用本地 mock 服务让探测通过，
+/// 聚焦状态判定本身。
+#[tokio::test]
+async fn run_setup_reaches_ready_when_embedding_available() {
+    let health_url = spawn_mock_health_server().await;
+    let embedding: Arc<dyn EmbeddingProvider> = Arc::new(DeterministicEmbedding::new());
+    let (engine, storage, dir) = engine_with_llm_config_and_embedding(
+        "setup-ready",
+        MockLlm::local(),
+        ramaria_core::config::RamariaConfig::default(),
+        Some(embedding),
+    )
+    .await;
+    storage
+        .save_backend_config(&BackendConfig::lm_studio_default())
+        .await
+        .expect("保存后端配置应成功");
+    storage
+        .set_index_version(1)
+        .await
+        .expect("写入索引版本应成功");
+
+    let state = engine
+        .run_setup(&local_request(&health_url))
+        .await
+        .expect("首次配置应成功");
+    assert_eq!(
+        state,
+        AppState::Ready,
+        "配置就绪 + 索引已建 + 嵌入可用时应直接判定 Ready"
+    );
+    assert_eq!(engine.current_state(), AppState::Ready);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 首次配置：配置就绪 + 索引已构建但嵌入缺失 → Degraded（向量通道降级，不阻塞）。
+///
+/// 探测经本地 mock 服务通过，确保降级原因只来自嵌入缺失而非探测失败。
+#[tokio::test]
+async fn run_setup_stays_degraded_without_embedding() {
+    let health_url = spawn_mock_health_server().await;
+    let (engine, storage, dir) = engine_with_llm_and_config(
+        "setup-no-embedding",
+        MockLlm::local(),
+        ramaria_core::config::RamariaConfig::default(),
+    )
+    .await;
+    storage
+        .save_backend_config(&BackendConfig::lm_studio_default())
+        .await
+        .expect("保存后端配置应成功");
+    storage
+        .set_index_version(1)
+        .await
+        .expect("写入索引版本应成功");
+
+    let state = engine
+        .run_setup(&local_request(&health_url))
+        .await
+        .expect("首次配置应成功");
+    assert_eq!(state, AppState::Degraded, "嵌入缺失时首次配置应降级");
+    assert_eq!(engine.current_state(), AppState::Degraded);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 线上 provider 缺少 API key：显式校验错误，且不写入任何配置。
+#[tokio::test]
+async fn run_setup_rejects_online_provider_without_key() {
+    let (engine, storage, dir) = engine_with_db("setup-no-key").await;
+
+    let err = engine
+        .run_setup(&SetupRequest {
+            provider: LlmProviderKind::DeepSeek,
+            model_id: "deepseek-chat".to_string(),
+            base_url: "https://api.deepseek.com/v1".to_string(),
+            api_key: None,
+        })
+        .await
+        .expect_err("缺少 API key 应报错");
+    assert_eq!(err.category(), "validation");
+    assert!(
+        storage
+            .get_backend_config()
+            .await
+            .expect("读取配置应成功")
+            .is_none(),
+        "校验失败不得写入后端配置"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 刷新状态：索引版本推进与嵌入可用性共同决定 Ready / Degraded。
+#[tokio::test]
+async fn refresh_state_follows_index_and_embedding() {
+    let (engine, storage, dir) = engine_with_db("setup-refresh").await;
+    storage
+        .save_backend_config(&BackendConfig::lm_studio_default())
+        .await
+        .expect("保存后端配置应成功");
+
+    // 索引待构建 → Indexing
+    storage
+        .set_index_version(0)
+        .await
+        .expect("写入索引版本应成功");
+    assert_eq!(
+        engine.refresh_setup_state().await.expect("刷新应成功"),
+        AppState::Indexing
+    );
+
+    // 索引已构建 + 嵌入不可用 → Degraded
+    storage
+        .set_index_version(1)
+        .await
+        .expect("写入索引版本应成功");
+    assert_eq!(
+        engine.refresh_setup_state().await.expect("刷新应成功"),
+        AppState::Degraded
+    );
+    assert_eq!(engine.current_state(), AppState::Degraded);
+
+    // 降级原因：LLM 可用（mock 探测通过）、嵌入缺失
+    assert_eq!(
+        engine.degraded_reason().await.expect("读取降级原因应成功"),
+        Some(crate::types::DegradedReason::EmbeddingMissing)
+    );
+
+    // 索引已构建 + 嵌入可用 → Ready
+    let embedding: Arc<dyn EmbeddingProvider> = Arc::new(DeterministicEmbedding::new());
+    engine.update_embedding(Some(embedding));
+    assert_eq!(
+        engine.refresh_setup_state().await.expect("刷新应成功"),
+        AppState::Ready
+    );
+    assert_eq!(
+        engine.degraded_reason().await.expect("读取降级原因应成功"),
+        None,
+        "非降级状态不返回降级原因"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 健康探测重试：前几次失败后成功 → true；超出上限 → false。
+#[tokio::test]
+async fn probe_health_retries_until_success() {
+    // 前 2 次失败、第 3 次成功（探测间隔 0 秒，避免测试等待）
+    let llm = MockLlm::local().with_health_failures(2);
+    assert!(
+        probe_health_with_retry(&llm, 3, 0).await,
+        "重试后成功应返回 true"
+    );
+
+    // 失败次数超过上限 → false
+    let llm = MockLlm::local().with_health_failures(5);
+    assert!(
+        !probe_health_with_retry(&llm, 2, 0).await,
+        "尝试次数用尽应返回 false"
+    );
+
+    // 尝试次数为 0：按 1 次处理（不出现零次探测）
+    let llm = MockLlm::local();
+    assert!(probe_health_with_retry(&llm, 0, 0).await);
+}
+
+/// 缺索引版本的空库：判定未构建 → 一次重建写回版本（幂等）→ 刷新后推进到 Ready。
+///
+/// 说明:
+/// - 构造"缺键"库（删除 migration 预置的索引版本键），模拟从未写过索引版本的老库；
+/// - 重建连续执行两次验证幂等；收敛后按嵌入可用性判定状态（本用例嵌入可用 → Ready）。
+#[tokio::test]
+async fn missing_index_version_converges_after_rebuild() {
+    let embedding: Arc<dyn EmbeddingProvider> = Arc::new(DeterministicEmbedding::new());
+    let (engine, storage, dir) = engine_with_llm_config_and_embedding(
+        "setup-missing-version",
+        MockLlm::local(),
+        ramaria_core::config::RamariaConfig::default(),
+        Some(embedding),
+    )
+    .await;
+    storage
+        .save_backend_config(&BackendConfig::lm_studio_default())
+        .await
+        .expect("保存后端配置应成功");
+
+    // 删除 migration 预置的索引版本键：构造"缺键"库
+    let pool = engine.sqlite_pool().expect("测试库应附着连接池");
+    sqlx::query("DELETE FROM schema_meta WHERE key = 'index_version'")
+        .execute(&pool)
+        .await
+        .expect("删除索引版本键应成功");
+
+    // 缺键 → 判定未构建 → Indexing
+    let status = engine.check_setup_status().await.expect("诊断应成功");
+    assert!(status.needs_indexing, "缺键应判定为未构建");
+    assert_eq!(
+        engine.refresh_setup_state().await.expect("刷新应成功"),
+        AppState::Indexing
+    );
+
+    // 一次重建（幂等：连续两次）→ 版本写回 1 → 状态推进到 Ready
+    engine.rebuild_index().await.expect("重建应成功");
+    engine.rebuild_index().await.expect("重复重建应成功");
+    assert_eq!(
+        storage
+            .get_index_version()
+            .await
+            .expect("读取索引版本应成功"),
+        1,
+        "重建完成后应写回索引版本 1"
+    );
+    assert_eq!(
+        engine.refresh_setup_state().await.expect("刷新应成功"),
+        AppState::Ready,
+        "重建 + 刷新后应推进到 Ready"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

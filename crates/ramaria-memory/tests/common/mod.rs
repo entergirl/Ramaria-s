@@ -8,6 +8,8 @@
 // 每个测试二进制独立编译本模块，各目标使用子集不同 → 允许未使用项
 #![allow(dead_code)]
 
+pub mod mock_store;
+
 use std::pin::Pin;
 use std::sync::Mutex;
 

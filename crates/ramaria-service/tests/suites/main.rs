@@ -13,7 +13,6 @@ mod behavior;
 mod bridge;
 mod dedup_knowledge;
 mod fact_extract;
-mod inference;
 mod knowledge;
 mod prompt_template;
 mod session_lifecycle;
