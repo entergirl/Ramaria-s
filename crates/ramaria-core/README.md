@@ -11,6 +11,21 @@
 - **业务数据类型**：L0→L3 全链路数据（`Session` / `Message` / `MemoryL1` / `MemoryEvent` / `PersonalityTrait` / `PersonaFact` / `UttBlock` 等）。
 - **并发与文本辅助**：锁恢复辅助（`lock`）、关键词 Newtype 与归一化（`keyword`）、文本工具（`text`）。
 
+## 文件地图（目录 → 职责）
+
+| 路径 | 职责 | 测试位置 |
+|------|------|----------|
+| `src/lib.rs` | crate 根：模块声明与顶层 re-export | — |
+| `src/error.rs` | `RamariaError` / `RamariaResult` / 分类构造器 | 内联 |
+| `src/lock.rs` | `lock_recover` / `read_recover` / `write_recover`（Poisoned 锁恢复） | 内联 |
+| `src/behavior.rs` | 行为层类型与 `SignalType::weight()`（S1/S2/S3） | 内联 |
+| `src/privacy.rs` | 隐私确认类型与脱敏辅助 | 内联 |
+| `src/text.rs` | 文本工具（截断 / 归一化 / 估算） | 内联 |
+| `src/keyword.rs` + `src/keyword/tests.rs` | 关键词 Newtype（`KeywordToken` / `KeywordSet` / `KeywordStatus` / `KeywordRef` / `KeywordQuery`）与归一化 | `src/keyword/tests.rs` |
+| `src/config/` | 配置域一文件一分组：`core` / `paths` / `infra` / `retrieval` / `runtime` / `layers` / `channels` / `domains`（`mod.rs` 逐项 re-export；版本常量在 `mod.rs`） | `src/config/tests.rs` |
+| `src/traits/` | trait 契约：`llm` / `embedding` / `cache` / `store_crud`（单 trait 契约，结构例外登记）/ `store_version` / `store_backend` | `src/traits/tests.rs` |
+| `src/types/` | 业务类型：`message` / `session` / `memory` / `utt` / `persona_enum` / `persona_struct` / `style` / `backend` / `state`（自由函数 `new_id` / `uuid_to_db` / `uuid_from_db` / `now_ms` 在 `mod.rs`） | `src/types/tests.rs` |
+
 ## 公共入口
 
 | 模块 | 内容 |
@@ -31,10 +46,10 @@
 
 | 改动 | 落点 | 连带 |
 |------|------|------|
-| 新增配置项 | `src/config.rs` | `config/default.toml` + 逐键比对测试 |
+| 新增配置项 | `src/config/<域>.rs` | `config/default.toml` + 逐键比对测试（service） |
 | 新增错误分类 | `src/error.rs` | 调用方映射（CLI 错误码 / 桌面提示） |
-| 新增业务类型 | `src/types.rs` | `ramaria-storage/migrations/` 建表 + repo 行映射 |
-| 修改/新增 trait 方法 | `src/traits.rs` | 全部实现方（`SqliteStorage`、各 provider、测试 mock） |
+| 新增业务类型 | `src/types/<域>.rs` | `ramaria-storage/migrations/` 建表 + repo 行映射 |
+| 修改/新增 trait 方法 | `src/traits/<域>.rs` | 全部实现方（`SqliteStorage`、各 provider、两套测试 mock） |
 | 调整关键词类型 | `src/keyword.rs` | `ramaria-memory/src/keyword/`、倒排与 BM25 分词口径 |
 
 ## 验证

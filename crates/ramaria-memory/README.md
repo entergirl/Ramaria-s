@@ -8,9 +8,38 @@
 - **分层记忆管线**：L1 摘要（含渐进式分段）、L2 事件提取与吸收、L3 画像推断、示例与 utt 话语块构建。
 - **混合检索**：向量 / BM25 / 关键词镜像 / 图谱四通道 + RRF 融合；`retriever/` 维护内存索引与驱逐；`recall.rs` 提供入口/服务层共用的 `assemble_recall`。
 - **衰减与排序**：Ebbinghaus 衰减（`decay`）、相似度（`similarity`）、Token 预算裁剪（`token_budget`）。
-- **Prompt 装配**：分层系统提示（`prompt/` + `chat.rs::build_system_prompt`，含模板版本常量）、脉络素材、示例预选。
+- **Prompt 装配**：分层系统提示（`prompt/` + `chat/`，含模板版本常量）、脉络素材、示例预选。
 - **行为 / 知识 / 风格**：情境路由与合并（`behavior/`）、事实版本链与判定器（`fact/`）、风格统计（`style/`）。
 - **重建与重试**：`rebuild`（索引重建）与 `job`（后台任务类型与管理）。
+
+## 文件地图（目录 → 职责）
+
+> 测试约定：生产文件旁的同名 `xxx/tests.rs` 或 `xxx/tests/` 目录为该模块测试；`tests/` 为跨模块集成测试。
+
+| 路径 | 职责 | 测试位置 |
+|------|------|----------|
+| `src/lib.rs` | crate 根：模块声明与公共项 | — |
+| `src/recall.rs` | 共用召回装配（检索 → 过滤 → 重排 → 裁剪 → 渲染），入口与服务层同源 | `src/recall/tests.rs` |
+| `src/bm25.rs` | 自研全文索引（词典增强分词、代次检测） | `src/bm25/tests.rs` |
+| `src/decay.rs` / `src/similarity.rs` | Ebbinghaus 衰减 / 相似度计算 | 内联 |
+| `src/rrf.rs` | `rrf_fuse_optional`（缺席通道不惩罚） | `src/rrf/tests.rs` |
+| `src/vector.rs` | `BruteForceIndex` + `CachedVectorIndex`（内存向量索引） | `src/vector/tests.rs` |
+| `src/rag.rs` / `src/token_budget.rs` | Persona-Aware 过滤 / Token 预算裁剪 | `token_budget/tests.rs` |
+| `src/graph_retriever.rs` | 图谱通道（当前无数据源，空贡献） | `src/graph_retriever/tests.rs` |
+| `src/retriever.rs` + `src/retriever/` | 检索编排（`index` / `search` 四通道装配 / `utt` / `helpers` / `types`） | `src/retriever/tests/` |
+| `src/example.rs` / `src/utt/` | examples 抽取编排 / utt 话语块（`splitter` 切分、`builder` 全量与增量） | `utt/builder/tests.rs` |
+| `src/rebuild.rs` / `src/job.rs` / `src/init.rs` | 索引重建 / 后台任务管理 / 初始化 | `job/tests.rs`、`init/tests.rs` |
+| `src/llm_gate.rs` / `src/utils.rs` | LLM 可用性门禁 / 通用工具 | 内联 |
+| `src/l1/` | L0→L1 摘要：`orchestrate`（生成与补扫编排）/ `prompt` / `summarizer/`（生成实现）+ `mock` | `src/l1/summarizer/tests/` |
+| `src/event/` | L1→L2 事件提取：`extractor/`（解析 / 去重 / 关系）/ `batcher/`（主题聚类分批 + `graph` 共现图）/ `context_retriever` / `degrade` / `paraphrase` / `prompt` | `extractor/tests.rs`、`batcher/tests.rs` |
+| `src/inference/` | L2→L3 推断：`stats/`（四因子统计）/ `clustering` / `shrink` / `causal/`（A8 因果链）/ `inferrer/`（Phase B）/ `drift` / `confidence` / `calibration` / `orchestrator/`（`phase_b/`、`phase_c` 分期） | `stats/tests/`、`clustering/tests.rs`、`inferrer/tests.rs`、`orchestrator/tests.rs` |
+| `src/behavior/` | 行为模型：`clustering/`（情境-反应聚类）/ `rule_gen` / `routing` / `incremental` / `feedback` / `sentiment` / `orchestrate` | `clustering/tests.rs`、`routing/tests.rs`、`rule_gen/tests.rs` |
+| `src/fact/` | 知识层：`extractor` / `dedup` / `tier` / `arbitration`（版本链）/ `retriever` | `extractor/tests.rs`、`retriever/tests.rs`、`arbitration/tests.rs` |
+| `src/style/` | 表达层五维统计：`stat` / `baseline` / `rule_gen` / `orchestrate` | `stat/tests.rs`、`rule_gen/tests.rs` |
+| `src/keyword/` | 关键词：`normalizer` / `index`（倒排）/ `composite`（三级回退）/ `pool`（三态）/ `alias` / `service`（会话镜像） | `index/tests.rs`、`composite/tests.rs`、`alias/tests.rs`、`service/tests.rs` |
+| `src/prompt/` | System Prompt 装配：`builder/` / `layers` / `layer_guard` / `example_selector` / `injection_guard` | `builder/tests/`、`layers/tests.rs`、`layer_guard/tests.rs` |
+| `src/chat/` | 在线装配编排：素材加载 / 五段式装配 / 示例预选 / 脉络 / 人格兜底 | `src/chat/tests.rs` |
+| `tests/` | 跨模块集成：`inference/`（管线与阶段）、`legacy_root_tests.rs`、`m3_full_pipeline.rs`、`topic_batcher_full_pipeline.rs`、`common/`、`fixtures/` | `tests/` |
 
 ## 公共入口
 
@@ -40,8 +69,8 @@
 | 修改检索融合 / 排序 | `src/rrf.rs`、`src/recall.rs` | 融合规则属决策保护范围，改动须先登记决策 |
 | 修改衰减公式 | `src/decay.rs` | 参数改动须实验依据（决策基线 §18） |
 | L1 摘要策略 | `src/l1/` | `[l1.progressive]` 配置 + 封存用例（service） |
-| 事件提取 | `src/event/` + `src/inference/` | L2/L3 调度（`ramaria-service/src/lifecycle/l2_l3.rs`） |
-| Prompt 段/模板 | `src/chat.rs` + `src/prompt/` | `PROMPT_TEMPLATE_VERSION` 递增（参与缓存 key）；消融门禁快照（service `suites`） |
+| 事件提取 | `src/event/` + `src/inference/` | L2/L3 调度（`ramaria-service/src/lifecycle/l2_l3/`） |
+| Prompt 段/模板 | `src/prompt/` + `src/chat/` | `PROMPT_TEMPLATE_VERSION` 递增（参与缓存 key）；消融门禁快照（service `suites`） |
 | 关键词池与别名 | `src/keyword/` | keyword 相关表 + 服务层 keyword 用例（CLI / 桌面共用） |
 | 全新检索通道 | 需先立项（决策基线 §19 候选池） | — |
 

@@ -11,6 +11,18 @@
 - **索引与缓存存取**：BM25 索引、关键词池/引用、LLM 响应缓存、后台任务（`background_jobs`）。
 - **写锁重试**：`retry` 模块提供多进程/多线程共库下的写冲突重试辅助。
 
+## 文件地图（目录 → 职责）
+
+| 路径 | 职责 | 测试位置 |
+|------|------|----------|
+| `src/lib.rs` | crate 根：声明与 re-export（委托层已外移，本文件保持薄） | — |
+| `src/database.rs` | `init_pool` / `init_pool_with` / `PoolTuning`（migration 入口） | 内联 |
+| `src/retry.rs` | 写冲突重试辅助（`SQLITE_BUSY` / `SQLITE_LOCKED` 有限重试） | 内联 |
+| `src/backend/` | `SqliteStorage` 的 trait 实现：`crud`（实体读写）/ `infrastructure`（索引 / 任务 / 设置）/ `llm_cache` | 内联 + `src/tests/` |
+| `src/repo/` | 每实体一文件：`sessions` / `messages` / `memory_l1` / `events` / `facts` / `traits` / `keyword` / `cluster` / `behavior_rules` / `examples` / `style_stats` / `personas` / `settings` / `schema_meta` / `background_jobs` / `feedback_log` / `llm_response_cache` / `l2_fingerprint` / `backend_config` / `privacy_consent` / `utt_blocks` / `traits.rs`（repo 共用辅助） | `repo/<entity>/tests.rs`（keyword / messages / sessions）或内联 |
+| `src/tests/` | 单元测试按域拆分：`mod.rs`（共享夹具）+ schema / session / message / memory_l1 / event / persona / personality_trait / fact / keyword / index / utt_block / example / llm_cache / background_job | `src/tests/` |
+| `migrations/` | `20260905_v2.0_schema.sql`（基线 27 表）+ `20260918_v2.1_channels.sql` + `20261001_v2.3_index_version.sql`；只增不删 | — |
+
 ## 公共入口
 
 | 模块 | 内容 |
@@ -30,8 +42,8 @@
 
 | 改动 | 落点 | 连带 |
 |------|------|------|
-| 新增表 / 列 | `migrations/*.sql`（只增不删；破坏性变更须负责人授权） | `ramaria-core/src/types.rs` + `repo/*` + `../../../docs/architecture-ai-agent.md` |
-| 新增/修改查询 | `src/repo/<entity>.rs` | `ramaria-core/src/traits.rs` 的 trait 方法 + 各 mock 实现 |
+| 新增表 / 列 | `migrations/*.sql`（只增不删；破坏性变更须负责人授权） | `ramaria-core/src/types/` + `repo/*` + `../../../docs/architecture-ai-agent.md` |
+| 新增/修改查询 | `src/repo/<entity>.rs` | `ramaria-core/src/traits/store_crud.rs` 的 trait 方法 + 各 mock 实现 |
 | 连接池参数 | `src/database.rs`（`PoolTuning`） | 决策基线 §18 参数纪律 |
 | 会话级联删除 | `src/repo/sessions.rs`（`delete_cascade`） | 服务层删除用例（CLI / 桌面共用） |
 
