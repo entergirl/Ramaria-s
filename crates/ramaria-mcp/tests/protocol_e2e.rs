@@ -567,9 +567,9 @@ async fn disabled_switch_blocks_all_tools() {
         .call_tool("memory_recall", json!({ "messages": [] }))
         .await;
     let message = recall.expect_error("memory_recall（总开关关闭）");
-    assert!(
-        message.contains("设置"),
-        "错误应指引用户去面板开启：{message}"
+    assert_eq!(
+        message, "MCP 接入未开启：请在 Ramaria 桌面「设置 → MCP 接入」中打开总开关后重试",
+        "无配置回退告警时文案应与原口径逐字一致"
     );
 
     let ingest = client
@@ -579,6 +579,36 @@ async fn disabled_switch_blocks_all_tools() {
         )
         .await;
     ingest.expect_error("chat_ingest（总开关关闭）");
+}
+
+/// config.toml 解析失败回退：总开关错误文案携带解析失败摘要与修复提示。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disabled_switch_reports_config_parse_failure() {
+    let db = TempDb::new("gate-broken-config");
+    // 库同目录写入非法 config.toml：装配按默认回退并携带解析失败告警
+    std::fs::write(db.path().with_file_name("config.toml"), "[mcp\nenabled = ")
+        .expect("写入非法配置应成功");
+    let engine = open_engine(db.path()).await;
+    assert!(
+        engine.config_warning().is_some(),
+        "非法配置装配应产生回退告警"
+    );
+
+    let (mut client, _server) = start_server(engine, McpConfig::default()).await;
+    client.handshake("client-broken-config").await;
+
+    let reply = client
+        .call_tool("memory_recall", json!({ "messages": [] }))
+        .await;
+    let message = reply.expect_error("memory_recall（总开关关闭 + 配置解析失败）");
+    assert!(
+        message.contains("解析失败"),
+        "错误应携带解析失败摘要：{message}"
+    );
+    assert!(
+        message.contains("[mcp]") && message.contains("重启"),
+        "错误应给出修复提示：{message}"
+    );
 }
 
 /// 写侧治理开关：`allow_ingest = false` 拒绝写入但读工具可用；

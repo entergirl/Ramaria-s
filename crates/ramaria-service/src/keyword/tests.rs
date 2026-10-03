@@ -10,7 +10,9 @@
 //! - 全部数据为合成样例；不访问 OS keychain、不连网、不使用真实用户数据。
 
 use super::*;
-use crate::test_support::{engine_with_db, seed_l1, seed_persona};
+use crate::test_support::{
+    engine_with_db, engine_with_l1_reply, seed_l1, seed_persona, seed_session_with_messages,
+};
 use ramaria_core::traits::StoreCrud;
 use ramaria_storage::repo::keyword as kw_repo;
 
@@ -152,7 +154,7 @@ async fn pending_alias_list_shape() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// 裁决全流程：确认成功 → 再次确认（桌面报错 / 幂等口径成功）→ 驳回成功 → 再次驳回报错。
+/// 裁决全流程：确认成功 → 再次确认（幂等成功）→ 驳回成功 → 再次驳回报错。
 #[tokio::test]
 async fn resolve_alias_confirm_then_reject() {
     let (engine, _storage, dir) = engine_with_db("keyword-resolve").await;
@@ -164,7 +166,6 @@ async fn resolve_alias_confirm_then_reject() {
         .keyword_resolve_alias(AliasResolveRequest {
             alias: "职场焦虑".to_string(),
             action: AliasAction::Confirm,
-            already_applied_ok: false,
         })
         .await
         .expect("确认合并应成功");
@@ -173,26 +174,14 @@ async fn resolve_alias_confirm_then_reject() {
     assert_eq!(outcome.status, "alias");
     assert!(!outcome.already_applied);
 
-    // 再次确认：桌面口径（already_applied_ok=false）报业务校验错误
-    let err = engine
-        .keyword_resolve_alias(AliasResolveRequest {
-            alias: "职场焦虑".to_string(),
-            action: AliasAction::Confirm,
-            already_applied_ok: false,
-        })
-        .await
-        .expect_err("已是 alias 时桌面口径应报错");
-    assert_eq!(err.category(), "validation");
-
-    // 再次确认：幂等口径成功且不写库
+    // 再次确认：已是 alias 时幂等成功且不写库（already_applied 置位）
     let idempotent = engine
         .keyword_resolve_alias(AliasResolveRequest {
             alias: "职场焦虑".to_string(),
             action: AliasAction::Confirm,
-            already_applied_ok: true,
         })
         .await
-        .expect("幂等口径应成功");
+        .expect("已是 alias 再次确认应幂等成功");
     assert!(idempotent.already_applied);
     assert_eq!(idempotent.status, "alias");
     assert_eq!(idempotent.canonical_keyword.as_deref(), Some("工作压力"));
@@ -202,7 +191,6 @@ async fn resolve_alias_confirm_then_reject() {
         .keyword_resolve_alias(AliasResolveRequest {
             alias: "职业倦怠".to_string(),
             action: AliasAction::Reject,
-            already_applied_ok: true,
         })
         .await
         .expect("驳回应成功");
@@ -215,7 +203,6 @@ async fn resolve_alias_confirm_then_reject() {
         .keyword_resolve_alias(AliasResolveRequest {
             alias: "职业倦怠".to_string(),
             action: AliasAction::Reject,
-            already_applied_ok: true,
         })
         .await
         .expect_err("非 pending 驳回应报错");
@@ -250,7 +237,6 @@ async fn resolve_alias_rejects_missing_and_non_pending() {
         .keyword_resolve_alias(AliasResolveRequest {
             alias: "工作压力".to_string(),
             action: AliasAction::Confirm,
-            already_applied_ok: true,
         })
         .await
         .expect_err("非 pending 确认应报错");
@@ -261,7 +247,6 @@ async fn resolve_alias_rejects_missing_and_non_pending() {
         .keyword_resolve_alias(AliasResolveRequest {
             alias: "不存在的词".to_string(),
             action: AliasAction::Confirm,
-            already_applied_ok: true,
         })
         .await
         .expect_err("词条不存在应报错");
@@ -276,7 +261,6 @@ async fn resolve_alias_rejects_missing_and_non_pending() {
         .keyword_resolve_alias(AliasResolveRequest {
             alias: "   ".to_string(),
             action: AliasAction::Reject,
-            already_applied_ok: true,
         })
         .await
         .expect_err("空别名应报错");
@@ -301,7 +285,6 @@ async fn resolve_alias_reports_changed_state() {
         .keyword_resolve_alias(AliasResolveRequest {
             alias: "孤儿别名".to_string(),
             action: AliasAction::Confirm,
-            already_applied_ok: false,
         })
         .await
         .expect_err("条件更新未命中应报错");
@@ -514,7 +497,6 @@ async fn suggest_pending_aliases_end_to_end_then_confirm() {
         .keyword_resolve_alias(AliasResolveRequest {
             alias: "职场压力".to_string(),
             action: AliasAction::Confirm,
-            already_applied_ok: false,
         })
         .await
         .expect("确认合并应成功");
@@ -686,6 +668,85 @@ async fn suggest_pending_aliases_caps_per_run() {
             .len(),
         50,
         "落库 pending 不超过上限"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// =========================================================
+// L1 写入侧 pending（未命中但相似 → 待确认别名）
+// =========================================================
+
+/// 符合 L1 摘要 JSON 契约的固定回复（关键词含相似词与新词）。
+const L1_KEYWORD_PENDING_REPLY: &str = r#"{
+  "summary": "用户最近在准备考研数学，也在坚持健身。",
+  "keywords": "数学,考研数学,健身计划",
+  "time_period": "夜间",
+  "atmosphere": "平静",
+  "valence": 0.0,
+  "salience": 0.5,
+  "evidence_notes": []
+}"#;
+
+/// 真实链路：未命中词池但与既有规范词相似的 LLM 关键词 → pending 入池；
+/// pending 词条不进入内存词典（词表与持久化状态一致）。
+#[tokio::test]
+async fn l1_write_back_similar_keyword_lands_pending() {
+    let (engine, storage, dir) =
+        engine_with_l1_reply("keyword-l1-pending", L1_KEYWORD_PENDING_REPLY).await;
+    seed_persona(&storage, "char-0001").await;
+    // 预置规范词「数学」（幂等种子，use_count 从 0 起）
+    assert!(
+        storage
+            .seed_keyword_canonical("数学")
+            .await
+            .expect("种子注入应成功"),
+        "新词应插入"
+    );
+    let session = seed_session_with_messages(&storage, "char-0001", 2, 1_000).await;
+
+    // 真实链路：读消息 → LLM → 写 L1 → 关键词写回 + 增量镜像
+    engine
+        .regenerate_l1_no_cascade(session, Some("char-0001"), None, None)
+        .await
+        .expect("L1 生成应成功")
+        .expect("有消息会话应产出 L1");
+
+    // 1. 落库：考研数学 → pending 指向 数学
+    let pending = storage
+        .list_pending_aliases()
+        .await
+        .expect("查询待确认别名应成功");
+    let item = pending
+        .iter()
+        .find(|p| p.alias_keyword == "考研数学")
+        .expect("相似未命中词应登记为待确认别名");
+    assert_eq!(item.canonical_keyword, "数学");
+
+    // 2. 镜像：pending 词条不进入内存词典（established 词表口径）
+    //    读锁在块内取用并释放（块内无 await），避免持锁跨异步点
+    let mirror = engine.keyword_mirror();
+    let dictionary = {
+        let guard = ramaria_core::lock::read_recover(&*mirror, "keyword.tests.l1_pending");
+        guard.pool_snapshot().dictionary().to_vec()
+    };
+    assert!(
+        !dictionary.contains(&"考研数学".to_string()),
+        "pending 词条不应进入词典: {dictionary:?}"
+    );
+    assert!(
+        dictionary.contains(&"数学".to_string()),
+        "既有规范词应保留在词典: {dictionary:?}"
+    );
+
+    // 3. 不相似词按既有口径写规范词
+    let entries = storage
+        .list_keyword_pool_entries()
+        .await
+        .expect("查询词条应成功");
+    assert!(
+        entries.iter().any(|e| e.keyword == "健身计划"),
+        "不相似词应写为规范词"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

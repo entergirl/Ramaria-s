@@ -6,7 +6,7 @@
 //! - 待确认别名列表前 best-effort 触发建议生成（扫描使用量 → 相似词对落库），
 //!   生成失败仅记日志，不影响列表返回
 //! - pending 别名可 confirm（合并到规范词）/ reject（晋升独立规范词），
-//!   语义与 CLI `keyword alias confirm/reject` 一致（桌面口径：非 pending 报错）
+//!   语义与 CLI `keyword alias confirm/reject` 一致（confirm 对已合并词条幂等成功）
 //! - 无 seed 入口（前端只读视图，词条由学习管线/CLI 维护）
 //! - 日志不记录词条文本：仅计数或 `redact_text_label` 脱敏标签（隐私口径）
 
@@ -71,6 +71,8 @@ pub struct AliasResolveResponse {
     pub canonical_keyword: Option<String>,
     /// 处理后状态: alias / canonical
     pub status: String,
+    /// true = 本次未写库（词条此前已合并，幂等路径）
+    pub already_applied: bool,
 }
 
 // =========================================================
@@ -169,7 +171,8 @@ pub async fn list_pending_aliases(
 /// - `action`: "confirm" 确认合并 / "reject" 驳回。
 ///
 /// 说明:
-/// - 词条不存在或非 pending 状态时返回业务校验错误（不写库）。
+/// - 词条不存在或非 pending 状态时返回业务校验错误（不写库）；
+///   confirm 且词条已是 alias 时幂等成功（不改库，结果中 already_applied 置位）。
 #[tauri::command]
 #[tracing::instrument(skip(state, alias))]
 pub async fn resolve_alias(
@@ -183,13 +186,11 @@ pub async fn resolve_alias(
         _ => return Err(format!("无效操作: '{action}'（应为 confirm 或 reject）")),
     };
 
-    // 桌面口径：confirm 且词条已是 alias 时按非 pending 报错（不幂等成功）
     let outcome = state
         .engine
         .keyword_resolve_alias(AliasResolveRequest {
             alias,
             action: action_value,
-            already_applied_ok: false,
         })
         .await
         .map_err(|e| crate::commands::service_error_message(&e, "别名处理失败"))?;
@@ -204,5 +205,6 @@ pub async fn resolve_alias(
         alias: outcome.alias,
         canonical_keyword: outcome.canonical_keyword,
         status: outcome.status,
+        already_applied: outcome.already_applied,
     })
 }

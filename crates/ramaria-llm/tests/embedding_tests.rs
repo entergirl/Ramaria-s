@@ -4,10 +4,6 @@
 //! - 使用 `NoopEmbeddingProvider` 进行无需真实模型的单元测试
 //! - 测试 EmbeddingProvider trait 的完整接口契约
 //! - 覆盖：可用性检查、验证、空输入、批量操作、模型信息一致性
-//!
-//! 说明:
-//! - ONNX 后端已停用（无 crate 启用 `embedding-onnx` feature），不存在对应的 ONNX
-//!   集成测试；本文件仅覆盖 `NoopEmbeddingProvider` 实现与 `EmbeddingProvider` trait 契约。
 
 use ramaria_core::traits::EmbeddingProvider;
 use ramaria_llm::embedding::noop::NoopEmbeddingProvider;

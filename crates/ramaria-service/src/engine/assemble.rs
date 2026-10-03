@@ -105,7 +105,7 @@ impl Engine {
         let config_path = options
             .config_path
             .unwrap_or_else(|| default_config_path(&db_path));
-        let config = load_config_readonly(&config_path, &db_path);
+        let (config, config_warning) = load_config_readonly(&config_path, &db_path);
 
         // ---- 3. 后端配置（DB 为真相源；无记录回退 LM Studio 默认）----
         let backend_config = storage
@@ -147,6 +147,7 @@ impl Engine {
             llm_cache: RwLock::new(cache),
             behavior_pending: Arc::new(Mutex::new(PendingPool::new(&config.behavior))),
             config: RwLock::new(Arc::new(config)),
+            config_warning: RwLock::new(config_warning),
             config_path,
             db_path,
             pool: RwLock::new(Some(engine_pool)),
@@ -193,6 +194,7 @@ impl Engine {
             llm_cache: RwLock::new(None),
             behavior_pending: Arc::new(Mutex::new(PendingPool::new(&config.behavior))),
             config: RwLock::new(Arc::new(config)),
+            config_warning: RwLock::new(None),
             config_path: PathBuf::new(),
             db_path: PathBuf::new(),
             pool: RwLock::new(None),
@@ -283,6 +285,17 @@ impl Engine {
     /// 生效配置快照（读锁内克隆 Arc，调用方在锁外使用）。
     pub fn config(&self) -> Arc<RamariaConfig> {
         read_recover(&self.config, "engine.config").clone()
+    }
+
+    /// 配置加载回退告警（装配时 `config.toml` 读取 / 解析失败的脱敏摘要）。
+    ///
+    /// 语义:
+    /// - `Some(..)` = 装配时未能采用磁盘配置，引擎按默认配置运行；供入口层在
+    ///   启动自检与门禁提示中携带可诊断原因（如 MCP 总开关「未开启」可能并非用户本意）；
+    /// - 配置正常加载 / 文件缺失（属正常默认路径）时为 None；
+    /// - 配置用例成功替换快照后清除（磁盘配置已按用例结果采用）。
+    pub fn config_warning(&self) -> Option<String> {
+        read_recover(&self.config_warning, "engine.config_warning").clone()
     }
 
     /// 实际使用的配置文件路径（`from_parts` 构造时为空路径）。
@@ -501,10 +514,15 @@ fn default_config_path(db_path: &Path) -> PathBuf {
 
 /// 只读加载配置：读取 `config.toml` 并填充实际路径；缺失 / 解析失败回退默认值。
 ///
+/// 返回:
+/// - 配置快照与可选的回退告警：文件存在但读取 / 解析失败时，告警携带脱敏摘要
+///   （错误首行、按字符截断），供入口层提示携带原因；其余情况为 None。
+///
 /// 说明:
 /// - 装配路径不生成模板、不回写 DB（无副作用的只读装配；写入只经配置用例）。
 /// - 路径字段以数据库所在目录为数据根填充（与入口层同一约定）。
-fn load_config_readonly(config_path: &Path, db_path: &Path) -> RamariaConfig {
+fn load_config_readonly(config_path: &Path, db_path: &Path) -> (RamariaConfig, Option<String>) {
+    let mut warning = None;
     let mut config = if config_path.exists() {
         match std::fs::read_to_string(config_path) {
             Ok(text) => match toml::from_str::<RamariaConfig>(&text) {
@@ -515,6 +533,10 @@ fn load_config_readonly(config_path: &Path, db_path: &Path) -> RamariaConfig {
                         error = %e,
                         "config.toml 解析失败，回退默认配置"
                     );
+                    warning = Some(format!(
+                        "config.toml 解析失败，已回退默认配置：{}",
+                        config_error_digest(&e.to_string())
+                    ));
                     RamariaConfig::default()
                 }
             },
@@ -524,6 +546,10 @@ fn load_config_readonly(config_path: &Path, db_path: &Path) -> RamariaConfig {
                     error = %e,
                     "config.toml 读取失败，回退默认配置"
                 );
+                warning = Some(format!(
+                    "config.toml 读取失败，已回退默认配置：{}",
+                    config_error_digest(&e.to_string())
+                ));
                 RamariaConfig::default()
             }
         }
@@ -543,7 +569,23 @@ fn load_config_readonly(config_path: &Path, db_path: &Path) -> RamariaConfig {
     config.paths.log_dir = data_dir.join("logs").to_string_lossy().into_owned();
     config.paths.config_dir = data_dir.to_string_lossy().into_owned();
     config.paths.vector_index_dir = data_dir.join("vectors").to_string_lossy().into_owned();
-    config
+    (config, warning)
+}
+
+/// 配置错误摘要（面向入口提示）：取错误文本首行并按字符截断到上限内。
+///
+/// 说明:
+/// - 提示只携带首行（通常含行号与简短原因），不把文件内容带入面向用户文案；
+/// - 超长时保留前 `MAX_CHARS - 1` 个字符并以省略号标记截断。
+fn config_error_digest(error: &str) -> String {
+    const MAX_CHARS: usize = 200;
+    let first_line = error.lines().next().unwrap_or_default().trim();
+    if first_line.chars().count() <= MAX_CHARS {
+        return first_line.to_string();
+    }
+    let mut digest: String = first_line.chars().take(MAX_CHARS - 1).collect();
+    digest.push('…');
+    digest
 }
 
 /// 按后端配置构建 LLM provider（可选注入响应缓存）。

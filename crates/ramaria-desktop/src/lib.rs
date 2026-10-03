@@ -18,6 +18,7 @@ mod events;
 mod notification;
 mod path_guard;
 mod tray;
+mod webview;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -291,10 +292,11 @@ async fn init_runtime(data_dir: &Path) -> Result<DesktopRuntime, String> {
 /// 1. 确定数据目录
 /// 2. 确保目录存在（含 logs/ 子目录）
 /// 3. 初始化日志（stdout + 文件）
-/// 4. 初始化桌面运行时（引擎 / 生命周期，异步）
-/// 5. 构建 Tauri Builder 并注入状态和命令
-/// 6. 在 setup 钩子中初始化系统托盘
-/// 7. 运行应用
+/// 4. 清理 WebView2 远程调试端口注入（release）
+/// 5. 初始化桌面运行时（引擎 / 生命周期，异步）
+/// 6. 构建 Tauri Builder 并注入状态和命令
+/// 7. 在 setup 钩子中初始化系统托盘
+/// 8. 运行应用
 ///
 /// 说明:
 /// - 该函数由 main.rs 调用
@@ -316,6 +318,10 @@ pub fn run() {
         dir = %path_guard::redact_path_label(&data_dir),
         "数据目录已就绪"
     );
+
+    // Step 4: release 构建清理 WebView2 远程调试端口注入（须在任何线程创建之前）
+    #[cfg(not(debug_assertions))]
+    webview::sanitize_webview2_debug_args();
 
     // 创建 tokio 运行时用于初始化
     let rt = tokio::runtime::Builder::new_multi_thread()

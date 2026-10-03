@@ -28,8 +28,6 @@ cuda = [
     "candle-nn/cuda",
     "candle-transformers/cuda",
 ]
-# 旧 ONNX 路径（已停用：无 crate 启用该 feature，不承诺可编译，计划后续版本移除）
-embedding-onnx = ["dep:ort", "dep:tokenizers", "dep:ndarray"]
 
 [dependencies]
 ramaria-core = { path = "../ramaria-core" }
@@ -50,8 +48,6 @@ candle-nn = { workspace = true, optional = true }
 candle-transformers = { workspace = true, optional = true }
 safetensors = { workspace = true, optional = true }
 tokenizers = { workspace = true, optional = true }
-ort = { workspace = true, optional = true }
-ndarray = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true

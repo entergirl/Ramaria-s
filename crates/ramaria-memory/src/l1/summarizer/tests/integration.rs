@@ -219,3 +219,207 @@ async fn summarize_session_includes_proactive_message_in_llm_input() {
     );
     assert!(request.user_message.contains("在的，最近还行"));
 }
+
+// =========================================================
+// 关键词写回（词池快照三分支）
+// =========================================================
+
+/// 构造词池行（供写入侧 pending 判定用例）。
+fn pool_row(
+    rowid: i64,
+    keyword: &str,
+    use_count: i64,
+    alias_status: Option<&str>,
+    canonical_id: Option<i64>,
+) -> ramaria_core::keyword::KeywordPoolRow {
+    ramaria_core::keyword::KeywordPoolRow {
+        rowid,
+        keyword: keyword.to_string(),
+        use_count,
+        created_at: 1_700_000_000_000,
+        alias_status: alias_status.map(str::to_string),
+        canonical_id,
+        canonical_keyword: None,
+    }
+}
+
+/// 构造 keywords 字段可控的 L1 摘要回复 JSON。
+fn l1_keywords_reply(keywords: &str) -> String {
+    serde_json::json!({
+        "summary": "关键词写回测试摘要",
+        "keywords": keywords,
+        "time_period": "上午",
+        "atmosphere": "平静",
+        "valence": 0.0,
+        "salience": 0.5,
+        "evidence_notes": []
+    })
+    .to_string()
+}
+
+/// 三分支：命中词池 → 递增；未命中但相似 → pending 指向规范词；未命中不相似 → 规范词。
+#[tokio::test]
+async fn write_back_keywords_branches_by_pool_hit_and_similarity() {
+    use crate::l1::mock::{MockLlmProvider, MockStorage, make_msg};
+    use ramaria_core::traits::StoreCrud;
+    use ramaria_core::types::MessageRole;
+    use uuid::Uuid;
+
+    let session_id = Uuid::new_v4();
+    let storage = MockStorage::new();
+    storage.add_messages(
+        session_id,
+        vec![
+            make_msg(session_id, MessageRole::User, "最近在准备考研数学"),
+            make_msg(session_id, MessageRole::Assistant, "数学要多做题"),
+        ],
+    );
+    // 词池快照：规范词「数学」（rowid=7、use_count=10）
+    storage.set_pool_rows(vec![pool_row(7, "数学", 10, None, None)]);
+
+    let llm = MockLlmProvider::new("test-model");
+    llm.set_response(l1_keywords_reply("数学,考研数学,健身计划"));
+
+    let config = L1SummarizerConfig {
+        persona_uid: Some("test-persona".into()),
+        context_json: None,
+        situation_strength: None,
+        temperature: 0.3,
+        max_tokens: 2048,
+        user_prefix: "用户：".into(),
+        assistant_prefix: "助手：".into(),
+        utt_splitter: None,
+        prior_context_threshold: 20,
+        prior_context_max_chars: 1500,
+    };
+    let summarizer = L1Summarizer::new(&llm, &storage, config);
+    summarizer
+        .summarize_session(session_id)
+        .await
+        .expect("摘要应成功");
+
+    // 相似未命中词以 pending 登记，携带规范词 rowid
+    assert_eq!(
+        storage.pending_writes(),
+        vec![("考研数学".to_string(), 7)],
+        "相似未命中词应登记 pending 并指向规范词"
+    );
+
+    // 命中词与不相似词走 upsert_keyword；pending 词不作为规范词写入
+    let keywords = storage.list_keywords().await.expect("读取关键词应成功");
+    assert!(
+        keywords.contains(&"数学".to_string()),
+        "命中词池的词应走递增路径"
+    );
+    assert!(
+        keywords.contains(&"健身计划".to_string()),
+        "不相似词应写为规范词"
+    );
+    assert!(
+        !keywords.contains(&"考研数学".to_string()),
+        "pending 词不得同时作为规范词写入"
+    );
+}
+
+/// pending 登记幂等：二次写回同一相似词（快照仍未命中）再次登记返回已存在，不重复记录。
+#[tokio::test]
+async fn write_back_keywords_repeated_pending_write_is_idempotent() {
+    use crate::l1::mock::{MockLlmProvider, MockStorage, make_msg};
+    use ramaria_core::types::MessageRole;
+    use uuid::Uuid;
+
+    let session_id = Uuid::new_v4();
+    let storage = MockStorage::new();
+    storage.add_messages(
+        session_id,
+        vec![make_msg(session_id, MessageRole::User, "继续准备考研数学")],
+    );
+    storage.set_pool_rows(vec![pool_row(7, "数学", 10, None, None)]);
+
+    let llm = MockLlmProvider::new("test-model");
+    llm.set_responses(vec![
+        l1_keywords_reply("考研数学"),
+        l1_keywords_reply("考研数学"),
+    ]);
+
+    let config = L1SummarizerConfig {
+        persona_uid: None,
+        context_json: None,
+        situation_strength: None,
+        temperature: 0.3,
+        max_tokens: 2048,
+        user_prefix: "用户：".into(),
+        assistant_prefix: "助手：".into(),
+        utt_splitter: None,
+        prior_context_threshold: 20,
+        prior_context_max_chars: 1500,
+    };
+    let summarizer = L1Summarizer::new(&llm, &storage, config);
+    summarizer
+        .summarize_session(session_id)
+        .await
+        .expect("首次摘要应成功");
+    summarizer
+        .summarize_session(session_id)
+        .await
+        .expect("二次摘要应成功");
+
+    // 两次登记同一别名：第二次返回已存在（幂等），记录不重复
+    assert_eq!(
+        storage.pending_writes(),
+        vec![("考研数学".to_string(), 7)],
+        "重复登记不得产生第二条记录"
+    );
+}
+
+/// 空词池快照（读取失败降级口径）：全部按规范词写回，无 pending 登记。
+#[tokio::test]
+async fn write_back_keywords_empty_pool_snapshot_writes_canonical() {
+    use crate::l1::mock::{MockLlmProvider, MockStorage, make_msg};
+    use ramaria_core::traits::StoreCrud;
+    use ramaria_core::types::MessageRole;
+    use uuid::Uuid;
+
+    let session_id = Uuid::new_v4();
+    let storage = MockStorage::new();
+    storage.add_messages(
+        session_id,
+        vec![make_msg(
+            session_id,
+            MessageRole::User,
+            "最近在准备考研数学",
+        )],
+    );
+    storage.set_pool_rows(Vec::new());
+
+    let llm = MockLlmProvider::new("test-model");
+    llm.set_response(l1_keywords_reply("考研数学"));
+
+    let config = L1SummarizerConfig {
+        persona_uid: None,
+        context_json: None,
+        situation_strength: None,
+        temperature: 0.3,
+        max_tokens: 2048,
+        user_prefix: "用户：".into(),
+        assistant_prefix: "助手：".into(),
+        utt_splitter: None,
+        prior_context_threshold: 20,
+        prior_context_max_chars: 1500,
+    };
+    let summarizer = L1Summarizer::new(&llm, &storage, config);
+    summarizer
+        .summarize_session(session_id)
+        .await
+        .expect("摘要应成功");
+
+    assert!(
+        storage.pending_writes().is_empty(),
+        "空词池快照下不应产生 pending 登记"
+    );
+    let keywords = storage.list_keywords().await.expect("读取关键词应成功");
+    assert!(
+        keywords.contains(&"考研数学".to_string()),
+        "空词池快照下降级为直接写规范词"
+    );
+}

@@ -38,3 +38,7 @@ futures.workspace = true
 reqwest.workspace = true
 # 诊断导出打包（同目录临时文件 + 原子替换）
 zip = "2"
+
+[dev-dependencies]
+# 测试内捕获 tracing 日志（内存 writer，断言日志内容与隐私边界）
+tracing-subscriber = { workspace = true }

@@ -55,6 +55,8 @@ async fn open_without_config_uses_defaults_and_degrades_embedding() {
     // 默认配置生效
     assert_eq!(engine.config().session.l1_idle_minutes, 10);
     assert_eq!(engine.db_path(), db_path.as_path());
+    // 文件缺失属正常默认路径，不算回退告警
+    assert!(engine.config_warning().is_none());
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -103,10 +105,50 @@ async fn open_reads_config_toml_readonly() {
         45,
         "config.toml 的 [utt] 必须被服务层读取"
     );
+    assert!(
+        engine.config_warning().is_none(),
+        "合法配置装配不应产生回退告警"
+    );
 
     // 只读纪律：装配过程不得改写配置文件
     let after = std::fs::read_to_string(dir.join("config.toml")).expect("读取配置应成功");
     assert_eq!(before, after, "服务层装配不得写回 config.toml");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 非法 config.toml：装配成功（回退默认）且携带解析失败告警；写回成功后清除。
+#[tokio::test]
+async fn open_with_broken_config_reports_warning_then_clears_after_save() {
+    let dir = temp_dir("config-broken");
+    let db_path = dir.join("assistant.db");
+    let config_path = dir.join("config.toml");
+    std::fs::write(&config_path, "[session\nl1_idle_minutes = ").expect("写入非法配置应成功");
+
+    let engine =
+        Engine::open_with(EngineOptions::new(db_path).with_config_path(config_path.clone()))
+            .await
+            .expect("配置非法时引擎应按默认配置完成装配");
+    let warning = engine.config_warning().expect("非法配置应携带回退告警");
+    assert!(
+        warning.contains("解析失败"),
+        "告警应说明解析失败: {warning}"
+    );
+    assert_eq!(
+        engine.config().session.l1_idle_minutes,
+        10,
+        "非法配置应回退默认值"
+    );
+
+    // 双写写回（文件被合法配置覆盖）成功后：告警清除
+    let mut cfg = engine.config().as_ref().clone();
+    cfg.session.l1_idle_minutes = 33;
+    let result = engine.save_config(&cfg).await.expect("保存配置应成功");
+    assert!(result.is_ok(), "双侧写入应成功: {:?}", result.failures);
+    assert!(
+        engine.config_warning().is_none(),
+        "配置成功写回后应清除回退告警"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

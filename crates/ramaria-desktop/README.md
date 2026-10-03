@@ -18,6 +18,7 @@
 | `src/main.rs` | 进程入口（薄） | — |
 | `src/lib.rs` | `run()` 装配（插件 / state / handler / setup）、`generate_handler!` 注册表 | — |
 | `src/events.rs` | 流式事件 → Tauri event 桥（`chat-done` 全文） | 内联 |
+| `src/webview.rs` | WebView2 附加启动参数清理（release 剥离远程调试端口） | 内联 |
 | `src/tray.rs` / `src/notification.rs` | 托盘与关闭动作 / 系统通知 | 内联 |
 | `src/path_guard.rs` + `src/path_guard/` | 路径脱敏 / 校验；`privacy_audit_tests` 为常驻隐私审计 | `src/path_guard/tests.rs`、`privacy_audit_tests.rs` |
 | `src/commands/` | 命令实现（17 模块）：chat / session / memory（+ `memory_view.rs` 视图映射）/ config / mcp / export / index_cmd / import_cmd / persona / rules / keywords / style / evaluation / diagnostics / setup / dialog | 内联测试段 |

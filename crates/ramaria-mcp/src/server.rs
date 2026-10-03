@@ -94,13 +94,26 @@ impl RamariaMcpServer {
     // =========================================================
 
     /// 总开关门禁：未开启时所有工具返回可操作错误。
+    ///
+    /// 说明:
+    /// - 配置解析失败会静默回退默认配置（总开关随默认值为关闭），
+    ///   文案在此时附加回退原因与修复提示，避免"配置过却被要求重新开启"的困惑。
     pub(crate) fn gate_enabled(&self) -> Option<CallToolResult> {
         if self.config.enabled {
             return None;
         }
-        Some(tool_error(
-            "MCP 接入未开启：请在 Ramaria 桌面「设置 → MCP 接入」中打开总开关后重试",
-        ))
+        Some(tool_error(self.gate_disabled_message()))
+    }
+
+    /// 总开关关闭时的错误文案（有配置回退告警时附带原因与修复提示）。
+    fn gate_disabled_message(&self) -> String {
+        const BASE: &str = "MCP 接入未开启：请在 Ramaria 桌面「设置 → MCP 接入」中打开总开关后重试";
+        match self.engine.config_warning() {
+            Some(warning) => format!(
+                "{BASE}。注意：{warning}——若你曾配置过 [mcp] 接入，请修正配置文件语法后重启本服务"
+            ),
+            None => BASE.to_string(),
+        }
     }
 
     /// 写工具门禁（`chat_ingest`）。

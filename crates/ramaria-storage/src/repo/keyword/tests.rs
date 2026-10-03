@@ -560,6 +560,71 @@ async fn test_upsert_pending_inserts_then_is_idempotent() {
     assert_eq!(mine.canonical_keyword, "工作压力");
 }
 
+// ── list_keyword_statuses（按文本批量状态查询）──
+
+/// 混合三态返回：canonical / alias / pending 各一；不存在的文本不返回；空输入空结果。
+#[tokio::test]
+async fn test_list_keyword_statuses_mixed_and_missing() {
+    let pool = setup().await;
+    // 工作压力（canonical）+ 职场焦虑（pending 指向它）
+    let (canonical_id, _) = seed_pending(&pool).await;
+    // 职业倦怠（已确认 alias，指向 工作压力）
+    upsert_with_alias(
+        &pool,
+        &KeywordToken::new("职业倦怠").unwrap(),
+        canonical_id,
+        "alias",
+    )
+    .await
+    .unwrap();
+
+    let queried = vec![
+        "工作压力".to_string(),
+        "职场焦虑".to_string(),
+        "职业倦怠".to_string(),
+        "不存在的词".to_string(),
+    ];
+    let result = list_keyword_statuses(&pool, &queried).await.unwrap();
+    assert_eq!(result.len(), 3, "不存在的文本不应出现在结果中");
+
+    let status = |text: &str| {
+        result
+            .iter()
+            .find(|(keyword, _)| keyword == text)
+            .map(|(_, alias_status)| alias_status.clone())
+            .expect("查询文本应出现在结果中")
+    };
+    assert_eq!(status("工作压力"), Some("canonical".to_string()));
+    assert_eq!(status("职场焦虑"), Some("pending".to_string()));
+    assert_eq!(status("职业倦怠"), Some("alias".to_string()));
+    assert!(!result.iter().any(|(keyword, _)| keyword == "不存在的词"));
+
+    // 空输入 → 空结果
+    assert!(list_keyword_statuses(&pool, &[]).await.unwrap().is_empty());
+}
+
+/// 分片路径：超过单片上限（500）的输入按片查询，不存在的词条全部不返回。
+#[tokio::test]
+async fn test_list_keyword_statuses_chunks_large_input() {
+    let pool = setup().await;
+    upsert(&pool, &KeywordToken::new("工作压力").unwrap())
+        .await
+        .unwrap();
+
+    // 501 个文本触发两片查询（首片含命中词，其余全部缺席）
+    let mut queried = vec!["工作压力".to_string()];
+    for i in 0..500 {
+        queried.push(format!("缺席词{i}"));
+    }
+    let result = list_keyword_statuses(&pool, &queried).await.unwrap();
+    assert_eq!(result.len(), 1, "仅有命中词条返回");
+    assert_eq!(result[0].0, "工作压力");
+    assert_eq!(
+        result[0].1, None,
+        "纯 upsert 形态规范词 alias_status 为 NULL"
+    );
+}
+
 /// 已存在规范词不被登记改写：对 canonical 行登记 pending → false 且状态不变。
 #[tokio::test]
 async fn test_upsert_pending_keeps_existing_canonical() {

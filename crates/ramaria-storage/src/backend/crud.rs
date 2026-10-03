@@ -514,6 +514,13 @@ impl StoreCrud for SqliteStorage {
     async fn list_keyword_pool_entries(&self) -> RamariaResult<Vec<KeywordPoolRow>> {
         repo::keyword::list_pool_rows(&self.pool).await
     }
+    /// 覆写为按文本的批量状态查询（空输入不访问数据库）。
+    async fn list_keyword_statuses(
+        &self,
+        keywords: &[String],
+    ) -> RamariaResult<Vec<(String, Option<String>)>> {
+        repo::keyword::list_keyword_statuses(&self.pool, keywords).await
+    }
     /// 覆写为 join 规范词文本的待确认别名查询。
     async fn list_pending_aliases(&self) -> RamariaResult<Vec<PendingAliasRow>> {
         repo::keyword::list_pending_aliases(&self.pool).await

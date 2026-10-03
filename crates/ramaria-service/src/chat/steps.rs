@@ -373,6 +373,18 @@ async fn step_resolve_session(
                     }
                 }
 
+                // 会话归属与请求人格不一致时只记日志（uid 级，不含消息内容）
+                if let Some(bound) = session.persona_uid.as_deref() {
+                    if bound != persona {
+                        tracing::warn!(
+                            session_id = %session.id,
+                            bound_persona = %bound,
+                            requested_persona = %persona,
+                            "会话归属与请求人格不一致，按会话绑定人格继续生成"
+                        );
+                    }
+                }
+
                 // 会话已绑定人格 → 覆盖本轮生效人格（避免跨人格上下文串用）
                 let effective = session
                     .persona_uid

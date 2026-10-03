@@ -3,7 +3,7 @@
 //! 设计特点:
 //! - 覆盖关键词池 / 待确认别名 / 裁决 / seed / 建议五类用例
 //! - 状态以三态字符串（canonical / alias / pending）对外表达
-//! - 裁决动作与幂等处置（already_applied_ok）由请求字段显式给定
+//! - 裁决动作由请求字段给定，confirm 对已合并词条恒幂等成功
 //! - 计数口径与入口展示一致（seeded + skipped 恒等于结果条数）
 
 use serde::{Deserialize, Serialize};
@@ -68,13 +68,13 @@ pub enum AliasAction {
 /// 字段约定:
 /// - `alias`: 待处理的别名文本（标准化后比较）。
 /// - `action`: 裁决动作（确认 / 驳回）。
-/// - `already_applied_ok`: confirm 且词条已是 alias 时的处置——true = 幂等成功
-///   （不写库，`already_applied` 置位）；false = 报业务校验错误。
+///
+/// 说明:
+/// - confirm 对已合并词条（已是 alias）恒为幂等成功：不写库、不报错。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AliasResolveRequest {
     pub alias: String,
     pub action: AliasAction,
-    pub already_applied_ok: bool,
 }
 
 /// 别名裁决结果。

@@ -54,6 +54,8 @@ impl ErrorHint {
     /// - `index`: 索引错误，需重建 → 不可重试
     /// - `validation`: 输入校验错误，需修正输入 → 不可重试
     /// - `io`: 文件 I/O 错误，需检查磁盘/权限 → 不可重试
+    /// - `embedding`: 嵌入模型错误，需检查模型文件/磁盘空间 → 不可重试
+    /// - `serialization`: 数据序列化错误，需重启应用 → 不可重试
     /// - `unsupported`: 功能不可用，需升级版本 → 不可重试
     pub fn from_error(err: &RamariaError) -> Self {
         match err.category() {
@@ -127,6 +129,28 @@ impl ErrorHint {
                     "读取或写入文件时出错。\n",
                     "建议：检查磁盘空间是否充足；确认应用有文件读写权限。\n",
                     "如果问题持续，请尝试以管理员身份运行。"
+                )
+                .to_string(),
+                retryable: false,
+            },
+
+            "embedding" => Self {
+                title: "嵌入模型错误".to_string(),
+                detail: concat!(
+                    "本地嵌入模型加载或推理失败。\n",
+                    "建议：检查模型文件是否完整、磁盘空间是否充足；可在设置中重新下载模型。\n",
+                    "如果问题持续，请重启应用。"
+                )
+                .to_string(),
+                retryable: false,
+            },
+
+            "serialization" => Self {
+                title: "数据序列化错误".to_string(),
+                detail: concat!(
+                    "处理数据格式时出错。\n",
+                    "建议：重启应用后重试。\n",
+                    "如果问题持续，请导出诊断包并反馈。"
                 )
                 .to_string(),
                 retryable: false,
@@ -245,6 +269,18 @@ mod tests {
             (RamariaError::validation("内容为空"), "", false, None),
             (RamariaError::io("读取失败", None), "", false, None),
             (
+                RamariaError::embedding("模型加载失败"),
+                "嵌入模型错误",
+                false,
+                Some("重新下载模型"),
+            ),
+            (
+                RamariaError::serialization("JSON 解析失败"),
+                "数据序列化错误",
+                false,
+                Some("重启应用"),
+            ),
+            (
                 RamariaError::unsupported("功能未实现"),
                 "",
                 false,
@@ -296,6 +332,11 @@ mod tests {
             (RamariaError::config("缺少必需字段"), "配置错误"),
             (RamariaError::index("索引损坏"), "索引错误"),
             (RamariaError::io("读取失败", None), "文件读写错误"),
+            (RamariaError::embedding("模型加载失败"), "嵌入模型错误"),
+            (
+                RamariaError::serialization("JSON 解析失败"),
+                "数据序列化错误",
+            ),
             (RamariaError::unsupported("功能未实现"), "功能不可用"),
         ];
         for (err, title) in cases {

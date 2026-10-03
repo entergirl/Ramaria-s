@@ -1,7 +1,7 @@
 //! crates/ramaria-llm/src/embedding/noop.rs - 空占位 Embedding Provider
 //!
 //! 设计特点:
-//! - 当 `embedding-onnx` feature 未启用时编译，避免上层条件编译散落
+//! - 无嵌入 feature 时编译，避免上层条件编译散落
 //! - `is_available` 始终返回 false，`embed` 返回 Unsupported 错误
 //! - 用于测试和降级场景
 
@@ -50,13 +50,13 @@ impl NoopEmbeddingProvider {
 impl EmbeddingProvider for NoopEmbeddingProvider {
     async fn embed(&self, _text: &str) -> RamariaResult<Vec<f32>> {
         Err(ramaria_core::error::RamariaError::unsupported(
-            "嵌入模型未启用（编译时未启用 embedding-native 或 embedding-onnx feature）",
+            "嵌入模型未启用（编译时未启用 embedding-native feature）",
         ))
     }
 
     async fn embed_batch(&self, _texts: &[&str]) -> RamariaResult<Vec<Vec<f32>>> {
         Err(ramaria_core::error::RamariaError::unsupported(
-            "嵌入模型未启用（编译时未启用 embedding-native 或 embedding-onnx feature）",
+            "嵌入模型未启用（编译时未启用 embedding-native feature）",
         ))
     }
 

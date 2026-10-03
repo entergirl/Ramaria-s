@@ -544,6 +544,49 @@ pub async fn list_pool_rows(pool: &SqlitePool) -> RamariaResult<Vec<KeywordPoolR
         .collect())
 }
 
+/// 按文本批量查询词条别名状态（供增量镜像与持久化状态保持一致）。
+///
+/// 参数:
+/// - `keywords`: 待查询的标准化词条文本（不存在的文本不出现在结果中）。
+///
+/// 返回:
+/// - `(keyword, alias_status)` 列表：`None` / `Some("canonical")` 为规范词，
+///   `Some("alias")` 已确认别名，`Some("pending")` 待确认别名；
+///   结果顺序不保证（调用方按文本查找消费）。
+///
+/// 说明:
+/// - 空输入直接返回空（不访问数据库）；
+/// - 按 500 分片查询（SQLite 变量上限保护），动态占位符只拼接 `?`，值全部绑定。
+pub async fn list_keyword_statuses(
+    pool: &SqlitePool,
+    keywords: &[String],
+) -> RamariaResult<Vec<(String, Option<String>)>> {
+    if keywords.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    const CHUNK_SIZE: usize = 500;
+
+    let mut result: Vec<(String, Option<String>)> = Vec::with_capacity(keywords.len());
+    for chunk in keywords.chunks(CHUNK_SIZE) {
+        let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "SELECT keyword, alias_status FROM keyword_pool WHERE keyword IN ({})",
+            placeholders.join(", ")
+        );
+        let mut query = sqlx::query_as::<_, (String, Option<String>)>(&sql);
+        for keyword in chunk {
+            query = query.bind(keyword);
+        }
+        let rows = query
+            .fetch_all(pool)
+            .await
+            .storage_err("查询词条状态失败")?;
+        result.extend(rows);
+    }
+    Ok(result)
+}
+
 /// 按词条文本取其 rowid（供 alias confirm/reject 以文本定位行）。
 ///
 /// 参数:

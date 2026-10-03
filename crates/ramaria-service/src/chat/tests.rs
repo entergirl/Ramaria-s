@@ -776,3 +776,88 @@ async fn interactive_null_persona_session_is_bound() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// =========================================================
+// 会话归属日志（只记 uid，不记内容）
+// =========================================================
+
+/// 会话归属与请求人格不一致：生成成功且按会话归属落库，WARN 日志含两人格 uid 且不含消息内容。
+#[tokio::test]
+async fn session_persona_mismatch_logs_warn_without_message_content() {
+    /// 内存日志缓冲（写入 `Vec<u8>`，供断言读取）。
+    #[derive(Clone, Default)]
+    struct LogBuffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("日志缓冲锁不应中毒")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuffer {
+        type Writer = LogBuffer;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    let buffer = LogBuffer::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(buffer.clone())
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .finish();
+    // 并行测试下 callsite 兴趣缓存可能在切换 subscriber 前被判定为不采集，
+    // 重建缓存保证本线程的 WARN 事件都被捕获
+    tracing::callsite::rebuild_interest_cache();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let (engine, storage, dir) = engine_with_l1_reply("chat-persona-mismatch-log", REPLY).await;
+    let engine = Arc::new(engine);
+    seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+    seed_persona(&storage, "char-0001").await;
+    engine.set_state(AppState::Ready);
+    let session = storage
+        .create_session(Some("char-0001"))
+        .await
+        .expect("建会话成功");
+
+    // 绑定人格 char-0001，请求人格使用默认 rama-0001；消息带哨兵串验证不外泄
+    let sentinel = "SENTINEL-7f3a9c-不应出现在日志中";
+    let mut req = stream_request(sentinel, Some(session.id));
+    req.persona = Some(DEFAULT_PERSONA_UID.to_string());
+    let handle = engine.chat_stream(req).await.expect("会话归属覆盖应放行");
+    assert_eq!(handle.session_id, session.id);
+    let _ = collect_events(handle.events).await;
+
+    // 行为零变化：仍按会话归属人格生成与落库
+    let messages = storage
+        .list_messages(session.id)
+        .await
+        .expect("读取消息成功");
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].persona_uid.as_deref(), Some("char-0001"));
+    assert_eq!(messages[1].persona_uid.as_deref(), Some("char-0001"));
+
+    drop(_guard);
+    let logs = String::from_utf8(buffer.0.lock().expect("日志缓冲锁不应中毒").clone())
+        .expect("日志应为合法 UTF-8");
+    assert!(
+        logs.contains("会话归属"),
+        "应记录会话归属不一致提示: {logs}"
+    );
+    assert!(logs.contains("char-0001"), "应记录会话绑定人格: {logs}");
+    assert!(logs.contains(DEFAULT_PERSONA_UID), "应记录请求人格: {logs}");
+    assert!(!logs.contains(sentinel), "日志不应包含消息内容: {logs}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

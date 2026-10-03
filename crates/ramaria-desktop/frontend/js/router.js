@@ -11,7 +11,6 @@
  *
  * 设计特点:
  * - 订阅 Store.appState 变化自动路由，不依赖轮询
- * - 同时监听 Tauri 'app-state-changed' 事件作为后端推送更新
  * - 视图切换生命周期：leave(旧视图) → DOM 切换 → enter(新视图)
  * - 全屏视图（setup/progress/error）自动隐藏 Sidebar/Header/StatusBar
  * - 所有 DOM 操作集中在此模块，Store 和 Api 不操作 DOM
@@ -27,11 +26,10 @@
  *
  * 用法:
  * RamariaRouter.init; // 启动路由监听
- * RamariaRouter.destroy; // 销毁路由（清理订阅和事件监听）
+ * RamariaRouter.destroy; // 销毁路由（清理订阅与钩子）
  *
  * 依赖:
  * - RamariaStore（js/store.js，必须先加载）
- * - TauriBridge（js/tauri-bridge.js，必须先加载）
  * - 全局 CSS（layout.css 中 .view / .view--fullscreen / .degraded-banner 类）
  */
 
@@ -98,9 +96,6 @@ var RamariaRouter = (function () {
 
  /** 取消订阅 Store 的函数 */
     var _unsubAppState = null;
-
- /** 取消 Tauri 事件监听的函数 */
-    var _unlistenAppState = null;
 
  // =========================================================
  // DOM 引用缓存
@@ -497,7 +492,6 @@ var RamariaRouter = (function () {
  * - 缓存 DOM 引用
  * - 绑定 Sidebar 导航事件
  * - 订阅 Store.appState 变化
- * - 监听 Tauri app-state-changed 事件
  * - 订阅 Store.activeSessionId 以更新状态栏
  */
     function init() {
@@ -520,28 +514,7 @@ var RamariaRouter = (function () {
  // 4. 订阅 Store.activeSessionId 变化 → 更新状态栏
         RamariaStore.subscribe('activeSessionId', _updateSessionInfo);
 
- // 5. 监听 Tauri app-state-changed 事件（Rust 后端推送）
-        try {
-            if (TauriBridge && TauriBridge.isTauri && TauriBridge.isTauri()) {
-                TauriBridge.listen('app-state-changed', function (event) {
-                    var payload = event.payload;
-                    if (payload && payload.state) {
-                        console.log('[Router] 收到后端状态推送: ' + payload.state);
- // 同步到 Store，触发 Store 的 'appState' 通知 → _routeByAppState
-                        RamariaStore.set('appState', payload.state);
-                    }
-                }).then(function (unlisten) {
-                    _unlistenAppState = unlisten;
-                    console.log('[Router] Tauri app-state-changed 监听已注册');
-                }).catch(function (err) {
-                    console.error('[Router] 无法监听 app-state-changed 事件:', err);
-                });
-            }
-        } catch (err) {
-            console.warn('[Router] Tauri 事件监听设置失败（可能非 Tauri 环境）:', err);
-        }
-
- // 6. 执行初始路由（基于 Store 中当前的 appState）
+ // 5. 执行初始路由（基于 Store 中当前的 appState）
  // 必须主动触发，因为 app.js 后续 set 可能因值相等(===)被跳过
         var currentState = RamariaStore.get('appState');
         if (currentState) {
@@ -555,7 +528,7 @@ var RamariaRouter = (function () {
 
  /**
  * 销毁路由系统。
- * 取消所有订阅和事件监听，清理钩子注册表。
+ * 取消所有订阅，清理钩子注册表。
  */
     function destroy() {
         console.log('[Router] 销毁路由系统...');
@@ -564,12 +537,6 @@ var RamariaRouter = (function () {
         if (_unsubAppState) {
             _unsubAppState();
             _unsubAppState = null;
-        }
-
- // 取消 Tauri 事件监听
-        if (_unlistenAppState) {
-            try { _unlistenAppState(); } catch (_) { /* ignore */ }
-            _unlistenAppState = null;
         }
 
  // 清理钩子注册表

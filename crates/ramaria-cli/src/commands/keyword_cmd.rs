@@ -310,6 +310,7 @@ async fn run_alias_list(engine: &Arc<Engine>, json: bool) -> anyhow::Result<()> 
 ///
 /// 写操作确认规则: `--yes` 自动通过；非 TTY 且无 `--yes` 直接失败不挂起（exit 4）；
 /// 用户主动取消不写库（ok:true + cancelled，exit 0）。
+/// confirm 且词条已是合并状态（alias）为幂等成功：不弹确认、不写库。
 async fn run_alias_resolve(
     engine: &Arc<Engine>,
     alias: &str,
@@ -320,7 +321,7 @@ async fn run_alias_resolve(
     let token = parse_keyword(alias)?;
 
     // 预取词条现状：
-    // - confirm 且已是 alias（已合并）→ 幂等成功（目标状态已达成，不重复写库）；
+    // - confirm 且已是 alias（已合并）→ 透传服务层做幂等成功（不写库、不弹确认）；
     // - 其余非 pending → 业务错误（exit 4）。
     let view = engine.keyword_list().await.context("查询关键词词条失败")?;
     let entry = find_entry(&view.keywords, &token).ok_or_else(|| {
@@ -335,26 +336,8 @@ async fn run_alias_resolve(
         )))
     })?;
     let status = entry.status.as_str();
-    if status != "pending" {
-        if confirm && status == "alias" {
-            let canonical_text = entry
-                .canonical_keyword
-                .as_deref()
-                .unwrap_or("（规范词缺失）");
-            if json {
-                let data = serde_json::json!({
-                    "alias": alias,
-                    "canonical_keyword": canonical_text,
-                    "status": "alias",
-                    "already_applied": true,
-                });
-                return json::emit_ok(&data);
-            }
-            crate::ui::info(&format!(
-                "别名 '{alias}' 已是合并状态（→ 规范词 '{canonical_text}'），无需重复确认"
-            ));
-            return Ok(());
-        }
+    let already_merged = confirm && status == "alias";
+    if status != "pending" && !already_merged {
         return Err(anyhow::anyhow!(RamariaError::validation(format!(
             "关键词 '{alias}' 当前状态为 {status}，不是待确认别名（pending），无法{}；请先用 alias list 查看待确认冲突",
             if confirm { "确认合并" } else { "驳回" }
@@ -366,25 +349,29 @@ async fn run_alias_resolve(
         .unwrap_or("（规范词缺失）")
         .to_string();
 
-    let prompt = if confirm {
-        format!("将别名 '{alias}' 合并到规范词 '{canonical_text}'？此操作不可撤销")
-    } else {
-        format!("将别名 '{alias}'（当前指向 '{canonical_text}'）驳回为独立规范词？此操作不可撤销")
-    };
-    let confirmed =
-        crate::ui::confirm(&prompt, yes).map_err(|e| RamariaError::validation(e.to_string()))?;
-    if !confirmed {
-        if json {
-            // 用户主动取消：非错误（ok:true + cancelled 标志，exit 0）
-            let data = serde_json::json!({ "alias": alias, "cancelled": true });
-            return json::emit_ok(&data);
+    if !already_merged {
+        let prompt = if confirm {
+            format!("将别名 '{alias}' 合并到规范词 '{canonical_text}'？此操作不可撤销")
+        } else {
+            format!(
+                "将别名 '{alias}'（当前指向 '{canonical_text}'）驳回为独立规范词？此操作不可撤销"
+            )
+        };
+        let confirmed = crate::ui::confirm(&prompt, yes)
+            .map_err(|e| RamariaError::validation(e.to_string()))?;
+        if !confirmed {
+            if json {
+                // 用户主动取消：非错误（ok:true + cancelled 标志，exit 0）
+                let data = serde_json::json!({ "alias": alias, "cancelled": true });
+                return json::emit_ok(&data);
+            }
+            crate::ui::info("已取消");
+            return Ok(());
         }
-        crate::ui::info("已取消");
-        return Ok(());
     }
 
-    // 执行状态迁移（服务层裁决用例；CLI 口径：已合并再次确认幂等成功）
-    let _outcome = engine
+    // 执行状态迁移（服务层裁决用例；已合并再次确认为幂等成功，不写库）
+    let outcome = engine
         .keyword_resolve_alias(AliasResolveRequest {
             alias: alias.to_string(),
             action: if confirm {
@@ -392,7 +379,6 @@ async fn run_alias_resolve(
             } else {
                 ServiceAliasAction::Reject
             },
-            already_applied_ok: true,
         })
         .await
         .map_err(|e| map_resolve_error(e, alias))?;
@@ -409,13 +395,20 @@ async fn run_alias_resolve(
             "alias": alias,
             "canonical_keyword": canonical_json,
             "status": new_status,
+            "already_applied": outcome.already_applied,
         });
         return json::emit_ok(&data);
     }
     if confirm {
-        crate::ui::success(&format!(
-            "别名 '{alias}' 已确认合并到规范词 '{canonical_text}'"
-        ));
+        if outcome.already_applied {
+            crate::ui::info(&format!(
+                "别名 '{alias}' 已是合并状态（→ 规范词 '{canonical_text}'），无需重复确认"
+            ));
+        } else {
+            crate::ui::success(&format!(
+                "别名 '{alias}' 已确认合并到规范词 '{canonical_text}'"
+            ));
+        }
     } else {
         crate::ui::success(&format!("别名 '{alias}' 已驳回，晋升为独立规范词"));
     }

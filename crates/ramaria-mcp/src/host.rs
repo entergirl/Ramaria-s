@@ -94,6 +94,12 @@ pub async fn serve_stdio(options: McpHostOptions) -> RamariaResult<()> {
             "MCP 接入未开启（[mcp].enabled = false）：服务端仍可挂载，但所有工具将返回可操作错误，请在桌面「设置 → MCP 接入」中开启"
         );
     }
+    if let Some(warning) = engine.config_warning() {
+        tracing::warn!(
+            warning = %warning,
+            "config.toml 解析失败已回退默认配置（[mcp] 门禁可能非用户本意）"
+        );
+    }
 
     // ---- 2. 召回策略：原文开关与人格白名单进入服务层强制执行 ----
     engine.set_recall_policy(

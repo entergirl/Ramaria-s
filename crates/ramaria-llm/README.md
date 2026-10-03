@@ -22,7 +22,7 @@
 | `src/transport/` | OpenAI-compatible 传输：`client`（HTTP）/ `sse`（增量解析）/ `error`（错误映射） | `src/transport/tests.rs` |
 | `src/keychain.rs` | `Keychain`（Windows 凭据管理器存取；service `ramaria`） | 内联 |
 | `src/model_manager/` | 模型文件生命周期：`presets`（`MODEL_PRESETS` / `DEFAULT_MODEL_ID`）/ `download`（断点续传）/ `manager` / `fs`（校验与目录） | `src/model_manager/tests.rs` |
-| `src/embedding/` | 嵌入 provider：`native`（safetensors + candle 推理）/ `noop`（降级占位）/ `models/`（`bert` / `llama` / 各模型头维适配）/ `onnx/`（**已停用旧后端**，无 feature 启用、不承诺可编译、计划移除） | `src/embedding/native/tests.rs`、`src/embedding/models/llama_head_dim/tests.rs` |
+| `src/embedding/` | 嵌入 provider：`native`（safetensors + candle 推理）/ `noop`（降级占位）/ `models/`（`bert` / `llama` / 各模型头维适配） | `src/embedding/native/tests.rs`、`src/embedding/models/llama_head_dim/tests.rs` |
 | `tests/` | 集成测试：`embedding_tests`（原生嵌入）/ `model_manager_tests`（下载与校验）/ `dp_cluster_tuning` / `qwen3_embed_local_verify`（本地验证，忽略态） | `tests/` |
 
 ## 公共入口

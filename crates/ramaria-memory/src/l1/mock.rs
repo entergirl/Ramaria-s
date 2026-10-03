@@ -14,6 +14,7 @@ use std::pin::Pin;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+use ramaria_core::keyword::KeywordPoolRow;
 use ramaria_core::traits::{ChatRequest, StreamDelta};
 use ramaria_core::types::{
     BackendConfig, ClusterSnapshot, EventRelation, MemoryEvent, MemoryL1, Message, ModelCapability,
@@ -119,12 +120,18 @@ impl LlmProviderTrait for MockLlmProvider {
 ///
 /// 仅实现 L1 摘要管线需要的方法:
 /// - `list_messages`, `list_keywords`, `save_memory_l1`, `upsert_keyword`
+/// - `list_keyword_pool_entries`（返回预置词池快照；空 = 空词池）
+/// - `upsert_pending_alias`（记录待确认别名登记）
 ///
 /// 其余方法返回 `unimplemented!`，确保测试边界清晰。
 pub struct MockStorage {
     messages: Mutex<HashMap<Uuid, Vec<Message>>>,
     l1_entries: Mutex<Vec<MemoryL1>>,
     keywords: Mutex<Vec<String>>,
+    /// 预置词池快照（供 L1 写入侧 pending 判定；空 = 空词池）。
+    pool_rows: Mutex<Vec<KeywordPoolRow>>,
+    /// 已登记的待确认别名 (alias, canonical_id)（用于断言）。
+    pending_writes: Mutex<Vec<(String, i64)>>,
     /// 预设的跨用户事件聚合结果（None = 默认返回空列表；Some(Err) 模拟聚合失败降级）。
     event_aggregate_result: Mutex<Option<Result<Vec<PersonaEventAggregate>, String>>>,
 }
@@ -135,6 +142,8 @@ impl MockStorage {
             messages: Mutex::new(HashMap::new()),
             l1_entries: Mutex::new(Vec::new()),
             keywords: Mutex::new(Vec::new()),
+            pool_rows: Mutex::new(Vec::new()),
+            pending_writes: Mutex::new(Vec::new()),
             event_aggregate_result: Mutex::new(None),
         }
     }
@@ -157,6 +166,16 @@ impl MockStorage {
     /// 获取关键词 upsert 调用次数（用于断言）。
     pub fn keyword_count(&self) -> usize {
         self.keywords.lock().unwrap().len()
+    }
+
+    /// 预置词池快照（供 L1 写入侧 pending 判定）。
+    pub fn set_pool_rows(&self, rows: Vec<KeywordPoolRow>) {
+        *self.pool_rows.lock().unwrap() = rows;
+    }
+
+    /// 获取已登记的待确认别名 (alias, canonical_id)（用于断言）。
+    pub fn pending_writes(&self) -> Vec<(String, i64)> {
+        self.pending_writes.lock().unwrap().clone()
     }
 
     /// 预设 `aggregate_persona_event_priors` 的成功返回（跨用户聚合行）。
@@ -354,6 +373,26 @@ impl StoreCrud for MockStorage {
 
     async fn list_keywords(&self) -> RamariaResult<Vec<String>> {
         Ok(self.keywords.lock().unwrap().clone())
+    }
+
+    /// 返回预置词池快照（空 = 空词池；区别于未覆写实现的 `Unsupported` 读失败路径）。
+    async fn list_keyword_pool_entries(&self) -> RamariaResult<Vec<KeywordPoolRow>> {
+        Ok(self.pool_rows.lock().unwrap().clone())
+    }
+
+    /// 记录待确认别名登记；同文本重复登记返回 `Ok(false)`（幂等，不覆盖）。
+    async fn upsert_pending_alias(
+        &self,
+        alias: &str,
+        canonical_id: i64,
+        _use_count: u32,
+    ) -> RamariaResult<bool> {
+        let mut writes = self.pending_writes.lock().unwrap();
+        if writes.iter().any(|(text, _)| text == alias) {
+            return Ok(false);
+        }
+        writes.push((alias.to_string(), canonical_id));
+        Ok(true)
     }
 }
 

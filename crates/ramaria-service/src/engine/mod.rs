@@ -129,6 +129,13 @@ pub struct Engine {
     /// 快照语义与 LLM / 嵌入 provider 一致：读取方在锁内克隆内层 Arc 后释放锁，
     /// 异步路径不持有锁跨 `.await`；写入方整体替换内层 Arc。
     config: RwLock<Arc<RamariaConfig>>,
+    /// 配置加载回退告警（装配时 config.toml 读取 / 解析失败的脱敏摘要）。
+    ///
+    /// 语义:
+    /// - `Some(..)` = 装配时未能采用磁盘配置，引擎按默认配置运行；供入口层在
+    ///   启动自检与门禁提示中携带可诊断原因（见 [`Engine::config_warning`]）；
+    /// - 配置用例成功替换快照后清除（磁盘配置已按用例结果采用）。
+    config_warning: RwLock<Option<String>>,
     /// 实际使用的配置文件路径（`from_parts` 构造时为空路径）。
     config_path: PathBuf,
     /// 数据库文件路径（诊断与客户端配置片段展示用）。

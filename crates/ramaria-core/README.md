@@ -22,7 +22,8 @@
 | `src/privacy.rs` | 隐私确认类型与脱敏辅助 | 内联 |
 | `src/text.rs` | 文本工具（截断 / 归一化 / 估算） | 内联 |
 | `src/keyword.rs` + `src/keyword/tests.rs` | 关键词 Newtype（`KeywordToken` / `KeywordSet` / `KeywordStatus` / `KeywordRef` / `KeywordQuery`）与归一化 | `src/keyword/tests.rs` |
-| `src/config/` | 配置域一文件一分组：`core` / `paths` / `infra` / `retrieval` / `runtime` / `layers` / `channels` / `domains`（`mod.rs` 逐项 re-export；版本常量在 `mod.rs`） | `src/config/tests.rs` |
+| `src/time_period.rs` | 本地时段映射（六时段枚举，与 L1 摘要 `time_period` 词汇对齐） | 内联 |
+| `src/config/` | 配置域一文件一分组：`core` / `paths` / `infra` / `retrieval` / `runtime` / `layers` / `channels` / `domains` / `proactive`（`mod.rs` 逐项 re-export；版本常量在 `mod.rs`） | `src/config/tests.rs` |
 | `src/traits/` | trait 契约：`llm` / `embedding` / `cache` / `store_crud`（单 trait 契约，结构例外登记）/ `store_version` / `store_backend` | `src/traits/tests.rs` |
 | `src/types/` | 业务类型：`message` / `session` / `memory` / `utt` / `persona_enum` / `persona_struct` / `style` / `backend` / `state`（自由函数 `new_id` / `uuid_to_db` / `uuid_from_db` / `now_ms` 在 `mod.rs`） | `src/types/tests.rs` |
 

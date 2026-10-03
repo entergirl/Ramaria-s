@@ -7,8 +7,8 @@
 //!   不改别名状态），新词条从 use_count 0 起写入
 //! - 待确认别名建议：汇总关键词池与内存镜像使用量，把相似词对经筛选后登记为
 //!   pending（单次运行有登记上限；已建立词条不重复登记）
-//! - 入口差异由参数表达：confirm 且词条已是 alias 时，`already_applied_ok = false`
-//!   报业务校验错误、`true` 幂等返回成功（不写库）
+//! - confirm 且词条已是 alias 时恒为幂等成功（不写库，`already_applied` 置位）；
+//!   其余非 pending 报业务校验错误
 //! - 非法输入显式校验：关键词文本经 `KeywordToken` 标准化（空 / 超长拒绝），
 //!   词条不存在 / 非 pending 均返回业务校验错误，不静默成功
 //! - 日志脱敏：别名文本在日志中只保留长度与短哈希标签，正文不入日志
@@ -219,13 +219,12 @@ pub(crate) async fn pending_aliases(engine: &Engine) -> RamariaResult<Vec<Pendin
 ///    - `pending`: 执行确认 / 驳回；条件更新未命中（状态已变化）→ 业务校验错误；
 ///      成功时 confirm 返回指向的规范词文本、状态 `alias`；
 ///      reject 规范词为 None、状态 `canonical`；
-///    - confirm 且已是 `alias`: `already_applied_ok = true` 时幂等返回成功（不写库），
-///      `false` 时按"非 pending"报业务校验错误；
+///    - confirm 且已是 `alias`: 幂等返回成功（不写库，`already_applied` 置位）；
 ///    - 其余（reject 且非 pending、confirm 且 canonical）: 业务校验错误。
 ///
 /// 参数:
 /// - `engine`: 服务层引擎。
-/// - `req`: 裁决请求（别名文本 / 动作 / 幂等开关）。
+/// - `req`: 裁决请求（别名文本 / 动作）。
 ///
 /// 返回:
 /// - 裁决结果（别名、处理后规范词、状态、是否幂等命中）。
@@ -246,8 +245,8 @@ pub(crate) async fn resolve_alias(
     let confirm = matches!(req.action, AliasAction::Confirm);
 
     if status != "pending" {
-        // confirm 且已是 alias：按调用入口口径选择幂等成功或报错
-        if confirm && status == "alias" && req.already_applied_ok {
+        // confirm 且已是 alias：目标状态已达成，幂等成功（不写库）
+        if confirm && status == "alias" {
             tracing::debug!(
                 alias = %redact_text_label(token.as_str()),
                 "别名裁决幂等返回（已是合并状态）"

@@ -7,12 +7,13 @@
 //! - validate_and_build: 字段校验（五档钳制 / 六选一 / evidence_notes 后处理）。
 //! - 隐私红线：LLM 原始响应不落日志，仅记长度；所有可恢复错误转 RamariaError。
 
-use ramaria_core::keyword::KeywordToken;
+use ramaria_core::keyword::{KeywordPoolRow, KeywordToken};
 use ramaria_core::traits::ChatRequest;
 use ramaria_core::{MemoryL1, RamariaError, RamariaResult};
 use tracing::{debug, warn};
 use uuid::Uuid;
 
+use crate::keyword::alias::is_similar_keyword;
 use crate::l1::prompt::{KEYWORD_INJECT_LIMIT, KEYWORD_INJECT_THRESHOLD, build_l1_prompt};
 use crate::utils;
 use crate::utt::UttChunk;
@@ -125,22 +126,84 @@ impl<'a> L1Summarizer<'a> {
     }
 
     /// 写回关键词词典 + 倒排索引（每块成功后调用，失败记 warn 不阻塞）。
+    ///
+    /// 判定（逐词独立，批内不去重——与 LLM 输出词列表口径一致）:
+    /// - 词条已存在于词池（任意状态）→ 递增使用计数，状态不变；
+    /// - 未命中但与某既有规范词字面相似 → 以 `pending` 登记为待确认别名
+    ///   （建议指向使用量最高的相似规范词）；登记失败回退直接写规范词（不丢词）；
+    /// - 未命中且不相似 → 直接写规范词。
+    ///
+    /// 参数:
+    /// - `session_id`: 来源 session（日志用）。
+    /// - `l1`: 已写库的 L1 摘要（倒排索引引用其 id 与 persona）。
+    /// - `keywords`: LLM 输出的关键词 token 列表。
+    /// - `pool_rows`: 词池快照（调用方在写库前读取一次）；为空表示读取失败，
+    ///   全部按"未命中且不相似"处理（降级为直接写规范词）。
+    ///
+    /// 降级:
+    /// - 单条写入失败只记 warn 继续（非致命），不阻塞后续词条。
     pub(super) async fn write_back_keywords(
         &self,
         session_id: Uuid,
         l1: &MemoryL1,
         keywords: &[KeywordToken],
+        pool_rows: &[KeywordPoolRow],
     ) {
+        // 规范词候选按 use_count 降序稳定排序（同分保持传入顺序），
+        // 相似命中时取使用量最高的规范词作为 pending 建议指向（确定性）。
+        let mut canonicals: Vec<&KeywordPoolRow> = pool_rows
+            .iter()
+            .filter(|row| is_canonical_row(row))
+            .collect();
+        canonicals.sort_by_key(|row| std::cmp::Reverse(row.use_count));
+
+        let mut existed = 0usize;
+        let mut pending_written = 0usize;
+        let mut canonical_written = 0usize;
+
         for kw_token in keywords {
-            // 写回 keyword_pool
-            if let Err(e) = self.storage.upsert_keyword(kw_token.as_str()).await {
-                warn!(%session_id, keyword=%kw_token, error=%e, "关键词写回失败（非致命）");
+            let text = kw_token.as_str();
+
+            if pool_rows.iter().any(|row| row.keyword == text) {
+                // 分支 1：词条已在词池（任意状态）→ 递增计数，状态不变
+                match self.storage.upsert_keyword(text).await {
+                    Ok(()) => existed += 1,
+                    Err(e) => {
+                        warn!(%session_id, keyword=%kw_token, error=%e, "关键词写回失败（非致命）");
+                    }
+                }
+            } else if let Some(row) = canonicals
+                .iter()
+                .find(|row| is_similar_keyword(text, &row.keyword))
+            {
+                // 分支 2：未命中但与既有规范词相似 → 登记待确认别名
+                match self.storage.upsert_pending_alias(text, row.rowid, 1).await {
+                    Ok(_) => pending_written += 1,
+                    Err(e) => {
+                        warn!(%session_id, error=%e, "待确认别名登记失败，回退写规范词（非致命）");
+                        match self.storage.upsert_keyword(text).await {
+                            Ok(()) => canonical_written += 1,
+                            Err(e) => {
+                                warn!(%session_id, error=%e, "关键词写回失败（非致命）");
+                            }
+                        }
+                    }
+                }
+            } else {
+                // 分支 3：未命中且不相似 → 直接写规范词
+                match self.storage.upsert_keyword(text).await {
+                    Ok(()) => canonical_written += 1,
+                    Err(e) => {
+                        warn!(%session_id, keyword=%kw_token, error=%e, "关键词写回失败（非致命）");
+                    }
+                }
             }
+
             // 写入 keyword_refs 倒排索引（L1 文档引用，doc_id 使用 UUID 字符串）
             if let Err(e) = self
                 .storage
                 .insert_keyword_ref(
-                    kw_token.as_str(),
+                    text,
                     "l1",
                     &l1.id.to_string(),
                     l1.persona_uid.as_deref().unwrap_or(""),
@@ -151,6 +214,14 @@ impl<'a> L1Summarizer<'a> {
                 warn!(%session_id, keyword=%kw_token, error=%e, "关键词引用写入失败（非致命）");
             }
         }
+
+        debug!(
+            %session_id,
+            existed,
+            pending_written,
+            canonical_written,
+            "关键词写回完成"
+        );
     }
 
     /// 获取关键词候选字符串。
@@ -335,4 +406,17 @@ impl<'a> L1Summarizer<'a> {
 
         (l1, keywords_list)
     }
+}
+
+// =========================================================
+// 写回辅助
+// =========================================================
+
+/// 判断词池行是否为持久化的规范词（供 L1 写入侧 pending 建议指向）。
+///
+/// 条件:
+/// - `canonical_id` 为空（规范词自身无指向）且 `alias_status` 为 NULL / "canonical"；
+/// - alias / pending 行不作为建议目标——建议指向必须是规范词行。
+fn is_canonical_row(row: &KeywordPoolRow) -> bool {
+    row.canonical_id.is_none() && matches!(row.alias_status.as_deref(), None | Some("canonical"))
 }

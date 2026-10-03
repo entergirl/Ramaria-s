@@ -580,10 +580,13 @@ async fn sync_keyword_mirror(engine: &Engine, l1_views: &[L1DocView], l2_views: 
 /// 行为:
 /// - 检索器已加载 → 生成摘要向量（嵌入可用时）后增量索引；
 ///   未加载 → 跳过（下次懒加载会从存储全量载入，不会漏）。
-/// - 关键词镜像 → 倒排增量 + 词典池累积（语义层不随增量重建，保持既有方言）。
+/// - 关键词镜像 → 倒排增量 + 词典池累积（语义层不随增量重建，保持既有方言）；
+///   持久化为 `pending` 的词条不进入内存池——词表与持久化状态保持一致
+///   （pending 不算已建立词条，不参与分词字典 / 语义层口径）。
 ///
 /// 降级:
-/// - 向量生成失败 → 仅 BM25（记 debug，不阻塞）。
+/// - 向量生成失败 → 仅 BM25（记 debug，不阻塞）；
+/// - 词条状态查询失败 → 跳过 pending 过滤（按旧口径全部入池）。
 pub(crate) async fn index_l1_into_mirrors(engine: &Engine, l1: &MemoryL1) {
     let doc = l1_view(l1);
 
@@ -621,10 +624,34 @@ pub(crate) async fn index_l1_into_mirrors(engine: &Engine, l1: &MemoryL1) {
     {
         let tokens = CommaSeparatedNormalizer.normalize(doc.keywords.as_deref().unwrap_or(""));
         let now = now_ms();
+
+        // pending 词条不进入内存池（established 词表与持久化状态一致）；
+        // 状态查询在拿镜像写锁之前完成，不持锁跨 await。
+        let texts: Vec<String> = tokens.iter().map(|t| t.as_str().to_string()).collect();
+        let pending_texts: HashSet<String> = match engine
+            .storage_ref()
+            .list_keyword_statuses(&texts)
+            .await
+        {
+            Ok(rows) => rows
+                .into_iter()
+                .filter(|(_, alias_status)| alias_status.as_deref() == Some("pending"))
+                .map(|(keyword, _)| keyword)
+                .collect(),
+            Err(e) => {
+                tracing::debug!(error = %e, "词条状态查询失败，pending 过滤跳过（按旧口径入池）");
+                HashSet::new()
+            }
+        };
+        let accepted: Vec<ramaria_core::keyword::KeywordToken> = tokens
+            .into_iter()
+            .filter(|token| !pending_texts.contains(token.as_str()))
+            .collect();
+
         let mirror = engine.keyword_mirror();
         let mut guard = write_recover(&*mirror, "index.keyword_mirror");
         guard.index_l1(&doc);
-        guard.upsert_pool_tokens(&tokens, now);
+        guard.upsert_pool_tokens(&accepted, now);
         // 语义层陈旧可观测（节流 5 分钟，日志不含词条文本）
         guard.warn_if_fuzzy_stale(now);
     }

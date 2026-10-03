@@ -25,7 +25,7 @@
 | `src/rrf.rs` | `rrf_fuse_optional`（缺席通道不惩罚） | `src/rrf/tests.rs` |
 | `src/vector.rs` | `BruteForceIndex` + `CachedVectorIndex`（内存向量索引） | `src/vector/tests.rs` |
 | `src/rag.rs` / `src/token_budget.rs` | Persona-Aware 过滤 / Token 预算裁剪 | `token_budget/tests.rs` |
-| `src/graph_retriever.rs` | 图谱通道（当前无数据源，空贡献） | `src/graph_retriever/tests.rs` |
+| `src/graph_retriever.rs` | 图谱通道（由事件关系重建数据源；索引重建时与 BM25 / 向量同批装载） | `src/graph_retriever/tests.rs` |
 | `src/retriever.rs` + `src/retriever/` | 检索编排（`index` / `search` 四通道装配 / `utt` / `helpers` / `types`） | `src/retriever/tests/` |
 | `src/example.rs` / `src/utt/` | examples 抽取编排 / utt 话语块（`splitter` 切分、`builder` 全量与增量） | `utt/builder/tests.rs` |
 | `src/rebuild.rs` / `src/job.rs` / `src/init.rs` | 索引重建 / 后台任务管理 / 初始化 | `job/tests.rs`、`init/tests.rs` |

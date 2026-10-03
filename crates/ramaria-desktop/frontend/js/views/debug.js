@@ -265,9 +265,13 @@ var RamariaDebugView = (function () {
 
     async function _resolveAlias(alias, action, panel) {
         try {
-            await RamariaApi.keywords.resolveAlias(alias, action);
-            var label = action === 'confirm' ? '已确认合并' : '已驳回';
-            RamariaToast.success('别名处理成功', alias + ' ' + label);
+            var resp = await RamariaApi.keywords.resolveAlias(alias, action);
+            if (resp && resp.already_applied) {
+                RamariaToast.info('该别名已处于合并状态', alias + ' 无需重复确认');
+            } else {
+                var label = action === 'confirm' ? '已确认合并' : '已驳回';
+                RamariaToast.success('别名处理成功', alias + ' ' + label);
+            }
             await _renderTab();
         } catch (err) {
             RamariaToast.error('操作失败', err.message || '未知错误');

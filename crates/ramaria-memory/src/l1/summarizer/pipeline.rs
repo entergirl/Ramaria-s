@@ -74,6 +74,11 @@ impl<'a> L1Summarizer<'a> {
     /// - 全部块均失败 → 返回最后一个错误（与 v1.4 失败语义一致）。
     /// - 成功块统一写库；写库失败为硬错误直接返回。
     ///
+    /// 关键词写回：
+    /// - 写库前读取一次词池快照供全部块复用：未命中词池但与既有规范词相似的词条
+    ///   以 `pending` 入池（待确认别名），其余写规范词；
+    /// - 快照读取失败降级为空快照（全部按规范词写回），不阻塞写库。
+    ///
     /// 参数:
     /// - `session_id`: 已关闭的 session UUID。
     ///
@@ -154,6 +159,14 @@ impl<'a> L1Summarizer<'a> {
         }
 
         // 4. 统一写库（成功块）+ 写回关键词
+        //    词池快照读取一次供全部块复用；读取失败降级为空快照（全部按规范词写回）
+        let pool_rows = match self.storage.list_keyword_pool_entries().await {
+            Ok(rows) => rows,
+            Err(e) => {
+                warn!(%session_id, error=%e, "词池快照读取失败，关键词写回降级为直接规范词");
+                Vec::new()
+            }
+        };
         let mut saved_last: Option<MemoryL1> = None;
         for entry in generated.iter().flatten() {
             let (l1, keywords) = entry;
@@ -162,7 +175,8 @@ impl<'a> L1Summarizer<'a> {
                 RamariaError::storage(format!("写入 session {session_id} L1 摘要失败: {e}"))
             })?;
             saved_last = Some(l1.clone());
-            self.write_back_keywords(session_id, l1, keywords).await;
+            self.write_back_keywords(session_id, l1, keywords, &pool_rows)
+                .await;
         }
 
         // 5. 返回
@@ -196,7 +210,9 @@ impl<'a> L1Summarizer<'a> {
     ///   尾段覆盖最新对话。
     /// - 全部段 L1 写库且 `absorbed=false`（入候选池），L2 事件提取仍按封存触发
     ///   （`list_unabsorbed_l1` 天然包含渐进式段 L1，无需额外缓冲结构）。
-    /// - 每段 L1 生成后写回关键词词典 + 倒排索引（与 `summarize_session` 一致）。
+    /// - 每段 L1 生成后写回关键词词典 + 倒排索引（与 `summarize_session` 一致）；
+    ///   逐段写库前读取一次词池快照供全部段复用，读取失败降级为空快照
+    ///   （全部按规范词写回）。
     ///
     /// 未触发:
     /// - 委托 `summarize_session`（v1.6 行为：整会话 / 按 utt 切分），返回单元素列表。
@@ -260,6 +276,14 @@ impl<'a> L1Summarizer<'a> {
         debug!(%session_id, block_count = chunks.len(), "渐进式摘要按段生成");
 
         // 4. 逐段生成（复用块级生成逻辑，块间注入上一块上文）
+        //    词池快照读取一次供全部段复用；读取失败降级为空快照（全部按规范词写回）
+        let pool_rows = match self.storage.list_keyword_pool_entries().await {
+            Ok(rows) => rows,
+            Err(e) => {
+                warn!(%session_id, error=%e, "词池快照读取失败，关键词写回降级为直接规范词");
+                Vec::new()
+            }
+        };
         let mut generated: Vec<MemoryL1> = Vec::with_capacity(chunks.len());
         let mut last_error: Option<RamariaError> = None;
         for (i, chunk) in chunks.iter().enumerate() {
@@ -287,7 +311,8 @@ impl<'a> L1Summarizer<'a> {
                             "渐进式摘要：session {session_id} 段 L1 写库失败: {e}"
                         ))
                     })?;
-                    self.write_back_keywords(session_id, &l1, &keywords).await;
+                    self.write_back_keywords(session_id, &l1, &keywords, &pool_rows)
+                        .await;
                     debug!(%session_id, block_index = i, "渐进式段 {} L1 生成成功", i);
                     generated.push(l1);
                 }

@@ -967,6 +967,25 @@ pub trait StoreCrud: Send + Sync {
         ))
     }
 
+    /// 按文本批量查询词条别名状态（供增量镜像与持久化状态保持一致）。
+    ///
+    /// 参数:
+    /// - `keywords`: 待查询的标准化词条文本（不存在 / 非法文本不出现在结果中）。
+    ///
+    /// 返回:
+    /// - `(keyword, alias_status)` 列表：`None` / `Some("canonical")` 为规范词，
+    ///   `Some("alias")` 已确认别名，`Some("pending")` 待确认别名。
+    ///
+    /// 默认实现:
+    /// - 返回空列表——调用方把"未查到"视为非 pending（退化为旧口径），
+    ///   存量 mock 无需实现即可编译。
+    async fn list_keyword_statuses(
+        &self,
+        _keywords: &[String],
+    ) -> RamariaResult<Vec<(String, Option<String>)>> {
+        Ok(Vec::new())
+    }
+
     /// 列出 keyword_pool 中全部待确认别名冲突（`alias_status='pending'`）。
     ///
     /// 返回:

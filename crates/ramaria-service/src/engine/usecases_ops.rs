@@ -73,8 +73,8 @@ impl Engine {
     /// 别名裁决用例：确认合并（pending → alias）/ 驳回晋升（pending → canonical）。
     ///
     /// 说明:
-    /// - confirm 且已是 alias 时按 `already_applied_ok` 选择幂等成功或报错
-    ///   （调用入口各自口径）。
+    /// - confirm 且已是 alias 时幂等成功（不写库，结果中 `already_applied` 置位）；
+    ///   其余非 pending 返回业务校验错误。
     pub async fn keyword_resolve_alias(
         &self,
         req: AliasResolveRequest,
@@ -288,9 +288,19 @@ impl Engine {
     }
 
     /// 整体替换内存配置快照（仅由配置用例调用；不重建行为待定池等既有内存态）。
+    ///
+    /// 说明:
+    /// - 替换成功后清除装配期的配置回退告警（磁盘配置已按用例结果采用）。
     fn replace_config_snapshot(&self, cfg: RamariaConfig) {
         let mut guard = write_recover(&self.config, "engine.config");
         *guard = Arc::new(cfg);
+        self.clear_config_warning();
+    }
+
+    /// 清除配置加载回退告警（装配期 config.toml 失败的提示位）。
+    fn clear_config_warning(&self) {
+        let mut guard = write_recover(&self.config_warning, "engine.config_warning");
+        *guard = None;
     }
 }
 

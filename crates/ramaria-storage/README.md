@@ -21,7 +21,7 @@
 | `src/backend/` | `SqliteStorage` 的 trait 实现：`crud`（实体读写）/ `infrastructure`（索引 / 任务 / 设置）/ `llm_cache` | 内联 + `src/tests/` |
 | `src/repo/` | 每实体一文件：`sessions` / `messages` / `memory_l1` / `events` / `facts` / `traits` / `keyword` / `cluster` / `behavior_rules` / `examples` / `style_stats` / `personas` / `settings` / `schema_meta` / `background_jobs` / `feedback_log` / `llm_response_cache` / `l2_fingerprint` / `backend_config` / `privacy_consent` / `utt_blocks` / `traits.rs`（repo 共用辅助） | `repo/<entity>/tests.rs`（keyword / messages / sessions）或内联 |
 | `src/tests/` | 单元测试按域拆分：`mod.rs`（共享夹具）+ schema / session / message / memory_l1 / event / persona / personality_trait / fact / keyword / index / utt_block / example / llm_cache / background_job | `src/tests/` |
-| `migrations/` | `20260905_v2.0_schema.sql`（基线 27 表）+ `20260918_v2.1_channels.sql` + `20261001_v2.3_index_version.sql`；只增不删 | — |
+| `migrations/` | `20260905_v2.0_schema.sql`（基线 27 表）+ `20260918_v2.1_channels.sql` + `20261001_v2.3_index_version.sql` + `20261002_v2.4_proactive.sql`（`messages.is_proactive` 加列）；只增不删 | — |
 
 ## 公共入口
 

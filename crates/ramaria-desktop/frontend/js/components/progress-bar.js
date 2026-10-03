@@ -3,14 +3,14 @@
  *
  * 职责:
  * - 在对话页顶部显示嵌入模型下载/索引重建进度条
- * - 监听 Tauri Event 'download-progress' 和 'index-progress'
+ * - 进度内容由调用方经 show / showError / hide 显式驱动
  * - 进度条为非阻塞设计，不阻止用户继续对话
  * - 支持百分比、速度/文档数显示
  *
  * 设计特点:
  * - 纯 JS，无外部依赖
  * - 自动注入 DOM，无需修改现有 HTML
- * - 5 秒无新事件后自动隐藏
+ * - 错误状态 5 秒后自动隐藏
  * - 错误时显示红色警告
  *
  * 用法:
@@ -25,8 +25,6 @@ var RamariaProgressBar = (function () {
     var _detail = null;
     var _initialized = false;
     var _hideTimer = null;
-    var _unlistenDownload = null;
-    var _unlistenIndex = null;
 
  // =========================================================
  // DOM 构建
@@ -159,42 +157,6 @@ var RamariaProgressBar = (function () {
     }
 
  // =========================================================
- // Tauri 事件处理
- // =========================================================
-
-    function _onDownloadProgress(payload) {
- // payload: { progress: 0.0..1.0, downloaded_bytes: u64, total_bytes: u64, current_file: str }
-        if (!payload) return;
-
-        var percent = (payload.progress || 0) * 100;
-        var downloaded = _formatBytes(payload.downloaded_bytes || 0);
-        var total = _formatBytes(payload.total_bytes || 0);
-        var file = payload.current_file || '';
-
-        show('正在下载嵌入模型', percent.toFixed(0) + '% · ' + downloaded + ' / ' + total + (file ? ' (' + file + ')' : ''), percent);
-    }
-
-    function _onIndexProgress(payload) {
- // payload: { phase: str, current: u64, total: u64 }
-        if (!payload) return;
-
-        var phase = payload.phase || '索引构建中';
-        var current = payload.current || 0;
-        var total = payload.total || 0;
-        var percent = total > 0 ? (current / total) * 100 : -1;
-
-        show(phase, total > 0 ? current + ' / ' + total + ' 文档' : '处理中...', percent);
-    }
-
-    function _formatBytes(bytes) {
-        if (bytes === 0) return '0 B';
-        var units = ['B', 'KB', 'MB', 'GB'];
-        var i = Math.floor(Math.log(bytes) / Math.log(1024));
-        i = Math.min(i, units.length - 1);
-        return (bytes / Math.pow(1024, i)).toFixed(1) + ' ' + units[i];
-    }
-
- // =========================================================
  // 初始化与销毁
  // =========================================================
 
@@ -208,29 +170,6 @@ var RamariaProgressBar = (function () {
 
         _createDom();
 
- // 监听 Tauri 事件
-        try {
-            if (typeof TauriBridge !== 'undefined' && TauriBridge.isTauri && TauriBridge.isTauri()) {
-                TauriBridge.listen('download-progress', function (event) {
-                    _onDownloadProgress(event.payload);
-                }).then(function (unlisten) {
-                    _unlistenDownload = unlisten;
-                }).catch(function (err) {
-                    console.warn('[ProgressBar] 无法监听 download-progress 事件:', err);
-                });
-
-                TauriBridge.listen('index-progress', function (event) {
-                    _onIndexProgress(event.payload);
-                }).then(function (unlisten) {
-                    _unlistenIndex = unlisten;
-                }).catch(function (err) {
-                    console.warn('[ProgressBar] 无法监听 index-progress 事件:', err);
-                });
-            }
-        } catch (err) {
-            console.warn('[ProgressBar] Tauri 事件监听设置失败:', err);
-        }
-
         _initialized = true;
         console.log('[ProgressBar] 进度条组件初始化完成');
     }
@@ -239,15 +178,6 @@ var RamariaProgressBar = (function () {
         console.log('[ProgressBar] 销毁进度条组件...');
 
         hide();
-
-        if (_unlistenDownload) {
-            try { _unlistenDownload(); } catch (_) { /* ignore */ }
-            _unlistenDownload = null;
-        }
-        if (_unlistenIndex) {
-            try { _unlistenIndex(); } catch (_) { /* ignore */ }
-            _unlistenIndex = null;
-        }
 
         if (_container && _container.parentNode) {
             _container.parentNode.removeChild(_container);
