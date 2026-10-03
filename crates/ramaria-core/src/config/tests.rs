@@ -867,22 +867,30 @@ allow_raw_text = true
 #[test]
 fn proactive_config_defaults_follow_decisions() {
     let cfg = RamariaConfig::default();
-    // 总开关默认开启（低频低打扰的保守基线）
+    // 总开关默认开启（打扰控制由各键约束）
     assert!(cfg.proactive.enabled, "主动对话默认开启");
     // 调度节拍与打扰控制默认值逐键锁定
     assert_eq!(cfg.proactive.check_interval_seconds, 300);
-    assert_eq!(cfg.proactive.min_idle_hours, 24);
-    assert_eq!(cfg.proactive.daily_limit, 1);
+    assert_eq!(cfg.proactive.min_idle_hours, 4);
+    assert_eq!(cfg.proactive.daily_limit, 3);
     assert_eq!(cfg.proactive.quiet_hours, "22:00-08:00");
-    assert_eq!(cfg.proactive.cooldown_hours, 48);
-    assert!((cfg.proactive.probability - 0.3).abs() < f64::EPSILON);
+    assert_eq!(cfg.proactive.cooldown_hours, 8);
+    // 判据与软加权算法参数默认值逐键锁定
+    assert!(cfg.proactive.judge_enabled, "判据默认开启");
+    assert_eq!(cfg.proactive.judge_interval_hours, 3);
+    assert!((cfg.proactive.active_hours_weight - 0.8).abs() < f64::EPSILON);
+    assert_eq!(cfg.proactive.active_hours_window_days, 30);
+    assert_eq!(cfg.proactive.active_hours_min_samples, 50);
+    assert!((cfg.proactive.valence_weight - 0.5).abs() < f64::EPSILON);
+    assert!((cfg.proactive.confidence_floor - 0.6).abs() < f64::EPSILON);
+    assert!((cfg.proactive.light_touch_weight - 0.3).abs() < f64::EPSILON);
     assert_eq!(cfg.proactive.silence_backoff_days, 3);
     assert_eq!(cfg.proactive.startup_grace_days, 3);
 }
 
 #[test]
 fn proactive_config_toml_roundtrip_and_partial() {
-    // 旧配置文件（无 [proactive]）解析后回退默认（开启、保守基线）
+    // 旧配置文件（无 [proactive]）解析后回退默认（开启、默认值）
     let legacy = r#"
 version = "2.0.0"
 schema_version = 1
@@ -903,10 +911,15 @@ quiet_hours = "23:00-07:30"
     assert_eq!(cfg2.proactive.daily_limit, 2);
     assert_eq!(cfg2.proactive.quiet_hours, "23:00-07:30");
     assert_eq!(
-        cfg2.proactive.cooldown_hours, 48,
-        "未写的键回退默认值（冷却 48 小时）"
+        cfg2.proactive.cooldown_hours, 8,
+        "未写的键回退默认值（冷却 8 小时）"
     );
-    assert!((cfg2.proactive.probability - 0.3).abs() < f64::EPSILON);
+    // 未写的判据与软加权键同样回退默认值
+    assert!(cfg2.proactive.judge_enabled);
+    assert_eq!(cfg2.proactive.judge_interval_hours, 3);
+    assert_eq!(cfg2.proactive.active_hours_window_days, 30);
+    assert_eq!(cfg2.proactive.active_hours_min_samples, 50);
+    assert!((cfg2.proactive.confidence_floor - 0.6).abs() < f64::EPSILON);
 
     // 扁平化同步覆盖本组（settings 表 config.* 键）
     let flat = config_sync_flatten(&cfg2);

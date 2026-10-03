@@ -973,7 +973,7 @@ async fn mcp_db_keys_absent_from_file_are_preserved() {
 // [proactive] 组纳入双写同步（主动对话配置通道）
 // =========================================================
 
-/// [proactive] 组九键纳入统一写入口：save 后 settings 表逐键可见、文件侧携带其值。
+/// [proactive] 组十六键纳入统一写入口：save 后 settings 表逐键可见、文件侧携带其值。
 #[tokio::test]
 async fn proactive_group_keys_are_covered_by_full_sync() {
     let storage = Arc::new(MockStorage::default());
@@ -986,7 +986,14 @@ async fn proactive_group_keys_are_covered_by_full_sync() {
     cfg.proactive.daily_limit = 2;
     cfg.proactive.quiet_hours = "23:00-07:30".to_string();
     cfg.proactive.cooldown_hours = 24;
-    cfg.proactive.probability = 0.5;
+    cfg.proactive.judge_enabled = false;
+    cfg.proactive.judge_interval_hours = 6;
+    cfg.proactive.active_hours_weight = 0.5;
+    cfg.proactive.active_hours_window_days = 14;
+    cfg.proactive.active_hours_min_samples = 20;
+    cfg.proactive.valence_weight = 0.8;
+    cfg.proactive.confidence_floor = 0.7;
+    cfg.proactive.light_touch_weight = 0.2;
     cfg.proactive.silence_backoff_days = 5;
     cfg.proactive.startup_grace_days = 1;
 
@@ -1000,7 +1007,14 @@ async fn proactive_group_keys_are_covered_by_full_sync() {
         ("config.proactive.min_idle_hours", "6"),
         ("config.proactive.daily_limit", "2"),
         ("config.proactive.cooldown_hours", "24"),
-        ("config.proactive.probability", "0.5"),
+        ("config.proactive.judge_enabled", "false"),
+        ("config.proactive.judge_interval_hours", "6"),
+        ("config.proactive.active_hours_weight", "0.5"),
+        ("config.proactive.active_hours_window_days", "14"),
+        ("config.proactive.active_hours_min_samples", "20"),
+        ("config.proactive.valence_weight", "0.8"),
+        ("config.proactive.confidence_floor", "0.7"),
+        ("config.proactive.light_touch_weight", "0.2"),
         ("config.proactive.silence_backoff_days", "5"),
         ("config.proactive.startup_grace_days", "1"),
     ] {

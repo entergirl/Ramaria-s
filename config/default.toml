@@ -581,15 +581,29 @@ enabled = true
 # 调度检查间隔（秒）：决定"是否触发"的判定频率
 check_interval_seconds = 300
 # 距上次对话的最小空闲时长（小时）：避免打断进行中的交流
-min_idle_hours = 24
+min_idle_hours = 4
 # 每画像每日主动投递上限（条）
-daily_limit = 1
+daily_limit = 3
 # 免打扰时段（HH:MM-HH:MM，支持跨零点）
 quiet_hours = "22:00-08:00"
 # 两次主动投递之间的最短间隔（小时）
-cooldown_hours = 48
-# 前置条件全部满足时的触发概率（0.0~1.0）
-probability = 0.3
+cooldown_hours = 8
+# AI 判据开关（默认开启）：关闭后由算法打分直接决策
+judge_enabled = true
+# 判据调用节流间隔（小时）：两次判据调用之间的最短间隔
+judge_interval_hours = 3
+# 活跃时段软加权强度（0.0~1.0）：越高越偏向用户活跃时段
+active_hours_weight = 0.8
+# 活跃时段统计滚动窗口（天）
+active_hours_window_days = 30
+# 时段建模最少样本数：不足时不启用时段加权
+active_hours_min_samples = 50
+# 效价入权强度：越高情绪波动大的记忆越优先
+valence_weight = 0.5
+# 事件置信度门槛（0.0~1.0）：低于此值不进入主动选题
+confidence_floor = 0.6
+# 轻触达兜底候选权重（0.0~1.0）
+light_touch_weight = 0.3
 # 连续未回应退避阈值（天）：达到后进入退避（降频 / 暂停）
 silence_backoff_days = 3
 # 首次启用宽限期（天）：期内不触发
