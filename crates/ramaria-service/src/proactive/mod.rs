@@ -13,6 +13,8 @@
 //! - 活跃时段统计：user 消息时间直方图 + 软加权（权重设下限，样本不足退化放行）
 
 mod activity;
+mod judge;
+mod picker;
 mod schedule;
 mod sink;
 mod state;
@@ -20,7 +22,8 @@ mod topic;
 
 pub use sink::{ProactiveMessage, ProactiveSink};
 
-pub(crate) use schedule::{NoopTopicPicker, TopicPicker, spawn};
+pub(crate) use picker::PickerTopicProvider;
+pub(crate) use schedule::{TopicPicker, spawn};
 pub(crate) use topic::{ProactiveDirective, ProactiveOutcome};
 
 #[cfg(test)]

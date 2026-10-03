@@ -157,6 +157,7 @@ pub struct RecallGates {
 /// 职责:
 /// - 让调用方按需只召回 L1（会话摘要）或只召回 L2（事件）——服务层 `include` 的
 ///   分层开关据此落地（只请求某层时，另一层既不进段落也不进结构化条目）。
+/// - 图谱实体由事件标题构成、来源为 L2 事件，跟随 `l2` 开关；两层全开时不受影响。
 /// - 在线管线两层全开（[`RecallMemoryLayers::default`]），过滤为无操作，行为不变。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecallMemoryLayers {
@@ -202,11 +203,13 @@ impl RecallMemoryLayers {
     ///
     /// 说明:
     /// - `l1` / `l2` 按开关判定；
-    /// - 其它分层（如 `graph` 图谱实体）不属于摘要路子层，恒参与（不受该开关约束）。
+    /// - `graph` 图谱实体由事件标题构成、来源为 L2 事件，故跟随 `l2` 开关
+    ///   （仅请求 L1 时不展示事件侧内容；两层全开时不受影响）；
+    /// - 其它未知分层恒参与（兜底）。
     pub fn allows(&self, layer: &str) -> bool {
         match layer {
             "l1" => self.l1,
-            "l2" => self.l2,
+            "l2" | "graph" => self.l2,
             _ => true,
         }
     }
@@ -312,7 +315,7 @@ pub struct RecallOutput {
 /// 2. 查询向量：RAG 或（白名单内）utt 需要时生成，失败降级为 None；
 /// 3. 关键词镜像预取：锁内取快照 → 锁外异步查询 → 纯 `(label, score)` 交检索融合；
 /// 4. 多通道检索（读锁内同步）：BM25 + 向量 + 图谱 + 关键词镜像，RRF 融合；
-/// 5. 记忆子层过滤：按 `memory_layers` 剔除未请求的 L1 / L2 文档（两层全开 = 无操作）；
+/// 5. 记忆子层过滤：按 `memory_layers` 剔除未请求的 L1 / L2 文档（图谱实体跟随 `l2`；两层全开 = 无操作）；
 /// 6. 时间衰减（含访问加成）→ touch_l1 刷新访问时间 → 按衰减后分数重排；
 /// 7. Persona-Aware 过滤 → 段落渲染（`[相关记忆]`）→ 覆盖集合记录；
 /// 8. utt 原文检索与预算渲染（白名单内且闸门开启）。
@@ -471,6 +474,7 @@ pub async fn assemble_recall<R: RetrieverSource + ?Sized, K: KeywordMirrorSource
 
     // ---- 4.3 记忆子层过滤（L1 / L2 分层开关） ----
     // 只请求单一子层时，另一层既不进段落文本也不进结构化条目（服务层 include 语义）；
+    // 图谱实体来源为 L2 事件，跟随 l2 开关，仅请求 L1 时同样被剔除；
     // 两层全开（在线管线默认）时整个分支跳过，零开销、行为不变。
     if !(input.memory_layers.l1 && input.memory_layers.l2) {
         let before = results.len();

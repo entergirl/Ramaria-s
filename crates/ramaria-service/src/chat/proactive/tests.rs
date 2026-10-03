@@ -40,6 +40,7 @@ fn directive(persona: &str, session_id: Option<Uuid>) -> ProactiveDirective {
         anchor: Some(ANCHOR.to_string()),
         angle: Some("轻问一句近况".to_string()),
         tone: Some("随意".to_string()),
+        valence: 0.0,
     }
 }
 

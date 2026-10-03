@@ -20,7 +20,8 @@ use serde::{Deserialize, Serialize};
 ///
 /// 职责:
 /// - 承载打扰控制与去重冷却所需的跨 tick 数据：上次投递时间、当日计数与归属
-///   日期、连续未回应次数、近期选题记录、宽限基准与判据节流记账、活跃时段直方图缓存。
+///   日期、连续未回应次数、近期选题记录、宽限基准与判据节流记账、活跃时段直方图
+///   缓存、候选效价符号与判据计数。
 ///
 /// 字段约定:
 /// - `last_sent_at`: 上次成功投递时间（Unix 毫秒；None = 尚未投递过）。
@@ -33,6 +34,10 @@ use serde::{Deserialize, Serialize};
 /// - `last_judge_at`: 最近一次判据尝试时间（Unix 毫秒）：判据调用节流的记账点。
 /// - `hour_histogram`: 用户活跃时段直方图缓存（按本地小时归桶；None = 尚未统计）。
 /// - `histogram_date`: 直方图缓存归属的本地日期（`YYYY-MM-DD`；跨日刷新）。
+/// - `last_valence_sign`: 最近一次生成成功候选的效价符号（`-1` 负 / `0` 中性或未知
+///   / `1` 正）：「负效价不连选」（正负平衡）的记账点。
+/// - `judge_yes_count` + `judge_no_count`: 判据累计「开口」/「沉默」裁决次数
+///   （调参观测）。
 ///
 /// 兼容性:
 /// - 字段级 `#[serde(default)]`：状态 JSON 缺字段（版本演进）时回退字段默认值。
@@ -61,6 +66,16 @@ pub struct ProactiveState {
     /// 直方图缓存归属的本地日期（`YYYY-MM-DD`；跨日刷新）。
     #[serde(default)]
     pub histogram_date: String,
+    /// 最近一次生成成功候选的效价符号（`-1` 负 / `0` 中性或未知 / `1` 正）：
+    /// 「负效价不连选」（正负平衡）的记账点。
+    #[serde(default)]
+    pub last_valence_sign: i8,
+    /// 判据累计「开口」裁决次数（调参观测）。
+    #[serde(default)]
+    pub judge_yes_count: u32,
+    /// 判据累计「沉默」裁决次数（调参观测）。
+    #[serde(default)]
+    pub judge_no_count: u32,
 }
 
 /// 近期选题记录（去重冷却输入）。

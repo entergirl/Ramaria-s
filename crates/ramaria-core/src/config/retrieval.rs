@@ -53,6 +53,11 @@ pub struct RetrievalConfig {
     pub bm25_weight: f64,
     /// 图谱通道权重
     pub graph_weight: f64,
+    /// 图谱通道开关（默认 true）。
+    ///
+    /// `false` 时摘要路检索不含知识图谱通道，回退到 BM25 + 向量（+ 关键词镜像）；
+    /// 对应内存检索器 `RetrieverConfig.enable_graph`。
+    pub enable_graph: bool,
     /// 向量通道开关（默认 true）。
     ///
     /// `false` 时关闭摘要路检索的向量通道（仅 BM25 + 图谱参与 RRF 融合），
@@ -109,7 +114,7 @@ impl Default for RetrievalConfig {
     ///
     /// 返回:
     /// - 适合轻度聊天场景的 L0/L1/L2 检索规模。
-    /// - RRF k=60，BM25 权重 1.0，图谱权重 0.8；向量通道默认开启。
+    /// - RRF k=60，BM25 权重 1.0，图谱权重 0.8；图谱与向量通道默认开启。
     /// - 摘要路 RAG 格式化参数与 memory `RagConfig::default()` 一致（行为等价）。
     fn default() -> Self {
         Self {
@@ -121,6 +126,7 @@ impl Default for RetrievalConfig {
             rrf_k: 60,
             bm25_weight: 1.0,
             graph_weight: 0.8,
+            enable_graph: true,
             enable_vector: true,
             enable_keyword_channel: true,
             keyword_weight: 1.0,

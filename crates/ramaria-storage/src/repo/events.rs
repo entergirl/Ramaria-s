@@ -16,6 +16,10 @@ use ramaria_core::types::{
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+mod topic_queries;
+
+pub use topic_queries::{list_events_by_salience, list_events_since};
+
 // =========================================================
 // MemoryEvent（事件主表）
 // =========================================================
@@ -676,3 +680,6 @@ pub async fn save_event_batch(
 
     Ok(event_ids)
 }
+
+#[cfg(test)]
+mod tests;

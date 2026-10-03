@@ -198,6 +198,33 @@ pub async fn last_user_message_time_by_persona(
     Ok(row.and_then(|r| r.max_time))
 }
 
+/// 查询指定会话最近一条消息的时间（Unix 毫秒，含全部角色）。
+///
+/// 口径:
+/// - 会话内全部角色（user / assistant 等）的消息均计入；
+/// - 会话无消息时返回 None。
+///
+/// 参数:
+/// - `session_id`: 会话 ID。
+///
+/// 返回:
+/// - `Ok(Some(ms))`: 最近一条消息的 Unix 毫秒时间戳。
+/// - `Ok(None)`: 会话无消息。
+pub async fn last_message_time_by_session(
+    pool: &SqlitePool,
+    session_id: Uuid,
+) -> RamariaResult<Option<i64>> {
+    // SQLite 聚合恒返回一行；无匹配行时 MAX 为 NULL，以 Option 解码
+    let max_time = sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT MAX(created_at) FROM messages WHERE session_id = ?",
+    )
+    .bind(session_id.to_string())
+    .fetch_one(pool)
+    .await
+    .storage_err("查询会话最后消息时间失败")?;
+    Ok(max_time)
+}
+
 /// 查询指定 persona 会话中时间窗口内的用户消息时间戳（升序）。
 ///
 /// 口径:

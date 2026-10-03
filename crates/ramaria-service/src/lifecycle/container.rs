@@ -133,7 +133,7 @@ impl Lifecycle {
                 .proactive_first_delay_seconds
                 .unwrap_or(PROACTIVE_DEFAULT_FIRST_DELAY_SECONDS);
             let picker: Arc<dyn crate::proactive::TopicPicker> =
-                Arc::new(crate::proactive::NoopTopicPicker);
+                Arc::new(crate::proactive::PickerTopicProvider);
             let handle = crate::proactive::spawn(
                 Arc::clone(&engine),
                 Arc::clone(&lifecycle.shutdown_flag),

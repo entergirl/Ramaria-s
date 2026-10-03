@@ -55,8 +55,8 @@ impl RetrieverConfig {
     /// 从 core 检索配置（`[retrieval]` 组）映射摘要路的检索参数。
     ///
     /// 说明:
-    /// - 仅映射本批已明确接线的字段：RRF 融合平滑系数 k、BM25/图谱/关键词镜像
-    ///   通道权重、向量与关键词镜像通道开关；其余字段保持默认值（默认配置下与
+    /// - 仅映射已明确接线的字段：RRF 融合平滑系数 k、BM25/图谱/关键词镜像
+    ///   通道权重、图谱/向量/关键词镜像通道开关；其余字段保持默认值（默认配置下与
     ///   `RetrieverConfig::default()` 完全一致，行为与上一版本等价）。
     /// - BM25 词典、向量维度等索引侧配置不属于检索参数，不在此映射。
     ///
@@ -64,7 +64,7 @@ impl RetrieverConfig {
     /// - `core`: ramaria-core 的摘要路检索配置。
     ///
     /// 返回:
-    /// - 仅本批接线字段取自 `core` 的 `RetrieverConfig`。
+    /// - 已接线字段取自 `core`、其余取默认值的 `RetrieverConfig`。
     pub fn from_retrieval_config(core: &ramaria_core::config::RetrievalConfig) -> Self {
         Self {
             rrf: RrfConfig {
@@ -74,6 +74,7 @@ impl RetrieverConfig {
                 keyword_weight: core.keyword_weight,
                 ..RrfConfig::default()
             },
+            enable_graph: core.enable_graph,
             enable_vector: core.enable_vector,
             enable_keyword_channel: core.enable_keyword_channel,
             ..Self::default()
@@ -226,14 +227,17 @@ mod tests {
         assert_eq!(mapped.rrf.bm25_weight, base.rrf.bm25_weight);
         assert_eq!(mapped.rrf.graph_weight, base.rrf.graph_weight);
         assert_eq!(mapped.rrf.keyword_weight, base.rrf.keyword_weight);
+        assert_eq!(
+            mapped.enable_graph, base.enable_graph,
+            "图谱通道开关默认开启"
+        );
         assert_eq!(mapped.enable_vector, base.enable_vector);
         assert_eq!(
             mapped.enable_keyword_channel, base.enable_keyword_channel,
             "关键词镜像通道开关默认开启"
         );
-        // 未接线条目保持默认（三通道开关、索引侧配置）
+        // 未接线条目保持默认（BM25 通道开关、索引侧配置）
         assert_eq!(mapped.enable_bm25, base.enable_bm25);
-        assert_eq!(mapped.enable_graph, base.enable_graph);
         assert_eq!(mapped.vector.min_similarity, base.vector.min_similarity);
         assert_eq!(mapped.bm25.k1, base.bm25.k1);
         assert_eq!(mapped.graph.max_entities, base.graph.max_entities);
@@ -247,6 +251,7 @@ mod tests {
             bm25_weight: 0.5,
             graph_weight: 0.4,
             keyword_weight: 0.7,
+            enable_graph: false,
             enable_vector: false,
             enable_keyword_channel: false,
             ..Default::default()
@@ -257,11 +262,11 @@ mod tests {
         assert_eq!(mapped.rrf.bm25_weight, 0.5);
         assert_eq!(mapped.rrf.graph_weight, 0.4);
         assert_eq!(mapped.rrf.keyword_weight, 0.7);
+        assert!(!mapped.enable_graph, "图谱通道开关应显式传递");
         assert!(!mapped.enable_vector);
         assert!(!mapped.enable_keyword_channel);
-        // 其余检索通道仍默认开启（映射仅反映 [retrieval] 组的向量/关键词开关）
+        // BM25 通道无配置开关，仍默认开启
         assert!(mapped.enable_bm25);
-        assert!(mapped.enable_graph);
         // 未映射的 RRF top_k 保持默认
         assert_eq!(mapped.rrf.top_k, RrfConfig::default().top_k);
     }

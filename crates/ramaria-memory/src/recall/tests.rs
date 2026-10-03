@@ -271,8 +271,9 @@ async fn memory_layer_switch_filters_sublayers() {
     assert!(context.contains("事件侧"), "应含 L2 文本: {context}");
     assert!(!context.contains("摘要侧"), "不应含 L1 文本: {context}");
 
-    // 开关判定：图谱等非摘要层不受约束
+    // 开关判定：图谱实体来源为 L2 事件，跟随 l2 开关（仅 L1 时不参与）
     assert!(RecallMemoryLayers::l2_only().allows("graph"));
+    assert!(!RecallMemoryLayers::l1_only().allows("graph"));
     assert!(RecallMemoryLayers::l1_only().any());
     assert!(!RecallMemoryLayers::l2_only().allows("l1"));
 }

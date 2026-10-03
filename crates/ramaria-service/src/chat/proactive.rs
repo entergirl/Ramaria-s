@@ -55,6 +55,7 @@ pub(crate) async fn run(
         anchor,
         angle,
         tone,
+        valence,
     } = directive;
     let persona = normalize_persona(Some(persona.as_str()));
     let topic_key = normalize_optional(topic_key);
@@ -193,6 +194,7 @@ pub(crate) async fn run(
         persona: prepared.persona,
         source,
         topic_key,
+        valence,
     }))
 }
 

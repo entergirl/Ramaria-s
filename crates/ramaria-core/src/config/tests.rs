@@ -22,7 +22,11 @@ fn default_config_is_valid() {
     assert_eq!(cfg.retrieval.l0_window_size, 3);
     assert_eq!(cfg.retrieval.rrf_k, 60);
     assert!((cfg.retrieval.similarity_threshold - 0.6).abs() < f64::EPSILON);
-    // 摘要路向量通道默认开启；RAG 格式化参数默认与既有行为等价
+    // 摘要路图谱与向量通道默认开启；RAG 格式化参数默认与既有行为等价
+    assert!(
+        cfg.retrieval.enable_graph,
+        "图谱通道默认开启（与既有行为等价）"
+    );
     assert!(
         cfg.retrieval.enable_vector,
         "向量通道默认开启（与既有行为等价）"
@@ -225,7 +229,8 @@ injection_budget_chars = 800
     assert!((cfg.knowledge.retrieve_threshold - 0.0).abs() < f64::EPSILON);
     assert_eq!(cfg.knowledge.injection_budget_chars, 800);
     assert!(cfg.knowledge.detector_enabled);
-    // 摘要路新增键未配置 → 回退默认（向量通道开、关键词镜像通道开、RAG 格式化默认）
+    // 摘要路新增键未配置 → 回退默认（图谱/向量通道开、关键词镜像通道开、RAG 格式化默认）
+    assert!(cfg.retrieval.enable_graph);
     assert!(cfg.retrieval.enable_vector);
     assert!(cfg.retrieval.enable_keyword_channel);
     assert!((cfg.retrieval.keyword_weight - 1.0).abs() < f64::EPSILON);
@@ -884,6 +889,12 @@ fn proactive_config_defaults_follow_decisions() {
     assert!((cfg.proactive.valence_weight - 0.5).abs() < f64::EPSILON);
     assert!((cfg.proactive.confidence_floor - 0.6).abs() < f64::EPSILON);
     assert!((cfg.proactive.light_touch_weight - 0.3).abs() < f64::EPSILON);
+    // 事件源阈值与选题去重冷却默认值逐键锁定
+    assert!((cfg.proactive.event_salience_threshold - 0.6).abs() < f64::EPSILON);
+    assert_eq!(cfg.proactive.event_window_days, 14);
+    assert!((cfg.proactive.unresolved_valence_threshold - (-0.3)).abs() < f64::EPSILON);
+    assert_eq!(cfg.proactive.follow_up_days, 3);
+    assert_eq!(cfg.proactive.topic_cooldown_hours, 24);
     assert_eq!(cfg.proactive.silence_backoff_days, 3);
     assert_eq!(cfg.proactive.startup_grace_days, 3);
 }

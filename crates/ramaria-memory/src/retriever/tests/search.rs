@@ -195,6 +195,44 @@ fn enable_vector_default_keeps_vector_hits() {
     );
 }
 
+/// enable_graph=false 时图谱通道关闭：仅图谱可命中的查询不再产出；
+/// 开启时同一查询命中图谱实体（开关短路生效的对照断言）。
+#[test]
+fn enable_graph_false_disables_graph_channel() {
+    let mut r = Retriever::new();
+    // 仅图谱有数据：文档集合为空（BM25 无索引文档），无查询向量、无关键词注入
+    r.graph_mut()
+        .load(&[(1, "陶艺展".to_string(), "event".to_string())], &[]);
+
+    let req = SearchRequest {
+        query: "陶艺展".to_string(),
+        persona_uid: None,
+        top_k: 10,
+        filter_share: false,
+    };
+
+    // 开启图谱通道（默认）→ 图谱实体命中返回
+    let on = r.search(&req, None);
+    assert!(
+        on.iter()
+            .any(|sr| sr.layer == "graph" && sr.doc_summary.contains("陶艺展")),
+        "enable_graph=true 时图谱实体应被检索到: {on:?}"
+    );
+    assert!(
+        on.iter().any(|sr| sr.graph_score.is_some()),
+        "图谱通道开启时结果应携带图谱分数"
+    );
+
+    // 关闭图谱通道 → 其余通道均无可命中数据 → 空结果（图谱命中不再产出）
+    r.config_mut().enable_graph = false;
+    let off = r.search(&req, None);
+    assert!(
+        off.iter().all(|sr| sr.layer != "graph"),
+        "enable_graph=false 时不得返回图谱通道命中: {off:?}"
+    );
+    assert!(off.is_empty(), "其余通道无数据时关闭图谱应为空结果");
+}
+
 #[test]
 fn search_filters_by_persona_uid() {
     let r = make_test_retriever();

@@ -532,3 +532,66 @@ async fn list_user_message_times_since_filters_window_and_role() {
         .expect("查询应成功");
     assert!(none.is_empty(), "窗口内无用户消息应返回空列表");
 }
+
+/// last_message_time_by_session：全部角色计入取最大时间、无消息 None、会话隔离。
+#[tokio::test]
+async fn last_message_time_by_session_counts_all_roles() {
+    let pool = init_test_pool().await.expect("测试库初始化失败");
+
+    // 无消息会话 → None
+    let session_a = setup_persona_session(&pool, "char-0001").await;
+    assert_eq!(
+        last_message_time_by_session(&pool, session_a)
+            .await
+            .expect("查询应成功"),
+        None,
+        "无消息会话应返回 None"
+    );
+
+    // 仅 assistant 消息也计入（与 last_user_message_time_by_persona 的仅 user 口径不同）
+    insert_role_message(&pool, session_a, MessageRole::Assistant, 5_000).await;
+    assert_eq!(
+        last_message_time_by_session(&pool, session_a)
+            .await
+            .expect("查询应成功"),
+        Some(5_000),
+        "assistant 消息应计入会话最后消息时间"
+    );
+
+    // user 与 assistant 混合：取全部角色中的最大时间
+    insert_role_message(&pool, session_a, MessageRole::User, 1_000).await;
+    insert_role_message(&pool, session_a, MessageRole::Assistant, 6_000).await;
+    assert_eq!(
+        last_message_time_by_session(&pool, session_a)
+            .await
+            .expect("查询应成功"),
+        Some(6_000),
+        "应取全部角色中的最大时间"
+    );
+
+    // 另一会话独立计算（会话隔离）
+    let session_b = setup_persona_session(&pool, "char-0002").await;
+    insert_role_message(&pool, session_b, MessageRole::User, 9_000).await;
+    assert_eq!(
+        last_message_time_by_session(&pool, session_a)
+            .await
+            .expect("查询应成功"),
+        Some(6_000),
+        "其他会话的消息不应串扰"
+    );
+    assert_eq!(
+        last_message_time_by_session(&pool, session_b)
+            .await
+            .expect("查询应成功"),
+        Some(9_000)
+    );
+
+    // 不存在的会话 → None
+    assert_eq!(
+        last_message_time_by_session(&pool, Uuid::new_v4())
+            .await
+            .expect("查询应成功"),
+        None,
+        "不存在的会话应返回 None"
+    );
+}

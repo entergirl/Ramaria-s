@@ -973,7 +973,7 @@ async fn mcp_db_keys_absent_from_file_are_preserved() {
 // [proactive] 组纳入双写同步（主动对话配置通道）
 // =========================================================
 
-/// [proactive] 组十六键纳入统一写入口：save 后 settings 表逐键可见、文件侧携带其值。
+/// [proactive] 组二十一键纳入统一写入口：save 后 settings 表逐键可见、文件侧携带其值。
 #[tokio::test]
 async fn proactive_group_keys_are_covered_by_full_sync() {
     let storage = Arc::new(MockStorage::default());
@@ -994,6 +994,11 @@ async fn proactive_group_keys_are_covered_by_full_sync() {
     cfg.proactive.valence_weight = 0.8;
     cfg.proactive.confidence_floor = 0.7;
     cfg.proactive.light_touch_weight = 0.2;
+    cfg.proactive.event_salience_threshold = 0.7;
+    cfg.proactive.event_window_days = 7;
+    cfg.proactive.unresolved_valence_threshold = -0.4;
+    cfg.proactive.follow_up_days = 5;
+    cfg.proactive.topic_cooldown_hours = 48;
     cfg.proactive.silence_backoff_days = 5;
     cfg.proactive.startup_grace_days = 1;
 
@@ -1015,6 +1020,11 @@ async fn proactive_group_keys_are_covered_by_full_sync() {
         ("config.proactive.valence_weight", "0.8"),
         ("config.proactive.confidence_floor", "0.7"),
         ("config.proactive.light_touch_weight", "0.2"),
+        ("config.proactive.event_salience_threshold", "0.7"),
+        ("config.proactive.event_window_days", "7"),
+        ("config.proactive.unresolved_valence_threshold", "-0.4"),
+        ("config.proactive.follow_up_days", "5"),
+        ("config.proactive.topic_cooldown_hours", "48"),
         ("config.proactive.silence_backoff_days", "5"),
         ("config.proactive.startup_grace_days", "1"),
     ] {

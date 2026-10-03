@@ -69,10 +69,18 @@ pub(crate) fn hour_norm(histogram: &[u32; 24], hour: u32) -> f64 {
     count as f64 / peak as f64
 }
 
-/// 当前小时的时段权重：`(1 - 强度) + 强度 × 归一化活跃度`（下限 = 1 - 强度，防信号归零）。
+/// 时段权重下限：`1 - clamp(active_hours_weight, 0.0, 1.0)`。
+///
+/// 说明:
+/// - 下限防「永不触发」；未建模（样本不足）时调用方以该值作中性权重。
+pub(crate) fn weight_floor(active_hours_weight: f64) -> f64 {
+    (1.0 - active_hours_weight.clamp(0.0, 1.0)).clamp(0.0, 1.0)
+}
+
+/// 当前小时的时段权重：`weight_floor + 强度 × 归一化活跃度`（下限防信号归零）。
 pub(crate) fn hour_weight(histogram: &[u32; 24], hour: u32, active_hours_weight: f64) -> f64 {
     let strength = active_hours_weight.clamp(0.0, 1.0);
-    (1.0 - strength) + strength * hour_norm(histogram, hour)
+    weight_floor(strength) + strength * hour_norm(histogram, hour)
 }
 
 /// 活跃时段门判定。
@@ -94,7 +102,7 @@ pub(crate) fn evaluate_gate(
     }
     let strength = active_hours_weight.clamp(0.0, 1.0);
     let norm = hour_norm(&model.histogram, hour);
-    let gate = (1.0 - strength).clamp(0.0, 1.0);
+    let gate = weight_floor(strength);
     if norm < gate {
         return ActivityGate::LowWeight { norm };
     }

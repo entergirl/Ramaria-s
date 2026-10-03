@@ -61,6 +61,13 @@ fn hour_norm_and_weight_floor() {
     let empty = [0u32; 24];
     approx(hour_norm(&empty, 0), 0.0);
     approx(hour_weight(&empty, 0, 0.8), 0.2);
+
+    // 下限口径一致性：独立函数与 hour_weight 的零计数小时一致，越界强度按边界夹取
+    approx(hour_weight(&empty, 0, 0.8), weight_floor(0.8));
+    approx(weight_floor(0.8), 0.2);
+    approx(weight_floor(0.0), 1.0);
+    approx(weight_floor(1.0), 0.0);
+    approx(weight_floor(1.5), 0.0);
 }
 
 /// 门判定：未建模 / 低活跃度 / 峰值通过；严格小于语义的强度 0 边界。

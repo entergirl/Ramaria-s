@@ -23,7 +23,9 @@ use ramaria_core::lock::{read_recover, write_recover};
 use ramaria_core::traits::{
     EmbeddingProvider, SETTING_BM25_INDEX_VERSION, StoreCrud, StoreInfrastructure,
 };
-use ramaria_core::types::{Message, MessageRole, MessageSource};
+use ramaria_core::types::{
+    EventRelation, EventRelationKind, MemoryEvent, Message, MessageRole, MessageSource,
+};
 use ramaria_memory::retriever::{SearchRequest, SearchResult};
 use ramaria_storage::SqliteStorage;
 use std::sync::Arc;
@@ -475,6 +477,94 @@ async fn rebuild_index_returns_document_total() {
         1,
         "重建完成后应写回索引版本 1"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 图谱构建：事件为实体节点、事件关系为边 — 检索产出图谱命中，
+/// 且命中携带 1-hop 关联事件标题。
+#[tokio::test]
+async fn rebuild_builds_graph_from_event_relations() {
+    let (engine, storage, dir) = engine_with_db("index-graph").await;
+    seed_persona(&storage, "char-0001").await;
+
+    // 两个事件：标题即图谱实体名（含可检索的独特词）
+    let first = MemoryEvent::new(
+        "char-0001".to_string(),
+        "陶艺展".to_string(),
+        "用户周末去看了陶艺展".to_string(),
+        1_000,
+        2_000,
+    );
+    let first_id = storage.save_event(&first).await.expect("写入事件应成功");
+    let second = MemoryEvent::new(
+        "char-0001".to_string(),
+        "陶艺课".to_string(),
+        "用户报名了陶艺课".to_string(),
+        3_000,
+        4_000,
+    );
+    let second_id = storage.save_event(&second).await.expect("写入事件应成功");
+    storage
+        .save_event_relation(&EventRelation::new(
+            first_id,
+            second_id,
+            EventRelationKind::RelatedTo,
+        ))
+        .await
+        .expect("写入事件关系应成功");
+
+    engine.rebuild_index().await.expect("重建应成功");
+
+    // 公开检索入口：图谱通道产出命中（实体名以 "[图谱实体] 标题" 呈现）
+    let hits = search_docs(&engine, "陶艺");
+    assert!(
+        hits.iter().any(|r| r.layer == "graph"
+            && r.graph_score.is_some()
+            && r.doc_summary.contains("陶艺展")),
+        "重建后检索应产出图谱通道命中: {hits:?}"
+    );
+
+    // 图谱内部检视：节点 / 边计数与 1-hop 关联关系
+    let slot = engine.retriever_slot();
+    let mut guard = write_recover(&*slot, "index.retriever_slot");
+    let retriever = guard.as_mut().expect("索引应已构建");
+    let graph_config = retriever.config().graph.clone();
+    let graph = retriever.graph_mut();
+    assert_eq!(graph.node_count(), 2, "两个事件应各成一个图节点");
+    assert_eq!(graph.edge_count(), 1, "一条事件关系应成一条边");
+    let graph_hits = graph.search("陶艺", &graph_config);
+    assert!(
+        graph_hits.iter().any(|h| {
+            h.entity_name == "陶艺展" && h.related_entities.iter().any(|name| name == "陶艺课")
+        }),
+        "图谱命中应含 1-hop 关联事件标题: {graph_hits:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 无事件关系时重建正常完成：事件仍成孤立节点、图无边（关系为空不阻塞构建）。
+#[tokio::test]
+async fn rebuild_without_relations_builds_isolated_graph_nodes() {
+    let (engine, storage, dir) = engine_with_db("index-graph-norel").await;
+    seed_persona(&storage, "char-0001").await;
+    let event = MemoryEvent::new(
+        "char-0001".to_string(),
+        "独自散步".to_string(),
+        "用户在河边散步".to_string(),
+        1_000,
+        2_000,
+    );
+    storage.save_event(&event).await.expect("写入事件应成功");
+
+    engine.rebuild_index().await.expect("无关系时重建应成功");
+
+    let slot = engine.retriever_slot();
+    let mut guard = write_recover(&*slot, "index.retriever_slot");
+    let graph = guard.as_mut().expect("索引应已构建").graph_mut();
+    assert_eq!(graph.node_count(), 1, "无关系的事件仍应成节点");
+    assert_eq!(graph.edge_count(), 0, "无关系时图不应有边");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

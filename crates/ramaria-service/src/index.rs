@@ -15,6 +15,8 @@
 //!   代次变化触发的重建再受 `[index].refresh_interval_seconds` 冷却窗口约束（0 = 不节流）
 //! - 边界：本模块只做"内存索引维护"，不写数据库（除索引版本 / BM25 分词版本标记外）
 
+use std::collections::HashSet;
+
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::lock::{read_recover, write_recover};
 use ramaria_core::traits::{
@@ -167,20 +169,21 @@ pub(crate) async fn rebuild(engine: &Engine) -> RamariaResult<usize> {
 ///
 /// 流程:
 /// 1. 读取库内代次快照（构建前读取，构建完成后记录供下次比对）；
-/// 2. 锁外收集文档视图（各 persona 的未吸收 L1 / L2 事件 / utt 块 + 无主 L1）；
+/// 2. 锁外收集文档视图（各 persona 的未吸收 L1 / L2 事件 / utt 块 / 事件关系 + 无主 L1）；
 /// 3. 评估 BM25 词典增强迁移决策（已确认词表 + 分词版本标记）；
 /// 4. 临时检索器构建（检索配置 + 词典 + 文档索引 + 可选向量）；
-/// 5. 整体替换懒加载槽（读者不读半成品）；
-/// 6. 词典增强迁移完成后写回分词版本标记；
-/// 7. 关键词镜像装载（词典池 + 倒排文档 + 语义层）；
-/// 8. 记录代次快照与构建完成时间，写回索引版本（失败只记日志）。
+/// 5. 图谱构建（事件为实体节点、事件关系为边，装入同一临时实例）；
+/// 6. 整体替换懒加载槽（读者不读半成品）；
+/// 7. 词典增强迁移完成后写回分词版本标记；
+/// 8. 关键词镜像装载（词典池 + 倒排文档 + 语义层）；
+/// 9. 记录代次快照与构建完成时间，写回索引版本（失败只记日志）。
 ///
 /// 返回:
 /// - `Ok(total)`: 构建完成，`total` 为 L1 + L2 文档总数（不含 utt 块）。
 /// - `Err(..)`: 关键读取失败（旧索引保持可用），并置"重建失败"告警位。
 ///
 /// 降级:
-/// - persona 事件 / utt 块 / 词典 / 向量读取失败按降级链处理，不阻塞构建；
+/// - persona 事件 / utt 块 / 事件关系 / 词典 / 向量读取失败按降级链处理，不阻塞构建；
 /// - 成功完成后复位"重建失败"告警位（供诊断展示与宿主告警）。
 async fn build_and_swap(engine: &Engine) -> RamariaResult<usize> {
     match build_and_swap_inner(engine).await {
@@ -221,6 +224,7 @@ async fn build_and_swap_inner(engine: &Engine) -> RamariaResult<usize> {
     let mut l1_views: Vec<L1DocView> = Vec::new();
     let mut l2_views: Vec<L2DocView> = Vec::new();
     let mut utt_blocks: Vec<ramaria_core::types::UttBlock> = Vec::new();
+    let mut event_relations: Vec<ramaria_core::types::EventRelation> = Vec::new();
 
     for persona in storage.list_personas().await? {
         for l1 in storage.list_unabsorbed_l1(&persona.uid).await? {
@@ -234,6 +238,13 @@ async fn build_and_swap_inner(engine: &Engine) -> RamariaResult<usize> {
             Ok(events) => l2_views.extend(events.iter().map(l2_view)),
             Err(e) => {
                 tracing::warn!(persona_uid = %persona.uid, error = %e, "读取事件失败，跳过该 persona 的事件");
+            }
+        }
+        // 事件关系：失败降级为空（单个 persona 的关系读取失败只丢该 persona 的边）
+        match storage.list_event_relations_by_persona(&persona.uid).await {
+            Ok(relations) => event_relations.extend(relations),
+            Err(e) => {
+                tracing::warn!(persona_uid = %persona.uid, error = %e, "读取事件关系失败，跳过该 persona 的关系");
             }
         }
         // utt 块：失败降级为空（原文通道缺失，其余通道不受影响）
@@ -276,14 +287,20 @@ async fn build_and_swap_inner(engine: &Engine) -> RamariaResult<usize> {
     }
     let vectors_built = build_vectors(engine, &mut fresh, &l1_views, &l2_views).await;
 
-    // ---- 4. 整体替换懒加载槽（此后读者要么见旧索引，要么见新索引）----
+    // ---- 4. 图谱构建（事件为实体节点、事件关系为边）----
+    // 无论 `enable_graph` 开关值如何都构建（数据量小；检索期由
+    // `RetrieverConfig.enable_graph` 短路，见 `retriever/search.rs` 的通道判断）。
+    let (graph_nodes, graph_edges) = build_graph_data(&l2_views, &event_relations);
+    fresh.graph_mut().load(&graph_nodes, &graph_edges);
+
+    // ---- 5. 整体替换懒加载槽（此后读者要么见旧索引，要么见新索引）----
     {
         let slot = engine.retriever_slot();
         let mut guard = write_recover(&*slot, "index.retriever_slot");
         *guard = Some(fresh);
     }
 
-    // ---- 5. 词典增强迁移版本写回（索引已是词典增强口径；失败下次重建自动重试）----
+    // ---- 6. 词典增强迁移版本写回（索引已是词典增强口径；失败下次重建自动重试）----
     if migration.mark_v2 {
         match storage
             .set_bm25_index_version(BM25_INDEX_VERSION_CURRENT)
@@ -304,15 +321,15 @@ async fn build_and_swap_inner(engine: &Engine) -> RamariaResult<usize> {
         }
     }
 
-    // ---- 6. 关键词镜像装载（词典池 + 倒排文档 + 语义层） ----
+    // ---- 7. 关键词镜像装载（词典池 + 倒排文档 + 语义层） ----
     sync_keyword_mirror(engine, &l1_views, &l2_views).await;
 
-    // ---- 7. 记录代次快照与构建完成时间 ----
+    // ---- 8. 记录代次快照与构建完成时间 ----
     engine.record_index_stamp(stamp);
     // 记"完成时间"：冷却窗口按两次重建之间的实际间隔计算（含本次构建耗时）
     engine.record_index_build_time(now_ms());
 
-    // ---- 8. 标记索引已构建（判定只看 `== 0`，写 1 表"已构建"）----
+    // ---- 9. 标记索引已构建（判定只看 `== 0`，写 1 表"已构建"）----
     // 供首次配置状态机判定"索引待构建"项消失；写入失败只记日志，不影响内存索引可用性。
     if let Err(e) = storage.set_index_version(1).await {
         tracing::warn!(
@@ -325,6 +342,8 @@ async fn build_and_swap_inner(engine: &Engine) -> RamariaResult<usize> {
         l1 = l1_views.len(),
         l2 = l2_views.len(),
         utt = utt_blocks.len(),
+        graph_nodes = graph_nodes.len(),
+        graph_edges = graph_edges.len(),
         vectors = vectors_built,
         elapsed_ms = now_ms().saturating_sub(started),
         bm25_version = stamp.bm25_version,
@@ -446,6 +465,64 @@ async fn build_vectors(
     }
 
     built
+}
+
+/// 图谱节点行：`(事件 id, 实体名, 实体类型)`。
+type GraphNodeRow = (i64, String, String);
+
+/// 图谱边行：`(关系 id, 源事件 id, 目标事件 id, 关系类型)`。
+type GraphEdgeRow = (i64, i64, i64, String);
+
+/// 从事件视图与事件关系构造图谱节点与边。
+///
+/// 说明:
+/// - 节点以事件为实体：`(事件 id, 事件标题, "event")`，事件标题即实体名
+///   （供查询文本子串匹配），空标题跳过；
+/// - `GraphRetriever` 节点集合以实体名为键（同名覆盖），为确定性保留首个出现的
+///   节点，跳过后续同名节点（只记 debug 跳过数，不记标题文本）；
+/// - 边以事件关系为数据源，仅保留两端都在节点集合内的边（事件被空标题过滤 /
+///   加载截断时不产生悬挂引用）；
+/// - 关系类型权重由 `GraphRetrieverConfig` 既有口径处理（未收录类型走默认权重）。
+fn build_graph_data(
+    l2_views: &[L2DocView],
+    relations: &[ramaria_core::types::EventRelation],
+) -> (Vec<GraphNodeRow>, Vec<GraphEdgeRow>) {
+    let mut nodes: Vec<GraphNodeRow> = Vec::with_capacity(l2_views.len());
+    let mut seen_names: HashSet<&str> = HashSet::new();
+    let mut skipped_duplicates = 0usize;
+
+    for event in l2_views {
+        let entity_name = event.title.trim();
+        if entity_name.is_empty() {
+            continue;
+        }
+        if !seen_names.insert(entity_name) {
+            skipped_duplicates += 1;
+            continue;
+        }
+        nodes.push((event.id, entity_name.to_string(), "event".to_string()));
+    }
+    if skipped_duplicates > 0 {
+        tracing::debug!(skipped = skipped_duplicates, "图谱构建跳过同名事件节点");
+    }
+
+    let node_ids: HashSet<i64> = nodes.iter().map(|(id, _, _)| *id).collect();
+    let edges: Vec<GraphEdgeRow> = relations
+        .iter()
+        .filter(|relation| {
+            node_ids.contains(&relation.from_id) && node_ids.contains(&relation.to_id)
+        })
+        .map(|relation| {
+            (
+                relation.id,
+                relation.from_id,
+                relation.to_id,
+                relation.kind.as_str().to_string(),
+            )
+        })
+        .collect();
+
+    (nodes, edges)
 }
 
 /// 装载关键词镜像（词典池 + 倒排文档 + 语义层），任一环节失败静默降级。

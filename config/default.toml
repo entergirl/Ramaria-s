@@ -95,6 +95,8 @@ rrf_k = 60
 bm25_weight = 1.0
 # 知识图谱通道权重
 graph_weight = 0.8
+# 图谱通道开关（摘要路三通道之一）：false = 回退 BM25 + 向量（+ 关键词镜像）
+enable_graph = true
 # 向量通道开关（摘要路三通道之一）：false = 仅 BM25 + 图谱参与 RRF 融合
 enable_vector = true
 # 关键词镜像通道开关（摘要路第四通道）：false = 回退仅三通道（BM25 + 向量 + 图谱）
@@ -604,6 +606,16 @@ valence_weight = 0.5
 confidence_floor = 0.6
 # 轻触达兜底候选权重（0.0~1.0）
 light_touch_weight = 0.3
+# 事件源显著性门槛（0.0~1.0）：低于此值的事件不进入主动选题
+event_salience_threshold = 0.6
+# 事件源统一时间窗（天）：仅事件结束时间在近 N 天内的事件参与选题
+event_window_days = 14
+# 未了结事件的负效价阈值（-1.0~0.0）：valence 低于此值视为负面情绪事件
+unresolved_valence_threshold = -0.3
+# 时间节点跟进点（天）：事件结束后第 N 天作为跟进时机
+follow_up_days = 3
+# 选题去重冷却窗口（小时）：同一选题键窗口内不复选（与投递冷却 cooldown_hours 无关）
+topic_cooldown_hours = 24
 # 连续未回应退避阈值（天）：达到后进入退避（降频 / 暂停）
 silence_backoff_days = 3
 # 首次启用宽限期（天）：期内不触发

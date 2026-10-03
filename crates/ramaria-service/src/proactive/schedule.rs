@@ -6,8 +6,8 @@
 //! - 时钟注入：单轮入口接收时间戳，测试与宿主时钟对齐均不需改实现
 //! - 状态按人格隔离：处理尾部统一回写（跳过路径的跨日重置 / 宽限基准同样落盘）
 //! - 降级纪律：单人格失败不阻塞其余；投递接收端未注册时静默丢弃
-//! - 投放语义：生成成功即记投递时间与当日计数（消息已落库应用内可见）；
-//!   仅投递成功才记选题冷却（失败允许下一窗口重试）
+//! - 投放语义：生成成功即记投递时间、当日计数与最近效价符号（消息已落库
+//!   应用内可见）；仅投递成功才记选题冷却（失败允许下一窗口重试）
 //! - 隐私：日志只记人格 / 来源 / 计数等元数据，不记消息内容
 
 use std::sync::Arc;
@@ -28,12 +28,18 @@ use super::sink::ProactiveMessage;
 use super::state::{self, ProactiveState, RecentTopic};
 use super::topic::{ProactiveDirective, ProactiveOutcome};
 
+mod quiet;
+
+use quiet::parse_quiet_hours;
+
 // =========================================================
 // 常量
 // =========================================================
 
 /// 近期选题记录上限（超出丢弃最旧；状态键防膨胀）。
 const RECENT_TOPICS_CAP: usize = 64;
+/// 效价符号判定阈值：`|valence|` 低于该值视为中性（不参与"不连选"符号判定）。
+const VALENCE_SIGN_EPSILON: f64 = 0.1;
 /// 可中断等待的分片长度（秒）。
 const SHUTDOWN_POLL_CHUNK_SECONDS: u64 = 60;
 
@@ -44,7 +50,10 @@ const SHUTDOWN_POLL_CHUNK_SECONDS: u64 = 60;
 /// 选题提供者：为指定人格产出候选指令（None = 本轮无题可提）。
 ///
 /// 说明:
-/// - `state` 为调度已加载的运行时状态（只读），供去重冷却判定参考；
+/// - `state` 为调度已加载的运行时状态（可变）：供选题器读取去重冷却记录、
+///   写入判据 yes/no 计数；
+/// - `activity_weight` 为当前时段软加权权重（0.0~1.0）：供判据输入信号；
+///   样本不足未建模时取权重下限；
 /// - 判据节流由调度层在调用前判定：本方法被调用即视为一次判据尝试（节流窗口消费）。
 #[async_trait]
 pub(crate) trait TopicPicker: Send + Sync {
@@ -54,7 +63,8 @@ pub(crate) trait TopicPicker: Send + Sync {
     /// - `engine`: 服务层引擎（供选题读取事件 / 规则等素材）。
     /// - `persona`: 目标人格 uid。
     /// - `now`: 本轮时间（Unix 毫秒）。
-    /// - `state`: 调度已加载的运行时状态（只读）。
+    /// - `state`: 调度已加载的运行时状态（可变；选题器写入判据计数）。
+    /// - `activity_weight`: 当前时段软加权权重（0.0~1.0）。
     ///
     /// 返回:
     /// - `Some(directive)`: 候选指令；
@@ -64,24 +74,9 @@ pub(crate) trait TopicPicker: Send + Sync {
         engine: &Engine,
         persona: &str,
         now: i64,
-        state: &ProactiveState,
+        state: &mut ProactiveState,
+        activity_weight: f64,
     ) -> Option<ProactiveDirective>;
-}
-
-/// 空选题器：不产出任何候选（未接入真实选题时的安全空转）。
-pub(crate) struct NoopTopicPicker;
-
-#[async_trait]
-impl TopicPicker for NoopTopicPicker {
-    async fn pick(
-        &self,
-        _engine: &Engine,
-        _persona: &str,
-        _now: i64,
-        _state: &ProactiveState,
-    ) -> Option<ProactiveDirective> {
-        None
-    }
 }
 
 // =========================================================
@@ -156,65 +151,6 @@ enum PersonaTick {
 enum GateOutcome {
     Pass,
     Skip(GateSkip),
-}
-
-// =========================================================
-// 免打扰时段
-// =========================================================
-
-/// 免打扰时段（分钟口径，支持跨零点）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct QuietHours {
-    start_minute: u32,
-    end_minute: u32,
-}
-
-impl QuietHours {
-    /// 判断当日某一分钟是否落在免打扰区间。
-    ///
-    /// 口径:
-    /// - start < end：`[start, end)`；
-    /// - start > end：`[start, 1440) ∪ [0, end)`（跨零点）；
-    /// - start == end：空窗口（视为未配置）。
-    fn contains(&self, minute_of_day: u32) -> bool {
-        if self.start_minute == self.end_minute {
-            return false;
-        }
-        if self.start_minute < self.end_minute {
-            minute_of_day >= self.start_minute && minute_of_day < self.end_minute
-        } else {
-            minute_of_day >= self.start_minute || minute_of_day < self.end_minute
-        }
-    }
-}
-
-/// 解析 `HH:MM-HH:MM`（空串 / 非法 / 等值窗口 → None，降级不报错）。
-fn parse_quiet_hours(raw: &str) -> Option<QuietHours> {
-    let raw = raw.trim();
-    if raw.is_empty() {
-        return None;
-    }
-    let (start_raw, end_raw) = raw.split_once('-')?;
-    let start_minute = parse_hhmm(start_raw.trim())?;
-    let end_minute = parse_hhmm(end_raw.trim())?;
-    if start_minute == end_minute {
-        return None;
-    }
-    Some(QuietHours {
-        start_minute,
-        end_minute,
-    })
-}
-
-/// 解析 `HH:MM` 为当日分钟（时 0-23 / 分 0-59，否则 None）。
-fn parse_hhmm(s: &str) -> Option<u32> {
-    let (hour_raw, minute_raw) = s.split_once(':')?;
-    let hour: u32 = hour_raw.trim().parse().ok()?;
-    let minute: u32 = minute_raw.trim().parse().ok()?;
-    if hour > 23 || minute > 59 {
-        return None;
-    }
-    Some(hour * 60 + minute)
 }
 
 /// 小时数转毫秒。
@@ -331,7 +267,7 @@ pub(crate) async fn run_tick(
 /// 3. 判据节流（仅判据开启时生效）；
 /// 4. 选题（进入选题即视为一次判据尝试，先记账后调用）；
 /// 5. 生成（`Ok(None)` = 生成层门禁静默跳过；`Err` 吸收为生成失败，不记投递状态）；
-/// 6. 投放与记账（生成成功即记投递时间与当日计数；投递成功才记选题冷却）。
+/// 6. 投放与记账（生成成功即记投递时间、当日计数与候选效价符号；投递成功才记选题冷却）。
 async fn process_persona(
     engine: &Engine,
     persona: &str,
@@ -357,22 +293,25 @@ async fn process_persona(
         config.active_hours_min_samples,
     )
     .await?;
-    match activity::evaluate_gate(model.as_ref(), hour, config.active_hours_weight) {
-        ActivityGate::LowWeight { norm } => {
-            debug!(
-                persona = %persona,
-                norm,
-                "主动调度跳过：当前时段活跃度过低"
-            );
-            return Ok(PersonaTick::Skipped(GateSkip::ActivityLow));
-        }
-        ActivityGate::Pass { weight } => {
-            debug!(persona = %persona, hour, weight, "主动调度：活跃时段门通过");
-        }
-        ActivityGate::NotModeled => {
-            debug!(persona = %persona, "主动调度：活跃时段样本不足，门放行");
-        }
-    }
+    let activity_weight =
+        match activity::evaluate_gate(model.as_ref(), hour, config.active_hours_weight) {
+            ActivityGate::LowWeight { norm } => {
+                debug!(
+                    persona = %persona,
+                    norm,
+                    "主动调度跳过：当前时段活跃度过低"
+                );
+                return Ok(PersonaTick::Skipped(GateSkip::ActivityLow));
+            }
+            ActivityGate::Pass { weight } => {
+                debug!(persona = %persona, hour, weight, "主动调度：活跃时段门通过");
+                weight
+            }
+            ActivityGate::NotModeled => {
+                debug!(persona = %persona, "主动调度：活跃时段样本不足，门放行");
+                activity::weight_floor(config.active_hours_weight)
+            }
+        };
 
     // ---- 3. 判据节流（仅判据开启时生效）----
     if config.judge_enabled {
@@ -385,7 +324,7 @@ async fn process_persona(
 
     // ---- 4. 选题：进入选题即视为一次判据尝试，先记账后调用 ----
     st.last_judge_at = Some(now);
-    let Some(directive) = picker.pick(engine, persona, now, st).await else {
+    let Some(directive) = picker.pick(engine, persona, now, st, activity_weight).await else {
         return Ok(PersonaTick::NoTopic);
     };
     let source = directive.source.clone();
@@ -395,7 +334,14 @@ async fn process_persona(
     match engine.chat_proactive(directive).await {
         Ok(Some(outcome)) => {
             let delivered = deliver(engine, &outcome, now);
-            record_delivery(st, now, &source, topic_key.as_deref(), delivered);
+            record_delivery(
+                st,
+                now,
+                &source,
+                topic_key.as_deref(),
+                delivered,
+                outcome.valence,
+            );
             info!(
                 persona = %persona,
                 source = %source,
@@ -569,11 +515,22 @@ fn deliver(engine: &Engine, outcome: &ProactiveOutcome, now: i64) -> bool {
     }
 }
 
+/// 效价符号：正（大于阈值）→ `1`；负（小于负阈值）→ `-1`；否则 `0`（中性或未知）。
+fn valence_sign(valence: f64) -> i8 {
+    if valence > VALENCE_SIGN_EPSILON {
+        1
+    } else if valence < -VALENCE_SIGN_EPSILON {
+        -1
+    } else {
+        0
+    }
+}
+
 /// 记录一次生成成功的投放记账。
 ///
 /// 口径:
-/// - 生成成功即记 `last_sent_at` / 当日计数 / 连续未回应次数：消息已落库应用内
-///   可见，避免下一窗口对同一人格重复生成；退避计数以此累计；
+/// - 生成成功即记 `last_sent_at` / 当日计数 / 连续未回应次数 / 候选效价符号：
+///   消息已落库应用内可见，避免下一窗口对同一人格重复生成；退避计数以此累计；
 /// - 近期选题仅在投递成功且选题键非空时记录（投递失败不计冷却，允许下窗重试）。
 fn record_delivery(
     st: &mut ProactiveState,
@@ -581,11 +538,13 @@ fn record_delivery(
     source: &str,
     topic_key: Option<&str>,
     delivered: bool,
+    valence: f64,
 ) {
     st.last_sent_at = Some(now);
     st.daily_count = st.daily_count.saturating_add(1);
     st.daily_date = state::local_date_str(now);
     st.silence_streak = st.silence_streak.saturating_add(1);
+    st.last_valence_sign = valence_sign(valence);
 
     if delivered {
         if let Some(key) = topic_key.map(str::trim).filter(|key| !key.is_empty()) {

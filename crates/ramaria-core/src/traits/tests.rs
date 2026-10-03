@@ -331,3 +331,25 @@ fn store_crud_user_message_time_defaults_are_passive() {
         .expect("默认实现不应报错");
     assert!(times.is_empty(), "未覆写 mock 的用户消息时间窗口应为空");
 }
+
+/// 选题事件查询与会话最后消息查询的默认实现为被动降级（空列表 / None）：
+/// 未覆写 mock 按"无候选 / 无法判定"处理，不报错、不阻塞调用方。
+#[test]
+fn store_crud_topic_query_defaults_are_passive() {
+    let store = BareStore;
+    let by_salience =
+        futures::executor::block_on(store.list_events_by_salience("persona-1", 0, 0.6, 10))
+            .expect("默认实现不应报错");
+    assert!(by_salience.is_empty(), "未覆写 mock 的高显著事件应为空");
+
+    let since = futures::executor::block_on(store.list_events_since("persona-1", 0, 10))
+        .expect("默认实现不应报错");
+    assert!(since.is_empty(), "未覆写 mock 的时间窗事件应为空");
+
+    assert_eq!(
+        futures::executor::block_on(store.last_message_time_by_session(Uuid::new_v4()))
+            .expect("默认实现不应报错"),
+        None,
+        "未覆写 mock 的会话最后消息时间应为 None（无法判定）"
+    );
+}

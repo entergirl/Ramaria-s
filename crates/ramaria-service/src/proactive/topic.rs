@@ -2,7 +2,8 @@
 //!
 //! 设计特点:
 //! - 跨模块契约：选题器 / 调度与生成用例之间的输入输出形态，独立于 Protocol 与 serde
-//! - 指令形态承载生成所需全部素材：人格 / 目标会话 / 来源标识 / 锚点 / 角度 / 语气
+//! - 指令形态承载生成所需全部素材与调度记账信号：人格 / 目标会话 / 来源标识 /
+//!   锚点 / 角度 / 语气 / 候选效价
 //! - 结果形态只含投递所需元数据：内容 / 落点会话 / 人格 / 来源标识（从指令透传）
 //! - 纯数据：无 I/O、无业务逻辑，字段取值口径由调用方（选题器 / 生成用例）约定
 //! - 日志隐私：两端形态可整体记录字段名与长度，不承载日志输出职责
@@ -14,7 +15,7 @@ use uuid::Uuid;
 // =========================================================
 
 /// 主动生成指令（选题与判据裁决的产物，供生成用例消费）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ProactiveDirective {
     /// 目标人格 uid。
     pub persona: String,
@@ -30,10 +31,13 @@ pub(crate) struct ProactiveDirective {
     pub angle: Option<String>,
     /// 说话语气（None = 未提供）。
     pub tone: Option<String>,
+    /// 候选效价（-1.0~1.0）：供调度记账「不连选」符号；
+    /// 轻触达等无情绪信号候选填 0.0。
+    pub valence: f64,
 }
 
 /// 主动生成结果（成功生成并落库后返回，供调度投递消费）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ProactiveOutcome {
     /// 生成内容（assistant 消息全文）。
     pub content: String,
@@ -45,4 +49,6 @@ pub(crate) struct ProactiveOutcome {
     pub source: String,
     /// 选题键（从指令透传；None = 无稳定键）。
     pub topic_key: Option<String>,
+    /// 候选效价（从指令透传；-1.0~1.0；无情绪信号候选为 0.0）。
+    pub valence: f64,
 }

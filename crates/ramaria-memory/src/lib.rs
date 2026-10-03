@@ -260,3 +260,6 @@ pub use token_budget::{
     BudgetedContext, CoordinatedInjection, TokenBudgetConfig, allocate_injection_budget,
     apply_token_budget, estimate_tokens, truncate_at_boundary,
 };
+
+// 通用解析辅助（主动对话判据复用：think 剥离与 JSON 对象提取）
+pub use utils::{extract_first_json_object, strip_thinking};

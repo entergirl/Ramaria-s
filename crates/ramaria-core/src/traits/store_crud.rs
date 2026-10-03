@@ -296,6 +296,24 @@ pub trait StoreCrud: Send + Sync {
         Ok(None)
     }
 
+    /// 查询指定会话最近一条消息的时间（Unix 毫秒，含全部角色）。
+    ///
+    /// 职责:
+    /// - 供主动对话选题判断"事件后所属会话是否静默"（未了结事件口径）。
+    ///
+    /// 语义:
+    /// - 会话内 user 与 assistant 等全部角色的消息均计入（与
+    ///   `last_user_message_time_by_persona` 的"仅用户消息"口径不同）；
+    /// - 会话无消息时返回 `None`。
+    ///
+    /// 返回:
+    /// - `Ok(Some(ms))`: 最近一条消息时间；
+    /// - `Ok(None)`: 无消息或未覆写 mock —— 语义为"无法判定"，调用方保守跳过
+    ///   依赖该判定的选题来源，不视为"确已静默"。
+    async fn last_message_time_by_session(&self, _session_id: Uuid) -> RamariaResult<Option<i64>> {
+        Ok(None)
+    }
+
     /// 查询指定 persona 会话中时间窗口内的用户消息时间戳（升序）。
     ///
     /// 职责:
@@ -523,6 +541,61 @@ pub trait StoreCrud: Send + Sync {
         limit: i64,
     ) -> RamariaResult<Vec<MemoryEvent>>;
     async fn list_unabsorbed_events(&self, persona_uid: &str) -> RamariaResult<Vec<MemoryEvent>>;
+
+    /// 查询高显著事件（主动对话选题的"高显著事件"源）。
+    ///
+    /// 职责:
+    /// - 按显著性门槛与时间窗筛选近期事件，供选题器取"值得跟进 / 回顾"的候选。
+    ///
+    /// 语义:
+    /// - 仅取事件结束时间 `end >= since_ms` 的事件（时间窗由调用方换算为下界）；
+    /// - `salience >= min_salience`（闭区间，恰等于门槛的事件入选）；
+    /// - 按 `salience` 降序排列，同分按 `end` 降序、再按 `id` 降序（确定性）；
+    /// - 取前 `limit` 条（`limit = 0` 时返回空）。
+    ///
+    /// 参数:
+    /// - `persona_uid`: 人格标识。
+    /// - `since_ms`: 时间窗下界（Unix 毫秒，闭区间，比较事件 `end`）。
+    /// - `min_salience`: 显著性门槛（0.0~1.0，闭区间下界）。
+    /// - `limit`: 最多返回条数。
+    ///
+    /// 默认实现:
+    /// - 返回空列表（未覆写 mock 按"无候选"降级，不阻塞选题）。
+    async fn list_events_by_salience(
+        &self,
+        _persona_uid: &str,
+        _since_ms: i64,
+        _min_salience: f64,
+        _limit: u32,
+    ) -> RamariaResult<Vec<MemoryEvent>> {
+        Ok(Vec::new())
+    }
+
+    /// 查询时间窗内的近期事件（主动对话选题的"未了结事件 / 时间节点 / 行为规则情境"源）。
+    ///
+    /// 职责:
+    /// - 取回时间窗内的全部近期事件（不设显著性门槛），由选题器按各自口径二次筛选。
+    ///
+    /// 语义:
+    /// - 仅取事件结束时间 `end >= since_ms` 的事件（闭区间）；
+    /// - 按 `end` 降序排列，同分按 `id` 降序（确定性）；
+    /// - 取前 `limit` 条（`limit = 0` 时返回空）。
+    ///
+    /// 参数:
+    /// - `persona_uid`: 人格标识。
+    /// - `since_ms`: 时间窗下界（Unix 毫秒，闭区间，比较事件 `end`）。
+    /// - `limit`: 最多返回条数。
+    ///
+    /// 默认实现:
+    /// - 返回空列表（未覆写 mock 按"无候选"降级，不阻塞选题）。
+    async fn list_events_since(
+        &self,
+        _persona_uid: &str,
+        _since_ms: i64,
+        _limit: u32,
+    ) -> RamariaResult<Vec<MemoryEvent>> {
+        Ok(Vec::new())
+    }
 
     /// 统计指定 persona 的事件数量（事件浏览的分页总数）。
     ///

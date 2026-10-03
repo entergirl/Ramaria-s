@@ -118,6 +118,10 @@ impl StoreCrud for SqliteStorage {
     ) -> RamariaResult<Option<i64>> {
         repo::messages::last_user_message_time_by_persona(&self.pool, persona_uid).await
     }
+    /// 覆写为 `SELECT MAX(created_at)` 查询（主动对话事件后会话静默判定）。
+    async fn last_message_time_by_session(&self, session_id: Uuid) -> RamariaResult<Option<i64>> {
+        repo::messages::last_message_time_by_session(&self.pool, session_id).await
+    }
     /// 覆写为窗口内用户消息时间戳查询（主动对话活跃时段统计）。
     async fn list_user_message_times_since(
         &self,
@@ -239,6 +243,34 @@ impl StoreCrud for SqliteStorage {
     }
     async fn list_unabsorbed_events(&self, persona_uid: &str) -> RamariaResult<Vec<MemoryEvent>> {
         repo::events::list_unabsorbed_events(&self.pool, persona_uid).await
+    }
+
+    /// 覆写为显著性门槛 + 时间窗查询（主动对话高显著事件源）。
+    async fn list_events_by_salience(
+        &self,
+        persona_uid: &str,
+        since_ms: i64,
+        min_salience: f64,
+        limit: u32,
+    ) -> RamariaResult<Vec<MemoryEvent>> {
+        repo::events::list_events_by_salience(
+            &self.pool,
+            persona_uid,
+            since_ms,
+            min_salience,
+            limit,
+        )
+        .await
+    }
+
+    /// 覆写为时间窗查询（主动对话未了结事件 / 时间节点 / 行为规则情境源）。
+    async fn list_events_since(
+        &self,
+        persona_uid: &str,
+        since_ms: i64,
+        limit: u32,
+    ) -> RamariaResult<Vec<MemoryEvent>> {
+        repo::events::list_events_since(&self.pool, persona_uid, since_ms, limit).await
     }
 
     async fn mark_events_absorbed(&self, event_ids: &[i64]) -> RamariaResult<()> {

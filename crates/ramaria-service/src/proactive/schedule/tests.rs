@@ -6,6 +6,7 @@
 //! - 用固定时间戳驱动单轮调度，装配真实 SQLite 临时库与 mock LLM，不依赖网络与真实时钟
 //! - 断言口径：闸门用"选题器是否被触达"、状态变更用"库中 reload"、投放用接收端留档
 
+use super::quiet::{QuietHours, parse_quiet_hours};
 use super::*;
 use crate::proactive::sink::ProactiveSink;
 use crate::recall::RecallPolicy;
@@ -78,6 +79,7 @@ fn directive(session_id: Option<Uuid>) -> ProactiveDirective {
         anchor: None,
         angle: None,
         tone: None,
+        valence: 0.0,
     }
 }
 
@@ -116,7 +118,8 @@ impl TopicPicker for CountingPicker {
         _engine: &Engine,
         _persona: &str,
         _now: i64,
-        _state: &ProactiveState,
+        _state: &mut ProactiveState,
+        _activity_weight: f64,
     ) -> Option<ProactiveDirective> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         self.directive.lock().expect("选题器锁不应中毒").clone()
@@ -752,19 +755,19 @@ async fn noop_picker_returns_none() {
     let now = now_ms();
     let (engine, storage, dir) = ready_engine("proactive-noop-picker", test_config()).await;
 
-    let picked = NoopTopicPicker
+    let picker = CountingPicker::empty();
+    let picked = picker
         .pick(
             &engine,
             DEFAULT_PERSONA_UID,
             now,
-            &ProactiveState::default(),
+            &mut ProactiveState::default(),
+            0.0,
         )
         .await;
     assert!(picked.is_none(), "空选题器不产出候选");
 
-    let summary = run_tick(&engine, now, &NoopTopicPicker)
-        .await
-        .expect("单轮应完成");
+    let summary = run_tick(&engine, now, &picker).await.expect("单轮应完成");
     assert_eq!(summary.attempts, 1, "空候选也计入判据尝试");
     assert_eq!(summary.generated, 0);
     assert_eq!(
@@ -789,7 +792,7 @@ async fn spawn_loop_stops_cleanly() {
         Arc::clone(&shutdown),
         0,
         1,
-        Arc::new(NoopTopicPicker),
+        Arc::new(CountingPicker::empty()),
     );
     tokio::time::sleep(Duration::from_millis(300)).await;
     shutdown.store(true, Ordering::Release);
