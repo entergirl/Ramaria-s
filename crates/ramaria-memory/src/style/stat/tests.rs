@@ -39,6 +39,18 @@ fn sample_count_and_chars_are_correct() {
     assert_eq!(stats.total_sentences, 2);
 }
 
+/// 主动消息口径：主动消息照常计入风格统计样本（零来源过滤）。
+#[test]
+fn proactive_messages_are_counted_in_style_stats() {
+    let messages = [
+        msg("主动说一句问候呀。").with_proactive(true),
+        msg("今天很开心。"),
+    ];
+    let stats = StyleStats::compute(&messages, &config());
+    assert_eq!(stats.sample_count, 2, "主动消息应计入风格样本");
+    assert_eq!(stats.total_sentences, 2);
+}
+
 #[test]
 fn punctuation_counts_are_correct() {
     let messages = [msg("哇！真的吗？？好棒～（开心）……哎||嗯嗯")];

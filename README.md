@@ -89,12 +89,12 @@ Ramaria 的记忆体系是自下而上的四层结构：
 
 - **Windows 10（1809 及以上）/ Windows 11**（目前仅支持 Windows，macOS / Linux 已列入路线图）
 - 建议 8 GB 以上内存
-- 安装包约 8.5 MB；安装后程序本体约数十 MB（界面基于系统自带的 WebView2，无需另行安装运行环境）
+- 安装包约 8.6 MB；安装后程序本体约数十 MB（界面基于系统自带的 WebView2，无需另行安装运行环境）
 - 若启用本地嵌入模型，首次运行会另行下载：默认模型 bge-small-zh-v1.5 约 100 MB，可选的 Qwen3-Embedding-0.6B 约 1.2 GB；使用 LM Studio 时，对话模型同样需要在 LM Studio 中单独下载
 
 ### 第一步：下载安装包
 
-前往 [**v2.3.0 下载页**](https://github.com/entergirl/Ramaria-s/releases/tag/Ramaria-v2.3.0)，下载安装包 `Ramaria_2.3.0_x64-setup.exe`，双击后按中文向导完成安装。历史版本见 [Releases 列表](https://github.com/entergirl/Ramaria-s/releases)。（v2.2.0 为内部结构版本，不提供安装包；v2.1.0 为上一发行版）
+前往 [**v2.3.0 下载页**](https://github.com/entergirl/Ramaria-s/releases/tag/Ramaria-v2.3.0)，下载安装包 `Ramaria_2.3.0_x64-setup.exe`（约 8.6 MB），双击后按中文向导完成安装。历史版本见 [Releases 列表](https://github.com/entergirl/Ramaria-s/releases)。（v2.2.0 为内部结构版本，不提供安装包；v2.1.0 为上一发行版）
 
 ### 第二步：选择模型后端
 

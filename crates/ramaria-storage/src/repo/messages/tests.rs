@@ -38,6 +38,7 @@ fn make_message(session_id: Uuid, fingerprint: Option<&str>) -> Message {
         source: MessageSource::Local,
         fingerprint: fingerprint.map(|s| s.to_string()),
         persona_uid: Some("char-0001".to_string()),
+        is_proactive: false,
     }
 }
 
@@ -292,4 +293,102 @@ async fn list_keys_by_channel_ref_scopes_and_orders() {
         .expect("查询成功");
     assert_eq!(keys.len(), 1);
     assert_eq!(keys[0].content, "前后有空白", "正文应在 SQL 侧 TRIM");
+}
+
+/// 主动消息标记：默认 false；真实写入 true 经各读取路径原样回读。
+///
+/// 说明:
+/// - `save`（常规写入）与 `save_import` / `save_import_batch`（导入写入）
+///   共用同一 INSERT，此处覆盖三条写入口的标记传递，防止只吃 DB 默认值的静默丢值；
+/// - 读取侧覆盖 `list_by_session` / 分页 / 指纹 / 按 persona 四条投影。
+#[tokio::test]
+async fn is_proactive_roundtrip_and_default() {
+    let pool = init_test_pool().await.expect("测试库初始化失败");
+    let session_id = setup_fixture(&pool).await;
+
+    // Message::new 默认 false：save 后回读仍为 false
+    let plain = Message::new(
+        session_id,
+        MessageRole::Assistant,
+        "常规回复".to_string(),
+        MessageSource::Local,
+    );
+    assert!(!plain.is_proactive, "Message::new 默认应为非主动");
+    save(&pool, &plain).await.expect("写入常规消息应成功");
+
+    // with_proactive(true)：save 后回读为 true
+    let proactive = Message::new(
+        session_id,
+        MessageRole::Assistant,
+        "主动问候".to_string(),
+        MessageSource::Online,
+    )
+    .with_proactive(true);
+    save(&pool, &proactive).await.expect("写入主动消息应成功");
+
+    let listed = list_by_session(&pool, session_id)
+        .await
+        .expect("读取应成功");
+    let plain_read = listed
+        .iter()
+        .find(|m| m.id == plain.id)
+        .expect("应包含常规消息");
+    let proactive_read = listed
+        .iter()
+        .find(|m| m.id == proactive.id)
+        .expect("应包含主动消息");
+    assert!(!plain_read.is_proactive, "常规消息回读应为 false");
+    assert!(proactive_read.is_proactive, "主动消息经 save 回读应为 true");
+
+    // 分页读取同样解析标记（列投影一致性）
+    let paged = list_by_session_paginated(&pool, session_id, 10, 0)
+        .await
+        .expect("分页读取应成功");
+    let proactive_in_page = paged
+        .iter()
+        .find(|m| m.id == proactive.id)
+        .expect("分页应包含主动消息");
+    assert!(
+        proactive_in_page.is_proactive,
+        "分页读回应解析 is_proactive"
+    );
+
+    // 导入单条：标记必须真实写入（不是 DB 默认值兜底）
+    let mut import_one = make_message(session_id, Some("fp-proactive-import"));
+    import_one.is_proactive = true;
+    save_import(&pool, &import_one)
+        .await
+        .expect("导入写入应成功");
+    let hit = find_by_fingerprint(&pool, "fp-proactive-import")
+        .await
+        .expect("指纹查询应成功")
+        .expect("应命中导入消息");
+    assert!(hit.is_proactive, "save_import 应保留主动标记");
+
+    // 导入批量：同一批次内 true / false 各自保持
+    let mut import_a = make_message(session_id, Some("fp-proactive-batch-a"));
+    import_a.is_proactive = true;
+    let import_b = make_message(session_id, Some("fp-proactive-batch-b"));
+    save_import_batch(&pool, &[import_a, import_b])
+        .await
+        .expect("批量导入写入应成功");
+    let batch_a = find_by_fingerprint(&pool, "fp-proactive-batch-a")
+        .await
+        .expect("指纹查询应成功")
+        .expect("应命中批量消息 a");
+    let batch_b = find_by_fingerprint(&pool, "fp-proactive-batch-b")
+        .await
+        .expect("指纹查询应成功")
+        .expect("应命中批量消息 b");
+    assert!(batch_a.is_proactive, "批量导入应保留主动标记");
+    assert!(!batch_b.is_proactive, "批量导入未标记的消息应保持 false");
+
+    // 按 persona 读取同一投影：主动标记可见
+    let by_persona = list_by_persona(&pool, "char-0001")
+        .await
+        .expect("按 persona 读取应成功");
+    assert!(
+        by_persona.iter().any(|m| m.is_proactive),
+        "list_by_persona 应解析主动标记"
+    );
 }

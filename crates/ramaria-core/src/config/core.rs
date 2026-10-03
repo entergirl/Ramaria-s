@@ -14,7 +14,7 @@ use super::{
     CacheConfig, DecayConfig, EmbeddingConfig, EventExtractionConfig, ExamplesConfig,
     FeedbackConfig, IndexConfig, InferenceConfig, InjectionBudgetConfig, InjectionGate,
     KnowledgeConfig, L1Config, LayerDedupConfig, LoggingConfig, McpConfig, MiscConfig, PathConfig,
-    RetrievalConfig, SessionConfig, StyleConfig, ThresholdConfig, UttConfig,
+    ProactiveConfig, RetrievalConfig, SessionConfig, StyleConfig, ThresholdConfig, UttConfig,
 };
 
 // =========================================================
@@ -160,6 +160,10 @@ pub struct RamariaConfig {
     #[serde(default)]
     pub mcp: McpConfig,
 
+    /// 主动对话配置（`[proactive]`，系统主动发起消息的开关与打扰控制）。
+    #[serde(default)]
+    pub proactive: ProactiveConfig,
+
     /// 杂项（预留扩展位，当前无字段）
     #[serde(default)]
     pub misc: MiscConfig,
@@ -215,6 +219,7 @@ impl Default for RamariaConfig {
             injection_budget: InjectionBudgetConfig::default(),
             layer_dedup: LayerDedupConfig::default(),
             mcp: McpConfig::default(),
+            proactive: ProactiveConfig::default(),
             misc: MiscConfig::default(),
         }
     }

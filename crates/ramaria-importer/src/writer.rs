@@ -238,6 +238,8 @@ impl ImportWriter {
                     source: ramaria_core::types::MessageSource::Local,
                     fingerprint: Some(parsed.fingerprint.clone()),
                     persona_uid: Some(persona_uid.to_string()),
+                    // 导入消息均为历史常规消息，不属于主动生成
+                    is_proactive: false,
                 });
             }
 

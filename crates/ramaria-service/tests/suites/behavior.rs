@@ -93,6 +93,7 @@ fn make_msg(content: &str) -> Message {
         created_at: 0,
         fingerprint: None,
         persona_uid: None,
+        is_proactive: false,
     }
 }
 

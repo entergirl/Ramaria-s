@@ -507,3 +507,86 @@ async fn mark_events_absorbed_only_absorbs_specified_ids() {
     let remaining = storage.list_unabsorbed_events(&persona_uid).await.unwrap();
     assert_eq!(remaining.len(), 2, "应剩余 2 条未吸收");
 }
+
+/// 事件→所属会话映射：多来源取权重最高者；无来源 / 脏数据缺失；空输入空映射。
+#[tokio::test]
+async fn event_session_map_selects_highest_weight_source() {
+    let storage = setup().await;
+    // 事件 persona 外键要求存在对应人格
+    let p = Persona::new(
+        "user-0001".into(),
+        "用户".into(),
+        PersonaKind::User,
+        1,
+        "local".into(),
+    );
+    storage.create_persona(&p).await.unwrap();
+    let session_high = storage.create_session(None).await.unwrap();
+    let session_low = storage.create_session(None).await.unwrap();
+    let l1_high = MemoryL1::new(session_high.id, "高权来源".into(), None);
+    let l1_low = MemoryL1::new(session_low.id, "低权来源".into(), None);
+    storage.save_memory_l1(&l1_high).await.unwrap();
+    storage.save_memory_l1(&l1_low).await.unwrap();
+
+    let now = now_ms();
+    let ev = MemoryEvent::new("user-0001".into(), "跟进".into(), "desc".into(), now, now);
+    let ev_id = storage.save_event(&ev).await.unwrap();
+    let orphan = MemoryEvent::new("user-0001".into(), "无来源".into(), "desc".into(), now, now);
+    let orphan_id = storage.save_event(&orphan).await.unwrap();
+
+    // 同一事件两条来源：低权先写、高权后写（验证选择不受写入顺序影响）
+    storage
+        .save_event_source(ev_id, l1_low.id, 0.2)
+        .await
+        .unwrap();
+    storage
+        .save_event_source(ev_id, l1_high.id, 0.9)
+        .await
+        .unwrap();
+
+    // 脏数据：所属会话主键非 UUID（解析失败应跳过，不阻塞整批映射）
+    let dirty = MemoryEvent::new("user-0001".into(), "脏".into(), "desc".into(), now, now);
+    let dirty_id = storage.save_event(&dirty).await.unwrap();
+    sqlx::query("INSERT INTO sessions (id, started_at) VALUES ('not-a-uuid-session', 0)")
+        .execute(&storage.pool)
+        .await
+        .unwrap();
+    let dirty_l1_id = Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO memory_l1 (id, session_id, summary, created_at) \
+         VALUES (?, 'not-a-uuid-session', '脏数据', 0)",
+    )
+    .bind(&dirty_l1_id)
+    .execute(&storage.pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO event_sources (event_id, l1_id, weight) VALUES (?, ?, 1.0)")
+        .bind(dirty_id)
+        .bind(&dirty_l1_id)
+        .execute(&storage.pool)
+        .await
+        .unwrap();
+
+    let map = storage
+        .list_event_session_map(&[ev_id, orphan_id, dirty_id])
+        .await
+        .unwrap();
+    assert_eq!(
+        map.get(&ev_id),
+        Some(&session_high.id),
+        "同一事件应取权重最高来源所属会话"
+    );
+    assert!(!map.contains_key(&orphan_id), "无来源事件不应出现在映射中");
+    assert!(
+        !map.contains_key(&dirty_id),
+        "会话 UUID 解析失败的事件不应出现在映射中"
+    );
+    assert!(
+        storage
+            .list_event_session_map(&[])
+            .await
+            .unwrap()
+            .is_empty(),
+        "空输入应返回空映射"
+    );
+}

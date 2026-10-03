@@ -158,6 +158,59 @@ async fn build_session_creates_blocks() {
     assert!(blocks[0].embedding.is_none(), "无 embedder → 无向量");
 }
 
+/// 主动消息口径：目标 persona 的主动消息照常吸收为发言样本（零来源过滤）。
+#[tokio::test]
+async fn proactive_reply_is_absorbed_as_target_speech() {
+    let storage = mem_storage().await;
+    let persona = Persona::new(
+        "char-0001".to_string(),
+        "角色char-0001".to_string(),
+        PersonaKind::Char,
+        1,
+        "local".to_string(),
+    );
+    storage.create_persona(&persona).await.unwrap();
+    let session = storage.create_session(Some("char-0001")).await.unwrap();
+
+    // 用户消息 + 主动生成的助手消息（persona_uid=目标、is_proactive=true）
+    let mut user_msg = Message::new(
+        session.id,
+        MessageRole::User,
+        "在吗？".to_string(),
+        MessageSource::Local,
+    );
+    user_msg.created_at = 1_000;
+    storage.save_message(&user_msg).await.unwrap();
+    let mut proactive = Message::new(
+        session.id,
+        MessageRole::Assistant,
+        "主动问候：最近还好吗？".to_string(),
+        MessageSource::Online,
+    )
+    .with_persona_uid(Some("char-0001".to_string()))
+    .with_proactive(true);
+    proactive.created_at = 1_001;
+    storage.save_message(&proactive).await.unwrap();
+
+    let stats = test_builder()
+        .build_session(&storage, &session, None)
+        .await
+        .unwrap();
+    assert_eq!(stats.chunks_created, 1, "两条消息应合成一块");
+
+    let blocks = storage
+        .list_utt_blocks_by_persona("char-0001")
+        .await
+        .unwrap();
+    assert_eq!(blocks.len(), 1);
+    assert!(
+        blocks[0].block_text.contains("主动问候：最近还好吗？"),
+        "主动消息应作为目标发言进入话语块: {}",
+        blocks[0].block_text
+    );
+    assert_eq!(blocks[0].msg_count, 2);
+}
+
 /// 端到端验收：真实消息序列上验证单边合并——
 /// 中间出现"只有一方发言"的块时正确并入相邻块（两侧等距时并入前块，tiebreak）。
 ///

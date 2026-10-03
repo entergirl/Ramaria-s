@@ -298,3 +298,65 @@ async fn channel_overview_counts_active_and_latest_activity() {
     assert_eq!(after.active_sessions, 1, "关闭一个会话后活跃数应下降");
     assert_eq!(after.last_activity_ms, Some(2_000));
 }
+
+/// 人格最近对话时间：取该 persona 全部会话中的最大消息时间；无历史返回 None。
+#[tokio::test]
+async fn last_message_time_by_persona_tracks_latest_message() {
+    let pool = init_test_pool().await.expect("测试库初始化成功");
+
+    // 空库：无对话历史
+    assert_eq!(
+        last_message_time_by_persona(&pool, "char-0001")
+            .await
+            .expect("查询应成功"),
+        None,
+        "空库应返回 None"
+    );
+
+    // 目标 persona 两个有消息会话 + 一个空会话；他人会话时间更高（不应计入）
+    let session_a = create(&pool, Some("char-0001"))
+        .await
+        .expect("创建会话 A 成功");
+    let session_b = create(&pool, Some("char-0001"))
+        .await
+        .expect("创建会话 B 成功");
+    let _empty = create(&pool, Some("char-0001"))
+        .await
+        .expect("创建空会话成功");
+    let other = create(&pool, Some("char-0002"))
+        .await
+        .expect("创建他人会话成功");
+
+    for (session_id, ts) in [
+        (session_a.id, 1_000_i64),
+        (session_a.id, 5_000),
+        (session_b.id, 3_000),
+        (other.id, 9_000),
+    ] {
+        let mut m = Message::new(
+            session_id,
+            MessageRole::User,
+            "内容".to_string(),
+            MessageSource::Local,
+        );
+        m.created_at = ts;
+        crate::repo::messages::save_import(&pool, &m)
+            .await
+            .expect("插入消息成功");
+    }
+
+    assert_eq!(
+        last_message_time_by_persona(&pool, "char-0001")
+            .await
+            .expect("查询应成功"),
+        Some(5_000),
+        "应取该 persona 全部会话中的最大消息时间（他人 9000 不计入）"
+    );
+    assert_eq!(
+        last_message_time_by_persona(&pool, "char-none")
+            .await
+            .expect("查询应成功"),
+        None,
+        "无会话的 persona 应返回 None"
+    );
+}

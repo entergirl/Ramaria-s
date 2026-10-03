@@ -257,6 +257,26 @@ pub trait StoreCrud: Send + Sync {
         ))
     }
 
+    /// 查询指定 persona 的最近对话时间（该 persona 会话中的最大消息时间）。
+    ///
+    /// 职责:
+    /// - 供主动对话调度判断"距上次对话的时长"（最小空闲门禁）。
+    ///
+    /// 语义:
+    /// - 会话归属以 `sessions.persona_uid` 为准（会话创建时绑定），取会话内消息
+    ///   的 `MAX(created_at)`；用户消息（`messages.persona_uid IS NULL`）同样计入。
+    /// - 会话存在但无消息时不计入；该 persona 无任何消息时返回 None。
+    ///
+    /// 参数:
+    /// - `persona_uid`: 人格标识。
+    ///
+    /// 返回:
+    /// - `Ok(Some(ms))`: 最近一条消息的 Unix 毫秒时间戳。
+    /// - `Ok(None)`: 无对话历史（含未覆写 mock —— 按"无历史"处理，不阻塞调度）。
+    async fn last_message_time_by_persona(&self, _persona_uid: &str) -> RamariaResult<Option<i64>> {
+        Ok(None)
+    }
+
     /// 统计指定 session 的消息数量。
     ///
     /// 职责:
@@ -555,6 +575,29 @@ pub trait StoreCrud: Send + Sync {
     /// 默认实现返回空列表，子 crate 应覆写为 SQL 查询。
     async fn list_event_sources_by_event(&self, _event_id: i64) -> RamariaResult<Vec<EventSource>> {
         Ok(Vec::new())
+    }
+
+    /// 批量查询事件所属会话映射（`event_sources → memory_l1.session_id`）。
+    ///
+    /// 职责:
+    /// - 事件跟进类主动对话需要定位"事件所属会话"作为投递落点：
+    ///   经 `event_sources.l1_id → memory_l1.session_id` 反查。
+    ///
+    /// 口径:
+    /// - 一个事件可能有多条溯源（跨会话）：取来源权重最高者的会话；
+    ///   同权重取 `l1_id` 升序首个（确定性，脏数据下结果稳定）。
+    ///
+    /// 参数:
+    /// - `event_ids`: 目标事件 id 列表（空列表直接返回空映射）。
+    ///
+    /// 返回:
+    /// - event_id → session_id 的映射；无来源 / 来源会话解析失败的事件不出现在映射中
+    ///   （含未覆写 mock —— 空映射表示"无映射可用"，调用方跳过事件跟进类选题）。
+    async fn list_event_session_map(
+        &self,
+        _event_ids: &[i64],
+    ) -> RamariaResult<HashMap<i64, Uuid>> {
+        Ok(HashMap::new())
     }
 
     // -- Persona Facts (id: i64) --

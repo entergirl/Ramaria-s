@@ -180,6 +180,43 @@ pub async fn channel_overview(pool: &SqlitePool, channel: &str) -> RamariaResult
     })
 }
 
+/// 查询指定 persona 的最近对话时间（该 persona 会话中的最大消息时间）。
+///
+/// 口径:
+/// - 会话归属以 `sessions.persona_uid` 为准（会话创建时绑定），取会话内消息
+///   `MAX(created_at)`；用户消息（`messages.persona_uid IS NULL`）同样计入
+///   "最近对话"。
+/// - 会话存在但无消息时不计入；该 persona 无任何消息时返回 None（不视为错误）。
+///
+/// 参数:
+/// - `persona_uid`: 人格标识。
+///
+/// 返回:
+/// - `Ok(Some(ms))`: 最近一条消息的 Unix 毫秒时间戳。
+/// - `Ok(None)`: 无对话历史。
+pub async fn last_message_time_by_persona(
+    pool: &SqlitePool,
+    persona_uid: &str,
+) -> RamariaResult<Option<i64>> {
+    // SQLite MAX 聚合在无匹配行时返回 NULL，使用 Option<i64> 安全解码
+    #[derive(sqlx::FromRow)]
+    struct LastTimeRow {
+        max_time: Option<i64>,
+    }
+
+    let row: Option<LastTimeRow> = sqlx::query_as(
+        "SELECT MAX(m.created_at) AS max_time \
+         FROM messages m JOIN sessions s ON s.id = m.session_id \
+         WHERE s.persona_uid = ?",
+    )
+    .bind(persona_uid)
+    .fetch_optional(pool)
+    .await
+    .storage_err("查询 persona 最近对话时间失败")?;
+
+    Ok(row.and_then(|r| r.max_time))
+}
+
 /// 条件更新抢占式关闭 session（幂等封存入口）。
 ///
 /// 职责:

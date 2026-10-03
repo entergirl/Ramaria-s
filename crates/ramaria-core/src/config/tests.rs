@@ -859,3 +859,64 @@ allow_raw_text = true
         "MCP 组应参与 DB settings 扁平同步"
     );
 }
+
+// =========================================================
+// 主动对话（[proactive]）配置测试
+// =========================================================
+
+#[test]
+fn proactive_config_defaults_follow_decisions() {
+    let cfg = RamariaConfig::default();
+    // 总开关默认开启（低频低打扰的保守基线）
+    assert!(cfg.proactive.enabled, "主动对话默认开启");
+    // 调度节拍与打扰控制默认值逐键锁定
+    assert_eq!(cfg.proactive.check_interval_seconds, 300);
+    assert_eq!(cfg.proactive.min_idle_hours, 24);
+    assert_eq!(cfg.proactive.daily_limit, 1);
+    assert_eq!(cfg.proactive.quiet_hours, "22:00-08:00");
+    assert_eq!(cfg.proactive.cooldown_hours, 48);
+    assert!((cfg.proactive.probability - 0.3).abs() < f64::EPSILON);
+    assert_eq!(cfg.proactive.silence_backoff_days, 3);
+    assert_eq!(cfg.proactive.startup_grace_days, 3);
+}
+
+#[test]
+fn proactive_config_toml_roundtrip_and_partial() {
+    // 旧配置文件（无 [proactive]）解析后回退默认（开启、保守基线）
+    let legacy = r#"
+version = "2.0.0"
+schema_version = 1
+"#;
+    let cfg: RamariaConfig = toml::from_str(legacy).expect("旧配置应可解析");
+    assert!(cfg.proactive.enabled, "缺 [proactive] 时回退默认开启");
+    assert_eq!(cfg.proactive.check_interval_seconds, 300);
+
+    // 显式配置可无损恢复；只写部分键时其余键回退默认值
+    let toml_text = r#"
+[proactive]
+enabled = false
+daily_limit = 2
+quiet_hours = "23:00-07:30"
+"#;
+    let cfg2: RamariaConfig = toml::from_str(toml_text).expect("主动对话配置应可解析");
+    assert!(!cfg2.proactive.enabled);
+    assert_eq!(cfg2.proactive.daily_limit, 2);
+    assert_eq!(cfg2.proactive.quiet_hours, "23:00-07:30");
+    assert_eq!(
+        cfg2.proactive.cooldown_hours, 48,
+        "未写的键回退默认值（冷却 48 小时）"
+    );
+    assert!((cfg2.proactive.probability - 0.3).abs() < f64::EPSILON);
+
+    // 扁平化同步覆盖本组（settings 表 config.* 键）
+    let flat = config_sync_flatten(&cfg2);
+    assert_eq!(
+        flat.get("proactive.enabled"),
+        Some(&serde_json::json!(false))
+    );
+    assert_eq!(
+        flat.get("proactive.daily_limit"),
+        Some(&serde_json::json!(2)),
+        "主动对话组应参与 DB settings 扁平同步"
+    );
+}

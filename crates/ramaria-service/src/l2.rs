@@ -151,4 +151,111 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// L2 事件提取的规范回复（工作 / 加班主题；供主动消息口径用例使用）。
+    const L2_EVENT_JSON: &str = r#"{"events": [{"title": "频繁加班", "summary": "用户最近工作压力很大，经常加班到深夜", "keywords": "工作,加班", "confidence": 0.9}]}"#;
+
+    /// 主动消息口径（不隔离）锁定：助手侧全部为主动消息的会话照常封存——
+    /// L1 摘要计入、风格统计计入、未吸收 L1 进入 L2 提取并产出事件（L2/L3 间接打通）。
+    #[tokio::test]
+    async fn proactive_messages_flow_through_seal_l1_style_and_l2() {
+        use crate::hooks::full_seal_hooks;
+        use crate::test_support::{L1_JSON_REPLY, ScriptedLlm, engine_with_shared_scripted_llm};
+        use ramaria_core::traits::StoreCrud;
+        use ramaria_core::types::{Message, MessageRole, MessageSource};
+        use std::sync::Arc;
+
+        let mut config = RamariaConfig::default();
+        config.thresholds.l2_trigger_count = 1;
+        // 测试不等待簇间节流（生产默认 800ms）
+        config.thresholds.cluster_delay_ms = 0;
+        // 关闭 L3 时间线触发（0 = 不按时间触发）：本用例只锁定 L1 → L2 段
+        config.thresholds.l3_trigger_days = 0;
+        let llm = Arc::new(ScriptedLlm::replies(&[L1_JSON_REPLY, L2_EVENT_JSON]));
+        let (engine, storage, dir) =
+            engine_with_shared_scripted_llm("l2-proactive-caliber", Arc::clone(&llm), config, None)
+                .await;
+        seed_persona(&storage, "char-0001").await;
+
+        // 种两条未吸收 L1（与封存摘要关键词连通，保证单簇单次提取调用）
+        seed_l1(
+            &storage,
+            "char-0001",
+            "用户最近工作压力很大，常常加班到深夜",
+            Some("工作压力,加班"),
+            1_000,
+        )
+        .await;
+        seed_l1(
+            &storage,
+            "char-0001",
+            "用户提到项目上线前每天都在加班",
+            Some("工作压力,加班"),
+            2_000,
+        )
+        .await;
+
+        // 会话：用户消息 + 全部由主动路径生成的助手消息（is_proactive=true）
+        let session = storage
+            .create_session(Some("char-0001"))
+            .await
+            .expect("创建会话应成功");
+        let mut user_msg = Message::new(
+            session.id,
+            MessageRole::User,
+            "最近工作压力好大".to_string(),
+            MessageSource::Local,
+        );
+        user_msg.created_at = 1_000;
+        storage
+            .save_message(&user_msg)
+            .await
+            .expect("写入用户消息应成功");
+        for (i, content) in ["我在呢，愿意说说吗", "加班到这么晚，辛苦了"]
+            .iter()
+            .enumerate()
+        {
+            let mut proactive = Message::new(
+                session.id,
+                MessageRole::Assistant,
+                content.to_string(),
+                MessageSource::Online,
+            )
+            .with_persona_uid(Some("char-0001".to_string()))
+            .with_proactive(true);
+            proactive.created_at = 1_001 + i as i64;
+            storage
+                .save_message(&proactive)
+                .await
+                .expect("写入主动消息应成功");
+        }
+
+        engine.set_seal_hooks(full_seal_hooks(&engine));
+        let outcome = engine.seal(session.id).await.expect("封存应成功");
+        assert!(outcome.sealed, "本次调用应抢到封存权");
+        assert_eq!(outcome.l1_count, 1, "含主动消息的会话应照常生成 L1");
+
+        // ① 风格统计计入：两条主动消息进入样本（用户消息无 persona 归属，不计入）
+        let stats = storage
+            .get_style_stats("char-0001")
+            .await
+            .expect("读取风格统计应成功")
+            .expect("风格统计步骤应已执行");
+        assert_eq!(
+            stats.sample_count, 2,
+            "主动消息应计入风格统计样本（零来源过滤）"
+        );
+
+        // ② L2 间接路径打通：事件已由含主动消息的 L1 提取落库
+        let events = storage
+            .list_events_by_persona("char-0001", 0, 100)
+            .await
+            .expect("查询事件应成功");
+        assert!(!events.is_empty(), "主动消息经 L1 应进入 L2 提取并产出事件");
+
+        // ③ 调用序锁定：L1 摘要 1 次 + L2 提取 1 次（无 L3 级联）
+        assert_eq!(llm.call_count(), 2, "应恰好为 L1 摘要与 L2 提取各一次调用");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

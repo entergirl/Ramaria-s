@@ -969,6 +969,62 @@ async fn mcp_db_keys_absent_from_file_are_preserved() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+// =========================================================
+// [proactive] 组纳入双写同步（主动对话配置通道）
+// =========================================================
+
+/// [proactive] 组九键纳入统一写入口：save 后 settings 表逐键可见、文件侧携带其值。
+#[tokio::test]
+async fn proactive_group_keys_are_covered_by_full_sync() {
+    let storage = Arc::new(MockStorage::default());
+    let (service, dir) = temp_service(storage.clone());
+
+    let mut cfg = RamariaConfig::default();
+    cfg.proactive.enabled = false;
+    cfg.proactive.check_interval_seconds = 120;
+    cfg.proactive.min_idle_hours = 6;
+    cfg.proactive.daily_limit = 2;
+    cfg.proactive.quiet_hours = "23:00-07:30".to_string();
+    cfg.proactive.cooldown_hours = 24;
+    cfg.proactive.probability = 0.5;
+    cfg.proactive.silence_backoff_days = 5;
+    cfg.proactive.startup_grace_days = 1;
+
+    let result = service.save_config(&cfg).await;
+    assert!(result.is_ok(), "双侧写入应成功: {:?}", result.failures);
+
+    // settings 表侧：标量键逐键断言（新增配置组必须自动纳入扁平化覆盖）
+    for (key, want) in [
+        ("config.proactive.enabled", "false"),
+        ("config.proactive.check_interval_seconds", "120"),
+        ("config.proactive.min_idle_hours", "6"),
+        ("config.proactive.daily_limit", "2"),
+        ("config.proactive.cooldown_hours", "24"),
+        ("config.proactive.probability", "0.5"),
+        ("config.proactive.silence_backoff_days", "5"),
+        ("config.proactive.startup_grace_days", "1"),
+    ] {
+        let got = storage.get_setting(key).await.unwrap();
+        assert_eq!(got.as_deref(), Some(want), "键 {key} 应写入 settings");
+    }
+    // 字符串键以 JSON 引号文本存储（与既有扁平化口径一致）
+    let quiet = storage
+        .get_setting("config.proactive.quiet_hours")
+        .await
+        .unwrap()
+        .expect("免打扰时段键应写入 settings");
+    assert_eq!(quiet, "\"23:00-07:30\"");
+
+    // 文件侧：完整序列化应携带 [proactive] 全组
+    let text = std::fs::read_to_string(service.config_path()).unwrap();
+    let file_cfg: RamariaConfig = toml::from_str(&text).unwrap();
+    assert!(!file_cfg.proactive.enabled);
+    assert_eq!(file_cfg.proactive.quiet_hours, "23:00-07:30");
+    assert_eq!(file_cfg.proactive.daily_limit, 2);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// 保存配置时保留文件头注释与未知键（全量序列化不丢用户手写内容）。
 #[tokio::test]
 async fn save_config_preserves_header_comments_and_unknown_keys() {

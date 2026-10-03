@@ -107,6 +107,10 @@ impl StoreCrud for SqliteStorage {
     async fn get_last_message_time(&self, session_id: Uuid) -> RamariaResult<Option<i64>> {
         repo::messages::get_last_message_time(&self.pool, session_id).await
     }
+    /// 覆写为 sessions/messages 联合查询（主动对话调度的空闲门禁）。
+    async fn last_message_time_by_persona(&self, persona_uid: &str) -> RamariaResult<Option<i64>> {
+        repo::sessions::last_message_time_by_persona(&self.pool, persona_uid).await
+    }
     async fn count_messages(&self, session_id: Uuid) -> RamariaResult<u32> {
         repo::messages::count_by_session(&self.pool, session_id).await
     }
@@ -263,6 +267,11 @@ impl StoreCrud for SqliteStorage {
 
     async fn list_event_sources_by_event(&self, event_id: i64) -> RamariaResult<Vec<EventSource>> {
         repo::events::list_sources_by_event(&self.pool, event_id).await
+    }
+
+    /// 覆写为批量映射查询（event_sources → memory_l1.session_id）。
+    async fn list_event_session_map(&self, event_ids: &[i64]) -> RamariaResult<HashMap<i64, Uuid>> {
+        repo::events::list_session_map(&self.pool, event_ids).await
     }
 
     // =========================================================

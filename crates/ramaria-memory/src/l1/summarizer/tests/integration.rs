@@ -160,3 +160,62 @@ async fn summarize_session_missing_evidence_notes_degrades() {
     let notes = l1.evidence_notes.expect("evidence_notes 应为 Some");
     assert!(notes.is_empty(), "缺失 evidence_notes 时应降级为空数组");
 }
+
+/// 主动消息口径：L1 摘要的 LLM 输入包含主动消息正文（零来源过滤）。
+#[tokio::test]
+async fn summarize_session_includes_proactive_message_in_llm_input() {
+    use crate::l1::mock::{MockLlmProvider, MockStorage, make_msg};
+    use ramaria_core::types::MessageRole;
+    use uuid::Uuid;
+
+    let session_id = Uuid::new_v4();
+
+    // 主动生成的助手消息（persona_uid=目标、is_proactive=true）
+    let mut proactive = make_msg(
+        session_id,
+        MessageRole::Assistant,
+        "主动问候：最近工作还顺利吗",
+    );
+    proactive.persona_uid = Some("test-persona".into());
+    proactive.is_proactive = true;
+
+    let storage = MockStorage::new();
+    storage.add_messages(
+        session_id,
+        vec![
+            make_msg(session_id, MessageRole::User, "在的，最近还行"),
+            proactive,
+        ],
+    );
+
+    let llm = MockLlmProvider::new("test-model");
+    llm.set_response(llm_json("含主动消息的摘要", None));
+
+    let config = L1SummarizerConfig {
+        persona_uid: Some("test-persona".into()),
+        context_json: None,
+        situation_strength: None,
+        temperature: 0.3,
+        max_tokens: 2048,
+        user_prefix: "用户：".into(),
+        assistant_prefix: "助手：".into(),
+        utt_splitter: None,
+        prior_context_threshold: 20,
+        prior_context_max_chars: 1500,
+    };
+
+    let summarizer = L1Summarizer::new(&llm, &storage, config);
+    summarizer
+        .summarize_session(session_id)
+        .await
+        .expect("含主动消息的会话摘要应成功");
+
+    // 锁定：主动消息正文进入 LLM 输入（L1 路径不按来源过滤）
+    let request = llm.last_request().expect("应记录 LLM 请求");
+    assert!(
+        request.user_message.contains("主动问候：最近工作还顺利吗"),
+        "L1 输入应包含主动消息正文，实际: {}",
+        request.user_message
+    );
+    assert!(request.user_message.contains("在的，最近还行"));
+}

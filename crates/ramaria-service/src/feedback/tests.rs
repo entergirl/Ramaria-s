@@ -24,6 +24,7 @@ fn msg(role: MessageRole, content: &str, created_at: i64) -> Message {
         source: MessageSource::Local,
         fingerprint: None,
         persona_uid: None,
+        is_proactive: false,
     }
 }
 

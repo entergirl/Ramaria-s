@@ -72,7 +72,8 @@ async fn test_pool() -> sqlx::SqlitePool {
             created_at INTEGER NOT NULL,
             source TEXT NOT NULL,
             import_fingerprint TEXT UNIQUE,
-            persona_uid TEXT
+            persona_uid TEXT,
+            is_proactive INTEGER NOT NULL DEFAULT 0
         )",
     )
     .execute(&pool)

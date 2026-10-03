@@ -17,5 +17,5 @@
 
 [[exemption]]
 path = "crates/ramaria-core/src/traits/store_crud.rs"
-reason = "StoreCrud 单一 trait 契约定义（890 行），trait 体结构上不可跨文件拆分"
+reason = "StoreCrud 单一 trait 契约定义（933 行），trait 体结构上不可跨文件拆分"
 date = "2026-10-02"

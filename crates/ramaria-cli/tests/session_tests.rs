@@ -52,6 +52,7 @@ fn message(
         source,
         fingerprint: None,
         persona_uid: Some("char-0001".to_string()),
+        is_proactive: false,
     }
 }
 

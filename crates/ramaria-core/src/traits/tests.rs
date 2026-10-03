@@ -299,3 +299,19 @@ fn bare_store_contract_methods_return_unsupported() {
         );
     }
 }
+
+/// 新增查询的默认实现为被动降级（空映射 / None）：不报错、不阻塞调用方。
+#[test]
+fn store_crud_new_query_defaults_are_passive() {
+    let store = BareStore;
+    let map = futures::executor::block_on(store.list_event_session_map(&[1, 2]))
+        .expect("默认实现不应报错");
+    assert!(map.is_empty(), "未覆写 mock 的事件会话映射应为空");
+
+    assert_eq!(
+        futures::executor::block_on(store.last_message_time_by_persona("persona-1"))
+            .expect("默认实现不应报错"),
+        None,
+        "未覆写 mock 的最近对话时间应为 None（无历史）"
+    );
+}

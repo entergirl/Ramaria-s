@@ -114,6 +114,8 @@ pub struct MessageKey {
 ///
 /// 字段约定:
 /// - `persona_uid`: 发言人标识。系统/助手消息填 None，导入消息填对应发言人的 uid。
+/// - `is_proactive`: 主动生成标记。仅主动对话路径写入 true，常规消息恒 false；
+///   与 `source` 语义无关。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub id: Uuid,
@@ -127,6 +129,9 @@ pub struct Message {
     pub fingerprint: Option<String>,
     /// 发言人标识，系统/助手消息为 None
     pub persona_uid: Option<String>,
+    /// 标记由主动对话路径生成的消息；常规消息恒 false；与 source 语义无关
+    #[serde(default)]
+    pub is_proactive: bool,
 }
 
 impl Message {
@@ -139,7 +144,7 @@ impl Message {
     /// - `source`: 本地或线上来源。
     ///
     /// 返回:
-    /// - 带新 UUID、当前创建时间且无 fingerprint 和 persona_uid 的消息。
+    /// - 带新 UUID、当前创建时间且无 fingerprint、persona_uid 的消息，`is_proactive` 为 false。
     pub fn new(
         session_id: Uuid,
         role: MessageRole,
@@ -155,6 +160,7 @@ impl Message {
             source,
             fingerprint: None,
             persona_uid: None,
+            is_proactive: false,
         }
     }
 
@@ -165,6 +171,17 @@ impl Message {
     /// - 助手消息设为当前对话的人格 uid，用于前端显示"谁在回复"。
     pub fn with_persona_uid(mut self, uid: Option<String>) -> Self {
         self.persona_uid = uid;
+        self
+    }
+
+    /// 设置主动生成标记（链式调用）。
+    ///
+    /// 说明:
+    /// - 仅主动对话路径生成的助手消息设为 true，常规消息保持默认 false。
+    /// - 与 `source`（本地/线上 provider）无关：本标记只表示产生方式，
+    ///   供 UI 与回流路径区分主动消息，不改变记忆回流口径。
+    pub fn with_proactive(mut self, is_proactive: bool) -> Self {
+        self.is_proactive = is_proactive;
         self
     }
 }

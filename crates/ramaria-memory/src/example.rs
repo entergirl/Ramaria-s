@@ -390,6 +390,25 @@ mod tests {
         assert_has_pair(&pairs, "今天天气真好呀", "是啊，我们出去走走吧！");
     }
 
+    /// 主动消息口径：前有用户消息时照常配对；无前序用户消息时不配对（零来源过滤）。
+    #[test]
+    fn proactive_reply_pairs_only_after_user_message() {
+        // 前有 user → 主动消息与普通回复同口径配对
+        let mut proactive = reply("主动问候一下最近还好吗", 2000);
+        proactive.is_proactive = true;
+        let pairs = extract_pairs(&[user("在吗", 1000), proactive], TARGET);
+        assert_eq!(pairs.len(), 1, "前有用户消息时主动消息应正常配对");
+        assert_has_pair(&pairs, "在吗", "主动问候一下最近还好吗");
+
+        // 无前序 user（主动消息开场）→ 不配对（锁定"仅前有 user 才配对"现有规则）
+        let mut opening = reply("今天过得怎么样呀", 1000);
+        opening.is_proactive = true;
+        assert!(
+            extract_pairs(&[opening], TARGET).is_empty(),
+            "无前序用户消息的主动消息不应产出回复对"
+        );
+    }
+
     #[test]
     fn no_target_reply_yields_empty() {
         let msgs = vec![

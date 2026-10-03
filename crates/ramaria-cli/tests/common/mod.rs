@@ -259,6 +259,7 @@ pub fn make_user_message(session_id: Uuid, content: &str) -> Message {
         created_at: 1_717_977_600_000,
         fingerprint: None,
         persona_uid: None,
+        is_proactive: false,
     }
 }
 
@@ -273,6 +274,7 @@ pub fn make_assistant_message(session_id: Uuid, content: &str) -> Message {
         created_at: 1_717_977_601_000,
         fingerprint: None,
         persona_uid: None,
+        is_proactive: false,
     }
 }
 

@@ -60,6 +60,7 @@ pub mod lifecycle;
 pub mod model;
 pub mod persona;
 pub mod privacy;
+pub mod proactive;
 pub mod recall;
 pub mod seal;
 pub mod session;
