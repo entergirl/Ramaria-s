@@ -1,7 +1,7 @@
 //! crates/ramaria-llm/src/provider/request.rs - 请求消息组装与 Prompt Injection 防护
 //!
 //! 设计特点:
-//! - `build_messages`: 将 `ChatRequest` 组装为 OpenAI 兼容消息数组（system / history / user）
+//! - `build_messages`: 将 `ChatRequest` 组装为 OpenAI 兼容消息数组（system / history / user；空 user_message 跳过）
 //! - memory_context 以 `<memory_context>` XML 标签包裹，与系统指令明确分隔
 //! - 用户消息含已知注入模式时追加防御性前缀（不拒绝、不修改原始内容）
 //! - `cache_key`: sha256(model_id + 模板版本 + 采样参数 + canonical messages JSON)
@@ -97,7 +97,7 @@ pub(crate) fn cache_key(
 /// 组装规则:
 /// 1. `system` 消息 = `system_prompt` + `<memory_context>` 包裹的记忆上下文
 /// 2. `history` 中的消息按序映射 role
-/// 3. `user` 消息 = 经过注入检测的 `user_message`
+/// 3. `user` 消息 = 经过注入检测的 `user_message`（空白时不追加——主动生成等无用户输入场景）
 ///
 /// Prompt Injection 防护：
 /// - `memory_context` 以 `<memory_context>` XML 标签包裹，与系统核心指令明确分隔。
@@ -146,11 +146,14 @@ pub(crate) fn build_messages(request: &ChatRequest) -> Vec<serde_json::Value> {
     }
 
     // Block C: 当前用户消息（含注入检测）
+    // 主动生成等无用户输入场景 `user_message` 为空 → 不追加 user 消息（assistant-only）
     let user_content = sanitize_user_message(&request.user_message);
-    messages.push(serde_json::json!({
-        "role": "user",
-        "content": user_content,
-    }));
+    if !user_content.trim().is_empty() {
+        messages.push(serde_json::json!({
+            "role": "user",
+            "content": user_content,
+        }));
+    }
 
     messages
 }

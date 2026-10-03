@@ -10,19 +10,24 @@
 //! - 失败不留半条：非流式仅在 LLM 成功后落库；流式先落用户消息，
 //!   助手回复仅在无错且非空时落库（用户消息落库失败经事件流传出错误）
 //! - 降级纪律：行为路由 / 知识事实 / 示例 / 脉络任一环节失败或关闭均静默降级，不阻塞生成
+//! - 主动生成：assistant-only 的主动开口用例随同模块收纳，复用同一份前置编排
 //! - 隐私：日志只记会话 id、人格与长度，不记消息与回复内容
 //!
 //! 模块划分:
 //! - `steps`：请求形态与前置编排（校验 / 门禁 / 会话定位 / 历史窗口 / 弱反馈）；
 //! - `context`：记忆召回与素材装载 + 系统 Prompt 装配与 Token 预算；
-//! - `generate`：用例入口（非流式 / 流式）与生成侧（LLM 调用 / 落库 / 事件桥接）。
+//! - `generate`：用例入口（非流式 / 流式）与生成侧（LLM 调用 / 落库 / 事件桥接）；
+//! - `proactive`：主动生成用例（assistant-only，门禁静默跳过）。
 
 mod context;
 mod generate;
+mod proactive;
 mod steps;
 
 // 用例入口 re-export：`crate::chat::run` / `crate::chat::stream` 为入口层既有调用路径
 pub(crate) use generate::{run, stream};
+// 主动生成入口 re-export：供引擎用例门面调用（主动调度接入前无生产调用方）
+pub(crate) use proactive::run as run_proactive;
 
 // =========================================================
 // 单元测试

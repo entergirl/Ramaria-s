@@ -101,6 +101,7 @@ mod blocks;
 mod boilerplate;
 mod coordinated;
 mod persona;
+mod proactive;
 mod social;
 mod template;
 mod utt_bridge;

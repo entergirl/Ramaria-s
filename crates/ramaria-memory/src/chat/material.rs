@@ -13,7 +13,9 @@ use ramaria_core::types::{PersonaExample, PersonaFact, ProfileField};
 
 use crate::behavior::MergedDecision;
 use crate::init::resolve_chat_style_rules;
-use crate::prompt::builder::{PromptConfig, PromptContext, assemble_prompt};
+use crate::prompt::builder::{
+    ProactivePromptContext, PromptConfig, PromptContext, assemble_prompt,
+};
 
 use super::persona_fallback::load_persona_toml_prompt;
 use super::time::now_timestamp_str;
@@ -100,6 +102,8 @@ pub struct PromptMaterialInputs<'a> {
     pub rag_text: Option<&'a str>,
     /// 层间证据去重与冲突仲裁配置。
     pub layer_dedup: &'a LayerDedupConfig,
+    /// 主动生成场景上下文（None = 非主动生成，Prompt 不产生主动段）。
+    pub proactive: Option<ProactivePromptContext>,
 }
 
 // =========================================================
@@ -304,6 +308,8 @@ pub async fn load_prompt_material(
             knowledge_facts,
             // 自动风格规则（None = 风格关闭/数据不足 → prompt 不含自动风格规则）
             style_rule_text,
+            // 主动生成场景（None = 非主动路径 → prompt 不含主动段）
+            proactive_context: inputs.proactive.clone(),
         };
 
         // examples.max_examples 经配置传播，

@@ -174,6 +174,12 @@ pub(super) fn build_role_layer(context: &PromptContext, config: &PromptConfig) -
     // 回复规范（社交基调 + 核心规则 + 说话锚点 + 记忆引用规则；无自定义规则时使用中性默认）
     parts.push(build_experiment_section(context, config));
 
+    // 主动开口场景（仅主动生成注入；None / 空 → 不产生段落，既有输出零变化）
+    let proactive_block = super::proactive::build_proactive_block(context);
+    if !proactive_block.is_empty() {
+        parts.push(format!("\n\n{proactive_block}"));
+    }
+
     parts.join("")
 }
 

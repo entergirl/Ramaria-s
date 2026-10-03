@@ -146,6 +146,59 @@ fn build_messages_with_history() {
     assert_eq!(messages[3]["content"], "谢谢");
 }
 
+#[test]
+fn build_messages_skips_empty_user_message() {
+    // 主动生成等无用户输入场景：空 user_message 不追加 user 消息（assistant-only）
+    let request = ChatRequest {
+        system_prompt: "你是一个助手".into(),
+        memory_context: None,
+        history: vec![
+            ChatMessage {
+                role: MessageRole::Assistant,
+                content: "今天晴天".into(),
+            },
+            ChatMessage {
+                role: MessageRole::Assistant,
+                content: "你那边呢？".into(),
+            },
+        ],
+        user_message: String::new(),
+        temperature: 0.3,
+        max_tokens: 1024,
+        request_id: Uuid::new_v4(),
+        template_version: "test".into(),
+    };
+
+    let messages = build_messages(&request);
+    assert_eq!(messages.len(), 3); // system + 2 assistant（无 user 项）
+    assert!(
+        messages.iter().all(|m| m["role"] != "user"),
+        "空 user_message 不应追加 user 消息"
+    );
+}
+
+#[test]
+fn build_messages_skips_blank_user_message() {
+    // 空白串同样视为空：不追加 user 消息
+    let request = ChatRequest {
+        system_prompt: "你是一个助手".into(),
+        memory_context: None,
+        history: vec![],
+        user_message: "   \n".into(),
+        temperature: 0.3,
+        max_tokens: 1024,
+        request_id: Uuid::new_v4(),
+        template_version: "test".into(),
+    };
+
+    let messages = build_messages(&request);
+    assert_eq!(messages.len(), 1); // 仅 system
+    assert!(
+        messages.iter().all(|m| m["role"] != "user"),
+        "空白 user_message 不应追加 user 消息"
+    );
+}
+
 // ---- Prompt Injection 防护测试 ----
 
 #[test]
@@ -473,6 +526,25 @@ fn cache_key_changes_with_sampling_params() {
     assert_eq!(base.len(), 64, "SHA-256 hex 应为 64 字符");
     assert_ne!(base, higher_temp, "temperature 变更 → key 变化");
     assert_ne!(base, more_tokens, "max_tokens 变更 → key 变化");
+}
+
+/// 提示词内容变化纳入缓存 key：同一模板版本下，主动生成注入的主动段
+/// 使 messages 变化 → key 变化，不会误命中普通对话缓存。
+#[test]
+fn cache_key_changes_with_prompt_content() {
+    let plain: Vec<serde_json::Value> =
+        vec![serde_json::json!({"role": "system", "content": "# 角色（行为层）"})];
+    let with_proactive: Vec<serde_json::Value> = vec![serde_json::json!({
+        "role": "system",
+        "content": "# 角色（行为层）\n\n# 主动开口\n现在不是你在回复对方。"
+    })];
+
+    let k_plain = cache_key("model-a", "same-version", 0.3, 1024, &plain);
+    let k_proactive = cache_key("model-a", "same-version", 0.3, 1024, &with_proactive);
+    assert_ne!(
+        k_plain, k_proactive,
+        "提示词内容变化 → key 变化（主动段注入不误命中普通对话缓存）"
+    );
 }
 
 #[tokio::test]

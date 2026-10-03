@@ -14,6 +14,7 @@ use ramaria_core::error::RamariaResult;
 use ramaria_core::types::{MemoryL1, Session};
 use uuid::Uuid;
 
+use crate::proactive::{ProactiveDirective, ProactiveOutcome};
 use crate::stream_event::ChatStreamHandle;
 use crate::types::{
     ChatSendOutcome, ChatSendRequest, ChatStreamRequest, HistoryRequest, HistoryResult,
@@ -51,6 +52,21 @@ impl Engine {
     /// - 成功时返回 `reply` / `session_id` / `chars`。
     pub async fn chat_send(&self, req: ChatSendRequest) -> RamariaResult<ChatSendOutcome> {
         crate::chat::run(self, req).await
+    }
+
+    /// 主动生成用例：为指定人格生成一条主动消息（非流式、assistant-only）。
+    ///
+    /// 说明:
+    /// - 输入为选题指令（人格 / 目标会话 / 来源 / 锚点 / 角度 / 语气）；
+    /// - 门禁不过（状态未就绪 / 隐私未确认 / 人格不可见 / 目标会话不可用）返回
+    ///   `Ok(None)`（静默跳过，不落库不投递）；LLM 或存储失败返回错误；
+    /// - 成功时仅写入 1 条 `is_proactive=true` 的 assistant 消息（来源线上）。
+    #[allow(dead_code)] // 主动对话调度接入前保留定义（调度消费后移除）
+    pub(crate) async fn chat_proactive(
+        &self,
+        directive: ProactiveDirective,
+    ) -> RamariaResult<Option<ProactiveOutcome>> {
+        crate::chat::run_proactive(self, directive).await
     }
 
     /// 流式生成用例：以指定人格回复一条消息，返回增量事件流句柄（交互入口消费）。

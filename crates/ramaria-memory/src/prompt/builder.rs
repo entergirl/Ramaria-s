@@ -36,6 +36,7 @@ use ramaria_core::types::{Persona, PersonaExample, PersonaFact, PersonalityTrait
 mod context;
 mod experiment;
 mod memory;
+mod proactive;
 mod role;
 mod style;
 
@@ -45,6 +46,7 @@ use role::{build_capacity, build_role_layer};
 use style::build_style_layer;
 
 pub use memory::{build_cross_session_narrative, render_utt_context};
+pub use proactive::ProactivePromptContext;
 
 // =========================================================
 // 样板文案常量（引导句/占位/默认规则集中管理）
@@ -321,6 +323,12 @@ pub struct PromptContext {
     ///   手工 `speaking_style` 存在时自动规则被覆盖（不注入，手工优先）。
     /// - 只含统计生成的风格描述，不含原文消息文本。
     pub style_rule_text: Option<String>,
+    /// 主动生成场景上下文（None = 非主动生成 → Prompt 不产生主动段）。
+    ///
+    /// 字段约定:
+    /// - `Some(..)` = 本次为主动生成，注入「主动开口」指令段与「此刻情境」时段段；
+    /// - `None` = 既有对话路径，输出与既有版本逐字节一致。
+    pub proactive_context: Option<ProactivePromptContext>,
 }
 
 // =========================================================

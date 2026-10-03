@@ -45,6 +45,13 @@ pub(super) async fn step_recall(
     persona: &str,
     message: &str,
 ) -> RamariaResult<(Option<String>, Vec<String>, Option<String>)> {
+    // 无检索输入（主动生成的轻触达场景无锚点）：跳过召回，避免空查询触发嵌入调用；
+    // 既有对话路径消息非空，行为不变
+    if message.trim().is_empty() {
+        tracing::debug!(persona = %persona, "查询为空，跳过记忆召回");
+        return Ok((None, Vec::new(), None));
+    }
+
     engine.ensure_index_loaded().await?;
 
     // 嵌入 provider 取快照后在锁外使用（缺失 → 共用召回内部降级为 BM25 + 关键词镜像）

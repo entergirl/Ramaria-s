@@ -58,6 +58,7 @@ pub(crate) async fn run(engine: &Engine, req: ChatSendRequest) -> RamariaResult<
         channel: req.channel,
         conversation_id: req.conversation_id,
         seed_history: Vec::new(),
+        proactive: None,
     };
 
     let prepared = prepare_request(engine, &input, config.as_ref()).await?;
@@ -127,6 +128,7 @@ pub(crate) async fn stream(
         channel: String::new(),
         conversation_id: None,
         seed_history: req.seed_history,
+        proactive: None,
     };
 
     let prepared = prepare_request(engine.as_ref(), &input, config.as_ref()).await?;

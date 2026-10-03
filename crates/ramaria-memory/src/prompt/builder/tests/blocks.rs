@@ -354,6 +354,7 @@ fn full_prompt_all_blocks() {
         behavior_decision: None,     // 默认无行为路由决策
         knowledge_facts: Vec::new(), // 默认无知识事实
         style_rule_text: None,       // 默认无自动风格规则（v1.6 语义等价）
+        proactive_context: None,     // 默认非主动生成
     };
     let config = PromptConfig::default();
     let result = assemble_prompt(&ctx, &config);

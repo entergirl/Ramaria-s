@@ -14,6 +14,7 @@ pub mod keyword;
 pub mod lock;
 pub mod privacy;
 pub mod text;
+pub mod time_period;
 pub mod traits;
 pub mod types;
 
@@ -30,6 +31,7 @@ pub use behavior::{
 // 常用 re-export
 pub use config::RamariaConfig;
 pub use error::{RamariaError, RamariaResult};
+pub use time_period::TimePeriod;
 pub use traits::{
     ChatMessage, ChatRequest, Embedding, EmbeddingModelInfo, EmbeddingProvider,
     LlmProvider as LlmProviderTrait, LlmResponseCache, StorageBackend, StoreCrud,

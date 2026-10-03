@@ -3,20 +3,27 @@
 //! 设计特点:
 //! - 请求形态：两入口共用的内部形态（`ChatInput` / `ChatMode`）与编排产出（`PreparedRequest`）
 //! - 单一编排：`prepare_request` 把校验 / 门禁 / 会话定位 / 历史窗口 / 弱反馈检测串联为固定顺序，
-//!   非流式与流式入口共用同一份前置链路
-//! - 门禁语义：状态门禁与线上 provider 隐私确认仅对交互式入口生效（通道式入口不受约束）
+//!   非流式 / 流式 / 主动生成入口共用同一份前置链路
+//! - 门禁语义：状态门禁与线上 provider 隐私确认仅对交互式入口生效
+//!   （通道式入口不受约束；主动模式由生成用例预检后静默处理）
 //! - 会话定位：交互式按显式 `session_id` > 新建（含新会话桥接注入）；
-//!   通道式按显式 `session_id` > 通道 + 外部标识续写
+//!   通道式按显式 `session_id` > 通道 + 外部标识续写；
+//!   主动模式按显式 `session_id` > 新建（不注入桥接，话题由锚点承载）
+//! - 主动模式：消息位为选题锚点（可为空），请求的用户消息位留空，
+//!   提示词装配注入主动开口段
 //! - 历史窗口：分页倒序加载，条数上限与字符预算取 `[session]` 配置，读取失败保留已加载部分
 //! - 降级纪律：会话 NULL 归属回写 / 弱反馈检测失败均只记 warn，不阻塞生成
 
+use chrono::Timelike;
 use ramaria_core::config::RamariaConfig;
 use ramaria_core::error::{RamariaError, RamariaResult};
+use ramaria_core::time_period::TimePeriod;
 use ramaria_core::traits::{ChatMessage, ChatRequest, StorageBackend};
 use ramaria_core::types::{
     AppState, BackendConfig, Message, MessageRole, MessageSource, Session, new_id,
 };
 use ramaria_memory::chat::PromptMaterialInputs;
+use ramaria_memory::prompt::builder::ProactivePromptContext;
 use uuid::Uuid;
 
 use crate::engine::Engine;
@@ -38,11 +45,16 @@ const HISTORY_PAGE_SIZE: i64 = 20;
 ///
 /// 变体:
 /// - `Interactive`: 交互式入口（桌面 / CLI）——状态门禁 / 隐私门禁 / 新会话桥接 / 弱反馈检测开启；
-/// - `Channel`: 通道式入口（MCP）——以上四项全关，会话按通道 + 外部标识解析。
+/// - `Channel`: 通道式入口（MCP）——以上四项全关，会话按通道 + 外部标识解析；
+/// - `Proactive`: 主动生成——消息位为选题锚点（可为空）、无状态 / 隐私二次检查
+///   （由主动生成用例预检后静默处理）、会话不注入桥接。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ChatMode {
     Interactive,
     Channel,
+    /// 主动生成：无用户消息（消息位为选题锚点，可为空）、无状态/隐私二次检查
+    /// （由主动生成用例预检后静默处理）、会话不注入桥接。
+    Proactive,
 }
 
 /// 统一请求（两个入口共用的内部形态）。
@@ -57,6 +69,18 @@ pub(super) struct ChatInput {
     pub(super) conversation_id: Option<String>,
     /// 调用方预置上文（时间正序；不落库，仅进入本轮 prompt 历史段）。
     pub(super) seed_history: Vec<ChatMessage>,
+    /// 主动生成输入（仅 `Proactive` 模式使用；其余模式为 None）。
+    pub(super) proactive: Option<ProactiveInput>,
+}
+
+/// 主动生成输入（`Proactive` 模式专用）。
+pub(super) struct ProactiveInput {
+    /// 候选锚点摘要（同时作为检索查询；None = 无具体话题）。
+    pub(super) anchor: Option<String>,
+    /// 开口角度。
+    pub(super) angle: Option<String>,
+    /// 说话语气。
+    pub(super) tone: Option<String>,
 }
 
 /// 会话解析产出（含本轮生效人格与新会话桥接内容）。
@@ -85,10 +109,10 @@ pub(super) struct PreparedRequest {
 /// 执行生成前置步骤（两入口单一实现），产出可直接调用的 `ChatRequest`。
 ///
 /// 流程:
-/// 1. 参数与策略校验（空消息 / 人格归一与白名单）；
-/// 2. 交互式：应用状态门禁；
-/// 3. 后端配置快照 + 交互式：线上 provider 隐私确认；
-/// 4. 会话定位（交互式 / 通道式两种语义）；
+/// 1. 参数与策略校验（空消息 / 人格归一与白名单；主动模式消息位为锚点，不做空校验）；
+/// 2. 交互式：应用状态门禁（主动模式由调用方预检）；
+/// 3. 后端配置快照 + 交互式：线上 provider 隐私确认（主动模式由调用方预检）；
+/// 4. 会话定位（交互式 / 通道式 / 主动模式三种语义）；
 /// 5. 历史窗口加载（配置驱动 + 预置上文前置）；
 /// 6. 记忆召回（配置闸门 × 宿主策略）；
 /// 7. 交互式：弱反馈检测；
@@ -97,7 +121,7 @@ pub(super) struct PreparedRequest {
 /// 10. 知识层判定器检索；
 /// 11. 示例预选；
 /// 12. 系统 Prompt 装配（普通 / 协调预算路径）；
-/// 13. Token 预算裁剪与 `ChatRequest` 构建。
+/// 13. Token 预算裁剪与 `ChatRequest` 构建（主动模式用户消息位留空）。
 pub(super) async fn prepare_request(
     engine: &Engine,
     input: &ChatInput,
@@ -106,14 +130,23 @@ pub(super) async fn prepare_request(
     let storage = engine.storage_ref().as_ref();
 
     // ---- 1. 参数与策略校验 ----
-    let (message, persona) = step_validate(engine, &input.message, input.persona.as_deref())?;
+    let (message, persona) = if input.mode == ChatMode::Proactive {
+        // 主动生成：消息位为锚点（可为空，不做空校验）；人格白名单由调用方
+        // 以"静默跳过"语义预检，此处只做归一
+        (
+            input.message.trim(),
+            normalize_persona(input.persona.as_deref()),
+        )
+    } else {
+        step_validate(engine, &input.message, input.persona.as_deref())?
+    };
 
-    // ---- 2. 应用状态门禁（交互式） ----
+    // ---- 2. 应用状态门禁（交互式；主动模式由调用方预检） ----
     if input.mode == ChatMode::Interactive {
         step_check_state(engine)?;
     }
 
-    // ---- 3. 后端配置 + 隐私门禁（交互式） ----
+    // ---- 3. 后端配置 + 隐私门禁（交互式；主动模式由调用方预检） ----
     let backend = step_backend_config(engine);
     if input.mode == ChatMode::Interactive {
         step_check_privacy(engine, &backend).await?;
@@ -167,22 +200,33 @@ pub(super) async fn prepare_request(
         style_enabled: config.style.enabled,
         rag_text: memory_context.as_deref(),
         layer_dedup: &config.layer_dedup,
+        proactive: if input.mode == ChatMode::Proactive {
+            build_proactive_prompt(input)
+        } else {
+            None
+        },
     };
     let (system_prompt, memory_context) =
         step_build_prompt(storage, config, &inputs, memory_context.clone()).await;
 
     // ---- 13. Token 预算与 ChatRequest ----
     let request_id = new_id();
+    // 主动生成无用户消息：请求的 user 消息位留空（provider 侧跳过空消息）
+    let request_message = if input.mode == ChatMode::Proactive {
+        ""
+    } else {
+        message
+    };
     let budgeted = step_apply_token_budget(
         config,
         &backend,
         &system_prompt,
         memory_context.as_deref(),
         &history,
-        message,
+        request_message,
         request_id,
     );
-    let chat_request = step_build_request(&backend, budgeted, message, request_id);
+    let chat_request = step_build_request(&backend, budgeted, request_message, request_id);
 
     Ok(PreparedRequest {
         request_id,
@@ -271,7 +315,7 @@ async fn step_check_privacy(engine: &Engine, backend: &BackendConfig) -> Ramaria
     Ok(())
 }
 
-/// 步骤 4：会话定位（交互式 / 通道式语义参数化）。
+/// 步骤 4：会话定位（交互式 / 通道式 / 主动模式语义参数化）。
 ///
 /// 交互式（桌面 / CLI）:
 /// - 显式 `session_id`：校验存在性与未关闭；存量 NULL 归属按调用方显式人格回写
@@ -281,6 +325,10 @@ async fn step_check_privacy(engine: &Engine, backend: &BackendConfig) -> Ramaria
 /// 通道式（MCP）:
 /// - 显式 `session_id`：校验存在性、未关闭与人格归属一致性；
 /// - 无 `session_id`：复用回流写入的会话解析（含惰性封存体检与"标识被他人格占用则另起"）。
+///
+/// 主动模式:
+/// - 显式 `session_id`：校验存在性、未关闭与人格归属一致性（不改写会话归属）；
+/// - 无 `session_id`：新建会话，不注入上一会话桥接（话题由选题锚点承载）。
 ///
 /// 返回:
 /// - 目标会话 + 本轮生效人格 + 新会话桥接内容。
@@ -403,6 +451,45 @@ async fn step_resolve_session(
                 })
             }
         }
+        ChatMode::Proactive => match input.session_id {
+            Some(sid) => {
+                let session = storage
+                    .get_session(sid)
+                    .await?
+                    .ok_or_else(|| RamariaError::validation(format!("会话不存在: {sid}")))?;
+                if session.ended_at.is_some() {
+                    return Err(RamariaError::validation(format!(
+                        "会话已关闭（session {sid}）"
+                    )));
+                }
+                // 主动生成不改写人格归属：会话已绑定他人格时拒绝（调用方预检应已剔除）
+                if let Some(uid) = session.persona_uid.as_deref() {
+                    if uid != persona {
+                        return Err(RamariaError::validation(format!(
+                            "会话归属人格为 {uid}，与主动生成人格 {persona} 不一致"
+                        )));
+                    }
+                }
+                Ok(ResolvedSession {
+                    session,
+                    persona: persona.to_string(),
+                    bridge_context: None,
+                })
+            }
+            None => {
+                // 主动开口的话题由选题锚点承载：新建会话不注入上一会话桥接
+                let session = storage
+                    .create_session(Some(persona))
+                    .await
+                    .map_err(|e| RamariaError::storage_with_source("创建 session 失败", e))?;
+                tracing::info!(session_id = %session.id, "主动生成新建会话");
+                Ok(ResolvedSession {
+                    session,
+                    persona: persona.to_string(),
+                    bridge_context: None,
+                })
+            }
+        },
     }
 }
 
@@ -534,8 +621,19 @@ async fn step_detect_feedback(
     }
 }
 
+/// 构造主动生成的提示词上下文（时段取本地当前时间）。
+fn build_proactive_prompt(input: &ChatInput) -> Option<ProactivePromptContext> {
+    let proactive = input.proactive.as_ref()?;
+    Some(ProactivePromptContext {
+        time_period: TimePeriod::from_local_hour(chrono::Local::now().hour()),
+        anchor: proactive.anchor.clone(),
+        angle: proactive.angle.clone(),
+        tone: proactive.tone.clone(),
+    })
+}
+
 /// 归一化人格 uid（缺省取默认人格）。
-fn normalize_persona(persona: Option<&str>) -> String {
+pub(super) fn normalize_persona(persona: Option<&str>) -> String {
     persona
         .map(str::trim)
         .filter(|value| !value.is_empty())
