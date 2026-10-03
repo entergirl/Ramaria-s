@@ -392,3 +392,143 @@ async fn is_proactive_roundtrip_and_default() {
         "list_by_persona 应解析主动标记"
     );
 }
+
+// =========================================================
+// persona 用户消息时间查询（主动调度退避 / 活跃时段统计）
+// =========================================================
+
+/// 插入 persona 与绑定该 persona 的 session fixture
+/// （新查询按 `sessions.persona_uid` 归属，与消息自身 persona_uid 无关）。
+async fn setup_persona_session(pool: &SqlitePool, persona_uid: &str) -> Uuid {
+    sqlx::query(
+        "INSERT INTO personas (uid, name, kind, seq, source, created_at, updated_at) \
+         VALUES (?, '测试', 'char', 1, 'local', 0, 0) \
+         ON CONFLICT(uid) DO NOTHING",
+    )
+    .bind(persona_uid)
+    .execute(pool)
+    .await
+    .expect("插入 persona fixture 应成功");
+    let session_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO sessions (id, started_at, persona_uid) VALUES (?, 0, ?)")
+        .bind(session_id.to_string())
+        .bind(persona_uid)
+        .execute(pool)
+        .await
+        .expect("插入 persona session fixture 应成功");
+    session_id
+}
+
+/// 写入一条指定角色与时间戳的消息（指纹含时间戳，同 session 内保持唯一）。
+async fn insert_role_message(
+    pool: &SqlitePool,
+    session_id: Uuid,
+    role: MessageRole,
+    created_at: i64,
+) {
+    let mut m = make_message(
+        session_id,
+        Some(&format!("fp-role-{session_id}-{created_at}")),
+    );
+    m.role = role;
+    m.created_at = created_at;
+    save_import(pool, &m).await.expect("写入角色消息成功");
+}
+
+/// last_user_message_time_by_persona 只计 user 消息，按 persona 会话归属隔离。
+#[tokio::test]
+async fn last_user_message_time_counts_user_role_only() {
+    let pool = init_test_pool().await.expect("测试库初始化失败");
+
+    // 无会话的 persona → None
+    assert_eq!(
+        last_user_message_time_by_persona(&pool, "char-0001")
+            .await
+            .expect("查询应成功"),
+        None,
+        "无会话应返回 None"
+    );
+
+    // 仅 assistant 消息：不视为用户回应
+    let session_a = setup_persona_session(&pool, "char-0001").await;
+    insert_role_message(&pool, session_a, MessageRole::Assistant, 5_000).await;
+    assert_eq!(
+        last_user_message_time_by_persona(&pool, "char-0001")
+            .await
+            .expect("查询应成功"),
+        None,
+        "仅 assistant 消息应返回 None"
+    );
+
+    // 写入 user 消息后取 user 的最大时间；更新的 assistant 消息不影响结果
+    insert_role_message(&pool, session_a, MessageRole::User, 1_000).await;
+    insert_role_message(&pool, session_a, MessageRole::User, 2_000).await;
+    assert_eq!(
+        last_user_message_time_by_persona(&pool, "char-0001")
+            .await
+            .expect("查询应成功"),
+        Some(2_000),
+        "应取 user 消息最大时间而非 assistant 时间"
+    );
+
+    // 另一 persona 的会话不串扰
+    let session_b = setup_persona_session(&pool, "char-0002").await;
+    insert_role_message(&pool, session_b, MessageRole::User, 9_000).await;
+    assert_eq!(
+        last_user_message_time_by_persona(&pool, "char-0001")
+            .await
+            .expect("查询应成功"),
+        Some(2_000),
+        "其他 persona 的会话不应串扰"
+    );
+    assert_eq!(
+        last_user_message_time_by_persona(&pool, "char-0002")
+            .await
+            .expect("查询应成功"),
+        Some(9_000),
+        "目标 persona 应取自身 user 消息时间"
+    );
+}
+
+/// list_user_message_times_since：窗口闭区间、升序、只计 user 消息、
+/// 跨会话聚合、persona 隔离。
+#[tokio::test]
+async fn list_user_message_times_since_filters_window_and_role() {
+    let pool = init_test_pool().await.expect("测试库初始化失败");
+    let session_a = setup_persona_session(&pool, "char-0001").await;
+    insert_role_message(&pool, session_a, MessageRole::User, 1_000).await;
+    insert_role_message(&pool, session_a, MessageRole::Assistant, 1_500).await;
+    insert_role_message(&pool, session_a, MessageRole::User, 2_000).await;
+    insert_role_message(&pool, session_a, MessageRole::User, 3_000).await;
+
+    // 同 persona 的另一会话（模拟空闲封存后另起）：应跨会话聚合
+    let session_b = setup_persona_session(&pool, "char-0001").await;
+    insert_role_message(&pool, session_b, MessageRole::User, 2_500).await;
+
+    // 另一 persona 的 user 消息：不应混入
+    let session_c = setup_persona_session(&pool, "char-0002").await;
+    insert_role_message(&pool, session_c, MessageRole::User, 2_100).await;
+
+    // 窗口 [2000, ∞)：闭区间含边界 2000；更早的 1000 与 assistant 1500 排除；
+    // 跨会话 2500 纳入；另一 persona 2100 排除；结果升序。
+    let times = list_user_message_times_since(&pool, "char-0001", 2_000)
+        .await
+        .expect("查询应成功");
+    assert_eq!(
+        times,
+        vec![2_000, 2_500, 3_000],
+        "应升序返回窗口内 user 消息时间"
+    );
+
+    // 放大窗口 → 包含更早的 user 消息，assistant 仍排除
+    let all = list_user_message_times_since(&pool, "char-0001", 0)
+        .await
+        .expect("查询应成功");
+    assert_eq!(all, vec![1_000, 2_000, 2_500, 3_000]);
+
+    // 窗口内无消息 → 空列表
+    let none = list_user_message_times_since(&pool, "char-0001", 10_000)
+        .await
+        .expect("查询应成功");
+    assert!(none.is_empty(), "窗口内无用户消息应返回空列表");
+}

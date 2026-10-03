@@ -30,12 +30,13 @@ const REPLY: &str = "刚路过一家花店，想起你说想学插花。";
 /// 锚点文本（供提示词注入断言）。
 const ANCHOR: &str = "上周提过想去看展";
 
-/// 构造主动生成指令（固定来源 `event`、带锚点 / 角度 / 语气）。
+/// 构造主动生成指令（固定来源 `event`、带选题键与锚点 / 角度 / 语气）。
 fn directive(persona: &str, session_id: Option<Uuid>) -> ProactiveDirective {
     ProactiveDirective {
         persona: persona.to_string(),
         session_id,
         source: "event".to_string(),
+        topic_key: Some("evt-1".to_string()),
         anchor: Some(ANCHOR.to_string()),
         angle: Some("轻问一句近况".to_string()),
         tone: Some("随意".to_string()),
@@ -62,6 +63,7 @@ async fn success_persists_single_proactive_assistant_message() {
     assert_eq!(outcome.content, REPLY);
     assert_eq!(outcome.persona, DEFAULT_PERSONA_UID);
     assert_eq!(outcome.source, "event");
+    assert_eq!(outcome.topic_key.as_deref(), Some("evt-1"), "选题键应透传");
 
     let messages = storage
         .list_messages(session_id)

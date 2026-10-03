@@ -61,7 +61,6 @@ impl Engine {
     /// - 门禁不过（状态未就绪 / 隐私未确认 / 人格不可见 / 目标会话不可用）返回
     ///   `Ok(None)`（静默跳过，不落库不投递）；LLM 或存储失败返回错误；
     /// - 成功时仅写入 1 条 `is_proactive=true` 的 assistant 消息（来源线上）。
-    #[allow(dead_code)] // 主动对话调度接入前保留定义（调度消费后移除）
     pub(crate) async fn chat_proactive(
         &self,
         directive: ProactiveDirective,

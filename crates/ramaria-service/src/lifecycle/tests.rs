@@ -20,13 +20,15 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-/// 测试用装配选项：空闲与 L2/L3 均以 1 秒轮次运行（关停等待收敛在 1 秒量级），
+/// 测试用装配选项：空闲、L2/L3 与主动对话均以 1 秒轮次运行（关停等待收敛在 1 秒量级），
 /// 首轮延迟 1 秒，其余按桌面口径。
 fn test_options() -> LifecycleOptions {
     LifecycleOptions::desktop()
         .with_idle_interval(1)
         .with_l2_l3_interval(1)
         .with_l2_l3_first_delay(1)
+        .with_proactive_interval(1)
+        .with_proactive_first_delay(1)
 }
 
 /// 活跃指针与最后活跃缓存：set / get / forget / clear_active_if。
@@ -420,6 +422,61 @@ async fn mcp_options_start_idle_only_and_skip_l2() {
     let lifecycle = engine.start_lifecycle(LifecycleOptions::none());
     assert!(!lifecycle.idle_loop_running(), "none 选项不应拉起空闲循环");
     assert!(!lifecycle.l2_l3_running(), "none 选项不应拉起 L2/L3 调度");
+    lifecycle.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 装配口径：desktop 拉起主动对话调度循环，mcp / none 不拉起；关停后停止。
+#[tokio::test]
+async fn desktop_options_start_proactive_loop_and_mcp_skip() {
+    // desktop：空闲 / L2/L3 / 主动对话三个循环均拉起，关停后停止位置位
+    let (engine, _storage, dir) = engine_with_db("life-proactive-desktop").await;
+    let engine = Arc::new(engine);
+    let lifecycle = engine.start_lifecycle(
+        LifecycleOptions::desktop()
+            .with_idle_interval(1)
+            .with_l2_l3_interval(1)
+            .with_l2_l3_first_delay(1)
+            .with_proactive_interval(1)
+            .with_proactive_first_delay(1),
+    );
+    assert!(lifecycle.idle_loop_running(), "desktop 选项应拉起空闲循环");
+    assert!(lifecycle.l2_l3_running(), "desktop 选项应拉起 L2/L3 调度");
+    assert!(
+        lifecycle.proactive_running(),
+        "desktop 选项应拉起主动对话调度"
+    );
+    lifecycle.shutdown().await;
+    assert!(
+        !lifecycle.proactive_running(),
+        "关停后主动对话调度不应再运行"
+    );
+    assert!(
+        lifecycle.shutdown_flag().load(Ordering::Acquire),
+        "停止位应已置位"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // mcp：仅空闲检查，不拉起主动对话调度
+    let (engine, _storage, dir) = engine_with_db("life-proactive-mcp").await;
+    let engine = Arc::new(engine);
+    let lifecycle = engine.start_lifecycle(LifecycleOptions::mcp().with_idle_interval(1));
+    assert!(lifecycle.idle_loop_running(), "mcp 选项应拉起空闲循环");
+    assert!(
+        !lifecycle.proactive_running(),
+        "mcp 选项不应拉起主动对话调度"
+    );
+    lifecycle.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // none：不拉起任何循环
+    let (engine, _storage, dir) = engine_with_db("life-proactive-none").await;
+    let engine = Arc::new(engine);
+    let lifecycle = engine.start_lifecycle(LifecycleOptions::none());
+    assert!(
+        !lifecycle.proactive_running(),
+        "none 选项不应拉起主动对话调度"
+    );
     lifecycle.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
 }

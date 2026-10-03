@@ -45,6 +45,7 @@ use ramaria_memory::retriever::Retriever;
 use sqlx::SqlitePool;
 
 use crate::index::{IndexBuildFailure, IndexStamp};
+use crate::proactive::ProactiveSink;
 use crate::recall::RecallPolicy;
 use crate::seal::SealHooks;
 
@@ -179,6 +180,8 @@ pub struct Engine {
     /// - 门禁落在 `seal` 用例与空闲检查入口，避免「只写不封存」被惰性体检
     ///   （续写超时会话先封存）或空闲循环绕过。
     seal_allowed: AtomicBool,
+    /// 主动消息投递接收端（宿主注册制；未注册时调度静默丢弃）。
+    proactive_sink: Arc<RwLock<Option<Arc<dyn ProactiveSink>>>>,
 }
 
 #[cfg(test)]

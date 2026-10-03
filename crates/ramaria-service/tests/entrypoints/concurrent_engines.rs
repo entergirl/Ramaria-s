@@ -73,7 +73,9 @@ async fn three_entry_shapes_share_one_db_and_seal_each_session_once() {
         LifecycleOptions::desktop()
             .with_idle_interval(1)
             .with_l2_l3_interval(1)
-            .with_l2_l3_first_delay(1),
+            .with_l2_l3_first_delay(1)
+            .with_proactive_interval(1)
+            .with_proactive_first_delay(1),
     );
 
     // ---- MCP 形态：轻量封存钩子链 + 空闲循环（IdleLoop） ----

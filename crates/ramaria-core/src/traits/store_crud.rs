@@ -277,6 +277,45 @@ pub trait StoreCrud: Send + Sync {
         Ok(None)
     }
 
+    /// 查询指定 persona 会话中用户消息的最近时间（Unix 毫秒）。
+    ///
+    /// 职责:
+    /// - 供主动对话调度做"上次投递后用户是否回应"的退避判定。
+    ///
+    /// 语义:
+    /// - 口径为角色 `user` 的消息（`messages.role = 'user'`），主动消息与助手回复
+    ///   （assistant 角色）均不计入；会话归属以 `sessions.persona_uid` 为准。
+    ///
+    /// 返回:
+    /// - `Ok(Some(ms))`: 最近一条用户消息时间；
+    /// - `Ok(None)`: 无用户消息历史（含未覆写 mock —— 按"无法证明已回应"处理，不阻塞调度）。
+    async fn last_user_message_time_by_persona(
+        &self,
+        _persona_uid: &str,
+    ) -> RamariaResult<Option<i64>> {
+        Ok(None)
+    }
+
+    /// 查询指定 persona 会话中时间窗口内的用户消息时间戳（升序）。
+    ///
+    /// 职责:
+    /// - 供主动对话调度统计用户活跃时段直方图（按本地小时归桶）。
+    ///
+    /// 语义:
+    /// - 只取角色 `user` 的消息时间戳（主动消息不计入）；
+    /// - 窗口由调用方给出（`since_ms` 为下界，闭区间）。
+    ///
+    /// 返回:
+    /// - 时间升序的时间戳列表（默认实现返回空列表：未覆写的 mock 视为"无样本"，
+    ///   时段统计退化不启用）。
+    async fn list_user_message_times_since(
+        &self,
+        _persona_uid: &str,
+        _since_ms: i64,
+    ) -> RamariaResult<Vec<i64>> {
+        Ok(Vec::new())
+    }
+
     /// 统计指定 session 的消息数量。
     ///
     /// 职责:

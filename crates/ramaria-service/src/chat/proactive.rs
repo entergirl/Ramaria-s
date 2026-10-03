@@ -51,11 +51,13 @@ pub(crate) async fn run(
         persona,
         session_id,
         source,
+        topic_key,
         anchor,
         angle,
         tone,
     } = directive;
     let persona = normalize_persona(Some(persona.as_str()));
+    let topic_key = normalize_optional(topic_key);
     let anchor = normalize_optional(anchor);
     let angle = normalize_optional(angle);
     let tone = normalize_optional(tone);
@@ -78,22 +80,9 @@ pub(crate) async fn run(
     }
 
     // ---- 4. 隐私门禁：线上 provider 未确认时静默跳过（存储读取失败上抛） ----
-    let backend = engine.llm_ref().config().clone();
-    if backend.provider.is_online() {
-        let status = crate::privacy::check_privacy(
-            engine.storage_ref().as_ref(),
-            backend.provider,
-            &backend.base_url,
-        )
-        .await?;
-        if !status.is_confirmed() {
-            tracing::debug!(
-                persona = %persona,
-                provider = %backend.provider,
-                "主动生成跳过：线上服务未完成隐私确认"
-            );
-            return Ok(None);
-        }
+    if !crate::privacy::online_privacy_confirmed(engine).await? {
+        tracing::debug!(persona = %persona, "主动生成跳过：线上服务未完成隐私确认");
+        return Ok(None);
     }
 
     // ---- 5. 目标会话预检 ----
@@ -203,6 +192,7 @@ pub(crate) async fn run(
         session_id: prepared.session_id,
         persona: prepared.persona,
         source,
+        topic_key,
     }))
 }
 

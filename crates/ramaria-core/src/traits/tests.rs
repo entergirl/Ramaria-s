@@ -315,3 +315,19 @@ fn store_crud_new_query_defaults_are_passive() {
         "未覆写 mock 的最近对话时间应为 None（无历史）"
     );
 }
+
+/// 用户消息时间查询的默认实现为被动降级（None / 空列表）：
+/// 未覆写 mock 按"无法证明已回应 / 无样本"处理，不报错、不阻塞调度。
+#[test]
+fn store_crud_user_message_time_defaults_are_passive() {
+    let store = BareStore;
+    assert_eq!(
+        futures::executor::block_on(store.last_user_message_time_by_persona("persona-1"))
+            .expect("默认实现不应报错"),
+        None,
+        "未覆写 mock 的用户消息最近时间应为 None"
+    );
+    let times = futures::executor::block_on(store.list_user_message_times_since("persona-1", 0))
+        .expect("默认实现不应报错");
+    assert!(times.is_empty(), "未覆写 mock 的用户消息时间窗口应为空");
+}

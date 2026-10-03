@@ -22,6 +22,8 @@ pub(crate) struct ProactiveDirective {
     pub session_id: Option<Uuid>,
     /// 选题来源标识（如 `event` / `rule` / `time_node` / `light_touch`；仅日志与透传，不参与生成逻辑）。
     pub source: String,
+    /// 选题键（来源内稳定标识，如事件 id 的文本形态；None = 无稳定键，不参与去重冷却）。
+    pub topic_key: Option<String>,
     /// 候选锚点摘要（判据与生成共见；None = 轻触达无具体话题）。
     pub anchor: Option<String>,
     /// 开口角度（None = 未提供）。
@@ -41,4 +43,6 @@ pub(crate) struct ProactiveOutcome {
     pub persona: String,
     /// 选题来源标识（从指令透传）。
     pub source: String,
+    /// 选题键（从指令透传；None = 无稳定键）。
+    pub topic_key: Option<String>,
 }

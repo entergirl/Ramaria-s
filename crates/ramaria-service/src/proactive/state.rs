@@ -7,6 +7,7 @@
 //! - 日志只记状态键名与解析错误，不记状态值内容
 //! - 按画像隔离：同一画像读写同一键，不同画像互不串扰
 
+use chrono::{Local, LocalResult, TimeZone, Timelike};
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::traits::StorageBackend;
 use serde::{Deserialize, Serialize};
@@ -19,7 +20,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// 职责:
 /// - 承载打扰控制与去重冷却所需的跨 tick 数据：上次投递时间、当日计数与归属
-///   日期、连续未回应次数、近期选题记录。
+///   日期、连续未回应次数、近期选题记录、宽限基准与判据节流记账、活跃时段直方图缓存。
 ///
 /// 字段约定:
 /// - `last_sent_at`: 上次成功投递时间（Unix 毫秒；None = 尚未投递过）。
@@ -27,6 +28,11 @@ use serde::{Deserialize, Serialize};
 ///   （本地日期 `YYYY-MM-DD` 文本）；跨日重置由调用方按日期比对执行。
 /// - `silence_streak`: 主动消息后连续未得到用户回应的累计次数（退避依据）。
 /// - `recent_topics`: 近期选题记录（同一事件 / 规则的去重冷却依据）。
+/// - `first_seen_at`: 首次被调度看到的时间（Unix 毫秒）：首次启用宽限期的起算基准，
+///   首次加载时由调度惰性写入。
+/// - `last_judge_at`: 最近一次判据尝试时间（Unix 毫秒）：判据调用节流的记账点。
+/// - `hour_histogram`: 用户活跃时段直方图缓存（按本地小时归桶；None = 尚未统计）。
+/// - `histogram_date`: 直方图缓存归属的本地日期（`YYYY-MM-DD`；跨日刷新）。
 ///
 /// 兼容性:
 /// - 字段级 `#[serde(default)]`：状态 JSON 缺字段（版本演进）时回退字段默认值。
@@ -42,6 +48,19 @@ pub struct ProactiveState {
     pub silence_streak: u32,
     #[serde(default)]
     pub recent_topics: Vec<RecentTopic>,
+    /// 首次被调度看到的时间（Unix 毫秒）：首次启用宽限期的起算基准，
+    /// 首次加载时由调度惰性写入。
+    #[serde(default)]
+    pub first_seen_at: Option<i64>,
+    /// 最近一次判据尝试时间（Unix 毫秒）：判据调用节流的记账点。
+    #[serde(default)]
+    pub last_judge_at: Option<i64>,
+    /// 用户活跃时段直方图缓存（按本地小时归桶；None = 尚未统计）。
+    #[serde(default)]
+    pub hour_histogram: Option<[u32; 24]>,
+    /// 直方图缓存归属的本地日期（`YYYY-MM-DD`；跨日刷新）。
+    #[serde(default)]
+    pub histogram_date: String,
 }
 
 /// 近期选题记录（去重冷却输入）。
@@ -55,6 +74,40 @@ pub struct RecentTopic {
     pub source: String,
     pub key: String,
     pub sent_at: i64,
+}
+
+// =========================================================
+// 本地时间工具
+// =========================================================
+
+/// 计算指定时刻的本地日期文本（`YYYY-MM-DD`）。
+///
+/// 说明:
+/// - 供当日计数归属与直方图缓存归属比较；时间戳超出可表示范围时返回空串
+///   （比较必然不等 → 触发重置 / 刷新，安全方向）。
+pub(crate) fn local_date_str(ms: i64) -> String {
+    match Local.timestamp_millis_opt(ms) {
+        LocalResult::Single(dt) | LocalResult::Ambiguous(dt, _) => {
+            dt.format("%Y-%m-%d").to_string()
+        }
+        LocalResult::None => String::new(),
+    }
+}
+
+/// 计算指定时刻的本地小时（0~23；超范围时间戳安全退化为 0）。
+pub(crate) fn local_hour(ms: i64) -> u32 {
+    match Local.timestamp_millis_opt(ms) {
+        LocalResult::Single(dt) | LocalResult::Ambiguous(dt, _) => dt.hour(),
+        LocalResult::None => 0,
+    }
+}
+
+/// 计算指定时刻在当日的本地分钟数（0~1439；超范围时间戳安全退化为 0）。
+pub(crate) fn local_minute_of_day(ms: i64) -> u32 {
+    match Local.timestamp_millis_opt(ms) {
+        LocalResult::Single(dt) | LocalResult::Ambiguous(dt, _) => dt.hour() * 60 + dt.minute(),
+        LocalResult::None => 0,
+    }
 }
 
 // =========================================================

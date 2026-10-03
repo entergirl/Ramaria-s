@@ -111,6 +111,21 @@ impl StoreCrud for SqliteStorage {
     async fn last_message_time_by_persona(&self, persona_uid: &str) -> RamariaResult<Option<i64>> {
         repo::sessions::last_message_time_by_persona(&self.pool, persona_uid).await
     }
+    /// 覆写为 messages/sessions 联合查询（主动对话退避的回应检测）。
+    async fn last_user_message_time_by_persona(
+        &self,
+        persona_uid: &str,
+    ) -> RamariaResult<Option<i64>> {
+        repo::messages::last_user_message_time_by_persona(&self.pool, persona_uid).await
+    }
+    /// 覆写为窗口内用户消息时间戳查询（主动对话活跃时段统计）。
+    async fn list_user_message_times_since(
+        &self,
+        persona_uid: &str,
+        since_ms: i64,
+    ) -> RamariaResult<Vec<i64>> {
+        repo::messages::list_user_message_times_since(&self.pool, persona_uid, since_ms).await
+    }
     async fn count_messages(&self, session_id: Uuid) -> RamariaResult<u32> {
         repo::messages::count_by_session(&self.pool, session_id).await
     }

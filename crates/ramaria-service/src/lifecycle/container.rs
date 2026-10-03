@@ -1,7 +1,7 @@
 //! crates/ramaria-service/src/lifecycle/container.rs - Ramaria 会话生命周期容器
 //!
 //! 设计特点:
-//! - 与传输无关的生命周期容器：活跃指针、手动关闭、空闲检测、L2/L3 调度与关停统一装配
+//! - 与传输无关的生命周期容器：活跃指针、手动关闭、空闲检测、L2/L3 调度、主动对话调度与关停统一装配
 //! - 宿主差异全部由 [`LifecycleOptions`] 表达（长驻宿主 / 仅空闲检查 / 单次执行），后台循环按选项拉起
 //! - 停止语义：共享原子停止位传入各循环，关停等待在途轮次收敛（超时只记日志，不阻塞退出）
 //! - 降级纪律：LLM 不可用 / 单条数据失败均不阻塞级联与关停，仅记日志后继续
@@ -31,6 +31,12 @@ use super::{LifecycleOptions, idle, l1, l2_l3};
 /// L2/L3 定时调度首轮检查的默认延迟（秒）：避开宿主启动阶段。
 const L2_L3_DEFAULT_FIRST_DELAY_SECONDS: u64 = 300;
 
+/// 主动对话调度首轮检查的默认延迟（秒）：避开宿主启动阶段。
+const PROACTIVE_DEFAULT_FIRST_DELAY_SECONDS: u64 = 60;
+
+/// 主动对话检查间隔下限（秒）：防配置误设过小造成热循环（配置缺省 300s，远大于下限）。
+const MIN_PROACTIVE_CHECK_INTERVAL_SECONDS: u64 = 30;
+
 /// 启动期 L1 补扫的延迟（秒）：先让索引构建与首轮对话完成。
 const STARTUP_L1_RETRY_DELAY_SECONDS: u64 = 30;
 
@@ -41,12 +47,12 @@ const SHUTDOWN_WAIT_TIMEOUT_SECONDS: u64 = 15;
 // 生命周期容器
 // =========================================================
 
-/// 会话生命周期容器：活跃指针、手动关闭、空闲检测、L2/L3 调度与关停。
+/// 会话生命周期容器：活跃指针、手动关闭、空闲检测、L2/L3 调度、主动对话调度与关停。
 ///
 /// 职责:
 /// - 活跃会话指针与各会话最后活跃时间的内存缓存（宿主每条消息落库后调用 `touch_session`）；
 /// - 手动关闭活跃会话（抢占式封存，同一会话只生成一份摘要）；
-/// - 按 [`LifecycleOptions`] 拉起空闲检查线程、L2/L3 调度与启动期 L1 补扫；
+/// - 按 [`LifecycleOptions`] 拉起空闲检查线程、L2/L3 调度、主动对话调度与启动期 L1 补扫；
 /// - 优雅关停：置停止位 → 关闭活跃会话（落库）→ 等待在途轮次结束。
 ///
 /// 并发约定:
@@ -67,6 +73,8 @@ pub struct Lifecycle {
     idle_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// L2/L3 调度循环句柄（None = 未拉起，或关停时已取走等待）。
     l2_l3_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// 主动对话调度循环句柄（None = 未拉起，或关停时已取走等待）。
+    proactive_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl Lifecycle {
@@ -87,6 +95,7 @@ impl Lifecycle {
             shutdown_flag: Arc::new(AtomicBool::new(false)),
             idle_handle: Mutex::new(None),
             l2_l3_handle: Mutex::new(None),
+            proactive_handle: Mutex::new(None),
         });
 
         // ---- 空闲检查循环（间隔：覆盖值或配置值夹取下限） ----
@@ -115,6 +124,26 @@ impl Lifecycle {
             *lock_recover(&lifecycle.l2_l3_handle, "lifecycle.l2_l3_handle") = Some(handle);
         }
 
+        // ---- 主动对话调度循环（仅桌面宿主装配；总开关由每轮 tick 读取配置判定）----
+        if options.proactive {
+            let interval_seconds = options.proactive_interval_seconds.unwrap_or_else(|| {
+                clamp_proactive_interval(engine.config().proactive.check_interval_seconds as u64)
+            });
+            let first_delay_seconds = options
+                .proactive_first_delay_seconds
+                .unwrap_or(PROACTIVE_DEFAULT_FIRST_DELAY_SECONDS);
+            let picker: Arc<dyn crate::proactive::TopicPicker> =
+                Arc::new(crate::proactive::NoopTopicPicker);
+            let handle = crate::proactive::spawn(
+                Arc::clone(&engine),
+                Arc::clone(&lifecycle.shutdown_flag),
+                first_delay_seconds,
+                interval_seconds,
+                picker,
+            );
+            *lock_recover(&lifecycle.proactive_handle, "lifecycle.proactive_handle") = Some(handle);
+        }
+
         // ---- 启动期 L1 补扫（独立任务，不纳入句柄；由停止位提前退出） ----
         if options.startup_l1_retry {
             let retry_engine = Arc::clone(&engine);
@@ -134,6 +163,7 @@ impl Lifecycle {
         info!(
             idle = options.idle,
             l2_l3 = options.l2_l3,
+            proactive = options.proactive,
             startup_l1_retry = options.startup_l1_retry,
             "会话生命周期已拉起"
         );
@@ -231,6 +261,13 @@ impl Lifecycle {
     /// L2/L3 调度循环是否在运行（未收停止信号且任务未结束）。
     pub fn l2_l3_running(&self) -> bool {
         let handle = lock_recover(&self.l2_l3_handle, "lifecycle.l2_l3_handle");
+        handle.as_ref().is_some_and(|h| !h.is_finished())
+            && !self.shutdown_flag.load(Ordering::Acquire)
+    }
+
+    /// 主动对话调度循环是否在运行（未收停止信号且任务未结束）。
+    pub fn proactive_running(&self) -> bool {
+        let handle = lock_recover(&self.proactive_handle, "lifecycle.proactive_handle");
         handle.as_ref().is_some_and(|h| !h.is_finished())
             && !self.shutdown_flag.load(Ordering::Acquire)
     }
@@ -357,7 +394,7 @@ impl Lifecycle {
     /// 顺序:
     /// 1. 置 `shutdown_flag`（后台循环在下一轮感知后退出）；
     /// 2. 关闭活跃会话（失败只记 error，不向上抛——退出流程不因单点失败中断）；
-    /// 3. 取走两个循环句柄，各自按 15 秒上限等待（超时只 warn，不强杀任务）。
+    /// 3. 取走三个循环句柄，各自按 15 秒上限等待（超时只 warn，不强杀任务）。
     ///
     /// 说明:
     /// - 可重复调用（第二次为空操作）；
@@ -408,6 +445,22 @@ impl Lifecycle {
             }
         }
 
+        let proactive_handle = {
+            let mut guard = lock_recover(&self.proactive_handle, "lifecycle.proactive_handle");
+            guard.take()
+        };
+        if let Some(handle) = proactive_handle {
+            let timeout = Duration::from_secs(SHUTDOWN_WAIT_TIMEOUT_SECONDS);
+            match tokio::time::timeout(timeout, handle).await {
+                Ok(Ok(())) => debug!("主动对话调度循环已退出"),
+                Ok(Err(e)) => warn!(error = %e, "主动对话调度循环异常结束"),
+                Err(_) => warn!(
+                    timeout_seconds = SHUTDOWN_WAIT_TIMEOUT_SECONDS,
+                    "主动对话调度循环未在超时内退出，放弃等待"
+                ),
+            }
+        }
+
         info!("会话生命周期关停完成");
     }
 }
@@ -424,6 +477,22 @@ fn clamp_idle_interval(configured: u64) -> u64 {
             configured,
             used = interval,
             "空闲检查间隔配置过小，已按下限夹取（避免热循环）"
+        );
+    }
+    interval
+}
+
+/// 夹取配置侧的主动对话检查间隔到下限（防配置误设过小造成热循环）。
+///
+/// 说明:
+/// - 与空闲检查同口径：仅对配置值夹取并 warn；显式覆盖值视为调用方自保证，不做下限夹取。
+fn clamp_proactive_interval(configured: u64) -> u64 {
+    let interval = configured.max(MIN_PROACTIVE_CHECK_INTERVAL_SECONDS);
+    if interval != configured {
+        warn!(
+            configured,
+            used = interval,
+            "主动对话检查间隔配置过小，已按下限夹取（避免热循环）"
         );
     }
     interval

@@ -214,6 +214,26 @@ pub(crate) async fn confirm(engine: &Engine, persistent: bool) -> RamariaResult<
     .await
 }
 
+/// 线上 provider 的隐私确认判定（主动调度与主动生成共用的只读门禁）。
+///
+/// 返回:
+/// - `Ok(true)`: 本地 provider，或线上 provider 已完成确认（放行）；
+/// - `Ok(false)`: 线上 provider 未完成确认（调用方静默跳过）；
+/// - `Err`: 隐私记录读取失败。
+pub(crate) async fn online_privacy_confirmed(engine: &Engine) -> RamariaResult<bool> {
+    let backend = engine.llm_ref().config().clone();
+    if !backend.provider.is_online() {
+        return Ok(true);
+    }
+    let status = check_privacy(
+        engine.storage_ref().as_ref(),
+        backend.provider,
+        &backend.base_url,
+    )
+    .await?;
+    Ok(status.is_confirmed())
+}
+
 /// DB 侧后端配置（无记录回退本地 provider 默认值）。
 async fn effective_backend_config(engine: &Engine) -> RamariaResult<BackendConfig> {
     Ok(engine

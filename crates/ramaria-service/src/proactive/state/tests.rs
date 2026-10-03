@@ -22,6 +22,10 @@ fn sample_state() -> ProactiveState {
             key: "42".to_string(),
             sent_at: 1_700_000_000_000,
         }],
+        first_seen_at: Some(1_699_000_000_000),
+        last_judge_at: Some(1_700_000_100_000),
+        hour_histogram: Some([1; 24]),
+        histogram_date: "2026-10-02".to_string(),
     }
 }
 
@@ -132,4 +136,55 @@ async fn state_key_shape_is_stable() {
     );
 
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 旧版 JSON（缺新增字段）解析：旧字段保留、新字段回退默认值。
+#[tokio::test]
+async fn legacy_json_without_new_fields_falls_back() {
+    let (_engine, storage, dir) = engine_with_db("proactive-state-legacy").await;
+
+    storage
+        .set_setting(
+            "proactive.state.char-0001",
+            r#"{"last_sent_at":1700000000000,"daily_count":2,"daily_date":"2026-10-02",
+               "silence_streak":1,"recent_topics":[{"source":"event","key":"42","sent_at":1700000000000}]}"#,
+        )
+        .await
+        .expect("写入旧版状态应成功");
+    let state = load_state(storage.as_ref(), "char-0001")
+        .await
+        .expect("读取应成功");
+    assert_eq!(state.daily_count, 2, "旧字段应保留");
+    assert_eq!(state.silence_streak, 1);
+    assert_eq!(state.first_seen_at, None, "缺 first_seen_at 应回退默认");
+    assert_eq!(state.last_judge_at, None, "缺 last_judge_at 应回退默认");
+    assert_eq!(state.hour_histogram, None, "缺 hour_histogram 应回退默认");
+    assert_eq!(state.histogram_date, "", "缺 histogram_date 应回退默认");
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 本地时间工具与 `chrono::Local` 同口径（本地时区自洽 + 超范围安全退化）。
+#[test]
+fn local_time_helpers_agree_with_local_now() {
+    let now = chrono::Local::now();
+    let ms = now.timestamp_millis();
+    assert_eq!(local_date_str(ms), now.format("%Y-%m-%d").to_string());
+    assert_eq!(local_hour(ms), now.hour());
+    assert_eq!(local_minute_of_day(ms), now.hour() * 60 + now.minute());
+
+    // 固定本地时刻：小时 / 当日分钟 / 日期文本自洽
+    let fixed = chrono::Local
+        .with_ymd_and_hms(2026, 1, 15, 10, 30, 0)
+        .single()
+        .expect("固定本地时刻应可表示");
+    let fixed_ms = fixed.timestamp_millis();
+    assert_eq!(local_date_str(fixed_ms), "2026-01-15");
+    assert_eq!(local_hour(fixed_ms), 10);
+    assert_eq!(local_minute_of_day(fixed_ms), 10 * 60 + 30);
+
+    // 超范围时间戳：安全退化（空串 / 0），不 panic
+    assert_eq!(local_date_str(i64::MAX), "");
+    assert_eq!(local_hour(i64::MAX), 0);
+    assert_eq!(local_minute_of_day(i64::MIN), 0);
 }

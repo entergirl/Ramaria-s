@@ -25,8 +25,8 @@
 //! - `export`：会话导出数据装配用例（会话集合 + 消息 + 人格 L1 摘要段）；
 //! - `utt`：utt 话语块重建用例（配置读取 / 强制重切 / 索引刷新）；
 //! - `l2`：L2 事件提取触发（无 app 宿主的运行时用）；
-//! - `lifecycle`：会话生命周期容器（活跃指针 / 手动关闭 / 空闲检查线程 / L2-L3 调度 / 关停）
-//!   与 L1 摘要重生成 / 补扫，后台定时链路与手动触发共用；
+//! - `lifecycle`：会话生命周期容器（活跃指针 / 手动关闭 / 空闲检查线程 / L2-L3 调度 /
+//!   主动对话调度 / 关停）与 L1 摘要重生成 / 补扫，后台定时链路与手动触发共用；
 //! - `fact_extract`：知识事实自动抽取编排（`[knowledge].auto_fact_detect` 增强层）；
 //! - `hooks`：封存钩子默认装配（轻量链 / 完整链两套，供入口按响应语义注册）；
 //! - `stream_event`：流式事件领域模型（Delta / Done / Error）与事件流句柄；
@@ -103,6 +103,7 @@ pub use model::{
 };
 pub use persona::{PersonaLoadMode, PersonaRegenerateOutcome};
 pub use privacy::PrivacyStatus;
+pub use proactive::{ProactiveMessage, ProactiveSink};
 pub use recall::RecallPolicy;
 pub use seal::{SealHook, SealHooks};
 pub use settings::mask_api_key;
