@@ -1997,6 +1997,12 @@ var RamariaChatView = (function () {
 
     return {
         init: init,
+        /** 打开指定会话（主动消息通知点击定位入口；已打开时跳过，避免重复加载） */
+        openSession: function (sessionId) {
+            if (!sessionId) return;
+            if (RamariaStore.get('activeSessionId') === sessionId) return;
+            return _onSessionDrawerSelect(sessionId, null);
+        },
         destroy: function () {
             _unlistenAll();
             for (var i = 0; i < _unregisterFns.length; i++) {

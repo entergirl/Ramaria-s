@@ -17,11 +17,13 @@ mod commands;
 mod events;
 mod notification;
 mod path_guard;
+mod proactive;
 mod tray;
 mod webview;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tauri::Manager;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 // =========================================================
@@ -433,6 +435,14 @@ pub fn run() {
             tray::confirm_close_action,
         ])
         .setup(move |app| {
+            // 注册主动消息投递接收端：emit 事件 + 系统通知（点击聚焦并定位会话）。
+            // 须在调度循环首次投递前就位；未注册时服务层调度静默丢弃。
+            let engine = app.state::<DesktopState>().engine.clone();
+            engine.set_proactive_sink(Arc::new(proactive::TauriProactiveSink::new(
+                app.handle().clone(),
+            )));
+            tracing::info!("主动消息投递接收端已注册");
+
             // 初始化系统托盘
             if let Err(e) = tray::setup_tray(app.handle()) {
                 tracing::error!(error = %e, "系统托盘初始化失败，应用继续运行");

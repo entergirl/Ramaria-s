@@ -591,12 +591,17 @@ fn browse_and_keyword_views_serde_roundtrip() {
             created_at: 1_756_000_000_001,
             source: MessageSource::Local,
             persona_uid: Some("char-0001".to_string()),
+            is_proactive: true,
         }],
     };
     let json = serde_json::to_string(&detail).expect("序列化成功");
     assert!(
         json.contains("\"role\":\"user\""),
         "role 应小写序列化: {json}"
+    );
+    assert!(
+        json.contains("\"is_proactive\":true"),
+        "is_proactive 应序列化透出: {json}"
     );
     let back: SessionDetailView = serde_json::from_str(&json).expect("反序列化成功");
     assert_eq!(detail, back);

@@ -47,6 +47,6 @@ tauri-build = { version = "2", features = [] }
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }
 
-# Windows 通知点击回调（插件桌面侧无回调接口，验证直用底层 winrt toast 的 on_activated 链路）
-[target.'cfg(windows)'.dev-dependencies]
+# Windows 通知点击回调（插件桌面侧无回调接口，主动消息通知直用底层 winrt toast）
+[target.'cfg(windows)'.dependencies]
 tauri-winrt-notification = "0.7"

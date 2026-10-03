@@ -16,6 +16,9 @@
 use tauri::{AppHandle, Runtime};
 use tauri_plugin_notification::NotificationExt;
 
+#[cfg(windows)]
+use tauri_winrt_notification::{Duration as ToastDuration, Toast};
+
 /// 通知内容长度限制
 const MAX_TITLE_LEN: usize = 60;
 /// 通知正文字符上限
@@ -26,6 +29,16 @@ const CHAT_NOTIFICATION_TITLE: &str = "Ramaria 回复";
 
 /// 聊天回复通知正文预览长度（从回复中截取前 N 个字符）
 const CHAT_PREVIEW_LEN: usize = 80;
+
+/// 主动消息通知标题
+const PROACTIVE_NOTIFICATION_TITLE: &str = "Ramaria";
+
+/// 主动消息通知正文预览长度（字符数上限）
+const PROACTIVE_PREVIEW_LEN: usize = 80;
+
+/// 应用标识（与 tauri.conf.json 的 identifier 一致；安装版通知使用该身份）
+#[cfg(windows)]
+const APP_IDENTIFIER: &str = "com.ramaria.app";
 
 // =========================================================
 // 公开 API
@@ -121,6 +134,50 @@ pub fn send_chat_notification<R: Runtime>(
     send_notification(app_handle, CHAT_NOTIFICATION_TITLE, &body);
 }
 
+/// 发送主动消息通知（Windows 上注册点击回调）。
+///
+/// 参数:
+/// - `app_handle`: Tauri AppHandle（非 Windows 回退路径使用）。
+/// - `content`: 主动消息全文（仅取预览进通知；不进日志）。
+/// - `on_click`: 通知点击回调（在 toast 事件线程执行，实现须快速返回）。
+///
+/// 说明:
+/// - Windows: 直连 winrt toast（插件桌面侧不暴露点击回调）；
+/// - 非 Windows: 回退 `send_notification` 插件路径（无点击回调能力）；
+/// - 发送失败仅记日志（静默降级，不传播错误）。
+pub fn send_proactive_notification<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    content: &str,
+    on_click: impl Fn() + Send + 'static,
+) {
+    let body = proactive_body(content);
+    tracing::debug!(body_chars = body.chars().count(), "发送主动消息通知");
+
+    #[cfg(windows)]
+    {
+        let _ = app_handle;
+        let app_id = select_toast_app_id(cfg!(debug_assertions));
+        let result = Toast::new(app_id)
+            .title(PROACTIVE_NOTIFICATION_TITLE)
+            .text1(&body)
+            .duration(ToastDuration::Short)
+            .on_activated(move |_action| {
+                on_click();
+                Ok(())
+            })
+            .show();
+        if let Err(e) = result {
+            tracing::warn!(error = %e, "主动消息通知发送失败（静默降级）");
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = on_click;
+        send_notification(app_handle, PROACTIVE_NOTIFICATION_TITLE, &body);
+    }
+}
+
 // =========================================================
 // 辅助函数
 // =========================================================
@@ -140,6 +197,34 @@ pub fn send_chat_notification<R: Runtime>(
 /// - 截断后的字符串（如果原字符串 ≤ max_len 则返回原样的 &str）
 fn truncate_str(s: &str, max_len: usize) -> &str {
     ramaria_core::text::truncate_char_boundary(s, max_len)
+}
+
+/// 主动消息通知正文：按字符安全截断为预览（超长加省略号）。
+///
+/// 参数:
+/// - `content`: 主动消息全文。
+///
+/// 返回:
+/// - 空串 → 空串；不超过上限 → 原样；超长 → 截断到上限 + "…"。
+fn proactive_body(content: &str) -> String {
+    if content.is_empty() {
+        return String::new();
+    }
+    if content.chars().count() <= PROACTIVE_PREVIEW_LEN {
+        return content.to_string();
+    }
+    format!("{}…", truncate_str(content, PROACTIVE_PREVIEW_LEN))
+}
+
+/// 选择 toast 应用标识：debug 构建用 PowerShell 兜底身份（开发态未注册自定义
+/// AUMID），release 构建用安装身份。
+#[cfg(windows)]
+fn select_toast_app_id(debug_build: bool) -> &'static str {
+    if debug_build {
+        Toast::POWERSHELL_APP_ID
+    } else {
+        APP_IDENTIFIER
+    }
 }
 
 // =========================================================
@@ -179,5 +264,50 @@ mod tests {
             assert!(MAX_BODY_LEN > 0 && MAX_BODY_LEN <= 500);
             assert!(CHAT_PREVIEW_LEN > 0 && CHAT_PREVIEW_LEN <= 200);
         }
+    }
+
+    // ---- 主动消息通知 ----
+
+    /// 正文预览边界：空 / 短 / 恰好上限 / 超长中文 / 超一字符。
+    #[test]
+    fn proactive_body_bounds() {
+        assert_eq!(proactive_body(""), "", "空串应返回空串");
+        assert_eq!(proactive_body("你好"), "你好", "短文本应原样");
+
+        let exact = "甲".repeat(PROACTIVE_PREVIEW_LEN);
+        assert_eq!(proactive_body(&exact), exact, "恰好上限应原样不截断");
+
+        let over_cn = "珊瑚".repeat(60);
+        let body = proactive_body(&over_cn);
+        assert_eq!(
+            body,
+            format!("{}…", truncate_str(&over_cn, PROACTIVE_PREVIEW_LEN)),
+            "超长中文应截断加省略号"
+        );
+        assert_eq!(body.chars().count(), PROACTIVE_PREVIEW_LEN + 1);
+
+        let over_ascii = "a".repeat(PROACTIVE_PREVIEW_LEN + 1);
+        assert_eq!(
+            proactive_body(&over_ascii),
+            format!("{}…", "a".repeat(PROACTIVE_PREVIEW_LEN)),
+            "超一字符应截断"
+        );
+    }
+
+    /// toast 应用标识：debug 走 PowerShell 兜底身份，release 走安装身份。
+    #[cfg(windows)]
+    #[test]
+    fn select_toast_app_id_by_build_profile() {
+        assert_eq!(
+            select_toast_app_id(true),
+            Toast::POWERSHELL_APP_ID,
+            "debug 构建应使用 PowerShell 兜底身份"
+        );
+        assert_eq!(
+            select_toast_app_id(false),
+            APP_IDENTIFIER,
+            "release 构建应使用安装身份"
+        );
+        assert_eq!(select_toast_app_id(false), "com.ramaria.app");
     }
 }

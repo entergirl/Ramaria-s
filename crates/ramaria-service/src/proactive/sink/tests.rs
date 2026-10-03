@@ -39,6 +39,7 @@ impl ProactiveSink for RecordingSink {
 /// 构造一条投递负载（合成数据）。
 fn sample_message() -> ProactiveMessage {
     ProactiveMessage {
+        message_id: Uuid::new_v4(),
         content: "主动消息内容".to_string(),
         session_id: Uuid::new_v4(),
         persona: "char-0001".to_string(),

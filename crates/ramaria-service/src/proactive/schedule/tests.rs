@@ -638,6 +638,10 @@ async fn tick_generates_and_delivers_full_chain() {
     assert_eq!(messages.len(), 1, "新建会话应仅落库 1 条");
     assert_eq!(messages[0].role, MessageRole::Assistant);
     assert!(messages[0].is_proactive, "应为主动消息");
+    assert_eq!(
+        message.message_id, messages[0].id,
+        "投递负载应携带落库消息 id"
+    );
 
     // 状态记账：投递时间 / 当日计数 / 退避计数 / 选题冷却
     let reloaded = reload_state(&storage).await;

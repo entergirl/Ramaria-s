@@ -494,6 +494,7 @@ fn deliver(engine: &Engine, outcome: &ProactiveOutcome, now: i64) -> bool {
         }
         Some(sink) => {
             let message = ProactiveMessage {
+                message_id: outcome.message_id,
                 content: outcome.content.clone(),
                 session_id: outcome.session_id,
                 persona: outcome.persona.clone(),

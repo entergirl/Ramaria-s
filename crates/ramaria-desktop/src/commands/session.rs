@@ -94,6 +94,8 @@ pub struct MessageView {
     pub content: String,
     pub persona_uid: Option<String>,
     pub created_at: i64,
+    /// 主动生成标记（后端主动对话路径写入 true；常规消息恒 false）
+    pub is_proactive: bool,
 }
 
 /// 由服务层会话详情视图构造前端详情（字段映射的唯一入口，便于单测锁定）。
@@ -120,6 +122,7 @@ fn message_view(m: &ramaria_service::SessionMessageView) -> MessageView {
         content: m.content.clone(),
         persona_uid: m.persona_uid.clone(),
         created_at: m.created_at,
+        is_proactive: m.is_proactive,
     }
 }
 
@@ -317,6 +320,7 @@ mod tests {
                 created_at: 1_700_000_030_000,
                 source: MessageSource::Local,
                 persona_uid: Some("char-0001".to_string()),
+                is_proactive: true,
             }],
         };
 
@@ -334,6 +338,7 @@ mod tests {
         assert_eq!(msg.content, "你好");
         assert_eq!(msg.persona_uid.as_deref(), Some("char-0001"));
         assert_eq!(msg.created_at, 1_700_000_030_000);
+        assert!(msg.is_proactive, "主动标记应透传");
 
         // 未关闭会话：ended_at 为 None 保持；全量加载 has_more false
         let open = ramaria_service::SessionDetailView {

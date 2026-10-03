@@ -121,6 +121,7 @@ var RamariaSettingsView = (function () {
         _renderEmbeddingSection(basicPane);
         _renderMemoryInjectionSection(basicPane);
         _renderSessionSection(basicPane);
+        _renderProactiveSection(basicPane);
         _renderPrivacySection(basicPane);
         _renderDataDirSection(basicPane);
         _renderMcpSection(basicPane);
@@ -1305,6 +1306,150 @@ var RamariaSettingsView = (function () {
         return null;
     }
 
+// =========================================================
+// 主动对话区块（主动消息调度总开关与打扰控制入口）
+// =========================================================
+
+    /** 免打扰时段格式（HH:MM-HH:MM，24 小时制，支持跨零点） */
+    var _QUIET_HOURS_PATTERN = /^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$/;
+
+    /**
+     * 渲染「主动对话」区块（基础设置页）。
+     *
+     * 说明:
+     * - 四键为日常可达项（总开关 / 每日上限 / 最小空闲 / 免打扰时段）；
+     *   检查节拍、判据与选题权重等调度参数在高级设置「主动对话」组。
+     */
+    function _renderProactiveSection(parent) {
+        var section = document.createElement('div');
+        section.className = 'settings-section';
+        section.innerHTML =
+            '<div class="settings-section-title">🗨️ 主动对话</div>' +
+            '<div class="settings-section-desc">系统会在合适时机主动发来消息；免打扰时段内不会打扰。</div>';
+
+        var card = document.createElement('div');
+        card.className = 'settings-card';
+        card.id = 'settings-proactive-card';
+        card.innerHTML =
+            '<div class="settings-form-group">' +
+                '<label class="settings-form-label">' +
+                    '<input type="checkbox" id="settings-proactive-enabled" checked /> 启用主动对话' +
+                '</label>' +
+                '<div class="settings-form-hint">关闭后不调度、不投递主动消息（总开关）。</div>' +
+            '</div>' +
+            '<div class="settings-form-group">' +
+                '<label class="settings-form-label">每日投递上限（条）</label>' +
+                '<input class="settings-form-input" id="settings-proactive-daily-limit" type="number" min="1" max="10" value="3" />' +
+                '<div class="settings-form-hint">每个画像每日最多主动投递条数（1~10）。</div>' +
+            '</div>' +
+            '<div class="settings-form-group">' +
+                '<label class="settings-form-label">最小空闲时长（小时）</label>' +
+                '<input class="settings-form-input" id="settings-proactive-min-idle" type="number" min="1" max="48" value="4" />' +
+                '<div class="settings-form-hint">距上次对话满该时长后才可能主动发起（1~48）。</div>' +
+            '</div>' +
+            '<div class="settings-form-group">' +
+                '<label class="settings-form-label">免打扰时段</label>' +
+                '<input class="settings-form-input" id="settings-proactive-quiet-hours" type="text" placeholder="22:00-08:00" />' +
+                '<div class="settings-form-hint">HH:MM-HH:MM 格式，支持跨零点（如 22:00-08:00）。</div>' +
+            '</div>' +
+            '<div class="settings-save-hint">' +
+                '<button class="btn btn-primary btn-sm" id="settings-save-proactive">保存主动对话设置</button>' +
+            '</div>';
+
+        section.appendChild(card);
+        parent.appendChild(section);
+
+        // 绑定事件
+        var saveBtn = $('settings-save-proactive');
+        if (saveBtn) saveBtn.addEventListener('click', _handleSaveProactive);
+    }
+
+    /**
+     * 回显主动对话表单（配置缺失的字段保留 HTML 默认值）。
+     */
+    function _fillProactiveForm(config) {
+        var proactive = config && config.proactive;
+        if (!proactive) return;
+
+        var enabledEl = $('settings-proactive-enabled');
+        if (enabledEl && typeof proactive.enabled === 'boolean') {
+            enabledEl.checked = proactive.enabled;
+        }
+
+        var dailyEl = $('settings-proactive-daily-limit');
+        if (dailyEl && typeof proactive.daily_limit === 'number') {
+            dailyEl.value = proactive.daily_limit;
+        }
+
+        var idleEl = $('settings-proactive-min-idle');
+        if (idleEl && typeof proactive.min_idle_hours === 'number') {
+            idleEl.value = proactive.min_idle_hours;
+        }
+
+        var quietEl = $('settings-proactive-quiet-hours');
+        if (quietEl && typeof proactive.quiet_hours === 'string') {
+            quietEl.value = proactive.quiet_hours;
+        }
+    }
+
+    /**
+     * 保存主动对话设置（读当前值 → 完整配置更新，后端校验并热生效）。
+     */
+    async function _handleSaveProactive() {
+        try {
+            if (!_fullConfig) {
+                throw new Error('配置未加载，请刷新设置页后重试');
+            }
+
+            var enabledEl = $('settings-proactive-enabled');
+            var dailyEl = $('settings-proactive-daily-limit');
+            var idleEl = $('settings-proactive-min-idle');
+            var quietEl = $('settings-proactive-quiet-hours');
+
+            var dailyRaw = dailyEl ? dailyEl.value.trim() : '';
+            var dailyLimit = parseInt(dailyRaw, 10);
+            if (!/^\d+$/.test(dailyRaw) || dailyLimit < 1 || dailyLimit > 10) {
+                RamariaToast.show('warning', '每日投递上限需为 1~10 的整数');
+                return;
+            }
+
+            var idleRaw = idleEl ? idleEl.value.trim() : '';
+            var minIdle = parseInt(idleRaw, 10);
+            if (!/^\d+$/.test(idleRaw) || minIdle < 1 || minIdle > 48) {
+                RamariaToast.show('warning', '最小空闲时长需为 1~48 的整数（小时）');
+                return;
+            }
+
+            var quietHours = quietEl ? quietEl.value.trim() : '';
+            if (!_QUIET_HOURS_PATTERN.test(quietHours)) {
+                RamariaToast.show('warning', '免打扰时段格式应为 HH:MM-HH:MM（如 22:00-08:00）');
+                return;
+            }
+
+            // 深拷贝后仅改 proactive 四键，其余字段原样回写
+            var cfg = JSON.parse(JSON.stringify(_fullConfig));
+            if (!cfg.proactive) cfg.proactive = {};
+            cfg.proactive.enabled = !!(enabledEl && enabledEl.checked);
+            cfg.proactive.daily_limit = dailyLimit;
+            cfg.proactive.min_idle_hours = minIdle;
+            cfg.proactive.quiet_hours = quietHours;
+
+            var result = await RamariaApi.config.updateFull(cfg);
+            if (result && result.fileOk === false && result.dbOk === false) {
+                throw new Error('配置双写均失败');
+            }
+            // 后端保存成功后已热更新运行时参数（无需重启）
+            if (!_fullConfig.proactive) _fullConfig.proactive = {};
+            _fullConfig.proactive.enabled = cfg.proactive.enabled;
+            _fullConfig.proactive.daily_limit = dailyLimit;
+            _fullConfig.proactive.min_idle_hours = minIdle;
+            _fullConfig.proactive.quiet_hours = quietHours;
+            RamariaToast.show('success', '主动对话设置已保存（立即生效）');
+        } catch (err) {
+            RamariaToast.show('error', '保存主动对话设置失败', err.message || '未知错误');
+        }
+    }
+
  /**
  * 填充嵌入模型配置表单。
  */
@@ -1949,7 +2094,7 @@ var RamariaSettingsView = (function () {
      *
      * 字段约定:
      * - `path`: 组内相对路径（数组，支持嵌套；完整路径由 `section` 前缀拼接）。
-     * - `type`: `number` | `bool` | `whitelist` | `order`。
+     * - `type`: `number` | `bool` | `whitelist` | `order` | `text`。
      * - `def`: 默认值（恢复默认与默认值标注用；`whitelist` / `order` 为数组）。
      * - `options`: `whitelist` / `order` 使用（可选值列表 {value, label}）。
      * - `order` 语义：数组顺序 = 保留优先级（高优先在前），UI 通过上/下移调整，
@@ -2202,6 +2347,35 @@ var RamariaSettingsView = (function () {
                 { path: ['causal_latency_emotion_trend'], label: '因果时延+情绪走势', type: 'bool', def: true, hint: 'false = 回退 v1.7 仅链长/循环模式' },
             ],
         },
+        {
+            key: 'proactive',
+            section: ['proactive'],
+            title: '🗨️ 主动对话（主动消息调度）',
+            desc: '系统主动发起对话的调度节拍、打扰控制与选题权重；修改立即生效。',
+            fields: [
+                { path: ['enabled'], label: '主动对话总开关', type: 'bool', def: true, hint: '关闭后不调度、不投递' },
+                { path: ['check_interval_seconds'], label: '调度检查间隔（秒）', type: 'number', min: 30, def: 300, hint: '决定「是否触发」的判定频率' },
+                { path: ['min_idle_hours'], label: '最小空闲时长（小时）', type: 'number', def: 4, hint: '距上次对话满该时长才可能主动发起' },
+                { path: ['daily_limit'], label: '每日投递上限（条）', type: 'number', def: 3, hint: '每个画像每日最多主动投递条数' },
+                { path: ['quiet_hours'], label: '免打扰时段', type: 'text', def: '22:00-08:00', validate: 'quiet_hours', hint: 'HH:MM-HH:MM 格式，支持跨零点（如 22:00-08:00）' },
+                { path: ['cooldown_hours'], label: '投递冷却（小时）', type: 'number', def: 8, hint: '两次主动投递之间的最短间隔' },
+                { path: ['judge_enabled'], label: 'AI 判据开关', type: 'bool', def: true, hint: '关闭后由算法打分直接决策' },
+                { path: ['judge_interval_hours'], label: '判据节流间隔（小时）', type: 'number', def: 3, hint: '两次判据调用之间的最短间隔' },
+                { path: ['active_hours_weight'], label: '活跃时段加权强度', type: 'number', step: 0.1, min: 0, max: 1, def: 0.8, hint: '越高越偏向用户活跃时段' },
+                { path: ['active_hours_window_days'], label: '活跃时段统计窗口（天）', type: 'number', def: 30, hint: '活跃时段建模的滚动窗口' },
+                { path: ['active_hours_min_samples'], label: '时段建模样本门槛', type: 'number', def: 50, hint: '样本不足时不启用时段加权' },
+                { path: ['valence_weight'], label: '效价入权强度', type: 'number', step: 0.1, min: 0, max: 1, def: 0.5, hint: '越高情绪波动大的记忆越优先' },
+                { path: ['confidence_floor'], label: '事件置信度门槛', type: 'number', step: 0.1, min: 0, max: 1, def: 0.6, hint: '低于此值的事件不进入主动选题' },
+                { path: ['light_touch_weight'], label: '轻触达兜底权重', type: 'number', step: 0.1, min: 0, max: 1, def: 0.3, hint: '轻触达兜底候选的选题权重' },
+                { path: ['event_salience_threshold'], label: '事件显著性门槛', type: 'number', step: 0.1, min: 0, max: 1, def: 0.6, hint: '低于此值的事件不进入主动选题' },
+                { path: ['event_window_days'], label: '事件时间窗（天）', type: 'number', def: 14, hint: '仅近 N 天内结束的事件参与选题' },
+                { path: ['unresolved_valence_threshold'], label: '未了结负效价阈值', type: 'number', step: 0.1, min: -1, max: 0, def: -0.3, hint: 'valence 低于此值视为负面情绪事件' },
+                { path: ['follow_up_days'], label: '跟进点（天）', type: 'number', def: 3, hint: '事件结束后第 N 天作为跟进时机' },
+                { path: ['topic_cooldown_hours'], label: '选题去重冷却（小时）', type: 'number', def: 24, hint: '同一选题键在冷却窗口内不复选（与投递冷却独立）' },
+                { path: ['silence_backoff_days'], label: '沉默退避阈值（天）', type: 'number', def: 3, hint: '连续未回应达到后进入退避（降频 / 暂停）' },
+                { path: ['startup_grace_days'], label: '首次启用宽限期（天）', type: 'number', def: 3, hint: '首次启用后的宽限期内不触发' },
+            ],
+        },
     ];
 
     /**
@@ -2288,6 +2462,14 @@ var RamariaSettingsView = (function () {
                         _orderItemsHtml(f, f.def) +
                     '</div>' +
                     '<div class="settings-form-hint">' + f.hint + '（默认：' + f.def.join(' → ') + '）</div>' +
+                '</div>';
+            } else if (f.type === 'text') {
+                html += '<div class="settings-form-group">' +
+                    '<label class="settings-form-label">' + f.label + '</label>' +
+                    '<input class="settings-form-input" id="' + fid + '" type="text"' +
+                        (f.placeholder ? ' placeholder="' + f.placeholder + '"' : '') +
+                        ' value="' + f.def + '" />' +
+                    '<div class="settings-form-hint">' + f.hint + '（默认：' + f.def + '）</div>' +
                 '</div>';
             } else {
                 // 数值输入框：初始 value 预置默认值并以浅色字符显示（is-default），
@@ -2572,6 +2754,9 @@ var RamariaSettingsView = (function () {
                 if (orderBox) {
                     orderBox.innerHTML = _orderItemsHtml(f, value);
                 }
+            } else if (f.type === 'text') {
+                var textInput = $(fid);
+                if (textInput && value !== undefined) textInput.value = value;
             } else {
                 var input = $(fid);
                 if (!input) continue;
@@ -2639,6 +2824,20 @@ var RamariaSettingsView = (function () {
                     return null;
                 }
                 value = orderList;
+            } else if (f.type === 'text') {
+                var textInput = $(fid);
+                if (!textInput) continue;
+                var text = textInput.value.trim();
+                if (text === '') {
+                    RamariaToast.show('warning', f.label + ' 不能为空');
+                    return null;
+                }
+                // 可选格式校验：由字段元数据的 validate 标记声明（如免打扰时段）
+                if (f.validate === 'quiet_hours' && !_QUIET_HOURS_PATTERN.test(text)) {
+                    RamariaToast.show('warning', f.label + ' 格式应为 HH:MM-HH:MM（如 22:00-08:00）');
+                    return null;
+                }
+                value = text;
             } else {
                 var input = $(fid);
                 if (!input) continue;
@@ -2812,6 +3011,7 @@ var RamariaSettingsView = (function () {
              try {
                  _fullConfig = await RamariaApi.config.getFull();
                  _fillSessionForm(_fullConfig);
+                 _fillProactiveForm(_fullConfig);
                  _fillMemoryInjectionForm(_fullConfig);
                  _fillDataDirForm(_fullConfig);
                  _fillMcpForm(_fullConfig);

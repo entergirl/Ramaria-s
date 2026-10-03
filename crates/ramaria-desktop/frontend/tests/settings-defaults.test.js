@@ -197,7 +197,7 @@ test('路径解析：字段绝对路径 = section + 组内相对路径', () => {
 
 test('高级字段元数据形态合法（分组完整 / 路径唯一 / 类型受控 / 默认值类型匹配）', () => {
   const seenPaths = new Set();
-  const allowedTypes = ['number', 'bool', 'whitelist', 'order'];
+  const allowedTypes = ['number', 'bool', 'whitelist', 'order', 'text'];
   const seenKeys = new Set();
 
   for (const group of groups) {
@@ -224,6 +224,8 @@ test('高级字段元数据形态合法（分组完整 / 路径唯一 / 类型�
         assert.equal(typeof field.def, 'number', `${key}: number 默认值应为数字`);
       } else if (field.type === 'bool') {
         assert.equal(typeof field.def, 'boolean', `${key}: bool 默认值应为布尔`);
+      } else if (field.type === 'text') {
+        assert.equal(typeof field.def, 'string', `${key}: text 默认值应为字符串`);
       } else {
         assert.ok(Array.isArray(field.def), `${key}: ${field.type} 默认值应为数组`);
         assert.ok(Array.isArray(field.options) && field.options.length > 0, `${key}: 缺少 options`);
@@ -302,4 +304,82 @@ test('MCP 面板：白名单默认全部人格可见', () => {
   // 经 JSON 往返归一：vm 沙箱数组的原型与宿主 realm 不同，直接 deepEqual 会误报
   const def = JSON.parse(JSON.stringify(mcpFields['mcp.allowed_personas'].def));
   assert.deepEqual(def, ['*']);
+});
+
+// =========================================================
+// 主动对话组：21 键齐全 + 默认值类型 + 模板收录
+// =========================================================
+
+test('主动对话组：21 键齐全且默认值类型正确', () => {
+  const proactive = groups.find((g) => g.key === 'proactive');
+  assert.ok(proactive, '应存在 proactive 组');
+  assert.deepEqual(proactive.section, ['proactive']);
+
+  const expected = [
+    'proactive.enabled',
+    'proactive.check_interval_seconds',
+    'proactive.min_idle_hours',
+    'proactive.daily_limit',
+    'proactive.quiet_hours',
+    'proactive.cooldown_hours',
+    'proactive.judge_enabled',
+    'proactive.judge_interval_hours',
+    'proactive.active_hours_weight',
+    'proactive.active_hours_window_days',
+    'proactive.active_hours_min_samples',
+    'proactive.valence_weight',
+    'proactive.confidence_floor',
+    'proactive.light_touch_weight',
+    'proactive.event_salience_threshold',
+    'proactive.event_window_days',
+    'proactive.unresolved_valence_threshold',
+    'proactive.follow_up_days',
+    'proactive.topic_cooldown_hours',
+    'proactive.silence_backoff_days',
+    'proactive.startup_grace_days',
+  ];
+
+  const proactiveFields = flattenFields([proactive]);
+  assert.deepEqual(Object.keys(proactiveFields).sort(), expected.slice().sort());
+
+  // 每键必须被 config/default.toml 收录（未收录会让"逐键一致"用例静默跳过，漂移不可见）
+  const missing = expected.filter(
+    (key) => getByPath(templateConfig, key.split('.')) === undefined
+  );
+  assert.deepEqual(missing, [], `default.toml 未收录: ${missing.join(', ')}`);
+
+  // 默认值类型与 default.toml 解析口径一致
+  for (const key of expected) {
+    const field = proactiveFields[key];
+    const templateValue = getByPath(templateConfig, key.split('.'));
+    if (field.type === 'number') {
+      assert.equal(typeof field.def, 'number', `${key}: number 默认值应为数字`);
+    } else if (field.type === 'bool') {
+      assert.equal(typeof field.def, 'boolean', `${key}: bool 默认值应为布尔`);
+    } else if (field.type === 'text') {
+      assert.equal(typeof field.def, 'string', `${key}: text 默认值应为字符串`);
+    }
+    assert.equal(typeof field.def, typeof templateValue, `${key}: 默认值类型漂移`);
+  }
+
+  // 免打扰时段为 text 类型并带格式校验标记（收集时依此做 HH:MM-HH:MM 校验）
+  assert.equal(proactiveFields['proactive.quiet_hours'].type, 'text');
+  assert.equal(proactiveFields['proactive.quiet_hours'].validate, 'quiet_hours');
+
+  // 浮点字段必须带 <1 的 step（收集时依 step 选择 parseFloat，否则被 parseInt 截断）
+  const floatKeys = [
+    'proactive.active_hours_weight',
+    'proactive.valence_weight',
+    'proactive.confidence_floor',
+    'proactive.light_touch_weight',
+    'proactive.event_salience_threshold',
+    'proactive.unresolved_valence_threshold',
+  ];
+  for (const key of floatKeys) {
+    const step = proactiveFields[key].step;
+    assert.ok(
+      typeof step === 'number' && step > 0 && step < 1,
+      `${key}: 浮点字段必须带 <1 的 step`
+    );
+  }
 });

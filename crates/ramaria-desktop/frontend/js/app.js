@@ -320,10 +320,13 @@
                     _preloadData();
                 }
 
- // ★ 监听关闭窗口确认事件
- // Rust 端拦截 CloseRequested → 发送 close-requested 事件 →
- // 前端弹窗让用户选择「最小化到托盘」或「退出 Ramaria」
+// ★ 监听关闭窗口确认事件
+// Rust 端拦截 CloseRequested → 发送 close-requested 事件 →
+// 前端弹窗让用户选择「最小化到托盘」或「退出 Ramaria」
                 _listenCloseRequested();
+
+// ★ 监听主动消息事件（应用内展示 + 通知点击定位）
+                _listenProactiveMessages();
             } catch (err) {
                 console.error('[App] 无法获取应用状态:', err);
  // 无法连接后端 → 显示错误
@@ -448,6 +451,17 @@
         }).catch(function (err) {
             console.error('[App] close-requested 事件监听注册失败:', err);
         });
+    }
+
+ /**
+ * 初始化主动消息事件处理（委托 RamariaProactive 模块；模块未加载时降级跳过）。
+ */
+    function _listenProactiveMessages() {
+        if (typeof RamariaProactive === 'undefined') {
+            console.warn('[App] RamariaProactive 未加载，跳过主动消息监听');
+            return;
+        }
+        RamariaProactive.init();
     }
 
  // =========================================================

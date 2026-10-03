@@ -19,7 +19,7 @@
  * - 多气泡：助手回复按 `||` 契约拆分为多条气泡（历史回读与流式收尾同一拆分口径）
  *
  * 用法:
- * var bubble = RamariaMessageBubble.create({ id, role, content, persona_uid, created_at });
+ * var bubble = RamariaMessageBubble.create({ id, role, content, persona_uid, created_at, is_proactive });
  * var bubble = RamariaMessageBubble.createStreaming({ id: 'temp', role: 'assistant' });
  * RamariaMessageBubble.updateStreamText('temp', '已累积的全文');
  * RamariaMessageBubble.finalize('temp', finalContent);
@@ -168,6 +168,15 @@ var RamariaMessageBubble = (function () {
             labelSpan.className = 'msg-bubble-label';
             labelSpan.textContent = label;
             meta.appendChild(labelSpan);
+
+ // 主动消息标识（系统主动发起；消息对象 is_proactive 透传）
+            if (msg.is_proactive === true) {
+                var proactiveSpan = document.createElement('span');
+                proactiveSpan.className = 'msg-bubble-proactive';
+                proactiveSpan.textContent = '主动';
+                proactiveSpan.title = '这条消息由 Ramaria 主动发起';
+                meta.appendChild(proactiveSpan);
+            }
 
  // 仅 assistant 消息且 persona 非 rama-0001 时显示 @persona 标注
             if (role === 'assistant' && msg.persona_uid && personaName && msg.persona_uid.indexOf('rama-0001') !== 0) {

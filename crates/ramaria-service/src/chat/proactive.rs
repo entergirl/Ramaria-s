@@ -189,6 +189,7 @@ pub(crate) async fn run(
         "主动生成完成"
     );
     Ok(Some(ProactiveOutcome {
+        message_id: assistant.id,
         content: reply,
         session_id: prepared.session_id,
         persona: prepared.persona,

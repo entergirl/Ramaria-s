@@ -77,6 +77,10 @@ async fn success_persists_single_proactive_assistant_message() {
     assert_eq!(last.source, MessageSource::Online);
     assert_eq!(last.persona_uid.as_deref(), Some(DEFAULT_PERSONA_UID));
     assert_eq!(last.content, REPLY);
+    assert_eq!(
+        outcome.message_id, last.id,
+        "投递负载消息 id 应与落库消息一致"
+    );
     let user_count = messages
         .iter()
         .filter(|message| message.role == MessageRole::User)

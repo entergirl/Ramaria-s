@@ -39,7 +39,7 @@ var RamariaStore = (function () {
  * "setup" | "progress" | "chat" | "memory" | "settings" | "error"
  * - `sessions`: 会话数组 [{ id, started_at, ended_at, message_count }]
  * - `activeSessionId`: 当前活跃会话 UUID 字符串（null 表示无活跃会话）
- * - `messages`: 当前会话的消息数组 [{ id, role, content, persona_uid, created_at }]
+ * - `messages`: 当前会话的消息数组 [{ id, role, content, persona_uid, created_at, is_proactive }]
  * - `isStreaming`: 是否正在流式接收 LLM 回复
  * - `streamingRequestId`: 当前流式请求的 request_id（null 表示无进行中流式）
  * - `backendConfig`: 后端配置 { provider, model_id, base_url, supports_streaming, ... }
@@ -272,7 +272,7 @@ var RamariaStore = (function () {
  * 向 messages 数组追加消息（不可变更新）。
  *
  * 参数:
- * - `message`: 消息对象 { id, role, content, persona_uid, created_at }
+ * - `message`: 消息对象 { id, role, content, persona_uid, created_at, is_proactive }
  */
     function appendMessage(message) {
         var msgs = _state.messages.slice(); // 浅拷贝

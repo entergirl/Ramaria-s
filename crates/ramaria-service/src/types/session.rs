@@ -163,6 +163,8 @@ pub struct SessionMessageView {
     pub created_at: i64,
     pub source: MessageSource,
     pub persona_uid: Option<String>,
+    /// 主动生成标记（仅主动对话路径写入 true；常规消息恒 false）。
+    pub is_proactive: bool,
 }
 
 /// 通道会话概览视图（通道活动统计）。

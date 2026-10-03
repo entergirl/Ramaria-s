@@ -21,6 +21,8 @@ pub const EVENT_CHAT_DONE: &str = "chat-done";
 pub const EVENT_CHAT_ERROR: &str = "chat-error";
 /// 关闭窗口确认事件名（前端弹窗后用户选择操作）
 pub const EVENT_CLOSE_REQUESTED: &str = "close-requested";
+/// 主动消息事件名（新消息投递与通知点击定位共用同一事件）
+pub const EVENT_PROACTIVE_MESSAGE: &str = "proactive-message";
 /// 导入进度事件名
 pub const EVENT_IMPORT_PROGRESS: &str = "import-progress";
 
@@ -126,6 +128,61 @@ impl ChatErrorPayload {
             error_detail,
             retryable,
         }
+    }
+}
+
+// =========================================================
+// 主动消息事件
+// =========================================================
+
+/// 主动消息事件负载。
+///
+/// 职责:
+/// - 承载服务层投递的主动消息；新消息渲染与通知点击定位共用同一事件
+///
+/// 字段约定:
+/// - `session_id` / `message_id`: 消息落点会话与落库消息 id（前端幂等处理键）
+/// - `content`: 消息全文；不参与任何日志输出（隐私口径：不记录原文）
+/// - `persona` / `source`: 目标人格 uid 与选题来源标识
+/// - `created_at`: 消息生成时间（Unix 毫秒）
+/// - `activated`: 缺省 = 常规投递；`Some(true)` = 通知点击重播（前端据此切换到目标会话）
+#[derive(Debug, Clone, Serialize)]
+pub struct ProactiveMessagePayload {
+    pub session_id: String,
+    pub message_id: String,
+    pub content: String,
+    pub persona: String,
+    pub source: String,
+    pub created_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activated: Option<bool>,
+}
+
+impl ProactiveMessagePayload {
+    /// 创建主动消息事件负载（常规投递，不带点击标记）。
+    pub fn new(
+        session_id: String,
+        message_id: String,
+        content: String,
+        persona: String,
+        source: String,
+        created_at: i64,
+    ) -> Self {
+        Self {
+            session_id,
+            message_id,
+            content,
+            persona,
+            source,
+            created_at,
+            activated: None,
+        }
+    }
+
+    /// 标记为通知点击重播（承载会话定位语义）。
+    pub fn activated(mut self) -> Self {
+        self.activated = Some(true);
+        self
     }
 }
 
@@ -262,124 +319,4 @@ impl ImportProgressPayload {
 // =========================================================
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn delta_payload_serialization() {
-        let payload = ChatDeltaPayload::new("req-001".to_string(), "你好".to_string());
-        let json = serde_json::to_string(&payload).expect("序列化失败");
-        assert!(json.contains("req-001"));
-        assert!(json.contains("你好"));
-    }
-
-    #[test]
-    fn done_payload_serialization() {
-        let payload = ChatDonePayload::new(
-            "req-001".to_string(),
-            Some("deepseek".into()),
-            42,
-            "完整回复".to_string(),
-        );
-        let json = serde_json::to_string(&payload).expect("序列化失败");
-        assert!(json.contains("完整回复"), "应含完整回复文本: {json}");
-        assert!(
-            json.contains(r#""request_id":"req-001""#),
-            "应含 request_id: {json}"
-        );
-        assert!(
-            json.contains(r#""backend_id":"deepseek""#),
-            "应含 backend_id: {json}"
-        );
-        assert!(
-            json.contains(r#""total_chars":42"#),
-            "应含 total_chars: {json}"
-        );
-    }
-
-    #[test]
-    fn done_payload_empty_content_serializes() {
-        let payload = ChatDonePayload::new("req-002".to_string(), None, 0, String::new());
-        let json = serde_json::to_string(&payload).expect("序列化失败");
-        assert!(
-            json.contains(r#""content":"""#),
-            "空 content 应序列化为空串字段: {json}"
-        );
-    }
-
-    #[test]
-    fn error_payload_serialization() {
-        let payload = ChatErrorPayload::new(
-            "req-001".into(),
-            "连接失败".into(),
-            "请检查网络".into(),
-            true,
-        );
-        let json = serde_json::to_string(&payload).expect("序列化失败");
-        assert!(json.contains("连接失败"));
-        assert!(json.contains("请检查网络"));
-        assert!(json.contains("true"));
-    }
-
-    // ---- 阶段预计总量与 ETA 字段 ----
-
-    /// 基础 payload（无估算字段）→ 序列化不含 l1_expected/l2_expected/l3_expected/eta_seconds
-    /// （向后兼容：旧前端忽略未知字段；旧后端事件不含新字段）。
-    #[test]
-    fn basic_payload_omits_estimate_fields() {
-        let payload = ImportProgressPayload::new("l1", 1, 10, "进度");
-        let json = serde_json::to_string(&payload).expect("序列化失败");
-        assert!(
-            !json.contains("l1_expected"),
-            "未附加估算时不应输出字段: {json}"
-        );
-        assert!(
-            !json.contains("eta_seconds"),
-            "未附加估算时不应输出字段: {json}"
-        );
-    }
-
-    /// 附加估算字段 → 序列化包含各阶段预计总量与 eta_seconds。
-    #[test]
-    fn payload_with_estimates_serializes_fields() {
-        let payload = ImportProgressPayload::new("l1", 5, 20, "进度").with_estimates(
-            Some(20),
-            Some(2),
-            Some(2),
-            Some(120),
-        );
-        let json = serde_json::to_string(&payload).expect("序列化失败");
-        assert!(
-            json.contains(r#""l1_expected":20"#),
-            "应含 l1_expected: {json}"
-        );
-        assert!(
-            json.contains(r#""l2_expected":2"#),
-            "应含 l2_expected: {json}"
-        );
-        assert!(
-            json.contains(r#""l3_expected":2"#),
-            "应含 l3_expected: {json}"
-        );
-        assert!(
-            json.contains(r#""eta_seconds":120"#),
-            "应含 eta_seconds: {json}"
-        );
-    }
-
-    /// 部分估算字段为 None → 仅序列化非 None 字段。
-    #[test]
-    fn payload_with_partial_estimates_serializes_only_some() {
-        // L1 阶段：仅 l1_expected 已知，L2/L3 未知
-        let payload = ImportProgressPayload::new("l1", 0, 20, "进度").with_estimates(
-            Some(20),
-            None,
-            None,
-            None,
-        );
-        let json = serde_json::to_string(&payload).expect("序列化失败");
-        assert!(json.contains(r#""l1_expected":20"#));
-        assert!(!json.contains("l2_expected"), "未知阶段不应输出: {json}");
-        assert!(!json.contains("eta_seconds"), "无 ETA 不应输出: {json}");
-    }
-}
+mod tests;

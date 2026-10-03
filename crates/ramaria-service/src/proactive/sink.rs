@@ -15,6 +15,7 @@ use uuid::Uuid;
 /// 主动消息（投递负载）。
 ///
 /// 字段约定:
+/// - `message_id`: 落库消息 id（宿主幂等处理与通知点击定位依据）；
 /// - `content`: 消息全文（assistant 已落库内容）；
 /// - `session_id`: 消息落点会话；
 /// - `persona`: 目标人格 uid；
@@ -22,6 +23,8 @@ use uuid::Uuid;
 /// - `created_at`: 投递时间（Unix 毫秒）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProactiveMessage {
+    /// 落库消息 id（宿主幂等处理与通知点击定位依据）。
+    pub message_id: Uuid,
     pub content: String,
     pub session_id: Uuid,
     pub persona: String,

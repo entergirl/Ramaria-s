@@ -240,6 +240,16 @@
 .msg-bubble-wrapper[data-role="user"]      .msg-bubble-label { color: var(--pink-500); }
 .msg-bubble-wrapper[data-role="assistant"] .msg-bubble-label { color: var(--blue-500); }
 
+/* ── 主动消息标识（系统主动发起的小标签） ── */
+.msg-bubble-proactive {
+  padding: 0 6px;
+  font-size: 11px;
+  line-height: 16px;
+  border-radius: var(--radius-sm);
+  background: var(--blue-50);
+  color: var(--blue-500);
+}
+
 .msg-bubble-persona {
   color: var(--text-tertiary);
 }

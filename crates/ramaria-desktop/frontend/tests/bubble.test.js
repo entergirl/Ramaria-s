@@ -8,18 +8,23 @@
  * - 豁免区不切分（围栏代码块 / 行内代码 / 链接目标 / 裸 URL，CR2-COR-011）
  * - streamDisplay 流式展示（豁免区外 `||` → 换行）
  * - 分隔符常量导出
+ * - 消息气泡主动标识（is_proactive → `.msg-bubble-proactive` 存在性）
  *
  * 运行: node --test "tests/*.test.js"
  *
  * 说明:
  * - 工具经 vm 沙箱加载，返回数组的原型属于沙箱 realm；断言前用 `split()`
  *   转回宿主数组，避免 deepStrictEqual 的原型比较失败。
+ * - 消息气泡组件经 vm 沙箱 + 最小 DOM 桩加载，只走 `create()` 渲染路径。
  */
 
 'use strict';
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
 const { loadUtil } = require('./helpers/load-util.js');
 
 const bubble = loadUtil('bubble.js');
@@ -115,4 +120,116 @@ test('streamDisplay: 空内容返回空串', () => {
 
 test('SEPARATOR: 常量为 ||', () => {
   assert.equal(bubble.SEPARATOR, '||');
+});
+
+// =========================================================
+// 消息气泡主动标识（dom 桩加载 message-bubble 组件）
+// =========================================================
+
+/** 消息气泡组件源码（frontend/js/components/message-bubble.js） */
+const MESSAGE_BUBBLE_PATH = path.resolve(
+  __dirname, '..', 'js', 'components', 'message-bubble.js'
+);
+
+/** 最小 DOM 节点桩：满足 create() 渲染路径（createElement / appendChild / setAttribute） */
+function createNode(tag) {
+  const node = {
+    tagName: String(tag).toUpperCase(),
+    children: [],
+    attributes: {},
+    className: '',
+    textContent: '',
+    innerHTML: '',
+    style: {},
+    appendChild(child) {
+      this.children.push(child);
+      return child;
+    },
+    setAttribute(name, value) {
+      this.attributes[name] = String(value);
+    },
+    getAttribute(name) {
+      return Object.prototype.hasOwnProperty.call(this.attributes, name)
+        ? this.attributes[name]
+        : null;
+    },
+    removeChild(child) {
+      const idx = this.children.indexOf(child);
+      if (idx !== -1) this.children.splice(idx, 1);
+    },
+    addEventListener() {},
+  };
+  return node;
+}
+
+/** 递归收集 className 精确命中的节点 */
+function collectByClass(root, className) {
+  const out = [];
+  function walk(node) {
+    if (!node) return;
+    const cls = typeof node.className === 'string' ? node.className : '';
+    if (cls.split(/\s+/).indexOf(className) !== -1) out.push(node);
+    const children = node.children || [];
+    for (const child of children) walk(child);
+  }
+  walk(root);
+  return out;
+}
+
+/** 在 vm 沙箱中加载 message-bubble.js（注入 DOM / Markdown / Format / Store 最小桩） */
+function loadMessageBubble() {
+  const source = fs.readFileSync(MESSAGE_BUBBLE_PATH, 'utf8');
+  const windowMock = {};
+  const sandbox = {
+    window: windowMock,
+    console: { log() {}, warn() {}, error() {} },
+    document: {
+      createElement: createNode,
+      createTextNode: (text) => ({ text: String(text) }),
+    },
+    RamariaMarkdown: { render: (text) => String(text) },
+    RamariaFormat: { smartTime: (ts) => String(ts) },
+    RamariaStore: { get: () => [] },
+  };
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(source, sandbox, { filename: 'message-bubble.js' });
+
+  const component = windowMock.RamariaMessageBubble;
+  if (!component) throw new Error('message-bubble.js 未暴露 RamariaMessageBubble');
+  return component;
+}
+
+const messageBubble = loadMessageBubble();
+
+test('消息气泡：is_proactive=true 显示「主动」标识', () => {
+  const wrapper = messageBubble.create({
+    id: 'm1',
+    role: 'assistant',
+    content: '在吗？突然想起你说过的事。',
+    created_at: 1759459200000,
+    is_proactive: true,
+  });
+
+  const tags = collectByClass(wrapper, 'msg-bubble-proactive');
+  assert.equal(tags.length, 1, '应渲染一个主动标识');
+  assert.equal(tags[0].textContent, '主动');
+  assert.equal(tags[0].title, '这条消息由 Ramaria 主动发起');
+});
+
+test('消息气泡：is_proactive 缺省 / false 不显示标识', () => {
+  const explicitFalse = messageBubble.create({
+    id: 'm2',
+    role: 'assistant',
+    content: '普通消息',
+    is_proactive: false,
+  });
+  assert.equal(collectByClass(explicitFalse, 'msg-bubble-proactive').length, 0);
+
+  const missing = messageBubble.create({
+    id: 'm3',
+    role: 'assistant',
+    content: '普通消息',
+  });
+  assert.equal(collectByClass(missing, 'msg-bubble-proactive').length, 0);
 });
