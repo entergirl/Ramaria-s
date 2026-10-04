@@ -160,6 +160,50 @@ async fn progressive_triggered_generates_multiple_l1_in_candidate_pool() {
     );
 }
 
+/// 开销口径：渐进式多段共用一次词池快照读取（段数不放大快照读取次数）。
+#[tokio::test]
+async fn progressive_pool_snapshot_read_once_for_all_segments() {
+    use crate::l1::mock::MockLlmProvider;
+    let sid = Uuid::new_v4();
+    let storage = MockStorage::new();
+    let msgs: Vec<Message> = (0..12)
+        .map(|i| {
+            if i % 2 == 0 {
+                target_msg(sid, i * 1000, &format!("长会话消息 {i}"))
+            } else {
+                user_msg(sid, i * 1000, &format!("长会话消息 {i}"))
+            }
+        })
+        .collect();
+    storage.add_messages(sid, msgs);
+    let llm = MockLlmProvider::new("test-model");
+    llm.set_responses(vec![
+        llm_json("段 1 摘要", None),
+        llm_json("段 2 摘要", Some("延续")),
+        llm_json("段 3 摘要", Some("延续")),
+    ]);
+
+    let summarizer = L1Summarizer::new(
+        &llm,
+        &storage,
+        L1SummarizerConfig {
+            utt_splitter: None,
+            persona_uid: Some("char-0001".into()),
+            ..Default::default()
+        },
+    );
+    let result = summarizer
+        .summarize_progressive(sid, &progressive_cfg())
+        .await;
+    assert!(result.is_ok(), "触发分段应成功: {:?}", result.err());
+    assert_eq!(result.unwrap().len(), 3, "12 条消息 tail=5 应切 3 段");
+    assert_eq!(
+        storage.pool_read_count(),
+        1,
+        "全部段共用一次词池快照（不随段数放大）"
+    );
+}
+
 /// 未达触发阈值（消息数 ≤ 阈值且跨度 ≤ 阈值）→ 整会话 1 条 L1（v1.6 语义）。
 #[tokio::test]
 async fn progressive_not_triggered_single_l1() {

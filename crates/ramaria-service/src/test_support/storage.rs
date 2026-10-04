@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::keyword::PendingAliasRow;
@@ -40,6 +40,8 @@ pub(crate) struct FailableStorage {
     inner: Arc<SqliteStorage>,
     /// `list_personas` 失败开关（true = 返回存储错误）。
     fail_list_personas: AtomicBool,
+    /// `list_keyword_statuses` 调用次数（热路径开销口径断言用）。
+    keyword_status_queries: AtomicUsize,
 }
 
 impl FailableStorage {
@@ -48,12 +50,18 @@ impl FailableStorage {
         Self {
             inner,
             fail_list_personas: AtomicBool::new(false),
+            keyword_status_queries: AtomicUsize::new(0),
         }
     }
 
     /// 设置 `list_personas` 失败开关（true = 该查询返回存储错误）。
     pub(crate) fn set_fail_list_personas(&self, fail: bool) {
         self.fail_list_personas.store(fail, Ordering::Release);
+    }
+
+    /// 获取 `list_keyword_statuses` 调用次数（用于断言每 L1 一次批量查询的口径）。
+    pub(crate) fn keyword_status_query_count(&self) -> usize {
+        self.keyword_status_queries.load(Ordering::Relaxed)
     }
 }
 
@@ -279,6 +287,15 @@ impl StoreCrud for FailableStorage {
 
     async fn reject_keyword_alias(&self, alias_id: i64) -> RamariaResult<bool> {
         self.inner.reject_keyword_alias(alias_id).await
+    }
+
+    /// 覆写为"计数 + 转发真实查询"（锁定"每 L1 一次批量状态查询"的开销口径）。
+    async fn list_keyword_statuses(
+        &self,
+        keywords: &[String],
+    ) -> RamariaResult<Vec<(String, Option<String>)>> {
+        self.keyword_status_queries.fetch_add(1, Ordering::Relaxed);
+        self.inner.list_keyword_statuses(keywords).await
     }
 }
 

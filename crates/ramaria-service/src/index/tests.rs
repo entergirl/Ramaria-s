@@ -192,6 +192,48 @@ async fn incremental_l1_is_searchable() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// 开销口径：增量镜像对每条 L1 恰好一次批量词条状态查询（3 个关键词 1 次，不逐词）。
+#[tokio::test]
+async fn incremental_l1_mirror_queries_keyword_status_once_per_l1() {
+    let (engine, storage, failable, dir) =
+        engine_with_failable_storage("index-keyword-status-count").await;
+    seed_persona(&storage, "char-0001").await;
+
+    let mut l1s = Vec::new();
+    for i in 0..3 {
+        let id = seed_l1_raw(
+            &storage,
+            "char-0001",
+            &format!("计数口径摘要 {i}"),
+            Some("睡前,阅读,复盘"),
+            1_000 + i,
+        )
+        .await;
+        let l1 = storage
+            .get_memory_l1(id)
+            .await
+            .expect("读取 L1 应成功")
+            .expect("L1 应存在");
+        l1s.push(l1);
+    }
+
+    assert_eq!(
+        failable.keyword_status_query_count(),
+        0,
+        "增量镜像前不应有词条状态查询"
+    );
+    for l1 in &l1s {
+        index_l1_into_mirrors(&engine, l1).await;
+    }
+    assert_eq!(
+        failable.keyword_status_query_count(),
+        3,
+        "每条 L1 一次批量状态查询（3 个关键词 1 次，不逐词）"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// 索引未加载期间产生的 L1：置脏标记 → 下次加载重建并找回该 L1（不漏检索）。
 #[tokio::test]
 async fn dirty_flag_forces_rebuild_after_incremental_write() {

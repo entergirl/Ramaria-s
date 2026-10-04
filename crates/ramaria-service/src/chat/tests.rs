@@ -781,19 +781,75 @@ async fn interactive_null_persona_session_is_bound() {
 // 会话归属日志（只记 uid，不记内容）
 // =========================================================
 
-/// 会话归属与请求人格不一致：生成成功且按会话归属落库，WARN 日志含两人格 uid 且不含消息内容。
-#[tokio::test]
-async fn session_persona_mismatch_logs_warn_without_message_content() {
-    /// 内存日志缓冲（写入 `Vec<u8>`，供断言读取）。
-    #[derive(Clone, Default)]
-    struct LogBuffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+/// 进程级日志捕获辅助（WARN 及以上；缓冲按线程隔离）。
+///
+/// 说明:
+/// - 不使用线程本地订阅者：同一 `warn!` callsite 的首次注册可能发生在并行用例的
+///   无订阅者线程上（兴趣缓存被判为"不采集"），本线程随后的重建又可能被其他线程
+///   的注册覆盖——进程级订阅者在任意线程的注册路径上都能命中。
+/// - 未挂载缓冲的线程直接丢弃日志（不打印、不跨用例串扰）。
+mod log_capture {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex, Once};
 
-    impl std::io::Write for LogBuffer {
+    thread_local! {
+        static BUFFER: std::cell::RefCell<Option<Arc<Mutex<Vec<u8>>>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// 安装进程级捕获订阅者（只生效一次）；返回是否安装成功。
+    pub(super) fn install() -> bool {
+        static ONCE: Once = Once::new();
+        static INSTALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        ONCE.call_once(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(CaptureWriter)
+                .with_max_level(tracing::Level::WARN)
+                .with_ansi(false)
+                .finish();
+            let installed = tracing::subscriber::set_global_default(subscriber).is_ok();
+            INSTALLED.store(installed, std::sync::atomic::Ordering::Release);
+        });
+        INSTALLED.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// 为当前线程挂载日志缓冲。
+    pub(super) fn attach() -> Arc<Mutex<Vec<u8>>> {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        BUFFER.with(|slot| {
+            *slot.borrow_mut() = Some(buffer.clone());
+        });
+        buffer
+    }
+
+    /// 卸载当前线程的日志缓冲。
+    pub(super) fn detach() {
+        BUFFER.with(|slot| {
+            *slot.borrow_mut() = None;
+        });
+    }
+
+    struct CaptureWriter;
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+        type Writer = Writer;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            Writer
+        }
+    }
+
+    struct Writer;
+
+    impl Write for Writer {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0
-                .lock()
-                .expect("日志缓冲锁不应中毒")
-                .extend_from_slice(buf);
+            BUFFER.with(|slot| {
+                if let Some(buffer) = slot.borrow().as_ref() {
+                    if let Ok(mut guard) = buffer.lock() {
+                        guard.extend_from_slice(buf);
+                    }
+                }
+            });
             Ok(buf.len())
         }
 
@@ -801,25 +857,13 @@ async fn session_persona_mismatch_logs_warn_without_message_content() {
             Ok(())
         }
     }
+}
 
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuffer {
-        type Writer = LogBuffer;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
-
-    let buffer = LogBuffer::default();
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(buffer.clone())
-        .with_max_level(tracing::Level::WARN)
-        .with_ansi(false)
-        .finish();
-    // 并行测试下 callsite 兴趣缓存可能在切换 subscriber 前被判定为不采集，
-    // 重建缓存保证本线程的 WARN 事件都被捕获
-    tracing::callsite::rebuild_interest_cache();
-    let _guard = tracing::subscriber::set_default(subscriber);
+/// 会话归属与请求人格不一致：生成成功且按会话归属落库，WARN 日志含两人格 uid 且不含消息内容。
+#[tokio::test]
+async fn session_persona_mismatch_logs_warn_without_message_content() {
+    assert!(log_capture::install(), "进程级日志捕获订阅者安装失败");
+    let buffer = log_capture::attach();
 
     let (engine, storage, dir) = engine_with_l1_reply("chat-persona-mismatch-log", REPLY).await;
     let engine = Arc::new(engine);
@@ -848,8 +892,8 @@ async fn session_persona_mismatch_logs_warn_without_message_content() {
     assert_eq!(messages[0].persona_uid.as_deref(), Some("char-0001"));
     assert_eq!(messages[1].persona_uid.as_deref(), Some("char-0001"));
 
-    drop(_guard);
-    let logs = String::from_utf8(buffer.0.lock().expect("日志缓冲锁不应中毒").clone())
+    log_capture::detach();
+    let logs = String::from_utf8(buffer.lock().expect("日志缓冲锁不应中毒").clone())
         .expect("日志应为合法 UTF-8");
     assert!(
         logs.contains("会话归属"),

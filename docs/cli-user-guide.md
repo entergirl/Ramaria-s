@@ -1,6 +1,6 @@
 # Ramaria CLI 使用指南
 
-> 版本：2.1（命令参考覆盖 setup / ask / chat / memory / blocks / index / import / export / session / config / persona / rule / style / fact / keyword / diagnostics / status / probe / mcp 共 19 个子命令）
+> 版本：2.4（命令参考覆盖 setup / ask / chat / memory / blocks / index / import / export / session / config / persona / rule / style / fact / keyword / diagnostics / status / probe / mcp 共 19 个子命令）
 > 适用平台：Windows / macOS / Linux（Windows 首发）
 
 ## 概述
@@ -8,6 +8,8 @@
 `ramaria` 是 Ramaria 的命令行入口，支持对话、记忆查询（L1/L2/L3）、话语块管理（blocks）、索引管理、会话管理、配置修改、人格管理、行为规则管理（rule）、风格统计（style）、知识事实查询（fact）、关键词词典管理（keyword）、数据导入/导出、诊断导出、状态探活（status）、探针实验（probe）与 MCP 服务端（`mcp serve`）。
 
 首次使用前需运行首次配置向导（`ramaria setup`）。**CLI 与桌面应用的数据目录相互独立**：CLI 的数据库由 `--db` 指定（默认 `data/ramaria_assistant.db`，`RAMARIA_DB_PATH` 覆盖）；桌面应用开发模式（`cargo tauri dev`）使用 `crates/ramaria-desktop/.ramaria-dev/`、生产模式使用 `%APPDATA%\Ramaria\data\`；API key 均保存在 Windows Credential Manager（不落盘）。
+
+**关于主动对话（v2.4）**：主动对话（Ramaria 主动发起消息）**仅随桌面应用装配**——CLI 与 MCP 接入都不会主动发言。CLI 侧可正常查看与处理主动消息：`ramaria chat` / `session` 可见其所在会话与消息；主动消息同样参与记忆回流，`memory` / `blocks` / `persona` 等查询照常覆盖。是否启用由桌面「设置 → 主动对话」控制（`[proactive]` 配置组）。
 
 ---
 

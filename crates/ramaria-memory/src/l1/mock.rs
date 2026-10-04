@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use ramaria_core::keyword::KeywordPoolRow;
@@ -132,6 +133,8 @@ pub struct MockStorage {
     pool_rows: Mutex<Vec<KeywordPoolRow>>,
     /// 已登记的待确认别名 (alias, canonical_id)（用于断言）。
     pending_writes: Mutex<Vec<(String, i64)>>,
+    /// 词池快照读取调用次数（热路径开销口径断言用）。
+    pool_reads: AtomicUsize,
     /// 预设的跨用户事件聚合结果（None = 默认返回空列表；Some(Err) 模拟聚合失败降级）。
     event_aggregate_result: Mutex<Option<Result<Vec<PersonaEventAggregate>, String>>>,
 }
@@ -144,6 +147,7 @@ impl MockStorage {
             keywords: Mutex::new(Vec::new()),
             pool_rows: Mutex::new(Vec::new()),
             pending_writes: Mutex::new(Vec::new()),
+            pool_reads: AtomicUsize::new(0),
             event_aggregate_result: Mutex::new(None),
         }
     }
@@ -176,6 +180,11 @@ impl MockStorage {
     /// 获取已登记的待确认别名 (alias, canonical_id)（用于断言）。
     pub fn pending_writes(&self) -> Vec<(String, i64)> {
         self.pending_writes.lock().unwrap().clone()
+    }
+
+    /// 获取词池快照读取次数（用于断言每会话读取一次的口径）。
+    pub fn pool_read_count(&self) -> usize {
+        self.pool_reads.load(Ordering::Relaxed)
     }
 
     /// 预设 `aggregate_persona_event_priors` 的成功返回（跨用户聚合行）。
@@ -375,8 +384,10 @@ impl StoreCrud for MockStorage {
         Ok(self.keywords.lock().unwrap().clone())
     }
 
-    /// 返回预置词池快照（空 = 空词池；区别于未覆写实现的 `Unsupported` 读失败路径）。
+    /// 返回预置词池快照（空 = 空词池；区别于未覆写实现的 `Unsupported` 读失败路径）；
+    /// 记录调用次数供热路径开销口径断言。
     async fn list_keyword_pool_entries(&self) -> RamariaResult<Vec<KeywordPoolRow>> {
+        self.pool_reads.fetch_add(1, Ordering::Relaxed);
         Ok(self.pool_rows.lock().unwrap().clone())
     }
 

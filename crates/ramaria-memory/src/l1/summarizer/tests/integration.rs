@@ -423,3 +423,50 @@ async fn write_back_keywords_empty_pool_snapshot_writes_canonical() {
         "空词池快照下降级为直接写规范词"
     );
 }
+
+/// 开销口径：词池快照每会话读取一次——与关键词数量无关（不逐词查询）。
+#[tokio::test]
+async fn pool_snapshot_read_once_per_session() {
+    use crate::l1::mock::{MockLlmProvider, MockStorage, make_msg};
+    use ramaria_core::types::MessageRole;
+    use uuid::Uuid;
+
+    let session_id = Uuid::new_v4();
+    let storage = MockStorage::new();
+    storage.add_messages(
+        session_id,
+        vec![
+            make_msg(session_id, MessageRole::User, "最近在准备考研"),
+            make_msg(session_id, MessageRole::Assistant, "复习要循序渐进"),
+        ],
+    );
+    storage.set_pool_rows(vec![pool_row(1, "考研", 3, None, None)]);
+
+    let llm = MockLlmProvider::new("test-model");
+    // 5 个关键词：若退化为逐词查询则读取次数会远超一次
+    llm.set_response(l1_keywords_reply("考研,复习,数学,英语,政治"));
+
+    let config = L1SummarizerConfig {
+        persona_uid: Some("test-persona".into()),
+        context_json: None,
+        situation_strength: None,
+        temperature: 0.3,
+        max_tokens: 2048,
+        user_prefix: "用户：".into(),
+        assistant_prefix: "助手：".into(),
+        utt_splitter: None,
+        prior_context_threshold: 20,
+        prior_context_max_chars: 1500,
+    };
+    let summarizer = L1Summarizer::new(&llm, &storage, config);
+    summarizer
+        .summarize_session(session_id)
+        .await
+        .expect("摘要应成功");
+
+    assert_eq!(
+        storage.pool_read_count(),
+        1,
+        "词池快照应恰好读取一次（与关键词数量无关）"
+    );
+}
