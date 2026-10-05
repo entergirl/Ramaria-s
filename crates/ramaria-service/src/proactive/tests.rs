@@ -14,7 +14,7 @@ use crate::engine::Engine;
 use crate::proactive::sink::ProactiveSink;
 use crate::test_support::{
     MockLlm, ScriptedLlm, engine_with_db, engine_with_llm_and_config,
-    engine_with_shared_scripted_llm, seed_persona,
+    engine_with_shared_scripted_llm, seed_dialogue_history, seed_persona,
 };
 use crate::types::DEFAULT_PERSONA_UID;
 use async_trait::async_trait;
@@ -154,6 +154,7 @@ async fn loop_triggers_generate_and_deliver() {
     )
     .await;
     seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+    seed_dialogue_history(&storage, DEFAULT_PERSONA_UID).await;
     engine.set_state(AppState::Ready);
 
     let sink = Arc::new(TestSink::ok());
@@ -238,6 +239,7 @@ async fn loop_with_real_picker_delivers_event_topic() {
     )
     .await;
     seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+    seed_dialogue_history(&storage, DEFAULT_PERSONA_UID).await;
     engine.set_state(AppState::Ready);
 
     let now = now_ms();
@@ -331,6 +333,7 @@ async fn loop_with_judge_uses_scripted_llm() {
         engine_with_shared_scripted_llm("proactive-loop-judge", Arc::clone(&llm), config, None)
             .await;
     seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+    seed_dialogue_history(&storage, DEFAULT_PERSONA_UID).await;
     engine.set_state(AppState::Ready);
 
     let now = now_ms();

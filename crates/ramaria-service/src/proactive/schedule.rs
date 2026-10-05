@@ -1,10 +1,13 @@
 //! crates/ramaria-service/src/proactive/schedule.rs - Ramaria 主动对话调度与打扰控制
 //!
 //! 设计特点:
-//! - 单轮判定链：硬闸门（可见性 / 状态 / 宽限 / 免打扰 / 每日上限 / 冷却 / 退避 /
-//!   最小空闲 / 隐私）→ 活跃时段门 → 判据节流 → 选题 → 生成 → 投放
+//! - 单轮判定链：硬闸门（可见性 / 人格主动开关 / 状态 / 宽限 / 免打扰 / 每日上限 /
+//!   全局日上限 / 冷却 / 退避 / 最小空闲 / 隐私）→ 活跃时段门 → 判据节流 → 选题 →
+//!   生成 → 投放
 //! - 时钟注入：单轮入口接收时间戳，测试与宿主时钟对齐均不需改实现
 //! - 状态按人格隔离：处理尾部统一回写（跳过路径的跨日重置 / 宽限基准同样落盘）
+//! - 全局日上限：启用时单轮加载全局状态（跨日重置 + 生成计数）并整轮回写；
+//!   不限时不读不写全局状态
 //! - 降级纪律：单人格失败不阻塞其余；投递接收端未注册时静默丢弃
 //! - 投放语义：生成成功即记投递时间、当日计数与最近效价符号（消息已落库
 //!   应用内可见）；仅投递成功才记选题冷却（失败允许下一窗口重试）
@@ -19,18 +22,19 @@ use tracing::{debug, error, info, warn};
 
 use ramaria_core::config::ProactiveConfig;
 use ramaria_core::error::RamariaResult;
-use ramaria_core::types::{AppState, now_ms};
+use ramaria_core::types::{Persona, now_ms};
 
 use crate::engine::Engine;
 
 use super::activity::{self, ActivityGate};
 use super::sink::ProactiveMessage;
-use super::state::{self, ProactiveState, RecentTopic};
+use super::state::{self, ProactiveGlobalState, ProactiveState, RecentTopic};
 use super::topic::{ProactiveDirective, ProactiveOutcome};
 
+mod gates;
 mod quiet;
 
-use quiet::parse_quiet_hours;
+use gates::{GateOutcome, GateSkip, evaluate_gates, hours_to_ms};
 
 // =========================================================
 // 常量
@@ -98,41 +102,6 @@ pub(crate) struct ProactiveTickSummary {
     pub delivered: usize,
 }
 
-/// 闸门跳过原因（日志标识）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GateSkip {
-    PersonaNotAllowed,
-    StateNotReady,
-    StartupGrace,
-    QuietHours,
-    DailyLimit,
-    Cooldown,
-    SilenceBackoff,
-    MinIdle,
-    PrivacyUnconfirmed,
-    ActivityLow,
-    JudgeThrottled,
-}
-
-impl GateSkip {
-    /// 稳定英文标识（日志字段）。
-    fn as_str(self) -> &'static str {
-        match self {
-            GateSkip::PersonaNotAllowed => "persona_not_allowed",
-            GateSkip::StateNotReady => "state_not_ready",
-            GateSkip::StartupGrace => "startup_grace",
-            GateSkip::QuietHours => "quiet_hours",
-            GateSkip::DailyLimit => "daily_limit",
-            GateSkip::Cooldown => "cooldown",
-            GateSkip::SilenceBackoff => "silence_backoff",
-            GateSkip::MinIdle => "min_idle",
-            GateSkip::PrivacyUnconfirmed => "privacy_unconfirmed",
-            GateSkip::ActivityLow => "activity_low",
-            GateSkip::JudgeThrottled => "judge_throttled",
-        }
-    }
-}
-
 /// 单人格处理结果。
 enum PersonaTick {
     /// 硬闸门或活跃时段门未通过。
@@ -147,22 +116,6 @@ enum PersonaTick {
     GenerationFailed,
 }
 
-/// 硬闸门结果。
-enum GateOutcome {
-    Pass,
-    Skip(GateSkip),
-}
-
-/// 小时数转毫秒。
-fn hours_to_ms(hours: u32) -> i64 {
-    hours as i64 * 3_600_000
-}
-
-/// 天数转毫秒。
-fn days_to_ms(days: u32) -> i64 {
-    days as i64 * 86_400_000
-}
-
 // =========================================================
 // 单轮调度
 // =========================================================
@@ -172,8 +125,10 @@ fn days_to_ms(days: u32) -> i64 {
 /// 流程:
 /// 1. 总开关判定（关闭直接返回空摘要，选题等一律不触达）；
 /// 2. 列出全部人格（失败上抛，循环层下轮重试）；
-/// 3. 逐人格：加载状态 → 判定链（闸门 / 活跃时段 / 判据节流 / 选题 / 生成 / 投放）
-///    → 无条件回写状态；单人格失败记 warn 不阻塞其余。
+/// 3. 全局日上限启用时加载全局状态并按本地日期跨日重置（失败上抛，下轮重试）；
+/// 4. 逐人格：加载状态 → 判定链（闸门 / 活跃时段 / 判据节流 / 选题 / 生成 / 投放）
+///    → 无条件回写状态；单人格失败记 warn 不阻塞其余；
+/// 5. 全局状态无条件回写（跨日重置与生成计数均落盘）。
 ///
 /// 参数:
 /// - `engine`: 服务层引擎。
@@ -181,7 +136,7 @@ fn days_to_ms(days: u32) -> i64 {
 /// - `picker`: 选题提供者。
 ///
 /// 返回:
-/// - 本轮各计数摘要；列出人格失败时上抛。
+/// - 本轮各计数摘要；列出人格或读取全局状态失败时上抛。
 pub(crate) async fn run_tick(
     engine: &Engine,
     now: i64,
@@ -197,6 +152,19 @@ pub(crate) async fn run_tick(
     let personas = storage.list_personas().await?;
     let mut summary = ProactiveTickSummary::default();
 
+    // 全局日上限：不限时不读不写全局状态
+    let mut global = if config.proactive.daily_total_limit > 0 {
+        let mut g = state::load_global_state(storage).await?;
+        let today = state::local_date_str(now);
+        if g.daily_date != today {
+            g.daily_count = 0;
+            g.daily_date = today;
+        }
+        Some(g)
+    } else {
+        None
+    };
+
     for persona in &personas {
         summary.personas += 1;
         let mut st = match state::load_state(storage, &persona.uid).await {
@@ -209,10 +177,11 @@ pub(crate) async fn run_tick(
 
         let result = process_persona(
             engine,
-            &persona.uid,
+            persona,
             now,
             picker,
             &config.proactive,
+            global.as_ref(),
             &mut st,
         )
         .await;
@@ -240,6 +209,10 @@ pub(crate) async fn run_tick(
                 if delivered {
                     summary.delivered += 1;
                 }
+                // 口径与人格级一致：生成成功即记入全局计数
+                if let Some(g) = global.as_mut() {
+                    g.daily_count = g.daily_count.saturating_add(1);
+                }
             }
             Ok(PersonaTick::GenerationSkipped) => {
                 summary.attempts += 1;
@@ -253,6 +226,13 @@ pub(crate) async fn run_tick(
                     "主动调度：单人格处理失败，跳过该人格"
                 );
             }
+        }
+    }
+
+    // 全局状态无条件回写：跨日重置与生成计数均落盘
+    if let Some(g) = &global {
+        if let Err(e) = state::save_global_state(storage, g).await {
+            warn!(error = %e, "主动调度：全局状态保存失败");
         }
     }
 
@@ -270,14 +250,15 @@ pub(crate) async fn run_tick(
 /// 6. 投放与记账（生成成功即记投递时间、当日计数与候选效价符号；投递成功才记选题冷却）。
 async fn process_persona(
     engine: &Engine,
-    persona: &str,
+    persona: &Persona,
     now: i64,
     picker: &dyn TopicPicker,
     config: &ProactiveConfig,
+    global: Option<&ProactiveGlobalState>,
     st: &mut ProactiveState,
 ) -> RamariaResult<PersonaTick> {
     // ---- 1. 硬闸门 ----
-    match evaluate_gates(engine, persona, now, config, st).await? {
+    match evaluate_gates(engine, persona, now, config, global, st).await? {
         GateOutcome::Skip(reason) => return Ok(PersonaTick::Skipped(reason)),
         GateOutcome::Pass => {}
     }
@@ -287,7 +268,7 @@ async fn process_persona(
     let model = activity::load_model(
         engine.storage_ref().as_ref(),
         st,
-        persona,
+        &persona.uid,
         now,
         config.active_hours_window_days,
         config.active_hours_min_samples,
@@ -297,18 +278,18 @@ async fn process_persona(
         match activity::evaluate_gate(model.as_ref(), hour, config.active_hours_weight) {
             ActivityGate::LowWeight { norm } => {
                 debug!(
-                    persona = %persona,
+                    persona = %persona.uid,
                     norm,
                     "主动调度跳过：当前时段活跃度过低"
                 );
                 return Ok(PersonaTick::Skipped(GateSkip::ActivityLow));
             }
             ActivityGate::Pass { weight } => {
-                debug!(persona = %persona, hour, weight, "主动调度：活跃时段门通过");
+                debug!(persona = %persona.uid, hour, weight, "主动调度：活跃时段门通过");
                 weight
             }
             ActivityGate::NotModeled => {
-                debug!(persona = %persona, "主动调度：活跃时段样本不足，门放行");
+                debug!(persona = %persona.uid, "主动调度：活跃时段样本不足，门放行");
                 activity::weight_floor(config.active_hours_weight)
             }
         };
@@ -324,7 +305,10 @@ async fn process_persona(
 
     // ---- 4. 选题：进入选题即视为一次判据尝试，先记账后调用 ----
     st.last_judge_at = Some(now);
-    let Some(directive) = picker.pick(engine, persona, now, st, activity_weight).await else {
+    let Some(directive) = picker
+        .pick(engine, &persona.uid, now, st, activity_weight)
+        .await
+    else {
         return Ok(PersonaTick::NoTopic);
     };
     let source = directive.source.clone();
@@ -343,7 +327,7 @@ async fn process_persona(
                 outcome.valence,
             );
             info!(
-                persona = %persona,
+                persona = %persona.uid,
                 source = %source,
                 delivered,
                 session_id = %outcome.session_id,
@@ -352,130 +336,15 @@ async fn process_persona(
             Ok(PersonaTick::Generated { delivered })
         }
         Ok(None) => {
-            debug!(persona = %persona, "主动调度：生成层门禁静默跳过");
+            debug!(persona = %persona.uid, "主动调度：生成层门禁静默跳过");
             Ok(PersonaTick::GenerationSkipped)
         }
         // 生成失败（LLM / 存储）：不记投递状态，允许下一窗口重试（节流已记账）
         Err(e) => {
-            warn!(persona = %persona, error = %e, "主动调度：生成失败，本轮不记投递状态");
+            warn!(persona = %persona.uid, error = %e, "主动调度：生成失败，本轮不记投递状态");
             Ok(PersonaTick::GenerationFailed)
         }
     }
-}
-
-/// 硬闸门判定（按"先内存后存储"顺序）。
-///
-/// 顺序:
-/// 1. 人格可见性（召回策略白名单）；
-/// 2. 应用状态就绪；
-/// 3. 首次启用宽限期（首次见到即起算，宽限期内不打扰；grace=0 立即放行）；
-/// 4. 免打扰时段；
-/// 5. 每日上限（先按本地日期跨日重置）；
-/// 6. 冷却（距上次生成的最短间隔）；
-/// 7. 退避与回应检测（用户已回应则解除退避）；
-/// 8. 距上次对话的最小空闲（无历史视为足够空闲）；
-/// 9. 线上 provider 隐私确认。
-///
-/// 返回:
-/// - `Pass` 或首个未通过的跳过原因；存储查询失败上抛。
-async fn evaluate_gates(
-    engine: &Engine,
-    persona: &str,
-    now: i64,
-    config: &ProactiveConfig,
-    st: &mut ProactiveState,
-) -> RamariaResult<GateOutcome> {
-    // ---- 1. 人格可见性 ----
-    if !engine.recall_policy().persona_allowed(persona) {
-        return Ok(GateOutcome::Skip(GateSkip::PersonaNotAllowed));
-    }
-
-    // ---- 2. 应用状态 ----
-    if engine.current_state() != AppState::Ready {
-        return Ok(GateOutcome::Skip(GateSkip::StateNotReady));
-    }
-
-    // ---- 3. 首次启用宽限期（首次见到即起算）----
-    let first = match st.first_seen_at {
-        Some(t) => t,
-        None => {
-            st.first_seen_at = Some(now);
-            now
-        }
-    };
-    if now.saturating_sub(first) < days_to_ms(config.startup_grace_days) {
-        return Ok(GateOutcome::Skip(GateSkip::StartupGrace));
-    }
-
-    // ---- 4. 免打扰时段（配置为空视为未配置；解析失败降级为无免打扰）----
-    let quiet_raw = config.quiet_hours.trim();
-    if !quiet_raw.is_empty() {
-        match parse_quiet_hours(quiet_raw) {
-            Some(quiet) => {
-                if quiet.contains(state::local_minute_of_day(now)) {
-                    return Ok(GateOutcome::Skip(GateSkip::QuietHours));
-                }
-            }
-            None => {
-                debug!(
-                    raw = %quiet_raw,
-                    "主动调度：免打扰时段配置无法解析，本轮按无免打扰处理"
-                );
-            }
-        }
-    }
-
-    // ---- 5. 每日上限（先跨日重置）----
-    let today = state::local_date_str(now);
-    if st.daily_date != today {
-        st.daily_count = 0;
-        st.daily_date = today;
-    }
-    if st.daily_count >= config.daily_limit {
-        return Ok(GateOutcome::Skip(GateSkip::DailyLimit));
-    }
-
-    // ---- 6. 冷却 ----
-    if let Some(last) = st.last_sent_at {
-        if now.saturating_sub(last) < hours_to_ms(config.cooldown_hours) {
-            return Ok(GateOutcome::Skip(GateSkip::Cooldown));
-        }
-    }
-
-    // ---- 7. 退避与回应检测 ----
-    if let Some(last_sent) = st.last_sent_at {
-        let last_user = engine
-            .storage_ref()
-            .as_ref()
-            .last_user_message_time_by_persona(persona)
-            .await?;
-        let responded = last_user.is_some_and(|t| t > last_sent);
-        if responded {
-            // 用户已回应：解除退避
-            st.silence_streak = 0;
-        } else if now.saturating_sub(last_sent) >= days_to_ms(config.silence_backoff_days) {
-            return Ok(GateOutcome::Skip(GateSkip::SilenceBackoff));
-        }
-    }
-
-    // ---- 8. 距上次对话的最小空闲（无历史视为足够空闲）----
-    if let Some(last) = engine
-        .storage_ref()
-        .as_ref()
-        .last_message_time_by_persona(persona)
-        .await?
-    {
-        if now.saturating_sub(last) < hours_to_ms(config.min_idle_hours) {
-            return Ok(GateOutcome::Skip(GateSkip::MinIdle));
-        }
-    }
-
-    // ---- 9. 隐私门禁（线上 provider 未确认时跳过）----
-    if !crate::privacy::online_privacy_confirmed(engine).await? {
-        return Ok(GateOutcome::Skip(GateSkip::PrivacyUnconfirmed));
-    }
-
-    Ok(GateOutcome::Pass)
 }
 
 /// 投放主动消息（同步调用接收端）。

@@ -296,6 +296,24 @@ pub trait StoreCrud: Send + Sync {
         Ok(None)
     }
 
+    /// 查询指定 persona 是否存在本地用户消息（"对话一次"存在性判定）。
+    ///
+    /// 职责:
+    /// - 供主动对话判定该人格是否已发生本地对话（未对话人格的解锁判定）。
+    ///
+    /// 语义:
+    /// - 会话归属以 `sessions.persona_uid` 为准；只计角色 `user` 且
+    ///   `import_fingerprint IS NULL` 的消息：导入消息与主动消息（assistant 角色）
+    ///   均不计入。
+    /// - EXISTS 语义：只判断存在性，不取时间。
+    ///
+    /// 返回:
+    /// - `Ok(true)`: 存在至少一条本地用户消息；
+    /// - `Ok(false)`: 无（含未覆写 mock —— 保守按"无对话"处理）。
+    async fn has_local_user_message_by_persona(&self, _persona_uid: &str) -> RamariaResult<bool> {
+        Ok(false)
+    }
+
     /// 查询指定会话最近一条消息的时间（Unix 毫秒，含全部角色）。
     ///
     /// 职责:

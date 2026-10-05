@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use ramaria_core::traits::StoreCrud;
 use ramaria_core::types::{
-    MemoryL1, Message, MessageRole, MessageSource, Persona, PersonaKind, UttBlock,
+    MemoryL1, Message, MessageRole, MessageSource, Persona, PersonaKind, UttBlock, now_ms,
 };
 use ramaria_storage::SqliteStorage;
 use uuid::Uuid;
@@ -34,12 +34,17 @@ pub(crate) fn temp_dir(tag: &str) -> PathBuf {
 // 造数
 // =========================================================
 
-/// 造一个 persona 行（L1 / facts / sessions 的外键依赖）。
+/// 造一个 persona 行（L1 / facts / sessions 的外键依赖），类型固定为 char。
 pub(crate) async fn seed_persona(storage: &SqliteStorage, uid: &str) {
+    seed_persona_kind(storage, uid, PersonaKind::Char).await;
+}
+
+/// 造一个指定类型 persona 行（user / rama 等类型分支的闸门用例使用）。
+pub(crate) async fn seed_persona_kind(storage: &SqliteStorage, uid: &str, kind: PersonaKind) {
     let persona = Persona::new(
         uid.to_string(),
         "测试人格".to_string(),
-        PersonaKind::Char,
+        kind,
         1,
         "local".to_string(),
     );
@@ -111,6 +116,15 @@ pub(crate) async fn seed_session_with_messages(
         .expect("创建会话应成功");
     seed_messages(storage, session.id, persona, count, base_ts).await;
     session.id
+}
+
+/// 造一段足够久远的对话历史（含本地用户消息，消息时间 45 天前）。
+///
+/// 用途:
+/// - 让"自动"开关的人格通过解锁判定（存在本地用户消息）；
+/// - 时间取活跃时段 30 天统计窗口之外且早于退避 / 空闲判定窗口，不干扰既有用例语义。
+pub(crate) async fn seed_dialogue_history(storage: &SqliteStorage, persona: &str) {
+    seed_session_with_messages(storage, persona, 2, now_ms() - 45 * 86_400_000).await;
 }
 
 /// 造一个带通道标识的活跃会话 + 消息（供"外部对话超时另起"等回流用例）。

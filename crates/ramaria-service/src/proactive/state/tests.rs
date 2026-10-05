@@ -2,8 +2,9 @@
 //!
 //! 设计特点:
 //! - 覆盖完整往返、覆盖写、画像隔离、缺键回退、损坏回退、部分字段回退
+//! - 全局状态覆盖往返 / 覆盖写、缺键回退与键形稳定
 //! - 使用真实 SQLite 临时库（`settings` 表读写与生产同路径）
-//! - 锁定状态键形 `proactive.state.{persona_uid}`
+//! - 锁定状态键形 `proactive.state.{persona_uid}` 与 `proactive.state.global`
 //! - 只构造合成状态，不依赖网络 / LLM
 
 use super::*;
@@ -172,6 +173,97 @@ async fn legacy_json_without_new_fields_falls_back() {
     );
     assert_eq!(state.judge_yes_count, 0, "缺 judge_yes_count 应回退默认");
     assert_eq!(state.judge_no_count, 0, "缺 judge_no_count 应回退默认");
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+// =========================================================
+// 全局状态
+// =========================================================
+
+/// 全局状态往返 + 覆盖写。
+#[tokio::test]
+async fn global_state_roundtrip_and_overwrite() {
+    let (_engine, storage, dir) = engine_with_db("proactive-global-roundtrip").await;
+
+    let state = ProactiveGlobalState {
+        daily_count: 2,
+        daily_date: "2026-10-02".to_string(),
+    };
+    save_global_state(storage.as_ref(), &state)
+        .await
+        .expect("保存应成功");
+    let loaded = load_global_state(storage.as_ref())
+        .await
+        .expect("读取应成功");
+    assert_eq!(loaded, state, "读写应无损往返");
+
+    // 覆盖写：同一键以最新快照为准
+    let updated = ProactiveGlobalState {
+        daily_count: 3,
+        daily_date: "2026-10-03".to_string(),
+    };
+    save_global_state(storage.as_ref(), &updated)
+        .await
+        .expect("覆盖写应成功");
+    let reloaded = load_global_state(storage.as_ref())
+        .await
+        .expect("读取应成功");
+    assert_eq!(reloaded, updated, "覆盖写应生效");
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 键缺失 → 默认全局状态（空态非错误）。
+#[tokio::test]
+async fn global_state_missing_key_returns_default() {
+    let (_engine, storage, dir) = engine_with_db("proactive-global-missing").await;
+
+    let state = load_global_state(storage.as_ref())
+        .await
+        .expect("缺失键应回退默认而非报错");
+    assert_eq!(state, ProactiveGlobalState::default());
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 损坏 JSON → 回退默认全局状态（不阻塞调度）。
+#[tokio::test]
+async fn global_state_corrupted_json_falls_back_to_default() {
+    let (_engine, storage, dir) = engine_with_db("proactive-global-corrupt").await;
+
+    storage
+        .set_setting("proactive.state.global", "{ 不是 JSON")
+        .await
+        .expect("写入损坏值应成功");
+    let state = load_global_state(storage.as_ref())
+        .await
+        .expect("损坏值应回退默认而非报错");
+    assert_eq!(
+        state,
+        ProactiveGlobalState::default(),
+        "损坏 JSON 应回退默认"
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 全局状态键形稳定：`proactive.state.global`。
+#[tokio::test]
+async fn global_state_key_shape_is_stable() {
+    let (_engine, storage, dir) = engine_with_db("proactive-global-key").await;
+
+    save_global_state(storage.as_ref(), &ProactiveGlobalState::default())
+        .await
+        .expect("保存应成功");
+    assert!(
+        storage
+            .get_setting("proactive.state.global")
+            .await
+            .expect("读取应成功")
+            .is_some(),
+        "全局状态键应为 proactive.state.global"
+    );
 
     let _ = std::fs::remove_dir_all(dir);
 }

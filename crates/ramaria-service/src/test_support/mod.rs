@@ -23,8 +23,9 @@ pub(crate) use engine::{
 };
 pub(crate) use llm::{MockLlm, ScriptedLlm};
 pub(crate) use seed::{
-    seed_channel_session, seed_closed_session_with_messages, seed_l1, seed_messages, seed_persona,
-    seed_session_with_messages, seed_utt_block, temp_dir,
+    seed_channel_session, seed_closed_session_with_messages, seed_dialogue_history, seed_l1,
+    seed_messages, seed_persona, seed_persona_kind, seed_session_with_messages, seed_utt_block,
+    temp_dir,
 };
 pub(crate) use storage::FailableStorage;
 

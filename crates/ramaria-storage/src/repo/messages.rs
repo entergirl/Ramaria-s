@@ -198,6 +198,38 @@ pub async fn last_user_message_time_by_persona(
     Ok(row.and_then(|r| r.max_time))
 }
 
+/// 查询指定 persona 是否存在本地用户消息（"对话一次"存在性判定）。
+///
+/// 口径:
+/// - 只计角色 `user` 且 `import_fingerprint IS NULL` 的消息：主动消息（assistant
+///   角色）与导入消息均不计入。
+/// - 会话归属以 `sessions.persona_uid` 为准；EXISTS 语义只判断存在性，不取时间。
+///
+/// 参数:
+/// - `persona_uid`: 人格标识。
+///
+/// 返回:
+/// - `Ok(true)`: 存在至少一条本地用户消息。
+/// - `Ok(false)`: 不存在。
+pub async fn has_local_user_message_by_persona(
+    pool: &SqlitePool,
+    persona_uid: &str,
+) -> RamariaResult<bool> {
+    // SQLite EXISTS 恒返回一行 0/1
+    let exists = sqlx::query_scalar::<_, i64>(
+        "SELECT EXISTS( \
+             SELECT 1 FROM messages m JOIN sessions s ON s.id = m.session_id \
+             WHERE s.persona_uid = ? AND m.role = 'user' AND m.import_fingerprint IS NULL \
+         )",
+    )
+    .bind(persona_uid)
+    .fetch_one(pool)
+    .await
+    .storage_err("查询 persona 本地用户消息存在性失败")?;
+
+    Ok(exists != 0)
+}
+
 /// 查询指定会话最近一条消息的时间（Unix 毫秒，含全部角色）。
 ///
 /// 口径:

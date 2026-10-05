@@ -9,6 +9,8 @@
 //!   生成用例复用统一生成链路的主动模式
 //! - 调度循环与打扰控制：单轮判定链（硬闸门 → 活跃时段门 → 判据节流 → 选题 →
 //!   生成 → 投放），状态按人格隔离且处理尾部统一回写
+//! - 人格开关：三态（自动 / 手动开 / 手动关）按画像存于 `settings` 表，
+//!   由调度在资格闸门读取
 //! - 投递注册：宿主实现接收端 trait 并注册到引擎；未注册时调度静默丢弃
 //! - 活跃时段统计：user 消息时间直方图 + 软加权（权重设下限，样本不足退化放行）
 
@@ -18,6 +20,7 @@ mod picker;
 mod schedule;
 mod sink;
 mod state;
+mod switch;
 mod topic;
 
 pub use sink::{ProactiveMessage, ProactiveSink};

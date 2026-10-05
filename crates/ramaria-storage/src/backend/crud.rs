@@ -118,6 +118,10 @@ impl StoreCrud for SqliteStorage {
     ) -> RamariaResult<Option<i64>> {
         repo::messages::last_user_message_time_by_persona(&self.pool, persona_uid).await
     }
+    /// 覆写为 EXISTS 查询（主动对话人格解锁判定）。
+    async fn has_local_user_message_by_persona(&self, persona_uid: &str) -> RamariaResult<bool> {
+        repo::messages::has_local_user_message_by_persona(&self.pool, persona_uid).await
+    }
     /// 覆写为 `SELECT MAX(created_at)` 查询（主动对话事件后会话静默判定）。
     async fn last_message_time_by_session(&self, session_id: Uuid) -> RamariaResult<Option<i64>> {
         repo::messages::last_message_time_by_session(&self.pool, session_id).await

@@ -2,6 +2,7 @@
 //!
 //! 设计特点:
 //! - 状态以 JSON 存于 `settings` 表，键 `proactive.state.{persona_uid}`，重启保持
+//! - 全局记账为固定单键（`proactive.state.global`，全部人格合计），与按画像隔离的状态键并列
 //! - 缺键 / 损坏 / 类型不符的 JSON 回退默认状态并记 warn，不阻塞调度
 //! - 状态形态覆盖打扰控制与去重冷却的全部跨 tick 数据
 //! - 日志只记状态键名与解析错误，不记状态值内容
@@ -76,6 +77,25 @@ pub struct ProactiveState {
     /// 判据累计「沉默」裁决次数（调参观测）。
     #[serde(default)]
     pub judge_no_count: u32,
+}
+
+/// 全局主动状态（全部人格合计）。
+///
+/// 职责:
+/// - 承载跨人格合计的主动投递记账：当日已投递条数与计数归属日期。
+///
+/// 字段约定:
+/// - `daily_count` + `daily_date`: 全部人格当日已投递条数与计数归属日期
+///   （本地日期 `YYYY-MM-DD` 文本）；跨日重置由调用方按日期比对执行。
+///
+/// 兼容性:
+/// - 字段级 `#[serde(default)]`：状态 JSON 缺字段（版本演进）时回退字段默认值。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProactiveGlobalState {
+    #[serde(default)]
+    pub daily_count: u32,
+    #[serde(default)]
+    pub daily_date: String,
 }
 
 /// 近期选题记录（去重冷却输入）。
@@ -191,6 +211,60 @@ pub(crate) async fn save_state(
     storage.set_setting(&key, &json).await?;
 
     tracing::debug!(key = %key, "主动对话状态已保存");
+    Ok(())
+}
+
+/// 全局状态键（固定单键，全部人格合计共用）。
+const GLOBAL_STATE_KEY: &str = "proactive.state.global";
+
+/// 读取全局主动状态。
+///
+/// 参数:
+/// - `storage`: 存储后端（`settings` 表键值读写）。
+///
+/// 返回:
+/// - 键缺失 → 默认状态（尚未产生过全局记账）；
+/// - JSON 损坏 / 字段类型不符 → 记 warn 并回退默认状态（状态可重建，不阻塞调度）；
+/// - 存储读取本身失败 → 返回 `Storage` 错误（不静默吞错）。
+pub(crate) async fn load_global_state(
+    storage: &dyn StorageBackend,
+) -> RamariaResult<ProactiveGlobalState> {
+    let Some(raw) = storage.get_setting(GLOBAL_STATE_KEY).await? else {
+        return Ok(ProactiveGlobalState::default());
+    };
+
+    match serde_json::from_str::<ProactiveGlobalState>(&raw) {
+        Ok(state) => Ok(state),
+        Err(e) => {
+            // 状态为可重建的运行期数据：损坏时回退默认，避免阻塞后续调度
+            tracing::warn!(
+                key = GLOBAL_STATE_KEY,
+                error = %e,
+                "主动全局状态 JSON 解析失败，回退默认状态"
+            );
+            Ok(ProactiveGlobalState::default())
+        }
+    }
+}
+
+/// 写入全局主动状态（已存在键覆盖写）。
+///
+/// 参数:
+/// - `storage`: 存储后端。
+/// - `state`: 待持久化的完整全局状态快照。
+///
+/// 返回:
+/// - 序列化失败 → `Serialization` 错误；
+/// - 写入失败 → `Storage` 错误。
+pub(crate) async fn save_global_state(
+    storage: &dyn StorageBackend,
+    state: &ProactiveGlobalState,
+) -> RamariaResult<()> {
+    let json = serde_json::to_string(state)
+        .map_err(|e| RamariaError::serialization(format!("序列化主动全局状态失败: {e}")))?;
+    storage.set_setting(GLOBAL_STATE_KEY, &json).await?;
+
+    tracing::debug!(key = GLOBAL_STATE_KEY, "主动全局状态已保存");
     Ok(())
 }
 

@@ -9,15 +9,17 @@
 use super::quiet::{QuietHours, parse_quiet_hours};
 use super::*;
 use crate::proactive::sink::ProactiveSink;
+use crate::proactive::switch::{self, ProactivePersonaMode};
 use crate::recall::RecallPolicy;
 use crate::test_support::seed_session_with_messages;
 use crate::test_support::{
-    MockLlm, engine_with_llm_and_config, engine_with_shared_llm, seed_persona,
+    MockLlm, engine_with_llm_and_config, engine_with_shared_llm, seed_dialogue_history,
+    seed_persona, seed_persona_kind,
 };
 use crate::types::DEFAULT_PERSONA_UID;
 use ramaria_core::config::RamariaConfig;
 use ramaria_core::traits::{StoreCrud, StoreInfrastructure};
-use ramaria_core::types::{BackendConfig, MessageRole, PrivacyConsent};
+use ramaria_core::types::{AppState, BackendConfig, MessageRole, PersonaKind, PrivacyConsent};
 use ramaria_storage::SqliteStorage;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
@@ -44,13 +46,15 @@ fn test_config() -> RamariaConfig {
     config
 }
 
-/// 装配"真实 SQLite + 空回复 mock LLM + 指定主动配置"的引擎，并造 persona 与就绪态。
+/// 装配"真实 SQLite + 空回复 mock LLM + 指定主动配置"的引擎，并造 persona、
+/// 对话历史与就绪态（历史满足资格闸门的解锁判定）。
 async fn ready_engine(
     tag: &str,
     config: RamariaConfig,
 ) -> (Engine, Arc<SqliteStorage>, std::path::PathBuf) {
     let (engine, storage, dir) = engine_with_llm_and_config(tag, MockLlm::local(), config).await;
     seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+    seed_dialogue_history(&storage, DEFAULT_PERSONA_UID).await;
     engine.set_state(AppState::Ready);
     (engine, storage, dir)
 }
@@ -258,6 +262,8 @@ async fn gate_state_not_ready() {
     let (engine, storage, dir) =
         engine_with_llm_and_config("proactive-gate-state", MockLlm::local(), test_config()).await;
     seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+    // 补足历史让资格闸门放行，保留对"状态门"的覆盖
+    seed_dialogue_history(&storage, DEFAULT_PERSONA_UID).await;
     // 不设 Ready：状态门未通过
 
     let picker = CountingPicker::empty();
@@ -461,8 +467,18 @@ async fn gate_min_idle_blocks() {
     assert_eq!(picker.calls(), 0, "空闲不足不应触达选题");
     let _ = std::fs::remove_dir_all(dir);
 
-    // 无任何消息 → 放行
-    let (engine, _storage, dir) = ready_engine("proactive-gate-idle-out", config).await;
+    // 无任何消息 → 放行（手动强开绕过解锁门，保留"无历史视为足够空闲"语义）
+    let (engine, storage, dir) =
+        engine_with_llm_and_config("proactive-gate-idle-out", MockLlm::local(), config).await;
+    seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+    switch::save_mode(
+        storage.as_ref(),
+        DEFAULT_PERSONA_UID,
+        ProactivePersonaMode::On,
+    )
+    .await
+    .expect("保存开关应成功");
+    engine.set_state(AppState::Ready);
     let picker = CountingPicker::empty();
     run_tick(&engine, now, &picker).await.expect("单轮应完成");
     assert_eq!(picker.calls(), 1, "无历史应视为足够空闲");
@@ -481,6 +497,7 @@ async fn gate_privacy_unconfirmed_online() {
     )
     .await;
     seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+    seed_dialogue_history(&storage, DEFAULT_PERSONA_UID).await;
     engine.set_state(AppState::Ready);
 
     let now = now_ms();
@@ -591,6 +608,250 @@ async fn activity_gate_low_weight_skips() {
 }
 
 // =========================================================
+// 人格主动开关闸门
+// =========================================================
+
+/// user 类人格硬排除：手动强开也不放行。
+#[tokio::test]
+async fn gate_user_persona_excluded() {
+    let (engine, storage, dir) =
+        engine_with_llm_and_config("proactive-gate-user", MockLlm::local(), test_config()).await;
+    seed_persona_kind(&storage, "user-0001", PersonaKind::User).await;
+    seed_dialogue_history(&storage, "user-0001").await;
+    switch::save_mode(storage.as_ref(), "user-0001", ProactivePersonaMode::On)
+        .await
+        .expect("保存开关应成功");
+    engine.set_state(AppState::Ready);
+
+    let picker = CountingPicker::empty();
+    let summary = run_tick(&engine, now_ms(), &picker)
+        .await
+        .expect("单轮应完成");
+    assert_eq!(summary.attempts, 0);
+    assert_eq!(picker.calls(), 0, "user 类人格应硬排除");
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 手动关闭：有对话历史也跳过。
+#[tokio::test]
+async fn gate_persona_off_skips() {
+    let (engine, storage, dir) = ready_engine("proactive-gate-off", test_config()).await;
+    switch::save_mode(
+        storage.as_ref(),
+        DEFAULT_PERSONA_UID,
+        ProactivePersonaMode::Off,
+    )
+    .await
+    .expect("保存开关应成功");
+
+    let picker = CountingPicker::empty();
+    let summary = run_tick(&engine, now_ms(), &picker)
+        .await
+        .expect("单轮应完成");
+    assert_eq!(summary.attempts, 0);
+    assert_eq!(picker.calls(), 0, "手动关闭不应触达选题");
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 自动冷：无对话历史跳过（自动态的冷启动解锁判定）。
+#[tokio::test]
+async fn gate_persona_cold_skips() {
+    let (engine, storage, dir) =
+        engine_with_llm_and_config("proactive-gate-cold", MockLlm::local(), test_config()).await;
+    seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+    engine.set_state(AppState::Ready);
+
+    let picker = CountingPicker::empty();
+    let summary = run_tick(&engine, now_ms(), &picker)
+        .await
+        .expect("单轮应完成");
+    assert_eq!(summary.attempts, 0);
+    assert_eq!(picker.calls(), 0, "自动态无历史不应触达选题");
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 手动强开：无对话历史也放行。
+#[tokio::test]
+async fn gate_persona_on_forces_pass_when_cold() {
+    let (engine, storage, dir) =
+        engine_with_llm_and_config("proactive-gate-on", MockLlm::local(), test_config()).await;
+    seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+    switch::save_mode(
+        storage.as_ref(),
+        DEFAULT_PERSONA_UID,
+        ProactivePersonaMode::On,
+    )
+    .await
+    .expect("保存开关应成功");
+    engine.set_state(AppState::Ready);
+
+    let picker = CountingPicker::empty();
+    let summary = run_tick(&engine, now_ms(), &picker)
+        .await
+        .expect("单轮应完成");
+    assert_eq!(summary.attempts, 1);
+    assert_eq!(picker.calls(), 1, "手动强开应放行");
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 自动暖：有对话历史且未设置开关（自动态）放行。
+#[tokio::test]
+async fn gate_persona_warm_auto_passes() {
+    let (engine, _storage, dir) = ready_engine("proactive-gate-warm", test_config()).await;
+
+    let picker = CountingPicker::empty();
+    let summary = run_tick(&engine, now_ms(), &picker)
+        .await
+        .expect("单轮应完成");
+    assert_eq!(summary.attempts, 1);
+    assert_eq!(picker.calls(), 1, "自动态有历史应放行");
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 开关值损坏：回退自动（有历史放行）。
+#[tokio::test]
+async fn gate_persona_corrupted_switch_falls_back_auto() {
+    let (engine, storage, dir) = ready_engine("proactive-gate-corrupt", test_config()).await;
+    storage
+        .set_setting(
+            &format!("proactive.persona.{DEFAULT_PERSONA_UID}"),
+            "garbage",
+        )
+        .await
+        .expect("写入损坏开关应成功");
+
+    let picker = CountingPicker::empty();
+    let summary = run_tick(&engine, now_ms(), &picker)
+        .await
+        .expect("单轮应完成");
+    assert_eq!(summary.attempts, 1);
+    assert_eq!(picker.calls(), 1, "损坏值应回退自动并放行");
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+// =========================================================
+// 全局日上限
+// =========================================================
+
+/// 预置全局主动状态。
+async fn save_global(storage: &SqliteStorage, global: &ProactiveGlobalState) {
+    state::save_global_state(storage, global)
+        .await
+        .expect("预置全局状态应成功");
+}
+
+/// 读取全局主动状态。
+async fn reload_global(storage: &SqliteStorage) -> ProactiveGlobalState {
+    state::load_global_state(storage)
+        .await
+        .expect("读取全局状态应成功")
+}
+
+/// 全局日上限已满：跳过。
+#[tokio::test]
+async fn gate_daily_total_limit_blocks() {
+    let now = now_ms();
+    let mut config = test_config();
+    config.proactive.daily_total_limit = 1;
+    let (engine, storage, dir) = ready_engine("proactive-gate-total-full", config).await;
+    save_global(
+        &storage,
+        &ProactiveGlobalState {
+            daily_count: 1,
+            daily_date: state::local_date_str(now),
+        },
+    )
+    .await;
+
+    let picker = CountingPicker::empty();
+    run_tick(&engine, now, &picker).await.expect("单轮应完成");
+    assert_eq!(picker.calls(), 0, "全局上限已满不应触达选题");
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 全局上限不限（0）：不读不写全局状态。
+#[tokio::test]
+async fn gate_daily_total_limit_disabled_zero() {
+    let now = now_ms();
+    let (engine, storage, dir) = ready_engine("proactive-gate-total-off", test_config()).await;
+    let preset = ProactiveGlobalState {
+        daily_count: 99,
+        daily_date: state::local_date_str(now),
+    };
+    save_global(&storage, &preset).await;
+
+    let picker = CountingPicker::empty();
+    run_tick(&engine, now, &picker).await.expect("单轮应完成");
+    assert_eq!(picker.calls(), 1, "不限模式不应拦截");
+    assert_eq!(
+        reload_global(&storage).await,
+        preset,
+        "不限模式不应读写全局状态"
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 跨日重置：归属昨日 → 清零后放行。
+#[tokio::test]
+async fn gate_daily_total_limit_cross_day_reset() {
+    let now = now_ms();
+    let mut config = test_config();
+    config.proactive.daily_total_limit = 1;
+    let (engine, storage, dir) = ready_engine("proactive-gate-total-reset", config).await;
+    save_global(
+        &storage,
+        &ProactiveGlobalState {
+            daily_count: 5,
+            daily_date: state::local_date_str(now - 86_400_000),
+        },
+    )
+    .await;
+
+    let picker = CountingPicker::empty();
+    run_tick(&engine, now, &picker).await.expect("单轮应完成");
+    assert_eq!(picker.calls(), 1, "跨日重置后应触达选题");
+    let reloaded = reload_global(&storage).await;
+    assert_eq!(reloaded.daily_count, 0, "空选题器无投递，计数应保持重置值");
+    assert_eq!(reloaded.daily_date, state::local_date_str(now));
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 生成成功计入全局计数（口径与人格级一致）。
+#[tokio::test]
+async fn daily_total_limit_counts_generated() {
+    let now = now_ms();
+    let mut config = test_config();
+    config.proactive.daily_total_limit = 5;
+    let (engine, storage, dir) =
+        engine_with_llm_and_config("proactive-total-counts", MockLlm::with_reply(REPLY), config)
+            .await;
+    seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+    seed_dialogue_history(&storage, DEFAULT_PERSONA_UID).await;
+    engine.set_state(AppState::Ready);
+
+    let sink = Arc::new(TestSink::ok());
+    engine.set_proactive_sink(sink.clone());
+    let picker = CountingPicker::returning(directive(None));
+    let summary = run_tick(&engine, now, &picker).await.expect("单轮应完成");
+    assert_eq!(summary.generated, 1);
+
+    let global = reload_global(&storage).await;
+    assert_eq!(global.daily_count, 1, "生成成功应计入全局计数");
+    assert_eq!(global.daily_date, state::local_date_str(now));
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+// =========================================================
 // 生成与投放
 // =========================================================
 
@@ -605,6 +866,7 @@ async fn tick_generates_and_delivers_full_chain() {
     )
     .await;
     seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+    seed_dialogue_history(&storage, DEFAULT_PERSONA_UID).await;
     engine.set_state(AppState::Ready);
 
     let sink = Arc::new(TestSink::ok());
@@ -666,6 +928,7 @@ async fn tick_without_sink_records_sent_but_no_cooldown() {
     )
     .await;
     seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+    seed_dialogue_history(&storage, DEFAULT_PERSONA_UID).await;
     engine.set_state(AppState::Ready);
 
     let picker = CountingPicker::returning(directive(None));
@@ -691,6 +954,7 @@ async fn tick_sink_failure_does_not_record_cooldown() {
     )
     .await;
     seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+    seed_dialogue_history(&storage, DEFAULT_PERSONA_UID).await;
     engine.set_state(AppState::Ready);
 
     engine.set_proactive_sink(Arc::new(TestSink::failing()));
@@ -714,6 +978,7 @@ async fn tick_generation_failure_keeps_sent_unrecorded() {
         engine_with_llm_and_config("proactive-tick-gen-fail", MockLlm::failing(), test_config())
             .await;
     seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+    seed_dialogue_history(&storage, DEFAULT_PERSONA_UID).await;
     engine.set_state(AppState::Ready);
 
     let picker = CountingPicker::returning(directive(None));

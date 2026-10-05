@@ -973,7 +973,7 @@ async fn mcp_db_keys_absent_from_file_are_preserved() {
 // [proactive] 组纳入双写同步（主动对话配置通道）
 // =========================================================
 
-/// [proactive] 组二十一键纳入统一写入口：save 后 settings 表逐键可见、文件侧携带其值。
+/// [proactive] 组二十二键纳入统一写入口：save 后 settings 表逐键可见、文件侧携带其值。
 #[tokio::test]
 async fn proactive_group_keys_are_covered_by_full_sync() {
     let storage = Arc::new(MockStorage::default());
@@ -984,6 +984,7 @@ async fn proactive_group_keys_are_covered_by_full_sync() {
     cfg.proactive.check_interval_seconds = 120;
     cfg.proactive.min_idle_hours = 6;
     cfg.proactive.daily_limit = 2;
+    cfg.proactive.daily_total_limit = 5;
     cfg.proactive.quiet_hours = "23:00-07:30".to_string();
     cfg.proactive.cooldown_hours = 24;
     cfg.proactive.judge_enabled = false;
@@ -1011,6 +1012,7 @@ async fn proactive_group_keys_are_covered_by_full_sync() {
         ("config.proactive.check_interval_seconds", "120"),
         ("config.proactive.min_idle_hours", "6"),
         ("config.proactive.daily_limit", "2"),
+        ("config.proactive.daily_total_limit", "5"),
         ("config.proactive.cooldown_hours", "24"),
         ("config.proactive.judge_enabled", "false"),
         ("config.proactive.judge_interval_hours", "6"),
@@ -1045,6 +1047,7 @@ async fn proactive_group_keys_are_covered_by_full_sync() {
     assert!(!file_cfg.proactive.enabled);
     assert_eq!(file_cfg.proactive.quiet_hours, "23:00-07:30");
     assert_eq!(file_cfg.proactive.daily_limit, 2);
+    assert_eq!(file_cfg.proactive.daily_total_limit, 5);
 
     let _ = std::fs::remove_dir_all(dir);
 }

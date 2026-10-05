@@ -595,3 +595,123 @@ async fn last_message_time_by_session_counts_all_roles() {
         "不存在的会话应返回 None"
     );
 }
+
+// =========================================================
+// persona 本地用户消息存在性查询（人格解锁判定）
+// =========================================================
+
+/// 写入一条本地用户消息（无导入指纹，走常规保存路径）。
+async fn insert_local_user_message(pool: &SqlitePool, session_id: Uuid, created_at: i64) {
+    let mut m = make_message(session_id, None);
+    m.created_at = created_at;
+    save(pool, &m).await.expect("写入本地用户消息成功");
+}
+
+/// 本地 user 消息（无导入指纹）命中；无消息时返回 false。
+#[tokio::test]
+async fn has_local_user_message_true_for_local_user() {
+    let pool = init_test_pool().await.expect("测试库初始化失败");
+    let session = setup_persona_session(&pool, "char-0001").await;
+
+    assert!(
+        !has_local_user_message_by_persona(&pool, "char-0001")
+            .await
+            .expect("查询应成功"),
+        "无消息应为 false"
+    );
+
+    insert_local_user_message(&pool, session, 1_000).await;
+    assert!(
+        has_local_user_message_by_persona(&pool, "char-0001")
+            .await
+            .expect("查询应成功"),
+        "本地 user 消息应命中"
+    );
+}
+
+/// 仅 assistant 角色消息（如主动消息）不计入。
+#[tokio::test]
+async fn has_local_user_message_ignores_assistant_role() {
+    let pool = init_test_pool().await.expect("测试库初始化失败");
+    let session = setup_persona_session(&pool, "char-0001").await;
+
+    let mut m = make_message(session, None);
+    m.role = MessageRole::Assistant;
+    m.created_at = 1_000;
+    save(&pool, &m).await.expect("写入 assistant 消息成功");
+
+    assert!(
+        !has_local_user_message_by_persona(&pool, "char-0001")
+            .await
+            .expect("查询应成功"),
+        "assistant 角色不应命中"
+    );
+}
+
+/// 带导入指纹的 user 消息（导入历史）不计入。
+#[tokio::test]
+async fn has_local_user_message_ignores_imported() {
+    let pool = init_test_pool().await.expect("测试库初始化失败");
+    let session = setup_persona_session(&pool, "char-0001").await;
+
+    // 该辅助写入的消息指纹非空（导入消息）
+    insert_role_message(&pool, session, MessageRole::User, 1_000).await;
+
+    assert!(
+        !has_local_user_message_by_persona(&pool, "char-0001")
+            .await
+            .expect("查询应成功"),
+        "导入消息不应命中"
+    );
+}
+
+/// 归属以会话 `persona_uid` 为准：他人格会话不串扰，消息自身 persona_uid 不参与归属。
+#[tokio::test]
+async fn has_local_user_message_scopes_by_session_persona() {
+    let pool = init_test_pool().await.expect("测试库初始化失败");
+    let session_a = setup_persona_session(&pool, "char-0001").await;
+    let session_b = setup_persona_session(&pool, "char-0002").await;
+
+    // 仅 char-0002 的会话有本地用户消息
+    insert_local_user_message(&pool, session_b, 1_000).await;
+    assert!(
+        !has_local_user_message_by_persona(&pool, "char-0001")
+            .await
+            .expect("查询应成功"),
+        "他人格会话不应串扰"
+    );
+    assert!(
+        has_local_user_message_by_persona(&pool, "char-0002")
+            .await
+            .expect("查询应成功"),
+        "目标人格自身的本地消息应命中"
+    );
+
+    // char-0001 的会话内写入 persona_uid 标记为 char-0002 的本地消息：
+    // 归属仍取会话归属 → char-0001 命中
+    let mut m = make_message(session_a, None);
+    m.persona_uid = Some("char-0002".to_string());
+    m.created_at = 2_000;
+    save(&pool, &m).await.expect("写入消息成功");
+    assert!(
+        has_local_user_message_by_persona(&pool, "char-0001")
+            .await
+            .expect("查询应成功"),
+        "归属应取 sessions.persona_uid 而非消息自身 persona_uid"
+    );
+}
+
+/// 未绑定 persona 的会话（`persona_uid IS NULL`）消息不计入。
+#[tokio::test]
+async fn has_local_user_message_ignores_unbound_session() {
+    let pool = init_test_pool().await.expect("测试库初始化失败");
+    let session = setup_fixture(&pool).await;
+
+    insert_local_user_message(&pool, session, 1_000).await;
+    assert!(
+        !has_local_user_message_by_persona(&pool, "char-0001")
+            .await
+            .expect("查询应成功"),
+        "未绑定 persona 的会话不应命中"
+    );
+}

@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 /// - `check_interval_seconds`: 调度循环的检查间隔（秒），决定触发判定频率。
 /// - `min_idle_hours`: 距上次对话的最小空闲时长（小时），避免打断进行中的交流。
 /// - `daily_limit`: 每个画像每日最多主动投递条数。
+/// - `daily_total_limit`: 全部人格合计每日主动投递上限（0 = 不限）。
 /// - `quiet_hours`: 免打扰时段（`HH:MM-HH:MM`，支持跨零点，如 `"22:00-08:00"`）。
 /// - `cooldown_hours`: 两次主动投递之间的最短间隔（小时）。
 /// - `judge_enabled`: 判据开关（默认开启）；关闭后由算法打分直接决策。
@@ -60,6 +61,8 @@ pub struct ProactiveConfig {
     pub min_idle_hours: u32,
     /// 每画像每日主动投递上限（默认 3）。
     pub daily_limit: u32,
+    /// 全部人格合计每日主动投递上限（默认 0 = 不限）。
+    pub daily_total_limit: u32,
     /// 免打扰时段（`HH:MM-HH:MM`，支持跨零点；默认 "22:00-08:00"）。
     pub quiet_hours: String,
     /// 两次主动投递的最短间隔（小时，默认 8）。
@@ -113,7 +116,7 @@ impl Default for ProactiveConfig {
     ///
     /// 返回:
     /// - 均衡基线：总开关开启，检查间隔 300 秒，最小空闲 4 小时，
-    ///   每日上限 3 条，免打扰 22:00-08:00，冷却 8 小时；判据开启、
+    ///   每日上限 3 条（合计不限），免打扰 22:00-08:00，冷却 8 小时；判据开启、
     ///   节流 3 小时；时段加权 0.8（窗口 30 天、最少 50 样本）；
     ///   效价权重 0.5，置信度门槛 0.6，轻触达权重 0.3；
     ///   事件显著门槛 0.6（时间窗 14 天），负效价阈值 -0.3，
@@ -124,6 +127,7 @@ impl Default for ProactiveConfig {
             check_interval_seconds: 300,
             min_idle_hours: 4,
             daily_limit: 3,
+            daily_total_limit: 0,
             quiet_hours: "22:00-08:00".to_string(),
             cooldown_hours: 8,
             judge_enabled: true,

@@ -586,6 +586,8 @@ check_interval_seconds = 300
 min_idle_hours = 4
 # 每画像每日主动投递上限（条）
 daily_limit = 3
+# 全部人格合计每日主动投递上限（条）：0 = 不限
+daily_total_limit = 0
 # 免打扰时段（HH:MM-HH:MM，支持跨零点）
 quiet_hours = "22:00-08:00"
 # 两次主动投递之间的最短间隔（小时）
