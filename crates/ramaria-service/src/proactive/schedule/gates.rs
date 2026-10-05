@@ -13,7 +13,7 @@ use tracing::debug;
 
 use ramaria_core::config::ProactiveConfig;
 use ramaria_core::error::RamariaResult;
-use ramaria_core::types::{AppState, Persona, PersonaKind};
+use ramaria_core::types::{AppState, Persona};
 
 use crate::engine::Engine;
 use crate::proactive::switch::{self, ProactivePersonaMode};
@@ -92,15 +92,6 @@ pub(super) fn days_to_ms(days: u32) -> i64 {
 // 硬闸门判定
 // =========================================================
 
-/// 判断画像是否为"用户本人"类型（绝不参与主动对话的硬排除）。
-///
-/// 规则:
-/// - 行值优先（`persona.kind`），uid 前缀兜底（`PersonaKind::from_uid`）；
-/// - user 类画像代表用户自身，主动对其发言没有语义，任何开关设置都不放行。
-fn is_user_persona(persona: &Persona) -> bool {
-    persona.kind == PersonaKind::User || PersonaKind::from_uid(&persona.uid) == PersonaKind::User
-}
-
 /// 硬闸门判定（按"资格 → 就绪 → 打扰控制 → 隐私"分层判定）。
 ///
 /// 顺序:
@@ -132,7 +123,7 @@ pub(super) async fn evaluate_gates(
     }
 
     // ---- 2. 人格主动开关（user 硬排除 / 手动关 / 自动冷）----
-    if is_user_persona(persona) {
+    if switch::is_user_persona(persona) {
         return Ok(GateOutcome::Skip(GateSkip::PersonaExcluded));
     }
     match switch::load_mode(engine.storage_ref().as_ref(), &persona.uid).await? {

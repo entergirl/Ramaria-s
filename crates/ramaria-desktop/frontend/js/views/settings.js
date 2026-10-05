@@ -1359,6 +1359,19 @@ var RamariaSettingsView = (function () {
         section.appendChild(card);
         parent.appendChild(section);
 
+        // 主动消息名单子区块（全部活跃人格）：行内切换即时保存，
+        // 与上方全局四键的"保存按钮"形态共存并在文案上区分
+        var rosterCard = document.createElement('div');
+        rosterCard.className = 'settings-card';
+        rosterCard.id = 'settings-proactive-roster-card';
+        rosterCard.innerHTML =
+            '<div class="settings-form-label">主动消息名单</div>' +
+            '<div class="settings-form-hint">逐个控制哪些人格可以主动发来消息；行内切换即时保存（上方全局设置需点击保存按钮）。</div>' +
+            '<div class="settings-proactive-roster" id="settings-proactive-roster">' +
+                '<div class="settings-proactive-roster-placeholder">加载中…</div>' +
+            '</div>';
+        section.appendChild(rosterCard);
+
         // 绑定事件
         var saveBtn = $('settings-save-proactive');
         if (saveBtn) saveBtn.addEventListener('click', _handleSaveProactive);
@@ -1448,6 +1461,205 @@ var RamariaSettingsView = (function () {
         } catch (err) {
             RamariaToast.show('error', '保存主动对话设置失败', err.message || '未知错误');
         }
+    }
+
+// =========================================================
+// 主动消息名单（逐人格三态开关；行内切换即时保存）
+// =========================================================
+
+    /**
+     * 主动消息名单状态文案（四态）。
+     *
+     * 参数:
+     * - `mode`: 开关三态（auto / on / off）
+     * - `hasDialogue`: 是否存在本地对话（自动态是否已解锁）
+     * - `kind`: 人格类型（user 行固定显示不参与说明）
+     *
+     * 返回:
+     * - 中文状态文案；user 行控件禁用并说明"用户人格不参与主动对话"。
+     */
+    function _proactivePersonaStatusText(mode, hasDialogue, kind) {
+        if (kind === 'user') return '用户人格不参与主动对话';
+        if (mode === 'on') return '已开启（手动）';
+        if (mode === 'off') return '已关闭';
+        return hasDialogue ? '自动开启（已对话过）' : '未解锁（对话一次后自动开启）';
+    }
+
+    /**
+     * 归一化开关文本：非 on / off 一律回退 auto（防后端异常值打断渲染）。
+     */
+    function _normalizeProactiveMode(mode) {
+        return (mode === 'on' || mode === 'off') ? mode : 'auto';
+    }
+
+    /**
+     * 名单读命令结果 → 行视图模型（纯函数）。
+     *
+     * 参数:
+     * - `list`: list_proactive_personas 返回数组
+     *
+     * 返回:
+     * - [{ uid, name, kind, mode, hasDialogue, statusText, selectDisabled }]；
+     *   user 行 selectDisabled=true（硬排除，不可设置）。
+     */
+    function _buildProactivePersonaRows(list) {
+        var rows = [];
+        if (!Array.isArray(list)) return rows;
+        for (var i = 0; i < list.length; i++) {
+            var item = list[i] || {};
+            if (!item.uid) continue;
+            var mode = _normalizeProactiveMode(item.mode);
+            var hasDialogue = !!item.has_local_dialogue;
+            var kind = String(item.kind || '');
+            rows.push({
+                uid: String(item.uid),
+                name: String(item.name || item.uid),
+                kind: kind,
+                mode: mode,
+                hasDialogue: hasDialogue,
+                statusText: _proactivePersonaStatusText(mode, hasDialogue, kind),
+                selectDisabled: kind === 'user',
+            });
+        }
+        return rows;
+    }
+
+    /**
+     * 人格类型徽标中文标签（名单行展示用）。
+     */
+    function _proactiveKindLabel(kind) {
+        var map = {
+            'user': '用户',
+            'rama': 'Rama',
+            'char': '角色',
+            'anim': '动漫',
+            'oc': 'OC',
+            'hist': '历史',
+        };
+        return map[kind] || kind;
+    }
+
+    /**
+     * 名单行 HTML（全部动态字段经转义，防注入）。
+     */
+    function _proactivePersonaRowHtml(row) {
+        var escape = RamariaEscape.escapeHtml;
+        var options = '';
+        var modes = [['auto', '自动'], ['on', '开启'], ['off', '关闭']];
+        for (var i = 0; i < modes.length; i++) {
+            options += '<option value="' + modes[i][0] + '"' +
+                (row.mode === modes[i][0] ? ' selected' : '') + '>' + modes[i][1] + '</option>';
+        }
+        return '<div class="settings-proactive-roster-row">' +
+            '<div class="settings-proactive-roster-info">' +
+                '<div class="settings-proactive-roster-identity">' +
+                    '<span class="settings-proactive-roster-name">' + escape(row.name) + '</span>' +
+                    '<span class="settings-proactive-roster-kind">' + escape(_proactiveKindLabel(row.kind)) + '</span>' +
+                '</div>' +
+                '<div class="settings-proactive-roster-row-status" id="settings-proactive-status-' + escape(row.uid) + '">' +
+                    escape(row.statusText) +
+                '</div>' +
+            '</div>' +
+            '<select class="settings-form-select settings-proactive-roster-select"' +
+                ' data-uid="' + escape(row.uid) + '"' +
+                ' data-has-dialogue="' + (row.hasDialogue ? '1' : '0') + '"' +
+                ' data-kind="' + escape(row.kind) + '"' +
+                ' data-prev-mode="' + escape(row.mode) + '"' +
+                (row.selectDisabled ? ' disabled' : '') + '>' +
+                options +
+            '</select>' +
+        '</div>';
+    }
+
+    /**
+     * 渲染名单列表（空态 / 行渲染 + 事件绑定）。
+     */
+    function _renderProactivePersonaList(rows) {
+        var container = $('settings-proactive-roster');
+        if (!container) return;
+        if (!rows.length) {
+            container.innerHTML = '<div class="settings-proactive-roster-placeholder">暂无可管理的人格</div>';
+            return;
+        }
+        var html = '';
+        for (var i = 0; i < rows.length; i++) html += _proactivePersonaRowHtml(rows[i]);
+        container.innerHTML = html;
+
+        var selects = container.querySelectorAll('.settings-proactive-roster-select');
+        for (var j = 0; j < selects.length; j++) {
+            selects[j].addEventListener('change', _onProactivePersonaSelectChange);
+        }
+    }
+
+    /**
+     * 加载并渲染主动消息名单（读取失败只显示错误态，不回显旧值）。
+     */
+    async function _loadProactivePersonas() {
+        var container = $('settings-proactive-roster');
+        if (container) {
+            container.innerHTML = '<div class="settings-proactive-roster-placeholder">加载中…</div>';
+        }
+        try {
+            var list = await RamariaApi.proactive.listPersonas();
+            _renderProactivePersonaList(_buildProactivePersonaRows(list));
+        } catch (err) {
+            console.error('[SettingsView] 加载主动消息名单失败:', err);
+            var current = $('settings-proactive-roster');
+            if (current) {
+                current.innerHTML = '<div class="settings-proactive-roster-placeholder settings-proactive-roster-error">名单加载失败：' +
+                    RamariaEscape.escapeHtml(err.message || '未知错误') + '</div>';
+            }
+        }
+    }
+
+    /**
+     * 行内开关切换事件入口。
+     */
+    function _onProactivePersonaSelectChange(evt) {
+        _handleProactivePersonaChange(evt.target);
+    }
+
+    /**
+     * 行内开关切换：即时保存；成功更新状态文案，失败回滚控件并提示。
+     *
+     * 参数:
+     * - `selectEl`: 名单行的三态控件（dataset 携带 uid / 对话状态 / 类型 / 切换前值）。
+     */
+    async function _handleProactivePersonaChange(selectEl) {
+        if (!selectEl || !selectEl.dataset) return;
+        var uid = selectEl.dataset.uid || '';
+        var prev = _normalizeProactiveMode(selectEl.dataset.prevMode);
+        var next = _normalizeProactiveMode(selectEl.value);
+        var hasDialogue = selectEl.dataset.hasDialogue === '1';
+        var kind = selectEl.dataset.kind || '';
+        if (!uid || next === prev) return;
+
+        selectEl.disabled = true;
+        try {
+            await RamariaApi.proactive.setPersona(uid, next);
+            selectEl.dataset.prevMode = next;
+            selectEl.value = next;
+            _updateProactivePersonaStatus(uid, next, hasDialogue, kind);
+            RamariaToast.show('success', '主动开关已保存');
+            // 冷人格手动强开：给出素材提示（保存已成功，不阻塞）
+            if (next === 'on' && !hasDialogue) {
+                RamariaToast.show('info', '该人格尚未对话过', '主动消息可能缺少话题素材');
+            }
+        } catch (err) {
+            // 保存失败：回滚控件与显示值，避免误显示为已生效
+            selectEl.value = prev;
+            RamariaToast.show('error', '保存主动开关失败', err.message || '未知错误');
+        } finally {
+            selectEl.disabled = false;
+        }
+    }
+
+    /**
+     * 更新名单行状态文案（行不存在时静默跳过，如切换后已离开设置页）。
+     */
+    function _updateProactivePersonaStatus(uid, mode, hasDialogue, kind) {
+        var el = $('settings-proactive-status-' + uid);
+        if (el) el.textContent = _proactivePersonaStatusText(mode, hasDialogue, kind);
     }
 
  /**
@@ -3020,7 +3232,10 @@ var RamariaSettingsView = (function () {
                  console.error('[SettingsView] 加载完整配置失败:', err);
              }
 
- // 加载 MCP 接入信息（运行状态 + 客户端配置片段）
+// 加载主动消息名单（逐人格开关；读取失败只显示错误态，不阻塞其余区块）
+             await _loadProactivePersonas();
+
+// 加载 MCP 接入信息（运行状态 + 客户端配置片段）
              await _refreshMcpInfo();
 
  // 加载隐私状态
@@ -3087,6 +3302,37 @@ var RamariaSettingsView = (function () {
          */
         buildMcpClientSnippets: function (info) {
             return buildMcpClientSnippets(info);
+        },
+        /**
+         * 主动消息名单行视图模型（纯函数，只读）。
+         *
+         * 用途:
+         * - 回归测试直接驱动四态文案与 user 行禁用矩阵；
+         * - 参数为 list_proactive_personas 的返回数组。
+         */
+        buildProactivePersonaRows: function (list) {
+            return _buildProactivePersonaRows(list);
+        },
+        /**
+         * 名单状态文案（纯函数，只读）。
+         */
+        proactivePersonaStatusText: function (mode, hasDialogue, kind) {
+            return _proactivePersonaStatusText(mode, hasDialogue, kind);
+        },
+        /**
+         * 名单行开关切换处理器（供回归测试直接驱动）。
+         *
+         * 参数:
+         * - `selectEl`: 名单行三态控件（dataset: uid / hasDialogue / kind / prevMode）。
+         */
+        handleProactivePersonaChange: function (selectEl) {
+            return _handleProactivePersonaChange(selectEl);
+        },
+        /**
+         * 加载并渲染主动消息名单（供回归测试直接驱动）。
+         */
+        loadProactivePersonas: function () {
+            return _loadProactivePersonas();
         },
         destroy: function () {
             for (var i = 0; i < _unregisterFns.length; i++) {

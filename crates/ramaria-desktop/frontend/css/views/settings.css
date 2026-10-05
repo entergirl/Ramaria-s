@@ -538,3 +538,79 @@
   word-break: break-all;
   text-align: right;
 }
+
+/* =========================================================
+   主动消息名单（逐人格三态开关；行内切换即时保存）
+   ========================================================= */
+
+.settings-proactive-roster {
+  margin-top: var(--space-3);
+  border-top: 1px solid var(--border-light);
+  padding-top: var(--space-3);
+}
+
+/* 名单占位（加载中 / 空态 / 错误态） */
+.settings-proactive-roster-placeholder {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  padding: var(--space-2) 0;
+}
+
+.settings-proactive-roster-placeholder.settings-proactive-roster-error {
+  color: var(--pink-500);
+}
+
+/* 名单行：左侧身份与状态、右侧三态控件 */
+.settings-proactive-roster-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.settings-proactive-roster-row:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.settings-proactive-roster-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-proactive-roster-identity {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.settings-proactive-roster-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+/* 类型徽标 */
+.settings-proactive-roster-kind {
+  font-size: 11px;
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-sm);
+  color: var(--text-tertiary);
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-light);
+}
+
+.settings-proactive-roster-row-status {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-top: var(--space-1);
+  line-height: 1.4;
+}
+
+/* 三态控件：定宽，避免撑满行 */
+.settings-proactive-roster-select {
+  width: 110px;
+  flex-shrink: 0;
+}

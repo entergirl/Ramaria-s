@@ -27,6 +27,7 @@
 //!   索引加载与重建 / L1-L2-L3 手动触发与 L1 补扫）；
 //! - `usecases_browse`：浏览域用例（L1 / L2 / L3 / 事实 / 证据链 / 会话列表与消息）；
 //! - `usecases_persona`：人格域用例（人格列表 / 卡片 / 更新 / 导入 / 重生成，行为规则与表达风格）；
+//! - `usecases_proactive`：主动对话名单用例（状态读取 / 开关写入）；
 //! - `usecases_ops`：运维域用例（导出 / utt / 关键词 / 宿主后台任务 / 设置与元信息 / 隐私 /
 //!   配置双写 / 首次配置 / 模型管理 / 诊断导出）；
 //! - `index_state`：索引状态机字段读写（脏标记 / 代次 / 失败告警 / 构建时间与冷却窗口）。
@@ -55,6 +56,7 @@ mod usecases_browse;
 mod usecases_memory;
 mod usecases_ops;
 mod usecases_persona;
+mod usecases_proactive;
 
 // 装配辅助 re-export：模型管理用例（`crate::model`）复用同一 provider 构造口径
 pub(crate) use assemble::build_llm_provider;

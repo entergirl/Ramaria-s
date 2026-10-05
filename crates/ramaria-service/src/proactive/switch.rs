@@ -4,10 +4,12 @@
 //! - 三态开关按画像存于 `settings` 表，键 `proactive.persona.{persona_uid}`
 //! - 自动 / 手动开 / 手动关：手动态覆盖自动判定，缺失与非法值回退自动
 //! - 三态均显式存储（无删键路径）：读取方只认三值，不依赖键存在性
+//! - user 类硬排除判定与开关同域：调度与名单写入共用单点实现
 //! - 日志只记键名与状态值，不记消息内容
 
 use ramaria_core::error::RamariaResult;
 use ramaria_core::traits::StorageBackend;
+use ramaria_core::types::{Persona, PersonaKind};
 
 // =========================================================
 // 三态定义
@@ -48,6 +50,22 @@ impl ProactivePersonaMode {
             _ => None,
         }
     }
+}
+
+// =========================================================
+// user 类硬排除
+// =========================================================
+
+/// 判断画像是否为"用户本人"类型（绝不参与主动对话的硬排除）。
+///
+/// 规则:
+/// - 行值优先（`persona.kind`），uid 前缀兜底（`PersonaKind::from_uid`）；
+/// - user 类画像代表用户自身，主动对其发言没有语义，任何开关设置都不放行。
+///
+/// 消费方:
+/// - 调度资格闸门（跳过原因 `persona_excluded`）与名单写入校验（拒绝设置）。
+pub(crate) fn is_user_persona(persona: &Persona) -> bool {
+    persona.kind == PersonaKind::User || PersonaKind::from_uid(&persona.uid) == PersonaKind::User
 }
 
 // =========================================================
@@ -101,8 +119,7 @@ pub(crate) async fn load_mode(
 /// - 写入失败 → `Storage` 错误。
 ///
 /// 消费方:
-/// - 命令面写入口与测试；调度读取路径只走 [`load_mode`]。
-#[allow(dead_code)]
+/// - 名单写用例（校验通过后落开关）与测试；调度读取路径只走 [`load_mode`]。
 pub(crate) async fn save_mode(
     storage: &dyn StorageBackend,
     persona_uid: &str,

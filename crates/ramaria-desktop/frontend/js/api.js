@@ -669,6 +669,38 @@ var RamariaApi = (function () {
     }
 
  // =========================================================
+ // 8.5 主动消息名单 (proactive)
+ // =========================================================
+
+ /**
+ * 查询主动消息名单（活跃人格 + 开关状态 + 生效结论）。
+ *
+ * 返回:
+ * - [{ uid, name, kind, has_local_dialogue, mode, effective }]
+ * - mode: "auto"（未显式设置，按对话历史自动判定）/ "on"（手动开启）/ "off"（手动关闭）
+ * - effective: 该人格当前是否参与主动对话（由服务层单点计算，前端不重算规则）
+ */
+    async function listProactivePersonas() {
+        return await _invoke('list_proactive_personas', {}, '查询主动消息名单');
+    }
+
+ /**
+ * 设置单个成员的主动开关（三态即时保存）。
+ *
+ * 参数:
+ * - `uid`: 目标人格 UID
+ * - `mode`: "auto" | "on" | "off"
+ *
+ * 返回:
+ * - "ok" 表示已保存
+ */
+    async function setProactivePersona(uid, mode) {
+        _require(uid, '人格 UID');
+        _require(mode, '开关状态');
+        return await _invoke('set_proactive_persona', { uid: uid, mode: mode }, '保存主动开关');
+    }
+
+ // =========================================================
  // 9. 数据导入 (import) —
  // =========================================================
 
@@ -1005,6 +1037,10 @@ var RamariaApi = (function () {
             listFull: listPersonasFull,
             updateInfo: updatePersonaInfo,
             refresh: refreshPersona,
+        },
+        proactive: {
+            listPersonas: listProactivePersonas,
+            setPersona: setProactivePersona,
         },
         rules: {
             list: listRules,
