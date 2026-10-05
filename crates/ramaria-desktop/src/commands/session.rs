@@ -1,13 +1,13 @@
 //! crates/ramaria-desktop/src/commands/session.rs - 会话管理 Tauri Commands
 //!
 //! 设计特点:
-//! - list_sessions / get_session / create_session: 委托服务层会话用例
+//! - list_sessions / get_session / create_session / mark_session_read: 委托服务层会话用例
 //! - 所有返回值经过序列化，前端可直接解析 JSON（字段结构保持既有契约）
 //! - 服务层的时间类型转换为毫秒时间戳，与前端既有展示口径一致
 
 use crate::DesktopState;
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, State};
 use uuid::Uuid;
 
 // =========================================================
@@ -22,6 +22,8 @@ pub struct SessionSummary {
     pub ended_at: Option<i64>,
     /// 消息数量（服务层聚合查询结果）
     pub message_count: u32,
+    /// 未读消息数（本地助手消息中晚于会话已读时间的条数；用户发言与导入历史不计）。
+    pub unread: u32,
     /// 会话绑定的人格 UID（NULL 表示存量旧数据）。
     /// 前端 SessionDrawer 据此按 persona 筛选会话列表。
     pub persona_uid: Option<String>,
@@ -49,6 +51,7 @@ fn summary_from(
         started_at: session.started_at,
         ended_at: session.ended_at,
         message_count: message_count.unwrap_or(0),
+        unread: 0,
         persona_uid: session.persona_uid.clone(),
         channel: session.channel.clone(),
         external_ref: session.external_ref.clone(),
@@ -65,6 +68,7 @@ fn summary_from_view(view: &ramaria_service::SessionSummaryView) -> SessionSumma
         started_at: view.started_at.timestamp_millis(),
         ended_at: view.ended_at.as_ref().map(|dt| dt.timestamp_millis()),
         message_count: view.message_count,
+        unread: view.unread,
         persona_uid: view.persona_uid.clone(),
         channel: view.channel.clone(),
         external_ref: view.external_ref.clone(),
@@ -229,6 +233,38 @@ pub async fn create_session(
 }
 
 // =========================================================
+// mark_session_read — 标记会话已读
+// =========================================================
+
+/// 标记会话已读（把该会话的未读计数清零）。
+///
+/// 参数:
+/// - `app_handle`: Tauri AppHandle（成功后刷新托盘未读徽标）。
+/// - `session_id`: 会话 UUID 字符串。
+///
+/// 返回:
+/// - 成功返回 "ok"。
+#[tauri::command]
+#[tracing::instrument(skip(app_handle, state))]
+pub async fn mark_session_read(
+    app_handle: AppHandle,
+    state: State<'_, DesktopState>,
+    session_id: String,
+) -> Result<String, String> {
+    let sid = Uuid::parse_str(&session_id).map_err(|e| format!("无效的会话 ID: {}", e))?;
+
+    state
+        .engine
+        .session_mark_read(sid)
+        .await
+        .map_err(|e| format!("标记会话已读失败: {}", e))?;
+
+    tracing::debug!(session_id = %session_id, "mark_session_read 完成");
+    crate::tray::spawn_tray_refresh(app_handle);
+    Ok("ok".to_string())
+}
+
+// =========================================================
 // 测试
 // =========================================================
 
@@ -248,6 +284,7 @@ mod tests {
         assert_eq!(summary.channel, "mcp", "通道应透传（前端据此标注来源）");
         assert_eq!(summary.external_ref.as_deref(), Some("client-A"));
         assert_eq!(summary.message_count, 3);
+        assert_eq!(summary.unread, 0, "新建会话路径未读应恒为 0");
         assert_eq!(summary.persona_uid.as_deref(), Some("rama-0001"));
 
         // 本地会话：通道 local、无外部标识；消息数缺失按 0 处理
@@ -276,6 +313,7 @@ mod tests {
             channel: "local".to_string(),
             external_ref: None,
             message_count: 7,
+            unread: 4,
         };
 
         let summary = summary_from_view(&view);
@@ -283,6 +321,7 @@ mod tests {
         assert_eq!(summary.started_at, 1_700_000_000_000);
         assert_eq!(summary.ended_at, Some(1_700_000_060_000));
         assert_eq!(summary.message_count, 7);
+        assert_eq!(summary.unread, 4, "未读数应透传");
         assert_eq!(summary.persona_uid.as_deref(), Some("char-0001"));
         assert_eq!(summary.channel, "local");
         assert!(summary.external_ref.is_none());

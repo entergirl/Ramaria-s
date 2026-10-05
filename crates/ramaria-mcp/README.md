@@ -1,7 +1,7 @@
 # ramaria-mcp
 
 > 定位：MCP 协议壳（stdio）——工具 schema、参数校验、结果包装与错误映射；不含业务逻辑。
-> 上游 SSOT：`../../../docs/dev/07-mcp/mcp-spec.md`（工具契约 / 门禁 / 并发约束）、`../../../docs/dev-2.3/test/contract-baseline-2.3.md`（§5 工具基线）。
+> 上游 SSOT：`../../../docs/dev/07-mcp/mcp-spec.md`（工具契约 / 门禁 / 并发约束）、`../../../docs/dev-2.5/test/contract-baseline-2.5.md`（差异式基线；工具面，逐项底本 = 2.3 基线 §6）。
 
 ## 职责
 

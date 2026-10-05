@@ -264,6 +264,23 @@
   color: var(--pink-600);
 }
 
+/* 未读计数徽标（存在未读消息时显示于标题行；打开会话后清除） */
+.session-drawer-item-unread {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: var(--radius-full);
+  background: #ef4444; /* 红色（与活跃绿点同为直接色值，token 中无此色阶）*/
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
 /* ── 元信息行 ── */
 .session-drawer-item-meta {
   font-size: 11px;

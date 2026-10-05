@@ -360,3 +360,51 @@ async fn last_message_time_by_persona_tracks_latest_message() {
         "无会话的 persona 应返回 None"
     );
 }
+
+/// 标记已读：命中会话推进 `last_read_at` 且未读归零；不存在会话幂等成功。
+#[tokio::test]
+async fn mark_read_roundtrip_and_missing_session_idempotent() {
+    let pool = init_test_pool().await.expect("测试库初始化成功");
+    let session = create(&pool, Some("rama-0001"))
+        .await
+        .expect("创建 session 成功");
+
+    // 未读基线：一条晚于 last_read_at（默认 0）的本地助手消息
+    let mut m = Message::new(
+        session.id,
+        MessageRole::Assistant,
+        "回复".to_string(),
+        MessageSource::Online,
+    );
+    m.created_at = 1_000;
+    crate::repo::messages::save_import(&pool, &m)
+        .await
+        .expect("插入消息成功");
+    let counts = crate::repo::messages::list_unread_counts(&pool)
+        .await
+        .expect("查询未读成功");
+    assert_eq!(counts.get(&session.id).copied(), Some(1), "标记前应有未读");
+
+    // 标记已读：last_read_at 落库到指定时间，未读归零
+    mark_read(&pool, session.id, 2_000)
+        .await
+        .expect("标记已读成功");
+    let last_read: i64 = sqlx::query_scalar("SELECT last_read_at FROM sessions WHERE id = ?")
+        .bind(session.id.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("读取 last_read_at 成功");
+    assert_eq!(last_read, 2_000, "last_read_at 应写入指定时间");
+    let counts = crate::repo::messages::list_unread_counts(&pool)
+        .await
+        .expect("查询未读成功");
+    assert_eq!(counts.get(&session.id), None, "标记后不应再有未读");
+
+    // 重复标记与不存在会话：均幂等成功
+    mark_read(&pool, session.id, 3_000)
+        .await
+        .expect("重复标记应幂等成功");
+    mark_read(&pool, Uuid::new_v4(), 1)
+        .await
+        .expect("不存在的会话应幂等成功");
+}

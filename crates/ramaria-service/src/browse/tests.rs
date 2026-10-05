@@ -2,7 +2,7 @@
 //!
 //! 设计特点:
 //! - 由 browse 模块以 `#[cfg(test)] mod tests;` 收纳：覆盖 L1 / L2 / L3 / 三层画像 /
-//!   画像状态 / 事实 / 证据链 / 会话浏览 / 通道概览九组路径
+//!   画像状态 / 事实 / 证据链 / 会话浏览 / 通道概览 / 未读标记与汇总十组路径
 //! - 使用真实 SQLite 临时库（全量 migration）：断言以浏览视图结构与落库状态为准
 //! - 分页与钳制边界逐项锁定（offset / limit / has_more / 消息计数按 0 降级）
 //!
@@ -19,9 +19,9 @@ use crate::types::{
 };
 use ramaria_core::traits::StoreCrud;
 use ramaria_core::types::{
-    EvidenceDirection, EvidenceNote, FactSource, MemoryEvent, MemoryL1, MessageRole, MessageSource,
-    PersonaFact, PersonalityTrait, ProfileField, TraitEvidence, TraitLayer, TraitSource,
-    TraitStatus,
+    EvidenceDirection, EvidenceNote, FactSource, MemoryEvent, MemoryL1, Message, MessageRole,
+    MessageSource, PersonaFact, PersonalityTrait, ProfileField, TraitEvidence, TraitLayer,
+    TraitSource, TraitStatus,
 };
 use ramaria_storage::SqliteStorage;
 use std::time::Duration;
@@ -682,6 +682,190 @@ async fn sessions_aggregate_counts_and_paginate() {
         .await
         .expect("会话列表应成功");
     assert_eq!(page.items.len(), 1);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 会话未读口径：本地助手消息计入；用户发言与导入历史不计；
+/// 标记已读后归零，标记后的新助手消息重新计入。
+#[tokio::test]
+async fn session_unread_counts_local_assistant_and_mark_read() {
+    let (engine, storage, dir) = engine_with_db("browse-unread").await;
+    seed_persona(&storage, "char-0001").await;
+
+    // 空库：未读总数 0
+    assert_eq!(
+        engine.unread_total().await.expect("未读总数应成功"),
+        0,
+        "空库未读应为 0"
+    );
+
+    let s1 = storage
+        .create_session(Some("char-0001"))
+        .await
+        .expect("创建会话应成功");
+    let s2 = storage
+        .create_session(Some("char-0001"))
+        .await
+        .expect("创建会话应成功");
+
+    // s1：用户发言（不计）+ 本地助手（计）+ 带指纹的助手（导入历史，不计）+ 本地助手（计）
+    let mut m_user = Message::new(
+        s1.id,
+        MessageRole::User,
+        "用户发言".to_string(),
+        MessageSource::Local,
+    );
+    m_user.created_at = 1_000;
+    storage
+        .save_message(&m_user)
+        .await
+        .expect("写入用户消息应成功");
+    for (content, ts, fingerprint) in [
+        ("回复一", 1_001_i64, None),
+        ("导入回复", 1_002, Some("fp-import-1")),
+        ("回复二", 1_003, None),
+    ] {
+        let mut m = Message::new(
+            s1.id,
+            MessageRole::Assistant,
+            content.to_string(),
+            MessageSource::Online,
+        )
+        .with_persona_uid(Some("char-0001".to_string()));
+        m.created_at = ts;
+        m.fingerprint = fingerprint.map(str::to_string);
+        storage.save_message(&m).await.expect("写入助手消息应成功");
+    }
+    // s2 无消息：未读为 0
+
+    let page = engine
+        .session_list(SessionBrowseRequest {
+            limit: None,
+            offset: None,
+        })
+        .await
+        .expect("会话列表应成功");
+    let s1_item = page
+        .items
+        .iter()
+        .find(|s| s.id == s1.id)
+        .expect("s1 应出现");
+    assert_eq!(
+        s1_item.unread, 2,
+        "本地助手消息应计入未读（用户发言与导入历史不计）"
+    );
+    let s2_item = page
+        .items
+        .iter()
+        .find(|s| s.id == s2.id)
+        .expect("s2 应出现");
+    assert_eq!(s2_item.unread, 0, "无消息会话未读为 0");
+    assert_eq!(engine.unread_total().await.expect("未读总数应成功"), 2);
+
+    // 分页路径同样填充未读（两条同批创建，按 id 查找不依赖排序位置）
+    let paged = engine
+        .session_list(SessionBrowseRequest {
+            limit: Some(2),
+            offset: None,
+        })
+        .await
+        .expect("分页应成功");
+    assert_eq!(paged.items.len(), 2);
+    assert_eq!(
+        paged.items.iter().find(|s| s.id == s1.id).map(|s| s.unread),
+        Some(2),
+        "分页路径未读应正确"
+    );
+
+    // 标记已读：未读归零
+    engine
+        .session_mark_read(s1.id)
+        .await
+        .expect("标记已读应成功");
+    let page = engine
+        .session_list(SessionBrowseRequest {
+            limit: None,
+            offset: None,
+        })
+        .await
+        .expect("会话列表应成功");
+    assert_eq!(
+        page.items.iter().find(|s| s.id == s1.id).map(|s| s.unread),
+        Some(0),
+        "标记后未读应归零"
+    );
+    assert_eq!(engine.unread_total().await.expect("未读总数应成功"), 0);
+
+    // 幂等：不存在会话标记成功
+    engine
+        .session_mark_read(Uuid::new_v4())
+        .await
+        .expect("不存在的会话应幂等成功");
+
+    // 标记后新到的助手消息重新计未读（时间晚于已读时间戳）
+    let mut newer = Message::new(
+        s1.id,
+        MessageRole::Assistant,
+        "新回复".to_string(),
+        MessageSource::Online,
+    );
+    newer.created_at = ramaria_core::types::now_ms() + 10_000;
+    storage
+        .save_message(&newer)
+        .await
+        .expect("写入新消息应成功");
+    assert_eq!(
+        engine.unread_total().await.expect("未读总数应成功"),
+        1,
+        "标记后的新助手消息应重新计入未读"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 未读汇总：跨会话求和；标记单个会话只归零该会话。
+#[tokio::test]
+async fn unread_total_sums_across_sessions() {
+    let (engine, storage, dir) = engine_with_db("browse-unread-total").await;
+    seed_persona(&storage, "char-0001").await;
+
+    let s1 = storage
+        .create_session(Some("char-0001"))
+        .await
+        .expect("创建会话应成功");
+    let s2 = storage
+        .create_session(Some("char-0001"))
+        .await
+        .expect("创建会话应成功");
+
+    // s1 两条 + s2 一条本地助手消息
+    for (session_id, ts) in [(s1.id, 1_001_i64), (s1.id, 1_002), (s2.id, 1_003)] {
+        let mut m = Message::new(
+            session_id,
+            MessageRole::Assistant,
+            "回复".to_string(),
+            MessageSource::Online,
+        );
+        m.created_at = ts;
+        storage.save_message(&m).await.expect("写入助手消息应成功");
+    }
+    assert_eq!(
+        engine.unread_total().await.expect("汇总应成功"),
+        3,
+        "应跨会话求和"
+    );
+
+    // 只标记 s1：s2 的未读保留
+    engine
+        .session_mark_read(s1.id)
+        .await
+        .expect("标记已读应成功");
+    assert_eq!(
+        engine.unread_total().await.expect("汇总应成功"),
+        1,
+        "标记单个会话只归零该会话"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

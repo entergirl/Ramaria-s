@@ -9,10 +9,11 @@
 //!
 //! （前端提供「最小化到托盘」和「退出 Ramaria」两个选项）
 //! - 托盘图标 tooltip 显示 "Ramaria - 个人AI陪伴记忆系统"
+//! - 未读徽标：在基础图标右上角合成未读数字（`tray_badge`），tooltip 同步未读数
 //! - 错误处理：托盘创建失败记录错误日志但不阻断应用启动
 //!
 //! Tauri 2 API 参考:
-//! - tray::TrayIconBuilder: 构建托盘图标
+//! - tray::TrayIconBuilder: 构建托盘图标（按 id 注册，供徽标刷新取回句柄）
 //! - menu::MenuBuilder / MenuItemBuilder: 构建右键菜单
 //! - TrayIconEvent: 左键点击事件（toggle 窗口）
 
@@ -21,6 +22,20 @@ use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
+
+// =========================================================
+// 常量
+// =========================================================
+
+/// 托盘图标 id（徽标刷新按 id 取回托盘句柄）。
+const TRAY_ID: &str = "main-tray";
+/// 托盘图标尺寸（方形，像素）。
+const TRAY_ICON_WIDTH: u32 = 32;
+const TRAY_ICON_HEIGHT: u32 = 32;
+/// 托盘基础配色（Ramaria 品牌粉 #c44d5a，完全不透明）。
+const TRAY_ICON_RGBA: [u8; 4] = [0xc4, 0x4d, 0x5a, 0xff];
+/// 无未读时的托盘提示文案。
+const TRAY_TOOLTIP_BASE: &str = "Ramaria - 个人AI陪伴记忆系统";
 
 // =========================================================
 // 菜单项 ID 常量
@@ -35,12 +50,26 @@ const MENU_ID_QUIT: &str = "tray_quit";
 // 托盘初始化
 // =========================================================
 
+/// 构建托盘基础图标像素（纯色品牌方块）。
+///
+/// 说明:
+/// - Tauri 2 Image::from_bytes 需要 image-ico/image-png feature（可能不可用），
+///   改为程序化生成 RGBA 像素；徽标刷新在副本上继续合成。
+fn base_tray_pixels() -> Vec<u8> {
+    let pixel_count = (TRAY_ICON_WIDTH * TRAY_ICON_HEIGHT) as usize;
+    let mut pixels = Vec::with_capacity(pixel_count * 4);
+    for _ in 0..pixel_count {
+        pixels.extend_from_slice(&TRAY_ICON_RGBA);
+    }
+    pixels
+}
+
 /// 初始化系统托盘。
 ///
 /// 流程:
-/// 1. 嵌入图标资源（icons/icon.ico → bytes）
+/// 1. 生成图标像素（32×32 RGBA 品牌粉方块）
 /// 2. 构建右键菜单（显示窗口 + 退出）
-/// 3. 创建 TrayIconBuilder 并注册事件
+/// 3. 创建 TrayIconBuilder 并按 id 注册
 /// 4. 拦截主窗口关闭事件（CloseRequested → hide 而非 close）
 ///
 /// 参数:
@@ -51,20 +80,8 @@ const MENU_ID_QUIT: &str = "tray_quit";
 /// - `Err(String)` 初始化失败（图标加载、菜单构建等错误）
 pub fn setup_tray<R: Runtime>(app_handle: &AppHandle<R>) -> Result<(), Box<dyn std::error::Error>> {
     // ---- 创建托盘图标（32×32 RGBA 粉色 Brand 色方块） ----
-    // 说明:
-    // - Tauri 2 Image::from_bytes 需要 image-ico/image-png feature（可能不可用）
-    // - 改为程序化生成 RGBA 像素：一个 32×32 的纯色方块
-    // - 颜色使用 Ramaria 品牌粉色 oklch(0.53 0.19 10) → sRGB #c44d5a
-    // - 后续可以用 PNG/ICO 资源文件替换（icons/icon.ico 已存在）
-    let width: u32 = 32;
-    let height: u32 = 32;
-    let rgba: [u8; 4] = [0xc4, 0x4d, 0x5a, 0xff]; // #c44d5a 完全不透明
-    let pixel_count = (width * height) as usize;
-    let mut pixels = Vec::with_capacity(pixel_count * 4);
-    for _ in 0..pixel_count {
-        pixels.extend_from_slice(&rgba);
-    }
-    let icon = tauri::image::Image::new(&pixels, width, height);
+    let pixels = base_tray_pixels();
+    let icon = tauri::image::Image::new(&pixels, TRAY_ICON_WIDTH, TRAY_ICON_HEIGHT);
 
     // ---- 构建右键菜单 ----
     let show_item = MenuItemBuilder::with_id(MENU_ID_SHOW, "显示主窗口")
@@ -79,10 +96,10 @@ pub fn setup_tray<R: Runtime>(app_handle: &AppHandle<R>) -> Result<(), Box<dyn s
         .item(&quit_item)
         .build()?;
 
-    // ---- 创建托盘图标 ----
-    let _tray = TrayIconBuilder::new()
+    // ---- 创建托盘图标（按 id 注册，供未读徽标刷新取回句柄） ----
+    let _tray = TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon)
-        .tooltip("Ramaria - 个人AI陪伴记忆系统")
+        .tooltip(TRAY_TOOLTIP_BASE)
         .menu(&menu)
         .show_menu_on_left_click(false) // 左键不显示菜单，用事件处理 toggle
         .on_menu_event(move |app, event| {
@@ -99,6 +116,57 @@ pub fn setup_tray<R: Runtime>(app_handle: &AppHandle<R>) -> Result<(), Box<dyn s
 
     tracing::info!("系统托盘初始化成功");
     Ok(())
+}
+
+// =========================================================
+// 未读徽标刷新
+// =========================================================
+
+/// 刷新托盘未读徽标（在基础图标上合成未读数字，并更新提示文案）。
+///
+/// 参数:
+/// - `app`: Tauri AppHandle（按 id 取回托盘句柄）。
+/// - `unread`: 未读消息总数（0 = 清除徽标，恢复基础图标与默认提示）。
+///
+/// 说明:
+/// - 托盘不存在或图标 / 提示更新失败仅记 warn（徽标为提示性信息，不阻塞主流程）。
+pub fn refresh_tray_badge<R: Runtime>(app: &AppHandle<R>, unread: u32) {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        tracing::warn!("托盘图标不存在，跳过未读徽标刷新");
+        return;
+    };
+
+    let mut pixels = base_tray_pixels();
+    crate::tray_badge::compose_badge_rgba(&mut pixels, TRAY_ICON_WIDTH, unread);
+    let icon = tauri::image::Image::new(&pixels, TRAY_ICON_WIDTH, TRAY_ICON_HEIGHT);
+    if let Err(e) = tray.set_icon(Some(icon)) {
+        tracing::warn!(error = %e, "托盘图标更新失败");
+    }
+
+    let tooltip = if unread == 0 {
+        TRAY_TOOLTIP_BASE.to_string()
+    } else {
+        format!("Ramaria - {unread} 条未读消息")
+    };
+    if let Err(e) = tray.set_tooltip(Some(tooltip)) {
+        tracing::warn!(error = %e, "托盘提示更新失败");
+    }
+    tracing::debug!(unread, "托盘未读徽标已刷新");
+}
+
+/// 异步刷新托盘未读徽标（查询未读总数后合成，失败仅 warn）。
+///
+/// 用途:
+/// - 应用启动、标记已读、主动消息投递等未读状态变化点调用；
+/// - 查询与合成在后台任务中执行，不阻塞调用方。
+pub fn spawn_tray_refresh<R: Runtime>(app: AppHandle<R>) {
+    tauri::async_runtime::spawn(async move {
+        let engine = app.state::<crate::DesktopState>().engine.clone();
+        match engine.unread_total().await {
+            Ok(unread) => refresh_tray_badge(&app, unread),
+            Err(e) => tracing::warn!(error = %e, "查询未读总数失败，托盘徽标未刷新"),
+        }
+    });
 }
 
 // =========================================================

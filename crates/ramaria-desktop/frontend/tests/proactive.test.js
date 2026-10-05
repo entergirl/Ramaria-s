@@ -6,6 +6,7 @@
  * - handlePayload：无效负载（非对象 / 缺 session_id / 缺 message_id）防御
  * - 常规消息：当前会话匹配时幂等追加（id / role / is_proactive / content 透传）
  * - 常规消息：非当前会话不追加，仅刷新会话列表
+ * - 已读标记：当前会话匹配时调用 markRead；不匹配 / activated 路径不直接调用
  * - 幂等：messages 已含同 message_id 时不重复追加
  * - activated：当前视图为 chat → RamariaChatView.openSession；其它视图 → Router.showView
  *
@@ -66,6 +67,7 @@ function loadProactive(overrides) {
     appended: [],
     storeSet: [],
     listCalls: 0,
+    markReadCalls: [],
     actions: [],
     warnings: [],
   };
@@ -92,6 +94,10 @@ function loadProactive(overrides) {
         list() {
           state.listCalls++;
           return Promise.resolve(opts.listResult || [{ id: 's1' }]);
+        },
+        markRead(id) {
+          state.markReadCalls.push(id);
+          return Promise.resolve('ok');
         },
       },
     },
@@ -220,6 +226,55 @@ test('handlePayload: 常规消息且当前会话不匹配 → 不追加，仅刷
   assert.equal(state.listCalls, 1, '应刷新会话列表');
   assert.deepEqual(plain(storeState.sessions), [{ id: 's1' }]);
   assert.equal(state.actions.length, 0);
+});
+
+test('handlePayload: 常规消息且当前会话匹配 → 标记该会话已读', async () => {
+  const { proactive, state } = loadProactive({ activeSessionId: 's1' });
+
+  proactive.handlePayload({
+    session_id: 's1',
+    message_id: 'm-unread-1',
+    content: '在吗',
+    persona: 'rama-0001',
+    source: 'event',
+    created_at: 1759459200000,
+  });
+  await tick();
+
+  assert.deepEqual(state.markReadCalls, ['s1'], '当前查看的会话应标记已读');
+});
+
+test('handlePayload: 常规消息且当前会话不匹配 → 不标记已读', async () => {
+  const { proactive, state } = loadProactive({ activeSessionId: 's-other' });
+
+  proactive.handlePayload({
+    session_id: 's1',
+    message_id: 'm-unread-2',
+    content: '在吗',
+    persona: 'rama-0001',
+    source: 'event',
+    created_at: 1759459200000,
+  });
+  await tick();
+
+  assert.deepEqual(state.markReadCalls, [], '非当前会话不应标记已读');
+});
+
+test('handlePayload: activated 重播路径不直接标记已读（由会话打开路径处理）', async () => {
+  const { proactive, state } = loadProactive({ activeSessionId: 's1', currentView: 'chat' });
+
+  proactive.handlePayload({
+    session_id: 's1',
+    message_id: 'm-unread-3',
+    content: '在吗',
+    persona: 'rama-0001',
+    source: 'event',
+    created_at: 1759459200000,
+    activated: true,
+  });
+  await tick();
+
+  assert.deepEqual(state.markReadCalls, [], 'activated 路径由 openSession 内部标记已读');
 });
 
 test('handlePayload: 同 message_id 已存在时不重复追加（幂等）', async () => {

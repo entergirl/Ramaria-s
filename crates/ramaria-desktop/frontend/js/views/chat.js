@@ -1065,6 +1065,9 @@ var RamariaChatView = (function () {
  // 重新启用输入
             _setInputEnabled(true);
 
+            // 用户正在查看该会话：回复到达即视为已读
+            _markSessionRead(RamariaStore.get('activeSessionId'));
+
             _scrollToBottom();
         }).then(function (unlisten) {
             _unlistenFns.push(unlisten);
@@ -1556,6 +1559,52 @@ var RamariaChatView = (function () {
     }
 
  // =========================================================
+ // 会话已读标记
+ // =========================================================
+
+ /**
+ * 标记会话已读（打开会话 / 会话内收到回复时调用）。
+ *
+ * 说明:
+ * - 后端把该会话 `last_read_at` 推进到当前时间，未读状态清零；
+ * - 成功后同步把 Store 会话列表中该会话未读计数清零（抽屉订阅联动刷新）；
+ * - 失败静默降级（仅告警），不打断会话展示。
+ *
+ * 参数:
+ * - `sessionId`: 会话 UUID（空值直接跳过）。
+ */
+    function _markSessionRead(sessionId) {
+        if (!sessionId) return;
+        if (!RamariaApi.session || typeof RamariaApi.session.markRead !== 'function') return;
+
+        RamariaApi.session.markRead(sessionId).then(function () {
+            _clearSessionUnread(sessionId);
+        }).catch(function (err) {
+            console.warn('[ChatView] 标记会话已读失败:', (err && err.message) || err);
+        });
+    }
+
+ /**
+ * 把 Store 会话列表中指定会话的未读计数清零（无未读时不做变更）。
+ */
+    function _clearSessionUnread(sessionId) {
+        var sessions = RamariaStore.get('sessions');
+        if (!Array.isArray(sessions)) return;
+
+        var changed = false;
+        var next = sessions.map(function (s) {
+            if (s && s.id === sessionId && (s.unread || 0) > 0) {
+                changed = true;
+                var copy = Object.assign({}, s);
+                copy.unread = 0;
+                return copy;
+            }
+            return s;
+        });
+        if (changed) RamariaStore.set('sessions', next);
+    }
+
+ // =========================================================
  // 面包屑导航 + 会话跳转
  // =========================================================
 
@@ -1717,6 +1766,9 @@ var RamariaChatView = (function () {
             // ★ 标记已通过跳转加载会话，防止 _loadInitialData 覆盖
             _sessionJumped = true;
 
+            // 打开会话即已读
+            _markSessionRead(sessionId);
+
             RamariaToast.show('info', '已加载历史对话',
                 messages.length + ' 条消息' + (isClosed ? '（只读）' : ''));
 
@@ -1827,6 +1879,9 @@ var RamariaChatView = (function () {
             // 全量渲染消息
             _renderAllMessages();
 
+            // 打开会话即已读
+            _markSessionRead(sessionId);
+
             RamariaToast.show('info', '已加载会话',
                 messages.length + ' 条消息' + (isClosed ? '（只读）' : ''));
 
@@ -1930,6 +1985,9 @@ var RamariaChatView = (function () {
                         _renderAllMessages();
                         loaded = true;
 
+                        // 恢复即打开：标记该会话已读
+                        _markSessionRead(savedSessionId);
+
  // 从后端 session.persona_uid 读取真相源并同步到 Store
                         var dbPersona = session.persona_uid || null;
                         if (dbPersona) {
@@ -2000,7 +2058,11 @@ var RamariaChatView = (function () {
         /** 打开指定会话（主动消息通知点击定位入口；已打开时跳过，避免重复加载） */
         openSession: function (sessionId) {
             if (!sessionId) return;
-            if (RamariaStore.get('activeSessionId') === sessionId) return;
+            if (RamariaStore.get('activeSessionId') === sessionId) {
+                // 已停留在目标会话（通知点击重播）：当前查看即视为已读
+                _markSessionRead(sessionId);
+                return;
+            }
             return _onSessionDrawerSelect(sessionId, null);
         },
         destroy: function () {

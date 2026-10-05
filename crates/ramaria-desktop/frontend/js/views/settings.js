@@ -2569,6 +2569,7 @@ var RamariaSettingsView = (function () {
                 { path: ['check_interval_seconds'], label: '调度检查间隔（秒）', type: 'number', min: 30, def: 300, hint: '决定「是否触发」的判定频率' },
                 { path: ['min_idle_hours'], label: '最小空闲时长（小时）', type: 'number', def: 4, hint: '距上次对话满该时长才可能主动发起' },
                 { path: ['daily_limit'], label: '每日投递上限（条）', type: 'number', def: 3, hint: '每个画像每日最多主动投递条数' },
+                { path: ['daily_total_limit'], label: '全部人格每日合计上限（条）', type: 'number', min: 0, def: 0, hint: '全部人格合计每日主动投递上限；0 = 不限' },
                 { path: ['quiet_hours'], label: '免打扰时段', type: 'text', def: '22:00-08:00', validate: 'quiet_hours', hint: 'HH:MM-HH:MM 格式，支持跨零点（如 22:00-08:00）' },
                 { path: ['cooldown_hours'], label: '投递冷却（小时）', type: 'number', def: 8, hint: '两次主动投递之间的最短间隔' },
                 { path: ['judge_enabled'], label: 'AI 判据开关', type: 'bool', def: true, hint: '关闭后由算法打分直接决策' },

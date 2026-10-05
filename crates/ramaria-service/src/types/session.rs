@@ -22,6 +22,8 @@ use super::defaults::DEFAULT_HISTORY_LIMIT;
 /// 字段约定:
 /// - `channel` / `external_ref`: 会话来源通道与外部对话标识（用于来源标注与续写定位）。
 /// - `message_count`: 会话消息条数。
+/// - `unread`: 未读消息数（本地助手消息中晚于会话已读时间的条数；
+///   用户发言与导入历史不计）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionSummaryView {
     pub id: Uuid,
@@ -31,6 +33,7 @@ pub struct SessionSummaryView {
     pub channel: String,
     pub external_ref: Option<String>,
     pub message_count: u32,
+    pub unread: u32,
 }
 
 /// 会话历史请求（`chat_history` 入参）。

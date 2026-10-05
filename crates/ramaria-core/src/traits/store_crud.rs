@@ -314,6 +314,41 @@ pub trait StoreCrud: Send + Sync {
         Ok(false)
     }
 
+    /// 标记会话已读（推进 `last_read_at`，供会话列表与托盘未读徽标归零）。
+    ///
+    /// 语义:
+    /// - 按会话写入已读时间戳；推进后该会话中早于该时间的本地助手消息不再计入未读。
+    /// - 幂等：会话不存在或重复标记均静默成功。
+    ///
+    /// 参数:
+    /// - `session_id`: 目标会话。
+    /// - `at_ms`: 已读时间戳（Unix 毫秒），由调用方统一取当前时间提供。
+    ///
+    /// 默认实现:
+    /// - 返回 `Unsupported`（写语义由实现方显式声明）；
+    ///   `ramaria-storage` 覆写为 `UPDATE sessions SET last_read_at = ?`。
+    async fn mark_session_read(&self, _session_id: Uuid, _at_ms: i64) -> RamariaResult<()> {
+        Err(crate::error::RamariaError::unsupported(
+            "StoreCrud 未实现会话已读标记（需覆写 mark_session_read）",
+        ))
+    }
+
+    /// 聚合各会话的未读消息数（会话列表与托盘徽标的未读口径）。
+    ///
+    /// 语义:
+    /// - 只计本地助手消息（`role = 'assistant'` 且 `import_fingerprint IS NULL`）
+    ///   中晚于会话 `last_read_at` 的部分；用户发言与导入历史不计。
+    ///
+    /// 返回:
+    /// - 会话 ID → 未读条数的映射；**无未读的会话不出现在映射中**
+    ///   （调用方对缺失项按 0 处理，与 SQL `GROUP BY` 的结果形态一致）。
+    ///
+    /// 默认实现:
+    /// - 返回空映射（未覆写 mock 按"无未读"降级，不阻塞列表与徽标）。
+    async fn list_unread_counts(&self) -> RamariaResult<HashMap<Uuid, u32>> {
+        Ok(HashMap::new())
+    }
+
     /// 查询指定会话最近一条消息的时间（Unix 毫秒，含全部角色）。
     ///
     /// 职责:

@@ -4,6 +4,7 @@
  * 职责:
  * - 监听后端 `proactive-message` 事件，处理应用内展示与通知点击定位
  * - 常规消息：刷新会话列表 + 当前会话匹配时把消息幂等追加到 Store
+ * - 已读标记：用户正在查看的会话收到消息时标记已读，避免自己眼前的会话出现未读
  * - 通知点击重播（`activated === true`）：切换到目标会话并定位到该消息所在会话
  *
  * 设计特点:
@@ -107,6 +108,22 @@ var RamariaProactive = (function () {
 
         _refreshSessions();
         _ensureAppended(payload);
+        _markReadIfActive(payload.session_id);
+    }
+
+    /**
+     * 用户正在查看该会话时标记已读（静默失败降级：不阻塞消息展示）。
+     *
+     * 参数:
+     * - `sessionId`: 消息所属会话 UUID。
+     */
+    function _markReadIfActive(sessionId) {
+        if (RamariaStore.get('activeSessionId') !== sessionId) return;
+        if (!RamariaApi.session || typeof RamariaApi.session.markRead !== 'function') return;
+
+        RamariaApi.session.markRead(sessionId).catch(function (err) {
+            console.warn('[Proactive] 标记会话已读失败:', (err && err.message) || err);
+        });
     }
 
     /**

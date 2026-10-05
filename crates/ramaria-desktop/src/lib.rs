@@ -19,6 +19,7 @@ mod notification;
 mod path_guard;
 mod proactive;
 mod tray;
+mod tray_badge;
 mod webview;
 
 use std::path::{Path, PathBuf};
@@ -297,7 +298,7 @@ async fn init_runtime(data_dir: &Path) -> Result<DesktopRuntime, String> {
 /// 4. 清理 WebView2 远程调试端口注入（release）
 /// 5. 初始化桌面运行时（引擎 / 生命周期，异步）
 /// 6. 构建 Tauri Builder 并注入状态和命令
-/// 7. 在 setup 钩子中初始化系统托盘
+/// 7. 在 setup 钩子中初始化系统托盘并刷新未读徽标
 /// 8. 运行应用
 ///
 /// 说明:
@@ -379,6 +380,7 @@ pub fn run() {
             commands::session::list_sessions,
             commands::session::get_session,
             commands::session::create_session,
+            commands::session::mark_session_read,
             // ---- Memory ----
             commands::memory::get_personas,
             commands::memory::get_l1_memories,
@@ -451,6 +453,9 @@ pub fn run() {
                 tracing::error!(error = %e, "系统托盘初始化失败，应用继续运行");
                 // 托盘失败不是致命错误，应用仍可运行
             }
+
+            // 启动时刷新一次托盘未读徽标（查询失败仅告警，不阻塞 setup）
+            tray::spawn_tray_refresh(app.handle().clone());
 
             tracing::info!("Tauri 应用 setup 完成");
             Ok(())

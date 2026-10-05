@@ -1,7 +1,7 @@
 # ramaria-service
 
 > 定位：**唯一能力层**（与传输无关）——引擎装配 + 生命周期 / 索引 / 配置 + 全部用例：召回 / 生成（含主动对话）/ 写入 / 封存 / 浏览 / 人格。
-> 上游 SSOT：`../../../docs/dev/00-architecture/arch-decisions-unified.md`（§3.2 边界 / §9 记忆系统）、`../../../docs/dev/07-mcp/mcp-spec.md`（服务层边界）、`../../../docs/dev-2.3/test/contract-baseline-2.3.md`（对外契约）。
+> 上游 SSOT：`../../../docs/dev/00-architecture/arch-decisions-unified.md`（§3.2 边界 / §9 记忆系统）、`../../../docs/dev/07-mcp/mcp-spec.md`（服务层边界）、`../../../docs/dev-2.5/test/contract-baseline-2.5.md`（差异式基线；对外契约）。
 
 ## 职责
 
@@ -23,7 +23,7 @@
 | `src/chat/` | 对话用例：`steps`（`prepare_request` 前置编排）/ `context`（历史窗口与上下文）/ `generate`（LLM 调用与流式）/ `proactive`（主动生成，assistant-only 非流式） | `src/chat/tests.rs` |
 | `src/proactive/` | 主动对话域：`schedule`（触发链 + `quiet` 免打扰 + `gates` 资格闸门）/ `switch`（人格开关三态）/ `roster`（名单读写用例）/ `picker`（`sources` 四源选题与打分）/ `judge`（AI 判据）/ `activity`（活跃时段统计）/ `state`（状态键）/ `sink`（投放注册制）；指令与结果形态 `topic` | `src/proactive/tests.rs`、`schedule/tests.rs`、`switch/tests.rs`、`roster/tests.rs`、`picker/tests.rs`、`judge/tests.rs`、`state/tests.rs`、`sink/tests.rs`、`activity/tests.rs` |
 | `src/recall/` | 分层召回装配：`policy`（闸门）/ `layers` / `search` / `overview` / `entry` | `src/recall/tests.rs` |
-| `src/browse/` | 记忆与会话浏览：`l1` / `l2_l3` / `profile` / `evidence` / `facts` / `session` / `channel` / `view` | `src/browse/tests.rs` |
+| `src/browse/` | 记忆与会话浏览：`l1` / `l2_l3` / `profile` / `evidence` / `facts` / `session` / `channel` / `unread`（未读标记与汇总）/ `view` | `src/browse/tests.rs` |
 | `src/persona/` | 人格用例：`load` / `regenerate` / `update` / `view` | `src/persona/tests.rs` |
 | `src/diagnostics/` | 诊断导出：`collect` / `redact`（二次脱敏）/ `render` / `export` | `src/diagnostics/tests.rs` |
 | `src/import/` | QQ 导入用例（`importer` feature）：`detect` / `analyze` / `l0` / `l1` / `deep` | `src/import/tests.rs` |

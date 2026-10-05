@@ -200,6 +200,20 @@ var RamariaApi = (function () {
         return await _invoke('create_session', args, '创建会话');
     }
 
+ /**
+ * 标记会话已读（清除该会话未读状态；打开会话时调用）。
+ *
+ * 参数:
+ * - `sessionId`: 会话 UUID 字符串
+ *
+ * 返回:
+ * - "ok"
+ */
+    async function markSessionRead(sessionId) {
+        _require(sessionId, '会话 ID');
+        return await _invoke('mark_session_read', { sessionId: sessionId }, '标记会话已读');
+    }
+
  // =========================================================
  // 3. 记忆查看 (memory)
  // =========================================================
@@ -989,6 +1003,7 @@ var RamariaApi = (function () {
             list: listSessions,
             get: getSession,
             create: createSession,
+            markRead: markSessionRead,
         },
         memory: {
             getPersonas: getPersonas,

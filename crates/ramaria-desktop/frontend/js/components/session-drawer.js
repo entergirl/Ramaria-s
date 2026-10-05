@@ -6,12 +6,15 @@
  * - 支持搜索过滤（按 persona 名称或会话时间）
  * - 点击会话项 → 通过回调通知 ChatView 加载该会话的消息
  * - 三种会话状态区分：活跃（绿色圆点）、已关闭（灰色时间戳）、导入（来源标签）
+ * - 未读标识：会话存在未读消息时在标题行显示计数徽标
  * - v2.1 来源标注：外部通道（如 MCP）回流会话显示「来源: MCP」标签（见 `sourceTag`）
  *
  * 设计特点:
  * - 独立组件，通过回调（onSelect）与 ChatView 解耦
  * - CSS 动画由 session-drawer.css 驱动（180ms slide）
  * - 会话列表按 started_at 倒序排列
+ * - 未读状态来自会话列表数据的 `unread` 字段（打开会话后由 ChatView 标记已读）；
+ *   抽屉打开期间订阅 Store.sessions 变更自动刷新
  * - 响应式：窗口宽度 ≤640px 时全宽覆盖
  * - 空状态显示引导提示
  * - 加载失败显示重试按钮
@@ -60,6 +63,9 @@ var RamariaSessionDrawer = (function () {
 
     /** 是否已初始化 */
     var _initialized = false;
+
+    /** Store sessions 变更退订函数（抽屉打开期间随数据自动刷新） */
+    var _unsubSessions = null;
 
     // =========================================================
     // DOM 创建
@@ -209,34 +215,7 @@ var RamariaSessionDrawer = (function () {
                 allSessions = [];
             }
 
-            // 按当前 persona_uid 过滤
-            if (_currentPersonaUid) {
-                _sessions = allSessions.filter(function (s) {
-                    // 匹配 persona_uid（NULL 的存量 session 归入默认人格）
-                    if (!s.persona_uid) {
-                        // 存量 NULL session：仅当当前人格是默认人格(rama-0001)时显示。
-                        // P0-1 修复后新建会话都会绑定 persona_uid，此处仅为
-                        // 旧数据兼容；命中时告警便于发现归属缺失的存量会话。
-                        if (_currentPersonaUid === 'rama-0001') {
-                            console.warn(
-                                '[SessionDrawer] 会话归属缺失（persona_uid=NULL）：' +
-                                (s.id || '') + '，按存量兼容归入默认人格 rama-0001'
-                            );
-                            return true;
-                        }
-                        return false;
-                    }
-                    return s.persona_uid === _currentPersonaUid;
-                });
-            } else {
-                // 无指定人格时显示全部
-                _sessions = allSessions;
-            }
-
-            // 按 started_at 倒序（后端已排序，此处防御性重排）
-            _sessions.sort(function (a, b) {
-                return (b.started_at || 0) - (a.started_at || 0);
-            });
+            _applySessions(allSessions);
 
             console.log('[SessionDrawer] 加载 ' + _sessions.length + ' 个会话 (persona=' +
                 (_currentPersonaUid || 'all') + ', 总数=' + allSessions.length + ')');
@@ -246,6 +225,43 @@ var RamariaSessionDrawer = (function () {
             _sessions = [];
             return false;
         }
+    }
+
+    /**
+     * 应用会话列表数据：按当前 persona_uid 过滤 + 按 started_at 倒序。
+     *
+     * 参数:
+     * - `allSessions`: 后端返回的完整会话列表。
+     */
+    function _applySessions(allSessions) {
+        // 按当前 persona_uid 过滤
+        if (_currentPersonaUid) {
+            _sessions = allSessions.filter(function (s) {
+                // 匹配 persona_uid（NULL 的存量 session 归入默认人格）
+                if (!s.persona_uid) {
+                    // 存量 NULL session：仅当当前人格是默认人格(rama-0001)时显示。
+                    // P0-1 修复后新建会话都会绑定 persona_uid，此处仅为
+                    // 旧数据兼容；命中时告警便于发现归属缺失的存量会话。
+                    if (_currentPersonaUid === 'rama-0001') {
+                        console.warn(
+                            '[SessionDrawer] 会话归属缺失（persona_uid=NULL）：' +
+                            (s.id || '') + '，按存量兼容归入默认人格 rama-0001'
+                        );
+                        return true;
+                    }
+                    return false;
+                }
+                return s.persona_uid === _currentPersonaUid;
+            });
+        } else {
+            // 无指定人格时显示全部
+            _sessions = allSessions;
+        }
+
+        // 按 started_at 倒序（后端已排序，此处防御性重排）
+        _sessions.sort(function (a, b) {
+            return (b.started_at || 0) - (a.started_at || 0);
+        });
     }
 
     // =========================================================
@@ -352,7 +368,7 @@ var RamariaSessionDrawer = (function () {
      * 创建单个会话项 DOM 元素。
      *
      * 参数:
-     * - `session`: 会话摘要对象 { id, started_at, ended_at, message_count, persona_uid }
+     * - `session`: 会话摘要对象 { id, started_at, ended_at, message_count, persona_uid, unread }
      * - `isActive`: 是否为活跃会话（ended_at === null）
      *
      * 布局:
@@ -405,6 +421,15 @@ var RamariaSessionDrawer = (function () {
                 RamariaEscape.escapeHtml(personaName) + '</span>';
         }
 
+        // 未读计数徽标（存在晚于已读时间的消息时显示；打开会话后由上层标记已读）
+        var badge = unreadBadge(session);
+        var badgeHtml = '';
+        if (badge) {
+            badgeHtml = '<span class="' + badge.className + '" title="' +
+                RamariaEscape.escapeHtml(badge.title) + '">' +
+                RamariaEscape.escapeHtml(badge.text) + '</span>';
+        }
+
         // 消息数
         var msgCount = session.message_count || 0;
         var msgLabel = msgCount > 0 ? (msgCount + ' 条消息') : '无消息';
@@ -419,6 +444,7 @@ var RamariaSessionDrawer = (function () {
                     '<div class="session-drawer-item-title">' +
                         '<span class="session-drawer-item-time">' + RamariaEscape.escapeHtml(timeLabel) + '</span>' +
                         tagHtml +
+                        badgeHtml +
                     '</div>' +
                     '<div class="session-drawer-item-meta">' +
                         '<span>' + msgLabel + '</span>' +
@@ -469,6 +495,26 @@ var RamariaSessionDrawer = (function () {
             text: '来源: ' + label,
             className: 'session-drawer-item-tag session-drawer-item-tag--source',
             title: ref ? ('外部对话标识: ' + ref) : ('来源通道: ' + label),
+        };
+    }
+
+    /**
+     * 计算会话未读徽标（供渲染复用与前端测试）。
+     *
+     * 参数:
+     * - `session`: 会话摘要（含后端返回的 `unread` 计数；缺字段按无未读处理）。
+     *
+     * 返回:
+     * - `{ text, className, title }`：存在未读消息时的计数徽标（超过 99 显示 "99+"）；
+     * - `null`：无未读（0 / 缺字段 / 非法值）。
+     */
+    function unreadBadge(session) {
+        var unread = session && typeof session.unread === 'number' ? session.unread : 0;
+        if (!(unread > 0)) return null;
+        return {
+            text: unread > 99 ? '99+' : String(unread),
+            className: 'session-drawer-item-unread',
+            title: unread + ' 条未读消息',
         };
     }
 
@@ -603,6 +649,16 @@ var RamariaSessionDrawer = (function () {
         _bindEvents();
         _initialized = true;
 
+        // 订阅 Store 会话列表变更：抽屉打开期间未读等数据变化即时重渲染
+        // （未打开时忽略，show() 会重新加载最新列表）
+        if (typeof RamariaStore !== 'undefined' && typeof RamariaStore.subscribe === 'function') {
+            _unsubSessions = RamariaStore.subscribe('sessions', function (sessions) {
+                if (!_isOpen) return;
+                _applySessions(Array.isArray(sessions) ? sessions : []);
+                _renderSessionList();
+            });
+        }
+
         console.log('[SessionDrawer] 初始化完成 (onSelect=' + (typeof _onSelect === 'function' ? '已绑定' : '未绑定') + ')');
     }
 
@@ -730,6 +786,12 @@ var RamariaSessionDrawer = (function () {
             _dom.drawer.parentNode.removeChild(_dom.drawer);
         }
 
+        // 释放 Store 会话列表订阅
+        if (typeof _unsubSessions === 'function') {
+            try { _unsubSessions(); } catch (_) { /* ignore */ }
+            _unsubSessions = null;
+        }
+
         _dom = {};
         _sessions = [];
         _currentPersonaUid = null;
@@ -770,6 +832,15 @@ var RamariaSessionDrawer = (function () {
          * - `null`：本地会话（不标注）。
          */
         sourceTag: _sourceTag,
+
+        /**
+         * 计算会话未读徽标（供渲染复用与前端测试）。
+         *
+         * 返回:
+         * - `{ text, className, title }`：存在未读消息时的计数徽标；
+         * - `null`：无未读。
+         */
+        unreadBadge: unreadBadge,
     };
 })();
 

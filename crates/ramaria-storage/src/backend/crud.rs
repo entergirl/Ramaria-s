@@ -73,6 +73,10 @@ impl StoreCrud for SqliteStorage {
     async fn close_session_if_active(&self, session_id: Uuid) -> RamariaResult<bool> {
         repo::sessions::close_if_active(&self.pool, session_id).await
     }
+    /// 覆写为 `UPDATE` 推进已读时间（幂等：未命中会话静默成功）。
+    async fn mark_session_read(&self, session_id: Uuid, at_ms: i64) -> RamariaResult<()> {
+        repo::sessions::mark_read(&self.pool, session_id, at_ms).await
+    }
 
     // =========================================================
     // Message（L0 原始消息）
@@ -140,6 +144,10 @@ impl StoreCrud for SqliteStorage {
     /// 覆写为单条 GROUP BY 聚合（会话列表一次取回全部计数，替代逐会话 COUNT）。
     async fn count_messages_by_session(&self) -> RamariaResult<HashMap<Uuid, u32>> {
         repo::messages::count_by_sessions(&self.pool).await
+    }
+    /// 覆写为单条 GROUP BY 聚合（会话列表与托盘徽标一次取回全部未读数）。
+    async fn list_unread_counts(&self) -> RamariaResult<HashMap<Uuid, u32>> {
+        repo::messages::list_unread_counts(&self.pool).await
     }
     /// 覆写为指纹精确查询（外部入口回流去重）。
     async fn find_message_by_fingerprint(

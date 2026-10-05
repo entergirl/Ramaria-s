@@ -1,7 +1,7 @@
 //! crates/ramaria-service/src/browse/session.rs - Ramaria 会话浏览（列表 / 消息 / 详情）
 //!
 //! 设计特点:
-//! - 列表聚合：开始时间倒序 + 单次消息计数聚合（聚合失败记告警并按 0 处理）
+//! - 列表聚合：开始时间倒序 + 单次消息计数与未读聚合（聚合失败记告警并按 0 处理）
 //! - 消息分页：全量正序（limit 为 None）或最新在前分页后翻正，单页上限 1000
 //! - 分页钳制：列表 limit 下界 1；消息偏移负数按 0 处理；has_more 仅分页路径有效
 //! - 空态语义：会话不存在返回业务校验错误（入口无需预判存在性）；无消息返回空集合
@@ -34,12 +34,13 @@ const MAX_MESSAGE_PAGE: i64 = 1000;
 // 会话浏览（列表 / 消息 / 详情）
 // =========================================================
 
-/// 会话列表浏览（按开始时间倒序，带消息计数聚合）。
+/// 会话列表浏览（按开始时间倒序，带消息计数与未读聚合）。
 ///
 /// 流程:
 /// 1. 读取全部会话并按开始时间倒序；
 /// 2. 单次聚合各会话消息数（聚合失败时记告警并按 0 处理，不阻塞列表）；
-/// 3. 应用 offset 与可选 limit（`Some(0)` 按下界 1 处理）。
+/// 3. 单次聚合各会话未读数（聚合失败同样按 0 处理）；
+/// 4. 应用 offset 与可选 limit（`Some(0)` 按下界 1 处理）。
 ///
 /// 参数:
 /// - `engine`: 服务层引擎。
@@ -63,6 +64,14 @@ pub(crate) async fn sessions(
         }
     };
 
+    let unread_map = match storage.list_unread_counts().await {
+        Ok(counts) => counts,
+        Err(e) => {
+            tracing::warn!(error = %e, "聚合会话未读数失败，未读数按 0 处理");
+            HashMap::new()
+        }
+    };
+
     let total = sorted.len();
     let offset = req.offset.unwrap_or(0) as usize;
     let take = req
@@ -76,6 +85,7 @@ pub(crate) async fn sessions(
         .take(take)
         .map(|s| {
             let message_count = counts.get(&s.id).copied().unwrap_or(0);
+            let unread = unread_map.get(&s.id).copied().unwrap_or(0);
             SessionSummaryView {
                 id: s.id,
                 started_at: to_datetime(s.started_at),
@@ -84,6 +94,7 @@ pub(crate) async fn sessions(
                 channel: s.channel,
                 external_ref: s.external_ref,
                 message_count,
+                unread,
             }
         })
         .collect();

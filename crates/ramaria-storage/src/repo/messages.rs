@@ -348,6 +348,48 @@ pub async fn count_by_sessions(pool: &SqlitePool) -> RamariaResult<HashMap<Uuid,
     Ok(counts)
 }
 
+/// 聚合各会话的未读消息数（`GROUP BY session_id`，供会话列表与托盘徽标一次取回）。
+///
+/// 未读口径:
+/// - 只计本地助手消息：`role = 'assistant'` 且 `import_fingerprint IS NULL`
+///   （用户发言不计；主动消息与常规回复计）；
+/// - 消息时间严格晚于会话的 `last_read_at`（等于视为已读）。
+///
+/// 返回:
+/// - 会话 UUID → 未读条数的映射；只包含存在未读的会话
+///   （无未读会话由调用方按 0 处理）。
+///
+/// 说明:
+/// - 单行 session_id 解析失败时记录 WARNING 并跳过（防御历史脏数据，不阻塞列表）。
+pub async fn list_unread_counts(pool: &SqlitePool) -> RamariaResult<HashMap<Uuid, u32>> {
+    let rows = sqlx::query_as::<_, (String, i64)>(
+        "SELECT m.session_id, COUNT(*) AS cnt \
+         FROM messages m JOIN sessions s ON s.id = m.session_id \
+         WHERE m.role = 'assistant' AND m.import_fingerprint IS NULL \
+           AND m.created_at > s.last_read_at \
+         GROUP BY m.session_id",
+    )
+    .fetch_all(pool)
+    .await
+    .storage_err("聚合会话未读数量失败")?;
+
+    let mut counts = HashMap::with_capacity(rows.len());
+    for (session_id, cnt) in rows {
+        match ramaria_core::types::uuid_from_db(&session_id) {
+            Ok(id) => {
+                counts.insert(id, cnt.max(0) as u32);
+            }
+            Err(_) => {
+                tracing::warn!(
+                    raw_id = %session_id,
+                    "messages.session_id UUID 解析失败，未读聚合已跳过该行"
+                );
+            }
+        }
+    }
+    Ok(counts)
+}
+
 /// 按时间升序加载指定 session 的全部消息。
 ///
 /// 说明:

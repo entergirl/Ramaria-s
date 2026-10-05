@@ -715,3 +715,81 @@ async fn has_local_user_message_ignores_unbound_session() {
         "未绑定 persona 的会话不应命中"
     );
 }
+
+// =========================================================
+// 会话未读聚合（会话列表 / 托盘徽标口径）
+// =========================================================
+
+/// 写入一条本地助手消息（无导入指纹，走常规保存路径）。
+async fn insert_local_assistant_message(pool: &SqlitePool, session_id: Uuid, created_at: i64) {
+    let mut m = make_message(session_id, None);
+    m.role = MessageRole::Assistant;
+    m.created_at = created_at;
+    save(pool, &m).await.expect("写入本地助手消息成功");
+}
+
+/// 写入一条带导入指纹的助手消息（导入历史）。
+async fn insert_imported_assistant_message(pool: &SqlitePool, session_id: Uuid, created_at: i64) {
+    let mut m = make_message(
+        session_id,
+        Some(&format!("fp-unread-{session_id}-{created_at}")),
+    );
+    m.role = MessageRole::Assistant;
+    m.created_at = created_at;
+    save_import(pool, &m).await.expect("写入导入助手消息成功");
+}
+
+/// 未读口径矩阵：本地助手且晚于 `last_read_at` 才计入；
+/// 用户发言 / 导入消息 / 已读区间均不计；多会话隔离且无未读会话不出现。
+#[tokio::test]
+async fn list_unread_counts_matrix() {
+    let pool = init_test_pool().await.expect("测试库初始化失败");
+    let session_a = setup_persona_session(&pool, "char-0001").await;
+    let session_b = setup_persona_session(&pool, "char-0001").await;
+    let session_empty = setup_persona_session(&pool, "char-0002").await;
+
+    // a. 本地助手晚于 last_read_at（基线 500）→ 计入
+    insert_local_assistant_message(&pool, session_a, 600).await;
+    // b. 用户发言 → 不计
+    insert_local_user_message(&pool, session_a, 700).await;
+    // c. 带导入指纹的助手 → 不计
+    insert_imported_assistant_message(&pool, session_a, 800).await;
+    // d. created_at <= last_read_at → 不计（早于与等于各一条）
+    insert_local_assistant_message(&pool, session_a, 400).await;
+    insert_local_assistant_message(&pool, session_a, 500).await;
+
+    // 已读基线：只对 session_a 写入 500
+    sqlx::query("UPDATE sessions SET last_read_at = 500 WHERE id = ?")
+        .bind(session_a.to_string())
+        .execute(&pool)
+        .await
+        .expect("更新已读基线成功");
+
+    // f. 多会话隔离：session_b 两条未读（基线默认 0）
+    insert_local_assistant_message(&pool, session_b, 900).await;
+    insert_local_assistant_message(&pool, session_b, 901).await;
+
+    let counts = list_unread_counts(&pool).await.expect("查询应成功");
+    assert_eq!(counts.len(), 2, "只应包含存在未读的会话");
+    assert_eq!(
+        counts.get(&session_a).copied(),
+        Some(1),
+        "本地助手晚于已读基线才计入（用户 / 导入 / 已读区间不计）"
+    );
+    assert_eq!(counts.get(&session_b).copied(), Some(2), "多会话应隔离计数");
+    // e. 无未读会话不出现
+    assert!(
+        !counts.contains_key(&session_empty),
+        "无未读会话不应出现在结果中"
+    );
+
+    // 推进 session_b 已读基线：未读归零后整表为空
+    sqlx::query("UPDATE sessions SET last_read_at = 9999 WHERE id = ?")
+        .bind(session_b.to_string())
+        .execute(&pool)
+        .await
+        .expect("更新已读基线成功");
+    insert_local_assistant_message(&pool, session_a, 9_999).await;
+    let counts = list_unread_counts(&pool).await.expect("查询应成功");
+    assert_eq!(counts.get(&session_b), None, "已读基线推进后不应有未读");
+}

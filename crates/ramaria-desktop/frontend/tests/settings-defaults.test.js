@@ -307,10 +307,10 @@ test('MCP 面板：白名单默认全部人格可见', () => {
 });
 
 // =========================================================
-// 主动对话组：21 键齐全 + 默认值类型 + 模板收录
+// 主动对话组：22 键齐全 + 默认值类型 + 模板收录
 // =========================================================
 
-test('主动对话组：21 键齐全且默认值类型正确', () => {
+test('主动对话组：22 键齐全且默认值类型正确', () => {
   const proactive = groups.find((g) => g.key === 'proactive');
   assert.ok(proactive, '应存在 proactive 组');
   assert.deepEqual(proactive.section, ['proactive']);
@@ -320,6 +320,7 @@ test('主动对话组：21 键齐全且默认值类型正确', () => {
     'proactive.check_interval_seconds',
     'proactive.min_idle_hours',
     'proactive.daily_limit',
+    'proactive.daily_total_limit',
     'proactive.quiet_hours',
     'proactive.cooldown_hours',
     'proactive.judge_enabled',

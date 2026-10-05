@@ -1,7 +1,7 @@
 # ramaria-cli
 
 > 定位：命令行入口（clap derive，19 个子命令）+ 评估探针（例外登记：允许直连 `ramaria-memory` 算法原语）。
-> 上游 SSOT：`../../../docs/dev-2.3/test/contract-baseline-2.3.md`（§4 CLI 基线：子命令 / `--json` 信封 / 退出码）、`../../../docs/dev-2.2/v2.2-decisions.md`（D-V22-009 探针例外）。
+> 上游 SSOT：`../../../docs/dev-2.5/test/contract-baseline-2.5.md`（差异式基线；CLI 面：子命令 / `--json` 信封 / 退出码，逐项底本 = 2.3 基线 §5）、`../../../docs/dev-2.2/v2.2-decisions.md`（D-V22-009 探针例外）。
 
 ## 职责
 

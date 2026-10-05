@@ -285,6 +285,32 @@ pub async fn bind_persona_uid(
     Ok(())
 }
 
+/// 标记会话已读（把 `last_read_at` 推进到指定时间）。
+///
+/// 职责:
+/// - 会话浏览侧的"已读"写入口：推进后该会话中早于该时间的本地助手消息
+///   不再计入未读。
+///
+/// 参数:
+/// - `session_id`: 目标会话 UUID。
+/// - `at_ms`: 已读时间戳（Unix 毫秒），由调用方统一取当前时间提供。
+///
+/// 说明:
+/// - 幂等：会话不存在（0 行命中）或重复标记均静默成功。
+pub async fn mark_read(pool: &SqlitePool, session_id: Uuid, at_ms: i64) -> RamariaResult<()> {
+    // 多进程写锁争用时有限重试，避免 database is locked 直接失败
+    with_busy_retry("标记 session 已读", || async {
+        sqlx::query("UPDATE sessions SET last_read_at = ? WHERE id = ?")
+            .bind(at_ms)
+            .bind(session_id.to_string())
+            .execute(pool)
+            .await
+    })
+    .await
+    .storage_err("标记 session 已读失败")?;
+    Ok(())
+}
+
 pub async fn get(pool: &SqlitePool, session_id: Uuid) -> RamariaResult<Option<Session>> {
     let row = sqlx::query_as::<_, SessionRow>(&format!(
         "SELECT {SESSION_COLUMNS} FROM sessions WHERE id = ?"

@@ -1,10 +1,10 @@
 //! crates/ramaria-service/src/engine/usecases_browse.rs - Ramaria 浏览域用例挂载
 //!
 //! 设计特点:
-//! - 全部为只读用例：实现体在 `browse` 模块，本层只做入口挂载
+//! - 以只读用例为主（会话未读标记为唯一写操作）：实现体在 `browse` 模块，本层只做入口挂载
 //! - 记忆浏览：L1（会话口径 / persona 未吸收口径）、L2 事件、L3 标签与三层画像
 //! - 知识浏览：活跃事实分页、单条事实版本链、按字段分组与版本链折叠
-//! - 会话浏览：列表聚合与分页、消息正序 / 分页翻正、详情与计数
+//! - 会话浏览：列表聚合与分页、消息正序 / 分页翻正、详情与计数、未读标记与汇总
 //! - 证据链：trait → 证据记录 → 事件 → L1 溯源 → 证据片段
 //! - 空态语义：不存在 / 无数据返回空列表或空链（非错误），由用例实现保证
 
@@ -129,6 +129,16 @@ impl Engine {
     /// 会话消息计数用例（诊断用；查询失败按 0 处理，不阻塞主流程）。
     pub async fn count_session_messages(&self, session_id: Uuid) -> usize {
         crate::browse::count_session_messages(self, session_id).await
+    }
+
+    /// 标记会话已读用例：推进已读时间到当前（幂等；会话不存在也视为成功）。
+    pub async fn session_mark_read(&self, session_id: Uuid) -> RamariaResult<()> {
+        crate::browse::mark_session_read(self, session_id).await
+    }
+
+    /// 全部会话未读总数用例（托盘徽标与全局未读提示口径）。
+    pub async fn unread_total(&self) -> RamariaResult<u32> {
+        crate::browse::unread_total(self).await
     }
 
     /// 通道会话概览用例：该通道的活跃会话数与最近活动时间（只读聚合）。

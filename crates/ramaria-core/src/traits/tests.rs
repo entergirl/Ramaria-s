@@ -290,6 +290,8 @@ fn bare_store_contract_methods_return_unsupported() {
             .expect_err("find_active_session_by_channel 未覆写应报错"),
         futures::executor::block_on(store.close_session_if_active(Uuid::new_v4()))
             .expect_err("close_session_if_active 未覆写应报错"),
+        futures::executor::block_on(store.mark_session_read(Uuid::new_v4(), 0))
+            .expect_err("mark_session_read 未覆写应报错"),
     ];
     for err in errors {
         assert_eq!(
@@ -314,6 +316,9 @@ fn store_crud_new_query_defaults_are_passive() {
         None,
         "未覆写 mock 的最近对话时间应为 None（无历史）"
     );
+
+    let unread = futures::executor::block_on(store.list_unread_counts()).expect("默认实现不应报错");
+    assert!(unread.is_empty(), "未覆写 mock 的未读聚合应为空映射");
 }
 
 /// 用户消息时间查询的默认实现为被动降级（None / 空列表）：

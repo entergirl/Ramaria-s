@@ -4,6 +4,7 @@
 //! - 实现服务层 ProactiveSink（注册制）：投递 = emit 事件 + 系统通知
 //! - 事件发射失败按降级处理（消息已落库应用内可见，warn 后继续通知）
 //! - 通知点击：聚焦主窗口并重播事件（activated=true）驱动前端定位会话
+//! - 投递完成后异步刷新托盘未读徽标（消息已落库，未读口径即时）
 //! - 隐私：日志只记会话 / 人格 / 来源等元数据，不记消息内容
 
 use ramaria_core::error::RamariaResult;
@@ -62,6 +63,9 @@ impl<R: Runtime> ProactiveSink for TauriProactiveSink<R> {
             source = %message.source,
             "主动消息已投递"
         );
+
+        // 未读状态变化：刷新托盘徽标（消息已落库，未读口径即时生效）
+        crate::tray::spawn_tray_refresh(self.app_handle.clone());
         Ok(())
     }
 }
