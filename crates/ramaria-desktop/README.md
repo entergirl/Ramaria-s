@@ -24,7 +24,7 @@
 | `src/commands/` | 命令实现（18 模块）：chat / session / memory（+ `memory_view.rs` 视图映射）/ config / mcp / export / index_cmd / import_cmd / persona / proactive_cmd / rules / keywords / style / evaluation / diagnostics / setup / dialog | 内联测试段 |
 | `frontend/js/` | 前端逻辑：根模块 6 + `views/`（8 视图：chat / memory / persona / rules / import / settings / setup / debug）+ `components/` 7 + `utils/` 5；`api.js` 为调用封装 | `frontend/tests/` |
 | `frontend/css/` | 设计令牌与样式（16 个文件） | — |
-| `frontend/tests/` | 12 个测试文件 + helpers：`settings-defaults`（与 default.toml 逐键）/ `settings-proactive-personas`（名单四态与即时保存回归）/ `store-keys`（Store 字段注册扫描）/ `markup-conventions` / `markdown` / `bubble` / `dom` / `format` / `probe` / `mcp-snippets` / `session-source-tag` / `session-unread`（未读徽标回归） | `frontend/tests/` |
+| `frontend/tests/` | 13 个测试文件 + helpers：`settings-defaults`（与 default.toml 逐键）/ `settings-proactive-personas`（名单四态与即时保存回归）/ `store-keys`（Store 字段注册扫描）/ `markup-conventions` / `markdown` / `bubble` / `dom` / `format` / `probe` / `mcp-snippets` / `session-source-tag` / `session-unread`（未读徽标回归）/ `proactive`（主动事件订阅与定位） | `frontend/tests/` |
 | `.ramaria-dev/` | 开发模式数据目录（不随发行） | — |
 
 ## 相邻契约

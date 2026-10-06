@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/v2/crates/tauri-config-schema/schema.json",
   "productName": "Ramaria",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "identifier": "com.ramaria.app",
   "build": {
     "frontendDist": "./frontend"
@@ -38,7 +38,8 @@
       "nsis": {
         "languages": ["SimpChinese"],
         "installMode": "currentUser",
-        "displayLanguageSelector": false
+        "displayLanguageSelector": false,
+        "installerHooks": "./nsis-hooks.nsh"
       }
     },
     "publisher": "Ramaria",

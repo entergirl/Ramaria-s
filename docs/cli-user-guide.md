@@ -1,6 +1,6 @@
 # Ramaria CLI 使用指南
 
-> 版本：2.4（命令参考覆盖 setup / ask / chat / memory / blocks / index / import / export / session / config / persona / rule / style / fact / keyword / diagnostics / status / probe / mcp 共 19 个子命令）
+> 版本：2.5（命令参考覆盖 setup / ask / chat / memory / blocks / index / import / export / session / config / persona / rule / style / fact / keyword / diagnostics / status / probe / mcp 共 19 个子命令）
 > 适用平台：Windows / macOS / Linux（Windows 首发）
 
 ## 概述
@@ -9,7 +9,7 @@
 
 首次使用前需运行首次配置向导（`ramaria setup`）。**CLI 与桌面应用的数据目录相互独立**：CLI 的数据库由 `--db` 指定（默认 `data/ramaria_assistant.db`，`RAMARIA_DB_PATH` 覆盖）；桌面应用开发模式（`cargo tauri dev`）使用 `crates/ramaria-desktop/.ramaria-dev/`、生产模式使用 `%APPDATA%\Ramaria\data\`；API key 均保存在 Windows Credential Manager（不落盘）。
 
-**关于主动对话（v2.4）**：主动对话（Ramaria 主动发起消息）**仅随桌面应用装配**——CLI 与 MCP 接入都不会主动发言。CLI 侧可正常查看与处理主动消息：`ramaria chat` / `session` 可见其所在会话与消息；主动消息同样参与记忆回流，`memory` / `blocks` / `persona` 等查询照常覆盖。是否启用由桌面「设置 → 主动对话」控制（`[proactive]` 配置组）。
+**关于主动对话（v2.4 起步 / v2.5 收敛）**：主动对话（Ramaria 主动发起消息）**仅随桌面应用装配**——CLI 与 MCP 接入都不会主动发言。CLI 侧可正常查看与处理主动消息：`ramaria chat` / `session` 可见其所在会话与消息；主动消息同样参与记忆回流，`memory` / `blocks` / `persona` 等查询照常覆盖。是否启用由桌面「设置 → 主动对话」控制：全局开关与**逐人格三态开关**（「主动消息名单」）均在该页管理（`[proactive]` 配置组 + `settings` 键 `proactive.persona.{uid}`）；`ramaria probe baseline` 可只读查看投递 / 回应 / 判据计数。未读标记（会话未读计数与托盘徽标）为桌面体验，CLI 查询不受影响。
 
 ---
 
@@ -477,6 +477,22 @@ ramaria probe report --results probe-results.json --evaluation eval.json --ablat
 
 **`--ablation` 消融对比（v1.7）**：自动识别 F0（F 组）与 B1（S 组）基线，按题目配对执行 Wilcoxon 符号秩检验（正态近似、平均秩，n<5 返回 None 保守处理）+ Cohen's d + 95% CI + 全局 Benjamini-Hochberg FDR 校正；判定线 **p_fdr<0.05 ∧ |d|≥0.3 ∧ CI 不含 0 → 显著**（↑ 正向 / ↓ 负向 / → 无差异）；附辅助指标表（平均回复字符 / 耗时 / 空回复率）。对照档位由数据集 `variants[].ablation` 给出。
 
+#### `ramaria probe baseline` — 主动对话数值基线（v2.5 新增）
+
+只读查看主动对话的运行计数与配置口径快照（投递 / 回应 / 判据计数，按人格分组 + 按本地日期分桶），用于数值回归评估；**只读，不回写、不建表**。
+
+```
+ramaria probe baseline
+ramaria probe baseline --window-hours 0 --json
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--window-hours <N>` | 回应统计窗口（小时；默认 24，`0` = 不设上界） |
+| `--json` | 信封输出（完整报告） |
+
+**口径**：投递 = 主动生成消息标记；回应 = 该人格会话中窗口内首条本地用户消息（排除导入与主动消息）；判据计数 = 运行状态中的 yes / no 计数；比率分母为 0 时显示 `-`。
+
 ---
 
 ### `ramaria fact` — 知识层事实查询（v1.6新增）
@@ -696,6 +712,7 @@ CLI 命名与输出约定变更（v1.5 起因"自动化友好改造"引入，后
 | 弱反馈闭环 | **v1.7 M4 新增（H2）**：S2/S3 弱信号检测写入 `feedback_log`（默认仅审计不自动改动）；无需新 CLI 命令 |
 | `import qq --file` 中文路径 | **v1.7 M0 修复**：文件路径参数改 `PathBuf`/`OsString` 承载，中文文件名导入冒烟通过 |
 | `mcp serve` | **v2.1 新增 MCP 服务端入口**：`ramaria mcp serve` 以 stdio 启动 MCP 服务端（六个工具，沿用全局 `--db`）；stdout 仅协议消息、日志走 stderr；桌面「设置 → MCP 接入」提供客户端配置片段，详见上文 `mcp` 章节 |
+| `probe baseline` | **v2.5 新增只读取数**：主动对话投递 / 回应 / 判据计数与配置口径快照（`--window-hours` 默认 24，`0` = 不限窗口）；只读、不回写、不建表。详见上文 `probe` 章节 |
 
 ---
 
