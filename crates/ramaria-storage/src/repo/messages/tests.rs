@@ -793,3 +793,121 @@ async fn list_unread_counts_matrix() {
     let counts = list_unread_counts(&pool).await.expect("查询应成功");
     assert_eq!(counts.get(&session_b), None, "已读基线推进后不应有未读");
 }
+
+// =========================================================
+// 主动投递与回应配对查询（主动对话数值基线统计）
+// =========================================================
+
+/// 写入一条主动消息（本地保存路径，无导入指纹，`is_proactive = true`）。
+async fn insert_proactive_message(pool: &SqlitePool, session_id: Uuid, created_at: i64) {
+    let mut m = make_message(session_id, None);
+    m.role = MessageRole::Assistant;
+    m.created_at = created_at;
+    m.is_proactive = true;
+    save(pool, &m).await.expect("写入主动消息成功");
+}
+
+/// 投递与回应配对：只计主动消息、跨会话取首条本地用户消息、窗口闭区间、升序输出。
+#[tokio::test]
+async fn list_proactive_delivery_pairs_window_and_ordering() {
+    let pool = init_test_pool().await.expect("测试库初始化失败");
+    let session_a = setup_persona_session(&pool, "char-0001").await;
+
+    // 无投递 → 空列表
+    assert!(
+        list_proactive_delivery_pairs(&pool, "char-0001", 0)
+            .await
+            .expect("查询应成功")
+            .is_empty(),
+        "无投递应返回空列表"
+    );
+
+    // 两次投递 + 一条常规助手消息（常规消息不计投递）
+    insert_proactive_message(&pool, session_a, 30_000).await;
+    insert_local_assistant_message(&pool, session_a, 20_000).await;
+    insert_proactive_message(&pool, session_a, 10_000).await;
+
+    let pairs = list_proactive_delivery_pairs(&pool, "char-0001", 0)
+        .await
+        .expect("查询应成功");
+    assert_eq!(pairs.len(), 2, "常规助手消息不应计入投递");
+    assert_eq!(pairs[0].sent_at, 10_000, "结果应按投递时间升序");
+    assert_eq!(pairs[1].sent_at, 30_000);
+    assert_eq!(pairs[0].responded_at, None, "无用户消息时应为 None");
+
+    // 跨会话回应：同 persona 另一会话的本地用户消息
+    let session_b = setup_persona_session(&pool, "char-0001").await;
+    insert_local_user_message(&pool, session_b, 11_000).await;
+
+    let pairs = list_proactive_delivery_pairs(&pool, "char-0001", 0)
+        .await
+        .expect("查询应成功");
+    assert_eq!(
+        pairs[0].responded_at,
+        Some(11_000),
+        "窗口不限时应命中跨会话的首条本地用户消息"
+    );
+    assert_eq!(
+        pairs[1].responded_at, None,
+        "早于投递的用户消息不应回填为回应"
+    );
+
+    // 窗口闭区间：间隔 1_000 命中上界；收紧到 999 越界
+    let within = list_proactive_delivery_pairs(&pool, "char-0001", 1_000)
+        .await
+        .expect("查询应成功");
+    assert_eq!(within[0].responded_at, Some(11_000), "窗口上界应为闭区间");
+    let outside = list_proactive_delivery_pairs(&pool, "char-0001", 999)
+        .await
+        .expect("查询应成功");
+    assert_eq!(outside[0].responded_at, None, "超出窗口不应命中");
+}
+
+/// 投递与回应配对：导入消息不计回应、人格隔离、未绑定会话不计。
+#[tokio::test]
+async fn list_proactive_delivery_pairs_excludes_import_and_other_persona() {
+    let pool = init_test_pool().await.expect("测试库初始化失败");
+    let session_a = setup_persona_session(&pool, "char-0001").await;
+    insert_proactive_message(&pool, session_a, 10_000).await;
+
+    // 导入用户消息（带指纹）不计回应
+    insert_role_message(&pool, session_a, MessageRole::User, 11_000).await;
+    let pairs = list_proactive_delivery_pairs(&pool, "char-0001", 0)
+        .await
+        .expect("查询应成功");
+    assert_eq!(pairs[0].responded_at, None, "导入用户消息不应计回应");
+
+    // 本地用户消息命中
+    insert_local_user_message(&pool, session_a, 12_000).await;
+    let pairs = list_proactive_delivery_pairs(&pool, "char-0001", 0)
+        .await
+        .expect("查询应成功");
+    assert_eq!(
+        pairs[0].responded_at,
+        Some(12_000),
+        "应取首条本地用户消息（导入被跳过）"
+    );
+
+    // 另一 persona 的会话不串扰
+    let session_other = setup_persona_session(&pool, "char-0002").await;
+    insert_local_user_message(&pool, session_other, 9_000).await;
+    let pairs = list_proactive_delivery_pairs(&pool, "char-0001", 0)
+        .await
+        .expect("查询应成功");
+    assert_eq!(pairs[0].responded_at, Some(12_000), "他人格会话不应串扰");
+
+    // 未绑定 persona 的会话不计（投递侧与回应侧均不归属）
+    let unbound = Uuid::new_v4();
+    sqlx::query("INSERT INTO sessions (id, started_at) VALUES (?, 0)")
+        .bind(unbound.to_string())
+        .execute(&pool)
+        .await
+        .expect("插入未绑定会话 fixture 应成功");
+    insert_proactive_message(&pool, unbound, 5_000).await;
+    insert_local_user_message(&pool, unbound, 6_000).await;
+    let pairs = list_proactive_delivery_pairs(&pool, "char-0001", 0)
+        .await
+        .expect("查询应成功");
+    assert_eq!(pairs.len(), 1, "未绑定 persona 的会话不应计入投递");
+    assert_eq!(pairs[0].sent_at, 10_000);
+}

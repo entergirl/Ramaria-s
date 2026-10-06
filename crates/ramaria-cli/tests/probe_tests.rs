@@ -264,6 +264,43 @@ async fn probe_build_command_runs_ok() {
     );
 }
 
+/// 命令级入口：`probe baseline` 文本与 `--json` 两种形态均返回 Ok。
+#[tokio::test]
+async fn probe_baseline_command_runs_ok() {
+    let (engine, storage) = build_probe_engine();
+    storage.add_persona(common::make_test_persona(
+        "char-0001",
+        "角色一",
+        ramaria_core::types::PersonaKind::Char,
+        None,
+    ));
+
+    let text = ramaria_cli::commands::probe::run(
+        &engine,
+        ProbeCmd::Baseline {
+            window_hours: 24,
+            json: false,
+        },
+        false,
+    )
+    .await;
+    assert!(
+        text.is_ok(),
+        "probe baseline 文本形态应成功（空数据零值降级）"
+    );
+
+    let json = ramaria_cli::commands::probe::run(
+        &engine,
+        ProbeCmd::Baseline {
+            window_hours: 0,
+            json: true,
+        },
+        false,
+    )
+    .await;
+    assert!(json.is_ok(), "probe baseline --json 形态应成功");
+}
+
 /// `--ablation`：默认 4 档后追加 15 档消融 Profile（契约）。
 #[tokio::test]
 async fn probe_build_ablation_appends_all_profiles() {

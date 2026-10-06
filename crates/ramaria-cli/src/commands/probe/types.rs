@@ -672,6 +672,12 @@ pub enum ProbeCmd {
         no_tone_judge: bool,
         json: bool,
     },
+    /// 统计主动对话数值基线（只读：投递 / 回应 / 判据计数）
+    Baseline {
+        /// 回应判定窗口（小时；0 = 不设上界）
+        window_hours: u32,
+        json: bool,
+    },
     /// 生成档位对比报告与定稿建议（markdown/JSON 双形态）
     Report {
         /// 实验结果文件（probe run 产物）

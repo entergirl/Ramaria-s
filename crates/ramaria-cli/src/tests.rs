@@ -138,6 +138,27 @@ fn probe_run_repeat_flag_parses() {
     }
 }
 
+/// `probe baseline --window-hours` 可解析，缺省为 24。
+#[test]
+fn probe_baseline_window_hours_parses() {
+    let cli = Cli::try_parse_from(["ramaria", "probe", "baseline", "--window-hours", "6"])
+        .expect("--window-hours 应可解析");
+    match cli.command {
+        Commands::Probe(ProbeArgs::Baseline { window_hours }) => {
+            assert_eq!(window_hours, 6);
+        }
+        _ => panic!("应解析为 Probe::Baseline，实际解析为其他命令"),
+    }
+
+    let cli2 = Cli::try_parse_from(["ramaria", "probe", "baseline"]).expect("缺省参数应可解析");
+    match cli2.command {
+        Commands::Probe(ProbeArgs::Baseline { window_hours }) => {
+            assert_eq!(window_hours, 24, "回应窗口缺省 24 小时");
+        }
+        _ => panic!("应解析为 Probe::Baseline"),
+    }
+}
+
 /// `ramaria mcp serve` 可解析（MCP 服务端入口；--db 沿用全局参数）。
 #[test]
 fn mcp_serve_parses() {

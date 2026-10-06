@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::keyword::{KeywordPoolRow, PendingAliasRow};
-use ramaria_core::traits::StoreCrud;
+use ramaria_core::traits::{ProactiveDeliveryPair, StoreCrud};
 use ramaria_core::types::{
     ClusterSnapshot, EventBatchWrite, EventRelation, EventSource, MemoryEvent, MemoryL1, Message,
     Persona, PersonaEventAggregate, PersonaExample, PersonaFact, PersonaStyleStats,
@@ -137,6 +137,15 @@ impl StoreCrud for SqliteStorage {
         since_ms: i64,
     ) -> RamariaResult<Vec<i64>> {
         repo::messages::list_user_message_times_since(&self.pool, persona_uid, since_ms).await
+    }
+    /// 覆写为"主动投递 + 窗口内首条本地用户回应"配对查询（主动对话数值基线统计）。
+    async fn list_proactive_delivery_pairs(
+        &self,
+        persona_uid: &str,
+        response_window_ms: i64,
+    ) -> RamariaResult<Vec<ProactiveDeliveryPair>> {
+        repo::messages::list_proactive_delivery_pairs(&self.pool, persona_uid, response_window_ms)
+            .await
     }
     async fn count_messages(&self, session_id: Uuid) -> RamariaResult<u32> {
         repo::messages::count_by_session(&self.pool, session_id).await

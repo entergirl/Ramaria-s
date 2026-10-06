@@ -8,7 +8,7 @@
 - **参数解析与分发**：`cli.rs` 定义 `Cli` 与 `Commands`；`dispatch.rs` 分发到 `commands/`；`main.rs` 仅进程入口。
 - **`--json` 信封**：`json.rs` 统一 `{ ok: true, data }` / `{ ok: false, error: { code, message } }`；退出码 0 / 2 / 3 / 4。
 - **子命令实现**：`commands/*` 每个子命令一个模块；只做"调服务层用例 + 输出格式化"。
-- **评估探针**：`commands/probe/`（数据集构建 / 批量运行 / 评估 / 报告），属研发工具链；例外登记（D-V22-009）允许直连 `ramaria-memory` 算法原语与数据读取，不直连 LLM provider（LLM 经服务层装配）。
+- **评估探针**：`commands/probe/`（数据集构建 / 批量运行 / 评估 / 报告 / 数值基线统计），属研发工具链；例外登记（D-V22-009）允许直连 `ramaria-memory` 算法原语与数据读取，不直连 LLM provider（LLM 经服务层装配）。
 - **隐私确认**：`privacy.rs` 提供 CLI 侧线上 provider 确认流程。
 
 ## 文件地图（目录 → 职责）
@@ -23,7 +23,7 @@
 | `src/ui.rs` / `src/util.rs` | 终端输出（表格 / 颜色 / 进度）/ 通用工具 | `src/tests.rs` |
 | `src/privacy.rs` | CLI 侧隐私确认流程 | 内联 |
 | `src/commands/` | 19 个子命令实现（ask / chat / setup / memory / utt / index_cmd / import_cmd / export / session / config / persona / rule / style / fact / keyword_cmd / diagnostics / status / probe / mcp） | `memory/tests.rs`、`setup/tests.rs`、`rule/tests.rs`；其余内联 |
-| `src/commands/probe/` | 评估探针：`types` / `dataset/`（构建）/ `run/`（批量运行）/ `evaluate/`（评分）/ `report/`（统计 / 消融 / TOST / 校准 / 知识质量 / 渲染）/ `tests/` | `src/commands/probe/tests/` |
+| `src/commands/probe/` | 评估探针：`types` / `dataset/`（构建）/ `run/`（批量运行）/ `evaluate/`（评分）/ `report/`（统计 / 消融 / TOST / 校准 / 知识质量 / 渲染）/ `baseline.rs`（主动对话数值基线，只读）/ `tests/` | `src/commands/probe/tests/`、`baseline/tests.rs` |
 | `src/commands/rule/` | 规则子命令：`manage`（增删改查）/ `incremental` / `clusters`（工具例外：只读事件 + 聚类原语） | `src/commands/rule/tests.rs` |
 | `tests/` | 集成测试：`command_tests`（薄入口 + `command_tests/` 四域）+ export / keyword / memory_l2 / probe / rule / session / style / ui 各域 | `tests/`；夹具 `tests/common/` |
 | `examples/` | 研发用 PoC（`keychain_poc` / `vector_poc`），不参与构建产物 | — |

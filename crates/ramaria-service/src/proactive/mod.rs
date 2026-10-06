@@ -12,6 +12,7 @@
 //! - 人格开关：三态（自动 / 手动开 / 手动关）按画像存于 `settings` 表，
 //!   由调度在资格闸门读取
 //! - 名单用例：读取活跃人格开关状态与生效结论、按校验写开关，供设置页入口
+//! - 数值基线统计：只读汇总投递 / 回应 / 判据计数（供回归取数，不写库）
 //! - 投递注册：宿主实现接收端 trait 并注册到引擎；未注册时调度静默丢弃
 //! - 活跃时段统计：user 消息时间直方图 + 软加权（权重设下限，样本不足退化放行）
 
@@ -22,15 +23,21 @@ mod roster;
 mod schedule;
 mod sink;
 mod state;
+mod stats;
 mod switch;
 mod topic;
 
 pub use roster::ProactivePersonaView;
 pub use sink::{ProactiveMessage, ProactiveSink};
+pub use stats::{
+    ProactiveDailyCount, ProactiveGlobalStats, ProactivePersonaStats, ProactiveStatsReport,
+    ProactiveStatsTotals,
+};
 
 pub(crate) use picker::PickerTopicProvider;
 pub(crate) use roster::{list_personas, set_persona_mode};
 pub(crate) use schedule::{TopicPicker, spawn};
+pub(crate) use stats::collect as collect_stats;
 pub(crate) use topic::{ProactiveDirective, ProactiveOutcome};
 
 #[cfg(test)]

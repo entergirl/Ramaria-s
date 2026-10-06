@@ -21,6 +21,21 @@ use crate::types::{
 };
 
 // =========================================================
+// 查询返回形态
+// =========================================================
+
+/// 主动消息投递与回应配对（只读统计查询返回）。
+///
+/// 字段约定:
+/// - `sent_at`: 主动消息投递时间（Unix 毫秒）；
+/// - `responded_at`: 窗口内紧随投递的首条本地用户消息时间（None = 窗口内无回应）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProactiveDeliveryPair {
+    pub sent_at: i64,
+    pub responded_at: Option<i64>,
+}
+
+// =========================================================
 // 存储后端抽象层
 // =========================================================
 
@@ -384,6 +399,35 @@ pub trait StoreCrud: Send + Sync {
         _persona_uid: &str,
         _since_ms: i64,
     ) -> RamariaResult<Vec<i64>> {
+        Ok(Vec::new())
+    }
+
+    /// 列出指定 persona 的主动消息投递与其后（窗口内）首条本地用户消息的配对。
+    ///
+    /// 职责:
+    /// - 供主动对话数值基线统计回应率与回应延迟（投递 / 回应口径的单点查询）。
+    ///
+    /// 语义:
+    /// - 投递 = 会话归属该 persona（`sessions.persona_uid`）且 `messages.is_proactive = 1`
+    ///   的消息；
+    /// - 回应 = 该 persona 任一会话中角色 `user`、无导入指纹
+    ///   （`import_fingerprint IS NULL`）、时间晚于投递且在 `response_window_ms` 内
+    ///   （闭区间上界）的最早一条；
+    /// - `response_window_ms = 0` 表示不设上界：投递后任意时间的首条本地用户消息
+    ///   都算回应（与调度"已回应"判定同口径）。
+    ///
+    /// 参数:
+    /// - `persona_uid`: 人格标识。
+    /// - `response_window_ms`: 回应判定窗口（毫秒；0 = 不设上界）。
+    ///
+    /// 返回:
+    /// - 按投递时间升序的配对列表（默认实现返回空列表：未覆写的 mock 视为"无投递数据"，
+    ///   统计侧按零数据降级）。
+    async fn list_proactive_delivery_pairs(
+        &self,
+        _persona_uid: &str,
+        _response_window_ms: i64,
+    ) -> RamariaResult<Vec<ProactiveDeliveryPair>> {
         Ok(Vec::new())
     }
 

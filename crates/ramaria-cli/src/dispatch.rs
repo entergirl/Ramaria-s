@@ -327,6 +327,10 @@ pub(crate) async fn dispatch(engine: &Arc<Engine>, cli: Cli) -> anyhow::Result<(
                     no_tone_judge,
                     json: cli.json,
                 },
+                ProbeArgs::Baseline { window_hours } => commands::probe::ProbeCmd::Baseline {
+                    window_hours,
+                    json: cli.json,
+                },
                 ProbeArgs::Report {
                     results,
                     evaluation,

@@ -181,7 +181,7 @@ pub(crate) enum Commands {
     #[command(display_order = 50)]
     Status,
 
-    /// 探针实验（build: 构建测试集 / run: 档位批量实验）[高级]
+    /// 探针实验（build: 构建测试集 / run: 档位批量实验 / baseline: 数值基线统计）[高级]
     #[command(display_order = 51, subcommand)]
     Probe(ProbeArgs),
 
@@ -458,6 +458,13 @@ pub(crate) enum ProbeArgs {
         /// 跳过语气维 LLM-as-judge（仅评事实维，节省 LLM 调用）
         #[arg(long)]
         no_tone_judge: bool,
+    },
+
+    /// 统计主动对话数值基线（只读：投递 / 回应 / 判据计数）
+    Baseline {
+        /// 回应判定窗口（小时；0 = 不设上界——投递后任意时间的首条本地用户消息均算回应）
+        #[arg(long, default_value_t = 24)]
+        window_hours: u32,
     },
 
     /// 生成档位对比报告与定稿建议（markdown/JSON 双形态；支持人工抽检校准）

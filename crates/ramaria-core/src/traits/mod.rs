@@ -18,7 +18,7 @@ pub use cache::LlmResponseCache;
 pub use embedding::{Embedding, EmbeddingModelInfo, EmbeddingProvider};
 pub use llm::{ChatMessage, ChatRequest, LlmProvider, StreamDelta};
 pub use store_backend::{StorageBackend, StoreInfrastructure};
-pub use store_crud::StoreCrud;
+pub use store_crud::{ProactiveDeliveryPair, StoreCrud};
 pub use store_version::{
     BM25_INDEX_VERSION_CURRENT, BM25_INDEX_VERSION_LEGACY, IndexCorpusStamp,
     SETTING_BM25_INDEX_VERSION,

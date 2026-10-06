@@ -21,7 +21,7 @@
 | `src/types/` | 用例层纯数据：`chat` / `recall` / `ingest` / `persona` / `setup` / `memory_browse` / `facts` / `session` / `keyword` / `defaults` | `src/types/tests.rs` |
 | `src/config/` | `ConfigWriter` 配置双写：`file_io`（原子写）/ `db_io` / `merge` / `flatten` / `backend_map` / `results` | `src/config/tests.rs` |
 | `src/chat/` | 对话用例：`steps`（`prepare_request` 前置编排）/ `context`（历史窗口与上下文）/ `generate`（LLM 调用与流式）/ `proactive`（主动生成，assistant-only 非流式） | `src/chat/tests.rs` |
-| `src/proactive/` | 主动对话域：`schedule`（触发链 + `quiet` 免打扰 + `gates` 资格闸门）/ `switch`（人格开关三态）/ `roster`（名单读写用例）/ `picker`（`sources` 四源选题与打分）/ `judge`（AI 判据）/ `activity`（活跃时段统计）/ `state`（状态键）/ `sink`（投放注册制）；指令与结果形态 `topic` | `src/proactive/tests.rs`、`schedule/tests.rs`、`switch/tests.rs`、`roster/tests.rs`、`picker/tests.rs`、`judge/tests.rs`、`state/tests.rs`、`sink/tests.rs`、`activity/tests.rs` |
+| `src/proactive/` | 主动对话域：`schedule`（触发链 + `quiet` 免打扰 + `gates` 资格闸门）/ `switch`（人格开关三态）/ `roster`（名单读写用例）/ `stats`（数值基线统计，只读）/ `picker`（`sources` 四源选题与打分）/ `judge`（AI 判据）/ `activity`（活跃时段统计）/ `state`（状态键）/ `sink`（投放注册制）；指令与结果形态 `topic` | `src/proactive/tests.rs`、`schedule/tests.rs`、`switch/tests.rs`、`roster/tests.rs`、`stats/tests.rs`、`picker/tests.rs`、`judge/tests.rs`、`state/tests.rs`、`sink/tests.rs`、`activity/tests.rs` |
 | `src/recall/` | 分层召回装配：`policy`（闸门）/ `layers` / `search` / `overview` / `entry` | `src/recall/tests.rs` |
 | `src/browse/` | 记忆与会话浏览：`l1` / `l2_l3` / `profile` / `evidence` / `facts` / `session` / `channel` / `unread`（未读标记与汇总）/ `view` | `src/browse/tests.rs` |
 | `src/persona/` | 人格用例：`load` / `regenerate` / `update` / `view` | `src/persona/tests.rs` |

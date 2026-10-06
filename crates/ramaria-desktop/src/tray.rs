@@ -33,7 +33,8 @@ const TRAY_ID: &str = "main-tray";
 const TRAY_ICON_WIDTH: u32 = 32;
 const TRAY_ICON_HEIGHT: u32 = 32;
 /// 托盘基础配色（Ramaria 品牌粉 #c44d5a，完全不透明）。
-const TRAY_ICON_RGBA: [u8; 4] = [0xc4, 0x4d, 0x5a, 0xff];
+/// 徽标绘制（`tray_badge`）需据此校验底色对比度，故对 crate 可见。
+pub(crate) const TRAY_ICON_RGBA: [u8; 4] = [0xc4, 0x4d, 0x5a, 0xff];
 /// 无未读时的托盘提示文案。
 const TRAY_TOOLTIP_BASE: &str = "Ramaria - 个人AI陪伴记忆系统";
 

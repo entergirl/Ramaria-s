@@ -18,11 +18,14 @@
 //! - 产物出口范围（登记 CR-SEC-102）：数据集/结果/评分/报告默认落地为本地文件；
 //!   用户显式 `--output -` 时直出 stdout（含库内原文），属"本机工具链、不出端"的口径边界；
 //!   进一步收紧（如 `--redact`）需负责人裁定，当前不改变默认行为。
+//! - `probe baseline`：主动对话数值基线统计（只读；口径与聚合在服务层单点实现，
+//!   本层只做调用与渲染）。
 
 use std::sync::Arc;
 
 use ramaria_core::types::now_ms;
 
+mod baseline;
 mod dataset;
 mod evaluate;
 mod report;
@@ -53,6 +56,9 @@ use evaluate::run_evaluate;
 
 // report 对比报告族下沉至 report.rs；run 入口经 `use` 沿用原名称。
 use report::run_report;
+
+// baseline 数值基线统计族下沉至 baseline.rs；run 入口经 `use` 沿用原名称。
+use baseline::run_baseline;
 
 // report 数据容器对外保持原路径（probe::ProbeReport 等），在此 re-export。
 pub use report::{
@@ -130,6 +136,7 @@ pub async fn run(
             )
             .await
         }
+        ProbeCmd::Baseline { window_hours, json } => run_baseline(engine, window_hours, json).await,
         ProbeCmd::Report {
             results,
             evaluation,

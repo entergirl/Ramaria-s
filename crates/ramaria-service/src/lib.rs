@@ -103,7 +103,7 @@ pub use model::{
 };
 pub use persona::{PersonaLoadMode, PersonaRegenerateOutcome};
 pub use privacy::PrivacyStatus;
-pub use proactive::{ProactiveMessage, ProactivePersonaView, ProactiveSink};
+pub use proactive::{ProactiveMessage, ProactivePersonaView, ProactiveSink, ProactiveStatsReport};
 pub use recall::RecallPolicy;
 pub use seal::{SealHook, SealHooks};
 pub use settings::mask_api_key;

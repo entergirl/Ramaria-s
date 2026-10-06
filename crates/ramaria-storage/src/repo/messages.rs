@@ -15,6 +15,7 @@ use crate::repo::StorageResultExt;
 use crate::repo::parse_uuid_required;
 use crate::retry::with_busy_retry;
 use ramaria_core::error::{RamariaError, RamariaResult};
+use ramaria_core::traits::ProactiveDeliveryPair;
 use ramaria_core::types::{Message, MessageKey, MessageRole, MessageSource};
 use sqlx::SqlitePool;
 use uuid::Uuid;
@@ -287,6 +288,52 @@ pub async fn list_user_message_times_since(
     .storage_err("查询 persona 用户消息时间窗口失败")?;
 
     Ok(times)
+}
+
+/// 列出指定 persona 的主动消息投递与其后（窗口内）首条本地用户消息的配对。
+///
+/// 口径:
+/// - 投递 = 会话归属该 persona（`sessions.persona_uid`）且 `is_proactive = 1` 的消息；
+/// - 回应 = 该 persona 任一会话中角色 `user`、无导入指纹、时间晚于投递且在窗口内
+///   （闭区间上界）的最早一条；`response_window_ms = 0` 表示不设上界；
+/// - 结果按投递时间升序。
+///
+/// 参数:
+/// - `persona_uid`: 人格标识。
+/// - `response_window_ms`: 回应判定窗口（毫秒；0 = 不设上界）。
+///
+/// 返回:
+/// - 投递与回应配对列表（无投递时为空列表）。
+pub async fn list_proactive_delivery_pairs(
+    pool: &SqlitePool,
+    persona_uid: &str,
+    response_window_ms: i64,
+) -> RamariaResult<Vec<ProactiveDeliveryPair>> {
+    let rows = sqlx::query_as::<_, (i64, Option<i64>)>(
+        "SELECT p.created_at AS sent_at, \
+                (SELECT MIN(u.created_at) \
+                   FROM messages u JOIN sessions us ON us.id = u.session_id \
+                  WHERE us.persona_uid = s.persona_uid AND u.role = 'user' \
+                    AND u.import_fingerprint IS NULL AND u.created_at > p.created_at \
+                    AND (? = 0 OR u.created_at <= p.created_at + ?)) AS responded_at \
+           FROM messages p JOIN sessions s ON s.id = p.session_id \
+          WHERE p.is_proactive = 1 AND s.persona_uid = ? \
+          ORDER BY p.created_at ASC",
+    )
+    .bind(response_window_ms)
+    .bind(response_window_ms)
+    .bind(persona_uid)
+    .fetch_all(pool)
+    .await
+    .storage_err("查询主动消息投递与回应配对失败")?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(sent_at, responded_at)| ProactiveDeliveryPair {
+            sent_at,
+            responded_at,
+        })
+        .collect())
 }
 
 /// 统计指定 session 的消息数量（使用 SELECT COUNT(*) 避免全表拉取）。
