@@ -100,6 +100,10 @@ pub struct MessageView {
     pub created_at: i64,
     /// 主动生成标记（后端主动对话路径写入 true；常规消息恒 false）
     pub is_proactive: bool,
+    /// 外部平台发送者 ID（导入消息）；本地 / MCP 消息为 None。
+    pub sender_ref: Option<String>,
+    /// 外部平台发送者显示名（导入消息）；本地 / MCP 消息为 None。
+    pub sender_name: Option<String>,
 }
 
 /// 由服务层会话详情视图构造前端详情（字段映射的唯一入口，便于单测锁定）。
@@ -127,6 +131,8 @@ fn message_view(m: &ramaria_service::SessionMessageView) -> MessageView {
         persona_uid: m.persona_uid.clone(),
         created_at: m.created_at,
         is_proactive: m.is_proactive,
+        sender_ref: m.sender_ref.clone(),
+        sender_name: m.sender_name.clone(),
     }
 }
 
@@ -360,6 +366,8 @@ mod tests {
                 source: MessageSource::Local,
                 persona_uid: Some("char-0001".to_string()),
                 is_proactive: true,
+                sender_ref: None,
+                sender_name: None,
             }],
         };
 

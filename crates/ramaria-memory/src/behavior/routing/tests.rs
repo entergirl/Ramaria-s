@@ -42,6 +42,8 @@ fn msg(content: &str, role: MessageRole) -> Message {
         fingerprint: None,
         persona_uid: None,
         is_proactive: false,
+        sender_ref: None,
+        sender_name: None,
     }
 }
 

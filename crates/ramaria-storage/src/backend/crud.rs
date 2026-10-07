@@ -14,7 +14,7 @@ use ramaria_core::traits::{ProactiveDeliveryPair, StoreCrud};
 use ramaria_core::types::{
     ClusterSnapshot, EventBatchWrite, EventRelation, EventSource, MemoryEvent, MemoryL1, Message,
     Persona, PersonaEventAggregate, PersonaExample, PersonaFact, PersonaStyleStats,
-    PersonalityTrait, ProfileField, Session, TraitEvidence, TraitStatus, UttBlock,
+    PersonalityTrait, ProfileField, Session, SessionMember, TraitEvidence, TraitStatus, UttBlock,
 };
 use uuid::Uuid;
 
@@ -72,6 +72,14 @@ impl StoreCrud for SqliteStorage {
     }
     async fn close_session_if_active(&self, session_id: Uuid) -> RamariaResult<bool> {
         repo::sessions::close_if_active(&self.pool, session_id).await
+    }
+    /// 覆写为事务内批量 upsert（同键冲突合并，不重复插入）。
+    async fn upsert_session_members(&self, members: &[SessionMember]) -> RamariaResult<()> {
+        repo::session_members::upsert_batch(&self.pool, members).await
+    }
+    /// 覆写为按会话行列查询（首见时间升序）。
+    async fn list_session_members(&self, session_id: Uuid) -> RamariaResult<Vec<SessionMember>> {
+        repo::session_members::list_by_session(&self.pool, session_id).await
     }
     /// 覆写为 `UPDATE` 推进已读时间（幂等：未命中会话静默成功）。
     async fn mark_session_read(&self, session_id: Uuid, at_ms: i64) -> RamariaResult<()> {

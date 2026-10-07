@@ -13,6 +13,7 @@
 
 use ramaria_core::error::RamariaResult;
 use ramaria_core::privacy::mask_id;
+use ramaria_core::types::{CHANNEL_QQ, InboundMessage, InboundSender};
 use std::path::Path;
 
 // =========================================================
@@ -146,6 +147,35 @@ pub struct ParsedMessage {
     pub sender_uin: Option<String>,
     /// 发送者的显示名称
     pub sender_name: String,
+}
+
+impl ParsedMessage {
+    /// 投影为入站规范模型（QQ 通道）。
+    ///
+    /// 职责:
+    /// - 把 QQ 解析中间态投影为平台无关的入站消息：发送者身份 / 时间 / 正文；
+    ///   附件引用与回复关系由后续导出解析扩展填充（当前为空）。
+    ///
+    /// 说明:
+    /// - `role` / `fingerprint` 为导入端归属与去重信息，不进规范模型；
+    /// - `platform_id` 原样保留（空串表示平台未提供，判空在写入侧执行）。
+    pub fn to_inbound(&self) -> InboundMessage {
+        InboundMessage {
+            channel: CHANNEL_QQ.to_string(),
+            platform_message_id: None,
+            reply_to: None,
+            created_at: self.created_at,
+            text: self.content.clone(),
+            sender: InboundSender {
+                platform_id: self.sender_uid.clone(),
+                uin: self.sender_uin.clone(),
+                display_name: self.sender_name.clone(),
+                group_nickname: None,
+                role: None,
+            },
+            attachments: Vec::new(),
+        }
+    }
 }
 
 /// 解析后的 session（一组消息）。
@@ -541,5 +571,42 @@ mod tests {
         ] {
             assert!(plain.contains(raw), "原值摘要应保留 {raw}: {plain}");
         }
+    }
+
+    /// to_inbound 投影：发送者身份 / 时间 / 正文完整映射；空平台 ID 原样保留。
+    #[test]
+    fn to_inbound_maps_sender_fields_and_keeps_empty_uid() {
+        let parsed = ParsedMessage {
+            role: "user".to_string(),
+            content: "早上好".to_string(),
+            created_at: 1_700_000_000_000,
+            fingerprint: "fp-x".to_string(),
+            sender_uid: "u_self".to_string(),
+            sender_uin: Some("10001".to_string()),
+            sender_name: "小明".to_string(),
+        };
+
+        let inbound = parsed.to_inbound();
+        assert_eq!(inbound.channel, CHANNEL_QQ);
+        assert_eq!(inbound.created_at, parsed.created_at);
+        assert_eq!(inbound.text, "早上好");
+        assert_eq!(inbound.sender.platform_id, "u_self");
+        assert_eq!(inbound.sender.uin.as_deref(), Some("10001"));
+        assert_eq!(inbound.sender.display_name, "小明");
+        assert!(inbound.sender.group_nickname.is_none());
+        assert!(inbound.sender.role.is_none());
+        assert!(inbound.platform_message_id.is_none());
+        assert!(inbound.reply_to.is_none());
+        assert!(inbound.attachments.is_empty());
+
+        // 空 uid / 空名原样保留（判空口径在写入侧执行）
+        let mut empty = parsed.clone();
+        empty.sender_uid = String::new();
+        empty.sender_uin = None;
+        empty.sender_name = String::new();
+        let inbound = empty.to_inbound();
+        assert_eq!(inbound.sender.platform_id, "");
+        assert!(inbound.sender.uin.is_none());
+        assert_eq!(inbound.sender.display_name, "");
     }
 }

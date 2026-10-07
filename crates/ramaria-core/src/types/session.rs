@@ -23,6 +23,9 @@ use super::{new_id, now_ms};
 /// - 外部入口通道（如 `mcp`）在入口层各自声明，不使用本常量。
 pub const CHANNEL_LOCAL: &str = "local";
 
+/// QQ 导入通道标识（QQ 聊天记录导入与后续 QQ 连接共用）。
+pub const CHANNEL_QQ: &str = "qq";
+
 /// 对话会话。
 ///
 /// 职责:
@@ -142,5 +145,81 @@ impl Session {
     /// - `false`: Session 已关闭（`ended_at` 有值）。
     pub fn is_active(&self) -> bool {
         self.ended_at.is_none()
+    }
+}
+
+/// 会话成员角色（外部平台成员在会话内的身份）。
+///
+/// 职责:
+/// - 表示外部平台（如 QQ 群）成员的会话内角色；
+///   未知角色为 `None`（由使用方以 Option 表达）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemberRole {
+    Owner,
+    Admin,
+    Member,
+}
+
+impl MemberRole {
+    /// 返回存储口径的小写字符串（owner / admin / member）。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Owner => "owner",
+            Self::Admin => "admin",
+            Self::Member => "member",
+        }
+    }
+
+    /// 解析存储口径字符串；非法值返回 None。
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "owner" => Some(Self::Owner),
+            "admin" => Some(Self::Admin),
+            "member" => Some(Self::Member),
+            _ => None,
+        }
+    }
+}
+
+/// 会话成员行（外部平台发言者在会话内的身份记录）。
+///
+/// 职责:
+/// - 记录某外部平台发言者在某会话内的最近显示名、群名片、角色与首末见时间；
+/// - 供成员映射、成员列表展示与跨会话身份归一使用。
+///
+/// 字段约定:
+/// - `platform_ref`: 外部平台 ID；(session_id, platform_ref) 唯一。
+/// - `group_nickname` / `role`: 平台未提供时为 None。
+/// - `first_seen_at` / `last_seen_at`: 该成员在本会话内的最早 / 最晚消息时间（Unix 毫秒）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionMember {
+    pub session_id: Uuid,
+    pub platform_ref: String,
+    pub name: String,
+    pub group_nickname: Option<String>,
+    pub role: Option<MemberRole>,
+    pub first_seen_at: i64,
+    pub last_seen_at: i64,
+}
+
+impl SessionMember {
+    /// 创建成员行（群名片与角色初始为 None，由写入方按需填充）。
+    pub fn new(
+        session_id: Uuid,
+        platform_ref: impl Into<String>,
+        name: impl Into<String>,
+        first_seen_at: i64,
+        last_seen_at: i64,
+    ) -> Self {
+        Self {
+            session_id,
+            platform_ref: platform_ref.into(),
+            name: name.into(),
+            group_nickname: None,
+            role: None,
+            first_seen_at,
+            last_seen_at,
+        }
     }
 }

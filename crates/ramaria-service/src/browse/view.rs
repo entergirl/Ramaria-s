@@ -158,5 +158,7 @@ pub(super) fn message_view(m: &Message) -> SessionMessageView {
         source: m.source,
         persona_uid: m.persona_uid.clone(),
         is_proactive: m.is_proactive,
+        sender_ref: m.sender_ref.clone(),
+        sender_name: m.sender_name.clone(),
     }
 }

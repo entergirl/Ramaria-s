@@ -62,6 +62,7 @@ pub mod messages;
 pub mod personas;
 pub mod privacy_consent;
 pub mod schema_meta;
+pub mod session_members;
 pub mod sessions;
 pub mod settings;
 pub mod style_stats;

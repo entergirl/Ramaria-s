@@ -75,6 +75,7 @@ pub fn now_ms() -> i64 {
 }
 
 mod backend;
+mod inbound;
 mod memory;
 mod message;
 mod persona_enum;
@@ -85,6 +86,7 @@ mod style;
 mod utt;
 
 pub use backend::{BackendConfig, LlmProvider, ModelCapability, PrivacyConsent};
+pub use inbound::{InboundAttachmentKind, InboundAttachmentRef, InboundMessage, InboundSender};
 pub use memory::{
     ClusterSnapshot, EventBatchWrite, EventRelation, EventRelationKind, EventSource, EvidenceNote,
     MemoryEvent, MemoryL1, PersonaEventAggregate,
@@ -95,7 +97,7 @@ pub use persona_enum::{
     TraitLayer, TraitSource, TraitStatus,
 };
 pub use persona_struct::{Persona, PersonaFact, PersonalityTrait, TraitEvidence};
-pub use session::{CHANNEL_LOCAL, Session};
+pub use session::{CHANNEL_LOCAL, CHANNEL_QQ, MemberRole, Session, SessionMember};
 pub use state::AppState;
 pub use style::{PersonaExample, PersonaStyleStats, StyleRuleSource, StyleStatsStatus};
 pub use utt::UttBlock;

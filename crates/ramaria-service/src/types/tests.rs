@@ -594,6 +594,8 @@ fn browse_and_keyword_views_serde_roundtrip() {
             source: MessageSource::Local,
             persona_uid: Some("char-0001".to_string()),
             is_proactive: true,
+            sender_ref: None,
+            sender_name: None,
         }],
     };
     let json = serde_json::to_string(&detail).expect("序列化成功");

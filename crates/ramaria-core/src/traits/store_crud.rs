@@ -17,7 +17,7 @@ use crate::keyword::{KeywordPoolRow, PendingAliasRow};
 use crate::types::{
     ClusterSnapshot, EventBatchWrite, EventRelation, EventSource, MemoryEvent, MemoryL1, Message,
     MessageKey, Persona, PersonaEventAggregate, PersonaExample, PersonaFact, PersonaStyleStats,
-    PersonalityTrait, ProfileField, Session, TraitEvidence, TraitStatus, UttBlock,
+    PersonalityTrait, ProfileField, Session, SessionMember, TraitEvidence, TraitStatus, UttBlock,
 };
 
 // =========================================================
@@ -168,6 +168,34 @@ pub trait StoreCrud: Send + Sync {
         Err(crate::error::RamariaError::unsupported(
             "StoreCrud 未实现条件关闭 session（需覆写 close_session_if_active）",
         ))
+    }
+
+    /// 批量 upsert 会话成员行（外部导入的身份写入）。
+    ///
+    /// 职责:
+    /// - 会话成员身份持久化的写入口：导入写入层与后续社交入口共用。
+    ///
+    /// 语义:
+    /// - 同一 (session_id, platform_ref) 重复写入只更新行（名称 / 群名片 / 角色 /
+    ///   首末见时间按实现方的合并口径），不重复插入。
+    ///
+    /// 默认实现:
+    /// - 返回 `Unsupported`（写语义由实现方显式声明，不做静默丢弃）。
+    async fn upsert_session_members(&self, _members: &[SessionMember]) -> RamariaResult<()> {
+        Err(crate::error::RamariaError::unsupported(
+            "StoreCrud 未实现会话成员写入（需覆写 upsert_session_members）",
+        ))
+    }
+
+    /// 按会话读取成员行。
+    ///
+    /// 职责:
+    /// - 成员列表与成员映射的读取入口。
+    ///
+    /// 默认实现:
+    /// - 返回空列表（未覆写 mock 视为"无成员信息"，调用方按缺失降级处理）。
+    async fn list_session_members(&self, _session_id: Uuid) -> RamariaResult<Vec<SessionMember>> {
+        Ok(Vec::new())
     }
 
     // -- Message (L0) --

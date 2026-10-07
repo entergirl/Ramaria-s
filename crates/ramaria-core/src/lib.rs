@@ -39,8 +39,10 @@ pub use traits::{
 };
 pub use types::{
     AppState, BackendConfig, ClusterSnapshot, EventBatchWrite, EventRelation, EventRelationKind,
-    EventSource, EvidenceDirection, FactSource, LlmProvider, MemoryEvent, MemoryL1, Message,
+    EventSource, EvidenceDirection, FactSource, InboundAttachmentKind, InboundAttachmentRef,
+    InboundMessage, InboundSender, LlmProvider, MemberRole, MemoryEvent, MemoryL1, Message,
     MessageKey, MessageRole, MessageSource, ModelCapability, Persona, PersonaExample, PersonaFact,
     PersonaKind, PersonalityTrait, Presentation, PrivacyConsent, ProfileField, Session,
-    TraitEvidence, TraitLayer, TraitSource, TraitStatus, new_id, now_ms, uuid_from_db, uuid_to_db,
+    SessionMember, TraitEvidence, TraitLayer, TraitSource, TraitStatus, new_id, now_ms,
+    uuid_from_db, uuid_to_db,
 };

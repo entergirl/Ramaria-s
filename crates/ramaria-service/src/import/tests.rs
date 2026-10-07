@@ -360,6 +360,57 @@ async fn write_l0_second_import_deduplicates_fingerprints() {
 
 // ---- L1 批量生成 ----
 
+/// L0 导入写入发送者身份两列与会话成员行（消息字段与成员行一一对应）。
+#[tokio::test]
+async fn write_l0_persists_sender_identity_and_members() {
+    let (engine, pool, storage, dir) = import_engine("import-sender-identity").await;
+    let file_path = dir.join("export.json");
+    std::fs::write(&file_path, qq_export_json()).expect("写入导出文件应成功");
+
+    let outcome = engine
+        .import_qq_l0(import_request(&file_path))
+        .await
+        .expect("L0 导入应成功");
+    assert_eq!(outcome.sessions_written, 2);
+
+    // 每个会话：消息 sender 两列与自身身份一致（u_self ↔ 小明、u_peer ↔ 小红）
+    for session_id in &outcome.session_ids {
+        let messages = storage
+            .list_messages(*session_id)
+            .await
+            .expect("读取会话消息应成功");
+        assert_eq!(messages.len(), 2, "每会话双方各一条消息");
+        for msg in &messages {
+            let (expected_ref, expected_name) = match msg.persona_uid.as_deref() {
+                Some("user-10001") => ("u_self", "小明"),
+                Some("char-90002") => ("u_peer", "小红"),
+                other => panic!("意外的 persona_uid: {other:?}"),
+            };
+            assert_eq!(msg.sender_ref.as_deref(), Some(expected_ref));
+            assert_eq!(msg.sender_name.as_deref(), Some(expected_name));
+        }
+
+        // 成员行：两行、platform_ref 与名称对应、按首见升序
+        let members = ramaria_storage::repo::session_members::list_by_session(&pool, *session_id)
+            .await
+            .expect("读取会话成员应成功");
+        let pairs: Vec<(String, String)> = members
+            .iter()
+            .map(|m| (m.platform_ref.clone(), m.name.clone()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("u_self".to_string(), "小明".to_string()),
+                ("u_peer".to_string(), "小红".to_string()),
+            ],
+            "成员行应按首见升序且名称对应"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test]
 async fn generate_l1_generates_for_both_personas_with_eta_progress() {
     let (engine, _pool, storage, dir) = import_engine("import-l1").await;

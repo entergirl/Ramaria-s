@@ -73,7 +73,25 @@ async fn test_pool() -> sqlx::SqlitePool {
             source TEXT NOT NULL,
             import_fingerprint TEXT UNIQUE,
             persona_uid TEXT,
-            is_proactive INTEGER NOT NULL DEFAULT 0
+            is_proactive INTEGER NOT NULL DEFAULT 0,
+            sender_ref TEXT,
+            sender_name TEXT
+        )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TABLE session_members (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id     TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            platform_ref   TEXT NOT NULL,
+            name           TEXT NOT NULL DEFAULT '',
+            group_nickname TEXT,
+            role           TEXT,
+            first_seen_at  INTEGER NOT NULL DEFAULT 0,
+            last_seen_at   INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(session_id, platform_ref)
         )",
     )
     .execute(&pool)
@@ -459,4 +477,191 @@ fn import_side_parse_cli() {
         ImportSide::Other
     );
     assert!(ImportSide::parse_cli(Some("all")).is_err());
+}
+
+// =========================================================
+// 发送者身份与成员聚合
+// =========================================================
+
+/// 读出消息的 sender 身份两列（按时间升序）。
+async fn msg_sender_pairs(pool: &sqlx::SqlitePool) -> Vec<(Option<String>, Option<String>)> {
+    sqlx::query_as("SELECT sender_ref, sender_name FROM messages ORDER BY created_at")
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
+/// 导入写入同时落 sender 身份两列与会话成员行（首末见时间取消息时间）。
+#[tokio::test]
+async fn write_l0_persists_sender_identity_and_members() {
+    let pool = test_pool().await;
+    let sessions = vec![make_side_session("我的发言", "对方发言")];
+
+    ImportWriter::write_l0(
+        &pool,
+        &sessions,
+        Some("user-0001"),
+        Some("char-0001"),
+        "SELF_UID",
+        ImportSide::Both,
+    )
+    .await
+    .unwrap();
+
+    // 消息两列：self / other 各自对应平台 ID 与显示名
+    let pairs = msg_sender_pairs(&pool).await;
+    assert_eq!(
+        pairs,
+        vec![
+            (Some("SELF_UID".to_string()), Some("我".to_string())),
+            (Some("OTHER_UID".to_string()), Some("对方".to_string())),
+        ],
+        "消息应携带发送者平台 ID 与显示名"
+    );
+
+    // 成员行：两行、首末见时间取消息时间、name 正确、按首见升序
+    let members: Vec<(String, String, i64, i64)> = sqlx::query_as(
+        "SELECT platform_ref, name, first_seen_at, last_seen_at \
+         FROM session_members ORDER BY first_seen_at ASC",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        members,
+        vec![
+            ("SELF_UID".to_string(), "我".to_string(), 1100, 1100),
+            ("OTHER_UID".to_string(), "对方".to_string(), 1200, 1200),
+        ]
+    );
+}
+
+/// 同一发送者多条消息聚合为一行：首见取小、末见取大、名称取最后一条非空。
+#[tokio::test]
+async fn write_l0_member_aggregation_merges_same_sender() {
+    let pool = test_pool().await;
+    let session = crate::traits::ImportedSession {
+        messages: vec![
+            crate::traits::ParsedMessage {
+                role: "user".to_string(),
+                content: "第一条".to_string(),
+                created_at: 100,
+                fingerprint: "f-agg-1".to_string(),
+                sender_uid: "SELF_UID".to_string(),
+                sender_uin: Some("10001".to_string()),
+                sender_name: "名一".to_string(),
+            },
+            crate::traits::ParsedMessage {
+                role: "user".to_string(),
+                content: "第二条".to_string(),
+                created_at: 200,
+                fingerprint: "f-agg-2".to_string(),
+                sender_uid: "SELF_UID".to_string(),
+                sender_uin: Some("10001".to_string()),
+                sender_name: "名二".to_string(),
+            },
+            crate::traits::ParsedMessage {
+                role: "user".to_string(),
+                content: "第三条".to_string(),
+                created_at: 300,
+                fingerprint: "f-agg-3".to_string(),
+                sender_uid: "SELF_UID".to_string(),
+                sender_uin: Some("10001".to_string()),
+                sender_name: String::new(),
+            },
+        ],
+        started_at: 100,
+        ended_at: 300,
+    };
+
+    ImportWriter::write_l0(
+        &pool,
+        &[session],
+        Some("user-0001"),
+        None,
+        "SELF_UID",
+        ImportSide::Me,
+    )
+    .await
+    .unwrap();
+
+    let members: Vec<(String, String, i64, i64)> = sqlx::query_as(
+        "SELECT platform_ref, name, first_seen_at, last_seen_at FROM session_members",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(members.len(), 1, "同发送者应聚合为一行");
+    let (platform_ref, name, first_seen_at, last_seen_at) = &members[0];
+    assert_eq!(platform_ref, "SELF_UID");
+    assert_eq!(name, "名二", "名称应取最后一条非空（空名不清空）");
+    assert_eq!(*first_seen_at, 100, "首见应取最小时间");
+    assert_eq!(*last_seen_at, 300, "末见应取最大时间");
+}
+
+/// 空平台 ID 的消息两列为 NULL，且不生成成员行（其他行不受影响）。
+#[tokio::test]
+async fn write_l0_empty_sender_id_writes_null_columns() {
+    let pool = test_pool().await;
+    let session = crate::traits::ImportedSession {
+        messages: vec![
+            crate::traits::ParsedMessage {
+                role: "user".to_string(),
+                content: "空身份发言".to_string(),
+                created_at: 1100,
+                fingerprint: "f-empty".to_string(),
+                sender_uid: String::new(),
+                sender_uin: None,
+                sender_name: String::new(),
+            },
+            crate::traits::ParsedMessage {
+                role: "user".to_string(),
+                content: "正常发言".to_string(),
+                created_at: 1200,
+                fingerprint: "f-normal".to_string(),
+                sender_uid: "SELF_UID".to_string(),
+                sender_uin: Some("10001".to_string()),
+                sender_name: "我".to_string(),
+            },
+        ],
+        started_at: 1000,
+        ended_at: 2000,
+    };
+
+    ImportWriter::write_l0(
+        &pool,
+        &[session],
+        Some("user-0001"),
+        Some("char-0001"),
+        "SELF_UID",
+        ImportSide::Both,
+    )
+    .await
+    .unwrap();
+
+    let rows: Vec<(String, Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT content, sender_ref, sender_name FROM messages ORDER BY created_at")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        rows[0],
+        ("空身份发言".to_string(), None, None),
+        "空平台 ID 与空显示名应写 NULL"
+    );
+    assert_eq!(
+        rows[1],
+        (
+            "正常发言".to_string(),
+            Some("SELF_UID".to_string()),
+            Some("我".to_string())
+        )
+    );
+
+    let refs: Vec<String> =
+        sqlx::query_scalar("SELECT platform_ref FROM session_members ORDER BY platform_ref")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(refs, vec!["SELF_UID".to_string()], "空 ID 不应生成成员行");
 }

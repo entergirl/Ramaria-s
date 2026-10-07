@@ -39,6 +39,8 @@ fn make_message(session_id: Uuid, fingerprint: Option<&str>) -> Message {
         fingerprint: fingerprint.map(|s| s.to_string()),
         persona_uid: Some("char-0001".to_string()),
         is_proactive: false,
+        sender_ref: None,
+        sender_name: None,
     }
 }
 
@@ -910,4 +912,65 @@ async fn list_proactive_delivery_pairs_excludes_import_and_other_persona() {
         .expect("查询应成功");
     assert_eq!(pairs.len(), 1, "未绑定 persona 的会话不应计入投递");
     assert_eq!(pairs[0].sent_at, 10_000);
+}
+
+// =========================================================
+// 发送者身份列（导入消息 sender_ref / sender_name 回读）
+// =========================================================
+
+/// 带身份与 None 的消息经各读取路径原样回读（导入写入 + 常规写入 + 投影一致性）。
+#[tokio::test]
+async fn sender_identity_roundtrip() {
+    let pool = init_test_pool().await.expect("测试库初始化失败");
+    let session_id = setup_fixture(&pool).await;
+
+    // 带身份：导入口径写入
+    let mut imported = make_message(session_id, Some("fp-sender"));
+    imported.sender_ref = Some("u_peer".to_string());
+    imported.sender_name = Some("小红".to_string());
+    save_import(&pool, &imported)
+        .await
+        .expect("写入带身份消息应成功");
+
+    // None：常规写入
+    let plain = make_message(session_id, None);
+    save(&pool, &plain).await.expect("写入无身份消息应成功");
+
+    let listed = list_by_session(&pool, session_id)
+        .await
+        .expect("读取应成功");
+    let read_imported = listed
+        .iter()
+        .find(|m| m.id == imported.id)
+        .expect("应包含导入消息");
+    assert_eq!(read_imported.sender_ref.as_deref(), Some("u_peer"));
+    assert_eq!(read_imported.sender_name.as_deref(), Some("小红"));
+    let read_plain = listed
+        .iter()
+        .find(|m| m.id == plain.id)
+        .expect("应包含常规消息");
+    assert_eq!(read_plain.sender_ref, None, "本地消息 sender_ref 应为 None");
+    assert_eq!(
+        read_plain.sender_name, None,
+        "本地消息 sender_name 应为 None"
+    );
+
+    // find_by_fingerprint 同一投影
+    let hit = find_by_fingerprint(&pool, "fp-sender")
+        .await
+        .expect("指纹查询应成功")
+        .expect("应命中导入消息");
+    assert_eq!(hit.sender_ref.as_deref(), Some("u_peer"));
+    assert_eq!(hit.sender_name.as_deref(), Some("小红"));
+
+    // 分页投影一致性
+    let paged = list_by_session_paginated(&pool, session_id, 10, 0)
+        .await
+        .expect("分页读取应成功");
+    let paged_imported = paged
+        .iter()
+        .find(|m| m.id == imported.id)
+        .expect("分页应包含导入消息");
+    assert_eq!(paged_imported.sender_ref.as_deref(), Some("u_peer"));
+    assert_eq!(paged_imported.sender_name.as_deref(), Some("小红"));
 }

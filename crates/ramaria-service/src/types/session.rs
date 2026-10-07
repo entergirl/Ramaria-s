@@ -168,6 +168,10 @@ pub struct SessionMessageView {
     pub persona_uid: Option<String>,
     /// 主动生成标记（仅主动对话路径写入 true；常规消息恒 false）。
     pub is_proactive: bool,
+    /// 外部平台发送者 ID（导入消息）；本地 / MCP 消息为 None。
+    pub sender_ref: Option<String>,
+    /// 外部平台发送者显示名（导入消息）；本地 / MCP 消息为 None。
+    pub sender_name: Option<String>,
 }
 
 /// 通道会话概览视图（通道活动统计）。

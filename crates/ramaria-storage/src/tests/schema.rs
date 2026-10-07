@@ -258,3 +258,143 @@ async fn last_read_at_backfills_existing_sessions_on_upgrade() {
         "新会话晚于默认基线的助手消息应计未读"
     );
 }
+
+/// 旧库升级：messages 新增发送者身份两列（可空无默认）与 session_members 成员表；
+/// 旧行两列为 NULL、省略新列写入成功、成员表唯一约束生效。
+///
+/// 说明:
+/// - 模拟口径：在已全量迁移的测试库上删除新增表 / 索引 / 列还原"旧库"状态，
+///   写入旧式数据后执行本版 migration 文件（与 `sqlx::migrate!` 应用的是同一份 SQL）。
+/// - 带索引的列必须先从属于它的索引删起，否则 `DROP COLUMN` 失败。
+#[tokio::test]
+async fn sender_identity_migration_on_upgrade() {
+    let pool = database::init_test_pool()
+        .await
+        .expect("测试数据库初始化失败");
+
+    // 空库全量迁移后即含新列与新表
+    for column in ["sender_ref", "sender_name"] {
+        let (notnull, default_value): (i64, Option<String>) = sqlx::query_as(
+            "SELECT \"notnull\", dflt_value FROM pragma_table_info('messages') WHERE name = ?",
+        )
+        .bind(column)
+        .fetch_one(&pool)
+        .await
+        .expect("查询列属性应成功");
+        assert_eq!(notnull, 0, "sender 身份列应可空");
+        assert_eq!(default_value, None, "sender 身份列应无默认值");
+    }
+    let table: Option<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session_members'",
+    )
+    .fetch_optional(&pool)
+    .await
+    .expect("查询表应成功");
+    assert_eq!(
+        table.as_deref(),
+        Some("session_members"),
+        "空库初始化后应含 session_members 表"
+    );
+
+    // 还原旧库：移除新增表 / 索引 / 列（列上索引必须先删，否则 DROP COLUMN 失败）
+    sqlx::query("DROP TABLE session_members")
+        .execute(&pool)
+        .await
+        .expect("删除新增表以模拟旧库应成功");
+    sqlx::query("DROP INDEX idx_messages_sender_ref")
+        .execute(&pool)
+        .await
+        .expect("删除新增索引以模拟旧库应成功");
+    sqlx::query("ALTER TABLE messages DROP COLUMN sender_ref")
+        .execute(&pool)
+        .await
+        .expect("删除新增列以模拟旧库应成功");
+    sqlx::query("ALTER TABLE messages DROP COLUMN sender_name")
+        .execute(&pool)
+        .await
+        .expect("删除新增列以模拟旧库应成功");
+
+    // 旧式写入：消息必须归属存在的会话（外键约束）
+    let session_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO sessions (id, started_at) VALUES (?, 0)")
+        .bind(session_id.to_string())
+        .execute(&pool)
+        .await
+        .expect("插入 session fixture 应成功");
+    sqlx::query(
+        "INSERT INTO messages (id, session_id, role, content, created_at, source) \
+         VALUES (?, ?, 'user', '旧消息', 1, 'local')",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(session_id.to_string())
+    .execute(&pool)
+    .await
+    .expect("写入旧式消息应成功");
+
+    // 执行本版 migration（迁移文件内容即被 sqlx::migrate! 应用的 SQL）
+    sqlx::raw_sql(include_str!("../../migrations/20261007_v2.6_identity.sql"))
+        .execute(&pool)
+        .await
+        .expect("执行新增 migration 应成功");
+
+    // 旧行两列为 NULL
+    let (sender_ref, sender_name): (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT sender_ref, sender_name FROM messages WHERE content = '旧消息'")
+            .fetch_one(&pool)
+            .await
+            .expect("读取旧行应成功");
+    assert_eq!(sender_ref, None, "旧行 sender_ref 应为 NULL");
+    assert_eq!(sender_name, None, "旧行 sender_name 应为 NULL");
+
+    // 省略新列的写入成功且取 NULL
+    sqlx::query(
+        "INSERT INTO messages (id, session_id, role, content, created_at, source) \
+         VALUES (?, ?, 'assistant', '新消息', 2, 'local')",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(session_id.to_string())
+    .execute(&pool)
+    .await
+    .expect("省略新列写入应成功");
+    let (sender_ref, sender_name): (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT sender_ref, sender_name FROM messages WHERE content = '新消息'")
+            .fetch_one(&pool)
+            .await
+            .expect("读取新行应成功");
+    assert_eq!(sender_ref, None, "省略列写入应取 NULL");
+    assert_eq!(sender_name, None, "省略列写入应取 NULL");
+
+    // UNIQUE(session_id, platform_ref) 生效：同键二次插入被拒绝，异键正常
+    sqlx::query(
+        "INSERT INTO session_members (session_id, platform_ref, name, first_seen_at, last_seen_at) \
+         VALUES (?, 'u_a', '成员', 10, 20)",
+    )
+    .bind(session_id.to_string())
+    .execute(&pool)
+    .await
+    .expect("插入成员行应成功");
+    let dup = sqlx::query(
+        "INSERT INTO session_members (session_id, platform_ref, name, first_seen_at, last_seen_at) \
+         VALUES (?, 'u_a', '成员', 10, 20)",
+    )
+    .bind(session_id.to_string())
+    .execute(&pool)
+    .await
+    .expect_err("同 (session_id, platform_ref) 应被 UNIQUE 拒绝");
+    let unique_in_chain = std::iter::successors(std::error::Error::source(&dup), |e| e.source())
+        .map(|e| e.to_string())
+        .chain([dup.to_string()])
+        .any(|msg| msg.contains("UNIQUE"));
+    assert!(
+        unique_in_chain,
+        "底层错误链应含 UNIQUE 约束冲突，实际: {dup}"
+    );
+    sqlx::query(
+        "INSERT INTO session_members (session_id, platform_ref, name, first_seen_at, last_seen_at) \
+         VALUES (?, 'u_b', '另一成员', 30, 40)",
+    )
+    .bind(session_id.to_string())
+    .execute(&pool)
+    .await
+    .expect("不同 platform_ref 写入应成功");
+}

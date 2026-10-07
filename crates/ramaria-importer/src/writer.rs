@@ -15,6 +15,7 @@
 
 use ramaria_core::error::RamariaResult;
 use ramaria_core::privacy::mask_id;
+use ramaria_core::types::SessionMember;
 use sqlx::SqlitePool;
 
 use crate::traits::{ImportSide, ImportedSession};
@@ -225,6 +226,8 @@ impl ImportWriter {
                     continue;
                 };
 
+                // 入站规范投影：sender 身份两列取平台 ID 与发送时显示名（空串视为缺失）
+                let inbound = parsed.to_inbound();
                 batch.push(ramaria_core::types::Message {
                     id: ramaria_core::types::new_id(),
                     session_id: db_session.id,
@@ -240,6 +243,8 @@ impl ImportWriter {
                     persona_uid: Some(persona_uid.to_string()),
                     // 导入消息均为历史常规消息，不属于主动生成
                     is_proactive: false,
+                    sender_ref: non_empty_opt(&inbound.sender.platform_id),
+                    sender_name: non_empty_opt(&inbound.sender.display_name),
                 });
             }
 
@@ -258,6 +263,43 @@ impl ImportWriter {
                         return Err(e);
                     }
                 };
+
+            // 会话成员聚合：按 platform_ref 归并首末见时间与最近显示名（空 ID 不生成成员行）
+            let mut member_aggs: std::collections::BTreeMap<String, SessionMember> =
+                std::collections::BTreeMap::new();
+            for msg in &batch {
+                let Some(platform_ref) = msg.sender_ref.as_deref() else {
+                    continue;
+                };
+                let entry = member_aggs
+                    .entry(platform_ref.to_string())
+                    .or_insert_with(|| {
+                        SessionMember::new(
+                            db_session.id,
+                            platform_ref,
+                            String::new(),
+                            msg.created_at,
+                            msg.created_at,
+                        )
+                    });
+                entry.first_seen_at = entry.first_seen_at.min(msg.created_at);
+                entry.last_seen_at = entry.last_seen_at.max(msg.created_at);
+                if let Some(name) = &msg.sender_name {
+                    entry.name = name.clone();
+                }
+            }
+            if !member_aggs.is_empty() {
+                let members: Vec<SessionMember> = member_aggs.into_values().collect();
+                if let Err(e) =
+                    ramaria_storage::repo::session_members::upsert_batch(pool, &members).await
+                {
+                    tracing::error!(
+                        session_id = %db_session.id,
+                        error = %e,
+                        "会话成员写入失败（不阻塞导入；成员信息可在后续导入时补齐）"
+                    );
+                }
+            }
 
             session_ids.push(db_session.id);
             sessions_written += 1;
@@ -315,6 +357,15 @@ async fn rollback_created_session(pool: &sqlx::SqlitePool, session_id: uuid::Uui
             error = %del_err,
             "补偿删除已创建 session 失败，重跑导入可能重复创建该会话"
         );
+    }
+}
+
+/// 空串视为缺失，统一转为 None（身份列 NULL 口径）。
+fn non_empty_opt(value: &str) -> Option<String> {
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
     }
 }
 

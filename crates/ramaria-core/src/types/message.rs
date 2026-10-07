@@ -132,6 +132,12 @@ pub struct Message {
     /// 标记由主动对话路径生成的消息；常规消息恒 false；与 source 语义无关
     #[serde(default)]
     pub is_proactive: bool,
+    /// 外部平台发送者 ID（导入消息）；本地 / MCP 消息为 None
+    #[serde(default)]
+    pub sender_ref: Option<String>,
+    /// 外部平台发送者显示名（导入消息）；本地 / MCP 消息为 None
+    #[serde(default)]
+    pub sender_name: Option<String>,
 }
 
 impl Message {
@@ -161,6 +167,8 @@ impl Message {
             fingerprint: None,
             persona_uid: None,
             is_proactive: false,
+            sender_ref: None,
+            sender_name: None,
         }
     }
 
