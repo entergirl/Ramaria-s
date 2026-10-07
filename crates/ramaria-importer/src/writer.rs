@@ -6,6 +6,8 @@
 //! - 接收导入源无关的中间数据（`ImportedSession` / `ParsedMessage`）与画像归属参数，
 //!   负责：按导入侧过滤消息、创建历史 session、按发送方归属 persona、批量写入、
 //!   以及跨文件去重查重（指纹已在库中的消息跳过）。
+//! - 画像归属经 `PersonaDispatch` 表达：双画像（私聊）按导出者身份二分，
+//!   多画像（群聊）按发送者平台 UID 查成员映射。
 //! - 只关心 L0（messages/sessions）写入；L1/L2/L3 深度处理由调用方在拿到
 //!   返回的 `session_ids` 后自行触发，writer 不做任何 LLM 相关衔接。
 //! - 平台特有逻辑（QQ 号/QQ UID → persona UID、source 归属等）不在此层，
@@ -13,9 +15,11 @@
 //! - 跨文件去重复用 `ramaria_storage::repo::messages::find_by_fingerprint` 同一路径，
 //!   本层不重复实现去重规则。
 
+use std::collections::BTreeMap;
+
 use ramaria_core::error::RamariaResult;
 use ramaria_core::privacy::mask_id;
-use ramaria_core::types::SessionMember;
+use ramaria_core::types::{MemberRole, SessionMember};
 use sqlx::SqlitePool;
 
 use crate::traits::{ImportSide, ImportedSession};
@@ -42,6 +46,54 @@ pub struct WriteOutcome {
 }
 
 // =========================================================
+// 多画像派发
+// =========================================================
+
+/// 多画像成员派发信息（群聊：一个平台发送者对应一个 persona）。
+///
+/// 字段约定:
+/// - `persona_uid`: 该发送者消息归属的 persona 标识。
+/// - `group_nickname`: 群名片；导出未提供时为 None。
+/// - `role`: 群内角色；导出未提供时为 None。
+#[derive(Debug)]
+pub struct MemberDispatch {
+    /// 该发送者对应的 persona 标识
+    pub persona_uid: String,
+    /// 群名片（无则 None）
+    pub group_nickname: Option<String>,
+    /// 群内角色（无则 None）
+    pub role: Option<MemberRole>,
+}
+
+/// 消息画像归属派发策略。
+///
+/// 语义:
+/// - `Dual`: 双画像（私聊），发送者为导出者 → self persona，其余 → other persona。
+/// - `Multi`: 多画像（群聊），按发送者平台 UID 查成员映射；未命中（含空 UID）
+///   的消息丢弃并计入 `messages_dropped`。
+#[derive(Debug)]
+pub enum PersonaDispatch<'a> {
+    /// 双画像（私聊）：发送者为导出者 → self persona，其余 → other persona
+    Dual {
+        /// 导出者的平台内部 UID（用于与消息的 sender_uid 比较）
+        self_uid: &'a str,
+        /// 导出者本人的画像标识（导入侧过滤跳过时为 None）
+        self_persona_uid: Option<&'a str>,
+        /// 对话对方的画像标识（导入侧过滤跳过时为 None）
+        other_persona_uid: Option<&'a str>,
+    },
+    /// 多画像（群聊）：按发送者平台 UID 查成员表
+    Multi {
+        /// 导出者的平台内部 UID（用于判定我方消息）
+        self_uid: &'a str,
+        /// 平台 UID → 成员派发信息
+        members: &'a BTreeMap<String, MemberDispatch>,
+        /// 会话归属 persona（调用方保证；None 时整段会话丢弃并计入 messages_dropped）
+        owner_uid: Option<&'a str>,
+    },
+}
+
+// =========================================================
 // 通用写入器
 // =========================================================
 
@@ -59,15 +111,17 @@ pub struct ImportWriter;
 impl ImportWriter {
     /// 写入已解析的会话与消息（仅 L0，即 messages/sessions 表）。
     ///
-    /// 双画像归属:
-    /// - 根据每条消息的发送者（`sender_uid == self_uid`）区分画像归属。
-    /// - 导出者本人的消息关联 `self_persona_uid`，对方消息关联 `other_persona_uid`。
+    /// 画像归属（`dispatch`）:
+    /// - `Dual`（私聊双画像）：发送者 `sender_uid == self_uid` → `self_persona_uid`，
+    ///   其余 → `other_persona_uid`；会话按导入侧归属（`Both` 归属对方）。
+    /// - `Multi`（群聊多画像）：按发送者平台 UID 查成员映射得到 persona；
+    ///   未命中（含空 UID）的消息丢弃并计入 `messages_dropped`；
+    ///   会话归属 `owner_uid`，为 None 时整段会话丢弃并计入 `messages_dropped`。
     ///
     /// 导入侧过滤:
     /// - `side` 控制只处理某一侧：`Me` 只写我方消息、`Other` 只写对方消息、
     ///   `Both` 全部写入（默认）。跳过侧消息不入库；该侧 persona 由调用方不创建。
-    /// - 单侧模式下，跳过侧的 `persona_uid` 传 `None`（不会在消息中出现）；
-    ///   session 归属为处理侧画像。
+    /// - 单侧模式下，跳过侧的 `persona_uid` 传 `None`（不会在消息中出现）。
     ///
     /// 去重:
     /// - 复用存储层指纹查重，指纹已在库中的消息跨文件去重跳过。
@@ -78,9 +132,7 @@ impl ImportWriter {
     /// 参数:
     /// - `pool`: 数据库连接池。
     /// - `sessions`: 解析后的 session 列表。
-    /// - `self_persona_uid`: 导出者本人的画像标识（`side=Other` 时为 None）。
-    /// - `other_persona_uid`: 对话对方的画像标识（`side=Me` 时为 None）。
-    /// - `self_uid`: 导出者的平台内部 UID（用于与消息的 sender_uid 比较）。
+    /// - `dispatch`: 画像归属派发策略（双画像 / 多画像）。
     /// - `side`: 导入侧过滤（self|other|both）。
     ///
     /// 返回:
@@ -94,9 +146,7 @@ impl ImportWriter {
     pub async fn write_l0(
         pool: &SqlitePool,
         sessions: &[ImportedSession],
-        self_persona_uid: Option<&str>,
-        other_persona_uid: Option<&str>,
-        self_uid: &str,
+        dispatch: PersonaDispatch<'_>,
         side: ImportSide,
     ) -> RamariaResult<WriteOutcome> {
         let mut sessions_written = 0usize;
@@ -115,6 +165,12 @@ impl ImportWriter {
         // 全局 UNIQUE。此处与跨文件去重同语义，仅把去重范围扩到"本批已见"。
         let mut seen_fingerprints: std::collections::HashSet<String> =
             std::collections::HashSet::new();
+
+        // 解构派发策略：导出者 UID 用于消息侧判定；模式标识用于日志排查
+        let (self_uid, mode) = match &dispatch {
+            PersonaDispatch::Dual { self_uid, .. } => (*self_uid, "dual"),
+            PersonaDispatch::Multi { self_uid, .. } => (*self_uid, "multi"),
+        };
 
         for session in sessions {
             // 过滤本 session 消息（按 side）：跳过侧消息不入库
@@ -144,19 +200,34 @@ impl ImportWriter {
                 continue;
             }
 
-            // 创建历史 session（已关闭）；归属为处理侧画像（Both 模式归属对方）。
-            let owner = match side {
-                ImportSide::Me => self_persona_uid,
-                ImportSide::Other | ImportSide::Both => other_persona_uid,
+            // 创建历史 session（已关闭）；Dual 归属处理侧画像（Both 模式归属对方），
+            // Multi 归属会话 owner。
+            let owner = match &dispatch {
+                PersonaDispatch::Dual {
+                    self_persona_uid,
+                    other_persona_uid,
+                    ..
+                } => match side {
+                    ImportSide::Me => *self_persona_uid,
+                    ImportSide::Other | ImportSide::Both => *other_persona_uid,
+                },
+                PersonaDispatch::Multi { owner_uid, .. } => *owner_uid,
             };
             let Some(owner_uid) = owner else {
                 // 防御：处理侧归属画像必须已创建（调用方保证）
                 messages_dropped += kept.len();
-                tracing::warn!(
-                    kept = kept.len(),
-                    side = ?side,
-                    "session 归属画像未创建，跳过该 session 并将其消息计入丢弃数（导入侧过滤不一致）"
-                );
+                match &dispatch {
+                    PersonaDispatch::Dual { .. } => tracing::warn!(
+                        kept = kept.len(),
+                        side = ?side,
+                        "session 归属画像未创建，跳过该 session 并将其消息计入丢弃数（导入侧过滤不一致）"
+                    ),
+                    PersonaDispatch::Multi { .. } => tracing::warn!(
+                        kept = kept.len(),
+                        side = ?side,
+                        "群聊会话归属 persona 缺失，跳过该 session 并将其消息计入丢弃数"
+                    ),
+                }
                 continue;
             };
 
@@ -208,21 +279,40 @@ impl ImportWriter {
                     }
                 }
 
-                let persona_for_msg = if is_self {
-                    self_msg_count += 1;
-                    self_persona_uid
-                } else {
-                    other_msg_count += 1;
-                    other_persona_uid
+                // 消息画像分配：Dual 按发送侧取二画像；Multi 按发送者 UID 查成员映射
+                let persona_for_msg = match &dispatch {
+                    PersonaDispatch::Dual {
+                        self_persona_uid,
+                        other_persona_uid,
+                        ..
+                    } => {
+                        if is_self {
+                            self_msg_count += 1;
+                            *self_persona_uid
+                        } else {
+                            other_msg_count += 1;
+                            *other_persona_uid
+                        }
+                    }
+                    PersonaDispatch::Multi { members, .. } => members
+                        .get(&parsed.sender_uid)
+                        .map(|member| member.persona_uid.as_str()),
                 };
                 let Some(persona_uid) = persona_for_msg else {
-                    // 防御：单侧模式下不应出现跳过侧消息（已过滤），出现则丢弃记 warn；
+                    // 防御：Dual 单侧模式下不应出现跳过侧消息（已过滤），出现则丢弃记 warn；
+                    // Multi 下发送者不在成员映射中（含空 UID）同样丢弃。
                     // sender 为个人标识，日志只记掩码。
                     messages_dropped += 1;
-                    tracing::warn!(
-                        sender = %mask_id(&parsed.sender_uid),
-                        "消息发送侧画像未创建，丢弃该消息（导入侧过滤不一致）"
-                    );
+                    match &dispatch {
+                        PersonaDispatch::Dual { .. } => tracing::warn!(
+                            sender = %mask_id(&parsed.sender_uid),
+                            "消息发送侧画像未创建，丢弃该消息（导入侧过滤不一致）"
+                        ),
+                        PersonaDispatch::Multi { .. } => tracing::warn!(
+                            sender = %mask_id(&parsed.sender_uid),
+                            "消息发送者不在成员映射中，丢弃该消息（成员画像未准备）"
+                        ),
+                    }
                     continue;
                 };
 
@@ -287,6 +377,14 @@ impl ImportWriter {
                 if let Some(name) = &msg.sender_name {
                     entry.name = name.clone();
                 }
+                // Multi：从成员映射补齐群名片与角色（查不到保持 None；
+                // 与非空合并语义由存储层 upsert 负责）
+                if let PersonaDispatch::Multi { members, .. } = &dispatch {
+                    if let Some(member) = members.get(platform_ref) {
+                        entry.group_nickname = member.group_nickname.clone();
+                        entry.role = member.role;
+                    }
+                }
             }
             if !member_aggs.is_empty() {
                 let members: Vec<SessionMember> = member_aggs.into_values().collect();
@@ -314,15 +412,26 @@ impl ImportWriter {
             }
         }
 
+        // 双画像标识仅用于日志展示（Multi 下无此概念，记 None）
+        let (self_persona_log, other_persona_log) = match &dispatch {
+            PersonaDispatch::Dual {
+                self_persona_uid,
+                other_persona_uid,
+                ..
+            } => (*self_persona_uid, *other_persona_uid),
+            PersonaDispatch::Multi { .. } => (None, None),
+        };
+
         tracing::info!(
+            mode = mode,
             self_messages = self_msg_count,
             other_messages = other_msg_count,
             dedup_skipped = dedup_skipped,
             messages_dropped = messages_dropped,
-            self_persona = ?self_persona_uid,
-            other_persona = ?other_persona_uid,
+            self_persona = ?self_persona_log,
+            other_persona = ?other_persona_log,
             side = ?side,
-            "双画像导入统计"
+            "导入消息归属统计"
         );
 
         if messages_dropped > 0 {

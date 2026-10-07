@@ -68,6 +68,65 @@ fn import_request(file_path: &Path) -> ImportRequest {
     }
 }
 
+/// 群聊导出样例（3 成员：导出者 + 两位群友，uin 各不相同）。
+///
+/// 时间戳分布（切割间隔 10 分钟 → 3 个 session）:
+/// - session 1: base ~ base+180s（导出者与两位群友交替，块内含两位他人）；
+/// - session 2: base+3600s ~ base+3720s（纯导出者发言块）；
+/// - session 3: base+7200s ~ base+7260s（导出者与一位群友交替）。
+fn qq_group_export_json() -> String {
+    let base = 1_700_000_000_000i64;
+    let messages = [
+        (base, "u_self", "10001", "小明", "大家早"),
+        (base + 60_000, "u_a", "90002", "小红", "早呀"),
+        (base + 120_000, "u_self", "10001", "小明", "今天开会吗"),
+        (base + 180_000, "u_b", "90003", "小刚", "下午两点"),
+        (base + 3_600_000, "u_self", "10001", "小明", "记录一下"),
+        (base + 3_660_000, "u_self", "10001", "小明", "第一条"),
+        (base + 3_720_000, "u_self", "10001", "小明", "第二条"),
+        (base + 7_200_000, "u_self", "10001", "小明", "晚上继续"),
+        (base + 7_260_000, "u_a", "90002", "小红", "好的"),
+    ];
+    let body = messages
+        .iter()
+        .enumerate()
+        .map(|(i, (ts, uid, uin, name, text))| {
+            format!(
+                r#"{{"id":"g_{i}","timestamp":{ts},"type":"text","recalled":false,"system":false,"content":{{"text":"{text}","elements":[]}},"sender":{{"uid":"{uid}","uin":"{uin}","name":"{name}"}}}}"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        r#"{{"chatInfo":{{"selfUid":"u_self","selfName":"小明","selfUin":"10001","name":"技术交流群","type":"group"}},"messages":[{body}]}}"#
+    )
+}
+
+/// 群聊补充导出样例（第二批：单会话，块内含两位他人）。
+///
+/// 与首份素材时间 / 文本错开，避免消息指纹去重；导出者与成员 uin 保持一致。
+fn qq_group_export_extra_json() -> String {
+    let base = 1_700_100_000_000i64;
+    let messages = [
+        (base, "u_self", "10001", "小明", "再记一条"),
+        (base + 60_000, "u_a", "90002", "小红", "收到"),
+        (base + 120_000, "u_b", "90003", "小刚", "明白"),
+    ];
+    let body = messages
+        .iter()
+        .enumerate()
+        .map(|(i, (ts, uid, uin, name, text))| {
+            format!(
+                r#"{{"id":"h_{i}","timestamp":{ts},"type":"text","recalled":false,"system":false,"content":{{"text":"{text}","elements":[]}},"sender":{{"uid":"{uid}","uin":"{uin}","name":"{name}"}}}}"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        r#"{{"chatInfo":{{"selfUid":"u_self","selfName":"小明","selfUin":"10001","name":"技术交流群","type":"group"}},"messages":[{body}]}}"#
+    )
+}
+
 /// 装配导入用例测试引擎（真实临时库 + mock LLM + 已附着连接池）。
 ///
 /// 说明:
@@ -435,6 +494,7 @@ async fn generate_l1_generates_for_both_personas_with_eta_progress() {
         targets: vec![Some(self_uid), Some(other_uid)],
         cascade: false,
         throttle_ms: 0,
+        group_fanout: false,
     };
     let l1 = engine
         .generate_import_l1(&outcome.session_ids, plan, Some(&sink))
@@ -469,6 +529,423 @@ async fn generate_l1_generates_for_both_personas_with_eta_progress() {
     let last = events.last().expect("应有进度事件");
     assert_eq!(last.current, 4);
     assert_eq!(last.total, 4);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- 群聊导入 ----
+
+/// 群聊导入：多画像创建 + 消息按发送者分派 + 会话归属导出者 + 成员行完整。
+#[tokio::test]
+async fn write_l0_group_creates_multi_personas_and_dispatches() {
+    let (engine, pool, storage, dir) = import_engine("import-group-l0").await;
+    let file_path = dir.join("group.json");
+    std::fs::write(&file_path, qq_group_export_json()).expect("写入导出文件应成功");
+
+    let outcome = engine
+        .import_qq_l0(import_request(&file_path))
+        .await
+        .expect("群聊 L0 导入应成功");
+
+    assert_eq!(outcome.chat_type, "group");
+    assert_eq!(outcome.members.len(), 3, "导出者 + 两位群友");
+    assert_eq!(outcome.sessions_written, 3);
+    assert_eq!(outcome.messages_written, 9);
+    assert_eq!(outcome.messages_dropped, 0);
+    assert_eq!(outcome.persona_uid.as_deref(), Some("user-10001"));
+    assert!(outcome.other_persona_uid.is_none(), "群聊无单一对方画像");
+    assert_eq!(outcome.other_persona_name, "");
+    assert_eq!(outcome.persona_name, "小明", "导出者画像名回读自库内");
+
+    // 3 个 source="qq" persona：user-10001 + char-90002 + char-90003
+    let personas = ramaria_storage::repo::personas::list_all(&pool)
+        .await
+        .expect("读取 persona 列表应成功");
+    let qq_personas: Vec<_> = personas.iter().filter(|p| p.source == "qq").collect();
+    assert_eq!(qq_personas.len(), 3, "每个成员各创建一个 qq persona");
+    for uid in ["user-10001", "char-90002", "char-90003"] {
+        assert!(qq_personas.iter().any(|p| p.uid == uid), "缺 persona {uid}");
+    }
+
+    // 每个 session 归属导出者 persona，且消息 persona_uid 与发送者一一对应
+    let expected = [
+        ("u_self", "user-10001"),
+        ("u_a", "char-90002"),
+        ("u_b", "char-90003"),
+    ];
+    for session_id in &outcome.session_ids {
+        let owner: Option<String> =
+            sqlx::query_scalar("SELECT persona_uid FROM sessions WHERE id = ?")
+                .bind(session_id.to_string())
+                .fetch_one(&pool)
+                .await
+                .expect("读取 session 归属应成功");
+        assert_eq!(
+            owner.as_deref(),
+            Some("user-10001"),
+            "群聊会话归属导出者 persona"
+        );
+
+        let messages = storage
+            .list_messages(*session_id)
+            .await
+            .expect("读取会话消息应成功");
+        assert!(!messages.is_empty());
+        for msg in &messages {
+            let sender = msg.sender_ref.as_deref().expect("导入消息应带 sender_ref");
+            let want = expected
+                .iter()
+                .find(|(uid, _)| *uid == sender)
+                .map(|(_, persona)| *persona)
+                .unwrap_or_else(|| panic!("意外的发送者: {sender}"));
+            assert_eq!(
+                msg.persona_uid.as_deref(),
+                Some(want),
+                "消息应按发送者分派 persona（sender={sender}）"
+            );
+        }
+    }
+
+    // 首个会话的成员行：3 位成员（导出者 + 两位群友）
+    let members =
+        ramaria_storage::repo::session_members::list_by_session(&pool, outcome.session_ids[0])
+            .await
+            .expect("读取会话成员应成功");
+    assert_eq!(members.len(), 3, "首个会话含 3 位成员行");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 群聊导入侧过滤：side=Me 仅导出者消息与画像；side=Other 仅他人消息与画像（对称）。
+#[tokio::test]
+async fn write_l0_group_side_filter() {
+    // side=Me：仅导出者消息落库 + 仅导出者 persona
+    let (engine_me, pool_me, storage_me, dir_me) = import_engine("import-group-side-me").await;
+    let file_me = dir_me.join("group.json");
+    std::fs::write(&file_me, qq_group_export_json()).expect("写入导出文件应成功");
+
+    let mut req = import_request(&file_me);
+    req.side = ImportSide::Me;
+    let outcome = engine_me
+        .import_qq_l0(req)
+        .await
+        .expect("side=Me 导入应成功");
+    assert_eq!(outcome.sessions_written, 3, "3 个会话均含导出者消息");
+    assert_eq!(outcome.messages_written, 6, "仅导出者消息落库（2+3+1）");
+    assert_eq!(outcome.messages_dropped, 0);
+
+    let personas = ramaria_storage::repo::personas::list_all(&pool_me)
+        .await
+        .expect("读取 persona 列表应成功");
+    let qq_personas: Vec<_> = personas.iter().filter(|p| p.source == "qq").collect();
+    assert_eq!(qq_personas.len(), 1, "仅导出者 persona");
+    assert_eq!(qq_personas[0].uid, "user-10001");
+
+    for session_id in &outcome.session_ids {
+        for msg in storage_me
+            .list_messages(*session_id)
+            .await
+            .expect("读取消息应成功")
+        {
+            assert_eq!(
+                msg.persona_uid.as_deref(),
+                Some("user-10001"),
+                "side=Me 仅导出者消息"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir_me);
+
+    // side=Other：仅他人消息落库 + 仅他人 persona（对称）
+    let (engine_other, pool_other, storage_other, dir_other) =
+        import_engine("import-group-side-other").await;
+    let file_other = dir_other.join("group.json");
+    std::fs::write(&file_other, qq_group_export_json()).expect("写入导出文件应成功");
+
+    let mut req = import_request(&file_other);
+    req.side = ImportSide::Other;
+    let outcome = engine_other
+        .import_qq_l0(req)
+        .await
+        .expect("side=Other 导入应成功");
+    assert_eq!(
+        outcome.sessions_written, 2,
+        "纯导出者会话不创建（无他人消息）"
+    );
+    assert_eq!(outcome.messages_written, 3, "仅他人消息落库（2+1）");
+    assert!(
+        outcome.persona_uid.is_none(),
+        "side=Other 不创建导出者 persona"
+    );
+
+    let personas = ramaria_storage::repo::personas::list_all(&pool_other)
+        .await
+        .expect("读取 persona 列表应成功");
+    let qq_personas: Vec<_> = personas.iter().filter(|p| p.source == "qq").collect();
+    assert_eq!(qq_personas.len(), 2, "仅两位他人 persona");
+    assert!(qq_personas.iter().all(|p| p.uid.starts_with("char-")));
+
+    for session_id in &outcome.session_ids {
+        for msg in storage_other
+            .list_messages(*session_id)
+            .await
+            .expect("读取消息应成功")
+        {
+            assert!(
+                msg.persona_uid
+                    .as_deref()
+                    .is_some_and(|uid| uid.starts_with("char-")),
+                "side=Other 仅他人消息"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir_other);
+}
+
+/// 群聊 L1 分发：每会话一次生成 × 块内参与者复制；纯自我块 NULL；吸收与按人独立；幂等。
+#[tokio::test]
+async fn generate_l1_group_fanout_dispatches_rows() {
+    let (engine, _pool, storage, dir) = import_engine("import-group-l1").await;
+    let file_path = dir.join("group.json");
+    std::fs::write(&file_path, qq_group_export_json()).expect("写入导出文件应成功");
+
+    let outcome = engine
+        .import_qq_l0(import_request(&file_path))
+        .await
+        .expect("群聊 L0 导入应成功");
+    assert_eq!(outcome.chat_type, "group");
+
+    let make_plan = || ImportL1Plan {
+        targets: Vec::new(),
+        cascade: false,
+        throttle_ms: 0,
+        group_fanout: true,
+    };
+
+    let sink = RecordingSink::new();
+    let l1 = engine
+        .generate_import_l1(&outcome.session_ids, make_plan(), Some(&sink))
+        .await
+        .expect("群聊 L1 批量生成应成功");
+
+    assert_eq!(l1.l1_total, 3, "群聊分发每会话一次生成");
+    assert_eq!(l1.l1_success, 3);
+    assert_eq!(l1.l1_failed, 0);
+    assert_eq!(l1.l1_skipped, 0);
+    assert_eq!(l1.l1_processed, 3);
+
+    // 起始进度与逐 session 进度：总量 = session 数，文案为群成员分发
+    let events = sink.events();
+    assert_eq!(events.len(), 4, "起始进度 + 每 session 一条");
+    assert_eq!(events[0].current, 0);
+    assert_eq!(events[0].total, 3);
+    assert!(
+        events[0].message.contains("群成员分发"),
+        "起始文案应标注群成员分发: {}",
+        events[0].message
+    );
+    assert!(
+        events
+            .last()
+            .expect("应有进度事件")
+            .message
+            .contains("群成员分发"),
+        "完成文案应标注群成员分发"
+    );
+
+    // 行结构：session 1（两位他人）→ 2 行；session 2（纯自我）→ 1 行 NULL；session 3（一位他人）→ 1 行
+    let rows_s1 = storage
+        .list_memory_l1(outcome.session_ids[0])
+        .await
+        .expect("读取 L1 应成功");
+    assert_eq!(rows_s1.len(), 2, "块内两位他人 → 每人一行");
+    assert!(
+        rows_s1.iter().all(|row| matches!(
+            row.persona_uid.as_deref(),
+            Some("char-90002") | Some("char-90003")
+        )),
+        "分发行 persona 应均为块内他人"
+    );
+    assert!(
+        rows_s1
+            .iter()
+            .all(|row| row.persona_uid.as_deref() != Some("user-10001")),
+        "self 不分发"
+    );
+
+    let rows_s2 = storage
+        .list_memory_l1(outcome.session_ids[1])
+        .await
+        .expect("读取 L1 应成功");
+    assert_eq!(rows_s2.len(), 1, "纯自我块保持 1 行");
+    assert!(
+        rows_s2[0].persona_uid.is_none(),
+        "纯自我块 persona_uid 为 NULL"
+    );
+
+    let rows_s3 = storage
+        .list_memory_l1(outcome.session_ids[2])
+        .await
+        .expect("读取 L1 应成功");
+    assert_eq!(rows_s3.len(), 1);
+    assert_eq!(rows_s3[0].persona_uid.as_deref(), Some("char-90002"));
+
+    // absorbed 独立：吸收 char-90002 的一行不影响 char-90003 的未吸收集合
+    let row_a = rows_s1
+        .iter()
+        .find(|row| row.persona_uid.as_deref() == Some("char-90002"))
+        .expect("session 1 应有 char-90002 行");
+    assert!(
+        rows_s1
+            .iter()
+            .any(|row| row.persona_uid.as_deref() == Some("char-90003")),
+        "session 1 应有 char-90003 行"
+    );
+    storage
+        .mark_l1_absorbed(&[row_a.id])
+        .await
+        .expect("标记吸收应成功");
+
+    let unabsorbed_b = storage
+        .list_unabsorbed_l1("char-90003")
+        .await
+        .expect("查询未吸收 L1 应成功");
+    assert_eq!(unabsorbed_b.len(), 1, "char-90003 未吸收行不受吸收影响");
+    assert!(
+        unabsorbed_b
+            .iter()
+            .all(|row| row.persona_uid.as_deref() == Some("char-90003")),
+        "按人独立返回本 persona 的行"
+    );
+
+    // L2 按人独立（数据面）：char-90002 剩余 session 3 一行未吸收
+    let unabsorbed_a = storage
+        .list_unabsorbed_l1("char-90002")
+        .await
+        .expect("查询未吸收 L1 应成功");
+    assert_eq!(unabsorbed_a.len(), 1, "char-90002 剩余一行（session 3）");
+    assert!(
+        !unabsorbed_a.iter().any(|row| row.id == row_a.id),
+        "已吸收行不应再返回"
+    );
+
+    // 幂等：再次生成不新增行数（已分发会话跳过重生成，纯自我会话仅替换 NULL 行）
+    engine
+        .generate_import_l1(&outcome.session_ids, make_plan(), None)
+        .await
+        .expect("重复生成应成功");
+    let mut total_rows = 0usize;
+    for session_id in &outcome.session_ids {
+        total_rows += storage
+            .list_memory_l1(*session_id)
+            .await
+            .expect("读取 L1 应成功")
+            .len();
+    }
+    assert_eq!(total_rows, 4, "重复生成不新增 L1 行数");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 群聊端到端：导入 → 多画像 L1 分发 → L2 按人独立触达并吸收。
+///
+/// 口径:
+/// - 阈值取 2；两批素材分发后 char-90002 3 行 / char-90003 2 行未吸收，均达阈值；
+/// - `check_l2_trigger` 对达阈值 persona 启动提取（mock 非 events JSON → 降级事件）
+///   且 L1 被吸收清空；导出者侧无达阈值行，纯自我块摘要保持无主。
+#[tokio::test]
+async fn group_import_reaches_l2_per_persona() {
+    let mut config = RamariaConfig::default();
+    config.thresholds.l2_trigger_count = 2;
+    // 测试不等待簇间节流（生产默认 800ms）
+    config.thresholds.cluster_delay_ms = 0;
+    let (engine, storage, dir) = crate::test_support::engine_with_llm_and_config(
+        "import-group-l2",
+        MockLlm::with_reply(L1_JSON_REPLY),
+        config,
+    )
+    .await;
+
+    // 两批群聊素材（时间 / 文本错开）：同一导出者 + 两位成员，画像按 uid 复用
+    let file_first = dir.join("group_first.json");
+    std::fs::write(&file_first, qq_group_export_json()).expect("写入导出文件应成功");
+    let file_extra = dir.join("group_extra.json");
+    std::fs::write(&file_extra, qq_group_export_extra_json()).expect("写入导出文件应成功");
+
+    let first = engine
+        .import_qq_l0(import_request(&file_first))
+        .await
+        .expect("首批群聊 L0 导入应成功");
+    let extra = engine
+        .import_qq_l0(import_request(&file_extra))
+        .await
+        .expect("补充群聊 L0 导入应成功");
+    assert_eq!(first.chat_type, "group");
+    assert_eq!(extra.chat_type, "group");
+
+    let mut session_ids = first.session_ids.clone();
+    session_ids.extend(extra.session_ids.iter().copied());
+    let plan = ImportL1Plan {
+        targets: Vec::new(),
+        cascade: false,
+        throttle_ms: 0,
+        group_fanout: true,
+    };
+    let l1 = engine
+        .generate_import_l1(&session_ids, plan, None)
+        .await
+        .expect("群聊 L1 批量生成应成功");
+    assert_eq!(l1.l1_success, 4, "4 个会话各一次生成（含纯自我会话）");
+
+    // 数据面：两位成员各自累积未吸收行（按人独立），均达阈值 2
+    let unabsorbed_a = storage
+        .list_unabsorbed_l1("char-90002")
+        .await
+        .expect("查询未吸收 L1 应成功");
+    assert_eq!(
+        unabsorbed_a.len(),
+        3,
+        "char-90002 首份两会话 + 补充会话共 3 行"
+    );
+    let unabsorbed_b = storage
+        .list_unabsorbed_l1("char-90003")
+        .await
+        .expect("查询未吸收 L1 应成功");
+    assert_eq!(
+        unabsorbed_b.len(),
+        2,
+        "char-90003 首块与补充会话各一行共 2 行"
+    );
+
+    // L2 触达：两位成员 persona 均达阈值 → 各自触发提取并吸收
+    crate::lifecycle::l2_l3::check_l2_trigger(&engine, None).await;
+    for uid in ["char-90002", "char-90003"] {
+        let remaining = storage
+            .list_unabsorbed_l1(uid)
+            .await
+            .expect("查询未吸收 L1 应成功");
+        assert!(remaining.is_empty(), "{uid} 达阈值应被吸收: {remaining:?}");
+        let events = storage
+            .list_events_by_persona(uid, 0, 100)
+            .await
+            .expect("查询事件应成功");
+        assert!(
+            !events.is_empty(),
+            "{uid} 触发提取应有事件产出（降级事件亦可）"
+        );
+    }
+
+    // 对照组：导出者侧无达阈值行 —— 纯自我块摘要保持无主、未归属未吸收
+    let unbound = storage
+        .list_unabsorbed_l1_unbound()
+        .await
+        .expect("查询无主 L1 应成功");
+    assert_eq!(unbound.len(), 1, "纯自我块摘要未达阈值，保持无主状态");
+    let self_unabsorbed = storage
+        .list_unabsorbed_l1("user-10001")
+        .await
+        .expect("查询未吸收 L1 应成功");
+    assert!(self_unabsorbed.is_empty(), "导出者无已归属未吸收行");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

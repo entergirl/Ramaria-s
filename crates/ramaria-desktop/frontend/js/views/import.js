@@ -8,6 +8,7 @@
  * - 文件选择通过 Tauri dialog 打开系统文件选择器
  * - : 双画像支持——分别为导出者和对方创建独立 persona
  * - 导入结果含统计摘要和解析报告详情
+ * - 群聊导入：预览报告与完成页标注群聊成员数与 Top 成员（formatGroupMembers）
  *
  * 生命周期:
  * - enter: 渲染导入向导 DOM，绑定事件
@@ -481,6 +482,72 @@ var ImportView = (function () {
  // Step 2: 预览报告
  // =========================================================
 
+    /**
+     * 格式化群聊成员标注（预览报告与完成页共用）。
+     *
+     * 参数:
+     * - `members`: 成员数组（后端 snake_case 原始形态，元素含 name / uin / message_count）
+     * - `limit`: Top 成员展示数量，非正整数回退为 5
+     *
+     * 返回:
+     * - HTML 字符串（成员数 + 按消息数降序的 Top 成员）；无有效成员时返回空串
+     *
+     * 说明:
+     * - 自行稳定排序保证展示确定：message_count 降序，同数按名称升序；
+     * - 成员名经 escapeHtml 转义；缺名回退 uin，再回退「未知」；
+     * - message_count 非有限数字按 0 计数；非法输入安全降级，不抛异常。
+     */
+    function formatGroupMembers(members, limit) {
+        if (!Array.isArray(members) || members.length === 0) {
+            return '';
+        }
+
+        var topN = (typeof limit === 'number' && isFinite(limit) && limit > 0)
+            ? Math.floor(limit)
+            : 5;
+
+        var valid = [];
+        for (var i = 0; i < members.length; i++) {
+            var m = members[i];
+            if (!m || typeof m !== 'object') continue;
+
+            var name = (m.name != null && m.name !== '')
+                ? m.name
+                : ((m.uin != null && m.uin !== '') ? m.uin : '未知');
+            var count = (typeof m.message_count === 'number' && isFinite(m.message_count))
+                ? m.message_count
+                : 0;
+
+            valid.push({ name: String(name), count: count });
+        }
+
+        if (valid.length === 0) {
+            return '';
+        }
+
+        valid.sort(function (a, b) {
+            if (b.count !== a.count) return b.count - a.count;
+            if (a.name < b.name) return -1;
+            if (a.name > b.name) return 1;
+            return 0;
+        });
+
+        var shown = Math.min(topN, valid.length);
+        var items = [];
+        for (var j = 0; j < shown; j++) {
+            items.push('<span class="import-group-member">' + RamariaEscape.escapeHtml(valid[j].name) + '（' + valid[j].count + ' 条）</span>');
+        }
+
+        var html = '<strong>群聊成员:</strong> ' + valid.length + ' 人<br />';
+        html += '<span class="import-group-members">Top 成员: ' + items.join('、');
+        if (valid.length > shown) {
+            html += '<span class="import-group-more">… 等共 ' + valid.length + ' 人</span>';
+        }
+        html += '</span>';
+
+        return html;
+    }
+
     function _renderPreview() {
         if (!_reportData) {
             return '<div class="import-error"><div class="import-error-title">错误</div>报告数据丢失，请返回重新选择文件。</div>';
@@ -529,6 +596,16 @@ var ImportView = (function () {
         html += '<strong>时间范围:</strong> ' + RamariaEscape.escapeHtml(report.timeRange || '未知') + '<br />';
         html += '<strong>Session 切割:</strong> ' + report.sessionCount + ' 个会话（间隔 ' + _gapMinutes + ' 分钟）';
         html += '</div>';
+
+// 群聊标注：成员数 + Top 成员（仅群聊文件）
+        if (report.chatType === 'group') {
+            var groupBlock = formatGroupMembers(report.members, 5);
+            if (groupBlock) {
+                html += '<div class="import-report-section import-report-group">';
+                html += groupBlock;
+                html += '</div>';
+            }
+        }
         html += '</div>';
 
         html += '</div></div>';
@@ -669,6 +746,16 @@ var ImportView = (function () {
             html += '<div class="import-report-details">';
             html += '<strong>人格：</strong> ' + RamariaEscape.escapeHtml(result.personaName);
             html += '</div>';
+        }
+
+// 群聊导入概览：成员数与 Top 成员（仅群聊）
+        if (result.chatType === 'group') {
+            var groupOverview = formatGroupMembers(result.members, 3);
+            if (groupOverview) {
+                html += '<div class="import-report-details">';
+                html += groupOverview;
+                html += '</div>';
+            }
         }
 
         if (result.reportSummary) {
@@ -949,6 +1036,7 @@ var ImportView = (function () {
                 totalDegraded: 0,
                 totalSkipped: 0,
                 sessionCount: 0,
+                members: [],
             };
 
             _step = 'preview';
@@ -974,6 +1062,7 @@ var ImportView = (function () {
                         totalDegraded: report.total_degraded || 0,
                         totalSkipped: report.total_skipped || 0,
                         sessionCount: report.session_count || 0,
+                        members: report.members || [],
                     };
 
                     if (report.total_success === 0 && report.total_degraded === 0) {
@@ -1040,6 +1129,8 @@ var ImportView = (function () {
                     mode: result.mode || _importMode,
                     reportSummary: result.report_summary || '',
                     personaName: result.persona_name || '',
+                    chatType: result.chat_type || '',
+                    members: result.members || [],
                 };
 
  // 保存 persona 信息供导航使用
@@ -1239,6 +1330,7 @@ var ImportView = (function () {
 
     return {
         init: init,
+        formatGroupMembers: formatGroupMembers,
     };
 })();
 

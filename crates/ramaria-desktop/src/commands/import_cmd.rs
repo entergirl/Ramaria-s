@@ -50,8 +50,12 @@ pub struct ImportResult {
     pub other_persona_name: String,
     /// 导出者名称（从文件中解析）
     pub self_name: String,
-    /// 对话对象名称
+    /// 对话对象名称（群聊为群名称）
     pub chat_name: String,
+    /// 对话类型（private / group）
+    pub chat_type: String,
+    /// 解析成员分布（消息数降序；私聊为双方，群聊为全部成员）
+    pub members: Vec<ramaria_importer::ImportMemberStat>,
     /// 对话时间范围（如 "2023-01-01 ~ 2024-06-30"）
     pub time_range: String,
     /// 跳过的消息数（撤回+空+未知类型）
@@ -134,6 +138,7 @@ pub async fn analyze_qq_chat(
         self_uin: report.self_uin,
         chat_name: report.chat_name,
         chat_type: report.chat_type,
+        members: report.members,
         other_name: report.other_name,
         other_uid: report.other_uid,
         other_uin: report.other_uin,
@@ -162,6 +167,8 @@ pub struct AnalysisReport {
     pub chat_name: String,
     /// 对话类型
     pub chat_type: String,
+    /// 解析成员分布（消息数降序；私聊为双方，群聊为全部成员）
+    pub members: Vec<ramaria_importer::ImportMemberStat>,
     /// 对方名称
     pub other_name: String,
     /// 对方 QQ UID
@@ -327,13 +334,17 @@ pub async fn import_qq_chat(
     );
 
     // ---- Step 4: L1 批量生成与深度处理（后台异步，避免阻塞前端） ----
-    // 目标列表：每个 session 为双方 persona 各生成一份 L1（单侧模式跳过侧不生成）。
+    // 目标列表：私聊为双方 persona 各生成一份 L1（单侧模式跳过侧不生成）；
+    // 群聊走成员分发口径（每会话一次生成，目标由块内发言者决定，忽略 targets）。
+    let group_fanout = outcome.chat_type == "group";
     let mut targets: Vec<Option<String>> = Vec::with_capacity(2);
-    if let Some(uid) = &outcome.persona_uid {
-        targets.push(Some(uid.clone()));
-    }
-    if let Some(uid) = &outcome.other_persona_uid {
-        targets.push(Some(uid.clone()));
+    if !group_fanout {
+        if let Some(uid) = &outcome.persona_uid {
+            targets.push(Some(uid.clone()));
+        }
+        if let Some(uid) = &outcome.other_persona_uid {
+            targets.push(Some(uid.clone()));
+        }
     }
     // 批量 LLM 请求间最小间隔（毫秒）：读当前生效配置的 `[thresholds].cluster_delay_ms`，
     // 导入会连续多次调用 LLM，无节流时易触发远程 API 速率限制。
@@ -362,6 +373,7 @@ pub async fn import_qq_chat(
                     targets,
                     cascade: false,
                     throttle_ms,
+                    group_fanout,
                 },
                 Some(&sink),
             )
@@ -428,6 +440,8 @@ pub async fn import_qq_chat(
         other_persona_name: outcome.other_persona_name,
         self_name: outcome.self_name,
         chat_name: outcome.chat_name,
+        chat_type: outcome.chat_type,
+        members: outcome.members,
         time_range: outcome.time_range,
         skipped_count: outcome.skipped_count,
         session_ids: session_id_strings,
@@ -437,6 +451,8 @@ pub async fn import_qq_chat(
         sessions = result.sessions_written,
         messages = result.messages_written,
         mode = %result.mode,
+        chat_type = %result.chat_type,
+        member_count = result.members.len(),
         self_persona = ?result.persona_uid.as_deref().map(mask_id),
         other_persona = ?result.other_persona_uid.as_deref().map(mask_id),
         "QQ 聊天记录导入完成"

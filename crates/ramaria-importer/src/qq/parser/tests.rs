@@ -10,6 +10,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use ramaria_core::error::RamariaResult;
+use ramaria_core::types::MemberRole;
 
 use crate::traits::{ImportReport, ImportedSession, ParsedMessage};
 
@@ -139,6 +140,8 @@ fn make_test_msg(role: &str, content: &str, created_at: i64) -> ParsedMessage {
         sender_uid: String::new(),
         sender_uin: None,
         sender_name: String::new(),
+        group_nickname: None,
+        member_role: None,
     }
 }
 
@@ -332,4 +335,166 @@ fn streaming_equals_whole_file_snapshot() {
     assert_eq!(stream_report.time_start, legacy_report.time_start);
     assert_eq!(stream_report.time_end, legacy_report.time_end);
     assert_eq!(stream_report.other_uid, legacy_report.other_uid);
+}
+
+// =========================================================
+// 群聊成员聚合与群名片 / 角色
+// =========================================================
+
+/// 构造群聊导出 JSON：self + 2 位他人（含群名片 / 角色）+ 一条空 UID 消息。
+fn group_export_json() -> String {
+    r#"{
+        "chatInfo": {"selfUid":"u_self","selfName":"小明","selfUin":"10001","name":"测试群","type":"group","peerUid":"u_group","peerUin":"30003"},
+        "messages": [
+            {"id":"m1","timestamp":1704067200000,"type":"text","recalled":false,"system":false,"content":{"text":"大家好","elements":[]},"sender":{"uid":"u_self","name":"小明","uin":"10001"}},
+            {"id":"m2","timestamp":1704067260000,"type":"text","recalled":false,"system":false,"content":{"text":"你好","elements":[]},"sender":{"uid":"u_a","name":"昵称A","uin":"20001","groupNickname":"群名片A","role":"owner"}},
+            {"id":"m3","timestamp":1704067320000,"type":"text","recalled":false,"system":false,"content":{"text":"早","elements":[]},"sender":{"uid":"u_b","name":"昵称B"}},
+            {"id":"m4","timestamp":1704067380000,"type":"text","recalled":false,"system":false,"content":{"text":"再聊","elements":[]},"sender":{"uid":"u_a","name":"昵称A改"}},
+            {"id":"m5","timestamp":1704067440000,"type":"text","recalled":false,"system":false,"content":{"text":"好","elements":[]},"sender":{"uid":"u_b","name":"昵称B"}},
+            {"id":"m6","timestamp":1704067500000,"type":"text","recalled":false,"system":false,"content":{"text":"回聊","elements":[]},"sender":{"uid":"u_a","name":"昵称A改"}},
+            {"id":"m7","timestamp":1704067560000,"type":"text","recalled":false,"system":false,"content":{"text":"无名发言","elements":[]},"sender":{"uid":"","name":"神秘人"}}
+        ]
+    }"#
+    .to_string()
+}
+
+/// 写临时文件并运行给定解析闭包（自定义文件名避免并行测试互相覆盖）。
+fn run_with_group_file<T>(name: &str, content: &str, f: impl FnOnce(&Path) -> T) -> T {
+    let path =
+        std::env::temp_dir().join(format!("ramaria_group_{name}_{}.json", std::process::id()));
+    std::fs::write(&path, content).expect("写入临时文件失败");
+    let result = f(&path);
+    let _ = std::fs::remove_file(&path);
+    result
+}
+
+/// 群聊导出：成员按消息数降序聚合；name 取最后非空；uin 取首个非空；空 UID 不参与。
+#[test]
+fn parse_group_export_aggregates_members() {
+    let content = group_export_json();
+    let (_sessions, report) = run_with_group_file("aggregate", &content, |p| {
+        parse_qq_export(p, 10).expect("群聊解析失败")
+    });
+
+    assert_eq!(report.chat_type, "group");
+    assert_eq!(report.members.len(), 3, "空 UID 消息不参与成员统计");
+    let summary: Vec<(&str, Option<&str>, usize)> = report
+        .members
+        .iter()
+        .map(|m| (m.name.as_str(), m.uin.as_deref(), m.message_count))
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            ("昵称A改", Some("20001"), 3),
+            ("昵称B", None, 2),
+            ("小明", Some("10001"), 1),
+        ],
+        "成员应按消息数降序；name 取最后非空；uin 取首个非空"
+    );
+}
+
+/// 直接聚合：同条数按名称升序、同名称按 UID 升序；空 UID 跳过。
+#[test]
+fn aggregate_members_sorts_ties_by_name_and_skips_empty_uid() {
+    let make = |uid: &str, name: &str| ParsedMessage {
+        role: "assistant".to_string(),
+        content: "发言".to_string(),
+        created_at: 1,
+        fingerprint: format!("fp-{uid}-{name}"),
+        sender_uid: uid.to_string(),
+        sender_uin: None,
+        sender_name: name.to_string(),
+        group_nickname: None,
+        member_role: None,
+    };
+    let messages = vec![
+        make("u_b", "bob"),
+        make("", "ghost"),
+        make("u_a", "alice"),
+        make("u_c", "alice"),
+    ];
+
+    let members = aggregate_members(&messages);
+    let got: Vec<(&str, &str)> = members
+        .iter()
+        .map(|m| (m.name.as_str(), m.uid.as_str()))
+        .collect();
+    assert_eq!(
+        got,
+        vec![("alice", "u_a"), ("alice", "u_c"), ("bob", "u_b")],
+        "同条数按名称升序，同名称按 UID 升序；空 UID 不参与"
+    );
+}
+
+/// 摘要渲染成员分布；掩码版不泄露成员昵称。
+#[test]
+fn group_export_summary_renders_member_distribution_with_masking() {
+    let content = group_export_json();
+    let (_sessions, report) = run_with_group_file("summary", &content, |p| {
+        parse_qq_export(p, 10).expect("群聊解析失败")
+    });
+
+    let plain = report.summary();
+    assert!(plain.contains("成员分布: 3 人（消息数降序）:"), "{plain}");
+    assert!(plain.contains("  - 昵称A改 3 条"), "{plain}");
+    assert!(plain.contains("昵称B"), "{plain}");
+
+    let masked = report.summary_masked();
+    assert!(masked.contains("成员分布: 3 人"), "{masked}");
+    assert!(
+        !masked.contains("昵称A改"),
+        "掩码摘要不应包含原昵称: {masked}"
+    );
+    assert!(!masked.contains("昵称B"), "{masked}");
+}
+
+/// 单条解析：sender 带 groupNickname / role 时正确读取。
+#[test]
+fn parse_json_message_reads_group_nickname_and_role() {
+    let raw = serde_json::json!({
+        "id": "g1",
+        "timestamp": 1704067260000i64,
+        "type": "text",
+        "recalled": false,
+        "system": false,
+        "content": {"text": "你好", "elements": []},
+        "sender": {"uid": "u_a", "uin": "20001", "name": "昵称A", "groupNickname": "群名片A", "role": "owner"}
+    });
+    let mut report = ImportReport::default();
+
+    let parsed = parse_json_message(&raw, "u_self", "小明", &mut report).expect("应解析成功");
+    assert_eq!(parsed.group_nickname.as_deref(), Some("群名片A"));
+    assert_eq!(parsed.member_role, Some(MemberRole::Owner));
+}
+
+/// 单条解析：群名片缺失 / 为空或角色非法时一律 None，不阻塞解析。
+#[test]
+fn parse_json_message_group_fields_absent_or_invalid_are_none() {
+    let mut report = ImportReport::default();
+    let raw = serde_json::json!({
+        "id": "g2",
+        "timestamp": 1704067260000i64,
+        "type": "text",
+        "recalled": false,
+        "system": false,
+        "content": {"text": "你好", "elements": []},
+        "sender": {"uid": "u_a", "name": "昵称A", "groupNickname": "", "role": "super"}
+    });
+    let parsed = parse_json_message(&raw, "u_self", "小明", &mut report).expect("应解析成功");
+    assert!(parsed.group_nickname.is_none(), "空群名片视为缺失");
+    assert!(parsed.member_role.is_none(), "非法角色视为未知");
+
+    let raw = serde_json::json!({
+        "id": "g3",
+        "timestamp": 1704067260001i64,
+        "type": "text",
+        "recalled": false,
+        "system": false,
+        "content": {"text": "你好", "elements": []},
+        "sender": {"uid": "u_b", "name": "昵称B"}
+    });
+    let parsed = parse_json_message(&raw, "u_self", "小明", &mut report).expect("应解析成功");
+    assert!(parsed.group_nickname.is_none(), "缺少群名片键视为缺失");
+    assert!(parsed.member_role.is_none(), "缺少角色键视为未知");
 }

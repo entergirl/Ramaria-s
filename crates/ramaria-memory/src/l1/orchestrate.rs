@@ -38,22 +38,26 @@ pub const MAX_L1_RETRY_JOBS_PER_RUN: usize = 8;
 /// 字段约定:
 /// - `persona_uid`: L1 归属人格；`None` 表示不绑定（存量兼容）。
 /// - `user_prefix` / `assistant_prefix`: 摘要素材的角色前缀覆盖；`None` 用默认。
+/// - `fanout_others`: 多画像分发开关（群聊场景按块/段内他人发言者复制 L1 行）；默认关闭。
 #[derive(Debug, Clone, Copy)]
 pub struct L1GenerateRequest<'a> {
     pub session_id: Uuid,
     pub persona_uid: Option<&'a str>,
     pub user_prefix: Option<&'a str>,
     pub assistant_prefix: Option<&'a str>,
+    /// 多画像分发开关（按块/段内他人发言者复制 L1 行）
+    pub fanout_others: bool,
 }
 
 impl<'a> L1GenerateRequest<'a> {
-    /// 以会话与人格构造请求（前缀使用默认）。
+    /// 以会话与人格构造请求（前缀使用默认，多画像分发关闭）。
     pub fn new(session_id: Uuid, persona_uid: Option<&'a str>) -> Self {
         Self {
             session_id,
             persona_uid,
             user_prefix: None,
             assistant_prefix: None,
+            fanout_others: false,
         }
     }
 }
@@ -84,6 +88,8 @@ pub async fn generate_l1_summaries(
     if let Some(prefix) = req.assistant_prefix {
         summarizer_config.assistant_prefix = prefix.to_string();
     }
+    // 多画像分发开关透传（群聊场景；关闭时行为与私聊一致）
+    summarizer_config.fanout_others = req.fanout_others;
 
     // L1 输出预算从 backend_config 传播（下限钳制到 L1 默认值，防结构化 JSON 被截断）
     match storage.get_backend_config().await {

@@ -9,6 +9,8 @@
 
 use crate::traits::{ImportReport, ParsedMessage};
 
+use ramaria_core::types::MemberRole;
+
 use super::elements::{
     clean_image_placeholders, extract_reply_body, has_image_element, json_element_description,
     make_fingerprint, reply_element,
@@ -110,6 +112,16 @@ pub(super) fn parse_json_message(
         .and_then(|s| s.get("name"))
         .and_then(|n| n.as_str())
         .unwrap_or("");
+    // 群名片 / 群内角色：群聊导出提供时读取，缺失或非法一律 None（不阻塞解析）
+    let sender_group_nickname = sender
+        .and_then(|s| s.get("groupNickname"))
+        .and_then(|n| n.as_str())
+        .filter(|n| !n.is_empty())
+        .map(String::from);
+    let sender_role = sender
+        .and_then(|s| s.get("role"))
+        .and_then(|r| r.as_str())
+        .and_then(MemberRole::parse);
 
     // ── 规则1：撤回消息直接跳过 ──
     if recalled {
@@ -160,6 +172,8 @@ pub(super) fn parse_json_message(
                 sender_uid: sender_uid.to_string(),
                 sender_uin: sender_uin.map(|s| s.to_string()),
                 sender_name: sender_name.to_string(),
+                group_nickname: sender_group_nickname.clone(),
+                member_role: sender_role,
             });
         }
         report.skipped_empty += 1;
@@ -310,6 +324,8 @@ pub(super) fn parse_json_message(
         sender_uid: sender_uid.to_string(),
         sender_uin: sender_uin.map(|s| s.to_string()),
         sender_name: sender_name.to_string(),
+        group_nickname: sender_group_nickname,
+        member_role: sender_role,
     })
 }
 

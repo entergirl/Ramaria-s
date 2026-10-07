@@ -5,7 +5,10 @@
 //! - 覆盖跨文件去重、本批内同指纹去重与不同指纹正常写入
 //! - 覆盖失败补偿删除（不留半成品会话）与批量写入整体回滚
 //! - 覆盖画像缺失的丢弃统计（session 级与消息级）
+//! - 覆盖多画像（群聊）派发：成员映射命中 / 未命中、会话归属缺失与成员补齐
 //! - 使用单连接内存库与最小 schema，不依赖真实数据
+
+use ramaria_core::types::MemberRole;
 
 use super::*;
 
@@ -21,6 +24,8 @@ fn make_side_session(self_content: &str, other_content: &str) -> crate::traits::
                 sender_uid: "SELF_UID".to_string(),
                 sender_uin: Some("10001".to_string()),
                 sender_name: "我".to_string(),
+                group_nickname: None,
+                member_role: None,
             },
             crate::traits::ParsedMessage {
                 role: "assistant".to_string(),
@@ -30,6 +35,8 @@ fn make_side_session(self_content: &str, other_content: &str) -> crate::traits::
                 sender_uid: "OTHER_UID".to_string(),
                 sender_uin: Some("20002".to_string()),
                 sender_name: "对方".to_string(),
+                group_nickname: None,
+                member_role: None,
             },
         ],
         started_at: 1000,
@@ -130,9 +137,11 @@ async fn write_l0_side_me_filters_other() {
     let outcome = ImportWriter::write_l0(
         &pool,
         &sessions,
-        Some("user-0001"),
-        None, // side=Me：对方画像不创建
-        "SELF_UID",
+        PersonaDispatch::Dual {
+            self_uid: "SELF_UID",
+            self_persona_uid: Some("user-0001"),
+            other_persona_uid: None, // side=Me：对方画像不创建
+        },
         ImportSide::Me,
     )
     .await
@@ -154,9 +163,11 @@ async fn write_l0_side_other_filters_self() {
     let outcome = ImportWriter::write_l0(
         &pool,
         &sessions,
-        None, // side=Other：我方画像不创建
-        Some("char-0001"),
-        "SELF_UID",
+        PersonaDispatch::Dual {
+            self_uid: "SELF_UID",
+            self_persona_uid: None, // side=Other：我方画像不创建
+            other_persona_uid: Some("char-0001"),
+        },
         ImportSide::Other,
     )
     .await
@@ -178,9 +189,11 @@ async fn write_l0_side_both_keeps_all() {
     let outcome = ImportWriter::write_l0(
         &pool,
         &sessions,
-        Some("user-0001"),
-        Some("char-0001"),
-        "SELF_UID",
+        PersonaDispatch::Dual {
+            self_uid: "SELF_UID",
+            self_persona_uid: Some("user-0001"),
+            other_persona_uid: Some("char-0001"),
+        },
         ImportSide::Both,
     )
     .await
@@ -206,9 +219,11 @@ async fn write_l0_side_skips_empty_session() {
     let outcome = ImportWriter::write_l0(
         &pool,
         &only_self,
-        None,
-        Some("char-0001"),
-        "SELF_UID",
+        PersonaDispatch::Dual {
+            self_uid: "SELF_UID",
+            self_persona_uid: None,
+            other_persona_uid: Some("char-0001"),
+        },
         ImportSide::Other,
     )
     .await
@@ -235,6 +250,8 @@ fn make_dedup_session(self_content: &str, fingerprint: &str) -> crate::traits::I
             sender_uid: "SELF_UID".to_string(),
             sender_uin: Some("10001".to_string()),
             sender_name: "我".to_string(),
+            group_nickname: None,
+            member_role: None,
         }],
         started_at: 1000,
         ended_at: 2000,
@@ -265,9 +282,11 @@ async fn write_l0_skips_existing_fingerprint() {
     let outcome = ImportWriter::write_l0(
         &pool,
         &sessions,
-        Some("user-0001"),
-        None,
-        "SELF_UID",
+        PersonaDispatch::Dual {
+            self_uid: "SELF_UID",
+            self_persona_uid: Some("user-0001"),
+            other_persona_uid: None,
+        },
         ImportSide::Me,
     )
     .await
@@ -297,14 +316,18 @@ async fn write_l0_dedups_within_batch_same_fingerprint() {
         sender_uid: "SELF_UID".to_string(),
         sender_uin: Some("10001".to_string()),
         sender_name: "我".to_string(),
+        group_nickname: None,
+        member_role: None,
     });
 
     let outcome = ImportWriter::write_l0(
         &pool,
         &[session],
-        Some("user-0001"),
-        None,
-        "SELF_UID",
+        PersonaDispatch::Dual {
+            self_uid: "SELF_UID",
+            self_persona_uid: Some("user-0001"),
+            other_persona_uid: None,
+        },
         ImportSide::Me,
     )
     .await
@@ -329,9 +352,11 @@ async fn write_l0_dedups_across_sessions_same_fingerprint() {
     let outcome = ImportWriter::write_l0(
         &pool,
         &[s1, s2],
-        Some("user-0001"),
-        None,
-        "SELF_UID",
+        PersonaDispatch::Dual {
+            self_uid: "SELF_UID",
+            self_persona_uid: Some("user-0001"),
+            other_persona_uid: None,
+        },
         ImportSide::Me,
     )
     .await
@@ -358,9 +383,11 @@ async fn write_l0_writes_distinct_fingerprint() {
     let outcome = ImportWriter::write_l0(
         &pool,
         &sessions,
-        Some("user-0001"),
-        None,
-        "SELF_UID",
+        PersonaDispatch::Dual {
+            self_uid: "SELF_UID",
+            self_persona_uid: Some("user-0001"),
+            other_persona_uid: None,
+        },
         ImportSide::Me,
     )
     .await
@@ -386,14 +413,18 @@ async fn write_l0_batch_failure_removes_created_session() {
         sender_uid: "SELF_UID".to_string(),
         sender_uin: Some("10001".to_string()),
         sender_name: "我".to_string(),
+        group_nickname: None,
+        member_role: None,
     });
 
     let result = ImportWriter::write_l0(
         &pool,
         &[session],
-        Some("user-0001"),
-        None,
-        "SELF_UID",
+        PersonaDispatch::Dual {
+            self_uid: "SELF_UID",
+            self_persona_uid: Some("user-0001"),
+            other_persona_uid: None,
+        },
         ImportSide::Me,
     )
     .await;
@@ -418,9 +449,11 @@ async fn write_l0_owner_persona_missing_counts_dropped() {
     let outcome = ImportWriter::write_l0(
         &pool,
         &sessions,
-        None, // side=Me：我方画像未创建（防御场景）
-        Some("char-0001"),
-        "SELF_UID",
+        PersonaDispatch::Dual {
+            self_uid: "SELF_UID",
+            self_persona_uid: None, // side=Me：我方画像未创建（防御场景）
+            other_persona_uid: Some("char-0001"),
+        },
         ImportSide::Me,
     )
     .await
@@ -445,9 +478,11 @@ async fn write_l0_missing_self_persona_drops_self_messages() {
     let outcome = ImportWriter::write_l0(
         &pool,
         &sessions,
-        None, // 我方画像缺失（防御场景）
-        Some("char-0001"),
-        "SELF_UID",
+        PersonaDispatch::Dual {
+            self_uid: "SELF_UID",
+            self_persona_uid: None, // 我方画像缺失（防御场景）
+            other_persona_uid: Some("char-0001"),
+        },
         ImportSide::Both,
     )
     .await
@@ -500,9 +535,11 @@ async fn write_l0_persists_sender_identity_and_members() {
     ImportWriter::write_l0(
         &pool,
         &sessions,
-        Some("user-0001"),
-        Some("char-0001"),
-        "SELF_UID",
+        PersonaDispatch::Dual {
+            self_uid: "SELF_UID",
+            self_persona_uid: Some("user-0001"),
+            other_persona_uid: Some("char-0001"),
+        },
         ImportSide::Both,
     )
     .await
@@ -550,6 +587,8 @@ async fn write_l0_member_aggregation_merges_same_sender() {
                 sender_uid: "SELF_UID".to_string(),
                 sender_uin: Some("10001".to_string()),
                 sender_name: "名一".to_string(),
+                group_nickname: None,
+                member_role: None,
             },
             crate::traits::ParsedMessage {
                 role: "user".to_string(),
@@ -559,6 +598,8 @@ async fn write_l0_member_aggregation_merges_same_sender() {
                 sender_uid: "SELF_UID".to_string(),
                 sender_uin: Some("10001".to_string()),
                 sender_name: "名二".to_string(),
+                group_nickname: None,
+                member_role: None,
             },
             crate::traits::ParsedMessage {
                 role: "user".to_string(),
@@ -568,6 +609,8 @@ async fn write_l0_member_aggregation_merges_same_sender() {
                 sender_uid: "SELF_UID".to_string(),
                 sender_uin: Some("10001".to_string()),
                 sender_name: String::new(),
+                group_nickname: None,
+                member_role: None,
             },
         ],
         started_at: 100,
@@ -577,9 +620,11 @@ async fn write_l0_member_aggregation_merges_same_sender() {
     ImportWriter::write_l0(
         &pool,
         &[session],
-        Some("user-0001"),
-        None,
-        "SELF_UID",
+        PersonaDispatch::Dual {
+            self_uid: "SELF_UID",
+            self_persona_uid: Some("user-0001"),
+            other_persona_uid: None,
+        },
         ImportSide::Me,
     )
     .await
@@ -613,6 +658,8 @@ async fn write_l0_empty_sender_id_writes_null_columns() {
                 sender_uid: String::new(),
                 sender_uin: None,
                 sender_name: String::new(),
+                group_nickname: None,
+                member_role: None,
             },
             crate::traits::ParsedMessage {
                 role: "user".to_string(),
@@ -622,6 +669,8 @@ async fn write_l0_empty_sender_id_writes_null_columns() {
                 sender_uid: "SELF_UID".to_string(),
                 sender_uin: Some("10001".to_string()),
                 sender_name: "我".to_string(),
+                group_nickname: None,
+                member_role: None,
             },
         ],
         started_at: 1000,
@@ -631,9 +680,11 @@ async fn write_l0_empty_sender_id_writes_null_columns() {
     ImportWriter::write_l0(
         &pool,
         &[session],
-        Some("user-0001"),
-        Some("char-0001"),
-        "SELF_UID",
+        PersonaDispatch::Dual {
+            self_uid: "SELF_UID",
+            self_persona_uid: Some("user-0001"),
+            other_persona_uid: Some("char-0001"),
+        },
         ImportSide::Both,
     )
     .await
@@ -664,4 +715,245 @@ async fn write_l0_empty_sender_id_writes_null_columns() {
             .await
             .unwrap();
     assert_eq!(refs, vec!["SELF_UID".to_string()], "空 ID 不应生成成员行");
+}
+
+// =========================================================
+// 多画像（群聊）派发
+// =========================================================
+
+/// 构造群聊成员映射：导出者 + 两位他人（其一含群名片与角色）。
+fn make_multi_members() -> std::collections::BTreeMap<String, MemberDispatch> {
+    let mut members = std::collections::BTreeMap::new();
+    members.insert(
+        "SELF_UID".to_string(),
+        MemberDispatch {
+            persona_uid: "user-0001".to_string(),
+            group_nickname: None,
+            role: None,
+        },
+    );
+    members.insert(
+        "U_A".to_string(),
+        MemberDispatch {
+            persona_uid: "char-u_a".to_string(),
+            group_nickname: Some("群名片A".to_string()),
+            role: Some(MemberRole::Owner),
+        },
+    );
+    members.insert(
+        "U_B".to_string(),
+        MemberDispatch {
+            persona_uid: "char-u_b".to_string(),
+            group_nickname: None,
+            role: None,
+        },
+    );
+    members
+}
+
+/// 构造群聊 session：3 位发送者各一条消息。
+fn make_multi_session() -> crate::traits::ImportedSession {
+    let make = |uid: &str, name: &str, ts: i64, fp: &str| crate::traits::ParsedMessage {
+        role: if uid == "SELF_UID" {
+            "user"
+        } else {
+            "assistant"
+        }
+        .to_string(),
+        content: format!("{name} 的发言"),
+        created_at: ts,
+        fingerprint: fp.to_string(),
+        sender_uid: uid.to_string(),
+        sender_uin: None,
+        sender_name: name.to_string(),
+        group_nickname: None,
+        member_role: None,
+    };
+    crate::traits::ImportedSession {
+        messages: vec![
+            make("SELF_UID", "小明", 1100, "f-group-1"),
+            make("U_A", "昵称A", 1200, "f-group-2"),
+            make("U_B", "昵称B", 1300, "f-group-3"),
+        ],
+        started_at: 1000,
+        ended_at: 2000,
+    }
+}
+
+/// 多画像：各消息按发送者派发 persona；会话归属 owner；成员行补齐群名片与角色。
+#[tokio::test]
+async fn write_l0_multi_dispatches_personas_and_persists_members() {
+    let pool = test_pool().await;
+    let sessions = vec![make_multi_session()];
+    let members = make_multi_members();
+
+    let outcome = ImportWriter::write_l0(
+        &pool,
+        &sessions,
+        PersonaDispatch::Multi {
+            self_uid: "SELF_UID",
+            members: &members,
+            owner_uid: Some("char-group"),
+        },
+        ImportSide::Both,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.sessions_written, 1);
+    assert_eq!(outcome.messages_written, 3);
+    assert_eq!(outcome.messages_dropped, 0);
+    assert_eq!(
+        msg_persona_uids(&pool).await,
+        vec![
+            "user-0001".to_string(),
+            "char-u_a".to_string(),
+            "char-u_b".to_string()
+        ],
+        "各消息应按发送者派发到对应 persona"
+    );
+    assert_eq!(session_owner(&pool).await.as_deref(), Some("char-group"));
+
+    let rows: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT platform_ref, name, group_nickname, role FROM session_members \
+         ORDER BY platform_ref",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            ("SELF_UID".to_string(), "小明".to_string(), None, None),
+            (
+                "U_A".to_string(),
+                "昵称A".to_string(),
+                Some("群名片A".to_string()),
+                Some("owner".to_string())
+            ),
+            ("U_B".to_string(), "昵称B".to_string(), None, None),
+        ],
+        "成员行应从成员映射补齐群名片与角色"
+    );
+}
+
+/// 多画像：未命中发送者（含空 UID）的消息丢弃并计数，不中断本批。
+#[tokio::test]
+async fn write_l0_multi_unknown_sender_dropped() {
+    let pool = test_pool().await;
+    let mut session = make_multi_session();
+    session.messages.push(crate::traits::ParsedMessage {
+        role: "assistant".to_string(),
+        content: "未登记发言".to_string(),
+        created_at: 1400,
+        fingerprint: "f-group-x".to_string(),
+        sender_uid: "U_X".to_string(),
+        sender_uin: None,
+        sender_name: "路人".to_string(),
+        group_nickname: None,
+        member_role: None,
+    });
+    session.messages.push(crate::traits::ParsedMessage {
+        role: "assistant".to_string(),
+        content: "空身份发言".to_string(),
+        created_at: 1500,
+        fingerprint: "f-group-empty".to_string(),
+        sender_uid: String::new(),
+        sender_uin: None,
+        sender_name: String::new(),
+        group_nickname: None,
+        member_role: None,
+    });
+    let members = make_multi_members();
+
+    let outcome = ImportWriter::write_l0(
+        &pool,
+        &[session],
+        PersonaDispatch::Multi {
+            self_uid: "SELF_UID",
+            members: &members,
+            owner_uid: Some("char-group"),
+        },
+        ImportSide::Both,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.sessions_written, 1, "命中消息仍正常入库");
+    assert_eq!(outcome.messages_written, 3);
+    assert_eq!(
+        outcome.messages_dropped, 2,
+        "未命中发送者与空 UID 消息应计入丢弃数"
+    );
+    assert_eq!(msg_count(&pool).await, 3);
+}
+
+/// 多画像：会话归属缺失（owner_uid=None）→ 整段会话丢弃并计入丢弃数。
+#[tokio::test]
+async fn write_l0_multi_missing_owner_drops_session() {
+    let pool = test_pool().await;
+    let sessions = vec![make_multi_session()];
+    let members = make_multi_members();
+
+    let outcome = ImportWriter::write_l0(
+        &pool,
+        &sessions,
+        PersonaDispatch::Multi {
+            self_uid: "SELF_UID",
+            members: &members,
+            owner_uid: None,
+        },
+        ImportSide::Both,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.sessions_written, 0);
+    assert_eq!(outcome.messages_written, 0);
+    assert_eq!(outcome.messages_dropped, 3, "整段丢弃应计入丢弃数");
+    assert_eq!(msg_count(&pool).await, 0);
+}
+
+/// 多画像：side 过滤（Me 只写我方消息 / Other 只写对方消息）。
+#[tokio::test]
+async fn write_l0_multi_side_filters_messages() {
+    let members = make_multi_members();
+    let sessions = vec![make_multi_session()];
+
+    // side=Me：只写导出者消息
+    let pool = test_pool().await;
+    let outcome = ImportWriter::write_l0(
+        &pool,
+        &sessions,
+        PersonaDispatch::Multi {
+            self_uid: "SELF_UID",
+            members: &members,
+            owner_uid: Some("user-0001"),
+        },
+        ImportSide::Me,
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome.messages_written, 1);
+    assert_eq!(msg_persona_uids(&pool).await, vec!["user-0001".to_string()]);
+
+    // side=Other：只写对方消息（两位成员）
+    let pool = test_pool().await;
+    let outcome = ImportWriter::write_l0(
+        &pool,
+        &sessions,
+        PersonaDispatch::Multi {
+            self_uid: "SELF_UID",
+            members: &members,
+            owner_uid: Some("char-u_a"),
+        },
+        ImportSide::Other,
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome.messages_written, 2);
+    assert_eq!(
+        msg_persona_uids(&pool).await,
+        vec!["char-u_a".to_string(), "char-u_b".to_string()]
+    );
 }

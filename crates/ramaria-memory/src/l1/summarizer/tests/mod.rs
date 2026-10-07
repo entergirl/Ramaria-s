@@ -51,6 +51,7 @@ fn llm_json(summary: &str, continuation: Option<&str>) -> String {
 }
 
 mod evidence;
+mod fanout;
 mod integration;
 mod progressive;
 mod utt;

@@ -33,6 +33,8 @@ use message::parse_json_message;
 #[cfg(test)]
 use sessions::split_into_sessions;
 #[cfg(test)]
+use stream::aggregate_members;
+#[cfg(test)]
 use time::ts_ms_to_date;
 
 #[cfg(test)]

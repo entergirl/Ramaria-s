@@ -366,6 +366,17 @@
     border-bottom: none;
 }
 
+/* 群聊成员标注（预览报告与完成页共用）：成员名突出，截断提示弱化 */
+.import-group-member {
+    color: var(--text-primary);
+    font-weight: 500;
+}
+
+.import-group-more {
+    color: var(--text-tertiary);
+    margin-left: var(--space-1);
+}
+
 /* ═════════════════════════════════════════════════
    导入进度 (Step 3)
    ═════════════════════════════════════════════════ */

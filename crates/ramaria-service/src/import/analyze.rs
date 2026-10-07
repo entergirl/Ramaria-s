@@ -48,6 +48,8 @@ pub struct AnalysisReport {
     pub chat_name: String,
     /// 对话类型（private / group）
     pub chat_type: String,
+    /// 解析成员分布（消息数降序；私聊为双方）
+    pub members: Vec<ramaria_importer::ImportMemberStat>,
     /// 对方名称
     pub other_name: String,
     /// 对方平台内部 UID
@@ -138,6 +140,7 @@ pub(crate) async fn analyze(
         self_uin: report.self_uin,
         chat_name: report.chat_name,
         chat_type: report.chat_type,
+        members: report.members,
         other_name: report.other_name,
         other_uid: report.other_uid,
         other_uin: report.other_uin,

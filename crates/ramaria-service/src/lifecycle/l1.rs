@@ -69,6 +69,7 @@ pub(crate) async fn regenerate_l1(
         persona_uid,
         user_prefix,
         assistant_prefix,
+        false,
     )
     .await
     {
@@ -146,6 +147,7 @@ pub(crate) async fn regenerate_l1_no_cascade(
         persona_uid,
         user_prefix,
         assistant_prefix,
+        false,
     )
     .await
     {
@@ -206,6 +208,7 @@ pub(crate) async fn regenerate_l1_progressive(
             persona_uid,
             user_prefix,
             assistant_prefix,
+            fanout_others: false,
         },
     )
     .await
@@ -237,19 +240,23 @@ pub(crate) async fn regenerate_l1_progressive(
 /// 为指定会话生成单段 L1 摘要。
 ///
 /// 实现要点:
-/// - `persona_uid` / 前缀覆盖写入 `L1SummarizerConfig`；
+/// - `persona_uid` / 前缀覆盖 / 多画像分发开关写入 `L1SummarizerConfig`；
 /// - `max_tokens` 从 `backend_config` 传播并以下限钳制（防 chat 侧小预算截断结构化 JSON）；
 /// - 经 `JobManager::execute_with_retry` 包裹执行（指数退避重试 + 任务可观测性）；
 /// - 成功后从存储读回最后一条 L1（`JobManager` 不返回业务结果）。
 ///
+/// 参数:
+/// - `fanout_others`: 多画像分发开关（群聊场景按块内参与者复制 L1 行）。
+///
 /// 返回:
 /// - 成功时返回刚写入的 L1；生成后仍读不到记录视为内部错误（Validation）。
-async fn generate_l1_summary(
+pub(crate) async fn generate_l1_summary(
     engine: &Engine,
     session_id: Uuid,
     persona_uid: Option<&str>,
     user_prefix: Option<&str>,
     assistant_prefix: Option<&str>,
+    fanout_others: bool,
 ) -> RamariaResult<MemoryL1> {
     let storage = engine.storage_ref().as_ref();
     let llm = engine.llm_ref();
@@ -264,6 +271,7 @@ async fn generate_l1_summary(
     if let Some(prefix) = assistant_prefix {
         summarizer_config.assistant_prefix = prefix.to_string();
     }
+    summarizer_config.fanout_others = fanout_others;
 
     // 输出预算从 backend_config 传播并下限钳制（结构化 JSON 输出需要更大预算）
     if let Ok(Some(backend)) = storage.get_backend_config().await {

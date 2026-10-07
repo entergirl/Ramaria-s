@@ -17,7 +17,7 @@ use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::privacy::mask_id;
 
 use crate::error;
-use crate::traits::{ImportReport, ImportedSession, ParsedMessage};
+use crate::traits::{ImportMemberStat, ImportReport, ImportedSession, ParsedMessage};
 
 use super::detect::decode_bytes;
 use super::message::parse_json_message;
@@ -331,6 +331,53 @@ fn json_parse_error_with_position(path: &Path, e: &serde_json::Error) -> Ramaria
 }
 
 // =========================================================
+// 成员分布聚合
+// =========================================================
+
+/// 按发送者聚合解析结果，生成成员分布统计。
+///
+/// 归并规则:
+/// - 按 `sender_uid` 归并；空 UID 的消息不参与统计；
+/// - `name` 取该发送者最后一条非空显示名（消息序即时间序）；
+/// - `uin` 取该发送者首个非空值；
+/// - `message_count` 计该发送者成功解析的消息条数。
+///
+/// 排序:
+/// - 消息数降序；同条数按名称升序；名称相同按 UID 升序（输出完全确定）。
+pub(super) fn aggregate_members(messages: &[ParsedMessage]) -> Vec<ImportMemberStat> {
+    let mut stats: std::collections::BTreeMap<String, ImportMemberStat> =
+        std::collections::BTreeMap::new();
+    for msg in messages {
+        if msg.sender_uid.is_empty() {
+            continue;
+        }
+        let entry = stats
+            .entry(msg.sender_uid.clone())
+            .or_insert_with(|| ImportMemberStat {
+                uid: msg.sender_uid.clone(),
+                uin: None,
+                name: String::new(),
+                message_count: 0,
+            });
+        entry.message_count += 1;
+        if entry.uin.is_none() {
+            entry.uin = msg.sender_uin.clone().filter(|u| !u.is_empty());
+        }
+        if !msg.sender_name.is_empty() {
+            entry.name = msg.sender_name.clone();
+        }
+    }
+    let mut members: Vec<ImportMemberStat> = stats.into_values().collect();
+    members.sort_by(|a, b| {
+        b.message_count
+            .cmp(&a.message_count)
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.uid.cmp(&b.uid))
+    });
+    members
+}
+
+// =========================================================
 // 主解析函数（对外接口）
 // =========================================================
 
@@ -432,6 +479,9 @@ pub fn parse_qq_export(
     // ── 按时间戳升序稳定排序（去重后保留首现次序；与原整读解析一致）──
     let mut parsed_messages = ctx.parsed_messages;
     parsed_messages.sort_by_key(|m| m.created_at);
+
+    // ── 成员分布聚合（按发送者归并；空 UID 不参与）──
+    report.members = aggregate_members(&parsed_messages);
 
     // ── Session 切割 ──
     let sessions = split_into_sessions(&parsed_messages, gap_ms);

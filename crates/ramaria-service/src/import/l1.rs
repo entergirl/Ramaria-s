@@ -1,7 +1,8 @@
 //! crates/ramaria-service/src/import/l1.rs - Ramaria 导入 L1 批量生成与 ETA 进度模块
 //!
 //! 设计特点:
-//! - 逐 session × 逐目标调用 L1 生成（`cascade=true` 走带级联口径，否则无级联口径）
+//! - 双口径：逐 session × 逐目标调用 L1 生成（`cascade=true` 走带级联口径，否则无级联口径）；
+//!   群聊多画像分发时每会话一次生成（按块内参与者复制 L1 行，忽略 targets）
 //! - 请求间节流：连续 LLM 调用按 `plan.throttle_ms` 保持最小间隔（0 = 不等待）
 //! - 分层 EMA 预估（`crate::eta`）：循环前发起始进度，每完成一个 session 推送一条（含剩余秒数）
 //! - 静默降级：单次生成失败只记 warn 并计入失败计数，不中断批量
@@ -9,8 +10,9 @@
 
 use std::time::Instant;
 
-use ramaria_core::error::RamariaResult;
+use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::privacy::mask_id;
+use ramaria_core::types::MemoryL1;
 use uuid::Uuid;
 
 use crate::engine::Engine;
@@ -25,7 +27,9 @@ use crate::eta::{EtaEstimator, PhaseKind};
 /// 字段约定:
 /// - `targets`: 每个目标对应一次 L1 生成（`None` = 不绑定画像，`persona_uid` 存 NULL）；
 /// - `cascade`: `true` 时每次生成末尾触发 L2 检查（宿主自行汇总触发），`false` 为无级联口径；
-/// - `throttle_ms`: 连续 LLM 调用之间的最小间隔（毫秒，0 = 不等待）。
+/// - `throttle_ms`: 连续 LLM 调用之间的最小间隔（毫秒，0 = 不等待）；
+/// - `group_fanout`: 群聊多画像分发：每会话一次生成 × 块内参与者复制 L1 行；
+///   为 true 时忽略 `targets`（目标由块内发言者决定）。
 #[derive(Debug, Clone)]
 pub struct ImportL1Plan {
     /// L1 生成目标列表（每个目标一次调用）
@@ -34,6 +38,8 @@ pub struct ImportL1Plan {
     pub cascade: bool,
     /// 连续 LLM 调用间最小间隔（毫秒）
     pub throttle_ms: u64,
+    /// 群聊多画像分发（为 true 时忽略 `targets`）
+    pub group_fanout: bool,
 }
 
 /// L1 批量生成结果。
@@ -138,8 +144,12 @@ pub(crate) async fn generate_l1(
 ) -> RamariaResult<ImportL1Outcome> {
     let started_at = Instant::now();
     let mut eta = EtaEstimator::new();
-    // 预计总量 = session 数 × 目标数（每个目标一次 LLM 调用）
-    let l1_total = session_ids.len() * plan.targets.len();
+    // 预计总量：群聊分发每会话一次生成；逐目标口径为 session 数 × 目标数
+    let l1_total = if plan.group_fanout {
+        session_ids.len()
+    } else {
+        session_ids.len() * plan.targets.len()
+    };
 
     let mut l1_success = 0usize;
     let mut l1_failed = 0usize;
@@ -148,11 +158,16 @@ pub(crate) async fn generate_l1(
 
     // 起始进度：总量已知，先给出 0/总数 的起点（宿主不再自行计算 L1 总量）
     if let Some(sink) = progress {
+        let message = if plan.group_fanout {
+            "正在生成 L1 会话摘要（群成员分发）..."
+        } else {
+            "正在生成 L1 会话摘要（双方 persona）..."
+        };
         sink.on_l1_progress(&ImportL1Progress {
             phase: "l1",
             current: 0,
             total: l1_total,
-            message: "正在生成 L1 会话摘要（双方 persona）...".to_string(),
+            message: message.to_string(),
             eta_seconds: None,
             l1_total: Some(l1_total),
             l2_total: None,
@@ -161,42 +176,80 @@ pub(crate) async fn generate_l1(
     }
 
     for session_id in session_ids {
-        for target in &plan.targets {
-            let result = if plan.cascade {
-                engine
-                    .regenerate_l1(*session_id, target.as_deref(), Some(""), Some(""))
-                    .await
-            } else {
-                engine
-                    .regenerate_l1_no_cascade(*session_id, target.as_deref(), Some(""), Some(""))
-                    .await
-            };
-
-            match result {
-                Ok(Some(_)) => l1_success += 1,
-                Ok(None) => {
-                    // 会话无消息或已有同画像摘要：跳过不影响连续失败计数
+        if plan.group_fanout {
+            // 群聊多画像分发：每会话一次生成，块内参与者复制成行
+            match regenerate_l1_group(engine, *session_id).await {
+                Ok(rows) if !rows.is_empty() => l1_success += 1,
+                Ok(rows) => {
                     l1_skipped += 1;
                     tracing::debug!(
                         session_id = %session_id,
-                        persona_uid = ?target.as_deref().map(mask_id),
-                        "L1 无内容可生成，跳过"
+                        rows = rows.len(),
+                        "群聊 L1 无内容可生成，跳过"
                     );
                 }
                 Err(e) => {
                     l1_failed += 1;
                     tracing::warn!(
                         session_id = %session_id,
-                        persona_uid = ?target.as_deref().map(mask_id),
                         error = %e,
-                        "L1 摘要生成失败（非致命）"
+                        "群聊 L1 摘要生成失败（非致命）"
                     );
                 }
             }
             l1_processed += 1;
 
+            // 级联语义：与逐目标口径对齐，生成后按计划触发 L2 检查
+            if plan.cascade {
+                engine.trigger_l2_check().await;
+            }
+
             // 请求间节流：连续 LLM 调用间保持最小间隔，避免触发远端速率限制
-            ramaria_memory::llm_gate::inter_llm_delay(plan.throttle_ms, "L1 导入批量摘要").await;
+            ramaria_memory::llm_gate::inter_llm_delay(plan.throttle_ms, "L1 群聊分发").await;
+        } else {
+            for target in &plan.targets {
+                let result = if plan.cascade {
+                    engine
+                        .regenerate_l1(*session_id, target.as_deref(), Some(""), Some(""))
+                        .await
+                } else {
+                    engine
+                        .regenerate_l1_no_cascade(
+                            *session_id,
+                            target.as_deref(),
+                            Some(""),
+                            Some(""),
+                        )
+                        .await
+                };
+
+                match result {
+                    Ok(Some(_)) => l1_success += 1,
+                    Ok(None) => {
+                        // 会话无消息或已有同画像摘要：跳过不影响连续失败计数
+                        l1_skipped += 1;
+                        tracing::debug!(
+                            session_id = %session_id,
+                            persona_uid = ?target.as_deref().map(mask_id),
+                            "L1 无内容可生成，跳过"
+                        );
+                    }
+                    Err(e) => {
+                        l1_failed += 1;
+                        tracing::warn!(
+                            session_id = %session_id,
+                            persona_uid = ?target.as_deref().map(mask_id),
+                            error = %e,
+                            "L1 摘要生成失败（非致命）"
+                        );
+                    }
+                }
+                l1_processed += 1;
+
+                // 请求间节流：连续 LLM 调用间保持最小间隔，避免触发远端速率限制
+                ramaria_memory::llm_gate::inter_llm_delay(plan.throttle_ms, "L1 导入批量摘要")
+                    .await;
+            }
         }
 
         // 每完成一个 session 推送一次进度（分母为 LLM 调用总次数）
@@ -207,11 +260,16 @@ pub(crate) async fn generate_l1(
             started_at.elapsed().as_secs_f64(),
         );
         if let Some(sink) = progress {
+            let message = if plan.group_fanout {
+                format!("L1 摘要 {l1_processed}/{l1_total}（群成员分发）")
+            } else {
+                format!("L1 摘要 {l1_processed}/{l1_total}（双方 persona）")
+            };
             sink.on_l1_progress(&ImportL1Progress {
                 phase: "l1",
                 current: l1_processed,
                 total: l1_total,
-                message: format!("L1 摘要 {l1_processed}/{l1_total}（双方 persona）"),
+                message,
                 eta_seconds: eta.remaining_seconds().map(|s| s.round() as u64),
                 l1_total: Some(l1_total),
                 l2_total: None,
@@ -237,6 +295,80 @@ pub(crate) async fn generate_l1(
         l1_total,
         session_ids: session_ids.to_vec(),
     })
+}
+
+// =========================================================
+// 群聊分发生成
+// =========================================================
+
+/// 群聊会话生成分发 L1 摘要（每会话一次生成，块内参与者复制成多行）。
+///
+/// 流程:
+/// 1. 读会话消息；无消息 → 记 warn 并返回空列表；
+/// 2. 幂等：已有带 persona 归属的 L1 行（此前分发结果）→ 只补索引镜像并原样返回，不重复调用 LLM；
+/// 3. 清理旧的无归属摘要（`persona_uid IS NULL`），避免新旧两份并存；
+/// 4. 生成（多画像分发开启；空前缀——导入消息自带人名前缀）；
+/// 5. 读回落库行，逐行增量镜像并返回。
+///
+/// 参数:
+/// - `engine`: 服务层引擎；
+/// - `session_id`: 目标会话。
+///
+/// 返回:
+/// - 本次实际可用的 L1 行（含此前分发结果）；空列表表示会话无消息。
+pub(crate) async fn regenerate_l1_group(
+    engine: &Engine,
+    session_id: Uuid,
+) -> RamariaResult<Vec<MemoryL1>> {
+    let storage = engine.storage_ref().as_ref();
+    let messages = storage.list_messages(session_id).await?;
+    if messages.is_empty() {
+        tracing::warn!(%session_id, "regenerate_l1_group: 会话无消息，跳过");
+        return Ok(Vec::new());
+    }
+
+    // 幂等：带 persona 归属的 L1 行视为此前分发结果，不重复生成
+    let existing = storage.list_memory_l1(session_id).await?;
+    let dispatched: Vec<MemoryL1> = existing
+        .into_iter()
+        .filter(|l1| l1.persona_uid.is_some())
+        .collect();
+    if !dispatched.is_empty() {
+        tracing::info!(
+            %session_id,
+            rows = dispatched.len(),
+            "该会话已有群聊分发 L1 摘要，跳过重新生成"
+        );
+        for l1 in &dispatched {
+            crate::index::index_l1_into_mirrors(engine, l1).await;
+        }
+        return Ok(dispatched);
+    }
+
+    // 清理旧的无归属摘要（只删 persona_uid IS NULL 行），再做生成
+    let deleted = storage.delete_memory_l1_by_session(session_id).await?;
+    if deleted > 0 {
+        tracing::info!(%session_id, deleted, "已清理旧的无归属 L1 摘要");
+    }
+
+    tracing::info!(
+        %session_id,
+        msg_count = messages.len(),
+        "群聊 L1 摘要生成（成员分发）"
+    );
+
+    crate::lifecycle::l1::generate_l1_summary(engine, session_id, None, Some(""), Some(""), true)
+        .await?;
+
+    let rows = storage.list_memory_l1(session_id).await?;
+    if rows.is_empty() {
+        return Err(RamariaError::validation("群聊 L1 摘要生成后无法读取"));
+    }
+    for l1 in &rows {
+        crate::index::index_l1_into_mirrors(engine, l1).await;
+    }
+    tracing::info!(%session_id, rows = rows.len(), "群聊 L1 摘要生成完成（成员分发）");
+    Ok(rows)
 }
 
 /// 构造导入完成摘要（两种分支的文案与桌面 done 事件一致）。

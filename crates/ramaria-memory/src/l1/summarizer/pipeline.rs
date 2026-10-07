@@ -3,10 +3,14 @@
 //! 设计特点:
 //! - summarize_session: 整会话按话语块生成，块 N 注入上一块上文（§6.3 混合形态）。
 //! - summarize_progressive: 渐进式按段生成，未达阈值时回退 summarize_session。
+//! - 多画像分发：fanout_others 开启时按块/段内他人发言者复制 L1 行，各行独立 persona。
 //! - 块级容错：单块失败记 warn 并降级继续，全部失败返回最后一个错误。
 //! - 写库失败为硬错误；关键词写回失败为非致命（记 warn 不阻塞）。
 
+use std::collections::BTreeSet;
+
 use ramaria_core::keyword::KeywordToken;
+use ramaria_core::types::MessageRole;
 use ramaria_core::{LlmProviderTrait, MemoryL1, RamariaError, RamariaResult, StorageBackend};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -100,12 +104,22 @@ impl<'a> L1Summarizer<'a> {
 
         debug!(%session_id, msg_count = messages.len(), "开始生成 L1 摘要");
 
-        // 2. 切分为话语块（B2 上下文感知生成的块粒度）
-        //    - 配置了 utt_splitter → 用 split_messages 切分（目标 persona 为 config.persona_uid）
-        //    - 未配置 → 整会话一块（v1.4 行为）
+        // 2. 切分为话语块（上下文感知生成的块粒度）
+        //    - 多画像分发开启 → 群聊口径切分（多发言者，全部块保留）
+        //    - 否则配置了 utt_splitter → split_messages 切分（目标 persona 为 config.persona_uid）
+        //    - 未配置 → 整会话一块
         //    - 切分结果为空（如纯用户消息块被丢弃）→ 回退整会话一块，
-        //      保证与 v1.4 至少产出一条摘要的语义一致。
+        //      保证至少产出一条摘要的语义一致。
         let chunks = match &self.config.utt_splitter {
+            Some(splitter_cfg) if self.config.fanout_others => {
+                let split =
+                    crate::utt::group_splitter::split_messages_group(&messages, splitter_cfg);
+                if split.is_empty() {
+                    vec![UttChunk::from_messages(messages.clone())]
+                } else {
+                    split
+                }
+            }
             Some(splitter_cfg) => {
                 let target = self.config.persona_uid.as_deref();
                 let split = crate::utt::splitter::split_messages(&messages, target, splitter_cfg);
@@ -168,15 +182,20 @@ impl<'a> L1Summarizer<'a> {
             }
         };
         let mut saved_last: Option<MemoryL1> = None;
-        for entry in generated.iter().flatten() {
-            let (l1, keywords) = entry;
-            self.storage.save_memory_l1(l1).await.map_err(|e| {
-                warn!(%session_id, l1_id = %l1.id, error=%e, "写入 memory_l1 失败");
-                RamariaError::storage(format!("写入 session {session_id} L1 摘要失败: {e}"))
-            })?;
-            saved_last = Some(l1.clone());
-            self.write_back_keywords(session_id, l1, keywords, &pool_rows)
-                .await;
+        for (idx, entry) in generated.iter().enumerate() {
+            let Some((l1, keywords)) = entry else {
+                continue;
+            };
+            // 多画像分发：参与者非空时按参与者复制多行落库，否则原行落库
+            for row in self.fanout_rows(l1, &chunks[idx]) {
+                self.storage.save_memory_l1(&row).await.map_err(|e| {
+                    warn!(%session_id, l1_id = %row.id, error=%e, "写入 memory_l1 失败");
+                    RamariaError::storage(format!("写入 session {session_id} L1 摘要失败: {e}"))
+                })?;
+                self.write_back_keywords(session_id, &row, keywords, &pool_rows)
+                    .await;
+                saved_last = Some(row);
+            }
         }
 
         // 5. 返回
@@ -210,6 +229,8 @@ impl<'a> L1Summarizer<'a> {
     ///   尾段覆盖最新对话。
     /// - 全部段 L1 写库且 `absorbed=false`（入候选池），L2 事件提取仍按封存触发
     ///   （`list_unabsorbed_l1` 天然包含渐进式段 L1，无需额外缓冲结构）。
+    /// - 多画像分发开启时（`fanout_others`），每段按其内他人发言者复制 L1 行，
+    ///   返回值与写库内容同为实际落库行集。
     /// - 每段 L1 生成后写回关键词词典 + 倒排索引（与 `summarize_session` 一致）；
     ///   逐段写库前读取一次词池快照供全部段复用，读取失败降级为空快照
     ///   （全部按规范词写回）。
@@ -226,7 +247,8 @@ impl<'a> L1Summarizer<'a> {
     /// - `progressive`: 渐进式摘要配置（未启用时直接回退 v1.6）。
     ///
     /// 返回:
-    /// - 成功时返回本次生成的全部 L1（触发时 ≥1 条，未触发时 1 条）。
+    /// - 成功时返回本次实际落库的全部 L1 行（多画像分发开启时含复制行；
+    ///   触发时 ≥1 条，未触发时 1 条）。
     pub async fn summarize_progressive(
         &self,
         session_id: Uuid,
@@ -260,14 +282,20 @@ impl<'a> L1Summarizer<'a> {
 
         // 3. 触发：按 tail_msg_count 切分为段（每段 ≤ tail 条，尾块覆盖最新对话）
         //    theta_gap 保持默认（10 分钟）：时间间隙大的消息也切分为独立段。
+        //    多画像分发开启 → 群聊口径切分（多发言者，全部块保留）；
+        //    否则按目标 persona（`config.persona_uid`）切分。
         let splitter_cfg = crate::utt::UttSplitterConfig {
             theta_gap_minutes: 10,
             max_msgs_per_block: progressive.tail_msg_count.max(1),
         };
-        let target = self.config.persona_uid.as_deref();
-        let chunks = crate::utt::splitter::split_messages(&messages, target, &splitter_cfg);
+        let chunks = if self.config.fanout_others {
+            crate::utt::group_splitter::split_messages_group(&messages, &splitter_cfg)
+        } else {
+            let target = self.config.persona_uid.as_deref();
+            crate::utt::splitter::split_messages(&messages, target, &splitter_cfg)
+        };
 
-        // 无目标发言（如全会话只有用户消息）→ 回退整会话摘要（与 summarize_session 语义一致）
+        // 切分为空（如无目标发言）→ 回退整会话摘要（与 summarize_session 语义一致）
         if chunks.is_empty() {
             debug!(%session_id, "渐进式摘要切分为空，回退整会话摘要");
             let l1 = self.summarize_session(session_id).await?;
@@ -284,7 +312,10 @@ impl<'a> L1Summarizer<'a> {
                 Vec::new()
             }
         };
+        // generated = 实际落库行（多画像分发开启时含全部复制行；关闭时每段 1 行）
         let mut generated: Vec<MemoryL1> = Vec::with_capacity(chunks.len());
+        // 上一成功段的代表行（供下一段上文注入；与分发行的摘要内容一致）
+        let mut last_segment_l1: Option<MemoryL1> = None;
         let mut last_error: Option<RamariaError> = None;
         for (i, chunk) in chunks.iter().enumerate() {
             let prior_context = if i == 0 {
@@ -292,7 +323,7 @@ impl<'a> L1Summarizer<'a> {
             } else {
                 Some(build_prior_context(
                     &chunks[i - 1],
-                    generated.last(),
+                    last_segment_l1.as_ref(),
                     &self.config,
                     &self.config.user_prefix,
                     &self.config.assistant_prefix,
@@ -304,17 +335,28 @@ impl<'a> L1Summarizer<'a> {
                 .await
             {
                 Ok((l1, keywords)) => {
+                    // 多画像分发：参与者非空时按参与者复制多行落库，否则原行落库；
                     // 段 L1 写库（absorbed=false 入候选池），供 L2 封存触发提取
-                    self.storage.save_memory_l1(&l1).await.map_err(|e| {
-                        warn!(%session_id, l1_id = %l1.id, error=%e, "渐进式段 L1 写库失败");
-                        RamariaError::storage(format!(
-                            "渐进式摘要：session {session_id} 段 L1 写库失败: {e}"
-                        ))
-                    })?;
-                    self.write_back_keywords(session_id, &l1, &keywords, &pool_rows)
-                        .await;
-                    debug!(%session_id, block_index = i, "渐进式段 {} L1 生成成功", i);
-                    generated.push(l1);
+                    let rows = self.fanout_rows(&l1, chunk);
+                    for row in &rows {
+                        self.storage.save_memory_l1(row).await.map_err(|e| {
+                            warn!(%session_id, l1_id = %row.id, error=%e, "渐进式段 L1 写库失败");
+                            RamariaError::storage(format!(
+                                "渐进式摘要：session {session_id} 段 L1 写库失败: {e}"
+                            ))
+                        })?;
+                        self.write_back_keywords(session_id, row, &keywords, &pool_rows)
+                            .await;
+                    }
+                    debug!(
+                        %session_id,
+                        block_index = i,
+                        row_count = rows.len(),
+                        "渐进式段 {} L1 生成成功",
+                        i
+                    );
+                    last_segment_l1 = Some(l1);
+                    generated.extend(rows);
                 }
                 Err(e) => {
                     warn!(%session_id, block_index = i, error=%e, "渐进式段 L1 生成失败（降级继续）");
@@ -332,10 +374,57 @@ impl<'a> L1Summarizer<'a> {
         info!(
             %session_id,
             total_blocks = chunks.len(),
-            success_blocks = generated.len(),
+            saved_rows = generated.len(),
             tail_msg_count = progressive.tail_msg_count,
             "渐进式摘要完成（按段生成 L1，段 L1 已入候选池）"
         );
         Ok(generated)
+    }
+
+    // =========================================================
+    // 多画像分发（内部辅助）
+    // =========================================================
+
+    /// 按块内他人发言者复制 L1 行（多画像分发）。
+    ///
+    /// 规则:
+    /// - `fanout_others=false` → 原行（1 行）；
+    /// - 参与者 = 块内 Assistant 角色且 persona_uid 非空的消息发送者集合
+    ///   （去重、稳定序；self 的 User 消息天然排除）；
+    /// - 参与者为空（无他人参与）→ 原行保留（persona_uid 为 config 值，导入场景即 NULL）；
+    /// - 参与者非空 → 每参与者复制一行（新 id、各自 persona_uid），原行不落库。
+    ///
+    /// 参数:
+    /// - `l1`: 块/段生成结果（复制模板）。
+    /// - `chunk`: 生成该 L1 的话语块（读取发言者）。
+    ///
+    /// 返回:
+    /// - 待落库的 L1 行列表（各行摘要内容一致，仅 id 与 persona_uid 不同）。
+    fn fanout_rows(&self, l1: &MemoryL1, chunk: &UttChunk) -> Vec<MemoryL1> {
+        if !self.config.fanout_others {
+            return vec![l1.clone()];
+        }
+
+        let participants: BTreeSet<&str> = chunk
+            .messages
+            .iter()
+            .filter(|m| m.role == MessageRole::Assistant)
+            .filter_map(|m| m.persona_uid.as_deref())
+            .collect();
+
+        if participants.is_empty() {
+            // 无他人参与（纯 self / 无他人发言者）→ 原行保留
+            return vec![l1.clone()];
+        }
+
+        participants
+            .into_iter()
+            .map(|uid| {
+                let mut row = l1.clone();
+                row.id = ramaria_core::types::new_id();
+                row.persona_uid = Some(uid.to_string());
+                row
+            })
+            .collect()
     }
 }

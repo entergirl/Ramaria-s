@@ -4,6 +4,7 @@
 //! - 纯数据结构 + Default，无 I/O、无逻辑分支。
 //! - `utt_splitter` 为 None 时整会话单块（v1.4 行为）；Some 时按话语块逐块生成。
 //! - `prior_context_*` 控制上一块上文注入形态（原文 / 上一 L1 摘要 + 线索 / 截断原文）。
+//! - `fanout_others` 开启时按块/段内他人发言者复制 L1 行（多画像分发，默认关闭）。
 
 // =========================================================
 // L1 Summarizer 配置
@@ -29,6 +30,9 @@
 /// - `prior_context_threshold`（v1.5 B2）: 上一块消息数 ≤ 此阈值 → 注入 L0 原文；
 ///   超过 → 注入上一块 L1 摘要 + 结构化线索。默认 20（§6.3 示例值）。
 /// - `prior_context_max_chars`（v1.5 B2）: 长块无上一 L1 时回退注入原文的截断上限。
+/// - `fanout_others`: 多画像分发开关（群聊场景）。开启时按块/段内他人发言者复制 L1 行：
+///   参与者为空（无他人参与）→ 原行保留；参与者非空 → 每参与者一行（各自 persona_uid），
+///   原行不落库。默认关闭（私聊路径行为不变）。
 #[derive(Debug, Clone)]
 pub struct L1SummarizerConfig {
     /// LLM 生成温度 0.0..2.0
@@ -47,6 +51,8 @@ pub struct L1SummarizerConfig {
     pub situation_strength: Option<i32>,
     /// utt 切分配置（v1.5 B2 上下文感知生成），None = v1.4 整会话单块
     pub utt_splitter: Option<crate::utt::UttSplitterConfig>,
+    /// 多画像分发：按块/段内他人发言者复制 L1 行（每行各自 persona_uid；默认关闭）
+    pub fanout_others: bool,
     /// 上一块消息数阈值（≤ 注入原文，> 注入上一 L1 摘要+线索），默认 20
     pub prior_context_threshold: usize,
     /// 长块无上一 L1 时原文截断上限（字符），默认 1500
@@ -64,6 +70,7 @@ impl Default for L1SummarizerConfig {
             context_json: None,
             situation_strength: None,
             utt_splitter: Some(crate::utt::UttSplitterConfig::default()),
+            fanout_others: false,
             prior_context_threshold: 20,
             prior_context_max_chars: 1500,
         }

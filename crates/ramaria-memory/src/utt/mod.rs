@@ -11,6 +11,7 @@
 //! - 不依赖具体 LLM/embedding provider：embedding 由调用方注入 trait 对象
 
 pub mod builder;
+pub mod group_splitter;
 pub mod splitter;
 
 use ramaria_core::error::{RamariaError, RamariaResult};

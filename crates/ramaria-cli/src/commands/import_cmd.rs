@@ -13,8 +13,9 @@
 //! - 仅支持 qq-chat-exporter v6.x JSON 格式（语义化 type 名称）
 
 use anyhow::Context;
+use ramaria_core::privacy::mask_id;
 use ramaria_importer::ImportSource;
-use ramaria_service::{Engine, ImportMode, ImportRequest};
+use ramaria_service::{Engine, ImportL1Plan, ImportMode, ImportRequest};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -230,7 +231,7 @@ pub async fn run(engine: &Arc<Engine>, args: ImportArgs) -> anyhow::Result<()> {
         .await
         .context("导入写入失败")?;
 
-    // 画像准备结果回显（按导入侧过滤：跳过侧不创建 persona）
+    // 画像准备结果回显（按导入侧过滤：跳过侧不创建 persona；群聊展示成员分布）
     match &outcome.persona_uid {
         Some(uid) => crate::ui::info(&format!("👤 导出者: {} ({})", outcome.persona_name, uid)),
         None => crate::ui::info(&format!(
@@ -243,31 +244,68 @@ pub async fn run(engine: &Arc<Engine>, args: ImportArgs) -> anyhow::Result<()> {
             "👤 对话对方: {} ({})",
             outcome.other_persona_name, uid
         )),
-        None => crate::ui::info(&format!(
-            "⏭️  跳过对方 persona（--side {} 不处理对方）",
-            "self"
-        )),
+        None => {
+            if outcome.chat_type == "group" {
+                // 群聊无单一对方：展示成员数与 Top 3 显示名（个人标识经掩码）
+                let top: Vec<String> = outcome
+                    .members
+                    .iter()
+                    .take(3)
+                    .map(|m| mask_id(&m.name))
+                    .collect();
+                crate::ui::info(&format!(
+                    "👥 群聊导入：成员 {} 人（{}）",
+                    outcome.members.len(),
+                    top.join("、")
+                ));
+            } else {
+                crate::ui::info(&format!(
+                    "⏭️  跳过对方 persona（--side {} 不处理对方）",
+                    "self"
+                ));
+            }
+        }
     }
 
     // Step 6: 为每个导入的 session 触发 L1 摘要生成
-    // L1 摘要 persona_uid 存 NULL
-    // —— 导入的 session 来自多人对话，摘要不应被特定画像视图独占
+    // 私聊：逐 session 生成 persona_uid=NULL 摘要（不绑定特定画像视图）
+    // 群聊：按会话生成一次、块内参与者复制分发行（成员各自持有摘要）
     if args.deep {
         crate::ui::info("🔄 执行深度导入（L0 → 触发 L1 摘要生成）...");
     } else {
         crate::ui::info("⚡ 执行快速导入（L0 → 触发 L1 摘要生成）...");
     }
 
-    let mut l1_ok = 0u32;
-    let mut l1_skip = 0u32;
-    let mut l1_err = 0u32;
-    for sid in &outcome.session_ids {
-        match engine.regenerate_l1(*sid, None, None, None).await {
-            Ok(Some(_)) => l1_ok += 1,
-            Ok(None) => l1_skip += 1,
-            Err(e) => {
-                l1_err += 1;
-                tracing::warn!(%sid, error = %e, "L1 摘要生成失败（非致命）");
+    let group_fanout = outcome.chat_type == "group";
+    let mut l1_ok = 0usize;
+    let mut l1_skip = 0usize;
+    let mut l1_err = 0usize;
+    if group_fanout {
+        let l1_outcome = engine
+            .generate_import_l1(
+                &outcome.session_ids,
+                ImportL1Plan {
+                    targets: Vec::new(),
+                    cascade: true,
+                    throttle_ms: 0,
+                    group_fanout: true,
+                },
+                None,
+            )
+            .await
+            .context("L1 生成失败")?;
+        l1_ok = l1_outcome.l1_success;
+        l1_skip = l1_outcome.l1_skipped;
+        l1_err = l1_outcome.l1_failed;
+    } else {
+        for sid in &outcome.session_ids {
+            match engine.regenerate_l1(*sid, None, None, None).await {
+                Ok(Some(_)) => l1_ok += 1,
+                Ok(None) => l1_skip += 1,
+                Err(e) => {
+                    l1_err += 1;
+                    tracing::warn!(%sid, error = %e, "L1 摘要生成失败（非致命）");
+                }
             }
         }
     }
@@ -326,6 +364,8 @@ pub async fn run(engine: &Arc<Engine>, args: ImportArgs) -> anyhow::Result<()> {
             "session_ids": outcome.session_ids.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
             "l1": {"ok": l1_ok, "skip": l1_skip, "err": l1_err},
             "skipped": report.total_skipped(),
+            "chat_type": outcome.chat_type,
+            "members": serde_json::to_value(&outcome.members)?,
         });
         return crate::json::emit_ok(&data);
     }

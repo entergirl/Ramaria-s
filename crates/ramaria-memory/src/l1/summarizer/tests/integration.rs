@@ -53,6 +53,7 @@ async fn summarize_session_integration_basic() {
         user_prefix: "用户：".into(),
         assistant_prefix: "助手：".into(),
         utt_splitter: None,
+        fanout_others: false,
         prior_context_threshold: 20,
         prior_context_max_chars: 1500,
     };
@@ -99,6 +100,7 @@ async fn summarize_session_empty_messages_errors() {
         user_prefix: "用户：".into(),
         assistant_prefix: "助手：".into(),
         utt_splitter: None,
+        fanout_others: false,
         prior_context_threshold: 20,
         prior_context_max_chars: 1500,
     };
@@ -143,6 +145,7 @@ async fn summarize_session_missing_evidence_notes_degrades() {
         user_prefix: "用户：".into(),
         assistant_prefix: "助手：".into(),
         utt_splitter: None,
+        fanout_others: false,
         prior_context_threshold: 20,
         prior_context_max_chars: 1500,
     };
@@ -200,6 +203,7 @@ async fn summarize_session_includes_proactive_message_in_llm_input() {
         user_prefix: "用户：".into(),
         assistant_prefix: "助手：".into(),
         utt_splitter: None,
+        fanout_others: false,
         prior_context_threshold: 20,
         prior_context_max_chars: 1500,
     };
@@ -289,6 +293,7 @@ async fn write_back_keywords_branches_by_pool_hit_and_similarity() {
         user_prefix: "用户：".into(),
         assistant_prefix: "助手：".into(),
         utt_splitter: None,
+        fanout_others: false,
         prior_context_threshold: 20,
         prior_context_max_chars: 1500,
     };
@@ -351,6 +356,7 @@ async fn write_back_keywords_repeated_pending_write_is_idempotent() {
         user_prefix: "用户：".into(),
         assistant_prefix: "助手：".into(),
         utt_splitter: None,
+        fanout_others: false,
         prior_context_threshold: 20,
         prior_context_max_chars: 1500,
     };
@@ -404,6 +410,7 @@ async fn write_back_keywords_empty_pool_snapshot_writes_canonical() {
         user_prefix: "用户：".into(),
         assistant_prefix: "助手：".into(),
         utt_splitter: None,
+        fanout_others: false,
         prior_context_threshold: 20,
         prior_context_max_chars: 1500,
     };
@@ -455,6 +462,7 @@ async fn pool_snapshot_read_once_per_session() {
         user_prefix: "用户：".into(),
         assistant_prefix: "助手：".into(),
         utt_splitter: None,
+        fanout_others: false,
         prior_context_threshold: 20,
         prior_context_max_chars: 1500,
     };

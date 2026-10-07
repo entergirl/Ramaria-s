@@ -3,8 +3,9 @@
 //! 设计特点:
 //! - 管线分段：解析预览（`analyze`）→ L0 写入（`write_l0`）→ L1 批量生成（`generate_l1`）
 //!   → 深度处理触发（`trigger_deep`），宿主按导入模式组合调用，不写第二份导入实现
-//! - 双画像：导出者与对方分别准备 `source="qq"` 的 persona（UID 生成策略与文件解析口径
-//!   由 `ramaria-importer` 承担），L1 摘要按 persona 各生成一份；结果中的画像名以库内实际注册名为准
+//! - 画像准备双形态：私聊为导出者与对方分别准备 `source="qq"` 的 persona（L1 按 persona
+//!   各生成一份）；群聊按发送者聚合成员、逐成员准备画像（L1 按块内参与者分发）；结果中的
+//!   画像名以库内实际注册名为准（UID 生成策略与文件解析口径由 `ramaria-importer` 承担）
 //! - 进度与 ETA：逐 session 经 `ImportProgressSink` 回调（分层 EMA 预估见 `crate::eta`），
 //!   宿主负责把回调转发为自身事件通道
 //! - 静默降级：单次 L1 生成失败只记 warn 并计入失败计数，不中断批量（完成提示由宿主汇总）
@@ -14,8 +15,8 @@
 //! 模块划分:
 //! - `detect`：格式探测与解析前校验（扩展名校验 / 日志路径标签）；
 //! - `analyze`：解析预览（`AnalyzeRequest` → `AnalysisReport`，不写入数据库）；
-//! - `l0`：L0 写入（双画像准备、会话与消息落库、画像名回读口径）；
-//! - `l1`：L1 批量生成与 ETA 进度（含完成摘要构造）；
+//! - `l0`：L0 写入（私聊双画像 / 群聊多画像准备、会话与消息落库、画像名回读口径）；
+//! - `l1`：L1 批量生成与 ETA 进度（含群聊分发口径与完成摘要构造）；
 //! - `deep`：深度触发（L2 事件提取 → L3 性格画像级联）。
 
 mod analyze;
@@ -65,9 +66,10 @@ impl Engine {
         analyze(self, req).await
     }
 
-    /// 执行 QQ 聊天记录 L0 导入（双画像准备 + 会话 / 消息写入，不含 L1 生成）。
+    /// 执行 QQ 聊天记录 L0 导入（画像准备 + 会话 / 消息写入，不含 L1 生成）。
     ///
     /// 说明:
+    /// - 私聊准备双画像（导出者 / 对方）；群聊按发送者聚合成员并逐成员准备画像；
     /// - 需要引擎已附着 SQLite 连接池（`open_with` 装配自动携带；
     ///   `from_parts` 注入构造需先 [`Engine::attach_sqlite_pool`]）。
     pub async fn import_qq_l0(&self, req: ImportRequest) -> RamariaResult<ImportL0Outcome> {
