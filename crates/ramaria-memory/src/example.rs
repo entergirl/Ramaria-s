@@ -21,6 +21,9 @@ use crate::prompt::example_selector::extract_keywords;
 /// 图片消息占位符（导入器统一替换格式，见 importer/qq/parser.rs）。
 const IMAGE_PLACEHOLDER: &str = "[图片]";
 
+/// 图片占位符的指纹前缀（`[图片#{md5 前 8 位}]`）。
+const IMAGE_PLACEHOLDER_HASH: &str = "[图片#";
+
 // =========================================================
 // 抽取结果
 // =========================================================
@@ -63,11 +66,14 @@ impl ExampleSaveStats {
 /// 判断消息是否为图片消息。
 ///
 /// 说明:
-/// - 导入器将图片统一替换为 `[图片]`（跨批次指纹一致）。
-/// - 防御性同时识别 `[图片:` 前缀（历史版本可能残留带文件名的占位符）。
+/// - 导入器把图片统一替换为占位符形态：`[图片]`（无指纹）或
+///   `[图片#{md5 前 8 位}]`（带指纹，解析层可追溯到附件行）。
+/// - 防御性同时识别 `[图片:` 前缀（描述已注入的渲染形态）。
 /// - 图片消息无文本风格信息，不作为 partner 或 reply。
 pub fn is_image_message(msg: &Message) -> bool {
-    msg.content.contains(IMAGE_PLACEHOLDER) || msg.content.contains("[图片:")
+    msg.content.contains(IMAGE_PLACEHOLDER)
+        || msg.content.contains("[图片:")
+        || msg.content.contains(IMAGE_PLACEHOLDER_HASH)
 }
 
 /// 从会话消息中抽取"对方消息 → persona 回复"相邻对。
@@ -619,7 +625,28 @@ mod tests {
     fn is_image_message_detects_placeholder() {
         assert!(is_image_message(&user("[图片]", 1)));
         assert!(is_image_message(&user("[图片: abc123.jpg]", 1)));
+        assert!(
+            is_image_message(&user("[图片#abcd1234]", 1)),
+            "带指纹占位符应判定为图片消息"
+        );
+        assert!(is_image_message(&user("看这个 [图片#abcd1234] 好看吗", 1)));
         assert!(!is_image_message(&user("正常文本", 1)));
+    }
+
+    /// 带指纹占位符的图片消息同样不参与配对与 context。
+    #[test]
+    fn hash_image_message_is_filtered_from_pairs() {
+        let msgs = vec![
+            user("[图片#abcd1234]", 1000),
+            user("这张照片好看吗？", 2000),
+            reply("好看呀，构图很棒！", 3000),
+        ];
+        let pairs = extract_pairs(&msgs, TARGET);
+        assert_eq!(pairs.len(), 1, "带指纹图片消息不配对");
+        assert_has_pair(&pairs, "这张照片好看吗？", "好看呀，构图很棒！");
+
+        let msgs = vec![user("发张照片看看", 1000), reply("[图片#abcd1234]", 2000)];
+        assert!(extract_pairs(&msgs, TARGET).is_empty(), "图片回复不配对");
     }
 
     #[test]

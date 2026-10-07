@@ -13,7 +13,9 @@
 pub use crate::report::{ImportMemberStat, ImportReport};
 
 use ramaria_core::error::RamariaResult;
-use ramaria_core::types::{CHANNEL_QQ, InboundMessage, InboundSender, MemberRole};
+use ramaria_core::types::{
+    CHANNEL_QQ, InboundAttachmentRef, InboundMessage, InboundSender, MemberRole,
+};
 use std::path::Path;
 
 // =========================================================
@@ -133,6 +135,7 @@ impl ImportSide {
 /// - `sender_name`: 发送者显示昵称/群名片。
 /// - `group_nickname`: 群名片；私聊或导出未提供时为 None。
 /// - `member_role`: 群内角色；私聊或导出未提供时为 None。
+/// - `attachments`: 附件引用列表（导出资源的引用而非内容）；无附件为空。
 #[derive(Debug, Clone)]
 pub struct ParsedMessage {
     /// 消息角色：user / assistant
@@ -153,18 +156,21 @@ pub struct ParsedMessage {
     pub group_nickname: Option<String>,
     /// 发送者在群内的角色（群聊导出提供时）
     pub member_role: Option<MemberRole>,
+    /// 附件引用列表（导出资源的引用而非内容）
+    pub attachments: Vec<InboundAttachmentRef>,
 }
 
 impl ParsedMessage {
     /// 投影为入站规范模型（QQ 通道）。
     ///
     /// 职责:
-    /// - 把 QQ 解析中间态投影为平台无关的入站消息：发送者身份 / 时间 / 正文；
-    ///   附件引用与回复关系由后续导出解析扩展填充（当前为空）。
+    /// - 把 QQ 解析中间态投影为平台无关的入站消息：发送者身份 / 时间 / 正文 /
+    ///   附件引用；
     ///
     /// 说明:
     /// - `role` / `fingerprint` 为导入端归属与去重信息，不进规范模型；
-    /// - `platform_id` 原样保留（空串表示平台未提供，判空在写入侧执行）。
+    /// - `platform_id` 原样保留（空串表示平台未提供，判空在写入侧执行）；
+    /// - 附件引用原样投射（source_ref 已在解析期规范化为导出根相对路径）。
     pub fn to_inbound(&self) -> InboundMessage {
         InboundMessage {
             channel: CHANNEL_QQ.to_string(),
@@ -179,7 +185,7 @@ impl ParsedMessage {
                 group_nickname: self.group_nickname.clone(),
                 role: self.member_role,
             },
-            attachments: Vec::new(),
+            attachments: self.attachments.clone(),
         }
     }
 }
@@ -250,8 +256,9 @@ pub trait ImportSource: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ramaria_core::types::InboundAttachmentKind;
 
-    /// to_inbound 投影：发送者身份 / 时间 / 正文完整映射；空平台 ID 原样保留。
+    /// to_inbound 投影：发送者身份 / 时间 / 正文 / 附件完整映射；空平台 ID 原样保留。
     #[test]
     fn to_inbound_maps_sender_fields_and_keeps_empty_uid() {
         let parsed = ParsedMessage {
@@ -264,6 +271,15 @@ mod tests {
             sender_name: "小明".to_string(),
             group_nickname: None,
             member_role: None,
+            attachments: vec![InboundAttachmentRef {
+                kind: InboundAttachmentKind::Image,
+                source_ref: "resources/images/aabbccdd_AABBCCDD.jpg".to_string(),
+                md5: Some("aabbccddeeff00112233445566778899".to_string()),
+                size: Some(1024),
+                width: Some(640),
+                height: Some(480),
+                sub_type: Some("photo".to_string()),
+            }],
         };
 
         let inbound = parsed.to_inbound();
@@ -277,17 +293,33 @@ mod tests {
         assert!(inbound.sender.role.is_none());
         assert!(inbound.platform_message_id.is_none());
         assert!(inbound.reply_to.is_none());
-        assert!(inbound.attachments.is_empty());
+        // 附件引用原样投射（source_ref 为解析期规范化的导出根相对路径）
+        assert_eq!(inbound.attachments.len(), 1);
+        assert_eq!(inbound.attachments[0].kind, InboundAttachmentKind::Image);
+        assert_eq!(
+            inbound.attachments[0].source_ref,
+            "resources/images/aabbccdd_AABBCCDD.jpg"
+        );
+        assert_eq!(
+            inbound.attachments[0].md5.as_deref(),
+            Some("aabbccddeeff00112233445566778899")
+        );
+        assert_eq!(inbound.attachments[0].size, Some(1024));
+        assert_eq!(inbound.attachments[0].width, Some(640));
+        assert_eq!(inbound.attachments[0].height, Some(480));
+        assert_eq!(inbound.attachments[0].sub_type.as_deref(), Some("photo"));
 
         // 空 uid / 空名原样保留（判空口径在写入侧执行）
         let mut empty = parsed.clone();
         empty.sender_uid = String::new();
         empty.sender_uin = None;
         empty.sender_name = String::new();
+        empty.attachments = Vec::new();
         let inbound = empty.to_inbound();
         assert_eq!(inbound.sender.platform_id, "");
         assert!(inbound.sender.uin.is_none());
         assert_eq!(inbound.sender.display_name, "");
+        assert!(inbound.attachments.is_empty(), "无附件时投影为空列表");
     }
 
     /// 群名片与群内角色原样投射到入站发送者。
@@ -303,10 +335,12 @@ mod tests {
             sender_name: "昵称A".to_string(),
             group_nickname: Some("群名片A".to_string()),
             member_role: Some(MemberRole::Owner),
+            attachments: Vec::new(),
         };
 
         let inbound = parsed.to_inbound();
         assert_eq!(inbound.sender.group_nickname.as_deref(), Some("群名片A"));
         assert_eq!(inbound.sender.role, Some(MemberRole::Owner));
+        assert!(inbound.attachments.is_empty());
     }
 }

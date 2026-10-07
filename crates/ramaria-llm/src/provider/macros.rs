@@ -118,6 +118,26 @@ macro_rules! impl_online_provider {
                 self.base.chat(request).await
             }
 
+            async fn chat_vision(
+                &self,
+                request: &ramaria_core::traits::ChatRequest,
+                image_data_uris: &[String],
+            ) -> ramaria_core::error::RamariaResult<String> {
+                let api_key = self.resolve_api_key()?;
+                if api_key.is_none() {
+                    return Err(ramaria_core::error::RamariaError::privacy(format!(
+                        concat!(
+                            $display,
+                            " API key 未配置。请在设置中配置 ",
+                            $display,
+                            " API key 后再试。"
+                        )
+                    )));
+                }
+                self.base.set_api_key(api_key);
+                self.base.chat_with_images(request, image_data_uris).await
+            }
+
             async fn chat_stream(
                 &self,
                 request: &ramaria_core::traits::ChatRequest,

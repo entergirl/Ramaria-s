@@ -4,9 +4,11 @@
 //! - 满足 `LlmProvider` 契约但不发起任何网络调用（CI 无外网依赖）；
 //! - 固定回复 / 恒失败 / 流式脚本 / 健康探测重试等口径，覆盖只读用例与降级路径；
 //! - 脚本化 LLM 按调用次序消费回复队列，覆盖多步 LLM 链路的序列场景；
-//! - 调用计数与请求记录供 Prompt 结构断言使用，不落日志、不含真实密钥。
+//! - 调用计数与请求记录供 Prompt 结构断言使用，不落日志、不含真实密钥；
+//! - 调用序列记录（`chat` / `chat_vision`）供"先理解后摘要"的链路顺序断言。
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::traits::{ChatRequest, LlmProvider, StreamDelta};
@@ -25,7 +27,8 @@ use ramaria_core::types::{BackendConfig, ModelCapability};
 /// - [`MockLlm::stream_fails_after`]：流式先发片段再返回错误（模拟"流中错误"）；
 /// - [`MockLlm::failing`]：生成调用恒失败（模拟后端不可用，覆盖降级与"不落半条"路径）；
 /// - [`MockLlm::online`]：线上 provider（DeepSeek）口径的 mock（本地不发网络请求）；
-/// - [`MockLlm::with_health_failures`]：健康探测前 N 次失败（模拟后端启动中，覆盖探测重试）。
+/// - [`MockLlm::with_health_failures`]：健康探测前 N 次失败（模拟后端启动中，覆盖探测重试）；
+/// - `chat_vision`：按覆写回复 / 剩余失败次数返回（图片理解链路；默认成功）。
 pub(crate) struct MockLlm {
     backend: BackendConfig,
     reply: Option<String>,
@@ -41,6 +44,14 @@ pub(crate) struct MockLlm {
     chat_calls: std::sync::atomic::AtomicUsize,
     /// 已收到的生成请求（按调用顺序；供 Prompt 结构断言使用，不落日志）。
     requests: std::sync::Mutex<Vec<ChatRequest>>,
+    /// 图片理解覆写回复（None = 内置默认描述）。
+    vision_reply: Option<String>,
+    /// 图片理解剩余失败次数（递减；0 表示直接成功）。
+    vision_failures: std::sync::atomic::AtomicUsize,
+    /// 图片理解调用计数（含探测与内容理解；是否成功均计入）。
+    vision_calls: std::sync::atomic::AtomicUsize,
+    /// 调用序列记录（按发生顺序；`"chat"` = 文本生成，`"chat_vision"` = 图片理解）。
+    call_log: Arc<std::sync::Mutex<Vec<&'static str>>>,
 }
 
 impl MockLlm {
@@ -55,6 +66,9 @@ impl MockLlm {
             health_failures: std::sync::atomic::AtomicUsize::new(0),
             chat_calls: std::sync::atomic::AtomicUsize::new(0),
             requests: std::sync::Mutex::new(Vec::new()),
+            vision_reply: None,
+            vision_failures: std::sync::atomic::AtomicUsize::new(0),
+            vision_calls: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -69,6 +83,9 @@ impl MockLlm {
             health_failures: std::sync::atomic::AtomicUsize::new(0),
             chat_calls: std::sync::atomic::AtomicUsize::new(0),
             requests: std::sync::Mutex::new(Vec::new()),
+            vision_reply: None,
+            vision_failures: std::sync::atomic::AtomicUsize::new(0),
+            vision_calls: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -83,6 +100,9 @@ impl MockLlm {
             health_failures: std::sync::atomic::AtomicUsize::new(0),
             chat_calls: std::sync::atomic::AtomicUsize::new(0),
             requests: std::sync::Mutex::new(Vec::new()),
+            vision_reply: None,
+            vision_failures: std::sync::atomic::AtomicUsize::new(0),
+            vision_calls: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -97,6 +117,9 @@ impl MockLlm {
             health_failures: std::sync::atomic::AtomicUsize::new(0),
             chat_calls: std::sync::atomic::AtomicUsize::new(0),
             requests: std::sync::Mutex::new(Vec::new()),
+            vision_reply: None,
+            vision_failures: std::sync::atomic::AtomicUsize::new(0),
+            vision_calls: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -123,6 +146,33 @@ impl MockLlm {
             health_failures: std::sync::atomic::AtomicUsize::new(failures),
             ..self
         }
+    }
+
+    /// 覆写图片理解回复（链式调用；未设置时返回内置默认描述）。
+    pub(crate) fn with_vision_reply(self, reply: &str) -> Self {
+        Self {
+            vision_reply: Some(reply.to_string()),
+            ..self
+        }
+    }
+
+    /// 指定图片理解前 N 次失败（链式调用；N = 0 表示直接成功）。
+    pub(crate) fn vision_failing(self, failures: usize) -> Self {
+        Self {
+            vision_failures: std::sync::atomic::AtomicUsize::new(failures),
+            ..self
+        }
+    }
+
+    /// 设置图片理解剩余失败次数（供"探测已缓存成功后再编排调用失败"的场景）。
+    pub(crate) fn set_vision_failures(&self, failures: usize) {
+        self.vision_failures
+            .store(failures, std::sync::atomic::Ordering::Release);
+    }
+
+    /// 图片理解调用次数（含探测与内容理解；成功与失败均计入）。
+    pub(crate) fn vision_call_count(&self) -> usize {
+        self.vision_calls.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// 生成调用次数（`chat` 与 `chat_stream` 合计，含成功与失败；健康探测不计入）。
@@ -203,6 +253,25 @@ impl LlmProvider for MockLlm {
             )));
         }
         Ok(Box::pin(futures::stream::iter(items)))
+    }
+
+    /// 图片理解：按剩余失败次数返回错误，否则返回覆写回复 / 内置默认描述。
+    async fn chat_vision(
+        &self,
+        _request: &ChatRequest,
+        _image_data_uris: &[String],
+    ) -> RamariaResult<String> {
+        use std::sync::atomic::Ordering;
+
+        self.vision_calls.fetch_add(1, Ordering::Relaxed);
+        if self.vision_failures.load(Ordering::Acquire) > 0 {
+            self.vision_failures.fetch_sub(1, Ordering::AcqRel);
+            return Err(RamariaError::llm("MockLlm 图片理解失败（模拟调用失败）"));
+        }
+        Ok(self
+            .vision_reply
+            .clone()
+            .unwrap_or_else(|| "一张测试图片".to_string()))
     }
 
     fn capability(&self) -> &ModelCapability {

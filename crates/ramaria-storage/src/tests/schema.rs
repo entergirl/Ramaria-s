@@ -398,3 +398,134 @@ async fn sender_identity_migration_on_upgrade() {
     .await
     .expect("不同 platform_ref 写入应成功");
 }
+
+/// 旧库升级：新增 message_attachments 附件表与三个索引；
+/// 列缺省值、外键级联在升级后的旧库上生效。
+///
+/// 说明:
+/// - 模拟口径：在已全量迁移的测试库上删除新增表还原“旧库”状态，
+///   写入旧式数据后执行本版 migration 文件（与 `sqlx::migrate!` 应用的是同一份 SQL）。
+#[tokio::test]
+async fn attachments_migration_on_upgrade() {
+    let pool = database::init_test_pool()
+        .await
+        .expect("测试数据库初始化失败");
+
+    // 空库全量迁移后即含附件表与三个索引
+    let table: Option<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'message_attachments'",
+    )
+    .fetch_optional(&pool)
+    .await
+    .expect("查询表应成功");
+    assert_eq!(
+        table.as_deref(),
+        Some("message_attachments"),
+        "空库初始化后应含 message_attachments 表"
+    );
+    for index in [
+        "idx_attachments_message_id",
+        "idx_attachments_status",
+        "idx_attachments_md5",
+    ] {
+        let found: Option<String> =
+            sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?")
+                .bind(index)
+                .fetch_optional(&pool)
+                .await
+                .expect("查询索引应成功");
+        assert_eq!(
+            found.as_deref(),
+            Some(index),
+            "空库初始化后应含索引 {index}"
+        );
+    }
+
+    // 还原旧库：删除新增表（表上索引随表一并删除）
+    sqlx::query("DROP TABLE message_attachments")
+        .execute(&pool)
+        .await
+        .expect("删除新增表以模拟旧库应成功");
+
+    // 旧式数据：消息必须归属存在的会话（外键约束）
+    let session_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO sessions (id, started_at) VALUES (?, 0)")
+        .bind(session_id.to_string())
+        .execute(&pool)
+        .await
+        .expect("插入 session fixture 应成功");
+    let message_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO messages (id, session_id, role, content, created_at, source) \
+         VALUES (?, ?, 'user', '旧消息', 1, 'local')",
+    )
+    .bind(message_id.to_string())
+    .bind(session_id.to_string())
+    .execute(&pool)
+    .await
+    .expect("写入旧式消息应成功");
+
+    // 执行本版 migration（迁移文件内容即被 sqlx::migrate! 应用的 SQL）
+    sqlx::raw_sql(include_str!(
+        "../../migrations/20261008_v2.6_attachments.sql"
+    ))
+    .execute(&pool)
+    .await
+    .expect("执行新增 migration 应成功");
+
+    // 缺省值：省略可选列写入取默认（source_ref '' / status pending / 时间 0）
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO message_attachments (message_id, kind) VALUES (?, 'image') RETURNING id",
+    )
+    .bind(message_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("省略可选列写入应成功");
+    let (source_ref, status, created_at, updated_at): (String, String, i64, i64) = sqlx::query_as(
+        "SELECT source_ref, status, created_at, updated_at FROM message_attachments WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .expect("读取默认值应成功");
+    assert_eq!(source_ref, "", "source_ref 缺省应为空串");
+    assert_eq!(status, "pending", "status 缺省应为 pending");
+    assert_eq!(created_at, 0, "created_at 缺省应为 0");
+    assert_eq!(updated_at, 0, "updated_at 缺省应为 0");
+
+    // 完整字段写入回读
+    sqlx::query(
+        "INSERT INTO message_attachments \
+             (message_id, kind, source_ref, md5, size, width, height, sub_type, status, \
+              description, description_model, created_at, updated_at) \
+         VALUES (?, 'image', 'images/a.png', 'aabbccddeeff00112233445566778899', 1024, 640, 480, \
+                 'photo', 'done', '一只橘猫', 'vision-mock', 10, 20)",
+    )
+    .bind(message_id.to_string())
+    .execute(&pool)
+    .await
+    .expect("完整字段写入应成功");
+    let (md5, description): (String, String) = sqlx::query_as(
+        "SELECT md5, description FROM message_attachments WHERE message_id = ? AND status = 'done'",
+    )
+    .bind(message_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("读取完整字段应成功");
+    assert_eq!(md5, "aabbccddeeff00112233445566778899");
+    assert_eq!(description, "一只橘猫");
+
+    // 外键级联：删除消息后附件行随之消失
+    sqlx::query("DELETE FROM messages WHERE id = ?")
+        .bind(message_id.to_string())
+        .execute(&pool)
+        .await
+        .expect("删除消息应成功");
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM message_attachments WHERE message_id = ?")
+            .bind(message_id.to_string())
+            .fetch_one(&pool)
+            .await
+            .expect("计数应成功");
+    assert_eq!(count, 0, "删除消息后附件应级联删除");
+}

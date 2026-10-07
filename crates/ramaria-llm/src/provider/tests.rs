@@ -302,6 +302,101 @@ fn sanitize_substring_injection_not_flagged() {
     assert_eq!(result, "the above equation is correct");
 }
 
+// ---- build_vision_messages ----
+
+/// 含图消息：system 字符串 content + user 数组 content（text 元素 + 按序 image_url）。
+#[test]
+fn build_vision_messages_uses_array_content_with_images_in_order() {
+    let request = ChatRequest {
+        system_prompt: "你是一个助手".into(),
+        memory_context: None,
+        history: vec![],
+        user_message: "请描述这张图片。".into(),
+        temperature: 0.2,
+        max_tokens: 256,
+        request_id: Uuid::new_v4(),
+        template_version: "vision-v1".into(),
+    };
+    let images = vec![
+        "data:image/jpeg;base64,AAA".to_string(),
+        "data:image/png;base64,BBB".to_string(),
+    ];
+
+    let messages = build_vision_messages(&request, &images);
+    assert_eq!(messages.len(), 2);
+
+    // system 保持字符串 content
+    assert_eq!(messages[0]["role"], "system");
+    assert!(
+        messages[0]["content"].is_string(),
+        "system content 应为字符串"
+    );
+    assert_eq!(messages[0]["content"], "你是一个助手");
+
+    // user content 为数组：text + 按序 image_url
+    assert_eq!(messages[1]["role"], "user");
+    let content = messages[1]["content"]
+        .as_array()
+        .expect("user content 应为数组");
+    assert_eq!(content.len(), 3);
+    assert_eq!(content[0]["type"], "text");
+    assert_eq!(content[0]["text"], "请描述这张图片。");
+    assert_eq!(content[1]["type"], "image_url");
+    assert_eq!(content[1]["image_url"]["url"], "data:image/jpeg;base64,AAA");
+    assert_eq!(content[2]["type"], "image_url");
+    assert_eq!(content[2]["image_url"]["url"], "data:image/png;base64,BBB");
+}
+
+/// 无图输入：user content 仍为数组形态（仅 text 元素），与含图口径一致。
+#[test]
+fn build_vision_messages_without_images_keeps_text_only_array() {
+    let request = ChatRequest {
+        system_prompt: String::new(),
+        memory_context: None,
+        history: vec![],
+        user_message: "请描述这张图片。".into(),
+        temperature: 0.2,
+        max_tokens: 256,
+        request_id: Uuid::new_v4(),
+        template_version: "vision-v1".into(),
+    };
+
+    let messages = build_vision_messages(&request, &[]);
+    assert_eq!(messages.len(), 2);
+    let content = messages[1]["content"]
+        .as_array()
+        .expect("user content 应为数组");
+    assert_eq!(content.len(), 1);
+    assert_eq!(content[0]["type"], "text");
+}
+
+/// 对话路径零变化：`build_messages` 组装的每条消息 content 均为字符串。
+#[test]
+fn build_messages_keeps_string_content_on_dialog_path() {
+    let request = ChatRequest {
+        system_prompt: "你是一个助手".into(),
+        memory_context: Some("用户喜欢猫。".into()),
+        history: vec![ChatMessage {
+            role: MessageRole::Assistant,
+            content: "今天晴天".into(),
+        }],
+        user_message: "谢谢".into(),
+        temperature: 0.3,
+        max_tokens: 1024,
+        request_id: Uuid::new_v4(),
+        template_version: "test".into(),
+    };
+
+    let messages = build_messages(&request);
+    assert_eq!(messages.len(), 3);
+    for msg in &messages {
+        assert!(
+            msg["content"].is_string(),
+            "对话路径消息 content 应保持字符串: {msg}"
+        );
+    }
+}
+
 // ---- ProviderBase (without network) ----
 
 #[test]

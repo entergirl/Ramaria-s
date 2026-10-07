@@ -3,6 +3,8 @@
 //! 设计特点:
 //! - 列表聚合：开始时间倒序 + 单次消息计数与未读聚合（聚合失败记告警并按 0 处理）
 //! - 消息分页：全量正序（limit 为 None）或最新在前分页后翻正，单页上限 1000
+//! - 图片描述注入：消息正文中的 `[图片#{hash}]` 占位符按附件描述渲染为
+//!   `[图片: {描述}]`（附件查询失败 / 无描述保留原占位符）
 //! - 分页钳制：列表 limit 下界 1；消息偏移负数按 0 处理；has_more 仅分页路径有效
 //! - 空态语义：会话不存在返回业务校验错误（入口无需预判存在性）；无消息返回空集合
 
@@ -13,6 +15,7 @@ use std::sync::Arc;
 use chrono::DateTime;
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::traits::StorageBackend;
+use ramaria_core::types::{Message, MessageAttachment, build_render_map, replace_image_placeholders};
 use uuid::Uuid;
 
 use crate::engine::Engine;
@@ -207,7 +210,7 @@ pub(crate) async fn count_session_messages(engine: &Engine, session_id: Uuid) ->
     }
 }
 
-/// 读取会话消息页（全量正序或最新在前分页后翻正）。
+/// 读取会话消息页（全量正序或最新在前分页后翻正，正文按附件描述渲染）。
 ///
 /// 返回:
 /// - `(消息视图, total, has_more)`；`total` 为会话消息总数，`has_more` 仅分页路径有效。
@@ -221,7 +224,8 @@ async fn message_page(
         None => {
             let messages = storage.list_messages(session_id).await?;
             let total = messages.len() as u32;
-            Ok((messages.iter().map(message_view).collect(), total, false))
+            let views = message_views(storage.as_ref(), &messages).await;
+            Ok((views, total, false))
         }
         Some(limit) => {
             let limit = limit.clamp(1, MAX_MESSAGE_PAGE);
@@ -232,7 +236,41 @@ async fn message_page(
             messages.reverse();
             let total = storage.count_messages(session_id).await?;
             let has_more = (offset + limit) < i64::from(total);
-            Ok((messages.iter().map(message_view).collect(), total, has_more))
+            let views = message_views(storage.as_ref(), &messages).await;
+            Ok((views, total, has_more))
         }
     }
+}
+
+/// 组装消息视图（`[图片#{hash}]` 占位符按附件描述渲染为 `[图片: {描述}]`）。
+async fn message_views(storage: &dyn StorageBackend, messages: &[Message]) -> Vec<SessionMessageView> {
+    let render_map = load_attachment_render_map(storage, messages).await;
+    messages
+        .iter()
+        .map(|message| {
+            let mut view = message_view(message);
+            view.content = replace_image_placeholders(&view.content, &render_map);
+            view
+        })
+        .collect()
+}
+
+/// 加载消息附件渲染映射（查询失败记 warn 并按空映射降级：正文保留占位符原文）。
+async fn load_attachment_render_map(
+    storage: &dyn StorageBackend,
+    messages: &[Message],
+) -> HashMap<String, String> {
+    let message_ids: Vec<Uuid> = messages.iter().map(|m| m.id).collect();
+    if message_ids.is_empty() {
+        return HashMap::new();
+    }
+    let rows: Vec<MessageAttachment> =
+        match storage.list_attachments_by_messages(&message_ids).await {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!(error = %e, "会话消息附件查询失败，正文保留占位符原文");
+                return HashMap::new();
+            }
+        };
+    build_render_map(&rows)
 }

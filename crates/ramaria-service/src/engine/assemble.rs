@@ -29,6 +29,7 @@ use sqlx::SqlitePool;
 use crate::proactive::ProactiveSink;
 use crate::recall::RecallPolicy;
 use crate::seal::SealHooks;
+use crate::vision::VisionProbeState;
 
 use super::{Engine, EngineOptions};
 
@@ -59,6 +60,11 @@ impl Engine {
     /// 行为层待定池（crate 内编排与测试使用）。
     pub(crate) fn behavior_pending_ref(&self) -> &Arc<Mutex<PendingPool>> {
         &self.behavior_pending
+    }
+
+    /// 图片理解能力探测缓存槽（crate 内用例使用）。
+    pub(crate) fn vision_probe_slot(&self) -> &tokio::sync::Mutex<Option<VisionProbeState>> {
+        &self.vision_probe
     }
 }
 
@@ -164,6 +170,7 @@ impl Engine {
             seal_hooks: Arc::new(RwLock::new(SealHooks::default())),
             seal_allowed: AtomicBool::new(true),
             proactive_sink: Arc::new(RwLock::new(None)),
+            vision_probe: tokio::sync::Mutex::new(None),
             // 状态机初值：首次配置判定由 setup 用例推进（装配阶段不做网络探测）
             state: Mutex::new(AppState::NeedsSetup),
         })
@@ -209,6 +216,7 @@ impl Engine {
             seal_hooks: Arc::new(RwLock::new(SealHooks::default())),
             seal_allowed: AtomicBool::new(true),
             proactive_sink: Arc::new(RwLock::new(None)),
+            vision_probe: tokio::sync::Mutex::new(None),
             state: Mutex::new(AppState::NeedsSetup),
         }
     }

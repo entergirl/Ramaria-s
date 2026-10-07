@@ -7,7 +7,10 @@
 use super::*;
 use ramaria_core::error::RamariaError;
 use ramaria_core::traits::StoreCrud;
-use ramaria_core::types::{Message, MessageRole, MessageSource, Persona, PersonaKind};
+use ramaria_core::types::{
+    AttachmentStatus, InboundAttachmentKind, Message, MessageAttachment, MessageRole, MessageSource,
+    Persona, PersonaKind,
+};
 use ramaria_storage::SqliteStorage;
 
 /// 内存 SQLite 存储（跑 v1.3 + v1.4 migration）。
@@ -767,7 +770,7 @@ async fn render_block_text_formats_lines() {
         ),
     ];
     let chunk = split_messages(&msgs, Some("char-0001"), &UttSplitterConfig::default());
-    let text = render_block_text(&chunk[0], "char-0001", "小夏");
+    let text = render_block_text(&chunk[0], "char-0001", "小夏", &HashMap::new());
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(lines.len(), 2);
     assert!(
@@ -776,6 +779,108 @@ async fn render_block_text_formats_lines() {
         lines[0]
     );
     assert!(lines[1].contains("用户: 你也好"), "{}", lines[1]);
+}
+
+/// 附件描述映射：命中占位符注入 `[图片: {描述}]`；未命中 / 空映射保留原样。
+#[test]
+fn render_block_text_injects_image_descriptions() {
+    let msgs = vec![
+        Message::new(
+            Uuid::new_v4(),
+            MessageRole::User,
+            "看这个 [图片#aabbccdd] 还有 [图片#ffffffff]".to_string(),
+            MessageSource::Local,
+        ),
+        Message::new(
+            Uuid::new_v4(),
+            MessageRole::Assistant,
+            "好看".to_string(),
+            MessageSource::Local,
+        )
+        .with_persona_uid(Some("char-0001".to_string())),
+    ];
+    let chunk = split_messages(&msgs, Some("char-0001"), &UttSplitterConfig::default());
+
+    // 命中 → 注入描述；未命中 → 占位符保留
+    let mut map = HashMap::new();
+    map.insert("aabbccdd".to_string(), "一只橘猫".to_string());
+    let text = render_block_text(&chunk[0], "char-0001", "小夏", &map);
+    assert!(
+        text.contains("看这个 [图片: 一只橘猫] 还有 [图片#ffffffff]"),
+        "命中替换 / 未命中保留: {text}"
+    );
+
+    // 空映射 → 正文零变化
+    let plain = render_block_text(&chunk[0], "char-0001", "小夏", &HashMap::new());
+    assert!(plain.contains("[图片#aabbccdd]"), "空映射应保留占位符: {plain}");
+    assert!(!plain.contains("[图片:"), "空映射不应产生描述形态: {plain}");
+}
+
+/// 端到端：附件行（done + 描述）在增量构建时注入块文本；无描述的图保持占位符。
+#[tokio::test]
+async fn build_session_block_text_injects_attachment_descriptions() {
+    let storage = mem_storage().await;
+    let session = setup_session(&storage, "char-0001", 2, 1).await;
+
+    // 追加一条含图用户消息（占位符形态与导入落库一致）
+    let mut image_msg = Message::new(
+        session.id,
+        MessageRole::User,
+        "看这个 [图片#aabbccdd]".to_string(),
+        MessageSource::Local,
+    );
+    image_msg.created_at = 2_000_000;
+    storage.save_message(&image_msg).await.unwrap();
+
+    let attachment = MessageAttachment {
+        id: 0,
+        message_id: image_msg.id,
+        kind: InboundAttachmentKind::Image,
+        source_ref: "resources/images/a.jpg".to_string(),
+        md5: Some("aabbccddeeff00112233445566778899".to_string()),
+        size: Some(1024),
+        width: Some(640),
+        height: Some(480),
+        sub_type: None,
+        status: AttachmentStatus::Pending,
+        description: None,
+        description_model: None,
+        created_at: 0,
+        updated_at: 0,
+    };
+    storage
+        .insert_message_attachments(&[attachment])
+        .await
+        .expect("写入附件行应成功");
+    storage
+        .fill_attachment_done_by_md5(
+            "aabbccddeeff00112233445566778899",
+            "一只橘猫",
+            "mock-vision",
+        )
+        .await
+        .expect("回填描述应成功");
+
+    let stats = test_builder()
+        .build_session(&storage, &session, None)
+        .await
+        .unwrap();
+    assert_eq!(stats.chunks_created, 1);
+
+    let blocks = storage
+        .list_utt_blocks_by_persona("char-0001")
+        .await
+        .unwrap();
+    assert!(
+        blocks[0].block_text.contains("[图片: 一只橘猫]"),
+        "块文本应注入附件描述: {}",
+        blocks[0].block_text
+    );
+    assert!(
+        !blocks[0].block_text.contains("[图片#aabbccdd]"),
+        "命中后不应保留原占位符: {}",
+        blocks[0].block_text
+    );
 }
 
 #[tokio::test]

@@ -15,6 +15,7 @@ use super::{
     FeedbackConfig, IndexConfig, InferenceConfig, InjectionBudgetConfig, InjectionGate,
     KnowledgeConfig, L1Config, LayerDedupConfig, LoggingConfig, McpConfig, MiscConfig, PathConfig,
     ProactiveConfig, RetrievalConfig, SessionConfig, StyleConfig, ThresholdConfig, UttConfig,
+    VisionConfig,
 };
 
 // =========================================================
@@ -164,6 +165,10 @@ pub struct RamariaConfig {
     #[serde(default)]
     pub proactive: ProactiveConfig,
 
+    /// 图片理解配置（`[vision]`，图片附件的理解能力声明与单批上限）。
+    #[serde(default)]
+    pub vision: VisionConfig,
+
     /// 杂项（预留扩展位，当前无字段）
     #[serde(default)]
     pub misc: MiscConfig,
@@ -220,6 +225,7 @@ impl Default for RamariaConfig {
             layer_dedup: LayerDedupConfig::default(),
             mcp: McpConfig::default(),
             proactive: ProactiveConfig::default(),
+            vision: VisionConfig::default(),
             misc: MiscConfig::default(),
         }
     }

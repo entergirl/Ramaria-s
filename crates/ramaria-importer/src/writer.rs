@@ -8,6 +8,8 @@
 //!   以及跨文件去重查重（指纹已在库中的消息跳过）。
 //! - 画像归属经 `PersonaDispatch` 表达：双画像（私聊）按导出者身份二分，
 //!   多画像（群聊）按发送者平台 UID 查成员映射。
+//! - 附件随消息同批落 `message_attachments`：按导出目录定位本地文件，
+//!   命中置 pending，缺失或不可定位置 skipped；附件写入失败不阻塞导入。
 //! - 只关心 L0（messages/sessions）写入；L1/L2/L3 深度处理由调用方在拿到
 //!   返回的 `session_ids` 后自行触发，writer 不做任何 LLM 相关衔接。
 //! - 平台特有逻辑（QQ 号/QQ UID → persona UID、source 归属等）不在此层，
@@ -16,10 +18,11 @@
 //!   本层不重复实现去重规则。
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use ramaria_core::error::RamariaResult;
 use ramaria_core::privacy::mask_id;
-use ramaria_core::types::{MemberRole, SessionMember};
+use ramaria_core::types::{AttachmentStatus, MemberRole, MessageAttachment, SessionMember};
 use sqlx::SqlitePool;
 
 use crate::traits::{ImportSide, ImportedSession};
@@ -129,11 +132,18 @@ impl ImportWriter {
     ///   （如同一通话记录被导出两次）跳过，避免撞 messages.import_fingerprint 全局 UNIQUE。
     /// - 只记计数与指纹尾段，不记消息内容/昵称/QQ 号。
     ///
+    /// 附件:
+    /// - 每条消息携带的附件引用随消息同批写入 `message_attachments`；
+    /// - 按 `export_dir` 定位本地文件：命中置 `pending`，
+    ///   缺失 / 不可定位（source_ref 为空、绝对路径、服务器链接）置 `skipped`；
+    /// - 附件写入失败仅记录 error 日志，不阻塞本批导入。
+    ///
     /// 参数:
     /// - `pool`: 数据库连接池。
     /// - `sessions`: 解析后的 session 列表。
     /// - `dispatch`: 画像归属派发策略（双画像 / 多画像）。
     /// - `side`: 导入侧过滤（self|other|both）。
+    /// - `export_dir`: 导入导出 JSON 所在目录（附件定位根；None = 不定位，全部 skipped）。
     ///
     /// 返回:
     /// - `WriteOutcome`: 写入统计、创建的 session UUID 列表与画像缺失丢弃计数。
@@ -148,6 +158,7 @@ impl ImportWriter {
         sessions: &[ImportedSession],
         dispatch: PersonaDispatch<'_>,
         side: ImportSide,
+        export_dir: Option<&Path>,
     ) -> RamariaResult<WriteOutcome> {
         let mut sessions_written = 0usize;
         let mut messages_written = 0usize;
@@ -165,6 +176,8 @@ impl ImportWriter {
         // 全局 UNIQUE。此处与跨文件去重同语义，仅把去重范围扩到"本批已见"。
         let mut seen_fingerprints: std::collections::HashSet<String> =
             std::collections::HashSet::new();
+        // 附件行时间戳：本批统一取导入时刻（Unix 毫秒）
+        let now_ms = ramaria_core::types::now_ms();
 
         // 解构派发策略：导出者 UID 用于消息侧判定；模式标识用于日志排查
         let (self_uid, mode) = match &dispatch {
@@ -246,6 +259,7 @@ impl ImportWriter {
             // 构造消息（按发送者分配 persona_uid；单侧模式下跳过侧不会出现）
             // 写入前按指纹查重：已入库的消息跨文件去重跳过，避免 UNIQUE 冲突与重复入库。
             let mut batch: Vec<ramaria_core::types::Message> = Vec::with_capacity(kept.len());
+            let mut attachment_rows: Vec<MessageAttachment> = Vec::new();
             for (is_self, parsed) in kept {
                 // 跨文件去重：指纹已在库中 → 跳过（只记计数与指纹尾段，不记内容/昵称/QQ 号）
                 if !parsed.fingerprint.is_empty() {
@@ -318,8 +332,9 @@ impl ImportWriter {
 
                 // 入站规范投影：sender 身份两列取平台 ID 与发送时显示名（空串视为缺失）
                 let inbound = parsed.to_inbound();
+                let message_id = ramaria_core::types::new_id();
                 batch.push(ramaria_core::types::Message {
-                    id: ramaria_core::types::new_id(),
+                    id: message_id,
                     session_id: db_session.id,
                     role: if parsed.role == "user" {
                         ramaria_core::types::MessageRole::User
@@ -336,6 +351,34 @@ impl ImportWriter {
                     sender_ref: non_empty_opt(&inbound.sender.platform_id),
                     sender_name: non_empty_opt(&inbound.sender.display_name),
                 });
+
+                // 附件行：本地文件定位成功 → pending；缺失 / 不可定位 → skipped
+                for attachment_ref in &parsed.attachments {
+                    let status = if export_dir
+                        .and_then(|dir| resolve_attachment_file(dir, &attachment_ref.source_ref))
+                        .is_some()
+                    {
+                        AttachmentStatus::Pending
+                    } else {
+                        AttachmentStatus::Skipped
+                    };
+                    attachment_rows.push(MessageAttachment {
+                        id: 0,
+                        message_id,
+                        kind: attachment_ref.kind,
+                        source_ref: attachment_ref.source_ref.clone(),
+                        md5: attachment_ref.md5.as_ref().map(|md5| md5.to_lowercase()),
+                        size: attachment_ref.size,
+                        width: attachment_ref.width,
+                        height: attachment_ref.height,
+                        sub_type: attachment_ref.sub_type.clone(),
+                        status,
+                        description: None,
+                        description_model: None,
+                        created_at: now_ms,
+                        updated_at: now_ms,
+                    });
+                }
             }
 
             // 单事务批量写入（替代逐条 INSERT，显著降低大文件导入的 fsync 开销）；
@@ -399,6 +442,19 @@ impl ImportWriter {
                 }
             }
 
+            // 附件行写入：与成员写入同口径，失败只记 error 不阻塞导入
+            if !attachment_rows.is_empty() {
+                if let Err(e) =
+                    ramaria_storage::repo::attachments::insert_batch(pool, &attachment_rows).await
+                {
+                    tracing::error!(
+                        session_id = %db_session.id,
+                        error = %e,
+                        "消息附件写入失败（不阻塞导入；附件可在后续重新导入时补齐）"
+                    );
+                }
+            }
+
             session_ids.push(db_session.id);
             sessions_written += 1;
             messages_written += msg_count;
@@ -448,6 +504,29 @@ impl ImportWriter {
             messages_dropped,
         })
     }
+}
+
+/// 定位附件本地文件。
+///
+/// 规则:
+/// - `source_ref` 为导出根相对路径（非空、非 "/" 开头、非 http(s):// 开头）时
+///   拼为 `{export_dir}/{source_ref}`；
+/// - 仅 `is_file()` 命中返回 `Some`；否则 None（服务器链接 / 绝对路径 /
+///   文件缺失 / 空引用一律视为不可定位）。
+///
+/// 参数:
+/// - `export_dir`: 导出 JSON 所在目录（附件根）。
+/// - `source_ref`: 已规范化的附件引用。
+fn resolve_attachment_file(export_dir: &Path, source_ref: &str) -> Option<PathBuf> {
+    if source_ref.is_empty()
+        || source_ref.starts_with('/')
+        || source_ref.starts_with("http://")
+        || source_ref.starts_with("https://")
+    {
+        return None;
+    }
+    let path = export_dir.join(source_ref);
+    if path.is_file() { Some(path) } else { None }
 }
 
 /// 补偿删除本批新建的 session（写入失败回滚）。

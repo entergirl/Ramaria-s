@@ -1794,7 +1794,8 @@ var RamariaSettingsView = (function () {
         section.className = 'settings-section';
         section.innerHTML =
             '<div class="settings-section-title">🔒 隐私设置</div>' +
-            '<div class="settings-section-desc">管理线上服务的隐私确认和数据控制。</div>';
+            '<div class="settings-section-desc">管理线上服务的隐私确认和数据控制。' +
+            '使用线上模型时，对话内容、记忆上下文与导入图片的理解请求也会发送到 API 服务器。</div>';
 
         var card = document.createElement('div');
         card.className = 'settings-card';
@@ -2587,6 +2588,16 @@ var RamariaSettingsView = (function () {
                 { path: ['topic_cooldown_hours'], label: '选题去重冷却（小时）', type: 'number', def: 24, hint: '同一选题键在冷却窗口内不复选（与投递冷却独立）' },
                 { path: ['silence_backoff_days'], label: '沉默退避阈值（天）', type: 'number', def: 3, hint: '连续未回应达到后进入退避（降频 / 暂停）' },
                 { path: ['startup_grace_days'], label: '首次启用宽限期（天）', type: 'number', def: 3, hint: '首次启用后的宽限期内不触发' },
+            ],
+        },
+        {
+            key: 'vision',
+            section: ['vision'],
+            title: '🖼️ 图片理解（vision）',
+            desc: '导入聊天记录中图片的理解开关与批次上限；需要当前对话模型支持图片识别，线上模型会产生图片外发请求。',
+            fields: [
+                { path: ['model_supports_vision'], label: '模型支持图片识别', type: 'bool', def: false, hint: '显式声明当前对话模型可识图；关闭时图片理解整体跳过（保留占位符）' },
+                { path: ['batch_limit'], label: '单批理解上限（张）', type: 'number', min: 0, def: 0, hint: '单次理解批次处理的图片数量上限；0 = 不限' },
             ],
         },
     ];

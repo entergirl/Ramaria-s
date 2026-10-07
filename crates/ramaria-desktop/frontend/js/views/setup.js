@@ -200,8 +200,9 @@ var RamariaSetupView = (function () {
                     '<div class="setup-field-hint">必须与 API 服务商的模型标识符一致。如 deepseek-chat、gpt-4o</div>' +
                 '</div>' +
                 '<div class="setup-privacy-hint">' +
-                    '<strong>隐私提示：</strong>对话内容（含记忆上下文）将发送给线上 API 服务商处理。<br>' +
-                    '敏感对话建议使用本地部署模式。' +
+                    '<strong>隐私提示：</strong>对话内容（含记忆上下文）将发送给线上 API 服务商处理；' +
+                    '开启图片理解后，导入图片的内容也会随理解请求发送。<br>' +
+                    '敏感对话或敏感图片建议使用本地部署模式。' +
                 '</div>' +
             '</div>' +
 

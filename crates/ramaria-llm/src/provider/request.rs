@@ -2,6 +2,7 @@
 //!
 //! 设计特点:
 //! - `build_messages`: 将 `ChatRequest` 组装为 OpenAI 兼容消息数组（system / history / user；空 user_message 跳过）
+//! - `build_vision_messages`: 图片理解请求的消息数组（system 字符串 content + user 数组 content）
 //! - memory_context 以 `<memory_context>` XML 标签包裹，与系统指令明确分隔
 //! - 用户消息含已知注入模式时追加防御性前缀（不拒绝、不修改原始内容）
 //! - `cache_key`: sha256(model_id + 模板版本 + 采样参数 + canonical messages JSON)
@@ -186,4 +187,51 @@ pub(crate) fn sanitize_user_message(msg: &str) -> String {
     } else {
         msg.to_string()
     }
+}
+
+// =========================================================
+// 图片理解消息组装
+// =========================================================
+
+/// 构造图片理解请求的消息数组。
+///
+/// 组装规则:
+/// 1. `system` 消息 = `request.system_prompt`（字符串 content）；
+/// 2. `user` 消息 = 数组 content：文本元素（`request.user_message`）
+///    加按序排列的 `image_url` 元素（OpenAI 兼容多模态形态）。
+///
+/// 参数:
+/// - `request`: 业务层聊天请求（取 system_prompt 与 user_message）。
+/// - `image_data_uris`: 图片 data URI 列表（`data:image/...;base64,...`），按序随用户消息发送。
+///
+/// 返回:
+/// - `Vec<serde_json::Value>`，可直接序列化到 OpenAI API 的 `messages` 字段。
+pub(crate) fn build_vision_messages(
+    request: &ChatRequest,
+    image_data_uris: &[String],
+) -> Vec<serde_json::Value> {
+    let mut messages: Vec<serde_json::Value> = Vec::new();
+
+    messages.push(serde_json::json!({
+        "role": "system",
+        "content": request.system_prompt,
+    }));
+
+    let mut content: Vec<serde_json::Value> = Vec::new();
+    content.push(serde_json::json!({
+        "type": "text",
+        "text": request.user_message,
+    }));
+    for data_uri in image_data_uris {
+        content.push(serde_json::json!({
+            "type": "image_url",
+            "image_url": { "url": data_uri },
+        }));
+    }
+    messages.push(serde_json::json!({
+        "role": "user",
+        "content": content,
+    }));
+
+    messages
 }

@@ -944,3 +944,55 @@ quiet_hours = "23:00-07:30"
         "主动对话组应参与 DB settings 扁平同步"
     );
 }
+
+// =========================================================
+// 图片理解（[vision]）配置测试
+// =========================================================
+
+#[test]
+fn vision_config_defaults_follow_decisions() {
+    let cfg = RamariaConfig::default();
+    // 能力声明默认关闭：未显式声明可识图时图片理解整体跳过
+    assert!(
+        !cfg.vision.model_supports_vision,
+        "图片识别能力声明默认关闭"
+    );
+    // 单批上限默认 0 = 不限
+    assert_eq!(cfg.vision.batch_limit, 0, "单批理解上限默认不限");
+}
+
+#[test]
+fn vision_config_toml_roundtrip_and_partial() {
+    // 旧配置文件（无 [vision]）解析后回退默认（声明关闭、上限不限）
+    let legacy = r#"
+version = "2.0.0"
+schema_version = 1
+"#;
+    let cfg: RamariaConfig = toml::from_str(legacy).expect("旧配置应可解析");
+    assert!(
+        !cfg.vision.model_supports_vision,
+        "缺 [vision] 时回退默认关闭"
+    );
+    assert_eq!(cfg.vision.batch_limit, 0);
+
+    // 显式配置可无损恢复；只写部分键时其余键回退默认值
+    let toml_text = r#"
+[vision]
+model_supports_vision = true
+"#;
+    let cfg2: RamariaConfig = toml::from_str(toml_text).expect("图片理解配置应可解析");
+    assert!(cfg2.vision.model_supports_vision);
+    assert_eq!(cfg2.vision.batch_limit, 0, "未写的键回退默认值");
+
+    // 扁平化同步覆盖本组（settings 表 config.* 键）
+    let flat = config_sync_flatten(&cfg2);
+    assert_eq!(
+        flat.get("vision.model_supports_vision"),
+        Some(&serde_json::json!(true))
+    );
+    assert_eq!(
+        flat.get("vision.batch_limit"),
+        Some(&serde_json::json!(0)),
+        "图片理解组应参与 DB settings 扁平同步"
+    );
+}

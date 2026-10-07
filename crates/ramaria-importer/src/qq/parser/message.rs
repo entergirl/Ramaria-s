@@ -9,11 +9,12 @@
 
 use crate::traits::{ImportReport, ParsedMessage};
 
-use ramaria_core::types::MemberRole;
+use ramaria_core::types::{InboundAttachmentKind, InboundAttachmentRef, MemberRole};
 
 use super::elements::{
-    clean_image_placeholders, extract_reply_body, has_image_element, json_element_description,
-    make_fingerprint, reply_element,
+    extract_reply_body, fallback_image_placeholder, has_image_element, image_element_infos,
+    json_element_description, make_fingerprint, normalize_source_ref, render_image_placeholders,
+    reply_element,
 };
 
 // =========================================================
@@ -100,6 +101,21 @@ pub(super) fn parse_json_message(
         .trim()
         .to_string();
 
+    // 图片元素信息与附件引用（按元素顺序；各分支返回点均携带）
+    let image_infos = image_element_infos(&elements);
+    let attachments: Vec<InboundAttachmentRef> = image_infos
+        .iter()
+        .map(|info| InboundAttachmentRef {
+            kind: InboundAttachmentKind::Image,
+            source_ref: normalize_source_ref(info),
+            md5: info.md5.clone(),
+            size: info.size,
+            width: info.width,
+            height: info.height,
+            sub_type: info.sub_type.clone(),
+        })
+        .collect();
+
     let sender_uid = sender
         .and_then(|s| s.get("uid"))
         .and_then(|u| u.as_str())
@@ -174,6 +190,7 @@ pub(super) fn parse_json_message(
                 sender_name: sender_name.to_string(),
                 group_nickname: sender_group_nickname.clone(),
                 member_role: sender_role,
+                attachments: attachments.clone(),
             });
         }
         report.skipped_empty += 1;
@@ -186,12 +203,13 @@ pub(super) fn parse_json_message(
         // "text": 普通文本消息（可能含图片或表情元素）
         TYPE_TEXT => {
             if has_image_element(&elements) {
-                // 含图片元素：清理图片占位符，统一为 [图片]
-                let cleaned = clean_image_placeholders(&raw_text);
-                let result = if cleaned.is_empty() {
-                    "[图片]".to_string()
+                // 含图片元素：按元素信息渲染占位符为 [图片#{hash}]；
+                // 无可渲染正文时回退为纯图片占位符
+                let rendered = render_image_placeholders(&raw_text, &image_infos);
+                let result = if rendered.trim().is_empty() {
+                    fallback_image_placeholder(&image_infos)
                 } else {
-                    cleaned
+                    rendered
                 };
                 report.success_image += 1;
                 result
@@ -202,9 +220,9 @@ pub(super) fn parse_json_message(
             }
         }
 
-        // "reply": 回复/引用消息
+        // "reply": 回复/引用消息（可承载图片元素与占位符文本）
         TYPE_REPLY => {
-            if let Some(reply_elem) = reply_element(&elements) {
+            let assembled = if let Some(reply_elem) = reply_element(&elements) {
                 // 有 reply 元素：格式化「回复 sender: content」引用头部
                 let quoted_sender = reply_elem
                     .get("senderName")
@@ -228,7 +246,9 @@ pub(super) fn parse_json_message(
                 report.degraded_reply_fallback += 1;
                 tracing::debug!(time = %time_str, "回复消息无reply元素，降级提取正文");
                 extract_reply_body(&raw_text)
-            }
+            };
+            // 引用消息可承载图片元素：对组装完成的正文渲染占位符
+            render_image_placeholders(&assembled, &image_infos)
         }
 
         // "audio": 语音消息 → 降级为文本占位符
@@ -326,6 +346,7 @@ pub(super) fn parse_json_message(
         sender_name: sender_name.to_string(),
         group_nickname: sender_group_nickname,
         member_role: sender_role,
+        attachments: attachments.clone(),
     })
 }
 

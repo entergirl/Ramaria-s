@@ -49,6 +49,7 @@ use crate::index::{IndexBuildFailure, IndexStamp};
 use crate::proactive::ProactiveSink;
 use crate::recall::RecallPolicy;
 use crate::seal::SealHooks;
+use crate::vision::VisionProbeState;
 
 mod assemble;
 mod index_state;
@@ -191,6 +192,8 @@ pub struct Engine {
     seal_allowed: AtomicBool,
     /// 主动消息投递接收端（宿主注册制；未注册时调度静默丢弃）。
     proactive_sink: Arc<RwLock<Option<Arc<dyn ProactiveSink>>>>,
+    /// 图片理解能力探测缓存（按 model_id + base_url 键控；None = 本进程尚未探测）。
+    vision_probe: tokio::sync::Mutex<Option<VisionProbeState>>,
 }
 
 #[cfg(test)]

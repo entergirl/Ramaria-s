@@ -46,6 +46,7 @@ macro_rules! parse_enum_fallback {
     };
 }
 
+pub mod attachments;
 pub mod backend_config;
 pub mod background_jobs;
 pub mod behavior_rules;

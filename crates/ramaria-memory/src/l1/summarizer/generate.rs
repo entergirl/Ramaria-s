@@ -7,6 +7,8 @@
 //! - validate_and_build: 字段校验（五档钳制 / 六选一 / evidence_notes 后处理）。
 //! - 隐私红线：LLM 原始响应不落日志，仅记长度；所有可恢复错误转 RamariaError。
 
+use std::collections::HashMap;
+
 use ramaria_core::keyword::{KeywordPoolRow, KeywordToken};
 use ramaria_core::traits::ChatRequest;
 use ramaria_core::{MemoryL1, RamariaError, RamariaResult};
@@ -35,11 +37,19 @@ impl<'a> L1Summarizer<'a> {
     /// - User 消息: `用户：{content}`
     /// - Assistant 消息: `助手：{content}`
     /// - System/Tool 消息: 跳过（不参与摘要）
-    fn format_conversation(&self, messages: &[ramaria_core::types::Message]) -> String {
+    ///
+    /// 参数:
+    /// - `descriptions`: 附件描述映射（`[图片#{hash}]` → 描述；空映射时零变化）。
+    fn format_conversation(
+        &self,
+        messages: &[ramaria_core::types::Message],
+        descriptions: &HashMap<String, String>,
+    ) -> String {
         format_messages(
             messages,
             &self.config.user_prefix,
             &self.config.assistant_prefix,
+            descriptions,
         )
     }
 
@@ -51,6 +61,7 @@ impl<'a> L1Summarizer<'a> {
     /// - `session_id`: 来源 session。
     /// - `chunk`: 当前块（其消息为对话原文）。
     /// - `prior_context`: 上一块的上文文本（None = 无上一块，v1.4 独立摘要路径）。
+    /// - `descriptions`: 附件描述映射（对话格式化时渲染图片占位符）。
     ///
     /// 返回:
     /// - 校验后的 `(MemoryL1, 关键词列表)`（尚未写入存储，由调用方统一写库）。
@@ -59,9 +70,10 @@ impl<'a> L1Summarizer<'a> {
         session_id: Uuid,
         chunk: &UttChunk,
         prior_context: Option<&str>,
+        descriptions: &HashMap<String, String>,
     ) -> RamariaResult<(MemoryL1, Vec<KeywordToken>)> {
         // 1. 格式化当前块对话文本
-        let conversation = self.format_conversation(&chunk.messages);
+        let conversation = self.format_conversation(&chunk.messages, descriptions);
 
         // 2. 获取关键词候选
         let keyword_candidates = self.get_keyword_candidates().await;

@@ -5,6 +5,7 @@
 //! - 用例为确定性断言，可离线运行。
 
 use super::*;
+use ramaria_core::types::{AttachmentStatus, InboundAttachmentKind, MessageAttachment};
 
 // =========================================================
 // summarize_session 集成测试
@@ -476,5 +477,112 @@ async fn pool_snapshot_read_once_per_session() {
         storage.pool_read_count(),
         1,
         "词池快照应恰好读取一次（与关键词数量无关）"
+    );
+}
+
+// =========================================================
+// 图片描述注入（附件渲染）
+// =========================================================
+
+/// 构造图片附件行（描述 / 状态由场景给定）。
+fn image_attachment(
+    message_id: Uuid,
+    md5: &str,
+    status: AttachmentStatus,
+    description: Option<&str>,
+) -> MessageAttachment {
+    MessageAttachment {
+        id: 0,
+        message_id,
+        kind: InboundAttachmentKind::Image,
+        source_ref: "resources/images/a.jpg".to_string(),
+        md5: Some(md5.to_string()),
+        size: None,
+        width: None,
+        height: None,
+        sub_type: None,
+        status,
+        description: description.map(str::to_string),
+        description_model: Some("mock-vision".to_string()),
+        created_at: 0,
+        updated_at: 0,
+    }
+}
+
+/// 附件描述注入：消息含 `[图片#{hash}]` 且附件已理解 → prompt 注入 `[图片: {描述}]`。
+#[tokio::test]
+async fn summarize_session_injects_attachment_description_into_prompt() {
+    use crate::l1::mock::{MockLlmProvider, MockStorage, make_msg};
+
+    let session_id = Uuid::new_v4();
+    let storage = MockStorage::new();
+    let image_msg = make_msg(session_id, MessageRole::User, "看这个 [图片#aabbccdd] 好看吗");
+    let reply = make_msg(session_id, MessageRole::Assistant, "好看呀，构图很棒");
+    storage.add_messages(session_id, vec![image_msg.clone(), reply]);
+    storage.add_attachment(image_attachment(
+        image_msg.id,
+        "aabbccddeeff00112233445566778899",
+        AttachmentStatus::Done,
+        Some("一只橘猫"),
+    ));
+
+    let llm = MockLlmProvider::new("test-model");
+    llm.set_response(llm_json("图片闲聊", None));
+    let summarizer = L1Summarizer::new(&llm, &storage, L1SummarizerConfig::default());
+    summarizer
+        .summarize_session(session_id)
+        .await
+        .expect("摘要应成功");
+
+    let request = llm.last_request().expect("应记录 LLM 请求");
+    assert!(
+        request
+            .user_message
+            .contains("看这个 [图片: 一只橘猫] 好看吗"),
+        "prompt 应注入附件描述: {}",
+        request.user_message
+    );
+    assert!(
+        !request.user_message.contains("[图片#aabbccdd]"),
+        "命中后不应保留原占位符: {}",
+        request.user_message
+    );
+}
+
+/// 无已完成描述（pending）→ prompt 保留占位符原文（零变化）。
+#[tokio::test]
+async fn summarize_session_keeps_placeholder_without_description() {
+    use crate::l1::mock::{MockLlmProvider, MockStorage, make_msg};
+
+    let session_id = Uuid::new_v4();
+    let storage = MockStorage::new();
+    let image_msg = make_msg(session_id, MessageRole::User, "看这个 [图片#aabbccdd] 好看吗");
+    storage.add_messages(session_id, vec![image_msg.clone()]);
+    // pending 行即使有描述也不渲染（渲染映射仅收录已完成行）
+    storage.add_attachment(image_attachment(
+        image_msg.id,
+        "aabbccddeeff00112233445566778899",
+        AttachmentStatus::Pending,
+        Some("未完成"),
+    ));
+
+    let llm = MockLlmProvider::new("test-model");
+    llm.set_response(llm_json("图片闲聊", None));
+    let summarizer = L1Summarizer::new(&llm, &storage, L1SummarizerConfig::default());
+    summarizer
+        .summarize_session(session_id)
+        .await
+        .expect("摘要应成功");
+
+    let request = llm.last_request().expect("应记录 LLM 请求");
+    assert!(
+        request.user_message.contains("[图片#aabbccdd]"),
+        "未完成描述应保留占位符: {}",
+        request.user_message
+    );
+    assert!(
+        !request.user_message.contains("[图片:"),
+        "未完成描述不应渲染: {}",
+        request.user_message
     );
 }

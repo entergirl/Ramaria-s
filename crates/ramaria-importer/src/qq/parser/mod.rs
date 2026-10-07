@@ -26,7 +26,8 @@ pub use stream::parse_qq_export;
 // 单元测试跨子模块引用的私有项（测试构建下对 `qq::parser::tests` 可见）
 #[cfg(test)]
 use elements::{
-    clean_image_placeholders, extract_reply_body, json_element_description, make_fingerprint,
+    extract_reply_body, fallback_image_placeholder, image_element_infos, json_element_description,
+    make_fingerprint, normalize_source_ref, render_image_placeholders,
 };
 #[cfg(test)]
 use message::parse_json_message;

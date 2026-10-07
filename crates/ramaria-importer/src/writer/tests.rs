@@ -6,11 +6,14 @@
 //! - 覆盖失败补偿删除（不留半成品会话）与批量写入整体回滚
 //! - 覆盖画像缺失的丢弃统计（session 级与消息级）
 //! - 覆盖多画像（群聊）派发：成员映射命中 / 未命中、会话归属缺失与成员补齐
+//! - 附件采集用例见子模块 `attachments`（pending / skipped 定位口径与失败补偿）
 //! - 使用单连接内存库与最小 schema，不依赖真实数据
 
-use ramaria_core::types::MemberRole;
+use ramaria_core::types::{InboundAttachmentKind, InboundAttachmentRef, MemberRole};
 
 use super::*;
+
+mod attachments;
 
 /// 构造一个含 self + other 各 1 条消息的 session。
 fn make_side_session(self_content: &str, other_content: &str) -> crate::traits::ImportedSession {
@@ -26,6 +29,7 @@ fn make_side_session(self_content: &str, other_content: &str) -> crate::traits::
                 sender_name: "我".to_string(),
                 group_nickname: None,
                 member_role: None,
+                attachments: Vec::new(),
             },
             crate::traits::ParsedMessage {
                 role: "assistant".to_string(),
@@ -37,6 +41,7 @@ fn make_side_session(self_content: &str, other_content: &str) -> crate::traits::
                 sender_name: "对方".to_string(),
                 group_nickname: None,
                 member_role: None,
+                attachments: Vec::new(),
             },
         ],
         started_at: 1000,
@@ -104,6 +109,28 @@ async fn test_pool() -> sqlx::SqlitePool {
     .execute(&pool)
     .await
     .unwrap();
+    // 消息附件表（覆盖附件写入所需列；外键级联链与生产 schema 一致）
+    sqlx::query(
+        "CREATE TABLE message_attachments (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_id        TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+            kind              TEXT NOT NULL,
+            source_ref        TEXT NOT NULL DEFAULT '',
+            md5               TEXT,
+            size              INTEGER,
+            width             INTEGER,
+            height            INTEGER,
+            sub_type          TEXT,
+            status            TEXT NOT NULL DEFAULT 'pending',
+            description       TEXT,
+            description_model TEXT,
+            created_at        INTEGER NOT NULL DEFAULT 0,
+            updated_at        INTEGER NOT NULL DEFAULT 0
+        )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     pool
 }
 
@@ -143,6 +170,7 @@ async fn write_l0_side_me_filters_other() {
             other_persona_uid: None, // side=Me：对方画像不创建
         },
         ImportSide::Me,
+        None,
     )
     .await
     .unwrap();
@@ -169,6 +197,7 @@ async fn write_l0_side_other_filters_self() {
             other_persona_uid: Some("char-0001"),
         },
         ImportSide::Other,
+        None,
     )
     .await
     .unwrap();
@@ -195,6 +224,7 @@ async fn write_l0_side_both_keeps_all() {
             other_persona_uid: Some("char-0001"),
         },
         ImportSide::Both,
+        None,
     )
     .await
     .unwrap();
@@ -225,6 +255,7 @@ async fn write_l0_side_skips_empty_session() {
             other_persona_uid: Some("char-0001"),
         },
         ImportSide::Other,
+        None,
     )
     .await
     .unwrap();
@@ -252,6 +283,7 @@ fn make_dedup_session(self_content: &str, fingerprint: &str) -> crate::traits::I
             sender_name: "我".to_string(),
             group_nickname: None,
             member_role: None,
+            attachments: Vec::new(),
         }],
         started_at: 1000,
         ended_at: 2000,
@@ -288,6 +320,7 @@ async fn write_l0_skips_existing_fingerprint() {
             other_persona_uid: None,
         },
         ImportSide::Me,
+        None,
     )
     .await
     .unwrap();
@@ -318,6 +351,7 @@ async fn write_l0_dedups_within_batch_same_fingerprint() {
         sender_name: "我".to_string(),
         group_nickname: None,
         member_role: None,
+        attachments: Vec::new(),
     });
 
     let outcome = ImportWriter::write_l0(
@@ -329,6 +363,7 @@ async fn write_l0_dedups_within_batch_same_fingerprint() {
             other_persona_uid: None,
         },
         ImportSide::Me,
+        None,
     )
     .await
     .unwrap();
@@ -358,6 +393,7 @@ async fn write_l0_dedups_across_sessions_same_fingerprint() {
             other_persona_uid: None,
         },
         ImportSide::Me,
+        None,
     )
     .await
     .unwrap();
@@ -389,6 +425,7 @@ async fn write_l0_writes_distinct_fingerprint() {
             other_persona_uid: None,
         },
         ImportSide::Me,
+        None,
     )
     .await
     .unwrap();
@@ -415,6 +452,7 @@ async fn write_l0_batch_failure_removes_created_session() {
         sender_name: "我".to_string(),
         group_nickname: None,
         member_role: None,
+        attachments: Vec::new(),
     });
 
     let result = ImportWriter::write_l0(
@@ -426,6 +464,7 @@ async fn write_l0_batch_failure_removes_created_session() {
             other_persona_uid: None,
         },
         ImportSide::Me,
+        None,
     )
     .await;
 
@@ -455,6 +494,7 @@ async fn write_l0_owner_persona_missing_counts_dropped() {
             other_persona_uid: Some("char-0001"),
         },
         ImportSide::Me,
+        None,
     )
     .await
     .unwrap();
@@ -484,6 +524,7 @@ async fn write_l0_missing_self_persona_drops_self_messages() {
             other_persona_uid: Some("char-0001"),
         },
         ImportSide::Both,
+        None,
     )
     .await
     .unwrap();
@@ -541,6 +582,7 @@ async fn write_l0_persists_sender_identity_and_members() {
             other_persona_uid: Some("char-0001"),
         },
         ImportSide::Both,
+        None,
     )
     .await
     .unwrap();
@@ -589,6 +631,7 @@ async fn write_l0_member_aggregation_merges_same_sender() {
                 sender_name: "名一".to_string(),
                 group_nickname: None,
                 member_role: None,
+                attachments: Vec::new(),
             },
             crate::traits::ParsedMessage {
                 role: "user".to_string(),
@@ -600,6 +643,7 @@ async fn write_l0_member_aggregation_merges_same_sender() {
                 sender_name: "名二".to_string(),
                 group_nickname: None,
                 member_role: None,
+                attachments: Vec::new(),
             },
             crate::traits::ParsedMessage {
                 role: "user".to_string(),
@@ -611,6 +655,7 @@ async fn write_l0_member_aggregation_merges_same_sender() {
                 sender_name: String::new(),
                 group_nickname: None,
                 member_role: None,
+                attachments: Vec::new(),
             },
         ],
         started_at: 100,
@@ -626,6 +671,7 @@ async fn write_l0_member_aggregation_merges_same_sender() {
             other_persona_uid: None,
         },
         ImportSide::Me,
+        None,
     )
     .await
     .unwrap();
@@ -660,6 +706,7 @@ async fn write_l0_empty_sender_id_writes_null_columns() {
                 sender_name: String::new(),
                 group_nickname: None,
                 member_role: None,
+                attachments: Vec::new(),
             },
             crate::traits::ParsedMessage {
                 role: "user".to_string(),
@@ -671,6 +718,7 @@ async fn write_l0_empty_sender_id_writes_null_columns() {
                 sender_name: "我".to_string(),
                 group_nickname: None,
                 member_role: None,
+                attachments: Vec::new(),
             },
         ],
         started_at: 1000,
@@ -686,6 +734,7 @@ async fn write_l0_empty_sender_id_writes_null_columns() {
             other_persona_uid: Some("char-0001"),
         },
         ImportSide::Both,
+        None,
     )
     .await
     .unwrap();
@@ -768,6 +817,7 @@ fn make_multi_session() -> crate::traits::ImportedSession {
         sender_name: name.to_string(),
         group_nickname: None,
         member_role: None,
+        attachments: Vec::new(),
     };
     crate::traits::ImportedSession {
         messages: vec![
@@ -796,6 +846,7 @@ async fn write_l0_multi_dispatches_personas_and_persists_members() {
             owner_uid: Some("char-group"),
         },
         ImportSide::Both,
+        None,
     )
     .await
     .unwrap();
@@ -852,6 +903,7 @@ async fn write_l0_multi_unknown_sender_dropped() {
         sender_name: "路人".to_string(),
         group_nickname: None,
         member_role: None,
+        attachments: Vec::new(),
     });
     session.messages.push(crate::traits::ParsedMessage {
         role: "assistant".to_string(),
@@ -863,6 +915,7 @@ async fn write_l0_multi_unknown_sender_dropped() {
         sender_name: String::new(),
         group_nickname: None,
         member_role: None,
+        attachments: Vec::new(),
     });
     let members = make_multi_members();
 
@@ -875,6 +928,7 @@ async fn write_l0_multi_unknown_sender_dropped() {
             owner_uid: Some("char-group"),
         },
         ImportSide::Both,
+        None,
     )
     .await
     .unwrap();
@@ -904,6 +958,7 @@ async fn write_l0_multi_missing_owner_drops_session() {
             owner_uid: None,
         },
         ImportSide::Both,
+        None,
     )
     .await
     .unwrap();
@@ -931,6 +986,7 @@ async fn write_l0_multi_side_filters_messages() {
             owner_uid: Some("user-0001"),
         },
         ImportSide::Me,
+        None,
     )
     .await
     .unwrap();
@@ -948,6 +1004,7 @@ async fn write_l0_multi_side_filters_messages() {
             owner_uid: Some("char-u_a"),
         },
         ImportSide::Other,
+        None,
     )
     .await
     .unwrap();

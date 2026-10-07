@@ -341,6 +341,7 @@ async fn import_dual(
             other_persona_uid: other_persona_uid.as_deref(),
         },
         req.side,
+        req.file_path.parent(),
     )
     .await
     .map_err(|e| {
@@ -573,6 +574,7 @@ async fn import_group(
             owner_uid: owner_uid.as_deref(),
         },
         req.side,
+        req.file_path.parent(),
     )
     .await
     .map_err(|e| {

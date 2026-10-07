@@ -490,6 +490,7 @@ pub(crate) async fn ensure_privacy_with_engine(
             eprintln!("    地址  : {base_url}");
             eprintln!();
             eprintln!("  你的对话内容将发送至该服务商的服务器。");
+            eprintln!("  开启图片理解后，导入图片的内容也会随理解请求发送。");
             eprintln!("  请确认你已阅读并同意该服务商的隐私政策。");
             eprintln!();
 

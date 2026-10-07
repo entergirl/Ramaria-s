@@ -1,7 +1,8 @@
 //! crates/ramaria-importer/src/qq/parser/tests.rs - QQ JSON 解析器单元测试
 //!
 //! 设计特点:
-//! - 覆盖图片占位符清理 / 回复正文提取 / 指纹性质 / 会话切割 / 日期换算
+//! - 覆盖图片元素提取与占位符渲染（配对、回退链、幂等）/ 回复正文提取 /
+//!   指纹性质 / 会话切割 / 日期换算
 //! - 覆盖 JSON 元素描述提取优先级（description > title > None）
 //! - 流式解析与整读参考实现在大导出上的会话/报告快照等价对照
 //! - 全程使用临时文件与内存数据，不依赖真实 QQ 数据
@@ -16,20 +17,218 @@ use crate::traits::{ImportReport, ImportedSession, ParsedMessage};
 
 use super::*;
 
-// -- 图片占位符清理 --
+// -- 图片元素提取与占位符渲染 --
 
+/// 构造 image 元素 JSON（filename + md5）。
+fn image_json(filename: &str, md5: &str) -> serde_json::Value {
+    serde_json::json!({"type": "image", "data": {"filename": filename, "md5": md5}})
+}
+
+/// image_element_infos：全字段读取，md5 小写规范化。
 #[test]
-fn clean_image_placeholder_replaces() {
-    assert_eq!(clean_image_placeholders("[图片: abc123]"), "[图片]");
+fn image_element_infos_reads_full_fields() {
+    let elements = vec![serde_json::json!({
+        "type": "image",
+        "data": {
+            "filename": "EA12E26D5376DBD64D163300CE6EECE6.jpg",
+            "size": 241558,
+            "width": 960,
+            "height": 1728,
+            "md5": "EA12E26D5376DBD64D163300CE6EECE6",
+            "url": "resources/images/ea12_EA12.jpg",
+            "localPath": "images/ea12_EA12.jpg",
+            "subType": "photo"
+        }
+    })];
+    let infos = image_element_infos(&elements);
+    assert_eq!(infos.len(), 1);
     assert_eq!(
-        clean_image_placeholders("[图片: 1234567890abcdef.jpg]"),
-        "[图片]"
+        infos[0].md5.as_deref(),
+        Some("ea12e26d5376dbd64d163300ce6eece6"),
+        "md5 应小写规范化"
+    );
+    assert_eq!(
+        infos[0].filename.as_deref(),
+        Some("EA12E26D5376DBD64D163300CE6EECE6.jpg")
+    );
+    assert_eq!(
+        infos[0].url.as_deref(),
+        Some("resources/images/ea12_EA12.jpg")
+    );
+    assert_eq!(infos[0].local_path.as_deref(), Some("images/ea12_EA12.jpg"));
+    assert_eq!(infos[0].size, Some(241558));
+    assert_eq!(infos[0].width, Some(960));
+    assert_eq!(infos[0].height, Some(1728));
+    assert_eq!(infos[0].sub_type.as_deref(), Some("photo"));
+}
+
+/// image_element_infos：空 data 全 None、字段部分缺失、非 image 元素不产出。
+#[test]
+fn image_element_infos_empty_and_partial_fields() {
+    // 空 data {}
+    let infos = image_element_infos(&[serde_json::json!({"type": "image", "data": {}})]);
+    assert_eq!(infos.len(), 1);
+    assert!(infos[0].md5.is_none());
+    assert!(infos[0].filename.is_none());
+    assert!(infos[0].url.is_none());
+    assert!(infos[0].local_path.is_none());
+    assert!(infos[0].size.is_none());
+    assert!(infos[0].width.is_none());
+    assert!(infos[0].height.is_none());
+    assert!(infos[0].sub_type.is_none());
+
+    // 字段部分缺失（仅 md5）
+    let infos = image_element_infos(&[serde_json::json!({
+        "type": "image",
+        "data": {"md5": "aabbccdd"}
+    })]);
+    assert_eq!(infos[0].md5.as_deref(), Some("aabbccdd"));
+    assert!(infos[0].filename.is_none());
+
+    // 非 image 元素不产出
+    let infos = image_element_infos(&[serde_json::json!({"type": "text", "data": {"text": "hi"}})]);
+    assert!(infos.is_empty());
+}
+
+/// 占位符渲染：filename 命中优先，不按顺序消费。
+#[test]
+fn render_matches_filename_first() {
+    let infos = image_element_infos(&[
+        image_json("AAA.jpg", "aabbccddeeff00112233445566778899"),
+        image_json("BBB.jpg", "11223344556677889900aabbccddeeff"),
+    ]);
+    assert_eq!(
+        render_image_placeholders("看图 [图片:BBB.jpg]", &infos),
+        "看图 [图片#11223344]",
+        "filename 命中第二个元素时应取其 md5 hash"
     );
 }
 
+/// 占位符渲染：filename 未命中 → 按序取下一个未使用元素。
 #[test]
-fn clean_image_placeholder_no_placeholder() {
-    assert_eq!(clean_image_placeholders("普通消息"), "普通消息");
+fn render_falls_back_to_next_unused_element_in_order() {
+    let infos = image_element_infos(&[
+        image_json("AAA.jpg", "aabbccddeeff00112233445566778899"),
+        image_json("BBB.jpg", "11223344556677889900aabbccddeeff"),
+    ]);
+    assert_eq!(
+        render_image_placeholders("[图片:CCC.jpg][图片:DDD.jpg]", &infos),
+        "[图片#aabbccdd][图片#11223344]",
+        "未命中时按序消费元素"
+    );
+}
+
+/// 占位符渲染：多占位符多元素按序配对（filename 命中与顺序兜底混合）。
+#[test]
+fn render_pairs_multiple_placeholders_in_order() {
+    let infos = image_element_infos(&[
+        image_json("AAA.jpg", "aabbccddeeff00112233445566778899"),
+        image_json("BBB.jpg", "11223344556677889900aabbccddeeff"),
+    ]);
+    assert_eq!(
+        render_image_placeholders("前 [图片:BBB.jpg] 后 [图片:AAA.jpg]", &infos),
+        "前 [图片#11223344] 后 [图片#aabbccdd]"
+    );
+}
+
+/// 占位符渲染：无元素时从内容提取 32 位连续 hex（大小写不敏感）。
+#[test]
+fn render_extracts_32_hex_without_elements() {
+    assert_eq!(
+        render_image_placeholders("[图片:EA12E26D5376DBD64D163300CE6EECE6.jpg]", &[]),
+        "[图片#ea12e26d]"
+    );
+    assert_eq!(
+        render_image_placeholders("[图片:ea12e26d5376dbd64d163300ce6eece6.png]", &[]),
+        "[图片#ea12e26d]",
+        "hex 段大小写不敏感"
+    );
+    // 带空格（早期文档形态）同样命中
+    assert_eq!(
+        render_image_placeholders("[图片: EA12E26D5376DBD64D163300CE6EECE6.jpg]", &[]),
+        "[图片#ea12e26d]"
+    );
+}
+
+/// 占位符渲染：无可用 32 位 hex 段时 sha256 前 8 位兜底。
+#[test]
+fn render_hashes_non_hex_placeholder() {
+    // 内容是 12 位 hex（长度不足 32）→ sha256("abc123def456.jpg") 前 8 位
+    assert_eq!(
+        render_image_placeholders("[图片:abc123def456.jpg]", &[]),
+        "[图片#a7486078]"
+    );
+}
+
+/// 占位符渲染：畸形 `[图片:` 原样保留；幂等（已渲染文本零变化）。
+#[test]
+fn render_keeps_malformed_and_is_idempotent() {
+    assert_eq!(
+        render_image_placeholders("前[图片:abc 后", &[]),
+        "前[图片:abc 后",
+        "找不到 ] 的畸形占位符应原样保留"
+    );
+
+    let rendered = render_image_placeholders("图 [图片:abc123def456.jpg] 完", &[]);
+    assert_eq!(
+        render_image_placeholders(&rendered, &[]),
+        rendered,
+        "已渲染文本再次渲染零变化"
+    );
+    assert_eq!(render_image_placeholders("普通消息", &[]), "普通消息");
+}
+
+/// 无文本纯图占位符：首个元素有 md5 → hash 形态；否则纯文字回退。
+#[test]
+fn fallback_placeholder_uses_first_element_md5() {
+    let infos = image_element_infos(&[
+        image_json("AAA.jpg", "AABBCCDDEEFF00112233445566778899"),
+        image_json("BBB.jpg", "11223344556677889900aabbccddeeff"),
+    ]);
+    assert_eq!(fallback_image_placeholder(&infos), "[图片#aabbccdd]");
+
+    assert_eq!(fallback_image_placeholder(&[]), "[图片]");
+    let no_md5 = image_element_infos(&[serde_json::json!({"type": "image", "data": {}})]);
+    assert_eq!(fallback_image_placeholder(&no_md5), "[图片]");
+}
+
+/// source_ref 规范化：url 优先 / localPath 补前缀 / 均无空串 / 特殊 url 原样。
+#[test]
+fn normalize_source_ref_cases() {
+    let one = |data: serde_json::Value| {
+        let infos = image_element_infos(&[serde_json::json!({"type": "image", "data": data})]);
+        normalize_source_ref(&infos[0])
+    };
+
+    // url 优先（相对路径直接使用）
+    assert_eq!(
+        one(serde_json::json!({
+            "url": "resources/images/a_b.jpg",
+            "localPath": "images/a_b.jpg"
+        })),
+        "resources/images/a_b.jpg"
+    );
+    // url 缺失 → localPath 补 resources/ 前缀
+    assert_eq!(
+        one(serde_json::json!({"localPath": "images/a_b.jpg"})),
+        "resources/images/a_b.jpg"
+    );
+    // localPath 已带前缀 → 不重复补
+    assert_eq!(
+        one(serde_json::json!({"localPath": "resources/images/a_b.jpg"})),
+        "resources/images/a_b.jpg"
+    );
+    // 均无 → 空串
+    assert_eq!(one(serde_json::json!({})), "");
+    // 服务器链接与 http 链接原样保留（不可定位判定在写入侧）
+    assert_eq!(
+        one(serde_json::json!({"url": "/download?appid=1406&fileid=x"})),
+        "/download?appid=1406&fileid=x"
+    );
+    assert_eq!(
+        one(serde_json::json!({"url": "https://example.com/a.jpg"})),
+        "https://example.com/a.jpg"
+    );
 }
 
 // -- 回复正文提取 --
@@ -142,6 +341,7 @@ fn make_test_msg(role: &str, content: &str, created_at: i64) -> ParsedMessage {
         sender_name: String::new(),
         group_nickname: None,
         member_role: None,
+        attachments: Vec::new(),
     }
 }
 
@@ -407,6 +607,7 @@ fn aggregate_members_sorts_ties_by_name_and_skips_empty_uid() {
         sender_name: name.to_string(),
         group_nickname: None,
         member_role: None,
+        attachments: Vec::new(),
     };
     let messages = vec![
         make("u_b", "bob"),

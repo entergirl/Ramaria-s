@@ -10,6 +10,8 @@
 //! 块文本格式:
 //! - 每行 `[YYYY-MM-DD HH:MM] 角色: 内容`，块内消息按时间升序
 //! - 角色名：目标 persona 用其注册名（查询失败回退 uid），用户消息显示"用户"
+//! - 消息正文中的 `[图片#{hash}]` 占位符按附件描述渲染为 `[图片: {描述}]`
+//!   （无描述 / 查询失败保留原占位符）
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -19,7 +21,9 @@ use ramaria_core::config::UttConfig;
 use ramaria_core::error::RamariaResult;
 use ramaria_core::lock::lock_recover;
 use ramaria_core::traits::{EmbeddingProvider, StorageBackend};
-use ramaria_core::types::{Session, UttBlock};
+use ramaria_core::types::{
+    Message, Session, UttBlock, build_render_map, replace_image_placeholders,
+};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -289,7 +293,8 @@ impl UttBuilder {
         stats: &mut UttBuildStats,
     ) -> RamariaResult<()> {
         let target_name = resolve_persona_name(storage, target).await;
-        let block_text = render_block_text(chunk, target, &target_name);
+        let descriptions = load_attachment_descriptions(storage, &chunk.messages).await;
+        let block_text = render_block_text(chunk, target, &target_name, &descriptions);
 
         let mut block = UttBlock::new(
             target.to_string(),
@@ -370,6 +375,28 @@ async fn resolve_persona_name(storage: &dyn StorageBackend, uid: &str) -> String
     }
 }
 
+/// 加载消息附件描述映射（`[图片#{hash}]` → 描述；失败按空映射降级）。
+///
+/// 说明:
+/// - 仅取描述已完成的附件（渲染条件由 [`build_render_map`] 统一判定）；
+/// - 查询失败记 warn 并返回空映射：块文本保留占位符原文，不阻塞构建。
+async fn load_attachment_descriptions(
+    storage: &dyn StorageBackend,
+    messages: &[Message],
+) -> HashMap<String, String> {
+    let message_ids: Vec<Uuid> = messages.iter().map(|m| m.id).collect();
+    if message_ids.is_empty() {
+        return HashMap::new();
+    }
+    match storage.list_attachments_by_messages(&message_ids).await {
+        Ok(rows) => build_render_map(&rows),
+        Err(e) => {
+            warn!(error = %e, "消息附件查询失败，块文本保留占位符原文");
+            HashMap::new()
+        }
+    }
+}
+
 /// 计算块文本的内容哈希（用于内容级去重）。
 ///
 /// 说明:
@@ -420,15 +447,22 @@ fn format_block_time(created_at_ms: i64) -> String {
 /// - `chunk`: 切分结果。
 /// - `target_uid`: 目标 persona UID。
 /// - `target_name`: 目标 persona 注册名（已解析）。
+/// - `descriptions`: 附件描述映射（`[图片#{hash}]` → 描述；空映射时正文零变化）。
 ///
 /// 返回:
 /// - 多行块文本（供 `UttBlock.block_text` 持久化与【原文片段】注入）。
-pub fn render_block_text(chunk: &UttChunk, target_uid: &str, target_name: &str) -> String {
+pub fn render_block_text(
+    chunk: &UttChunk,
+    target_uid: &str,
+    target_name: &str,
+    descriptions: &HashMap<String, String>,
+) -> String {
     let mut lines = Vec::with_capacity(chunk.messages.len());
     for m in &chunk.messages {
         let speaker = speaker_label(m, target_uid, target_name);
         let time = format_block_time(m.created_at);
-        lines.push(format!("[{time}] {speaker}: {}", m.content));
+        let content = replace_image_placeholders(&m.content, descriptions);
+        lines.push(format!("[{time}] {speaker}: {content}"));
     }
     lines.join("\n")
 }

@@ -15,9 +15,10 @@ use uuid::Uuid;
 use crate::error::RamariaResult;
 use crate::keyword::{KeywordPoolRow, PendingAliasRow};
 use crate::types::{
-    ClusterSnapshot, EventBatchWrite, EventRelation, EventSource, MemoryEvent, MemoryL1, Message,
-    MessageKey, Persona, PersonaEventAggregate, PersonaExample, PersonaFact, PersonaStyleStats,
-    PersonalityTrait, ProfileField, Session, SessionMember, TraitEvidence, TraitStatus, UttBlock,
+    AttachmentStatus, ClusterSnapshot, EventBatchWrite, EventRelation, EventSource, MemoryEvent,
+    MemoryL1, Message, MessageAttachment, MessageKey, Persona, PersonaEventAggregate,
+    PersonaExample, PersonaFact, PersonaStyleStats, PersonalityTrait, ProfileField, Session,
+    SessionMember, TraitEvidence, TraitStatus, UttBlock,
 };
 
 // =========================================================
@@ -537,6 +538,123 @@ pub trait StoreCrud: Send + Sync {
         _external_ref: Option<&str>,
     ) -> RamariaResult<Vec<MessageKey>> {
         Ok(Vec::new())
+    }
+
+    /// 批量写入消息附件行（单事务；id 由数据库分配）。
+    ///
+    /// 职责:
+    /// - 附件采集写入的单一入口：导入采集层把解析出的附件引用落库。
+    ///
+    /// 语义:
+    /// - 空列表直接成功；任一条失败时整批回滚。
+    ///
+    /// 默认实现:
+    /// - 返回 `Unsupported`（写语义由实现方显式声明，不做静默丢弃）。
+    async fn insert_message_attachments(
+        &self,
+        _attachments: &[MessageAttachment],
+    ) -> RamariaResult<()> {
+        Err(crate::error::RamariaError::unsupported(
+            "StoreCrud 未实现消息附件写入（需覆写 insert_message_attachments）",
+        ))
+    }
+
+    /// 按会话扫描 pending 附件（id 升序）。
+    ///
+    /// 职责:
+    /// - 图片理解任务的待处理扫描入口：取某会话内尚未理解的附件。
+    ///
+    /// 语义:
+    /// - 仅返回 `status = 'pending'` 的附件，按附件 id 升序；
+    /// - `limit = 0` 表示不限，`limit > 0` 时取前 limit 条。
+    ///
+    /// 默认实现:
+    /// - 返回空列表（未覆写 mock 按"无待处理附件"降级，不阻塞理解任务）。
+    async fn list_pending_attachments_by_session(
+        &self,
+        _session_id: Uuid,
+        _limit: u32,
+    ) -> RamariaResult<Vec<MessageAttachment>> {
+        Ok(Vec::new())
+    }
+
+    /// 按消息 id 批量查询附件（读取渲染附带描述用）。
+    ///
+    /// 职责:
+    /// - 消息列表读取口取回附件行，供占位符渲染映射构建。
+    ///
+    /// 语义:
+    /// - 空输入返回空列表；未知消息 id 被忽略。
+    ///
+    /// 默认实现:
+    /// - 返回空列表（未覆写 mock 视为"消息无附件"，占位符保留）。
+    async fn list_attachments_by_messages(
+        &self,
+        _message_ids: &[Uuid],
+    ) -> RamariaResult<Vec<MessageAttachment>> {
+        Ok(Vec::new())
+    }
+
+    /// 把某 md5 的全部 pending 附件置 done（描述与模型一并写入）。
+    ///
+    /// 职责:
+    /// - 图片理解完成后的批量回填：同一图片的多个附件共享一条描述。
+    ///
+    /// 返回:
+    /// - 受影响行数（无命中时为 0）。
+    ///
+    /// 默认实现:
+    /// - 返回 `Unsupported`（写语义由实现方显式声明，不做静默丢弃）。
+    async fn fill_attachment_done_by_md5(
+        &self,
+        _md5: &str,
+        _description: &str,
+        _description_model: &str,
+    ) -> RamariaResult<u64> {
+        Err(crate::error::RamariaError::unsupported(
+            "StoreCrud 未实现附件描述按 md5 回填（需覆写 fill_attachment_done_by_md5）",
+        ))
+    }
+
+    /// 单行置 done（md5 缺失的附件兜底路径）。
+    ///
+    /// 默认实现:
+    /// - 返回 `Unsupported`（写语义由实现方显式声明，不做静默丢弃）。
+    async fn mark_attachment_done(
+        &self,
+        _id: i64,
+        _description: &str,
+        _description_model: &str,
+    ) -> RamariaResult<()> {
+        Err(crate::error::RamariaError::unsupported(
+            "StoreCrud 未实现附件单行完成标记（需覆写 mark_attachment_done）",
+        ))
+    }
+
+    /// 单行迁移附件状态（failed / skipped；description 不动）。
+    ///
+    /// 默认实现:
+    /// - 返回 `Unsupported`（写语义由实现方显式声明，不做静默丢弃）。
+    async fn mark_attachment_status(
+        &self,
+        _id: i64,
+        _status: AttachmentStatus,
+    ) -> RamariaResult<()> {
+        Err(crate::error::RamariaError::unsupported(
+            "StoreCrud 未实现附件状态迁移（需覆写 mark_attachment_status）",
+        ))
+    }
+
+    /// 按 md5 查询最近一次已完成的描述（理解去重复用）。
+    ///
+    /// 返回:
+    /// - `Ok(Some((description, description_model)))`: 命中最近完成的描述；
+    /// - `Ok(None)`: 无已完成描述（含未覆写 mock —— 按"需重新理解"处理）。
+    async fn find_attachment_description_by_md5(
+        &self,
+        _md5: &str,
+    ) -> RamariaResult<Option<(String, String)>> {
+        Ok(None)
     }
 
     // -- Memory L1 --

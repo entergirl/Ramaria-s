@@ -5,6 +5,7 @@
 //! - 手动 `Debug`：缓存为 trait object，仅输出是否启用；API key 不进入 Debug 输出
 //! - `with_retry`: 指数退避执行器（网络错误 + 5xx + 429 重试，4xx 与配置错误不重试）
 //! - 非流式 `chat` 接入精确缓存：命中直接复用、写失败静默降级；流式不缓存
+//! - `chat_with_images`: 图片理解的带图非流式调用（与非流式 `chat` 同一发送路径，不接缓存）
 //! - `resolve_constructor_key`: 构造期 keychain 读取降级（失败不阻断 provider 构造）
 
 use futures::Stream;
@@ -17,7 +18,7 @@ use std::time::Duration;
 
 use crate::transport::OpenAiTransport;
 
-use super::request::{build_messages, cache_key};
+use super::request::{build_messages, build_vision_messages, cache_key};
 use super::retry::RetryConfig;
 
 // =========================================================
@@ -261,6 +262,40 @@ impl ProviderBase {
         }
 
         // ---- 未启用缓存路径（与 v1.4 行为一致）----
+        self.with_retry(|| async {
+            self.transport
+                .chat(&messages, model, temperature, max_tokens)
+                .await
+        })
+        .await
+    }
+
+    // =========================================================
+    // 非流式聊天（带图片）
+    // =========================================================
+
+    /// 执行带图片的非流式聊天（图片理解专用）。
+    ///
+    /// 参数:
+    /// - `request`: 文本请求部分（system_prompt / user_message / 采样参数）。
+    /// - `image_data_uris`: 图片 data URI 列表（`data:image/...;base64,...`），按序随用户消息发送。
+    ///
+    /// 返回:
+    /// - 完整 assistant 回复文本。
+    ///
+    /// 说明:
+    /// - 交互路径与非流式 `chat` 相同（重试 + 传输层非流式发送），仅消息组装不同；
+    /// - 不接入精确缓存（图片理解模板版本固定，无重跑语义）。
+    pub async fn chat_with_images(
+        &self,
+        request: &ChatRequest,
+        image_data_uris: &[String],
+    ) -> RamariaResult<String> {
+        let messages = build_vision_messages(request, image_data_uris);
+        let model = &self.config.capability.model_id;
+        let temperature = request.temperature;
+        let max_tokens = request.max_tokens;
+
         self.with_retry(|| async {
             self.transport
                 .chat(&messages, model, temperature, max_tokens)

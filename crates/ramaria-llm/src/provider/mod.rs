@@ -21,4 +21,4 @@ pub use retry::RetryConfig;
 pub(crate) use base::ProviderBase;
 
 #[cfg(test)]
-pub(crate) use request::{build_messages, cache_key, sanitize_user_message};
+pub(crate) use request::{build_messages, build_vision_messages, cache_key, sanitize_user_message};

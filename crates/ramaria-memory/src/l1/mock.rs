@@ -18,9 +18,10 @@ use async_trait::async_trait;
 use ramaria_core::keyword::KeywordPoolRow;
 use ramaria_core::traits::{ChatRequest, StreamDelta};
 use ramaria_core::types::{
-    BackendConfig, ClusterSnapshot, EventRelation, MemoryEvent, MemoryL1, Message, ModelCapability,
-    Persona, PersonaEventAggregate, PersonaExample, PersonaFact, PersonalityTrait, PrivacyConsent,
-    ProfileField, Session, TraitEvidence, TraitStatus,
+    BackendConfig, ClusterSnapshot, EventRelation, MemoryEvent, MemoryL1, Message,
+    MessageAttachment, ModelCapability, Persona, PersonaEventAggregate, PersonaExample,
+    PersonaFact, PersonalityTrait, PrivacyConsent, ProfileField, Session, TraitEvidence,
+    TraitStatus,
 };
 use ramaria_core::{LlmProviderTrait, RamariaError, RamariaResult, StoreCrud, StoreInfrastructure};
 use uuid::Uuid;
@@ -127,6 +128,8 @@ impl LlmProviderTrait for MockLlmProvider {
 /// 其余方法返回 `unimplemented!`，确保测试边界清晰。
 pub struct MockStorage {
     messages: Mutex<HashMap<Uuid, Vec<Message>>>,
+    /// 消息附件行（供 L1 对话文本的图片描述渲染）。
+    attachments: Mutex<Vec<MessageAttachment>>,
     l1_entries: Mutex<Vec<MemoryL1>>,
     keywords: Mutex<Vec<String>>,
     /// 预置词池快照（供 L1 写入侧 pending 判定；空 = 空词池）。
@@ -145,6 +148,7 @@ impl MockStorage {
     pub fn new() -> Self {
         Self {
             messages: Mutex::new(HashMap::new()),
+            attachments: Mutex::new(Vec::new()),
             l1_entries: Mutex::new(Vec::new()),
             keywords: Mutex::new(Vec::new()),
             pool_rows: Mutex::new(Vec::new()),
@@ -158,6 +162,11 @@ impl MockStorage {
     /// 为指定 session 添加消息。
     pub fn add_messages(&self, session_id: Uuid, msgs: Vec<Message>) {
         self.messages.lock().unwrap().insert(session_id, msgs);
+    }
+
+    /// 追加一条消息附件行（供图片描述渲染用例）。
+    pub fn add_attachment(&self, attachment: MessageAttachment) {
+        self.attachments.lock().unwrap().push(attachment);
     }
 
     /// 设置关键词词典。
@@ -245,6 +254,21 @@ impl StoreCrud for MockStorage {
 
     async fn list_messages_by_persona(&self, _: &str) -> RamariaResult<Vec<Message>> {
         unimplemented!()
+    }
+
+    // -- Message attachments (used by summarizer image rendering) --
+    async fn list_attachments_by_messages(
+        &self,
+        message_ids: &[Uuid],
+    ) -> RamariaResult<Vec<MessageAttachment>> {
+        Ok(self
+            .attachments
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|row| message_ids.contains(&row.message_id))
+            .cloned()
+            .collect())
     }
 
     // -- Memory L1 (used by summarizer) --

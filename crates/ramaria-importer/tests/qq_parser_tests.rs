@@ -13,6 +13,7 @@
 use std::io::Write;
 use std::path::Path;
 
+use ramaria_core::types::InboundAttachmentKind;
 use ramaria_importer::qq::parser;
 
 // =========================================================
@@ -426,6 +427,7 @@ fn parse_json_reply_message() {
 // 图片消息测试
 // =========================================================
 
+/// text 消息承载图片元素：占位符渲染为 md5 hash 形态，附件引用完整填充。
 #[test]
 fn parse_json_with_image() {
     let content = r#"{
@@ -438,9 +440,18 @@ fn parse_json_with_image() {
                 "recalled": false,
                 "system": false,
                 "content": {
-                    "text": "看这张图 [图片: abc123def456.jpg]",
+                    "text": "看这张图 [图片:FCCB86F2A1B695DF3C37A1042A967A44.jpg]",
                     "elements": [
-                        {"type": "image", "data": {}}
+                        {"type": "image", "data": {
+                            "filename": "FCCB86F2A1B695DF3C37A1042A967A44.jpg",
+                            "size": 487719,
+                            "width": 640,
+                            "height": 400,
+                            "md5": "fccb86f2a1b695df3c37a1042a967a44",
+                            "url": "resources/images/fccb86f2a1b695df3c37a1042a967a44_FCCB86F2A1B695DF3C37A1042A967A44.jpg",
+                            "subType": "sticker",
+                            "localPath": "images/fccb86f2a1b695df3c37a1042a967a44_FCCB86F2A1B695DF3C37A1042A967A44.jpg"
+                        }}
                     ]
                 },
                 "sender": {"uid": "u_self", "name": "我"}
@@ -457,9 +468,128 @@ fn parse_json_with_image() {
 
     assert_eq!(report.success_image, 1);
     let msg = &sessions[0].messages[0];
-    // 图片占位符应替换为 [图片]
-    assert!(msg.content.contains("[图片]"));
-    assert!(!msg.content.contains("abc123def456"));
+    // 图片占位符应为 md5 前 8 位 hash 形态，原始文件名不再出现
+    assert!(msg.content.contains("[图片#fccb86f2]"), "{}", msg.content);
+    assert!(!msg.content.contains("FCCB86F2A1B695DF3C37A1042A967A44"));
+    // 附件引用：source_ref 为导出根相对路径，md5 小写，尺寸与细分类型齐全
+    assert_eq!(msg.attachments.len(), 1);
+    let attachment = &msg.attachments[0];
+    assert_eq!(attachment.kind, InboundAttachmentKind::Image);
+    assert_eq!(
+        attachment.source_ref,
+        "resources/images/fccb86f2a1b695df3c37a1042a967a44_FCCB86F2A1B695DF3C37A1042A967A44.jpg"
+    );
+    assert_eq!(
+        attachment.md5.as_deref(),
+        Some("fccb86f2a1b695df3c37a1042a967a44")
+    );
+    assert_eq!(attachment.size, Some(487719));
+    assert_eq!(attachment.width, Some(640));
+    assert_eq!(attachment.height, Some(400));
+    assert_eq!(attachment.sub_type.as_deref(), Some("sticker"));
+}
+
+/// 多图素材：双图消息（占位符按 filename 命中配对）+ 无图文本消息。
+fn image_pair_export_json() -> String {
+    r#"{
+        "chatInfo": {"selfUid": "u_self", "selfName": "我", "name": "好友", "type": "private", "peerUid": "u_friend"},
+        "messages": [
+            {
+                "id": "1",
+                "timestamp": 1704067200000,
+                "type": "text",
+                "recalled": false,
+                "system": false,
+                "content": {
+                    "text": "[图片:AAA.jpg][图片:BBB.jpg]",
+                    "elements": [
+                        {"type": "image", "data": {"filename": "AAA.jpg", "size": 100, "md5": "aabbccddeeff00112233445566778899", "subType": "photo"}},
+                        {"type": "image", "data": {"filename": "BBB.jpg", "size": 200, "md5": "11223344556677889900aabbccddeeff", "subType": "sticker"}}
+                    ]
+                },
+                "sender": {"uid": "u_self", "name": "我"}
+            },
+            {
+                "id": "2",
+                "timestamp": 1704067260000,
+                "type": "text",
+                "recalled": false,
+                "system": false,
+                "content": {"text": "普通文本", "elements": []},
+                "sender": {"uid": "u_peer", "name": "好友"}
+            }
+        ]
+    }"#
+    .to_string()
+}
+
+/// 多图消息 attachments 按序填充（md5 / size / subType），无图消息为空。
+#[test]
+fn parse_json_fills_attachments_and_leaves_text_message_empty() {
+    let content = image_pair_export_json();
+    let path = create_temp_json("parse_image_pair", &content);
+
+    let result = parser::parse_qq_export(Path::new(&path), 10);
+    cleanup(&path);
+
+    let (sessions, _report) = result.unwrap();
+    let with_images = &sessions[0].messages[0];
+    assert_eq!(with_images.attachments.len(), 2);
+    assert_eq!(
+        with_images.attachments[0].md5.as_deref(),
+        Some("aabbccddeeff00112233445566778899")
+    );
+    assert_eq!(with_images.attachments[0].size, Some(100));
+    assert_eq!(
+        with_images.attachments[0].sub_type.as_deref(),
+        Some("photo")
+    );
+    assert_eq!(
+        with_images.attachments[1].md5.as_deref(),
+        Some("11223344556677889900aabbccddeeff")
+    );
+    assert_eq!(with_images.attachments[1].size, Some(200));
+    assert_eq!(
+        with_images.attachments[1].sub_type.as_deref(),
+        Some("sticker")
+    );
+    // 占位符按序配对为各自元素的 md5 hash
+    assert!(
+        with_images
+            .content
+            .contains("[图片#aabbccdd][图片#11223344]"),
+        "{}",
+        with_images.content
+    );
+
+    let plain = &sessions[0].messages[1];
+    assert!(plain.attachments.is_empty(), "无图消息附件应为空");
+}
+
+/// 含图消息的稳定面：同输入两次解析 → content 与 fingerprint 完全一致。
+#[test]
+fn parse_json_image_message_is_deterministic_across_parses() {
+    let content = image_pair_export_json();
+    let path1 = create_temp_json("img_det_1", &content);
+    let path2 = create_temp_json("img_det_2", &content);
+
+    let result1 = parser::parse_qq_export(Path::new(&path1), 10).unwrap();
+    let result2 = parser::parse_qq_export(Path::new(&path2), 10).unwrap();
+    cleanup(&path1);
+    cleanup(&path2);
+
+    let flatten = |sessions: &[ramaria_importer::ImportedSession]| {
+        sessions[0]
+            .messages
+            .iter()
+            .map(|m| (m.content.clone(), m.fingerprint.clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        flatten(&result1.0),
+        flatten(&result2.0),
+        "同输入的解析结果（content 与 fingerprint）应完全一致"
+    );
 }
 
 // =========================================================

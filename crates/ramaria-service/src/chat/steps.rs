@@ -11,7 +11,8 @@
 //!   主动模式按显式 `session_id` > 新建（不注入桥接，话题由锚点承载）
 //! - 主动模式：消息位为选题锚点（可为空），请求的用户消息位留空，
 //!   提示词装配注入主动开口段
-//! - 历史窗口：分页倒序加载，条数上限与字符预算取 `[session]` 配置，读取失败保留已加载部分
+//! - 历史窗口：分页倒序加载，条数上限与字符预算取 `[session]` 配置（预算按渲染后正文计），
+//!   读取失败保留已加载部分；图片占位符按附件描述渲染（附件查询失败降级原文）
 //! - 降级纪律：会话 NULL 归属回写 / 弱反馈检测失败均只记 warn，不阻塞生成
 
 use chrono::Timelike;
@@ -20,7 +21,8 @@ use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::time_period::TimePeriod;
 use ramaria_core::traits::{ChatMessage, ChatRequest, StorageBackend};
 use ramaria_core::types::{
-    AppState, BackendConfig, Message, MessageRole, MessageSource, Session, new_id,
+    AppState, BackendConfig, Message, MessageAttachment, MessageRole, MessageSource, Session,
+    build_render_map, new_id, replace_image_placeholders,
 };
 use ramaria_memory::chat::PromptMaterialInputs;
 use ramaria_memory::prompt::builder::ProactivePromptContext;
@@ -510,8 +512,10 @@ async fn step_resolve_session(
 /// 语义:
 /// - 分页 20 条倒序加载（先检查条数上限与字符预算，再取页）；
 /// - 加载条数上限取 `[session].max_history_messages`，字符预算取 `[session].max_history_chars`，
-///   每条按 `content.chars().count() + 16`（role 标记开销）计；
+///   每条按**渲染后正文**（`[图片#{hash}]` 占位符注入附件描述后）的
+///   `content.chars().count() + 16`（role 标记开销）计；
 /// - 读取失败记 warn 并保留已加载部分（首屏失败即空历史），不阻塞生成；
+///   附件查询失败同样降级为正文原文；
 /// - 按 `created_at` 升序排列后，前置拼接调用方预置上文（seed 早于本会话历史）。
 pub(super) async fn step_load_history(
     storage: &dyn StorageBackend,
@@ -523,6 +527,7 @@ pub(super) async fn step_load_history(
     let char_budget = config.session.max_history_chars.max(1) as usize;
 
     let mut loaded: Vec<Message> = Vec::new();
+    let mut attachment_rows: Vec<MessageAttachment> = Vec::new();
     let mut total_chars: usize = 0;
     let mut offset: i64 = 0;
 
@@ -566,9 +571,17 @@ pub(super) async fn step_load_history(
         }
 
         let page_len = page.len() as i64;
+        // 字符预算按渲染后正文计算（附件描述注入会加长实际进入 Prompt 的文本；
+        // 查询失败降级为空映射 → 按原文计量）
+        let page_attachments = load_message_attachments(storage, &page).await;
+        let page_map = build_render_map(&page_attachments);
         for message in &page {
-            total_chars += message.content.chars().count() + 16;
+            total_chars += replace_image_placeholders(&message.content, &page_map)
+                .chars()
+                .count()
+                + 16;
         }
+        attachment_rows.extend(page_attachments);
         loaded.extend(page);
         offset += HISTORY_PAGE_SIZE;
 
@@ -581,12 +594,32 @@ pub(super) async fn step_load_history(
     // 按 created_at 升序排列（分页返回为倒序；相同时刻保持稳定不翻转）
     loaded.sort_by_key(|message| message.created_at);
 
+    // 最终映射由全部已加载消息的附件行构建（同一 md5 描述一致，跨页无冲突）
+    let render_map = build_render_map(&attachment_rows);
     let mut merged = seed_history.to_vec();
     merged.extend(loaded.into_iter().map(|message| ChatMessage {
         role: message.role,
-        content: message.content,
+        content: replace_image_placeholders(&message.content, &render_map),
     }));
     merged
+}
+
+/// 加载消息附件行（查询失败记 warn 并返回空列表：正文保留占位符原文）。
+async fn load_message_attachments(
+    storage: &dyn StorageBackend,
+    messages: &[Message],
+) -> Vec<MessageAttachment> {
+    let message_ids: Vec<Uuid> = messages.iter().map(|m| m.id).collect();
+    if message_ids.is_empty() {
+        return Vec::new();
+    }
+    match storage.list_attachments_by_messages(&message_ids).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(error = %e, "历史窗口附件查询失败，正文保留占位符原文");
+            Vec::new()
+        }
+    }
 }
 
 /// 步骤 7（仅交互式）：弱反馈检测（S2 纠正 / S3 继续）。

@@ -36,6 +36,7 @@
 //! - `diagnostics`：诊断信息导出用例（日志 / 配置脱敏 + 原子替换）；
 //! - `import`：QQ 聊天记录导入用例（解析 / L0 写入 / L1 批量生成与 ETA / 深度触发，
 //!   `importer` feature 下编译）；
+//! - `vision`：图片理解用例（能力门禁 / md5 去重 / 多模态调用 / 描述回填）；
 //! - 入口层（如 `ramaria-mcp`）只做协议包装，不承载业务逻辑。
 
 pub mod behavior;
@@ -71,6 +72,7 @@ pub mod style;
 pub mod types;
 pub mod update;
 pub mod utt;
+pub mod vision;
 
 #[cfg(feature = "importer")]
 pub mod import;
@@ -129,3 +131,4 @@ pub use types::{
 };
 pub use update::{UpdateStatus, check_update};
 pub use utt::UttRebuildOutcome;
+pub use vision::VisionRunStat;

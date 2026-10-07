@@ -3,6 +3,8 @@
 //! 设计特点:
 //! - 管线分段：解析预览（`analyze`）→ L0 写入（`write_l0`）→ L1 批量生成（`generate_l1`）
 //!   → 深度处理触发（`trigger_deep`），宿主按导入模式组合调用，不写第二份导入实现
+//! - 图片理解门面（`understand_import_attachments`）：宿主在 L0 写入后、L1 生成前调用，
+//!   细节由图片理解模块承担（门禁 / 去重 / 调用 / 回填）
 //! - 画像准备双形态：私聊为导出者与对方分别准备 `source="qq"` 的 persona（L1 按 persona
 //!   各生成一份）；群聊按发送者聚合成员、逐成员准备画像（L1 按块内参与者分发）；结果中的
 //!   画像名以库内实际注册名为准（UID 生成策略与文件解析口径由 `ramaria-importer` 承担）
@@ -31,6 +33,7 @@ use ramaria_core::error::RamariaResult;
 use uuid::Uuid;
 
 use crate::engine::Engine;
+use crate::vision::{VisionRunStat, understand_attachments};
 
 // 请求与结果类型 re-export：`crate::import::X` / `ramaria_service::import::X` 为既有调用路径
 pub use analyze::{AnalysisReport, AnalyzeRequest};
@@ -74,6 +77,25 @@ impl Engine {
     ///   `from_parts` 注入构造需先 [`Engine::attach_sqlite_pool`]）。
     pub async fn import_qq_l0(&self, req: ImportRequest) -> RamariaResult<ImportL0Outcome> {
         write_l0(self, req).await
+    }
+
+    /// 理解导入会话中的待处理图片附件（先理解后 L1 的宿主入口）。
+    ///
+    /// 职责:
+    /// - 宿主在 L0 写入后、L1 生成前调用；内部完成门禁判定、md5 去重与描述回填。
+    ///
+    /// 参数:
+    /// - `session_ids`: 本次导入产出的会话 ID 列表。
+    /// - `export_root`: 导出 JSON 所在目录（附件相对路径的定位根）。
+    ///
+    /// 返回:
+    /// - 本轮执行统计；失败时返回统一错误类型（宿主按非阻塞处置）。
+    pub async fn understand_import_attachments(
+        &self,
+        session_ids: &[Uuid],
+        export_root: &Path,
+    ) -> RamariaResult<VisionRunStat> {
+        understand_attachments(self, session_ids, export_root).await
     }
 
     /// 批量生成导入会话的 L1 摘要（可选级联与进度回调）。

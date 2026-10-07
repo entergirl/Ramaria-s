@@ -1,17 +1,20 @@
 //! crates/ramaria-memory/src/l1/summarizer/helpers.rs - 摘要管线自由辅助函数
 //!
 //! 设计特点:
-//! - format_messages: L0 消息列表 → 对话文本（仅 User/Assistant 参与摘要）。
+//! - format_messages: L0 消息列表 → 对话文本（仅 User/Assistant 参与摘要；
+//!   图片占位符按附件描述渲染）。
 //! - is_progressive_triggered: 渐进式摘要触发判断（消息数 / 时间跨度双条件）。
 //! - build_prior_context: 上一块上文构建（短块注入原文 / 长块注入上一 L1 + 线索 / 降级截断）。
 //! - validate_continuation / validate_evidence_notes / normalize_optional_slot: LLM 输出字段校验与规范化。
 //! - parse_keywords: 关键词字符串 → (存储串, KeywordToken 列表)。
 //! - 全部为纯函数/无 I/O；隐私红线：日志只记长度与字段，不记录原文。
 
+use std::collections::HashMap;
+
 use crate::keyword::normalizer::{CommaSeparatedNormalizer, KeywordNormalizer};
 use ramaria_core::MemoryL1;
 use ramaria_core::keyword::KeywordToken;
-use ramaria_core::types::{EvidenceNote, MessageRole};
+use ramaria_core::types::{EvidenceNote, MessageRole, replace_image_placeholders};
 use tracing::{debug, warn};
 use uuid::Uuid;
 
@@ -27,10 +30,14 @@ use super::L1SummarizerConfig;
 /// - User 消息: `{user_prefix}{content}`
 /// - Assistant 消息: `{assistant_prefix}{content}`
 /// - System/Tool 消息: 跳过（不参与摘要）
+///
+/// 参数:
+/// - `descriptions`: 附件描述映射（`[图片#{hash}]` → 描述；空映射时正文零变化）。
 pub(super) fn format_messages(
     messages: &[ramaria_core::types::Message],
     user_prefix: &str,
     assistant_prefix: &str,
+    descriptions: &HashMap<String, String>,
 ) -> String {
     let mut lines = Vec::with_capacity(messages.len());
     for msg in messages {
@@ -40,7 +47,8 @@ pub(super) fn format_messages(
             // System/Tool 消息不进入摘要上下文
             _ => continue,
         };
-        lines.push(format!("{prefix}{}", msg.content));
+        let content = replace_image_placeholders(&msg.content, descriptions);
+        lines.push(format!("{prefix}{content}"));
     }
     lines.join("\n")
 }
@@ -94,6 +102,9 @@ pub(super) fn is_progressive_triggered(
 /// - 长块但上一 L1 不可用（生成失败降级）→ 回退注入上一块原文并截断到
 ///   `prior_context_max_chars`（默认 1500 字符），防止超长上文挤占输出预算。
 ///
+/// 参数:
+/// - `descriptions`: 附件描述映射（原文形态注入时对 `[图片#{hash}]` 占位符生效）。
+///
 /// 隐私: 原文仅作为 LLM prompt 上下文（与摘要生成同链路），不落日志。
 pub(super) fn build_prior_context(
     prev_chunk: &crate::utt::UttChunk,
@@ -101,12 +112,18 @@ pub(super) fn build_prior_context(
     config: &L1SummarizerConfig,
     user_prefix: &str,
     assistant_prefix: &str,
+    descriptions: &HashMap<String, String>,
 ) -> String {
     let is_long = (prev_chunk.msg_count as usize) > config.prior_context_threshold;
 
     // 短块 → 直接注入 L0 原文（原文信息量最大，无需 L1）
     if !is_long {
-        return format_messages(&prev_chunk.messages, user_prefix, assistant_prefix);
+        return format_messages(
+            &prev_chunk.messages,
+            user_prefix,
+            assistant_prefix,
+            descriptions,
+        );
     }
 
     // 长块 → 优先注入上一 L1 摘要 + 结构化线索
@@ -132,7 +149,12 @@ pub(super) fn build_prior_context(
     }
 
     // 长块且上一 L1 缺失（降级）→ 注入上一块原文并截断
-    let raw = format_messages(&prev_chunk.messages, user_prefix, assistant_prefix);
+    let raw = format_messages(
+        &prev_chunk.messages,
+        user_prefix,
+        assistant_prefix,
+        descriptions,
+    );
     ramaria_core::text::truncate_chars(&raw, config.prior_context_max_chars)
 }
 

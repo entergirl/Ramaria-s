@@ -1117,3 +1117,79 @@ fn l1_outcome(success: usize, failed: usize, skipped: usize, processed: usize) -
         session_ids: Vec::new(),
     }
 }
+
+// ---- 附件采集（端到端） ----
+
+/// 含图消息端到端：导出目录真实文件 → pending；服务器链接 → skipped。
+#[tokio::test]
+async fn write_l0_imports_image_attachments() {
+    let (engine, pool, _storage, dir) = import_engine("import-attachments").await;
+    let md5 = "fccb86f2a1b695df3c37a1042a967a44";
+    let file_name = "fccb86f2a1b695df3c37a1042a967a44_FCCB86F2A1B695DF3C37A1042A967A44.jpg";
+    let images_dir = dir.join("resources").join("images");
+    std::fs::create_dir_all(&images_dir).expect("创建图片目录应成功");
+    std::fs::write(images_dir.join(file_name), b"jpeg-bytes").expect("写入图片应成功");
+
+    // 素材：一条本地图片消息（含真实元素结构）+ 一条旧导出服务器链接图片消息
+    let base = 1_700_200_000_000i64;
+    let content = format!(
+        r#"{{"chatInfo":{{"selfUid":"u_self","selfName":"小明","selfUin":"10001","name":"小红","type":"private","peerUid":"u_peer","peerUin":"90002"}},"messages":[
+            {{"id":"a_0","timestamp":{base},"type":"text","recalled":false,"system":false,"content":{{"text":"看这张图 [图片:FCCB86F2A1B695DF3C37A1042A967A44.jpg]","elements":[{{"type":"image","data":{{"filename":"FCCB86F2A1B695DF3C37A1042A967A44.jpg","size":487719,"width":640,"height":400,"md5":"{md5}","url":"resources/images/{file_name}","subType":"sticker","localPath":"images/{file_name}"}}}}]}},"sender":{{"uid":"u_self","name":"小明"}}}},
+            {{"id":"a_1","timestamp":{},"type":"text","recalled":false,"system":false,"content":{{"text":"[图片:EA12E26D5376DBD64D163300CE6EECE6.jpg]","elements":[{{"type":"image","data":{{"filename":"EA12E26D5376DBD64D163300CE6EECE6.jpg","size":241558,"width":960,"height":1728,"md5":"ea12e26d5376dbd64d163300ce6eece6","url":"/download?appid=1406&fileid=EXAMPLE","subType":"photo"}}}}]}},"sender":{{"uid":"u_peer","name":"小红"}}}}
+        ]}}"#,
+        base + 60_000
+    );
+    let file_path = dir.join("export.json");
+    std::fs::write(&file_path, content).expect("写入导出文件应成功");
+
+    let outcome = engine
+        .import_qq_l0(import_request(&file_path))
+        .await
+        .expect("L0 导入应成功");
+    assert_eq!(outcome.messages_written, 2);
+
+    // 正文占位符均为 md5 hash 形态（本地图与服务器链接图一致口径）
+    let contents: Vec<String> =
+        sqlx::query_scalar("SELECT content FROM messages ORDER BY created_at")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert!(contents[0].contains("[图片#fccb86f2]"), "{}", contents[0]);
+    assert!(contents[1].contains("[图片#ea12e26d]"), "{}", contents[1]);
+    assert!(!contents[0].contains("FCCB86F2"));
+
+    // 附件行：本地文件 pending / 服务器链接 skipped；字段与消息一一对应
+    let rows: Vec<(String, String, Option<String>, Option<i64>)> =
+        sqlx::query_as("SELECT status, source_ref, md5, size FROM message_attachments ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows.len(), 2, "两条含图消息各落一行附件");
+    assert_eq!(
+        rows[0],
+        (
+            "pending".to_string(),
+            format!("resources/images/{file_name}"),
+            Some(md5.to_string()),
+            Some(487719)
+        )
+    );
+    assert_eq!(
+        rows[1],
+        (
+            "skipped".to_string(),
+            "/download?appid=1406&fileid=EXAMPLE".to_string(),
+            Some("ea12e26d5376dbd64d163300ce6eece6".to_string()),
+            Some(241558)
+        )
+    );
+    let bound: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM message_attachments a JOIN messages m ON m.id = a.message_id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(bound, 2, "附件行应归属实际消息");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

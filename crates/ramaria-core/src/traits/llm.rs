@@ -125,6 +125,30 @@ pub trait LlmProvider: Send + Sync {
         request: &ChatRequest,
     ) -> RamariaResult<Pin<Box<dyn Stream<Item = RamariaResult<StreamDelta>> + Send>>>;
 
+    /// 执行带图片的非流式聊天完成请求（图片理解专用）。
+    ///
+    /// 职责:
+    /// - 为图片理解提供一次性（非流式）多模态调用入口；
+    /// - 默认实现返回 Unsupported，provider 按需覆写（对话路径不受影响）。
+    ///
+    /// 参数:
+    /// - `request`: 文本请求部分（system_prompt / user_message / temperature / max_tokens 等）。
+    /// - `image_data_uris`: 图片 data URI 列表（`data:image/...;base64,...`），按序随用户消息发送。
+    ///
+    /// 返回:
+    /// - 成功时返回完整 assistant 文本。
+    /// - 当前 provider 不支持时返回 Unsupported。
+    async fn chat_vision(
+        &self,
+        request: &ChatRequest,
+        image_data_uris: &[String],
+    ) -> RamariaResult<String> {
+        let _ = (request, image_data_uris);
+        Err(crate::error::RamariaError::unsupported(
+            "当前 provider 未实现图片理解调用（chat_vision）",
+        ))
+    }
+
     /// 获取此 provider 的模型能力描述。
     ///
     /// 返回:

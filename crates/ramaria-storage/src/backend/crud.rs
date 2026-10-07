@@ -12,9 +12,10 @@ use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::keyword::{KeywordPoolRow, PendingAliasRow};
 use ramaria_core::traits::{ProactiveDeliveryPair, StoreCrud};
 use ramaria_core::types::{
-    ClusterSnapshot, EventBatchWrite, EventRelation, EventSource, MemoryEvent, MemoryL1, Message,
-    Persona, PersonaEventAggregate, PersonaExample, PersonaFact, PersonaStyleStats,
-    PersonalityTrait, ProfileField, Session, SessionMember, TraitEvidence, TraitStatus, UttBlock,
+    AttachmentStatus, ClusterSnapshot, EventBatchWrite, EventRelation, EventSource, MemoryEvent,
+    MemoryL1, Message, MessageAttachment, Persona, PersonaEventAggregate, PersonaExample,
+    PersonaFact, PersonaStyleStats, PersonalityTrait, ProfileField, Session, SessionMember,
+    TraitEvidence, TraitStatus, UttBlock,
 };
 use uuid::Uuid;
 
@@ -180,6 +181,57 @@ impl StoreCrud for SqliteStorage {
         external_ref: Option<&str>,
     ) -> RamariaResult<Vec<ramaria_core::types::MessageKey>> {
         repo::messages::list_keys_by_channel_ref(&self.pool, channel, external_ref).await
+    }
+    /// 覆写为事务内批量写入（id 由数据库分配）。
+    async fn insert_message_attachments(
+        &self,
+        attachments: &[MessageAttachment],
+    ) -> RamariaResult<()> {
+        repo::attachments::insert_batch(&self.pool, attachments).await
+    }
+    /// 覆写为按会话扫描 pending 附件（JOIN messages，id 升序）。
+    async fn list_pending_attachments_by_session(
+        &self,
+        session_id: Uuid,
+        limit: u32,
+    ) -> RamariaResult<Vec<MessageAttachment>> {
+        repo::attachments::list_pending_by_session(&self.pool, session_id, limit).await
+    }
+    /// 覆写为按消息分片 IN 查询（单片不超过 500 个）。
+    async fn list_attachments_by_messages(
+        &self,
+        message_ids: &[Uuid],
+    ) -> RamariaResult<Vec<MessageAttachment>> {
+        repo::attachments::list_by_messages(&self.pool, message_ids).await
+    }
+    /// 覆写为按 md5 回填全部 pending 行为 done（返回受影响行数）。
+    async fn fill_attachment_done_by_md5(
+        &self,
+        md5: &str,
+        description: &str,
+        description_model: &str,
+    ) -> RamariaResult<u64> {
+        repo::attachments::fill_done_by_md5(&self.pool, md5, description, description_model).await
+    }
+    /// 覆写为单行置 done（md5 缺失的兜底路径）。
+    async fn mark_attachment_done(
+        &self,
+        id: i64,
+        description: &str,
+        description_model: &str,
+    ) -> RamariaResult<()> {
+        repo::attachments::mark_done(&self.pool, id, description, description_model).await
+    }
+    /// 覆写为单行状态迁移（description 不改动）。
+    async fn mark_attachment_status(&self, id: i64, status: AttachmentStatus) -> RamariaResult<()> {
+        repo::attachments::mark_status(&self.pool, id, status).await
+    }
+    /// 覆写为按 md5 取最近 done 描述（理解去重复用）。
+    async fn find_attachment_description_by_md5(
+        &self,
+        md5: &str,
+    ) -> RamariaResult<Option<(String, String)>> {
+        repo::attachments::find_done_description_by_md5(&self.pool, md5).await
     }
 
     // =========================================================

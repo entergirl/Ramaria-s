@@ -384,3 +384,29 @@ test('主动对话组：22 键齐全且默认值类型正确', () => {
     );
   }
 });
+
+// =========================================================
+// 图片理解组（v2.6）：2 键齐全 + 默认值类型 + 模板收录
+// =========================================================
+
+test('图片理解组：2 键齐全且默认值类型正确', () => {
+  const vision = groups.find((g) => g.key === 'vision');
+  assert.ok(vision, '应存在 vision 组');
+  assert.deepEqual(vision.section, ['vision']);
+
+  const expected = ['vision.model_supports_vision', 'vision.batch_limit'];
+  const visionFields = flattenFields([vision]);
+  assert.deepEqual(Object.keys(visionFields).sort(), expected.slice().sort());
+
+  // 每键必须被 config/default.toml 收录（未收录会让"逐键一致"用例静默跳过，漂移不可见）
+  const missing = expected.filter(
+    (key) => getByPath(templateConfig, key.split('.')) === undefined
+  );
+  assert.deepEqual(missing, [], `default.toml 未收录: ${missing.join(', ')}`);
+
+  // 能力声明默认关闭（显式声明后才执行图片理解）；批次上限默认 0 = 不限
+  assert.equal(visionFields['vision.model_supports_vision'].type, 'bool');
+  assert.equal(visionFields['vision.model_supports_vision'].def, false);
+  assert.equal(visionFields['vision.batch_limit'].type, 'number');
+  assert.equal(visionFields['vision.batch_limit'].def, 0);
+});

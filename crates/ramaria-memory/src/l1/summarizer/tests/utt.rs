@@ -51,6 +51,7 @@ fn prior_context_short_block_injects_raw_text() {
         &cfg,
         "用户：",
         "助手：",
+        &std::collections::HashMap::new(),
     );
     // 短块即使有 L1 也注入原文
     assert!(ctx.contains("今天工作好累"), "应注入短块原文");
@@ -83,7 +84,14 @@ fn prior_context_long_block_injects_summary_and_notes() {
         }],
     );
     let cfg = L1SummarizerConfig::default();
-    let ctx = build_prior_context(&chunk, Some(&prev_l1), &cfg, "用户：", "助手：");
+    let ctx = build_prior_context(
+        &chunk,
+        Some(&prev_l1),
+        &cfg,
+        "用户：",
+        "助手：",
+        &std::collections::HashMap::new(),
+    );
     assert!(ctx.contains("[上一块摘要] 用户抱怨项目延期"), "应注入摘要");
     assert!(ctx.contains("用户提到项目延期到月底"), "应注入线索 text");
     assert!(ctx.contains("时间：上周三"), "线索可选槽位应保留");
@@ -101,7 +109,14 @@ fn prior_context_long_block_l1_without_notes_injects_summary_only() {
     let chunk = make_chunk(msgs);
     let prev_l1 = make_l1("用户聊了天气", vec![]);
     let cfg = L1SummarizerConfig::default();
-    let ctx = build_prior_context(&chunk, Some(&prev_l1), &cfg, "用户：", "助手：");
+    let ctx = build_prior_context(
+        &chunk,
+        Some(&prev_l1),
+        &cfg,
+        "用户：",
+        "助手：",
+        &std::collections::HashMap::new(),
+    );
     assert!(ctx.contains("[上一块摘要] 用户聊了天气"));
     assert!(!ctx.contains("[上一块线索]"), "无线索时不应输出线索段落");
 }
@@ -124,7 +139,14 @@ fn prior_context_long_block_without_l1_truncates_raw() {
         prior_context_max_chars: 100,
         ..Default::default()
     };
-    let ctx = build_prior_context(&chunk, None, &cfg, "用户：", "助手：");
+    let ctx = build_prior_context(
+        &chunk,
+        None,
+        &cfg,
+        "用户：",
+        "助手：",
+        &std::collections::HashMap::new(),
+    );
     assert!(ctx.ends_with('…'), "应含统一省略号截断标记");
     assert!(
         ctx.chars().count() <= 100,
@@ -149,6 +171,7 @@ fn prior_context_threshold_boundary() {
         &cfg,
         "用户：",
         "助手：",
+        &std::collections::HashMap::new(),
     );
     assert!(!ctx.contains("[上一块摘要]"), "= 阈值仍为短块原文形态");
     // 21 条（> 阈值）→ L1 摘要形态
@@ -161,6 +184,7 @@ fn prior_context_threshold_boundary() {
         &cfg,
         "用户：",
         "助手：",
+        &std::collections::HashMap::new(),
     );
     assert!(ctx2.contains("[上一块摘要]"), "超过阈值应注入 L1 摘要");
 }

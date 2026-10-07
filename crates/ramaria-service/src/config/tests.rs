@@ -721,6 +721,9 @@ async fn default_template_contains_expected_groups() {
     assert!(text.contains("max_examples"));
     assert!(text.contains("[bridge]"));
     assert!(text.contains("persona_kind_whitelist"));
+    assert!(text.contains("[vision]"), "模板应含 [vision]");
+    assert!(text.contains("model_supports_vision"));
+    assert!(text.contains("batch_limit"));
 
     let _ = std::fs::remove_dir_all(dir);
 }

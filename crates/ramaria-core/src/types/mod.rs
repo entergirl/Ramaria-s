@@ -74,6 +74,7 @@ pub fn now_ms() -> i64 {
     }
 }
 
+mod attachments;
 mod backend;
 mod inbound;
 mod memory;
@@ -85,6 +86,10 @@ mod state;
 mod style;
 mod utt;
 
+pub use attachments::{
+    AttachmentStatus, MessageAttachment, build_render_map, image_placeholder_hash,
+    is_local_relative_ref, replace_image_placeholders,
+};
 pub use backend::{BackendConfig, LlmProvider, ModelCapability, PrivacyConsent};
 pub use inbound::{InboundAttachmentKind, InboundAttachmentRef, InboundMessage, InboundSender};
 pub use memory::{

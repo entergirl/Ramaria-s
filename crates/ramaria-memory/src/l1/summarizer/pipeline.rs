@@ -3,11 +3,13 @@
 //! 设计特点:
 //! - summarize_session: 整会话按话语块生成，块 N 注入上一块上文（§6.3 混合形态）。
 //! - summarize_progressive: 渐进式按段生成，未达阈值时回退 summarize_session。
+//! - 图片描述注入：切块前一次加载会话内附件描述映射，对话文本中的
+//!   `[图片#{hash}]` 占位符渲染为 `[图片: {描述}]`（无描述 / 查询失败保留占位符）。
 //! - 多画像分发：fanout_others 开启时按块/段内他人发言者复制 L1 行，各行独立 persona。
 //! - 块级容错：单块失败记 warn 并降级继续，全部失败返回最后一个错误。
 //! - 写库失败为硬错误；关键词写回失败为非致命（记 warn 不阻塞）。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use ramaria_core::keyword::KeywordToken;
 use ramaria_core::types::MessageRole;
@@ -104,7 +106,10 @@ impl<'a> L1Summarizer<'a> {
 
         debug!(%session_id, msg_count = messages.len(), "开始生成 L1 摘要");
 
-        // 2. 切分为话语块（上下文感知生成的块粒度）
+        // 2. 附件描述（切块前一次加载；空映射时对话文本零变化）
+        let descriptions = self.load_attachment_descriptions(&messages).await;
+
+        // 3. 切分为话语块（上下文感知生成的块粒度）
         //    - 多画像分发开启 → 群聊口径切分（多发言者，全部块保留）
         //    - 否则配置了 utt_splitter → split_messages 切分（目标 persona 为 config.persona_uid）
         //    - 未配置 → 整会话一块
@@ -133,7 +138,7 @@ impl<'a> L1Summarizer<'a> {
         };
         debug!(%session_id, block_count = chunks.len(), "L1 摘要按块生成");
 
-        // 3. 逐块生成（内存收集，全部成功后统一写库）
+        // 4. 逐块生成（内存收集，全部成功后统一写库）
         //    - generated[i] = 块 i 的 (L1, 关键词列表)（None = 该块生成失败，降级）
         //    - 块 i 的上文来自块 i-1 的生成结果（内存传递，只注入最近 1 块，不链式）
         let mut generated: Vec<Option<(MemoryL1, Vec<KeywordToken>)>> =
@@ -152,11 +157,12 @@ impl<'a> L1Summarizer<'a> {
                     &self.config,
                     &self.config.user_prefix,
                     &self.config.assistant_prefix,
+                    &descriptions,
                 ))
             };
 
             match self
-                .generate_chunk_l1(session_id, chunk, prior_context.as_deref())
+                .generate_chunk_l1(session_id, chunk, prior_context.as_deref(), &descriptions)
                 .await
             {
                 Ok((l1, keywords)) => {
@@ -172,7 +178,7 @@ impl<'a> L1Summarizer<'a> {
             }
         }
 
-        // 4. 统一写库（成功块）+ 写回关键词
+        // 5. 统一写库（成功块）+ 写回关键词
         //    词池快照读取一次供全部块复用；读取失败降级为空快照（全部按规范词写回）
         let pool_rows = match self.storage.list_keyword_pool_entries().await {
             Ok(rows) => rows,
@@ -198,7 +204,7 @@ impl<'a> L1Summarizer<'a> {
             }
         }
 
-        // 5. 返回
+        // 6. 返回
         match saved_last {
             Some(l1) => {
                 info!(
@@ -280,10 +286,11 @@ impl<'a> L1Summarizer<'a> {
             return Ok(vec![l1]);
         }
 
-        // 3. 触发：按 tail_msg_count 切分为段（每段 ≤ tail 条，尾块覆盖最新对话）
+        // 3. 触发：附件描述加载 + 按 tail_msg_count 切分为段（每段 ≤ tail 条，尾块覆盖最新对话）
         //    theta_gap 保持默认（10 分钟）：时间间隙大的消息也切分为独立段。
         //    多画像分发开启 → 群聊口径切分（多发言者，全部块保留）；
         //    否则按目标 persona（`config.persona_uid`）切分。
+        let descriptions = self.load_attachment_descriptions(&messages).await;
         let splitter_cfg = crate::utt::UttSplitterConfig {
             theta_gap_minutes: 10,
             max_msgs_per_block: progressive.tail_msg_count.max(1),
@@ -327,11 +334,12 @@ impl<'a> L1Summarizer<'a> {
                     &self.config,
                     &self.config.user_prefix,
                     &self.config.assistant_prefix,
+                    &descriptions,
                 ))
             };
 
             match self
-                .generate_chunk_l1(session_id, chunk, prior_context.as_deref())
+                .generate_chunk_l1(session_id, chunk, prior_context.as_deref(), &descriptions)
                 .await
             {
                 Ok((l1, keywords)) => {
@@ -426,5 +434,31 @@ impl<'a> L1Summarizer<'a> {
                 row
             })
             .collect()
+    }
+
+    // =========================================================
+    // 附件描述加载（内部辅助）
+    // =========================================================
+
+    /// 加载会话消息的附件描述映射（`[图片#{hash}]` → 描述）。
+    ///
+    /// 说明:
+    /// - 切块前一次加载全部会话消息的附件行，供对话文本与上文注入渲染；
+    /// - 查询失败记 warn 并返回空映射（对话文本保留占位符原文，L1 不阻塞）。
+    async fn load_attachment_descriptions(
+        &self,
+        messages: &[ramaria_core::types::Message],
+    ) -> HashMap<String, String> {
+        let message_ids: Vec<Uuid> = messages.iter().map(|m| m.id).collect();
+        if message_ids.is_empty() {
+            return HashMap::new();
+        }
+        match self.storage.list_attachments_by_messages(&message_ids).await {
+            Ok(rows) => ramaria_core::types::build_render_map(&rows),
+            Err(e) => {
+                warn!(error = %e, "L1 摘要附件查询失败，对话文本保留占位符原文");
+                HashMap::new()
+            }
+        }
     }
 }

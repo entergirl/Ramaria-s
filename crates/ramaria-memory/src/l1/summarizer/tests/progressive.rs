@@ -363,7 +363,14 @@ fn prior_context_truncates_mixed_cjk_emoji_on_char_boundary() {
         prior_context_max_chars: 60,
         ..Default::default()
     };
-    let ctx = build_prior_context(&chunk, None, &cfg, "用户：", "助手：");
+    let ctx = build_prior_context(
+        &chunk,
+        None,
+        &cfg,
+        "用户：",
+        "助手：",
+        &std::collections::HashMap::new(),
+    );
     assert!(ctx.ends_with('…'), "应含统一省略号截断标记");
     assert!(
         ctx.chars().count() <= 60,

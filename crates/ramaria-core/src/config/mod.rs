@@ -3,7 +3,7 @@
 //! 设计特点:
 //! - 按职责拆分配置域: 路径、后端、检索、衰减、Session、阈值、索引、日志、推断、
 //!   事件提取、L1 摘要、utt 话语块、示例、桥接、缓存、行为、知识、嵌入、风格、反馈、
-//!   注入协调预算、层间去重、主动对话
+//!   注入协调预算、层间去重、主动对话、图片理解
 //! - 每组配置提供稳定默认值，保证首次启动和测试环境有一致行为
 //! - 支持 serde 序列化与反序列化，便于 CLI、GUI 和配置文件共享
 //! - 非敏感配置才允许进入 config.toml，API key 始终由 OS keychain 管理
@@ -36,6 +36,7 @@ mod paths;
 mod proactive;
 mod retrieval;
 mod runtime;
+mod vision;
 
 pub use channels::{BridgeConfig, McpConfig, UttConfig};
 pub use core::RamariaConfig;
@@ -55,6 +56,7 @@ pub use paths::PathConfig;
 pub use proactive::ProactiveConfig;
 pub use retrieval::{DecayConfig, RetrievalConfig};
 pub use runtime::{EventExtractionConfig, IndexConfig, SessionConfig, ThresholdConfig};
+pub use vision::VisionConfig;
 
 #[cfg(test)]
 mod tests;

@@ -82,6 +82,14 @@ impl LlmProvider for LmStudioProvider {
         self.base.chat(request).await
     }
 
+    async fn chat_vision(
+        &self,
+        request: &ChatRequest,
+        image_data_uris: &[String],
+    ) -> RamariaResult<String> {
+        self.base.chat_with_images(request, image_data_uris).await
+    }
+
     async fn chat_stream(
         &self,
         request: &ChatRequest,
