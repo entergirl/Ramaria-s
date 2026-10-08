@@ -26,19 +26,23 @@ use crate::eta::{EtaEstimator, PhaseKind};
 ///
 /// 字段约定:
 /// - `targets`: 每个目标对应一次 L1 生成（`None` = 不绑定画像，`persona_uid` 存 NULL）；
+/// - `l1_prefix`: L1 角色前缀覆盖（`None` = 摘要器默认「用户：/助手：」；
+///   `Some((user, assistant))` = 覆盖，导入消息自带人名前缀时传空串）；
 /// - `cascade`: `true` 时每次生成末尾触发 L2 检查（宿主自行汇总触发），`false` 为无级联口径；
 /// - `throttle_ms`: 连续 LLM 调用之间的最小间隔（毫秒，0 = 不等待）；
 /// - `group_fanout`: 群聊多画像分发：每会话一次生成 × 块内参与者复制 L1 行；
-///   为 true 时忽略 `targets`（目标由块内发言者决定）。
+///   为 true 时忽略 `targets` 与 `l1_prefix`（分发恒用空前缀）。
 #[derive(Debug, Clone)]
 pub struct ImportL1Plan {
     /// L1 生成目标列表（每个目标一次调用）
     pub targets: Vec<Option<String>>,
+    /// L1 角色前缀覆盖（为 `None` 时用摘要器默认前缀）
+    pub l1_prefix: Option<(String, String)>,
     /// 是否在每次生成末尾触发 L2 检查
     pub cascade: bool,
     /// 连续 LLM 调用间最小间隔（毫秒）
     pub throttle_ms: u64,
-    /// 群聊多画像分发（为 true 时忽略 `targets`）
+    /// 群聊多画像分发（为 true 时忽略 `targets` 与 `l1_prefix`）
     pub group_fanout: bool,
 }
 
@@ -156,6 +160,12 @@ pub(crate) async fn generate_l1(
     let mut l1_skipped = 0usize;
     let mut l1_processed = 0usize;
 
+    // 角色前缀：None 走摘要器默认前缀，Some 覆盖为指定文本（群聊分发分支不使用）
+    let (user_prefix, assistant_prefix) = match &plan.l1_prefix {
+        Some((u, a)) => (Some(u.as_str()), Some(a.as_str())),
+        None => (None, None),
+    };
+
     // 起始进度：总量已知，先给出 0/总数 的起点（宿主不再自行计算 L1 总量）
     if let Some(sink) = progress {
         let message = if plan.group_fanout {
@@ -210,15 +220,20 @@ pub(crate) async fn generate_l1(
             for target in &plan.targets {
                 let result = if plan.cascade {
                     engine
-                        .regenerate_l1(*session_id, target.as_deref(), Some(""), Some(""))
+                        .regenerate_l1(
+                            *session_id,
+                            target.as_deref(),
+                            user_prefix,
+                            assistant_prefix,
+                        )
                         .await
                 } else {
                     engine
                         .regenerate_l1_no_cascade(
                             *session_id,
                             target.as_deref(),
-                            Some(""),
-                            Some(""),
+                            user_prefix,
+                            assistant_prefix,
                         )
                         .await
                 };

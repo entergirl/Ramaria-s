@@ -70,6 +70,7 @@ fn l1_plan(outcome: &ImportL0Outcome) -> ImportL1Plan {
     }
     ImportL1Plan {
         targets,
+        l1_prefix: Some((String::new(), String::new())),
         cascade: false,
         throttle_ms: 0,
         group_fanout: false,

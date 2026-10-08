@@ -15,11 +15,13 @@
  * - 角色映射：user → 右对齐粉底 / assistant → 左对齐蓝底 / system → 居中灰底
  * - CSP-safe: 全部样式走 CSS 类，零内联 style（包括 innerHTML 中的 style 属性）
  * - 助手气泡左侧显示人格头像（首字母圆形），用户气泡右侧无头像
- * - persona_uid 为 null/空时按角色回退标签（user→"你"，assistant→"助手"）
+ * - 导入 / 群聊消息的 sender_name 优先作气泡标签与头像首字母；缺失时回退 persona 昵称 / "助手"
+ * - 图片占位符 `[图片: 描述]` 渲染为文本卡片（图标 + 转义描述）；`[图片#hash]` 等
+ *   未注入描述的形态保留原文；与普通文本混排时按占位符分段渲染，互不干扰
  * - 多气泡：助手回复按 `||` 契约拆分为多条气泡（历史回读与流式收尾同一拆分口径）
  *
  * 用法:
- * var bubble = RamariaMessageBubble.create({ id, role, content, persona_uid, created_at, is_proactive });
+ * var bubble = RamariaMessageBubble.create({ id, role, content, persona_uid, sender_name, created_at, is_proactive });
  * var bubble = RamariaMessageBubble.createStreaming({ id: 'temp', role: 'assistant' });
  * RamariaMessageBubble.updateStreamText('temp', '已累积的全文');
  * RamariaMessageBubble.finalize('temp', finalContent);
@@ -90,12 +92,13 @@ var RamariaMessageBubble = (function () {
  * 说明:
  * - 不修改数据库内容，保持 L1 摘要可访问完整上下文。
  * - 正常 AI 对话不会产生 `[{name}] ` 前缀，此操作安全无副作用。
+ * - 行首 `[图片...]` 系列占位符不是昵称前缀（由图片卡片渲染处理），不剥离。
  */
     function _stripImportPrefix(content) {
 // 空值/空串统一回退占位：避免渲染出不可见的空气泡（内容缺失要显式可见）
         if (!content) return '[空消息]';
-// 匹配行首的 [{任意字符}] 后跟可选空格
-        var stripped = content.replace(/^\[[^\]]+\]\s*/, '');
+// 匹配行首的 [{任意字符}] 后跟可选空格；排除 `[图片...]` 占位符
+        var stripped = content.replace(/^\[(?!图片)[^\]]+\]\s*/, '');
 // 极端情况：消息本身只有前缀无正文
         if (!stripped.trim()) return '[空消息]';
         return stripped;
@@ -109,7 +112,7 @@ var RamariaMessageBubble = (function () {
  * 创建一个标准消息气泡。
  *
  * 参数:
- * - `msg`: { id, role, content, persona_uid?, created_at? }
+ * - `msg`: { id, role, content, persona_uid?, sender_name?, created_at? }
  *
  * 返回:
  * - DOM 元素（.msg-bubble-wrapper），可直接插入消息列表
@@ -123,14 +126,22 @@ var RamariaMessageBubble = (function () {
         var role = msg.role;
 
  // ── 角色标签逻辑 ──
+ // assistant 消息带 sender_name（群聊 / 导入消息的外部发送者）→ 显示 sender_name
  // assistant 消息带 persona_uid → 显示 persona 昵称（对话人，在左侧）
  // assistant 消息无 persona_uid → 回退 "助手"
  // user 消息 → 始终显示 "你"（用户自己，在右侧）
+        var senderName = (role === 'assistant' && typeof msg.sender_name === 'string')
+            ? msg.sender_name
+            : '';
+
         var personaName = '';
-        var label;
         if (role === 'assistant' && msg.persona_uid) {
             personaName = _lookupPersonaName(msg.persona_uid);
-            label = personaName || '助手';
+        }
+
+        var label;
+        if (role === 'assistant') {
+            label = senderName || personaName || '助手';
         } else {
             label = ROLE_LABELS[role] || ROLE_LABELS.system;
         }
@@ -148,12 +159,13 @@ var RamariaMessageBubble = (function () {
         wrapper.setAttribute('data-message-id', msg.id || '');
         wrapper.setAttribute('data-role', role);
 
- // ── 助手气泡左侧显示人格头像 ──
-        if (role === 'assistant' && personaName) {
+ // ── 助手气泡左侧显示人格头像（sender_name 优先，头像底色仍由 persona_uid 决定） ──
+        var avatarName = senderName || personaName;
+        if (role === 'assistant' && avatarName) {
             var avatarEl = document.createElement('div');
             avatarEl.className = 'msg-bubble-avatar';
             avatarEl.setAttribute('aria-hidden', 'true');
-            avatarEl.textContent = personaName.charAt(0).toUpperCase();
+            avatarEl.textContent = avatarName.charAt(0).toUpperCase();
  // 稳定的头像背景色（由 persona_uid hash 决定）
             avatarEl.style.backgroundColor = _avatarColor(msg.persona_uid || '');
             wrapper.appendChild(avatarEl);
@@ -233,22 +245,124 @@ var RamariaMessageBubble = (function () {
     }
 
 /**
- * 创建单个气泡元素（Markdown 渲染 + 异常兜底）。
+ * 创建单个气泡元素（图片占位符分段渲染 + Markdown + 异常兜底）。
+ *
+ * 说明:
+ * - 无图片占位符时整段走 Markdown 渲染（原路径不变）；
+ * - 含 `[图片: 描述]` 时按占位符分段：文本段走 Markdown，图片段渲染为卡片 DOM，
+ *   依次 append 到同一气泡容器，互不干扰；
+ * - `[图片#hash]` 等未注入描述的占位符不匹配，随文本段原样渲染。
  */
     function _createBubbleEl(text) {
         var bubble = document.createElement('div');
         bubble.className = 'msg-bubble';
 
-        try {
-            bubble.innerHTML = RamariaMarkdown.render(text);
-        } catch (err) {
-            console.error('[MessageBubble] Markdown 渲染失败:', err);
-            bubble.innerHTML = RamariaMarkdown.sanitize
-                ? RamariaMarkdown.sanitize(text)
-                : _escHtml(text);
+        var segments = _splitImageSegments(text);
+        if (!_hasImageSegment(segments)) {
+            _renderMarkdownInto(bubble, text);
+            return bubble;
+        }
+
+        for (var i = 0; i < segments.length; i++) {
+            var seg = segments[i];
+            if (seg.type === 'image') {
+                bubble.appendChild(_createImageCard(seg.desc));
+            } else {
+                var textEl = document.createElement('div');
+                textEl.className = 'msg-bubble-segment';
+                _renderMarkdownInto(textEl, seg.value);
+                bubble.appendChild(textEl);
+            }
         }
 
         return bubble;
+    }
+
+/**
+ * 将文本按图片占位符 `[图片: 描述]` 切分为文本段与图片段。
+ *
+ * 参数:
+ * - `text`: 气泡文本
+ *
+ * 返回:
+ * - 分段数组，元素为 { type: 'text', value } 或 { type: 'image', desc }
+ *
+ * 说明:
+ * - 描述禁止包含 `[` / `]`：描述含方括号（无法确定占位符终点）时该处不匹配，
+ *   整段按原文交给文本段渲染（不完整匹配降级）；
+ * - `[图片#hash]` / `[图片]` / 未闭合的 `[图片: ...` 不匹配，保留原文。
+ */
+    function _splitImageSegments(text) {
+        var source = (typeof text === 'string') ? text : '';
+        var re = /\[图片: ([^\[\]]+)\]/g;
+        var segments = [];
+        var lastIndex = 0;
+        var match;
+
+        while ((match = re.exec(source)) !== null) {
+            if (match.index > lastIndex) {
+                segments.push({ type: 'text', value: source.slice(lastIndex, match.index) });
+            }
+            segments.push({ type: 'image', desc: match[1] });
+            lastIndex = re.lastIndex;
+        }
+
+        if (lastIndex < source.length) {
+            segments.push({ type: 'text', value: source.slice(lastIndex) });
+        }
+
+        return segments;
+    }
+
+/** 判断分段结果中是否含图片段 */
+    function _hasImageSegment(segments) {
+        for (var i = 0; i < segments.length; i++) {
+            if (segments[i].type === 'image') return true;
+        }
+        return false;
+    }
+
+/**
+ * 创建图片占位卡片（文本卡片通道：仅展示图标与描述，不加载真实图片文件）。
+ *
+ * 参数:
+ * - `desc`: 图片描述（读取口注入产物）
+ *
+ * 返回:
+ * - DOM 元素（.msg-image-card）
+ *
+ * 说明:
+ * - 描述经 textContent 写入（不解析 HTML / Markdown），不产生注入节点；
+ * - 图标为 aria-hidden 的字符图形，样式全部走 CSS 类（CSP-safe）。
+ */
+    function _createImageCard(desc) {
+        var card = document.createElement('div');
+        card.className = 'msg-image-card';
+
+        var icon = document.createElement('span');
+        icon.className = 'msg-image-card-icon';
+        icon.setAttribute('aria-hidden', 'true');
+        icon.textContent = '\uD83D\uDDBC';
+
+        var descEl = document.createElement('span');
+        descEl.className = 'msg-image-card-desc';
+        descEl.textContent = desc;
+
+        card.appendChild(icon);
+        card.appendChild(descEl);
+        return card;
+    }
+
+/** 将 Markdown 文本渲染进目标元素；渲染异常时降级为转义文本 */
+    function _renderMarkdownInto(el, text) {
+        try {
+            el.innerHTML = RamariaMarkdown.render(text);
+        } catch (err) {
+            console.error('[MessageBubble] Markdown 渲染失败:', err);
+            el.innerHTML = RamariaMarkdown.sanitize
+                ? RamariaMarkdown.sanitize(text)
+                : _escHtml(text);
+        }
     }
 
 /**

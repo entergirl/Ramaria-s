@@ -497,7 +497,7 @@ pub(crate) async fn evaluate_item(
 
 /// 写评分数值到文件（`-` 表示 stdout）。
 ///
-/// 说明: `-` 直出 stdout（含库内原文，口径见模块头 CR-SEC-102 登记）。
+/// 说明: `-` 直出 stdout（含库内原文，口径见模块头说明）。
 pub(crate) fn write_evaluation_file(out: &str, evaluation: &ProbeEvaluation) -> anyhow::Result<()> {
     let json = serde_json::to_string_pretty(evaluation).context("评分数值序列化失败")?;
     if out == "-" {

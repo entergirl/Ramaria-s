@@ -492,6 +492,7 @@ async fn generate_l1_generates_for_both_personas_with_eta_progress() {
     let sink = RecordingSink::new();
     let plan = ImportL1Plan {
         targets: vec![Some(self_uid), Some(other_uid)],
+        l1_prefix: Some((String::new(), String::new())),
         cascade: false,
         throttle_ms: 0,
         group_fanout: false,
@@ -717,6 +718,7 @@ async fn generate_l1_group_fanout_dispatches_rows() {
 
     let make_plan = || ImportL1Plan {
         targets: Vec::new(),
+        l1_prefix: None,
         cascade: false,
         throttle_ms: 0,
         group_fanout: true,
@@ -887,6 +889,7 @@ async fn group_import_reaches_l2_per_persona() {
     session_ids.extend(extra.session_ids.iter().copied());
     let plan = ImportL1Plan {
         targets: Vec::new(),
+        l1_prefix: None,
         cascade: false,
         throttle_ms: 0,
         group_fanout: true,

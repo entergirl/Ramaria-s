@@ -397,7 +397,7 @@ var ImportView = (function () {
             html += '<div class="import-file-zone" id="import-file-zone">';
             html += '<div class="import-file-zone-icon">📂</div>';
             html += '<div class="import-file-zone-title">选择 QQ 聊天记录文件</div>';
-            html += '<div class="import-file-zone-desc">支持 shuakami/qq-chat-exporter v6.x 导出的 JSON 文件</div>';
+            html += '<div class="import-file-zone-desc">支持 shuakami/qq-chat-exporter v6.x 导出的 JSON 文件；含图片的导出请保留与 JSON 同级的 resources/ 目录</div>';
             html += '<button class="btn btn-primary" id="btn-select-file">浏览文件</button>';
             html += '</div>';
         }
@@ -1014,7 +1014,7 @@ var ImportView = (function () {
             var isQQ = await RamariaApi.import.detectFormat(_selectedFilePath);
 
             if (!isQQ) {
-                RamariaToast.show('error', '格式错误', '文件格式不是 QQ 聊天记录，请确认文件来源。');
+                RamariaToast.show('error', '格式错误', '文件格式不是 QQ 聊天记录，请确认是 shuakami/qq-chat-exporter v6.x 导出的 JSON 文件。');
                 if (btn) { btn.disabled = false; btn.textContent = '分析文件'; }
                 return;
             }

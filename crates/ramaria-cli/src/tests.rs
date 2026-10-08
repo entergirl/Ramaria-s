@@ -431,7 +431,7 @@ async fn init_app_uses_config_toml_backend_on_fresh_db() {
     assert_eq!(
         engine.llm().name(),
         "DeepSeek",
-        "新库首次启动必须采用 config.toml 的 [backend]（BUG-M5b-01）"
+        "新库首次启动必须采用 config.toml 的 [backend]"
     );
 
     // 同步后 DB backend_config 也应记录 deepseek（文件为准回写）

@@ -15,7 +15,7 @@
 use anyhow::Context;
 use ramaria_core::privacy::mask_id;
 use ramaria_importer::ImportSource;
-use ramaria_service::{Engine, ImportL1Plan, ImportMode, ImportRequest};
+use ramaria_service::{Engine, ImportMode, ImportPostPlan, ImportPostRequest, ImportRequest};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -70,9 +70,8 @@ pub struct ImportArgs {
 /// 3. 文件解析 → 诊断报告输出（默认掩码版，`--no-report` 关闭）
 /// 4. 用户确认（非 --yes 模式）
 /// 5. L0 导入（服务层用例：双画像准备 + 会话 / 消息写入）
-/// 6. 为每个导入的 session 触发 L1 摘要生成（persona_uid=NULL，不绑定特定画像）
-/// 7. 深度模式触发 L2→L3 级联
-/// 8. 结果输出
+/// 6. 导入后处理（服务层单一编排：图片理解 → L1 摘要生成 → 深度模式触发 L2→L3 级联）
+/// 7. 结果输出
 pub async fn run(engine: &Arc<Engine>, args: ImportArgs) -> anyhow::Result<()> {
     let path = args.file.as_path();
 
@@ -102,7 +101,7 @@ pub async fn run(engine: &Arc<Engine>, args: ImportArgs) -> anyhow::Result<()> {
     if ext != "json" {
         return Err(anyhow::anyhow!(
             ramaria_core::error::RamariaError::validation(format!(
-                "不支持的文件类型: .{}（仅支持 qq-chat-exporter v6.x 导出的 .json 格式）",
+                "不支持的文件类型: .{}（仅支持 qq-chat-exporter v6.x 导出的 .json 格式；含图片的导出请保留 resources/ 目录）",
                 ext
             ))
         ));
@@ -267,25 +266,8 @@ pub async fn run(engine: &Arc<Engine>, args: ImportArgs) -> anyhow::Result<()> {
         }
     }
 
-    // Step 5.5: 图片理解（先理解后 L1；声明关闭 / 门禁未过时静默跳过）
-    if let Some(export_root) = args.file.parent() {
-        match engine
-            .understand_import_attachments(&outcome.session_ids, export_root)
-            .await
-        {
-            Ok(stat) if stat.scanned > 0 => crate::ui::info(&format!(
-                "🖼️  图片理解: {} 完成, {} 复用, {} 跳过, {} 失败",
-                stat.done, stat.reused, stat.skipped, stat.failed
-            )),
-            Ok(_) => {}
-            Err(e) => {
-                tracing::warn!(error = %e, "图片理解执行失败（不阻塞导入）");
-                crate::ui::warn(&format!("图片理解跳过: {e}"));
-            }
-        }
-    }
-
-    // Step 6: 为每个导入的 session 触发 L1 摘要生成
+    // Step 5.5: 导入后处理（服务层单一编排：图片理解 → L1 摘要生成 → 深度触发；
+    // 图片理解先于 L1；声明关闭 / 门禁未过时静默跳过）
     // 私聊：逐 session 生成 persona_uid=NULL 摘要（不绑定特定画像视图）
     // 群聊：按会话生成一次、块内参与者复制分发行（成员各自持有摘要）
     if args.deep {
@@ -295,38 +277,36 @@ pub async fn run(engine: &Arc<Engine>, args: ImportArgs) -> anyhow::Result<()> {
     }
 
     let group_fanout = outcome.chat_type == "group";
-    let mut l1_ok = 0usize;
-    let mut l1_skip = 0usize;
-    let mut l1_err = 0usize;
-    if group_fanout {
-        let l1_outcome = engine
-            .generate_import_l1(
-                &outcome.session_ids,
-                ImportL1Plan {
-                    targets: Vec::new(),
-                    cascade: true,
+    let post = engine
+        .run_import_post(
+            ImportPostRequest {
+                session_ids: outcome.session_ids.clone(),
+                export_root: args.file.parent().map(|p| p.to_path_buf()),
+                plan: ImportPostPlan {
+                    l1_targets: if group_fanout { Vec::new() } else { vec![None] },
+                    l1_prefix: None,
+                    group_fanout,
+                    l1_cascade: true,
+                    cascade_deep: args.deep,
                     throttle_ms: 0,
-                    group_fanout: true,
                 },
-                None,
-            )
-            .await
-            .context("L1 生成失败")?;
-        l1_ok = l1_outcome.l1_success;
-        l1_skip = l1_outcome.l1_skipped;
-        l1_err = l1_outcome.l1_failed;
-    } else {
-        for sid in &outcome.session_ids {
-            match engine.regenerate_l1(*sid, None, None, None).await {
-                Ok(Some(_)) => l1_ok += 1,
-                Ok(None) => l1_skip += 1,
-                Err(e) => {
-                    l1_err += 1;
-                    tracing::warn!(%sid, error = %e, "L1 摘要生成失败（非致命）");
-                }
-            }
-        }
+            },
+            None,
+        )
+        .await
+        .context("导入后处理失败")?;
+
+    // 图片理解统计：仅扫描到附件时展示
+    if let Some(stat) = post.vision.filter(|stat| stat.scanned > 0) {
+        crate::ui::info(&format!(
+            "🖼️  图片理解: {} 完成, {} 复用, {} 跳过, {} 失败",
+            stat.done, stat.reused, stat.skipped, stat.failed
+        ));
     }
+
+    let l1_ok = post.l1.l1_success;
+    let l1_skip = post.l1.l1_skipped;
+    let l1_err = post.l1.l1_failed;
     if l1_ok > 0 || l1_err > 0 {
         crate::ui::info(&format!(
             "📝 L1 摘要: {} 成功, {} 跳过（空会话）, {} 失败",
@@ -334,15 +314,9 @@ pub async fn run(engine: &Arc<Engine>, args: ImportArgs) -> anyhow::Result<()> {
         ));
     }
 
-    // Step 6.6: 深度模式触发 L2→L3 级联；快速模式跳过（留给用户稍后手动触发）
-    if args.deep && l1_ok > 0 {
+    // 深度模式触发 L2→L3 级联；快速模式跳过（留给用户稍后手动触发）
+    if post.l2_triggered {
         crate::ui::info("🔍 深度导入模式：触发 L2 事件提取 → L3 人格画像...");
-        if let Err(e) = engine
-            .trigger_import_deep(Some(outcome.session_ids.len()), None)
-            .await
-        {
-            tracing::warn!(error = %e, "深度处理触发失败（不阻塞导入结果）");
-        }
     }
 
     // Step 7: 结果输出

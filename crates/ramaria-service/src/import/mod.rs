@@ -1,8 +1,8 @@
 //! crates/ramaria-service/src/import/mod.rs - QQ 聊天记录导入用例（解析 / L0 写入 / L1 批量生成 / 深度触发）
 //!
 //! 设计特点:
-//! - 管线分段：解析预览（`analyze`）→ L0 写入（`write_l0`）→ L1 批量生成（`generate_l1`）
-//!   → 深度处理触发（`trigger_deep`），宿主按导入模式组合调用，不写第二份导入实现
+//! - 管线分段：解析预览（`analyze`）→ L0 写入（`write_l0`）→ 后处理编排
+//!   （`post`：图片理解 → L1 批量生成 → 深度触发），宿主差异由计划参数表达
 //! - 图片理解门面（`understand_import_attachments`）：宿主在 L0 写入后、L1 生成前调用，
 //!   细节由图片理解模块承担（门禁 / 去重 / 调用 / 回填）
 //! - 画像准备双形态：私聊为导出者与对方分别准备 `source="qq"` 的 persona（L1 按 persona
@@ -19,6 +19,7 @@
 //! - `analyze`：解析预览（`AnalyzeRequest` → `AnalysisReport`，不写入数据库）；
 //! - `l0`：L0 写入（私聊双画像 / 群聊多画像准备、会话与消息落库、画像名回读口径）；
 //! - `l1`：L1 批量生成与 ETA 进度（含群聊分发口径与完成摘要构造）；
+//! - `post`：导入后处理单一入口（图片理解 → L1 批量生成 → 可选深度级联一次编排）；
 //! - `deep`：深度触发（L2 事件提取 → L3 性格画像级联）。
 
 mod analyze;
@@ -26,6 +27,7 @@ mod deep;
 mod detect;
 mod l0;
 mod l1;
+mod post;
 
 use std::path::Path;
 
@@ -42,6 +44,7 @@ pub use l1::{
     ImportDoneSummary, ImportL1Outcome, ImportL1Plan, ImportL1Progress, ImportProgressSink,
     done_summary,
 };
+pub use post::{ImportPostOutcome, ImportPostPlan, ImportPostRequest};
 
 // 用例入口 re-export：`crate::import::X` 为引擎门面与既有调用路径
 pub(crate) use analyze::analyze;
@@ -49,6 +52,7 @@ pub(crate) use deep::trigger_deep;
 pub(crate) use detect::detect_format;
 pub(crate) use l0::write_l0;
 pub(crate) use l1::generate_l1;
+pub(crate) use post::run_post;
 
 // =========================================================
 // 引擎门面
@@ -126,12 +130,34 @@ impl Engine {
     ) -> RamariaResult<()> {
         trigger_deep(self, l1_total, progress).await
     }
+
+    /// 执行导入后处理单一编排（图片理解 → L1 批量生成 → 可选深度级联）。
+    ///
+    /// 职责:
+    /// - 宿主在 L0 写入后一次调用完成全部后处理，顺序固定：图片理解先于 L1，深度触发最后；
+    /// - 图片理解失败自动降级（不阻塞）；深度触发条件为 L1 至少一条生成成功。
+    ///
+    /// 参数:
+    /// - `req`: 会话列表、导出根与后处理计划（见 [`ImportPostRequest`]）；
+    /// - `progress`: 可选进度回调（L1 / L2 / L3 阶段进度透传）。
+    ///
+    /// 返回:
+    /// - `ImportPostOutcome`：图片理解统计、L1 计数与深度触发标志。
+    pub async fn run_import_post(
+        &self,
+        req: ImportPostRequest,
+        progress: Option<&dyn ImportProgressSink>,
+    ) -> RamariaResult<ImportPostOutcome> {
+        run_post(self, req, progress).await
+    }
 }
 
 // =========================================================
 // 单元测试
 // =========================================================
 
+#[cfg(test)]
+mod post_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

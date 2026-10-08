@@ -15,8 +15,8 @@ use crate::DesktopState;
 use crate::events::{EVENT_IMPORT_PROGRESS, ImportProgressPayload};
 use ramaria_core::privacy::mask_id;
 use ramaria_service::{
-    AnalyzeRequest, ImportDoneSummary, ImportL1Plan, ImportL1Progress, ImportMode,
-    ImportProgressSink, ImportRequest,
+    AnalyzeRequest, ImportDoneSummary, ImportL1Progress, ImportMode, ImportPostPlan,
+    ImportPostRequest, ImportProgressSink, ImportRequest,
 };
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
@@ -368,37 +368,27 @@ pub async fn import_qq_chat(
     tokio::spawn(async move {
         let sink = TauriImportProgressSink { app_handle: handle };
 
-        // 图片理解（先理解后 L1）：门禁未过 / 无待处理图片时静默跳过，失败不阻塞导入
-        if let Some(root) = export_root.as_deref() {
-            match engine.understand_import_attachments(&sids, root).await {
-                Ok(stat) if stat.scanned > 0 => tracing::info!(
-                    scanned = stat.scanned,
-                    done = stat.done,
-                    reused = stat.reused,
-                    skipped = stat.skipped,
-                    failed = stat.failed,
-                    "导入图片理解完成"
-                ),
-                Ok(_) => {}
-                Err(e) => tracing::warn!(error = %e, "图片理解执行失败（不阻塞导入）"),
-            }
-        }
-
-        // L1 批量生成：起始进度与逐 session 进度由服务层用例发出，宿主只转发。
-        let l1_outcome = match engine
-            .generate_import_l1(
-                &sids,
-                ImportL1Plan {
-                    targets,
-                    cascade: false,
-                    throttle_ms,
-                    group_fanout,
+        // 导入后处理单一编排：图片理解（先理解后 L1）→ L1 批量生成 → 深度触发。
+        // 图片理解失败自动降级；起始进度与逐 session 进度由服务层用例发出，宿主只转发。
+        let post = match engine
+            .run_import_post(
+                ImportPostRequest {
+                    session_ids: sids,
+                    export_root,
+                    plan: ImportPostPlan {
+                        l1_targets: targets,
+                        l1_prefix: Some((String::new(), String::new())),
+                        group_fanout,
+                        l1_cascade: false,
+                        cascade_deep: is_deep,
+                        throttle_ms,
+                    },
                 },
                 Some(&sink),
             )
             .await
         {
-            Ok(outcome) => outcome,
+            Ok(post) => post,
             Err(e) => {
                 // 理论不可达：服务层把单次生成失败转为计数，不抛错；防御性收束
                 tracing::error!(error = %e, "导入 L1 批量生成失败");
@@ -415,26 +405,11 @@ pub async fn import_qq_chat(
             }
         };
 
-        // 深度模式：至少一条 L1 生成成功时触发 L2 → L3 级联
-        // （双方 persona 均在满足未吸收 L1 阈值后各自触发）。
-        let mut l2_triggered = false;
-        let mut l3_triggered = false;
-        if is_deep && l1_outcome.l1_success > 0 {
-            if let Err(e) = engine
-                .trigger_import_deep(Some(l1_outcome.l1_total), Some(&sink))
-                .await
-            {
-                tracing::error!(error = %e, "导入深度处理触发失败");
-            }
-            l2_triggered = true;
-            l3_triggered = true;
-        }
-
         // 完成摘要（文案由服务层提供，与既有 done 事件口径一致）
         let summary = ramaria_service::import::done_summary(
-            &l1_outcome,
-            l2_triggered,
-            l3_triggered,
+            &post.l1,
+            post.l2_triggered,
+            post.l3_triggered,
             total_sids,
         );
         sink.on_done(&summary);

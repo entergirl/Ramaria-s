@@ -547,7 +547,7 @@ pub(crate) fn filter_variants(
 
 /// 写实验结果到文件（`-` 表示 stdout，输出原始结果 JSON）。
 ///
-/// 说明: `-` 直出 stdout（含库内原文，口径见模块头 CR-SEC-102 登记）。
+/// 说明: `-` 直出 stdout（含库内原文，口径见模块头说明）。
 pub(crate) fn write_experiment_file(out: &str, experiment: &ProbeExperiment) -> anyhow::Result<()> {
     let json = serde_json::to_string_pretty(experiment).context("实验结果序列化失败")?;
     if out == "-" {

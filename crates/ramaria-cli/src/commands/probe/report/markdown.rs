@@ -12,7 +12,7 @@ use super::render::{AblationComparisonRow, ProbeReport};
 
 /// 写 JSON 报告到文件。
 ///
-/// 说明: `-` 直出 stdout（含库内原文，口径见模块头 CR-SEC-102 登记）。
+/// 说明: `-` 直出 stdout（含库内原文，口径见模块头说明）。
 pub(crate) fn write_report_json(out: &str, report: &ProbeReport) -> anyhow::Result<()> {
     let json = serde_json::to_string_pretty(report).context("报告 JSON 序列化失败")?;
     if out == "-" {
@@ -25,7 +25,7 @@ pub(crate) fn write_report_json(out: &str, report: &ProbeReport) -> anyhow::Resu
 
 /// 写 markdown 报告到文件。
 ///
-/// 说明: `-` 直出 stdout（含库内原文，口径见模块头 CR-SEC-102 登记）。
+/// 说明: `-` 直出 stdout（含库内原文，口径见模块头说明）。
 pub(crate) fn write_report_markdown(out: &str, report: &ProbeReport) -> anyhow::Result<()> {
     let md = render_report_markdown(report);
     if out == "-" {
@@ -230,7 +230,7 @@ pub(crate) fn render_report_markdown(report: &ProbeReport) -> String {
         );
         md.push_str("- 判定线：p_fdr<0.05 ∧ |d|≥0.3 ∧ CI 不含 0\n");
         md.push_str(&format!("- {}\n\n", ab.equivalence_note));
-        md.push_str("- 对照语义（D-V20-006）：\n");
+        md.push_str("- 对照语义：\n");
         md.push_str("  - **removal（移除，基线 F0）**：全开中逐层关闭 → 去掉某一层的边际损失；\n");
         md.push_str(
             "  - **substitution（替代，基线 B1）**：去 RAG 摘要、仅单专属层 → 单层能否替代 RAG；\n",

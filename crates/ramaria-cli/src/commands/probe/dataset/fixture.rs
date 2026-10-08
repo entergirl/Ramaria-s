@@ -322,7 +322,7 @@ pub fn sample_with_fallback<T: Clone>(
 
 /// 写数据集到文件（`-` 表示 stdout，输出原始数据集 JSON）。
 ///
-/// 说明: `-` 直出 stdout（含库内原文，口径见模块头 CR-SEC-102 登记）。
+/// 说明: `-` 直出 stdout（含库内原文，口径见模块头说明）。
 pub(crate) fn write_dataset_file(out: &str, dataset: &ProbeDataset) -> anyhow::Result<()> {
     let json = serde_json::to_string_pretty(dataset).context("数据集序列化失败")?;
     if out == "-" {
