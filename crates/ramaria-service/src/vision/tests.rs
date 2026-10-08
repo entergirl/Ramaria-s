@@ -463,7 +463,7 @@ async fn understand_retries_failed_call_once_then_marks_failed() {
 
     let session = storage.create_session(None).await.expect("创建会话应成功");
     write_image(&dir, "resources/images/a.jpg", b"fake");
-    let first = seed_pending_attachment(
+    seed_pending_attachment(
         &storage,
         session.id,
         "resources/images/a.jpg",

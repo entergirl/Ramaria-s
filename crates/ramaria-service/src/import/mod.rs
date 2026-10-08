@@ -134,3 +134,5 @@ impl Engine {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod vision_flow_tests;

@@ -516,7 +516,11 @@ async fn summarize_session_injects_attachment_description_into_prompt() {
 
     let session_id = Uuid::new_v4();
     let storage = MockStorage::new();
-    let image_msg = make_msg(session_id, MessageRole::User, "看这个 [图片#aabbccdd] 好看吗");
+    let image_msg = make_msg(
+        session_id,
+        MessageRole::User,
+        "看这个 [图片#aabbccdd] 好看吗",
+    );
     let reply = make_msg(session_id, MessageRole::Assistant, "好看呀，构图很棒");
     storage.add_messages(session_id, vec![image_msg.clone(), reply]);
     storage.add_attachment(image_attachment(
@@ -556,7 +560,11 @@ async fn summarize_session_keeps_placeholder_without_description() {
 
     let session_id = Uuid::new_v4();
     let storage = MockStorage::new();
-    let image_msg = make_msg(session_id, MessageRole::User, "看这个 [图片#aabbccdd] 好看吗");
+    let image_msg = make_msg(
+        session_id,
+        MessageRole::User,
+        "看这个 [图片#aabbccdd] 好看吗",
+    );
     storage.add_messages(session_id, vec![image_msg.clone()]);
     // pending 行即使有描述也不渲染（渲染映射仅收录已完成行）
     storage.add_attachment(image_attachment(

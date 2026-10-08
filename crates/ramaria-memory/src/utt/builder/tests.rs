@@ -8,8 +8,8 @@ use super::*;
 use ramaria_core::error::RamariaError;
 use ramaria_core::traits::StoreCrud;
 use ramaria_core::types::{
-    AttachmentStatus, InboundAttachmentKind, Message, MessageAttachment, MessageRole, MessageSource,
-    Persona, PersonaKind,
+    AttachmentStatus, InboundAttachmentKind, Message, MessageAttachment, MessageRole,
+    MessageSource, Persona, PersonaKind,
 };
 use ramaria_storage::SqliteStorage;
 
@@ -812,7 +812,10 @@ fn render_block_text_injects_image_descriptions() {
 
     // 空映射 → 正文零变化
     let plain = render_block_text(&chunk[0], "char-0001", "小夏", &HashMap::new());
-    assert!(plain.contains("[图片#aabbccdd]"), "空映射应保留占位符: {plain}");
+    assert!(
+        plain.contains("[图片#aabbccdd]"),
+        "空映射应保留占位符: {plain}"
+    );
     assert!(!plain.contains("[图片:"), "空映射不应产生描述形态: {plain}");
 }
 

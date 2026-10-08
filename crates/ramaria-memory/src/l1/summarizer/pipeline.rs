@@ -453,7 +453,11 @@ impl<'a> L1Summarizer<'a> {
         if message_ids.is_empty() {
             return HashMap::new();
         }
-        match self.storage.list_attachments_by_messages(&message_ids).await {
+        match self
+            .storage
+            .list_attachments_by_messages(&message_ids)
+            .await
+        {
             Ok(rows) => ramaria_core::types::build_render_map(&rows),
             Err(e) => {
                 warn!(error = %e, "L1 摘要附件查询失败，对话文本保留占位符原文");

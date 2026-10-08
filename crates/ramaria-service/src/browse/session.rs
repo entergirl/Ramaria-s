@@ -15,7 +15,9 @@ use std::sync::Arc;
 use chrono::DateTime;
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::traits::StorageBackend;
-use ramaria_core::types::{Message, MessageAttachment, build_render_map, replace_image_placeholders};
+use ramaria_core::types::{
+    Message, MessageAttachment, build_render_map, replace_image_placeholders,
+};
 use uuid::Uuid;
 
 use crate::engine::Engine;
@@ -243,7 +245,10 @@ async fn message_page(
 }
 
 /// 组装消息视图（`[图片#{hash}]` 占位符按附件描述渲染为 `[图片: {描述}]`）。
-async fn message_views(storage: &dyn StorageBackend, messages: &[Message]) -> Vec<SessionMessageView> {
+async fn message_views(
+    storage: &dyn StorageBackend,
+    messages: &[Message],
+) -> Vec<SessionMessageView> {
     let render_map = load_attachment_render_map(storage, messages).await;
     messages
         .iter()

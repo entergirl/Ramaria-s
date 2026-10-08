@@ -267,6 +267,24 @@ pub async fn run(engine: &Arc<Engine>, args: ImportArgs) -> anyhow::Result<()> {
         }
     }
 
+    // Step 5.5: 图片理解（先理解后 L1；声明关闭 / 门禁未过时静默跳过）
+    if let Some(export_root) = args.file.parent() {
+        match engine
+            .understand_import_attachments(&outcome.session_ids, export_root)
+            .await
+        {
+            Ok(stat) if stat.scanned > 0 => crate::ui::info(&format!(
+                "🖼️  图片理解: {} 完成, {} 复用, {} 跳过, {} 失败",
+                stat.done, stat.reused, stat.skipped, stat.failed
+            )),
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "图片理解执行失败（不阻塞导入）");
+                crate::ui::warn(&format!("图片理解跳过: {e}"));
+            }
+        }
+    }
+
     // Step 6: 为每个导入的 session 触发 L1 摘要生成
     // 私聊：逐 session 生成 persona_uid=NULL 摘要（不绑定特定画像视图）
     // 群聊：按会话生成一次、块内参与者复制分发行（成员各自持有摘要）

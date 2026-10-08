@@ -311,6 +311,9 @@ pub async fn import_qq_chat(
         ));
     }
 
+    // 附件定位根（供 L0 后图片理解使用）：导出 JSON 所在目录
+    let export_root = real_path.parent().map(|dir| dir.to_path_buf());
+
     // ---- Step 3: L0 导入（解析 → 双画像准备 → 会话与消息写入） ----
     let outcome = state
         .engine
@@ -364,6 +367,22 @@ pub async fn import_qq_chat(
 
     tokio::spawn(async move {
         let sink = TauriImportProgressSink { app_handle: handle };
+
+        // 图片理解（先理解后 L1）：门禁未过 / 无待处理图片时静默跳过，失败不阻塞导入
+        if let Some(root) = export_root.as_deref() {
+            match engine.understand_import_attachments(&sids, root).await {
+                Ok(stat) if stat.scanned > 0 => tracing::info!(
+                    scanned = stat.scanned,
+                    done = stat.done,
+                    reused = stat.reused,
+                    skipped = stat.skipped,
+                    failed = stat.failed,
+                    "导入图片理解完成"
+                ),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error = %e, "图片理解执行失败（不阻塞导入）"),
+            }
+        }
 
         // L1 批量生成：起始进度与逐 session 进度由服务层用例发出，宿主只转发。
         let l1_outcome = match engine

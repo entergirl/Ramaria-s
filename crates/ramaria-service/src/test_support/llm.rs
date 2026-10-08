@@ -69,6 +69,7 @@ impl MockLlm {
             vision_reply: None,
             vision_failures: std::sync::atomic::AtomicUsize::new(0),
             vision_calls: std::sync::atomic::AtomicUsize::new(0),
+            call_log: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -86,6 +87,7 @@ impl MockLlm {
             vision_reply: None,
             vision_failures: std::sync::atomic::AtomicUsize::new(0),
             vision_calls: std::sync::atomic::AtomicUsize::new(0),
+            call_log: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -103,6 +105,7 @@ impl MockLlm {
             vision_reply: None,
             vision_failures: std::sync::atomic::AtomicUsize::new(0),
             vision_calls: std::sync::atomic::AtomicUsize::new(0),
+            call_log: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -120,6 +123,7 @@ impl MockLlm {
             vision_reply: None,
             vision_failures: std::sync::atomic::AtomicUsize::new(0),
             vision_calls: std::sync::atomic::AtomicUsize::new(0),
+            call_log: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -175,6 +179,14 @@ impl MockLlm {
         self.vision_calls.load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// 调用序列副本（按发生顺序；`"chat"` = 文本生成，`"chat_vision"` = 图片理解）。
+    pub(crate) fn call_log(&self) -> Vec<&'static str> {
+        self.call_log
+            .lock()
+            .expect("MockLlm 的调用序列锁不应中毒")
+            .clone()
+    }
+
     /// 生成调用次数（`chat` 与 `chat_stream` 合计，含成功与失败；健康探测不计入）。
     pub(crate) fn chat_calls(&self) -> usize {
         self.chat_calls.load(std::sync::atomic::Ordering::Acquire)
@@ -198,6 +210,10 @@ impl LlmProvider for MockLlm {
             .lock()
             .expect("MockLlm 的请求记录锁不应中毒")
             .push(request.clone());
+        self.call_log
+            .lock()
+            .expect("MockLlm 的调用序列锁不应中毒")
+            .push("chat");
         if self.always_fail {
             return Err(RamariaError::llm("MockLlm 恒失败（模拟 LLM 后端不可用）"));
         }
@@ -216,6 +232,10 @@ impl LlmProvider for MockLlm {
             .lock()
             .expect("MockLlm 的请求记录锁不应中毒")
             .push(request.clone());
+        self.call_log
+            .lock()
+            .expect("MockLlm 的调用序列锁不应中毒")
+            .push("chat");
         if self.always_fail {
             return Err(RamariaError::llm("MockLlm 恒失败（模拟 LLM 后端不可用）"));
         }
@@ -264,6 +284,10 @@ impl LlmProvider for MockLlm {
         use std::sync::atomic::Ordering;
 
         self.vision_calls.fetch_add(1, Ordering::Relaxed);
+        self.call_log
+            .lock()
+            .expect("MockLlm 的调用序列锁不应中毒")
+            .push("chat_vision");
         if self.vision_failures.load(Ordering::Acquire) > 0 {
             self.vision_failures.fetch_sub(1, Ordering::AcqRel);
             return Err(RamariaError::llm("MockLlm 图片理解失败（模拟调用失败）"));
