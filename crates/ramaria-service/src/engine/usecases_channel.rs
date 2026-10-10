@@ -2,7 +2,7 @@
 //!
 //! 设计特点:
 //! - 用例薄壳：实现体在 `channel` 域模块，本层只做入口挂载
-//! - 读用例实时解析：绑定解析（含自动建档）与生效人格按调用即时计算
+//! - 读用例实时解析：绑定解析（含自动建档）/ 只读查询与生效人格按调用即时计算
 //! - 凭据用例同步：keychain API 为同步调用，不做 async 包装
 //! - 入站写入 / 回复生成 / 图片理解三用例供通道运行时编排消费
 
@@ -39,6 +39,18 @@ impl Engine {
         external_ref: &str,
     ) -> RamariaResult<ChannelBinding> {
         crate::channel::resolve_binding(self, channel, external_ref).await
+    }
+
+    /// 只读查询绑定（不自动建档）；不存在返回 None。
+    ///
+    /// 说明:
+    /// - 供投递门禁等"绑定不存在即不投递"的消费方使用（不产生副作用）。
+    pub async fn channel_find_binding(
+        &self,
+        channel: &str,
+        external_ref: &str,
+    ) -> RamariaResult<Option<ChannelBinding>> {
+        crate::channel::find_binding(self, channel, external_ref).await
     }
 
     /// 绑定写用例：更新绑定（不存在则先自动建档）。

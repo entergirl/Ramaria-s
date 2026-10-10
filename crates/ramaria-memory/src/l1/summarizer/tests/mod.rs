@@ -54,5 +54,6 @@ mod evidence;
 mod fanout;
 mod integration;
 mod progressive;
+mod projection;
 mod utt;
 mod validate;

@@ -70,6 +70,32 @@ pub async fn resolve_binding(
     }
 }
 
+/// 只读查询绑定（不自动建档）；不存在返回 None。
+///
+/// 说明:
+/// - 与 [`resolve_binding`] 的差异：本查询不做自动建档，供投递门禁等
+///   "绑定不存在即不投递"的消费方使用（不产生副作用）。
+///
+/// 参数:
+/// - `channel`: 通道标识（两侧空白容忍）。
+/// - `external_ref`: 会话外部标识（两侧空白容忍）。
+///
+/// 返回:
+/// - `Some(binding)`: 命中的绑定行；
+/// - `None`: 不存在（未建档）。
+pub async fn find_binding(
+    engine: &Engine,
+    channel: &str,
+    external_ref: &str,
+) -> RamariaResult<Option<ChannelBinding>> {
+    let channel = validate_channel(channel)?;
+    let external_ref = validate_external_ref(external_ref)?;
+    engine
+        .storage()
+        .get_channel_binding(channel, external_ref)
+        .await
+}
+
 /// 绑定写用例：按 `(channel, external_ref)` 更新绑定（不存在则先自动建档）。
 ///
 /// 语义:

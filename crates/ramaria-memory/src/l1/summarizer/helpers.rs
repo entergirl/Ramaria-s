@@ -2,7 +2,7 @@
 //!
 //! 设计特点:
 //! - format_messages: L0 消息列表 → 对话文本（仅 User/Assistant 参与摘要；
-//!   图片占位符按附件描述渲染）。
+//!   图片占位符按附件描述渲染；投影模式下按目标判定角色并渲染发言人）；
 //! - is_progressive_triggered: 渐进式摘要触发判断（消息数 / 时间跨度双条件）。
 //! - build_prior_context: 上一块上文构建（短块注入原文 / 长块注入上一 L1 + 线索 / 降级截断）。
 //! - validate_continuation / validate_evidence_notes / normalize_optional_slot: LLM 输出字段校验与规范化。
@@ -26,29 +26,62 @@ use super::L1SummarizerConfig;
 
 /// 将消息列表格式化为对话文本（供 L1 摘要 prompt 使用）。
 ///
-/// 格式:
+/// 格式（非投影，`projection` 为 None）:
 /// - User 消息: `{user_prefix}{content}`
 /// - Assistant 消息: `{assistant_prefix}{content}`
 /// - System/Tool 消息: 跳过（不参与摘要）
 ///
+/// 格式（目标相对投影，`projection` 为 Some(target)）:
+/// - 角色按「发言人人格」判定：`persona_uid == target` → Assistant 前缀，
+///   否则（含 persona_uid 为 None）→ User 前缀；System/Tool 照旧跳过；
+/// - 行格式为 `{role_prefix}{sender_name}：{content}`（全角冒号）；
+///   `sender_name` 缺失或 trim 后为空时退化为 `{role_prefix}{content}`。
+///
 /// 参数:
 /// - `descriptions`: 附件描述映射（`[图片#{hash}]` → 描述；空映射时正文零变化）。
+/// - `projection`: 投影目标人格；None = 保持存储角色口径（本地 / 导入路径）。
 pub(super) fn format_messages(
     messages: &[ramaria_core::types::Message],
     user_prefix: &str,
     assistant_prefix: &str,
     descriptions: &HashMap<String, String>,
+    projection: Option<&str>,
 ) -> String {
     let mut lines = Vec::with_capacity(messages.len());
     for msg in messages {
-        let prefix = match msg.role {
-            MessageRole::User => user_prefix,
-            MessageRole::Assistant => assistant_prefix,
-            // System/Tool 消息不进入摘要上下文
-            _ => continue,
+        let prefix = match projection {
+            Some(target) => {
+                // 投影模式：按发言人是否为投影目标定向；System/Tool 照旧跳过
+                if matches!(msg.role, MessageRole::System | MessageRole::Tool) {
+                    continue;
+                }
+                if msg.persona_uid.as_deref() == Some(target) {
+                    assistant_prefix
+                } else {
+                    user_prefix
+                }
+            }
+            None => match msg.role {
+                MessageRole::User => user_prefix,
+                MessageRole::Assistant => assistant_prefix,
+                // System/Tool 消息不进入摘要上下文
+                _ => continue,
+            },
         };
         let content = replace_image_placeholders(&msg.content, descriptions);
-        lines.push(format!("{prefix}{content}"));
+        if projection.is_some() {
+            let sender = msg
+                .sender_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty());
+            match sender {
+                Some(name) => lines.push(format!("{prefix}{name}：{content}")),
+                None => lines.push(format!("{prefix}{content}")),
+            }
+        } else {
+            lines.push(format!("{prefix}{content}"));
+        }
     }
     lines.join("\n")
 }
@@ -104,6 +137,7 @@ pub(super) fn is_progressive_triggered(
 ///
 /// 参数:
 /// - `descriptions`: 附件描述映射（原文形态注入时对 `[图片#{hash}]` 占位符生效）。
+/// - `projection`: 投影目标人格（透传给 [`format_messages`]；投影模式下行首带发言人）。
 ///
 /// 隐私: 原文仅作为 LLM prompt 上下文（与摘要生成同链路），不落日志。
 pub(super) fn build_prior_context(
@@ -113,6 +147,7 @@ pub(super) fn build_prior_context(
     user_prefix: &str,
     assistant_prefix: &str,
     descriptions: &HashMap<String, String>,
+    projection: Option<&str>,
 ) -> String {
     let is_long = (prev_chunk.msg_count as usize) > config.prior_context_threshold;
 
@@ -123,6 +158,7 @@ pub(super) fn build_prior_context(
             user_prefix,
             assistant_prefix,
             descriptions,
+            projection,
         );
     }
 
@@ -154,6 +190,7 @@ pub(super) fn build_prior_context(
         user_prefix,
         assistant_prefix,
         descriptions,
+        projection,
     );
     ramaria_core::text::truncate_chars(&raw, config.prior_context_max_chars)
 }

@@ -11,11 +11,13 @@
 //! - `status`：连接状态机（快照与流转规则）；
 //! - `events`：宿主事件回调 trait（桌面转发 Tauri 事件）；
 //! - `transport`：传输抽象（收事件 / 发出站 / 连接维护 / 状态查询）；
-//! - `runtime`：宿主无关运行时（状态簿与状态上报）。
+//! - `runtime`：宿主无关运行时（状态簿与状态上报）；
+//! - `sink`：主动消息投递接收端（按通道查找传输并发送）。
 
 pub mod config;
 pub mod events;
 pub mod runtime;
+pub mod sink;
 pub mod status;
 pub mod transport;
 
@@ -25,6 +27,7 @@ pub use runtime::ChannelRuntime;
 pub use runtime::assemble::{AssembledInbound, DownloadedImage, assemble_inbound};
 pub use runtime::download::{HttpImageDownloader, ImageDownloader, MAX_IMAGE_BYTES};
 pub use runtime::worker::{ChannelWorker, WorkerOptions};
+pub use sink::ChannelProactiveSink;
 pub use status::{ChannelStatus, ConnectionState};
 pub use transport::onebot::{OneBotTransport, QqTransportOptions, SentMessageCache};
 pub use transport::telegram::{

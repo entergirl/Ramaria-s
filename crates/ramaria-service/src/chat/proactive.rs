@@ -10,7 +10,7 @@
 //! - 隐私：日志只记会话 id、人格、来源标识与长度，不记锚点 / 角度 / 语气与回复内容
 
 use ramaria_core::error::RamariaResult;
-use ramaria_core::types::{AppState, Message, MessageRole, MessageSource};
+use ramaria_core::types::{AppState, CHANNEL_LOCAL, Message, MessageRole, MessageSource};
 
 use crate::engine::Engine;
 use crate::proactive::{ProactiveDirective, ProactiveOutcome};
@@ -32,7 +32,8 @@ use super::steps::{ChatInput, ChatMode, ProactiveInput, normalize_persona, prepa
 /// 6. 复用 `prepare_request` 装配（主动模式：锚点为消息位，请求用户消息位留空）；
 /// 7. LLM 非流式生成（失败上抛且不落库）；
 /// 8. 空回复防御（不落库）；
-/// 9. 写入 1 条 `is_proactive=true` 的 assistant 消息（来源线上）。
+/// 9. 写入 1 条 `is_proactive=true` 的 assistant 消息（来源线上）；
+/// 10. 读取落点会话的通道与外部标识（投递路由依据；读取失败防御为本地）。
 ///
 /// 参数:
 /// - `engine`: 服务层引擎。
@@ -181,11 +182,38 @@ pub(crate) async fn run(
         .save_message(&assistant)
         .await?;
 
-    // ---- 10. 完成日志（仅元数据）与结果 ----
+    // ---- 10. 投递路由标识（落点会话的通道与外部标识） ----
+    // 读取失败防御为本地投递（消息已落库应用内可见，不因路由读取失败吞掉结果）
+    let (channel, external_ref) = match engine
+        .storage_ref()
+        .as_ref()
+        .get_session(prepared.session_id)
+        .await
+    {
+        Ok(Some(session)) => (session.channel, session.external_ref),
+        Ok(None) => {
+            tracing::warn!(
+                session_id = %prepared.session_id,
+                "主动生成：落点会话记录缺失，投递按本地通道处理"
+            );
+            (CHANNEL_LOCAL.to_string(), None)
+        }
+        Err(e) => {
+            tracing::warn!(
+                session_id = %prepared.session_id,
+                error = %e,
+                "主动生成：会话通道读取失败，投递按本地通道处理"
+            );
+            (CHANNEL_LOCAL.to_string(), None)
+        }
+    };
+
+    // ---- 11. 完成日志（仅元数据）与结果 ----
     tracing::info!(
         session_id = %prepared.session_id,
         persona = %prepared.persona,
         source = %source,
+        channel = %channel,
         reply_chars,
         "主动生成完成"
     );
@@ -197,6 +225,8 @@ pub(crate) async fn run(
         source,
         topic_key,
         valence,
+        channel,
+        external_ref,
     }))
 }
 

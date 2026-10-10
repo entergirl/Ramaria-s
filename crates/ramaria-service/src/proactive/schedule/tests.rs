@@ -3,6 +3,7 @@
 //! 设计特点:
 //! - 覆盖判定链各闸门（可见性 / 状态 / 宽限 / 免打扰 / 上限 / 冷却 / 退避 / 空闲 / 隐私 /
 //!   活跃时段 / 判据节流）与投放三态（成功 / 未注册 / 失败）
+//! - 投放路由与通道门禁见子模块 delivery（本地 / 通道分流与计费条件）
 //! - 用固定时间戳驱动单轮调度，装配真实 SQLite 临时库与 mock LLM，不依赖网络与真实时钟
 //! - 断言口径：闸门用"选题器是否被触达"、状态变更用"库中 reload"、投放用接收端留档
 
@@ -24,6 +25,8 @@ use ramaria_storage::SqliteStorage;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
+
+mod delivery;
 
 /// 固定回复（供"生成成功"路径断言）。
 const REPLY: &str = "刚路过一家花店，想起你说想学插花。";
@@ -158,8 +161,9 @@ impl TestSink {
     }
 }
 
+#[async_trait]
 impl ProactiveSink for TestSink {
-    fn deliver(&self, message: &ProactiveMessage) -> RamariaResult<()> {
+    async fn deliver(&self, message: &ProactiveMessage) -> RamariaResult<()> {
         if self.fail {
             return Err(ramaria_core::error::RamariaError::storage("模拟投递失败"));
         }

@@ -4366,6 +4366,7 @@ dependencies = [
 name = "ramaria-desktop"
 version = "2.6.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "futures",
  "ramaria-core",

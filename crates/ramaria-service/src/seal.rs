@@ -18,7 +18,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use ramaria_core::error::RamariaResult;
-use ramaria_core::types::MemoryL1;
+use ramaria_core::types::{CHANNEL_QQ, CHANNEL_TELEGRAM, MemoryL1};
 use ramaria_memory::job::JobType;
 use ramaria_memory::utt::builder::UttBuilder;
 use uuid::Uuid;
@@ -131,7 +131,19 @@ pub(crate) async fn run(engine: &Engine, session_id: Uuid) -> RamariaResult<Seal
     );
 
     // ---- 3. L1 摘要（渐进式感知；失败登记 pending 重试任务） ----
-    let l1_list = match generate_l1(engine, session_id, persona_uid.as_deref()).await {
+    // 社交通道会话（QQ / Telegram）按「目标相对投影」逐目标生成 L1；
+    // 本地 / 导入会话 channel 非社交通道，行为保持不变。
+    let target_projection = session
+        .as_ref()
+        .is_some_and(|s| s.channel == CHANNEL_QQ || s.channel == CHANNEL_TELEGRAM);
+    let l1_list = match generate_l1(
+        engine,
+        session_id,
+        persona_uid.as_deref(),
+        target_projection,
+    )
+    .await
+    {
         Ok(list) => list,
         Err(e) => {
             tracing::error!(
@@ -139,7 +151,13 @@ pub(crate) async fn run(engine: &Engine, session_id: Uuid) -> RamariaResult<Seal
                 error = %e,
                 "L1 摘要生成失败（会话已关闭，摘要缺失；已登记重试任务）"
             );
-            register_l1_retry(engine, session_id, persona_uid.as_deref()).await;
+            register_l1_retry(
+                engine,
+                session_id,
+                persona_uid.as_deref(),
+                target_projection,
+            )
+            .await;
             return Err(e);
         }
     };
@@ -197,6 +215,8 @@ pub(crate) async fn run(engine: &Engine, session_id: Uuid) -> RamariaResult<Seal
 /// - 编排与桌面共用 `ramaria_memory::l1::generate_l1_summaries`（同源，不重写第二套）：
 ///   `[l1.progressive]` 触发时按段生成多条 L1，否则单条整会话摘要；
 ///   `max_tokens` 从 `backend_config` 传播并以下限钳制；经 `JobManager` 包裹执行。
+/// - `target_projection`：社交通道会话按「目标相对投影」逐目标生成（绑定人格 ∪
+///   块内发言者，assistant iff 发言人 persona == 目标）；本地 / 导入路径传 false。
 ///
 /// 返回:
 /// - 成功时返回本会话的全部 L1（顺序与库内一致）。
@@ -204,13 +224,16 @@ async fn generate_l1(
     engine: &Engine,
     session_id: Uuid,
     persona_uid: Option<&str>,
+    target_projection: bool,
 ) -> RamariaResult<Vec<MemoryL1>> {
     let progressive = engine.config().l1.progressive.clone();
+    let mut req = ramaria_memory::l1::L1GenerateRequest::new(session_id, persona_uid);
+    req.target_projection = target_projection;
     ramaria_memory::l1::generate_l1_summaries(
         engine.storage_ref().as_ref(),
         engine.llm_ref().as_ref(),
         &progressive,
-        ramaria_memory::l1::L1GenerateRequest::new(session_id, persona_uid),
+        req,
     )
     .await
 }
@@ -220,12 +243,20 @@ async fn generate_l1(
 /// 类型说明:
 /// - 使用补偿登记专用类型 `l1_summary_retry`（[`JobType::L1SummaryRetry`]）：
 ///   与在途生成任务（`l1_summary`）区分，避免补扫消费方误取在途任务造成重复摘要。
-async fn register_l1_retry(engine: &Engine, session_id: Uuid, persona_uid: Option<&str>) {
+/// - payload 携带 `target_projection`：补扫重试保持与会话类型一致的生成口径
+///   （社交会话仍逐目标投影；本地 / 导入保持关闭）。
+async fn register_l1_retry(
+    engine: &Engine,
+    session_id: Uuid,
+    persona_uid: Option<&str>,
+    target_projection: bool,
+) {
     let storage = engine.storage_ref().as_ref();
     let payload = serde_json::json!({
         "session_id": session_id.to_string(),
         "persona_uid": persona_uid,
-        "reason": "auto_retry_on_seal"
+        "reason": "auto_retry_on_seal",
+        "target_projection": target_projection
     })
     .to_string();
     match storage
@@ -339,230 +370,4 @@ pub(crate) async fn run_hook(
 // =========================================================
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test_support::{
-        L1_JSON_REPLY, engine_with_db, engine_with_l1_reply, seed_persona,
-        seed_session_with_messages,
-    };
-    use crate::types::{RecallLayer, RecallRequest};
-    use ramaria_core::traits::{StoreCrud, StoreInfrastructure};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    /// 封存生成单条 L1，并完成抢占幂等（二次调用不重复生成）。
-    #[tokio::test]
-    async fn seal_generates_l1_once_and_is_idempotent() {
-        let (engine, storage, dir) = engine_with_l1_reply("seal", L1_JSON_REPLY).await;
-        seed_persona(&storage, "char-0001").await;
-        let session_id = seed_session_with_messages(&storage, "char-0001", 4, 1_000).await;
-        // 先加载索引：验证 L1 生成后的增量镜像链路（检索即可命中）
-        engine.ensure_index_loaded().await.expect("索引加载");
-
-        let first = engine.seal(session_id).await.expect("封存应成功");
-        assert!(first.sealed, "首次调用应抢到关闭权");
-        assert_eq!(first.l1_count, 1, "短会话应生成单条 L1");
-
-        let l1_list = storage
-            .list_memory_l1(session_id)
-            .await
-            .expect("读取 L1 应成功");
-        assert_eq!(l1_list.len(), 1, "库中应只有一条 L1");
-        assert_eq!(
-            l1_list[0].persona_uid.as_deref(),
-            Some("char-0001"),
-            "L1 归属应为会话 persona"
-        );
-
-        // 二次调用：已关闭 → 未抢到 → 不重复生成
-        let second = engine.seal(session_id).await.expect("封存应幂等成功返回");
-        assert!(!second.sealed, "二次调用不应抢到关闭权");
-        assert_eq!(second.l1_count, 0);
-        assert_eq!(
-            storage
-                .list_memory_l1(session_id)
-                .await
-                .expect("读取 L1 应成功")
-                .len(),
-            1,
-            "重复封存不得产生第二条 L1"
-        );
-
-        // 增量镜像生效：新 L1 可被召回
-        let recalled = engine
-            .recall(RecallRequest {
-                query: Some("工作压力".to_string()),
-                persona: Some("char-0001".to_string()),
-                include: Some(vec![RecallLayer::L1]),
-                ..RecallRequest::default()
-            })
-            .await
-            .expect("召回应成功");
-        assert!(
-            recalled.items.iter().any(|i| i.text.contains("工作压力")),
-            "封存后 L1 应立即可检索: {:?}",
-            recalled.items
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 并发抢占语义：两个调用方同时封存，只有一方生成 L1。
-    #[tokio::test]
-    async fn seal_concurrent_calls_have_single_winner() {
-        let (engine, storage, dir) = engine_with_l1_reply("seal-race", L1_JSON_REPLY).await;
-        seed_persona(&storage, "char-0001").await;
-        let session_id = seed_session_with_messages(&storage, "char-0001", 2, 1_000).await;
-
-        // 并发触发两个封存（同一会话）
-        let engine_a = &engine;
-        let (first, second) = tokio::join!(async { engine_a.seal(session_id).await }, async {
-            engine_a.seal(session_id).await
-        });
-        let winners = [first.expect("封存不报错"), second.expect("封存不报错")]
-            .into_iter()
-            .filter(|outcome| outcome.sealed)
-            .count();
-        assert_eq!(winners, 1, "并发封存应只有一个赢家（抢占幂等）");
-        assert_eq!(
-            storage
-                .list_memory_l1(session_id)
-                .await
-                .expect("读取 L1 应成功")
-                .len(),
-            1,
-            "并发封存不得产生重复 L1"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 封存门禁（D-V21-009）：许可关闭时封存用例直接跳过
-    /// （不抢占关闭、不改会话状态、不调用 LLM 生成摘要）。
-    #[tokio::test]
-    async fn seal_is_noop_when_seal_disabled() {
-        let (engine, storage, dir) = engine_with_l1_reply("seal-gated", L1_JSON_REPLY).await;
-        seed_persona(&storage, "char-0001").await;
-        let session_id = seed_session_with_messages(&storage, "char-0001", 2, 1_000).await;
-
-        engine.set_seal_allowed(false);
-        let outcome = engine
-            .seal(session_id)
-            .await
-            .expect("封存应正常返回（跳过）");
-        assert!(!outcome.sealed, "许可关闭时不应执行封存");
-        assert_eq!(outcome.l1_count, 0);
-
-        let session = storage
-            .get_session(session_id)
-            .await
-            .expect("查询应成功")
-            .expect("会话应存在");
-        assert!(session.ended_at.is_none(), "许可关闭时不应关闭会话");
-        assert!(
-            storage
-                .list_memory_l1(session_id)
-                .await
-                .expect("读取 L1 应成功")
-                .is_empty(),
-            "许可关闭时不应生成 L1"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 空会话封存：会话关闭但无消息 → 不生成 L1（不调用 LLM）。
-    #[tokio::test]
-    async fn seal_empty_session_skips_l1() {
-        let (engine, storage, dir) = engine_with_l1_reply("seal-empty", L1_JSON_REPLY).await;
-        seed_persona(&storage, "char-0001").await;
-        let session = storage
-            .create_session(Some("char-0001"))
-            .await
-            .expect("创建会话");
-
-        let outcome = engine.seal(session.id).await.expect("封存应成功");
-        assert!(outcome.sealed);
-        assert_eq!(outcome.l1_count, 0);
-        assert!(
-            storage
-                .list_memory_l1(session.id)
-                .await
-                .expect("读取 L1 应成功")
-                .is_empty(),
-            "空会话不应生成 L1"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// L1 失败：会话仍关闭、错误可见，并登记 pending 重试任务（不丢补偿）。
-    #[tokio::test]
-    async fn seal_l1_failure_registers_retry_job() {
-        // 空回复 mock → L1 JSON 解析失败（模拟 LLM 不可用/输出非法）
-        let (engine, storage, dir) = engine_with_db("seal-fail").await;
-        seed_persona(&storage, "char-0001").await;
-        let session_id = seed_session_with_messages(&storage, "char-0001", 2, 1_000).await;
-
-        let err = engine.seal(session_id).await.expect_err("L1 失败应报错");
-        assert!(!err.to_string().is_empty(), "错误信息应可读");
-
-        // 会话已关闭（不阻塞用户继续新会话）
-        let session = storage
-            .get_session(session_id)
-            .await
-            .expect("查询会话应成功")
-            .expect("会话应存在");
-        assert!(session.ended_at.is_some(), "会话应已关闭");
-
-        // 登记了 pending 重试任务
-        let pending = storage.list_pending_jobs().await.expect("查询任务应成功");
-        assert!(
-            pending
-                .iter()
-                .any(|(_, job_type, _)| job_type == "l1_summary_retry"),
-            "L1 失败应登记 l1_summary_retry 补偿任务: {pending:?}"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 封存钩子：注册后按位置调用（行为 / 风格 / L2 各一次），未注册则跳过。
-    #[tokio::test]
-    async fn seal_invokes_registered_hooks() {
-        let (engine, storage, dir) = engine_with_l1_reply("seal-hooks", L1_JSON_REPLY).await;
-        seed_persona(&storage, "char-0001").await;
-        let session_id = seed_session_with_messages(&storage, "char-0001", 2, 1_000).await;
-
-        let behavior_calls = Arc::new(AtomicUsize::new(0));
-        let style_calls = Arc::new(AtomicUsize::new(0));
-        let l2_calls = Arc::new(AtomicUsize::new(0));
-        let make_hook = |counter: Arc<AtomicUsize>| -> SealHook {
-            Arc::new(move |_engine: &Engine, _persona: &str| {
-                let counter = Arc::clone(&counter);
-                Box::pin(async move {
-                    counter.fetch_add(1, Ordering::SeqCst);
-                }) as Pin<Box<dyn Future<Output = ()> + Send + '_>>
-            })
-        };
-        engine.set_seal_hooks(SealHooks {
-            behavior: Some(make_hook(Arc::clone(&behavior_calls))),
-            style: Some(make_hook(Arc::clone(&style_calls))),
-            l2_trigger: Some(make_hook(Arc::clone(&l2_calls))),
-        });
-
-        engine.seal(session_id).await.expect("封存应成功");
-        assert_eq!(behavior_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(style_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(l2_calls.load(Ordering::SeqCst), 1);
-
-        // 未抢到的封存不得再触发钩子
-        engine.seal(session_id).await.expect("重复封存应成功返回");
-        assert_eq!(
-            behavior_calls.load(Ordering::SeqCst),
-            1,
-            "重复封存不重复调用钩子"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-}
+mod tests;

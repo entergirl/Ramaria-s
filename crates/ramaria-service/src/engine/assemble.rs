@@ -6,7 +6,8 @@
 //! - 注入构造（`from_parts`）：不创建连接池与迁移、不加载配置文件，调用方对依赖生命周期负责
 //! - 访问器统一返回"已脱离锁"的句柄：Arc 克隆（provider 快照）或引用（存储 / 锁槽），
 //!   异步路径不跨 `.await` 持锁
-//! - 策略与钩子（召回策略 / 封存钩子 / 封存许可）由入口层注入，缺省按配置闸门映射
+//! - 策略与钩子（召回策略 / 封存钩子 / 封存许可）与投递接收端由入口层注入，
+//!   缺省按配置闸门映射（接收端门面见 `sinks` 子模块）
 //! - provider 热更新：整体替换快照，读取方取到替换前或替换后的完整快照，无中间态
 //! - 装配辅助（配置只读加载 / provider 构造 / 嵌入恢复）与热更新共用同一构造口径
 
@@ -26,12 +27,13 @@ use ramaria_memory::retriever::Retriever;
 use ramaria_storage::SqliteStorage;
 use sqlx::SqlitePool;
 
-use crate::proactive::ProactiveSink;
 use crate::recall::RecallPolicy;
 use crate::seal::SealHooks;
 use crate::vision::VisionProbeState;
 
 use super::{Engine, EngineOptions};
+
+mod sinks;
 
 // =========================================================
 // 内部依赖访问器（crate 内用例实现使用）
@@ -170,6 +172,7 @@ impl Engine {
             seal_hooks: Arc::new(RwLock::new(SealHooks::default())),
             seal_allowed: AtomicBool::new(true),
             proactive_sink: Arc::new(RwLock::new(None)),
+            channel_proactive_sink: Arc::new(RwLock::new(None)),
             vision_probe: tokio::sync::Mutex::new(None),
             // 状态机初值：首次配置判定由 setup 用例推进（装配阶段不做网络探测）
             state: Mutex::new(AppState::NeedsSetup),
@@ -216,6 +219,7 @@ impl Engine {
             seal_hooks: Arc::new(RwLock::new(SealHooks::default())),
             seal_allowed: AtomicBool::new(true),
             proactive_sink: Arc::new(RwLock::new(None)),
+            channel_proactive_sink: Arc::new(RwLock::new(None)),
             vision_probe: tokio::sync::Mutex::new(None),
             state: Mutex::new(AppState::NeedsSetup),
         }
@@ -431,22 +435,6 @@ impl Engine {
     /// 当前封存许可（`false` = 只写不封存）。
     pub fn seal_allowed(&self) -> bool {
         self.seal_allowed.load(Ordering::Acquire)
-    }
-
-    /// 注册主动消息投递接收端（覆盖已有注册）。
-    ///
-    /// 说明:
-    /// - 宿主启动时注入（桌面宿主实现系统通知与应用内转发）；
-    /// - 未注册时调度静默丢弃（降级不阻塞）。
-    pub fn set_proactive_sink(&self, sink: Arc<dyn ProactiveSink>) {
-        tracing::info!("主动消息投递接收端已注册");
-        let mut guard = write_recover(&self.proactive_sink, "engine.proactive_sink");
-        *guard = Some(sink);
-    }
-
-    /// 当前注册的主动消息投递接收端（未注册 → None）。
-    pub fn proactive_sink(&self) -> Option<Arc<dyn ProactiveSink>> {
-        read_recover(&self.proactive_sink, "engine.proactive_sink").clone()
     }
 }
 

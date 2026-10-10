@@ -40,16 +40,19 @@ impl<'a> L1Summarizer<'a> {
     ///
     /// 参数:
     /// - `descriptions`: 附件描述映射（`[图片#{hash}]` → 描述；空映射时零变化）。
+    /// - `projection`: 投影目标人格（Some 时按「目标相对投影」判定角色并渲染发言人）。
     fn format_conversation(
         &self,
         messages: &[ramaria_core::types::Message],
         descriptions: &HashMap<String, String>,
+        projection: Option<&str>,
     ) -> String {
         format_messages(
             messages,
             &self.config.user_prefix,
             &self.config.assistant_prefix,
             descriptions,
+            projection,
         )
     }
 
@@ -62,6 +65,7 @@ impl<'a> L1Summarizer<'a> {
     /// - `chunk`: 当前块（其消息为对话原文）。
     /// - `prior_context`: 上一块的上文文本（None = 无上一块，v1.4 独立摘要路径）。
     /// - `descriptions`: 附件描述映射（对话格式化时渲染图片占位符）。
+    /// - `projection`: 投影目标人格（Some 时本行摘要归属该目标，逐行角色重投影）。
     ///
     /// 返回:
     /// - 校验后的 `(MemoryL1, 关键词列表)`（尚未写入存储，由调用方统一写库）。
@@ -71,9 +75,10 @@ impl<'a> L1Summarizer<'a> {
         chunk: &UttChunk,
         prior_context: Option<&str>,
         descriptions: &HashMap<String, String>,
+        projection: Option<&str>,
     ) -> RamariaResult<(MemoryL1, Vec<KeywordToken>)> {
         // 1. 格式化当前块对话文本
-        let conversation = self.format_conversation(&chunk.messages, descriptions);
+        let conversation = self.format_conversation(&chunk.messages, descriptions, projection);
 
         // 2. 获取关键词候选
         let keyword_candidates = self.get_keyword_candidates().await;
@@ -110,7 +115,11 @@ impl<'a> L1Summarizer<'a> {
         let (mut l1, keywords) = Self::validate_and_build(&parsed, session_id);
 
         // 注入 config 中的上下文字段
-        l1.persona_uid = self.config.persona_uid.clone();
+        // 投影模式：本行摘要归属投影目标（每行独立生成，persona 已定向）；
+        // 非投影保持 config 现值（本地 / 导入路径行为不变）
+        l1.persona_uid = projection
+            .map(str::to_string)
+            .or_else(|| self.config.persona_uid.clone());
         l1.context_json = self.config.context_json.clone();
         // 优先使用 LLM 输出的 situation_strength，缺失时回退 config 默认值
         l1.situation_strength = parsed

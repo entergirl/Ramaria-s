@@ -6,6 +6,8 @@
 //! - 图片描述注入：切块前一次加载会话内附件描述映射，对话文本中的
 //!   `[图片#{hash}]` 占位符渲染为 `[图片: {描述}]`（无描述 / 查询失败保留占位符）。
 //! - 多画像分发：fanout_others 开启时按块/段内他人发言者复制 L1 行，各行独立 persona。
+//! - 目标相对投影：target_projection 开启时按块内目标集合（绑定人格 ∪ 块内发言者）
+//!   逐目标生成 L1 行（各行角色重投影、persona 定向），不做行复制分发。
 //! - 块级容错：单块失败记 warn 并降级继续，全部失败返回最后一个错误。
 //! - 写库失败为硬错误；关键词写回失败为非致命（记 warn 不阻塞）。
 
@@ -21,6 +23,20 @@ use crate::utt::UttChunk;
 
 use super::config::L1SummarizerConfig;
 use super::{build_prior_context, is_progressive_triggered};
+
+// =========================================================
+// 常量
+// =========================================================
+
+/// 单块投影目标数上限（绑定人格 + 块内发言者合计）。
+///
+/// 说明:
+/// - 控制群聊逐目标调用成本（调用次数 = 块数 × 目标数）；
+/// - 不做配置键，按实测定值，超限按「消息条数降序 → 首次出现升序」截断。
+const MAX_TARGETS_PER_CHUNK: usize = 8;
+
+/// 生成行：`(投影目标, 摘要, 关键词列表)`（非投影行为 `None` 目标）。
+type GeneratedRow = (Option<String>, MemoryL1, Vec<KeywordToken>);
 
 // =========================================================
 // L1 Summarizer
@@ -74,11 +90,16 @@ impl<'a> L1Summarizer<'a> {
     ///   输出 `continuation`（延续/转折/无关）。
     /// - 单块 session 或未配置切分器 → 与 v1.4 行为完全一致（独立摘要）。
     ///
+    /// 目标相对投影（`target_projection` 开启，社会通道会话）：
+    /// - 切分走群聊口径（多发言者，全部块保留），每块按目标集合逐目标生成一行；
+    /// - 逐目标行 persona 定向该目标，不做行复制分发；块间上文不注入上一 L1
+    ///   （多目标下无语义，长块走原文截断降级）。
+    ///
     /// 块级容错：
-    /// - 某块 LLM 调用/解析失败 → 记 warn、该块不产出 L1，后续块以上一块
-    ///   原文（截断）作为上文继续生成（不阻塞整体）。
-    /// - 全部块均失败 → 返回最后一个错误（与 v1.4 失败语义一致）。
-    /// - 成功块统一写库；写库失败为硬错误直接返回。
+    /// - 某块 / 某目标 LLM 调用或解析失败 → 记 warn、该目标不产出 L1，
+    ///   同块其余目标与后续块照常生成（不阻塞整体）。
+    /// - 全部块零行 → 返回最后一个错误（与 v1.4 失败语义一致）。
+    /// - 成功行统一写库；写库失败为硬错误直接返回。
     ///
     /// 关键词写回：
     /// - 写库前读取一次词池快照供全部块复用：未命中词池但与既有规范词相似的词条
@@ -110,13 +131,13 @@ impl<'a> L1Summarizer<'a> {
         let descriptions = self.load_attachment_descriptions(&messages).await;
 
         // 3. 切分为话语块（上下文感知生成的块粒度）
-        //    - 多画像分发开启 → 群聊口径切分（多发言者，全部块保留）
+        //    - 多画像分发 / 目标相对投影 → 群聊口径切分（多发言者，全部块保留）
         //    - 否则配置了 utt_splitter → split_messages 切分（目标 persona 为 config.persona_uid）
         //    - 未配置 → 整会话一块
         //    - 切分结果为空（如纯用户消息块被丢弃）→ 回退整会话一块，
         //      保证至少产出一条摘要的语义一致。
         let chunks = match &self.config.utt_splitter {
-            Some(splitter_cfg) if self.config.fanout_others => {
+            Some(splitter_cfg) if self.config.fanout_others || self.config.target_projection => {
                 let split =
                     crate::utt::group_splitter::split_messages_group(&messages, splitter_cfg);
                 if split.is_empty() {
@@ -138,47 +159,90 @@ impl<'a> L1Summarizer<'a> {
         };
         debug!(%session_id, block_count = chunks.len(), "L1 摘要按块生成");
 
-        // 4. 逐块生成（内存收集，全部成功后统一写库）
-        //    - generated[i] = 块 i 的 (L1, 关键词列表)（None = 该块生成失败，降级）
-        //    - 块 i 的上文来自块 i-1 的生成结果（内存传递，只注入最近 1 块，不链式）
-        let mut generated: Vec<Option<(MemoryL1, Vec<KeywordToken>)>> =
-            Vec::with_capacity(chunks.len());
+        // 4. 逐块 × 逐目标生成（内存收集，全部成功后统一写库）
+        //    - generated[i] = 块 i 的生成行列表（每项 (target, L1, 关键词列表)；
+        //      非投影时每块至多 1 项且 target=None；空列表 = 该块全部失败，降级）
+        //    - 非投影：块 i 的上文来自块 i-1 的生成结果（内存传递，只注入最近 1 块，不链式）
+        //    - 投影：多目标下「上一块的哪一行」无语义，prev_l1 传 None——
+        //      长块走既有降级路径（注入上一块原文并按 prior_context_max_chars 截断）
+        let mut generated: Vec<Vec<GeneratedRow>> = Vec::with_capacity(chunks.len());
         let mut last_error: Option<RamariaError> = None;
         for (i, chunk) in chunks.iter().enumerate() {
-            // 构建上一块上文（混合形态，§6.3）：
-            // - 上一块消息数 ≤ prior_context_threshold → 注入 L0 原文
-            // - 长块 → 注入上一 L1 摘要 + 结构化线索（上一 L1 缺失 → 原文截断）
-            let prior_context = if i == 0 {
-                None
+            // 块级目标集合：投影 → 逐目标；非投影 → 单目标（None）
+            let mut targets: Vec<Option<String>> = if self.config.target_projection {
+                self.projection_targets(chunk)
+                    .into_iter()
+                    .map(Some)
+                    .collect()
             } else {
-                Some(build_prior_context(
-                    &chunks[i - 1],
-                    generated[i - 1].as_ref().map(|(l1, _)| l1),
-                    &self.config,
-                    &self.config.user_prefix,
-                    &self.config.assistant_prefix,
-                    &descriptions,
-                ))
+                vec![None]
             };
+            if targets.is_empty() {
+                // 空块防御：目标集合为空时按非投影单目标生成一次，绝不出现零次生成
+                targets.push(None);
+            }
 
-            match self
-                .generate_chunk_l1(session_id, chunk, prior_context.as_deref(), &descriptions)
-                .await
-            {
-                Ok((l1, keywords)) => {
-                    debug!(%session_id, block_index = i, "块 {} L1 生成成功", i);
-                    generated.push(Some((l1, keywords)));
-                }
-                Err(e) => {
-                    // 块级降级：不阻塞整体，后续块以原文（截断）作为上文
-                    warn!(%session_id, block_index = i, error=%e, "L1 块生成失败，该块无摘要（降级继续）");
-                    last_error = Some(e);
-                    generated.push(None);
+            let mut rows: Vec<GeneratedRow> = Vec::new();
+            for target in targets {
+                // 构建上一块上文（混合形态，§6.3）：
+                // - 上一块消息数 ≤ prior_context_threshold → 注入 L0 原文
+                // - 长块 → 注入上一 L1 摘要 + 结构化线索（上一 L1 缺失 → 原文截断）
+                let prior_context = if i == 0 {
+                    None
+                } else {
+                    let prev_l1 = if self.config.target_projection {
+                        None
+                    } else {
+                        generated[i - 1].first().map(|(_, l1, _)| l1)
+                    };
+                    Some(build_prior_context(
+                        &chunks[i - 1],
+                        prev_l1,
+                        &self.config,
+                        &self.config.user_prefix,
+                        &self.config.assistant_prefix,
+                        &descriptions,
+                        target.as_deref(),
+                    ))
+                };
+
+                match self
+                    .generate_chunk_l1(
+                        session_id,
+                        chunk,
+                        prior_context.as_deref(),
+                        &descriptions,
+                        target.as_deref(),
+                    )
+                    .await
+                {
+                    Ok((l1, keywords)) => {
+                        debug!(
+                            %session_id,
+                            block_index = i,
+                            target = target.as_deref().unwrap_or("none"),
+                            "块 {} L1 生成成功",
+                            i
+                        );
+                        rows.push((target, l1, keywords));
+                    }
+                    Err(e) => {
+                        // 目标级降级：不阻塞同块其余目标与后续块，块内全部失败时该块无行
+                        warn!(
+                            %session_id,
+                            block_index = i,
+                            target = target.as_deref().unwrap_or("none"),
+                            error=%e,
+                            "L1 块目标生成失败，该目标无摘要（降级继续）"
+                        );
+                        last_error = Some(e);
+                    }
                 }
             }
+            generated.push(rows);
         }
 
-        // 5. 统一写库（成功块）+ 写回关键词
+        // 5. 统一写库（成功行）+ 写回关键词
         //    词池快照读取一次供全部块复用；读取失败降级为空快照（全部按规范词写回）
         let pool_rows = match self.storage.list_keyword_pool_entries().await {
             Ok(rows) => rows,
@@ -188,19 +252,34 @@ impl<'a> L1Summarizer<'a> {
             }
         };
         let mut saved_last: Option<MemoryL1> = None;
-        for (idx, entry) in generated.iter().enumerate() {
-            let Some((l1, keywords)) = entry else {
-                continue;
-            };
-            // 多画像分发：参与者非空时按参与者复制多行落库，否则原行落库
-            for row in self.fanout_rows(l1, &chunks[idx]) {
-                self.storage.save_memory_l1(&row).await.map_err(|e| {
-                    warn!(%session_id, l1_id = %row.id, error=%e, "写入 memory_l1 失败");
-                    RamariaError::storage(format!("写入 session {session_id} L1 摘要失败: {e}"))
-                })?;
-                self.write_back_keywords(session_id, &row, keywords, &pool_rows)
-                    .await;
-                saved_last = Some(row);
+        let mut saved_rows = 0usize;
+        for (idx, rows) in generated.iter().enumerate() {
+            for (_target, l1, keywords) in rows {
+                if self.config.target_projection {
+                    // 投影：每行独立生成、persona 已定向，直接落库（不做行复制分发）
+                    self.storage.save_memory_l1(l1).await.map_err(|e| {
+                        warn!(%session_id, l1_id = %l1.id, error=%e, "写入 memory_l1 失败");
+                        RamariaError::storage(format!("写入 session {session_id} L1 摘要失败: {e}"))
+                    })?;
+                    self.write_back_keywords(session_id, l1, keywords, &pool_rows)
+                        .await;
+                    saved_last = Some(l1.clone());
+                    saved_rows += 1;
+                } else {
+                    // 多画像分发：参与者非空时按参与者复制多行落库，否则原行落库
+                    for row in self.fanout_rows(l1, &chunks[idx]) {
+                        self.storage.save_memory_l1(&row).await.map_err(|e| {
+                            warn!(%session_id, l1_id = %row.id, error=%e, "写入 memory_l1 失败");
+                            RamariaError::storage(format!(
+                                "写入 session {session_id} L1 摘要失败: {e}"
+                            ))
+                        })?;
+                        self.write_back_keywords(session_id, &row, keywords, &pool_rows)
+                            .await;
+                        saved_last = Some(row);
+                        saved_rows += 1;
+                    }
+                }
             }
         }
 
@@ -211,7 +290,8 @@ impl<'a> L1Summarizer<'a> {
                     %session_id,
                     l1_id = %l1.id,
                     total_blocks = chunks.len(),
-                    success_blocks = generated.iter().filter(|g| g.is_some()).count(),
+                    success_blocks = generated.iter().filter(|rows| !rows.is_empty()).count(),
+                    saved_rows,
                     "L1 摘要生成完成（按块）"
                 );
                 Ok(l1)
@@ -237,6 +317,8 @@ impl<'a> L1Summarizer<'a> {
     ///   （`list_unabsorbed_l1` 天然包含渐进式段 L1，无需额外缓冲结构）。
     /// - 多画像分发开启时（`fanout_others`），每段按其内他人发言者复制 L1 行，
     ///   返回值与写库内容同为实际落库行集。
+    /// - 目标相对投影开启时（`target_projection`），每段按目标集合逐目标生成行
+    ///   （persona 定向，不做行复制分发）；段间不注入上一段 L1（prev_l1 传 None）。
     /// - 每段 L1 生成后写回关键词词典 + 倒排索引（与 `summarize_session` 一致）；
     ///   逐段写库前读取一次词池快照供全部段复用，读取失败降级为空快照
     ///   （全部按规范词写回）。
@@ -288,14 +370,14 @@ impl<'a> L1Summarizer<'a> {
 
         // 3. 触发：附件描述加载 + 按 tail_msg_count 切分为段（每段 ≤ tail 条，尾块覆盖最新对话）
         //    theta_gap 保持默认（10 分钟）：时间间隙大的消息也切分为独立段。
-        //    多画像分发开启 → 群聊口径切分（多发言者，全部块保留）；
+        //    多画像分发 / 目标相对投影 → 群聊口径切分（多发言者，全部块保留）；
         //    否则按目标 persona（`config.persona_uid`）切分。
         let descriptions = self.load_attachment_descriptions(&messages).await;
         let splitter_cfg = crate::utt::UttSplitterConfig {
             theta_gap_minutes: 10,
             max_msgs_per_block: progressive.tail_msg_count.max(1),
         };
-        let chunks = if self.config.fanout_others {
+        let chunks = if self.config.fanout_others || self.config.target_projection {
             crate::utt::group_splitter::split_messages_group(&messages, &splitter_cfg)
         } else {
             let target = self.config.persona_uid.as_deref();
@@ -310,7 +392,7 @@ impl<'a> L1Summarizer<'a> {
         }
         debug!(%session_id, block_count = chunks.len(), "渐进式摘要按段生成");
 
-        // 4. 逐段生成（复用块级生成逻辑，块间注入上一块上文）
+        // 4. 逐段 × 逐目标生成（复用块级生成逻辑，非投影时块间注入上一段上文）
         //    词池快照读取一次供全部段复用；读取失败降级为空快照（全部按规范词写回）
         let pool_rows = match self.storage.list_keyword_pool_entries().await {
             Ok(rows) => rows,
@@ -319,56 +401,99 @@ impl<'a> L1Summarizer<'a> {
                 Vec::new()
             }
         };
-        // generated = 实际落库行（多画像分发开启时含全部复制行；关闭时每段 1 行）
+        // generated = 实际落库行（多画像分发开启时含全部复制行；投影开启时含逐目标行）
         let mut generated: Vec<MemoryL1> = Vec::with_capacity(chunks.len());
-        // 上一成功段的代表行（供下一段上文注入；与分发行的摘要内容一致）
+        // 上一成功段的代表行（供下一段上文注入；投影模式不使用，prev_l1 传 None）
         let mut last_segment_l1: Option<MemoryL1> = None;
         let mut last_error: Option<RamariaError> = None;
         for (i, chunk) in chunks.iter().enumerate() {
-            let prior_context = if i == 0 {
-                None
+            // 段级目标集合：投影 → 逐目标；非投影 → 单目标（None）
+            let mut targets: Vec<Option<String>> = if self.config.target_projection {
+                self.projection_targets(chunk)
+                    .into_iter()
+                    .map(Some)
+                    .collect()
             } else {
-                Some(build_prior_context(
-                    &chunks[i - 1],
-                    last_segment_l1.as_ref(),
-                    &self.config,
-                    &self.config.user_prefix,
-                    &self.config.assistant_prefix,
-                    &descriptions,
-                ))
+                vec![None]
             };
+            if targets.is_empty() {
+                // 空段防御：目标集合为空时按非投影单目标生成一次，绝不出现零次生成
+                targets.push(None);
+            }
 
-            match self
-                .generate_chunk_l1(session_id, chunk, prior_context.as_deref(), &descriptions)
-                .await
-            {
-                Ok((l1, keywords)) => {
-                    // 多画像分发：参与者非空时按参与者复制多行落库，否则原行落库；
-                    // 段 L1 写库（absorbed=false 入候选池），供 L2 封存触发提取
-                    let rows = self.fanout_rows(&l1, chunk);
-                    for row in &rows {
-                        self.storage.save_memory_l1(row).await.map_err(|e| {
-                            warn!(%session_id, l1_id = %row.id, error=%e, "渐进式段 L1 写库失败");
-                            RamariaError::storage(format!(
-                                "渐进式摘要：session {session_id} 段 L1 写库失败: {e}"
-                            ))
-                        })?;
-                        self.write_back_keywords(session_id, row, &keywords, &pool_rows)
-                            .await;
+            for target in targets {
+                let prior_context = if i == 0 {
+                    None
+                } else {
+                    let prev_l1 = if self.config.target_projection {
+                        None
+                    } else {
+                        last_segment_l1.as_ref()
+                    };
+                    Some(build_prior_context(
+                        &chunks[i - 1],
+                        prev_l1,
+                        &self.config,
+                        &self.config.user_prefix,
+                        &self.config.assistant_prefix,
+                        &descriptions,
+                        target.as_deref(),
+                    ))
+                };
+
+                match self
+                    .generate_chunk_l1(
+                        session_id,
+                        chunk,
+                        prior_context.as_deref(),
+                        &descriptions,
+                        target.as_deref(),
+                    )
+                    .await
+                {
+                    Ok((l1, keywords)) => {
+                        // 投影：每行独立生成、persona 已定向，直接落库（不做行复制分发）；
+                        // 非投影：多画像分发开启时按参与者复制多行落库，否则原行落库；
+                        // 段 L1 写库（absorbed=false 入候选池），供 L2 封存触发提取
+                        let rows: Vec<MemoryL1> = if self.config.target_projection {
+                            vec![l1.clone()]
+                        } else {
+                            self.fanout_rows(&l1, chunk)
+                        };
+                        for row in &rows {
+                            self.storage.save_memory_l1(row).await.map_err(|e| {
+                                warn!(%session_id, l1_id = %row.id, error=%e, "渐进式段 L1 写库失败");
+                                RamariaError::storage(format!(
+                                    "渐进式摘要：session {session_id} 段 L1 写库失败: {e}"
+                                ))
+                            })?;
+                            self.write_back_keywords(session_id, row, &keywords, &pool_rows)
+                                .await;
+                        }
+                        debug!(
+                            %session_id,
+                            block_index = i,
+                            target = target.as_deref().unwrap_or("none"),
+                            row_count = rows.len(),
+                            "渐进式段 {} L1 生成成功",
+                            i
+                        );
+                        if !self.config.target_projection {
+                            last_segment_l1 = Some(l1);
+                        }
+                        generated.extend(rows);
                     }
-                    debug!(
-                        %session_id,
-                        block_index = i,
-                        row_count = rows.len(),
-                        "渐进式段 {} L1 生成成功",
-                        i
-                    );
-                    last_segment_l1 = Some(l1);
-                    generated.extend(rows);
-                }
-                Err(e) => {
-                    warn!(%session_id, block_index = i, error=%e, "渐进式段 L1 生成失败（降级继续）");
-                    last_error = Some(e);
+                    Err(e) => {
+                        // 目标级降级：不阻塞同段其余目标与后续段
+                        warn!(
+                            %session_id,
+                            block_index = i,
+                            target = target.as_deref().unwrap_or("none"),
+                            error=%e,
+                            "渐进式段目标 L1 生成失败（降级继续）"
+                        );
+                        last_error = Some(e);
+                    }
                 }
             }
         }
@@ -387,6 +512,64 @@ impl<'a> L1Summarizer<'a> {
             "渐进式摘要完成（按段生成 L1，段 L1 已入候选池）"
         );
         Ok(generated)
+    }
+
+    // =========================================================
+    // 目标相对投影（内部辅助）
+    // =========================================================
+
+    /// 计算块级目标集合（投影模式）。
+    ///
+    /// 规则:
+    /// - 集合 = 绑定人格（`config.persona_uid`，若配置）∪ 块内消息发言人
+    ///   `persona_uid`（Some 且非空白，去重）；
+    /// - 截断上限 [`MAX_TARGETS_PER_CHUNK`]：绑定人格恒保留在首位；
+    ///   块内发言者按「消息条数降序 → 首次出现升序」取回剩余名额；
+    /// - 绑定人格为 None 时目标集合全由块内发言者构成（仍受上限约束）；
+    /// - 空块（无消息）返回空集合（调用方按非投影单目标兜底生成一次）。
+    ///
+    /// 返回:
+    /// - 去重后的目标人格列表（绑定人格在首位；可能为空）。
+    fn projection_targets(&self, chunk: &UttChunk) -> Vec<String> {
+        // 块内发言者统计：(uid, 消息条数)，保持首次出现顺序
+        let mut speakers: Vec<(String, usize)> = Vec::new();
+        for msg in &chunk.messages {
+            let Some(uid) = msg
+                .persona_uid
+                .as_deref()
+                .map(str::trim)
+                .filter(|uid| !uid.is_empty())
+            else {
+                continue;
+            };
+            match speakers.iter_mut().find(|(known, _)| known == uid) {
+                Some((_, count)) => *count += 1,
+                None => speakers.push((uid.to_string(), 1)),
+            }
+        }
+        // 条数降序（稳定排序：同条数保持首次出现顺序）
+        speakers.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+
+        let mut targets: Vec<String> = Vec::new();
+        if let Some(bound) = self
+            .config
+            .persona_uid
+            .as_deref()
+            .map(str::trim)
+            .filter(|uid| !uid.is_empty())
+        {
+            targets.push(bound.to_string());
+        }
+        for (uid, _) in speakers {
+            if targets.len() >= MAX_TARGETS_PER_CHUNK {
+                break;
+            }
+            if targets.iter().any(|known| known == &uid) {
+                continue;
+            }
+            targets.push(uid);
+        }
+        targets
     }
 
     // =========================================================

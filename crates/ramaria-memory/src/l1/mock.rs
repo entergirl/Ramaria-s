@@ -2,7 +2,7 @@
 //!
 //! 设计特点:
 //! - 仅 #[cfg(test)] 编译，零运行时开销
-//! - MockLlmProvider: 可预设 chat 返回值，用于模拟 LLM 响应
+//! - MockLlmProvider: 可预设 chat 返回值（单值 / 队列），并记录全部请求供 prompt 断言
 //! - MockStorage: 内存 HashMap 存储 messages / l1 / keywords
 //! - 未实现的方法返回 `unimplemented!`，确保测试仅覆盖声明路径
 //! - 所有存储操作为同步（直接插入 HashMap），不需要真实数据库
@@ -43,6 +43,8 @@ pub struct MockLlmProvider {
     responses: Mutex<std::collections::VecDeque<String>>,
     /// 最后一次 chat 请求（供断言 prompt 内容，如上文注入）
     last_request: Mutex<Option<ChatRequest>>,
+    /// 全部 chat 请求（按调用顺序；供逐目标 prompt 断言）
+    requests: Mutex<Vec<ChatRequest>>,
 }
 
 impl MockLlmProvider {
@@ -52,6 +54,7 @@ impl MockLlmProvider {
             response: Mutex::new(None),
             responses: Mutex::new(std::collections::VecDeque::new()),
             last_request: Mutex::new(None),
+            requests: Mutex::new(Vec::new()),
         }
     }
 
@@ -72,12 +75,18 @@ impl MockLlmProvider {
     pub fn last_request(&self) -> Option<ChatRequest> {
         self.last_request.lock().unwrap().clone()
     }
+
+    /// 返回全部 chat 请求（按调用顺序；供逐目标 prompt 断言）。
+    pub fn requests(&self) -> Vec<ChatRequest> {
+        self.requests.lock().unwrap().clone()
+    }
 }
 
 #[async_trait]
 impl LlmProviderTrait for MockLlmProvider {
     async fn chat(&self, request: &ChatRequest) -> RamariaResult<String> {
         *self.last_request.lock().unwrap() = Some(request.clone());
+        self.requests.lock().unwrap().push(request.clone());
         // 优先消费队列（多块场景）；队列空时回退单响应
         if let Some(text) = self.responses.lock().unwrap().pop_front() {
             return Ok(text);

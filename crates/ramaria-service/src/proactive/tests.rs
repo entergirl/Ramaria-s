@@ -93,8 +93,9 @@ impl TestSink {
     }
 }
 
+#[async_trait]
 impl ProactiveSink for TestSink {
-    fn deliver(&self, message: &ProactiveMessage) -> RamariaResult<()> {
+    async fn deliver(&self, message: &ProactiveMessage) -> RamariaResult<()> {
         self.received
             .lock()
             .expect("接收端留档锁不应中毒")

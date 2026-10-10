@@ -35,8 +35,9 @@ impl<R: Runtime> TauriProactiveSink<R> {
     }
 }
 
+#[async_trait::async_trait]
 impl<R: Runtime> ProactiveSink for TauriProactiveSink<R> {
-    fn deliver(&self, message: &ProactiveMessage) -> RamariaResult<()> {
+    async fn deliver(&self, message: &ProactiveMessage) -> RamariaResult<()> {
         let payload = build_payload(message);
 
         // 应用内事件：失败按降级处理（消息已落库，warn 后继续通知）
@@ -122,6 +123,8 @@ mod tests {
             persona: "char-0001".to_string(),
             source: "event".to_string(),
             created_at: 1_700_000_000_000,
+            channel: "local".to_string(),
+            external_ref: None,
         };
 
         let payload = build_payload(&message);

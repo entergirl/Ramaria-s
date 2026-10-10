@@ -370,6 +370,7 @@ fn prior_context_truncates_mixed_cjk_emoji_on_char_boundary() {
         "用户：",
         "助手：",
         &std::collections::HashMap::new(),
+        None,
     );
     assert!(ctx.ends_with('…'), "应含统一省略号截断标记");
     assert!(

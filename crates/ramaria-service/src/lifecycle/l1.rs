@@ -209,6 +209,7 @@ pub(crate) async fn regenerate_l1_progressive(
             user_prefix,
             assistant_prefix,
             fanout_others: false,
+            target_projection: false,
         },
     )
     .await

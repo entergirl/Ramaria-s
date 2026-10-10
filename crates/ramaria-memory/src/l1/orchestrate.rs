@@ -39,6 +39,7 @@ pub const MAX_L1_RETRY_JOBS_PER_RUN: usize = 8;
 /// - `persona_uid`: L1 归属人格；`None` 表示不绑定（存量兼容）。
 /// - `user_prefix` / `assistant_prefix`: 摘要素材的角色前缀覆盖；`None` 用默认。
 /// - `fanout_others`: 多画像分发开关（群聊场景按块/段内他人发言者复制 L1 行）；默认关闭。
+/// - `target_projection`: 目标相对投影开关（社会通道会话逐目标重投影生成）；默认关闭。
 #[derive(Debug, Clone, Copy)]
 pub struct L1GenerateRequest<'a> {
     pub session_id: Uuid,
@@ -47,10 +48,12 @@ pub struct L1GenerateRequest<'a> {
     pub assistant_prefix: Option<&'a str>,
     /// 多画像分发开关（按块/段内他人发言者复制 L1 行）
     pub fanout_others: bool,
+    /// 目标相对投影开关（按块内目标集合逐目标生成 L1 行）
+    pub target_projection: bool,
 }
 
 impl<'a> L1GenerateRequest<'a> {
-    /// 以会话与人格构造请求（前缀使用默认，多画像分发关闭）。
+    /// 以会话与人格构造请求（前缀使用默认，多画像分发与投影均关闭）。
     pub fn new(session_id: Uuid, persona_uid: Option<&'a str>) -> Self {
         Self {
             session_id,
@@ -58,6 +61,7 @@ impl<'a> L1GenerateRequest<'a> {
             user_prefix: None,
             assistant_prefix: None,
             fanout_others: false,
+            target_projection: false,
         }
     }
 }
@@ -90,6 +94,8 @@ pub async fn generate_l1_summaries(
     }
     // 多画像分发开关透传（群聊场景；关闭时行为与私聊一致）
     summarizer_config.fanout_others = req.fanout_others;
+    // 目标相对投影开关透传（社会通道会话；关闭时行为与本地 / 导入一致）
+    summarizer_config.target_projection = req.target_projection;
 
     // L1 输出预算从 backend_config 传播（下限钳制到 L1 默认值，防结构化 JSON 被截断）
     match storage.get_backend_config().await {
@@ -247,7 +253,9 @@ pub async fn retry_pending_l1_jobs(
         }
         stats.scanned += 1;
 
-        let Some((session_id, persona_uid)) = parse_l1_retry_payload(payload.as_deref()) else {
+        let Some((session_id, persona_uid, target_projection)) =
+            parse_l1_retry_payload(payload.as_deref())
+        else {
             warn!(
                 job_id,
                 "L1 补扫：payload 缺失或非法，标记任务完成（无法重试）"
@@ -317,7 +325,8 @@ pub async fn retry_pending_l1_jobs(
 
         stats.attempted += 1;
         info!(job_id, %session_id, ?persona_uid, "L1 补扫：开始重试摘要生成");
-        let request = L1GenerateRequest::new(session_id, persona_uid.as_deref());
+        let mut request = L1GenerateRequest::new(session_id, persona_uid.as_deref());
+        request.target_projection = target_projection;
         match generate_l1_summaries(storage, llm, progressive, request).await {
             Ok(l1_list) if !l1_list.is_empty() => {
                 info!(
@@ -372,12 +381,14 @@ async fn mark_l1_job_completed(job_manager: &JobManager<'_>, job_id: i64) {
 /// 解析 L1 补扫任务 payload（封存失败登记时写入的 JSON）。
 ///
 /// 结构:
-/// - `{"session_id": "<uuid>", "persona_uid": "<uid|空>", "reason": "..."}`
+/// - `{"session_id": "<uuid>", "persona_uid": "<uid|空>", "reason": "...",
+///   "target_projection": <bool|缺省>}`
 ///
 /// 返回:
-/// - `Some((session_id, persona_uid))`：`session_id` 合法即成功（persona 可为 None）。
+/// - `Some((session_id, persona_uid, target_projection))`：`session_id` 合法即成功
+///   （persona 可为 None；`target_projection` 缺省 false，兼容旧任务）。
 /// - `None`：payload 缺失、非 JSON 或 `session_id` 非法（该任务无法重试）。
-fn parse_l1_retry_payload(payload: Option<&str>) -> Option<(Uuid, Option<String>)> {
+fn parse_l1_retry_payload(payload: Option<&str>) -> Option<(Uuid, Option<String>, bool)> {
     let value: serde_json::Value = serde_json::from_str(payload?).ok()?;
     let session_id = Uuid::parse_str(value.get("session_id")?.as_str()?).ok()?;
     let persona_uid = value
@@ -385,7 +396,11 @@ fn parse_l1_retry_payload(payload: Option<&str>) -> Option<(Uuid, Option<String>
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
-    Some((session_id, persona_uid))
+    let target_projection = value
+        .get("target_projection")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    Some((session_id, persona_uid, target_projection))
 }
 
 // =========================================================
@@ -404,18 +419,23 @@ mod tests {
         let full = serde_json::json!({
             "session_id": sid.to_string(),
             "persona_uid": "char-0001",
-            "reason": "auto_retry_on_close"
+            "reason": "auto_retry_on_close",
+            "target_projection": true
         })
         .to_string();
-        let (parsed_sid, persona) = parse_l1_retry_payload(Some(&full)).expect("合法 payload");
+        let (parsed_sid, persona, projection) =
+            parse_l1_retry_payload(Some(&full)).expect("合法 payload");
         assert_eq!(parsed_sid, sid);
         assert_eq!(persona.as_deref(), Some("char-0001"));
+        assert!(projection, "target_projection 应透传");
 
-        // persona 为 null / 空串 → None（L1 归属走默认）
+        // persona 为 null / 空串 → None（L1 归属走默认）；缺省 target_projection → false（兼容旧任务）
         let no_persona = serde_json::json!({ "session_id": sid.to_string() }).to_string();
-        let (parsed_sid, persona) = parse_l1_retry_payload(Some(&no_persona)).expect("无 persona");
+        let (parsed_sid, persona, projection) =
+            parse_l1_retry_payload(Some(&no_persona)).expect("无 persona");
         assert_eq!(parsed_sid, sid);
         assert!(persona.is_none());
+        assert!(!projection, "缺省 target_projection 应为 false");
 
         // 缺失 payload / 非法 JSON / session_id 非法 → None（任务无法重试）
         assert!(parse_l1_retry_payload(None).is_none());
@@ -423,7 +443,7 @@ mod tests {
         assert!(parse_l1_retry_payload(Some(r#"{"session_id": "not-a-uuid"}"#)).is_none());
     }
 
-    /// 请求构造：默认前缀为空（由 summarizer 使用内置默认）。
+    /// 请求构造：默认前缀为空（由 summarizer 使用内置默认），投影关闭。
     #[test]
     fn generate_request_defaults_use_summarizer_prefixes() {
         let sid = Uuid::new_v4();
@@ -432,5 +452,6 @@ mod tests {
         assert_eq!(request.persona_uid, Some("char-0001"));
         assert!(request.user_prefix.is_none());
         assert!(request.assistant_prefix.is_none());
+        assert!(!request.target_projection, "默认投影关闭");
     }
 }
