@@ -15,6 +15,7 @@ use crate::ChannelResult;
 use crate::status::ChannelStatus;
 
 pub mod onebot;
+pub mod telegram;
 
 // =========================================================
 // 传输抽象

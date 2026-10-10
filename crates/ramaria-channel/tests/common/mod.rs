@@ -13,6 +13,8 @@
 // 握手回调签名由协议库固定（Err 为较大的 HTTP 响应结构），测试基建豁免该 lint
 #![allow(clippy::result_large_err)]
 
+pub mod telegram;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;

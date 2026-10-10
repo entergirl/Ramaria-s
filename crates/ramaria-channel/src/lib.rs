@@ -27,6 +27,9 @@ pub use runtime::download::{HttpImageDownloader, ImageDownloader, MAX_IMAGE_BYTE
 pub use runtime::worker::{ChannelWorker, WorkerOptions};
 pub use status::{ChannelStatus, ConnectionState};
 pub use transport::onebot::{OneBotTransport, QqTransportOptions, SentMessageCache};
+pub use transport::telegram::{
+    TelegramFileDownloader, TelegramTransport, TelegramTransportOptions,
+};
 pub use transport::{
     InboundSegment, OutboundAttachment, OutboundMessage, OutboundTarget, Transport, TransportEvent,
 };
