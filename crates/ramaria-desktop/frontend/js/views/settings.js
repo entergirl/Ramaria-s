@@ -2600,6 +2600,20 @@ var RamariaSettingsView = (function () {
                 { path: ['batch_limit'], label: '单批理解上限（张）', type: 'number', min: 0, def: 0, hint: '单次理解批次处理的图片数量上限；0 = 不限' },
             ],
         },
+        {
+            key: 'channel',
+            section: ['channel'],
+            title: '💬 社交通道（QQ / Telegram）',
+            desc: '社交通道随桌面启动与外部平台收发消息；默认关闭。平台凭据（OneBot token / Telegram bot token）在「社交平台接入」面板中单独配置，不写入配置文件。',
+            fields: [
+                { path: ['enabled'], label: '通道总开关', type: 'bool', def: false, hint: '关闭时不连接任何平台' },
+                { path: ['default_persona_uid'], label: '默认本机侧人格', type: 'text', def: 'rama-0001', hint: '绑定未覆盖时使用的对话人格 uid' },
+                { path: ['qq_enabled'], label: 'QQ 平台开关', type: 'bool', def: false, hint: '需通道总开关开启' },
+                { path: ['qq_ws_url'], label: 'QQ WS 地址', type: 'text', def: 'ws://127.0.0.1:3001', hint: 'OneBot v11 正向 WebSocket 地址（NapCat 服务端口）' },
+                { path: ['telegram_enabled'], label: 'Telegram 平台开关', type: 'bool', def: false, hint: '需通道总开关开启' },
+                { path: ['proactive_enabled'], label: '社交主动投递开关', type: 'bool', def: false, hint: '主动消息投递到社交通道的总开关；还须绑定级开关放行' },
+            ],
+        },
     ];
 
     /**

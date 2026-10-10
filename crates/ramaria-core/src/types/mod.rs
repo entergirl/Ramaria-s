@@ -76,6 +76,7 @@ pub fn now_ms() -> i64 {
 
 mod attachments;
 mod backend;
+mod channel;
 mod inbound;
 mod memory;
 mod message;
@@ -91,6 +92,7 @@ pub use attachments::{
     is_local_relative_ref, replace_image_placeholders,
 };
 pub use backend::{BackendConfig, LlmProvider, ModelCapability, PrivacyConsent};
+pub use channel::{ChannelBinding, ChannelPlatform};
 pub use inbound::{InboundAttachmentKind, InboundAttachmentRef, InboundMessage, InboundSender};
 pub use memory::{
     ClusterSnapshot, EventBatchWrite, EventRelation, EventRelationKind, EventSource, EvidenceNote,
@@ -102,7 +104,9 @@ pub use persona_enum::{
     TraitLayer, TraitSource, TraitStatus,
 };
 pub use persona_struct::{Persona, PersonaFact, PersonalityTrait, TraitEvidence};
-pub use session::{CHANNEL_LOCAL, CHANNEL_QQ, MemberRole, Session, SessionMember};
+pub use session::{
+    CHANNEL_LOCAL, CHANNEL_QQ, CHANNEL_TELEGRAM, MemberRole, Session, SessionMember,
+};
 pub use state::AppState;
 pub use style::{PersonaExample, PersonaStyleStats, StyleRuleSource, StyleStatsStatus};
 pub use utt::UttBlock;

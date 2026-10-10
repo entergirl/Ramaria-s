@@ -529,3 +529,212 @@ async fn attachments_migration_on_upgrade() {
             .expect("计数应成功");
     assert_eq!(count, 0, "删除消息后附件应级联删除");
 }
+
+/// 旧库升级：channel_bindings 新表与 messages 平台消息 ID 列 / 部分唯一索引；
+/// 默认值与唯一约束在升级后的旧库上生效。
+///
+/// 说明:
+/// - 模拟口径：在已全量迁移的测试库上删除新增索引 / 表 / 列还原"旧库"状态
+///   （带索引的列必须先删所属索引，否则 `DROP COLUMN` 失败），写入旧式数据后
+///   执行本版 migration 文件（与 `sqlx::migrate!` 应用的是同一份 SQL）。
+#[tokio::test]
+async fn channels_migration_on_upgrade() {
+    let pool = database::init_test_pool()
+        .await
+        .expect("测试数据库初始化失败");
+
+    // 空库全量迁移后即含新表 / 新索引 / 新列
+    let table: Option<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'channel_bindings'",
+    )
+    .fetch_optional(&pool)
+    .await
+    .expect("查询表应成功");
+    assert_eq!(
+        table.as_deref(),
+        Some("channel_bindings"),
+        "空库初始化后应含 channel_bindings 表"
+    );
+    let index: Option<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type = 'index' \
+         AND name = 'idx_messages_platform_message_id'",
+    )
+    .fetch_optional(&pool)
+    .await
+    .expect("查询索引应成功");
+    assert_eq!(
+        index.as_deref(),
+        Some("idx_messages_platform_message_id"),
+        "空库初始化后应含平台消息 ID 索引"
+    );
+    let (notnull, default_value): (i64, Option<String>) = sqlx::query_as(
+        "SELECT \"notnull\", dflt_value FROM pragma_table_info('messages') \
+         WHERE name = 'platform_message_id'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("查询列属性应成功");
+    assert_eq!(notnull, 0, "platform_message_id 应可空");
+    assert_eq!(default_value, None, "platform_message_id 应无默认值");
+
+    // 还原旧库：移除新增索引 / 表 / 列（列上索引必须先删，否则 DROP COLUMN 失败）
+    sqlx::query("DROP INDEX idx_messages_platform_message_id")
+        .execute(&pool)
+        .await
+        .expect("删除新增索引以模拟旧库应成功");
+    sqlx::query("DROP TABLE channel_bindings")
+        .execute(&pool)
+        .await
+        .expect("删除新增表以模拟旧库应成功");
+    sqlx::query("ALTER TABLE messages DROP COLUMN platform_message_id")
+        .execute(&pool)
+        .await
+        .expect("删除新增列以模拟旧库应成功");
+
+    // 旧式写入：消息必须归属存在的会话（外键约束）
+    let session_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO sessions (id, started_at) VALUES (?, 0)")
+        .bind(session_id.to_string())
+        .execute(&pool)
+        .await
+        .expect("插入 session fixture 应成功");
+    sqlx::query(
+        "INSERT INTO messages (id, session_id, role, content, created_at, source) \
+         VALUES (?, ?, 'user', '旧消息', 1, 'local')",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(session_id.to_string())
+    .execute(&pool)
+    .await
+    .expect("写入旧式消息应成功");
+
+    // 执行本版 migration（迁移文件内容即被 sqlx::migrate! 应用的 SQL）
+    sqlx::raw_sql(include_str!("../../migrations/20261010_v2.7_channels.sql"))
+        .execute(&pool)
+        .await
+        .expect("执行新增 migration 应成功");
+
+    // 旧行 platform_message_id 为 NULL
+    let old_platform_id: Option<String> =
+        sqlx::query_scalar("SELECT platform_message_id FROM messages WHERE content = '旧消息'")
+            .fetch_one(&pool)
+            .await
+            .expect("读取旧行应成功");
+    assert_eq!(old_platform_id, None, "旧行 platform_message_id 应为 NULL");
+
+    // 绑定表默认值：省略可选列写入取默认（enabled 1 / allow_proactive 0 / 时间 0）
+    sqlx::query("INSERT INTO channel_bindings (channel, external_ref) VALUES ('qq', 'c2c:10001')")
+        .execute(&pool)
+        .await
+        .expect("省略可选列写入应成功");
+    let (persona_uid, enabled, allow_proactive, created_at, updated_at): (
+        Option<String>,
+        i64,
+        i64,
+        i64,
+        i64,
+    ) = sqlx::query_as(
+        "SELECT persona_uid, enabled, allow_proactive, created_at, updated_at \
+         FROM channel_bindings WHERE channel = 'qq' AND external_ref = 'c2c:10001'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("读取默认值应成功");
+    assert_eq!(persona_uid, None, "persona_uid 缺省应为 NULL（未覆盖）");
+    assert_eq!(enabled, 1, "enabled 缺省应为 1");
+    assert_eq!(allow_proactive, 0, "allow_proactive 缺省应为 0");
+    assert_eq!(created_at, 0, "created_at 缺省应为 0");
+    assert_eq!(updated_at, 0, "updated_at 缺省应为 0");
+
+    // 完整字段写入回读
+    sqlx::query(
+        "INSERT INTO channel_bindings \
+             (channel, external_ref, persona_uid, enabled, allow_proactive, created_at, updated_at) \
+         VALUES ('qq', 'group:20002', 'char-0001', 0, 1, 10, 20)",
+    )
+    .execute(&pool)
+    .await
+    .expect("完整字段写入应成功");
+    let (persona_uid, enabled, allow_proactive): (Option<String>, i64, i64) = sqlx::query_as(
+        "SELECT persona_uid, enabled, allow_proactive FROM channel_bindings \
+         WHERE channel = 'qq' AND external_ref = 'group:20002'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("读取完整字段应成功");
+    assert_eq!(persona_uid.as_deref(), Some("char-0001"));
+    assert_eq!(enabled, 0);
+    assert_eq!(allow_proactive, 1);
+
+    // UNIQUE(channel, external_ref) 生效：同键二次插入被拒绝，异键正常
+    let dup = sqlx::query(
+        "INSERT INTO channel_bindings (channel, external_ref) VALUES ('qq', 'c2c:10001')",
+    )
+    .execute(&pool)
+    .await;
+    assert!(dup.is_err(), "同 (channel, external_ref) 应被 UNIQUE 拒绝");
+    sqlx::query("INSERT INTO channel_bindings (channel, external_ref) VALUES ('qq', 'c2c:10002')")
+        .execute(&pool)
+        .await
+        .expect("不同 external_ref 写入应成功");
+    sqlx::query(
+        "INSERT INTO channel_bindings (channel, external_ref) VALUES ('telegram', 'c2c:10001')",
+    )
+    .execute(&pool)
+    .await
+    .expect("不同 channel 同 external_ref 写入应成功");
+
+    // messages 平台消息 ID：同会话重复插入被拒绝（部分唯一索引兜底幂等）
+    sqlx::query(
+        "INSERT INTO messages (id, session_id, role, content, created_at, source, platform_message_id) \
+         VALUES (?, ?, 'user', '平台消息', 2, 'local', 'pm_1')",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(session_id.to_string())
+    .execute(&pool)
+    .await
+    .expect("同会话首条平台消息应写入成功");
+    let dup_msg = sqlx::query(
+        "INSERT INTO messages (id, session_id, role, content, created_at, source, platform_message_id) \
+         VALUES (?, ?, 'user', '平台消息重复', 3, 'local', 'pm_1')",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(session_id.to_string())
+    .execute(&pool)
+    .await;
+    assert!(
+        dup_msg.is_err(),
+        "同会话重复 platform_message_id 应被部分唯一索引拒绝"
+    );
+
+    // 不同会话相同平台消息 ID 允许
+    let other_session = Uuid::new_v4();
+    sqlx::query("INSERT INTO sessions (id, started_at) VALUES (?, 0)")
+        .bind(other_session.to_string())
+        .execute(&pool)
+        .await
+        .expect("插入另一 session fixture 应成功");
+    sqlx::query(
+        "INSERT INTO messages (id, session_id, role, content, created_at, source, platform_message_id) \
+         VALUES (?, ?, 'user', '另一会话', 4, 'local', 'pm_1')",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(other_session.to_string())
+    .execute(&pool)
+    .await
+    .expect("不同会话相同平台消息 ID 应允许写入");
+
+    // NULL 平台消息 ID 多行允许（部分唯一索引不约束 NULL）
+    for i in 0..3 {
+        sqlx::query(
+            "INSERT INTO messages (id, session_id, role, content, created_at, source) \
+             VALUES (?, ?, 'assistant', '本地消息', ?, 'local')",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(session_id.to_string())
+        .bind(10 + i)
+        .execute(&pool)
+        .await
+        .expect("NULL 平台消息 ID 写入应成功");
+    }
+}

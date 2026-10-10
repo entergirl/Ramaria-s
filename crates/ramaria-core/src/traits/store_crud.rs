@@ -15,8 +15,8 @@ use uuid::Uuid;
 use crate::error::RamariaResult;
 use crate::keyword::{KeywordPoolRow, PendingAliasRow};
 use crate::types::{
-    AttachmentStatus, ClusterSnapshot, EventBatchWrite, EventRelation, EventSource, MemoryEvent,
-    MemoryL1, Message, MessageAttachment, MessageKey, Persona, PersonaEventAggregate,
+    AttachmentStatus, ChannelBinding, ClusterSnapshot, EventBatchWrite, EventRelation, EventSource,
+    MemoryEvent, MemoryL1, Message, MessageAttachment, MessageKey, Persona, PersonaEventAggregate,
     PersonaExample, PersonaFact, PersonaStyleStats, PersonalityTrait, ProfileField, Session,
     SessionMember, TraitEvidence, TraitStatus, UttBlock,
 };
@@ -197,6 +197,72 @@ pub trait StoreCrud: Send + Sync {
     /// - 返回空列表（未覆写 mock 视为"无成员信息"，调用方按缺失降级处理）。
     async fn list_session_members(&self, _session_id: Uuid) -> RamariaResult<Vec<SessionMember>> {
         Ok(Vec::new())
+    }
+
+    // -- ChannelBinding --
+    /// 写入 / 更新通道绑定（按 (channel, external_ref) upsert）。
+    ///
+    /// 职责:
+    /// - 通道绑定持久化的写入口：社交通道绑定管理（自动建档 / 手动改绑 / 开关）。
+    ///
+    /// 语义:
+    /// - 按 `(channel, external_ref)` upsert，返回落库后的完整行；
+    /// - 时间戳由实现方生成：首建 `created_at = updated_at = 当前`；
+    ///   更新保持 `created_at`、刷新 `updated_at`。
+    ///
+    /// 默认实现:
+    /// - 返回 `Unsupported`（写语义由实现方显式声明，避免静默丢弃）。
+    async fn upsert_channel_binding(
+        &self,
+        _channel: &str,
+        _external_ref: &str,
+        _persona_uid: Option<&str>,
+        _enabled: bool,
+        _allow_proactive: bool,
+    ) -> RamariaResult<ChannelBinding> {
+        Err(crate::error::RamariaError::unsupported(
+            "StoreCrud 未实现通道绑定写入（需覆写 upsert_channel_binding）",
+        ))
+    }
+
+    /// 按键查询通道绑定。
+    ///
+    /// 返回:
+    /// - `Ok(Some(binding))`: 命中绑定行。
+    /// - `Ok(None)`: 无绑定记录。
+    ///
+    /// 默认实现:
+    /// - 返回 `Unsupported`（避免调用方把"未实现"误读为"不存在"而重复建档）。
+    async fn get_channel_binding(
+        &self,
+        _channel: &str,
+        _external_ref: &str,
+    ) -> RamariaResult<Option<ChannelBinding>> {
+        Err(crate::error::RamariaError::unsupported(
+            "StoreCrud 未实现通道绑定查询（需覆写 get_channel_binding）",
+        ))
+    }
+
+    /// 列出全部通道绑定（按 channel / external_ref 排序）。
+    ///
+    /// 默认实现:
+    /// - 返回空列表（未覆写 mock 视为"无绑定"，调用方按缺失降级处理）。
+    async fn list_channel_bindings(&self) -> RamariaResult<Vec<ChannelBinding>> {
+        Ok(Vec::new())
+    }
+
+    /// 删除通道绑定（幂等：不存在视同成功）。
+    ///
+    /// 默认实现:
+    /// - 返回 `Unsupported`（写语义由实现方显式声明，避免静默丢弃）。
+    async fn delete_channel_binding(
+        &self,
+        _channel: &str,
+        _external_ref: &str,
+    ) -> RamariaResult<()> {
+        Err(crate::error::RamariaError::unsupported(
+            "StoreCrud 未实现通道绑定删除（需覆写 delete_channel_binding）",
+        ))
     }
 
     // -- Message (L0) --

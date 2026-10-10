@@ -1,0 +1,21 @@
+[package]
+name = "ramaria-channel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Ramaria 社交通道（协议壳 + 宿主无关运行时，业务经 ramaria-service）"
+
+[lints]
+workspace = true
+
+[dependencies]
+ramaria-core = { path = "../ramaria-core" }
+ramaria-service = { path = "../ramaria-service" }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }

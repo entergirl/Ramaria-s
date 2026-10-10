@@ -11,11 +11,11 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     BackendSelection, BehaviorConfig, BridgeConfig, CURRENT_APP_VERSION, CURRENT_SCHEMA_VERSION,
-    CacheConfig, DecayConfig, EmbeddingConfig, EventExtractionConfig, ExamplesConfig,
-    FeedbackConfig, IndexConfig, InferenceConfig, InjectionBudgetConfig, InjectionGate,
-    KnowledgeConfig, L1Config, LayerDedupConfig, LoggingConfig, McpConfig, MiscConfig, PathConfig,
-    ProactiveConfig, RetrievalConfig, SessionConfig, StyleConfig, ThresholdConfig, UttConfig,
-    VisionConfig,
+    CacheConfig, ChannelConfig, DecayConfig, EmbeddingConfig, EventExtractionConfig,
+    ExamplesConfig, FeedbackConfig, IndexConfig, InferenceConfig, InjectionBudgetConfig,
+    InjectionGate, KnowledgeConfig, L1Config, LayerDedupConfig, LoggingConfig, McpConfig,
+    MiscConfig, PathConfig, ProactiveConfig, RetrievalConfig, SessionConfig, StyleConfig,
+    ThresholdConfig, UttConfig, VisionConfig,
 };
 
 // =========================================================
@@ -169,6 +169,10 @@ pub struct RamariaConfig {
     #[serde(default)]
     pub vision: VisionConfig,
 
+    /// 社交通道配置（`[channel]`，社交平台接入的开关与连接参数）。
+    #[serde(default)]
+    pub channel: ChannelConfig,
+
     /// 杂项（预留扩展位，当前无字段）
     #[serde(default)]
     pub misc: MiscConfig,
@@ -226,6 +230,7 @@ impl Default for RamariaConfig {
             mcp: McpConfig::default(),
             proactive: ProactiveConfig::default(),
             vision: VisionConfig::default(),
+            channel: ChannelConfig::default(),
             misc: MiscConfig::default(),
         }
     }

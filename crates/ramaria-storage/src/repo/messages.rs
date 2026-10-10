@@ -46,6 +46,7 @@ struct MessageRow {
     is_proactive: i64,
     sender_ref: Option<String>,
     sender_name: Option<String>,
+    platform_message_id: Option<String>,
 }
 
 impl MessageRow {
@@ -66,6 +67,7 @@ impl MessageRow {
             is_proactive: self.is_proactive != 0,
             sender_ref: self.sender_ref,
             sender_name: self.sender_name,
+            platform_message_id: self.platform_message_id,
         })
     }
 }
@@ -84,8 +86,8 @@ where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
     sqlx::query(
-        "INSERT INTO messages (id, session_id, role, content, created_at, source, import_fingerprint, persona_uid, is_proactive, sender_ref, sender_name)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO messages (id, session_id, role, content, created_at, source, import_fingerprint, persona_uid, is_proactive, sender_ref, sender_name, platform_message_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
         .bind(msg.id.to_string())
         .bind(msg.session_id.to_string())
@@ -98,6 +100,7 @@ where
         .bind(i64::from(msg.is_proactive))
         .bind(&msg.sender_ref)
         .bind(&msg.sender_name)
+        .bind(&msg.platform_message_id)
         .execute(executor)
         .await?;
     Ok(())
@@ -456,7 +459,7 @@ pub async fn list_unread_counts(pool: &SqlitePool) -> RamariaResult<HashMap<Uuid
 /// - 按 `created_at ASC`（时间正序）排列的消息列表。
 pub async fn list_by_session(pool: &SqlitePool, session_id: Uuid) -> RamariaResult<Vec<Message>> {
     let rows = sqlx::query_as::<_, MessageRow>(
-        "SELECT id, session_id, role, content, created_at, source, import_fingerprint, persona_uid, is_proactive, sender_ref, sender_name
+        "SELECT id, session_id, role, content, created_at, source, import_fingerprint, persona_uid, is_proactive, sender_ref, sender_name, platform_message_id
          FROM messages WHERE session_id = ? ORDER BY created_at ASC",
     )
     .bind(session_id.to_string())
@@ -487,7 +490,7 @@ pub async fn list_by_session_paginated(
     offset: i64,
 ) -> RamariaResult<Vec<Message>> {
     let rows = sqlx::query_as::<_, MessageRow>(
-        "SELECT id, session_id, role, content, created_at, source, import_fingerprint, persona_uid, is_proactive, sender_ref, sender_name
+        "SELECT id, session_id, role, content, created_at, source, import_fingerprint, persona_uid, is_proactive, sender_ref, sender_name, platform_message_id
          FROM messages WHERE session_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
     )
     .bind(session_id.to_string())
@@ -507,7 +510,7 @@ pub async fn find_by_fingerprint(
     fingerprint: &str,
 ) -> RamariaResult<Option<Message>> {
     let row = sqlx::query_as::<_, MessageRow>(
-        "SELECT id, session_id, role, content, created_at, source, import_fingerprint, persona_uid, is_proactive, sender_ref, sender_name
+        "SELECT id, session_id, role, content, created_at, source, import_fingerprint, persona_uid, is_proactive, sender_ref, sender_name, platform_message_id
          FROM messages WHERE import_fingerprint = ? LIMIT 1",
     )
     .bind(fingerprint)
@@ -581,7 +584,7 @@ pub async fn list_keys_by_channel_ref(
 /// - 按 `created_at DESC`（最新在前）排列的消息列表。
 pub async fn list_by_persona(pool: &SqlitePool, persona_uid: &str) -> RamariaResult<Vec<Message>> {
     let rows = sqlx::query_as::<_, MessageRow>(
-        "SELECT id, session_id, role, content, created_at, source, import_fingerprint, persona_uid, is_proactive, sender_ref, sender_name
+        "SELECT id, session_id, role, content, created_at, source, import_fingerprint, persona_uid, is_proactive, sender_ref, sender_name, platform_message_id
          FROM messages WHERE persona_uid = ? ORDER BY created_at DESC",
     )
     .bind(persona_uid)
@@ -616,7 +619,7 @@ pub async fn list_by_persona_paginated(
     offset: i64,
 ) -> RamariaResult<Vec<Message>> {
     let rows = sqlx::query_as::<_, MessageRow>(
-        "SELECT id, session_id, role, content, created_at, source, import_fingerprint, persona_uid, is_proactive, sender_ref, sender_name
+        "SELECT id, session_id, role, content, created_at, source, import_fingerprint, persona_uid, is_proactive, sender_ref, sender_name, platform_message_id
          FROM messages WHERE persona_uid = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
     )
     .bind(persona_uid)

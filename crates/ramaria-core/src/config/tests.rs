@@ -996,3 +996,56 @@ model_supports_vision = true
         "图片理解组应参与 DB settings 扁平同步"
     );
 }
+
+// =========================================================
+// 社交通道（[channel]）配置测试
+// =========================================================
+
+#[test]
+fn channel_config_defaults_follow_decisions() {
+    let cfg = RamariaConfig::default();
+    assert!(!cfg.channel.enabled, "社交通道总开关默认关闭");
+    assert_eq!(cfg.channel.default_persona_uid, "rama-0001");
+    assert!(!cfg.channel.qq_enabled, "QQ 平台开关默认关闭");
+    assert_eq!(cfg.channel.qq_ws_url, "ws://127.0.0.1:3001");
+    assert!(!cfg.channel.telegram_enabled, "Telegram 平台开关默认关闭");
+    assert!(!cfg.channel.proactive_enabled, "社交主动投递总开关默认关闭");
+}
+
+#[test]
+fn channel_config_toml_roundtrip_and_partial() {
+    // 旧配置文件（无 [channel]）解析后回退默认（总开关关闭）
+    let legacy = r#"
+version = "2.0.0"
+schema_version = 1
+"#;
+    let cfg: RamariaConfig = toml::from_str(legacy).expect("旧配置应可解析");
+    assert!(!cfg.channel.enabled, "缺 [channel] 时回退默认关闭");
+    assert_eq!(cfg.channel.default_persona_uid, "rama-0001");
+
+    // 显式配置可无损恢复；只写部分键时其余键回退默认值
+    let toml_text = r#"
+[channel]
+enabled = true
+qq_enabled = true
+qq_ws_url = "ws://192.168.1.10:3001"
+"#;
+    let cfg2: RamariaConfig = toml::from_str(toml_text).expect("社交通道配置应可解析");
+    assert!(cfg2.channel.enabled);
+    assert!(cfg2.channel.qq_enabled);
+    assert_eq!(cfg2.channel.qq_ws_url, "ws://192.168.1.10:3001");
+    assert_eq!(
+        cfg2.channel.default_persona_uid, "rama-0001",
+        "未写的键回退默认值"
+    );
+    assert!(!cfg2.channel.telegram_enabled);
+
+    // 扁平化同步覆盖本组（settings 表 config.* 键）
+    let flat = config_sync_flatten(&cfg2);
+    assert_eq!(flat.get("channel.enabled"), Some(&serde_json::json!(true)));
+    assert_eq!(
+        flat.get("channel.qq_ws_url"),
+        Some(&serde_json::json!("ws://192.168.1.10:3001")),
+        "社交通道组应参与 DB settings 扁平同步"
+    );
+}

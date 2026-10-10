@@ -41,6 +41,7 @@ fn make_message(session_id: Uuid, fingerprint: Option<&str>) -> Message {
         is_proactive: false,
         sender_ref: None,
         sender_name: None,
+        platform_message_id: None,
     }
 }
 

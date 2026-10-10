@@ -410,3 +410,43 @@ test('图片理解组：2 键齐全且默认值类型正确', () => {
   assert.equal(visionFields['vision.batch_limit'].type, 'number');
   assert.equal(visionFields['vision.batch_limit'].def, 0);
 });
+
+// =========================================================
+// 社交通道组：6 键齐全 + 默认值类型 + 模板收录
+// =========================================================
+test('社交通道组：6 键齐全且默认值类型正确', () => {
+  const channel = groups.find((g) => g.key === 'channel');
+  assert.ok(channel, '应存在 channel 组');
+  assert.deepEqual(channel.section, ['channel']);
+
+  const expected = [
+    'channel.enabled',
+    'channel.default_persona_uid',
+    'channel.qq_enabled',
+    'channel.qq_ws_url',
+    'channel.telegram_enabled',
+    'channel.proactive_enabled',
+  ];
+  const channelFields = flattenFields([channel]);
+  assert.deepEqual(Object.keys(channelFields).sort(), expected.slice().sort());
+
+  // 每键必须被 config/default.toml 收录（未收录会让"逐键一致"用例静默跳过，漂移不可见）
+  const missing = expected.filter(
+    (key) => getByPath(templateConfig, key.split('.')) === undefined
+  );
+  assert.deepEqual(missing, [], `default.toml 未收录: ${missing.join(', ')}`);
+
+  // 社交接入默认整体关闭；默认本机侧人格为内置助手；QQ 地址为 NapCat 默认正向 WS 端口
+  assert.equal(channelFields['channel.enabled'].type, 'bool');
+  assert.equal(channelFields['channel.enabled'].def, false);
+  assert.equal(channelFields['channel.default_persona_uid'].type, 'text');
+  assert.equal(channelFields['channel.default_persona_uid'].def, 'rama-0001');
+  assert.equal(channelFields['channel.qq_enabled'].type, 'bool');
+  assert.equal(channelFields['channel.qq_enabled'].def, false);
+  assert.equal(channelFields['channel.qq_ws_url'].type, 'text');
+  assert.equal(channelFields['channel.qq_ws_url'].def, 'ws://127.0.0.1:3001');
+  assert.equal(channelFields['channel.telegram_enabled'].type, 'bool');
+  assert.equal(channelFields['channel.telegram_enabled'].def, false);
+  assert.equal(channelFields['channel.proactive_enabled'].type, 'bool');
+  assert.equal(channelFields['channel.proactive_enabled'].def, false);
+});

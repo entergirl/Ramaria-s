@@ -350,6 +350,11 @@ impl ImportWriter {
                     is_proactive: false,
                     sender_ref: non_empty_opt(&inbound.sender.platform_id),
                     sender_name: non_empty_opt(&inbound.sender.display_name),
+                    // 平台消息 ID 投影规范态字段（空串视为平台未提供）
+                    platform_message_id: inbound
+                        .platform_message_id
+                        .clone()
+                        .filter(|value| !value.is_empty()),
                 });
 
                 // 附件行：本地文件定位成功 → pending；缺失 / 不可定位 → skipped

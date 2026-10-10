@@ -44,6 +44,7 @@ fn msg(content: &str, role: MessageRole) -> Message {
         is_proactive: false,
         sender_ref: None,
         sender_name: None,
+        platform_message_id: None,
     }
 }
 

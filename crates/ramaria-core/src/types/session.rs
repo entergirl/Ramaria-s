@@ -26,6 +26,9 @@ pub const CHANNEL_LOCAL: &str = "local";
 /// QQ 导入通道标识（QQ 聊天记录导入与后续 QQ 连接共用）。
 pub const CHANNEL_QQ: &str = "qq";
 
+/// Telegram 通道标识（社交通道）。
+pub const CHANNEL_TELEGRAM: &str = "telegram";
+
 /// 对话会话。
 ///
 /// 职责:

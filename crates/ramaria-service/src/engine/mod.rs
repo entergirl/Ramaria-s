@@ -54,6 +54,7 @@ use crate::vision::VisionProbeState;
 mod assemble;
 mod index_state;
 mod usecases_browse;
+mod usecases_channel;
 mod usecases_memory;
 mod usecases_ops;
 mod usecases_persona;

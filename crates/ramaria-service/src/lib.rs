@@ -19,6 +19,7 @@
 //!   空闲检查同时提供宿主循环（`IdleLoop`），供长驻进程免外部驱动自动封存超时会话；
 //! - `settings`：设置键值与元信息读取用例（settings 表读写 / 后端配置 / schema 版本 / 密钥掩码）；
 //! - `browse`：记忆与会话浏览用例（L1 / L2 / L3 / 事实 / 证据链 / 会话列表与消息）；
+//! - `channel`：社交通道域用例（绑定读写 / 解析与自动建档 / 生效人格 / 平台凭据）；
 //! - `behavior`：行为规则用例（管理 / 学习 / 证据链 / 增量更新，与封存钩子同源）；
 //! - `style`：表达风格统计用例（增量更新 / 规则读取 / 统计视图）；
 //! - `keyword`：关键词词典用例（列表 / 幂等注入 / 待确认别名 / 别名裁决状态机）；
@@ -42,6 +43,7 @@
 pub mod behavior;
 pub mod bridge;
 pub mod browse;
+pub mod channel;
 pub mod chat;
 pub mod config;
 pub mod diagnostics;

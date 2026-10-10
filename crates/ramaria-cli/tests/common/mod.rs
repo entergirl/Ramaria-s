@@ -262,6 +262,7 @@ pub fn make_user_message(session_id: Uuid, content: &str) -> Message {
         is_proactive: false,
         sender_ref: None,
         sender_name: None,
+        platform_message_id: None,
     }
 }
 
@@ -279,6 +280,7 @@ pub fn make_assistant_message(session_id: Uuid, content: &str) -> Message {
         is_proactive: false,
         sender_ref: None,
         sender_name: None,
+        platform_message_id: None,
     }
 }
 

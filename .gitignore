@@ -69,3 +69,6 @@ desktop.ini
 
 # Agent 工作导航（本地开发使用，不随仓库分发）
 AGENTS.md
+
+# crate 级开发导航 README（agent 用文件地图 / 改动落点，链接指向仓库外本地文档；不随仓库分发）
+crates/*/README.md

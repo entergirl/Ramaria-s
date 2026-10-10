@@ -38,7 +38,7 @@ mod retrieval;
 mod runtime;
 mod vision;
 
-pub use channels::{BridgeConfig, McpConfig, UttConfig};
+pub use channels::{BridgeConfig, ChannelConfig, McpConfig, UttConfig};
 pub use core::RamariaConfig;
 pub use domains::{
     BehaviorConfig, CalibrationConf, ConfidenceConf, DriftConf, ExamplesConfig, FeedbackConfig,

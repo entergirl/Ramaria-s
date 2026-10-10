@@ -138,6 +138,9 @@ pub struct Message {
     /// 外部平台发送者显示名（导入消息）；本地 / MCP 消息为 None
     #[serde(default)]
     pub sender_name: Option<String>,
+    /// 平台消息 ID（社交通道消息）；本地 / MCP / 导入旧路径为 None
+    #[serde(default)]
+    pub platform_message_id: Option<String>,
 }
 
 impl Message {
@@ -169,6 +172,7 @@ impl Message {
             is_proactive: false,
             sender_ref: None,
             sender_name: None,
+            platform_message_id: None,
         }
     }
 

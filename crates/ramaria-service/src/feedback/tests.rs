@@ -27,6 +27,7 @@ fn msg(role: MessageRole, content: &str, created_at: i64) -> Message {
         is_proactive: false,
         sender_ref: None,
         sender_name: None,
+        platform_message_id: None,
     }
 }
 

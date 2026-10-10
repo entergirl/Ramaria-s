@@ -12,10 +12,10 @@ use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::keyword::{KeywordPoolRow, PendingAliasRow};
 use ramaria_core::traits::{ProactiveDeliveryPair, StoreCrud};
 use ramaria_core::types::{
-    AttachmentStatus, ClusterSnapshot, EventBatchWrite, EventRelation, EventSource, MemoryEvent,
-    MemoryL1, Message, MessageAttachment, Persona, PersonaEventAggregate, PersonaExample,
-    PersonaFact, PersonaStyleStats, PersonalityTrait, ProfileField, Session, SessionMember,
-    TraitEvidence, TraitStatus, UttBlock,
+    AttachmentStatus, ChannelBinding, ClusterSnapshot, EventBatchWrite, EventRelation, EventSource,
+    MemoryEvent, MemoryL1, Message, MessageAttachment, Persona, PersonaEventAggregate,
+    PersonaExample, PersonaFact, PersonaStyleStats, PersonalityTrait, ProfileField, Session,
+    SessionMember, TraitEvidence, TraitStatus, UttBlock,
 };
 use uuid::Uuid;
 
@@ -85,6 +85,41 @@ impl StoreCrud for SqliteStorage {
     /// 覆写为 `UPDATE` 推进已读时间（幂等：未命中会话静默成功）。
     async fn mark_session_read(&self, session_id: Uuid, at_ms: i64) -> RamariaResult<()> {
         repo::sessions::mark_read(&self.pool, session_id, at_ms).await
+    }
+    /// 覆写为 `(channel, external_ref)` upsert（首建写入时间、更新保持 created_at）。
+    async fn upsert_channel_binding(
+        &self,
+        channel: &str,
+        external_ref: &str,
+        persona_uid: Option<&str>,
+        enabled: bool,
+        allow_proactive: bool,
+    ) -> RamariaResult<ChannelBinding> {
+        repo::channel_bindings::upsert(
+            &self.pool,
+            channel,
+            external_ref,
+            persona_uid,
+            enabled,
+            allow_proactive,
+        )
+        .await
+    }
+    /// 覆写为按键精确查询。
+    async fn get_channel_binding(
+        &self,
+        channel: &str,
+        external_ref: &str,
+    ) -> RamariaResult<Option<ChannelBinding>> {
+        repo::channel_bindings::find(&self.pool, channel, external_ref).await
+    }
+    /// 覆写为按 `channel / external_ref` 排序的全量列表。
+    async fn list_channel_bindings(&self) -> RamariaResult<Vec<ChannelBinding>> {
+        repo::channel_bindings::list_all(&self.pool).await
+    }
+    /// 覆写为幂等删除（未命中行静默成功）。
+    async fn delete_channel_binding(&self, channel: &str, external_ref: &str) -> RamariaResult<()> {
+        repo::channel_bindings::delete(&self.pool, channel, external_ref).await
     }
 
     // =========================================================

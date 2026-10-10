@@ -4,6 +4,7 @@
 //! - 定义 utt 话语块（原文注入通道）配置
 //! - 定义桥接配置（外部入口集成）
 //! - 定义 MCP 服务端通道配置
+//! - 定义社交通道（平台接入）配置
 //! - 各配置组提供稳定默认值
 //! - 支持 serde，供配置文件与 DB settings 共享
 
@@ -181,6 +182,69 @@ impl Default for McpConfig {
             allow_raw_text: false,
             max_items: 5,
             max_chars: 1200,
+        }
+    }
+}
+
+// =========================================================
+// 社交通道配置（外部平台接入）
+// =========================================================
+
+/// 社交通道配置（`[channel]` 配置组）。
+///
+/// 职责:
+/// - 承载社交平台接入的开关与连接参数：总开关、默认人格、两平台开关与地址、
+///   社交主动投递总开关。
+/// - 由桌面「社交平台接入」面板读写；通道运行时按本组 + 凭据装配。
+///
+/// 字段约定:
+/// - `enabled`: 总开关，默认 false（社交接入默认关闭）；关闭后两平台均不启动。
+/// - `default_persona_uid`: 通道级默认人格（绑定未覆盖时生效），默认 `rama-0001`。
+/// - `qq_enabled`: QQ 通道开关（OneBot v11 正向 WS），默认 false。
+/// - `qq_ws_url`: OneBot v11 正向 WS 服务地址（协议端监听，Ramaria 作客户端）。
+/// - `telegram_enabled`: Telegram 通道开关，默认 false。
+/// - `proactive_enabled`: 社交主动投递总开关，默认 false；
+///   还须绑定级开关同时开启才实际投递（多层叠加）。
+///
+/// 安全约束:
+/// - 平台凭据（OneBot access token / Telegram bot token）不经本组配置，
+///   一律存放于 OS 凭据管理器（keychain），由宿主经服务层用例读写。
+///
+/// 兼容性说明:
+/// - struct 级 `#[serde(default)]`：config.toml 的 `[channel]` 表只写部分键时，
+///   缺失字段回退 `Default` 实现，避免解析失败。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChannelConfig {
+    /// 社交通道总开关（默认 false）。
+    pub enabled: bool,
+    /// 通道级默认人格（默认 "rama-0001"；绑定未覆盖时生效）。
+    pub default_persona_uid: String,
+    /// QQ 通道开关（默认 false）。
+    pub qq_enabled: bool,
+    /// QQ 正向 WebSocket 服务地址（默认 `ws://127.0.0.1:3001`）。
+    pub qq_ws_url: String,
+    /// Telegram 通道开关（默认 false）。
+    pub telegram_enabled: bool,
+    /// 社交主动投递总开关（默认 false；还须绑定级开关，任一关闭即不投递）。
+    pub proactive_enabled: bool,
+}
+
+impl Default for ChannelConfig {
+    /// 创建默认社交通道配置。
+    ///
+    /// 返回:
+    /// - 总开关关闭（社交接入默认关，不影响本地功能）。
+    /// - 默认人格 `rama-0001`；QQ 地址取 NapCat 常用默认端口；两平台开关与
+    ///   主动投递开关均关闭。
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            default_persona_uid: "rama-0001".to_string(),
+            qq_enabled: false,
+            qq_ws_url: "ws://127.0.0.1:3001".to_string(),
+            telegram_enabled: false,
+            proactive_enabled: false,
         }
     }
 }

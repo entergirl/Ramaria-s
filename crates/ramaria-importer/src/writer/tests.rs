@@ -87,7 +87,8 @@ async fn test_pool() -> sqlx::SqlitePool {
             persona_uid TEXT,
             is_proactive INTEGER NOT NULL DEFAULT 0,
             sender_ref TEXT,
-            sender_name TEXT
+            sender_name TEXT,
+            platform_message_id TEXT
         )",
     )
     .execute(&pool)

@@ -50,6 +50,7 @@ pub mod attachments;
 pub mod backend_config;
 pub mod background_jobs;
 pub mod behavior_rules;
+pub mod channel_bindings;
 pub mod cluster;
 pub mod events;
 pub mod examples;

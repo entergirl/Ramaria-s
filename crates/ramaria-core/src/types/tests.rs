@@ -645,3 +645,92 @@ fn message_source_serde() {
         r#""online""#
     );
 }
+
+// ---- ChannelBinding / ChannelPlatform ----
+
+#[test]
+fn channel_platform_serde_and_parse() {
+    assert_eq!(ChannelPlatform::Qq.as_str(), "qq");
+    assert_eq!(ChannelPlatform::Telegram.as_str(), "telegram");
+    assert_eq!(ChannelPlatform::parse("qq"), Some(ChannelPlatform::Qq));
+    assert_eq!(
+        ChannelPlatform::parse("telegram"),
+        Some(ChannelPlatform::Telegram)
+    );
+    assert_eq!(ChannelPlatform::parse("unknown"), None);
+    assert_eq!(ChannelPlatform::parse(""), None);
+
+    assert_eq!(
+        serde_json::to_string(&ChannelPlatform::Qq).unwrap(),
+        r#""qq""#
+    );
+    assert_eq!(
+        serde_json::to_string(&ChannelPlatform::Telegram).unwrap(),
+        r#""telegram""#
+    );
+    let back: ChannelPlatform = serde_json::from_str(r#""telegram""#).unwrap();
+    assert_eq!(back, ChannelPlatform::Telegram);
+}
+
+#[test]
+fn channel_binding_serde_roundtrip() {
+    let binding = ChannelBinding {
+        id: 7,
+        channel: "qq".to_string(),
+        external_ref: "group:20002".to_string(),
+        persona_uid: Some("char-0001".to_string()),
+        enabled: true,
+        allow_proactive: false,
+        created_at: 1_700_000_000_000,
+        updated_at: 1_700_000_001_000,
+    };
+    let json = serde_json::to_string(&binding).unwrap();
+    let back: ChannelBinding = serde_json::from_str(&json).unwrap();
+    assert_eq!(binding, back);
+
+    // persona_uid 为 None（未覆盖）往返
+    let uncovered = ChannelBinding {
+        persona_uid: None,
+        ..binding
+    };
+    let json = serde_json::to_string(&uncovered).unwrap();
+    let back: ChannelBinding = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.persona_uid, None);
+}
+
+#[test]
+fn channel_telegram_constant() {
+    assert_eq!(CHANNEL_TELEGRAM, "telegram");
+    assert_eq!(CHANNEL_LOCAL, "local");
+    assert_eq!(CHANNEL_QQ, "qq");
+}
+
+#[test]
+fn message_platform_message_id_serde() {
+    let mut msg = Message::new(
+        new_id(),
+        MessageRole::User,
+        "你好".into(),
+        MessageSource::Local,
+    );
+    assert!(msg.platform_message_id.is_none(), "常规消息应为 None");
+
+    msg.platform_message_id = Some("pm_1".to_string());
+    let json = serde_json::to_string(&msg).unwrap();
+    let back: Message = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.platform_message_id.as_deref(), Some("pm_1"));
+
+    // 缺省字段反序列化回退 None（存量 JSON 兼容）
+    let legacy = r#"{
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "session_id": "550e8400-e29b-41d4-a716-446655440001",
+        "role": "user",
+        "content": "旧",
+        "created_at": 1,
+        "source": "local",
+        "fingerprint": null,
+        "persona_uid": null
+    }"#;
+    let back: Message = serde_json::from_str(legacy).unwrap();
+    assert_eq!(back.platform_message_id, None, "缺省字段应回退 None");
+}
