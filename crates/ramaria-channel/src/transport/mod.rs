@@ -3,14 +3,18 @@
 //! 设计特点:
 //! - 协议无关：运行时持有 `Transport` trait 对象，互不感知平台协议细节
 //! - 拉取式事件流：`next_event` 逐条返回规范态入站事件，None 表示流正常终止
+//! - 入站事件为段序列形态：图片段需下载后才能产出最终正文与附件引用，
+//!   解析层不做字节级处理（组装在 runtime 层完成）
 //! - 出站本版只实现文本路径；附件模型先落地不接线
-//! - 入站统一用 core `InboundMessage`；传输类型不外泄协议字段
+//! - At 段已在解析层折叠为文本段（`@qq` / `@全体成员`），传输类型不外泄协议字段
 
 use async_trait::async_trait;
-use ramaria_core::types::InboundMessage;
+use ramaria_core::types::InboundSender;
 
 use crate::ChannelResult;
 use crate::status::ChannelStatus;
+
+pub mod onebot;
 
 // =========================================================
 // 传输抽象
@@ -51,17 +55,42 @@ pub trait Transport: Send + Sync {
 // 入站事件
 // =========================================================
 
+/// 入站消息段（协议解析后的规范段）。
+///
+/// 变体:
+/// - `Text`: 文本段；At 段已在解析层折叠为 `@qq` / `@全体成员` 文本。
+/// - `Image`: 图片段；`url` 为平台下载地址，`size` / `sub_type` 为平台可选元数据。
+#[derive(Debug, Clone, PartialEq)]
+pub enum InboundSegment {
+    Text(String),
+    Image {
+        url: String,
+        size: Option<u64>,
+        sub_type: Option<String>,
+    },
+}
+
 /// 运行时消费的入站事件（协议解析后的规范态）。
 ///
 /// 字段约定:
 /// - `external_ref`: 会话外部标识（`c2c:{uin}` 私聊 / `group:{群号}` 群聊）。
-/// - `message`: core 入站消息规范模型。
+/// - `sender`: 发送者身份（规范模型）。
+/// - `platform_message_id`: 平台消息 ID；平台未提供时为 None。
+/// - `reply_to`: 被回复的平台消息 ID；非回复消息为 None。
+/// - `created_at`: 消息时间（Unix 毫秒）。
+/// - `segments`: 段序列（按平台消息内出现顺序）；正文与附件在组装层产出。
 /// - `should_respond`: 响应判定结果（私聊逐条响应 / 群聊仅 @ 与被回复响应）。
+/// - `self_id`: 本机账号标识（平台提供时）；用于发言归属与 @ 判定留痕。
 #[derive(Debug, Clone, PartialEq)]
 pub struct TransportEvent {
     pub external_ref: String,
-    pub message: InboundMessage,
+    pub sender: InboundSender,
+    pub platform_message_id: Option<String>,
+    pub reply_to: Option<String>,
+    pub created_at: i64,
+    pub segments: Vec<InboundSegment>,
     pub should_respond: bool,
+    pub self_id: Option<String>,
 }
 
 // =========================================================

@@ -21,9 +21,14 @@ pub mod transport;
 
 pub use config::{ChannelRuntimeConfig, QqRuntimeConfig, TelegramRuntimeConfig};
 pub use events::{ChannelEventSink, NoopSink};
+pub use runtime::ChannelRuntime;
+pub use runtime::assemble::{AssembledInbound, DownloadedImage, assemble_inbound};
+pub use runtime::download::{HttpImageDownloader, ImageDownloader, MAX_IMAGE_BYTES};
+pub use runtime::worker::{ChannelWorker, WorkerOptions};
 pub use status::{ChannelStatus, ConnectionState};
+pub use transport::onebot::{OneBotTransport, QqTransportOptions, SentMessageCache};
 pub use transport::{
-    OutboundAttachment, OutboundMessage, OutboundTarget, Transport, TransportEvent,
+    InboundSegment, OutboundAttachment, OutboundMessage, OutboundTarget, Transport, TransportEvent,
 };
 
 // =========================================================

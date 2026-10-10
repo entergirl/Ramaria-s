@@ -131,6 +131,7 @@ pub(crate) async fn run(
         channel: String::new(),
         conversation_id: None,
         seed_history: Vec::new(),
+        message_in_history: false,
         proactive: Some(ProactiveInput {
             anchor,
             angle,

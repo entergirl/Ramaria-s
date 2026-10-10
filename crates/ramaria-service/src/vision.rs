@@ -23,6 +23,7 @@ use ramaria_core::types::{AttachmentStatus, MessageAttachment, is_local_relative
 use uuid::Uuid;
 
 use crate::engine::Engine;
+use crate::types::ChannelImageOutcome;
 
 // =========================================================
 // 常量
@@ -349,6 +350,139 @@ async fn process_row(
 }
 
 // =========================================================
+// 单张已下载图片理解（社交通道现场路径）
+// =========================================================
+
+/// 理解一张已下载图片（字节直接输入；与批量路径同口径）。
+///
+/// 流程:
+/// 1. 空字节 / 超限 → 标记 skipped；
+/// 2. 能力门禁（声明 → 隐私 → 探测）；隐私未确认保持 pending 返回 Skipped；
+/// 3. md5 去重：命中已有描述批量回填 → Reused；
+/// 4. 魔数判定 MIME → 多模态调用（失败重试一次）→ 描述清洗 → 回填。
+///
+/// 参数:
+/// - `engine`: 服务层引擎。
+/// - `attachment_id`: 附件行 id（状态回填目标）。
+/// - `md5`: 图片内容指纹（小写 hex；由下载侧计算）。
+/// - `image_bytes`: 图片字节。
+///
+/// 返回:
+/// - 单张理解结果（统计口径）；业务失败按标记口径返回，不中断调用方。
+pub(crate) async fn understand_downloaded_image(
+    engine: &Engine,
+    attachment_id: i64,
+    md5: &str,
+    image_bytes: &[u8],
+) -> RamariaResult<ChannelImageOutcome> {
+    let storage = engine.storage_ref().clone();
+
+    // ---- 1. 字节边界 ----
+    if image_bytes.is_empty() || image_bytes.len() as u64 > MAX_IMAGE_BYTES {
+        tracing::warn!(
+            attachment_id,
+            size = image_bytes.len(),
+            "社交通道图片字节为空或超限，跳过"
+        );
+        storage
+            .mark_attachment_status(attachment_id, AttachmentStatus::Skipped)
+            .await?;
+        return Ok(ChannelImageOutcome::Skipped);
+    }
+
+    // ---- 2. 能力门禁（顺序固定：声明 → 隐私 → 探测） ----
+    match capability_gate(engine).await? {
+        CapabilityGate::DeclaredOff | CapabilityGate::ProbeFailed => {
+            storage
+                .mark_attachment_status(attachment_id, AttachmentStatus::Skipped)
+                .await?;
+            return Ok(ChannelImageOutcome::Skipped);
+        }
+        CapabilityGate::PrivacyPending => {
+            // 行保持 pending，待隐私确认后由后续路径处理
+            tracing::info!(attachment_id, "隐私确认未完成，社交通道图片保持待处理");
+            return Ok(ChannelImageOutcome::Skipped);
+        }
+        CapabilityGate::Ready => {}
+    }
+
+    // ---- 3. md5 去重：已有完成描述直接批量回填 ----
+    let md5 = md5.trim().to_string();
+    if !md5.is_empty() {
+        if let Some((description, description_model)) =
+            storage.find_attachment_description_by_md5(&md5).await?
+        {
+            storage
+                .fill_attachment_done_by_md5(&md5, &description, &description_model)
+                .await?;
+            return Ok(ChannelImageOutcome::Reused);
+        }
+    }
+
+    // ---- 4. 多模态调用（失败重试一次，共两次尝试） ----
+    let llm = engine.llm();
+    let label = model_label(&llm);
+    let request = ChatRequest {
+        system_prompt: String::new(),
+        memory_context: None,
+        history: Vec::new(),
+        user_message: VISION_PROMPT.to_string(),
+        temperature: 0.2,
+        max_tokens: 256,
+        request_id: Uuid::new_v4(),
+        template_version: VISION_TEMPLATE_VERSION.to_string(),
+    };
+    let data_uri = format!(
+        "data:{};base64,{}",
+        image_mime_from_bytes(image_bytes),
+        base64_encode(image_bytes)
+    );
+    let images = vec![data_uri];
+    let reply = match llm.chat_vision(&request, &images).await {
+        Ok(reply) => Ok(reply),
+        Err(first_error) => {
+            tracing::warn!(
+                attachment_id,
+                error = %first_error,
+                "社交通道图片理解调用失败，重试一次"
+            );
+            llm.chat_vision(&request, &images).await
+        }
+    };
+    let raw = match reply {
+        Ok(raw) => raw,
+        Err(error) => {
+            tracing::warn!(attachment_id, error = %error, "社交通道图片理解调用仍然失败");
+            storage
+                .mark_attachment_status(attachment_id, AttachmentStatus::Failed)
+                .await?;
+            return Ok(ChannelImageOutcome::Failed);
+        }
+    };
+
+    // ---- 5. 清洗与回填（空描述不落库） ----
+    let description = sanitize_description(&raw);
+    if description.is_empty() {
+        tracing::warn!(attachment_id, "社交通道图片理解返回空描述，标记失败");
+        storage
+            .mark_attachment_status(attachment_id, AttachmentStatus::Failed)
+            .await?;
+        return Ok(ChannelImageOutcome::Failed);
+    }
+    if md5.is_empty() {
+        storage
+            .mark_attachment_done(attachment_id, &description, &label)
+            .await?;
+    } else {
+        storage
+            .fill_attachment_done_by_md5(&md5, &description, &label)
+            .await?;
+    }
+    tracing::info!(attachment_id, "社交通道图片理解完成");
+    Ok(ChannelImageOutcome::Done)
+}
+
+// =========================================================
 // 能力门禁与探测
 // =========================================================
 
@@ -439,6 +573,27 @@ fn image_mime_for(source_ref: &str) -> &'static str {
         Some("webp") => "image/webp",
         Some("bmp") => "image/bmp",
         _ => "image/jpeg",
+    }
+}
+
+/// 按魔数判定图片 MIME（未知格式回退 image/jpeg）。
+///
+/// 判定顺序:
+/// - JPEG `FF D8 FF`；PNG `89 50 4E 47`；GIF `47 49 46`；
+/// - WEBP `RIFF....WEBP`；BMP `42 4D`。
+fn image_mime_from_bytes(bytes: &[u8]) -> &'static str {
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        "image/jpeg"
+    } else if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
+        "image/png"
+    } else if bytes.starts_with(b"GIF") {
+        "image/gif"
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        "image/webp"
+    } else if bytes.starts_with(b"BM") {
+        "image/bmp"
+    } else {
+        "image/jpeg"
     }
 }
 

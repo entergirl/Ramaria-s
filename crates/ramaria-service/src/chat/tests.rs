@@ -16,7 +16,9 @@ use crate::test_support::{
     MockLlm, engine_with_db, engine_with_failing_llm, engine_with_l1_reply, engine_with_shared_llm,
     seed_closed_session_with_messages, seed_persona, seed_session_with_messages,
 };
-use crate::types::{CHANNEL_MCP, ChatSendRequest, ChatStreamRequest, DEFAULT_PERSONA_UID};
+use crate::types::{
+    CHANNEL_MCP, ChannelReplyRequest, ChatSendRequest, ChatStreamRequest, DEFAULT_PERSONA_UID,
+};
 use futures::StreamExt;
 use ramaria_core::config::RamariaConfig;
 use ramaria_core::traits::{ChatMessage, StoreCrud, StoreInfrastructure};
@@ -902,6 +904,179 @@ async fn session_persona_mismatch_logs_warn_without_message_content() {
     assert!(logs.contains("char-0001"), "应记录会话绑定人格: {logs}");
     assert!(logs.contains(DEFAULT_PERSONA_UID), "应记录请求人格: {logs}");
     assert!(!logs.contains(sentinel), "日志不应包含消息内容: {logs}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// =========================================================
+// 社交通道回复（入站消息已落库路径）——只写助手行
+// =========================================================
+
+/// 构造社交通道回复请求。
+fn reply_request(session_id: Uuid, persona: &str, message: &str) -> ChannelReplyRequest {
+    ChannelReplyRequest {
+        session_id,
+        persona_uid: persona.to_string(),
+        message: message.to_string(),
+    }
+}
+
+/// 社交通道回复：只写助手行、历史窗口含入站消息、请求用户消息位留空。
+#[tokio::test]
+async fn channel_reply_persists_assistant_only_and_embeds_inbound_history() {
+    let llm = Arc::new(MockLlm::with_reply(REPLY));
+    let (engine, storage, dir) = engine_with_shared_llm(
+        "chat-channel-reply",
+        llm.clone(),
+        RamariaConfig::default(),
+        None,
+    )
+    .await;
+    seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+    seed_persona(&storage, "char-10001").await;
+    let session = storage
+        .create_session_in_channel(Some(DEFAULT_PERSONA_UID), "qq", Some("c2c:10001"))
+        .await
+        .expect("建会话应成功");
+
+    // 模拟通道写入用例已落库的入站消息
+    let mut inbound = Message::new(
+        session.id,
+        MessageRole::User,
+        "你好呀".to_string(),
+        MessageSource::Local,
+    )
+    .with_persona_uid(Some("char-10001".to_string()));
+    inbound.sender_ref = Some("10001".to_string());
+    inbound.sender_name = Some("小明".to_string());
+    inbound.platform_message_id = Some("m-1".to_string());
+    storage
+        .save_message(&inbound)
+        .await
+        .expect("写入入站消息应成功");
+
+    let outcome = engine
+        .channel_reply(reply_request(session.id, DEFAULT_PERSONA_UID, "你好呀"))
+        .await
+        .expect("社交通道回复应成功");
+    assert_eq!(outcome.reply, REPLY);
+    assert_eq!(outcome.session_id, session.id);
+
+    let messages = storage
+        .list_messages(session.id)
+        .await
+        .expect("查询消息应成功");
+    assert_eq!(messages.len(), 2, "只应新增一条助手行");
+    let assistant = messages
+        .iter()
+        .find(|message| message.role == MessageRole::Assistant)
+        .expect("应有助手行");
+    assert_eq!(assistant.persona_uid.as_deref(), Some(DEFAULT_PERSONA_UID));
+
+    // Prompt 断言：用户消息位留空（由历史窗口承载）、历史含入站消息
+    let requests = llm.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0].user_message.is_empty(),
+        "入站消息已落库时请求用户消息位应留空"
+    );
+    assert!(
+        requests[0]
+            .history
+            .iter()
+            .any(|message| message.content.contains("你好呀")),
+        "历史窗口应包含入站消息"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 社交通道回复：会话不存在 / 已关闭 / 人格不一致均显式拒绝且不落库。
+#[tokio::test]
+async fn channel_reply_rejects_invalid_sessions() {
+    let llm = Arc::new(MockLlm::with_reply(REPLY));
+    let (engine, storage, dir) = engine_with_shared_llm(
+        "chat-channel-reply-reject",
+        llm,
+        RamariaConfig::default(),
+        None,
+    )
+    .await;
+    seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+    seed_persona(&storage, "char-0001").await;
+
+    let missing = Uuid::new_v4();
+    assert!(
+        engine
+            .channel_reply(reply_request(missing, DEFAULT_PERSONA_UID, "hi"))
+            .await
+            .is_err(),
+        "会话不存在应拒绝"
+    );
+
+    let closed = storage
+        .create_session_in_channel(Some(DEFAULT_PERSONA_UID), "qq", Some("c2c:9"))
+        .await
+        .expect("建会话应成功");
+    storage
+        .close_session(closed.id)
+        .await
+        .expect("关闭会话应成功");
+    assert!(
+        engine
+            .channel_reply(reply_request(closed.id, DEFAULT_PERSONA_UID, "hi"))
+            .await
+            .is_err(),
+        "已关闭会话应拒绝"
+    );
+
+    let mismatched = storage
+        .create_session_in_channel(Some("char-0001"), "qq", Some("c2c:8"))
+        .await
+        .expect("建会话应成功");
+    let err = engine
+        .channel_reply(reply_request(mismatched.id, DEFAULT_PERSONA_UID, "hi"))
+        .await
+        .expect_err("人格不一致应拒绝");
+    assert_eq!(err.category(), "validation");
+
+    let messages = storage
+        .list_messages(mismatched.id)
+        .await
+        .expect("查询消息应成功");
+    assert!(messages.is_empty(), "拒绝路径不应产生任何落库");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 社交通道回复：LLM 返回空内容时不落库（由调用方跳过发送）。
+#[tokio::test]
+async fn channel_reply_skips_persist_on_empty_reply() {
+    let llm = Arc::new(MockLlm::local());
+    let (engine, storage, dir) = engine_with_shared_llm(
+        "chat-channel-reply-empty",
+        llm,
+        RamariaConfig::default(),
+        None,
+    )
+    .await;
+    seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+    let session = storage
+        .create_session_in_channel(Some(DEFAULT_PERSONA_UID), "qq", Some("c2c:10001"))
+        .await
+        .expect("建会话应成功");
+
+    let outcome = engine
+        .channel_reply(reply_request(session.id, DEFAULT_PERSONA_UID, "在吗"))
+        .await
+        .expect("生成调用本身应成功");
+    assert!(outcome.reply.is_empty());
+
+    let messages = storage
+        .list_messages(session.id)
+        .await
+        .expect("查询消息应成功");
+    assert!(messages.is_empty(), "空回复不应落库");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

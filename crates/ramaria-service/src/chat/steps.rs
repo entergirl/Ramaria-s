@@ -71,6 +71,8 @@ pub(super) struct ChatInput {
     pub(super) conversation_id: Option<String>,
     /// 调用方预置上文（时间正序；不落库，仅进入本轮 prompt 历史段）。
     pub(super) seed_history: Vec<ChatMessage>,
+    /// 消息是否已入历史（社交通道回复：入站消息已落库，请求用户消息位留空）。
+    pub(super) message_in_history: bool,
     /// 主动生成输入（仅 `Proactive` 模式使用；其余模式为 None）。
     pub(super) proactive: Option<ProactiveInput>,
 }
@@ -213,8 +215,9 @@ pub(super) async fn prepare_request(
 
     // ---- 13. Token 预算与 ChatRequest ----
     let request_id = new_id();
-    // 主动生成无用户消息：请求的 user 消息位留空（provider 侧跳过空消息）
-    let request_message = if input.mode == ChatMode::Proactive {
+    // 主动生成无用户消息；社交通道回复的入站消息已落库（由历史窗口承载）：
+    // 两类均将请求的 user 消息位留空（provider 侧跳过空消息）
+    let request_message = if input.mode == ChatMode::Proactive || input.message_in_history {
         ""
     } else {
         message

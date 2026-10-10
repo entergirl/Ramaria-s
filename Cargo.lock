@@ -4307,8 +4307,12 @@ name = "ramaria-channel"
 version = "2.6.0"
 dependencies = [
  "async-trait",
+ "futures",
+ "md-5",
  "ramaria-core",
  "ramaria-service",
+ "ramaria-storage",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

@@ -4,6 +4,7 @@
 //! - 宿主无关：只持有装配参数、事件接收端与状态簿，不含平台协议概念
 //! - 状态簿按通道名独立记录；读取返回拷贝，写入后锁外通知宿主（不持锁回调）
 //! - 通道名排序稳定：状态列表按名称字典序输出，宿主展示顺序确定
+//! - 运行时自身实现宿主事件回调：传输层可直接以本类型为状态上报终点
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -11,6 +12,10 @@ use std::sync::{Arc, RwLock};
 use crate::config::ChannelRuntimeConfig;
 use crate::events::ChannelEventSink;
 use crate::status::ChannelStatus;
+
+pub mod assemble;
+pub mod download;
+pub mod worker;
 
 // =========================================================
 // 通道运行时
@@ -81,6 +86,13 @@ impl ChannelRuntime {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         }
+    }
+}
+
+impl ChannelEventSink for ChannelRuntime {
+    /// 传输层的状态上报直接落状态簿并转发宿主事件端。
+    fn on_status_changed(&self, status: &ChannelStatus) {
+        self.report_status(status.clone());
     }
 }
 

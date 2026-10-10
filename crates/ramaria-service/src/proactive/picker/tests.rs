@@ -393,15 +393,19 @@ async fn topic_cooldown_blocks_within_window_and_releases_after() {
     let event = seed_event(&storage, "展览", "看了展览", now - DAY_MS, 0.3, 0.8, 0.9).await;
     let key = event.to_string();
 
-    let mut cooling = ProactiveState::default();
-    cooling.recent_topics = vec![recent("event", &key, now - 23 * HOUR_MS)];
+    let mut cooling = ProactiveState {
+        recent_topics: vec![recent("event", &key, now - 23 * HOUR_MS)],
+        ..Default::default()
+    };
     let directive = pick_once(&engine, now, &mut cooling)
         .await
         .expect("冷却窗口内应回退轻触达");
     assert_eq!(directive.source, "light_touch", "冷却窗口内同键不应复选");
 
-    let mut released = ProactiveState::default();
-    released.recent_topics = vec![recent("event", &key, now - 25 * HOUR_MS)];
+    let mut released = ProactiveState {
+        recent_topics: vec![recent("event", &key, now - 25 * HOUR_MS)],
+        ..Default::default()
+    };
     let directive = pick_once(&engine, now, &mut released)
         .await
         .expect("窗口外同键应放行");
@@ -453,8 +457,10 @@ async fn negative_valence_not_followed_by_negative() {
     assert_eq!(directive.topic_key.as_deref(), Some(negative_key.as_str()));
 
     // 上一投递为负效价：负效价候选被剔除，正效价保留
-    let mut after_negative = ProactiveState::default();
-    after_negative.last_valence_sign = -1;
+    let mut after_negative = ProactiveState {
+        last_valence_sign: -1,
+        ..Default::default()
+    };
     let directive = pick_once(&engine, now, &mut after_negative)
         .await
         .expect("正效价候选应保留");
@@ -626,8 +632,10 @@ async fn light_touch_cooldown_returns_none() {
     let (engine, _storage, dir) = engine_events("picker-light-touch-cooldown").await;
     let now = now_ms();
 
-    let mut state = ProactiveState::default();
-    state.recent_topics = vec![recent("light_touch", "light_touch", now - HOUR_MS)];
+    let mut state = ProactiveState {
+        recent_topics: vec![recent("light_touch", "light_touch", now - HOUR_MS)],
+        ..Default::default()
+    };
     assert!(
         pick_once(&engine, now, &mut state).await.is_none(),
         "轻触达冷却窗口内本轮应无候选"
@@ -766,8 +774,10 @@ async fn empty_candidates_skip_judge_call() {
     let (engine, llm, _storage, dir) = engine_judge("picker-judge-empty", &[SPEAK_JSON]).await;
     let now = now_ms();
 
-    let mut state = ProactiveState::default();
-    state.recent_topics = vec![recent("light_touch", "light_touch", now - HOUR_MS)];
+    let mut state = ProactiveState {
+        recent_topics: vec![recent("light_touch", "light_touch", now - HOUR_MS)],
+        ..Default::default()
+    };
     assert!(pick_once(&engine, now, &mut state).await.is_none());
     assert_eq!(llm.call_count(), 0, "候选为空不应发起判据调用");
 

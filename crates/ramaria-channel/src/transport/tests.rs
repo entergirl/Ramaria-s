@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use super::*;
 use crate::status::ConnectionState;
-use ramaria_core::types::{InboundMessage, InboundSender};
+use ramaria_core::types::InboundSender;
 
 /// 最小传输实现（内存事件队列 + 记录出站），用于验证 trait 对象形态。
 struct MockTransport {
@@ -79,22 +79,19 @@ impl Transport for MockTransport {
 fn sample_event(external_ref: &str, should_respond: bool) -> TransportEvent {
     TransportEvent {
         external_ref: external_ref.to_string(),
-        message: InboundMessage {
-            channel: "qq".to_string(),
-            platform_message_id: Some("m_1".to_string()),
-            reply_to: None,
-            created_at: 1_700_000_000_000,
-            text: "你好".to_string(),
-            sender: InboundSender {
-                platform_id: "u_1".to_string(),
-                uin: Some("10001".to_string()),
-                display_name: "小明".to_string(),
-                group_nickname: None,
-                role: None,
-            },
-            attachments: Vec::new(),
+        sender: InboundSender {
+            platform_id: "u_1".to_string(),
+            uin: Some("10001".to_string()),
+            display_name: "小明".to_string(),
+            group_nickname: None,
+            role: None,
         },
+        platform_message_id: Some("m_1".to_string()),
+        reply_to: None,
+        created_at: 1_700_000_000_000,
+        segments: vec![InboundSegment::Text("你好".to_string())],
         should_respond,
+        self_id: Some("42".to_string()),
     }
 }
 

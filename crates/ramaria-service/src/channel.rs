@@ -2,6 +2,7 @@
 //!
 //! 设计特点:
 //! - 绑定解析单点：按 `(channel, external_ref)` 解析，不存在时自动建档（收到即建）
+//! - 入站写入独立口径：平台消息幂等 + 发言人归属 + 附件定位（见 `ingest` 子模块）
 //! - 生效人格解析：绑定级覆盖优先，其次通道级默认，再兜底默认人格（纯函数）
 //! - 凭据用例经 OS keychain（凭据不落日志：仅记平台名，绝不打印令牌内容）
 //! - 校验失败为业务校验错误（中文文案），不静默放行
@@ -12,6 +13,8 @@ use ramaria_core::privacy::mask_id;
 use ramaria_core::types::{ChannelBinding, ChannelPlatform};
 
 use crate::engine::Engine;
+
+pub(crate) mod ingest;
 
 // =========================================================
 // 绑定用例

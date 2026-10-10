@@ -4,9 +4,15 @@
 //! - 用例薄壳：实现体在 `channel` 域模块，本层只做入口挂载
 //! - 读用例实时解析：绑定解析（含自动建档）与生效人格按调用即时计算
 //! - 凭据用例同步：keychain API 为同步调用，不做 async 包装
+//! - 入站写入 / 回复生成 / 图片理解三用例供通道运行时编排消费
 
 use ramaria_core::error::RamariaResult;
 use ramaria_core::types::{ChannelBinding, ChannelPlatform};
+
+use crate::types::{
+    ChannelImageOutcome, ChannelIngestOutcome, ChannelIngestRequest, ChannelReplyRequest,
+    ChatSendOutcome,
+};
 
 use super::Engine;
 
@@ -107,5 +113,41 @@ impl Engine {
         platform: ChannelPlatform,
     ) -> RamariaResult<Option<String>> {
         crate::channel::load_credential(self, platform)
+    }
+
+    // =========================================================
+    // 通道消息用例（入站写入 / 回复生成 / 图片理解）
+    // =========================================================
+
+    /// 社交通道入站写入：会话解析 / 发言人归属 / 附件行 / 成员 upsert（幂等）。
+    ///
+    /// 返回:
+    /// - `session_id` / `written` / 图片附件定位（`written=false` 为重复事件）。
+    pub async fn channel_ingest(
+        &self,
+        req: ChannelIngestRequest,
+    ) -> RamariaResult<ChannelIngestOutcome> {
+        crate::channel::ingest::run(self, req).await
+    }
+
+    /// 社交通道回复生成：入站消息已落库，只写助手回复行。
+    ///
+    /// 返回:
+    /// - `reply` / `session_id` / `chars`（空回复不落库，由调用方跳过发送）。
+    pub async fn channel_reply(&self, req: ChannelReplyRequest) -> RamariaResult<ChatSendOutcome> {
+        crate::chat::reply_to_inbound(self, req).await
+    }
+
+    /// 理解一张已下载图片（字节输入；门禁 / 去重 / 回填与批量路径同口径）。
+    ///
+    /// 返回:
+    /// - 单张理解结果（统计口径）。
+    pub async fn channel_understand_image(
+        &self,
+        attachment_id: i64,
+        md5: &str,
+        image_bytes: &[u8],
+    ) -> RamariaResult<ChannelImageOutcome> {
+        crate::vision::understand_downloaded_image(self, attachment_id, md5, image_bytes).await
     }
 }

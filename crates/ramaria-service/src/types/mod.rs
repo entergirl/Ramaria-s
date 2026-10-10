@@ -9,6 +9,7 @@
 //! - 枚举序列化统一小写，与 MCP 客户端 JSON 约定一致
 //! - 结构体仅承载数据，不含行为；业务语义由用例层（engine / recall / ingest 等）实现
 
+mod channel;
 mod chat;
 mod defaults;
 mod facts;
@@ -20,6 +21,10 @@ mod recall;
 mod session;
 mod setup;
 
+pub use channel::{
+    ChannelImageOutcome, ChannelIngestOutcome, ChannelIngestRequest, ChannelIngestedImage,
+    ChannelReplyRequest,
+};
 pub use chat::{
     ChatRole, ChatSendOutcome, ChatSendRequest, ChatStreamRequest, ChatTurn, SealOutcome,
 };

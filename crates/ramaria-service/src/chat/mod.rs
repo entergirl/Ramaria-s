@@ -25,7 +25,7 @@ mod proactive;
 mod steps;
 
 // 用例入口 re-export：`crate::chat::run` / `crate::chat::stream` 为入口层既有调用路径
-pub(crate) use generate::{run, stream};
+pub(crate) use generate::{reply_to_inbound, run, stream};
 // 主动生成入口 re-export：供引擎用例门面调用（主动调度接入前无生产调用方）
 pub(crate) use proactive::run as run_proactive;
 

@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use crate::engine::Engine;
 use crate::stream_event::{ChatStreamHandle, StreamEvent};
-use crate::types::{ChatSendOutcome, ChatSendRequest, ChatStreamRequest};
+use crate::types::{ChannelReplyRequest, ChatSendOutcome, ChatSendRequest, ChatStreamRequest};
 
 use super::steps::{ChatInput, ChatMode, prepare_request};
 
@@ -58,6 +58,7 @@ pub(crate) async fn run(engine: &Engine, req: ChatSendRequest) -> RamariaResult<
         channel: req.channel,
         conversation_id: req.conversation_id,
         seed_history: Vec::new(),
+        message_in_history: false,
         proactive: None,
     };
 
@@ -128,6 +129,7 @@ pub(crate) async fn stream(
         channel: String::new(),
         conversation_id: None,
         seed_history: req.seed_history,
+        message_in_history: false,
         proactive: None,
     };
 
@@ -166,6 +168,83 @@ pub(crate) async fn stream(
         request_id,
         session_id,
         events: Box::pin(rx),
+    })
+}
+
+// =========================================================
+// 社交通道回复用例
+// =========================================================
+
+/// 执行社交通道回复生成（入站消息已落库；只写助手回复行）。
+///
+/// 流程:
+/// - 前置编排与非流式入口同源（校验 / 会话定位（显式会话 + 归属一致校验）/
+///   历史窗口（已含入站消息）/ 召回 / Prompt 装配 / Token 预算）；
+/// - 请求的用户消息位留空（消息由历史窗口承载，避免重复注入）；
+/// - LLM 生成后只落助手回复行；失败不落库（入库用户消息由写入用例负责）。
+///
+/// 参数:
+/// - `engine`: 服务层引擎。
+/// - `req`: 回复请求（会话 / 人格 / 本轮用户消息文本）。
+///
+/// 返回:
+/// - 成功时返回 `reply` / `session_id` / `chars`（空回复不落库，由调用方跳过发送）。
+pub(crate) async fn reply_to_inbound(
+    engine: &Engine,
+    req: ChannelReplyRequest,
+) -> RamariaResult<ChatSendOutcome> {
+    let config = engine.config();
+    let input = ChatInput {
+        message: req.message,
+        persona: Some(req.persona_uid),
+        session_id: Some(req.session_id),
+        mode: ChatMode::Channel,
+        channel: String::new(),
+        conversation_id: None,
+        seed_history: Vec::new(),
+        message_in_history: true,
+        proactive: None,
+    };
+
+    let prepared = prepare_request(engine, &input, config.as_ref()).await?;
+    tracing::info!(
+        request_id = %prepared.request_id,
+        session_id = %prepared.session_id,
+        persona = %prepared.persona,
+        input_chars = prepared.message.chars().count(),
+        "社交通道回复生成开始（记忆检索与 Prompt 装配完成）"
+    );
+
+    // ---- LLM 生成（失败不落库） ----
+    let reply = step_call_llm(engine, &prepared.chat_request, prepared.session_id).await?;
+    if reply.trim().is_empty() {
+        tracing::warn!(
+            session_id = %prepared.session_id,
+            "社交通道回复未产出内容，本次不落库"
+        );
+        return Ok(ChatSendOutcome {
+            reply,
+            session_id: prepared.session_id,
+            chars: 0,
+        });
+    }
+
+    // ---- 只落助手回复行（入站用户消息已由通道写入用例落库） ----
+    let storage = engine.storage_ref().as_ref();
+    let reply_chars =
+        step_persist_assistant_only(storage, prepared.session_id, &prepared.persona, &reply)
+            .await?;
+
+    tracing::info!(
+        session_id = %prepared.session_id,
+        persona = %prepared.persona,
+        reply_chars,
+        "社交通道回复生成完成（已落库）"
+    );
+    Ok(ChatSendOutcome {
+        reply,
+        session_id: prepared.session_id,
+        chars: reply_chars,
     })
 }
 
@@ -221,6 +300,25 @@ async fn step_persist_reply(
     .with_persona_uid(Some(persona.to_string()));
     storage.save_message(&assistant_message).await?;
 
+    Ok(reply_chars)
+}
+
+/// 社交通道落库：只写入助手回复行（入站用户消息已由通道写入用例落库）。
+async fn step_persist_assistant_only(
+    storage: &dyn StorageBackend,
+    session_id: Uuid,
+    persona: &str,
+    reply: &str,
+) -> RamariaResult<usize> {
+    let reply_chars = reply.chars().count();
+    let assistant_message = Message::new(
+        session_id,
+        MessageRole::Assistant,
+        reply.to_string(),
+        MessageSource::Local,
+    )
+    .with_persona_uid(Some(persona.to_string()));
+    storage.save_message(&assistant_message).await?;
     Ok(reply_chars)
 }
 

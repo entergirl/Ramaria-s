@@ -679,3 +679,222 @@ async fn understand_empty_input_returns_zero_stat() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// =========================================================
+// 单张已下载图片理解（社交通道现场路径）
+// =========================================================
+
+/// 魔数判定：PNG / JPEG / GIF / WEBP / BMP 与未知回退 jpeg。
+#[test]
+fn image_mime_from_bytes_magic_numbers() {
+    assert_eq!(
+        image_mime_from_bytes(&[0xFF, 0xD8, 0xFF, 0xE0]),
+        "image/jpeg"
+    );
+    assert_eq!(
+        image_mime_from_bytes(&[0x89, 0x50, 0x4E, 0x47, 0x0D]),
+        "image/png"
+    );
+    assert_eq!(image_mime_from_bytes(b"GIF89a"), "image/gif");
+    let mut webp = b"RIFF".to_vec();
+    webp.extend_from_slice(&[0, 0, 0, 0]);
+    webp.extend_from_slice(b"WEBP");
+    assert_eq!(image_mime_from_bytes(&webp), "image/webp");
+    assert_eq!(image_mime_from_bytes(b"BMxxxx"), "image/bmp");
+    assert_eq!(image_mime_from_bytes(b"unknown"), "image/jpeg");
+    assert_eq!(image_mime_from_bytes(&[]), "image/jpeg");
+}
+
+/// 现场理解：正常调用回填（Done + 行 done / 描述写入）。
+#[tokio::test]
+async fn understand_downloaded_image_fills_description() {
+    let llm = Arc::new(MockLlm::local().with_vision_reply("一只橘猫"));
+    let (engine, storage, dir) =
+        vision_engine("vision-channel-done", llm, vision_on_config()).await;
+    let session = storage.create_session(None).await.expect("创建会话应成功");
+    let md5 = "abcdabcdabcdabcdabcdabcdabcdabcd";
+    let message_id =
+        seed_pending_attachment(&storage, session.id, "https://x/1.png", Some(md5)).await;
+    let attachment_id = load_attachments(&storage, message_id).await[0].id;
+
+    let outcome = engine
+        .channel_understand_image(
+            attachment_id,
+            md5,
+            &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 1, 2, 3],
+        )
+        .await
+        .expect("现场理解应成功");
+    assert_eq!(outcome, ChannelImageOutcome::Done);
+
+    let rows = load_attachments(&storage, message_id).await;
+    assert_eq!(rows[0].status, AttachmentStatus::Done);
+    assert_eq!(rows[0].description.as_deref(), Some("一只橘猫"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 现场理解：md5 命中已有描述直接复用（Reused + 行 done，不调用模型）。
+#[tokio::test]
+async fn understand_downloaded_image_reuses_by_md5() {
+    let llm = Arc::new(MockLlm::local().with_vision_reply("不应调用"));
+    let (engine, storage, dir) =
+        vision_engine("vision-channel-reuse", Arc::clone(&llm), vision_on_config()).await;
+    let session = storage.create_session(None).await.expect("创建会话应成功");
+    let md5 = "12121212121212121212121212121212";
+    // 预置一条已完成描述（同 md5）
+    seed_attachment_row(
+        &storage,
+        session.id,
+        "https://x/old.png",
+        Some(md5),
+        AttachmentStatus::Done,
+        Some("既有描述"),
+    )
+    .await;
+    let message_id =
+        seed_pending_attachment(&storage, session.id, "https://x/new.png", Some(md5)).await;
+    let attachment_id = load_attachments(&storage, message_id).await[0].id;
+
+    let outcome = engine
+        .channel_understand_image(attachment_id, md5, &[0x89, 0x50, 0x4E, 0x47, 1])
+        .await
+        .expect("复用路径应成功");
+    assert_eq!(outcome, ChannelImageOutcome::Reused);
+    assert!(
+        llm.vision_call_count() <= 1,
+        "复用不应发起内容理解调用（至多一次能力探测）"
+    );
+
+    let rows = load_attachments(&storage, message_id).await;
+    assert_eq!(rows[0].status, AttachmentStatus::Done);
+    assert_eq!(rows[0].description.as_deref(), Some("既有描述"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 现场理解：模型恒失败（重试后 Failed + 行 failed）。
+#[tokio::test]
+async fn understand_downloaded_image_marks_failed_after_retries() {
+    let llm = Arc::new(MockLlm::local().with_vision_reply("成功一次"));
+    let (engine, storage, dir) =
+        vision_engine("vision-channel-fail", Arc::clone(&llm), vision_on_config()).await;
+    let session = storage.create_session(None).await.expect("创建会话应成功");
+
+    // 先做一次成功理解：能力探测结论入缓存
+    let md5_ok = "aaaabbbbccccddddaaaabbbbccccdddd";
+    let msg_ok =
+        seed_pending_attachment(&storage, session.id, "https://x/ok.png", Some(md5_ok)).await;
+    let id_ok = load_attachments(&storage, msg_ok).await[0].id;
+    engine
+        .channel_understand_image(id_ok, md5_ok, &[0x89, 0x50, 0x4E, 0x47, 1])
+        .await
+        .expect("首次应成功");
+
+    // 其后编排调用恒失败（重试一次仍失败）
+    llm.set_vision_failures(10);
+    let md5_bad = "ffffffffffffffffffffffffffffffff";
+    let msg_bad =
+        seed_pending_attachment(&storage, session.id, "https://x/bad.png", Some(md5_bad)).await;
+    let id_bad = load_attachments(&storage, msg_bad).await[0].id;
+    let outcome = engine
+        .channel_understand_image(id_bad, md5_bad, &[0x89, 0x50, 0x4E, 0x47, 1])
+        .await
+        .expect("失败路径应正常返回");
+    assert_eq!(outcome, ChannelImageOutcome::Failed);
+
+    let rows = load_attachments(&storage, msg_bad).await;
+    assert_eq!(rows[0].status, AttachmentStatus::Failed);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 现场理解：声明关走门禁跳过（行 skipped，零模型调用）。
+#[tokio::test]
+async fn understand_downloaded_image_skips_when_declared_off() {
+    let llm = Arc::new(MockLlm::local().with_vision_reply("不应调用"));
+    let (engine, storage, dir) = vision_engine(
+        "vision-channel-declared-off",
+        Arc::clone(&llm),
+        RamariaConfig::default(),
+    )
+    .await;
+    let session = storage.create_session(None).await.expect("创建会话应成功");
+    let message_id =
+        seed_pending_attachment(&storage, session.id, "https://x/1.png", Some("abc")).await;
+    let attachment_id = load_attachments(&storage, message_id).await[0].id;
+
+    let outcome = engine
+        .channel_understand_image(attachment_id, "abc", &[0x89, 0x50, 0x4E, 0x47, 1])
+        .await
+        .expect("门禁路径应成功");
+    assert_eq!(outcome, ChannelImageOutcome::Skipped);
+    assert_eq!(llm.vision_call_count(), 0);
+
+    let rows = load_attachments(&storage, message_id).await;
+    assert_eq!(rows[0].status, AttachmentStatus::Skipped);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 现场理解：隐私未确认保持 pending（返回 Skipped，行不迁移状态）。
+#[tokio::test]
+async fn understand_downloaded_image_keeps_pending_on_privacy_pending() {
+    let llm = Arc::new(MockLlm::online().with_vision_reply("不应调用"));
+    let (engine, storage, dir) = vision_engine(
+        "vision-channel-privacy",
+        Arc::clone(&llm),
+        vision_on_config(),
+    )
+    .await;
+    // 库内后端配置指向线上 provider 且无隐私确认记录
+    storage
+        .save_backend_config(&BackendConfig::deepseek_default())
+        .await
+        .expect("写入后端配置应成功");
+    let session = storage.create_session(None).await.expect("创建会话应成功");
+    let message_id =
+        seed_pending_attachment(&storage, session.id, "https://x/1.png", Some("abc")).await;
+    let attachment_id = load_attachments(&storage, message_id).await[0].id;
+
+    let outcome = engine
+        .channel_understand_image(attachment_id, "abc", &[0x89, 0x50, 0x4E, 0x47, 1])
+        .await
+        .expect("隐私门禁路径应成功");
+    assert_eq!(outcome, ChannelImageOutcome::Skipped);
+
+    let rows = load_attachments(&storage, message_id).await;
+    assert_eq!(rows[0].status, AttachmentStatus::Pending, "行应保持待处理");
+    assert_eq!(llm.vision_call_count(), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 现场理解：空字节与超限字节跳过（行 skipped）。
+#[tokio::test]
+async fn understand_downloaded_image_skips_invalid_sizes() {
+    let llm = Arc::new(MockLlm::local().with_vision_reply("不应调用"));
+    let (engine, storage, dir) =
+        vision_engine("vision-channel-size", Arc::clone(&llm), vision_on_config()).await;
+    let session = storage.create_session(None).await.expect("创建会话应成功");
+
+    let empty_msg =
+        seed_pending_attachment(&storage, session.id, "https://x/e.png", Some("e")).await;
+    let empty_id = load_attachments(&storage, empty_msg).await[0].id;
+    let outcome = engine
+        .channel_understand_image(empty_id, "e", &[])
+        .await
+        .expect("空字节路径应成功");
+    assert_eq!(outcome, ChannelImageOutcome::Skipped);
+
+    let big_msg = seed_pending_attachment(&storage, session.id, "https://x/b.png", Some("b")).await;
+    let big_id = load_attachments(&storage, big_msg).await[0].id;
+    let oversized = vec![0u8; (MAX_IMAGE_BYTES + 1) as usize];
+    let outcome = engine
+        .channel_understand_image(big_id, "b", &oversized)
+        .await
+        .expect("超限路径应成功");
+    assert_eq!(outcome, ChannelImageOutcome::Skipped);
+
+    let rows = load_attachments(&storage, empty_msg).await;
+    assert_eq!(rows[0].status, AttachmentStatus::Skipped);
+    let rows = load_attachments(&storage, big_msg).await;
+    assert_eq!(rows[0].status, AttachmentStatus::Skipped);
+    assert_eq!(llm.vision_call_count(), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
