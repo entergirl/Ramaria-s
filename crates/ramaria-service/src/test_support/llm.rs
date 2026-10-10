@@ -180,6 +180,8 @@ impl MockLlm {
     }
 
     /// 调用序列副本（按发生顺序；`"chat"` = 文本生成，`"chat_vision"` = 图片理解）。
+    // 仅导入链路用例消费；未启用 `importer` feature 时无调用方。
+    #[cfg_attr(not(feature = "importer"), allow(dead_code))]
     pub(crate) fn call_log(&self) -> Vec<&'static str> {
         self.call_log
             .lock()
