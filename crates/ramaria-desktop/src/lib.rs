@@ -13,6 +13,7 @@
 //! - 日志不落绝对路径与用户原文：路径一律经 `path_guard::redact_path_label`
 //!   折叠为"文件名 + 短哈希"（由 `path_guard::privacy_audit_tests` 静态把关）。
 
+mod channels;
 mod commands;
 mod events;
 mod notification;
@@ -46,6 +47,8 @@ pub struct DesktopState {
     pub engine: Arc<ramaria_service::Engine>,
     /// 服务层生命周期容器（活跃指针 / 空闲检查 / L2-L3 调度 / 关停）
     pub lifecycle: Arc<ramaria_service::Lifecycle>,
+    /// 社交通道运行时管理器（装配 / 启停 / 状态列表；crate 内命令访问）
+    pub(crate) channel_manager: channels::ChannelManager,
     /// 评估面板的"用户显式授权目录"（原生目录对话框选择结果）。
     ///
     /// 语义:
@@ -348,8 +351,11 @@ pub fn run() {
     let state = DesktopState {
         engine: runtime.engine,
         lifecycle: runtime.lifecycle,
+        channel_manager: channels::ChannelManager::new(),
         eval_allowed_dirs: std::sync::Mutex::new(Vec::new()),
     };
+    // 退出路径需要独立持有管理器句柄（state 随构建移入 Tauri 管理器）
+    let channel_manager = state.channel_manager.clone();
 
     // 构建 Tauri 应用
     let builder = tauri::Builder::default()
@@ -416,6 +422,12 @@ pub fn run() {
             // ---- Proactive（主动消息名单）----
             commands::proactive_cmd::list_proactive_personas,
             commands::proactive_cmd::set_proactive_persona,
+            // ---- Channel（社交平台接入）----
+            commands::channel::get_channel_status,
+            commands::channel::start_channel,
+            commands::channel::stop_channel,
+            commands::channel::list_channel_bindings,
+            commands::channel::set_channel_binding,
             // ---- Rules（行为规则管理）----
             commands::rules::list_rules,
             commands::rules::set_rule_enabled,
@@ -457,12 +469,28 @@ pub fn run() {
             // 启动时刷新一次托盘未读徽标（查询失败仅告警，不阻塞 setup）
             tray::spawn_tray_refresh(app.handle().clone());
 
+            // 启动通道运行时（已启用且参数完整时装配；异步执行，不阻塞 setup）
+            channels::spawn_start(
+                app.state::<DesktopState>().channel_manager.clone(),
+                app.state::<DesktopState>().engine.clone(),
+                app.handle().clone(),
+            );
+
             tracing::info!("Tauri 应用 setup 完成");
             Ok(())
         });
 
     // 运行应用
-    builder
-        .run(tauri::generate_context!())
-        .expect("运行 Tauri 应用时发生错误");
+    let app = builder
+        .build(tauri::generate_context!())
+        .expect("构建 Tauri 应用失败");
+    app.run(move |_app_handle, event| {
+        // 退出前停止通道运行时（限时等待在途编排退出；失败仅忽略，进程即将结束）
+        if let tauri::RunEvent::Exit = event {
+            let _ = tauri::async_runtime::block_on(async {
+                tokio::time::timeout(std::time::Duration::from_secs(5), channel_manager.stop())
+                    .await
+            });
+        }
+    });
 }

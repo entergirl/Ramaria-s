@@ -81,7 +81,7 @@ pub async fn send_message(
                 .engine
                 .resolve_send_session(persona_uid.as_deref(), Some(sid))
                 .await
-                .map_err(|e| format!("无法自动创建新会话: {e}"))?,
+                .map_err(|e| crate::commands::service_error_message(&e, "无法自动创建新会话"))?,
         ),
         None => None,
     };
@@ -331,14 +331,14 @@ pub async fn save_current_session(
         .lifecycle
         .close_active_session()
         .await
-        .map_err(|e| format!("保存对话失败: {}", e))?;
+        .map_err(|e| crate::commands::service_error_message(&e, "保存对话失败"))?;
 
     // 验证 L1 是否生成
     let l1_entries = state
         .engine
         .memory_l1_by_session(sid)
         .await
-        .map_err(|e| format!("查询 L1 状态失败: {}", e))?;
+        .map_err(|e| crate::commands::service_error_message(&e, "查询 L1 状态失败"))?;
 
     let l1_generated = !l1_entries.is_empty();
 
@@ -400,7 +400,7 @@ pub async fn generate_l1(
         .engine
         .regenerate_l1(sid, persona_uid.as_deref(), None, None)
         .await
-        .map_err(|e| format!("L1 生成失败: {e}"))?;
+        .map_err(|e| crate::commands::service_error_message(&e, "L1 生成失败"))?;
 
     match result {
         Some(l1) => {
@@ -441,7 +441,7 @@ pub async fn check_privacy(state: State<'_, DesktopState>) -> Result<serde_json:
         .engine
         .check_privacy()
         .await
-        .map_err(|e| format!("检查隐私状态失败: {}", e))?;
+        .map_err(|e| crate::commands::service_error_message(&e, "检查隐私状态失败"))?;
 
     let json = match &status {
         ramaria_service::PrivacyStatus::NotNeeded => {
@@ -493,7 +493,7 @@ pub async fn confirm_privacy(
         .engine
         .confirm_privacy(persistent)
         .await
-        .map_err(|e| format!("记录隐私确认失败: {}", e))?;
+        .map_err(|e| crate::commands::service_error_message(&e, "记录隐私确认失败"))?;
 
     tracing::info!(persistent = persistent, "隐私确认已记录");
     Ok("ok".to_string())

@@ -479,13 +479,8 @@ pub struct RemoveModelOutcome {
 /// - `removed = false`: 目标目录不存在（幂等成功，不报错）。
 pub fn remove_model(model_id: &str, root: Option<&Path>) -> RamariaResult<RemoveModelOutcome> {
     let manager = ModelManager::new(models_root(root))?;
-    let dir = manager.model_dir(model_id);
-    if !dir.exists() {
-        tracing::info!(model_id, "模型目录不存在，删除按幂等成功处理");
-        return Ok(RemoveModelOutcome { removed: false });
-    }
-    manager.remove_model(model_id)?;
-    Ok(RemoveModelOutcome { removed: true })
+    let removed = manager.remove_model(model_id)?;
+    Ok(RemoveModelOutcome { removed })
 }
 
 /// 下载嵌入模型（断点续传 + SHA-256 校验 + 原子替换，由模型管理器实现）。

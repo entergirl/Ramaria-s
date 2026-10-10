@@ -177,7 +177,7 @@ pub async fn export_diagnostics(
         .map_err(|e| {
             // 日志只记错误分类：错误链可能内嵌绝对路径（zip 产物路径），
             // 完整原因经返回消息交前端展示
-            let msg = format!("诊断导出失败: {e}");
+            let msg = crate::commands::service_error_message(&e, "诊断导出失败");
             tracing::error!(category = e.category(), "诊断导出失败");
             msg
         })?;

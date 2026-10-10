@@ -8,7 +8,7 @@
  * - 所有方法返回 Promise，调用方可用 async/await 或 .then/.catch
  *
  * 设计特点:
- * - 按功能域分组：chat / session / memory / config / setup / export / index
+ * - 按功能域分组：chat / session / memory / config / setup / export / index / channel 等
  * - 参数校验在前，减少无效的 IPC 调用
  * - 每个方法内部 try-catch，将 TauriBridge 底层异常统一包装
  * - 日志使用 [Api] 前缀，便于调试追踪
@@ -904,9 +904,9 @@ var RamariaApi = (function () {
         return await _invoke('get_style_stats', { personaUid: personaUid }, '查询说话风格统计');
     }
 
- // =========================================================
- // 14. 评估调试只读面板 (evaluation) — M7
- // =========================================================
+// =========================================================
+// 14. 评估调试只读面板 (evaluation) — M7
+// =========================================================
 
 /**
  * 弹出目录选择框，返回评估产物目录（取消返回 null）。
@@ -984,6 +984,87 @@ var RamariaApi = (function () {
  */
     async function exportDiagnostics() {
         return await _invoke('export_diagnostics', {}, '导出诊断信息');
+    }
+
+// =========================================================
+// 15. 社交平台接入 (channel)
+// =========================================================
+
+/**
+ * 查询社交平台接入面板状态（配置摘要 + 凭据标记 + 连接状态 + 运行标记）。
+ *
+ * 返回:
+ * - { enabled, qqEnabled, telegramEnabled, qqWsUrl, defaultPersonaUid, proactiveEnabled,
+ *     qqTokenConfigured, telegramTokenConfigured, running,
+ *     channels: [{ channel, state, lastError, updatedAt }] }
+ * - `state`: "disconnected" | "connecting" | "online" | "error"（仅 `running` 时有意义）
+ */
+    async function getChannelStatus() {
+        return await _invoke('get_channel_status', {}, '查询社交平台接入状态');
+    }
+
+/**
+ * 启动社交通道运行时（按当前配置连接已启用的平台）。
+ *
+ * 说明:
+ * - 幂等：已运行时直接返回当前状态；
+ * - 配置未启用 / 另一实例占用连接互斥时返回 running=false 与说明，不抛错。
+ *
+ * 返回:
+ * - 同 getChannelStatus 的面板状态对象。
+ */
+    async function startChannel() {
+        return await _invoke('start_channel', {}, '启动社交通道');
+    }
+
+/**
+ * 停止社交通道运行时（断开连接 + 在途消息收尾）。
+ *
+ * 返回:
+ * - 同 getChannelStatus 的面板状态对象（running=false）。
+ */
+    async function stopChannel() {
+        return await _invoke('stop_channel', {}, '停止社交通道');
+    }
+
+/**
+ * 列出通道绑定（外部会话 ↔ 本机侧人格）。
+ *
+ * 返回:
+ * - [{ channel, externalRef, personaUid, effectivePersonaUid, enabled, allowProactive,
+ *     createdAt, updatedAt }]
+ * - `personaUid`: 绑定级覆盖（null = 继承通道默认）；
+ *   `effectivePersonaUid`: 三层回退后的生效人格（服务层单点计算）。
+ */
+    async function listChannelBindings() {
+        return await _invoke('list_channel_bindings', {}, '查询通道绑定');
+    }
+
+/**
+ * 写入 / 更新单条通道绑定（不存在则自动建档）。
+ *
+ * 参数:
+ * - `channel`: 通道名（qq / telegram）
+ * - `externalRef`: 外部会话标识（如 c2c:10001 / group:123456）
+ * - `personaUid`: 可选，绑定级人格覆盖；null/undefined = 保持现值
+ * - `enabled`: 可选，启用开关；null/undefined = 保持现值
+ * - `allowProactive`: 可选，主动投递开关；null/undefined = 保持现值
+ *
+ * 返回:
+ * - 更新后的绑定行（同 listChannelBindings 元素）。
+ */
+    async function setChannelBinding(channel, externalRef, personaUid, enabled, allowProactive) {
+        _require(channel, '通道名');
+        _require(externalRef, '外部会话标识');
+        var args = { channel: channel, externalRef: externalRef };
+        if (personaUid !== undefined && personaUid !== null && personaUid !== '') {
+            args.personaUid = personaUid;
+        }
+        if (enabled !== undefined && enabled !== null) args.enabled = !!enabled;
+        if (allowProactive !== undefined && allowProactive !== null) {
+            args.allowProactive = !!allowProactive;
+        }
+        return await _invoke('set_channel_binding', args, '保存通道绑定');
     }
 
  // =========================================================
@@ -1080,6 +1161,13 @@ var RamariaApi = (function () {
             checkUpdate: checkUpdate,
             getVersion: getVersion,
             exportDiagnostics: exportDiagnostics,
+        },
+        channel: {
+            getStatus: getChannelStatus,
+            start: startChannel,
+            stop: stopChannel,
+            listBindings: listChannelBindings,
+            setBinding: setChannelBinding,
         },
     };
 })();

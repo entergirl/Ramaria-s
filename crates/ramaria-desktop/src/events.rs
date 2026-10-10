@@ -23,6 +23,8 @@ pub const EVENT_CHAT_ERROR: &str = "chat-error";
 pub const EVENT_CLOSE_REQUESTED: &str = "close-requested";
 /// 主动消息事件名（新消息投递与通知点击定位共用同一事件）
 pub const EVENT_PROACTIVE_MESSAGE: &str = "proactive-message";
+/// 通道状态变更事件名（社交通道连接状态流转时推送）
+pub const EVENT_CHANNEL_STATUS: &str = "channel-status";
 /// 导入进度事件名
 pub const EVENT_IMPORT_PROGRESS: &str = "import-progress";
 
@@ -184,6 +186,23 @@ impl ProactiveMessagePayload {
         self.activated = Some(true);
         self
     }
+}
+
+// =========================================================
+// 通道状态事件
+// =========================================================
+
+/// 通道状态变更事件负载。
+///
+/// 职责:
+/// - 承载本次流转的通道状态快照；前端按 `channel` 合并更新面板条目。
+///
+/// 字段约定:
+/// - `channels`: 本次变更的状态列表（当前实现为单通道；列表形态为后续批量上报预留）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelStatusPayload {
+    pub channels: Vec<crate::channels::ChannelStatusView>,
 }
 
 // =========================================================

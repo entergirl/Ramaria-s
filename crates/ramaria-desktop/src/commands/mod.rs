@@ -5,6 +5,7 @@
 //! - 每个子模块只做参数转换 + 委托服务层用例，不写业务逻辑
 //! - 提供服务层错误到前端文案的统一转换（委托服务层入口映射：业务校验原文直出，技术错误附场景前缀）
 
+pub mod channel;
 pub mod chat;
 pub mod config;
 pub mod diagnostics;

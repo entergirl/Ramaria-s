@@ -71,7 +71,7 @@ pub async fn get_mcp_info(state: State<'_, DesktopState>) -> Result<McpInfoView,
         .engine
         .load_full_config()
         .await
-        .map_err(|e| format!("读取配置失败: {}", e))?;
+        .map_err(|e| crate::commands::service_error_message(&e, "读取配置失败"))?;
 
     // ---- 通道活动统计（降级不阻塞） ----
     let overview = match state

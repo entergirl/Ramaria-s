@@ -3,6 +3,8 @@
 //! 设计特点:
 //! - 设置键值读写直通 `settings` 表：返回键集合与过滤口径保持现状，不做额外过滤
 //! - 写入校验与桌面现状一致：空键拒绝（校验错误），已存在键覆盖写
+//! - 凭据保留键分流：`channel.qq_access_token` / `channel.telegram_bot_token` 写入转向
+//!   OS keychain（明文不落 `settings` 表；读取恒为空不回显，空白值拒绝）
 //! - 后端配置读取直通 `backend_config` 表（无记录返回 None，回退口径由调用方决定）
 //! - schema 版本读取复用存储层既有口径（键缺失按 1、非法值报错），入口不再直查 `schema_meta`
 //! - 掩码工具按字符口径处理多字节密钥（ASCII 输出与桌面现状逐字一致），纯函数零 I/O
@@ -12,9 +14,27 @@
 //! - 掩码不可逆：仅输出首尾少量字符，中间以 `****` 替代
 
 use ramaria_core::error::{RamariaError, RamariaResult};
-use ramaria_core::types::BackendConfig;
+use ramaria_core::types::{BackendConfig, ChannelPlatform};
 
 use crate::engine::Engine;
+
+// =========================================================
+// 凭据保留键
+// =========================================================
+
+/// 凭据保留键：QQ 访问令牌（写入分流到 OS keychain）。
+const RESERVED_KEY_QQ_TOKEN: &str = "channel.qq_access_token";
+/// 凭据保留键：Telegram Bot 令牌（写入分流到 OS keychain）。
+const RESERVED_KEY_TELEGRAM_TOKEN: &str = "channel.telegram_bot_token";
+
+/// 解析凭据保留键对应的平台（非保留键返回 None）。
+fn reserved_credential_platform(key: &str) -> Option<ChannelPlatform> {
+    match key {
+        RESERVED_KEY_QQ_TOKEN => Some(ChannelPlatform::Qq),
+        RESERVED_KEY_TELEGRAM_TOKEN => Some(ChannelPlatform::Telegram),
+        _ => None,
+    }
+}
 
 // =========================================================
 // 设置键值用例
@@ -36,7 +56,13 @@ pub(crate) async fn list(engine: &Engine) -> RamariaResult<Vec<(String, String)>
 /// 返回:
 /// - `Ok(Some(value))`: 键存在；
 /// - `Ok(None)`: 键不存在（空态，非错误；调用方按各自契约决定"未知键"提示）。
+///
+/// 说明:
+/// - 凭据保留键恒返回 None：明文只存 keychain，不经设置面回读（防泄露）。
 pub(crate) async fn get(engine: &Engine, key: &str) -> RamariaResult<Option<String>> {
+    if reserved_credential_platform(key).is_some() {
+        return Ok(None);
+    }
     engine.storage_ref().get_setting(key).await
 }
 
@@ -48,10 +74,21 @@ pub(crate) async fn get(engine: &Engine, key: &str) -> RamariaResult<Option<Stri
 ///
 /// 返回:
 /// - 空键返回 `Validation` 错误（文案与桌面现状一致）；
+/// - 凭据保留键：写入 OS keychain（明文不落 `settings` 表），空白值为 `Validation` 错误；
 /// - 存储写入失败返回 `Storage` 错误。
 pub(crate) async fn set(engine: &Engine, key: &str, value: &str) -> RamariaResult<()> {
     if key.trim().is_empty() {
         return Err(RamariaError::validation("设置键名不能为空"));
+    }
+
+    // 凭据保留键：分流到 keychain（明文不落设置表；不回显、不提供清除语义）
+    if let Some(platform) = reserved_credential_platform(key) {
+        if value.trim().is_empty() {
+            return Err(RamariaError::validation("凭据不能为空"));
+        }
+        engine.channel_save_credential(platform, value)?;
+        tracing::info!(key = %key, "凭据保留键已写入 keychain");
+        return Ok(());
     }
 
     engine.storage_ref().set_setting(key, value).await?;
@@ -259,5 +296,126 @@ mod tests {
         // 多字节：按字符计数与截取，不切 UTF-8
         assert_eq!(mask_api_key("密钥一二三四五六七"), "密钥一****五六七");
         assert_eq!(mask_api_key("短密钥abc"), "短****");
+    }
+
+    /// 凭据保留键：空白值校验错误（不触碰 keychain），且不落设置表。
+    #[tokio::test]
+    async fn settings_reserved_credential_keys_reject_blank_values() {
+        let (engine, storage, dir) = engine_with_db("settings-reserved-blank").await;
+
+        for key in ["channel.qq_access_token", "channel.telegram_bot_token"] {
+            for blank in ["", "   "] {
+                let err = engine
+                    .setting_set(key, blank)
+                    .await
+                    .expect_err("空白凭据应报校验错误");
+                assert_eq!(err.category(), "validation", "key={key}");
+                assert!(
+                    err.to_string().contains("不能为空"),
+                    "文案应提示不能为空: {err}"
+                );
+            }
+            assert!(
+                storage
+                    .get_setting(key)
+                    .await
+                    .expect("存储读取应成功")
+                    .is_none(),
+                "保留键不应写入设置表: {key}"
+            );
+            assert!(
+                engine
+                    .setting_get(key)
+                    .await
+                    .expect("门面读取应成功")
+                    .is_none(),
+                "保留键经设置面读取不回显: {key}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 凭据保留键（Windows keychain）：写入落 keychain、不落设置表；普通键不受影响。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn settings_reserved_credential_keys_route_to_keychain() {
+        let (engine, storage, dir) = engine_with_db("settings-reserved-keychain").await;
+
+        // 保存既有生产键值（测试结束恢复，避免污染用户凭据）
+        let original = engine
+            .channel_load_credential(ChannelPlatform::Qq)
+            .expect("读取既有凭据应成功");
+        let token = format!("test-token-{}", uuid::Uuid::new_v4());
+
+        // 写保留键 → 落 keychain、不落设置表
+        engine
+            .setting_set("channel.qq_access_token", &token)
+            .await
+            .expect("写保留键应成功");
+        assert!(
+            engine
+                .channel_credential_configured(ChannelPlatform::Qq)
+                .expect("凭据状态读取应成功"),
+            "保留键应写入 keychain"
+        );
+        assert_eq!(
+            engine
+                .channel_load_credential(ChannelPlatform::Qq)
+                .expect("读取应成功")
+                .as_deref(),
+            Some(token.as_str()),
+            "keychain 值应与写入一致"
+        );
+        assert!(
+            storage
+                .get_setting("channel.qq_access_token")
+                .await
+                .expect("存储读取应成功")
+                .is_none(),
+            "保留键不得写入设置表"
+        );
+        assert!(
+            engine
+                .setting_get("channel.qq_access_token")
+                .await
+                .expect("门面读取应成功")
+                .is_none(),
+            "保留键经设置面读取不回显"
+        );
+        assert!(
+            !engine
+                .settings_list()
+                .await
+                .expect("列表读取应成功")
+                .iter()
+                .any(|(key, _)| key.starts_with("channel.qq_")),
+            "设置列表不应含凭据保留键"
+        );
+
+        // 普通 `channel.*` 键仍走设置表（保留键为精确匹配）
+        engine
+            .setting_set("channel.default_persona_uid", "char-0001")
+            .await
+            .expect("普通键写入应成功");
+        assert_eq!(
+            engine
+                .setting_get("channel.default_persona_uid")
+                .await
+                .expect("读取应成功")
+                .as_deref(),
+            Some("char-0001"),
+            "普通键读写不受保留键分流影响"
+        );
+
+        // 清理 / 恢复生产键
+        match original {
+            Some(previous) => engine
+                .channel_save_credential(ChannelPlatform::Qq, &previous)
+                .expect("恢复既有凭据应成功"),
+            None => crate::channel::delete_credential(&engine, "qq").expect("清理测试凭据应成功"),
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

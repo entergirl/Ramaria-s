@@ -157,6 +157,10 @@ pub(crate) enum Commands {
     #[command(display_order = 47, subcommand)]
     Style(StyleCmd),
 
+    /// 社交平台接入（status / bindings / bind）[管理]
+    #[command(display_order = 48, subcommand)]
+    Channel(ChannelCmd),
+
     /// 知识事实查询（list / show，只读）[管理]
     #[command(display_order = 45, subcommand)]
     Fact(FactCmd),
@@ -300,6 +304,37 @@ pub(crate) enum StyleCmd {
         /// 目标 persona_uid（默认 rama-0001）
         #[arg(long)]
         persona: Option<String>,
+    },
+}
+
+/// 社交平台接入子命令（status / bindings / bind）。
+#[derive(Subcommand)]
+pub(crate) enum ChannelCmd {
+    /// 查看通道配置摘要与凭据配置状态
+    Status,
+    /// 列出通道绑定（外部会话 ↔ 本机侧人格）
+    Bindings,
+    /// 写入 / 更新通道绑定（不存在则自动建档）
+    Bind {
+        /// 通道名（qq / telegram）
+        channel: String,
+        /// 外部会话标识（如 c2c:10001 / group:123456）
+        external_ref: String,
+        /// 绑定级人格覆盖（缺省保持现值）
+        #[arg(long)]
+        persona: Option<String>,
+        /// 启用绑定（与 --disable 互斥）
+        #[arg(long, conflicts_with = "disable")]
+        enable: bool,
+        /// 禁用绑定
+        #[arg(long)]
+        disable: bool,
+        /// 允许该绑定接收主动消息（与 --deny-proactive 互斥）
+        #[arg(long, conflicts_with = "deny_proactive")]
+        allow_proactive: bool,
+        /// 禁止该绑定接收主动消息
+        #[arg(long)]
+        deny_proactive: bool,
     },
 }
 

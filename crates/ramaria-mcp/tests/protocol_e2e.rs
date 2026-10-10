@@ -20,9 +20,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ramaria_core::config::McpConfig;
-use ramaria_core::types::{Persona, PersonaKind};
+use ramaria_core::types::{BackendConfig, Persona, PersonaKind};
 use ramaria_mcp::RamariaMcpServer;
-use ramaria_service::{DEFAULT_PERSONA_UID, Engine};
+use ramaria_service::{DEFAULT_PERSONA_UID, Engine, PrivacyStatus};
 use rmcp::ServiceExt;
 use serde_json::{Value, json};
 use tokio::io::{
@@ -335,7 +335,7 @@ async fn start_server(engine: Arc<Engine>, config: McpConfig) -> (StdioClient, J
 // 用例：握手与工具清单
 // =========================================================
 
-/// 握手后可正常调用，且工具清单与契约一致（六个工具）。
+/// 握手后可正常调用，且工具清单与契约一致（七个工具）。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn handshake_and_tools_list_follow_contract() {
     let db = TempDb::new("handshake");
@@ -380,13 +380,14 @@ async fn handshake_and_tools_list_follow_contract() {
         "persona_list",
         "persona_get",
         "chat_history",
+        "privacy_confirm",
     ] {
         assert!(
             names.contains(&expected.to_string()),
             "工具清单缺少 {expected}：{names:?}"
         );
     }
-    assert_eq!(names.len(), 6, "工具数量应与契约一致：{names:?}");
+    assert_eq!(names.len(), 7, "工具数量应与契约一致：{names:?}");
 }
 
 // =========================================================
@@ -730,4 +731,67 @@ async fn persona_get_missing_uid_reports_business_message() {
         message.contains("persona_list"),
         "应保留可操作后缀: {message}"
     );
+}
+
+// =========================================================
+// 用例：隐私确认（privacy_confirm）
+// =========================================================
+
+/// 本地 provider：privacy_confirm 为无操作，回执说明无需确认。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn privacy_confirm_local_provider_is_noop() {
+    let db = TempDb::new("privacy-local");
+    let engine = open_engine(db.path()).await;
+    let (mut client, _server) = start_server(Arc::clone(&engine), enabled_config()).await;
+    client.handshake("client-local").await;
+
+    let reply = client.call_tool("privacy_confirm", json!({})).await;
+    let payload = reply.expect_ok("privacy_confirm（本地模式）");
+    assert_eq!(payload["provider"], "lm_studio");
+    let note = payload["note"].as_str().unwrap_or_default();
+    assert!(note.contains("本地"), "回执应说明本地模式无需确认：{note}");
+
+    // 本地恒为"已确认"（无需用户操作）
+    let status = engine.check_privacy().await.expect("检查应成功");
+    assert!(status.is_confirmed());
+}
+
+/// 线上 provider 未确认：调用后确认生效（按 provider + 地址粒度落库）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn privacy_confirm_confirms_online_provider() {
+    let db = TempDb::new("privacy-online");
+    let engine = open_engine(db.path()).await;
+    // 判定输入取 DB 侧后端配置（与桌面 / CLI 同源）
+    engine
+        .storage()
+        .save_backend_config(&BackendConfig::deepseek_default())
+        .await
+        .expect("保存后端配置应成功");
+
+    // 调用前：需要确认
+    assert!(
+        engine
+            .check_privacy()
+            .await
+            .expect("检查应成功")
+            .needs_user_action(),
+        "线上未确认时应处于待确认状态"
+    );
+
+    let (mut client, _server) = start_server(Arc::clone(&engine), enabled_config()).await;
+    client.handshake("client-online").await;
+
+    let reply = client
+        .call_tool("privacy_confirm", json!({ "persistent": true }))
+        .await;
+    let payload = reply.expect_ok("privacy_confirm（线上）");
+    assert_eq!(payload["confirmed"], true);
+    assert_eq!(payload["provider"], "deepseek");
+    assert_eq!(payload["persistent"], true);
+
+    // 调用后：确认已生效（持久化标记如实回传）
+    match engine.check_privacy().await.expect("检查应成功") {
+        PrivacyStatus::Confirmed { persistent, .. } => assert!(persistent),
+        other => panic!("确认后应为 Confirmed，实际 {other:?}"),
+    }
 }

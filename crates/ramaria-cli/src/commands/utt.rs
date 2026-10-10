@@ -32,10 +32,7 @@ pub async fn run(engine: &Arc<Engine>, cmd: UttCmd, json: bool) -> anyhow::Resul
 /// - `json`: `--json` 信封输出（配置未启用与成功路径均输出结构化数据）。
 async fn rebuild(engine: &Arc<Engine>, force: bool, json: bool) -> anyhow::Result<()> {
     // 读取生效配置（config.toml + DB 双写合并），确保使用当前切分参数
-    let cfg = engine
-        .load_full_config()
-        .await
-        .map_err(|e| anyhow::anyhow!("读取配置失败: {e}"))?;
+    let cfg = engine.load_full_config().await.context("读取配置失败")?;
 
     if !cfg.utt.enabled {
         if json {

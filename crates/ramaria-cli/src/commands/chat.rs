@@ -132,7 +132,10 @@ pub async fn run(engine: &Arc<Engine>, yes: bool) -> anyhow::Result<()> {
 
     // 退出时自动保存并关闭活跃 session（生命周期容器的关停语义）
     if let Err(e) = lifecycle.close_active_session().await {
-        crate::ui::warn(&format!("退出时保存对话失败: {e}"));
+        crate::ui::warn(&format!(
+            "退出时保存对话失败：{}",
+            ramaria_service::entry_error_message(&e, "")
+        ));
     } else {
         crate::ui::info("对话已保存。");
     }
@@ -178,8 +181,9 @@ async fn try_send_or_recreate(
     // 重建 session
     let new_session = engine.create_session(None).await.map_err(|e| {
         ramaria_core::error::RamariaError::storage(format!(
-            "创建新会话失败（原 session {} 已关闭）: {e}",
-            session.id
+            "创建新会话失败（原 session {} 已关闭）: {}",
+            session.id,
+            e.context()
         ))
     })?;
 
@@ -272,12 +276,18 @@ async fn handle_command(
                             );
                         }
                         Err(e) => {
-                            crate::ui::warn(&format!("创建新会话失败: {e}，下次消息时将自动重试"));
+                            crate::ui::warn(&format!(
+                                "创建新会话失败：{}，下次消息时将自动重试",
+                                ramaria_service::entry_error_message(&e, "")
+                            ));
                         }
                     }
                 }
                 Err(e) => {
-                    crate::ui::warn(&format!("保存对话失败: {e}"));
+                    crate::ui::warn(&format!(
+                        "保存对话失败：{}",
+                        ramaria_service::entry_error_message(&e, "")
+                    ));
                 }
             }
             CommandAction::Continue

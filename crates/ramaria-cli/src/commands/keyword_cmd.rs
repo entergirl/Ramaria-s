@@ -267,7 +267,10 @@ async fn run_seed(engine: &Arc<Engine>, keywords: &[String], json: bool) -> anyh
 ///   生成失败只提示，不影响列表输出。
 async fn run_alias_list(engine: &Arc<Engine>, json: bool) -> anyhow::Result<()> {
     if let Err(e) = engine.keyword_suggest_pending_aliases(None).await {
-        crate::ui::warn(&format!("待确认别名生成失败（忽略）：{e}"));
+        crate::ui::warn(&format!(
+            "待确认别名生成失败（忽略）：{}",
+            ramaria_service::entry_error_message(&e, "")
+        ));
     }
 
     let pending = engine

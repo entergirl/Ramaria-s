@@ -273,3 +273,36 @@ pub(super) fn path_log_label(path: &Path) -> String {
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "<unknown>".to_string())
 }
+
+/// 生成路径"文件名 + 短哈希"标签（日志与占位文本用）。
+///
+/// 口径:
+/// - 文件名 + 原始路径字符串的 64 位 FNV-1a 哈希低 32 位（8 位十六进制）；
+/// - 无文件名回退 `<unknown>`；
+/// - 与桌面日志脱敏（`path_guard::redact_path_label`）逐字一致：跨 crate 独立实现，
+///   不共享代码（桌面与服务的日志面向不同诊断包，避免边界耦合）。
+///
+/// 说明:
+/// - 不可逆且零依赖：同一路径稳定可关联（跨日志排查），不暴露目录结构；
+/// - 仅用于日志与诊断占位文本，不用于任何安全用途。
+pub(crate) fn path_hash_label(path: &Path) -> String {
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("<unknown>");
+    format!("{name}#{:08x}", fnv1a32(path.to_string_lossy().as_bytes()))
+}
+
+/// 64 位 FNV-1a 哈希取低 32 位（仅用于日志标签，不用于安全用途）。
+fn fnv1a32(bytes: &[u8]) -> u32 {
+    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    let mut hash = OFFSET_BASIS;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    (hash & 0xffff_ffff) as u32
+}

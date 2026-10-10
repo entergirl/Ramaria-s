@@ -274,4 +274,23 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// 嵌入不可用（None）降级：块照常入库、embedding 计数为零、重建不报错。
+    #[tokio::test]
+    async fn rebuild_without_embedding_degrades_without_error() {
+        let (engine, dir) = utt_engine("utt-no-embed", None).await;
+        seed_session(&engine, "char-0001", 3, 1_000).await;
+
+        let outcome = engine
+            .rebuild_utt_blocks(false)
+            .await
+            .expect("无嵌入模型时重建应成功（降级不阻塞）");
+        assert!(outcome.rebuilt);
+        assert_eq!(outcome.chunks_created, 1, "块应照常入库");
+        assert_eq!(outcome.embedding_ok, 0, "无嵌入时应无向量生成");
+        assert_eq!(outcome.embedding_failed, 0, "降级路径不应计失败");
+        assert_eq!(outcome.doc_count, 0, "无 L1/L2 文档时索引文档数为 0");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

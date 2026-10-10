@@ -229,6 +229,7 @@ async fn generate_l1(
     let progressive = engine.config().l1.progressive.clone();
     let mut req = ramaria_memory::l1::L1GenerateRequest::new(session_id, persona_uid);
     req.target_projection = target_projection;
+    req.job_manager_config = Some(engine.job_manager_config());
     ramaria_memory::l1::generate_l1_summaries(
         engine.storage_ref().as_ref(),
         engine.llm_ref().as_ref(),

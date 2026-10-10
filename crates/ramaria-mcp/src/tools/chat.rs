@@ -88,10 +88,19 @@ impl RamariaMcpServer {
             }
             Err(e) => {
                 tracing::warn!(persona = %persona, error = %e, "chat_send 执行失败");
-                Ok(tool_error(format!(
-                    "{}。可检查 LLM 后端是否可用（桌面「设置 → 后端」）与人格 uid 后重试",
-                    entry_error_message(&e, "生成失败")
-                )))
+                // 隐私门禁拒绝时附确认入口指引（线上 provider 首次调用场景）
+                let message = if e.category() == "privacy" {
+                    format!(
+                        "{}（可调用 privacy_confirm 工具或经桌面「设置 → 后端」确认后重试）",
+                        entry_error_message(&e, "生成失败")
+                    )
+                } else {
+                    format!(
+                        "{}。可检查 LLM 后端是否可用（桌面「设置 → 后端」）与人格 uid 后重试",
+                        entry_error_message(&e, "生成失败")
+                    )
+                };
+                Ok(tool_error(message))
             }
         }
     }

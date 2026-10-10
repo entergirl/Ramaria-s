@@ -1,105 +1,22 @@
 //! ramaria-memory 集成测试共享基础设施
 //!
 //! 提供:
-//! - `MockLlm`: 实现 `LlmProviderTrait` 的 mock LLM（预设 JSON 回复 + 最近请求记录）
+//! - `MockLlm`: 实现 `LlmProviderTrait` 的 mock LLM（单点定义在 `mock_store`，本模块 re-export）
 //! - `mem_storage`: 内存 SQLite（跑 v1.3 + v1.4 migration）→ `SqliteStorage`
 //! - fixture 构造辅助：分组关键词 L1、mock embedding（预计算向量）
 
 // 每个测试二进制独立编译本模块，各目标使用子集不同 → 允许未使用项
-#![allow(dead_code)]
+// （`unused_imports` 覆盖跨文件 re-export：部分测试二进制不使用全部导出）
+#![allow(dead_code, unused_imports)]
 
 pub mod mock_store;
 
-use std::pin::Pin;
-use std::sync::Mutex;
+pub use mock_store::MockLlm;
 
-use async_trait::async_trait;
-use futures::Stream;
-use ramaria_core::traits::{ChatRequest, StoreCrud, StreamDelta};
-use ramaria_core::types::{
-    BackendConfig, MemoryL1, ModelCapability, Persona, PersonaKind, Session, now_ms,
-};
-use ramaria_core::{LlmProviderTrait, RamariaResult};
+use ramaria_core::traits::StoreCrud;
+use ramaria_core::types::{MemoryL1, Persona, PersonaKind, Session, now_ms};
 use ramaria_storage::SqliteStorage;
 use uuid::Uuid;
-
-// =========================================================
-// Mock LLM
-// =========================================================
-
-/// 测试用 mock LLM：chat 恒返回预设文本，并记录最近一次请求。
-pub struct MockLlm {
-    reply: Mutex<String>,
-    capability: ModelCapability,
-    config: BackendConfig,
-    /// 最近一次 chat 请求（prompt 断言用）
-    last_request: Mutex<Option<ChatRequest>>,
-    /// 累计 chat 调用次数（v1.5 L2 指纹测试断言"不重复调用 LLM"用）
-    calls: std::sync::atomic::AtomicU32,
-}
-
-impl MockLlm {
-    pub fn new(reply: &str) -> Self {
-        let config = BackendConfig::lm_studio_default();
-        Self {
-            reply: Mutex::new(reply.to_string()),
-            capability: config.capability.clone(),
-            config,
-            last_request: Mutex::new(None),
-            calls: std::sync::atomic::AtomicU32::new(0),
-        }
-    }
-
-    /// 最近一次 chat 请求内容。
-    pub fn last_request(&self) -> Option<ChatRequest> {
-        self.last_request.lock().unwrap().clone()
-    }
-
-    /// 累计 chat 调用次数（供"同集合跳过时不重复调用 LLM"断言）。
-    pub fn call_count(&self) -> u32 {
-        self.calls.load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    /// 预设/更新 chat 回复。
-    pub fn set_reply(&self, reply: &str) {
-        *self.reply.lock().unwrap() = reply.to_string();
-    }
-}
-
-#[async_trait]
-impl LlmProviderTrait for MockLlm {
-    async fn chat(&self, request: &ChatRequest) -> RamariaResult<String> {
-        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        *self.last_request.lock().unwrap() = Some(request.clone());
-        Ok(self.reply.lock().unwrap().clone())
-    }
-
-    async fn chat_stream(
-        &self,
-        _request: &ChatRequest,
-    ) -> RamariaResult<Pin<Box<dyn Stream<Item = RamariaResult<StreamDelta>> + Send>>> {
-        // 事件提取链路仅使用非流式 chat；返回空流而非 unimplemented，
-        // 防止未来链路切换流式后测试以 panic 形式爆炸。
-        let empty: Vec<RamariaResult<StreamDelta>> = Vec::new();
-        Ok(Box::pin(futures::stream::iter(empty)))
-    }
-
-    fn capability(&self) -> &ModelCapability {
-        &self.capability
-    }
-
-    fn config(&self) -> &BackendConfig {
-        &self.config
-    }
-
-    async fn validate(&self) -> RamariaResult<()> {
-        Ok(())
-    }
-
-    fn name(&self) -> &'static str {
-        "MockLlm"
-    }
-}
 
 // =========================================================
 // 内存 SQLite 存储

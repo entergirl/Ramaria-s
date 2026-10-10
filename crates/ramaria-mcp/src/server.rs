@@ -87,6 +87,7 @@ impl RamariaMcpServer {
             + Self::ingest_router()
             + Self::persona_router()
             + Self::history_router()
+            + Self::privacy_router()
     }
 
     // =========================================================
@@ -213,7 +214,7 @@ impl ServerHandler for RamariaMcpServer {
 mod tests {
     use super::*;
 
-    /// 工具路由汇总：注册的工具清单与契约一致（六个工具的名称集合）。
+    /// 工具路由汇总：注册的工具清单与契约一致（七个工具的名称集合）。
     #[test]
     fn tool_router_exposes_contract_tools() {
         let router = RamariaMcpServer::tool_router();
@@ -229,10 +230,49 @@ mod tests {
             "persona_list",
             "persona_get",
             "chat_history",
+            "privacy_confirm",
         ] {
             assert!(names.contains(&expected.to_string()), "缺少工具 {expected}");
         }
-        assert_eq!(names.len(), 6, "工具数量应与注册实现一致：{names:?}");
+        assert_eq!(names.len(), 7, "工具数量应与注册实现一致：{names:?}");
+    }
+
+    /// 隐私确认工具：写记录、幂等，注解非只读 / 非破坏 / 闭合世界。
+    #[test]
+    fn privacy_confirm_tool_annotations() {
+        let router = RamariaMcpServer::tool_router();
+        let tool = router
+            .get("privacy_confirm")
+            .expect("privacy_confirm 应已注册");
+        let annotations = tool.annotations.clone().expect("应显式设置注解");
+        assert_eq!(annotations.read_only_hint, Some(false), "需写确认记录");
+        assert_eq!(annotations.destructive_hint, Some(false));
+        assert_eq!(
+            annotations.idempotent_hint,
+            Some(true),
+            "重复确认为覆盖写入"
+        );
+        assert_eq!(
+            annotations.open_world_hint,
+            Some(false),
+            "确认记录只落本机库"
+        );
+
+        let description = tool.description.as_deref().unwrap_or_default();
+        assert!(
+            description.contains("何时"),
+            "描述应包含使用时机说明（做什么 + 何时用/不用）"
+        );
+        let has_persistent = tool
+            .input_schema
+            .get("properties")
+            .and_then(|value| value.as_object())
+            .is_some_and(|properties| properties.contains_key("persistent"));
+        assert!(
+            has_persistent,
+            "入参应含 persistent 开关：{:?}",
+            tool.input_schema
+        );
     }
 
     /// 生成工具：非只读、非幂等、可能访问外部（LLM 在远端）。

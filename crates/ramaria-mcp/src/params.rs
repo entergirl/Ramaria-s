@@ -189,3 +189,10 @@ pub struct HistoryParams {
     /// 分页偏移（第一页为 0）
     pub offset: Option<u32>,
 }
+
+/// `privacy_confirm` 入参。
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct PrivacyConfirmParams {
+    /// 是否跨重启持久化确认（默认 true）
+    pub persistent: Option<bool>,
+}

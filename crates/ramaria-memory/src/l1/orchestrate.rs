@@ -24,7 +24,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use super::{L1Summarizer, L1SummarizerConfig};
-use crate::job::{JobManager, JobResult, JobType};
+use crate::job::{JobManager, JobManagerConfig, JobResult, JobType};
 
 /// 单轮补扫最多重试的 L1 任务数（防止一次扫描长时间占用宿主线程）。
 pub const MAX_L1_RETRY_JOBS_PER_RUN: usize = 8;
@@ -40,7 +40,8 @@ pub const MAX_L1_RETRY_JOBS_PER_RUN: usize = 8;
 /// - `user_prefix` / `assistant_prefix`: 摘要素材的角色前缀覆盖；`None` 用默认。
 /// - `fanout_others`: 多画像分发开关（群聊场景按块/段内他人发言者复制 L1 行）；默认关闭。
 /// - `target_projection`: 目标相对投影开关（社会通道会话逐目标重投影生成）；默认关闭。
-#[derive(Debug, Clone, Copy)]
+/// - `job_manager_config`: 生成任务的退避配置覆盖；`None` 用默认（3 次 / 1000ms 起）。
+#[derive(Debug, Clone)]
 pub struct L1GenerateRequest<'a> {
     pub session_id: Uuid,
     pub persona_uid: Option<&'a str>,
@@ -50,6 +51,8 @@ pub struct L1GenerateRequest<'a> {
     pub fanout_others: bool,
     /// 目标相对投影开关（按块内目标集合逐目标生成 L1 行）
     pub target_projection: bool,
+    /// 任务退避配置覆盖（None = 默认）
+    pub job_manager_config: Option<JobManagerConfig>,
 }
 
 impl<'a> L1GenerateRequest<'a> {
@@ -62,6 +65,7 @@ impl<'a> L1GenerateRequest<'a> {
             assistant_prefix: None,
             fanout_others: false,
             target_projection: false,
+            job_manager_config: None,
         }
     }
 }
@@ -126,7 +130,7 @@ pub async fn generate_l1_summaries(
 
     // 渐进式配置为快照：闭包需要 'static 数据，clone 后移入
     let progressive_cfg = progressive.clone();
-    let job_manager = JobManager::with_defaults(storage);
+    let job_manager = JobManager::new(storage, req.job_manager_config.clone().unwrap_or_default());
     let payload = serde_json::json!({ "session_id": session_id.to_string() }).to_string();
 
     let result = job_manager
@@ -226,6 +230,7 @@ pub async fn retry_pending_l1_jobs(
     progressive: &L1ProgressiveConfig,
     max_per_run: usize,
     observer: &dyn L1RetryObserver,
+    job_manager_config: JobManagerConfig,
 ) -> L1RetryStats {
     let pending = match storage.list_pending_jobs().await {
         Ok(list) => list,
@@ -235,7 +240,7 @@ pub async fn retry_pending_l1_jobs(
         }
     };
 
-    let job_manager = JobManager::with_defaults(storage);
+    let job_manager = JobManager::new(storage, job_manager_config.clone());
     let mut stats = L1RetryStats::default();
 
     for (job_id, job_type, payload) in pending {
@@ -327,6 +332,7 @@ pub async fn retry_pending_l1_jobs(
         info!(job_id, %session_id, ?persona_uid, "L1 补扫：开始重试摘要生成");
         let mut request = L1GenerateRequest::new(session_id, persona_uid.as_deref());
         request.target_projection = target_projection;
+        request.job_manager_config = Some(job_manager_config.clone());
         match generate_l1_summaries(storage, llm, progressive, request).await {
             Ok(l1_list) if !l1_list.is_empty() => {
                 info!(

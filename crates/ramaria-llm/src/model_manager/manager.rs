@@ -263,15 +263,20 @@ impl ModelManager {
     ///
     /// 参数:
     /// - `model_id`: 模型标识。
-    pub fn remove_model(&self, model_id: &str) -> RamariaResult<()> {
+    ///
+    /// 返回:
+    /// - `Ok(true)`: 目标目录存在且已删除；
+    /// - `Ok(false)`: 目标目录不存在（幂等成功，不报错）。
+    pub fn remove_model(&self, model_id: &str) -> RamariaResult<bool> {
         let dir = self.model_dir(model_id);
-        if dir.exists() {
-            fs::remove_dir_all(&dir).map_err(|e| {
-                RamariaError::io(format!("无法删除模型目录: {}", dir.display()), Some(e))
-            })?;
-            tracing::info!(model_id, model_dir = %path_log_label(&dir), "模型已删除");
+        if !dir.exists() {
+            return Ok(false);
         }
-        Ok(())
+        fs::remove_dir_all(&dir).map_err(|e| {
+            RamariaError::io(format!("无法删除模型目录: {}", dir.display()), Some(e))
+        })?;
+        tracing::info!(model_id, model_dir = %path_log_label(&dir), "模型已删除");
+        Ok(true)
     }
 
     /// 获取模型目录占用的磁盘空间（字节）。

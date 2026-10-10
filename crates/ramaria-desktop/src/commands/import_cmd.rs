@@ -398,7 +398,7 @@ pub async fn import_qq_chat(
                     l2_triggered: false,
                     l3_triggered: false,
                     total_sessions: total_sids,
-                    message: format!("L1 批量生成失败: {e}"),
+                    message: crate::commands::service_error_message(&e, "L1 批量生成失败"),
                 };
                 sink.on_done(&summary);
                 return;

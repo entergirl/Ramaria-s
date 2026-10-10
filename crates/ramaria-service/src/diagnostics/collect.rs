@@ -13,7 +13,7 @@ use ramaria_core::config::RamariaConfig;
 
 use crate::engine::Engine;
 
-use super::redact::{path_log_label, redact_api_keys, redact_for_export};
+use super::redact::{path_hash_label, path_log_label, redact_api_keys, redact_for_export};
 
 // =========================================================
 // 类型定义
@@ -107,10 +107,11 @@ pub(super) fn collect_logs(config: &RamariaConfig, status: &mut HashMap<String, 
             }
         }
         Err(e) => {
-            // 占位文本随诊断包外发：路径只写文件名（与成功内容的导出前脱敏口径一致）
+            // 占位文本随诊断包外发：保留"文件名 + 目录路径不可逆短哈希"——
+            // 同一路径稳定可关联（跨日志排查），不暴露目录结构
             let msg = format!(
                 "# 无法读取日志文件 ({}): {}\n",
-                path_log_label(&log_path),
+                path_hash_label(&log_path),
                 e
             );
             status.insert("logs".to_string(), format!("error: {e}"));
@@ -172,10 +173,11 @@ pub(super) fn collect_config(
             )
         }
         Err(e) => {
-            // 占位文本随诊断包外发：路径只写文件名（与成功内容的导出前脱敏口径一致）
+            // 占位文本随诊断包外发：保留"文件名 + 目录路径不可逆短哈希"——
+            // 同一路径稳定可关联（跨日志排查），不暴露目录结构
             let msg = format!(
                 "# 无法读取配置文件 ({}): {}\n",
-                path_log_label(&config_path),
+                path_hash_label(&config_path),
                 e
             );
             status.insert("config".to_string(), format!("error: {e}"));

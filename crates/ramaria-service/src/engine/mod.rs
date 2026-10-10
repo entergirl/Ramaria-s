@@ -41,6 +41,7 @@ use ramaria_core::traits::{EmbeddingProvider, LlmProvider, LlmResponseCache, Sto
 use ramaria_core::types::AppState;
 use ramaria_llm::keychain::Keychain;
 use ramaria_memory::behavior::PendingPool;
+use ramaria_memory::job::JobManagerConfig;
 use ramaria_memory::keyword::KeywordService;
 use ramaria_memory::retriever::Retriever;
 use sqlx::SqlitePool;
@@ -72,10 +73,12 @@ pub(crate) use assemble::build_llm_provider;
 /// 字段约定:
 /// - `db_path`: 数据库文件路径（不存在时自动创建目录与库并执行 migration）。
 /// - `config_path`: 配置文件路径；缺省取数据库同目录 `config.toml`。
+/// - `job_manager_config`: 后台任务管理器配置（L1 生成 / 补扫的重试退避口径）。
 #[derive(Debug, Clone)]
 pub struct EngineOptions {
     pub db_path: PathBuf,
     pub config_path: Option<PathBuf>,
+    pub job_manager_config: JobManagerConfig,
 }
 
 impl EngineOptions {
@@ -84,12 +87,19 @@ impl EngineOptions {
         Self {
             db_path: db_path.into(),
             config_path: None,
+            job_manager_config: JobManagerConfig::default(),
         }
     }
 
     /// 指定配置文件路径（链式调用）。
     pub fn with_config_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.config_path = Some(path.into());
+        self
+    }
+
+    /// 指定后台任务管理器配置（链式调用）。
+    pub fn with_job_manager_config(mut self, config: JobManagerConfig) -> Self {
+        self.job_manager_config = config;
         self
     }
 }
@@ -197,6 +207,8 @@ pub struct Engine {
     channel_proactive_sink: Arc<RwLock<Option<Arc<dyn ProactiveSink>>>>,
     /// 图片理解能力探测缓存（按 model_id + base_url 键控；None = 本进程尚未探测）。
     vision_probe: tokio::sync::Mutex<Option<VisionProbeState>>,
+    /// 后台任务管理器配置（L1 生成 / 补扫的重试退避口径；装配时指定，测试可后置注入）。
+    job_manager_config: RwLock<JobManagerConfig>,
 }
 
 #[cfg(test)]

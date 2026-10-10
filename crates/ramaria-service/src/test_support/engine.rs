@@ -143,6 +143,11 @@ async fn assemble_engine(
         config,
     );
     engine.attach_sqlite_pool(pool);
+    // 测试退避缩短：任务重试不做真实等待（仅缩短基退避，重试次数与生产一致）
+    engine.set_job_manager_config(ramaria_memory::job::JobManagerConfig {
+        max_retries: 3,
+        retry_base_delay_ms: 1,
+    });
     (engine, storage, dir)
 }
 

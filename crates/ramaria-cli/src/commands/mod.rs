@@ -6,6 +6,7 @@
 //! - 命令函数返回 `anyhow::Result<>`，错误由 main.rs 统一处理
 
 pub mod ask;
+pub mod channel;
 pub mod chat;
 pub mod config;
 pub mod diagnostics;

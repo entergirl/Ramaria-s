@@ -154,7 +154,7 @@ pub async fn list_sessions(state: State<'_, DesktopState>) -> Result<Vec<Session
             offset: None,
         })
         .await
-        .map_err(|e| format!("查询会话列表失败: {}", e))?;
+        .map_err(|e| crate::commands::service_error_message(&e, "查询会话列表失败"))?;
 
     let summaries: Vec<SessionSummary> = page.items.iter().map(summary_from_view).collect();
 
@@ -231,7 +231,7 @@ pub async fn create_session(
         .engine
         .create_session(persona_uid.as_deref())
         .await
-        .map_err(|e| format!("创建会话失败: {}", e))?;
+        .map_err(|e| crate::commands::service_error_message(&e, "创建会话失败"))?;
 
     tracing::info!(session_id = %session.id, persona_uid = ?session.persona_uid, "新会话已创建");
 
@@ -263,7 +263,7 @@ pub async fn mark_session_read(
         .engine
         .session_mark_read(sid)
         .await
-        .map_err(|e| format!("标记会话已读失败: {}", e))?;
+        .map_err(|e| crate::commands::service_error_message(&e, "标记会话已读失败"))?;
 
     tracing::debug!(session_id = %session_id, "mark_session_read 完成");
     crate::tray::spawn_tray_refresh(app_handle);

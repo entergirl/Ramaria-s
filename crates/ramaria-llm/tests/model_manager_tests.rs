@@ -103,9 +103,17 @@ fn remove_model_deletes_directory() {
 
     assert!(mgr.is_model_ready("test-model"));
 
-    mgr.remove_model("test-model").unwrap();
+    assert!(
+        mgr.remove_model("test-model").unwrap(),
+        "目录存在时应报告已删除"
+    );
     assert!(!mgr.is_model_ready("test-model"));
     assert!(!model_dir.exists());
+
+    assert!(
+        !mgr.remove_model("test-model").unwrap(),
+        "目录不存在时应报告未删除（幂等）"
+    );
 
     cleanup(&root);
 }

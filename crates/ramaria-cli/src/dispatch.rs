@@ -13,8 +13,8 @@ use ramaria_core::error::RamariaError;
 use ramaria_service::Engine;
 
 use crate::cli::{
-    BlocksCmd, Cli, Commands, ConfigCmd, FactCmd, ImportCmd, IndexCmd, KeywordAliasCmd, KeywordCmd,
-    PersonaCmd, ProbeArgs, RuleCmd, SessionCmd, StyleCmd,
+    BlocksCmd, ChannelCmd, Cli, Commands, ConfigCmd, FactCmd, ImportCmd, IndexCmd, KeywordAliasCmd,
+    KeywordCmd, PersonaCmd, ProbeArgs, RuleCmd, SessionCmd, StyleCmd,
 };
 
 // =========================================================
@@ -176,6 +176,30 @@ pub(crate) async fn dispatch(engine: &Arc<Engine>, cli: Cli) -> anyhow::Result<(
                 StyleCmd::Update { persona } => commands::style::StyleCmd::Update { persona },
             };
             commands::style::run(engine, cmd, cli.json).await?;
+        }
+        Commands::Channel(sub) => {
+            let cmd = match sub {
+                ChannelCmd::Status => commands::channel::ChannelCmd::Status,
+                ChannelCmd::Bindings => commands::channel::ChannelCmd::Bindings,
+                ChannelCmd::Bind {
+                    channel,
+                    external_ref,
+                    persona,
+                    enable,
+                    disable,
+                    allow_proactive,
+                    deny_proactive,
+                } => commands::channel::ChannelCmd::Bind {
+                    channel,
+                    external_ref,
+                    persona,
+                    enable,
+                    disable,
+                    allow_proactive,
+                    deny_proactive,
+                },
+            };
+            commands::channel::run(engine, cmd, cli.json).await?;
         }
         Commands::Fact(sub) => {
             let cmd = match sub {

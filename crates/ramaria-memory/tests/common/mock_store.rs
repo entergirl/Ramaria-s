@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 
 use async_trait::async_trait;
 use futures::{Stream, stream};
@@ -999,11 +999,13 @@ impl StoreInfrastructure for MockStorage {
 
 /// Mock LLM Provider，返回预设回复。
 pub struct MockLlm {
-    reply: String,
+    reply: Mutex<String>,
     model_capability: ModelCapability,
     config: BackendConfig,
     /// 最近一次 chat/chat_stream 请求（桥接注入等 prompt 断言用）
     last_request: Mutex<Option<ChatRequest>>,
+    /// 累计 chat / chat_stream 调用次数（"同集合跳过时不重复调用 LLM"等断言用）
+    calls: AtomicU32,
 }
 
 impl MockLlm {
@@ -1011,7 +1013,7 @@ impl MockLlm {
     #[allow(dead_code)]
     pub fn new(reply: &str) -> Self {
         Self {
-            reply: reply.to_string(),
+            reply: Mutex::new(reply.to_string()),
             model_capability: ModelCapability {
                 provider: LlmProviderKind::LmStudio,
                 model_id: "mock-model".into(),
@@ -1023,6 +1025,7 @@ impl MockLlm {
             },
             config: BackendConfig::lm_studio_default(),
             last_request: Mutex::new(None),
+            calls: AtomicU32::new(0),
         }
     }
 
@@ -1031,10 +1034,11 @@ impl MockLlm {
     pub fn with_config(reply: &str, config: BackendConfig) -> Self {
         let capability = config.capability.clone();
         Self {
-            reply: reply.to_string(),
+            reply: Mutex::new(reply.to_string()),
             model_capability: capability,
             config,
             last_request: Mutex::new(None),
+            calls: AtomicU32::new(0),
         }
     }
 
@@ -1055,6 +1059,12 @@ impl MockLlm {
             config: BackendConfig::lm_studio_default(),
         }
     }
+
+    /// 预设/更新回复。
+    #[allow(dead_code)]
+    pub fn set_reply(&self, reply: &str) {
+        *self.reply.lock().unwrap() = reply.to_string();
+    }
 }
 
 impl MockLlm {
@@ -1063,28 +1073,37 @@ impl MockLlm {
     pub fn last_request(&self) -> Option<ChatRequest> {
         self.last_request.lock().unwrap().clone()
     }
+
+    /// 累计 chat / chat_stream 调用次数（供"不重复调用 LLM"断言）。
+    #[allow(dead_code)]
+    pub fn call_count(&self) -> u32 {
+        self.calls.load(Ordering::SeqCst)
+    }
 }
 
 #[async_trait]
 impl LlmProvider for MockLlm {
     async fn chat(&self, request: &ChatRequest) -> RamariaResult<String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         *self.last_request.lock().unwrap() = Some(request.clone());
-        Ok(self.reply.clone())
+        Ok(self.reply.lock().unwrap().clone())
     }
 
     async fn chat_stream(
         &self,
         request: &ChatRequest,
     ) -> RamariaResult<Pin<Box<dyn Stream<Item = RamariaResult<StreamDelta>> + Send>>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         *self.last_request.lock().unwrap() = Some(request.clone());
-        let reply = self.reply.clone();
+        let reply = self.reply.lock().unwrap().clone();
         let chars: Vec<char> = reply.chars().collect();
+        let total = chars.len();
 
         let stream = stream::iter(chars.into_iter().enumerate().map(move |(i, c)| {
             Ok(StreamDelta {
                 content: c.to_string(),
-                done: i == reply.chars().count() - 1,
-                metadata: if i == reply.chars().count() - 1 {
+                done: i + 1 == total,
+                metadata: if i + 1 == total {
                     Some("stop".into())
                 } else {
                     None

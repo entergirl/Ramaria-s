@@ -9,7 +9,7 @@
 //! - 全部数据为合成样例；断言"脱敏后不含原文与绝对路径"，不写入真实密钥。
 
 use super::collect::{SystemInfo, collect_config, collect_logs, collect_system_info};
-use super::redact::{redact_api_keys, redact_for_export};
+use super::redact::{path_hash_label, redact_api_keys, redact_for_export};
 use super::render::{build_system_txt, build_zip};
 use super::*;
 use ramaria_core::config::RamariaConfig;
@@ -171,9 +171,9 @@ fn test_collect_config_empty_dir() {
     assert!(status.contains_key("config"));
 }
 
-// ── 收集失败分支: 占位文本只写文件名 ──
+// ── 收集失败分支: 占位文本只写"文件名 + 短哈希" ──
 
-/// 读取失败（目标同名目录占位）→ 占位文本只含文件名，不把本机绝对路径写进诊断包。
+/// 读取失败（目标同名目录占位）→ 占位文本只含"文件名 + 短哈希"，不把本机绝对路径写进诊断包。
 #[test]
 fn collect_failure_placeholder_keeps_file_name_only() {
     let dir = unique_dir("collect-failure");
@@ -196,13 +196,53 @@ fn collect_failure_placeholder_keeps_file_name_only() {
         !logs.contains(&dir_label) && !config_text.contains(&dir_label),
         "占位文本不应含绝对路径: logs={logs} config={config_text}"
     );
-    assert!(logs.contains("ramaria.log"), "应保留文件名便于定位: {logs}");
     assert!(
-        config_text.contains("config.toml"),
-        "应保留文件名便于定位: {config_text}"
+        logs.contains("ramaria.log#"),
+        "应保留文件名 + 短哈希便于定位与关联: {logs}"
+    );
+    assert!(
+        config_text.contains("config.toml#"),
+        "应保留文件名 + 短哈希便于定位与关联: {config_text}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── 路径哈希标签 ──
+
+/// 路径哈希标签：文件名 + 8 位十六进制；同路径稳定、异路径不同、无文件名回退。
+#[test]
+fn path_hash_label_is_stable_and_hides_directories() {
+    let path = Path::new(r"C:\用户\文档\ramaria.log");
+    let label = path_hash_label(path);
+    assert!(
+        label.starts_with("ramaria.log#"),
+        "应保留文件名前缀: {label}"
+    );
+    assert_eq!(
+        label.len(),
+        "ramaria.log#".len() + 8,
+        "哈希应为 8 位十六进制: {label}"
+    );
+    assert!(
+        label["ramaria.log#".len()..]
+            .chars()
+            .all(|c| c.is_ascii_hexdigit()),
+        "哈希应为十六进制: {label}"
+    );
+    assert!(
+        !label.contains("用户") && !label.contains(r"C:\"),
+        "不应含目录结构: {label}"
+    );
+
+    // 同一路径稳定（跨日志可关联）；不同目录的同名文件标签不同
+    assert_eq!(path_hash_label(path), label, "同一路径应稳定");
+    let other = path_hash_label(Path::new(r"D:\other\ramaria.log"));
+    assert_ne!(other, label, "不同路径应产生不同标签");
+
+    // 无文件名（盘根）回退 <unknown>
+    let root = path_hash_label(Path::new(r"C:\"));
+    assert!(root.starts_with("<unknown>#"), "无文件名应回退: {root}");
 }
 
 // ── zip 打包: 原子写入 ──

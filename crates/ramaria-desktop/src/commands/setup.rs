@@ -66,14 +66,15 @@ pub async fn run_setup(
         .engine
         .run_setup(&request)
         .await
-        .map_err(|e| format!("设置流程失败: {}", e))?;
+        .map_err(|e| crate::commands::service_error_message(&e, "设置流程失败"))?;
 
     // ---- ★ 初始化默认人格（user-0001 + 扫描 personas/ 目录） ----
     // 桌面端此前缺失此步骤，导致对话页/记忆页的人格选择器为空。
     // 对齐 CLI 的 create_initial_personas 行为。
+    // 说明: `init_default_personas` 内部错误已统一映射（String 文案），此处只叠加场景前缀。
     init_default_personas(&state.engine)
         .await
-        .map_err(|e| format!("初始化人格失败: {}", e))?;
+        .map_err(|e| format!("初始化人格失败: {e}"))?;
 
     // ---- 索引待构建时完成一次构建（缺索引的库），随后返回推进后的状态 ----
     crate::ensure_index_ready(&state.engine).await;
@@ -104,7 +105,7 @@ pub async fn refresh_setup_state(state: State<'_, DesktopState>) -> Result<Strin
         .engine
         .refresh_setup_state()
         .await
-        .map_err(|e| format!("刷新状态失败: {}", e))?;
+        .map_err(|e| crate::commands::service_error_message(&e, "刷新状态失败"))?;
 
     tracing::info!(new_state = %new_state.as_str(), "应用状态已刷新");
     Ok(new_state.as_str().to_string())
@@ -137,7 +138,7 @@ pub async fn test_llm_connection(state: State<'_, DesktopState>) -> Result<Strin
     llm.validate()
         .await
         .map(|_| "ok".to_string())
-        .map_err(|e| format!("LLM 连接测试失败: {}", e))
+        .map_err(|e| crate::commands::service_error_message(&e, "LLM 连接测试失败"))
 }
 
 // =========================================================
@@ -196,7 +197,7 @@ pub async fn validate_embedding_model(
         .engine
         .validate_embedding_model(&path)
         .await
-        .map_err(|e| format!("校验嵌入模型失败: {}", e))?;
+        .map_err(|e| crate::commands::service_error_message(&e, "校验嵌入模型失败"))?;
 
     // 校验结果透传（valid=false + reason 表达失败原因）
     Ok(EmbeddingValidationResult {
@@ -236,7 +237,7 @@ pub async fn save_embedding_model(
         .engine
         .save_embedding_model(Some(path.as_str()))
         .await
-        .map_err(|e| format!("加载嵌入模型失败: {}", e))?;
+        .map_err(|e| crate::commands::service_error_message(&e, "加载嵌入模型失败"))?;
 
     tracing::info!("嵌入模型配置已持久化");
     Ok("ok".to_string())
@@ -257,7 +258,7 @@ pub async fn get_embedding_model(
         .engine
         .embedding_model()
         .await
-        .map_err(|e| format!("读取后端配置失败: {}", e))?;
+        .map_err(|e| crate::commands::service_error_message(&e, "读取后端配置失败"))?;
 
     // 服务层视图字段与桌面视图一致，直接映射
     Ok(view.map(|v| EmbeddingModelView {
@@ -286,7 +287,7 @@ pub async fn get_degraded_reason(
         .engine
         .degraded_reason()
         .await
-        .map_err(|e| format!("查询降级原因失败: {}", e))?;
+        .map_err(|e| crate::commands::service_error_message(&e, "查询降级原因失败"))?;
 
     // 服务层原因分类映射为桌面视图枚举（序列化口径一致）
     Ok(reason.map(|reason| match reason {
@@ -323,7 +324,7 @@ async fn init_default_personas(engine: &ramaria_service::Engine) -> Result<(), S
     engine
         .persona_ensure_user()
         .await
-        .map_err(|e| format!("创建 user-0001 失败: {}", e))?;
+        .map_err(|e| crate::commands::service_error_message(&e, "创建 user-0001 失败"))?;
 
     // ---- Step 2: 目录解析（多级回退） ----
     let candidates = [

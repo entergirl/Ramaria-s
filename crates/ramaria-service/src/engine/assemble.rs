@@ -22,6 +22,7 @@ use ramaria_core::traits::{EmbeddingProvider, LlmProvider, LlmResponseCache, Sto
 use ramaria_core::types::{AppState, BackendConfig, LlmProvider as LlmProviderKind};
 use ramaria_llm::keychain::Keychain;
 use ramaria_memory::behavior::PendingPool;
+use ramaria_memory::job::JobManagerConfig;
 use ramaria_memory::keyword::KeywordService;
 use ramaria_memory::retriever::Retriever;
 use ramaria_storage::SqliteStorage;
@@ -102,6 +103,7 @@ impl Engine {
     /// 6. 检索器占位（懒加载）。
     pub async fn open_with(options: EngineOptions) -> RamariaResult<Self> {
         let db_path = options.db_path;
+        let job_manager_config = options.job_manager_config;
 
         // ---- 1. 数据库连接池 + migration ----
         let pool = ramaria_storage::database::init_pool(Some(db_path.clone())).await?;
@@ -174,6 +176,7 @@ impl Engine {
             proactive_sink: Arc::new(RwLock::new(None)),
             channel_proactive_sink: Arc::new(RwLock::new(None)),
             vision_probe: tokio::sync::Mutex::new(None),
+            job_manager_config: RwLock::new(job_manager_config),
             // 状态机初值：首次配置判定由 setup 用例推进（装配阶段不做网络探测）
             state: Mutex::new(AppState::NeedsSetup),
         })
@@ -221,6 +224,7 @@ impl Engine {
             proactive_sink: Arc::new(RwLock::new(None)),
             channel_proactive_sink: Arc::new(RwLock::new(None)),
             vision_probe: tokio::sync::Mutex::new(None),
+            job_manager_config: RwLock::new(JobManagerConfig::default()),
             state: Mutex::new(AppState::NeedsSetup),
         }
     }
@@ -435,6 +439,18 @@ impl Engine {
     /// 当前封存许可（`false` = 只写不封存）。
     pub fn seal_allowed(&self) -> bool {
         self.seal_allowed.load(Ordering::Acquire)
+    }
+
+    /// 后台任务管理器配置快照（L1 生成 / 补扫的重试退避口径；读锁内克隆后返回）。
+    pub(crate) fn job_manager_config(&self) -> JobManagerConfig {
+        read_recover(&self.job_manager_config, "engine.job_manager_config").clone()
+    }
+
+    /// 设置后台任务管理器配置（测试装配注入短退避等场景）。
+    #[cfg(test)]
+    pub(crate) fn set_job_manager_config(&self, config: JobManagerConfig) {
+        let mut guard = write_recover(&self.job_manager_config, "engine.job_manager_config");
+        *guard = config;
     }
 }
 

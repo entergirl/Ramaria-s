@@ -81,13 +81,11 @@ pub async fn serve_stdio(options: McpHostOptions) -> RamariaResult<()> {
 
     // ---- 1. 服务层引擎 ----
     let db_path = options.db_path.clone();
-    let engine = Arc::new(
-        Engine::open_with(EngineOptions {
-            db_path: options.db_path,
-            config_path: options.config_path,
-        })
-        .await?,
-    );
+    let engine_options = match options.config_path {
+        Some(path) => EngineOptions::new(options.db_path).with_config_path(path),
+        None => EngineOptions::new(options.db_path),
+    };
+    let engine = Arc::new(Engine::open_with(engine_options).await?);
     let mcp_config = engine.config().mcp.clone();
     if !mcp_config.enabled {
         tracing::warn!(

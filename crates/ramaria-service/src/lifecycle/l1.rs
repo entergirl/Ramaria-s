@@ -210,6 +210,7 @@ pub(crate) async fn regenerate_l1_progressive(
             assistant_prefix,
             fanout_others: false,
             target_projection: false,
+            job_manager_config: Some(engine.job_manager_config()),
         },
     )
     .await
@@ -286,7 +287,7 @@ pub(crate) async fn generate_l1_summary(
     }
 
     let summarizer = L1Summarizer::new(llm.as_ref(), storage, summarizer_config);
-    let job_manager = JobManager::with_defaults(storage);
+    let job_manager = JobManager::new(storage, engine.job_manager_config());
     let payload = serde_json::json!({ "session_id": session_id.to_string() }).to_string();
 
     let result = job_manager
@@ -354,6 +355,7 @@ pub(crate) async fn retry_pending_l1_jobs_with_stats(engine: &Engine) -> L1Retry
         &engine.config().l1.progressive,
         MAX_L1_RETRY_JOBS_PER_RUN,
         &ServiceL1RetryObserver { engine },
+        engine.job_manager_config(),
     )
     .await
 }
