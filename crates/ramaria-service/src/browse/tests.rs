@@ -1,21 +1,23 @@
 //! crates/ramaria-service/src/browse/tests.rs - Ramaria 记忆与会话浏览用例单元测试
 //!
 //! 设计特点:
-//! - 由 browse 模块以 `#[cfg(test)] mod tests;` 收纳：覆盖 L1 / L2 / L3 / 三层画像 /
-//!   画像状态 / 事实 / 证据链 / 会话浏览 / 通道概览 / 未读标记与汇总十组路径
+//! - 由 browse 模块以 `#[cfg(test)] mod tests;` 收纳：覆盖 L2 / L3 / 三层画像 /
+//!   画像状态 / 事实 / 证据链 / 会话浏览 / 通道概览 / 未读标记与汇总路径
+//! - L1 浏览（直查 + 未吸收口径）拆分至 `browse/tests/l1.rs`
 //! - 使用真实 SQLite 临时库（全量 migration）：断言以浏览视图结构与落库状态为准
 //! - 分页与钳制边界逐项锁定（offset / limit / has_more / 消息计数按 0 降级）
 //!
 //! 安全约束:
 //! - 全部数据为合成样例；不访问 OS keychain、不连网、不使用真实用户数据。
 
+mod l1;
+
 use crate::test_support::{
-    engine_with_db, seed_channel_session, seed_l1, seed_messages, seed_persona,
-    seed_session_with_messages,
+    engine_with_db, seed_channel_session, seed_messages, seed_persona, seed_session_with_messages,
 };
 use crate::types::{
-    FactBrowseRequest, L1BrowseRequest, L2BrowseRequest, SessionBrowseRequest,
-    SessionMessagesRequest, TraitEvidenceRequest,
+    FactBrowseRequest, L2BrowseRequest, SessionBrowseRequest, SessionMessagesRequest,
+    TraitEvidenceRequest,
 };
 use ramaria_core::traits::StoreCrud;
 use ramaria_core::types::{
@@ -75,127 +77,6 @@ async fn seed_fact(
         FactSource::Manual,
     );
     storage.save_fact(&f).await.expect("写入事实应成功")
-}
-
-/// L1 桌面口径：按会话收集 + persona 过滤 + 创建时间倒序 + limit 截断。
-#[tokio::test]
-async fn l1_desktop_scope_filters_orders_and_truncates() {
-    let (engine, storage, dir) = engine_with_db("browse-l1-desktop").await;
-    seed_persona(&storage, "char-0001").await;
-    seed_persona(&storage, "char-0002").await;
-    seed_l1(&storage, "char-0001", "摘要 A", Some("考试"), 1_000).await;
-    seed_l1(&storage, "char-0002", "摘要 B", None, 2_000).await;
-    seed_l1(&storage, "char-0001", "摘要 C", None, 3_000).await;
-
-    // persona 过滤：只含 char-0001 的两条，创建时间倒序
-    let page = engine
-        .memory_l1(L1BrowseRequest {
-            persona: Some("char-0001".to_string()),
-            unabsorbed_only: false,
-            limit: None,
-            offset: None,
-        })
-        .await
-        .expect("L1 浏览应成功");
-    assert_eq!(page.total, 2);
-    let summaries: Vec<&str> = page.items.iter().map(|m| m.summary.as_str()).collect();
-    assert_eq!(summaries, vec!["摘要 C", "摘要 A"], "应按创建时间倒序");
-    assert!(
-        page.items
-            .iter()
-            .all(|m| m.persona_uid.as_deref() == Some("char-0001"))
-    );
-    let a_item = page
-        .items
-        .iter()
-        .find(|m| m.summary == "摘要 A")
-        .expect("摘要 A 应出现");
-    assert_eq!(a_item.keywords.as_deref(), Some("考试"), "伴随字段应透传");
-
-    // 无 persona：三条全含
-    let all = engine
-        .memory_l1(L1BrowseRequest {
-            persona: None,
-            unabsorbed_only: false,
-            limit: None,
-            offset: None,
-        })
-        .await
-        .expect("L1 浏览应成功");
-    assert_eq!(all.total, 3);
-    let summaries: Vec<&str> = all.items.iter().map(|m| m.summary.as_str()).collect();
-    assert_eq!(summaries, vec!["摘要 C", "摘要 B", "摘要 A"]);
-
-    // limit 截断：取最新一条
-    let limited = engine
-        .memory_l1(L1BrowseRequest {
-            persona: None,
-            unabsorbed_only: false,
-            limit: Some(1),
-            offset: None,
-        })
-        .await
-        .expect("L1 浏览应成功");
-    assert_eq!(limited.items.len(), 1);
-    assert_eq!(limited.items[0].summary, "摘要 C");
-
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// L1 未吸收口径：分页 + total 为分页前条数；persona 缺省报业务校验错误。
-#[tokio::test]
-async fn l1_unabsorbed_scope_paginates() {
-    let (engine, storage, dir) = engine_with_db("browse-l1-unabsorbed").await;
-    seed_persona(&storage, "char-0001").await;
-    seed_l1(&storage, "char-0001", "摘要 1", None, 1_000).await;
-    let absorbed = seed_l1(&storage, "char-0001", "摘要 2", None, 2_000).await;
-    seed_l1(&storage, "char-0001", "摘要 3", None, 3_000).await;
-    storage
-        .mark_l1_absorbed(&[absorbed])
-        .await
-        .expect("标记吸收应成功");
-
-    // 全量：未吸收 2 条（按创建时间升序取回）
-    let page = engine
-        .memory_l1(L1BrowseRequest {
-            persona: Some("char-0001".to_string()),
-            unabsorbed_only: true,
-            limit: None,
-            offset: None,
-        })
-        .await
-        .expect("未吸收浏览应成功");
-    assert_eq!(page.total, 2, "total 为分页前条数");
-    let summaries: Vec<&str> = page.items.iter().map(|m| m.summary.as_str()).collect();
-    assert_eq!(summaries, vec!["摘要 1", "摘要 3"]);
-
-    // 分页：offset 1 + limit 1 → 第二条
-    let page = engine
-        .memory_l1(L1BrowseRequest {
-            persona: Some("char-0001".to_string()),
-            unabsorbed_only: true,
-            limit: Some(1),
-            offset: Some(1),
-        })
-        .await
-        .expect("未吸收浏览应成功");
-    assert_eq!(page.total, 2);
-    assert_eq!(page.items.len(), 1);
-    assert_eq!(page.items[0].summary, "摘要 3");
-
-    // persona 缺省：业务校验错误
-    let err = engine
-        .memory_l1(L1BrowseRequest {
-            persona: None,
-            unabsorbed_only: true,
-            limit: None,
-            offset: None,
-        })
-        .await
-        .expect_err("未吸收口径需 persona");
-    assert_eq!(err.category(), "validation");
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// L2 persona 口径：分页 + total 为全量计数。

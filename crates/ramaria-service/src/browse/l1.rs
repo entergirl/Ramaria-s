@@ -1,10 +1,11 @@
 //! crates/ramaria-service/src/browse/l1.rs - Ramaria L1 记忆摘要浏览
 //!
 //! 设计特点:
-//! - 双口径单一实现：按会话收集（扫描最近会话逐个读取，可选 persona 过滤）与未吸收全量口径
-//! - 排序与分页：按会话口径按创建时间倒序后应用 offset / limit；未吸收口径按存储顺序分页
-//! - 上限纪律：默认 200、按会话口径截断上限 1000、会话扫描上限 500
-//! - 空态语义：会话无摘要返回空列表（非错误）
+//! - 双口径单一实现：按 persona 直查（索引 `(persona_uid, created_at)`，不受会话规模影响）
+//!   与未吸收全量口径；无 persona 时逐人格取回后合并（与 L2 合并口径一致）
+//! - 排序与分页：取回后按创建时间倒序，再应用 offset / limit
+//! - 上限纪律：默认 200、limit 截断上限 1000；取回条数按 offset + limit 收敛
+//! - 空态语义：无摘要返回空列表（非错误）
 
 use std::cmp::Reverse;
 
@@ -17,22 +18,15 @@ use crate::types::{L1BrowsePage, L1BrowseRequest, L1MemoryView};
 use super::view::{DEFAULT_BROWSE_LIMIT, MAX_BROWSE_LIMIT, l1_view, normalize_persona};
 
 // =========================================================
-// 常量
-// =========================================================
-
-/// L1 按会话收集时的会话扫描上限（只取最近的前 N 个会话）。
-const MAX_SESSION_SCAN: usize = 500;
-
-// =========================================================
 // L1 记忆摘要浏览
 // =========================================================
 
 /// L1 记忆摘要浏览。
 ///
 /// 流程（按 `unabsorbed_only` 二选一，单一实现）:
-/// - `false`（按会话收集）: 按开始时间取最近会话（上限 [`MAX_SESSION_SCAN`]）逐个读取
-///   L1 摘要，可选按 persona 过滤；收集满 limit 后停止收集 → 按创建时间倒序
-///   → 应用 offset → 截断 limit；
+/// - `false`（直查口径）: 指定 persona 时按人格直查最近摘要（存储层 `ORDER BY created_at
+///   DESC LIMIT ?`，命中 `idx_memory_l1_persona_created`）；未指定 persona 时逐人格取回
+///   最近摘要后合并排序（与 L2 合并口径一致）→ 按创建时间倒序 → 应用 offset → 截断 limit；
 /// - `true`（未吸收口径）: 按 persona 全量读取未吸收摘要（persona 必填）→ 应用 offset / limit。
 ///
 /// 参数:
@@ -40,10 +34,12 @@ const MAX_SESSION_SCAN: usize = 500;
 /// - `req`: 浏览请求（persona / 未吸收开关 / limit / offset）。
 ///
 /// 返回:
-/// - `items` 与 `total`（排序后、分页前的条数）。
+/// - `items` 与 `total`（排序后、截断前的条数）。
 ///
 /// 说明:
-/// - 未吸收口径不设 1000 上限（与全量分页的调用口径一致）；按会话收集口径上限 1000。
+/// - 直查口径的 `total` 为取回条数：按 `offset + limit + 1` 收敛，用于判断"是否还有下一页"
+///   （取回数等于上限即表示还有更多），不承担精确计数语义；
+/// - 未吸收口径不设 1000 上限（与全量分页的调用口径一致）。
 pub(crate) async fn l1(engine: &Engine, req: L1BrowseRequest) -> RamariaResult<L1BrowsePage> {
     let storage = engine.storage_ref();
     let persona = normalize_persona(req.persona.as_deref());
@@ -62,27 +58,33 @@ pub(crate) async fn l1(engine: &Engine, req: L1BrowseRequest) -> RamariaResult<L
         return Ok(L1BrowsePage { items, total });
     }
 
-    // 按会话收集：逐个会话读取摘要，收集满 limit 后停止（与桌面口径一致）
+    // ---- 直查口径：取回条数按 offset + limit 收敛（+1 用于判断是否还有下一页） ----
     let limit = req
         .limit
         .unwrap_or(DEFAULT_BROWSE_LIMIT)
         .min(MAX_BROWSE_LIMIT);
-    let sessions = storage.list_sessions().await?;
-    let mut all: Vec<L1MemoryView> = Vec::new();
-    for session in sessions.iter().take(MAX_SESSION_SCAN) {
-        let list = storage.list_memory_l1(session.id).await?;
-        for m in list {
-            if let Some(uid) = &persona {
-                if m.persona_uid.as_deref() != Some(uid.as_str()) {
-                    continue;
-                }
+    let fetch = limit
+        .saturating_add(req.offset.unwrap_or(0))
+        .saturating_add(1);
+
+    let mut all: Vec<L1MemoryView> = match &persona {
+        Some(uid) => storage
+            .list_recent_l1_by_persona(uid, fetch)
+            .await?
+            .iter()
+            .map(l1_view)
+            .collect(),
+        None => {
+            // 无 persona：逐人格取回最近 fetch 条后合并（避免全表排序）
+            let personas = storage.list_personas().await?;
+            let mut merged: Vec<L1MemoryView> = Vec::new();
+            for p in &personas {
+                let rows = storage.list_recent_l1_by_persona(&p.uid, fetch).await?;
+                merged.extend(rows.iter().map(l1_view));
             }
-            all.push(l1_view(&m));
+            merged
         }
-        if all.len() >= limit as usize {
-            break;
-        }
-    }
+    };
 
     all.sort_by_key(|v| Reverse(v.created_at));
     let total = all.len();

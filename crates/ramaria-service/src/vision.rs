@@ -8,7 +8,9 @@
 //! - 降级纪律：声明关 / 探测失败批量标 skipped；隐私未确认保持 pending 待下次；
 //!   定位失败与超大文件跳过；调用失败重试一次后标 failed
 //! - md5 去重：同图已有完成描述直接批量回填，不重复调用模型
-//! - base64 编码自实现（不新增依赖）；日志不落图片内容与描述原文
+//! - 输入准备：线上 provider 按内容格式与单边像素上限归一化（越界长图缩放重编码）；
+//!   本地 provider 原字节透传；不符合后端输入约束时按 skipped 降级（见 `prepare` 子模块）
+//! - base64 编码自实现；日志不落图片内容与描述原文
 
 // 理解入口经 import 门面（`importer` feature）调用；未启用该 feature 时本模块
 // 仅作为引擎探测缓存的类型宿主，不产生未使用代码告警
@@ -24,6 +26,8 @@ use uuid::Uuid;
 
 use crate::engine::Engine;
 use crate::types::ChannelImageOutcome;
+
+mod prepare;
 
 // =========================================================
 // 常量
@@ -286,7 +290,25 @@ async fn process_row(
         }
     };
 
-    // ---- 4. 多模态调用（失败重试一次，共两次尝试） ----
+    // ---- 4. 输入准备与多模态调用（失败重试一次，共两次尝试） ----
+    let prepared = match prepare::prepare_image(
+        llm.config().provider.is_online(),
+        &bytes,
+        prepare::image_mime_for(source_ref),
+    ) {
+        Ok(prepared) => prepared,
+        Err(reject) => {
+            tracing::warn!(
+                attachment_id = row.id,
+                reason = reject.as_str(),
+                "图片不符合线上理解后端输入约束，跳过"
+            );
+            storage
+                .mark_attachment_status(row.id, AttachmentStatus::Skipped)
+                .await?;
+            return Ok(RowOutcome::Skipped);
+        }
+    };
     let request = ChatRequest {
         system_prompt: String::new(),
         memory_context: None,
@@ -297,12 +319,7 @@ async fn process_row(
         request_id: Uuid::new_v4(),
         template_version: VISION_TEMPLATE_VERSION.to_string(),
     };
-    let data_uri = format!(
-        "data:{};base64,{}",
-        image_mime_for(source_ref),
-        base64_encode(&bytes)
-    );
-    let images = vec![data_uri];
+    let images = vec![prepared.to_data_uri()];
     let reply = match llm.chat_vision(&request, &images).await {
         Ok(reply) => Ok(reply),
         Err(first_error) => {
@@ -419,9 +436,27 @@ pub(crate) async fn understand_downloaded_image(
         }
     }
 
-    // ---- 4. 多模态调用（失败重试一次，共两次尝试） ----
+    // ---- 4. 输入准备与多模态调用（失败重试一次，共两次尝试） ----
     let llm = engine.llm();
     let label = model_label(&llm);
+    let prepared = match prepare::prepare_image(
+        llm.config().provider.is_online(),
+        image_bytes,
+        prepare::image_mime_from_bytes(image_bytes),
+    ) {
+        Ok(prepared) => prepared,
+        Err(reject) => {
+            tracing::warn!(
+                attachment_id,
+                reason = reject.as_str(),
+                "社交通道图片不符合线上理解后端输入约束，跳过"
+            );
+            storage
+                .mark_attachment_status(attachment_id, AttachmentStatus::Skipped)
+                .await?;
+            return Ok(ChannelImageOutcome::Skipped);
+        }
+    };
     let request = ChatRequest {
         system_prompt: String::new(),
         memory_context: None,
@@ -432,12 +467,7 @@ pub(crate) async fn understand_downloaded_image(
         request_id: Uuid::new_v4(),
         template_version: VISION_TEMPLATE_VERSION.to_string(),
     };
-    let data_uri = format!(
-        "data:{};base64,{}",
-        image_mime_from_bytes(image_bytes),
-        base64_encode(image_bytes)
-    );
-    let images = vec![data_uri];
+    let images = vec![prepared.to_data_uri()];
     let reply = match llm.chat_vision(&request, &images).await {
         Ok(reply) => Ok(reply),
         Err(first_error) => {
@@ -557,43 +587,6 @@ fn model_label(llm: &Arc<dyn LlmProvider>) -> String {
         config.provider.as_str().to_string()
     } else {
         config.capability.model_id.clone()
-    }
-}
-
-/// 按扩展名返回图片 MIME（未知扩展名回退 image/jpeg）。
-fn image_mime_for(source_ref: &str) -> &'static str {
-    let extension = Path::new(source_ref)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(str::to_ascii_lowercase);
-    match extension.as_deref() {
-        Some("jpg") | Some("jpeg") => "image/jpeg",
-        Some("png") => "image/png",
-        Some("gif") => "image/gif",
-        Some("webp") => "image/webp",
-        Some("bmp") => "image/bmp",
-        _ => "image/jpeg",
-    }
-}
-
-/// 按魔数判定图片 MIME（未知格式回退 image/jpeg）。
-///
-/// 判定顺序:
-/// - JPEG `FF D8 FF`；PNG `89 50 4E 47`；GIF `47 49 46`；
-/// - WEBP `RIFF....WEBP`；BMP `42 4D`。
-fn image_mime_from_bytes(bytes: &[u8]) -> &'static str {
-    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        "image/jpeg"
-    } else if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
-        "image/png"
-    } else if bytes.starts_with(b"GIF") {
-        "image/gif"
-    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
-        "image/webp"
-    } else if bytes.starts_with(b"BM") {
-        "image/bmp"
-    } else {
-        "image/jpeg"
     }
 }
 

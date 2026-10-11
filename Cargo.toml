@@ -84,6 +84,16 @@ candle-flash-attn = "0.10"
 sha2 = "0.10"
 md-5 = "0.10"
 
+# ---------- 图片处理 ----------
+# 图片理解输入归一化（解码 / 缩放 / 重编码）：仅启用理解链路涉及的格式
+image = { version = "0.25", default-features = false, features = [
+    "jpeg",
+    "png",
+    "gif",
+    "webp",
+    "bmp",
+] }
+
 # ---------- Desktop ----------
 tauri = "2"
 tauri-build = "2"

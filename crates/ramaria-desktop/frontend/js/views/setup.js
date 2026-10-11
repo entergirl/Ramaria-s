@@ -206,7 +206,19 @@ var RamariaSetupView = (function () {
                 '</div>' +
             '</div>' +
 
- // 连接测试按钮
+ // 图片理解能力声明（模型属性，本地 / 线上两种模式均适用）
+            '<div class="setup-field">' +
+                '<label class="setup-field-label">' +
+                    '<input type="checkbox" id="setup-vision-supported" /> ' +
+                    '模型支持图片理解' +
+                '</label>' +
+                '<div class="setup-field-hint">' +
+                    '勾选后导入聊天记录的图片会交由该模型理解（线上模型会产生图片外发请求）；' +
+                    '不确定可先不勾选，稍后在「设置 → 后端配置」开启。' +
+                '</div>' +
+            '</div>' +
+
+// 连接测试按钮
             '<div class="mt-3">' +
                 '<button class="setup-test-btn" id="setup-test-btn">' +
                     '<span class="setup-test-dot"></span> 测试连接' +
@@ -684,12 +696,14 @@ var RamariaSetupView = (function () {
     }
 
     function _collectConfig() {
+        var visionSupported = !!($('setup-vision-supported') || {}).checked;
         if (_currentMode === 'local') {
             return {
                 provider: 'LmStudio',
                 baseUrl: ($('setup-local-url') || {}).value || 'http://localhost:1234/v1',
                 modelId: ($('setup-local-model') || {}).value || '',
                 apiKey: '',
+                visionSupported: visionSupported,
             };
         } else {
             return {
@@ -697,6 +711,7 @@ var RamariaSetupView = (function () {
                 baseUrl: ($('setup-api-url') || {}).value || 'https://api.deepseek.com/v1',
                 modelId: ($('setup-api-model') || {}).value || '',
                 apiKey: ($('setup-api-key') || {}).value || '',
+                visionSupported: visionSupported,
             };
         }
     }
@@ -824,6 +839,17 @@ var RamariaSetupView = (function () {
                 try { await RamariaApi.chat.confirmPrivacy(true); } catch (_) { /* ignore */ }
             }
 
+// 图片理解能力声明：写入 [vision] 配置（双写；失败不阻塞首次配置）
+            try {
+                var fullConfig = await RamariaApi.config.getFull();
+                if (fullConfig && fullConfig.vision) {
+                    fullConfig.vision.model_supports_vision = config.visionSupported === true;
+                    await RamariaApi.config.updateFull(fullConfig);
+                }
+            } catch (visionErr) {
+                console.warn('[SetupView] 图片理解能力声明保存失败（非致命）:', visionErr);
+            }
+
  // 更新进度：保存成功
             _updateInitLine('setup-init-save', 'ok', '配置已保存');
 
@@ -923,6 +949,11 @@ var RamariaSetupView = (function () {
             config.baseUrl || '-'
         );
         _appendSummaryRow(box, '模型名称：', config.modelId || '-');
+        _appendSummaryRow(
+            box,
+            '图片理解：',
+            config.visionSupported ? '✓ 已声明模型支持' : '未声明（可在「设置 → 后端配置」开启）'
+        );
 
         if (_currentMode === 'api') {
             // 明文与前缀一律不回显：已填写只显示掩码，未填写给出明确提示

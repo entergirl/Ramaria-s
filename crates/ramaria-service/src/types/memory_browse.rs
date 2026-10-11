@@ -17,10 +17,10 @@ use uuid::Uuid;
 /// L1 记忆浏览请求。
 ///
 /// 字段约定:
-/// - `persona`: 目标人格 uid（None = 不过滤；未吸收口径下必填）。
-/// - `unabsorbed_only`: false = 按会话收集摘要的统一排序口径（桌面）；
+/// - `persona`: 目标人格 uid（None = 逐人格合并；未吸收口径下必填）。
+/// - `unabsorbed_only`: false = 直查最近摘要口径（按创建时间倒序；桌面）；
 ///   true = 只读未吸收摘要（按 persona 全量取回后分页）。
-/// - `limit`: 返回条数上限（缺省 200；桌面口径再按 1000 截断）。
+/// - `limit`: 返回条数上限（缺省 200；直查口径再按 1000 截断）。
 /// - `offset`: 分页偏移（缺省 0）。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct L1BrowseRequest {
@@ -53,7 +53,8 @@ pub struct L1MemoryView {
 /// L1 记忆浏览响应。
 ///
 /// 字段约定:
-/// - `total`: 排序后、分页前的条数（调用方据此判断是否还有下一页）。
+/// - `total`: 排序后、分页前的条数（调用方据此判断是否还有下一页）；未吸收口径为精确计数，
+///   直查口径按 `offset + limit + 1` 收敛（等于上限即表示还有更多，不承担精确计数语义）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct L1BrowsePage {
     pub items: Vec<L1MemoryView>,

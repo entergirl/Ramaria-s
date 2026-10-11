@@ -214,10 +214,37 @@ var RamariaSettingsView = (function () {
             '</div>';
 
         section.appendChild(card);
+
+// ── 图片理解：模型能力声明（勾选后才出现单批理解上限）──
+        var visionCard = document.createElement('div');
+        visionCard.className = 'settings-card';
+        visionCard.id = 'settings-vision-card';
+        visionCard.innerHTML =
+            '<div class="settings-form-group">' +
+                '<label class="settings-form-label">' +
+                    '<input type="checkbox" id="settings-vision-enabled" /> ' +
+                    '模型支持图片理解' +
+                '</label>' +
+                '<div class="settings-form-hint">' +
+                    '显式声明当前对话模型可识图（线上模型会产生图片外发请求）；' +
+                    '关闭时导入的图片整体跳过，仅保留 [图片#hash] 占位符。' +
+                '</div>' +
+            '</div>' +
+            '<div class="settings-form-group hidden" id="settings-vision-batch-group">' +
+                '<label class="settings-form-label">单批理解上限（张）</label>' +
+                '<input class="settings-form-input" id="settings-vision-batch-limit" type="number" min="0" />' +
+                '<div class="settings-form-hint">单次理解批次处理的图片数量上限；0 = 不限。</div>' +
+            '</div>' +
+            '<div class="settings-save-hint">' +
+                '<button class="btn btn-primary btn-sm" id="settings-save-vision">保存图片理解设置</button>' +
+            '</div>';
+        section.appendChild(visionCard);
+
         parent.appendChild(section);
 
- // 事件绑定
+// 事件绑定
         _bindBackendEvents();
+        _bindVisionEvents();
     }
 
     function _bindBackendEvents() {
@@ -329,9 +356,137 @@ var RamariaSettingsView = (function () {
         }
     }
 
- // =========================================================
- // 嵌入模型配置区块
- // =========================================================
+// =========================================================
+// 图片理解（后端能力声明）
+// =========================================================
+
+    /**
+     * 「图片理解」字段元数据（默认值与类型）。
+     *
+     * 字段约定:
+     * - `path`: 组内相对路径；完整配置路径 = ['vision'].concat(path)。
+     * - `def`: 默认值，与 `config/default.toml` 的 `[vision]` 组逐键一致（回归测试锁定）。
+     *
+     * 说明:
+     * - 界面控件按此元数据维护默认值与文案；本数组供默认值一致性回归读取（不参与渲染）。
+     */
+    var _VISION_FIELDS = [
+        { path: ['model_supports_vision'], type: 'bool', def: false },
+        { path: ['batch_limit'], type: 'number', min: 0, def: 0 },
+    ];
+
+    /**
+     * 绑定图片理解区块事件。
+     *
+     * 交互:
+     * - 勾选「模型支持图片理解」后才显示「单批理解上限」输入框（与既有高级设置控件形态一致）；
+     * - 保存经 `update_full_config` 统一写入口双写（与高级设置的同一组配置键）。
+     */
+    function _bindVisionEvents() {
+        var enabledBox = $('settings-vision-enabled');
+        if (enabledBox) {
+            enabledBox.addEventListener('change', _syncVisionBatchVisibility);
+        }
+        var saveBtn = $('settings-save-vision');
+        if (saveBtn) {
+            saveBtn.addEventListener('click', _handleSaveVision);
+        }
+    }
+
+    /**
+     * 单批理解上限输入组随能力声明勾选状态显示 / 隐藏。
+     */
+    function _syncVisionBatchVisibility() {
+        var enabledBox = $('settings-vision-enabled');
+        var batchGroup = $('settings-vision-batch-group');
+        if (!enabledBox || !batchGroup) return;
+        batchGroup.classList.toggle('hidden', !enabledBox.checked);
+    }
+
+    /**
+     * 回显图片理解配置（能力声明 + 单批上限）。
+     */
+    function _fillVisionForm(config) {
+        if (!config || !config.vision) return;
+
+        var enabledBox = $('settings-vision-enabled');
+        var batchInput = $('settings-vision-batch-limit');
+        if (enabledBox) enabledBox.checked = config.vision.model_supports_vision === true;
+        if (batchInput) batchInput.value = config.vision.batch_limit;
+
+        _syncVisionBatchVisibility();
+    }
+
+    /**
+     * 收集并校验图片理解表单值。
+     *
+     * 校验:
+     * - 单批上限为 ≥ 0 的整数（留空按 0 = 不限）；
+     * - 能力声明关闭时不校验输入框（上限值不参与写入，重新开启后沿用原值）。
+     *
+     * 返回:
+     * - `{ enabled, batchLimit }`（校验通过；`batchLimit` 仅能力开启时有意义）；
+     * - `{ error }`（校验失败，调用方提示）。
+     */
+    function _collectVisionValues() {
+        var enabledBox = $('settings-vision-enabled');
+        var batchInput = $('settings-vision-batch-limit');
+        var enabled = !!(enabledBox && enabledBox.checked);
+
+        var batchLimit = 0;
+        var raw = batchInput ? String(batchInput.value).trim() : '';
+        if (enabled && raw !== '') {
+            batchLimit = parseInt(raw, 10);
+            if (isNaN(batchLimit) || batchLimit < 0) {
+                return { error: '单批理解上限需为 ≥ 0 的整数（0 = 不限）' };
+            }
+        }
+        return { enabled: enabled, batchLimit: batchLimit };
+    }
+
+    /**
+     * 把图片理解表单值合并进完整配置（纯函数：不修改入参，返回新配置）。
+     *
+     * 说明:
+     * - 能力声明关闭时只关声明、保留已配置的单批上限（重新开启后沿用）。
+     */
+    function _applyVisionFormToConfig(config, values) {
+        var cfg = JSON.parse(JSON.stringify(config));
+        if (!cfg.vision) cfg.vision = {};
+        cfg.vision.model_supports_vision = !!values.enabled;
+        if (values.enabled) cfg.vision.batch_limit = values.batchLimit;
+        return cfg;
+    }
+
+    /**
+     * 保存图片理解配置（能力声明 + 单批上限）。
+     */
+    async function _handleSaveVision() {
+        try {
+            if (!_fullConfig) {
+                throw new Error('配置未加载，请刷新设置页后重试');
+            }
+
+            var collected = _collectVisionValues();
+            if (collected.error) {
+                RamariaToast.show('warning', collected.error);
+                return;
+            }
+
+            var cfg = _applyVisionFormToConfig(_fullConfig, collected);
+            var result = await RamariaApi.config.updateFull(cfg);
+            if (!_handleUpdateFullResult(result, '图片理解设置已保存')) {
+                throw new Error('配置双写均失败');
+            }
+            _fullConfig = cfg;
+        } catch (err) {
+            RamariaToast.show('error', '保存失败', err.message || '未知错误');
+        }
+    }
+
+// =========================================================
+// 嵌入模型配置区块
+// =========================================================
 
     function _renderEmbeddingSection(parent) {
         var section = document.createElement('div');
@@ -3333,16 +3488,6 @@ var RamariaSettingsView = (function () {
             ],
         },
         {
-            key: 'vision',
-            section: ['vision'],
-            title: '🖼️ 图片理解（vision）',
-            desc: '导入聊天记录中图片的理解开关与批次上限；需要当前对话模型支持图片识别，线上模型会产生图片外发请求。',
-            fields: [
-                { path: ['model_supports_vision'], label: '模型支持图片识别', type: 'bool', def: false, hint: '显式声明当前对话模型可识图；关闭时图片理解整体跳过（保留占位符）' },
-                { path: ['batch_limit'], label: '单批理解上限（张）', type: 'number', min: 0, def: 0, hint: '单次理解批次处理的图片数量上限；0 = 不限' },
-            ],
-        },
-        {
             key: 'channel',
             section: ['channel'],
             title: '💬 社交通道（QQ / Telegram）',
@@ -3993,6 +4138,7 @@ var RamariaSettingsView = (function () {
                  _fillSessionForm(_fullConfig);
                  _fillProactiveForm(_fullConfig);
                  _fillMemoryInjectionForm(_fullConfig);
+                 _fillVisionForm(_fullConfig);
                  _fillDataDirForm(_fullConfig);
                  _fillMcpForm(_fullConfig);
                  _fillAdvancedForms(_fullConfig);
@@ -4061,6 +4207,43 @@ var RamariaSettingsView = (function () {
          */
         getMcpFields: function () {
             return JSON.parse(JSON.stringify(_MCP_FIELDS));
+        },
+        /**
+         * 图片理解字段元数据快照（深拷贝，只读）。
+         *
+         * 用途:
+         * - 默认值一致性回归（与 `config/default.toml` 的 `[vision]` 组逐键比对）；
+         * - 排障时查看面板认识的配置键与默认值。
+         *
+         * 返回:
+         * - `_VISION_FIELDS` 的深拷贝；字段 `path` 为组内相对路径（前缀 `vision`）。
+         */
+        getVisionFields: function () {
+            return JSON.parse(JSON.stringify(_VISION_FIELDS));
+        },
+        /**
+         * 图片理解表单回显（供回归测试直接驱动）。
+         */
+        fillVisionForm: function (config) {
+            return _fillVisionForm(config);
+        },
+        /**
+         * 单批上限输入组显隐同步（供回归测试直接驱动）。
+         */
+        syncVisionBatchVisibility: function () {
+            return _syncVisionBatchVisibility();
+        },
+        /**
+         * 图片理解表单值收集与校验（纯读取，供回归测试直接驱动）。
+         */
+        collectVisionValues: function () {
+            return _collectVisionValues();
+        },
+        /**
+         * 图片理解表单值合并完整配置（纯函数，供回归测试直接驱动）。
+         */
+        applyVisionFormToConfig: function (config, values) {
+            return _applyVisionFormToConfig(config, values);
         },
         /**
          * 生成 MCP 挂载配置片段（纯函数，只读）。

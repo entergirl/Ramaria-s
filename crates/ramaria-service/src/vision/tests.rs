@@ -15,11 +15,12 @@ use ramaria_core::config::RamariaConfig;
 use ramaria_core::traits::{StoreCrud, StoreInfrastructure};
 use ramaria_core::types::{
     AttachmentStatus, BackendConfig, InboundAttachmentKind, Message, MessageAttachment,
-    MessageRole, MessageSource, now_ms,
+    MessageRole, MessageSource, PrivacyConsent, now_ms,
 };
 use ramaria_storage::SqliteStorage;
 use uuid::Uuid;
 
+use super::prepare::{image_mime_for, image_mime_from_bytes};
 use super::*;
 use crate::engine::Engine;
 use crate::test_support::{MockLlm, engine_with_shared_llm};
@@ -896,5 +897,200 @@ async fn understand_downloaded_image_skips_invalid_sizes() {
     let rows = load_attachments(&storage, big_msg).await;
     assert_eq!(rows[0].status, AttachmentStatus::Skipped);
     assert_eq!(llm.vision_call_count(), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// =========================================================
+// 输入准备（线上 / 本地 provider 口径）
+// =========================================================
+
+/// 生成指定尺寸的真实 JPEG 字节（横向渐变，避免退化为单色块）。
+fn jpeg_bytes(width: u32, height: u32) -> Vec<u8> {
+    use image::{DynamicImage, ImageBuffer, ImageFormat, Rgb};
+
+    let image: ImageBuffer<Rgb<u8>, Vec<u8>> =
+        ImageBuffer::from_fn(width, height, |x, _| Rgb([(x % 256) as u8, 120, 60]));
+    let mut buffer = Vec::new();
+    DynamicImage::ImageRgb8(image)
+        .write_to(&mut std::io::Cursor::new(&mut buffer), ImageFormat::Jpeg)
+        .expect("编码 JPEG 应成功");
+    buffer
+}
+
+/// 期望的原字节透传 data URI。
+fn original_data_uri(mime: &str, bytes: &[u8]) -> String {
+    format!("data:{};base64,{}", mime, base64_encode(bytes))
+}
+
+/// 线上 provider 口径的引擎（库内后端配置为 DeepSeek 且隐私已确认）。
+async fn online_vision_engine(
+    tag: &str,
+    llm: Arc<MockLlm>,
+) -> (Engine, Arc<SqliteStorage>, PathBuf) {
+    let (engine, storage, dir) = vision_engine(tag, llm, vision_on_config()).await;
+    let backend = BackendConfig::deepseek_default();
+    storage
+        .save_backend_config(&backend)
+        .await
+        .expect("写入后端配置应成功");
+    storage
+        .save_privacy_consent(&PrivacyConsent::new(
+            backend.provider,
+            backend.base_url.clone(),
+            true,
+        ))
+        .await
+        .expect("写入隐私确认应成功");
+    (engine, storage, dir)
+}
+
+/// 批量路径：线上 provider 越界长图缩放后送出（行 done，不 failed / skipped）。
+#[tokio::test]
+async fn understand_scales_oversized_image_for_online_provider() {
+    let llm = Arc::new(MockLlm::online().with_vision_reply("一张很长的聊天截图"));
+    let (engine, storage, dir) =
+        online_vision_engine("vision-online-scale", Arc::clone(&llm)).await;
+    let session = storage.create_session(None).await.expect("创建会话应成功");
+
+    let bytes = jpeg_bytes(120, 9000);
+    write_image(&dir, "resources/images/long.jpg", &bytes);
+    let message = seed_pending_attachment(
+        &storage,
+        session.id,
+        "resources/images/long.jpg",
+        Some("11111111111111111111111111111111"),
+    )
+    .await;
+
+    let stat = understand_attachments(&engine, &[session.id], &dir)
+        .await
+        .expect("理解任务应成功");
+    assert_eq!(stat.scanned, 1);
+    assert_eq!(stat.done, 1);
+    assert_eq!(stat.failed, 0);
+    assert_eq!(stat.skipped, 0, "越界长图应缩放而非跳过");
+
+    // 首次为能力探测，第二次为内容理解
+    let images = llm.vision_images();
+    assert_eq!(images.len(), 2);
+    assert!(images[1][0].starts_with("data:image/jpeg;base64,"));
+    assert_ne!(
+        images[1][0],
+        original_data_uri("image/jpeg", &bytes),
+        "越界长图应重编码后送出"
+    );
+
+    let rows = load_attachments(&storage, message).await;
+    assert_eq!(rows[0].status, AttachmentStatus::Done);
+    assert_eq!(rows[0].description.as_deref(), Some("一张很长的聊天截图"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 批量路径：线上 provider 不受支持格式跳过（仅探测调用，行 skipped）。
+#[tokio::test]
+async fn understand_skips_unsupported_format_for_online_provider() {
+    let llm = Arc::new(MockLlm::online().with_vision_reply("不应调用"));
+    let (engine, storage, dir) =
+        online_vision_engine("vision-online-unsupported", Arc::clone(&llm)).await;
+    let session = storage.create_session(None).await.expect("创建会话应成功");
+
+    write_image(&dir, "resources/images/raw.bin", b"II*\x00not-an-image");
+    let message = seed_pending_attachment(
+        &storage,
+        session.id,
+        "resources/images/raw.bin",
+        Some("22222222222222222222222222222222"),
+    )
+    .await;
+
+    let stat = understand_attachments(&engine, &[session.id], &dir)
+        .await
+        .expect("理解任务应成功");
+    assert_eq!(stat.scanned, 1);
+    assert_eq!(stat.skipped, 1);
+    assert_eq!(stat.failed, 0);
+    assert_eq!(stat.done, 0);
+    assert_eq!(llm.vision_call_count(), 1, "仅能力探测，无内容理解调用");
+
+    let rows = load_attachments(&storage, message).await;
+    assert_eq!(rows[0].status, AttachmentStatus::Skipped);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 批量路径：本地 provider 越界图原字节送出（不受线上约束）。
+#[tokio::test]
+async fn understand_keeps_oversized_image_for_local_provider() {
+    let llm = Arc::new(MockLlm::local().with_vision_reply("长图描述"));
+    let (engine, storage, dir) = vision_engine(
+        "vision-local-oversized",
+        Arc::clone(&llm),
+        vision_on_config(),
+    )
+    .await;
+    let session = storage.create_session(None).await.expect("创建会话应成功");
+
+    let bytes = jpeg_bytes(120, 9000);
+    write_image(&dir, "resources/images/long.jpg", &bytes);
+    let message = seed_pending_attachment(
+        &storage,
+        session.id,
+        "resources/images/long.jpg",
+        Some("33333333333333333333333333333333"),
+    )
+    .await;
+
+    let stat = understand_attachments(&engine, &[session.id], &dir)
+        .await
+        .expect("理解任务应成功");
+    assert_eq!(stat.done, 1);
+
+    let images = llm.vision_images();
+    assert_eq!(images.len(), 2);
+    assert_eq!(
+        images[1][0],
+        original_data_uri("image/jpeg", &bytes),
+        "本地 provider 应原字节透传"
+    );
+
+    let rows = load_attachments(&storage, message).await;
+    assert_eq!(rows[0].status, AttachmentStatus::Done);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 现场路径：线上 provider 越界字节缩放后送出（行 done）。
+#[tokio::test]
+async fn understand_downloaded_image_scales_oversized_for_online() {
+    let llm = Arc::new(MockLlm::online().with_vision_reply("长图描述"));
+    let (engine, storage, dir) =
+        online_vision_engine("vision-online-channel-scale", Arc::clone(&llm)).await;
+    let session = storage.create_session(None).await.expect("创建会话应成功");
+
+    let md5 = "44444444444444444444444444444444";
+    let message = seed_pending_attachment(
+        &storage,
+        session.id,
+        "https://multimedia.example/long.jpg",
+        Some(md5),
+    )
+    .await;
+    let attachment_id = load_attachments(&storage, message).await[0].id;
+
+    let bytes = jpeg_bytes(120, 9000);
+    let outcome = engine
+        .channel_understand_image(attachment_id, md5, &bytes)
+        .await
+        .expect("现场理解应成功");
+    assert_eq!(outcome, ChannelImageOutcome::Done);
+
+    let images = llm.vision_images();
+    assert_eq!(images.len(), 2);
+    assert_ne!(
+        images[1][0],
+        original_data_uri("image/jpeg", &bytes),
+        "线上 provider 越界字节应重编码后送出"
+    );
+
+    let rows = load_attachments(&storage, message).await;
+    assert_eq!(rows[0].status, AttachmentStatus::Done);
     let _ = std::fs::remove_dir_all(&dir);
 }

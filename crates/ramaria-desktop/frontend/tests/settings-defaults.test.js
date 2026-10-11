@@ -386,19 +386,21 @@ test('主动对话组：22 键齐全且默认值类型正确', () => {
 });
 
 // =========================================================
-// 图片理解组（v2.6）：2 键齐全 + 默认值类型 + 模板收录
+// 图片理解（后端配置面板）：2 键齐全 + 默认值类型 + 模板收录
 // =========================================================
 
-test('图片理解组：2 键齐全且默认值类型正确', () => {
-  const vision = groups.find((g) => g.key === 'vision');
-  assert.ok(vision, '应存在 vision 组');
-  assert.deepEqual(vision.section, ['vision']);
+test('图片理解：2 键齐全、默认值与模板一致且不重复登记到高级设置', () => {
+  if (typeof settingsView.getVisionFields !== 'function') {
+    throw new Error('settings.js 未暴露 getVisionFields()');
+  }
 
   const expected = ['vision.model_supports_vision', 'vision.batch_limit'];
-  const visionFields = flattenFields([vision]);
+  const visionFields = flattenFields([
+    { key: 'vision', section: ['vision'], fields: settingsView.getVisionFields() },
+  ]);
   assert.deepEqual(Object.keys(visionFields).sort(), expected.slice().sort());
 
-  // 每键必须被 config/default.toml 收录（未收录会让"逐键一致"用例静默跳过，漂移不可见）
+  // 每键必须被 config/default.toml 收录（未收录会让逐键比对静默跳过，漂移不可见）
   const missing = expected.filter(
     (key) => getByPath(templateConfig, key.split('.')) === undefined
   );
@@ -409,6 +411,23 @@ test('图片理解组：2 键齐全且默认值类型正确', () => {
   assert.equal(visionFields['vision.model_supports_vision'].def, false);
   assert.equal(visionFields['vision.batch_limit'].type, 'number');
   assert.equal(visionFields['vision.batch_limit'].def, 0);
+  assert.equal(
+    visionFields['vision.model_supports_vision'].def,
+    getByPath(templateConfig, ['vision', 'model_supports_vision']),
+    '能力声明默认值应与模板一致'
+  );
+  assert.equal(
+    visionFields['vision.batch_limit'].def,
+    getByPath(templateConfig, ['vision', 'batch_limit']),
+    '单批上限默认值应与模板一致'
+  );
+
+  // 已下沉到基础设置「后端配置」：高级设置不再重复登记同组键
+  assert.equal(
+    groups.find((g) => g.key === 'vision'),
+    undefined,
+    '高级设置不应再登记 vision 组'
+  );
 });
 
 // =========================================================

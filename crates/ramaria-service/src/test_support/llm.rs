@@ -28,7 +28,7 @@ use ramaria_core::types::{BackendConfig, ModelCapability};
 /// - [`MockLlm::failing`]：生成调用恒失败（模拟后端不可用，覆盖降级与"不落半条"路径）；
 /// - [`MockLlm::online`]：线上 provider（DeepSeek）口径的 mock（本地不发网络请求）；
 /// - [`MockLlm::with_health_failures`]：健康探测前 N 次失败（模拟后端启动中，覆盖探测重试）；
-/// - `chat_vision`：按覆写回复 / 剩余失败次数返回（图片理解链路；默认成功）。
+/// - `chat_vision`：按覆写回复 / 剩余失败次数返回，并记录收到的图片 data URI（图片理解链路）。
 pub(crate) struct MockLlm {
     backend: BackendConfig,
     reply: Option<String>,
@@ -50,6 +50,8 @@ pub(crate) struct MockLlm {
     vision_failures: std::sync::atomic::AtomicUsize,
     /// 图片理解调用计数（含探测与内容理解；是否成功均计入）。
     vision_calls: std::sync::atomic::AtomicUsize,
+    /// 图片理解收到的 data URI 序列（按调用顺序；供输入准备口径断言使用）。
+    vision_images: std::sync::Mutex<Vec<Vec<String>>>,
     /// 调用序列记录（按发生顺序；`"chat"` = 文本生成，`"chat_vision"` = 图片理解）。
     call_log: Arc<std::sync::Mutex<Vec<&'static str>>>,
 }
@@ -69,6 +71,7 @@ impl MockLlm {
             vision_reply: None,
             vision_failures: std::sync::atomic::AtomicUsize::new(0),
             vision_calls: std::sync::atomic::AtomicUsize::new(0),
+            vision_images: std::sync::Mutex::new(Vec::new()),
             call_log: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
@@ -87,6 +90,7 @@ impl MockLlm {
             vision_reply: None,
             vision_failures: std::sync::atomic::AtomicUsize::new(0),
             vision_calls: std::sync::atomic::AtomicUsize::new(0),
+            vision_images: std::sync::Mutex::new(Vec::new()),
             call_log: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
@@ -105,6 +109,7 @@ impl MockLlm {
             vision_reply: None,
             vision_failures: std::sync::atomic::AtomicUsize::new(0),
             vision_calls: std::sync::atomic::AtomicUsize::new(0),
+            vision_images: std::sync::Mutex::new(Vec::new()),
             call_log: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
@@ -123,6 +128,7 @@ impl MockLlm {
             vision_reply: None,
             vision_failures: std::sync::atomic::AtomicUsize::new(0),
             vision_calls: std::sync::atomic::AtomicUsize::new(0),
+            vision_images: std::sync::Mutex::new(Vec::new()),
             call_log: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
@@ -177,6 +183,14 @@ impl MockLlm {
     /// 图片理解调用次数（含探测与内容理解；成功与失败均计入）。
     pub(crate) fn vision_call_count(&self) -> usize {
         self.vision_calls.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// 图片理解收到的 data URI 副本（按调用顺序；首个为能力探测请求）。
+    pub(crate) fn vision_images(&self) -> Vec<Vec<String>> {
+        self.vision_images
+            .lock()
+            .expect("MockLlm 的图片记录锁不应中毒")
+            .clone()
     }
 
     /// 调用序列副本（按发生顺序；`"chat"` = 文本生成，`"chat_vision"` = 图片理解）。
@@ -281,11 +295,15 @@ impl LlmProvider for MockLlm {
     async fn chat_vision(
         &self,
         _request: &ChatRequest,
-        _image_data_uris: &[String],
+        image_data_uris: &[String],
     ) -> RamariaResult<String> {
         use std::sync::atomic::Ordering;
 
         self.vision_calls.fetch_add(1, Ordering::Relaxed);
+        self.vision_images
+            .lock()
+            .expect("MockLlm 的图片记录锁不应中毒")
+            .push(image_data_uris.to_vec());
         self.call_log
             .lock()
             .expect("MockLlm 的调用序列锁不应中毒")
