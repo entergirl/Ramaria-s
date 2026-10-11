@@ -1,11 +1,11 @@
 # Ramaria CLI 使用指南
 
-> 版本：2.5（命令参考覆盖 setup / ask / chat / memory / blocks / index / import / export / session / config / persona / rule / style / fact / keyword / diagnostics / status / probe / mcp 共 19 个子命令）
+> 版本：2.7（命令参考覆盖 setup / ask / chat / memory / blocks / index / import / export / session / config / persona / rule / style / fact / keyword / channel / diagnostics / status / probe / mcp 共 20 个子命令）
 > 适用平台：Windows / macOS / Linux（Windows 首发）
 
 ## 概述
 
-`ramaria` 是 Ramaria 的命令行入口，支持对话、记忆查询（L1/L2/L3）、话语块管理（blocks）、索引管理、会话管理、配置修改、人格管理、行为规则管理（rule）、风格统计（style）、知识事实查询（fact）、关键词词典管理（keyword）、数据导入/导出、诊断导出、状态探活（status）、探针实验（probe）与 MCP 服务端（`mcp serve`）。
+`ramaria` 是 Ramaria 的命令行入口，支持对话、记忆查询（L1/L2/L3）、话语块管理（blocks）、索引管理、会话管理、配置修改、人格管理、行为规则管理（rule）、风格统计（style）、知识事实查询（fact）、关键词词典管理（keyword）、社交通道维护（channel）、数据导入/导出、诊断导出、状态探活（status）、探针实验（probe）与 MCP 服务端（`mcp serve`）。
 
 首次使用前需运行首次配置向导（`ramaria setup`）。**CLI 与桌面应用的数据目录相互独立**：CLI 的数据库由 `--db` 指定（默认 `data/ramaria_assistant.db`，`RAMARIA_DB_PATH` 覆盖）；桌面应用开发模式（`cargo tauri dev`）使用 `crates/ramaria-desktop/.ramaria-dev/`、生产模式使用 `%APPDATA%\Ramaria\data\`；API key 均保存在 Windows Credential Manager（不落盘）。
 
@@ -611,10 +611,29 @@ ramaria keyword alias reject "摸鱼"         # 驳回别名（pending → 独�
 ramaria --db <库路径> mcp serve
 ```
 
-- `mcp serve`：启动 stdio 服务端（六个工具：`memory_recall` / `chat_send` / `chat_ingest` / `persona_list` / `persona_get` / `chat_history`）；`--db` 须置于子命令之前。
+- `mcp serve`：启动 stdio 服务端（七个工具：`memory_recall` / `chat_send` / `chat_ingest` / `persona_list` / `persona_get` / `chat_history` / `privacy_confirm`）；`--db` 须置于子命令之前。
 - 门禁与策略取自 `[mcp]` 配置组（默认关闭）：`enabled` / `allow_ingest` / `allow_seal` / `allowed_personas` / `allow_raw_text` / `max_items` / `max_chars`；配置在进程启动时读取，修改后需重连（重启）客户端侧连接。
 - stdout 仅承载协议消息，日志全部走 stderr；退出（传输关闭 / Ctrl+C）时优雅关停空闲检查与在途封存（最多等待 15 秒）。
 - 客户端配置片段（通用 `mcpServers` JSON 与 DeepSeek Harness 插件 patch）可在桌面「设置 → MCP 接入」一键复制。
+- `privacy_confirm`（v2.7 新增工具）：为当前线上后端记录隐私确认（按 provider + 服务地址粒度、幂等覆盖；本地 provider 调用为无操作；返回不含 API key）。
+
+---
+
+### `ramaria channel` — 社交通道（v2.7）
+
+查看与维护社交平台（QQ / Telegram）配置与绑定。**连接由桌面应用托管**（随桌面启停），CLI 只做配置与绑定维护，不建立连接。
+
+```
+ramaria --db <库路径> channel status
+ramaria --db <库路径> channel bindings
+ramaria --db <库路径> channel bind <qq|telegram> <外部会话标识> [--persona rama-0001] [--enable|--disable] [--allow-proactive|--deny-proactive]
+```
+
+- `channel status`：通道配置摘要与凭据配置状态（总开关 / 平台开关 / WebSocket 地址 / 凭据是否已配置）；**运行连接态只在桌面侧可见**。
+- `channel bindings`：列出全部绑定（外部会话 ↔ 本机侧人格 / 启用 / 允许主动 / 时间戳）。
+- `channel bind`：写入或更新绑定（不存在则自动建档）；外部会话标识形如 `c2c:10001`（私聊）/ `group:123456`（群聊）；`--persona` 缺省保持现值，`--enable` / `--disable` 与 `--allow-proactive` / `--deny-proactive` 成对互斥。
+- 凭据（QQ access token / Telegram bot token）**不提供 CLI 明文传参入口**——请在桌面「设置 → 通道」填写（存 Windows 凭据管理器）；配置或凭据改动后需在桌面重新启停通道生效。
+- 接入步骤、风控声明与故障排查见 `desktop-user-guide.md`「社交平台接入」章节。
 
 ---
 
@@ -711,8 +730,9 @@ CLI 命名与输出约定变更（v1.5 起因"自动化友好改造"引入，后
 | 风格规则注入 | **v1.7 M2 新增（A3）**：自动风格统计生成 SpeakingStyle 规则注入对话 prompt（`[style]` 配置，关闭回退 v1.6）；无需新 CLI 命令 |
 | 弱反馈闭环 | **v1.7 M4 新增（H2）**：S2/S3 弱信号检测写入 `feedback_log`（默认仅审计不自动改动）；无需新 CLI 命令 |
 | `import qq --file` 中文路径 | **v1.7 M0 修复**：文件路径参数改 `PathBuf`/`OsString` 承载，中文文件名导入冒烟通过 |
-| `mcp serve` | **v2.1 新增 MCP 服务端入口**：`ramaria mcp serve` 以 stdio 启动 MCP 服务端（六个工具，沿用全局 `--db`）；stdout 仅协议消息、日志走 stderr；桌面「设置 → MCP 接入」提供客户端配置片段，详见上文 `mcp` 章节 |
+| `mcp serve` | **v2.1 新增 MCP 服务端入口**：`ramaria mcp serve` 以 stdio 启动 MCP 服务端（v2.1 起六个工具，**v2.7 起七个**——新增 `privacy_confirm`，沿用全局 `--db`）；stdout 仅协议消息、日志走 stderr；桌面「设置 → MCP 接入」提供客户端配置片段，详见上文 `mcp` 章节 |
 | `probe baseline` | **v2.5 新增只读取数**：主动对话投递 / 回应 / 判据计数与配置口径快照（`--window-hours` 默认 24，`0` = 不限窗口）；只读、不回写、不建表。详见上文 `probe` 章节 |
+| `channel` | **v2.7 新增社交通道维护命令**：`status` / `bindings` / `bind`（连接由桌面托管，CLI 不建立连接）；子命令 19 → 20。详见上文 `channel` 章节 |
 
 ---
 

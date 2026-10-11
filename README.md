@@ -41,6 +41,7 @@ Ramaria（珊瑚菌）正是为解决这一问题而设计。它是一款运行�
 | **未读标记** | 会话列表未读计数、打开即已读、托盘未读数字徽标，不错过主动消息 |
 | **自动形成个人档案** | 从日常对话中归纳性格、习惯与关注点，无需手动填写资料 |
 | **导入聊天记录并建立画像** | 支持导入 QQ 聊天记录，自动为对话参与者建立独立的记忆与人格画像 |
+| **接入 QQ 与 Telegram（v2.7）** | 把 Ramaria 接入你的 QQ（NapCat 等 OneBot v11 协议端）或 Telegram bot：私聊直接聊、群聊被 @ 才开口，图片自动理解并记住；默认关闭，凭据交系统凭据管理器保管 |
 | **记忆全程可见、可追溯** | 每段对话小结、重要事件与性格判断都可在「记忆」页查看，并能回溯到原始对话 |
 | **隐私优先** | 数据默认留在本机；本地模型模式下完全离线；API 密钥交由 Windows 系统保管 |
 | **原生桌面应用** | 双击安装、中文界面、系统托盘常驻，全部操作无需命令行 |
@@ -219,15 +220,16 @@ Ramaria 本身免费开源（MIT 协议）。费用仅来自所选的模型后�
 采用「本地推理 + 云端辅助」混合架构，SQLite 全部本地存储，LLM 调用对三后端透明。
 
 ```
-Tauri 桌面应用 / CLI                            MCP 客户端（CodeBuddy / Trae / dsh 等）
+Tauri 桌面应用 / CLI（桌面装配社交通道）           MCP 客户端（CodeBuddy / Trae / dsh 等）
     ↓↑ Command / 函数调用                                ↓ stdio
-    │                                          ramaria-mcp     MCP 协议壳（六个工具）
+    │                                          ramaria-mcp     MCP 协议壳（七个工具）
     │                                                ↓
     └───────────────────────────────────→ ramaria-service  唯一能力层（召回 / 生成 / 写入 / 封存 / 会话生命周期）
     ├── ramaria-memory     记忆管线（L0→L3）+ 混合 RAG + 性格推断（Phase A/B/C）
     ├── ramaria-llm        LLM Provider（LM Studio / DeepSeek / OpenAI）
     ├── ramaria-importer   聊天记录导入（QQ 解析 + 双模式导入）
-    ├── ramaria-storage    SQLite（27 张表，Repository 模式）
+    ├── ramaria-channel    社交通道（QQ / Telegram 协议壳 + 运行时）
+    ├── ramaria-storage    SQLite（30 张表，Repository 模式）
     └── ramaria-core       核心类型 & Trait（零 I/O）
 ```
 
@@ -239,13 +241,14 @@ Tauri 桌面应用 / CLI                            MCP 客户端（CodeBuddy / 
 | 模块 | 技术选型 | 职责 |
 |------|----------|------|
 | **ramaria-core** | 纯 Rust 类型系统 | 核心类型 + 配置 + 错误体系 + StorageBackend 契约（StoreCrud / StoreInfrastructure 分组）+ LlmProvider / EmbeddingProvider trait |
-| **ramaria-storage** | SQLite（sqlx） | 27 张表 schema、21 个 Repository、手动行映射避免 derive 侵入 |
+| **ramaria-storage** | SQLite（sqlx） | 30 张表 schema、23 个 Repository、手动行映射避免 derive 侵入 |
 | **ramaria-memory** | 自研管线 | 分层摘要→事件提取→性格推断、向量+BM25+图谱+关键词镜像多通道 RAG、Ebbinghaus 衰减、RRF 融合、Token Budgeting |
 | **ramaria-llm** | reqwest + candle | 3 后端适配器、SSE 流式传输、API Key 凭据管理器、指数退避重试、原生 safetensors 嵌入（bge-small-zh-v1.5 / Qwen3-Embedding-0.6B，CUDA 优先） |
 | **ramaria-importer** | encoding_rs + sha2 | QQ 聊天记录解析（QQChatExporter v6.x JSON，流式解析）、快速/深度双模式、双画像自动创建、指纹去重 |
 | **ramaria-service** | 纯 Rust 用例层 | 记忆服务化能力出口：召回装配、会话解析与封存、外部写入、人格读取、空闲检查（与传输无关，桌面与 MCP 共用） |
-| **ramaria-mcp** | rmcp（stdio） | MCP 协议壳：六个工具的 schema、门禁与白名单前置校验、结果包装（isError）；不含业务逻辑 |
-| **ramaria-cli** | clap derive | 19 个子命令、交互式 REPL、`--json` 信封、色彩输出 |
+| **ramaria-mcp** | rmcp（stdio） | MCP 协议壳：七个工具的 schema、门禁与白名单前置校验、结果包装（isError）；不含业务逻辑 |
+| **ramaria-channel** | tokio-tungstenite + reqwest | 社交通道协议壳与运行时：QQ（OneBot v11 正向 WS）/ Telegram（Bot API 长轮询）传输、图片下载组装、单事件编排、主动投递路由；业务语义一律经服务层 |
+| **ramaria-cli** | clap derive | 20 个子命令、交互式 REPL、`--json` 信封、色彩输出 |
 | **ramaria-desktop** | Tauri 2 | 原生窗口、系统托盘、通知、CSP、Markdown 渲染、前端 JS（8 个视图，含规则/调试） |
 
 **依赖关系（自底向上）**
@@ -258,8 +261,9 @@ ramaria-core         零依赖，纯类型边界
   └── ramaria-memory     依赖 core + storage
         └── ramaria-service      依赖 core + storage + memory + llm（+ importer，feature 启用）
               ├── ramaria-cli         依赖 service + core + storage + memory + mcp + importer
-              ├── ramaria-desktop     依赖 service + core + importer
-              └── ramaria-mcp         依赖 service + core
+              ├── ramaria-desktop     依赖 service + core + importer + channel
+              ├── ramaria-mcp         依赖 service + core
+              └── ramaria-channel     依赖 service + core（硬约束：service 禁止反向依赖 channel）
 ```
 
 </details>
@@ -335,13 +339,14 @@ L0 原始消息（永久保留，不删除，不过滤，标记发言人）
 ```
 crates/
 ├── ramaria-core/          # 核心类型 & Trait（零 I/O）
-├── ramaria-storage/       # SQLite 存储层（27 张表，21 个 Repository）
+├── ramaria-storage/       # SQLite 存储层（30 张表，23 个 Repository）
 ├── ramaria-memory/        # 记忆管线 + RAG + 性格推断
 ├── ramaria-llm/           # LLM Provider（LM Studio / DeepSeek / OpenAI）
 ├── ramaria-importer/      # QQ 聊天记录导入
 ├── ramaria-service/       # 唯一能力层（用例：召回 / 生成 / 封存 / 会话生命周期）
-├── ramaria-mcp/           # MCP 协议壳（stdio，六个工具）
-├── ramaria-cli/           # CLI 入口（19 个子命令）
+├── ramaria-channel/       # 社交通道（QQ / Telegram 协议壳 + 运行时）
+├── ramaria-mcp/           # MCP 协议壳（stdio，七个工具）
+├── ramaria-cli/           # CLI 入口（20 个子命令）
 └── ramaria-desktop/       # Tauri 2 桌面应用
 config/
 ├── default.toml           # 默认配置模板
@@ -350,7 +355,7 @@ docs/                      # 用户文档
 tests/                     # 集成测试
 ```
 
-**规模统计**：9 个 crate（目录 / 模块 / 测试分布见 `../docs/architecture-ai-agent.md`）。
+**规模统计**：10 个 crate（目录 / 模块 / 测试分布见 `../docs/architecture-ai-agent.md`）。
 
 ### CLI 快速参考
 
@@ -370,6 +375,10 @@ ramaria memory l3    # 性格画像
 # 导入 QQ 聊天记录
 ramaria import qq --file chat.json --deep
 
+# 社交通道配置与绑定（连接由桌面托管）
+ramaria channel status
+ramaria channel bindings
+
 # 数据导出 / 诊断
 ramaria export --format markdown
 ramaria diagnostics --output diag.zip
@@ -381,7 +390,21 @@ ramaria diagnostics --output diag.zip
 
 ## 版本历史
 
-### v2.6.0 — 2026-10-10（当前版本，内部结构版本，不设发行版）
+### v2.7.0 — 2026-10-11（当前版本，发行 2.7.0）
+
+**「社交平台接入」**：把记忆系统接到真实社交场景——新增 **QQ（OneBot v11 正向 WebSocket，兼容 NapCat 等协议端）与 Telegram（Bot API 长轮询）双向通道**：收到消息即自动建档并归属发言人、私聊逐条响应 / 群聊仅被 @ 与回复时响应、图片自动下载并理解、封存时按"为谁生成谁即助手"为每个参与者生成各自视角的摘要；主动对话可投递到社交平台（通道 / 绑定 / 人格 / 全局多层开关，默认全关）。同批交付收口期三项修正（图片理解入口可达性、超长截图理解、记忆页摘要可见性）。**无破坏性变更**（一次纯增量 migration），旧数据直接可用；本版**发行 2.7.0**。
+
+**主要变化**：
+
+- 社交通道：QQ（OneBot v11 正向 WS，含 NapCat 配置指引与风控声明）/ Telegram（Bot API）双向接入；绑定模型（外部会话 ↔ 本机侧人格 + 启用 + 允许主动）、收到即自动建档、群聊仅 @ / 回复响应、图片现场理解、社交主动投递（默认关）
+- 桌面「设置 → 通道」：总开关与平台开关、连接状态与启停（连接随应用启停）、凭据（Windows 凭据管理器）、绑定管理
+- 命令行：新增 `ramaria channel status / bindings / bind`（子命令 19 → 20）；MCP 新增 `privacy_confirm` 工具（六个 → 七个）
+- 记忆：社交会话 L1 按「目标相对投影」逐参与者生成各自视角摘要（本地 / 导入路径零变化）
+- 修正（收口期）：图片理解能力声明入口下沉「设置 → 后端配置」并进入首次配置向导；越界长图（单边 > 8192 像素）自动缩放重编码后理解；记忆页 L1 摘要在大量导入会话下不再"看不到"
+- 工程（用户无感）：新增 `ramaria-channel` crate（9 → 10）；命令 60 → 65、事件 6 → 7（`channel-status`）、配置组 30 → 31（`[channel]`）、业务表 29 → 30（`channel_bindings`）、migration 7 → 8
+- 升级：无破坏性变更；一次纯增量 migration（新增通道绑定表与消息平台 ID 列）；社交接入默认全部关闭，不开启与 2.6 行为完全一致
+
+### v2.6.0 — 2026-10-10（内部结构版本，不设发行版）
 
 **「消息管理底层整合与升级」**：把消息底座一次做齐——导入链路引入入站规范模型（消息 / 发送者 / 附件统一表示），消息持久化新增发送者身份与会话成员表，新支持**群聊导入**（全发言者各建人格、摘要按块内参与者分发、事件与画像按人独立沉淀），图片消息登记为附件并支持"导入时理解、阅读时呈现"（按设置页能力声明与隐私门禁执行），导入后处理收敛为服务层单一入口。**无破坏性变更**（两次纯增量 migration），旧数据直接可用；本版不提供安装包（下载面维持 v2.5.0）。
 
