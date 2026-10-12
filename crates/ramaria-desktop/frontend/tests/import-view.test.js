@@ -1,15 +1,17 @@
 /**
- * tests/import-view.test.js — 导入向导群聊标注回归（node --test）
+ * tests/import-view.test.js — 导入向导群聊标注与继续处理统计回归（node --test）
  *
  * 目的:
  * - 锁定 `formatGroupMembers(members, limit)` 的展示约定：成员总数 + Top 成员列表，
  *   消息数降序（同数按名称升序）、超限时补「… 等共 N 人」；
+ * - 锁定 `formatContinueSummary(prog)` 的"继续处理"完成统计：三张卡片（重置附件 /
+ *   图片理解 / L1 补跑）、失败警告口径、null 与非法数字按 0 安全降级；
  * - 防御：非数组 / 空数组 / 元素缺字段 / message_count 非数字不抛异常、安全降级；
  * - XSS：成员名经 escapeHtml 转义后才进入 HTML。
  *
  * 说明:
  * - import.js 是浏览器 IIFE 视图；本测试用 vm 沙箱注入最小桩加载，
- *   只调用其公开纯函数 `formatGroupMembers`，不触碰 DOM、Store 与 Tauri。
+ *   只调用其公开纯函数，不触碰 DOM、Store 与 Tauri。
  * - RamariaEscape 从 utils/dom.js 原样加载进同一沙箱，转义断言针对真实实现。
  *
  * 运行: node --test "tests/*.test.js"
@@ -173,3 +175,49 @@ test('HTML 转义：引号与 & 一并转义', () => {
   const html = fmt([{ name: 'A & "B" <C>', message_count: 1 }]);
   assert.ok(html.includes('A &amp; &quot;B&quot; &lt;C&gt;'), `特殊字符应转义: ${html}`);
 });
+
+// =========================================================
+// 继续处理完成统计（formatContinueSummary）
+// =========================================================
+
+/** 调用被测函数（返回普通对象） */
+function cont(prog) {
+  return view.formatContinueSummary(prog);
+}
+
+test('继续处理统计：完整字段输出三张卡片且无警告', () => {
+  const summary = cont({ resetCount: 12, visionDone: 8, visionFailed: 0, l1Success: 30, l1Failed: 2 });
+
+  assert.equal(summary.stats.length, 3, `应有三张统计卡片: ${JSON.stringify(summary.stats)}`);
+  assert.equal(summary.stats[0].value, '12');
+  assert.equal(summary.stats[0].label, '重置待处理附件');
+  assert.equal(summary.stats[1].value, '8');
+  assert.equal(summary.stats[2].value, '30 / 32', `L1 成功数应为 成功/总数: ${summary.stats[2].value}`);
+  assert.equal(summary.l1Warning, true, '有 L1 失败时 l1Warning 应为 true');
+  assert.equal(summary.visionWarning, null, '无图片失败时不应有图片警告');
+});
+
+test('继续处理统计：空对象按 0 计且无警告', () => {
+  const summary = cont({});
+
+  assert.equal(summary.stats.map((s) => s.value).join(','), '0,0,0 / 0');
+  assert.equal(summary.l1Warning, false);
+  assert.equal(summary.visionWarning, null);
+});
+
+test('继续处理统计：null / 非法数字按 0 计不抛异常', () => {
+  const summary = cont({ resetCount: null, visionDone: undefined, visionFailed: 'x', l1Success: NaN, l1Failed: null });
+
+  assert.equal(summary.stats.map((s) => s.value).join(','), '0,0,0 / 0');
+  assert.equal(summary.l1Warning, false);
+  assert.equal(summary.visionWarning, null);
+  assert.equal(cont(null).stats.map((s) => s.value).join(','), '0,0,0 / 0', '缺参应安全降级');
+});
+
+test('继续处理统计：图片失败提示含具体数量', () => {
+  const summary = cont({ visionDone: 5, visionFailed: 3 });
+
+  assert.ok(typeof summary.visionWarning === 'string' && summary.visionWarning.includes('3'), `警告应含失败数: ${summary.visionWarning}`);
+  assert.equal(summary.l1Warning, false);
+});
+

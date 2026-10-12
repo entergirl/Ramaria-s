@@ -228,6 +228,49 @@ pub async fn mark_status(
     Ok(())
 }
 
+/// 把单行附件重置为 pending（供重新扫描）。
+///
+/// 口径:
+/// - 置 `status = 'pending'` 并刷新 `updated_at`；
+/// - `source_ref` 为 Some 时一并更新（定位修正后的引用），None 保持原值；
+/// - 幂等：对已 pending 行重复调用只刷新时间。
+///
+/// 参数:
+/// - `id`: 附件行 id。
+/// - `source_ref`: 重扫时的引用覆盖（None = 不改动）。
+pub async fn reset_for_rescan(
+    pool: &SqlitePool,
+    id: i64,
+    source_ref: Option<&str>,
+) -> RamariaResult<()> {
+    let now = ramaria_core::types::now_ms();
+    match source_ref {
+        Some(reference) => {
+            sqlx::query(
+                "UPDATE message_attachments \
+                 SET status = 'pending', source_ref = ?, updated_at = ? WHERE id = ?",
+            )
+            .bind(reference)
+            .bind(now)
+            .bind(id)
+            .execute(pool)
+            .await
+            .storage_err("重置附件待处理失败")?;
+        }
+        None => {
+            sqlx::query(
+                "UPDATE message_attachments SET status = 'pending', updated_at = ? WHERE id = ?",
+            )
+            .bind(now)
+            .bind(id)
+            .execute(pool)
+            .await
+            .storage_err("重置附件待处理失败")?;
+        }
+    }
+    Ok(())
+}
+
 // =========================================================
 // 查询
 // =========================================================
@@ -267,6 +310,70 @@ pub async fn list_pending_by_session(
     .storage_err("查询会话待处理附件失败")?;
 
     rows.into_iter().map(|row| row.into_attachment()).collect()
+}
+
+/// 全库按状态扫描附件（id 升序；分页口径与按会话扫描一致）。
+///
+/// 口径:
+/// - 仅返回指定状态的行，按附件 id 升序；
+/// - `limit = 0` 表示不限；`limit > 0` 时取前 limit 条。
+async fn list_all_by_status(
+    pool: &SqlitePool,
+    status: AttachmentStatus,
+    limit: u32,
+    context: &'static str,
+) -> RamariaResult<Vec<MessageAttachment>> {
+    let base =
+        format!("SELECT {COLUMNS} FROM message_attachments WHERE status = ? ORDER BY id ASC");
+    let rows = if limit == 0 {
+        sqlx::query_as::<_, AttachmentRow>(&base)
+            .bind(status.as_str())
+            .fetch_all(pool)
+            .await
+    } else {
+        sqlx::query_as::<_, AttachmentRow>(&format!("{base} LIMIT ?"))
+            .bind(status.as_str())
+            .bind(limit)
+            .fetch_all(pool)
+            .await
+    }
+    .storage_err(context)?;
+
+    rows.into_iter().map(|row| row.into_attachment()).collect()
+}
+
+/// 全库扫描 pending 附件（id 升序）。
+///
+/// 参数:
+/// - `limit`: 返回条数上限（0 = 不限）。
+pub async fn list_all_pending(
+    pool: &SqlitePool,
+    limit: u32,
+) -> RamariaResult<Vec<MessageAttachment>> {
+    list_all_by_status(
+        pool,
+        AttachmentStatus::Pending,
+        limit,
+        "查询全库待处理附件失败",
+    )
+    .await
+}
+
+/// 全库扫描 skipped 附件（id 升序）。
+///
+/// 参数:
+/// - `limit`: 返回条数上限（0 = 不限）。
+pub async fn list_all_skipped(
+    pool: &SqlitePool,
+    limit: u32,
+) -> RamariaResult<Vec<MessageAttachment>> {
+    list_all_by_status(
+        pool,
+        AttachmentStatus::Skipped,
+        limit,
+        "查询全库跳过附件失败",
+    )
+    .await
 }
 
 /// 按消息 id 批量查询附件（分片 IN，单片不超过 500 个）。

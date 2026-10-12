@@ -23,7 +23,6 @@ use sqlx::SqlitePool;
 
 use crate::engine::Engine;
 use crate::test_support::{L1_JSON_REPLY, MockLlm};
-
 // ---- 测试脚手架 ----
 
 /// 最小 qq-chat-exporter v6.x 导出（5 分钟切割线下两条 session）。
@@ -496,6 +495,7 @@ async fn generate_l1_generates_for_both_personas_with_eta_progress() {
         cascade: false,
         throttle_ms: 0,
         group_fanout: false,
+        fanout_include_self: false,
     };
     let l1 = engine
         .generate_import_l1(&outcome.session_ids, plan, Some(&sink))
@@ -722,6 +722,7 @@ async fn generate_l1_group_fanout_dispatches_rows() {
         cascade: false,
         throttle_ms: 0,
         group_fanout: true,
+        fanout_include_self: false,
     };
 
     let sink = RecordingSink::new();
@@ -736,14 +737,14 @@ async fn generate_l1_group_fanout_dispatches_rows() {
     assert_eq!(l1.l1_skipped, 0);
     assert_eq!(l1.l1_processed, 3);
 
-    // 起始进度与逐 session 进度：总量 = session 数，文案为群成员分发
+    // 起始进度与逐 session 进度：总量 = session 数，文案为参与者分发
     let events = sink.events();
     assert_eq!(events.len(), 4, "起始进度 + 每 session 一条");
     assert_eq!(events[0].current, 0);
     assert_eq!(events[0].total, 3);
     assert!(
-        events[0].message.contains("群成员分发"),
-        "起始文案应标注群成员分发: {}",
+        events[0].message.contains("参与者分发"),
+        "起始文案应标注参与者分发: {}",
         events[0].message
     );
     assert!(
@@ -751,8 +752,8 @@ async fn generate_l1_group_fanout_dispatches_rows() {
             .last()
             .expect("应有进度事件")
             .message
-            .contains("群成员分发"),
-        "完成文案应标注群成员分发"
+            .contains("参与者分发"),
+        "完成文案应标注参与者分发"
     );
 
     // 行结构：session 1（两位他人）→ 2 行；session 2（纯自我）→ 1 行 NULL；session 3（一位他人）→ 1 行
@@ -893,6 +894,7 @@ async fn group_import_reaches_l2_per_persona() {
         cascade: false,
         throttle_ms: 0,
         group_fanout: true,
+        fanout_include_self: false,
     };
     let l1 = engine
         .generate_import_l1(&session_ids, plan, None)

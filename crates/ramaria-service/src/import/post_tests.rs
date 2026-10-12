@@ -64,6 +64,7 @@ fn post_plan(cascade_deep: bool, targets: Vec<Option<String>>) -> ImportPostPlan
         l1_targets: targets,
         l1_prefix: None,
         group_fanout: false,
+        fanout_include_self: false,
         l1_cascade: false,
         cascade_deep,
         throttle_ms: 0,

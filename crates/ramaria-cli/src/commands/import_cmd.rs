@@ -7,7 +7,7 @@
 //! - `--dry-run`：仅解析预览（输出结构化 JSON 摘要，不写入数据库），供 agent 验证数据源
 //! - 双画像支持——分别为导出者和对方创建独立 persona（由服务层导入用例承担）
 //! - `--persona` 向后兼容，行为等同于 `--persona-self-name`
-//! - L1 摘要 persona_uid 存 NULL，不绑定特定画像（避免记忆视图污染）
+//! - L1 摘要按参与者分发（私聊双侧各一行、群聊他人行），不产生无归属摘要
 //! - 解析报告默认以掩码版输出到 stderr 提示（`--no-report` 可关闭），数据输出遵循 stdout 纯净性（--json 信封）
 //! - 确认规则：`--yes` 自动确认；非 TTY 且无 `--yes` 不挂起、直接失败提示
 //! - 仅支持 qq-chat-exporter v6.x JSON 格式（语义化 type 名称）
@@ -15,7 +15,10 @@
 use anyhow::Context;
 use ramaria_core::privacy::mask_id;
 use ramaria_importer::ImportSource;
-use ramaria_service::{Engine, ImportMode, ImportPostPlan, ImportPostRequest, ImportRequest};
+use ramaria_service::{
+    Engine, ImportContinueRequest, ImportDoneSummary, ImportL1Progress, ImportMode, ImportPostPlan,
+    ImportPostRequest, ImportProgressSink, ImportRequest,
+};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -267,25 +270,26 @@ pub async fn run(engine: &Arc<Engine>, args: ImportArgs) -> anyhow::Result<()> {
     }
 
     // Step 5.5: 导入后处理（服务层单一编排：图片理解 → L1 摘要生成 → 深度触发；
-    // 图片理解先于 L1；声明关闭 / 门禁未过时静默跳过）
-    // 私聊：逐 session 生成 persona_uid=NULL 摘要（不绑定特定画像视图）
-    // 群聊：按会话生成一次、块内参与者复制分发行（成员各自持有摘要）
+    // 图片理解先于 L1；能力不可达时静默跳过并保持待处理）
+    // 分发口径统一：私聊双侧各一行（含"我"）、群聊他人行；
+    // 每会话一次生成、块内参与者复制分发行（各自持有摘要）
     if args.deep {
         crate::ui::info("🔄 执行深度导入（L0 → 触发 L1 摘要生成）...");
     } else {
         crate::ui::info("⚡ 执行快速导入（L0 → 触发 L1 摘要生成）...");
     }
 
-    let group_fanout = outcome.chat_type == "group";
+    let fanout_include_self = outcome.chat_type != "group";
     let post = engine
         .run_import_post(
             ImportPostRequest {
                 session_ids: outcome.session_ids.clone(),
                 export_root: args.file.parent().map(|p| p.to_path_buf()),
                 plan: ImportPostPlan {
-                    l1_targets: if group_fanout { Vec::new() } else { vec![None] },
+                    l1_targets: Vec::new(),
                     l1_prefix: None,
-                    group_fanout,
+                    group_fanout: true,
+                    fanout_include_self,
                     l1_cascade: true,
                     cascade_deep: args.deep,
                     throttle_ms: 0,
@@ -358,6 +362,159 @@ pub async fn run(engine: &Arc<Engine>, args: ImportArgs) -> anyhow::Result<()> {
             "skipped": report.total_skipped(),
             "chat_type": outcome.chat_type,
             "members": serde_json::to_value(&outcome.members)?,
+        });
+        return crate::json::emit_ok(&data);
+    }
+
+    Ok(())
+}
+
+// =========================================================
+// 继续处理参数
+// =========================================================
+
+/// CLI "继续处理"命令的参数。
+pub struct ContinueArgs {
+    /// 导出根目录（可多次指定；空 = 跳过附件回补）
+    pub export_roots: Vec<PathBuf>,
+    /// 重置"有文件可定位"的存量跳过附件
+    pub reset_skipped: bool,
+    /// L1 补跑会话数上限（0 = 不限）
+    pub limit: usize,
+    /// 补跑成功后触发 L2 → L3 级联
+    pub cascade_deep: bool,
+    /// 跳过确认提示
+    pub yes: bool,
+    /// JSON 信封输出
+    pub json: bool,
+}
+
+// =========================================================
+// 继续处理进度回调
+// =========================================================
+
+/// CLI 进度回调：阶段进度按节流打印到 stderr（stdout 保持数据纯净）。
+///
+/// 说明:
+/// - 图片理解的逐行进度按 10 行或末行节流；L1 阶段逐会话推送；
+/// - `on_done` 为空实现（统计由命令主体汇总输出）。
+struct CliProgressSink;
+
+impl ImportProgressSink for CliProgressSink {
+    fn on_l1_progress(&self, p: &ImportL1Progress) {
+        if p.current.is_multiple_of(10) || p.current == p.total {
+            crate::ui::info(&p.message);
+        }
+    }
+
+    fn on_done(&self, _summary: &ImportDoneSummary) {}
+}
+
+// =========================================================
+// run_continue — 继续处理命令入口
+// =========================================================
+
+/// 执行导入"继续处理"（附件回补 → L1 幂等补跑 → 可选深度级联）。
+///
+/// 参数:
+/// - `engine`: 服务层引擎（三阶段编排经服务层用例）。
+/// - `args`: 继续处理参数（导出根 / 重置开关 / 上限 / 级联开关）。
+///
+/// 流程:
+/// 1. 导出根校验（业务校验失败，exit code 4）；
+/// 2. 用户确认（非 --yes 模式；非 TTY 无 --yes 直接失败不挂起）；
+/// 3. 服务层编排（附件回补 → L1 补跑 → 可选级联），进度节流打印到 stderr；
+/// 4. 结果输出（统计与级联标志）。
+pub async fn run_continue(engine: &Arc<Engine>, args: ContinueArgs) -> anyhow::Result<()> {
+    // Step 1: 导出根校验（业务校验失败，exit code 4）
+    for root in &args.export_roots {
+        if !root.exists() {
+            return Err(anyhow::anyhow!(
+                ramaria_core::error::RamariaError::validation(format!(
+                    "导出目录不存在: {}",
+                    root.display()
+                ))
+            ));
+        }
+        if !root.is_dir() {
+            return Err(anyhow::anyhow!(
+                ramaria_core::error::RamariaError::validation(format!(
+                    "路径不是目录: {}",
+                    root.display()
+                ))
+            ));
+        }
+    }
+
+    // Step 2: 确认（非 --yes 模式；非 TTY 无 --yes 直接失败不挂起）
+    if !args.yes {
+        let proceed =
+            crate::ui::confirm("确认继续处理（附件回补 + L1 补跑 + 深度级联）?", args.yes)
+                .map_err(|e| ramaria_core::error::RamariaError::validation(e.to_string()))?;
+        if !proceed {
+            crate::ui::info("继续处理已取消");
+            return Ok(());
+        }
+    }
+
+    // Step 3: 服务层编排（进度经 sink 节流打印到 stderr）
+    crate::ui::info("🔄 执行导入继续处理（附件回补 → L1 补跑 → 深度级联）...");
+    let outcome = engine
+        .continue_import(
+            ImportContinueRequest {
+                export_roots: args.export_roots.clone(),
+                reset_skipped: args.reset_skipped,
+                throttle_ms: 0,
+                l1_limit: args.limit,
+                cascade_deep: args.cascade_deep,
+            },
+            Some(&CliProgressSink),
+        )
+        .await
+        .context("继续处理失败")?;
+
+    // Step 4: 统计输出
+    match &outcome.vision {
+        Some(stat) => crate::ui::info(&format!(
+            "🖼️  附件回补: 重置 {}（md5 反查 {}），扫描 {}，完成 {}，复用 {}，跳过 {}，失败 {}",
+            outcome.reset_count,
+            outcome.reverse_lookup_hits,
+            stat.scanned,
+            stat.done,
+            stat.reused,
+            stat.skipped,
+            stat.failed
+        )),
+        None => crate::ui::info("🖼️  附件回补: 未执行"),
+    }
+    crate::ui::info(&format!(
+        "📝 L1 补跑: {} 成功, {} 跳过, {} 失败（候选 {}）",
+        outcome.l1.l1_success, outcome.l1.l1_skipped, outcome.l1.l1_failed, outcome.l1.l1_total
+    ));
+    if outcome.l2_triggered {
+        crate::ui::info("🔍 已触发 L2 事件提取 → L3 人格画像");
+    }
+    crate::ui::success("✅ 继续处理完成");
+
+    if args.json {
+        let data = serde_json::json!({
+            "reset_count": outcome.reset_count,
+            "reverse_lookup_hits": outcome.reverse_lookup_hits,
+            "vision": outcome.vision.map(|stat| serde_json::json!({
+                "scanned": stat.scanned,
+                "done": stat.done,
+                "reused": stat.reused,
+                "skipped": stat.skipped,
+                "failed": stat.failed,
+            })),
+            "l1": {
+                "success": outcome.l1.l1_success,
+                "skipped": outcome.l1.l1_skipped,
+                "failed": outcome.l1.l1_failed,
+                "total": outcome.l1.l1_total,
+            },
+            "l2_triggered": outcome.l2_triggered,
+            "l3_triggered": outcome.l3_triggered,
         });
         return crate::json::emit_ok(&data);
     }

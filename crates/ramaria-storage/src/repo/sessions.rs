@@ -346,6 +346,63 @@ pub async fn list_all(pool: &SqlitePool) -> RamariaResult<Vec<Session>> {
         .collect::<Result<Vec<_>, _>>()
 }
 
+/// 统计会话内的去重发言者数（`messages.persona_uid` 去重，NULL 不计）。
+///
+/// 口径:
+/// - 仅统计带 persona 归属的消息；同一发送者多条消息只计一次；
+/// - 会话不存在或无带归属消息时返回 0。
+///
+/// 参数:
+/// - `session_id`: 目标会话。
+pub async fn count_speakers(pool: &SqlitePool, session_id: Uuid) -> RamariaResult<u32> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT persona_uid) FROM messages \
+         WHERE session_id = ? AND persona_uid IS NOT NULL",
+    )
+    .bind(session_id.to_string())
+    .fetch_one(pool)
+    .await
+    .storage_err("统计会话发言者失败")?;
+    Ok(count.max(0) as u32)
+}
+
+/// 查询"已关闭且缺 L1 摘要"的本地会话 id 列表（补跑候选）。
+///
+/// 口径:
+/// - 仅统计 `channel = 'local'` 的会话；
+/// - 会话须已关闭（`ended_at IS NOT NULL`）且存在至少一条消息；
+/// - 会话无任何 `memory_l1` 行（含无归属行）才算缺失；
+/// - 按 `started_at ASC, id ASC` 排序（先发生的先补）；
+/// - `limit = 0` 表示不限；`limit > 0` 时取前 limit 条。
+///
+/// 参数:
+/// - `limit`: 返回条数上限（0 = 不限）。
+pub async fn list_closed_missing_l1(pool: &SqlitePool, limit: u32) -> RamariaResult<Vec<Uuid>> {
+    let base = "SELECT s.id FROM sessions s \
+         WHERE s.channel = ? \
+           AND s.ended_at IS NOT NULL \
+           AND EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id) \
+           AND NOT EXISTS (SELECT 1 FROM memory_l1 l WHERE l.session_id = s.id) \
+         ORDER BY s.started_at ASC, s.id ASC";
+    let rows: Vec<String> = if limit == 0 {
+        sqlx::query_scalar(base)
+            .bind(CHANNEL_LOCAL)
+            .fetch_all(pool)
+            .await
+    } else {
+        sqlx::query_scalar(&format!("{base} LIMIT ?"))
+            .bind(CHANNEL_LOCAL)
+            .bind(limit)
+            .fetch_all(pool)
+            .await
+    }
+    .storage_err("查询缺失 L1 的会话失败")?;
+
+    rows.iter()
+        .map(|id| parse_uuid_required(id, "sessions", "id"))
+        .collect()
+}
+
 pub async fn delete(pool: &SqlitePool, session_id: Uuid) -> RamariaResult<()> {
     sqlx::query("DELETE FROM sessions WHERE id = ?")
         .bind(session_id.to_string())

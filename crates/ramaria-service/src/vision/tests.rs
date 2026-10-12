@@ -347,9 +347,9 @@ async fn understand_respects_batch_limit_per_session() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// 声明关（默认配置）：全部标 skipped，零调用。
+/// 声明关（默认配置）：统计计入跳过，行保持待处理（不落库），零调用。
 #[tokio::test]
-async fn understand_skips_all_when_declared_off() {
+async fn understand_keeps_pending_when_declared_off() {
     let llm = Arc::new(MockLlm::local().with_vision_reply("不会调用"));
     let (engine, storage, dir) =
         vision_engine("vision-off", Arc::clone(&llm), RamariaConfig::default()).await;
@@ -372,7 +372,11 @@ async fn understand_skips_all_when_declared_off() {
     assert_eq!(llm.vision_call_count(), 0);
 
     let rows = load_attachments(&storage, message_id).await;
-    assert_eq!(rows[0].status, AttachmentStatus::Skipped);
+    assert_eq!(
+        rows[0].status,
+        AttachmentStatus::Pending,
+        "声明关不落库：行保持待处理"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -410,9 +414,9 @@ async fn understand_keeps_pending_when_privacy_pending() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// 探测失败：全部 skipped 且失败结论缓存，后续批次不重复发送探测请求。
+/// 探测失败：统计计入跳过、行保持待处理，且失败结论缓存，后续批次不重复发送探测请求。
 #[tokio::test]
-async fn understand_probe_failure_skips_and_caches_failure() {
+async fn understand_probe_failure_keeps_pending_and_caches_failure() {
     let llm = Arc::new(MockLlm::local().with_vision_reply("x").vision_failing(100));
     let (engine, storage, dir) =
         vision_engine("vision-probe-fail", Arc::clone(&llm), vision_on_config()).await;
@@ -433,9 +437,13 @@ async fn understand_probe_failure_skips_and_caches_failure() {
     assert_eq!(stat.skipped, 1);
     assert_eq!(llm.vision_call_count(), 1, "仅探测一次请求");
     let rows = load_attachments(&storage, first).await;
-    assert_eq!(rows[0].status, AttachmentStatus::Skipped);
+    assert_eq!(
+        rows[0].status,
+        AttachmentStatus::Pending,
+        "探测失败不落库：行保持待处理"
+    );
 
-    // 第二次：扫描新 pending → 探测结论缓存命中，不再发请求
+    // 第二次：旧行仍为待处理，与新行一并重扫 → 探测结论缓存命中，不再发请求
     let second = seed_pending_attachment(
         &storage,
         session.id,
@@ -446,11 +454,21 @@ async fn understand_probe_failure_skips_and_caches_failure() {
     let stat2 = understand_attachments(&engine, &[session.id], &dir)
         .await
         .expect("第二次理解任务应成功");
-    assert_eq!(stat2.scanned, 1);
-    assert_eq!(stat2.skipped, 1);
+    assert_eq!(stat2.scanned, 2, "门禁不可达保持待处理，下批一并重扫");
+    assert_eq!(stat2.skipped, 2);
     assert_eq!(llm.vision_call_count(), 1, "探测失败已缓存，不重复发送");
     let rows2 = load_attachments(&storage, second).await;
-    assert_eq!(rows2[0].status, AttachmentStatus::Skipped);
+    assert_eq!(
+        rows2[0].status,
+        AttachmentStatus::Pending,
+        "后续批次同样保持待处理"
+    );
+    let rows_first = load_attachments(&storage, first).await;
+    assert_eq!(
+        rows_first[0].status,
+        AttachmentStatus::Pending,
+        "旧行保持待处理（能力恢复后可继续）"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -807,9 +825,9 @@ async fn understand_downloaded_image_marks_failed_after_retries() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// 现场理解：声明关走门禁跳过（行 skipped，零模型调用）。
+/// 现场理解：声明关走门禁跳过（返回 Skipped，行保持待处理，零模型调用）。
 #[tokio::test]
-async fn understand_downloaded_image_skips_when_declared_off() {
+async fn understand_downloaded_image_keeps_pending_when_declared_off() {
     let llm = Arc::new(MockLlm::local().with_vision_reply("不应调用"));
     let (engine, storage, dir) = vision_engine(
         "vision-channel-declared-off",
@@ -830,7 +848,11 @@ async fn understand_downloaded_image_skips_when_declared_off() {
     assert_eq!(llm.vision_call_count(), 0);
 
     let rows = load_attachments(&storage, message_id).await;
-    assert_eq!(rows[0].status, AttachmentStatus::Skipped);
+    assert_eq!(
+        rows[0].status,
+        AttachmentStatus::Pending,
+        "声明关不落库：行保持待处理"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

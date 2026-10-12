@@ -382,6 +382,99 @@ async fn list_by_messages_chunks_over_limit() {
     assert_eq!(rows[0].message_id, message_id);
 }
 
+// =========================================================
+// 全库扫描与重扫重置
+// =========================================================
+
+/// 全库扫描：跨会话按状态过滤（pending / skipped），id 升序，limit 截断。
+#[tokio::test]
+async fn list_all_by_status_filters_and_limits() {
+    let pool = init_test_pool().await.expect("测试库初始化失败");
+    let session_a = setup_session(&pool).await;
+    let session_b = setup_session(&pool).await;
+    let message_a = setup_message(&pool, session_a, "会话 a 消息").await;
+    let message_b = setup_message(&pool, session_b, "会话 b 消息").await;
+
+    let mut skipped_a = attachment(message_a, Some("aaaa0000000000000000000000000000"));
+    skipped_a.status = AttachmentStatus::Skipped;
+    let mut skipped_b = attachment(message_b, Some("bbbb0000000000000000000000000000"));
+    skipped_b.status = AttachmentStatus::Skipped;
+    let mut done = attachment(message_b, Some("cccc0000000000000000000000000000"));
+    done.status = AttachmentStatus::Done;
+    done.description = Some("已完成".to_string());
+    insert_batch(
+        &pool,
+        &[
+            attachment(message_a, Some("11110000000000000000000000000000")),
+            skipped_a,
+            attachment(message_b, Some("22220000000000000000000000000000")),
+            done,
+            skipped_b,
+        ],
+    )
+    .await
+    .expect("批量写入应成功");
+
+    let pending = list_all_pending(&pool, 0).await.expect("扫描应成功");
+    let pending_ids: Vec<i64> = pending.iter().map(|a| a.id).collect();
+    assert_eq!(pending.len(), 2, "仅 pending 行");
+    assert!(
+        pending_ids.windows(2).all(|w| w[0] < w[1]),
+        "应按附件 id 升序"
+    );
+    let limited = list_all_pending(&pool, 1).await.expect("limit 应成功");
+    assert_eq!(limited.len(), 1, "limit=1 截断");
+    assert_eq!(limited[0].id, pending_ids[0], "取最早一条");
+
+    let skipped = list_all_skipped(&pool, 0).await.expect("扫描应成功");
+    assert_eq!(skipped.len(), 2, "仅 skipped 行（跳过 done 与 pending）");
+    let skipped_refs: Vec<&str> = skipped.iter().map(|a| a.source_ref.as_str()).collect();
+    assert!(skipped_refs.iter().all(|r| *r == "images/a.png"));
+    assert!(
+        skipped
+            .iter()
+            .all(|a| a.message_id == message_a || a.message_id == message_b),
+        "跨会话扫描命中两库内消息"
+    );
+}
+
+/// 重扫重置：置 pending 并可选修正 source_ref；对已 pending 行幂等。
+#[tokio::test]
+async fn reset_for_rescan_migrates_state_and_updates_ref() {
+    let pool = init_test_pool().await.expect("测试库初始化失败");
+    let session_id = setup_session(&pool).await;
+    let message_id = setup_message(&pool, session_id, "重扫消息").await;
+    let mut row = attachment(message_id, Some("aaaa0000000000000000000000000000"));
+    row.status = AttachmentStatus::Skipped;
+    insert_batch(&pool, &[row]).await.expect("写入应成功");
+    let row_id = attachments_of(&pool, message_id).await[0].id;
+
+    reset_for_rescan(&pool, row_id, Some("resources/images/fixed.jpg"))
+        .await
+        .expect("重置应成功");
+    let rows = attachments_of(&pool, message_id).await;
+    assert_eq!(
+        rows[0].status,
+        AttachmentStatus::Pending,
+        "状态应迁移为待处理"
+    );
+    assert_eq!(
+        rows[0].source_ref, "resources/images/fixed.jpg",
+        "source_ref 应被修正"
+    );
+
+    // 幂等：再次重置（不带引用）保持 pending 且不改引用
+    reset_for_rescan(&pool, row_id, None)
+        .await
+        .expect("重复重置应成功");
+    let rows = attachments_of(&pool, message_id).await;
+    assert_eq!(rows[0].status, AttachmentStatus::Pending);
+    assert_eq!(
+        rows[0].source_ref, "resources/images/fixed.jpg",
+        "None 引用不改动原值"
+    );
+}
+
 /// 脏枚举值读取降级：非法 kind / status 不报错，分别回退 File / Pending。
 #[tokio::test]
 async fn dirty_enum_values_degrade_on_read() {

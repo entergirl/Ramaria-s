@@ -27,6 +27,8 @@ use super::l1::{ImportL1Outcome, ImportL1Plan, ImportProgressSink, generate_l1};
 /// 字段约定:
 /// - `l1_targets`: 每个目标一次 L1 生成（`group_fanout` 为 true 时忽略）；
 /// - `l1_prefix`: L1 角色前缀覆盖（`None` = 摘要器默认前缀；`group_fanout` 为 true 时忽略）；
+/// - `group_fanout`: 参与者分发（为 true 时忽略 `l1_targets` 与 `l1_prefix`）；
+/// - `fanout_include_self`: 分发参与者含"我"（仅 `group_fanout` 为 true 时生效）；
 /// - `l1_cascade`: 每次 L1 生成末尾触发 L2 检查（逐次级联）；
 /// - `cascade_deep`: L1 全部完成后统一触发 L2 → L3 级联（深度模式）；
 /// - `throttle_ms`: 连续 LLM 调用之间的最小间隔（毫秒，0 = 不等待）。
@@ -36,8 +38,10 @@ pub struct ImportPostPlan {
     pub l1_targets: Vec<Option<String>>,
     /// L1 角色前缀覆盖（`None` = 摘要器默认；`group_fanout` 时忽略）
     pub l1_prefix: Option<(String, String)>,
-    /// 群聊多画像分发（为 true 时忽略 `l1_targets` 与 `l1_prefix`）
+    /// 参与者分发（为 true 时忽略 `l1_targets` 与 `l1_prefix`）
     pub group_fanout: bool,
+    /// 分发参与者含"我"（仅 `group_fanout` 为 true 时生效）
+    pub fanout_include_self: bool,
     /// 逐次级联：每次 L1 生成末尾触发 L2 检查
     pub l1_cascade: bool,
     /// L1 全部完成后统一触发 L2 → L3 级联
@@ -126,6 +130,7 @@ pub(crate) async fn run_post(
             targets: req.plan.l1_targets,
             l1_prefix: req.plan.l1_prefix,
             group_fanout: req.plan.group_fanout,
+            fanout_include_self: req.plan.fanout_include_self,
             cascade: req.plan.l1_cascade,
             throttle_ms: req.plan.throttle_ms,
         },

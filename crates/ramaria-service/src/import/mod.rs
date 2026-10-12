@@ -18,8 +18,9 @@
 //! - `detect`：格式探测与解析前校验（扩展名校验 / 日志路径标签）；
 //! - `analyze`：解析预览（`AnalyzeRequest` → `AnalysisReport`，不写入数据库）；
 //! - `l0`：L0 写入（私聊双画像 / 群聊多画像准备、会话与消息落库、画像名回读口径）；
-//! - `l1`：L1 批量生成与 ETA 进度（含群聊分发口径与完成摘要构造）；
+//! - `l1`：L1 批量生成与 ETA 进度（含参与者分发口径与完成摘要构造）；
 //! - `post`：导入后处理单一入口（图片理解 → L1 批量生成 → 可选深度级联一次编排）；
+//! - `resume`：导入"继续处理"（附件回补 → L1 幂等补跑 → 可选深度级联）；
 //! - `deep`：深度触发（L2 事件提取 → L3 性格画像级联）。
 
 mod analyze;
@@ -28,6 +29,7 @@ mod detect;
 mod l0;
 mod l1;
 mod post;
+mod resume;
 
 use std::path::Path;
 
@@ -45,6 +47,7 @@ pub use l1::{
     done_summary,
 };
 pub use post::{ImportPostOutcome, ImportPostPlan, ImportPostRequest};
+pub use resume::{ImportContinueOutcome, ImportContinueRequest};
 
 // 用例入口 re-export：`crate::import::X` 为引擎门面与既有调用路径
 pub(crate) use analyze::analyze;
@@ -53,6 +56,7 @@ pub(crate) use detect::detect_format;
 pub(crate) use l0::write_l0;
 pub(crate) use l1::generate_l1;
 pub(crate) use post::run_post;
+pub(crate) use resume::run_continue;
 
 // =========================================================
 // 引擎门面
@@ -150,6 +154,26 @@ impl Engine {
     ) -> RamariaResult<ImportPostOutcome> {
         run_post(self, req, progress).await
     }
+
+    /// 执行导入"继续处理"（附件回补 → L1 幂等补跑 → 可选深度级联）。
+    ///
+    /// 职责:
+    /// - 供中断导入的续跑与增量回补：重置可定位的存量跳过附件、重扫全部待处理附件、
+    ///   补跑缺失摘要的会话；重复执行零副作用（理解按 md5 去重、摘要按已有归属行跳过）。
+    ///
+    /// 参数:
+    /// - `req`: 三阶段选项（见 [`ImportContinueRequest`]）；
+    /// - `progress`: 可选进度回调（vision / l1 / l2 / l3 阶段进度透传）。
+    ///
+    /// 返回:
+    /// - [`ImportContinueOutcome`]：附件回补统计、重置计数与 L1 / 级联结果。
+    pub async fn continue_import(
+        &self,
+        req: ImportContinueRequest,
+        progress: Option<&dyn ImportProgressSink>,
+    ) -> RamariaResult<ImportContinueOutcome> {
+        run_continue(self, req, progress).await
+    }
 }
 
 // =========================================================
@@ -158,6 +182,8 @@ impl Engine {
 
 #[cfg(test)]
 mod post_tests;
+#[cfg(test)]
+mod resume_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

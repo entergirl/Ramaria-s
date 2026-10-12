@@ -259,6 +259,15 @@ pub struct ImportProgressPayload {
     /// 后端 EMA 估算的剩余秒数（None = 无样本，前端线性兜底；v1.5 I 项）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub eta_seconds: Option<u64>,
+    /// "继续处理"重置为待处理的存量附件数（仅 done 阶段有意义）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reset_count: Option<usize>,
+    /// "继续处理"本轮回补的图片理解完成数（仅 done 阶段有意义）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vision_done: Option<usize>,
+    /// "继续处理"本轮回补的图片理解失败数（仅 done 阶段有意义）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vision_failed: Option<usize>,
 }
 
 impl ImportProgressPayload {
@@ -277,6 +286,9 @@ impl ImportProgressPayload {
             l2_expected: None,
             l3_expected: None,
             eta_seconds: None,
+            reset_count: None,
+            vision_done: None,
+            vision_failed: None,
         }
     }
 
@@ -329,7 +341,28 @@ impl ImportProgressPayload {
             l2_expected: None,
             l3_expected: None,
             eta_seconds: None,
+            reset_count: None,
+            vision_done: None,
+            vision_failed: None,
         }
+    }
+
+    /// 附加"继续处理"的附件回补统计（仅 done 阶段有意义）。
+    ///
+    /// 参数:
+    /// - `reset_count`: 重置为待处理的存量附件数。
+    /// - `vision_done`: 本轮回补的图片理解完成数。
+    /// - `vision_failed`: 本轮回补的图片理解失败数。
+    pub fn with_continue_stats(
+        mut self,
+        reset_count: usize,
+        vision_done: usize,
+        vision_failed: usize,
+    ) -> Self {
+        self.reset_count = Some(reset_count);
+        self.vision_done = Some(vision_done);
+        self.vision_failed = Some(vision_failed);
+        self
     }
 }
 

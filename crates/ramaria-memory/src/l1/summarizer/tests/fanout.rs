@@ -234,6 +234,82 @@ async fn fanout_disabled_private_chat_keeps_one_row_per_block() {
 }
 
 // =========================================================
+// 含 self 两态（fanout_include_self）
+// =========================================================
+
+/// 含 self 开启：私聊形态（双方各带 persona）→ 双方各一行（内容一致）。
+#[tokio::test]
+async fn fanout_include_self_dispatches_private_both_sides() {
+    let sid = Uuid::new_v4();
+    let storage = MockStorage::new();
+    storage.add_messages(
+        sid,
+        vec![
+            group_msg(sid, Some("user-0001"), 0, "晚上去吃火锅"),
+            group_msg(sid, Some("char-0009"), 1000, "好啊，几点"),
+        ],
+    );
+
+    let llm = MockLlmProvider::new("test-model");
+    llm.set_response(llm_json("私聊双方摘要", None));
+
+    let config = L1SummarizerConfig {
+        utt_splitter: Some(group_splitter_cfg()),
+        fanout_others: true,
+        fanout_include_self: true,
+        ..Default::default()
+    };
+    let summarizer = L1Summarizer::new(&llm, &storage, config);
+    let result = summarizer.summarize_session(sid).await;
+    assert!(result.is_ok(), "含 self 分发应成功: {:?}", result.err());
+
+    let saved = storage.saved_l1_entries();
+    assert_eq!(saved.len(), 2, "双方各一行");
+    let personas: Vec<Option<&str>> = saved.iter().map(|row| row.persona_uid.as_deref()).collect();
+    assert!(
+        personas.contains(&Some("user-0001")),
+        "self 行应存在: {personas:?}"
+    );
+    assert!(
+        personas.contains(&Some("char-0009")),
+        "对方行应存在: {personas:?}"
+    );
+    assert_ne!(saved[0].id, saved[1].id, "复制行应各持独立 id");
+    assert_eq!(saved[0].summary, saved[1].summary, "各行摘要内容一致");
+}
+
+/// 含 self 关闭（默认）：同素材仅他人一行（self 的 User 发言不分发）。
+#[tokio::test]
+async fn fanout_excludes_self_by_default() {
+    let sid = Uuid::new_v4();
+    let storage = MockStorage::new();
+    storage.add_messages(
+        sid,
+        vec![
+            group_msg(sid, Some("user-0001"), 0, "晚上去吃火锅"),
+            group_msg(sid, Some("char-0009"), 1000, "好啊，几点"),
+        ],
+    );
+
+    let llm = MockLlmProvider::new("test-model");
+    llm.set_response(llm_json("仅他人行摘要", None));
+
+    let config = L1SummarizerConfig {
+        utt_splitter: Some(group_splitter_cfg()),
+        fanout_others: true,
+        fanout_include_self: false,
+        ..Default::default()
+    };
+    let summarizer = L1Summarizer::new(&llm, &storage, config);
+    let result = summarizer.summarize_session(sid).await;
+    assert!(result.is_ok(), "默认分发应成功: {:?}", result.err());
+
+    let saved = storage.saved_l1_entries();
+    assert_eq!(saved.len(), 1, "默认不含 self：仅他人一行");
+    assert_eq!(saved[0].persona_uid.as_deref(), Some("char-0009"));
+}
+
+// =========================================================
 // 渐进式分发
 // =========================================================
 

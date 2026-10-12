@@ -337,18 +337,8 @@ pub async fn import_qq_chat(
     );
 
     // ---- Step 4: L1 批量生成与深度处理（后台异步，避免阻塞前端） ----
-    // 目标列表：私聊为双方 persona 各生成一份 L1（单侧模式跳过侧不生成）；
-    // 群聊走成员分发口径（每会话一次生成，目标由块内发言者决定，忽略 targets）。
-    let group_fanout = outcome.chat_type == "group";
-    let mut targets: Vec<Option<String>> = Vec::with_capacity(2);
-    if !group_fanout {
-        if let Some(uid) = &outcome.persona_uid {
-            targets.push(Some(uid.clone()));
-        }
-        if let Some(uid) = &outcome.other_persona_uid {
-            targets.push(Some(uid.clone()));
-        }
-    }
+    // 分发口径统一：私聊双侧各一行（含"我"）、群聊他人行；每会话一次生成（忽略 targets）。
+    let fanout_include_self = outcome.chat_type != "group";
     // 批量 LLM 请求间最小间隔（毫秒）：读当前生效配置的 `[thresholds].cluster_delay_ms`，
     // 导入会连续多次调用 LLM，无节流时易触发远程 API 速率限制。
     // 读取失败时降级为 0（不阻塞导入）。
@@ -376,9 +366,10 @@ pub async fn import_qq_chat(
                     session_ids: sids,
                     export_root,
                     plan: ImportPostPlan {
-                        l1_targets: targets,
-                        l1_prefix: Some((String::new(), String::new())),
-                        group_fanout,
+                        l1_targets: Vec::new(),
+                        l1_prefix: None,
+                        group_fanout: true,
+                        fanout_include_self,
                         l1_cascade: false,
                         cascade_deep: is_deep,
                         throttle_ms,
@@ -464,9 +455,10 @@ pub async fn import_qq_chat(
 /// 说明:
 /// - 事件负载字段与前端契约一致（phase / current / total / message /
 ///   各阶段预计总量 / ETA / done 统计）；
-/// - 事件发射失败只记 warn，不中断导入批次。
-struct TauriImportProgressSink {
-    app_handle: AppHandle,
+/// - 事件发射失败只记 warn，不中断导入批次；
+/// - 供导入与"继续处理"两条命令共用（后者单独发 done 事件）。
+pub(crate) struct TauriImportProgressSink {
+    pub(crate) app_handle: AppHandle,
 }
 
 impl ImportProgressSink for TauriImportProgressSink {

@@ -10,7 +10,7 @@ use super::*;
 use clap::Parser;
 use ramaria_core::traits::StoreInfrastructure;
 
-use crate::cli::{Cli, Commands, McpCmd, ProbeArgs, RuleCmd, StyleCmd};
+use crate::cli::{Cli, Commands, ImportCmd, McpCmd, ProbeArgs, RuleCmd, StyleCmd};
 
 /// 串行化 env 变量测试（多个 #[test] 并行时会互相干扰环境变量）。
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -171,6 +171,65 @@ fn mcp_serve_parses() {
     let cli = Cli::try_parse_from(["ramaria", "--db", "d/x.db", "mcp", "serve"])
         .expect("带 --db 的 mcp serve 应可解析");
     assert_eq!(cli.db, PathBuf::from("d/x.db"));
+}
+
+/// `ramaria import continue` 可解析：多导出根、开关、上限与缺省值。
+#[test]
+fn import_continue_parses() {
+    let cli = Cli::try_parse_from([
+        "ramaria",
+        "import",
+        "continue",
+        "--export-root",
+        "C:/a",
+        "--export-root",
+        "C:/b",
+        "--no-reset-skipped",
+        "--limit",
+        "5",
+        "--no-cascade",
+        "--yes",
+    ])
+    .expect("import continue 应可解析");
+    match cli.command {
+        Commands::Import(ImportCmd::Continue {
+            export_root,
+            no_reset_skipped,
+            limit,
+            no_cascade,
+            yes,
+        }) => {
+            assert_eq!(
+                export_root,
+                vec![PathBuf::from("C:/a"), PathBuf::from("C:/b")],
+                "多导出根按指定顺序保留"
+            );
+            assert!(no_reset_skipped, "--no-reset-skipped 应置位");
+            assert_eq!(limit, 5);
+            assert!(no_cascade, "--no-cascade 应置位");
+            assert!(yes);
+        }
+        _ => panic!("应解析为 Import::Continue，实际解析为其他命令"),
+    }
+
+    // 缺省：无导出根、不关重置与级联、上限不限
+    let cli2 = Cli::try_parse_from(["ramaria", "import", "continue"]).expect("缺省参数应可解析");
+    match cli2.command {
+        Commands::Import(ImportCmd::Continue {
+            export_root,
+            no_reset_skipped,
+            limit,
+            no_cascade,
+            yes,
+        }) => {
+            assert!(export_root.is_empty(), "缺省无导出根（跳过附件回补）");
+            assert!(!no_reset_skipped, "缺省开启存量跳过重置");
+            assert_eq!(limit, 0, "缺省不限量");
+            assert!(!no_cascade, "缺省触发深度级联");
+            assert!(!yes);
+        }
+        _ => panic!("应解析为 Import::Continue，实际解析为其他命令"),
+    }
 }
 
 /// `ramaria style update` 可解析（无 --persona → 命令层回退默认 rama-0001）。

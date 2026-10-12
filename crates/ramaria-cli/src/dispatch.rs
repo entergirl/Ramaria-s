@@ -290,6 +290,24 @@ pub(crate) async fn dispatch(engine: &Arc<Engine>, cli: Cli) -> anyhow::Result<(
                 };
                 commands::import_cmd::run(engine, args).await?;
             }
+            ImportCmd::Continue {
+                export_root,
+                no_reset_skipped,
+                limit,
+                no_cascade,
+                yes,
+            } => {
+                let args = commands::import_cmd::ContinueArgs {
+                    export_roots: export_root,
+                    reset_skipped: !no_reset_skipped,
+                    limit,
+                    cascade_deep: !no_cascade,
+                    // 全局 --yes 与子命令 --yes 任一生效
+                    yes: cli.yes || yes,
+                    json: cli.json,
+                };
+                commands::import_cmd::run_continue(engine, args).await?;
+            }
         },
         Commands::Diagnostics { output, redact } => {
             let args = commands::diagnostics::DiagnosticsArgs { output, redact };

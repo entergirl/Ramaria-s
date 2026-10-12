@@ -68,7 +68,7 @@ var ImportView = (function () {
 
  /** 导入后深度处理进度跟踪 */
     var _importProgress = {
-        phase: '',           // 'l1' | 'l2' | 'l3' | 'done'
+        phase: '',           // 'vision' | 'l1' | 'l2' | 'l3' | 'done'
         current: 0,
         total: 0,
         message: '',
@@ -81,10 +81,35 @@ var ImportView = (function () {
         l2Expected: null,
         l3Expected: null,
         etaSeconds: null,
+        // "继续处理" done 阶段：附件回补统计（普通导入为 null）
+        resetCount: null,    // 重置为待处理的存量附件数
+        visionDone: null,    // 图片理解完成数
+        visionFailed: null,  // 图片理解失败数
     };
 
-    /** 导入开始时间（Unix 毫秒），用于预估剩余时间 */
+ /** 导入开始时间（Unix 毫秒），用于预估剩余时间 */
     var _importStartedAt = null;
+
+ /** 是否处于"继续处理"模式（完成页与进度文案按此分流） */
+    var _isContinueMode = false;
+
+ /** "继续处理"使用的导出根目录（展示用；未提供时为 null） */
+    var _continueExportRoot = null;
+
+ /** 导入视图是否处于激活状态（用户是否停留在导入页，用于完成通知分流） */
+    var _isViewActive = false;
+
+ /**
+ * 重置深度处理进度为初始状态（进入导入页、重新开始、继续处理启动时共用）。
+ */
+    function _resetProgress() {
+        _importProgress = {
+            phase: '', current: 0, total: 0, message: '',
+            l1Success: null, l1Failed: null, l2Triggered: null, l3Triggered: null,
+            l1Expected: null, l2Expected: null, l3Expected: null, etaSeconds: null,
+            resetCount: null, visionDone: null, visionFailed: null,
+        };
+    }
 
  /** 导入完成后用于导航的 persona 信息 */
     var _importResultPersona = {
@@ -147,7 +172,10 @@ var ImportView = (function () {
         _importMode = 'fast';
         _reportData = null;
         _isImporting = false;
-        _importProgress = { phase: '', current: 0, total: 0, message: '', l1Success: null, l1Failed: null, l2Triggered: null, l3Triggered: null, l1Expected: null, l2Expected: null, l3Expected: null, etaSeconds: null };
+        _isViewActive = true;
+        _isContinueMode = false;
+        _continueExportRoot = null;
+        _resetProgress();
         _importResultPersona = { selfUid: '', selfName: '', otherUid: '', otherName: '' };
         _importStartedAt = null;  // 重置 ETA 计时
 
@@ -167,6 +195,7 @@ var ImportView = (function () {
 
     function _onLeave() {
         _cleanup();
+        _isViewActive = false;
  // ═══ 不立即清理 import-progress 监听 ═══
  // 后端 L1/L2/L3 管线是异步执行的，done 事件可能在用户离开导入页后才到达。
  // 保持监听器存活直到 done 事件到达（或超时 5 分钟），
@@ -475,6 +504,15 @@ var ImportView = (function () {
         html += '<button class="btn btn-primary" id="btn-analyze" ' + (_selectedFilePath ? '' : 'disabled') + '>分析文件</button>';
         html += '</div>';
 
+ // 继续处理区块：回补此前中断的导入（附件重扫 + L1 补跑 + 级联）
+        html += '<div class="import-option-group mt-4">';
+        html += '<div class="import-option-label">继续处理</div>';
+        html += '<div class="import-option-desc">回补此前中断的导入：重扫图片附件、补跑缺失的记忆摘要并触发深度处理。选择导出目录（含 resources/ 的那一层）可同时回补本地图片。</div>';
+        html += '<div class="import-actions mt-3">';
+        html += '<button class="btn btn-secondary" id="btn-continue-import" ' + (_isImporting ? 'disabled' : '') + '>继续处理</button>';
+        html += '</div>';
+        html += '</div>';
+
         return html;
     }
 
@@ -633,8 +671,9 @@ var ImportView = (function () {
         html += '</div>';
 
  // 阶段标题
-        var titleText = '正在导入聊天记录...';
-        if (prog.phase === 'l1') titleText = '正在生成 L1 会话摘要...';
+        var titleText = _isContinueMode ? '正在继续处理...' : '正在导入聊天记录...';
+        if (prog.phase === 'vision') titleText = '正在回补图片理解...';
+        else if (prog.phase === 'l1') titleText = _isContinueMode ? '正在补跑 L1 会话摘要...' : '正在生成 L1 会话摘要...';
         else if (prog.phase === 'l2') titleText = '正在提取 L2 事件...';
         else if (prog.phase === 'l3') titleText = '正在推断 L3 性格画像...';
         html += '<div class="import-progress-title">' + RamariaEscape.escapeHtml(titleText) + '</div>';
@@ -658,7 +697,7 @@ var ImportView = (function () {
             html += '<span class="import-progress-pct" id="import-progress-pct-inline"></span>';
 
  // 阶段指示器——显示"已完成 x/y 项"（v1.5 I：L1 总量 = session × persona，以 LLM 调用项计）
-            if (prog.phase === 'l1') {
+            if (prog.phase === 'l1' || prog.phase === 'vision') {
                 html += '<span class="import-progress-sep">·</span>';
                 html += '<span class="import-progress-session-counter">已完成 <strong id="import-session-current">' + prog.current + '</strong> / ' + prog.total + ' 项</span>';
             }
@@ -681,6 +720,11 @@ var ImportView = (function () {
  // =========================================================
 
     function _renderDone() {
+        // "继续处理"完成页与导入完成页分流
+        if (_isContinueMode) {
+            return _renderContinueDone();
+        }
+
         var result = _reportData; // 此时 reportData 已替换为导入结果
         if (!result) {
             return '<div class="import-error"><div class="import-error-title">错误</div>导入结果数据丢失。</div>';
@@ -769,6 +813,105 @@ var ImportView = (function () {
         html += '<div class="import-actions">';
         html += '<button class="btn btn-ghost" id="btn-new-import">导入另一个文件</button>';
         html += '<button class="btn btn-secondary" id="btn-goto-chat">查看导入消息</button>';
+        html += '<button class="btn btn-primary" id="btn-goto-memory">前往记忆页面</button>';
+        html += '</div>';
+
+        return html;
+    }
+
+ // =========================================================
+ // Step 4（继续处理）: 完成
+ // =========================================================
+
+ /**
+ * 构造"继续处理"完成统计（纯函数，供完成页渲染与单元测试共用）。
+ *
+ * 参数:
+ * - `prog`: 进度对象（读 resetCount / visionDone / visionFailed / l1Success / l1Failed）。
+ *
+ * 返回:
+ * - `{ stats, visionWarning, l1Warning }`:
+ *   `stats` 为展示卡片列表（`{ value, label }`）；`visionWarning` 非空时提示图片理解未完成数；
+ *   `l1Warning` 标记 L1 补跑存在失败。
+ *
+ * 说明:
+ * - 字段为 null / 非有限数字（任务未执行到该阶段）时按 0 计，卡片保持展示，避免统计缺失；
+ * - 纯函数：不读 DOM、不写全局状态。
+ */
+    function formatContinueSummary(prog) {
+        prog = prog || {};
+        var toNum = function (v) {
+            return (typeof v === 'number' && isFinite(v)) ? v : 0;
+        };
+        var resetCount = toNum(prog.resetCount);
+        var visionDone = toNum(prog.visionDone);
+        var visionFailed = toNum(prog.visionFailed);
+        var l1Success = toNum(prog.l1Success);
+        var l1Failed = toNum(prog.l1Failed);
+
+        var stats = [
+            { value: String(resetCount), label: '重置待处理附件' },
+            { value: String(visionDone), label: '图片理解完成' },
+            { value: l1Success + ' / ' + (l1Success + l1Failed), label: 'L1 补跑成功' },
+        ];
+        var visionWarning = visionFailed > 0
+            ? ('有 ' + visionFailed + ' 张图片未完成理解，可稍后再次继续处理。')
+            : null;
+        return { stats: stats, visionWarning: visionWarning, l1Warning: l1Failed > 0 };
+    }
+
+ /**
+ * 渲染"继续处理"完成页。
+ *
+ * 说明:
+ * - 统计来源为 done 事件负载（resetCount / visionDone / visionFailed / L1 计数）；
+ * - L1 失败与图片未完成分别以警告条 / 信息条提示，可再次继续处理；
+ * - 按钮复用既有 id（btn-new-import 返回导入页、btn-goto-memory 前往记忆页）。
+ */
+    function _renderContinueDone() {
+        var summary = formatContinueSummary(_importProgress);
+        var html = '';
+
+ // ═══ L1 失败警告条 ═══
+        if (summary.l1Warning) {
+            html += '<div class="import-warning-banner">';
+            html += '<div class="import-warning-icon">⚠️</div>';
+            html += '<div class="import-warning-content">';
+            html += '<div class="import-warning-title">部分 L1 摘要补跑失败</div>';
+            html += '<div class="import-warning-desc">这通常意味着 LLM 模型暂不可用。请确认模型连接成功后再次点击 <strong>「继续处理」</strong>。</div>';
+            html += '</div>';
+            html += '</div>';
+        }
+
+ // ═══ 图片理解未完成提示条 ═══
+        if (summary.visionWarning) {
+            html += '<div class="import-info-banner">';
+            html += '<div class="import-info-icon">🖼️</div>';
+            html += '<div class="import-info-content">';
+            html += '<div class="import-info-desc">' + RamariaEscape.escapeHtml(summary.visionWarning) + '</div>';
+            html += '</div>';
+            html += '</div>';
+        }
+
+        html += '<div class="import-result">';
+        html += '<div class="import-result-header">';
+        html += '<div class="import-result-icon">✅</div>';
+        html += '<div class="import-result-title">继续处理完成</div>';
+        html += '</div>';
+        html += '<div class="import-result-body">';
+        html += '<div class="import-result-stats">';
+        summary.stats.forEach(function (item) {
+            html += '<div class="import-result-stat">';
+            html += '<div class="import-result-stat-value">' + RamariaEscape.escapeHtml(item.value) + '</div>';
+            html += '<div class="import-result-stat-label">' + RamariaEscape.escapeHtml(item.label) + '</div>';
+            html += '</div>';
+        });
+        html += '</div>';
+        html += '</div></div>';
+
+ // ═══ 导航按钮组 ═══
+        html += '<div class="import-actions">';
+        html += '<button class="btn btn-ghost" id="btn-new-import">返回导入页</button>';
         html += '<button class="btn btn-primary" id="btn-goto-memory">前往记忆页面</button>';
         html += '</div>';
 
@@ -875,6 +1018,13 @@ var ImportView = (function () {
             _cleanupFns.push(function () { btnAnalyze.removeEventListener('click', _handleAnalyze); });
         }
 
+ // 继续处理按钮
+        var btnContinue = $('btn-continue-import');
+        if (btnContinue) {
+            btnContinue.addEventListener('click', _handleContinueImport);
+            _cleanupFns.push(function () { btnContinue.removeEventListener('click', _handleContinueImport); });
+        }
+
  // 返回按钮
         var btnBack = $('btn-back-select');
         if (btnBack) {
@@ -901,7 +1051,9 @@ var ImportView = (function () {
                 _selectedFileName = null;
                 _selectedFileSize = null;
                 _reportData = null;
-                _importProgress = { phase: '', current: 0, total: 0, message: '', l1Success: null, l1Failed: null, l2Triggered: null, l3Triggered: null, l1Expected: null, l2Expected: null, l3Expected: null, etaSeconds: null };
+                _isContinueMode = false;
+                _continueExportRoot = null;
+                _resetProgress();
                 _importStartedAt = null;  // 重置 ETA 计时
                 _render();
             });
@@ -1098,8 +1250,11 @@ var ImportView = (function () {
         }
 
         _isImporting = true;
+        _isContinueMode = false;
+        _continueExportRoot = null;
         _step = 'importing';
         _importStartedAt = Date.now();  // 记录开始时间用于 ETA 计算
+        _resetProgress();
         _render();
 
         console.log('[ImportView] 开始导入: file=' + _selectedFilePath + ', mode=' + _importMode + ', gap=' + _gapMinutes);
@@ -1163,6 +1318,72 @@ var ImportView = (function () {
     }
 
  // =========================================================
+ // 事件处理：继续处理（回补中断的导入）
+ // =========================================================
+
+ /**
+ * 启动"继续处理"：选择导出目录 → 调用 continue_import → 由 done 事件推进完成页。
+ *
+ * 说明:
+ * - 命令立即返回（任务已启动回执）；进度经 import-progress 事件实时刷新，
+ *   完成统计（含附件回补与 L1 计数）随 done 事件送达；
+ * - 用户取消目录选择即中止本次操作；
+ * - 桌面入口固定要求选择导出目录（含 resources/ 的那一层）；仅补 L1 的场景走 CLI。
+ */
+    async function _handleContinueImport() {
+        if (_isImporting) return;
+
+ // ── 选择导出目录（取消即中止）──
+        var selected = null;
+        if (window.__TAURI__ && window.__TAURI__.dialog && window.__TAURI__.dialog.open) {
+            try {
+                selected = await window.__TAURI__.dialog.open({
+                    title: '选择 QQ 聊天记录导出目录（含 resources/ 的那一层）',
+                    directory: true,
+                    multiple: false,
+                });
+            } catch (dialogErr) {
+                console.warn('[ImportView] 导出目录选择对话框失败:', dialogErr);
+            }
+        }
+        if (!selected) {
+            RamariaToast.show('warning', '已取消', '未选择导出目录，继续处理未执行。');
+            return;
+        }
+        var exportRoot = typeof selected === 'string' ? selected : (selected.path || (Array.isArray(selected) ? selected[0] : null));
+        if (!exportRoot) {
+            RamariaToast.show('error', '错误', '未获取到目录路径');
+            return;
+        }
+
+        _isImporting = true;
+        _isContinueMode = true;
+        _continueExportRoot = exportRoot;
+        _step = 'importing';
+        _importStartedAt = Date.now();
+        _resetProgress();
+        _render();
+
+        console.log('[ImportView] 启动继续处理（导出目录已选择）');
+
+ // ── 注册 import-progress 事件监听（done 事件推进完成页）──
+        _setupImportProgressListener();
+
+        try {
+            await RamariaApi.import.continueImport(exportRoot);
+ // 命令立即返回（启动回执）；完成与统计经 done 事件送达
+        } catch (err) {
+            _isImporting = false;
+            _isContinueMode = false;
+            _continueExportRoot = null;
+            _step = 'select';
+            _render();
+            console.error('[ImportView] 继续处理启动失败:', err);
+            RamariaToast.show('error', '继续处理失败', err.message || String(err));
+        }
+    }
+
+ // =========================================================
  // 导入进度事件监听
  // =========================================================
 
@@ -1207,6 +1428,20 @@ var ImportView = (function () {
                     _importProgress.l1Failed = (payload.l1_failed !== undefined) ? payload.l1_failed : null;
                     _importProgress.l2Triggered = (payload.l2_triggered !== undefined) ? payload.l2_triggered : null;
                     _importProgress.l3Triggered = (payload.l3_triggered !== undefined) ? payload.l3_triggered : null;
+ // "继续处理"附件回补统计（普通导入缺省为 null）
+                    _importProgress.resetCount = (payload.reset_count !== undefined) ? payload.reset_count : null;
+                    _importProgress.visionDone = (payload.vision_done !== undefined) ? payload.vision_done : null;
+                    _importProgress.visionFailed = (payload.vision_failed !== undefined) ? payload.vision_failed : null;
+
+ // ── "继续处理"：命令已提前返回，done 事件负责把页面推进到完成页 ──
+                    if (_isContinueMode) {
+                        _isImporting = false;
+                        _step = 'done';
+ // 用户已离开导入页时经全局 Toast 送达完成通知
+                        if (!_isViewActive) {
+                            _notifyContinueDoneViaToast();
+                        }
+                    }
 
  // ── 用户可能已离开导入视图 ──
  // 如果 done 事件到达时用户不在导入页，通过全局 Toast 通知 L1 失败。
@@ -1233,12 +1468,16 @@ var ImportView = (function () {
 
  // ── 安全超时: 5 分钟后强制清理监听器 ──
  // 防止 done 事件永不抵达（网络/进程异常）导致监听器泄漏。
-            setTimeout(function () {
-                if (_importProgressUnlisten) {
-                    console.warn('[ImportView] import-progress 监听器超时（5min），强制清理');
-                    _onDestroyImportProgressListener();
-                }
-            }, 300000);
+ // "继续处理"任务可能持续数小时，不设固定超时——由 done 事件清理，
+ // 下次启动前 `_setupImportProgressListener` 亦会先清理旧监听器。
+            if (!_isContinueMode) {
+                setTimeout(function () {
+                    if (_importProgressUnlisten) {
+                        console.warn('[ImportView] import-progress 监听器超时（5min），强制清理');
+                        _onDestroyImportProgressListener();
+                    }
+                }, 300000);
+            }
         }
     }
 
@@ -1265,6 +1504,35 @@ var ImportView = (function () {
             RamariaToast.show(
                 'success', '导入深度处理完成',
                 'L1 摘要全部生成成功 (' + l1Success + ' 条)。记忆页面可查看结果。',
+                { duration: 5000 }
+            );
+        }
+    }
+
+ /**
+ * 通过全局 Toast 通知"继续处理"完成（用于用户已离开导入页的场景）。
+ *
+ * 说明:
+ * - "继续处理"为长任务（可能数小时），done 事件到达时用户多半已离开导入页；
+ * - 汇总重置数 / 图片理解数 / L1 补跑数；存在失败时用 warning 级别提示可再次继续处理。
+ */
+    function _notifyContinueDoneViaToast() {
+        var summary = formatContinueSummary(_importProgress);
+        var l1Success = (typeof _importProgress.l1Success === 'number') ? _importProgress.l1Success : 0;
+        var l1Failed = (typeof _importProgress.l1Failed === 'number') ? _importProgress.l1Failed : 0;
+        var detail = '重置附件 ' + (summary.stats[0] ? summary.stats[0].value : 0) + ' 条，图片理解 ' +
+            (summary.stats[1] ? summary.stats[1].value : 0) + ' 条，L1 补跑成功 ' + l1Success + '/' + (l1Success + l1Failed) + '。';
+
+        if (l1Failed > 0) {
+            RamariaToast.show(
+                'warning', '继续处理完成（有失败）',
+                detail + ' 部分 L1 摘要补跑失败，请确认 LLM 连接后再次继续处理。',
+                { duration: 8000 }
+            );
+        } else {
+            RamariaToast.show(
+                'success', '继续处理完成',
+                detail,
                 { duration: 5000 }
             );
         }
@@ -1331,6 +1599,7 @@ var ImportView = (function () {
     return {
         init: init,
         formatGroupMembers: formatGroupMembers,
+        formatContinueSummary: formatContinueSummary,
     };
 })();
 

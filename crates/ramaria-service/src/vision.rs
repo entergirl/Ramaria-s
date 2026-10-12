@@ -1,40 +1,46 @@
 //! crates/ramaria-service/src/vision.rs - Ramaria 图片理解模块
 //!
 //! 设计特点:
-//! - 理解任务全链路：扫描待处理附件 → 能力门禁 → md5 去重 → 定位读取 → 多模态调用
-//!   → 描述清洗 → 回填；逐行独立处置，单行业务失败不中断整批
+//! - 理解任务全链路：扫描待处理附件 → 能力门禁 → md5 去重 → 定位读取（相对引用直连
+//!   + md5 反查兜底）→ 多模态调用 → 描述清洗 → 回填；逐行独立处置，单行业务失败不中断整批
 //! - 能力门禁顺序固定：声明（配置显式开关）→ 隐私确认 → 探测；探测结论按
 //!   model_id + base_url 进程内缓存，同键不重复发送探测请求
-//! - 降级纪律：声明关 / 探测失败批量标 skipped；隐私未确认保持 pending 待下次；
-//!   定位失败与超大文件跳过；调用失败重试一次后标 failed
+//! - 降级纪律：声明关 / 探测失败保持 pending 待下次（不落库）；隐私未确认保持 pending
+//!   待下次；定位失败与超大文件跳过；调用失败重试一次后标 failed
 //! - md5 去重：同图已有完成描述直接批量回填，不重复调用模型
 //! - 输入准备：线上 provider 按内容格式与单边像素上限归一化（越界长图缩放重编码）；
 //!   本地 provider 原字节透传；不符合后端输入约束时按 skipped 降级（见 `prepare` 子模块）
 //! - base64 编码自实现；日志不落图片内容与描述原文
+//!
+//! 模块划分:
+//! - `batch`：批量与"继续处理"共用的逐行理解实现；
+//! - `locate`：附件定位（多导出根直连 + md5 反查）；
+//! - `prepare`：理解输入准备（格式归一化与像素上限）。
 
 // 理解入口经 import 门面（`importer` feature）调用；未启用该 feature 时本模块
 // 仅作为引擎探测缓存的类型宿主，不产生未使用代码告警
 #![cfg_attr(not(feature = "importer"), allow(dead_code))]
 
-use std::path::Path;
 use std::sync::Arc;
 
 use ramaria_core::error::RamariaResult;
-use ramaria_core::traits::{ChatRequest, LlmProvider, StorageBackend};
-use ramaria_core::types::{AttachmentStatus, MessageAttachment, is_local_relative_ref};
+use ramaria_core::traits::{ChatRequest, LlmProvider};
+use ramaria_core::types::AttachmentStatus;
 use uuid::Uuid;
 
 use crate::engine::Engine;
 use crate::types::ChannelImageOutcome;
 
+mod batch;
+mod locate;
 mod prepare;
+
+pub(crate) use batch::{MAX_IMAGE_BYTES, understand_attachment_rows, understand_attachments};
+pub(crate) use locate::AttachmentLocator;
 
 // =========================================================
 // 常量
 // =========================================================
-
-/// 单张图片体积上限（字节）；超过则不读取直接跳过。
-const MAX_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
 
 /// 描述截断上限（按字符数）。
 const MAX_DESCRIPTION_CHARS: usize = 200;
@@ -85,18 +91,6 @@ pub(crate) struct VisionProbeState {
 // 理解任务
 // =========================================================
 
-/// 单行附件的处理结果（统计计数口径）。
-enum RowOutcome {
-    /// 调用成功并回填（含重试成功）。
-    Done,
-    /// 命中已有描述直接复用回填。
-    Reused,
-    /// 调用失败（重试后仍失败 / 清洗后为空）。
-    Failed,
-    /// 定位失败 / 超大文件等跳过。
-    Skipped,
-}
-
 /// 图片理解能力门禁（内部判定状态）。
 enum CapabilityGate {
     /// 声明开启且探测可用。
@@ -107,263 +101,6 @@ enum CapabilityGate {
     PrivacyPending,
     /// 能力探测失败（模型不可用 / 不支持多模态）。
     ProbeFailed,
-}
-
-/// 理解一批会话中的待处理图片附件。
-///
-/// 流程:
-/// 1. 逐会话扫描 pending 附件（各自独立限制 `[vision].batch_limit`，0 = 不限）；
-/// 2. 能力门禁（声明 → 隐私 → 探测）；门禁未通过按分支批量处置后返回；
-/// 3. 逐行处理：md5 去重 → 定位读取 → 多模态调用（失败重试一次）→ 清洗 → 回填。
-///
-/// 参数:
-/// - `engine`: 服务层引擎；
-/// - `session_ids`: 待理解会话列表；
-/// - `export_root`: 导出目录（附件相对引用的定位根）。
-///
-/// 返回:
-/// - 本轮执行统计。
-pub(crate) async fn understand_attachments(
-    engine: &Engine,
-    session_ids: &[Uuid],
-    export_root: &Path,
-) -> RamariaResult<VisionRunStat> {
-    let mut stat = VisionRunStat::default();
-    if session_ids.is_empty() {
-        return Ok(stat);
-    }
-
-    // ---- 1. 扫描（按 session 序；会话内按附件 id 升序，由查询层保证） ----
-    let storage = engine.storage_ref().clone();
-    let batch_limit = engine.config().vision.batch_limit;
-    let mut scanned: Vec<(Uuid, Vec<MessageAttachment>)> = Vec::new();
-    for session_id in session_ids {
-        let rows = storage
-            .list_pending_attachments_by_session(*session_id, batch_limit)
-            .await?;
-        if !rows.is_empty() {
-            scanned.push((*session_id, rows));
-        }
-    }
-    let total: usize = scanned.iter().map(|(_, rows)| rows.len()).sum();
-    stat.scanned = total;
-    if total == 0 {
-        return Ok(stat);
-    }
-
-    // ---- 2. 能力门禁（顺序固定） ----
-    match capability_gate(engine).await? {
-        CapabilityGate::DeclaredOff => {
-            for (session_id, rows) in &scanned {
-                for row in rows {
-                    storage
-                        .mark_attachment_status(row.id, AttachmentStatus::Skipped)
-                        .await?;
-                }
-                tracing::info!(
-                    session = %session_id,
-                    count = rows.len(),
-                    "图片理解声明关闭，附件跳过"
-                );
-            }
-            stat.skipped = total;
-            return Ok(stat);
-        }
-        CapabilityGate::PrivacyPending => {
-            tracing::info!(
-                sessions = scanned.len(),
-                pending = total,
-                "隐私确认未完成，图片保持待处理"
-            );
-            return Ok(stat);
-        }
-        CapabilityGate::ProbeFailed => {
-            for (_, rows) in &scanned {
-                for row in rows {
-                    storage
-                        .mark_attachment_status(row.id, AttachmentStatus::Skipped)
-                        .await?;
-                }
-            }
-            stat.skipped = total;
-            tracing::warn!(count = total, "图片理解能力探测失败，附件跳过");
-            return Ok(stat);
-        }
-        CapabilityGate::Ready => {}
-    }
-
-    // ---- 3. 逐行处理（单行业务失败不中断整批） ----
-    let llm = engine.llm();
-    let label = model_label(&llm);
-    for (_, rows) in &scanned {
-        for row in rows {
-            match process_row(&llm, &storage, row, export_root, &label).await? {
-                RowOutcome::Done => stat.done += 1,
-                RowOutcome::Reused => stat.reused += 1,
-                RowOutcome::Failed => stat.failed += 1,
-                RowOutcome::Skipped => stat.skipped += 1,
-            }
-        }
-    }
-
-    tracing::info!(
-        sessions = scanned.len(),
-        scanned = stat.scanned,
-        done = stat.done,
-        reused = stat.reused,
-        failed = stat.failed,
-        skipped = stat.skipped,
-        "图片理解批次完成"
-    );
-    Ok(stat)
-}
-
-/// 处理单行附件（含状态回填等全部副作用；业务失败按标记口径返回）。
-async fn process_row(
-    llm: &Arc<dyn LlmProvider>,
-    storage: &Arc<dyn StorageBackend>,
-    row: &MessageAttachment,
-    export_root: &Path,
-    model_label: &str,
-) -> RamariaResult<RowOutcome> {
-    // ---- 1. md5 去重：已有完成描述 → 直接批量回填 ----
-    let row_md5 = row.md5.as_deref().filter(|md5| !md5.is_empty());
-    if let Some(md5) = row_md5 {
-        if let Some((description, description_model)) =
-            storage.find_attachment_description_by_md5(md5).await?
-        {
-            storage
-                .fill_attachment_done_by_md5(md5, &description, &description_model)
-                .await?;
-            return Ok(RowOutcome::Reused);
-        }
-    }
-
-    // ---- 2. 定位（仅受信相对引用；导出根拼接后校验文件） ----
-    let source_ref = row.source_ref.as_str();
-    if !is_local_relative_ref(source_ref) {
-        tracing::warn!(attachment_id = row.id, "附件引用不可定位，跳过");
-        storage
-            .mark_attachment_status(row.id, AttachmentStatus::Skipped)
-            .await?;
-        return Ok(RowOutcome::Skipped);
-    }
-    let path = export_root.join(source_ref);
-    let metadata = match std::fs::metadata(&path) {
-        Ok(metadata) if metadata.is_file() => metadata,
-        Ok(_) => {
-            tracing::warn!(attachment_id = row.id, "附件路径不是文件，跳过");
-            storage
-                .mark_attachment_status(row.id, AttachmentStatus::Skipped)
-                .await?;
-            return Ok(RowOutcome::Skipped);
-        }
-        Err(error) => {
-            tracing::warn!(attachment_id = row.id, error = %error, "附件定位失败，跳过");
-            storage
-                .mark_attachment_status(row.id, AttachmentStatus::Skipped)
-                .await?;
-            return Ok(RowOutcome::Skipped);
-        }
-    };
-
-    // ---- 3. 体积检查与读取（超大与 IO 失败均为环境跳过，非模型失败） ----
-    if metadata.len() > MAX_IMAGE_BYTES {
-        tracing::warn!(
-            attachment_id = row.id,
-            size = metadata.len(),
-            "附件超过体积上限，跳过"
-        );
-        storage
-            .mark_attachment_status(row.id, AttachmentStatus::Skipped)
-            .await?;
-        return Ok(RowOutcome::Skipped);
-    }
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            tracing::warn!(attachment_id = row.id, error = %error, "附件读取失败，跳过");
-            storage
-                .mark_attachment_status(row.id, AttachmentStatus::Skipped)
-                .await?;
-            return Ok(RowOutcome::Skipped);
-        }
-    };
-
-    // ---- 4. 输入准备与多模态调用（失败重试一次，共两次尝试） ----
-    let prepared = match prepare::prepare_image(
-        llm.config().provider.is_online(),
-        &bytes,
-        prepare::image_mime_for(source_ref),
-    ) {
-        Ok(prepared) => prepared,
-        Err(reject) => {
-            tracing::warn!(
-                attachment_id = row.id,
-                reason = reject.as_str(),
-                "图片不符合线上理解后端输入约束，跳过"
-            );
-            storage
-                .mark_attachment_status(row.id, AttachmentStatus::Skipped)
-                .await?;
-            return Ok(RowOutcome::Skipped);
-        }
-    };
-    let request = ChatRequest {
-        system_prompt: String::new(),
-        memory_context: None,
-        history: Vec::new(),
-        user_message: VISION_PROMPT.to_string(),
-        temperature: 0.2,
-        max_tokens: 256,
-        request_id: Uuid::new_v4(),
-        template_version: VISION_TEMPLATE_VERSION.to_string(),
-    };
-    let images = vec![prepared.to_data_uri()];
-    let reply = match llm.chat_vision(&request, &images).await {
-        Ok(reply) => Ok(reply),
-        Err(first_error) => {
-            tracing::warn!(
-                attachment_id = row.id,
-                error = %first_error,
-                "图片理解调用失败，重试一次"
-            );
-            llm.chat_vision(&request, &images).await
-        }
-    };
-    let raw = match reply {
-        Ok(raw) => raw,
-        Err(error) => {
-            tracing::warn!(attachment_id = row.id, error = %error, "图片理解调用仍然失败");
-            storage
-                .mark_attachment_status(row.id, AttachmentStatus::Failed)
-                .await?;
-            return Ok(RowOutcome::Failed);
-        }
-    };
-
-    // ---- 5. 清洗与回填（空描述不落库） ----
-    let description = sanitize_description(&raw);
-    if description.is_empty() {
-        tracing::warn!(attachment_id = row.id, "图片理解返回空描述，标记失败");
-        storage
-            .mark_attachment_status(row.id, AttachmentStatus::Failed)
-            .await?;
-        return Ok(RowOutcome::Failed);
-    }
-    match row_md5 {
-        Some(md5) => {
-            storage
-                .fill_attachment_done_by_md5(md5, &description, model_label)
-                .await?;
-        }
-        None => {
-            storage
-                .mark_attachment_done(row.id, &description, model_label)
-                .await?;
-        }
-    }
-    Ok(RowOutcome::Done)
 }
 
 // =========================================================
@@ -410,9 +147,8 @@ pub(crate) async fn understand_downloaded_image(
     // ---- 2. 能力门禁（顺序固定：声明 → 隐私 → 探测） ----
     match capability_gate(engine).await? {
         CapabilityGate::DeclaredOff | CapabilityGate::ProbeFailed => {
-            storage
-                .mark_attachment_status(attachment_id, AttachmentStatus::Skipped)
-                .await?;
+            // 行保持 pending，待能力可达后由后续路径处理
+            tracing::info!(attachment_id, "图片理解能力不可达，社交通道图片保持待处理");
             return Ok(ChannelImageOutcome::Skipped);
         }
         CapabilityGate::PrivacyPending => {

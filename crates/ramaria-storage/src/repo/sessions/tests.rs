@@ -408,3 +408,154 @@ async fn mark_read_roundtrip_and_missing_session_idempotent() {
         .await
         .expect("不存在的会话应幂等成功");
 }
+
+// =========================================================
+// 发言者统计与缺失 L1 候选
+// =========================================================
+
+/// 发言者去重统计：同人多条计一次、NULL 不计、空会话为 0。
+#[tokio::test]
+async fn count_speakers_distinct_non_null() {
+    let pool = init_test_pool().await.expect("测试库初始化成功");
+    // messages.persona_uid 有外键：先建两条 persona
+    for (seq, uid) in [(1, "user-0001"), (2, "char-0002")] {
+        sqlx::query(
+            "INSERT INTO personas (uid, name, kind, seq, source, created_at, updated_at) \
+             VALUES (?, '测试', 'char', ?, 'local', 0, 0)",
+        )
+        .bind(uid)
+        .bind(seq)
+        .execute(&pool)
+        .await
+        .expect("插入 persona fixture 应成功");
+    }
+    let session = create(&pool, None).await.expect("创建 session 成功");
+
+    // 4 条消息：两个不同 persona（其一重复）+ 一条无归属
+    for (role, uid) in [
+        (MessageRole::User, Some("user-0001")),
+        (MessageRole::Assistant, Some("char-0002")),
+        (MessageRole::Assistant, Some("char-0002")),
+        (MessageRole::User, None),
+    ] {
+        let mut message = Message::new(session.id, role, "内容".to_string(), MessageSource::Local);
+        message.persona_uid = uid.map(str::to_string);
+        crate::repo::messages::save_import(&pool, &message)
+            .await
+            .expect("插入消息成功");
+    }
+
+    assert_eq!(
+        count_speakers(&pool, session.id).await.expect("统计应成功"),
+        2,
+        "去重且不计 NULL 归属"
+    );
+    let empty = create(&pool, None).await.expect("创建空会话成功");
+    assert_eq!(
+        count_speakers(&pool, empty.id).await.expect("统计应成功"),
+        0,
+        "无消息会话为 0"
+    );
+}
+
+/// 缺失 L1 候选：四条件过滤（本地 / 已关闭 / 有消息 / 无 L1）+ 排序 + limit。
+#[tokio::test]
+async fn list_closed_missing_l1_filters_and_limits() {
+    let pool = init_test_pool().await.expect("测试库初始化成功");
+
+    // 命中两条（started_at 早 / 晚，验证排序）
+    let hit_early = create(&pool, Some("char-0001")).await.expect("创建成功");
+    let hit_late = create(&pool, Some("char-0002")).await.expect("创建成功");
+    sqlx::query("UPDATE sessions SET started_at = 100, ended_at = 1 WHERE id = ?")
+        .bind(hit_early.id.to_string())
+        .execute(&pool)
+        .await
+        .expect("更新 started_at 成功");
+    sqlx::query("UPDATE sessions SET started_at = 200, ended_at = 1 WHERE id = ?")
+        .bind(hit_late.id.to_string())
+        .execute(&pool)
+        .await
+        .expect("更新 started_at 成功");
+    for session_id in [hit_early.id, hit_late.id] {
+        let message = Message::new(
+            session_id,
+            MessageRole::User,
+            "有消息".to_string(),
+            MessageSource::Local,
+        );
+        crate::repo::messages::save_import(&pool, &message)
+            .await
+            .expect("插入消息成功");
+    }
+
+    // 未关闭（活跃）→ 不命中
+    let active = create(&pool, None).await.expect("创建成功");
+    let message = Message::new(
+        active.id,
+        MessageRole::User,
+        "活跃".to_string(),
+        MessageSource::Local,
+    );
+    crate::repo::messages::save_import(&pool, &message)
+        .await
+        .expect("插入消息成功");
+
+    // 已关闭但无消息 → 不命中
+    let no_msg = create(&pool, None).await.expect("创建成功");
+    sqlx::query("UPDATE sessions SET ended_at = 1 WHERE id = ?")
+        .bind(no_msg.id.to_string())
+        .execute(&pool)
+        .await
+        .expect("关闭成功");
+
+    // 已关闭、有消息、但已有 L1 行 → 不命中
+    let with_l1 = create(&pool, Some("char-0003")).await.expect("创建成功");
+    let message = Message::new(
+        with_l1.id,
+        MessageRole::User,
+        "已有摘要".to_string(),
+        MessageSource::Local,
+    );
+    crate::repo::messages::save_import(&pool, &message)
+        .await
+        .expect("插入消息成功");
+    sqlx::query("UPDATE sessions SET ended_at = 1 WHERE id = ?")
+        .bind(with_l1.id.to_string())
+        .execute(&pool)
+        .await
+        .expect("关闭成功");
+    let l1 = ramaria_core::types::MemoryL1::new(with_l1.id, "既有摘要".to_string(), None);
+    crate::repo::memory_l1::save(&pool, &l1)
+        .await
+        .expect("写入 L1 成功");
+
+    // 非本地通道（已关闭、有消息）→ 不命中
+    let other_channel = create_in_channel(&pool, None, "mcp", Some("conv"))
+        .await
+        .expect("创建成功");
+    let message = Message::new(
+        other_channel.id,
+        MessageRole::User,
+        "外通道".to_string(),
+        MessageSource::Local,
+    );
+    crate::repo::messages::save_import(&pool, &message)
+        .await
+        .expect("插入消息成功");
+    sqlx::query("UPDATE sessions SET ended_at = 1 WHERE id = ?")
+        .bind(other_channel.id.to_string())
+        .execute(&pool)
+        .await
+        .expect("关闭成功");
+
+    let all = list_closed_missing_l1(&pool, 0).await.expect("查询应成功");
+    assert_eq!(
+        all,
+        vec![hit_early.id, hit_late.id],
+        "仅命中四条件全满足的会话且按 started_at 升序"
+    );
+    let limited = list_closed_missing_l1(&pool, 1)
+        .await
+        .expect("limit 查询应成功");
+    assert_eq!(limited, vec![hit_early.id], "limit=1 取最早一条");
+}

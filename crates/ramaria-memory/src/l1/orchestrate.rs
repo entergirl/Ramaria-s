@@ -39,6 +39,8 @@ pub const MAX_L1_RETRY_JOBS_PER_RUN: usize = 8;
 /// - `persona_uid`: L1 归属人格；`None` 表示不绑定（存量兼容）。
 /// - `user_prefix` / `assistant_prefix`: 摘要素材的角色前缀覆盖；`None` 用默认。
 /// - `fanout_others`: 多画像分发开关（群聊场景按块/段内他人发言者复制 L1 行）；默认关闭。
+/// - `fanout_include_self`: 分发参与者含"我"（User 角色发言者）；
+///   仅 `fanout_others` 开启时生效；默认关闭。
 /// - `target_projection`: 目标相对投影开关（社会通道会话逐目标重投影生成）；默认关闭。
 /// - `job_manager_config`: 生成任务的退避配置覆盖；`None` 用默认（3 次 / 1000ms 起）。
 #[derive(Debug, Clone)]
@@ -49,6 +51,8 @@ pub struct L1GenerateRequest<'a> {
     pub assistant_prefix: Option<&'a str>,
     /// 多画像分发开关（按块/段内他人发言者复制 L1 行）
     pub fanout_others: bool,
+    /// 分发参与者含"我"（User 角色发言者；仅 `fanout_others` 开启时生效）
+    pub fanout_include_self: bool,
     /// 目标相对投影开关（按块内目标集合逐目标生成 L1 行）
     pub target_projection: bool,
     /// 任务退避配置覆盖（None = 默认）
@@ -64,6 +68,7 @@ impl<'a> L1GenerateRequest<'a> {
             user_prefix: None,
             assistant_prefix: None,
             fanout_others: false,
+            fanout_include_self: false,
             target_projection: false,
             job_manager_config: None,
         }
@@ -98,6 +103,8 @@ pub async fn generate_l1_summaries(
     }
     // 多画像分发开关透传（群聊场景；关闭时行为与私聊一致）
     summarizer_config.fanout_others = req.fanout_others;
+    // 分发参与者含"我"开关透传（仅分发开启时有意义）
+    summarizer_config.fanout_include_self = req.fanout_include_self;
     // 目标相对投影开关透传（社会通道会话；关闭时行为与本地 / 导入一致）
     summarizer_config.target_projection = req.target_projection;
 

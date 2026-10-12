@@ -786,6 +786,24 @@ var RamariaApi = (function () {
         return await _invoke('import_qq_chat', args, '导入 QQ 聊天记录');
     }
 
+ /**
+ * 继续处理：回补中断的导入（图片附件重扫 + L1 摘要补跑 + 深度级联）。
+ *
+ * 参数:
+ * - `exportRoot`: 可选，导出根目录（附件定位与 md5 反查的搜索根）；
+ * 缺省时仅补跑 L1 与会话级联，不重扫附件。
+ *
+ * 返回:
+ * - 命令立即返回（任务已启动）；进度与最终统计经 `import-progress` 事件送达，
+ * done 阶段负载含 `reset_count` / `vision_done` / `vision_failed` 可选字段。
+ */
+    async function continueImport(exportRoot) {
+        var args = {};
+        if (exportRoot) args.exportRoot = exportRoot;
+        console.log('[Api] 调用 continueImport，exportRoot=' + (exportRoot ? '已提供' : '缺省'));
+        return await _invoke('continue_import', args, '继续处理导入');
+    }
+
  // =========================================================
  // 11. 行为规则管理 (rules) — M7
  // =========================================================
@@ -1128,6 +1146,7 @@ var RamariaApi = (function () {
             detectFormat: detectQQFormat,
             analyzeFile: analyzeQQFile,
             importQQ: importQQChat,
+            continueImport: continueImport,
         },
         persona: {
             listFull: listPersonasFull,

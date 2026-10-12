@@ -4,7 +4,8 @@
 //! - 纯数据结构 + Default，无 I/O、无逻辑分支。
 //! - `utt_splitter` 为 None 时整会话单块（v1.4 行为）；Some 时按话语块逐块生成。
 //! - `prior_context_*` 控制上一块上文注入形态（原文 / 上一 L1 摘要 + 线索 / 截断原文）。
-//! - `fanout_others` 开启时按块/段内他人发言者复制 L1 行（多画像分发，默认关闭）。
+//! - `fanout_others` 开启时按块/段内他人发言者复制 L1 行（多画像分发，默认关闭）；
+//!   `fanout_include_self` 控制分发参与者是否含"我"（User 角色发言者）。
 //! - `target_projection` 开启时按「目标相对投影」逐目标生成 L1（社会通道会话；
 //!   本地与导入路径保持关闭）。
 
@@ -35,6 +36,9 @@
 /// - `fanout_others`: 多画像分发开关（群聊场景）。开启时按块/段内他人发言者复制 L1 行：
 ///   参与者为空（无他人参与）→ 原行保留；参与者非空 → 每参与者一行（各自 persona_uid），
 ///   原行不落库。默认关闭（私聊路径行为不变）。
+/// - `fanout_include_self`: 分发参与者含"我"（User 角色发言者）。仅 `fanout_others`
+///   开启时生效：true 时参与者集合额外纳入块内 User 角色且带 persona_uid 的发言者
+///   （私聊双方分发口径）；false 时仅他人（Assistant 角色）发言者参与。默认关闭。
 /// - `target_projection`: 目标相对投影开关（社交通道会话）。开启时按块内目标集合
 ///   逐目标生成 L1（assistant iff 发言人 persona == 目标；行首渲染 `sender_name`），
 ///   不做行复制分发。默认关闭（本地与导入路径行为不变）。
@@ -58,6 +62,8 @@ pub struct L1SummarizerConfig {
     pub utt_splitter: Option<crate::utt::UttSplitterConfig>,
     /// 多画像分发：按块/段内他人发言者复制 L1 行（每行各自 persona_uid；默认关闭）
     pub fanout_others: bool,
+    /// 分发参与者含"我"（User 角色发言者；仅 `fanout_others` 开启时生效，默认关闭）
+    pub fanout_include_self: bool,
     /// 目标相对投影开关（社交会话逐目标重投影生成；本地与导入路径保持关闭）
     pub target_projection: bool,
     /// 上一块消息数阈值（≤ 注入原文，> 注入上一 L1 摘要+线索），默认 20
@@ -78,6 +84,7 @@ impl Default for L1SummarizerConfig {
             situation_strength: None,
             utt_splitter: Some(crate::utt::UttSplitterConfig::default()),
             fanout_others: false,
+            fanout_include_self: false,
             target_projection: false,
             prior_context_threshold: 20,
             prior_context_max_chars: 1500,

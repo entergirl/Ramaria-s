@@ -96,9 +96,10 @@ pub use hooks::{default_seal_hooks, full_seal_hooks};
 pub use idle::{IdleLoop, IdleLoopOptions, MIN_IDLE_CHECK_INTERVAL_SECONDS};
 #[cfg(feature = "importer")]
 pub use import::{
-    AnalysisReport, AnalyzeRequest, ImportDoneSummary, ImportL0Outcome, ImportL1Outcome,
-    ImportL1Plan, ImportL1Progress, ImportMode, ImportPostOutcome, ImportPostPlan,
-    ImportPostRequest, ImportProgressSink, ImportRequest,
+    AnalysisReport, AnalyzeRequest, ImportContinueOutcome, ImportContinueRequest,
+    ImportDoneSummary, ImportL0Outcome, ImportL1Outcome, ImportL1Plan, ImportL1Progress,
+    ImportMode, ImportPostOutcome, ImportPostPlan, ImportPostRequest, ImportProgressSink,
+    ImportRequest,
 };
 pub use index::IndexBuildFailure;
 pub use lifecycle::{Lifecycle, LifecycleOptions};

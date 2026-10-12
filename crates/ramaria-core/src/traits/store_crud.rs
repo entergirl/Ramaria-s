@@ -199,6 +199,40 @@ pub trait StoreCrud: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// 统计会话内的去重发言者数（按消息 `persona_uid` 去重）。
+    ///
+    /// 职责:
+    /// - 供调用方按参与人数区分会话形态（如私聊双方 / 群聊多人），
+    ///   决定后续摘要生成的分发口径。
+    ///
+    /// 语义:
+    /// - 仅统计 `persona_uid IS NOT NULL` 的消息发送者；
+    /// - 同一发送者多条消息只计一次。
+    ///
+    /// 默认实现:
+    /// - 返回 0（未覆写 mock 视为"无发言者信息"，调用方按未知降级处理）。
+    async fn count_session_speakers(&self, _session_id: Uuid) -> RamariaResult<u32> {
+        Ok(0)
+    }
+
+    /// 查询"已关闭且缺 L1 摘要"的本地会话 id 列表（补跑候选）。
+    ///
+    /// 职责:
+    /// - 供缺失摘要的补跑路径扫描候选：会话已关闭、含消息、但尚无任何 L1 行。
+    ///
+    /// 语义:
+    /// - 仅统计 `channel = 'local'` 的会话（其他通道由各自的摘要路径承担）；
+    /// - 会话须 `ended_at IS NOT NULL` 且存在至少一条消息；
+    /// - 会话无任何 `memory_l1` 行（含无归属行）才算缺失；
+    /// - 按 `started_at ASC, id ASC` 排序（先发生的先补）；
+    /// - `limit = 0` 表示不限，`limit > 0` 时取前 limit 条。
+    ///
+    /// 默认实现:
+    /// - 返回空列表（未覆写 mock 视为"无待补会话"）。
+    async fn list_closed_sessions_missing_l1(&self, _limit: u32) -> RamariaResult<Vec<Uuid>> {
+        Ok(Vec::new())
+    }
+
     // -- ChannelBinding --
     /// 写入 / 更新通道绑定（按 (channel, external_ref) upsert）。
     ///
@@ -721,6 +755,67 @@ pub trait StoreCrud: Send + Sync {
         _md5: &str,
     ) -> RamariaResult<Option<(String, String)>> {
         Ok(None)
+    }
+
+    /// 全库扫描 pending 附件（id 升序）。
+    ///
+    /// 职责:
+    /// - 全库级待处理扫描的读取入口：跨会话回补尚未理解的附件
+    ///   （不限定会话的补跑路径使用）。
+    ///
+    /// 语义:
+    /// - 仅返回 `status = 'pending'` 的附件，按附件 id 升序；
+    /// - `limit = 0` 表示不限，`limit > 0` 时取前 limit 条。
+    ///
+    /// 默认实现:
+    /// - 返回空列表（未覆写 mock 按"无待处理附件"降级，不阻塞调用方）。
+    async fn list_all_pending_attachments(
+        &self,
+        _limit: u32,
+    ) -> RamariaResult<Vec<MessageAttachment>> {
+        Ok(Vec::new())
+    }
+
+    /// 全库扫描 skipped 附件（id 升序）。
+    ///
+    /// 职责:
+    /// - 存量跳过行的重扫入口：附件此前因定位失败等原因被跳过，
+    ///   外部条件变化（如更换导出根 / 补齐文件）后由调用方判定是否重置为待处理。
+    ///
+    /// 语义:
+    /// - 仅返回 `status = 'skipped'` 的附件，按附件 id 升序；
+    /// - `limit = 0` 表示不限，`limit > 0` 时取前 limit 条。
+    ///
+    /// 默认实现:
+    /// - 返回空列表（未覆写 mock 视为"无跳过行"）。
+    async fn list_all_skipped_attachments(
+        &self,
+        _limit: u32,
+    ) -> RamariaResult<Vec<MessageAttachment>> {
+        Ok(Vec::new())
+    }
+
+    /// 把单行附件重置为待处理（供重新扫描）。
+    ///
+    /// 职责:
+    /// - 存量跳过行的重置写入口：把此前跳过的附件改回 `pending`，
+    ///   使后续理解任务重新扫描该行。
+    ///
+    /// 语义:
+    /// - 置 `status = 'pending'` 并刷新 `updated_at`；
+    /// - `source_ref` 为 `Some` 时一并更新（定位修正后的引用）；
+    /// - 幂等：对已 pending 行重复调用无副作用。
+    ///
+    /// 默认实现:
+    /// - 返回 `Unsupported`（写语义由实现方显式声明，不做静默丢弃）。
+    async fn reset_attachment_for_rescan(
+        &self,
+        _id: i64,
+        _source_ref: Option<&str>,
+    ) -> RamariaResult<()> {
+        Err(crate::error::RamariaError::unsupported(
+            "StoreCrud 未实现附件重扫重置（需覆写 reset_attachment_for_rescan）",
+        ))
     }
 
     // -- Memory L1 --

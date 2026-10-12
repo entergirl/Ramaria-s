@@ -82,6 +82,14 @@ impl StoreCrud for SqliteStorage {
     async fn list_session_members(&self, session_id: Uuid) -> RamariaResult<Vec<SessionMember>> {
         repo::session_members::list_by_session(&self.pool, session_id).await
     }
+    /// 覆写为单条 COUNT(DISTINCT) 聚合（去重发言者口径）。
+    async fn count_session_speakers(&self, session_id: Uuid) -> RamariaResult<u32> {
+        repo::sessions::count_speakers(&self.pool, session_id).await
+    }
+    /// 覆写为 EXISTS / NOT EXISTS 联合过滤查询（缺失 L1 的已关闭会话候选）。
+    async fn list_closed_sessions_missing_l1(&self, limit: u32) -> RamariaResult<Vec<Uuid>> {
+        repo::sessions::list_closed_missing_l1(&self.pool, limit).await
+    }
     /// 覆写为 `UPDATE` 推进已读时间（幂等：未命中会话静默成功）。
     async fn mark_session_read(&self, session_id: Uuid, at_ms: i64) -> RamariaResult<()> {
         repo::sessions::mark_read(&self.pool, session_id, at_ms).await
@@ -267,6 +275,28 @@ impl StoreCrud for SqliteStorage {
         md5: &str,
     ) -> RamariaResult<Option<(String, String)>> {
         repo::attachments::find_done_description_by_md5(&self.pool, md5).await
+    }
+    /// 覆写为全库按状态扫描（id 升序，limit 0 = 不限）。
+    async fn list_all_pending_attachments(
+        &self,
+        limit: u32,
+    ) -> RamariaResult<Vec<MessageAttachment>> {
+        repo::attachments::list_all_pending(&self.pool, limit).await
+    }
+    /// 覆写为全库按状态扫描（id 升序，limit 0 = 不限）。
+    async fn list_all_skipped_attachments(
+        &self,
+        limit: u32,
+    ) -> RamariaResult<Vec<MessageAttachment>> {
+        repo::attachments::list_all_skipped(&self.pool, limit).await
+    }
+    /// 覆写为单行状态重置（可选修正 source_ref）。
+    async fn reset_attachment_for_rescan(
+        &self,
+        id: i64,
+        source_ref: Option<&str>,
+    ) -> RamariaResult<()> {
+        repo::attachments::reset_for_rescan(&self.pool, id, source_ref).await
     }
 
     // =========================================================

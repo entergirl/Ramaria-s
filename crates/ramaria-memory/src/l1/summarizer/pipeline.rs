@@ -5,7 +5,8 @@
 //! - summarize_progressive: 渐进式按段生成，未达阈值时回退 summarize_session。
 //! - 图片描述注入：切块前一次加载会话内附件描述映射，对话文本中的
 //!   `[图片#{hash}]` 占位符渲染为 `[图片: {描述}]`（无描述 / 查询失败保留占位符）。
-//! - 多画像分发：fanout_others 开启时按块/段内他人发言者复制 L1 行，各行独立 persona。
+//! - 多画像分发：fanout_others 开启时按块/段内参与者复制 L1 行，各行独立 persona；
+//!   `fanout_include_self` 控制参与者是否含"我"（User 角色发言者）。
 //! - 目标相对投影：target_projection 开启时按块内目标集合（绑定人格 ∪ 块内发言者）
 //!   逐目标生成 L1 行（各行角色重投影、persona 定向），不做行复制分发。
 //! - 块级容错：单块失败记 warn 并降级继续，全部失败返回最后一个错误。
@@ -576,13 +577,14 @@ impl<'a> L1Summarizer<'a> {
     // 多画像分发（内部辅助）
     // =========================================================
 
-    /// 按块内他人发言者复制 L1 行（多画像分发）。
+    /// 按块内参与者复制 L1 行（多画像分发）。
     ///
     /// 规则:
     /// - `fanout_others=false` → 原行（1 行）；
     /// - 参与者 = 块内 Assistant 角色且 persona_uid 非空的消息发送者集合
-    ///   （去重、稳定序；self 的 User 消息天然排除）；
-    /// - 参与者为空（无他人参与）→ 原行保留（persona_uid 为 config 值，导入场景即 NULL）；
+    ///   （去重、稳定序）；`fanout_include_self=true` 时参与者额外纳入
+    ///   User 角色且 persona_uid 非空的发言者（含"我"的两态口径）；
+    /// - 参与者为空（无参与发言）→ 原行保留（persona_uid 为 config 值，导入场景即 NULL）；
     /// - 参与者非空 → 每参与者复制一行（新 id、各自 persona_uid），原行不落库。
     ///
     /// 参数:
@@ -599,7 +601,7 @@ impl<'a> L1Summarizer<'a> {
         let participants: BTreeSet<&str> = chunk
             .messages
             .iter()
-            .filter(|m| m.role == MessageRole::Assistant)
+            .filter(|m| self.config.fanout_include_self || m.role == MessageRole::Assistant)
             .filter_map(|m| m.persona_uid.as_deref())
             .collect();
 

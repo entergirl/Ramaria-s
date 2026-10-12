@@ -70,6 +70,7 @@ pub(crate) async fn regenerate_l1(
         user_prefix,
         assistant_prefix,
         false,
+        false,
     )
     .await
     {
@@ -148,6 +149,7 @@ pub(crate) async fn regenerate_l1_no_cascade(
         user_prefix,
         assistant_prefix,
         false,
+        false,
     )
     .await
     {
@@ -209,6 +211,7 @@ pub(crate) async fn regenerate_l1_progressive(
             user_prefix,
             assistant_prefix,
             fanout_others: false,
+            fanout_include_self: false,
             target_projection: false,
             job_manager_config: Some(engine.job_manager_config()),
         },
@@ -248,7 +251,9 @@ pub(crate) async fn regenerate_l1_progressive(
 /// - 成功后从存储读回最后一条 L1（`JobManager` 不返回业务结果）。
 ///
 /// 参数:
-/// - `fanout_others`: 多画像分发开关（群聊场景按块内参与者复制 L1 行）。
+/// - `fanout_others`: 多画像分发开关（真时按块内参与者复制 L1 行）。
+/// - `fanout_include_self`: 分发参与者含"我"（User 角色发言者）；
+///   仅 `fanout_others` 为真时有意义。
 ///
 /// 返回:
 /// - 成功时返回刚写入的 L1；生成后仍读不到记录视为内部错误（Validation）。
@@ -259,6 +264,7 @@ pub(crate) async fn generate_l1_summary(
     user_prefix: Option<&str>,
     assistant_prefix: Option<&str>,
     fanout_others: bool,
+    fanout_include_self: bool,
 ) -> RamariaResult<MemoryL1> {
     let storage = engine.storage_ref().as_ref();
     let llm = engine.llm_ref();
@@ -274,6 +280,7 @@ pub(crate) async fn generate_l1_summary(
         summarizer_config.assistant_prefix = prefix.to_string();
     }
     summarizer_config.fanout_others = fanout_others;
+    summarizer_config.fanout_include_self = fanout_include_self;
 
     // 输出预算从 backend_config 传播并下限钳制（结构化 JSON 输出需要更大预算）
     if let Ok(Some(backend)) = storage.get_backend_config().await {

@@ -74,6 +74,7 @@ fn l1_plan(outcome: &ImportL0Outcome) -> ImportL1Plan {
         cascade: false,
         throttle_ms: 0,
         group_fanout: false,
+        fanout_include_self: false,
     }
 }
 

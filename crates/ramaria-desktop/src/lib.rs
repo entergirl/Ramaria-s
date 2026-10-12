@@ -414,6 +414,7 @@ pub fn run() {
             commands::import_cmd::analyze_qq_chat,
             commands::import_cmd::import_qq_chat,
             commands::import_cmd::detect_qq_format,
+            commands::import_continue::continue_import,
             // ---- Persona ----
             commands::persona::list_personas_full,
             commands::persona::update_persona_info,
