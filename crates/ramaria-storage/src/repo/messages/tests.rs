@@ -975,3 +975,29 @@ async fn sender_identity_roundtrip() {
     assert_eq!(paged_imported.sender_ref.as_deref(), Some("u_peer"));
     assert_eq!(paged_imported.sender_name.as_deref(), Some("小红"));
 }
+
+/// get 能按 id 命中已入库消息，未入库 id 返回 None。
+#[tokio::test]
+async fn get_hits_and_misses_by_id() {
+    let pool = init_test_pool().await.expect("测试库初始化失败");
+    let session_id = setup_fixture(&pool).await;
+
+    // 未入库 id：None
+    assert!(
+        get(&pool, Uuid::new_v4()).await.unwrap().is_none(),
+        "未入库 id 应返回 None"
+    );
+
+    // 入库后按 id 命中完整投影
+    let message = make_message(session_id, Some("fp-get"));
+    save_import(&pool, &message).await.expect("写入成功");
+    let hit = get(&pool, message.id)
+        .await
+        .unwrap()
+        .expect("应命中已入库消息");
+    assert_eq!(hit.id, message.id);
+    assert_eq!(hit.session_id, session_id);
+    assert_eq!(hit.content, "内容");
+    assert_eq!(hit.fingerprint.as_deref(), Some("fp-get"));
+    assert_eq!(hit.persona_uid.as_deref(), Some("char-0001"));
+}

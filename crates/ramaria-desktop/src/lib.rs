@@ -148,14 +148,12 @@ fn determine_data_dir() -> PathBuf {
     PathBuf::from(&appdata).join("Ramaria").join("data")
 }
 
-/// 确保数据目录存在。
+/// 确保数据目录存在（含 logs / personas / image_cache 子目录）。
 fn ensure_data_dir(path: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(path)?;
-
-    // 同时确保子目录存在
-    std::fs::create_dir_all(path.join("logs"))?;
-    std::fs::create_dir_all(path.join("personas"))?;
-
+    for sub in ["logs", "personas", "image_cache"] {
+        std::fs::create_dir_all(path.join(sub))?;
+    }
     Ok(())
 }
 
@@ -415,6 +413,9 @@ pub fn run() {
             commands::import_cmd::import_qq_chat,
             commands::import_cmd::detect_qq_format,
             commands::import_continue::continue_import,
+            // ---- Attachment（会话浏览图片）----
+            commands::attachment::read_attachment_image,
+            commands::attachment::clear_image_cache,
             // ---- Persona ----
             commands::persona::list_personas_full,
             commands::persona::update_persona_info,

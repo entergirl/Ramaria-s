@@ -37,6 +37,7 @@ mod prepare;
 
 pub(crate) use batch::{MAX_IMAGE_BYTES, understand_attachment_rows, understand_attachments};
 pub(crate) use locate::AttachmentLocator;
+pub(crate) use prepare::image_mime_from_bytes;
 
 // =========================================================
 // 常量

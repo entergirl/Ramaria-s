@@ -5,12 +5,17 @@
 //! - 记忆浏览：L1（会话口径 / persona 未吸收口径）、L2 事件、L3 标签与三层画像
 //! - 知识浏览：活跃事实分页、单条事实版本链、按字段分组与版本链折叠
 //! - 会话浏览：列表聚合与分页、消息正序 / 分页翻正、详情与计数、未读标记与汇总
+//! - 会话图片：按消息与序号读取图片字节（缓存优先）、客户端缓存清理
 //! - 证据链：trait → 证据记录 → 事件 → L1 溯源 → 证据片段
 //! - 空态语义：不存在 / 无数据返回空列表或空链（非错误），由用例实现保证
+
+use std::path::Path;
 
 use ramaria_core::error::RamariaResult;
 use uuid::Uuid;
 
+use crate::attachment_cache::AttachmentCacheStat;
+use crate::attachment_read::AttachmentImage;
 use crate::types::{
     ChannelOverviewView, FactBrowsePage, FactBrowseRequest, FactDetailView, GroupedFactsView,
     L1BrowsePage, L1BrowseRequest, L1MemoryView, L2BrowsePage, L2BrowseRequest, L3TraitView,
@@ -144,5 +149,41 @@ impl Engine {
     /// 通道会话概览用例：该通道的活跃会话数与最近活动时间（只读聚合）。
     pub async fn channel_overview(&self, channel: &str) -> RamariaResult<ChannelOverviewView> {
         crate::browse::channel_overview(self, channel).await
+    }
+}
+
+// =========================================================
+// 会话图片读取用例
+// =========================================================
+
+impl Engine {
+    /// 读取消息中第 `slot` 个图片槽位的图片字节（缓存优先 → 导出根定位）。
+    ///
+    /// 说明:
+    /// - 供会话浏览展示真图；`slot` 为正文中图片的出现下标（从 0 起）；
+    /// - 消息不存在 / 序号越界 / 无本地文件均为业务校验错误。
+    ///
+    /// 参数:
+    /// - `message_id`: 目标消息 id。
+    /// - `slot`: 图片槽位下标。
+    /// - `cache_dir`: 客户端图片缓存目录。
+    pub async fn read_message_attachment_image(
+        &self,
+        message_id: Uuid,
+        slot: usize,
+        cache_dir: &Path,
+    ) -> RamariaResult<AttachmentImage> {
+        crate::attachment_read::read_message_image(self, message_id, slot, cache_dir).await
+    }
+
+    /// 清理客户端图片缓存（仅第一层文件，不递归子目录）。
+    ///
+    /// 返回:
+    /// - 成功删除的文件数与字节数（目录不存在时全 0）。
+    pub async fn clear_attachment_cache(
+        &self,
+        cache_dir: &Path,
+    ) -> RamariaResult<AttachmentCacheStat> {
+        crate::attachment_cache::clear(cache_dir)
     }
 }

@@ -70,7 +70,7 @@ async fn resume_env(
     engine_with_shared_llm(tag, llm, config, None).await
 }
 
-/// 默认"继续处理"请求（无导出根、不重置、无节流、不限量、无级联）。
+/// 默认"继续处理"请求（无导出根、不重置、无节流、不限量、无级联、不建缓存）。
 fn continue_request() -> ImportContinueRequest {
     ImportContinueRequest {
         export_roots: Vec::new(),
@@ -78,6 +78,7 @@ fn continue_request() -> ImportContinueRequest {
         throttle_ms: 0,
         l1_limit: 0,
         cascade_deep: false,
+        cache_dir: None,
     }
 }
 
@@ -278,6 +279,52 @@ async fn continue_resets_locatable_skipped_via_direct_and_md5() {
         AttachmentStatus::Skipped,
         "无文件可定位保持跳过"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 缓存回填：传入缓存目录时，反查命中的源文件被写入客户端缓存。
+#[tokio::test]
+async fn continue_backfills_client_cache_for_reverse_hits() {
+    let llm =
+        Arc::new(MockLlm::with_reply(L1_JSON_REPLY).with_vision_reply("一只橘猫趴在窗台上。"));
+    let (engine, storage, dir) = resume_env("resume-cache", llm, vision_on_config()).await;
+
+    // 反查素材：resources/images/{md5}_{大写 md5}.jpg（JPEG 魔数）
+    let file_name = "fccb86f2a1b695df3c37a1042a967a44_FCCB86F2A1B695DF3C37A1042A967A44.jpg";
+    let image_path = dir.join("resources").join("images").join(file_name);
+    std::fs::create_dir_all(image_path.parent().expect("图片文件应有父目录"))
+        .expect("创建图片目录应成功");
+    let jpeg: Vec<u8> = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46];
+    std::fs::write(&image_path, &jpeg).expect("写入图片应成功");
+
+    let session = storage.create_session(None).await.expect("创建会话应成功");
+    // 不可直连的服务器链接（md5 命中 → 反查兜底）
+    seed_attachment_message(
+        &storage,
+        session.id,
+        "/download?fileid=1",
+        Some(IMAGE_MD5),
+        AttachmentStatus::Skipped,
+    )
+    .await;
+
+    let cache_dir = dir.join("image_cache");
+    let mut req = continue_request();
+    req.export_roots = vec![dir.clone()];
+    req.reset_skipped = true;
+    req.cache_dir = Some(cache_dir.clone());
+    let outcome = engine
+        .continue_import(req, None)
+        .await
+        .expect("继续处理应成功");
+    assert_eq!(outcome.reset_count, 1);
+    assert_eq!(outcome.reverse_lookup_hits, 1, "经 md5 反查命中");
+
+    // 缓存文件落地：{md5}.jpg（JPEG 魔数 → jpg 扩展名），内容与源文件一致
+    let cached = cache_dir.join(format!("{IMAGE_MD5}.jpg"));
+    assert!(cached.is_file(), "反查命中应回填客户端缓存: {cached:?}");
+    assert_eq!(std::fs::read(&cached).expect("读取缓存应成功"), jpeg);
 
     let _ = std::fs::remove_dir_all(&dir);
 }

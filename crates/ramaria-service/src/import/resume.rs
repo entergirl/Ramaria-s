@@ -1,7 +1,7 @@
 //! crates/ramaria-service/src/import/resume.rs - Ramaria 导入"继续处理"编排模块
 //!
 //! 设计特点:
-//! - 三阶段单一编排：附件回补（重置可定位存量跳过 + 重扫 pending + md5 反查）
+//! - 三阶段单一编排：附件回补（重置可定位存量跳过 + 命中文件缓存回填 + 重扫 pending + md5 反查）
 //!   → L1 幂等补跑 → 深度级联补触发
 //! - 幂等可重跑：理解按 md5 去重、L1 按"已有归属行"跳过；重复执行零副作用
 //! - 能力门禁不可达保持 pending；附件阶段失败不阻塞 L1 补跑
@@ -29,7 +29,8 @@ use super::l1::{ImportL1Outcome, ImportL1Progress, ImportProgressSink, regenerat
 /// - `reset_skipped`: 是否重置"有文件可定位"的存量 skipped 行；
 /// - `throttle_ms`: 连续 LLM 调用间最小间隔（毫秒，0 = 不等待）；
 /// - `l1_limit`: L1 补跑会话上限（0 = 不限）；
-/// - `cascade_deep`: 补跑成功后是否触发 L2 → L3 级联。
+/// - `cascade_deep`: 补跑成功后是否触发 L2 → L3 级联；
+/// - `cache_dir`: 图片缓存目录（None = 不建立缓存）。
 #[derive(Debug, Clone)]
 pub struct ImportContinueRequest {
     /// 附件定位与反查的搜索根（空 = 跳过附件阶段）
@@ -42,6 +43,8 @@ pub struct ImportContinueRequest {
     pub l1_limit: usize,
     /// 补跑成功后触发 L2 → L3 级联
     pub cascade_deep: bool,
+    /// 图片缓存目录（None = 不建立缓存）
+    pub cache_dir: Option<PathBuf>,
 }
 
 /// "继续处理"结果。
@@ -120,6 +123,26 @@ pub(crate) async fn run_continue(
                 let Some(located) = locator.locate(&row.source_ref, row.md5.as_deref()) else {
                     continue;
                 };
+                // 命中文件 best-effort 建立客户端缓存（失败不影响重置逻辑）
+                if let Some(cache_dir) = req.cache_dir.as_deref() {
+                    match std::fs::read(&located.path) {
+                        Ok(bytes) => {
+                            crate::attachment_cache::store(
+                                cache_dir,
+                                row.id,
+                                row.md5.as_deref(),
+                                &bytes,
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                attachment_id = row.id,
+                                error = %error,
+                                "缓存回填读取来源文件失败（跳过该行缓存）"
+                            );
+                        }
+                    }
+                }
                 match storage
                     .reset_attachment_for_rescan(row.id, Some(&located.normalized_ref))
                     .await

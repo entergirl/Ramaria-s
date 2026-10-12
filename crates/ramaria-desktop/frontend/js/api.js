@@ -1085,6 +1085,41 @@ var RamariaApi = (function () {
         return await _invoke('set_channel_binding', args, '保存通道绑定');
     }
 
+// =========================================================
+// 16. 消息附件 (attachment)
+// =========================================================
+
+/**
+ * 读取消息附件的原始图片字节（缓存优先、源文件兜底）。
+ *
+ * 参数:
+ * - `messageId`: 消息 ID。
+ * - `index`: 图片段序号（消息正文中图片类段按出现顺序，从 0 起）。
+ *
+ * 返回:
+ * - ArrayBuffer（原始图片字节）；读取失败时抛出 Error。
+ */
+    async function readAttachmentImage(messageId, index) {
+        _require(messageId, '消息 ID');
+        if (index === undefined || index === null) {
+            throw new Error('图片序号不能为空');
+        }
+        return await _invoke('read_attachment_image', {
+            messageId: messageId,
+            index: index,
+        }, '读取图片');
+    }
+
+/**
+ * 清理客户端图片缓存目录。
+ *
+ * 返回:
+ * - { files, bytes }：删除的文件数与字节数。
+ */
+    async function clearImageCache() {
+        return await _invoke('clear_image_cache', {}, '清理图片缓存');
+    }
+
  // =========================================================
  // 公开 API
  // =========================================================
@@ -1187,6 +1222,10 @@ var RamariaApi = (function () {
             stop: stopChannel,
             listBindings: listChannelBindings,
             setBinding: setChannelBinding,
+        },
+        attachment: {
+            readImage: readAttachmentImage,
+            clearCache: clearImageCache,
         },
     };
 })();

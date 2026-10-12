@@ -467,6 +467,11 @@ pub async fn run_continue(engine: &Arc<Engine>, args: ContinueArgs) -> anyhow::R
                 throttle_ms: 0,
                 l1_limit: args.limit,
                 cascade_deep: args.cascade_deep,
+                // 图片缓存目录（数据库同级 `image_cache`；父目录缺失时降级不建立缓存）
+                cache_dir: engine
+                    .db_path()
+                    .parent()
+                    .map(|parent| parent.join("image_cache")),
             },
             Some(&CliProgressSink),
         )

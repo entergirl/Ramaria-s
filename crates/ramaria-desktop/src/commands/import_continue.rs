@@ -61,6 +61,8 @@ pub async fn continue_import(
         .unwrap_or(0);
 
     let reset_skipped = reset_skipped.unwrap_or(true);
+    // 图片缓存目录（数据库同级 `image_cache`；父目录缺失时降级不建立缓存）
+    let cache_dir = crate::commands::attachment::image_cache_dir(&state.engine);
     tracing::info!(
         roots = export_roots.len(),
         reset_skipped,
@@ -83,6 +85,7 @@ pub async fn continue_import(
                     throttle_ms,
                     l1_limit: 0,
                     cascade_deep: true,
+                    cache_dir,
                 },
                 Some(&sink),
             )

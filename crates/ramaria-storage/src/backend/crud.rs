@@ -139,6 +139,10 @@ impl StoreCrud for SqliteStorage {
     async fn list_messages(&self, session_id: Uuid) -> RamariaResult<Vec<Message>> {
         repo::messages::list_by_session(&self.pool, session_id).await
     }
+    /// 覆写为按 id 精确查询（单行）。
+    async fn get_message(&self, id: Uuid) -> RamariaResult<Option<Message>> {
+        repo::messages::get(&self.pool, id).await
+    }
     /// 覆写为高效 SQL 分页（`ORDER BY created_at DESC LIMIT ? OFFSET ?`）。
     async fn list_messages_paginated(
         &self,

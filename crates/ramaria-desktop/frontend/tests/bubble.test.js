@@ -9,7 +9,8 @@
  * - streamDisplay 流式展示（豁免区外 `||` → 换行）
  * - 分隔符常量导出
  * - 消息气泡主动标识（is_proactive → `.msg-bubble-proactive` 存在性）
- * - 图片占位符卡片（`[图片: 描述]` 卡片 / `[图片#hash]` 原文降级 / 混排分段 / XSS）
+ * - 图片占位符渲染（三形态分段序号 / 降级卡片 / 真图读取与 Blob URL /
+ *   失败降级 / MIME 魔数嗅探 / 混排分段 / XSS）
  * - sender_name 展示（群聊多说话人 / user 恒「你」/ 回退 persona 昵称）
  * - 导入前缀剥离（`[名字]` 前缀剥离；`[图片...]` 占位符不剥离）
  *
@@ -140,7 +141,7 @@ const MARKDOWN_PATH = path.resolve(
   __dirname, '..', 'js', 'utils', 'markdown.js'
 );
 
-/** 最小 DOM 节点桩：满足 create() 渲染路径（createElement / appendChild / setAttribute） */
+/** 最小 DOM 节点桩：满足 create() 渲染路径（createElement / appendChild / setAttribute / classList） */
 function createNode(tag) {
   const node = {
     tagName: String(tag).toUpperCase(),
@@ -162,12 +163,39 @@ function createNode(tag) {
         ? this.attributes[name]
         : null;
     },
+    removeAttribute(name) {
+      delete this.attributes[name];
+    },
     removeChild(child) {
       const idx = this.children.indexOf(child);
       if (idx !== -1) this.children.splice(idx, 1);
     },
+    querySelectorAll(className) {
+      return collectByClass(this, className);
+    },
     addEventListener() {},
   };
+  // classList 视图：读写映射到 className 字符串（图片加载成功 / 降级时使用）
+  Object.defineProperty(node, 'classList', {
+    get() {
+      const self = this;
+      const has = (name) => self.className.split(/\s+/).indexOf(name) !== -1;
+      return {
+        add(name) {
+          if (!has(name)) {
+            self.className = self.className ? self.className + ' ' + name : name;
+          }
+        },
+        remove(name) {
+          self.className = self.className
+            .split(/\s+/)
+            .filter((cls) => cls && cls !== name)
+            .join(' ');
+        },
+        contains: has,
+      };
+    },
+  });
   return node;
 }
 
@@ -219,22 +247,63 @@ function flatText(root) {
  * 参数:
  * - `options.personas`: RamariaStore.get('personas') 返回值（默认空数组），
  *   用于断言 persona 昵称回退路径。
+ * - `options.api`: 注入沙箱的 RamariaApi 桩（缺省不注入 → 图片段走降级卡片）。
+ * - `options.objectUrls`: 可选的记录器 { created, blobs, revoked }，收集
+ *   URL.createObjectURL / revokeObjectURL 的调用（缺省时用例内自建）。
+ *
+ * 说明:
+ * - 沙箱不提供 IntersectionObserver，图片读取走「立即读取」路径。
+ * - Blob / URL 为最小桩；createObjectURL 生成递增的 blob:vm-test/N 字符串。
  */
 function loadMessageBubble(options) {
   const opts = options || {};
+  const objectUrls = opts.objectUrls || { created: [], blobs: [], revoked: [] };
   const markdownSource = fs.readFileSync(MARKDOWN_PATH, 'utf8');
   const source = fs.readFileSync(MESSAGE_BUBBLE_PATH, 'utf8');
   const windowMock = {};
+  // 已创建节点注册表：支撑 document.querySelector('.msg-bubble-wrapper[data-message-id="…"]')
+  const createdNodes = [];
   const sandbox = {
     window: windowMock,
-    console: { log() {}, warn() {}, error() {} },
+    console: { log() {}, warn() {}, error() {}, debug() {} },
     document: {
-      createElement: createNode,
+      createElement(tag) {
+        const node = createNode(tag);
+        createdNodes.push(node);
+        return node;
+      },
       createTextNode: (text) => ({ text: String(text) }),
+      querySelector(selector) {
+        const matched = /^\.msg-bubble-wrapper\[data-message-id="(.*)"\]$/.exec(selector);
+        if (!matched) return null;
+        return (
+          createdNodes.find(
+            (node) =>
+              node.className.split(/\s+/).indexOf('msg-bubble-wrapper') !== -1 &&
+              node.getAttribute('data-message-id') === matched[1]
+          ) || null
+        );
+      },
     },
     RamariaFormat: { smartTime: (ts) => String(ts) },
     RamariaStore: { get: () => opts.personas || [] },
+    Blob: function (parts, blobOptions) {
+      this.parts = parts;
+      this.type = (blobOptions && blobOptions.type) || '';
+    },
+    URL: {
+      createObjectURL(blob) {
+        const url = 'blob:vm-test/' + (objectUrls.created.length + 1);
+        objectUrls.created.push(url);
+        objectUrls.blobs.push(blob);
+        return url;
+      },
+      revokeObjectURL(url) {
+        objectUrls.revoked.push(url);
+      },
+    },
   };
+  if (opts.api) sandbox.RamariaApi = opts.api;
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(markdownSource, sandbox, { filename: 'markdown.js' });
@@ -243,6 +312,44 @@ function loadMessageBubble(options) {
   const component = windowMock.RamariaMessageBubble;
   if (!component) throw new Error('message-bubble.js 未暴露 RamariaMessageBubble');
   return component;
+}
+
+/** 等待沙箱内 promise 链（图片读取）执行完毕 */
+function flushAsync() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+/** 合成 PNG 字节（魔数 + 占位负载） */
+const PNG_BYTES = Uint8Array.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x01]);
+
+/**
+ * 构造记录调用的 RamariaApi 桩。
+ *
+ * 参数:
+ * - `options.fail`: true 时 readImage 返回 rejected promise（降级路径）。
+ * - `options.bytes`: readImage 成功时返回的字节（默认合成 PNG）。
+ *
+ * 返回:
+ * - { calls: [{ messageId, index }], attachment } 形状的桩对象。
+ */
+function makeApi(options) {
+  const opts = options || {};
+  const calls = [];
+  return {
+    calls,
+    attachment: {
+      readImage(messageId, index) {
+        calls.push({ messageId, index });
+        if (opts.fail) {
+          return Promise.reject(new Error('读取失败'));
+        }
+        return Promise.resolve(opts.bytes || PNG_BYTES);
+      },
+      clearCache() {
+        return Promise.resolve({ files: 0, bytes: 0 });
+      },
+    },
+  };
 }
 
 const messageBubble = loadMessageBubble();
@@ -280,10 +387,10 @@ test('消息气泡：is_proactive 缺省 / false 不显示标识', () => {
 });
 
 // =========================================================
-// 图片占位符卡片（文本卡片通道：不加载真实图片文件）
+// 图片占位符分段（无 RamariaApi：全部走降级卡片）
 // =========================================================
 
-test('图片卡片：[图片: 猫] 渲染卡片、描述与 aria-hidden 图标', () => {
+test('图片降级卡片：[图片: 猫] 渲染卡片、描述与 aria-hidden 图标', () => {
   const wrapper = messageBubble.create({
     id: 'img1',
     role: 'assistant',
@@ -302,7 +409,7 @@ test('图片卡片：[图片: 猫] 渲染卡片、描述与 aria-hidden 图标',
   assert.equal(icons[0].getAttribute('aria-hidden'), 'true');
 });
 
-test('图片卡片：描述含换行（注入形态允许）原样展示', () => {
+test('图片降级卡片：描述含换行（注入形态允许）原样展示', () => {
   const wrapper = messageBubble.create({
     id: 'img2',
     role: 'assistant',
@@ -314,28 +421,37 @@ test('图片卡片：描述含换行（注入形态允许）原样展示', () =>
   assert.equal(descs[0].textContent, '图二\n第二行');
 });
 
-test('图片卡片：混排时文本段 Markdown 渲染仍在，哈希占位符保留原文', () => {
+test('图片分段：混排时文本段 Markdown 渲染仍在，hash 形态渲染为图片段', () => {
   const wrapper = messageBubble.create({
     id: 'img3',
     role: 'assistant',
     content: '看这个 [图片: 猫] 还有 [图片#aabbccdd]，普通文本',
   });
 
-  assert.equal(collectByClass(wrapper, 'msg-image-card').length, 1, '应仅渲染一个卡片');
+  const cards = collectByClass(wrapper, 'msg-image-card');
+  assert.equal(cards.length, 2, '描述形态与 hash 形态应各渲染一个降级卡片');
+
+  const descs = collectByClass(wrapper, 'msg-image-card-desc');
+  assert.equal(descs[0].textContent, '猫');
+  assert.equal(descs[1].textContent, '图片', 'hash 形态无描述时回退「图片」');
 
   const textSegments = collectByClass(wrapper, 'msg-bubble-segment');
-  assert.equal(textSegments.length, 2, '应保留卡片前后的两个文本段');
+  assert.equal(textSegments.length, 3, '应保留图片段之间的三个文本段');
   assert.ok(
     textSegments[0].innerHTML.includes('<p>看这个</p>'),
     `文本段一应经 Markdown 渲染: ${textSegments[0].innerHTML}`
   );
   assert.ok(
-    textSegments[1].innerHTML.includes('还有 [图片#aabbccdd]，普通文本'),
-    `文本段二应经 Markdown 渲染且缺描述占位符保留原文: ${textSegments[1].innerHTML}`
+    textSegments[2].innerHTML.includes('，普通文本'),
+    `文本段三应经 Markdown 渲染: ${textSegments[2].innerHTML}`
+  );
+  assert.ok(
+    !flatText(wrapper).includes('[图片#aabbccdd]'),
+    'hash 占位符不应以原文残留'
   );
 });
 
-test('图片卡片：多图混排按顺序渲染多个卡片', () => {
+test('图片降级卡片：多图混排按顺序渲染多个卡片', () => {
   const wrapper = messageBubble.create({
     id: 'img4',
     role: 'assistant',
@@ -348,7 +464,7 @@ test('图片卡片：多图混排按顺序渲染多个卡片', () => {
   assert.equal(descs[1].textContent, '狗');
 });
 
-test('图片卡片：描述含方括号 / 未闭合的不完整形态保留原文', () => {
+test('图片分段：描述含方括号 / 未闭合的不完整形态保留原文', () => {
   const withBracket = messageBubble.create({
     id: 'img5',
     role: 'assistant',
@@ -366,7 +482,7 @@ test('图片卡片：描述含方括号 / 未闭合的不完整形态保留原�
   assert.ok(flatText(unterminated).includes('[图片: 猫 结束'), flatText(unterminated));
 });
 
-test('图片卡片：描述含 HTML 标签作为文本写入（不产生注入节点）', () => {
+test('图片降级卡片：描述含 HTML 标签作为文本写入（不产生注入节点）', () => {
   const payload = '<img src=x onerror=alert(1)>';
   const wrapper = messageBubble.create({
     id: 'img7',
@@ -381,6 +497,168 @@ test('图片卡片：描述含 HTML 标签作为文本写入（不产生注入�
   assert.equal(descs[0].textContent, payload, '描述应以纯文本承载');
 
   assert.equal(findByTag(wrapper, 'IMG'), null, '不得产生注入的图片元素');
+});
+
+// =========================================================
+// 图片真图渲染（RamariaApi 桩注入；IntersectionObserver 不提供 → 立即读取）
+// =========================================================
+
+test('图片真图：三形态分段序号与请求参数正确', async () => {
+  const api = makeApi();
+  const mb = loadMessageBubble({ api });
+
+  mb.create({
+    id: 'seq1',
+    role: 'assistant',
+    content: '[图片] 甲 [图片#aabbccdd] 乙 [图片: 一只猫]',
+  });
+  await flushAsync();
+
+  assert.equal(api.calls.length, 2, '无文件形态不发请求，其余两段各请求一次');
+  assert.deepEqual(
+    api.calls.map((call) => call.index),
+    [1, 2],
+    '请求序号应与图片段出现序号一致（无文件形态占用 0 号）'
+  );
+  assert.equal(api.calls[0].messageId, 'seq1');
+  assert.equal(api.calls[1].messageId, 'seq1');
+});
+
+test('图片真图：跨 `||` 气泡段的请求序号连续累计（hash 形态）', async () => {
+  const api = makeApi();
+  const mb = loadMessageBubble({ api });
+
+  mb.create({
+    id: 'multi1',
+    role: 'assistant',
+    content: '甲 [图片#aaaa1111]||乙 [图片#bbbb2222]',
+  });
+  await flushAsync();
+
+  assert.deepEqual(
+    api.calls.map((call) => call.index),
+    [0, 1],
+    '序号以整条正文为口径（不按气泡段内重新计数）'
+  );
+});
+
+test('图片真图：跨 `||` 气泡段的请求序号连续累计（描述形态）', async () => {
+  const api = makeApi();
+  const mb = loadMessageBubble({ api });
+
+  mb.create({
+    id: 'multi2',
+    role: 'assistant',
+    content: '[图片: 猫]||[图片: 狗]',
+  });
+  await flushAsync();
+
+  assert.deepEqual(api.calls.map((call) => call.index), [0, 1]);
+});
+
+test('图片真图：读取成功生成 img（懒加载属性 / blob URL / 加载后释放）', async () => {
+  const objectUrls = { created: [], blobs: [], revoked: [] };
+  const api = makeApi();
+  const mb = loadMessageBubble({ api, objectUrls });
+
+  const wrapper = mb.create({
+    id: 'ok1',
+    role: 'assistant',
+    content: '看 [图片: 一只猫]',
+  });
+  await flushAsync();
+
+  const img = findByTag(wrapper, 'IMG');
+  assert.ok(img, '读取成功应生成 img 元素');
+  assert.equal(img.loading, 'lazy');
+  assert.equal(img.alt, '一只猫', '描述应作为替换文本');
+  assert.equal(img.src, objectUrls.created[0], 'src 应为 blob URL');
+  assert.equal(objectUrls.blobs[0].type, 'image/png', 'Blob MIME 应由字节魔数嗅探');
+
+  assert.equal(collectByClass(wrapper, 'msg-image-card').length, 0, '成功时不渲染降级卡片');
+
+  img.onload();
+  assert.deepEqual(objectUrls.revoked, [objectUrls.created[0]], '加载完成后释放 Blob URL');
+});
+
+test('图片真图：读取失败降级卡片（描述保留）', async () => {
+  const api = makeApi({ fail: true });
+  const mb = loadMessageBubble({ api });
+
+  const wrapper = mb.create({
+    id: 'fail1',
+    role: 'assistant',
+    content: '看 [图片: 一只猫]',
+  });
+  await flushAsync();
+
+  assert.equal(findByTag(wrapper, 'IMG'), null, '失败时不生成 img');
+  const descs = collectByClass(wrapper, 'msg-image-card-desc');
+  assert.equal(descs.length, 1, '失败应降级为文本卡片');
+  assert.equal(descs[0].textContent, '一只猫', '降级卡片显示描述');
+});
+
+test('图片真图：无文件形态不发请求但占用序号', async () => {
+  const api = makeApi();
+  const mb = loadMessageBubble({ api });
+
+  mb.create({
+    id: 'skip1',
+    role: 'assistant',
+    content: '[图片] 甲 [图片: 一只猫]',
+  });
+  await flushAsync();
+
+  assert.equal(api.calls.length, 1, '无文件形态不发读取请求');
+  assert.equal(api.calls[0].index, 1, '后续图片段序号应跳过无文件形态');
+});
+
+test('图片真图：无 RamariaApi 时全部降级卡片且不抛错', () => {
+  const wrapper = messageBubble.create({
+    id: 'noapi1',
+    role: 'assistant',
+    content: '[图片#aabbccdd] 甲 [图片: 一只猫] 乙 [图片]',
+  });
+
+  const cards = collectByClass(wrapper, 'msg-image-card');
+  assert.equal(cards.length, 3, '三种形态均应降级为卡片');
+
+  const descs = collectByClass(wrapper, 'msg-image-card-desc').map((el) => el.textContent);
+  assert.deepEqual(descs, ['图片', '一只猫', '图片']);
+});
+
+test('图片真图：finalize 收尾重建气泡时图片段走同一读取路径', async () => {
+  const api = makeApi();
+  const mb = loadMessageBubble({ api });
+
+  const wrapper = mb.createStreaming({ id: 'fin1' });
+  mb.finalize('fin1', '看 [图片: 一只猫]', 1759459200000);
+  await flushAsync();
+
+  assert.equal(api.calls.length, 1, '收尾重建后应发起读取');
+  assert.equal(api.calls[0].messageId, 'fin1', '消息 ID 取自 wrapper 的 data-message-id');
+  assert.equal(api.calls[0].index, 0);
+  assert.ok(findByTag(wrapper, 'IMG'), '读取成功应生成 img 元素');
+});
+
+test('sniffImageMime：五类魔数识别与未知回退', () => {
+  const sniff = messageBubble.sniffImageMime;
+
+  assert.equal(
+    sniff(Uint8Array.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])),
+    'image/png'
+  );
+  assert.equal(sniff(Uint8Array.from([0xFF, 0xD8, 0xFF, 0xE0])), 'image/jpeg');
+  assert.equal(sniff(Uint8Array.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61])), 'image/gif');
+  assert.equal(
+    sniff(Uint8Array.from([
+      0x52, 0x49, 0x46, 0x46, 0x10, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50,
+    ])),
+    'image/webp'
+  );
+  assert.equal(sniff(Uint8Array.from([0x42, 0x4D, 0x00, 0x00])), 'image/bmp');
+  assert.equal(sniff(Uint8Array.from([0x00, 0x01, 0x02, 0x03])), 'application/octet-stream');
+  assert.equal(sniff(null), 'application/octet-stream');
 });
 
 // =========================================================
@@ -492,15 +770,20 @@ test('前缀剥离：[张三] 你好 → 你好', () => {
   assert.ok(!text.includes('[张三]'), `昵称前缀应被剥离: ${text}`);
 });
 
-test('前缀剥离：[图片#aabbccdd] 行首占位符完整保留', () => {
+test('前缀剥离：[图片#hash] 行首占位符不剥离（按图片段渲染）', () => {
   const wrapper = messageBubble.create({
     id: 'p2',
     role: 'user',
     content: '[图片#aabbccdd] 看这个',
   });
 
+  const cards = collectByClass(wrapper, 'msg-image-card');
+  assert.equal(cards.length, 1, '行首 hash 占位符应渲染为卡片（未被昵称前缀剥离吞掉）');
+  assert.equal(collectByClass(wrapper, 'msg-image-card-desc')[0].textContent, '图片');
+
   const text = flatText(wrapper);
-  assert.ok(text.includes('[图片#aabbccdd] 看这个'), text);
+  assert.ok(text.includes('看这个'), text);
+  assert.ok(!text.includes('aabbccdd'), `hash 不应以文本形态残留: ${text}`);
 });
 
 test('前缀剥离：[图片] / [图片: …] 行首占位符不剥离', () => {
@@ -509,7 +792,9 @@ test('前缀剥离：[图片] / [图片: …] 行首占位符不剥离', () => {
     role: 'user',
     content: '[图片] 看这个',
   });
-  assert.ok(flatText(noDesc).includes('[图片] 看这个'), flatText(noDesc));
+  assert.equal(collectByClass(noDesc, 'msg-image-card').length, 1, '无文件形态渲染卡片');
+  assert.equal(collectByClass(noDesc, 'msg-image-card-desc')[0].textContent, '图片');
+  assert.ok(flatText(noDesc).includes('看这个'), flatText(noDesc));
 
   const withDesc = messageBubble.create({
     id: 'p4',

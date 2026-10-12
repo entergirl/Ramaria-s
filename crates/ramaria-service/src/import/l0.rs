@@ -130,7 +130,8 @@ pub struct ImportL0Outcome {
 /// 3. 按对话类型分流：私聊准备双画像（导出者 / 对方），
 ///    群聊按发送者聚合成员并逐成员准备 persona（按导入侧过滤跳过时不创建）；
 /// 4. `ImportWriter::write_l0` 写入会话与消息（指纹去重，失败补偿删除会话）；
-///    画像名从库内回读上报（回读失败回退请求覆盖名 / 文件解析名）。
+///    画像名从库内回读上报（回读失败回退请求覆盖名 / 文件解析名）；
+/// 5. 登记导出根目录（best-effort：失败不阻塞导入）。
 ///
 /// 参数:
 /// - `engine`: 服务层引擎（须已附着 SQLite 连接池）；
@@ -191,11 +192,22 @@ pub(crate) async fn write_l0(
 
     // ---- 2. 画像准备与写入（按对话类型分流） ----
     // 群聊：按发送者聚合成员并逐成员准备 persona；私聊：导出者 / 对方双画像
-    if report.chat_type == "group" {
-        import_group(&pool, &sessions, &report, &req).await
+    let outcome = if report.chat_type == "group" {
+        import_group(&pool, &sessions, &report, &req).await?
     } else {
-        import_dual(&pool, &sessions, &report, &req).await
+        import_dual(&pool, &sessions, &report, &req).await?
+    };
+
+    // ---- 3. 登记导出根目录（best-effort：失败不阻塞导入） ----
+    if let Some(root) = req.file_path.parent().and_then(|parent| parent.to_str()) {
+        if let Err(error) =
+            crate::attachment_read::register_export_root(engine.storage_ref().as_ref(), root).await
+        {
+            tracing::warn!(error = %error, "导出根登记失败（不阻塞导入）");
+        }
     }
+
+    Ok(outcome)
 }
 
 // =========================================================

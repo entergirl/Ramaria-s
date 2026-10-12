@@ -245,6 +245,35 @@
   overflow-wrap: break-word;
 }
 
+/* ── 气泡内真图渲染（懒加载；加载中为骨架占位，成功 / 降级后收起占位） ── */
+.msg-image {
+  margin: var(--space-1) 0;
+  min-height: 96px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
+  overflow: hidden;
+}
+
+.msg-image--loaded,
+.msg-image--degraded {
+  min-height: 0;
+  background: transparent;
+}
+
+/* 长图约束：等比缩放，最高 360px */
+.msg-image img {
+  display: block;
+  max-width: 100%;
+  max-height: 360px;
+  object-fit: contain;
+  border-radius: var(--radius-sm);
+}
+
+/* 降级卡片位于真图区内部时去掉自身外边距（容器已有间距） */
+.msg-image .msg-image-card {
+  margin: 0;
+}
+
 /* ── 元数据行（角色标签 + 人格 + 时间） ── */
 .msg-bubble-meta {
   display: flex;

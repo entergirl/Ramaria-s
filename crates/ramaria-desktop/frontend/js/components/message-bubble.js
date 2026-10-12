@@ -16,8 +16,9 @@
  * - CSP-safe: 全部样式走 CSS 类，零内联 style（包括 innerHTML 中的 style 属性）
  * - 助手气泡左侧显示人格头像（首字母圆形），用户气泡右侧无头像
  * - 导入 / 群聊消息的 sender_name 优先作气泡标签与头像首字母；缺失时回退 persona 昵称 / "助手"
- * - 图片占位符 `[图片: 描述]` 渲染为文本卡片（图标 + 转义描述）；`[图片#hash]` 等
- *   未注入描述的形态保留原文；与普通文本混排时按占位符分段渲染，互不干扰
+ * - 图片占位符三种形态按出现顺序分段渲染：`[图片#hash]`（8 位 ASCII）/ `[图片: 描述]` /
+ *   `[图片]`；可读取时渲染真图（懒加载 / 长图约束），不可读取或加载失败时降级为
+ *   文本卡片（图标 + 转义描述），与普通文本混排互不干扰
  * - 多气泡：助手回复按 `||` 契约拆分为多条气泡（历史回读与流式收尾同一拆分口径）
  *
  * 用法:
@@ -216,9 +217,7 @@ var RamariaMessageBubble = (function () {
         }
 
  // 气泡内容（助手回复按契约拆分为多条气泡；其它角色单条）
-        for (var b = 0; b < segments.length; b++) {
-            wrapper.appendChild(_createBubbleEl(segments[b]));
-        }
+        _appendBubbles(wrapper, segments, msg.id);
 
         return wrapper;
     }
@@ -245,15 +244,49 @@ var RamariaMessageBubble = (function () {
     }
 
 /**
+ * 渲染一组气泡段（图片段序号跨段连续累计）。
+ *
+ * 参数:
+ * - `wrapper`: 目标 wrapper
+ * - `texts`: 气泡文本数组（每条渲染为一个 .msg-bubble）
+ * - `msgId`: 所属消息 ID
+ *
+ * 说明:
+ * - 图片段序号以整条消息正文为口径：逐段累计已出现的图片段数作为下一段的
+ *   起始序号（`||` 拆分与导入前缀剥离不重置编号）。
+ */
+    function _appendBubbles(wrapper, texts, msgId) {
+        var baseIndex = 0;
+        for (var i = 0; i < texts.length; i++) {
+            wrapper.appendChild(_createBubbleEl(texts[i], msgId, baseIndex));
+            baseIndex += _countImageSegments(texts[i]);
+        }
+    }
+
+/** 统计文本中的图片段数量 */
+    function _countImageSegments(text) {
+        var segments = _splitImageSegments(text);
+        var count = 0;
+        for (var i = 0; i < segments.length; i++) {
+            if (segments[i].type === 'image') count++;
+        }
+        return count;
+    }
+
+/**
  * 创建单个气泡元素（图片占位符分段渲染 + Markdown + 异常兜底）。
+ *
+ * 参数:
+ * - `text`: 气泡文本
+ * - `msgId`: 所属消息 ID（图片读取的入参；缺失时图片段直接降级卡片）
+ * - `baseIndex`: 该气泡之前已出现的图片段数量（图片请求序号 = baseIndex + 段内序号）
  *
  * 说明:
  * - 无图片占位符时整段走 Markdown 渲染（原路径不变）；
- * - 含 `[图片: 描述]` 时按占位符分段：文本段走 Markdown，图片段渲染为卡片 DOM，
- *   依次 append 到同一气泡容器，互不干扰；
- * - `[图片#hash]` 等未注入描述的占位符不匹配，随文本段原样渲染。
+ * - 含图片占位符时按占位符分段：文本段走 Markdown，图片段渲染为真图区或
+ *   降级卡片，依次 append 到同一气泡容器，互不干扰。
  */
-    function _createBubbleEl(text) {
+    function _createBubbleEl(text, msgId, baseIndex) {
         var bubble = document.createElement('div');
         bubble.className = 'msg-bubble';
 
@@ -263,10 +296,11 @@ var RamariaMessageBubble = (function () {
             return bubble;
         }
 
+        var base = baseIndex || 0;
         for (var i = 0; i < segments.length; i++) {
             var seg = segments[i];
             if (seg.type === 'image') {
-                bubble.appendChild(_createImageCard(seg.desc));
+                bubble.appendChild(_createImageEl(seg, msgId, base + seg.index));
             } else {
                 var textEl = document.createElement('div');
                 textEl.className = 'msg-bubble-segment';
@@ -279,31 +313,44 @@ var RamariaMessageBubble = (function () {
     }
 
 /**
- * 将文本按图片占位符 `[图片: 描述]` 切分为文本段与图片段。
+ * 将文本按图片占位符切分为文本段与图片段。
  *
  * 参数:
  * - `text`: 气泡文本
  *
  * 返回:
- * - 分段数组，元素为 { type: 'text', value } 或 { type: 'image', desc }
+ * - 分段数组，元素为 { type: 'text', value } 或
+ *   { type: 'image', index, hash, desc }（index 为本文本内的图片段序号，从 0 起；
+ *   跨气泡段的累计序号由调用方按 baseIndex 叠加）
  *
  * 说明:
- * - 描述禁止包含 `[` / `]`：描述含方括号（无法确定占位符终点）时该处不匹配，
- *   整段按原文交给文本段渲染（不完整匹配降级）；
- * - `[图片#hash]` / `[图片]` / 未闭合的 `[图片: ...` 不匹配，保留原文。
+ * - 三种占位符形态按出现顺序识别：
+ *   1. `[图片#` + 恰好 8 个 ASCII 字符 + `]`（hash 形态，desc 为空串）；
+ *   2. `[图片: ` + 至少 1 个非方括号字符 + `]`（描述形态，hash 为空串）；
+ *   3. `[图片]`（无文件形态，hash 与 desc 均为空串）；
+ * - 其余写法（位数不符的 hash / 描述含方括号 / 未闭合）不识别，按普通文本处理、
+ *   不占图片序号；
+ * - 无文件形态不发读取请求，但仍占序号（序号与正文中图片段出现顺序一致）。
  */
     function _splitImageSegments(text) {
         var source = (typeof text === 'string') ? text : '';
-        var re = /\[图片: ([^\[\]]+)\]/g;
+        var re = /\[图片#([\x00-\x7F]{8})\]|\[图片: ([^\[\]]+)\]|\[图片\]/g;
         var segments = [];
         var lastIndex = 0;
+        var imageIndex = 0;
         var match;
 
         while ((match = re.exec(source)) !== null) {
             if (match.index > lastIndex) {
                 segments.push({ type: 'text', value: source.slice(lastIndex, match.index) });
             }
-            segments.push({ type: 'image', desc: match[1] });
+            segments.push({
+                type: 'image',
+                index: imageIndex,
+                hash: match[1] || '',
+                desc: match[2] || '',
+            });
+            imageIndex++;
             lastIndex = re.lastIndex;
         }
 
@@ -323,7 +370,168 @@ var RamariaMessageBubble = (function () {
     }
 
 /**
- * 创建图片占位卡片（文本卡片通道：仅展示图标与描述，不加载真实图片文件）。
+ * 创建单个图片段元素（真图读取；不可读取时直接降级卡片）。
+ *
+ * 参数:
+ * - `seg`: 图片段 { index, hash, desc }
+ * - `msgId`: 所属消息 ID
+ * - `imageIndex`: 该图片段在整条消息正文中的序号（读取请求入参）
+ *
+ * 返回:
+ * - DOM 元素（.msg-image 真图区，或 .msg-image-card 降级卡片）
+ *
+ * 说明:
+ * - 无文件形态 / 消息 ID 缺失 / 宿主读取能力不可用时不发请求，直接降级卡片；
+ * - 可读取时先渲染加载占位（.msg-image），读取成功后替换为 <img>，
+ *   读取失败时由 [_degradeToCard] 降级为文本卡片。
+ */
+    function _createImageEl(seg, msgId, imageIndex) {
+        var desc = seg.desc || '';
+        if (!seg.hash && !desc) {
+            return _createImageCard('图片');
+        }
+
+        var reader = _imageReader();
+        if (!msgId || !reader) {
+            return _createImageCard(desc || '图片');
+        }
+
+        var container = document.createElement('div');
+        container.className = 'msg-image';
+        _scheduleImageLoad(container, msgId, imageIndex, desc, reader);
+        return container;
+    }
+
+/** 取宿主图片读取能力（不可用时返回 null） */
+    function _imageReader() {
+        if (typeof RamariaApi === 'undefined') return null;
+        var attachment = RamariaApi.attachment;
+        if (!attachment || typeof attachment.readImage !== 'function') return null;
+        return attachment.readImage;
+    }
+
+/**
+ * 安排图片读取时机：支持视口懒加载，不支持时立即读取。
+ *
+ * 说明:
+ * - `IntersectionObserver` 可用时进入视口才发起读取（一次性，读取后断开观察）；
+ * - 不可用（构造失败 / 测试环境）时立即读取，不阻塞渲染。
+ */
+    function _scheduleImageLoad(container, msgId, imageIndex, desc, reader) {
+        var load = function () {
+            _loadImageInto(container, msgId, imageIndex, desc, reader);
+        };
+
+        if (typeof window !== 'undefined' && window.IntersectionObserver) {
+            try {
+                var observer = new window.IntersectionObserver(function (entries) {
+                    for (var i = 0; i < entries.length; i++) {
+                        if (entries[i].isIntersecting) {
+                            observer.disconnect();
+                            load();
+                            return;
+                        }
+                    }
+                });
+                observer.observe(container);
+                return;
+            } catch (err) {
+                console.debug('[MessageBubble] 视口懒加载不可用，改为立即读取:', err);
+            }
+        }
+
+        load();
+    }
+
+/**
+ * 读取图片字节并渲染为 <img>；任何失败静默降级为文本卡片。
+ *
+ * 说明:
+ * - MIME 由字节魔数嗅探（[_sniffImageMime]），经 Blob URL 赋给 img.src；
+ * - `img.onload` 后释放 Blob URL；加载出错同样释放并降级；
+ * - 描述只作 img.alt，不额外渲染；失败时描述进入降级卡片。
+ */
+    function _loadImageInto(container, msgId, imageIndex, desc, reader) {
+        var fail = function (err) {
+            console.debug('[MessageBubble] 图片读取失败，降级为文本卡片:', err);
+            _degradeToCard(container, desc);
+        };
+
+        try {
+            reader(msgId, imageIndex).then(function (bytes) {
+                var blob = new Blob([bytes], { type: _sniffImageMime(bytes) });
+                var url = URL.createObjectURL(blob);
+                var img = document.createElement('img');
+                img.loading = 'lazy';
+                img.alt = desc;
+                img.onload = function () {
+                    URL.revokeObjectURL(url);
+                    container.classList.add('msg-image--loaded');
+                };
+                img.onerror = function () {
+                    URL.revokeObjectURL(url);
+                    _degradeToCard(container, desc);
+                };
+                img.src = url;
+                container.appendChild(img);
+            }).catch(fail);
+        } catch (err) {
+            fail(err);
+        }
+    }
+
+/** 清空真图区并降级为文本卡片（描述缺失时显示「图片」） */
+    function _degradeToCard(container, desc) {
+        while (container.children.length > 0) {
+            container.removeChild(container.children[0]);
+        }
+        container.classList.add('msg-image--degraded');
+        container.appendChild(_createImageCard(desc || '图片'));
+    }
+
+/**
+ * 按字节魔数嗅探图片 MIME 类型（纯函数）。
+ *
+ * 参数:
+ * - `bytes`: 图片字节（ArrayBuffer 或 Uint8Array）
+ *
+ * 返回:
+ * - 五类图片 MIME：image/png / image/jpeg / image/gif / image/webp / image/bmp；
+ *   无法识别（含入参异常）时返回 'application/octet-stream'
+ */
+    function _sniffImageMime(bytes) {
+        var u8;
+        try {
+            u8 = new Uint8Array(bytes);
+        } catch (err) {
+            return 'application/octet-stream';
+        }
+
+        if (u8.length >= 8
+            && u8[0] === 0x89 && u8[1] === 0x50 && u8[2] === 0x4E && u8[3] === 0x47
+            && u8[4] === 0x0D && u8[5] === 0x0A && u8[6] === 0x1A && u8[7] === 0x0A) {
+            return 'image/png';
+        }
+        if (u8.length >= 3 && u8[0] === 0xFF && u8[1] === 0xD8 && u8[2] === 0xFF) {
+            return 'image/jpeg';
+        }
+        if (u8.length >= 4
+            && u8[0] === 0x47 && u8[1] === 0x49 && u8[2] === 0x46 && u8[3] === 0x38) {
+            return 'image/gif';
+        }
+        if (u8.length >= 12
+            && u8[0] === 0x52 && u8[1] === 0x49 && u8[2] === 0x46 && u8[3] === 0x46
+            && u8[8] === 0x57 && u8[9] === 0x45 && u8[10] === 0x42 && u8[11] === 0x50) {
+            return 'image/webp';
+        }
+        if (u8.length >= 2 && u8[0] === 0x42 && u8[1] === 0x4D) {
+            return 'image/bmp';
+        }
+        return 'application/octet-stream';
+    }
+
+/**
+ * 创建图片降级卡片（真图不可读取 / 加载失败时的文本兜底）。
  *
  * 参数:
  * - `desc`: 图片描述（读取口注入产物）
@@ -367,6 +575,10 @@ var RamariaMessageBubble = (function () {
 
 /**
  * 重建 wrapper 内的气泡（流式收尾：整段替换为按契约拆分的多条气泡）。
+ *
+ * 说明:
+ * - 消息 ID 取自 wrapper 的 data-message-id，保证流式收尾后的图片段
+ *   与历史回读走同一条读取路径。
  */
     function _replaceBubbles(wrapper, content) {
         var old = wrapper.querySelectorAll('.msg-bubble');
@@ -374,10 +586,8 @@ var RamariaMessageBubble = (function () {
             wrapper.removeChild(old[i]);
         }
 
-        var segments = _splitAssistantBubbles(content);
-        for (var j = 0; j < segments.length; j++) {
-            wrapper.appendChild(_createBubbleEl(segments[j]));
-        }
+        var msgId = wrapper.getAttribute('data-message-id') || '';
+        _appendBubbles(wrapper, _splitAssistantBubbles(content), msgId);
     }
 
  /**
@@ -561,6 +771,7 @@ var RamariaMessageBubble = (function () {
         updateStreamText: updateStreamText,
         finalize: finalize,
         markError: markError,
+        sniffImageMime: _sniffImageMime,
     };
 })();
 

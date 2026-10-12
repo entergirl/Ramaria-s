@@ -301,6 +301,14 @@ pub trait StoreCrud: Send + Sync {
 
     // -- Message (L0) --
     async fn save_message(&self, message: &Message) -> RamariaResult<()>;
+
+    /// 按消息 ID 查询单条消息。
+    ///
+    /// 默认实现返回 `Ok(None)`（兼容存量实现；ramaria-storage 覆写为单行查询）。
+    async fn get_message(&self, _id: Uuid) -> RamariaResult<Option<Message>> {
+        Ok(None)
+    }
+
     /// 全量加载指定 session 的全部消息。
     ///
     /// 说明:
