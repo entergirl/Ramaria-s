@@ -62,6 +62,7 @@ fn search_exact_top_k_truncation() {
             keywords: Some("Rust,测试".to_string()),
             persona_uid: Some("user-0001".to_string()),
             created_at: 3000 + i as i64,
+            occurred_at: 3000 + i as i64,
             salience: 0.5,
             last_accessed_at: None,
         });
@@ -81,6 +82,7 @@ fn search_exact_sorts_by_match_count() {
         keywords: Some("Rust".to_string()),
         persona_uid: Some("u1".to_string()),
         created_at: 1000,
+        occurred_at: 1000,
         salience: 0.5,
         last_accessed_at: None,
     });
@@ -91,6 +93,7 @@ fn search_exact_sorts_by_match_count() {
         keywords: Some("Rust,编程,异步".to_string()),
         persona_uid: Some("u1".to_string()),
         created_at: 2000,
+        occurred_at: 2000,
         salience: 0.5,
         last_accessed_at: None,
     });
@@ -106,4 +109,64 @@ fn search_exact_sorts_by_match_count() {
         results[0].doc_summary.contains("B"),
         "命中更多关键词的文档应排在前面"
     );
+}
+
+/// L2 投影：search_exact 命中的时间基准取事件开始时间（start），而非登记时间。
+#[test]
+fn search_exact_l2_time_base_is_event_start() {
+    let mut r = Retriever::new();
+    r.index_l2(&L2DocView {
+        id: 1,
+        title: "事件标题".to_string(),
+        summary: "事件摘要".to_string(),
+        keywords: Some("工作".to_string()),
+        attitude: None,
+        paraphrase: None,
+        persona_uid: "user-0001".to_string(),
+        share: 0.5,
+        confidence: 0.9,
+        created_at: 9000, // 登记时刻
+        start: 1000,      // 发生时刻
+        salience: 0.5,
+    });
+
+    let kw = vec![KeywordToken::new("工作").unwrap()];
+    let results = r.search_exact(&kw, "user-0001", 10);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].layer, "l2");
+    assert_eq!(results[0].created_at, 1000, "L2 时间基准应取事件 start");
+}
+
+/// L2 投影：BM25 路径（resolve_bm25_doc）命中的时间基准同样取事件 start。
+#[test]
+fn search_substring_l2_time_base_is_event_start() {
+    let mut r = Retriever::new();
+    r.index_l2(&L2DocView {
+        id: 2,
+        title: "篮球比赛".to_string(),
+        summary: "参加了周末篮球比赛".to_string(),
+        keywords: Some("篮球".to_string()),
+        attitude: None,
+        paraphrase: None,
+        persona_uid: "user-0001".to_string(),
+        share: 0.5,
+        confidence: 0.9,
+        created_at: 8000, // 登记时刻
+        start: 2000,      // 发生时刻
+        salience: 0.5,
+    });
+
+    let results = r.search_substring("篮球", "user-0001", 10);
+    assert!(!results.is_empty(), "BM25 应命中篮球事件");
+    assert_eq!(
+        results[0].created_at, 2000,
+        "BM25 路径 L2 时间基准应取事件 start"
+    );
+    // 同分排序次键（search_exact）也随 start：再放一条 start 更早的 L2 文档
+    let results_exact = {
+        let kw = vec![KeywordToken::new("篮球").unwrap()];
+        r.search_exact(&kw, "user-0001", 10)
+    };
+    assert!(!results_exact.is_empty());
+    assert_eq!(results_exact[0].created_at, 2000);
 }

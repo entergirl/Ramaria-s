@@ -24,7 +24,7 @@ use super::view::{DEFAULT_BROWSE_LIMIT, MAX_BROWSE_LIMIT, l2_view, l3_view, norm
 ///
 /// 流程:
 /// - persona 有值: 按分页参数从存储层取事件（`start` 倒序），`total` 取该 persona 的全量计数；
-/// - persona 无值: 逐个 persona 取回最近 limit 条事件后合并，按创建时间倒序并截断 limit，
+/// - persona 无值: 逐个 persona 取回最近 limit 条事件后合并，按事件开始时间倒序并截断 limit，
 ///   `total` 为合并后的条数。
 ///
 /// 参数:
@@ -52,7 +52,7 @@ pub(crate) async fn l2(engine: &Engine, req: L2BrowseRequest) -> RamariaResult<L
                 .await?;
             all.append(&mut events);
         }
-        all.sort_by_key(|e| Reverse(e.created_at));
+        all.sort_by_key(|e| Reverse(e.start));
         let total = all.len();
         all.truncate(limit as usize);
         let items: Vec<L2EventView> = all.iter().map(l2_view).collect();

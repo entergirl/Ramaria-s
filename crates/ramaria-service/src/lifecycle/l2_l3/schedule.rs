@@ -120,7 +120,7 @@ pub(crate) async fn run_scheduled_check(engine: &Engine, shutdown: Option<&Atomi
         // 最早未吸收 L1 超过配置阈值天数则触发（阈值 > 0 才启用）
         match storage.list_unabsorbed_l1(&persona.uid).await {
             Ok(l1_list) => {
-                if let Some(oldest) = l1_list.iter().map(|l| l.created_at).min() {
+                if let Some(oldest) = l1_list.iter().map(|l| l.occurred_at_or_created()).min() {
                     let age_days = (now - oldest) as f64 / ms_per_day as f64;
                     if l2_trigger_days > 0.0 && age_days >= l2_trigger_days {
                         info!(

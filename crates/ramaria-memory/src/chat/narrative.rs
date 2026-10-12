@@ -128,9 +128,9 @@ pub async fn load_narrative_material<R: RetrieverSource + ?Sized>(
     // 格式化近期摘要为可读文本行
     let recent_summaries: Vec<String> = recent_l1.iter().map(format_l1_as_context_line).collect();
 
-    // 从最近一条 L1 的创建时间提取最后活跃时间
+    // 从最近一条 L1 的发生时间提取最后活跃时间
     let last_active_at: Option<String> = recent_l1.first().map(|l1| {
-        let secs = l1.created_at / 1000;
+        let secs = l1.occurred_at_or_created() / 1000;
         match chrono::DateTime::from_timestamp(secs, 0) {
             Some(dt) => dt.format("%Y-%m-%d %H:%M").to_string(),
             None => String::new(),
@@ -173,6 +173,7 @@ pub(super) fn search_result_to_memory_l1(sr: &SearchResult) -> Option<MemoryL1> 
         salience: 0.5,
         absorbed: false,
         created_at: sr.created_at,
+        occurred_at: None,
         last_accessed_at: sr.last_accessed_at,
         persona_uid: sr.persona_uid.clone(),
         context_json: None,

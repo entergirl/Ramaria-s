@@ -116,11 +116,13 @@ fn semantic_sample() -> CompositeIndex {
         Some("工作压力, 加班"),
         0.8,
         NOW_MS - 86_400_000,
+        NOW_MS - 86_400_000,
     );
     composite.index_parsed(
         l1_ref(uuid::Uuid::new_v4(), "user-0001"),
         Some("职场焦虑, 内耗"),
         0.7,
+        NOW_MS - 86_400_000,
         NOW_MS - 86_400_000,
     );
     composite
@@ -133,7 +135,7 @@ fn composite_index_ops() {
     let mut composite = CompositeIndex::new(CompositeIndexConfig::default());
     assert_eq!(composite.doc_count(), 0);
     let reff = l1_ref(uuid::Uuid::new_v4(), "p1");
-    composite.index_parsed(reff.clone(), Some("爬山"), 0.5, NOW_MS);
+    composite.index_parsed(reff.clone(), Some("爬山"), 0.5, NOW_MS, NOW_MS);
     assert_eq!(composite.doc_count(), 1);
     assert!(composite.remove(&reff));
     assert_eq!(composite.doc_count(), 0);
@@ -164,6 +166,7 @@ async fn substring_fallback_when_exact_insufficient() {
         Some("工作压力"),
         0.5,
         NOW_MS - 86_400_000,
+        NOW_MS - 86_400_000,
     );
     // 查"工作"——精确不命中（无"工作"独立词），子串命中"工作压力"
     let results = composite.query(&query_for(&["工作"], "p1", 5), None).await;
@@ -183,6 +186,7 @@ async fn substring_fallback_disabled() {
         l1_ref(uuid::Uuid::new_v4(), "p1"),
         Some("工作压力"),
         0.5,
+        NOW_MS - 86_400_000,
         NOW_MS - 86_400_000,
     );
     let results = composite.query(&query_for(&["工作"], "p1", 5), None).await;

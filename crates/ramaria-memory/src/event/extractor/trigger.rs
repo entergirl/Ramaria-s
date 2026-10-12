@@ -42,8 +42,8 @@ impl<'a> EventExtractor<'a> {
             return Ok(true);
         }
 
-        // 条件 B: 时间
-        if let Some(oldest) = l1_list.iter().map(|l| l.created_at).min() {
+        // 条件 B: 时间（按发生时间计算年龄；缺失回退登记时间）
+        if let Some(oldest) = l1_list.iter().map(|l| l.occurred_at_or_created()).min() {
             let now = now_ms();
             let age_ms = now.saturating_sub(oldest);
             // 使用 f64 避免整数除法截断: 23h59m 不应算作 1 天

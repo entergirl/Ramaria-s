@@ -34,7 +34,8 @@ pub struct L1BrowseRequest {
 ///
 /// 字段约定:
 /// - `keywords` / `atmosphere` / `time_period` / `context_json`: 摘要伴随字段（原始可能为空）。
-/// - `valence` / `salience`: 情绪效价与情感显著性；`created_at`: 创建时间（Unix 毫秒）。
+/// - `valence` / `salience`: 情绪效价与情感显著性；`created_at`: 入库时间（Unix 毫秒）。
+/// - `occurred_at`: 发生时间（Unix 毫秒，有效值）——浏览时间基准。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct L1MemoryView {
     pub id: Uuid,
@@ -48,6 +49,8 @@ pub struct L1MemoryView {
     pub salience: f64,
     pub persona_uid: Option<String>,
     pub created_at: i64,
+    /// 发生时间（Unix 毫秒，有效值）——浏览时间基准
+    pub occurred_at: i64,
 }
 
 /// L1 记忆浏览响应。

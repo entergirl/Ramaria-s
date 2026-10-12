@@ -19,6 +19,7 @@ pub(super) struct Bm25Resolved {
     pub(super) doc_id: DocId,
     pub(super) persona_uid: Option<String>,
     pub(super) share: Option<f64>,
+    /// 时间基准（Unix 毫秒）——L1 为发生时间、L2 为事件开始时间
     pub(super) created_at: i64,
     pub(super) last_accessed_at: Option<i64>,
     pub(super) summary: String,
@@ -40,7 +41,7 @@ pub(super) fn resolve_bm25_doc(
                     doc_id: doc_id.clone(),
                     persona_uid: doc.persona_uid.clone(),
                     share: None,
-                    created_at: doc.created_at,
+                    created_at: doc.occurred_at,
                     last_accessed_at: doc.last_accessed_at,
                     summary: doc.summary.clone(),
                     layer: "l1".to_string(),
@@ -64,7 +65,7 @@ pub(super) fn resolve_bm25_doc(
                     doc_id: doc_id.clone(),
                     persona_uid: Some(doc.persona_uid.clone()),
                     share: Some(doc.share),
-                    created_at: doc.created_at,
+                    created_at: doc.start,
                     last_accessed_at: None, // L2 事件暂不追踪访问时间
                     summary: format!("{} — {}", doc.title, doc.summary),
                     layer: "l2".to_string(),
@@ -131,7 +132,8 @@ pub(super) fn parse_graph_label(
 /// 仅用于向量通道产生的 L1:/L2: 格式 label（BM25 已通过 `resolve_bm25_doc` 预解析，
 /// 图谱已通过 `parse_graph_label` 独立处理）。
 ///
-/// 返回: 元组 (DocId, persona_uid, share, created_at, last_accessed_at, summary)
+/// 返回: 元组 (DocId, persona_uid, share, 时间基准, last_accessed_at, summary)
+/// ——时间基准：L1 为发生时间、L2 为事件开始时间。
 #[allow(clippy::type_complexity)]
 pub(super) fn parse_doc_label(
     label: &str,
@@ -148,7 +150,7 @@ pub(super) fn parse_doc_label(
             DocId::L1(id),
             doc.persona_uid.clone(),
             None, // L1 无 share
-            doc.created_at,
+            doc.occurred_at,
             doc.last_accessed_at,
             doc.summary.clone(),
         ))
@@ -162,7 +164,7 @@ pub(super) fn parse_doc_label(
             DocId::L2(id),
             Some(doc.persona_uid.clone()),
             Some(doc.share),
-            doc.created_at,
+            doc.start,
             None, // L2 事件暂不追踪访问时间
             format!("{} — {}", doc.title, doc.summary),
         ))

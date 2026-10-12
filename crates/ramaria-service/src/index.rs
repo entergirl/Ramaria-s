@@ -54,8 +54,7 @@ pub struct IndexStamp {
 /// 最近一次索引构建失败记录（供诊断导出与宿主提示）。
 ///
 /// 字段约定:
-/// - `reason`: 失败原因的脱敏文本（已折叠为单行；路径只留文件名、消息类字段只留字符数，
-///   不含用户原文）；
+/// - `reason`: 失败原因的脱敏文本（已折叠为单行；路径只留文件名、消息类字段只留字符数，不含用户原文）；
 /// - `at_ms`: 记录时间（Unix 毫秒）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexBuildFailure {
@@ -669,6 +668,7 @@ fn l1_view(l1: &MemoryL1) -> L1DocView {
         keywords: l1.keywords.clone(),
         persona_uid: l1.persona_uid.clone(),
         created_at: l1.created_at,
+        occurred_at: l1.occurred_at_or_created(),
         salience: l1.salience,
         last_accessed_at: l1.last_accessed_at,
     }
@@ -687,6 +687,7 @@ fn l2_view(event: &ramaria_core::types::MemoryEvent) -> L2DocView {
         share: event.share,
         confidence: event.confidence,
         created_at: event.created_at,
+        start: event.start,
         salience: event.salience,
     }
 }

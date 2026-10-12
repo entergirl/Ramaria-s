@@ -158,7 +158,7 @@ pub(super) async fn process_unbound_l1_for_l2(
         let count_ok = trigger_count > 0 && l1s.len() >= trigger_count;
         let oldest_age_days = l1s
             .iter()
-            .map(|l| l.created_at)
+            .map(|l| l.occurred_at_or_created())
             .min()
             .map(|min| (now.saturating_sub(min)) as f64 / ms_per_day as f64)
             .unwrap_or(0.0);

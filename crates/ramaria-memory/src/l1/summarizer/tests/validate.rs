@@ -58,7 +58,7 @@ fn validate_summary_empty_fallback() {
         continuation: None,
     };
     let sid = ramaria_core::types::new_id();
-    let (l1, _keywords) = L1Summarizer::validate_and_build(&parsed, sid);
+    let (l1, _keywords) = L1Summarizer::validate_and_build(&parsed, sid, None);
     assert!(l1.summary.contains("失败"));
 }
 
@@ -76,7 +76,7 @@ fn validate_time_period_invalid() {
         continuation: None,
     };
     let sid = ramaria_core::types::new_id();
-    let (l1, _) = L1Summarizer::validate_and_build(&parsed, sid);
+    let (l1, _) = L1Summarizer::validate_and_build(&parsed, sid, None);
     assert!(l1.time_period.is_none(), "非法 time_period 应被过滤");
 }
 
@@ -94,7 +94,7 @@ fn validate_atmosphere_truncation() {
         continuation: None,
     };
     let sid = ramaria_core::types::new_id();
-    let (l1, _) = L1Summarizer::validate_and_build(&parsed, sid);
+    let (l1, _) = L1Summarizer::validate_and_build(&parsed, sid, None);
     let atm = l1.atmosphere.unwrap();
     assert!(atm.chars().count() <= 4, "atmosphere 应截断到 ≤4 字: {atm}");
 }
@@ -113,7 +113,7 @@ fn validate_keywords_parsing() {
         continuation: None,
     };
     let sid = ramaria_core::types::new_id();
-    let (_l1, keywords) = L1Summarizer::validate_and_build(&parsed, sid);
+    let (_l1, keywords) = L1Summarizer::validate_and_build(&parsed, sid, None);
     assert_eq!(keywords.len(), 3);
     assert!(keywords.contains(&KeywordToken::new("工作").unwrap()));
     assert!(keywords.contains(&KeywordToken::new("学习").unwrap()));
@@ -183,7 +183,7 @@ fn validate_and_build_does_not_inject_situation_strength() {
             continuation: None,
         };
         let sid = ramaria_core::types::new_id();
-        let (l1, _) = L1Summarizer::validate_and_build(&parsed, sid);
+        let (l1, _) = L1Summarizer::validate_and_build(&parsed, sid, None);
         assert_eq!(
             l1.situation_strength, None,
             "validate_and_build 不应注入 situation_strength（LLM 输入 {llm_value:?}）"
@@ -298,5 +298,34 @@ async fn summarize_session_injects_situation_strength_priority() {
         storage_c.saved_l1_entries()[0].situation_strength,
         Some(3),
         "LLM 与 config 均缺失时回退默认 3"
+    );
+}
+
+/// occurred_at 参数生效：Some 传入保留到产出 L1；None 保持 None（读取回退 created_at）。
+#[test]
+fn validate_and_build_sets_occurred_at_from_arg() {
+    let parsed = L1SummaryResponse {
+        summary: Some("测试摘要".into()),
+        keywords: None,
+        time_period: Some("上午".into()),
+        atmosphere: None,
+        valence: Some(0.0),
+        salience: Some(0.5),
+        situation_strength: None,
+        evidence_notes: None,
+        continuation: None,
+    };
+    let sid = ramaria_core::types::new_id();
+
+    let (l1, _) = L1Summarizer::validate_and_build(&parsed, sid, Some(42_000));
+    assert_eq!(l1.occurred_at, Some(42_000), "occurred_at 参数应保留");
+    assert_eq!(l1.occurred_at_or_created(), 42_000);
+
+    let (l1b, _) = L1Summarizer::validate_and_build(&parsed, sid, None);
+    assert_eq!(l1b.occurred_at, None, "None 参数应保持 None");
+    assert_eq!(
+        l1b.occurred_at_or_created(),
+        l1b.created_at,
+        "读取回退 created_at"
     );
 }

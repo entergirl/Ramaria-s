@@ -49,6 +49,7 @@ use super::similarity::absorb_orphans;
 ///     embedding: None,
 ///     salience: 0.6,
 ///     created_at: 1_000,
+///     occurred_at: 1_000,
 /// };
 /// let mut batcher = TopicBatcher::new(TopicBatcherConfig::default());
 /// // 单条 L1 不足 min_cluster_size(3) → 进入 Pending Buffer，不产出正式簇

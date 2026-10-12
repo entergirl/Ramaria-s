@@ -56,6 +56,8 @@ struct FactRow {
     ref_l1_id: Option<String>,
     created_at: i64,
     updated_at: i64,
+    /// 发生时间（Unix 毫秒）——源事件发生时间（JOIN 投影；无事件引用时为 NULL）
+    occurred_at: Option<i64>,
 }
 
 impl FactRow {
@@ -76,13 +78,16 @@ impl FactRow {
             ref_l1_id,
             created_at: self.created_at,
             updated_at: self.updated_at,
+            occurred_at: self.occurred_at,
         })
     }
 }
 
-/// 所有 fact 列（查询投影统一复用）。
+/// 所有 fact 列（查询投影统一复用）；
+/// occurred_at 由源事件 start 子查询投影，非物理列（不参与写入）。
 const FACT_COLUMNS: &str = "id, persona_uid, field, content, source, status, tier, \
-     version_of, confidence, keyword_hint, ref_event_id, ref_l1_id, created_at, updated_at";
+     version_of, confidence, keyword_hint, ref_event_id, ref_l1_id, created_at, updated_at, \
+     (SELECT e.start FROM memory_events e WHERE e.id = persona_facts.ref_event_id) AS occurred_at";
 
 pub async fn save(pool: &SqlitePool, f: &PersonaFact) -> RamariaResult<i64> {
     sqlx::query_scalar::<_, i64>(

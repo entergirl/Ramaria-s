@@ -269,6 +269,7 @@ pub fn l1_list_to_views(l1_list: &[ramaria_core::MemoryL1]) -> Vec<L1DocView> {
             keywords: l1.keywords.clone(),
             persona_uid: l1.persona_uid.clone(),
             created_at: l1.created_at,
+            occurred_at: l1.occurred_at_or_created(),
             salience: l1.salience,
             last_accessed_at: l1.last_accessed_at,
         })
@@ -298,6 +299,7 @@ pub fn events_to_views(events: &[ramaria_core::MemoryEvent]) -> Vec<L2DocView> {
             share: ev.share,
             confidence: ev.confidence,
             created_at: ev.created_at,
+            start: ev.start,
             salience: ev.salience,
         })
         .collect()
@@ -320,6 +322,7 @@ mod tests {
             keywords: Some("测试,索引".to_string()),
             persona_uid: Some("user-0001".to_string()),
             created_at: 1000,
+            occurred_at: 1000,
             salience: 0.5,
             last_accessed_at: None,
         }
@@ -337,6 +340,7 @@ mod tests {
             share: 0.5,
             confidence: 0.8,
             created_at: 1000,
+            start: 1000,
             salience: 0.6,
         }
     }

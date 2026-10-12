@@ -269,7 +269,8 @@ pub(super) async fn build_rule_candidate(
                 format!("{} {}", event.title.trim(), event.summary.trim()),
                 MessageSource::Local,
             );
-            message.created_at = event.created_at;
+            // 事件上下文时间基准统一为事件发生时间
+            message.created_at = event.start;
             message
         })
         .collect();

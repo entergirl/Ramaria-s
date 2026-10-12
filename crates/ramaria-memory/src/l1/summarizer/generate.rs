@@ -112,7 +112,9 @@ impl<'a> L1Summarizer<'a> {
         let parsed = self.parse_summary_json(&raw_response)?;
 
         // 6. 校验并修正字段
-        let (mut l1, keywords) = Self::validate_and_build(&parsed, session_id);
+        // occurred_at = 块内最早消息时间（splitter 已按 created_at 排序，取 min 对乱序输入仍正确）
+        let occurred_at = chunk.messages.iter().map(|m| m.created_at).min();
+        let (mut l1, keywords) = Self::validate_and_build(&parsed, session_id, occurred_at);
 
         // 注入 config 中的上下文字段
         // 投影模式：本行摘要归属投影目标（每行独立生成，persona 已定向）；
@@ -331,11 +333,17 @@ impl<'a> L1Summarizer<'a> {
     /// - `evidence_notes`: 新增，后处理校验（非空数组 + 每条 ≥ 5 字符），
     ///   校验失败不阻塞 L1 生成，降级为空数组并记 warn 日志
     ///
+    /// 参数:
+    /// - `parsed`: LLM 输出解析结果。
+    /// - `session_id`: 来源 session。
+    /// - `occurred_at`: 块内最早消息时间（发生时间，Unix 毫秒）。
+    ///
     /// 返回:
     /// - (MemoryL1, KeywordToken 列表)
     pub(super) fn validate_and_build(
         parsed: &L1SummaryResponse,
         session_id: Uuid,
+        occurred_at: Option<i64>,
     ) -> (MemoryL1, Vec<KeywordToken>) {
         // summary: 必填降级
         let summary = parsed.summary.as_deref().unwrap_or("").trim().to_string();
@@ -417,6 +425,7 @@ impl<'a> L1Summarizer<'a> {
             salience,
             absorbed: false,
             created_at: ramaria_core::types::now_ms(),
+            occurred_at,
             last_accessed_at: None,
             persona_uid: None,        // 由调用方在 construct 阶段通过 config 注入
             context_json: None,       // 由调用方在 construct 阶段通过 config 注入

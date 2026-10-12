@@ -276,7 +276,7 @@ impl Retriever {
                         graph_score: None,
                         persona_uid: doc.persona_uid.clone(),
                         share: None,
-                        created_at: doc.created_at,
+                        created_at: doc.occurred_at,
                         last_accessed_at: doc.last_accessed_at,
                         doc_summary: doc.summary.clone(),
                     },
@@ -303,7 +303,7 @@ impl Retriever {
                         graph_score: None,
                         persona_uid: Some(doc.persona_uid.clone()),
                         share: Some(doc.share),
-                        created_at: doc.created_at,
+                        created_at: doc.start,
                         last_accessed_at: None, // L2 事件暂不追踪访问时间
                         doc_summary: format!("{} — {}", doc.title, doc.summary),
                     },
@@ -311,7 +311,7 @@ impl Retriever {
             }
         }
 
-        // 按命中关键词数降序排列，同等命中数按 created_at 降序
+        // 按命中关键词数降序排列，同等命中数按时间基准（发生时间）降序
         candidates.sort_by(|a, b| {
             b.0.cmp(&a.0)
                 .then_with(|| b.1.created_at.cmp(&a.1.created_at))
@@ -348,12 +348,12 @@ impl Retriever {
     ///   融合排序，使"刚聊过 / 相关的话题"优先进入脉络注入。
     ///
     /// 排序公式:
-    /// - `score = BM25 相关性 × calc_retention(created_at, last_accessed_at, now, salience)`
+    /// - `score = BM25 相关性 × calc_retention(occurred_at, last_accessed_at, now, salience)`
     /// - `calc_retention` 内含访问加成：近期被检索命中的 L1（`touch` 刷新
     ///   `last_accessed_at` 后）保留率保底 `recent_boost_floor`，旧记忆更容易被召回。
     ///
     /// 兜底:
-    /// - 查询为空或 BM25 无相关性命中 → 按 `created_at` 降序回退最近 N 条，
+    /// - 查询为空或 BM25 无相关性命中 → 按 `occurred_at`（发生时间）降序回退最近 N 条，
     ///   与既有"无条件取最近几条"语义等价（不丢脉络）。
     /// - 目标 persona 无 L1 → 空列表。
     ///
@@ -408,7 +408,7 @@ impl Retriever {
         for doc in persona_docs {
             let bm25_raw = bm25_hits.get(&doc.id).copied().unwrap_or(0.0);
             let retention = calc_retention(
-                doc.created_at,
+                doc.occurred_at,
                 doc.last_accessed_at,
                 now_ms,
                 doc.salience,
@@ -417,13 +417,13 @@ impl Retriever {
             scored.push((bm25_raw * retention, doc));
         }
 
-        // 4. 排序：有相关性命中 → 按融合分降序；否则按创建时间降序（最近优先兜底）
+        // 4. 排序：有相关性命中 → 按融合分降序；否则按发生时间降序（最近优先兜底）
         let has_relevance = scored.iter().any(|(s, _)| *s > 0.0);
         if has_relevance {
             scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         } else {
-            // 按创建时间降序（最近优先兜底）：sort_by_key 升序后反转
-            scored.sort_by_key(|(_, doc)| doc.created_at);
+            // 按发生时间降序（最近优先兜底）：sort_by_key 升序后反转
+            scored.sort_by_key(|(_, doc)| doc.occurred_at);
             scored.reverse();
         }
 
@@ -440,7 +440,7 @@ impl Retriever {
                 graph_score: None,
                 persona_uid: doc.persona_uid.clone(),
                 share: None,
-                created_at: doc.created_at,
+                created_at: doc.occurred_at,
                 last_accessed_at: doc.last_accessed_at,
                 doc_summary: doc.summary.clone(),
             })

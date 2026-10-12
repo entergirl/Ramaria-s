@@ -27,6 +27,7 @@ fn format_single_l1_from_cluster() {
         evidence_notes: vec![],
         salience: 0.5,
         created_at: 1_700_000_000_000,
+        occurred_at: 1_700_000_000_000,
     };
     let cluster = TopicCluster::new(vec![item]);
     let formatted = EventExtractor::format_l1_from_cluster(&cluster);
@@ -45,6 +46,7 @@ fn format_multiple_l1_from_cluster() {
         evidence_notes: vec![],
         salience: 0.5,
         created_at: now_ms(),
+        occurred_at: now_ms(),
     };
     let item2 = L1Item {
         id: Uuid::new_v4(),
@@ -54,6 +56,7 @@ fn format_multiple_l1_from_cluster() {
         evidence_notes: vec![],
         salience: 0.5,
         created_at: now_ms(),
+        occurred_at: now_ms(),
     };
     let cluster = TopicCluster::new(vec![item1, item2]);
     let formatted = EventExtractor::format_l1_from_cluster(&cluster);
@@ -80,6 +83,7 @@ fn format_l1_with_evidence_notes_injects_clue_lines() {
         }],
         salience: 0.5,
         created_at: now_ms(),
+        occurred_at: now_ms(),
     };
     let cluster = TopicCluster::new(vec![item]);
     let formatted = EventExtractor::format_l1_from_cluster(&cluster);
@@ -105,6 +109,7 @@ fn format_l1_evidence_notes_omits_missing_slots() {
         evidence_notes: vec![EvidenceNote::new("用户提到通勤时间变长")],
         salience: 0.5,
         created_at: now_ms(),
+        occurred_at: now_ms(),
     };
     let cluster = TopicCluster::new(vec![item]);
     let formatted = EventExtractor::format_l1_from_cluster(&cluster);
@@ -125,6 +130,7 @@ fn format_l1_without_evidence_notes_unchanged() {
         evidence_notes: vec![],
         salience: 0.5,
         created_at: now_ms(),
+        occurred_at: now_ms(),
     };
     let cluster = TopicCluster::new(vec![item]);
     let formatted = EventExtractor::format_l1_from_cluster(&cluster);
@@ -444,6 +450,7 @@ fn l1_for_fp(id: &str, summary: &str) -> MemoryL1 {
         salience: 0.5,
         absorbed: false,
         created_at: now_ms(),
+        occurred_at: None,
         last_accessed_at: None,
         persona_uid: None,
         context_json: None,

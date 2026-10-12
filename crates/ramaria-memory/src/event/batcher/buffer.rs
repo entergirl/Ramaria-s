@@ -126,6 +126,7 @@ impl PendingFragment {
 ///     embedding: None,
 ///     salience: 0.5,
 ///     created_at: 1_000,
+///     occurred_at: 1_000,
 /// };
 /// buf.add_fragment(orphan, 1_000_000);
 /// let promoted = buf.drain_promoted(); // 未达 3 条，不会提升
@@ -354,6 +355,7 @@ mod tests {
             embedding: None,
             salience: 0.5,
             created_at,
+            occurred_at: created_at,
         }
     }
 
@@ -368,6 +370,7 @@ mod tests {
             embedding: Some(embedding),
             salience: 0.5,
             created_at,
+            occurred_at: created_at,
         }
     }
 

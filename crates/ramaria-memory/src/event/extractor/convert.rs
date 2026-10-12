@@ -31,7 +31,8 @@ impl<'a> EventExtractor<'a> {
     pub(super) fn format_l1_from_cluster(cluster: &crate::event::batcher::TopicCluster) -> String {
         let mut lines = Vec::with_capacity(cluster.l1_items.len());
         for (i, item) in cluster.l1_items.iter().enumerate() {
-            let date = timestamp_to_date_str(item.created_at);
+            // 日期取发生时间（注入 LLM 的 L1 日期须为事情真实发生日期）
+            let date = timestamp_to_date_str(item.occurred_at);
             let kw_str = if item.keywords.is_empty() {
                 String::new()
             } else {

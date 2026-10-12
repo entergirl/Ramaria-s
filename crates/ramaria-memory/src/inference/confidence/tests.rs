@@ -31,6 +31,7 @@ fn make_evidence(
         score,
         decay,
         created_at,
+        occurred_at: None,
     }
 }
 
@@ -317,4 +318,38 @@ fn update_trait_confidence_calibrated_basic() {
         update_trait_confidence_calibrated(&old_state, &new_data, &new_scores, now, &config);
     assert!(update.conf_after > 0.0);
     assert!(update.e_total_after > update.e_total_before);
+}
+
+// ---- 时间语义：证据衰减按发生时间（occurred_at） ----
+
+/// 证据衰减按发生时间：occurred 旧 → E_total 低于 occurred 新（登记相同）；
+/// occurred None 回退登记时间（与旧行为等价）。
+#[test]
+fn e_total_uses_occurred_at() {
+    let config = ConfidenceConfig::default();
+    let now = TEST_NOW_MS;
+
+    // 两条证据登记时间相同（now），一条发生 30 天前、一条 1 天前
+    let mut stale = make_evidence(1, 1, 0.8, 0.0, &config);
+    stale.occurred_at = Some(now - (30.0 * MS_PER_DAY) as i64);
+    let mut fresh = make_evidence(1, 2, 0.8, 0.0, &config);
+    fresh.occurred_at = Some(now - (1.0 * MS_PER_DAY) as i64);
+
+    let e_stale = compute_e_total(std::slice::from_ref(&stale), now, &config);
+    let e_fresh = compute_e_total(std::slice::from_ref(&fresh), now, &config);
+    assert!(
+        e_stale < e_fresh,
+        "occurred 旧的证据贡献应低于 occurred 新（{e_stale} vs {e_fresh}）"
+    );
+
+    // None 回退登记时间：等价于显式 occurred = created
+    let fallback = make_evidence(1, 3, 0.8, 0.0, &config);
+    let mut explicit = make_evidence(1, 4, 0.8, 0.0, &config);
+    explicit.occurred_at = Some(explicit.created_at);
+    let e_fallback = compute_e_total(std::slice::from_ref(&fallback), now, &config);
+    let e_explicit = compute_e_total(std::slice::from_ref(&explicit), now, &config);
+    assert!(
+        (e_fallback - e_explicit).abs() < 1e-10,
+        "occurred None 应回退 created（{e_fallback} vs {e_explicit}）"
+    );
 }

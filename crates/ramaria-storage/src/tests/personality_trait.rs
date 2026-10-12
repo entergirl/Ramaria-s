@@ -81,3 +81,70 @@ async fn trait_evidence_crud() {
     assert_eq!(list[0].trait_id, pt_id);
     assert_eq!(list[0].event_id, ev_id);
 }
+
+// =========================================================
+// 证据读取的事件时间投影（occurred_at）
+// =========================================================
+
+/// 证据读取经 JOIN 填充源事件发生时间；源事件缺失（FK 保护下不可达的防御路径）回退 None。
+#[tokio::test]
+async fn evidence_read_fills_occurred_at_from_event() {
+    let storage = setup().await;
+    let p = Persona::new(
+        "user-0001".into(),
+        "用户".into(),
+        PersonaKind::User,
+        1,
+        "local".into(),
+    );
+    storage.create_persona(&p).await.unwrap();
+    let pt = PersonalityTrait::new(
+        "user-0001".into(),
+        TraitLayer::Base,
+        "温和".into(),
+        "待人温和".into(),
+        TraitSource::Inferred,
+        0,
+    );
+    let pt_id = storage.save_trait(&pt).await.unwrap();
+
+    // 事件（start 为发生时间基准）
+    let ev = MemoryEvent::new("user-0001".into(), "事件".into(), "描述".into(), 7000, 8000);
+    let ev_id = storage.save_event(&ev).await.unwrap();
+    let evidence = TraitEvidence::new(pt_id, ev_id, EvidenceDirection::Support, 0.8);
+    storage.save_evidence(&evidence).await.unwrap();
+
+    let list = storage.list_evidence_by_trait(pt_id).await.unwrap();
+    assert_eq!(
+        list[0].occurred_at,
+        Some(7000),
+        "证据 occurred_at 应取源事件 start"
+    );
+
+    // ---- 源事件缺失：FK 保护下正常写入不可达，临时关闭外键构造防御路径数据 ----
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&storage.pool)
+        .await
+        .unwrap();
+    let dangling = TraitEvidence::new(pt_id, 999_999, EvidenceDirection::Support, 0.5);
+    storage.save_evidence(&dangling).await.unwrap();
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&storage.pool)
+        .await
+        .unwrap();
+
+    let list2 = storage.list_evidence_by_trait(pt_id).await.unwrap();
+    let dangling_back = list2
+        .iter()
+        .find(|e| e.event_id == 999_999)
+        .expect("悬空证据应可读回");
+    assert_eq!(
+        dangling_back.occurred_at, None,
+        "源事件缺失时 occurred_at 为 None"
+    );
+    assert_eq!(
+        dangling_back.occurred_at_or_created(),
+        dangling_back.created_at,
+        "读取回退登记时间"
+    );
+}

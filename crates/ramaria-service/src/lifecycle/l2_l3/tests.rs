@@ -662,3 +662,102 @@ fn keep_only_round_is_not_first_round() {
         "仅当本轮无任何活跃 trait 时才视为首轮"
     );
 }
+
+// =========================================================
+// 时间语义：触发年龄按发生时间（occurred_at）
+// =========================================================
+
+/// 无主 L1 时间触发年龄按发生时间：登记=现在、发生=10 天前 → 触发归属与 L2。
+#[tokio::test]
+async fn unbound_l1_age_trigger_uses_occurred_at() {
+    let mut config = RamariaConfig::default();
+    config.thresholds.cluster_delay_ms = 0;
+    let (engine, storage, dir) = engine_with_llm_and_config(
+        "l2l3-unbound-occurred",
+        MockLlm::with_reply(r#"{"events": []}"#),
+        config,
+    )
+    .await;
+    seed_persona(&storage, "char-0001").await;
+    let session = storage
+        .create_session(Some("char-0001"))
+        .await
+        .expect("创建会话应成功");
+
+    // 1 条无主 L1：登记 = 现在、发生 = 10 天前（对抗数据；计数阈值不启用）
+    let mut l1 = MemoryL1::new(session.id, "导入会话摘要内容".to_string(), None);
+    l1.created_at = now_ms();
+    l1.occurred_at = Some(now_ms() - 10 * 86_400_000);
+    storage.save_memory_l1(&l1).await.expect("写入 L1 应成功");
+
+    let stats = process_unbound_l1_for_l2(&engine, None, 0, 7.0).await;
+
+    assert_eq!(stats.total, 1);
+    assert_eq!(
+        stats.triggered_personas, 1,
+        "发生时间年龄 ≥ 7 天应触发（登记年龄不参与）"
+    );
+    assert_eq!(stats.pending_groups, 0);
+
+    let bound = storage
+        .list_recent_l1_by_persona("char-0001", 100)
+        .await
+        .expect("查询 L1 应成功");
+    assert_eq!(bound.len(), 1, "时间触发同样应归属 L1");
+    assert_eq!(bound[0].persona_uid.as_deref(), Some("char-0001"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 定时检查 L2 时间线年龄按发生时间：登记=现在、发生=2 天前 → 超阈值触发并吸收。
+#[tokio::test]
+async fn scheduled_check_l2_age_uses_occurred_at() {
+    let mut config = RamariaConfig::default();
+    config.thresholds.l2_trigger_days = 1;
+    config.thresholds.cluster_delay_ms = 0;
+    let (engine, storage, dir) = engine_with_llm_and_config(
+        "l2l3-sched-occurred",
+        MockLlm::with_reply(r#"{"events": []}"#),
+        config,
+    )
+    .await;
+    seed_persona(&storage, "char-0001").await;
+    let pool = engine.sqlite_pool().expect("测试引擎应附着连接池");
+
+    // 3 条未吸收 L1（关键词连通 → 单簇）：登记 = 现在、发生 = 2 天前（对抗数据）
+    let now = now_ms();
+    for i in 0..3 {
+        let l1_id = seed_l1(
+            &storage,
+            "char-0001",
+            "用户最近工作压力很大",
+            Some("工作压力"),
+            now,
+        )
+        .await;
+        sqlx::query("UPDATE memory_l1 SET occurred_at = ? WHERE id = ?")
+            .bind(now - 2 * 86_400_000 + i)
+            .bind(l1_id.to_string())
+            .execute(&pool)
+            .await
+            .expect("更新 occurred_at 应成功");
+    }
+
+    run_scheduled_check(&engine, None).await;
+
+    let unabsorbed = storage
+        .list_unabsorbed_l1("char-0001")
+        .await
+        .expect("查询未吸收 L1 应成功");
+    assert!(
+        unabsorbed.is_empty(),
+        "发生时间年龄超阈值应触发提取并吸收 L1: {unabsorbed:?}"
+    );
+    let events = storage
+        .list_events_by_persona("char-0001", 0, 100)
+        .await
+        .expect("查询事件应成功");
+    assert!(!events.is_empty(), "触发提取应有事件产出（降级事件亦可）");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -414,7 +414,7 @@ var RamariaMemoryView = (function () {
                 // ── 底部操作栏：时间 + 跳转按钮 ──
                 '<div class="memory-l1-card-actions">' +
                     '<span class="memory-l1-card-time">' +
-                        RamariaFormat.smartTime(item.created_at) +
+                        RamariaFormat.smartTime(item.occurred_at) +
                     '</span>' +
                     // 强度条保留在中间
                     '<div class="memory-salience-bar">' +
@@ -567,7 +567,7 @@ var RamariaMemoryView = (function () {
                     '</div>' +
                     '<div class="memory-l2-detail-row">' +
                         '<span class="memory-l2-detail-label">时间</span>' +
-                        '<span class="memory-l2-detail-value">' + RamariaFormat.smartTime(item.created_at) + '</span>' +
+                        '<span class="memory-l2-detail-value">' + RamariaFormat.smartTime(item.start) + '</span>' +
                     '</div>' +
                 '</div>';
 

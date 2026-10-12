@@ -43,6 +43,7 @@ fn search_substring_top_k() {
             keywords: Some("Rust".to_string()),
             persona_uid: Some("user-0001".to_string()),
             created_at: 3000 + i as i64,
+            occurred_at: 3000 + i as i64,
             salience: 0.5,
             last_accessed_at: None,
         });
@@ -64,6 +65,7 @@ fn search_narrative_ranks_relevant_over_recent() {
         keywords: Some("Rust,编程".to_string()),
         persona_uid: Some("user-0001".to_string()),
         created_at: now - 3 * 86_400_000,
+        occurred_at: now - 3 * 86_400_000,
         salience: 0.5,
         last_accessed_at: None,
     });
@@ -74,6 +76,7 @@ fn search_narrative_ranks_relevant_over_recent() {
         keywords: Some("社交,火锅".to_string()),
         persona_uid: Some("user-0001".to_string()),
         created_at: now - 86_400_000,
+        occurred_at: now - 86_400_000,
         salience: 0.5,
         last_accessed_at: None,
     });
@@ -123,4 +126,92 @@ fn search_substring_returns_bm25_score() {
         assert!(sr.bm25_score.unwrap_or(0.0) > 0.0, "BM25 分数应大于 0");
         assert!(sr.rrf_score > 0.0, "rrf_score 应为 BM25 分数");
     }
+}
+
+/// 衰减排序按发生时间：相关性命中下，发生时间近的记忆排前（登记时间更早也不影响）。
+#[test]
+fn search_narrative_decay_ranks_by_occurred_at() {
+    let mut r = Retriever::new();
+    let now = 1_700_000_000_000i64;
+    // A：相关，发生旧（30 天前），登记新（1 天前）——对抗数据
+    r.index_l1(&L1DocView {
+        id: uuid::Uuid::new_v4(),
+        summary: "用户讨论了Rust异步编程的实践".to_string(),
+        keywords: Some("Rust,编程".to_string()),
+        persona_uid: Some("user-0001".to_string()),
+        created_at: now - 86_400_000,
+        occurred_at: now - 30 * 86_400_000,
+        salience: 0.5,
+        last_accessed_at: None,
+    });
+    // B：同等相关，发生新（1 天前），登记旧（30 天前）
+    r.index_l1(&L1DocView {
+        id: uuid::Uuid::new_v4(),
+        summary: "用户讨论了Rust异步编程的实践".to_string(),
+        keywords: Some("Rust,编程".to_string()),
+        persona_uid: Some("user-0001".to_string()),
+        created_at: now - 30 * 86_400_000,
+        occurred_at: now - 86_400_000,
+        salience: 0.5,
+        last_accessed_at: None,
+    });
+
+    let decay = DecayConfig::l1();
+    let results = r.search_narrative("Rust 编程", "user-0001", 2, now, &decay);
+
+    assert_eq!(results.len(), 2);
+    assert_eq!(
+        results[0].created_at,
+        now - 86_400_000,
+        "衰减按发生时间：B（发生 1 天前）应排前"
+    );
+    assert_eq!(
+        results[1].created_at,
+        now - 30 * 86_400_000,
+        "A（发生 30 天前）应排后"
+    );
+}
+
+/// 无相关性兜底排序按发生时间降序；SearchResult.created_at 回传发生时间。
+#[test]
+fn search_narrative_fallback_sorts_by_occurred_at() {
+    let mut r = Retriever::new();
+    let now = 1_700_000_000_000i64;
+    // A：发生早（10 天前），登记新（1 天前）
+    r.index_l1(&L1DocView {
+        id: uuid::Uuid::new_v4(),
+        summary: "用户去看了电影".to_string(),
+        keywords: Some("电影".to_string()),
+        persona_uid: Some("user-0001".to_string()),
+        created_at: now - 86_400_000,
+        occurred_at: now - 10 * 86_400_000,
+        salience: 0.5,
+        last_accessed_at: None,
+    });
+    // B：发生新（1 天前），登记早（10 天前）
+    r.index_l1(&L1DocView {
+        id: uuid::Uuid::new_v4(),
+        summary: "用户和朋友去吃了火锅".to_string(),
+        keywords: Some("火锅".to_string()),
+        persona_uid: Some("user-0001".to_string()),
+        created_at: now - 10 * 86_400_000,
+        occurred_at: now - 86_400_000,
+        salience: 0.5,
+        last_accessed_at: None,
+    });
+
+    let decay = DecayConfig::l1();
+    let results = r.search_narrative("完全不相关的查询词", "user-0001", 2, now, &decay);
+
+    assert_eq!(results.len(), 2);
+    assert!(
+        results[0].doc_summary.contains("火锅"),
+        "兜底按发生时间降序（B 在前），got: {}",
+        results[0].doc_summary
+    );
+    assert_eq!(
+        results[0].created_at,
+        now - 86_400_000,
+        "SearchResult.created_at 应携带发生时间"
+    );
 }

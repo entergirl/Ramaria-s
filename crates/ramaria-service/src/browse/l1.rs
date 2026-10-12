@@ -86,7 +86,7 @@ pub(crate) async fn l1(engine: &Engine, req: L1BrowseRequest) -> RamariaResult<L
         }
     };
 
-    all.sort_by_key(|v| Reverse(v.created_at));
+    all.sort_by_key(|v| Reverse(v.occurred_at));
     let total = all.len();
     let items: Vec<L1MemoryView> = all.into_iter().skip(offset).take(limit as usize).collect();
 

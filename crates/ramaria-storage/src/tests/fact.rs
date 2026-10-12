@@ -310,3 +310,65 @@ async fn fact_double_supersede_conflict() {
     assert_eq!(active.len(), 1, "同 field 只应保留一条 active");
     assert_eq!(active[0].content, "当前情绪：焦虑");
 }
+
+// =========================================================
+// 事实读取的事件时间投影（occurred_at）
+// =========================================================
+
+/// 事实读取经 JOIN 填充源事件发生时间；无事件引用（ref_event_id=None）时为 None。
+#[tokio::test]
+async fn fact_read_fills_occurred_at_from_event() {
+    let storage = setup().await;
+    let p = Persona::new(
+        "user-0001".into(),
+        "用户".into(),
+        PersonaKind::User,
+        1,
+        "local".into(),
+    );
+    storage.create_persona(&p).await.unwrap();
+
+    // 事件（start 为发生时间基准）
+    let ev = MemoryEvent::new("user-0001".into(), "事件".into(), "描述".into(), 6000, 9000);
+    let ev_id = storage.save_event(&ev).await.unwrap();
+
+    // 引用事件的 volatile 事实
+    let mut with_event = PersonaFact::new(
+        "user-0001".into(),
+        ramaria_core::types::ProfileField::PersonalStatus,
+        "最近在忙项目".into(),
+        FactSource::Event,
+    );
+    with_event.tier = ramaria_core::types::FactTier::Volatile;
+    with_event.ref_event_id = Some(ev_id);
+    let with_event_id = storage.save_fact(&with_event).await.unwrap();
+
+    // 无事件引用的事实
+    let without_event = PersonaFact::new(
+        "user-0001".into(),
+        ramaria_core::types::ProfileField::BasicInfo,
+        "姓名：小明".into(),
+        FactSource::Manual,
+    );
+    let without_event_id = storage.save_fact(&without_event).await.unwrap();
+
+    let facts = storage
+        .list_all_facts_by_persona("user-0001")
+        .await
+        .unwrap();
+    let backed = facts.iter().find(|f| f.id == with_event_id).unwrap();
+    assert_eq!(
+        backed.occurred_at,
+        Some(6000),
+        "事实 occurred_at 应取源事件 start"
+    );
+    assert_eq!(backed.occurred_at_or_created(), 6000);
+
+    let plain = facts.iter().find(|f| f.id == without_event_id).unwrap();
+    assert_eq!(plain.occurred_at, None, "无事件引用时为 None");
+    assert_eq!(
+        plain.occurred_at_or_created(),
+        plain.created_at,
+        "读取回退登记时间"
+    );
+}

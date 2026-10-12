@@ -121,6 +121,10 @@ pub struct PersonaFact {
     pub ref_l1_id: Option<Uuid>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// 发生时间（Unix 毫秒）——源事件的发生时间；读取时由存储层 JOIN 填充，
+    /// None 回退 created_at
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occurred_at: Option<i64>,
 }
 
 impl PersonaFact {
@@ -147,7 +151,13 @@ impl PersonaFact {
             ref_l1_id: None,
             created_at: now,
             updated_at: now,
+            occurred_at: None,
         }
+    }
+
+    /// 有效发生时间（读取回退：occurred_at 缺失时用 created_at）。
+    pub fn occurred_at_or_created(&self) -> i64 {
+        self.occurred_at.unwrap_or(self.created_at)
     }
 }
 
@@ -174,6 +184,10 @@ pub struct TraitEvidence {
     /// 时间衰减权重
     pub decay: f64,
     pub created_at: i64,
+    /// 发生时间（Unix 毫秒）——源事件的发生时间；读取时由存储层 JOIN 填充，
+    /// None 回退 created_at
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occurred_at: Option<i64>,
 }
 
 impl TraitEvidence {
@@ -187,7 +201,13 @@ impl TraitEvidence {
             score,
             decay: 1.0,
             created_at: now_ms(),
+            occurred_at: None,
         }
+    }
+
+    /// 有效发生时间（读取回退：occurred_at 缺失时用 created_at）。
+    pub fn occurred_at_or_created(&self) -> i64 {
+        self.occurred_at.unwrap_or(self.created_at)
     }
 }
 

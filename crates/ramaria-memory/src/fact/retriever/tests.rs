@@ -606,3 +606,71 @@ fn fact_doc_labels_match_rag_label_format() {
     let plain = fact(ProfileField::History, "无引用事实", "x", FactTier::Stable);
     assert!(fact_doc_labels(&plain).is_empty());
 }
+
+// =========================================================
+// 时间语义：volatile 事实时效权重按发生时间（occurred_at）
+// =========================================================
+
+/// volatile 事实权重按发生时间：occurred 旧 → weight 低于 occurred 新（登记相同）；
+/// occurred None 回退登记时间（与旧行为等价）。
+#[test]
+fn weight_of_uses_occurred_at() {
+    const DAY_MS: i64 = 86_400_000;
+    let now = 1_760_000_000_000i64;
+
+    // 两条事实登记时间相同（now），一条发生 60 天前、一条 1 天前
+    let mut stale = fact(
+        ProfileField::PersonalStatus,
+        "最近在忙项目",
+        "项目",
+        FactTier::Volatile,
+    );
+    stale.created_at = now;
+    stale.occurred_at = Some(now - 60 * DAY_MS);
+
+    let mut fresh = fact(
+        ProfileField::PersonalStatus,
+        "最近在忙项目",
+        "项目",
+        FactTier::Volatile,
+    );
+    fresh.created_at = now;
+    fresh.occurred_at = Some(now - DAY_MS);
+
+    let w_stale = weight_of(&stale, now, 30);
+    let w_fresh = weight_of(&fresh, now, 30);
+    assert!(
+        w_stale < w_fresh,
+        "occurred 旧的事实权重应更低（{w_stale} vs {w_fresh}）"
+    );
+
+    // None 回退登记时间：等价于显式 occurred = created
+    let fallback = fact(
+        ProfileField::PersonalStatus,
+        "最近在忙项目",
+        "项目",
+        FactTier::Volatile,
+    );
+    let mut explicit = fact(
+        ProfileField::PersonalStatus,
+        "最近在忙项目",
+        "项目",
+        FactTier::Volatile,
+    );
+    explicit.occurred_at = Some(explicit.created_at);
+    assert!(
+        (weight_of(&fallback, now, 30) - weight_of(&explicit, now, 30)).abs() < 1e-10,
+        "occurred None 应回退 created"
+    );
+
+    // stable 档不受时间影响（权重恒 1.0）——口径对照
+    let mut stable = fact(
+        ProfileField::BasicInfo,
+        "姓名：小明",
+        "姓名",
+        FactTier::Stable,
+    );
+    stable.created_at = now;
+    stable.occurred_at = Some(now - 600 * DAY_MS);
+    assert!((weight_of(&stable, now, 30) - 1.0).abs() < 1e-10);
+}

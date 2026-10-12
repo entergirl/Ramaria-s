@@ -277,7 +277,7 @@ pub fn retrieve_knowledge_with_options(
 
 /// 计算单条事实的时效权重（stable/historical=1.0；volatile 随事件时间衰减）。
 fn weight_of(fact: &PersonaFact, now: i64, halflife_days: u32) -> f64 {
-    let event_time = fact.created_at;
+    let event_time = fact.occurred_at_or_created();
     let tier = fact.tier;
     decay_weight(tier, event_time, now, halflife_days)
 }

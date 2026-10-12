@@ -254,6 +254,7 @@ mod tests {
             keywords: Some("Rust,编程,异步".to_string()),
             persona_uid: Some("user-0001".to_string()),
             created_at: 1000,
+            occurred_at: 1000,
             salience: 0.8,
             last_accessed_at: None,
         });
@@ -263,6 +264,7 @@ mod tests {
             keywords: Some("社交,火锅,工作压力".to_string()),
             persona_uid: Some("user-0001".to_string()),
             created_at: 2000,
+            occurred_at: 2000,
             salience: 0.6,
             last_accessed_at: None,
         });
@@ -272,6 +274,7 @@ mod tests {
             keywords: Some("运动,爬山,放松".to_string()),
             persona_uid: Some("user-0001".to_string()),
             created_at: 3000,
+            occurred_at: 3000,
             salience: 0.5,
             last_accessed_at: None,
         });
@@ -287,6 +290,7 @@ mod tests {
             share: 0.8,
             confidence: 0.9,
             created_at: 1500,
+            start: 1500,
             salience: 0.9,
         });
         r.index_l2(&L2DocView {
@@ -300,6 +304,7 @@ mod tests {
             share: 0.3,
             confidence: 0.85,
             created_at: 2500,
+            start: 2500,
             salience: 0.85,
         });
 
@@ -325,6 +330,7 @@ mod tests {
             evidence_notes: vec![],
             salience: 0.5,
             created_at: 1000,
+            occurred_at: 1000,
         }]);
 
         let docs = cr.retrieve_context(&cluster, "user-0001");
@@ -360,6 +366,7 @@ mod tests {
             evidence_notes: vec![],
             salience: 0.5,
             created_at: 1000,
+            occurred_at: 1000,
         }]);
 
         // user-0002 无任何文档
@@ -388,6 +395,7 @@ mod tests {
             evidence_notes: vec![],
             salience: 0.5,
             created_at: 1000,
+            occurred_at: 1000,
         }]);
 
         let docs = cr.retrieve_context(&cluster, "user-0001");
@@ -421,6 +429,7 @@ mod tests {
             evidence_notes: vec![],
             salience: 0.5,
             created_at: 1000,
+            occurred_at: 1000,
         }]);
 
         let docs = cr.retrieve_context(&cluster, "user-0001");

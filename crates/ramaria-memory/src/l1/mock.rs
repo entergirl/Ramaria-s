@@ -615,6 +615,7 @@ pub fn make_valid_l1(summary: &str) -> MemoryL1 {
         salience: 0.5,
         absorbed: false,
         created_at: ramaria_core::types::now_ms(),
+        occurred_at: None,
         last_accessed_at: None,
         persona_uid: None,
         context_json: None,

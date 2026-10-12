@@ -36,6 +36,7 @@ fn l1_item(
         embedding,
         salience,
         created_at,
+        occurred_at: created_at,
     }
 }
 

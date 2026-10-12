@@ -114,6 +114,10 @@ pub struct MemoryL1 {
     pub absorbed: bool,
     /// 创建时间（Unix 毫秒）
     pub created_at: i64,
+    /// 发生时间（Unix 毫秒）——该摘要所涵盖对话块的开始时刻（块内最早消息时间）。
+    /// None 表示存量未回填，读取侧回退 created_at
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occurred_at: Option<i64>,
     /// 最近被检索命中的时间
     pub last_accessed_at: Option<i64>,
     /// 人格关联——本条摘要描述的对象
@@ -176,6 +180,7 @@ impl MemoryL1 {
             salience: 0.5,
             absorbed: false,
             created_at: now_ms(),
+            occurred_at: None,
             last_accessed_at: None,
             persona_uid: None,
             context_json: None,
@@ -183,6 +188,11 @@ impl MemoryL1 {
             evidence_notes: None,
             continuation: None,
         }
+    }
+
+    /// 有效发生时间（读取回退：occurred_at 缺失时用 created_at）。
+    pub fn occurred_at_or_created(&self) -> i64 {
+        self.occurred_at.unwrap_or(self.created_at)
     }
 
     /// 标记此 L1 已被事件提取器吸收。

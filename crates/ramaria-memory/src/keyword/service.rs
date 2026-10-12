@@ -189,6 +189,7 @@ impl KeywordService {
                 doc.keywords.as_deref(),
                 doc.salience,
                 doc.created_at,
+                doc.occurred_at,
             );
         }
         for doc in l2 {
@@ -197,6 +198,7 @@ impl KeywordService {
                 doc.keywords.as_deref(),
                 doc.salience,
                 doc.created_at,
+                doc.start,
             );
         }
         self.composite = Arc::new(composite);
@@ -219,6 +221,7 @@ impl KeywordService {
             doc.keywords.as_deref(),
             doc.salience,
             doc.created_at,
+            doc.occurred_at,
         );
         self.composite.doc_count()
     }
@@ -231,6 +234,7 @@ impl KeywordService {
             doc.keywords.as_deref(),
             doc.salience,
             doc.created_at,
+            doc.start,
         );
         self.composite.doc_count()
     }

@@ -15,6 +15,7 @@ fn make_test_retriever() -> Retriever {
         keywords: Some("学习,Rust,编程".to_string()),
         persona_uid: Some("user-0001".to_string()),
         created_at: 1000,
+        occurred_at: 1000,
         salience: 0.8,
         last_accessed_at: None,
     });
@@ -25,6 +26,7 @@ fn make_test_retriever() -> Retriever {
         keywords: Some("社交,火锅,开心".to_string()),
         persona_uid: Some("user-0001".to_string()),
         created_at: 2000,
+        occurred_at: 2000,
         salience: 0.6,
         last_accessed_at: None,
     });
@@ -41,6 +43,7 @@ fn make_test_retriever() -> Retriever {
         share: 0.8,
         confidence: 0.9,
         created_at: 1500,
+        start: 1500,
         salience: 0.9,
     });
 
@@ -55,6 +58,7 @@ fn l1_view_doc(id: uuid::Uuid, summary: &str, created_at: i64) -> L1DocView {
         keywords: None,
         persona_uid: Some("user-0001".to_string()),
         created_at,
+        occurred_at: created_at,
         salience: 0.5,
         last_accessed_at: None,
     }

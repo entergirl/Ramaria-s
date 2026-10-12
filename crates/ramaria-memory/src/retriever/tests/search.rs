@@ -36,6 +36,7 @@ fn vector_channel_finds_indexed_l1_l2() {
             keywords: None,
             persona_uid: Some("user-0001".to_string()),
             created_at: 1000,
+            occurred_at: 1000,
             salience: 0.8,
             last_accessed_at: None,
         },
@@ -54,6 +55,7 @@ fn vector_channel_finds_indexed_l1_l2() {
         share: 0.9,
         confidence: 0.9,
         created_at: 2000,
+        start: 2000,
         salience: 0.7,
     });
     let label = make_vector_label("l2", &l2_id.to_string());
@@ -94,6 +96,7 @@ fn vector_channel_skipped_without_query_vector() {
             keywords: None,
             persona_uid: Some("user-0001".to_string()),
             created_at: 1000,
+            occurred_at: 1000,
             salience: 0.8,
             last_accessed_at: None,
         },
@@ -136,6 +139,7 @@ fn enable_vector_false_disables_vector_channel() {
             keywords: None,
             persona_uid: Some("user-0001".to_string()),
             created_at: 1000,
+            occurred_at: 1000,
             salience: 0.8,
             last_accessed_at: None,
         },
@@ -175,6 +179,7 @@ fn enable_vector_default_keeps_vector_hits() {
             keywords: None,
             persona_uid: Some("user-0001".to_string()),
             created_at: 1000,
+            occurred_at: 1000,
             salience: 0.8,
             last_accessed_at: None,
         },
@@ -258,6 +263,7 @@ fn search_top_k_truncation() {
             keywords: Some("测试".to_string()),
             persona_uid: Some("user-0001".to_string()),
             created_at: 3000 + i as i64,
+            occurred_at: 3000 + i as i64,
             salience: 0.5,
             last_accessed_at: None,
         });

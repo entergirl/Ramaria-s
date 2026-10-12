@@ -29,6 +29,8 @@ struct L1Row {
     salience: f64,
     absorbed: i64,
     created_at: i64,
+    /// 发生时间（Unix 毫秒，可空）——块内最早消息时间；NULL 表示未回填
+    occurred_at: Option<i64>,
     last_accessed_at: Option<i64>,
     persona_uid: Option<String>,
     context_json: Option<String>,
@@ -68,6 +70,7 @@ impl L1Row {
             salience: self.salience,
             absorbed: self.absorbed != 0,
             created_at: self.created_at,
+            occurred_at: self.occurred_at,
             last_accessed_at: self.last_accessed_at,
             persona_uid: self.persona_uid,
             context_json: self.context_json,
@@ -95,9 +98,9 @@ pub async fn save(pool: &SqlitePool, l1: &MemoryL1) -> RamariaResult<()> {
     with_busy_retry("保存 L1 记忆", || async {
         sqlx::query(
             "INSERT INTO memory_l1 (id, session_id, summary, keywords, time_period, atmosphere,
-             valence, salience, absorbed, created_at, last_accessed_at, persona_uid, context_json,
-             situation_strength, evidence_notes, continuation)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             valence, salience, absorbed, created_at, occurred_at, last_accessed_at, persona_uid,
+             context_json, situation_strength, evidence_notes, continuation)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(l1.id.to_string())
         .bind(l1.session_id.to_string())
@@ -109,6 +112,7 @@ pub async fn save(pool: &SqlitePool, l1: &MemoryL1) -> RamariaResult<()> {
         .bind(l1.salience)
         .bind(l1.absorbed as i64)
         .bind(l1.created_at)
+        .bind(l1.occurred_at)
         .bind(l1.last_accessed_at)
         .bind(&l1.persona_uid)
         .bind(&l1.context_json)
@@ -144,9 +148,9 @@ pub async fn delete_by_session(pool: &SqlitePool, session_id: Uuid) -> RamariaRe
 pub async fn list_by_session(pool: &SqlitePool, session_id: Uuid) -> RamariaResult<Vec<MemoryL1>> {
     let rows = sqlx::query_as::<_, L1Row>(
         "SELECT id, session_id, summary, keywords, time_period, atmosphere, valence, salience,
-         absorbed, created_at, last_accessed_at, persona_uid, context_json, situation_strength,
-         evidence_notes, continuation
-         FROM memory_l1 WHERE session_id = ? ORDER BY created_at ASC",
+         absorbed, created_at, occurred_at, last_accessed_at, persona_uid, context_json,
+         situation_strength, evidence_notes, continuation
+         FROM memory_l1 WHERE session_id = ? ORDER BY COALESCE(occurred_at, created_at) ASC",
     )
     .bind(session_id.to_string())
     .fetch_all(pool)
@@ -160,8 +164,8 @@ pub async fn list_by_session(pool: &SqlitePool, session_id: Uuid) -> RamariaResu
 pub async fn get(pool: &SqlitePool, id: Uuid) -> RamariaResult<Option<MemoryL1>> {
     let row = sqlx::query_as::<_, L1Row>(
         "SELECT id, session_id, summary, keywords, time_period, atmosphere, valence, salience,
-         absorbed, created_at, last_accessed_at, persona_uid, context_json, situation_strength,
-         evidence_notes, continuation
+         absorbed, created_at, occurred_at, last_accessed_at, persona_uid, context_json,
+         situation_strength, evidence_notes, continuation
          FROM memory_l1 WHERE id = ?",
     )
     .bind(id.to_string())
@@ -274,9 +278,9 @@ pub async fn touch(pool: &SqlitePool, l1_ids: &[Uuid], now_ms: i64) -> RamariaRe
 pub async fn list_unabsorbed(pool: &SqlitePool, persona_uid: &str) -> RamariaResult<Vec<MemoryL1>> {
     let rows = sqlx::query_as::<_, L1Row>(
         "SELECT id, session_id, summary, keywords, time_period, atmosphere, valence, salience,
-         absorbed, created_at, last_accessed_at, persona_uid, context_json, situation_strength,
-         evidence_notes, continuation
-         FROM memory_l1 WHERE absorbed = 0 AND persona_uid = ? ORDER BY created_at ASC",
+         absorbed, created_at, occurred_at, last_accessed_at, persona_uid, context_json,
+         situation_strength, evidence_notes, continuation
+         FROM memory_l1 WHERE absorbed = 0 AND persona_uid = ? ORDER BY COALESCE(occurred_at, created_at) ASC",
     )
     .bind(persona_uid)
     .fetch_all(pool)
@@ -295,9 +299,9 @@ pub async fn list_unabsorbed(pool: &SqlitePool, persona_uid: &str) -> RamariaRes
 pub async fn list_unabsorbed_unbound(pool: &SqlitePool) -> RamariaResult<Vec<MemoryL1>> {
     let rows = sqlx::query_as::<_, L1Row>(
         "SELECT id, session_id, summary, keywords, time_period, atmosphere, valence, salience,
-         absorbed, created_at, last_accessed_at, persona_uid, context_json, situation_strength,
-         evidence_notes, continuation
-         FROM memory_l1 WHERE absorbed = 0 AND persona_uid IS NULL ORDER BY created_at ASC",
+         absorbed, created_at, occurred_at, last_accessed_at, persona_uid, context_json,
+         situation_strength, evidence_notes, continuation
+         FROM memory_l1 WHERE absorbed = 0 AND persona_uid IS NULL ORDER BY COALESCE(occurred_at, created_at) ASC",
     )
     .fetch_all(pool)
     .await
@@ -362,7 +366,7 @@ pub async fn assign_persona_uid(
     Ok(assigned)
 }
 
-/// 按创建时间降序获取指定 persona 的最近 N 条 L1 摘要。
+/// 按发生时间降序获取指定 persona 的最近 N 条 L1 摘要。
 ///
 /// 用法:
 /// - 供跨 session 上下文注入：新 session 创建时自动加载最近对话摘要。
@@ -373,7 +377,7 @@ pub async fn assign_persona_uid(
 /// - `limit`: 最多返回条数。
 ///
 /// 返回:
-/// - 按 `created_at DESC` 排序的 MemoryL1 列表。
+/// - 按 `COALESCE(occurred_at, created_at) DESC` 排序的 MemoryL1 列表。
 pub async fn list_recent_by_persona(
     pool: &SqlitePool,
     persona_uid: &str,
@@ -381,9 +385,9 @@ pub async fn list_recent_by_persona(
 ) -> RamariaResult<Vec<MemoryL1>> {
     let rows = sqlx::query_as::<_, L1Row>(
         "SELECT id, session_id, summary, keywords, time_period, atmosphere, valence, salience,
-         absorbed, created_at, last_accessed_at, persona_uid, context_json, situation_strength,
-         evidence_notes, continuation
-         FROM memory_l1 WHERE persona_uid = ? ORDER BY created_at DESC LIMIT ?",
+         absorbed, created_at, occurred_at, last_accessed_at, persona_uid, context_json,
+         situation_strength, evidence_notes, continuation
+         FROM memory_l1 WHERE persona_uid = ? ORDER BY COALESCE(occurred_at, created_at) DESC LIMIT ?",
     )
     .bind(persona_uid)
     .bind(limit as i64)
@@ -401,8 +405,7 @@ pub async fn list_recent_by_persona(
 //
 // 说明:
 // - 使用内存 SQLite 真库（database::init_test_pool 自动应用全部 migration）。
-// - 迁移后读取测试手动构造"旧库（基线 schema + 旧格式数据）"再应用一次性迁移，
-//   验证迁移产物可被 repo 结构化读取。
+// - 迁移产物（新增列 / 旧格式数据）可被 repo 结构化读取。
 
 #[cfg(test)]
 mod tests {
@@ -422,6 +425,7 @@ mod tests {
             salience: 0.5,
             absorbed: false,
             created_at: 1_700_000_000_000,
+            occurred_at: None,
             last_accessed_at: None,
             persona_uid: Some("char-0001".into()),
             context_json: None,

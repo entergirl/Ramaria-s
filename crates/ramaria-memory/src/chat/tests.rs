@@ -133,6 +133,47 @@ async fn unweighted_path_reads_recent_l1_and_last_active() {
     );
 }
 
+/// last_active_at 取最近 L1 的发生时间：登记为导入时刻、发生为历史时刻 → 显示发生时间。
+#[tokio::test]
+async fn last_active_at_uses_occurred_at() {
+    let storage = test_storage("occurred").await;
+    ensure_persona(storage.as_ref(), "rama-0001").await;
+    let session = storage
+        .create_session(None)
+        .await
+        .expect("session 创建应成功");
+    // 登记时间 = 现在（模拟导入时刻）；发生时间 = 2023-11-14 22:13:20 UTC
+    let mut l1 = MemoryL1::new(
+        session.id,
+        "导入的历史摘要".to_string(),
+        Some("下午".to_string()),
+    );
+    l1.persona_uid = Some("rama-0001".to_string());
+    l1.created_at = ramaria_core::types::now_ms();
+    l1.occurred_at = Some(1_700_000_000_000);
+    storage.save_memory_l1(&l1).await.expect("L1 写入应成功");
+
+    let mut cfg = RamariaConfig::default();
+    cfg.retrieval.narrative_weighted = false;
+    let retriever = RwLock::new(Retriever::new());
+    let material = load_narrative_material(
+        storage.as_ref(),
+        &retriever,
+        &cfg.retrieval,
+        &cfg.decay,
+        true,
+        "rama-0001",
+        "完全不相关的话题",
+    )
+    .await;
+
+    assert_eq!(
+        material.last_active_at.as_deref(),
+        Some("2023-11-14 22:13"),
+        "最后活跃时间应取发生时间（而非导入时刻）"
+    );
+}
+
 /// 加权路径（默认）：以当前消息为话题依据，话题相关的 L1 优先注入。
 #[tokio::test]
 async fn weighted_path_ranks_topic_relevant_first() {
@@ -147,6 +188,7 @@ async fn weighted_path_ranks_topic_relevant_first() {
         keywords: Some("Rust,编程".to_string()),
         persona_uid: Some("rama-0001".to_string()),
         created_at: now - 3 * 86_400_000,
+        occurred_at: now - 3 * 86_400_000,
         salience: 0.5,
         last_accessed_at: None,
     });
@@ -156,6 +198,7 @@ async fn weighted_path_ranks_topic_relevant_first() {
         keywords: Some("社交,火锅".to_string()),
         persona_uid: Some("rama-0001".to_string()),
         created_at: now - 86_400_000,
+        occurred_at: now - 86_400_000,
         salience: 0.5,
         last_accessed_at: None,
     });

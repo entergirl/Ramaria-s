@@ -146,6 +146,50 @@ async fn l2_all_personas_merges_and_truncates() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// 时间语义：L2 合并排序按事件开始时间（start），登记时间不参与排序。
+#[tokio::test]
+async fn l2_merge_orders_by_event_start() {
+    let (engine, storage, dir) = engine_with_db("browse-l2-start-order").await;
+    seed_persona(&storage, "char-0001").await;
+    seed_persona(&storage, "char-0002").await;
+
+    // A：开始早（1000）、登记晚（9000）——对抗数据
+    let mut a = MemoryEvent::new(
+        "char-0001".into(),
+        "一A".into(),
+        "desc".into(),
+        1_000,
+        1_500,
+    );
+    a.created_at = 9_000;
+    storage.save_event(&a).await.expect("写入事件应成功");
+    // B：开始晚（8000）、登记早（2000）
+    let mut b = MemoryEvent::new(
+        "char-0002".into(),
+        "二B".into(),
+        "desc".into(),
+        8_000,
+        8_500,
+    );
+    b.created_at = 2_000;
+    storage.save_event(&b).await.expect("写入事件应成功");
+
+    let page = engine
+        .memory_l2(L2BrowseRequest {
+            persona: None,
+            limit: None,
+            offset: None,
+        })
+        .await
+        .expect("L2 合并浏览应成功");
+    let titles: Vec<&str> = page.items.iter().map(|e| e.title.as_str()).collect();
+    assert_eq!(titles, vec!["二B", "一A"], "合并口径应按事件开始时间倒序");
+    assert_eq!(page.items[0].start, 8_000, "视图透出事件开始时间");
+    assert_eq!(page.items[0].created_at, 2_000, "登记时间字段保持原值");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// L3 两分支：persona 过滤与全人格合并。
 #[tokio::test]
 async fn l3_both_scopes() {

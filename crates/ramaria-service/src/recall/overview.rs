@@ -54,14 +54,15 @@ pub(super) async fn overview(
         {
             Ok(list) => {
                 for l1 in list {
+                    let occurred = l1.occurred_at_or_created();
                     candidates.push((
-                        l1.created_at,
+                        occurred,
                         RecallItem {
                             layer: RecallLayer::L1,
                             id: l1.id.to_string(),
                             text: l1.summary,
                             score: None,
-                            time: iso_time(l1.created_at),
+                            time: iso_time(occurred),
                         },
                     ));
                 }
@@ -79,13 +80,13 @@ pub(super) async fn overview(
             Ok(events) => {
                 for event in events {
                     candidates.push((
-                        event.created_at,
+                        event.start,
                         RecallItem {
                             layer: RecallLayer::L2,
                             id: event.id.to_string(),
                             text: format!("{} — {}", event.title, event.summary),
                             score: None,
-                            time: iso_time(event.created_at),
+                            time: iso_time(event.start),
                         },
                     ));
                 }

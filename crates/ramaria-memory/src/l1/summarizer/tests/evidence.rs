@@ -145,7 +145,7 @@ fn validate_and_build_evidence_notes_present() {
         continuation: None,
     };
     let sid = ramaria_core::types::new_id();
-    let (l1, _) = L1Summarizer::validate_and_build(&parsed, sid);
+    let (l1, _) = L1Summarizer::validate_and_build(&parsed, sid, None);
     let notes = l1.evidence_notes.expect("evidence_notes 不应为 None");
     assert_eq!(notes.len(), 1);
     assert!(notes[0].text.contains("项目截止日期"));
@@ -166,7 +166,7 @@ fn validate_and_build_evidence_notes_missing_downgrades() {
         continuation: None,
     };
     let sid = ramaria_core::types::new_id();
-    let (l1, _) = L1Summarizer::validate_and_build(&parsed, sid);
+    let (l1, _) = L1Summarizer::validate_and_build(&parsed, sid, None);
     let notes = l1
         .evidence_notes
         .expect("evidence_notes 不应为 None，应为 Some(vec![])");

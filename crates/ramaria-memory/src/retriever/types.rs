@@ -107,7 +107,8 @@ pub struct SearchResult {
     pub persona_uid: Option<String>,
     /// 分享意愿（L2 事件专用，L1 为 None）
     pub share: Option<f64>,
-    /// 文档创建时间（Unix 毫秒），用于时间衰减加权
+    /// 文档时间基准（Unix 毫秒）——L1 为发生时间（摘要块最早消息时刻）、
+    /// L2 为事件开始时间；用于时间衰减重排与显示
     pub created_at: i64,
     /// 最近访问时间（Unix 毫秒，L1 经 touch 接线刷新；L2 事件暂不追踪 → None）。
     ///
@@ -154,7 +155,10 @@ pub struct L1DocView {
     pub summary: String,
     pub keywords: Option<String>,
     pub persona_uid: Option<String>,
+    /// 入库时间（Unix 毫秒）——索引容量驱逐基准
     pub created_at: i64,
+    /// 发生时间（有效值，读取已回退）——时间衰减与排序基准
+    pub occurred_at: i64,
     pub salience: f64,
     /// 最近访问时间（Unix 毫秒），检索命中经 touch 刷新后参与访问加成衰减。
     pub last_accessed_at: Option<i64>,
@@ -172,7 +176,10 @@ pub struct L2DocView {
     pub persona_uid: String,
     pub share: f64,
     pub confidence: f64,
+    /// 入库时间（提取时刻，Unix 毫秒）——索引容量驱逐基准
     pub created_at: i64,
+    /// 事件发生开始时间（= MemoryEvent.start）——时间衰减与排序基准
+    pub start: i64,
     pub salience: f64,
 }
 

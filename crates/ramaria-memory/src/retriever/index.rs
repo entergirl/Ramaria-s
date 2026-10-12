@@ -88,6 +88,7 @@ impl Retriever {
             keywords: record.keywords.clone(),
             persona_uid: record.persona_uid.clone(),
             created_at: record.created_at,
+            occurred_at: record.occurred_at_or_created(),
             salience: record.salience,
             last_accessed_at: record.last_accessed_at,
         };

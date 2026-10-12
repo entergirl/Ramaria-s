@@ -24,6 +24,7 @@ fn make_memory_l1(summary: &str, keywords: Option<&str>, salience: f64) -> Memor
         salience,
         absorbed: false,
         created_at: 1_700_000_000_000,
+        occurred_at: None,
         last_accessed_at: None,
         persona_uid: None,
         context_json: None,
@@ -99,6 +100,7 @@ fn semantic_text_includes_summary_evidence_and_keywords() {
         embedding: None,
         salience: 0.5,
         created_at: 1000,
+        occurred_at: 1000,
     };
     let text = item.semantic_text();
     assert!(text.contains("用户讨论项目延期安排"), "应含 summary");
@@ -122,6 +124,7 @@ fn semantic_text_degrades_gracefully() {
         embedding: None,
         salience: 0.5,
         created_at: 1000,
+        occurred_at: 1000,
     };
     let text = item.semantic_text();
     assert_eq!(text, "仅摘要文本");
@@ -135,6 +138,7 @@ fn semantic_text_degrades_gracefully() {
         embedding: None,
         salience: 0.5,
         created_at: 1000,
+        occurred_at: 1000,
     };
     let text = item.semantic_text();
     assert!(text.contains("摘要"));
@@ -161,6 +165,7 @@ fn semantic_text_joins_multiple_evidence_notes() {
         embedding: None,
         salience: 0.5,
         created_at: 1000,
+        occurred_at: 1000,
     };
     let text = item.semantic_text();
     assert!(text.contains(" ; "), "多条线索应以分隔符拼接");
@@ -182,6 +187,7 @@ fn topic_cluster_basic() {
             evidence_notes: vec![],
             salience: 0.5,
             created_at: 2000,
+            occurred_at: 2000,
         },
         L1Item {
             id: Uuid::new_v4(),
@@ -191,6 +197,7 @@ fn topic_cluster_basic() {
             evidence_notes: vec![],
             salience: 0.8,
             created_at: 1000,
+            occurred_at: 1000,
         },
     ];
     let cluster = TopicCluster::new(items);
@@ -216,6 +223,7 @@ fn topic_cluster_deduplicates_keywords() {
             evidence_notes: vec![],
             salience: 0.5,
             created_at: 1000,
+            occurred_at: 1000,
         },
         L1Item {
             id: Uuid::new_v4(),
@@ -228,6 +236,7 @@ fn topic_cluster_deduplicates_keywords() {
             evidence_notes: vec![],
             salience: 0.5,
             created_at: 2000,
+            occurred_at: 2000,
         },
     ];
     let cluster = TopicCluster::new(items);
@@ -302,6 +311,7 @@ fn make_l1_with_emb(keywords: Vec<&str>, embedding: Option<Vec<f32>>, salience: 
         embedding,
         salience,
         created_at: 1_000_000,
+        occurred_at: 1_000_000,
     }
 }
 
@@ -501,5 +511,42 @@ fn build_clusters_sorted_by_salience() {
     assert!(
         clusters[0].avg_salience >= clusters[1].avg_salience,
         "簇应按 avg_salience 降序排列"
+    );
+}
+
+/// 发生时间与登记时间背离时：簇内次序与时间跨度按 occurred_at（发生时间）。
+#[test]
+fn topic_cluster_orders_by_occurred_at() {
+    // item1：发生晚（9000）/ 登记早（1000）；item2：发生早（2000）/ 登记晚（8000）
+    let item1 = L1Item {
+        id: Uuid::new_v4(),
+        summary: "s1".into(),
+        keywords: vec![KeywordToken::new("工作").unwrap()],
+        evidence_notes: vec![],
+        embedding: None,
+        salience: 0.5,
+        created_at: 1000,
+        occurred_at: 9000,
+    };
+    let item2 = L1Item {
+        id: Uuid::new_v4(),
+        summary: "s2".into(),
+        keywords: vec![KeywordToken::new("压力").unwrap()],
+        evidence_notes: vec![],
+        embedding: None,
+        salience: 0.5,
+        created_at: 8000,
+        occurred_at: 2000,
+    };
+    let cluster = TopicCluster::new(vec![item1, item2]);
+    assert_eq!(
+        cluster.l1_items[0].occurred_at, 2000,
+        "簇内应按发生时间正序"
+    );
+    assert_eq!(cluster.l1_items[1].occurred_at, 9000);
+    assert_eq!(
+        cluster.time_span,
+        (2000, 9000),
+        "时间跨度取发生时间 min/max"
     );
 }

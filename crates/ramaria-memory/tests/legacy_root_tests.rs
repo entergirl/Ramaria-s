@@ -46,6 +46,7 @@ fn retriever_lru_eviction() {
             keywords: Some(format!("测试,文档{}", i)),
             persona_uid: Some("user-0001".to_string()),
             created_at: (i + 1) as i64 * 1000, // 模拟递增时间戳
+            occurred_at: (i + 1) as i64 * 1000,
             salience: 0.5,
             last_accessed_at: None,
         };
@@ -71,6 +72,7 @@ fn retriever_remove_l1() {
         keywords: Some("删除,测试".to_string()),
         persona_uid: Some("user-0001".to_string()),
         created_at: 1000,
+        occurred_at: 1000,
         salience: 0.5,
         last_accessed_at: None,
     };
@@ -99,6 +101,7 @@ fn retriever_lru_unlimited() {
             keywords: None,
             persona_uid: None,
             created_at: i as i64,
+            occurred_at: i as i64,
             salience: 0.3,
             last_accessed_at: None,
         };

@@ -10,7 +10,7 @@
 
 use anyhow::Context;
 use ramaria_core::error::RamariaError;
-use ramaria_service::{Engine, L1BrowseRequest, L2BrowseRequest, L2EventView};
+use ramaria_service::{Engine, L1BrowseRequest, L1MemoryView, L2BrowseRequest, L2EventView};
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -85,22 +85,7 @@ async fn show_l1(engine: &Arc<Engine>, args: &MemoryArgs) -> anyhow::Result<()> 
         .context("查询 L1 记忆失败")?;
 
     if args.json {
-        let items: Vec<serde_json::Value> = page
-            .items
-            .iter()
-            .map(|mem| {
-                serde_json::json!({
-                    "id": mem.id.to_string(),
-                    "session_id": mem.session_id.to_string(),
-                    "summary": mem.summary,
-                    "keywords": mem.keywords,
-                    "atmosphere": mem.atmosphere,
-                    "valence": mem.valence,
-                    "salience": mem.salience,
-                    "created_at": crate::util::format_timestamp_iso(mem.created_at),
-                })
-            })
-            .collect();
+        let items = l1_json_items(&page.items);
         let data = serde_json::json!({
             "layer": "l1",
             "persona_uid": persona_uid,
@@ -128,7 +113,8 @@ async fn show_l1(engine: &Arc<Engine>, args: &MemoryArgs) -> anyhow::Result<()> 
         println!("  [{i}] {}", mem.id);
         crate::ui::labeled("会话", &mem.session_id.to_string());
         crate::ui::labeled("摘要", &crate::util::truncate(&mem.summary, 120));
-        if let Some(ts) = crate::util::format_timestamp(mem.created_at) {
+        // 展示"时间"取发生时间（用户看到的浏览时间 = 事情发生时刻）
+        if let Some(ts) = crate::util::format_timestamp(mem.occurred_at) {
             crate::ui::labeled("时间", &ts);
         }
         crate::ui::labeled("效价", &format!("{:.2}", mem.valence));
@@ -144,6 +130,37 @@ async fn show_l1(engine: &Arc<Engine>, args: &MemoryArgs) -> anyhow::Result<()> 
     }
 
     Ok(())
+}
+
+/// L1 摘要视图 → `--json` 条目列表。
+///
+/// 参数:
+/// - `items`: 当前页摘要视图（顺序即输出顺序）。
+///
+/// 返回:
+/// - 每条条目为 `{id, session_id, summary, keywords, atmosphere, valence, salience,
+///   created_at, occurred_at}`；`created_at` 为入库时间、`occurred_at` 为发生时间（读取已回退），
+///   均为 ISO-8601 UTC 字符串。
+///
+/// 说明:
+/// - `created_at` 为既有契约键（保留原键原值），`occurred_at` 为零破坏增信息。
+pub fn l1_json_items(items: &[L1MemoryView]) -> Vec<serde_json::Value> {
+    items
+        .iter()
+        .map(|mem| {
+            serde_json::json!({
+                "id": mem.id.to_string(),
+                "session_id": mem.session_id.to_string(),
+                "summary": mem.summary,
+                "keywords": mem.keywords,
+                "atmosphere": mem.atmosphere,
+                "valence": mem.valence,
+                "salience": mem.salience,
+                "created_at": crate::util::format_timestamp_iso(mem.created_at),
+                "occurred_at": crate::util::format_timestamp_iso(mem.occurred_at),
+            })
+        })
+        .collect()
 }
 
 // =========================================================

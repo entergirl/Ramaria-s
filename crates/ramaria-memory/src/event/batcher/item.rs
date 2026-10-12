@@ -36,6 +36,9 @@ pub struct L1Item {
     pub embedding: Option<Vec<f32>>,
     pub salience: f64,
     pub created_at: i64,
+    /// 有效发生时间（Unix 毫秒）——块内最早消息时间，缺失时回退 created_at；
+    /// 簇次序与事件起止以它为基准
+    pub occurred_at: i64,
 }
 
 impl From<&MemoryL1> for L1Item {
@@ -45,6 +48,7 @@ impl From<&MemoryL1> for L1Item {
     /// - 关键词从 `keywords` 字段解析，通过 `KeywordToken::new()` 标准化。
     /// - evidence_notes 直接复制结构化线索（缺失/为空 → 空 Vec）。
     /// - embedding 初始化为 None，由上层在构建图之前注入。
+    /// - `occurred_at` 取读取回退后的有效发生时间（occurred_at 缺失时用 created_at）。
     fn from(l1: &MemoryL1) -> Self {
         let keywords = l1
             .keywords
@@ -67,6 +71,7 @@ impl From<&MemoryL1> for L1Item {
             embedding: None,
             salience: l1.salience,
             created_at: l1.created_at,
+            occurred_at: l1.occurred_at_or_created(),
         }
     }
 }

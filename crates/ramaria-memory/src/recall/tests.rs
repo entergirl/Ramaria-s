@@ -36,6 +36,7 @@ fn seeded_retriever(summary: &str, persona_uid: &str) -> RwLock<Retriever> {
         keywords: Some("工作压力,加班".to_string()),
         persona_uid: Some(persona_uid.to_string()),
         created_at: 1_000,
+        occurred_at: 1_000,
         salience: 0.8,
         last_accessed_at: None,
     });
@@ -157,6 +158,7 @@ async fn persona_filter_hides_low_share_event() {
             share: 0.1,
             confidence: 0.9,
             created_at: 1_000,
+            start: 1_000,
             salience: 0.8,
         });
     }
@@ -199,6 +201,7 @@ async fn memory_layer_switch_filters_sublayers() {
             keywords: Some("工作压力".to_string()),
             persona_uid: Some("char-0001".to_string()),
             created_at: 1_000,
+            occurred_at: 1_000,
             salience: 0.8,
             last_accessed_at: None,
         });
@@ -213,6 +216,7 @@ async fn memory_layer_switch_filters_sublayers() {
             share: 1.0,
             confidence: 0.9,
             created_at: 1_000,
+            start: 1_000,
             salience: 0.8,
         });
     }
@@ -386,6 +390,7 @@ async fn both_handles_produce_identical_output() {
         keywords: Some("工作压力,加班".to_string()),
         persona_uid: Some("persona-0001".to_string()),
         created_at: 1_000,
+        occurred_at: 1_000,
         salience: 0.8,
         last_accessed_at: None,
     };

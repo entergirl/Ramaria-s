@@ -23,6 +23,7 @@ fn set_bm25_dictionary_applies_to_indexed_l1() {
         keywords: None,
         persona_uid: Some("user-0001".to_string()),
         created_at: 1000,
+        occurred_at: 1000,
         salience: 0.8,
         last_accessed_at: None,
     });

@@ -602,3 +602,76 @@ async fn summarize_session_keeps_placeholder_without_description() {
         request.user_message
     );
 }
+
+/// generate_chunk_l1 端到端：产出的 L1.occurred_at = 块内最早消息时间（≠ 生成时刻）。
+#[tokio::test]
+async fn summarize_session_sets_occurred_at_to_earliest_message_time() {
+    use crate::l1::mock::{MockLlmProvider, MockStorage, make_msg};
+    use ramaria_core::types::MessageRole;
+    use uuid::Uuid;
+
+    let session_id = Uuid::new_v4();
+
+    // 三条消息：显式设置已知 created_at（含乱序），最早为 1_000_000
+    let storage = MockStorage::new();
+    let mut m1 = make_msg(session_id, MessageRole::User, "第一句");
+    m1.created_at = 2_000_000;
+    let mut m2 = make_msg(session_id, MessageRole::Assistant, "第二句");
+    m2.created_at = 1_000_000;
+    let mut m3 = make_msg(session_id, MessageRole::User, "第三句");
+    m3.created_at = 3_000_000;
+    storage.add_messages(session_id, vec![m1, m2, m3]);
+
+    let llm = MockLlmProvider::new("test-model");
+    let response_json = serde_json::json!({
+        "summary": "用户进行了一段测试对话",
+        "keywords": "测试,对话",
+        "time_period": "上午",
+        "atmosphere": "平静",
+        "valence": 0.0,
+        "salience": 0.5,
+        "evidence_notes": ["用户进行了测试对话"]
+    });
+    llm.set_response(response_json.to_string());
+
+    let config = L1SummarizerConfig {
+        persona_uid: Some("test-persona".into()),
+        context_json: None,
+        situation_strength: None,
+        temperature: 0.3,
+        max_tokens: 2048,
+        user_prefix: "用户：".into(),
+        assistant_prefix: "助手：".into(),
+        utt_splitter: None,
+        fanout_others: false,
+        target_projection: false,
+        prior_context_threshold: 20,
+        prior_context_max_chars: 1500,
+    };
+
+    let summarizer = L1Summarizer::new(&llm, &storage, config);
+    let l1 = summarizer
+        .summarize_session(session_id)
+        .await
+        .expect("summarize_session 应成功");
+
+    assert_eq!(
+        l1.occurred_at,
+        Some(1_000_000),
+        "occurred_at 应取块内最早消息时间"
+    );
+    assert_ne!(
+        l1.occurred_at,
+        Some(l1.created_at),
+        "发生时间不应等于生成时刻"
+    );
+
+    // 落库保留
+    let saved = storage.saved_l1_entries();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(
+        saved[0].occurred_at,
+        Some(1_000_000),
+        "落库 occurred_at 应保留"
+    );
+}

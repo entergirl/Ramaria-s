@@ -273,8 +273,10 @@ impl CompositeIndex {
         keywords: KeywordSet,
         salience: f64,
         created_at: i64,
+        occurred_at: i64,
     ) {
-        self.exact.index(reff, keywords, salience, created_at);
+        self.exact
+            .index(reff, keywords, salience, created_at, occurred_at);
     }
 
     /// 解析原始关键词串后索引（返回索引文档总数）。
@@ -284,9 +286,10 @@ impl CompositeIndex {
         raw_keywords: Option<&str>,
         salience: f64,
         created_at: i64,
+        occurred_at: i64,
     ) -> usize {
         self.exact
-            .index_parsed(reff, raw_keywords, salience, created_at)
+            .index_parsed(reff, raw_keywords, salience, created_at, occurred_at)
     }
 
     /// 移除单文档。

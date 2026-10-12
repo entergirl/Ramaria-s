@@ -224,3 +224,62 @@ async fn l1_persona_scope_paginates_by_created_at() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 时间语义：L1 浏览合并排序按发生时间（occurred_at），视图透出有效发生时间。
+#[tokio::test]
+async fn l1_browse_orders_by_occurred_at_and_exposes_field() {
+    let (engine, storage, dir) = engine_with_db("browse-l1-occurred").await;
+    seed_persona(&storage, "char-0001").await;
+    let pool = engine.sqlite_pool().expect("测试引擎应附着连接池");
+
+    // A：登记晚（3000）、发生早（1000）
+    let id_a = seed_l1(&storage, "char-0001", "摘要 A", None, 3_000).await;
+    sqlx::query("UPDATE memory_l1 SET occurred_at = ? WHERE id = ?")
+        .bind(1_000_i64)
+        .bind(id_a.to_string())
+        .execute(&pool)
+        .await
+        .expect("更新 occurred_at 应成功");
+    // B：登记早（1000）、发生晚（3000）
+    let id_b = seed_l1(&storage, "char-0001", "摘要 B", None, 1_000).await;
+    sqlx::query("UPDATE memory_l1 SET occurred_at = ? WHERE id = ?")
+        .bind(3_000_i64)
+        .bind(id_b.to_string())
+        .execute(&pool)
+        .await
+        .expect("更新 occurred_at 应成功");
+    // C：未回填（NULL）→ 回退登记时间 2000
+    seed_l1(&storage, "char-0001", "摘要 C", None, 2_000).await;
+
+    let page = engine
+        .memory_l1(L1BrowseRequest {
+            persona: Some("char-0001".to_string()),
+            unabsorbed_only: false,
+            limit: None,
+            offset: None,
+        })
+        .await
+        .expect("L1 浏览应成功");
+    let summaries: Vec<&str> = page.items.iter().map(|m| m.summary.as_str()).collect();
+    assert_eq!(
+        summaries,
+        vec!["摘要 B", "摘要 C", "摘要 A"],
+        "合并排序应按发生时间倒序（C 回退登记时间）"
+    );
+
+    let b_item = page
+        .items
+        .iter()
+        .find(|m| m.summary == "摘要 B")
+        .expect("摘要 B 应出现");
+    assert_eq!(b_item.occurred_at, 3_000, "视图应透出有效发生时间");
+    assert_eq!(b_item.created_at, 1_000, "登记时间字段保持原值");
+    let c_item = page
+        .items
+        .iter()
+        .find(|m| m.summary == "摘要 C")
+        .expect("摘要 C 应出现");
+    assert_eq!(c_item.occurred_at, 2_000, "未回填时透出回退后的发生时间");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

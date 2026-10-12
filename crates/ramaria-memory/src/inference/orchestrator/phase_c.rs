@@ -115,8 +115,8 @@ pub async fn run_phase_c_update(
     let mut new_event_scores_by_trait: Vec<Vec<f64>> = vec![vec![]; n_traits];
 
     for event in events {
-        // 事件贡献 = (event.confidence, event.created_at)
-        let event_data = (event.confidence, event.created_at);
+        // 事件贡献 = (event.confidence, event.start)
+        let event_data = (event.confidence, event.start);
 
         // 解析事件关键词
         let event_keywords: Vec<&str> = event
@@ -209,6 +209,7 @@ pub async fn run_phase_c_update(
                 score,
                 decay: 1.0, // 新证据初始衰减为 1.0
                 created_at: now,
+                occurred_at: Some(event.start),
             };
 
             match storage.save_evidence(&evidence).await {

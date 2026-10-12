@@ -547,3 +547,67 @@ async fn messages_only_enters_search_mode() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 时间语义：概览时间线 L1 按发生时间、L2 按事件开始时间（而非登记时间）。
+#[tokio::test]
+async fn overview_timeline_uses_occurred_at_and_event_start() {
+    let (engine, storage, dir) = engine_with_db("overview-time").await;
+    seed_persona(&storage, "char-0001").await;
+    let pool = engine.sqlite_pool().expect("测试引擎应附着连接池");
+
+    // L1：登记晚（9000）、发生早（1000）——对抗数据
+    let l1_id = seed_l1(&storage, "char-0001", "L1 摘要内容", 9_000).await;
+    sqlx::query("UPDATE memory_l1 SET occurred_at = ? WHERE id = ?")
+        .bind(1_000_i64)
+        .bind(l1_id.to_string())
+        .execute(&pool)
+        .await
+        .expect("更新 occurred_at 应成功");
+
+    // L2：开始晚（8000）、登记早（2000）
+    let mut event = ramaria_core::types::MemoryEvent::new(
+        "char-0001".to_string(),
+        "事件标题".to_string(),
+        "事件摘要".to_string(),
+        8_000,
+        8_500,
+    );
+    event.created_at = 2_000;
+    storage.save_event(&event).await.expect("写入事件应成功");
+
+    let result = engine
+        .recall(RecallRequest {
+            persona: Some("char-0001".to_string()),
+            include: Some(vec![RecallLayer::L1, RecallLayer::L2]),
+            ..RecallRequest::default()
+        })
+        .await
+        .expect("概览成功");
+
+    // 时间倒序：L2（开始 8000）在前、L1（发生 1000）在后
+    assert_eq!(result.items.len(), 2);
+    assert_eq!(
+        result.items[0].layer,
+        RecallLayer::L2,
+        "L2 开始时间较晚应排前"
+    );
+    assert_eq!(result.items[1].layer, RecallLayer::L1);
+    assert_eq!(
+        result.items[1]
+            .time
+            .expect("L1 应有时间")
+            .timestamp_millis(),
+        1_000,
+        "L1 时间线应取发生时间"
+    );
+    assert_eq!(
+        result.items[0]
+            .time
+            .expect("L2 应有时间")
+            .timestamp_millis(),
+        8_000,
+        "L2 时间线应取事件开始时间"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

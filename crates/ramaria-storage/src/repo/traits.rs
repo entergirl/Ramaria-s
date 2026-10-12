@@ -200,9 +200,12 @@ pub async fn list_evidence_by_trait(
         score: f64,
         decay: f64,
         created_at: i64,
+        /// 源事件发生时间（JOIN 投影；事件缺失时为 NULL）
+        occurred_at: Option<i64>,
     }
     let rows = sqlx::query_as::<_, EvRow>(
-        "SELECT id, trait_id, event_id, direction, score, decay, created_at
+        "SELECT id, trait_id, event_id, direction, score, decay, created_at,
+         (SELECT e.start FROM memory_events e WHERE e.id = trait_evidence.event_id) AS occurred_at
          FROM trait_evidence WHERE trait_id = ? ORDER BY created_at DESC",
     )
     .bind(trait_id)
@@ -219,6 +222,7 @@ pub async fn list_evidence_by_trait(
             score: r.score,
             decay: r.decay,
             created_at: r.created_at,
+            occurred_at: r.occurred_at,
         })
         .collect())
 }

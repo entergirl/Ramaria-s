@@ -81,6 +81,7 @@ fn rama_persona_prompt_semantically_equivalent_to_v13() {
             ref_event_id: None,
             ref_l1_id: None,
             created_at: 1000,
+            occurred_at: None,
             updated_at: 1000,
         }],
         traits: vec![make_test_trait("严谨", TraitLayer::Base, "做事认真")],

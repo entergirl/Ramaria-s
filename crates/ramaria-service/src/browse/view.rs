@@ -68,6 +68,7 @@ pub(super) fn l1_view(m: &MemoryL1) -> L1MemoryView {
         salience: m.salience,
         persona_uid: m.persona_uid.clone(),
         created_at: m.created_at,
+        occurred_at: m.occurred_at_or_created(),
     }
 }
 

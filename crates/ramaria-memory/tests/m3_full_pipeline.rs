@@ -108,6 +108,7 @@ fn build_retriever(persona_uid: &str, l1s: &[(Uuid, String, String)]) -> Retriev
             keywords: Some(keywords.clone()),
             persona_uid: Some(persona_uid.to_string()),
             created_at: now_ms(),
+            occurred_at: now_ms(),
             salience: 0.6,
             last_accessed_at: None,
         });
@@ -566,4 +567,141 @@ async fn l2_relations_remap_after_partial_dedup_skip() {
         relations.len()
     );
     assert_eq!(relations[0].kind.as_str(), "RelatedTo", "仅 0→2 关系应写入");
+}
+
+// =========================================================
+// 时间语义：事件起止与触发年龄按发生时间（发生时间为第一公民）
+// =========================================================
+
+/// 单事件响应（供时间语义用例复用）。
+const SINGLE_EVENT_RESPONSE: &str = r#"{
+  "events": [
+    {
+      "title": "项目讨论",
+      "summary": "用户讨论了项目安排。",
+      "keywords": "工作,项目",
+      "confidence": 0.8,
+      "salience": 0.6,
+      "valence": 0.0,
+      "presentation": "objective",
+      "share": 0.5,
+      "attitude": null
+    }
+  ]
+}"#;
+
+/// 事件起止按发生时间：L1 的登记时刻为现在、发生时间在 30 天前（背离），
+/// 提取事件 start/end 应取发生时间的 min/max，而非登记时刻。
+#[tokio::test]
+async fn extract_event_time_range_uses_occurred_at() {
+    let storage = mem_storage().await;
+    let persona_uid = create_persona(&storage, "char-occ-range", "发生范围").await;
+    let session = create_session(&storage, Some(&persona_uid)).await;
+    let now = now_ms();
+    let base = now - 30 * 24 * 3600 * 1000;
+
+    // 5 条同主题 L1：created = now（登记），occurred 各不相同（发生）
+    for i in 0..5i64 {
+        let mut l1 = make_l1(
+            session.id,
+            &format!("工作讨论{i}"),
+            "工作,项目",
+            &persona_uid,
+            0.5,
+            now, // 登记时刻 = 现在
+        );
+        l1.occurred_at = Some(base + i * 3_600_000); // 发生时刻：base ~ base+4h
+        storage.save_memory_l1(&l1).await.expect("保存 L1 失败");
+    }
+
+    let llm = MockLlm::new(SINGLE_EVENT_RESPONSE);
+    // 触发条件 A 禁用（count=100），条件 B 按发生时间年龄（30 天）触发
+    let config = EventExtractorConfig {
+        trigger_count: 100,
+        ..EventExtractorConfig::default()
+    };
+    let mut extractor = EventExtractor::new(&llm, &storage, config);
+    let events = extractor
+        .extract_events(&persona_uid)
+        .await
+        .expect("提取应成功");
+
+    assert_eq!(events.len(), 1, "应提取 1 条事件");
+    assert_eq!(
+        events[0].start, base,
+        "事件 start 应取源 L1 发生时间 min（30 天前）"
+    );
+    assert_eq!(
+        events[0].end,
+        base + 4 * 3_600_000,
+        "事件 end 应取源 L1 发生时间 max"
+    );
+    assert!(
+        events[0].created_at >= now,
+        "事件登记时刻仍为提取时刻（审计语义）"
+    );
+}
+
+/// 触发年龄按发生时间：L1 登记时刻为现在、发生时间在 30 天前 → 条件 B 触发；
+/// 对照：发生时间也是现在（年龄 < 7 天）→ 不触发。
+#[tokio::test]
+async fn extract_trigger_uses_occurred_at_age() {
+    let storage = mem_storage().await;
+    let persona_uid = create_persona(&storage, "char-occ-trigger", "发生触发").await;
+    let session = create_session(&storage, Some(&persona_uid)).await;
+    let now = now_ms();
+
+    // 5 条同主题 L1：created 与 occurred 均在 30 天前
+    for i in 0..5 {
+        let mut l1 = make_l1(
+            session.id,
+            &format!("工作讨论{i}"),
+            "工作,项目",
+            &persona_uid,
+            0.5,
+            now - 30 * 24 * 3600 * 1000,
+        );
+        l1.occurred_at = Some(now - 30 * 24 * 3600 * 1000);
+        storage.save_memory_l1(&l1).await.expect("保存 L1 失败");
+    }
+
+    let llm = MockLlm::new(SINGLE_EVENT_RESPONSE);
+    let config = EventExtractorConfig {
+        trigger_count: 100,
+        ..EventExtractorConfig::default()
+    };
+    let mut extractor = EventExtractor::new(&llm, &storage, config);
+    let events = extractor
+        .extract_events(&persona_uid)
+        .await
+        .expect("提取应成功");
+    assert!(!events.is_empty(), "发生时间年龄 30 天 ≥ 7 天应触发");
+
+    // 对照：新库、occurred 与 created 均为现在（年龄 0）→ 条件 B 不触发
+    let storage2 = mem_storage().await;
+    let persona2 = create_persona(&storage2, "char-occ-fresh", "新近").await;
+    let session2 = create_session(&storage2, Some(&persona2)).await;
+    for i in 0..5 {
+        let mut l1 = make_l1(
+            session2.id,
+            &format!("工作讨论{i}"),
+            "工作,项目",
+            &persona2,
+            0.5,
+            now,
+        );
+        l1.occurred_at = Some(now);
+        storage2.save_memory_l1(&l1).await.expect("保存 L1 失败");
+    }
+    let llm2 = MockLlm::new(SINGLE_EVENT_RESPONSE);
+    let config2 = EventExtractorConfig {
+        trigger_count: 100,
+        ..EventExtractorConfig::default()
+    };
+    let mut extractor2 = EventExtractor::new(&llm2, &storage2, config2);
+    let events2 = extractor2
+        .extract_events(&persona2)
+        .await
+        .expect("提取应成功");
+    assert!(events2.is_empty(), "发生时间年龄 0 < 7 天不应触发");
 }

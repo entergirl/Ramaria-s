@@ -45,6 +45,7 @@ fn sample_index() -> KeywordIndex {
         l1_ref(uuid::Uuid::new_v4(), "user-0001"),
         Some("工作压力, 加班, 失眠"),
         0.9,
+        NOW_MS - 86_400_000,
         NOW_MS - 86_400_000, // 1 天前
     );
     // L1 中性早期
@@ -52,6 +53,7 @@ fn sample_index() -> KeywordIndex {
         l1_ref(uuid::Uuid::new_v4(), "user-0001"),
         Some("运动, 爬山, 放松"),
         0.5,
+        NOW_MS - 30 * 86_400_000,
         NOW_MS - 30 * 86_400_000, // 30 天前
     );
     // L2 其他 persona
@@ -59,6 +61,7 @@ fn sample_index() -> KeywordIndex {
         l2_ref(1, "user-0002"),
         Some("工作压力, 职场"),
         0.7,
+        NOW_MS - 86_400_000,
         NOW_MS - 86_400_000,
     );
     index
@@ -149,6 +152,7 @@ fn substring_bigram_candidates_match_full_scan() {
         Some("工作压力, 爬山, 职场, aabbcc, 996"),
         0.5,
         NOW_MS,
+        NOW_MS,
     );
 
     let queries = [
@@ -216,8 +220,15 @@ fn recency_boosts_newer_doc() {
         Some("爬山"),
         0.5,
         NOW_MS - 60 * 86_400_000,
+        NOW_MS - 60 * 86_400_000,
     );
-    index.index_parsed(l1_ref(new_id, "p1"), Some("爬山"), 0.5, NOW_MS - 86_400_000);
+    index.index_parsed(
+        l1_ref(new_id, "p1"),
+        Some("爬山"),
+        0.5,
+        NOW_MS - 86_400_000,
+        NOW_MS - 86_400_000,
+    );
     let results =
         index.query_with_time(&q(&["爬山"], Some("p1"), MatchStrategy::Exact, 10), NOW_MS);
     assert_eq!(results.len(), 2);
@@ -230,11 +241,18 @@ fn salience_boosts_higher_significance() {
     let mut index = KeywordIndex::new();
     let low_id = uuid::Uuid::new_v4();
     let high_id = uuid::Uuid::new_v4();
-    index.index_parsed(l1_ref(low_id, "p1"), Some("爬山"), 0.2, NOW_MS - 86_400_000);
+    index.index_parsed(
+        l1_ref(low_id, "p1"),
+        Some("爬山"),
+        0.2,
+        NOW_MS - 86_400_000,
+        NOW_MS - 86_400_000,
+    );
     index.index_parsed(
         l1_ref(high_id, "p1"),
         Some("爬山"),
         0.9,
+        NOW_MS - 86_400_000,
         NOW_MS - 86_400_000,
     );
     let results =
@@ -252,6 +270,7 @@ fn idf_prefers_rare_term() {
         Some("量子"),
         0.5,
         NOW_MS - 86_400_000,
+        NOW_MS - 86_400_000,
     );
     // 再加 9 篇含高频词"工作"的文档（含初始 1 篇共 9 篇命中）
     for _ in 0..9 {
@@ -259,6 +278,7 @@ fn idf_prefers_rare_term() {
             l1_ref(uuid::Uuid::new_v4(), "p1"),
             Some("工作"),
             0.5,
+            NOW_MS - 86_400_000,
             NOW_MS - 86_400_000,
         );
     }
@@ -282,7 +302,7 @@ fn remove_doc() {
     let mut index = sample_index();
     let id = uuid::Uuid::new_v4();
     let reff = l1_ref(id, "user-0001");
-    index.index_parsed(reff.clone(), Some("独有词"), 0.5, NOW_MS);
+    index.index_parsed(reff.clone(), Some("独有词"), 0.5, NOW_MS, NOW_MS);
     assert_eq!(index.doc_count(), 4);
     assert!(index.remove(&reff));
     assert!(!index.remove(&reff), "重复移除返回 false");
@@ -297,8 +317,8 @@ fn remove_doc_batch() {
     let mut index = sample_index();
     let l1_a = uuid::Uuid::new_v4();
     let l1_b = uuid::Uuid::new_v4();
-    index.index_parsed(l1_ref(l1_a, "p"), Some("甲"), 0.5, NOW_MS);
-    index.index_parsed(l1_ref(l1_b, "p"), Some("乙"), 0.5, NOW_MS);
+    index.index_parsed(l1_ref(l1_a, "p"), Some("甲"), 0.5, NOW_MS, NOW_MS);
+    index.index_parsed(l1_ref(l1_b, "p"), Some("乙"), 0.5, NOW_MS, NOW_MS);
     let removed = index.remove_doc_batch(&[l1_a, l1_b], &[]);
     assert_eq!(removed, 2);
     assert!(
@@ -317,9 +337,9 @@ fn remove_keeps_inverted_consistent() {
     let remove = l1_ref(uuid::Uuid::new_v4(), "p1");
     let keep_b = l1_ref(uuid::Uuid::new_v4(), "p1");
 
-    index.index_parsed(keep_a.clone(), Some("工作压力, 爬山"), 0.5, NOW_MS);
-    index.index_parsed(remove.clone(), Some("独有词"), 0.5, NOW_MS);
-    index.index_parsed(keep_b.clone(), Some("爬山, 露营"), 0.5, NOW_MS);
+    index.index_parsed(keep_a.clone(), Some("工作压力, 爬山"), 0.5, NOW_MS, NOW_MS);
+    index.index_parsed(remove.clone(), Some("独有词"), 0.5, NOW_MS, NOW_MS);
+    index.index_parsed(keep_b.clone(), Some("爬山, 露营"), 0.5, NOW_MS, NOW_MS);
 
     // 移除中间文档：末尾文档被 swap 到它的位置，剩余两篇仍可命中；
     // "爬山" 为跨 3 篇的共享 token，其 postings 需从 {0,1,2} 修正为 {0,1}
@@ -356,7 +376,7 @@ fn remove_keeps_inverted_consistent() {
     );
 
     // 重索引被搬移过的文档（幂等路径 + 下标修正后仍正确）
-    index.index_parsed(keep_b.clone(), Some("爬山, 露营"), 0.5, NOW_MS);
+    index.index_parsed(keep_b.clone(), Some("爬山, 露营"), 0.5, NOW_MS, NOW_MS);
     assert_eq!(index.doc_count(), 2);
     assert_eq!(
         index
@@ -386,11 +406,13 @@ fn max_docs_evicts_oldest() {
         Some("旧词"),
         0.5,
         NOW_MS - 20 * 86_400_000,
+        NOW_MS - 20 * 86_400_000,
     );
     index.index_parsed(
         l1_ref(mid_id, "p1"),
         Some("中词"),
         0.5,
+        NOW_MS - 10 * 86_400_000,
         NOW_MS - 10 * 86_400_000,
     );
     assert_eq!(index.doc_count(), 2, "未超上限不驱逐");
@@ -401,6 +423,7 @@ fn max_docs_evicts_oldest() {
         l1_ref(uuid::Uuid::new_v4(), "p1"),
         Some("新词"),
         0.5,
+        NOW_MS,
         NOW_MS,
     );
     assert_eq!(index.doc_count(), 2);
@@ -430,6 +453,7 @@ fn max_docs_evicts_oldest() {
         Some("追加词"),
         0.5,
         NOW_MS,
+        NOW_MS,
     );
     assert_eq!(index.doc_count(), 3);
     assert_eq!(index.doc_capacity(), None);
@@ -440,10 +464,10 @@ fn max_docs_evicts_oldest() {
 fn reindex_is_idempotent() {
     let mut index = KeywordIndex::new();
     let reff = l1_ref(uuid::Uuid::new_v4(), "p1");
-    index.index_parsed(reff.clone(), Some("旧词"), 0.5, NOW_MS);
+    index.index_parsed(reff.clone(), Some("旧词"), 0.5, NOW_MS, NOW_MS);
     assert_eq!(index.doc_count(), 1);
     // 同文档更新关键词
-    index.index_parsed(reff.clone(), Some("新词"), 0.9, NOW_MS);
+    index.index_parsed(reff.clone(), Some("新词"), 0.9, NOW_MS, NOW_MS);
     assert_eq!(index.doc_count(), 1, "重复 index 不累积文档");
     assert!(
         index
@@ -481,6 +505,7 @@ fn top_k_truncates() {
             Some("爬山"),
             0.5,
             NOW_MS - i * 86_400_000,
+            NOW_MS - i * 86_400_000,
         );
     }
     let results = index.query(&q(&["爬山"], Some("p1"), MatchStrategy::Exact, 3));
@@ -495,6 +520,7 @@ fn one_result_per_doc() {
         l1_ref(uuid::Uuid::new_v4(), "p1"),
         Some("工作压力, 加班"),
         0.5,
+        NOW_MS - 86_400_000,
         NOW_MS - 86_400_000,
     );
     let results = index.query(&q(
@@ -520,9 +546,143 @@ fn same_score_tiebreak_by_newest() {
     let mut index = KeywordIndex::new();
     let newer = l1_ref(uuid::Uuid::new_v4(), "p1");
     let older = l1_ref(uuid::Uuid::new_v4(), "p1");
-    index.index_parsed(older.clone(), Some("爬山"), 0.5, NOW_MS - 10 * 86_400_000);
-    index.index_parsed(newer.clone(), Some("爬山"), 0.5, NOW_MS - 86_400_000);
+    index.index_parsed(
+        older.clone(),
+        Some("爬山"),
+        0.5,
+        NOW_MS - 10 * 86_400_000,
+        NOW_MS - 10 * 86_400_000,
+    );
+    index.index_parsed(
+        newer.clone(),
+        Some("爬山"),
+        0.5,
+        NOW_MS - 86_400_000,
+        NOW_MS - 86_400_000,
+    );
     let results = index.query_with_time(&q(&["爬山"], Some("p1"), MatchStrategy::Exact, 5), NOW_MS);
     assert_eq!(results[0].0, newer);
     assert_eq!(results[1].0, older);
+}
+
+// =========================================================
+// 时间语义：打分用 occurred_at、驱逐用 created_at
+// =========================================================
+
+/// 打分 recency 衰减按发生时间：登记相同时，发生时间新的文档得分更高。
+#[test]
+fn score_recency_uses_occurred_at() {
+    let mut index = KeywordIndex::new();
+    let stale_id = uuid::Uuid::new_v4();
+    let fresh_id = uuid::Uuid::new_v4();
+    // 两条文档登记时间相同；发生时间一旧（30 天前）一新（1 天前）
+    index.index_parsed(
+        l1_ref(stale_id, "p1"),
+        Some("工作压力"),
+        0.5,
+        NOW_MS,
+        NOW_MS - 30 * 86_400_000,
+    );
+    index.index_parsed(
+        l1_ref(fresh_id, "p1"),
+        Some("工作压力"),
+        0.5,
+        NOW_MS,
+        NOW_MS - 86_400_000,
+    );
+
+    let hits = index.query_with_time(
+        &q(&["工作压力"], Some("p1"), MatchStrategy::Exact, 5),
+        NOW_MS,
+    );
+    assert_eq!(hits.len(), 2);
+    assert_eq!(
+        hits[0].0,
+        l1_ref(fresh_id, "p1"),
+        "发生时间新的文档应排前（recency 按 occurred_at）"
+    );
+}
+
+/// 容量驱逐维持登记时间：created 最旧者被驱逐（即使其 occurred 最新）。
+#[test]
+fn evict_still_uses_created_at() {
+    let mut index = KeywordIndex::new();
+    index.set_max_docs(Some(2));
+
+    // A：登记最旧（30 天前）、发生最新（now）
+    index.index_parsed(
+        l1_ref(uuid::Uuid::new_v4(), "p1"),
+        Some("甲词"),
+        0.5,
+        NOW_MS - 30 * 86_400_000,
+        NOW_MS,
+    );
+    // B：登记居中
+    index.index_parsed(
+        l1_ref(uuid::Uuid::new_v4(), "p1"),
+        Some("乙词"),
+        0.5,
+        NOW_MS - 20 * 86_400_000,
+        NOW_MS - 20 * 86_400_000,
+    );
+    // C：登记最新（10 天前）、发生最旧（30 天前）→ 第 3 篇触发驱逐
+    index.index_parsed(
+        l1_ref(uuid::Uuid::new_v4(), "p1"),
+        Some("丙词"),
+        0.5,
+        NOW_MS - 10 * 86_400_000,
+        NOW_MS - 30 * 86_400_000,
+    );
+
+    assert_eq!(index.doc_count(), 2, "应驱逐 1 条至容量上限");
+    assert!(
+        index
+            .query(&q(&["甲词"], Some("p1"), MatchStrategy::Exact, 5))
+            .is_empty(),
+        "登记最旧的甲词应被驱逐（驱逐维持 created_at）"
+    );
+    assert_eq!(
+        index
+            .query(&q(&["乙词"], Some("p1"), MatchStrategy::Exact, 5))
+            .len(),
+        1
+    );
+    assert_eq!(
+        index
+            .query(&q(&["丙词"], Some("p1"), MatchStrategy::Exact, 5))
+            .len(),
+        1,
+        "丙词虽发生最旧，但登记较新，不应被驱逐"
+    );
+}
+
+/// 同分排序次键按发生时间降序：命中分相同时 occurred 新的排前。
+#[test]
+fn tie_break_uses_occurred_at() {
+    let mut index = KeywordIndex::new();
+    let old_occurred = uuid::Uuid::new_v4();
+    let new_occurred = uuid::Uuid::new_v4();
+    // 同关键词、同 salience、同登记；发生时间一旧一新
+    index.index_parsed(
+        l1_ref(old_occurred, "p1"),
+        Some("同分词组"),
+        0.5,
+        NOW_MS,
+        NOW_MS - 10 * 86_400_000,
+    );
+    index.index_parsed(
+        l1_ref(new_occurred, "p1"),
+        Some("同分词组"),
+        0.5,
+        NOW_MS,
+        NOW_MS,
+    );
+
+    let hits = index.query_with_time(
+        &q(&["同分词组"], Some("p1"), MatchStrategy::Exact, 5),
+        NOW_MS,
+    );
+    assert_eq!(hits.len(), 2);
+    // 分数不同（衰减不同）时本断言退化为衰减序；构造相同衰减验证次键语义
+    assert_eq!(hits[0].0, l1_ref(new_occurred, "p1"));
 }

@@ -3,7 +3,7 @@
 //! 设计特点:
 //! - 封装一组语义相近的 L1 摘要，作为 L1→L2 事件提取的批次输入
 //! - 携带簇级别聚合统计（平均显著性、时间跨度、代表性关键词）
-//! - 构造时自动按 `created_at` 正序排列并去重关键词
+//! - 构造时自动按 `occurred_at`（发生时间）正序排列并去重关键词
 //! - 纯数据结构，不依赖 LLM 或数据库
 
 use ramaria_core::keyword::KeywordToken;
@@ -21,13 +21,13 @@ use super::item::L1Item;
 /// - 携带簇级别的聚合统计信息（平均显著性、时间跨度、代表性关键词）。
 ///
 /// 字段约定:
-/// - `l1_items`: 按 `created_at` 时间正序排列。
+/// - `l1_items`: 按 `occurred_at`（发生时间）正序排列。
 /// - `cluster_keywords`: 簇内所有 L1 关键词的去重并集（保留高频词顺序）。
 /// - `avg_salience`: 所有 L1 salience 的算术均值。
-/// - `time_span`: (最早时间戳, 最晚时间戳)，均为 Unix 毫秒。
+/// - `time_span`: (最早时间戳, 最晚时间戳)，均为 Unix 毫秒的发生时间。
 #[derive(Debug, Clone)]
 pub struct TopicCluster {
-    /// 簇内的 L1 条目（按 created_at 正序）
+    /// 簇内的 L1 条目（按 occurred_at 发生时间正序）
     pub l1_items: Vec<L1Item>,
     /// 簇级别的去重关键词集合
     pub cluster_keywords: Vec<KeywordToken>,
@@ -44,8 +44,8 @@ impl TopicCluster {
     /// - 自动计算 `cluster_keywords`（去重并集）、`avg_salience`、`time_span`。
     /// - 调用方应保证 `l1_items` 非空。
     pub fn new(mut l1_items: Vec<L1Item>) -> Self {
-        // 按时间正序排列
-        l1_items.sort_by_key(|item| item.created_at);
+        // 按发生时间正序排列
+        l1_items.sort_by_key(|item| item.occurred_at);
 
         // 收集簇内所有关键词（去重）
         let mut kw_set: std::collections::BTreeMap<String, KeywordToken> =
@@ -67,12 +67,12 @@ impl TopicCluster {
             sum / l1_items.len() as f64
         };
 
-        // 时间跨度
+        // 时间跨度（按发生时间）
         let time_span = if l1_items.is_empty() {
             (0, 0)
         } else {
-            let earliest = l1_items.first().map(|i| i.created_at).unwrap_or(0);
-            let latest = l1_items.last().map(|i| i.created_at).unwrap_or(0);
+            let earliest = l1_items.first().map(|i| i.occurred_at).unwrap_or(0);
+            let latest = l1_items.last().map(|i| i.occurred_at).unwrap_or(0);
             (earliest, latest)
         };
 

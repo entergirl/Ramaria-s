@@ -447,14 +447,18 @@ impl<'a> EventExtractor<'a> {
                 .collect();
             let relations = parsed.relations;
 
-            // 时间范围
+            // 时间范围（按发生时间；L1Item.occurred_at 已是有效值）
             let time_range = (
                 cluster
                     .l1_items
                     .first()
-                    .map(|i| i.created_at)
+                    .map(|i| i.occurred_at)
                     .unwrap_or(now),
-                cluster.l1_items.last().map(|i| i.created_at).unwrap_or(now),
+                cluster
+                    .l1_items
+                    .last()
+                    .map(|i| i.occurred_at)
+                    .unwrap_or(now),
             );
 
             // 情境强度

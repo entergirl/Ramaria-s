@@ -299,6 +299,7 @@ pub fn make_test_l1(session_id: Uuid, summary: &str) -> MemoryL1 {
         context_json: None,
         absorbed: false,
         created_at: 1_717_977_600_000,
+        occurred_at: None,
         last_accessed_at: None,
         situation_strength: None,
         evidence_notes: None,

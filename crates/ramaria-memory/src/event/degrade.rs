@@ -113,18 +113,19 @@ pub fn build_degraded_event(
         config.default_confidence
     };
 
-    // 计算事件时间范围（单次遍历）
+    // 计算事件时间范围（单次遍历；按有效发生时间，缺失回退登记时间）
     let (start, end) = if l1_list.is_empty() {
         (now, now)
     } else {
-        let mut min_ts = l1_list[0].created_at;
-        let mut max_ts = l1_list[0].created_at;
+        let mut min_ts = l1_list[0].occurred_at_or_created();
+        let mut max_ts = l1_list[0].occurred_at_or_created();
         for l1 in &l1_list[1..] {
-            if l1.created_at < min_ts {
-                min_ts = l1.created_at;
+            let occurred = l1.occurred_at_or_created();
+            if occurred < min_ts {
+                min_ts = occurred;
             }
-            if l1.created_at > max_ts {
-                max_ts = l1.created_at;
+            if occurred > max_ts {
+                max_ts = occurred;
             }
         }
         (min_ts, max_ts)
@@ -278,6 +279,7 @@ mod tests {
             salience,
             absorbed: false,
             created_at: TEST_NOW_MS,
+            occurred_at: None,
             last_accessed_at: None,
             persona_uid: None,
             context_json: None,
@@ -464,5 +466,27 @@ mod tests {
         let event = build_degraded_event("user-0001", &[l1_old, l1_new], &DegradeConfig::default());
         assert_eq!(event.start, now - 86_400_000);
         assert_eq!(event.end, now);
+    }
+
+    /// 发生时间与登记时间背离时：降级事件 start/end 按有效发生时间。
+    #[test]
+    fn degraded_event_start_end_uses_occurred_at() {
+        let sid = Uuid::new_v4();
+        // l1_old：发生早（2 天前），登记晚（now）
+        let mut l1_old = make_l1(sid, "旧发生", None, 0.0, 0.5);
+        l1_old.created_at = TEST_NOW_MS;
+        l1_old.occurred_at = Some(TEST_NOW_MS - 2 * 86_400_000);
+        // l1_new：发生晚（1 小时前），登记早（2 天前）
+        let mut l1_new = make_l1(sid, "新发生", None, 0.0, 0.5);
+        l1_new.created_at = TEST_NOW_MS - 2 * 86_400_000;
+        l1_new.occurred_at = Some(TEST_NOW_MS - 3_600_000);
+
+        let event = build_degraded_event("user-0001", &[l1_old, l1_new], &DegradeConfig::default());
+        assert_eq!(
+            event.start,
+            TEST_NOW_MS - 2 * 86_400_000,
+            "start 取发生时间 min"
+        );
+        assert_eq!(event.end, TEST_NOW_MS - 3_600_000, "end 取发生时间 max");
     }
 }

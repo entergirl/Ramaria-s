@@ -18,6 +18,7 @@ fn make_l1(keywords: Vec<&str>, salience: f64) -> L1Item {
         embedding: None,
         salience,
         created_at: 1_000_000,
+        occurred_at: 1_000_000,
     }
 }
 

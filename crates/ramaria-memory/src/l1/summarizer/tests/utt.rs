@@ -25,6 +25,7 @@ fn make_l1(summary: &str, notes: Vec<EvidenceNote>) -> MemoryL1 {
         salience: 0.5,
         absorbed: false,
         created_at: 0,
+        occurred_at: None,
         last_accessed_at: None,
         persona_uid: Some("char-0001".to_string()),
         context_json: None,

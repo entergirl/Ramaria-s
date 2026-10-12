@@ -47,6 +47,7 @@ fn l1_view(id: uuid::Uuid, persona: Option<&str>, keywords: Option<&str>) -> L1D
         keywords: keywords.map(|s| s.to_string()),
         persona_uid: persona.map(|s| s.to_string()),
         created_at: NOW_MS,
+        occurred_at: NOW_MS,
         salience: 0.8,
         last_accessed_at: None,
     }
@@ -64,6 +65,7 @@ fn l2_view(id: i64, persona: &str, keywords: Option<&str>) -> L2DocView {
         share: 0.5,
         confidence: 0.7,
         created_at: NOW_MS,
+        start: NOW_MS,
         salience: 0.6,
     }
 }

@@ -39,18 +39,28 @@ struct DocEntry {
     keywords: KeywordSet,
     /// 情感显著性 0.0..=1.0（用于 salience 加权）
     salience: f64,
-    /// 创建时间（Unix 毫秒，用于 recency 衰减）
+    /// 创建时间（Unix 毫秒，用于容量驱逐——最旧优先）
     created_at: i64,
+    /// 时间基准（Unix 毫秒）——L1 为发生时间、L2 为事件开始时间，
+    /// 用于时间衰减打分与同分排序
+    occurred_at: i64,
 }
 
 impl DocEntry {
     /// 构造并校验元数据边界（防御性钳制 salience）。
-    fn new(reff: KeywordRef, keywords: KeywordSet, salience: f64, created_at: i64) -> Self {
+    fn new(
+        reff: KeywordRef,
+        keywords: KeywordSet,
+        salience: f64,
+        created_at: i64,
+        occurred_at: i64,
+    ) -> Self {
         Self {
             reff,
             keywords,
             salience: salience.clamp(0.0, 1.0),
             created_at,
+            occurred_at,
         }
     }
 }
@@ -167,13 +177,15 @@ impl KeywordIndex {
     /// - `reff`: 文档标识（L1/L2）。Pool 词条请勿入索引。
     /// - `keywords`: 该文档的标准化关键词集合。
     /// - `salience`: 情感显著性 0.0..=1.0（越界自动钳制）。
-    /// - `created_at`: 创建时间（Unix 毫秒，供 recency 衰减）。
+    /// - `created_at`: 创建时间（Unix 毫秒，供容量驱逐）。
+    /// - `occurred_at`: 时间基准（Unix 毫秒，供 recency 衰减与同分排序）。
     pub fn index(
         &mut self,
         reff: KeywordRef,
         keywords: KeywordSet,
         salience: f64,
         created_at: i64,
+        occurred_at: i64,
     ) {
         debug_assert!(
             matches!(reff, KeywordRef::L1 { .. } | KeywordRef::L2 { .. }),
@@ -183,7 +195,7 @@ impl KeywordIndex {
         self.remove(&reff);
 
         let doc_idx = self.docs.len();
-        let entry = DocEntry::new(reff.clone(), keywords, salience, created_at);
+        let entry = DocEntry::new(reff.clone(), keywords, salience, created_at, occurred_at);
 
         for token in entry.keywords.iter() {
             self.exact_inverted
@@ -205,12 +217,13 @@ impl KeywordIndex {
         raw_keywords: Option<&str>,
         salience: f64,
         created_at: i64,
+        occurred_at: i64,
     ) -> usize {
         let keywords: KeywordSet = CommaSeparatedNormalizer
             .normalize(raw_keywords.unwrap_or(""))
             .into_iter()
             .collect();
-        self.index(reff, keywords, salience, created_at);
+        self.index(reff, keywords, salience, created_at, occurred_at);
         self.docs.len()
     }
 
@@ -436,10 +449,10 @@ impl KeywordIndex {
             return Vec::new();
         }
 
-        // 2. 评分（idf_sum × salience 加权 × recency 衰减）。
-        //    同分次键（created_at）随评分预表化（doc_idx → created_at），
+        // 2. 评分（idf_sum × salience 加权 × recency 衰减；衰减按 occurred_at 时间基准）。
+        //    同分次键（occurred_at）随评分预表化（doc_idx → occurred_at），
         //    排序比较时 O(1) 查询，避免逐对按 KeywordRef 线性扫描文档表。
-        let mut created_at_by_idx: HashMap<usize, i64> = HashMap::with_capacity(matched.len());
+        let mut occurred_at_by_idx: HashMap<usize, i64> = HashMap::with_capacity(matched.len());
         let mut scored: Vec<(usize, f64)> = Vec::with_capacity(matched.len());
         for (idx, idf_sum) in matched {
             let entry = &self.docs[idx];
@@ -456,21 +469,21 @@ impl KeywordIndex {
                 }
             }
 
-            let age_days = ((now_ms - entry.created_at) as f64) / 86_400_000.0;
+            let age_days = ((now_ms - entry.occurred_at) as f64) / 86_400_000.0;
             let score = scorer.score(idf_sum, entry.salience, age_days);
             if score > 0.0 {
-                created_at_by_idx.insert(idx, entry.created_at);
+                occurred_at_by_idx.insert(idx, entry.occurred_at);
                 scored.push((idx, score));
             }
         }
 
-        // 3. 排序：得分降序；同分按创建时间降序（最新优先）；再按 label 兜底稳定
+        // 3. 排序：得分降序；同分按时间基准降序（最新优先）；再按 label 兜底稳定
         scored.sort_by(|a, b| {
             b.1.partial_cmp(&a.1)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| {
-                    let ca = created_at_by_idx.get(&a.0).copied().unwrap_or(0);
-                    let cb = created_at_by_idx.get(&b.0).copied().unwrap_or(0);
+                    let ca = occurred_at_by_idx.get(&a.0).copied().unwrap_or(0);
+                    let cb = occurred_at_by_idx.get(&b.0).copied().unwrap_or(0);
                     cb.cmp(&ca)
                 })
                 .then_with(|| {

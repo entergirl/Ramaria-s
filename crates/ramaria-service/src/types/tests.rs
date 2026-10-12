@@ -573,6 +573,7 @@ fn browse_and_keyword_views_serde_roundtrip() {
         salience: 0.7,
         persona_uid: Some("char-0001".to_string()),
         created_at: 1_756_000_000_000,
+        occurred_at: 1_756_000_000_000,
     };
     let json = serde_json::to_string(&l1).expect("序列化成功");
     let back: L1MemoryView = serde_json::from_str(&json).expect("反序列化成功");

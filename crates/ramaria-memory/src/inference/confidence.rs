@@ -102,7 +102,7 @@ pub struct ConfidenceSummary {
 /// 公式: w(t) = max(e^(-t/S), min_decay)
 ///
 /// 参数:
-/// - `created_at_ms`: 事件创建时间（Unix 毫秒）。
+/// - `created_at_ms`: 时间基准（源事件发生时间，缺失回退登记时刻；Unix 毫秒）。
 /// - `now_ms`: 当前时间（Unix 毫秒）。
 /// - `config`: 置信度配置。
 ///
@@ -141,7 +141,7 @@ pub fn compute_e_total(
             // 证据贡献 = |score| × decay_weight
             // score 的范围 -1.0..1.0，取绝对值为证据强度
             let strength = ev.score.abs();
-            let decay_w = time_decay_weight(ev.created_at, now, config);
+            let decay_w = time_decay_weight(ev.occurred_at_or_created(), now, config);
             strength * decay_w
         })
         .sum()
@@ -172,7 +172,7 @@ pub fn compute_e_total_calibrated(
         .zip(calibrated_weights)
         .map(|(ev, &cal_w)| {
             let strength = ev.score.abs();
-            let decay_w = time_decay_weight(ev.created_at, now, config);
+            let decay_w = time_decay_weight(ev.occurred_at_or_created(), now, config);
             cal_w * strength * decay_w
         })
         .sum()
@@ -226,7 +226,7 @@ pub fn compute_consistency(
     let mut total_weight = 0.0;
 
     for ev in evidence_records {
-        let decay_w = time_decay_weight(ev.created_at, now, config);
+        let decay_w = time_decay_weight(ev.occurred_at_or_created(), now, config);
         // score 本身已有方向，直接使用（不取绝对值）
         weighted_sum += ev.score * decay_w;
         total_weight += decay_w;
@@ -268,7 +268,7 @@ pub fn compute_consistency_calibrated(
     let mut total_weight = 0.0;
 
     for (ev, &cal_w) in evidence_records.iter().zip(calibrated_weights) {
-        let decay_w = time_decay_weight(ev.created_at, now, config);
+        let decay_w = time_decay_weight(ev.occurred_at_or_created(), now, config);
         let combined_w = cal_w * decay_w;
         weighted_sum += ev.score * combined_w;
         total_weight += combined_w;
