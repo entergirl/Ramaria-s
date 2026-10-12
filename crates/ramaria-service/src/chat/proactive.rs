@@ -11,6 +11,7 @@
 
 use ramaria_core::error::RamariaResult;
 use ramaria_core::types::{AppState, CHANNEL_LOCAL, Message, MessageRole, MessageSource};
+use ramaria_memory::chat::SegmentStyle;
 
 use crate::engine::Engine;
 use crate::proactive::{ProactiveDirective, ProactiveOutcome};
@@ -88,7 +89,9 @@ pub(crate) async fn run(
     }
 
     // ---- 5. 目标会话预检 ----
-    // 已关闭 / 归属不符的会话不再接收任何消息，主动消息不例外；跳过原因记 debug
+    // 已关闭 / 归属不符的会话不再接收任何消息，主动消息不例外；跳过原因记 debug。
+    // 命中时记录目标通道，用于后续分段格式声明判定。
+    let mut target_channel: Option<String> = None;
     if let Some(sid) = session_id {
         match engine.storage_ref().as_ref().get_session(sid).await? {
             None => {
@@ -118,9 +121,16 @@ pub(crate) async fn run(
                         return Ok(None);
                     }
                 }
+                target_channel = Some(session.channel.clone());
             }
         }
     }
+
+    // 目标会话通道为即时通讯平台时按换行声明分条；其余（含新建会话）沿用多气泡契约
+    let segment_style = match target_channel.as_deref() {
+        Some("qq") | Some("telegram") => SegmentStyle::Newline,
+        _ => SegmentStyle::Pipe,
+    };
 
     // ---- 6. 复用前置编排（主动模式：锚点为消息位，请求用户消息位在编排内留空） ----
     let config = engine.config();
@@ -133,6 +143,7 @@ pub(crate) async fn run(
         conversation_id: None,
         seed_history: Vec::new(),
         message_in_history: false,
+        segment_style,
         proactive: Some(ProactiveInput {
             anchor,
             angle,

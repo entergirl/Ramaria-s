@@ -23,7 +23,8 @@ use futures::StreamExt;
 use ramaria_core::config::RamariaConfig;
 use ramaria_core::traits::{ChatMessage, StoreCrud, StoreInfrastructure};
 use ramaria_core::types::{
-    AppState, BackendConfig, Message, MessageRole, MessageSource, PrivacyConsent, now_ms,
+    AppState, AttachmentStatus, BackendConfig, InboundAttachmentKind, Message, MessageAttachment,
+    MessageRole, MessageSource, PrivacyConsent, now_ms,
 };
 use std::sync::Arc;
 use uuid::Uuid;
@@ -986,6 +987,111 @@ async fn channel_reply_persists_assistant_only_and_embeds_inbound_history() {
             .iter()
             .any(|message| message.content.contains("你好呀")),
         "历史窗口应包含入站消息"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 社交通道回复：提示词含通道分段格式声明（换行分条、禁用 `||` 符号）。
+#[tokio::test]
+async fn channel_reply_prompt_declares_newline_segments() {
+    let llm = Arc::new(MockLlm::with_reply(REPLY));
+    let (engine, storage, dir) = engine_with_shared_llm(
+        "chat-channel-segment-style",
+        llm.clone(),
+        RamariaConfig::default(),
+        None,
+    )
+    .await;
+    seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+    let session = storage
+        .create_session_in_channel(Some(DEFAULT_PERSONA_UID), "qq", Some("c2c:10001"))
+        .await
+        .expect("建会话应成功");
+
+    engine
+        .channel_reply(reply_request(session.id, DEFAULT_PERSONA_UID, "你好"))
+        .await
+        .expect("社交通道回复应成功");
+
+    let requests = llm.requests();
+    assert_eq!(requests.len(), 1);
+    let prompt = &requests[0].system_prompt;
+    assert!(
+        prompt.contains(ramaria_memory::chat::CHANNEL_SEGMENT_DECLARATION),
+        "通道回复提示词应含通道格式声明段"
+    );
+    assert!(prompt.contains("换行"), "声明应要求换行分条");
+    assert!(prompt.contains("「||」"), "声明应禁用分隔符符号");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 社交通道回复：历史窗口中 pending 附件渲染为「处理中」（未完成图片不裸露占位符）。
+#[tokio::test]
+async fn channel_reply_renders_pending_image_as_processing() {
+    let llm = Arc::new(MockLlm::with_reply(REPLY));
+    let (engine, storage, dir) = engine_with_shared_llm(
+        "chat-channel-pending-image",
+        llm.clone(),
+        RamariaConfig::default(),
+        None,
+    )
+    .await;
+    seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+    let session = storage
+        .create_session_in_channel(Some(DEFAULT_PERSONA_UID), "qq", Some("c2c:10001"))
+        .await
+        .expect("建会话应成功");
+
+    // 入站消息：正文含图片占位符；附件行仍在处理中（pending + 指纹）
+    let md5 = "aabbccddeeff00112233445566778899";
+    let hash = &md5[..8];
+    let inbound = Message::new(
+        session.id,
+        MessageRole::User,
+        format!("看图 [图片#{hash}]"),
+        MessageSource::Local,
+    )
+    .with_persona_uid(Some(DEFAULT_PERSONA_UID.to_string()));
+    storage
+        .save_message(&inbound)
+        .await
+        .expect("写入入站消息应成功");
+    storage
+        .insert_message_attachments(&[MessageAttachment {
+            id: 0,
+            message_id: inbound.id,
+            kind: InboundAttachmentKind::Image,
+            source_ref: "https://example.com/a.png".to_string(),
+            md5: Some(md5.to_string()),
+            size: None,
+            width: None,
+            height: None,
+            sub_type: None,
+            status: AttachmentStatus::Pending,
+            description: None,
+            description_model: None,
+            created_at: now_ms(),
+            updated_at: now_ms(),
+        }])
+        .await
+        .expect("写入附件行应成功");
+
+    engine
+        .channel_reply(reply_request(session.id, DEFAULT_PERSONA_UID, "看图"))
+        .await
+        .expect("社交通道回复应成功");
+
+    let requests = llm.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]
+            .history
+            .iter()
+            .any(|message| message.content.contains("[图片: 处理中]")),
+        "pending 附件应渲染为处理中提示: {:?}",
+        requests[0].history
     );
 
     let _ = std::fs::remove_dir_all(&dir);

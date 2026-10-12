@@ -2,8 +2,8 @@
 //!
 //! 设计特点:
 //! - 真实 SQLite 临时库 + 桩 LLM / 桩传输 / 桩下载器：覆盖全流程与各降级分支
-//! - 断言以库内状态（消息 / 附件行）与桩记录（出站文本 / 调用计数）为准
-//! - 图片理解为后台任务：轮询等待（带超时）后断言
+//! - 断言以库内状态（消息 / 附件行）与桩记录（出站文本 / 调用计数 / 请求）为准
+//! - 图片理解：应响应事件先理解后回复（同步断言）；超时降级后轮询等待后台回填
 //!
 //! 安全约束:
 //! - 仅使用合成样例数据与临时目录，不涉及真实账号 / 网络调用 / 用户数据。
@@ -36,13 +36,17 @@ use crate::transport::{InboundSegment, TransportEvent};
 // 桩实现
 // =========================================================
 
-/// 桩 LLM：固定文本回复 / 固定图片描述，记录调用次数。
+/// 桩 LLM：固定文本回复 / 固定图片描述，记录调用次数与生成请求。
 struct StubLlm {
     backend: BackendConfig,
     chat_reply: String,
     vision_reply: String,
     chat_calls: AtomicUsize,
     vision_calls: AtomicUsize,
+    /// 图片理解延迟（模拟慢理解；0 = 立即返回）。
+    vision_delay: StdMutex<Duration>,
+    /// 已收到的生成请求（按调用顺序；供先理解后回复断言）。
+    requests: StdMutex<Vec<ChatRequest>>,
 }
 
 impl StubLlm {
@@ -53,6 +57,8 @@ impl StubLlm {
             vision_reply: vision_reply.to_string(),
             chat_calls: AtomicUsize::new(0),
             vision_calls: AtomicUsize::new(0),
+            vision_delay: StdMutex::new(Duration::ZERO),
+            requests: StdMutex::new(Vec::new()),
         })
     }
 
@@ -63,22 +69,40 @@ impl StubLlm {
     fn vision_calls(&self) -> usize {
         self.vision_calls.load(Ordering::SeqCst)
     }
+
+    /// 设置图片理解延迟（模拟慢理解，覆盖超时降级路径）。
+    fn set_vision_delay(&self, delay: Duration) {
+        *self.vision_delay.lock().expect("图片延迟锁不应中毒") = delay;
+    }
+
+    /// 已收到的生成请求副本（按调用顺序）。
+    fn requests(&self) -> Vec<ChatRequest> {
+        self.requests.lock().expect("请求记录锁不应中毒").clone()
+    }
 }
 
 #[async_trait]
 impl LlmProvider for StubLlm {
-    async fn chat(&self, _request: &ChatRequest) -> RamariaResult<String> {
+    async fn chat(&self, request: &ChatRequest) -> RamariaResult<String> {
         self.chat_calls.fetch_add(1, Ordering::SeqCst);
+        self.requests
+            .lock()
+            .expect("请求记录锁不应中毒")
+            .push(request.clone());
         Ok(self.chat_reply.clone())
     }
 
     async fn chat_stream(
         &self,
-        _request: &ChatRequest,
+        request: &ChatRequest,
     ) -> RamariaResult<
         std::pin::Pin<Box<dyn futures::Stream<Item = RamariaResult<StreamDelta>> + Send>>,
     > {
         self.chat_calls.fetch_add(1, Ordering::SeqCst);
+        self.requests
+            .lock()
+            .expect("请求记录锁不应中毒")
+            .push(request.clone());
         let items = vec![Ok(StreamDelta {
             content: self.chat_reply.clone(),
             done: true,
@@ -92,6 +116,10 @@ impl LlmProvider for StubLlm {
         _request: &ChatRequest,
         _image_data_uris: &[String],
     ) -> RamariaResult<String> {
+        let delay = *self.vision_delay.lock().expect("图片延迟锁不应中毒");
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
         self.vision_calls.fetch_add(1, Ordering::SeqCst);
         Ok(self.vision_reply.clone())
     }
@@ -280,6 +308,7 @@ fn worker_options() -> WorkerOptions {
         min_send_interval: Duration::from_millis(10),
         send_retry_delay: Duration::from_millis(10),
         send_max_attempts: 2,
+        image_understand_timeout: Duration::from_secs(20),
     }
 }
 
@@ -323,6 +352,14 @@ async fn dispatch(
     .await;
 }
 
+/// 显式放行绑定（自动建档默认禁用；白名单语义：启用后才响应）。
+async fn allow(engine: &Arc<Engine>, external_ref: &str) {
+    engine
+        .channel_set_binding("qq", external_ref, None, Some(true), None)
+        .await
+        .expect("显式放行绑定应成功");
+}
+
 // =========================================================
 // 用例
 // =========================================================
@@ -333,6 +370,7 @@ async fn private_text_full_flow() {
     let llm = StubLlm::new("你好，我是 Ramaria。", "不应调用");
     let (engine, storage, dir) = worker_engine("private-flow", Arc::clone(&llm)).await;
     seed_binding_persona(&storage).await;
+    allow(&engine, "c2c:10001").await;
     let transport = StubTransport::new();
     let downloader = StubDownloader::failing();
 
@@ -381,17 +419,12 @@ async fn private_text_full_flow() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// 绑定未启用：无写库、无发送、无生成。
+/// 绑定未启用（自动建档默认禁用）：无写库、无发送、无生成；绑定行保留可见。
 #[tokio::test]
 async fn disabled_binding_drops_event() {
     let llm = StubLlm::new("不应调用", "不应调用");
     let (engine, storage, dir) = worker_engine("disabled", Arc::clone(&llm)).await;
     seed_binding_persona(&storage).await;
-    // 预置禁用绑定（自动建档会覆盖为默认启用，故显式先建）
-    engine
-        .channel_set_binding("qq", "c2c:10001", None, Some(false), None)
-        .await
-        .expect("预置绑定应成功");
     let transport = StubTransport::new();
     let downloader = StubDownloader::failing();
 
@@ -414,6 +447,96 @@ async fn disabled_binding_drops_event() {
     );
     assert!(transport.sent_texts().is_empty());
     assert_eq!(llm.chat_calls(), 0);
+    let binding = storage
+        .list_channel_bindings()
+        .await
+        .expect("查询绑定应成功")
+        .into_iter()
+        .find(|binding| binding.external_ref == "c2c:10001")
+        .expect("自动建档行应保留（面板可见新会话请求）");
+    assert!(!binding.enabled, "自动建档默认禁用");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 白名单：显式放行后同一事件正常回复并落库。
+#[tokio::test]
+async fn binding_responds_after_explicit_allow() {
+    let llm = StubLlm::new("你好，我是 Ramaria。", "不应调用");
+    let (engine, storage, dir) = worker_engine("whitelist-allow", Arc::clone(&llm)).await;
+    seed_binding_persona(&storage).await;
+    engine
+        .channel_set_binding("qq", "c2c:10001", None, Some(true), None)
+        .await
+        .expect("显式放行应成功");
+    let transport = StubTransport::new();
+    let downloader = StubDownloader::failing();
+
+    dispatch(
+        &engine,
+        &transport,
+        &downloader,
+        &worker_options(),
+        private_event("你好", "m-allow"),
+    )
+    .await;
+
+    assert_eq!(
+        transport.sent_texts(),
+        vec!["你好，我是 Ramaria。".to_string()]
+    );
+    assert_eq!(llm.chat_calls(), 1);
+    assert!(
+        storage
+            .find_active_session_by_channel("qq", Some("c2c:10001"))
+            .await
+            .expect("查询会话应成功")
+            .is_some(),
+        "放行后应正常建会话"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 出站兜底：含 `||` 的回复在发送前替换为换行（库内原文不改）。
+#[tokio::test]
+async fn outbound_pipe_separator_is_sanitized() {
+    let llm = StubLlm::new("你好 || 在的||怎么啦", "不应调用");
+    let (engine, storage, dir) = worker_engine("outbound-pipe", Arc::clone(&llm)).await;
+    seed_binding_persona(&storage).await;
+    allow(&engine, "c2c:10001").await;
+    let transport = StubTransport::new();
+    let downloader = StubDownloader::failing();
+
+    dispatch(
+        &engine,
+        &transport,
+        &downloader,
+        &worker_options(),
+        private_event("你好", "m-pipe"),
+    )
+    .await;
+
+    assert_eq!(
+        transport.sent_texts(),
+        vec!["你好\n在的\n怎么啦".to_string()],
+        "出站文本不应残留分隔符"
+    );
+
+    // 库内回复原文保留多气泡契约（仅出站净化）
+    let session = storage
+        .find_active_session_by_channel("qq", Some("c2c:10001"))
+        .await
+        .expect("查询会话应成功")
+        .expect("会话应存在");
+    let assistant = storage
+        .list_messages(session.id)
+        .await
+        .expect("查询消息应成功")
+        .into_iter()
+        .find(|message| message.role == MessageRole::Assistant)
+        .expect("应有助手行");
+    assert_eq!(assistant.content, "你好 || 在的||怎么啦");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -424,6 +547,7 @@ async fn duplicate_event_skips_write_and_reply() {
     let llm = StubLlm::new("收到", "不应调用");
     let (engine, storage, dir) = worker_engine("duplicate", Arc::clone(&llm)).await;
     seed_binding_persona(&storage).await;
+    allow(&engine, "c2c:10001").await;
     let transport = StubTransport::new();
     let downloader = StubDownloader::failing();
     let options = worker_options();
@@ -467,12 +591,13 @@ async fn duplicate_event_skips_write_and_reply() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// 图片成功：占位符正文 + 附件行回填（后台理解完成后 done + 描述）。
+/// 图片成功：先理解后回复（返回时附件已 done，回复历史含描述）。
 #[tokio::test]
 async fn image_success_runs_understanding() {
     let llm = StubLlm::new("看到图了", "一只橘猫趴在窗台上");
     let (engine, storage, dir) = worker_engine("image-ok", Arc::clone(&llm)).await;
     seed_binding_persona(&storage).await;
+    allow(&engine, "c2c:10001").await;
     let transport = StubTransport::new();
     let image_bytes: Vec<u8> = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3];
     let downloader = StubDownloader::succeeding(&image_bytes);
@@ -507,11 +632,75 @@ async fn image_success_runs_understanding() {
         user_row.content
     );
 
-    // 图片理解为后台任务：轮询等待回填完成（带超时）
+    // 先理解后回复：dispatch 返回时（回复已生成发送）附件已回填完成，无需轮询
+    let rows = storage
+        .list_attachments_by_messages(&[user_row.id])
+        .await
+        .expect("查询附件应成功");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].status, AttachmentStatus::Done);
+    assert_eq!(rows[0].description.as_deref(), Some("一只橘猫趴在窗台上"));
+    assert_eq!(transport.sent_texts(), vec!["看到图了".to_string()]);
+
+    // 回复生成时模型已能看到图片描述（历史窗口注入）
+    let requests = llm.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]
+            .history
+            .iter()
+            .any(|message| message.content.contains("[图片: 一只橘猫趴在窗台上]")),
+        "chat 请求历史应含图片描述: {:?}",
+        requests[0].history
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 图片理解超时：不阻塞回复（按占位符继续），后台任务继续回填。
+#[tokio::test]
+async fn image_understand_timeout_degrades_and_backfills() {
+    let llm = StubLlm::new("先回复", "一只橘猫趴在窗台上");
+    llm.set_vision_delay(Duration::from_millis(300));
+    let (engine, storage, dir) = worker_engine("image-timeout", Arc::clone(&llm)).await;
+    seed_binding_persona(&storage).await;
+    allow(&engine, "c2c:10001").await;
+    let transport = StubTransport::new();
+    let image_bytes: Vec<u8> = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3];
+    let downloader = StubDownloader::succeeding(&image_bytes);
+
+    let mut options = worker_options();
+    options.image_understand_timeout = Duration::from_millis(50);
+
+    let mut event = private_event("", "m-img-timeout");
+    event.segments = vec![InboundSegment::Image {
+        url: "https://example.com/slow.png".to_string(),
+        size: Some(11),
+        sub_type: Some("0".to_string()),
+    }];
+    dispatch(&engine, &transport, &downloader, &options, event).await;
+
+    // 超时降级：回复照常发出
+    assert_eq!(transport.sent_texts(), vec!["先回复".to_string()]);
+
+    // 后台任务未被取消：轮询等待附件最终回填完成（带超时）
+    let session = storage
+        .find_active_session_by_channel("qq", Some("c2c:10001"))
+        .await
+        .expect("查询会话应成功")
+        .expect("会话应存在");
+    let user_row_id = storage
+        .list_messages(session.id)
+        .await
+        .expect("查询消息应成功")
+        .into_iter()
+        .find(|message| message.role == MessageRole::User)
+        .expect("应有用户行")
+        .id;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let rows = loop {
         let rows = storage
-            .list_attachments_by_messages(&[user_row.id])
+            .list_attachments_by_messages(&[user_row_id])
             .await
             .expect("查询附件应成功");
         if rows
@@ -520,15 +709,13 @@ async fn image_success_runs_understanding() {
         {
             break rows;
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "等待图片理解回填超时"
-        );
+        assert!(tokio::time::Instant::now() < deadline, "等待后台回填超时");
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].description.as_deref(), Some("一只橘猫趴在窗台上"));
-    assert_eq!(transport.sent_texts(), vec!["看到图了".to_string()]);
+    // 能力探测一次（首图触发）+ 正式理解一次；超时降级不取消后台任务
+    assert_eq!(llm.vision_calls(), 2);
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -539,6 +726,7 @@ async fn image_download_failure_degrades() {
     let llm = StubLlm::new("没收到图", "不应调用");
     let (engine, storage, dir) = worker_engine("image-fail", Arc::clone(&llm)).await;
     seed_binding_persona(&storage).await;
+    allow(&engine, "c2c:10001").await;
     let transport = StubTransport::new();
     let downloader = StubDownloader::failing();
 
@@ -575,18 +763,25 @@ async fn image_download_failure_degrades() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// 群聊未触发响应：正常落库但不回复。
+/// 群聊未触发响应：正常落库但不回复；图片理解留后台继续回填。
 #[tokio::test]
 async fn group_without_trigger_persists_only() {
-    let llm = StubLlm::new("不应调用", "不应调用");
+    let llm = StubLlm::new("不应调用", "一只橘猫趴在窗台上");
     let (engine, storage, dir) = worker_engine("group-idle", Arc::clone(&llm)).await;
     seed_binding_persona(&storage).await;
+    allow(&engine, "group:20002").await;
     let transport = StubTransport::new();
-    let downloader = StubDownloader::failing();
+    let image_bytes: Vec<u8> = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3];
+    let downloader = StubDownloader::succeeding(&image_bytes);
 
-    let mut event = private_event("群里的闲聊", "g-1");
+    let mut event = private_event("", "g-1");
     event.external_ref = "group:20002".to_string();
     event.should_respond = false;
+    event.segments = vec![InboundSegment::Image {
+        url: "https://example.com/g.png".to_string(),
+        size: Some(11),
+        sub_type: Some("0".to_string()),
+    }];
     dispatch(&engine, &transport, &downloader, &worker_options(), event).await;
 
     let session = storage
@@ -602,6 +797,26 @@ async fn group_without_trigger_persists_only() {
     assert!(transport.sent_texts().is_empty());
     assert_eq!(llm.chat_calls(), 0);
 
+    // 不响应不影响图片理解：后台任务继续，轮询等待回填完成（带超时）
+    let user_row_id = messages[0].id;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let rows = loop {
+        let rows = storage
+            .list_attachments_by_messages(&[user_row_id])
+            .await
+            .expect("查询附件应成功");
+        if rows
+            .first()
+            .is_some_and(|row| row.status == AttachmentStatus::Done)
+        {
+            break rows;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "等待后台回填超时");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].description.as_deref(), Some("一只橘猫趴在窗台上"));
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -611,6 +826,7 @@ async fn send_retry_recovers_after_one_failure() {
     let llm = StubLlm::new("重试后成功", "不应调用");
     let (engine, storage, dir) = worker_engine("send-retry", Arc::clone(&llm)).await;
     seed_binding_persona(&storage).await;
+    allow(&engine, "c2c:10001").await;
     let transport = StubTransport::new();
     transport.fail_next(1, true);
     let downloader = StubDownloader::failing();
@@ -636,6 +852,7 @@ async fn send_non_retryable_failure_not_retried() {
     let llm = StubLlm::new("不会发出", "不应调用");
     let (engine, storage, dir) = worker_engine("send-no-retry", Arc::clone(&llm)).await;
     seed_binding_persona(&storage).await;
+    allow(&engine, "c2c:10001").await;
     let transport = StubTransport::new();
     transport.fail_next(1, false);
     let downloader = StubDownloader::failing();
@@ -673,6 +890,7 @@ async fn empty_text_event_dropped() {
     let llm = StubLlm::new("不应调用", "不应调用");
     let (engine, storage, dir) = worker_engine("empty-drop", Arc::clone(&llm)).await;
     seed_binding_persona(&storage).await;
+    allow(&engine, "c2c:10001").await;
     let transport = StubTransport::new();
     let downloader = StubDownloader::failing();
 
@@ -688,6 +906,38 @@ async fn empty_text_event_dropped() {
             .is_none()
     );
     assert!(transport.sent_texts().is_empty());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 纯表情消息（`[表情]` 占位段）：正常入库并回复（不被空正文丢弃）。
+#[tokio::test]
+async fn face_only_message_stored_and_replied() {
+    let llm = StubLlm::new("收到你的表情了", "不应调用");
+    let (engine, storage, dir) = worker_engine("face-only", Arc::clone(&llm)).await;
+    seed_binding_persona(&storage).await;
+    allow(&engine, "c2c:10001").await;
+    let transport = StubTransport::new();
+    let downloader = StubDownloader::failing();
+
+    let mut event = private_event("", "m-face");
+    event.segments = vec![InboundSegment::Text("[表情]".to_string())];
+    dispatch(&engine, &transport, &downloader, &worker_options(), event).await;
+
+    let session = storage
+        .find_active_session_by_channel("qq", Some("c2c:10001"))
+        .await
+        .expect("查询会话应成功")
+        .expect("表情消息应入库建会话");
+    let user_row = storage
+        .list_messages(session.id)
+        .await
+        .expect("查询消息应成功")
+        .into_iter()
+        .find(|message| message.role == MessageRole::User)
+        .expect("应有用户行");
+    assert_eq!(user_row.content, "[表情]");
+    assert_eq!(transport.sent_texts(), vec!["收到你的表情了".to_string()]);
 
     let _ = std::fs::remove_dir_all(&dir);
 }

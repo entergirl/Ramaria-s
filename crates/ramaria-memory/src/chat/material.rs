@@ -24,6 +24,27 @@ use super::time::now_timestamp_str;
 // 装配素材（共享加载，供普通/协调装配消费）
 // =========================================================
 
+/// 回复分段格式（按出站通道声明）。
+///
+/// 变体:
+/// - `Pipe`: 多气泡契约（`||` 分隔；桌面等自渲染通道）；
+/// - `Newline`: 即时通讯平台通道（直接换行分条，禁用 `||` 符号）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SegmentStyle {
+    Pipe,
+    Newline,
+}
+
+/// 通道分段格式声明段（出站为即时通讯平台时追加在回复规则之后）。
+///
+/// 语义:
+/// - 声明以格式要求覆盖前述分隔符号约定；
+/// - 分条时直接使用换行，不输出 `||` 符号。
+pub const CHANNEL_SEGMENT_DECLARATION: &str = "\
+通道格式要求（覆盖上文的分条约定）:\n\
+本条回复将直接发送到即时通讯平台，需要分条时直接使用换行分隔；\n\
+不要输出「||」符号，本要求优先于上文的格式约定。";
+
 /// 已加载的 System Prompt 装配素材。
 ///
 /// 职责:
@@ -71,6 +92,8 @@ pub enum LoadedPromptMaterial {
 ///   层间仲裁开启时作为"保留参照"做内容级判重（RAG 摘要为主）。
 /// - `layer_dedup`: 层间证据去重与冲突仲裁配置（`[layer_dedup]`；默认关闭 =
 ///   回退既有引用级去重，prompt 输出与既有版本逐字段等价）。
+/// - `segment_style`: 回复分段格式（`Pipe` = 沿用多气泡契约；`Newline` =
+///   即时通讯平台通道，回复规则后追加换行格式声明段）。
 pub struct PromptMaterialInputs<'a> {
     /// 人格标识（None 表示 rama 自身）。
     pub persona_uid: Option<&'a str>,
@@ -102,6 +125,8 @@ pub struct PromptMaterialInputs<'a> {
     pub rag_text: Option<&'a str>,
     /// 层间证据去重与冲突仲裁配置。
     pub layer_dedup: &'a LayerDedupConfig,
+    /// 回复分段格式（按出站通道声明）。
+    pub segment_style: SegmentStyle,
     /// 主动生成场景上下文（None = 非主动生成，Prompt 不产生主动段）。
     pub proactive: Option<ProactivePromptContext>,
 }
@@ -281,6 +306,17 @@ pub async fn load_prompt_material(
             deduped
         };
 
+        // 回复规则：显式 E_rules 优先，缺省用共享规则（与 Stage 路径同一口径）；
+        // 陈述档由 builder 门控回退中性默认。通道出站为即时通讯平台时，
+        // 在规则后追加换行格式声明段（覆盖 `||` 分条契约；管道形态零变化）。
+        let chat_style_rules = {
+            let base = resolve_chat_style_rules(p.config.as_deref());
+            match inputs.segment_style {
+                SegmentStyle::Pipe => base,
+                SegmentStyle::Newline => format!("{base}\n\n{CHANNEL_SEGMENT_DECLARATION}"),
+            }
+        };
+
         let ctx = PromptContext {
             persona: Some(p.clone()),
             facts,
@@ -296,7 +332,7 @@ pub async fn load_prompt_material(
             weather: None,
             // 回复规则：显式 E_rules 优先，缺省用共享规则（与 Stage 路径同一口径）；
             // 陈述档由 builder 门控回退中性默认。
-            chat_style_rules: Some(resolve_chat_style_rules(p.config.as_deref())),
+            chat_style_rules: Some(chat_style_rules),
             // utt 原文片段（检索层已按白名单与预算过滤，None 表示不注入）
             utt_context: inputs.utt_context.map(|s| s.to_string()),
             // 桥接内容（桥接层已按白名单与预算过滤，None 表示未启用）

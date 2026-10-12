@@ -20,7 +20,8 @@ mod tests;
 
 pub use examples::load_examples_for_input;
 pub use material::{
-    LoadedPromptMaterial, PromptMaterialInputs, build_system_prompt, load_prompt_material,
+    CHANNEL_SEGMENT_DECLARATION, LoadedPromptMaterial, PromptMaterialInputs, SegmentStyle,
+    build_system_prompt, load_prompt_material,
 };
 pub use narrative::{NarrativeMaterial, format_l1_as_context_line, load_narrative_material};
 pub use persona_fallback::load_persona_toml_prompt;

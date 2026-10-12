@@ -7,6 +7,7 @@
 //!   `at.qq` / `reply.id` 为字符串；统一转字符串比较与存储
 //! - 只处理 message 事件（private / group）；meta_event / notice / request 静默忽略
 //! - At 段在解析层折叠为文本（`@qq` / `@全体成员`）；reply 段只用于判定不进正文
+//! - 表情段（face / mface / bface）折叠为 `[表情]` 占位文本，避免表情消息整条丢弃
 //! - 图片段保留下载引用（url / size / sub_type），正文与附件在组装层产出
 
 use ramaria_core::types::{InboundSender, MemberRole, now_ms};
@@ -244,7 +245,12 @@ fn parse_segment(
                     .filter(|id| !id.trim().is_empty())
             });
         }
-        // 其余段（face / record / video / file 等）忽略
+        // 表情段（经典 / 商城 / 原创）：折叠为占位文本，
+        // 使纯表情消息正文非空（不被空正文丢弃）
+        Some("face") | Some("mface") | Some("bface") => {
+            segments.push(InboundSegment::Text("[表情]".to_string()));
+        }
+        // 其余段（record / video / file 等）忽略
         _ => {}
     }
 }

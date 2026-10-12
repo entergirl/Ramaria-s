@@ -8,7 +8,8 @@
 //!   bot_command 三种形态），被回复判定读 `reply_to_message.from` 与 Bot 身份比对
 //! - 实体切片按 UTF-16 单元偏移提取（平台口径），非法边界不 panic
 //! - 段序列：文本 → 文本段；图片（photo 最大尺寸项 / 图片类 document）→ 图片段，
-//!   caption 追加为文本段（先图后文）；其余媒体忽略
+//!   caption 追加为文本段（先图后文）；表情贴纸（sticker）→ `[表情]` 占位文本段，
+//!   贴纸配文追加为文本段；其余媒体忽略
 //! - 图片段的下载引用填放置文件标识（下载经 `getFile` 两步，媒体下载器据此工作）
 
 use ramaria_core::types::{InboundSender, now_ms};
@@ -245,7 +246,9 @@ fn ends_with_ignore_ascii_case(text: &str, suffix: &str) -> bool {
 /// - `photo` 非空数组 → 取 `file_size` 最大项的 `file_id` 为图片段；
 /// - `document` 且 `mime_type` 以 `image/` 开头 → 图片段；
 /// - 图片段存在且 `caption` 非空 → 追加文本段（先图后文）；
-/// - 其余媒体（非图片 document / video / voice / animation / sticker 等）忽略。
+/// - `sticker` 存在 → `[表情]` 占位文本段；贴纸 `caption` 非空再追加文本段
+///   （sticker 与 text / photo 互斥，配文不重复解析）；
+/// - 其余媒体（非图片 document / video / voice / animation 等）忽略。
 fn parse_segments(message: &Value) -> Vec<InboundSegment> {
     let mut segments = Vec::new();
 
@@ -257,6 +260,19 @@ fn parse_segments(message: &Value) -> Vec<InboundSegment> {
     let image = parse_photo(message).or_else(|| parse_image_document(message));
     if let Some(segment) = image {
         segments.push(segment);
+        let caption = message
+            .get("caption")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        if !caption.is_empty() {
+            segments.push(InboundSegment::Text(caption.to_string()));
+        }
+    }
+
+    // 表情贴纸：折叠为占位文本，避免贴纸消息段序列为空被整条忽略
+    if message.get("sticker").is_some_and(|value| !value.is_null()) {
+        segments.push(InboundSegment::Text("[表情]".to_string()));
         let caption = message
             .get("caption")
             .and_then(Value::as_str)

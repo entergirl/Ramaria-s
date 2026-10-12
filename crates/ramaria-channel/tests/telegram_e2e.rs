@@ -35,6 +35,7 @@ use serde_json::{Value, json};
 /// e2e 上下文（mock 服务端 / 存储 / 传输 / 编排任务）。
 struct E2e {
     server: MockTelegramServer,
+    engine: Arc<ramaria_service::Engine>,
     storage: Arc<SqliteStorage>,
     transport: Arc<TelegramTransport>,
     worker: Option<ChannelWorker>,
@@ -72,11 +73,13 @@ async fn setup(tag: &str, server: MockTelegramServer, downloader: Arc<dyn ImageD
             min_send_interval: Duration::from_millis(10),
             send_retry_delay: Duration::from_millis(10),
             send_max_attempts: 2,
+            ..WorkerOptions::default()
         },
     );
     transport.connect().await.expect("连接应成功");
     E2e {
         server,
+        engine,
         storage,
         transport,
         worker: Some(worker),
@@ -91,6 +94,14 @@ async fn setup_stub(tag: &str) -> E2e {
 }
 
 impl E2e {
+    /// 显式放行绑定（自动建档默认禁用；白名单语义：启用后才响应）。
+    async fn allow(&self, external_ref: &str) {
+        self.engine
+            .channel_set_binding("telegram", external_ref, None, Some(true), None)
+            .await
+            .expect("显式放行绑定应成功");
+    }
+
     /// 等待客户端连接上线。
     async fn wait_online(&self) {
         let transport = Arc::clone(&self.transport);
@@ -237,6 +248,7 @@ fn private_photo_update(update_id: i64, message_id: i64, file_id: &str) -> Value
 async fn private_message_end_to_end() {
     let ctx = setup_stub("private").await;
     ctx.wait_online().await;
+    ctx.allow("c2c:10001").await;
 
     ctx.server.push_update(private_text_update(1, 101, "你好"));
     ctx.wait_sent(1).await;
@@ -269,6 +281,7 @@ async fn private_message_end_to_end() {
 async fn group_mention_end_to_end() {
     let ctx = setup_stub("group-mention").await;
     ctx.wait_online().await;
+    ctx.allow("group:-1001234567890").await;
 
     ctx.server
         .push_update(group_mention_update(2, 201, "@testbot 在吗"));
@@ -290,6 +303,7 @@ async fn group_mention_end_to_end() {
 async fn group_reply_decision_end_to_end() {
     let ctx = setup_stub("group-reply").await;
     ctx.wait_online().await;
+    ctx.allow("group:-1001234567890").await;
 
     // 回复 Bot → 触发
     ctx.server
@@ -323,6 +337,7 @@ async fn group_reply_decision_end_to_end() {
 async fn duplicate_update_single_write_and_reply() {
     let ctx = setup_stub("duplicate").await;
     ctx.wait_online().await;
+    ctx.allow("c2c:10001").await;
 
     ctx.server
         .push_update(private_text_update(10, 401, "重复消息"));
@@ -353,6 +368,7 @@ async fn image_message_end_to_end() {
     ));
     let ctx = setup("image", server, downloader).await;
     ctx.wait_online().await;
+    ctx.allow("c2c:10001").await;
 
     ctx.server
         .push_update(private_photo_update(20, 501, "file-1"));

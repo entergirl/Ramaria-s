@@ -370,3 +370,97 @@ fn search_result_conversion_rules() {
         "非 L1 层不应进入脉络注入"
     );
 }
+
+// =========================================================
+// 分段格式声明（按通道）
+// =========================================================
+
+/// 组装最小分段格式输入（其余素材字段取空集）。
+fn segment_style_inputs<'a>(
+    summaries: &'a [String],
+    labels: &'a [String],
+    injection: &'a ramaria_core::config::InjectionGate,
+    layer_dedup: &'a ramaria_core::config::LayerDedupConfig,
+    style: SegmentStyle,
+) -> PromptMaterialInputs<'a> {
+    PromptMaterialInputs {
+        persona_uid: Some("rama-0001"),
+        recent_summaries: summaries,
+        last_active_at: None,
+        utt_context: None,
+        bridge_context: None,
+        behavior_decision: None,
+        examples: Vec::new(),
+        max_examples: 3,
+        knowledge_facts: Vec::new(),
+        rag_covered_labels: labels,
+        knowledge_budget_chars: None,
+        injection,
+        style_enabled: false,
+        rag_text: None,
+        layer_dedup,
+        segment_style: style,
+        proactive: None,
+    }
+}
+
+/// 通道（Newline）：核心规则后追加换行格式声明段（换行与 || 同现）。
+#[tokio::test]
+async fn newline_segment_style_appends_channel_declaration() {
+    let storage = test_storage("segment-newline").await;
+    ensure_persona(storage.as_ref(), "rama-0001").await;
+    let config = RamariaConfig::default();
+    let summaries: Vec<String> = Vec::new();
+    let labels: Vec<String> = Vec::new();
+
+    let prompt = build_system_prompt(
+        storage.as_ref(),
+        &segment_style_inputs(
+            &summaries,
+            &labels,
+            &config.injection,
+            &config.layer_dedup,
+            SegmentStyle::Newline,
+        ),
+    )
+    .await;
+
+    assert!(
+        prompt.contains(CHANNEL_SEGMENT_DECLARATION),
+        "通道声明段应进入提示词"
+    );
+    assert!(prompt.contains("换行"), "声明应要求换行分条");
+    assert!(prompt.contains("「||」"), "声明应禁用分隔符符号");
+    assert!(
+        prompt.contains("覆盖上文的分条约定"),
+        "声明应以格式要求覆盖前述约定"
+    );
+}
+
+/// 管道（Pipe）：与现状一致，不追加通道声明。
+#[tokio::test]
+async fn pipe_segment_style_keeps_legacy_rules() {
+    let storage = test_storage("segment-pipe").await;
+    ensure_persona(storage.as_ref(), "rama-0001").await;
+    let config = RamariaConfig::default();
+    let summaries: Vec<String> = Vec::new();
+    let labels: Vec<String> = Vec::new();
+
+    let prompt = build_system_prompt(
+        storage.as_ref(),
+        &segment_style_inputs(
+            &summaries,
+            &labels,
+            &config.injection,
+            &config.layer_dedup,
+            SegmentStyle::Pipe,
+        ),
+    )
+    .await;
+
+    assert!(
+        !prompt.contains(CHANNEL_SEGMENT_DECLARATION),
+        "管道形态不应包含通道声明"
+    );
+    assert!(prompt.contains("||"), "共享回复规则仍含多气泡契约");
+}

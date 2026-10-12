@@ -1,7 +1,8 @@
 //! crates/ramaria-service/src/channel.rs - Ramaria 社交通道域用例模块
 //!
 //! 设计特点:
-//! - 绑定解析单点：按 `(channel, external_ref)` 解析，不存在时自动建档（收到即建）
+//! - 绑定解析单点：按 `(channel, external_ref)` 解析，不存在时自动建档
+//!   （收到即建档，默认不放行；显式启用后才响应）
 //! - 入站写入独立口径：平台消息幂等 + 发言人归属 + 附件定位（见 `ingest` 子模块）
 //! - 生效人格解析：绑定级覆盖优先，其次通道级默认，再兜底默认人格（纯函数）
 //! - 凭据用例经 OS keychain（凭据不落日志：仅记平台名，绝不打印令牌内容）
@@ -31,7 +32,8 @@ pub async fn list_bindings(engine: &Engine) -> RamariaResult<Vec<ChannelBinding>
 /// 按 `(channel, external_ref)` 解析绑定；不存在时自动建档。
 ///
 /// 自动建档默认值:
-/// - `enabled = true`（收到即建，立即可用）；
+/// - `enabled = false`（收到即建档，但默认不放行；用户在面板 / CLI
+///   显式启用后才响应，被拒消息不入库不回复）；
 /// - `allow_proactive = false`（主动投递默认关）；
 /// - `persona_uid = None`（未覆盖，生效时回退通道级默认）。
 ///
@@ -58,12 +60,12 @@ pub async fn resolve_binding(
         None => {
             let binding = engine
                 .storage()
-                .upsert_channel_binding(channel, external_ref, None, true, false)
+                .upsert_channel_binding(channel, external_ref, None, false, false)
                 .await?;
             tracing::info!(
                 channel = %binding.channel,
                 external_ref = %mask_id(&binding.external_ref),
-                "自动创建通道绑定"
+                "自动创建通道绑定（默认未启用，等待显式放行）"
             );
             Ok(binding)
         }

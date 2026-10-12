@@ -247,3 +247,30 @@ async fn deliver_exhausts_attempts() {
     assert_eq!(handle.calls(), 3, "调用次数应等于上限");
     assert!(handle.sent().is_empty());
 }
+
+/// 出站兜底：含 `||` 的主动消息在发送前替换为换行（吞并邻接空白）。
+#[tokio::test]
+async fn deliver_sanitizes_pipe_separator() {
+    let transport = Arc::new(MockTransport::new("qq"));
+    let (sink, handle) = sink_with(&transport, 2);
+
+    let mut message = sample_message("qq", Some("c2c:10001"));
+    message.content = "甲 || 乙||丙".to_string();
+    sink.deliver(&message).await.expect("发送应成功");
+
+    let sent = handle.sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].1.text, "甲\n乙\n丙");
+}
+
+/// 净化后为空（仅分隔符与空白）：跳过发送且视为已完成。
+#[tokio::test]
+async fn deliver_skips_when_sanitized_empty() {
+    let transport = Arc::new(MockTransport::new("qq"));
+    let (sink, handle) = sink_with(&transport, 2);
+
+    let mut message = sample_message("qq", Some("c2c:10001"));
+    message.content = "  ||  ".to_string();
+    sink.deliver(&message).await.expect("跳过发送应视为完成");
+    assert_eq!(handle.calls(), 0, "净化后为空不应发起发送");
+}

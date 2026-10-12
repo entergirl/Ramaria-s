@@ -15,6 +15,7 @@
 //!
 //! 模块划分:
 //! - `steps`：请求形态与前置编排（校验 / 门禁 / 会话定位 / 历史窗口 / 弱反馈）；
+//! - `render`：历史窗口附件行加载与渲染映射（字符预算统计与注入共用）；
 //! - `context`：记忆召回与素材装载 + 系统 Prompt 装配与 Token 预算；
 //! - `generate`：用例入口（非流式 / 流式）与生成侧（LLM 调用 / 落库 / 事件桥接）；
 //! - `proactive`：主动生成用例（assistant-only，门禁静默跳过）。
@@ -22,6 +23,7 @@
 mod context;
 mod generate;
 mod proactive;
+mod render;
 mod steps;
 
 // 用例入口 re-export：`crate::chat::run` / `crate::chat::stream` 为入口层既有调用路径

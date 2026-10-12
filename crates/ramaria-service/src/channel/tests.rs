@@ -26,7 +26,7 @@ async fn resolve_auto_creates_binding_once() {
     assert_eq!(binding.channel, "qq");
     assert_eq!(binding.external_ref, "c2c:10001");
     assert_eq!(binding.persona_uid, None, "自动建档人格未覆盖");
-    assert!(binding.enabled, "自动建档默认启用");
+    assert!(!binding.enabled, "自动建档默认不启用（显式放行后才响应）");
     assert!(!binding.allow_proactive, "自动建档主动投递默认关");
 
     let again = resolve_binding(&engine, "qq", "c2c:10001")
@@ -36,6 +36,35 @@ async fn resolve_auto_creates_binding_once() {
 
     let all = list_bindings(&engine).await.expect("列出绑定应成功");
     assert_eq!(all.len(), 1);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 白名单：自动建档默认禁用；显式启用放行、显式关闭再次禁用。
+#[tokio::test]
+async fn auto_created_binding_requires_explicit_enable() {
+    let (engine, _storage, dir) = engine_with_db("channel-whitelist").await;
+
+    let created = resolve_binding(&engine, "qq", "c2c:10001")
+        .await
+        .expect("首次解析应自动建档");
+    assert!(!created.enabled, "自动建档默认禁用");
+
+    let allowed = set_binding(&engine, "qq", "c2c:10001", None, Some(true), None)
+        .await
+        .expect("显式启用应成功");
+    assert!(allowed.enabled, "显式启用后应放行");
+    assert_eq!(allowed.id, created.id, "放行不应另起绑定行");
+
+    let again = resolve_binding(&engine, "qq", "c2c:10001")
+        .await
+        .expect("重复解析应命中已有行");
+    assert!(again.enabled, "显式放行结果应被后续解析读到");
+
+    let disabled = set_binding(&engine, "qq", "c2c:10001", None, Some(false), None)
+        .await
+        .expect("显式关闭应成功");
+    assert!(!disabled.enabled, "显式关闭后应再次禁用");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -72,7 +101,7 @@ async fn set_binding_validates_persona_exists() {
 async fn set_binding_switches_independently() {
     let (engine, _storage, dir) = engine_with_db("channel-set-switches").await;
 
-    // 自动建档默认 enabled=true / allow_proactive=false
+    // 自动建档默认 enabled=false / allow_proactive=false
     resolve_binding(&engine, "telegram", "c2c:42")
         .await
         .expect("建档应成功");

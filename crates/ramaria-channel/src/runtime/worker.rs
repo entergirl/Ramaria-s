@@ -2,10 +2,10 @@
 //!
 //! 设计特点:
 //! - 单事件编排顺序固定：绑定解析 → 启用门禁 → 图片下载 → 组装 → 落库 →
-//!   理解（后台并行）→ 响应判定 → 回复生成 → 节流 → 出站发送（含重试）
-//! - 单步失败降级不阻塞：图片理解在后台任务、生成失败不发送、发送失败仅记日志
-//!   （回复已落库）；重复事件零重复写入与响应
-//! - 出站按会话节流；可重试错误按短退避重试至上限
+//!   理解（应响应时先理解后回复，超时降级）→ 响应判定 → 回复生成 → 节流 → 出站发送（含重试）
+//! - 单步失败降级不阻塞：图片理解超时/失败按占位符继续（后台任务不取消）、
+//!   生成失败不发送、发送失败仅记日志（回复已落库）；重复事件零重复写入与响应
+//! - 出站文本净化：多气泡契约分隔符替换为换行；按会话节流；可重试错误按短退避重试至上限
 //! - 日志脱敏：外部标识经 `mask_id`，不记消息内容
 
 use std::collections::HashMap;
@@ -17,6 +17,7 @@ use ramaria_service::{ChannelIngestRequest, ChannelReplyRequest, Engine};
 
 use super::assemble::{DownloadedImage, assemble_inbound, md5_hex};
 use super::download::ImageDownloader;
+use super::outbound::sanitize_outbound_text;
 use crate::runtime::ChannelRuntime;
 use crate::transport::{
     InboundSegment, OutboundMessage, OutboundTarget, Transport, TransportEvent,
@@ -26,17 +27,20 @@ use crate::transport::{
 // 编排参数
 // =========================================================
 
-/// 编排参数（节流 / 发送重试）。
+/// 编排参数（节流 / 发送重试 / 图片理解等待）。
 ///
 /// 字段约定:
 /// - `min_send_interval`: 同会话两次出站的最小间隔（节流）。
 /// - `send_retry_delay`: 可重试发送失败后的重试等待。
 /// - `send_max_attempts`: 发送总尝试上限（1 次初始 + 重试；仅可重试错误消耗）。
+/// - `image_understand_timeout`: 应响应事件的图片理解等待上限（超时按占位符
+///   继续回复，后台理解任务不取消）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerOptions {
     pub min_send_interval: Duration,
     pub send_retry_delay: Duration,
     pub send_max_attempts: u32,
+    pub image_understand_timeout: Duration,
 }
 
 impl Default for WorkerOptions {
@@ -45,6 +49,7 @@ impl Default for WorkerOptions {
             min_send_interval: Duration::from_secs(1),
             send_retry_delay: Duration::from_secs(1),
             send_max_attempts: 2,
+            image_understand_timeout: Duration::from_secs(20),
         }
     }
 }
@@ -146,9 +151,10 @@ async fn run_loop(
 /// 1. 绑定解析（含自动建档）；未启用 → 整事件丢弃；
 /// 2. 图片段逐个下载（失败按占位符继续）；
 /// 3. 组装入站消息；正文为空 → 丢弃；
-/// 4. 落库（重复事件跳过后续）；图片理解经后台任务并行；
-/// 5. 响应判定未触发 → 结束；
-/// 6. 回复生成（失败不发送）→ 出站节流 → 发送（可重试错误按上限重试）。
+/// 4. 落库（重复事件跳过后续）；图片理解逐张启动后台任务；
+/// 5. 响应判定未触发 → 理解留后台，结束；
+/// 6. 应响应：等待理解（超时按占位符继续，后台任务不取消）→
+///    回复生成（失败不发送）→ 出站节流 → 发送（可重试错误按上限重试）。
 pub(crate) async fn handle_event(
     engine: &Arc<Engine>,
     transport: &dyn Transport,
@@ -242,7 +248,8 @@ pub(crate) async fn handle_event(
         return;
     }
 
-    // ---- 5. 图片理解（后台任务，与回复并行；失败不影响回复） ----
+    // ---- 5. 图片理解（逐张后台任务；应响应时先理解后回复） ----
+    let mut understand_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     if !outcome.images.is_empty() {
         let targets: Vec<(i64, DownloadedImage)> = outcome
             .images
@@ -250,9 +257,9 @@ pub(crate) async fn handle_event(
             .map(|image| image.attachment_id)
             .zip(assembled.downloaded.iter().cloned())
             .collect();
-        let engine = Arc::clone(engine);
-        tokio::spawn(async move {
-            for (attachment_id, image) in targets {
+        for (attachment_id, image) in targets {
+            let engine = Arc::clone(engine);
+            understand_handles.push(tokio::spawn(async move {
                 match engine
                     .channel_understand_image(attachment_id, &image.md5, &image.bytes)
                     .await
@@ -264,13 +271,29 @@ pub(crate) async fn handle_event(
                         tracing::warn!(attachment_id, error = %error, "通道图片理解调用失败");
                     }
                 }
-            }
-        });
+            }));
+        }
     }
 
-    // ---- 6. 响应判定 ----
+    // ---- 6. 响应判定与理解等待 ----
     if !event.should_respond {
+        // 不响应：理解任务留在后台继续（丢弃句柄不取消任务）
         return;
+    }
+    // 先理解后回复：等待全部图片理解完成；超时按占位符继续（后台任务不取消，句柄丢弃）
+    if !understand_handles.is_empty()
+        && tokio::time::timeout(
+            options.image_understand_timeout,
+            futures::future::join_all(understand_handles),
+        )
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            channel,
+            external_ref = %mask_id(&event.external_ref),
+            "图片理解超时，按占位符继续（后台继续回填）"
+        );
     }
 
     // ---- 7. 回复生成（失败不发送；不写半条） ----
@@ -300,7 +323,17 @@ pub(crate) async fn handle_event(
     let target = OutboundTarget {
         external_ref: event.external_ref.clone(),
     };
-    let message = OutboundMessage::text(reply);
+    // 出站兜底：多气泡契约分隔符替换为换行（库内回复原文不改）
+    let sanitized = sanitize_outbound_text(&reply);
+    let sanitized = sanitized.trim();
+    if sanitized.is_empty() {
+        tracing::warn!(
+            session_id = %outcome.session_id,
+            "净化后出站文本为空，跳过发送"
+        );
+        return;
+    }
+    let message = OutboundMessage::text(sanitized.to_string());
     send_with_retry(transport, &target, &message, options).await;
 }
 

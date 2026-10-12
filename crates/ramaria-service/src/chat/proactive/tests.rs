@@ -121,6 +121,58 @@ async fn new_session_path_creates_session_with_single_message() {
 }
 
 // =========================================================
+// 分段格式（按目标会话通道）
+// =========================================================
+
+/// 分段格式跟随目标会话通道：QQ 会话声明换行分条；本地新建不追加声明。
+#[tokio::test]
+async fn segment_style_follows_target_channel() {
+    let llm = Arc::new(MockLlm::with_reply(REPLY));
+    let (engine, storage, dir) = engine_with_shared_llm(
+        "proactive-segment-style",
+        Arc::clone(&llm),
+        RamariaConfig::default(),
+        None,
+    )
+    .await;
+    seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+    engine.set_state(AppState::Ready);
+
+    // 目标为 QQ 会话 → 提示词追加换行分段声明
+    let qq_session = storage
+        .create_session_in_channel(Some(DEFAULT_PERSONA_UID), "qq", Some("c2c:10001"))
+        .await
+        .expect("建通道会话应成功");
+    run(&engine, directive(DEFAULT_PERSONA_UID, Some(qq_session.id)))
+        .await
+        .expect("主动生成应成功")
+        .expect("应产出主动消息");
+
+    // 本地新建会话 → 沿用多气泡契约
+    run(&engine, directive(DEFAULT_PERSONA_UID, None))
+        .await
+        .expect("主动生成应成功")
+        .expect("应产出主动消息");
+
+    let requests = llm.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[0]
+            .system_prompt
+            .contains(ramaria_memory::chat::CHANNEL_SEGMENT_DECLARATION),
+        "QQ 目标会话提示词应含换行分段声明"
+    );
+    assert!(
+        !requests[1]
+            .system_prompt
+            .contains(ramaria_memory::chat::CHANNEL_SEGMENT_DECLARATION),
+        "本地新建会话不应追加分段声明"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// =========================================================
 // 门禁静默跳过（不落库不投递）
 // =========================================================
 

@@ -254,7 +254,8 @@ fn image_segment_without_url_degrades_to_text() {
     );
 }
 
-/// 混合段序列：text + at + image + reply + 未知段（未知忽略、顺序保持）。
+/// 混合段序列：text + at + image + reply + 表情 + 未知段（表情折叠占位、
+/// 未知忽略、顺序保持）。
 #[test]
 fn mixed_segments_preserve_order_and_ignore_unknown() {
     let sent_ids = SentMessageCache::new();
@@ -272,14 +273,15 @@ fn mixed_segments_preserve_order_and_ignore_unknown() {
             { "type": "at", "data": { "qq": "42" } },
             { "type": "image", "data": { "url": "https://example.com/a.png", "file_size": "10" } },
             { "type": "reply", "data": { "id": "777" } },
-            { "type": "face", "data": { "id": "1" } }
+            { "type": "face", "data": { "id": "1" } },
+            { "type": "record", "data": { "file": "x.silk" } }
         ]
     })
     .to_string();
 
     let event = parse_event(&json, &sent_ids).expect("应解析成功");
     assert!(event.should_respond);
-    assert_eq!(event.segments.len(), 3);
+    assert_eq!(event.segments.len(), 4);
     assert_eq!(
         event.segments[0],
         InboundSegment::Text("看这个".to_string())
@@ -292,6 +294,60 @@ fn mixed_segments_preserve_order_and_ignore_unknown() {
         }
         other => panic!("应为图片段: {other:?}"),
     }
+    assert_eq!(
+        event.segments[3],
+        InboundSegment::Text("[表情]".to_string()),
+        "表情段应折叠为占位文本"
+    );
+}
+
+/// 纯表情消息（face / mface / bface）：折叠为 `[表情]` 占位段，
+/// 段序列非空（经组装层入库，不被空正文丢弃）。
+#[test]
+fn face_only_message_degrades_to_placeholder() {
+    let sent_ids = SentMessageCache::new();
+    let json = json!({
+        "post_type": "message",
+        "message_type": "private",
+        "user_id": 10001,
+        "self_id": 42,
+        "time": 1,
+        "message": [
+            { "type": "face", "data": { "id": "1" } },
+            { "type": "mface", "data": { "emoji_id": "abc" } },
+            { "type": "bface", "data": { "id": "9" } }
+        ]
+    })
+    .to_string();
+
+    let event = parse_event(&json, &sent_ids).expect("表情消息应解析成功");
+    assert_eq!(
+        event.segments,
+        vec![
+            InboundSegment::Text("[表情]".to_string()),
+            InboundSegment::Text("[表情]".to_string()),
+            InboundSegment::Text("[表情]".to_string()),
+        ]
+    );
+    assert!(event.should_respond, "私聊表情消息应响应");
+}
+
+/// 纯语音消息（record）：仍不产段（段序列为空，经组装层按空正文丢弃）。
+#[test]
+fn record_only_message_produces_no_segments() {
+    let sent_ids = SentMessageCache::new();
+    let json = json!({
+        "post_type": "message",
+        "message_type": "private",
+        "user_id": 10001,
+        "self_id": 42,
+        "time": 1,
+        "message": [{ "type": "record", "data": { "file": "x.silk" } }]
+    })
+    .to_string();
+
+    let event = parse_event(&json, &sent_ids).expect("事件本身可解析");
+    assert!(event.segments.is_empty(), "语音段不产占位");
 }
 
 /// 非 message 事件（meta_event / notice）忽略。

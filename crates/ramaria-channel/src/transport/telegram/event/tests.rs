@@ -439,6 +439,51 @@ fn document_image_and_non_image() {
     assert!(parse(pdf_document).is_none(), "非图片文档应忽略");
 }
 
+/// 表情贴纸（sticker-only）：降级为 `[表情]` 占位文本段（不整条丢弃）。
+#[test]
+fn sticker_only_degrades_to_placeholder() {
+    let update = json!({
+        "update_id": 130,
+        "message": {
+            "message_id": 305,
+            "from": { "id": 10001, "is_bot": false, "first_name": "小明" },
+            "chat": { "id": 10001, "first_name": "小明", "type": "private" },
+            "date": 1_700_000_010,
+            "sticker": { "file_id": "CAACsticker", "emoji": "😀", "width": 512, "height": 512 }
+        }
+    });
+    let event = parse(update).expect("贴纸消息应解析成功");
+    assert_eq!(
+        event.segments,
+        vec![InboundSegment::Text("[表情]".to_string())]
+    );
+    assert!(event.should_respond, "私聊贴纸消息应响应");
+}
+
+/// 表情贴纸带配文：`[表情]` 占位后追加配文文本段（空白修剪）。
+#[test]
+fn sticker_with_caption_appends_text() {
+    let update = json!({
+        "update_id": 131,
+        "message": {
+            "message_id": 306,
+            "from": { "id": 10001, "is_bot": false, "first_name": "小明" },
+            "chat": { "id": 10001, "first_name": "小明", "type": "private" },
+            "date": 1_700_000_011,
+            "sticker": { "file_id": "CAACsticker" },
+            "caption": "  就这个表情  "
+        }
+    });
+    let event = parse(update).expect("贴纸配文消息应解析成功");
+    assert_eq!(
+        event.segments,
+        vec![
+            InboundSegment::Text("[表情]".to_string()),
+            InboundSegment::Text("就这个表情".to_string()),
+        ]
+    );
+}
+
 /// 服务消息（无文本与媒体）→ None；空文本消息 → None。
 #[test]
 fn service_message_and_empty_text_ignored() {

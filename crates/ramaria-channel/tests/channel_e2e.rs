@@ -34,6 +34,7 @@ use serde_json::json;
 /// e2e 上下文（mock 协议端 / 存储 / 传输 / 编排任务）。
 struct E2e {
     server: MockNapCatServer,
+    engine: Arc<ramaria_service::Engine>,
     storage: Arc<SqliteStorage>,
     sink: Arc<RecordingSink>,
     transport: Arc<OneBotTransport>,
@@ -64,11 +65,13 @@ async fn setup(tag: &str, token: Option<&str>, downloader: Arc<dyn ImageDownload
             min_send_interval: Duration::from_millis(10),
             send_retry_delay: Duration::from_millis(10),
             send_max_attempts: 2,
+            ..WorkerOptions::default()
         },
     );
     transport.connect().await.expect("连接应成功");
     E2e {
         server,
+        engine,
         storage,
         sink,
         transport,
@@ -78,6 +81,14 @@ async fn setup(tag: &str, token: Option<&str>, downloader: Arc<dyn ImageDownload
 }
 
 impl E2e {
+    /// 显式放行绑定（自动建档默认禁用；白名单语义：启用后才响应）。
+    async fn allow(&self, external_ref: &str) {
+        self.engine
+            .channel_set_binding("qq", external_ref, None, Some(true), None)
+            .await
+            .expect("显式放行绑定应成功");
+    }
+
     /// 等待客户端连接上线。
     async fn wait_online(&self) {
         let transport = Arc::clone(&self.transport);
@@ -169,6 +180,7 @@ fn private_image_event(url: &str, message_id: i64) -> String {
 async fn private_message_end_to_end() {
     let ctx = setup("private", None, StubImageDownloader::failing()).await;
     ctx.wait_online().await;
+    ctx.allow("c2c:10001").await;
 
     ctx.server.push_event(&private_event("你好", 101));
     ctx.wait_requests("send_private_msg", 1).await;
@@ -215,11 +227,39 @@ async fn private_message_end_to_end() {
     ctx.teardown().await;
 }
 
+/// 未放行绑定：事件被丢弃——无出站请求、库内无会话消息。
+#[tokio::test]
+async fn unapproved_binding_is_dropped() {
+    let ctx = setup("unapproved", None, StubImageDownloader::failing()).await;
+    ctx.wait_online().await;
+
+    // 不调用 allow：自动建档默认禁用
+    ctx.server.push_event(&private_event("你好", 601));
+
+    // 稳定窗口：确认丢弃路径没有产生出站与落库
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        ctx.server.received_actions("send_private_msg").is_empty(),
+        "未放行绑定不应出站"
+    );
+    assert!(
+        ctx.storage
+            .find_active_session_by_channel("qq", Some("c2c:10001"))
+            .await
+            .expect("查询会话应成功")
+            .is_none(),
+        "未放行绑定不应落库"
+    );
+
+    ctx.teardown().await;
+}
+
 /// 群 @ 触发：事件带 at 本机段 → 以群接口回发。
 #[tokio::test]
 async fn group_mention_end_to_end() {
     let ctx = setup("group-mention", None, StubImageDownloader::failing()).await;
     ctx.wait_online().await;
+    ctx.allow("group:20002").await;
 
     ctx.server.push_event(&group_at_event("在吗", 201));
     ctx.wait_requests("send_group_msg", 1).await;
@@ -259,6 +299,7 @@ async fn group_mention_end_to_end() {
 async fn duplicate_event_single_write_and_reply() {
     let ctx = setup("duplicate", None, StubImageDownloader::failing()).await;
     ctx.wait_online().await;
+    ctx.allow("c2c:10001").await;
 
     let event = private_event("重复消息", 301);
     ctx.server.push_event(&event);
@@ -313,6 +354,7 @@ async fn duplicate_event_single_write_and_reply() {
 async fn disconnect_reconnects_and_resumes() {
     let ctx = setup("reconnect", None, StubImageDownloader::failing()).await;
     ctx.wait_online().await;
+    ctx.allow("c2c:10001").await;
 
     ctx.server.push_event(&private_event("第一条", 401));
     ctx.wait_requests("send_private_msg", 1).await;
@@ -358,6 +400,7 @@ async fn image_message_end_to_end() {
     let downloader = StubImageDownloader::succeeding(&image_bytes);
     let ctx = setup("image", None, downloader).await;
     ctx.wait_online().await;
+    ctx.allow("c2c:10001").await;
 
     ctx.server
         .push_event(&private_image_event("https://example.com/a.png", 501));

@@ -12,7 +12,8 @@
 //! - 主动模式：消息位为选题锚点（可为空），请求的用户消息位留空，
 //!   提示词装配注入主动开口段
 //! - 历史窗口：分页倒序加载，条数上限与字符预算取 `[session]` 配置（预算按渲染后正文计），
-//!   读取失败保留已加载部分；图片占位符按附件描述渲染（附件查询失败降级原文）
+//!   读取失败保留已加载部分；图片占位符按附件状态渲染（完成 → 描述、处理中 → 提示、
+//!   其余保留裸占位符；附件查询失败降级原文）
 //! - 降级纪律：会话 NULL 归属回写 / 弱反馈检测失败均只记 warn，不阻塞生成
 
 use chrono::Timelike;
@@ -22,9 +23,9 @@ use ramaria_core::time_period::TimePeriod;
 use ramaria_core::traits::{ChatMessage, ChatRequest, StorageBackend};
 use ramaria_core::types::{
     AppState, BackendConfig, Message, MessageAttachment, MessageRole, MessageSource, Session,
-    build_render_map, new_id, replace_image_placeholders,
+    new_id, replace_image_placeholders,
 };
-use ramaria_memory::chat::PromptMaterialInputs;
+use ramaria_memory::chat::{PromptMaterialInputs, SegmentStyle};
 use ramaria_memory::prompt::builder::ProactivePromptContext;
 use uuid::Uuid;
 
@@ -35,6 +36,7 @@ use super::context::{
     step_apply_token_budget, step_build_prompt, step_build_request, step_load_examples,
     step_load_knowledge, step_load_narrative, step_recall, step_route_behavior,
 };
+use super::render::{build_history_render_map, load_message_attachments};
 
 /// 历史加载分页条数（实现常量；加载条数与字符预算由 `[session]` 配置提供）。
 const HISTORY_PAGE_SIZE: i64 = 20;
@@ -73,6 +75,8 @@ pub(super) struct ChatInput {
     pub(super) seed_history: Vec<ChatMessage>,
     /// 消息是否已入历史（社交通道回复：入站消息已落库，请求用户消息位留空）。
     pub(super) message_in_history: bool,
+    /// 回复分段格式（通道式入口按目标通道声明；其余入口沿用多气泡契约）。
+    pub(super) segment_style: SegmentStyle,
     /// 主动生成输入（仅 `Proactive` 模式使用；其余模式为 None）。
     pub(super) proactive: Option<ProactiveInput>,
 }
@@ -204,6 +208,7 @@ pub(super) async fn prepare_request(
         style_enabled: config.style.enabled,
         rag_text: memory_context.as_deref(),
         layer_dedup: &config.layer_dedup,
+        segment_style: input.segment_style,
         proactive: if input.mode == ChatMode::Proactive {
             build_proactive_prompt(input)
         } else {
@@ -577,7 +582,7 @@ pub(super) async fn step_load_history(
         // 字符预算按渲染后正文计算（附件描述注入会加长实际进入 Prompt 的文本；
         // 查询失败降级为空映射 → 按原文计量）
         let page_attachments = load_message_attachments(storage, &page).await;
-        let page_map = build_render_map(&page_attachments);
+        let page_map = build_history_render_map(&page_attachments);
         for message in &page {
             total_chars += replace_image_placeholders(&message.content, &page_map)
                 .chars()
@@ -598,31 +603,13 @@ pub(super) async fn step_load_history(
     loaded.sort_by_key(|message| message.created_at);
 
     // 最终映射由全部已加载消息的附件行构建（同一 md5 描述一致，跨页无冲突）
-    let render_map = build_render_map(&attachment_rows);
+    let render_map = build_history_render_map(&attachment_rows);
     let mut merged = seed_history.to_vec();
     merged.extend(loaded.into_iter().map(|message| ChatMessage {
         role: message.role,
         content: replace_image_placeholders(&message.content, &render_map),
     }));
     merged
-}
-
-/// 加载消息附件行（查询失败记 warn 并返回空列表：正文保留占位符原文）。
-async fn load_message_attachments(
-    storage: &dyn StorageBackend,
-    messages: &[Message],
-) -> Vec<MessageAttachment> {
-    let message_ids: Vec<Uuid> = messages.iter().map(|m| m.id).collect();
-    if message_ids.is_empty() {
-        return Vec::new();
-    }
-    match storage.list_attachments_by_messages(&message_ids).await {
-        Ok(rows) => rows,
-        Err(e) => {
-            tracing::warn!(error = %e, "历史窗口附件查询失败，正文保留占位符原文");
-            Vec::new()
-        }
-    }
 }
 
 /// 步骤 7（仅交互式）：弱反馈检测（S2 纠正 / S3 继续）。

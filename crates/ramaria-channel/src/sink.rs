@@ -2,6 +2,7 @@
 //!
 //! 设计特点:
 //! - 职责单一：按通道查找已装配的传输、向目标外部会话发送文本、可重试错误退避重试
+//! - 出站文本净化：多气泡契约分隔符替换为换行（库内消息原文不改）
 //! - 不持有 Engine：依赖在构造时以「通道名 → 传输」映射注入，避免宿主侧引用环
 //! - 绑定与开关门禁由服务层调度在投递前完成，本端不做业务判定
 //! - 最终失败返回错误（调度侧按平台失败不记账）；日志脱敏，不记消息内容
@@ -15,6 +16,7 @@ use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::privacy::mask_id;
 use ramaria_service::{ProactiveMessage, ProactiveSink};
 
+use crate::runtime::outbound::sanitize_outbound_text;
 use crate::transport::{OutboundMessage, OutboundTarget, Transport};
 
 // =========================================================
@@ -85,7 +87,19 @@ impl ProactiveSink for ChannelProactiveSink {
         let target = OutboundTarget {
             external_ref: external_ref.to_string(),
         };
-        let outbound = OutboundMessage::text(message.content.clone());
+        // 出站兜底：多气泡契约分隔符替换为换行（库内消息原文不改）
+        let sanitized = sanitize_outbound_text(&message.content);
+        let sanitized = sanitized.trim();
+        if sanitized.is_empty() {
+            tracing::warn!(
+                channel = %message.channel,
+                external_ref = %mask_id(external_ref),
+                message_id = %message.message_id,
+                "净化后主动消息内容为空，跳过发送"
+            );
+            return Ok(());
+        }
+        let outbound = OutboundMessage::text(sanitized.to_string());
 
         let mut attempt = 1;
         loop {

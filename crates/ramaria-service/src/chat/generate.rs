@@ -18,6 +18,7 @@ use futures::channel::mpsc;
 use ramaria_core::error::RamariaResult;
 use ramaria_core::traits::{ChatRequest, StorageBackend, StreamDelta};
 use ramaria_core::types::{Message, MessageRole, MessageSource, now_ms};
+use ramaria_memory::chat::SegmentStyle;
 use uuid::Uuid;
 
 use crate::engine::Engine;
@@ -59,6 +60,7 @@ pub(crate) async fn run(engine: &Engine, req: ChatSendRequest) -> RamariaResult<
         conversation_id: req.conversation_id,
         seed_history: Vec::new(),
         message_in_history: false,
+        segment_style: SegmentStyle::Pipe,
         proactive: None,
     };
 
@@ -130,6 +132,7 @@ pub(crate) async fn stream(
         conversation_id: None,
         seed_history: req.seed_history,
         message_in_history: false,
+        segment_style: SegmentStyle::Pipe,
         proactive: None,
     };
 
@@ -203,6 +206,8 @@ pub(crate) async fn reply_to_inbound(
         conversation_id: None,
         seed_history: Vec::new(),
         message_in_history: true,
+        // 社交通道回复：出站为即时通讯平台，按换行分条声明
+        segment_style: SegmentStyle::Newline,
         proactive: None,
     };
 

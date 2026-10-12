@@ -15,6 +15,7 @@ use crate::status::ChannelStatus;
 
 pub mod assemble;
 pub mod download;
+pub mod outbound;
 pub mod worker;
 
 // =========================================================
