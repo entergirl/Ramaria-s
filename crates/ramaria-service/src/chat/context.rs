@@ -59,6 +59,8 @@ pub(super) async fn step_recall(
     let policy = engine.recall_policy();
     let retriever = engine.retriever_slot();
     let keyword_mirror = engine.keyword_mirror();
+    // 人格类型按 persona 行显式解析（行缺失 / 读取失败 → None，共用召回内部保守降级）
+    let persona_kind = crate::recall::resolve_persona_kind(storage, persona).await;
     let recall = assemble_recall(RecallInput {
         retriever: &*retriever,
         keyword_mirror: &*keyword_mirror,
@@ -66,6 +68,7 @@ pub(super) async fn step_recall(
         embedding: embedding.as_deref(),
         query: message,
         persona_uid: Some(persona),
+        persona_kind,
         retrieval: &config.retrieval,
         decay: &config.decay,
         utt: &config.utt,

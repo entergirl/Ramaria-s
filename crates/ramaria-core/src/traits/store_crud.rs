@@ -199,22 +199,6 @@ pub trait StoreCrud: Send + Sync {
         Ok(Vec::new())
     }
 
-    /// 统计会话内的去重发言者数（按消息 `persona_uid` 去重）。
-    ///
-    /// 职责:
-    /// - 供调用方按参与人数区分会话形态（如私聊双方 / 群聊多人），
-    ///   决定后续摘要生成的分发口径。
-    ///
-    /// 语义:
-    /// - 仅统计 `persona_uid IS NOT NULL` 的消息发送者；
-    /// - 同一发送者多条消息只计一次。
-    ///
-    /// 默认实现:
-    /// - 返回 0（未覆写 mock 视为"无发言者信息"，调用方按未知降级处理）。
-    async fn count_session_speakers(&self, _session_id: Uuid) -> RamariaResult<u32> {
-        Ok(0)
-    }
-
     /// 查询"已关闭且缺 L1 摘要"的本地会话 id 列表（补跑候选）。
     ///
     /// 职责:

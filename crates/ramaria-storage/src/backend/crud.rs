@@ -82,10 +82,6 @@ impl StoreCrud for SqliteStorage {
     async fn list_session_members(&self, session_id: Uuid) -> RamariaResult<Vec<SessionMember>> {
         repo::session_members::list_by_session(&self.pool, session_id).await
     }
-    /// 覆写为单条 COUNT(DISTINCT) 聚合（去重发言者口径）。
-    async fn count_session_speakers(&self, session_id: Uuid) -> RamariaResult<u32> {
-        repo::sessions::count_speakers(&self.pool, session_id).await
-    }
     /// 覆写为 EXISTS / NOT EXISTS 联合过滤查询（缺失 L1 的已关闭会话候选）。
     async fn list_closed_sessions_missing_l1(&self, limit: u32) -> RamariaResult<Vec<Uuid>> {
         repo::sessions::list_closed_missing_l1(&self.pool, limit).await

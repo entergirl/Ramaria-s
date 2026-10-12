@@ -346,26 +346,6 @@ pub async fn list_all(pool: &SqlitePool) -> RamariaResult<Vec<Session>> {
         .collect::<Result<Vec<_>, _>>()
 }
 
-/// 统计会话内的去重发言者数（`messages.persona_uid` 去重，NULL 不计）。
-///
-/// 口径:
-/// - 仅统计带 persona 归属的消息；同一发送者多条消息只计一次；
-/// - 会话不存在或无带归属消息时返回 0。
-///
-/// 参数:
-/// - `session_id`: 目标会话。
-pub async fn count_speakers(pool: &SqlitePool, session_id: Uuid) -> RamariaResult<u32> {
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(DISTINCT persona_uid) FROM messages \
-         WHERE session_id = ? AND persona_uid IS NOT NULL",
-    )
-    .bind(session_id.to_string())
-    .fetch_one(pool)
-    .await
-    .storage_err("统计会话发言者失败")?;
-    Ok(count.max(0) as u32)
-}
-
 /// 查询"已关闭且缺 L1 摘要"的本地会话 id 列表（补跑候选）。
 ///
 /// 口径:

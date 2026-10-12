@@ -82,9 +82,9 @@ async fn list_mode_matrix_reflects_dialogue_and_switch() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// user 类硬排除：行值为 user 与 uid 前缀兜底两种形态即使强开也不生效。
+/// user 类硬排除按显式载体：行 kind=user 即使强开也不生效；uid 形似 user 但行 kind=char 生效。
 #[tokio::test]
-async fn list_user_persona_never_effective() {
+async fn list_user_persona_follows_row_kind() {
     let (engine, storage, dir) = engine_with_db("proactive-roster-user").await;
 
     seed_persona_kind(storage.as_ref(), "user-0001", PersonaKind::User).await;
@@ -107,7 +107,7 @@ async fn list_user_persona_never_effective() {
         .expect("名单应包含 user-0001");
     assert_eq!(row.kind, "user", "行值 kind 应透传");
     assert_eq!(row.mode, "on", "显式强开应如实展示");
-    assert!(!row.effective, "user 类即使强开也不生效");
+    assert!(!row.effective, "行 kind=user 即使强开也不生效");
 
     let fallback = views
         .iter()
@@ -115,7 +115,7 @@ async fn list_user_persona_never_effective() {
         .expect("名单应包含 user-0002");
     assert_eq!(fallback.kind, "char", "行值 kind 应透传");
     assert!(fallback.has_local_dialogue, "前置条件：应有本地对话");
-    assert!(!fallback.effective, "uid 前缀兜底为 user 类也不生效");
+    assert!(fallback.effective, "行 kind=char 不因 uid 前缀被排除");
 
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -287,28 +287,37 @@ async fn set_rejects_invalid_mode() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// 写用例拒绝 user 类：行值为 user 与 uid 前缀兜底两种形态均不可设置。
+/// 写用例的 user 类判定按显式载体：行 kind=user 拒绝；uid 形似 user 但行 kind=char 可设置。
 #[tokio::test]
-async fn set_rejects_user_persona() {
+async fn set_user_persona_follows_row_kind() {
     let (engine, storage, dir) = engine_with_db("proactive-roster-userwrite").await;
 
     seed_persona_kind(storage.as_ref(), "user-0001", PersonaKind::User).await;
     seed_persona_kind(storage.as_ref(), "user-0009", PersonaKind::Char).await;
 
-    for uid in ["user-0001", "user-0009"] {
-        let err = set_persona_mode(&engine, uid, "on")
-            .await
-            .expect_err("user 类应被拒绝");
-        assert!(
-            matches!(&err, RamariaError::Validation { .. }),
-            "uid={uid} 应为业务校验错误，实际: {err}"
-        );
-        let raw = storage
-            .get_setting(&format!("proactive.persona.{uid}"))
-            .await
-            .expect("读取原始键应成功");
-        assert!(raw.is_none(), "被拒的 user 类不应落键: uid={uid}");
-    }
+    // 行 kind=user → 拒绝且不落键
+    let err = set_persona_mode(&engine, "user-0001", "on")
+        .await
+        .expect_err("行 kind=user 应被拒绝");
+    assert!(
+        matches!(&err, RamariaError::Validation { .. }),
+        "行 kind=user 应为业务校验错误，实际: {err}"
+    );
+    let raw = storage
+        .get_setting("proactive.persona.user-0001")
+        .await
+        .expect("读取原始键应成功");
+    assert!(raw.is_none(), "被拒的 user 类不应落键");
+
+    // 行 kind=char → 可设置（类型以行值为准，uid 前缀不参与判定）
+    set_persona_mode(&engine, "user-0009", "on")
+        .await
+        .expect("行 kind=char 应可设置");
+    let raw = storage
+        .get_setting("proactive.persona.user-0009")
+        .await
+        .expect("读取原始键应成功");
+    assert_eq!(raw.as_deref(), Some("on"), "行 kind=char 应落键");
 
     let _ = std::fs::remove_dir_all(dir);
 }

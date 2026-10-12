@@ -410,53 +410,8 @@ async fn mark_read_roundtrip_and_missing_session_idempotent() {
 }
 
 // =========================================================
-// 发言者统计与缺失 L1 候选
+// 缺失 L1 候选
 // =========================================================
-
-/// 发言者去重统计：同人多条计一次、NULL 不计、空会话为 0。
-#[tokio::test]
-async fn count_speakers_distinct_non_null() {
-    let pool = init_test_pool().await.expect("测试库初始化成功");
-    // messages.persona_uid 有外键：先建两条 persona
-    for (seq, uid) in [(1, "user-0001"), (2, "char-0002")] {
-        sqlx::query(
-            "INSERT INTO personas (uid, name, kind, seq, source, created_at, updated_at) \
-             VALUES (?, '测试', 'char', ?, 'local', 0, 0)",
-        )
-        .bind(uid)
-        .bind(seq)
-        .execute(&pool)
-        .await
-        .expect("插入 persona fixture 应成功");
-    }
-    let session = create(&pool, None).await.expect("创建 session 成功");
-
-    // 4 条消息：两个不同 persona（其一重复）+ 一条无归属
-    for (role, uid) in [
-        (MessageRole::User, Some("user-0001")),
-        (MessageRole::Assistant, Some("char-0002")),
-        (MessageRole::Assistant, Some("char-0002")),
-        (MessageRole::User, None),
-    ] {
-        let mut message = Message::new(session.id, role, "内容".to_string(), MessageSource::Local);
-        message.persona_uid = uid.map(str::to_string);
-        crate::repo::messages::save_import(&pool, &message)
-            .await
-            .expect("插入消息成功");
-    }
-
-    assert_eq!(
-        count_speakers(&pool, session.id).await.expect("统计应成功"),
-        2,
-        "去重且不计 NULL 归属"
-    );
-    let empty = create(&pool, None).await.expect("创建空会话成功");
-    assert_eq!(
-        count_speakers(&pool, empty.id).await.expect("统计应成功"),
-        0,
-        "无消息会话为 0"
-    );
-}
 
 /// 缺失 L1 候选：四条件过滤（本地 / 已关闭 / 有消息 / 无 L1）+ 排序 + limit。
 #[tokio::test]

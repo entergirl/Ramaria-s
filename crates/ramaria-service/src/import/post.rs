@@ -28,7 +28,8 @@ use super::l1::{ImportL1Outcome, ImportL1Plan, ImportProgressSink, generate_l1};
 /// - `l1_targets`: 每个目标一次 L1 生成（`group_fanout` 为 true 时忽略）；
 /// - `l1_prefix`: L1 角色前缀覆盖（`None` = 摘要器默认前缀；`group_fanout` 为 true 时忽略）；
 /// - `group_fanout`: 参与者分发（为 true 时忽略 `l1_targets` 与 `l1_prefix`）；
-/// - `fanout_include_self`: 分发参与者含"我"（仅 `group_fanout` 为 true 时生效）；
+/// - `fanout_include_self`: 分发参与者含"我"（User 角色发言者）；
+///   仅 `group_fanout` 为 true 时生效（导入分发恒开启）；
 /// - `l1_cascade`: 每次 L1 生成末尾触发 L2 检查（逐次级联）；
 /// - `cascade_deep`: L1 全部完成后统一触发 L2 → L3 级联（深度模式）；
 /// - `throttle_ms`: 连续 LLM 调用之间的最小间隔（毫秒，0 = 不等待）。

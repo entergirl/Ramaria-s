@@ -33,7 +33,7 @@ use crate::eta::{EtaEstimator, PhaseKind};
 /// - `group_fanout`: 参与者分发：每会话一次生成 × 块内参与者复制 L1 行；
 ///   为 true 时忽略 `targets` 与 `l1_prefix`（分发恒用空前缀）；
 /// - `fanout_include_self`: 分发参与者含"我"（User 角色发言者）；
-///   仅 `group_fanout` 为 true 时生效（私聊双方分发口径）。
+///   仅 `group_fanout` 为 true 时生效（导入分发恒开启）。
 #[derive(Debug, Clone)]
 pub struct ImportL1Plan {
     /// L1 生成目标列表（每个目标一次调用）
@@ -323,8 +323,8 @@ pub(crate) async fn generate_l1(
 /// 会话生成分发 L1 摘要（每会话一次生成，块内参与者复制成多行）。
 ///
 /// 口径:
-/// - `include_self=false`：参与者为他人（Assistant 角色发言者），群聊口径；
-/// - `include_self=true`：参与者含"我"（User 角色发言者），私聊双方口径。
+/// - `include_self=false`：参与者为他人（Assistant 角色发言者），他人行口径；
+/// - `include_self=true`：参与者含"我"（User 角色发言者），导入分发恒用此口径。
 ///
 /// 流程:
 /// 1. 读会话消息；无消息 → 记 warn 并返回空列表；

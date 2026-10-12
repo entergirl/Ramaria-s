@@ -337,8 +337,7 @@ pub async fn import_qq_chat(
     );
 
     // ---- Step 4: L1 批量生成与深度处理（后台异步，避免阻塞前端） ----
-    // 分发口径统一：私聊双侧各一行（含"我"）、群聊他人行；每会话一次生成（忽略 targets）。
-    let fanout_include_self = outcome.chat_type != "group";
+    // 分发口径：恒含"我"（导出者）在内、块内参与者各一行；每会话一次生成（忽略 targets）。
     // 批量 LLM 请求间最小间隔（毫秒）：读当前生效配置的 `[thresholds].cluster_delay_ms`，
     // 导入会连续多次调用 LLM，无节流时易触发远程 API 速率限制。
     // 读取失败时降级为 0（不阻塞导入）。
@@ -369,7 +368,7 @@ pub async fn import_qq_chat(
                         l1_targets: Vec::new(),
                         l1_prefix: None,
                         group_fanout: true,
-                        fanout_include_self,
+                        fanout_include_self: true,
                         l1_cascade: false,
                         cascade_deep: is_deep,
                         throttle_ms,

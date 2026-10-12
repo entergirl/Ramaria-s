@@ -528,6 +528,51 @@ async fn continue_private_import_produces_dual_l1_rows() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// 群聊续跑：继续处理的分发恒含"我"与块内他人——各 persona 一行、摘要内容一致。
+#[tokio::test]
+async fn continue_group_import_produces_rows_per_speaker() {
+    let llm = Arc::new(MockLlm::with_reply(L1_JSON_REPLY));
+    let (engine, storage, dir) =
+        resume_env("resume-group-fanout", llm, RamariaConfig::default()).await;
+
+    let session = seed_closed_session(
+        &storage,
+        &[
+            Some("user-10001"),
+            Some("char-90002"),
+            Some("user-10001"),
+            Some("char-90003"),
+        ],
+    )
+    .await;
+
+    let outcome = engine
+        .continue_import(continue_request(), None)
+        .await
+        .expect("继续处理应成功");
+    assert_eq!(outcome.l1.l1_success, 1);
+
+    let rows = storage
+        .list_memory_l1(session)
+        .await
+        .expect("读取 L1 应成功");
+    assert_eq!(rows.len(), 3, "群聊续跑应产生三位发言者各一行");
+    let personas: Vec<&str> = rows
+        .iter()
+        .filter_map(|row| row.persona_uid.as_deref())
+        .collect();
+    assert_eq!(personas.len(), 3, "不应存在无归属行");
+    for uid in ["user-10001", "char-90002", "char-90003"] {
+        assert!(personas.contains(&uid), "应含 {uid} 行: {personas:?}");
+    }
+    assert!(
+        rows.iter().all(|row| row.summary == rows[0].summary),
+        "分发行摘要内容一致（同一生成结果复制）"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// 深度级联：cascade_deep=true 且补跑成功时触发 L2 → L3（进度含 l2 / l3 阶段）。
 #[tokio::test]
 async fn continue_cascade_deep_triggers_after_success() {

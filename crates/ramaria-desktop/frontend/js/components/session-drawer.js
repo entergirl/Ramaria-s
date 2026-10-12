@@ -274,7 +274,7 @@ var RamariaSessionDrawer = (function () {
      * 过滤逻辑:
      * - 先按 _filterText 过滤（匹配 persona_name / session id / 时间）。
      * - 按状态分组：活跃（ended_at === null）在前，已关闭在后。
-     * - 导入会话通过 persona_uid 前缀（char-/anim-/oc-/hist-）推断。
+     * - 导入会话按归属 persona 的 source（qq = 导入人格）识别。
      */
     function _renderSessionList() {
         var listEl = _dom.list;
@@ -415,7 +415,7 @@ var RamariaSessionDrawer = (function () {
         if (isActive) {
             tagHtml += '<span class="session-drawer-item-tag session-drawer-item-tag--active">活跃</span>';
         } else if (_isImportedSession(session)) {
-            // 判断是否为导入会话（persona_uid 以 char-/anim-/oc-/hist- 开头）
+            // 判断是否为导入会话（归属 persona 的 source 为 qq）
             var personaName = _getPersonaName(session.persona_uid);
             tagHtml += '<span class="session-drawer-item-tag session-drawer-item-tag--import">导入: ' +
                 RamariaEscape.escapeHtml(personaName) + '</span>';
@@ -519,16 +519,36 @@ var RamariaSessionDrawer = (function () {
     }
 
     /**
+     * 从 Store 缓存的 personas 列表中查找人格记录。
+     *
+     * 参数:
+     * - `personaUid`: 人格业务标识（如 "char-123456789"）。
+     *
+     * 返回:
+     * - 命中的人格对象；无人格列表 / 未命中 / 空 uid 返回 null。
+     */
+    function _findPersona(personaUid) {
+        if (!personaUid) return null;
+        var personas = RamariaStore.get('personas') || [];
+        for (var i = 0; i < personas.length; i++) {
+            if (personas[i].uid === personaUid) {
+                return personas[i];
+            }
+        }
+        return null;
+    }
+
+    /**
      * 判断会话是否为导入会话。
-     * 导入 persona 的 uid 以特定前缀开头。
+     *
+     * 规则（显式载体）:
+     * - 以会话归属 persona 的 `source` 为准：`qq` = QQ 导入人格（含导出者 user-{uin}）；
+     * - persona 未加载到 Store（列表未就绪 / 已删除）时按非导入处理。
      */
     function _isImportedSession(session) {
-        if (!session.persona_uid) return false;
-        var uid = session.persona_uid;
-        return uid.indexOf('char-') === 0 ||
-               uid.indexOf('anim-') === 0 ||
-               uid.indexOf('oc-') === 0 ||
-               uid.indexOf('hist-') === 0;
+        if (!session || !session.persona_uid) return false;
+        var persona = _findPersona(session.persona_uid);
+        return !!(persona && persona.source === 'qq');
     }
 
     /**
@@ -540,11 +560,9 @@ var RamariaSessionDrawer = (function () {
         // 默认人格使用中文名
         if (personaUid === 'rama-0001') return 'Rama';
 
-        var personas = RamariaStore.get('personas') || [];
-        for (var i = 0; i < personas.length; i++) {
-            if (personas[i].uid === personaUid) {
-                return personas[i].name || personaUid;
-            }
+        var persona = _findPersona(personaUid);
+        if (persona) {
+            return persona.name || personaUid;
         }
         // 回退：显示 uid 的短格式
         return personaUid.substring(0, 8) + '…';
@@ -841,6 +859,15 @@ var RamariaSessionDrawer = (function () {
          * - `null`：无未读。
          */
         unreadBadge: unreadBadge,
+
+        /**
+         * 判断会话是否为导入会话（供渲染复用与前端测试）。
+         *
+         * 返回:
+         * - `true`：归属 persona 的 source 为 qq；
+         * - `false`：其余（含 persona 未加载 / 无归属）。
+         */
+        isImportedSession: _isImportedSession,
     };
 })();
 

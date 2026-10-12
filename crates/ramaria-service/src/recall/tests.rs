@@ -13,17 +13,53 @@ use super::entry::resolve_query;
 use super::*;
 use crate::test_support::{
     MockLlm, engine_with_db, engine_with_llm_and_config, seed_l1 as seed_l1_raw, seed_persona,
+    seed_persona_kind,
 };
 use crate::types::{ChatRole, ChatTurn, RecallLayer, RecallMode, RecallRequest};
 use ramaria_core::config::RamariaConfig;
 use ramaria_core::traits::StoreCrud;
-use ramaria_core::types::{FactSource, FactTier, ProfileField};
+use ramaria_core::types::{FactSource, FactTier, PersonaKind, ProfileField};
 use ramaria_storage::SqliteStorage;
 use uuid::Uuid;
 
 /// 造一条 L1（默认不带关键词；BM25 直接命中摘要文本）。
 async fn seed_l1(storage: &SqliteStorage, persona: &str, summary: &str, created_at: i64) -> Uuid {
     seed_l1_raw(storage, persona, summary, None, created_at).await
+}
+
+/// 显式类型解析：行存在 → 行值 kind；行缺失 → None；读取失败 → None（保守降级）。
+#[tokio::test]
+async fn resolve_persona_kind_reads_row_value() {
+    let (engine, storage, dir) = engine_with_db("resolve-kind").await;
+    seed_persona(&storage, "char-0001").await;
+    seed_persona_kind(&storage, "user-0001", PersonaKind::User).await;
+
+    assert_eq!(
+        resolve_persona_kind(storage.as_ref(), "char-0001").await,
+        Some(PersonaKind::Char),
+        "行存在应按行值 kind 返回"
+    );
+    assert_eq!(
+        resolve_persona_kind(storage.as_ref(), "user-0001").await,
+        Some(PersonaKind::User),
+        "行值 kind=user 应如实返回（不按 uid 前缀推导）"
+    );
+    assert_eq!(
+        resolve_persona_kind(storage.as_ref(), "char-9999").await,
+        None,
+        "行缺失应返回 None（类型未知）"
+    );
+
+    // 连接池关闭 → 查询报错 → 保守返回 None（warn 日志，不向外抛错）
+    let pool = engine.sqlite_pool().expect("测试引擎应附着连接池");
+    pool.close().await;
+    assert_eq!(
+        resolve_persona_kind(storage.as_ref(), "char-0001").await,
+        None,
+        "读取失败应返回 None（类型未知）"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---- 策略 ----

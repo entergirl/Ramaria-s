@@ -57,6 +57,7 @@ async fn hit_assembles_context_and_hits() {
         embedding: None,
         query: "工作压力",
         persona_uid: Some("persona-0001"),
+        persona_kind: Some(PersonaKind::Char),
         retrieval: &cfg.retrieval,
         decay: &cfg.decay,
         utt: &cfg.utt,
@@ -91,6 +92,7 @@ async fn gates_closed_returns_empty() {
         embedding: None,
         query: "工作压力",
         persona_uid: Some("persona-0001"),
+        persona_kind: Some(PersonaKind::Char),
         retrieval: &cfg.retrieval,
         decay: &cfg.decay,
         utt: &cfg.utt,
@@ -123,6 +125,7 @@ async fn unloaded_slot_returns_empty() {
         embedding: None,
         query: "工作压力",
         persona_uid: Some("persona-0001"),
+        persona_kind: Some(PersonaKind::Char),
         retrieval: &cfg.retrieval,
         decay: &cfg.decay,
         utt: &cfg.utt,
@@ -170,6 +173,7 @@ async fn persona_filter_hides_low_share_event() {
         embedding: None,
         query: "秘密",
         persona_uid: Some("char-0001"),
+        persona_kind: Some(PersonaKind::Char),
         retrieval: &cfg.retrieval,
         decay: &cfg.decay,
         utt: &cfg.utt,
@@ -233,6 +237,7 @@ async fn memory_layer_switch_filters_sublayers() {
                 embedding: None,
                 query: "工作压力",
                 persona_uid: Some("char-0001"),
+                persona_kind: Some(PersonaKind::Char),
                 retrieval: &cfg.retrieval,
                 decay: &cfg.decay,
                 utt: &cfg.utt,
@@ -311,6 +316,7 @@ async fn utt_respects_persona_whitelist() {
         embedding: None,
         query: "公园",
         persona_uid: Some("char-0001"),
+        persona_kind: Some(PersonaKind::Char),
         retrieval: &cfg.retrieval,
         decay: &cfg.decay,
         utt: &cfg.utt,
@@ -332,6 +338,7 @@ async fn utt_respects_persona_whitelist() {
         embedding: None,
         query: "公园",
         persona_uid: Some("rama-0001"),
+        persona_kind: Some(PersonaKind::Rama),
         retrieval: &cfg.retrieval,
         decay: &cfg.decay,
         utt: &cfg.utt,
@@ -344,6 +351,136 @@ async fn utt_respects_persona_whitelist() {
     })
     .await;
     assert!(output.utt_context.is_none(), "白名单外不注入原文");
+}
+
+/// 显式载体（uid 与 kind 背离）：utt 白名单按 `persona_kind` 判定，不看 uid 前缀。
+#[tokio::test]
+async fn utt_whitelist_follows_persona_kind_not_uid_prefix() {
+    let cfg = config();
+    let storage = test_storage("utt-drift").await;
+    let retriever = RwLock::new(Retriever::new());
+    let make_utt = |id: i64, persona_uid: &str| UttDocView {
+        id,
+        persona_uid: persona_uid.to_string(),
+        session_id: Uuid::new_v4(),
+        block_text: "今天天气真好我们一起去公园".to_string(),
+        msg_count: 2,
+        created_at: 1_000,
+    };
+    {
+        let mut guard = retriever.write().expect("锁可用");
+        guard.index_utt(&make_utt(1, "user-9999"), None);
+        guard.index_utt(&make_utt(2, "char-9999"), None);
+    }
+
+    let run = |persona_uid: &'static str, kind: PersonaKind| {
+        let retriever = &retriever;
+        let storage = storage.as_ref();
+        let cfg = &cfg;
+        async move {
+            assemble_recall(RecallInput {
+                retriever,
+                keyword_mirror: &RwLock::new(KeywordService::new()),
+                storage,
+                embedding: None,
+                query: "公园",
+                persona_uid: Some(persona_uid),
+                persona_kind: Some(kind),
+                retrieval: &cfg.retrieval,
+                decay: &cfg.decay,
+                utt: &cfg.utt,
+                gates: RecallGates {
+                    memory_rag: false,
+                    utt: true,
+                },
+                memory_layers: RecallMemoryLayers::default(),
+                now_ms: 2_000,
+            })
+            .await
+        }
+    };
+
+    // uid 前缀形似 user，但类型为角色类 → 放行（旧前缀推导会拒绝）
+    let out = run("user-9999", PersonaKind::Char).await;
+    assert!(
+        out.utt_context.is_some(),
+        "类型为角色类应放行原文注入（不按 uid 前缀拒绝）"
+    );
+
+    // uid 前缀形似 char，但类型为 user 类 → 拒绝（旧前缀推导会放行）
+    let out = run("char-9999", PersonaKind::User).await;
+    assert!(
+        out.utt_context.is_none(),
+        "类型为 user 类应拒绝原文注入（不按 uid 前缀放行）"
+    );
+}
+
+/// Persona-Aware 阈值按显式类型：share=0.4 对 User 保留、对 Char 过滤、未知（None）按最严。
+#[tokio::test]
+async fn rag_threshold_follows_persona_kind() {
+    let cfg = config();
+    let storage = test_storage("kind-threshold").await;
+    let retriever = RwLock::new(Retriever::new());
+    {
+        let mut guard = retriever.write().expect("锁可用");
+        guard.index_l2(&L2DocView {
+            id: 7,
+            title: "边界分享事件".to_string(),
+            summary: "用户提到边界内容".to_string(),
+            keywords: Some("边界".to_string()),
+            attitude: None,
+            paraphrase: None,
+            persona_uid: "char-0001".to_string(),
+            share: 0.4,
+            confidence: 0.9,
+            created_at: 1_000,
+            start: 1_000,
+            salience: 0.8,
+        });
+    }
+
+    let run = |kind: Option<PersonaKind>| {
+        let retriever = &retriever;
+        let storage = storage.as_ref();
+        let cfg = &cfg;
+        async move {
+            assemble_recall(RecallInput {
+                retriever,
+                keyword_mirror: &RwLock::new(KeywordService::new()),
+                storage,
+                embedding: None,
+                query: "边界",
+                persona_uid: Some("char-0001"),
+                persona_kind: kind,
+                retrieval: &cfg.retrieval,
+                decay: &cfg.decay,
+                utt: &cfg.utt,
+                gates: RecallGates {
+                    memory_rag: true,
+                    utt: false,
+                },
+                memory_layers: RecallMemoryLayers::default(),
+                now_ms: 2_000,
+            })
+            .await
+        }
+    };
+
+    let user = run(Some(PersonaKind::User)).await;
+    assert_eq!(user.fused_count, 1, "融合层应命中事件");
+    assert_eq!(
+        user.filtered_count, 1,
+        "share=0.4 达 user 阈值（0.3）应保留"
+    );
+
+    let char_kind = run(Some(PersonaKind::Char)).await;
+    assert_eq!(
+        char_kind.filtered_count, 0,
+        "share=0.4 低于 char 阈值（0.5）应过滤"
+    );
+
+    let unknown = run(None).await;
+    assert_eq!(unknown.filtered_count, 0, "类型未知按最严阈值过滤");
 }
 
 /// 关键词镜像通道：镜像为空时静默跳过（不影响 BM25 命中）。
@@ -360,6 +497,7 @@ async fn keyword_mirror_empty_degrades_silently() {
         embedding: None,
         query: "Rust",
         persona_uid: Some("persona-0001"),
+        persona_kind: Some(PersonaKind::Char),
         retrieval: &cfg.retrieval,
         decay: &cfg.decay,
         utt: &cfg.utt,
@@ -409,6 +547,7 @@ async fn both_handles_produce_identical_output() {
         embedding: None,
         query: "工作压力",
         persona_uid: Some("persona-0001"),
+        persona_kind: Some(PersonaKind::Char),
         retrieval: &cfg.retrieval,
         decay: &cfg.decay,
         utt: &cfg.utt,
@@ -428,6 +567,7 @@ async fn both_handles_produce_identical_output() {
         embedding: None,
         query: "工作压力",
         persona_uid: Some("persona-0001"),
+        persona_kind: Some(PersonaKind::Char),
         retrieval: &cfg.retrieval,
         decay: &cfg.decay,
         utt: &cfg.utt,

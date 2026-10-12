@@ -271,7 +271,7 @@ pub async fn run(engine: &Arc<Engine>, args: ImportArgs) -> anyhow::Result<()> {
 
     // Step 5.5: 导入后处理（服务层单一编排：图片理解 → L1 摘要生成 → 深度触发；
     // 图片理解先于 L1；能力不可达时静默跳过并保持待处理）
-    // 分发口径统一：私聊双侧各一行（含"我"）、群聊他人行；
+    // 分发口径：恒含"我"（导出者）在内、块内参与者各一行；
     // 每会话一次生成、块内参与者复制分发行（各自持有摘要）
     if args.deep {
         crate::ui::info("🔄 执行深度导入（L0 → 触发 L1 摘要生成）...");
@@ -279,7 +279,6 @@ pub async fn run(engine: &Arc<Engine>, args: ImportArgs) -> anyhow::Result<()> {
         crate::ui::info("⚡ 执行快速导入（L0 → 触发 L1 摘要生成）...");
     }
 
-    let fanout_include_self = outcome.chat_type != "group";
     let post = engine
         .run_import_post(
             ImportPostRequest {
@@ -289,7 +288,7 @@ pub async fn run(engine: &Arc<Engine>, args: ImportArgs) -> anyhow::Result<()> {
                     l1_targets: Vec::new(),
                     l1_prefix: None,
                     group_fanout: true,
-                    fanout_include_self,
+                    fanout_include_self: true,
                     l1_cascade: true,
                     cascade_deep: args.deep,
                     throttle_ms: 0,

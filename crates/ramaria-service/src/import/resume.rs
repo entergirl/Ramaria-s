@@ -74,7 +74,7 @@ pub struct ImportContinueOutcome {
 /// 1. 导出根校验（任一根不存在或非目录即报错，面向用户的校验错误）；
 /// 2. `export_roots` 非空时执行附件回补：
 ///    重置可定位的存量跳过行 → 全库重扫 pending（逐行理解，逐行进度）→ 统计；
-/// 3. L1 补跑：扫描"已关闭且缺摘要"的会话，逐会话按参与人数选择分发口径生成；
+/// 3. L1 补跑：扫描"已关闭且缺摘要"的会话，逐会话按分发口径（恒含"我"与块内他人）生成；
 /// 4. `cascade_deep` 且至少一条 L1 生成成功时统一触发 L2 → L3 级联。
 ///
 /// 参数:
@@ -236,20 +236,8 @@ pub(crate) async fn run_continue(
     }
 
     for session_id in &candidates {
-        // 参与人数决定分发口径：≤2 视为私聊口径（含双方），否则群聊口径（他人行）
-        let speakers = match storage.count_session_speakers(*session_id).await {
-            Ok(speakers) => speakers,
-            Err(e) => {
-                tracing::warn!(
-                    session_id = %session_id,
-                    error = %e,
-                    "统计会话发言者失败，按私聊口径继续"
-                );
-                0
-            }
-        };
-        let include_self = speakers <= 2;
-        match regenerate_l1_fanout(engine, *session_id, include_self).await {
+        // 分发口径：恒含"我"（导出者）与块内他人——各 persona 一行，absorbed 独立
+        match regenerate_l1_fanout(engine, *session_id, true).await {
             Ok(rows) if !rows.is_empty() => l1_success += 1,
             Ok(_) => {
                 l1_skipped += 1;

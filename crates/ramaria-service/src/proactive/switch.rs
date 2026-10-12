@@ -59,13 +59,13 @@ impl ProactivePersonaMode {
 /// 判断画像是否为"用户本人"类型（绝不参与主动对话的硬排除）。
 ///
 /// 规则:
-/// - 行值优先（`persona.kind`），uid 前缀兜底（`PersonaKind::from_uid`）；
+/// - 显式载体：以 persona 行 `kind` 为准（uid 前缀不参与判定）；
 /// - user 类画像代表用户自身，主动对其发言没有语义，任何开关设置都不放行。
 ///
 /// 消费方:
 /// - 调度资格闸门（跳过原因 `persona_excluded`）与名单写入校验（拒绝设置）。
 pub(crate) fn is_user_persona(persona: &Persona) -> bool {
-    persona.kind == PersonaKind::User || PersonaKind::from_uid(&persona.uid) == PersonaKind::User
+    persona.kind == PersonaKind::User
 }
 
 // =========================================================

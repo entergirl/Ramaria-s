@@ -19,7 +19,8 @@
 //! - `entry`：用例入口（策略校验、请求归一化、检索 / 概览分流）；
 //! - `search`：检索模式分层装配与预算裁剪（记忆层共用召回）；
 //! - `overview`：概览模式时间线装配与渲染；
-//! - `layers`：各辅助分层读取与条目映射（行为 / 知识 / 风格 / 脉络 / 画像）。
+//! - `layers`：各辅助分层读取与条目映射（行为 / 知识 / 风格 / 脉络 / 画像）；
+//! - 模块级辅助：人格类型显式解析（按 persona 行 `kind` 读取，供召回装配使用）。
 
 mod entry;
 mod layers;
@@ -27,11 +28,44 @@ mod overview;
 mod policy;
 mod search;
 
+use ramaria_core::traits::StorageBackend;
+use ramaria_core::types::PersonaKind;
+
 // 策略 re-export：`crate::recall::RecallPolicy` 为引擎与入口层既有调用路径
 pub use policy::RecallPolicy;
 
 // 用例入口 re-export：`crate::recall::run` 为引擎既有调用路径
 pub(crate) use entry::run;
+
+// =========================================================
+// 辅助
+// =========================================================
+
+/// 解析 persona 行的显式类型（未知 / 读取失败 → `None`，保守降级）。
+///
+/// 职责:
+/// - 按 persona 行 `kind` 解析目标人格类型（显式载体），供召回装配的
+///   Persona-Aware 阈值与 utt 原文白名单使用。
+///
+/// 返回:
+/// - 行存在 → `Some(kind)`；
+/// - 行缺失 / 读取失败 → 记 warn 并返回 `None`（不阻塞召回）。
+pub(crate) async fn resolve_persona_kind(
+    storage: &dyn StorageBackend,
+    uid: &str,
+) -> Option<PersonaKind> {
+    match storage.get_persona_by_uid(uid).await {
+        Ok(Some(persona)) => Some(persona.kind),
+        Ok(None) => {
+            tracing::warn!(persona = %uid, "persona 行不存在，类型按未知处理");
+            None
+        }
+        Err(e) => {
+            tracing::warn!(persona = %uid, error = %e, "persona 类型读取失败，按未知处理");
+            None
+        }
+    }
+}
 
 // =========================================================
 // 单元测试

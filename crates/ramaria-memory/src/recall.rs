@@ -231,8 +231,16 @@ pub struct RecallInput<'a, R: RetrieverSource + ?Sized, K: KeywordMirrorSource +
     pub embedding: Option<&'a dyn EmbeddingProvider>,
     /// 查询文本（在线管线为当前用户输入；服务层为 query 或最后一条用户消息）。
     pub query: &'a str,
-    /// 目标人格 uid（None = 不过滤；Persona-Aware 类型阈值仍生效）。
+    /// 目标人格 uid（供检索过滤与 utt 原文隔离；类型判定见 `persona_kind`）。
     pub persona_uid: Option<&'a str>,
+    /// 目标人格类型（显式载体：调用方按 persona 行 `kind` 解析后传入）。
+    ///
+    /// 约定:
+    /// - `Some(kind)`: 已解析的人格类型——Persona-Aware 阈值与 utt 原文白名单均以此为准；
+    /// - `None`: 类型未知（persona 行缺失 / 读取失败）——保守降级：RAG 按最严阈值、
+    ///   utt 白名单不放行；
+    /// - 无画像的 rama 自身召回由调用方显式传 `Some(PersonaKind::Rama)`。
+    pub persona_kind: Option<PersonaKind>,
     /// 摘要路检索配置（`[retrieval]` 组）。
     pub retrieval: &'a RetrievalConfig,
     /// 时间衰减配置（`[decay]` 组）。
@@ -317,7 +325,7 @@ pub struct RecallOutput {
 /// 4. 多通道检索（读锁内同步）：BM25 + 向量 + 图谱 + 关键词镜像，RRF 融合；
 /// 5. 记忆子层过滤：按 `memory_layers` 剔除未请求的 L1 / L2 文档（图谱实体跟随 `l2`；两层全开 = 无操作）；
 /// 6. 时间衰减（含访问加成）→ touch_l1 刷新访问时间 → 按衰减后分数重排；
-/// 7. Persona-Aware 过滤 → 段落渲染（`[相关记忆]`）→ 覆盖集合记录；
+/// 7. Persona-Aware 过滤（阈值取显式载体 `persona_kind`）→ 段落渲染（`[相关记忆]`）→ 覆盖集合记录；
 /// 8. utt 原文检索与预算渲染（白名单内且闸门开启）。
 ///
 /// 参数:
@@ -339,18 +347,12 @@ pub async fn assemble_recall<R: RetrieverSource + ?Sized, K: KeywordMirrorSource
         return output;
     }
 
-    // utt 是否对本 persona 生效（原文白名单双闸门：开关 + persona 类型）。
+    // utt 是否对本 persona 生效（原文白名单双闸门：开关 + 人格类型；类型取显式载体）。
     // 查询向量仅在 RAG 或 utt（白名单内）需要时生成，避免无效 embedding 调用。
     let utt_persona_allowed = input.gates.utt
         && input
-            .persona_uid
-            .map(|puid| {
-                input
-                    .utt
-                    .persona_kind_whitelist
-                    .contains(&PersonaKind::from_uid(puid))
-            })
-            .unwrap_or(false);
+            .persona_kind
+            .is_some_and(|kind| input.utt.persona_kind_whitelist.contains(&kind));
     let need_query_vec = input.gates.memory_rag || utt_persona_allowed;
 
     // ---- 2. 查询向量（锁外 await；失败降级为 None） ----
@@ -569,10 +571,8 @@ pub async fn assemble_recall<R: RetrieverSource + ?Sized, K: KeywordMirrorSource
         output.fused_count = results.len();
 
         // ---- 5.3 Persona-Aware 过滤 + 段落渲染 ----
-        let persona_kind = input
-            .persona_uid
-            .map(PersonaKind::from_uid)
-            .unwrap_or(PersonaKind::Rama);
+        // 阈值按显式载体 `persona_kind` 选取；未知类型（None）保守按最严（char 阈值）。
+        let persona_kind = input.persona_kind.unwrap_or(PersonaKind::Char);
         let rag_config = RagConfig::from_retrieval_config(input.retrieval);
         let filtered = filter_by_persona(&results, persona_kind, &rag_config);
         output.filtered_count = filtered.len();

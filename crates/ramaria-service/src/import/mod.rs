@@ -181,6 +181,8 @@ impl Engine {
 // =========================================================
 
 #[cfg(test)]
+mod identity_tests;
+#[cfg(test)]
 mod post_tests;
 #[cfg(test)]
 mod resume_tests;
