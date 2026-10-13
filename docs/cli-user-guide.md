@@ -145,7 +145,7 @@ ramaria memory --limit 20         # 限制返回条数
 | `--offset <N>` | 跳过前 N 条（分页） |
 
 **输出格式**：
-- **L1**：摘要卡片，含 `summary` / `atmosphere` / `valence` / `salience` / `situation_strength`
+- **L1**：摘要卡片，含 `summary` / `atmosphere` / `valence` / `salience` / `situation_strength`；时间行按**发生时间**显示（v2.8），`--json` 条目新增 `occurred_at` 键（`created_at` 原键保留）
 - **L2**：事件列表，含 `title` / `confidence` / `keywords` / `attitude`
 - **L3**：性格标签表，含 `layer` / `trait` / `meaning` / `confidence`
 
@@ -294,6 +294,31 @@ ramaria import qq --file chat.json --side other
    - 快速模式：仅写入 L0 + 生成 L1 摘要
    - 深度模式：L0→L1→L2→L3 全管线执行
 4. 导入完成后显示统计报告
+
+**继续处理（v2.8）**：导入已完成但图片未理解 / 摘要缺失时（如导入中途中断、当时图片理解不可用），可续跑后处理：
+
+```
+# 续跑：重扫未理解图片 + 补跑缺失摘要 + 补触发深度级联
+ramaria import continue --export-root "C:\Users\你\Documents\QQChatExporter\exports"
+
+# 多个导出目录（用于按图片指纹反查找回旧导出资源）
+ramaria import continue --export-root "D:\exports" --export-root "E:\exports" --yes
+
+# 只处理当前待处理项，不重置历史"已跳过"附件
+ramaria import continue --no-reset-skipped
+
+# 限制本次处理数量 / 不触发深度级联
+ramaria import continue --limit 100 --no-cascade
+```
+
+| 参数（continue） | 说明 |
+|------|------|
+| `--export-root <PATH>` | 导出目录（可重复传入）；用于图片定位与按 md5 反查找回资源 |
+| `--no-reset-skipped` | 不重置历史"已跳过"的附件，只处理当前待处理项 |
+| `--limit <N>` | 本次最多处理的附件数 |
+| `--no-cascade` | L1 补跑后不触发深度级联（L2/L3） |
+
+> 可重复执行：已完成的图片理解与摘要会自动跳过；进度输出在 stderr，`--json` 信封同其他子命令。
 
 **支持的格式**：
 - **JSON**：QQChatExporter v6.x 导出格式（流式解析大文件；TXT / PCQQ 不在 2.0 范围）
