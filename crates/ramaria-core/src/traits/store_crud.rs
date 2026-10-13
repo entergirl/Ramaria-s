@@ -523,6 +523,28 @@ pub trait StoreCrud: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// 查询指定 persona 在时间窗口内的全部发言时间戳（升序）。
+    ///
+    /// 职责:
+    /// - 供人格活跃曲线统计（人格节律数据）：按消息级 persona 归属取该人格自身的
+    ///   发言时间分布，含导入素材与本地对话。
+    ///
+    /// 语义:
+    /// - 不 JOIN 会话，归属口径为 `messages.persona_uid`（消息级归属）；
+    /// - 不区分角色：人格自身发言无论以何角色入库均计入；
+    /// - `since_ms` 为窗口下界（Unix 毫秒，闭区间）。
+    ///
+    /// 返回:
+    /// - 时间升序的时间戳列表（默认实现返回空列表：未覆写 mock 视为"无样本"，
+    ///   人格节律统计退化不启用）。
+    async fn list_persona_message_times_since(
+        &self,
+        _persona_uid: &str,
+        _since_ms: i64,
+    ) -> RamariaResult<Vec<i64>> {
+        Ok(Vec::new())
+    }
+
     /// 列出指定 persona 的主动消息投递与其后（窗口内）首条本地用户消息的配对。
     ///
     /// 职责:

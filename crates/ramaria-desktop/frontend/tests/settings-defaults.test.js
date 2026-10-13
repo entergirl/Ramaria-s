@@ -307,10 +307,10 @@ test('MCP 面板：白名单默认全部人格可见', () => {
 });
 
 // =========================================================
-// 主动对话组：22 键齐全 + 默认值类型 + 模板收录
+// 主动对话组：29 键齐全 + 默认值类型 + 模板收录
 // =========================================================
 
-test('主动对话组：22 键齐全且默认值类型正确', () => {
+test('主动对话组：29 键齐全且默认值类型正确', () => {
   const proactive = groups.find((g) => g.key === 'proactive');
   assert.ok(proactive, '应存在 proactive 组');
   assert.deepEqual(proactive.section, ['proactive']);
@@ -328,6 +328,9 @@ test('主动对话组：22 键齐全且默认值类型正确', () => {
     'proactive.active_hours_weight',
     'proactive.active_hours_window_days',
     'proactive.active_hours_min_samples',
+    'proactive.rhythm_weight',
+    'proactive.rhythm_window_days',
+    'proactive.rhythm_min_samples',
     'proactive.valence_weight',
     'proactive.confidence_floor',
     'proactive.light_touch_weight',
@@ -338,6 +341,10 @@ test('主动对话组：22 键齐全且默认值类型正确', () => {
     'proactive.topic_cooldown_hours',
     'proactive.silence_backoff_days',
     'proactive.startup_grace_days',
+    'proactive.greeting_enabled',
+    'proactive.greeting_window_minutes',
+    'proactive.recent_state_enabled',
+    'proactive.recent_state_window_days',
   ];
 
   const proactiveFields = flattenFields([proactive]);
@@ -370,6 +377,7 @@ test('主动对话组：22 键齐全且默认值类型正确', () => {
   // 浮点字段必须带 <1 的 step（收集时依 step 选择 parseFloat，否则被 parseInt 截断）
   const floatKeys = [
     'proactive.active_hours_weight',
+    'proactive.rhythm_weight',
     'proactive.valence_weight',
     'proactive.confidence_floor',
     'proactive.light_touch_weight',

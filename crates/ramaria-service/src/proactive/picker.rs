@@ -1,16 +1,17 @@
 //! crates/ramaria-service/src/proactive/picker.rs - Ramaria 主动对话真实选题器
 //!
 //! 设计特点:
-//! - 四源候选按构建顺序即去重优先级：未了结（负效价或高显著 + 会话静默）→ 时间节点
-//!   （结束后第 N 天跟进）→ 高显著事件 → 行为规则情境（事件上下文路由命中）
+//! - 候选源按构建顺序即去重优先级：未了结（负效价或高显著 + 会话静默）→ 时间节点
+//!   （结束后第 N 天跟进）→ 高显著事件 → 行为规则情境（事件上下文路由命中）→
+//!   早安问候（唤醒时段的时机型候选）
 //! - 统一过滤链：选题冷却 → 负效价出口兜底 → 不连选（上一投递为负效价时本轮不选负效价）
 //! - 打分层：置信度先门槛后折扣、显著性主权重、效价强度加成；规则候选直取路由得分
-//! - 轻触达兜底：四源皆空且不在冷却窗口时产出低权重候选；冷却窗口内保持沉默不硬凑话题
+//! - 轻触达兜底：各源皆空且不在冷却窗口时产出低权重候选；冷却窗口内保持沉默不硬凑话题
 //! - 决策：判据开启交由 AI 裁决（三态记账）；关闭时按算法排序直取第一名，不调用 LLM
 //! - 隐私：日志只记来源 / 计数 / 开关与判据结论，不记候选锚点与事件文本
 //!
 //! 模块划分:
-//! - `sources`：素材加载与四源候选构建（事件查询 / 静默判定 / 规则情境路由）
+//! - `sources`：素材加载与候选源构建（事件查询 / 静默判定 / 规则情境路由 / 问候窗口）
 
 use async_trait::async_trait;
 use tracing::{debug, info, warn};
@@ -28,8 +29,9 @@ use super::topic::ProactiveDirective;
 mod sources;
 
 use sources::{
-    build_rule_candidate, build_salient_candidates, build_time_node_candidates,
-    build_unresolved_candidates, load_salient_events, load_session_map, load_window_events,
+    build_greeting_candidate, build_rule_candidate, build_salient_candidates,
+    build_time_node_candidates, build_unresolved_candidates, load_salient_events, load_session_map,
+    load_window_events,
 };
 
 // =========================================================
@@ -44,6 +46,8 @@ const ANCHOR_SUMMARY_MAX_CHARS: usize = 80;
 const JUDGE_CANDIDATE_ID_PREFIX: &str = "c";
 /// 轻触达候选的选题键（冷却记录与去重的稳定标识）。
 const LIGHT_TOUCH_TOPIC_KEY: &str = "light_touch";
+/// 早安问候候选的基准得分（高于轻触达兜底、低于多数事件候选）。
+const GREETING_SCORE: f64 = 0.5;
 
 /// 来源标识：未了结事件。
 const SOURCE_UNRESOLVED: &str = "unresolved";
@@ -53,6 +57,8 @@ const SOURCE_TIME_NODE: &str = "time_node";
 const SOURCE_EVENT: &str = "event";
 /// 来源标识：行为规则情境。
 const SOURCE_RULE: &str = "rule";
+/// 来源标识：早安问候。
+const SOURCE_GREETING: &str = "greeting";
 /// 来源标识：轻触达兜底。
 const SOURCE_LIGHT_TOUCH: &str = "light_touch";
 
@@ -68,10 +74,12 @@ const MS_PER_HOUR: i64 = 3_600_000;
 /// 算法层选题候选（来源 / 落点 / 打分统一形态）。
 ///
 /// 字段约定:
-/// - `source`: 来源标识（`event` / `unresolved` / `time_node` / `rule` / `light_touch`）。
-/// - `topic_key`: 来源内稳定标识（事件 / 规则 id 的文本形态，或轻触达键）。
+/// - `source`: 来源标识（`event` / `unresolved` / `time_node` / `rule` / `greeting`
+///   / `light_touch`）。
+/// - `topic_key`: 来源内稳定标识（事件 / 规则 id 的文本形态，或轻触达 / 问候键）。
 /// - `session_id`: 目标会话（None = 问候类新建）。
 /// - `anchor`: 情境摘要（None = 轻触达无具体话题）。
+/// - `angle`: 构建者携带的开口角度（None = 未提供；判据裁决角度优先）。
 /// - `confidence`: 事件置信度（规则与轻触达为 None，不参与事件打分公式）。
 /// - `salience` / `valence`: 事件信号原值（非事件候选不参与事件打分）。
 /// - `score`: 最终排序分（事件类候选由打分层计算，规则候选直取路由得分）。
@@ -80,13 +88,14 @@ pub(super) struct TopicCandidate {
     pub(super) topic_key: String,
     pub(super) session_id: Option<Uuid>,
     pub(super) anchor: Option<String>,
+    pub(super) angle: Option<String>,
     pub(super) confidence: Option<f64>,
     pub(super) salience: f64,
     pub(super) valence: f64,
     pub(super) score: f64,
 }
 
-/// 真实选题器：四源候选 + 安全网 + AI 判据（无状态，可共享）。
+/// 真实选题器：多源候选 + 安全网 + AI 判据（无状态，可共享）。
 pub(crate) struct PickerTopicProvider;
 
 #[async_trait]
@@ -110,7 +119,7 @@ impl TopicPicker for PickerTopicProvider {
             load_salient_events(storage, persona, since, proactive.event_salience_threshold).await;
         let session_map = load_session_map(storage, &window_events, &salient_events).await;
 
-        // ---- 四源候选（构建顺序即去重优先级）----
+        // ---- 候选各源（构建顺序即去重优先级）----
         let mut candidates: Vec<TopicCandidate> = Vec::new();
         let mut claimed: std::collections::HashSet<i64> = std::collections::HashSet::new();
         candidates.extend(
@@ -141,6 +150,10 @@ impl TopicPicker for PickerTopicProvider {
         {
             candidates.push(rule_candidate);
         }
+        // 问候为时机型候选源：构建顺序位于事件类源之后
+        if let Some(greeting_candidate) = build_greeting_candidate(now, state, proactive) {
+            candidates.push(greeting_candidate);
+        }
 
         // ---- 打分层（事件类候选：置信度门槛后折扣）----
         apply_event_scores(&mut candidates, proactive);
@@ -151,14 +164,14 @@ impl TopicPicker for PickerTopicProvider {
         // ---- 排序（得分降序，同分按键升序保证确定性）----
         sort_candidates(&mut candidates);
 
-        // ---- 轻触达兜底：四源皆无候选且不在冷却窗口 ----
+        // ---- 轻触达兜底：各源皆无候选且不在冷却窗口 ----
         if candidates.is_empty() {
             match light_touch_candidate(state, now, proactive) {
                 Some(candidate) => candidates.push(candidate),
                 None => {
                     debug!(
                         persona,
-                        "主动选题：四源无候选且轻触达在冷却窗口内，本轮无题"
+                        "主动选题：各源无候选且轻触达在冷却窗口内，本轮无题"
                     );
                     return None;
                 }
@@ -260,6 +273,7 @@ fn light_touch_candidate(
         topic_key: LIGHT_TOUCH_TOPIC_KEY.to_string(),
         session_id: None,
         anchor: None,
+        angle: None,
         confidence: None,
         salience: 0.0,
         valence: 0.0,
@@ -354,12 +368,16 @@ async fn hours_since_last_chat(engine: &Engine, persona: &str, now: i64) -> Opti
 }
 
 /// 候选 → 主动生成指令（判据角度 / 语气可为空）。
+///
+/// 口径:
+/// - 角度：判据裁决的角度优先，缺省用候选自带角度（构建者携带的开口角度）。
 fn directive_from(
     candidate: &TopicCandidate,
     persona: &str,
     angle: Option<String>,
     tone: Option<String>,
 ) -> ProactiveDirective {
+    let angle = angle.or_else(|| candidate.angle.clone());
     ProactiveDirective {
         persona: persona.to_string(),
         session_id: candidate.session_id,

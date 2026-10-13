@@ -400,6 +400,7 @@ fn segment_style_inputs<'a>(
         rag_text: None,
         layer_dedup,
         segment_style: style,
+        recent_state: RecentStateConfig::default(),
         proactive: None,
     }
 }
@@ -463,4 +464,164 @@ async fn pipe_segment_style_keeps_legacy_rules() {
         "管道形态不应包含通道声明"
     );
     assert!(prompt.contains("||"), "共享回复规则仍含多气泡契约");
+}
+
+// =========================================================
+// 近期状态注入
+// =========================================================
+
+/// 写入一条带效价 / 显著性的 L1（发生时间为当前时间，窗口内）。
+async fn save_l1_with_valence(
+    storage: &dyn StorageBackend,
+    persona_uid: &str,
+    valence: f64,
+    salience: f64,
+) {
+    let session = storage
+        .create_session(None)
+        .await
+        .expect("session 创建应成功");
+    let mut l1 = MemoryL1::new(session.id, "摘要".to_string(), Some("下午".to_string()));
+    l1.persona_uid = Some(persona_uid.to_string());
+    l1.valence = valence;
+    l1.salience = salience;
+    storage.save_memory_l1(&l1).await.expect("L1 写入应成功");
+}
+
+/// 在最小装配输入上覆盖近期状态配置。
+fn recent_state_inputs<'a>(
+    summaries: &'a [String],
+    labels: &'a [String],
+    injection: &'a ramaria_core::config::InjectionGate,
+    layer_dedup: &'a ramaria_core::config::LayerDedupConfig,
+    recent_state: RecentStateConfig,
+) -> PromptMaterialInputs<'a> {
+    let mut inputs = segment_style_inputs(
+        summaries,
+        labels,
+        injection,
+        layer_dedup,
+        SegmentStyle::Pipe,
+    );
+    inputs.recent_state = recent_state;
+    inputs
+}
+
+/// 近期状态开启：窗口内正向效价为主 → 提示词含轻快语气行。
+#[tokio::test]
+async fn recent_state_positive_mood_injected_when_enabled() {
+    let storage = test_storage("recent-mood-positive").await;
+    ensure_persona(storage.as_ref(), "rama-0001").await;
+    // 两条高显著正向 + 一条低显著负向 → 加权效价明显正向
+    save_l1_with_valence(storage.as_ref(), "rama-0001", 0.9, 1.0).await;
+    save_l1_with_valence(storage.as_ref(), "rama-0001", 0.8, 1.0).await;
+    save_l1_with_valence(storage.as_ref(), "rama-0001", -0.6, 0.1).await;
+
+    let config = RamariaConfig::default();
+    let summaries: Vec<String> = Vec::new();
+    let labels: Vec<String> = Vec::new();
+    let prompt = build_system_prompt(
+        storage.as_ref(),
+        &recent_state_inputs(
+            &summaries,
+            &labels,
+            &config.injection,
+            &config.layer_dedup,
+            RecentStateConfig {
+                enabled: true,
+                window_days: 7,
+            },
+        ),
+    )
+    .await;
+
+    assert!(
+        prompt.contains("近期状态：最近心情不错，语气可以轻快一些。"),
+        "开启且方向明确时应注入近期状态行"
+    );
+}
+
+/// 近期状态开启：负向效价为主 → 提示词含放缓语气行。
+#[tokio::test]
+async fn recent_state_negative_mood_injected_when_enabled() {
+    let storage = test_storage("recent-mood-negative").await;
+    ensure_persona(storage.as_ref(), "rama-0001").await;
+    save_l1_with_valence(storage.as_ref(), "rama-0001", -0.9, 1.0).await;
+    save_l1_with_valence(storage.as_ref(), "rama-0001", -0.7, 1.0).await;
+
+    let config = RamariaConfig::default();
+    let summaries: Vec<String> = Vec::new();
+    let labels: Vec<String> = Vec::new();
+    let prompt = build_system_prompt(
+        storage.as_ref(),
+        &recent_state_inputs(
+            &summaries,
+            &labels,
+            &config.injection,
+            &config.layer_dedup,
+            RecentStateConfig {
+                enabled: true,
+                window_days: 7,
+            },
+        ),
+    )
+    .await;
+
+    assert!(
+        prompt.contains("近期状态：最近心情有些低落，语气放缓一些，别太跳脱。"),
+        "负向主导时应注入放缓语气行"
+    );
+}
+
+/// 开关关闭：窗口内效价明确也不查询、不注入（消费可关）。
+#[tokio::test]
+async fn recent_state_disabled_skips_injection() {
+    let storage = test_storage("recent-mood-off").await;
+    ensure_persona(storage.as_ref(), "rama-0001").await;
+    save_l1_with_valence(storage.as_ref(), "rama-0001", 0.9, 1.0).await;
+    save_l1_with_valence(storage.as_ref(), "rama-0001", 0.8, 1.0).await;
+
+    let config = RamariaConfig::default();
+    let summaries: Vec<String> = Vec::new();
+    let labels: Vec<String> = Vec::new();
+    let prompt = build_system_prompt(
+        storage.as_ref(),
+        &recent_state_inputs(
+            &summaries,
+            &labels,
+            &config.injection,
+            &config.layer_dedup,
+            RecentStateConfig::default(),
+        ),
+    )
+    .await;
+
+    assert!(!prompt.contains("近期状态"), "关闭时不应注入近期状态行");
+}
+
+/// 无样本：开启但窗口内无 L1 → 不含近期状态行。
+#[tokio::test]
+async fn recent_state_without_samples_skips_injection() {
+    let storage = test_storage("recent-mood-empty").await;
+    ensure_persona(storage.as_ref(), "rama-0001").await;
+
+    let config = RamariaConfig::default();
+    let summaries: Vec<String> = Vec::new();
+    let labels: Vec<String> = Vec::new();
+    let prompt = build_system_prompt(
+        storage.as_ref(),
+        &recent_state_inputs(
+            &summaries,
+            &labels,
+            &config.injection,
+            &config.layer_dedup,
+            RecentStateConfig {
+                enabled: true,
+                window_days: 7,
+            },
+        ),
+    )
+    .await;
+
+    assert!(!prompt.contains("近期状态"), "无样本时不应注入近期状态行");
 }

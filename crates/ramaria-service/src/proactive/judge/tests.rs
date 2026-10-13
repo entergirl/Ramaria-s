@@ -311,7 +311,7 @@ fn user_message_format_contract() {
     let message = build_user_message(&all_sources, &signals());
     assert!(message.contains("## 当前情境"));
     assert!(message.contains("- 本地时间：14 点"));
-    assert!(message.contains("- 用户活跃权重：0.72（越高表示用户通常在这个时段活跃）"));
+    assert!(message.contains("- 时机权重：0.72（用户活跃与人格节奏的合成，越高越适合此刻开口）"));
     assert!(message.contains("- 距上次对话：6.5 小时"));
     assert!(message.contains("- 连续未回应主动消息：0 次"));
     assert!(message.contains("- 今日已主动投递：1 次"));

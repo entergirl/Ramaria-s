@@ -8,6 +8,7 @@
 //! - 静默降级：单次生成失败只记 warn 并计入失败计数，不中断批量
 //! - `done_summary` 构造完成摘要（两种分支文案与桌面 done 事件一致）
 
+use std::collections::BTreeSet;
 use std::time::Instant;
 
 use ramaria_core::error::{RamariaError, RamariaResult};
@@ -65,6 +66,8 @@ pub struct ImportL1Outcome {
     pub l1_total: usize,
     /// 参与的 session UUID 列表
     pub session_ids: Vec<Uuid>,
+    /// 本次参与生成的人格 uid 去重升序列表（供导入链路触发风格统计）
+    pub personas: Vec<String>,
 }
 
 /// 导入进度事件（宿主转发为自身事件通道）。
@@ -163,6 +166,8 @@ pub(crate) async fn generate_l1(
     let mut l1_failed = 0usize;
     let mut l1_skipped = 0usize;
     let mut l1_processed = 0usize;
+    // 本次参与生成的人格归属（去重升序；供导入链路触发风格统计）
+    let mut personas: BTreeSet<String> = BTreeSet::new();
 
     // 角色前缀：None 走摘要器默认前缀，Some 覆盖为指定文本（群聊分发分支不使用）
     let (user_prefix, assistant_prefix) = match &plan.l1_prefix {
@@ -193,7 +198,12 @@ pub(crate) async fn generate_l1(
         if plan.group_fanout {
             // 参与者分发：每会话一次生成，块内参与者复制成行
             match regenerate_l1_fanout(engine, *session_id, plan.fanout_include_self).await {
-                Ok(rows) if !rows.is_empty() => l1_success += 1,
+                Ok(rows) if !rows.is_empty() => {
+                    l1_success += 1;
+                    for row in &rows {
+                        note_persona(&mut personas, row.persona_uid.as_deref());
+                    }
+                }
                 Ok(rows) => {
                     l1_skipped += 1;
                     tracing::debug!(
@@ -243,7 +253,11 @@ pub(crate) async fn generate_l1(
                 };
 
                 match result {
-                    Ok(Some(_)) => l1_success += 1,
+                    Ok(Some(row)) => {
+                        l1_success += 1;
+                        note_persona(&mut personas, row.persona_uid.as_deref());
+                        note_persona(&mut personas, target.as_deref());
+                    }
                     Ok(None) => {
                         // 会话无消息或已有同画像摘要：跳过不影响连续失败计数
                         l1_skipped += 1;
@@ -313,7 +327,15 @@ pub(crate) async fn generate_l1(
         l1_processed,
         l1_total,
         session_ids: session_ids.to_vec(),
+        personas: personas.into_iter().collect(),
     })
+}
+
+/// 记录一个 persona 归属（None 与空值忽略；集合保证去重升序）。
+fn note_persona(into: &mut BTreeSet<String>, uid: Option<&str>) {
+    if let Some(uid) = uid.filter(|s| !s.is_empty()) {
+        into.insert(uid.to_string());
+    }
 }
 
 // =========================================================

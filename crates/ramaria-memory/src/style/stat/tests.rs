@@ -51,6 +51,26 @@ fn proactive_messages_are_counted_in_style_stats() {
     assert_eq!(stats.total_sentences, 2);
 }
 
+/// 导入素材口径：导入的群聊素材（按发送者 persona 归属、assistant 角色、
+/// 带导入去重指纹）与本地对话消息同一口径进入五维统计。
+#[test]
+fn imported_messages_count_in_style_stats() {
+    let imported: Vec<Message> = ["今天天气真好", "晚上一起吃饭吗"]
+        .iter()
+        .map(|text| {
+            let mut m = msg(text);
+            m.persona_uid = Some("char-0001".to_string());
+            m.fingerprint = Some("a1b2c3d4e5f60718".to_string());
+            m
+        })
+        .collect();
+    let stats = StyleStats::compute(&imported, &config());
+    assert_eq!(stats.sample_count, 2, "导入消息应计入样本量");
+    // "今天天气真好"(6) + "晚上一起吃饭吗"(7) = 13 有效字符
+    assert_eq!(stats.total_chars, 13, "导入消息字符应计入统计口径");
+    assert_eq!(stats.total_sentences, 2);
+}
+
 #[test]
 fn punctuation_counts_are_correct() {
     let messages = [msg("哇！真的吗？？好棒～（开心）……哎||嗯嗯")];

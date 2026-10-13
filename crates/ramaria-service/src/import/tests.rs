@@ -978,6 +978,7 @@ fn l1_outcome(success: usize, failed: usize, skipped: usize, processed: usize) -
         l1_processed: processed,
         l1_total: processed,
         session_ids: Vec::new(),
+        personas: Vec::new(),
     }
 }
 

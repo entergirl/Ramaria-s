@@ -623,6 +623,12 @@ active_hours_weight = 0.8
 active_hours_window_days = 30
 # 时段建模最少样本数：不足时不启用时段加权
 active_hours_min_samples = 50
+# 人格节律软加权强度（0.0~1.0）：0 = 关闭人格节律（行为退化为仅用户活跃时段）
+rhythm_weight = 0.5
+# 人格活跃曲线统计滚动窗口（天）
+rhythm_window_days = 90
+# 人格活跃曲线建模最少样本数：不足时不启用
+rhythm_min_samples = 100
 # 效价入权强度：越高情绪波动大的记忆越优先
 valence_weight = 0.5
 # 事件置信度门槛（0.0~1.0）：低于此值不进入主动选题
@@ -643,6 +649,14 @@ topic_cooldown_hours = 24
 silence_backoff_days = 3
 # 首次启用宽限期（天）：期内不触发
 startup_grace_days = 3
+# 问候类候选开关：用户刚睡醒时段的早安问候主动消息
+greeting_enabled = true
+# 问候时机窗口（分钟）：距用户每日首条消息中位时刻的允许偏差
+greeting_window_minutes = 45
+# 近期状态消费开关：L1 效价时序 → 近期心情，注入提示词
+recent_state_enabled = true
+# 近期状态统计窗口（天）
+recent_state_window_days = 7
 
 # =========================================================
 # 图片理解（图片附件描述生成）

@@ -303,3 +303,81 @@ async fn post_with_empty_sessions_counts_zero_and_skips_deep() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---- 风格统计触发 ----
+
+/// 导入后风格统计：L1 生成后按画像触发（样本不足也算已触发、不阻塞导入结果）。
+#[tokio::test]
+async fn post_triggers_style_stats_for_l1_personas() {
+    let (engine, _llm, dir) = post_env("post-style-stats", vision_on_config()).await;
+    let export_path = dir.join("export.json");
+    std::fs::write(&export_path, qq_export_with_image()).expect("写入导出文件应成功");
+
+    let outcome = engine
+        .import_qq_l0(fast_import_request(&export_path))
+        .await
+        .expect("L0 导入应成功");
+    let peer = outcome
+        .other_persona_uid
+        .clone()
+        .expect("私聊导入应准备对方画像");
+
+    let post = engine
+        .run_import_post(
+            ImportPostRequest {
+                session_ids: outcome.session_ids.clone(),
+                export_root: None,
+                plan: post_plan(false, vec![Some(peer.clone())]),
+            },
+            None,
+        )
+        .await
+        .expect("后处理应成功");
+
+    assert_eq!(post.l1.l1_success, 1, "L1 应生成成功");
+    let stats = engine
+        .style_stats(&peer)
+        .await
+        .expect("读取风格统计应成功")
+        .expect("导入后应触发风格统计并落库");
+    assert!(stats.sample_count >= 1, "该画像的消息应计入风格统计样本");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 风格统计关闭：`[style].enabled=false` 时不触发、不落统计行。
+#[tokio::test]
+async fn post_style_stats_disabled_skips_update() {
+    let mut config = vision_on_config();
+    config.style.enabled = false;
+    let (engine, _llm, dir) = post_env("post-style-off", config).await;
+    let export_path = dir.join("export.json");
+    std::fs::write(&export_path, qq_export_with_image()).expect("写入导出文件应成功");
+
+    let outcome = engine
+        .import_qq_l0(fast_import_request(&export_path))
+        .await
+        .expect("L0 导入应成功");
+    let peer = outcome
+        .other_persona_uid
+        .clone()
+        .expect("私聊导入应准备对方画像");
+
+    let post = engine
+        .run_import_post(
+            ImportPostRequest {
+                session_ids: outcome.session_ids.clone(),
+                export_root: None,
+                plan: post_plan(false, vec![Some(peer.clone())]),
+            },
+            None,
+        )
+        .await
+        .expect("后处理应成功");
+
+    assert_eq!(post.l1.l1_success, 1, "风格关闭不影响 L1 生成");
+    let stats = engine.style_stats(&peer).await.expect("读取风格统计应成功");
+    assert!(stats.is_none(), "风格关闭时不应产生统计行");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

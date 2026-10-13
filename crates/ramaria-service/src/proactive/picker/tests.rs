@@ -783,3 +783,110 @@ async fn empty_candidates_skip_judge_call() {
 
     let _ = std::fs::remove_dir_all(dir);
 }
+
+// =========================================================
+// 早安问候用例
+// =========================================================
+
+/// 构造唤醒统计可用的运行时状态：缓存归属今日 + 唤醒中位相对当前分钟偏移。
+fn waking_state(now: i64, offset_minutes: i64) -> ProactiveState {
+    let current = state::local_minute_of_day(now) as i64;
+    let wake = (current + offset_minutes).rem_euclid(1440) as u32;
+    ProactiveState {
+        histogram_date: state::local_date_str(now),
+        wake_minute_median: Some(wake),
+        ..Default::default()
+    }
+}
+
+/// 唤醒窗口命中：产出问候候选且携带问候角度（判据关闭直取）。
+#[tokio::test]
+async fn greeting_source_hits_wake_window() {
+    let (engine, _storage, dir) = engine_events("picker-greeting-hit").await;
+    let now = now_ms();
+
+    let mut state = waking_state(now, 0);
+    let directive = pick_once(&engine, now, &mut state)
+        .await
+        .expect("唤醒窗口内应产出问候候选");
+    assert_eq!(directive.source, "greeting");
+    assert_eq!(
+        directive.angle.as_deref(),
+        Some("对方刚醒来，问候一声早安"),
+        "问候候选应携带开口角度"
+    );
+    assert!(directive.session_id.is_none(), "问候类新建会话");
+    assert_eq!(directive.valence, 0.0);
+    let expected_key = format!("greeting-{}", state::local_date_str(now));
+    assert_eq!(directive.topic_key.as_deref(), Some(expected_key.as_str()));
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 唤醒窗口外：不产出问候（无其他源时回退轻触达兜底）。
+#[tokio::test]
+async fn greeting_source_misses_outside_window() {
+    let (engine, _storage, dir) = engine_events("picker-greeting-miss").await;
+    let now = now_ms();
+
+    // 唤醒中位距当前 120 分钟（大于默认 45 分钟窗口）→ 不产出
+    let mut state = waking_state(now, 120);
+    let directive = pick_once(&engine, now, &mut state)
+        .await
+        .expect("窗口外应回退轻触达");
+    assert_eq!(directive.source, "light_touch");
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 问候开关关闭：窗口命中也不产出问候。
+#[tokio::test]
+async fn greeting_source_disabled_falls_back() {
+    let mut config = events_config();
+    config.proactive.greeting_enabled = false;
+    let (engine, storage, dir) =
+        engine_with_llm_and_config("picker-greeting-off", MockLlm::local(), config).await;
+    seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+    let now = now_ms();
+
+    let mut state = waking_state(now, 0);
+    let directive = pick_once(&engine, now, &mut state)
+        .await
+        .expect("开关关闭应回退轻触达");
+    assert_eq!(directive.source, "light_touch");
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 唤醒统计缓存非今日：不产出问候（依赖同轮已刷新的缓存）。
+#[tokio::test]
+async fn greeting_source_requires_today_cache() {
+    let (engine, _storage, dir) = engine_events("picker-greeting-stale").await;
+    let now = now_ms();
+
+    let mut state = waking_state(now, 0);
+    state.histogram_date = state::local_date_str(now - DAY_MS);
+    let directive = pick_once(&engine, now, &mut state)
+        .await
+        .expect("缓存过期应回退轻触达");
+    assert_eq!(directive.source, "light_touch");
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 同题冷却：今日问候已投递时窗口内被冷却过滤。
+#[tokio::test]
+async fn greeting_source_respects_topic_cooldown() {
+    let (engine, _storage, dir) = engine_events("picker-greeting-cooldown").await;
+    let now = now_ms();
+
+    let mut state = waking_state(now, 0);
+    let key = format!("greeting-{}", state::local_date_str(now));
+    state.recent_topics = vec![recent("greeting", &key, now - HOUR_MS)];
+    let directive = pick_once(&engine, now, &mut state)
+        .await
+        .expect("冷却窗口内应回退轻触达");
+    assert_eq!(directive.source, "light_touch", "同键重复应被冷却过滤");
+
+    let _ = std::fs::remove_dir_all(dir);
+}

@@ -5,6 +5,7 @@
 //! - 用例为确定性断言，可离线运行。
 
 use super::*;
+use crate::chat::RecentMood;
 
 // ---- Insight 块测试 ----
 
@@ -319,6 +320,48 @@ fn context_with_last_active() {
     assert!(result.contains("2026-06-13"));
 }
 
+#[test]
+fn context_with_recent_mood_positive() {
+    let ctx = PromptContext {
+        persona: Some(make_test_persona()),
+        current_time_str: Some("2026-10-13 10:00".into()),
+        recent_mood: Some(RecentMood::Positive),
+        ..Default::default()
+    };
+    let config = PromptConfig::default();
+    let result = assemble_prompt(&ctx, &config);
+
+    assert!(result.contains("近期状态：最近心情不错，语气可以轻快一些。"));
+}
+
+#[test]
+fn context_with_recent_mood_negative() {
+    let ctx = PromptContext {
+        persona: Some(make_test_persona()),
+        current_time_str: Some("2026-10-13 10:00".into()),
+        recent_mood: Some(RecentMood::Negative),
+        ..Default::default()
+    };
+    let config = PromptConfig::default();
+    let result = assemble_prompt(&ctx, &config);
+
+    assert!(result.contains("近期状态：最近心情有些低落，语气放缓一些，别太跳脱。"));
+}
+
+/// 无方向（None）：不出现近期状态行（零输出，与既有语义一致）。
+#[test]
+fn context_without_recent_mood_has_no_line() {
+    let ctx = PromptContext {
+        persona: Some(make_test_persona()),
+        current_time_str: Some("2026-10-13 10:00".into()),
+        ..Default::default()
+    };
+    let config = PromptConfig::default();
+    let result = assemble_prompt(&ctx, &config);
+
+    assert!(!result.contains("近期状态"), "无方向时不应产生近期状态行");
+}
+
 // ---- 完整装配 ----
 
 #[test]
@@ -356,6 +399,7 @@ fn full_prompt_all_blocks() {
         behavior_decision: None,     // 默认无行为路由决策
         knowledge_facts: Vec::new(), // 默认无知识事实
         style_rule_text: None,       // 默认无自动风格规则（v1.6 语义等价）
+        recent_mood: None,           // 默认无近期状态（未开启/无样本/中性）
         proactive_context: None,     // 默认非主动生成
     };
     let config = PromptConfig::default();

@@ -209,6 +209,10 @@ pub(super) async fn prepare_request(
         rag_text: memory_context.as_deref(),
         layer_dedup: &config.layer_dedup,
         segment_style: input.segment_style,
+        recent_state: ramaria_memory::chat::RecentStateConfig {
+            enabled: config.proactive.recent_state_enabled,
+            window_days: config.proactive.recent_state_window_days,
+        },
         proactive: if input.mode == ChatMode::Proactive {
             build_proactive_prompt(input)
         } else {

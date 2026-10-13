@@ -536,6 +536,71 @@ async fn list_user_message_times_since_filters_window_and_role() {
     assert!(none.is_empty(), "窗口内无用户消息应返回空列表");
 }
 
+/// 写入一条指定消息级 persona 归属、角色与时间戳的消息。
+async fn insert_persona_time_message(
+    pool: &SqlitePool,
+    session_id: Uuid,
+    persona_uid: &str,
+    role: MessageRole,
+    created_at: i64,
+) {
+    let mut m = make_message(
+        session_id,
+        Some(&format!("fp-persona-{persona_uid}-{created_at}")),
+    );
+    m.persona_uid = Some(persona_uid.to_string());
+    m.role = role;
+    m.created_at = created_at;
+    save_import(pool, &m)
+        .await
+        .expect("写入 persona 时间消息成功");
+}
+
+/// list_persona_message_times_since：按消息级 persona 归属过滤（不 JOIN 会话）、
+/// 角色不过滤、窗口闭区间、升序、另一 persona 不混入。
+#[tokio::test]
+async fn list_persona_message_times_since_filters_persona_and_window() {
+    let pool = init_test_pool().await.expect("测试库初始化失败");
+    let session_a = setup_persona_session(&pool, "char-0001").await;
+
+    // 目标 persona：user 与 assistant 角色均计入（不区分角色）
+    insert_persona_time_message(&pool, session_a, "char-0001", MessageRole::User, 1_000).await;
+    insert_persona_time_message(&pool, session_a, "char-0001", MessageRole::Assistant, 2_000).await;
+    insert_persona_time_message(&pool, session_a, "char-0001", MessageRole::User, 3_000).await;
+
+    // 另一 persona 的消息挂在 char-0001 的会话内：按消息级归属过滤，不应混入
+    let _session_b = setup_persona_session(&pool, "char-0002").await;
+    insert_persona_time_message(&pool, session_a, "char-0002", MessageRole::User, 2_500).await;
+
+    // 窗口 [2000, ∞)：闭区间含边界 2000；更早的 1000 排除；结果升序
+    let times = list_persona_message_times_since(&pool, "char-0001", 2_000)
+        .await
+        .expect("查询应成功");
+    assert_eq!(
+        times,
+        vec![2_000, 3_000],
+        "应升序返回窗口内该 persona 的消息时间"
+    );
+
+    // 放大窗口 → 包含更早消息；assistant 角色仍计入
+    let all = list_persona_message_times_since(&pool, "char-0001", 0)
+        .await
+        .expect("查询应成功");
+    assert_eq!(all, vec![1_000, 2_000, 3_000]);
+
+    // 另一 persona 自身查询只取自己的消息
+    let other = list_persona_message_times_since(&pool, "char-0002", 0)
+        .await
+        .expect("查询应成功");
+    assert_eq!(other, vec![2_500]);
+
+    // 窗口内无消息 → 空列表
+    let none = list_persona_message_times_since(&pool, "char-0001", 10_000)
+        .await
+        .expect("查询应成功");
+    assert!(none.is_empty(), "窗口内无消息应返回空列表");
+}
+
 /// last_message_time_by_session：全部角色计入取最大时间、无消息 None、会话隔离。
 #[tokio::test]
 async fn last_message_time_by_session_counts_all_roles() {

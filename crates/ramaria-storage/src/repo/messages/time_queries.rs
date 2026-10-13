@@ -166,3 +166,35 @@ pub async fn list_user_message_times_since(
 
     Ok(times)
 }
+
+/// 查询指定 persona 在时间窗口内的全部发言时间戳（升序）。
+///
+/// 口径:
+/// - 归属口径为 `messages.persona_uid`（消息级归属）：不 JOIN 会话，含导入素材
+///   与本地对话；不区分角色（人格自身发言无论以何角色入库均计入）。
+/// - `since_ms` 为闭区间下界；结果按时间升序，供本地时区归桶分析。
+///
+/// 参数:
+/// - `persona_uid`: 人格标识。
+/// - `since_ms`: 窗口下界（Unix 毫秒，闭区间）。
+///
+/// 返回:
+/// - 按 `created_at ASC` 排列的时间戳列表（窗口内无消息时为空）。
+pub async fn list_persona_message_times_since(
+    pool: &SqlitePool,
+    persona_uid: &str,
+    since_ms: i64,
+) -> RamariaResult<Vec<i64>> {
+    let times = sqlx::query_scalar::<_, i64>(
+        "SELECT created_at FROM messages \
+         WHERE persona_uid = ? AND created_at >= ? \
+         ORDER BY created_at ASC",
+    )
+    .bind(persona_uid)
+    .bind(since_ms)
+    .fetch_all(pool)
+    .await
+    .storage_err("查询 persona 发言时间窗口失败")?;
+
+    Ok(times)
+}

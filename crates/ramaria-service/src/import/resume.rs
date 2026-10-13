@@ -2,12 +2,13 @@
 //!
 //! 设计特点:
 //! - 三阶段单一编排：附件回补（重置可定位存量跳过 + 命中文件缓存回填 + 重扫 pending + md5 反查）
-//!   → L1 幂等补跑 → 深度级联补触发
+//!   → L1 幂等补跑（含风格统计触发）→ 深度级联补触发
 //! - 幂等可重跑：理解按 md5 去重、L1 按"已有归属行"跳过；重复执行零副作用
 //! - 能力门禁不可达保持 pending；附件阶段失败不阻塞 L1 补跑
 //! - 进度经 ImportProgressSink 透传（phase: vision / l1 / l2 / l3），宿主只做转发
 //! - 日志不落路径原文与消息正文
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use ramaria_core::error::{RamariaError, RamariaResult};
@@ -17,6 +18,7 @@ use crate::vision::{AttachmentLocator, VisionRunStat, understand_attachment_rows
 
 use super::deep::trigger_deep;
 use super::l1::{ImportL1Outcome, ImportL1Progress, ImportProgressSink, regenerate_l1_fanout};
+use super::post::update_style_stats;
 
 // =========================================================
 // 请求与结果类型
@@ -68,14 +70,15 @@ pub struct ImportContinueOutcome {
 // 用例入口
 // =========================================================
 
-/// 执行导入"继续处理"：附件回补 → L1 幂等补跑 → 可选深度级联。
+/// 执行导入"继续处理"：附件回补 → L1 幂等补跑（含风格统计触发）→ 可选深度级联。
 ///
 /// 流程:
 /// 1. 导出根校验（任一根不存在或非目录即报错，面向用户的校验错误）；
 /// 2. `export_roots` 非空时执行附件回补：
 ///    重置可定位的存量跳过行 → 全库重扫 pending（逐行理解，逐行进度）→ 统计；
 /// 3. L1 补跑：扫描"已关闭且缺摘要"的会话，逐会话按分发口径（恒含"我"与块内他人）生成；
-/// 4. `cascade_deep` 且至少一条 L1 生成成功时统一触发 L2 → L3 级联。
+/// 4. 补跑完成后按结果人格触发风格统计增量更新（失败不阻塞）；
+/// 5. `cascade_deep` 且至少一条 L1 生成成功时统一触发 L2 → L3 级联。
 ///
 /// 参数:
 /// - `engine`: 服务层引擎；
@@ -219,6 +222,8 @@ pub(crate) async fn run_continue(
     let mut l1_failed = 0usize;
     let mut l1_skipped = 0usize;
     let mut l1_processed = 0usize;
+    // 本次补跑参与生成的人格归属（去重升序；供风格统计触发）
+    let mut personas: BTreeSet<String> = BTreeSet::new();
 
     if total > 0 {
         if let Some(sink) = progress {
@@ -238,7 +243,14 @@ pub(crate) async fn run_continue(
     for session_id in &candidates {
         // 分发口径：恒含"我"（导出者）与块内他人——各 persona 一行，absorbed 独立
         match regenerate_l1_fanout(engine, *session_id, true).await {
-            Ok(rows) if !rows.is_empty() => l1_success += 1,
+            Ok(rows) if !rows.is_empty() => {
+                l1_success += 1;
+                for row in &rows {
+                    if let Some(uid) = row.persona_uid.as_deref().filter(|s| !s.is_empty()) {
+                        personas.insert(uid.to_string());
+                    }
+                }
+            }
             Ok(_) => {
                 l1_skipped += 1;
                 tracing::debug!(session_id = %session_id, "L1 补跑无内容可生成，跳过");
@@ -273,7 +285,11 @@ pub(crate) async fn run_continue(
         l1_processed,
         l1_total: total,
         session_ids: candidates,
+        personas: personas.into_iter().collect(),
     };
+
+    // ---- 3b. 风格统计触发（L1 补跑完成后逐 persona 增量统计；失败不阻塞） ----
+    update_style_stats(engine, &l1.personas).await;
 
     // ---- 4. 深度级联补触发（至少一条 L1 生成成功时统一触发 L2 → L3） ----
     let mut l2_triggered = false;

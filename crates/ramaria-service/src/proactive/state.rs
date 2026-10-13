@@ -35,6 +35,10 @@ use serde::{Deserialize, Serialize};
 /// - `last_judge_at`: 最近一次判据尝试时间（Unix 毫秒）：判据调用节流的记账点。
 /// - `hour_histogram`: 用户活跃时段直方图缓存（按本地小时归桶；None = 尚未统计）。
 /// - `histogram_date`: 直方图缓存归属的本地日期（`YYYY-MM-DD`；跨日刷新）。
+/// - `wake_minute_median`: 用户唤醒时刻中位数缓存（每日首条用户消息的本地分钟中位；
+///   None = 无可统计日；归属 `histogram_date`）。
+/// - `rhythm_histogram`: 人格活跃曲线直方图缓存（按本地小时归桶；None = 尚未统计）。
+/// - `rhythm_histogram_date`: 人格直方图缓存归属的本地日期（`YYYY-MM-DD`；跨日刷新）。
 /// - `last_valence_sign`: 最近一次生成成功候选的效价符号（`-1` 负 / `0` 中性或未知
 ///   / `1` 正）：「负效价不连选」（正负平衡）的记账点。
 /// - `judge_yes_count` + `judge_no_count`: 判据累计「开口」/「沉默」裁决次数
@@ -67,6 +71,16 @@ pub struct ProactiveState {
     /// 直方图缓存归属的本地日期（`YYYY-MM-DD`；跨日刷新）。
     #[serde(default)]
     pub histogram_date: String,
+    /// 用户唤醒时刻中位数缓存（每日首条用户消息的本地分钟中位；None = 无可统计日；
+    /// 归属 `histogram_date`）。
+    #[serde(default)]
+    pub wake_minute_median: Option<u32>,
+    /// 人格活跃曲线直方图缓存（按本地小时归桶；None = 尚未统计）。
+    #[serde(default)]
+    pub rhythm_histogram: Option<[u32; 24]>,
+    /// 人格直方图缓存归属的本地日期（`YYYY-MM-DD`；跨日刷新）。
+    #[serde(default)]
+    pub rhythm_histogram_date: String,
     /// 最近一次生成成功候选的效价符号（`-1` 负 / `0` 中性或未知 / `1` 正）：
     /// 「负效价不连选」（正负平衡）的记账点。
     #[serde(default)]

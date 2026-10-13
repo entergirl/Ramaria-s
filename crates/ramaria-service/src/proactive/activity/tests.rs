@@ -79,6 +79,7 @@ fn evaluate_gate_states() {
     let model = ActivityModel {
         histogram,
         total: 11,
+        wake_minute_median: None,
     };
 
     assert!(
@@ -88,6 +89,7 @@ fn evaluate_gate_states() {
     let empty = ActivityModel {
         histogram: [0u32; 24],
         total: 0,
+        wake_minute_median: None,
     };
     assert!(
         matches!(
@@ -177,4 +179,123 @@ async fn load_model_caches_and_respects_sample_floor() {
     );
 
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 唤醒中位数：跨多日分组取每日首条，奇数条取中间值。
+#[test]
+fn compute_wake_median_groups_by_local_date() {
+    // 三天首条分别为 7:30 / 8:00 / 8:30（同日后续消息不参与）→ 中位 8:00
+    let day1_first = local_ms(2026, 1, 15, 7, 30);
+    let day1_later = local_ms(2026, 1, 15, 9, 0);
+    let day2_first = local_ms(2026, 1, 16, 8, 0);
+    let day2_later = local_ms(2026, 1, 16, 22, 10);
+    let day3_first = local_ms(2026, 1, 17, 8, 30);
+    let times = [day1_first, day1_later, day2_first, day2_later, day3_first];
+    assert_eq!(compute_wake_median(&times), Some(8 * 60), "取每日首条中位");
+}
+
+/// 唤醒中位数：单日取首条；空输入无中位。
+#[test]
+fn compute_wake_median_single_day_and_empty() {
+    let morning = local_ms(2026, 2, 1, 6, 45);
+    let evening = local_ms(2026, 2, 1, 21, 0);
+    assert_eq!(
+        compute_wake_median(&[morning, evening]),
+        Some(6 * 60 + 45),
+        "单日应取首条"
+    );
+    assert_eq!(compute_wake_median(&[]), None, "空输入无中位");
+}
+
+/// 唤醒中位数：偶数条取中间两值平均（向下取整）。
+#[test]
+fn compute_wake_median_even_count_averages_floor() {
+    // 两天首条 7:00（420）与 8:01（481）→ (420 + 481) / 2 = 450
+    let day1 = local_ms(2026, 3, 1, 7, 0);
+    let day2 = local_ms(2026, 3, 2, 8, 1);
+    assert_eq!(
+        compute_wake_median(&[day1, day2]),
+        Some(450),
+        "偶数条应取中间两值平均并向下取整"
+    );
+}
+
+/// 人格模型：样本达标产出模型且缓存写入；缓存命中复用；样本不足退化不启用。
+#[tokio::test]
+async fn load_persona_model_caches_and_respects_sample_floor() {
+    let (_engine, storage, dir) = engine_with_db("proactive-rhythm").await;
+    seed_persona(&storage, "char-0001").await;
+
+    // 10 点 3 条 + 15 点 2 条：人格归属不区分角色，全部计入
+    let day1 = local_ms(2026, 1, 15, 10, 30);
+    let day2 = local_ms(2026, 1, 16, 15, 0);
+    seed_session_with_messages(&storage, "char-0001", 3, day1).await;
+    seed_session_with_messages(&storage, "char-0001", 2, day2).await;
+    let now = day2 + 3_600_000;
+
+    let mut state = ProactiveState::default();
+    let model = load_persona_model(storage.as_ref(), &mut state, "char-0001", now, 90, 1)
+        .await
+        .expect("加载应成功")
+        .expect("样本充足应产出模型");
+    assert_eq!(model.histogram[10], 3, "10 点应有三条");
+    assert_eq!(model.histogram[15], 2, "15 点应有两条");
+    assert_eq!(model.total, 5, "人格消息不区分角色全部计入");
+    assert!(model.wake_minute_median.is_none(), "人格模型不统计唤醒时刻");
+    assert_eq!(
+        state.rhythm_histogram,
+        Some(model.histogram),
+        "直方图应写回状态缓存"
+    );
+    assert_eq!(
+        state.rhythm_histogram_date,
+        state::local_date_str(now),
+        "缓存应记录归属日期"
+    );
+
+    // 当日缓存命中：直接改缓存值后再次加载 → 复用缓存而不重新查询
+    state.rhythm_histogram = Some([9; 24]);
+    let cached = load_persona_model(storage.as_ref(), &mut state, "char-0001", now, 90, 1)
+        .await
+        .expect("加载应成功")
+        .expect("缓存样本充足应产出模型");
+    assert_eq!(cached.histogram, [9; 24], "当日缓存命中应直接复用");
+    assert_eq!(cached.total, 216);
+
+    // 样本门槛：新状态（无缓存）重新统计，样本数低于门槛 → None（统计仍写回缓存）
+    let mut fresh = ProactiveState::default();
+    let none = load_persona_model(storage.as_ref(), &mut fresh, "char-0001", now, 90, 100)
+        .await
+        .expect("加载应成功");
+    assert!(none.is_none(), "样本低于门槛应退化不启用");
+    assert_eq!(
+        fresh.rhythm_histogram,
+        Some(model.histogram),
+        "统计应写入缓存"
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 时机权重合成：None 中性 / 强度 0 退化到仅用户活跃。
+#[test]
+fn combine_weight_neutral_and_degenerate() {
+    // 人格未建模：原样返回（行为与仅用户活跃一致）
+    approx(combine_weight(0.7, None, 0.5), 0.7);
+    // 强度 0：无论节律强度如何均退化到仅用户活跃
+    approx(combine_weight(0.7, Some(0.0), 0.0), 0.7);
+    approx(combine_weight(0.7, Some(1.0), 0.0), 0.7);
+}
+
+/// 时机权重合成：全活跃不衰减 / 零活跃衰减到下限 / 越界夹取。
+#[test]
+fn combine_weight_scales_by_rhythm_norm() {
+    // 全活跃（norm = 1）：合成因子为 1，不衰减
+    approx(combine_weight(0.75, Some(1.0), 0.5), 0.75);
+    // 零活跃（norm = 0）：衰减到下限因子 0.5 → 0.375
+    approx(combine_weight(0.75, Some(0.0), 0.5), 0.375);
+    // 强度越界按边界夹取：强度 1 时零活跃衰减到 0
+    approx(combine_weight(1.0, Some(0.0), 1.5), 0.0);
+    // 归一化越界按边界夹取：norm > 1 视同全活跃
+    approx(combine_weight(0.4, Some(2.0), 0.5), 0.4);
 }

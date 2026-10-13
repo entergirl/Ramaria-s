@@ -1,4 +1,4 @@
-//! crates/ramaria-service/src/proactive/picker/sources.rs - Ramaria 主动对话选题素材与四源候选
+//! crates/ramaria-service/src/proactive/picker/sources.rs - Ramaria 主动对话选题素材与候选源
 //!
 //! 设计特点:
 //! - 素材一次加载：近窗事件（未了结 / 时间节点 / 规则情境共用）、高显著事件、事件会话映射
@@ -6,6 +6,7 @@
 //! - 时间节点：事件结束后第 N 天跟进，要求会话映射存在（不要求静默）
 //! - 高显著源：负效价出口约束（强负效价事件不从此源出口），会话映射可缺省
 //! - 规则情境：事件文本构造查询上下文，复用情境路由纯函数，命中主规则为候选
+//! - 早安问候：用户唤醒时段窗口内产出时机型候选（依赖同轮已刷新的唤醒统计缓存）
 //! - 隐私：事件文本仅供内存中转（查询构造），不落日志
 
 use std::collections::{HashMap, HashSet};
@@ -22,10 +23,11 @@ use ramaria_memory::behavior::{
 };
 
 use crate::engine::Engine;
+use crate::proactive::state::{self, ProactiveState};
 
 use super::{
-    ANCHOR_SUMMARY_MAX_CHARS, EVENT_LOAD_LIMIT, MS_PER_DAY, SOURCE_EVENT, SOURCE_RULE,
-    SOURCE_TIME_NODE, SOURCE_UNRESOLVED, TopicCandidate,
+    ANCHOR_SUMMARY_MAX_CHARS, EVENT_LOAD_LIMIT, GREETING_SCORE, MS_PER_DAY, SOURCE_EVENT,
+    SOURCE_GREETING, SOURCE_RULE, SOURCE_TIME_NODE, SOURCE_UNRESOLVED, TopicCandidate,
 };
 
 // =========================================================
@@ -92,7 +94,7 @@ pub(super) async fn load_session_map(
 }
 
 // =========================================================
-// 四源构建
+// 候选源构建
 // =========================================================
 
 /// 源②：未了结事件（负效价或高显著 + 所属会话在事件结束后无新对话）。
@@ -149,6 +151,7 @@ pub(super) async fn build_unresolved_candidates(
             topic_key: event.id.to_string(),
             session_id: Some(session_id),
             anchor: event_anchor(event),
+            angle: None,
             confidence: Some(event.confidence),
             salience: event.salience,
             valence: event.valence,
@@ -188,6 +191,7 @@ pub(super) fn build_time_node_candidates(
             topic_key: event.id.to_string(),
             session_id: Some(session_id),
             anchor: event_anchor(event),
+            angle: None,
             confidence: Some(event.confidence),
             salience: event.salience,
             valence: event.valence,
@@ -222,6 +226,7 @@ pub(super) fn build_salient_candidates(
             topic_key: event.id.to_string(),
             session_id: session_map.get(&event.id).copied(),
             anchor: event_anchor(event),
+            angle: None,
             confidence: Some(event.confidence),
             salience: event.salience,
             valence: event.valence,
@@ -310,10 +315,49 @@ pub(super) async fn build_rule_candidate(
         topic_key: primary.rule.id.to_string(),
         session_id: None,
         anchor,
+        angle: None,
         confidence: None,
         salience: 0.0,
         valence: primary.rule.situation.valence_mean,
         score: primary.score,
+    })
+}
+
+/// 源⑤：早安问候（用户唤醒时段窗口内的时机型候选）。
+///
+/// 口径:
+/// - 开关关闭 / 唤醒统计缓存非今日 / 唤醒中位不可用 → 不产出；
+/// - 当前本地分钟与唤醒中位的环形距离（跨零点取最短弧）不超过配置窗口 → 产出；
+/// - 选题键按本地日期稳定（同日去重冷却，次日可再次问候）；
+/// - 依赖同轮调度已刷新唤醒统计缓存（缓存缺失时当日不产出）。
+pub(super) fn build_greeting_candidate(
+    now: i64,
+    state: &ProactiveState,
+    config: &ProactiveConfig,
+) -> Option<TopicCandidate> {
+    if !config.greeting_enabled {
+        return None;
+    }
+    let date = state::local_date_str(now);
+    if state.histogram_date != date {
+        return None;
+    }
+    let wake = state.wake_minute_median?;
+    let current = state::local_minute_of_day(now);
+    let diff = current.abs_diff(wake);
+    if diff.min(1440 - diff) > config.greeting_window_minutes {
+        return None;
+    }
+    Some(TopicCandidate {
+        source: SOURCE_GREETING,
+        topic_key: format!("greeting-{date}"),
+        session_id: None,
+        anchor: None,
+        angle: Some("对方刚醒来，问候一声早安".to_string()),
+        confidence: None,
+        salience: 0.0,
+        valence: 0.0,
+        score: GREETING_SCORE,
     })
 }
 

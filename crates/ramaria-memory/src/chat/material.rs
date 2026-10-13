@@ -1,7 +1,8 @@
 //! crates/ramaria-memory/src/chat/material.rs - System Prompt 装配素材加载
 //!
 //! 设计特点:
-//! - 装配素材加载：persona 结构化画像 / 事实 / 性格 / 示例 / 自动风格规则 / 知识层去重
+//! - 装配素材加载：persona 结构化画像 / 事实 / 性格 / 示例 / 自动风格规则 / 近期状态 / 知识层去重
+//! - 近期状态：消费开关开启时按窗口 L1 效价时序判定，中性 / 无样本 / 失败降级为不注入
 //! - 普通装配路径：结构化素材走装配器，纯文本降级（无 persona / 冷启动）原样返回
 //! - 冷启动兜底：persona 无结构化画像时经 persona.toml 组装基础 prompt（DB 配置优先，文件系统回退）
 //! - 知识层去重：RAG 覆盖剔除 / 角色层重复剔除，层间仲裁（默认关闭）追加内容级去重
@@ -18,6 +19,7 @@ use crate::prompt::builder::{
 };
 
 use super::persona_fallback::load_persona_toml_prompt;
+use super::recent_state;
 use super::time::now_timestamp_str;
 
 // =========================================================
@@ -62,6 +64,35 @@ pub enum LoadedPromptMaterial {
     Structured(Box<PromptContext>, PromptConfig),
 }
 
+/// 近期状态消费配置（提示词注入侧）。
+///
+/// 职责:
+/// - 收拢近期状态（心情）的消费开关与统计窗口，由调用方按宿主配置传入。
+///
+/// 字段约定:
+/// - `enabled`: 消费开关（缺省不启用，注入侧显式开启）；
+/// - `window_days`: 统计窗口（天）。
+#[derive(Debug, Clone, Copy)]
+pub struct RecentStateConfig {
+    /// 消费开关（缺省不启用）
+    pub enabled: bool,
+    /// 统计窗口（天）
+    pub window_days: u32,
+}
+
+impl Default for RecentStateConfig {
+    /// 创建缺省近期状态配置。
+    ///
+    /// 返回:
+    /// - `enabled=false`、窗口 7 天（不启用时窗口不参与加载）。
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            window_days: 7,
+        }
+    }
+}
+
 /// System Prompt 装配素材加载的完整输入集合。
 ///
 /// 职责:
@@ -94,6 +125,7 @@ pub enum LoadedPromptMaterial {
 ///   回退既有引用级去重，prompt 输出与既有版本逐字段等价）。
 /// - `segment_style`: 回复分段格式（`Pipe` = 沿用多气泡契约；`Newline` =
 ///   即时通讯平台通道，回复规则后追加换行格式声明段）。
+/// - `recent_state`: 近期状态消费配置（开关关闭时不查询、不注入）。
 pub struct PromptMaterialInputs<'a> {
     /// 人格标识（None 表示 rama 自身）。
     pub persona_uid: Option<&'a str>,
@@ -127,6 +159,8 @@ pub struct PromptMaterialInputs<'a> {
     pub layer_dedup: &'a LayerDedupConfig,
     /// 回复分段格式（按出站通道声明）。
     pub segment_style: SegmentStyle,
+    /// 近期状态消费配置（提示词近期状态行；关闭 / 无样本 / 中性 → 不注入）。
+    pub recent_state: RecentStateConfig,
     /// 主动生成场景上下文（None = 非主动生成，Prompt 不产生主动段）。
     pub proactive: Option<ProactivePromptContext>,
 }
@@ -206,6 +240,14 @@ pub async fn load_prompt_material(
                     tracing::warn!(persona_uid = %p.uid, %e, "加载自动风格规则失败，跳过");
                     None
                 })
+        } else {
+            None
+        };
+
+        // 近期状态（心情）：消费开关开启时按窗口内的 L1 效价时序判定；
+        // 关闭 / 无样本 / 中性 / 查询失败 → None（不注入，prompt 与既有语义等价）
+        let recent_mood = if inputs.recent_state.enabled {
+            recent_state::load(storage, &p.uid, inputs.recent_state.window_days).await
         } else {
             None
         };
@@ -344,6 +386,8 @@ pub async fn load_prompt_material(
             knowledge_facts,
             // 自动风格规则（None = 风格关闭/数据不足 → prompt 不含自动风格规则）
             style_rule_text,
+            // 近期状态（None = 关闭/无样本/中性 → prompt 不含近期状态行）
+            recent_mood,
             // 主动生成场景（None = 非主动路径 → prompt 不含主动段）
             proactive_context: inputs.proactive.clone(),
         };

@@ -481,6 +481,31 @@ async fn continue_l1_backfills_missing_only() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// 风格统计触发：L1 补跑完成后按画像增量统计并落库（样本不足也算已触发）。
+#[tokio::test]
+async fn continue_triggers_style_stats_after_l1_backfill() {
+    let llm = Arc::new(MockLlm::with_reply(L1_JSON_REPLY));
+    let (engine, storage, dir) =
+        resume_env("resume-style-stats", llm, RamariaConfig::default()).await;
+
+    seed_closed_session(&storage, &[Some("char-0001"), Some("char-0001")]).await;
+
+    let outcome = engine
+        .continue_import(continue_request(), None)
+        .await
+        .expect("继续处理应成功");
+    assert_eq!(outcome.l1.l1_success, 1);
+
+    let stats = engine
+        .style_stats("char-0001")
+        .await
+        .expect("读取风格统计应成功")
+        .expect("补跑后应触发风格统计并落库");
+    assert!(stats.sample_count >= 1, "补跑会话的消息应计入风格统计样本");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// 私聊导入续跑：继续处理产生双行摘要（双方 persona 各一、无无归属行、内容一致）。
 #[tokio::test]
 async fn continue_private_import_produces_dual_l1_rows() {

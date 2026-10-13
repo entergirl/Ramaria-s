@@ -27,6 +27,9 @@ fn sample_state() -> ProactiveState {
         last_judge_at: Some(1_700_000_100_000),
         hour_histogram: Some([1; 24]),
         histogram_date: "2026-10-02".to_string(),
+        wake_minute_median: Some(7 * 60 + 30),
+        rhythm_histogram: Some([2; 24]),
+        rhythm_histogram_date: "2026-10-02".to_string(),
         last_valence_sign: -1,
         judge_yes_count: 3,
         judge_no_count: 2,
@@ -167,6 +170,18 @@ async fn legacy_json_without_new_fields_falls_back() {
     assert_eq!(state.last_judge_at, None, "缺 last_judge_at 应回退默认");
     assert_eq!(state.hour_histogram, None, "缺 hour_histogram 应回退默认");
     assert_eq!(state.histogram_date, "", "缺 histogram_date 应回退默认");
+    assert_eq!(
+        state.wake_minute_median, None,
+        "缺 wake_minute_median 应回退默认"
+    );
+    assert_eq!(
+        state.rhythm_histogram, None,
+        "缺 rhythm_histogram 应回退默认"
+    );
+    assert_eq!(
+        state.rhythm_histogram_date, "",
+        "缺 rhythm_histogram_date 应回退默认"
+    );
     assert_eq!(
         state.last_valence_sign, 0,
         "缺 last_valence_sign 应回退默认"

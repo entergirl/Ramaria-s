@@ -32,6 +32,9 @@ use serde::{Deserialize, Serialize};
 /// - `active_hours_weight`: 活跃时段软加权强度（0.0~1.0，越高越偏向用户活跃时段）。
 /// - `active_hours_window_days`: 活跃时段统计滚动窗口（天）。
 /// - `active_hours_min_samples`: 时段建模最少样本数（不足时不启用时段加权）。
+/// - `rhythm_weight`: 人格节律软加权强度（0.0~1.0，0 = 关闭人格节律）。
+/// - `rhythm_window_days`: 人格活跃曲线统计滚动窗口（天）。
+/// - `rhythm_min_samples`: 人格活跃曲线建模最少样本数（不足时不启用）。
 /// - `valence_weight`: 效价入权强度（越高情绪波动大的记忆越优先）。
 /// - `confidence_floor`: 事件置信度门槛（低于此值不进入主动选题，0.0~1.0）。
 /// - `light_touch_weight`: 轻触达兜底候选权重（0.0~1.0）。
@@ -42,6 +45,10 @@ use serde::{Deserialize, Serialize};
 /// - `topic_cooldown_hours`: 同一选题键的去重冷却窗口（与投递冷却 `cooldown_hours` 无关）。
 /// - `silence_backoff_days`: 连续未回应达到此天数后进入退避（降频 / 暂停）。
 /// - `startup_grace_days`: 首次启用后的宽限期（天），期内不触发。
+/// - `greeting_enabled`: 问候类候选开关（用户刚睡醒时段的早安问候主动消息）。
+/// - `greeting_window_minutes`: 问候时机窗口（分钟），距用户每日首条消息中位时刻的允许偏差。
+/// - `recent_state_enabled`: 近期状态消费开关（L1 效价时序 → 近期心情，注入提示词）。
+/// - `recent_state_window_days`: 近期状态统计窗口（天）。
 ///
 /// 命名说明:
 /// - 本组与行为层 `crate::behavior::BehaviorParams::proactiveness` 无语义关联：
@@ -77,6 +84,13 @@ pub struct ProactiveConfig {
     pub active_hours_window_days: u32,
     /// 时段建模最少样本数（默认 50；不足时不启用时段加权）。
     pub active_hours_min_samples: u32,
+    /// 人格节律软加权强度（0.0~1.0，默认 0.5；0 = 关闭人格节律，
+    /// 行为退化为仅用户活跃时段）。
+    pub rhythm_weight: f64,
+    /// 人格活跃曲线统计滚动窗口（天，默认 90）。
+    pub rhythm_window_days: u32,
+    /// 人格活跃曲线建模最少样本数（默认 100；不足时不启用）。
+    pub rhythm_min_samples: u32,
     /// 效价入权强度（默认 0.5；越高情绪波动大的记忆越优先）。
     pub valence_weight: f64,
     /// 事件置信度门槛（0.0~1.0，默认 0.6；低于此值不进入主动选题）。
@@ -109,6 +123,14 @@ pub struct ProactiveConfig {
     pub silence_backoff_days: u32,
     /// 首次启用宽限期（天，默认 3）。
     pub startup_grace_days: u32,
+    /// 问候类候选开关（默认 true；用户刚睡醒时段的早安问候主动消息）。
+    pub greeting_enabled: bool,
+    /// 问候时机窗口（分钟，默认 45）：距用户每日首条消息中位时刻的允许偏差。
+    pub greeting_window_minutes: u32,
+    /// 近期状态消费开关（默认 true；L1 效价时序 → 近期心情，注入提示词）。
+    pub recent_state_enabled: bool,
+    /// 近期状态统计窗口（天，默认 7）。
+    pub recent_state_window_days: u32,
 }
 
 impl Default for ProactiveConfig {
@@ -118,9 +140,11 @@ impl Default for ProactiveConfig {
     /// - 均衡基线：总开关开启，检查间隔 300 秒，最小空闲 4 小时，
     ///   每日上限 3 条（合计不限），免打扰 22:00-08:00，冷却 8 小时；判据开启、
     ///   节流 3 小时；时段加权 0.8（窗口 30 天、最少 50 样本）；
+    ///   人格节律加权 0.5（窗口 90 天、最少 100 样本）；
     ///   效价权重 0.5，置信度门槛 0.6，轻触达权重 0.3；
     ///   事件显著门槛 0.6（时间窗 14 天），负效价阈值 -0.3，
-    ///   跟进点 3 天，选题去重冷却 24 小时；连续沉默退避 3 天，首次启用宽限 3 天。
+    ///   跟进点 3 天，选题去重冷却 24 小时；连续沉默退避 3 天，首次启用宽限 3 天；
+    ///   问候类候选开启（窗口 45 分钟），近期状态消费开启（窗口 7 天）。
     fn default() -> Self {
         Self {
             enabled: true,
@@ -135,6 +159,9 @@ impl Default for ProactiveConfig {
             active_hours_weight: 0.8,
             active_hours_window_days: 30,
             active_hours_min_samples: 50,
+            rhythm_weight: 0.5,
+            rhythm_window_days: 90,
+            rhythm_min_samples: 100,
             valence_weight: 0.5,
             confidence_floor: 0.6,
             light_touch_weight: 0.3,
@@ -145,6 +172,10 @@ impl Default for ProactiveConfig {
             topic_cooldown_hours: 24,
             silence_backoff_days: 3,
             startup_grace_days: 3,
+            greeting_enabled: true,
+            greeting_window_minutes: 45,
+            recent_state_enabled: true,
+            recent_state_window_days: 7,
         }
     }
 }

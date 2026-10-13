@@ -190,6 +190,14 @@ impl StoreCrud for SqliteStorage {
     ) -> RamariaResult<Vec<i64>> {
         repo::messages::list_user_message_times_since(&self.pool, persona_uid, since_ms).await
     }
+    /// 覆写为按消息级 persona 归属的时间戳窗口查询（人格活跃曲线统计）。
+    async fn list_persona_message_times_since(
+        &self,
+        persona_uid: &str,
+        since_ms: i64,
+    ) -> RamariaResult<Vec<i64>> {
+        repo::messages::list_persona_message_times_since(&self.pool, persona_uid, since_ms).await
+    }
     /// 覆写为"主动投递 + 窗口内首条本地用户回应"配对查询（主动对话数值基线统计）。
     async fn list_proactive_delivery_pairs(
         &self,

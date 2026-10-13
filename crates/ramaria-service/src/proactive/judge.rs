@@ -58,7 +58,7 @@ const JUDGE_SYSTEM_PROMPT: &str = r#"你是陪伴型 AI 的主动对话判据。
 ///
 /// 字段约定:
 /// - `hour`: 本地小时（0~23）。
-/// - `activity_weight`: 当前时段软加权权重（0.0~1.0）。
+/// - `activity_weight`: 时机权重（0.0~1.0；用户活跃与人格节律的合成）。
 /// - `hours_since_last_chat`: 距上次对话小时数（None = 无历史）。
 /// - `silence_streak`: 连续未回应主动消息次数。
 /// - `daily_count`: 当日已主动投递条数。
@@ -74,7 +74,8 @@ pub(crate) struct JudgeSignals {
 ///
 /// 字段约定:
 /// - `id`: 候选编号（如 `c0`），判据输出回引。
-/// - `source`: 来源标识（`event` / `unresolved` / `time_node` / `rule` / `light_touch`）。
+/// - `source`: 来源标识（`event` / `unresolved` / `time_node` / `rule` / `greeting`
+///   / `light_touch`）。
 /// - `anchor`: 情境摘要（None = 轻触达无具体话题）。
 /// - `valence`: 候选效价（-1.0~1.0；符号决定正 / 负向标注）。
 pub(crate) struct JudgeCandidate {
@@ -221,7 +222,7 @@ fn build_user_message(candidates: &[JudgeCandidate], signals: &JudgeSignals) -> 
     message.push_str("## 当前情境\n");
     message.push_str(&format!("- 本地时间：{} 点\n", signals.hour));
     message.push_str(&format!(
-        "- 用户活跃权重：{:.2}（越高表示用户通常在这个时段活跃）\n",
+        "- 时机权重：{:.2}（用户活跃与人格节奏的合成，越高越适合此刻开口）\n",
         signals.activity_weight
     ));
     match signals.hours_since_last_chat {
@@ -260,6 +261,7 @@ fn source_label(source: &str) -> &str {
         "unresolved" => "未了结事件",
         "time_node" => "时间节点",
         "rule" => "行为规则",
+        "greeting" => "早安问候",
         "light_touch" => "轻触达",
         _ => source,
     }

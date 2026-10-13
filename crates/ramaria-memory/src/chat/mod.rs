@@ -2,6 +2,7 @@
 //!
 //! 设计特点:
 //! - 装配素材加载：persona 结构化画像 / 事实 / 性格 / 示例 / 自动风格规则 / 知识层去重
+//! - 近期状态：消费开关开启时按窗口 L1 效价时序判定方向，中性 / 无样本不产生输出
 //! - 普通装配路径：结构化素材走 5-Block 装配器，纯文本降级（无 persona / 冷启动）原样返回
 //! - 冷启动兜底：persona 无结构化画像时经 persona.toml 组装基础 prompt（DB 配置优先，文件系统回退）
 //! - 示例预选：评分轮换 + 记忆未命中兜底；关闭时回退静态 selected 注入
@@ -13,6 +14,7 @@ mod examples;
 mod material;
 mod narrative;
 mod persona_fallback;
+mod recent_state;
 mod time;
 
 #[cfg(test)]
@@ -20,9 +22,10 @@ mod tests;
 
 pub use examples::load_examples_for_input;
 pub use material::{
-    CHANNEL_SEGMENT_DECLARATION, LoadedPromptMaterial, PromptMaterialInputs, SegmentStyle,
-    build_system_prompt, load_prompt_material,
+    CHANNEL_SEGMENT_DECLARATION, LoadedPromptMaterial, PromptMaterialInputs, RecentStateConfig,
+    SegmentStyle, build_system_prompt, load_prompt_material,
 };
 pub use narrative::{NarrativeMaterial, format_l1_as_context_line, load_narrative_material};
 pub use persona_fallback::load_persona_toml_prompt;
+pub use recent_state::RecentMood;
 pub use time::now_timestamp_str;

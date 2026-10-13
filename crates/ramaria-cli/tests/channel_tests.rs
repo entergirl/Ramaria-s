@@ -120,7 +120,10 @@ fn bind_creates_updates_and_is_idempotent() {
         "未覆盖时 persona_uid 应为 null"
     );
     assert_eq!(data["effective_persona_uid"], "rama-0001");
-    assert_eq!(data["enabled"], true, "自动建档默认启用");
+    assert_eq!(
+        data["enabled"], false,
+        "自动建档默认禁用（白名单载体，须显式放行）"
+    );
     assert_eq!(data["allow_proactive"], false, "主动投递默认关");
 
     // 幂等重放：再次执行同命令仍成功且不新增

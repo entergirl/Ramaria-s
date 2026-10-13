@@ -27,6 +27,7 @@ use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 mod delivery;
+mod rhythm;
 
 /// 固定回复（供"生成成功"路径断言）。
 const REPLY: &str = "刚路过一家花店，想起你说想学插花。";

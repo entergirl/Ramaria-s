@@ -2,8 +2,8 @@
 //!
 //! 设计特点:
 //! - 单轮判定链：硬闸门（可见性 / 人格主动开关 / 状态 / 宽限 / 免打扰 / 每日上限 /
-//!   全局日上限 / 冷却 / 退避 / 最小空闲 / 隐私）→ 活跃时段门 → 判据节流 → 选题 →
-//!   生成 → 投放
+//!   全局日上限 / 冷却 / 退避 / 最小空闲 / 隐私）→ 活跃时段门与时机合成 → 判据节流 →
+//!   选题 → 生成 → 投放
 //! - 时钟注入：单轮入口接收时间戳，测试与宿主时钟对齐均不需改实现
 //! - 状态按人格隔离：处理尾部统一回写（跳过路径的跨日重置 / 宽限基准同样落盘）
 //! - 全局日上限：启用时单轮加载全局状态（跨日重置 + 生成计数）并整轮回写；
@@ -58,8 +58,8 @@ const SHUTDOWN_POLL_CHUNK_SECONDS: u64 = 60;
 /// 说明:
 /// - `state` 为调度已加载的运行时状态（可变）：供选题器读取去重冷却记录、
 ///   写入判据 yes/no 计数；
-/// - `activity_weight` 为当前时段软加权权重（0.0~1.0）：供判据输入信号；
-///   样本不足未建模时取权重下限；
+/// - `activity_weight` 为时机权重（0.0~1.0：用户活跃与人格节律的合成软加权）：
+///   供判据输入信号；样本不足未建模时取权重下限；
 /// - 判据节流由调度层在调用前判定：本方法被调用即视为一次判据尝试（节流窗口消费）。
 #[async_trait]
 pub(crate) trait TopicPicker: Send + Sync {
@@ -70,7 +70,7 @@ pub(crate) trait TopicPicker: Send + Sync {
     /// - `persona`: 目标人格 uid。
     /// - `now`: 本轮时间（Unix 毫秒）。
     /// - `state`: 调度已加载的运行时状态（可变；选题器写入判据计数）。
-    /// - `activity_weight`: 当前时段软加权权重（0.0~1.0）。
+    /// - `activity_weight`: 时机权重（0.0~1.0；用户活跃与人格节律的合成）。
     ///
     /// 返回:
     /// - `Some(directive)`: 候选指令；
@@ -263,10 +263,11 @@ pub(crate) async fn run_tick(
 /// 流程:
 /// 1. 硬闸门（未通过返回跳过原因）；
 /// 2. 活跃时段门（样本不足退化放行；低活跃度本轮不启动）；
-/// 3. 判据节流（仅判据开启时生效）；
-/// 4. 选题（进入选题即视为一次判据尝试，先记账后调用）；
-/// 5. 生成（`Ok(None)` = 生成层门禁静默跳过；`Err` 吸收为生成失败，不记投递状态）；
-/// 6. 投放与记账（本地 / 通道分流；本地路径生成成功即记投递时间、当日计数与
+/// 3. 时机权重合成（人格节律为软信号：样本不足中性，不构成硬否决）；
+/// 4. 判据节流（仅判据开启时生效）；
+/// 5. 选题（进入选题即视为一次判据尝试，先记账后调用）；
+/// 6. 生成（`Ok(None)` = 生成层门禁静默跳过；`Err` 吸收为生成失败，不记投递状态）；
+/// 7. 投放与记账（本地 / 通道分流；本地路径生成成功即记投递时间、当日计数与
 ///    候选效价符号，投递成功才记选题冷却；通道门禁丢弃 / 平台失败不记账）。
 async fn process_persona(
     engine: &Engine,
@@ -314,6 +315,26 @@ async fn process_persona(
             }
         };
 
+    // ---- 2.5 人格节律：与用户活跃合成时机权重（软信号，不构成硬否决）----
+    let rhythm_model = activity::load_persona_model(
+        engine.storage_ref().as_ref(),
+        st,
+        &persona.uid,
+        now,
+        config.rhythm_window_days,
+        config.rhythm_min_samples,
+    )
+    .await?;
+    let rhythm_norm = rhythm_model.map(|model| activity::hour_norm(&model.histogram, hour));
+    let combined_weight =
+        activity::combine_weight(activity_weight, rhythm_norm, config.rhythm_weight);
+    debug!(
+        persona = %persona.uid,
+        rhythm_norm = ?rhythm_norm,
+        combined_weight,
+        "主动调度：时机权重合成"
+    );
+
     // ---- 3. 判据节流（仅判据开启时生效）----
     if config.judge_enabled {
         if let Some(last) = st.last_judge_at {
@@ -326,7 +347,7 @@ async fn process_persona(
     // ---- 4. 选题：进入选题即视为一次判据尝试，先记账后调用 ----
     st.last_judge_at = Some(now);
     let Some(directive) = picker
-        .pick(engine, &persona.uid, now, st, activity_weight)
+        .pick(engine, &persona.uid, now, st, combined_weight)
         .await
     else {
         return Ok(PersonaTick::NoTopic);
