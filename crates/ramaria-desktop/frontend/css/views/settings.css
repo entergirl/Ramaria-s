@@ -341,6 +341,41 @@
   .settings-adv-reset-row .btn {
     width: 100%;
   }
+
+  /* 目录导航：窄屏纵向堆叠，目录栏改横向滚动一行（列表过长时水平滑动） */
+  .settings-layout {
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+
+  .settings-nav {
+    position: static;
+    width: 100%;
+    flex: none;
+    flex-direction: row;
+    align-items: center;
+    gap: var(--space-4);
+    overflow-x: auto;
+    padding-bottom: var(--space-1);
+  }
+
+  .settings-nav-group {
+    flex-direction: row;
+    align-items: center;
+    gap: var(--space-1);
+    flex-shrink: 0;
+  }
+
+  .settings-nav-group-title {
+    flex-shrink: 0;
+    padding: 0 var(--space-1);
+  }
+
+  .settings-nav-item {
+    width: auto;
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
 }
 
 /* =========================================================
@@ -613,4 +648,104 @@
 .settings-proactive-roster-select {
   width: 110px;
   flex-shrink: 0;
+}
+
+/* =========================================================
+   目录导航布局（左右结构 + 面包屑 + 跨页签跳转）
+   ========================================================= */
+
+/* 左右结构：左侧目录栏 + 右侧内容区 */
+.settings-layout {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-6);
+}
+
+/* 目录栏：定宽 + 滚动区粘性定位（页面整体滚动，不设独立滚动区） */
+.settings-nav {
+  flex: 0 0 220px;
+  min-width: 0;
+  position: sticky;
+  top: var(--space-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.settings-nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.settings-nav-group-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text-tertiary);
+  padding: var(--space-1) var(--space-2);
+}
+
+.settings-nav-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  border: none;
+  background: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-family: var(--font-body);
+  font-size: 13px;
+  color: var(--text-secondary);
+  transition: color var(--dur-fast) var(--ease-out),
+              background-color var(--dur-fast) var(--ease-out),
+              box-shadow var(--dur-fast) var(--ease-out);
+}
+
+.settings-nav-item:hover {
+  background: var(--bg-subtle);
+  color: var(--text-primary);
+}
+
+.settings-nav-item.active {
+  background: var(--bg-card);
+  color: var(--text-primary);
+  font-weight: 500;
+  box-shadow: var(--shadow-sm);
+}
+
+.settings-content {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 面包屑（基础设置 / 分组 / 项标题；分组名可点击跳该组首项） */
+.settings-breadcrumb {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  margin-bottom: var(--space-4);
+  line-height: 1.6;
+}
+
+.settings-breadcrumb-link {
+  border: none;
+  background: none;
+  padding: 0;
+  font-family: var(--font-body);
+  font-size: 12px;
+  color: var(--color-secondary);
+  cursor: pointer;
+}
+
+.settings-breadcrumb-link:hover {
+  text-decoration: underline;
+}
+
+/* 基础 ↔ 高级跨页签跳转行 */
+.settings-crosslink {
+  margin-top: var(--space-4);
+  font-size: 12px;
+  color: var(--text-tertiary);
+  line-height: 1.8;
 }

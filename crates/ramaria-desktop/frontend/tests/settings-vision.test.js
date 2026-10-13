@@ -8,8 +8,9 @@
  * - 合并完整配置：纯函数不改入参；能力关闭时保留已配置上限
  *
  * 说明:
- * - settings.js 是浏览器 IIFE；本测试用 vm 注入 window/console/Router/document 桩加载，
- *   仅调用 `RamariaSettingsView` 暴露的纯函数与处理器，不触发真实渲染流程；
+ * - 设置页为浏览器 IIFE 多模块结构（js/views/settings/）；本测试经
+ *   tests/helpers/load-settings.js 在 vm 沙箱中按序加载全部模块，仅调用
+ *   `RamariaSettingsView` 暴露的纯函数与处理器，不触发真实渲染流程；
  * - 元素桩只实现被测逻辑用到的属性（checked / value / classList）。
  *
  * 运行: node --test "tests/*.test.js"
@@ -19,12 +20,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-const vm = require('node:vm');
-
-/** 设置页视图源码（frontend/js/views/settings.js） */
-const SETTINGS_PATH = path.resolve(__dirname, '..', 'js', 'views', 'settings.js');
+const { loadSettingsView: loadSettingsModules } = require('./helpers/load-settings.js');
 
 /** 造一个带 classList 行为的元素桩 */
 function classListElement(initialClasses) {
@@ -45,29 +41,16 @@ function classListElement(initialClasses) {
 }
 
 /**
- * 在 vm 沙箱中加载 settings.js，返回视图单例与调用记录。
+ * 加载设置页（js/views/settings/ 全部模块按序进入同一 vm 沙箱），返回视图单例与调用记录。
  *
  * 参数:
  * - `opts.elements`: document.getElementById 的 id → 元素桩映射（缺省 null）。
  */
 function loadSettingsView(opts) {
   const options = opts || {};
-  const source = fs.readFileSync(SETTINGS_PATH, 'utf8');
   const calls = { updateFull: [] };
-  const windowMock = {};
 
-  const sandbox = {
-    window: windowMock,
-    console: { log() {}, warn() {}, error() {} },
-    RamariaRouter: {
-      registerHook() {
-        return function () {};
-      },
-      getCurrentView() {
-        return 'chat';
-      },
-      setContentActions() {},
-    },
+  const { view } = loadSettingsModules({
     RamariaToast: {
       show() {},
     },
@@ -85,14 +68,10 @@ function loadSettingsView(opts) {
         return Object.prototype.hasOwnProperty.call(map, id) ? map[id] : null;
       },
     },
-  };
-  sandbox.globalThis = sandbox;
-  vm.createContext(sandbox);
-  vm.runInContext(source, sandbox, { filename: 'settings.js' });
+  });
 
-  const view = windowMock.RamariaSettingsView;
   if (!view || typeof view.getVisionFields !== 'function') {
-    throw new Error('settings.js 未暴露图片理解面板接口');
+    throw new Error('设置页未暴露图片理解面板接口');
   }
   return { view, calls };
 }

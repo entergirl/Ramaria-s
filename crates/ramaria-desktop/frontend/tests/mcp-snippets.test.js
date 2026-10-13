@@ -10,7 +10,8 @@
  * - 空态防御：缺少命令或库路径时返回空数组（面板显示空态而非残缺片段）。
  *
  * 说明:
- * - settings.js 是浏览器 IIFE 视图，本测试用 vm 注入最小桩加载，
+ * - 设置页为浏览器 IIFE 多模块结构（js/views/settings/）；本测试经
+ *   tests/helpers/load-settings.js 在 vm 沙箱中按序加载全部模块，
  *   只调用纯函数 `buildMcpClientSnippets(info)`，不触碰 DOM 与 Tauri。
  *
  * 运行: node --test "tests/*.test.js"
@@ -20,45 +21,20 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-const vm = require('node:vm');
-
-/** 设置页视图源码（frontend/js/views/settings.js） */
-const SETTINGS_PATH = path.resolve(__dirname, '..', 'js', 'views', 'settings.js');
+const { loadSettingsView: loadSettingsModules } = require('./helpers/load-settings.js');
 
 /**
- * 在 vm 沙箱中加载 settings.js，返回其全局单例。
+ * 加载设置页（js/views/settings/ 全部模块按序进入同一 vm 沙箱），返回其全局单例。
  *
- * 桩说明（与 settings-defaults.test.js 同口径）:
+ * 桩说明（由 helpers/load-settings.js 提供）:
  * - `RamariaRouter`：init() 只注册钩子；getCurrentView 返回非 settings，
  *   避免自动初始化分支注册定时器导致测试进程挂起；
  * - 不注入 `document`：本测试只调用纯函数，不触碰 DOM。
  */
 function loadSettingsView() {
-  const source = fs.readFileSync(SETTINGS_PATH, 'utf8');
-
-  const windowMock = {};
-  const sandbox = {
-    window: windowMock,
-    console: { log() {}, warn() {}, error() {} },
-    RamariaRouter: {
-      registerHook() {
-        return function () {};
-      },
-      getCurrentView() {
-        return 'chat';
-      },
-      setContentActions() {},
-    },
-  };
-  sandbox.globalThis = sandbox;
-  vm.createContext(sandbox);
-  vm.runInContext(source, sandbox, { filename: 'settings.js' });
-
-  const view = windowMock.RamariaSettingsView;
+  const { view } = loadSettingsModules();
   if (!view || typeof view.buildMcpClientSnippets !== 'function') {
-    throw new Error('settings.js 未暴露 buildMcpClientSnippets()');
+    throw new Error('设置页未暴露 buildMcpClientSnippets()');
   }
   return view;
 }

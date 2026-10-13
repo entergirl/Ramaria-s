@@ -9,8 +9,9 @@
  *   存在性、类型与默认值。
  *
  * 说明:
- * - settings.js 是浏览器 IIFE 视图，本测试用 vm 注入最小桩（Router/window/console）
- *   加载它，只读取 `getAdvancedGroups()` 暴露的元数据快照，不触发任何 DOM 操作；
+ * - 设置页为浏览器 IIFE 多模块结构（js/views/settings/），本测试经
+ *   tests/helpers/load-settings.js 在 vm 沙箱中按序加载全部模块，只读取
+ *   `getAdvancedGroups()` 暴露的元数据快照，不触发任何 DOM 操作；
  * - 模板未收录的键（如待 CFG-01 补齐的分组）跳过比对，不做"反向要求模板"的断言，
  *   避免测试越权约束配置模板的收录范围。
  *
@@ -23,11 +24,8 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const vm = require('node:vm');
 const { parseToml } = require('./helpers/toml-lite.js');
-
-/** 设置页视图源码（frontend/js/views/settings.js） */
-const SETTINGS_PATH = path.resolve(__dirname, '..', 'js', 'views', 'settings.js');
+const { loadSettingsView: loadSettingsModules } = require('./helpers/load-settings.js');
 
 /** 后端配置模板（main/config/default.toml） */
 const DEFAULT_TOML_PATH = path.resolve(
@@ -35,38 +33,17 @@ const DEFAULT_TOML_PATH = path.resolve(
 );
 
 /**
- * 在 vm 沙箱中加载 settings.js，返回其全局单例。
+ * 加载设置页（js/views/settings/ 全部模块按序进入同一 vm 沙箱），返回其全局单例。
  *
- * 桩说明:
+ * 桩说明（由 helpers/load-settings.js 提供）:
  * - `RamariaRouter`：init() 只注册钩子；`getCurrentView()` 返回非 settings，
- *   避免自动初始化分支注册定时器导致测试进程挂起。
- * - `window`：收集 defineProperty 暴露的 `RamariaSettingsView`。
- * - 不注入 `document`：本测试不触碰 DOM（getAdvancedGroups 为纯数据读取）。
+ *   避免自动初始化分支注册定时器导致测试进程挂起；
+ * - 不注入 `document` / `RamariaStore`：本测试不触碰 DOM（纯数据读取）。
  */
 function loadSettingsView() {
-  const source = fs.readFileSync(SETTINGS_PATH, 'utf8');
-
-  const windowMock = {};
-  const sandbox = {
-    window: windowMock,
-    console: { log() {}, warn() {}, error() {} },
-    RamariaRouter: {
-      registerHook() {
-        return function () {};
-      },
-      getCurrentView() {
-        return 'chat';
-      },
-      setContentActions() {},
-    },
-  };
-  sandbox.globalThis = sandbox;
-  vm.createContext(sandbox);
-  vm.runInContext(source, sandbox, { filename: 'settings.js' });
-
-  const view = windowMock.RamariaSettingsView;
+  const { view } = loadSettingsModules();
   if (!view || typeof view.getAdvancedGroups !== 'function') {
-    throw new Error('settings.js 未暴露 getAdvancedGroups()');
+    throw new Error('设置页未暴露 getAdvancedGroups()');
   }
   return view;
 }

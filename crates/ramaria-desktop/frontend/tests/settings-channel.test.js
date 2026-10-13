@@ -11,8 +11,9 @@
  * - 凭据保存处理器：空输入仅提示不写入；成功写入后清空输入框
  *
  * 说明:
- * - settings.js 是浏览器 IIFE；本测试用 vm 注入 window/console/Router/Api 桩加载，
- *   仅调用 `RamariaSettingsView` 暴露的纯函数与处理器，不触发真实渲染流程；
+ * - 设置页为浏览器 IIFE 多模块结构（js/views/settings/）；本测试经
+ *   tests/helpers/load-settings.js 在 vm 沙箱中按序加载全部模块，仅调用
+ *   `RamariaSettingsView` 暴露的纯函数与处理器，不触发真实渲染流程；
  * - vm 沙箱返回值的原型属于沙箱 realm，断言前用 JSON 往返归一。
  *
  * 运行: node --test "tests/*.test.js"
@@ -22,12 +23,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-const vm = require('node:vm');
-
-/** 设置页视图源码（frontend/js/views/settings.js） */
-const SETTINGS_PATH = path.resolve(__dirname, '..', 'js', 'views', 'settings.js');
+const { loadSettingsView: loadSettingsModules } = require('./helpers/load-settings.js');
 
 /** JSON 往返归一（vm realm 对象 → 宿主 realm） */
 function plain(value) {
@@ -35,7 +31,7 @@ function plain(value) {
 }
 
 /**
- * 在 vm 沙箱中加载 settings.js，返回视图单例与调用记录。
+ * 加载设置页（js/views/settings/ 全部模块按序进入同一 vm 沙箱），返回视图单例与调用记录。
  *
  * 参数:
  * - `opts.elements`: document.getElementById 的 id → 元素桩映射（缺省 null）；
@@ -47,22 +43,9 @@ function plain(value) {
  */
 function loadSettingsView(opts) {
   const options = opts || {};
-  const source = fs.readFileSync(SETTINGS_PATH, 'utf8');
-
   const calls = { updateSetting: [], toasts: [] };
-  const windowMock = {};
-  const sandbox = {
-    window: windowMock,
-    console: { log() {}, warn() {}, error() {} },
-    RamariaRouter: {
-      registerHook() {
-        return function () {};
-      },
-      getCurrentView() {
-        return 'chat';
-      },
-      setContentActions() {},
-    },
+
+  const { view } = loadSettingsModules({
     RamariaEscape: {
       escapeHtml(str) {
         if (str === undefined || str === null) return '';
@@ -115,14 +98,10 @@ function loadSettingsView(opts) {
         return Object.prototype.hasOwnProperty.call(map, id) ? map[id] : null;
       },
     },
-  };
-  sandbox.globalThis = sandbox;
-  vm.createContext(sandbox);
-  vm.runInContext(source, sandbox, { filename: 'settings.js' });
+  });
 
-  const view = windowMock.RamariaSettingsView;
   if (!view || typeof view.getChannelFields !== 'function') {
-    throw new Error('settings.js 未暴露通道面板接口');
+    throw new Error('设置页未暴露通道面板接口');
   }
   return { view, calls };
 }

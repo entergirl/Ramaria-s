@@ -10,8 +10,9 @@
  * - 加载失败：错误态提示（不回显旧值）；空名单：空态文案
  *
  * 说明:
- * - settings.js 是浏览器 IIFE；本测试用 vm 注入 window/console/Router 桩加载，
- *   再调用 `RamariaSettingsView` 暴露的纯函数与处理器，不触发真实渲染流程；
+ * - 设置页为浏览器 IIFE 多模块结构（js/views/settings/）；本测试经
+ *   tests/helpers/load-settings.js 在 vm 沙箱中按序加载全部模块，再调用
+ *   `RamariaSettingsView` 暴露的纯函数与处理器，不触发真实渲染流程；
  * - vm 沙箱返回值的原型属于沙箱 realm，断言前用 JSON 往返归一（与既有测试同一注意事项）；
  * - 处理器测试用最小 DOM 桩：document.getElementById 返回状态文案占位或列表容器。
  *
@@ -22,12 +23,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-const vm = require('node:vm');
-
-/** 设置页视图源码（frontend/js/views/settings.js） */
-const SETTINGS_PATH = path.resolve(__dirname, '..', 'js', 'views', 'settings.js');
+const { loadSettingsView: loadSettingsModules } = require('./helpers/load-settings.js');
 
 /** JSON 往返归一（vm realm 对象 → 宿主 realm） */
 function plain(value) {
@@ -46,7 +42,7 @@ function escapeHtmlStub(str) {
 }
 
 /**
- * 在 vm 沙箱中加载 settings.js，返回视图单例与调用记录。
+ * 加载设置页（js/views/settings/ 全部模块按序进入同一 vm 沙箱），返回视图单例与调用记录。
  *
  * 参数:
  * - `opts.listResult`: listPersonas 返回的名单数组；
@@ -60,22 +56,9 @@ function escapeHtmlStub(str) {
  */
 function loadSettingsView(opts) {
   const options = opts || {};
-  const source = fs.readFileSync(SETTINGS_PATH, 'utf8');
-
   const calls = { setCalls: [], toasts: [], listCalls: 0 };
-  const windowMock = {};
-  const sandbox = {
-    window: windowMock,
-    console: { log() {}, warn() {}, error() {} },
-    RamariaRouter: {
-      registerHook() {
-        return function () {};
-      },
-      getCurrentView() {
-        return 'chat';
-      },
-      setContentActions() {},
-    },
+
+  const { view } = loadSettingsModules({
     RamariaEscape: { escapeHtml: escapeHtmlStub },
     RamariaToast: {
       show(type, title, detail) {
@@ -102,14 +85,10 @@ function loadSettingsView(opts) {
         return elements[id] || null;
       },
     },
-  };
-  sandbox.globalThis = sandbox;
-  vm.createContext(sandbox);
-  vm.runInContext(source, sandbox, { filename: 'settings.js' });
+  });
 
-  const view = windowMock.RamariaSettingsView;
   if (!view || typeof view.buildProactivePersonaRows !== 'function') {
-    throw new Error('settings.js 未暴露名单回归接口');
+    throw new Error('设置页未暴露名单回归接口');
   }
   return { view, calls };
 }
