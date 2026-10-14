@@ -435,3 +435,168 @@ async fn phase_c_first_round_skips_drift_detection() {
     );
     assert!(!result.has_significant_drift, "首轮不应产生漂移结论");
 }
+
+// =========================================================
+// Phase C 编排：Manual 豁免
+// =========================================================
+
+/// 构造并落库一个 Base trait fixture（指定来源），返回存储层回填 id 后的 trait。
+async fn seed_trait_fixture(
+    storage: &SqliteStorage,
+    uid: &str,
+    label: &str,
+    source: ramaria_core::types::TraitSource,
+) -> PersonalityTrait {
+    let trait_fixture = PersonalityTrait {
+        id: 0,
+        persona_uid: uid.into(),
+        layer: ramaria_core::types::TraitLayer::Base,
+        trait_label: label.into(),
+        meaning: "测试含义".into(),
+        not_meaning: None,
+        trigger: None,
+        suppress: None,
+        related: None,
+        seq: 0,
+        source,
+        ref_event_id: None,
+        ref_l1_id: None,
+        confidence: 0.5,
+        evidence: 1.0,
+        consistency: 0.5,
+        status: TraitStatus::Active,
+        created_at: TEST_NOW_MS,
+        updated_at: TEST_NOW_MS,
+    };
+    let id = storage
+        .save_trait(&trait_fixture)
+        .await
+        .expect("落库 trait fixture 应成功");
+    PersonalityTrait {
+        id,
+        ..trait_fixture
+    }
+}
+
+/// Manual 豁免：全 Manual 画像在 Phase C 零置信度更新、零证据，行字段全零变化。
+#[tokio::test]
+async fn phase_c_manual_only_traits_are_exempt() {
+    let storage = mem_storage().await;
+    insert_persona(&storage, "persona-manual").await;
+    let manual = seed_trait_fixture(
+        &storage,
+        "persona-manual",
+        "温柔",
+        ramaria_core::types::TraitSource::Manual,
+    )
+    .await;
+
+    let events: Vec<MemoryEvent> = (1..=5)
+        .map(|i| make_event(i, "工作,会议", 0.8, 0.6))
+        .collect();
+
+    let result = run_phase_c_update(
+        &ConfidenceConfig::default(),
+        &DriftConfig::default(),
+        &storage,
+        "persona-manual",
+        std::slice::from_ref(&manual),
+        &events,
+        true,
+    )
+    .await
+    .expect("Phase C 应成功");
+
+    assert_eq!(result.traits_updated, 0, "Manual 不应有置信度更新");
+    assert_eq!(result.evidence_saved, 0, "Manual 不应挂证据");
+
+    let stored = storage
+        .list_traits_by_persona("persona-manual")
+        .await
+        .unwrap();
+    let row = stored
+        .iter()
+        .find(|t| t.id == manual.id)
+        .expect("Manual 行应存在");
+    assert_eq!(row.source, ramaria_core::types::TraitSource::Manual);
+    assert_eq!(row.status, TraitStatus::Active);
+    assert_eq!(row.confidence, 0.5, "Manual 置信度零变化");
+    assert_eq!(row.evidence, 1.0, "Manual 证据量零变化");
+    assert_eq!(row.consistency, 0.5, "Manual 一致度零变化");
+
+    let evidence = storage.list_evidence_by_trait(manual.id).await.unwrap();
+    assert!(evidence.is_empty(), "Manual 不应有证据行");
+}
+
+/// Manual + Inferred 混合：Inferred 正常更新置信度并落证据，Manual 零变化。
+#[tokio::test]
+async fn phase_c_mixed_traits_update_inferred_only() {
+    let storage = mem_storage().await;
+    insert_persona(&storage, "persona-mixed").await;
+    let manual = seed_trait_fixture(
+        &storage,
+        "persona-mixed",
+        "温柔",
+        ramaria_core::types::TraitSource::Manual,
+    )
+    .await;
+    let inferred = seed_trait_fixture(
+        &storage,
+        "persona-mixed",
+        "尽责",
+        ramaria_core::types::TraitSource::Inferred,
+    )
+    .await;
+
+    let mut events: Vec<MemoryEvent> = (1..=5)
+        .map(|i| make_event(i, "尽责,任务", 0.8, 0.6))
+        .collect();
+    // 证据表对 event_id 有外键约束：先落库事件并回填真实 id（persona 指向本用例）
+    for ev in events.iter_mut() {
+        ev.persona_uid = "persona-mixed".into();
+        let id = storage.save_event(ev).await.expect("落库事件应成功");
+        ev.id = id;
+    }
+
+    let result = run_phase_c_update(
+        &ConfidenceConfig::default(),
+        &DriftConfig::default(),
+        &storage,
+        "persona-mixed",
+        &[manual.clone(), inferred.clone()],
+        &events,
+        true,
+    )
+    .await
+    .expect("Phase C 应成功");
+
+    assert_eq!(result.traits_updated, 1, "只有 Inferred 应被更新");
+    assert!(result.evidence_saved > 0, "Inferred 应落证据");
+
+    let stored = storage
+        .list_traits_by_persona("persona-mixed")
+        .await
+        .unwrap();
+    let manual_row = stored
+        .iter()
+        .find(|t| t.id == manual.id)
+        .expect("Manual 行应存在");
+    assert_eq!(manual_row.source, ramaria_core::types::TraitSource::Manual);
+    assert_eq!(manual_row.confidence, 0.5, "Manual 置信度零变化");
+    assert_eq!(manual_row.evidence, 1.0, "Manual 证据量零变化");
+    assert_eq!(manual_row.consistency, 0.5, "Manual 一致度零变化");
+
+    let inferred_row = stored
+        .iter()
+        .find(|t| t.id == inferred.id)
+        .expect("Inferred 行应存在");
+    assert_ne!(
+        inferred_row.evidence, 1.0,
+        "Inferred 证据量应被更新（时间衰减下与初值不同即可）"
+    );
+
+    let manual_evidence = storage.list_evidence_by_trait(manual.id).await.unwrap();
+    assert!(manual_evidence.is_empty(), "Manual 不应有证据行");
+    let inferred_evidence = storage.list_evidence_by_trait(inferred.id).await.unwrap();
+    assert!(!inferred_evidence.is_empty(), "Inferred 应有证据行");
+}

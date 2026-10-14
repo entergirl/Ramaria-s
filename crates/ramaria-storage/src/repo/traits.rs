@@ -167,6 +167,18 @@ pub async fn update_status(pool: &SqlitePool, id: i64, status: TraitStatus) -> R
     Ok(())
 }
 
+pub async fn update_source(pool: &SqlitePool, id: i64, source: TraitSource) -> RamariaResult<()> {
+    let now = ramaria_core::types::now_ms();
+    sqlx::query("UPDATE personality_traits SET source = ?, updated_at = ? WHERE id = ?")
+        .bind(source.as_str())
+        .bind(now)
+        .bind(id)
+        .execute(pool)
+        .await
+        .storage_err("更新性格来源失败")?;
+    Ok(())
+}
+
 // =========================================================
 // 性格证据链（trait_id/event_id 均为 i64）
 // =========================================================

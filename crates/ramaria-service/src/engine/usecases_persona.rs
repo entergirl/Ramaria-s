@@ -3,7 +3,7 @@
 //! 设计特点:
 //! - 用例薄壳：实现体在 `persona` / `behavior` / `style` 模块，本层只做入口挂载
 //! - 人格管理：列表（摘要 / 全字段）、卡片视图、信息更新、文件导入（目录 / 单文件）、
-//!   预设导入（dry-run 预览 / 执行）与系统用户人格幂等创建
+//!   预设导入（dry-run 预览 / 执行）、推断接管（Manual → Inferred）与系统用户人格幂等创建
 //! - 行为规则：管理（增删改查 / 导入）、学习（聚类生成 Auto 规则）与增量更新（封存钩子核心）
 //! - 表达风格：五维统计增量更新、注入侧规则读取与统计视图
 //! - 空态语义：规则 / 统计不存在返回空态（非错误），由用例实现保证
@@ -138,6 +138,23 @@ impl Engine {
         no_ai: bool,
     ) -> RamariaResult<PersonaImportOutcome> {
         crate::persona::import_execute(self, path, merge_target, no_ai).await
+    }
+
+    /// 允许推断接管用例：将选定 Manual 画像的来源改写为 Inferred。
+    ///
+    /// 参数:
+    /// - `uid`: 目标人格标识。
+    /// - `labels`: 目标 trait 标签（精确匹配）；空切片 = 全部 Manual 画像。
+    ///
+    /// 返回:
+    /// - 成功改写的条数；uid 无人格 / 无匹配 label 返回 0（非错误）；
+    /// - 加载失败上抛，单条改写失败记 warn 跳过（不计入）。
+    pub async fn persona_allow_inference(
+        &self,
+        uid: &str,
+        labels: &[String],
+    ) -> RamariaResult<usize> {
+        crate::persona::allow_inference(self, uid, labels).await
     }
 
     /// 重生成某人格在导入会话中的 L1 摘要（不含 L2/L3 级联，宿主按需触发）。

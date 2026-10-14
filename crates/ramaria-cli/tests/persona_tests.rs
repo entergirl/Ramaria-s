@@ -1,10 +1,11 @@
-//! tests/persona_tests.rs - CLI `persona import` 子命令契约测试
+//! tests/persona_tests.rs - CLI `persona` 子命令契约测试
 //!
 //! 覆盖:
 //! - dry-run：预览信封（注册 / 将写入计数 / 拆解状态）与不写库保证
 //! - 导入执行：写入统计 / 列表读回 / 直连库断言 trait 来源为 Manual
 //! - 合并：二次导入 mode=merge、四类零写入、merge_mode 提示
 //! - `--into` 目标不存在：按新建处理 + merge_target_missing 提示
+//! - allow-inference：全量 / 按 label 改写来源为 inferred、未知 uid 零改写
 //! - 文本形态与错误路径（文件不存在 / 非法 TOML 的退出码）
 //!
 //! 安全约束:
@@ -302,6 +303,115 @@ fn import_errors_report_nonzero_exit() {
     let out = run_cli(&dir, &["persona", "import", bad, "--no-ai"]);
     assert_ne!(out.status.code(), Some(0), "非法 TOML 应非零退出");
     assert!(!out.stderr.is_empty(), "错误应输出到 stderr");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// =========================================================
+// allow-inference（允许推断接管）
+// =========================================================
+
+/// 全量接管：导入后的两条 Manual 画像均改写为 inferred。
+#[tokio::test]
+async fn allow_inference_rewrites_all_manual_traits() {
+    let dir = temp_test_dir("allow-all");
+    let preset = write_preset(&dir, "char-0001.toml", PRESET_TOML);
+    let file = preset.to_str().expect("预设路径应为合法 UTF-8");
+
+    let out = run_cli(&dir, &["persona", "import", file, "--json", "--no-ai"]);
+    assert_eq!(out.status.code(), Some(0), "导入应成功退出");
+
+    let out = run_cli(&dir, &["persona", "allow-inference", "char-0001", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "接管应成功退出");
+    let envelope = parse_envelope(&out);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["data"]["uid"], "char-0001");
+    assert_eq!(envelope["data"]["updated"], 2, "两条 Manual 应被改写");
+
+    // 直连临时库：两条来源均为 Inferred
+    let pool = ramaria_storage::database::init_pool(Some(dir.join("persona.db")))
+        .await
+        .expect("打开测试库应成功");
+    let storage = SqliteStorage::new(pool.clone());
+    let traits = storage
+        .list_traits_by_persona("char-0001")
+        .await
+        .expect("查询 traits 应成功");
+    assert_eq!(traits.len(), 2);
+    assert!(
+        traits.iter().all(|t| t.source == TraitSource::Inferred),
+        "接管后来源应为 Inferred: {traits:?}"
+    );
+    pool.close().await;
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 按 label 接管：只改写命中的标签，其余保持 Manual。
+#[tokio::test]
+async fn allow_inference_filters_by_label() {
+    let dir = temp_test_dir("allow-label");
+    let preset = write_preset(&dir, "char-0001.toml", PRESET_TOML);
+    let file = preset.to_str().expect("预设路径应为合法 UTF-8");
+
+    let out = run_cli(&dir, &["persona", "import", file, "--json", "--no-ai"]);
+    assert_eq!(out.status.code(), Some(0), "导入应成功退出");
+
+    let out = run_cli(
+        &dir,
+        &[
+            "persona",
+            "allow-inference",
+            "char-0001",
+            "--label",
+            "温和",
+            "--json",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "按 label 接管应成功退出");
+    let envelope = parse_envelope(&out);
+    assert_eq!(envelope["data"]["updated"], 1, "只应改写命中标签");
+
+    // 直连临时库：温和 inferred / 慢热 manual
+    let pool = ramaria_storage::database::init_pool(Some(dir.join("persona.db")))
+        .await
+        .expect("打开测试库应成功");
+    let storage = SqliteStorage::new(pool.clone());
+    let traits = storage
+        .list_traits_by_persona("char-0001")
+        .await
+        .expect("查询 traits 应成功");
+    let by_label = |label: &str| {
+        traits
+            .iter()
+            .find(|t| t.trait_label == label)
+            .unwrap_or_else(|| panic!("应存在标签 {label}"))
+    };
+    assert_eq!(by_label("温和").source, TraitSource::Inferred);
+    assert_eq!(by_label("慢热").source, TraitSource::Manual);
+    pool.close().await;
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 未知 uid：零改写、成功退出；文本形态输出未找到提示。
+#[test]
+fn allow_inference_unknown_uid_is_noop() {
+    let dir = temp_test_dir("allow-none");
+
+    let out = run_cli(&dir, &["persona", "allow-inference", "char-9999", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "未知 uid 应成功退出");
+    let envelope = parse_envelope(&out);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["data"]["updated"], 0);
+
+    let out = run_cli(&dir, &["persona", "allow-inference", "char-9999"]);
+    assert_eq!(out.status.code(), Some(0), "文本形态应成功退出");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("未找到匹配的 Manual 画像"),
+        "应输出未找到提示: {stderr}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

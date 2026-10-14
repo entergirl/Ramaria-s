@@ -2,6 +2,7 @@
 //!
 //! 设计特点:
 //! - run_phase_c_update: 加载活跃 traits 与证据 → 按语义匹配度分配新事件 → 置信度更新 → 持久化 → 漂移检测。
+//! - Manual 来源 trait 豁免：不参与证据分配 / 不做证据查询 / 不更新置信度 / 不挂证据（单一过滤点覆盖）。
 //! - detect_and_summarize_drift: 对比 cluster_snapshots 旧分布（上一轮已吸收分布）与当前事件分布，产出 DriftSummary。
 //! - 真实分布恢复未启用 / 旧分布缺失 / 无判别信息的分类显式跳过，带 skipped_count 标注，不生成占位假数据。
 //! - restore_old_distribution: 从快照 samples JSON 恢复真实旧分布（valence/share 按 n_eff 展开）。
@@ -10,7 +11,10 @@
 use ramaria_core::{
     RamariaResult,
     traits::StorageBackend,
-    types::{EvidenceDirection, MemoryEvent, PersonalityTrait, TraitEvidence, TraitStatus, now_ms},
+    types::{
+        EvidenceDirection, MemoryEvent, PersonalityTrait, TraitEvidence, TraitSource, TraitStatus,
+        now_ms,
+    },
 };
 use tracing::{debug, error, info, warn};
 
@@ -28,11 +32,15 @@ use super::types::PhaseCResult;
 /// 执行 Phase C 更新：置信度更新 + 漂移检测 + 持久化。
 ///
 /// 流程:
-/// 1. 从 DB 加载当前 persona 的所有活跃 trait 及其证据记录。
+/// 1. 从 DB 加载当前 persona 的活跃 trait 及其证据记录。
 /// 2. 使用新事件数据计算置信度更新（E_total、C、conf）。
 /// 3. 执行漂移检测（对比 cluster_snapshots 中的旧分布与新事件分布）。
 /// 4. 首轮推断跳过漂移检测（无旧分布可对比）。
 /// 5. 持久化更新后的置信度和新增证据记录。
+///
+/// 说明:
+/// - Manual 来源的 trait 豁免证据分配 / 置信度更新 / 证据挂载（保持零证据人工锚点）；
+/// - `PhaseCResult.traits_updated` 只计实际更新（Manual 不在内）。
 ///
 /// 参数:
 /// - `storage`: 存储后端。
@@ -76,10 +84,11 @@ pub async fn run_phase_c_update(
             e
         })?;
 
-    // 只处理活跃 trait
+    // 只处理活跃 trait；Manual 来源豁免（不参与证据分配 / 不更新置信度 / 不挂证据）。
+    // 豁免只停增量：命中前已挂的历史证据不清理，查询仍可见。
     let active_traits: Vec<&PersonalityTrait> = stored_traits
         .iter()
-        .filter(|t| t.status == TraitStatus::Active)
+        .filter(|t| t.status == TraitStatus::Active && t.source != TraitSource::Manual)
         .collect();
 
     if active_traits.is_empty() {

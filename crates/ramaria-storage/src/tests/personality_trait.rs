@@ -3,6 +3,7 @@
 //! 设计特点:
 //! - 覆盖人格特质写入与按 persona 读取
 //! - 覆盖特质置信度与状态更新
+//! - 覆盖特质来源改写（Manual → Inferred 接管）
 //! - 覆盖证据写入与按特质读取
 
 use super::*;
@@ -146,5 +147,53 @@ async fn evidence_read_fills_occurred_at_from_event() {
         dangling_back.occurred_at_or_created(),
         dangling_back.created_at,
         "读取回退登记时间"
+    );
+}
+
+// =========================================================
+// 来源改写（允许推断接管）
+// =========================================================
+
+/// Manual → Inferred 来源改写：只改 source，其余字段保持，updated_at 前移。
+#[tokio::test]
+async fn update_trait_source_rewrites_source_only() {
+    let storage = setup().await;
+    let p = Persona::new(
+        "user-0001".into(),
+        "用户".into(),
+        PersonaKind::User,
+        1,
+        "local".into(),
+    );
+    storage.create_persona(&p).await.unwrap();
+
+    let mut pt = PersonalityTrait::new(
+        "user-0001".into(),
+        TraitLayer::Base,
+        "温和".into(),
+        "待人温和".into(),
+        TraitSource::Manual,
+        0,
+    );
+    pt.created_at = 1000;
+    pt.updated_at = 1000;
+    let pt_id = storage.save_trait(&pt).await.unwrap();
+
+    storage
+        .update_trait_source(pt_id, TraitSource::Inferred)
+        .await
+        .unwrap();
+
+    let traits = storage.list_traits_by_persona("user-0001").await.unwrap();
+    let row = traits.iter().find(|t| t.id == pt_id).expect("行应存在");
+    assert_eq!(row.source, TraitSource::Inferred, "来源应改写为 Inferred");
+    assert_eq!(row.trait_label, "温和", "标签保持");
+    assert_eq!(row.meaning, "待人温和", "含义保持");
+    assert_eq!(row.layer, TraitLayer::Base, "层保持");
+    assert_eq!(row.status, TraitStatus::Active, "状态保持");
+    assert_eq!(row.created_at, 1000, "创建时间保持");
+    assert!(
+        row.updated_at >= 1000,
+        "改写后 updated_at 应为当前时刻（不早于原值）"
     );
 }

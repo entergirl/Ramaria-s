@@ -16,7 +16,7 @@ use ramaria_core::traits::{StoreCrud, StoreInfrastructure};
 use ramaria_core::types::{
     BackendConfig, ClusterSnapshot, EventRelation, MemoryEvent, MemoryL1, Message, Persona,
     PersonaExample, PersonaFact, PersonalityTrait, PrivacyConsent, ProfileField, Session,
-    TraitEvidence, TraitStatus,
+    TraitEvidence, TraitSource, TraitStatus,
 };
 use ramaria_storage::SqliteStorage;
 use uuid::Uuid;
@@ -234,6 +234,10 @@ impl StoreCrud for FailableStorage {
 
     async fn update_trait_status(&self, id: i64, status: TraitStatus) -> RamariaResult<()> {
         self.inner.update_trait_status(id, status).await
+    }
+
+    async fn update_trait_source(&self, id: i64, source: TraitSource) -> RamariaResult<()> {
+        self.inner.update_trait_source(id, source).await
     }
 
     async fn save_evidence(&self, e: &TraitEvidence) -> RamariaResult<i64> {

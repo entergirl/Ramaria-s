@@ -56,6 +56,7 @@ pub(crate) fn personas_dir() -> std::path::PathBuf {
 /// - Show: 展示当前所有已注册人格的摘要信息。
 /// - Reload: 重新扫描文件系统，同步到 DB（支持全量或按 UID 指定）。
 /// - Import: 从预设文件导入人格（dry-run 预览 / 执行写入）。
+/// - AllowInference: 允许推断接管 Manual 画像（按 label 或全部）。
 #[derive(Debug, Clone)]
 pub enum PersonaCmd {
     /// 结构化列出所有人格（uid / 名称 / kind）
@@ -83,6 +84,13 @@ pub enum PersonaCmd {
         /// 关闭 LLM 拆解
         no_ai: bool,
     },
+    /// 允许推断接管 Manual 画像（labels 为空 = 全部）
+    AllowInference {
+        /// 目标人格 uid
+        uid: String,
+        /// 目标 trait 标签（精确匹配）
+        labels: Vec<String>,
+    },
 }
 
 /// 运行 persona 子命令分发。
@@ -102,6 +110,9 @@ pub async fn run(engine: &Arc<Engine>, cmd: PersonaCmd, json: bool) -> anyhow::R
             into,
             no_ai,
         } => run_import(engine, file, dry_run, into, no_ai, json).await,
+        PersonaCmd::AllowInference { uid, labels } => {
+            run_allow_inference(engine, uid, labels, json).await
+        }
     }
 }
 
@@ -442,6 +453,40 @@ async fn run_import(
     Ok(())
 }
 
+// =========================================================
+// allow-inference 命令
+// =========================================================
+
+/// 允许推断接管：将选定 Manual 画像的来源改写为 Inferred。
+///
+/// 说明:
+/// - `--label` 可重复（精确匹配）；缺省 = 全部 Manual 画像；
+/// - `--json`: 输出 `{"uid":..., "updated":n}` 信封；
+/// - 文本模式：n > 0 输出改写条数；n == 0 输出未找到提示；
+/// - 失败错误上抛，由入口统一映射退出码。
+async fn run_allow_inference(
+    engine: &Arc<Engine>,
+    uid: String,
+    labels: Vec<String>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let updated = engine
+        .persona_allow_inference(&uid, &labels)
+        .await
+        .context("允许推断接管失败")?;
+
+    if json {
+        return crate::json::emit_ok(&serde_json::json!({"uid": uid, "updated": updated}));
+    }
+
+    if updated > 0 {
+        println!("已将 {updated} 条 Manual 画像转为可被推断覆盖（uid: {uid}）");
+    } else {
+        crate::ui::info("未找到匹配的 Manual 画像（无改写）");
+    }
+    Ok(())
+}
+
 /// 渲染导入结果摘要（人格行 + 写入统计 + 拆解行）。
 fn render_outcome(outcome: &PersonaImportOutcome) -> String {
     let reg = &outcome.preview.registration;
@@ -568,113 +613,4 @@ fn summarize_block(text: &str, max_chars: usize) -> String {
 // =========================================================
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use ramaria_core::types::PersonaKind;
-
-    // 注: extract_toml_value 的单元测试已移至 crate::util 模块，
-    // 此处仅保留 extract_toml_block / summarize_block / PersonaKind::from_uid 的测试。
-
-    /// extract_toml_block 各输入参数化验证。
-    #[test]
-    fn extract_toml_block_cases() {
-        // (toml, key, 期望内容（None=不存在）, 是否要求精确相等)
-        let cases = [
-            (
-                "[blocks]\nA_persona = \"\"\"\n我是测试人格。\n性格：温和。\n\"\"\"\nE_rules = \"\"\"\n规则内容\n\"\"\"",
-                "A_persona",
-                Some("我是测试人格。\n性格：温和。"),
-                false,
-            ),
-            (
-                "[blocks]\nA_persona = \"\"\"\n内容\n\"\"\"",
-                "E_rules",
-                None,
-                false,
-            ), // key 不存在
-            (
-                "[blocks]\nA_persona = \"\"\"\"\"\"",
-                "A_persona",
-                None,
-                false,
-            ), // 空块
-            (
-                "[blocks]\nA_persona = \"\"\"\n\n\n核心内容\n\n\n\"\"\"",
-                "A_persona",
-                Some("核心内容"),
-                true, // 空行清理后精确匹配
-            ),
-        ];
-        for (toml, key, expected, exact) in cases {
-            let result = extract_toml_block(toml, key);
-            match (result, expected) {
-                (Some(content), Some(exp)) => {
-                    if exact {
-                        assert_eq!(content, exp, "key={key}");
-                    } else {
-                        assert!(content.contains(exp), "key={key}");
-                    }
-                    assert!(!content.contains("\"\"\""), "key={key}");
-                }
-                (None, None) => {}
-                (r, e) => panic!("key={key}: 期望 {e:?}，实际 {r:?}"),
-            }
-        }
-    }
-
-    /// summarize_block 各输入参数化验证。
-    #[test]
-    fn summarize_block_cases() {
-        // 短文本原样
-        assert_eq!(summarize_block("短文本", 100), "短文本");
-        // 超长截断：预算内含统一省略号 → 总长 50
-        let long = "a".repeat(200);
-        let result = summarize_block(&long, 50);
-        assert!(result.ends_with('…'));
-        assert_eq!(result.chars().count(), 50);
-        // 多行合并为单行
-        let text = "第一行\n第二行\n  第三行有空格  ";
-        let result = summarize_block(text, 100);
-        assert!(result.contains("第一行"));
-        assert!(result.contains("第二行"));
-        assert!(result.contains("第三行有空格"));
-        assert!(!result.contains('\n'));
-    }
-
-    #[test]
-    fn persona_kind_from_uid_uses_core() {
-        // 验证 PersonaKind::from_uid 的行为（依赖 core 实现）
-        assert_eq!(PersonaKind::from_uid("rama-0001"), PersonaKind::Rama);
-        assert_eq!(PersonaKind::from_uid("user-0001"), PersonaKind::User);
-        assert_eq!(PersonaKind::from_uid("char-0001"), PersonaKind::Char);
-        assert_eq!(PersonaKind::from_uid("unknown-xyz"), PersonaKind::Char); // 默认回退
-    }
-
-    #[test]
-    fn collect_toml_files_filters() {
-        // 使用 temp dir 测试文件收集逻辑
-        let tmp = std::env::temp_dir().join("ramaria_persona_test_collect");
-        let _ = std::fs::create_dir_all(&tmp);
-
-        // 创建测试文件
-        std::fs::write(tmp.join("rama-0001.toml"), "name = test").unwrap();
-        std::fs::write(tmp.join("user-0001.toml"), "name = user").unwrap();
-        std::fs::write(tmp.join("readme.txt"), "not a toml").unwrap();
-
-        // 无过滤
-        let all = collect_toml_files(&tmp, None).unwrap();
-        assert_eq!(all.len(), 2);
-
-        // 按 UID 过滤
-        let filtered = collect_toml_files(&tmp, Some("rama-0001")).unwrap();
-        assert_eq!(filtered.len(), 1);
-        assert!(filtered[0].ends_with("rama-0001.toml"));
-
-        // 不存在的 UID
-        let missing = collect_toml_files(&tmp, Some("nonexistent")).unwrap();
-        assert!(missing.is_empty());
-
-        // 清理
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-}
+mod tests;

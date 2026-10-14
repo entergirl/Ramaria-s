@@ -18,7 +18,7 @@ use crate::types::{
     AttachmentStatus, ChannelBinding, ClusterSnapshot, EventBatchWrite, EventRelation, EventSource,
     MemoryEvent, MemoryL1, Message, MessageAttachment, MessageKey, Persona, PersonaEventAggregate,
     PersonaExample, PersonaFact, PersonaStyleStats, PersonalityTrait, ProfileField, Session,
-    SessionMember, TraitEvidence, TraitStatus, UttBlock,
+    SessionMember, TraitEvidence, TraitSource, TraitStatus, UttBlock,
 };
 
 // =========================================================
@@ -1255,6 +1255,14 @@ pub trait StoreCrud: Send + Sync {
     ) -> RamariaResult<()>;
     /// `id` 为 personality_traits 表的 INTEGER 主键。
     async fn update_trait_status(&self, id: i64, status: TraitStatus) -> RamariaResult<()>;
+    /// 改写性格来源（Manual → Inferred 的显式「允许推断接管」动作）。
+    ///
+    /// 默认实现返回 `Unsupported`（存量 mock 无需实现即可编译）。
+    async fn update_trait_source(&self, _id: i64, _source: TraitSource) -> RamariaResult<()> {
+        Err(crate::error::RamariaError::unsupported(
+            "StoreCrud 未实现 update_trait_source",
+        ))
+    }
 
     // -- Trait Evidence (trait_id/event_id: i64) --
     async fn save_evidence(&self, e: &TraitEvidence) -> RamariaResult<i64>;

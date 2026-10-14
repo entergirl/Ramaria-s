@@ -5,6 +5,7 @@
 //! - 首轮推断（无旧 traits）跳过 post_process diff 计算。
 //! - LLM 推断失败时降级至 mock_infer，不阻塞主流程。
 //! - 单条 trait 落库失败仅告警跳过，不影响其余 trait。
+//! - Manual 来源 trait 落库防御：不被更新（不改写 source）也不被废弃（与 diff 层豁免双重保证）。
 
 use ramaria_core::{
     RamariaResult,
@@ -202,6 +203,13 @@ pub async fn run_phase_b_inference(
         }
     }
 
+    // Manual 豁免集合（落库层防御：即使 diff 口径变化，Manual 的 source 与状态也不被改写）
+    let manual_ids: std::collections::HashSet<i64> = old_traits
+        .iter()
+        .filter(|t| t.status == TraitStatus::Active && t.source == TraitSource::Manual)
+        .map(|t| t.id)
+        .collect();
+
     // 4a. 新增 trait
     for mut t in post_result.to_add {
         t.persona_uid = persona_owned.clone();
@@ -243,6 +251,14 @@ pub async fn run_phase_b_inference(
     // 4b. 更新已有 trait
     // `to_update` 元素为 (old_id: i64, updated_trait: PersonalityTrait)
     for (old_id, mut updated_trait) in post_result.to_update {
+        if manual_ids.contains(&old_id) {
+            debug!(
+                persona_uid = %persona_owned,
+                old_id,
+                "Phase B: Manual trait 豁免更新（跳过）"
+            );
+            continue;
+        }
         updated_trait.id = old_id;
         updated_trait.persona_uid = persona_owned.clone();
         updated_trait.source = TraitSource::Inferred;
@@ -274,6 +290,14 @@ pub async fn run_phase_b_inference(
 
     // 4c. 废弃旧 trait（`to_deprecate` 为旧 trait ID 列表）
     for old_id in post_result.to_deprecate {
+        if manual_ids.contains(&old_id) {
+            debug!(
+                persona_uid = %persona_owned,
+                old_id,
+                "Phase B: Manual trait 豁免废弃（跳过）"
+            );
+            continue;
+        }
         match storage
             .update_trait_status(old_id, TraitStatus::Deprecated)
             .await

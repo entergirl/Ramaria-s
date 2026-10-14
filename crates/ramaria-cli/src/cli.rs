@@ -151,7 +151,7 @@ pub(crate) enum Commands {
     #[command(display_order = 41, subcommand)]
     Config(ConfigCmd),
 
-    /// 人格管理（list / show / reload / import）[管理]
+    /// 人格管理（list / show / reload / import / allow-inference）[管理]
     #[command(display_order = 42, subcommand)]
     Persona(PersonaCmd),
 
@@ -588,6 +588,14 @@ pub(crate) enum PersonaCmd {
         /// 关闭 LLM 拆解（仅直写结构化字段与 config 原文）
         #[arg(long)]
         no_ai: bool,
+    },
+    /// 允许推断接管 Manual 画像（--label 可重复，缺省 = 全部）
+    AllowInference {
+        /// 目标人格 uid
+        uid: String,
+        /// 目标 trait 标签（可重复；缺省 = 全部 Manual 画像）
+        #[arg(long)]
+        label: Vec<String>,
     },
 }
 

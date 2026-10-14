@@ -127,6 +127,132 @@ async fn phase_b_incremental_update_with_existing_traits() {
     assert!(result.traits_saved > 0, "应有新增 trait");
 }
 
+// =========================================================
+// Manual 画像豁免与推断接管
+// =========================================================
+
+/// 构造预置的「尽责」Manual trait fixture（id 由 mock 存储分配）。
+fn manual_jinze_fixture(meaning: &str) -> PersonalityTrait {
+    PersonalityTrait {
+        id: 0,
+        persona_uid: "rama-0001".into(),
+        layer: TraitLayer::Base,
+        trait_label: "尽责".into(),
+        meaning: meaning.into(),
+        not_meaning: None,
+        trigger: None,
+        suppress: None,
+        related: None,
+        seq: 0,
+        source: TraitSource::Manual,
+        ref_event_id: None,
+        ref_l1_id: None,
+        confidence: 0.6,
+        evidence: 2.0,
+        consistency: 0.7,
+        status: TraitStatus::Active,
+        created_at: 1000,
+        updated_at: 1000,
+    }
+}
+
+/// Manual 豁免：一轮推断后 Manual 行全字段零变化，同 label 被吸收不重复新增。
+#[tokio::test]
+async fn phase_b_manual_trait_exempt_from_update() {
+    let storage = Arc::new(MockStorage::new());
+    let manual_id = storage.add_trait(manual_jinze_fixture("旧描述"));
+
+    let multi_llm = MultiStepLlm::new(vec![step1_reply(), step2_reply(), step3_reply()]);
+    let stats = make_stats_summary();
+    let config = InferrerConfig::default();
+
+    let result = run_phase_b_inference(&multi_llm, &*storage, &stats, "rama-0001", &config, true)
+        .await
+        .expect("Phase B 应成功完成");
+
+    assert_eq!(result.traits_updated, 0, "Manual 不应被更新");
+
+    let traits = storage
+        .list_traits_by_persona("rama-0001")
+        .await
+        .expect("查询 traits 应成功");
+    let row = traits
+        .iter()
+        .find(|t| t.id == manual_id)
+        .expect("Manual 行应存在");
+    assert_eq!(row.meaning, "旧描述", "Manual meaning 零变化");
+    assert_eq!(row.source, TraitSource::Manual, "Manual 来源零变化");
+    assert_eq!(row.status, TraitStatus::Active, "Manual 状态零变化");
+    assert_eq!(row.confidence, 0.6, "Manual 置信度零变化");
+    assert_eq!(row.consistency, 0.7, "Manual 一致度零变化");
+
+    let same_label_count = traits.iter().filter(|t| t.trait_label == "尽责").count();
+    assert_eq!(same_label_count, 1, "同 label 应被吸收，无重复新增");
+}
+
+/// 接管后 Manual 可被推断更新：改写来源 → 下一轮 meaning 被推断值覆盖。
+#[tokio::test]
+async fn phase_b_manual_trait_updates_after_allow_inference() {
+    let storage = Arc::new(MockStorage::new());
+    let manual_id = storage.add_trait(manual_jinze_fixture("旧描述"));
+
+    let stats = make_stats_summary();
+    let config = InferrerConfig::default();
+
+    // 两轮共用一条脚本队列（每轮消耗 step1/2/3 三条回复）
+    let multi_llm = MultiStepLlm::new(vec![
+        step1_reply(),
+        step2_reply(),
+        step3_reply(),
+        step1_reply(),
+        step2_reply(),
+        step3_reply(),
+    ]);
+
+    // 第一轮：Manual 豁免，零变化
+    let first = run_phase_b_inference(&multi_llm, &*storage, &stats, "rama-0001", &config, true)
+        .await
+        .expect("第一轮推断应成功");
+    assert_eq!(first.traits_updated, 0, "第一轮 Manual 不应被更新");
+
+    let traits = storage
+        .list_traits_by_persona("rama-0001")
+        .await
+        .expect("查询 traits 应成功");
+    let row = traits
+        .iter()
+        .find(|t| t.id == manual_id)
+        .expect("Manual 行应存在");
+    assert_eq!(row.meaning, "旧描述", "接管前 meaning 零变化");
+    assert_eq!(row.source, TraitSource::Manual, "接管前来源保持 Manual");
+
+    // 允许推断接管：Manual → Inferred
+    storage
+        .update_trait_source(manual_id, TraitSource::Inferred)
+        .await
+        .expect("接管改写应成功");
+
+    // 第二轮：同 label meaning 变化 → 被更新
+    let second = run_phase_b_inference(&multi_llm, &*storage, &stats, "rama-0001", &config, true)
+        .await
+        .expect("第二轮推断应成功");
+    assert_eq!(second.traits_updated, 1, "接管后应被更新");
+
+    let traits = storage
+        .list_traits_by_persona("rama-0001")
+        .await
+        .expect("查询 traits 应成功");
+    let row = traits
+        .iter()
+        .find(|t| t.id == manual_id)
+        .expect("接管行应存在");
+    assert_eq!(
+        row.meaning, "对交给自己的任务有强烈的完成意愿，重视承诺",
+        "接管后 meaning 应被推断值覆盖"
+    );
+    assert_eq!(row.source, TraitSource::Inferred, "接管后来源为 Inferred");
+}
+
 /// 测试置信度更新 + 证据链记录。
 #[tokio::test]
 async fn phase_c_confidence_and_evidence() {

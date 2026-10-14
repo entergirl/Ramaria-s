@@ -15,7 +15,7 @@ use ramaria_core::types::{
     AttachmentStatus, ChannelBinding, ClusterSnapshot, EventBatchWrite, EventRelation, EventSource,
     MemoryEvent, MemoryL1, Message, MessageAttachment, Persona, PersonaEventAggregate,
     PersonaExample, PersonaFact, PersonaStyleStats, PersonalityTrait, ProfileField, Session,
-    SessionMember, TraitEvidence, TraitStatus, UttBlock,
+    SessionMember, TraitEvidence, TraitSource, TraitStatus, UttBlock,
 };
 use uuid::Uuid;
 
@@ -561,6 +561,9 @@ impl StoreCrud for SqliteStorage {
     }
     async fn update_trait_status(&self, id: i64, status: TraitStatus) -> RamariaResult<()> {
         repo::traits::update_status(&self.pool, id, status).await
+    }
+    async fn update_trait_source(&self, id: i64, source: TraitSource) -> RamariaResult<()> {
+        repo::traits::update_source(&self.pool, id, source).await
     }
 
     async fn save_evidence(&self, e: &TraitEvidence) -> RamariaResult<i64> {

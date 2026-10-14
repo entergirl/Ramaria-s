@@ -318,6 +318,128 @@ fn compute_diff_accent_deprecation() {
     assert!(post.to_deprecate.contains(&99));
 }
 
+// ---- 后处理（Manual 豁免） ----
+
+/// 构造指定层 / 标签 / 含义 / 来源的 trait fixture（id 显式给定）。
+fn make_diff_trait(
+    id: i64,
+    layer: TraitLayer,
+    label: &str,
+    meaning: &str,
+    source: TraitSource,
+) -> PersonalityTrait {
+    let now = ramaria_core::types::now_ms();
+    PersonalityTrait {
+        id,
+        persona_uid: "user-0001".into(),
+        layer,
+        trait_label: label.into(),
+        meaning: meaning.into(),
+        not_meaning: None,
+        trigger: None,
+        suppress: None,
+        related: None,
+        seq: 0,
+        source,
+        ref_event_id: None,
+        ref_l1_id: None,
+        confidence: 0.5,
+        evidence: 1.0,
+        consistency: 0.5,
+        status: TraitStatus::Active,
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+/// Manual 同 label 且含义变化：吸收进 Keep（不推 Update、不重复 Add），留痕含旧 id。
+#[test]
+fn compute_diff_manual_trait_keeps_instead_of_update() {
+    let old = make_diff_trait(7, TraitLayer::Base, "温柔", "待人温和", TraitSource::Manual);
+    let new = make_diff_trait(
+        0,
+        TraitLayer::Base,
+        "温柔",
+        "对他人保持温柔与耐心",
+        TraitSource::Inferred,
+    );
+    let post = compute_trait_diff(&[new], &[old], "user-0001");
+
+    assert!(post.to_update.is_empty(), "Manual 不应进入 to_update");
+    assert!(post.to_add.is_empty(), "同 label 应被吸收，不重复新增");
+    let keep = post
+        .diffs
+        .iter()
+        .find(|d| d.action == DiffAction::Keep)
+        .expect("应含 Keep 豁免留痕");
+    assert_eq!(keep.old_trait_id, Some(7));
+    assert!(keep.new_trait.is_none(), "Keep 留痕应与既有形态一致");
+}
+
+/// Manual accent 未命中新推断：不进入废弃列表，diffs 无 Deprecate。
+#[test]
+fn compute_diff_manual_accent_not_deprecated() {
+    let old = make_diff_trait(
+        8,
+        TraitLayer::Accent,
+        "对昆虫着迷",
+        "谈及昆虫兴致高昂",
+        TraitSource::Manual,
+    );
+    let post = compute_trait_diff(&[], &[old], "user-0001");
+
+    assert!(post.to_deprecate.is_empty(), "Manual accent 不应被废弃");
+    assert!(
+        !post.diffs.iter().any(|d| d.action == DiffAction::Deprecate),
+        "diffs 不应含 Deprecate 条目"
+    );
+}
+
+/// 混合场景回归锁定：Manual 记 Keep，未命中的 Inferred accent 照旧废弃。
+#[test]
+fn compute_diff_mixed_manual_keep_and_inferred_deprecate() {
+    let manual = make_diff_trait(
+        11,
+        TraitLayer::Base,
+        "温柔",
+        "待人温和",
+        TraitSource::Manual,
+    );
+    let inferred_accent = make_diff_trait(
+        12,
+        TraitLayer::Accent,
+        "过时标签",
+        "旧意义",
+        TraitSource::Inferred,
+    );
+    let new = make_diff_trait(
+        0,
+        TraitLayer::Base,
+        "温柔",
+        "新的含义",
+        TraitSource::Inferred,
+    );
+    let post = compute_trait_diff(&[new], &[manual, inferred_accent], "user-0001");
+
+    assert!(post.to_update.is_empty(), "Manual 不应进入 to_update");
+    assert!(
+        post.diffs
+            .iter()
+            .any(|d| d.action == DiffAction::Keep && d.old_trait_id == Some(11)),
+        "Manual 应记 Keep 留痕"
+    );
+    assert!(
+        post.to_deprecate.contains(&12),
+        "Inferred accent 应照旧废弃"
+    );
+    assert!(
+        post.diffs
+            .iter()
+            .any(|d| d.action == DiffAction::Deprecate && d.old_trait_id == Some(12)),
+        "diffs 应含 Inferred 的 Deprecate 条目"
+    );
+}
+
 // ---- InferrerConfig ----
 
 #[test]

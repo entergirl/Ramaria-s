@@ -15,7 +15,7 @@ use ramaria_core::traits::StoreCrud;
 use ramaria_core::types::{
     ClusterSnapshot, EventRelation, EventSource, FactStatus, MemoryEvent, MemoryL1, Message,
     Persona, PersonaExample, PersonaFact, PersonalityTrait, ProfileField, Session, TraitEvidence,
-    TraitStatus, UttBlock,
+    TraitSource, TraitStatus, UttBlock,
 };
 use uuid::Uuid;
 
@@ -534,6 +534,13 @@ impl StoreCrud for MockStorage {
     async fn update_trait_status(&self, id: i64, status: TraitStatus) -> RamariaResult<()> {
         if let Some(t) = self.traits.lock().unwrap().get_mut(&id) {
             t.status = status;
+        }
+        Ok(())
+    }
+
+    async fn update_trait_source(&self, id: i64, source: TraitSource) -> RamariaResult<()> {
+        if let Some(t) = self.traits.lock().unwrap().get_mut(&id) {
+            t.source = source;
         }
         Ok(())
     }

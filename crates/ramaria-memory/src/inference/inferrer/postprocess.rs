@@ -4,9 +4,10 @@
 //! - 将新推断 trait 与已有 trait 逐条比对，产出 Add/Update/Deprecate/Keep
 //! - 简化版按 trait_label 精确匹配；接入 embedding 后可替换为语义匹配
 //! - 旧 accent trait 在新推断中消失即标记废弃
+//! - Manual 来源 trait 豁免覆盖与废弃：命中同 label 记 Keep（吸收不重复），未命中的 accent 保持 Active
 //! - 纯计算，不写库
 
-use ramaria_core::{PersonalityTrait, TraitLayer, TraitStatus};
+use ramaria_core::{PersonalityTrait, TraitLayer, TraitSource, TraitStatus};
 
 use super::types::{DiffAction, InferenceResult, PostProcessResult, TraitDiff};
 
@@ -18,9 +19,12 @@ use super::types::{DiffAction, InferenceResult, PostProcessResult, TraitDiff};
 ///
 /// 策略（简化版——基于 trait_label 精确匹配）:
 /// - 新 trait 的 label 在旧 trait 中找不到 → Add
-/// - 新 trait 的 label 与旧 trait 匹配但 layer 不同 → Update
-/// - 旧 accent trait 在新推断中消失 → Deprecate
+/// - 新 trait 的 label 与旧 trait 匹配但 layer / meaning 变化 → Update（Manual 来源记 Keep 豁免）
+/// - 旧 accent trait 在新推断中消失 → Deprecate（Manual 来源跳过，保持 Active）
 /// - 其他 → Keep
+///
+/// 说明: Manual 来源（手写 / 预设导入）的 trait 参与 label 匹配吸收但不被覆盖也不被废弃，
+/// 豁免留痕以 Keep 条目体现在 diffs 中（`new_trait` 为 None，形态与既有 Keep 一致）。
 ///
 /// 注意: 接入 embedding 后应替换为语义匹配。
 ///
@@ -42,6 +46,7 @@ pub fn compute_trait_diff(
     let mut diffs = Vec::new();
 
     // 构建旧 trait 的 label→(id, trait) 映射
+    // Manual 参与「匹配吸收」：同 label 的新推断被吸收，防重复新增
     let old_map: std::collections::HashMap<String, (i64, &PersonalityTrait)> = old_traits
         .iter()
         .filter(|t| t.status == TraitStatus::Active)
@@ -55,14 +60,24 @@ pub fn compute_trait_diff(
         if let Some(&(old_id, old_t)) = old_map.get(&new_t.trait_label) {
             old_matched.insert(old_id);
             if new_t.layer != old_t.layer || new_t.meaning != old_t.meaning {
-                // layer 或 meaning 变化 → Update
-                to_update.push((old_id, new_t.clone()));
-                diffs.push(TraitDiff {
-                    action: DiffAction::Update,
-                    new_trait: Some(new_t.clone()),
-                    old_trait_id: Some(old_id),
-                    old_label: Some(old_t.trait_label.clone()),
-                });
+                if old_t.source == TraitSource::Manual {
+                    // Manual 豁免覆盖：记 Keep 留痕，不推 to_update
+                    diffs.push(TraitDiff {
+                        action: DiffAction::Keep,
+                        new_trait: None,
+                        old_trait_id: Some(old_id),
+                        old_label: Some(old_t.trait_label.clone()),
+                    });
+                } else {
+                    // layer 或 meaning 变化 → Update
+                    to_update.push((old_id, new_t.clone()));
+                    diffs.push(TraitDiff {
+                        action: DiffAction::Update,
+                        new_trait: Some(new_t.clone()),
+                        old_trait_id: Some(old_id),
+                        old_label: Some(old_t.trait_label.clone()),
+                    });
+                }
             } else {
                 // 无变化 → Keep
                 diffs.push(TraitDiff {
@@ -84,10 +99,11 @@ pub fn compute_trait_diff(
         }
     }
 
-    // 未被匹配的旧 accent trait → 标记废弃
+    // 未被匹配的旧 accent trait → 标记废弃（Manual 来源豁免，保持 Active）
     for old_t in old_traits {
         if old_t.status == TraitStatus::Active
             && old_t.layer == TraitLayer::Accent
+            && old_t.source != TraitSource::Manual
             && !old_matched.contains(&old_t.id)
         {
             to_deprecate.push(old_t.id);
