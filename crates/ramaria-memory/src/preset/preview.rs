@@ -6,11 +6,15 @@
 //! - 文本与 JSON 两形态；文本与 JSON 均不含自由文本块与描述原文
 //! - 纯函数，零 I/O，不依赖数据库或异步运行时
 
+use ramaria_core::TraitLayer;
 use ramaria_core::types::PersonaKind;
 use serde::Serialize;
 
 use super::PresetFormat;
-use super::model::{KindSource, ParsedPreset, PresetHint, SkipCategory, SkipReason};
+use super::model::{
+    KindSource, ParsedPreset, PresetHint, SkipCategory, SkipReason, SkippedEntry, TraitEntry,
+};
+use super::plan::{EntryDecision, ImportPlan, Planned};
 
 // =========================================================
 // 预览类型
@@ -200,10 +204,127 @@ pub fn build_preview(parsed: &ParsedPreset, options: &PreviewOptions) -> PresetP
     }
 }
 
-/// 按类别分拣跳过明细为预览项。
+/// 按类别分拣解析期跳过明细为预览项。
 fn collect_skipped(parsed: &ParsedPreset, category: SkipCategory) -> Vec<SkipItem> {
-    parsed
-        .skipped
+    parsed_skip_items(&parsed.skipped, category)
+}
+
+/// 从导入计划构建 dry-run 预览（与实写共用裁决数据源；未配置时默认路径零影响）。
+///
+/// 参数:
+/// - `plan`: 导入计划（注册 / 四类条目 / 提示词补丁的逐项裁决）。
+/// - `options`: 预览选项（文件名与拆解开关状态）。
+///
+/// 返回:
+/// - 预览结构；跳过明细顺序 = 解析期在前、裁决期在后。
+pub fn build_preview_from_plan(plan: &ImportPlan, options: &PreviewOptions) -> PresetPreview {
+    let mut traits_skipped = parsed_skip_items(&plan.parsed_skipped, SkipCategory::Traits);
+    traits_skipped.extend(
+        plan.traits
+            .iter()
+            .filter_map(|planned| match planned.decision {
+                EntryDecision::Skip(reason) => Some(SkipItem {
+                    label: Some(planned.entry.label.clone()),
+                    reason,
+                }),
+                EntryDecision::Write => None,
+            }),
+    );
+
+    let mut facts_skipped = parsed_skip_items(&plan.parsed_skipped, SkipCategory::Facts);
+    facts_skipped.extend(
+        plan.facts
+            .iter()
+            .filter_map(|planned| match planned.decision {
+                EntryDecision::Skip(reason) => Some(SkipItem {
+                    label: None,
+                    reason,
+                }),
+                EntryDecision::Write => None,
+            }),
+    );
+
+    let mut examples_skipped = parsed_skip_items(&plan.parsed_skipped, SkipCategory::Examples);
+    examples_skipped.extend(
+        plan.examples
+            .iter()
+            .filter_map(|planned| match planned.decision {
+                EntryDecision::Skip(reason) => Some(SkipItem {
+                    label: None,
+                    reason,
+                }),
+                EntryDecision::Write => None,
+            }),
+    );
+
+    let mut rules_skipped = parsed_skip_items(&plan.parsed_skipped, SkipCategory::BehaviorRules);
+    rules_skipped.extend(
+        plan.rules
+            .iter()
+            .filter_map(|planned| match planned.decision {
+                EntryDecision::Skip(reason) => Some(SkipItem {
+                    label: planned.entry.keywords.first().cloned(),
+                    reason,
+                }),
+                EntryDecision::Write => None,
+            }),
+    );
+
+    PresetPreview {
+        file: options.file_name.clone(),
+        format: plan.format,
+        registration: RegistrationPreview {
+            uid: Some(plan.registration.uid.clone()),
+            mode: plan.registration.mode,
+            kind: Some(plan.registration.kind),
+            kind_source: plan.registration.kind_source,
+            name: plan.registration.name.clone(),
+            source: plan.registration.source.clone(),
+            avatar: plan.registration.write_avatar,
+            description: plan.registration.write_description,
+        },
+        will_write: WillWritePreview {
+            traits: TraitsPreview {
+                base: count_layer(&plan.traits, TraitLayer::Base),
+                primary: count_layer(&plan.traits, TraitLayer::Primary),
+                accent: count_layer(&plan.traits, TraitLayer::Accent),
+                skipped: traits_skipped,
+            },
+            facts: CountPreview {
+                count: count_writes(&plan.facts),
+                skipped: facts_skipped,
+            },
+            examples: CountPreview {
+                count: count_writes(&plan.examples),
+                skipped: examples_skipped,
+            },
+            behavior_rules: CountPreview {
+                count: count_writes(&plan.rules),
+                skipped: rules_skipped,
+            },
+            prompt: PromptPreview {
+                role_suffix: plan.prompt.write_role_suffix,
+                style_suffix: plan.prompt.write_style_suffix,
+            },
+            blocks: BlocksPreview {
+                segments: plan.blocks_segments,
+            },
+            identity: IdentityPreview {
+                assistant_name: plan.identity.assistant_name.clone(),
+                user_name: plan.identity.user_name.clone(),
+            },
+        },
+        decompose: DecomposePreview {
+            enabled: options.decompose_enabled,
+            privacy_confirmed: options.privacy_confirmed,
+        },
+        hints: plan.hints.clone(),
+    }
+}
+
+/// 解析期跳过明细中指定类别的预览项（保持原顺序）。
+fn parsed_skip_items(parsed_skipped: &[SkippedEntry], category: SkipCategory) -> Vec<SkipItem> {
+    parsed_skipped
         .iter()
         .filter(|entry| entry.category == category)
         .map(|entry| SkipItem {
@@ -211,6 +332,22 @@ fn collect_skipped(parsed: &ParsedPreset, category: SkipCategory) -> Vec<SkipIte
             reason: entry.reason,
         })
         .collect()
+}
+
+/// 统计写入项总数。
+fn count_writes<T>(planned: &[Planned<T>]) -> usize {
+    planned
+        .iter()
+        .filter(|item| item.decision == EntryDecision::Write)
+        .count()
+}
+
+/// 统计指定层写入的 trait 数。
+fn count_layer(traits: &[Planned<TraitEntry>], layer: TraitLayer) -> usize {
+    traits
+        .iter()
+        .filter(|item| item.entry.layer == layer && item.decision == EntryDecision::Write)
+        .count()
 }
 
 // =========================================================

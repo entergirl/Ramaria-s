@@ -16,8 +16,8 @@
 use ramaria_core::traits::ChatRequest;
 use ramaria_core::types::{FactSource, PersonaKind};
 use ramaria_core::{
-    LlmProviderTrait, Persona, PersonaFact, PersonalityTrait, ProfileField, RamariaResult,
-    StorageBackend, TraitLayer, TraitSource, TraitStatus,
+    LlmProviderTrait, Persona, PersonaFact, PersonalityTrait, ProfileField, RamariaError,
+    RamariaResult, StorageBackend, TraitLayer, TraitSource, TraitStatus,
 };
 use serde::Deserialize;
 use tracing::{debug, info, warn};
@@ -246,7 +246,9 @@ const COLD_START_PROMPT: &str = r#"# Capacity（你的能力）
 struct ColdStartFactJson {
     field: String,
     content: String,
+    /// 响应中的来源标注（落库统一按 Manual；字段保留以匹配响应结构）
     #[serde(default)]
+    #[allow(dead_code)]
     source: Option<String>,
 }
 
@@ -278,6 +280,102 @@ const RAMA_DISPLAY_ORDER: i64 = 1;
 
 /// rama persona 的数据来源（手动配置）。
 const RAMA_SOURCE: &str = "manual";
+
+/// 拆解请求的 system 提示词（约束 JSON 输出形态）。
+const COLD_START_SYSTEM_PROMPT: &str =
+    "你是一个精确的角色画像分析助手。请严格按照要求的 JSON 格式输出。";
+
+// =========================================================
+// LLM 拆解（可重入）
+// =========================================================
+
+/// LLM 拆解产出的结构化条目（不落库；uid 由调用方绑定）。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DecomposedProfile {
+    pub traits: Vec<crate::preset::TraitEntry>,
+    pub facts: Vec<crate::preset::FactEntry>,
+}
+
+/// 调用 LLM 把配置文本拆解为结构化条目（可重入 / 非首次可用 / 不查库不落库）。
+///
+/// 失败语义: LLM 调用失败 / 响应非 JSON / JSON 结构不符 → Err（调用方决定降级）。
+/// 成功但条目为空 → Ok(空)。
+///
+/// 参数:
+/// - `llm`: LLM provider。
+/// - `text`: 待拆解的配置文本（自由文本块汇总）。
+/// - `config`: 拆解配置（温度与最大输出 tokens）。
+///
+/// 返回:
+/// - 结构化条目；失败返回错误（消息不含 LLM 原始响应）。
+pub async fn decompose_profile_text(
+    llm: &dyn LlmProviderTrait,
+    text: &str,
+    config: &ColdStartConfig,
+) -> RamariaResult<DecomposedProfile> {
+    let prompt = COLD_START_PROMPT.replace("{persona_config}", text);
+
+    let request = ChatRequest {
+        system_prompt: COLD_START_SYSTEM_PROMPT.to_string(),
+        memory_context: None,
+        history: vec![],
+        user_message: prompt,
+        temperature: config.temperature,
+        max_tokens: config.max_tokens,
+        request_id: Uuid::new_v4(),
+        template_version: crate::prompt::PROMPT_TEMPLATE_VERSION.to_string(),
+    };
+
+    let raw_response = match llm.chat(&request).await {
+        Ok(text) => text,
+        Err(e) => {
+            warn!(error = %e, "LLM 画像拆解调用失败");
+            return Err(e);
+        }
+    };
+
+    // 隐私红线：LLM 原始响应不落日志，仅记录长度供诊断
+    let json_text = crate::utils::strip_thinking(&raw_response);
+    let json_text = crate::utils::extract_first_json_object(&json_text);
+    let response: ColdStartResponse = match json_text {
+        Some(json) => match serde_json::from_str::<ColdStartResponse>(&json) {
+            Ok(response) => response,
+            Err(e) => {
+                warn!(error = %e, json_len = json.chars().count(), "LLM 返回的 JSON 解析失败");
+                return Err(RamariaError::llm(format!("画像拆解响应解析失败: {e}")));
+            }
+        },
+        None => {
+            warn!("LLM 返回内容中未找到 JSON 对象");
+            return Err(RamariaError::llm("画像拆解响应中未找到 JSON 对象"));
+        }
+    };
+
+    let facts = response
+        .facts
+        .iter()
+        .map(|fact_json| crate::preset::FactEntry {
+            field: parse_profile_field(&fact_json.field),
+            content: fact_json.content.clone(),
+        })
+        .collect();
+    let traits = response
+        .traits
+        .iter()
+        .map(|trait_json| crate::preset::TraitEntry {
+            layer: parse_trait_layer(&trait_json.layer),
+            label: trait_json.trait_label.clone(),
+            meaning: trait_json.meaning.clone(),
+            not_meaning: trait_json.not_meaning.clone(),
+            trigger: trait_json.trigger.clone(),
+            suppress: trait_json.suppress.clone(),
+            related: trait_json.related.clone(),
+            motives: Vec::new(),
+        })
+        .collect();
+
+    Ok(DecomposedProfile { traits, facts })
+}
 
 // =========================================================
 // 冷启动核心逻辑
@@ -358,22 +456,8 @@ pub async fn initialize_rama_persona(
 
     // ---- 步骤 4: 调用 LLM 拆解画像 ----
     let blocks_text = format_blocks_for_prompt(&parsed.blocks);
-    let prompt = COLD_START_PROMPT.replace("{persona_config}", &blocks_text);
-
-    let request = ChatRequest {
-        system_prompt: "你是一个精确的角色画像分析助手。请严格按照要求的 JSON 格式输出。"
-            .to_string(),
-        memory_context: None,
-        history: vec![],
-        user_message: prompt,
-        temperature: config.temperature,
-        max_tokens: config.max_tokens,
-        request_id: Uuid::new_v4(),
-        template_version: crate::prompt::PROMPT_TEMPLATE_VERSION.to_string(),
-    };
-
-    let raw_response = match llm.chat(&request).await {
-        Ok(text) => text,
+    let decomposed = match decompose_profile_text(llm, &blocks_text, config).await {
+        Ok(decomposed) => decomposed,
         Err(e) => {
             warn!(error = %e, "LLM 画像拆解失败，创建基础 persona（无结构化画像）");
             return Ok(ColdStartResult {
@@ -385,98 +469,57 @@ pub async fn initialize_rama_persona(
         }
     };
 
-    // ---- 步骤 5: 解析 LLM 响应 ----
-    let json_text = crate::utils::strip_thinking(&raw_response);
-    let json_text = crate::utils::extract_first_json_object(&json_text);
-
-    let response: ColdStartResponse = match json_text {
-        Some(j) => match serde_json::from_str::<ColdStartResponse>(&j) {
-            Ok(r) => r,
-            Err(e) => {
-                // 隐私红线：LLM 原始响应不落日志，仅记录长度供诊断
-                warn!(error = %e, json_len = j.chars().count(), "LLM 返回的 JSON 解析失败，创建基础 persona");
-                return Ok(ColdStartResult {
-                    persona_uid: "rama-0001".to_string(),
-                    is_new: true,
-                    fact_count: 0,
-                    trait_count: 0,
-                });
-            }
-        },
-        None => {
-            warn!("LLM 返回内容中未找到 JSON 对象，创建基础 persona");
-            return Ok(ColdStartResult {
-                persona_uid: "rama-0001".to_string(),
-                is_new: true,
-                fact_count: 0,
-                trait_count: 0,
-            });
-        }
-    };
-
-    // ---- 步骤 6: 写入 facts ----
+    // ---- 步骤 5: 写入 facts ----
     let mut fact_count = 0usize;
-    for fact_json in &response.facts {
-        let field = parse_profile_field(&fact_json.field);
-        let source = match fact_json.source.as_deref() {
-            Some("L1") => FactSource::L1,
-            Some("Event") => FactSource::Event,
-            Some("Manual") => FactSource::Manual,
-            _ => FactSource::Manual,
-        };
-
+    for fact_entry in &decomposed.facts {
         let fact = PersonaFact::new(
             "rama-0001".to_string(),
-            field,
-            fact_json.content.clone(),
-            source,
+            fact_entry.field,
+            fact_entry.content.clone(),
+            FactSource::Manual,
         );
 
         match storage.save_fact(&fact).await {
             Ok(_) => {
                 fact_count += 1;
-                debug!(field = %fact_json.field, "已写入 fact");
+                debug!(field = %fact_entry.field, "已写入 fact");
             }
             Err(e) => {
-                warn!(field = %fact_json.field, error = %e, "写入 fact 失败，跳过");
+                warn!(field = %fact_entry.field, error = %e, "写入 fact 失败，跳过");
             }
         }
     }
 
-    // ---- 步骤 7: 写入 traits ----
+    // ---- 步骤 6: 写入 traits ----
     let mut trait_count = 0usize;
-    for (idx, trait_json) in response.traits.iter().enumerate() {
-        let layer = parse_trait_layer(&trait_json.layer);
-
-        let personality_trait = PersonalityTrait::new(
+    for (idx, trait_entry) in decomposed.traits.iter().enumerate() {
+        // 注意：PersonalityTrait::new 不接受 optional 字段，需要手动设置
+        let mut personality_trait = PersonalityTrait::new(
             "rama-0001".to_string(),
-            layer,
-            trait_json.trait_label.clone(),
-            trait_json.meaning.clone(),
+            trait_entry.layer,
+            trait_entry.label.clone(),
+            trait_entry.meaning.clone(),
             TraitSource::Manual,
             (idx + 1) as i32,
         );
-
-        // 注意：PersonalityTrait::new 不接受 optional 字段，需要手动设置
-        let mut personality_trait = personality_trait;
-        personality_trait.not_meaning = trait_json.not_meaning.clone();
-        personality_trait.trigger = trait_json.trigger.clone();
-        personality_trait.suppress = trait_json.suppress.clone();
-        personality_trait.related = trait_json.related.clone();
+        personality_trait.not_meaning = trait_entry.not_meaning.clone();
+        personality_trait.trigger = trait_entry.trigger.clone();
+        personality_trait.suppress = trait_entry.suppress.clone();
+        personality_trait.related = trait_entry.related.clone();
         personality_trait.status = TraitStatus::Active;
 
         match storage.save_trait(&personality_trait).await {
             Ok(_) => {
                 trait_count += 1;
                 debug!(
-                    label = %trait_json.trait_label,
-                    layer = %trait_json.layer,
+                    label = %trait_entry.label,
+                    layer = %trait_entry.layer,
                     "已写入 trait"
                 );
             }
             Err(e) => {
                 warn!(
-                    label = %trait_json.trait_label,
+                    label = %trait_entry.label,
                     error = %e,
                     "写入 trait 失败，跳过"
                 );

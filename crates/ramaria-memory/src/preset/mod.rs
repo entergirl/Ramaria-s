@@ -9,6 +9,7 @@
 
 mod model;
 mod parse;
+mod plan;
 mod png;
 mod preview;
 mod ser;
@@ -22,11 +23,15 @@ pub use model::{
     TraitsSection,
 };
 pub use parse::{parse_st_json, parse_st_png, parse_toml};
+pub use plan::{
+    DecomposedEntries, EntryDecision, ExistingProfile, ImportPlan, PlanOptions, Planned,
+    PromptPlan, RegistrationPlan, ResolvedRegistration, plan_import, resolve_registration,
+};
 pub use png::extract_chara_text;
 pub use preview::{
     BlocksPreview, CountPreview, DecomposePreview, IdentityPreview, PresetPreview, PreviewMode,
     PreviewOptions, PromptPreview, RegistrationPreview, SkipItem, TraitsPreview, WillWritePreview,
-    build_preview,
+    build_preview, build_preview_from_plan,
 };
 pub use ser::to_superset_toml;
 

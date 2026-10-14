@@ -1,13 +1,14 @@
 //! crates/ramaria-memory/src/preset/tests/mod.rs - Ramaria 预设解析测试模块
 //!
 //! 设计特点:
-//! - 目录化拆分：超集解析 / 注册段 / 结构化段 / PNG / ST 卡 / 兼容包装 / 序列化 / 预览按域分文件
+//! - 目录化拆分：超集解析 / 注册段 / 结构化段 / PNG / ST 卡 / 兼容包装 / 序列化 / 预览 / 导入计划按域分文件
 //! - 本文件仅保留子模块声明与跨域共享辅助（上下文构造、PNG 字节构造、base64 编码）
 //! - 由 preset/mod.rs 以 #[cfg(test)] mod tests; 收纳，与生产代码物理隔离
 //! - 用例为确定性断言，可离线运行
 
 mod compat;
 mod identity;
+mod plan;
 mod png;
 mod preview;
 mod sections;

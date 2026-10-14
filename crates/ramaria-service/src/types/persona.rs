@@ -5,8 +5,10 @@
 //! - 卡片分段选择器控制装配范围，缺省返回全部分段
 //! - 管理视图字段沿用 snake_case 序列化口径（is_active 不输出 camelCase）
 //! - 文件导入动作与结果以枚举 / 条目表达，单文件失败不影响其余文件
+//! - 预设导入结果以预览 + 写入统计 + 拆解执行情况表达（导入失败降级如实回传）
 
 use ramaria_core::types::{FactTier, PersonaKind, ProfileField, StyleStatsStatus, TraitLayer};
+use ramaria_memory::preset::PresetPreview;
 use serde::{Deserialize, Serialize};
 
 // =========================================================
@@ -233,4 +235,44 @@ pub struct PersonaFileOutcome {
     pub uid: String,
     pub action: PersonaFileAction,
     pub message: String,
+}
+
+// =========================================================
+// 预设导入用例（dry-run 预览 / 执行写入）
+// =========================================================
+
+/// 预设导入执行结果。
+#[derive(Debug, Clone, Serialize)]
+pub struct PersonaImportOutcome {
+    /// 导入计划预览（与 dry-run 同一裁决数据源；含本次实际拆解产物）
+    pub preview: PresetPreview,
+    /// 实际写入统计
+    pub written: ImportWriteStats,
+    /// 拆解执行情况
+    pub decompose: DecomposeExecution,
+}
+
+/// 导入写入统计。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportWriteStats {
+    pub traits: usize,
+    pub facts: usize,
+    pub examples: usize,
+    pub behavior_rules: usize,
+    /// 写入失败被跳过的条目数
+    pub failed: usize,
+}
+
+/// 拆解执行情况。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecomposeExecution {
+    /// 是否请求（--no-ai 的反面）
+    pub requested: bool,
+    /// 是否实际执行
+    pub executed: bool,
+    /// 跳过原因：privacy_unconfirmed / no_input / llm_failed（未跳过为 None）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped_reason: Option<String>,
+    pub fact_count: usize,
+    pub trait_count: usize,
 }

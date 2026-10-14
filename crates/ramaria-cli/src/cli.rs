@@ -151,7 +151,7 @@ pub(crate) enum Commands {
     #[command(display_order = 41, subcommand)]
     Config(ConfigCmd),
 
-    /// 人格管理（list / show / reload）[管理]
+    /// 人格管理（list / show / reload / import）[管理]
     #[command(display_order = 42, subcommand)]
     Persona(PersonaCmd),
 
@@ -574,6 +574,20 @@ pub(crate) enum PersonaCmd {
         /// 指定要重新加载的 persona UID（默认加载全部）
         #[arg(long)]
         uid: Option<String>,
+    },
+    /// 从预设文件导入人格（persona.toml 超集 / SillyTavern 卡 .json / .png）
+    Import {
+        /// 预设文件路径
+        file: PathBuf,
+        /// 仅预览将写入项，不写库（dry-run）
+        #[arg(long)]
+        dry_run: bool,
+        /// 合并到已有人格 uid（默认新建；目标不存在按新建处理）
+        #[arg(long)]
+        into: Option<String>,
+        /// 关闭 LLM 拆解（仅直写结构化字段与 config 原文）
+        #[arg(long)]
+        no_ai: bool,
     },
 }
 

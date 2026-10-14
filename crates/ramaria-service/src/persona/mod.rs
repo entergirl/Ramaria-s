@@ -10,11 +10,13 @@
 //! - 隐私：卡片不含 utt 原文块；日志中的个人标识经 `mask_id` 脱敏
 //!
 //! 模块划分:
+//! - `import`：预设导入（dry-run 预览 / 执行写入；可选拆解，失败降级不丢人格）；
 //! - `load`：人格文件导入（目录扫描 / 单文件显式 uid；单文件失败转为结果条目）；
 //! - `regenerate`：人格 L1 重生成（离线重建路径，含连续失败早停）；
 //! - `update`：人格基本信息更新与系统用户人格保障；
 //! - `view`：人格读取与视图组装（摘要列表 / 全字段列表 / 卡片 / 成熟度计数）。
 
+mod import;
 mod load;
 mod regenerate;
 mod update;
@@ -25,6 +27,7 @@ pub use load::PersonaLoadMode;
 pub use regenerate::PersonaRegenerateOutcome;
 
 // 用例 re-export：`crate::persona::X` 为引擎既有调用路径
+pub(crate) use import::{execute as import_execute, preview as import_preview};
 pub(crate) use load::{load_file, load_from_dir};
 pub(crate) use regenerate::regenerate_import_l1;
 pub(crate) use update::{ensure_user, update_info};

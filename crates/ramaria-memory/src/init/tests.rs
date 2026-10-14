@@ -6,6 +6,8 @@
 //! - 用例为确定性断言，可离线运行。
 use super::*;
 
+use crate::l1::mock::MockLlmProvider;
+
 // =========================================================
 // persona.toml 解析测试
 // =========================================================
@@ -405,4 +407,125 @@ E_rules = """
     assert!(prompt.contains("知性稳重"));
     assert!(prompt.contains("用||分隔"));
     assert!(!prompt.contains("{persona_config}")); // 占位符已被替换
+}
+
+// =========================================================
+// LLM 拆解泛化测试
+// =========================================================
+
+/// 合法 JSON 响应：facts / traits 字段与可选字段映射正确。
+#[tokio::test]
+async fn decompose_profile_text_maps_entries() {
+    let llm = MockLlmProvider::new("mock");
+    llm.set_response(
+        r#"{
+            "facts": [
+                {"field": "BasicInfo", "content": "她的名字是黎杋枫", "source": "Manual"},
+                {"field": "Interests", "content": "喜欢阅读"}
+            ],
+            "traits": [
+                {
+                    "layer": "Base",
+                    "trait_label": "知性稳重",
+                    "meaning": "以理性克制的态度交流",
+                    "not_meaning": null,
+                    "trigger": "日常对话",
+                    "suppress": null,
+                    "related": "理性,情绪稳定"
+                },
+                {
+                    "layer": "Accent",
+                    "trait_label": "冷幽默",
+                    "meaning": "偶发的一句玩笑",
+                    "not_meaning": "不是刻薄",
+                    "trigger": null,
+                    "suppress": null,
+                    "related": null
+                }
+            ]
+        }"#,
+    );
+
+    let decomposed = decompose_profile_text(
+        &llm,
+        "## A_persona\n\n配置文本",
+        &ColdStartConfig::default(),
+    )
+    .await
+    .expect("拆解应当成功");
+
+    assert_eq!(decomposed.facts.len(), 2);
+    assert_eq!(decomposed.facts[0].field, ProfileField::BasicInfo);
+    assert_eq!(decomposed.facts[0].content, "她的名字是黎杋枫");
+    assert_eq!(decomposed.facts[1].field, ProfileField::Interests);
+
+    assert_eq!(decomposed.traits.len(), 2);
+    assert_eq!(decomposed.traits[0].layer, TraitLayer::Base);
+    assert_eq!(decomposed.traits[0].label, "知性稳重");
+    assert_eq!(decomposed.traits[0].meaning, "以理性克制的态度交流");
+    assert_eq!(decomposed.traits[0].not_meaning, None);
+    assert_eq!(decomposed.traits[0].trigger.as_deref(), Some("日常对话"));
+    assert_eq!(decomposed.traits[0].suppress, None);
+    assert_eq!(
+        decomposed.traits[0].related.as_deref(),
+        Some("理性,情绪稳定")
+    );
+    assert!(decomposed.traits[0].motives.is_empty());
+    assert_eq!(decomposed.traits[1].layer, TraitLayer::Accent);
+    assert_eq!(
+        decomposed.traits[1].not_meaning.as_deref(),
+        Some("不是刻薄")
+    );
+
+    // 请求 prompt 已替换待拆解文本且无占位符残留
+    let request = llm.last_request().expect("应记录请求");
+    assert!(request.user_message.contains("配置文本"));
+    assert!(!request.user_message.contains("{persona_config}"));
+}
+
+/// LLM 调用失败 → Err（调用方决定降级）。
+#[tokio::test]
+async fn decompose_profile_text_returns_err_on_llm_failure() {
+    let llm = MockLlmProvider::new("mock");
+    let result = decompose_profile_text(&llm, "文本", &ColdStartConfig::default()).await;
+    assert!(result.is_err());
+}
+
+/// 非 JSON 响应 → Err。
+#[tokio::test]
+async fn decompose_profile_text_returns_err_on_non_json() {
+    let llm = MockLlmProvider::new("mock");
+    llm.set_response("抱歉，我无法完成这个请求。");
+    let result = decompose_profile_text(&llm, "文本", &ColdStartConfig::default()).await;
+    assert!(result.is_err());
+}
+
+/// 空条目 JSON → Ok(空)。
+#[tokio::test]
+async fn decompose_profile_text_accepts_empty_entries() {
+    let llm = MockLlmProvider::new("mock");
+    llm.set_response(r#"{"facts": [], "traits": []}"#);
+    let decomposed = decompose_profile_text(&llm, "文本", &ColdStartConfig::default())
+        .await
+        .expect("空条目应当成功");
+    assert!(decomposed.facts.is_empty());
+    assert!(decomposed.traits.is_empty());
+}
+
+/// 未知 field / layer 回退 BasicInfo / Accent，不整体失败。
+#[tokio::test]
+async fn decompose_profile_text_falls_back_on_unknown_enums() {
+    let llm = MockLlmProvider::new("mock");
+    llm.set_response(
+        r#"{
+            "facts": [{"field": "UnknownField", "content": "内容"}],
+            "traits": [{"layer": "UnknownLayer", "trait_label": "标签", "meaning": "含义"}]
+        }"#,
+    );
+    let decomposed = decompose_profile_text(&llm, "文本", &ColdStartConfig::default())
+        .await
+        .expect("未知枚举应回退而非整体失败");
+    assert_eq!(decomposed.facts[0].field, ProfileField::BasicInfo);
+    assert_eq!(decomposed.traits[0].layer, TraitLayer::Accent);
+    assert_eq!(decomposed.traits[0].label, "标签");
 }

@@ -235,18 +235,20 @@ pub use style::{
 
 // Init 冷启动
 pub use init::{
-    ColdStartConfig, ColdStartResult, PersonaToml, SHARED_CHAT_STYLE_RULES,
-    initialize_rama_persona, parse_persona_toml, resolve_chat_style_rules,
+    ColdStartConfig, ColdStartResult, DecomposedProfile, PersonaToml, SHARED_CHAT_STYLE_RULES,
+    decompose_profile_text, initialize_rama_persona, parse_persona_toml, resolve_chat_style_rules,
 };
 
 // Preset 预设格式解析（persona.toml 超集 / ST 角色卡 / PNG 角色卡提取 / 序列化与预览）
 pub use preset::{
-    BlocksPreview, CountPreview, DecomposePreview, ExampleEntry, FactEntry, HintLevel,
-    IdentityPreview, IdentitySection, KindSource, ParsedPreset, PersonaSection, PresetFormat,
-    PresetHint, PresetParseContext, PresetPreview, PreviewMode, PreviewOptions, PromptPatch,
-    PromptPreview, RegistrationPreview, RuleEntry, SkipCategory, SkipItem, SkipReason,
-    SkippedEntry, TraitEntry, TraitsPreview, TraitsSection, WillWritePreview, build_preview,
-    extract_chara_text, parse_preset, parse_st_json, parse_st_png, parse_toml, to_superset_toml,
+    BlocksPreview, CountPreview, DecomposePreview, DecomposedEntries, EntryDecision, ExampleEntry,
+    ExistingProfile, FactEntry, HintLevel, IdentityPreview, IdentitySection, ImportPlan,
+    KindSource, ParsedPreset, PersonaSection, PlanOptions, Planned, PresetFormat, PresetHint,
+    PresetParseContext, PresetPreview, PreviewMode, PreviewOptions, PromptPatch, PromptPlan,
+    PromptPreview, RegistrationPlan, RegistrationPreview, ResolvedRegistration, RuleEntry,
+    SkipCategory, SkipItem, SkipReason, SkippedEntry, TraitEntry, TraitsPreview, TraitsSection,
+    WillWritePreview, build_preview, build_preview_from_plan, extract_chara_text, parse_preset,
+    parse_st_json, parse_st_png, parse_toml, plan_import, resolve_registration, to_superset_toml,
 };
 
 // Job 后台任务管理

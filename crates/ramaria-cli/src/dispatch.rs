@@ -119,6 +119,17 @@ pub(crate) async fn dispatch(engine: &Arc<Engine>, cli: Cli) -> anyhow::Result<(
                 }
                 PersonaCmd::Show => commands::persona::PersonaCmd::Show,
                 PersonaCmd::Reload { uid } => commands::persona::PersonaCmd::Reload { uid },
+                PersonaCmd::Import {
+                    file,
+                    dry_run,
+                    into,
+                    no_ai,
+                } => commands::persona::PersonaCmd::Import {
+                    file,
+                    dry_run,
+                    into,
+                    no_ai,
+                },
             };
             commands::persona::run(engine, cmd, cli.json).await?;
         }

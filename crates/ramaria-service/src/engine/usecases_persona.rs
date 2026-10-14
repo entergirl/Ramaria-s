@@ -2,8 +2,8 @@
 //!
 //! 设计特点:
 //! - 用例薄壳：实现体在 `persona` / `behavior` / `style` 模块，本层只做入口挂载
-//! - 人格管理：列表（摘要 / 全字段）、卡片视图、信息更新、文件导入（目录 / 单文件）
-//!   与系统用户人格幂等创建
+//! - 人格管理：列表（摘要 / 全字段）、卡片视图、信息更新、文件导入（目录 / 单文件）、
+//!   预设导入（dry-run 预览 / 执行）与系统用户人格幂等创建
 //! - 行为规则：管理（增删改查 / 导入）、学习（聚类生成 Auto 规则）与增量更新（封存钩子核心）
 //! - 表达风格：五维统计增量更新、注入侧规则读取与统计视图
 //! - 空态语义：规则 / 统计不存在返回空态（非错误），由用例实现保证
@@ -12,13 +12,14 @@ use std::path::Path;
 
 use ramaria_core::behavior::BehaviorRule;
 use ramaria_core::error::RamariaResult;
+use ramaria_memory::preset::PresetPreview;
 
 use crate::behavior::{BehaviorLearnOutcome, RuleEvidenceItem};
 use crate::persona::{PersonaLoadMode, PersonaRegenerateOutcome};
 use crate::style::StyleStatsView;
 use crate::types::{
-    PersonaCardRequest, PersonaCardView, PersonaFileOutcome, PersonaFullView, PersonaSummaryView,
-    PersonaUpdateRequest,
+    PersonaCardRequest, PersonaCardView, PersonaFileOutcome, PersonaFullView, PersonaImportOutcome,
+    PersonaSummaryView, PersonaUpdateRequest,
 };
 
 use super::Engine;
@@ -99,6 +100,44 @@ impl Engine {
     /// - `Ok(true)`: 本次创建；`Ok(false)`: 已存在（未做任何写入）。
     pub async fn persona_ensure_user(&self) -> RamariaResult<bool> {
         crate::persona::ensure_user(self).await
+    }
+
+    /// 预设导入预览用例（dry-run：解析 → 裁决 → 预览；不调用 LLM、不写库）。
+    ///
+    /// 参数:
+    /// - `path`: 预设文件路径（TOML 超集 / ST 卡 JSON / ST 卡 PNG）。
+    /// - `merge_target`: 合并目标 uid（`--into`）；`None` 表示新建。
+    /// - `no_ai`: true 表示关闭 LLM 拆解（`--no-ai`）。
+    ///
+    /// 返回:
+    /// - dry-run 预览（注册信息 / 将写入计数 / 跳过明细 / 拆解状态 / 提示）；
+    /// - 文件读取与解析失败上抛。
+    pub async fn persona_import_preview(
+        &self,
+        path: &Path,
+        merge_target: Option<&str>,
+        no_ai: bool,
+    ) -> RamariaResult<PresetPreview> {
+        crate::persona::import_preview(self, path, merge_target, no_ai).await
+    }
+
+    /// 预设导入用例（解析 → 可选拆解 → 计划 → 写入 L3；失败降级不丢人格）。
+    ///
+    /// 参数:
+    /// - `path`: 预设文件路径（TOML 超集 / ST 卡 JSON / ST 卡 PNG）。
+    /// - `merge_target`: 合并目标 uid（`--into`）；目标不存在按新建处理。
+    /// - `no_ai`: true 表示关闭 LLM 拆解（`--no-ai`）。
+    ///
+    /// 返回:
+    /// - 导入结果（预览 + 实际写入统计 + 拆解执行情况）；
+    /// - 文件读取 / 解析失败与注册列写入失败上抛（L3 条目失败降级计数）。
+    pub async fn persona_import(
+        &self,
+        path: &Path,
+        merge_target: Option<&str>,
+        no_ai: bool,
+    ) -> RamariaResult<PersonaImportOutcome> {
+        crate::persona::import_execute(self, path, merge_target, no_ai).await
     }
 
     /// 重生成某人格在导入会话中的 L1 摘要（不含 L2/L3 级联，宿主按需触发）。

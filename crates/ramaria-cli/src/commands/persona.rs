@@ -9,6 +9,8 @@
 //! - 不提供 CLI 逐字段编辑命令，保持简洁
 
 use anyhow::Context;
+use ramaria_memory::preset::PreviewMode;
+use ramaria_service::types::{DecomposeExecution, PersonaImportOutcome};
 use ramaria_service::{Engine, PersonaFileAction, PersonaFullView, PersonaLoadMode};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -53,6 +55,7 @@ pub(crate) fn personas_dir() -> std::path::PathBuf {
 /// - List: 结构化列出所有人格（uid / 名称 / kind），供 agent 脚本消费。
 /// - Show: 展示当前所有已注册人格的摘要信息。
 /// - Reload: 重新扫描文件系统，同步到 DB（支持全量或按 UID 指定）。
+/// - Import: 从预设文件导入人格（dry-run 预览 / 执行写入）。
 #[derive(Debug, Clone)]
 pub enum PersonaCmd {
     /// 结构化列出所有人格（uid / 名称 / kind）
@@ -69,6 +72,17 @@ pub enum PersonaCmd {
         /// 指定要重新加载的 persona UID（默认加载全部 .toml 文件）
         uid: Option<String>,
     },
+    /// 从预设文件导入人格
+    Import {
+        /// 预设文件路径
+        file: PathBuf,
+        /// 仅预览将写入项，不写库
+        dry_run: bool,
+        /// 合并到已有人格 uid（默认新建）
+        into: Option<String>,
+        /// 关闭 LLM 拆解
+        no_ai: bool,
+    },
 }
 
 /// 运行 persona 子命令分发。
@@ -82,6 +96,12 @@ pub async fn run(engine: &Arc<Engine>, cmd: PersonaCmd, json: bool) -> anyhow::R
         PersonaCmd::List { limit, offset } => run_list(engine, json, limit, offset).await,
         PersonaCmd::Show => run_show(engine, json).await,
         PersonaCmd::Reload { uid } => run_reload(engine, uid).await,
+        PersonaCmd::Import {
+            file,
+            dry_run,
+            into,
+            no_ai,
+        } => run_import(engine, file, dry_run, into, no_ai, json).await,
     }
 }
 
@@ -370,6 +390,98 @@ fn collect_toml_files(dir: &Path, target_uid: Option<&str>) -> anyhow::Result<Ve
     // 确保处理顺序可预测
     files.sort();
     Ok(files)
+}
+
+// =========================================================
+// import 命令
+// =========================================================
+
+/// 从预设文件导入人格（dry-run 预览 / 执行写入）。
+///
+/// 说明:
+/// - dry-run 仅解析与裁决，不调用 LLM、不写库；
+/// - `--into` 指向的目标不存在时按新建处理，`--no-ai` 关闭 LLM 拆解；
+/// - JSON 模式输出预览 / 导入结果信封，stdout 仅含数据；文本模式输出预览与写入摘要。
+/// - 失败错误上抛，由入口统一映射退出码。
+async fn run_import(
+    engine: &Arc<Engine>,
+    file: PathBuf,
+    dry_run: bool,
+    into: Option<String>,
+    no_ai: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    if dry_run {
+        let preview = engine
+            .persona_import_preview(&file, into.as_deref(), no_ai)
+            .await
+            .context("预设预览失败")?;
+        if json {
+            return crate::json::emit_ok(&preview);
+        }
+        // render_text 自带换行；预览数据走 stdout
+        print!("{}", preview.render_text());
+        return Ok(());
+    }
+
+    let outcome = engine
+        .persona_import(&file, into.as_deref(), no_ai)
+        .await
+        .context("预设导入失败")?;
+    if json {
+        return crate::json::emit_ok(&outcome);
+    }
+    print!("{}", outcome.preview.render_text());
+    print!("{}", render_outcome(&outcome));
+    if outcome.written.failed > 0 {
+        crate::ui::warn(&format!(
+            "存在 {} 条写入失败（已跳过，其余条目照常写入）",
+            outcome.written.failed
+        ));
+    }
+    Ok(())
+}
+
+/// 渲染导入结果摘要（人格行 + 写入统计 + 拆解行）。
+fn render_outcome(outcome: &PersonaImportOutcome) -> String {
+    let reg = &outcome.preview.registration;
+    let uid = reg.uid.as_deref().unwrap_or("（自动生成）");
+    let mode = match reg.mode {
+        PreviewMode::Create => "新建",
+        PreviewMode::Merge => "合并",
+    };
+    let written = &outcome.written;
+    let mut out = format!("导入完成：persona {uid}（{mode}）\n");
+    out.push_str(&format!(
+        "  已写入：traits {} / facts {} / examples {} / behavior_rules {}（失败 {}）\n",
+        written.traits, written.facts, written.examples, written.behavior_rules, written.failed
+    ));
+    out.push_str(&format!(
+        "  拆解：{}\n",
+        decompose_label(&outcome.decompose)
+    ));
+    out
+}
+
+/// 拆解执行行文本（未启用 / 已执行 / 跳过原因）。
+fn decompose_label(exec: &DecomposeExecution) -> String {
+    if exec.executed {
+        return format!(
+            "已执行（traits {} / facts {}）",
+            exec.trait_count, exec.fact_count
+        );
+    }
+    if !exec.requested {
+        return "未启用".to_string();
+    }
+    let reason = match exec.skipped_reason.as_deref() {
+        Some("privacy_unconfirmed") => "隐私未确认",
+        Some("no_input") => "无拆解输入",
+        Some("llm_failed") => "LLM 调用失败",
+        Some(other) => other,
+        None => "未执行",
+    };
+    format!("已跳过（{reason}）")
 }
 
 // =========================================================
