@@ -62,7 +62,7 @@ mod usecases_persona;
 mod usecases_proactive;
 
 // 装配辅助 re-export：模型管理用例（`crate::model`）复用同一 provider 构造口径
-pub(crate) use assemble::build_llm_provider;
+pub(crate) use assemble::providers::build_llm_provider;
 
 // =========================================================
 // 装配选项

@@ -10,16 +10,17 @@
 //!   缺省按配置闸门映射（接收端门面见 `sinks` 子模块）
 //! - provider 热更新：整体替换快照，读取方取到替换前或替换后的完整快照，无中间态
 //! - 装配辅助（配置只读加载 / provider 构造 / 嵌入恢复）与热更新共用同一构造口径
+//!   （provider 构造与嵌入恢复见 `providers` 子模块）
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
-use ramaria_core::config::{EmbeddingDevice, RamariaConfig};
-use ramaria_core::error::{RamariaError, RamariaResult};
+use ramaria_core::config::RamariaConfig;
+use ramaria_core::error::RamariaResult;
 use ramaria_core::lock::{lock_recover, read_recover, write_recover};
 use ramaria_core::traits::{EmbeddingProvider, LlmProvider, LlmResponseCache, StorageBackend};
-use ramaria_core::types::{AppState, BackendConfig, LlmProvider as LlmProviderKind};
+use ramaria_core::types::{AppState, BackendConfig};
 use ramaria_llm::keychain::Keychain;
 use ramaria_memory::behavior::PendingPool;
 use ramaria_memory::job::JobManagerConfig;
@@ -34,6 +35,7 @@ use crate::vision::VisionProbeState;
 
 use super::{Engine, EngineOptions};
 
+pub(super) mod providers;
 mod sinks;
 
 // =========================================================
@@ -134,10 +136,10 @@ impl Engine {
             None
         };
         let keychain = Arc::new(Keychain::new());
-        let llm = build_llm_provider(&backend_config, &keychain, cache.clone())?;
+        let llm = providers::build_llm_provider(&backend_config, &keychain, cache.clone())?;
 
         // ---- 5. 嵌入 provider（可选，缺失降级）----
-        let embedding = restore_embedding(&backend_config, config.embedding.device);
+        let embedding = providers::restore_embedding(&backend_config, config.embedding.device);
 
         tracing::info!(
             db = %path_log_label(&db_path),
@@ -227,6 +229,18 @@ impl Engine {
             job_manager_config: RwLock::new(JobManagerConfig::default()),
             state: Mutex::new(AppState::NeedsSetup),
         }
+    }
+
+    /// 设置数据库文件路径（builder 风格；注入装配的引擎补全路径派生能力）。
+    ///
+    /// 参数:
+    /// - `db_path`: 数据库文件路径。
+    ///
+    /// 返回:
+    /// - 设置路径后的引擎。
+    pub fn with_db_path(mut self, db_path: impl Into<PathBuf>) -> Self {
+        self.db_path = db_path.into();
+        self
     }
 }
 
@@ -510,7 +524,7 @@ impl Engine {
 // =========================================================
 
 /// 取路径的文件名用于日志（完整路径不进日志，避免暴露本机目录结构）。
-fn path_log_label(path: &Path) -> String {
+pub(super) fn path_log_label(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "<unknown>".to_string())
@@ -598,103 +612,4 @@ fn config_error_digest(error: &str) -> String {
     let mut digest: String = first_line.chars().take(MAX_CHARS - 1).collect();
     digest.push('…');
     digest
-}
-
-/// 按后端配置构建 LLM provider（可选注入响应缓存）。
-///
-/// 参数:
-/// - `backend_config`: 后端配置（provider / base_url / model）。
-/// - `keychain`: 线上 provider 的 API key 来源（本地 provider 不使用）。
-/// - `cache`: 精确缓存（`[cache].enabled=false` 时为 None）。
-///
-/// 说明:
-/// - 装配与后端配置热更新共用本函数，保证两处的 provider 构造口径与缓存注入条件一致。
-pub(crate) fn build_llm_provider(
-    backend_config: &BackendConfig,
-    keychain: &Arc<Keychain>,
-    cache: Option<Arc<dyn LlmResponseCache>>,
-) -> RamariaResult<Arc<dyn LlmProvider>> {
-    let provider: Arc<dyn LlmProvider> = match backend_config.provider {
-        LlmProviderKind::LmStudio => {
-            let provider = ramaria_llm::lm_studio::LmStudioProvider::new(backend_config.clone())?;
-            match cache {
-                Some(cache) => Arc::new(provider.with_cache(cache)),
-                None => Arc::new(provider),
-            }
-        }
-        LlmProviderKind::DeepSeek => {
-            let provider = ramaria_llm::deepseek::DeepSeekProvider::new(
-                backend_config.clone(),
-                Arc::clone(keychain),
-            )?;
-            match cache {
-                Some(cache) => Arc::new(provider.with_cache(cache)),
-                None => Arc::new(provider),
-            }
-        }
-        LlmProviderKind::OpenAI => {
-            let provider = ramaria_llm::openai::OpenAIProvider::new(
-                backend_config.clone(),
-                Arc::clone(keychain),
-            )?;
-            match cache {
-                Some(cache) => Arc::new(provider.with_cache(cache)),
-                None => Arc::new(provider),
-            }
-        }
-        // non_exhaustive 兜底：未知 provider 显式报错，不静默退化
-        other => {
-            return Err(RamariaError::unsupported(format!(
-                "不支持的 LLM provider: {}",
-                other.as_str()
-            )));
-        }
-    };
-    Ok(provider)
-}
-
-/// 尝试恢复已保存的嵌入模型；缺失 / 加载失败返回 None（向量通道降级）。
-///
-/// 说明:
-/// - 模型目录存在但加载失败（文件损坏 / 设备不可用）同样降级，
-///   记 warn 不阻塞装配（BM25 + 关键词镜像继续工作）。
-fn restore_embedding(
-    backend_config: &BackendConfig,
-    device: EmbeddingDevice,
-) -> Option<Arc<dyn EmbeddingProvider>> {
-    let saved_path = backend_config
-        .embedding_model_path
-        .as_deref()
-        .filter(|path| !path.is_empty())?;
-
-    let model_dir = Path::new(saved_path);
-    if !model_dir.exists() {
-        tracing::warn!(
-            path = %path_log_label(model_dir),
-            "已保存的嵌入模型目录不存在，向量通道降级（BM25 + 关键词镜像继续可用）"
-        );
-        return None;
-    }
-
-    match ramaria_llm::embedding::native::create_native_provider_with_device(model_dir, device) {
-        Ok(provider) => {
-            let info = provider.model_info();
-            tracing::info!(
-                path = %path_log_label(model_dir),
-                model_id = %info.model_id,
-                dim = info.dimension,
-                device = device.as_str(),
-                "已恢复嵌入模型（向量通道可用）"
-            );
-            Some(Arc::new(provider) as Arc<dyn EmbeddingProvider>)
-        }
-        Err(e) => {
-            tracing::warn!(
-                path = %path_log_label(model_dir),
-                error = %e,
-                "加载已保存的嵌入模型失败，向量通道降级（BM25 + 关键词镜像继续可用）"
-            );
-            None
-        }
-    }
 }

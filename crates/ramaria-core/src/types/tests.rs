@@ -706,6 +706,16 @@ fn channel_telegram_constant() {
 }
 
 #[test]
+fn is_social_channel_matches_qq_and_telegram_only() {
+    assert!(is_social_channel("qq"));
+    assert!(is_social_channel("telegram"));
+    assert!(!is_social_channel("local"));
+    assert!(!is_social_channel("mcp"));
+    assert!(!is_social_channel(""));
+    assert!(!is_social_channel("QQ"));
+}
+
+#[test]
 fn message_platform_message_id_serde() {
     let mut msg = Message::new(
         new_id(),

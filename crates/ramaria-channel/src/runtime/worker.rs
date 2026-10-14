@@ -5,7 +5,7 @@
 //!   理解（应响应时先理解后回复，超时降级）→ 响应判定 → 回复生成 → 节流 → 出站发送（含重试）
 //! - 单步失败降级不阻塞：图片理解超时/失败按占位符继续（后台任务不取消）、
 //!   生成失败不发送、发送失败仅记日志（回复已落库）；重复事件零重复写入与响应
-//! - 出站文本净化：多气泡契约分隔符替换为换行；按会话节流；可重试错误按短退避重试至上限
+//! - 出站文本拆条：多气泡契约分隔符切段，逐段分次发送（段间间隔 + 段数上限）
 //! - 日志脱敏：外部标识经 `mask_id`，不记消息内容
 
 use std::collections::HashMap;
@@ -17,7 +17,7 @@ use ramaria_service::{ChannelIngestRequest, ChannelReplyRequest, Engine};
 
 use super::assemble::{DownloadedImage, assemble_inbound, md5_hex};
 use super::download::ImageDownloader;
-use super::outbound::sanitize_outbound_text;
+use super::outbound::{fold_segment_overflow, split_outbound_segments};
 use crate::runtime::ChannelRuntime;
 use crate::transport::{
     InboundSegment, OutboundMessage, OutboundTarget, Transport, TransportEvent,
@@ -27,10 +27,13 @@ use crate::transport::{
 // 编排参数
 // =========================================================
 
-/// 编排参数（节流 / 发送重试 / 图片理解等待）。
+/// 编排参数（节流 / 分段发送 / 发送重试 / 图片理解等待）。
 ///
 /// 字段约定:
 /// - `min_send_interval`: 同会话两次出站的最小间隔（节流）。
+/// - `segment_interval`: 分段发送的段间最小间隔（同一条回复的相邻段之间；
+///   注意平台风控节奏）。
+/// - `segment_max`: 单条回复的最大分条数（超出部分并入末段）。
 /// - `send_retry_delay`: 可重试发送失败后的重试等待。
 /// - `send_max_attempts`: 发送总尝试上限（1 次初始 + 重试；仅可重试错误消耗）。
 /// - `image_understand_timeout`: 应响应事件的图片理解等待上限（超时按占位符
@@ -38,6 +41,8 @@ use crate::transport::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerOptions {
     pub min_send_interval: Duration,
+    pub segment_interval: Duration,
+    pub segment_max: usize,
     pub send_retry_delay: Duration,
     pub send_max_attempts: u32,
     pub image_understand_timeout: Duration,
@@ -47,6 +52,8 @@ impl Default for WorkerOptions {
     fn default() -> Self {
         Self {
             min_send_interval: Duration::from_secs(1),
+            segment_interval: Duration::from_millis(800),
+            segment_max: 5,
             send_retry_delay: Duration::from_secs(1),
             send_max_attempts: 2,
             image_understand_timeout: Duration::from_secs(20),
@@ -318,26 +325,59 @@ pub(crate) async fn handle_event(
         return;
     }
 
-    // ---- 8. 出站节流 + 发送（可重试错误按上限重试） ----
-    enforce_send_interval(throttle, &event.external_ref, options.min_send_interval).await;
+    // ---- 8. 出站节流 + 发送（多段分次发送；可重试错误按上限重试） ----
     let target = OutboundTarget {
         external_ref: event.external_ref.clone(),
     };
-    // 出站兜底：多气泡契约分隔符替换为换行（库内回复原文不改）
-    let sanitized = sanitize_outbound_text(&reply);
-    let sanitized = sanitized.trim();
-    if sanitized.is_empty() {
+    // 出站兜底：多气泡契约分隔符 `||` 切段，逐段分次发送（库内回复原文不改）
+    let segments: Vec<String> = split_outbound_segments(&reply)
+        .into_iter()
+        .map(|segment| segment.trim().to_string())
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    let segments = fold_segment_overflow(segments, options.segment_max);
+    if segments.is_empty() {
         tracing::warn!(
             session_id = %outcome.session_id,
             "净化后出站文本为空，跳过发送"
         );
         return;
     }
-    let message = OutboundMessage::text(sanitized.to_string());
-    send_with_retry(transport, &target, &message, options).await;
+    tracing::info!(
+        session_id = %outcome.session_id,
+        segments = segments.len(),
+        "通道出站回复分条发送"
+    );
+    // 段间复用会话节流簿：末段落簿实际发送时刻后，使下一条回复仍满足 min_send_interval
+    for (index, segment) in segments.iter().enumerate() {
+        let interval = if index == 0 {
+            options.min_send_interval
+        } else {
+            options.segment_interval
+        };
+        enforce_send_interval(throttle, &event.external_ref, interval).await;
+        tracing::debug!(
+            session_id = %outcome.session_id,
+            index,
+            total = segments.len(),
+            "通道出站回复分条发送"
+        );
+        let message = OutboundMessage::text(segment.clone());
+        send_with_retry(transport, &target, &message, options).await;
+        // 落簿实际发送时刻（修正预占槽位）：段间与跨回复间隔均从实际发送时刻
+        // 起算，调度抖动不压缩风控节奏
+        record_send_time(throttle, &event.external_ref);
+    }
 }
 
-/// 出站节流：距上次发送不足间隔时等待补足，并记录本次发送时刻。
+/// 发送后落簿实际发送时刻（覆盖预占槽位；无等待）。
+fn record_send_time(throttle: &Mutex<HashMap<String, Instant>>, external_ref: &str) {
+    let mut guard = lock(throttle);
+    guard.insert(external_ref.to_string(), Instant::now());
+}
+
+/// 出站节流：距上次发送不足间隔时等待补足，并预占本次发送槽位
+/// （发送后由 `record_send_time` 落簿实际时刻）。
 async fn enforce_send_interval(
     throttle: &Mutex<HashMap<String, Instant>>,
     external_ref: &str,

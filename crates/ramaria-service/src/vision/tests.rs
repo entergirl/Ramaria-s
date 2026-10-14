@@ -888,7 +888,7 @@ async fn understand_downloaded_image_keeps_pending_on_privacy_pending() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// 现场理解：空字节与超限字节跳过（行 skipped）。
+/// 现场理解：空字节与超限字节跳过（行 skipped；不产生缓存文件）。
 #[tokio::test]
 async fn understand_downloaded_image_skips_invalid_sizes() {
     let llm = Arc::new(MockLlm::local().with_vision_reply("不应调用"));
@@ -919,6 +919,43 @@ async fn understand_downloaded_image_skips_invalid_sizes() {
     let rows = load_attachments(&storage, big_msg).await;
     assert_eq!(rows[0].status, AttachmentStatus::Skipped);
     assert_eq!(llm.vision_call_count(), 0);
+    assert!(
+        !dir.join("image_cache").exists(),
+        "空字节与超限路径不应产生缓存文件"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 现场理解：下载成功后 best-effort 落盘客户端图片缓存（数据库同级 image_cache 子目录）。
+#[tokio::test]
+async fn understand_downloaded_image_stores_bytes_into_client_cache() {
+    let llm = Arc::new(MockLlm::local().with_vision_reply("一只橘猫"));
+    let (engine, storage, dir) =
+        vision_engine("vision-channel-cache", llm, vision_on_config()).await;
+    let session = storage.create_session(None).await.expect("创建会话应成功");
+    let md5 = "beefbeefbeefbeefbeefbeefbeefbeef";
+    let message_id =
+        seed_pending_attachment(&storage, session.id, "https://x/c.png", Some(md5)).await;
+    let attachment_id = load_attachments(&storage, message_id).await[0].id;
+
+    let bytes: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 1, 2];
+    let outcome = engine
+        .channel_understand_image(attachment_id, md5, &bytes)
+        .await
+        .expect("现场理解应成功");
+    assert_eq!(outcome, ChannelImageOutcome::Done);
+
+    let cache_file = dir.join("image_cache").join(format!("{md5}.png"));
+    assert!(
+        cache_file.is_file(),
+        "下载成功后应落盘缓存文件: {cache_file:?}"
+    );
+    assert_eq!(
+        std::fs::read(&cache_file).expect("读取缓存应成功"),
+        bytes,
+        "缓存内容应为下载字节"
+    );
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 

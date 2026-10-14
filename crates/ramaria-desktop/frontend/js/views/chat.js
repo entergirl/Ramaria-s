@@ -9,6 +9,8 @@
  * - : SessionBar 区分活跃/已关闭（绿色圆点 / 灰色时间戳）
  * - : 已关闭 session 只读模式（隐藏输入框 + "此对话已关闭"提示）
  * - : "保存对话"按钮（关闭 session → 不清屏 → 下次消息自动创建新 session）
+ * - : 社交平台会话（qq / telegram）只读（隐藏输入区 + 定制提示，回复请在对应平台进行）
+ * - : 社交平台会话发言人视角（他人消息左侧带 sender_name；本机侧与助手回复右侧）
  *
  * 设计特点:
  * - 所有 Tauri Event 监听在 enter 时注册、leave 时注销，防止事件泄漏
@@ -22,6 +24,7 @@
  * - 人格独立会话——每个人格拥有独立 Session，切换人格=切换好友
  * - 人格会话映射持久化（Store.personaSessions → 后端 settings）
  * - 修复人格昵称/头像位置（助手消息=左侧对话人，用户消息=右侧自己）
+ * - 会话来源通道按加载详情回填（_activeChannel）：只读判定与发言人视角的唯一依据
  *
  * 依赖:
  * - RamariaApi / RamariaStore / RamariaRouter
@@ -56,6 +59,15 @@ var RamariaChatView = (function () {
      * 避免覆盖已跳转加载的会话数据。
      */
     var _sessionJumped = false;
+
+ /**
+ * 当前会话的来源通道（真相源来自最近一次加载的会话详情）。
+ *
+ * 用途:
+ * - 社交通道会话（qq / telegram）判定：输入区只读 + 发言人视角渲染；
+ * - 本地 / mcp 会话为空串或 'local'，展示行为零变化。
+ */
+    var _activeChannel = '';
 
 /** 取消 Tauri 事件监听的函数列表 */
     var _unlistenFns = [];
@@ -201,9 +213,9 @@ var RamariaChatView = (function () {
                     '<option value="rama-0001">默认 (rama-0001)</option>' +
                 '</select>' +
             '</div>' +
- // 已关闭 session 的只读提示
+ // 只读提示（已关闭会话 / 社交平台会话两种形态）
             '<div class="chat-readonly-banner hidden" id="chat-readonly-banner">' +
-                '<span>🔒 此对话已关闭</span>' +
+                '<span id="chat-readonly-text">🔒 此对话已关闭</span>' +
                 '<button class="btn btn-primary btn-sm" id="chat-new-session-btn">开始新对话</button>' +
             '</div>' +
             '<div class="chat-streaming-hint hidden" id="chat-streaming-hint">' +
@@ -433,9 +445,11 @@ var RamariaChatView = (function () {
                     if (session.messages && session.messages.length > 0) {
                         RamariaStore.set('activeSessionId', cachedSessionId);
                         RamariaStore.set('messages', session.messages);
+                        _activeChannel = session.channel || '';
                         _renderAllMessages();
                         messagesLoaded = true;
-                        _setReadonlyMode(false);
+                        // 社交平台会话仅可查看；其余保持可输入
+                        _setReadonlyMode(_isSocialChannel(_activeChannel), 'social');
 
                         console.log('[ChatView] 切换人格 ' + personaUid
                             + ' → session ' + cachedSessionId.substring(0, 8)
@@ -458,9 +472,11 @@ var RamariaChatView = (function () {
                     if (session.messages && session.messages.length > 0) {
                         RamariaStore.set('activeSessionId', cachedSessionId);
                         RamariaStore.set('messages', session.messages);
+                        _activeChannel = session.channel || '';
                         _renderAllMessages();
                         messagesLoaded = true;
-                        _setReadonlyMode(false);
+                        // 社交平台会话仅可查看；其余保持可输入
+                        _setReadonlyMode(_isSocialChannel(_activeChannel), 'social');
 
                         console.log('[ChatView] 切换人格 ' + personaUid
                             + ' → session ' + cachedSessionId.substring(0, 8)
@@ -506,6 +522,7 @@ var RamariaChatView = (function () {
  // 无已有会话或消息，显示空状态
             RamariaStore.set('activeSessionId', null);
             RamariaStore.set('messages', []);
+            _activeChannel = '';
             _clearMessages();
             _setReadonlyMode(false);
         }
@@ -615,21 +632,65 @@ var RamariaChatView = (function () {
  // =========================================================
 
  /**
+ * 判断会话通道是否为社交平台通道（QQ / Telegram）。
+ *
+ * 说明:
+ * - 社交平台会话在桌面客户端为只读（回复请在对应平台进行）；
+ * - 与后端会话只读门禁同一通道判定口径。
+ */
+    function _isSocialChannel(channel) {
+        return channel === 'qq' || channel === 'telegram';
+    }
+
+ /**
+ * 解析会话访问模式（只读判定单一入口）。
+ *
+ * 参数:
+ * - `channel`: 会话来源通道（来自会话详情）。
+ * - `endedAt`: 会话结束时间（毫秒时间戳；`null` / `undefined` / `0` 视为未关闭）。
+ *
+ * 返回:
+ * - `'social'`: 社交平台会话——只读（回复请在对应平台进行）；
+ * - `'closed'`: 会话已关闭——只读（可开始新对话）；
+ * - `''`: 可正常输入（本地 / mcp 等）。
+ */
+    function _resolveSessionAccess(channel, endedAt) {
+        if (_isSocialChannel(channel)) return 'social';
+        return endedAt ? 'closed' : '';
+    }
+
+ /**
  * 设置对话视图的只读模式。
  *
- * 已关闭 session 时隐藏输入框，
- * 显示"此对话已关闭"提示和"开始新对话"按钮。
+ * 两种只读形态:
+ * - 'closed'：会话已关闭（显示"此对话已关闭" + "开始新对话"按钮）；
+ * - 'social'：会话来自社交平台（显示定制提示，隐藏"开始新对话"按钮——
+ *   该语境下没有"新对话"动作，回复应回到对应平台）。
+ *
+ * 参数:
+ * - `isReadonly`: 是否进入只读。
+ * - `reason`: 只读原因（'closed' 缺省 / 'social'；非只读时忽略）。
  */
-    function _setReadonlyMode(isReadonly) {
+    function _setReadonlyMode(isReadonly, reason) {
         var inputArea = document.querySelector('#view-chat .chat-input-area');
         var readonlyBanner = $('chat-readonly-banner');
+        var readonlyText = $('chat-readonly-text');
+        var newSessionBtn = $('chat-new-session-btn');
         var inputEl = _inputEl();
         var sendBtn = _sendBtnEl();
 
         if (isReadonly) {
  // 隐藏输入区域
             if (inputArea) inputArea.classList.add('hidden');
- // 显示只读提示
+ // 显示只读提示（按原因切换文案与"开始新对话"按钮显隐）
+            if (readonlyText) {
+                readonlyText.textContent = (reason === 'social')
+                    ? '🔒 该会话来自社交平台，仅可查看；回复请在对应平台进行'
+                    : '🔒 此对话已关闭';
+            }
+            if (newSessionBtn) {
+                newSessionBtn.classList.toggle('hidden', reason === 'social');
+            }
             if (readonlyBanner) readonlyBanner.classList.remove('hidden');
  // 禁用输入
             if (inputEl) inputEl.disabled = true;
@@ -793,6 +854,7 @@ var RamariaChatView = (function () {
 
  // 清除当前消息、活跃 session 和会话 persona 绑定
  // personaSessions 缓存保留（下次发送消息时后端自动创建新 session 并写入 persona_uid）
+        _activeChannel = '';
         RamariaStore.set('messages', []);
         RamariaStore.set('activeSessionId', null);
         RamariaStore.set('sessionPersonaUid', null);
@@ -853,6 +915,8 @@ var RamariaChatView = (function () {
                 var session = await RamariaApi.session.create(personaUid);
                 sessionId = session.id;
                 RamariaStore.set('activeSessionId', sessionId);
+                // 新建会话恒为本地通道（发言视角与只读判定复位）
+                _activeChannel = session.channel || 'local';
 
  // 建立人格→会话缓存映射并持久化（非真相源，仅供下次切换加速查找）
                 RamariaStore.setPersonaSession(personaUid, sessionId);
@@ -1159,7 +1223,9 @@ var RamariaChatView = (function () {
         var emptyState = msgList.querySelector('.chat-empty-state');
         if (emptyState) emptyState.remove();
 
-        var bubble = RamariaMessageBubble.create(msg);
+        var bubble = RamariaMessageBubble.create(msg, {
+            socialPerspective: _isSocialChannel(_activeChannel),
+        });
         msgList.appendChild(bubble);
         _scrollToBottom();
     }
@@ -1184,8 +1250,10 @@ var RamariaChatView = (function () {
 
         if (emptyState) emptyState.remove();
 
+ // 社交发言人视角：社交通道会话按发言人视角渲染（他人左侧带名）
+        var renderOpts = { socialPerspective: _isSocialChannel(_activeChannel) };
         for (var j = 0; j < messages.length; j++) {
-            var bubble = RamariaMessageBubble.create(messages[j]);
+            var bubble = RamariaMessageBubble.create(messages[j], renderOpts);
             msgList.appendChild(bubble);
         }
 
@@ -1748,8 +1816,10 @@ var RamariaChatView = (function () {
                 _sessionPersonaUid = null;
             }
 
-            // 设置只读模式（已关闭 session）
-            _setReadonlyMode(isClosed);
+            // 设置只读模式（会话已关闭；社交平台会话仅可查看）
+            var jumpAccess = _resolveSessionAccess(detail.channel, detail.ended_at);
+            _activeChannel = detail.channel || '';
+            _setReadonlyMode(!!jumpAccess, jumpAccess || 'closed');
 
             // 更新 persona 会话缓存
             var effectivePersona = dbPersonaUid || personaUid;
@@ -1865,8 +1935,10 @@ var RamariaChatView = (function () {
                 // 保留 currentPersonaUid（前端选择的人格）
             }
 
-            // 设置只读模式
-            _setReadonlyMode(isClosed);
+            // 设置只读模式（会话已关闭；社交平台会话仅可查看）
+            var selectAccess = _resolveSessionAccess(detail.channel, detail.ended_at);
+            _activeChannel = detail.channel || '';
+            _setReadonlyMode(!!selectAccess, selectAccess || 'closed');
 
             // 更新 persona 会话缓存
             if (dbPersonaUid) {
@@ -1940,6 +2012,7 @@ var RamariaChatView = (function () {
                     var latest = sessions[sessions.length - 1];
                     try {
                         var histSession = await RamariaApi.session.get(latest.id);
+                        _activeChannel = histSession.channel || '';
                         RamariaStore.set('messages', histSession.messages || []);
                         _renderAllMessages();
                         RamariaStore.set('activeSessionId', null);
@@ -2003,7 +2076,13 @@ var RamariaChatView = (function () {
                                 + ' (' + session.messages.length + ' 条消息, persona_uid=NULL, 回退=' + currentPersona + ')');
                         }
 
- // ★ 不启用只读模式：用户回到对话页就是要继续聊的。
+                        // ★ 本地会话不启用只读模式：用户回到对话页就是要继续聊的；
+                        // 社交平台会话仅可查看（回复请在对应平台进行）
+                        _activeChannel = session.channel || '';
+                        var restoreSocial = _isSocialChannel(_activeChannel);
+                        if (restoreSocial) {
+                            _setReadonlyMode(true, 'social');
+                        }
                         RamariaRouter.setSessionInfo('会话: ' + savedSessionId.substring(0, 8) + '...');
                     }
                 } catch (err) {
@@ -2018,6 +2097,7 @@ var RamariaChatView = (function () {
                 RamariaStore.set('currentPersonaUid', currentPersona);
                 RamariaStore.set('sessionPersonaUid', null);
                 _sessionPersonaUid = null;
+                _activeChannel = '';
                 _renderAllMessages();
                 _setReadonlyMode(false);
                 console.log('[ChatView] 无历史会话，显示空状态');
@@ -2055,6 +2135,17 @@ var RamariaChatView = (function () {
 
     return {
         init: init,
+        /**
+         * 会话访问模式解析（只读判定对外口径）。
+         *
+         * 返回:
+         * - `'social'`: 社交平台会话——只读（回复请在对应平台进行）；
+         * - `'closed'`: 会话已关闭——只读（可开始新对话）；
+         * - `''`: 可正常输入。
+         */
+        resolveSessionAccess: function (channel, endedAt) {
+            return _resolveSessionAccess(channel, endedAt);
+        },
         /** 打开指定会话（主动消息通知点击定位入口；已打开时跳过，避免重复加载） */
         openSession: function (sessionId) {
             if (!sessionId) return;

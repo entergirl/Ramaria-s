@@ -29,6 +29,17 @@ pub const CHANNEL_QQ: &str = "qq";
 /// Telegram 通道标识（社交通道）。
 pub const CHANNEL_TELEGRAM: &str = "telegram";
 
+/// 判断会话通道是否为社交平台通道（QQ / Telegram）。
+///
+/// 参数:
+/// - `channel`: 会话来源通道标识。
+///
+/// 返回:
+/// - QQ 或 Telegram 为 true；其余（local / mcp 等）为 false。
+pub fn is_social_channel(channel: &str) -> bool {
+    channel == CHANNEL_QQ || channel == CHANNEL_TELEGRAM
+}
+
 /// 对话会话。
 ///
 /// 职责:

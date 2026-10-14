@@ -382,6 +382,7 @@ fn segment_style_inputs<'a>(
     injection: &'a ramaria_core::config::InjectionGate,
     layer_dedup: &'a ramaria_core::config::LayerDedupConfig,
     style: SegmentStyle,
+    group_conversation: bool,
 ) -> PromptMaterialInputs<'a> {
     PromptMaterialInputs {
         persona_uid: Some("rama-0001"),
@@ -400,12 +401,13 @@ fn segment_style_inputs<'a>(
         rag_text: None,
         layer_dedup,
         segment_style: style,
+        group_conversation,
         recent_state: RecentStateConfig::default(),
         proactive: None,
     }
 }
 
-/// 通道（Newline）：核心规则后追加换行格式声明段（换行与 || 同现）。
+/// 通道（Newline）：核心规则后追加分条格式声明段（契约回到 `||`，平台逐条发送）。
 #[tokio::test]
 async fn newline_segment_style_appends_channel_declaration() {
     let storage = test_storage("segment-newline").await;
@@ -422,6 +424,7 @@ async fn newline_segment_style_appends_channel_declaration() {
             &config.injection,
             &config.layer_dedup,
             SegmentStyle::Newline,
+            false,
         ),
     )
     .await;
@@ -430,15 +433,66 @@ async fn newline_segment_style_appends_channel_declaration() {
         prompt.contains(CHANNEL_SEGMENT_DECLARATION),
         "通道声明段应进入提示词"
     );
-    assert!(prompt.contains("换行"), "声明应要求换行分条");
-    assert!(prompt.contains("「||」"), "声明应禁用分隔符符号");
+    assert!(prompt.contains("「||」"), "声明应要求用 || 分条");
+    assert!(prompt.contains("逐条"), "声明应说明平台逐条分别发送");
     assert!(
         prompt.contains("覆盖上文的分条约定"),
         "声明应以格式要求覆盖前述约定"
     );
 }
 
-/// 管道（Pipe）：与现状一致，不追加通道声明。
+/// 通道（Newline + 群聊）：分段声明后追加群聊说明段；非群聊不追加。
+#[tokio::test]
+async fn group_declaration_appended_only_for_group_conversation() {
+    let storage = test_storage("segment-group").await;
+    ensure_persona(storage.as_ref(), "rama-0001").await;
+    let config = RamariaConfig::default();
+    let summaries: Vec<String> = Vec::new();
+    let labels: Vec<String> = Vec::new();
+
+    let group_prompt = build_system_prompt(
+        storage.as_ref(),
+        &segment_style_inputs(
+            &summaries,
+            &labels,
+            &config.injection,
+            &config.layer_dedup,
+            SegmentStyle::Newline,
+            true,
+        ),
+    )
+    .await;
+    assert!(
+        group_prompt.contains(CHANNEL_GROUP_DECLARATION),
+        "群聊形态应追加群聊说明段"
+    );
+    let segment_pos = group_prompt
+        .find(CHANNEL_SEGMENT_DECLARATION)
+        .expect("群聊提示词应含通道分段声明");
+    let group_pos = group_prompt
+        .find(CHANNEL_GROUP_DECLARATION)
+        .expect("群聊提示词应含群聊说明段");
+    assert!(segment_pos < group_pos, "群聊说明段应紧跟分段声明之后");
+
+    let private_prompt = build_system_prompt(
+        storage.as_ref(),
+        &segment_style_inputs(
+            &summaries,
+            &labels,
+            &config.injection,
+            &config.layer_dedup,
+            SegmentStyle::Newline,
+            false,
+        ),
+    )
+    .await;
+    assert!(
+        !private_prompt.contains(CHANNEL_GROUP_DECLARATION),
+        "非群聊不应包含群聊说明段"
+    );
+}
+
+/// 管道（Pipe）：与现状一致，不追加通道声明与群聊说明段。
 #[tokio::test]
 async fn pipe_segment_style_keeps_legacy_rules() {
     let storage = test_storage("segment-pipe").await;
@@ -455,6 +509,7 @@ async fn pipe_segment_style_keeps_legacy_rules() {
             &config.injection,
             &config.layer_dedup,
             SegmentStyle::Pipe,
+            false,
         ),
     )
     .await;
@@ -462,6 +517,10 @@ async fn pipe_segment_style_keeps_legacy_rules() {
     assert!(
         !prompt.contains(CHANNEL_SEGMENT_DECLARATION),
         "管道形态不应包含通道声明"
+    );
+    assert!(
+        !prompt.contains(CHANNEL_GROUP_DECLARATION),
+        "管道形态不应包含群聊说明段"
     );
     assert!(prompt.contains("||"), "共享回复规则仍含多气泡契约");
 }
@@ -502,6 +561,7 @@ fn recent_state_inputs<'a>(
         injection,
         layer_dedup,
         SegmentStyle::Pipe,
+        false,
     );
     inputs.recent_state = recent_state;
     inputs

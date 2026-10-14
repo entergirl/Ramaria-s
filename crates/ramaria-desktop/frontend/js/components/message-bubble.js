@@ -16,6 +16,8 @@
  * - CSP-safe: 全部样式走 CSS 类，零内联 style（包括 innerHTML 中的 style 属性）
  * - 助手气泡左侧显示人格头像（首字母圆形），用户气泡右侧无头像
  * - 导入 / 群聊消息的 sender_name 优先作气泡标签与头像首字母；缺失时回退 persona 昵称 / "助手"
+ * - 社交发言人视角（opts.socialPerspective）：社交通道会话下他人 user 消息左对齐并以
+ *   sender_name 作标签（本机侧与助手回复保持右侧；本地会话不传该选项，行为零变化）
  * - 图片占位符三种形态按出现顺序分段渲染：`[图片#hash]`（8 位 ASCII）/ `[图片: 描述]` /
  *   `[图片]`；可读取时渲染真图（懒加载 / 长图约束），不可读取或加载失败时降级为
  *   文本卡片（图标 + 转义描述），与普通文本混排互不干扰
@@ -23,6 +25,7 @@
  *
  * 用法:
  * var bubble = RamariaMessageBubble.create({ id, role, content, persona_uid, sender_name, created_at, is_proactive });
+ * var bubble = RamariaMessageBubble.create({ id, role, content, sender_name }, { socialPerspective: true });
  * var bubble = RamariaMessageBubble.createStreaming({ id: 'temp', role: 'assistant' });
  * RamariaMessageBubble.updateStreamText('temp', '已累积的全文');
  * RamariaMessageBubble.finalize('temp', finalContent);
@@ -109,28 +112,34 @@ var RamariaMessageBubble = (function () {
  // 工厂函数
  // =========================================================
 
- /**
+/**
  * 创建一个标准消息气泡。
  *
  * 参数:
  * - `msg`: { id, role, content, persona_uid?, sender_name?, created_at? }
+ * - `opts`: 可选渲染选项
+ *   - `socialPerspective`: 社交通道会话发言人视角（true 时他人 user 消息左对齐
+ *     并以 `sender_name` 作标签；本机侧 assistant 消息维持右侧。本地会话不传）
  *
  * 返回:
  * - DOM 元素（.msg-bubble-wrapper），可直接插入消息列表
  */
-    function create(msg) {
+    function create(msg, opts) {
         if (!msg || !msg.role) {
             console.error('[MessageBubble] create 需要 msg.role');
             return _createPlaceholder('消息数据异常');
         }
 
         var role = msg.role;
+        // 社交视角：仅社交通道会话传递；本地会话恒 false（DOM 与既有行为零变化）
+        var socialPerspective = !!(opts && opts.socialPerspective);
 
  // ── 角色标签逻辑 ──
- // assistant 消息带 sender_name（群聊 / 导入消息的外部发送者）→ 显示 sender_name
+ // 社交视角下 role=user 表示群聊 / 私聊中的他人（左侧 + sender_name）；
+ // 非社交视角 role=user 恒为右侧「你」（用户自己）
+ // assistant 消息带 sender_name（外部发送者）→ 显示 sender_name
  // assistant 消息带 persona_uid → 显示 persona 昵称（对话人，在左侧）
  // assistant 消息无 persona_uid → 回退 "助手"
- // user 消息 → 始终显示 "你"（用户自己，在右侧）
         var senderName = (role === 'assistant' && typeof msg.sender_name === 'string')
             ? msg.sender_name
             : '';
@@ -143,6 +152,9 @@ var RamariaMessageBubble = (function () {
         var label;
         if (role === 'assistant') {
             label = senderName || personaName || '助手';
+        } else if (role === 'user' && socialPerspective) {
+            var socialName = (typeof msg.sender_name === 'string') ? msg.sender_name : '';
+            label = socialName || '成员';
         } else {
             label = ROLE_LABELS[role] || ROLE_LABELS.system;
         }
@@ -159,6 +171,10 @@ var RamariaMessageBubble = (function () {
         wrapper.className = 'msg-bubble-wrapper';
         wrapper.setAttribute('data-message-id', msg.id || '');
         wrapper.setAttribute('data-role', role);
+        if (socialPerspective) {
+            // 社交发言人视角标记：CSS 据此调整他人消息对齐方向
+            wrapper.setAttribute('data-perspective', 'social');
+        }
 
  // ── 助手气泡左侧显示人格头像（sender_name 优先，头像底色仍由 persona_uid 决定） ──
         var avatarName = senderName || personaName;

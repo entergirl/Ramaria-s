@@ -143,6 +143,7 @@ pub struct SessionMessagesView {
 ///
 /// 字段约定:
 /// - `started_at` / `ended_at`: 会话起止时间（UTC；未关闭时 `ended_at` 为 None）。
+/// - `channel`: 会话来源通道（供前端判定社交会话只读与发言人视角）。
 /// - `total_messages`: 会话消息总数（与分页无关）。
 /// - `has_more`: 是否还有更早的消息未返回（全量加载恒为 false）。
 /// - `messages`: 消息页（时间正序）。
@@ -152,6 +153,7 @@ pub struct SessionDetailView {
     pub started_at: DateTime<Utc>,
     pub ended_at: Option<DateTime<Utc>>,
     pub persona_uid: Option<String>,
+    pub channel: String,
     pub total_messages: u32,
     pub has_more: bool,
     pub messages: Vec<SessionMessageView>,

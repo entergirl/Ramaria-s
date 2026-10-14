@@ -206,7 +206,7 @@ pub(crate) async fn reply_to_inbound(
         conversation_id: None,
         seed_history: Vec::new(),
         message_in_history: true,
-        // 社交通道回复：出站为即时通讯平台，按换行分条声明
+        // 社交通道回复：出站为即时通讯平台，提示词追加通道分段声明段
         segment_style: SegmentStyle::Newline,
         proactive: None,
     };

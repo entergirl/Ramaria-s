@@ -10,6 +10,7 @@
 //! - md5 去重：同图已有完成描述直接批量回填，不重复调用模型
 //! - 输入准备：线上 provider 按内容格式与单边像素上限归一化（越界长图缩放重编码）；
 //!   本地 provider 原字节透传；不符合后端输入约束时按 skipped 降级（见 `prepare` 子模块）
+//! - 下载成功即 best-effort 落盘客户端图片缓存（真图渲染恢复）；落盘失败不影响理解语义
 //! - base64 编码自实现；日志不落图片内容与描述原文
 //!
 //! 模块划分:
@@ -143,6 +144,18 @@ pub(crate) async fn understand_downloaded_image(
             .mark_attachment_status(attachment_id, AttachmentStatus::Skipped)
             .await?;
         return Ok(ChannelImageOutcome::Skipped);
+    }
+
+    // 下载成功即 best-effort 落盘客户端图片缓存（真图渲染依赖缓存命中；
+    // 与读取侧缓存目录口径一致：数据库文件同级 `image_cache` 子目录）
+    if let Some(cache_dir) = engine
+        .db_path()
+        .parent()
+        .map(|parent| parent.join("image_cache"))
+    {
+        let md5_key = md5.trim();
+        let md5_key = (!md5_key.is_empty()).then_some(md5_key);
+        crate::attachment_cache::store(&cache_dir, attachment_id, md5_key, image_bytes);
     }
 
     // ---- 2. 能力门禁（顺序固定：声明 → 隐私 → 探测） ----

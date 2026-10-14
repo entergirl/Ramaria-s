@@ -12,6 +12,8 @@
  * - 图片占位符渲染（三形态分段序号 / 降级卡片 / 真图读取与 Blob URL /
  *   失败降级 / MIME 魔数嗅探 / 混排分段 / XSS）
  * - sender_name 展示（群聊多说话人 / user 恒「你」/ 回退 persona 昵称）
+ * - 社交发言人视角（socialPerspective：他人 user 左侧 + sender_name 标签；
+ *   本地会话缺省零变化）
  * - 导入前缀剥离（`[名字]` 前缀剥离；`[图片...]` 占位符不剥离）
  *
  * 运行: node --test "tests/*.test.js"
@@ -752,6 +754,58 @@ test('sender 展示：头像背景色仍由 persona_uid 决定', () => {
     '#9ca3af',
     '无 persona_uid 时走灰色兜底（不取 sender_name 做色）'
   );
+});
+
+// =========================================================
+// 社交发言人视角（socialPerspective：他人消息左侧 + sender_name 标签）
+// =========================================================
+
+test('社交视角：user 消息显示 sender_name 并携带 data-perspective', () => {
+  const wrapper = messageBubble.create(
+    { id: 'sp1', role: 'user', content: '大家好', sender_name: '张三' },
+    { socialPerspective: true }
+  );
+
+  assert.equal(wrapper.getAttribute('data-role'), 'user');
+  assert.equal(wrapper.getAttribute('data-perspective'), 'social');
+  assert.equal(collectByClass(wrapper, 'msg-bubble-label')[0].textContent, '张三');
+});
+
+test('社交视角：user 缺 sender_name 回退「成员」', () => {
+  const wrapper = messageBubble.create(
+    { id: 'sp2', role: 'user', content: '在吗' },
+    { socialPerspective: true }
+  );
+  assert.equal(collectByClass(wrapper, 'msg-bubble-label')[0].textContent, '成员');
+});
+
+test('社交视角：assistant（本机侧 / 机器人）维持右侧语义与既有标签', () => {
+  const wrapper = messageBubble.create(
+    { id: 'sp3', role: 'assistant', content: '在的', sender_name: '小明', persona_uid: 'rama-0001' },
+    { socialPerspective: true }
+  );
+
+  assert.equal(wrapper.getAttribute('data-role'), 'assistant');
+  assert.equal(wrapper.getAttribute('data-perspective'), 'social');
+  assert.equal(collectByClass(wrapper, 'msg-bubble-label')[0].textContent, '小明');
+});
+
+test('社交视角：本地会话（缺省 / false）行为零变化', () => {
+  const byDefault = messageBubble.create({
+    id: 'sp4',
+    role: 'user',
+    content: '你好',
+    sender_name: '张三',
+  });
+  assert.equal(byDefault.getAttribute('data-perspective'), null, '本地会话不携带社交视角属性');
+  assert.equal(collectByClass(byDefault, 'msg-bubble-label')[0].textContent, '你');
+
+  const explicitFalse = messageBubble.create(
+    { id: 'sp5', role: 'user', content: '你好', sender_name: '张三' },
+    { socialPerspective: false }
+  );
+  assert.equal(explicitFalse.getAttribute('data-perspective'), null);
+  assert.equal(collectByClass(explicitFalse, 'msg-bubble-label')[0].textContent, '你');
 });
 
 // =========================================================

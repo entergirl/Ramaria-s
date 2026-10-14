@@ -156,6 +156,12 @@
 .msg-bubble-wrapper[data-role="assistant"] { align-items: flex-start; }
 .msg-bubble-wrapper[data-role="system"]    { align-items: center; }
 
+/*
+ * 社交平台会话发言人视角：他人消息（user 角色）改为左侧展示，
+ * 与各自 sender_name 标签配合；本机侧与助手回复（assistant）保持右侧。
+ */
+.msg-bubble-wrapper[data-perspective="social"][data-role="user"] { align-items: flex-start; }
+
 /* 助手消息气泡左侧头像（圆形，首字母） */
 .msg-bubble-avatar {
   width: 28px;

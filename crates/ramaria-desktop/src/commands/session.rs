@@ -4,6 +4,7 @@
 //! - list_sessions / get_session / create_session / mark_session_read: 委托服务层会话用例
 //! - 所有返回值经过序列化，前端可直接解析 JSON（字段结构保持既有契约）
 //! - 服务层的时间类型转换为毫秒时间戳，与前端既有展示口径一致
+//! - 会话详情透传来源通道（前端据此判定社交平台会话只读与发言人视角）
 
 use crate::DesktopState;
 use serde::Serialize;
@@ -83,6 +84,11 @@ pub struct SessionDetail {
     pub ended_at: Option<i64>,
     /// 会话绑定的人格 UID。
     pub persona_uid: Option<String>,
+    /// 会话来源通道（`local` / `mcp` / `qq` / `telegram` 等）。
+    ///
+    /// 用途:
+    /// - 前端据此判定社交平台会话（只读输入区 + 发言人视角展示）。
+    pub channel: String,
     /// 会话消息总数（与分页无关，始终为真实总数）
     pub total_messages: u32,
     /// 是否还有更早的消息未返回（仅分页请求时有意义；全量加载恒为 false）
@@ -116,6 +122,7 @@ fn detail_from_view(view: &ramaria_service::SessionDetailView) -> SessionDetail 
         started_at: view.started_at.timestamp_millis(),
         ended_at: view.ended_at.as_ref().map(|dt| dt.timestamp_millis()),
         persona_uid: view.persona_uid.clone(),
+        channel: view.channel.clone(),
         total_messages: view.total_messages,
         has_more: view.has_more,
         messages: view.messages.iter().map(message_view).collect(),
@@ -356,6 +363,7 @@ mod tests {
             started_at: started,
             ended_at: Some(ended),
             persona_uid: Some("char-0001".to_string()),
+            channel: "qq".to_string(),
             total_messages: 9,
             has_more: true,
             messages: vec![ramaria_service::SessionMessageView {
@@ -376,6 +384,10 @@ mod tests {
         assert_eq!(detail.started_at, 1_700_000_000_000);
         assert_eq!(detail.ended_at, Some(1_700_000_060_000));
         assert_eq!(detail.persona_uid.as_deref(), Some("char-0001"));
+        assert_eq!(
+            detail.channel, "qq",
+            "来源通道应透传（前端据此判定社交只读）"
+        );
         assert_eq!(detail.total_messages, 9);
         assert!(detail.has_more);
         assert_eq!(detail.messages.len(), 1);

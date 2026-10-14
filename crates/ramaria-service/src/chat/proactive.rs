@@ -126,7 +126,8 @@ pub(crate) async fn run(
         }
     }
 
-    // 目标会话通道为即时通讯平台时按换行声明分条；其余（含新建会话）沿用多气泡契约
+    // 目标会话通道为即时通讯平台时追加通道分段声明（分条契约为 `||`）；
+    // 其余（含新建会话）沿用多气泡契约
     let segment_style = match target_channel.as_deref() {
         Some("qq") | Some("telegram") => SegmentStyle::Newline,
         _ => SegmentStyle::Pipe,

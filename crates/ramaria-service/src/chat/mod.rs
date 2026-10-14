@@ -14,7 +14,9 @@
 //! - 隐私：日志只记会话 id、人格与长度，不记消息与回复内容
 //!
 //! 模块划分:
-//! - `steps`：请求形态与前置编排（校验 / 门禁 / 会话定位 / 历史窗口 / 弱反馈）；
+//! - `steps`：请求形态与前置编排（校验 / 门禁 / 会话定位 / 弱反馈）；
+//! - `history`：历史窗口加载（配置驱动分页 + 附件渲染 + 发言人前缀）；
+//! - `social`：社交会话判定辅助（群聊判定 / 发言人前缀 / 只读拒绝文案）；
 //! - `render`：历史窗口附件行加载与渲染映射（字符预算统计与注入共用）；
 //! - `context`：记忆召回与素材装载 + 系统 Prompt 装配与 Token 预算；
 //! - `generate`：用例入口（非流式 / 流式）与生成侧（LLM 调用 / 落库 / 事件桥接）；
@@ -22,8 +24,10 @@
 
 mod context;
 mod generate;
+mod history;
 mod proactive;
 mod render;
+mod social;
 mod steps;
 
 // 用例入口 re-export：`crate::chat::run` / `crate::chat::stream` 为入口层既有调用路径
@@ -37,3 +41,6 @@ pub(crate) use proactive::run as run_proactive;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod tests_social;

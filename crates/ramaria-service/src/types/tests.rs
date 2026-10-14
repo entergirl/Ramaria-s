@@ -585,6 +585,7 @@ fn browse_and_keyword_views_serde_roundtrip() {
         started_at: fixed_time(1_756_000_000_000),
         ended_at: None,
         persona_uid: Some("char-0001".to_string()),
+        channel: "local".to_string(),
         total_messages: 1,
         has_more: false,
         messages: vec![SessionMessageView {

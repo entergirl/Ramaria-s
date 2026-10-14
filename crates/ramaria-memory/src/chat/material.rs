@@ -30,7 +30,8 @@ use super::time::now_timestamp_str;
 ///
 /// 变体:
 /// - `Pipe`: 多气泡契约（`||` 分隔；桌面等自渲染通道）；
-/// - `Newline`: 即时通讯平台通道（直接换行分条，禁用 `||` 符号）。
+/// - `Newline`: 即时通讯平台通道（提示词追加通道声明段；分条契约为 `||`，
+///   出站由通道逐段分次发送）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SegmentStyle {
     Pipe,
@@ -40,12 +41,23 @@ pub enum SegmentStyle {
 /// 通道分段格式声明段（出站为即时通讯平台时追加在回复规则之后）。
 ///
 /// 语义:
-/// - 声明以格式要求覆盖前述分隔符号约定；
-/// - 分条时直接使用换行，不输出 `||` 符号。
+/// - 声明分条契约覆盖前述的分隔符号约定；
+/// - 分条时用「||」分隔，平台侧会逐条分别发送；不得用空行或连续换行模拟分条。
 pub const CHANNEL_SEGMENT_DECLARATION: &str = "\
 通道格式要求（覆盖上文的分条约定）:\n\
-本条回复将直接发送到即时通讯平台，需要分条时直接使用换行分隔；\n\
-不要输出「||」符号，本要求优先于上文的格式约定。";
+本条回复将直接发送到即时通讯平台，需要分条时用「||」分隔（平台侧会逐条分别发送）；\n\
+不要用空行或连续换行模拟分条，本要求优先于上文的格式约定。";
+
+/// 群聊多人对话说明段（社交通道群聊时追加在通道分段声明之后）。
+///
+/// 语义:
+/// - 声明本条对话发生在多人群聊中，历史消息里以「名字：」开头的是不同的其他人；
+/// - 没有该前缀的消息与 assistant 消息均属本机侧（同一人）；
+/// - 直接说话即可，不要给自己加「名字：」前缀。
+pub const CHANNEL_GROUP_DECLARATION: &str = "\
+群聊说明:\n\
+本条对话发生在多人群聊中，历史消息里以「名字：」开头的是不同的其他人；\n\
+没有前缀的消息与你的发言属于同一人（你自己）。直接说话即可，不要给自己加「名字：」前缀。";
 
 /// 已加载的 System Prompt 装配素材。
 ///
@@ -124,7 +136,8 @@ impl Default for RecentStateConfig {
 /// - `layer_dedup`: 层间证据去重与冲突仲裁配置（`[layer_dedup]`；默认关闭 =
 ///   回退既有引用级去重，prompt 输出与既有版本逐字段等价）。
 /// - `segment_style`: 回复分段格式（`Pipe` = 沿用多气泡契约；`Newline` =
-///   即时通讯平台通道，回复规则后追加换行格式声明段）。
+///   即时通讯平台通道，回复规则后追加通道声明段）。
+/// - `group_conversation`: 社交通道群聊标记（`Newline` 且为群聊时追加群聊说明段）。
 /// - `recent_state`: 近期状态消费配置（开关关闭时不查询、不注入）。
 pub struct PromptMaterialInputs<'a> {
     /// 人格标识（None 表示 rama 自身）。
@@ -159,6 +172,8 @@ pub struct PromptMaterialInputs<'a> {
     pub layer_dedup: &'a LayerDedupConfig,
     /// 回复分段格式（按出站通道声明）。
     pub segment_style: SegmentStyle,
+    /// 社交通道群聊标记（`Newline` 且为群聊时追加群聊说明段）。
+    pub group_conversation: bool,
     /// 近期状态消费配置（提示词近期状态行；关闭 / 无样本 / 中性 → 不注入）。
     pub recent_state: RecentStateConfig,
     /// 主动生成场景上下文（None = 非主动生成，Prompt 不产生主动段）。
@@ -350,12 +365,20 @@ pub async fn load_prompt_material(
 
         // 回复规则：显式 E_rules 优先，缺省用共享规则（与 Stage 路径同一口径）；
         // 陈述档由 builder 门控回退中性默认。通道出站为即时通讯平台时，
-        // 在规则后追加换行格式声明段（覆盖 `||` 分条契约；管道形态零变化）。
+        // 在规则后追加分条格式声明段（分条契约为 `||`）；群聊时再追加群聊说明段
+        // （管道形态零变化）。
         let chat_style_rules = {
             let base = resolve_chat_style_rules(p.config.as_deref());
             match inputs.segment_style {
                 SegmentStyle::Pipe => base,
-                SegmentStyle::Newline => format!("{base}\n\n{CHANNEL_SEGMENT_DECLARATION}"),
+                SegmentStyle::Newline => {
+                    let mut text = format!("{base}\n\n{CHANNEL_SEGMENT_DECLARATION}");
+                    if inputs.group_conversation {
+                        text.push_str("\n\n");
+                        text.push_str(CHANNEL_GROUP_DECLARATION);
+                    }
+                    text
+                }
             }
         };
 

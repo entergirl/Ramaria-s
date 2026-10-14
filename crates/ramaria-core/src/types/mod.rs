@@ -106,6 +106,7 @@ pub use persona_enum::{
 pub use persona_struct::{Persona, PersonaFact, PersonalityTrait, TraitEvidence};
 pub use session::{
     CHANNEL_LOCAL, CHANNEL_QQ, CHANNEL_TELEGRAM, MemberRole, Session, SessionMember,
+    is_social_channel,
 };
 pub use state::AppState;
 pub use style::{PersonaExample, PersonaStyleStats, StyleRuleSource, StyleStatsStatus};

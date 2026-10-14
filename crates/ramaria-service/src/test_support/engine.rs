@@ -132,7 +132,7 @@ async fn assemble_engine(
     let _ = Engine::open_with(EngineOptions::new(db_path.clone()))
         .await
         .expect("引擎装配应成功");
-    let pool = ramaria_storage::database::init_pool(Some(db_path))
+    let pool = ramaria_storage::database::init_pool(Some(db_path.clone()))
         .await
         .expect("测试库初始化应成功");
     let storage = Arc::new(SqliteStorage::new(pool.clone()));
@@ -141,7 +141,8 @@ async fn assemble_engine(
         llm,
         embedding,
         config,
-    );
+    )
+    .with_db_path(db_path.clone());
     engine.attach_sqlite_pool(pool);
     // 测试退避缩短：任务重试不做真实等待（仅缩短基退避，重试次数与生产一致）
     engine.set_job_manager_config(ramaria_memory::job::JobManagerConfig {

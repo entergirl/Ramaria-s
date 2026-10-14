@@ -9,11 +9,13 @@
 //! - 会话定位：交互式按显式 `session_id` > 新建（含新会话桥接注入）；
 //!   通道式按显式 `session_id` > 通道 + 外部标识续写；
 //!   主动模式按显式 `session_id` > 新建（不注入桥接，话题由锚点承载）
+//! - 社交会话只读：显式指定社交平台会话的客户端本地生成一律拒绝；
+//!   通道式仅放行入站回复链路（`message_in_history=true`）
 //! - 主动模式：消息位为选题锚点（可为空），请求的用户消息位留空，
 //!   提示词装配注入主动开口段
 //! - 历史窗口：分页倒序加载，条数上限与字符预算取 `[session]` 配置（预算按渲染后正文计），
 //!   读取失败保留已加载部分；图片占位符按附件状态渲染（完成 → 描述、处理中 → 提示、
-//!   其余保留裸占位符；附件查询失败降级原文）
+//!   其余保留裸占位符；附件查询失败降级原文）；社交会话按发言人前缀标注他人消息
 //! - 降级纪律：会话 NULL 归属回写 / 弱反馈检测失败均只记 warn，不阻塞生成
 
 use chrono::Timelike;
@@ -22,8 +24,8 @@ use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::time_period::TimePeriod;
 use ramaria_core::traits::{ChatMessage, ChatRequest, StorageBackend};
 use ramaria_core::types::{
-    AppState, BackendConfig, Message, MessageAttachment, MessageRole, MessageSource, Session,
-    new_id, replace_image_placeholders,
+    AppState, BackendConfig, Message, MessageRole, MessageSource, Session, is_social_channel,
+    new_id,
 };
 use ramaria_memory::chat::{PromptMaterialInputs, SegmentStyle};
 use ramaria_memory::prompt::builder::ProactivePromptContext;
@@ -36,10 +38,8 @@ use super::context::{
     step_apply_token_budget, step_build_prompt, step_build_request, step_load_examples,
     step_load_knowledge, step_load_narrative, step_recall, step_route_behavior,
 };
-use super::render::{build_history_render_map, load_message_attachments};
-
-/// 历史加载分页条数（实现常量；加载条数与字符预算由 `[session]` 配置提供）。
-const HISTORY_PAGE_SIZE: i64 = 20;
+use super::history::step_load_history;
+use super::social::{is_group_conversation, readonly_error};
 
 // =========================================================
 // 内部请求形态
@@ -92,7 +92,8 @@ pub(super) struct ProactiveInput {
 }
 
 /// 会话解析产出（含本轮生效人格与新会话桥接内容）。
-struct ResolvedSession {
+#[derive(Debug)]
+pub(super) struct ResolvedSession {
     session: Session,
     /// 本轮生效人格（会话已绑定人格时覆盖请求人格）。
     persona: String,
@@ -165,8 +166,10 @@ pub(super) async fn prepare_request(
     let persona = resolved.persona.clone();
     let session_id = resolved.session.id;
 
-    // ---- 5. 历史窗口（配置驱动；预置上文前置） ----
-    let history = step_load_history(storage, config, session_id, &input.seed_history).await;
+    // ---- 5. 历史窗口（配置驱动；预置上文前置；社交会话标注发言人） ----
+    let social = is_social_channel(&resolved.session.channel);
+    let group_conversation = is_group_conversation(&resolved.session);
+    let history = step_load_history(storage, config, session_id, &input.seed_history, social).await;
 
     // ---- 6. 记忆召回（配置闸门 × 宿主策略） ----
     let (memory_context, rag_covered_labels, utt_context) =
@@ -209,6 +212,7 @@ pub(super) async fn prepare_request(
         rag_text: memory_context.as_deref(),
         layer_dedup: &config.layer_dedup,
         segment_style: input.segment_style,
+        group_conversation,
         recent_state: ramaria_memory::chat::RecentStateConfig {
             enabled: config.proactive.recent_state_enabled,
             window_days: config.proactive.recent_state_window_days,
@@ -332,12 +336,14 @@ async fn step_check_privacy(engine: &Engine, backend: &BackendConfig) -> Ramaria
 /// 步骤 4：会话定位（交互式 / 通道式 / 主动模式语义参数化）。
 ///
 /// 交互式（桌面 / CLI）:
-/// - 显式 `session_id`：校验存在性与未关闭；存量 NULL 归属按调用方显式人格回写
+/// - 显式 `session_id`：社交平台会话一律拒绝（仅可查看，需在对应平台回复）；
+///   校验存在性与未关闭；存量 NULL 归属按调用方显式人格回写
 ///   （失败只 warn 不阻塞）；会话已绑定人格时覆盖本轮生效人格。
 /// - 无 `session_id`：新建会话；注入闸门开启时加载新会话桥接内容。
 ///
 /// 通道式（MCP）:
-/// - 显式 `session_id`：校验存在性、未关闭与人格归属一致性；
+/// - 显式 `session_id`：社交平台会话仅放行入站回复链路（`message_in_history=true`），
+///   其余调用一律拒绝；校验存在性、未关闭与人格归属一致性；
 /// - 无 `session_id`：复用回流写入的会话解析（含惰性封存体检与"标识被他人格占用则另起"）。
 ///
 /// 主动模式:
@@ -346,7 +352,7 @@ async fn step_check_privacy(engine: &Engine, backend: &BackendConfig) -> Ramaria
 ///
 /// 返回:
 /// - 目标会话 + 本轮生效人格 + 新会话桥接内容。
-async fn step_resolve_session(
+pub(super) async fn step_resolve_session(
     engine: &Engine,
     storage: &dyn StorageBackend,
     config: &RamariaConfig,
@@ -360,6 +366,15 @@ async fn step_resolve_session(
                     .get_session(sid)
                     .await?
                     .ok_or_else(|| RamariaError::validation(format!("会话不存在: {sid}")))?;
+                // 社交平台会话在客户端本地只读（先于关闭检查）：显式指定即拒绝
+                if is_social_channel(&session.channel) {
+                    tracing::warn!(
+                        session_id = %session.id,
+                        channel = %session.channel,
+                        "社交平台会话不允许客户端本地生成，拒绝"
+                    );
+                    return Err(readonly_error(&session.channel));
+                }
                 if session.ended_at.is_some() {
                     return Err(RamariaError::validation(format!(
                         "会话已关闭（session {sid}），请开启新对话。"
@@ -445,6 +460,16 @@ async fn step_resolve_session(
                     .get_session(id)
                     .await?
                     .ok_or_else(|| RamariaError::validation(format!("会话不存在：{id}")))?;
+                // 通道入站回复路径（message_in_history=true，入站消息已落库）是唯一允许写
+                // 社交会话的本地链路；其余显式指定社交会话的调用（如 MCP chat_send）一律拒绝
+                if is_social_channel(&session.channel) && !input.message_in_history {
+                    tracing::warn!(
+                        session_id = %session.id,
+                        channel = %session.channel,
+                        "社交平台会话不允许绕过入站回复路径生成，拒绝"
+                    );
+                    return Err(readonly_error(&session.channel));
+                }
                 if session.ended_at.is_some() {
                     return Err(RamariaError::validation(format!(
                         "会话已关闭：{id}（请省略 session_id 由服务端续写或另起）"
@@ -517,103 +542,6 @@ async fn step_resolve_session(
             }
         },
     }
-}
-
-/// 步骤 5：载入会话历史（时间正序），配置驱动的分页窗口。
-///
-/// 语义:
-/// - 分页 20 条倒序加载（先检查条数上限与字符预算，再取页）；
-/// - 加载条数上限取 `[session].max_history_messages`，字符预算取 `[session].max_history_chars`，
-///   每条按**渲染后正文**（`[图片#{hash}]` 占位符注入附件描述后）的
-///   `content.chars().count() + 16`（role 标记开销）计；
-/// - 读取失败记 warn 并保留已加载部分（首屏失败即空历史），不阻塞生成；
-///   附件查询失败同样降级为正文原文；
-/// - 按 `created_at` 升序排列后，前置拼接调用方预置上文（seed 早于本会话历史）。
-pub(super) async fn step_load_history(
-    storage: &dyn StorageBackend,
-    config: &RamariaConfig,
-    session_id: Uuid,
-    seed_history: &[ChatMessage],
-) -> Vec<ChatMessage> {
-    let max_messages = config.session.max_history_messages.max(1) as i64;
-    let char_budget = config.session.max_history_chars.max(1) as usize;
-
-    let mut loaded: Vec<Message> = Vec::new();
-    let mut attachment_rows: Vec<MessageAttachment> = Vec::new();
-    let mut total_chars: usize = 0;
-    let mut offset: i64 = 0;
-
-    loop {
-        if loaded.len() as i64 >= max_messages {
-            tracing::debug!(
-                session_id = %session_id,
-                loaded = loaded.len(),
-                max = max_messages,
-                "历史消息已达到加载条数上限"
-            );
-            break;
-        }
-        if total_chars >= char_budget {
-            tracing::debug!(
-                session_id = %session_id,
-                total_chars,
-                budget = char_budget,
-                "历史消息已达到字符预算"
-            );
-            break;
-        }
-
-        let page = match storage
-            .list_messages_paginated(session_id, HISTORY_PAGE_SIZE, offset)
-            .await
-        {
-            Ok(page) => page,
-            Err(e) => {
-                tracing::warn!(
-                    session_id = %session_id,
-                    loaded = loaded.len(),
-                    error = %e,
-                    "分页加载会话历史失败，按已加载部分继续"
-                );
-                break;
-            }
-        };
-        if page.is_empty() {
-            break; // 没有更多消息
-        }
-
-        let page_len = page.len() as i64;
-        // 字符预算按渲染后正文计算（附件描述注入会加长实际进入 Prompt 的文本；
-        // 查询失败降级为空映射 → 按原文计量）
-        let page_attachments = load_message_attachments(storage, &page).await;
-        let page_map = build_history_render_map(&page_attachments);
-        for message in &page {
-            total_chars += replace_image_placeholders(&message.content, &page_map)
-                .chars()
-                .count()
-                + 16;
-        }
-        attachment_rows.extend(page_attachments);
-        loaded.extend(page);
-        offset += HISTORY_PAGE_SIZE;
-
-        // 如果返回的页不满，说明已是最后一批
-        if page_len < HISTORY_PAGE_SIZE {
-            break;
-        }
-    }
-
-    // 按 created_at 升序排列（分页返回为倒序；相同时刻保持稳定不翻转）
-    loaded.sort_by_key(|message| message.created_at);
-
-    // 最终映射由全部已加载消息的附件行构建（同一 md5 描述一致，跨页无冲突）
-    let render_map = build_history_render_map(&attachment_rows);
-    let mut merged = seed_history.to_vec();
-    merged.extend(loaded.into_iter().map(|message| ChatMessage {
-        role: message.role,
-        content: replace_image_placeholders(&message.content, &render_map),
-    }));
-    merged
 }
 
 /// 步骤 7（仅交互式）：弱反馈检测（S2 纠正 / S3 继续）。

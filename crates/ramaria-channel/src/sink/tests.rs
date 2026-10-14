@@ -1,7 +1,7 @@
 //! crates/ramaria-channel/src/sink/tests.rs - 通道主动投递接收端单元测试
 //!
 //! 设计特点:
-//! - 以最小 MockTransport 记录出站调用并注入失败序列，覆盖发送 / 重试 / 失败全景。
+//! - 以最小 MockTransport 记录出站调用并注入失败序列，覆盖发送 / 重试 / 分段 / 失败全景。
 //! - 全部离线确定性：重试间隔注入为毫秒级，不依赖网络与真实平台。
 //! - 断言口径：传输调用次数、送达参数、错误结果。
 
@@ -20,11 +20,12 @@ use ramaria_core::types::new_id;
 // mock 传输
 // =========================================================
 
-/// 记录型传输：记录调用次数与送达参数，可注入失败序列（按序消费一次）。
+/// 记录型传输：记录调用次数与送达参数，可注入失败序列（按序消费一次；
+/// `None` 槽位表示该次调用放行成功）。
 struct MockTransport {
     channel_name: &'static str,
     calls: AtomicUsize,
-    failures: Mutex<VecDeque<ChannelError>>,
+    failures: Mutex<VecDeque<Option<ChannelError>>>,
     sent: Mutex<Vec<(OutboundTarget, OutboundMessage)>>,
 }
 
@@ -42,7 +43,18 @@ impl MockTransport {
     fn fail_with(&self, errors: Vec<ChannelError>) {
         let mut queue = self.failures.lock().expect("失败序列锁不应中毒");
         for error in errors {
-            queue.push_back(error);
+            queue.push_back(Some(error));
+        }
+    }
+
+    /// 放行前 `successes` 次发送后，再按错误序列生效。
+    fn fail_after(&self, successes: usize, errors: Vec<ChannelError>) {
+        let mut queue = self.failures.lock().expect("失败序列锁不应中毒");
+        for _ in 0..successes {
+            queue.push_back(None);
+        }
+        for error in errors {
+            queue.push_back(Some(error));
         }
     }
 
@@ -75,7 +87,7 @@ impl Transport for MockTransport {
 
     async fn send(&self, target: &OutboundTarget, message: &OutboundMessage) -> ChannelResult<()> {
         self.calls.fetch_add(1, Ordering::Relaxed);
-        if let Some(error) = self
+        if let Some(Some(error)) = self
             .failures
             .lock()
             .expect("失败序列锁不应中毒")
@@ -113,16 +125,44 @@ fn sample_message(channel: &str, external_ref: Option<&str>) -> ProactiveMessage
     }
 }
 
-/// 装配以单个 mock 传输为目标的接收端（毫秒级重试间隔）。
+/// 构造单通道传输映射。
+fn transports_with(transport: &Arc<MockTransport>) -> HashMap<String, Arc<dyn Transport>> {
+    let mut transports: HashMap<String, Arc<dyn Transport>> = HashMap::new();
+    let handle: Arc<dyn Transport> = transport.clone();
+    transports.insert(transport.channel_name.to_string(), handle);
+    transports
+}
+
+/// 装配以单个 mock 传输为目标的接收端（毫秒级重试间隔；分段取默认值）。
 fn sink_with(
     transport: &Arc<MockTransport>,
     max_attempts: u32,
 ) -> (ChannelProactiveSink, Arc<MockTransport>) {
-    let mut transports: HashMap<String, Arc<dyn Transport>> = HashMap::new();
-    let handle: Arc<dyn Transport> = transport.clone();
-    transports.insert(transport.channel_name.to_string(), handle);
     (
-        ChannelProactiveSink::with_options(transports, Duration::from_millis(10), max_attempts),
+        ChannelProactiveSink::with_options(
+            transports_with(transport),
+            Duration::from_millis(10),
+            max_attempts,
+        ),
+        transport.clone(),
+    )
+}
+
+/// 装配分段参数注入的接收端（毫秒级重试与段间间隔）。
+fn sink_with_segments(
+    transport: &Arc<MockTransport>,
+    max_attempts: u32,
+    segment_interval: Duration,
+    segment_max: usize,
+) -> (ChannelProactiveSink, Arc<MockTransport>) {
+    (
+        ChannelProactiveSink::with_segment_options(
+            transports_with(transport),
+            Duration::from_millis(10),
+            max_attempts,
+            segment_interval,
+            segment_max,
+        ),
         transport.clone(),
     )
 }
@@ -248,19 +288,64 @@ async fn deliver_exhausts_attempts() {
     assert!(handle.sent().is_empty());
 }
 
-/// 出站兜底：含 `||` 的主动消息在发送前替换为换行（吞并邻接空白）。
+/// 出站拆条：含 `||` 的主动消息切段分次发出（吞并邻接空白）。
 #[tokio::test]
-async fn deliver_sanitizes_pipe_separator() {
+async fn deliver_splits_pipe_segments() {
     let transport = Arc::new(MockTransport::new("qq"));
-    let (sink, handle) = sink_with(&transport, 2);
+    let (sink, handle) = sink_with_segments(&transport, 2, Duration::from_millis(10), 5);
 
     let mut message = sample_message("qq", Some("c2c:10001"));
     message.content = "甲 || 乙||丙".to_string();
     sink.deliver(&message).await.expect("发送应成功");
 
-    let sent = handle.sent();
-    assert_eq!(sent.len(), 1);
-    assert_eq!(sent[0].1.text, "甲\n乙\n丙");
+    assert_eq!(handle.calls(), 3, "每段一次发送");
+    let texts: Vec<String> = handle
+        .sent()
+        .into_iter()
+        .map(|(_, outbound)| outbound.text)
+        .collect();
+    assert_eq!(texts, vec!["甲", "乙", "丙"]);
+}
+
+/// 分段失败语义：第 2 段不可重试失败 → Err，剩余段不再发送（已发送段不回滚）。
+#[tokio::test]
+async fn deliver_failure_after_partial_send_stops_remaining() {
+    let transport = Arc::new(MockTransport::new("qq"));
+    transport.fail_after(1, vec![ChannelError::Auth("凭据错误".to_string())]);
+    let (sink, handle) = sink_with_segments(&transport, 2, Duration::from_millis(10), 5);
+
+    let mut message = sample_message("qq", Some("c2c:10001"));
+    message.content = "甲||乙||丙".to_string();
+    let error = sink.deliver(&message).await.expect_err("分段失败应报错");
+    assert!(
+        error.to_string().contains("发送失败"),
+        "错误应含发送失败语义: {error}"
+    );
+    assert_eq!(handle.calls(), 2, "第 2 段失败后不应继续尝试第 3 段");
+    let texts: Vec<String> = handle
+        .sent()
+        .into_iter()
+        .map(|(_, outbound)| outbound.text)
+        .collect();
+    assert_eq!(texts, vec!["甲"], "仅第 1 段已送达");
+}
+
+/// 默认构造：分段参数与 worker 出站口径一致（800ms × 5 段）。
+#[test]
+fn default_constructors_use_worker_segment_options() {
+    let transport = Arc::new(MockTransport::new("qq"));
+
+    let sink = ChannelProactiveSink::new(transports_with(&transport));
+    assert_eq!(sink.segment_interval, Duration::from_millis(800));
+    assert_eq!(sink.segment_max, 5);
+
+    let sink = ChannelProactiveSink::with_options(
+        transports_with(&transport),
+        Duration::from_millis(10),
+        2,
+    );
+    assert_eq!(sink.segment_interval, Duration::from_millis(800));
+    assert_eq!(sink.segment_max, 5);
 }
 
 /// 净化后为空（仅分隔符与空白）：跳过发送且视为已完成。

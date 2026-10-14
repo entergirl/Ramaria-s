@@ -9,7 +9,7 @@
 //! 安全约束:
 //! - 仅使用合成样例数据与临时目录，不涉及真实 API key / 网络调用 / 用户数据。
 
-use super::steps::step_load_history;
+use super::history::step_load_history;
 use crate::recall::RecallPolicy;
 use crate::stream_event::{ChatEventStream, StreamEvent};
 use crate::test_support::{
@@ -527,7 +527,8 @@ async fn history_window_stops_at_char_budget() {
     }
 
     let config = engine.config();
-    let history = step_load_history(storage.as_ref(), config.as_ref(), session.id, &[]).await;
+    let history =
+        step_load_history(storage.as_ref(), config.as_ref(), session.id, &[], false).await;
     assert_eq!(history.len(), 40, "字符预算在第 2 页后越界即停");
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -992,7 +993,7 @@ async fn channel_reply_persists_assistant_only_and_embeds_inbound_history() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// 社交通道回复：提示词含通道分段格式声明（换行分条、禁用 `||` 符号）。
+/// 社交通道回复：提示词含通道分段格式声明（用 `||` 分条、平台逐条发送）。
 #[tokio::test]
 async fn channel_reply_prompt_declares_newline_segments() {
     let llm = Arc::new(MockLlm::with_reply(REPLY));
@@ -1021,13 +1022,13 @@ async fn channel_reply_prompt_declares_newline_segments() {
         prompt.contains(ramaria_memory::chat::CHANNEL_SEGMENT_DECLARATION),
         "通道回复提示词应含通道格式声明段"
     );
-    assert!(prompt.contains("换行"), "声明应要求换行分条");
-    assert!(prompt.contains("「||」"), "声明应禁用分隔符符号");
+    assert!(prompt.contains("「||」"), "声明应要求用 || 分条");
+    assert!(prompt.contains("逐条"), "声明应说明平台逐条分别发送");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// 社交通道回复：历史窗口中 pending 附件渲染为「处理中」（未完成图片不裸露占位符）。
+/// 社交通道回复：历史窗口中 pending 附件渲染为「对方发来一张图片（处理中）」。
 #[tokio::test]
 async fn channel_reply_renders_pending_image_as_processing() {
     let llm = Arc::new(MockLlm::with_reply(REPLY));
@@ -1086,10 +1087,9 @@ async fn channel_reply_renders_pending_image_as_processing() {
     let requests = llm.requests();
     assert_eq!(requests.len(), 1);
     assert!(
-        requests[0]
-            .history
-            .iter()
-            .any(|message| message.content.contains("[图片: 处理中]")),
+        requests[0].history.iter().any(|message| message
+            .content
+            .contains("[图片: 对方发来一张图片（处理中）]")),
         "pending 附件应渲染为处理中提示: {:?}",
         requests[0].history
     );

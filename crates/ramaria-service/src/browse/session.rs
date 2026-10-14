@@ -191,6 +191,7 @@ pub(crate) async fn session_detail(
         started_at: to_datetime(session.started_at),
         ended_at: session.ended_at.and_then(DateTime::from_timestamp_millis),
         persona_uid: session.persona_uid,
+        channel: session.channel,
         total_messages: total,
         has_more,
         messages,

@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use ramaria_core::config::RamariaConfig;
@@ -141,10 +141,12 @@ impl LlmProvider for StubLlm {
     }
 }
 
-/// 桩传输：记录出站发送与尝试次数，可注入发送失败。
+/// 桩传输：记录出站发送与尝试次数，成功发送时刻可查，可注入发送失败。
 struct StubTransport {
     status: StdMutex<ChannelStatus>,
     sends: StdMutex<Vec<(OutboundTarget, OutboundMessage)>>,
+    /// 成功发送时刻（与 `sends` 一一对应；供分段间隔断言）。
+    times: StdMutex<Vec<Instant>>,
     attempts: AtomicUsize,
     remaining_failures: AtomicUsize,
     failure_retryable: AtomicBool,
@@ -155,6 +157,7 @@ impl StubTransport {
         Arc::new(Self {
             status: StdMutex::new(ChannelStatus::new("qq")),
             sends: StdMutex::new(Vec::new()),
+            times: StdMutex::new(Vec::new()),
             attempts: AtomicUsize::new(0),
             remaining_failures: AtomicUsize::new(0),
             failure_retryable: AtomicBool::new(true),
@@ -178,6 +181,11 @@ impl StubTransport {
             .iter()
             .map(|(_, message)| message.text.clone())
             .collect()
+    }
+
+    /// 成功发送时刻副本（按发送顺序）。
+    fn send_times(&self) -> Vec<Instant> {
+        self.times.lock().expect("发送时刻锁不应中毒").clone()
     }
 }
 
@@ -214,6 +222,10 @@ impl Transport for StubTransport {
             .lock()
             .expect("出站记录锁不应中毒")
             .push((target.clone(), message.clone()));
+        self.times
+            .lock()
+            .expect("发送时刻锁不应中毒")
+            .push(Instant::now());
         Ok(())
     }
 
@@ -306,6 +318,8 @@ async fn seed_binding_persona(storage: &SqliteStorage) {
 fn worker_options() -> WorkerOptions {
     WorkerOptions {
         min_send_interval: Duration::from_millis(10),
+        segment_interval: Duration::from_millis(10),
+        segment_max: 5,
         send_retry_delay: Duration::from_millis(10),
         send_max_attempts: 2,
         image_understand_timeout: Duration::from_secs(20),
@@ -498,9 +512,9 @@ async fn binding_responds_after_explicit_allow() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// 出站兜底：含 `||` 的回复在发送前替换为换行（库内原文不改）。
+/// 出站拆条：含 `||` 的回复在发送前切段分次发出（库内原文不改）。
 #[tokio::test]
-async fn outbound_pipe_separator_is_sanitized() {
+async fn outbound_pipe_separator_is_split() {
     let llm = StubLlm::new("你好 || 在的||怎么啦", "不应调用");
     let (engine, storage, dir) = worker_engine("outbound-pipe", Arc::clone(&llm)).await;
     seed_binding_persona(&storage).await;
@@ -519,11 +533,12 @@ async fn outbound_pipe_separator_is_sanitized() {
 
     assert_eq!(
         transport.sent_texts(),
-        vec!["你好\n在的\n怎么啦".to_string()],
-        "出站文本不应残留分隔符"
+        vec!["你好".to_string(), "在的".to_string(), "怎么啦".to_string()],
+        "出站文本应按分隔符拆条，不残留分隔符"
     );
+    assert_eq!(transport.attempts(), 3, "每段一次发送");
 
-    // 库内回复原文保留多气泡契约（仅出站净化）
+    // 库内回复原文保留多气泡契约（仅出站拆条）
     let session = storage
         .find_active_session_by_channel("qq", Some("c2c:10001"))
         .await
@@ -537,6 +552,75 @@ async fn outbound_pipe_separator_is_sanitized() {
         .find(|message| message.role == MessageRole::Assistant)
         .expect("应有助手行");
     assert_eq!(assistant.content, "你好 || 在的||怎么啦");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 多段分次发送：逐段发出，相邻段发送时刻差满足段间最小间隔。
+#[tokio::test]
+async fn outbound_multi_segment_sends_with_interval() {
+    let llm = StubLlm::new("甲||乙||丙", "不应调用");
+    let (engine, storage, dir) = worker_engine("outbound-interval", Arc::clone(&llm)).await;
+    seed_binding_persona(&storage).await;
+    allow(&engine, "c2c:10001").await;
+    let transport = StubTransport::new();
+    let downloader = StubDownloader::failing();
+
+    dispatch(
+        &engine,
+        &transport,
+        &downloader,
+        &worker_options(),
+        private_event("你好", "m-seg"),
+    )
+    .await;
+
+    assert_eq!(
+        transport.sent_texts(),
+        vec!["甲".to_string(), "乙".to_string(), "丙".to_string()]
+    );
+    assert_eq!(transport.attempts(), 3);
+
+    let times = transport.send_times();
+    assert_eq!(times.len(), 3);
+    for pair in times.windows(2) {
+        let gap = pair[1].duration_since(pair[0]);
+        assert!(
+            gap + Duration::from_millis(1) >= Duration::from_millis(10),
+            "相邻段发送间隔应不小于 10ms: {gap:?}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 段数超限：超出上限的余段以换行并入末段后发送。
+#[tokio::test]
+async fn outbound_segment_overflow_folds_into_last() {
+    let llm = StubLlm::new("甲||乙||丙", "不应调用");
+    let (engine, storage, dir) = worker_engine("outbound-fold", Arc::clone(&llm)).await;
+    seed_binding_persona(&storage).await;
+    allow(&engine, "c2c:10001").await;
+    let transport = StubTransport::new();
+    let downloader = StubDownloader::failing();
+
+    let mut options = worker_options();
+    options.segment_max = 2;
+    dispatch(
+        &engine,
+        &transport,
+        &downloader,
+        &options,
+        private_event("你好", "m-fold"),
+    )
+    .await;
+
+    assert_eq!(
+        transport.sent_texts(),
+        vec!["甲".to_string(), "乙\n丙".to_string()],
+        "超限余段应并入末段"
+    );
+    assert_eq!(transport.attempts(), 2);
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -649,7 +733,7 @@ async fn image_success_runs_understanding() {
         requests[0]
             .history
             .iter()
-            .any(|message| message.content.contains("[图片: 一只橘猫趴在窗台上]")),
+            .any(|message| message.content.contains("一只橘猫趴在窗台上")),
         "chat 请求历史应含图片描述: {:?}",
         requests[0].history
     );
