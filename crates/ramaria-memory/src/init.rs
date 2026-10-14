@@ -2,7 +2,7 @@
 //!
 //! 设计特点:
 //! - 首次启动检测: 查询 personas 表无 kind='rama' 记录时触发
-//! - persona.toml 解析: 手动解析 [identity] 和 [blocks] 节（零外部依赖）
+//! - persona.toml 解析: 预设超集解析器（crate::preset）的兼容包装
 //! - LLM 结构化拆解: 将 persona 配置拆解为 PersonaFact + PersonalityTrait 写入存储
 //! - 已有画像时跳过初始化，返回已有 persona 信息
 //! - 错误处理: LLM 可恢复错误不阻断启动（降级为仅创建基础 persona）
@@ -16,8 +16,8 @@
 use ramaria_core::traits::ChatRequest;
 use ramaria_core::types::{FactSource, PersonaKind};
 use ramaria_core::{
-    LlmProviderTrait, Persona, PersonaFact, PersonalityTrait, ProfileField, RamariaError,
-    RamariaResult, StorageBackend, TraitLayer, TraitSource, TraitStatus,
+    LlmProviderTrait, Persona, PersonaFact, PersonalityTrait, ProfileField, RamariaResult,
+    StorageBackend, TraitLayer, TraitSource, TraitStatus,
 };
 use serde::Deserialize;
 use tracing::{debug, info, warn};
@@ -82,9 +82,9 @@ pub fn resolve_chat_style_rules(config: Option<&str>) -> String {
 /// 解析后的 persona.toml 内容。
 ///
 /// 字段:
-/// - `assistant_name`: [identity] 节 assistant_name
+/// - `assistant_name`: [identity] 节 assistant_name（缺省回退 [persona] 段 name / 文件名 stem）
 /// - `user_name`: [identity] 节 user_name
-/// - `description`: [identity] 节 description（可选；背景描述，供对话 prompt 角色层使用）
+/// - `description`: 人格描述（[persona] 段 description 优先，[identity] 段 description 兜底）
 /// - `work`: [identity] 节 work（可选；`Anim` 类人格的作品名）
 /// - `era`: [identity] 节 era（可选；`Hist` 类人格的时代/时期名）
 /// - `blocks`: [blocks] 节所有键值对（`A_persona` / `E_rules` / `speaking_style` 等）
@@ -98,13 +98,12 @@ pub struct PersonaToml {
     pub blocks: Vec<(String, String)>,
 }
 
-/// 手动解析 persona.toml。
+/// 解析 persona.toml（预设超集解析器兼容包装）。
 ///
-/// 支持的格式（简化版 TOML 解析器）:
-/// - `[identity]` 节: key = "value"（`assistant_name` / `user_name` 必选语义见下；
-///   `description` / `work` / `era` 为可选键，空串按"未设置"处理）
-/// - `[blocks]` 节: key = """...""" 或 key = "..."
-/// - 忽略空行和注释行（以 # 开头）
+/// 说明:
+/// - 完整解析（含 [persona] 注册段与各类结构化段）由 `crate::preset::parse_toml` 承担；
+///   本包装按旧接口形态提取对话身份与自由文本块，供冷启动与对话兜底链路使用。
+/// - 兼容面: [identity] 的 assistant_name / user_name / description / work / era 与 [blocks]。
 ///
 /// 参数:
 /// - `content`: persona.toml 文件原始内容。
@@ -112,125 +111,15 @@ pub struct PersonaToml {
 /// 返回:
 /// - 成功时返回 PersonaToml，解析失败返回错误。
 pub fn parse_persona_toml(content: &str) -> RamariaResult<PersonaToml> {
-    let mut assistant_name = String::new();
-    let mut user_name = String::new();
-    let mut description: Option<String> = None;
-    let mut work: Option<String> = None;
-    let mut era: Option<String> = None;
-    let mut blocks: Vec<(String, String)> = Vec::new();
-
-    let mut current_section: Option<String> = None;
-    let mut in_multiline = false;
-    let mut multiline_key = String::new();
-    let mut multiline_value = String::new();
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-
-        // 跳过空行和注释
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-
-        // 正在收集多行字符串
-        if in_multiline {
-            if trimmed == r#"""""# {
-                // 多行字符串结束
-                blocks.push((
-                    multiline_key.clone(),
-                    multiline_value.trim_end().to_string(),
-                ));
-                in_multiline = false;
-                multiline_key.clear();
-                multiline_value.clear();
-            } else {
-                if !multiline_value.is_empty() {
-                    multiline_value.push('\n');
-                }
-                multiline_value.push_str(line);
-            }
-            continue;
-        }
-
-        // 节标题 [section]
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            current_section = Some(trimmed[1..trimmed.len() - 1].to_string());
-            continue;
-        }
-
-        // 键值对 key = value
-        if let Some(eq_pos) = trimmed.find('=') {
-            let key = trimmed[..eq_pos].trim().to_string();
-            let value_raw = trimmed[eq_pos + 1..].trim();
-
-            // 检测多行字符串开始 """
-            if value_raw == r#"""""# {
-                in_multiline = true;
-                multiline_key = key;
-                multiline_value = String::new();
-                continue;
-            }
-
-            // 普通字符串值（去掉首尾引号）
-            let value = if value_raw.starts_with('"') && value_raw.ends_with('"') {
-                value_raw[1..value_raw.len() - 1].to_string()
-            } else {
-                value_raw.to_string()
-            };
-
-            match current_section.as_deref() {
-                Some("identity") => match key.as_str() {
-                    "assistant_name" => assistant_name = value,
-                    "user_name" => user_name = value,
-                    // 可选键：空串/纯空白按"未设置"处理（避免渲染空背景行/空作品名）
-                    "description" => description = normalize_optional_value(value),
-                    "work" => work = normalize_optional_value(value),
-                    "era" => era = normalize_optional_value(value),
-                    _ => debug!(key = %key, "忽略 [identity] 中未知字段"),
-                },
-                Some("blocks") => {
-                    blocks.push((key, value));
-                }
-                _ => debug!(section = ?current_section, "忽略未知节"),
-            }
-        }
-    }
-
-    // 检查是否有未闭合的多行字符串
-    if in_multiline {
-        return Err(RamariaError::config(
-            "persona.toml 中存在未闭合的多行字符串 (\"\"\")",
-        ));
-    }
-
-    if assistant_name.is_empty() {
-        return Err(RamariaError::config(
-            "persona.toml 缺少 [identity] assistant_name",
-        ));
-    }
-
-    if blocks.is_empty() {
-        warn!("persona.toml 的 [blocks] 节为空，将创建无结构化画像的 rama persona");
-    }
-
+    let parsed = crate::preset::parse_toml(content, &crate::preset::PresetParseContext::default())?;
     Ok(PersonaToml {
-        assistant_name,
-        user_name,
-        description,
-        work,
-        era,
-        blocks,
+        assistant_name: parsed.identity.assistant_name,
+        user_name: parsed.identity.user_name.unwrap_or_default(),
+        description: parsed.persona.description,
+        work: parsed.identity.work,
+        era: parsed.identity.era,
+        blocks: parsed.blocks,
     })
-}
-
-/// 可选键值归一：去首尾空白后为空 → `None`（调用方据此判断"未设置"）。
-fn normalize_optional_value(value: String) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
 }
 
 // =========================================================

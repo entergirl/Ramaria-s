@@ -1,3 +1,8 @@
+[persona]
+uid = "rama-0001"
+kind = "rama"
+name = "黎杋枫"
+
 [identity]
 assistant_name = "黎杋枫"
 user_name = "用户"

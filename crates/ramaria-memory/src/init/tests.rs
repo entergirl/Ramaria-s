@@ -90,7 +90,7 @@ A_persona = """
 
     let err = parse_persona_toml(content).unwrap_err();
     let err_msg = format!("{}", err);
-    assert!(err_msg.contains("未闭合"));
+    assert!(err_msg.contains("解析 persona.toml 失败"));
 }
 
 #[test]
@@ -117,12 +117,10 @@ user_name = "user"
 A_persona = '你是黎杋枫。被问及"是否是AI"时温柔回避。'
 "#;
 
-    // 注意：这里值使用了单引号括起来的普通字符串，
-    // 解析器将其当作不带引号的原始值
+    // 单引号字面量按 TOML 语义解析：引号本身是定界符，不进入值
     let parsed = parse_persona_toml(content).expect("解析失败");
     assert_eq!(parsed.assistant_name, "name");
     assert_eq!(parsed.blocks.len(), 1);
-    // 单引号的值会被当作字面量（包括引号本身）
     let block_value = &parsed.blocks[0].1;
     assert!(block_value.contains("黎杋枫"));
 }
