@@ -376,7 +376,7 @@ mod tests {
         let static_view = preview_view(ramaria_service::PersonaPromptPreview {
             uid: "char-0002".to_string(),
             tier: ramaria_service::PromptPreviewTier::Static,
-            system_prompt: "# 能力边界".to_string(),
+            system_prompt: "## 底线".to_string(),
             memory_context: None,
             chars: 5,
             tokens: 3,

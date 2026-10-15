@@ -63,7 +63,7 @@ use crate::support::mock_backend::{MockLlm, MockStorage};
 
 /// 角色层手工说话风格（表达层手工子段）。
 const PERSONA_STYLE: &str = "热情活泼，喜欢用emoji";
-/// 角色层已知事实（BasicInfo，固定骨架区，任何档位都保留）。
+/// 角色层关于对方（BasicInfo，固定骨架区，任何档位都保留）。
 const ROLE_FACT_TEXT: &str = "出生于上海";
 /// RAG L1 摘要特征（memory_context 内容）。
 const RAG_L1_SUMMARY: &str = "用户最近迷上了科幻电影，几乎每周都会看一两次";
@@ -223,7 +223,7 @@ fn active_fact(
     f
 }
 
-/// 构造角色层 BasicInfo 事实（固定骨架已知事实区，避免 facts 为空触发
+/// 构造角色层 BasicInfo 事实（固定骨架关于对方区，避免 facts 为空触发
 /// persona.toml 冷启动分支）。
 fn add_role_fact(storage: &MockStorage) {
     storage.add_fact(active_fact(
@@ -396,10 +396,10 @@ fn assert_absent(prompt: &str, forbidden: &[&str], label: &str) {
 
 /// 固定骨架子串（所有档位 persona 存在且 facts 非空时均在）。
 const FIXED_SKELETON: &[&str] = &[
-    "# 能力边界",
+    "## 底线",
     "# 角色（行为层）",
-    "## 已知事实",
-    "## 回复规范",
+    "## 关于对方",
+    "## 说话方式",
     "# 当前时间",
 ];
 

@@ -4,8 +4,7 @@
 //!
 //! | 段落 | 内容来源 | 说明 |
 //! |------|----------|------|
-//! | `# 能力边界` | 安全边界（保留，非四层） | Capacity |
-//! | `# 角色（行为层）` | 角色身份 + 性格特征 + 已知事实 + 回复规范 | Role + Insight + Experiment |
+//! | `# 角色（行为层）` | 角色身份 + 底线 + 性格 + 关于对方 + 说话方式/规则/格式 | Role + Insight + Experiment |
 //! | `## 行为规则`（行为层） | 情境-反应规则（`render_behavior_block`，命中注入） | 行为槽位 |
 //! | `# 说话风格（表达层）` | 说话风格 + 对话示例 | Personality + Statement |
 //! | `# 知识（知识层，按需）` | 事实卡片（`render_knowledge_block`） | 知识槽位 |
@@ -42,7 +41,7 @@ mod style;
 
 use context::build_context_block;
 use memory::build_memory;
-use role::{build_capacity, build_role_layer};
+use role::build_role_layer;
 use style::build_style_layer;
 
 pub use memory::{build_cross_session_narrative, render_utt_context};
@@ -60,26 +59,21 @@ pub use proactive::ProactivePromptContext;
 // - 段落标题（`# 角色（行为层）` 等）为层结构标识，已被模板映射/探针/集成测试
 //   锁定，保持稳定；这里仅收纳随内容拼接的引导句与固定段落文本。
 
-/// Capacity 首段引导：记忆 / 未知 / 安全三条约束（身份声明由角色层承担，
-/// 不再重复"你是 Ramaria"；原"知识边界"重叠项已去重）。
-const CAPACITY_INTRO: &str = "# 能力边界\n\
-- 记忆：你记得和对方过往的对话；相关时自然提起，不相关时不提。\n\
-- 未知：不确定或不知道的内容直接说明，不编造。\n\
-- 安全：不做医疗/法律/金融建议，不生成对他人有害、违法或人身攻击内容。";
-
-/// 默认知识边界子段（无 persona 自定义边界时追加；仅保留原默认三条中
-/// "知识时效/不臆测"一条——能力、安全边界已由 [CAPACITY_INTRO] 覆盖）。
-const KNOWLEDGE_BOUNDARY_DEFAULT: &str = "\n\n## 知识边界\n\
-知识截至训练时间，不臆测未知的事实或日期。";
+/// 底线子段（角色段内，身份信息之后）：诚实与安全约束（恒常注入）；
+/// 自定义知识边界非空时追加为末行（`include_knowledge_boundary` 控制）。
+const BOTTOM_LINE: &str = "## 底线\n\
+不知道或没把握的内容直接说明，不编造；不虚构对方说过的话、没发生过的事。\n\
+不做医疗、法律、金融方面的建议；不生成伤害他人或违反法律的内容。";
 
 /// 角色层无 persona 时的默认身份段（`# 角色（行为层）` 头部：场景行 + 默认身份行）。
 const ROLE_DEFAULT_TEXT: &str = "# 角色（行为层）\n\
 场景：你在社交软件上和对方即时聊天（「对方」指正在和你聊天的人）。\n\
 你是 Ramaria，你有自己的说话习惯。";
 
-/// 记忆层首段引导（说明记忆内容性质与引用时机）。
+/// 记忆层首段引导（记忆内容性质 + 引用时机/表达方式/询问应答三合一）。
 const MEMORY_SECTION_INTRO: &str = "# 记忆（脉络层）\n\
-以下是你的记忆内容。要求：仅在话题相关时自然提及；无相关内容时不提及。";
+以下是你记得的事。只在话题相关时自然提起；打招呼或新话题时不提。说的时候直接说内容（如「记得你说过…」），不使用「根据记录」「系统记录」这类说法。\n\
+对方问起「你还记得…吗」时，直接回答记得的内容。";
 
 /// 近期对话脉络无摘要时的占位提示。
 const NARRATIVE_PLACEHOLDER: &str = "（无历史对话）";
@@ -87,53 +81,49 @@ const NARRATIVE_PLACEHOLDER: &str = "（无历史对话）";
 /// 相关历史记忆占位提示（无 RAG 命中时）。
 const RAG_PLACEHOLDER: &str = "（无相关记忆）";
 
-/// 原文片段引导（utt 块；保留防照搬边界）。
-const UTT_LEAD: &str = "以下是你过去的发言样本。用途：模仿其语气、用词与断句；禁止照搬内容。\n";
+/// 原文片段引导（utt 块；与对话示例差异化为"连续发言"样例，保留防照搬边界）。
+const UTT_LEAD: &str =
+    "这也是你以前发过的消息（连着发的几条）。模仿它的分条与断句方式；不要照搬内容。\n";
 
-/// 桥接引导（上一会话尾部；保留不重复原文/不编造边界）。
+/// 桥接引导（上一会话尾部；保留延续话题/不重复原文/不编造边界）。
 const BRIDGE_LEAD: &str =
-    "以下是上一段对话的结尾。要求：延续该话题继续对话；不重复原文；不编造未提及的内容。\n";
+    "以下是上一段对话的结尾。接着这个话题继续聊；不要重复原文，不要编造没提过的内容。\n";
 
 /// 对话示例引导（Few-shot；保留防照搬边界）。
 const STATEMENT_LEAD: &str =
     "以下是你的说话示例。要求：模仿其长度、语气与断句方式；禁止照搬示例内容。";
 
 /// 说话风格子段引导行（手工/自动风格互斥渲染，共用同一引导；防风格描述被复述）。
-const STYLE_USAGE_LEAD: &str = "（以下是你的说话习惯。要求：按其表达，不复述该段文字。）";
+const STYLE_USAGE_LEAD: &str = "（以下是你自己的说话习惯。按这个表达；不要复述这段文字。）";
 
 /// 无自定义规则时的中性默认回复规则（单行；兼作陈述档默认）。
-const CORE_RULES_DEFAULT: &str = "\n### 核心规则\n\
+const CORE_RULES_DEFAULT: &str = "## 核心规则\n\
 - 不确定或不知道的内容直接说明，不编造。";
 
-/// 全局社交平台对话基调（聊天档注入，优先级高于 persona 风格规则）。
+/// 全局社交平台对话体裁约束（聊天档注入，先于 persona 风格规则生效）。
 ///
 /// 目的:
-/// - 对话发生在社交平台即时聊天场景；模型缺乏强约束时会回退"附和 + 反问需求 +
+/// - 对话发生在社交平台即时聊天场景；模型缺乏体裁约束时会回退"附和 + 反问需求 +
 ///   解释总结"的助手腔，与 persona 真实社交语气偏离（实测 persona 真实句长均值
 ///   约 15 字，模型回复 60~73 字）。
-/// - 该基调对全部 persona 生效：人格风格规则只在其之上做个性化叠加，
-///   不替代基调。放在 `### 核心规则` 之前，体现"先定体裁、再定个性"。
-const SOCIAL_CHAT_TONE_RULES: &str = "\n### 社交对话基调（优先于任何其它规则）\n\
-对方是熟人，不是服务对象。\n\
-1. 长度：整条回复不超过 30 字；一般 1~2 句，不确定时只回 1 句。\n\
-2. 语体：口语化；可使用语气词（啊/呀/哦/嗯/啦/嘛）和叠字；省略主语；不使用书面词与连接词。\n\
-3. 禁止：解释、总结、列点、给出方案；括号内动作或神态描写；代替对方发言；结尾反问「需要我帮你…吗」。\n\
-4. 顺序：先回应对方的情绪或最后半句话，再表达自己的内容。\n\
-5. 取舍：无内容时不硬找话；说错话时直接改口。";
+/// - 该约束对全部 persona 生效：人格风格规则只在其之上做个性化叠加，
+///   不替代体裁。放在 `## 核心规则` 之前，体现"先定体裁、再定个性"。
+const SOCIAL_CHAT_TONE_RULES: &str = "## 说话方式\n\
+对方是熟人，不是客户。你在和熟人聊天，不是在完成服务任务。\n\
+\n\
+- 长度：一般 1~2 句；一两个字的回复也是正常的，不要为凑长度多说。\n\
+- 语体：口语化；用语气词（啊/呀/哦/嗯/啦/嘛）和叠字；省略主语；不用书面词。\n\
+- 不解释、不总结、不列点、不给建议；不代替对方说话。\n\
+- 说完就停：不追加计划或安排，不用「还需要别的吗」这类追问。\n\
+- 对方说话时，先接住对方的最后半句或情绪，再说自己的内容。\n\
+- 可以主动说自己这边的事，也可以开玩笑——不必每次都只顺着对方回应。";
 
-/// 说话锚点（关键约束贴近生成位置的复述，置于 `### 核心规则` 之后）。
+/// 回复格式子段（`||` 分条契约 + 长度数值兜底，贴近生成位置；陈述档不注入）。
 ///
-/// 复述长度（≤30 字）、`||` 多气泡分隔与语体底线（不解释/不列点/不写括号动作），
-/// 与 [SOCIAL_CHAT_TONE_RULES] 构成"角色层开头 + 回复规范末尾"各一次的约束；
-/// 陈述档（`include_social_tone=false`）不注入。
-const RESPONSE_ANCHOR: &str = "\n### 说话锚点\n\
-回复要求：整条 ≤30 字；多条用「||」分隔；口语化；不解释、不列点、不写括号动作。";
-
-/// 记忆引用规则段（标题 + 三条可判定约束：引用时机 / 表达方式 / 对方询问时）。
-const MEMORY_CITATION_RULES: &str = "\n### 记忆引用规则\n\
-1. 相关才引用：仅当记忆内容与当前话题相关时提及；打招呼或新话题不提及。\n\
-2. 表达方式：直接说内容（如「记得你说过…」）；禁止「根据记录」「系统记录」等表述。\n\
-3. 对方询问「你还记得…吗」时：直接回答记得的内容；对方未询问时按第 1 条执行。";
+/// `||` 为产品级格式契约（桌面多气泡渲染 / 社交通道逐段发送的行为依赖）；
+/// 长度为示例节奏锚定之外的数值兜底（全篇仅此一处）。
+const RESPONSE_ANCHOR: &str = "## 回复格式\n\
+要分条时用「||」分隔；整条不超过 30 字。";
 
 // =========================================================
 // System Prompt 装配配置
@@ -147,7 +137,7 @@ const MEMORY_CITATION_RULES: &str = "\n### 记忆引用规则\n\
 /// - `include_traits`: 是否包含性格标签（Insight 块）。默认 true。
 /// - `include_facts`: 是否包含事实信息（Insight 块）。默认 true。
 /// - `include_examples`: 是否包含 Few-shot 示例（Statement 块）。默认 true。
-/// - `include_knowledge_boundary`: 是否包含知识边界（能力边界块末尾）。默认 true。
+/// - `include_knowledge_boundary`: 是否包含自定义知识边界（追加到底线子段）。默认 true。
 /// - `current_time_str`: 当前时间的格式化字符串。空则自动使用 chrono::Local::now()。
 /// - `memory_layer_budget_chars`: 脉络层字符预算上限。
 ///   `None` 时使用默认预算：`LayerBudgetConfig`（1000 tokens × 30% × 2 = 600 字符）。
@@ -163,7 +153,7 @@ pub struct PromptConfig {
     pub include_facts: bool,
     /// 是否包含 Few-shot 示例
     pub include_examples: bool,
-    /// 是否包含知识边界
+    /// 是否包含知识边界（自定义知识边界追加到底线段；固定底线恒常注入）
     pub include_knowledge_boundary: bool,
     /// 当前时间字符串（空则使用 chrono::Local::now()）
     pub current_time_str: String,
@@ -195,10 +185,10 @@ pub struct PromptConfig {
     pub include_utt: bool,
     /// 是否渲染记忆块中的"桥接"子段（`## 桥接（上一会话尾部）`，脉络层）。
     pub include_bridge: bool,
-    /// 是否注入全局社交对话基调（`### 社交对话基调`）与说话锚点（`### 说话锚点`）。
+    /// 是否注入全局说话方式（`## 说话方式`）与回复格式（`## 回复格式`）。
     ///
-    /// 默认 `true`（聊天档）：基调与锚点对全部 persona 生效；
-    /// 关闭（陈述档，可及性轨）时两者均不注入，`### 核心规则` 回退
+    /// 默认 `true`（聊天档）：体裁约束与格式契约对全部 persona 生效；
+    /// 关闭（陈述档，可及性轨）时两者均不注入，`## 核心规则` 回退
     /// [CORE_RULES_DEFAULT] 中性默认（不注入 persona 风格规则）。
     pub include_social_tone: bool,
 }
@@ -272,7 +262,7 @@ pub struct PromptContext {
     /// 该 persona 最近一次活跃时间（当前语境块）
     pub last_active_at: Option<String>,
 
-    /// 知识边界描述（Capacity 块末尾）
+    /// 知识边界描述（自定义时追加到底线子段末尾）
     pub knowledge_boundary: Option<String>,
 
     /// 当前时间字符串（空则使用 chrono::Local::now()）
@@ -344,8 +334,7 @@ pub struct PromptContext {
 /// 四层模板结构。
 ///
 /// 占位符说明:
-/// - `{capacity}` → `# 能力边界`（安全边界，非四层，前置保留）
-/// - `{role_layer}` → `# 角色（行为层）`（角色身份/性格特征/已知事实/回复规范）
+/// - `{role_layer}` → `# 角色（行为层）`（角色身份/底线/性格/关于对方/说话方式）
 /// - `{behavior}` → 行为层槽位（情境-反应规则）
 /// - `{style_layer}` → `# 说话风格（表达层）`（说话风格 + 对话示例）
 /// - `{knowledge}` → `# 知识（知识层，按需）`（事实卡片）
@@ -354,8 +343,6 @@ pub struct PromptContext {
 ///
 /// 装配语义: 空块自动跳过（不产生空段落），由 `assemble_prompt` 按序拼接。
 pub const LAYER_TEMPLATE: &str = "\
-{capacity}
-
 {role_layer}
 
 {behavior}
@@ -374,13 +361,8 @@ pub const LAYER_TEMPLATE: &str = "\
 /// 记录四层模板的段落结构与内容来源。
 pub const TEMPLATE_LAYER_MAP: &[(&str, &str, &str)] = &[
     (
-        "# 能力边界",
-        "安全边界（记忆 / 未知 / 安全三条约束 + 知识边界，无助手身份声明）",
-        "Capacity（保留）",
-    ),
-    (
         "# 角色（行为层）",
-        "角色身份 + 性格特征 + 已知事实 + 回复规范",
+        "角色身份 + 底线 + 性格 + 关于对方 + 说话方式/规则/格式",
         "Role + Insight + Experiment",
     ),
     (
@@ -408,7 +390,7 @@ pub const TEMPLATE_LAYER_MAP: &[(&str, &str, &str)] = &[
 /// Prompt 部件类别：固定骨架或某注入通道。
 ///
 /// 字段约定:
-/// - `Fixed`: 系统提示骨架（能力边界/角色层/当前时间），不参与注入预算裁剪。
+/// - `Fixed`: 系统提示骨架（角色层含底线/当前时间），不参与注入预算裁剪。
 /// - `Injection(slot)`: 可协调注入块（行为/知识/表达/脉络四层之一），超预算时
 ///   低优先通道可被整块丢弃（由协调预算机制处理）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -435,7 +417,7 @@ pub struct PromptPart {
 /// 按四层模板顺序渲染全部 Prompt 部件。
 ///
 /// 段落顺序（与 `assemble_prompt` 输出一致）:
-/// 能力边界(Fixed) → 角色层(Fixed) → 行为层(Inject Behavior) →
+/// 角色层(Fixed，含底线) → 行为层(Inject Behavior) →
 /// 表达层(Inject Style) → 知识层(Inject Knowledge) → 脉络层(Inject Memory)
 /// → 当前时间(Fixed)。
 ///
@@ -444,10 +426,6 @@ pub struct PromptPart {
 ///   join 时自动跳过；`assemble_prompt` 与其输出等价（行为等价重构）。
 pub fn render_prompt_parts(context: &PromptContext, config: &PromptConfig) -> Vec<PromptPart> {
     vec![
-        PromptPart {
-            kind: PromptPartKind::Fixed,
-            content: build_capacity(config, context),
-        },
         PromptPart {
             kind: PromptPartKind::Fixed,
             content: build_role_layer(context, config),
@@ -535,8 +513,8 @@ pub fn measure_prompt_volume(text: &str) -> PromptVolume {
 ///
 /// 降级策略:
 /// - 无 persona 时使用默认 Ramaria 身份描述。
-/// - 无 traits 时省略角色层中的性格特征段。
-/// - 无 facts 时省略角色层中的已知事实段。
+/// - 无 traits 时省略角色层中的性格段。
+/// - 无 facts 时省略角色层中的关于对方段。
 /// - 无 examples 时省略表达层中的对话示例段。
 /// - 无 chat_style_rules（或陈述档）时使用中性默认规则。
 /// - 行为层未命中/关闭（`behavior_decision=None`）→ 不产生段落；
@@ -570,7 +548,7 @@ pub struct CoordinatedPrompt {
 /// - `budget` 为协调预算配置（core `[injection_budget]`）；`enabled=false` 时
 ///   本函数退化为普通装配（`system_prompt` 与 `assemble_prompt` 等价，
 ///   `memory_context` 原样保留——防御，正常调用方不进入）。
-/// - 固定骨架（能力边界/角色层/当前时间）不参与裁剪，始终完整保留。
+/// - 固定骨架（角色层含底线/当前时间）不参与裁剪，始终完整保留。
 ///
 /// 参数:
 /// - `context`: 装配上下文。

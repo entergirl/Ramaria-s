@@ -353,7 +353,7 @@ pub fn build_knowledge_injection(
 ///
 /// 职责:
 /// - 把"RAG 摘要为主召回路径、断言知识为兜底"落为可测规则：凡已由 RAG 摘要
-///   文本覆盖的事实，知识卡片不再重复注入；与角色层已知事实区同一事实 id 的
+///   文本覆盖的事实，知识卡片不再重复注入；与角色层关于对方区同一事实 id 的
 ///   条目也不在知识卡片区重复（角色描述区保留）。
 ///
 /// 去重规则:
@@ -372,7 +372,7 @@ pub fn build_knowledge_injection(
 /// 参数:
 /// - `facts`: 知识层判定器命中的 active facts。
 /// - `rag_covered_labels`: RAG 摘要实际覆盖的文档 label 集合。
-/// - `role_facts`: 角色层已知事实区展示的事实列表（按 id 去重）。
+/// - `role_facts`: 角色层关于对方区展示的事实列表（按 id 去重）。
 ///
 /// 返回:
 /// - 过滤后应注入知识卡片区的事实。
@@ -385,7 +385,7 @@ pub fn dedup_knowledge_facts(
     facts
         .iter()
         .filter(|f| {
-            // 角色层已知事实区已展示同一条记录 → 知识卡片区不重复注入
+            // 角色层关于对方区已展示同一条记录 → 知识卡片区不重复注入
             if role_ids.contains(&f.id) {
                 return false;
             }

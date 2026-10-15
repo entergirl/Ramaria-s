@@ -137,7 +137,7 @@ fn assemble_prompt_includes_bridge_section_only_when_present() {
         result2.contains("## 桥接（上一会话尾部）"),
         "桥接段落应出现"
     );
-    assert!(result2.contains("延续该话题继续对话"), "应含衔接用途说明");
+    assert!(result2.contains("接着这个话题继续聊"), "应含衔接用途说明");
     assert!(result2.contains("上次聊到这里"), "应含桥接原文内容");
 }
 

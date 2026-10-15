@@ -48,9 +48,9 @@ fn role_without_persona_uses_default() {
     assert!(result.contains("你有自己的说话习惯"), "默认身份行");
 }
 
-/// 角色层与能力边界不再出现"AI 助手"身份声明（有 persona 与默认兜底两态）。
+/// 角色层不再出现"AI 助手"身份声明（有 persona 与默认兜底两态）。
 #[test]
-fn role_and_capacity_never_claim_ai_assistant() {
+fn role_layer_never_claims_ai_assistant() {
     let contexts = [
         PromptContext {
             persona: Some(make_test_persona()),
@@ -60,11 +60,11 @@ fn role_and_capacity_never_claim_ai_assistant() {
     ];
     for ctx in contexts {
         let result = assemble_prompt(&ctx, &PromptConfig::default());
-        assert!(result.contains("# 能力边界"));
+        assert!(result.contains("## 底线"));
         assert!(result.contains("# 角色（行为层）"));
         assert!(
             !result.contains("AI 助手"),
-            "角色层/能力边界不得含助手身份声明: {result}"
+            "角色层不得含助手身份声明: {result}"
         );
     }
 }
@@ -94,7 +94,7 @@ fn auto_style_rule_injected_when_no_manual_style() {
     );
     assert!(result.contains("口癖词「哇塞」"), "规则文本在 prompt 中");
     assert!(
-        result.contains("（以下是你的说话习惯。要求：按其表达，不复述该段文字。）"),
+        result.contains("（以下是你自己的说话习惯。按这个表达；不要复述这段文字。）"),
         "自动风格规则带说话习惯引导行"
     );
     assert!(
@@ -115,7 +115,7 @@ fn manual_style_overrides_auto_rule() {
     assert!(result.contains("## 说话风格"), "手工风格子段存在");
     assert!(result.contains("热情活泼"), "手工风格内容注入");
     assert!(
-        result.contains("（以下是你的说话习惯。要求：按其表达，不复述该段文字。）"),
+        result.contains("（以下是你自己的说话习惯。按这个表达；不要复述这段文字。）"),
         "手工风格带说话习惯引导行"
     );
     assert!(
@@ -326,7 +326,7 @@ fn production_persona_explicit_rules_override_shared_examples() {
         "显式规则不包含共享规则示例段"
     );
 
-    // 端到端：显式规则（经 resolve_chat_style_rules 解析）进入 `## 回复规范` 核心规则段
+    // 端到端：显式规则（经 resolve_chat_style_rules 解析）进入 `## 核心规则` 段
     let persona = Persona {
         uid: "rama-0001".into(),
         name: "Ramaria".into(),

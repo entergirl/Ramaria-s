@@ -147,7 +147,7 @@ async fn rag_covers_fact_when_assertion_layer_off() {
 // =========================================================
 
 /// 同一条事实（ref_l1_id 指向已覆盖 L1）不应同时在 RAG 摘要与知识卡片出现：
-/// 知识块为空，角色层已知事实区仍展示 BasicInfo（角色区保留）。
+/// 知识块为空，角色层关于对方区仍展示 BasicInfo（角色区保留）。
 #[tokio::test]
 async fn knowledge_not_duplicated_when_rag_covers_fact() {
     let storage = Arc::new(MockStorage::new());
@@ -157,7 +157,7 @@ async fn knowledge_not_duplicated_when_rag_covers_fact() {
     let engine = build_ready_engine(&storage, &llm, config).await;
 
     add_char_persona(&storage);
-    // 角色层已知事实（BasicInfo）：会进角色描述区
+    // 角色层关于对方（BasicInfo）：会进角色描述区
     storage.add_fact(active_fact(
         "char-0001",
         ProfileField::BasicInfo,
@@ -196,10 +196,10 @@ async fn knowledge_not_duplicated_when_rag_covers_fact() {
         !prompt.contains("关于兴趣爱好：喜欢科幻电影"),
         "事实已由 RAG 覆盖 → 知识卡片不应重复注入: {prompt}"
     );
-    // 角色层已知事实区保留 BasicInfo（取角色区、去知识区）
+    // 角色层关于对方区保留 BasicInfo（取角色区、去知识区）
     assert!(
         prompt.contains("出生于上海"),
-        "角色层已知事实区应保留 BasicInfo: {prompt}"
+        "角色层关于对方区应保留 BasicInfo: {prompt}"
     );
 }
 

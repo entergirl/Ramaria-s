@@ -21,8 +21,9 @@ fn ablation_all_on_renders_all_layers() {
     assert!(result.contains("## 桥接"));
     assert!(result.contains("# 说话风格（表达层）"));
     assert!(result.contains("## 对话示例"));
-    assert!(result.contains("## 性格特征"));
-    assert!(result.contains("## 已知事实"));
+    assert!(result.contains("## 底线"));
+    assert!(result.contains("## 性格"));
+    assert!(result.contains("## 关于对方"));
 }
 
 /// B0 无记忆注入：关闭全部记忆子段 + 表达子段后，

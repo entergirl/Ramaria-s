@@ -13,9 +13,8 @@ use super::*;
 /// 模板结构映射表（`TEMPLATE_LAYER_MAP`）与四层模板常量一致（文档化核对）。
 #[test]
 fn template_layer_map_matches_rendered_paragraphs() {
-    // 映射表覆盖四层 + 能力边界 + 当前时间
+    // 映射表覆盖四层 + 当前时间
     let titles: Vec<&str> = TEMPLATE_LAYER_MAP.iter().map(|(t, _, _)| *t).collect();
-    assert!(titles.contains(&"# 能力边界"));
     assert!(titles.contains(&"# 角色（行为层）"));
     assert!(titles.contains(&"# 说话风格（表达层）"));
     assert!(titles.contains(&"# 知识（知识层，按需）"));
@@ -24,7 +23,6 @@ fn template_layer_map_matches_rendered_paragraphs() {
 
     // 模板常量包含全部占位符（结构可机械核对）
     for (i, placeholder) in [
-        "capacity",
         "role_layer",
         "behavior",
         "style_layer",
@@ -44,13 +42,13 @@ fn template_layer_map_matches_rendered_paragraphs() {
 }
 
 /// 助手类 persona（原文白名单外）的不注入原文内容——
-/// 全部关键语义元素（能力边界/角色身份/性格/事实/示例/回复规则/记忆引用规则/
+/// 全部关键语义元素（底线/角色身份/性格/事实/说话方式与规则/示例/
 /// 近期脉络/相关记忆/当前时间）保留，且不产生原文/桥接段落。
 ///
 /// 说明: 白名单闸门在检索/桥接加载层（`retrieve_memory.rs` / `bridge.rs`，
 /// 已分别有断言测试），本测试验证装配层对 `None` 注入源不产生段落。
 #[test]
-fn rama_persona_prompt_semantically_equivalent_to_v13() {
+fn rama_persona_prompt_keeps_semantic_elements() {
     let ctx = PromptContext {
         persona: Some(Persona {
             id: 1,
@@ -99,18 +97,19 @@ fn rama_persona_prompt_semantically_equivalent_to_v13() {
 
     // ---- 语义元素齐全 ----
     let semantic_elements = [
-        "# 能力边界",             // Capacity 安全边界
-        "你记得和对方过往的对话", // 核心能力
-        "# 角色（行为层）",       // 角色身份
+        "## 底线", // 诚实与安全约束
+        "不编造",
+        "# 角色（行为层）", // 角色身份
         "Ramaria",
-        "## 性格特征", // Insight traits
+        "## 性格", // Insight traits
         "严谨",
-        "## 已知事实", // Insight facts
+        "## 关于对方", // Insight facts
         "用户喜欢编程",
-        "## 回复规范", // Experiment 回复规则
+        "## 说话方式", // 体裁约束
+        "## 核心规则", // Experiment 回复规则
         "回复简洁，用口语化表达",
-        "记忆引用规则", // 记忆引用规则保留
-        "## 对话示例",  // Statement Few-shot
+        "## 回复格式", // 分条契约
+        "## 对话示例", // Statement Few-shot
         "你好呀",
         "## 近期对话脉络", // Memory 脉络
         "项目排期",
@@ -150,10 +149,10 @@ fn empty_slots_do_not_produce_blank_paragraphs() {
     );
     // 无三连空行（join 拼接，空块已跳过）
     assert!(!result.contains("\n\n\n\n"), "不应出现多空行");
-    // 段落顺序：能力边界在最前，当前时间在最后
-    let capacity_pos = result.find("# 能力边界").expect("能力边界应存在");
+    // 段落顺序：角色层（含底线）在最前，当前时间在最后
+    let role_pos = result.find("# 角色（行为层）").expect("角色层应存在");
     let time_pos = result.rfind("# 当前时间").expect("当前时间应存在");
-    assert!(capacity_pos < time_pos, "能力边界应前置，当前时间应置尾");
+    assert!(role_pos < time_pos, "角色层应前置，当前时间应置尾");
 }
 
 /// 脉络层预算——超限时原文/桥接被裁剪，

@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 ///     对话示例 / 原文样例（原文片段）。
 ///   - 脉络层（`narrative` + `bridge`）: 近期对话脉络 / 桥接（上一会话尾部）。
 ///   - RAG 相关记忆（`memory_rag`）: ChatRequest.memory_context（L1/L2/L3 摘要检索）。
-///   - 社交对话基调（`social_tone`）: 全局体裁约束，非记忆层；不参与记忆层消融，
+///   - 说话方式（`social_tone`）: 全局体裁约束，非记忆层；不参与记忆层消融，
 ///     全开/全关档位均保持注入（详见字段注释）。
 #[derive(Debug, Clone)]
 pub struct InjectionGate {
@@ -51,7 +51,7 @@ pub struct InjectionGate {
     pub bridge: bool,
     /// RAG 相关历史记忆注入（`ChatRequest.memory_context`，摘要/转述通道）。
     pub memory_rag: bool,
-    /// 是否注入全局社交对话基调块（`### 社交对话基调`）。
+    /// 是否注入全局说话方式块（`## 说话方式`）。
     ///
     /// 基调是面向全部 persona 的体裁约束、非记忆层闸门：默认开启，
     /// 关闭后 prompt 仅保留 persona 风格规则（供对照/语域切换）；
@@ -259,7 +259,7 @@ pub struct InjectionBudgetConfig {
     /// RAG 摘要 + 四层注入合计 token 上限（默认 1000，机制起点非定稿值）。
     ///
     /// 说明:
-    /// - 固定骨架（能力边界/角色层/当前时间）不在池内，始终完整保留。
+    /// - 固定骨架（角色层含底线/当前时间）不在池内，始终完整保留。
     /// - 超限时按 `order` 从低优先通道开始整块丢弃；最高优先通道单块仍超池
     ///   时在句子边界截断兜底，保证"总注入 ≤ 本值"恒成立。
     pub max_injection_tokens: usize,

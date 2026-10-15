@@ -281,7 +281,7 @@ pub async fn load_prompt_material(
 
         // 知识层注入去重：RAG 摘要为主召回路径、断言知识为兜底。
         // 装配前剔除两类重复——① 来源文档已进入 RAG 覆盖集合的事实（同一事实已由
-        // 摘要文本提供）；② 与角色层已知事实区同 id 的记录（角色区已展示，取后者去重）。
+        // 摘要文本提供）；② 与角色层关于对方区同 id 的记录（角色区已展示，取后者去重）。
         // 无来源引用（手工/冷启动等）或 RAG 未覆盖的事实保留，兜底注入不失效。
         //
         // `[layer_dedup]` 开启（默认关闭 = 回退既有引用级去重路径）时，在引用级之上
@@ -428,7 +428,7 @@ pub async fn load_prompt_material(
             include_memory_rag: inputs.injection.memory_rag,
             include_utt: inputs.injection.utt,
             include_bridge: inputs.injection.bridge,
-            // 全局社交对话基调（体裁约束，非记忆层）：默认开，probe 的
+            // 全局说话方式（体裁约束，非记忆层）：默认开，probe 的
             // statement 档经闸门关闭（陈述/知识表述语域对照）。
             include_social_tone: inputs.injection.social_tone,
             // 知识块渲染预算接线：core [knowledge].injection_budget_chars

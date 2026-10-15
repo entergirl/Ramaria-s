@@ -40,19 +40,19 @@ fn render_with_examples(config: &str) -> String {
 
 // ---- 角色层后缀 ----
 
-/// `[prompt].role_suffix` 追加在角色层末尾（回复规范之后、下一层之前）。
+/// `[prompt].role_suffix` 追加在角色层末尾（回复格式之后、下一层之前）。
 #[test]
 fn role_suffix_appended_at_role_layer_end() {
-    let config = format!("{BASE_TOML}\n[prompt]\nrole_suffix = \"记得用括号写小动作\"\n");
+    let config = format!("{BASE_TOML}\n[prompt]\nrole_suffix = \"记得说话带点停顿感\"\n");
     let result = render_with_examples(&config);
 
     let suffix_pos = result
-        .find("记得用括号写小动作")
+        .find("记得说话带点停顿感")
         .expect("role_suffix 应注入");
-    let rules_pos = result.find("### 记忆引用规则").expect("回复规范段应存在");
+    let rules_pos = result.find("## 回复格式").expect("回复格式段应存在");
     let next_pos = result.find("# 说话风格（表达层）").expect("表达层应存在");
 
-    assert!(suffix_pos > rules_pos, "role_suffix 应在回复规范之后");
+    assert!(suffix_pos > rules_pos, "role_suffix 应在回复格式之后");
     assert!(suffix_pos < next_pos, "role_suffix 应在表达层之前");
 }
 
@@ -85,11 +85,11 @@ fn both_suffixes_render_at_own_layers() {
 
     let role_pos = result.find("角色补丁").expect("role_suffix 应注入");
     let style_suffix_pos = result.find("风格补丁").expect("style_suffix 应注入");
-    let rules_pos = result.find("### 记忆引用规则").expect("回复规范段应存在");
+    let rules_pos = result.find("## 回复格式").expect("回复格式段应存在");
     let style_title_pos = result.find("# 说话风格（表达层）").expect("表达层应存在");
     let examples_pos = result.find("## 对话示例").expect("对话示例段应存在");
 
-    assert!(role_pos > rules_pos, "role_suffix 应在回复规范之后");
+    assert!(role_pos > rules_pos, "role_suffix 应在回复格式之后");
     assert!(role_pos < style_title_pos, "role_suffix 应在表达层之前");
     assert!(
         style_suffix_pos > examples_pos,

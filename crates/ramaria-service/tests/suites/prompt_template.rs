@@ -109,7 +109,7 @@ async fn four_layer_template_rendered_in_active_path() {
     let prompt = &request.system_prompt;
 
     // ---- 四层段落标题 ----
-    assert!(prompt.contains("# 能力边界"), "能力边界段缺失");
+    assert!(prompt.contains("## 底线"), "底线子段缺失");
     assert!(prompt.contains("# 角色（行为层）"), "角色层缺失");
     assert!(prompt.contains("# 说话风格（表达层）"), "表达层缺失");
     assert!(prompt.contains("# 记忆（脉络层）"), "脉络层缺失");
@@ -299,7 +299,7 @@ async fn all_v14_features_disabled_returns_v13_semantics() {
     assert!(prompt.contains("# 角色（行为层）"));
     assert!(prompt.contains("# 记忆（脉络层）"));
     assert!(prompt.contains("## 近期对话脉络"), "v1.3 脉络保留");
-    assert!(prompt.contains("## 回复规范"), "v1.3 回复规范保留");
+    assert!(prompt.contains("## 说话方式"), "说话方式保留");
     // examples 走静态 selected（既有行为）
     assert!(
         prompt.contains("静态示例回复"),
@@ -474,7 +474,7 @@ async fn compressed_boilerplate_still_yields_non_empty_reply() {
     // 结构化装配仍正常：四层段落标题齐全（压缩未破坏骨架）
     let request = llm.last_request().expect("应记录最后一次请求");
     let prompt = &request.system_prompt;
-    assert!(prompt.contains("# 能力边界"), "能力边界段缺失");
+    assert!(prompt.contains("## 底线"), "底线子段缺失");
     assert!(prompt.contains("# 角色（行为层）"), "角色层缺失");
     assert!(prompt.contains("# 记忆（脉络层）"), "脉络层缺失");
 }

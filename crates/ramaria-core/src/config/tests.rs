@@ -408,21 +408,21 @@ fn injection_gate_off_is_complement_of_on() {
     assert!(on.behavior && on.memory_rag && on.narrative);
 }
 
-/// 社交对话基调是全局体裁约束、非记忆层闸门：全关档位（B0 等消融）
+/// 说话方式是全局体裁约束、非记忆层闸门：全关档位（B0 等消融）
 /// 仍保持注入，全开与默认同样开启（保证既有消融语义与历史可比）。
 #[test]
 fn injection_gate_social_tone_survives_all_off() {
     assert!(
         InjectionGate::all_off().social_tone,
-        "全关档位不得关闭全局社交对话基调"
+        "全关档位不得关闭全局说话方式"
     );
     assert!(
         InjectionGate::all_on().social_tone,
-        "全开档位应注入全局社交对话基调"
+        "全开档位应注入全局说话方式"
     );
     assert!(
         InjectionGate::default().social_tone,
-        "默认闸门应注入全局社交对话基调"
+        "默认闸门应注入全局说话方式"
     );
 }
 

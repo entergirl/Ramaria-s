@@ -512,7 +512,7 @@ fn dedup_removes_fact_covered_by_l2_event_in_rag() {
     assert!(kept.is_empty(), "L2 事件已覆盖的事实应去重");
 }
 
-/// 与角色层已知事实区同一 id → 知识卡片区去重（角色区保留）。
+/// 与角色层关于对方区同一 id → 知识卡片区去重（角色区保留）。
 #[test]
 fn dedup_removes_fact_duplicated_with_role_facts() {
     let f = sourced_fact(ProfileField::BasicInfo, "出生于上海", "上海", None, None);

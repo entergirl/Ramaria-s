@@ -57,14 +57,14 @@ fn render_prompt_parts_joins_identically_to_assemble() {
     let ctx = behavior_hit_ctx();
     let config = PromptConfig::default();
     let parts = render_prompt_parts(&ctx, &config);
-    // 7 个部件（含空块也保留，join 时跳过）
-    assert_eq!(parts.len(), 7);
-    // 固定骨架恰为 3 个
+    // 6 个部件（含空块也保留，join 时跳过）
+    assert_eq!(parts.len(), 6);
+    // 固定骨架恰为 2 个（角色层含底线 + 当前时间）
     let fixed = parts
         .iter()
         .filter(|p| p.kind == PromptPartKind::Fixed)
         .count();
-    assert_eq!(fixed, 3);
+    assert_eq!(fixed, 2);
     let injection_slots: Vec<InjectionSlot> = parts
         .iter()
         .filter_map(|p| match p.kind {
@@ -117,8 +117,8 @@ fn coordinated_drops_low_priority_layer_blocks() {
         out.dropped.contains(&InjectionSlot::Memory),
         "脉络最低优先先丢"
     );
-    // 固定骨架始终保留
-    assert!(out.system_prompt.contains("# 能力边界"));
+    // 固定骨架始终保留（角色层含底线）
+    assert!(out.system_prompt.contains("## 底线"));
     assert!(out.system_prompt.contains("# 角色（行为层）"));
     assert!(out.system_prompt.contains("# 当前时间"));
     // 脉络块被整块丢弃（无段落标题与子段）

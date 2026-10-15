@@ -13,9 +13,9 @@ use super::*;
 /// 标签压缩改造前"固定骨架"渲染体量（字符数 / 估算 token）。
 ///
 /// 口径: 在压缩改造前用同一骨架上下文（见 [`skeleton_context`]）实测——
-/// `assemble_prompt` 输出恰好由固定样板组成（能力边界 + 默认知识边界 + 默认角色 +
-/// 回复规范默认规则/记忆引用规则 + 记忆层引导 + 无历史对话占位 + 无相关记忆占位 +
-/// 当前时间），无任何注入数据内容，因此可作为"样板体积"的稳定代理。
+/// `assemble_prompt` 输出恰好由固定样板组成（角色层默认 + 底线 + 核心规则默认
+/// 规则 + 记忆层引导 + 无历史对话占位 + 无相关记忆占位 + 当前时间），
+/// 无任何注入数据内容，因此可作为"样板体积"的稳定代理。
 /// 实测记录: chars=849, tokens=393。
 const LEGACY_BOILERPLATE_CHARS: usize = 849;
 const LEGACY_BOILERPLATE_TOKENS: usize = 393;
@@ -30,7 +30,7 @@ fn skeleton_context() -> PromptContext {
 
 /// 骨架样板体量下降：压缩后总体积必须小于压缩前基线（防样板回退膨胀）。
 ///
-/// 口径: 社交对话基调与说话锚点是有意新增的固定内容块（非既有引导句膨胀），
+/// 口径: 说话方式与回复格式块是有意新增的固定内容块（非既有引导句膨胀），
 /// 对照旧基线时以 `include_social_tone=false` 扣除，使"既有样板未回退膨胀"
 /// 的约束仍然成立；两块体量另作精确增量断言（防止两块之外再有增长）。
 #[test]
@@ -51,37 +51,39 @@ fn boilerplate_skeleton_shrunk_below_legacy() {
         base.tokens
     );
 
-    // 默认（聊天档）骨架 = 陈述档骨架 + 基调块 + 说话锚点，增量恰为两块自身体量
+    // 默认（聊天档）骨架 = 陈述档骨架 + 说话方式块 + 回复格式块 + 两处块间空行分隔
     let with_tone = measure_prompt_volume(&assemble_prompt(
         &skeleton_context(),
         &PromptConfig::default(),
     ));
-    let chat_delta_chars = SOCIAL_CHAT_TONE_RULES.chars().count() + RESPONSE_ANCHOR.chars().count();
+    let section_separators_chars = 2 * "\n\n".chars().count();
+    let chat_delta_chars = SOCIAL_CHAT_TONE_RULES.chars().count()
+        + RESPONSE_ANCHOR.chars().count()
+        + section_separators_chars;
     assert_eq!(
         with_tone.chars,
         base.chars + chat_delta_chars,
-        "基调块与说话锚点应按原文字符数精确叠加"
+        "说话方式与回复格式块应按原文字符数（含块间分隔）精确叠加"
     );
     // token 估算在拼接边界非严格线性（±1 舍入），增量与两块自身体量对齐即可
     let chat_delta_tokens = crate::token_budget::estimate_tokens(SOCIAL_CHAT_TONE_RULES)
         + crate::token_budget::estimate_tokens(RESPONSE_ANCHOR);
     let token_delta = with_tone.tokens - base.tokens;
     assert!(
-        token_delta.abs_diff(chat_delta_tokens) <= 2,
-        "基调+锚点增量 token 应约等于两块自身体量 {chat_delta_tokens}，实际 {token_delta}"
+        token_delta.abs_diff(chat_delta_tokens) <= 3,
+        "说话方式+回复格式增量 token 应约等于两块自身体量 {chat_delta_tokens}，实际 {token_delta}"
     );
 }
 
 /// 各样板引导句/占位文本长度上限（引导句压缩的逐项锁定）。
 ///
-/// 上限给的是压缩后实际文本的宽裕余量（+10 左右），防后续"加长引导"悄悄回退。
+/// 上限给的是当前实际文本的宽裕余量（+10 左右），防后续"加长引导"悄悄回退。
 #[test]
 fn boilerplate_leads_stay_within_upper_bounds() {
     let cases: &[(&str, &str, usize)] = &[
-        ("CAPACITY_INTRO", CAPACITY_INTRO, 130),
-        ("KNOWLEDGE_BOUNDARY_DEFAULT", KNOWLEDGE_BOUNDARY_DEFAULT, 60),
+        ("BOTTOM_LINE", BOTTOM_LINE, 100),
         ("ROLE_DEFAULT_TEXT", ROLE_DEFAULT_TEXT, 110),
-        ("MEMORY_SECTION_INTRO", MEMORY_SECTION_INTRO, 90),
+        ("MEMORY_SECTION_INTRO", MEMORY_SECTION_INTRO, 140),
         ("NARRATIVE_PLACEHOLDER", NARRATIVE_PLACEHOLDER, 20),
         ("RAG_PLACEHOLDER", RAG_PLACEHOLDER, 30),
         ("UTT_LEAD", UTT_LEAD, 60),
@@ -90,8 +92,7 @@ fn boilerplate_leads_stay_within_upper_bounds() {
         ("CORE_RULES_DEFAULT", CORE_RULES_DEFAULT, 90),
         ("STYLE_USAGE_LEAD", STYLE_USAGE_LEAD, 40),
         ("RESPONSE_ANCHOR", RESPONSE_ANCHOR, 60),
-        ("MEMORY_CITATION_RULES", MEMORY_CITATION_RULES, 230),
-        ("SOCIAL_CHAT_TONE_RULES", SOCIAL_CHAT_TONE_RULES, 288),
+        ("SOCIAL_CHAT_TONE_RULES", SOCIAL_CHAT_TONE_RULES, 320),
     ];
     for (name, text, limit) in cases {
         let chars = text.chars().count();
@@ -105,33 +106,27 @@ fn boilerplate_leads_stay_within_upper_bounds() {
 /// 压缩后保留关键指令（语义等价锁定——压缩只删引导措辞，不删行为约束）。
 #[test]
 fn compressed_boilerplate_keeps_essential_instructions() {
-    // 边界约束关键词逐条保留（防止后续压缩误删"禁止照搬/不编造"等安全语义）
+    // 边界约束关键词逐条保留（防止后续压缩误删"不照搬/不编造"等安全语义）
     assert!(
-        UTT_LEAD.contains("禁止照搬内容"),
+        UTT_LEAD.contains("不要照搬内容"),
         "utt 引导须保留防照搬边界"
     );
     assert!(
-        BRIDGE_LEAD.contains("不重复原文"),
+        BRIDGE_LEAD.contains("不要重复原文"),
         "桥接引导须保留防重复边界"
     );
     assert!(
-        BRIDGE_LEAD.contains("不编造未提及的内容"),
+        BRIDGE_LEAD.contains("不要编造没提过的内容"),
         "桥接引导须保留防编造边界"
     );
-    assert!(CAPACITY_INTRO.contains("不编造"), "能力边界须保留诚实约束");
+    assert!(BOTTOM_LINE.contains("不编造"), "底线须保留诚实约束");
+    assert!(BOTTOM_LINE.contains("不生成伤害他人"), "底线须保留安全约束");
     assert!(
-        CAPACITY_INTRO.contains("不生成对他人有害"),
-        "能力边界须保留安全约束"
+        MEMORY_SECTION_INTRO.contains("你还记得"),
+        "记忆层引导须保留主动询问边界"
     );
     assert!(
-        MEMORY_CITATION_RULES.contains("你还记得"),
-        "记忆引用规则须保留主动询问边界"
+        MEMORY_SECTION_INTRO.contains("话题相关"),
+        "记忆层引导须保留引用时机约束"
     );
-    assert!(
-        MEMORY_CITATION_RULES.contains("相关才引用")
-            && MEMORY_CITATION_RULES.contains("打招呼或新话题不提及"),
-        "记忆引用规则须保留引用时机边界"
-    );
-    // 记忆层引导保留"引用时机"约束
-    assert!(MEMORY_SECTION_INTRO.contains("仅在话题相关时自然提及"));
 }

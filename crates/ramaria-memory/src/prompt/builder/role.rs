@@ -1,39 +1,40 @@
-//! crates/ramaria-memory/src/prompt/builder/role.rs - 能力边界与角色层（行为层）构建
+//! crates/ramaria-memory/src/prompt/builder/role.rs - 底线与角色层（行为层）构建
 //!
 //! 设计特点:
-//! - `build_capacity`: 记忆/未知/安全约束 + 知识边界（安全红线，前置保留）
+//! - `build_bottom_line`: 底线子段（诚实/安全约束恒常注入 + 自定义知识边界追加）
 //! - `build_role`: 角色身份段（场景行 + 身份行 + 背景描述），解析 persona.toml / JSON 兼容
-//! - `build_role_layer`: 角色身份 + 性格特征 + 已知事实 + 回复规范（Role + Insight + Experiment）
+//! - `build_role_layer`: 角色身份 + 底线 + 性格 + 关于对方 + 说话方式/规则/格式
 //! - 性格/事实格式化按 layer 与 ProfileField 分组，条件边界缺失时省略对应段
 //! - 纯字符串拼接，无 I/O 与 LLM 依赖
 
 use ramaria_core::types::{Persona, PersonaFact, PersonalityTrait, ProfileField, TraitStatus};
 
 use super::experiment::build_experiment_section;
-use super::{
-    CAPACITY_INTRO, KNOWLEDGE_BOUNDARY_DEFAULT, PromptConfig, PromptContext, ROLE_DEFAULT_TEXT,
-};
+use super::{BOTTOM_LINE, PromptConfig, PromptContext, ROLE_DEFAULT_TEXT};
 
 // =========================================================
-// Capacity 块: 能力边界
+// 底线子段（角色段内）
 // =========================================================
 
-/// 组装能力边界块：记忆/未知/安全约束 + 知识边界（安全红线，非四层，前置保留）。
-pub(super) fn build_capacity(config: &PromptConfig, context: &PromptContext) -> String {
-    let mut parts = vec![CAPACITY_INTRO.to_string()];
-
-    // 知识边界（可选）
-    if config.include_knowledge_boundary {
-        if let Some(ref boundary) = context.knowledge_boundary
-            && !boundary.trim().is_empty()
-        {
-            parts.push(format!("\n\n## 知识边界\n{boundary}"));
-        } else {
-            parts.push(KNOWLEDGE_BOUNDARY_DEFAULT.to_string());
-        }
+/// 组装底线子段（`## 底线`）：诚实与安全约束；自定义知识边界非空时追加为末行。
+///
+/// 说明:
+/// - 固定红线恒常注入（不随作用域开关变化）；
+/// - `include_knowledge_boundary` 控制自定义知识边界（`context.knowledge_boundary`）的追加。
+pub(super) fn build_bottom_line(context: &PromptContext, config: &PromptConfig) -> String {
+    let custom = if config.include_knowledge_boundary {
+        context
+            .knowledge_boundary
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    } else {
+        None
+    };
+    match custom {
+        Some(boundary) => format!("{BOTTOM_LINE}\n{boundary}"),
+        None => BOTTOM_LINE.to_string(),
     }
-
-    parts.join("")
 }
 
 // =========================================================
@@ -156,10 +157,10 @@ pub(super) fn persona_patch(persona: Option<&Persona>) -> Option<crate::preset::
 }
 
 // =========================================================
-// 角色层（行为层）: 角色身份 + 性格特征 + 已知事实 + 回复规范
+// 角色层（行为层）: 角色身份 + 底线 + 性格 + 关于对方 + 说话与回复规则
 // =========================================================
 
-/// 组装角色层块（`# 角色（行为层）`）：角色身份 + 性格特征 + 已知事实 + 回复规范。
+/// 组装角色层块（`# 角色（行为层）`）：角色身份 + 底线 + 性格 + 关于对方 + 说话与回复规则。
 ///
 /// 对应 Role + Insight + Experiment 三块；
 /// 行为规则槽位（情境-反应规则）由 `render_behavior_block` 在装配时挂载。
@@ -170,23 +171,26 @@ pub(super) fn persona_patch(persona: Option<&Persona>) -> Option<crate::preset::
 pub(super) fn build_role_layer(context: &PromptContext, config: &PromptConfig) -> String {
     let mut parts: Vec<String> = vec![build_role(context)];
 
+    // 底线（诚实与安全约束；身份信息之后）
+    parts.push(format!("\n\n{}", build_bottom_line(context, config)));
+
     // 性格标签（按 layer 分组；无 traits 时省略）
     if config.include_traits && !context.traits.is_empty() {
         let trait_text = format_traits_for_prompt(&context.traits, config.max_traits_per_layer);
         if !trait_text.is_empty() {
-            parts.push(format!("\n\n## 性格特征\n{trait_text}"));
+            parts.push(format!("\n\n## 性格\n{trait_text}"));
         }
     }
 
-    // 已知事实（无 facts 时省略）
+    // 关于对方（无 facts 时省略）
     if config.include_facts && !context.facts.is_empty() {
         let fact_text = format_facts_for_prompt(&context.facts);
         if !fact_text.is_empty() {
-            parts.push(format!("\n\n## 已知事实\n{fact_text}"));
+            parts.push(format!("\n\n## 关于对方\n{fact_text}"));
         }
     }
 
-    // 回复规范（社交基调 + 核心规则 + 说话锚点 + 记忆引用规则；无自定义规则时使用中性默认）
+    // 说话与回复规则（说话方式 + 核心规则 + 回复格式；无自定义规则时使用中性默认）
     parts.push(build_experiment_section(context, config));
 
     // 主动开口场景（仅主动生成注入；None / 空 → 不产生段落，既有输出零变化）
@@ -282,7 +286,7 @@ fn format_facts_for_prompt(facts: &[PersonaFact]) -> String {
             ProfileField::SpeakingStyle => "说话风格",
             _ => "其他",
         };
-        lines.push(format!("  [{field_label}] {}", fact.content));
+        lines.push(format!("  {field_label}：{}", fact.content));
     }
 
     lines.join("\n")

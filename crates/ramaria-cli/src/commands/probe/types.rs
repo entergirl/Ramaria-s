@@ -356,7 +356,7 @@ pub struct ContextTurn {
 /// 题项答复体裁：`chat`（缺省，社交聊天）或 `statement`（陈述说明，可及性轨）。
 ///
 /// 说明:
-/// - `statement` 题送入对话管线时追加陈述说明引导并关闭全局社交对话基调，
+/// - `statement` 题送入对话管线时追加陈述说明引导并关闭全局说话方式，
 ///   用于对照两种语域下的事实召回表现。
 /// - `chat` 为缺省：旧数据集缺省即社交聊天语域；序列化时省略该键（最小差异）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]

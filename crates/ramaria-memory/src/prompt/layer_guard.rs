@@ -12,7 +12,7 @@
 //!   内容摘要 hash），日志不含原文全文。
 //!
 //! 语义边界（刻意不做，防误删）:
-//! - 角色区已知事实（Role）恒保留：与 RAG 摘要/知识卡片重复时不剔除角色区
+//! - 角色区关于对方（Role）恒保留：与 RAG 摘要/知识卡片重复时不剔除角色区
 //!   （角色区是稳定身份声明，RAG 是话题相关记忆转述，属结构性冗余而非同一注入通道）。
 //! - 行为规则 / 表达风格 / 原文（utt/桥接）文本不互为判重对象：规则、风格描述、
 //!   原话语录与"事实陈述"语义不同构；其中行为规则文本可作为"保留参照"参与
@@ -89,7 +89,7 @@ pub struct RetentionReference<'a> {
 ///
 /// 字段约定:
 /// - `knowledge`: 知识层判定器命中的 active facts（仲裁后可能被剔除，唯一可剔除通道）。
-/// - `role`: 角色层已知事实区展示的事实（仅消费，不剔除；按 content 做重复对照）。
+/// - `role`: 角色层关于对方区展示的事实（仅消费，不剔除；按 content 做重复对照）。
 /// - `references`: 保留参照文本（RAG 摘要 / 行为规则文本）；可空。
 /// - `rag_covered_labels`: RAG 实际注入文本覆盖的文档 label 集合（`L1:{uuid}`/`L2:{id}`）；
 ///   空集合 = RAG 未注入 → 引用级 RAG 去重不生效（知识兜底路径保留）。
@@ -97,7 +97,7 @@ pub struct RetentionReference<'a> {
 pub struct LayerGuardInput<'a> {
     /// 知识层候选事实（待仲裁）
     pub knowledge: &'a [PersonaFact],
-    /// 角色层已知事实（保留方）
+    /// 角色层关于对方（保留方）
     pub role: &'a [PersonaFact],
     /// 保留参照文本（RAG/行为规则）
     pub references: &'a [RetentionReference<'a>],
@@ -110,7 +110,7 @@ pub struct LayerGuardInput<'a> {
 pub enum DedupReason {
     /// 与角色层同一记录（同 id）
     RoleSameRecord,
-    /// 内容级：与角色层已知事实重复
+    /// 内容级：与角色层关于对方重复
     RoleContentDuplicate,
     /// 引用级：来源文档已进入 RAG 覆盖集合
     RagRefCovered,

@@ -123,7 +123,7 @@ fn proactive_optional_lines_follow_inputs() {
 }
 
 #[test]
-fn render_prompt_parts_still_has_seven_parts() {
+fn render_prompt_parts_still_has_six_parts() {
     let ctx = proactive_ctx(ProactivePromptContext {
         time_period: TimePeriod::Morning,
         anchor: Some("昨天说想看电影".into()),
@@ -131,9 +131,9 @@ fn render_prompt_parts_still_has_seven_parts() {
         tone: None,
     });
     let parts = render_prompt_parts(&ctx, &PromptConfig::default());
-    assert_eq!(parts.len(), 7, "主动段并入角色层，部件数保持 7");
+    assert_eq!(parts.len(), 6, "主动段并入角色层，部件数保持 6");
     assert!(
-        parts[1].content.contains("# 主动开口"),
-        "主动段应位于角色层部件（索引 1）"
+        parts[0].content.contains("# 主动开口"),
+        "主动段应位于角色层部件（索引 0）"
     );
 }

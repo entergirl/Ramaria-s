@@ -68,7 +68,7 @@ fn insight_with_facts() {
     let config = PromptConfig::default();
     let result = assemble_prompt(&ctx, &config);
 
-    assert!(result.contains("已知事实"));
+    assert!(result.contains("## 关于对方"));
     assert!(result.contains("科幻小说"));
 }
 

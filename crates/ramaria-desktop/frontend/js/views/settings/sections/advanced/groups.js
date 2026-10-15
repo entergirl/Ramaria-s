@@ -241,7 +241,7 @@
             desc: 'RAG 摘要与四层注入纳入同一 token 池：超限按 order 从低优先整块丢弃。默认关闭时行为与既有版本等价。',
             fields: [
                 { path: ['enabled'], label: '协调预算开关', type: 'bool', def: false, hint: 'false = 走既有独立预算路径（回归红线）' },
-                { path: ['max_injection_tokens'], label: '注入总 token 上限', type: 'number', min: 0, def: 1000, hint: '固定骨架（能力边界/角色/时间）不计入池' },
+                { path: ['max_injection_tokens'], label: '注入总 token 上限', type: 'number', min: 0, def: 1000, hint: '固定骨架（角色/时间）不计入池' },
                 { path: ['max_rag_tokens'], label: 'RAG 独立 token 上限', type: 'number', min: 0, def: 0, hint: '0 = 不设独立上限，仅受总池约束' },
                 {
                     path: ['order'],
