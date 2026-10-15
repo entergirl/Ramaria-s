@@ -6,6 +6,7 @@
 //! - 合并：二次导入 mode=merge、四类零写入、merge_mode 提示
 //! - `--into` 目标不存在：按新建处理 + merge_target_missing 提示
 //! - allow-inference：全量 / 按 label 改写来源为 inferred、未知 uid 零改写
+//! - prompt：静态段 / 全量两档预览（信封与文本形态）、未知 uid 非零退出
 //! - 文本形态与错误路径（文件不存在 / 非法 TOML 的退出码）
 //!
 //! 安全约束:
@@ -412,6 +413,80 @@ fn allow_inference_unknown_uid_is_noop() {
         stderr.contains("未找到匹配的 Manual 画像"),
         "应输出未找到提示: {stderr}"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// =========================================================
+// prompt（提示词预览查看器）
+// =========================================================
+
+/// 静态段预览（--json）：单行信封、tier=static、含人格名、无 memory_context 字段。
+#[test]
+fn prompt_static_tier_json_envelope() {
+    let dir = temp_test_dir("prompt-static");
+    let preset = write_preset(&dir, "char-0001.toml", PRESET_TOML);
+    let file = preset.to_str().expect("预设路径应为合法 UTF-8");
+
+    let out = run_cli(&dir, &["persona", "import", file, "--json", "--no-ai"]);
+    assert_eq!(out.status.code(), Some(0), "导入应成功退出");
+
+    let out = run_cli(&dir, &["persona", "prompt", "char-0001", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "静态段预览应成功退出");
+    let envelope = parse_envelope(&out);
+    assert_eq!(envelope["ok"], true);
+    let data = &envelope["data"];
+    assert_eq!(data["uid"], "char-0001");
+    assert_eq!(data["tier"], "static");
+    assert!(
+        data["system_prompt"]
+            .as_str()
+            .expect("system_prompt 应为字符串")
+            .contains("导入人格"),
+        "应含人格名: {data:?}"
+    );
+    assert!(
+        data.get("memory_context").is_none(),
+        "静态档 memory_context 字段应省略: {data:?}"
+    );
+    assert!(data["chars"].as_u64().expect("chars 应为数字") > 0);
+    assert!(data["tokens"].as_u64().expect("tokens 应为数字") > 0);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 全量预览（文本形态）：stdout 含示例兜底注入的「对话示例」段。
+#[test]
+fn prompt_full_tier_text_contains_examples() {
+    let dir = temp_test_dir("prompt-full");
+    let preset = write_preset(&dir, "char-0001.toml", PRESET_TOML);
+    let file = preset.to_str().expect("预设路径应为合法 UTF-8");
+
+    let out = run_cli(&dir, &["persona", "import", file, "--json", "--no-ai"]);
+    assert_eq!(out.status.code(), Some(0), "导入应成功退出");
+
+    let out = run_cli(
+        &dir,
+        &["persona", "prompt", "char-0001", "--input", "今天有点累"],
+    );
+    assert_eq!(out.status.code(), Some(0), "全量预览应成功退出");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("## 对话示例"),
+        "全量档应含示例兜底注入: {stdout}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 未知 uid：Validation 映射 exit code 4，stderr 非空。
+#[test]
+fn prompt_unknown_uid_exits_with_validation_code() {
+    let dir = temp_test_dir("prompt-unknown");
+
+    let out = run_cli(&dir, &["persona", "prompt", "char-9999", "--json"]);
+    assert_eq!(out.status.code(), Some(4), "未知 uid 应退出 code 4");
+    assert!(!out.stderr.is_empty(), "错误应输出到 stderr");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

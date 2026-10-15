@@ -262,3 +262,126 @@ fn full_view(persona: ramaria_service::PersonaFullView) -> PersonaFullView {
         updated_at: persona.updated_at,
     }
 }
+
+// =========================================================
+// preview_persona_prompt — 提示词预览（静态段 / 全量两档）
+// =========================================================
+
+/// 提示词预览视图（前端展示用）。
+#[derive(Debug, Clone, Serialize)]
+pub struct PersonaPromptPreviewView {
+    pub uid: String,
+    /// 档位: "static" / "full"
+    pub tier: String,
+    pub system_prompt: String,
+    /// RAG 记忆上下文（无则 None）
+    pub memory_context: Option<String>,
+    pub chars: usize,
+    pub tokens: usize,
+}
+
+/// 归一化给定输入：trim 后为空按未提供（None = 静态段预览）。
+fn normalize_input(input: Option<String>) -> Option<String> {
+    input
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+}
+
+/// 预览指定人格的 system prompt（静态段 / 全量两档；显式只读读取）。
+///
+/// 参数:
+/// - `uid`: 目标人格 uid（空白 → 错误）。
+/// - `input`: 给定输入文本（None / 空白 = 静态段预览；非空 = 全量预览，含记忆召回）。
+///
+/// 日志:
+/// - INFO: 记录目标 uid 与档位（不记提示词内容）
+#[tauri::command]
+#[tracing::instrument(skip(state))]
+pub async fn preview_persona_prompt(
+    state: State<'_, DesktopState>,
+    uid: String,
+    input: Option<String>,
+) -> Result<PersonaPromptPreviewView, String> {
+    let uid = uid.trim().to_string();
+    if uid.is_empty() {
+        return Err("人格 UID 不能为空".to_string());
+    }
+
+    let input = normalize_input(input);
+    let preview = state
+        .engine
+        .persona_prompt_preview(&uid, input.as_deref())
+        .await
+        .map_err(|e| crate::commands::service_error_message(&e, "提示词预览失败"))?;
+
+    let view = preview_view(preview);
+    tracing::info!(%uid, tier = %view.tier, "preview_persona_prompt 完成");
+    Ok(view)
+}
+
+/// 服务层预览结果 → 前端视图（档位字符串化）。
+fn preview_view(preview: ramaria_service::PersonaPromptPreview) -> PersonaPromptPreviewView {
+    let tier = match preview.tier {
+        ramaria_service::PromptPreviewTier::Static => "static",
+        ramaria_service::PromptPreviewTier::Full => "full",
+    };
+    PersonaPromptPreviewView {
+        uid: preview.uid,
+        tier: tier.to_string(),
+        system_prompt: preview.system_prompt,
+        memory_context: preview.memory_context,
+        chars: preview.chars,
+        tokens: preview.tokens,
+    }
+}
+
+// =========================================================
+// 单元测试
+// =========================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 输入归一：None / 空串 / 纯空白按未提供；有内容时去除首尾空白。
+    #[test]
+    fn normalize_input_trims_and_drops_blank() {
+        assert_eq!(normalize_input(None), None);
+        assert_eq!(normalize_input(Some(String::new())), None);
+        assert_eq!(normalize_input(Some("   ".to_string())), None);
+        assert_eq!(
+            normalize_input(Some(" 在吗 ".to_string())),
+            Some("在吗".to_string())
+        );
+    }
+
+    /// 视图映射：字段透传，档位字符串化（static / full）。
+    #[test]
+    fn preview_view_maps_fields_and_tier() {
+        let full = preview_view(ramaria_service::PersonaPromptPreview {
+            uid: "char-0001".to_string(),
+            tier: ramaria_service::PromptPreviewTier::Full,
+            system_prompt: "# 角色（行为层）".to_string(),
+            memory_context: Some("相关记忆".to_string()),
+            chars: 8,
+            tokens: 4,
+        });
+        assert_eq!(full.uid, "char-0001");
+        assert_eq!(full.tier, "full");
+        assert_eq!(full.system_prompt, "# 角色（行为层）");
+        assert_eq!(full.memory_context.as_deref(), Some("相关记忆"));
+        assert_eq!(full.chars, 8);
+        assert_eq!(full.tokens, 4);
+
+        let static_view = preview_view(ramaria_service::PersonaPromptPreview {
+            uid: "char-0002".to_string(),
+            tier: ramaria_service::PromptPreviewTier::Static,
+            system_prompt: "# 能力边界".to_string(),
+            memory_context: None,
+            chars: 5,
+            tokens: 3,
+        });
+        assert_eq!(static_view.tier, "static");
+        assert_eq!(static_view.memory_context, None);
+    }
+}

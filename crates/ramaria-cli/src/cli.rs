@@ -597,6 +597,14 @@ pub(crate) enum PersonaCmd {
         #[arg(long)]
         label: Vec<String>,
     },
+    /// 查看指定人格的 system prompt 渲染结果（静态段预览；--input 走全量预览含召回）
+    Prompt {
+        /// 目标人格 uid
+        uid: String,
+        /// 给定输入文本（提供时走全量预览；缺省为静态段预览）
+        #[arg(long)]
+        input: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]

@@ -57,6 +57,7 @@ pub(crate) fn personas_dir() -> std::path::PathBuf {
 /// - Reload: 重新扫描文件系统，同步到 DB（支持全量或按 UID 指定）。
 /// - Import: 从预设文件导入人格（dry-run 预览 / 执行写入）。
 /// - AllowInference: 允许推断接管 Manual 画像（按 label 或全部）。
+/// - Prompt: 查看指定人格的 system prompt 渲染结果（静态段 / 全量两档）。
 #[derive(Debug, Clone)]
 pub enum PersonaCmd {
     /// 结构化列出所有人格（uid / 名称 / kind）
@@ -91,6 +92,13 @@ pub enum PersonaCmd {
         /// 目标 trait 标签（精确匹配）
         labels: Vec<String>,
     },
+    /// 查看指定人格的 system prompt 渲染结果（静态段预览；--input 走全量预览含召回）
+    Prompt {
+        /// 目标人格 uid
+        uid: String,
+        /// 给定输入文本（提供时走全量预览；缺省为静态段预览）
+        input: Option<String>,
+    },
 }
 
 /// 运行 persona 子命令分发。
@@ -113,6 +121,7 @@ pub async fn run(engine: &Arc<Engine>, cmd: PersonaCmd, json: bool) -> anyhow::R
         PersonaCmd::AllowInference { uid, labels } => {
             run_allow_inference(engine, uid, labels, json).await
         }
+        PersonaCmd::Prompt { uid, input } => run_prompt(engine, uid, input, json).await,
     }
 }
 
@@ -484,6 +493,52 @@ async fn run_allow_inference(
     } else {
         crate::ui::info("未找到匹配的 Manual 画像（无改写）");
     }
+    Ok(())
+}
+
+// =========================================================
+// prompt 命令
+// =========================================================
+
+/// 查看指定人格的 system prompt 渲染结果（静态段 / 全量两档）。
+///
+/// 说明:
+/// - 缺省为静态段预览（不含检索内容）；`--input` 提供给定输入时走全量预览（含记忆召回）；
+/// - `--json`: 输出单行信封（data = 预览对象）；文本模式 stdout 只含渲染结果与记忆上下文；
+/// - 档位与度量走 stderr；失败错误上抛，由入口统一映射退出码。
+async fn run_prompt(
+    engine: &Arc<Engine>,
+    uid: String,
+    input: Option<String>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let preview = engine
+        .persona_prompt_preview(&uid, input.as_deref())
+        .await
+        .context("提示词预览失败")?;
+
+    if json {
+        return crate::json::emit_ok(&preview);
+    }
+
+    println!("{}", preview.system_prompt);
+    if let Some(context) = preview
+        .memory_context
+        .as_deref()
+        .filter(|c| !c.trim().is_empty())
+    {
+        println!("\n\n----- 记忆上下文（随请求单独注入）-----");
+        println!("{context}");
+    }
+
+    let tier_label = match preview.tier {
+        ramaria_service::PromptPreviewTier::Static => "静态段预览",
+        ramaria_service::PromptPreviewTier::Full => "全量预览（含记忆召回）",
+    };
+    crate::ui::info(&format!(
+        "{tier_label}（字符 {} / 约 {} tokens）",
+        preview.chars, preview.tokens
+    ));
     Ok(())
 }
 

@@ -88,6 +88,7 @@ pub fn resolve_chat_style_rules(config: Option<&str>) -> String {
 /// - `work`: [identity] 节 work（可选；`Anim` 类人格的作品名）
 /// - `era`: [identity] 节 era（可选；`Hist` 类人格的时代/时期名）
 /// - `blocks`: [blocks] 节所有键值对（`A_persona` / `E_rules` / `speaking_style` 等）
+/// - `patch`: [prompt] 节提示词补丁（追加语义，未配置为空补丁）
 #[derive(Debug, Clone)]
 pub struct PersonaToml {
     pub assistant_name: String,
@@ -96,6 +97,7 @@ pub struct PersonaToml {
     pub work: Option<String>,
     pub era: Option<String>,
     pub blocks: Vec<(String, String)>,
+    pub patch: crate::preset::PromptPatch,
 }
 
 /// 解析 persona.toml（预设超集解析器兼容包装）。
@@ -103,7 +105,8 @@ pub struct PersonaToml {
 /// 说明:
 /// - 完整解析（含 [persona] 注册段与各类结构化段）由 `crate::preset::parse_toml` 承担；
 ///   本包装按旧接口形态提取对话身份与自由文本块，供冷启动与对话兜底链路使用。
-/// - 兼容面: [identity] 的 assistant_name / user_name / description / work / era 与 [blocks]。
+/// - 兼容面: [identity] 的 assistant_name / user_name / description / work / era、[blocks]
+///   与 [prompt] 提示词补丁。
 ///
 /// 参数:
 /// - `content`: persona.toml 文件原始内容。
@@ -119,6 +122,7 @@ pub fn parse_persona_toml(content: &str) -> RamariaResult<PersonaToml> {
         work: parsed.identity.work,
         era: parsed.identity.era,
         blocks: parsed.blocks,
+        patch: parsed.prompt,
     })
 }
 

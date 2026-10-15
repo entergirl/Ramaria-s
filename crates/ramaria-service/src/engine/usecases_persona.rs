@@ -19,7 +19,7 @@ use crate::persona::{PersonaLoadMode, PersonaRegenerateOutcome};
 use crate::style::StyleStatsView;
 use crate::types::{
     PersonaCardRequest, PersonaCardView, PersonaFileOutcome, PersonaFullView, PersonaImportOutcome,
-    PersonaSummaryView, PersonaUpdateRequest,
+    PersonaPromptPreview, PersonaSummaryView, PersonaUpdateRequest,
 };
 
 use super::Engine;
@@ -155,6 +155,22 @@ impl Engine {
         labels: &[String],
     ) -> RamariaResult<usize> {
         crate::persona::allow_inference(self, uid, labels).await
+    }
+
+    /// 提示词预览用例：渲染指定人格的 system prompt（静态段 / 全量两档）。
+    ///
+    /// 参数:
+    /// - `uid`: 目标人格 uid。
+    /// - `input`: 给定输入文本（None / 空白 = 静态段预览；非空 = 全量预览，含记忆召回）。
+    ///
+    /// 返回:
+    /// - 预览结果（system_prompt + 记忆上下文 + 度量）；uid 空或人格不存在返回 `Validation`。
+    pub async fn persona_prompt_preview(
+        &self,
+        uid: &str,
+        input: Option<&str>,
+    ) -> RamariaResult<PersonaPromptPreview> {
+        crate::persona::preview(self, uid, input).await
     }
 
     /// 重生成某人格在导入会话中的 L1 摘要（不含 L2/L3 级联，宿主按需触发）。

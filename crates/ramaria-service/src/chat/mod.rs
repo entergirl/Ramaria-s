@@ -34,6 +34,11 @@ mod steps;
 pub(crate) use generate::{reply_to_inbound, run, stream};
 // 主动生成入口 re-export：供引擎用例门面调用（主动调度接入前无生产调用方）
 pub(crate) use proactive::run as run_proactive;
+// 素材装载与提示装配步骤 re-export：供人格提示词预览用例复用（同一份装配链路）
+pub(crate) use context::{
+    step_build_prompt, step_load_examples, step_load_knowledge, step_load_narrative, step_recall,
+    step_route_behavior,
+};
 
 // =========================================================
 // 单元测试

@@ -144,6 +144,17 @@ pub(super) fn parse_persona_config(persona: &Persona) -> Option<crate::init::Per
         .and_then(|cfg| crate::init::parse_persona_toml(cfg).ok())
 }
 
+/// 读取 persona 配置中的提示词补丁（`[prompt]` 节；无 persona / 解析失败 → `None`）。
+///
+/// 说明:
+/// - 补丁为追加语义的纯文本后缀，空值在解析期已归一为未配置；
+/// - 正文长度由解析期统一约束（超长截断），渲染侧不做二次截断。
+pub(super) fn persona_patch(persona: Option<&Persona>) -> Option<crate::preset::PromptPatch> {
+    persona
+        .and_then(parse_persona_config)
+        .map(|parsed| parsed.patch)
+}
+
 // =========================================================
 // 角色层（行为层）: 角色身份 + 性格特征 + 已知事实 + 回复规范
 // =========================================================
@@ -152,6 +163,10 @@ pub(super) fn parse_persona_config(persona: &Persona) -> Option<crate::init::Per
 ///
 /// 对应 Role + Insight + Experiment 三块；
 /// 行为规则槽位（情境-反应规则）由 `render_behavior_block` 在装配时挂载。
+///
+/// 提示词补丁:
+/// - `[prompt].role_suffix` 非空时追加为末段（追加语义，不覆盖既有子段）；
+///   未配置 → 不产生任何输出。
 pub(super) fn build_role_layer(context: &PromptContext, config: &PromptConfig) -> String {
     let mut parts: Vec<String> = vec![build_role(context)];
 
@@ -178,6 +193,14 @@ pub(super) fn build_role_layer(context: &PromptContext, config: &PromptConfig) -
     let proactive_block = super::proactive::build_proactive_block(context);
     if !proactive_block.is_empty() {
         parts.push(format!("\n\n{proactive_block}"));
+    }
+
+    // 提示词补丁（[prompt].role_suffix）：角色层末尾追加（不覆盖任何既有子段）；
+    // 未配置 → 不产生任何输出（零字节变化），不随消融开关关闭
+    if let Some(suffix) =
+        persona_patch(context.persona.as_ref()).and_then(|patch| patch.role_suffix)
+    {
+        parts.push(format!("\n\n{suffix}"));
     }
 
     parts.join("")

@@ -421,6 +421,7 @@ pub fn run() {
             commands::persona::update_persona_info,
             commands::persona::refresh_persona,
             commands::persona::regenerate_import_pipeline,
+            commands::persona::preview_persona_prompt,
             // ---- Proactive（主动消息名单）----
             commands::proactive_cmd::list_proactive_personas,
             commands::proactive_cmd::set_proactive_persona,

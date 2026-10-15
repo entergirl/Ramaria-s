@@ -133,6 +133,9 @@ pub(crate) async fn dispatch(engine: &Arc<Engine>, cli: Cli) -> anyhow::Result<(
                 PersonaCmd::AllowInference { uid, label } => {
                     commands::persona::PersonaCmd::AllowInference { uid, labels: label }
                 }
+                PersonaCmd::Prompt { uid, input } => {
+                    commands::persona::PersonaCmd::Prompt { uid, input }
+                }
             };
             commands::persona::run(engine, cmd, cli.json).await?;
         }

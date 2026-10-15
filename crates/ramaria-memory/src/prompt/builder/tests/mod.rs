@@ -100,6 +100,7 @@ mod behavior;
 mod blocks;
 mod boilerplate;
 mod coordinated;
+mod patch;
 mod persona;
 mod proactive;
 mod social;

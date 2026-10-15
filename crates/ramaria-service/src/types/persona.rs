@@ -276,3 +276,34 @@ pub struct DecomposeExecution {
     pub fact_count: usize,
     pub trait_count: usize,
 }
+
+// =========================================================
+// 提示词预览用例（persona prompt 查看器）
+// =========================================================
+
+/// 提示词预览档位。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PromptPreviewTier {
+    /// 静态段预览（不含检索内容）
+    Static,
+    /// 全量预览（给定输入，含记忆召回）
+    Full,
+}
+
+/// 提示词预览结果（`persona prompt` 查看器）。
+///
+/// 字段约定:
+/// - `system_prompt`: 完整渲染文本（静态档=无输入骨架；全量档=含检索注入）；
+/// - `memory_context`: RAG 记忆上下文（随请求单独注入；静态档/无命中为 None，序列化时省略）；
+/// - `chars` / `tokens`: 对 system_prompt 的度量（字符数 / token 估算）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PersonaPromptPreview {
+    pub uid: String,
+    pub tier: PromptPreviewTier,
+    pub system_prompt: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_context: Option<String>,
+    pub chars: usize,
+    pub tokens: usize,
+}

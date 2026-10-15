@@ -6,7 +6,7 @@
 //! - `build_statement`: Few-shot 对话示例（前文/对方/你）渲染
 //! - 纯字符串拼接，无 I/O 与 LLM 依赖
 
-use super::role::parse_persona_config;
+use super::role::{parse_persona_config, persona_patch};
 use super::{PromptConfig, PromptContext, STATEMENT_LEAD, STYLE_USAGE_LEAD};
 
 // =========================================================
@@ -26,6 +26,10 @@ use super::{PromptConfig, PromptContext, STATEMENT_LEAD, STYLE_USAGE_LEAD};
 /// 探针消融（F3 / B0 / B1 / S_*）:
 /// - `config.include_speaking_style=false` → 说话风格与自动风格规则均不渲染
 ///   （表达层关闭；对话示例仍由 `include_examples` 独立控制）。
+///
+/// 提示词补丁:
+/// - `[prompt].style_suffix` 非空时追加为末尾子段（追加语义，不覆盖既有子段）；
+///   补丁属 persona 配置，不受上述消融开关影响。
 pub(super) fn build_style_layer(context: &PromptContext, config: &PromptConfig) -> String {
     let mut sub: Vec<String> = Vec::with_capacity(3);
 
@@ -53,6 +57,14 @@ pub(super) fn build_style_layer(context: &PromptContext, config: &PromptConfig) 
     let statement = build_statement(context, config);
     if !statement.is_empty() {
         sub.push(statement);
+    }
+
+    // 提示词补丁（[prompt].style_suffix）：表达层末尾追加（不覆盖任何既有子段）；
+    // 未配置 → 不产生任何输出（零字节变化），不随消融开关关闭
+    if let Some(suffix) =
+        persona_patch(context.persona.as_ref()).and_then(|patch| patch.style_suffix)
+    {
+        sub.push(suffix);
     }
 
     if sub.is_empty() {

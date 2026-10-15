@@ -38,7 +38,7 @@ use crate::engine::Engine;
 /// 说明:
 /// - 索引懒加载失败上抛（召回前置不可绕过）；
 /// - 其余降级（嵌入缺失 / 无命中 / 白名单外）由共用实现内部处理，返回空值。
-pub(super) async fn step_recall(
+pub(crate) async fn step_recall(
     engine: &Engine,
     storage: &dyn StorageBackend,
     config: &RamariaConfig,
@@ -96,7 +96,7 @@ pub(super) async fn step_recall(
 /// 说明:
 /// - 注入闸门 / 加权检索 / "最近 N 条"回退语义由记忆层单份实现承担；
 /// - 任何降级路径返回空素材而非错误（不阻塞生成）。
-pub(super) async fn step_load_narrative(
+pub(crate) async fn step_load_narrative(
     engine: &Engine,
     storage: &dyn StorageBackend,
     config: &RamariaConfig,
@@ -121,7 +121,7 @@ pub(super) async fn step_load_narrative(
 /// 说明:
 /// - 路由输入取本轮 prompt 历史（查询构造只用角色与内容）；
 /// - `[injection].behavior` 或 `[behavior].enabled` 关闭时不做任何查询。
-pub(super) async fn step_route_behavior(
+pub(crate) async fn step_route_behavior(
     engine: &Engine,
     storage: &dyn StorageBackend,
     config: &RamariaConfig,
@@ -169,7 +169,7 @@ pub(super) async fn step_route_behavior(
 }
 
 /// 步骤 10：知识层判定器检索（关闭 / 未命中 / 失败 → 空，不注入知识块）。
-pub(super) async fn step_load_knowledge(
+pub(crate) async fn step_load_knowledge(
     storage: &dyn StorageBackend,
     config: &RamariaConfig,
     persona: &str,
@@ -189,7 +189,7 @@ pub(super) async fn step_load_knowledge(
 }
 
 /// 步骤 11：示例预选（注入闸门关闭 → 空；记忆命中 → 兜底不注入）。
-pub(super) async fn step_load_examples(
+pub(crate) async fn step_load_examples(
     storage: &dyn StorageBackend,
     config: &RamariaConfig,
     persona: &str,
@@ -219,7 +219,7 @@ pub(super) async fn step_load_examples(
 /// 返回:
 /// - `(system_prompt, memory_context)`；协调路径可能裁剪 / 丢弃 RAG，返回值即最终记忆上下文
 ///   （普通路径原样返回传入值）。
-pub(super) async fn step_build_prompt(
+pub(crate) async fn step_build_prompt(
     storage: &dyn StorageBackend,
     config: &RamariaConfig,
     inputs: &PromptMaterialInputs<'_>,

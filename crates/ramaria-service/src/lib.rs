@@ -133,12 +133,12 @@ pub use types::{
     KeywordSeedOutcome, KeywordSuggestionOutcome, L1BrowsePage, L1BrowseRequest, L1MemoryView,
     L2BrowsePage, L2BrowseRequest, L2EventView, L3TraitView, MAX_ITEMS_LIMIT, PendingAliasView,
     PersonaCardRequest, PersonaCardView, PersonaFileAction, PersonaFileOutcome, PersonaFullView,
-    PersonaSection, PersonaSummaryView, PersonaUpdateRequest, PersonalityProfileView,
-    ProfileStatusView, RecallItem, RecallLayer, RecallMode, RecallRequest, RecallResult,
-    RecallStats, SealOutcome, SessionBrowsePage, SessionBrowseRequest, SessionDetailView,
-    SessionMessageView, SessionMessagesRequest, SessionMessagesView, SessionSummaryView,
-    SetupRequest, SetupStatus, StyleView, TraitDetailView, TraitEvidenceRequest, TraitEvidenceView,
-    TraitView,
+    PersonaPromptPreview, PersonaSection, PersonaSummaryView, PersonaUpdateRequest,
+    PersonalityProfileView, ProfileStatusView, PromptPreviewTier, RecallItem, RecallLayer,
+    RecallMode, RecallRequest, RecallResult, RecallStats, SealOutcome, SessionBrowsePage,
+    SessionBrowseRequest, SessionDetailView, SessionMessageView, SessionMessagesRequest,
+    SessionMessagesView, SessionSummaryView, SetupRequest, SetupStatus, StyleView, TraitDetailView,
+    TraitEvidenceRequest, TraitEvidenceView, TraitView,
 };
 pub use update::{UpdateStatus, check_update};
 pub use utt::UttRebuildOutcome;
