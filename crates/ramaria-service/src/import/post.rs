@@ -4,22 +4,56 @@
 //! - 单一入口：图片理解 → L1 批量生成（含风格统计触发）→ 深度触发按固定顺序一次编排，
 //!   宿主差异由计划参数表达
 //! - 图片理解降级：执行失败只记 warn 且统计置 None，不阻塞 L1 与深度触发；导出根缺失时零调用
+//! - 图片理解进度：逐行进度按"每 5 行或百分比变化"节流经阶段回调透传，
+//!   完成 / 中止时补一条携带 done / failed / skipped 计数的收尾事件
 //! - 风格统计触发：L1 完成后逐 persona 增量统计（门控 `[style].enabled`，失败不阻塞）
 //! - 深度触发口径：仅当 L1 全部完成后至少一条生成成功时统一触发 L2 → L3
-//! - 进度透传：L1 / L2 / L3 阶段进度经回调直通（图片理解不发阶段进度）
+//! - 导入后处理互斥：进程内标志（RAII guard 保证复位）供宿主拒绝并发"继续处理"
 //! - 日志：步骤级 info 只记会话数与阶段计数，不落消息正文 / 昵称 / 路径原文
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use ramaria_core::error::RamariaResult;
 use ramaria_core::privacy::mask_id;
 use uuid::Uuid;
 
 use crate::engine::Engine;
-use crate::vision::{VisionRunStat, understand_attachments};
+use crate::vision::{
+    AttachmentLocator, VisionRunStat, scan_pending_attachments, understand_attachment_rows,
+};
 
 use super::deep::trigger_deep;
-use super::l1::{ImportL1Outcome, ImportL1Plan, ImportProgressSink, generate_l1};
+use super::l1::{ImportL1Outcome, ImportL1Plan, ImportL1Progress, ImportProgressSink, generate_l1};
+
+// =========================================================
+// 导入后处理互斥（进程内单实例）
+// =========================================================
+
+/// 导入后处理是否活跃（图片理解 / L1 / 深度触发在途）。
+static POST_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// 导入后处理活跃标记的 RAII 守卫：构造置位，Drop 复位（异常 / 提前返回路径不残留）。
+pub(crate) struct PostActiveGuard(());
+
+impl PostActiveGuard {
+    /// 置位活跃标记并返回守卫（生命周期与 `run_post` 调用一致）。
+    pub(crate) fn acquire() -> Self {
+        POST_ACTIVE.store(true, Ordering::SeqCst);
+        Self(())
+    }
+}
+
+impl Drop for PostActiveGuard {
+    fn drop(&mut self) {
+        POST_ACTIVE.store(false, Ordering::SeqCst);
+    }
+}
+
+/// 查询导入后处理是否正在进行（宿主在其他入口据此拒绝并发操作）。
+pub fn is_post_active() -> bool {
+    POST_ACTIVE.load(Ordering::SeqCst)
+}
 
 // =========================================================
 // 请求与结果类型
@@ -93,7 +127,7 @@ pub struct ImportPostOutcome {
 /// 参数:
 /// - `engine`: 服务层引擎；
 /// - `req`: 会话列表、导出根与后处理计划；
-/// - `progress`: 可选进度回调（L1 / L2 / L3 阶段进度透传）。
+/// - `progress`: 可选进度回调（vision / L1 / L2 / L3 阶段进度透传）。
 ///
 /// 返回:
 /// - `ImportPostOutcome`：图片理解统计、L1 计数与深度触发标志。
@@ -102,28 +136,15 @@ pub(crate) async fn run_post(
     req: ImportPostRequest,
     progress: Option<&dyn ImportProgressSink>,
 ) -> RamariaResult<ImportPostOutcome> {
+    // 活跃标记随本次编排置位 / 复位：宿主在其他入口（如"继续处理"）据此拒绝并发
+    let _active = PostActiveGuard::acquire();
+
     let session_count = req.session_ids.len();
     tracing::info!(session_count, "导入后处理开始");
 
     // ---- 图片理解（先理解后 L1；失败降级不阻塞） ----
     let vision = match &req.export_root {
-        Some(root) => match understand_attachments(engine, &req.session_ids, root).await {
-            Ok(stat) => {
-                tracing::info!(
-                    scanned = stat.scanned,
-                    done = stat.done,
-                    reused = stat.reused,
-                    skipped = stat.skipped,
-                    failed = stat.failed,
-                    "导入图片理解完成"
-                );
-                Some(stat)
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "图片理解执行失败（不阻塞导入）");
-                None
-            }
-        },
+        Some(root) => run_vision_stage(engine, &req.session_ids, root, progress).await,
         None => None,
     };
 
@@ -173,6 +194,142 @@ pub(crate) async fn run_post(
         l2_triggered,
         l3_triggered,
     })
+}
+
+// =========================================================
+// 图片理解阶段（扫描 → 节流进度 → 收尾事件）
+// =========================================================
+
+/// 执行图片理解阶段：扫描待处理附件 → 起始与节流进度 → 完成 / 中止收尾事件。
+///
+/// 参数:
+/// - `engine`: 服务层引擎；
+/// - `session_ids`: 本次导入产出的会话列表；
+/// - `export_root`: 导出目录（附件相对引用的定位根）；
+/// - `progress`: 可选进度回调（phase = "vision"）。
+///
+/// 返回:
+/// - `Some(stat)`: 阶段执行完成（含零待处理与门禁未过口径）；
+/// - `None`: 扫描或逐行理解失败（降级，不阻塞后续阶段）。
+async fn run_vision_stage(
+    engine: &Engine,
+    session_ids: &[Uuid],
+    export_root: &Path,
+    progress: Option<&dyn ImportProgressSink>,
+) -> Option<VisionRunStat> {
+    let rows = match scan_pending_attachments(engine, session_ids).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(error = %e, "图片理解扫描失败（不阻塞导入）");
+            return None;
+        }
+    };
+    let total = rows.len();
+    if total == 0 {
+        tracing::info!("导入图片理解：无待处理附件");
+        return Some(VisionRunStat::default());
+    }
+
+    // 起始进度：总量已知，先给 0/N 起点（宿主只做转发）
+    emit_vision_progress(progress, 0, total, format!("正在理解图片 0/{total}"), None);
+
+    let mut locator = AttachmentLocator::new(vec![export_root.to_path_buf()]);
+    // 节流状态：上次推送时的百分比（usize::MAX = 尚未推送）
+    let last_pct = AtomicUsize::new(usize::MAX);
+    let on_row = |done: usize| {
+        let pct = done.saturating_mul(100) / total;
+        if should_push_vision_progress(done, total, last_pct.load(Ordering::Relaxed)) {
+            last_pct.store(pct, Ordering::Relaxed);
+            emit_vision_progress(
+                progress,
+                done,
+                total,
+                format!("正在理解图片 {done}/{total}"),
+                None,
+            );
+        }
+    };
+
+    match understand_attachment_rows(engine, &rows, &mut locator, Some(&on_row)).await {
+        Ok(stat) => {
+            tracing::info!(
+                scanned = stat.scanned,
+                done = stat.done,
+                reused = stat.reused,
+                skipped = stat.skipped,
+                failed = stat.failed,
+                "导入图片理解完成"
+            );
+            // 完成收尾事件：done / failed / skipped 计数随可选字段透出
+            emit_vision_progress(
+                progress,
+                stat.scanned,
+                stat.scanned,
+                format!(
+                    "图片理解完成：成功 {}，失败 {}，跳过 {}",
+                    stat.done, stat.failed, stat.skipped
+                ),
+                Some(&stat),
+            );
+            Some(stat)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "图片理解执行失败（不阻塞导入）");
+            emit_vision_progress(
+                progress,
+                0,
+                0,
+                "图片理解中止（不阻塞后续处理）".to_string(),
+                None,
+            );
+            None
+        }
+    }
+}
+
+/// 推送一条图片理解阶段进度（`stat` 非空时携带完成统计字段）。
+///
+/// 参数:
+/// - `progress`: 进度回调（None = 不推送）；
+/// - `current` / `total`: 当前进度与总量；
+/// - `message`: 人类可读描述；
+/// - `stat`: 完成统计（仅完成收尾事件传入）。
+fn emit_vision_progress(
+    progress: Option<&dyn ImportProgressSink>,
+    current: usize,
+    total: usize,
+    message: String,
+    stat: Option<&VisionRunStat>,
+) {
+    let Some(sink) = progress else {
+        return;
+    };
+    sink.on_l1_progress(&ImportL1Progress {
+        phase: "vision",
+        current,
+        total,
+        message,
+        eta_seconds: None,
+        l1_total: None,
+        l2_total: None,
+        l3_total: None,
+        vision_done: stat.map(|s| s.done),
+        vision_failed: stat.map(|s| s.failed),
+        vision_skipped: stat.map(|s| s.skipped),
+    });
+}
+
+/// 图片理解进度节流：每 5 行或百分比变化时推送（末行必推）。
+///
+/// 参数:
+/// - `done`: 已完成行数（从 1 起）；
+/// - `total`: 总行数；
+/// - `prev_pct`: 上次推送时的百分比（`usize::MAX` = 尚未推送）。
+pub(super) fn should_push_vision_progress(done: usize, total: usize, prev_pct: usize) -> bool {
+    if done == total || done.is_multiple_of(5) {
+        return true;
+    }
+    total > 0 && done.saturating_mul(100) / total != prev_pct
 }
 
 // =========================================================

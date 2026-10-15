@@ -62,6 +62,9 @@ pub(crate) async fn trigger_deep(
             l1_total,
             l2_total: Some(l2_expected),
             l3_total: None,
+            vision_done: None,
+            vision_failed: None,
+            vision_skipped: None,
         });
     }
 
@@ -90,6 +93,9 @@ pub(crate) async fn trigger_deep(
             l1_total,
             l2_total: Some(l2_expected),
             l3_total: Some(l3_expected),
+            vision_done: None,
+            vision_failed: None,
+            vision_skipped: None,
         });
     }
 

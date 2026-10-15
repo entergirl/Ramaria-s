@@ -3,7 +3,9 @@
 //! 设计特点:
 //! - `continue_import`: 回补中断的导入（附件重扫 + L1 补跑 + 深度级联），
 //!   后台任务执行、进度经 import-progress 事件转发
-//! - 导出根经只读白名单校验（Documents/Downloads/Desktop 等），拒绝时返回脱敏文案
+//! - 导出根防呆：只读白名单校验 + 导出根特征校验（含 resources/ 或导出 JSON），
+//!   无效时同步拒绝并返回不含路径原值的用户文案
+//! - 导入后处理互斥：post（图片理解 / 摘要处理）在途时拒绝并发续跑，避免抢行附件行
 //! - 命令返回"任务已启动"回执；全部统计经 done 事件送达
 //!   （含 resetCount / visionDone / visionFailed 附件回补字段）
 //! - privacy 回归断言（文件底部）静态扫描本文件的日志与 instrument 写法
@@ -11,9 +13,28 @@
 use crate::DesktopState;
 use crate::events::{EVENT_IMPORT_PROGRESS, ImportProgressPayload};
 use ramaria_service::ImportContinueRequest;
+use ramaria_service::import::{is_post_active, is_valid_export_root};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::commands::import_cmd::TauriImportProgressSink;
+
+// =========================================================
+// 入口校验辅助
+// =========================================================
+
+/// 无效导出根的用户提示（命令层校验失败返回，前端 toast 直接展示）。
+const INVALID_EXPORT_ROOT_MESSAGE: &str = "所选目录不是聊天记录导出根：请选择包含 resources 文件夹（或导出 JSON）的那一层目录（通常为 QQChatExporter 下的 exports 目录）";
+
+/// 导入后处理互斥判定：post 活跃时返回拒绝文案。
+///
+/// 参数:
+/// - `post_active`: 服务层导入后处理活跃标志（`ramaria_service::import::is_post_active()`）。
+///
+/// 返回:
+/// - `Some(文案)`: 拒绝继续处理；`None`: 放行。
+fn post_busy_error(post_active: bool) -> Option<String> {
+    post_active.then(|| "导入后的图片理解/摘要处理仍在进行，请稍候再试".to_string())
+}
 
 // =========================================================
 // continue_import — 回补中断的导入
@@ -27,7 +48,7 @@ use crate::commands::import_cmd::TauriImportProgressSink;
 ///
 /// 返回:
 /// - `Ok(())`: 任务已启动（统计经 `import-progress` done 事件送达）。
-/// - `Err(String)`: 参数校验失败（导出根非法等）。
+/// - `Err(String)`: 入口校验失败（导入后处理在途 / 导出根非法等）。
 ///
 /// 说明:
 /// - 后台任务执行完整编排；完成 / 失败均发射一条 done 事件（失败时统计置零）。
@@ -39,13 +60,21 @@ pub async fn continue_import(
     export_root: Option<String>,
     reset_skipped: Option<bool>,
 ) -> Result<(), String> {
-    // ---- 导出根校验（只读白名单内的目录；拒绝文案已脱敏） ----
+    // ---- 导入后处理互斥：图片理解 / 摘要处理在途时拒绝并发续跑（防抢行附件行） ----
+    if let Some(message) = post_busy_error(is_post_active()) {
+        return Err(message);
+    }
+
+    // ---- 导出根校验（只读白名单内的目录 + 导出根特征；拒绝文案不含路径原值） ----
     let export_roots = match export_root {
         Some(root) if !root.trim().is_empty() => {
             let validated = crate::path_guard::validate_read_dir_path(
                 &root,
                 &crate::path_guard::read_allowed_roots(&[]),
             )?;
+            if !is_valid_export_root(&validated) {
+                return Err(INVALID_EXPORT_ROOT_MESSAGE.to_string());
+            }
             vec![validated]
         }
         _ => Vec::new(),
@@ -205,5 +234,35 @@ mod privacy_regression_tests {
                 "instrument skip 块必须包含 {arg}，否则该参数会在 info 级被自动记录（泄露导出根路径）"
             );
         }
+    }
+}
+
+// =========================================================
+// 入口校验断言（互斥判定与导出根拒绝文案）
+// =========================================================
+
+#[cfg(test)]
+mod entry_guard_tests {
+    //! 断言"继续处理"入口的互斥判定与导出根防呆文案。
+    //!
+    //! 说明:
+    //! - 判定以纯函数形式提供（`post_busy_error`），本模块覆盖拒绝 / 放行两分支；
+    //! - 标志的真实置位 / 复位由服务层用例覆盖（`is_post_active` 的 RAII 生命周期）。
+
+    use super::*;
+
+    #[test]
+    fn post_busy_error_rejects_while_post_active() {
+        let message = post_busy_error(true).expect("post 活跃时应拒绝");
+        assert_eq!(message, "导入后的图片理解/摘要处理仍在进行，请稍候再试");
+        assert!(post_busy_error(false).is_none(), "post 非活跃时应放行");
+    }
+
+    #[test]
+    fn invalid_export_root_message_guides_toward_exports_dir() {
+        assert!(INVALID_EXPORT_ROOT_MESSAGE.contains("不是聊天记录导出根"));
+        assert!(INVALID_EXPORT_ROOT_MESSAGE.contains("resources"));
+        assert!(INVALID_EXPORT_ROOT_MESSAGE.contains("导出 JSON"));
+        assert!(INVALID_EXPORT_ROOT_MESSAGE.contains("exports"));
     }
 }

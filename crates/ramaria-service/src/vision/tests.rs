@@ -144,19 +144,23 @@ fn base64_encode_matches_rfc4648_vectors() {
     }
 }
 
-/// 描述清洗：引号剥离 / 换行与控制字符折叠 / 200 字符截断 / 空串。
+/// 描述清洗：引号剥离 / 行内空白折叠 / 换行保留（空行折叠）/ 2000 字符截断 / 空串。
 #[test]
-fn sanitize_description_strips_quotes_folds_whitespace_and_truncates() {
+fn sanitize_description_strips_quotes_normalizes_lines_and_truncates() {
     // 成对引号剥离（循环剥离多层）
     assert_eq!(sanitize_description("\"一只猫\""), "一只猫");
     assert_eq!(sanitize_description("'一只猫'"), "一只猫");
     assert_eq!(sanitize_description("“一只猫”"), "一只猫");
     assert_eq!(sanitize_description("「一只猫」"), "一只猫");
     assert_eq!(sanitize_description("““双层””"), "双层");
-    // 换行 / 控制字符 / 连续空白折叠
-    assert_eq!(sanitize_description("第一行\n第二行"), "第一行 第二行");
+    // 换行保留（文字类图片识别文本按行落库）；行内空白 / 控制字符折叠
+    assert_eq!(sanitize_description("第一行\n第二行"), "第一行\n第二行");
     assert_eq!(sanitize_description("多  个\t空白"), "多 个 空白");
     assert_eq!(sanitize_description("  a\u{0007}b  "), "a b");
+    // 连续空行折叠、首尾空行丢弃；\r\n / \r 归一为 \n
+    assert_eq!(sanitize_description("甲\n\n\n乙"), "甲\n乙");
+    assert_eq!(sanitize_description("\n甲\n"), "甲");
+    assert_eq!(sanitize_description("甲\r\n乙\r丙"), "甲\n乙\n丙");
     // 空与近空输入
     assert_eq!(sanitize_description(""), "");
     assert_eq!(sanitize_description("   "), "");
@@ -164,9 +168,13 @@ fn sanitize_description_strips_quotes_folds_whitespace_and_truncates() {
     // 不成对引号不剥离
     assert_eq!(sanitize_description("\"半只猫"), "\"半只猫");
     assert_eq!(sanitize_description("\""), "\"");
-    // 200 字符截断（按字符而非字节）
-    let long = "好".repeat(300);
-    assert_eq!(sanitize_description(&long).chars().count(), 200);
+    // 2000 字符截断（按字符而非字节）
+    let long = "好".repeat(2500);
+    assert_eq!(
+        sanitize_description(&long).chars().count(),
+        MAX_DESCRIPTION_CHARS
+    );
+    assert_eq!(MAX_DESCRIPTION_CHARS, 2000, "输出预算口径：2000 字符");
 }
 
 /// 图片 MIME 按扩展名映射，未知扩展名回退 image/jpeg。

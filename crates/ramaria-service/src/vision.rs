@@ -14,7 +14,7 @@
 //! - base64 编码自实现；日志不落图片内容与描述原文
 //!
 //! 模块划分:
-//! - `batch`：批量与"继续处理"共用的逐行理解实现；
+//! - `batch`：批量与"继续处理"共用的扫描 / 逐行理解实现；
 //! - `locate`：附件定位（多导出根直连 + md5 反查）；
 //! - `prepare`：理解输入准备（格式归一化与像素上限）。
 
@@ -36,7 +36,9 @@ mod batch;
 mod locate;
 mod prepare;
 
-pub(crate) use batch::{MAX_IMAGE_BYTES, understand_attachment_rows, understand_attachments};
+pub(crate) use batch::{
+    MAX_IMAGE_BYTES, scan_pending_attachments, understand_attachment_rows, understand_attachments,
+};
 pub(crate) use locate::AttachmentLocator;
 pub(crate) use prepare::image_mime_from_bytes;
 
@@ -44,11 +46,20 @@ pub(crate) use prepare::image_mime_from_bytes;
 // 常量
 // =========================================================
 
-/// 描述截断上限（按字符数）。
-const MAX_DESCRIPTION_CHARS: usize = 200;
+/// 描述截断上限（按字符数）；文字类图片的识别文本按此上限兜底截断。
+const MAX_DESCRIPTION_CHARS: usize = 2000;
 
 /// 理解任务的内置提示词（固定单轮，请求文本不经用户输入）。
-const VISION_PROMPT: &str = "请用一两句话简要描述这张图片的内容，直接给出描述，不要额外说明。";
+///
+/// 双路口径:
+/// - 图案类（图画 / 照片 / 表情包）→ 清晰描述画面内容（一两句话）；
+/// - 文字类（截图 / 文档 / 海报等）→ 识别并完整输出文字（保留顺序与分段，不概括改写）；
+/// - 图文混合 → 先描述画面、再输出文字；文字不可辨认时说明，不猜测编造。
+const VISION_PROMPT: &str = "请直接输出这张图片的内容，不要额外说明：\n\
+1. 以图案、图画、照片或表情包为主的图片：清晰描述画面内容（主体、场景、氛围、风格），一到两句话。\n\
+2. 以文字为主的图片（截图、文档、对话记录、海报等）：识别并完整输出其中的文字，保持原有顺序与分段；不要概括、不要改写、不要补充解释。\n\
+3. 图文混合的图片：先描述画面，再输出其中的文字。\n\
+文字模糊无法辨认时说明无法辨认，不要猜测编造。";
 
 /// 探测请求的提示词。
 const PROBE_PROMPT: &str = "请描述这张图片。";
@@ -56,8 +67,8 @@ const PROBE_PROMPT: &str = "请描述这张图片。";
 /// 探测用 1x1 PNG 图片（data URI 的 base64 载荷）。
 const PROBE_IMAGE_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
-/// 理解请求的模板版本。
-const VISION_TEMPLATE_VERSION: &str = "vision-v1";
+/// 理解请求的模板版本（v2：双路 prompt〔图案描述 / 文字识别〕+ 输出预算 4096）。
+const VISION_TEMPLATE_VERSION: &str = "vision-v2";
 
 /// 探测请求的模板版本。
 const PROBE_TEMPLATE_VERSION: &str = "vision-probe-v1";
@@ -213,7 +224,8 @@ pub(crate) async fn understand_downloaded_image(
         history: Vec::new(),
         user_message: VISION_PROMPT.to_string(),
         temperature: 0.2,
-        max_tokens: 256,
+        // 输出预算：文字类图片的识别文本较长（描述上限 2000 字符兜底）
+        max_tokens: 4096,
         request_id: Uuid::new_v4(),
         template_version: VISION_TEMPLATE_VERSION.to_string(),
         enable_thinking: None,
@@ -346,21 +358,30 @@ fn model_label(llm: &Arc<dyn LlmProvider>) -> String {
 ///
 /// 步骤:
 /// - trim 首尾空白，循环剥离成对包裹的引号（`"` / `'` / `“”` / `「」`）；
-/// - 换行与控制字符替换为空格；
-/// - 折叠连续空白为单个空格；
-/// - 按字符截断到 200 字符。
+/// - 归一换行（`\r\n` / `\r` → `\n`），逐行折叠行内空白为单个空格；
+/// - 丢弃空行、以单换行连接（折叠连续空行与首尾空行）；
+/// - 按字符截断到 [`MAX_DESCRIPTION_CHARS`]。
+///
+/// 说明:
+/// - **保留换行**：文字类图片的识别文本按行落库（阅读与审计友好）；
+/// - 注入侧（`replace_image_placeholders`）渲染时会把换行折叠为空格，
+///   保证块文本 / L1 对话文本的行结构不被多行描述破坏。
 fn sanitize_description(raw: &str) -> String {
     let unquoted = strip_wrapping_quotes(raw);
-    let mut spaced = String::with_capacity(unquoted.len());
-    for ch in unquoted.chars() {
-        if ch.is_control() {
-            spaced.push(' ');
-        } else {
-            spaced.push(ch);
-        }
-    }
-    let collapsed = spaced.split_whitespace().collect::<Vec<_>>().join(" ");
-    collapsed.chars().take(MAX_DESCRIPTION_CHARS).collect()
+    let normalized = unquoted.replace("\r\n", "\n").replace('\r', "\n");
+    let cleaned = normalized
+        .split('\n')
+        .map(|line| {
+            let spaced: String = line
+                .chars()
+                .map(|ch| if ch.is_control() { ' ' } else { ch })
+                .collect();
+            spaced.split_whitespace().collect::<Vec<_>>().join(" ")
+        })
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    cleaned.chars().take(MAX_DESCRIPTION_CHARS).collect()
 }
 
 /// 循环剥离成对包裹的引号（剥离后重新 trim；不处理嵌套不配对形态）。

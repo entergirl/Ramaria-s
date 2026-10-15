@@ -73,13 +73,15 @@ pub struct ImportL1Outcome {
 /// 导入进度事件（宿主转发为自身事件通道）。
 ///
 /// 字段约定:
-/// - `phase`: 阶段字符串（`l1` / `l2` / `l3`）；
+/// - `phase`: 阶段字符串（`vision` / `l1` / `l2` / `l3`）；
 /// - `current` / `total`: 阶段内进度（总数 0 表示未知）；
 /// - `eta_seconds`: 分层 EMA 估算的剩余秒数（None = 无样本，宿主可回退线性估算）；
-/// - `l1_total` / `l2_total` / `l3_total`: 各阶段预计总量（None = 当前阶段未知）。
+/// - `l1_total` / `l2_total` / `l3_total`: 各阶段预计总量（None = 当前阶段未知）；
+/// - `vision_done` / `vision_failed` / `vision_skipped`: 图片理解阶段完成统计
+///   （仅 vision 阶段完成 / 中止收尾事件携带，其余事件为 None）。
 #[derive(Debug, Clone)]
 pub struct ImportL1Progress {
-    /// 阶段: "l1" | "l2" | "l3"
+    /// 阶段: "vision" | "l1" | "l2" | "l3"
     pub phase: &'static str,
     /// 当前进度（已处理数）
     pub current: usize,
@@ -95,6 +97,12 @@ pub struct ImportL1Progress {
     pub l2_total: Option<usize>,
     /// L3 阶段预计总量
     pub l3_total: Option<usize>,
+    /// 图片理解完成数（仅 vision 阶段收尾事件携带）
+    pub vision_done: Option<usize>,
+    /// 图片理解失败数（仅 vision 阶段收尾事件携带）
+    pub vision_failed: Option<usize>,
+    /// 图片理解跳过数（仅 vision 阶段收尾事件携带）
+    pub vision_skipped: Option<usize>,
 }
 
 /// 导入完成摘要（宿主在完成事件中携带）。
@@ -191,6 +199,9 @@ pub(crate) async fn generate_l1(
             l1_total: Some(l1_total),
             l2_total: None,
             l3_total: None,
+            vision_done: None,
+            vision_failed: None,
+            vision_skipped: None,
         });
     }
 
@@ -307,6 +318,9 @@ pub(crate) async fn generate_l1(
                 l1_total: Some(l1_total),
                 l2_total: None,
                 l3_total: None,
+                vision_done: None,
+                vision_failed: None,
+                vision_skipped: None,
             });
         }
     }

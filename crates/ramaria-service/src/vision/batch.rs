@@ -4,7 +4,8 @@
 //! - 批量导入与"继续处理"共用单一逐行处理实现（`understand_attachment_rows`）
 //! - 门禁未过不写库（行保持待处理，由能力恢复后的后续批次重新扫描）
 //! - 逐行独立处置：定位 / 体积 / 读取 / 调用失败按行降级，单行失败不中断整批
-//! - 可选逐行回调供宿主推送进度，批量导入路径不传回调
+//! - 可选逐行回调供宿主推送进度：批量入口（`understand_attachments`）不传，
+//!   导入后处理与"继续处理"编排按需传入
 
 use std::path::Path;
 use std::sync::Arc;
@@ -53,8 +54,8 @@ enum RowOutcome {
 /// 理解一批会话中的待处理图片附件。
 ///
 /// 流程:
-/// 1. 逐会话扫描 pending 附件（各自独立限制 `[vision].batch_limit`，0 = 不限）；
-/// 2. 平铺为单批行列表，经 [`understand_attachment_rows`] 统一处理（门禁 + 逐行）。
+/// 1. 扫描 pending 附件并平铺为单批行列表（见 [`scan_pending_attachments`]）；
+/// 2. 经 [`understand_attachment_rows`] 统一处理（门禁 + 逐行）。
 ///
 /// 参数:
 /// - `engine`: 服务层引擎；
@@ -68,12 +69,37 @@ pub(crate) async fn understand_attachments(
     session_ids: &[Uuid],
     export_root: &Path,
 ) -> RamariaResult<VisionRunStat> {
-    let mut stat = VisionRunStat::default();
-    if session_ids.is_empty() {
+    let rows = scan_pending_attachments(engine, session_ids).await?;
+    let stat = VisionRunStat {
+        scanned: rows.len(),
+        ..Default::default()
+    };
+    if rows.is_empty() {
         return Ok(stat);
     }
 
-    // ---- 1. 扫描（按 session 序；会话内按附件 id 升序，由查询层保证） ----
+    // 定位器（单导出根）+ 统一逐行处理
+    let mut locator = AttachmentLocator::new(vec![export_root.to_path_buf()]);
+    understand_attachment_rows(engine, &rows, &mut locator, None).await
+}
+
+/// 扫描一批会话中的待处理图片附件（平铺为单批行列表）。
+///
+/// 说明:
+/// - 逐会话扫描（各自独立限制 `[vision].batch_limit`，0 = 不限），
+///   会话内按附件 id 升序（查询层保证）；无待处理行时返回空列表且不记日志；
+/// - 供宿主在批量处理前获知总量，以组织起始进度事件。
+///
+/// 参数:
+/// - `engine`: 服务层引擎；
+/// - `session_ids`: 待扫描会话列表。
+///
+/// 返回:
+/// - 平铺后的待处理附件行（调用方负责门禁与逐行处理）。
+pub(crate) async fn scan_pending_attachments(
+    engine: &Engine,
+    session_ids: &[Uuid],
+) -> RamariaResult<Vec<MessageAttachment>> {
     let storage = engine.storage_ref().clone();
     let batch_limit = engine.config().vision.batch_limit;
     let mut rows: Vec<MessageAttachment> = Vec::new();
@@ -87,19 +113,14 @@ pub(crate) async fn understand_attachments(
             rows.extend(session_rows);
         }
     }
-    stat.scanned = rows.len();
-    if rows.is_empty() {
-        return Ok(stat);
+    if !rows.is_empty() {
+        tracing::info!(
+            sessions = sessions_with_rows,
+            pending = rows.len(),
+            "图片理解批次扫描完成"
+        );
     }
-    tracing::info!(
-        sessions = sessions_with_rows,
-        pending = rows.len(),
-        "图片理解批次扫描完成"
-    );
-
-    // ---- 2. 定位器（单导出根）+ 统一逐行处理 ----
-    let mut locator = AttachmentLocator::new(vec![export_root.to_path_buf()]);
-    understand_attachment_rows(engine, &rows, &mut locator, None).await
+    Ok(rows)
 }
 
 /// 处理一批附件行（门禁 + 逐行理解；导入后处理与"继续处理"共用单一实现）。
@@ -114,7 +135,7 @@ pub(crate) async fn understand_attachments(
 /// - `engine`: 服务层引擎；
 /// - `rows`: 待处理附件行（调用方完成扫描 / 重置）；
 /// - `locator`: 附件定位器（多导出根 + md5 反查）；
-/// - `on_row`: 每完成一行回调（附已完成行数，从 1 起；供进度推送，导入批量路径传 None）。
+/// - `on_row`: 每完成一行回调（附已完成行数，从 1 起；供进度推送，批量入口传 None）。
 ///
 /// 返回:
 /// - 本轮执行统计（门禁未过时 skipped = rows.len()，不落库）。
@@ -287,7 +308,8 @@ async fn process_row(
         history: Vec::new(),
         user_message: VISION_PROMPT.to_string(),
         temperature: 0.2,
-        max_tokens: 256,
+        // 输出预算：文字类图片的识别文本较长（描述上限 2000 字符兜底）
+        max_tokens: 4096,
         request_id: Uuid::new_v4(),
         template_version: VISION_TEMPLATE_VERSION.to_string(),
         enable_thinking: None,

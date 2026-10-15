@@ -156,6 +156,7 @@ pub fn build_render_map(attachments: &[MessageAttachment]) -> HashMap<String, St
 /// 扫描规则:
 /// - 遇到 `[图片#` 后读取连续的 8 个 ASCII 字符再遇 `]` 视为占位符（严格 8 位）；
 /// - 命中 `render_map`（key 为 8 位小写 hex）→ 替换为 `[图片: {描述}]`；
+/// - 描述中的换行折叠为空格（渲染单行，保护块文本 / 对话文本的行结构）；
 /// - 未命中 / 格式不完整 → 原文保留（逐字符复制，不做任何其他改动）。
 ///
 /// 参数:
@@ -185,7 +186,12 @@ pub fn replace_image_placeholders(text: &str, render_map: &HashMap<String, Strin
             Some(description) => {
                 out.push_str(&rest[..pos]);
                 out.push_str("[图片: ");
-                out.push_str(description);
+                // 描述可能含换行（文字类图片的识别文本按行存储）：渲染为单行
+                out.extend(
+                    description
+                        .chars()
+                        .map(|ch| if matches!(ch, '\n' | '\r') { ' ' } else { ch }),
+                );
                 out.push(']');
                 rest = &after_prefix[9..];
             }
@@ -358,7 +364,7 @@ mod tests {
         );
     }
 
-    /// 混排文本（中文、换行、其他方括号）不破坏；空 map 零改动。
+    /// 混排文本（中文、换行、其他方括号）不破坏；描述换行渲染为空格；空 map 零改动。
     #[test]
     fn replace_preserves_mixed_text_and_empty_map() {
         let mut map = HashMap::new();
@@ -369,7 +375,7 @@ mod tests {
         let rendered = replace_image_placeholders(text, &map);
         assert_eq!(
             rendered,
-            "【提醒】\n[图片: 图一] 之后\n[引用] 普通方括号 [图片: 图二\n第二行] 结束"
+            "【提醒】\n[图片: 图一] 之后\n[引用] 普通方括号 [图片: 图二 第二行] 结束"
         );
 
         let empty = HashMap::new();
@@ -377,7 +383,7 @@ mod tests {
         assert_eq!(replace_image_placeholders("", &map), "");
     }
 
-    /// 描述文本本身含方括号形态时原样落入结果，不递归替换。
+    /// 描述文本本身含方括号形态时原样落入结果（换行折叠除外），不递归替换。
     #[test]
     fn replace_pushes_description_verbatim() {
         let mut map = HashMap::new();

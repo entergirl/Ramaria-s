@@ -8,7 +8,7 @@
 //! - 深度导入（deep）：L0 → L1 摘要 → 触发 L2/L3 级联
 //! - 双画像支持——分别为导出者和对方创建独立 persona（由服务层用例承担）
 //! - 路径安全校验：三层防御（canonicalize + 白名单 + 符号链接拒绝），复用 path_guard 模块
-//! - 进度事件字段与前端契约一致；L1 起始事件由服务层用例发出，桌面只做转发
+//! - 进度事件字段与前端契约一致；阶段进度（含图片理解完成统计）由服务层用例发出，桌面只做转发
 //! - privacy 回归断言（文件底部）静态扫描本文件的日志与 instrument 写法
 
 use crate::DesktopState;
@@ -462,8 +462,14 @@ pub(crate) struct TauriImportProgressSink {
 
 impl ImportProgressSink for TauriImportProgressSink {
     fn on_l1_progress(&self, p: &ImportL1Progress) {
-        let payload = ImportProgressPayload::new(p.phase, p.current, p.total, &p.message)
+        let mut payload = ImportProgressPayload::new(p.phase, p.current, p.total, &p.message)
             .with_estimates(p.l1_total, p.l2_total, p.l3_total, p.eta_seconds);
+        // 图片理解完成收尾事件：done / failed / skipped 计数随可选字段透出
+        if let (Some(done), Some(failed), Some(skipped)) =
+            (p.vision_done, p.vision_failed, p.vision_skipped)
+        {
+            payload = payload.with_vision_stats(done, failed, skipped);
+        }
         if let Err(e) = self.app_handle.emit(EVENT_IMPORT_PROGRESS, &payload) {
             tracing::warn!(error = %e, "发射 import-progress 事件失败");
         }

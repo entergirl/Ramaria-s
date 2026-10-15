@@ -334,6 +334,8 @@ async fn continue_backfills_client_cache_for_reverse_hits() {
 async fn continue_gate_keeps_pending() {
     let llm = Arc::new(MockLlm::with_reply(L1_JSON_REPLY).with_vision_reply("不会调用"));
     let (engine, storage, dir) = resume_env("resume-gate", llm, RamariaConfig::default()).await;
+    // 有效导出根：含 resources/（用例聚焦门禁分支，根有效性由独立用例覆盖）
+    std::fs::create_dir_all(dir.join("resources")).expect("创建 resources 目录应成功");
 
     let session = storage.create_session(None).await.expect("创建会话应成功");
     let message_id = seed_attachment_message(
@@ -627,6 +629,55 @@ async fn continue_cascade_deep_triggers_after_success() {
 }
 
 // ---- 请求校验 ----
+
+/// 无效导出根（无 resources 目录且无导出 JSON）：附件步骤停（不标记任何附件行），L1 补跑照常。
+#[tokio::test]
+async fn continue_invalid_root_skips_attachment_steps_but_keeps_l1() {
+    let llm = Arc::new(MockLlm::with_reply(L1_JSON_REPLY).with_vision_reply("不会调用"));
+    let (engine, storage, dir) = resume_env("resume-invalid-root", llm, vision_on_config()).await;
+
+    // 待处理附件（根无效时不得被标记为跳过）+ 缺 L1 的已关闭会话
+    let session = storage.create_session(None).await.expect("创建会话应成功");
+    let message_id = seed_attachment_message(
+        &storage,
+        session.id,
+        "resources/images/a.jpg",
+        Some(IMAGE_MD5),
+        AttachmentStatus::Pending,
+    )
+    .await;
+    seed_closed_session(&storage, &[Some("char-0005"), Some("char-0005")]).await;
+
+    // 目录存在但不含 resources / 导出 JSON → 无效导出根
+    let mut req = continue_request();
+    req.export_roots = vec![dir.clone()];
+    let outcome = engine
+        .continue_import(req, None)
+        .await
+        .expect("无效根不应整体中止");
+
+    assert!(outcome.vision.is_none(), "附件阶段应被跳过");
+    assert_eq!(outcome.reset_count, 0, "不应重置任何行");
+    // 附件行保持待处理（绝不被批量标记跳过），也不产生跳过行
+    let rows = load_attachments(&storage, message_id).await;
+    assert_eq!(
+        rows[0].status,
+        AttachmentStatus::Pending,
+        "附件行应保持待处理"
+    );
+    assert_eq!(
+        storage
+            .list_all_skipped_attachments(0)
+            .await
+            .expect("查询不应失败")
+            .len(),
+        0,
+        "不应产生跳过行"
+    );
+    assert_eq!(outcome.l1.l1_success, 1, "L1 补跑应照常执行");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
 
 /// 导出根非法：不存在的目录以业务校验错误拒绝。
 #[tokio::test]

@@ -121,6 +121,38 @@ fn payload_with_partial_estimates_serializes_only_some() {
     assert!(!json.contains("eta_seconds"), "无 ETA 不应输出: {json}");
 }
 
+// ---- 图片理解阶段完成统计 ----
+
+/// 基础进度事件：未附加统计时 vision 字段整体省略（旧前端不受损）。
+#[test]
+fn basic_payload_omits_vision_stats() {
+    let payload = ImportProgressPayload::new("vision", 1, 10, "正在理解图片 1/10");
+    let json = serde_json::to_string(&payload).expect("序列化失败");
+    assert!(!json.contains("vision_done"), "未附加时不应输出: {json}");
+    assert!(!json.contains("vision_failed"), "未附加时不应输出: {json}");
+    assert!(!json.contains("vision_skipped"), "未附加时不应输出: {json}");
+}
+
+/// 图片理解完成事件：done / failed / skipped 统计字段序列化透出。
+#[test]
+fn payload_with_vision_stats_serializes_fields() {
+    let payload =
+        ImportProgressPayload::new("vision", 10, 10, "图片理解完成").with_vision_stats(8, 1, 1);
+    let json = serde_json::to_string(&payload).expect("序列化失败");
+    assert!(
+        json.contains(r#""vision_done":8"#),
+        "应含 vision_done: {json}"
+    );
+    assert!(
+        json.contains(r#""vision_failed":1"#),
+        "应含 vision_failed: {json}"
+    );
+    assert!(
+        json.contains(r#""vision_skipped":1"#),
+        "应含 vision_skipped: {json}"
+    );
+}
+
 // ---- 主动消息事件 ----
 
 /// 常规投递：六字段序列化齐备，activated 不出现。

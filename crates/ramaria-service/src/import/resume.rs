@@ -3,6 +3,8 @@
 //! 设计特点:
 //! - 三阶段单一编排：附件回补（重置可定位存量跳过 + 命中文件缓存回填 + 重扫 pending + md5 反查）
 //!   → L1 幂等补跑（含风格统计触发）→ 深度级联补触发
+//! - 无效导出根防御：全部根无导出特征（无 resources 且无导出 JSON）时附件步骤停、
+//!   绝不标记任何附件行；L1 与级联不依赖导出根，照常执行
 //! - 幂等可重跑：理解按 md5 去重、L1 按"已有归属行"跳过；重复执行零副作用
 //! - 能力门禁不可达保持 pending；附件阶段失败不阻塞 L1 补跑
 //! - 进度经 ImportProgressSink 透传（phase: vision / l1 / l2 / l3），宿主只做转发
@@ -17,6 +19,7 @@ use crate::engine::Engine;
 use crate::vision::{AttachmentLocator, VisionRunStat, understand_attachment_rows};
 
 use super::deep::trigger_deep;
+use super::is_valid_export_root;
 use super::l1::{ImportL1Outcome, ImportL1Progress, ImportProgressSink, regenerate_l1_fanout};
 use super::post::update_style_stats;
 
@@ -74,8 +77,9 @@ pub struct ImportContinueOutcome {
 ///
 /// 流程:
 /// 1. 导出根校验（任一根不存在或非目录即报错，面向用户的校验错误）；
-/// 2. `export_roots` 非空时执行附件回补：
+/// 2. 有效导出根（含 resources/ 或导出 JSON）非空时执行附件回补：
 ///    重置可定位的存量跳过行 → 全库重扫 pending（逐行理解，逐行进度）→ 统计；
+///    全部根无导出特征时附件步骤停（记日志，绝不标记任何附件行）；
 /// 3. L1 补跑：扫描"已关闭且缺摘要"的会话，逐会话按分发口径（恒含"我"与块内他人）生成；
 /// 4. 补跑完成后按结果人格触发风格统计增量更新（失败不阻塞）；
 /// 5. `cascade_deep` 且至少一条 L1 生成成功时统一触发 L2 → L3 级联。
@@ -110,14 +114,50 @@ pub(crate) async fn run_continue(
         }
     }
 
+    // 仅保留具备导出根特征的目录（含 resources/ 或导出 JSON）；
+    // 全部无效时附件步骤停（绝不标记任何附件行），L1 补跑与深度级联照常
+    let attachment_roots: Vec<PathBuf> = req
+        .export_roots
+        .iter()
+        .filter(|root| is_valid_export_root(root))
+        .cloned()
+        .collect();
+
     let storage = engine.storage_ref().clone();
     let mut vision_stat: Option<VisionRunStat> = None;
     let mut reset_count = 0usize;
     let mut reverse_lookup_hits = 0usize;
 
-    // ---- 2. 附件回补（export_roots 非空时执行；失败不阻塞 L1 补跑） ----
-    if !req.export_roots.is_empty() {
-        let mut locator = AttachmentLocator::new(req.export_roots.clone());
+    // ---- 2. 附件回补（有效导出根非空时执行；失败不阻塞 L1 补跑） ----
+    if !req.export_roots.is_empty() && attachment_roots.is_empty() {
+        // 无效根 ≠ 整体中止：附件步骤停（不重置、不重扫、不标记任何附件行），其余阶段继续。
+        // 待处理附件数查询仅用于日志分级，失败不影响主流程（附件保持现状）。
+        match storage.list_all_pending_attachments(0).await {
+            Ok(rows) if rows.is_empty() => {
+                tracing::warn!(
+                    roots = req.export_roots.len(),
+                    "所选导出根无导出特征（无 resources 目录且无导出 JSON），跳过附件回补（当前无待处理附件）"
+                );
+            }
+            Ok(rows) => {
+                tracing::error!(
+                    roots = req.export_roots.len(),
+                    pending = rows.len(),
+                    "所选导出根无导出特征（无 resources 目录且无导出 JSON），跳过附件回补：附件保持待处理，请重新选择包含 resources 文件夹（或导出 JSON）的那一层目录后再次继续处理"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    roots = req.export_roots.len(),
+                    error = %e,
+                    "所选导出根无导出特征，跳过附件回补；待处理附件数查询失败（附件保持现状，不影响 L1 补跑与级联）"
+                );
+            }
+        }
+    }
+
+    if !attachment_roots.is_empty() {
+        let mut locator = AttachmentLocator::new(attachment_roots);
 
         // 2a. 存量跳过行重置：仅重置"有文件可定位"的行（单行失败只记 warn 跳过）
         if req.reset_skipped {
@@ -185,6 +225,9 @@ pub(crate) async fn run_continue(
                     l1_total: None,
                     l2_total: None,
                     l3_total: None,
+                    vision_done: None,
+                    vision_failed: None,
+                    vision_skipped: None,
                 });
             }
             let on_row = |done: usize| {
@@ -199,6 +242,9 @@ pub(crate) async fn run_continue(
                             l1_total: None,
                             l2_total: None,
                             l3_total: None,
+                            vision_done: None,
+                            vision_failed: None,
+                            vision_skipped: None,
                         });
                     }
                 }
@@ -236,6 +282,9 @@ pub(crate) async fn run_continue(
                 l1_total: Some(total),
                 l2_total: None,
                 l3_total: None,
+                vision_done: None,
+                vision_failed: None,
+                vision_skipped: None,
             });
         }
     }
@@ -272,6 +321,9 @@ pub(crate) async fn run_continue(
                 l1_total: Some(total),
                 l2_total: None,
                 l3_total: None,
+                vision_done: None,
+                vision_failed: None,
+                vision_skipped: None,
             });
         }
         // 请求间节流：连续 LLM 调用间保持最小间隔，避免触发远端速率限制

@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use ramaria_core::config::RamariaConfig;
 use ramaria_importer::qq::ImportSide;
 
+use super::post::{PostActiveGuard, should_push_vision_progress};
 use super::*;
 use crate::test_support::{L1_JSON_REPLY, MockLlm, engine_with_shared_llm};
 
@@ -207,7 +208,7 @@ async fn post_cascade_deep_triggers_with_l1_total() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// 非深度模式：cascade_deep=false 不触发深度，进度只含 L1 阶段。
+/// 非深度模式：cascade_deep=false 不触发深度，进度不含 l2 / l3 阶段。
 #[tokio::test]
 async fn post_without_cascade_deep_skips_deep() {
     let (engine, _llm, dir) = post_env("post-no-deep", vision_on_config()).await;
@@ -237,8 +238,10 @@ async fn post_without_cascade_deep_skips_deep() {
         "非深度模式不应触发级联"
     );
     assert!(
-        sink.events().iter().all(|e| e.phase == "l1"),
-        "非深度模式进度应只含 L1 阶段"
+        sink.events()
+            .iter()
+            .all(|e| e.phase == "vision" || e.phase == "l1"),
+        "非深度模式进度应只含 vision / L1 阶段（不含 l2 / l3）"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -302,6 +305,110 @@ async fn post_with_empty_sessions_counts_zero_and_skips_deep() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- 图片理解进度 ----
+
+/// 图片理解进度：起始（0/N）→ 逐行（节流）→ 完成收尾事件（携带 done / failed / skipped 计数）。
+#[tokio::test]
+async fn post_emits_vision_progress_with_stats() {
+    let (engine, _llm, dir) = post_env("post-vision-progress", vision_on_config()).await;
+    let export_path = dir.join("export.json");
+    std::fs::write(&export_path, qq_export_with_image()).expect("写入导出文件应成功");
+
+    let outcome = engine
+        .import_qq_l0(fast_import_request(&export_path))
+        .await
+        .expect("L0 导入应成功");
+
+    let sink = RecordingSink::new();
+    let post = engine
+        .run_import_post(
+            ImportPostRequest {
+                session_ids: outcome.session_ids.clone(),
+                export_root: Some(dir.clone()),
+                plan: post_plan(false, vec![None]),
+            },
+            Some(&sink),
+        )
+        .await
+        .expect("后处理应成功");
+    assert_eq!(
+        post.vision.expect("应返回图片理解统计").done,
+        1,
+        "本地图片应完成理解"
+    );
+
+    let events = sink.events();
+    let vision_events: Vec<&ImportL1Progress> =
+        events.iter().filter(|e| e.phase == "vision").collect();
+    let first = vision_events.first().expect("应有图片理解起始事件");
+    assert_eq!(
+        (first.current, first.total),
+        (0, 1),
+        "起始事件应给出 0/N 总量"
+    );
+    let last = vision_events.last().expect("应有图片理解收尾事件");
+    assert_eq!(last.vision_done, Some(1), "收尾事件应携带完成数");
+    assert_eq!(last.vision_failed, Some(0), "收尾事件应携带失败数");
+    assert_eq!(last.vision_skipped, Some(0), "收尾事件应携带跳过数");
+    assert!(
+        last.message.contains("图片理解完成"),
+        "收尾文案应说明阶段结束: {}",
+        last.message
+    );
+    assert!(
+        vision_events.len() >= 2,
+        "应含起始与收尾两条以上事件: {vision_events:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 图片理解进度节流（纯函数）：每 5 行或百分比变化推送，末行必推。
+#[test]
+fn vision_progress_throttle_emits_five_rows_or_percent_change() {
+    // 大总数：5 行步长主导（1% ≈ 10 行）
+    assert!(should_push_vision_progress(1, 1000, usize::MAX), "首次推送");
+    assert!(
+        !should_push_vision_progress(4, 1000, 0),
+        "未到 5 行且百分比未变应节流"
+    );
+    assert!(should_push_vision_progress(5, 1000, 0), "每 5 行应推送");
+    assert!(
+        should_push_vision_progress(10, 1000, 0),
+        "百分比变化（1%）应推送"
+    );
+    assert!(
+        !should_push_vision_progress(11, 1000, 1),
+        "未跨 5 行且百分比未变应节流"
+    );
+    assert!(should_push_vision_progress(1000, 1000, 99), "末行必推");
+    // 小总数：百分比变化主导
+    assert!(
+        should_push_vision_progress(1, 4, usize::MAX),
+        "小样本首次推送"
+    );
+    assert!(
+        should_push_vision_progress(2, 4, 25),
+        "百分比变化（50%）应推送"
+    );
+}
+
+// ---- 导入后处理互斥标志 ----
+
+/// 互斥标志生命周期：acquire 置位、Drop 复位（宿主入口据此拒绝并发"继续处理"）。
+#[test]
+fn post_active_flag_lifecycle() {
+    let guard = PostActiveGuard::acquire();
+    assert!(is_post_active(), "guard 存活期间标志应置位");
+    drop(guard);
+    // 并行用例的 run_post 可能同时在途（同样持有标志）；短暂等待吸收该窗口后必须复位
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while is_post_active() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(!is_post_active(), "guard 释放后标志应复位");
 }
 
 // ---- 风格统计触发 ----

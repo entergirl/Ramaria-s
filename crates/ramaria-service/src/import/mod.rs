@@ -21,11 +21,13 @@
 //! - `l1`：L1 批量生成与 ETA 进度（含参与者分发口径与完成摘要构造）；
 //! - `post`：导入后处理单一入口（图片理解 → L1 批量生成 → 风格统计 → 可选深度级联一次编排）；
 //! - `resume`：导入"继续处理"（附件回补 → L1 幂等补跑 → 风格统计 → 可选深度级联）；
-//! - `deep`：深度触发（L2 事件提取 → L3 性格画像级联）。
+//! - `deep`：深度触发（L2 事件提取 → L3 性格画像级联）；
+//! - `export_root`：导出根有效性判定（含 resources 或导出 JSON；桌面与"继续处理"共用）。
 
 mod analyze;
 mod deep;
 mod detect;
+mod export_root;
 mod l0;
 mod l1;
 mod post;
@@ -41,12 +43,13 @@ use crate::vision::{VisionRunStat, understand_attachments};
 
 // 请求与结果类型 re-export：`crate::import::X` / `ramaria_service::import::X` 为既有调用路径
 pub use analyze::{AnalysisReport, AnalyzeRequest};
+pub use export_root::is_valid_export_root;
 pub use l0::{ImportL0Outcome, ImportMode, ImportRequest};
 pub use l1::{
     ImportDoneSummary, ImportL1Outcome, ImportL1Plan, ImportL1Progress, ImportProgressSink,
     done_summary,
 };
-pub use post::{ImportPostOutcome, ImportPostPlan, ImportPostRequest};
+pub use post::{ImportPostOutcome, ImportPostPlan, ImportPostRequest, is_post_active};
 pub use resume::{ImportContinueOutcome, ImportContinueRequest};
 
 // 用例入口 re-export：`crate::import::X` 为引擎门面与既有调用路径

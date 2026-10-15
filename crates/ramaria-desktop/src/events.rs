@@ -212,12 +212,13 @@ pub struct ChannelStatusPayload {
 /// 导入深度处理进度事件负载。
 ///
 /// 职责:
-/// - 携带导入后 L1/L2/L3 管线处理的实时进度和最终统计。
+/// - 携带导入后 vision / L1 / L2 / L3 阶段处理的实时进度和最终统计。
 /// - 在 `done` 阶段携带 `l1_success`/`l1_failed` 计数，
-///   前端据此决定是否展示 L1 失败警告和"深度处理"引导入口。
+///   前端据此决定是否展示 L1 失败警告和"深度处理"引导入口；
+///   vision 阶段完成事件携带 `vision_done`/`vision_failed`/`vision_skipped` 计数。
 ///
 /// 字段约定:
-/// - `phase`: "l1" | "l2" | "l3" | "done"
+/// - `phase`: "vision" | "l1" | "l2" | "l3" | "done"
 /// - `current` / `total`: 进度计数；done 阶段为最终统计
 /// - `l1_success` / `l1_failed`: 仅 done 阶段有意义，其余阶段为 None
 /// - `l2_triggered` / `l3_triggered`: 仅 done 阶段有意义，标记深度模式级联是否已触发
@@ -227,7 +228,7 @@ pub struct ChannelStatusPayload {
 ///   （无样本/首次运行），前端回退线性估算
 #[derive(Debug, Clone, Serialize)]
 pub struct ImportProgressPayload {
-    /// 阶段: "l1" | "l2" | "l3" | "done"
+    /// 阶段: "vision" | "l1" | "l2" | "l3" | "done"
     pub phase: String,
     /// 当前进度（已处理数）
     pub current: usize,
@@ -262,12 +263,15 @@ pub struct ImportProgressPayload {
     /// "继续处理"重置为待处理的存量附件数（仅 done 阶段有意义）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reset_count: Option<usize>,
-    /// "继续处理"本轮回补的图片理解完成数（仅 done 阶段有意义）
+    /// 本轮图片理解完成数（vision 阶段完成事件 / "继续处理"done 阶段）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vision_done: Option<usize>,
-    /// "继续处理"本轮回补的图片理解失败数（仅 done 阶段有意义）
+    /// 本轮图片理解失败数（vision 阶段完成事件 / "继续处理"done 阶段）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vision_failed: Option<usize>,
+    /// 本轮图片理解跳过数（仅 vision 阶段完成事件有意义）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vision_skipped: Option<usize>,
 }
 
 impl ImportProgressPayload {
@@ -289,6 +293,7 @@ impl ImportProgressPayload {
             reset_count: None,
             vision_done: None,
             vision_failed: None,
+            vision_skipped: None,
         }
     }
 
@@ -344,6 +349,7 @@ impl ImportProgressPayload {
             reset_count: None,
             vision_done: None,
             vision_failed: None,
+            vision_skipped: None,
         }
     }
 
@@ -362,6 +368,19 @@ impl ImportProgressPayload {
         self.reset_count = Some(reset_count);
         self.vision_done = Some(vision_done);
         self.vision_failed = Some(vision_failed);
+        self
+    }
+
+    /// 附加图片理解阶段完成统计（vision 阶段完成收尾事件）。
+    ///
+    /// 参数:
+    /// - `done`: 本批次理解完成数。
+    /// - `failed`: 本批次理解失败数。
+    /// - `skipped`: 本批次跳过数（定位失败 / 门禁未过等）。
+    pub fn with_vision_stats(mut self, done: usize, failed: usize, skipped: usize) -> Self {
+        self.vision_done = Some(done);
+        self.vision_failed = Some(failed);
+        self.vision_skipped = Some(skipped);
         self
     }
 }
