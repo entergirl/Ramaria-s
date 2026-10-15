@@ -152,7 +152,7 @@ fn template_rule_contains_detected_items() {
     let stats = stats_with(100, 2000);
     let pool = baseline_pool_with(0.5);
     let sig = analyze_significance(&stats, &pool, &config()).unwrap();
-    let rule = render_template_rule(&stats, &sig);
+    let rule = render_template_rule(&sig);
     assert!(rule.contains("哇塞"), "模板应含口癖词: {rule}");
     assert!(rule.contains("电影"), "模板应含话题: {rule}");
     assert!(rule.contains("感叹号"), "模板应含标点维度: {rule}");
@@ -179,7 +179,7 @@ fn template_rule_empty_when_no_significant() {
         sentiment_word_high: false,
         topics: Vec::new(),
     };
-    let rule = render_template_rule(&StyleStats::default(), &sig);
+    let rule = render_template_rule(&sig);
     assert!(rule.is_empty(), "无显著项不生成规则: {rule}");
 }
 
@@ -192,7 +192,7 @@ async fn generate_without_llm_returns_template() {
     let rule = generate_style_rule(&stats, &sig, None, true, 0.3)
         .await
         .expect("generate 不应失败");
-    assert_eq!(rule, render_template_rule(&stats, &sig));
+    assert_eq!(rule, render_template_rule(&sig));
 }
 
 // ---- LLM 翻译增强降级（静默回退模板） ----
@@ -261,11 +261,7 @@ async fn generate_with_failing_llm_falls_back_to_template() {
     let rule = generate_style_rule(&stats, &sig, Some(&llm), true, 0.3)
         .await
         .expect("LLM 故障应静默回退模板（不报错）");
-    assert_eq!(
-        rule,
-        render_template_rule(&stats, &sig),
-        "翻译失败应返回模板文本"
-    );
+    assert_eq!(rule, render_template_rule(&sig), "翻译失败应返回模板文本");
     assert!(!rule.trim().is_empty(), "模板含显著项时不应为空");
 }
 
@@ -275,10 +271,46 @@ fn build_translate_prompt_contains_no_raw_text() {
     let pool = baseline_pool_with(0.5);
     let sig = analyze_significance(&stats, &pool, &config()).unwrap();
     assert!(!sig.catchphrases.is_empty(), "前置：应检出口癖词");
-    let template = render_template_rule(&stats, &sig);
+    let template = render_template_rule(&sig);
     let prompt = build_translate_prompt(&stats, &sig, &template);
     assert!(prompt.contains("哇塞"), "统计参数在 prompt 中");
     assert!(prompt.contains("模板规则"), "模板在 prompt 中");
     // prompt 不包含消息原文（本测试消息内容未传入，防御性断言）
     assert!(!prompt.contains("你好"), "不应出现原文文本");
+}
+
+/// 模板产物不含元统计语（任何统计数字）——防"表演统计"机械感回归
+/// （T-V29-6-004 审查修订：产物直入对话 prompt 表达层，须保持人格自述语态）。
+#[test]
+fn template_rule_contains_no_meta_statistics() {
+    let stats = stats_with(100, 2000);
+    let pool = baseline_pool_with(0.5);
+    let sig = analyze_significance(&stats, &pool, &config()).unwrap();
+    let rule = render_template_rule(&sig);
+    assert!(!rule.trim().is_empty(), "前置：显著项应产出规则");
+    assert!(
+        !rule.chars().any(|c| c.is_ascii_digit()),
+        "模板产物不应含统计数字: {rule}"
+    );
+    for needle in ["每 100 字", "均值", "平均"] {
+        assert!(!rule.contains(needle), "不应含元统计语「{needle}」: {rule}");
+    }
+}
+
+/// 翻译 prompt 携带去数字约束（防 LLM 把统计参数抄进规则文本）。
+#[test]
+fn build_translate_prompt_forbids_meta_statistics() {
+    let stats = stats_with(100, 2000);
+    let pool = baseline_pool_with(0.5);
+    let sig = analyze_significance(&stats, &pool, &config()).unwrap();
+    let template = render_template_rule(&sig);
+    let prompt = build_translate_prompt(&stats, &sig, &template);
+    assert!(
+        prompt.contains("保持风格倾向不变"),
+        "约束口径应为风格倾向（而非统计事实）"
+    );
+    assert!(
+        prompt.contains("也不要写入具体统计数字"),
+        "应明确禁止写入统计数字"
+    );
 }

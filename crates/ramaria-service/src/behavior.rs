@@ -91,6 +91,7 @@ fn manual_anchor_samples(rules: &[BehaviorRule]) -> Vec<BehaviorSample> {
             salience: 1.0,
             situation_strength: Some(3),
             start_ms: r.created_at,
+            attitude: None,
         })
         .collect()
 }

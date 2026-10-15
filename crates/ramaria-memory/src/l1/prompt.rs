@@ -229,7 +229,9 @@ pub const L1_SUMMARY_PROMPT_WITH_KEYWORDS_AND_PRIOR: &str = r#"# Context（背�
 
 // =========================================================
 // L1 摘要 Prompt（含关键词候选注入）
-// =========================================================/// L1 摘要 Prompt —— emotion + keyword injection 版本。
+// =========================================================
+
+/// L1 摘要 Prompt —— emotion + keyword injection 版本。
 ///
 /// CRAFT 框架: 与基础版共享相同的 CRAFT 结构，
 /// 仅在 Action > keywords 字段末尾注入关键词候选列表，

@@ -28,6 +28,7 @@ fn sample(
         salience: 0.5,
         situation_strength: Some(3),
         start_ms: 1_000,
+        attitude: None,
     }
 }
 
@@ -928,5 +929,52 @@ async fn retry_theta_drop_welds_borderline_clusters() {
         refined.len(),
         1,
         "重试降 θ 把可分离 3 簇焊成 1 簇（方向无保护，登记风险行为）"
+    );
+}
+
+// ---- 代表性态度（规则翻译示例素材，T-V29-6-004 审查修订） ----
+
+/// 代表性态度收集：前 3 条非空、单条按字符截断；空白跳过、超量不足。
+#[test]
+fn refine_cluster_collects_representative_attitudes() {
+    let mut a = sample(1, &["加班"], None, None);
+    a.attitude = Some("又是加班，好累".to_string());
+    let mut blank = sample(2, &["加班"], None, None);
+    blank.attitude = Some("   ".to_string());
+    let mut long = sample(3, &["加班"], None, None);
+    long.attitude = Some("长".repeat(100));
+    let mut fourth = sample(4, &["加班"], None, None);
+    fourth.attitude = Some("第四条".to_string());
+
+    let samples = [a, blank, long, fourth];
+    let members = [0, 1, 2, 3];
+    let cluster = refine_cluster(&samples, &members, 0.4, 0.3);
+
+    assert_eq!(
+        cluster.representative_attitudes.len(),
+        MAX_REPRESENTATIVE_ATTITUDES,
+        "取前 3 条非空态度"
+    );
+    assert_eq!(cluster.representative_attitudes[0], "又是加班，好累");
+    assert_eq!(
+        cluster.representative_attitudes[1].chars().count(),
+        MAX_ATTITUDE_CHARS,
+        "单条按字符截断"
+    );
+    assert_eq!(cluster.representative_attitudes[2], "第四条");
+}
+
+/// 无态度数据 → 空列表（翻译 prompt 示例段随之整体省略）。
+#[test]
+fn refine_cluster_without_attitudes_yields_empty() {
+    let samples = [
+        sample(1, &["加班"], None, None),
+        sample(2, &["加班"], None, None),
+    ];
+    let members = [0, 1];
+    let cluster = refine_cluster(&samples, &members, 0.4, 0.3);
+    assert!(
+        cluster.representative_attitudes.is_empty(),
+        "无态度数据应为空列表"
     );
 }

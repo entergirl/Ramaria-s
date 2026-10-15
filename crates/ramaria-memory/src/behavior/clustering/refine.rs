@@ -50,10 +50,18 @@ pub struct RefinedCluster {
     ///
     /// 与 `member_event_ids` 一一对应（同索引），顺序一致。
     pub member_events: Vec<ClusterMember>,
+    /// 代表性态度文本（成员前 3 条非空态度，单条按字符截断；供规则翻译示例）。
+    pub representative_attitudes: Vec<String>,
 }
 
 /// 关键词并集保留的 Top-N 条数。
 pub const KEYWORD_TOP_N: usize = 10;
+
+/// 规则翻译示例保留的代表性态度条数。
+pub const MAX_REPRESENTATIVE_ATTITUDES: usize = 3;
+
+/// 代表性态度单条字符截断上限（防超长句进入翻译 prompt）。
+pub const MAX_ATTITUDE_CHARS: usize = 60;
 
 /// 簇提炼（v3.1 §4.2 Step 2.4）。
 ///
@@ -183,6 +191,16 @@ pub fn refine_cluster(
         member_samples.len() as f64
     };
 
+    // ---- 代表性态度（规则翻译示例：前 3 条非空，单条按字符截断防超长） ----
+    let representative_attitudes: Vec<String> = member_samples
+        .iter()
+        .filter_map(|s| s.attitude.as_deref())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(|text| text.chars().take(MAX_ATTITUDE_CHARS).collect())
+        .take(MAX_REPRESENTATIVE_ATTITUDES)
+        .collect();
+
     RefinedCluster {
         situation: BehaviorSituation {
             keywords,
@@ -208,6 +226,7 @@ pub fn refine_cluster(
                 salience: s.salience,
             })
             .collect(),
+        representative_attitudes,
     }
 }
 

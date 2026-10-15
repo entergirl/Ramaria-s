@@ -92,7 +92,7 @@ pub const EVENT_EXTRACTION_PROMPT: &str = r#"# Context（背景）
 # Format（输出格式）
 你的整个回复必须是一个裸 JSON 对象，以 { 开头、以 } 结尾，不要添加任何其他内容：
 
-{"events":[{"title":"...","summary":"...","keywords":"...","participants":[],"confidence":0.8,"salience":0.7,"valence":-0.5,"presentation":"subjective","share":0.3,"attitude":"...","motives":["..."]}],"relations":[{"from_index":0,"to_index":1,"kind":"CausedBy","weight":0.8,"detail":"..."}]}
+{"events":[{"title":"...","summary":"...","keywords":"...","participants":[],"confidence":0.8,"salience":0.75,"valence":-0.5,"presentation":"subjective","share":0.45,"attitude":"...","motives":["..."]}],"relations":[{"from_index":0,"to_index":1,"kind":"CausedBy","weight":0.8,"detail":"..."}]}
 
 # Target（质量目标）
 - 每条事件的 summary 独立可理解（脱离 L1 原文仍有信息量）
@@ -529,5 +529,24 @@ mod tests {
         assert!(prompt.contains("合并"));
         assert!(prompt.contains("而非新建事件"));
         assert!(prompt.contains("直接复制为新事件"));
+    }
+
+    /// 示例与约束一致性（T-V29-6-004 审查修订）：示例中的 `salience` 取五档值、
+    /// `share` 避开被约束点名的 0.3 / 0.7 锚点——示例矛盾会直接污染输出分布。
+    #[test]
+    fn event_prompt_example_matches_constraints() {
+        let prompt = build_event_extraction_prompt("[1] 2025-01-01 测试摘要");
+        assert!(
+            prompt.contains(r#""salience":0.75"#),
+            "示例 salience 应取五档值 0.75"
+        );
+        assert!(
+            !prompt.contains(r#""salience":0.7,"#),
+            "不应残留非五档示例值"
+        );
+        assert!(
+            prompt.contains(r#""share":0.45"#),
+            "示例 share 应取连续值并避开 0.3 / 0.7 锚点"
+        );
     }
 }

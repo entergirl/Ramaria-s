@@ -20,7 +20,10 @@ mod vectorize;
 
 pub use cluster::{ClusterAssignment, DensityClusterResult, RawCluster, density_cluster};
 pub use pipeline::BehaviorClusterer;
-pub use refine::{ClusterMember, KEYWORD_TOP_N, RefinedCluster, refine_cluster};
+pub use refine::{
+    ClusterMember, KEYWORD_TOP_N, MAX_ATTITUDE_CHARS, MAX_REPRESENTATIVE_ATTITUDES, RefinedCluster,
+    refine_cluster,
+};
 pub use sample::{BehaviorSample, dedup_keywords, sample_from_event};
 pub use similarity::{cosine_clipped, fused_similarity, jaccard};
 pub use vectorize::vectorize;

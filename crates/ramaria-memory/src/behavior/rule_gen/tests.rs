@@ -119,7 +119,28 @@ fn make_cluster(
                 salience: 0.5,
             })
             .collect(),
+        representative_attitudes: Vec::new(),
     }
+}
+
+/// 示例段渲染：有代表性态度 → 含真实文本；无态度 → 整段省略（不留空壳占位）。
+#[test]
+fn translation_prompt_renders_real_attitudes() {
+    let mut cluster = make_cluster(-0.4, 0.2, 8, 6.0);
+    cluster.representative_attitudes =
+        vec!["又是加班，好累".to_string(), "这周已经第三次了".to_string()];
+    let prompt = build_translation_prompt(&cluster);
+    assert!(prompt.contains("代表事件态度示例:"), "有态度时应含示例段");
+    assert!(prompt.contains("1. 又是加班，好累"), "示例应含真实态度");
+    assert!(prompt.contains("2. 这周已经第三次了"));
+    assert!(!prompt.contains("示例态度（已脱敏）"), "不应残留空壳占位");
+
+    let empty = make_cluster(-0.4, 0.2, 8, 6.0);
+    let prompt = build_translation_prompt(&empty);
+    assert!(
+        !prompt.contains("代表事件态度示例"),
+        "无态度数据时示例段应整体省略"
+    );
 }
 
 // ---- 极性一致性校验（表驱动） ----
@@ -298,6 +319,7 @@ fn build_evidence_near_event_outweighs_old_event() {
                 salience: 0.8,
             },
         ],
+        representative_attitudes: Vec::new(),
     };
     let ev = build_evidence(&cluster, now, 30);
     let near = ev.iter().find(|(id, _)| *id == 1).expect("有新事件").1;

@@ -38,6 +38,8 @@ pub struct BehaviorSample {
     pub situation_strength: Option<i32>,
     /// 事件开始时间（Unix 毫秒）
     pub start_ms: i64,
+    /// 态度的自然语言原文（供规则翻译示例；无态度时为 None）
+    pub attitude: Option<String>,
 }
 
 /// 从 `MemoryEvent` 构造样本（向量留空，由 `vectorize` 填充）。
@@ -69,6 +71,7 @@ pub fn sample_from_event(event: &MemoryEvent) -> BehaviorSample {
         salience: event.salience.clamp(0.0, 1.0),
         situation_strength: event.situation_strength,
         start_ms: event.start,
+        attitude: event.attitude.clone(),
     }
 }
 

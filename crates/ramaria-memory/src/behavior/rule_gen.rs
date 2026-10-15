@@ -353,13 +353,14 @@ pub fn compute_stability(cluster: &RefinedCluster) -> f64 {
 // LLM 翻译
 // =========================================================
 
-/// 翻译 prompt 构造（引用代表事件 attitude 作示例）。
+/// 翻译 prompt 构造（示例取簇内真实态度文本）。
 ///
 /// 参数:
 /// - `cluster`: 提炼后的簇。
 ///
 /// 说明:
-/// - 示例取成员事件前 3 条的 attitude（摘要形态，非完整原文）。
+/// - 示例取 `representative_attitudes`（簇成员前 3 条真实态度，已由提炼层截断）；
+///   无态度数据时示例段整体省略（不留空壳占位）。
 fn build_translation_prompt(cluster: &RefinedCluster) -> String {
     let valence_desc = if cluster.situation.valence_mean > 0.1 {
         "积极/正面"
@@ -368,6 +369,17 @@ fn build_translation_prompt(cluster: &RefinedCluster) -> String {
     } else {
         "中性"
     };
+    let examples = if cluster.representative_attitudes.is_empty() {
+        String::new()
+    } else {
+        let lines: Vec<String> = cluster
+            .representative_attitudes
+            .iter()
+            .enumerate()
+            .map(|(i, attitude)| format!("{}. {}", i + 1, attitude))
+            .collect();
+        format!("代表事件态度示例:\n{}\n", lines.join("\n"))
+    };
     format!(
         "你是行为规则翻译器。根据情境-反应簇的统计，把簇内反应模式翻译为一条可注入的人格规则文本。\n\
          规则文本格式：'当{{情境}}时，倾向{{反应}}……'，要求用自然口语表达、可解释。\n\
@@ -375,19 +387,11 @@ fn build_translation_prompt(cluster: &RefinedCluster) -> String {
          \n\
          簇关键词: {keywords}\n\
          簇情绪方向: {valence_desc}（valence={valence:.2}）\n\
-         代表事件态度示例:\n{examples}\n\
-         \n\
+         {examples}\n\
          只输出 JSON，格式: {{\"reaction\": \"...\", \"avoid\": [\"...\"]}}",
         keywords = cluster.situation.keywords.join("、"),
         valence = cluster.situation.valence_mean,
-        examples = cluster
-            .member_event_ids
-            .iter()
-            .take(3)
-            .enumerate()
-            .map(|(i, _)| format!("{}. 示例态度（已脱敏）", i + 1))
-            .collect::<Vec<_>>()
-            .join("\n"),
+        examples = examples,
     )
 }
 

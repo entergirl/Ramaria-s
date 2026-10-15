@@ -254,7 +254,12 @@ fn rate_metric_significant(
 /// 模板拼接生成自动风格规则文本（D-V17-002 模板优先）。
 ///
 /// 输出为 `## 自动风格规则` 小节的正文（多行风格描述）。
-pub fn render_template_rule(stats: &StyleStats, sig: &StyleSignificant) -> String {
+///
+/// 说明:
+/// - 产物为**定性风格描述**（人格自述语态），不含统计数字——
+///   规则文本直入对话 prompt 表达层，数字会诱导"表演统计"的机械执行
+///   （T-V29-6-004 审查修订；统计溯源由 `style/stat.rs` 统计面承担）。
+pub fn render_template_rule(sig: &StyleSignificant) -> String {
     let mut lines: Vec<String> = Vec::new();
 
     if !sig.catchphrases.is_empty() {
@@ -271,44 +276,26 @@ pub fn render_template_rule(stats: &StyleStats, sig: &StyleSignificant) -> Strin
     }
 
     if sig.short_sentences {
-        lines.push(format!(
-            "你的句子偏短（平均 {} 字），断句明快、节奏紧凑。",
-            fmt1(stats.sentence_len_mean)
-        ));
+        lines.push("你说话句子偏短，断句明快、节奏紧凑。".to_string());
     } else if sig.long_sentences {
-        lines.push(format!(
-            "你的句子偏长（平均 {} 字），表达绵长、娓娓道来。",
-            fmt1(stats.sentence_len_mean)
-        ));
+        lines.push("你说话句子偏长，表达绵长、娓娓道来。".to_string());
     }
 
     if sig.slash_high {
-        lines.push(format!(
-            "你习惯用「||」断句（每 100 字约 {} 次），把长回复拆成多条短句。",
-            fmt1(stats.per_100(stats.slash_count))
-        ));
+        lines.push("你习惯用「||」断句，把长回复拆成多条短句。".to_string());
     }
     if sig.comma_high {
-        lines.push(format!(
-            "你常使用逗号串联多个分句（每 100 字约 {} 次），语气连贯。",
-            fmt1(stats.per_100(stats.comma_count))
-        ));
+        lines.push("你常使用逗号串联多个分句，语气连贯。".to_string());
     }
     if sig.newline_high {
         lines.push("你习惯用换行分段表达，层次清晰。".to_string());
     }
 
     if sig.exclaim_high {
-        lines.push(format!(
-            "你每 100 字约使用 {} 个感叹号，情绪外放、表达热烈。",
-            fmt1(stats.per_100(stats.exclaim_count))
-        ));
+        lines.push("你爱用感叹号，情绪外放、表达热烈。".to_string());
     }
     if sig.question_high {
-        lines.push(format!(
-            "你频繁使用问句（每 100 字约 {} 个问号），喜欢用提问互动。",
-            fmt1(stats.per_100(stats.question_count))
-        ));
+        lines.push("你常用问句，喜欢用提问互动。".to_string());
     }
     if sig.ellipsis_high {
         lines.push("你常用省略号，语气留白、带思考感。".to_string());
@@ -321,15 +308,9 @@ pub fn render_template_rule(stats: &StyleStats, sig: &StyleSignificant) -> Strin
     }
 
     if sig.sentiment_positive {
-        lines.push(format!(
-            "你偏向积极表达（情感强度均值 {:+}），常给人温暖鼓励的感觉。",
-            fmt2(stats.sentiment_mean)
-        ));
+        lines.push("你偏向积极表达，常给人温暖鼓励的感觉。".to_string());
     } else if sig.sentiment_negative {
-        lines.push(format!(
-            "你偏向消极表达（情感强度均值 {:+}），常流露疲惫或无奈。",
-            fmt2(stats.sentiment_mean)
-        ));
+        lines.push("你偏向消极表达，常流露疲惫或无奈。".to_string());
     }
     if sig.interjection_high {
         lines.push("你常带感叹词（如「哇」「哎」），口语感强。".to_string());
@@ -383,7 +364,7 @@ pub async fn generate_style_rule(
     auto_translate: bool,
     temperature: f64,
 ) -> RamariaResult<String> {
-    let template = render_template_rule(stats, sig);
+    let template = render_template_rule(sig);
     if template.trim().is_empty() {
         return Ok(String::new());
     }
@@ -428,8 +409,8 @@ fn build_translate_prompt(stats: &StyleStats, sig: &StyleSignificant, template: 
     format!(
         "请根据以下说话风格统计参数，把模板规则改写成自然、具体的一段中文风格描述（3~6 句）。\n\
          要求：\n\
-         1. 保持统计事实不变（口癖词、句长、标点频率、情感倾向、话题）。\n\
-         2. 语气像人格设定说明，不要出现'根据统计''数据显示'等表述。\n\
+         1. 保持风格倾向不变（口癖词、句长节奏、标点习惯、情感倾向、话题）。\n\
+         2. 语气像人格设定说明，不要出现'根据统计''数据显示'等表述，也不要写入具体统计数字（如'每 100 字 X 次''均值 X'），用自然的频率感表达。\n\
          3. 不要提及任何具体对话原文。\n\n\
          统计参数：\n\
          - 口癖词：{}\n\
