@@ -98,8 +98,7 @@ pub(crate) async fn preview(
                 step_route_behavior(engine, storage, &config, uid, Uuid::nil(), &route_messages)
                     .await;
             let knowledge_facts = step_load_knowledge(storage, &config, uid, message).await;
-            let examples =
-                step_load_examples(storage, &config, uid, message, memory_context.is_some()).await;
+            let examples = step_load_examples(storage, &config, uid).await;
 
             let inputs = PromptMaterialInputs {
                 persona_uid: Some(uid),

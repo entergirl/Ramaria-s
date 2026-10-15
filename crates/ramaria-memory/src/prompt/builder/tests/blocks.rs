@@ -124,10 +124,12 @@ fn statement_max_examples_limit() {
     };
     let result = assemble_prompt(&ctx, &config);
 
-    assert!(result.contains("示例 1"));
-    assert!(result.contains("示例 2"));
-    assert!(result.contains("示例 3"));
-    assert!(!result.contains("示例 4"));
+    // 片段形态：无编号，仅前 3 条 reply 进入（同分稳定排序保输入序）
+    assert!(result.contains("reply0"));
+    assert!(result.contains("reply1"));
+    assert!(result.contains("reply2"));
+    assert!(!result.contains("reply3"));
+    assert!(!result.contains("示例 1"), "新版片段形态无编号");
 }
 
 // ---- Memory 块测试 ----

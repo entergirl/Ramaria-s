@@ -3,7 +3,7 @@
 //! 设计特点:
 //! - `build_style_layer`: 说话风格（手工优先）+ 自动风格规则 + 对话示例的组装
 //! - 手工与自动风格互斥渲染（手工存在时覆盖自动规则，D-V17-004）
-//! - `build_statement`: Few-shot 对话示例（前文/对方/你）渲染
+//! - `build_statement`: 说话片段渲染（无编号对话流；前文对话化 + 对方/你行）
 //! - 纯字符串拼接，无 I/O 与 LLM 依赖
 
 use super::role::{parse_persona_config, persona_patch};
@@ -115,38 +115,60 @@ fn build_personality(context: &PromptContext) -> String {
     }
 }
 
-/// 组装对话示例子段（`## 对话示例`）：Few-shot 对话示例。
+/// 组装对话示例子段（`## 对话示例`）：说话片段（无编号，连续对话流）。
 ///
-/// 从独立 Statement 块并入表达层；无示例时返回空（不产生段落）。
+/// 渲染形态:
+/// - 每条示例渲染为对话片段（前文对话行 + 对方行 + 你行），无编号、块间空行分隔；
+/// - 前文（`context`）行由提取期"用户: / 你: "标签转为"对方：/ 你："对话行（最多 3 行）；
+/// - 无示例时返回空（不产生段落）。
 fn build_statement(context: &PromptContext, config: &PromptConfig) -> String {
     if !config.include_examples || context.examples.is_empty() {
         return String::new();
     }
 
-    let mut lines: Vec<String> = Vec::new();
-    lines.push(format!("## 对话示例\n{STATEMENT_LEAD}"));
+    let mut blocks: Vec<String> = Vec::new();
+    for ex in context.examples.iter().take(config.max_examples) {
+        let mut lines: Vec<String> = Vec::new();
 
-    for (i, ex) in context
-        .examples
-        .iter()
-        .take(config.max_examples)
-        .enumerate()
-    {
-        lines.push(format!("\n示例 {}：", i + 1));
-
-        // 前文语境
-        if let Some(ref ctx) = ex.context
-            && !ctx.trim().is_empty()
+        // 前文语境（对话化渲染，最多 3 行）
+        if let Some(ctx) = ex
+            .context
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
         {
-            let ctx_lines: Vec<&str> = ctx.lines().take(3).collect();
-            for cl in ctx_lines {
-                lines.push(format!("  前文：{cl}"));
+            for cl in ctx.lines().take(3) {
+                let line = cl.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                lines.push(promote_context_line(line));
             }
         }
 
-        lines.push(format!("  对方：{}", ex.partner));
-        lines.push(format!("  你：{}", ex.reply));
+        lines.push(format!("对方：{}", ex.partner));
+        lines.push(format!("你：{}", ex.reply));
+        blocks.push(lines.join("\n"));
     }
 
-    lines.join("\n")
+    if blocks.is_empty() {
+        return String::new();
+    }
+
+    format!("## 对话示例\n{STATEMENT_LEAD}\n\n{}", blocks.join("\n\n"))
+}
+
+/// 把提取期 context 行（`用户: …` / `你: …`）转为对话片段行（`对方：…` / `你：…`）。
+///
+/// 说明:
+/// - 前缀标签半角冒号统一为全角冒号（与示例行同构）；
+/// - 无已知前缀时原样保留（防御）。
+fn promote_context_line(line: &str) -> String {
+    if let Some(rest) = line.strip_prefix("用户:") {
+        return format!("对方：{}", rest.trim());
+    }
+    if let Some(rest) = line.strip_prefix("你:") {
+        return format!("你：{}", rest.trim());
+    }
+    line.to_string()
 }

@@ -118,7 +118,8 @@ impl Default for RecentStateConfig {
 /// - `utt_context`: utt 原文片段（已按预算裁剪渲染；None 表示不注入）。
 /// - `bridge_context`: 桥接内容（上一会话尾部原文，已按预算截断；None 表示不注入）。
 /// - `behavior_decision`: 行为层路由合并决策（None = 未命中/关闭，不注入行为块）。
-/// - `examples`: 已选好的 Few-shot 示例（由 `load_examples_for_input` 评分轮换/兜底后传入）。
+/// - `examples`: 已选好的 Few-shot 示例（由 `load_examples_for_input` 风格代表性选取后传入；
+///   常驻注入，不依赖记忆命中）。
 /// - `max_examples`: examples 注入上限（来自生效配置 `examples.max_examples`，
 ///   由调用方传入以支持配置覆盖的探针场景）。
 /// - `knowledge_facts`: 知识层判定器命中的 active facts（装配前经 RAG 覆盖/角色层去重，

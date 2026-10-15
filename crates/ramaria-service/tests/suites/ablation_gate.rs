@@ -73,7 +73,7 @@ const KNOWLEDGE_FACT_TEXT: &str = "喜欢科幻电影";
 const PREV_SESSION_UTT: &str = "上次我们聊到科幻电影";
 /// 脉络层有主 L1 摘要特征（仅脉络档出现）。
 const NARRATIVE_L1_SUMMARY: &str = "用户聊了科幻电影与假期安排，倾向短途旅行";
-/// 表达层示例回复特征（仅记忆未命中时注入）。
+/// 表达层示例回复特征（常驻注入，不依赖记忆命中）。
 const EXAMPLE_REPLY: &str = "热情简短地回答科幻问题";
 /// 行为规则 reaction 特征（仅行为命中时注入）。
 const BEHAVIOR_REACTION: &str = "用热情兴奋的语气回应科幻话题";
@@ -290,7 +290,7 @@ fn add_prev_session_with_utt(storage: &MockStorage) {
     });
 }
 
-/// 构造表达层示例候选（未选中；记忆未命中时评分轮换兜底注入）。
+/// 构造表达层示例候选（未选中；常驻注入，按风格代表性选取）。
 fn add_example_candidates(storage: &MockStorage) {
     for (partner, reply) in [
         ("你最近看什么", EXAMPLE_REPLY),
@@ -474,7 +474,7 @@ async fn f0_full_system_injects_all_layers_on_route_hit() {
         .as_deref()
         .expect("F0 memory_context 应有内容");
     assert!(rag.contains("科幻电影"), "RAG 摘要含事实: {rag}");
-    // 四层：行为（两轮命中）、知识卡片、表达手工风格、utt 原文、近期脉络
+    // 四层：行为（两轮命中）、知识卡片、表达手工风格 + 常驻示例、utt 原文、近期脉络
     assert_present(
         prompt,
         &[
@@ -483,6 +483,8 @@ async fn f0_full_system_injects_all_layers_on_route_hit() {
             "关于兴趣爱好：喜欢科幻电影",
             "# 说话风格（表达层）",
             "## 说话风格",
+            "## 对话示例",
+            EXAMPLE_REPLY,
             "## 原文片段",
             PREV_SESSION_UTT,
             "## 近期对话脉络",
@@ -556,21 +558,19 @@ async fn i_expression_is_rag_base_plus_style_and_utt() {
         .as_deref()
         .expect("I_expression 保留 RAG 基座");
     assert!(rag.contains("科幻电影"), "RAG 摘要含事实: {rag}");
-    // 表达层 = 手工说话风格 + utt 原文（示例因 RAG 命中被既有兜底语义跳过）
+    // 表达层 = 手工说话风格 + 常驻示例 + utt 原文（示例不依赖记忆命中）
     assert_present(
         prompt,
         &[
             "# 说话风格（表达层）",
             "## 说话风格",
             PERSONA_STYLE,
+            "## 对话示例",
+            EXAMPLE_REPLY,
             "## 原文片段",
             PREV_SESSION_UTT,
         ],
         "I_expression",
-    );
-    assert!(
-        !prompt.contains("## 对话示例"),
-        "[I_expression] 记忆命中时示例兜底被跳过:\n{prompt}"
     );
     assert_absent(
         prompt,
@@ -677,7 +677,7 @@ async fn s_expression_removes_rag_keeps_expression_with_examples() {
         request.memory_context.is_none(),
         "S_expression 去 RAG → memory_context 应为 None"
     );
-    // 表达层 = 手工风格 + 示例（去 RAG → 记忆未命中 → 示例兜底注入）+ utt 原文
+    // 表达层 = 手工风格 + 常驻示例 + utt 原文（示例不依赖记忆命中）
     assert_present(
         prompt,
         &[

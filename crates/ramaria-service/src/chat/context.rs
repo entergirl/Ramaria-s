@@ -188,23 +188,14 @@ pub(crate) async fn step_load_knowledge(
     }
 }
 
-/// 步骤 11：示例预选（注入闸门关闭 → 空；记忆命中 → 兜底不注入）。
+/// 步骤 11：示例预选（常驻；注入闸门关闭 → 空）。
 pub(crate) async fn step_load_examples(
     storage: &dyn StorageBackend,
     config: &RamariaConfig,
     persona: &str,
-    message: &str,
-    memory_hit: bool,
 ) -> Vec<ramaria_core::types::PersonaExample> {
     if config.injection.examples {
-        load_examples_for_input(
-            storage,
-            &config.examples,
-            Some(persona),
-            message,
-            memory_hit,
-        )
-        .await
+        load_examples_for_input(storage, &config.examples, Some(persona)).await
     } else {
         Vec::new()
     }

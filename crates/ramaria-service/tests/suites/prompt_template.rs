@@ -256,7 +256,9 @@ async fn examples_max_examples_propagated() {
 
     let request = llm.last_request().expect("应记录最后一次请求");
     let prompt = &request.system_prompt;
-    let example_count = prompt.matches("示例 ").count();
+    // 按示例 reply 特征计数（每条恰好出现一次；不数「你：」行——
+    // 共享规则自带示例行会干扰计数）
+    let example_count = prompt.matches("示例回复内容").count();
     assert!(
         example_count <= 2,
         "max_examples=2 应注入 ≤2 条，实际 {example_count} 条"

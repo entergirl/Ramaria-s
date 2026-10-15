@@ -190,9 +190,8 @@ pub(super) async fn prepare_request(
     // ---- 10. 知识层判定器检索（关闭 / 未命中 / 失败 → 空，不注入知识块） ----
     let knowledge_facts = step_load_knowledge(storage, config, &persona, message).await;
 
-    // ---- 11. 示例预选（关闭 → 空；记忆未命中时走兜底轮换） ----
-    let examples =
-        step_load_examples(storage, config, &persona, message, memory_context.is_some()).await;
+    // ---- 11. 示例预选（常驻；注入闸门关闭 → 空） ----
+    let examples = step_load_examples(storage, config, &persona).await;
 
     // ---- 12. 系统 Prompt 装配（协调路径可能裁剪 / 丢弃 RAG，以结果回写记忆上下文） ----
     let inputs = PromptMaterialInputs {

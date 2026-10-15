@@ -177,3 +177,21 @@ fn memory_layer_budget_applied_in_assemble() {
     assert!(!result.contains("原文内容"), "原文块被裁");
     assert!(!result.contains("桥接内容"), "桥接被裁");
 }
+
+/// 预算隔离：脉络层预算极紧时示例片段不受裁剪（示例在表达层，不参与脉络层预算）。
+#[test]
+fn examples_unaffected_by_memory_layer_budget() {
+    let ctx = PromptContext {
+        persona: Some(make_test_persona()),
+        examples: vec![make_test_example("在吗", "在的呀")],
+        recent_session_summaries: vec!["最近的摘要内容".to_string()],
+        ..Default::default()
+    };
+    let config = PromptConfig {
+        memory_layer_budget_chars: Some(8),
+        ..Default::default()
+    };
+    let result = assemble_prompt(&ctx, &config);
+    assert!(result.contains("## 对话示例"), "示例不受脉络层预算影响");
+    assert!(result.contains("你：在的呀"), "示例片段完整渲染");
+}
