@@ -66,6 +66,12 @@ pub struct ChatRequest {
     pub temperature: f64,
     /// 最大输出 tokens
     pub max_tokens: u32,
+    /// 是否启用思考模式（provider 按字段构造请求体）。
+    ///
+    /// 取值:
+    /// - `None` / `Some(false)`: 关闭思考（与既有行为一致，默认）；
+    /// - `Some(true)`: 开启思考（仅对话路径按配置开启；结构化提取路径恒关闭）。
+    pub enable_thinking: Option<bool>,
     /// 请求标识，用于流式事件串联
     pub request_id: Uuid,
     /// Prompt 模板版本（参与精确缓存 key，变更需递增）。

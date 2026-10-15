@@ -83,6 +83,7 @@ fn build_messages_basic() {
         max_tokens: 1024,
         request_id: Uuid::new_v4(),
         template_version: "test".into(),
+        enable_thinking: None,
     };
 
     let messages = build_messages(&request);
@@ -108,6 +109,7 @@ fn build_messages_with_empty_memory_context() {
         max_tokens: 1024,
         request_id: Uuid::new_v4(),
         template_version: "test".into(),
+        enable_thinking: None,
     };
 
     let messages = build_messages(&request);
@@ -134,6 +136,7 @@ fn build_messages_with_history() {
         max_tokens: 1024,
         request_id: Uuid::new_v4(),
         template_version: "test".into(),
+        enable_thinking: None,
     };
 
     let messages = build_messages(&request);
@@ -167,6 +170,7 @@ fn build_messages_skips_empty_user_message() {
         max_tokens: 1024,
         request_id: Uuid::new_v4(),
         template_version: "test".into(),
+        enable_thinking: None,
     };
 
     let messages = build_messages(&request);
@@ -189,6 +193,7 @@ fn build_messages_skips_blank_user_message() {
         max_tokens: 1024,
         request_id: Uuid::new_v4(),
         template_version: "test".into(),
+        enable_thinking: None,
     };
 
     let messages = build_messages(&request);
@@ -260,6 +265,7 @@ fn sanitize_prevent_injection_in_build_messages() {
         max_tokens: 1024,
         request_id: Uuid::new_v4(),
         template_version: "test".into(),
+        enable_thinking: None,
     };
 
     let messages = build_messages(&request);
@@ -282,6 +288,7 @@ fn sanitize_memory_context_uses_xml_delimiters() {
         max_tokens: 1024,
         request_id: Uuid::new_v4(),
         template_version: "test".into(),
+        enable_thinking: None,
     };
 
     let messages = build_messages(&request);
@@ -316,6 +323,7 @@ fn build_vision_messages_uses_array_content_with_images_in_order() {
         max_tokens: 256,
         request_id: Uuid::new_v4(),
         template_version: "vision-v1".into(),
+        enable_thinking: None,
     };
     let images = vec![
         "data:image/jpeg;base64,AAA".to_string(),
@@ -359,6 +367,7 @@ fn build_vision_messages_without_images_keeps_text_only_array() {
         max_tokens: 256,
         request_id: Uuid::new_v4(),
         template_version: "vision-v1".into(),
+        enable_thinking: None,
     };
 
     let messages = build_vision_messages(&request, &[]);
@@ -385,6 +394,7 @@ fn build_messages_keeps_string_content_on_dialog_path() {
         max_tokens: 1024,
         request_id: Uuid::new_v4(),
         template_version: "test".into(),
+        enable_thinking: None,
     };
 
     let messages = build_messages(&request);
@@ -591,6 +601,7 @@ fn chat_request(template_version: &str) -> ChatRequest {
         max_tokens: 1024,
         request_id: Uuid::new_v4(),
         template_version: template_version.into(),
+        enable_thinking: None,
     }
 }
 
@@ -598,10 +609,10 @@ fn chat_request(template_version: &str) -> ChatRequest {
 fn cache_key_changes_with_template_version() {
     let messages = serde_json::json!([{"role": "system", "content": "你好"}]);
     let messages: Vec<serde_json::Value> = vec![messages];
-    let k1 = cache_key("model-a", "v1", 0.3, 1024, &messages);
-    let k1_again = cache_key("model-a", "v1", 0.3, 1024, &messages);
-    let k2 = cache_key("model-a", "v2", 0.3, 1024, &messages);
-    let k3 = cache_key("model-b", "v1", 0.3, 1024, &messages);
+    let k1 = cache_key("model-a", "v1", 0.3, 1024, None, &messages);
+    let k1_again = cache_key("model-a", "v1", 0.3, 1024, None, &messages);
+    let k2 = cache_key("model-a", "v2", 0.3, 1024, None, &messages);
+    let k3 = cache_key("model-b", "v1", 0.3, 1024, None, &messages);
 
     assert_eq!(k1, k1_again, "同输入应产生同 key（重跑稳定）");
     assert_eq!(k1.len(), 64, "SHA-256 hex 应为 64 字符");
@@ -614,9 +625,9 @@ fn cache_key_changes_with_template_version() {
 fn cache_key_changes_with_sampling_params() {
     let messages: Vec<serde_json::Value> =
         vec![serde_json::json!({"role": "user", "content": "你好"})];
-    let base = cache_key("model-a", "v1", 0.3, 1024, &messages);
-    let higher_temp = cache_key("model-a", "v1", 0.7, 1024, &messages);
-    let more_tokens = cache_key("model-a", "v1", 0.3, 2048, &messages);
+    let base = cache_key("model-a", "v1", 0.3, 1024, None, &messages);
+    let higher_temp = cache_key("model-a", "v1", 0.7, 1024, None, &messages);
+    let more_tokens = cache_key("model-a", "v1", 0.3, 2048, None, &messages);
 
     assert_eq!(base.len(), 64, "SHA-256 hex 应为 64 字符");
     assert_ne!(base, higher_temp, "temperature 变更 → key 变化");
@@ -634,11 +645,31 @@ fn cache_key_changes_with_prompt_content() {
         "content": "# 角色（行为层）\n\n# 主动开口\n现在不是你在回复对方。"
     })];
 
-    let k_plain = cache_key("model-a", "same-version", 0.3, 1024, &plain);
-    let k_proactive = cache_key("model-a", "same-version", 0.3, 1024, &with_proactive);
+    let k_plain = cache_key("model-a", "same-version", 0.3, 1024, None, &plain);
+    let k_proactive = cache_key("model-a", "same-version", 0.3, 1024, None, &with_proactive);
     assert_ne!(
         k_plain, k_proactive,
         "提示词内容变化 → key 变化（主动段注入不误命中普通对话缓存）"
+    );
+}
+
+/// 思考开关纳入缓存 key：思考/非思考是两种生成配置，同输入下必须产生
+/// 不同 key；`None` 与 `Some(false)` 语义等价（均为关闭），key 相同。
+#[test]
+fn cache_key_changes_with_thinking_flag() {
+    let messages: Vec<serde_json::Value> =
+        vec![serde_json::json!({"role": "user", "content": "你好"})];
+    let disabled_default = cache_key("model-a", "v1", 0.3, 1024, None, &messages);
+    let thinking = cache_key("model-a", "v1", 0.3, 1024, Some(true), &messages);
+    let explicit_disabled = cache_key("model-a", "v1", 0.3, 1024, Some(false), &messages);
+
+    assert_ne!(
+        disabled_default, thinking,
+        "思考开启 vs 默认关闭 → key 必须不同，避免跨思考模式互串缓存"
+    );
+    assert_eq!(
+        disabled_default, explicit_disabled,
+        "None 与 Some(false) 语义等价（均 disabled），key 应相同"
     );
 }
 
@@ -651,7 +682,14 @@ async fn cache_hit_reuses_response_without_calling_llm() {
     // 命中路径通过预置 store 模拟：
     let request = chat_request("test");
     let messages = build_messages(&request);
-    let key = cache_key("test-model", "test", 0.3, 1024, &messages);
+    let key = cache_key(
+        "test-model",
+        "test",
+        0.3,
+        1024,
+        request.enable_thinking,
+        &messages,
+    );
     cache
         .store
         .lock()

@@ -119,6 +119,7 @@ pub async fn generate_paraphrase(
         max_tokens: config.max_tokens,
         request_id,
         template_version: crate::prompt::PROMPT_TEMPLATE_VERSION.to_string(),
+        enable_thinking: None,
     };
 
     // 调用 LLM

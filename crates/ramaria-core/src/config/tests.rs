@@ -586,6 +586,33 @@ provider = "lm-studio"
     assert_eq!(cfg.utt.theta_gap_minutes, 10);
     assert_eq!(cfg.examples.max_examples, 5);
     assert!(cfg.bridge.enabled);
+    assert!(!cfg.backend.chat_thinking, "旧配置缺思考键应回退默认关闭");
+    assert_eq!(cfg.backend.role_immersion, RoleImmersion::Off);
+    assert_eq!(cfg.backend.chat_temperature, None);
+}
+
+/// 思考适配三键（`[backend]` chat_thinking / role_immersion / chat_temperature）默认值与解析。
+#[test]
+fn backend_thinking_keys_default_and_parse() {
+    let cfg = RamariaConfig::default();
+    assert!(!cfg.backend.chat_thinking, "默认关闭思考模式");
+    assert_eq!(
+        cfg.backend.role_immersion,
+        RoleImmersion::Off,
+        "默认不注入角色沉浸"
+    );
+    assert_eq!(cfg.backend.chat_temperature, None, "默认沿用 temperature");
+
+    let toml_text = r#"
+[backend]
+chat_thinking = true
+role_immersion = "user"
+chat_temperature = 1.0
+"#;
+    let cfg: RamariaConfig = toml::from_str(toml_text).expect("思考适配键应可解析");
+    assert!(cfg.backend.chat_thinking);
+    assert_eq!(cfg.backend.role_immersion, RoleImmersion::User);
+    assert_eq!(cfg.backend.chat_temperature, Some(1.0));
 }
 
 /// 六组基础配置（paths/decay/session/thresholds/index/logging）只写部分键时，

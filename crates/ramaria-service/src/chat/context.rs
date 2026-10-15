@@ -6,12 +6,16 @@
 //! - 素材装载：脉络 / 行为 / 知识 / 示例四类素材，任一环节关闭或失败均静默降级（返回空素材）
 //! - Prompt 装配：普通路径与协调预算路径共用同一素材结构，协调结果回写记忆上下文
 //! - Token 预算：上下文窗口与输出上限取后端配置，协调路径放开整条 system_prompt 句截断
+//! - 思考适配：对话路径按 `[backend]` 选择思考开关 / 角色沉浸注入 / 生成温度，
+//!   注入在预算裁剪之后进行（默认关闭时请求逐字段与既有行为一致）
 //! - 隐私：日志只记人格与长度口径，不记素材与提示词内容
 
-use ramaria_core::config::RamariaConfig;
+use ramaria_core::config::{BackendSelection, RamariaConfig, RoleImmersion};
 use ramaria_core::error::RamariaResult;
 use ramaria_core::traits::{ChatMessage, ChatRequest, StorageBackend};
-use ramaria_core::types::{BackendConfig, Message, MessageSource, now_ms};
+use ramaria_core::types::{
+    BackendConfig, LlmProvider, Message, MessageRole, MessageSource, now_ms,
+};
 use ramaria_memory::chat::{
     LoadedPromptMaterial, PromptMaterialInputs, build_system_prompt, load_examples_for_input,
     load_narrative_material, load_prompt_material,
@@ -23,6 +27,19 @@ use ramaria_memory::token_budget::{self, TokenBudgetConfig};
 use uuid::Uuid;
 
 use crate::engine::Engine;
+
+// =========================================================
+// 角色沉浸指令（对话路径可选注入）
+// =========================================================
+
+/// 角色沉浸指令标记（幂等判定与请求断言用）。
+pub(super) const ROLE_IMMERSION_MARKER: &str = "【角色沉浸要求】";
+
+/// 角色沉浸指令原文（`[backend].role_immersion` 为 system / user 时注入）。
+pub(super) const ROLE_IMMERSION_DIRECTIVE: &str = r#"【角色沉浸要求】在你的思考过程（<think>标签内）中，请遵守以下规则：
+1. 请以角色第一人称进行内心独白，用括号包裹内心活动，例如"（心想：……）"或"(内心OS：……)"
+2. 用第一人称描写角色的内心感受，例如"我心想""我觉得""我暗自"等
+3. 思考内容应沉浸在角色中，通过内心独白分析剧情和规划回复"#;
 
 // =========================================================
 // 步骤实现：记忆召回与素材装载
@@ -303,21 +320,86 @@ pub(super) fn step_apply_token_budget(
     budgeted
 }
 
-/// 步骤 13b：构建 `ChatRequest`（预算裁剪结果 + 后端生成参数）。
+/// 步骤 13b：构建 `ChatRequest`（预算裁剪结果 + 后端生成参数 + 思考适配）。
+///
+/// 说明:
+/// - 思考开关：仅 DeepSeek 且 `chat_thinking` 开启时置 `Some(true)`，其余 `None`；
+/// - 对话温度：`chat_temperature` 已配置时覆盖 `temperature`，未配置沿用后端值；
+/// - 角色沉浸：仅 DeepSeek 且 `role_immersion` 非 off 时注入
+///   （system 末尾 / 消息数组内首条 user 消息末尾）；
+/// - 注入在 token 预算裁剪之后执行，保证指令落在最终消息数组内；
+///   目标消息已含标记时跳过（幂等）。
 pub(super) fn step_build_request(
     backend: &BackendConfig,
+    selection: &BackendSelection,
     budgeted: token_budget::BudgetedContext,
     message: &str,
     request_id: Uuid,
 ) -> ChatRequest {
+    let mut system_prompt = budgeted.system_prompt;
+    let mut history = budgeted.history;
+    let mut user_message = message.to_string();
+
+    // 仅 DeepSeek 生效；默认关闭时请求与既有行为逐字段一致
+    if backend.provider == LlmProvider::DeepSeek {
+        match selection.role_immersion {
+            RoleImmersion::System => append_role_immersion_to_system(&mut system_prompt),
+            RoleImmersion::User => {
+                append_role_immersion_to_first_user(&mut history, &mut user_message);
+            }
+            RoleImmersion::Off => {}
+        }
+    }
+
     ChatRequest {
-        system_prompt: budgeted.system_prompt,
+        system_prompt,
         memory_context: budgeted.memory_context,
-        history: budgeted.history,
-        user_message: message.to_string(),
-        temperature: backend.temperature,
+        history,
+        user_message,
+        temperature: selection.chat_temperature.unwrap_or(backend.temperature),
         max_tokens: backend.max_tokens,
+        enable_thinking: (backend.provider == LlmProvider::DeepSeek && selection.chat_thinking)
+            .then_some(true),
         request_id,
         template_version: PROMPT_TEMPLATE_VERSION.to_string(),
+    }
+}
+
+/// 将角色沉浸指令追加到 system prompt 末尾（已含标记时跳过，幂等）。
+fn append_role_immersion_to_system(system_prompt: &mut String) {
+    if system_prompt.contains(ROLE_IMMERSION_MARKER) {
+        return;
+    }
+    if !system_prompt.is_empty() {
+        system_prompt.push_str("\n\n");
+    }
+    system_prompt.push_str(ROLE_IMMERSION_DIRECTIVE);
+}
+
+/// 将角色沉浸指令追加到消息数组内首条 user 消息末尾。
+///
+/// 说明:
+/// - 无历史 user 消息时退回当前用户消息（保证指令在最终消息数组内）；
+/// - 目标消息已含标记时跳过（幂等）。
+fn append_role_immersion_to_first_user(history: &mut [ChatMessage], user_message: &mut String) {
+    match history.iter_mut().find(|msg| msg.role == MessageRole::User) {
+        Some(first_user) => {
+            if first_user.content.contains(ROLE_IMMERSION_MARKER) {
+                return;
+            }
+            if !first_user.content.is_empty() {
+                first_user.content.push_str("\n\n");
+            }
+            first_user.content.push_str(ROLE_IMMERSION_DIRECTIVE);
+        }
+        None => {
+            if user_message.contains(ROLE_IMMERSION_MARKER) {
+                return;
+            }
+            if !user_message.is_empty() {
+                user_message.push_str("\n\n");
+            }
+            user_message.push_str(ROLE_IMMERSION_DIRECTIVE);
+        }
     }
 }

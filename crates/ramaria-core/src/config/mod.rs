@@ -46,7 +46,7 @@ pub use domains::{
 };
 pub use infra::{
     BackendSelection, CacheConfig, CacheEviction, EmbeddingConfig, EmbeddingDevice, LoggingConfig,
-    MiscConfig,
+    MiscConfig, RoleImmersion,
 };
 pub use layers::{
     InjectionBudgetConfig, InjectionGate, InjectionSlot, L1Config, L1ProgressiveConfig,

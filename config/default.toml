@@ -54,6 +54,12 @@ max_tokens = 1024
 # true = 对话时附带相关记忆（首次使用线上 API 需隐私确认）
 # false = 仅发送当前对话消息
 online_memory_injection = true
+# 对话路径思考模式（仅 DeepSeek 生效；结构化提取路径恒关闭）
+chat_thinking = false
+# 角色沉浸指令注入位置（off | system | user；配合 chat_thinking 使用）
+role_immersion = "off"
+# 对话路径生成温度（注释掉 = 沿用 temperature）
+# chat_temperature = 1.0
 
 # =========================================================
 # 嵌入模型运行时配置

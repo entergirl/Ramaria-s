@@ -49,3 +49,6 @@ mod tests;
 
 #[cfg(test)]
 mod tests_social;
+
+#[cfg(test)]
+mod tests_thinking;

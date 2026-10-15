@@ -153,6 +153,7 @@ impl OpenAiTransport {
     /// - `model`: 模型标识。
     /// - `temperature`: 生成温度 0.0..2.0。
     /// - `max_tokens`: 最大输出 token 数。
+    /// - `enable_thinking`: 思考模式开关（`Some(true)` 开启，其余关闭）。
     ///
     /// 返回:
     /// - 成功时返回 assistant 完整文本。
@@ -164,25 +165,32 @@ impl OpenAiTransport {
         model: &str,
         temperature: f64,
         max_tokens: u32,
+        enable_thinking: Option<bool>,
     ) -> RamariaResult<String> {
         let url = format!("{}/chat/completions", self.base_url);
-        // 关闭思考模式（thinking disabled）：
-        // - deepseek-v4-flash 默认开启思考（官方文档 thinking_mode：默认 enabled，
-        //   effort=high），思考内容（reasoning_content）消耗输出预算；
-        //   在 max_tokens 较小（如 L1 摘要 512）时思考即可耗尽预算，
-        //   导致 content 为空或截断（2026-08-08 实测 reasoning_len=30556 后 content 空）。
+        // 思考模式按请求参数构造（thinking.type）：
+        // - 默认（None / Some(false)）关闭：deepseek-v4-flash 默认开启思考
+        //   （官方文档 thinking_mode：默认 enabled，effort=high），思考内容
+        //   （reasoning_content）消耗输出预算；在 max_tokens 较小（如 L1 摘要 512）
+        //   时思考即可耗尽预算，导致 content 为空或截断（实测 reasoning_len
+        //   可达数万后 content 空）。
         // - 本函数服务全部结构化提取任务（L1 摘要/L2 事件提取/L3 推断/冷启动），
         //   不需要链式思考；关闭后 temperature 参数也恢复生效（思考模式下
         //   temperature/top_p 等参数无效，官方文档 Input and Output Parameters）。
-        // - 对话路径（chat_stream）已同步关闭思考（2026-08-25），
-        //   保证 temperature 在对话链路同样生效、输出可复现。
+        // - 对话路径可经 `ChatRequest.enable_thinking` 显式开启（思考适配开关，
+        //   见 `chat_stream`）；默认关闭，保证 temperature 生效、输出可复现。
+        let thinking_type = if enable_thinking == Some(true) {
+            "enabled"
+        } else {
+            "disabled"
+        };
         let body = serde_json::json!({
             "model": model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
             "stream": false,
-            "thinking": {"type": "disabled"},
+            "thinking": {"type": thinking_type},
         });
 
         let response = self.send_request(&url, &body).await?;
@@ -245,6 +253,7 @@ impl OpenAiTransport {
     /// - `model`: 模型标识。
     /// - `temperature`: 生成温度。
     /// - `max_tokens`: 最大输出 token 数。
+    /// - `enable_thinking`: 思考模式开关（`Some(true)` 开启，其余关闭）。
     ///
     /// 返回:
     /// - 成功时返回 `Pin<Box<dyn Stream<Item = RamariaResult<StreamDelta>>>>`。
@@ -262,22 +271,28 @@ impl OpenAiTransport {
         model: &str,
         temperature: f64,
         max_tokens: u32,
+        enable_thinking: Option<bool>,
     ) -> RamariaResult<Pin<Box<dyn Stream<Item = RamariaResult<StreamDelta>> + Send>>> {
         let url = format!("{}/chat/completions", self.base_url);
-        // 关闭思考模式（thinking disabled），与 chat 非流式方法（已修复）保持一致：
-        // - deepseek-v4-flash 默认开启思考（官方文档 thinking_mode：默认 enabled，
-        //   effort=high）；思考模式下 temperature/top_p 等采样参数不生效
-        //   （官方文档 Input and Output Parameters："设置不报错但不生效"），
-        //   输出由思考主导、同参数不可复现（2026-08-25 探针复跑一致性验证失败：
-        //   同 seed 同命令两次运行，全部回复不同）。
-        // - 本函数服务对话路径；关闭后 temperature 恢复生效、输出显著更确定。
+        // 思考模式按请求参数构造（thinking.type），与 chat 非流式方法同一口径：
+        // - 默认（None / Some(false)）关闭：deepseek-v4-flash 默认开启思考
+        //   （官方文档 thinking_mode：默认 enabled，effort=high）；思考模式下
+        //   temperature/top_p 等采样参数不生效（官方文档 Input and Output
+        //   Parameters："设置不报错但不生效"），输出由思考主导、同参数不可复现。
+        // - 本函数服务对话路径；可经 `ChatRequest.enable_thinking` 显式开启
+        //   （思考适配开关），默认关闭后 temperature 恢复生效、输出更确定。
+        let thinking_type = if enable_thinking == Some(true) {
+            "enabled"
+        } else {
+            "disabled"
+        };
         let body = serde_json::json!({
             "model": model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
             "stream": true,
-            "thinking": {"type": "disabled"},
+            "thinking": {"type": thinking_type},
         });
 
         let response = self.send_request(&url, &body).await?;

@@ -33,6 +33,7 @@ fn chat_request_construction() {
         user_message: "今天天气如何？".into(),
         temperature: 0.3,
         max_tokens: 1024,
+        enable_thinking: None,
         request_id: Uuid::new_v4(),
         template_version: "test".into(),
     };
@@ -40,6 +41,7 @@ fn chat_request_construction() {
     assert!(req.memory_context.is_some());
     assert!(!req.history.is_empty());
     assert!(!req.template_version.is_empty());
+    assert!(req.enable_thinking.is_none(), "默认路径不开启思考模式");
 }
 
 #[test]

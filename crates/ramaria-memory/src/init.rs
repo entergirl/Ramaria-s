@@ -328,6 +328,7 @@ pub async fn decompose_profile_text(
         max_tokens: config.max_tokens,
         request_id: Uuid::new_v4(),
         template_version: crate::prompt::PROMPT_TEMPLATE_VERSION.to_string(),
+        enable_thinking: None,
     };
 
     let raw_response = match llm.chat(&request).await {

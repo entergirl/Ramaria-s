@@ -3,7 +3,7 @@
 //! 设计特点:
 //! - 覆盖 SSE 行解析各分支与流内 error 载荷上抛
 //! - 覆盖 http_error 状态码分类与响应体截断
-//! - 覆盖 chat_stream 请求 body（思考模式禁用）与 mock SSE 服务端链路
+//! - 覆盖 chat_stream 请求 body（思考模式开关：默认禁用 / 显式开启）与 mock SSE 服务端链路
 //! - 覆盖背压不丢 delta 与首事件 / 整体分级超时
 
 use super::*;
@@ -206,12 +206,13 @@ async fn spawn_mock_sse_server() -> (
     (format!("http://{}", addr), captured)
 }
 
-/// chat_stream 请求 body 必须含 `thinking.type == "disabled"`。
+/// chat_stream 请求 body：`enable_thinking = None` 必须含 `thinking.type == "disabled"`。
 ///
 /// 背景:
 /// - 思考模式下 temperature/top_p 等采样参数不生效（官方文档 Input and
 ///   Output Parameters："设置不报错但不生效"），输出由思考主导、不可复现；
 ///   chat 非流式已修复，chat_stream 未同步导致对话链路同参数不可复现。
+/// - 默认路径（None / Some(false)）恒关闭，保证默认行为零变化。
 /// - 通过 mock server 捕获真实发送的请求 body，断言字段存在且取值正确。
 #[tokio::test]
 async fn chat_stream_body_disables_thinking() {
@@ -223,7 +224,7 @@ async fn chat_stream_body_disables_thinking() {
 
     let messages = vec![serde_json::json!({"role": "user", "content": "你好"})];
     let mut stream = transport
-        .chat_stream(&messages, "deepseek-chat", 0.0, 512)
+        .chat_stream(&messages, "deepseek-chat", 0.0, 512, None)
         .await
         .expect("chat_stream 应成功");
 
@@ -253,6 +254,46 @@ async fn chat_stream_body_disables_thinking() {
     assert_eq!(body["temperature"], 0.0, "temperature 应透传");
     assert_eq!(body["max_tokens"], 512, "max_tokens 应透传");
     assert_eq!(body["messages"][0]["role"], "user", "messages 应透传");
+}
+
+/// chat_stream 请求 body：`enable_thinking = Some(true)` 必须含 `thinking.type == "enabled"`。
+///
+/// 用途:
+/// - 对话路径思考适配开关的通道级验证（body 由请求参数字段构造，非恒关闭）。
+#[tokio::test]
+async fn chat_stream_body_enables_thinking_when_requested() {
+    use futures::StreamExt;
+
+    let (base_url, captured) = spawn_mock_sse_server().await;
+    let transport =
+        OpenAiTransport::new(base_url, Some("test-key".into()), 5).expect("构造 transport 应成功");
+
+    let messages = vec![serde_json::json!({"role": "user", "content": "你好"})];
+    let mut stream = transport
+        .chat_stream(&messages, "deepseek-chat", 1.0, 4096, Some(true))
+        .await
+        .expect("chat_stream 应成功");
+
+    // 消费流直到 [DONE]，保证 mock 已收到并处理完整请求
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(d) if d.done => break,
+            Ok(_) => {}
+            Err(e) => panic!("流内错误: {e}"),
+        }
+    }
+
+    let body = captured
+        .lock()
+        .expect("捕获锁应可用")
+        .clone()
+        .expect("应捕获到请求 body");
+    assert_eq!(
+        body["thinking"]["type"], "enabled",
+        "显式开启思考时请求应携带 enabled"
+    );
+    assert_eq!(body["temperature"], 1.0, "temperature 应透传");
+    assert_eq!(body["max_tokens"], 4096, "max_tokens 应透传");
 }
 
 // =========================================================

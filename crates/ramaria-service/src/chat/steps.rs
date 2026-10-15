@@ -130,7 +130,8 @@ pub(super) struct PreparedRequest {
 /// 10. 知识层判定器检索；
 /// 11. 示例预选；
 /// 12. 系统 Prompt 装配（普通 / 协调预算路径）；
-/// 13. Token 预算裁剪与 `ChatRequest` 构建（主动模式用户消息位留空）。
+/// 13. Token 预算裁剪与 `ChatRequest` 构建（主动模式用户消息位留空；
+///     思考适配按 `[backend]` 配置注入思考开关 / 角色沉浸 / 对话温度）。
 pub(super) async fn prepare_request(
     engine: &Engine,
     input: &ChatInput,
@@ -243,7 +244,13 @@ pub(super) async fn prepare_request(
         request_message,
         request_id,
     );
-    let chat_request = step_build_request(&backend, budgeted, request_message, request_id);
+    let chat_request = step_build_request(
+        &backend,
+        &config.backend,
+        budgeted,
+        request_message,
+        request_id,
+    );
 
     Ok(PreparedRequest {
         request_id,

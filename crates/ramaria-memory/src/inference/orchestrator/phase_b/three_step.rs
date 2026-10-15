@@ -100,6 +100,7 @@ async fn call_llm_and_get_text(
             .min(capability.context_window.saturating_sub(2048)),
         request_id: Uuid::new_v4(),
         template_version: crate::prompt::PROMPT_TEMPLATE_VERSION.to_string(),
+        enable_thinking: None,
     };
 
     debug!(

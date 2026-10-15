@@ -33,7 +33,7 @@ use super::retry::RetryConfig;
 /// - 实现重试逻辑（`with_retry`）
 /// - 将 `ChatRequest`（trait 格式）组装为 OpenAI 消息数组
 /// - 可选接入 LLM 响应精确缓存（三层生成缓存）：
-///   `chat()` 先按 `sha256(model_id + template_version + 采样参数 + prompt)` 查缓存，
+///   `chat()` 先按 `sha256(model_id + template_version + 采样参数 + 思考开关 + prompt)` 查缓存，
 ///   命中直接复用（不重复花费 API 账单）；查询/写入失败静默降级走 LLM。
 ///
 /// 安全约束:
@@ -170,7 +170,7 @@ impl ProviderBase {
     ///
     /// 缓存行为（三层生成缓存）:
     /// - 已注入缓存（`with_cache`）且 `request.template_version` 非空时：
-    ///   1. 构造 key = sha256(model_id + template_version + 采样参数 + messages JSON)；
+    ///   1. 构造 key = sha256(model_id + template_version + 采样参数 + 思考开关 + messages JSON)；
     ///   2. 查询缓存：命中 → 记 `cache_hit=true` 日志并直接返回（不发 HTTP）；
     ///   3. 未命中 → 正常调 LLM，成功后写入缓存（写失败记 warn 继续）；
     ///   4. 查询失败 → 记 warn 后直接走 LLM（降级不阻塞）。
@@ -195,6 +195,7 @@ impl ProviderBase {
                 &request.template_version,
                 temperature,
                 max_tokens,
+                request.enable_thinking,
                 &messages,
             );
             match cache.get(&key).await {
@@ -230,7 +231,13 @@ impl ProviderBase {
             let response = self
                 .with_retry(|| async {
                     self.transport
-                        .chat(&messages, model, temperature, max_tokens)
+                        .chat(
+                            &messages,
+                            model,
+                            temperature,
+                            max_tokens,
+                            request.enable_thinking,
+                        )
                         .await
                 })
                 .await;
@@ -264,7 +271,13 @@ impl ProviderBase {
         // ---- 未启用缓存路径（与 v1.4 行为一致）----
         self.with_retry(|| async {
             self.transport
-                .chat(&messages, model, temperature, max_tokens)
+                .chat(
+                    &messages,
+                    model,
+                    temperature,
+                    max_tokens,
+                    request.enable_thinking,
+                )
                 .await
         })
         .await
@@ -298,7 +311,13 @@ impl ProviderBase {
 
         self.with_retry(|| async {
             self.transport
-                .chat(&messages, model, temperature, max_tokens)
+                .chat(
+                    &messages,
+                    model,
+                    temperature,
+                    max_tokens,
+                    request.enable_thinking,
+                )
                 .await
         })
         .await
@@ -330,7 +349,13 @@ impl ProviderBase {
 
         self.with_retry(|| async {
             self.transport
-                .chat_stream(&messages, model, temperature, max_tokens)
+                .chat_stream(
+                    &messages,
+                    model,
+                    temperature,
+                    max_tokens,
+                    request.enable_thinking,
+                )
                 .await
         })
         .await

@@ -724,6 +724,14 @@ async fn default_template_contains_expected_groups() {
     assert!(text.contains("[vision]"), "模板应含 [vision]");
     assert!(text.contains("model_supports_vision"));
     assert!(text.contains("batch_limit"));
+    assert!(
+        text.contains("chat_thinking") && text.contains("role_immersion"),
+        "模板应含 [backend] 思考适配键（chat_thinking / role_immersion）"
+    );
+    assert!(
+        text.contains("# chat_temperature"),
+        "chat_temperature 应以注释行呈现（注释掉 = 沿用 temperature）"
+    );
 
     let _ = std::fs::remove_dir_all(dir);
 }

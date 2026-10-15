@@ -216,6 +216,7 @@ pub(crate) async fn understand_downloaded_image(
         max_tokens: 256,
         request_id: Uuid::new_v4(),
         template_version: VISION_TEMPLATE_VERSION.to_string(),
+        enable_thinking: None,
     };
     let images = vec![prepared.to_data_uri()];
     let reply = match llm.chat_vision(&request, &images).await {
@@ -308,6 +309,7 @@ async fn probe_once(engine: &Engine) -> bool {
         max_tokens: 8,
         request_id: Uuid::new_v4(),
         template_version: PROBE_TEMPLATE_VERSION.to_string(),
+        enable_thinking: None,
     };
     let images = vec![format!("data:image/png;base64,{PROBE_IMAGE_BASE64}")];
     let capable = match llm.chat_vision(&request, &images).await {

@@ -97,6 +97,7 @@ impl<'a> L1Summarizer<'a> {
             max_tokens: self.config.max_tokens,
             request_id,
             template_version: crate::prompt::PROMPT_TEMPLATE_VERSION.to_string(),
+            enable_thinking: None,
         };
 
         let raw_response = self.llm.chat(&llm_request).await.map_err(|e| {

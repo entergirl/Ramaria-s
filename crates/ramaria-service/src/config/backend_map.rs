@@ -3,7 +3,8 @@
 //! 设计特点:
 //! - 文件侧 `[backend]` 组（BackendSelection）↔ backend_config 表（BackendConfig）双向映射
 //! - 业务字段（provider / base_url / model / embedding / temperature / max_tokens）以文件为准覆盖
-//! - `online_memory_injection` 仅存在于文件侧（DB 无对应字段），映射时保留 fallback 值
+//! - `online_memory_injection` 与思考适配三键（chat_thinking / role_immersion /
+//!   chat_temperature）仅存在于文件侧（DB 无对应字段），映射时保留 fallback 值
 //! - capability 派生字段随 provider / model / base_url 同步；embedding_model_path 不参与比较
 //! - 比较口径忽略派生字段，避免"表 / 文件"因派生差异反复误判不一致
 
@@ -39,7 +40,8 @@ pub(super) fn backend_config_from_selection(
 /// 将 BackendConfig 映射为 `RamariaConfig.backend`（BackendSelection）。
 ///
 /// 说明:
-/// - `online_memory_injection` 仅存在于文件侧（DB 无对应字段），保留 fallback 值。
+/// - `online_memory_injection` 与思考适配三键（chat_thinking / role_immersion /
+///   chat_temperature）仅存在于文件侧（DB 无对应字段），保留 fallback 值。
 pub(super) fn backend_selection_from_backend_config(
     bc: &BackendConfig,
     fallback: &ramaria_core::config::BackendSelection,
@@ -52,6 +54,9 @@ pub(super) fn backend_selection_from_backend_config(
         temperature: bc.temperature,
         max_tokens: bc.max_tokens,
         online_memory_injection: fallback.online_memory_injection,
+        chat_thinking: fallback.chat_thinking,
+        role_immersion: fallback.role_immersion,
+        chat_temperature: fallback.chat_temperature,
     }
 }
 

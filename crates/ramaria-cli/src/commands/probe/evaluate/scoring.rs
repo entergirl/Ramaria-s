@@ -451,6 +451,8 @@ pub(crate) async fn score_tone_item(
         request_id: Uuid::new_v4(),
         // 模板版本参与 LLM 响应缓存键：口径修订即 bump，避免复用旧偏置评分缓存。
         template_version: "probe-judge-v2".to_string(),
+        // 结构化评估路径：思考模式恒关闭
+        enable_thinking: None,
     };
 
     let raw = judge.chat(&request).await.map_err(|e| {

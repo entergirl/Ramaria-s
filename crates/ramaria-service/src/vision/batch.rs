@@ -290,6 +290,7 @@ async fn process_row(
         max_tokens: 256,
         request_id: Uuid::new_v4(),
         template_version: VISION_TEMPLATE_VERSION.to_string(),
+        enable_thinking: None,
     };
     let images = vec![prepared.to_data_uri()];
     let reply = match llm.chat_vision(&request, &images).await {

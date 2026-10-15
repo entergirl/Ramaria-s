@@ -5,7 +5,7 @@
 //! - `build_vision_messages`: 图片理解请求的消息数组（system 字符串 content + user 数组 content）
 //! - memory_context 以 `<memory_context>` XML 标签包裹，与系统指令明确分隔
 //! - 用户消息含已知注入模式时追加防御性前缀（不拒绝、不修改原始内容）
-//! - `cache_key`: sha256(model_id + 模板版本 + 采样参数 + canonical messages JSON)
+//! - `cache_key`: sha256(model_id + 模板版本 + 采样参数 + 思考开关 + canonical messages JSON)
 
 use ramaria_core::traits::ChatRequest;
 use ramaria_core::types::MessageRole;
@@ -49,13 +49,15 @@ const INJECTION_PATTERNS: &[&str] = &[
 /// 构造 LLM 精确缓存 key。
 ///
 /// 缓存 key 公式:
-/// `key = sha256_hex(model_id + template_version + temperature_le_bits + max_tokens_le + canonical_messages_json)`
+/// `key = sha256_hex(model_id + template_version + temperature_le_bits + max_tokens_le + thinking_flag_le + canonical_messages_json)`
 ///
 /// 参数:
 /// - `model_id`: `BackendConfig.capability.model_id`。
 /// - `template_version`: `ChatRequest.template_version`（prompt 模板版本常量）。
 /// - `temperature`: 采样温度，以 IEEE-754 位模式（`to_bits`）入哈希，消除浮点文本格式化歧义。
 /// - `max_tokens`: 最大输出 token 数。
+/// - `enable_thinking`: 思考开关；`Some(true)` 为启用，`None` / `Some(false)` 语义等价
+///   （均为关闭），哈希时统一归一到 `u8` 标志位。
 /// - `messages`: `build_messages` 组装后的 OpenAI 兼容消息数组。
 ///
 /// 说明:
@@ -63,6 +65,8 @@ const INJECTION_PATTERNS: &[&str] = &[
 ///   同一请求内容在重跑/重试时序列化结果稳定，保证同 key 同输出。
 /// - 采样参数（temperature / max_tokens）纳入 key：同 prompt 在不同采样参数下
 ///   生成结果不同，必须区分缓存，避免跨参数误命中。
+/// - 思考开关纳入 key：思考/非思考是两种生成配置（思考模式下采样参数不生效、
+///   输出形态不同），必须区分缓存，避免同 key 跨思考模式互串。
 /// - 模板版本变更 → key 变化 → 旧缓存不误命中（跨版本隔离）。
 /// - key 构成变更后旧缓存自动失效（无迁移动作，重新生成即重建缓存）。
 /// - 只输出哈希 hex，不包含任何原文（隐私红线：缓存表只存响应）。
@@ -71,6 +75,7 @@ pub(crate) fn cache_key(
     template_version: &str,
     temperature: f64,
     max_tokens: u32,
+    enable_thinking: Option<bool>,
     messages: &[serde_json::Value],
 ) -> String {
     let prompt_json = serde_json::to_string(messages).unwrap_or_default();
@@ -79,6 +84,7 @@ pub(crate) fn cache_key(
     hasher.update(template_version.as_bytes());
     hasher.update(temperature.to_bits().to_le_bytes());
     hasher.update(max_tokens.to_le_bytes());
+    hasher.update(u8::from(enable_thinking.unwrap_or(false)).to_le_bytes());
     hasher.update(prompt_json.as_bytes());
     let digest = hasher.finalize();
     let mut hex = String::with_capacity(64);

@@ -169,6 +169,7 @@ pub(crate) async fn decide(
         max_tokens: JUDGE_MAX_TOKENS,
         request_id: Uuid::new_v4(),
         template_version: ramaria_memory::prompt::PROMPT_TEMPLATE_VERSION.to_string(),
+        enable_thinking: None,
     };
 
     let raw = match engine.llm_ref().chat(&request).await {

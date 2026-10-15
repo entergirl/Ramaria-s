@@ -424,6 +424,7 @@ impl<'a> FactExtractor<'a> {
             max_tokens: self.max_tokens,
             request_id: Uuid::new_v4(),
             template_version: crate::prompt::PROMPT_TEMPLATE_VERSION.to_string(),
+            enable_thinking: None,
         };
         self.llm.chat(&request).await
     }

@@ -452,6 +452,7 @@ pub async fn translate_reaction(
             max_tokens: config.max_tokens,
             request_id: Uuid::new_v4(),
             template_version: BEHAVIOR_RULE_PROMPT_VERSION.to_string(),
+            enable_thinking: None,
         };
         let raw = match llm.chat(&request).await {
             Ok(r) => r,

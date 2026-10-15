@@ -404,6 +404,7 @@ pub async fn generate_style_rule(
         max_tokens: LLM_MAX_TOKENS,
         request_id: uuid::Uuid::new_v4(),
         template_version: crate::prompt::PROMPT_TEMPLATE_VERSION.to_string(),
+        enable_thinking: None,
     };
     match llm.chat(&request).await {
         Ok(text) => {

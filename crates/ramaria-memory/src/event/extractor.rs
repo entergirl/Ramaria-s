@@ -393,6 +393,7 @@ impl<'a> EventExtractor<'a> {
                 max_tokens: self.config.max_tokens,
                 request_id,
                 template_version: crate::prompt::PROMPT_TEMPLATE_VERSION.to_string(),
+                enable_thinking: None,
             };
 
             let raw_response = match self.llm.chat(&llm_request).await {

@@ -16,12 +16,38 @@ use crate::types::LlmProvider;
 // 后端选择
 // =========================================================
 
+/// 角色沉浸指令注入位置（`[backend].role_immersion`）。
+///
+/// 职责:
+/// - 控制对话路径是否将角色沉浸指令注入请求消息数组。
+///
+/// 变体:
+/// - `Off`: 不注入（默认）；
+/// - `System`: 追加到 system prompt 末尾；
+/// - `User`: 追加到消息数组内首条 user 消息末尾（无历史 user 消息时退回当前用户消息）。
+///
+/// 约束:
+/// - 仅对 DeepSeek provider 生效（与 `chat_thinking` 配合用于思考适配）；
+/// - 只影响对话路径，结构化提取路径不注入。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RoleImmersion {
+    /// 不注入（默认）
+    #[default]
+    Off,
+    /// 追加到 system prompt 末尾
+    System,
+    /// 追加到消息数组内首条 user 消息末尾
+    User,
+}
+
 /// 当前选用的 LLM 后端。
 ///
 /// 职责:
 /// - 保存当前 provider、模型 ID、base URL 和生成参数。
 /// - 保存 embedding 模型选择结果。
 /// - 控制线上 provider 是否允许注入记忆上下文。
+/// - 控制对话路径的思考模式、角色沉浸注入与生成温度。
 ///
 /// 安全约束:
 /// - API key 不属于此结构，必须通过 OS keychain 读取。
@@ -48,6 +74,12 @@ pub struct BackendSelection {
     pub max_tokens: u32,
     /// 是否允许线上后端注入 L1/L2/L3 上下文
     pub online_memory_injection: bool,
+    /// 对话路径是否启用思考模式（仅 DeepSeek 生效；结构化提取路径恒关闭）
+    pub chat_thinking: bool,
+    /// 角色沉浸指令注入位置（仅 DeepSeek 生效）
+    pub role_immersion: RoleImmersion,
+    /// 对话路径生成温度（None = 沿用 `temperature`）
+    pub chat_temperature: Option<f64>,
 }
 
 impl Default for BackendSelection {
@@ -57,6 +89,7 @@ impl Default for BackendSelection {
     /// - 默认 provider 为 LM Studio。
     /// - 默认 base URL 为 LM Studio OpenAI-compatible 端点。
     /// - 默认允许线上记忆注入，但实际启用前仍需隐私确认。
+    /// - 默认关闭思考模式与角色沉浸注入，对话温度沿用 `temperature`。
     fn default() -> Self {
         Self {
             provider: LlmProvider::LmStudio,
@@ -66,6 +99,9 @@ impl Default for BackendSelection {
             temperature: 0.3,
             max_tokens: 1024,
             online_memory_injection: true,
+            chat_thinking: false,
+            role_immersion: RoleImmersion::Off,
+            chat_temperature: None,
         }
     }
 }
