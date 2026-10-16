@@ -25,6 +25,9 @@ pub struct MemoryL1View {
     pub salience: f64,
     pub persona_uid: Option<String>,
     pub created_at: i64,
+    /// 发生时间（Unix 毫秒，有效值）——浏览时间基准（列表时间展示口径；
+    /// 前端 `smartTime(occurred_at)` 依赖本字段，缺失会显示"未知时间"）
+    pub occurred_at: i64,
     /// 时间段（清晨/上午/下午/傍晚/夜间/深夜）
     pub time_period: Option<String>,
     /// 分组上下文 JSON，含 chat_partners / message_count 等

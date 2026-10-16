@@ -105,6 +105,7 @@ pub async fn get_l1_memories(
             salience: m.salience,
             persona_uid: m.persona_uid,
             created_at: m.created_at,
+            occurred_at: m.occurred_at,
             time_period: m.time_period,
             context_json: m.context_json,
         })

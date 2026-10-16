@@ -151,5 +151,6 @@ fn test_refined_cluster(sample_count: usize, n_eff: f64, valence_std: f64) -> Re
         quality: 1.0,
         member_event_ids: Vec::new(),
         member_events: Vec::new(),
+        representative_attitudes: Vec::new(),
     }
 }
