@@ -11,14 +11,15 @@
 use std::sync::Arc;
 
 use ramaria_core::error::RamariaResult;
-use ramaria_core::types::{MemoryL1, Session};
+use ramaria_core::types::{MemoryL1, Session, StickerAsset, now_ms};
 use uuid::Uuid;
 
 use crate::proactive::{ProactiveDirective, ProactiveOutcome};
 use crate::stream_event::ChatStreamHandle;
 use crate::types::{
-    ChatSendOutcome, ChatSendRequest, ChatStreamRequest, HistoryRequest, HistoryResult,
-    IngestOutcome, IngestRequest, RecallRequest, RecallResult, SealOutcome,
+    ChannelImageOutcome, ChatSendOutcome, ChatSendRequest, ChatStreamRequest, HistoryRequest,
+    HistoryResult, IngestOutcome, IngestRequest, LocalImageSendOutcome, LocalImageSendRequest,
+    RecallRequest, RecallResult, SealOutcome,
 };
 
 use super::Engine;
@@ -352,5 +353,83 @@ impl Engine {
     /// - 本轮成功补跑出 L1 摘要的任务数。
     pub async fn retry_pending_l1_jobs(&self) -> usize {
         crate::lifecycle::l1::retry_pending_l1_jobs(self).await
+    }
+}
+
+// =========================================================
+// 本地图片 / 撤回 / 表情资产用例
+// =========================================================
+
+impl Engine {
+    /// 本地会话发图：消息与附件行一并落库（仅本地会话）。
+    ///
+    /// 返回:
+    /// - 落库消息与附件行定位、占位符与最终正文。
+    pub async fn send_local_image(
+        &self,
+        req: LocalImageSendRequest,
+    ) -> RamariaResult<LocalImageSendOutcome> {
+        crate::local_image::send(self, req).await
+    }
+
+    /// 撤回一条本地消息（仅本地会话、本人消息、窗口内）。
+    ///
+    /// 返回:
+    /// - 标记成功返回 `Ok(())`；校验失败为校验错误。
+    pub async fn recall_local_message(&self, message_id: Uuid) -> RamariaResult<()> {
+        crate::withdraw::recall_local_message(self, message_id, now_ms()).await
+    }
+
+    /// 理解一张本地图片（字节输入；门禁 / 去重 / 回填与批量路径同口径）。
+    ///
+    /// 返回:
+    /// - 单张理解结果（统计口径）。
+    pub async fn local_understand_image(
+        &self,
+        attachment_id: i64,
+        md5: &str,
+        image_bytes: &[u8],
+    ) -> RamariaResult<ChannelImageOutcome> {
+        crate::vision::understand_downloaded_image(self, attachment_id, md5, image_bytes).await
+    }
+
+    /// 新增表情资产（写文件 + 落库）。
+    ///
+    /// 返回:
+    /// - 落库后的资产行。
+    pub async fn sticker_add(
+        &self,
+        file_name: &str,
+        bytes: &[u8],
+        description: Option<&str>,
+        tags: &[String],
+    ) -> RamariaResult<StickerAsset> {
+        crate::sticker::add(self, file_name, bytes, description, tags).await
+    }
+
+    /// 列出全部表情资产（按 id 升序）。
+    pub async fn sticker_list(&self) -> RamariaResult<Vec<StickerAsset>> {
+        crate::sticker::list(self).await
+    }
+
+    /// 更新表情资产（描述 / 标签；None 保持现值，描述空串清空）。
+    ///
+    /// 返回:
+    /// - 目标行存在且已更新为 true；不存在为 false。
+    pub async fn sticker_update(
+        &self,
+        id: i64,
+        description: Option<&str>,
+        tags: Option<&[String]>,
+    ) -> RamariaResult<bool> {
+        crate::sticker::update(self, id, description, tags).await
+    }
+
+    /// 删除表情资产（含 best-effort 文件删除）。
+    ///
+    /// 返回:
+    /// - 目标行存在且已删除为 true；不存在为 false。
+    pub async fn sticker_remove(&self, id: i64) -> RamariaResult<bool> {
+        crate::sticker::remove(self, id).await
     }
 }

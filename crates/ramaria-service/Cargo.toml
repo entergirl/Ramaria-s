@@ -30,6 +30,8 @@ chrono.workspace = true
 sqlx.workspace = true
 # 回流消息指纹（SHA-256 前 8 字节 hex，复用导入去重机制）
 sha2.workspace = true
+# 图片内容指纹（表情资产与本地发图落盘命名）
+md-5 = { workspace = true }
 # L1 补扫宿主钩子（实现 ramaria-memory 的 L1RetryObserver 异步 trait）
 async-trait.workspace = true
 # 流式事件流类型（增量生成契约的宿主消费侧）

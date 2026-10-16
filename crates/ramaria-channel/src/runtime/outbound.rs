@@ -1,10 +1,11 @@
-//! crates/ramaria-channel/src/runtime/outbound.rs - Ramaria 通道出站文本拆条模块
+//! crates/ramaria-channel/src/runtime/outbound.rs - Ramaria 通道出站文本预处理模块
 //!
 //! 设计特点:
 //! - 多气泡契约分隔符 `||` 切分为待分次发送的段列表（仅出站文本；库内原文不改）
 //! - 单遍状态机：代码块 / 行内代码 / URL 区间内不切分
 //! - 切段吞并紧邻两侧连续横向空白；逐段首尾 trim 后丢弃空段；未切分时输出与输入逐字符一致
 //! - 段数上限折叠：超出上限的余段以换行并入末段
+//! - 表情指令剥离：`[表情:关键词]` 标记从出站文本移除，关键词交发送侧解析资产
 //! - 纯函数、多字节字符安全、不 panic
 
 // =========================================================
@@ -153,6 +154,56 @@ pub fn fold_segment_overflow(segments: Vec<String>, max_segments: usize) -> Vec<
     let mut folded: Vec<String> = segments[..max_segments - 1].to_vec();
     folded.push(segments[max_segments - 1..].join("\n"));
     folded
+}
+
+// =========================================================
+// 表情指令剥离
+// =========================================================
+
+/// 表情指令解析：剥离 `[表情:关键词]` 标记并取首个非空关键词。
+///
+/// 规则:
+/// - 标记形态：`[表情` + 半角 / 全角冒号 + 关键词 + `]`（关键词两侧空白
+///   容忍；冒号后到 `]` 之间为空视为无关键词）；
+/// - 从左到右扫描：`[表情` 前缀后无 `]` 闭合 → 该处按原文保留（不剥离），
+///   后续标记仍可识别；前缀后无冒号同样按原文保留；
+/// - 多个标记全部剥离；关键词取首个非空（后续标记的关键词丢弃）；
+/// - 多字节字符安全、不 panic。
+///
+/// 参数:
+/// - `text`: 出站文本（发送前调用；库内消息正文保持原样）。
+///
+/// 返回:
+/// - 剥离后文本（首尾 trim）与首个非空关键词；无关键词时为 None。
+pub fn parse_sticker_directive(text: &str) -> (String, Option<String>) {
+    const PREFIX: &str = "[表情";
+    let mut output = String::with_capacity(text.len());
+    let mut keyword: Option<String> = None;
+    let mut i = 0usize;
+    while i < text.len() {
+        let rest = &text[i..];
+        let Some(ch) = rest.chars().next() else {
+            break;
+        };
+        if let Some(after) = rest.strip_prefix(PREFIX) {
+            let colon = after.chars().next();
+            if matches!(colon, Some(':') | Some('：')) {
+                let colon_len = colon.map(char::len_utf8).unwrap_or(0);
+                let inner_start = PREFIX.len() + colon_len;
+                if let Some(close) = rest[inner_start..].find(']') {
+                    let inner = rest[inner_start..inner_start + close].trim();
+                    if keyword.is_none() && !inner.is_empty() {
+                        keyword = Some(inner.to_string());
+                    }
+                    i += inner_start + close + 1;
+                    continue;
+                }
+            }
+        }
+        output.push(ch);
+        i += ch.len_utf8();
+    }
+    (output.trim().to_string(), keyword)
 }
 
 /// 收尾一段：首尾 trim 后非空则入列，缓冲清空。

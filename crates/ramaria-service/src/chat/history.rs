@@ -6,6 +6,8 @@
 //!   其余会话与 core 浏览口径一致（完成 → 描述、处理中 → 提示；其余状态保留裸占位符；
 //!   附件查询失败降级原文）
 //! - 社交会话按发言人前缀标注他人消息（`{sender_name}：`，全角冒号）；预置上文不标注
+//! - 被撤回消息两态渲染：已消费（其后有助手消息）保留原内容并追加撤回信号；
+//!   未消费仅保留信号；预算统计与最终注入同口径
 //! - 读取失败记 warn 并保留已加载部分，不阻塞生成
 
 use ramaria_core::config::RamariaConfig;
@@ -107,10 +109,9 @@ pub(super) async fn step_load_history(
         let page_attachments = load_message_attachments(storage, &page).await;
         let page_map = build_history_render_map(&page_attachments, social_senders);
         for message in &page {
-            total_chars += replace_image_placeholders(&message.content, &page_map)
-                .chars()
-                .count()
-                + 16;
+            let rendered = replace_image_placeholders(&message.content, &page_map);
+            let rendered = render_if_recalled(storage, session_id, message, rendered).await;
+            total_chars += rendered.chars().count() + 16;
             if social_senders {
                 if let Some(prefix) = sender_prefix(message) {
                     total_chars += prefix.chars().count() + 1;
@@ -133,17 +134,40 @@ pub(super) async fn step_load_history(
     // 最终映射由全部已加载消息的附件行构建（同一 md5 描述一致，跨页无冲突）
     let render_map = build_history_render_map(&attachment_rows, social_senders);
     let mut merged = seed_history.to_vec();
-    merged.extend(loaded.into_iter().map(|message| {
-        let mut content = replace_image_placeholders(&message.content, &render_map);
+    for message in loaded {
+        let content = replace_image_placeholders(&message.content, &render_map);
+        // 撤回渲染在占位符替换之后、发言人前缀之前
+        let mut content = render_if_recalled(storage, session_id, &message, content).await;
         if social_senders {
             if let Some(prefix) = sender_prefix(&message) {
                 content = format!("{prefix}：{content}");
             }
         }
-        ChatMessage {
+        merged.push(ChatMessage {
             role: message.role,
             content,
-        }
-    }));
+        });
+    }
     merged
+}
+
+/// 对被撤回消息应用两态渲染（撤回信号替换 / 追加）；其余消息原样返回。
+///
+/// 说明:
+/// - 已消费判定查询失败按未消费处理（保守丢弃原文）；
+/// - 仅在消息已撤回时才发起存储查询（撤回消息罕见）。
+async fn render_if_recalled(
+    storage: &dyn StorageBackend,
+    session_id: Uuid,
+    message: &Message,
+    rendered: String,
+) -> String {
+    if message.recalled_at.is_none() {
+        return rendered;
+    }
+    let consumed = storage
+        .has_assistant_message_after(session_id, message.created_at)
+        .await
+        .unwrap_or(false);
+    crate::withdraw::render_recalled_content(&rendered, consumed)
 }

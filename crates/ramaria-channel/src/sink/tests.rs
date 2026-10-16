@@ -359,3 +359,150 @@ async fn deliver_skips_when_sanitized_empty() {
     sink.deliver(&message).await.expect("跳过发送应视为完成");
     assert_eq!(handle.calls(), 0, "净化后为空不应发起发送");
 }
+
+// =========================================================
+// 表情指令投递
+// =========================================================
+
+/// 表情解析器桩：固定命中 / 未命中，记录调用次数。
+struct MockStickerResolver {
+    sticker: Option<OutboundSticker>,
+    calls: AtomicUsize,
+}
+
+impl MockStickerResolver {
+    fn hitting(file_name: &str, bytes: &[u8]) -> Arc<Self> {
+        Arc::new(Self {
+            sticker: Some(OutboundSticker {
+                file_name: file_name.to_string(),
+                bytes: bytes.to_vec(),
+            }),
+            calls: AtomicUsize::new(0),
+        })
+    }
+
+    fn missing() -> Arc<Self> {
+        Arc::new(Self {
+            sticker: None,
+            calls: AtomicUsize::new(0),
+        })
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::Acquire)
+    }
+}
+
+#[async_trait]
+impl StickerResolver for MockStickerResolver {
+    async fn resolve(&self, _keyword: &str) -> Option<OutboundSticker> {
+        self.calls.fetch_add(1, Ordering::Acquire);
+        self.sticker.clone()
+    }
+}
+
+/// 装配注入表情解析器的接收端（毫秒级重试；分段取默认值）。
+fn sink_with_resolver(
+    transport: &Arc<MockTransport>,
+    resolver: &Arc<MockStickerResolver>,
+) -> (ChannelProactiveSink, Arc<MockTransport>) {
+    let handle: Arc<dyn StickerResolver> = resolver.clone();
+    let sink = ChannelProactiveSink::with_options(
+        transports_with(transport),
+        Duration::from_millis(10),
+        2,
+    )
+    .with_sticker_resolver(handle);
+    (sink, transport.clone())
+}
+
+/// 命中：标记剥离，首段携带附件，其余段纯文本。
+#[tokio::test]
+async fn deliver_sticker_hit_attaches_first_segment() {
+    let transport = Arc::new(MockTransport::new("qq"));
+    let resolver = MockStickerResolver::hitting("cat.png", b"PNGDATA");
+    let (sink, handle) = sink_with_resolver(&transport, &resolver);
+
+    let mut message = sample_message("qq", Some("c2c:10001"));
+    message.content = "送你[表情:猫]||到家".to_string();
+    sink.deliver(&message).await.expect("发送应成功");
+
+    assert_eq!(resolver.calls(), 1, "有关键词应调用一次解析");
+    let sent = handle.sent();
+    assert_eq!(sent.len(), 2, "拆条两段");
+    assert_eq!(sent[0].1.text, "送你");
+    assert_eq!(
+        sent[0].1.attachment,
+        Some(crate::transport::OutboundAttachment::Bytes {
+            file_name: "cat.png".to_string(),
+            data: b"PNGDATA".to_vec(),
+        }),
+        "首段应携带表情附件"
+    );
+    assert_eq!(sent[1].1.text, "到家");
+    assert_eq!(sent[1].1.attachment, None);
+}
+
+/// 命中且剥离后文本为空：只发一条空文本带附件的消息。
+#[tokio::test]
+async fn deliver_sticker_only_sends_image_message() {
+    let transport = Arc::new(MockTransport::new("qq"));
+    let resolver = MockStickerResolver::hitting("cat.png", b"PNGDATA");
+    let (sink, handle) = sink_with_resolver(&transport, &resolver);
+
+    let mut message = sample_message("qq", Some("c2c:10001"));
+    message.content = "[表情:猫]".to_string();
+    sink.deliver(&message).await.expect("发送应成功");
+
+    let sent = handle.sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].1.text, "");
+    assert!(sent[0].1.attachment.is_some(), "仅表情应携带附件");
+}
+
+/// 未注入解析器：标记剥离后按纯文字发送。
+#[tokio::test]
+async fn deliver_sticker_without_resolver_sends_text_only() {
+    let transport = Arc::new(MockTransport::new("qq"));
+    let (sink, handle) = sink_with(&transport, 2);
+
+    let mut message = sample_message("qq", Some("c2c:10001"));
+    message.content = "送你[表情:猫]到家".to_string();
+    sink.deliver(&message).await.expect("发送应成功");
+
+    let sent = handle.sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].1.text, "送你到家");
+    assert_eq!(sent[0].1.attachment, None);
+}
+
+/// 解析器未命中：降级纯文字发送。
+#[tokio::test]
+async fn deliver_sticker_missing_falls_back_to_text() {
+    let transport = Arc::new(MockTransport::new("qq"));
+    let resolver = MockStickerResolver::missing();
+    let (sink, handle) = sink_with_resolver(&transport, &resolver);
+
+    let mut message = sample_message("qq", Some("c2c:10001"));
+    message.content = "送你[表情:猫]到家".to_string();
+    sink.deliver(&message).await.expect("发送应成功");
+
+    assert_eq!(resolver.calls(), 1);
+    let sent = handle.sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].1.text, "送你到家");
+    assert_eq!(sent[0].1.attachment, None);
+}
+
+/// 仅表情且未命中：跳过发送且视为已完成（现有空文本口径）。
+#[tokio::test]
+async fn deliver_sticker_only_miss_skips() {
+    let transport = Arc::new(MockTransport::new("qq"));
+    let resolver = MockStickerResolver::missing();
+    let (sink, handle) = sink_with_resolver(&transport, &resolver);
+
+    let mut message = sample_message("qq", Some("c2c:10001"));
+    message.content = "[表情:猫]".to_string();
+    sink.deliver(&message).await.expect("跳过发送应视为完成");
+    assert_eq!(handle.calls(), 0, "未命中且无文本不应发起发送");
+}

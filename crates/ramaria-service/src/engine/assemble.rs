@@ -177,6 +177,7 @@ impl Engine {
             seal_allowed: AtomicBool::new(true),
             proactive_sink: Arc::new(RwLock::new(None)),
             channel_proactive_sink: Arc::new(RwLock::new(None)),
+            recall_inflight: Arc::new(Mutex::new(std::collections::HashSet::new())),
             vision_probe: tokio::sync::Mutex::new(None),
             job_manager_config: RwLock::new(job_manager_config),
             // 状态机初值：首次配置判定由 setup 用例推进（装配阶段不做网络探测）
@@ -225,6 +226,7 @@ impl Engine {
             seal_allowed: AtomicBool::new(true),
             proactive_sink: Arc::new(RwLock::new(None)),
             channel_proactive_sink: Arc::new(RwLock::new(None)),
+            recall_inflight: Arc::new(Mutex::new(std::collections::HashSet::new())),
             vision_probe: tokio::sync::Mutex::new(None),
             job_manager_config: RwLock::new(JobManagerConfig::default()),
             state: Mutex::new(AppState::NeedsSetup),
@@ -356,6 +358,20 @@ impl Engine {
     pub fn attach_sqlite_pool(&self, pool: SqlitePool) {
         let mut guard = write_recover(&self.pool, "engine.pool");
         *guard = Some(pool);
+    }
+
+    /// 标记会话撤回处理在途（键 = 会话 id 文本）。
+    ///
+    /// 返回:
+    /// - `true`: 键此前不在途（本次处理获得触发资格）；
+    /// - `false`: 已有在途处理（连撤通知去重，调用方放弃触发）。
+    pub(crate) fn recall_inflight_begin(&self, key: &str) -> bool {
+        lock_recover(&self.recall_inflight, "engine.recall_inflight").insert(key.to_string())
+    }
+
+    /// 释出会话撤回在途标记（与 `recall_inflight_begin` 配对调用）。
+    pub(crate) fn recall_inflight_end(&self, key: &str) {
+        lock_recover(&self.recall_inflight, "engine.recall_inflight").remove(key);
     }
 
     /// 检索索引是否已加载（懒加载占位状态）。

@@ -18,7 +18,7 @@ use crate::types::{
     AttachmentStatus, ChannelBinding, ClusterSnapshot, EventBatchWrite, EventRelation, EventSource,
     MemoryEvent, MemoryL1, Message, MessageAttachment, MessageKey, Persona, PersonaEventAggregate,
     PersonaExample, PersonaFact, PersonaStyleStats, PersonalityTrait, ProfileField, Session,
-    SessionMember, TraitEvidence, TraitSource, TraitStatus, UttBlock,
+    SessionMember, StickerAsset, TraitEvidence, TraitSource, TraitStatus, UttBlock,
 };
 
 // =========================================================
@@ -291,6 +291,100 @@ pub trait StoreCrud: Send + Sync {
     /// 默认实现返回 `Ok(None)`（兼容存量实现；ramaria-storage 覆写为单行查询）。
     async fn get_message(&self, _id: Uuid) -> RamariaResult<Option<Message>> {
         Ok(None)
+    }
+    /// 按 (session, 平台消息 ID) 查询单条消息。
+    ///
+    /// 职责:
+    /// - 社交通道消息的定位查询：以平台侧消息 ID 在指定会话内查找对应行。
+    ///
+    /// 返回:
+    /// - 命中时返回消息；未命中返回 `Ok(None)`。
+    ///
+    /// 默认实现:
+    /// - 返回 `Ok(None)`（兼容存量实现；ramaria-storage 覆写为单行查询）。
+    async fn find_message_by_platform_id(
+        &self,
+        _session_id: Uuid,
+        _platform_message_id: &str,
+    ) -> RamariaResult<Option<Message>> {
+        Ok(None)
+    }
+
+    /// 按 (session, 平台消息 ID) 标记消息撤回。
+    ///
+    /// 职责:
+    /// - 平台撤回事件的落库入口：给尚未撤回的消息写入撤回时刻。
+    ///
+    /// 语义:
+    /// - 幂等：仅更新 `recalled_at IS NULL` 的行，已撤回行不被覆盖。
+    ///
+    /// 参数:
+    /// - `session_id`: 消息所属会话。
+    /// - `platform_message_id`: 平台侧消息 ID。
+    /// - `recalled_at`: 撤回时刻（Unix 毫秒）。
+    ///
+    /// 返回:
+    /// - 受影响行数（1 = 本次标记成功；0 = 未命中或已撤回）。
+    ///
+    /// 默认实现:
+    /// - 返回 `Unsupported`（写语义由实现方显式声明）。
+    async fn mark_message_recalled(
+        &self,
+        _session_id: Uuid,
+        _platform_message_id: &str,
+        _recalled_at: i64,
+    ) -> RamariaResult<u64> {
+        Err(crate::error::RamariaError::unsupported(
+            "StoreCrud 未实现消息撤回标记（需覆写 mark_message_recalled）",
+        ))
+    }
+
+    /// 按消息 ID 标记消息撤回（本地定位兜底路径）。
+    ///
+    /// 语义:
+    /// - 幂等：仅更新未撤回的行，已撤回行不被覆盖。
+    ///
+    /// 参数:
+    /// - `message_id`: 消息 UUID。
+    /// - `recalled_at`: 撤回时刻（Unix 毫秒）。
+    ///
+    /// 返回:
+    /// - `Ok(true)`: 本次完成标记。
+    /// - `Ok(false)`: 未命中或已撤回（未写库）。
+    ///
+    /// 默认实现:
+    /// - 返回 `Unsupported`（写语义由实现方显式声明）。
+    async fn mark_message_recalled_by_id(
+        &self,
+        _message_id: Uuid,
+        _recalled_at: i64,
+    ) -> RamariaResult<bool> {
+        Err(crate::error::RamariaError::unsupported(
+            "StoreCrud 未实现消息撤回标记（需覆写 mark_message_recalled_by_id）",
+        ))
+    }
+
+    /// 判断会话内是否存在晚于指定时刻的助手消息。
+    ///
+    /// 职责:
+    /// - 撤回处理的上下文判定：撤回行之后再未产生助手回复时，
+    ///   调用方可据此做相应补偿。
+    ///
+    /// 参数:
+    /// - `session_id`: 会话 ID。
+    /// - `after_ms`: 时间下界（Unix 毫秒，严格大于）。
+    ///
+    /// 返回:
+    /// - `true`: 存在晚于 `after_ms` 的助手消息。
+    ///
+    /// 默认实现:
+    /// - 返回 `Ok(false)`（兼容存量实现；ramaria-storage 覆写为 EXISTS 查询）。
+    async fn has_assistant_message_after(
+        &self,
+        _session_id: Uuid,
+        _after_ms: i64,
+    ) -> RamariaResult<bool> {
+        Ok(false)
     }
 
     /// 全量加载指定 session 的全部消息。
@@ -1485,6 +1579,82 @@ pub trait StoreCrud: Send + Sync {
     ) -> RamariaResult<bool> {
         Err(crate::error::RamariaError::unsupported(
             "StoreCrud 未实现待确认别名登记",
+        ))
+    }
+    // -- Sticker Assets (id: i64) --
+    /// 插入一条表情资产，返回自增 id。
+    ///
+    /// 语义:
+    /// - 传入结构内的 id 不参与写入，由数据库自增分配。
+    ///
+    /// 参数:
+    /// - `asset`: 资产登记信息。
+    ///
+    /// 返回:
+    /// - 新行的自增 id。
+    ///
+    /// 默认实现:
+    /// - 返回 `Unsupported`（写语义由实现方显式声明）。
+    async fn insert_sticker_asset(&self, _asset: &StickerAsset) -> RamariaResult<i64> {
+        Err(crate::error::RamariaError::unsupported(
+            "StoreCrud 未实现表情资产写入（需覆写 insert_sticker_asset）",
+        ))
+    }
+
+    /// 列出全部表情资产（按 id 升序）。
+    ///
+    /// 默认实现:
+    /// - 返回空列表（未覆写实现视为"无资产"）。
+    async fn list_sticker_assets(&self) -> RamariaResult<Vec<StickerAsset>> {
+        Ok(Vec::new())
+    }
+
+    /// 按 id 查询单条表情资产。
+    ///
+    /// 默认实现:
+    /// - 返回 `Ok(None)`（兼容存量实现）。
+    async fn get_sticker_asset(&self, _id: i64) -> RamariaResult<Option<StickerAsset>> {
+        Ok(None)
+    }
+
+    /// 更新表情资产的描述与标签。
+    ///
+    /// 语义:
+    /// - `description` 为 `Some` 时覆盖描述，`None` 保持现值；
+    /// - `tags` 为 `Some` 时整体覆盖标签，`None` 保持现值；
+    /// - 命中时刷新 `updated_at`。
+    ///
+    /// 参数:
+    /// - `id`: 资产行 id。
+    /// - `description`: 描述覆盖值。
+    /// - `tags`: 标签覆盖值。
+    ///
+    /// 返回:
+    /// - `Ok(true)`: 命中并更新；`Ok(false)`: 未命中。
+    ///
+    /// 默认实现:
+    /// - 返回 `Unsupported`（写语义由实现方显式声明）。
+    async fn update_sticker_asset(
+        &self,
+        _id: i64,
+        _description: Option<&str>,
+        _tags: Option<&[String]>,
+    ) -> RamariaResult<bool> {
+        Err(crate::error::RamariaError::unsupported(
+            "StoreCrud 未实现表情资产更新（需覆写 update_sticker_asset）",
+        ))
+    }
+
+    /// 按 id 删除表情资产。
+    ///
+    /// 返回:
+    /// - `Ok(true)`: 命中并删除；`Ok(false)`: 未命中。
+    ///
+    /// 默认实现:
+    /// - 返回 `Unsupported`（写语义由实现方显式声明）。
+    async fn delete_sticker_asset(&self, _id: i64) -> RamariaResult<bool> {
+        Err(crate::error::RamariaError::unsupported(
+            "StoreCrud 未实现表情资产删除（需覆写 delete_sticker_asset）",
         ))
     }
 }

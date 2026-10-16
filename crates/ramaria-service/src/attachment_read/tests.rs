@@ -9,7 +9,7 @@
 //! - 全部数据为合成样例；不访问 OS keychain、不连网
 
 use super::*;
-use crate::test_support::{engine_with_db, temp_dir};
+use crate::test_support::engine_with_db;
 use ramaria_core::traits::{StoreCrud, StoreInfrastructure};
 use ramaria_core::types::{AttachmentStatus, Message, MessageRole, MessageSource, now_ms};
 use ramaria_storage::SqliteStorage;

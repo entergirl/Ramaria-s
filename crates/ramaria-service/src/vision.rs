@@ -36,11 +36,15 @@ mod batch;
 mod locate;
 mod prepare;
 
-pub(crate) use batch::{
-    MAX_IMAGE_BYTES, scan_pending_attachments, understand_attachment_rows, understand_attachments,
-};
+pub(crate) use batch::MAX_IMAGE_BYTES;
+// 批量理解入口经导入流程（importer feature）消费
+#[cfg(feature = "importer")]
+pub(crate) use batch::{scan_pending_attachments, understand_attachment_rows};
+// 测试构建（无 feature）亦直接消费
+#[cfg(any(feature = "importer", test))]
+pub(crate) use batch::understand_attachments;
 pub(crate) use locate::AttachmentLocator;
-pub(crate) use prepare::image_mime_from_bytes;
+pub(crate) use prepare::{image_mime_checked, image_mime_from_bytes};
 
 // =========================================================
 // 常量

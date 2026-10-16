@@ -141,6 +141,9 @@ pub struct Message {
     /// 平台消息 ID（社交通道消息）；本地 / MCP / 导入旧路径为 None
     #[serde(default)]
     pub platform_message_id: Option<String>,
+    /// 撤回时刻（Unix 毫秒）；None = 未撤回
+    #[serde(default)]
+    pub recalled_at: Option<i64>,
 }
 
 impl Message {
@@ -173,6 +176,7 @@ impl Message {
             sender_ref: None,
             sender_name: None,
             platform_message_id: None,
+            recalled_at: None,
         }
     }
 

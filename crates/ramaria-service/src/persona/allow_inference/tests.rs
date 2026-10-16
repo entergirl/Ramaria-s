@@ -12,7 +12,6 @@ use ramaria_core::traits::StoreCrud;
 use ramaria_core::types::{PersonalityTrait, TraitLayer, TraitSource, TraitStatus};
 use ramaria_storage::SqliteStorage;
 
-use super::*;
 use crate::test_support::{engine_with_db, seed_persona};
 
 // =========================================================

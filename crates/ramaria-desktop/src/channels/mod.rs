@@ -13,8 +13,9 @@ use std::sync::Arc;
 
 use ramaria_channel::{
     ChannelEventSink, ChannelProactiveSink, ChannelRuntime, ChannelRuntimeConfig, ChannelStatus,
-    ChannelWorker, HttpImageDownloader, ImageDownloader, OneBotTransport, QqTransportOptions,
-    TelegramFileDownloader, TelegramTransport, TelegramTransportOptions, Transport, WorkerOptions,
+    ChannelWorker, HttpImageDownloader, ImageDownloader, OneBotTransport, OutboundSticker,
+    QqTransportOptions, RecallDispatcher, StickerResolver, TelegramFileDownloader,
+    TelegramTransport, TelegramTransportOptions, Transport, WorkerOptions,
 };
 use ramaria_core::types::ChannelPlatform;
 use ramaria_service::Engine;
@@ -277,11 +278,12 @@ impl ChannelManager {
 
         // ---- 5a. QQ（OneBot v11 正向 WS） ----
         if let Some(qq_config) = runtime_config.qq.clone() {
-            let transport: Arc<dyn Transport> = Arc::new(OneBotTransport::new(
-                qq_config,
-                QqTransportOptions::default(),
-                runtime.clone(),
-            ));
+            // 撤回通知经分发器回灌服务层（平台撤回事件 → 本地消息标记与渲染变换）
+            let recall_sink = Arc::new(RecallDispatcher::new(Arc::clone(&engine)));
+            let transport: Arc<dyn Transport> = Arc::new(
+                OneBotTransport::new(qq_config, QqTransportOptions::default(), runtime.clone())
+                    .with_recall_sink(recall_sink),
+            );
             assemble_transport(
                 &engine,
                 &runtime,
@@ -317,7 +319,11 @@ impl ChannelManager {
         }
 
         // ---- 6. 通道主动投递接收端（未注册时通道投递按门禁丢弃） ----
-        engine.set_channel_proactive_sink(Arc::new(ChannelProactiveSink::new(transports.clone())));
+        // 表情解析经服务层资产库：未命中 / 解析失败由投递侧降级纯文字
+        let sticker_resolver = Arc::new(EngineStickerResolver::new(Arc::clone(&engine)));
+        engine.set_channel_proactive_sink(Arc::new(
+            ChannelProactiveSink::new(transports.clone()).with_sticker_resolver(sticker_resolver),
+        ));
 
         let channels: Vec<ChannelStatusView> =
             runtime.statuses().iter().map(status_to_view).collect();
@@ -435,6 +441,41 @@ async fn assemble_transport(
         downloader,
         WorkerOptions::default(),
     ));
+}
+
+/// 表情资产解析适配器：服务层主题解析 → 通道出站表情载荷。
+///
+/// 实现约定:
+/// - 命中时把资产文件名与字节映射为出站载荷，由投递侧作为图片附件发送；
+/// - 未命中返回 None（投递侧按无表情处理）；
+/// - 解析出错记 warn 后返回 None（降级不阻塞投递）。
+struct EngineStickerResolver {
+    engine: Arc<Engine>,
+}
+
+impl EngineStickerResolver {
+    /// 以服务层引擎构造。
+    fn new(engine: Arc<Engine>) -> Self {
+        Self { engine }
+    }
+}
+
+#[async_trait::async_trait]
+impl StickerResolver for EngineStickerResolver {
+    /// 按关键词解析表情资产；未命中 / 失败返回 None。
+    async fn resolve(&self, keyword: &str) -> Option<OutboundSticker> {
+        match self.engine.sticker_resolve(keyword).await {
+            Ok(Some(payload)) => Some(OutboundSticker {
+                file_name: payload.file_name,
+                bytes: payload.bytes,
+            }),
+            Ok(None) => None,
+            Err(error) => {
+                tracing::warn!(error = %error, "表情资产解析失败，按未命中处理");
+                None
+            }
+        }
+    }
 }
 
 #[cfg(test)]

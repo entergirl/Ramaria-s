@@ -282,6 +282,7 @@ async fn channel_reply_prompt_declares_group_conversation() {
             session_id: group.id,
             persona_uid: DEFAULT_PERSONA_UID.to_string(),
             message: "消息".to_string(),
+            trigger_message_id: None,
         })
         .await
         .expect("群聊社交通道回复应成功");
@@ -304,6 +305,7 @@ async fn channel_reply_prompt_declares_group_conversation() {
             session_id: private.id,
             persona_uid: DEFAULT_PERSONA_UID.to_string(),
             message: "消息".to_string(),
+            trigger_message_id: None,
         })
         .await
         .expect("私聊社交通道回复应成功");
@@ -316,6 +318,229 @@ async fn channel_reply_prompt_declares_group_conversation() {
             .contains(CHANNEL_GROUP_DECLARATION),
         "私聊会话不应含群聊说明段"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// =========================================================
+// 撤回渲染与发送前检查
+// =========================================================
+
+/// 历史窗口：被撤回消息两态渲染（已消费保留原文 + 信号；未消费仅信号）。
+#[tokio::test]
+async fn history_renders_recalled_messages_in_two_states() {
+    let (engine, storage, dir) = engine_with_db("chat-history-recalled").await;
+    seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+    let config = engine.config();
+
+    // 会话一：撤回消息之后已有助手消息 → 已消费（原文 + 信号）
+    let consumed = storage
+        .create_session(Some(DEFAULT_PERSONA_UID))
+        .await
+        .expect("建会话应成功");
+    let mut recalled = Message::new(
+        consumed.id,
+        MessageRole::User,
+        "撤回前的内容".to_string(),
+        MessageSource::Local,
+    )
+    .with_persona_uid(Some(DEFAULT_PERSONA_UID.to_string()));
+    recalled.created_at = 1_000;
+    storage
+        .save_message(&recalled)
+        .await
+        .expect("写入消息应成功");
+    let mut later = Message::new(
+        consumed.id,
+        MessageRole::Assistant,
+        "已经回复".to_string(),
+        MessageSource::Local,
+    )
+    .with_persona_uid(Some(DEFAULT_PERSONA_UID.to_string()));
+    later.created_at = 2_000;
+    storage.save_message(&later).await.expect("写入消息应成功");
+    storage
+        .mark_message_recalled_by_id(recalled.id, 5_000)
+        .await
+        .expect("标记撤回应成功");
+
+    let history =
+        step_load_history(storage.as_ref(), config.as_ref(), consumed.id, &[], false).await;
+    assert_eq!(history.len(), 2);
+    assert_eq!(
+        history[0].content,
+        format!("撤回前的内容{}", crate::withdraw::RECALL_SIGNAL),
+        "已消费应保留原文并追加信号"
+    );
+    assert_eq!(history[1].content, "已经回复", "其余消息零变化");
+
+    // 会话二：撤回消息之后无助手消息 → 未消费（仅信号）
+    let unconsumed = storage
+        .create_session(Some(DEFAULT_PERSONA_UID))
+        .await
+        .expect("建会话应成功");
+    let mut tail = Message::new(
+        unconsumed.id,
+        MessageRole::User,
+        "不该出现的内容".to_string(),
+        MessageSource::Local,
+    )
+    .with_persona_uid(Some(DEFAULT_PERSONA_UID.to_string()));
+    tail.created_at = 1_000;
+    storage.save_message(&tail).await.expect("写入消息应成功");
+    storage
+        .mark_message_recalled_by_id(tail.id, 5_000)
+        .await
+        .expect("标记撤回应成功");
+
+    let history =
+        step_load_history(storage.as_ref(), config.as_ref(), unconsumed.id, &[], false).await;
+    assert_eq!(history.len(), 1);
+    assert_eq!(
+        history[0].content,
+        crate::withdraw::RECALL_SIGNAL,
+        "未消费应仅保留信号"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 社交会话：撤回渲染后发言人前缀保留。
+#[tokio::test]
+async fn history_renders_recalled_with_social_prefix() {
+    let (engine, storage, dir) = engine_with_db("chat-history-recalled-social").await;
+    seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+    let session = storage
+        .create_session_in_channel(Some(DEFAULT_PERSONA_UID), "qq", Some("c2c:10001"))
+        .await
+        .expect("建通道会话应成功");
+    let mut recalled = Message::new(
+        session.id,
+        MessageRole::User,
+        "撤回的图内容".to_string(),
+        MessageSource::Local,
+    )
+    .with_persona_uid(Some(DEFAULT_PERSONA_UID.to_string()));
+    recalled.sender_name = Some("小明".to_string());
+    recalled.created_at = 1_000;
+    storage
+        .save_message(&recalled)
+        .await
+        .expect("写入消息应成功");
+    storage
+        .mark_message_recalled_by_id(recalled.id, 5_000)
+        .await
+        .expect("标记撤回应成功");
+
+    let config = engine.config();
+    let history = step_load_history(storage.as_ref(), config.as_ref(), session.id, &[], true).await;
+    assert_eq!(history.len(), 1);
+    assert_eq!(
+        history[0].content,
+        format!("小明：{}", crate::withdraw::RECALL_SIGNAL),
+        "社交前缀应保留在撤回渲染之外"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 发送前检查：触发消息已撤回 → 回复作废（不落库不发送）。
+#[tokio::test]
+async fn channel_reply_discards_when_trigger_recalled() {
+    let llm = Arc::new(MockLlm::with_reply("在呢"));
+    let (engine, storage, dir) = engine_with_shared_llm(
+        "chat-reply-trigger-recalled",
+        llm,
+        RamariaConfig::default(),
+        None,
+    )
+    .await;
+    seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+    let session = storage
+        .create_session_in_channel(Some(DEFAULT_PERSONA_UID), "qq", Some("c2c:10001"))
+        .await
+        .expect("建会话应成功");
+    let mut inbound = Message::new(
+        session.id,
+        MessageRole::User,
+        "在吗".to_string(),
+        MessageSource::Local,
+    )
+    .with_persona_uid(Some(DEFAULT_PERSONA_UID.to_string()));
+    inbound.platform_message_id = Some("m-1".to_string());
+    storage
+        .save_message(&inbound)
+        .await
+        .expect("写入入站消息应成功");
+    storage
+        .mark_message_recalled_by_id(inbound.id, now_ms())
+        .await
+        .expect("标记撤回应成功");
+
+    let outcome = engine
+        .channel_reply(ChannelReplyRequest {
+            session_id: session.id,
+            persona_uid: DEFAULT_PERSONA_UID.to_string(),
+            message: "在吗".to_string(),
+            trigger_message_id: Some(inbound.id),
+        })
+        .await
+        .expect("生成调用本身应成功");
+    assert!(outcome.is_none(), "触发消息已撤回应作废");
+    let messages = storage
+        .list_messages(session.id)
+        .await
+        .expect("查询消息应成功");
+    assert_eq!(messages.len(), 1, "作废路径不应落库助手行");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 发送前检查：触发消息未撤回 → 正常完成并落库。
+#[tokio::test]
+async fn channel_reply_proceeds_when_trigger_alive() {
+    let llm = Arc::new(MockLlm::with_reply("在呢"));
+    let (engine, storage, dir) = engine_with_shared_llm(
+        "chat-reply-trigger-alive",
+        llm,
+        RamariaConfig::default(),
+        None,
+    )
+    .await;
+    seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+    let session = storage
+        .create_session_in_channel(Some(DEFAULT_PERSONA_UID), "qq", Some("c2c:10001"))
+        .await
+        .expect("建会话应成功");
+    let mut inbound = Message::new(
+        session.id,
+        MessageRole::User,
+        "在吗".to_string(),
+        MessageSource::Local,
+    )
+    .with_persona_uid(Some(DEFAULT_PERSONA_UID.to_string()));
+    inbound.platform_message_id = Some("m-1".to_string());
+    storage
+        .save_message(&inbound)
+        .await
+        .expect("写入入站消息应成功");
+
+    let outcome = engine
+        .channel_reply(ChannelReplyRequest {
+            session_id: session.id,
+            persona_uid: DEFAULT_PERSONA_UID.to_string(),
+            message: "在吗".to_string(),
+            trigger_message_id: Some(inbound.id),
+        })
+        .await
+        .expect("生成调用本身应成功")
+        .expect("触发消息未撤回应产出回复");
+    assert_eq!(outcome.reply, "在呢");
+    let messages = storage
+        .list_messages(session.id)
+        .await
+        .expect("查询消息应成功");
+    assert_eq!(messages.len(), 2, "应新增一条助手行");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

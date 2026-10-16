@@ -1056,3 +1056,58 @@ async fn worker_shutdown_stops_loop() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// =========================================================
+// 表情指令
+// =========================================================
+
+/// 表情指令剥离：无资产命中时按纯文字发送（标记不残留在出站文本）。
+#[tokio::test]
+async fn sticker_directive_stripped_when_asset_missing() {
+    let llm = StubLlm::new("送你[表情:猫]到家", "不应调用");
+    let (engine, storage, dir) = worker_engine("sticker-miss", Arc::clone(&llm)).await;
+    seed_binding_persona(&storage).await;
+    allow(&engine, "c2c:10001").await;
+    let transport = StubTransport::new();
+    let downloader = StubDownloader::failing();
+
+    dispatch(
+        &engine,
+        &transport,
+        &downloader,
+        &worker_options(),
+        private_event("你好", "m-sticker"),
+    )
+    .await;
+
+    let sends = transport.sends.lock().expect("出站记录锁不应中毒").clone();
+    assert_eq!(sends.len(), 1, "无资产命中应只发纯文字一条");
+    assert_eq!(sends[0].1.text, "送你到家", "标记应剥离且不残留");
+    assert_eq!(sends[0].1.attachment, None, "未命中不应携带附件");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 仅表情指令且无资产命中：净化后为空，跳过发送。
+#[tokio::test]
+async fn sticker_only_reply_without_asset_skips_send() {
+    let llm = StubLlm::new("[表情:猫]", "不应调用");
+    let (engine, storage, dir) = worker_engine("sticker-only", Arc::clone(&llm)).await;
+    seed_binding_persona(&storage).await;
+    allow(&engine, "c2c:10001").await;
+    let transport = StubTransport::new();
+    let downloader = StubDownloader::failing();
+
+    dispatch(
+        &engine,
+        &transport,
+        &downloader,
+        &worker_options(),
+        private_event("你好", "m-sticker-only"),
+    )
+    .await;
+
+    assert_eq!(transport.attempts(), 0, "无附件且无文本应跳过发送");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

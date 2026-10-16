@@ -4,6 +4,7 @@
 //! - 样例驱动：覆盖真实 NapCat 事件形态（含扩展字段）与字段类型归一
 //! - 响应判定三分支：私聊逐条 / 群 @ / 群被回复；"all" 与未命中不触发
 //! - 容错路径断言：坏 JSON / 非 message 事件 / 缺关键字段均返回 None
+//! - 撤回通知：私聊 / 群聊字段口径、操作者回退与缺字段容错
 
 use super::*;
 use ramaria_core::types::now_ms;
@@ -500,4 +501,161 @@ fn sender_missing_falls_back_to_defaults() {
     assert_eq!(event.sender.display_name, "");
     assert_eq!(event.sender.group_nickname, None);
     assert_eq!(event.sender.role, None);
+}
+
+// =========================================================
+// 撤回通知解析
+// =========================================================
+
+/// 私聊撤回：全字段核对（会话标识来自 user_id，操作者为 user_id）。
+#[test]
+fn friend_recall_notice_fields() {
+    let json = json!({
+        "post_type": "notice",
+        "notice_type": "friend_recall",
+        "user_id": 10001,
+        "self_id": 42,
+        "time": 1_700_000_000,
+        "message_id": 777
+    })
+    .to_string();
+
+    let notice = parse_notice(&json).expect("私聊撤回应解析成功");
+    assert_eq!(notice.channel, "qq");
+    assert_eq!(notice.external_ref, "c2c:10001");
+    assert_eq!(notice.platform_message_id, "777");
+    assert_eq!(notice.operator_id.as_deref(), Some("10001"));
+    assert_eq!(notice.self_id.as_deref(), Some("42"));
+    assert_eq!(notice.occurred_at, 1_700_000_000_000);
+}
+
+/// 群聊撤回：会话标识来自 group_id，操作者优先 operator_id。
+#[test]
+fn group_recall_operator_prefers_operator_id() {
+    let json = json!({
+        "post_type": "notice",
+        "notice_type": "group_recall",
+        "group_id": 20002,
+        "user_id": 10001,
+        "operator_id": 10002,
+        "self_id": 42,
+        "time": 1_700_000_001,
+        "message_id": "m-9"
+    })
+    .to_string();
+
+    let notice = parse_notice(&json).expect("群聊撤回应解析成功");
+    assert_eq!(notice.external_ref, "group:20002");
+    assert_eq!(notice.platform_message_id, "m-9");
+    assert_eq!(notice.operator_id.as_deref(), Some("10002"));
+    assert_eq!(notice.occurred_at, 1_700_000_001_000);
+}
+
+/// 群聊撤回：operator_id 缺失回退 user_id。
+#[test]
+fn group_recall_operator_falls_back_to_user_id() {
+    let json = json!({
+        "post_type": "notice",
+        "notice_type": "group_recall",
+        "group_id": 20002,
+        "user_id": 10001,
+        "time": 1_700_000_002,
+        "message_id": 888
+    })
+    .to_string();
+
+    let notice = parse_notice(&json).expect("群聊撤回应解析成功");
+    assert_eq!(notice.operator_id.as_deref(), Some("10001"));
+}
+
+/// 缺 message_id（含空白值）：返回 None。
+#[test]
+fn recall_without_message_id_is_none() {
+    let missing = json!({
+        "post_type": "notice",
+        "notice_type": "friend_recall",
+        "user_id": 10001,
+        "time": 1_700_000_000
+    })
+    .to_string();
+    assert!(parse_notice(&missing).is_none());
+
+    let blank = json!({
+        "post_type": "notice",
+        "notice_type": "friend_recall",
+        "user_id": 10001,
+        "message_id": "   "
+    })
+    .to_string();
+    assert!(parse_notice(&blank).is_none());
+}
+
+/// 非撤回事件（其他 notice / message 事件 / 坏 JSON）：返回 None。
+#[test]
+fn non_recall_frames_are_none() {
+    let group_ban = json!({
+        "post_type": "notice",
+        "notice_type": "group_ban",
+        "group_id": 20002,
+        "message_id": 1
+    })
+    .to_string();
+    assert!(parse_notice(&group_ban).is_none());
+
+    let message_event = json!({
+        "post_type": "message",
+        "message_type": "private",
+        "message_id": 1,
+        "user_id": 10001
+    })
+    .to_string();
+    assert!(parse_notice(&message_event).is_none());
+
+    assert!(parse_notice("not-json").is_none());
+}
+
+/// 私聊撤回缺 user_id：返回 None。
+#[test]
+fn friend_recall_without_user_id_is_none() {
+    let json = json!({
+        "post_type": "notice",
+        "notice_type": "friend_recall",
+        "message_id": 777,
+        "time": 1_700_000_000
+    })
+    .to_string();
+    assert!(parse_notice(&json).is_none());
+}
+
+/// 群聊撤回缺 group_id：返回 None。
+#[test]
+fn group_recall_without_group_id_is_none() {
+    let json = json!({
+        "post_type": "notice",
+        "notice_type": "group_recall",
+        "user_id": 10001,
+        "message_id": 777
+    })
+    .to_string();
+    assert!(parse_notice(&json).is_none());
+}
+
+/// time 缺失 / 非正：回退当前时刻。
+#[test]
+fn recall_missing_time_falls_back_to_now() {
+    let json = json!({
+        "post_type": "notice",
+        "notice_type": "friend_recall",
+        "user_id": 10001,
+        "message_id": 777
+    })
+    .to_string();
+    let before = now_ms();
+    let notice = parse_notice(&json).expect("应解析成功");
+    let after = now_ms();
+    assert!(
+        (before..=after).contains(&notice.occurred_at),
+        "缺失时间应回退当前时间: {} not in [{before}, {after}]",
+        notice.occurred_at
+    );
 }

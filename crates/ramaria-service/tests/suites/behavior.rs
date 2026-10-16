@@ -97,6 +97,7 @@ fn make_msg(content: &str) -> Message {
         sender_ref: None,
         sender_name: None,
         platform_message_id: None,
+        recalled_at: None,
     }
 }
 

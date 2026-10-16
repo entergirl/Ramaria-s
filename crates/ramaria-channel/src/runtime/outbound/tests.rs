@@ -4,6 +4,7 @@
 //! - 样例驱动：基本切分 / 空白吞并 / 豁免区间 / 未切分零改动逐项覆盖
 //! - 断言以逐字符等价为准（未切分时输出与输入一致；切分后逐段断言）
 //! - fold 折叠：界限内原样 / 超限并入末段 / 下界与空输入
+//! - 表情指令：剥离 / 关键词取首个非空 / 未闭合与非标记按原文保留
 
 use super::*;
 
@@ -154,4 +155,100 @@ fn fold_treats_zero_as_one() {
 fn fold_empty_input() {
     assert!(fold_segment_overflow(Vec::new(), 5).is_empty());
     assert!(fold_segment_overflow(Vec::new(), 0).is_empty());
+}
+
+// =========================================================
+// 表情指令解析
+// =========================================================
+
+/// 无标记：文本逐字符一致，关键词为空。
+#[test]
+fn sticker_no_directive_is_identity() {
+    let (text, keyword) = parse_sticker_directive("你好呀，今天天气不错");
+    assert_eq!(text, "你好呀，今天天气不错");
+    assert_eq!(keyword, None);
+}
+
+/// 半角冒号单标记：标记剥离，关键词取出。
+#[test]
+fn sticker_halfwidth_directive_stripped() {
+    let (text, keyword) = parse_sticker_directive("送你[表情:喵喵]到家");
+    assert_eq!(text, "送你到家");
+    assert_eq!(keyword.as_deref(), Some("喵喵"));
+}
+
+/// 全角冒号同样识别。
+#[test]
+fn sticker_fullwidth_colon_recognized() {
+    let (text, keyword) = parse_sticker_directive("开心[表情：开心]呀");
+    assert_eq!(text, "开心呀");
+    assert_eq!(keyword.as_deref(), Some("开心"));
+}
+
+/// 关键词两侧空白 trim。
+#[test]
+fn sticker_keyword_trimmed() {
+    let (text, keyword) = parse_sticker_directive("[表情:  微笑  ]好");
+    assert_eq!(text, "好");
+    assert_eq!(keyword.as_deref(), Some("微笑"));
+}
+
+/// 空关键词：标记仍剥离但不产出关键词（半 / 全角冒号）。
+#[test]
+fn sticker_empty_keyword_stripped_only() {
+    let (text, keyword) = parse_sticker_directive("哈哈[表情:]");
+    assert_eq!(text, "哈哈");
+    assert_eq!(keyword, None);
+
+    let (text, keyword) = parse_sticker_directive("哈哈[表情：  ]");
+    assert_eq!(text, "哈哈");
+    assert_eq!(keyword, None);
+}
+
+/// 多标记：全部剥离，关键词取首个非空。
+#[test]
+fn sticker_multiple_takes_first_non_empty() {
+    let (text, keyword) = parse_sticker_directive("[表情:][表情:猫][表情:狗]你好");
+    assert_eq!(text, "你好");
+    assert_eq!(keyword.as_deref(), Some("猫"));
+}
+
+/// 未闭合标记：该处按原文保留（不剥离）。
+#[test]
+fn sticker_unclosed_preserved() {
+    let (text, keyword) = parse_sticker_directive("打[表情:喵");
+    assert_eq!(text, "打[表情:喵");
+    assert_eq!(keyword, None);
+}
+
+/// 前缀后无冒号：按原文保留（非标记形态）。
+#[test]
+fn sticker_without_colon_preserved() {
+    let (text, keyword) = parse_sticker_directive("[表情包]来了");
+    assert_eq!(text, "[表情包]来了");
+    assert_eq!(keyword, None);
+}
+
+/// 与 `||` 共存：表情标记剥离，分隔符原样保留（交拆条模块处理）。
+#[test]
+fn sticker_coexists_with_pipe_separator() {
+    let (text, keyword) = parse_sticker_directive("[表情:猫]||你好呀");
+    assert_eq!(text, "||你好呀");
+    assert_eq!(keyword.as_deref(), Some("猫"));
+}
+
+/// 中文与 emoji 混排：剥离不破坏多字节字符。
+#[test]
+fn sticker_mixed_multibyte_preserved() {
+    let (text, keyword) = parse_sticker_directive("🎉[表情： 猫 ]好🐱");
+    assert_eq!(text, "🎉好🐱");
+    assert_eq!(keyword.as_deref(), Some("猫"));
+}
+
+/// 仅标记：剥离后为空文本，关键词仍产出。
+#[test]
+fn sticker_only_marker_yields_empty_text() {
+    let (text, keyword) = parse_sticker_directive("[表情:猫]");
+    assert_eq!(text, "");
+    assert_eq!(keyword.as_deref(), Some("猫"));
 }

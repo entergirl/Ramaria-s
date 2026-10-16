@@ -22,7 +22,7 @@ use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 
 use super::{Inner, QqTransportOptions, WsStream, lock, update_status};
 use crate::config::QqRuntimeConfig;
-use crate::events::ChannelEventSink;
+use crate::events::{ChannelEventSink, RecallNoticeSink};
 use crate::status::ConnectionState;
 use crate::{ChannelError, ChannelResult};
 
@@ -63,6 +63,7 @@ pub(crate) struct ManagerContext {
     pub(crate) config: QqRuntimeConfig,
     pub(crate) options: QqTransportOptions,
     pub(crate) sink: Arc<dyn ChannelEventSink>,
+    pub(crate) recall_sink: Option<Arc<dyn RecallNoticeSink>>,
     pub(crate) inner: Arc<std::sync::Mutex<Inner>>,
 }
 
@@ -281,6 +282,10 @@ fn handle_text(context: &ManagerContext, text: &str) {
     let sent_ids = { lock(&context.inner).sent_ids.clone() };
     if let Some(event) = super::event::parse_event(text, &sent_ids) {
         super::emit_event(&context.inner, event);
+    } else if let Some(notice) = super::event::parse_notice(text) {
+        if let Some(sink) = &context.recall_sink {
+            sink.on_recall(&notice);
+        }
     }
 }
 

@@ -5,7 +5,8 @@
 //!   不做强类型反序列化，避免扩展字段引发整帧失败
 //! - 类型归一：`self_id` / `user_id` / `group_id` / `time` 为数字，
 //!   `at.qq` / `reply.id` 为字符串；统一转字符串比较与存储
-//! - 只处理 message 事件（private / group）；meta_event / notice / request 静默忽略
+//! - message 事件解析为规范入站事件；notice 撤回事件解析为撤回通知；
+//!   meta_event / request 及其他 notice 静默忽略
 //! - At 段在解析层折叠为文本（`@qq` / `@全体成员`）；reply 段只用于判定不进正文
 //! - 表情段（face / mface / bface）折叠为 `[表情]` 占位文本，避免表情消息整条丢弃
 //! - 图片段保留下载引用（url / size / sub_type），正文与附件在组装层产出
@@ -14,6 +15,7 @@ use ramaria_core::types::{InboundSender, MemberRole, now_ms};
 use serde_json::Value;
 
 use super::api::{SentMessageCache, value_to_string};
+use crate::events::RecallNotice;
 use crate::transport::{InboundSegment, TransportEvent};
 
 // =========================================================
@@ -124,9 +126,89 @@ pub(crate) fn parse_event(json: &str, sent_ids: &SentMessageCache) -> Option<Tra
     })
 }
 
+/// 解析一条 OneBot 上报帧为撤回通知。
+///
+/// 规则:
+/// - JSON 解析失败 → None（记日志，不 panic）；
+/// - `post_type != "notice"` → None；
+/// - `notice_type` 仅 `friend_recall` / `group_recall`，其余（如 notify）→ None；
+/// - `message_id` 必填（缺失 / 空白视为缺失）；
+/// - `friend_recall`: 取 `user_id` 作为会话账号与撤回操作者；
+/// - `group_recall`: 取 `group_id` 作为会话群号，操作者优先取 `operator_id`，
+///   缺失回退 `user_id`；
+/// - `time`（秒）缺失 / 非正 → 当前时刻。
+///
+/// 参数:
+/// - `json`: 上报帧原文。
+///
+/// 返回:
+/// - 规范撤回通知；非撤回事件或关键字段缺失时为 None。
+pub(crate) fn parse_notice(json: &str) -> Option<RecallNotice> {
+    let root: Value = match serde_json::from_str(json) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(channel = "qq", error = %error, "OneBot 上报帧 JSON 解析失败，忽略");
+            return None;
+        }
+    };
+
+    if root.get("post_type").and_then(Value::as_str) != Some("notice") {
+        return None;
+    }
+    let notice_type = root.get("notice_type").and_then(Value::as_str);
+    if !matches!(notice_type, Some("friend_recall") | Some("group_recall")) {
+        tracing::debug!(
+            channel = "qq",
+            notice_type = notice_type.unwrap_or("none"),
+            "非撤回通知，忽略"
+        );
+        return None;
+    }
+
+    let Some(message_id) = id_field(&root, "message_id") else {
+        tracing::warn!(channel = "qq", "撤回通知缺少消息 ID，忽略");
+        return None;
+    };
+
+    let (external_ref, operator_id) = match notice_type {
+        Some("friend_recall") => {
+            let Some(user_id) = id_field(&root, "user_id") else {
+                tracing::warn!(channel = "qq", "私聊撤回通知缺少账号，忽略");
+                return None;
+            };
+            (format!("c2c:{user_id}"), Some(user_id))
+        }
+        _ => {
+            let Some(group_id) = id_field(&root, "group_id") else {
+                tracing::warn!(channel = "qq", "群聊撤回通知缺少群号，忽略");
+                return None;
+            };
+            let operator = id_field(&root, "operator_id").or_else(|| id_field(&root, "user_id"));
+            (format!("group:{group_id}"), operator)
+        }
+    };
+
+    Some(RecallNotice {
+        channel: "qq",
+        external_ref,
+        platform_message_id: message_id,
+        operator_id,
+        self_id: root.get("self_id").and_then(value_to_string),
+        occurred_at: parse_created_at(&root),
+    })
+}
+
 // =========================================================
 // 字段解析
 // =========================================================
+
+/// 读取必填标识字段：归一为字符串并去两侧空白，缺失或空白返回 None。
+fn id_field(root: &Value, key: &str) -> Option<String> {
+    root.get(key)
+        .and_then(value_to_string)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
 
 /// 解析消息时间：`time` 为秒，转 Unix 毫秒；缺失或非正数回退当前时间。
 fn parse_created_at(root: &Value) -> i64 {

@@ -14,7 +14,7 @@ use ramaria_service::Engine;
 
 use crate::cli::{
     BlocksCmd, ChannelCmd, Cli, Commands, ConfigCmd, FactCmd, ImportCmd, IndexCmd, KeywordAliasCmd,
-    KeywordCmd, PersonaCmd, ProbeArgs, RuleCmd, SessionCmd, StyleCmd,
+    KeywordCmd, PersonaCmd, ProbeArgs, RuleCmd, SessionCmd, StickerCmd, StyleCmd,
 };
 
 // =========================================================
@@ -217,6 +217,31 @@ pub(crate) async fn dispatch(engine: &Arc<Engine>, cli: Cli) -> anyhow::Result<(
                 },
             };
             commands::channel::run(engine, cmd, cli.json).await?;
+        }
+        Commands::Sticker(sub) => {
+            let cmd = match sub {
+                StickerCmd::Add {
+                    file,
+                    description,
+                    tags,
+                } => commands::sticker::StickerCmd::Add {
+                    file,
+                    description,
+                    tags,
+                },
+                StickerCmd::List => commands::sticker::StickerCmd::List,
+                StickerCmd::Update {
+                    id,
+                    description,
+                    tags,
+                } => commands::sticker::StickerCmd::Update {
+                    id,
+                    description,
+                    tags,
+                },
+                StickerCmd::Remove { id } => commands::sticker::StickerCmd::Remove { id },
+            };
+            commands::sticker::run(engine, cmd, cli.json).await?;
         }
         Commands::Fact(sub) => {
             let cmd = match sub {

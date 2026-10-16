@@ -56,6 +56,7 @@ fn message(
         sender_ref: None,
         sender_name: None,
         platform_message_id: None,
+        recalled_at: None,
     }
 }
 

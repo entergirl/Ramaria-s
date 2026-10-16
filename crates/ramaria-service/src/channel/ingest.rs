@@ -83,6 +83,7 @@ pub(crate) async fn run(
             );
             return Ok(ChannelIngestOutcome {
                 session_id: existing.session_id,
+                message_id: existing.id,
                 written: false,
                 images: Vec::new(),
             });
@@ -172,6 +173,7 @@ pub(crate) async fn run(
 
     Ok(ChannelIngestOutcome {
         session_id: session.id,
+        message_id: message.id,
         written: true,
         images,
     })

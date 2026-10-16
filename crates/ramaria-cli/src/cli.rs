@@ -167,6 +167,10 @@ pub(crate) enum Commands {
     #[command(display_order = 48, subcommand)]
     Channel(ChannelCmd),
 
+    /// 表情资产管理（add / list / update / remove）[管理]
+    #[command(display_order = 49, subcommand)]
+    Sticker(StickerCmd),
+
     /// 知识事实查询（list / show，只读）[管理]
     #[command(display_order = 45, subcommand)]
     Fact(FactCmd),
@@ -341,6 +345,44 @@ pub(crate) enum ChannelCmd {
         /// 禁止该绑定接收主动消息
         #[arg(long)]
         deny_proactive: bool,
+    },
+}
+
+/// 表情资产管理子命令（动词词表：add / list / update / remove）。
+///
+/// 更新语义:
+/// - `update --tag` 出现（非空）即覆盖全部标签，缺省保持；
+/// - `update --description` 缺省保持，给空串清空。
+#[derive(Subcommand)]
+pub(crate) enum StickerCmd {
+    /// 新增表情资产（读取图片文件，写入资产目录并登记）
+    Add {
+        /// 表情图片文件路径
+        file: PathBuf,
+        /// 资产描述（缺省为空）
+        #[arg(long)]
+        description: Option<String>,
+        /// 标签（可重复）
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+    },
+    /// 列出全部表情资产
+    List,
+    /// 更新表情资产的描述与标签
+    Update {
+        /// 资产 id
+        id: i64,
+        /// 新的描述（给空串清空，缺省保持）
+        #[arg(long)]
+        description: Option<String>,
+        /// 新的标签（可重复；出现即覆盖全部标签，缺省保持）
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+    },
+    /// 删除表情资产（含资产文件删除）
+    Remove {
+        /// 资产 id
+        id: i64,
     },
 }
 

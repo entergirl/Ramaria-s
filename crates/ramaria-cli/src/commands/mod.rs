@@ -23,5 +23,6 @@ pub mod rule;
 pub mod session;
 pub mod setup;
 pub mod status;
+pub mod sticker;
 pub mod style;
 pub mod utt;

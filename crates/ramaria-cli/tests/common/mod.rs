@@ -263,6 +263,7 @@ pub fn make_user_message(session_id: Uuid, content: &str) -> Message {
         sender_ref: None,
         sender_name: None,
         platform_message_id: None,
+        recalled_at: None,
     }
 }
 
@@ -281,6 +282,7 @@ pub fn make_assistant_message(session_id: Uuid, content: &str) -> Message {
         sender_ref: None,
         sender_name: None,
         platform_message_id: None,
+        recalled_at: None,
     }
 }
 

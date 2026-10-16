@@ -21,7 +21,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use super::*;
 use crate::config::QqRuntimeConfig;
-use crate::events::ChannelEventSink;
+use crate::events::{ChannelEventSink, RecallNotice, RecallNoticeSink};
 
 // =========================================================
 // 测试基建
@@ -50,6 +50,21 @@ impl ChannelEventSink for RecordingSink {
             .lock()
             .expect("状态记录锁不应中毒")
             .push(status.clone());
+    }
+}
+
+/// 撤回通知记录器（收集读循环回调的撤回通知）。
+#[derive(Default)]
+struct RecordingRecallSink {
+    notices: StdMutex<Vec<RecallNotice>>,
+}
+
+impl RecallNoticeSink for RecordingRecallSink {
+    fn on_recall(&self, notice: &RecallNotice) {
+        self.notices
+            .lock()
+            .expect("撤回记录锁不应中毒")
+            .push(notice.clone());
     }
 }
 
@@ -621,9 +636,9 @@ async fn inbound_event_delivered() {
     transport.shutdown().await.expect("关停应成功");
 }
 
-/// 出站附件不接线：忽略附件仅发文本；纯空文本拒绝。
+/// 出站附件接线：URL / 字节图片随文本发出；超限降级；纯空文本拒绝。
 #[tokio::test]
-async fn outbound_attachment_ignored_and_empty_text_rejected() {
+async fn outbound_attachment_sends_image_segment_and_empty_text_rejected() {
     let (url, probe) = spawn_server(ServerMode::Echo).await;
     let sink = Arc::new(RecordingSink::default());
     let transport = build_transport(&url, fast_options(), sink);
@@ -641,16 +656,112 @@ async fn outbound_attachment_ignored_and_empty_text_rejected() {
     transport
         .send(&target, &with_attachment)
         .await
-        .expect("附件被忽略后应仅发文本");
-    let frames = probe.frames.lock().expect("帧记录锁不应中毒").clone();
-    assert_eq!(frames.len(), 1);
-    assert_eq!(frames[0]["params"]["message"][0]["data"]["text"], "看这个");
+        .expect("文本 + URL 图片应发送成功");
+
+    let bytes_message = OutboundMessage {
+        text: String::new(),
+        attachment: Some(crate::transport::OutboundAttachment::Bytes {
+            file_name: "cat.png".to_string(),
+            data: b"PNGDATA".to_vec(),
+        }),
+    };
+    transport
+        .send(&target, &bytes_message)
+        .await
+        .expect("仅字节图片应发送成功");
+
+    let oversize_message = OutboundMessage {
+        text: "先说话".to_string(),
+        attachment: Some(crate::transport::OutboundAttachment::Bytes {
+            file_name: "big.png".to_string(),
+            data: vec![0u8; OUTBOUND_IMAGE_MAX_BYTES + 1],
+        }),
+    };
+    transport
+        .send(&target, &oversize_message)
+        .await
+        .expect("超限附件应降级纯文本发送");
 
     let empty = transport
         .send(&target, &OutboundMessage::text("   "))
         .await
         .expect_err("空文本应拒绝");
     assert!(matches!(empty, ChannelError::Protocol(_)));
+
+    let frames = probe.frames.lock().expect("帧记录锁不应中毒").clone();
+    assert_eq!(frames.len(), 3, "三次成功发送各一帧");
+    assert_eq!(frames[0]["params"]["message"][0]["data"]["text"], "看这个");
+    assert_eq!(frames[0]["params"]["message"][1]["type"], "image");
+    assert_eq!(
+        frames[0]["params"]["message"][1]["data"]["file"],
+        "https://example.com/a.png"
+    );
+    assert_eq!(
+        frames[1]["params"]["message"].as_array().map(Vec::len),
+        Some(1),
+        "仅图片应单段"
+    );
+    assert_eq!(frames[1]["params"]["message"][0]["type"], "image");
+    let encoded = frames[1]["params"]["message"][0]["data"]["file"]
+        .as_str()
+        .expect("file 应为字符串");
+    assert_eq!(
+        encoded,
+        format!("base64://{}", super::api::base64_encode(b"PNGDATA"))
+    );
+    assert_eq!(
+        frames[2]["params"]["message"].as_array().map(Vec::len),
+        Some(1),
+        "超限附件降级后仅文本段"
+    );
+    assert_eq!(frames[2]["params"]["message"][0]["type"], "text");
+
+    transport.shutdown().await.expect("关停应成功");
+}
+
+/// 撤回通知投递：notice 帧经连接读循环回调到注册的接收端。
+#[tokio::test]
+async fn recall_notice_reaches_sink() {
+    let notice_frame = r#"{
+        "post_type": "notice",
+        "notice_type": "friend_recall",
+        "user_id": 10001,
+        "self_id": 42,
+        "time": 1700000000,
+        "message_id": 777
+    }"#;
+    let (url, _probe) = spawn_server(ServerMode::PushEvent(notice_frame)).await;
+    let sink = Arc::new(RecordingSink::default());
+    let recall_sink = Arc::new(RecordingRecallSink::default());
+    let handle: Arc<dyn RecallNoticeSink> = recall_sink.clone();
+    let transport = build_transport(&url, fast_options(), sink).with_recall_sink(handle);
+    transport.connect().await.expect("连接应成功");
+
+    let mut waited = Duration::ZERO;
+    let step = Duration::from_millis(10);
+    while waited < Duration::from_secs(2) {
+        if !recall_sink
+            .notices
+            .lock()
+            .expect("撤回记录锁不应中毒")
+            .is_empty()
+        {
+            break;
+        }
+        tokio::time::sleep(step).await;
+        waited += step;
+    }
+    let notices = recall_sink
+        .notices
+        .lock()
+        .expect("撤回记录锁不应中毒")
+        .clone();
+    assert_eq!(notices.len(), 1, "应收到一条撤回通知");
+    assert_eq!(notices[0].channel, "qq");
+    assert_eq!(notices[0].external_ref, "c2c:10001");
+    assert_eq!(notices[0].platform_message_id, "777");
+    assert_eq!(notices[0].operator_id.as_deref(), Some("10001"));
+    assert_eq!(notices[0].occurred_at, 1_700_000_000_000);
 
     transport.shutdown().await.expect("关停应成功");
 }

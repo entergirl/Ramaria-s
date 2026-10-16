@@ -42,6 +42,7 @@ fn make_message(session_id: Uuid, fingerprint: Option<&str>) -> Message {
         sender_ref: None,
         sender_name: None,
         platform_message_id: None,
+        recalled_at: None,
     }
 }
 
@@ -1065,4 +1066,122 @@ async fn get_hits_and_misses_by_id() {
     assert_eq!(hit.content, "内容");
     assert_eq!(hit.fingerprint.as_deref(), Some("fp-get"));
     assert_eq!(hit.persona_uid.as_deref(), Some("char-0001"));
+}
+
+/// recalled_at 往返：save_import 后按 id 读回（None 与 Some 两态）。
+#[tokio::test]
+async fn recalled_at_roundtrip() {
+    let pool = init_test_pool().await.expect("测试库初始化失败");
+    let session_id = setup_fixture(&pool).await;
+
+    let plain = make_message(session_id, Some("fp-rec-plain"));
+    save_import(&pool, &plain).await.expect("写入成功");
+    let got = get(&pool, plain.id).await.unwrap().expect("应命中");
+    assert_eq!(got.recalled_at, None, "未撤回消息应为 None");
+
+    let mut recalled = make_message(session_id, Some("fp-rec-done"));
+    recalled.recalled_at = Some(5000);
+    save_import(&pool, &recalled).await.expect("写入成功");
+    let got = get(&pool, recalled.id).await.unwrap().expect("应命中");
+    assert_eq!(got.recalled_at, Some(5000), "撤回时刻应往返一致");
+}
+
+/// mark_recalled 幂等：仅首次命中写入；重复调用与未命中平台 ID 均返回 0。
+#[tokio::test]
+async fn mark_recalled_is_idempotent() {
+    let pool = init_test_pool().await.expect("测试库初始化失败");
+    let session_id = setup_fixture(&pool).await;
+
+    let mut message = make_message(session_id, Some("fp-mark"));
+    message.platform_message_id = Some("pm-1001".to_string());
+    save_import(&pool, &message).await.expect("写入成功");
+
+    let first = mark_recalled(&pool, session_id, "pm-1001", 9000)
+        .await
+        .expect("撤回标记应成功");
+    assert_eq!(first, 1, "首次标记应命中一行");
+    let second = mark_recalled(&pool, session_id, "pm-1001", 9999)
+        .await
+        .expect("重复标记应成功");
+    assert_eq!(second, 0, "已撤回行不重复命中");
+    let got = find_by_platform_id(&pool, session_id, "pm-1001")
+        .await
+        .unwrap()
+        .expect("应命中");
+    assert_eq!(got.recalled_at, Some(9000), "已撤回行不被覆盖");
+}
+
+/// mark_recalled_by_id 幂等：命中写回，重复调用与未入库 id 返回 false。
+#[tokio::test]
+async fn mark_recalled_by_id_is_idempotent() {
+    let pool = init_test_pool().await.expect("测试库初始化失败");
+    let session_id = setup_fixture(&pool).await;
+
+    let message = make_message(session_id, Some("fp-mark-id"));
+    save_import(&pool, &message).await.expect("写入成功");
+
+    assert!(
+        mark_recalled_by_id(&pool, message.id, 9000).await.unwrap(),
+        "首次命中"
+    );
+    assert!(
+        !mark_recalled_by_id(&pool, message.id, 9999).await.unwrap(),
+        "重复不命中"
+    );
+    assert!(
+        !mark_recalled_by_id(&pool, Uuid::new_v4(), 1).await.unwrap(),
+        "未入库不命中"
+    );
+    let got = get(&pool, message.id).await.unwrap().expect("应命中");
+    assert_eq!(got.recalled_at, Some(9000), "已撤回行不被覆盖");
+}
+
+/// find_by_platform_id 按 (session, 平台消息 ID) 命中；异平台 ID / 异会话未命中。
+#[tokio::test]
+async fn find_by_platform_id_hits_and_misses() {
+    let pool = init_test_pool().await.expect("测试库初始化失败");
+    let session_id = setup_fixture(&pool).await;
+
+    let mut message = make_message(session_id, Some("fp-platform"));
+    message.platform_message_id = Some("pm-hit".to_string());
+    save_import(&pool, &message).await.expect("写入成功");
+
+    let hit = find_by_platform_id(&pool, session_id, "pm-hit")
+        .await
+        .unwrap()
+        .expect("应命中");
+    assert_eq!(hit.id, message.id);
+    let miss = find_by_platform_id(&pool, session_id, "pm-other")
+        .await
+        .unwrap();
+    assert!(miss.is_none(), "异平台消息 ID 不应命中");
+    let miss_cold = find_by_platform_id(&pool, Uuid::new_v4(), "pm-hit")
+        .await
+        .unwrap();
+    assert!(miss_cold.is_none(), "异会话不应命中");
+}
+
+/// has_assistant_message_after 只计晚于下界的 assistant 消息（同刻不计）。
+#[tokio::test]
+async fn has_assistant_message_after_checks_role_and_time() {
+    let pool = init_test_pool().await.expect("测试库初始化失败");
+    let session_id = setup_fixture(&pool).await;
+
+    let mut assistant = make_message(session_id, Some("fp-assistant"));
+    assistant.role = MessageRole::Assistant;
+    assistant.created_at = 7000;
+    save_import(&pool, &assistant).await.expect("写入成功");
+
+    let after = has_assistant_message_after(&pool, session_id, 6999)
+        .await
+        .unwrap();
+    assert!(after, "assistant 消息晚于时间下界应命中");
+    let same = has_assistant_message_after(&pool, session_id, 7000)
+        .await
+        .unwrap();
+    assert!(!same, "同刻不计（严格大于）");
+    let early = has_assistant_message_after(&pool, session_id, 7001)
+        .await
+        .unwrap();
+    assert!(!early, "assistant 消息早于时间下界不应命中");
 }

@@ -15,7 +15,7 @@ use ramaria_core::types::{
     AttachmentStatus, ChannelBinding, ClusterSnapshot, EventBatchWrite, EventRelation, EventSource,
     MemoryEvent, MemoryL1, Message, MessageAttachment, Persona, PersonaEventAggregate,
     PersonaExample, PersonaFact, PersonaStyleStats, PersonalityTrait, ProfileField, Session,
-    SessionMember, TraitEvidence, TraitSource, TraitStatus, UttBlock,
+    SessionMember, StickerAsset, TraitEvidence, TraitSource, TraitStatus, UttBlock,
 };
 use uuid::Uuid;
 
@@ -224,6 +224,40 @@ impl StoreCrud for SqliteStorage {
         fingerprint: &str,
     ) -> RamariaResult<Option<Message>> {
         repo::messages::find_by_fingerprint(&self.pool, fingerprint).await
+    }
+    /// 覆写为按 (session, 平台消息 ID) 单行查询（社交通道撤回定位）。
+    async fn find_message_by_platform_id(
+        &self,
+        session_id: Uuid,
+        platform_message_id: &str,
+    ) -> RamariaResult<Option<Message>> {
+        repo::messages::find_by_platform_id(&self.pool, session_id, platform_message_id).await
+    }
+    /// 覆写为条件 UPDATE（仅未撤回行，幂等；返回受影响行数）。
+    async fn mark_message_recalled(
+        &self,
+        session_id: Uuid,
+        platform_message_id: &str,
+        recalled_at: i64,
+    ) -> RamariaResult<u64> {
+        repo::messages::mark_recalled(&self.pool, session_id, platform_message_id, recalled_at)
+            .await
+    }
+    /// 覆写为条件 UPDATE（仅未撤回行，幂等）。
+    async fn mark_message_recalled_by_id(
+        &self,
+        message_id: Uuid,
+        recalled_at: i64,
+    ) -> RamariaResult<bool> {
+        repo::messages::mark_recalled_by_id(&self.pool, message_id, recalled_at).await
+    }
+    /// 覆写为 EXISTS 查询（撤回处理的上下文判定）。
+    async fn has_assistant_message_after(
+        &self,
+        session_id: Uuid,
+        after_ms: i64,
+    ) -> RamariaResult<bool> {
+        repo::messages::has_assistant_message_after(&self.pool, session_id, after_ms).await
     }
     /// 覆写为跨会话按通道取去重键（外部对话重复提交去重）。
     async fn list_message_keys_by_channel_ref(
@@ -701,5 +735,28 @@ impl StoreCrud for SqliteStorage {
         let token = ramaria_core::keyword::KeywordToken::new(alias)
             .ok_or_else(|| RamariaError::validation("关键词非法（空/超长），拒绝写入词条池"))?;
         repo::keyword::upsert_pending(&self.pool, &token, canonical_id, use_count).await
+    }
+    // =========================================================
+    // Sticker Assets（表情资产）
+    // =========================================================
+    async fn insert_sticker_asset(&self, asset: &StickerAsset) -> RamariaResult<i64> {
+        repo::sticker_assets::insert(&self.pool, asset).await
+    }
+    async fn list_sticker_assets(&self) -> RamariaResult<Vec<StickerAsset>> {
+        repo::sticker_assets::list_all(&self.pool).await
+    }
+    async fn get_sticker_asset(&self, id: i64) -> RamariaResult<Option<StickerAsset>> {
+        repo::sticker_assets::get(&self.pool, id).await
+    }
+    async fn update_sticker_asset(
+        &self,
+        id: i64,
+        description: Option<&str>,
+        tags: Option<&[String]>,
+    ) -> RamariaResult<bool> {
+        repo::sticker_assets::update(&self.pool, id, description, tags).await
+    }
+    async fn delete_sticker_asset(&self, id: i64) -> RamariaResult<bool> {
+        repo::sticker_assets::delete(&self.pool, id).await
     }
 }

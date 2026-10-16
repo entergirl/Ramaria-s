@@ -205,6 +205,9 @@ pub struct Engine {
     proactive_sink: Arc<RwLock<Option<Arc<dyn ProactiveSink>>>>,
     /// 通道路主动消息投递接收端（宿主注册制；未注册时通道投递按门禁丢弃）。
     channel_proactive_sink: Arc<RwLock<Option<Arc<dyn ProactiveSink>>>>,
+    /// 撤回在途去重集（键 = 会话 id 文本）：同一会话的连撤通知在首条处理完成前
+    /// 不再触发第二次回应生成；取用即放，不跨 `.await` 持锁。
+    recall_inflight: Arc<Mutex<std::collections::HashSet<String>>>,
     /// 图片理解能力探测缓存（按 model_id + base_url 键控；None = 本进程尚未探测）。
     vision_probe: tokio::sync::Mutex<Option<VisionProbeState>>,
     /// 后台任务管理器配置（L1 生成 / 补扫的重试退避口径；装配时指定，测试可后置注入）。

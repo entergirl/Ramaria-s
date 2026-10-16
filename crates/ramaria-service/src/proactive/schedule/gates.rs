@@ -27,7 +27,7 @@ use super::state::{self, ProactiveGlobalState, ProactiveState};
 
 /// 闸门跳过原因（日志标识）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum GateSkip {
+pub(crate) enum GateSkip {
     PersonaNotAllowed,
     PersonaExcluded,
     PersonaDisabled,
@@ -47,7 +47,7 @@ pub(super) enum GateSkip {
 
 impl GateSkip {
     /// 稳定英文标识（日志字段）。
-    pub(super) fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             GateSkip::PersonaNotAllowed => "persona_not_allowed",
             GateSkip::PersonaExcluded => "persona_excluded",
@@ -69,7 +69,7 @@ impl GateSkip {
 }
 
 /// 硬闸门结果。
-pub(super) enum GateOutcome {
+pub(crate) enum GateOutcome {
     Pass,
     Skip(GateSkip),
 }
@@ -231,6 +231,104 @@ pub(super) async fn evaluate_gates(
     }
 
     // ---- 11. 隐私门禁（线上 provider 未确认时跳过）----
+    if !crate::privacy::online_privacy_confirmed(engine).await? {
+        return Ok(GateOutcome::Skip(GateSkip::PrivacyUnconfirmed));
+    }
+
+    Ok(GateOutcome::Pass)
+}
+
+// =========================================================
+// 撤回触发闸门
+// =========================================================
+
+/// 撤回触发的回应判定闸门（打扰控制子集，顺序固定）。
+///
+/// 顺序:
+/// 1. 人格可见性；
+/// 2. 人格主动开关（user 类硬排除 / 手动关；自动态豁免冷启动）；
+/// 3. 应用状态就绪；
+/// 4. 免打扰时段（解析失败降级放行）；
+/// 5. 每日上限（先按本地日期跨日重置）；
+/// 6. 全局日上限（不限时不传全局状态）；
+/// 7. 冷却；
+/// 8. 线上 provider 隐私确认。
+///
+/// 说明:
+/// - 即时事件触发，豁免首次宽限 / 退避 / 最小空闲 / 冷启动；
+/// - 返回 `Pass` 或首个未通过的跳过原因；存储查询失败上抛。
+pub(crate) async fn evaluate_recall_gates(
+    engine: &Engine,
+    persona: &Persona,
+    now: i64,
+    config: &ProactiveConfig,
+    global: Option<&ProactiveGlobalState>,
+    st: &mut ProactiveState,
+) -> RamariaResult<GateOutcome> {
+    // ---- 1. 人格可见性 ----
+    if !engine.recall_policy().persona_allowed(&persona.uid) {
+        return Ok(GateOutcome::Skip(GateSkip::PersonaNotAllowed));
+    }
+
+    // ---- 2. 人格主动开关（user 硬排除 / 手动关；自动态豁免冷启动）----
+    if switch::is_user_persona(persona) {
+        return Ok(GateOutcome::Skip(GateSkip::PersonaExcluded));
+    }
+    match switch::load_mode(engine.storage_ref().as_ref(), &persona.uid).await? {
+        ProactivePersonaMode::Off => return Ok(GateOutcome::Skip(GateSkip::PersonaDisabled)),
+        ProactivePersonaMode::On | ProactivePersonaMode::Auto => {}
+    }
+
+    // ---- 3. 应用状态 ----
+    if engine.current_state() != AppState::Ready {
+        return Ok(GateOutcome::Skip(GateSkip::StateNotReady));
+    }
+
+    // ---- 4. 免打扰时段（配置为空视为未配置；解析失败降级为无免打扰）----
+    let quiet_raw = config.quiet_hours.trim();
+    if !quiet_raw.is_empty() {
+        match parse_quiet_hours(quiet_raw) {
+            Some(quiet) => {
+                if quiet.contains(state::local_minute_of_day(now)) {
+                    return Ok(GateOutcome::Skip(GateSkip::QuietHours));
+                }
+            }
+            None => {
+                debug!(
+                    raw = %quiet_raw,
+                    "撤回触发：免打扰时段配置无法解析，本轮按无免打扰处理"
+                );
+            }
+        }
+    }
+
+    // ---- 5. 每日上限（先跨日重置）----
+    let today = state::local_date_str(now);
+    if st.daily_date != today {
+        st.daily_count = 0;
+        st.daily_date = today;
+    }
+    if st.daily_count >= config.daily_limit {
+        return Ok(GateOutcome::Skip(GateSkip::DailyLimit));
+    }
+
+    // ---- 6. 全局日上限（全部人格合计；不限时调用方不传全局状态）----
+    if config.daily_total_limit > 0 {
+        if let Some(global) = global {
+            if global.daily_count >= config.daily_total_limit {
+                return Ok(GateOutcome::Skip(GateSkip::DailyTotalLimit));
+            }
+        }
+    }
+
+    // ---- 7. 冷却 ----
+    if let Some(last) = st.last_sent_at {
+        if now.saturating_sub(last) < hours_to_ms(config.cooldown_hours) {
+            return Ok(GateOutcome::Skip(GateSkip::Cooldown));
+        }
+    }
+
+    // ---- 8. 隐私门禁（线上 provider 未确认时跳过）----
     if !crate::privacy::online_privacy_confirmed(engine).await? {
         return Ok(GateOutcome::Skip(GateSkip::PrivacyUnconfirmed));
     }

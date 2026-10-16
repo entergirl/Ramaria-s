@@ -20,10 +20,11 @@ mod persona;
 mod recall;
 mod session;
 mod setup;
+mod sticker;
 
 pub use channel::{
     ChannelImageOutcome, ChannelIngestOutcome, ChannelIngestRequest, ChannelIngestedImage,
-    ChannelReplyRequest,
+    ChannelReplyRequest, RecallNoticeRequest, RecallOutcome,
 };
 pub use chat::{
     ChatRole, ChatSendOutcome, ChatSendRequest, ChatStreamRequest, ChatTurn, SealOutcome,
@@ -60,6 +61,7 @@ pub use session::{
 pub use setup::{
     DegradedReason, EmbeddingModelView, EmbeddingValidation, SetupRequest, SetupStatus,
 };
+pub use sticker::{LocalImageSendOutcome, LocalImageSendRequest, StickerPayload};
 
 // =========================================================
 // 单元测试

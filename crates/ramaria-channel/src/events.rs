@@ -36,5 +36,39 @@ impl ChannelEventSink for NoopSink {
     fn on_status_changed(&self, _status: &ChannelStatus) {}
 }
 
+// =========================================================
+// 撤回通知回调
+// =========================================================
+
+/// 撤回通知（平台撤回事件的规范形态）。
+///
+/// 字段约定:
+/// - `channel`: 通道标识（`qq` / `telegram`）；
+/// - `external_ref`: 会话外部标识（`c2c:{uin}` 私聊 / `group:{群号}` 群聊）；
+/// - `platform_message_id`: 被撤回消息的平台侧消息 ID；
+/// - `operator_id`: 执行撤回的账号（平台未提供时 None）；
+/// - `self_id`: 本机账号标识（平台未提供时 None）；
+/// - `occurred_at`: 撤回发生时刻（Unix 毫秒）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecallNotice {
+    pub channel: &'static str,
+    pub external_ref: String,
+    pub platform_message_id: String,
+    pub operator_id: Option<String>,
+    pub self_id: Option<String>,
+    pub occurred_at: i64,
+}
+
+/// 撤回通知接收端（宿主注册制）。
+///
+/// 实现约定:
+/// - 回调为同步调用且不阻塞：由读循环直接调用，实现方自行 spawn 异步处理
+///   （撤回处理含生成与投递，耗时较长）；
+/// - 回调可能来自任意线程，实现须保证自身线程安全。
+pub trait RecallNoticeSink: Send + Sync {
+    /// 撤回通知回调（同步、不阻塞；实现方自行 spawn 异步处理）。
+    fn on_recall(&self, notice: &RecallNotice);
+}
+
 #[cfg(test)]
 mod tests;

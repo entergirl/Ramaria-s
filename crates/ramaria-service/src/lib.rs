@@ -40,6 +40,9 @@
 //! - `import`：QQ 聊天记录导入用例（解析 / L0 写入 / L1 批量生成与 ETA / 深度触发，
 //!   `importer` feature 下编译）；
 //! - `vision`：图片理解用例（能力门禁 / md5 去重 / 多模态调用 / 描述回填）；
+//! - `withdraw`：消息撤回域（通道撤回通知处理 / 本地撤回标记 / 撤回文本渲染）；
+//! - `sticker`：表情资产用例（入库 / 列表 / 更新 / 删除 / 主题解析）；
+//! - `local_image`：本地会话发图用例（消息与附件行一并落库）；
 //! - 入口层（如 `ramaria-mcp`）只做协议包装，不承载业务逻辑。
 
 pub mod attachment_cache;
@@ -64,6 +67,7 @@ pub mod ingest;
 pub mod keyword;
 pub mod l2;
 pub mod lifecycle;
+pub(crate) mod local_image;
 pub mod model;
 pub mod persona;
 pub mod privacy;
@@ -73,12 +77,14 @@ pub mod seal;
 pub mod session;
 pub mod settings;
 pub mod setup;
+pub(crate) mod sticker;
 pub mod stream_event;
 pub mod style;
 pub mod types;
 pub mod update;
 pub mod utt;
 pub mod vision;
+pub(crate) mod withdraw;
 
 #[cfg(feature = "importer")]
 pub mod import;
@@ -131,14 +137,15 @@ pub use types::{
     FactEntryView, FactView, GroupedFactsView, HistoryMessageView, HistoryRequest, HistoryResult,
     IngestOutcome, IngestRequest, KeywordEntryView, KeywordPoolView, KeywordSeedItem,
     KeywordSeedOutcome, KeywordSuggestionOutcome, L1BrowsePage, L1BrowseRequest, L1MemoryView,
-    L2BrowsePage, L2BrowseRequest, L2EventView, L3TraitView, MAX_ITEMS_LIMIT, PendingAliasView,
-    PersonaCardRequest, PersonaCardView, PersonaFileAction, PersonaFileOutcome, PersonaFullView,
-    PersonaPromptPreview, PersonaSection, PersonaSummaryView, PersonaUpdateRequest,
-    PersonalityProfileView, ProfileStatusView, PromptPreviewTier, RecallItem, RecallLayer,
-    RecallMode, RecallRequest, RecallResult, RecallStats, SealOutcome, SessionBrowsePage,
-    SessionBrowseRequest, SessionDetailView, SessionMessageView, SessionMessagesRequest,
-    SessionMessagesView, SessionSummaryView, SetupRequest, SetupStatus, StyleView, TraitDetailView,
-    TraitEvidenceRequest, TraitEvidenceView, TraitView,
+    L2BrowsePage, L2BrowseRequest, L2EventView, L3TraitView, LocalImageSendOutcome,
+    LocalImageSendRequest, MAX_ITEMS_LIMIT, PendingAliasView, PersonaCardRequest, PersonaCardView,
+    PersonaFileAction, PersonaFileOutcome, PersonaFullView, PersonaPromptPreview, PersonaSection,
+    PersonaSummaryView, PersonaUpdateRequest, PersonalityProfileView, ProfileStatusView,
+    PromptPreviewTier, RecallItem, RecallLayer, RecallMode, RecallRequest, RecallResult,
+    RecallStats, SealOutcome, SessionBrowsePage, SessionBrowseRequest, SessionDetailView,
+    SessionMessageView, SessionMessagesRequest, SessionMessagesView, SessionSummaryView,
+    SetupRequest, SetupStatus, StyleView, TraitDetailView, TraitEvidenceRequest, TraitEvidenceView,
+    TraitView,
 };
 pub use update::{UpdateStatus, check_update};
 pub use utt::UttRebuildOutcome;

@@ -19,9 +19,11 @@ use tokio_tungstenite::MaybeTlsStream;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::config::QqRuntimeConfig;
-use crate::events::ChannelEventSink;
+use crate::events::{ChannelEventSink, RecallNoticeSink};
 use crate::status::{ChannelStatus, ConnectionState};
-use crate::transport::{OutboundMessage, OutboundTarget, Transport, TransportEvent};
+use crate::transport::{
+    OutboundAttachment, OutboundMessage, OutboundTarget, Transport, TransportEvent,
+};
 use crate::{ChannelError, ChannelResult};
 
 mod api;
@@ -33,6 +35,9 @@ pub use api::SentMessageCache;
 /// WebSocket 流类型（本版仅 `ws://` 明文，保留两态统一类型）。
 pub(crate) type WsStream =
     tokio_tungstenite::WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// 出站图片字节上限（超出忽略附件降级纯文本）。
+const OUTBOUND_IMAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
 
 // =========================================================
 // 连接参数
@@ -83,6 +88,7 @@ pub struct OneBotTransport {
     config: QqRuntimeConfig,
     options: QqTransportOptions,
     sink: Arc<dyn ChannelEventSink>,
+    recall_sink: Option<Arc<dyn RecallNoticeSink>>,
     events: tokio::sync::Mutex<mpsc::UnboundedReceiver<TransportEvent>>,
     inner: Arc<Mutex<Inner>>,
     echo_counter: AtomicU64,
@@ -111,6 +117,7 @@ impl OneBotTransport {
             config,
             options,
             sink,
+            recall_sink: None,
             events: tokio::sync::Mutex::new(events_rx),
             inner: Arc::new(Mutex::new(Inner {
                 status: ChannelStatus::new("qq"),
@@ -125,6 +132,12 @@ impl OneBotTransport {
         }
     }
 
+    /// 注入撤回通知接收端（构建器：宿主装配时注册一次，缺省不接收通知）。
+    pub fn with_recall_sink(mut self, sink: Arc<dyn RecallNoticeSink>) -> Self {
+        self.recall_sink = Some(sink);
+        self
+    }
+
     /// 启动后台管理任务（携带首次已建连接素材，或从退避重连开始）。
     fn spawn_manager(&self, initial: Option<connection::Connection>) {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -132,6 +145,7 @@ impl OneBotTransport {
             config: self.config.clone(),
             options: self.options.clone(),
             sink: Arc::clone(&self.sink),
+            recall_sink: self.recall_sink.clone(),
             inner: Arc::clone(&self.inner),
         };
         let handle = tokio::spawn(connection::manage(context, shutdown_rx, initial));
@@ -256,10 +270,8 @@ impl Transport for OneBotTransport {
     }
 
     async fn send(&self, target: &OutboundTarget, message: &OutboundMessage) -> ChannelResult<()> {
-        if message.attachment.is_some() {
-            tracing::warn!(channel = "qq", "本版不支持出站附件，已忽略");
-        }
-        if message.text.trim().is_empty() {
+        let image_file = self.resolve_attachment(message.attachment.as_ref());
+        if message.text.trim().is_empty() && image_file.is_none() {
             return Err(ChannelError::Protocol(
                 "出站消息文本为空，取消发送".to_string(),
             ));
@@ -277,7 +289,12 @@ impl Transport for OneBotTransport {
             "ramaria-{}",
             self.echo_counter.fetch_add(1, Ordering::Relaxed)
         );
-        let request = api::build_text_request(&target.external_ref, &message.text, &echo)?;
+        let request = api::build_message_request(
+            &target.external_ref,
+            &message.text,
+            image_file.as_deref(),
+            &echo,
+        )?;
         let response_rx = pending.register(echo.clone());
         if write_tx
             .send(Message::Text(request.to_string().into()))
@@ -300,6 +317,46 @@ impl Transport for OneBotTransport {
 
     fn status(&self) -> ChannelStatus {
         lock(&self.inner).status.clone()
+    }
+}
+
+impl OneBotTransport {
+    /// 归一附件为出站图片引用：URL 原样；字节超限降级忽略；无附件为 None。
+    ///
+    /// 规则:
+    /// - Url: 取 URL 原样（空白视为无效降级）；
+    /// - Bytes: 超过 OUTBOUND_IMAGE_MAX_BYTES → 记日志忽略附件；否则编码为
+    ///   base64:// 引用（文件名仅用于日志）；
+    /// - None: 无图。
+    fn resolve_attachment(&self, attachment: Option<&OutboundAttachment>) -> Option<String> {
+        match attachment {
+            None => None,
+            Some(OutboundAttachment::Url(url)) => {
+                let url = url.trim();
+                if url.is_empty() {
+                    None
+                } else {
+                    Some(url.to_string())
+                }
+            }
+            Some(OutboundAttachment::Bytes { file_name, data }) => {
+                if data.len() > OUTBOUND_IMAGE_MAX_BYTES {
+                    tracing::warn!(
+                        channel = "qq",
+                        file_name = %file_name,
+                        bytes = data.len(),
+                        "出站图片超过大小上限，忽略附件按纯文本发送"
+                    );
+                    return None;
+                }
+                tracing::debug!(
+                    channel = "qq",
+                    bytes = data.len(),
+                    "出站图片已编码为 base64 引用"
+                );
+                Some(format!("base64://{}", api::base64_encode(data)))
+            }
+        }
     }
 }
 

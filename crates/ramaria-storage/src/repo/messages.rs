@@ -56,6 +56,7 @@ struct MessageRow {
     sender_ref: Option<String>,
     sender_name: Option<String>,
     platform_message_id: Option<String>,
+    recalled_at: Option<i64>,
 }
 
 impl MessageRow {
@@ -77,6 +78,7 @@ impl MessageRow {
             sender_ref: self.sender_ref,
             sender_name: self.sender_name,
             platform_message_id: self.platform_message_id,
+            recalled_at: self.recalled_at,
         })
     }
 }
@@ -95,8 +97,8 @@ where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
     sqlx::query(
-        "INSERT INTO messages (id, session_id, role, content, created_at, source, import_fingerprint, persona_uid, is_proactive, sender_ref, sender_name, platform_message_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO messages (id, session_id, role, content, created_at, source, import_fingerprint, persona_uid, is_proactive, sender_ref, sender_name, platform_message_id, recalled_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
         .bind(msg.id.to_string())
         .bind(msg.session_id.to_string())
@@ -110,6 +112,7 @@ where
         .bind(&msg.sender_ref)
         .bind(&msg.sender_name)
         .bind(&msg.platform_message_id)
+        .bind(msg.recalled_at)
         .execute(executor)
         .await?;
     Ok(())
@@ -311,7 +314,7 @@ pub async fn list_unread_counts(pool: &SqlitePool) -> RamariaResult<HashMap<Uuid
 /// - 按 `created_at ASC`（时间正序）排列的消息列表。
 pub async fn list_by_session(pool: &SqlitePool, session_id: Uuid) -> RamariaResult<Vec<Message>> {
     let rows = sqlx::query_as::<_, MessageRow>(
-        "SELECT id, session_id, role, content, created_at, source, import_fingerprint, persona_uid, is_proactive, sender_ref, sender_name, platform_message_id
+        "SELECT id, session_id, role, content, created_at, source, import_fingerprint, persona_uid, is_proactive, sender_ref, sender_name, platform_message_id, recalled_at
          FROM messages WHERE session_id = ? ORDER BY created_at ASC",
     )
     .bind(session_id.to_string())
@@ -342,7 +345,7 @@ pub async fn list_by_session_paginated(
     offset: i64,
 ) -> RamariaResult<Vec<Message>> {
     let rows = sqlx::query_as::<_, MessageRow>(
-        "SELECT id, session_id, role, content, created_at, source, import_fingerprint, persona_uid, is_proactive, sender_ref, sender_name, platform_message_id
+        "SELECT id, session_id, role, content, created_at, source, import_fingerprint, persona_uid, is_proactive, sender_ref, sender_name, platform_message_id, recalled_at
          FROM messages WHERE session_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
     )
     .bind(session_id.to_string())
@@ -362,7 +365,7 @@ pub async fn list_by_session_paginated(
 /// - 与列表查询使用同一投影与解析口径；未命中返回 None。
 pub async fn get(pool: &SqlitePool, id: Uuid) -> RamariaResult<Option<Message>> {
     let row = sqlx::query_as::<_, MessageRow>(
-        "SELECT id, session_id, role, content, created_at, source, import_fingerprint, persona_uid, is_proactive, sender_ref, sender_name, platform_message_id
+        "SELECT id, session_id, role, content, created_at, source, import_fingerprint, persona_uid, is_proactive, sender_ref, sender_name, platform_message_id, recalled_at
          FROM messages WHERE id = ? LIMIT 1",
     )
     .bind(id.to_string())
@@ -378,7 +381,7 @@ pub async fn find_by_fingerprint(
     fingerprint: &str,
 ) -> RamariaResult<Option<Message>> {
     let row = sqlx::query_as::<_, MessageRow>(
-        "SELECT id, session_id, role, content, created_at, source, import_fingerprint, persona_uid, is_proactive, sender_ref, sender_name, platform_message_id
+        "SELECT id, session_id, role, content, created_at, source, import_fingerprint, persona_uid, is_proactive, sender_ref, sender_name, platform_message_id, recalled_at
          FROM messages WHERE import_fingerprint = ? LIMIT 1",
     )
     .bind(fingerprint)
@@ -386,6 +389,106 @@ pub async fn find_by_fingerprint(
     .await
     .storage_err("指纹查询失败")?;
     row.map(|r| r.into_message()).transpose()
+}
+/// 按 (session, 平台消息 ID) 查询单条消息。
+///
+/// 口径:
+/// - 与列表查询使用同一投影与解析口径；未命中返回 None。
+pub async fn find_by_platform_id(
+    pool: &SqlitePool,
+    session_id: Uuid,
+    platform_message_id: &str,
+) -> RamariaResult<Option<Message>> {
+    let row = sqlx::query_as::<_, MessageRow>(
+        "SELECT id, session_id, role, content, created_at, source, import_fingerprint, persona_uid, is_proactive, sender_ref, sender_name, platform_message_id, recalled_at \
+         FROM messages WHERE session_id = ? AND platform_message_id = ? LIMIT 1",
+    )
+    .bind(session_id.to_string())
+    .bind(platform_message_id)
+    .fetch_optional(pool)
+    .await
+    .storage_err("按平台消息 ID 查询失败")?;
+    row.map(|r| r.into_message()).transpose()
+}
+
+/// 按 (session, 平台消息 ID) 标记消息撤回。
+///
+/// 口径:
+/// - 幂等：仅更新 `recalled_at IS NULL` 的行，已撤回行不被覆盖；
+/// - 返回受影响行数（1 = 本次标记成功；0 = 未命中或已撤回）。
+///
+/// 说明:
+/// - 写路径经 [`with_busy_retry`] 重试，避免多进程写锁争用时直接失败。
+pub async fn mark_recalled(
+    pool: &SqlitePool,
+    session_id: Uuid,
+    platform_message_id: &str,
+    recalled_at: i64,
+) -> RamariaResult<u64> {
+    let session_id = session_id.to_string();
+    with_busy_retry("消息撤回标记", || async {
+        sqlx::query(
+            "UPDATE messages SET recalled_at = ? \
+             WHERE session_id = ? AND platform_message_id = ? AND recalled_at IS NULL",
+        )
+        .bind(recalled_at)
+        .bind(&session_id)
+        .bind(platform_message_id)
+        .execute(pool)
+        .await
+        .map(|result| result.rows_affected())
+    })
+    .await
+    .storage_err("消息撤回标记失败")
+}
+
+/// 按消息 ID 标记消息撤回（本地定位兜底路径）。
+///
+/// 口径:
+/// - 幂等：仅更新 `recalled_at IS NULL` 的行，已撤回行不被覆盖；
+/// - 返回是否本次完成标记（未命中或已撤回返回 false）。
+pub async fn mark_recalled_by_id(
+    pool: &SqlitePool,
+    message_id: Uuid,
+    recalled_at: i64,
+) -> RamariaResult<bool> {
+    let message_id = message_id.to_string();
+    let result = with_busy_retry("消息撤回标记", || async {
+        sqlx::query("UPDATE messages SET recalled_at = ? WHERE id = ? AND recalled_at IS NULL")
+            .bind(recalled_at)
+            .bind(&message_id)
+            .execute(pool)
+            .await
+    })
+    .await
+    .storage_err("消息撤回标记失败")?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// 判断会话内是否存在晚于指定时刻的助手消息。
+///
+/// 口径:
+/// - 仅计 `role = 'assistant'` 的消息；时间下界严格大于（等于不计）；
+/// - 供撤回处理的上下文判定（撤回行之后是否已有助手回复）。
+pub async fn has_assistant_message_after(
+    pool: &SqlitePool,
+    session_id: Uuid,
+    after_ms: i64,
+) -> RamariaResult<bool> {
+    // SQLite EXISTS 恒返回一行 0/1
+    let exists = sqlx::query_scalar::<_, i64>(
+        "SELECT EXISTS( \
+             SELECT 1 FROM messages \
+             WHERE session_id = ? AND role = 'assistant' AND created_at > ? \
+         )",
+    )
+    .bind(session_id.to_string())
+    .bind(after_ms)
+    .fetch_one(pool)
+    .await
+    .storage_err("查询会话助手消息存在性失败")?;
+
+    Ok(exists != 0)
 }
 
 /// 按来源通道 + 外部对话标识读取消息去重键（外部入口重复提交去重）。
@@ -452,7 +555,7 @@ pub async fn list_keys_by_channel_ref(
 /// - 按 `created_at DESC`（最新在前）排列的消息列表。
 pub async fn list_by_persona(pool: &SqlitePool, persona_uid: &str) -> RamariaResult<Vec<Message>> {
     let rows = sqlx::query_as::<_, MessageRow>(
-        "SELECT id, session_id, role, content, created_at, source, import_fingerprint, persona_uid, is_proactive, sender_ref, sender_name, platform_message_id
+        "SELECT id, session_id, role, content, created_at, source, import_fingerprint, persona_uid, is_proactive, sender_ref, sender_name, platform_message_id, recalled_at
          FROM messages WHERE persona_uid = ? ORDER BY created_at DESC",
     )
     .bind(persona_uid)
@@ -487,7 +590,7 @@ pub async fn list_by_persona_paginated(
     offset: i64,
 ) -> RamariaResult<Vec<Message>> {
     let rows = sqlx::query_as::<_, MessageRow>(
-        "SELECT id, session_id, role, content, created_at, source, import_fingerprint, persona_uid, is_proactive, sender_ref, sender_name, platform_message_id
+        "SELECT id, session_id, role, content, created_at, source, import_fingerprint, persona_uid, is_proactive, sender_ref, sender_name, platform_message_id, recalled_at
          FROM messages WHERE persona_uid = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
     )
     .bind(persona_uid)

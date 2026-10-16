@@ -22,7 +22,7 @@ mod picker;
 mod roster;
 mod schedule;
 mod sink;
-mod state;
+pub(crate) mod state;
 mod stats;
 mod switch;
 mod topic;
@@ -34,9 +34,17 @@ pub use stats::{
     ProactiveStatsTotals,
 };
 
+pub(crate) use judge::{JudgeCandidate, JudgeOutcome, JudgeSignals, decide as judge_decide};
 pub(crate) use picker::PickerTopicProvider;
 pub(crate) use roster::{list_personas, set_persona_mode};
-pub(crate) use schedule::{TopicPicker, spawn};
+pub(crate) use schedule::{
+    DeliveryOutcome, GateOutcome, TopicPicker, deliver as proactive_deliver, evaluate_recall_gates,
+    record_delivery as record_proactive_delivery, spawn,
+};
+pub(crate) use state::{
+    ProactiveGlobalState, ProactiveState, load_global_state, load_state, save_global_state,
+    save_state,
+};
 pub(crate) use stats::collect as collect_stats;
 pub(crate) use topic::{ProactiveDirective, ProactiveOutcome};
 

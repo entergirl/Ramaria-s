@@ -103,6 +103,7 @@ async fn first_message_creates_session_and_persists() {
         .expect("查询消息应成功");
     assert_eq!(messages.len(), 1);
     let message = &messages[0];
+    assert_eq!(outcome.message_id, message.id, "写入路径应回传落库消息 id");
     assert_eq!(message.role, MessageRole::User);
     assert_eq!(message.persona_uid.as_deref(), Some("char-10001"));
     assert_eq!(message.sender_ref.as_deref(), Some("10001"));
@@ -194,6 +195,10 @@ async fn duplicate_platform_message_is_idempotent() {
     assert!(first.written);
     assert!(!second.written);
     assert_eq!(first.session_id, second.session_id);
+    assert_eq!(
+        second.message_id, first.message_id,
+        "重复事件应回传已存在消息 id"
+    );
     assert!(second.images.is_empty());
     let messages = storage
         .list_messages(first.session_id)

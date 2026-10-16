@@ -920,6 +920,7 @@ fn reply_request(session_id: Uuid, persona: &str, message: &str) -> ChannelReply
         session_id,
         persona_uid: persona.to_string(),
         message: message.to_string(),
+        trigger_message_id: None,
     }
 }
 
@@ -960,7 +961,8 @@ async fn channel_reply_persists_assistant_only_and_embeds_inbound_history() {
     let outcome = engine
         .channel_reply(reply_request(session.id, DEFAULT_PERSONA_UID, "你好呀"))
         .await
-        .expect("社交通道回复应成功");
+        .expect("社交通道回复应成功")
+        .expect("应产出回复");
     assert_eq!(outcome.reply, REPLY);
     assert_eq!(outcome.session_id, session.id);
 
@@ -1175,7 +1177,8 @@ async fn channel_reply_skips_persist_on_empty_reply() {
     let outcome = engine
         .channel_reply(reply_request(session.id, DEFAULT_PERSONA_UID, "在吗"))
         .await
-        .expect("生成调用本身应成功");
+        .expect("生成调用本身应成功")
+        .expect("空回复仍应产出结果");
     assert!(outcome.reply.is_empty());
 
     let messages = storage

@@ -439,6 +439,10 @@ async fn newline_segment_style_appends_channel_declaration() {
         prompt.contains("覆盖上文的分条约定"),
         "声明应以格式要求覆盖前述约定"
     );
+    assert!(
+        prompt.contains(CHANNEL_STICKER_DECLARATION),
+        "表情发送声明段应进入提示词"
+    );
 }
 
 /// 通道（Newline + 群聊）：分段声明后追加群聊说明段；非群聊不追加。
@@ -469,10 +473,16 @@ async fn group_declaration_appended_only_for_group_conversation() {
     let segment_pos = group_prompt
         .find(CHANNEL_SEGMENT_DECLARATION)
         .expect("群聊提示词应含通道分段声明");
+    let sticker_pos = group_prompt
+        .find(CHANNEL_STICKER_DECLARATION)
+        .expect("群聊提示词应含表情发送声明段");
     let group_pos = group_prompt
         .find(CHANNEL_GROUP_DECLARATION)
         .expect("群聊提示词应含群聊说明段");
-    assert!(segment_pos < group_pos, "群聊说明段应紧跟分段声明之后");
+    assert!(
+        segment_pos < sticker_pos && sticker_pos < group_pos,
+        "表情发送声明段应位于分段声明与群聊说明段之间"
+    );
 
     let private_prompt = build_system_prompt(
         storage.as_ref(),
@@ -521,6 +531,10 @@ async fn pipe_segment_style_keeps_legacy_rules() {
     assert!(
         !prompt.contains(CHANNEL_GROUP_DECLARATION),
         "管道形态不应包含群聊说明段"
+    );
+    assert!(
+        !prompt.contains(CHANNEL_STICKER_DECLARATION),
+        "管道形态不应包含表情发送声明段"
     );
     assert!(prompt.contains("||"), "共享回复规则仍含多气泡契约");
 }

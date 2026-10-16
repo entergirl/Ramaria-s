@@ -4548,6 +4548,7 @@ dependencies = [
  "chrono",
  "futures",
  "image",
+ "md-5",
  "ramaria-core",
  "ramaria-importer",
  "ramaria-llm",

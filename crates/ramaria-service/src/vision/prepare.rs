@@ -298,6 +298,14 @@ pub(crate) fn image_mime_from_bytes(bytes: &[u8]) -> &'static str {
         .unwrap_or("image/jpeg")
 }
 
+/// 按魔数返回图片 MIME（未知格式返回 None，不做回退）。
+///
+/// 用途:
+/// - 需要区分「未知格式」与「JPEG」的调用方（如图片入库前的格式校验）。
+pub(crate) fn image_mime_checked(bytes: &[u8]) -> Option<&'static str> {
+    detect_kind(bytes).map(ImageKind::mime)
+}
+
 // =========================================================
 // 解码与重编码
 // =========================================================

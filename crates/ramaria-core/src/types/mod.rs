@@ -84,6 +84,7 @@ mod persona_enum;
 mod persona_struct;
 mod session;
 mod state;
+mod sticker;
 mod style;
 mod utt;
 
@@ -109,6 +110,7 @@ pub use session::{
     is_social_channel,
 };
 pub use state::AppState;
+pub use sticker::StickerAsset;
 pub use style::{PersonaExample, PersonaStyleStats, StyleRuleSource, StyleStatsStatus};
 pub use utt::UttBlock;
 

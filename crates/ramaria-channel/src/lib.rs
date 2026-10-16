@@ -22,12 +22,13 @@ pub mod status;
 pub mod transport;
 
 pub use config::{ChannelRuntimeConfig, QqRuntimeConfig, TelegramRuntimeConfig};
-pub use events::{ChannelEventSink, NoopSink};
+pub use events::{ChannelEventSink, NoopSink, RecallNotice, RecallNoticeSink};
 pub use runtime::ChannelRuntime;
 pub use runtime::assemble::{AssembledInbound, DownloadedImage, assemble_inbound};
 pub use runtime::download::{HttpImageDownloader, ImageDownloader, MAX_IMAGE_BYTES};
+pub use runtime::recall::RecallDispatcher;
 pub use runtime::worker::{ChannelWorker, WorkerOptions};
-pub use sink::ChannelProactiveSink;
+pub use sink::{ChannelProactiveSink, OutboundSticker, StickerResolver};
 pub use status::{ChannelStatus, ConnectionState};
 pub use transport::onebot::{OneBotTransport, QqTransportOptions, SentMessageCache};
 pub use transport::telegram::{

@@ -67,6 +67,7 @@ pub mod schema_meta;
 pub mod session_members;
 pub mod sessions;
 pub mod settings;
+pub mod sticker_assets;
 pub mod style_stats;
 pub mod traits;
 pub mod utt_blocks;

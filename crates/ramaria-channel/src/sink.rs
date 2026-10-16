@@ -16,8 +16,36 @@ use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::privacy::mask_id;
 use ramaria_service::{ProactiveMessage, ProactiveSink};
 
-use crate::runtime::outbound::{fold_segment_overflow, split_outbound_segments};
-use crate::transport::{OutboundMessage, OutboundTarget, Transport};
+use crate::runtime::outbound::{
+    fold_segment_overflow, parse_sticker_directive, split_outbound_segments,
+};
+use crate::transport::{OutboundAttachment, OutboundMessage, OutboundTarget, Transport};
+
+// =========================================================
+// 表情资产解析
+// =========================================================
+
+/// 出站表情资产（解析命中后的文件名与字节）。
+///
+/// 字段约定:
+/// - `file_name`: 资产原始文件名（展示与日志用）；
+/// - `bytes`: 图片字节（出站发送载荷）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboundSticker {
+    pub file_name: String,
+    pub bytes: Vec<u8>,
+}
+
+/// 表情资产解析器（宿主注入：按关键词匹配资产并读取字节）。
+///
+/// 实现约定:
+/// - 未命中 / 读取失败返回 None（调用方降级纯文字发送）；
+/// - 实现方自行处理并发与超时，不阻塞投递线程。
+#[async_trait]
+pub trait StickerResolver: Send + Sync {
+    /// 按关键词解析表情资产；未命中返回 None。
+    async fn resolve(&self, keyword: &str) -> Option<OutboundSticker>;
+}
 
 // =========================================================
 // 通道主动投递接收端
@@ -35,6 +63,7 @@ pub struct ChannelProactiveSink {
     max_attempts: u32,
     segment_interval: Duration,
     segment_max: usize,
+    sticker_resolver: Option<Arc<dyn StickerResolver>>,
 }
 
 impl ChannelProactiveSink {
@@ -79,7 +108,14 @@ impl ChannelProactiveSink {
             max_attempts: max_attempts.max(1),
             segment_interval,
             segment_max,
+            sticker_resolver: None,
         }
+    }
+
+    /// 注入表情资产解析器（构建器：缺省不解析表情指令，按纯文字发送）。
+    pub fn with_sticker_resolver(mut self, resolver: Arc<dyn StickerResolver>) -> Self {
+        self.sticker_resolver = Some(resolver);
+        self
     }
 }
 
@@ -98,7 +134,9 @@ impl ProactiveSink for ChannelProactiveSink {
     /// - `Ok(())`: 全部分段已由传输发出（含拆条后为空跳过发送）；
     /// - `Err`: 校验失败或分段发送失败（文案含通道名与错误分类，不含消息内容）。
     async fn deliver(&self, message: &ProactiveMessage) -> RamariaResult<()> {
-        if message.content.trim().is_empty() {
+        // 表情指令剥离：剥离后文本为空但有表情关键词时仍继续（仅发图路径）
+        let (content_text, sticker_keyword) = parse_sticker_directive(&message.content);
+        if content_text.is_empty() && sticker_keyword.is_none() {
             return Err(RamariaError::validation("主动消息内容为空"));
         }
         let external_ref = message
@@ -114,35 +152,65 @@ impl ProactiveSink for ChannelProactiveSink {
             )));
         };
 
+        // 表情资产解析：有关键词且有解析器时尝试命中；未命中 / 失败降级纯文字
+        let attachment = match (self.sticker_resolver.as_ref(), sticker_keyword.as_deref()) {
+            (Some(resolver), Some(keyword)) => {
+                resolver
+                    .resolve(keyword)
+                    .await
+                    .map(|sticker| OutboundAttachment::Bytes {
+                        file_name: sticker.file_name,
+                        data: sticker.bytes,
+                    })
+            }
+            _ => None,
+        };
+        let sticker_hit = attachment.is_some();
+
         let target = OutboundTarget {
             external_ref: external_ref.to_string(),
         };
         // 出站兜底：多气泡契约分隔符 `||` 切段，逐段分次发送（库内消息原文不改）
-        let segments: Vec<String> = split_outbound_segments(&message.content)
+        let segments: Vec<String> = split_outbound_segments(&content_text)
             .into_iter()
             .map(|segment| segment.trim().to_string())
             .filter(|segment| !segment.is_empty())
             .collect();
         let segments = fold_segment_overflow(segments, self.segment_max);
-        if segments.is_empty() {
-            tracing::warn!(
-                channel = %message.channel,
-                external_ref = %mask_id(external_ref),
-                message_id = %message.message_id,
-                "净化后主动消息内容为空，跳过发送"
-            );
-            return Ok(());
+        // 首段携带表情附件（若有）；其余段纯文本
+        let mut messages: Vec<OutboundMessage> = segments
+            .into_iter()
+            .enumerate()
+            .map(|(index, segment)| OutboundMessage {
+                text: segment,
+                attachment: if index == 0 { attachment.clone() } else { None },
+            })
+            .collect();
+        if messages.is_empty() {
+            // 纯表情：发一条空文本带附件的消息；无附件（未命中 / 未注入解析器）跳过
+            let Some(sticker_attachment) = attachment else {
+                tracing::warn!(
+                    channel = %message.channel,
+                    external_ref = %mask_id(external_ref),
+                    message_id = %message.message_id,
+                    "净化后主动消息内容为空，跳过发送"
+                );
+                return Ok(());
+            };
+            messages.push(OutboundMessage {
+                text: String::new(),
+                attachment: Some(sticker_attachment),
+            });
         }
 
-        let total = segments.len();
-        for (index, segment) in segments.iter().enumerate() {
+        let total = messages.len();
+        for (index, outbound) in messages.iter().enumerate() {
             if index > 0 {
                 tokio::time::sleep(self.segment_interval).await;
             }
-            let outbound = OutboundMessage::text(segment.clone());
             let mut attempt = 1;
             loop {
-                match transport.send(&target, &outbound).await {
+                match transport.send(&target, outbound).await {
                     Ok(()) => {
                         tracing::info!(
                             channel = %message.channel,
@@ -150,6 +218,7 @@ impl ProactiveSink for ChannelProactiveSink {
                             message_id = %message.message_id,
                             segment_index = index,
                             segment_total = total,
+                            sticker_hit,
                             "通道主动消息分段已发送"
                         );
                         break;

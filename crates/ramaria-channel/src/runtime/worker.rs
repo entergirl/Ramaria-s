@@ -6,6 +6,7 @@
 //! - 单步失败降级不阻塞：图片理解超时/失败按占位符继续（后台任务不取消）、
 //!   生成失败不发送、发送失败仅记日志（回复已落库）；重复事件零重复写入与响应
 //! - 出站文本拆条：多气泡契约分隔符切段，逐段分次发送（段间间隔 + 段数上限）
+//! - 表情指令：回复中的 `[表情:关键词]` 标记剥离后交表情资产解析，命中时随首段发出
 //! - 日志脱敏：外部标识经 `mask_id`，不记消息内容
 
 use std::collections::HashMap;
@@ -17,10 +18,10 @@ use ramaria_service::{ChannelIngestRequest, ChannelReplyRequest, Engine};
 
 use super::assemble::{DownloadedImage, assemble_inbound, md5_hex};
 use super::download::ImageDownloader;
-use super::outbound::{fold_segment_overflow, split_outbound_segments};
+use super::outbound::{fold_segment_overflow, parse_sticker_directive, split_outbound_segments};
 use crate::runtime::ChannelRuntime;
 use crate::transport::{
-    InboundSegment, OutboundMessage, OutboundTarget, Transport, TransportEvent,
+    InboundSegment, OutboundAttachment, OutboundMessage, OutboundTarget, Transport, TransportEvent,
 };
 
 // =========================================================
@@ -161,7 +162,8 @@ async fn run_loop(
 /// 4. 落库（重复事件跳过后续）；图片理解逐张启动后台任务；
 /// 5. 响应判定未触发 → 理解留后台，结束；
 /// 6. 应响应：等待理解（超时按占位符继续，后台任务不取消）→
-///    回复生成（失败不发送）→ 出站节流 → 发送（可重试错误按上限重试）。
+///    回复生成（失败不发送）→ 表情指令剥离与资产解析 → 出站节流 →
+///    发送（可重试错误按上限重试）。
 pub(crate) async fn handle_event(
     engine: &Arc<Engine>,
     transport: &dyn Transport,
@@ -308,9 +310,17 @@ pub(crate) async fn handle_event(
         session_id: outcome.session_id,
         persona_uid: persona,
         message: assembled.message.text.clone(),
+        trigger_message_id: Some(outcome.message_id),
     };
     let reply = match engine.channel_reply(reply_request).await {
-        Ok(result) => result.reply,
+        Ok(Some(result)) => result.reply,
+        Ok(None) => {
+            tracing::warn!(
+                session_id = %outcome.session_id,
+                "触发消息已撤回，回复作废丢弃"
+            );
+            return;
+        }
         Err(error) => {
             tracing::error!(
                 session_id = %outcome.session_id,
@@ -325,27 +335,57 @@ pub(crate) async fn handle_event(
         return;
     }
 
-    // ---- 8. 出站节流 + 发送（多段分次发送；可重试错误按上限重试） ----
+    // ---- 8. 表情指令剥离与资产解析（未命中 / 失败降级纯文字） ----
+    let (reply_text, sticker_keyword) = parse_sticker_directive(&reply);
+    let sticker = match sticker_keyword.as_deref() {
+        Some(keyword) => match engine.sticker_resolve(keyword).await {
+            Ok(payload) => payload,
+            Err(error) => {
+                tracing::warn!(%error, "表情资产解析失败，降级纯文字");
+                None
+            }
+        },
+        None => None,
+    };
+    let sticker_attachment = sticker.map(|payload| OutboundAttachment::Bytes {
+        file_name: payload.file_name,
+        data: payload.bytes,
+    });
+
+    // ---- 9. 出站节流 + 发送（多段分次发送；可重试错误按上限重试） ----
     let target = OutboundTarget {
         external_ref: event.external_ref.clone(),
     };
     // 出站兜底：多气泡契约分隔符 `||` 切段，逐段分次发送（库内回复原文不改）
-    let segments: Vec<String> = split_outbound_segments(&reply)
+    let segments: Vec<String> = split_outbound_segments(&reply_text)
         .into_iter()
         .map(|segment| segment.trim().to_string())
         .filter(|segment| !segment.is_empty())
         .collect();
     let segments = fold_segment_overflow(segments, options.segment_max);
     if segments.is_empty() {
-        tracing::warn!(
-            session_id = %outcome.session_id,
-            "净化后出站文本为空，跳过发送"
-        );
+        // 纯表情：发一条空文本带附件的消息；无附件时走现有空文本跳过分支
+        let Some(attachment) = sticker_attachment else {
+            tracing::warn!(
+                session_id = %outcome.session_id,
+                "净化后出站文本为空，跳过发送"
+            );
+            return;
+        };
+        tracing::info!(session_id = %outcome.session_id, "通道出站仅表情发送");
+        enforce_send_interval(throttle, &event.external_ref, options.min_send_interval).await;
+        let message = OutboundMessage {
+            text: String::new(),
+            attachment: Some(attachment),
+        };
+        send_with_retry(transport, &target, &message, options).await;
+        record_send_time(throttle, &event.external_ref);
         return;
     }
     tracing::info!(
         session_id = %outcome.session_id,
         segments = segments.len(),
+        sticker_hit = sticker_attachment.is_some(),
         "通道出站回复分条发送"
     );
     // 段间复用会话节流簿：末段落簿实际发送时刻后，使下一条回复仍满足 min_send_interval
@@ -362,7 +402,15 @@ pub(crate) async fn handle_event(
             total = segments.len(),
             "通道出站回复分条发送"
         );
-        let message = OutboundMessage::text(segment.clone());
+        // 首段携带表情附件（若有）；其余段纯文本
+        let message = OutboundMessage {
+            text: segment.clone(),
+            attachment: if index == 0 {
+                sticker_attachment.clone()
+            } else {
+                None
+            },
+        };
         send_with_retry(transport, &target, &message, options).await;
         // 落簿实际发送时刻（修正预占槽位）：段间与跨回复间隔均从实际发送时刻
         // 起算，调度抖动不压缩风控节奏

@@ -36,7 +36,8 @@ use super::topic::{ProactiveDirective, ProactiveOutcome};
 mod gates;
 mod quiet;
 
-use gates::{GateOutcome, GateSkip, evaluate_gates, hours_to_ms};
+pub(crate) use gates::{GateOutcome, GateSkip, evaluate_recall_gates};
+use gates::{evaluate_gates, hours_to_ms};
 
 // =========================================================
 // 常量
@@ -105,7 +106,7 @@ pub(crate) struct ProactiveTickSummary {
 }
 
 /// 投递结果（驱动差异化记账）。
-enum DeliveryOutcome {
+pub(crate) enum DeliveryOutcome {
     /// 投递成功（本地或通道）。
     Delivered,
     /// 本地路径失败（未注册 / 本地 sink 报错）——维持既有记账口径。
@@ -410,7 +411,11 @@ async fn process_persona(
 ///
 /// 返回:
 /// - 四态 [`DeliveryOutcome`]，驱动差异化记账。
-async fn deliver(engine: &Engine, outcome: &ProactiveOutcome, now: i64) -> DeliveryOutcome {
+pub(crate) async fn deliver(
+    engine: &Engine,
+    outcome: &ProactiveOutcome,
+    now: i64,
+) -> DeliveryOutcome {
     let is_channel = outcome.channel == CHANNEL_QQ || outcome.channel == CHANNEL_TELEGRAM;
     let message = ProactiveMessage {
         message_id: outcome.message_id,
@@ -526,7 +531,7 @@ fn valence_sign(valence: f64) -> i8 {
 ///   人格重复生成；退避计数以此累计；
 /// - `Dropped` / `PlatformFailed`：全部不记（消息未送达不消耗额度，允许下一窗口重试）；
 /// - 近期选题仅在投递成功且选题键非空时记录（投递失败不计冷却，允许下窗重试）。
-fn record_delivery(
+pub(crate) fn record_delivery(
     st: &mut ProactiveState,
     now: i64,
     source: &str,

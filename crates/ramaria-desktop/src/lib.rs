@@ -334,7 +334,6 @@ pub fn run() {
         .expect("创建 tokio 运行时失败");
 
     // 执行应用初始化
-    //
     // 初始化失败属不可恢复（无 storage / 无 LLM provider 时所有 Command 均不可用），
     // 故记录错误后直接退出；用户可从日志与 stderr 获取失败原因。
     let runtime = match rt.block_on(init_runtime(&data_dir)) {
@@ -371,6 +370,8 @@ pub fn run() {
             commands::chat::get_app_state,
             commands::chat::check_privacy,
             commands::chat::confirm_privacy,
+            commands::chat::recall_message,
+            commands::chat::send_local_image,
             // ---- Setup ----
             commands::setup::run_setup,
             commands::setup::refresh_setup_state,

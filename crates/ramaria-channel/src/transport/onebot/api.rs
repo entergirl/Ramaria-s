@@ -171,22 +171,85 @@ pub(crate) fn action_and_params(
     )))
 }
 
-/// 构建一条文本出站请求体（含 `message` 段与 `echo`）。
+/// 构建一条纯文本出站请求体（薄封装；含 `message` 段与 `echo`）。
+#[cfg(test)]
 pub(crate) fn build_text_request(
     external_ref: &str,
     text: &str,
     echo: &str,
 ) -> ChannelResult<Value> {
+    build_message_request(external_ref, text, None, echo)
+}
+
+/// 构建一条出站请求体（文本 + 可选图片，含 `message` 段与 `echo`）。
+///
+/// 规则:
+/// - `message` 数组按序组装：文本段（`text` 非空白时）+ 图片段
+///   （`image_file` 非空白时，`data.file` 原样透传）；
+/// - 两段皆无 → 协议错误（出站消息为空）；
+/// - 文本段承载原始文本（不做 trim）；空文本与图片同发时只发图片段。
+///
+/// 参数:
+/// - `external_ref`: 会话外部标识（两侧空白容忍）；
+/// - `text`: 文本内容；
+/// - `image_file`: 图片引用（URL / `base64://` 载荷；None 或空白为无图）；
+/// - `echo`: 出站配对标识。
+///
+/// 返回:
+/// - 完整请求体（action / params / echo）。
+pub(crate) fn build_message_request(
+    external_ref: &str,
+    text: &str,
+    image_file: Option<&str>,
+    echo: &str,
+) -> ChannelResult<Value> {
+    let image_file = image_file.map(str::trim).filter(|value| !value.is_empty());
+    if text.trim().is_empty() && image_file.is_none() {
+        return Err(ChannelError::Protocol("出站消息为空".to_string()));
+    }
     let (action, mut params) = action_and_params(external_ref)?;
-    params.insert(
-        "message".to_string(),
-        json!([{ "type": "text", "data": { "text": text } }]),
-    );
+    let mut message: Vec<Value> = Vec::new();
+    if !text.trim().is_empty() {
+        message.push(json!({ "type": "text", "data": { "text": text } }));
+    }
+    if let Some(file) = image_file {
+        message.push(json!({ "type": "image", "data": { "file": file } }));
+    }
+    params.insert("message".to_string(), Value::Array(message));
     Ok(json!({
         "action": action,
         "params": params,
         "echo": echo,
     }))
+}
+
+/// 标准 base64 编码（`=` 补齐；无外部依赖）。
+///
+/// 规则:
+/// - 每 3 字节一组，余 1 字节补两个 `=`、余 2 字节补一个 `=`；
+/// - 空输入为空串。
+pub(crate) fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = u32::from(chunk[0]);
+        let b1 = u32::from(chunk.get(1).copied().unwrap_or(0));
+        let b2 = u32::from(chunk.get(2).copied().unwrap_or(0));
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        output.push(char::from(TABLE[((triple >> 18) & 0x3F) as usize]));
+        output.push(char::from(TABLE[((triple >> 12) & 0x3F) as usize]));
+        if chunk.len() > 1 {
+            output.push(char::from(TABLE[((triple >> 6) & 0x3F) as usize]));
+        } else {
+            output.push('=');
+        }
+        if chunk.len() > 2 {
+            output.push(char::from(TABLE[(triple & 0x3F) as usize]));
+        } else {
+            output.push('=');
+        }
+    }
+    output
 }
 
 /// 归一 JSON 取值为字符串：数字转十进制串、字符串原样；其余为 None。

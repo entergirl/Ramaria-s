@@ -26,7 +26,7 @@ use futures::{SinkExt, StreamExt};
 use ramaria_channel::{
     ChannelError, ChannelEventSink, ChannelResult, ChannelRuntime, ChannelRuntimeConfig,
     ChannelStatus, ConnectionState, ImageDownloader, NoopSink, OneBotTransport, QqRuntimeConfig,
-    QqTransportOptions,
+    QqTransportOptions, RecallDispatcher,
 };
 use ramaria_core::config::RamariaConfig;
 use ramaria_core::error::RamariaResult;
@@ -415,6 +415,26 @@ pub fn e2e_transport(
         e2e_transport_options(),
         sink,
     ))
+}
+
+/// 构造传输实例并注册撤回通知分发（服务层引擎接收撤回处理）。
+pub fn e2e_transport_with_recall(
+    server: &MockNapCatServer,
+    sink: Arc<dyn ChannelEventSink>,
+    token: Option<&str>,
+    engine: Arc<Engine>,
+) -> Arc<OneBotTransport> {
+    Arc::new(
+        OneBotTransport::new(
+            QqRuntimeConfig {
+                ws_url: server.url().to_string(),
+                access_token: token.map(str::to_string),
+            },
+            e2e_transport_options(),
+            sink,
+        )
+        .with_recall_sink(Arc::new(RecallDispatcher::new(engine))),
+    )
 }
 
 /// 构造通道运行时（无宿主事件端）。

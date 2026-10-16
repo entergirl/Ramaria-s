@@ -4,14 +4,14 @@
 //! - 用例薄壳：实现体在 `channel` 域模块，本层只做入口挂载
 //! - 读用例实时解析：绑定解析（含自动建档）/ 只读查询与生效人格按调用即时计算
 //! - 凭据用例同步：keychain API 为同步调用，不做 async 包装
-//! - 入站写入 / 回复生成 / 图片理解三用例供通道运行时编排消费
+//! - 入站写入 / 回复生成 / 图片理解 / 撤回通知 / 表情解析用例供通道运行时编排消费
 
 use ramaria_core::error::RamariaResult;
-use ramaria_core::types::{ChannelBinding, ChannelPlatform};
+use ramaria_core::types::{ChannelBinding, ChannelPlatform, now_ms};
 
 use crate::types::{
     ChannelImageOutcome, ChannelIngestOutcome, ChannelIngestRequest, ChannelReplyRequest,
-    ChatSendOutcome,
+    ChatSendOutcome, RecallNoticeRequest, RecallOutcome, StickerPayload,
 };
 
 use super::Engine;
@@ -145,9 +145,33 @@ impl Engine {
     /// 社交通道回复生成：入站消息已落库，只写助手回复行。
     ///
     /// 返回:
-    /// - `reply` / `session_id` / `chars`（空回复不落库，由调用方跳过发送）。
-    pub async fn channel_reply(&self, req: ChannelReplyRequest) -> RamariaResult<ChatSendOutcome> {
+    /// - `Some(outcome)`: `reply` / `session_id` / `chars`（空回复不落库，
+    ///   由调用方跳过发送）；
+    /// - `None`: 触发消息已撤回，回复作废（不落库不发送）。
+    pub async fn channel_reply(
+        &self,
+        req: ChannelReplyRequest,
+    ) -> RamariaResult<Option<ChatSendOutcome>> {
         crate::chat::reply_to_inbound(self, req).await
+    }
+
+    /// 处理一条通道消息撤回通知（标记 + 触发展开回应）。
+    ///
+    /// 返回:
+    /// - 处理结果三态（已标记 / 忽略 / 重复通知）。
+    pub async fn channel_recall(
+        &self,
+        notice: RecallNoticeRequest,
+    ) -> RamariaResult<RecallOutcome> {
+        crate::withdraw::handle_notice(self, notice, now_ms()).await
+    }
+
+    /// 解析表情主题（匹配资产并读取文件字节）。
+    ///
+    /// 返回:
+    /// - 命中返回资产载荷；未命中 / 文件读取失败返回 None（降级不阻塞发送）。
+    pub async fn sticker_resolve(&self, keyword: &str) -> RamariaResult<Option<StickerPayload>> {
+        crate::sticker::resolve(self, keyword).await
     }
 
     /// 理解一张已下载图片（字节输入；门禁 / 去重 / 回填与批量路径同口径）。

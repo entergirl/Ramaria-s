@@ -258,6 +258,7 @@ fn build_user_message(candidates: &[JudgeCandidate], signals: &JudgeSignals) -> 
 /// 来源中文标注（未知来源原样输出，防御性回退）。
 fn source_label(source: &str) -> &str {
     match source {
+        "recall" => "对方撤回消息",
         "event" => "高显著事件",
         "unresolved" => "未了结事件",
         "time_node" => "时间节点",

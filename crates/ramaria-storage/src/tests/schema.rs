@@ -738,3 +738,146 @@ async fn channels_migration_on_upgrade() {
         .expect("NULL 平台消息 ID 写入应成功");
     }
 }
+/// 旧库升级：messages.recalled_at 撤回列；升级后旧行保持 NULL。
+///
+/// 说明:
+/// - 模拟口径：在已全量迁移的测试库上 `DROP COLUMN` 还原"旧库"状态，
+///   写入旧式数据后执行本版 migration 文件（与 `sqlx::migrate!` 应用的是同一份 SQL）。
+#[tokio::test]
+async fn messages_recalled_at_migration_on_upgrade() {
+    let pool = database::init_test_pool()
+        .await
+        .expect("测试数据库初始化失败");
+
+    // 空库全量迁移后即含新列（可空、无默认值）
+    let (notnull, default_value): (i64, Option<String>) = sqlx::query_as(
+        "SELECT \"notnull\", dflt_value FROM pragma_table_info('messages') \
+         WHERE name = 'recalled_at'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("查询列属性应成功");
+    assert_eq!(notnull, 0, "recalled_at 应可空");
+    assert_eq!(default_value, None, "recalled_at 应无默认值");
+
+    // 还原旧库：移除本版新增列与新增表（migration 文件为一次升级单元）
+    sqlx::query("ALTER TABLE messages DROP COLUMN recalled_at")
+        .execute(&pool)
+        .await
+        .expect("删除新增列以模拟旧库应成功");
+    sqlx::query("DROP TABLE sticker_assets")
+        .execute(&pool)
+        .await
+        .expect("删除新增表以模拟旧库应成功");
+
+    // 旧式写入：消息必须归属存在的会话（外键约束）
+    let session_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO sessions (id, started_at) VALUES (?, 0)")
+        .bind(session_id.to_string())
+        .execute(&pool)
+        .await
+        .expect("插入 session fixture 应成功");
+    sqlx::query(
+        "INSERT INTO messages (id, session_id, role, content, created_at, source) \
+         VALUES (?, ?, 'user', '旧消息', 1, 'local')",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(session_id.to_string())
+    .execute(&pool)
+    .await
+    .expect("写入旧式消息应成功");
+
+    // 执行本版 migration（迁移文件内容即被 sqlx::migrate! 应用的 SQL）
+    sqlx::raw_sql(include_str!(
+        "../../migrations/20261017_v2.9_recall_stickers.sql"
+    ))
+    .execute(&pool)
+    .await
+    .expect("执行新增 migration 应成功");
+
+    // 旧行 recalled_at 为 NULL（历史消息无撤回信息）
+    let old_recalled: Option<i64> =
+        sqlx::query_scalar("SELECT recalled_at FROM messages WHERE content = '旧消息'")
+            .fetch_one(&pool)
+            .await
+            .expect("读取旧行应成功");
+    assert_eq!(old_recalled, None, "旧行 recalled_at 应为 NULL");
+}
+
+/// 旧库升级：sticker_assets 表情资产表与 md5 索引；升级后默认值生效。
+#[tokio::test]
+async fn sticker_assets_migration_on_upgrade() {
+    let pool = database::init_test_pool()
+        .await
+        .expect("测试数据库初始化失败");
+
+    // 空库全量迁移后即含新表 / 新索引
+    let table: Option<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sticker_assets'",
+    )
+    .fetch_optional(&pool)
+    .await
+    .expect("查询表应成功");
+    assert_eq!(
+        table.as_deref(),
+        Some("sticker_assets"),
+        "空库初始化后应含 sticker_assets 表"
+    );
+    let index: Option<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type = 'index' \
+         AND name = 'idx_sticker_assets_md5'",
+    )
+    .fetch_optional(&pool)
+    .await
+    .expect("查询索引应成功");
+    assert_eq!(
+        index.as_deref(),
+        Some("idx_sticker_assets_md5"),
+        "空库初始化后应含 md5 索引"
+    );
+
+    // 还原旧库：移除本版新增表与新增列（DROP TABLE 连带删除 md5 索引）
+    sqlx::query("DROP TABLE sticker_assets")
+        .execute(&pool)
+        .await
+        .expect("删除新增表以模拟旧库应成功");
+    sqlx::query("ALTER TABLE messages DROP COLUMN recalled_at")
+        .execute(&pool)
+        .await
+        .expect("删除新增列以模拟旧库应成功");
+
+    // 执行本版 migration
+    sqlx::raw_sql(include_str!(
+        "../../migrations/20261017_v2.9_recall_stickers.sql"
+    ))
+    .execute(&pool)
+    .await
+    .expect("执行新增 migration 应成功");
+
+    // 表 / 索引恢复；省略可选列写入取默认（tags '[]' / 时间 0 / 其余 NULL）
+    let index: Option<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type = 'index' \
+         AND name = 'idx_sticker_assets_md5'",
+    )
+    .fetch_optional(&pool)
+    .await
+    .expect("查询索引应成功");
+    assert_eq!(
+        index.as_deref(),
+        Some("idx_sticker_assets_md5"),
+        "升级后应恢复 md5 索引"
+    );
+    sqlx::query("INSERT INTO sticker_assets (file_name, file_path) VALUES ('a.png', 'a.png')")
+        .execute(&pool)
+        .await
+        .expect("省略可选列写入应成功");
+    let (tags, created_at, updated_at): (String, i64, i64) = sqlx::query_as(
+        "SELECT tags, created_at, updated_at FROM sticker_assets WHERE file_name = 'a.png'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("读取默认值应成功");
+    assert_eq!(tags, "[]", "tags 缺省应为 JSON 空数组");
+    assert_eq!(created_at, 0, "created_at 缺省应为 0");
+    assert_eq!(updated_at, 0, "updated_at 缺省应为 0");
+}

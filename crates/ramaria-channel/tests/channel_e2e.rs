@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use common::{
     MiniLlm, MockNapCatServer, RecordingSink, StubImageDownloader, e2e_engine, e2e_runtime,
-    e2e_transport, seed_binding_persona, wait_for,
+    e2e_transport, e2e_transport_with_recall, seed_binding_persona, wait_for,
 };
 use ramaria_channel::{
     ChannelEventSink, ChannelWorker, ConnectionState, ImageDownloader, OneBotTransport, Transport,
@@ -459,4 +459,126 @@ async fn image_message_end_to_end() {
     assert_eq!(rows[0].description.as_deref(), Some("一只橘猫"));
 
     ctx.teardown().await;
+}
+
+/// 私聊撤回通知：被撤回消息经读循环回调标记 recalled_at。
+fn recall_event(message_id: i64) -> String {
+    json!({
+        "post_type": "notice",
+        "notice_type": "friend_recall",
+        "user_id": 10001,
+        "self_id": 42,
+        "time": 1_700_000_100,
+        "message_id": message_id
+    })
+    .to_string()
+}
+
+/// 撤回全链路：消息落库后撤回通知经注册的接收端标记 recalled_at。
+#[tokio::test]
+async fn recall_notice_marks_message() {
+    let server = MockNapCatServer::start(None).await;
+    let llm = MiniLlm::new("你好，我是 Ramaria。", "一只橘猫");
+    let (engine, storage, dir) = e2e_engine("recall", llm).await;
+    seed_binding_persona(&storage).await;
+
+    let runtime = e2e_runtime();
+    let sink = Arc::new(RecordingSink::default());
+    let transport = e2e_transport_with_recall(
+        &server,
+        Arc::clone(&sink) as Arc<dyn ChannelEventSink>,
+        None,
+        Arc::clone(&engine),
+    );
+    let worker = ChannelWorker::spawn(
+        Arc::clone(&engine),
+        Arc::clone(&transport) as Arc<dyn Transport>,
+        Arc::clone(&runtime),
+        StubImageDownloader::failing(),
+        WorkerOptions {
+            min_send_interval: Duration::from_millis(10),
+            send_retry_delay: Duration::from_millis(10),
+            send_max_attempts: 2,
+            ..WorkerOptions::default()
+        },
+    );
+    transport.connect().await.expect("连接应成功");
+
+    let probe_transport = Arc::clone(&transport);
+    wait_for("通道上线", Duration::from_secs(5), move || {
+        let transport = Arc::clone(&probe_transport);
+        async move { transport.status().is_online() }
+    })
+    .await;
+    engine
+        .channel_set_binding("qq", "c2c:10001", None, Some(true), None)
+        .await
+        .expect("放行绑定应成功");
+
+    // 第一步：推送私聊消息并等待落库（平台消息 ID 101）
+    server.push_event(&private_event("你好", 101));
+    let probe_storage = Arc::clone(&storage);
+    wait_for("消息落库", Duration::from_secs(5), move || {
+        let storage = Arc::clone(&probe_storage);
+        async move {
+            let Ok(Some(session)) = storage
+                .find_active_session_by_channel("qq", Some("c2c:10001"))
+                .await
+            else {
+                return false;
+            };
+            storage
+                .list_messages(session.id)
+                .await
+                .map(|messages| {
+                    messages
+                        .iter()
+                        .any(|message| message.platform_message_id.as_deref() == Some("101"))
+                })
+                .unwrap_or(false)
+        }
+    })
+    .await;
+
+    // 第二步：推送撤回通知并等待标记落库
+    server.push_event(&recall_event(101));
+    let probe_storage = Arc::clone(&storage);
+    wait_for("撤回标记落库", Duration::from_secs(5), move || {
+        let storage = Arc::clone(&probe_storage);
+        async move {
+            let Ok(Some(session)) = storage
+                .find_active_session_by_channel("qq", Some("c2c:10001"))
+                .await
+            else {
+                return false;
+            };
+            storage
+                .list_messages(session.id)
+                .await
+                .map(|messages| messages.iter().any(|message| message.recalled_at.is_some()))
+                .unwrap_or(false)
+        }
+    })
+    .await;
+
+    // 终态核对：标记落在平台消息 ID 101 对应行
+    let session = storage
+        .find_active_session_by_channel("qq", Some("c2c:10001"))
+        .await
+        .expect("查询会话应成功")
+        .expect("会话应存在");
+    let messages = storage
+        .list_messages(session.id)
+        .await
+        .expect("查询消息应成功");
+    let recalled = messages
+        .iter()
+        .find(|message| message.platform_message_id.as_deref() == Some("101"))
+        .expect("应有被撤回消息行");
+    assert!(recalled.recalled_at.is_some(), "消息应被标记撤回");
+    assert_eq!(recalled.role, MessageRole::User);
+
+    transport.shutdown().await.expect("关停应成功");
+    worker.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
 }

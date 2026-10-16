@@ -355,6 +355,8 @@ impl ImportWriter {
                         .platform_message_id
                         .clone()
                         .filter(|value| !value.is_empty()),
+                    // 导入消息为历史存量，无撤回信息
+                    recalled_at: None,
                 });
 
                 // 附件行：本地文件定位成功 → pending；缺失 / 不可定位 → skipped

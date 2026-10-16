@@ -59,6 +59,15 @@ pub const CHANNEL_GROUP_DECLARATION: &str = "\
 本条对话发生在多人群聊中，历史消息里以「名字：」开头的是不同的其他人；\n\
 没有前缀的消息与你的发言属于同一人（你自己）。直接说话即可，不要给自己加「名字：」前缀。";
 
+/// 表情发送声明段（出站为即时通讯平台时追加在通道分段声明之后）。
+///
+/// 语义:
+/// - 需要发表情表达情绪时在回复末尾写一个「[表情: 关键词]」标记；
+/// - 系统按关键词匹配本地表情资产随消息发出；无合适表情时不写该标记。
+pub const CHANNEL_STICKER_DECLARATION: &str = "\
+表情发送:\n\
+想发个表情表达情绪时，在回复末尾单独写一个「[表情: 关键词]」标记（关键词如 开心、无奈、摸鱼）；系统会挑一个对应的表情随消息发出。没有合适的表情就不要写这个标记。";
+
 /// 已加载的 System Prompt 装配素材。
 ///
 /// 职责:
@@ -366,14 +375,16 @@ pub async fn load_prompt_material(
 
         // 回复规则：显式 E_rules 优先，缺省用共享规则（与 Stage 路径同一口径）；
         // 陈述档由 builder 门控回退中性默认。通道出站为即时通讯平台时，
-        // 在规则后追加分条格式声明段（分条契约为 `||`）；群聊时再追加群聊说明段
-        // （管道形态零变化）。
+        // 在规则后依次追加分条格式声明段（分条契约为 `||`）与表情发送声明段；
+        // 群聊时再追加群聊说明段（管道形态零变化）。
         let chat_style_rules = {
             let base = resolve_chat_style_rules(p.config.as_deref());
             match inputs.segment_style {
                 SegmentStyle::Pipe => base,
                 SegmentStyle::Newline => {
                     let mut text = format!("{base}\n\n{CHANNEL_SEGMENT_DECLARATION}");
+                    text.push_str("\n\n");
+                    text.push_str(CHANNEL_STICKER_DECLARATION);
                     if inputs.group_conversation {
                         text.push_str("\n\n");
                         text.push_str(CHANNEL_GROUP_DECLARATION);

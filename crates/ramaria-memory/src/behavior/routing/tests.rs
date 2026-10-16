@@ -45,6 +45,7 @@ fn msg(content: &str, role: MessageRole) -> Message {
         sender_ref: None,
         sender_name: None,
         platform_message_id: None,
+        recalled_at: None,
     }
 }
 

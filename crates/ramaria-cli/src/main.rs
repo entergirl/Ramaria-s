@@ -107,6 +107,7 @@ fn help_groups() -> Vec<(&'static str, &'static str)> {
         ("keyword", "管理"),
         ("style", "管理"),
         ("channel", "管理"),
+        ("sticker", "管理"),
         ("diagnostics", "管理"),
         ("status", "高级"),
         ("probe", "高级"),
