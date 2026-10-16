@@ -183,6 +183,29 @@ fn template_rule_empty_when_no_significant() {
     assert!(rule.is_empty(), "无显著项不生成规则: {rule}");
 }
 
+/// 标点与分行维度不生成风格描述（分行/标点属产品格式契约，描述成习惯会与契约冲突）。
+#[test]
+fn template_rule_skips_punctuation_and_linebreak_habits() {
+    let sig = StyleSignificant {
+        comma_high: true,
+        newline_high: true,
+        ..Default::default()
+    };
+    let rule = render_template_rule(&sig);
+    assert!(
+        !rule.contains("逗号") && !rule.contains("换行"),
+        "逗号/换行习惯不得进入风格描述: {rule}"
+    );
+
+    // `||` 断句与契约同向，仍保留
+    let sig = StyleSignificant {
+        slash_high: true,
+        ..sig
+    };
+    let rule = render_template_rule(&sig);
+    assert!(rule.contains("「||」断句"), "`||` 断句描述保留: {rule}");
+}
+
 #[tokio::test]
 async fn generate_without_llm_returns_template() {
     // auto_translate=false 或 llm=None → 仅模板

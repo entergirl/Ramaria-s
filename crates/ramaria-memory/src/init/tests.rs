@@ -301,7 +301,7 @@ fn shared_style_examples_are_generic() {
 fn shared_style_keeps_structured_shape() {
     let rules = SHARED_CHAT_STYLE_RULES;
     // 分条契约（前端按 || 拆分为多条气泡）
-    assert!(rules.contains("需要分条时用「||」分隔"), "缺少分条契约");
+    assert!(rules.contains("分两次说就用「||」隔开"), "缺少分条契约");
     // 两组通用闲聊示例（不涉具体地点），保证示例段落可建立 || 短句直觉
     for line in ["草||先去吃饭", "怎么这样||换谁都得烦"] {
         assert!(rules.contains(line), "缺少示例行: {line}");

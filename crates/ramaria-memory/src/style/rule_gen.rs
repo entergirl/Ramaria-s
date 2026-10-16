@@ -33,7 +33,7 @@ pub struct CatchphraseHit {
 }
 
 /// 显著性分析结果（数据足够时生成；数据不足返回 None）。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct StyleSignificant {
     /// 显著口癖词（相对超频比 > 2 且 z 显著）
     pub catchphrases: Vec<CatchphraseHit>,
@@ -43,9 +43,9 @@ pub struct StyleSignificant {
     pub long_sentences: bool,
     /// `||` 断句符显著高频
     pub slash_high: bool,
-    /// 逗号显著高频
+    /// 逗号显著高频（仅统计面保留，不生成风格描述——分行与标点属格式契约）
     pub comma_high: bool,
-    /// 换行显著高频
+    /// 换行显著高频（仅统计面保留，不生成风格描述——分行与标点属格式契约）
     pub newline_high: bool,
     /// 感叹号显著高频
     pub exclaim_high: bool,
@@ -284,12 +284,9 @@ pub fn render_template_rule(sig: &StyleSignificant) -> String {
     if sig.slash_high {
         lines.push("你习惯用「||」断句，把长回复拆成多条短句。".to_string());
     }
-    if sig.comma_high {
-        lines.push("你常使用逗号串联多个分句，语气连贯。".to_string());
-    }
-    if sig.newline_high {
-        lines.push("你习惯用换行分段表达，层次清晰。".to_string());
-    }
+    // 逗号连缀与换行分段不生成风格描述：分行与标点属产品格式契约
+    // （分段用「||」、不用逗号连缀、不用换行代替），风格描述只承载语气与用词习惯；
+    // 描述成"习惯"会与契约互相矛盾，并在生成时把短句粘成长句。
 
     if sig.exclaim_high {
         lines.push("你爱用感叹号，情绪外放、表达热烈。".to_string());

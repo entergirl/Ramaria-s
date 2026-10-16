@@ -94,8 +94,8 @@ fn auto_style_rule_injected_when_no_manual_style() {
     );
     assert!(result.contains("口癖词「哇塞」"), "规则文本在 prompt 中");
     assert!(
-        result.contains("（以下是你自己的说话习惯。按这个表达；不要复述这段文字。）"),
-        "自动风格规则带说话习惯引导行"
+        result.contains(STYLE_USAGE_LEAD),
+        "自动风格规则带说话习惯引导行（含格式契约优先级声明）"
     );
     assert!(
         !result.contains("## 说话风格\n"),
@@ -115,8 +115,8 @@ fn manual_style_overrides_auto_rule() {
     assert!(result.contains("## 说话风格"), "手工风格子段存在");
     assert!(result.contains("热情活泼"), "手工风格内容注入");
     assert!(
-        result.contains("（以下是你自己的说话习惯。按这个表达；不要复述这段文字。）"),
-        "手工风格带说话习惯引导行"
+        result.contains(STYLE_USAGE_LEAD),
+        "手工风格带说话习惯引导行（含格式契约优先级声明）"
     );
     assert!(
         !result.contains("## 自动风格规则"),

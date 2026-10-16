@@ -90,8 +90,8 @@ fn boilerplate_leads_stay_within_upper_bounds() {
         ("BRIDGE_LEAD", BRIDGE_LEAD, 60),
         ("STATEMENT_LEAD", STATEMENT_LEAD, 40),
         ("CORE_RULES_DEFAULT", CORE_RULES_DEFAULT, 90),
-        ("STYLE_USAGE_LEAD", STYLE_USAGE_LEAD, 40),
-        ("RESPONSE_ANCHOR", RESPONSE_ANCHOR, 60),
+        ("STYLE_USAGE_LEAD", STYLE_USAGE_LEAD, 50),
+        ("RESPONSE_ANCHOR", RESPONSE_ANCHOR, 80),
         ("SOCIAL_CHAT_TONE_RULES", SOCIAL_CHAT_TONE_RULES, 320),
     ];
     for (name, text, limit) in cases {

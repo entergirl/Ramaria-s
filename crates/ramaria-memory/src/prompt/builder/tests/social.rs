@@ -68,12 +68,37 @@ fn social_tone_locks_anti_assistant_constraints() {
         "不解释、不总结、不列点、不给建议",
         "不用「还需要别的吗」这类追问",
         "不代替对方说话",
+        // 社交平台断句口径：短句直接断开，不用逗号连缀
+        "两个短句不要用逗号连成一句",
+        // 请求场景先问缘由，不直接进入执行细节（去服务姿态）
+        "先问缘由",
     ] {
         assert!(
             SOCIAL_CHAT_TONE_RULES.contains(needle),
             "说话方式必须保留约束: {needle}"
         );
     }
+}
+
+/// 回复格式锁定分段契约：`||` 强制分条、回复中不出现换行（长度兜底单处）。
+#[test]
+fn response_anchor_locks_segment_contract() {
+    for needle in [
+        "必须在两次之间写「||」",
+        "回复里一律不出现换行",
+        "换行不算分条",
+        "不超过 30 字",
+    ] {
+        assert!(
+            RESPONSE_ANCHOR.contains(needle),
+            "回复格式必须保留分段契约: {needle}"
+        );
+    }
+    // 表达层风格描述不得覆盖格式契约（优先级声明）
+    assert!(
+        STYLE_USAGE_LEAD.contains("分行与标点以「回复格式」为准"),
+        "说话习惯引导行必须声明格式契约优先级"
+    );
 }
 
 /// 度量函数基本正确性（字符数 + token 估算，复用 estimate_tokens）。
