@@ -234,7 +234,7 @@ E_rules = """
     assert!(parsed.blocks[0].1.contains("你是黎杋枫。"));
     assert!(parsed.blocks[0].1.contains("性格：知性稳重"));
     assert!(parsed.blocks[0].1.contains("引导探索，不直接给答案。"));
-    assert!(parsed.blocks[1].1.contains("用「||」分隔"));
+    assert!(parsed.blocks[1].1.contains("用「||」隔开"));
     assert!(parsed.blocks[1].1.starts_with("回复格式要求："));
     // 多行块值不含 CR 且末尾无残留空白
     for (_, value) in &parsed.blocks {

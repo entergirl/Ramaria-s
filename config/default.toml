@@ -48,16 +48,16 @@ base_url = "http://localhost:1234/v1"
 # embedding_model_id = "bge-small-zh-v1.5"
 # 生成温度 (0.0-2.0)，越高越随机
 temperature = 0.3
-# 最大输出 token 数
-max_tokens = 1024
+# 最大输出 token 数（思考模式最低可用预算 4096）
+max_tokens = 4096
 # 是否允许线上后端注入 L1/L2/L3 记忆上下文
 # true = 对话时附带相关记忆（首次使用线上 API 需隐私确认）
 # false = 仅发送当前对话消息
 online_memory_injection = true
 # 对话路径思考模式（仅 DeepSeek 生效；结构化提取路径恒关闭）
-chat_thinking = false
+chat_thinking = true
 # 角色沉浸指令注入位置（off | system | user；配合 chat_thinking 使用）
-role_immersion = "off"
+role_immersion = "system"
 # 对话路径生成温度（注释掉 = 沿用 temperature）
 # chat_temperature = 1.0
 

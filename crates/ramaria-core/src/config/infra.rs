@@ -22,8 +22,8 @@ use crate::types::LlmProvider;
 /// - 控制对话路径是否将角色沉浸指令注入请求消息数组。
 ///
 /// 变体:
-/// - `Off`: 不注入（默认）；
-/// - `System`: 追加到 system prompt 末尾；
+/// - `Off`: 不注入；
+/// - `System`: 追加到 system prompt 末尾（默认）；
 /// - `User`: 追加到消息数组内首条 user 消息末尾（无历史 user 消息时退回当前用户消息）。
 ///
 /// 约束:
@@ -32,10 +32,10 @@ use crate::types::LlmProvider;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum RoleImmersion {
-    /// 不注入（默认）
-    #[default]
+    /// 不注入
     Off,
-    /// 追加到 system prompt 末尾
+    /// 追加到 system prompt 末尾（默认）
+    #[default]
     System,
     /// 追加到消息数组内首条 user 消息末尾
     User,
@@ -89,7 +89,8 @@ impl Default for BackendSelection {
     /// - 默认 provider 为 LM Studio。
     /// - 默认 base URL 为 LM Studio OpenAI-compatible 端点。
     /// - 默认允许线上记忆注入，但实际启用前仍需隐私确认。
-    /// - 默认关闭思考模式与角色沉浸注入，对话温度沿用 `temperature`。
+    /// - 默认开启思考模式与 system 末尾角色沉浸注入（均仅 DeepSeek 生效），
+    ///   对话温度沿用 `temperature`；输出上限取思考模式的最低可用预算。
     fn default() -> Self {
         Self {
             provider: LlmProvider::LmStudio,
@@ -97,10 +98,10 @@ impl Default for BackendSelection {
             base_url: "http://localhost:1234/v1".to_string(),
             embedding_model_id: None,
             temperature: 0.3,
-            max_tokens: 1024,
+            max_tokens: 4096,
             online_memory_injection: true,
-            chat_thinking: false,
-            role_immersion: RoleImmersion::Off,
+            chat_thinking: true,
+            role_immersion: RoleImmersion::System,
             chat_temperature: None,
         }
     }

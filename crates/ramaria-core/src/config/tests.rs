@@ -586,8 +586,8 @@ provider = "lm-studio"
     assert_eq!(cfg.utt.theta_gap_minutes, 10);
     assert_eq!(cfg.examples.max_examples, 5);
     assert!(cfg.bridge.enabled);
-    assert!(!cfg.backend.chat_thinking, "旧配置缺思考键应回退默认关闭");
-    assert_eq!(cfg.backend.role_immersion, RoleImmersion::Off);
+    assert!(cfg.backend.chat_thinking, "旧配置缺思考键应回退默认开启");
+    assert_eq!(cfg.backend.role_immersion, RoleImmersion::System);
     assert_eq!(cfg.backend.chat_temperature, None);
 }
 
@@ -595,11 +595,11 @@ provider = "lm-studio"
 #[test]
 fn backend_thinking_keys_default_and_parse() {
     let cfg = RamariaConfig::default();
-    assert!(!cfg.backend.chat_thinking, "默认关闭思考模式");
+    assert!(cfg.backend.chat_thinking, "默认开启思考模式");
     assert_eq!(
         cfg.backend.role_immersion,
-        RoleImmersion::Off,
-        "默认不注入角色沉浸"
+        RoleImmersion::System,
+        "默认在 system 末尾注入角色沉浸"
     );
     assert_eq!(cfg.backend.chat_temperature, None, "默认沿用 temperature");
 
