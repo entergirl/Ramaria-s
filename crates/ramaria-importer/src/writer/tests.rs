@@ -88,7 +88,8 @@ async fn test_pool() -> sqlx::SqlitePool {
             is_proactive INTEGER NOT NULL DEFAULT 0,
             sender_ref TEXT,
             sender_name TEXT,
-            platform_message_id TEXT
+            platform_message_id TEXT,
+            recalled_at INTEGER
         )",
     )
     .execute(&pool)

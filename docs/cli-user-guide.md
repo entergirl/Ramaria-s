@@ -213,18 +213,29 @@ ramaria config set max_tokens 2048       # 修改最大输出 token
 
 ### `ramaria persona` — 人格管理
 
-管理对话人格。
+管理对话人格；v2.9 起支持预设导入 / 导出 / 提示词查看 / 推断接管。
 
 ```
+ramaria persona list              # 列出人格（uid / 名称 / 类型 / 来源）
 ramaria persona show              # 显示所有的人格的名称/类型/状态
 ramaria persona reload            # 重新扫描 personas/ 目录并同步到数据库
 ramaria persona reload --uid rama-0001   # 仅重新加载指定人格
+ramaria persona import <file> [--dry-run] [--into <uid>] [--no-ai] [--json]
+ramaria persona export <uid> [--out <file>]
+ramaria persona prompt <uid> [--input <文本>]
+ramaria persona allow-inference <uid>
 ```
 
 | 子命令 | 说明 |
 |--------|------|
-| `show` | 列出所有人格：UID、名称、类型（user/rama/char 等）、是否激活、来源 |
+| `list` | 列出人格：UID、名称、类型（user/rama/char 等）、来源 |
+| `show` | 显示所有人格摘要 |
 | `reload` | 扫描 `personas/` 目录下所有 `.toml` 文件，同步名称/配置到数据库。新人格自动创建，已存在的跳过（幂等操作） |
+| `import` | 从预设文件导入人格（v2.9）：支持 `persona.toml` 超集与 SillyTavern 角色卡（`.json` / `.png`）。`--dry-run` 仅预览将写入项（不写库 / 不调 LLM）；`--into <uid>` 合并到已有人格（facts 判重 / traits 同 label 跳过 / examples 与规则追加）；`--no-ai` 关闭自由文本的 LLM 拆解（只保留原文）；`--json` 输出结构化结果 |
+| `export` | 导出人格为预设文件（v2.9）：缺省输出到 stdout，`--out <file>` 写文件、`-` 同 stdout。导出不含证据链、对话示例与会话原文 |
+| `prompt` | 查看该人格的 System Prompt（v2.9，只读）：缺省 / `--input` 为空显示静态段预览；`--input` 非空走完整装配（含记忆召回），不建会话、不写库、不调 LLM |
+| `allow-inference` | 允许推断管线接管该人格的 Manual 画像（v2.9）：把该人格 Active 的手工 trait 转回可推断更新；不写反馈日志 |
+
 
 **人格文件**：
 - 源码目录：`config/personas/*.toml`
@@ -662,6 +673,23 @@ ramaria --db <库路径> channel bind <qq|telegram> <外部会话标识> [--pers
 
 ---
 
+### `ramaria sticker` — 表情资产管理（v2.9）
+
+管理 AI 可在社交对话中发送的表情图片（资产 = 图片文件 + 描述 + 场景标签）。管理器界面随后续前端改版，当前以命令行为准。
+
+```
+ramaria --db <库路径> sticker add <图片文件> [--description "..."] [--tag 开心] [--tag 晚安]
+ramaria --db <库路径> sticker list
+ramaria --db <库路径> sticker update <id> [--description "..."] [--tag ...]
+ramaria --db <库路径> sticker remove <id>
+```
+
+- 资产文件复制到数据目录的 `stickers/` 下（随数据目录自包含）；`remove` 同时删除资产行与文件；
+- **发送语义**：提示词向社交通道声明"可用 `[表情: 关键词]`"——出站时按标签（优先）/ 描述匹配资产，命中随回复发出；**未命中降级为纯文字**（指令段被剥离，不会原样发出）；出站图片上限 8MB；
+- 本地（桌面 / MCP）对话不使用表情资产，行为零变化；Telegram 出站附件当前未实现（登记观察）。
+
+---
+
 ## 环境变量
 | 变量 | 说明 |
 |------|------|
@@ -758,6 +786,8 @@ CLI 命名与输出约定变更（v1.5 起因"自动化友好改造"引入，后
 | `mcp serve` | **v2.1 新增 MCP 服务端入口**：`ramaria mcp serve` 以 stdio 启动 MCP 服务端（v2.1 起六个工具，**v2.7 起七个**——新增 `privacy_confirm`，沿用全局 `--db`）；stdout 仅协议消息、日志走 stderr；桌面「设置 → MCP 接入」提供客户端配置片段，详见上文 `mcp` 章节 |
 | `probe baseline` | **v2.5 新增只读取数**：主动对话投递 / 回应 / 判据计数与配置口径快照（`--window-hours` 默认 24，`0` = 不限窗口）；只读、不回写、不建表。详见上文 `probe` 章节 |
 | `channel` | **v2.7 新增社交通道维护命令**：`status` / `bindings` / `bind`（连接由桌面托管，CLI 不建立连接）；子命令 19 → 20。详见上文 `channel` 章节 |
+| `persona import/export/prompt/allow-inference` | **v2.9 新增人格可编程命令**：预设导入（`--dry-run` / `--into` / `--no-ai` / `--json`）、画像导出（`--out`）、提示词查看（静态档 / `--input` 全量档）、推断接管；`persona` 动作 4 → **7**，顶层 20 不变。详见上文 `persona` 章节 |
+| `sticker` | **v2.9 新增表情资产管理**：`add` / `list` / `update` / `remove`（资产文件写入数据目录 `stickers/`；出站按 `[表情: 关键词]` 匹配，未命中降级纯文字）；顶层子命令 20 → **21**。详见上文 `sticker` 章节 |
 
 ---
 

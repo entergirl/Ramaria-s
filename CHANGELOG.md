@@ -7,6 +7,52 @@
 
 ---
 
+## [2.9.0] - 2026-10-17
+
+### 版本定位
+
+**「人格可编程与社交补强」**：让人格从"只能被推断"变成"可以由你亲手定义"——**人格预设系统**（persona.toml 超集 + SillyTavern 角色卡导入 → 校验 → dry-run 预览 → 直写 L3；可选 LLM 拆解；导入永不失败）、**Manual 保护**（手工 / 导入画像不被推断覆盖，另有显式「允许推断接管」）、**提示词工程**（System Prompt 查看器两档 + `[prompt]` 补丁），以及**提示词全量升级**（去"人机味"：示例常驻、角色信念语态、长度以示例节奏锚定；DeepSeek 思考模式默认开）；同批修复 2.8.0 实机暴露的**社交四项**（`||` 拆条分次发送 / 群聊发言人视角 / 社交会话只读 / 社交图片落盘）并补上**撤回**与**图片收发**（表情资产 + AI 按场景发图 + 本地发送图片）。**本版发行 2.9.0**（安装包面向 Windows x64），为 2.x 系列最后一版。
+
+### 升级须知
+
+- **一次纯增量 migration**（`20261017_v2.9_recall_stickers.sql`）：`messages` 增 `recalled_at`（撤回标记）+ 新表 `sticker_assets`（表情资产）；表 30 → 31；旧库直接可用，无重建。
+- **思考模式默认开启（DeepSeek，行为变化）**：对话路径 `chat_thinking = true`、角色沉浸注入位置 `role_immersion = "system"`、`max_tokens` 默认 1024 → **4096**（思考模式最低可用预算）。首字延迟略增；结构化记忆任务始终关闭思考。既有用户配置需手动同步这三键；不想要思考可在「设置 → 后端配置」关闭。
+- **提示词全量升级（对话体感变化）**：回复更口语、更贴近人格自己的说法；分条改为 `||` 契约（客户端渲染多气泡，回复中不再出现换行）；`PROMPT_TEMPLATE_VERSION` → `20261017-v2.9.2`（旧缓存自动失效）。
+- **社交会话只读（行为变化）**：QQ / Telegram 会话在桌面客户端不再可输入，回复请回到对应平台（服务层同样拒绝客户端写入，防绕过）。
+- **社交回复拆条发送（行为变化）**：一条回复按 `||` 拆成多条分次发出（间隔约 0.8 秒、最多 5 段）——平台侧看到的是多条消息。
+- **预设导入的画像默认不被推断覆盖**：导入 / 手工写入的 L3 条目带「手工」标记，Phase B / C 全面豁免；需要让推断重新接管时用 `ramaria persona allow-inference <uid>`。
+- **空回复按错误处理**：后端返回空内容时提示可重试，不再留下空气泡，也不写入记录。
+
+### 新增功能
+
+- **人格预设系统**：persona.toml 超集（`[persona]` / `[traits]` / `[[facts]]` / `[[examples]]` / `[[behavior_rules]]` / `[prompt]`，旧文件零改动可读）+ SillyTavern 角色卡（`.json` / `.png`）导入；`--into` 合并（facts 判重 / traits 同 label 跳过 / examples 与规则追加）；examples 手工写入路径；`--dry-run` 预览与实际写入同源；**导入永不失败**（拆解失败 / 校验降级时原文保留在人格配置，人格照常建成）。
+- **手工画像保护**：Phase B 不覆盖 / 不废弃、Phase C 不挂证据；`persona allow-inference` 显式接管。
+- **画像导出**：`ramaria persona export <uid>`（stdout / `--out`），只含人格本身内容（不含证据链、对话示例与会话原文）。
+- **System Prompt 查看器**：`ramaria persona prompt <uid>`（静态段）/ `--input` 全量档（含召回）；桌面命令 `preview_persona_prompt`；显式只读。
+- **提示词补丁**：预设 `[prompt].role_suffix` / `style_suffix` 追加到角色层 / 表达层末尾（不覆盖硬编码段、受预算约束）。
+- **撤回**：QQ `friend_recall` / `group_recall` 识别 + 客户端内撤回命令（本地会话 2 分钟）；消费印记制注入（未读过的原文不再进入上下文，已读过的保持连贯 + 撤回信号）；即时判定（问 / 不问按人格）；生成完成前发送前检查（命中整条丢弃）。
+- **图片收发**：表情资产（`sticker` 命令族：`add` / `list` / `update` / `remove`）+ AI 按场景发图（`[表情: 关键词]`，未命中降级纯文字）+ 本地会话发送图片（`send_local_image` 命令）。
+- **桌面预设导入入口**：人格管理页「导入预设」→ 文件选择 → 预览弹窗 → 确认 → 结果提示。
+
+### 修复
+
+- **社交四项（2.8.0 实机反馈）**：`||` 未拆条（改为分次发送）/ 群聊发言人在客户端显示为「我」（改为发言人视角 + 模型侧可区分）/ 社交会话可被客户端写入（改为只读双门禁）/ 社交图片不落盘（写入本地图片缓存，真图可见并明确"对方发来一张图片"语义）。
+- **空回复**：思考模式下 HTTP 200 但正文为空时，此前前端留空气泡、库内无记录；现统一转错误 + 前端兜底。
+- **撤销（撤回）之前完全无检测**：2.8 及以前 notice 事件被忽略，撤回的消息会一直参与上下文；现已接入。
+- **人格身份行写死产品名**：助手类人格的身份行改为跟随 `personas.name`（`rama-0001` 的注册名）。
+
+### 工程与加固（内部结构，不改变用户可见行为）
+
+- **契约面**：Tauri 命令 68 → **73**（`preview_persona_import` / `import_persona_preset` / `preview_persona_prompt` / `recall_message` / `send_local_image`）、`api.js` 66 → **68**；CLI 顶层 20 → **21**（+`sticker`；`persona` 4 → **7** 动作）；migration 9 → **10**、表 30 → **31**；MCP 工具 7 / 事件 7 / 配置组 31 / 消息与会话视图 8·8 零变化；`[backend]` 键面 +2（`chat_thinking` / `role_immersion`）。
+- **新增模块**：`ramaria-memory/src/preset/`（解析 / 中间表示 / 写入裁决 / 预览 / 序列化 / PNG）、`ramaria-service/src/persona/{import,export,prompt,allow_inference}`、`ramaria-service/src/{withdraw,sticker,local_image}`、`ramaria-channel/src/runtime/{recall,outbound}` 扩展；结构动作：CLI 导出抽 `commands/persona/export.rs`、桌面引导逻辑拆 `src/bootstrap.rs`、流式用例拆 `chat/tests_stream.rs`。
+- **测试与验证**：分 crate 全绿（数字见下）；parity golden 已随提示词升级重生成（`system_prompt_chars` 875、`template_version 20261016-v2.9.1`）并在身份行变更后复跑零 diff。
+
+### 测试
+
+分 crate 全绿（2026-10-17 实测）：`ramaria-core` 187、`ramaria-storage` 241（另 3 ignored doctest）、`ramaria-memory` 1539（lib 1482 + 集成 47 + doctest 10，另 2 ignored）、`ramaria-llm` 113（lib 94 + 集成 19，另 9 ignored）、`ramaria-service` 808（lib 676 + `channel_memory_e2e` 2 + entrypoints 6 + parity 18 + suites 105 + doctest 1；`--features importer` 856，lib 724）、`ramaria-mcp` 20、`ramaria-channel` 226（lib 214 + `channel_e2e` 7 + `telegram_e2e` 5）、`ramaria-cli` 343（lib 143 + main 23 + 集成 177）、`ramaria-desktop` 88（另 3 ignored spike）、`ramaria-importer` 82（lib 51 + 集成 31），全部 0 failed；前端 `node --test` 211 全绿；`clippy -j 2 --workspace --all-targets -- -D warnings` 与 `fmt --all --check` 零问题；结构自检 exit 0（阻断 0 / 建议 82 / 例外 2；841 个源文件 = barrel 83 / test 287 / production 471）；parity golden 18/18（零 diff）。全量 `cargo test --workspace` 回归与实机验收由项目负责人执行。
+
+---
+
 ## [2.8.0] - 2026-10-13
 
 ### 版本定位
