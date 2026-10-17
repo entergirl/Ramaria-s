@@ -136,6 +136,9 @@ pub(crate) async fn dispatch(engine: &Arc<Engine>, cli: Cli) -> anyhow::Result<(
                 PersonaCmd::Prompt { uid, input } => {
                     commands::persona::PersonaCmd::Prompt { uid, input }
                 }
+                PersonaCmd::Export { uid, out } => {
+                    commands::persona::PersonaCmd::Export { uid, out }
+                }
             };
             commands::persona::run(engine, cmd, cli.json).await?;
         }

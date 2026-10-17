@@ -15,7 +15,7 @@
     "memory_context_chars": 0,
     "memory_context_present": false,
     "system_prompt_chars": 875,
-    "template_version": "20261016-v2.9.1",
+    "template_version": "20261017-v2.9.2",
     "user_message": "今天有点累，随便聊聊吧"
   },
   "reply": "嗯，我在听。",

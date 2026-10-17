@@ -16,6 +16,11 @@ crate-type = ["lib"]
 name = "ramaria-desktop"
 path = "src/main.rs"
 
+[features]
+default = []
+# CUDA 后端透传（本地自用构建：`cargo build -p ramaria-desktop --features cuda`）
+cuda = ["ramaria-service/cuda"]
+
 [dependencies]
 ramaria-core = { path = "../ramaria-core" }
 # importer feature：QQ 聊天记录导入用例（解析 / L0 写入 / L1 批量生成 / 深度触发）

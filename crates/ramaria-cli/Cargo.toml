@@ -12,6 +12,11 @@ workspace = true
 name = "ramaria"
 path = "src/main.rs"
 
+[features]
+default = []
+# CUDA 后端透传（本地自用构建：`cargo build -p ramaria-cli --features cuda`）
+cuda = ["ramaria-service/cuda"]
+
 [dependencies]
 ramaria-core = { path = "../ramaria-core" }
 ramaria-mcp = { path = "../ramaria-mcp" }

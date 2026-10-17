@@ -1101,6 +1101,25 @@ var RamariaChatView = (function () {
  // 解析最终全文（后端事件全文 → 前端累积 → DOM 兜底；不记录原文日志）
             var finalContent = _resolveFinalContent(payload);
 
+// 空文本兜底：后端已把"空回复"转为 chat-error，这里防御旧版后端 / 合成 Done
+// 带空文本的情形——否则会留下一个没有任何内容的气泡（用户看到的"空消息"）。
+            if (!finalContent || !finalContent.trim()) {
+                console.warn('[ChatView] 完成事件文本为空，按失败处理: ' + payload.request_id);
+                RamariaMessageBubble.markError(completedMsgId, '本轮没有生成内容');
+                RamariaStore.set('isStreaming', false);
+                RamariaStore.set('streamingRequestId', null);
+                _streamingMsgId = null;
+                _pendingDelta = '';
+                _streamedText = '';
+
+                var emptyHintEl = $('chat-streaming-hint');
+                if (emptyHintEl) emptyHintEl.classList.add('hidden');
+
+                _setInputEnabled(true);
+                RamariaToast.show('error', '生成失败', '本轮没有生成内容，请再试一次');
+                return;
+            }
+
             var createdAt = Date.now();
             RamariaMessageBubble.finalize(completedMsgId, finalContent, createdAt);
 

@@ -51,4 +51,7 @@ mod tests;
 mod tests_social;
 
 #[cfg(test)]
+mod tests_stream;
+
+#[cfg(test)]
 mod tests_thinking;

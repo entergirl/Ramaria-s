@@ -3,6 +3,7 @@
 //! 设计特点:
 //! - show: 从 DB 读取所有 persona，展示 uid/name/kind/config 摘要
 //! - reload: 扫描 personas/ 目录下 .toml 文件，创建或更新 DB 中的 persona 记录
+//! - export: 画像（含 Manual 部分）导出为预设超集 TOML；不含证据链与会话原文
 //! - 人格文件（.toml）是定义的权威源，DB 的 personas.config 字段是运行时缓存
 //! - 用户用文本编辑器直接编辑 .toml 文件，reload 同步到 DB
 //! - 文件名 = persona UID（如 rama-0001.toml），kind 从 UID 前缀自动推断
@@ -14,6 +15,8 @@ use ramaria_service::types::{DecomposeExecution, PersonaImportOutcome};
 use ramaria_service::{Engine, PersonaFileAction, PersonaFullView, PersonaLoadMode};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+mod export;
 
 // =========================================================
 // 常量
@@ -58,6 +61,7 @@ pub(crate) fn personas_dir() -> std::path::PathBuf {
 /// - Import: 从预设文件导入人格（dry-run 预览 / 执行写入）。
 /// - AllowInference: 允许推断接管 Manual 画像（按 label 或全部）。
 /// - Prompt: 查看指定人格的 system prompt 渲染结果（静态段 / 全量两档）。
+/// - Export: 导出人格画像为预设超集 TOML（不含证据链与会话原文）。
 #[derive(Debug, Clone)]
 pub enum PersonaCmd {
     /// 结构化列出所有人格（uid / 名称 / kind）
@@ -99,6 +103,13 @@ pub enum PersonaCmd {
         /// 给定输入文本（提供时走全量预览；缺省为静态段预览）
         input: Option<String>,
     },
+    /// 导出人格画像为预设文件（超集 TOML；不含证据链与会话原文）
+    Export {
+        /// 目标人格 uid
+        uid: String,
+        /// 输出文件路径（缺省 / `-` = stdout）
+        out: Option<String>,
+    },
 }
 
 /// 运行 persona 子命令分发。
@@ -122,6 +133,7 @@ pub async fn run(engine: &Arc<Engine>, cmd: PersonaCmd, json: bool) -> anyhow::R
             run_allow_inference(engine, uid, labels, json).await
         }
         PersonaCmd::Prompt { uid, input } => run_prompt(engine, uid, input, json).await,
+        PersonaCmd::Export { uid, out } => export::run(engine, uid, out, json).await,
     }
 }
 

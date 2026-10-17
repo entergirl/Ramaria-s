@@ -1,9 +1,9 @@
 //! crates/ramaria-service/src/chat/tests.rs - Ramaria 生成用例单元测试
 //!
 //! 设计特点:
-//! - 由 chat 模块以 `#[cfg(test)] mod tests;` 收纳：覆盖非流式 / 流式 / 历史窗口 / 交互入口语义
+//! - 由 chat 模块以 `#[cfg(test)] mod tests;` 收纳：覆盖非流式 / 历史窗口 / 交互入口语义
 //! - 使用 mock LLM 与真实 SQLite 临时库，断言以落库状态与记录到的 LLM 请求为准
-//! - 流式路径断言事件序列（Delta… → Done / Error）与消息落库纪律
+//! - 流式路径的事件序列（Delta… → Done / Error / 空回复）在 `tests_stream` 中
 //! - 历史窗口用例经 `step_load_history` 直接验证配置驱动的加载条数与字符预算
 //!
 //! 安全约束:
@@ -29,8 +29,8 @@ use ramaria_core::types::{
 use std::sync::Arc;
 use uuid::Uuid;
 
-/// 固定回复（供"生成成功"路径断言）。
-const REPLY: &str = "嗯，我在听。";
+/// 固定回复（供"生成成功"路径断言；`tests_stream` 亦引用）。
+pub(super) const REPLY: &str = "嗯，我在听。";
 
 /// 构造生成请求（默认人格 rama-0001、通道 mcp）。
 fn request(message: &str, conversation_id: Option<&str>) -> ChatSendRequest {
@@ -43,8 +43,8 @@ fn request(message: &str, conversation_id: Option<&str>) -> ChatSendRequest {
     }
 }
 
-/// 构造流式生成请求（默认人格、无预置上文）。
-fn stream_request(message: &str, session_id: Option<Uuid>) -> ChatStreamRequest {
+/// 构造流式生成请求（默认人格、无预置上文；`tests_stream` 亦引用）。
+pub(super) fn stream_request(message: &str, session_id: Option<Uuid>) -> ChatStreamRequest {
     ChatStreamRequest {
         message: message.to_string(),
         persona: Some(DEFAULT_PERSONA_UID.to_string()),
@@ -54,8 +54,8 @@ fn stream_request(message: &str, session_id: Option<Uuid>) -> ChatStreamRequest 
     }
 }
 
-/// 收集事件流全部事件（出现流内错误项即失败，用于"成功路径"断言）。
-async fn collect_events(events: ChatEventStream) -> Vec<StreamEvent> {
+/// 收集事件流全部事件（出现流内错误项即失败，用于"成功路径"断言；`tests_stream` 亦引用）。
+pub(super) async fn collect_events(events: ChatEventStream) -> Vec<StreamEvent> {
     let mut stream = events;
     let mut collected = Vec::new();
     while let Some(item) = stream.next().await {
@@ -67,8 +67,8 @@ async fn collect_events(events: ChatEventStream) -> Vec<StreamEvent> {
     collected
 }
 
-/// 提取事件类型序列。
-fn kinds(events: &[StreamEvent]) -> Vec<&'static str> {
+/// 提取事件类型序列（`tests_stream` 亦引用）。
+pub(super) fn kinds(events: &[StreamEvent]) -> Vec<&'static str> {
     events.iter().map(StreamEvent::kind).collect()
 }
 
@@ -229,157 +229,6 @@ async fn explicit_session_id_checks_persona_binding() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// =========================================================
-// 流式（交互入口）
-// =========================================================
-
-/// 流式成功：事件序列 Delta… → Done；消息落库两条（user 本地 / assistant 线上，均带人格）。
-#[tokio::test]
-async fn stream_success_emits_deltas_done_and_persists_messages() {
-    // 多片段流式（拼接后等于回复全文）
-    let llm = Arc::new(MockLlm::with_stream_chunks(&["嗯，", "我在", "听。"]));
-    let (engine, storage, dir) =
-        engine_with_shared_llm("chat-stream-ok", llm, RamariaConfig::default(), None).await;
-    let engine = Arc::new(engine);
-    seed_persona(&storage, DEFAULT_PERSONA_UID).await;
-    engine.set_state(AppState::Ready);
-
-    let handle = engine
-        .chat_stream(stream_request("你好", None))
-        .await
-        .expect("流式生成应成功");
-    let session_id = handle.session_id;
-    let events = collect_events(handle.events).await;
-
-    // 事件序列：Delta… → Done（无 Error）
-    assert_eq!(
-        kinds(&events),
-        vec!["delta", "delta", "delta", "done"],
-        "三个增量片段后跟一个完成事件"
-    );
-    assert_eq!(events.last().map(StreamEvent::kind), Some("done"));
-    let delta_text: String = events
-        .iter()
-        .filter_map(|event| match event {
-            StreamEvent::Delta { content, .. } => Some(content.as_str()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(delta_text, REPLY, "增量文本拼接应等于回复全文");
-
-    let done = events.iter().find_map(|event| match event {
-        StreamEvent::Done {
-            session_id,
-            backend_id,
-            total_chars,
-            ..
-        } => Some((*session_id, backend_id.clone(), *total_chars)),
-        _ => None,
-    });
-    let (done_session, backend_id, total_chars) = done.expect("应包含 Done 事件");
-    assert_eq!(done_session, Some(session_id));
-    assert_eq!(backend_id.as_deref(), Some("stop"));
-    assert_eq!(total_chars, REPLY.chars().count());
-
-    // 落库：用户消息（本地来源）+ 助手回复（线上来源），均带人格
-    let messages = storage
-        .list_messages(session_id)
-        .await
-        .expect("读取消息成功");
-    assert_eq!(messages.len(), 2);
-    assert_eq!(messages[0].role, MessageRole::User);
-    assert_eq!(messages[0].content, "你好");
-    assert_eq!(messages[0].source, MessageSource::Local);
-    assert_eq!(
-        messages[0].persona_uid.as_deref(),
-        Some(DEFAULT_PERSONA_UID)
-    );
-    assert_eq!(messages[1].role, MessageRole::Assistant);
-    assert_eq!(messages[1].content, REPLY);
-    assert_eq!(messages[1].source, MessageSource::Online);
-    assert_eq!(
-        messages[1].persona_uid.as_deref(),
-        Some(DEFAULT_PERSONA_UID)
-    );
-
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// 流打不开：返回 Ok，首个事件为 Error、无 Done；库内无消息。
-#[tokio::test]
-async fn stream_open_failure_returns_error_event_without_persistence() {
-    let (engine, storage, dir) = engine_with_failing_llm("chat-stream-open-fail").await;
-    let engine = Arc::new(engine);
-    seed_persona(&storage, DEFAULT_PERSONA_UID).await;
-    engine.set_state(AppState::Ready);
-
-    let handle = engine
-        .chat_stream(stream_request("你好", None))
-        .await
-        .expect("流打不开也应返回事件流句柄");
-    let session_id = handle.session_id;
-    let request_id = handle.request_id;
-    let events = collect_events(handle.events).await;
-
-    assert_eq!(
-        kinds(&events),
-        vec!["error"],
-        "流打不开时应只有一个 Error 事件"
-    );
-    assert_eq!(events[0].request_id(), request_id);
-
-    let messages = storage
-        .list_messages(session_id)
-        .await
-        .expect("读取消息成功");
-    assert!(messages.is_empty(), "流打不开不应写入任何消息");
-
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// 流中错误：先收到增量、再收到 Error、无 Done；用户消息已落库、助手回复未落库。
-#[tokio::test]
-async fn stream_error_after_deltas_keeps_user_message_only() {
-    let llm = Arc::new(MockLlm::stream_fails_after(&["好的", "，继续"]));
-    let (engine, storage, dir) =
-        engine_with_shared_llm("chat-stream-mid-fail", llm, RamariaConfig::default(), None).await;
-    let engine = Arc::new(engine);
-    seed_persona(&storage, DEFAULT_PERSONA_UID).await;
-    engine.set_state(AppState::Ready);
-
-    let handle = engine
-        .chat_stream(stream_request("你好", None))
-        .await
-        .expect("应返回事件流句柄");
-    let session_id = handle.session_id;
-    let events = collect_events(handle.events).await;
-
-    let event_kinds = kinds(&events);
-    assert!(event_kinds.len() >= 2, "应先收到增量再收到错误");
-    assert_eq!(
-        event_kinds[event_kinds.len() - 1],
-        "error",
-        "流中错误应转为 Error 事件"
-    );
-    assert!(!event_kinds.contains(&"done"), "出错后不应再发 Done");
-    assert!(
-        event_kinds[..event_kinds.len() - 1]
-            .iter()
-            .all(|kind| *kind == "delta"),
-        "错误之前的序列应为增量事件"
-    );
-
-    let messages = storage
-        .list_messages(session_id)
-        .await
-        .expect("读取消息成功");
-    assert_eq!(messages.len(), 1, "用户消息已落库、助手回复不落库");
-    assert_eq!(messages[0].role, MessageRole::User);
-    assert_eq!(messages[0].content, "你好");
-
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
 /// 状态门禁：交互入口在非就绪状态被拒、就绪后放行；通道入口不受门禁（初值 NeedsSetup）。
 #[tokio::test]
 async fn interactive_state_gate_blocks_until_ready_but_channel_passes() {
@@ -422,9 +271,10 @@ async fn interactive_state_gate_blocks_until_ready_but_channel_passes() {
 /// 隐私门禁：线上 provider 未确认时拒绝（Privacy）；写入确认后放行。
 #[tokio::test]
 async fn interactive_privacy_gate_requires_consent_for_online_provider() {
+    // 线上 provider + 固定流式片段：本用例只验隐私闸门，不放行空回复语义
     let (engine, storage, dir) = engine_with_shared_llm(
         "chat-privacy",
-        Arc::new(MockLlm::online()),
+        Arc::new(MockLlm::online().streaming(&["好的"])),
         RamariaConfig::default(),
         None,
     )

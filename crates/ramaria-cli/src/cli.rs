@@ -151,7 +151,7 @@ pub(crate) enum Commands {
     #[command(display_order = 41, subcommand)]
     Config(ConfigCmd),
 
-    /// 人格管理（list / show / reload / import / allow-inference）[管理]
+    /// 人格管理（list / show / reload / import / allow-inference / prompt / export）[管理]
     #[command(display_order = 42, subcommand)]
     Persona(PersonaCmd),
 
@@ -646,6 +646,14 @@ pub(crate) enum PersonaCmd {
         /// 给定输入文本（提供时走全量预览；缺省为静态段预览）
         #[arg(long)]
         input: Option<String>,
+    },
+    /// 导出人格画像为预设文件（超集 TOML；不含证据链与会话原文）
+    Export {
+        /// 目标人格 uid
+        uid: String,
+        /// 输出文件路径（缺省输出到 stdout；`-` 亦为 stdout）
+        #[arg(long)]
+        out: Option<String>,
     },
 }
 

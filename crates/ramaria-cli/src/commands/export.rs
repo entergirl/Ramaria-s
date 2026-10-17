@@ -140,7 +140,7 @@ async fn export_markdown(engine: &Arc<Engine>, args: &ExportArgs) -> anyhow::Res
 /// 返回:
 /// - `Ok(Some(path))`: 实际写入的文件路径。
 /// - `Ok(None)`: 内容已输出到 stdout。
-fn write_output(
+pub(crate) fn write_output(
     content: &str,
     output: Option<&str>,
     format: &str,

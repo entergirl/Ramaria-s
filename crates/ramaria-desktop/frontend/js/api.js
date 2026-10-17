@@ -682,9 +682,49 @@ var RamariaApi = (function () {
         return await _invoke('refresh_persona', { uid: uid }, '刷新人格管线');
     }
 
- // =========================================================
- // 8.5 主动消息名单 (proactive)
- // =========================================================
+/**
+* 预览预设文件将写入的内容（dry-run：不写库、不调用 LLM）。
+*
+* 参数:
+* - `filePath`: 预设文件路径（.toml 超集 / SillyTavern 卡 .json / .png）
+* - `into`: 可选，合并目标 uid（缺省新建；目标不存在按新建处理）
+* - `noAi`: 可选，true 关闭 LLM 拆解
+*
+* 返回:
+* - { text, uid, mode, name, decompose_enabled, privacy_confirmed }
+*   `text` 为逐条预览文本（不含原文全文）；`mode` 为 "create" / "merge"
+*/
+    async function previewPersonaImport(filePath, into, noAi) {
+        _require(filePath, '预设文件路径');
+        var args = { filePath: filePath };
+        if (into) args.into = into;
+        if (noAi) args.noAi = true;
+        return await _invoke('preview_persona_import', args, '预览预设导入');
+    }
+
+/**
+* 执行预设导入（解析 → 可选拆解 → 写入注册列与 L3 条目）。
+*
+* 参数:
+* - `filePath`: 预设文件路径（.toml 超集 / SillyTavern 卡 .json / .png）
+* - `into`: 可选，合并目标 uid
+* - `noAi`: 可选，true 关闭 LLM 拆解
+*
+* 返回:
+* - { text, uid, mode, name, written: { traits, facts, examples, behavior_rules, failed },
+*     decompose: { requested, executed, skipped_reason?, fact_count, trait_count } }
+*/
+    async function importPersonaPreset(filePath, into, noAi) {
+        _require(filePath, '预设文件路径');
+        var args = { filePath: filePath };
+        if (into) args.into = into;
+        if (noAi) args.noAi = true;
+        return await _invoke('import_persona_preset', args, '导入预设');
+    }
+
+// =========================================================
+// 8.5 主动消息名单 (proactive)
+// =========================================================
 
  /**
  * 查询主动消息名单（活跃人格 + 开关状态 + 生效结论）。
@@ -1187,6 +1227,8 @@ var RamariaApi = (function () {
             listFull: listPersonasFull,
             updateInfo: updatePersonaInfo,
             refresh: refreshPersona,
+            previewImport: previewPersonaImport,
+            importPreset: importPersonaPreset,
         },
         proactive: {
             listPersonas: listProactivePersonas,

@@ -141,6 +141,15 @@ impl MockLlm {
         }
     }
 
+    /// 链式覆盖流式片段（保留 provider / 回复等既有配置）。
+    ///
+    /// 用途: 需要在"线上 provider"等特定配置下验证流式事件序列时，避免再造构造器
+    /// （与 `with_vision_reply` 同一链式口径）。
+    pub(crate) fn streaming(mut self, chunks: &[&str]) -> Self {
+        self.stream_chunks = Some(chunks.iter().map(|chunk| chunk.to_string()).collect());
+        self
+    }
+
     /// 构造"流中错误"mock（先发片段再返回 Llm 错误，模拟流式生成中断）。
     pub(crate) fn stream_fails_after(chunks: &[&str]) -> Self {
         Self {

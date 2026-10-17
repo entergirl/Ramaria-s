@@ -43,4 +43,6 @@ pub mod layers;
 /// - v2.9 M6 再递增记录：换行禁令收紧（回复中不出现换行、换行不算分条）、长度口径改
 ///   一般规律（复杂问题说明不受限）、思考指令重写（逐步定分条 + 开口前自检）、
 ///   风格生成器不再描述标点与分行习惯，prompt 文本变更 → 旧缓存自动失效。
-pub const PROMPT_TEMPLATE_VERSION: &str = "20261016-v2.9.1";
+/// - v2.9 递增记录：助手（`Rama`）身份行由写死产品名改为跟随人格注册名
+///   （`personas.name`，空白时回退产品名），prompt 文本变更 → 旧缓存自动失效。
+pub const PROMPT_TEMPLATE_VERSION: &str = "20261017-v2.9.2";

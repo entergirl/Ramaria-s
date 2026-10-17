@@ -278,6 +278,43 @@ pub struct DecomposeExecution {
 }
 
 // =========================================================
+// 预设导出用例（画像 → 预设文件）
+// =========================================================
+
+/// 预设导出结果（`persona export`）。
+///
+/// 字段约定:
+/// - `toml`: 超集 TOML 文本（可被预设导入通道原样再导入）；
+/// - `stats`: 导出内容计数（traits / facts / behavior_rules / blocks / 提示词补丁）；
+/// - `hints`: 降级说明（如 `personas.config` 不可解析时未含自由文本块 / 提示词补丁）；
+///   无降级时序列化省略该键。
+///
+/// 隐私:
+/// - 不含证据链（trait / rule 证据与来源引用）、对话示例与会话原文，属画像级导出。
+#[derive(Debug, Clone, Serialize)]
+pub struct PersonaExportOutcome {
+    pub uid: String,
+    pub name: String,
+    /// 超集 TOML 文本
+    pub toml: String,
+    pub stats: PersonaExportStats,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hints: Vec<String>,
+}
+
+/// 预设导出内容计数。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersonaExportStats {
+    pub traits: usize,
+    pub facts: usize,
+    pub behavior_rules: usize,
+    /// `[blocks]` 段数（自 `personas.config` 重放）
+    pub blocks: usize,
+    /// 是否包含 `[prompt]` 补丁（role_suffix / style_suffix 任一有值）
+    pub prompt_patch: bool,
+}
+
+// =========================================================
 // 提示词预览用例（persona prompt 查看器）
 // =========================================================
 

@@ -41,6 +41,13 @@ pub(super) fn build_bottom_line(context: &PromptContext, config: &PromptConfig) 
 // Role 块: 角色身份
 // =========================================================
 
+/// 助手（`Rama`）身份名缺失时的兜底名。
+///
+/// 说明:
+/// - 正常路径下身份名跟随 `personas.name`（`rama-0001` 即产品自身身份的注册名）；
+/// - 仅在注册名为空白（数据异常）时回退为产品名，避免渲染出空名字的身份行。
+const ASSISTANT_FALLBACK_NAME: &str = "Ramaria";
+
 /// 组装角色身份段：场景行 + 身份行（kind）+ 背景描述（`# 角色（行为层）` 的头部）。
 ///
 /// 背景描述数据源（按优先级取值，均为空则不渲染该行）:
@@ -62,8 +69,16 @@ fn build_role(context: &PromptContext) -> String {
         // persona kind 描述（一行式身份事实；Anim/Hist 的作品名/时代名由
         // persona 设定数据源提供，缺失时使用回退句）
         let kind_desc = match persona.kind {
+            // 产品自身身份（`rama-0001`）：身份名跟随人格注册名（`personas.name`），
+            // 不再写死产品名；注册名为空白时回退产品名兜底。
             ramaria_core::types::PersonaKind::Rama => {
-                "你是 Ramaria，你有自己的说话习惯。".to_string()
+                let name = persona.name.trim();
+                let name = if name.is_empty() {
+                    ASSISTANT_FALLBACK_NAME
+                } else {
+                    name
+                };
+                format!("你是「{name}」，你有自己的说话习惯。")
             }
             ramaria_core::types::PersonaKind::User => {
                 format!("你以「{}」的视角说话。", persona.name)

@@ -21,6 +21,7 @@ pub mod mcp;
 pub mod memory;
 pub mod memory_view;
 pub mod persona;
+pub mod preset;
 pub mod proactive_cmd;
 pub mod rules;
 pub mod session;

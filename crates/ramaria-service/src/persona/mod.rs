@@ -11,6 +11,7 @@
 //!
 //! 模块划分:
 //! - `allow_inference`：允许推断接管（Manual → Inferred 的显式授权改写）；
+//! - `export`：预设导出（画像 → 预设超集 TOML；不含证据链与会话原文）；
 //! - `import`：预设导入（dry-run 预览 / 执行写入；可选拆解，失败降级不丢人格）；
 //! - `load`：人格文件导入（目录扫描 / 单文件显式 uid；单文件失败转为结果条目）；
 //! - `prompt`：提示词预览（静态段 / 全量两档，与生成前置步骤同源）；
@@ -19,6 +20,7 @@
 //! - `view`：人格读取与视图组装（摘要列表 / 全字段列表 / 卡片 / 成熟度计数）。
 
 mod allow_inference;
+mod export;
 mod import;
 mod load;
 mod prompt;
@@ -32,6 +34,7 @@ pub use regenerate::PersonaRegenerateOutcome;
 
 // 用例 re-export：`crate::persona::X` 为引擎既有调用路径
 pub(crate) use allow_inference::allow_inference;
+pub(crate) use export::export;
 pub(crate) use import::{execute as import_execute, preview as import_preview};
 pub(crate) use load::{load_file, load_from_dir};
 pub(crate) use prompt::preview;

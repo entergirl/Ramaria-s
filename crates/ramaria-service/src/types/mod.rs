@@ -48,9 +48,10 @@ pub use memory_browse::{
 };
 pub use persona::{
     BehaviorRuleView, DataMaturityView, DecomposeExecution, FactView, ImportWriteStats,
-    PersonaCardRequest, PersonaCardView, PersonaFileAction, PersonaFileOutcome, PersonaFullView,
-    PersonaImportOutcome, PersonaPromptPreview, PersonaSection, PersonaSummaryView,
-    PersonaUpdateRequest, PromptPreviewTier, StyleView, TraitView,
+    PersonaCardRequest, PersonaCardView, PersonaExportOutcome, PersonaExportStats,
+    PersonaFileAction, PersonaFileOutcome, PersonaFullView, PersonaImportOutcome,
+    PersonaPromptPreview, PersonaSection, PersonaSummaryView, PersonaUpdateRequest,
+    PromptPreviewTier, StyleView, TraitView,
 };
 pub use recall::{RecallItem, RecallLayer, RecallMode, RecallRequest, RecallResult, RecallStats};
 pub use session::{

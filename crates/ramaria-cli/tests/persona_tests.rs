@@ -7,6 +7,7 @@
 //! - `--into` 目标不存在：按新建处理 + merge_target_missing 提示
 //! - allow-inference：全量 / 按 label 改写来源为 inferred、未知 uid 零改写
 //! - prompt：静态段 / 全量两档预览（信封与文本形态）、未知 uid 非零退出
+//! - export：信封含 TOML 与统计、不含对话示例与原文、`--out` 写文件与再导入往返、未知 uid 非零退出
 //! - 文本形态与错误路径（文件不存在 / 非法 TOML 的退出码）
 //!
 //! 安全约束:
@@ -485,6 +486,146 @@ fn prompt_unknown_uid_exits_with_validation_code() {
     let dir = temp_test_dir("prompt-unknown");
 
     let out = run_cli(&dir, &["persona", "prompt", "char-9999", "--json"]);
+    assert_eq!(out.status.code(), Some(4), "未知 uid 应退出 code 4");
+    assert!(!out.stderr.is_empty(), "错误应输出到 stderr");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// =========================================================
+// export（画像 → 预设文件）
+// =========================================================
+
+/// 导出信封：含 TOML 全文与逐类计数；不含对话示例（预设含 1 对示例，导出为 0）。
+#[test]
+fn export_json_envelope_contains_toml_and_stats() {
+    let dir = temp_test_dir("export-json");
+    let preset = write_preset(&dir, "char-0001.toml", PRESET_TOML);
+    let file = preset.to_str().expect("预设路径应为合法 UTF-8");
+
+    let out = run_cli(&dir, &["persona", "import", file, "--json", "--no-ai"]);
+    assert_eq!(out.status.code(), Some(0), "导入应成功退出");
+
+    let out = run_cli(&dir, &["persona", "export", "char-0001", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "导出应成功退出");
+    let envelope = parse_envelope(&out);
+    assert_eq!(envelope["ok"], true);
+    let data = &envelope["data"];
+    assert_eq!(data["uid"], "char-0001");
+    assert_eq!(data["name"], "导入人格");
+    assert_eq!(data["stats"]["traits"], 2);
+    assert_eq!(data["stats"]["facts"], 1);
+    assert_eq!(data["stats"]["behavior_rules"], 1);
+    assert_eq!(data["stats"]["blocks"], 1);
+    assert_eq!(data["stats"]["prompt_patch"], false);
+
+    let toml = data["toml"].as_str().expect("toml 应为字符串");
+    assert!(toml.contains("uid = \"char-0001\""), "应含注册 uid: {toml}");
+    assert!(toml.contains("label = \"温和\""), "应含 traits: {toml}");
+    assert!(
+        toml.contains("content = \"示例事实\""),
+        "应含 facts: {toml}"
+    );
+    assert!(toml.contains("A_persona"), "应含自由文本块: {toml}");
+    assert!(
+        !toml.contains("[[examples]]") && !toml.contains("在吗"),
+        "画像级导出不应含对话示例: {toml}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `--out <file>`：写入指定文件；导出文本可再导入到新 uid（往返链路可用）。
+#[test]
+fn export_writes_file_and_reimports_into_new_uid() {
+    let dir = temp_test_dir("export-file");
+    let preset = write_preset(&dir, "char-0001.toml", PRESET_TOML);
+    let file = preset.to_str().expect("预设路径应为合法 UTF-8");
+
+    let out = run_cli(&dir, &["persona", "import", file, "--json", "--no-ai"]);
+    assert_eq!(out.status.code(), Some(0), "导入应成功退出");
+
+    let export_path = dir.join("char-0001.export.toml");
+    let export_arg = export_path.to_str().expect("导出路径应为合法 UTF-8");
+    let out = run_cli(
+        &dir,
+        &[
+            "persona",
+            "export",
+            "char-0001",
+            "--out",
+            export_arg,
+            "--json",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "文件导出应成功退出");
+    let envelope = parse_envelope(&out);
+    assert!(
+        envelope["data"]["written_to"].is_string(),
+        "信封应含 written_to: {}",
+        envelope["data"]
+    );
+    let exported = std::fs::read_to_string(&export_path).expect("导出文件应存在");
+    assert!(exported.contains("uid = \"char-0001\""), "文件应含导出内容");
+
+    // 再导入到新 uid（--into 覆盖预设 uid）
+    let out = run_cli(
+        &dir,
+        &[
+            "persona",
+            "import",
+            export_arg,
+            "--into",
+            "char-0002",
+            "--json",
+            "--no-ai",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "再导入应成功退出");
+    let envelope = parse_envelope(&out);
+    assert_eq!(
+        envelope["data"]["preview"]["registration"]["uid"],
+        "char-0002"
+    );
+    assert_eq!(envelope["data"]["written"]["traits"], 2);
+    assert_eq!(envelope["data"]["written"]["facts"], 1);
+    assert_eq!(envelope["data"]["written"]["behavior_rules"], 1);
+    assert_eq!(envelope["data"]["written"]["examples"], 0);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 文本形态：stdout 仅含 TOML 数据（摘要与提示走 stderr）。
+#[test]
+fn export_text_form_stdout_is_data_only() {
+    let dir = temp_test_dir("export-text");
+    let preset = write_preset(&dir, "char-0001.toml", PRESET_TOML);
+    let file = preset.to_str().expect("预设路径应为合法 UTF-8");
+
+    let out = run_cli(&dir, &["persona", "import", file, "--json", "--no-ai"]);
+    assert_eq!(out.status.code(), Some(0), "导入应成功退出");
+
+    let out = run_cli(&dir, &["persona", "export", "char-0001"]);
+    assert_eq!(out.status.code(), Some(0), "文本导出应成功退出");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("[persona]"), "stdout 应含 TOML: {stdout}");
+    assert!(!stdout.contains("已导出人格"), "摘要不应进 stdout");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("已导出人格"), "摘要应走 stderr: {stderr}");
+    assert!(
+        stderr.contains("不含证据链"),
+        "应提示画像级导出口径: {stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 未知 uid / 空白 uid：Validation 映射 exit code 4。
+#[test]
+fn export_unknown_uid_exits_with_validation_code() {
+    let dir = temp_test_dir("export-unknown");
+
+    let out = run_cli(&dir, &["persona", "export", "char-9999", "--json"]);
     assert_eq!(out.status.code(), Some(4), "未知 uid 应退出 code 4");
     assert!(!out.stderr.is_empty(), "错误应输出到 stderr");
 

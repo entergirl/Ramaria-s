@@ -120,8 +120,10 @@ pub use model::{
     is_model_ready, list_models, model_size, models_root, remove_model, validate_embedding_model,
 };
 pub use persona::{PersonaLoadMode, PersonaRegenerateOutcome};
+// 预设类型 re-export：入口层（桌面）消费预览结构时经服务层取用，不新增直连 memory crate 的依赖
 pub use privacy::PrivacyStatus;
 pub use proactive::{ProactiveMessage, ProactivePersonaView, ProactiveSink, ProactiveStatsReport};
+pub use ramaria_memory::preset::{PresetPreview, PreviewMode};
 pub use recall::RecallPolicy;
 pub use seal::{SealHook, SealHooks};
 pub use settings::mask_api_key;

@@ -307,8 +307,11 @@ fn role_anim_hist_read_identity_work_era_with_fallback() {
 }
 
 /// 生产 persona（`config/personas/rama-0001.toml`）的显式规则形态锁定：
-/// `E_rules` 存在 → 核心规则 4 条（含"讲解"）且不注入共享规则的示例段
-/// （有意设计，防格式契约回归误判）。
+/// `E_rules` 存在 → 核心规则按编号给出（1 分条 / 2 接话 / 3 收尾 + 自定义条目）
+/// 且不注入共享规则的示例段（有意设计，防格式契约回归误判）。
+///
+/// 说明: 第 4 条起为随包人格的自定义条目，措辞随预设迭代变化——只断言"存在
+/// 且进入装配"，不断言具体文案，避免预设内容更新时误伤格式契约用例。
 #[test]
 fn production_persona_explicit_rules_override_shared_examples() {
     let persona_config = include_str!(concat!(
@@ -320,7 +323,12 @@ fn production_persona_explicit_rules_override_shared_examples() {
     assert!(rules.contains("1. 分条"), "显式规则第 1 条: {rules}");
     assert!(rules.contains("2. 接话"), "显式规则第 2 条");
     assert!(rules.contains("3. 收尾"), "显式规则第 3 条");
-    assert!(rules.contains("4. 讲解"), "显式规则第 4 条（讲解）");
+    let custom_rule = rules
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("4. "))
+        .expect("显式规则应有第 4 条（人格自定义条目）")
+        .to_string();
     assert!(
         !rules.contains("示例（模仿长度与分条方式"),
         "显式规则不包含共享规则示例段"
@@ -343,8 +351,49 @@ fn production_persona_explicit_rules_override_shared_examples() {
         },
         &PromptConfig::default(),
     );
-    assert!(result.contains("4. 讲解"), "核心规则段含显式第 4 条");
+    assert!(
+        result.contains(custom_rule.as_str()),
+        "核心规则段含显式第 4 条: {custom_rule}"
+    );
     assert!(!result.contains("先去吃饭"), "不注入共享规则示例");
+}
+
+/// 助手（`Rama`）身份行跟随人格注册名：`rama-0001` 即产品自身身份的注册名。
+#[test]
+fn rama_identity_line_follows_persona_name() {
+    let result = assemble_prompt(
+        &PromptContext {
+            persona: Some(persona_with_kind(PersonaKind::Rama, None)),
+            ..Default::default()
+        },
+        &PromptConfig::default(),
+    );
+    assert!(
+        result.contains("你是「小明」，你有自己的说话习惯。"),
+        "Rama 身份行应跟随注册名: {result}"
+    );
+    assert!(
+        !result.contains("你是 Ramaria，"),
+        "Rama 身份行不应再写死产品名: {result}"
+    );
+}
+
+/// 助手注册名为空白（数据异常）→ 回退产品名，避免渲染出空名字的身份行。
+#[test]
+fn rama_identity_line_falls_back_to_product_name_when_blank() {
+    let mut persona = persona_with_kind(PersonaKind::Rama, None);
+    persona.name = "   ".into();
+    let result = assemble_prompt(
+        &PromptContext {
+            persona: Some(persona),
+            ..Default::default()
+        },
+        &PromptConfig::default(),
+    );
+    assert!(
+        result.contains("你是「Ramaria」，你有自己的说话习惯。"),
+        "空白注册名应回退产品名: {result}"
+    );
 }
 
 #[test]

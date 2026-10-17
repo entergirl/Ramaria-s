@@ -6,15 +6,17 @@
  * - 点击卡片进入人格详情页（在线编辑基本信息）
  * - "设为默认对话人格"功能
  * - "重载性格"按钮触发记忆管线
+ * - "导入预设"：文件选择（.toml / .json / .png）→ dry-run 预览 → 确认导入 → 结果提示
  *
  * 设计特点:
  * - IIFE 模式 + 自动初始化 + Router 生命周期钩子
  * - 与 memory.js/settings.js 架构一致
  * - 异步数据加载，含骨架屏和错误兜底
  * - 编辑操作含 loading 态防重复提交
+ * - 预设导入复用服务层裁决（预览与实际写入同源），本视图只做展示与确认
  *
  * 依赖:
- * - RamariaApi, RamariaStore, RamariaRouter, RamariaToast (可选)
+ * - RamariaApi, RamariaStore, RamariaRouter, RamariaToast (可选), RamariaModal (可选)
  */
 
 var RamariaPersonaView = (function () {
@@ -185,7 +187,12 @@ var RamariaPersonaView = (function () {
         toolbar.innerHTML =
             '<div class="persona-toolbar-title">' +
                 '<span>共 ' + _personasFull.length + ' 个人格</span>' +
-            '</div>';
+            '</div>' +
+            '<button class="btn btn-secondary btn-sm" id="btn-persona-import" type="button">导入预设</button>';
+        var importBtn = toolbar.querySelector('#btn-persona-import');
+        if (importBtn) {
+            importBtn.addEventListener('click', _handleImportPreset);
+        }
         wrapper.appendChild(toolbar);
 
  // ---- 卡片网格 ----
@@ -642,16 +649,220 @@ var RamariaPersonaView = (function () {
     }
 
  // =========================================================
+ // 预设导入（文件选择 → dry-run 预览 → 确认导入）
+ // =========================================================
+
+ /**
+  * 预设导入入口：选择文件 → 预览 → 弹窗确认。
+  *
+  * 说明:
+  * - 文件对话框经 Tauri dialog 插件（与数据导入页同一调用口径）；
+  * - 预览由服务层裁决（不写库、不调用 LLM），弹窗展示逐条将写入项；
+  * - 取消预览不产生任何写入。
+  */
+     async function _handleImportPreset() {
+         try {
+             var filePath = await _pickPresetFile();
+             if (!filePath) {
+                 return; // 用户取消
+             }
+
+             var preview = await RamariaApi.persona.previewImport(filePath);
+             _showImportPreview(filePath, preview);
+         } catch (err) {
+             console.error('[PersonaView] 预设预览失败:', err);
+             _showToast('预览失败: ' + (err.message || String(err)), 'error');
+         }
+     }
+
+ /**
+  * 打开原生文件对话框选择预设文件。
+  *
+  * 返回:
+  * - 文件路径字符串；用户取消或环境不支持时返回 null。
+  */
+     async function _pickPresetFile() {
+         var selected = null;
+
+         if (window.__TAURI__ && window.__TAURI__.dialog && window.__TAURI__.dialog.open) {
+             try {
+                 selected = await window.__TAURI__.dialog.open({
+                     title: '选择预设文件',
+                     filters: [{
+                         name: '预设文件（.toml / .json / .png）',
+                         extensions: ['toml', 'json', 'png'],
+                     }],
+                     multiple: false,
+                     directory: false,
+                 });
+             } catch (dialogErr) {
+                 console.warn('[PersonaView] 原生文件对话框失败:', dialogErr);
+             }
+         }
+
+ // 回退：通过 TauriBridge 调用
+         if (!selected && TauriBridge && TauriBridge.invoke) {
+             try {
+                 selected = await TauriBridge.invoke('plugin:dialog|open', {
+                     title: '选择预设文件',
+                     filters: [{
+                         name: '预设文件（.toml / .json / .png）',
+                         extensions: ['toml', 'json', 'png'],
+                     }],
+                     multiple: false,
+                 });
+             } catch (invokeErr) {
+                 console.warn('[PersonaView] 调用文件对话框失败:', invokeErr);
+             }
+         }
+
+         if (!selected) {
+             return null;
+         }
+         return typeof selected === 'string'
+             ? selected
+             : (selected.path || (Array.isArray(selected) ? selected[0] : null));
+     }
+
+ /**
+  * 展示预设预览弹窗（确认后才执行导入）。
+  *
+  * 参数:
+  * - `filePath`: 已选预设文件路径。
+  * - `preview`: 服务层预览结果（text / uid / mode / name / decompose_*）。
+  */
+     function _showImportPreview(filePath, preview) {
+         if (!window.RamariaModal || typeof RamariaModal.show !== 'function') {
+             _showToast('预览弹窗组件未加载，无法确认导入', 'error');
+             return;
+         }
+
+         RamariaModal.show({
+             title: '预设导入预览',
+             body: buildImportPreviewHtml(preview),
+             footer: '<button class="btn btn-ghost" data-action="cancel" type="button">取消</button>' +
+                 '<button class="btn btn-primary" data-action="confirm" type="button">确认导入</button>',
+             onAction: function (action, btn) {
+                 if (action !== 'confirm') {
+                     return; // 取消 / 关闭：走默认关闭
+                 }
+                 if (btn) {
+                     btn.disabled = true;
+                     btn.textContent = '导入中...';
+                 }
+ // 保持弹窗打开直至导入完成（由 _executeImport 关闭）
+                 _executeImport(filePath, btn);
+                 return 'prevent-close';
+             },
+         });
+     }
+
+ /**
+  * 执行预设导入并回填结果。
+  *
+  * 参数:
+  * - `filePath`: 已选预设文件路径。
+  * - `confirmBtn`: 确认按钮（失败时恢复可点击）。
+  */
+     async function _executeImport(filePath, confirmBtn) {
+         try {
+             var outcome = await RamariaApi.persona.importPreset(filePath);
+             if (window.RamariaModal && typeof RamariaModal.close === 'function') {
+                 RamariaModal.close();
+             }
+             _showToast(formatImportSummary(outcome), 'success');
+             await _loadAndRender();
+         } catch (err) {
+             console.error('[PersonaView] 预设导入失败:', err);
+             if (confirmBtn) {
+                 confirmBtn.disabled = false;
+                 confirmBtn.textContent = '确认导入';
+             }
+             _showToast('导入失败: ' + (err.message || String(err)), 'error');
+         }
+     }
+
+ /**
+  * 构建预览弹窗正文（纯函数，供测试）。
+  *
+  * 参数:
+  * - `preview`: 服务层预览结果。
+  *
+  * 返回:
+  * - HTML 字符串；预览文本经转义后放入 `<pre>`。
+  */
+     function buildImportPreviewHtml(preview) {
+         var text = preview && typeof preview.text === 'string' ? preview.text : '';
+         return '<pre class="persona-import-preview">' + RamariaEscape.escapeHtml(text) + '</pre>' +
+             '<p class="persona-import-hint">' +
+             '确认后按「只增不改」写入：重复条目自动跳过，目标已有内容不被覆盖。' +
+             '</p>';
+     }
+
+ /**
+  * 格式化导入结果摘要（纯函数，供测试）。
+  *
+  * 参数:
+  * - `outcome`: 服务层导入结果（uid / name / mode / written / decompose）。
+  *
+  * 返回:
+  * - 单行摘要文本。
+  */
+     function formatImportSummary(outcome) {
+         var o = outcome || {};
+         var uid = o.uid || '（未知）';
+         var name = o.name ? '「' + o.name + '」' : '';
+         var mode = o.mode === 'merge' ? '合并' : '新建';
+         var written = o.written || {};
+
+         var summary = '已导入人格 ' + uid + name + '（' + mode + '）：' +
+             'traits ' + (written.traits || 0) +
+             ' / facts ' + (written.facts || 0) +
+             ' / examples ' + (written.examples || 0) +
+             ' / behavior_rules ' + (written.behavior_rules || 0);
+         if (written.failed) {
+             summary += '；失败 ' + written.failed + ' 条（已跳过）';
+         }
+         return summary + '；拆解：' + _decomposeLabel(o.decompose) + '。';
+     }
+
+ /**
+  * 拆解执行情况文案（未启用 / 已执行 / 跳过原因）。
+  */
+     function _decomposeLabel(decompose) {
+         var exec = decompose || {};
+         if (exec.executed) {
+             return '已执行（traits ' + (exec.trait_count || 0) + ' / facts ' + (exec.fact_count || 0) + '）';
+         }
+         if (!exec.requested) {
+             return '未启用';
+         }
+         var reason = exec.skipped_reason;
+         if (reason === 'privacy_unconfirmed') {
+             return '已跳过（隐私未确认）';
+         }
+         if (reason === 'no_input') {
+             return '已跳过（无拆解输入）';
+         }
+         if (reason === 'llm_failed') {
+             return '已跳过（LLM 调用失败）';
+         }
+         return reason ? '已跳过（' + reason + '）' : '未执行';
+     }
+
+ // =========================================================
  // UI 辅助：Toast
  // =========================================================
 
  /**
  * 显示 Toast 通知。
  * 兼容 RamariaToast（如果已加载），否则 fallback 到 console。
+ *
+ * 说明: 组件口径为 `show(type, title, message)`；本视图文案为单行展示（作标题）。
  */
     function _showToast(message, type) {
         if (window.RamariaToast && typeof RamariaToast.show === 'function') {
-            RamariaToast.show(message, type || 'info');
+            RamariaToast.show(type || 'info', message);
         } else {
             console.log('[PersonaView Toast] ' + type + ': ' + message);
         }
@@ -707,7 +918,12 @@ var RamariaPersonaView = (function () {
         div.innerHTML =
             '<div class="persona-empty-icon" aria-hidden="true">👤</div>' +
             '<h3 class="persona-empty-title">暂无已注册人格</h3>' +
-            '<p class="persona-empty-desc">人格将通过首次配置或数据导入自动创建</p>';
+            '<p class="persona-empty-desc">人格将通过首次配置、数据导入或预设文件创建</p>' +
+            '<button class="btn btn-primary btn-sm persona-empty-import" type="button">导入预设</button>';
+        var importBtn = div.querySelector('.persona-empty-import');
+        if (importBtn) {
+            importBtn.addEventListener('click', _handleImportPreset);
+        }
         return div;
     }
 
@@ -783,8 +999,10 @@ var RamariaPersonaView = (function () {
     return {
         init: init,
         destroy: destroy,
- /** 暴露 _loadAndRender 供外部强制刷新 */
+/** 暴露 _loadAndRender 供外部强制刷新 */
         reload: _loadAndRender,
+        buildImportPreviewHtml: buildImportPreviewHtml,
+        formatImportSummary: formatImportSummary,
     };
 })();
 

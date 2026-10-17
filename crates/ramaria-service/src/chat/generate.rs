@@ -7,6 +7,9 @@
 //! - 流打不开：返回只含一个 `Error` 事件的事件流句柄（不落库、不启动转发任务）
 //! - 事件桥接：后台任务逐增量转发 `Delta`，结束时仅当无错才发 `Done`
 //!   （错误经 `Error` 事件表达，不再发 `Done`）
+//! - 空回复：HTTP 200 但正文为空（思考模式耗尽预算 / 后端异常 / choices 为空）
+//!   与非流式路径同一纪律——转 `Error`、不发 `Done`、不落助手消息，
+//!   避免前端留下无法判断的空气泡
 //! - 隐私：日志只记会话 id、人格与长度，不记消息与回复内容
 
 use std::pin::Pin;
@@ -26,6 +29,13 @@ use crate::stream_event::{ChatStreamHandle, StreamEvent};
 use crate::types::{ChannelReplyRequest, ChatSendOutcome, ChatSendRequest, ChatStreamRequest};
 
 use super::steps::{ChatInput, ChatMode, prepare_request};
+
+/// 空回复的错误文案（流式路径）。
+///
+/// 说明:
+/// - 前端经 `chat-error` 提示并允许重试；
+/// - 文案不含模型 / provider 细节（用户只需要"没生成出来，可以再试一次"）。
+const EMPTY_REPLY_MESSAGE: &str = "模型本轮没有返回内容，请再试一次。";
 
 // =========================================================
 // 用例入口
@@ -453,6 +463,24 @@ async fn forward_and_persist(
                 break;
             }
         }
+    }
+
+    // 2.5 空回复判定：与非流式路径同一纪律——空正文按错误处理。
+    // 触发场景: 思考模式耗尽输出预算、后端返回 200 但 choices 为空、内容审核截断。
+    // 若按成功收尾，助手消息不落库（下方判空跳过）却已发 `Done(0)`，
+    // 前端会留下一个没有任何内容、也无法重试的气泡。
+    if !has_error && full_reply.trim().is_empty() {
+        has_error = true;
+        tracing::warn!(
+            request_id = %request_id,
+            session_id = %session_id,
+            duration_ms = now_ms() - started_at,
+            "模型返回空回复（HTTP 200 但无正文），按错误处理"
+        );
+        let _ = tx.unbounded_send(Ok(StreamEvent::error(
+            request_id,
+            EMPTY_REPLY_MESSAGE.to_string(),
+        )));
     }
 
     // 3. 保存助手消息（仅在非错误且非空时；来源线上，携带人格归属）
