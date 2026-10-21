@@ -53,7 +53,6 @@ pub struct MockStorage {
     persona_seq: Mutex<i64>,
     privacy_consents: Mutex<Vec<PrivacyConsent>>,
     backend_config: Mutex<Option<BackendConfig>>,
-    index_version: Mutex<i32>,
     examples: Mutex<HashMap<String, Vec<PersonaExample>>>,
     // 人格推断相关存储
     traits: Mutex<HashMap<i64, PersonalityTrait>>,
@@ -105,7 +104,6 @@ impl MockStorage {
             persona_seq: Mutex::new(0),
             privacy_consents: Mutex::new(Vec::new()),
             backend_config: Mutex::new(None),
-            index_version: Mutex::new(0),
             examples: Mutex::new(HashMap::new()),
             traits: Mutex::new(HashMap::new()),
             traits_by_persona: Mutex::new(HashMap::new()),
@@ -833,15 +831,6 @@ impl StoreInfrastructure for MockStorage {
         Ok(1)
     }
 
-    async fn get_index_version(&self) -> RamariaResult<i32> {
-        Ok(*self.index_version.lock().unwrap())
-    }
-
-    async fn set_index_version(&self, version: i32) -> RamariaResult<()> {
-        *self.index_version.lock().unwrap() = version;
-        Ok(())
-    }
-
     // ---- 基础设施方法 ----
 
     async fn create_background_job(
@@ -896,17 +885,6 @@ impl StoreInfrastructure for MockStorage {
 
     async fn list_settings(&self) -> RamariaResult<Vec<(String, String)>> {
         Ok(Vec::new())
-    }
-
-    async fn insert_keyword_ref(
-        &self,
-        _keyword_id: &str,
-        _doc_type: &str,
-        _doc_id: &str,
-        _persona_uid: &str,
-        _weight: f64,
-    ) -> RamariaResult<()> {
-        Ok(())
     }
 
     // -- 行为规则 --

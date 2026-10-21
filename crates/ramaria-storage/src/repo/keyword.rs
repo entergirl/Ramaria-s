@@ -1,9 +1,8 @@
-//! crates/ramaria-storage/src/repo/keyword.rs - KeywordPool + keyword_refs 写入
+//! crates/ramaria-storage/src/repo/keyword.rs - KeywordPool 读写与别名归一化
 //!
 //! 设计特点:
 //! - 关键词池（keyword_pool）读写接口从裸 `String` 升级为 `KeywordToken` Newtype
 //! - `upsert` 支持写入 canonical_id/alias_status，支撑别名归一化管线
-//! - `keyword_refs` 倒排索引仅保留写入（insert_ref）；精确匹配消费路径留 M3
 //! - 所有 SQL 使用 `?` 参数绑定，杜绝注入风险
 //!
 //! - 激活 keyword_pool 的 canonical_id/alias_status 列（预埋）
@@ -93,7 +92,6 @@ pub async fn upsert(pool: &SqlitePool, keyword: &KeywordToken) -> RamariaResult<
     Ok(())
 }
 
-// 预留给 keyword_refs 消费路径（v1.6 精确匹配检索）
 /// 插入或更新关键词，并写入别名状态。
 ///
 /// 参数:
@@ -159,7 +157,6 @@ pub async fn list_all(pool: &SqlitePool) -> RamariaResult<Vec<KeywordToken>> {
     Ok(tokens)
 }
 
-// 预留给 keyword_refs 消费路径（v1.6 精确匹配检索）
 /// 根据规范词 ID 查找所有别名。
 ///
 /// 参数:
@@ -183,7 +180,6 @@ pub async fn list_aliases(pool: &SqlitePool, canonical_id: i64) -> RamariaResult
     Ok(rows)
 }
 
-// 预留给 keyword_refs 消费路径（v1.6 精确匹配检索）
 /// 根据关键词文本查询其 canonical_id。
 ///
 /// 返回:
@@ -207,7 +203,6 @@ pub async fn find_canonical_id(
     Ok(row.and_then(|r| r.0))
 }
 
-// 预留给 keyword_refs 消费路径（v1.6 精确匹配检索）
 /// 更新关键词的别名状态。
 ///
 /// 参数:
@@ -235,7 +230,6 @@ pub async fn update_alias_status(
     Ok(())
 }
 
-// 预留给 keyword_refs 消费路径（v1.6 精确匹配检索）
 /// 列出全部规范词（canonical_id IS NULL 的词条，含 alias_status NULL 与 'canonical' 两种旧形态）。
 ///
 /// 返回:
@@ -298,7 +292,6 @@ pub async fn list_established(pool: &SqlitePool) -> RamariaResult<Vec<CanonicalR
         .collect())
 }
 
-// 预留给 keyword_refs 消费路径（v1.6 精确匹配检索）
 /// 根据词条 rowid 返回其规范词文本。
 ///
 /// - 词条本身是 Canonical → 返回自身 keyword。
@@ -327,7 +320,6 @@ pub async fn get_canonical_name(pool: &SqlitePool, word_id: i64) -> RamariaResul
     }
 }
 
-// 预留给 keyword_refs 消费路径（v1.6 精确匹配检索）
 /// 列出全部待确认别名冲突（alias_status='pending'，join 规范词文本）。
 pub async fn list_pending_aliases(pool: &SqlitePool) -> RamariaResult<Vec<PendingAliasRow>> {
     let rows = sqlx::query_as::<_, (i64, String, i64, String, i64)>(
@@ -357,7 +349,6 @@ pub async fn list_pending_aliases(pool: &SqlitePool) -> RamariaResult<Vec<Pendin
         .collect())
 }
 
-// 预留给 keyword_refs 消费路径（v1.6 精确匹配检索）
 /// 确认别名：把 alias_status='pending' 的词条置为 'alias'。
 ///
 /// 返回是否发生更新（目标不存在 / 非 pending → false）。
@@ -373,7 +364,6 @@ pub async fn confirm_alias(pool: &SqlitePool, alias_id: i64) -> RamariaResult<bo
     Ok(result.rows_affected() > 0)
 }
 
-// 预留给 keyword_refs 消费路径（v1.6 精确匹配检索）
 /// 驳回别名：把 alias_status='pending' 的词条晋升为独立规范词（清除 canonical 指向）。
 ///
 /// 返回是否发生更新（目标不存在 / 非 pending → false）。
@@ -435,7 +425,6 @@ pub async fn upsert_pending(
 ///
 /// 说明:
 /// - 供 AliasManager::load_use_counts() 批量加载使用。
-/// - 预留给 keyword_refs 消费路径（v1.6 精确匹配检索）。
 pub async fn list_all_with_counts(pool: &SqlitePool) -> RamariaResult<Vec<(String, u32)>> {
     let rows = sqlx::query_as::<_, (String, u32)>(
         "SELECT keyword, use_count FROM keyword_pool ORDER BY use_count DESC",
@@ -635,47 +624,6 @@ pub async fn seed_canonical(pool: &SqlitePool, keyword: &KeywordToken) -> Ramari
     .await
     .storage_err("种子注入关键词失败")?;
     Ok(result.rows_affected() > 0)
-}
-
-// =========================================================
-// keyword_refs 写入（倒排索引；精确匹配消费路径留 M3）
-// =========================================================
-
-/// 插入一条关键词引用记录。
-///
-/// 参数:
-/// - `keyword_id`: 关键词文本（引用 keyword_pool.keyword）。
-/// - `doc_type`: 文档类型（"l1" / "l2"）。
-/// - `doc_id`: 文档 ID。
-/// - `persona_uid`: 所属人格 UID。
-/// - `weight`: 关键词在此文档中的权重（默认 1.0）。
-///
-/// 说明:
-/// - 不检查重复——同一关键词在同一文档中出现多次时分别记录（权重可不同）。
-/// - 由调用方确保 `keyword_id` 在 keyword_pool 中已存在。
-pub async fn insert_ref(
-    pool: &SqlitePool,
-    keyword_id: &str,
-    doc_type: &str,
-    doc_id: &str,
-    persona_uid: &str,
-    weight: f64,
-) -> RamariaResult<()> {
-    let now = ramaria_core::types::now_ms();
-    sqlx::query(
-        "INSERT INTO keyword_refs (keyword_id, doc_type, doc_id, persona_uid, weight, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)",
-    )
-    .bind(keyword_id)
-    .bind(doc_type)
-    .bind(doc_id)
-    .bind(persona_uid)
-    .bind(weight)
-    .bind(now)
-    .execute(pool)
-    .await
-    .storage_err("插入关键词引用失败")?;
-    Ok(())
 }
 
 #[cfg(test)]

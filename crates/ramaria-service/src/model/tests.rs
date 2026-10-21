@@ -102,7 +102,7 @@ async fn update_backend_config_hot_swaps_provider() {
 #[tokio::test]
 async fn update_backend_config_syncs_file_side_backend_group() {
     let dir = temp_dir("model-file-sync");
-    let db_path = dir.join("assistant.db");
+    let db_path = dir.join("ramaria.db");
     let config_path = dir.join("config.toml");
     std::fs::write(&config_path, "[utt]\ntheta_gap_minutes = 12\n").expect("写入配置应成功");
     let engine = Engine::open_with(
@@ -135,7 +135,7 @@ async fn update_backend_config_syncs_file_side_backend_group() {
 #[tokio::test]
 async fn write_backend_config_db_and_file_without_hot_swap() {
     let dir = temp_dir("model-write-db-file");
-    let db_path = dir.join("assistant.db");
+    let db_path = dir.join("ramaria.db");
     let config_path = dir.join("config.toml");
     let engine =
         Engine::open_with(EngineOptions::new(db_path).with_config_path(config_path.clone()))
@@ -189,7 +189,7 @@ async fn write_backend_config_db_and_file_without_hot_swap() {
 #[tokio::test]
 async fn write_backend_config_hot_swap_without_file_sync() {
     let dir = temp_dir("model-write-hot-swap");
-    let db_path = dir.join("assistant.db");
+    let db_path = dir.join("ramaria.db");
     let config_path = dir.join("config.toml");
     let original = "[utt]\ntheta_gap_minutes = 12\n";
     std::fs::write(&config_path, original).expect("写入配置应成功");
@@ -241,7 +241,7 @@ async fn write_backend_config_hot_swap_without_file_sync() {
 #[tokio::test]
 async fn write_backend_config_file_failure_keeps_db() {
     let dir = temp_dir("model-write-file-fail");
-    let db_path = dir.join("assistant.db");
+    let db_path = dir.join("ramaria.db");
     let config_path = dir.join("config.toml");
     std::fs::write(&config_path, "损坏的 [[[ 配置").expect("写入配置应成功");
     let engine =

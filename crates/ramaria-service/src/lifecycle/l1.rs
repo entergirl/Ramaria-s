@@ -446,7 +446,7 @@ mod tests {
 
         // LLM 恢复：同库第二台引擎直接补扫 → 完成 1 条、L1 落库、pending 清空
         let recovered = engine_on_existing_db(
-            &dir.join("assistant.db"),
+            &dir.join("ramaria.db"),
             MockLlm::with_reply(L1_JSON_REPLY),
             RamariaConfig::default(),
         )

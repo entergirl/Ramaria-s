@@ -22,7 +22,7 @@
 ///
 /// 版本历史:
 /// - 1: 初始 schema
-const CURRENT_SCHEMA_VERSION: u32 = 1;
+const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 /// 当前 Ramaria 应用版本号（与 workspace Cargo.toml 保持同步）。
 const CURRENT_APP_VERSION: &str = "2.9.0";

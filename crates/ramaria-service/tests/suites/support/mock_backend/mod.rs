@@ -45,7 +45,6 @@ pub struct MockStorage {
     persona_seq: Mutex<i64>,
     privacy_consents: Mutex<Vec<PrivacyConsent>>,
     backend_config: Mutex<Option<BackendConfig>>,
-    index_version: Mutex<i32>,
     examples: Mutex<HashMap<String, Vec<PersonaExample>>>,
     // 人格推断相关存储
     traits: Mutex<HashMap<i64, PersonalityTrait>>,
@@ -97,7 +96,6 @@ impl MockStorage {
             persona_seq: Mutex::new(0),
             privacy_consents: Mutex::new(Vec::new()),
             backend_config: Mutex::new(None),
-            index_version: Mutex::new(0),
             examples: Mutex::new(HashMap::new()),
             traits: Mutex::new(HashMap::new()),
             traits_by_persona: Mutex::new(HashMap::new()),

@@ -69,7 +69,6 @@ fn add_prev_session_with_utt(storage: &MockStorage) {
             .to_string(),
         msg_count: 2,
         time_span_ms: 60_000,
-        embedding: None,
         created_at: 1_700_000_000_000,
     });
 }

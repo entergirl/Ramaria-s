@@ -18,7 +18,7 @@ use ramaria_storage::repo::keyword as kw_repo;
 
 /// 打开与引擎同一库文件的连接池（造 pending 别名等测试数据用）。
 async fn open_pool(dir: &std::path::Path) -> sqlx::SqlitePool {
-    ramaria_storage::database::init_pool(Some(dir.join("assistant.db")))
+    ramaria_storage::database::init_pool(Some(dir.join("ramaria.db")))
         .await
         .expect("打开测试库连接池应成功")
 }

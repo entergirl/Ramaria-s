@@ -215,8 +215,6 @@ impl<'a> EventExtractor<'a> {
             motives,
             created_at: now,
             last_accessed_at: None,
-            indexed_at: None,
-            index_version: None,
         }
     }
 }

@@ -611,7 +611,6 @@ fn app_state_serde() {
     for state in [
         AppState::NeedsSetup,
         AppState::DownloadingModel,
-        AppState::Indexing,
         AppState::Ready,
         AppState::Degraded,
         AppState::FatalError,
@@ -713,6 +712,23 @@ fn is_social_channel_matches_qq_and_telegram_only() {
     assert!(!is_social_channel("mcp"));
     assert!(!is_social_channel(""));
     assert!(!is_social_channel("QQ"));
+}
+
+#[test]
+fn index_status_serde_uses_snake_case() {
+    let cases = [
+        (IndexStatus::Idle, "idle"),
+        (IndexStatus::Building, "building"),
+        (IndexStatus::Ready, "ready"),
+        (IndexStatus::Degraded, "degraded"),
+    ];
+    for (status, text) in cases {
+        assert_eq!(
+            serde_json::to_string(&status).unwrap(),
+            format!("\"{text}\"")
+        );
+        assert_eq!(status.as_str(), text);
+    }
 }
 
 #[test]

@@ -29,7 +29,7 @@ pub async fn list_events_by_salience(
     let rows = sqlx::query_as::<_, EventRow>(
         "SELECT id, persona_uid, title, summary, keywords, participants, start, \"end\",
          confidence, salience, valence, presentation, share, attitude, paraphrase,
-         absorbed, situation_strength, motives, created_at, last_accessed_at, indexed_at, index_version
+         absorbed, situation_strength, motives, created_at, last_accessed_at
          FROM memory_events WHERE persona_uid = ? AND \"end\" >= ? AND salience >= ?
          ORDER BY salience DESC, \"end\" DESC, id DESC LIMIT ?",
     )
@@ -62,7 +62,7 @@ pub async fn list_events_since(
     let rows = sqlx::query_as::<_, EventRow>(
         "SELECT id, persona_uid, title, summary, keywords, participants, start, \"end\",
          confidence, salience, valence, presentation, share, attitude, paraphrase,
-         absorbed, situation_strength, motives, created_at, last_accessed_at, indexed_at, index_version
+         absorbed, situation_strength, motives, created_at, last_accessed_at
          FROM memory_events WHERE persona_uid = ? AND \"end\" >= ?
          ORDER BY \"end\" DESC, id DESC LIMIT ?",
     )

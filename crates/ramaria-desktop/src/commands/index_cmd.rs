@@ -1,32 +1,47 @@
 //! crates/ramaria-desktop/src/commands/index_cmd.rs - 索引管理 Tauri Commands
 //!
 //! 设计特点:
-//! - rebuild_index: 触发检索索引全量重建（委托服务层索引用例）
-//! - 重建完成后索引立即生效（不受刷新间隔约束）
+//! - get_index_status: 读取索引状态视图（状态 / 进度 / 模型 / 失败原因）
+//! - rebuild_index: 触发后台重建并立即返回回执（不阻塞命令线程）
+//! - 构建进度经 `index-progress` 事件推送（引擎回调在 setup 中注册）
 
 use crate::DesktopState;
+use ramaria_service::types::{IndexRebuildReceipt, IndexStatusView};
 use tauri::State;
 
 // =========================================================
-// rebuild_index — 重建检索索引
+// get_index_status — 读取索引状态
 // =========================================================
 
-/// 触发全部检索索引（BM25 + 图谱）的全量重建。
+/// 读取当前索引状态视图。
 ///
 /// 返回:
-/// - 重建的文档数量
-///
-/// 说明:
-/// - 重建失败时旧索引保持可用、告警位置位并上抛错误
+/// - 状态 / 已加载与总数 / 百分比 / 模型标识 / 最近失败原因 / 更新时间
 #[tauri::command]
 #[tracing::instrument(skip(state))]
-pub async fn rebuild_index(state: State<'_, DesktopState>) -> Result<usize, String> {
-    let count = state
-        .engine
-        .rebuild_index()
-        .await
-        .map_err(|e| crate::commands::service_error_message(&e, "索引重建失败"))?;
+pub async fn get_index_status(state: State<'_, DesktopState>) -> Result<IndexStatusView, String> {
+    Ok(state.engine.index_status())
+}
 
-    tracing::info!(doc_count = count, "索引重建完成");
-    Ok(count)
+// =========================================================
+// rebuild_index — 触发后台重建
+// =========================================================
+
+/// 触发全部检索索引（BM25 + 图谱 + 向量）的后台重建。
+///
+/// 返回:
+/// - `started=true`: 本次已启动构建；
+/// - `started=false`: 已有构建在途，本次忽略
+///
+/// 说明:
+/// - 构建进度经 `index-progress` 事件推送；
+/// - 构建失败时旧索引保持可用，状态切到 `degraded` 并携带脱敏原因
+#[tauri::command]
+#[tracing::instrument(skip(state))]
+pub async fn rebuild_index(state: State<'_, DesktopState>) -> Result<IndexRebuildReceipt, String> {
+    let started = state.engine.start_index_build();
+    if started {
+        tracing::info!("索引后台重建已启动");
+    }
+    Ok(IndexRebuildReceipt { started })
 }

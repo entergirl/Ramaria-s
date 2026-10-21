@@ -60,6 +60,7 @@ pub mod keyword;
 pub mod l2_fingerprint;
 pub mod llm_response_cache;
 pub mod memory_l1;
+pub mod memory_vectors;
 pub mod messages;
 pub mod personas;
 pub mod privacy_consent;

@@ -1,16 +1,12 @@
 -- =========================================================
--- Ramaria 2.0 Schema —— 单基线合并（D-V20-002）
+-- Ramaria 数据库基线（单文件建表）
 --
 -- 说明:
--- - 由 v1.6 基线（20260815_v1.6_schema.sql）+ v1.7 增量
---   （20260901_v1.7_style_stats.sql，persona_style_stats）合并为
---   单一 2.0 初始化基线，替代此前两份迁移文件。
--- - 破坏性变更（无外部存量用户）：旧开发库无法在线增量升级，
---   需重建（备份 → 重建 → 重新导入 → 数量核对，见升级路径文档）。
--- - 所有最终列直接写入 CREATE TABLE 定义（不使用增量 ALTER/UPDATE）。
+-- - 新库首次执行即得最终 schema；全部使用 CREATE TABLE / CREATE INDEX，
+--   不使用 ALTER / DROP，所有最终列直接写入建表定义。
 -- - 时间字段统一 INTEGER（Unix 毫秒）。
--- - 全部使用 CREATE TABLE / CREATE INDEX（另含 schema_meta 的 2 条版本键 INSERT OR IGNORE）；
---   空库首次执行即得最终 schema。
+-- - 显式索引 44 个（含两个部分唯一索引）；外键由连接池 PRAGMA foreign_keys 生效。
+-- - 末尾写入 schema 版本键；创建索引的语句紧随所属表，便于对账。
 -- =========================================================
 
 -- =========================================================
@@ -22,9 +18,39 @@ CREATE TABLE schema_meta (
     value TEXT NOT NULL
 );
 
--- 默认 schema 版本 1，索引版本 1
-INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('schema_version', '1');
-INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('index_version', '1');
+CREATE TABLE settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE backend_config (
+    id   INTEGER PRIMARY KEY CHECK (id = 1),
+    data TEXT NOT NULL
+);
+
+CREATE TABLE privacy_consent (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider   TEXT NOT NULL,
+    base_url   TEXT NOT NULL,
+    timestamp  INTEGER NOT NULL,
+    persistent INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_privacy_consent_provider_url ON privacy_consent(provider, base_url);
+
+CREATE TABLE background_jobs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_type    TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'pending',
+    payload     TEXT,
+    created_at  INTEGER NOT NULL,
+    finished_at INTEGER,
+    error       TEXT
+);
+
+-- =========================================================
+-- 身份与会话
+-- =========================================================
 
 CREATE TABLE personas (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -45,25 +71,59 @@ CREATE UNIQUE INDEX idx_personas_kind_source_ref
     ON personas(kind, source, ref_id) WHERE ref_id IS NOT NULL;
 
 CREATE TABLE sessions (
-    id          TEXT PRIMARY KEY,        -- UUID v4
-    started_at  INTEGER NOT NULL,
-    ended_at    INTEGER,
-    persona_uid TEXT                     -- Session 当前绑定对话人格
+    id           TEXT PRIMARY KEY,        -- UUID v4
+    started_at   INTEGER NOT NULL,
+    ended_at     INTEGER,
+    persona_uid  TEXT,                    -- Session 当前绑定对话人格
+    channel      TEXT NOT NULL DEFAULT 'local',  -- local / mcp / qq / telegram
+    external_ref TEXT,                    -- 外部会话标识（按 channel 解释）
+    last_read_at INTEGER NOT NULL DEFAULT 0  -- 最近标记已读时间；0 = 从未标记
+);
+CREATE INDEX idx_sessions_channel_external_ref
+    ON sessions (channel, external_ref);
+
+CREATE TABLE session_members (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id     TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    platform_ref   TEXT NOT NULL,
+    name           TEXT NOT NULL DEFAULT '',
+    group_nickname TEXT,
+    role           TEXT,
+    first_seen_at  INTEGER NOT NULL DEFAULT 0,
+    last_seen_at   INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(session_id, platform_ref)
+);
+
+CREATE TABLE channel_bindings (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel         TEXT NOT NULL,
+    external_ref    TEXT NOT NULL,
+    persona_uid     TEXT,
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    allow_proactive INTEGER NOT NULL DEFAULT 0,
+    created_at      INTEGER NOT NULL DEFAULT 0,
+    updated_at      INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(channel, external_ref)
 );
 
 -- =========================================================
--- L0 层 — messages + utt_blocks（FK→sessions, personas）
+-- L0 层 — messages + utt_blocks + 附件
 -- =========================================================
 
 CREATE TABLE messages (
-    id                 TEXT PRIMARY KEY,  -- UUID v4
-    session_id         TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    role               TEXT NOT NULL,
-    content            TEXT NOT NULL,
-    created_at         INTEGER NOT NULL,
-    source             TEXT NOT NULL,
-    import_fingerprint TEXT UNIQUE,  -- 跨文件导入去重：同指纹不可重复入库
-    persona_uid        TEXT REFERENCES personas(uid)
+    id                  TEXT PRIMARY KEY,  -- UUID v4
+    session_id          TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    role                TEXT NOT NULL,
+    content             TEXT NOT NULL,
+    created_at          INTEGER NOT NULL,
+    source              TEXT NOT NULL,
+    import_fingerprint  TEXT UNIQUE,  -- 跨文件导入去重：同指纹不可重复入库
+    persona_uid         TEXT REFERENCES personas(uid),
+    is_proactive        INTEGER NOT NULL DEFAULT 0,  -- 1 = 主动生成消息
+    sender_ref          TEXT,                -- 外部平台 ID；本地消息为 NULL
+    sender_name         TEXT,                -- 发送时显示名；本地消息为 NULL
+    platform_message_id TEXT,                -- 平台消息 ID；(session_id, 平台 ID) 部分唯一
+    recalled_at         INTEGER              -- 撤回时刻；NULL = 未撤回
 );
 CREATE INDEX idx_messages_session ON messages(session_id);
 CREATE INDEX idx_messages_created_at ON messages(created_at);
@@ -71,53 +131,77 @@ CREATE INDEX idx_messages_persona ON messages(persona_uid);
 -- 列表查询复合索引（过滤列 + 排序列成对，避免每次查询建临时 B-tree）
 CREATE INDEX idx_messages_session_created ON messages(session_id, created_at);
 CREATE INDEX idx_messages_persona_created ON messages(persona_uid, created_at);
+CREATE INDEX idx_messages_sender_ref ON messages(sender_ref);
+CREATE UNIQUE INDEX idx_messages_platform_message_id
+    ON messages(session_id, platform_message_id) WHERE platform_message_id IS NOT NULL;
 
 CREATE TABLE utt_blocks (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    persona_uid   TEXT NOT NULL REFERENCES personas(uid),
-    session_id    TEXT NOT NULL REFERENCES sessions(id),
-    start_msg_id  TEXT NOT NULL REFERENCES messages(id),
-    end_msg_id    TEXT NOT NULL REFERENCES messages(id),
-    block_text    TEXT NOT NULL,
-    msg_count     INTEGER NOT NULL,
-    time_span_ms  INTEGER NOT NULL,
-    embedding     BLOB,
-    created_at    INTEGER NOT NULL
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    persona_uid  TEXT NOT NULL REFERENCES personas(uid),
+    session_id   TEXT NOT NULL REFERENCES sessions(id),
+    start_msg_id TEXT NOT NULL REFERENCES messages(id),
+    end_msg_id   TEXT NOT NULL REFERENCES messages(id),
+    block_text   TEXT NOT NULL,
+    msg_count    INTEGER NOT NULL,
+    time_span_ms INTEGER NOT NULL,
+    created_at   INTEGER NOT NULL
 );
 CREATE INDEX idx_utt_blocks_persona ON utt_blocks(persona_uid);
 CREATE INDEX idx_utt_blocks_session ON utt_blocks(session_id);
 CREATE INDEX idx_utt_blocks_created_at ON utt_blocks(created_at);
 CREATE INDEX idx_utt_blocks_session_created ON utt_blocks(session_id, created_at);
 
+CREATE TABLE message_attachments (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id        TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    kind              TEXT NOT NULL,            -- image / audio / video / file
+    source_ref        TEXT NOT NULL DEFAULT '', -- 导出根相对路径或 URL 引用
+    md5               TEXT,                     -- 图片内容 md5（小写 hex）
+    size              INTEGER,
+    width             INTEGER,
+    height            INTEGER,
+    sub_type          TEXT,                     -- 平台细分类型（photo / sticker）
+    status            TEXT NOT NULL DEFAULT 'pending',  -- pending / done / failed / skipped
+    description       TEXT,                     -- 理解结果文本；仅 done 有值
+    description_model TEXT,                     -- 产生描述的模型标识
+    created_at        INTEGER NOT NULL DEFAULT 0,
+    updated_at        INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_attachments_message_id ON message_attachments(message_id);
+CREATE INDEX idx_attachments_status ON message_attachments(status);
+CREATE INDEX idx_attachments_md5 ON message_attachments(md5);
+
 -- =========================================================
 -- L1 层 — memory_l1 会话摘要
 -- =========================================================
 
 CREATE TABLE memory_l1 (
-    id               TEXT PRIMARY KEY,     -- UUID v4
-    session_id       TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    summary          TEXT NOT NULL,
-    keywords         TEXT,
-    time_period      TEXT,
-    atmosphere       TEXT,
-    valence          REAL NOT NULL DEFAULT 0.0,
-    salience         REAL NOT NULL DEFAULT 0.5,
-    absorbed         INTEGER NOT NULL DEFAULT 0,   -- 0=未吸收, 1=已吸收
-    created_at       INTEGER NOT NULL,
-    last_accessed_at INTEGER,
-    persona_uid      TEXT REFERENCES personas(uid),
-    context_json     TEXT,
+    id                 TEXT PRIMARY KEY,     -- UUID v4
+    session_id         TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    summary            TEXT NOT NULL,
+    keywords           TEXT,
+    time_period        TEXT,
+    atmosphere         TEXT,
+    valence            REAL NOT NULL DEFAULT 0.0,
+    salience           REAL NOT NULL DEFAULT 0.5,
+    absorbed           INTEGER NOT NULL DEFAULT 0,   -- 0=未吸收, 1=已吸收
+    created_at         INTEGER NOT NULL,
+    last_accessed_at   INTEGER,
+    persona_uid        TEXT REFERENCES personas(uid),
+    context_json       TEXT,
     situation_strength INTEGER,             -- 情境强度 1-5（NULL 等效 3 中性）
-    evidence_notes   TEXT,                   -- 结构化对象数组 [{text,time?,who?,cause?}]
-    continuation     TEXT                    -- 与上一对话块的延续/转折/无关枚举
+    evidence_notes     TEXT,                -- 结构化对象数组 [{text,time?,who?,cause?}]
+    continuation       TEXT,                -- 与上一对话块的延续/转折/无关枚举
+    occurred_at        INTEGER              -- 块内最早消息时间；读取侧回退 created_at
 );
 CREATE INDEX idx_memory_l1_session ON memory_l1(session_id);
 CREATE INDEX idx_memory_l1_absorbed ON memory_l1(absorbed);
 CREATE INDEX idx_memory_l1_persona ON memory_l1(persona_uid);
 CREATE INDEX idx_memory_l1_persona_created ON memory_l1(persona_uid, created_at);
+CREATE INDEX idx_memory_l1_persona_occurred ON memory_l1(persona_uid, occurred_at);
 
 -- =========================================================
--- L2 层 — memory_events（事件层核心，FK→personas）
+-- L2 层 — memory_events 事件层核心
 -- =========================================================
 
 CREATE TABLE memory_events (
@@ -139,8 +223,6 @@ CREATE TABLE memory_events (
     absorbed           INTEGER NOT NULL DEFAULT 0,
     created_at         INTEGER NOT NULL,
     last_accessed_at   INTEGER,
-    indexed_at         INTEGER,
-    index_version      INTEGER,
     situation_strength INTEGER,             -- 情境强度 1-5
     motives            TEXT                 -- 底层动机标注（JSON 数组字符串）
 );
@@ -168,28 +250,27 @@ CREATE TABLE event_sources (
 );
 
 -- =========================================================
--- L2 层 — persona_facts 事实库（v1.6 版本化直建）
+-- L3 层 — 事实库与性格画像
 -- =========================================================
--- 字段约定:
--- - tier: 稳定 stable / 动态 volatile / 历史 historical（分层更新策略）。
+-- persona_facts 字段约定:
+-- - tier: stable / volatile / historical（分层更新策略）。
 -- - status: active（当前检索用）/ superseded（已被覆盖，沿 version_of 链可追）/ candidate（待互证提升）。
 -- - version_of: 覆盖时新事实指向被替换事实 id；由旧事实经 supersede 置 superseded。
 -- - confidence: 0.0..1.0；主观隐含事实初始 0.5 入 candidate 轨道。
 -- - 检索与注入只取 status = 'active'。
--- - 唯一性: 当前不加 (persona_uid, field) WHERE status='active' 的部分唯一索引——
---   低置信互证提升路径会新增同 field 的 active（同 field 多 active 并存口径待定）；
+-- - 唯一性: 当前不加 (persona_uid, field) WHERE status='active' 的部分唯一索引；
 --   版本链并发分叉由 save_with_version 的 status='active' 守卫阻断。
 
 CREATE TABLE persona_facts (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    persona_uid TEXT NOT NULL REFERENCES personas(uid),
-    field       TEXT NOT NULL,        -- ProfileField 值
-    content     TEXT NOT NULL,
-    source      TEXT NOT NULL,        -- event / manual / l1
-    tier        TEXT NOT NULL DEFAULT 'stable',  -- stable / volatile / historical
-    status      TEXT NOT NULL DEFAULT 'active',  -- active / superseded / candidate
-    version_of  INTEGER REFERENCES persona_facts(id),  -- 覆盖时指向被替换事实 id
-    confidence  REAL NOT NULL DEFAULT 0.0,
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    persona_uid  TEXT NOT NULL REFERENCES personas(uid),
+    field        TEXT NOT NULL,        -- ProfileField 值
+    content      TEXT NOT NULL,
+    source       TEXT NOT NULL,        -- event / manual / l1
+    tier         TEXT NOT NULL DEFAULT 'stable',  -- stable / volatile / historical
+    status       TEXT NOT NULL DEFAULT 'active',  -- active / superseded / candidate
+    version_of   INTEGER REFERENCES persona_facts(id),  -- 覆盖时指向被替换事实 id
+    confidence   REAL NOT NULL DEFAULT 0.0,
     keyword_hint TEXT,                -- 逗号分隔事实关键词（判重交集 & 判定器检索）
     ref_event_id INTEGER REFERENCES memory_events(id),
     ref_l1_id    TEXT REFERENCES memory_l1(id),
@@ -198,10 +279,6 @@ CREATE TABLE persona_facts (
 );
 CREATE INDEX idx_persona_facts_uid_field ON persona_facts(persona_uid, field, status);
 CREATE INDEX idx_persona_facts_uid_status ON persona_facts(persona_uid, status);
-
--- =========================================================
--- L3 层 — 性格画像（FK→personas, memory_events, memory_l1）
--- =========================================================
 
 CREATE TABLE personality_traits (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -289,115 +366,7 @@ CREATE TABLE persona_style_stats (
 CREATE INDEX idx_style_stats_status ON persona_style_stats(status);
 
 -- =========================================================
--- 基础设施层 — 关键词 / BM25 / 图谱
--- =========================================================
-
-CREATE TABLE keyword_pool (
-    keyword      TEXT PRIMARY KEY,
-    use_count    INTEGER NOT NULL DEFAULT 0,
-    last_used_at INTEGER,
-    created_at   INTEGER NOT NULL,
-    canonical_id INTEGER,           -- 指向规范词条目的隐式 rowid；禁止对 keyword_pool 执行 VACUUM（会重排 rowid）
-    alias_status TEXT    -- confirmed / pending / canonical
-);
-CREATE INDEX idx_keyword_alias ON keyword_pool(alias_status);
-
-CREATE TABLE keyword_refs (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    keyword_id  TEXT    NOT NULL REFERENCES keyword_pool(keyword) ON DELETE CASCADE,
-    doc_type    TEXT    NOT NULL,   -- 'l1' / 'l2'
-    doc_id      TEXT    NOT NULL,   -- L1: UUID字符串, L2: i64字符串
-    persona_uid TEXT    NOT NULL,
-    weight      REAL    NOT NULL DEFAULT 1.0,
-    created_at  INTEGER NOT NULL
-);
-CREATE INDEX idx_keyword_refs_keyword ON keyword_refs(keyword_id);
-CREATE INDEX idx_keyword_refs_doc ON keyword_refs(doc_type, doc_id);
-
-CREATE TABLE bm25_index (
-    doc_id     INTEGER NOT NULL,
-    layer      TEXT NOT NULL,       -- l0 / l1 / event
-    tokens_json TEXT NOT NULL,
-    PRIMARY KEY (doc_id, layer)
-);
-
--- =========================================================
--- 基础设施层 — 隐私 / 后端配置 / 后台任务
--- =========================================================
-
-CREATE TABLE privacy_consent (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    provider   TEXT NOT NULL,
-    base_url   TEXT NOT NULL,
-    timestamp  INTEGER NOT NULL,
-    persistent INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX idx_privacy_consent_provider_url ON privacy_consent(provider, base_url);
-
-CREATE TABLE backend_config (
-    id   INTEGER PRIMARY KEY CHECK (id = 1),
-    data TEXT NOT NULL
-);
-
-CREATE TABLE background_jobs (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    job_type    TEXT NOT NULL,
-    status      TEXT NOT NULL DEFAULT 'pending',
-    payload     TEXT,
-    created_at  INTEGER NOT NULL,
-    started_at  INTEGER,
-    finished_at INTEGER,
-    error       TEXT,
-    retry_count INTEGER NOT NULL DEFAULT 0,
-    max_retries INTEGER NOT NULL DEFAULT 3
-);
-
--- =========================================================
--- 基础设施层 — 推送 / 设置
--- =========================================================
-
--- 预留表：当前无仓储实现与调用方（推送能力未接线）
-CREATE TABLE pending_push (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    content    TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    status     TEXT NOT NULL DEFAULT 'pending',
-    sent_at    INTEGER
-);
-CREATE INDEX idx_pending_push_status ON pending_push(status);
-
-CREATE TABLE settings (
-    key        TEXT PRIMARY KEY,
-    value      TEXT NOT NULL,
-    updated_at INTEGER NOT NULL
-);
-
--- =========================================================
--- 三层生成缓存（C）/ L2 去重指纹
--- =========================================================
-
-CREATE TABLE llm_response_cache (
-    key              TEXT PRIMARY KEY,   -- sha256(model_id + template_version + prompt)
-    response         TEXT NOT NULL,       -- 只存响应，不存 prompt 原文
-    model_id         TEXT NOT NULL,
-    template_version TEXT NOT NULL,
-    created_at       INTEGER NOT NULL,
-    last_accessed_at INTEGER NOT NULL,
-    hit_count        INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX idx_llm_response_cache_accessed ON llm_response_cache(last_accessed_at);
-CREATE INDEX idx_llm_response_cache_created ON llm_response_cache(created_at);
-
-CREATE TABLE l2_cluster_fingerprints (
-    persona_uid TEXT NOT NULL,
-    fingerprint TEXT NOT NULL,   -- SHA-256 hex
-    created_at  INTEGER NOT NULL,
-    PRIMARY KEY (persona_uid, fingerprint)
-);
-CREATE INDEX idx_l2_cluster_fingerprints_created ON l2_cluster_fingerprints(created_at);
-
--- =========================================================
--- 行为层规则 + 反馈日志
+-- 行为层 — 规则 + 反馈日志
 -- =========================================================
 
 CREATE TABLE behavior_rules (
@@ -430,3 +399,81 @@ CREATE TABLE feedback_log (
 );
 CREATE INDEX idx_feedback_log_persona ON feedback_log(persona_uid);
 CREATE INDEX idx_feedback_log_target ON feedback_log(target_type, target_id);
+
+-- =========================================================
+-- 检索基础设施 — 关键词词池 / 生成缓存 / L2 去重指纹
+-- =========================================================
+-- keyword_pool.canonical_id 指向规范词条目的隐式 rowid；
+-- 禁止对 keyword_pool 执行 VACUUM（会重排 rowid）。
+
+CREATE TABLE keyword_pool (
+    keyword      TEXT PRIMARY KEY,
+    use_count    INTEGER NOT NULL DEFAULT 0,
+    last_used_at INTEGER,
+    created_at   INTEGER NOT NULL,
+    canonical_id INTEGER,
+    alias_status TEXT    -- confirmed / pending / canonical
+);
+CREATE INDEX idx_keyword_alias ON keyword_pool(alias_status);
+
+CREATE TABLE llm_response_cache (
+    key              TEXT PRIMARY KEY,   -- sha256(model_id + template_version + prompt)
+    response         TEXT NOT NULL,      -- 只存响应，不存 prompt 原文
+    model_id         TEXT NOT NULL,
+    template_version TEXT NOT NULL,
+    created_at       INTEGER NOT NULL,
+    last_accessed_at INTEGER NOT NULL,
+    hit_count        INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_llm_response_cache_accessed ON llm_response_cache(last_accessed_at);
+CREATE INDEX idx_llm_response_cache_created ON llm_response_cache(created_at);
+
+CREATE TABLE l2_cluster_fingerprints (
+    persona_uid TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,   -- SHA-256 hex
+    PRIMARY KEY (persona_uid, fingerprint)
+);
+
+-- =========================================================
+-- 资产 — 聊天平台表情图片
+-- =========================================================
+
+CREATE TABLE sticker_assets (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_name   TEXT NOT NULL,
+    file_path   TEXT NOT NULL,             -- 资产目录内的文件名（不含目录前缀）
+    md5         TEXT,
+    size        INTEGER,
+    description TEXT,
+    tags        TEXT NOT NULL DEFAULT '[]',  -- 标签 JSON 数组
+    created_at  INTEGER NOT NULL DEFAULT 0,
+    updated_at  INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_sticker_assets_md5 ON sticker_assets(md5);
+
+-- =========================================================
+-- 向量 — 记忆记忆体的向量持久化（多态 doc_id，无外键）
+-- =========================================================
+-- 字段约定:
+-- - doc_type: l1 / l2 / utt。
+-- - doc_id: l1 为 UUID 字符串；l2 / utt 为自增 id 的十进制串。
+-- - model: 模型指纹 model_id@dim#size（size = 单行向量字节数 dim×4），加载时校验 BLOB 长度。
+-- - vector: f32 小端字节序列。
+-- - 主键 (doc_type, doc_id)：单行单模型，换模型覆盖写。
+
+CREATE TABLE memory_vectors (
+    doc_type   TEXT    NOT NULL,
+    doc_id     TEXT    NOT NULL,
+    model      TEXT    NOT NULL,
+    dim        INTEGER NOT NULL,
+    vector     BLOB    NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (doc_type, doc_id)
+);
+CREATE INDEX idx_memory_vectors_model ON memory_vectors(model, doc_type);
+
+-- =========================================================
+-- schema 版本键
+-- =========================================================
+
+INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', '3');

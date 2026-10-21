@@ -94,7 +94,6 @@ async fn bridge_injected_into_new_session_prompt_from_utt_block() {
             .to_string(),
         msg_count: 2,
         time_span_ms: 60_000,
-        embedding: None,
         created_at: 1_700_000_000_000,
     });
 
@@ -184,7 +183,6 @@ async fn bridge_not_injected_for_rama_persona() {
         block_text: "[2026-08-01 20:00] rama: 你好".to_string(),
         msg_count: 1,
         time_span_ms: 0,
-        embedding: None,
         created_at: 1_700_000_000_000,
     });
 
@@ -226,7 +224,6 @@ async fn bridge_disabled_skips_injection() {
         block_text: "[2026-08-01 20:00] 小夏: 上次的内容".to_string(),
         msg_count: 1,
         time_span_ms: 0,
-        embedding: None,
         created_at: 1_700_000_000_000,
     });
 

@@ -64,42 +64,17 @@ async fn spawn_mock_health_server() -> String {
     format!("http://127.0.0.1:{}/v1", addr.port())
 }
 
-/// 缺项诊断：空库缺后端 / 模型 / 索引 / 嵌入四项；显式置索引版本为已构建后去掉索引项；
-/// 本地 / 线上 provider 的模型选择口径不同。
+/// 缺项诊断：空库缺后端 / 模型 / 嵌入三项；本地 / 线上 provider 的模型选择口径不同。
 #[tokio::test]
 async fn check_reports_missing_items_on_empty_db() {
     let (engine, storage, dir) = engine_with_db("setup-empty").await;
 
-    // 空库 migration 后索引版本为 0（未构建）：缺后端 / 模型 / 索引 / 嵌入四项
+    // 空库：缺后端 / 模型 / 嵌入三项（索引状态不参与缺项判定）
     let status = engine.check_setup_status().await.expect("诊断应成功");
     assert!(!status.backend_configured);
     assert!(!status.model_selected);
-    assert!(
-        status.needs_indexing,
-        "新库迁移后索引版本为 0，空库按未构建口径"
-    );
     assert!(!status.embedding_available);
     assert!(!status.is_complete());
-    assert_eq!(
-        status.missing_items().len(),
-        4,
-        "缺后端 / 模型 / 索引 / 嵌入"
-    );
-    assert!(
-        status
-            .missing_items()
-            .iter()
-            .any(|item| item.contains("索引")),
-        "缺项应包含索引项"
-    );
-
-    // 显式标记索引已构建：缺项清单去掉索引项
-    storage
-        .set_index_version(1)
-        .await
-        .expect("写入索引版本应成功");
-    let status = engine.check_setup_status().await.expect("诊断应成功");
-    assert!(!status.needs_indexing);
     assert_eq!(status.missing_items().len(), 3, "缺后端 / 模型 / 嵌入");
 
     // 本地 provider：模型选择视为完成
@@ -130,7 +105,7 @@ async fn check_reports_missing_items_on_empty_db() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// 状态判定：各组合逐一对应 NeedsSetup / Indexing / Degraded / Ready。
+/// 状态判定：各组合逐一对应 NeedsSetup / Degraded / Ready。
 #[test]
 fn determine_state_cases() {
     let cases = [
@@ -138,7 +113,6 @@ fn determine_state_cases() {
             SetupStatus {
                 backend_configured: false,
                 model_selected: false,
-                needs_indexing: false,
                 embedding_available: false,
             },
             AppState::NeedsSetup,
@@ -147,7 +121,6 @@ fn determine_state_cases() {
             SetupStatus {
                 backend_configured: true,
                 model_selected: false,
-                needs_indexing: false,
                 embedding_available: true,
             },
             AppState::NeedsSetup,
@@ -156,16 +129,6 @@ fn determine_state_cases() {
             SetupStatus {
                 backend_configured: true,
                 model_selected: true,
-                needs_indexing: true,
-                embedding_available: true,
-            },
-            AppState::Indexing,
-        ),
-        (
-            SetupStatus {
-                backend_configured: true,
-                model_selected: true,
-                needs_indexing: false,
                 embedding_available: false,
             },
             AppState::Degraded,
@@ -174,7 +137,6 @@ fn determine_state_cases() {
             SetupStatus {
                 backend_configured: true,
                 model_selected: true,
-                needs_indexing: false,
                 embedding_available: true,
             },
             AppState::Ready,
@@ -258,21 +220,7 @@ async fn advance_state_follows_probe_and_diagnostics() {
     );
     assert_eq!(engine.current_state(), AppState::Degraded);
 
-    // 探测通过 + 索引待构建 → Indexing
-    storage
-        .set_index_version(0)
-        .await
-        .expect("写入索引版本应成功");
-    assert_eq!(
-        advance_state(&engine, true).await.expect("推进应成功"),
-        AppState::Indexing
-    );
-
-    // 探测通过 + 索引已构建 + 嵌入不可用 → Degraded
-    storage
-        .set_index_version(1)
-        .await
-        .expect("写入索引版本应成功");
+    // 探测通过 + 嵌入不可用 → Degraded
     assert_eq!(
         advance_state(&engine, true).await.expect("推进应成功"),
         AppState::Degraded
@@ -345,10 +293,6 @@ async fn run_setup_reaches_ready_when_embedding_available() {
         .save_backend_config(&BackendConfig::lm_studio_default())
         .await
         .expect("保存后端配置应成功");
-    storage
-        .set_index_version(1)
-        .await
-        .expect("写入索引版本应成功");
 
     let state = engine
         .run_setup(&local_request(&health_url))
@@ -380,10 +324,6 @@ async fn run_setup_stays_degraded_without_embedding() {
         .save_backend_config(&BackendConfig::lm_studio_default())
         .await
         .expect("保存后端配置应成功");
-    storage
-        .set_index_version(1)
-        .await
-        .expect("写入索引版本应成功");
 
     let state = engine
         .run_setup(&local_request(&health_url))
@@ -422,30 +362,16 @@ async fn run_setup_rejects_online_provider_without_key() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// 刷新状态：索引版本推进与嵌入可用性共同决定 Ready / Degraded。
+/// 刷新状态：嵌入可用性决定 Ready / Degraded。
 #[tokio::test]
-async fn refresh_state_follows_index_and_embedding() {
+async fn refresh_state_follows_embedding() {
     let (engine, storage, dir) = engine_with_db("setup-refresh").await;
     storage
         .save_backend_config(&BackendConfig::lm_studio_default())
         .await
         .expect("保存后端配置应成功");
 
-    // 索引待构建 → Indexing
-    storage
-        .set_index_version(0)
-        .await
-        .expect("写入索引版本应成功");
-    assert_eq!(
-        engine.refresh_setup_state().await.expect("刷新应成功"),
-        AppState::Indexing
-    );
-
-    // 索引已构建 + 嵌入不可用 → Degraded
-    storage
-        .set_index_version(1)
-        .await
-        .expect("写入索引版本应成功");
+    // 嵌入不可用 → Degraded
     assert_eq!(
         engine.refresh_setup_state().await.expect("刷新应成功"),
         AppState::Degraded
@@ -458,7 +384,7 @@ async fn refresh_state_follows_index_and_embedding() {
         Some(crate::types::DegradedReason::EmbeddingMissing)
     );
 
-    // 索引已构建 + 嵌入可用 → Ready
+    // 嵌入可用 → Ready
     let embedding: Arc<dyn EmbeddingProvider> = Arc::new(DeterministicEmbedding::new());
     engine.update_embedding(Some(embedding));
     assert_eq!(
@@ -496,13 +422,9 @@ async fn probe_health_retries_until_success() {
     assert!(probe_health_with_retry(&llm, 0, 0).await);
 }
 
-/// 缺索引版本的空库：判定未构建 → 一次重建写回版本（幂等）→ 刷新后推进到 Ready。
-///
-/// 说明:
-/// - 构造"缺键"库（删除 migration 预置的索引版本键），模拟从未写过索引版本的老库；
-/// - 重建连续执行两次验证幂等；收敛后按嵌入可用性判定状态（本用例嵌入可用 → Ready）。
+/// 空库重建：连续重建幂等，且状态不因索引构建改变。
 #[tokio::test]
-async fn missing_index_version_converges_after_rebuild() {
+async fn rebuild_index_is_idempotent_and_keeps_state() {
     let embedding: Arc<dyn EmbeddingProvider> = Arc::new(DeterministicEmbedding::new());
     let (engine, storage, dir) = engine_with_llm_config_and_embedding(
         "setup-missing-version",
@@ -516,36 +438,15 @@ async fn missing_index_version_converges_after_rebuild() {
         .await
         .expect("保存后端配置应成功");
 
-    // 删除 migration 预置的索引版本键：构造"缺键"库
-    let pool = engine.sqlite_pool().expect("测试库应附着连接池");
-    sqlx::query("DELETE FROM schema_meta WHERE key = 'index_version'")
-        .execute(&pool)
-        .await
-        .expect("删除索引版本键应成功");
+    let state = engine.refresh_setup_state().await.expect("刷新应成功");
+    assert_eq!(state, AppState::Ready);
 
-    // 缺键 → 判定未构建 → Indexing
-    let status = engine.check_setup_status().await.expect("诊断应成功");
-    assert!(status.needs_indexing, "缺键应判定为未构建");
-    assert_eq!(
-        engine.refresh_setup_state().await.expect("刷新应成功"),
-        AppState::Indexing
-    );
-
-    // 一次重建（幂等：连续两次）→ 版本写回 1 → 状态推进到 Ready
     engine.rebuild_index().await.expect("重建应成功");
     engine.rebuild_index().await.expect("重复重建应成功");
     assert_eq!(
-        storage
-            .get_index_version()
-            .await
-            .expect("读取索引版本应成功"),
-        1,
-        "重建完成后应写回索引版本 1"
-    );
-    assert_eq!(
-        engine.refresh_setup_state().await.expect("刷新应成功"),
+        engine.current_state(),
         AppState::Ready,
-        "重建 + 刷新后应推进到 Ready"
+        "索引重建不应改变应用状态"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

@@ -34,7 +34,7 @@ fn temp_dir(tag: &str) -> PathBuf {
 #[tokio::test]
 async fn open_without_config_uses_defaults_and_degrades_embedding() {
     let dir = temp_dir("defaults");
-    let db_path = dir.join("assistant.db");
+    let db_path = dir.join("ramaria.db");
 
     let engine = Engine::open(db_path.clone()).await.expect("引擎装配应成功");
 
@@ -65,7 +65,7 @@ async fn open_without_config_uses_defaults_and_degrades_embedding() {
 #[tokio::test]
 async fn probe_handles_expose_empty_state_after_assembly() {
     let dir = temp_dir("probe-handles");
-    let db_path = dir.join("assistant.db");
+    let db_path = dir.join("ramaria.db");
     let engine = Engine::open(db_path).await.expect("引擎装配应成功");
 
     let retriever = engine.retriever_slot();
@@ -86,7 +86,7 @@ async fn probe_handles_expose_empty_state_after_assembly() {
 #[tokio::test]
 async fn open_reads_config_toml_readonly() {
     let dir = temp_dir("config");
-    let db_path = dir.join("assistant.db");
+    let db_path = dir.join("ramaria.db");
     std::fs::write(
         dir.join("config.toml"),
         "[session]\nl1_idle_minutes = 25\n\n[utt]\ntheta_gap_minutes = 45\n",
@@ -121,7 +121,7 @@ async fn open_reads_config_toml_readonly() {
 #[tokio::test]
 async fn open_with_broken_config_reports_warning_then_clears_after_save() {
     let dir = temp_dir("config-broken");
-    let db_path = dir.join("assistant.db");
+    let db_path = dir.join("ramaria.db");
     let config_path = dir.join("config.toml");
     std::fs::write(&config_path, "[session\nl1_idle_minutes = ").expect("写入非法配置应成功");
 
@@ -157,7 +157,7 @@ async fn open_with_broken_config_reports_warning_then_clears_after_save() {
 #[tokio::test]
 async fn save_config_updates_in_memory_snapshot() {
     let dir = temp_dir("config-save");
-    let db_path = dir.join("assistant.db");
+    let db_path = dir.join("ramaria.db");
     let config_path = dir.join("config.toml");
     let engine =
         Engine::open_with(EngineOptions::new(db_path).with_config_path(config_path.clone()))
@@ -198,7 +198,7 @@ async fn save_config_updates_in_memory_snapshot() {
 #[tokio::test]
 async fn reload_config_reads_file_and_writes_db() {
     let dir = temp_dir("config-reload");
-    let db_path = dir.join("assistant.db");
+    let db_path = dir.join("ramaria.db");
     let config_path = dir.join("config.toml");
     std::fs::write(&config_path, "[utt]\ntheta_gap_minutes = 30\n").expect("写入配置应成功");
 
@@ -282,7 +282,7 @@ async fn config_writer_requires_config_path() {
 #[tokio::test]
 async fn open_uses_saved_backend_config() {
     let dir = temp_dir("backend");
-    let db_path = dir.join("assistant.db");
+    let db_path = dir.join("ramaria.db");
 
     // 预写 DB：LM Studio 自定义 base_url（与默认不同，用于断言读取生效）
     let pool = ramaria_storage::database::init_pool(Some(db_path.clone()))
@@ -313,7 +313,7 @@ async fn open_uses_saved_backend_config() {
 #[tokio::test]
 async fn use_cases_are_reachable_on_empty_db() {
     let dir = temp_dir("usecases");
-    let db_path = dir.join("assistant.db");
+    let db_path = dir.join("ramaria.db");
     let engine = Engine::open(db_path).await.expect("引擎装配应成功");
 
     // 召回：空库 → 空结果（不报错），且进入概览模式（无 query / messages）
@@ -369,7 +369,7 @@ async fn use_cases_are_reachable_on_empty_db() {
 #[tokio::test]
 async fn index_rebuild_cooldown_follows_config_interval() {
     let dir = temp_dir("cooldown");
-    let db_path = dir.join("assistant.db");
+    let db_path = dir.join("ramaria.db");
     let pool = ramaria_storage::database::init_pool(Some(db_path))
         .await
         .expect("初始化测试库应成功");
@@ -418,7 +418,7 @@ async fn index_rebuild_cooldown_follows_config_interval() {
 #[tokio::test]
 async fn from_parts_constructs_without_io() {
     let dir = temp_dir("parts");
-    let db_path = dir.join("assistant.db");
+    let db_path = dir.join("ramaria.db");
     let pool = ramaria_storage::database::init_pool(Some(db_path))
         .await
         .expect("初始化测试库应成功");
@@ -450,7 +450,7 @@ async fn from_parts_constructs_without_io() {
 #[tokio::test]
 async fn attach_sqlite_pool_roundtrip() {
     let dir = temp_dir("pool-attach");
-    let db_path = dir.join("assistant.db");
+    let db_path = dir.join("ramaria.db");
     let pool = ramaria_storage::database::init_pool(Some(db_path.clone()))
         .await
         .expect("初始化测试库应成功");

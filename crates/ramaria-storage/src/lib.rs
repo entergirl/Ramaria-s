@@ -1,7 +1,7 @@
 //! crates/ramaria-storage/src/lib.rs - Ramaria SQLite 存储层
 //!
 //! 设计特点:
-//! - 存储层入口：装配 `SqliteStorage`（`StoreCrud` + `StoreInfrastructure` = `StorageBackend`，对应 schema 27 张表；`pending_push` 预留未接线）与 `SqliteLlmCache`
+//! - 存储层入口：装配 `SqliteStorage`（`StoreCrud` + `StoreInfrastructure` = `StorageBackend`，对应 schema 29 张表）与 `SqliteLlmCache`
 //! - Repository 模式：每个子模块负责一类实体的 SQL 操作与行映射
 //! - 所有可恢复错误统一转换为 RamariaError::Storage
 //! - 手动行映射避免 sqlx derive 侵入 core 层，保持零 I/O 约束

@@ -2,7 +2,7 @@
 //!
 //! 设计特点:
 //! - 管理 `utt_blocks` 表（v1.4 新增），原文话语块的持久化读写
-//! - insert 返回自增 id；embedding 以 f32 小端 BLOB 存储（None 表示未生成）
+//! - insert 返回自增 id；块向量由 memory_vectors 表持久化，本模块只存原文与边界
 //! - 查询按 persona_uid 严格隔离（原文是最高敏感层，不跨 persona 暴露）
 //! - get_latest_block_by_session 供跨会话桥接取"上一会话尾部原文"
 //! - delete_by_session 供会话清理（与 sessions 级联删除配合使用）
@@ -24,7 +24,6 @@ struct UttBlockRow {
     block_text: String,
     msg_count: i64,
     time_span_ms: i64,
-    embedding: Option<Vec<u8>>,
     created_at: i64,
 }
 
@@ -39,14 +38,13 @@ impl UttBlockRow {
             block_text: self.block_text,
             msg_count: self.msg_count as u32,
             time_span_ms: self.time_span_ms,
-            embedding: self.embedding,
             created_at: self.created_at,
         })
     }
 }
 
 const BLOCK_COLUMNS: &str = "id, persona_uid, session_id, start_msg_id, end_msg_id, \
-     block_text, msg_count, time_span_ms, embedding, created_at";
+     block_text, msg_count, time_span_ms, created_at";
 
 /// 插入一条 utt 话语块。
 ///
@@ -61,8 +59,8 @@ const BLOCK_COLUMNS: &str = "id, persona_uid, session_id, start_msg_id, end_msg_
 pub async fn insert(pool: &SqlitePool, block: &UttBlock) -> RamariaResult<i64> {
     sqlx::query_scalar::<_, i64>(
         "INSERT INTO utt_blocks (persona_uid, session_id, start_msg_id, end_msg_id, \
-         block_text, msg_count, time_span_ms, embedding, created_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+         block_text, msg_count, time_span_ms, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
     )
     .bind(&block.persona_uid)
     .bind(block.session_id.to_string())
@@ -71,7 +69,6 @@ pub async fn insert(pool: &SqlitePool, block: &UttBlock) -> RamariaResult<i64> {
     .bind(&block.block_text)
     .bind(block.msg_count as i64)
     .bind(block.time_span_ms)
-    .bind(&block.embedding)
     .bind(block.created_at)
     .fetch_one(pool)
     .await
@@ -175,7 +172,6 @@ mod tests {
             block_text: "原文内容".to_string(),
             msg_count: 5,
             time_span_ms: 1_800_000,
-            embedding: Some(vec![0u8, 0, 128, 63]),
             created_at: 1_700_000_000_000,
         };
         let block = row.into_block().expect("合法 UUID 应解析成功");
@@ -183,7 +179,6 @@ mod tests {
         assert_eq!(block.persona_uid, "char-0001");
         assert_eq!(block.msg_count, 5);
         assert_eq!(block.time_span_ms, 1_800_000);
-        assert!(block.embedding.is_some());
     }
 
     #[test]
@@ -197,7 +192,6 @@ mod tests {
             block_text: "原文".to_string(),
             msg_count: 1,
             time_span_ms: 0,
-            embedding: None,
             created_at: 1_700_000_000_000,
         };
         let err = row.into_block().expect_err("非法 UUID 应返回错误");
@@ -219,7 +213,6 @@ mod tests {
             90_000,
         );
         assert_eq!(block.id, 0);
-        assert!(block.embedding.is_none());
         assert!(block.created_at > 0);
     }
 }

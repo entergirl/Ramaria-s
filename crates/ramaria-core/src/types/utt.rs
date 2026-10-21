@@ -25,7 +25,6 @@ use super::now_ms;
 /// 字段约定:
 /// - `persona_uid`: 块归属人格，原文按 persona 严格隔离（隐私约束）。
 /// - `block_text`: 块内原文全文，按原文格式拼接（含发言人标记），不写日志。
-/// - `embedding`: 块文本向量（f32 小端 BLOB），`None` 表示未生成或 embedding 不可用。
 ///
 /// 安全约束:
 /// - 原文是最高敏感层：注入受 `persona_kind_whitelist` 约束，内容不记录日志。
@@ -47,8 +46,6 @@ pub struct UttBlock {
     pub msg_count: u32,
     /// 首末消息时间跨度（毫秒）
     pub time_span_ms: i64,
-    /// 块文本向量（f32 小端 BLOB），None 表示未生成
-    pub embedding: Option<Vec<u8>>,
     /// 创建时间（Unix 毫秒）
     pub created_at: i64,
 }
@@ -65,7 +62,7 @@ impl UttBlock {
     /// - `time_span_ms`: 时间跨度。
     ///
     /// 返回:
-    /// - `embedding=None`、`created_at=当前时间` 的 UttBlock。
+    /// - `id=0`、`created_at=当前时间` 的 UttBlock。
     pub fn new(
         persona_uid: String,
         session_id: Uuid,
@@ -84,7 +81,6 @@ impl UttBlock {
             block_text,
             msg_count,
             time_span_ms,
-            embedding: None,
             created_at: now_ms(),
         }
     }

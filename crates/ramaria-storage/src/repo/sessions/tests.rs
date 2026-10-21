@@ -49,8 +49,8 @@ async fn setup_fixture(pool: &SqlitePool) -> Uuid {
     sqlx::query(
         "INSERT INTO utt_blocks \
          (persona_uid, session_id, start_msg_id, end_msg_id, block_text, msg_count, \
-          time_span_ms, embedding, created_at) \
-         VALUES ('char-0001', ?, ?, ?, '测试话语块', 2, 1000, NULL, 0)",
+          time_span_ms, created_at) \
+         VALUES ('char-0001', ?, ?, ?, '测试话语块', 2, 1000, 0)",
     )
     .bind(session.id.to_string())
     .bind(m1.id.to_string())

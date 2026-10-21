@@ -130,10 +130,10 @@ fn clear_removes_utt_docs() {
 }
 
 #[test]
-fn index_utt_block_decodes_embedding_blob() {
+fn index_utt_block_uses_provided_vector() {
     use ramaria_core::types::UttBlock;
     let mut r = Retriever::new();
-    let mut block = UttBlock::new(
+    let block = UttBlock::new(
         "char-0001".to_string(),
         uuid::Uuid::new_v4(),
         uuid::Uuid::new_v4(),
@@ -142,8 +142,7 @@ fn index_utt_block_decodes_embedding_blob() {
         3,
         1000,
     );
-    block.embedding = Some(crate::utt::encode_embedding(&[0.5, -0.25]));
-    r.index_utt_block(&block);
+    r.index_utt_block(&block, Some(vec![0.5, -0.25]));
 
     let hits = r.search_utt("块原文", Some(&[0.5, -0.25]), 5, Some("char-0001"));
     assert_eq!(hits.len(), 1);
@@ -151,24 +150,23 @@ fn index_utt_block_decodes_embedding_blob() {
 }
 
 #[test]
-fn index_utt_block_corrupted_blob_degrades_to_substring() {
+fn index_utt_block_without_vector_degrades_to_substring() {
     use ramaria_core::types::UttBlock;
     let mut r = Retriever::new();
-    let mut block = UttBlock::new(
+    let block = UttBlock::new(
         "char-0001".to_string(),
         uuid::Uuid::new_v4(),
         uuid::Uuid::new_v4(),
         uuid::Uuid::new_v4(),
-        "损坏向量但文本可检索".to_string(),
+        "无向量但文本可检索".to_string(),
         3,
         1000,
     );
-    block.embedding = Some(vec![1, 2, 3]); // 长度非 4 倍数 → 解码失败
-    r.index_utt_block(&block);
+    r.index_utt_block(&block, None);
 
     let hits = r.search_utt("文本可检索", Some(&[1.0, 2.0, 3.0]), 5, Some("char-0001"));
     assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].channel, "substring", "损坏 BLOB 降级子串");
+    assert_eq!(hits[0].channel, "substring", "无向量降级子串");
 }
 
 #[test]

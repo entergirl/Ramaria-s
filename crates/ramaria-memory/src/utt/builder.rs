@@ -5,6 +5,7 @@
 //! - 增量语义：只重切"最后一个已入库块"及其后的消息，更早的块原样保留
 //! - 幂等判定：重切首块与库中最后一块的 (start,end,msg_count) 一致 → 跳过写入
 //! - embedding 由调用方注入 `EmbeddingProvider`；失败降级（块照常入库，记 warn）
+//! - 向量不落块行：生成的向量随构建统计返回，由服务层写入向量表
 //! - 原文隐私：块文本含发言人标记；构建日志只记计数与 ID，不记原文内容
 //!
 //! 块文本格式:
@@ -28,7 +29,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use super::splitter::split_messages;
-use super::{UttChunk, UttSplitterConfig, encode_embedding, infer_target_persona_from_messages};
+use super::{UttChunk, UttSplitterConfig, infer_target_persona_from_messages};
 
 /// rama 自身会话（Session.persona_uid 为 None）使用的块归属 UID。
 const RAMA_FALLBACK_UID: &str = "rama-0001";
@@ -47,7 +48,7 @@ pub struct UttBuildConfig {
 }
 
 /// 一次构建的统计结果（供日志与测试断言）。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct UttBuildStats {
     /// 处理的会话 ID
     pub session_id: Option<Uuid>,
@@ -63,6 +64,8 @@ pub struct UttBuildStats {
     pub embedding_reused: usize,
     /// embedding 生成失败的块数（降级为无向量）
     pub embedding_failed: usize,
+    /// 本次构建产出的向量（块 id + 向量），供服务层写入向量表
+    pub vectors: Vec<(i64, Vec<f32>)>,
 }
 
 /// utt 话语块构建器。
@@ -257,6 +260,7 @@ impl UttBuilder {
                     total.embedding_ok += stats.embedding_ok;
                     total.embedding_reused += stats.embedding_reused;
                     total.embedding_failed += stats.embedding_failed;
+                    total.vectors.extend(stats.vectors);
                 }
                 Err(e) => {
                     warn!(%session.id, %e, "utt 全量构建跳过失败会话（不中断整体）");
@@ -296,7 +300,7 @@ impl UttBuilder {
         let descriptions = load_attachment_descriptions(storage, &chunk.messages).await;
         let block_text = render_block_text(chunk, target, &target_name, &descriptions);
 
-        let mut block = UttBlock::new(
+        let block = UttBlock::new(
             target.to_string(),
             chunk.messages[0].session_id,
             chunk.start_msg_id,
@@ -307,6 +311,7 @@ impl UttBuilder {
         );
 
         // embedding 生成（失败降级：块照常入库，仅无向量）
+        let mut block_vector: Option<Vec<f32>> = None;
         if let Some(provider) = embedder {
             let content_hash = content_hash(&block.block_text);
             // 内容级去重：命中缓存 → 复用向量，不触发新的 embedding 推理。
@@ -316,8 +321,8 @@ impl UttBuilder {
                     .cloned();
                 match cached {
                     Some(vec) => {
-                        block.embedding = Some(encode_embedding(&vec));
                         stats.embedding_reused += 1;
+                        block_vector = Some(vec);
                         true
                     }
                     None => false,
@@ -334,8 +339,8 @@ impl UttBuilder {
                             lock_recover(&self.embedding_cache, "utt_builder.embedding_cache")
                                 .insert(content_hash, vec.clone());
                         }
-                        block.embedding = Some(encode_embedding(&vec));
                         stats.embedding_ok += 1;
+                        block_vector = Some(vec);
                     }
                     Err(e) => {
                         stats.embedding_failed += 1;
@@ -351,6 +356,9 @@ impl UttBuilder {
         }
 
         let id = storage.insert_utt_block(&block).await?;
+        if let Some(vec) = block_vector {
+            stats.vectors.push((id, vec));
+        }
         stats.chunks_created += 1;
         info!(
             block_id = id,

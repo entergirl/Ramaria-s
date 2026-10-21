@@ -264,7 +264,7 @@ async fn allow_inference_skips_deprecated_manual_rows() {
     assert_eq!(active_row.source, TraitSource::Inferred);
 
     // Deprecated 行不进入 list（只返回 active），直连库读回来源
-    let pool = ramaria_storage::database::init_pool(Some(dir.join("assistant.db")))
+    let pool = ramaria_storage::database::init_pool(Some(dir.join("ramaria.db")))
         .await
         .expect("打开测试库应成功");
     let source: String = sqlx::query_scalar("SELECT source FROM personality_traits WHERE id = ?")

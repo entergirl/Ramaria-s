@@ -34,8 +34,10 @@ pub(super) async fn search(
     max_items: usize,
     max_chars: usize,
 ) -> RamariaResult<RecallResult> {
-    // 懒加载索引（首次召回构建；存储故障向上传播，不掩盖为"无记忆"）
-    engine.ensure_index_loaded().await?;
+    // 懒加载索引（首次召回构建；失败只记 warn，检索按空记忆返回，不阻塞调用方）
+    if let Err(e) = engine.ensure_index_loaded().await {
+        tracing::warn!(error = %e, "索引加载失败，本次召回继续（可能无记忆注入）");
+    }
 
     let config = engine.config();
     let wants = |layer: RecallLayer| include.contains(&layer);

@@ -30,7 +30,7 @@ async fn test_engine(tag: &str, config_toml: Option<&str>) -> (Arc<Engine>, Path
         std::fs::write(&config_path, text).expect("写入配置应成功");
     }
     let engine = ramaria_service::Engine::open_with(
-        EngineOptions::new(dir.join("assistant.db")).with_config_path(config_path),
+        EngineOptions::new(dir.join("ramaria.db")).with_config_path(config_path),
     )
     .await
     .expect("引擎装配应成功");

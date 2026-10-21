@@ -249,7 +249,7 @@ impl TempDb {
         let dir = std::env::temp_dir().join(format!("ramaria-mcp-e2e-{tag}-{nanos}"));
         std::fs::create_dir_all(&dir).expect("临时目录应可创建");
         Self {
-            db_path: dir.join("assistant.db"),
+            db_path: dir.join("ramaria.db"),
             dir,
         }
     }

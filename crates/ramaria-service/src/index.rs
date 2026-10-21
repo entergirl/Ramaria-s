@@ -6,30 +6,37 @@
 //! - 原子替换：新索引在临时实例上完整构建，成功后一次写入替换；读者要么见旧索引，
 //!   要么见新索引，不会读到半成品；构建失败旧索引保持可用并置"重建失败"告警位
 //! - 数据来源与在线管线一致：各 persona 的未吸收 L1 + L2 事件 + utt 块，另加无主 L1
-//! - 降级链：嵌入模型缺失 / 批量向量化失败 → 仅 BM25 + 关键词镜像（不阻塞构建）；
-//!   关键词词表读取失败 → 空词典（纯 bigram 口径，行为可预期）
+//! - 降级链：嵌入模型缺失 / 向量通道关闭 → 仅 BM25 + 关键词镜像（不阻塞构建）；
+//!   缺失向量补算失败只跳过该条目；关键词词表读取失败 → 空词典（纯 bigram 口径）
+//! - 向量持久化：构建期按模型指纹读取记忆向量，缺失条目在索引可用后分批补算并写回
 //! - BM25 词典增强迁移：旧分词版本 + 已确认词表非空 → 重建切为词典增强口径并写回版本标记
 //! - 增量镜像：L1 生成后同步进检索器与关键词镜像（不重建整库）
 //! - 代次刷新：召回前比对库内语料戳与 BM25 分词代次，其他进程写入 / 词典升级后
 //!   重建内存索引（同进程脏标记保留为加载窗口内的兜底）；
 //!   代次变化触发的重建再受 `[index].refresh_interval_seconds` 冷却窗口约束（0 = 不节流）
-//! - 边界：本模块只做"内存索引维护"，不写数据库（除索引版本 / BM25 分词版本标记外）
+//! - 边界：本模块负责内存索引与记忆向量的维护；除记忆向量与 BM25 分词版本标记外不写业务表
 
-use std::collections::HashSet;
+pub(crate) mod status;
+mod vectors;
+
+use std::collections::{HashMap, HashSet};
 
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::lock::{read_recover, write_recover};
 use ramaria_core::traits::{
     BM25_INDEX_VERSION_CURRENT, BM25_INDEX_VERSION_LEGACY, IndexCorpusStamp,
 };
-use ramaria_core::types::{MemoryL1, now_ms};
+use ramaria_core::types::{
+    IndexStatus, MemoryL1, VECTOR_DOC_L1, VECTOR_DOC_L2, VECTOR_DOC_UTT, now_ms,
+};
 use ramaria_memory::keyword::service::KeywordService;
 use ramaria_memory::keyword::{CommaSeparatedNormalizer, KeywordNormalizer};
 use ramaria_memory::retriever::{L1DocView, L2DocView, Retriever, RetrieverConfig};
-// 向量索引写入（`CachedVectorIndex::add`）经 `VectorIndex` trait 提供
-use ramaria_memory::VectorIndex;
 
 use crate::engine::Engine;
+
+use status::read_stamp;
+pub(crate) use status::{IndexStatusState, percent};
 
 /// L2 事件单次加载上限（与在线管线重建口径一致，避免超大库一次性拉全量）。
 const L2_LOAD_LIMIT: i64 = 1_000;
@@ -62,38 +69,6 @@ pub struct IndexBuildFailure {
     pub at_ms: i64,
 }
 
-/// 读取当前库内索引代次快照（读取失败按"不变化"处理并记 warn，不阻塞召回）。
-async fn read_stamp(engine: &Engine) -> IndexStamp {
-    let storage = engine.storage_ref().as_ref();
-
-    let bm25_version = match storage.get_bm25_index_version().await {
-        Ok(version) => version,
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "读取 BM25 分词代次失败，本次按缺失口径比对（不影响召回本身）"
-            );
-            BM25_INDEX_VERSION_LEGACY
-        }
-    };
-
-    let corpus = match storage.index_corpus_stamp().await {
-        Ok(stamp) => stamp,
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "读取索引语料统计失败，本次跳过跨进程刷新检测（同进程脏标记仍然生效）"
-            );
-            None
-        }
-    };
-
-    IndexStamp {
-        bm25_version,
-        corpus,
-    }
-}
-
 // =========================================================
 // 懒加载与显式重建
 // =========================================================
@@ -120,6 +95,12 @@ async fn read_stamp(engine: &Engine) -> IndexStamp {
 ///   会让下次比对不等 → 再刷新一次（收敛，不漏新记忆）。
 /// - 构建失败时置"重建失败"告警位并上抛错误（旧索引保持可用，见 [`build_and_swap`]）。
 pub(crate) async fn ensure_loaded(engine: &Engine) -> RamariaResult<bool> {
+    // 后台构建在途 / 状态机处于 Building：本次不参与构建，按"索引可先用"返回
+    if engine.is_index_build_inflight() || engine.index_status().status == IndexStatus::Building {
+        tracing::debug!("索引正在构建，跳过本次懒加载");
+        return Ok(false);
+    }
+
     let stamp = read_stamp(engine).await;
 
     // 已加载且无脏标记 → 只需确认代次是否仍一致；一致则免构建
@@ -147,6 +128,8 @@ pub(crate) async fn ensure_loaded(engine: &Engine) -> RamariaResult<bool> {
     // 构建开始前清脏：构建窗口内新产生的增量会重新置脏（保证不漏、且能收敛）
     engine.clear_index_dirty();
 
+    // 与后台构建 / 显式重建串行（避免两次构建互相覆盖）
+    let _guard = engine.index_build_lock().lock().await;
     build_and_swap(engine).await?;
     Ok(true)
 }
@@ -161,6 +144,7 @@ pub(crate) async fn ensure_loaded(engine: &Engine) -> RamariaResult<bool> {
 /// - `Ok(total)`: 重建完成，`total` 为 L1 + L2 文档总数（不含 utt 块）。
 /// - `Err(..)`: 构建失败（旧索引保持可用，告警位置位）。
 pub(crate) async fn rebuild(engine: &Engine) -> RamariaResult<usize> {
+    let _guard = engine.index_build_lock().lock().await;
     build_and_swap(engine).await
 }
 
@@ -169,33 +153,45 @@ pub(crate) async fn rebuild(engine: &Engine) -> RamariaResult<usize> {
 /// 流程:
 /// 1. 读取库内代次快照（构建前读取，构建完成后记录供下次比对）；
 /// 2. 锁外收集文档视图（各 persona 的未吸收 L1 / L2 事件 / utt 块 / 事件关系 + 无主 L1）；
-/// 3. 评估 BM25 词典增强迁移决策（已确认词表 + 分词版本标记）；
-/// 4. 临时检索器构建（检索配置 + 词典 + 文档索引 + 可选向量）；
-/// 5. 图谱构建（事件为实体节点、事件关系为边，装入同一临时实例）；
-/// 6. 整体替换懒加载槽（读者不读半成品）；
-/// 7. 词典增强迁移完成后写回分词版本标记；
-/// 8. 关键词镜像装载（词典池 + 倒排文档 + 语义层）；
-/// 9. 记录代次快照与构建完成时间，写回索引版本（失败只记日志）。
+/// 3. 向量规划：开关 / provider / 模型指纹通过后按指纹读取已落库向量并校验维度；
+/// 4. 评估 BM25 词典增强迁移决策（已确认词表 + 分词版本标记）；
+/// 5. 临时检索器构建（检索配置 + 词典 + 文档索引 + 已加载向量）；
+/// 6. 图谱构建（事件为实体节点、事件关系为边，装入同一临时实例）；
+/// 7. 整体替换懒加载槽并标记构建中（此后读者要么见旧索引，要么见新索引）；
+/// 8. 词典增强迁移完成后写回分词版本标记；
+/// 9. 关键词镜像装载（词典池 + 倒排文档 + 语义层）；
+/// 10. 缺失向量分批补算（每批推进进度）；
+/// 11. 记录代次快照与构建完成时间，状态置就绪。
 ///
 /// 返回:
 /// - `Ok(total)`: 构建完成，`total` 为 L1 + L2 文档总数（不含 utt 块）。
-/// - `Err(..)`: 关键读取失败（旧索引保持可用），并置"重建失败"告警位。
+/// - `Err(..)`: 关键读取失败（旧索引保持可用），状态置降级并置"重建失败"告警位。
 ///
 /// 降级:
 /// - persona 事件 / utt 块 / 事件关系 / 词典 / 向量读取失败按降级链处理，不阻塞构建；
-/// - 成功完成后复位"重建失败"告警位（供诊断展示与宿主告警）。
+/// - 成功完成后复位"重建失败"告警位与状态失败原因（供诊断展示与宿主告警）。
 async fn build_and_swap(engine: &Engine) -> RamariaResult<usize> {
     match build_and_swap_inner(engine).await {
         Ok(total) => {
             engine.set_index_rebuild_failed(false);
             engine.clear_index_build_failure();
+            engine.clear_index_status_error();
             Ok(total)
         }
         Err(e) => {
             // 旧索引仍完整可用：置位告警位供宿主提示"记忆注入可能不完整"，
             // 并记录脱敏失败原因供诊断导出（不改变返回错误与降级语义）
+            let snapshot = engine.index_status();
+            let reason = redact_failure_reason(&e);
             engine.set_index_rebuild_failed(true);
-            engine.record_index_build_failure(redact_failure_reason(&e));
+            engine.record_index_build_failure(reason.clone());
+            engine.set_index_status(
+                IndexStatus::Degraded,
+                snapshot.loaded,
+                snapshot.total,
+                snapshot.model,
+                Some(reason),
+            );
             tracing::warn!(
                 error = %e,
                 "检索器重建失败，保留旧索引继续可用（索引未刷新）"
@@ -219,7 +215,8 @@ async fn build_and_swap_inner(engine: &Engine) -> RamariaResult<usize> {
     let stamp = read_stamp(engine).await;
     let started = now_ms();
 
-    // ---- 1. 视图收集（锁外 I/O） ----
+    // ---- 1. 视图收集（锁外 I/O）：起点先切 Building，首次构建的收集期也读作"构建中" ----
+    engine.set_index_status(IndexStatus::Building, 0, 0, None, None);
     let mut l1_views: Vec<L1DocView> = Vec::new();
     let mut l2_views: Vec<L2DocView> = Vec::new();
     let mut utt_blocks: Vec<ramaria_core::types::UttBlock> = Vec::new();
@@ -265,10 +262,31 @@ async fn build_and_swap_inner(engine: &Engine) -> RamariaResult<usize> {
 
     let total = l1_views.len() + l2_views.len();
 
-    // ---- 2. BM25 词典增强迁移决策（词表 + 分词版本标记） ----
+    // ---- 2. 向量规划：开关 / provider / 指纹任一不满足即走无向量路径 ----
+    let vector_plan = vectors::VectorPlan::detect(engine);
+    let vector_docs_total = if vector_plan.is_some() {
+        l1_views.len() + l2_views.len() + utt_blocks.len()
+    } else {
+        0
+    };
+    let mut vector_map: HashMap<vectors::VectorKey, Vec<f32>> = HashMap::new();
+    let mut missing: Vec<vectors::MissingVector> = Vec::new();
+    if let Some(plan) = &vector_plan {
+        match storage.load_memory_vectors(&plan.fingerprint).await {
+            Ok(rows) => vector_map = vectors::load(rows, plan.dimension),
+            Err(e) => {
+                tracing::warn!(error = %e, "读取记忆向量失败，本次按缺失口径补算");
+            }
+        }
+        missing = vectors::collect_missing(&l1_views, &l2_views, &utt_blocks, &vector_map);
+    }
+    let mut loaded = vector_docs_total.saturating_sub(missing.len());
+    let model_label = vector_plan.as_ref().map(|plan| plan.model_id.clone());
+
+    // ---- 3. BM25 词典增强迁移决策（词表 + 分词版本标记） ----
     let migration = prepare_bm25_migration(engine).await;
 
-    // ---- 3. 临时实例构建（检索配置 + 词典 + 文档索引 + 可选向量） ----
+    // ---- 4. 临时实例构建（检索配置 + 词典 + 文档索引 + 可选向量） ----
     let mut fresh = Retriever::new();
     *fresh.config_mut() = RetrieverConfig::from_retrieval_config(&engine.config().retrieval);
     if migration.apply_dictionary {
@@ -276,15 +294,23 @@ async fn build_and_swap_inner(engine: &Engine) -> RamariaResult<usize> {
         fresh.set_bm25_dictionary(&migration.dictionary);
     }
     for doc in &l1_views {
-        fresh.index_l1(doc);
+        fresh.index_l1_with_vector(
+            doc,
+            vectors::lookup(&vector_map, VECTOR_DOC_L1, &doc.id.to_string()),
+        );
     }
     for doc in &l2_views {
-        fresh.index_l2(doc);
+        fresh.index_l2_with_vector(
+            doc,
+            vectors::lookup(&vector_map, VECTOR_DOC_L2, &doc.id.to_string()),
+        );
     }
     for block in &utt_blocks {
-        fresh.index_utt_block(block);
+        fresh.index_utt_block(
+            block,
+            vectors::lookup(&vector_map, VECTOR_DOC_UTT, &block.id.to_string()),
+        );
     }
-    let vectors_built = build_vectors(engine, &mut fresh, &l1_views, &l2_views).await;
 
     // ---- 4. 图谱构建（事件为实体节点、事件关系为边）----
     // 无论 `enable_graph` 开关值如何都构建（数据量小；检索期由
@@ -323,19 +349,31 @@ async fn build_and_swap_inner(engine: &Engine) -> RamariaResult<usize> {
     // ---- 7. 关键词镜像装载（词典池 + 倒排文档 + 语义层） ----
     sync_keyword_mirror(engine, &l1_views, &l2_views).await;
 
-    // ---- 8. 记录代次快照与构建完成时间 ----
+    // ---- 8. 缺失向量批补算（每批后推进进度；单条失败不拖垮批次） ----
+    if let Some(plan) = &vector_plan {
+        if !missing.is_empty() {
+            let (backfilled, failed) = vectors::backfill(
+                engine,
+                plan,
+                &missing,
+                &mut loaded,
+                vector_docs_total,
+                started,
+            )
+            .await;
+            tracing::info!(
+                missing = missing.len(),
+                backfilled,
+                failed,
+                "缺失向量补算完成"
+            );
+        }
+    }
+
+    // ---- 9. 记录代次快照与构建完成时间 ----
     engine.record_index_stamp(stamp);
     // 记"完成时间"：冷却窗口按两次重建之间的实际间隔计算（含本次构建耗时）
     engine.record_index_build_time(now_ms());
-
-    // ---- 9. 标记索引已构建（判定只看 `== 0`，写 1 表"已构建"）----
-    // 供首次配置状态机判定"索引待构建"项消失；写入失败只记日志，不影响内存索引可用性。
-    if let Err(e) = storage.set_index_version(1).await {
-        tracing::warn!(
-            error = %e,
-            "写入索引版本失败（内存索引已可用，首次配置状态判定可能滞后）"
-        );
-    }
 
     tracing::info!(
         l1 = l1_views.len(),
@@ -343,10 +381,18 @@ async fn build_and_swap_inner(engine: &Engine) -> RamariaResult<usize> {
         utt = utt_blocks.len(),
         graph_nodes = graph_nodes.len(),
         graph_edges = graph_edges.len(),
-        vectors = vectors_built,
+        vectors = loaded,
+        vector_docs = vector_docs_total,
         elapsed_ms = now_ms().saturating_sub(started),
         bm25_version = stamp.bm25_version,
         "检索索引已加载（共 {total} 条文档）"
+    );
+    engine.set_index_progress(
+        IndexStatus::Ready,
+        loaded,
+        vector_docs_total,
+        model_label,
+        now_ms().saturating_sub(started) as u64,
     );
     Ok(total)
 }
@@ -408,62 +454,6 @@ struct Bm25MigrationPlan {
     apply_dictionary: bool,
     /// 重建成功后是否写回 `bm25_index_version = 当前版本`。
     mark_v2: bool,
-}
-
-/// 为临时检索器构建向量索引（嵌入不可用 / 失败时静默降级）。
-///
-/// 返回:
-/// - 实际写入向量索引的文档数（0 = 向量通道缺席）。
-async fn build_vectors(
-    engine: &Engine,
-    fresh: &mut Retriever,
-    l1_views: &[L1DocView],
-    l2_views: &[L2DocView],
-) -> usize {
-    let Some(provider) = engine.embedding_ref() else {
-        tracing::debug!("嵌入模型未配置，本次索引构建跳过向量通道");
-        return 0;
-    };
-    if !provider.is_available() {
-        tracing::debug!("嵌入模型不可用，本次索引构建跳过向量通道");
-        return 0;
-    }
-
-    let mut built = 0usize;
-
-    // L1 摘要向量
-    let l1_texts: Vec<&str> = l1_views.iter().map(|doc| doc.summary.as_str()).collect();
-    if !l1_texts.is_empty() {
-        match provider.embed_batch(&l1_texts).await {
-            Ok(vectors) => {
-                for (doc, vector) in l1_views.iter().zip(vectors) {
-                    let label =
-                        ramaria_memory::vector::make_vector_label("l1", &doc.id.to_string());
-                    fresh.vector_mut().add(&label, vector, doc.created_at);
-                    built += 1;
-                }
-            }
-            Err(e) => tracing::warn!(error = %e, "L1 批量向量化失败，向量通道降级"),
-        }
-    }
-
-    // L2 标题向量（与在线管线重建口径一致：标题作为事件语义代表）
-    let l2_texts: Vec<&str> = l2_views.iter().map(|doc| doc.title.as_str()).collect();
-    if !l2_texts.is_empty() {
-        match provider.embed_batch(&l2_texts).await {
-            Ok(vectors) => {
-                for (doc, vector) in l2_views.iter().zip(vectors) {
-                    let label =
-                        ramaria_memory::vector::make_vector_label("l2", &doc.id.to_string());
-                    fresh.vector_mut().add(&label, vector, doc.created_at);
-                    built += 1;
-                }
-            }
-            Err(e) => tracing::warn!(error = %e, "L2 批量向量化失败，向量通道降级"),
-        }
-    }
-
-    built
 }
 
 /// 图谱节点行：`(事件 id, 实体名, 实体类型)`。
@@ -589,17 +579,26 @@ async fn sync_keyword_mirror(engine: &Engine, l1_views: &[L1DocView], l2_views: 
 pub(crate) async fn index_l1_into_mirrors(engine: &Engine, l1: &MemoryL1) {
     let doc = l1_view(l1);
 
-    // 向量（嵌入可用时；失败/不可用 → None）
-    let vector = match engine.embedding_ref() {
-        Some(provider) if provider.is_available() => match provider.embed(&l1.summary).await {
-            Ok(vector) => Some(vector),
-            Err(e) => {
-                tracing::debug!(error = %e, "L1 增量向量生成失败，仅入 BM25 索引");
-                None
-            }
-        },
-        _ => None,
+    // 向量（向量通道开启且嵌入可用时；失败/不可用 → None）
+    let vector = if engine.config().retrieval.enable_vector {
+        match engine.embedding_ref() {
+            Some(provider) if provider.is_available() => match provider.embed(&l1.summary).await {
+                Ok(vector) => Some(vector),
+                Err(e) => {
+                    tracing::debug!(error = %e, "L1 增量向量生成失败，仅入 BM25 索引");
+                    None
+                }
+            },
+            _ => None,
+        }
+    } else {
+        None
     };
+
+    // 向量落库（与内存镜像同源；失败只记日志，不影响检索索引）
+    if let Some(vec) = vector.as_deref() {
+        crate::embedding_store::store(engine, VECTOR_DOC_L1, &l1.id.to_string(), vec).await;
+    }
 
     // 检索器增量
     {

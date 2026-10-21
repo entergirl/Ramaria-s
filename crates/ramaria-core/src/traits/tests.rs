@@ -219,16 +219,6 @@ impl StoreCrud for BareStore {
 
 #[async_trait]
 impl StoreInfrastructure for BareStore {
-    async fn insert_keyword_ref(
-        &self,
-        _: &str,
-        _: &str,
-        _: &str,
-        _: &str,
-        _: f64,
-    ) -> RamariaResult<()> {
-        bare_store_err!()
-    }
     async fn save_privacy_consent(&self, _: &PrivacyConsent) -> RamariaResult<()> {
         bare_store_err!()
     }
@@ -242,12 +232,6 @@ impl StoreInfrastructure for BareStore {
         bare_store_err!()
     }
     async fn get_schema_version(&self) -> RamariaResult<i32> {
-        bare_store_err!()
-    }
-    async fn get_index_version(&self) -> RamariaResult<i32> {
-        bare_store_err!()
-    }
-    async fn set_index_version(&self, _: i32) -> RamariaResult<()> {
         bare_store_err!()
     }
     async fn create_background_job(&self, _: &str, _: Option<&str>) -> RamariaResult<i64> {

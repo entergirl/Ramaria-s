@@ -3,7 +3,7 @@
 //! 设计特点:
 //! - 原文切分（splitter）+ 全量/增量构建（builder）两个子模块
 //! - 原文是最高敏感层：块按 persona_uid 严格隔离，内容不写日志
-//! - embedding 以 f32 小端 BLOB 持久化，编解码集中在本模块
+//! - 块向量不随块行持久化，由服务层写入向量表
 //! - 切分参数全部可配置（θ_gap 时间间隙 / 条数上限），默认值对齐 config 默认
 //!
 //! 边界:
@@ -14,7 +14,6 @@ pub mod builder;
 pub mod group_splitter;
 pub mod splitter;
 
-use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::types::{Message, MessageRole};
 
 /// utt 切分配置。
@@ -131,57 +130,6 @@ pub fn is_chat_message(msg: &Message) -> bool {
 }
 
 // =========================================================
-// embedding f32 小端 BLOB 编解码
-// =========================================================
-
-/// 将 f32 向量编码为小端 BLOB（与 `utt_blocks.embedding` 列约定一致）。
-///
-/// 返回:
-/// - `Vec<u8>`：长度恒为 `vec.len() * 4`。
-///
-/// 说明:
-/// - 空向量编码为空 BLOB，而 `decode_embedding` 视空 BLOB 为非法输入并返回 `Validation`；
-///   调用方应避免把空向量（通常意味着 embedding 未产出）编码后落库。
-pub fn encode_embedding(vec: &[f32]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(vec.len() * 4);
-    for v in vec {
-        out.extend_from_slice(&v.to_le_bytes());
-    }
-    out
-}
-
-/// 将 f32 小端 BLOB 解码为向量。
-///
-/// 错误:
-/// - 空 BLOB（0 字节）→ `Validation`：0 维向量会使向量索引整体失效（首个期望维度被记为 0），
-///   调用方应按"无向量"降级处理，不得把空 BLOB 当作合法向量。
-/// - BLOB 长度不是 4 的倍数 → `Validation`（数据损坏防御）。
-///
-/// 说明:
-/// - 正常路径下 BLOB 长度恒为 `vec.len() * 4`（由 `encode_embedding` 编码产生），
-///   故合法输入非空且长度必为 4 的倍数。
-pub fn decode_embedding(blob: &[u8]) -> RamariaResult<Vec<f32>> {
-    if blob.is_empty() {
-        return Err(RamariaError::validation(
-            "embedding BLOB 为空（0 字节），拒绝解码为 0 维向量",
-        ));
-    }
-    if !blob.len().is_multiple_of(4) {
-        return Err(RamariaError::validation(format!(
-            "embedding BLOB 长度 {} 不是 4 的倍数（数据损坏）",
-            blob.len()
-        )));
-    }
-    // 长度已校验为 4 的倍数，用 as_chunks 直接取完整块（无尾部残留）
-    Ok(blob
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|c| f32::from_le_bytes(*c))
-        .collect())
-}
-
-// =========================================================
 // 单元测试
 // =========================================================
 
@@ -197,27 +145,6 @@ mod tests {
             ramaria_core::types::MessageSource::Local,
         )
         .with_persona_uid(persona_uid.map(|s| s.to_string()))
-    }
-
-    #[test]
-    fn encode_decode_roundtrip() {
-        let vec = vec![0.1_f32, -0.5, 3.25, 0.0];
-        let blob = encode_embedding(&vec);
-        assert_eq!(blob.len(), 16);
-        let back = decode_embedding(&blob).unwrap();
-        assert_eq!(back, vec);
-    }
-
-    #[test]
-    fn decode_empty_blob_returns_validation_error() {
-        let err = decode_embedding(&[]).unwrap_err();
-        assert_eq!(err.category(), "validation");
-    }
-
-    #[test]
-    fn decode_invalid_len_returns_validation_error() {
-        let err = decode_embedding(&[1, 2, 3]).unwrap_err();
-        assert_eq!(err.category(), "validation");
     }
 
     #[test]

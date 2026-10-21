@@ -1,7 +1,8 @@
 //! crates/ramaria-storage/src/tests/schema.rs - schema 与迁移完整性测试
 //!
 //! 设计特点:
-//! - 覆盖 schema 版本读取
+//! - 覆盖 schema 版本读取与基线终值（表 / 列 / 显式索引 / 外键计数）
+//! - 覆盖关键表的列形态与主键（向量表、utt 块、后台任务、L2 去重指纹）
 //! - 覆盖迁移记录数与迁移目录文件数一致
 //! - 覆盖列表查询所需复合索引的齐备性
 
@@ -11,16 +12,14 @@ use super::*;
 async fn schema_version() {
     let storage = setup().await;
     let v = storage.get_schema_version().await.unwrap();
-    assert!(v >= 1);
+    assert_eq!(v, 3, "schema 版本应为 3");
 }
 
 /// 迁移完整性：空库初始化后 `_sqlx_migrations` 记录数与迁移目录文件数一致。
 ///
 /// 说明:
-/// - 历史增量迁移已合并为单个基线 SQL，空库初始化即得基线 schema；
-///   其后新增能力以独立增量文件追加（只增不删，不修改既有迁移）。
-/// - 若记录数少于文件数，说明初始化未完整执行；多于文件数说明迁移目录混入了
-///   已移除的文件（违反增量纪律）。
+/// - 基线为单个 migration 文件，空库初始化即得完整 schema；
+/// - 记录数与文件数不等说明初始化未完整执行，或迁移目录混入了多余文件。
 #[tokio::test]
 async fn migration_records_match_directory() {
     let pool = database::init_test_pool()
@@ -35,87 +34,151 @@ async fn migration_records_match_directory() {
         .filter_map(Result::ok)
         .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "sql"))
         .count() as i64;
-    assert_eq!(
-        count, files,
-        "迁移记录数应与迁移目录中的 SQL 文件数一致（基线 + 增量）"
-    );
-    assert!(files >= 1, "至少应有一个基线迁移文件");
+    assert_eq!(count, files, "迁移记录数应与迁移目录中的 SQL 文件数一致");
+    assert_eq!(files, 1, "基线应为单一迁移文件");
 }
 
-/// 旧库升级回填：迁移前已存在的行经新增列迁移后取默认 0。
-///
-/// 说明:
-/// - 模拟口径：在已全量迁移的测试库上删除本版新增列还原"旧库"状态，
-///   写入一行旧式数据后执行本版 migration 文件（与 `sqlx::migrate!` 应用的
-///   是同一份 SQL），验证 SQLite 对既有行的默认值回填与列约束。
-/// - 新增列不在任何索引 / 外键 / 约束中，`DROP COLUMN` 仅用于本测试的模拟。
+/// 基线终值：表 / 列 / 显式索引 / 外键计数与 schema 审计一致。
 #[tokio::test]
-async fn is_proactive_backfills_existing_rows_on_upgrade() {
-    let pool = database::init_test_pool()
-        .await
-        .expect("测试数据库初始化失败");
+async fn baseline_schema_totals() {
+    let storage = setup().await;
+    let pool = &storage.pool;
 
-    // 还原旧库：移除本版新增列
-    sqlx::query("ALTER TABLE messages DROP COLUMN is_proactive")
-        .execute(&pool)
-        .await
-        .expect("删除新增列以模拟旧库应成功");
-
-    // 旧式写入：消息必须归属存在的会话（外键约束）
-    let session_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO sessions (id, started_at) VALUES (?, 0)")
-        .bind(session_id.to_string())
-        .execute(&pool)
-        .await
-        .expect("插入 session fixture 应成功");
-    sqlx::query(
-        "INSERT INTO messages (id, session_id, role, content, created_at, source) \
-         VALUES (?, ?, 'user', '旧消息', 1, 'local')",
+    let tables: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type = 'table' \
+         AND name NOT LIKE 'sqlite_%' AND name <> '_sqlx_migrations' ORDER BY name",
     )
-    .bind(Uuid::new_v4().to_string())
-    .bind(session_id.to_string())
-    .execute(&pool)
+    .fetch_all(pool)
     .await
-    .expect("写入旧式消息应成功");
+    .expect("查询表清单应成功");
+    assert_eq!(tables.len(), 29, "表数应为 29");
 
-    // 执行本版 migration（迁移文件内容即被 sqlx::migrate! 应用的 SQL）
-    sqlx::raw_sql(include_str!("../../migrations/20261002_v2.4_proactive.sql"))
-        .execute(&pool)
+    let mut columns = 0usize;
+    let mut foreign_keys = 0usize;
+    for table in &tables {
+        let cols: Vec<String> =
+            sqlx::query_scalar(&format!("SELECT name FROM pragma_table_info('{table}')"))
+                .fetch_all(pool)
+                .await
+                .expect("查询列信息应成功");
+        columns += cols.len();
+
+        let fks: Vec<String> = sqlx::query_scalar(&format!(
+            "SELECT \"table\" FROM pragma_foreign_key_list('{table}')"
+        ))
+        .fetch_all(pool)
         .await
-        .expect("执行新增 migration 应成功");
+        .expect("查询外键应成功");
+        foreign_keys += fks.len();
+    }
+    assert_eq!(columns, 259, "列数应为 259");
+    assert_eq!(foreign_keys, 28, "外键数应为 28");
 
-    // 旧行回填 0
-    let backfilled: i64 = sqlx::query_scalar("SELECT is_proactive FROM messages LIMIT 1")
-        .fetch_one(&pool)
-        .await
-        .expect("读取回填值应成功");
-    assert_eq!(backfilled, 0, "迁移前旧行应回填默认值 0");
-
-    // 列约束：NOT NULL DEFAULT 0（省略该列的写入同样取 0）
-    let (notnull, default_value): (i64, Option<String>) = sqlx::query_as(
-        "SELECT \"notnull\", dflt_value FROM pragma_table_info('messages') WHERE name = 'is_proactive'",
+    let indexes: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%'",
     )
-    .fetch_one(&pool)
+    .fetch_all(pool)
     .await
-    .expect("查询列属性应成功");
-    assert_eq!(notnull, 1, "新增列应为 NOT NULL");
-    assert_eq!(default_value.as_deref(), Some("0"), "新增列默认值应为 0");
+    .expect("查询索引清单应成功");
+    assert_eq!(indexes.len(), 44, "显式索引数应为 44");
+}
 
-    sqlx::query(
-        "INSERT INTO messages (id, session_id, role, content, created_at, source) \
-         VALUES (?, ?, 'assistant', '新消息', 2, 'local')",
-    )
-    .bind(Uuid::new_v4().to_string())
-    .bind(session_id.to_string())
-    .execute(&pool)
-    .await
-    .expect("省略新列写入应成功");
-    let defaulted: i64 =
-        sqlx::query_scalar("SELECT is_proactive FROM messages WHERE content = '新消息'")
-            .fetch_one(&pool)
+/// 已删除对象不得出现在基线中。
+#[tokio::test]
+async fn removed_tables_and_columns_absent() {
+    let storage = setup().await;
+    let pool = &storage.pool;
+
+    for table in ["pending_push", "bm25_index", "keyword_refs"] {
+        let found: Option<String> =
+            sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+                .bind(table)
+                .fetch_optional(pool)
+                .await
+                .expect("查询表应成功");
+        assert!(found.is_none(), "表 {table} 不应存在");
+    }
+
+    let utt_columns: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('utt_blocks')")
+            .fetch_all(pool)
             .await
-            .expect("读取默认值应成功");
-    assert_eq!(defaulted, 0, "省略列写入应取默认 0");
+            .expect("查询 utt_blocks 列应成功");
+    assert!(
+        !utt_columns.iter().any(|c| c == "embedding"),
+        "utt_blocks 不应含 embedding 列"
+    );
+
+    let event_columns: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('memory_events')")
+            .fetch_all(pool)
+            .await
+            .expect("查询 memory_events 列应成功");
+    for gone in ["indexed_at", "index_version"] {
+        assert!(
+            !event_columns.iter().any(|c| c == gone),
+            "memory_events 不应含 {gone} 列"
+        );
+    }
+
+    let key: Option<String> =
+        sqlx::query_scalar("SELECT value FROM schema_meta WHERE key = 'index_version'")
+            .fetch_optional(pool)
+            .await
+            .expect("查询 schema_meta 应成功");
+    assert!(key.is_none(), "schema_meta 不应再写入索引版本键");
+}
+
+/// 关键表列形态与主键：向量表、后台任务、L2 去重指纹。
+#[tokio::test]
+async fn key_table_shapes() {
+    let storage = setup().await;
+    let pool = &storage.pool;
+
+    let vector_columns: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('memory_vectors')")
+            .fetch_all(pool)
+            .await
+            .expect("查询 memory_vectors 列应成功");
+    assert_eq!(
+        vector_columns,
+        vec!["doc_type", "doc_id", "model", "dim", "vector", "updated_at"]
+    );
+    let pk: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM pragma_table_info('memory_vectors') WHERE pk > 0 ORDER BY pk",
+    )
+    .fetch_all(pool)
+    .await
+    .expect("查询主键应成功");
+    assert_eq!(
+        pk,
+        vec!["doc_type", "doc_id"],
+        "主键应为 (doc_type, doc_id)"
+    );
+
+    let job_columns: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('background_jobs')")
+            .fetch_all(pool)
+            .await
+            .expect("查询 background_jobs 列应成功");
+    assert_eq!(job_columns.len(), 7, "background_jobs 应为 7 列");
+    for gone in ["started_at", "retry_count", "max_retries"] {
+        assert!(
+            !job_columns.iter().any(|c| c == gone),
+            "background_jobs 不应含 {gone} 列"
+        );
+    }
+
+    let fingerprint_columns: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('l2_cluster_fingerprints')")
+            .fetch_all(pool)
+            .await
+            .expect("查询 l2_cluster_fingerprints 列应成功");
+    assert_eq!(
+        fingerprint_columns,
+        vec!["persona_uid", "fingerprint"],
+        "去重指纹表只保留主键两列"
+    );
 }
 
 /// 复合索引齐备（过滤列 + 排序列成对，列表查询不再建临时 B-tree）。
@@ -126,8 +189,12 @@ async fn schema_pair_indexes_present() {
         "idx_messages_persona_created",
         "idx_messages_session_created",
         "idx_memory_l1_persona_created",
+        "idx_memory_l1_persona_occurred",
         "idx_memory_events_persona_created",
         "idx_utt_blocks_session_created",
+        "idx_memory_vectors_model",
+        "idx_messages_platform_message_id",
+        "idx_personas_kind_source_ref",
     ];
     for name in expected {
         let found: Option<String> =
@@ -136,748 +203,6 @@ async fn schema_pair_indexes_present() {
                 .fetch_optional(&storage.pool)
                 .await
                 .unwrap();
-        assert_eq!(found.as_deref(), Some(name), "缺少复合索引 {name}");
+        assert_eq!(found.as_deref(), Some(name), "缺少索引 {name}");
     }
-}
-
-/// 旧库升级回填：迁移前已存在的会话经新增列迁移后 `last_read_at` 取最大消息时间
-/// （既有会话一律视为已读，零虚假未读）。
-///
-/// 说明:
-/// - 模拟口径：在已全量迁移的测试库上删除本版新增列还原"旧库"状态，
-///   写入旧式数据后执行本版 migration 文件（与 `sqlx::migrate!` 应用的是同一份 SQL），
-///   验证 SQLite 对既有行的回填与列约束。
-/// - 新增列不在任何索引 / 外键 / 约束中，`DROP COLUMN` 仅用于本测试的模拟。
-#[tokio::test]
-async fn last_read_at_backfills_existing_sessions_on_upgrade() {
-    let pool = database::init_test_pool()
-        .await
-        .expect("测试数据库初始化失败");
-
-    // 空库全量迁移后即含新列
-    let has_column: Option<String> = sqlx::query_scalar(
-        "SELECT name FROM pragma_table_info('sessions') WHERE name = 'last_read_at'",
-    )
-    .fetch_optional(&pool)
-    .await
-    .expect("查询列信息应成功");
-    assert_eq!(
-        has_column.as_deref(),
-        Some("last_read_at"),
-        "空库初始化后应含 last_read_at 列"
-    );
-
-    // 还原旧库：移除本版新增列
-    sqlx::query("ALTER TABLE sessions DROP COLUMN last_read_at")
-        .execute(&pool)
-        .await
-        .expect("删除新增列以模拟旧库应成功");
-
-    // 旧式数据：一个带消息的会话（user 100 / assistant 200）与一个空会话
-    let with_messages = Uuid::new_v4();
-    let empty_session = Uuid::new_v4();
-    for session_id in [with_messages, empty_session] {
-        sqlx::query("INSERT INTO sessions (id, started_at) VALUES (?, 0)")
-            .bind(session_id.to_string())
-            .execute(&pool)
-            .await
-            .expect("插入 session fixture 应成功");
-    }
-    for (role, ts) in [("user", 100_i64), ("assistant", 200)] {
-        sqlx::query(
-            "INSERT INTO messages (id, session_id, role, content, created_at, source) \
-             VALUES (?, ?, ?, '旧消息', ?, 'local')",
-        )
-        .bind(Uuid::new_v4().to_string())
-        .bind(with_messages.to_string())
-        .bind(role)
-        .bind(ts)
-        .execute(&pool)
-        .await
-        .expect("写入旧式消息应成功");
-    }
-
-    // 执行本版 migration（迁移文件内容即被 sqlx::migrate! 应用的 SQL）
-    sqlx::raw_sql(include_str!("../../migrations/20261005_v2.5_unread.sql"))
-        .execute(&pool)
-        .await
-        .expect("执行新增 migration 应成功");
-
-    // 既有会话回填为最大消息时间（已读）；空会话回填 0
-    let last_read: i64 = sqlx::query_scalar("SELECT last_read_at FROM sessions WHERE id = ?")
-        .bind(with_messages.to_string())
-        .fetch_one(&pool)
-        .await
-        .expect("读取回填值应成功");
-    assert_eq!(last_read, 200, "旧会话应回填为最大消息时间（视为已读）");
-    let empty_read: i64 = sqlx::query_scalar("SELECT last_read_at FROM sessions WHERE id = ?")
-        .bind(empty_session.to_string())
-        .fetch_one(&pool)
-        .await
-        .expect("读取回填值应成功");
-    assert_eq!(empty_read, 0, "无消息旧会话应回填 0");
-
-    // 旧库升级后零虚假未读
-    let unread = crate::repo::messages::list_unread_counts(&pool)
-        .await
-        .expect("查询未读应成功");
-    assert!(unread.is_empty(), "旧库升级后既有会话应零未读");
-
-    // 列约束：NOT NULL DEFAULT 0（省略该列的写入同样取 0）
-    let (notnull, default_value): (i64, Option<String>) = sqlx::query_as(
-        "SELECT \"notnull\", dflt_value FROM pragma_table_info('sessions') WHERE name = 'last_read_at'",
-    )
-    .fetch_one(&pool)
-    .await
-    .expect("查询列属性应成功");
-    assert_eq!(notnull, 1, "新增列应为 NOT NULL");
-    assert_eq!(default_value.as_deref(), Some("0"), "新增列默认值应为 0");
-
-    // 省略列写入取默认 0：新会话 + 晚于的助手消息 → 产生未读
-    let new_session = Uuid::new_v4();
-    sqlx::query("INSERT INTO sessions (id, started_at) VALUES (?, 0)")
-        .bind(new_session.to_string())
-        .execute(&pool)
-        .await
-        .expect("省略新列写入应成功");
-    sqlx::query(
-        "INSERT INTO messages (id, session_id, role, content, created_at, source) \
-         VALUES (?, ?, 'assistant', '新回复', 300, 'local')",
-    )
-    .bind(Uuid::new_v4().to_string())
-    .bind(new_session.to_string())
-    .execute(&pool)
-    .await
-    .expect("写入新式消息应成功");
-    let unread = crate::repo::messages::list_unread_counts(&pool)
-        .await
-        .expect("查询未读应成功");
-    assert_eq!(
-        unread.get(&new_session).copied(),
-        Some(1),
-        "新会话晚于默认基线的助手消息应计未读"
-    );
-}
-
-/// 旧库升级：messages 新增发送者身份两列（可空无默认）与 session_members 成员表；
-/// 旧行两列为 NULL、省略新列写入成功、成员表唯一约束生效。
-///
-/// 说明:
-/// - 模拟口径：在已全量迁移的测试库上删除新增表 / 索引 / 列还原"旧库"状态，
-///   写入旧式数据后执行本版 migration 文件（与 `sqlx::migrate!` 应用的是同一份 SQL）。
-/// - 带索引的列必须先从属于它的索引删起，否则 `DROP COLUMN` 失败。
-#[tokio::test]
-async fn sender_identity_migration_on_upgrade() {
-    let pool = database::init_test_pool()
-        .await
-        .expect("测试数据库初始化失败");
-
-    // 空库全量迁移后即含新列与新表
-    for column in ["sender_ref", "sender_name"] {
-        let (notnull, default_value): (i64, Option<String>) = sqlx::query_as(
-            "SELECT \"notnull\", dflt_value FROM pragma_table_info('messages') WHERE name = ?",
-        )
-        .bind(column)
-        .fetch_one(&pool)
-        .await
-        .expect("查询列属性应成功");
-        assert_eq!(notnull, 0, "sender 身份列应可空");
-        assert_eq!(default_value, None, "sender 身份列应无默认值");
-    }
-    let table: Option<String> = sqlx::query_scalar(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session_members'",
-    )
-    .fetch_optional(&pool)
-    .await
-    .expect("查询表应成功");
-    assert_eq!(
-        table.as_deref(),
-        Some("session_members"),
-        "空库初始化后应含 session_members 表"
-    );
-
-    // 还原旧库：移除新增表 / 索引 / 列（列上索引必须先删，否则 DROP COLUMN 失败）
-    sqlx::query("DROP TABLE session_members")
-        .execute(&pool)
-        .await
-        .expect("删除新增表以模拟旧库应成功");
-    sqlx::query("DROP INDEX idx_messages_sender_ref")
-        .execute(&pool)
-        .await
-        .expect("删除新增索引以模拟旧库应成功");
-    sqlx::query("ALTER TABLE messages DROP COLUMN sender_ref")
-        .execute(&pool)
-        .await
-        .expect("删除新增列以模拟旧库应成功");
-    sqlx::query("ALTER TABLE messages DROP COLUMN sender_name")
-        .execute(&pool)
-        .await
-        .expect("删除新增列以模拟旧库应成功");
-
-    // 旧式写入：消息必须归属存在的会话（外键约束）
-    let session_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO sessions (id, started_at) VALUES (?, 0)")
-        .bind(session_id.to_string())
-        .execute(&pool)
-        .await
-        .expect("插入 session fixture 应成功");
-    sqlx::query(
-        "INSERT INTO messages (id, session_id, role, content, created_at, source) \
-         VALUES (?, ?, 'user', '旧消息', 1, 'local')",
-    )
-    .bind(Uuid::new_v4().to_string())
-    .bind(session_id.to_string())
-    .execute(&pool)
-    .await
-    .expect("写入旧式消息应成功");
-
-    // 执行本版 migration（迁移文件内容即被 sqlx::migrate! 应用的 SQL）
-    sqlx::raw_sql(include_str!("../../migrations/20261007_v2.6_identity.sql"))
-        .execute(&pool)
-        .await
-        .expect("执行新增 migration 应成功");
-
-    // 旧行两列为 NULL
-    let (sender_ref, sender_name): (Option<String>, Option<String>) =
-        sqlx::query_as("SELECT sender_ref, sender_name FROM messages WHERE content = '旧消息'")
-            .fetch_one(&pool)
-            .await
-            .expect("读取旧行应成功");
-    assert_eq!(sender_ref, None, "旧行 sender_ref 应为 NULL");
-    assert_eq!(sender_name, None, "旧行 sender_name 应为 NULL");
-
-    // 省略新列的写入成功且取 NULL
-    sqlx::query(
-        "INSERT INTO messages (id, session_id, role, content, created_at, source) \
-         VALUES (?, ?, 'assistant', '新消息', 2, 'local')",
-    )
-    .bind(Uuid::new_v4().to_string())
-    .bind(session_id.to_string())
-    .execute(&pool)
-    .await
-    .expect("省略新列写入应成功");
-    let (sender_ref, sender_name): (Option<String>, Option<String>) =
-        sqlx::query_as("SELECT sender_ref, sender_name FROM messages WHERE content = '新消息'")
-            .fetch_one(&pool)
-            .await
-            .expect("读取新行应成功");
-    assert_eq!(sender_ref, None, "省略列写入应取 NULL");
-    assert_eq!(sender_name, None, "省略列写入应取 NULL");
-
-    // UNIQUE(session_id, platform_ref) 生效：同键二次插入被拒绝，异键正常
-    sqlx::query(
-        "INSERT INTO session_members (session_id, platform_ref, name, first_seen_at, last_seen_at) \
-         VALUES (?, 'u_a', '成员', 10, 20)",
-    )
-    .bind(session_id.to_string())
-    .execute(&pool)
-    .await
-    .expect("插入成员行应成功");
-    let dup = sqlx::query(
-        "INSERT INTO session_members (session_id, platform_ref, name, first_seen_at, last_seen_at) \
-         VALUES (?, 'u_a', '成员', 10, 20)",
-    )
-    .bind(session_id.to_string())
-    .execute(&pool)
-    .await
-    .expect_err("同 (session_id, platform_ref) 应被 UNIQUE 拒绝");
-    let unique_in_chain = std::iter::successors(std::error::Error::source(&dup), |e| e.source())
-        .map(|e| e.to_string())
-        .chain([dup.to_string()])
-        .any(|msg| msg.contains("UNIQUE"));
-    assert!(
-        unique_in_chain,
-        "底层错误链应含 UNIQUE 约束冲突，实际: {dup}"
-    );
-    sqlx::query(
-        "INSERT INTO session_members (session_id, platform_ref, name, first_seen_at, last_seen_at) \
-         VALUES (?, 'u_b', '另一成员', 30, 40)",
-    )
-    .bind(session_id.to_string())
-    .execute(&pool)
-    .await
-    .expect("不同 platform_ref 写入应成功");
-}
-
-/// 旧库升级：新增 message_attachments 附件表与三个索引；
-/// 列缺省值、外键级联在升级后的旧库上生效。
-///
-/// 说明:
-/// - 模拟口径：在已全量迁移的测试库上删除新增表还原“旧库”状态，
-///   写入旧式数据后执行本版 migration 文件（与 `sqlx::migrate!` 应用的是同一份 SQL）。
-#[tokio::test]
-async fn attachments_migration_on_upgrade() {
-    let pool = database::init_test_pool()
-        .await
-        .expect("测试数据库初始化失败");
-
-    // 空库全量迁移后即含附件表与三个索引
-    let table: Option<String> = sqlx::query_scalar(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'message_attachments'",
-    )
-    .fetch_optional(&pool)
-    .await
-    .expect("查询表应成功");
-    assert_eq!(
-        table.as_deref(),
-        Some("message_attachments"),
-        "空库初始化后应含 message_attachments 表"
-    );
-    for index in [
-        "idx_attachments_message_id",
-        "idx_attachments_status",
-        "idx_attachments_md5",
-    ] {
-        let found: Option<String> =
-            sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?")
-                .bind(index)
-                .fetch_optional(&pool)
-                .await
-                .expect("查询索引应成功");
-        assert_eq!(
-            found.as_deref(),
-            Some(index),
-            "空库初始化后应含索引 {index}"
-        );
-    }
-
-    // 还原旧库：删除新增表（表上索引随表一并删除）
-    sqlx::query("DROP TABLE message_attachments")
-        .execute(&pool)
-        .await
-        .expect("删除新增表以模拟旧库应成功");
-
-    // 旧式数据：消息必须归属存在的会话（外键约束）
-    let session_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO sessions (id, started_at) VALUES (?, 0)")
-        .bind(session_id.to_string())
-        .execute(&pool)
-        .await
-        .expect("插入 session fixture 应成功");
-    let message_id = Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO messages (id, session_id, role, content, created_at, source) \
-         VALUES (?, ?, 'user', '旧消息', 1, 'local')",
-    )
-    .bind(message_id.to_string())
-    .bind(session_id.to_string())
-    .execute(&pool)
-    .await
-    .expect("写入旧式消息应成功");
-
-    // 执行本版 migration（迁移文件内容即被 sqlx::migrate! 应用的 SQL）
-    sqlx::raw_sql(include_str!(
-        "../../migrations/20261008_v2.6_attachments.sql"
-    ))
-    .execute(&pool)
-    .await
-    .expect("执行新增 migration 应成功");
-
-    // 缺省值：省略可选列写入取默认（source_ref '' / status pending / 时间 0）
-    let id: i64 = sqlx::query_scalar(
-        "INSERT INTO message_attachments (message_id, kind) VALUES (?, 'image') RETURNING id",
-    )
-    .bind(message_id.to_string())
-    .fetch_one(&pool)
-    .await
-    .expect("省略可选列写入应成功");
-    let (source_ref, status, created_at, updated_at): (String, String, i64, i64) = sqlx::query_as(
-        "SELECT source_ref, status, created_at, updated_at FROM message_attachments WHERE id = ?",
-    )
-    .bind(id)
-    .fetch_one(&pool)
-    .await
-    .expect("读取默认值应成功");
-    assert_eq!(source_ref, "", "source_ref 缺省应为空串");
-    assert_eq!(status, "pending", "status 缺省应为 pending");
-    assert_eq!(created_at, 0, "created_at 缺省应为 0");
-    assert_eq!(updated_at, 0, "updated_at 缺省应为 0");
-
-    // 完整字段写入回读
-    sqlx::query(
-        "INSERT INTO message_attachments \
-             (message_id, kind, source_ref, md5, size, width, height, sub_type, status, \
-              description, description_model, created_at, updated_at) \
-         VALUES (?, 'image', 'images/a.png', 'aabbccddeeff00112233445566778899', 1024, 640, 480, \
-                 'photo', 'done', '一只橘猫', 'vision-mock', 10, 20)",
-    )
-    .bind(message_id.to_string())
-    .execute(&pool)
-    .await
-    .expect("完整字段写入应成功");
-    let (md5, description): (String, String) = sqlx::query_as(
-        "SELECT md5, description FROM message_attachments WHERE message_id = ? AND status = 'done'",
-    )
-    .bind(message_id.to_string())
-    .fetch_one(&pool)
-    .await
-    .expect("读取完整字段应成功");
-    assert_eq!(md5, "aabbccddeeff00112233445566778899");
-    assert_eq!(description, "一只橘猫");
-
-    // 外键级联：删除消息后附件行随之消失
-    sqlx::query("DELETE FROM messages WHERE id = ?")
-        .bind(message_id.to_string())
-        .execute(&pool)
-        .await
-        .expect("删除消息应成功");
-    let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM message_attachments WHERE message_id = ?")
-            .bind(message_id.to_string())
-            .fetch_one(&pool)
-            .await
-            .expect("计数应成功");
-    assert_eq!(count, 0, "删除消息后附件应级联删除");
-}
-
-/// 旧库升级：channel_bindings 新表与 messages 平台消息 ID 列 / 部分唯一索引；
-/// 默认值与唯一约束在升级后的旧库上生效。
-///
-/// 说明:
-/// - 模拟口径：在已全量迁移的测试库上删除新增索引 / 表 / 列还原"旧库"状态
-///   （带索引的列必须先删所属索引，否则 `DROP COLUMN` 失败），写入旧式数据后
-///   执行本版 migration 文件（与 `sqlx::migrate!` 应用的是同一份 SQL）。
-#[tokio::test]
-async fn channels_migration_on_upgrade() {
-    let pool = database::init_test_pool()
-        .await
-        .expect("测试数据库初始化失败");
-
-    // 空库全量迁移后即含新表 / 新索引 / 新列
-    let table: Option<String> = sqlx::query_scalar(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'channel_bindings'",
-    )
-    .fetch_optional(&pool)
-    .await
-    .expect("查询表应成功");
-    assert_eq!(
-        table.as_deref(),
-        Some("channel_bindings"),
-        "空库初始化后应含 channel_bindings 表"
-    );
-    let index: Option<String> = sqlx::query_scalar(
-        "SELECT name FROM sqlite_master WHERE type = 'index' \
-         AND name = 'idx_messages_platform_message_id'",
-    )
-    .fetch_optional(&pool)
-    .await
-    .expect("查询索引应成功");
-    assert_eq!(
-        index.as_deref(),
-        Some("idx_messages_platform_message_id"),
-        "空库初始化后应含平台消息 ID 索引"
-    );
-    let (notnull, default_value): (i64, Option<String>) = sqlx::query_as(
-        "SELECT \"notnull\", dflt_value FROM pragma_table_info('messages') \
-         WHERE name = 'platform_message_id'",
-    )
-    .fetch_one(&pool)
-    .await
-    .expect("查询列属性应成功");
-    assert_eq!(notnull, 0, "platform_message_id 应可空");
-    assert_eq!(default_value, None, "platform_message_id 应无默认值");
-
-    // 还原旧库：移除新增索引 / 表 / 列（列上索引必须先删，否则 DROP COLUMN 失败）
-    sqlx::query("DROP INDEX idx_messages_platform_message_id")
-        .execute(&pool)
-        .await
-        .expect("删除新增索引以模拟旧库应成功");
-    sqlx::query("DROP TABLE channel_bindings")
-        .execute(&pool)
-        .await
-        .expect("删除新增表以模拟旧库应成功");
-    sqlx::query("ALTER TABLE messages DROP COLUMN platform_message_id")
-        .execute(&pool)
-        .await
-        .expect("删除新增列以模拟旧库应成功");
-
-    // 旧式写入：消息必须归属存在的会话（外键约束）
-    let session_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO sessions (id, started_at) VALUES (?, 0)")
-        .bind(session_id.to_string())
-        .execute(&pool)
-        .await
-        .expect("插入 session fixture 应成功");
-    sqlx::query(
-        "INSERT INTO messages (id, session_id, role, content, created_at, source) \
-         VALUES (?, ?, 'user', '旧消息', 1, 'local')",
-    )
-    .bind(Uuid::new_v4().to_string())
-    .bind(session_id.to_string())
-    .execute(&pool)
-    .await
-    .expect("写入旧式消息应成功");
-
-    // 执行本版 migration（迁移文件内容即被 sqlx::migrate! 应用的 SQL）
-    sqlx::raw_sql(include_str!("../../migrations/20261010_v2.7_channels.sql"))
-        .execute(&pool)
-        .await
-        .expect("执行新增 migration 应成功");
-
-    // 旧行 platform_message_id 为 NULL
-    let old_platform_id: Option<String> =
-        sqlx::query_scalar("SELECT platform_message_id FROM messages WHERE content = '旧消息'")
-            .fetch_one(&pool)
-            .await
-            .expect("读取旧行应成功");
-    assert_eq!(old_platform_id, None, "旧行 platform_message_id 应为 NULL");
-
-    // 绑定表默认值：省略可选列写入取默认（enabled 1 / allow_proactive 0 / 时间 0）
-    sqlx::query("INSERT INTO channel_bindings (channel, external_ref) VALUES ('qq', 'c2c:10001')")
-        .execute(&pool)
-        .await
-        .expect("省略可选列写入应成功");
-    let (persona_uid, enabled, allow_proactive, created_at, updated_at): (
-        Option<String>,
-        i64,
-        i64,
-        i64,
-        i64,
-    ) = sqlx::query_as(
-        "SELECT persona_uid, enabled, allow_proactive, created_at, updated_at \
-         FROM channel_bindings WHERE channel = 'qq' AND external_ref = 'c2c:10001'",
-    )
-    .fetch_one(&pool)
-    .await
-    .expect("读取默认值应成功");
-    assert_eq!(persona_uid, None, "persona_uid 缺省应为 NULL（未覆盖）");
-    assert_eq!(enabled, 1, "enabled 缺省应为 1");
-    assert_eq!(allow_proactive, 0, "allow_proactive 缺省应为 0");
-    assert_eq!(created_at, 0, "created_at 缺省应为 0");
-    assert_eq!(updated_at, 0, "updated_at 缺省应为 0");
-
-    // 完整字段写入回读
-    sqlx::query(
-        "INSERT INTO channel_bindings \
-             (channel, external_ref, persona_uid, enabled, allow_proactive, created_at, updated_at) \
-         VALUES ('qq', 'group:20002', 'char-0001', 0, 1, 10, 20)",
-    )
-    .execute(&pool)
-    .await
-    .expect("完整字段写入应成功");
-    let (persona_uid, enabled, allow_proactive): (Option<String>, i64, i64) = sqlx::query_as(
-        "SELECT persona_uid, enabled, allow_proactive FROM channel_bindings \
-         WHERE channel = 'qq' AND external_ref = 'group:20002'",
-    )
-    .fetch_one(&pool)
-    .await
-    .expect("读取完整字段应成功");
-    assert_eq!(persona_uid.as_deref(), Some("char-0001"));
-    assert_eq!(enabled, 0);
-    assert_eq!(allow_proactive, 1);
-
-    // UNIQUE(channel, external_ref) 生效：同键二次插入被拒绝，异键正常
-    let dup = sqlx::query(
-        "INSERT INTO channel_bindings (channel, external_ref) VALUES ('qq', 'c2c:10001')",
-    )
-    .execute(&pool)
-    .await;
-    assert!(dup.is_err(), "同 (channel, external_ref) 应被 UNIQUE 拒绝");
-    sqlx::query("INSERT INTO channel_bindings (channel, external_ref) VALUES ('qq', 'c2c:10002')")
-        .execute(&pool)
-        .await
-        .expect("不同 external_ref 写入应成功");
-    sqlx::query(
-        "INSERT INTO channel_bindings (channel, external_ref) VALUES ('telegram', 'c2c:10001')",
-    )
-    .execute(&pool)
-    .await
-    .expect("不同 channel 同 external_ref 写入应成功");
-
-    // messages 平台消息 ID：同会话重复插入被拒绝（部分唯一索引兜底幂等）
-    sqlx::query(
-        "INSERT INTO messages (id, session_id, role, content, created_at, source, platform_message_id) \
-         VALUES (?, ?, 'user', '平台消息', 2, 'local', 'pm_1')",
-    )
-    .bind(Uuid::new_v4().to_string())
-    .bind(session_id.to_string())
-    .execute(&pool)
-    .await
-    .expect("同会话首条平台消息应写入成功");
-    let dup_msg = sqlx::query(
-        "INSERT INTO messages (id, session_id, role, content, created_at, source, platform_message_id) \
-         VALUES (?, ?, 'user', '平台消息重复', 3, 'local', 'pm_1')",
-    )
-    .bind(Uuid::new_v4().to_string())
-    .bind(session_id.to_string())
-    .execute(&pool)
-    .await;
-    assert!(
-        dup_msg.is_err(),
-        "同会话重复 platform_message_id 应被部分唯一索引拒绝"
-    );
-
-    // 不同会话相同平台消息 ID 允许
-    let other_session = Uuid::new_v4();
-    sqlx::query("INSERT INTO sessions (id, started_at) VALUES (?, 0)")
-        .bind(other_session.to_string())
-        .execute(&pool)
-        .await
-        .expect("插入另一 session fixture 应成功");
-    sqlx::query(
-        "INSERT INTO messages (id, session_id, role, content, created_at, source, platform_message_id) \
-         VALUES (?, ?, 'user', '另一会话', 4, 'local', 'pm_1')",
-    )
-    .bind(Uuid::new_v4().to_string())
-    .bind(other_session.to_string())
-    .execute(&pool)
-    .await
-    .expect("不同会话相同平台消息 ID 应允许写入");
-
-    // NULL 平台消息 ID 多行允许（部分唯一索引不约束 NULL）
-    for i in 0..3 {
-        sqlx::query(
-            "INSERT INTO messages (id, session_id, role, content, created_at, source) \
-             VALUES (?, ?, 'assistant', '本地消息', ?, 'local')",
-        )
-        .bind(Uuid::new_v4().to_string())
-        .bind(session_id.to_string())
-        .bind(10 + i)
-        .execute(&pool)
-        .await
-        .expect("NULL 平台消息 ID 写入应成功");
-    }
-}
-/// 旧库升级：messages.recalled_at 撤回列；升级后旧行保持 NULL。
-///
-/// 说明:
-/// - 模拟口径：在已全量迁移的测试库上 `DROP COLUMN` 还原"旧库"状态，
-///   写入旧式数据后执行本版 migration 文件（与 `sqlx::migrate!` 应用的是同一份 SQL）。
-#[tokio::test]
-async fn messages_recalled_at_migration_on_upgrade() {
-    let pool = database::init_test_pool()
-        .await
-        .expect("测试数据库初始化失败");
-
-    // 空库全量迁移后即含新列（可空、无默认值）
-    let (notnull, default_value): (i64, Option<String>) = sqlx::query_as(
-        "SELECT \"notnull\", dflt_value FROM pragma_table_info('messages') \
-         WHERE name = 'recalled_at'",
-    )
-    .fetch_one(&pool)
-    .await
-    .expect("查询列属性应成功");
-    assert_eq!(notnull, 0, "recalled_at 应可空");
-    assert_eq!(default_value, None, "recalled_at 应无默认值");
-
-    // 还原旧库：移除本版新增列与新增表（migration 文件为一次升级单元）
-    sqlx::query("ALTER TABLE messages DROP COLUMN recalled_at")
-        .execute(&pool)
-        .await
-        .expect("删除新增列以模拟旧库应成功");
-    sqlx::query("DROP TABLE sticker_assets")
-        .execute(&pool)
-        .await
-        .expect("删除新增表以模拟旧库应成功");
-
-    // 旧式写入：消息必须归属存在的会话（外键约束）
-    let session_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO sessions (id, started_at) VALUES (?, 0)")
-        .bind(session_id.to_string())
-        .execute(&pool)
-        .await
-        .expect("插入 session fixture 应成功");
-    sqlx::query(
-        "INSERT INTO messages (id, session_id, role, content, created_at, source) \
-         VALUES (?, ?, 'user', '旧消息', 1, 'local')",
-    )
-    .bind(Uuid::new_v4().to_string())
-    .bind(session_id.to_string())
-    .execute(&pool)
-    .await
-    .expect("写入旧式消息应成功");
-
-    // 执行本版 migration（迁移文件内容即被 sqlx::migrate! 应用的 SQL）
-    sqlx::raw_sql(include_str!(
-        "../../migrations/20261017_v2.9_recall_stickers.sql"
-    ))
-    .execute(&pool)
-    .await
-    .expect("执行新增 migration 应成功");
-
-    // 旧行 recalled_at 为 NULL（历史消息无撤回信息）
-    let old_recalled: Option<i64> =
-        sqlx::query_scalar("SELECT recalled_at FROM messages WHERE content = '旧消息'")
-            .fetch_one(&pool)
-            .await
-            .expect("读取旧行应成功");
-    assert_eq!(old_recalled, None, "旧行 recalled_at 应为 NULL");
-}
-
-/// 旧库升级：sticker_assets 表情资产表与 md5 索引；升级后默认值生效。
-#[tokio::test]
-async fn sticker_assets_migration_on_upgrade() {
-    let pool = database::init_test_pool()
-        .await
-        .expect("测试数据库初始化失败");
-
-    // 空库全量迁移后即含新表 / 新索引
-    let table: Option<String> = sqlx::query_scalar(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sticker_assets'",
-    )
-    .fetch_optional(&pool)
-    .await
-    .expect("查询表应成功");
-    assert_eq!(
-        table.as_deref(),
-        Some("sticker_assets"),
-        "空库初始化后应含 sticker_assets 表"
-    );
-    let index: Option<String> = sqlx::query_scalar(
-        "SELECT name FROM sqlite_master WHERE type = 'index' \
-         AND name = 'idx_sticker_assets_md5'",
-    )
-    .fetch_optional(&pool)
-    .await
-    .expect("查询索引应成功");
-    assert_eq!(
-        index.as_deref(),
-        Some("idx_sticker_assets_md5"),
-        "空库初始化后应含 md5 索引"
-    );
-
-    // 还原旧库：移除本版新增表与新增列（DROP TABLE 连带删除 md5 索引）
-    sqlx::query("DROP TABLE sticker_assets")
-        .execute(&pool)
-        .await
-        .expect("删除新增表以模拟旧库应成功");
-    sqlx::query("ALTER TABLE messages DROP COLUMN recalled_at")
-        .execute(&pool)
-        .await
-        .expect("删除新增列以模拟旧库应成功");
-
-    // 执行本版 migration
-    sqlx::raw_sql(include_str!(
-        "../../migrations/20261017_v2.9_recall_stickers.sql"
-    ))
-    .execute(&pool)
-    .await
-    .expect("执行新增 migration 应成功");
-
-    // 表 / 索引恢复；省略可选列写入取默认（tags '[]' / 时间 0 / 其余 NULL）
-    let index: Option<String> = sqlx::query_scalar(
-        "SELECT name FROM sqlite_master WHERE type = 'index' \
-         AND name = 'idx_sticker_assets_md5'",
-    )
-    .fetch_optional(&pool)
-    .await
-    .expect("查询索引应成功");
-    assert_eq!(
-        index.as_deref(),
-        Some("idx_sticker_assets_md5"),
-        "升级后应恢复 md5 索引"
-    );
-    sqlx::query("INSERT INTO sticker_assets (file_name, file_path) VALUES ('a.png', 'a.png')")
-        .execute(&pool)
-        .await
-        .expect("省略可选列写入应成功");
-    let (tags, created_at, updated_at): (String, i64, i64) = sqlx::query_as(
-        "SELECT tags, created_at, updated_at FROM sticker_assets WHERE file_name = 'a.png'",
-    )
-    .fetch_one(&pool)
-    .await
-    .expect("读取默认值应成功");
-    assert_eq!(tags, "[]", "tags 缺省应为 JSON 空数组");
-    assert_eq!(created_at, 0, "created_at 缺省应为 0");
-    assert_eq!(updated_at, 0, "updated_at 缺省应为 0");
 }

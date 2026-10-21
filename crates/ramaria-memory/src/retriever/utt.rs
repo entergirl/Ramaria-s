@@ -7,7 +7,6 @@
 //! - utt 块按 `utt_max_entries` 参与容量治理，超出上限的 110% 时驱逐最旧块
 
 use crate::bm25::tokenize;
-use crate::utt::decode_embedding;
 use crate::vector::{VectorHit, VectorIndex, make_vector_label, parse_vector_label};
 
 use super::Retriever;
@@ -41,11 +40,16 @@ impl Retriever {
         self.evict_utt_if_needed();
     }
 
-    /// 从存储层 `UttBlock` 直接索引（解码 f32 BLOB 向量）。
+    /// 从存储层 `UttBlock` 直接索引。
     ///
-    /// 说明:
-    /// - embedding BLOB 解码失败（数据损坏）→ 记 warn，仅入内存文档（子串降级可用）。
-    pub fn index_utt_block(&mut self, block: &ramaria_core::types::UttBlock) {
+    /// 参数:
+    /// - `block`: 块行（原文与边界）。
+    /// - `vector`: 块向量（由调用方从向量表取得；None 表示无向量，子串降级可用）。
+    pub fn index_utt_block(
+        &mut self,
+        block: &ramaria_core::types::UttBlock,
+        vector: Option<Vec<f32>>,
+    ) {
         let doc = UttDocView {
             id: block.id,
             persona_uid: block.persona_uid.clone(),
@@ -53,16 +57,6 @@ impl Retriever {
             block_text: block.block_text.clone(),
             msg_count: block.msg_count,
             created_at: block.created_at,
-        };
-        let vector = match block.embedding.as_deref() {
-            Some(blob) => match decode_embedding(blob) {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    tracing::warn!(block_id = block.id, %e, "utt 块 embedding 解码失败，仅入内存文档");
-                    None
-                }
-            },
-            None => None,
         };
         self.index_utt(&doc, vector);
     }

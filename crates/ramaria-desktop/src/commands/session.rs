@@ -110,6 +110,8 @@ pub struct MessageView {
     pub sender_ref: Option<String>,
     /// 外部平台发送者显示名（导入消息）；本地 / MCP 消息为 None。
     pub sender_name: Option<String>,
+    /// 撤回时刻（Unix 毫秒；None = 未撤回）
+    pub recalled_at: Option<i64>,
 }
 
 /// 由服务层会话详情视图构造前端详情（字段映射的唯一入口，便于单测锁定）。
@@ -140,6 +142,7 @@ fn message_view(m: &ramaria_service::SessionMessageView) -> MessageView {
         is_proactive: m.is_proactive,
         sender_ref: m.sender_ref.clone(),
         sender_name: m.sender_name.clone(),
+        recalled_at: m.recalled_at,
     }
 }
 
@@ -376,6 +379,7 @@ mod tests {
                 is_proactive: true,
                 sender_ref: None,
                 sender_name: None,
+                recalled_at: Some(1_700_000_040_000),
             }],
         };
 
@@ -398,6 +402,7 @@ mod tests {
         assert_eq!(msg.persona_uid.as_deref(), Some("char-0001"));
         assert_eq!(msg.created_at, 1_700_000_030_000);
         assert!(msg.is_proactive, "主动标记应透传");
+        assert_eq!(msg.recalled_at, Some(1_700_000_040_000), "撤回时刻应透传");
 
         // 未关闭会话：ended_at 为 None 保持；全量加载 has_more false
         let open = ramaria_service::SessionDetailView {

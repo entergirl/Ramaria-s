@@ -262,7 +262,7 @@ impl<'a> L1Summarizer<'a> {
                         warn!(%session_id, l1_id = %l1.id, error=%e, "写入 memory_l1 失败");
                         RamariaError::storage(format!("写入 session {session_id} L1 摘要失败: {e}"))
                     })?;
-                    self.write_back_keywords(session_id, l1, keywords, &pool_rows)
+                    self.write_back_keywords(session_id, keywords, &pool_rows)
                         .await;
                     saved_last = Some(l1.clone());
                     saved_rows += 1;
@@ -275,7 +275,7 @@ impl<'a> L1Summarizer<'a> {
                                 "写入 session {session_id} L1 摘要失败: {e}"
                             ))
                         })?;
-                        self.write_back_keywords(session_id, &row, keywords, &pool_rows)
+                        self.write_back_keywords(session_id, keywords, &pool_rows)
                             .await;
                         saved_last = Some(row);
                         saved_rows += 1;
@@ -468,7 +468,7 @@ impl<'a> L1Summarizer<'a> {
                                     "渐进式摘要：session {session_id} 段 L1 写库失败: {e}"
                                 ))
                             })?;
-                            self.write_back_keywords(session_id, row, &keywords, &pool_rows)
+                            self.write_back_keywords(session_id, &keywords, &pool_rows)
                                 .await;
                         }
                         debug!(

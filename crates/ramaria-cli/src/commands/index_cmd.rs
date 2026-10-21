@@ -23,7 +23,7 @@ pub async fn run(engine: &Arc<Engine>, json: bool) -> anyhow::Result<()> {
     let count = engine.rebuild_index().await.context("索引重建失败")?;
     let elapsed = start.elapsed();
 
-    // 重建已写回索引版本：刷新状态使状态机与事实对齐
+    // 重建完成后刷新状态使状态机与事实对齐
     // （缺索引的库在本次构建后脱离待构建状态）
     if let Err(e) = engine.refresh_setup_state().await {
         tracing::warn!(error = %e, "重建后刷新应用状态失败（降级不阻塞）");

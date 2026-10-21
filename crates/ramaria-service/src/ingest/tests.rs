@@ -703,7 +703,7 @@ async fn concurrent_ingest_from_two_engines_succeeds() {
     seed_persona(&storage, DEFAULT_PERSONA_UID).await;
     // 第二台引擎：同一库文件、独立连接池（模拟"桌面 + MCP"并存写同一库）
     let engine_b = engine_on_existing_db(
-        &dir.join("assistant.db"),
+        &dir.join("ramaria.db"),
         MockLlm::local(),
         RamariaConfig::default(),
     )

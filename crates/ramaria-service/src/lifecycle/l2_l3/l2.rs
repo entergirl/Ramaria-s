@@ -85,6 +85,8 @@ pub(crate) async fn check_l2_trigger(engine: &Engine, shutdown: Option<&AtomicBo
                 None
             };
             run_l2_extraction(engine, shutdown, &persona.uid, other_name).await;
+            // L2 新事件已产生：下一次召回重建内存索引并补算向量（不阻塞提取流程）
+            engine.mark_index_dirty();
         } else {
             skipped += 1;
             info!(

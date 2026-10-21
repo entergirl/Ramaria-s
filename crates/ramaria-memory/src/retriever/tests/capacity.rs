@@ -47,18 +47,13 @@ fn request_top_k_beyond_rrf_default_is_reachable() {
     );
 }
 
-/// 空 embedding（0 字节 BLOB）→ 解码失败按"无向量"降级为子串检索，
+/// 无向量块（调用方传 None）→ 仅入内存文档（子串降级可命中），
 /// 且不污染向量索引的期望维度（后续真实向量仍可用）。
-///
-/// 修复前: 空 BLOB 被解码为 0 维向量写入索引，索引首个期望维度被记为 0，
-/// 后续真实维度向量全部被拒绝，向量通道整体静默失效（下方向量断言会失败）。
-/// 修复后: 空 BLOB 视为非法输入，块仅入内存文档（子串降级可命中），
-/// 后续真实向量的写入与检索不受影响。
 #[test]
-fn index_utt_block_empty_blob_degrades_and_keeps_vector_channel_usable() {
+fn index_utt_block_none_vector_degrades_and_keeps_vector_channel_usable() {
     use ramaria_core::types::UttBlock;
     let mut r = Retriever::new();
-    let mut block = UttBlock::new(
+    let block = UttBlock::new(
         "char-0001".to_string(),
         uuid::Uuid::new_v4(),
         uuid::Uuid::new_v4(),
@@ -67,13 +62,12 @@ fn index_utt_block_empty_blob_degrades_and_keeps_vector_channel_usable() {
         3,
         1000,
     );
-    block.embedding = Some(Vec::new()); // 空 BLOB → 解码失败 → 按无向量降级
-    r.index_utt_block(&block);
+    r.index_utt_block(&block, None);
 
     // 向量索引为空 → 子串降级仍可命中该块
     let hits = r.search_utt("子串命中", Some(&[1.0, 0.0]), 5, Some("char-0001"));
     assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].channel, "substring", "空 BLOB 应降级为子串检索");
+    assert_eq!(hits[0].channel, "substring", "无向量块应降级为子串检索");
 
     // 后续真实向量写入不被 0 维记录污染 → 向量通道仍可用
     r.index_utt(

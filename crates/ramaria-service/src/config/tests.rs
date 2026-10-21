@@ -220,16 +220,6 @@ impl ramaria_core::traits::StoreCrud for MockStorage {
 
 #[async_trait::async_trait]
 impl ramaria_core::traits::StoreInfrastructure for MockStorage {
-    async fn insert_keyword_ref(
-        &self,
-        _k: &str,
-        _d: &str,
-        _i: &str,
-        _p: &str,
-        _w: f64,
-    ) -> RamariaResult<()> {
-        Ok(())
-    }
     async fn save_privacy_consent(
         &self,
         _c: &ramaria_core::types::PrivacyConsent,
@@ -252,12 +242,6 @@ impl ramaria_core::traits::StoreInfrastructure for MockStorage {
     }
     async fn get_schema_version(&self) -> RamariaResult<i32> {
         Ok(1)
-    }
-    async fn get_index_version(&self) -> RamariaResult<i32> {
-        Ok(1)
-    }
-    async fn set_index_version(&self, _v: i32) -> RamariaResult<()> {
-        Ok(())
     }
     async fn create_background_job(&self, _t: &str, _p: Option<&str>) -> RamariaResult<i64> {
         Ok(1)

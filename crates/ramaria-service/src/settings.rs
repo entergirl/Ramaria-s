@@ -253,20 +253,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// schema 版本：migration 后默认 1；非法值按存储层口径报错（不静默回退）。
+    /// schema 版本：migration 后为 3；非法值按存储层口径报错（不静默回退）。
     #[tokio::test]
     async fn schema_version_follows_storage_semantics() {
         let (engine, _storage, dir) = engine_with_db("settings-schema").await;
 
-        // 新库：migration 写入 '1'
+        // 新库：migration 写入 '3'
         assert_eq!(
             engine.schema_version().await.expect("读取应成功"),
-            1,
-            "新库 schema 版本应为 1"
+            3,
+            "新库 schema 版本应为 3"
         );
 
         // 直写非法值 → 存储层报错（结构化错误可见）
-        let pool = ramaria_storage::database::init_pool(Some(dir.join("assistant.db")))
+        let pool = ramaria_storage::database::init_pool(Some(dir.join("ramaria.db")))
             .await
             .expect("测试库连接应成功");
         sqlx::query("UPDATE schema_meta SET value = 'abc' WHERE key = 'schema_version'")

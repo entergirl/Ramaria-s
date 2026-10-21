@@ -598,6 +598,7 @@ fn browse_and_keyword_views_serde_roundtrip() {
             is_proactive: true,
             sender_ref: None,
             sender_name: None,
+            recalled_at: None,
         }],
     };
     let json = serde_json::to_string(&detail).expect("序列化成功");
@@ -608,6 +609,10 @@ fn browse_and_keyword_views_serde_roundtrip() {
     assert!(
         json.contains("\"is_proactive\":true"),
         "is_proactive 应序列化透出: {json}"
+    );
+    assert!(
+        json.contains("\"recalled_at\":null"),
+        "未撤回消息应序列化 recalled_at 为 null: {json}"
     );
     let back: SessionDetailView = serde_json::from_str(&json).expect("反序列化成功");
     assert_eq!(detail, back);

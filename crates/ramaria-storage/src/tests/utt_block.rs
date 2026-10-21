@@ -69,7 +69,6 @@ async fn utt_block_insert_and_get_latest() {
     assert_eq!(latest.msg_count, 3);
     assert_eq!(latest.time_span_ms, 120_000);
     assert_eq!(latest.block_text, "你好呀\n最近怎么样\n挺好的");
-    assert!(latest.embedding.is_none(), "未设置 embedding 时应为 None");
 }
 
 #[tokio::test]
@@ -182,39 +181,4 @@ async fn utt_block_empty_session_returns_none() {
         .await
         .unwrap();
     assert!(latest.is_none(), "无块会话应返回 None");
-}
-
-#[tokio::test]
-async fn utt_block_embedding_roundtrip() {
-    let (storage, persona_uid, session_id) = setup_utt_context().await;
-    let messages = storage.list_messages(session_id).await.unwrap();
-
-    // 构造 4 维 f32 向量的小端 BLOB
-    let vector = vec![0.1f32, 0.2, 0.3, 0.4];
-    let blob: Vec<u8> = vector.iter().flat_map(|v| v.to_le_bytes()).collect();
-
-    let mut block = UttBlock::new(
-        persona_uid,
-        session_id,
-        messages[0].id,
-        messages[2].id,
-        "带向量的块".to_string(),
-        3,
-        60_000,
-    );
-    block.embedding = Some(blob);
-    storage.insert_utt_block(&block).await.unwrap();
-
-    let latest = storage
-        .get_latest_utt_block_by_session(session_id)
-        .await
-        .unwrap()
-        .expect("应有块");
-    let stored = latest.embedding.expect("embedding 应往返保留");
-    assert_eq!(stored.len(), 16, "4 × f32 = 16 字节");
-    let back: Vec<f32> = stored
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
-        .collect();
-    assert_eq!(back, vector);
 }

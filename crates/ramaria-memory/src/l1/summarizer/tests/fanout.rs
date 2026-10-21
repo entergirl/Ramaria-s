@@ -85,42 +85,6 @@ async fn group_chat_fanout_generates_row_per_participant() {
     assert_eq!(result.unwrap().persona_uid.as_deref(), Some("char-0002"));
 }
 
-/// 分发行的关键词引用按行写入（doc_id = 各行 id、persona_uid = 各行 persona）。
-#[tokio::test]
-async fn fanout_rows_write_keyword_refs_per_row() {
-    let sid = Uuid::new_v4();
-    let storage = MockStorage::new();
-    storage.add_messages(sid, two_block_group_session(sid));
-
-    let llm = MockLlmProvider::new("test-model");
-    llm.set_responses(vec![
-        llm_json("块1 摘要", None),
-        llm_json("块2 摘要", Some("延续")),
-    ]);
-
-    let config = L1SummarizerConfig {
-        utt_splitter: Some(group_splitter_cfg()),
-        fanout_others: true,
-        ..Default::default()
-    };
-    let summarizer = L1Summarizer::new(&llm, &storage, config);
-    summarizer.summarize_session(sid).await.expect("应成功");
-
-    let saved = storage.saved_l1_entries();
-    let refs = storage.keyword_refs();
-    // llm_json 的关键词固定为「测试,关键词」→ 每行 2 条引用
-    assert_eq!(refs.len(), saved.len() * 2, "每行 2 个关键词各写一条引用");
-    for row in &saved {
-        let doc_id = row.id.to_string();
-        let persona = row.persona_uid.clone().unwrap_or_default();
-        let hits = refs
-            .iter()
-            .filter(|(_, doc, uid)| doc == &doc_id && uid == &persona)
-            .count();
-        assert_eq!(hits, 2, "各行引用应指向本行 id 与 persona（row={doc_id}）");
-    }
-}
-
 // =========================================================
 // 无他人参与 → 原行保留（NULL）
 // =========================================================

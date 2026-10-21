@@ -25,10 +25,10 @@ fn parse_db(args: &[&str]) -> PathBuf {
 fn db_path_uses_env_when_no_flag() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // safety: edition 2024 下 set_var 为 unsafe；测试内串行使用，无并发读
-    unsafe { std::env::set_var("RAMARIA_DB_PATH", "env-data/assistant.db") };
+    unsafe { std::env::set_var("RAMARIA_DB_PATH", "env-data/ramaria.db") };
     let db = parse_db(&["ramaria", "status"]);
     unsafe { std::env::remove_var("RAMARIA_DB_PATH") };
-    assert_eq!(db, PathBuf::from("env-data/assistant.db"));
+    assert_eq!(db, PathBuf::from("env-data/ramaria.db"));
 }
 
 /// `--db` 优先于环境变量（优先级：--db > env > 默认）。
@@ -36,7 +36,7 @@ fn db_path_uses_env_when_no_flag() {
 fn db_path_flag_overrides_env() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // safety: 同 db_path_uses_env_when_no_flag
-    unsafe { std::env::set_var("RAMARIA_DB_PATH", "env-data/assistant.db") };
+    unsafe { std::env::set_var("RAMARIA_DB_PATH", "env-data/ramaria.db") };
     let db = parse_db(&["ramaria", "--db", "flag-data/custom.db", "status"]);
     unsafe { std::env::remove_var("RAMARIA_DB_PATH") };
     assert_eq!(db, PathBuf::from("flag-data/custom.db"));
@@ -48,7 +48,7 @@ fn db_path_defaults_when_nothing_set() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     unsafe { std::env::remove_var("RAMARIA_DB_PATH") };
     let db = parse_db(&["ramaria", "status"]);
-    assert_eq!(db, PathBuf::from("data/ramaria_assistant.db"));
+    assert_eq!(db, PathBuf::from("data/ramaria.db"));
 }
 
 /// `probe run --no-rebuild-utt` 可解析，且映射到内部 rebuild_utt=false。
@@ -400,7 +400,7 @@ async fn close_engine_pool(engine: &Engine) {
 #[tokio::test]
 async fn init_app_loads_config_toml() {
     let dir = temp_test_dir("toml");
-    let db_path = dir.join("assistant.db");
+    let db_path = dir.join("ramaria.db");
     // 预写 config.toml：`[utt] theta_gap_minutes = 45`（与默认 30 不同，用于断言读取生效）
     std::fs::write(dir.join("config.toml"), "[utt]\ntheta_gap_minutes = 45\n").unwrap();
 
@@ -418,7 +418,7 @@ async fn init_app_loads_config_toml() {
 #[tokio::test]
 async fn init_app_generates_template_when_missing() {
     let dir = temp_test_dir("missing");
-    let db_path = dir.join("assistant.db");
+    let db_path = dir.join("ramaria.db");
 
     let engine = init_app(db_path).await.expect("init_app 应成功");
     assert_eq!(engine.config().utt.theta_gap_minutes, 10, "缺失时用默认值");
@@ -434,7 +434,7 @@ async fn init_app_generates_template_when_missing() {
 #[tokio::test]
 async fn init_app_falls_back_on_corrupt_config() {
     let dir = temp_test_dir("corrupt");
-    let db_path = dir.join("assistant.db");
+    let db_path = dir.join("ramaria.db");
     std::fs::write(dir.join("config.toml"), "这不是合法的 TOML [[[").unwrap();
 
     let engine = init_app(db_path).await.expect("损坏 config 不应阻塞启动");
@@ -451,7 +451,7 @@ async fn init_app_falls_back_on_corrupt_config() {
 #[tokio::test]
 async fn init_app_degrades_when_embedding_missing() {
     let dir = temp_test_dir("embed");
-    let db_path = dir.join("assistant.db");
+    let db_path = dir.join("ramaria.db");
     let pool = ramaria_storage::database::init_pool(Some(db_path.clone()))
         .await
         .unwrap();
@@ -478,7 +478,7 @@ async fn init_app_degrades_when_embedding_missing() {
 #[tokio::test]
 async fn init_app_uses_config_toml_backend_on_fresh_db() {
     let dir = temp_test_dir("backend");
-    let db_path = dir.join("assistant.db");
+    let db_path = dir.join("ramaria.db");
     // 预写 config.toml：deepseek 后端（新库 backend_config 表无任何记录）
     std::fs::write(
         dir.join("config.toml"),
@@ -520,7 +520,7 @@ async fn init_app_uses_config_toml_backend_on_fresh_db() {
 #[tokio::test]
 async fn init_app_prefers_config_toml_over_stale_db_backend() {
     let dir = temp_test_dir("backend-stale");
-    let db_path = dir.join("assistant.db");
+    let db_path = dir.join("ramaria.db");
     // 预写 config.toml：deepseek
     std::fs::write(
         dir.join("config.toml"),

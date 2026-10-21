@@ -24,21 +24,18 @@ use serde::{Deserialize, Serialize};
 /// - `backend_configured`: `backend_config` 是否已有记录。
 /// - `model_selected`: 线上 provider 已填 model_id；本地 provider 视为已选
 ///   （模型由本地推理服务侧决定，配置层不强制）。
-/// - `needs_indexing`: 记忆索引尚未构建（`schema_meta.index_version == 0`；
-///   该键缺失时按未构建口径返回 `0`）。
 /// - `embedding_available`: 嵌入模型已加载且可用（向量通道就绪）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetupStatus {
     pub backend_configured: bool,
     pub model_selected: bool,
-    pub needs_indexing: bool,
     pub embedding_available: bool,
 }
 
 impl SetupStatus {
     /// 核心配置是否就绪（嵌入模型缺失不影响此结果）。
     pub fn is_complete(&self) -> bool {
-        self.backend_configured && self.model_selected && !self.needs_indexing
+        self.backend_configured && self.model_selected
     }
 
     /// 缺失项的人类可读描述列表（顺序与配置向导步骤一致）。
@@ -49,9 +46,6 @@ impl SetupStatus {
         }
         if !self.model_selected {
             items.push("模型未选择（需指定使用的模型）");
-        }
-        if self.needs_indexing {
-            items.push("记忆索引待构建");
         }
         if !self.embedding_available {
             items.push("嵌入模型未配置（向量检索不可用，BM25+图谱仍可用）");

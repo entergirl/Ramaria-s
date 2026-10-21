@@ -108,6 +108,8 @@ pub(super) struct PreparedRequest {
     pub(super) persona: String,
     /// 本轮用户消息（已去除首尾空白）。
     pub(super) message: String,
+    /// 用户消息是否已在前置编排中落库（交互式入口为 true）。
+    pub(super) user_persisted: bool,
     pub(super) chat_request: ChatRequest,
 }
 
@@ -122,7 +124,7 @@ pub(super) struct PreparedRequest {
 /// 2. 交互式：应用状态门禁（主动模式由调用方预检）；
 /// 3. 后端配置快照 + 交互式：线上 provider 隐私确认（主动模式由调用方预检）；
 /// 4. 会话定位（交互式 / 通道式 / 主动模式三种语义）；
-/// 5. 历史窗口加载（配置驱动 + 预置上文前置）；
+/// 5. 历史窗口加载（配置驱动 + 预置上文前置），交互式随后先落库用户消息（首条消息不阻塞）；
 /// 6. 记忆召回（配置闸门 × 宿主策略）；
 /// 7. 交互式：弱反馈检测；
 /// 8. 脉络素材；
@@ -172,13 +174,36 @@ pub(super) async fn prepare_request(
     let group_conversation = is_group_conversation(&resolved.session);
     let history = step_load_history(storage, config, session_id, &input.seed_history, social).await;
 
+    // ---- 5.5 交互式用户消息先落库（首条消息不阻塞；历史窗口已加载，不含本条） ----
+    let user_persisted = if input.mode == ChatMode::Interactive && !input.message_in_history {
+        let user_message = Message::new(
+            session_id,
+            MessageRole::User,
+            message.to_string(),
+            MessageSource::Local,
+        )
+        .with_persona_uid(Some(persona.clone()));
+        storage.save_message(&user_message).await?;
+        true
+    } else {
+        false
+    };
+
     // ---- 6. 记忆召回（配置闸门 × 宿主策略） ----
     let (memory_context, rag_covered_labels, utt_context) =
         step_recall(engine, storage, config, &persona, message).await?;
 
     // ---- 7. 弱反馈检测（交互式；失败只 warn） ----
     if input.mode == ChatMode::Interactive {
-        step_detect_feedback(storage, config, session_id, &persona, message).await;
+        step_detect_feedback(
+            storage,
+            config,
+            session_id,
+            &persona,
+            message,
+            user_persisted,
+        )
+        .await;
     }
 
     // ---- 8. 脉络素材（跨会话近期摘要 + 最后活跃时间） ----
@@ -257,6 +282,7 @@ pub(super) async fn prepare_request(
         session_id,
         persona,
         message: message.to_string(),
+        user_persisted,
         chat_request,
     })
 }
@@ -553,7 +579,7 @@ pub(super) async fn step_resolve_session(
 /// 步骤 7（仅交互式）：弱反馈检测（S2 纠正 / S3 继续）。
 ///
 /// 说明:
-/// - 检测序列 = 会话已落库消息 + 追加的本轮用户消息（时间取当前），检测后不落库；
+/// - 检测序列 = 会话已落库消息（前置编排已落本轮用户消息时不再追加）+ 未落库时追加的本轮消息；
 /// - `[feedback].enabled=false` 或读取失败 / 写入失败时静默降级（记 warn，不阻塞生成）。
 async fn step_detect_feedback(
     storage: &dyn StorageBackend,
@@ -561,6 +587,7 @@ async fn step_detect_feedback(
     session_id: Uuid,
     persona: &str,
     message: &str,
+    user_persisted: bool,
 ) {
     if !config.feedback.enabled {
         return;
@@ -573,13 +600,16 @@ async fn step_detect_feedback(
             Vec::new()
         }
     };
-    // 追加当前用户消息作为检测输入的最后一条（时间戳取当前，供间隔判定）
-    recent.push(Message::new(
-        session_id,
-        MessageRole::User,
-        message.to_string(),
-        MessageSource::Local,
-    ));
+    // 本轮消息尚未落库时追加为检测输入最后一条（时间戳取当前，供间隔判定）；
+    // 已落库时列表中已含该条，不重复追加
+    if !user_persisted {
+        recent.push(Message::new(
+            session_id,
+            MessageRole::User,
+            message.to_string(),
+            MessageSource::Local,
+        ));
+    }
 
     if let Err(e) = crate::feedback::process_feedback_for_new_message(
         storage,

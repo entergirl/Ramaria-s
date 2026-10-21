@@ -6,14 +6,18 @@
 //! - 失败告警位与失败原因记录分离：告警位供宿主快速判定，原因记录供诊断与提示
 //! - 构建时间用于重建节流（`[index].refresh_interval_seconds` 冷却窗口），
 //!   写入密集期抑制整库重建风暴
+//! - 索引状态槽：构建路径写状态与进度，宿主读视图；进度回调在锁外派发
+//! - 后台构建以 CAS 在途标记互斥，构建任务结束复位
 //! - 纯内存原子 / 锁槽读写，不做 I/O 与日志，可高频调用
 
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use ramaria_core::lock::{read_recover, write_recover};
-use ramaria_core::types::now_ms;
+use ramaria_core::types::{IndexStatus, now_ms};
 
 use crate::index::{IndexBuildFailure, IndexStamp};
+use crate::types::{IndexProgress, IndexStatusView};
 
 use super::Engine;
 
@@ -117,5 +121,128 @@ impl Engine {
             return true;
         }
         now_ms().saturating_sub(last_build_ms) >= interval_seconds as i64 * 1_000
+    }
+}
+
+// =========================================================
+// 索引状态与进度（宿主展示 / 事件派发）
+// =========================================================
+
+impl Engine {
+    /// 当前索引状态视图（计算百分比；读锁内克隆后返回）。
+    pub fn index_status(&self) -> IndexStatusView {
+        let state = read_recover(&self.index_status_state, "engine.index_status_state").clone();
+        IndexStatusView {
+            status: state.status,
+            loaded: state.loaded,
+            total: state.total,
+            percent: crate::index::percent(state.status, state.loaded, state.total),
+            model: state.model,
+            last_error: state.last_error,
+            updated_at: state.updated_at,
+        }
+    }
+
+    /// 写入索引状态并派发一次进度事件（elapsed_ms 按 0 处理）。
+    pub(crate) fn set_index_status(
+        &self,
+        status: IndexStatus,
+        loaded: usize,
+        total: usize,
+        model: Option<String>,
+        last_error: Option<String>,
+    ) {
+        self.apply_index_status(status, loaded, total, model, last_error, 0);
+    }
+
+    /// 写入索引状态并派发带耗时的进度事件（构建期使用）。
+    pub(crate) fn set_index_progress(
+        &self,
+        status: IndexStatus,
+        loaded: usize,
+        total: usize,
+        model: Option<String>,
+        elapsed_ms: u64,
+    ) {
+        self.apply_index_status(status, loaded, total, model, None, elapsed_ms);
+    }
+
+    /// 状态槽写入 + 锁外派发进度事件。
+    fn apply_index_status(
+        &self,
+        status: IndexStatus,
+        loaded: usize,
+        total: usize,
+        model: Option<String>,
+        last_error: Option<String>,
+        elapsed_ms: u64,
+    ) {
+        {
+            let mut guard = write_recover(&self.index_status_state, "engine.index_status_state");
+            guard.status = status;
+            guard.loaded = loaded;
+            guard.total = total;
+            guard.model = model.clone();
+            guard.last_error = last_error;
+            guard.updated_at = now_ms();
+        }
+        let hook = read_recover(&self.index_progress_hook, "engine.index_progress_hook").clone();
+        if let Some(hook) = hook {
+            hook(&IndexProgress {
+                status,
+                loaded,
+                total,
+                percent: crate::index::percent(status, loaded, total),
+                elapsed_ms,
+                model,
+            });
+        }
+    }
+
+    /// 清除最近一次构建失败原因（保留其余状态字段）。
+    pub(crate) fn clear_index_status_error(&self) {
+        let mut guard = write_recover(&self.index_status_state, "engine.index_status_state");
+        guard.last_error = None;
+    }
+
+    /// 注册索引进度回调（宿主启动时注入；未注册时只更新状态）。
+    pub fn set_index_progress_hook(&self, hook: super::IndexProgressHook) {
+        let mut guard = write_recover(&self.index_progress_hook, "engine.index_progress_hook");
+        *guard = Some(hook);
+    }
+
+    /// 当前是否有索引构建任务在途。
+    pub(crate) fn is_index_build_inflight(&self) -> bool {
+        self.index_build_inflight.load(Ordering::Acquire)
+    }
+
+    /// 索引构建串行锁（后台构建与同步重建共用）。
+    pub(crate) fn index_build_lock(&self) -> &tokio::sync::Mutex<()> {
+        &self.index_build_lock
+    }
+
+    /// 启动后台索引构建（CAS 互斥）。
+    ///
+    /// 返回:
+    /// - `true`: 已启动构建任务（在途期间状态由构建路径推进）。
+    /// - `false`: 已有构建在途，本次调用被忽略。
+    pub fn start_index_build(self: &Arc<Self>) -> bool {
+        if self
+            .index_build_inflight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            tracing::debug!("索引构建已在途，忽略本次触发");
+            return false;
+        }
+        let engine = Arc::clone(self);
+        tokio::spawn(async move {
+            let result = crate::index::rebuild(engine.as_ref()).await;
+            if let Err(e) = result {
+                tracing::warn!(error = %e, "后台索引构建失败，保留旧索引");
+            }
+            engine.index_build_inflight.store(false, Ordering::Release);
+        });
+        true
     }
 }

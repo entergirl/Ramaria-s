@@ -13,9 +13,9 @@
 
 use super::*;
 use crate::test_support::{
-    DeterministicEmbedding, MockLlm, engine_with_db, engine_with_failable_storage,
-    engine_with_llm_and_config, engine_with_llm_config_and_embedding, seed_l1 as seed_l1_raw,
-    seed_persona,
+    CountingEmbedding, DeterministicEmbedding, MockLlm, engine_with_db,
+    engine_with_failable_storage, engine_with_llm_and_config, engine_with_llm_config_and_embedding,
+    seed_l1 as seed_l1_raw, seed_persona,
 };
 use crate::types::{RecallLayer, RecallRequest, RecallResult};
 use ramaria_core::config::RamariaConfig;
@@ -24,10 +24,12 @@ use ramaria_core::traits::{
     EmbeddingProvider, SETTING_BM25_INDEX_VERSION, StoreCrud, StoreInfrastructure,
 };
 use ramaria_core::types::{
-    EventRelation, EventRelationKind, MemoryEvent, Message, MessageRole, MessageSource,
+    EventRelation, EventRelationKind, IndexStatus, MemoryEvent, MemoryVector, Message, MessageRole,
+    MessageSource, now_ms,
 };
 use ramaria_memory::retriever::{SearchRequest, SearchResult};
 use ramaria_storage::SqliteStorage;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
@@ -90,44 +92,15 @@ async fn ensure_loaded_builds_once_and_searches() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// 索引版本写入：首次构建成功后写 `1`（供首次配置状态机判定"索引已构建"）；
-/// 沿用已加载索引的早退分支不写。
+/// 索引加载幂等：首次构建返回 true，已加载后重复调用走早退分支返回 false。
 #[tokio::test]
-async fn ensure_loaded_marks_index_version_after_build() {
+async fn ensure_loaded_is_idempotent() {
     let (engine, storage, dir) = engine_with_db("index-version").await;
     seed_persona(&storage, "char-0001").await;
     seed_l1(&storage, "char-0001", "用户最近工作压力很大，常常加班").await;
 
-    // 显式置 0（"尚未构建"），与缺键口径一致
-    storage
-        .set_index_version(0)
-        .await
-        .expect("写入索引版本应成功");
-
     assert!(engine.ensure_index_loaded().await.expect("加载成功"));
-    assert_eq!(
-        storage
-            .get_index_version()
-            .await
-            .expect("读取索引版本应成功"),
-        1,
-        "构建完成后应写入索引版本 1"
-    );
-
-    // 沿用已加载索引的早退分支不写版本
-    storage
-        .set_index_version(0)
-        .await
-        .expect("写入索引版本应成功");
     assert!(!engine.ensure_index_loaded().await.expect("重复加载成功"));
-    assert_eq!(
-        storage
-            .get_index_version()
-            .await
-            .expect("读取索引版本应成功"),
-        0,
-        "早退分支不应写入索引版本"
-    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -339,7 +312,7 @@ async fn cross_process_write_refreshes_index() {
     );
 
     // 另一"进程"视角：同一库文件上的第二个存储句柄写入新 L1
-    let db_path = dir.join("assistant.db");
+    let db_path = dir.join("ramaria.db");
     let pool = ramaria_storage::database::init_pool(Some(db_path))
         .await
         .expect("第二连接池应可创建");
@@ -426,7 +399,7 @@ async fn refresh_interval_defers_rebuild_within_cooldown() {
 
     // 另一"进程"写入新 L1（语料代次变化）：必须在同一库文件的第二个连接上写入，
     // 模拟"桌面写、MCP 读"的跨进程场景
-    let db_path = dir.join("assistant.db");
+    let db_path = dir.join("ramaria.db");
     let other = SqliteStorage::new(
         ramaria_storage::database::init_pool(Some(db_path))
             .await
@@ -495,7 +468,7 @@ async fn rebuild_loads_unbound_l1() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// 显式重建返回 L1 + L2 文档总数，并写回索引版本（供首次配置状态机判定）。
+/// 显式重建返回 L1 + L2 文档总数。
 #[tokio::test]
 async fn rebuild_index_returns_document_total() {
     let (engine, storage, dir) = engine_with_db("index-rebuild-total").await;
@@ -503,22 +476,8 @@ async fn rebuild_index_returns_document_total() {
     seed_l1(&storage, "char-0001", "用户喜欢喝咖啡").await;
     seed_l1(&storage, "char-0001", "用户最近开始学习游泳").await;
 
-    // 显式置 0（"尚未构建"），与缺键口径一致
-    storage
-        .set_index_version(0)
-        .await
-        .expect("写入索引版本应成功");
-
     let total = engine.rebuild_index().await.expect("重建应成功");
     assert_eq!(total, 2, "返回值应为 L1 + L2 视图总数");
-    assert_eq!(
-        storage
-            .get_index_version()
-            .await
-            .expect("读取索引版本应成功"),
-        1,
-        "重建完成后应写回索引版本 1"
-    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -882,6 +841,318 @@ async fn build_failure_record_tracks_and_clears() {
         engine.index_build_failure().is_none(),
         "恢复后应清除失败记录"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// L1 增量镜像：嵌入可用时向量同时写入向量表（指纹 model@dim#size）。
+#[tokio::test]
+async fn l1_incremental_index_writes_memory_vector() {
+    let embedding: Arc<dyn EmbeddingProvider> = Arc::new(DeterministicEmbedding::new());
+    let (engine, storage, dir) = engine_with_llm_config_and_embedding(
+        "index-l1-vector",
+        MockLlm::local(),
+        RamariaConfig::default(),
+        Some(embedding),
+    )
+    .await;
+    seed_persona(&storage, "char-0001").await;
+    let id = seed_l1(&storage, "char-0001", "用户最近在学游泳，每周去两次").await;
+    let l1 = storage
+        .get_memory_l1(id)
+        .await
+        .expect("读取 L1 应成功")
+        .expect("L1 应存在");
+
+    super::index_l1_into_mirrors(&engine, &l1).await;
+
+    let fingerprint =
+        crate::embedding_store::model_fingerprint(&ramaria_core::traits::EmbeddingModelInfo {
+            model_id: "mock-deterministic-embedding".to_string(),
+            dimension: DeterministicEmbedding::DIMENSION,
+        });
+    let rows = engine
+        .storage_ref()
+        .load_memory_vectors(&fingerprint)
+        .await
+        .expect("加载向量应成功");
+    assert_eq!(rows.len(), 1, "L1 增量应写入一条向量");
+    assert_eq!(rows[0].doc_type, ramaria_core::types::VECTOR_DOC_L1);
+    assert_eq!(rows[0].doc_id, id.to_string());
+    assert_eq!(rows[0].dim as usize, DeterministicEmbedding::DIMENSION);
+    assert_eq!(rows[0].vector.len(), DeterministicEmbedding::DIMENSION);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// =========================================================
+// 向量持久化、补算与状态机
+// =========================================================
+
+/// 装配一台带计数嵌入 mock 的引擎（测试统一入口）。
+async fn engine_with_counting_embedding(
+    tag: &str,
+    config: RamariaConfig,
+) -> (Engine, Arc<SqliteStorage>, Arc<CountingEmbedding>, PathBuf) {
+    let embedding = Arc::new(CountingEmbedding::new());
+    let provider: Arc<dyn EmbeddingProvider> = embedding.clone();
+    let (engine, storage, dir) =
+        engine_with_llm_config_and_embedding(tag, MockLlm::local(), config, Some(provider)).await;
+    (engine, storage, embedding, dir)
+}
+
+/// 造一条已落库的向量行。
+async fn seed_vector(
+    storage: &SqliteStorage,
+    doc_type: &str,
+    doc_id: &str,
+    model: &str,
+    text: &str,
+) {
+    let row = MemoryVector {
+        doc_type: doc_type.to_string(),
+        doc_id: doc_id.to_string(),
+        model: model.to_string(),
+        dim: CountingEmbedding::DIMENSION as u32,
+        vector: CountingEmbedding::vector(text),
+        updated_at: now_ms(),
+    };
+    storage
+        .upsert_memory_vector(&row)
+        .await
+        .expect("写入向量应成功");
+}
+
+/// 指纹匹配：已有向量直接装载，不触发任何嵌入调用，向量通道可命中。
+#[tokio::test]
+async fn build_loads_vectors_by_fingerprint_without_backfill() {
+    let (engine, storage, embedding, dir) =
+        engine_with_counting_embedding("index-vector-load", RamariaConfig::default()).await;
+    seed_persona(&storage, "char-0001").await;
+    let l1_id = seed_l1(&storage, "char-0001", "用户最近工作压力很大，常常加班").await;
+    let event = MemoryEvent::new(
+        "char-0001".to_string(),
+        "工作压力".to_string(),
+        "用户聊到工作压力".to_string(),
+        1_000,
+        2_000,
+    );
+    let event_id = storage.save_event(&event).await.expect("写入事件应成功");
+
+    let fingerprint = CountingEmbedding::fingerprint();
+    seed_vector(
+        &storage,
+        ramaria_core::types::VECTOR_DOC_L1,
+        &l1_id.to_string(),
+        &fingerprint,
+        "用户最近工作压力很大，常常加班",
+    )
+    .await;
+    seed_vector(
+        &storage,
+        ramaria_core::types::VECTOR_DOC_L2,
+        &event_id.to_string(),
+        &fingerprint,
+        "工作压力",
+    )
+    .await;
+
+    engine.rebuild_index().await.expect("重建应成功");
+
+    assert_eq!(embedding.batch_calls(), 0, "命中向量时不应批量嵌入");
+    assert_eq!(embedding.embed_calls(), 0, "命中向量时不应单条嵌入");
+    let view = engine.index_status();
+    assert_eq!(view.status, IndexStatus::Ready);
+    assert_eq!(view.loaded, 2);
+    assert_eq!(view.total, 2);
+    assert_eq!(view.percent, 100);
+    assert!(view.last_error.is_none());
+
+    let result = recall_l1(&engine, "工作压力").await;
+    assert!(
+        result.stats.channels.get("vector").copied().unwrap_or(0) > 0,
+        "已装载向量应参与向量通道: {:?}",
+        result.stats.channels
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 指纹不匹配：旧模型行不装载、不误用；当前缺失条目补算后按新指纹写入，旧行保留。
+#[tokio::test]
+async fn build_ignores_other_fingerprint_and_backfills_new_rows() {
+    let (engine, storage, embedding, dir) =
+        engine_with_counting_embedding("index-vector-mismatch", RamariaConfig::default()).await;
+    seed_persona(&storage, "char-0001").await;
+    let l1_id = seed_l1(&storage, "char-0001", "用户最近开始夜跑").await;
+
+    let old_model = "old-embedding@16#64";
+    seed_vector(
+        &storage,
+        ramaria_core::types::VECTOR_DOC_L1,
+        &l1_id.to_string(),
+        old_model,
+        "旧模型向量",
+    )
+    .await;
+    // 与当前语料无关的历史行：验证按模型过滤后仍然保留
+    seed_vector(
+        &storage,
+        ramaria_core::types::VECTOR_DOC_L1,
+        "stale-doc",
+        old_model,
+        "历史残留",
+    )
+    .await;
+
+    engine.rebuild_index().await.expect("重建应成功");
+
+    assert_eq!(embedding.batch_calls(), 1, "缺失条目应走一次批量补算");
+    let rows = storage
+        .load_memory_vectors(&CountingEmbedding::fingerprint())
+        .await
+        .expect("加载新指纹向量应成功");
+    assert_eq!(rows.len(), 1, "当前条目应按新指纹写入");
+    assert_eq!(rows[0].doc_id, l1_id.to_string());
+    let legacy = storage
+        .load_memory_vectors(old_model)
+        .await
+        .expect("加载旧指纹向量应成功");
+    assert_eq!(legacy.len(), 1, "无业务对应关系的旧指纹行应保留");
+    assert_eq!(legacy[0].doc_id, "stale-doc");
+    assert_eq!(engine.index_status().loaded, 1);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 补算批大小：严格不超过 `[index].embed_batch_size`（5 条 / 每批 2 → [2,2,1]）。
+#[tokio::test]
+async fn backfill_respects_configured_batch_size() {
+    let mut config = RamariaConfig::default();
+    config.index.embed_batch_size = 2;
+    let (engine, storage, embedding, dir) =
+        engine_with_counting_embedding("index-vector-batch", config).await;
+    seed_persona(&storage, "char-0001").await;
+    for index in 0..5 {
+        seed_l1(&storage, "char-0001", &format!("补算条目 {index}")).await;
+    }
+
+    engine.rebuild_index().await.expect("重建应成功");
+
+    assert_eq!(embedding.batch_sizes(), vec![2, 2, 1]);
+    assert_eq!(engine.index_status().loaded, 5);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 批失败降级：批量嵌入报错后逐条嵌入，全部条目最终写入。
+#[tokio::test]
+async fn backfill_falls_back_to_single_embed_when_batch_fails() {
+    let (engine, storage, embedding, dir) =
+        engine_with_counting_embedding("index-vector-batch-fail", RamariaConfig::default()).await;
+    seed_persona(&storage, "char-0001").await;
+    for index in 0..3 {
+        seed_l1(&storage, "char-0001", &format!("降级条目 {index}")).await;
+    }
+    embedding.set_fail_batch(true);
+
+    engine.rebuild_index().await.expect("批量失败也应完成构建");
+
+    assert_eq!(embedding.batch_calls(), 1, "先尝试一次批量嵌入");
+    assert_eq!(embedding.embed_calls(), 3, "批量失败后逐条补算");
+    let rows = storage
+        .load_memory_vectors(&CountingEmbedding::fingerprint())
+        .await
+        .expect("加载向量应成功");
+    assert_eq!(rows.len(), 3, "逐条补算成功后应全部写入");
+    assert_eq!(engine.index_status().loaded, 3);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 向量开关关闭：零嵌入调用、状态 Ready、total=0、percent=100。
+#[tokio::test]
+async fn disabled_vector_channel_skips_all_embedding() {
+    let mut config = RamariaConfig::default();
+    config.retrieval.enable_vector = false;
+    let (engine, storage, embedding, dir) =
+        engine_with_counting_embedding("index-vector-disabled", config).await;
+    seed_persona(&storage, "char-0001").await;
+    seed_l1(&storage, "char-0001", "关闭向量通道的摘要").await;
+
+    assert_eq!(
+        engine.index_status().status,
+        IndexStatus::Idle,
+        "初始状态应为 idle"
+    );
+
+    engine.rebuild_index().await.expect("重建应成功");
+
+    assert_eq!(embedding.batch_calls(), 0);
+    assert_eq!(embedding.embed_calls(), 0);
+    let view = engine.index_status();
+    assert_eq!(view.status, IndexStatus::Ready);
+    assert_eq!(view.loaded, 0);
+    assert_eq!(view.total, 0);
+    assert_eq!(view.percent, 100);
+    let rows = storage
+        .load_memory_vectors(&CountingEmbedding::fingerprint())
+        .await
+        .expect("加载向量应成功");
+    assert!(rows.is_empty(), "关闭向量通道不应写入向量行");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 增量镜像同样遵守向量开关：关闭时不调用嵌入。
+#[tokio::test]
+async fn disabled_vector_channel_skips_incremental_embedding() {
+    let mut config = RamariaConfig::default();
+    config.retrieval.enable_vector = false;
+    let (engine, storage, embedding, dir) =
+        engine_with_counting_embedding("index-vector-disabled-incremental", config).await;
+    seed_persona(&storage, "char-0001").await;
+    let session = storage
+        .create_session(Some("char-0001"))
+        .await
+        .expect("创建会话应成功");
+    let mut l1 = ramaria_core::types::MemoryL1::new(session.id, "增量摘要".to_string(), None);
+    l1.persona_uid = Some("char-0001".to_string());
+    storage.save_memory_l1(&l1).await.expect("写入 L1 应成功");
+
+    super::index_l1_into_mirrors(&engine, &l1).await;
+
+    assert_eq!(embedding.embed_calls(), 0, "关闭向量通道时增量不得嵌入");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 构建失败：状态切 degraded 并携带脱敏原因，旧索引保留。
+#[tokio::test]
+async fn build_failure_switches_status_to_degraded() {
+    let (engine, storage, failable, dir) =
+        engine_with_failable_storage("index-status-degraded").await;
+    seed_persona(&storage, "char-0001").await;
+    seed_l1(&storage, "char-0001", "失败前已可检索的摘要").await;
+
+    engine.rebuild_index().await.expect("首次重建应成功");
+    assert_eq!(engine.index_status().status, IndexStatus::Ready);
+
+    failable.set_fail_list_personas(true);
+    assert!(
+        engine.rebuild_index().await.is_err(),
+        "故障注入后重建应失败"
+    );
+
+    let view = engine.index_status();
+    assert_eq!(view.status, IndexStatus::Degraded);
+    assert!(
+        view.last_error
+            .as_deref()
+            .is_some_and(|reason| !reason.is_empty()),
+        "降级状态应携带失败原因"
+    );
+    assert!(engine.is_retriever_loaded(), "旧索引应保持可用");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

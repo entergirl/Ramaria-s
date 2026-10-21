@@ -510,8 +510,6 @@ fn event_for_sim(title: &str, summary: &str, keywords: Option<&str>) -> MemoryEv
         motives: None,
         created_at: 0,
         last_accessed_at: None,
-        indexed_at: None,
-        index_version: None,
     }
 }
 

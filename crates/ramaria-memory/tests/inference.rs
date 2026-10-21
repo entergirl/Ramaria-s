@@ -273,8 +273,6 @@ fn make_test_events(persona_uid: &str) -> Vec<MemoryEvent> {
             motives: None,
             created_at: now - 86400000,
             last_accessed_at: None,
-            indexed_at: None,
-            index_version: None,
         },
         MemoryEvent {
             id: 2,
@@ -297,8 +295,6 @@ fn make_test_events(persona_uid: &str) -> Vec<MemoryEvent> {
             motives: None,
             created_at: now - 172800000,
             last_accessed_at: None,
-            indexed_at: None,
-            index_version: None,
         },
     ]
 }

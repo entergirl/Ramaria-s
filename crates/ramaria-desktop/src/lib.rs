@@ -28,7 +28,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::Manager;
 
-pub(crate) use bootstrap::ensure_index_ready;
 use bootstrap::{determine_data_dir, ensure_data_dir, init_runtime, init_tracing};
 
 // =========================================================
@@ -183,6 +182,7 @@ pub fn run() {
             commands::export::export_sessions_json,
             commands::export::export_sessions_markdown,
             // ---- Index ----
+            commands::index_cmd::get_index_status,
             commands::index_cmd::rebuild_index,
             // ---- Import ----
             commands::import_cmd::analyze_qq_chat,
@@ -240,6 +240,16 @@ pub fn run() {
                 app.handle().clone(),
             )));
             tracing::info!("主动消息投递接收端已注册");
+
+            // 注册索引构建进度回调，并在后台启动首次构建（不阻塞 setup）
+            let index_handle = app.handle().clone();
+            engine.set_index_progress_hook(Arc::new(move |progress| {
+                crate::events::emit_index_progress(&index_handle, progress);
+            }));
+            let build_engine = engine.clone();
+            tauri::async_runtime::spawn(async move {
+                build_engine.start_index_build();
+            });
 
             // 初始化系统托盘
             if let Err(e) = tray::setup_tray(app.handle()) {

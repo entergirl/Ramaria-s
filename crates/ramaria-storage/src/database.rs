@@ -6,7 +6,7 @@
 //! - WAL 模式默认启用，连接池最大 2 连接（本地应用场景）
 //! - busy_timeout 默认 10 秒：多进程共用库时写锁串行，“等待”优于“失败”
 //! - 测试模式支持 `sqlite::memory:` 内存数据库
-//! - 开发模式默认路径 `main/.ramaria-dev/assistant.db`（相对进程工作目录）
+//! - 开发模式默认路径 `main/.ramaria-dev/ramaria.db`（相对进程工作目录）
 
 use ramaria_core::error::{RamariaError, RamariaResult};
 use sqlx::SqlitePool;
@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 /// 默认开发数据库路径（相对进程工作目录；仓库内运行时即 workspace 根 `main/`）。
-const DEV_DB_RELATIVE_PATH: &str = ".ramaria-dev/assistant.db";
+const DEV_DB_RELATIVE_PATH: &str = ".ramaria-dev/ramaria.db";
 
 /// 默认写锁等待上限（秒）。
 ///
@@ -54,8 +54,8 @@ impl Default for PoolTuning {
 ///
 /// 参数:
 /// - `db_path`: 可选显式数据库路径。为 None 时按优先级查找：
-/// 1. `RAMARIA_DATA_DIR` 环境变量 + `/assistant.db`
-/// 2. 开发模式默认路径 `main/.ramaria-dev/assistant.db`（相对进程工作目录）
+/// 1. `RAMARIA_DATA_DIR` 环境变量 + `/ramaria.db`
+/// 2. 开发模式默认路径 `main/.ramaria-dev/ramaria.db`（相对进程工作目录）
 ///
 /// 返回:
 /// - 成功时返回已连接且已执行 migration 的连接池。
@@ -89,7 +89,7 @@ pub async fn init_pool_with(
 ) -> RamariaResult<SqlitePool> {
     let path = db_path.unwrap_or_else(|| {
         std::env::var("RAMARIA_DATA_DIR")
-            .map(|d| PathBuf::from(d).join("assistant.db"))
+            .map(|d| PathBuf::from(d).join("ramaria.db"))
             .unwrap_or_else(|_| PathBuf::from(DEV_DB_RELATIVE_PATH))
     });
 

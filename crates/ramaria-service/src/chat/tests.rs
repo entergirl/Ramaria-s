@@ -245,7 +245,7 @@ async fn interactive_state_gate_blocks_until_ready_but_channel_passes() {
     assert_eq!(outcome.reply, REPLY);
 
     // 交互入口：非就绪状态拒绝
-    engine.set_state(AppState::Indexing);
+    engine.set_state(AppState::DownloadingModel);
     let err = engine
         .chat_stream(stream_request("你好", None))
         .await

@@ -57,14 +57,12 @@ pub fn build_engine_with_embedding(
 ///
 /// 序列（与入口就绪口径一致）:
 /// 1. 写入本地后端配置（`lm_studio` 缺省）；
-/// 2. 写入索引版本（已构建）——避免状态停在 `Indexing`；
-/// 3. 刷新设置状态并返回判定结果。
+/// 2. 刷新设置状态并返回判定结果（索引构建不参与状态判定）。
 pub async fn mark_ready(engine: &Engine) -> RamariaResult<AppState> {
     engine
         .storage()
         .save_backend_config(&BackendConfig::lm_studio_default())
         .await?;
-    engine.storage().set_index_version(1).await?;
     engine.refresh_setup_state().await
 }
 

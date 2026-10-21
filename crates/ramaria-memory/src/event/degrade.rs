@@ -189,8 +189,6 @@ pub fn build_degraded_event(
         motives: None,
         created_at: now,
         last_accessed_at: None,
-        indexed_at: None,
-        index_version: None,
     }
 }
 

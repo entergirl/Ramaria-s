@@ -9,6 +9,7 @@
 use std::time::Instant;
 
 use ramaria_core::error::RamariaResult;
+use tracing::{info, warn};
 
 use crate::engine::Engine;
 use crate::eta::{EtaEstimator, PhaseKind};
@@ -24,7 +25,8 @@ use super::l1::{ImportL1Progress, ImportProgressSink};
 /// 流程（与宿主事件序列一致）:
 /// 1. 更新 L2 阶段 EMA 并发送 `l2` 阶段进度（总量按双方 persona 在线估算 = 2）；
 /// 2. 触发全 persona L2 检查（内部失败只记日志，不阻塞）；
-/// 3. 回填 L2 进度、发送 `l3` 阶段进度（总量 = 2）。
+/// 3. 回填 L2 进度、发送 `l3` 阶段进度（总量 = 2）；
+/// 4. 重建内存索引（L2 / L3 / utt 向量随之写入；失败只记日志并保留旧索引）。
 ///
 /// 参数:
 /// - `engine`: 服务层引擎；
@@ -97,6 +99,17 @@ pub(crate) async fn trigger_deep(
             vision_failed: None,
             vision_skipped: None,
         });
+    }
+
+    // ---- 索引刷新：L2 / L3 / utt 向量随重建写入，导入结束即可检索 ----
+    let refresh_started = Instant::now();
+    match engine.rebuild_index().await {
+        Ok(total) => info!(
+            total,
+            elapsed_ms = refresh_started.elapsed().as_millis() as u64,
+            "导入后索引刷新完成"
+        ),
+        Err(e) => warn!(error = %e, "导入后索引刷新失败，保留旧索引"),
     }
 
     Ok(())

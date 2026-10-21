@@ -182,7 +182,7 @@ impl LlmProvider for FailingLlm {
 /// 注入构造不携带库路径，无法执行配置读写用例，故此处装配真实临时库）。
 async fn build_config_test_engine(dir: &std::path::Path) -> Arc<ramaria_service::Engine> {
     let engine = ramaria_service::Engine::open_with(
-        ramaria_service::EngineOptions::new(dir.join("assistant.db"))
+        ramaria_service::EngineOptions::new(dir.join("ramaria.db"))
             .with_config_path(dir.join("config.toml")),
     )
     .await

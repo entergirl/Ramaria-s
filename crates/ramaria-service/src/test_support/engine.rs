@@ -36,7 +36,7 @@ pub(crate) async fn engine_with_failable_storage(
     tag: &str,
 ) -> (Engine, Arc<SqliteStorage>, Arc<FailableStorage>, PathBuf) {
     let dir = temp_dir(tag);
-    let db_path = dir.join("assistant.db");
+    let db_path = dir.join("ramaria.db");
     // 先做一次装配（建库 + migration），再以同一路径构造测试可见的存储句柄
     let _ = Engine::open_with(EngineOptions::new(db_path.clone()))
         .await
@@ -127,7 +127,7 @@ async fn assemble_engine(
     config: RamariaConfig,
 ) -> (Engine, Arc<SqliteStorage>, PathBuf) {
     let dir = temp_dir(tag);
-    let db_path = dir.join("assistant.db");
+    let db_path = dir.join("ramaria.db");
     // 先做一次装配（建库 + migration），再以同一路径构造测试可见的存储句柄
     let _ = Engine::open_with(EngineOptions::new(db_path.clone()))
         .await

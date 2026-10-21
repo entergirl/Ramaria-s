@@ -3,7 +3,7 @@
 //! 设计特点:
 //! - 管理 L1→L2 事件提取、索引重建等后台异步任务的状态
 //! - status 默认 'pending'，完成时更新为 'done'/'failed'
-//! - 支持重试计数（DDL 层控制，max_retries=3）
+//! - 行内不记录重试计数与开始时间：状态与错误由 status / error / finished_at 表达
 
 use crate::repo::StorageResultExt;
 use ramaria_core::error::{RamariaError, RamariaResult};

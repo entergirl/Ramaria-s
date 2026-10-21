@@ -96,9 +96,9 @@ async fn interactive_generate_rejected_before_ready() {
     assert!(sessions.is_empty(), "被拒的生成不应创建会话");
 }
 
-/// LLM 失败：流内以 Error 收尾，不产生任何落库痕迹（失败不留半条）。
+/// LLM 失败：流内以 Error 收尾；用户消息已在前置编排落库，助手回复不落库。
 #[tokio::test]
-async fn llm_failure_leaves_no_partial_write() {
+async fn llm_failure_keeps_user_message_only() {
     let storage = storage_with_persona();
     let engine = build_engine(
         Arc::clone(&storage),
@@ -115,7 +115,8 @@ async fn llm_failure_leaves_no_partial_write() {
         .list_messages(outcome.session_id)
         .await
         .expect("读取会话消息应成功");
-    assert!(messages.is_empty(), "失败路径不应留下用户消息或助手回复");
+    assert_eq!(messages.len(), 1, "失败路径只保留前置编排落库的用户消息");
+    assert_eq!(messages[0].role, MessageRole::User);
 }
 
 /// 封存路径：会话关闭并生成 L1 摘要。

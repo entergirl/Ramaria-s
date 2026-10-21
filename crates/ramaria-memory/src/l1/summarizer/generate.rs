@@ -2,7 +2,7 @@
 //!
 //! 设计特点:
 //! - generate_chunk_l1: 单块生成（对话格式化 / LLM 调用 / JSON 解析 / 字段校验）。
-//! - write_back_keywords: 关键词写回 keyword_pool + keyword_refs 倒排索引（失败非致命）。
+//! - write_back_keywords: 关键词写回 keyword_pool 词池与别名（失败非致命）。
 //! - parse_summary_json: 三步递进 JSON 解析（直接 → 剥离 think 标签 → 正则提取）。
 //! - validate_and_build: 字段校验（五档钳制 / 六选一 / evidence_notes 后处理）。
 //! - 隐私红线：LLM 原始响应不落日志，仅记长度；所有可恢复错误转 RamariaError。
@@ -149,7 +149,7 @@ impl<'a> L1Summarizer<'a> {
         Ok((l1, keywords))
     }
 
-    /// 写回关键词词典 + 倒排索引（每块成功后调用，失败记 warn 不阻塞）。
+    /// 写回关键词词典（每块成功后调用，失败记 warn 不阻塞）。
     ///
     /// 判定（逐词独立，批内不去重——与 LLM 输出词列表口径一致）:
     /// - 词条已存在于词池（任意状态）→ 递增使用计数，状态不变；
@@ -159,7 +159,6 @@ impl<'a> L1Summarizer<'a> {
     ///
     /// 参数:
     /// - `session_id`: 来源 session（日志用）。
-    /// - `l1`: 已写库的 L1 摘要（倒排索引引用其 id 与 persona）。
     /// - `keywords`: LLM 输出的关键词 token 列表。
     /// - `pool_rows`: 词池快照（调用方在写库前读取一次）；为空表示读取失败，
     ///   全部按"未命中且不相似"处理（降级为直接写规范词）。
@@ -169,7 +168,6 @@ impl<'a> L1Summarizer<'a> {
     pub(super) async fn write_back_keywords(
         &self,
         session_id: Uuid,
-        l1: &MemoryL1,
         keywords: &[KeywordToken],
         pool_rows: &[KeywordPoolRow],
     ) {
@@ -221,21 +219,6 @@ impl<'a> L1Summarizer<'a> {
                         warn!(%session_id, keyword=%kw_token, error=%e, "关键词写回失败（非致命）");
                     }
                 }
-            }
-
-            // 写入 keyword_refs 倒排索引（L1 文档引用，doc_id 使用 UUID 字符串）
-            if let Err(e) = self
-                .storage
-                .insert_keyword_ref(
-                    text,
-                    "l1",
-                    &l1.id.to_string(),
-                    l1.persona_uid.as_deref().unwrap_or(""),
-                    1.0,
-                )
-                .await
-            {
-                warn!(%session_id, keyword=%kw_token, error=%e, "关键词引用写入失败（非致命）");
             }
         }
 

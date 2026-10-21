@@ -185,7 +185,7 @@ impl Engine {
     /// 说明:
     /// - 构建失败时置"重建失败"告警位并上抛错误（旧索引保持可用，
     ///   见 [`Engine::is_index_rebuild_failed`]）；
-    /// - 构建完成后写回索引版本（供首次配置状态机判定"索引已构建"）。
+    /// - 构建完成后推进索引状态（Idle/Building → Ready；失败 → Degraded）。
     pub async fn ensure_index_loaded(&self) -> RamariaResult<bool> {
         crate::index::ensure_loaded(self).await
     }

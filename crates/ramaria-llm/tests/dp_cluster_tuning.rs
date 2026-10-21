@@ -8,7 +8,7 @@
 //!
 //! 说明：
 //! - 本测试为 `#[ignore]` 探索性摸底，需真实鸢九库 + 真实 Qwen3 embedding 模型，CI 不运行。
-//! - 只读主库（`data/ramaria_assistant.db`），不写入、不修改任何数据。
+//! - 只读主库（`data/ramaria.db`），不写入、不修改任何数据。
 //! - 依赖 `F:/9700/model/Qwen3-Embedding-0.6B`（与 CLI 运行时 embedding 模型一致）。
 //! - 整个文件仅在前置 `embedding-native` feature 下编译（`--features .../cuda` 隐式启用），
 //!   避免无 feature 的默认测试构建引用未编译的 native 模块。
@@ -28,7 +28,7 @@ use ramaria_memory::behavior::{
 use ramaria_storage::SqliteStorage;
 
 /// 鸢九库绝对路径（摸底只读主库）。
-const DB_PATH: &str = r"F:\Ramaria-s\main\data\ramaria_assistant.db";
+const DB_PATH: &str = r"F:\Ramaria-s\main\data\ramaria.db";
 /// 鸢九 persona。
 const PERSONA_UID: &str = "char-535648097";
 /// 真实 Qwen3 embedding 模型目录。

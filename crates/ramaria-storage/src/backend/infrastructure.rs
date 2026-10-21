@@ -1,7 +1,7 @@
 //! crates/ramaria-storage/src/backend/infrastructure.rs - Ramaria 存储后端 StoreInfrastructure 实现模块
 //!
 //! 设计特点:
-//! - 实现 `StoreInfrastructure`：关键词倒排引用、隐私确认、后端配置、schema/索引版本、后台任务、设置、L2 指纹、行为规则、反馈日志
+//! - 实现 `StoreInfrastructure`：隐私确认、后端配置、schema 版本、后台任务、设置、记忆向量、L2 指纹、行为规则、反馈日志
 //! - 纯代理：调用转发到 `repo` 对应子模块，SQL 逻辑集中在一处
 //! - 版本与设置方法保持查询-写入分离，供索引一致性检查复用
 //! - 所有可恢复错误由 repo 层统一转换为 RamariaError::Storage
@@ -9,35 +9,13 @@
 use ramaria_core::behavior::{BehaviorRule, FeedbackLog};
 use ramaria_core::error::RamariaResult;
 use ramaria_core::traits::{IndexCorpusStamp, StoreInfrastructure};
-use ramaria_core::types::{BackendConfig, MemoryEvent, PrivacyConsent, now_ms};
+use ramaria_core::types::{BackendConfig, MemoryEvent, MemoryVector, PrivacyConsent};
 
 use super::SqliteStorage;
 use crate::repo;
 
 #[async_trait::async_trait]
 impl StoreInfrastructure for SqliteStorage {
-    // =========================================================
-    // Keyword Refs（关键词倒排索引）
-    // =========================================================
-    async fn insert_keyword_ref(
-        &self,
-        keyword_id: &str,
-        doc_type: &str,
-        doc_id: &str,
-        persona_uid: &str,
-        weight: f64,
-    ) -> RamariaResult<()> {
-        repo::keyword::insert_ref(
-            &self.pool,
-            keyword_id,
-            doc_type,
-            doc_id,
-            persona_uid,
-            weight,
-        )
-        .await
-    }
-
     // =========================================================
     // Privacy Consent（隐私确认）
     // =========================================================
@@ -63,16 +41,10 @@ impl StoreInfrastructure for SqliteStorage {
     }
 
     // =========================================================
-    // 索引一致性（schema / index 版本）
+    // 索引一致性（schema 版本 / 语料统计戳）
     // =========================================================
     async fn get_schema_version(&self) -> RamariaResult<i32> {
         repo::schema_meta::get_schema_version(&self.pool).await
-    }
-    async fn get_index_version(&self) -> RamariaResult<i32> {
-        repo::schema_meta::get_index_version(&self.pool).await
-    }
-    async fn set_index_version(&self, version: i32) -> RamariaResult<()> {
-        repo::schema_meta::set_index_version(&self.pool, version).await
     }
     async fn index_corpus_stamp(&self) -> RamariaResult<Option<IndexCorpusStamp>> {
         Ok(Some(
@@ -120,7 +92,31 @@ impl StoreInfrastructure for SqliteStorage {
     }
 
     // =========================================================
-    // L2 聚类去重指纹（v1.5 三层生成缓存 C）
+    // 记忆向量
+    // =========================================================
+
+    async fn upsert_memory_vector(&self, vector: &MemoryVector) -> RamariaResult<()> {
+        repo::memory_vectors::upsert(&self.pool, vector).await
+    }
+
+    async fn load_memory_vectors(&self, model: &str) -> RamariaResult<Vec<MemoryVector>> {
+        repo::memory_vectors::load_by_model(&self.pool, model).await
+    }
+
+    async fn delete_memory_vector(&self, doc_type: &str, doc_id: &str) -> RamariaResult<()> {
+        repo::memory_vectors::delete_by_doc(&self.pool, doc_type, doc_id).await
+    }
+
+    async fn delete_memory_vectors_by_model(&self, model: &str) -> RamariaResult<()> {
+        repo::memory_vectors::delete_by_model(&self.pool, model).await
+    }
+
+    async fn prune_orphan_memory_vectors(&self) -> RamariaResult<u64> {
+        repo::memory_vectors::prune_orphans(&self.pool).await
+    }
+
+    // =========================================================
+    // L2 聚类去重指纹
     // =========================================================
 
     async fn l2_fingerprint_exists(
@@ -132,7 +128,7 @@ impl StoreInfrastructure for SqliteStorage {
     }
 
     async fn save_l2_fingerprint(&self, persona_uid: &str, fingerprint: &str) -> RamariaResult<()> {
-        repo::l2_fingerprint::insert(&self.pool, persona_uid, fingerprint, now_ms()).await
+        repo::l2_fingerprint::insert(&self.pool, persona_uid, fingerprint).await
     }
 
     /// 查询 persona 最近事件（按 created_at 倒序，供相似度去重比对）。

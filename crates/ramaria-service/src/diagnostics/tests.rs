@@ -272,7 +272,7 @@ fn unique_dir(tag: &str) -> PathBuf {
 
 /// 装配诊断用例所需的引擎（临时库 + mock LLM；配置快照承载导出路径字段）。
 async fn engine_for_diagnostics(dir: &Path, config: RamariaConfig) -> crate::engine::Engine {
-    let pool = ramaria_storage::database::init_pool(Some(dir.join("assistant.db")))
+    let pool = ramaria_storage::database::init_pool(Some(dir.join("ramaria.db")))
         .await
         .expect("测试库初始化应成功");
     let storage: std::sync::Arc<dyn ramaria_core::traits::StorageBackend> =
@@ -376,7 +376,7 @@ async fn export_reports_index_build_status() {
     config.paths.config_dir = dir.join("cfg").to_string_lossy().into_owned();
 
     // 组装带失败注入的引擎（真实 SQLite + 可失败存储包装）
-    let pool = ramaria_storage::database::init_pool(Some(dir.join("assistant.db")))
+    let pool = ramaria_storage::database::init_pool(Some(dir.join("ramaria.db")))
         .await
         .expect("测试库初始化应成功");
     let inner = std::sync::Arc::new(ramaria_storage::SqliteStorage::new(pool));

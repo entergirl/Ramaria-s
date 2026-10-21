@@ -7,10 +7,10 @@
 //!   重复提交同一后端配置只产生一次等效结果
 //! - 降级不阻塞：健康探测失败只把状态置为 `Degraded`（BM25 + 关键词镜像仍可用），
 //!   不返回错误，用户可修正配置后重试
-//! - 诊断可读：缺项清单（`SetupStatus::missing_items`）覆盖后端配置 / 模型选择 / 索引 / 嵌入
-//!   四项，设置页直接展示
-//! - 状态口径单一：`NeedsSetup → Indexing → Ready / Degraded` 的判定集中在 `determine_state`，
-//!   读状态与刷新状态共用同一实现
+//! - 诊断可读：缺项清单（`SetupStatus::missing_items`）覆盖后端配置 / 模型选择 / 嵌入
+//!   三项，设置页直接展示
+//! - 状态口径单一：`NeedsSetup → Ready / Degraded` 的判定集中在 `determine_state`，
+//!   读状态与刷新状态共用同一实现；索引构建进度由索引状态独立表达
 //! - 安全约束：API key 只经 OS keychain 落盘，日志不记密钥内容
 
 use ramaria_core::error::{RamariaError, RamariaResult};
@@ -37,7 +37,7 @@ pub const HEALTH_PROBE_INTERVAL_SECONDS: u64 = 2;
 /// 读取设置检查结果（嵌入可用性取引擎当前快照）。
 ///
 /// 返回:
-/// - 后端配置 / 模型选择 / 索引状态 / 嵌入可用性四项判定。
+/// - 后端配置 / 模型选择 / 嵌入可用性三项判定。
 pub(crate) async fn check(engine: &Engine) -> RamariaResult<SetupStatus> {
     let embedding_available = engine.is_embedding_available();
     check_with(engine, embedding_available).await
@@ -51,9 +51,7 @@ pub(crate) async fn check(engine: &Engine) -> RamariaResult<SetupStatus> {
 ///
 /// 检查项:
 /// 1. 后端配置：`backend_config` 是否有记录；
-/// 2. 模型选择：线上 provider 要求 `capability.model_id` 非空，本地 provider 视为已选；
-/// 3. 索引状态：`schema_meta.index_version == 0` 表示尚未构建
-///    （该键缺失时同样按未构建口径返回 `0`）。
+/// 2. 模型选择：线上 provider 要求 `capability.model_id` 非空，本地 provider 视为已选。
 async fn check_with(engine: &Engine, embedding_available: bool) -> RamariaResult<SetupStatus> {
     let storage = engine.storage_ref().as_ref();
     let backend_config = storage.get_backend_config().await?;
@@ -71,14 +69,9 @@ async fn check_with(engine: &Engine, embedding_available: bool) -> RamariaResult
         })
         .unwrap_or(false);
 
-    let index_version = storage.get_index_version().await?;
-    let needs_indexing = index_version == 0;
-
     tracing::debug!(
         backend_configured,
         model_selected,
-        index_version,
-        needs_indexing,
         embedding_available,
         "设置状态检查完成"
     );
@@ -86,7 +79,6 @@ async fn check_with(engine: &Engine, embedding_available: bool) -> RamariaResult
     Ok(SetupStatus {
         backend_configured,
         model_selected,
-        needs_indexing,
         embedding_available,
     })
 }
@@ -95,14 +87,11 @@ async fn check_with(engine: &Engine, embedding_available: bool) -> RamariaResult
 ///
 /// 返回:
 /// - `NeedsSetup`: 后端配置或模型选择未完成；
-/// - `Indexing`: 索引待构建；
 /// - `Degraded`: 核心配置就绪但嵌入模型不可用（向量通道降级）；
 /// - `Ready`: 核心配置就绪且嵌入模型可用。
 pub(crate) fn determine_state(status: &SetupStatus) -> AppState {
     if !status.backend_configured || !status.model_selected {
         AppState::NeedsSetup
-    } else if status.needs_indexing {
-        AppState::Indexing
     } else if !status.embedding_available {
         AppState::Degraded
     } else {
@@ -121,8 +110,7 @@ pub(crate) fn determine_state(status: &SetupStatus) -> AppState {
 /// - `req`: 向导提交的后端选择（provider / model / base_url / api_key）。
 ///
 /// 返回:
-/// - 探测通过时返回按缺项诊断判定的状态：索引待构建为 `Indexing`，索引已构建且
-///   嵌入可用为 `Ready`，嵌入不可用为 `Degraded`；
+/// - 探测通过时返回按缺项诊断判定的状态：嵌入可用为 `Ready`，嵌入不可用为 `Degraded`；
 /// - 探测全部失败时返回 `Degraded`（不报错，用户可修正配置后重试）；
 /// - 线上 provider 缺少 API key 返回 `Validation`（先于任何写入返回）。
 ///

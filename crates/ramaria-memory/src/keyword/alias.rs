@@ -15,8 +15,6 @@
 //! - 相似判据同时服务 L1 关键词写入侧的 pending 判定：写入侧对未命中词池的词条
 //!   按同一判据匹配既有规范词，命中即以 `pending` 入池。
 //!
-//! 预留给 keyword_refs 消费路径（v1.6 精确匹配检索）
-//!
 //! 用法:
 //! ```
 //! use ramaria_memory::keyword::alias::AliasManager;

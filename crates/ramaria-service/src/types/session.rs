@@ -174,6 +174,8 @@ pub struct SessionMessageView {
     pub sender_ref: Option<String>,
     /// 外部平台发送者显示名（导入消息）；本地 / MCP 消息为 None。
     pub sender_name: Option<String>,
+    /// 撤回时刻（Unix 毫秒；None = 未撤回）
+    pub recalled_at: Option<i64>,
 }
 
 /// 通道会话概览视图（通道活动统计）。

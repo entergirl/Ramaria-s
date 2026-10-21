@@ -305,10 +305,10 @@ async fn active_pointer_cleared_after_idle_seal() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// 状态机与事实对齐：空闲轮次后按配置完整度推进到 Ready / Indexing。
+/// 状态机与事实对齐：空闲轮次后按配置完整度推进到 Ready / Degraded。
 #[tokio::test]
 async fn idle_tick_aligns_state_with_facts() {
-    // 引擎 1：配置完整 + 索引已建 + 嵌入可用 → 空闲轮次后推进到 Ready
+    // 引擎 1：配置完整 + 嵌入可用 → 空闲轮次后推进到 Ready
     let (engine, storage, dir) = engine_with_llm_config_and_embedding(
         "life-state-ready",
         MockLlm::with_reply(L1_JSON_REPLY),
@@ -320,10 +320,6 @@ async fn idle_tick_aligns_state_with_facts() {
         .save_backend_config(&BackendConfig::lm_studio_default())
         .await
         .expect("保存后端配置应成功");
-    storage
-        .set_index_version(1)
-        .await
-        .expect("写入索引版本应成功");
     let engine = Arc::new(engine);
     assert_eq!(
         engine.current_state(),
@@ -344,29 +340,25 @@ async fn idle_tick_aligns_state_with_facts() {
     lifecycle.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
 
-    // 引擎 2：同配置但索引未建（index_version=0）→ 判定为 Indexing
+    // 引擎 2：同配置但嵌入缺失 → 判定为 Degraded
     let (engine, storage, dir) = engine_with_llm_config_and_embedding(
-        "life-state-indexing",
+        "life-state-degraded",
         MockLlm::with_reply(L1_JSON_REPLY),
         RamariaConfig::default(),
-        Some(Arc::new(DeterministicEmbedding::new())),
+        None,
     )
     .await;
     storage
         .save_backend_config(&BackendConfig::lm_studio_default())
         .await
         .expect("保存后端配置应成功");
-    storage
-        .set_index_version(0)
-        .await
-        .expect("写入索引版本应成功");
     let engine = Arc::new(engine);
     let lifecycle = engine.start_lifecycle(LifecycleOptions::none());
     assert_eq!(lifecycle.tick_idle().await.expect("空闲检查应成功"), 0);
     assert_eq!(
         engine.current_state(),
-        AppState::Indexing,
-        "索引待构建应判定为 Indexing"
+        AppState::Degraded,
+        "嵌入缺失应判定为 Degraded"
     );
     lifecycle.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);

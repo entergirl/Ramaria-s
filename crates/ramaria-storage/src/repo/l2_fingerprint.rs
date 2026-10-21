@@ -36,19 +36,13 @@ pub async fn exists(
 ///
 /// 说明:
 /// - 同 (persona_uid, fingerprint) 重复记录时忽略（幂等）。
-pub async fn insert(
-    pool: &SqlitePool,
-    persona_uid: &str,
-    fingerprint: &str,
-    now_ms: i64,
-) -> RamariaResult<()> {
+pub async fn insert(pool: &SqlitePool, persona_uid: &str, fingerprint: &str) -> RamariaResult<()> {
     sqlx::query(
-        "INSERT OR IGNORE INTO l2_cluster_fingerprints (persona_uid, fingerprint, created_at) \
-         VALUES (?, ?, ?)",
+        "INSERT OR IGNORE INTO l2_cluster_fingerprints (persona_uid, fingerprint) \
+         VALUES (?, ?)",
     )
     .bind(persona_uid)
     .bind(fingerprint)
-    .bind(now_ms)
     .execute(pool)
     .await
     .storage_err("记录 L2 聚类指纹失败")
@@ -67,7 +61,7 @@ mod tests {
     #[tokio::test]
     async fn insert_then_exists_returns_true() {
         let pool = init_test_pool().await.expect("测试库初始化成功");
-        insert(&pool, "p1", "fp-a", 1_000).await.expect("记录成功");
+        insert(&pool, "p1", "fp-a").await.expect("记录成功");
         assert!(exists(&pool, "p1", "fp-a").await.expect("查询成功"));
     }
 
@@ -80,7 +74,7 @@ mod tests {
     #[tokio::test]
     async fn fingerprint_is_isolated_by_persona() {
         let pool = init_test_pool().await.expect("测试库初始化成功");
-        insert(&pool, "p1", "fp-a", 1_000).await.expect("记录成功");
+        insert(&pool, "p1", "fp-a").await.expect("记录成功");
         assert!(exists(&pool, "p1", "fp-a").await.expect("查询成功"));
         assert!(
             !exists(&pool, "p2", "fp-a")
@@ -92,11 +86,7 @@ mod tests {
     #[tokio::test]
     async fn duplicate_insert_is_idempotent() {
         let pool = init_test_pool().await.expect("测试库初始化成功");
-        insert(&pool, "p1", "fp-a", 1_000)
-            .await
-            .expect("首次记录成功");
-        insert(&pool, "p1", "fp-a", 2_000)
-            .await
-            .expect("重复记录应幂等");
+        insert(&pool, "p1", "fp-a").await.expect("首次记录成功");
+        insert(&pool, "p1", "fp-a").await.expect("重复记录应幂等");
     }
 }

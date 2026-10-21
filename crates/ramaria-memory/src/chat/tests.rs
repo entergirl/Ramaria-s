@@ -24,7 +24,7 @@ async fn test_storage(tag: &str) -> Arc<dyn StorageBackend> {
         .as_nanos();
     let dir = std::env::temp_dir().join(format!("ramaria-chat-{tag}-{nanos}"));
     std::fs::create_dir_all(&dir).expect("临时目录创建应成功");
-    let pool = ramaria_storage::database::init_pool(Some(dir.join("assistant.db")))
+    let pool = ramaria_storage::database::init_pool(Some(dir.join("ramaria.db")))
         .await
         .expect("测试库初始化应成功");
     Arc::new(ramaria_storage::SqliteStorage::new(pool))

@@ -134,7 +134,7 @@ fn qq_group_export_extra_json() -> String {
 /// - 嵌入 provider 注入 None（导入用例不依赖向量通道）。
 pub(super) async fn import_engine(tag: &str) -> (Engine, SqlitePool, Arc<SqliteStorage>, PathBuf) {
     let dir = crate::test_support::temp_dir(tag);
-    let db_path = dir.join("assistant.db");
+    let db_path = dir.join("ramaria.db");
     let pool = ramaria_storage::database::init_pool(Some(db_path))
         .await
         .expect("测试库初始化应成功");
@@ -867,7 +867,7 @@ async fn write_l0_rejects_non_json_extension() {
 #[tokio::test]
 async fn write_l0_requires_attached_pool() {
     let dir = crate::test_support::temp_dir("import-no-pool");
-    let db_path = dir.join("assistant.db");
+    let db_path = dir.join("ramaria.db");
     let pool = ramaria_storage::database::init_pool(Some(db_path))
         .await
         .expect("测试库初始化应成功");

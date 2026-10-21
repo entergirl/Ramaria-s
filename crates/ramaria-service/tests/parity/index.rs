@@ -2,7 +2,7 @@
 //!
 //! 设计特点:
 //! - 覆盖合并后的索引语义要点：懒加载（只构建一次）/ 加载后增量可检索 /
-//!   跨进程写入按代次刷新 / 未加载窗口的脏标记重建 / 显式重建（写回索引版本）
+//!   跨进程写入按代次刷新 / 未加载窗口的脏标记重建 / 显式重建（文档数与命中）
 //! - 跨进程等价物：在同一库文件上开第二个连接池写入 L1，模拟"桌面写、MCP 读"场景，
 //!   不引入真实多进程
 //! - 快照只含布尔与计数：各场景的结论指标；索引内部结构与向量不落盘
@@ -181,11 +181,11 @@ async fn scenario_dirty_rebuild(tag: &str) -> ParityResult<(bool, bool)> {
     Ok((rebuilt, hit))
 }
 
-/// 场景 C：显式全量重建（`rebuild_index`）→ 文档数 / 告警位 / 检索命中 / 索引版本。
+/// 场景 C：显式全量重建（`rebuild_index`）→ 文档数 / 告警位 / 检索命中。
 ///
 /// 返回:
-/// - `(文档总数, 告警位, 检索命中, 索引版本)`。
-async fn scenario_explicit_rebuild(tag: &str) -> ParityResult<(usize, bool, bool, i32)> {
+/// - `(文档总数, 告警位, 检索命中)`。
+async fn scenario_explicit_rebuild(tag: &str) -> ParityResult<(usize, bool, bool)> {
     let env = ParityEnv::new(tag).await?;
     let engine = env.engine();
 
@@ -207,12 +207,6 @@ async fn scenario_explicit_rebuild(tag: &str) -> ParityResult<(usize, bool, bool
     )
     .await?;
 
-    // 显式置 0（"尚未构建"）→ 重建完成后应写回 1
-    env.storage()
-        .set_index_version(0)
-        .await
-        .map_err(|e| ParityError::env("写入索引版本", e))?;
-
     let total = engine
         .rebuild_index()
         .await
@@ -220,14 +214,9 @@ async fn scenario_explicit_rebuild(tag: &str) -> ParityResult<(usize, bool, bool
     let failed = engine.is_index_rebuild_failed();
     let hits = recall_l1_texts(engine, "夜跑").await?;
     let hit = hits.iter().any(|text| text.contains("夜跑"));
-    let index_version = env
-        .storage()
-        .get_index_version()
-        .await
-        .map_err(|e| ParityError::env("读取索引版本", e))?;
 
     env.cleanup().await;
-    Ok((total, failed, hit, index_version))
+    Ok((total, failed, hit))
 }
 
 /// 在给定库文件与标签上执行索引场景，产出规范化快照（内部使用三个隔离环境）。
@@ -235,7 +224,7 @@ async fn snapshot_of(tag: &str) -> ParityResult<Snapshot> {
     let (first_built, second_built, loaded, incremental_hit, cross_process_hit) =
         scenario_lazy_and_refresh(&format!("{tag}-lazy")).await?;
     let (dirty_rebuilt, dirty_hit) = scenario_dirty_rebuild(&format!("{tag}-dirty")).await?;
-    let (rebuild_total, rebuild_failed, rebuild_hit, rebuild_index_version) =
+    let (rebuild_total, rebuild_failed, rebuild_hit) =
         scenario_explicit_rebuild(&format!("{tag}-rebuild")).await?;
 
     Ok(Snapshot::new(
@@ -256,7 +245,6 @@ async fn snapshot_of(tag: &str) -> ParityResult<Snapshot> {
                 "total": rebuild_total,
                 "failed": rebuild_failed,
                 "hit": rebuild_hit,
-                "index_version": rebuild_index_version,
             },
         }),
     ))
@@ -314,12 +302,6 @@ async fn index_snapshot_matches_golden_baseline() {
         Some(true),
         "显式重建后写入的 L1 应可检索"
     );
-    assert_eq!(
-        snapshot.value()["rebuild"]["index_version"].as_i64(),
-        Some(1),
-        "显式重建应写回索引版本 1"
-    );
-
     let outcome = GoldenStore::new()
         .expect("基线仓库应可定位")
         .assert_or_record(&snapshot)
@@ -379,17 +361,12 @@ async fn rebuild_value(
     doc_total: usize,
     rebuild_failed: bool,
 ) -> ParityResult<serde_json::Value> {
-    let index_version = storage
-        .get_index_version()
-        .await
-        .map_err(|e| ParityError::env("读取索引版本", e))?;
     let bm25_index_version = storage
         .get_bm25_index_version()
         .await
         .map_err(|e| ParityError::env("读取 BM25 分词版本", e))?;
     Ok(json!({
         "doc_total": doc_total,
-        "index_version": index_version,
         "bm25_index_version": bm25_index_version,
         "rebuild_failed": rebuild_failed,
     }))
@@ -398,11 +375,6 @@ async fn rebuild_value(
 /// 显式重建：全量重建内存检索索引，产出规范化快照。
 async fn rebuild_snapshot(env: &ParityEnv) -> ParityResult<Snapshot> {
     seed_cross_fixture(env.storage()).await?;
-    // 重建前显式对齐索引版本（"已构建"起始状态）
-    env.storage()
-        .set_index_version(1)
-        .await
-        .map_err(|e| ParityError::env("对齐索引版本", e))?;
     let total = env
         .engine()
         .rebuild_index()
@@ -417,8 +389,7 @@ async fn rebuild_snapshot(env: &ParityEnv) -> ParityResult<Snapshot> {
 ///
 /// 口径说明:
 /// - fixture：同一人格 + 2 条关键词不同的 L1，以全量重建路径构建索引；
-/// - 快照取重建返回值与存储可读的版本 / 告警位（不比较索引内部结构与向量）；
-/// - 索引版本在重建前显式对齐为已构建状态，只看重建后的读取值。
+/// - 快照取重建返回值与存储可读的 BM25 版本 / 告警位（不比较索引内部结构与向量）。
 #[tokio::test]
 async fn index_rebuild_products_match_golden_baseline() {
     let env = ParityEnv::new("index-rebuild")
@@ -437,12 +408,6 @@ async fn index_rebuild_products_match_golden_baseline() {
         Some(false),
         "重建应成功"
     );
-    assert_eq!(
-        snapshot.value()["index_version"].as_i64(),
-        Some(1),
-        "重建后索引版本应处于已构建态"
-    );
-
     let outcome = GoldenStore::new()
         .expect("基线仓库应可定位")
         .assert_or_record(&snapshot)

@@ -53,7 +53,8 @@ pub(super) const ROLE_IMMERSION_DIRECTIVE: &str = r#"【角色沉浸要求】这
 /// - 摘要路两层（L1 + L2）全开。
 ///
 /// 说明:
-/// - 索引懒加载失败上抛（召回前置不可绕过）；
+/// - 索引懒加载失败只记 warn 并继续（首条消息不因索引构建失败而阻塞，
+///   检索器缺席时共用实现返回空记忆）；
 /// - 其余降级（嵌入缺失 / 无命中 / 白名单外）由共用实现内部处理，返回空值。
 pub(crate) async fn step_recall(
     engine: &Engine,
@@ -69,7 +70,9 @@ pub(crate) async fn step_recall(
         return Ok((None, Vec::new(), None));
     }
 
-    engine.ensure_index_loaded().await?;
+    if let Err(e) = engine.ensure_index_loaded().await {
+        tracing::warn!(error = %e, "索引加载失败，本次召回继续（可能无记忆注入）");
+    }
 
     // 嵌入 provider 取快照后在锁外使用（缺失 → 共用召回内部降级为 BM25 + 关键词镜像）
     let embedding = engine.embedding_ref();

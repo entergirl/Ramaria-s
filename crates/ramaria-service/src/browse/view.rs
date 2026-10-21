@@ -161,5 +161,6 @@ pub(super) fn message_view(m: &Message) -> SessionMessageView {
         is_proactive: m.is_proactive,
         sender_ref: m.sender_ref.clone(),
         sender_name: m.sender_name.clone(),
+        recalled_at: m.recalled_at,
     }
 }

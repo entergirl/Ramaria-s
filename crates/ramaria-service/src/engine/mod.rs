@@ -30,7 +30,8 @@
 //! - `usecases_proactive`：主动对话名单用例（状态读取 / 开关写入）；
 //! - `usecases_ops`：运维域用例（导出 / utt / 关键词 / 宿主后台任务 / 设置与元信息 / 隐私 /
 //!   配置双写 / 首次配置 / 模型管理 / 诊断导出）；
-//! - `index_state`：索引状态机字段读写（脏标记 / 代次 / 失败告警 / 构建时间与冷却窗口）。
+//! - `index_state`：索引状态机字段读写（脏标记 / 代次 / 失败告警 / 构建时间与冷却窗口 /
+//!   状态与进度快照 / 后台构建互斥）。
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64};
@@ -46,10 +47,11 @@ use ramaria_memory::keyword::KeywordService;
 use ramaria_memory::retriever::Retriever;
 use sqlx::SqlitePool;
 
-use crate::index::{IndexBuildFailure, IndexStamp};
+use crate::index::{IndexBuildFailure, IndexStamp, IndexStatusState};
 use crate::proactive::ProactiveSink;
 use crate::recall::RecallPolicy;
 use crate::seal::SealHooks;
+use crate::types::IndexProgress;
 use crate::vision::VisionProbeState;
 
 mod assemble;
@@ -63,6 +65,13 @@ mod usecases_proactive;
 
 // 装配辅助 re-export：模型管理用例（`crate::model`）复用同一 provider 构造口径
 pub(crate) use assemble::providers::build_llm_provider;
+
+// =========================================================
+// 索引进度回调
+// =========================================================
+
+/// 索引进度回调类型（宿主注入；在锁外派发）。
+pub(crate) type IndexProgressHook = Arc<dyn Fn(&IndexProgress) + Send + Sync>;
 
 // =========================================================
 // 装配选项
@@ -210,6 +219,14 @@ pub struct Engine {
     recall_inflight: Arc<Mutex<std::collections::HashSet<String>>>,
     /// 图片理解能力探测缓存（按 model_id + base_url 键控；None = 本进程尚未探测）。
     vision_probe: tokio::sync::Mutex<Option<VisionProbeState>>,
+    /// 索引状态与进度快照（构建路径写入，宿主读取；与懒加载脏标记相互独立）。
+    index_status_state: Arc<RwLock<IndexStatusState>>,
+    /// 索引进度回调（宿主注册制；未注册时只更新状态，不派发事件）。
+    index_progress_hook: Arc<RwLock<Option<IndexProgressHook>>>,
+    /// 索引构建在途标记（CAS 互斥：同一引擎同时只允许一个后台构建）。
+    index_build_inflight: Arc<AtomicBool>,
+    /// 索引构建串行锁（后台构建与宿主的同步重建共用；避免两次构建互相覆盖）。
+    index_build_lock: Arc<tokio::sync::Mutex<()>>,
     /// 后台任务管理器配置（L1 生成 / 补扫的重试退避口径；装配时指定，测试可后置注入）。
     job_manager_config: RwLock<JobManagerConfig>,
 }

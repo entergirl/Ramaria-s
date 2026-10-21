@@ -2,9 +2,10 @@
 //!
 //! 设计特点:
 //! - 用例入口：非流式 `run`（通道入口）与流式 `stream`（交互入口）共用 `prepare_request` 前置编排
-//! - 失败不留半条：非流式仅在 LLM 成功后落库；流式先落用户消息，
+//! - 失败不留半条：非流式仅在 LLM 成功后落库；流式在前置编排即落用户消息，
 //!   助手回复仅在无错且非空时落库
-//! - 流打不开：返回只含一个 `Error` 事件的事件流句柄（不落库、不启动转发任务）
+//! - 流打不开：返回只含一个 `Error` 事件的事件流句柄（用户消息已由前置编排落库，
+//!   不启动转发任务）
 //! - 事件桥接：后台任务逐增量转发 `Delta`，结束时仅当无错才发 `Done`
 //!   （错误经 `Error` 事件表达，不再发 `Done`）
 //! - 空回复：HTTP 200 但正文为空（思考模式耗尽预算 / 后端异常 / choices 为空）
@@ -115,8 +116,10 @@ pub(crate) async fn run(engine: &Engine, req: ChatSendRequest) -> RamariaResult<
 ///
 /// 流程:
 /// - 前置编排与非流式完全同源（参数校验 / 门禁 / 会话 / 历史 / 召回 / Prompt / 预算）；
-/// - 打开 LLM 增量流失败：不落库、不启动转发任务，返回只含一个 `Error` 事件的流；
-/// - 打开成功：后台任务先落库用户消息，再逐增量转发 `Delta`，结束时落库助手回复
+///   用户消息在前置编排中落库（历史窗口加载之后，首条消息不阻塞）；
+/// - 打开 LLM 增量流失败：不启动转发任务，返回只含一个 `Error` 事件的流
+///   （用户消息保持已落库，供重试与历史可见）；
+/// - 打开成功：后台任务逐增量转发 `Delta`，结束时落库助手回复
 ///   （仅当无错且非空）并发 `Done`（错误经 `Error` 事件表达，不再发 `Done`）。
 ///
 /// 参数:
@@ -154,6 +157,7 @@ pub(crate) async fn stream(
         session_id = %session_id,
         persona = %prepared.persona,
         input_chars = prepared.message.chars().count(),
+        user_persisted = prepared.user_persisted,
         "流式生成开始（记忆检索与 Prompt 装配完成）"
     );
 
@@ -164,7 +168,7 @@ pub(crate) async fn stream(
             Err(handle) => return Ok(handle),
         };
 
-    // ---- 后台任务：转发增量事件并落库（用户消息先落，助手回复按无错且非空落） ----
+    // ---- 后台任务：转发增量事件并落库（用户消息已由前置编排落库，助手回复按无错且非空落） ----
     let storage = Arc::clone(engine.storage_ref());
     let (tx, rx) = mpsc::unbounded::<RamariaResult<StreamEvent>>();
     tokio::spawn(forward_and_persist(
@@ -172,7 +176,6 @@ pub(crate) async fn stream(
         raw_stream,
         tx,
         session_id,
-        prepared.message,
         request_id,
         Some(prepared.persona),
     ));
@@ -403,7 +406,7 @@ async fn step_open_stream(
 /// 流式转发任务：消费原始增量流，转发事件并落库消息。
 ///
 /// 语义（与非流式路径的失败纪律对齐）:
-/// 1. 先落库用户消息（来源本地）；落库失败 → 事件流发送错误项并终止；
+/// 1. 用户消息已由前置编排落库（携带人格归属），本任务不再写入；
 /// 2. 逐增量转发 `Delta`；`done=true` 的增量记录后端标识并结束读取；
 /// 3. 流中错误 → 发送 `Error` 事件并标记错误（不再发 `Done`）；
 /// 4. 结束时仅当无错且回复非空才落库助手消息（来源线上）；
@@ -413,7 +416,6 @@ async fn forward_and_persist(
     raw_stream: RawDeltaStream,
     tx: mpsc::UnboundedSender<RamariaResult<StreamEvent>>,
     session_id: Uuid,
-    user_message: String,
     request_id: Uuid,
     persona_uid: Option<String>,
 ) {
@@ -424,21 +426,7 @@ async fn forward_and_persist(
     let mut has_error = false;
     let started_at = now_ms();
 
-    // 1. 保存用户消息（携带人格归属，表示"在此 persona 的对话上下文中"）
-    let user_msg = Message::new(
-        session_id,
-        MessageRole::User,
-        user_message,
-        MessageSource::Local,
-    )
-    .with_persona_uid(persona_uid.clone());
-    if let Err(e) = storage.save_message(&user_msg).await {
-        tracing::error!(session_id = %session_id, error = %e, "保存用户消息失败");
-        let _ = tx.unbounded_send(Err(e));
-        return;
-    }
-
-    // 2. 消费 LLM 流
+    // 1. 消费 LLM 流
     while let Some(delta_result) = raw_stream.next().await {
         match delta_result {
             Ok(delta) => {

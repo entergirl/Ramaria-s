@@ -13,6 +13,7 @@ mod channel;
 mod chat;
 mod defaults;
 mod facts;
+mod index;
 mod ingest;
 mod keyword;
 mod memory_browse;
@@ -36,6 +37,7 @@ pub use defaults::{
 pub use facts::{
     FactBrowsePage, FactBrowseRequest, FactDetailView, FactEntryView, GroupedFactsView,
 };
+pub use index::{IndexProgress, IndexRebuildReceipt, IndexStatusView};
 pub use ingest::{IngestOutcome, IngestRequest};
 pub use keyword::{
     AliasAction, AliasResolveOutcome, AliasResolveRequest, KeywordEntryView, KeywordPoolView,

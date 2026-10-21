@@ -15,7 +15,7 @@ mod llm;
 mod seed;
 mod storage;
 
-pub(crate) use embedding::DeterministicEmbedding;
+pub(crate) use embedding::{CountingEmbedding, DeterministicEmbedding};
 pub(crate) use engine::{
     engine_on_existing_db, engine_with_db, engine_with_failable_storage, engine_with_failing_llm,
     engine_with_l1_reply, engine_with_llm_and_config, engine_with_llm_config_and_embedding,

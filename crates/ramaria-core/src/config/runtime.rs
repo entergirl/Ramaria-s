@@ -181,6 +181,11 @@ pub struct IndexConfig {
     ///   窗口过后的下一次召回补上；用于写入密集期抑制整库重建风暴，
     ///   代价是跨进程写入的可见延迟不超过该间隔。
     pub refresh_interval_seconds: u32,
+    /// 向量补算批大小（每批嵌入条数）。
+    ///
+    /// 说明:
+    /// - 批越大吞吐越高，显存占用也越高；GPU 显存不足（OOM）时调小。
+    pub embed_batch_size: u32,
 }
 
 impl Default for IndexConfig {
@@ -190,11 +195,13 @@ impl Default for IndexConfig {
     /// - BM25 缓冲区积累 10 条后合并。
     /// - 每 300 秒进行一次重建检查。
     /// - 内存索引重建不做节流（跨进程写入即时可见）。
+    /// - 向量补算每批 32 条。
     fn default() -> Self {
         Self {
             bm25_incremental_threshold: 10,
             bm25_rebuild_interval: 300,
             refresh_interval_seconds: 0,
+            embed_batch_size: 32,
         }
     }
 }

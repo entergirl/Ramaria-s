@@ -45,8 +45,6 @@ fn make_event(id: i64, keywords: &str) -> MemoryEvent {
         motives: None,
         created_at: now,
         last_accessed_at: None,
-        indexed_at: None,
-        index_version: None,
     }
 }
 

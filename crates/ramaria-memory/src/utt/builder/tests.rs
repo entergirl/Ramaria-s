@@ -158,7 +158,7 @@ async fn build_session_creates_blocks() {
     assert!(blocks[0].block_text.contains("[") && blocks[0].block_text.contains("角色char-0001"));
     assert!(blocks[0].block_text.contains("用户"));
     assert_eq!(blocks[0].msg_count, 10);
-    assert!(blocks[0].embedding.is_none(), "无 embedder → 无向量");
+    assert!(stats.vectors.is_empty(), "无 embedder → 无向量产出");
 }
 
 /// 主动消息口径：目标 persona 的主动消息照常吸收为发言样本（零来源过滤）。
@@ -424,7 +424,9 @@ async fn build_session_generates_embedding() {
         .list_utt_blocks_by_persona("char-0001")
         .await
         .unwrap();
-    assert!(blocks[0].embedding.is_some(), "embedding BLOB 应写入");
+    assert_eq!(stats.vectors.len(), 1, "应产出一条块向量");
+    assert_eq!(stats.vectors[0].0, blocks[0].id, "向量应绑定新块 id");
+    assert!(!stats.vectors[0].1.is_empty(), "块向量不应为空");
 }
 
 #[tokio::test]
@@ -442,7 +444,7 @@ async fn build_session_embedding_failure_degrades() {
         .await
         .unwrap();
     assert_eq!(blocks.len(), 1, "块照常入库");
-    assert!(blocks[0].embedding.is_none());
+    assert!(stats.vectors.is_empty(), "失败时不应产出向量");
 }
 
 #[tokio::test]

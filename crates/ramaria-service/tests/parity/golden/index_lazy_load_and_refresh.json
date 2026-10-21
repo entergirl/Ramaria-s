@@ -13,7 +13,6 @@
   "rebuild": {
     "failed": false,
     "hit": true,
-    "index_version": 1,
     "total": 2
   }
 }

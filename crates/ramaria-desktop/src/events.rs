@@ -27,6 +27,30 @@ pub const EVENT_PROACTIVE_MESSAGE: &str = "proactive-message";
 pub const EVENT_CHANNEL_STATUS: &str = "channel-status";
 /// 导入进度事件名
 pub const EVENT_IMPORT_PROGRESS: &str = "import-progress";
+/// 索引构建进度事件名
+pub const EVENT_INDEX_PROGRESS: &str = "index-progress";
+
+// =========================================================
+// 索引进度事件
+// =========================================================
+
+/// 派发索引构建进度事件。
+///
+/// 参数:
+/// - `app`: 宿主应用句柄。
+/// - `progress`: 服务层产出的进度负载（状态 / 计数 / 百分比 / 耗时 / 模型）。
+///
+/// 说明:
+/// - 事件发送失败只记 debug（前端可能尚未就绪，不影响构建）。
+pub fn emit_index_progress<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    progress: &ramaria_service::types::IndexProgress,
+) {
+    use tauri::Emitter;
+    if let Err(e) = app.emit(EVENT_INDEX_PROGRESS, progress.clone()) {
+        tracing::debug!(error = %e, "索引进度事件发送失败");
+    }
+}
 
 // =========================================================
 // 聊天流式事件负载

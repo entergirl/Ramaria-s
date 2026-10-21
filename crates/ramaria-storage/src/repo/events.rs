@@ -53,8 +53,6 @@ struct EventRow {
     motives: Option<String>,
     created_at: i64,
     last_accessed_at: Option<i64>,
-    indexed_at: Option<i64>,
-    index_version: Option<i64>,
 }
 
 impl EventRow {
@@ -80,8 +78,6 @@ impl EventRow {
             motives: self.motives,
             created_at: self.created_at,
             last_accessed_at: self.last_accessed_at,
-            indexed_at: self.indexed_at,
-            index_version: self.index_version,
         }
     }
 }
@@ -91,8 +87,8 @@ pub async fn save_event(pool: &SqlitePool, ev: &MemoryEvent) -> RamariaResult<i6
     sqlx::query_scalar::<_, i64>(
         "INSERT INTO memory_events (persona_uid, title, summary, keywords, participants, start, \"end\",
          confidence, salience, valence, presentation, share, attitude, paraphrase,
-         absorbed, situation_strength, motives, created_at, last_accessed_at, indexed_at, index_version)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+         absorbed, situation_strength, motives, created_at, last_accessed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
     )
     .bind(&ev.persona_uid).bind(&ev.title).bind(&ev.summary)
     .bind(&ev.keywords).bind(&ev.participants).bind(ev.start).bind(ev.end)
@@ -101,7 +97,6 @@ pub async fn save_event(pool: &SqlitePool, ev: &MemoryEvent) -> RamariaResult<i6
     .bind(ev.absorbed).bind(ev.situation_strength.map(|v| v as i64))
     .bind(&ev.motives)
     .bind(ev.created_at).bind(ev.last_accessed_at)
-    .bind(ev.indexed_at).bind(ev.index_version)
     .fetch_one(pool).await
     .storage_err("保存事件失败")
 }
@@ -115,7 +110,7 @@ pub async fn list_events_by_persona(
     let rows = sqlx::query_as::<_, EventRow>(
         "SELECT id, persona_uid, title, summary, keywords, participants, start, \"end\",
          confidence, salience, valence, presentation, share, attitude, paraphrase,
-         absorbed, situation_strength, motives, created_at, last_accessed_at, indexed_at, index_version
+         absorbed, situation_strength, motives, created_at, last_accessed_at
          FROM memory_events WHERE persona_uid = ? ORDER BY start DESC LIMIT ? OFFSET ?",
     )
     .bind(persona_uid)
@@ -149,7 +144,7 @@ pub async fn get(pool: &SqlitePool, id: i64) -> RamariaResult<Option<MemoryEvent
     let row = sqlx::query_as::<_, EventRow>(
         "SELECT id, persona_uid, title, summary, keywords, participants, start, \"end\",
          confidence, salience, valence, presentation, share, attitude, paraphrase,
-         absorbed, situation_strength, motives, created_at, last_accessed_at, indexed_at, index_version
+         absorbed, situation_strength, motives, created_at, last_accessed_at
          FROM memory_events WHERE id = ?",
     )
     .bind(id)
@@ -166,7 +161,7 @@ pub async fn list_unabsorbed_events(
     let rows = sqlx::query_as::<_, EventRow>(
         "SELECT id, persona_uid, title, summary, keywords, participants, start, \"end\",
          confidence, salience, valence, presentation, share, attitude, paraphrase,
-         absorbed, situation_strength, motives, created_at, last_accessed_at, indexed_at, index_version
+         absorbed, situation_strength, motives, created_at, last_accessed_at
          FROM memory_events WHERE persona_uid = ? AND absorbed = 0 ORDER BY start ASC",
     )
     .bind(persona_uid)
@@ -188,7 +183,7 @@ pub async fn list_recent_by_persona(
     let rows = sqlx::query_as::<_, EventRow>(
         "SELECT id, persona_uid, title, summary, keywords, participants, start, \"end\",
          confidence, salience, valence, presentation, share, attitude, paraphrase,
-         absorbed, situation_strength, motives, created_at, last_accessed_at, indexed_at, index_version
+         absorbed, situation_strength, motives, created_at, last_accessed_at
          FROM memory_events WHERE persona_uid = ? ORDER BY created_at DESC LIMIT ?",
     )
     .bind(persona_uid)
@@ -579,8 +574,8 @@ pub async fn save_event_batch(
         let id = sqlx::query_scalar::<_, i64>(
             "INSERT INTO memory_events (persona_uid, title, summary, keywords, participants, start, \"end\",
              confidence, salience, valence, presentation, share, attitude, paraphrase,
-             absorbed, situation_strength, motives, created_at, last_accessed_at, indexed_at, index_version)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+             absorbed, situation_strength, motives, created_at, last_accessed_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
         )
         .bind(&ev.persona_uid).bind(&ev.title).bind(&ev.summary)
         .bind(&ev.keywords).bind(&ev.participants).bind(ev.start).bind(ev.end)
@@ -589,7 +584,6 @@ pub async fn save_event_batch(
         .bind(ev.absorbed).bind(ev.situation_strength.map(|v| v as i64))
         .bind(&ev.motives)
         .bind(ev.created_at).bind(ev.last_accessed_at)
-        .bind(ev.indexed_at).bind(ev.index_version)
         .fetch_one(&mut *tx)
         .await
         .storage_err("批次写入事件失败")?;

@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PathConfig {
-    /// SQLite 数据库路径。Windows 默认 `%APPDATA%\Ramaria\data\assistant.db`
+    /// SQLite 数据库路径。Windows 默认 `%APPDATA%\Ramaria\data\ramaria.db`
     pub data_dir: String,
     /// 配置文件目录
     pub config_dir: String,

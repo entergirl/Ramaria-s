@@ -9,6 +9,44 @@
 use serde::{Deserialize, Serialize};
 
 // =========================================================
+// 索引状态机
+// =========================================================
+
+/// 检索索引状态（独立于应用状态机，不参与路由）。
+///
+/// 状态流:
+/// - `Idle` -> `Building` -> `Ready`
+/// - 构建失败进入 `Degraded`（旧索引保持可用）
+///
+/// 说明:
+/// - 索引构建进度由独立状态表达，应用状态机不随构建推进。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum IndexStatus {
+    /// 尚未构建
+    Idle,
+    /// 构建中（已可读取旧索引或已替换的部分索引）
+    Building,
+    /// 构建完成，索引可用
+    Ready,
+    /// 构建失败或向量通道降级，索引仍可部分使用
+    Degraded,
+}
+
+impl IndexStatus {
+    /// 返回索引状态的稳定字符串标识。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Building => "building",
+            Self::Ready => "ready",
+            Self::Degraded => "degraded",
+        }
+    }
+}
+
+// =========================================================
 // 应用状态机
 // =========================================================
 
@@ -19,9 +57,12 @@ use serde::{Deserialize, Serialize};
 /// - 驱动首次配置、模型下载、索引重建、正常对话和错误恢复界面。
 ///
 /// 状态流:
-/// - `NeedsSetup` -> `DownloadingModel` -> `Indexing` -> `Ready`
+/// - `NeedsSetup` -> `DownloadingModel` -> `Ready`
 /// - 可恢复故障进入 `Degraded`
 /// - 不可恢复故障进入 `FatalError`
+///
+/// 说明:
+/// - 索引构建进度不进入应用状态机，由独立的索引状态表达。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -30,8 +71,6 @@ pub enum AppState {
     NeedsSetup,
     /// embedding 模型下载中
     DownloadingModel,
-    /// 索引初始化或重建中
-    Indexing,
     /// 可正常对话
     Ready,
     /// 可恢复故障（LLM 暂不可用 或 嵌入模型未配置/不可用）
@@ -50,7 +89,6 @@ impl AppState {
         match self {
             Self::NeedsSetup => "needs_setup",
             Self::DownloadingModel => "downloading_model",
-            Self::Indexing => "indexing",
             Self::Ready => "ready",
             Self::Degraded => "degraded",
             Self::FatalError => "fatal_error",

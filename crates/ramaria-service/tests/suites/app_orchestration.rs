@@ -123,7 +123,6 @@ async fn setup_status_complete_after_config() {
     let storage = Arc::new(MockStorage::new());
     let config = BackendConfig::lm_studio_default();
     storage.save_backend_config(&config).await.unwrap();
-    storage.set_index_version(1).await.unwrap();
 
     let llm = Arc::new(MockLlm::new("好的，我记住了。"));
     let embedding = Arc::new(MockEmbedding::new());
@@ -137,9 +136,6 @@ async fn setup_status_complete_after_config() {
 #[tokio::test]
 async fn run_setup_full_flow() {
     let storage = Arc::new(MockStorage::new());
-
-    // 模拟设置完成后的索引标记
-    storage.set_index_version(1).await.unwrap();
 
     let llm = Arc::new(MockLlm::new("好的，我记住了。"));
     let engine = build_engine(storage, llm, RamariaConfig::default());

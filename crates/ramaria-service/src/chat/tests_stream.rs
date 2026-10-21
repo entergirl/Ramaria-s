@@ -90,9 +90,9 @@ async fn stream_success_emits_deltas_done_and_persists_messages() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// 流打不开：返回 Ok，首个事件为 Error、无 Done；库内无消息。
+/// 流打不开：返回 Ok，首个事件为 Error、无 Done；用户消息已由前置编排落库。
 #[tokio::test]
-async fn stream_open_failure_returns_error_event_without_persistence() {
+async fn stream_open_failure_returns_error_event_after_user_persisted() {
     let (engine, storage, dir) = engine_with_failing_llm("chat-stream-open-fail").await;
     let engine = Arc::new(engine);
     seed_persona(&storage, DEFAULT_PERSONA_UID).await;
@@ -117,7 +117,9 @@ async fn stream_open_failure_returns_error_event_without_persistence() {
         .list_messages(session_id)
         .await
         .expect("读取消息成功");
-    assert!(messages.is_empty(), "流打不开不应写入任何消息");
+    assert_eq!(messages.len(), 1, "用户消息应在打开流之前落库");
+    assert_eq!(messages[0].role, MessageRole::User);
+    assert_eq!(messages[0].content, "你好");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -203,6 +205,86 @@ async fn stream_empty_reply_emits_error_without_persistence() {
         .expect("读取消息成功");
     assert_eq!(messages.len(), 1, "用户消息已落库、助手空回复不落库");
     assert_eq!(messages[0].role, MessageRole::User);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 索引构建中（状态 Building）：流式生成不受影响，用户消息仍在前置编排落库。
+#[tokio::test]
+async fn stream_completes_while_index_is_building() {
+    use ramaria_core::types::IndexStatus;
+
+    let llm = Arc::new(MockLlm::with_stream_chunks(&["我在"]));
+    let (engine, storage, dir) = engine_with_shared_llm(
+        "chat-stream-index-building",
+        llm,
+        RamariaConfig::default(),
+        None,
+    )
+    .await;
+    let engine = Arc::new(engine);
+    seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+    engine.set_state(AppState::Ready);
+    engine.set_index_status(IndexStatus::Building, 0, 0, None, None);
+
+    let handle = engine
+        .chat_stream(stream_request("你好", None))
+        .await
+        .expect("索引构建中流式生成应成功");
+    let session_id = handle.session_id;
+    let events = collect_events(handle.events).await;
+    assert_eq!(kinds(&events), vec!["delta", "done"]);
+
+    let messages = storage
+        .list_messages(session_id)
+        .await
+        .expect("读取消息成功");
+    assert_eq!(messages.len(), 2, "用户消息与助手回复均应落库");
+    assert_eq!(messages[0].role, MessageRole::User);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 前置编排即落用户消息：未调用 LLM 之前库内已有该条（交互式）。
+#[tokio::test]
+async fn prepare_request_persists_user_message_before_llm() {
+    use crate::chat::steps::{ChatInput, ChatMode, prepare_request};
+    use ramaria_memory::chat::SegmentStyle;
+
+    let (engine, storage, dir) = engine_with_shared_llm(
+        "chat-prepare-persist",
+        Arc::new(MockLlm::local()),
+        RamariaConfig::default(),
+        None,
+    )
+    .await;
+    seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+    engine.set_state(AppState::Ready);
+
+    let input = ChatInput {
+        message: "提前落库".to_string(),
+        persona: None,
+        session_id: None,
+        mode: ChatMode::Interactive,
+        channel: String::new(),
+        conversation_id: None,
+        seed_history: Vec::new(),
+        message_in_history: false,
+        segment_style: SegmentStyle::Pipe,
+        proactive: None,
+    };
+    let prepared = prepare_request(&engine, &input, engine.config().as_ref())
+        .await
+        .expect("前置编排应成功");
+    assert!(prepared.user_persisted, "交互式前置编排应落库用户消息");
+
+    let messages = storage
+        .list_messages(prepared.session_id)
+        .await
+        .expect("读取消息成功");
+    assert_eq!(messages.len(), 1, "LLM 未调用前应只有用户消息");
+    assert_eq!(messages[0].role, MessageRole::User);
+    assert_eq!(messages[0].content, "提前落库");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

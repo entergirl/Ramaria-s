@@ -285,7 +285,7 @@ fn temp_dir(tag: &str) -> PathBuf {
 /// 装配真实 SQLite 引擎（图片理解声明开启；桩 LLM / 无嵌入）。
 async fn worker_engine(tag: &str, llm: Arc<StubLlm>) -> (Arc<Engine>, Arc<SqliteStorage>, PathBuf) {
     let dir = temp_dir(tag);
-    let db_path = dir.join("assistant.db");
+    let db_path = dir.join("ramaria.db");
     let _ = Engine::open_with(EngineOptions::new(db_path.clone()))
         .await
         .expect("引擎装配应成功");

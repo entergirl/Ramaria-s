@@ -1,13 +1,11 @@
 //! crates/ramaria-storage/src/repo/schema_meta.rs - Schema 与索引版本管理模块
 //!
 //! 设计特点:
-//! - 通过 key-value 表管理 schema_version 和 index_version
+//! - 通过 key-value 表管理 schema_version
 //! - schema_version 由 migration 写入；get_schema_version 供调用方显式校验（当前无启动期自动拦截）
-//! - index_version 由应用层管理，索引重建完成后写入；键缺失按未构建（0）返回
 //! - 版本值统一解析为 i32，非法值时返回 Storage 错误而非静默回退
 
 use crate::repo::StorageResultExt;
-use crate::retry::with_busy_retry;
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::traits::IndexCorpusStamp;
 use sqlx::SqlitePool;
@@ -22,31 +20,6 @@ pub async fn get_schema_version(pool: &SqlitePool) -> RamariaResult<i32> {
     version_str
         .parse()
         .map_err(|_| RamariaError::storage("schema_version 值非法"))
-}
-
-pub async fn get_index_version(pool: &SqlitePool) -> RamariaResult<i32> {
-    let version_str: String =
-        sqlx::query_scalar("SELECT value FROM schema_meta WHERE key = 'index_version'")
-            .fetch_optional(pool)
-            .await
-            .storage_err("查询索引版本失败")?
-            .unwrap_or_else(|| "0".to_string());
-    version_str
-        .parse()
-        .map_err(|_| RamariaError::storage("index_version 值非法"))
-}
-
-pub async fn set_index_version(pool: &SqlitePool, version: i32) -> RamariaResult<()> {
-    // 多进程写锁争用时有限重试，避免 database is locked 直接失败
-    with_busy_retry("更新索引版本", || async {
-        sqlx::query("INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('index_version', ?)")
-            .bind(version.to_string())
-            .execute(pool)
-            .await
-    })
-    .await
-    .storage_err("更新索引版本失败")?;
-    Ok(())
 }
 
 /// 读取记忆语料统计戳（跨进程索引刷新检测）。

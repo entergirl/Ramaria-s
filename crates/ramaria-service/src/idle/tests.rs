@@ -207,7 +207,7 @@ async fn tick_consumes_pending_l1_retry_after_llm_recovers() {
 
     // LLM 恢复：同库第二台引擎（成功 mock）执行空闲检查 → 先补扫 pending，产出摘要
     let recovered = engine_on_existing_db(
-        &dir.join("assistant.db"),
+        &dir.join("ramaria.db"),
         MockLlm::with_reply(L1_JSON_REPLY),
         RamariaConfig::default(),
     )
@@ -294,7 +294,7 @@ async fn concurrent_retry_from_two_engines_generates_once() {
     assert_eq!(engine_a.tick_idle().await.expect("空闲检查应成功"), 0);
 
     // LLM 恢复：同一库上两台引擎并发补扫
-    let db_path = dir.join("assistant.db");
+    let db_path = dir.join("ramaria.db");
     let engine_b = engine_on_existing_db(
         &db_path,
         MockLlm::with_reply(L1_JSON_REPLY),
@@ -422,7 +422,7 @@ async fn concurrent_tick_from_two_engines_seals_once() {
 
     // 第二台引擎：同一库文件、独立连接池与内存状态（模拟"桌面 + MCP"并存）
     let engine_b = engine_on_existing_db(
-        &dir.join("assistant.db"),
+        &dir.join("ramaria.db"),
         MockLlm::with_reply(L1_JSON_REPLY),
         RamariaConfig::default(),
     )

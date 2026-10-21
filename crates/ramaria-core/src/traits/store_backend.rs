@@ -1,8 +1,8 @@
 //! crates/ramaria-core/src/traits/store_backend.rs - Ramaria 存储后端基础设施抽象模块
 //!
 //! 设计特点:
-//! - 承载关键词倒排、隐私确认、后端配置、schema/索引版本与后台任务队列
-//! - 覆盖全局设置、L2 聚类去重指纹、事件去重查询与行为规则/反馈日志
+//! - 承载隐私确认、后端配置、schema 版本与后台任务队列
+//! - 覆盖全局设置、记忆向量、L2 聚类去重指纹、事件去重查询与行为规则/反馈日志
 //! - 与 StoreCrud 分离，避免单一巨 trait 承载全部表能力
 //! - 未接线方法显式返回 Unsupported，存量 mock 走默认实现即可编译
 //! - StorageBackend 聚合两个子 trait，由 blanket impl 自动满足
@@ -15,12 +15,12 @@ use super::store_version::{
 };
 use crate::behavior::{BehaviorRule, FeedbackLog};
 use crate::error::RamariaResult;
-use crate::types::{BackendConfig, MemoryEvent, PrivacyConsent};
+use crate::types::{BackendConfig, MemoryEvent, MemoryVector, PrivacyConsent};
 
 /// 存储后端抽象 trait（基础设施/系统分组）。
 ///
 /// 职责:
-/// - 承载关键词倒排索引、隐私确认、后端配置、schema/索引版本、后台任务队列、全局设置、
+/// - 承载隐私确认、后端配置、schema 版本、后台任务队列、全局设置、记忆向量、
 ///   L2 聚类去重指纹、事件去重查询、行为规则与反馈日志等非核心业务对象的表能力。
 /// - 与 [`StoreCrud`]（核心业务 CRUD）分离，避免单一巨 trait。
 ///
@@ -29,17 +29,6 @@ use crate::types::{BackendConfig, MemoryEvent, PrivacyConsent};
 /// - 所有可恢复错误应转换为 `RamariaError::Storage` 或更精确分类。
 #[async_trait]
 pub trait StoreInfrastructure: Send + Sync {
-    // -- Keyword Refs --
-    /// 插入一条关键词引用记录。
-    async fn insert_keyword_ref(
-        &self,
-        keyword_id: &str,
-        doc_type: &str,
-        doc_id: &str,
-        persona_uid: &str,
-        weight: f64,
-    ) -> RamariaResult<()>;
-
     // -- Privacy Consent --
     async fn save_privacy_consent(&self, consent: &PrivacyConsent) -> RamariaResult<()>;
     async fn get_privacy_consent(
@@ -54,8 +43,6 @@ pub trait StoreInfrastructure: Send + Sync {
 
     // -- 索引一致性 --
     async fn get_schema_version(&self) -> RamariaResult<i32>;
-    async fn get_index_version(&self) -> RamariaResult<i32>;
-    async fn set_index_version(&self, version: i32) -> RamariaResult<()>;
 
     /// 读取记忆语料统计戳（跨进程索引刷新检测）。
     ///
@@ -71,6 +58,48 @@ pub trait StoreInfrastructure: Send + Sync {
     /// - 查询为常数级聚合（COUNT / MAX），可承受每次召回前调用。
     async fn index_corpus_stamp(&self) -> RamariaResult<Option<IndexCorpusStamp>> {
         Ok(None)
+    }
+
+    // =========================================================
+    // 记忆向量
+    // =========================================================
+    //
+    // 默认实现视后端不持久化向量（空表语义）：写入空操作、加载空列表、
+    // 删除空操作、孤儿清理 0 条。SqliteStorage 覆写为真实读写。
+
+    /// 写入（覆盖）一条记忆向量。
+    ///
+    /// 默认实现返回 `Ok(())`（不持久化）。
+    async fn upsert_memory_vector(&self, _vector: &MemoryVector) -> RamariaResult<()> {
+        Ok(())
+    }
+
+    /// 按模型指纹加载全部记忆向量。
+    ///
+    /// 默认实现返回空列表。
+    async fn load_memory_vectors(&self, _model: &str) -> RamariaResult<Vec<MemoryVector>> {
+        Ok(Vec::new())
+    }
+
+    /// 删除单条记忆向量。
+    ///
+    /// 默认实现返回 `Ok(())`。
+    async fn delete_memory_vector(&self, _doc_type: &str, _doc_id: &str) -> RamariaResult<()> {
+        Ok(())
+    }
+
+    /// 按模型指纹删除全部记忆向量（模型切换后清理旧向量）。
+    ///
+    /// 默认实现返回 `Ok(())`。
+    async fn delete_memory_vectors_by_model(&self, _model: &str) -> RamariaResult<()> {
+        Ok(())
+    }
+
+    /// 清理孤儿向量（业务行已不存在），返回删除条数。
+    ///
+    /// 默认实现返回 `Ok(0)`。
+    async fn prune_orphan_memory_vectors(&self) -> RamariaResult<u64> {
+        Ok(0)
     }
 
     // -- Background Jobs --

@@ -87,6 +87,7 @@ mod state;
 mod sticker;
 mod style;
 mod utt;
+mod vector;
 
 pub use attachments::{
     AttachmentStatus, MessageAttachment, build_render_map, image_placeholder_hash,
@@ -109,10 +110,13 @@ pub use session::{
     CHANNEL_LOCAL, CHANNEL_QQ, CHANNEL_TELEGRAM, MemberRole, Session, SessionMember,
     is_social_channel,
 };
-pub use state::AppState;
+pub use state::{AppState, IndexStatus};
 pub use sticker::StickerAsset;
 pub use style::{PersonaExample, PersonaStyleStats, StyleRuleSource, StyleStatsStatus};
 pub use utt::UttBlock;
+pub use vector::{
+    MemoryVector, VECTOR_DOC_L1, VECTOR_DOC_L2, VECTOR_DOC_UTT, decode_vector, encode_vector,
+};
 
 #[cfg(test)]
 mod tests;

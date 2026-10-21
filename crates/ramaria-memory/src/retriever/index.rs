@@ -134,6 +134,26 @@ impl Retriever {
         self.evict_if_needed();
     }
 
+    /// 将 L2 事件连同向量加入索引（与 index_l1_with_vector 对称）。
+    ///
+    /// 参数:
+    /// - doc: 事件文档视图。
+    /// - vector: 事件向量（None = 仅入 BM25/内存，检索走 BM25）。
+    ///
+    /// 说明:
+    /// - label 统一 L2:{id}（与检索通道解析口径一致）。
+    /// - 向量维度由索引首个条目确定；不一致条目会被索引拒绝并记 warn。
+    pub fn index_l2_with_vector(&mut self, doc: &L2DocView, vector: Option<Vec<f32>>) {
+        self.index_l2(doc);
+        if let Some(v) = vector {
+            self.vector_index.add(
+                &make_vector_label("l2", &doc.id.to_string()),
+                v,
+                doc.created_at,
+            );
+        }
+    }
+
     /// 从整个检索器中移除一个 L1 文档（BM25 + HashMap）。
     ///
     /// 用于会话删除、记忆清理等场景，保持内存和索引一致性。

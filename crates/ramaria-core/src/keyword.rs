@@ -404,8 +404,7 @@ pub struct PendingAliasRow {
 /// # 语义约定（M3 消费路径定稿）
 ///
 /// - 作为 `ramaria-memory` KeywordIndex / CompositeIndex 检索结果的**文档标识**返回，
-///   调用方依据 `doc_type()` + `doc_id_text()` 回查业务文档内容（对应
-///   `keyword_refs` 表 `(doc_type, doc_id)` 的语义主键形态）。
+///   调用方依据 `doc_type()` + `doc_id_text()` 回查业务文档内容。
 /// - L1 摘要以 `memory_l1.id`（uuid）为稳定标识，与 Retriever 的 `L1DocView`/DocId::L1
 ///   一致；L2 事件以事件表 INTEGER 主键标识。
 /// - `Pool` 表示 keyword_pool 中的词典词条自身（无业务文档关联），用于词典 / 模糊扩展。
@@ -413,7 +412,7 @@ pub struct PendingAliasRow {
 /// # 为什么用 enum 而非多个结构体
 ///
 /// 编译期内嵌 tag + data（无虚表指针），`match` 可由编译器穷尽检查，
-/// serde 序列化友好，与既有 `keyword_refs.doc_type` 口径一一对应。
+/// serde 序列化友好，`doc_type()` 取值与存储侧文档类型口径一致。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum KeywordRef {
     /// 指向 L1 摘要的引用
@@ -447,7 +446,7 @@ impl KeywordRef {
         }
     }
 
-    /// 返回业务文档 id 的文本形态（与 `keyword_refs.doc_id` 落库口径一致）。
+    /// 返回业务文档 id 的文本形态。
     ///
     /// - `L1`/`L2`: 返回主键文本（uuid / i64）。
     /// - `Pool`: None（词典词条无业务文档 id）。

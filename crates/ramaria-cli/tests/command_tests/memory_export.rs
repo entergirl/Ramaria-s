@@ -381,45 +381,29 @@ async fn index_rebuild_with_data() {
     assert!(result.is_ok());
 }
 
-/// 缺索引的库：对话前索引确保完成一次构建并刷新状态（脱离待构建状态）。
+/// 对话前索引确保：构建可完成，且索引构建不参与应用状态判定。
 #[tokio::test]
-async fn ensure_retriever_loaded_refreshes_state_after_rebuild() {
+async fn ensure_retriever_loaded_keeps_state_after_build() {
     let dir = temp_config_dir("ensure-index");
     let engine = build_config_test_engine(&dir).await;
 
-    // 配置就绪（本地 provider）+ 构造"缺索引"库（删除 migration 预置的索引版本键）
+    // 配置就绪（本地 provider）；缺嵌入模型 → Degraded
     engine
         .storage()
         .save_backend_config(&BackendConfig::lm_studio_default())
         .await
         .expect("保存后端配置应成功");
-    let pool = engine.sqlite_pool().expect("引擎应持有连接池");
-    sqlx::query("DELETE FROM schema_meta WHERE key = 'index_version'")
-        .execute(&pool)
-        .await
-        .expect("删除索引版本键应成功");
-
-    // 入口装配刷新：缺索引 → Indexing
     assert_eq!(
         engine.refresh_setup_state().await.expect("刷新应成功"),
-        ramaria_core::types::AppState::Indexing
+        ramaria_core::types::AppState::Degraded
     );
 
-    // 对话前确保：重建写回版本 + 刷新状态；无嵌入模型 → Degraded
+    // 对话前确保索引加载：构建成功且状态不变
     ramaria_cli::commands::ask::ensure_retriever_loaded(&engine).await;
-    assert_eq!(
-        engine
-            .storage()
-            .get_index_version()
-            .await
-            .expect("读取索引版本应成功"),
-        1,
-        "重建完成后应写回索引版本 1"
-    );
     assert_eq!(
         engine.current_state(),
         ramaria_core::types::AppState::Degraded,
-        "重建 + 刷新后应脱离待构建状态"
+        "索引构建不应改变应用状态"
     );
 
     close_engine_pool(&engine).await;

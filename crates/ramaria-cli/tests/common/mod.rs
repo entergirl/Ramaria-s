@@ -57,7 +57,6 @@ pub struct MockStorage {
     privacy_consents: Mutex<Vec<PrivacyConsent>>,
     backend_config: Mutex<Option<BackendConfig>>,
     settings: Mutex<HashMap<String, String>>,
-    index_version: Mutex<i32>,
     examples: Mutex<HashMap<String, Vec<PersonaExample>>>,
     event_seq: AtomicI64,
     /// 行为规则（CLI 测试）
@@ -88,7 +87,6 @@ impl MockStorage {
             privacy_consents: Mutex::new(Vec::new()),
             backend_config: Mutex::new(None),
             settings: Mutex::new(HashMap::new()),
-            index_version: Mutex::new(0),
             examples: Mutex::new(HashMap::new()),
             event_seq: AtomicI64::new(1),
             behavior_rules: Mutex::new(HashMap::new()),
@@ -332,8 +330,6 @@ pub fn make_test_event(id: i64, title: &str) -> MemoryEvent {
         motives: None,
         created_at: 1_717_977_600_000,
         last_accessed_at: None,
-        indexed_at: None,
-        index_version: None,
     }
 }
 

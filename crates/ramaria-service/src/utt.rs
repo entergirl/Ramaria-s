@@ -7,14 +7,17 @@
 //!   （增量语义只重切每会话尾块，旧块不会按新参数重切）
 //! - 完成后刷新内存检索索引（含 utt 向量通道），使新块立即可检索
 //! - 统计口径：新建 / 跳过 / 删除 / embedding 成败与索引文档数（L1 + L2，不含 utt 块）
+//! - 向量落库：构建产出的块向量写入向量表；重建前后各清理一次孤儿向量
 //! - 降级：embedding 不可用时块照常入库（仅无向量），不阻塞重建
 
 use std::time::Instant;
 
 use ramaria_core::error::RamariaResult;
 use ramaria_core::traits::EmbeddingProvider;
+use ramaria_core::types::VECTOR_DOC_UTT;
 use ramaria_memory::utt::builder::UttBuilder;
 
+use crate::embedding_store;
 use crate::engine::Engine;
 
 // =========================================================
@@ -91,11 +94,19 @@ pub(crate) async fn rebuild(engine: &Engine, force: bool) -> RamariaResult<UttRe
         }
         outcome.force_removed = removed;
         tracing::info!(removed, "--force：已清空旧 utt 块（全量重切）");
+        // 旧块已删除 → 其向量行同步失效
+        let pruned = storage.prune_orphan_memory_vectors().await?;
+        tracing::info!(pruned, "--force：已清理孤儿 utt 向量");
     }
 
     // ---- 3. 全量重建（embedding 不可用时块照常入库、仅无向量） ----
     let builder = UttBuilder::from_config(&cfg.utt);
-    let embedding = engine.embedding_ref();
+    // 向量通道关闭时不生成块向量（块照常入库）
+    let embedding = if cfg.retrieval.enable_vector {
+        engine.embedding_ref()
+    } else {
+        None
+    };
     let embedder: Option<&dyn EmbeddingProvider> = embedding.as_ref().map(|arc| arc.as_ref());
 
     let start = Instant::now();
@@ -107,6 +118,16 @@ pub(crate) async fn rebuild(engine: &Engine, force: bool) -> RamariaResult<UttRe
     outcome.chunks_removed = stats.chunks_removed;
     outcome.embedding_ok = stats.embedding_ok;
     outcome.embedding_failed = stats.embedding_failed;
+
+    // ---- 3b. 块向量写入向量表（失败只记日志，不阻塞重建） ----
+    let mut vectors_written = 0usize;
+    for (block_id, vector) in &stats.vectors {
+        if embedding_store::store(engine, VECTOR_DOC_UTT, &block_id.to_string(), vector).await {
+            vectors_written += 1;
+        }
+    }
+    // 重切替换掉的旧块向量已无业务行对应 → 清孤儿
+    let pruned = storage.prune_orphan_memory_vectors().await?;
 
     // ---- 4. 刷新内存检索索引（含 utt 向量通道），使新块立即可检索 ----
     outcome.doc_count = engine.rebuild_index().await?;
@@ -120,6 +141,8 @@ pub(crate) async fn rebuild(engine: &Engine, force: bool) -> RamariaResult<UttRe
         chunks_removed = outcome.chunks_removed,
         embedding_ok = outcome.embedding_ok,
         embedding_failed = outcome.embedding_failed,
+        vectors_written,
+        pruned,
         elapsed_ms = outcome.elapsed_ms,
         doc_count = outcome.doc_count,
         "utt 块重建完成"
@@ -136,6 +159,9 @@ pub(crate) async fn rebuild(engine: &Engine, force: bool) -> RamariaResult<UttRe
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use crate::test_support::CountingEmbedding;
 
     use ramaria_core::types::{Message, MessageRole, MessageSource, Persona, PersonaKind};
     use uuid::Uuid;
@@ -150,7 +176,7 @@ mod tests {
             std::fs::write(&config_path, text).expect("写入配置应成功");
         }
         let engine = Engine::open_with(
-            EngineOptions::new(dir.join("assistant.db")).with_config_path(config_path),
+            EngineOptions::new(dir.join("ramaria.db")).with_config_path(config_path),
         )
         .await
         .expect("引擎装配应成功");
@@ -271,6 +297,30 @@ mod tests {
         assert_eq!(outcome.chunks_created, 0);
         assert_eq!(outcome.force_removed, 0);
         assert_eq!(outcome.doc_count, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 向量通道关闭（provider 已加载）：不生成块向量，块照常入库。
+    #[tokio::test]
+    async fn rebuild_with_vector_channel_disabled_skips_embedding() {
+        let (engine, dir) = utt_engine(
+            "utt-vector-off",
+            Some("[retrieval]\nenable_vector = false\n"),
+        )
+        .await;
+        let counting = Arc::new(CountingEmbedding::new());
+        engine.update_embedding(Some(counting.clone()));
+        seed_session(&engine, "char-0001", 3, 1_000).await;
+
+        let outcome = engine
+            .rebuild_utt_blocks(false)
+            .await
+            .expect("关闭向量通道时重建应成功");
+        assert_eq!(outcome.chunks_created, 1, "块应照常入库");
+        assert_eq!(outcome.embedding_ok, 0);
+        assert_eq!(counting.embed_calls(), 0, "关闭向量通道不得调用嵌入");
+        assert_eq!(counting.batch_calls(), 0, "关闭向量通道不得调用批量嵌入");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

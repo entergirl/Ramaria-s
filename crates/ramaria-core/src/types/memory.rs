@@ -296,8 +296,6 @@ pub struct MemoryEvent {
     pub motives: Option<String>,
     pub created_at: i64,
     pub last_accessed_at: Option<i64>,
-    pub indexed_at: Option<i64>,
-    pub index_version: Option<i64>,
 }
 
 impl MemoryEvent {
@@ -325,8 +323,6 @@ impl MemoryEvent {
             motives: None,
             created_at: now,
             last_accessed_at: None,
-            indexed_at: None,
-            index_version: None,
         }
     }
 }

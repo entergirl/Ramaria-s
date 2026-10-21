@@ -62,7 +62,7 @@ impl TestDb {
         let dir = unique_temp_dir(tag);
         Self {
             dir: dir.clone(),
-            db_path: dir.join("assistant.db"),
+            db_path: dir.join("ramaria.db"),
             pools: Mutex::new(Vec::new()),
         }
     }

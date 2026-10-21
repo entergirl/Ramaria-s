@@ -299,12 +299,6 @@ impl ramaria_core::StoreInfrastructure for JobMockStorage {
     async fn get_schema_version(&self) -> RamariaResult<i32> {
         unimplemented!()
     }
-    async fn get_index_version(&self) -> RamariaResult<i32> {
-        unimplemented!()
-    }
-    async fn set_index_version(&self, _version: i32) -> RamariaResult<()> {
-        unimplemented!()
-    }
     async fn list_pending_jobs(&self) -> RamariaResult<Vec<(i64, String, Option<String>)>> {
         unimplemented!()
     }
@@ -315,16 +309,6 @@ impl ramaria_core::StoreInfrastructure for JobMockStorage {
         unimplemented!()
     }
     async fn list_settings(&self) -> RamariaResult<Vec<(String, String)>> {
-        unimplemented!()
-    }
-    async fn insert_keyword_ref(
-        &self,
-        _keyword_id: &str,
-        _doc_type: &str,
-        _doc_id: &str,
-        _persona_uid: &str,
-        _weight: f64,
-    ) -> RamariaResult<()> {
         unimplemented!()
     }
 }

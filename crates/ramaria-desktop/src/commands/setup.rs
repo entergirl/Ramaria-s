@@ -76,8 +76,6 @@ pub async fn run_setup(
         .await
         .map_err(|e| format!("初始化人格失败: {e}"))?;
 
-    // ---- 索引待构建时完成一次构建（缺索引的库），随后返回推进后的状态 ----
-    crate::ensure_index_ready(&state.engine).await;
     let new_state = state.engine.current_state();
 
     tracing::info!(

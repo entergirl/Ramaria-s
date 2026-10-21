@@ -47,15 +47,6 @@ impl StoreInfrastructure for MockStorage {
         Ok(1)
     }
 
-    async fn get_index_version(&self) -> RamariaResult<i32> {
-        Ok(*self.index_version.lock().unwrap())
-    }
-
-    async fn set_index_version(&self, version: i32) -> RamariaResult<()> {
-        *self.index_version.lock().unwrap() = version;
-        Ok(())
-    }
-
     // ---- 基础设施方法 ----
 
     async fn create_background_job(
@@ -104,17 +95,6 @@ impl StoreInfrastructure for MockStorage {
     // =========================================================
     // Keyword Refs (Mock 空实现)
     // =========================================================
-
-    async fn insert_keyword_ref(
-        &self,
-        _keyword_id: &str,
-        _doc_type: &str,
-        _doc_id: &str,
-        _persona_uid: &str,
-        _weight: f64,
-    ) -> RamariaResult<()> {
-        Ok(())
-    }
 
     // -- 行为规则（CLI 测试） --
 

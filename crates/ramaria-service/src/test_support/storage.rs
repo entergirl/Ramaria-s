@@ -305,19 +305,6 @@ impl StoreCrud for FailableStorage {
 
 #[async_trait::async_trait]
 impl StoreInfrastructure for FailableStorage {
-    async fn insert_keyword_ref(
-        &self,
-        keyword_id: &str,
-        doc_type: &str,
-        doc_id: &str,
-        persona_uid: &str,
-        weight: f64,
-    ) -> RamariaResult<()> {
-        self.inner
-            .insert_keyword_ref(keyword_id, doc_type, doc_id, persona_uid, weight)
-            .await
-    }
-
     async fn save_privacy_consent(&self, consent: &PrivacyConsent) -> RamariaResult<()> {
         self.inner.save_privacy_consent(consent).await
     }
@@ -340,14 +327,6 @@ impl StoreInfrastructure for FailableStorage {
 
     async fn get_schema_version(&self) -> RamariaResult<i32> {
         self.inner.get_schema_version().await
-    }
-
-    async fn get_index_version(&self) -> RamariaResult<i32> {
-        self.inner.get_index_version().await
-    }
-
-    async fn set_index_version(&self, version: i32) -> RamariaResult<()> {
-        self.inner.set_index_version(version).await
     }
 
     async fn create_background_job(

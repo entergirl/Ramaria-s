@@ -9,7 +9,7 @@
 
 # 版本控制（请勿手动修改）
 version = "2.9.0"
-schema_version = 1
+schema_version = 3
 
 # =========================================================
 # 路径配置
@@ -19,7 +19,7 @@ schema_version = 1
 # 可通过环境变量 RAMARIA_DATA_DIR 覆盖数据根目录
 
 [paths]
-# SQLite 数据库路径。默认 %APPDATA%\Ramaria\data\assistant.db
+# SQLite 数据库路径。默认 %APPDATA%\Ramaria\data\ramaria.db
 data_dir = ""
 # 配置文件目录。默认 %APPDATA%\Ramaria\
 config_dir = ""
@@ -223,6 +223,8 @@ bm25_rebuild_interval = 300
 # 0 = 不节流（每次召回校验代次，其他进程写入即时可见）；
 # 大于 0 时抑制写入密集期的重建风暴，代价是刷新延迟不超过该间隔
 refresh_interval_seconds = 0
+# 向量补算的批大小（每批嵌入条数）；GPU 显存不足（OOM）时调小
+embed_batch_size = 32
 
 # =========================================================
 # L3 性格推断 LLM 参数（Phase B/C）

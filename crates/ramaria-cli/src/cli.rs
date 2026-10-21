@@ -29,7 +29,7 @@ pub(crate) struct Cli {
     #[command(subcommand)]
     pub(crate) command: Commands,
 
-    /// 数据库文件路径（默认: ./data/ramaria_assistant.db，可通过 RAMARIA_DB_PATH 环境变量覆盖）
+    /// 数据库文件路径（默认: ./data/ramaria.db，可通过 RAMARIA_DB_PATH 环境变量覆盖）
     ///
     /// 优先级: `--db` 命令行参数 > `RAMARIA_DB_PATH` 环境变量 > 默认路径
     /// （clap 原生保证：显式参数 > env > default_value）。
@@ -37,7 +37,7 @@ pub(crate) struct Cli {
         long,
         global = true,
         env = "RAMARIA_DB_PATH",
-        default_value = "data/ramaria_assistant.db"
+        default_value = "data/ramaria.db"
     )]
     pub(crate) db: PathBuf,
 

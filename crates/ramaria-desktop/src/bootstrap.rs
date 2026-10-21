@@ -114,31 +114,6 @@ pub(crate) fn ensure_data_dir(path: &Path) -> std::io::Result<()> {
 // 应用初始化
 // =========================================================
 
-/// 索引待构建时完成一次构建并刷新状态。
-///
-/// 说明:
-/// - 仅在应用状态为"索引待构建"（`Indexing`）时动作：缺索引的库在入口侧一次性收敛
-///   （构建写回索引版本后状态机推进）；普通库不产生任何动作；
-/// - 构建失败保持现状（记 warn），可由用户稍后手动重建。
-pub(crate) async fn ensure_index_ready(engine: &ramaria_service::Engine) {
-    if engine.current_state() != ramaria_core::types::AppState::Indexing {
-        return;
-    }
-    match engine.ensure_index_loaded().await {
-        Ok(_) => {
-            if let Err(e) = engine.refresh_setup_state().await {
-                tracing::warn!(error = %e, "索引构建后刷新应用状态失败（降级不阻塞）");
-            }
-        }
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "索引构建失败，保持待构建状态（可稍后手动重建）"
-            );
-        }
-    }
-}
-
 /// 桌面运行时的装配产物。
 ///
 /// 字段约定:
@@ -156,8 +131,7 @@ pub(crate) struct DesktopRuntime {
 /// 2. 配置双写链路：加载 config.toml + DB 两侧，一致性校验（以文件为准）并回写；
 /// 3. 注册完整封存钩子链（行为 + 风格 + L2→L3 级联 + 知识抽取）；
 /// 4. 拉起生命周期容器（空闲检查 + L2/L3 调度 + 启动期补扫全开）；
-/// 5. 刷新启动状态；
-/// 6. 索引未构建时在启动期完成一次构建并再次刷新状态。
+/// 5. 刷新启动状态。
 ///
 /// 返回:
 /// - 成功时返回桌面运行时（引擎 / 生命周期）；
@@ -167,7 +141,7 @@ pub(crate) struct DesktopRuntime {
 /// - 空闲检测与 L2/L3 调度统一由服务层生命周期负责，避免两套后台循环并存；
 /// - 日志中的路径一律经 `path_guard::redact_path_label` 折叠（日志随诊断包外发）。
 pub(crate) async fn init_runtime(data_dir: &Path) -> Result<DesktopRuntime, String> {
-    let db_path = data_dir.join("assistant.db");
+    let db_path = data_dir.join("ramaria.db");
     let config_path = data_dir.join("config.toml");
 
     // 确保数据目录存在
@@ -229,9 +203,6 @@ pub(crate) async fn init_runtime(data_dir: &Path) -> Result<DesktopRuntime, Stri
         .refresh_setup_state()
         .await
         .map_err(|e| format!("刷新应用状态失败: {}", e))?;
-
-    // Step 6: 索引未构建的库在启动期完成一次构建并刷新状态
-    ensure_index_ready(&engine).await;
 
     tracing::info!(
         state = %engine.current_state().as_str(),

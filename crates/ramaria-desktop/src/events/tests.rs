@@ -212,3 +212,27 @@ fn proactive_payload_activated_marker_serializes() {
         "点击重播应含 activated=true: {json}"
     );
 }
+
+#[test]
+fn index_progress_event_payload_serialization() {
+    assert_eq!(EVENT_INDEX_PROGRESS, "index-progress");
+    let payload = ramaria_service::types::IndexProgress {
+        status: ramaria_core::types::IndexStatus::Building,
+        loaded: 2,
+        total: 5,
+        percent: 40,
+        elapsed_ms: 1200,
+        model: Some("bge-small".to_string()),
+    };
+    let json = serde_json::to_string(&payload).expect("序列化失败");
+    assert!(json.contains(r#""status":"building""#), "{json}");
+    assert!(json.contains(r#""percent":40"#), "{json}");
+    assert!(json.contains(r#""model":"bge-small""#), "{json}");
+
+    let without_model = ramaria_service::types::IndexProgress {
+        model: None,
+        ..payload
+    };
+    let json = serde_json::to_string(&without_model).expect("序列化失败");
+    assert!(!json.contains("model"), "无模型时应省略 model 字段: {json}");
+}

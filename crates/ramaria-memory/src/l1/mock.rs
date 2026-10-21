@@ -145,8 +145,6 @@ pub struct MockStorage {
     pool_rows: Mutex<Vec<KeywordPoolRow>>,
     /// 已登记的待确认别名 (alias, canonical_id)（用于断言）。
     pending_writes: Mutex<Vec<(String, i64)>>,
-    /// 已写入的 keyword_refs 调用记录 (keyword_id, doc_id, persona_uid)（用于断言）。
-    keyword_refs: Mutex<Vec<(String, String, String)>>,
     /// 词池快照读取调用次数（热路径开销口径断言用）。
     pool_reads: AtomicUsize,
     /// 预设的跨用户事件聚合结果（None = 默认返回空列表；Some(Err) 模拟聚合失败降级）。
@@ -162,7 +160,6 @@ impl MockStorage {
             keywords: Mutex::new(Vec::new()),
             pool_rows: Mutex::new(Vec::new()),
             pending_writes: Mutex::new(Vec::new()),
-            keyword_refs: Mutex::new(Vec::new()),
             pool_reads: AtomicUsize::new(0),
             event_aggregate_result: Mutex::new(None),
         }
@@ -201,11 +198,6 @@ impl MockStorage {
     /// 获取已登记的待确认别名 (alias, canonical_id)（用于断言）。
     pub fn pending_writes(&self) -> Vec<(String, i64)> {
         self.pending_writes.lock().unwrap().clone()
-    }
-
-    /// 获取已写入的 keyword_refs 调用记录 (keyword_id, doc_id, persona_uid)（用于断言）。
-    pub fn keyword_refs(&self) -> Vec<(String, String, String)> {
-        self.keyword_refs.lock().unwrap().clone()
     }
 
     /// 获取词池快照读取次数（用于断言每会话读取一次的口径）。
@@ -470,12 +462,6 @@ impl StoreInfrastructure for MockStorage {
     async fn get_schema_version(&self) -> RamariaResult<i32> {
         unimplemented!()
     }
-    async fn get_index_version(&self) -> RamariaResult<i32> {
-        unimplemented!()
-    }
-    async fn set_index_version(&self, _: i32) -> RamariaResult<()> {
-        unimplemented!()
-    }
 
     // -- 基础设施 --
     async fn create_background_job(&self, _: &str, _: Option<&str>) -> RamariaResult<i64> {
@@ -498,21 +484,6 @@ impl StoreInfrastructure for MockStorage {
     }
 
     // -- Keyword Refs（记录调用供断言） --
-    async fn insert_keyword_ref(
-        &self,
-        keyword_id: &str,
-        _doc_type: &str,
-        doc_id: &str,
-        persona_uid: &str,
-        _weight: f64,
-    ) -> RamariaResult<()> {
-        self.keyword_refs.lock().unwrap().push((
-            keyword_id.to_string(),
-            doc_id.to_string(),
-            persona_uid.to_string(),
-        ));
-        Ok(())
-    }
 }
 
 // =========================================================
