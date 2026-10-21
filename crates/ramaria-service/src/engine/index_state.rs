@@ -128,6 +128,17 @@ impl Engine {
 // 索引状态与进度（宿主展示 / 事件派发）
 // =========================================================
 
+/// 一次索引状态写入的完整快照（避免状态写入函数参数过多）。
+struct IndexStatusUpdate {
+    status: IndexStatus,
+    loaded: usize,
+    total: usize,
+    failed: usize,
+    model: Option<String>,
+    last_error: Option<String>,
+    elapsed_ms: u64,
+}
+
 impl Engine {
     /// 当前索引状态视图（计算百分比；读锁内克隆后返回）。
     pub fn index_status(&self) -> IndexStatusView {
@@ -136,6 +147,7 @@ impl Engine {
             status: state.status,
             loaded: state.loaded,
             total: state.total,
+            failed: state.failed,
             percent: crate::index::percent(state.status, state.loaded, state.total),
             model: state.model,
             last_error: state.last_error,
@@ -149,10 +161,19 @@ impl Engine {
         status: IndexStatus,
         loaded: usize,
         total: usize,
+        failed: usize,
         model: Option<String>,
         last_error: Option<String>,
     ) {
-        self.apply_index_status(status, loaded, total, model, last_error, 0);
+        self.apply_index_status(IndexStatusUpdate {
+            status,
+            loaded,
+            total,
+            failed,
+            model,
+            last_error,
+            elapsed_ms: 0,
+        });
     }
 
     /// 写入索引状态并派发带耗时的进度事件（构建期使用）。
@@ -161,40 +182,43 @@ impl Engine {
         status: IndexStatus,
         loaded: usize,
         total: usize,
+        failed: usize,
         model: Option<String>,
         elapsed_ms: u64,
     ) {
-        self.apply_index_status(status, loaded, total, model, None, elapsed_ms);
+        self.apply_index_status(IndexStatusUpdate {
+            status,
+            loaded,
+            total,
+            failed,
+            model,
+            last_error: None,
+            elapsed_ms,
+        });
     }
 
     /// 状态槽写入 + 锁外派发进度事件。
-    fn apply_index_status(
-        &self,
-        status: IndexStatus,
-        loaded: usize,
-        total: usize,
-        model: Option<String>,
-        last_error: Option<String>,
-        elapsed_ms: u64,
-    ) {
+    fn apply_index_status(&self, update: IndexStatusUpdate) {
         {
             let mut guard = write_recover(&self.index_status_state, "engine.index_status_state");
-            guard.status = status;
-            guard.loaded = loaded;
-            guard.total = total;
-            guard.model = model.clone();
-            guard.last_error = last_error;
+            guard.status = update.status;
+            guard.loaded = update.loaded;
+            guard.total = update.total;
+            guard.failed = update.failed;
+            guard.model = update.model.clone();
+            guard.last_error = update.last_error;
             guard.updated_at = now_ms();
         }
         let hook = read_recover(&self.index_progress_hook, "engine.index_progress_hook").clone();
         if let Some(hook) = hook {
             hook(&IndexProgress {
-                status,
-                loaded,
-                total,
-                percent: crate::index::percent(status, loaded, total),
-                elapsed_ms,
-                model,
+                status: update.status,
+                loaded: update.loaded,
+                total: update.total,
+                failed: update.failed,
+                percent: crate::index::percent(update.status, update.loaded, update.total),
+                elapsed_ms: update.elapsed_ms,
+                model: update.model,
             });
         }
     }
@@ -237,12 +261,41 @@ impl Engine {
         }
         let engine = Arc::clone(self);
         tokio::spawn(async move {
+            // 在途标记由 guard 复位：构建任务 panic 时同样执行 Drop，
+            // 避免标记永久为 true 导致后续构建全部被忽略。
+            let _guard = IndexBuildInflightGuard(Arc::clone(&engine));
             let result = crate::index::rebuild(engine.as_ref()).await;
             if let Err(e) = result {
                 tracing::warn!(error = %e, "后台索引构建失败，保留旧索引");
             }
-            engine.index_build_inflight.store(false, Ordering::Release);
         });
         true
+    }
+}
+
+/// 后台索引构建在途标记的复位守卫。
+///
+/// 说明:
+/// - 正常结束与 panic 展开都会执行 `Drop`，保证在途标记不泄漏；
+/// - panic 路径下状态仍停在 Building 时，改为 Degraded（保留当前计数与模型）
+///   并置可读失败原因，避免宿主长期显示“构建中”。
+struct IndexBuildInflightGuard(Arc<Engine>);
+
+impl Drop for IndexBuildInflightGuard {
+    fn drop(&mut self) {
+        let engine = &self.0;
+        engine.index_build_inflight.store(false, Ordering::Release);
+        if engine.index_status().status == IndexStatus::Building {
+            let snapshot = engine.index_status();
+            engine.set_index_status(
+                IndexStatus::Degraded,
+                snapshot.loaded,
+                snapshot.total,
+                snapshot.failed,
+                snapshot.model,
+                Some("索引构建任务异常终止".to_string()),
+            );
+            tracing::warn!("索引构建任务异常终止，在途标记已复位");
+        }
     }
 }

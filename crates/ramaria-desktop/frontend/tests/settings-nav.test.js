@@ -61,11 +61,10 @@ const EXPECTED_API = [
   'destroy',
 ];
 
-/** 12 个基础目录项挂载面（fill 表示该目录项有同步回显入口） */
+/** 11 个基础目录项挂载面（fill 表示该目录项有同步回显入口） */
 const BASIC_FACES = [
   { name: 'backend', fill: true },
   { name: 'embedding', fill: true },
-  { name: 'memoryInjection', fill: true },
   { name: 'session', fill: true },
   { name: 'proactive', fill: true },
   { name: 'channel', fill: false },
@@ -90,16 +89,16 @@ test('基础目录：5 组 12 项，key 集合与分组归属正确', () => {
   );
 
   const allKeys = nav.flatMap((g) => g.items.map((i) => i.key)).sort();
-  assert.equal(allKeys.length, 12, '基础目录应为 12 项');
+  assert.equal(allKeys.length, 11, '基础目录应为 11 项');
   assert.deepEqual(allKeys, [
     'about', 'backend', 'channel', 'data', 'data_dir', 'diagnostics',
-    'embedding', 'mcp', 'memory_injection', 'privacy', 'proactive', 'session',
+    'embedding', 'mcp', 'privacy', 'proactive', 'session',
   ].sort());
 
   // 分组归属（IA 稿 §3.2）
   const byTitle = {};
   nav.forEach((g) => { byTitle[g.title] = g.items.map((i) => i.key); });
-  assert.deepEqual(byTitle['模型与检索'], ['backend', 'embedding', 'memory_injection']);
+  assert.deepEqual(byTitle['模型与检索'], ['backend', 'embedding']);
   assert.deepEqual(byTitle['对话与主动'], ['session', 'proactive']);
   assert.deepEqual(byTitle['社交与接入'], ['channel', 'mcp']);
   assert.deepEqual(byTitle['隐私与数据'], ['privacy', 'data_dir', 'data']);
@@ -114,7 +113,6 @@ test('基础目录：目录项标题与现小标题一致', () => {
 
   assert.equal(titles.backend, '🔌 后端配置');
   assert.equal(titles.embedding, '🧲 嵌入模型');
-  assert.equal(titles.memory_injection, '🧠 记忆注入');
   assert.equal(titles.session, '💬 会话');
   assert.equal(titles.proactive, '🗨️ 主动对话');
   assert.equal(titles.channel, '💬 社交平台接入');
@@ -254,7 +252,7 @@ test('index.html：settings 模块 script 序列与加载清单一致', () => {
   while ((m = pattern.exec(html)) !== null) found.push(m[1]);
 
   assert.deepEqual(found, SETTINGS_MODULES, 'index.html 的 settings 模块序列应与加载清单一致');
-  assert.equal(found.length, 16, 'settings 模块应恰为 16 个');
+  assert.equal(found.length, 15, 'settings 模块应恰为 15 个');
 
   // 旧单文件不再被引用（新目录为唯一实现）
   assert.ok(!html.includes('js/views/settings.js'), '旧单文件 js/views/settings.js 不应再被引用');
@@ -267,7 +265,7 @@ test('公开 API：键集合与预期清单一致且全部为函数', () => {
   }
 });
 
-test('目录项挂载面：12 个基础 section 均暴露 render（有回显的暴露 fill）', () => {
+test('目录项挂载面：11 个基础 section 均暴露 render（有回显的暴露 fill）', () => {
   for (const face of BASIC_FACES) {
     const part = NS.parts[face.name];
     assert.ok(part, `NS.parts.${face.name} 应存在`);

@@ -161,6 +161,11 @@ impl Transport for OneBotTransport {
         "qq"
     }
 
+    /// 出站支持图片附件：纯附件消息（文本为空）可发送。
+    fn supports_outbound_attachment(&self) -> bool {
+        true
+    }
+
     /// 建立连接（幂等：管理任务在跑时直接成功）。
     ///
     /// 语义:

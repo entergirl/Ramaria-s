@@ -66,6 +66,8 @@ pub struct UttBuildStats {
     pub embedding_failed: usize,
     /// 本次构建产出的向量（块 id + 向量），供服务层写入向量表
     pub vectors: Vec<(i64, Vec<f32>)>,
+    /// 本次新建的块（含入库后的 id），供服务层增量加入内存索引
+    pub new_blocks: Vec<UttBlock>,
 }
 
 /// utt 话语块构建器。
@@ -261,6 +263,7 @@ impl UttBuilder {
                     total.embedding_reused += stats.embedding_reused;
                     total.embedding_failed += stats.embedding_failed;
                     total.vectors.extend(stats.vectors);
+                    total.new_blocks.extend(stats.new_blocks);
                 }
                 Err(e) => {
                     warn!(%session.id, %e, "utt 全量构建跳过失败会话（不中断整体）");
@@ -359,6 +362,9 @@ impl UttBuilder {
         if let Some(vec) = block_vector {
             stats.vectors.push((id, vec));
         }
+        let mut stored = block.clone();
+        stored.id = id;
+        stats.new_blocks.push(stored);
         stats.chunks_created += 1;
         info!(
             block_id = id,

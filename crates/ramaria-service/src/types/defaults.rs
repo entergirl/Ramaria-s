@@ -14,13 +14,13 @@
 pub const DEFAULT_PERSONA_UID: &str = "rama-0001";
 
 /// 召回条目默认上限（`max_items` 缺省值）。
-pub const DEFAULT_MAX_ITEMS: u32 = 5;
+pub const DEFAULT_MAX_ITEMS: u32 = ramaria_core::config::McpConfig::DEFAULT_MAX_ITEMS;
 
 /// 召回条目上限的硬边界（`max_items` 超过时按此截断）。
 pub const MAX_ITEMS_LIMIT: u32 = 20;
 
 /// 召回上下文文本默认预算（`max_chars` 缺省值，单位：字符）。
-pub const DEFAULT_MAX_CHARS: u32 = 1200;
+pub const DEFAULT_MAX_CHARS: u32 = ramaria_core::config::McpConfig::DEFAULT_MAX_CHARS;
 
 /// 会话历史分页默认条数（`chat_history.limit` 缺省值）。
 pub const DEFAULT_HISTORY_LIMIT: u32 = 20;

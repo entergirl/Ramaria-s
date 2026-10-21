@@ -186,6 +186,12 @@ pub struct IndexConfig {
     /// 说明:
     /// - 批越大吞吐越高，显存占用也越高；GPU 显存不足（OOM）时调小。
     pub embed_batch_size: u32,
+    /// 每个 persona 的 L2 事件加载上限。
+    ///
+    /// 语义:
+    /// - `0`（默认）: 不限——分页全量加载，内存规模由 LRU 上限兜底；
+    /// - 大于 `0`: 按时间倒序取最近 N 条（显式截断，早于该窗口的事件不进入内存索引）。
+    pub l2_load_limit: u32,
 }
 
 impl Default for IndexConfig {
@@ -196,12 +202,14 @@ impl Default for IndexConfig {
     /// - 每 300 秒进行一次重建检查。
     /// - 内存索引重建不做节流（跨进程写入即时可见）。
     /// - 向量补算每批 32 条。
+    /// - L2 事件默认不限量（分页全量加载）。
     fn default() -> Self {
         Self {
             bm25_incremental_threshold: 10,
             bm25_rebuild_interval: 300,
             refresh_interval_seconds: 0,
             embed_batch_size: 32,
+            l2_load_limit: 0,
         }
     }
 }

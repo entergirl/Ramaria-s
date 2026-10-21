@@ -162,6 +162,44 @@ async fn write_l0_marks_unresolvable_attachments_skipped() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// 附件定位只接受安全相对引用：盘符 / 上级目录 / 反斜杠 / 绝对路径一律拒绝。
+#[test]
+fn resolve_attachment_file_rejects_unsafe_refs() {
+    let root = attachment_dir("unsafe");
+    let export_dir = root.join("export");
+    std::fs::create_dir_all(export_dir.join("resources").join("images"))
+        .expect("创建导出目录应成功");
+    // 导出目录之外的样例文件：允许 ".." 穿越即可命中
+    std::fs::write(root.join("escape.jpg"), b"outside").expect("写入越界样例应成功");
+    std::fs::write(
+        export_dir.join("resources").join("images").join("ok.jpg"),
+        b"inside",
+    )
+    .expect("写入正常样例应成功");
+
+    let unsafe_refs = [
+        "C:\\Windows\\win.ini",
+        "..\\..\\x",
+        "../escape.jpg",
+        "resources\\images\\ok.jpg",
+        "/etc/passwd",
+        "https://example.com/a.jpg",
+        "",
+    ];
+    for source_ref in unsafe_refs {
+        assert!(
+            resolve_attachment_file(&export_dir, source_ref).is_none(),
+            "不安全引用应拒绝定位: {source_ref:?}"
+        );
+    }
+    assert!(
+        resolve_attachment_file(&export_dir, "resources/images/ok.jpg").is_some(),
+        "安全相对引用应命中"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// export_dir 为 None（不定位）→ 全部 skipped；引用与指纹仍完整落库。
 #[tokio::test]
 async fn write_l0_none_export_dir_keeps_attachments_skipped() {

@@ -21,7 +21,7 @@ use ramaria_core::error::RamariaResult;
 use ramaria_core::traits::{ChatRequest, LlmProvider, StoreCrud, StreamDelta};
 use ramaria_core::types::{
     AttachmentStatus, BackendConfig, InboundSender, MessageRole, ModelCapability, Persona,
-    PersonaKind, now_ms,
+    PersonaKind, StickerAsset, now_ms,
 };
 use ramaria_service::{Engine, EngineOptions};
 use ramaria_storage::SqliteStorage;
@@ -31,6 +31,10 @@ use crate::ChannelError;
 use crate::ChannelResult;
 use crate::status::ChannelStatus;
 use crate::transport::{InboundSegment, TransportEvent};
+
+mod outbound;
+mod shutdown;
+mod stickers;
 
 // =========================================================
 // 桩实现
@@ -45,6 +49,8 @@ struct StubLlm {
     vision_calls: AtomicUsize,
     /// 图片理解延迟（模拟慢理解；0 = 立即返回）。
     vision_delay: StdMutex<Duration>,
+    /// 生成挂起（模拟回复在途不返回）。
+    hang_chat: AtomicBool,
     /// 已收到的生成请求（按调用顺序；供先理解后回复断言）。
     requests: StdMutex<Vec<ChatRequest>>,
 }
@@ -58,6 +64,7 @@ impl StubLlm {
             chat_calls: AtomicUsize::new(0),
             vision_calls: AtomicUsize::new(0),
             vision_delay: StdMutex::new(Duration::ZERO),
+            hang_chat: AtomicBool::new(false),
             requests: StdMutex::new(Vec::new()),
         })
     }
@@ -75,6 +82,11 @@ impl StubLlm {
         *self.vision_delay.lock().expect("图片延迟锁不应中毒") = delay;
     }
 
+    /// 生成永久挂起（覆盖关停放弃在途回复的路径）。
+    fn set_hang_chat(&self) {
+        self.hang_chat.store(true, Ordering::SeqCst);
+    }
+
     /// 已收到的生成请求副本（按调用顺序）。
     fn requests(&self) -> Vec<ChatRequest> {
         self.requests.lock().expect("请求记录锁不应中毒").clone()
@@ -85,6 +97,9 @@ impl StubLlm {
 impl LlmProvider for StubLlm {
     async fn chat(&self, request: &ChatRequest) -> RamariaResult<String> {
         self.chat_calls.fetch_add(1, Ordering::SeqCst);
+        if self.hang_chat.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
         self.requests
             .lock()
             .expect("请求记录锁不应中毒")
@@ -150,6 +165,7 @@ struct StubTransport {
     attempts: AtomicUsize,
     remaining_failures: AtomicUsize,
     failure_retryable: AtomicBool,
+    supports_attachment: AtomicBool,
 }
 
 impl StubTransport {
@@ -161,7 +177,13 @@ impl StubTransport {
             attempts: AtomicUsize::new(0),
             remaining_failures: AtomicUsize::new(0),
             failure_retryable: AtomicBool::new(true),
+            supports_attachment: AtomicBool::new(true),
         })
+    }
+
+    /// 声明出站附件能力（默认支持，与 OneBot 口径一致）。
+    fn set_supports_attachment(&self, supported: bool) {
+        self.supports_attachment.store(supported, Ordering::SeqCst);
     }
 
     /// 注入后续 N 次发送失败。
@@ -207,6 +229,10 @@ impl Transport for StubTransport {
         None
     }
 
+    fn supports_outbound_attachment(&self) -> bool {
+        self.supports_attachment.load(Ordering::SeqCst)
+    }
+
     async fn send(&self, target: &OutboundTarget, message: &OutboundMessage) -> ChannelResult<()> {
         self.attempts.fetch_add(1, Ordering::SeqCst);
         if self.remaining_failures.load(Ordering::SeqCst) > 0 {
@@ -231,6 +257,65 @@ impl Transport for StubTransport {
 
     fn status(&self) -> ChannelStatus {
         self.status.lock().expect("状态锁不应中毒").clone()
+    }
+}
+
+/// 桩传输：交付一条事件后挂起（事件流不终止），用于关停打断在途编排。
+struct EventOnceTransport {
+    event: StdMutex<Option<TransportEvent>>,
+    sends: StdMutex<Vec<OutboundMessage>>,
+}
+
+impl EventOnceTransport {
+    fn new(event: TransportEvent) -> Self {
+        Self {
+            event: StdMutex::new(Some(event)),
+            sends: StdMutex::new(Vec::new()),
+        }
+    }
+
+    fn sent(&self) -> Vec<OutboundMessage> {
+        self.sends.lock().expect("出站记录锁不应中毒").clone()
+    }
+}
+
+#[async_trait]
+impl Transport for EventOnceTransport {
+    fn channel(&self) -> &'static str {
+        "qq"
+    }
+
+    async fn connect(&self) -> ChannelResult<()> {
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> ChannelResult<()> {
+        Ok(())
+    }
+
+    async fn next_event(&self) -> Option<ChannelResult<TransportEvent>> {
+        // 锁在取值后立即释放，避免非 Send 的守卫跨 await
+        let event = { self.event.lock().expect("事件锁不应中毒").take() };
+        match event {
+            Some(event) => Some(Ok(event)),
+            None => std::future::pending().await,
+        }
+    }
+
+    fn supports_outbound_attachment(&self) -> bool {
+        true
+    }
+
+    async fn send(&self, _target: &OutboundTarget, message: &OutboundMessage) -> ChannelResult<()> {
+        self.sends
+            .lock()
+            .expect("出站记录锁不应中毒")
+            .push(message.clone());
+        Ok(())
+    }
+
+    fn status(&self) -> ChannelStatus {
+        ChannelStatus::new("qq")
     }
 }
 
@@ -295,7 +380,10 @@ async fn worker_engine(tag: &str, llm: Arc<StubLlm>) -> (Arc<Engine>, Arc<Sqlite
     let storage = Arc::new(SqliteStorage::new(pool));
     let mut config = RamariaConfig::default();
     config.vision.model_supports_vision = true;
-    let engine = Arc::new(Engine::from_parts(storage.clone(), llm, None, config));
+    // 补数据库路径：表情资产 / 图片缓存目录按数据库同级派生
+    let engine = Arc::new(
+        Engine::from_parts(storage.clone(), llm, None, config).with_db_path(dir.join("ramaria.db")),
+    );
     (engine, storage, dir)
 }
 
@@ -364,6 +452,28 @@ async fn dispatch(
         event,
     )
     .await;
+}
+
+/// 造表情资产：标签即匹配关键词，文件按资产目录同点落盘（数据库同级 `stickers/`）。
+async fn seed_sticker(storage: &SqliteStorage, dir: &std::path::Path, keyword: &str, bytes: &[u8]) {
+    let sticker_dir = dir.join("stickers");
+    std::fs::create_dir_all(&sticker_dir).expect("表情目录创建应成功");
+    std::fs::write(sticker_dir.join("cat.png"), bytes).expect("表情文件写入应成功");
+    let asset = StickerAsset {
+        id: 0,
+        file_name: "cat.png".to_string(),
+        file_path: "cat.png".to_string(),
+        md5: None,
+        size: Some(bytes.len() as u64),
+        description: None,
+        tags: vec![keyword.to_string()],
+        created_at: now_ms(),
+        updated_at: now_ms(),
+    };
+    storage
+        .insert_sticker_asset(&asset)
+        .await
+        .expect("写入表情资产应成功");
 }
 
 /// 显式放行绑定（自动建档默认禁用；白名单语义：启用后才响应）。
@@ -508,119 +618,6 @@ async fn binding_responds_after_explicit_allow() {
             .is_some(),
         "放行后应正常建会话"
     );
-
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// 出站拆条：含 `||` 的回复在发送前切段分次发出（库内原文不改）。
-#[tokio::test]
-async fn outbound_pipe_separator_is_split() {
-    let llm = StubLlm::new("你好 || 在的||怎么啦", "不应调用");
-    let (engine, storage, dir) = worker_engine("outbound-pipe", Arc::clone(&llm)).await;
-    seed_binding_persona(&storage).await;
-    allow(&engine, "c2c:10001").await;
-    let transport = StubTransport::new();
-    let downloader = StubDownloader::failing();
-
-    dispatch(
-        &engine,
-        &transport,
-        &downloader,
-        &worker_options(),
-        private_event("你好", "m-pipe"),
-    )
-    .await;
-
-    assert_eq!(
-        transport.sent_texts(),
-        vec!["你好".to_string(), "在的".to_string(), "怎么啦".to_string()],
-        "出站文本应按分隔符拆条，不残留分隔符"
-    );
-    assert_eq!(transport.attempts(), 3, "每段一次发送");
-
-    // 库内回复原文保留多气泡契约（仅出站拆条）
-    let session = storage
-        .find_active_session_by_channel("qq", Some("c2c:10001"))
-        .await
-        .expect("查询会话应成功")
-        .expect("会话应存在");
-    let assistant = storage
-        .list_messages(session.id)
-        .await
-        .expect("查询消息应成功")
-        .into_iter()
-        .find(|message| message.role == MessageRole::Assistant)
-        .expect("应有助手行");
-    assert_eq!(assistant.content, "你好 || 在的||怎么啦");
-
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// 多段分次发送：逐段发出，相邻段发送时刻差满足段间最小间隔。
-#[tokio::test]
-async fn outbound_multi_segment_sends_with_interval() {
-    let llm = StubLlm::new("甲||乙||丙", "不应调用");
-    let (engine, storage, dir) = worker_engine("outbound-interval", Arc::clone(&llm)).await;
-    seed_binding_persona(&storage).await;
-    allow(&engine, "c2c:10001").await;
-    let transport = StubTransport::new();
-    let downloader = StubDownloader::failing();
-
-    dispatch(
-        &engine,
-        &transport,
-        &downloader,
-        &worker_options(),
-        private_event("你好", "m-seg"),
-    )
-    .await;
-
-    assert_eq!(
-        transport.sent_texts(),
-        vec!["甲".to_string(), "乙".to_string(), "丙".to_string()]
-    );
-    assert_eq!(transport.attempts(), 3);
-
-    let times = transport.send_times();
-    assert_eq!(times.len(), 3);
-    for pair in times.windows(2) {
-        let gap = pair[1].duration_since(pair[0]);
-        assert!(
-            gap + Duration::from_millis(1) >= Duration::from_millis(10),
-            "相邻段发送间隔应不小于 10ms: {gap:?}"
-        );
-    }
-
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// 段数超限：超出上限的余段以换行并入末段后发送。
-#[tokio::test]
-async fn outbound_segment_overflow_folds_into_last() {
-    let llm = StubLlm::new("甲||乙||丙", "不应调用");
-    let (engine, storage, dir) = worker_engine("outbound-fold", Arc::clone(&llm)).await;
-    seed_binding_persona(&storage).await;
-    allow(&engine, "c2c:10001").await;
-    let transport = StubTransport::new();
-    let downloader = StubDownloader::failing();
-
-    let mut options = worker_options();
-    options.segment_max = 2;
-    dispatch(
-        &engine,
-        &transport,
-        &downloader,
-        &options,
-        private_event("你好", "m-fold"),
-    )
-    .await;
-
-    assert_eq!(
-        transport.sent_texts(),
-        vec!["甲".to_string(), "乙\n丙".to_string()],
-        "超限余段应并入末段"
-    );
-    assert_eq!(transport.attempts(), 2);
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -904,70 +901,6 @@ async fn group_without_trigger_persists_only() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// 发送可重试失败一次后成功：尝试两次、最终发出。
-#[tokio::test]
-async fn send_retry_recovers_after_one_failure() {
-    let llm = StubLlm::new("重试后成功", "不应调用");
-    let (engine, storage, dir) = worker_engine("send-retry", Arc::clone(&llm)).await;
-    seed_binding_persona(&storage).await;
-    allow(&engine, "c2c:10001").await;
-    let transport = StubTransport::new();
-    transport.fail_next(1, true);
-    let downloader = StubDownloader::failing();
-
-    dispatch(
-        &engine,
-        &transport,
-        &downloader,
-        &worker_options(),
-        private_event("你好", "m-retry"),
-    )
-    .await;
-
-    assert_eq!(transport.attempts(), 2, "应重试一次");
-    assert_eq!(transport.sent_texts(), vec!["重试后成功".to_string()]);
-
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// 发送不可重试失败：仅尝试一次、不发出（回复已落库）。
-#[tokio::test]
-async fn send_non_retryable_failure_not_retried() {
-    let llm = StubLlm::new("不会发出", "不应调用");
-    let (engine, storage, dir) = worker_engine("send-no-retry", Arc::clone(&llm)).await;
-    seed_binding_persona(&storage).await;
-    allow(&engine, "c2c:10001").await;
-    let transport = StubTransport::new();
-    transport.fail_next(1, false);
-    let downloader = StubDownloader::failing();
-
-    dispatch(
-        &engine,
-        &transport,
-        &downloader,
-        &worker_options(),
-        private_event("你好", "m-no-retry"),
-    )
-    .await;
-
-    assert_eq!(transport.attempts(), 1, "不可重试错误不应重试");
-    assert!(transport.sent_texts().is_empty());
-
-    // 回复已落库（生成不因发送失败回滚）
-    let session = storage
-        .find_active_session_by_channel("qq", Some("c2c:10001"))
-        .await
-        .expect("查询会话应成功")
-        .expect("会话应存在");
-    let messages = storage
-        .list_messages(session.id)
-        .await
-        .expect("查询消息应成功");
-    assert_eq!(messages.len(), 2);
-
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
 /// 空段序列事件：组装后正文为空即丢弃（不落库不发送）。
 #[tokio::test]
 async fn empty_text_event_dropped() {
@@ -1022,92 +955,6 @@ async fn face_only_message_stored_and_replied() {
         .expect("应有用户行");
     assert_eq!(user_row.content, "[表情]");
     assert_eq!(transport.sent_texts(), vec!["收到你的表情了".to_string()]);
-
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// 事件队列空转：桩传输 next_event 返回 None 即事件流终止（循环退出）。
-#[tokio::test]
-async fn worker_shutdown_stops_loop() {
-    let llm = StubLlm::new("不应调用", "不应调用");
-    let (engine, storage, dir) = worker_engine("worker-shutdown", llm).await;
-    seed_binding_persona(&storage).await;
-    let transport: Arc<dyn Transport> = StubTransport::new();
-    let downloader = StubDownloader::failing();
-    let runtime = Arc::new(ChannelRuntime::new(
-        crate::config::ChannelRuntimeConfig {
-            default_persona_uid: "rama-0001".to_string(),
-            qq: None,
-            telegram: None,
-            proactive_enabled: false,
-        },
-        Arc::new(crate::events::NoopSink),
-    ));
-
-    let worker = ChannelWorker::spawn(
-        Arc::clone(&engine),
-        transport,
-        Arc::clone(&runtime),
-        downloader,
-        worker_options(),
-    );
-    assert!(Arc::ptr_eq(worker.runtime(), &runtime));
-    worker.shutdown().await;
-
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-// =========================================================
-// 表情指令
-// =========================================================
-
-/// 表情指令剥离：无资产命中时按纯文字发送（标记不残留在出站文本）。
-#[tokio::test]
-async fn sticker_directive_stripped_when_asset_missing() {
-    let llm = StubLlm::new("送你[表情:猫]到家", "不应调用");
-    let (engine, storage, dir) = worker_engine("sticker-miss", Arc::clone(&llm)).await;
-    seed_binding_persona(&storage).await;
-    allow(&engine, "c2c:10001").await;
-    let transport = StubTransport::new();
-    let downloader = StubDownloader::failing();
-
-    dispatch(
-        &engine,
-        &transport,
-        &downloader,
-        &worker_options(),
-        private_event("你好", "m-sticker"),
-    )
-    .await;
-
-    let sends = transport.sends.lock().expect("出站记录锁不应中毒").clone();
-    assert_eq!(sends.len(), 1, "无资产命中应只发纯文字一条");
-    assert_eq!(sends[0].1.text, "送你到家", "标记应剥离且不残留");
-    assert_eq!(sends[0].1.attachment, None, "未命中不应携带附件");
-
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// 仅表情指令且无资产命中：净化后为空，跳过发送。
-#[tokio::test]
-async fn sticker_only_reply_without_asset_skips_send() {
-    let llm = StubLlm::new("[表情:猫]", "不应调用");
-    let (engine, storage, dir) = worker_engine("sticker-only", Arc::clone(&llm)).await;
-    seed_binding_persona(&storage).await;
-    allow(&engine, "c2c:10001").await;
-    let transport = StubTransport::new();
-    let downloader = StubDownloader::failing();
-
-    dispatch(
-        &engine,
-        &transport,
-        &downloader,
-        &worker_options(),
-        private_event("你好", "m-sticker-only"),
-    )
-    .await;
-
-    assert_eq!(transport.attempts(), 0, "无附件且无文本应跳过发送");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

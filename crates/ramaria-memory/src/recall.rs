@@ -25,6 +25,7 @@ use crate::keyword::service::{KeywordPoolSnapshot, query_text_labels};
 use crate::keyword::{CompositeIndex, KeywordService};
 use crate::rag::{RagConfig, filter_by_persona, format_context_text};
 use crate::retriever::{Retriever, SearchRequest, SearchResult, UttHit};
+use crate::utils::EMBED_CALL_TIMEOUT;
 
 // =========================================================
 // 只读视图抽象（宿主侧句柄注入）
@@ -361,16 +362,25 @@ pub async fn assemble_recall<R: RetrieverSource + ?Sized, K: KeywordMirrorSource
         None
     } else {
         match input.embedding {
-            Some(provider) if provider.is_available() => match provider.embed(input.query).await {
-                Ok(vec) => {
-                    tracing::debug!(dim = vec.len(), "查询向量已生成");
-                    Some(vec)
+            Some(provider) if provider.is_available() => {
+                match tokio::time::timeout(EMBED_CALL_TIMEOUT, provider.embed(input.query)).await {
+                    Ok(Ok(vec)) => {
+                        tracing::debug!(dim = vec.len(), "查询向量已生成");
+                        Some(vec)
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!(%e, "查询向量生成失败，向量通道降级");
+                        None
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            timeout_ms = EMBED_CALL_TIMEOUT.as_millis() as u64,
+                            "查询向量生成超时，向量通道降级"
+                        );
+                        None
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!(%e, "查询向量生成失败，向量通道降级");
-                    None
-                }
-            },
+            }
             Some(_) => {
                 tracing::debug!("嵌入模型不可用，跳过向量通道");
                 None

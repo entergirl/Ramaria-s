@@ -246,6 +246,8 @@ fn aggregate_repeat_stats_pairs_by_variant_and_item() {
             dataset_seed: 1,
             persona_uid: "p".to_string(),
             rebuild_utt: true,
+
+            utt_restored: None,
             variants: vec![vr],
             repeat: None,
             diagnostics: None,

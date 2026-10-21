@@ -818,6 +818,40 @@ async fn send_rejects_empty_text_and_ignores_attachment() {
     transport.shutdown().await.expect("关停应成功");
 }
 
+/// 纯附件消息拒绝：传输不声明附件能力，空文本 + 附件即协议错误（不发请求）。
+#[tokio::test]
+async fn send_rejects_attachment_only_message() {
+    let mock = MockTelegram::start("tok").await;
+    let sink = Arc::new(RecordingSink::default());
+    let transport = build_transport(mock.base_url(), "tok", sink);
+    transport.connect().await.expect("连接应成功");
+
+    assert!(
+        !transport.supports_outbound_attachment(),
+        "Telegram 不支持纯附件消息"
+    );
+
+    let error = transport
+        .send(
+            &OutboundTarget {
+                external_ref: "c2c:10001".to_string(),
+            },
+            &OutboundMessage {
+                text: String::new(),
+                attachment: Some(crate::transport::OutboundAttachment::Bytes {
+                    file_name: "cat.png".to_string(),
+                    data: vec![1, 2, 3],
+                }),
+            },
+        )
+        .await
+        .expect_err("纯附件消息应拒绝");
+    assert!(matches!(error, ChannelError::Protocol(_)));
+    assert!(mock.sent_messages().is_empty(), "不应发出请求");
+
+    transport.shutdown().await.expect("关停应成功");
+}
+
 // =========================================================
 // 媒体下载器
 // =========================================================

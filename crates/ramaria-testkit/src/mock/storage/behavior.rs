@@ -108,6 +108,21 @@ impl MockStorage {
         Ok(())
     }
 
+    pub(crate) async fn upsert_memory_vectors(
+        &self,
+        vectors: &[MemoryVector],
+    ) -> RamariaResult<()> {
+        self.guard("upsert_memory_vectors")?;
+        let mut store = self.memory_vectors.lock().expect("向量锁");
+        for vector in vectors {
+            store.insert(
+                (vector.doc_type.clone(), vector.doc_id.clone()),
+                vector.clone(),
+            );
+        }
+        Ok(())
+    }
+
     pub(crate) async fn load_memory_vectors(
         &self,
         model: &str,

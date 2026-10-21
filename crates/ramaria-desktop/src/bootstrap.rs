@@ -21,19 +21,24 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 /// - 始终输出到 stdout（控制台/终端）。
 /// - 同时写入文件日志 `{log_dir}/ramaria.log`（每次启动覆盖旧日志）。
 /// - 使用 `Mutex<File>` 保证线程安全，文件在初始化时立即创建，无后台线程延迟。
+/// - 文件创建失败只降级为 stdout 输出并记 warn，不中断应用启动。
 pub(crate) fn init_tracing(log_dir: &std::path::Path) {
     // 默认只开 info 级：桌面 crate 的 debug 日志含词条/路径等运行细节，而日志
     // 文件会随诊断包外发；需要排查时用 RUST_LOG 显式开启（如 RUST_LOG=debug）。
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
-    // 日志文件：立即创建（create + truncate），避免异步写延迟
+    // 日志文件：立即创建（create + truncate），避免异步写延迟。
+    // 打开失败不阻断启动：仅保留 stdout 层，失败原因以错误类别入日志。
     let log_file_path = log_dir.join("ramaria.log");
-    let log_file = std::fs::OpenOptions::new()
+    let (log_file, open_error) = match std::fs::OpenOptions::new()
         .create(true)
         .truncate(true)
         .write(true)
         .open(&log_file_path)
-        .unwrap_or_else(|e| panic!("无法创建日志文件 '{}': {}", log_file_path.display(), e));
+    {
+        Ok(file) => (Some(file), None),
+        Err(error) => (None, Some(error.kind())),
+    };
 
     let stdout_layer = fmt::layer()
         .with_target(true)
@@ -41,11 +46,13 @@ pub(crate) fn init_tracing(log_dir: &std::path::Path) {
         .with_file(false)
         .with_line_number(false);
 
-    let file_layer = fmt::layer()
-        .with_target(true)
-        .with_thread_ids(false)
-        .with_ansi(false)
-        .with_writer(std::sync::Mutex::new(log_file));
+    let file_layer = log_file.map(|file| {
+        fmt::layer()
+            .with_target(true)
+            .with_thread_ids(false)
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(file))
+    });
 
     tracing_subscriber::registry()
         .with(filter)
@@ -55,10 +62,17 @@ pub(crate) fn init_tracing(log_dir: &std::path::Path) {
 
     // tracing_subscriber 的 fmt layer 通过 MakeWriter 写入时会自动添加换行符。
     tracing::info!("Ramaria Desktop v{} 启动", env!("CARGO_PKG_VERSION"));
-    tracing::info!(
-        file = %crate::path_guard::redact_path_label(&log_file_path),
-        "日志文件已创建"
-    );
+    match open_error {
+        Some(kind) => tracing::warn!(
+            file = %crate::path_guard::redact_path_label(&log_file_path),
+            error_kind = ?kind,
+            "日志文件创建失败，仅输出到 stdout"
+        ),
+        None => tracing::info!(
+            file = %crate::path_guard::redact_path_label(&log_file_path),
+            "日志文件已创建"
+        ),
+    }
 }
 
 // =========================================================

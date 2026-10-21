@@ -6,6 +6,37 @@
 
 use super::*;
 
+/// 向量检索失败必须可观测：本轮按无向量通道降级（不改变"无命中"语义），
+/// 失败次数累计可读，且不影响其他通道。
+#[test]
+fn vector_search_failure_degrades_and_is_counted() {
+    let mut r = Retriever::new();
+    r.index_l1(&l1_view_doc(
+        uuid::Uuid::new_v4(),
+        "Rust 向量检索失败降级用例",
+        1000,
+    ));
+
+    let req = SearchRequest {
+        query: "Rust".to_string(),
+        persona_uid: None,
+        top_k: 5,
+        filter_share: false,
+    };
+    // 向量索引为空 → search 返回 Err(Empty)；BM25 仍应命中
+    let results = r.search(&req, Some(&[1.0, 0.0]));
+    assert!(!results.is_empty(), "BM25 通道不受向量失败影响");
+    assert!(results.iter().all(|sr| sr.vector_score.is_none()));
+    assert_eq!(r.vector_search_failure_count(), 1, "失败必须被计数");
+
+    let _ = r.search(&req, Some(&[1.0, 0.0]));
+    assert_eq!(
+        r.vector_search_failure_count(),
+        2,
+        "每次失败都累计（仅告警节流）"
+    );
+}
+
 #[test]
 fn bm25_search_finds_results() {
     let r = make_test_retriever();

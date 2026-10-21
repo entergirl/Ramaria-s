@@ -22,7 +22,9 @@ use std::path::{Path, PathBuf};
 
 use ramaria_core::error::RamariaResult;
 use ramaria_core::privacy::mask_id;
-use ramaria_core::types::{AttachmentStatus, MemberRole, MessageAttachment, SessionMember};
+use ramaria_core::types::{
+    AttachmentStatus, MemberRole, MessageAttachment, SessionMember, is_local_relative_ref,
+};
 use sqlx::SqlitePool;
 
 use crate::traits::{ImportSide, ImportedSession};
@@ -516,20 +518,16 @@ impl ImportWriter {
 /// 定位附件本地文件。
 ///
 /// 规则:
-/// - `source_ref` 为导出根相对路径（非空、非 "/" 开头、非 http(s):// 开头）时
-///   拼为 `{export_dir}/{source_ref}`；
+/// - `source_ref` 须为安全相对引用（非空、非 "/" 开头、非 http(s):// 开头、
+///   不含反斜杠、不含 ".." 组件）且不是绝对路径，拼为 `{export_dir}/{source_ref}`；
 /// - 仅 `is_file()` 命中返回 `Some`；否则 None（服务器链接 / 绝对路径 /
-///   文件缺失 / 空引用一律视为不可定位）。
+///   路径穿越 / 文件缺失 / 空引用一律视为不可定位）。
 ///
 /// 参数:
 /// - `export_dir`: 导出 JSON 所在目录（附件根）。
 /// - `source_ref`: 已规范化的附件引用。
 fn resolve_attachment_file(export_dir: &Path, source_ref: &str) -> Option<PathBuf> {
-    if source_ref.is_empty()
-        || source_ref.starts_with('/')
-        || source_ref.starts_with("http://")
-        || source_ref.starts_with("https://")
-    {
+    if !is_local_relative_ref(source_ref) || Path::new(source_ref).is_absolute() {
         return None;
     }
     let path = export_dir.join(source_ref);

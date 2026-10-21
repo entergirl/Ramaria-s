@@ -30,6 +30,18 @@ fn mask_key_empty() {
     assert_eq!(ramaria_cli::ui::mask_key(""), "****");
 }
 
+/// 非 ASCII key 按字符取首尾，不在 UTF-8 边界中间切断。
+#[test]
+fn mask_key_multibyte_chars() {
+    // 8 个汉字（24 字节）：首尾各保留 3 个字符
+    assert_eq!(
+        ramaria_cli::ui::mask_key("密钥密钥密钥密钥"),
+        "密钥密****钥密钥"
+    );
+    // 4 个汉字（12 字节）即便字节长度 > 4 也按字符数回退
+    assert_eq!(ramaria_cli::ui::mask_key("密钥密钥"), "****");
+}
+
 #[test]
 fn mask_key_very_long() {
     let long_key = "sk-".to_string() + &"a".repeat(100);

@@ -400,8 +400,12 @@ fn vision_progress_throttle_emits_five_rows_or_percent_change() {
 /// 互斥标志生命周期：acquire 置位、Drop 复位（宿主入口据此拒绝并发"继续处理"）。
 #[test]
 fn post_active_flag_lifecycle() {
-    let guard = PostActiveGuard::acquire();
+    let guard = PostActiveGuard::acquire().expect("首个守卫应抢占成功");
     assert!(is_post_active(), "guard 存活期间标志应置位");
+    assert!(
+        PostActiveGuard::acquire().is_none(),
+        "已有守卫在途时第二次抢占应失败"
+    );
     drop(guard);
     // 并行用例的 run_post 可能同时在途（同样持有标志）；短暂等待吸收该窗口后必须复位
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);

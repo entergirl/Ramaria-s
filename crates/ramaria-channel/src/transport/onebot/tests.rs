@@ -97,6 +97,8 @@ enum ServerMode {
     Echo,
     /// 静默：记录帧但与不应答。
     Silent,
+    /// 保持连接但不读取任何帧（不回 Pong，模拟对端失联）。
+    Mute,
     /// 接受连接后立即主动关闭。
     CloseImmediately,
     /// 接受后立即断开 TCP（模拟握手失败）。
@@ -145,6 +147,11 @@ async fn spawn_server(mode: ServerMode) -> (String, ServerProbe) {
                 };
                 if mode == ServerMode::CloseImmediately {
                     let _ = ws.close(None).await;
+                    return;
+                }
+                if mode == ServerMode::Mute {
+                    // 只持有连接、不轮询帧：客户端发来的 Ping 得不到 Pong
+                    tokio::time::sleep(Duration::from_secs(30)).await;
                     return;
                 }
                 if let ServerMode::PushEvent(event) = mode {
@@ -437,6 +444,40 @@ async fn client_sends_ping_frames() {
         "应收到客户端 Ping",
     )
     .await;
+
+    transport.shutdown().await.expect("关停应成功");
+}
+
+/// 心跳间隔短于空闲阈值：心跳发出不续期，无入站帧仍按空闲判定并重连。
+#[tokio::test]
+async fn idle_timeout_survives_frequent_pings() {
+    let (url, probe) = spawn_server(ServerMode::Mute).await;
+    let sink = Arc::new(RecordingSink::default());
+    let options = QqTransportOptions {
+        ping_interval: Duration::from_millis(40),
+        idle_timeout: Duration::from_millis(160),
+        ..fast_options()
+    };
+    let transport = build_transport(&url, options, Arc::clone(&sink));
+
+    transport.connect().await.expect("连接应成功");
+    let states = wait_states(&sink, Duration::from_secs(5), |states| {
+        states.contains(&ConnectionState::Error)
+            && states
+                .iter()
+                .filter(|state| **state == ConnectionState::Online)
+                .count()
+                >= 2
+    })
+    .await;
+    assert!(
+        states.contains(&ConnectionState::Error),
+        "心跳不应延长空闲判定，应出现断线错误态"
+    );
+    assert!(
+        probe.connections.load(Ordering::SeqCst) >= 2,
+        "空闲超时应触发重连"
+    );
 
     transport.shutdown().await.expect("关停应成功");
 }

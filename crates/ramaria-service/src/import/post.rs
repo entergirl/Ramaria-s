@@ -37,10 +37,16 @@ static POST_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub(crate) struct PostActiveGuard(());
 
 impl PostActiveGuard {
-    /// 置位活跃标记并返回守卫（生命周期与 `run_post` 调用一致）。
-    pub(crate) fn acquire() -> Self {
-        POST_ACTIVE.store(true, Ordering::SeqCst);
-        Self(())
+    /// 以 CAS 抢占活跃标记：已有后处理在途时返回 `None`。
+    ///
+    /// 说明:
+    /// - 抢占是排他的（compare_exchange），并发调用只有一方成功；
+    /// - 返回的守卫生命周期与 `run_post` 调用一致，Drop 时复位。
+    pub(crate) fn acquire() -> Option<Self> {
+        POST_ACTIVE
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()
+            .map(|_| Self(()))
     }
 }
 
@@ -136,8 +142,13 @@ pub(crate) async fn run_post(
     req: ImportPostRequest,
     progress: Option<&dyn ImportProgressSink>,
 ) -> RamariaResult<ImportPostOutcome> {
-    // 活跃标记随本次编排置位 / 复位：宿主在其他入口（如"继续处理"）据此拒绝并发
-    let _active = PostActiveGuard::acquire();
+    // 活跃标记随本次编排置位 / 复位：宿主在其他入口（如"继续处理"）据此拒绝并发。
+    // CAS 抢占失败说明已有后处理在途：直接拒绝，避免两路同时处理同一批附件 / 会话。
+    let Some(_active) = PostActiveGuard::acquire() else {
+        return Err(ramaria_core::error::RamariaError::config(
+            "导入后处理正在进行，请稍候再试",
+        ));
+    };
 
     let session_count = req.session_ids.len();
     tracing::info!(session_count, "导入后处理开始");

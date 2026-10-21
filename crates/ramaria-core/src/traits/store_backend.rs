@@ -69,8 +69,24 @@ pub trait StoreInfrastructure: Send + Sync {
 
     /// 写入（覆盖）一条记忆向量。
     ///
-    /// 默认实现返回 `Ok(())`（不持久化）。
-    async fn upsert_memory_vector(&self, _vector: &MemoryVector) -> RamariaResult<()> {
+    /// 默认实现返回 `Ok(())`（不持久化）并记一次 warn：正常后端应覆写，
+    /// 静默空实现会让向量通道在重启后全部丢失。
+    async fn upsert_memory_vector(&self, vector: &MemoryVector) -> RamariaResult<()> {
+        tracing::warn!(
+            doc_type = %vector.doc_type,
+            "存储后端未实现记忆向量持久化，本条向量不会落盘"
+        );
+        Ok(())
+    }
+
+    /// 批量写入（覆盖）记忆向量。
+    ///
+    /// 默认实现逐条调用 [`Self::upsert_memory_vector`]（非事务、按序短路）；
+    /// SQLite 后端覆写为单事务多值 upsert，降低批量补算 / 封存的往返与 WAL 提交次数。
+    async fn upsert_memory_vectors(&self, vectors: &[MemoryVector]) -> RamariaResult<()> {
+        for vector in vectors {
+            self.upsert_memory_vector(vector).await?;
+        }
         Ok(())
     }
 

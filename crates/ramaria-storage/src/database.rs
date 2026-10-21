@@ -88,9 +88,15 @@ pub async fn init_pool_with(
     tuning: PoolTuning,
 ) -> RamariaResult<SqlitePool> {
     let path = db_path.unwrap_or_else(|| {
+        // 缺省路径仅用于开发 / 测试：数据目录环境变量优先，
+        // 否则落在当前工作目录下的开发库（解析为绝对路径，避免相对路径随 CWD 漂移）。
         std::env::var("RAMARIA_DATA_DIR")
             .map(|d| PathBuf::from(d).join("ramaria.db"))
-            .unwrap_or_else(|_| PathBuf::from(DEV_DB_RELATIVE_PATH))
+            .unwrap_or_else(|_| {
+                std::env::current_dir()
+                    .map(|dir| dir.join(DEV_DB_RELATIVE_PATH))
+                    .unwrap_or_else(|_| PathBuf::from(DEV_DB_RELATIVE_PATH))
+            })
     });
 
     // 确保父目录存在

@@ -119,13 +119,13 @@ pub(crate) async fn rebuild(engine: &Engine, force: bool) -> RamariaResult<UttRe
     outcome.embedding_ok = stats.embedding_ok;
     outcome.embedding_failed = stats.embedding_failed;
 
-    // ---- 3b. 块向量写入向量表（失败只记日志，不阻塞重建） ----
-    let mut vectors_written = 0usize;
-    for (block_id, vector) in &stats.vectors {
-        if embedding_store::store(engine, VECTOR_DOC_UTT, &block_id.to_string(), vector).await {
-            vectors_written += 1;
-        }
-    }
+    // ---- 3b. 块向量批量写入向量表（单事务；失败只记日志，不阻塞重建） ----
+    let vector_items: Vec<(String, Vec<f32>)> = stats
+        .vectors
+        .iter()
+        .map(|(block_id, vector)| (block_id.to_string(), vector.clone()))
+        .collect();
+    let vectors_written = embedding_store::store_many(engine, VECTOR_DOC_UTT, &vector_items).await;
     // 重切替换掉的旧块向量已无业务行对应 → 清孤儿
     let pruned = storage.prune_orphan_memory_vectors().await?;
 

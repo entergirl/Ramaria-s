@@ -31,7 +31,6 @@ const SETTINGS_MODULES = [
   'nav.js',
   'sections/basic/backend.js',
   'sections/basic/embedding.js',
-  'sections/basic/memory_injection.js',
   'sections/basic/session.js',
   'sections/basic/proactive.js',
   'sections/basic/channel.js',

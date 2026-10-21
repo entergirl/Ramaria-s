@@ -208,9 +208,7 @@ impl PendingBuffer {
             }
         }
 
-        if best_sim >= FRAGMENT_MERGE_THRESHOLD
-            && let Some(idx) = best_idx
-        {
+        if let Some(idx) = best_idx.filter(|_| best_sim >= FRAGMENT_MERGE_THRESHOLD) {
             tracing::debug!(
                 jaccard = best_sim,
                 fragment_idx = idx,

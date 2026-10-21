@@ -100,7 +100,7 @@ pub struct FusedResult<I> {
 ///
 /// 说明:
 /// - 通道缺席（None）→ 该项不参与融合（既不加分也不产生惩罚项）；
-/// - 通道存在但文档未命中 → 使用惩罚排名 `penalty_rank(config.top_k)`；
+/// - 通道存在但文档未命中 → 使用惩罚排名 `max(通道结果数, top_k) + 1`；
 /// - 权重按身份取值：向量恒 1.0、BM25 取 `config.bm25_weight`、
 ///   图谱取 `config.graph_weight`、关键词镜像取 `config.keyword_weight`。
 ///
@@ -125,13 +125,15 @@ pub struct OptionalChannels<'a, I: Clone + std::hash::Hash + Eq> {
 ///
 /// 当某文档不在某通道的返回结果中时，使用一个较大的排名作为惩罚。
 ///
-/// 公式: penalty_rank = top_k * 2 + 1
+/// 公式: penalty_rank = max(result_count, top_k) + 1
 ///
 /// 说明:
-/// - `top_k` 是融合后期望返回的最大条数。
-/// - 惩罚排名应大于所有实际出现的排名 (实际 rank ≤ result_count)。
-fn penalty_rank(top_k: usize) -> f64 {
-    (top_k * 2 + 1) as f64
+/// - `result_count` 是该通道本次返回的结果数；`top_k` 是融合后期望返回的最大条数。
+/// - 惩罚排名必须严格大于该通道的所有实际排名，否则深位命中（如通道超取后的
+///   第 60 名）会得到比"未命中"更低的贡献项，出现排序倒挂。
+/// - 通道结果数少于 `top_k` 时按 `top_k` 兜底，保持惩罚明显弱于任何可见排名。
+fn penalty_rank(top_k: usize, result_count: usize) -> f64 {
+    (result_count.max(top_k) + 1) as f64
 }
 
 /// 对任意通道组合执行 RRF 融合（单/双/三/四通道统一入口）。
@@ -151,7 +153,12 @@ pub fn rrf_fuse_optional<I: Clone + std::hash::Hash + Eq + std::fmt::Debug>(
     channels: &OptionalChannels<'_, I>,
     config: &RrfConfig,
 ) -> Vec<FusedResult<I>> {
-    let penalty = penalty_rank(config.top_k);
+    // 惩罚排名逐通道计算：不同通道的返回条数不同（如 BM25 超取、向量按 top_k 截断），
+    // 统一惩罚值会让"结果多的通道"的深位命中低于该通道的缺席惩罚。
+    let vector_penalty = channel_penalty(channels.vector, config.top_k);
+    let bm25_penalty = channel_penalty(channels.bm25, config.top_k);
+    let graph_penalty = channel_penalty(channels.graph, config.top_k);
+    let keyword_penalty = channel_penalty(channels.keyword, config.top_k);
 
     // 各通道排名映射：doc_id → (rank, raw_score)；缺席通道映射为 None
     let vector_ranks: Option<HashMap<&I, (f64, f64)>> = channels.vector.map(channel_rank_map);
@@ -181,10 +188,10 @@ pub fn rrf_fuse_optional<I: Clone + std::hash::Hash + Eq + std::fmt::Debug>(
     let mut fused: Vec<FusedResult<I>> = all_ids
         .iter()
         .map(|id| {
-            let (v_rank, v_score) = rank_and_score(&vector_ranks, id, penalty);
-            let (b_rank, b_score) = rank_and_score(&bm25_ranks, id, penalty);
-            let (g_rank, g_score) = rank_and_score(&graph_ranks, id, penalty);
-            let (kw_rank, _) = rank_and_score(&keyword_ranks, id, penalty);
+            let (v_rank, v_score) = rank_and_score(&vector_ranks, id, vector_penalty);
+            let (b_rank, b_score) = rank_and_score(&bm25_ranks, id, bm25_penalty);
+            let (g_rank, g_score) = rank_and_score(&graph_ranks, id, graph_penalty);
+            let (kw_rank, _) = rank_and_score(&keyword_ranks, id, keyword_penalty);
 
             let mut rrf_score = 0.0;
             if channels.vector.is_some() {
@@ -357,6 +364,14 @@ pub fn rrf_fuse_with_keyword<I: Clone + std::hash::Hash + Eq + std::fmt::Debug>(
         },
         config,
     )
+}
+
+/// 计算某通道的惩罚排名；通道缺席时返回 0（不会被使用）。
+fn channel_penalty<I: Clone + std::hash::Hash + Eq>(
+    channel: Option<&ChannelResult<I>>,
+    top_k: usize,
+) -> f64 {
+    channel.map_or(0.0, |ch| penalty_rank(top_k, ch.results.len()))
 }
 
 /// 构建通道排名映射：doc_id → (rank, raw_score)（索引 0 对应 rank=1）。

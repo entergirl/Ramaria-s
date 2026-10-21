@@ -406,3 +406,16 @@ fn add_node_refreshes_index_without_duplicates() {
         "clear 后单字符索引应清空"
     );
 }
+
+/// 图谱节点键携带人格归属：同名事件跨人格互不覆盖，拆分后人格与标题可还原。
+#[test]
+fn graph_entity_key_scopes_same_title_by_persona() {
+    let a = graph_entity_key(Some("char-a"), "一起去吃饭");
+    let b = graph_entity_key(Some("char-b"), "一起去吃饭");
+    assert_ne!(a, b, "同名事件分属不同人格时节点键应不同");
+    assert_eq!(split_graph_entity_key(&a), (Some("char-a"), "一起去吃饭"));
+    assert_eq!(split_graph_entity_key(&b), (Some("char-b"), "一起去吃饭"));
+
+    // 无归属实体保持原名（兼容旧格式 / 无主事件）
+    assert_eq!(split_graph_entity_key("一起去吃饭"), (None, "一起去吃饭"));
+}

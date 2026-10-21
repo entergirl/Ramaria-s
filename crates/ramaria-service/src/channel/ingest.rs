@@ -362,7 +362,8 @@ async fn persist_image_attachments(
 /// 事件指纹（SHA-256 前 8 字节 → 16 位 hex）。
 ///
 /// 组成:
-/// - 平台消息 ID 存在：`platform:{channel}:{message_id}`（同平台消息跨会话稳定）；
+/// - 平台消息 ID 存在：`platform:{channel}:{external_ref}:{message_id}`
+///   （消息 ID 只在会话内唯一，必须带上会话标识，避免跨会话同 ID 被误判重复）；
 /// - 缺失：`platform:{channel}:{external_ref}:{created_at}:{发送账号}:{正文}`（事件级兜底）。
 pub(crate) fn channel_fingerprint(
     channel: &str,
@@ -375,7 +376,7 @@ pub(crate) fn channel_fingerprint(
         .map(str::trim)
         .filter(|value| !value.is_empty());
     let material = match platform_id {
-        Some(message_id) => format!("platform:{channel}:{message_id}"),
+        Some(message_id) => format!("platform:{channel}:{external_ref}:{message_id}"),
         None => {
             let sender = message
                 .sender

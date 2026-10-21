@@ -220,6 +220,7 @@ fn index_progress_event_payload_serialization() {
         status: ramaria_core::types::IndexStatus::Building,
         loaded: 2,
         total: 5,
+        failed: 1,
         percent: 40,
         elapsed_ms: 1200,
         model: Some("bge-small".to_string()),

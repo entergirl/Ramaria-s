@@ -99,6 +99,10 @@ impl StoreInfrastructure for SqliteStorage {
         repo::memory_vectors::upsert(&self.pool, vector).await
     }
 
+    async fn upsert_memory_vectors(&self, vectors: &[MemoryVector]) -> RamariaResult<()> {
+        repo::memory_vectors::upsert_many(&self.pool, vectors).await
+    }
+
     async fn load_memory_vectors(&self, model: &str) -> RamariaResult<Vec<MemoryVector>> {
         repo::memory_vectors::load_by_model(&self.pool, model).await
     }

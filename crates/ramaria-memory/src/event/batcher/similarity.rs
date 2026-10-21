@@ -160,9 +160,7 @@ pub fn absorb_orphans(
             }
         }
 
-        if best_sim >= theta_attach
-            && let Some(ci) = best_cluster
-        {
+        if let Some(ci) = best_cluster.filter(|_| best_sim >= theta_attach) {
             tracing::debug!(
                 orphan_idx = node_idx,
                 target_cluster = ci,

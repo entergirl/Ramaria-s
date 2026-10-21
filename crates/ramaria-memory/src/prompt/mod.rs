@@ -5,12 +5,10 @@
 //! - layers.rs: 四层注入结构与预算分配器（脉络独立预算 ≤ 30%）
 //! - layer_guard.rs: 注入装配前层间证据去重与冲突仲裁（独立开关，默认关闭）
 //! - example_selector.rs: Few-shot 示例筛选 (按话题标签/情绪效价/消息长度)
-//! - injection_guard.rs: 线上记忆注入开关 (控制 Block C 是否发送到线上 LLM)
 //! - 数据来源: persona_facts + personality_traits + Persona-Aware RAG 检索结果
 
 pub mod builder;
 pub mod example_selector;
-pub mod injection_guard;
 pub mod layer_guard;
 pub mod layers;
 

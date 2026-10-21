@@ -278,16 +278,16 @@ impl<'a> L1Summarizer<'a> {
 
         // 步骤 2: 剥离 think 标签
         let stripped = utils::strip_thinking(raw);
-        if stripped != raw
-            && let Ok(parsed) = serde_json::from_str::<L1SummaryResponse>(&stripped)
-        {
-            debug!("剥离 think 标签后解析成功");
-            return Ok(parsed);
+        if stripped != raw {
+            if let Ok(parsed) = serde_json::from_str::<L1SummaryResponse>(&stripped) {
+                debug!("剥离 think 标签后解析成功");
+                return Ok(parsed);
+            }
         }
 
         // 步骤 3: 正则提取首对花括号
-        if let Some(json_segment) = utils::extract_first_json_object(raw)
-            && let Ok(parsed) = serde_json::from_str::<L1SummaryResponse>(&json_segment)
+        if let Some(parsed) = utils::extract_first_json_object(raw)
+            .and_then(|json_segment| serde_json::from_str::<L1SummaryResponse>(&json_segment).ok())
         {
             debug!("正则提取 JSON 对象后解析成功");
             return Ok(parsed);

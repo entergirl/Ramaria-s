@@ -3,7 +3,8 @@
 //! 设计特点:
 //! - 只读工具：分页回看会话消息，不改变状态
 //! - 定位二选一：`session_id`（具体会话）或 `persona`（该人格最近会话），都缺省时报可操作错误
-//! - 白名单双路径：`persona` 入参与会话归属人格都要通过可见性校验（防越权读取）
+//! - 白名单双路径：`persona` 入参与会话归属人格都要通过可见性校验（防越权读取）；
+//!   会话归属经服务层用例读取（协议壳不直接访问存储）
 //! - 参数校验在协议壳完成：UUID 解析失败给出明确提示，不下抛到服务层
 
 use ramaria_service::{HistoryRequest, entry_error_message};
@@ -70,14 +71,13 @@ impl RamariaMcpServer {
 
         // ---- 白名单校验：会话归属路径（防用会话 id 绕过白名单） ----
         if let Some(id) = session_id {
-            match self.engine().storage().get_session(id).await {
-                Ok(Some(session)) => {
-                    if let Some(uid) = session.persona_uid.as_deref() {
-                        if let Some(err) = self.check_persona_visible(uid) {
-                            return Ok(err);
-                        }
+            match self.engine().session_persona_uid(id).await {
+                Ok(Some(Some(uid))) => {
+                    if let Some(err) = self.check_persona_visible(&uid) {
+                        return Ok(err);
                     }
                 }
+                Ok(Some(None)) => {}
                 Ok(None) => {
                     return Ok(tool_error(format!(
                         "会话不存在：{id}（可先用 persona 查询最近会话）"

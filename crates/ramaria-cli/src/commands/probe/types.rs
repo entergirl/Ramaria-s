@@ -513,6 +513,9 @@ pub struct ProbeExperiment {
     pub dataset_seed: u64,
     pub persona_uid: String,
     pub rebuild_utt: bool,
+    /// utt 块复原状态（None = 本次未重建 utt；Some(false) = 按基准参数复原失败）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub utt_restored: Option<bool>,
     pub variants: Vec<ProbeVariantResult>,
     /// 统计法（--repeat N）聚合结果；未指定时为 None。
     #[serde(default, skip_serializing_if = "Option::is_none")]

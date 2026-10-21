@@ -187,8 +187,9 @@ impl Retriever {
                     }
                     // 向量命中但均被隔离过滤（防御）→ 落入子串降级
                 }
-                Err(_) => {
-                    // 空索引 / 维度不符 → 子串降级
+                Err(e) => {
+                    // 空索引 / 维度不符 → 子串降级；记录一次原因便于区分"无命中"与"通道故障"
+                    tracing::warn!(error = %e, "utt 向量检索失败，本次降级为子串匹配");
                 }
             }
         }
@@ -208,11 +209,12 @@ impl Retriever {
         let mut scored: Vec<UttHit> = Vec::new();
 
         for doc in candidates {
-            let lower_text = doc.block_text.to_lowercase();
+            // 不复制整块文本：ASCII token 走无分配的大小写不敏感匹配，
+            // 中文等非 ASCII token 直接子串匹配（分词阶段已统一小写）。
             let score: usize = if tokens.is_empty() {
                 // 分词为空（如纯符号查询）→ 原始子串包含判定
-                let q = query.trim().to_lowercase();
-                if !q.is_empty() && lower_text.contains(&q) {
+                let q = query.trim();
+                if !q.is_empty() && contains_token(&doc.block_text, q) {
                     1
                 } else {
                     0
@@ -220,7 +222,7 @@ impl Retriever {
             } else {
                 tokens
                     .iter()
-                    .filter(|t| lower_text.contains(t.as_str()))
+                    .filter(|t| contains_token(&doc.block_text, t.as_str()))
                     .count()
             };
             if score > 0 {
@@ -239,5 +241,25 @@ impl Retriever {
         });
         scored.truncate(top_k);
         scored
+    }
+}
+
+/// 大小写不敏感的 token 命中判定（不分配整块文本副本）。
+///
+/// 规则:
+/// - 纯 ASCII token：按字节窗口做 eq_ignore_ascii_case 比较，覆盖英文大小写差异；
+/// - 含非 ASCII token：直接子串匹配（中文无大小写，分词阶段已统一小写）。
+fn contains_token(haystack: &str, token: &str) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+    if token.is_ascii() {
+        let needle = token.as_bytes();
+        haystack
+            .as_bytes()
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle))
+    } else {
+        haystack.contains(token)
     }
 }

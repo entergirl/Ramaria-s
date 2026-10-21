@@ -689,6 +689,54 @@ async fn probe_run_result_serializes_to_valid_json() {
     assert!(json["generated_at"].is_string());
 }
 
+/// 档位实验结束按基准配置复原 utt 块（库内切分不被最后一档永久改写）。
+#[tokio::test]
+async fn probe_run_restores_base_utt_blocks() {
+    let (engine, storage) = build_probe_engine();
+    storage.add_persona(common::make_test_persona(
+        "char-0001",
+        "角色一",
+        ramaria_core::types::PersonaKind::Char,
+        None,
+    ));
+    let sid = Uuid::new_v4();
+    let mut messages = Vec::new();
+    for i in 0..40 {
+        messages.push(make_user_message(sid, &format!("第 {i} 条")));
+        messages.push(persona_reply(sid, &format!("回复 {i}")));
+    }
+    storage.create_session_with_messages(sid, messages);
+    for i in 1..=4 {
+        storage.add_event("char-0001", make_test_event(i, &format!("测试事件{i}")));
+    }
+
+    let ds = build_dataset(&engine, Some("char-0001".to_string()), 1, 7, None).await;
+    let experiment = build_experiment(
+        &engine,
+        &ds,
+        &PathBuf::from("dataset.json"),
+        Some("max_msgs_40"),
+        Some(1),
+        true,
+        false,
+    )
+    .await
+    .expect("档位实验应成功");
+
+    assert_eq!(experiment.utt_restored, Some(true), "重建过 utt 必须复原");
+
+    let blocks = storage
+        .list_utt_blocks_by_persona("char-0001")
+        .await
+        .expect("查询 utt 块应成功");
+    assert_eq!(
+        blocks.len(),
+        1,
+        "复原后应按基准条数上限（80）切为单块，实际: {blocks:?}"
+    );
+    assert_eq!(blocks[0].msg_count, 80, "全部消息应落在同一块内");
+}
+
 // =========================================================
 // 进程级测试：probe dataset alias + --json 信封（端到端）
 // =========================================================
@@ -795,6 +843,10 @@ fn probe_report_output_stdout_json_single_envelope() {
     assert_eq!(parsed["ok"], true);
     assert_eq!(parsed["data"]["file"], "-");
     assert!(parsed["data"]["raw"].is_object(), "原始报告应放在 data.raw");
+    assert_eq!(
+        parsed["data"]["raw"]["results_file"], "results.json",
+        "产物内只记录文件名，不写绝对路径"
+    );
 }
 
 /// `--results` 文件缺失 → 业务校验失败 exit code=4（非通用失败 1），

@@ -50,10 +50,6 @@ base_url = "http://localhost:1234/v1"
 temperature = 0.3
 # 最大输出 token 数（思考模式最低可用预算 4096）
 max_tokens = 4096
-# 是否允许线上后端注入 L1/L2/L3 记忆上下文
-# true = 对话时附带相关记忆（首次使用线上 API 需隐私确认）
-# false = 仅发送当前对话消息
-online_memory_injection = true
 # 对话路径思考模式（仅 DeepSeek 生效；结构化提取路径恒关闭）
 chat_thinking = true
 # 角色沉浸指令注入位置（off | system | user；配合 chat_thinking 使用）
@@ -225,6 +221,8 @@ bm25_rebuild_interval = 300
 refresh_interval_seconds = 0
 # 向量补算的批大小（每批嵌入条数）；GPU 显存不足（OOM）时调小
 embed_batch_size = 32
+# 每个 persona 的 L2 事件加载上限：0 = 不限（分页全量加载，LRU 兜底）；>0 = 只加载最近 N 条
+l2_load_limit = 0
 
 # =========================================================
 # L3 性格推断 LLM 参数（Phase B/C）

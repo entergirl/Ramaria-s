@@ -92,5 +92,90 @@ pub(crate) async fn store(engine: &Engine, doc_type: &str, doc_id: &str, vector:
     }
 }
 
+/// 批量写入记忆向量（同一模型指纹，单事务）。
+///
+/// 参数:
+/// - `engine`: 服务层引擎（取嵌入 provider 与存储）。
+/// - `doc_type`: 文档类型（l1 / l2 / utt）。
+/// - `items`: `(doc_id, vector)` 列表。
+///
+/// 返回:
+/// - 实际写入条数；通道关闭 / provider 不可用 / 维度为 0 / 写库失败均返回 0。
+///
+/// 说明:
+/// - 维度不符的条目单独跳过并记 debug，不影响同批其余条目；
+/// - 写库失败整批回滚（单事务语义），调用方按"本批未写入"处理。
+pub(crate) async fn store_many(
+    engine: &Engine,
+    doc_type: &str,
+    items: &[(String, Vec<f32>)],
+) -> usize {
+    if items.is_empty() {
+        return 0;
+    }
+    if !engine.config().retrieval.enable_vector {
+        debug!(
+            doc_type,
+            count = items.len(),
+            "向量通道已关闭，跳过批量向量写入"
+        );
+        return 0;
+    }
+    let Some(provider) = engine.embedding() else {
+        debug!(doc_type, "嵌入 provider 不可用，跳过批量向量写入");
+        return 0;
+    };
+    if !provider.is_available() {
+        debug!(doc_type, "嵌入模型不可用，跳过批量向量写入");
+        return 0;
+    }
+
+    let info = provider.model_info();
+    let fingerprint = model_fingerprint(&info);
+    if fingerprint.is_empty() {
+        debug!(doc_type, "嵌入模型维度为 0，跳过批量向量写入");
+        return 0;
+    }
+
+    let now = now_ms();
+    let rows: Vec<MemoryVector> = items
+        .iter()
+        .filter(|(doc_id, vector)| {
+            if vector.len() == info.dimension {
+                true
+            } else {
+                debug!(
+                    doc_type,
+                    doc_id,
+                    len = vector.len(),
+                    dim = info.dimension,
+                    "向量长度与模型维度不符，跳过该条"
+                );
+                false
+            }
+        })
+        .map(|(doc_id, vector)| MemoryVector {
+            doc_type: doc_type.to_string(),
+            doc_id: doc_id.clone(),
+            model: fingerprint.clone(),
+            dim: info.dimension as u32,
+            vector: vector.clone(),
+            updated_at: now,
+        })
+        .collect();
+
+    if rows.is_empty() {
+        return 0;
+    }
+    let written = rows.len();
+    match engine.storage().upsert_memory_vectors(&rows).await {
+        Ok(()) => written,
+        Err(e) => {
+            warn!(doc_type, count = written, error = %e, "批量记忆向量写入失败（不影响主流程）");
+            0
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;

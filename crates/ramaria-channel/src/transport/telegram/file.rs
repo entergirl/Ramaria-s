@@ -11,7 +11,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use super::api;
-use crate::runtime::download::{ImageDownloader, MAX_IMAGE_BYTES};
+use crate::runtime::download::{ImageDownloader, MAX_IMAGE_BYTES, read_body_capped};
 use crate::{ChannelError, ChannelResult};
 
 // =========================================================
@@ -127,16 +127,6 @@ impl ImageDownloader for TelegramFileDownloader {
                 )));
             }
         }
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|_| ChannelError::Protocol("媒体下载读取失败".to_string()))?;
-        if bytes.len() as u64 > self.max_bytes {
-            return Err(ChannelError::Protocol(format!(
-                "文件超过体积上限（{} 字节）",
-                bytes.len()
-            )));
-        }
-        Ok(bytes.to_vec())
+        read_body_capped(response, self.max_bytes, "文件").await
     }
 }

@@ -264,6 +264,45 @@ fn fingerprint_properties() {
     assert_ne!(fp1, fp4);
 }
 
+/// 指纹只取未加昵称前缀的正文：昵称变化的两次导出仍得到同一指纹。
+#[test]
+fn fingerprint_ignores_nickname_prefix() {
+    let raw = |uid: &str, name: &str| {
+        serde_json::json!({
+            "timestamp": 1704067260000i64,
+            "type": "text",
+            "recalled": false,
+            "system": false,
+            "content": {"text": "你好", "elements": []},
+            "sender": {"uid": uid, "name": name}
+        })
+    };
+    let mut report = ImportReport::default();
+    let other_a = parse_json_message(&raw("u_a", "昵称A"), "u_self", "小明", &mut report)
+        .expect("应解析成功");
+    let other_b = parse_json_message(&raw("u_a", "昵称A改"), "u_self", "小明", &mut report)
+        .expect("应解析成功");
+    let self_a = parse_json_message(&raw("u_self", "小明"), "u_self", "小明", &mut report)
+        .expect("应解析成功");
+    let self_b = parse_json_message(&raw("u_self", "小明明"), "u_self", "小明明", &mut report)
+        .expect("应解析成功");
+
+    assert_eq!(
+        other_a.fingerprint, other_b.fingerprint,
+        "对方昵称变化不应改变指纹"
+    );
+    assert_eq!(
+        self_a.fingerprint, self_b.fingerprint,
+        "导出者昵称变化不应改变指纹"
+    );
+    assert_ne!(
+        other_a.fingerprint, self_a.fingerprint,
+        "同一正文不同角色指纹应不同"
+    );
+    assert_eq!(other_a.content, "[昵称A] 你好", "昵称前缀仍用于展示");
+    assert_eq!(other_b.content, "[昵称A改] 你好", "昵称前缀仍用于展示");
+}
+
 // -- Session 切割 --
 
 /// split_into_sessions 各消息序列参数化验证。

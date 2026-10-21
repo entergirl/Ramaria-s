@@ -126,6 +126,27 @@ impl Engine {
         crate::session::history(self, req).await
     }
 
+    /// 会话归属查询：返回会话归属人格（供入口层做只读可见性校验）。
+    ///
+    /// 返回:
+    /// - `Ok(Some(Some(uid)))`: 会话存在且归属该人格；
+    /// - `Ok(Some(None))`: 会话存在但无归属（旧数据 / 未绑定）；
+    /// - `Ok(None)`: 会话不存在；
+    /// - `Err(..)`: 存储读取失败。
+    ///
+    /// 说明:
+    /// - 入口层不直接感知 sessions 表结构；白名单校验只依赖本用例的返回值。
+    pub async fn session_persona_uid(
+        &self,
+        session_id: Uuid,
+    ) -> RamariaResult<Option<Option<String>>> {
+        let storage = self.storage_ref();
+        match storage.get_session(session_id).await? {
+            Some(session) => Ok(Some(session.persona_uid)),
+            None => Ok(None),
+        }
+    }
+
     /// 会话创建用例：新建空白会话（可绑定人格）。
     ///
     /// 返回:

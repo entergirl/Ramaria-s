@@ -82,23 +82,23 @@ impl<'a> EventExtractor<'a> {
 
         // 步骤 2: 剥离 think 标签
         let stripped = crate::utils::strip_thinking(raw);
-        if stripped != raw
-            && let Ok(response) = serde_json::from_str::<EventResponse>(&stripped)
-        {
-            return response.into_result();
+        if stripped != raw {
+            if let Ok(response) = serde_json::from_str::<EventResponse>(&stripped) {
+                return response.into_result();
+            }
         }
 
         // 步骤 3: 正则提取
-        if let Some(extracted) = crate::utils::extract_first_json_array(raw)
-            && let Ok(response) = serde_json::from_str::<EventResponse>(&extracted)
+        if let Some(response) = crate::utils::extract_first_json_array(raw)
+            .and_then(|extracted| serde_json::from_str::<EventResponse>(&extracted).ok())
         {
             return response.into_result();
         }
 
         // 步骤 3b: LLM 可能返回完整的 JSON 对象（含 events/relations），
         // 而 extract_first_json_array 仅提取数组。尝试正则提取 JSON 对象 {...}。
-        if let Some(obj_str) = crate::utils::extract_first_json_object(raw)
-            && let Ok(response) = serde_json::from_str::<EventResponse>(&obj_str)
+        if let Some(response) = crate::utils::extract_first_json_object(raw)
+            .and_then(|obj_str| serde_json::from_str::<EventResponse>(&obj_str).ok())
         {
             return response.into_result();
         }

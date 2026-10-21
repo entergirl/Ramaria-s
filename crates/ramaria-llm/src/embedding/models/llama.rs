@@ -373,11 +373,7 @@ impl LlamaEncoder {
 
         // Step 1: Tokenize
         let encoding = self.tokenizer.encode(text, true).map_err(|e| {
-            ramaria_core::error::RamariaError::embedding(format!(
-                "LLaMA/Qwen 分词失败: {} — 文本: '{}...'",
-                e,
-                &text[..text.len().min(60)]
-            ))
+            ramaria_core::error::RamariaError::embedding(format!("LLaMA/Qwen 分词失败: {}", e))
         })?;
 
         let token_ids: Vec<u32> = encoding.get_ids().to_vec();
@@ -414,11 +410,7 @@ impl LlamaEncoder {
             ramaria_core::error::RamariaError::embedding(format!("LLaMA Cache 创建失败: {}", e))
         })?;
         let hidden_states = self.model.forward(&input_ids, 0, &mut cache).map_err(|e| {
-            ramaria_core::error::RamariaError::embedding(format!(
-                "LLaMA/Qwen 前向推理失败: {}。文本: '{}...'",
-                e,
-                &text[..text.len().min(60)]
-            ))
+            ramaria_core::error::RamariaError::embedding(format!("LLaMA/Qwen 前向推理失败: {}", e))
         })?;
         // hidden_states: [1, effective_len, hidden_size]
 

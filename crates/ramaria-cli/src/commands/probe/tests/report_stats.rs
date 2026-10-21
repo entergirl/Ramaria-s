@@ -207,6 +207,8 @@ fn build_ablation_report_marks_removal_effect() {
         dataset_seed: 1,
         persona_uid: "char-0001".into(),
         rebuild_utt: false,
+
+        utt_restored: None,
         variants: vec![],
         repeat: None,
         diagnostics: None,
@@ -263,6 +265,8 @@ fn build_ablation_report_s_group_positive() {
         dataset_seed: 1,
         persona_uid: "char-0001".into(),
         rebuild_utt: false,
+
+        utt_restored: None,
         variants: vec![],
         repeat: None,
         diagnostics: None,
@@ -304,6 +308,8 @@ fn build_ablation_report_i_group_marks_increment() {
         dataset_seed: 1,
         persona_uid: "char-0001".into(),
         rebuild_utt: false,
+
+        utt_restored: None,
         variants: vec![],
         repeat: None,
         diagnostics: None,
@@ -340,6 +346,8 @@ fn report_limitations_always_contain_external_validity_note() {
         dataset_seed: 1,
         persona_uid: "char-0001".into(),
         rebuild_utt: false,
+
+        utt_restored: None,
         variants: vec![],
         repeat: None,
         diagnostics: None,
@@ -441,6 +449,8 @@ fn ablation_judgment_excludes_uncalibrated_emotion() {
         dataset_seed: 1,
         persona_uid: "char-0001".into(),
         rebuild_utt: false,
+
+        utt_restored: None,
         variants: vec![],
         repeat: None,
         diagnostics: None,
@@ -679,6 +689,8 @@ fn probe_experiment_diagnostics_serde_backcompat() {
         dataset_seed: 1,
         persona_uid: "p".into(),
         rebuild_utt: false,
+
+        utt_restored: None,
         variants: vec![],
         repeat: None,
         diagnostics: Some(ProbeRunDiagnostics {

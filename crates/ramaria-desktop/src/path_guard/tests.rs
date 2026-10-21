@@ -91,6 +91,60 @@ fn test_validate_export_path_system_dir() {
     assert!(result.is_err());
 }
 
+// ── 导出目标形态测试 ──
+
+/// 创建文件符号链接；无权限或平台不支持时返回 false（调用方跳过断言）。
+#[cfg(target_os = "windows")]
+fn try_create_file_symlink(target: &Path, link: &Path) -> bool {
+    std::os::windows::fs::symlink_file(target, link).is_ok()
+}
+
+/// 创建文件符号链接；无权限或平台不支持时返回 false（调用方跳过断言）。
+#[cfg(not(target_os = "windows"))]
+fn try_create_file_symlink(target: &Path, link: &Path) -> bool {
+    std::os::unix::fs::symlink(target, link).is_ok()
+}
+
+#[test]
+fn ensure_export_target_accepts_missing_and_regular_file() {
+    let base = temp_test_dir("target-ok");
+
+    // 目标尚不存在（新建导出场景）
+    assert!(
+        ensure_export_target_is_regular(&base.join("new.json")).is_ok(),
+        "不存在的目标应放行"
+    );
+
+    // 已存在的普通文件（覆盖导出场景）
+    let existing = base.join("existing.json");
+    std::fs::write(&existing, b"{}").expect("写入测试文件失败");
+    assert!(
+        ensure_export_target_is_regular(&existing).is_ok(),
+        "普通文件应放行"
+    );
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn ensure_export_target_rejects_symlink() {
+    let base = temp_test_dir("target-link");
+    let target = base.join("real.json");
+    std::fs::write(&target, b"{}").expect("写入测试文件失败");
+
+    let link = base.join("link.json");
+    if !try_create_file_symlink(&target, &link) {
+        // Windows 未开启开发模式时创建符号链接需管理员权限，跳过
+        let _ = std::fs::remove_dir_all(&base);
+        return;
+    }
+
+    let err = ensure_export_target_is_regular(&link).expect_err("符号链接目标应被拒绝");
+    assert!(err.contains("符号链接"), "错误消息应说明链接形态: {err}");
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 // ── 用户主目录探测测试 ──
 
 #[test]

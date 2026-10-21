@@ -408,16 +408,32 @@ impl ProviderBase {
     /// 验证 provider 可用性。
     ///
     /// 检查内容:
-    /// - base_url 是否可连接（发送带 Authorization 的 GET 到 `/models` 端点）。
+    /// - base_url 是否可连接（发送带 Authorization 的 GET 到 `/models` 端点，超时 10 秒）。
     /// - 模型 ID 是否非空（LM Studio 场景允许空字符串，用户后续选择）。
     ///
     /// 注意:
     /// - 修复：使用 `send_authenticated_get` 携带 API key header，
     ///   避免线上 provider（DeepSeek/OpenAI）的 /models 端点返回 401。
     pub async fn validate(&self) -> RamariaResult<()> {
-        // 1. 检查 base_url 可连接（带 Authorization header）
+        // 1. 检查 base_url 可连接（带 Authorization header，10 秒超时）
         let models_url = format!("{}/models", self.transport.base_url());
-        let response = self.transport.send_authenticated_get(&models_url).await?;
+        let timeout = Duration::from_secs(10);
+        let response = tokio::time::timeout(timeout, async {
+            self.transport.send_authenticated_get(&models_url).await
+        })
+        .await
+        .map_err(|_elapsed| {
+            tracing::warn!(
+                provider = self.provider_name(),
+                url = %models_url,
+                "模型列表验证超时（10s）"
+            );
+            RamariaError::llm(format!(
+                "{} 模型列表查询超时（10s）：请检查 base_url 与网络连接 ({})",
+                self.provider_name(),
+                models_url,
+            ))
+        })??;
 
         let status = response.status();
         if !status.is_success() {

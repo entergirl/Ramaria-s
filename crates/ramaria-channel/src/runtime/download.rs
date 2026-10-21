@@ -110,18 +110,39 @@ impl ImageDownloader for HttpImageDownloader {
                 )));
             }
         }
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|_| ChannelError::Protocol("图片下载读取失败".to_string()))?;
-        if bytes.len() as u64 > self.max_bytes {
+        read_body_capped(response, self.max_bytes, "图片").await
+    }
+}
+
+/// 按块读取响应体并在超限时立即中止（不把超大响应整体缓冲进内存）。
+///
+/// 参数:
+/// - `response`: 已确认状态码成功的下载响应。
+/// - `max_bytes`: 允许的最大字节数。
+/// - `label`: 错误文案中的对象名（图片 / 文件）。
+///
+/// 返回:
+/// - 完整字节；任一块读取失败或累计超限时返回协议错误（文案不含 URL）。
+pub(crate) async fn read_body_capped(
+    response: reqwest::Response,
+    max_bytes: u64,
+    label: &str,
+) -> Result<Vec<u8>, ChannelError> {
+    use futures::StreamExt;
+
+    let mut stream = response.bytes_stream();
+    let mut bytes: Vec<u8> = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| ChannelError::Protocol(format!("{label}下载读取失败")))?;
+        let next_len = bytes.len() as u64 + chunk.len() as u64;
+        if next_len > max_bytes {
             return Err(ChannelError::Protocol(format!(
-                "图片超过体积上限（{} 字节）",
-                bytes.len()
+                "{label}超过体积上限（{next_len} 字节）"
             )));
         }
-        Ok(bytes.to_vec())
+        bytes.extend_from_slice(&chunk);
     }
+    Ok(bytes)
 }
 
 /// 请求错误分类（文案不含 URL）。

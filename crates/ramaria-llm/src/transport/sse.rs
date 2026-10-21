@@ -411,7 +411,7 @@ pub(crate) fn parse_sse_line(line: &str) -> Option<RamariaResult<StreamDelta>> {
             }))
         }
         Err(e) => Some(Err(RamariaError::llm_with_source(
-            format!("SSE data 解析失败: {}", &payload[..payload.len().min(200)]),
+            format!("SSE data 解析失败（{} 字节）", payload.len()),
             e,
         ))),
     }

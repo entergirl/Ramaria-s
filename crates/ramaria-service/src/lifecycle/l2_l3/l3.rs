@@ -147,15 +147,15 @@ pub(super) async fn run_l3_inference(engine: &Engine, persona_uid: &str) {
         }
     };
 
-    if job_id > 0
-        && let Err(e) = job_manager.mark_running(job_id).await
-    {
-        // 状态标记失败只影响可观测性，推断流程继续（不返回、不覆盖业务结果）
-        warn!(
-            job_id,
-            error = %e,
-            "标记 L3 推断任务 running 失败（继续执行，仅状态可观测性受影响）"
-        );
+    if job_id > 0 {
+        if let Err(e) = job_manager.mark_running(job_id).await {
+            // 状态标记失败只影响可观测性，推断流程继续（不返回、不覆盖业务结果）
+            warn!(
+                job_id,
+                error = %e,
+                "标记 L3 推断任务 running 失败（继续执行，仅状态可观测性受影响）"
+            );
+        }
     }
 
     // ---- 统计特征提取（纯数值，不调 LLM） ----
@@ -238,17 +238,18 @@ pub(super) async fn run_l3_inference(engine: &Engine, persona_uid: &str) {
         }
         Err(e) => {
             error!(persona_uid = %persona_owned, error = %e, "L3 Phase B 推断失败");
-            if job_id > 0
-                && let Err(mark_err) = job_manager
+            if job_id > 0 {
+                if let Err(mark_err) = job_manager
                     .mark_failed(job_id, &format!("Phase B 推断失败: {e}"))
                     .await
-            {
-                // 标记失败不覆盖原始错误（原始错误已由上面的 error! 记录）
-                warn!(
-                    job_id,
-                    error = %mark_err,
-                    "标记 L3 推断任务失败状态失败（不覆盖原始错误）"
-                );
+                {
+                    // 标记失败不覆盖原始错误（原始错误已由上面的 error! 记录）
+                    warn!(
+                        job_id,
+                        error = %mark_err,
+                        "标记 L3 推断任务失败状态失败（不覆盖原始错误）"
+                    );
+                }
             }
             return;
         }
@@ -367,10 +368,10 @@ pub(super) async fn run_l3_inference(engine: &Engine, persona_uid: &str) {
     }
 
     // 标记任务完成
-    if job_id > 0
-        && let Err(e) = job_manager.mark_completed(job_id).await
-    {
-        warn!(job_id, %e, "标记 L3 推断任务完成失败（已执行，仅状态未更新）");
+    if job_id > 0 {
+        if let Err(e) = job_manager.mark_completed(job_id).await {
+            warn!(job_id, %e, "标记 L3 推断任务完成失败（已执行，仅状态未更新）");
+        }
     }
 
     info!(

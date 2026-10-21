@@ -3,6 +3,7 @@
 //! 设计特点:
 //! - 管理任务单点：连接建立 → 读循环（手动回 Pong / 心跳 Ping / 空闲超时）→
 //!   断连收尾 → 指数退避重连；关停信号随时可打断退避与读循环
+//! - 空闲按最后一个入站帧计时（心跳发出不续期），心跳间隔短于空闲阈值时判定仍生效
 //! - 读循环三类入站帧：`echo` 应答配对到待应答表；事件帧解析为规范事件；
 //!   Ping 手动回 Pong（不依赖底层自动机制）；Pong / Binary 忽略
 //! - 断连收尾：清空写通道与待应答（在途调用收到关闭信号），中止写任务
@@ -192,6 +193,8 @@ async fn run_connection(
     ping_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ping_tick.tick().await; // 消耗首个立即触发的 tick
 
+    // 空闲判定以最后一个入站帧起算：心跳发出不续期，收帧才续期
+    let mut last_inbound = tokio::time::Instant::now();
     let reason = loop {
         tokio::select! {
             _ = &mut *shutdown_rx => break None,
@@ -200,15 +203,18 @@ async fn run_connection(
                     break Some("连接已关闭".to_string());
                 }
             }
-            incoming = tokio::time::timeout(context.options.idle_timeout, read_half.next()) => {
+            _ = tokio::time::sleep_until(last_inbound + context.options.idle_timeout) => {
+                break Some("连接空闲超时".to_string());
+            }
+            incoming = read_half.next() => {
                 match incoming {
-                    Err(_) => break Some("连接空闲超时".to_string()),
-                    Ok(None) => break Some("连接已关闭".to_string()),
-                    Ok(Some(Err(error))) => {
+                    None => break Some("连接已关闭".to_string()),
+                    Some(Err(error)) => {
                         tracing::debug!(channel = "qq", error = %error, "OneBot 连接读取失败");
                         break Some("连接读取失败".to_string());
                     }
-                    Ok(Some(Ok(message))) => {
+                    Some(Ok(message)) => {
+                        last_inbound = tokio::time::Instant::now();
                         if let Some(reason) = handle_frame(context, message) {
                             break Some(reason);
                         }

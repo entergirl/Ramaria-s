@@ -18,7 +18,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use ramaria_core::error::RamariaResult;
-use ramaria_core::types::{CHANNEL_QQ, CHANNEL_TELEGRAM, MemoryL1};
+use ramaria_core::types::{CHANNEL_QQ, CHANNEL_TELEGRAM, MemoryL1, VECTOR_DOC_UTT};
 use ramaria_memory::job::JobType;
 use ramaria_memory::utt::builder::UttBuilder;
 use uuid::Uuid;
@@ -299,14 +299,38 @@ async fn build_utt(
     };
 
     let builder = UttBuilder::from_config(&config.utt);
-    // 嵌入 provider 取快照后在锁外使用（不可用 → 块照常入库，无向量）
-    let embedding = engine.embedding_ref();
+    // 嵌入 provider 取快照后在锁外使用（不可用 → 块照常入库，无向量）；
+    // 向量通道关闭时不生成块向量（与 utt rebuild 同口径：零嵌入调用）。
+    let embedding = if config.retrieval.enable_vector {
+        engine.embedding_ref()
+    } else {
+        None
+    };
     let embedder = embedding.as_deref();
     match builder
         .build_session(engine.storage_ref().as_ref(), session, embedder)
         .await
     {
         Ok(stats) => {
+            // 块向量批量落表（单事务；失败只记日志，不影响检索降级）
+            if !stats.vectors.is_empty() {
+                let items: Vec<(String, Vec<f32>)> = stats
+                    .vectors
+                    .iter()
+                    .map(|(block_id, vector)| (block_id.to_string(), vector.clone()))
+                    .collect();
+                let written =
+                    crate::embedding_store::store_many(engine, VECTOR_DOC_UTT, &items).await;
+                tracing::debug!(written, total = items.len(), "utt 块向量批量写入完成");
+            }
+            // 增量进内存检索索引（构建中 / 未加载 → 置脏，下次构建覆盖）
+            let vector_map: std::collections::HashMap<i64, Vec<f32>> =
+                stats.vectors.iter().cloned().collect();
+            let indexed = crate::index::index_utt_blocks_incrementally(
+                engine,
+                &stats.new_blocks,
+                &vector_map,
+            );
             tracing::info!(
                 %session_id,
                 created = stats.chunks_created,
@@ -314,6 +338,7 @@ async fn build_utt(
                 removed = stats.chunks_removed,
                 embedding_ok = stats.embedding_ok,
                 embedding_failed = stats.embedding_failed,
+                indexed,
                 "utt 话语块增量构建完成"
             );
         }

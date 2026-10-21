@@ -608,7 +608,7 @@ var RamariaApi = (function () {
  */
     async function exportSessionsJson(outputPath) {
         _require(outputPath, '导出路径');
-        return await _invoke('export_sessions_json', { output_path: outputPath }, '导出 JSON');
+        return await _invoke('export_sessions_json', { outputPath: outputPath }, '导出 JSON');
     }
 
  /**
@@ -622,7 +622,7 @@ var RamariaApi = (function () {
  */
     async function exportSessionsMarkdown(outputPath) {
         _require(outputPath, '导出路径');
-        return await _invoke('export_sessions_markdown', { output_path: outputPath }, '导出 Markdown');
+        return await _invoke('export_sessions_markdown', { outputPath: outputPath }, '导出 Markdown');
     }
 
  // =========================================================

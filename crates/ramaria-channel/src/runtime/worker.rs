@@ -6,7 +6,9 @@
 //! - 单步失败降级不阻塞：图片理解超时/失败按占位符继续（后台任务不取消）、
 //!   生成失败不发送、发送失败仅记日志（回复已落库）；重复事件零重复写入与响应
 //! - 出站文本拆条：多气泡契约分隔符切段，逐段分次发送（段间间隔 + 段数上限）
-//! - 表情指令：回复中的 `[表情:关键词]` 标记剥离后交表情资产解析，命中时随首段发出
+//! - 表情指令：回复中的 `[表情:关键词]` 标记剥离后交表情资产解析，命中时随首段发出；
+//!   传输不支持纯附件消息时改发表情占位文本
+//! - 关停可打断在途编排：停止信号到达即放弃未完成的回复（已落库的回复不回滚）
 //! - 日志脱敏：外部标识经 `mask_id`，不记消息内容
 
 use std::collections::HashMap;
@@ -18,7 +20,9 @@ use ramaria_service::{ChannelIngestRequest, ChannelReplyRequest, Engine};
 
 use super::assemble::{DownloadedImage, assemble_inbound, md5_hex};
 use super::download::ImageDownloader;
-use super::outbound::{fold_segment_overflow, parse_sticker_directive, split_outbound_segments};
+use super::outbound::{
+    fold_segment_overflow, parse_sticker_directive, split_outbound_segments, sticker_text_fallback,
+};
 use crate::runtime::ChannelRuntime;
 use crate::transport::{
     InboundSegment, OutboundAttachment, OutboundMessage, OutboundTarget, Transport, TransportEvent,
@@ -113,7 +117,8 @@ impl ChannelWorker {
     }
 }
 
-/// 事件循环：顺序拉取事件并逐条编排，关停信号可随时打断。
+/// 事件循环：顺序拉取事件并逐条编排；关停信号在等事件与编排两处均可打断，
+/// 打断在途编排时放弃未完成的回复。
 async fn run_loop(
     engine: Arc<Engine>,
     transport: Arc<dyn Transport>,
@@ -125,20 +130,24 @@ async fn run_loop(
     let throttle: Mutex<HashMap<String, Instant>> = Mutex::new(HashMap::new());
     loop {
         let item = tokio::select! {
+            biased;
             _ = &mut shutdown_rx => break,
             item = transport.next_event() => item,
         };
         match item {
             Some(Ok(event)) => {
-                handle_event(
-                    &engine,
-                    transport.as_ref(),
-                    downloader.as_ref(),
-                    &options,
-                    &throttle,
-                    event,
-                )
-                .await;
+                tokio::select! {
+                    biased;
+                    _ = &mut shutdown_rx => break,
+                    _ = handle_event(
+                        &engine,
+                        transport.as_ref(),
+                        downloader.as_ref(),
+                        &options,
+                        &throttle,
+                        event,
+                    ) => {}
+                }
             }
             Some(Err(error)) => {
                 tracing::warn!(channel, error = %error, "通道事件读取失败，继续处理后续事件");
@@ -364,7 +373,7 @@ pub(crate) async fn handle_event(
         .collect();
     let segments = fold_segment_overflow(segments, options.segment_max);
     if segments.is_empty() {
-        // 纯表情：发一条空文本带附件的消息；无附件时走现有空文本跳过分支
+        // 纯表情：有附件能力时发空文本带附件；否则退化为表情占位文本（无附件时跳过）
         let Some(attachment) = sticker_attachment else {
             tracing::warn!(
                 session_id = %outcome.session_id,
@@ -372,12 +381,22 @@ pub(crate) async fn handle_event(
             );
             return;
         };
-        tracing::info!(session_id = %outcome.session_id, "通道出站仅表情发送");
-        enforce_send_interval(throttle, &event.external_ref, options.min_send_interval).await;
-        let message = OutboundMessage {
-            text: String::new(),
-            attachment: Some(attachment),
+        let message = if transport.supports_outbound_attachment() {
+            tracing::info!(session_id = %outcome.session_id, "通道出站仅表情发送");
+            OutboundMessage {
+                text: String::new(),
+                attachment: Some(attachment),
+            }
+        } else {
+            tracing::warn!(
+                session_id = %outcome.session_id,
+                "通道不支持纯附件消息，表情改以文本占位发送"
+            );
+            OutboundMessage::text(sticker_text_fallback(
+                sticker_keyword.as_deref().unwrap_or_default(),
+            ))
         };
+        enforce_send_interval(throttle, &event.external_ref, options.min_send_interval).await;
         send_with_retry(transport, &target, &message, options).await;
         record_send_time(throttle, &event.external_ref);
         return;

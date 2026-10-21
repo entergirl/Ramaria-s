@@ -37,25 +37,25 @@ pub(in crate::inference::orchestrator) fn parse_json_with_degrade<T>(
 
     // 步骤 2: 剥离 think 标签
     let stripped = strip_thinking(raw);
-    if stripped != raw
-        && let Some(result) = parser(&stripped)
-    {
-        debug!(step = step_name, "剥离 think 标签后 JSON 解析成功");
-        return Ok(result);
+    if stripped != raw {
+        if let Some(result) = parser(&stripped) {
+            debug!(step = step_name, "剥离 think 标签后 JSON 解析成功");
+            return Ok(result);
+        }
     }
 
     // 步骤 3: 正则提取 JSON
     // 先尝试提取 JSON 数组（Step3 输出是数组）
-    if let Some(json_segment) = extract_first_json_array(raw)
-        && let Some(result) = parser(&json_segment)
+    if let Some(result) =
+        extract_first_json_array(raw).and_then(|json_segment| parser(&json_segment))
     {
         debug!(step = step_name, "正则提取 JSON 数组后解析成功");
         return Ok(result);
     }
 
     // 再尝试提取 JSON 对象（Step1/Step2 输出是对象）
-    if let Some(json_segment) = extract_first_json_object(raw)
-        && let Some(result) = parser(&json_segment)
+    if let Some(result) =
+        extract_first_json_object(raw).and_then(|json_segment| parser(&json_segment))
     {
         debug!(step = step_name, "正则提取 JSON 对象后解析成功");
         return Ok(result);

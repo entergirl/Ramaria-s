@@ -106,6 +106,43 @@ impl Default for GraphRetrieverConfig {
 }
 
 // =========================================================
+// 图谱实体标识
+// =========================================================
+
+/// 图谱实体名中人格归属与标题的分隔符（U+001F，正文不可能出现的控制字符）。
+///
+/// 说明:
+/// - 图谱节点以「人格归属 + 标题」为唯一键：同名事件分属不同人格时互不覆盖；
+/// - 检索命中后按该分隔符拆回人格与标题，参与统一的 persona 过滤与展示。
+pub const GRAPH_PERSONA_SEPARATOR: char = '\u{001f}';
+
+/// 构造图谱节点名（`{persona_uid}\u{1f}{title}`）。
+///
+/// 参数:
+/// - `persona_uid`: 事件归属人格；`None` 表示无归属（仅按标题建键）。
+/// - `title`: 事件标题（实体名）。
+pub fn graph_entity_key(persona_uid: Option<&str>, title: &str) -> String {
+    match persona_uid {
+        Some(uid) if !uid.is_empty() => {
+            format!("{uid}{GRAPH_PERSONA_SEPARATOR}{title}")
+        }
+        _ => title.to_string(),
+    }
+}
+
+/// 拆分图谱节点名，返回 `(人格归属, 标题)`。
+///
+/// 无分隔符（无归属实体）时人格为 `None`，标题为原名。
+pub fn split_graph_entity_key(key: &str) -> (Option<&str>, &str) {
+    match key.split_once(GRAPH_PERSONA_SEPARATOR) {
+        Some((persona, title)) if !persona.is_empty() && !title.is_empty() => {
+            (Some(persona), title)
+        }
+        _ => (None, key),
+    }
+}
+
+// =========================================================
 // 图谱检索器
 // =========================================================
 

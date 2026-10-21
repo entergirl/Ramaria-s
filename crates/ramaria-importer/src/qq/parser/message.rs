@@ -179,7 +179,7 @@ pub(super) fn parse_json_message(
                 report,
                 "[通话记录]",
             );
-            let fingerprint = make_fingerprint(timestamp, &role, &content_final);
+            let fingerprint = make_fingerprint(timestamp, &role, "[通话记录]");
             return Some(ParsedMessage {
                 role,
                 content: content_final,
@@ -334,7 +334,8 @@ pub(super) fn parse_json_message(
         &final_text,
     );
 
-    let fingerprint = make_fingerprint(timestamp, &role, &content_final);
+    // 指纹取未加昵称前缀的正文：昵称随导出变化，不参与去重
+    let fingerprint = make_fingerprint(timestamp, &role, &final_text);
 
     Some(ParsedMessage {
         role,

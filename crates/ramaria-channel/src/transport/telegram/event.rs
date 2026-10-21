@@ -4,8 +4,9 @@
 //! - 更新 JSON 手动提取：平台新增字段自动容忍，不做强类型反序列化，
 //!   避免扩展字段引发整帧失败
 //! - 只处理顶层 `message`（`edited_message` / `channel_post` / `callback_query` 等静默忽略）
-//! - 群语义：隐私模式下天然只收 @ 与回复；@ 判定读 `entities`（mention / text_mention /
-//!   bot_command 三种形态），被回复判定读 `reply_to_message.from` 与 Bot 身份比对
+//! - 群语义：隐私模式下天然只收 @ 与回复；@ 判定按正文与配文各自的文本与实体表
+//!   分别进行（mention / text_mention / bot_command 三种形态），被回复判定读
+//!   `reply_to_message.from` 与 Bot 身份比对
 //! - 实体切片按 UTF-16 单元偏移提取（平台口径），非法边界不 panic
 //! - 段序列：文本 → 文本段；图片（photo 最大尺寸项 / 图片类 document）→ 图片段，
 //!   caption 追加为文本段（先图后文）；表情贴纸（sticker）→ `[表情]` 占位文本段，
@@ -144,10 +145,20 @@ fn parse_sender(from: Option<&Value>) -> Option<InboundSender> {
     })
 }
 
-/// @ 提及判定（群聊）：mention / text_mention / bot_command 三种实体形态任一命中。
+/// @ 提及判定（群聊）：正文与配文各自的文本 / 实体表分别判定，任一命中即触发。
+///
+/// 说明:
+/// - 图片 / 贴纸 / 文件消息的提及位于配文（`caption` + `caption_entities`），
+///   正文实体表此时缺省；两套表都判定才能覆盖媒体消息里的 @。
 fn mention_self(message: &Value, bot: &BotIdentity) -> bool {
-    let text = message.get("text").and_then(Value::as_str).unwrap_or("");
-    let Some(entities) = message.get("entities").and_then(Value::as_array) else {
+    mentions_bot(message.get("text"), message.get("entities"), bot)
+        || mentions_bot(message.get("caption"), message.get("caption_entities"), bot)
+}
+
+/// 单组文本 / 实体表的提及判定：mention / text_mention / bot_command 任一命中。
+fn mentions_bot(text: Option<&Value>, entities: Option<&Value>, bot: &BotIdentity) -> bool {
+    let text = text.and_then(Value::as_str).unwrap_or("");
+    let Some(entities) = entities.and_then(Value::as_array) else {
         return false;
     };
     let mention = format!("@{}", bot.username);

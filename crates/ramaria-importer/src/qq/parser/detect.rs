@@ -81,13 +81,10 @@ pub(super) fn decode_bytes(bytes: &[u8]) -> RamariaResult<String> {
     }
 
     // 2. UTF-8 BOM
-    if bytes.len() >= 3
-        && bytes[0] == 0xEF
-        && bytes[1] == 0xBB
-        && bytes[2] == 0xBF
-        && let Ok(s) = String::from_utf8(bytes[3..].to_vec())
-    {
-        return Ok(s);
+    if bytes.len() >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF {
+        if let Ok(s) = String::from_utf8(bytes[3..].to_vec()) {
+            return Ok(s);
+        }
     }
 
     // 3. UTF-16 LE (BOM: 0xFF 0xFE)

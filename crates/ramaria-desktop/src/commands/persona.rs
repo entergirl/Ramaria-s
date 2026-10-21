@@ -294,9 +294,9 @@ fn normalize_input(input: Option<String>) -> Option<String> {
 /// - `input`: 给定输入文本（None / 空白 = 静态段预览；非空 = 全量预览，含记忆召回）。
 ///
 /// 日志:
-/// - INFO: 记录目标 uid 与档位（不记提示词内容）
+/// - INFO: 记录目标 uid、档位与输入字符数（输入正文与提示词内容均不入日志）
 #[tauri::command]
-#[tracing::instrument(skip(state))]
+#[tracing::instrument(skip(state, input))]
 pub async fn preview_persona_prompt(
     state: State<'_, DesktopState>,
     uid: String,
@@ -308,6 +308,7 @@ pub async fn preview_persona_prompt(
     }
 
     let input = normalize_input(input);
+    let input_chars = input.as_ref().map(|text| text.chars().count()).unwrap_or(0);
     let preview = state
         .engine
         .persona_prompt_preview(&uid, input.as_deref())
@@ -315,7 +316,12 @@ pub async fn preview_persona_prompt(
         .map_err(|e| crate::commands::service_error_message(&e, "提示词预览失败"))?;
 
     let view = preview_view(preview);
-    tracing::info!(%uid, tier = %view.tier, "preview_persona_prompt 完成");
+    tracing::info!(
+        %uid,
+        tier = %view.tier,
+        input_chars,
+        "preview_persona_prompt 完成"
+    );
     Ok(view)
 }
 

@@ -87,6 +87,12 @@ impl Engine {
     /// - 需要引擎已附着 SQLite 连接池（`open_with` 装配自动携带；
     ///   `from_parts` 注入构造需先 [`Engine::attach_sqlite_pool`]）。
     pub async fn import_qq_l0(&self, req: ImportRequest) -> RamariaResult<ImportL0Outcome> {
+        // 与导入后处理互斥：后处理在途时再发起导入会与其抢行同一批会话 / 附件行
+        if is_post_active() {
+            return Err(ramaria_core::error::RamariaError::config(
+                "导入后的图片理解/摘要处理仍在进行，请稍候再导入",
+            ));
+        }
         write_l0(self, req).await
     }
 

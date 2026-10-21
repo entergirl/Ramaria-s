@@ -100,6 +100,7 @@ pub fn validate_import_file_path(file_path: &str) -> Result<PathBuf, String> {
 /// - 但父目录必须存在且经过 `canonicalize()` 验证
 /// - 父目录必须在授权白名单目录内
 /// - 拒绝写入系统目录
+/// - 目标文件已存在时拒绝符号链接 / 目录联接（防止写到白名单外）
 pub fn validate_export_path(output_path: &str) -> Result<PathBuf, String> {
     let path = Path::new(output_path);
 
@@ -143,12 +144,67 @@ pub fn validate_export_path(output_path: &str) -> Result<PathBuf, String> {
         .ok_or_else(|| format!("路径缺少文件名，拒绝导出: {}", output_path))?;
 
     let canonical = real_parent.join(file_name);
+
+    // Step 7: 目标文件已存在时校验其自身形态（父目录合法不代表目标合法）
+    ensure_export_target_is_regular(&canonical)?;
+
     // 日志仅记脱敏标签：导出目标路径位于用户主目录下，绝对路径不得入日志
     tracing::debug!(
         file = %redact_path_label(&canonical),
         "导出路径校验通过"
     );
     Ok(canonical)
+}
+
+/// 校验导出目标文件本身不是链接（目标不存在视为通过）。
+///
+/// 参数:
+/// - `target`: 已规范化的导出目标路径（父目录已通过白名单校验）。
+///
+/// 返回:
+/// - `Ok(())`: 目标不存在，或存在且为普通文件
+/// - `Err(String)`: 目标是符号链接 / 目录联接，或元数据不可读
+///
+/// 说明:
+/// - 父目录校验只能约束目录；目标文件本身仍可能是指向白名单外的链接，
+///   写入前再校验一次可缩小「校验后替换」的时间窗。
+pub fn ensure_export_target_is_regular(target: &Path) -> Result<(), String> {
+    let metadata = match std::fs::symlink_metadata(target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => {
+            return Err(format!(
+                "无法读取导出目标元信息，拒绝导出: {}",
+                target.display()
+            ));
+        }
+    };
+
+    // 符号链接一律拒绝；目录联接（junction）只以目录形态出现，故重解析点按目录判定。
+    // 文件形态的重解析点可能是云盘占位文件，按普通文件放行（is_symlink 已覆盖链接）。
+    let link_like =
+        metadata.file_type().is_symlink() || (metadata.is_dir() && is_reparse_point(&metadata));
+    if link_like {
+        return Err(format!(
+            "导出目标是符号链接，拒绝导出: {}",
+            target.display()
+        ));
+    }
+    Ok(())
+}
+
+/// 判定元数据是否为 Windows 重解析点（目录联接的识别依据）。
+#[cfg(target_os = "windows")]
+fn is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+/// 非 Windows 平台无重解析点形态，恒为 false（符号链接由 `is_symlink` 覆盖）。
+#[cfg(not(target_os = "windows"))]
+fn is_reparse_point(_metadata: &std::fs::Metadata) -> bool {
+    false
 }
 
 // =========================================================

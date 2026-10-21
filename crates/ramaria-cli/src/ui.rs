@@ -262,13 +262,17 @@ impl Default for PersonaFormatter {
 // =========================================================
 
 /// 将 API key 遮蔽为 `abc****xyz` 格式。
-/// key 长度 ≤ 4 时显示为 `****`。
+///
+/// 说明:
+/// - 按字符（而非字节）取前三位与后三位，非 ASCII key 不会切在 UTF-8 边界中间。
+/// - 字符数 ≤ 4 时显示为 `****`（无法同时保留首尾三位）。
 pub fn mask_key(key: &str) -> String {
-    if key.len() <= 4 {
+    let chars: Vec<char> = key.chars().collect();
+    if chars.len() <= 4 {
         return "****".to_string();
     }
-    let prefix = &key[..3];
-    let suffix = &key[key.len() - 3..];
+    let prefix: String = chars[..3].iter().collect();
+    let suffix: String = chars[chars.len() - 3..].iter().collect();
     format!("{prefix}****{suffix}")
 }
 

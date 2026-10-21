@@ -631,3 +631,45 @@ fn export_unknown_uid_exits_with_validation_code() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// =========================================================
+// reload（人格文件目录同步）
+// =========================================================
+
+/// `persona reload --json`：单行信封含逐文件结果与分类计数，stdout 不含文本摘要。
+#[test]
+fn reload_json_envelope_lists_files() {
+    let dir = temp_test_dir("reload-json");
+    let data_dir = dir.join("data");
+    let personas = data_dir.join("personas");
+    std::fs::create_dir_all(&personas).expect("创建 personas 目录应成功");
+    std::fs::write(
+        personas.join("char-0001.toml"),
+        "assistant_name = \"导入人格\"\n",
+    )
+    .expect("写入人格文件应成功");
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_ramaria"))
+        .args(["persona", "reload", "--json", "--db"])
+        .arg(dir.join("persona.db"))
+        .env("RAMARIA_DATA_DIR", &data_dir)
+        .output()
+        .expect("运行 ramaria 二进制失败");
+
+    assert_eq!(out.status.code(), Some(0), "reload 应成功退出");
+    let envelope = parse_envelope(&out);
+    assert_eq!(envelope["ok"], true);
+    let data = &envelope["data"];
+    assert!(data["uid"].is_null(), "未指定 --uid 时应为 null: {data:?}");
+    assert_eq!(data["files"], 1);
+    assert_eq!(data["created"], 1);
+    assert_eq!(data["updated"], 0);
+    assert_eq!(data["failed"], 0);
+    let results = data["results"].as_array().expect("results 应为数组");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["file"], "char-0001.toml");
+    assert_eq!(results[0]["uid"], "char-0001");
+    assert_eq!(results[0]["action"], "created");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

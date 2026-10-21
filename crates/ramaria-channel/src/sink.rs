@@ -3,6 +3,7 @@
 //! 设计特点:
 //! - 职责单一：按通道查找已装配的传输、向目标外部会话发送文本、可重试错误退避重试
 //! - 出站文本拆条：多气泡契约分隔符切段，逐段分次发送（段间间隔 + 段数上限）
+//! - 纯表情：传输支持附件时发空文本带附件，否则退化为表情占位文本
 //! - 不持有 Engine：依赖在构造时以「通道名 → 传输」映射注入，避免宿主侧引用环
 //! - 绑定与开关门禁由服务层调度在投递前完成，本端不做业务判定
 //! - 最终失败返回错误（调度侧按平台失败不记账）；日志脱敏，不记消息内容
@@ -17,7 +18,7 @@ use ramaria_core::privacy::mask_id;
 use ramaria_service::{ProactiveMessage, ProactiveSink};
 
 use crate::runtime::outbound::{
-    fold_segment_overflow, parse_sticker_directive, split_outbound_segments,
+    fold_segment_overflow, parse_sticker_directive, split_outbound_segments, sticker_text_fallback,
 };
 use crate::transport::{OutboundAttachment, OutboundMessage, OutboundTarget, Transport};
 
@@ -187,7 +188,8 @@ impl ProactiveSink for ChannelProactiveSink {
             })
             .collect();
         if messages.is_empty() {
-            // 纯表情：发一条空文本带附件的消息；无附件（未命中 / 未注入解析器）跳过
+            // 纯表情：有附件能力时发空文本带附件；否则退化为表情占位文本
+            // （无附件：未命中 / 未注入解析器 → 跳过）
             let Some(sticker_attachment) = attachment else {
                 tracing::warn!(
                     channel = %message.channel,
@@ -197,10 +199,22 @@ impl ProactiveSink for ChannelProactiveSink {
                 );
                 return Ok(());
             };
-            messages.push(OutboundMessage {
-                text: String::new(),
-                attachment: Some(sticker_attachment),
-            });
+            if transport.supports_outbound_attachment() {
+                messages.push(OutboundMessage {
+                    text: String::new(),
+                    attachment: Some(sticker_attachment),
+                });
+            } else {
+                tracing::warn!(
+                    channel = %message.channel,
+                    external_ref = %mask_id(external_ref),
+                    message_id = %message.message_id,
+                    "通道不支持纯附件消息，表情改以文本占位发送"
+                );
+                messages.push(OutboundMessage::text(sticker_text_fallback(
+                    sticker_keyword.as_deref().unwrap_or_default(),
+                )));
+            }
         }
 
         let total = messages.len();

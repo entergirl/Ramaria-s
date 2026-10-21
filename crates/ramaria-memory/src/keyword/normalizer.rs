@@ -124,10 +124,10 @@ fn bigram_normalize(input: &str, dict: Option<&DictState>) -> Vec<KeywordToken> 
 
     // 刷出英文段：小写化后长度 < 2 字节的段丢弃（与 bm25::tokenize 的字节口径一致）
     let flush_alpha = |buf: &mut String, out: &mut Vec<KeywordToken>| {
-        if buf.len() >= 2
-            && let Some(t) = KeywordToken::new(buf)
-        {
-            out.push(t);
+        if buf.len() >= 2 {
+            if let Some(t) = KeywordToken::new(buf) {
+                out.push(t);
+            }
         }
         buf.clear();
     };
@@ -140,9 +140,8 @@ fn bigram_normalize(input: &str, dict: Option<&DictState>) -> Vec<KeywordToken> 
             flush_alpha(&mut alpha_buf, &mut tokens);
 
             // 词典增强：在 CJK 位置优先尝试最长词典匹配（≥2 字符、命中即整体输出并跳过）
-            if let Some(dict) = dict
-                && let Some((word, next)) = dict.try_match_longest(&chars, i)
-            {
+            let longest = dict.and_then(|dict| dict.try_match_longest(&chars, i));
+            if let Some((word, next)) = longest {
                 // 词典条目本身已由构造期标准化校验，直接装箱
                 tokens.push(KeywordToken::from_validated(word));
                 i = next;

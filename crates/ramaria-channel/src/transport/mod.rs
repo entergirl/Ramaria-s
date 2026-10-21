@@ -5,7 +5,7 @@
 //! - 拉取式事件流：`next_event` 逐条返回规范态入站事件，None 表示流正常终止
 //! - 入站事件为段序列形态：图片段需下载后才能产出最终正文与附件引用，
 //!   解析层不做字节级处理（组装在 runtime 层完成）
-//! - 出站本版只实现文本路径；附件模型先落地不接线
+//! - 出站以文本为基线：附件支持由各传输声明，不支持时调用方退化为文本
 //! - At 段已在解析层折叠为文本段（`@qq` / `@全体成员`），传输类型不外泄协议字段
 
 use async_trait::async_trait;
@@ -47,6 +47,15 @@ pub trait Transport: Send + Sync {
 
     /// 发送一条出站消息。
     async fn send(&self, target: &OutboundTarget, message: &OutboundMessage) -> ChannelResult<()>;
+
+    /// 出站附件支持：纯附件消息（文本为空）是否可发送。
+    ///
+    /// 约定:
+    /// - 默认不支持：调用方须自带文本，或在仅有附件时退化为文本占位；
+    /// - 只影响纯附件消息，携带文本的消息两侧口径一致（附件可被忽略）。
+    fn supports_outbound_attachment(&self) -> bool {
+        false
+    }
 
     /// 当前连接状态快照。
     fn status(&self) -> ChannelStatus;
@@ -107,11 +116,11 @@ pub struct OutboundTarget {
     pub external_ref: String,
 }
 
-/// 出站消息（本版只实现 text 路径；附件模型先落地不接线）。
+/// 出站消息（文本 + 可选附件）。
 ///
 /// 字段约定:
 /// - `text`: 文本内容（发送方负责分片前的原始文本）。
-/// - `attachment`: 可选附件（预留模型；本版协议封装不接线）。
+/// - `attachment`: 可选附件（是否随消息发出由传输的 `supports_outbound_attachment` 决定）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboundMessage {
     pub text: String,

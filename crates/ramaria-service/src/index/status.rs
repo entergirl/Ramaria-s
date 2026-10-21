@@ -17,6 +17,7 @@ use crate::engine::Engine;
 /// 字段约定:
 /// - `status`: 索引状态机当前值。
 /// - `loaded` / `total`: 已加载向量文档数与向量文档总数。
+/// - `failed`: 最近一次构建中向量补算失败的条数。
 /// - `model`: 当前向量模型标识（无向量路径为 None）。
 /// - `last_error`: 最近一次构建失败的脱敏原因（成功后清空）。
 /// - `updated_at`: 最后更新时刻（Unix 毫秒；0 = 尚未更新）。
@@ -25,6 +26,7 @@ pub(crate) struct IndexStatusState {
     pub(crate) status: IndexStatus,
     pub(crate) loaded: usize,
     pub(crate) total: usize,
+    pub(crate) failed: usize,
     pub(crate) model: Option<String>,
     pub(crate) last_error: Option<String>,
     pub(crate) updated_at: i64,
@@ -36,6 +38,7 @@ impl Default for IndexStatusState {
             status: IndexStatus::Idle,
             loaded: 0,
             total: 0,
+            failed: 0,
             model: None,
             last_error: None,
             updated_at: 0,

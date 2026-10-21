@@ -289,6 +289,7 @@ pub(crate) async fn backfill(
             IndexStatus::Building,
             *loaded,
             total,
+            failed,
             Some(plan.model_id.clone()),
             now_ms().saturating_sub(started_ms) as u64,
         );

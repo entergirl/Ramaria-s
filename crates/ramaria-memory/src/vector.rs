@@ -147,6 +147,15 @@ pub trait VectorIndex: Send + Sync {
 
     /// 获取当前所有条目的 label 列表。
     fn labels(&self) -> Vec<String>;
+
+    /// 维度不符被拒绝写入的累计条数（诊断用；实现不支持时返回 0）。
+    ///
+    /// 用途:
+    /// - 维度不一致的向量会被静默跳过（trait 的写入接口无返回值），
+    ///   调用方可据此判断向量通道是否因配置错误而缺条。
+    fn dimension_mismatch_count(&self) -> u64 {
+        0
+    }
 }
 
 // =========================================================
@@ -169,6 +178,10 @@ pub trait VectorIndex: Send + Sync {
 pub struct BruteForceIndex {
     entries: HashMap<String, VectorEntry>,
     dimension: Option<usize>,
+    /// 维度不符被拒绝写入的累计条数
+    dimension_mismatches: u64,
+    /// 维度不符是否已告警（只告警首次，后续静默累计）
+    dimension_mismatch_warned: bool,
 }
 
 impl BruteForceIndex {
@@ -177,12 +190,22 @@ impl BruteForceIndex {
         Self {
             entries: HashMap::new(),
             dimension: None,
+            dimension_mismatches: 0,
+            dimension_mismatch_warned: false,
         }
     }
 
     /// 获取当前索引的向量维度。
     pub fn dimension(&self) -> Option<usize> {
         self.dimension
+    }
+
+    /// 维度不符被拒绝写入的累计条数。
+    ///
+    /// 返回:
+    /// - 自上次 `clear` 以来，因维度与索引首条不一致而被丢弃的向量条数。
+    pub fn dimension_mismatch_count(&self) -> u64 {
+        self.dimension_mismatches
     }
 
     /// 计算两个向量之间的余弦相似度。
@@ -218,13 +241,18 @@ impl VectorIndex for BruteForceIndex {
         if let Some(expected) = self.dimension {
             if expected != dim {
                 // trait 定义为无返回值（为了接口简洁），无法返回 Result。
-                // 维度不匹配是严重配置错误，必须通过日志告警便于排查。
-                tracing::warn!(
-                    label = %label,
-                    expected_dim = expected,
-                    got_dim = dim,
-                    "向量维度不匹配，跳过此条（可能导致检索结果不完整）"
-                );
+                // 维度不匹配是严重配置错误：首次告警，后续只累计计数（批量导入时
+                // 逐条告警会刷屏），计数经 dimension_mismatch_count 供诊断读取。
+                self.dimension_mismatches += 1;
+                if !self.dimension_mismatch_warned {
+                    self.dimension_mismatch_warned = true;
+                    tracing::warn!(
+                        label = %label,
+                        expected_dim = expected,
+                        got_dim = dim,
+                        "向量维度不匹配，跳过此条（可能导致检索结果不完整；后续同类条目不重复告警）"
+                    );
+                }
                 return;
             }
         } else {
@@ -300,6 +328,8 @@ impl VectorIndex for BruteForceIndex {
     fn clear(&mut self) {
         self.entries.clear();
         self.dimension = None;
+        self.dimension_mismatches = 0;
+        self.dimension_mismatch_warned = false;
     }
 
     fn len(&self) -> usize {
@@ -308,6 +338,10 @@ impl VectorIndex for BruteForceIndex {
 
     fn labels(&self) -> Vec<String> {
         self.entries.keys().cloned().collect()
+    }
+
+    fn dimension_mismatch_count(&self) -> u64 {
+        self.dimension_mismatches
     }
 }
 
@@ -546,6 +580,10 @@ impl<I: VectorIndex> VectorIndex for CachedVectorIndex<I> {
 
     fn labels(&self) -> Vec<String> {
         self.inner.labels()
+    }
+
+    fn dimension_mismatch_count(&self) -> u64 {
+        self.inner.dimension_mismatch_count()
     }
 }
 

@@ -575,11 +575,7 @@ impl LlamaHeadDimEncoder {
 
         // Step 1: Tokenize（add_special_tokens=true，BPE tokenizer 添加 BOS/EOS）
         let encoding = self.tokenizer.encode(text, true).map_err(|e| {
-            ramaria_core::error::RamariaError::embedding(format!(
-                "分词失败: {} — 文本: '{}...'",
-                e,
-                &text[..text.len().min(60)]
-            ))
+            ramaria_core::error::RamariaError::embedding(format!("分词失败: {}", e))
         })?;
 
         let token_ids: Vec<u32> = encoding.get_ids().to_vec();
@@ -607,11 +603,7 @@ impl LlamaHeadDimEncoder {
         // Step 3: Forward pass（无状态前向：每序列独立推理，无 KV cache 累积问题）
         let model = lock_recover(&self.model, "llama_head_dim.model");
         let hidden_states = model.forward(&input_ids).map_err(|e| {
-            ramaria_core::error::RamariaError::embedding(format!(
-                "前向推理失败: {}。文本: '{}...'",
-                e,
-                &text[..text.len().min(60)]
-            ))
+            ramaria_core::error::RamariaError::embedding(format!("前向推理失败: {}", e))
         })?;
         // hidden_states: [1, effective_len, hidden_size]
 

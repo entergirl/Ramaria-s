@@ -19,7 +19,9 @@ use crate::engine::Engine;
 use crate::types::{LocalImageSendOutcome, LocalImageSendRequest};
 
 /// 单张图片的字节上限（20 MB，与通道图片与表情资产口径一致）。
-const MAX_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
+///
+/// 公开给宿主做读取前预检（避免把超大文件整体读入内存后才拒绝）。
+pub const MAX_LOCAL_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
 
 /// 本地会话发图（消息与附件行一并落库）。
 ///
@@ -57,7 +59,7 @@ pub(crate) async fn send(
     if req.bytes.is_empty() {
         return Err(RamariaError::validation("图片字节不能为空"));
     }
-    if req.bytes.len() as u64 > MAX_IMAGE_BYTES {
+    if req.bytes.len() as u64 > MAX_LOCAL_IMAGE_BYTES {
         return Err(RamariaError::validation("图片超过 20 MB 上限"));
     }
     if crate::vision::image_mime_checked(&req.bytes).is_none() {

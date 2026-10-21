@@ -169,6 +169,7 @@ impl StoreInfrastructure for MockStorage {
     async fn get_schema_version(&self) -> RamariaResult<i32> { self.get_schema_version().await }
     async fn index_corpus_stamp(&self) -> RamariaResult<Option<IndexCorpusStamp>> { self.index_corpus_stamp().await }
     async fn upsert_memory_vector(&self, _vector: &MemoryVector) -> RamariaResult<()> { self.upsert_memory_vector(_vector).await }
+    async fn upsert_memory_vectors(&self, _vectors: &[MemoryVector]) -> RamariaResult<()> { self.upsert_memory_vectors(_vectors).await }
     async fn load_memory_vectors(&self, _model: &str) -> RamariaResult<Vec<MemoryVector>> { self.load_memory_vectors(_model).await }
     async fn delete_memory_vector(&self, _doc_type: &str, _doc_id: &str) -> RamariaResult<()> { self.delete_memory_vector(_doc_type, _doc_id).await }
     async fn delete_memory_vectors_by_model(&self, _model: &str) -> RamariaResult<()> { self.delete_memory_vectors_by_model(_model).await }

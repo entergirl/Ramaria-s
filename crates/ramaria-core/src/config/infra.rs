@@ -46,7 +46,6 @@ pub enum RoleImmersion {
 /// 职责:
 /// - 保存当前 provider、模型 ID、base URL 和生成参数。
 /// - 保存 embedding 模型选择结果。
-/// - 控制线上 provider 是否允许注入记忆上下文。
 /// - 控制对话路径的思考模式、角色沉浸注入与生成温度。
 ///
 /// 安全约束:
@@ -72,8 +71,6 @@ pub struct BackendSelection {
     pub temperature: f64,
     /// 最大输出 token 数。
     pub max_tokens: u32,
-    /// 是否允许线上后端注入 L1/L2/L3 上下文
-    pub online_memory_injection: bool,
     /// 对话路径是否启用思考模式（仅 DeepSeek 生效；结构化提取路径恒关闭）
     pub chat_thinking: bool,
     /// 角色沉浸指令注入位置（仅 DeepSeek 生效）
@@ -88,7 +85,6 @@ impl Default for BackendSelection {
     /// 返回:
     /// - 默认 provider 为 LM Studio。
     /// - 默认 base URL 为 LM Studio OpenAI-compatible 端点。
-    /// - 默认允许线上记忆注入，但实际启用前仍需隐私确认。
     /// - 默认开启思考模式与 system 末尾角色沉浸注入（均仅 DeepSeek 生效），
     ///   对话温度沿用 `temperature`；输出上限取思考模式的最低可用预算。
     fn default() -> Self {
@@ -99,7 +95,6 @@ impl Default for BackendSelection {
             embedding_model_id: None,
             temperature: 0.3,
             max_tokens: 4096,
-            online_memory_injection: true,
             chat_thinking: true,
             role_immersion: RoleImmersion::System,
             chat_temperature: None,

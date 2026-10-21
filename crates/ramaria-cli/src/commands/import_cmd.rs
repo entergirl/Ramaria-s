@@ -14,10 +14,10 @@
 
 use anyhow::Context;
 use ramaria_core::privacy::mask_id;
-use ramaria_importer::ImportSource;
 use ramaria_service::{
-    Engine, ImportContinueRequest, ImportDoneSummary, ImportL1Progress, ImportMode, ImportPostPlan,
-    ImportPostRequest, ImportProgressSink, ImportRequest,
+    AnalysisReport, AnalyzeRequest, Engine, ImportContinueRequest, ImportDoneSummary,
+    ImportL1Progress, ImportMode, ImportPostPlan, ImportPostRequest, ImportProgressSink,
+    ImportRequest,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -55,6 +55,38 @@ pub struct ImportArgs {
     pub yes: bool,
     /// JSON 信封输出
     pub json: bool,
+}
+
+// =========================================================
+// 解析报告摘要
+// =========================================================
+
+/// 构造掩码版解析报告摘要（stderr 提示；不输出昵称 / 账号原值）。
+///
+/// 参数:
+/// - `report`: 服务层解析预览报告。
+///
+/// 返回:
+/// - 多行摘要文本；个人标识经 `mask_id` 掩码，空值显示"未提供"。
+fn analysis_report_summary(report: &AnalysisReport) -> String {
+    let mask_opt = |value: Option<&str>| match value.map(str::trim) {
+        Some(v) if !v.is_empty() => mask_id(v),
+        _ => "未提供".to_string(),
+    };
+    format!(
+        "导出者: {} ({})\n对话: {} ({})\n时间范围: {}\n会话: {}（切割间隔 {} 分钟）\n消息: 原始 {} / 成功 {} / 降级 {} / 跳过 {}",
+        mask_id(&report.self_name),
+        mask_opt(report.self_uin.as_deref()),
+        mask_id(&report.chat_name),
+        report.chat_type,
+        report.time_range,
+        report.session_count,
+        report.gap_minutes,
+        report.total_raw,
+        report.total_success,
+        report.total_degraded,
+        report.total_skipped,
+    )
 }
 
 // =========================================================
@@ -118,10 +150,11 @@ pub async fn run(engine: &Arc<Engine>, args: ImportArgs) -> anyhow::Result<()> {
         args.gap
     ));
 
-    // Step 2: 格式检测
-    let importer = ramaria_importer::qq::QqImporter::new();
-
-    let is_qq = importer.detect_format(path).context("格式检测失败")?;
+    // Step 2: 格式检测（经服务层用例，入口不直连导入器）
+    let is_qq = engine
+        .detect_qq_format(path)
+        .await
+        .context("格式检测失败")?;
 
     if !is_qq {
         return Err(anyhow::anyhow!(
@@ -133,16 +166,22 @@ pub async fn run(engine: &Arc<Engine>, args: ImportArgs) -> anyhow::Result<()> {
         ));
     }
 
-    // Step 3: 文件解析
-    let (sessions, report) = importer.parse(path, args.gap).context("文件解析失败")?;
+    // Step 3: 文件解析预览（经服务层用例；统计与掩码摘要由入口渲染）
+    let report = engine
+        .analyze_qq_import(AnalyzeRequest {
+            file_path: args.file.clone(),
+            gap_minutes: args.gap,
+        })
+        .await
+        .context("文件解析失败")?;
 
     // 打印解析报告（stderr 提示，不污染 stdout 数据流；默认掩码版，避免昵称/账号标识落盘）
     if !args.no_report {
         crate::ui::info("📊 解析报告:");
-        crate::ui::info(&report.summary_masked());
+        crate::ui::info(&analysis_report_summary(&report));
     }
 
-    if sessions.is_empty() {
+    if report.session_count == 0 {
         // --json 模式：输出空数据信封（agent 可区分“成功但无数据”与异常）
         if args.json {
             let data = serde_json::json!({
@@ -169,8 +208,8 @@ pub async fn run(engine: &Arc<Engine>, args: ImportArgs) -> anyhow::Result<()> {
                 ramaria_importer::qq::ImportSide::Other => "other",
                 ramaria_importer::qq::ImportSide::Both => "both",
             },
-            "sessions": sessions.len(),
-            "messages": report.total_success() + report.total_degraded(),
+            "sessions": report.session_count,
+            "messages": report.total_success + report.total_degraded,
             "self": {
                 "name": report.self_name,
                 "uin": report.self_uin,
@@ -182,7 +221,7 @@ pub async fn run(engine: &Arc<Engine>, args: ImportArgs) -> anyhow::Result<()> {
                 "uid": report.other_uid,
             },
             "skipped": {
-                "total": report.total_skipped(),
+                "total": report.total_skipped,
                 "recalled": report.skipped_recalled,
                 "empty": report.skipped_empty,
                 "unknown": report.skipped_unknown,
@@ -202,8 +241,8 @@ pub async fn run(engine: &Arc<Engine>, args: ImportArgs) -> anyhow::Result<()> {
         let proceed = crate::ui::confirm(
             &format!(
                 "确认导入 {} 个 session（共 {} 条消息）?",
-                sessions.len(),
-                report.total_success() + report.total_degraded()
+                report.session_count,
+                report.total_success + report.total_degraded
             ),
             args.yes,
         )
@@ -335,10 +374,10 @@ pub async fn run(engine: &Arc<Engine>, args: ImportArgs) -> anyhow::Result<()> {
         ));
     }
 
-    if report.total_skipped() > 0 {
+    if report.total_skipped > 0 {
         crate::ui::warn(&format!(
             "⚠️  跳过的消息: {} 条（撤回 {}，空内容 {}，未知类型 {}）",
-            report.total_skipped(),
+            report.total_skipped,
             report.skipped_recalled,
             report.skipped_empty,
             report.skipped_unknown,
@@ -358,7 +397,7 @@ pub async fn run(engine: &Arc<Engine>, args: ImportArgs) -> anyhow::Result<()> {
             "messages_dropped": outcome.messages_dropped,
             "session_ids": outcome.session_ids.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
             "l1": {"ok": l1_ok, "skip": l1_skip, "err": l1_err},
-            "skipped": report.total_skipped(),
+            "skipped": report.total_skipped,
             "chat_type": outcome.chat_type,
             "members": serde_json::to_value(&outcome.members)?,
         });

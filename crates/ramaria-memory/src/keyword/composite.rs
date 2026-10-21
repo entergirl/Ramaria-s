@@ -29,6 +29,7 @@ use ramaria_core::traits::EmbeddingProvider;
 use ramaria_core::{RamariaError, RamariaResult};
 
 use crate::similarity::cosine_similarity;
+use crate::utils::EMBED_CALL_TIMEOUT;
 
 use super::index::{DefaultScoringStrategy, KeywordIndex};
 
@@ -187,10 +188,23 @@ impl FuzzyKeywordIndex {
             return Vec::new();
         }
 
-        let query_vec = match embedder.embed(query_token.as_str()).await {
-            Ok(v) => v,
-            Err(e) => {
+        let query_vec = match tokio::time::timeout(
+            EMBED_CALL_TIMEOUT,
+            embedder.embed(query_token.as_str()),
+        )
+        .await
+        {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => {
                 tracing::warn!(error=%e, keyword=%query_token, "查询词向量生成失败，跳过语义扩展");
+                return Vec::new();
+            }
+            Err(_) => {
+                tracing::warn!(
+                    keyword=%query_token,
+                    timeout_ms = EMBED_CALL_TIMEOUT.as_millis() as u64,
+                    "查询词向量生成超时，跳过语义扩展"
+                );
                 return Vec::new();
             }
         };
@@ -367,12 +381,18 @@ impl CompositeIndex {
         }
 
         // ---- 第 3 级：语义扩展（词级） ----
-        if results.len() < needed
-            && self.config.enable_semantic_fallback
-            && let Some(fuzzy) = self.fuzzy.as_ref()
-            && fuzzy.is_ready()
-            && let Some(embedder) = embedder
-        {
+        // 三个前置条件（结果不足 / 开关开启 / 语义层就绪 + 持有 embedder）用 Option 组合表达，
+        // 避免条件链过深。
+        let semantic_target: Option<(&FuzzyKeywordIndex, &dyn EmbeddingProvider)> =
+            if results.len() < needed && self.config.enable_semantic_fallback {
+                self.fuzzy
+                    .as_ref()
+                    .filter(|fuzzy| fuzzy.is_ready())
+                    .zip(embedder)
+            } else {
+                None
+            };
+        if let Some((fuzzy, embedder)) = semantic_target {
             let mut expansion_tokens: Vec<KeywordToken> = Vec::new();
             for query_token in query.keywords.iter() {
                 let expanded = fuzzy

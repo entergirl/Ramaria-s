@@ -113,9 +113,11 @@ pub fn mock_infer(stats: &StatsSummary, persona_uid: &str) -> InferenceResult {
     }
 
     // 最高权重分类 → 主色调
-    if let Some(top) = stats.categories.first()
-        && let Some(sig) = category_signals.iter().find(|s| s.category == top.category)
-    {
+    let primary_signal = stats
+        .categories
+        .first()
+        .and_then(|top| category_signals.iter().find(|s| s.category == top.category));
+    if let Some(sig) = primary_signal {
         primary_candidates.push(sig.signal_label.clone());
     }
 

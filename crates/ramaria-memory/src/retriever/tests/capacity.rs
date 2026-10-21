@@ -118,6 +118,47 @@ fn lru_eviction_triggers_at_110_percent_and_evicts_oldest() {
     );
 }
 
+/// L1/L2 LRU 驱逐必须同步清理向量索引。
+///
+/// 只删文档映射会让 `L1:` / `L2:` 向量残留：检索时命中已不存在的文档，
+/// 解析阶段被跳过，检索结果被静默稀释。
+#[test]
+fn lru_eviction_removes_evicted_doc_vectors() {
+    use crate::vector::{VectorIndex, make_vector_label};
+    let mut r = Retriever::new();
+    r.set_lru_max_entries(2);
+
+    let old_id = uuid::Uuid::new_v4();
+    let kept_id = uuid::Uuid::new_v4();
+    r.index_l1_with_vector(
+        &l1_view_doc(old_id, "最旧的向量文档", 1000),
+        Some(vec![1.0, 0.0]),
+    );
+    r.index_l1_with_vector(
+        &l1_view_doc(kept_id, "较新的向量文档", 2000),
+        Some(vec![0.0, 1.0]),
+    );
+    assert_eq!(r.vector_mut().len(), 2);
+
+    // 第 3 篇触发驱逐（上限 2，水位 110% = 2）
+    r.index_l1_with_vector(
+        &l1_view_doc(uuid::Uuid::new_v4(), "触发驱逐的新文档", 3000),
+        Some(vec![0.5, 0.5]),
+    );
+    assert_eq!(r.doc_count(), 2, "触发后应驱逐回容量上限");
+
+    let labels = r.vector_mut().labels();
+    assert_eq!(labels.len(), 2, "被驱逐文档的向量必须同步移除");
+    assert!(
+        !labels.contains(&make_vector_label("l1", &old_id.to_string())),
+        "最旧文档的向量应被移除"
+    );
+    assert!(
+        labels.contains(&make_vector_label("l1", &kept_id.to_string())),
+        "未驱逐文档的向量应保留"
+    );
+}
+
 /// utt 块容量治理：超过 `utt_max_entries` 的 110% 时驱逐最旧块，
 /// 并同步清理其 `L0:{id}` 向量；未驱逐块与子串检索不受影响。
 ///

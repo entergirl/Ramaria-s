@@ -111,7 +111,7 @@ pub async fn list_events_by_persona(
         "SELECT id, persona_uid, title, summary, keywords, participants, start, \"end\",
          confidence, salience, valence, presentation, share, attitude, paraphrase,
          absorbed, situation_strength, motives, created_at, last_accessed_at
-         FROM memory_events WHERE persona_uid = ? ORDER BY start DESC LIMIT ? OFFSET ?",
+         FROM memory_events WHERE persona_uid = ? ORDER BY start DESC, id DESC LIMIT ? OFFSET ?",
     )
     .bind(persona_uid)
     .bind(limit)

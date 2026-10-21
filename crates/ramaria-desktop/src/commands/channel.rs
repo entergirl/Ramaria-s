@@ -160,10 +160,23 @@ pub async fn start_channel(
 }
 
 /// 停止通道运行时（幂等；未运行时直接返回当前视图）。
+///
+/// 说明:
+/// - 关停需等 worker 与传输收尾，可能因对端无响应而长时间占用；
+/// - 超过时限返回「仍在收尾」错误，不谎报已停止。
 #[tauri::command]
 #[tracing::instrument(skip(state))]
 pub async fn stop_channel(state: State<'_, DesktopState>) -> Result<ChannelPanelView, String> {
-    state.channel_manager.stop().await;
+    const STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+    let stopped = tokio::time::timeout(STOP_TIMEOUT, state.channel_manager.stop())
+        .await
+        .is_ok();
+    if !stopped {
+        tracing::warn!("通道运行时停止超时，仍在收尾");
+        return Err("通道仍在收尾，请稍后重试".to_string());
+    }
+
     build_panel_view(state.inner()).await
 }
 
@@ -194,6 +207,22 @@ pub async fn list_channel_bindings(
     Ok(views)
 }
 
+/// 外部会话标识的日志掩码：保留类型前缀，标识本体只留长度与短哈希。
+///
+/// 说明:
+/// - 前缀（`c2c` / `group`）用于区分私聊与群聊，保留排查价值；
+/// - 标识本体可能含对方账号或群号，不以明文入日志。
+fn mask_external_ref(external_ref: &str) -> String {
+    let prefix = external_ref
+        .split_once(':')
+        .map(|(prefix, _)| prefix)
+        .unwrap_or("-");
+    format!(
+        "{prefix}/{}",
+        crate::path_guard::redact_text_label(external_ref)
+    )
+}
+
 /// 写入 / 更新通道绑定（不存在则自动建档；`None` 参数保持现值）。
 ///
 /// 参数:
@@ -202,7 +231,7 @@ pub async fn list_channel_bindings(
 /// - `persona_uid`: 绑定级人格覆盖；None = 保持现值。
 /// - `enabled` / `allow_proactive`: None = 保持现值。
 #[tauri::command]
-#[tracing::instrument(skip(state))]
+#[tracing::instrument(skip(state, external_ref, persona_uid))]
 pub async fn set_channel_binding(
     state: State<'_, DesktopState>,
     channel: String,
@@ -225,6 +254,8 @@ pub async fn set_channel_binding(
 
     tracing::info!(
         channel = %binding.channel,
+        external_ref = %mask_external_ref(&binding.external_ref),
+        persona_override = binding.persona_uid.is_some(),
         enabled = binding.enabled,
         allow_proactive = binding.allow_proactive,
         "通道绑定已保存"

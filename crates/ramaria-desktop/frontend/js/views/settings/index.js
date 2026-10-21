@@ -345,7 +345,6 @@ var RamariaSettingsView = (function () {
             switch (entry.key) {
                 case 'backend': parts.backend.render(body); break;
                 case 'embedding': parts.embedding.render(body); break;
-                case 'memory_injection': parts.memoryInjection.render(body); break;
                 case 'session': parts.session.render(body); break;
                 case 'proactive': parts.proactive.render(body); break;
                 case 'channel': parts.channel.render(body); break;
@@ -389,9 +388,6 @@ var RamariaSettingsView = (function () {
                 break;
             case 'embedding':
                 parts.embedding.fill(state.embeddingConfig);
-                break;
-            case 'memory_injection':
-                parts.memoryInjection.fill(state.fullConfig);
                 break;
             case 'session':
                 parts.session.fill(state.fullConfig);

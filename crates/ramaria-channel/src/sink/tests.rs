@@ -6,7 +6,7 @@
 //! - 断言口径：传输调用次数、送达参数、错误结果。
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -27,6 +27,7 @@ struct MockTransport {
     calls: AtomicUsize,
     failures: Mutex<VecDeque<Option<ChannelError>>>,
     sent: Mutex<Vec<(OutboundTarget, OutboundMessage)>>,
+    supports_attachment: AtomicBool,
 }
 
 impl MockTransport {
@@ -36,7 +37,13 @@ impl MockTransport {
             calls: AtomicUsize::new(0),
             failures: Mutex::new(VecDeque::new()),
             sent: Mutex::new(Vec::new()),
+            supports_attachment: AtomicBool::new(true),
         }
+    }
+
+    /// 声明出站附件能力（默认支持，与 OneBot 口径一致）。
+    fn set_supports_attachment(&self, supported: bool) {
+        self.supports_attachment.store(supported, Ordering::Relaxed);
     }
 
     /// 预置失败序列（每次 send 先消费一个；序列耗尽后成功）。
@@ -83,6 +90,10 @@ impl Transport for MockTransport {
 
     async fn next_event(&self) -> Option<ChannelResult<TransportEvent>> {
         None
+    }
+
+    fn supports_outbound_attachment(&self) -> bool {
+        self.supports_attachment.load(Ordering::Relaxed)
     }
 
     async fn send(&self, target: &OutboundTarget, message: &OutboundMessage) -> ChannelResult<()> {
@@ -492,6 +503,24 @@ async fn deliver_sticker_missing_falls_back_to_text() {
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].1.text, "送你到家");
     assert_eq!(sent[0].1.attachment, None);
+}
+
+/// 仅表情命中且传输不支持纯附件：退化为表情占位文本（不重试、不带附件）。
+#[tokio::test]
+async fn deliver_sticker_only_falls_back_to_text_when_unsupported() {
+    let transport = Arc::new(MockTransport::new("telegram"));
+    transport.set_supports_attachment(false);
+    let resolver = MockStickerResolver::hitting("cat.png", b"PNGDATA");
+    let (sink, handle) = sink_with_resolver(&transport, &resolver);
+
+    let mut message = sample_message("telegram", Some("c2c:10001"));
+    message.content = "[表情:猫]".to_string();
+    sink.deliver(&message).await.expect("退化文本发送应成功");
+
+    let sent = handle.sent();
+    assert_eq!(sent.len(), 1, "占位文本应一次发出");
+    assert_eq!(sent[0].1.text, "[表情:猫]");
+    assert_eq!(sent[0].1.attachment, None, "退化文本不应携带附件");
 }
 
 /// 仅表情且未命中：跳过发送且视为已完成（现有空文本口径）。

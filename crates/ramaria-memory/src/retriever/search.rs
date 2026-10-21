@@ -23,6 +23,9 @@ use super::Retriever;
 use super::helpers::{count_keyword_matches, parse_doc_label, parse_graph_label, resolve_bm25_doc};
 use super::types::{L1DocView, SearchRequest, SearchResult};
 
+/// 向量检索失败告警节流窗口（按累计次数）：首次失败立即告警，其后每 100 次告警一次。
+const VECTOR_SEARCH_WARN_EVERY: u64 = 100;
+
 impl Retriever {
     /// 执行多通道组合检索（不含关键词镜像通道）。
     ///
@@ -99,7 +102,22 @@ impl Retriever {
                             Some(ChannelResult { results })
                         }
                     }
-                    Err(_) => None,
+                    Err(e) => {
+                        // 失败按“无向量通道”降级，但必须可观测：逐条召回都会走到这里，
+                        // 按累计次数节流告警，避免日志刷屏。
+                        let failures = self
+                            .vector_search_failures
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                            + 1;
+                        if failures == 1 || failures.is_multiple_of(VECTOR_SEARCH_WARN_EVERY) {
+                            tracing::warn!(
+                                error = %e,
+                                failures,
+                                "向量检索失败，本轮按无向量通道降级（同类失败已节流）"
+                            );
+                        }
+                        None
+                    }
                 }
             } else {
                 None
@@ -179,10 +197,12 @@ impl Retriever {
                 };
 
             // persona_uid 过滤
-            if let Some(ref target_uid) = request.persona_uid
-                && let Some(ref puid) = persona_uid
-                && puid != target_uid
-            {
+            let persona_mismatch = request
+                .persona_uid
+                .as_ref()
+                .zip(persona_uid.as_ref())
+                .is_some_and(|(target_uid, puid)| puid != target_uid);
+            if persona_mismatch {
                 continue;
             }
 
@@ -507,10 +527,12 @@ impl Retriever {
             let doc_data = resolve_bm25_doc(&doc_id, &self.l1_docs, &self.l2_docs);
 
             // persona_uid 过滤
-            if let Some(ref target_uid) = request.persona_uid
-                && let Some(ref puid) = doc_data.persona_uid
-                && puid != target_uid
-            {
+            let persona_mismatch = request
+                .persona_uid
+                .as_ref()
+                .zip(doc_data.persona_uid.as_ref())
+                .is_some_and(|(target_uid, puid)| puid != target_uid);
+            if persona_mismatch {
                 continue;
             }
 

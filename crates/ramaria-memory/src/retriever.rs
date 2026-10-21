@@ -81,6 +81,8 @@ pub struct Retriever {
     /// utt 块 ID → 块视图（原文通道）；单设容量上限 `utt_max_entries`（默认 1 万块），
     /// 超出上限时按创建时间驱逐最旧块
     utt_docs: std::collections::HashMap<i64, UttDocView>,
+    /// 向量检索失败累计次数（告警节流与诊断用）
+    vector_search_failures: std::sync::atomic::AtomicU64,
 }
 
 /// 默认 LRU 容量上限：50,000 条文档。
@@ -108,6 +110,7 @@ impl Retriever {
             l1_docs: std::collections::HashMap::new(),
             l2_docs: std::collections::HashMap::new(),
             utt_docs: std::collections::HashMap::new(),
+            vector_search_failures: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -123,6 +126,7 @@ impl Retriever {
             l1_docs: std::collections::HashMap::new(),
             l2_docs: std::collections::HashMap::new(),
             utt_docs: std::collections::HashMap::new(),
+            vector_search_failures: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -137,6 +141,12 @@ impl Retriever {
     /// 获取当前 LRU 容量上限。
     pub fn lru_max_entries(&self) -> usize {
         self.lru_max_entries
+    }
+
+    /// 向量检索失败累计次数（告警节流与诊断用）。
+    pub fn vector_search_failure_count(&self) -> u64 {
+        self.vector_search_failures
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// 设置 utt 原文块容量上限（0 表示不限制）。

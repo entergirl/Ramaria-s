@@ -150,10 +150,10 @@ pub(crate) fn tone_pairs_from_messages(
                 push_context_turn(&mut window, "user", &m.content);
             }
             MessageRole::Assistant => {
-                if m.persona_uid.as_deref() == Some(persona_uid)
-                    && let Some(question) = last_user.take()
-                {
-                    pairs.push((question, m.content.clone(), pending_context.clone()));
+                if m.persona_uid.as_deref() == Some(persona_uid) {
+                    if let Some(question) = last_user.take() {
+                        pairs.push((question, m.content.clone(), pending_context.clone()));
+                    }
                 }
                 push_context_turn(&mut window, "assistant", &m.content);
             }

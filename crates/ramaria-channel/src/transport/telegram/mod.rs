@@ -157,6 +157,11 @@ impl Transport for TelegramTransport {
         "telegram"
     }
 
+    /// 出站只承载文本：纯附件消息不可发送（附件随文本时被忽略）。
+    fn supports_outbound_attachment(&self) -> bool {
+        false
+    }
+
     /// 建立连接（幂等：管理任务在跑时直接成功）。
     ///
     /// 语义:

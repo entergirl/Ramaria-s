@@ -66,6 +66,12 @@ pub struct AnalysisReport {
     pub total_degraded: usize,
     /// 跳过数
     pub total_skipped: usize,
+    /// 跳过明细：撤回消息数
+    pub skipped_recalled: usize,
+    /// 跳过明细：空消息数
+    pub skipped_empty: usize,
+    /// 跳过明细：未知类型数
+    pub skipped_unknown: usize,
     /// 切割后的 session 数
     pub session_count: usize,
     /// 切割间隔（分钟）
@@ -149,6 +155,9 @@ pub(crate) async fn analyze(
         total_success,
         total_degraded,
         total_skipped,
+        skipped_recalled: report.skipped_recalled,
+        skipped_empty: report.skipped_empty,
+        skipped_unknown: report.skipped_unknown,
         session_count: report.session_count,
         gap_minutes: req.gap_minutes,
     })

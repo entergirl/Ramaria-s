@@ -306,12 +306,12 @@ pub(super) fn extract_reply_body(content_text: &str) -> String {
     }
 
     // 尝试去掉 [回复...] 前缀
-    if let Some(stripped) = content_text.strip_prefix('[')
-        && let Some(end) = stripped.find(']')
-    {
-        let after = stripped[end + 1..].trim();
-        if !after.is_empty() && after != content_text {
-            return after.to_string();
+    if let Some(stripped) = content_text.strip_prefix('[') {
+        if let Some(end) = stripped.find(']') {
+            let after = stripped[end + 1..].trim();
+            if !after.is_empty() && after != content_text {
+                return after.to_string();
+            }
         }
     }
 
@@ -327,11 +327,12 @@ pub(super) fn extract_reply_body(content_text: &str) -> String {
 /// - 包含 role 维度，同一消息不同角色（自己/对方）的指纹不同
 /// - 图片占位符已在调用前渲染为 `[图片#hash]`（hash 由 md5 稳定生成），
 ///   确保跨批次一致
+/// - 只取未加昵称前缀的正文：昵称可能随导出变化，不影响去重
 ///
 /// 参数:
 /// - `original_ts`: 原始 Unix 毫秒时间戳。
 /// - `role`: 消息角色。
-/// - `content`: 消息正文。
+/// - `content`: 消息正文（不含昵称前缀）。
 ///
 /// 返回:
 /// - 16 位 hex 字符串。

@@ -242,6 +242,19 @@ impl<'a> JobManager<'a> {
         Ok(claimed)
     }
 
+    /// 将任务状态置回 pending（释放执行权，等待下一轮抢占）。
+    ///
+    /// 用途:
+    /// - 任务已被抢占为 running、但本轮未产出或执行失败时，若继续保持 running，
+    ///   后续轮次只扫描 pending 任务，该任务会被永久卡住；此入口显式回退状态。
+    pub async fn mark_pending(&self, job_id: i64) -> RamariaResult<()> {
+        self.storage
+            .update_job_status(job_id, status::PENDING, None)
+            .await?;
+        debug!(job_id = job_id, "后台任务已置回 pending，等待下一轮重试");
+        Ok(())
+    }
+
     /// 将任务状态标记为 completed。
     pub async fn mark_completed(&self, job_id: i64) -> RamariaResult<()> {
         self.storage

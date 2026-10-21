@@ -8,8 +8,8 @@
 
 use crate::DesktopState;
 use serde::Serialize;
-use std::path::Path;
-use tauri::State;
+use std::path::{Path, PathBuf};
+use tauri::{Manager, State};
 
 // =========================================================
 // run_setup — 执行首次配置
@@ -32,9 +32,10 @@ use tauri::State;
 /// - DeepSeek/OpenAI 场景下 api_key 必填
 /// - 配置保存后自动初始化默认人格（rama-0001）
 #[tauri::command]
-#[tracing::instrument(skip(state, api_key, base_url))]
+#[tracing::instrument(skip(state, app, api_key, base_url))]
 pub async fn run_setup(
     state: State<'_, DesktopState>,
+    app: tauri::AppHandle,
     provider: String,
     model_id: String,
     base_url: String,
@@ -72,7 +73,7 @@ pub async fn run_setup(
     // 桌面端此前缺失此步骤，导致对话页/记忆页的人格选择器为空。
     // 对齐 CLI 的 create_initial_personas 行为。
     // 说明: `init_default_personas` 内部错误已统一映射（String 文案），此处只叠加场景前缀。
-    init_default_personas(&state.engine)
+    init_default_personas(&state.engine, &app)
         .await
         .map_err(|e| format!("初始化人格失败: {e}"))?;
 
@@ -302,6 +303,36 @@ pub async fn get_degraded_reason(
 // init_default_personas — 初始化默认人格
 // =========================================================
 
+/// 收集默认人格目录的候选路径（按优先级排序，不做存在性判断）。
+///
+/// 参数:
+/// - `app`: 应用句柄（用于定位安装目录资源）。
+///
+/// 返回:
+/// - 候选目录列表：安装目录资源在前，开发运行目录相对路径在后。
+///
+/// 说明:
+/// - 资源目录布局由打包器决定，`..` 层级会被折叠为 `_up_`，故两种形态都列入；
+/// - 资源目录不可用时仅保留相对路径（开发场景），不影响后续判定。
+fn persona_dir_candidates(app: &tauri::AppHandle) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(resource_dir.join("config").join("personas"));
+        candidates.push(
+            resource_dir
+                .join("_up_")
+                .join("_up_")
+                .join("config")
+                .join("personas"),
+        );
+    }
+
+    candidates.push(PathBuf::from("../../config/personas"));
+    candidates.push(PathBuf::from("../config/personas"));
+    candidates
+}
+
 /// 首次配置时创建默认人格记录。
 ///
 /// 流程:
@@ -314,10 +345,14 @@ pub async fn get_degraded_reason(
 /// - 单文件读取失败 → 跳过该文件，继续处理其他文件
 /// - persona 已存在 → 跳过（幂等）
 ///
-/// 路径解析（cargo tauri dev 从 crates/ramaria-desktop/ 运行）:
-/// - 主路径: `../../config/personas` → workspace 根 `rust/config/personas/`
-/// - 回退路径: `../config/personas`（兼容 workspace 根运行场景）
-async fn init_default_personas(engine: &ramaria_service::Engine) -> Result<(), String> {
+/// 路径解析（按顺序取首个存在目录）:
+/// - 安装目录资源: `resource_dir()/config/personas`（打包配置已含该目录，
+///   兼容资源落在 `_up_/_up_` 层级的布局）
+/// - 开发运行目录: `../../config/personas` / `../config/personas`（cargo tauri dev）
+async fn init_default_personas(
+    engine: &ramaria_service::Engine,
+    app: &tauri::AppHandle,
+) -> Result<(), String> {
     // ---- Step 1: 确保 user-0001 存在（幂等） ----
     engine
         .persona_ensure_user()
@@ -325,11 +360,8 @@ async fn init_default_personas(engine: &ramaria_service::Engine) -> Result<(), S
         .map_err(|e| crate::commands::service_error_message(&e, "创建 user-0001 失败"))?;
 
     // ---- Step 2: 目录解析（多级回退） ----
-    let candidates = [
-        Path::new("../../config/personas"),
-        Path::new("../config/personas"),
-    ];
-    let dir = candidates.iter().find(|p| p.exists() && p.is_dir());
+    let candidates = persona_dir_candidates(app);
+    let dir = candidates.iter().find(|p| p.is_dir());
     let Some(dir) = dir else {
         tracing::warn!(
             candidates = ?candidates

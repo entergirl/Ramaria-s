@@ -225,7 +225,7 @@ async fn stream_completes_while_index_is_building() {
     let engine = Arc::new(engine);
     seed_persona(&storage, DEFAULT_PERSONA_UID).await;
     engine.set_state(AppState::Ready);
-    engine.set_index_status(IndexStatus::Building, 0, 0, None, None);
+    engine.set_index_status(IndexStatus::Building, 0, 0, 0, None, None);
 
     let handle = engine
         .chat_stream(stream_request("你好", None))

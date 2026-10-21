@@ -15,7 +15,7 @@
 ///
 /// 说明:
 /// - 仅与 BM25 索引的分词口径（纯 bigram / 词典增强）相关；
-///   与 schema_meta.index_version（记忆检索索引是否构建过）互不混用。
+///   记忆检索索引的构建状态由 `IndexStatus` 表达，两者互不混用。
 pub const SETTING_BM25_INDEX_VERSION: &str = "bm25_index_version";
 
 /// BM25 分词旧版本：纯 bigram（settings 缺失/不可解析视为本版本）。

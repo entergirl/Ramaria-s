@@ -578,7 +578,15 @@ pub async fn send_local_image(
         uuid::Uuid::parse_str(session_id.trim()).map_err(|_| "会话 ID 格式无效".to_string())?;
     let real_path = crate::path_guard::validate_import_file_path(&file_path)?;
 
-    // ---- 读取字节与文件名 ----
+    // ---- 读取字节与文件名（读前按体积预检，避免整体读入超大文件） ----
+    let metadata =
+        std::fs::metadata(&real_path).map_err(|e| format!("读取图片文件信息失败: {e}"))?;
+    if metadata.len() > ramaria_service::MAX_LOCAL_IMAGE_BYTES {
+        return Err(format!(
+            "图片超过体积上限（{} MB）",
+            ramaria_service::MAX_LOCAL_IMAGE_BYTES / (1024 * 1024)
+        ));
+    }
     let bytes = std::fs::read(&real_path).map_err(|e| format!("读取图片文件失败: {e}"))?;
     let file_name = real_path
         .file_name()

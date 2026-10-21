@@ -115,13 +115,16 @@ pub(super) fn parse_graph_label(
     String,
 )> {
     label.strip_prefix("graph:").map(|entity| {
+        // 节点名携带人格归属（`{persona}\u{1f}{title}`）：返回 persona 参与统一过滤，
+        // 展示摘要只保留标题。无归属实体（旧格式 / 纯标题）persona = None。
+        let (persona, title) = crate::graph_retriever::split_graph_entity_key(entity);
         (
             DocId::Graph(entity.to_string()),
-            None, // persona_uid（图谱实体不关联特定 persona）
-            None, // share
+            persona.map(str::to_string),
+            None, // share（图谱节点不单独承载分享等级）
             0,    // created_at（图谱实体无时间戳）
             None, // last_accessed_at（图谱实体无访问时间）
-            format!("[图谱实体] {}", entity),
+            format!("[图谱实体] {title}"),
             "graph".to_string(),
         )
     })
@@ -206,4 +209,30 @@ pub(super) fn count_keyword_matches(
         .iter()
         .filter(|qk| doc_kw_set.contains(qk.as_str()))
         .count()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 图谱标签携带人格归属：解析后 persona 参与过滤，摘要只保留标题。
+    #[test]
+    fn parse_graph_label_returns_persona_and_display_title() {
+        let label = format!(
+            "graph:char-b{}一起去吃饭",
+            crate::graph_retriever::GRAPH_PERSONA_SEPARATOR
+        );
+        let parsed = parse_graph_label(&label).expect("应解析成功");
+        assert_eq!(parsed.1.as_deref(), Some("char-b"), "应回传人格归属");
+        assert_eq!(parsed.5, "[图谱实体] 一起去吃饭", "摘要应剥离人格前缀");
+        assert_eq!(parsed.6, "graph");
+    }
+
+    /// 旧格式（无分隔符）保持原有语义：无人格归属，摘要为完整实体名。
+    #[test]
+    fn parse_graph_label_supports_legacy_entity_name() {
+        let parsed = parse_graph_label("graph:陶艺展").expect("应解析成功");
+        assert!(parsed.1.is_none(), "旧格式不应有人格归属");
+        assert_eq!(parsed.5, "[图谱实体] 陶艺展");
+    }
 }

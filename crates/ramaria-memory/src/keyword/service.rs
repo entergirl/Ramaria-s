@@ -485,10 +485,10 @@ pub async fn query_text_labels(
         let dict_normalizer = BigramWithDictionaryNormalizer::from_dictionary(pool.dictionary());
         for token in dict_normalizer.normalize(text) {
             set.insert(token.clone());
-            if let Some(canonical) = pool.resolve().get(token.as_str())
-                && let Some(ct) = KeywordToken::new(canonical)
-            {
-                set.insert(ct);
+            if let Some(canonical) = pool.resolve().get(token.as_str()) {
+                if let Some(ct) = KeywordToken::new(canonical) {
+                    set.insert(ct);
+                }
             }
         }
     }

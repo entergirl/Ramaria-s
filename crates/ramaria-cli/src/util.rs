@@ -101,16 +101,16 @@ pub fn extract_toml_value(content: &str, key: &str) -> Option<String> {
         let trimmed = line.trim();
         if trimmed.starts_with(&format!("{key} =")) {
             // 双引号格式
-            if let Some(start) = trimmed.find('"')
-                && let Some(end) = trimmed[start + 1..].find('"')
-            {
-                return Some(trimmed[start + 1..start + 1 + end].to_string());
+            if let Some(start) = trimmed.find('"') {
+                if let Some(end) = trimmed[start + 1..].find('"') {
+                    return Some(trimmed[start + 1..start + 1 + end].to_string());
+                }
             }
             // 单引号格式
-            if let Some(start) = trimmed.find('\'')
-                && let Some(end) = trimmed[start + 1..].find('\'')
-            {
-                return Some(trimmed[start + 1..start + 1 + end].to_string());
+            if let Some(start) = trimmed.find('\'') {
+                if let Some(end) = trimmed[start + 1..].find('\'') {
+                    return Some(trimmed[start + 1..start + 1 + end].to_string());
+                }
             }
         }
     }

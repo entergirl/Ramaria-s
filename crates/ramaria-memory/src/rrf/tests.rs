@@ -15,8 +15,11 @@ fn make_channel<I: Clone + std::hash::Hash + Eq>(results: Vec<(I, f64)>) -> Chan
 
 #[test]
 fn penalty_rank_formula() {
-    assert!((penalty_rank(5) - 11.0).abs() < 0.001);
-    assert!((penalty_rank(10) - 21.0).abs() < 0.001);
+    // 结果数不足 top_k → 按 top_k 兜底；结果数超过 top_k → 取结果数 + 1
+    assert!((penalty_rank(5, 0) - 6.0).abs() < 0.001);
+    assert!((penalty_rank(5, 3) - 6.0).abs() < 0.001);
+    assert!((penalty_rank(5, 96) - 97.0).abs() < 0.001);
+    assert!((penalty_rank(10, 10) - 11.0).abs() < 0.001);
 }
 
 // --- rrf_single_channel ---
@@ -192,8 +195,8 @@ fn three_channels_empty() {
 fn rrf_score_formula_verification() {
     // rank 1 在向量通道，不在其他通道
     // RRF = 1/(60+1) + 1.0/(60+penalty) + 0.8/(60+penalty)
-    // penalty = 5*2+1 = 11
-    // RRF = 1/61 + 1.0/71 + 0.8/71 ≈ 0.01639 + 0.01408 + 0.01127 ≈ 0.04175
+    // BM25 / 图谱通道无结果 → penalty = max(0, 5) + 1 = 6
+    // RRF = 1/61 + 1.0/66 + 0.8/66 ≈ 0.01639 + 0.01515 + 0.01212 ≈ 0.04366
     let config = RrfConfig {
         top_k: 5,
         ..Default::default()
@@ -204,7 +207,7 @@ fn rrf_score_formula_verification() {
 
     let fused = rrf_fuse(&vec, &bm25, &graph, &config);
     assert_eq!(fused.len(), 1);
-    let expected = 1.0 / 61.0 + 1.0 / 71.0 + 0.8 / 71.0;
+    let expected = 1.0 / 61.0 + 1.0 / 66.0 + 0.8 / 66.0;
     assert!(
         (fused[0].rrf_score - expected).abs() < 0.0001,
         "expected {:.6}, got {:.6}",
@@ -351,11 +354,11 @@ fn fusion_uses_channel_identity_weights() {
         },
         &config,
     );
-    // penalty = 5*2+1 = 11 → k+penalty = 71；命中项 k+rank = 61
+    // 两通道各 1 条结果 → penalty = max(1, 5) + 1 = 6 → k+penalty = 66；命中项 k+rank = 61
     let x = fused.iter().find(|f| f.doc_id == "x").unwrap();
     let y = fused.iter().find(|f| f.doc_id == "y").unwrap();
-    assert!((x.rrf_score - (0.4 / 61.0 + 0.9 / 71.0)).abs() < 1e-9);
-    assert!((y.rrf_score - (0.4 / 71.0 + 0.9 / 61.0)).abs() < 1e-9);
+    assert!((x.rrf_score - (0.4 / 61.0 + 0.9 / 66.0)).abs() < 1e-9);
+    assert!((y.rrf_score - (0.4 / 66.0 + 0.9 / 61.0)).abs() < 1e-9);
     assert_eq!(
         fused[0].doc_id, "y",
         "graph_weight 更高时图谱独有命中应排前"
@@ -384,4 +387,48 @@ fn absent_channels_contribute_nothing() {
     );
     assert_eq!(fused.len(), 2);
     assert!((fused[0].rrf_score - 1.0 / 61.0).abs() < 1e-9);
+}
+
+/// 通道实际结果数超过 `2*top_k+1` 时，惩罚排名按实际结果数计算，
+/// 深位命中（第 60 名）不会低于"未命中该通道"的惩罚项。
+#[test]
+fn long_channel_penalty_uses_actual_result_count() {
+    // top_k=90 让向量独有命中（融合后第 2 名）仍在输出内，从而可观测 BM25 的惩罚项
+    let config = RrfConfig {
+        top_k: 90,
+        ..Default::default()
+    };
+    let bm25_results: Vec<(String, f64)> = (1..=96).map(|rank| (format!("b{rank}"), 1.0)).collect();
+    let bm25 = make_channel(bm25_results);
+    let vec = make_channel(vec![("v".to_string(), 0.9)]);
+
+    let fused = rrf_fuse_optional(
+        &OptionalChannels {
+            vector: Some(&vec),
+            bm25: Some(&bm25),
+            graph: None,
+            keyword: None,
+        },
+        &config,
+    );
+
+    // 惩罚排名 = max(实际结果数 96, top_k 90) + 1 = 97（旧公式为 top_k*2+1）
+    let penalty = penalty_rank(config.top_k, bm25.results.len());
+    assert!((penalty - 97.0).abs() < f64::EPSILON);
+    assert!(
+        1.0 / (60.0 + 60.0) > 1.0 / (60.0 + penalty),
+        "第 60 名的贡献项必须高于缺席惩罚项"
+    );
+
+    // 向量独有命中：BM25 缺席项按真实结果数取惩罚排名 97
+    let v = fused
+        .iter()
+        .find(|f| f.doc_id == "v")
+        .expect("向量独有命中应进入 top_k");
+    let expected = 1.0 / 61.0 + 1.0 / (60.0 + penalty);
+    assert!(
+        (v.rrf_score - expected).abs() < 1e-9,
+        "expected {expected:.9}, got {:.9}",
+        v.rrf_score
+    );
 }

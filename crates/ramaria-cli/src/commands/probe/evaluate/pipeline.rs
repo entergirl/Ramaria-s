@@ -249,7 +249,7 @@ pub(crate) async fn run_evaluate(
     }
 
     let evaluation = ProbeEvaluation {
-        results_file: results_path.display().to_string(),
+        results_file: super::super::file_label(results_path),
         persona_uid: experiment.persona_uid.clone(),
         dataset_seed: experiment.dataset_seed,
         judge_used,
@@ -364,10 +364,10 @@ pub(crate) fn load_golden_references(
 
     let mut map = std::collections::HashMap::new();
     for item in &dataset.items {
-        if matches!(item.dimension.as_str(), "fact" | "tone")
-            && let Some(rev) = item.reference.clone().filter(|r| !r.trim().is_empty())
-        {
-            map.insert(item.id.clone(), rev);
+        if matches!(item.dimension.as_str(), "fact" | "tone") {
+            if let Some(rev) = item.reference.clone().filter(|r| !r.trim().is_empty()) {
+                map.insert(item.id.clone(), rev);
+            }
         }
     }
     Ok(map)

@@ -81,12 +81,13 @@ impl ramaria_core::traits::LlmResponseCache for SqliteLlmCache {
 
         // 容量自淘汰（v1.5）：写入后若超出上限，按配置策略淘汰最旧条目。
         // 淘汰失败仅记 warn——缓存淘汰是优化而非正确性约束，不阻塞响应返回。
-        if self.max_entries > 0
-            && let Err(e) =
+        if self.max_entries > 0 {
+            if let Err(e) =
                 repo::llm_response_cache::evict_oldest(&self.pool, self.max_entries, self.fifo)
                     .await
-        {
-            tracing::warn!(error = %e, max_entries = self.max_entries, "LLM 响应缓存容量淘汰失败（非致命）");
+            {
+                tracing::warn!(error = %e, max_entries = self.max_entries, "LLM 响应缓存容量淘汰失败（非致命）");
+            }
         }
         Ok(())
     }

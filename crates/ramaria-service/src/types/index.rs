@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 /// 字段约定:
 /// - `status`: 索引状态机当前值。
 /// - `loaded` / `total`: 已加载向量文档数与向量文档总数（total=0 表示本次构建无向量路径）。
+/// - `failed`: 本次构建中向量补算失败的条数（0 = 无失败）。
 /// - `percent`: 进度百分比（0~100；total=0 时 Ready 为 100，其余为 0）。
 /// - `model`: 当前向量模型标识（无向量路径时为 None）。
 /// - `last_error`: 最近一次构建失败的脱敏原因（成功后清空）。
@@ -26,6 +27,7 @@ pub struct IndexStatusView {
     pub status: IndexStatus,
     pub loaded: usize,
     pub total: usize,
+    pub failed: usize,
     pub percent: u8,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -38,7 +40,7 @@ pub struct IndexStatusView {
 ///
 /// 字段约定:
 /// - `status`: 事件发生时的索引状态。
-/// - `loaded` / `total` / `percent`: 与状态视图同一口径。
+/// - `loaded` / `total` / `failed` / `percent`: 与状态视图同一口径。
 /// - `elapsed_ms`: 本次构建已耗时（毫秒）。
 /// - `model`: 当前向量模型标识（无向量路径时为 None，不输出）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +48,7 @@ pub struct IndexProgress {
     pub status: IndexStatus,
     pub loaded: usize,
     pub total: usize,
+    pub failed: usize,
     pub percent: u8,
     pub elapsed_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]

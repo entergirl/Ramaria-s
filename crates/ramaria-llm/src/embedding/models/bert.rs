@@ -249,24 +249,12 @@ impl BertEncoder {
 
         // Step 1: Tokenize
         let encoding = self.tokenizer.encode(text, false).map_err(|e| {
-            ramaria_core::error::RamariaError::embedding(format!(
-                "BERT 分词失败: {} — 文本: '{}...'",
-                e,
-                &text[..text.len().min(60)]
-            ))
+            ramaria_core::error::RamariaError::embedding(format!("BERT 分词失败: {}", e))
         })?;
 
-        let token_ids: Vec<u32> = encoding.get_ids().to_vec();
-        let attention_mask: Vec<u32> = encoding.get_attention_mask().to_vec();
-        let seq_len = token_ids.len();
-
-        if seq_len > MAX_SEQ_LEN {
-            tracing::warn!(
-                seq_len,
-                max = MAX_SEQ_LEN,
-                "BERT: 输入序列超长，tokenizer 应已截断"
-            );
-        }
+        let mut token_ids: Vec<u32> = encoding.get_ids().to_vec();
+        let mut attention_mask: Vec<u32> = encoding.get_attention_mask().to_vec();
+        let seq_len = Self::truncate_to_max_seq_len(&mut token_ids, &mut attention_mask);
 
         // Step 2: 构建 candle 输入张量
         let input_ids = Tensor::new(token_ids.as_slice(), &self.device)
@@ -312,11 +300,7 @@ impl BertEncoder {
             .model
             .forward(&input_ids, &token_type_ids, Some(&attention_mask_tensor))
             .map_err(|e| {
-                ramaria_core::error::RamariaError::embedding(format!(
-                    "BERT 前向推理失败: {}。文本: '{}...'",
-                    e,
-                    &text[..text.len().min(60)]
-                ))
+                ramaria_core::error::RamariaError::embedding(format!("BERT 前向推理失败: {}", e))
             })?;
 
         // Step 4: Mean Pooling（attention_mask 加权）
@@ -356,14 +340,13 @@ impl BertEncoder {
 
         for text in texts {
             let encoding = self.tokenizer.encode(*text, false).map_err(|e| {
-                ramaria_core::error::RamariaError::embedding(format!(
-                    "BERT 批量分词失败: {} — 文本: '{}...'",
-                    e,
-                    &text[..text.len().min(60)]
-                ))
+                ramaria_core::error::RamariaError::embedding(format!("BERT 批量分词失败: {}", e))
             })?;
-            token_id_vecs.push(encoding.get_ids().to_vec());
-            attention_vecs.push(encoding.get_attention_mask().to_vec());
+            let mut token_ids = encoding.get_ids().to_vec();
+            let mut attention_mask = encoding.get_attention_mask().to_vec();
+            Self::truncate_to_max_seq_len(&mut token_ids, &mut attention_mask);
+            token_id_vecs.push(token_ids);
+            attention_vecs.push(attention_mask);
         }
 
         // Padding 到批次内最长序列
@@ -474,6 +457,35 @@ impl BertEncoder {
         Ok(all_vectors)
     }
 
+    // ---- 输入裁剪 ----
+
+    /// 将分词结果裁剪到模型最大序列长度，返回有效长度。
+    ///
+    /// 参数:
+    /// - `token_ids`: token id 序列（原地截断）。
+    /// - `attention_mask`: 与 token 序列对齐的注意力掩码（原地截断）。
+    ///
+    /// 返回:
+    /// - 裁剪后的有效 token 数（不大于 `MAX_SEQ_LEN`）。
+    ///
+    /// 说明:
+    /// - tokenizer 不保证按模型配置截断，超长输入会在位置编码处失败，因此在构建张量前统一裁剪。
+    fn truncate_to_max_seq_len(token_ids: &mut Vec<u32>, attention_mask: &mut Vec<u32>) -> usize {
+        let raw_len = token_ids.len();
+        let effective_len = raw_len.min(MAX_SEQ_LEN);
+        token_ids.truncate(effective_len);
+        attention_mask.truncate(effective_len);
+        if raw_len > MAX_SEQ_LEN {
+            tracing::debug!(
+                raw_len,
+                effective_len,
+                max = MAX_SEQ_LEN,
+                "BERT 输入序列超长，已按最大长度截断"
+            );
+        }
+        effective_len
+    }
+
     // ---- 池化辅助 ----
 
     /// Mean pooling: attention_mask 加权平均。
@@ -564,11 +576,66 @@ impl BertEncoder {
 }
 
 // =========================================================
-// 单元测试（需实际模型文件，此处仅测试构造逻辑）
+// 单元测试（内存构造小型模型，无需模型文件）
 // =========================================================
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use candle_nn::{VarBuilder, VarMap};
+    use tokenizers::models::wordlevel::WordLevel;
+    use tokenizers::pre_tokenizers::whitespace::Whitespace;
+
+    /// 构造仅用于测试的小型 BERT 编码器。
+    ///
+    /// 说明:
+    /// - 权重由 `VarMap` 在内存中初始化，不读取模型文件。
+    /// - 分词器按空白切分，词表只含 `[UNK]` 与 `a`，便于构造任意长度的 token 序列。
+    fn tiny_encoder() -> BertEncoder {
+        let device = Device::Cpu;
+
+        let mut vocab = std::collections::HashMap::new();
+        vocab.insert("[UNK]".to_string(), 0u32);
+        vocab.insert("a".to_string(), 1u32);
+        let word_level = WordLevel::builder()
+            .vocab(vocab.into_iter().collect())
+            .unk_token("[UNK]".to_string())
+            .build()
+            .expect("测试分词器应可构造");
+        let mut tokenizer = Tokenizer::new(word_level);
+        tokenizer.with_pre_tokenizer(Some(Whitespace));
+
+        let config = BertConfig {
+            vocab_size: 2,
+            hidden_size: 8,
+            num_hidden_layers: 1,
+            num_attention_heads: 2,
+            intermediate_size: 16,
+            hidden_act: candle_transformers::models::bert::HiddenAct::Gelu,
+            hidden_dropout_prob: 0.0,
+            max_position_embeddings: MAX_SEQ_LEN,
+            type_vocab_size: 2,
+            initializer_range: 0.02,
+            layer_norm_eps: 1e-12,
+            pad_token_id: 0,
+            position_embedding_type:
+                candle_transformers::models::bert::PositionEmbeddingType::Absolute,
+            use_cache: false,
+            classifier_dropout: None,
+            model_type: None,
+        };
+        let varmap = VarMap::new();
+        let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+        let model = BertModel::load(vb, &config).expect("测试模型应可构造");
+
+        BertEncoder {
+            model,
+            tokenizer,
+            dimension: config.hidden_size,
+            device,
+        }
+    }
+
     /// 测试空文本应报错
     #[test]
     fn empty_text_detection() {
@@ -576,5 +643,32 @@ mod tests {
         let err = ramaria_core::error::RamariaError::embedding("嵌入文本不能为空");
         assert_eq!(err.category(), "embedding");
         assert!(err.to_string().contains("嵌入文本不能为空"));
+    }
+
+    /// 超长文本应在截断到最大序列长度后成功生成向量。
+    #[test]
+    fn long_text_is_truncated_and_embedded() {
+        let encoder = tiny_encoder();
+        let text = "a ".repeat(MAX_SEQ_LEN + 88);
+
+        let vector = encoder
+            .embed_text(&text)
+            .expect("超长文本应在截断后成功生成向量");
+
+        assert_eq!(vector.len(), encoder.dimension());
+    }
+
+    /// 裁剪会同时收紧 token 序列与注意力掩码，两者长度保持一致。
+    #[test]
+    fn truncate_to_max_seq_len_clamps_ids_and_mask() {
+        let mut token_ids = vec![1u32; MAX_SEQ_LEN + 88];
+        let mut attention_mask = vec![1u32; MAX_SEQ_LEN + 88];
+
+        let effective_len =
+            BertEncoder::truncate_to_max_seq_len(&mut token_ids, &mut attention_mask);
+
+        assert_eq!(effective_len, MAX_SEQ_LEN);
+        assert_eq!(token_ids.len(), MAX_SEQ_LEN);
+        assert_eq!(attention_mask.len(), MAX_SEQ_LEN);
     }
 }

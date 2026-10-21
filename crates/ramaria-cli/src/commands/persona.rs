@@ -12,11 +12,12 @@
 use anyhow::Context;
 use ramaria_memory::preset::PreviewMode;
 use ramaria_service::types::{DecomposeExecution, PersonaImportOutcome};
-use ramaria_service::{Engine, PersonaFileAction, PersonaFullView, PersonaLoadMode};
+use ramaria_service::{Engine, PersonaFullView};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 mod export;
+mod reload;
 
 // =========================================================
 // 常量
@@ -122,7 +123,7 @@ pub async fn run(engine: &Arc<Engine>, cmd: PersonaCmd, json: bool) -> anyhow::R
     match cmd {
         PersonaCmd::List { limit, offset } => run_list(engine, json, limit, offset).await,
         PersonaCmd::Show => run_show(engine, json).await,
-        PersonaCmd::Reload { uid } => run_reload(engine, uid).await,
+        PersonaCmd::Reload { uid } => reload::run(engine, uid, json).await,
         PersonaCmd::Import {
             file,
             dry_run,
@@ -297,94 +298,8 @@ fn display_persona(p: &PersonaFullView) {
 }
 
 // =========================================================
-// reload 命令
+// reload 命令（实现见 reload.rs）
 // =========================================================
-
-/// 从 personas/ 目录重新加载人格文件到 DB。
-///
-/// 流程:
-/// 1. 验证目录存在。
-/// 2. 收集 .toml 文件（可按 --uid 筛选）。
-/// 3. 逐个文件读取 → 解析 assistant_name → 创建或更新 DB 记录（已存在则同步文件内容）。
-/// 4. 输出加载结果摘要。
-async fn run_reload(engine: &Arc<Engine>, uid: Option<String>) -> anyhow::Result<()> {
-    let dir = personas_dir();
-
-    if !dir.exists() {
-        return Err(anyhow::anyhow!(
-            "人格文件目录不存在: {}\n\
-             请确认工作目录在仓库根下，或将 .toml 文件放入 config/personas/ 目录。",
-            dir.display()
-        ));
-    }
-    if !dir.is_dir() {
-        return Err(anyhow::anyhow!("路径不是目录: {}", dir.display()));
-    }
-
-    // 收集要处理的文件（文件名用于逐文件结果展示）
-    let files = collect_toml_files(&dir, uid.as_deref())?;
-
-    if files.is_empty() {
-        if let Some(ref target_uid) = uid {
-            return Err(anyhow::anyhow!(
-                "未找到匹配的人格文件: {}.toml (在 {} 下)",
-                target_uid,
-                dir.display()
-            ));
-        }
-        crate::ui::warn(&format!("在 {} 下未找到 .toml 文件", dir.display()));
-        return Ok(());
-    }
-
-    crate::ui::separator();
-    println!("  正在加载人格文件... (共 {} 个)", files.len());
-    crate::ui::separator();
-    println!();
-
-    // 导入用例：已存在记录按文件内容同步（名称 / 配置）
-    let outcomes = engine
-        .persona_load_from_dir(&dir, uid.as_deref(), PersonaLoadMode::CreateOrUpdate)
-        .await?;
-
-    let mut success_count = 0u32;
-    let mut error_count = 0u32;
-
-    for (path, outcome) in files.iter().zip(outcomes.iter()) {
-        let filename = path
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "?".to_string());
-
-        match outcome.action {
-            PersonaFileAction::Created | PersonaFileAction::Updated => {
-                crate::ui::success(&format!("{filename} → {}", outcome.uid));
-                success_count += 1;
-            }
-            PersonaFileAction::Failed => {
-                crate::ui::warn(&format!("{filename}: {}", outcome.message));
-                tracing::error!(
-                    path = %path.display(),
-                    error = %outcome.message,
-                    "人格文件加载失败"
-                );
-                error_count += 1;
-            }
-            // 其余动作（如仅创建缺失模式的跳过）在本命令口径下不会出现，防御性忽略
-            _ => {}
-        }
-    }
-
-    println!();
-    crate::ui::separator();
-    println!("  加载完成: {} 成功, {} 失败", success_count, error_count);
-    crate::ui::separator();
-
-    if error_count > 0 && success_count == 0 {
-        return Err(anyhow::anyhow!("所有文件加载均失败，请检查文件格式和权限"));
-    }
-
-    Ok(())
-}
 
 /// 收集目录下所有 .toml 文件（可过滤指定 UID）。
 fn collect_toml_files(dir: &Path, target_uid: Option<&str>) -> anyhow::Result<Vec<PathBuf>> {

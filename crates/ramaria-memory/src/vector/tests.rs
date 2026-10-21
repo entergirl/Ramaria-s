@@ -53,6 +53,30 @@ fn index_dimension_mismatch() {
     ));
 }
 
+/// 维度不符的条目被丢弃但必须可观测：累计计数供诊断，且不影响后续合法写入。
+#[test]
+fn add_dimension_mismatch_accumulates_count() {
+    let mut idx = BruteForceIndex::new();
+    idx.add("doc1", vec![1.0, 0.0, 0.0], 1000);
+
+    idx.add("bad1", vec![1.0, 0.0], 1000);
+    idx.add("bad2", vec![1.0, 0.0], 1000);
+    assert_eq!(idx.len(), 1, "维度不符的条目不进入索引");
+    assert_eq!(
+        idx.dimension_mismatch_count(),
+        2,
+        "维度不符必须累计计数（不再静默丢弃）"
+    );
+
+    // 装饰器透传同一计数（检索器持有的就是该实现）
+    let cached = CachedVectorIndex::new(idx, None);
+    assert_eq!(cached.dimension_mismatch_count(), 2);
+    assert_eq!(
+        VectorIndex::dimension_mismatch_count(&BruteForceIndex::new()),
+        0
+    );
+}
+
 /// 0 维向量（空 embedding）不得被记为首个期望维度：
 /// 一旦记录，后续真实维度会被全部拒绝，向量通道整体静默失效（只剩 BM25/关键词）。
 #[test]

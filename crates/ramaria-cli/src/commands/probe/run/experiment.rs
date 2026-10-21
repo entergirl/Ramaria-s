@@ -22,6 +22,7 @@ use super::session::{
     rebuild_utt_for_config, run_single_question,
 };
 use anyhow::Context;
+use ramaria_core::config::RamariaConfig;
 use ramaria_core::error::RamariaError;
 use ramaria_service::Engine;
 use std::path::Path;
@@ -79,6 +80,11 @@ pub(crate) async fn run_experiment(
     let run_count: usize = experiment.variants.iter().map(|v| v.runs.len()).sum();
     tracing::info!(run_count, "probe run 完成");
 
+    // 复原失败的告警走 stderr（--json 模式的 stdout 只保留回执信封）
+    if experiment.utt_restored == Some(false) {
+        crate::ui::warn("utt 块按基准参数复原失败，请运行 `ramaria blocks rebuild --force` 重建");
+    }
+
     // Step 6: 输出
     if let Some(out) = output.as_deref() {
         // `-` + --json：stdout 只出一行信封，原始结果放 data.raw（避免两段 JSON）
@@ -88,6 +94,7 @@ pub(crate) async fn run_experiment(
                 "persona_uid": experiment.persona_uid,
                 "variants": experiment.variants.len(),
                 "runs": run_count,
+                "utt_restored": experiment.utt_restored,
                 "raw": &experiment,
             });
             return crate::json::emit_ok(&data);
@@ -99,6 +106,7 @@ pub(crate) async fn run_experiment(
                 "persona_uid": experiment.persona_uid,
                 "variants": experiment.variants.len(),
                 "runs": run_count,
+                "utt_restored": experiment.utt_restored,
             });
             return crate::json::emit_ok(&data);
         }
@@ -178,11 +186,47 @@ pub async fn build_experiment(
     );
 
     // Step 5: 逐档位实验（档位对齐：切分参数去重，同切分多档位复用已建块）
+    let results = run_variants(engine, dataset, &variants, &base_config, rebuild_utt, limit).await;
+
+    // Step 5.5: 复原 utt 块。
+    // 档位重建会按各档参数重切全库 utt 块（破坏性改写），实验结束必须按基准配置切回；
+    // 复原在错误上抛之前执行，失败路径同样还原用户原始切分。
+    let utt_restored = restore_utt_blocks(engine, &base_config, rebuild_utt).await;
+
+    let results = results?;
+
+    Ok(ProbeExperiment {
+        dataset_file: super::super::file_label(dataset_path),
+        dataset_seed: dataset.seed,
+        persona_uid: dataset.persona_uid.clone(),
+        rebuild_utt,
+        utt_restored,
+        variants: results,
+        repeat: None,
+        diagnostics: Some(diagnostics),
+        generated_at: now_iso8601(),
+    })
+}
+
+/// 逐档位执行实验（覆盖档位参数 → 按切分重建 utt 块 → 逐题跑对话管线）。
+///
+/// 说明:
+/// - 同一切分参数（θ_gap / 条数）在本轮只重建一次 utt 块，仅 top_k 不同的档位复用已建块。
+/// - `rebuild_utt=false` 时不改动 utt 块，直接复用库中现有切分。
+/// - 单题失败不中断批量（失败原因记入题项）；单档位重建失败记 warn 后继续。
+async fn run_variants(
+    engine: &Arc<Engine>,
+    dataset: &ProbeDataset,
+    variants: &[ProbeVariant],
+    base_config: &RamariaConfig,
+    rebuild_utt: bool,
+    limit: Option<usize>,
+) -> anyhow::Result<Vec<ProbeVariantResult>> {
     let mut results = Vec::with_capacity(variants.len());
-    // 已按切分参数（θ_gap/条数）重建过的档位集合；top_k 不参与切分，复用已建块。
+    // 已按切分参数（θ_gap / 条数）重建过的档位集合；top_k 不参与切分，复用已建块。
     let mut rebuilt_cuts: std::collections::HashMap<(u32, u32), ()> =
         std::collections::HashMap::new();
-    for variant in &variants {
+    for variant in variants {
         // 覆盖 utt 三参数（档位基准 + 单参数变化）
         let mut variant_config = base_config.clone();
         variant_config.utt.theta_gap_minutes = variant.theta_gap_minutes;
@@ -240,17 +284,15 @@ pub async fn build_experiment(
         // 档位对齐：仅当收到重建指令且该切分参数（θ_gap/条数）尚未在本轮重建过时，
         // 才重建 utt 块——同一切分下的多档位（仅 top_k 不同）复用已建块，embedding
         // 调用数不随 top_k 档位倍增；top_k 变化不影响 utt 块切分。
-        // `rebuild_utt=false`（--no-rebuild-utt）时完全不重建，直接复用库中已建块。
         let cut_key = (variant.theta_gap_minutes, variant.max_msgs_per_block);
-        if rebuild_utt
-            && !rebuilt_cuts.contains_key(&cut_key)
-            && let Err(e) = rebuild_utt_for_config(engine, &variant_config).await
-        {
-            tracing::warn!(
-                variant_id = %variant.id,
-                %e,
-                "档位 utt 块重建失败，本次档位可能未按目标参数生效"
-            );
+        if rebuild_utt && !rebuilt_cuts.contains_key(&cut_key) {
+            if let Err(e) = rebuild_utt_for_config(engine, &variant_config).await {
+                tracing::warn!(
+                    variant_id = %variant.id,
+                    %e,
+                    "档位 utt 块重建失败，本次档位可能未按目标参数生效"
+                );
+            }
         }
         if rebuild_utt {
             rebuilt_cuts.insert(cut_key, ());
@@ -301,16 +343,37 @@ pub async fn build_experiment(
         });
     }
 
-    Ok(ProbeExperiment {
-        dataset_file: dataset_path.display().to_string(),
-        dataset_seed: dataset.seed,
-        persona_uid: dataset.persona_uid.clone(),
-        rebuild_utt,
-        variants: results,
-        repeat: None,
-        diagnostics: Some(diagnostics),
-        generated_at: now_iso8601(),
-    })
+    Ok(results)
+}
+
+/// 按基准配置复原 utt 块（档位实验的破坏性切分在结束后必须还原）。
+///
+/// 参数:
+/// - `base_config`: 档位实验的配置基准（其 `[utt]` 段即用户原始切分参数）。
+/// - `rebuild_utt`: 本轮是否重建过 utt 块；否时不做任何写操作。
+///
+/// 返回:
+/// - `None`: 未重建 utt 块，无需复原。
+/// - `Some(true)`: 已按基准参数重建完成。
+/// - `Some(false)`: 复原失败（记 warn，不影响已产出的实验结果）。
+async fn restore_utt_blocks(
+    engine: &Arc<Engine>,
+    base_config: &RamariaConfig,
+    rebuild_utt: bool,
+) -> Option<bool> {
+    if !rebuild_utt {
+        return None;
+    }
+    match rebuild_utt_for_config(engine, base_config).await {
+        Ok(()) => {
+            tracing::info!("probe run 结束，utt 块已按基准参数复原");
+            Some(true)
+        }
+        Err(e) => {
+            tracing::warn!(%e, "probe run 结束，utt 块按基准参数复原失败");
+            Some(false)
+        }
+    }
 }
 
 /// 统计法多次运行（`probe run --repeat N >= 2`）。
@@ -378,6 +441,7 @@ pub async fn build_experiment_with_repeat(
         dataset_seed: last.dataset_seed,
         persona_uid: last.persona_uid.clone(),
         rebuild_utt: last.rebuild_utt,
+        utt_restored: last.utt_restored,
         variants: last.variants.clone(),
         repeat: Some(ProbeRepeatMeta {
             count: repeat,
@@ -421,12 +485,12 @@ pub(crate) fn aggregate_repeat_stats(rounds: &[ProbeExperiment]) -> Vec<VariantR
             let mut chars = Vec::new();
             let mut ms = Vec::new();
             for round in rounds {
-                if let Some(vr2) = round
+                let hit = round
                     .variants
                     .iter()
                     .find(|v| v.variant_id == vr.variant_id)
-                    && let Some(r) = vr2.runs.iter().find(|r| r.item_id == run.item_id)
-                {
+                    .and_then(|vr2| vr2.runs.iter().find(|r| r.item_id == run.item_id));
+                if let Some(r) = hit {
                     chars.push(r.metrics.reply_chars as f64);
                     ms.push(r.metrics.elapsed_ms as f64);
                 }
@@ -609,6 +673,9 @@ pub(crate) fn print_experiment_summary(experiment: &ProbeExperiment) {
                 vs.variant_id, chars_mean, ms_mean, rep.count
             );
         }
+    }
+    if experiment.utt_restored == Some(true) {
+        crate::ui::info("utt 块已按基准参数复原（档位切分未留在库中）");
     }
     crate::ui::info("完整结果含每题 reply/metrics，可用 --json 或 --output 获取");
 }

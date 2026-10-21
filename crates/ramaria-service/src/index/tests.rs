@@ -534,10 +534,12 @@ async fn rebuild_builds_graph_from_event_relations() {
     let graph = retriever.graph_mut();
     assert_eq!(graph.node_count(), 2, "两个事件应各成一个图节点");
     assert_eq!(graph.edge_count(), 1, "一条事件关系应成一条边");
+    let first_key = ramaria_memory::graph_retriever::graph_entity_key(Some("char-0001"), "陶艺展");
+    let second_key = ramaria_memory::graph_retriever::graph_entity_key(Some("char-0001"), "陶艺课");
     let graph_hits = graph.search("陶艺", &graph_config);
     assert!(
         graph_hits.iter().any(|h| {
-            h.entity_name == "陶艺展" && h.related_entities.iter().any(|name| name == "陶艺课")
+            h.entity_name == first_key && h.related_entities.iter().any(|name| name == &second_key)
         }),
         "图谱命中应含 1-hop 关联事件标题: {graph_hits:?}"
     );

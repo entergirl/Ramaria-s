@@ -307,8 +307,8 @@ pub(crate) async fn run_report(
     let style_metrics = compute_style_metrics(&experiment, evaluation.as_ref());
 
     let report = ProbeReport {
-        results_file: results_path.display().to_string(),
-        evaluation_file: evaluation_path.map(|p| p.display().to_string()),
+        results_file: super::super::file_label(results_path),
+        evaluation_file: evaluation_path.map(super::super::file_label),
         persona_uid: experiment.persona_uid.clone(),
         dataset_seed: experiment.dataset_seed,
         judge_used,

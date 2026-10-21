@@ -435,7 +435,6 @@ fn injection_gate_is_memory_only_not_persisted() {
     cfg.injection.behavior = false;
 
     // JSON 通道（backend_config / 信封等）：顶层无 `injection` 键。
-    // 注意不能用裸 "injection" 断言（`online_memory_injection` 亦含该子串）。
     let json = serde_json::to_string(&cfg).unwrap();
     let parsed_json: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert!(

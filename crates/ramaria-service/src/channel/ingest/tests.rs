@@ -671,3 +671,20 @@ async fn whitelist_rejection_leaves_no_side_effects() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 平台消息 ID 只在会话内唯一：指纹必须带上会话标识，跨会话同 ID 不得碰撞。
+#[test]
+fn fingerprint_includes_external_ref_for_platform_message_id() {
+    let message = inbound(Some("m-1"), "10001", "小明", "你好", now_ms());
+    let session_a = super::channel_fingerprint("telegram", "chat:1", &message);
+    let session_b = super::channel_fingerprint("telegram", "chat:2", &message);
+    assert_ne!(
+        session_a, session_b,
+        "同一平台消息 ID 在不同会话应产生不同指纹"
+    );
+    assert_eq!(
+        session_a,
+        super::channel_fingerprint("telegram", "chat:1", &message),
+        "同会话同消息指纹应稳定"
+    );
+}

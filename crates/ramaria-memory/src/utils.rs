@@ -4,7 +4,19 @@
 //! - 集中管理 L1 摘要和事件提取共用的纯函数
 //! - JSON 解析辅助: strip_thinking, extract_first_json_object, extract_first_json_array
 //! - 数值钳制: clamp_valence, clamp_salience, clamp_to_nearest (五档网格)
+//! - 超时预算: 召回链路上的嵌入调用统一使用 `EMBED_CALL_TIMEOUT`
 //! - 零 I/O，零 async，不依赖数据库或外部服务
+
+// =========================================================
+// 超时预算
+// =========================================================
+
+/// 单次嵌入调用的超时预算。
+///
+/// 用途:
+/// - 召回链路上的 embedding 调用不得超过该时长；超时按"无向量通道"降级，
+///   不阻塞对话主流程。
+pub(crate) const EMBED_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 // =========================================================
 // JSON 解析辅助

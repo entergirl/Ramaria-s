@@ -265,7 +265,6 @@ pub use prompt::{
         join_prompt_parts, render_prompt_parts,
     },
     example_selector::{ExampleSelector, ExampleSelectorConfig, extract_keywords},
-    injection_guard::{MemoryInjectionStatus, apply_injection_guard, check_injection},
 };
 
 // Token Budget 管理

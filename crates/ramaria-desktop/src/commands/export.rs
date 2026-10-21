@@ -101,12 +101,16 @@ pub async fn export_sessions_markdown(
 
 /// 渲染并写出 JSON 导出文件（桌面不脱敏；载荷与 CLI 同源）。
 fn write_export_json_file(canonical: &Path, data: &ExportData) -> Result<(), String> {
+    // 落盘前复核目标形态：校验与写入之间目标可能被替换为链接
+    crate::path_guard::ensure_export_target_is_regular(canonical)?;
     let json = ramaria_service::render_sessions_json(data, false);
     std::fs::write(canonical, &json).map_err(|e| format!("写入文件失败: {}", e))
 }
 
 /// 渲染并写出 Markdown 导出文件；无可导出会话时返回错误且不写文件。
 fn write_export_markdown_file(canonical: &Path, data: &ExportData) -> Result<(), String> {
+    // 落盘前复核目标形态：校验与写入之间目标可能被替换为链接
+    crate::path_guard::ensure_export_target_is_regular(canonical)?;
     match ramaria_service::render_sessions_markdown(data, false) {
         Some(markdown) => {
             std::fs::write(canonical, markdown).map_err(|e| format!("写入文件失败: {}", e))

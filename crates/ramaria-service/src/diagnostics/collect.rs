@@ -162,15 +162,10 @@ pub(super) fn collect_config(
             format!("# 配置文件: {file_label}\n# 注意：API key 已脱敏为 [REDACTED]\n\n{redacted}")
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // config.toml 不存在是预期行为：Ramaria 将配置存储在数据库中，不使用文件配置
-            status.insert(
-                "config".to_string(),
-                "skipped: 未使用配置文件（配置存储在数据库中）".to_string(),
-            );
-            tracing::debug!("配置文件不存在（预期：配置存储在数据库中），跳过收集");
-            String::from(
-                "# 配置文件不存在（Ramaria 将配置存储在数据库中，不使用 config.toml 文件）\n",
-            )
+            // config.toml 不存在是预期行为（首次启动尚未生成，或未完成配置写入）
+            status.insert("config".to_string(), "skipped: 配置文件不存在".to_string());
+            tracing::debug!("配置文件不存在（首次启动或尚未生成），跳过收集");
+            String::from("# 配置文件不存在（首次启动或尚未生成）\n")
         }
         Err(e) => {
             // 占位文本随诊断包外发：保留"文件名 + 目录路径不可逆短哈希"——

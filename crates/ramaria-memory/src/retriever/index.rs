@@ -218,15 +218,23 @@ impl Retriever {
             &entries[..evict_count]
         };
 
-        // 同步驱逐：BM25 + HashMap
+        // 同步驱逐：BM25 + HashMap + 向量索引
+        // 向量按 label 批量移除：只删文档映射会让 `L1:` / `L2:` 向量残留在索引里，
+        // 检索时命中已不存在的文档（解析阶段被跳过，检索结果被静默稀释）。
+        let mut vector_labels: Vec<String> = Vec::with_capacity(to_evict.len());
         for (_, is_l1, l1_uid, l2_id) in to_evict {
             if *is_l1 {
                 self.bm25_index.remove(&DocId::L1(*l1_uid));
                 self.l1_docs.remove(l1_uid);
+                vector_labels.push(make_vector_label("l1", &l1_uid.to_string()));
             } else {
                 self.bm25_index.remove(&DocId::L2(*l2_id));
                 self.l2_docs.remove(l2_id);
+                vector_labels.push(make_vector_label("l2", &l2_id.to_string()));
             }
+        }
+        for label in &vector_labels {
+            self.vector_index.remove(label);
         }
 
         tracing::warn!(

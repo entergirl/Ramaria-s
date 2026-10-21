@@ -260,7 +260,7 @@ impl ConfigWriter {
     ///
     /// 说明:
     /// - 读取当前 config.toml（缺失则生成模板），仅更新 `[backend]` 组后写回文件。
-    /// - 保留文件侧 `online_memory_injection` 等 DB 无对应字段的值。
+    /// - 保留文件侧思考适配等 DB 无对应字段的值。
     /// - `db_ok` 恒为 true：本方法只同步文件侧，DB 侧已由调用方写入
     ///   （调用方先写表再调用本方法）。
     pub async fn sync_backend_config(&self, backend: &BackendConfig) -> SyncWriteResult {
@@ -282,7 +282,7 @@ impl ConfigWriter {
             RamariaConfig::default()
         };
 
-        // 仅更新 backend 组（保留 online_memory_injection）
+        // 仅更新 backend 组（保留文件侧思考适配三键）
         cfg.backend = backend_selection_from_backend_config(backend, &cfg.backend);
 
         // 写回文件

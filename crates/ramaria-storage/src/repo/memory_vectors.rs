@@ -68,6 +68,57 @@ pub async fn upsert(pool: &SqlitePool, vector: &MemoryVector) -> RamariaResult<(
     Ok(())
 }
 
+/// 批量写入（覆盖）记忆向量（单事务多值 upsert）。
+///
+/// 参数:
+/// - `pool`: SQLite 连接池。
+/// - `vectors`: 待写入向量；空切片直接返回，不开启事务。
+///
+/// 说明:
+/// - 按 120 行 / 批切分（每行 6 个绑定参数，低于 SQLite 默认 999 上限）；
+/// - 全部行在同一事务内提交：任一行失败整体回滚，不留下半批数据。
+pub async fn upsert_many(pool: &SqlitePool, vectors: &[MemoryVector]) -> RamariaResult<()> {
+    const ROWS_PER_STATEMENT: usize = 120;
+    if vectors.is_empty() {
+        return Ok(());
+    }
+
+    let mut tx = pool
+        .begin()
+        .await
+        .storage_err("开启记忆向量批量写入事务失败")?;
+    for chunk in vectors.chunks(ROWS_PER_STATEMENT) {
+        let placeholders = std::iter::repeat_n("(?, ?, ?, ?, ?, ?)", chunk.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "INSERT INTO memory_vectors (doc_type, doc_id, model, dim, vector, updated_at)
+             VALUES {placeholders}
+             ON CONFLICT(doc_type, doc_id) DO UPDATE SET
+                 model = excluded.model,
+                 dim = excluded.dim,
+                 vector = excluded.vector,
+                 updated_at = excluded.updated_at"
+        );
+        let mut query = sqlx::query(&sql);
+        for vector in chunk {
+            query = query
+                .bind(&vector.doc_type)
+                .bind(&vector.doc_id)
+                .bind(&vector.model)
+                .bind(vector.dim as i64)
+                .bind(encode_vector(&vector.vector))
+                .bind(vector.updated_at);
+        }
+        query
+            .execute(&mut *tx)
+            .await
+            .storage_err("批量写入记忆向量失败")?;
+    }
+    tx.commit().await.storage_err("提交记忆向量批量写入失败")?;
+    Ok(())
+}
+
 // =========================================================
 // 读取
 // =========================================================

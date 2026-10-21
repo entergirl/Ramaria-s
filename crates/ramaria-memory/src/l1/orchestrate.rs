@@ -356,15 +356,17 @@ pub async fn retry_pending_l1_jobs(
                 stats.completed += 1;
             }
             Ok(_) => {
-                warn!(job_id, %session_id, "L1 补扫：未产出摘要，保持 pending 待下一轮");
+                warn!(job_id, %session_id, "L1 补扫：未产出摘要，置回 pending 待下一轮");
+                mark_l1_job_pending(&job_manager, job_id).await;
             }
             Err(e) => {
                 warn!(
                     job_id,
                     %session_id,
                     error = %e,
-                    "L1 补扫：重试失败，保持 pending 待下一轮（LLM 可能仍不可用）"
+                    "L1 补扫：重试失败，置回 pending 待下一轮（LLM 可能仍不可用）"
                 );
+                mark_l1_job_pending(&job_manager, job_id).await;
             }
         }
     }
@@ -378,6 +380,21 @@ pub async fn retry_pending_l1_jobs(
         );
     }
     stats
+}
+
+/// 将 L1 补扫任务置回 pending（状态写失败仅记 warn，不阻塞补扫主流程）。
+///
+/// 说明:
+/// - 任务在本轮已被抢占为 running；未产出或执行失败时必须显式回退，
+///   否则后续轮次只扫 pending，任务永久卡在 running。
+async fn mark_l1_job_pending(job_manager: &JobManager<'_>, job_id: i64) {
+    if let Err(e) = job_manager.mark_pending(job_id).await {
+        warn!(
+            job_id,
+            error = %e,
+            "L1 补扫：任务置回 pending 失败（状态可能停留 running）"
+        );
+    }
 }
 
 /// 标记 L1 补扫任务为完成（状态写失败仅记 warn，不阻塞补扫主流程）。
@@ -466,5 +483,59 @@ mod tests {
         assert!(request.user_prefix.is_none());
         assert!(request.assistant_prefix.is_none());
         assert!(!request.target_projection, "默认投影关闭");
+    }
+
+    /// 补扫失败后任务必须置回 pending：否则任务停留在 running，后续轮次不再扫描。
+    #[tokio::test]
+    async fn retry_failure_returns_job_to_pending() {
+        use crate::l1::mock::{MockStorage, make_msg};
+        use ramaria_core::types::MessageRole;
+        use ramaria_testkit::MockFailingLlm;
+
+        struct NoopObserver;
+        #[async_trait]
+        impl L1RetryObserver for NoopObserver {}
+
+        let storage = MockStorage::new();
+        let session_id = Uuid::new_v4();
+        storage.create_session_with_messages(
+            session_id,
+            vec![
+                make_msg(session_id, MessageRole::User, "今天有点累"),
+                make_msg(session_id, MessageRole::Assistant, "那就早点休息"),
+            ],
+        );
+        let payload = serde_json::json!({ "session_id": session_id.to_string() }).to_string();
+        let job_id = storage.add_pending_job("l1_summary_retry", Some(&payload));
+
+        let llm = MockFailingLlm::new("mock LLM 不可用");
+        let progressive = L1ProgressiveConfig::default();
+        let config = JobManagerConfig {
+            max_retries: 1,
+            retry_base_delay_ms: 1,
+        };
+
+        let stats = retry_pending_l1_jobs(
+            &storage,
+            &llm,
+            &progressive,
+            8,
+            &NoopObserver,
+            config.clone(),
+        )
+        .await;
+        assert_eq!(stats.attempted, 1, "本轮应抢占并尝试一次");
+        assert_eq!(stats.completed, 0, "LLM 失败不应产出摘要");
+        assert_eq!(
+            storage.job_status(job_id).as_deref(),
+            Some("pending"),
+            "失败后必须置回 pending"
+        );
+
+        // 下一轮仍可再次抢占同一任务（状态未卡在 running）
+        let again =
+            retry_pending_l1_jobs(&storage, &llm, &progressive, 8, &NoopObserver, config).await;
+        assert_eq!(again.attempted, 1, "下一轮应能再次抢占");
+        assert_eq!(storage.job_status(job_id).as_deref(), Some("pending"));
     }
 }

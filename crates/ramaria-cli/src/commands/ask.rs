@@ -10,6 +10,7 @@
 
 use anyhow::Context;
 use futures::StreamExt;
+use ramaria_core::error::RamariaError;
 use ramaria_service::{ChatEventStream, ChatStreamRequest, Engine, StreamEvent};
 use std::sync::Arc;
 
@@ -103,7 +104,7 @@ pub async fn run(engine: &Arc<Engine>, args: AskArgs) -> anyhow::Result<()> {
 /// 流式输出：逐字打印到 stdout，`||` 自动替换为换行（人格短句渲染）。
 async fn consume_streaming(mut stream: ChatEventStream) -> anyhow::Result<()> {
     let mut total_chars = 0usize;
-    let mut has_error = false;
+    let mut first_error: Option<RamariaError> = None;
     let mut formatter = crate::ui::PersonaFormatter::new();
 
     while let Some(event_result) = stream.next().await {
@@ -123,17 +124,17 @@ async fn consume_streaming(mut stream: ChatEventStream) -> anyhow::Result<()> {
                     total_chars = tc;
                 }
                 StreamEvent::Error { error, .. } => {
-                    has_error = true;
                     eprintln!();
                     crate::ui::warn(&format!("LLM 返回错误: {error}"));
+                    first_error.get_or_insert_with(|| RamariaError::llm(error));
                 }
                 _ => {
                     // StreamEvent 为 #[non_exhaustive]，忽略未知事件类型
                 }
             },
             Err(e) => {
-                has_error = true;
                 crate::ui::print_error(&e);
+                first_error.get_or_insert(e);
             }
         }
     }
@@ -143,21 +144,23 @@ async fn consume_streaming(mut stream: ChatEventStream) -> anyhow::Result<()> {
         crate::ui::write_delta(&remnant);
     }
 
-    if !has_error {
+    if first_error.is_none() {
         crate::ui::finish_delta();
+        if total_chars == 0 {
+            crate::ui::warn("LLM 未返回任何内容");
+        }
     }
 
-    if total_chars == 0 && !has_error {
-        crate::ui::warn("LLM 未返回任何内容");
+    match first_error {
+        Some(err) => Err(anyhow::anyhow!(err)),
+        None => Ok(()),
     }
-
-    Ok(())
 }
 
 /// 非流式输出：等待完整回复后一次性打印。`||` 替换为换行。
 async fn consume_full(mut stream: ChatEventStream) -> anyhow::Result<()> {
     let mut full_reply = String::new();
-    let mut has_error = false;
+    let mut first_error: Option<RamariaError> = None;
 
     while let Some(event_result) = stream.next().await {
         match event_result {
@@ -167,29 +170,31 @@ async fn consume_full(mut stream: ChatEventStream) -> anyhow::Result<()> {
                 }
                 StreamEvent::Done { .. } => {}
                 StreamEvent::Error { error, .. } => {
-                    has_error = true;
                     eprintln!();
                     crate::ui::warn(&format!("LLM 返回错误: {error}"));
+                    first_error.get_or_insert_with(|| RamariaError::llm(error));
                 }
                 _ => {}
             },
             Err(e) => {
-                has_error = true;
                 crate::ui::print_error(&e);
+                first_error.get_or_insert(e);
             }
         }
     }
 
-    if !has_error {
+    if first_error.is_none() {
         // 完整回复直接替换 || → 换行
         println!("{}", full_reply.replace("||", "\n"));
+        if full_reply.is_empty() {
+            crate::ui::warn("LLM 未返回任何内容");
+        }
     }
 
-    if full_reply.is_empty() && !has_error {
-        crate::ui::warn("LLM 未返回任何内容");
+    match first_error {
+        Some(err) => Err(anyhow::anyhow!(err)),
+        None => Ok(()),
     }
-
-    Ok(())
 }
 
 /// JSON 事件流输出：每行一个 JSON 对象（`{"type":"delta|done|error",...}`）。
@@ -197,12 +202,19 @@ async fn consume_full(mut stream: ChatEventStream) -> anyhow::Result<()> {
 /// StreamEvent 已实现 Serialize，
 /// 输出为合法 JSON。
 async fn consume_json(mut stream: ChatEventStream) -> anyhow::Result<()> {
+    let mut first_error: Option<RamariaError> = None;
+
     while let Some(event_result) = stream.next().await {
         match event_result {
-            Ok(event) => match serialize_event_line(&event) {
-                Some(line) => println!("{line}"),
-                None => crate::ui::warn("事件序列化失败"),
-            },
+            Ok(event) => {
+                if let StreamEvent::Error { error, .. } = &event {
+                    first_error.get_or_insert_with(|| RamariaError::llm(error.clone()));
+                }
+                match serialize_event_line(&event) {
+                    Some(line) => println!("{line}"),
+                    None => crate::ui::warn("事件序列化失败"),
+                }
+            }
             Err(e) => {
                 // 流错误以 JSON 事件形式输出
                 let error_json = serde_json::json!({
@@ -212,10 +224,15 @@ async fn consume_json(mut stream: ChatEventStream) -> anyhow::Result<()> {
                 if let Ok(json) = serde_json::to_string(&error_json) {
                     println!("{json}");
                 }
+                first_error.get_or_insert(e);
             }
         }
     }
-    Ok(())
+
+    match first_error {
+        Some(err) => Err(anyhow::anyhow!(err)),
+        None => Ok(()),
+    }
 }
 
 /// 将 StreamEvent 序列化为单行 JSON 事件（`ask --json` 事件流的一行）。
@@ -235,7 +252,7 @@ async fn consume_json_aggregate(mut stream: ChatEventStream) -> anyhow::Result<(
     let mut full_reply = String::new();
     let mut session_id: Option<String> = None;
     let mut total_chars = 0usize;
-    let mut has_error = false;
+    let mut first_error: Option<RamariaError> = None;
 
     while let Some(event_result) = stream.next().await {
         match event_result {
@@ -252,7 +269,6 @@ async fn consume_json_aggregate(mut stream: ChatEventStream) -> anyhow::Result<(
                     total_chars = tc;
                 }
                 StreamEvent::Error { error, .. } => {
-                    has_error = true;
                     let error_json = serde_json::json!({
                         "type": "error",
                         "error": error,
@@ -260,13 +276,13 @@ async fn consume_json_aggregate(mut stream: ChatEventStream) -> anyhow::Result<(
                     if let Ok(json) = serde_json::to_string(&error_json) {
                         println!("{json}");
                     }
+                    first_error.get_or_insert_with(|| RamariaError::llm(error));
                 }
                 _ => {
                     // StreamEvent 为 #[non_exhaustive]，忽略未知事件类型
                 }
             },
             Err(e) => {
-                has_error = true;
                 let error_json = serde_json::json!({
                     "type": "error",
                     "error": e.to_string(),
@@ -274,11 +290,12 @@ async fn consume_json_aggregate(mut stream: ChatEventStream) -> anyhow::Result<(
                 if let Ok(json) = serde_json::to_string(&error_json) {
                     println!("{json}");
                 }
+                first_error.get_or_insert(e);
             }
         }
     }
 
-    if !has_error {
+    if first_error.is_none() {
         let done = serde_json::json!({
             "type": "done",
             "reply": full_reply,
@@ -290,7 +307,10 @@ async fn consume_json_aggregate(mut stream: ChatEventStream) -> anyhow::Result<(
         }
     }
 
-    Ok(())
+    match first_error {
+        Some(err) => Err(anyhow::anyhow!(err)),
+        None => Ok(()),
+    }
 }
 
 // =========================================================
@@ -320,6 +340,39 @@ mod tests {
                 "type 必须是 delta/done/error，实际: {t}"
             );
         }
+    }
+
+    /// 流内错误事件转为服务层 LLM 错误（入口据此映射非零退出码）。
+    #[tokio::test]
+    async fn stream_error_surfaces_as_llm_error() {
+        let id = Uuid::new_v4();
+        let stream: ChatEventStream = Box::pin(futures::stream::iter(vec![
+            Ok(StreamEvent::delta(id, "未完成的回复".into())),
+            Ok(StreamEvent::error(id, "连接超时".into())),
+        ]));
+
+        let err = consume_full(stream).await.expect_err("流内错误应返回 Err");
+        let ramaria = err
+            .chain()
+            .find_map(|e| e.downcast_ref::<RamariaError>())
+            .expect("错误链应含服务层错误");
+        assert!(
+            matches!(ramaria, RamariaError::Llm { .. }),
+            "流内错误应归类为 LLM 错误: {ramaria}"
+        );
+    }
+
+    /// JSON 事件流同样以非零退出语义收尾（错误事件行照常输出）。
+    #[tokio::test]
+    async fn json_stream_error_returns_err() {
+        let id = Uuid::new_v4();
+        let stream: ChatEventStream = Box::pin(futures::stream::iter(vec![Ok(
+            StreamEvent::error(id, "限流".into()),
+        )]));
+        assert!(
+            consume_json(stream).await.is_err(),
+            "JSON 事件流的错误事件应返回 Err"
+        );
     }
 
     /// 聚合输出（json + no_stream）的 done 事件含 reply/session_id/total_chars。

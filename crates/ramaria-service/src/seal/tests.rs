@@ -9,7 +9,7 @@
 use super::*;
 use crate::test_support::{
     L1_JSON_REPLY, MockLlm, engine_with_db, engine_with_failing_llm, engine_with_l1_reply,
-    seed_persona, seed_session_with_messages,
+    engine_with_llm_config_and_embedding, seed_persona, seed_session_with_messages,
 };
 use crate::types::{RecallLayer, RecallRequest};
 use ramaria_core::traits::{StoreCrud, StoreInfrastructure};
@@ -367,6 +367,86 @@ async fn seal_retry_payload_carries_projection() {
         .collect();
     personas.sort_unstable();
     assert_eq!(personas, vec!["char-0001", "rama-0001"]);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 封存产生的 utt 块向量按模型指纹批量落表（可被后续检索加载）。
+#[tokio::test]
+async fn seal_persists_utt_vectors_with_model_fingerprint() {
+    use crate::test_support::CountingEmbedding;
+    use ramaria_core::config::RamariaConfig;
+    use ramaria_core::traits::EmbeddingProvider;
+    use std::sync::Arc;
+
+    let mut config = RamariaConfig::default();
+    config.retrieval.enable_vector = true;
+    let embedding = Arc::new(CountingEmbedding::new());
+    let provider: Arc<dyn EmbeddingProvider> = embedding.clone();
+    let (engine, storage, dir) = engine_with_llm_config_and_embedding(
+        "seal-utt-vector",
+        MockLlm::with_reply(L1_JSON_REPLY),
+        config,
+        Some(provider),
+    )
+    .await;
+    seed_persona(&storage, "char-0001").await;
+    let session_id = seed_session_with_messages(&storage, "char-0001", 4, 1_000).await;
+    engine.ensure_index_loaded().await.expect("索引加载");
+
+    engine.seal(session_id).await.expect("封存应成功");
+
+    let vectors = storage
+        .load_memory_vectors(&CountingEmbedding::fingerprint())
+        .await
+        .expect("加载向量应成功");
+    let utt_vectors: Vec<_> = vectors
+        .iter()
+        .filter(|row| row.doc_type == VECTOR_DOC_UTT)
+        .collect();
+    assert!(!utt_vectors.is_empty(), "封存应把 utt 块向量写入向量表");
+    let blocks = storage
+        .list_utt_blocks_by_persona("char-0001")
+        .await
+        .expect("读取 utt 块应成功");
+    assert_eq!(utt_vectors.len(), blocks.len(), "每条新块都应有向量");
+    assert!(embedding.embed_calls() >= blocks.len(), "应实际执行嵌入");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 关闭向量通道时封存零嵌入调用，也不落向量行。
+#[tokio::test]
+async fn seal_skips_embedding_when_vector_channel_disabled() {
+    use crate::test_support::CountingEmbedding;
+    use ramaria_core::config::RamariaConfig;
+    use ramaria_core::traits::EmbeddingProvider;
+    use std::sync::Arc;
+
+    let mut config = RamariaConfig::default();
+    config.retrieval.enable_vector = false;
+    let embedding = Arc::new(CountingEmbedding::new());
+    let provider: Arc<dyn EmbeddingProvider> = embedding.clone();
+    let (engine, storage, dir) = engine_with_llm_config_and_embedding(
+        "seal-utt-no-vector",
+        MockLlm::with_reply(L1_JSON_REPLY),
+        config,
+        Some(provider),
+    )
+    .await;
+    seed_persona(&storage, "char-0001").await;
+    let session_id = seed_session_with_messages(&storage, "char-0001", 4, 1_000).await;
+    engine.ensure_index_loaded().await.expect("索引加载");
+
+    engine.seal(session_id).await.expect("封存应成功");
+
+    assert_eq!(embedding.embed_calls(), 0, "关闭向量通道不得调用嵌入");
+    assert_eq!(embedding.batch_calls(), 0, "关闭向量通道不得调用批量嵌入");
+    let vectors = storage
+        .load_memory_vectors(&CountingEmbedding::fingerprint())
+        .await
+        .expect("加载向量应成功");
+    assert!(vectors.is_empty(), "关闭向量通道不得写向量行");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

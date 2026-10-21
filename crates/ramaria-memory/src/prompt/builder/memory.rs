@@ -93,22 +93,24 @@ pub(super) fn build_memory(context: &PromptContext, config: &PromptConfig) -> St
     }
 
     // 原文片段（utt 话语块；预算不足/白名单外为 None → 不产生段落）
-    if config.include_utt
-        && let Some(utt) = &alloc.utt
-        && !utt.trim().is_empty()
-    {
-        parts.push(format!("\n\n## 原文片段\n{UTT_LEAD}{utt}"));
+    if config.include_utt {
+        if let Some(utt) = alloc.utt.as_deref().filter(|utt| !utt.trim().is_empty()) {
+            parts.push(format!("\n\n## 原文片段\n{UTT_LEAD}{utt}"));
+        }
     }
 
     // 桥接（上一会话尾部；预算不足/开关关闭/白名单外为 None → 不产生段落）
-    if config.include_bridge
-        && let Some(bridge) = &alloc.bridge
-        && !bridge.trim().is_empty()
-    {
-        parts.push(format!(
-            "\n\n## 桥接（上一会话尾部）\n{}{}",
-            BRIDGE_LEAD, bridge
-        ));
+    if config.include_bridge {
+        if let Some(bridge) = alloc
+            .bridge
+            .as_deref()
+            .filter(|bridge| !bridge.trim().is_empty())
+        {
+            parts.push(format!(
+                "\n\n## 桥接（上一会话尾部）\n{}{}",
+                BRIDGE_LEAD, bridge
+            ));
+        }
     }
 
     parts.join("")

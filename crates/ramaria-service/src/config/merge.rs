@@ -30,7 +30,7 @@ use super::flatten::flat_map_to_config;
 ///
 /// 说明:
 /// - settings 键经 `flat_map_to_config` 覆盖；backend 组由 backend_config 表覆盖
-///   （保留文件侧 `online_memory_injection` 等 DB 无对应字段的值）。
+///   （保留文件侧思考适配等 DB 无对应字段的值）。
 pub(super) fn merge_db_into_file(
     file: &RamariaConfig,
     db_flat: &BTreeMap<String, JsonValue>,
@@ -44,7 +44,7 @@ pub(super) fn merge_db_into_file(
             file.clone()
         }
     };
-    // backend 组：DB 有记录则覆盖（保留文件侧 online_memory_injection）
+    // backend 组：DB 有记录则覆盖（保留文件侧思考适配三键）
     match db_backend {
         Some(bc) => {
             let mut cfg = merged;

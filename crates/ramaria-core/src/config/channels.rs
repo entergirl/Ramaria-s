@@ -166,6 +166,13 @@ pub struct McpConfig {
     pub max_chars: u32,
 }
 
+impl McpConfig {
+    /// 召回条目默认上限（与 `config/default.toml` 的 `[mcp].max_items` 同源）。
+    pub const DEFAULT_MAX_ITEMS: u32 = 5;
+    /// 召回上下文文本默认预算（字符，与 `[mcp].max_chars` 同源）。
+    pub const DEFAULT_MAX_CHARS: u32 = 1200;
+}
+
 impl Default for McpConfig {
     /// 创建默认 MCP 接入配置。
     ///
@@ -180,8 +187,8 @@ impl Default for McpConfig {
             allow_seal: true,
             allowed_personas: vec!["*".to_string()],
             allow_raw_text: false,
-            max_items: 5,
-            max_chars: 1200,
+            max_items: Self::DEFAULT_MAX_ITEMS,
+            max_chars: Self::DEFAULT_MAX_CHARS,
         }
     }
 }

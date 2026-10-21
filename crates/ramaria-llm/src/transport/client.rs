@@ -208,10 +208,7 @@ impl OpenAiTransport {
         // 解析 OpenAI chat completion 响应
         let parsed: serde_json::Value = serde_json::from_str(&response_text).map_err(|e| {
             RamariaError::llm_with_source(
-                format!(
-                    "解析 LLM 响应 JSON 失败: {}",
-                    &response_text[..response_text.len().min(200)]
-                ),
+                format!("解析 LLM 响应 JSON 失败（{} 字节）", response_text.len()),
                 e,
             )
         })?;

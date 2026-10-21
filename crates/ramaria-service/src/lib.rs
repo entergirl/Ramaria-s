@@ -69,6 +69,8 @@ pub mod keyword;
 pub mod l2;
 pub mod lifecycle;
 pub(crate) mod local_image;
+
+pub use local_image::MAX_LOCAL_IMAGE_BYTES;
 pub mod model;
 pub mod persona;
 pub mod privacy;

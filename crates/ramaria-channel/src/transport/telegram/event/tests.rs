@@ -221,6 +221,67 @@ fn group_text_mention_matches_bot_id() {
     );
 }
 
+/// 图片配文提及：正文实体表缺省时按 `caption` + `caption_entities` 判定。
+#[test]
+fn group_caption_mention_triggers() {
+    let mention = group_message(
+        "",
+        json!({
+            "text": null,
+            "photo": [{ "file_id": "photo-1", "file_size": 128 }],
+            "caption": "看看这个 @testbot",
+            "caption_entities": [{ "offset": 5, "length": 8, "type": "mention" }]
+        }),
+    );
+    let event = parse(mention).expect("应解析成功");
+    assert!(event.should_respond, "配文提及应触发响应");
+    assert_eq!(
+        event.segments,
+        vec![
+            InboundSegment::Image {
+                url: "photo-1".to_string(),
+                size: Some(128),
+                sub_type: None,
+            },
+            InboundSegment::Text("看看这个 @testbot".to_string()),
+        ]
+    );
+
+    let text_mention = group_message(
+        "",
+        json!({
+            "text": null,
+            "photo": [{ "file_id": "photo-2", "file_size": 128 }],
+            "caption": "你好",
+            "caption_entities": [{
+                "offset": 0,
+                "length": 2,
+                "type": "text_mention",
+                "user": { "id": 42, "is_bot": true, "first_name": "Ramaria" }
+            }]
+        }),
+    );
+    assert!(
+        parse(text_mention).expect("应解析成功").should_respond,
+        "配文文本提及 Bot 应触发"
+    );
+}
+
+/// 配文提及他人 → 不触发（配文实体表按同一口径判定）。
+#[test]
+fn group_caption_mention_other_not_trigger() {
+    let update = group_message(
+        "",
+        json!({
+            "text": null,
+            "photo": [{ "file_id": "photo-3", "file_size": 128 }],
+            "caption": "看看这个 @otherbot",
+            "caption_entities": [{ "offset": 5, "length": 9, "type": "mention" }]
+        }),
+    );
+    assert!(!parse(update).expect("应解析成功").should_respond);
+}
+
 /// 群命令带用户名后缀（`/start@testbot`）→ 触发。
 #[test]
 fn group_bot_command_with_username_triggers() {

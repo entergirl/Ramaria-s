@@ -28,7 +28,7 @@ use super::now_ms;
 ///
 /// 安全约束:
 /// - 原文是最高敏感层：注入受 `persona_kind_whitelist` 约束，内容不记录日志。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UttBlock {
     /// 内部索引（INTEGER AUTOINCREMENT，0 表示尚未入库）
     pub id: i64,
