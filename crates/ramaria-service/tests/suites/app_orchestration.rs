@@ -39,7 +39,7 @@ fn make_engine() -> (Arc<MockStorage>, Arc<MockLlm>, Arc<Engine>) {
 // 辅助: 创建使用 MockFailingLlm 的引擎
 fn make_failing_engine(error_msg: &str) -> (Arc<MockStorage>, Arc<MockFailingLlm>, Arc<Engine>) {
     let storage = Arc::new(MockStorage::new());
-    let llm = Arc::new(MockLlm::failing(error_msg));
+    let llm = Arc::new(MockFailingLlm::new(error_msg));
     let engine = build_engine(
         Arc::clone(&storage),
         Arc::clone(&llm) as Arc<dyn ramaria_core::traits::LlmProvider>,

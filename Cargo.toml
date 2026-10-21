@@ -11,6 +11,7 @@ members = [
     "crates/ramaria-cli",
     "crates/ramaria-desktop",
     "crates/ramaria-importer",
+    "crates/ramaria-testkit",
 ]
 
 [workspace.package]

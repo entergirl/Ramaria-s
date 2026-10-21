@@ -1,490 +1,16 @@
-//! crates/ramaria-memory/src/l1/mock.rs - 测试用 mock LlmProvider + StorageBackend
+//! crates/ramaria-memory/src/l1/mock.rs - L1 管线测试用 mock 与数据校验
 //!
 //! 设计特点:
+//! - MockLlmProvider / MockStorage 单份实现下沉到 ramaria-testkit，本模块只做转出
+//! - make_msg / make_valid_l1 提供确定性 L1 与消息夹具
+//! - validate_l1_entry 校验 L1 字段完整性，失败即 panic（测试数据错误）
 //! - 仅 #[cfg(test)] 编译，零运行时开销
-//! - MockLlmProvider: 可预设 chat 返回值（单值 / 队列），并记录全部请求供 prompt 断言
-//! - MockStorage: 内存 HashMap 存储 messages / l1 / keywords
-//! - 未实现的方法返回 `unimplemented!`，确保测试仅覆盖声明路径
-//! - 所有存储操作为同步（直接插入 HashMap），不需要真实数据库
 
 #![allow(dead_code)]
 
-use std::collections::HashMap;
-use std::pin::Pin;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-use async_trait::async_trait;
-use ramaria_core::keyword::KeywordPoolRow;
-use ramaria_core::traits::{ChatRequest, StreamDelta};
-use ramaria_core::types::{
-    BackendConfig, ClusterSnapshot, EventRelation, MemoryEvent, MemoryL1, Message,
-    MessageAttachment, ModelCapability, Persona, PersonaEventAggregate, PersonaExample,
-    PersonaFact, PersonalityTrait, PrivacyConsent, ProfileField, Session, TraitEvidence,
-    TraitStatus,
-};
-use ramaria_core::{LlmProviderTrait, RamariaError, RamariaResult, StoreCrud, StoreInfrastructure};
 use uuid::Uuid;
 
-// =========================================================
-// Mock LLM Provider
-// =========================================================
-
-/// 测试用 mock LLM Provider。
-///
-/// 用法:
-/// - 通过 `set_response` 预设下次 `chat` 返回的文本。
-/// - 通过 `set_responses` 预设队列（依次消费；队列耗尽后回退单响应）。
-/// - `chat_stream` 返回 unimplemented（摘要管线不使用流式）。
-pub struct MockLlmProvider {
-    name: &'static str,
-    response: Mutex<Option<String>>,
-    /// 响应队列（v1.5 B2 多块生成：每块一次 chat 调用，依次消费）
-    responses: Mutex<std::collections::VecDeque<String>>,
-    /// 最后一次 chat 请求（供断言 prompt 内容，如上文注入）
-    last_request: Mutex<Option<ChatRequest>>,
-    /// 全部 chat 请求（按调用顺序；供逐目标 prompt 断言）
-    requests: Mutex<Vec<ChatRequest>>,
-}
-
-impl MockLlmProvider {
-    pub fn new(name: &'static str) -> Self {
-        Self {
-            name,
-            response: Mutex::new(None),
-            responses: Mutex::new(std::collections::VecDeque::new()),
-            last_request: Mutex::new(None),
-            requests: Mutex::new(Vec::new()),
-        }
-    }
-
-    /// 预设下次 chat 的返回值。
-    pub fn set_response(&self, text: impl Into<String>) {
-        *self.response.lock().unwrap() = Some(text.into());
-    }
-
-    /// 预设响应队列（v1.5 B2：逐块调用依次消费）。
-    pub fn set_responses(&self, texts: Vec<String>) {
-        let mut q = self.responses.lock().unwrap();
-        for t in texts {
-            q.push_back(t);
-        }
-    }
-
-    /// 返回最后一次 chat 请求（供断言注入内容）。
-    pub fn last_request(&self) -> Option<ChatRequest> {
-        self.last_request.lock().unwrap().clone()
-    }
-
-    /// 返回全部 chat 请求（按调用顺序；供逐目标 prompt 断言）。
-    pub fn requests(&self) -> Vec<ChatRequest> {
-        self.requests.lock().unwrap().clone()
-    }
-}
-
-#[async_trait]
-impl LlmProviderTrait for MockLlmProvider {
-    async fn chat(&self, request: &ChatRequest) -> RamariaResult<String> {
-        *self.last_request.lock().unwrap() = Some(request.clone());
-        self.requests.lock().unwrap().push(request.clone());
-        // 优先消费队列（多块场景）；队列空时回退单响应
-        if let Some(text) = self.responses.lock().unwrap().pop_front() {
-            return Ok(text);
-        }
-        self.response
-            .lock()
-            .unwrap()
-            .take()
-            .ok_or_else(|| RamariaError::llm("mock: 未预设 chat 返回值"))
-    }
-
-    async fn chat_stream(
-        &self,
-        _request: &ChatRequest,
-    ) -> RamariaResult<Pin<Box<dyn futures::Stream<Item = RamariaResult<StreamDelta>> + Send>>>
-    {
-        unimplemented!("mock chat_stream 未实现")
-    }
-
-    fn capability(&self) -> &ModelCapability {
-        unimplemented!("mock capability 未实现")
-    }
-
-    fn config(&self) -> &BackendConfig {
-        unimplemented!("mock config 未实现")
-    }
-
-    async fn validate(&self) -> RamariaResult<()> {
-        Ok(())
-    }
-
-    fn name(&self) -> &'static str {
-        self.name
-    }
-}
-
-// =========================================================
-// Mock Storage Backend
-// =========================================================
-
-/// 测试用内存存储后端。
-///
-/// 仅实现 L1 摘要管线需要的方法:
-/// - `list_messages`, `list_keywords`, `save_memory_l1`, `upsert_keyword`
-/// - `list_keyword_pool_entries`（返回预置词池快照；空 = 空词池）
-/// - `upsert_pending_alias`（记录待确认别名登记）
-///
-/// 其余方法返回 `unimplemented!`，确保测试边界清晰。
-pub struct MockStorage {
-    messages: Mutex<HashMap<Uuid, Vec<Message>>>,
-    /// 消息附件行（供 L1 对话文本的图片描述渲染）。
-    attachments: Mutex<Vec<MessageAttachment>>,
-    l1_entries: Mutex<Vec<MemoryL1>>,
-    keywords: Mutex<Vec<String>>,
-    /// 预置词池快照（供 L1 写入侧 pending 判定；空 = 空词池）。
-    pool_rows: Mutex<Vec<KeywordPoolRow>>,
-    /// 已登记的待确认别名 (alias, canonical_id)（用于断言）。
-    pending_writes: Mutex<Vec<(String, i64)>>,
-    /// 词池快照读取调用次数（热路径开销口径断言用）。
-    pool_reads: AtomicUsize,
-    /// 预设的跨用户事件聚合结果（None = 默认返回空列表；Some(Err) 模拟聚合失败降级）。
-    event_aggregate_result: Mutex<Option<Result<Vec<PersonaEventAggregate>, String>>>,
-}
-
-impl MockStorage {
-    pub fn new() -> Self {
-        Self {
-            messages: Mutex::new(HashMap::new()),
-            attachments: Mutex::new(Vec::new()),
-            l1_entries: Mutex::new(Vec::new()),
-            keywords: Mutex::new(Vec::new()),
-            pool_rows: Mutex::new(Vec::new()),
-            pending_writes: Mutex::new(Vec::new()),
-            pool_reads: AtomicUsize::new(0),
-            event_aggregate_result: Mutex::new(None),
-        }
-    }
-
-    /// 为指定 session 添加消息。
-    pub fn add_messages(&self, session_id: Uuid, msgs: Vec<Message>) {
-        self.messages.lock().unwrap().insert(session_id, msgs);
-    }
-
-    /// 追加一条消息附件行（供图片描述渲染用例）。
-    pub fn add_attachment(&self, attachment: MessageAttachment) {
-        self.attachments.lock().unwrap().push(attachment);
-    }
-
-    /// 设置关键词词典。
-    pub fn set_keywords(&self, kws: Vec<String>) {
-        *self.keywords.lock().unwrap() = kws;
-    }
-
-    /// 获取已保存的 L1 条目（用于断言）。
-    pub fn saved_l1_entries(&self) -> Vec<MemoryL1> {
-        self.l1_entries.lock().unwrap().clone()
-    }
-
-    /// 获取关键词 upsert 调用次数（用于断言）。
-    pub fn keyword_count(&self) -> usize {
-        self.keywords.lock().unwrap().len()
-    }
-
-    /// 预置词池快照（供 L1 写入侧 pending 判定）。
-    pub fn set_pool_rows(&self, rows: Vec<KeywordPoolRow>) {
-        *self.pool_rows.lock().unwrap() = rows;
-    }
-
-    /// 获取已登记的待确认别名 (alias, canonical_id)（用于断言）。
-    pub fn pending_writes(&self) -> Vec<(String, i64)> {
-        self.pending_writes.lock().unwrap().clone()
-    }
-
-    /// 获取词池快照读取次数（用于断言每会话读取一次的口径）。
-    pub fn pool_read_count(&self) -> usize {
-        self.pool_reads.load(Ordering::Relaxed)
-    }
-
-    /// 预设 `aggregate_persona_event_priors` 的成功返回（跨用户聚合行）。
-    pub fn set_persona_event_aggregates(&self, rows: Vec<PersonaEventAggregate>) {
-        *self.event_aggregate_result.lock().unwrap() = Some(Ok(rows));
-    }
-
-    /// 预设 `aggregate_persona_event_priors` 失败（模拟 DB 聚合错误降级路径）。
-    pub fn set_persona_event_aggregate_error(&self, msg: &str) {
-        *self.event_aggregate_result.lock().unwrap() = Some(Err(msg.to_string()));
-    }
-}
-
-#[async_trait]
-impl StoreCrud for MockStorage {
-    // -- Session (unused by summarizer) --
-    async fn create_session(&self, _persona_uid: Option<&str>) -> RamariaResult<Session> {
-        unimplemented!()
-    }
-    async fn close_session(&self, _: Uuid) -> RamariaResult<()> {
-        unimplemented!()
-    }
-    async fn get_session(&self, _: Uuid) -> RamariaResult<Option<Session>> {
-        unimplemented!()
-    }
-    async fn list_active_sessions(&self) -> RamariaResult<Vec<Session>> {
-        unimplemented!()
-    }
-    async fn list_sessions(&self) -> RamariaResult<Vec<Session>> {
-        unimplemented!()
-    }
-    async fn delete_session(&self, _: Uuid) -> RamariaResult<()> {
-        unimplemented!()
-    }
-
-    // -- Message (used by summarizer) --
-    async fn save_message(&self, _: &Message) -> RamariaResult<()> {
-        unimplemented!()
-    }
-
-    async fn list_messages(&self, session_id: Uuid) -> RamariaResult<Vec<Message>> {
-        Ok(self
-            .messages
-            .lock()
-            .unwrap()
-            .get(&session_id)
-            .cloned()
-            .unwrap_or_default())
-    }
-
-    async fn list_messages_by_persona(&self, _: &str) -> RamariaResult<Vec<Message>> {
-        unimplemented!()
-    }
-
-    // -- Message attachments (used by summarizer image rendering) --
-    async fn list_attachments_by_messages(
-        &self,
-        message_ids: &[Uuid],
-    ) -> RamariaResult<Vec<MessageAttachment>> {
-        Ok(self
-            .attachments
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|row| message_ids.contains(&row.message_id))
-            .cloned()
-            .collect())
-    }
-
-    // -- Memory L1 (used by summarizer) --
-    async fn save_memory_l1(&self, memory: &MemoryL1) -> RamariaResult<()> {
-        self.l1_entries.lock().unwrap().push(memory.clone());
-        Ok(())
-    }
-
-    async fn list_memory_l1(&self, _: Uuid) -> RamariaResult<Vec<MemoryL1>> {
-        unimplemented!()
-    }
-    async fn get_memory_l1(&self, _: Uuid) -> RamariaResult<Option<MemoryL1>> {
-        unimplemented!()
-    }
-    async fn mark_l1_absorbed(&self, _: &[Uuid]) -> RamariaResult<()> {
-        unimplemented!()
-    }
-    async fn list_unabsorbed_l1(&self, _: &str) -> RamariaResult<Vec<MemoryL1>> {
-        unimplemented!()
-    }
-
-    // -- Personas --
-    async fn create_persona(&self, _: &Persona) -> RamariaResult<i64> {
-        unimplemented!()
-    }
-    async fn get_persona_by_uid(&self, _: &str) -> RamariaResult<Option<Persona>> {
-        unimplemented!()
-    }
-    async fn list_personas(&self) -> RamariaResult<Vec<Persona>> {
-        unimplemented!()
-    }
-    async fn update_persona(
-        &self,
-        _: &str,
-        _: &str,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-    ) -> RamariaResult<()> {
-        unimplemented!()
-    }
-
-    // -- Memory Events --
-    async fn save_event(&self, _: &MemoryEvent) -> RamariaResult<i64> {
-        unimplemented!()
-    }
-    async fn list_events_by_persona(
-        &self,
-        _: &str,
-        _: i64,
-        _: i64,
-    ) -> RamariaResult<Vec<MemoryEvent>> {
-        unimplemented!()
-    }
-    async fn list_unabsorbed_events(&self, _: &str) -> RamariaResult<Vec<MemoryEvent>> {
-        unimplemented!()
-    }
-
-    async fn mark_events_absorbed(&self, _: &[i64]) -> RamariaResult<()> {
-        unimplemented!()
-    }
-
-    // -- 跨用户事件聚合（供 L3 分层收缩冷启动先验测试预设返回值）--
-    async fn aggregate_persona_event_priors(
-        &self,
-        _exclude_persona_uid: &str,
-    ) -> RamariaResult<Vec<PersonaEventAggregate>> {
-        match self.event_aggregate_result.lock().unwrap().clone() {
-            Some(Ok(rows)) => Ok(rows),
-            Some(Err(msg)) => Err(RamariaError::storage(msg)),
-            None => Ok(Vec::new()),
-        }
-    }
-
-    // -- Event Relations --
-    async fn save_event_relation(&self, _: &EventRelation) -> RamariaResult<i64> {
-        unimplemented!()
-    }
-
-    // -- Event Sources --
-    async fn save_event_source(&self, _: i64, _: Uuid, _: f64) -> RamariaResult<()> {
-        unimplemented!()
-    }
-
-    // -- Persona Facts --
-    async fn save_fact(&self, _: &PersonaFact) -> RamariaResult<i64> {
-        unimplemented!()
-    }
-    async fn list_facts_by_persona(
-        &self,
-        _: &str,
-        _: ProfileField,
-    ) -> RamariaResult<Vec<PersonaFact>> {
-        unimplemented!()
-    }
-
-    // -- Personality Traits --
-    async fn save_trait(&self, _: &PersonalityTrait) -> RamariaResult<i64> {
-        unimplemented!()
-    }
-    async fn list_traits_by_persona(&self, _: &str) -> RamariaResult<Vec<PersonalityTrait>> {
-        Ok(Vec::new())
-    }
-    async fn update_trait_confidence(&self, _: i64, _: f64, _: f64, _: f64) -> RamariaResult<()> {
-        unimplemented!()
-    }
-    async fn update_trait_status(&self, _: i64, _: TraitStatus) -> RamariaResult<()> {
-        unimplemented!()
-    }
-
-    // -- Trait Evidence --
-    async fn save_evidence(&self, _: &TraitEvidence) -> RamariaResult<i64> {
-        unimplemented!()
-    }
-    async fn list_evidence_by_trait(&self, _: i64) -> RamariaResult<Vec<TraitEvidence>> {
-        unimplemented!()
-    }
-
-    // -- Persona Examples --
-    async fn save_example(&self, _: &PersonaExample) -> RamariaResult<i64> {
-        unimplemented!()
-    }
-    async fn list_selected_examples(&self, _: &str) -> RamariaResult<Vec<PersonaExample>> {
-        unimplemented!()
-    }
-
-    // -- Cluster Snapshots --
-    async fn save_cluster_snapshot(&self, _: &ClusterSnapshot) -> RamariaResult<i64> {
-        unimplemented!()
-    }
-    async fn get_current_snapshots(&self, _: &str, _: &str) -> RamariaResult<Vec<ClusterSnapshot>> {
-        unimplemented!()
-    }
-
-    // -- Keyword Pool (used by summarizer) --
-    async fn upsert_keyword(&self, keyword: &str) -> RamariaResult<()> {
-        let mut kws = self.keywords.lock().unwrap();
-        if !kws.contains(&keyword.to_string()) {
-            kws.push(keyword.to_string());
-        }
-        Ok(())
-    }
-
-    async fn list_keywords(&self) -> RamariaResult<Vec<String>> {
-        Ok(self.keywords.lock().unwrap().clone())
-    }
-
-    /// 返回预置词池快照（空 = 空词池；区别于未覆写实现的 `Unsupported` 读失败路径）；
-    /// 记录调用次数供热路径开销口径断言。
-    async fn list_keyword_pool_entries(&self) -> RamariaResult<Vec<KeywordPoolRow>> {
-        self.pool_reads.fetch_add(1, Ordering::Relaxed);
-        Ok(self.pool_rows.lock().unwrap().clone())
-    }
-
-    /// 记录待确认别名登记；同文本重复登记返回 `Ok(false)`（幂等，不覆盖）。
-    async fn upsert_pending_alias(
-        &self,
-        alias: &str,
-        canonical_id: i64,
-        _use_count: u32,
-    ) -> RamariaResult<bool> {
-        let mut writes = self.pending_writes.lock().unwrap();
-        if writes.iter().any(|(text, _)| text == alias) {
-            return Ok(false);
-        }
-        writes.push((alias.to_string(), canonical_id));
-        Ok(true)
-    }
-}
-
-#[async_trait]
-impl StoreInfrastructure for MockStorage {
-    // -- Privacy Consent --
-    async fn save_privacy_consent(&self, _: &PrivacyConsent) -> RamariaResult<()> {
-        unimplemented!()
-    }
-    async fn get_privacy_consent(&self, _: &str, _: &str) -> RamariaResult<Option<PrivacyConsent>> {
-        unimplemented!()
-    }
-
-    // -- Backend Config --
-    async fn save_backend_config(&self, _: &BackendConfig) -> RamariaResult<()> {
-        unimplemented!()
-    }
-    async fn get_backend_config(&self) -> RamariaResult<Option<BackendConfig>> {
-        unimplemented!()
-    }
-
-    // -- 索引一致性 --
-    async fn get_schema_version(&self) -> RamariaResult<i32> {
-        unimplemented!()
-    }
-
-    // -- 基础设施 --
-    async fn create_background_job(&self, _: &str, _: Option<&str>) -> RamariaResult<i64> {
-        unimplemented!()
-    }
-    async fn update_job_status(&self, _: i64, _: &str, _: Option<&str>) -> RamariaResult<()> {
-        unimplemented!()
-    }
-    async fn list_pending_jobs(&self) -> RamariaResult<Vec<(i64, String, Option<String>)>> {
-        unimplemented!()
-    }
-    async fn get_setting(&self, _: &str) -> RamariaResult<Option<String>> {
-        unimplemented!()
-    }
-    async fn set_setting(&self, _: &str, _: &str) -> RamariaResult<()> {
-        unimplemented!()
-    }
-    async fn list_settings(&self) -> RamariaResult<Vec<(String, String)>> {
-        unimplemented!()
-    }
-
-    // -- Keyword Refs（记录调用供断言） --
-}
+pub use ramaria_testkit::mock::{MockLlmProvider, MockStorage};
 
 // =========================================================
 // 辅助函数：构造测试用消息
@@ -495,8 +21,8 @@ pub fn make_msg(
     session_id: Uuid,
     role: ramaria_core::types::MessageRole,
     content: &str,
-) -> Message {
-    Message::new(
+) -> ramaria_core::types::Message {
+    ramaria_core::types::Message::new(
         session_id,
         role,
         content.to_string(),
@@ -507,22 +33,20 @@ pub fn make_msg(
 /// 校验 L1 记忆条目的字段完整性。
 ///
 /// 校验项:
-/// - `summary`: 不能为空
-/// - `time_period`: 若存在则必须是 ["清晨","上午","下午","傍晚","夜间","深夜"] 之一
-/// - `atmosphere`: 若存在则最多 4 个字符
-/// - `valence`: 范围 [-1.0, 1.0]
-/// - `salience`: 范围 [0.0, 1.0]
+/// - summary: 不能为空
+/// - time_period: 若存在则必须是 清晨/上午/下午/傍晚/夜间/深夜 之一
+/// - atmosphere: 若存在则最多 4 个字符
+/// - valence: 范围 [-1.0, 1.0]
+/// - salience: 范围 [0.0, 1.0]
 ///
-/// 验证失败时 **panic**，因为测试数据中的无效值表示测试本身的 bug。
-pub fn validate_l1_entry(l1: &MemoryL1) {
+/// 验证失败时 panic，因为测试数据中的无效值表示测试本身的 bug。
+pub fn validate_l1_entry(l1: &ramaria_core::types::MemoryL1) {
     let mut errors: Vec<String> = Vec::new();
 
-    // summary: 必填
     if l1.summary.trim().is_empty() {
         errors.push("summary 为空".to_string());
     }
 
-    // time_period: 若存在则必须合法
     if let Some(ref tp) = l1.time_period {
         const VALID_PERIODS: &[&str] = &["清晨", "上午", "下午", "傍晚", "夜间", "深夜"];
         if !VALID_PERIODS.contains(&tp.as_str()) {
@@ -533,7 +57,6 @@ pub fn validate_l1_entry(l1: &MemoryL1) {
         }
     }
 
-    // atmosphere: 最多 4 字
     if let Some(ref atm) = l1.atmosphere {
         let len = atm.chars().count();
         if len > 4 {
@@ -544,7 +67,6 @@ pub fn validate_l1_entry(l1: &MemoryL1) {
         }
     }
 
-    // valence: [-1.0, 1.0]
     if l1.valence < -1.0 || l1.valence > 1.0 {
         errors.push(format!(
             "valence 超出范围 [{:.2}]，应为 [-1.0, 1.0]",
@@ -552,7 +74,6 @@ pub fn validate_l1_entry(l1: &MemoryL1) {
         ));
     }
 
-    // salience: [0.0, 1.0]
     if l1.salience < 0.0 || l1.salience > 1.0 {
         errors.push(format!(
             "salience 超出范围 [{:.2}]，应为 [0.0, 1.0]",
@@ -572,10 +93,8 @@ pub fn validate_l1_entry(l1: &MemoryL1) {
 }
 
 /// 创建一条完全合法的测试用 L1 条目。
-///
-/// 返回一条字段全部合法的 L1 记忆，可供测试直接使用。
-pub fn make_valid_l1(summary: &str) -> MemoryL1 {
-    MemoryL1 {
+pub fn make_valid_l1(summary: &str) -> ramaria_core::types::MemoryL1 {
+    ramaria_core::types::MemoryL1 {
         id: ramaria_core::types::new_id(),
         session_id: ramaria_core::types::new_id(),
         summary: summary.to_string(),
@@ -603,7 +122,7 @@ mod mock_validation_tests {
     #[test]
     fn validate_valid_l1_passes() {
         let l1 = make_valid_l1("测试摘要");
-        validate_l1_entry(&l1); // 不应 panic
+        validate_l1_entry(&l1);
     }
 
     #[test]
@@ -649,7 +168,7 @@ mod mock_validation_tests {
     fn validate_none_time_period_passes() {
         let mut l1 = make_valid_l1("测试");
         l1.time_period = None;
-        validate_l1_entry(&l1); // None 不应该 panic，time_period 是 optional 的
+        validate_l1_entry(&l1);
     }
 
     #[test]

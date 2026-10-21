@@ -14,7 +14,7 @@ use ramaria_core::types::{MessageRole, Persona, PersonaKind};
 use crate::support::engine_env::{
     build_engine, kinds, mark_ready, seal_full, send_stream, stream_request, try_send_stream,
 };
-use crate::support::mock_backend::{MockLlm, MockStorage};
+use crate::support::mock_backend::{MockFailingLlm, MockLlm, MockStorage};
 
 /// 固定助手回复（断言直接用）。
 const REPLY: &str = "好的，我记住了。";
@@ -102,7 +102,7 @@ async fn llm_failure_keeps_user_message_only() {
     let storage = storage_with_persona();
     let engine = build_engine(
         Arc::clone(&storage),
-        Arc::new(MockLlm::failing("mock 网络错误")),
+        Arc::new(MockFailingLlm::new("mock 网络错误")),
         RamariaConfig::default(),
     );
     mark_ready(&engine).await.expect("就绪推进应成功");

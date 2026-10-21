@@ -62,7 +62,7 @@ async fn phase_b_produces_traits_with_mock_llm() {
 async fn phase_b_falls_back_to_mock_infer_on_llm_error() {
     let storage = Arc::new(MockStorage::new());
     // 使用返回错误的 Mock LLM
-    let failing_llm = MockLlm::failing("connection refused");
+    let failing_llm = MockFailingLlm::new("connection refused");
     let stats = make_stats_summary();
     let config = InferrerConfig::default();
 

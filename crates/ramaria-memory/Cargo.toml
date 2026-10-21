@@ -25,3 +25,4 @@ toml.workspace = true
 
 [dev-dependencies]
 sqlx.workspace = true
+ramaria-testkit = { path = "../ramaria-testkit" }

@@ -7,7 +7,7 @@
 //! - 覆盖画像缺失的丢弃统计（session 级与消息级）
 //! - 覆盖多画像（群聊）派发：成员映射命中 / 未命中、会话归属缺失与成员补齐
 //! - 附件采集用例见子模块 `attachments`（pending / skipped 定位口径与失败补偿）
-//! - 使用单连接内存库与最小 schema，不依赖真实数据
+//! - 使用迁移驱动的单连接内存库（生产 schema），不依赖真实数据
 
 use ramaria_core::types::{InboundAttachmentKind, InboundAttachmentRef, MemberRole};
 
@@ -49,90 +49,29 @@ fn make_side_session(self_content: &str, other_content: &str) -> crate::traits::
     }
 }
 
-/// 创建单连接内存库（max_connections=1 保证 sqlite::memory: 共享同一库）。
+/// 创建迁移驱动的单连接内存库（与生产 schema 一致）。
 async fn test_pool() -> sqlx::SqlitePool {
-    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-    let options = SqliteConnectOptions::new()
-        .filename(":memory:")
-        .foreign_keys(true);
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(options)
+    let pool = ramaria_testkit::db::memory_db()
         .await
-        .unwrap();
-    // 最小 schema（sessions + messages，对应 create_historical / save_import_batch 所需列）
-    // sessions 含 channel（导入会话落默认通道 'local'）与 external_ref（外部对话标识，导入为空）
-    sqlx::query(
-        "CREATE TABLE sessions (
-            id TEXT PRIMARY KEY,
-            started_at INTEGER NOT NULL,
-            ended_at INTEGER,
-            persona_uid TEXT,
-            channel TEXT NOT NULL DEFAULT 'local',
-            external_ref TEXT
-        )",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "CREATE TABLE messages (
-            id TEXT PRIMARY KEY,
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            content TEXT NOT NULL,
-            created_at INTEGER NOT NULL,
-            source TEXT NOT NULL,
-            import_fingerprint TEXT UNIQUE,
-            persona_uid TEXT,
-            is_proactive INTEGER NOT NULL DEFAULT 0,
-            sender_ref TEXT,
-            sender_name TEXT,
-            platform_message_id TEXT,
-            recalled_at INTEGER
-        )",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "CREATE TABLE session_members (
-            id             INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id     TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-            platform_ref   TEXT NOT NULL,
-            name           TEXT NOT NULL DEFAULT '',
-            group_nickname TEXT,
-            role           TEXT,
-            first_seen_at  INTEGER NOT NULL DEFAULT 0,
-            last_seen_at   INTEGER NOT NULL DEFAULT 0,
-            UNIQUE(session_id, platform_ref)
-        )",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
-    // 消息附件表（覆盖附件写入所需列；外键级联链与生产 schema 一致）
-    sqlx::query(
-        "CREATE TABLE message_attachments (
-            id                INTEGER PRIMARY KEY AUTOINCREMENT,
-            message_id        TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-            kind              TEXT NOT NULL,
-            source_ref        TEXT NOT NULL DEFAULT '',
-            md5               TEXT,
-            size              INTEGER,
-            width             INTEGER,
-            height            INTEGER,
-            sub_type          TEXT,
-            status            TEXT NOT NULL DEFAULT 'pending',
-            description       TEXT,
-            description_model TEXT,
-            created_at        INTEGER NOT NULL DEFAULT 0,
-            updated_at        INTEGER NOT NULL DEFAULT 0
-        )",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
+        .expect("初始化测试内存库失败");
+    // persona 外键目标（导入用例的消息归属固定为这些 uid）
+    for uid in [
+        "user-0001",
+        "char-0001",
+        "char-group",
+        "char-u_a",
+        "char-u_b",
+    ] {
+        sqlx::query(
+            "INSERT INTO personas (uid, name, kind, seq, source, created_at, updated_at)
+             VALUES (?, ?, 'char', 1, 'local', 0, 0)",
+        )
+        .bind(uid)
+        .bind(uid)
+        .execute(&pool)
+        .await
+        .expect("写入测试 persona 失败");
+    }
     pool
 }
 
@@ -294,12 +233,19 @@ fn make_dedup_session(self_content: &str, fingerprint: &str) -> crate::traits::I
 
 /// 预插一条 fingerprint 记录到库中（session_id/id 用合法 UUID，便于 find_by_fingerprint 反解）。
 async fn preseed_fingerprint(pool: &sqlx::SqlitePool, fp: &str) {
+    let session_id = uuid::Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO sessions (id, started_at) VALUES (?, ?)")
+        .bind(&session_id)
+        .bind(0_i64)
+        .execute(pool)
+        .await
+        .expect("预插指纹会话失败");
     sqlx::query(
         "INSERT INTO messages (id, session_id, role, content, created_at, source, import_fingerprint, persona_uid) \
          VALUES (?, ?, 'user', '预插内容', 100, 'local', ?, 'user-0001')",
     )
     .bind(uuid::Uuid::new_v4().to_string())
-    .bind(uuid::Uuid::new_v4().to_string())
+    .bind(&session_id)
     .bind(fp)
     .execute(pool)
     .await

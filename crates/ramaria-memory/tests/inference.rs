@@ -23,7 +23,7 @@ use ramaria_memory::inference::{
     promote_tentative_events, run_phase_a_stats, run_phase_b_inference, run_phase_c_update,
 };
 
-use common::mock_store::{MockLlm, MockStorage};
+use common::mock_store::{MockFailingLlm, MockStorage};
 
 // =========================================================
 // 多步 Mock LLM — 每次调用返回不同回复

@@ -1,5 +1,6 @@
 # Ramaria Rust CI
-# job 集合：build-and-test（Windows）/ coverage（Windows）/ structure-check（Ubuntu，秒级）
+# job 集合：build-and-test（Windows）/ coverage（Windows）/ structure-check（Ubuntu，秒级）/
+#           contract-check（Ubuntu，秒级：契约 / 配置 / schema / 前端结构）
 # 规则：
 #   - Windows 编译 + 单元测试（v1.0 首发 Windows，macOS/Linux 延后）
 #   - 不跑真实 LLM，不下 embedding 模型，不打包 Tauri
@@ -61,6 +62,7 @@ jobs:
   # 使用 cargo-llvm-cov 生成行覆盖率报告，行覆盖率低于阈值即失败（拦截覆盖率回退）。
   # 阈值口径：全局行覆盖率下限 80%；模块级目标（新模块 ≥85% / 重度修改模块 ≥80%）
   # 见 docs/dev-2.0/v2.0-checklist.md「覆盖率目标」，按发布前人工核验执行。
+  # ramaria-testkit 为 dev-only 测试基建，不计入覆盖率分母。
   # 仅适用于 Windows（llvm-tools-preview 组件可用）。
   coverage:
     name: Coverage (llvm-cov)
@@ -90,12 +92,12 @@ jobs:
           restore-keys: windows-cov-
 
       - name: Run coverage
-        run: cargo llvm-cov --workspace --summary-only --lcov --output-path lcov.info --fail-under-lines 80
+        run: cargo llvm-cov --workspace --exclude ramaria-testkit --summary-only --lcov --output-path lcov.info --fail-under-lines 80
         # 注：--lcov --output-path 生成 lcov 格式报告，可上传到 Codecov/Coveralls
         # --fail-under-lines 80：全局行覆盖率 <80% 时本步骤失败（拦截覆盖率回退）
 
       - name: Show coverage summary
-        run: cargo llvm-cov --workspace --summary-only
+        run: cargo llvm-cov --workspace --exclude ramaria-testkit --summary-only
 
   # ---- 结构自检（阻塞） ----
   # 秒级：纯文件遍历（scripts/check_structure.py），对照文件粒度红线（生产 ≤700 / 测试 ≤1200 /
@@ -116,3 +118,26 @@ jobs:
 
       - name: Run structure check
         run: python scripts/check_structure.py
+
+  # ---- 契约面自检（阻塞） ----
+  # 秒级：解析 Rust 注册表 / CLI 枚举 / MCP 工具 / 事件 / 配置键 / migration schema /
+  # 旧前端视图与 CSS 变量，对照仓库内机器基线；不一致即失败。
+  contract-check:
+    name: Contract Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run contract checks
+        run: |
+          python scripts/check_contract.py
+          python scripts/check_config.py
+          python scripts/check_schema.py
+          python scripts/check_frontend.py

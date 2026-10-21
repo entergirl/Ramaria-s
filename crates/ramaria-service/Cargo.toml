@@ -48,3 +48,5 @@ image.workspace = true
 [dev-dependencies]
 # 测试内捕获 tracing 日志（内存 writer，断言日志内容与隐私边界）
 tracing-subscriber = { workspace = true }
+# 测试基础设施（内存存储 / LLM / 嵌入 mock）
+ramaria-testkit = { path = "../ramaria-testkit" }
