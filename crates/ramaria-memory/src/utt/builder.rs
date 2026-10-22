@@ -64,6 +64,8 @@ pub struct UttBuildStats {
     pub embedding_reused: usize,
     /// embedding 生成失败的块数（降级为无向量）
     pub embedding_failed: usize,
+    /// 超出模型输入上限、按上限预截断后嵌入的块数（块原文保持完整）
+    pub chunks_truncated: usize,
     /// 本次构建产出的向量（块 id + 向量），供服务层写入向量表
     pub vectors: Vec<(i64, Vec<f32>)>,
     /// 本次新建的块（含入库后的 id），供服务层增量加入内存索引
@@ -262,6 +264,7 @@ impl UttBuilder {
                     total.embedding_ok += stats.embedding_ok;
                     total.embedding_reused += stats.embedding_reused;
                     total.embedding_failed += stats.embedding_failed;
+                    total.chunks_truncated += stats.chunks_truncated;
                     total.vectors.extend(stats.vectors);
                     total.new_blocks.extend(stats.new_blocks);
                 }
@@ -276,6 +279,7 @@ impl UttBuilder {
             created = total.chunks_created,
             skipped = total.chunks_skipped,
             removed = total.chunks_removed,
+            truncated = total.chunks_truncated,
             "utt 全量构建完成"
         );
         Ok(total)
@@ -335,7 +339,24 @@ impl UttBuilder {
             };
 
             if !reused {
-                match provider.embed(&block.block_text).await {
+                // 超出模型输入上限时先按上限裁剪再嵌入；块原文与去重键保持完整。
+                let truncation = provider.truncate_to_input_limit(&block.block_text);
+                if let Some(t) = &truncation {
+                    stats.chunks_truncated += 1;
+                    warn!(
+                        session_id = %block.session_id,
+                        start_msg_id = %block.start_msg_id,
+                        tokens = t.tokens,
+                        limit = t.limit,
+                        "utt 块文本超出嵌入输入上限，已按上限截断后嵌入（块原文保留）"
+                    );
+                }
+                let embed_input = truncation
+                    .as_ref()
+                    .map(|t| t.text.as_str())
+                    .unwrap_or(block.block_text.as_str());
+
+                match provider.embed(embed_input).await {
                     Ok(vec) => {
                         // 去重开启时写入缓存，供后续同内容块复用（锁内短操作，不跨 await）。
                         if self.config.content_dedup {

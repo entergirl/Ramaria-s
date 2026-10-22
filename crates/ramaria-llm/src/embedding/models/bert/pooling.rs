@@ -99,12 +99,17 @@ pub(super) fn mean_pooling(
 
 /// 单条 Mean pooling（批量处理时逐条调用）。
 ///
-/// hidden: [seq_len, hidden_size]
-/// mask: [seq_len] (f32 tensor)
+/// 参数:
+/// - `hidden`: 批内单条 hidden state，形状 `[seq_len, hidden_size]`。
+/// - `mask`: 注意力掩码 `[seq_len]`（f32），长度必须与 `hidden` 的第 0 维一致；
+///   批量场景下须按整批 padding 后的长度对齐，padding 位置取 0。
+/// - `device`: 计算设备。
+///
+/// 返回:
+/// - 池化后的 `[hidden_size]` 向量（未归一化）。
 pub(super) fn mean_pooling_single(
     hidden: &Tensor,
     mask: &Tensor,
-    _actual_len: usize,
     device: &Device,
 ) -> RamariaResult<Tensor> {
     // 添加 batch 维度

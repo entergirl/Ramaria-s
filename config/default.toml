@@ -103,6 +103,8 @@ enable_graph = true
 enable_vector = true
 # 关键词镜像通道开关（摘要路第四通道）：false = 回退仅三通道（BM25 + 向量 + 图谱）
 enable_keyword_channel = true
+# 关键词语义层开关：false = 词条不做嵌入（零权重加载、零嵌入调用），关键词通道退化为字面 + 别名归一
+enable_keyword_fuzzy = true
 # 关键词镜像通道权重（参与 RRF 融合；1.0 = 与向量通道同权重）
 keyword_weight = 1.0
 # L2 结果排序权重（<1.0 表示 L2 优先展示）

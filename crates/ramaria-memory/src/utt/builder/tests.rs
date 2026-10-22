@@ -92,6 +92,70 @@ impl EmbeddingProvider for FailingEmbedding {
     }
 }
 
+/// 按字符上限预裁剪的 mock embedding，记录每次收到的嵌入输入。
+struct TruncatingEmbedding {
+    /// 输入上限（字符数）
+    limit: usize,
+    /// 收到的嵌入输入（按调用顺序）
+    inputs: std::sync::Mutex<Vec<String>>,
+}
+
+impl TruncatingEmbedding {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            inputs: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn inputs(&self) -> Vec<String> {
+        self.inputs.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl EmbeddingProvider for TruncatingEmbedding {
+    async fn embed(&self, text: &str) -> RamariaResult<Vec<f32>> {
+        self.inputs.lock().unwrap().push(text.to_string());
+        Ok(vec![0.1, 0.2, 0.3])
+    }
+    async fn embed_batch(&self, texts: &[&str]) -> RamariaResult<Vec<Vec<f32>>> {
+        Ok(texts.iter().map(|_| vec![0.1, 0.2, 0.3]).collect())
+    }
+    fn truncate_to_input_limit(
+        &self,
+        text: &str,
+    ) -> Option<ramaria_core::traits::EmbeddingTruncation> {
+        let chars: Vec<char> = text.chars().collect();
+        if chars.len() <= self.limit {
+            return None;
+        }
+        Some(ramaria_core::traits::EmbeddingTruncation {
+            text: chars[..self.limit].iter().collect(),
+            tokens: chars.len(),
+            limit: self.limit,
+        })
+    }
+    fn model_info(&self) -> ramaria_core::traits::EmbeddingModelInfo {
+        ramaria_core::traits::EmbeddingModelInfo {
+            model_id: "truncating".to_string(),
+            dimension: 3,
+        }
+    }
+    async fn validate(&self) -> RamariaResult<()> {
+        Ok(())
+    }
+    async fn download_model(&self) -> RamariaResult<()> {
+        Ok(())
+    }
+    fn download_progress(&self) -> f64 {
+        1.0
+    }
+    fn is_available(&self) -> bool {
+        true
+    }
+}
+
 /// 构造 persona + 会话 + 交替消息。
 async fn setup_session(
     storage: &SqliteStorage,
@@ -905,4 +969,76 @@ fn format_block_time_fallback_on_invalid() {
     // 极端时间戳 → 回退数字，不 panic
     let s = format_block_time(i64::MAX);
     assert!(!s.is_empty());
+}
+
+/// 超限块按上限裁剪后生成向量：计数 +1，入库块文本保持完整原文。
+#[tokio::test]
+async fn build_session_truncates_overlong_block_for_embedding() {
+    let storage = mem_storage().await;
+    let session = setup_session(&storage, "char-0001", 4, 1).await;
+    let embedder = TruncatingEmbedding::new(8);
+
+    let stats = test_builder()
+        .build_session(&storage, &session, Some(&embedder))
+        .await
+        .unwrap();
+    assert_eq!(stats.chunks_created, 1);
+    assert_eq!(stats.embedding_ok, 1);
+    assert_eq!(stats.chunks_truncated, 1, "超限块应计入截断统计");
+
+    let blocks = storage
+        .list_utt_blocks_by_persona("char-0001")
+        .await
+        .unwrap();
+    let stored = &blocks[0].block_text;
+    assert!(
+        stored.chars().count() > 8,
+        "入库块文本应为完整原文: {stored}"
+    );
+
+    let inputs = embedder.inputs();
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(inputs[0].chars().count(), 8, "嵌入输入应裁剪到上限");
+    assert!(
+        stored.starts_with(inputs[0].as_str()),
+        "裁剪文本应为完整块文本的前缀"
+    );
+}
+
+/// 未超限块直接以完整块文本嵌入，不产生截断计数。
+#[tokio::test]
+async fn build_session_keeps_full_text_when_within_limit() {
+    let storage = mem_storage().await;
+    let session = setup_session(&storage, "char-0001", 4, 1).await;
+    let embedder = TruncatingEmbedding::new(4096);
+
+    let stats = test_builder()
+        .build_session(&storage, &session, Some(&embedder))
+        .await
+        .unwrap();
+    assert_eq!(stats.chunks_truncated, 0, "未超限不应计入截断统计");
+
+    let blocks = storage
+        .list_utt_blocks_by_persona("char-0001")
+        .await
+        .unwrap();
+    let inputs = embedder.inputs();
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(inputs[0], blocks[0].block_text, "嵌入输入应为完整块文本");
+}
+
+/// 全量构建按会话累加截断计数。
+#[tokio::test]
+async fn rebuild_all_aggregates_truncated_chunks() {
+    let storage = mem_storage().await;
+    let _s1 = setup_session(&storage, "char-0001", 4, 1).await;
+    let _s2 = setup_session(&storage, "char-0002", 4, 1).await;
+    let embedder = TruncatingEmbedding::new(8);
+
+    let total = test_builder()
+        .rebuild_all(&storage, Some(&embedder))
+        .await
+        .unwrap();
+    assert_eq!(total.chunks_created, 2);
+    assert_eq!(total.chunks_truncated, 2, "两个会话各截断一块");
 }

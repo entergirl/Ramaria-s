@@ -15,6 +15,7 @@ use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::bert::BertModel;
 use ramaria_core::error::RamariaResult;
+use ramaria_core::traits::EmbeddingTruncation;
 use std::path::Path;
 use tokenizers::Tokenizer;
 
@@ -154,6 +155,28 @@ impl BertEncoder {
     /// 返回向量维度。
     pub fn dimension(&self) -> usize {
         self.dimension
+    }
+
+    /// 按模型输入上限预裁剪文本。
+    ///
+    /// 参数:
+    /// - `text`: 待嵌入文本。
+    ///
+    /// 返回:
+    /// - `None`: token 数未超过上限，或裁剪结果无法还原。
+    /// - `Some`: 截取前 `MAX_SEQ_LEN` 个 token 还原的文本、原 token 数与上限。
+    pub fn truncate_to_limit(&self, text: &str) -> Option<EmbeddingTruncation> {
+        let encoding = self.tokenizer.encode(text, false).ok()?;
+        let ids = encoding.get_ids();
+        if ids.len() <= MAX_SEQ_LEN {
+            return None;
+        }
+        let text = self.tokenizer.decode(&ids[..MAX_SEQ_LEN], true).ok()?;
+        Some(EmbeddingTruncation {
+            text,
+            tokens: ids.len(),
+            limit: MAX_SEQ_LEN,
+        })
     }
 
     /// 对单条文本执行嵌入。
@@ -352,9 +375,9 @@ impl BertEncoder {
         let hidden_size = dims.2;
         let mut all_vectors = Vec::with_capacity(batch_size);
 
-        for i in 0..batch_size {
-            let actual_len = token_id_vecs[i].len();
-            if actual_len == 0 {
+        for (i, attention) in attention_vecs.iter().enumerate() {
+            if attention.is_empty() {
+                // 空序列的掩码全为零，池化无法计算均值，直接产出零向量
                 all_vectors.push(vec![0.0f32; hidden_size]);
                 continue;
             }
@@ -363,16 +386,19 @@ impl BertEncoder {
             let single = hidden_states.i(i).map_err(|e| {
                 ramaria_core::error::RamariaError::embedding(format!("BERT 样本提取失败: {}", e))
             })?;
-            // single: [seq_len, hidden_size]
+            // single: [batch_max_len, hidden_size]
 
-            // 收集实际 mask
-            let mask_vec: Vec<f32> = attention_vecs[i].iter().map(|&m| m as f32).collect();
+            // 掩码长度对齐整批 padding 后的序列长度：前 actual_len 位取该条掩码，
+            // 其余补零，使 padding 位置在均值中权重为零。
+            let mut mask_vec = vec![0.0f32; max_len];
+            for (slot, &m) in mask_vec.iter_mut().zip(attention.iter()) {
+                *slot = m as f32;
+            }
             let mask_tensor = Tensor::new(mask_vec.as_slice(), &self.device).map_err(|e| {
                 ramaria_core::error::RamariaError::embedding(format!("BERT mask 构建失败: {}", e))
             })?;
 
-            let pooled =
-                pooling::mean_pooling_single(&single, &mask_tensor, actual_len, &self.device)?;
+            let pooled = pooling::mean_pooling_single(&single, &mask_tensor, &self.device)?;
             let normalized = pooling::l2_normalize(&pooled, &self.device)?;
             let vec = normalized.to_vec1::<f32>().map_err(|e| {
                 ramaria_core::error::RamariaError::embedding(format!(

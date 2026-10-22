@@ -8,7 +8,7 @@
 use async_trait::async_trait;
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::lock::lock_recover;
-use ramaria_core::traits::{EmbeddingModelInfo, EmbeddingProvider};
+use ramaria_core::traits::{EmbeddingModelInfo, EmbeddingProvider, EmbeddingTruncation};
 
 use super::NativeEmbeddingProvider;
 
@@ -97,6 +97,20 @@ impl EmbeddingProvider for NativeEmbeddingProvider {
                 EMBED_BATCH_TIMEOUT_SECS, count
             ))
         })?
+    }
+
+    fn truncate_to_input_limit(&self, text: &str) -> Option<EmbeddingTruncation> {
+        // 模型未就绪时不预裁剪：让 embed 走原始路径并返回真实的加载错误。
+        if self.ensure_loaded().is_err() {
+            return None;
+        }
+
+        // 锁内仅取编码器快照（Arc clone），分词与还原在锁外执行。
+        let encoder = {
+            let guard = lock_recover(&self.encoder, "embedding_native.encoder");
+            guard.as_ref().cloned()
+        };
+        encoder.and_then(|encoder| encoder.truncate_to_limit(text))
     }
 
     fn model_info(&self) -> EmbeddingModelInfo {

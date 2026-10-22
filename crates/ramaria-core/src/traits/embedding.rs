@@ -4,6 +4,7 @@
 //! - 描述 embedding 模型标识、向量维度与单条嵌入结果
 //! - 抽象模型下载、校验、进度查询与可用性判断
 //! - 提供单条与批量文本向量化入口
+//! - 提供模型输入上限预裁剪钩子，默认不裁剪
 //! - 供混合 RAG 的向量通道与首次配置向导复用
 //! - 未完成下载或校验失败时可用性必须为 false
 
@@ -42,6 +43,21 @@ pub struct Embedding {
     pub vector: Vec<f32>,
 }
 
+/// 嵌入输入裁剪结果。
+///
+/// 职责:
+/// - 描述按模型输入上限裁剪后的文本片段。
+/// - 携带原文本 token 数与上限，供调用方记录截断事实。
+#[derive(Debug, Clone, PartialEq)]
+pub struct EmbeddingTruncation {
+    /// 裁剪后的文本
+    pub text: String,
+    /// 原文本 token 数
+    pub tokens: usize,
+    /// 模型输入 token 上限
+    pub limit: usize,
+}
+
 /// Embedding Provider 抽象 trait。
 ///
 /// 职责:
@@ -73,6 +89,21 @@ pub trait EmbeddingProvider: Send + Sync {
     /// 返回:
     /// - 与输入顺序一致的向量列表。
     async fn embed_batch(&self, texts: &[&str]) -> RamariaResult<Vec<Vec<f32>>>;
+
+    /// 按模型输入上限预裁剪文本。
+    ///
+    /// 参数:
+    /// - `text`: 待向量化文本。
+    ///
+    /// 返回:
+    /// - `None`: 未超限，或实现方不做预裁剪。
+    /// - `Some`: 已裁剪文本、原文本 token 数与上限。
+    ///
+    /// 说明:
+    /// - 供调用方在嵌入前裁剪长文本并记录截断事实；原文由调用方自行保留。
+    fn truncate_to_input_limit(&self, _text: &str) -> Option<EmbeddingTruncation> {
+        None
+    }
 
     /// 获取模型信息（按值返回，线程安全）。
     ///

@@ -13,6 +13,8 @@
 //!   读状态与刷新状态共用同一实现；索引构建进度由索引状态独立表达
 //! - 安全约束：API key 只经 OS keychain 落盘，日志不记密钥内容
 
+use std::path::Path;
+
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::traits::LlmProvider as LlmProviderTrait;
 use ramaria_core::types::{AppState, BackendConfig};
@@ -34,20 +36,48 @@ pub const HEALTH_PROBE_INTERVAL_SECONDS: u64 = 2;
 // 缺项诊断与状态判定
 // =========================================================
 
-/// 读取设置检查结果（嵌入可用性取引擎当前快照）。
+/// 读取设置检查结果（嵌入可用性 = 运行时实例可用 且 配置路径有效）。
 ///
 /// 返回:
 /// - 后端配置 / 模型选择 / 嵌入可用性三项判定。
+///
+/// 说明:
+/// - 运行时实例可能来自上一次配置（改配置但不热加载的路径，如 CLI 的配置写入），
+///   因此嵌入可用性同时以持久化路径为准：配置了路径但目录不存在即视为不可用，
+///   使状态与"配置事实"一致，避免回执停留在变更前。
 pub(crate) async fn check(engine: &Engine) -> RamariaResult<SetupStatus> {
-    let embedding_available = engine.is_embedding_available();
+    let embedding_available =
+        engine.is_embedding_available() && configured_embedding_dir_usable(engine).await?;
     check_with(engine, embedding_available).await
+}
+
+/// 配置声明的嵌入模型目录是否可用（未配置路径 → true）。
+///
+/// 参数:
+/// - `engine`: 服务层引擎（读取库内后端配置）。
+///
+/// 说明:
+/// - 配置了路径时以持久化路径为准：目录不存在即视为不可用，避免运行时实例
+///   停留在上一次配置上（改配置但不热加载的写入路径）。
+/// - 未配置路径时不做否定：引擎实例可由用例或宿主直接注入。
+async fn configured_embedding_dir_usable(engine: &Engine) -> RamariaResult<bool> {
+    let config = engine.storage_ref().as_ref().get_backend_config().await?;
+    let Some(path) = config
+        .as_ref()
+        .and_then(|config| config.embedding_model_path.as_deref())
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    else {
+        return Ok(true);
+    };
+    Ok(Path::new(path).is_dir())
 }
 
 /// 按指定嵌入可用性读取设置检查结果。
 ///
 /// 参数:
 /// - `engine`: 服务层引擎。
-/// - `embedding_available`: 嵌入可用性（读状态取引擎快照）。
+/// - `embedding_available`: 嵌入可用性（运行时实例可用 且 配置路径有效）。
 ///
 /// 检查项:
 /// 1. 后端配置：`backend_config` 是否有记录；

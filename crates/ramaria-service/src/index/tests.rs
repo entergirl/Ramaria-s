@@ -34,6 +34,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
+mod keyword_fuzzy;
+
 /// 造一条 L1（带"工作压力"关键词，便于关键词镜像/BM25 命中）。
 async fn seed_l1(storage: &SqliteStorage, persona: &str, summary: &str) -> Uuid {
     seed_l1_raw(storage, persona, summary, Some("工作压力"), 1_000).await

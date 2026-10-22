@@ -381,8 +381,14 @@ async fn sync_keyword_mirror(engine: &Engine, l1_views: &[L1DocView], l2_views: 
             .cloned()
             .collect()
     };
-    // 嵌入 provider 取快照后在锁外使用（缺失 → 语义层降级为无向量构建）
-    let provider = engine.embedding_ref();
+    // 语义层 provider：开关关闭时不传 provider（零权重加载、零嵌入调用），
+    // 关键词通道退化为字面 + 别名归一；文档向量通道由 enable_vector 单独控制。
+    let provider = if engine.config().retrieval.enable_keyword_fuzzy {
+        engine.embedding_ref()
+    } else {
+        tracing::debug!("关键词语义层已关闭，词条不做嵌入");
+        None
+    };
     let fuzzy = KeywordService::build_fuzzy(&terms, provider.as_deref()).await;
     {
         let mirror = engine.keyword_mirror();

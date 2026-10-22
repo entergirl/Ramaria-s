@@ -63,8 +63,9 @@
                 { path: ['retrieval_weight_l2'], label: 'L2 排序权重', type: 'number', step: 0.1, min: 0, def: 0.8, hint: '<1.0 表示 L2 优先展示' },
                 { path: ['retrieval_weight_l1'], label: 'L1 排序权重', type: 'number', step: 0.1, min: 0, def: 1.0, hint: 'L1 结果排序权重' },
                 // —— v2.0 新增：向量/关键词通道与摘要路 RAG 参数（阶段一不定稿，机制开关先接入）——
-                { path: ['enable_vector'], label: '向量通道开关', type: 'bool', def: true, hint: 'false = 仅 BM25 + 图谱参与 RRF 融合' },
+                { path: ['enable_vector'], label: '向量通道开关', type: 'bool', def: true, hint: 'false = 文档向量不装载 / 不补算（检索期向量通道关闭）；关键词语义层由独立开关控制' },
                 { path: ['enable_keyword_channel'], label: '关键词镜像通道', type: 'bool', def: true, hint: 'false = 回退三通道（BM25 + 向量 + 图谱）' },
+                { path: ['enable_keyword_fuzzy'], label: '关键词语义层', type: 'bool', def: true, hint: 'false = 词条不做嵌入（不加载嵌入权重），退化为字面 + 别名归一' },
                 { path: ['keyword_weight'], label: '关键词通道权重', type: 'number', step: 0.1, min: 0, def: 1.0, hint: '关键词镜像通道 RRF 权重（1.0 与向量同权）' },
                 { path: ['narrative_weighted'], label: '脉络加权注入', type: 'bool', def: true, hint: 'v1.7 B4：按时间×话题相关性融合排序；false 回退取最近 N 条' },
                 { path: ['narrative_top_k'], label: '脉络注入条数', type: 'number', min: 0, def: 3, hint: '脉络加权后注入的最大条数' },

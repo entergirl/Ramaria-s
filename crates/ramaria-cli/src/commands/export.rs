@@ -195,7 +195,11 @@ fn canonicalize_export_path(path: &Path) -> anyhow::Result<PathBuf> {
         ));
     }
 
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    // 裸文件名（如 `-o out.json`）的父路径为空路径，按当前目录处理
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
     let canonical_parent = parent
         .canonicalize()
         .with_context(|| format!("导出目录不存在或无法访问: {}", parent.display()))?;

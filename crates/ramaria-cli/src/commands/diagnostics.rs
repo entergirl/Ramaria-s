@@ -120,13 +120,13 @@ fn canonicalize_diagnostics_path(path: &Path) -> anyhow::Result<PathBuf> {
         ));
     }
 
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-
-    // 跳过空父路径
-    if !parent.as_os_str().is_empty() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("无法创建输出目录: {}", parent.display()))?;
-    }
+    // 裸文件名（如 `-o diag.zip` 或缺省输出）的父路径为空路径，按当前目录处理
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("无法创建输出目录: {}", parent.display()))?;
 
     let canonical_parent = parent
         .canonicalize()

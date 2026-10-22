@@ -61,7 +61,9 @@ pub struct RetrievalConfig {
     /// 向量通道开关（默认 true）。
     ///
     /// `false` 时关闭摘要路检索的向量通道（仅 BM25 + 图谱参与 RRF 融合），
-    /// 对应内存检索器 `RetrieverConfig.enable_vector`。
+    /// 对应内存检索器 `RetrieverConfig.enable_vector`；
+    /// 同时不再装载 / 补算文档向量、不写 utt 向量。
+    /// 关键词语义层由 `enable_keyword_fuzzy` 单独控制。
     pub enable_vector: bool,
     /// 关键词镜像通道开关（默认 true）。
     ///
@@ -74,6 +76,12 @@ pub struct RetrievalConfig {
     /// 关键词镜像作为第四检索通道参与 RRF 融合时的权重，
     /// 对应内存检索器 `RrfConfig.keyword_weight`（1.0 = 与向量通道同权重）。
     pub keyword_weight: f64,
+    /// 关键词语义层（词向量扩展）开关（默认 true）。
+    ///
+    /// `false` 时不构建 `FuzzyKeywordIndex`：不加载嵌入权重、不调用嵌入，
+    /// 关键词通道退化为字面匹配 + 别名归一。
+    /// 文档向量通道由 `enable_vector` 单独控制，两者互不隐含。
+    pub enable_keyword_fuzzy: bool,
     /// L2 结果排序权重（<1.0 表示 L2 优先展示）
     pub retrieval_weight_l2: f64,
     /// L1 结果排序权重
@@ -130,6 +138,7 @@ impl Default for RetrievalConfig {
             enable_vector: true,
             enable_keyword_channel: true,
             keyword_weight: 1.0,
+            enable_keyword_fuzzy: true,
             retrieval_weight_l2: 0.8,
             retrieval_weight_l1: 1.0,
             narrative_weighted: true,

@@ -222,13 +222,17 @@ pub(crate) async fn index_l1_into_mirrors(engine: &Engine, l1: &MemoryL1) {
             .into_iter()
             .filter(|token| !pending_texts.contains(token.as_str()))
             .collect();
+        // 语义层开关在取镜像写锁前读取（不持镜像锁时取配置快照）
+        let fuzzy_enabled = engine.config().retrieval.enable_keyword_fuzzy;
 
         let mirror = engine.keyword_mirror();
         let mut guard = write_recover(&*mirror, "index.keyword_mirror");
         guard.index_l1(&doc);
         guard.upsert_pool_tokens(&accepted, now);
-        // 语义层陈旧可观测（节流 5 分钟，日志不含词条文本）
-        guard.warn_if_fuzzy_stale(now);
+        // 语义层陈旧可观测（节流 5 分钟，日志不含词条文本）；语义层关闭时不告警
+        if fuzzy_enabled {
+            guard.warn_if_fuzzy_stale(now);
+        }
     }
 }
 

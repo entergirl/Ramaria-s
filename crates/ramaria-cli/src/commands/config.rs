@@ -386,11 +386,11 @@ async fn set_config(
         crate::ui::warn("config.toml 写入失败（DB 侧仍生效，但下次启动可能以文件为准覆盖）");
     }
 
-    // 刷新状态
-    engine.refresh_setup_state().await?;
+    // 刷新状态；回执取刷新判定结果（其依据已含持久化配置，不再只看运行时实例）
+    let state = engine.refresh_setup_state().await?;
 
     crate::ui::success(&format!("{key} 已更新为 {value}"));
-    crate::ui::info(&format!("当前状态: {}", engine.current_state().as_str()));
+    crate::ui::info(&format!("当前状态: {}", state.as_str()));
 
     if json {
         crate::json::emit_ok(&serde_json::json!({"key": key, "value": value}))?;

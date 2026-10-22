@@ -9,6 +9,7 @@
 use candle_core::Device;
 use ramaria_core::config::EmbeddingDevice;
 use ramaria_core::error::RamariaResult;
+use ramaria_core::traits::EmbeddingTruncation;
 use std::path::Path;
 
 use super::super::models::{self, ModelArchitecture};
@@ -101,6 +102,14 @@ impl Encoder {
             Self::Bert(e) => e.dimension(),
             Self::Llama(e) => e.dimension(),
             Self::LlamaHeadDim(e) => e.dimension(),
+        }
+    }
+
+    pub(super) fn truncate_to_limit(&self, text: &str) -> Option<EmbeddingTruncation> {
+        match self {
+            Self::Bert(e) => e.truncate_to_limit(text),
+            Self::Llama(e) => e.truncate_to_limit(text),
+            Self::LlamaHeadDim(e) => e.truncate_to_limit(text),
         }
     }
 

@@ -3,6 +3,7 @@
 //! 设计特点:
 //! - 内存构造小型 BERT 模型与空白切分分词器，不读取任何模型文件
 //! - 覆盖超长输入裁剪（token 序列与注意力掩码同步收紧）与嵌入维度校验
+//! - 覆盖批量混合长度 / 超长同批的池化对齐，以及输入上限预裁剪
 
 use candle_nn::{VarBuilder, VarMap};
 use candle_transformers::models::bert::Config as BertConfig;
@@ -80,6 +81,74 @@ fn long_text_is_truncated_and_embedded() {
         .expect("超长文本应在截断后成功生成向量");
 
     assert_eq!(vector.len(), encoder.dimension());
+}
+
+/// 批量嵌入支持批次内长度不齐的文本：每条各产出一个同维向量，
+/// 且批内短文本的池化结果与单条嵌入一致（padding 位置不参与均值）。
+#[test]
+fn batch_pooling_matches_single_text() {
+    let encoder = tiny_encoder();
+    let texts = ["a a a a a", "a a", "a"];
+
+    let vectors = encoder.embed_batch_texts(&texts).expect("批量嵌入应成功");
+    let single = encoder.embed_text("a a").expect("单条嵌入应成功");
+
+    assert_eq!(vectors.len(), texts.len(), "每条文本应产出一个向量");
+    for vector in &vectors {
+        assert_eq!(vector.len(), encoder.dimension());
+    }
+    assert_eq!(vectors[1].len(), single.len());
+    for (batched, alone) in vectors[1].iter().zip(single.iter()) {
+        assert!(
+            (batched - alone).abs() < 1e-5,
+            "批内第 2 条应与单条结果一致: {batched} vs {alone}"
+        );
+    }
+}
+
+/// 超长文本与短文本同批：超长条目截断后整体成功，短文本结果不受影响。
+#[test]
+fn batch_with_overlong_text_keeps_short_text_consistent() {
+    let encoder = tiny_encoder();
+    let long_text = "a ".repeat(MAX_SEQ_LEN + 88);
+    let texts = [long_text.as_str(), "a a"];
+
+    let vectors = encoder
+        .embed_batch_texts(&texts)
+        .expect("超长文本应截断后同批嵌入");
+
+    assert_eq!(vectors.len(), 2);
+    assert_eq!(vectors[0].len(), encoder.dimension());
+
+    let single = encoder.embed_text("a a").expect("单条嵌入应成功");
+    for (batched, alone) in vectors[1].iter().zip(single.iter()) {
+        assert!(
+            (batched - alone).abs() < 1e-5,
+            "同批短文本应与单条结果一致: {batched} vs {alone}"
+        );
+    }
+}
+
+/// 超出模型上限的文本返回裁剪结果，含原 token 数与上限。
+#[test]
+fn truncate_to_limit_reports_overlong_text() {
+    let encoder = tiny_encoder();
+    let text = "a ".repeat(MAX_SEQ_LEN + 88);
+
+    let truncation = encoder
+        .truncate_to_limit(&text)
+        .expect("超长文本应返回裁剪结果");
+
+    assert!(!truncation.text.is_empty(), "裁剪文本不应为空");
+    assert!(truncation.tokens > truncation.limit);
+    assert_eq!(truncation.limit, MAX_SEQ_LEN);
+}
+
+/// 未超出模型上限的文本不做预裁剪。
+#[test]
+fn truncate_to_limit_returns_none_for_short_text() {
+    let encoder = tiny_encoder();
+    assert!(encoder.truncate_to_limit("a a").is_none());
 }
 
 /// 裁剪会同时收紧 token 序列与注意力掩码，两者长度保持一致。

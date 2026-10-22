@@ -59,6 +59,7 @@
     "retrieval.enable_graph",
     "retrieval.enable_vector",
     "retrieval.enable_keyword_channel",
+    "retrieval.enable_keyword_fuzzy",
     "retrieval.keyword_weight",
     "retrieval.retrieval_weight_l2",
     "retrieval.retrieval_weight_l1",

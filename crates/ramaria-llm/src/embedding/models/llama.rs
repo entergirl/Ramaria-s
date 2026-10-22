@@ -16,6 +16,7 @@ use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::llama::{Cache, Config as LlamaConfig, Llama, LlamaEosToks};
 use ramaria_core::error::RamariaResult;
+use ramaria_core::traits::EmbeddingTruncation;
 use std::path::Path;
 use tokenizers::Tokenizer;
 
@@ -195,6 +196,31 @@ impl LlamaEncoder {
     /// 返回向量维度。
     pub fn dimension(&self) -> usize {
         self.dimension
+    }
+
+    /// 按模型输入上限预裁剪文本。
+    ///
+    /// 参数:
+    /// - `text`: 待嵌入文本。
+    ///
+    /// 返回:
+    /// - `None`: token 数未超过上限，或裁剪结果无法还原。
+    /// - `Some`: 截取前 `MAX_SEQ_LEN` 个 token 还原的文本、原 token 数与上限。
+    ///
+    /// 说明:
+    /// - 计数与嵌入使用相同的 `add_special_tokens=true` 口径，含 BOS/EOS。
+    pub fn truncate_to_limit(&self, text: &str) -> Option<EmbeddingTruncation> {
+        let encoding = self.tokenizer.encode(text, true).ok()?;
+        let ids = encoding.get_ids();
+        if ids.len() <= MAX_SEQ_LEN {
+            return None;
+        }
+        let text = self.tokenizer.decode(&ids[..MAX_SEQ_LEN], true).ok()?;
+        Some(EmbeddingTruncation {
+            text,
+            tokens: ids.len(),
+            limit: MAX_SEQ_LEN,
+        })
     }
 
     /// 检测 safetensors 键名前缀并适配 candle 的 `Llama::load`。
