@@ -21,8 +21,8 @@ use ramaria_core::types::now_ms;
 /// 通道投递场景参数（默认全放行，按需覆写单项）。
 #[derive(Clone, Copy)]
 struct ChannelCase {
-    /// 通道总开关（`[channel].proactive_enabled`）。
-    proactive_enabled: bool,
+    /// 通道总开关（`[channel].proactive_delivery_enabled`）。
+    proactive_delivery_enabled: bool,
     /// 会话外部标识（None = 会话无外部标识）。
     session_external_ref: Option<&'static str>,
     /// 是否预先建立绑定。
@@ -39,7 +39,7 @@ impl ChannelCase {
     /// 全放行基线：开关开、绑定存在且启用且允许主动、接收端已注册。
     fn open() -> Self {
         Self {
-            proactive_enabled: true,
+            proactive_delivery_enabled: true,
             session_external_ref: Some("c2c:10001"),
             create_binding: true,
             binding_enabled: true,
@@ -64,7 +64,7 @@ async fn run_channel_case(
     std::path::PathBuf,
 ) {
     let mut config = test_config();
-    config.channel.proactive_enabled = case.proactive_enabled;
+    config.channel.proactive_delivery_enabled = case.proactive_delivery_enabled;
     let (engine, storage, dir) =
         engine_with_llm_and_config(tag, MockLlm::with_reply(REPLY), config).await;
     seed_persona(&storage, DEFAULT_PERSONA_UID).await;
@@ -172,7 +172,7 @@ async fn channel_gates_drop_when_disabled() {
         (
             "gate-switch-off",
             ChannelCase {
-                proactive_enabled: false,
+                proactive_delivery_enabled: false,
                 ..open
             },
         ),
@@ -235,7 +235,7 @@ async fn channel_gates_drop_when_disabled() {
 #[tokio::test]
 async fn platform_failure_not_billed() {
     let mut config = test_config();
-    config.channel.proactive_enabled = true;
+    config.channel.proactive_delivery_enabled = true;
     let (engine, storage, dir) = engine_with_llm_and_config(
         "proactive-platform-fail",
         MockLlm::with_reply(REPLY),
@@ -277,7 +277,7 @@ async fn platform_failure_not_billed() {
 #[tokio::test]
 async fn global_count_skips_platform_failure() {
     let mut config = test_config();
-    config.channel.proactive_enabled = true;
+    config.channel.proactive_delivery_enabled = true;
     config.proactive.daily_total_limit = 5;
     let (engine, storage, dir) = engine_with_llm_and_config(
         "proactive-global-platform-fail",

@@ -32,7 +32,7 @@ fn runtime_with_sink(sink: Arc<RecordingSink>) -> ChannelRuntime {
             default_persona_uid: "rama-0001".to_string(),
             qq: None,
             telegram: None,
-            proactive_enabled: false,
+            proactive_delivery_enabled: false,
         },
         sink,
     )
@@ -115,5 +115,5 @@ fn config_snapshot_is_exposed() {
     let sink = Arc::new(RecordingSink::default());
     let runtime = runtime_with_sink(sink);
     assert_eq!(runtime.config().default_persona_uid, "rama-0001");
-    assert!(!runtime.config().proactive_enabled);
+    assert!(!runtime.config().proactive_delivery_enabled);
 }

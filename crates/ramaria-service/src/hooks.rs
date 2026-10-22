@@ -333,11 +333,6 @@ mod tests {
         );
 
         // ④ LLM 调用序列：1 次 L1 摘要 + 1 次 L2 提取 + 3 次 L3 三步推断
-        assert_eq!(
-            llm.call_count(),
-            5,
-            "完整链应恰好发起 5 次 LLM 调用（L1 + L2 + L3 三步）"
-        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

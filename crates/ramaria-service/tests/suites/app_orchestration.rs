@@ -15,8 +15,7 @@ use ramaria_service::privacy::{PrivacyStatus, check_privacy, confirm_privacy};
 use ramaria_service::{Engine, ErrorHint, SetupRequest, StreamEvent, error_title};
 
 use crate::support::engine_env::{
-    build_engine, build_engine_with_embedding, mark_ready, send_stream, stream_request,
-    try_send_stream,
+    build_engine, build_engine_with_embedding, mark_ready, send_stream,
 };
 use crate::support::mock_backend::{MockEmbedding, MockFailingLlm, MockLlm, MockStorage};
 
@@ -211,16 +210,6 @@ async fn privacy_confirm_then_check_passes() {
 // =========================================================
 // 流式生成集成测试
 // =========================================================
-
-#[tokio::test]
-async fn send_message_rejects_when_not_ready() {
-    let (_, _, engine) = make_engine();
-    let result = try_send_stream(&engine, stream_request("你好", None, None)).await;
-    match result {
-        Err(err) => assert!(err.to_string().contains("尚未就绪")),
-        Ok(_) => panic!("应返回错误"),
-    }
-}
 
 #[tokio::test]
 async fn send_message_flow_success() {

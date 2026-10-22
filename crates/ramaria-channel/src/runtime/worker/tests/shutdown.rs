@@ -19,7 +19,7 @@ async fn worker_shutdown_stops_loop() {
             default_persona_uid: "rama-0001".to_string(),
             qq: None,
             telegram: None,
-            proactive_enabled: false,
+            proactive_delivery_enabled: false,
         },
         Arc::new(crate::events::NoopSink),
     ));
@@ -52,7 +52,7 @@ async fn worker_shutdown_abandons_inflight_reply() {
             default_persona_uid: "rama-0001".to_string(),
             qq: None,
             telegram: None,
-            proactive_enabled: false,
+            proactive_delivery_enabled: false,
         },
         Arc::new(crate::events::NoopSink),
     ));

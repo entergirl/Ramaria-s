@@ -191,7 +191,7 @@
     "channel.qq_enabled",
     "channel.qq_ws_url",
     "channel.telegram_enabled",
-    "channel.proactive_enabled",
+    "channel.proactive_delivery_enabled",
     "proactive.enabled",
     "proactive.check_interval_seconds",
     "proactive.min_idle_hours",

@@ -91,14 +91,6 @@ impl ScriptedLlm {
             .clone()
     }
 
-    /// 已发生的生成调用次数（非流式 + 流式合计）。
-    pub fn call_count(&self) -> usize {
-        self.requests
-            .lock()
-            .expect("脚本化 LLM 的请求记录锁不应中毒")
-            .len()
-    }
-
     /// 取出本次调用的回复：队列优先，其次兜底。
     fn next_reply(&self) -> String {
         let mut queue = self

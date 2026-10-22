@@ -44,9 +44,10 @@ pub(crate) async fn run(
     req: ChannelIngestRequest,
 ) -> RamariaResult<ChannelIngestOutcome> {
     // ---- 1. 参数校验 ----
-    let channel = validate_required(&req.channel, "通道标识不能为空")?.to_string();
-    let external_ref = validate_required(&req.external_ref, "会话外部标识不能为空")?.to_string();
-    let persona = validate_required(&req.persona_uid, "人格标识不能为空")?.to_string();
+    let channel = super::validate::required(&req.channel, "通道标识不能为空")?.to_string();
+    let external_ref =
+        super::validate::required(&req.external_ref, "会话外部标识不能为空")?.to_string();
+    let persona = super::validate::required(&req.persona_uid, "人格标识不能为空")?.to_string();
 
     let policy = engine.recall_policy();
     if !policy.persona_allowed(&persona) {
@@ -402,17 +403,8 @@ pub(crate) fn channel_fingerprint(
 }
 
 // =========================================================
-// 校验辅助
+// 文本辅助
 // =========================================================
-
-/// 校验必填文本（trim 后须非空）；返回 trim 后的切片。
-fn validate_required<'a>(value: &'a str, message: &str) -> RamariaResult<&'a str> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Err(RamariaError::validation(message));
-    }
-    Ok(trimmed)
-}
 
 /// trim 后非空转 String，否则 None。
 fn optional_trimmed(value: &str) -> Option<String> {

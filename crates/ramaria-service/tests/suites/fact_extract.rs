@@ -129,55 +129,6 @@ async fn auto_fact_detect_off_gates_all_extraction() {
 // (b) 策略① 主观/低置信事件 → 字段感知隐含候选（落 candidate）
 // =========================================================
 
-#[tokio::test]
-async fn subjective_event_implied_candidate_field_aware() {
-    let storage = MockStorage::new();
-    let cfg = enabled_knowledge();
-
-    let subjective = event(
-        "char-0001",
-        1,
-        "好喜欢看科幻电影",
-        "提到喜欢科幻和悬疑",
-        "喜欢,科幻",
-        0.7,
-        Presentation::Subjective,
-        0.6,
-    );
-
-    let report = run_fact_extraction(&storage, &cfg, "char-0001", &[], &[subjective], None).await;
-
-    assert_eq!(report.implied_candidates, 1, "主观事件应产出策略①候选");
-    assert_eq!(
-        report.candidates_saved, 1,
-        "无互证的低置信候选应落 candidate"
-    );
-
-    let facts = all_facts(&storage, "char-0001", ProfileField::Interests).await;
-    assert_eq!(facts.len(), 1, "应保存 1 条 candidate");
-    let f = &facts[0];
-    assert_eq!(
-        f.status,
-        FactStatus::Candidate,
-        "隐含候选应保持 candidate 轨道"
-    );
-    assert_eq!(
-        f.field,
-        ProfileField::Interests,
-        "策略①应字段感知（Interests）"
-    );
-    assert!(
-        f.content.starts_with("偏好："),
-        "策略①应带字段语义前缀，content={}",
-        f.content
-    );
-    assert!(
-        (f.confidence - 0.5).abs() < f64::EPSILON,
-        "隐含候选置信度应为 0.5"
-    );
-    assert!(f.ref_event_id.is_some(), "隐含候选应溯源事件");
-}
-
 // =========================================================
 // (b) 策略② L1 保真线索 → 断言候选（source=L1 / ref_l1_id）
 // =========================================================

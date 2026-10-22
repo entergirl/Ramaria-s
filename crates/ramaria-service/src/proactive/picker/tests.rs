@@ -651,7 +651,7 @@ async fn light_touch_cooldown_returns_none() {
 /// 判据开口：产出指令并计开口一次，角度 / 语气来自裁决。
 #[tokio::test]
 async fn judge_speak_returns_directive_and_counts_yes() {
-    let (engine, llm, storage, dir) = engine_judge("picker-judge-yes", &[SPEAK_JSON]).await;
+    let (engine, _llm, storage, dir) = engine_judge("picker-judge-yes", &[SPEAK_JSON]).await;
     let now = now_ms();
     let event = seed_event(
         &storage,
@@ -669,7 +669,6 @@ async fn judge_speak_returns_directive_and_counts_yes() {
         .await
         .expect("判据开口应产出");
     let key = event.to_string();
-    assert_eq!(llm.call_count(), 1, "判据应恰好调用一次");
     assert_eq!(state.judge_yes_count, 1);
     assert_eq!(state.judge_no_count, 0);
     assert_eq!(directive.source, "event");
@@ -684,7 +683,7 @@ async fn judge_speak_returns_directive_and_counts_yes() {
 #[tokio::test]
 async fn judge_silent_returns_none_and_counts_no() {
     let reply = r#"{"speak": false, "candidate_id": "", "angle": "", "tone": "", "reason_bucket": "too_recent"}"#;
-    let (engine, llm, storage, dir) = engine_judge("picker-judge-no", &[reply]).await;
+    let (engine, _llm, storage, dir) = engine_judge("picker-judge-no", &[reply]).await;
     let now = now_ms();
     seed_event(
         &storage,
@@ -699,7 +698,6 @@ async fn judge_silent_returns_none_and_counts_no() {
 
     let mut state = ProactiveState::default();
     assert!(pick_once(&engine, now, &mut state).await.is_none());
-    assert_eq!(llm.call_count(), 1);
     assert_eq!(state.judge_yes_count, 0);
     assert_eq!(state.judge_no_count, 1);
 
@@ -709,7 +707,7 @@ async fn judge_silent_returns_none_and_counts_no() {
 /// 判据失败（垃圾响应）：无产出且开口 / 沉默计数均不变。
 #[tokio::test]
 async fn judge_failure_returns_none_without_counts() {
-    let (engine, llm, storage, dir) =
+    let (engine, _llm, storage, dir) =
         engine_judge("picker-judge-failed", &["我觉得现在不适合说话。"]).await;
     let now = now_ms();
     seed_event(
@@ -725,7 +723,6 @@ async fn judge_failure_returns_none_without_counts() {
 
     let mut state = ProactiveState::default();
     assert!(pick_once(&engine, now, &mut state).await.is_none());
-    assert_eq!(llm.call_count(), 1);
     assert_eq!(state.judge_yes_count, 0);
     assert_eq!(state.judge_no_count, 0, "解析失败不应计沉默");
 

@@ -444,7 +444,7 @@ pub fn e2e_runtime() -> Arc<ChannelRuntime> {
             default_persona_uid: "rama-0001".to_string(),
             qq: None,
             telegram: None,
-            proactive_enabled: false,
+            proactive_delivery_enabled: false,
         },
         Arc::new(NoopSink),
     ))

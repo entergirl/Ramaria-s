@@ -199,6 +199,8 @@ CREATE INDEX idx_memory_l1_absorbed ON memory_l1(absorbed);
 CREATE INDEX idx_memory_l1_persona ON memory_l1(persona_uid);
 CREATE INDEX idx_memory_l1_persona_created ON memory_l1(persona_uid, created_at);
 CREATE INDEX idx_memory_l1_persona_occurred ON memory_l1(persona_uid, occurred_at);
+-- L1 未吸收查询：按 persona 过滤后直接按有效时间有序取出（occurred_at 可空，回退 created_at）
+CREATE INDEX idx_memory_l1_effective_time ON memory_l1(persona_uid, absorbed, COALESCE(occurred_at, created_at));
 
 -- =========================================================
 -- L2 层 — memory_events 事件层核心

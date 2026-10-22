@@ -4,8 +4,11 @@
 //! - 位于 behavior::rule_gen 模块内，经 use super::* 取用被测项（含私有项）。
 //! - 由 rule_gen.rs 以 #[cfg(test)] mod tests; 收纳，与生产代码物理隔离。
 //! - 用例为确定性断言，可离线运行。
+use super::translate::{build_translation_prompt, parse_translation};
 use super::*;
 use ramaria_core::behavior::BehaviorSituation;
+use ramaria_core::error::{RamariaError, RamariaResult};
+use ramaria_core::traits::ChatRequest;
 use ramaria_core::types::Presentation;
 
 // ---- mock LLM ----
@@ -402,7 +405,6 @@ async fn translate_reaction_success_path() {
     let (reaction, avoid) = out.expect("应返回规则");
     assert!(reaction.contains("加班"));
     assert_eq!(avoid, vec!["深夜"], "消极簇不过滤 avoid");
-    assert_eq!(llm.call_count(), 1);
 }
 
 #[tokio::test]

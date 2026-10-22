@@ -137,7 +137,7 @@ test('通道面板字段与高级页 channel 组逐键一致（默认值防漂�
   assert.equal(panelByKey.qq_ws_url, 'ws://127.0.0.1:3001');
   assert.equal(panelByKey.telegram_enabled, false);
   assert.equal(panelByKey.default_persona_uid, 'rama-0001');
-  assert.equal(panelByKey.proactive_enabled, false);
+  assert.equal(panelByKey.proactive_delivery_enabled, false);
 });
 
 // =========================================================
@@ -211,7 +211,7 @@ test('表单值合并完整配置：不修改入参且补齐缺失组', () => {
     qq_ws_url: 'ws://x',
     telegram_enabled: true,
     default_persona_uid: 'rama-0002',
-    proactive_enabled: true,
+    proactive_delivery_enabled: true,
   }));
   assert.equal(merged.channel.enabled, true);
   assert.equal(merged.channel.qq_enabled, true);

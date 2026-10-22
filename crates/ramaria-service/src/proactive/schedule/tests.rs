@@ -7,9 +7,17 @@
 //! - 用固定时间戳驱动单轮调度，装配真实 SQLite 临时库与 mock LLM，不依赖网络与真实时钟
 //! - 断言口径：闸门用"选题器是否被触达"、状态变更用"库中 reload"、投放用接收端留档
 
+use async_trait::async_trait;
+
 use super::quiet::{QuietHours, parse_quiet_hours};
 use super::*;
+use crate::engine::Engine;
+use crate::proactive::sink::ProactiveMessage;
 use crate::proactive::sink::ProactiveSink;
+use crate::proactive::state::{self, ProactiveGlobalState, ProactiveState};
+use crate::proactive::topic::ProactiveDirective;
+use ramaria_core::error::RamariaResult;
+
 use crate::proactive::switch::{self, ProactivePersonaMode};
 use crate::recall::RecallPolicy;
 use crate::test_support::seed_session_with_messages;
@@ -20,10 +28,13 @@ use crate::test_support::{
 use crate::types::DEFAULT_PERSONA_UID;
 use ramaria_core::config::RamariaConfig;
 use ramaria_core::traits::{StoreCrud, StoreInfrastructure};
-use ramaria_core::types::{AppState, BackendConfig, MessageRole, PersonaKind, PrivacyConsent};
+use ramaria_core::types::{
+    AppState, BackendConfig, MessageRole, PersonaKind, PrivacyConsent, now_ms,
+};
 use ramaria_storage::SqliteStorage;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use uuid::Uuid;
 
 mod delivery;

@@ -13,18 +13,21 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ramaria_core::behavior::BehaviorParams;
+use ramaria_core::behavior::{BehaviorParams, BehaviorRule, BehaviorSituation, RuleSource};
 use ramaria_core::config::RamariaConfig;
 use ramaria_core::traits::{StoreCrud, StoreInfrastructure};
-use ramaria_core::types::{AppState, FactTier, PersonaKind, ProfileField};
+use ramaria_core::types::{
+    AppState, FactSource, FactTier, Persona, PersonaExample, PersonaFact, PersonaKind,
+    PersonalityTrait, ProfileField, TraitLayer, TraitSource, TraitStatus,
+};
 
 use ramaria_memory::preset::{KindSource, PreviewMode, SkipReason};
 
-use super::*;
 use crate::test_support::{
     MockLlm, engine_with_db, engine_with_failing_llm, engine_with_shared_llm, seed_persona,
     temp_dir,
 };
+use crate::types::ImportWriteStats;
 use crate::types::{CHANNEL_MCP, ChatSendRequest};
 
 // =========================================================

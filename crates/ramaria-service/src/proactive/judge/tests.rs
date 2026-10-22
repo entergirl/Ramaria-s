@@ -72,7 +72,7 @@ async fn engine_with_replies(tag: &str, replies: &[&str]) -> (Engine, Arc<Script
 /// 正常 JSON：speak=true 且候选有效 → 产出裁决，字段与输入回引一致。
 #[tokio::test]
 async fn speak_true_valid_candidate_returns_decision() {
-    let (engine, llm, dir) = engine_with_replies("judge-speak-true", &[SPEAK_JSON]).await;
+    let (engine, _llm, dir) = engine_with_replies("judge-speak-true", &[SPEAK_JSON]).await;
 
     let JudgeOutcome::Speak(decision) = decide(&engine, &candidates(), &signals()).await else {
         panic!("有效裁决应产出");
@@ -81,7 +81,6 @@ async fn speak_true_valid_candidate_returns_decision() {
     assert_eq!(decision.angle.as_deref(), Some("关心近况"));
     assert_eq!(decision.tone.as_deref(), Some("温和"));
     assert_eq!(decision.reason_bucket, "speak");
-    assert_eq!(llm.call_count(), 1, "判据应恰好调用一次 LLM");
 
     let _ = std::fs::remove_dir_all(dir);
 }

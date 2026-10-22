@@ -18,8 +18,8 @@ use ramaria_core::types::{AppState, Persona};
 use crate::engine::Engine;
 use crate::proactive::switch::{self, ProactivePersonaMode};
 
+use super::super::state::{self, ProactiveGlobalState, ProactiveState};
 use super::quiet::parse_quiet_hours;
-use super::state::{self, ProactiveGlobalState, ProactiveState};
 
 // =========================================================
 // 跳过原因与判定结果

@@ -129,6 +129,8 @@ async fn edit_converts_to_manual_and_writes_snapshot() {
         .expect("查询反馈日志应成功");
     assert_eq!(logs.len(), 1, "编辑应写一条反馈日志");
     assert_eq!(logs[0].signal_type, SignalType::Edit);
+    assert_eq!(logs[0].weight, 1.0, "S1 强信号 weight=1.0");
+    assert_eq!(logs[0].target_type, TargetType::BehaviorRule);
     assert_eq!(logs[0].session_id.as_deref(), Some("sess-1"));
     let detail: serde_json::Value =
         serde_json::from_str(logs[0].detail.as_deref().expect("编辑反馈应含快照"))
@@ -175,6 +177,7 @@ async fn import_rejects_invalid_payloads() {
         .behavior_import_rule("char-0001", "{ not json")
         .await
         .expect_err("非法 JSON 应拒绝");
+    assert_eq!(err.category(), "validation", "非法 JSON 应为校验错误");
     assert!(
         err.to_string().contains("规则 JSON 非法"),
         "错误应指明 JSON 非法: {err}"

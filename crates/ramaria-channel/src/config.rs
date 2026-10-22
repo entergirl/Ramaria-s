@@ -29,13 +29,13 @@ pub const FALLBACK_DEFAULT_PERSONA_UID: &str = "rama-0001";
 /// - `default_persona_uid`: 通道级默认人格（绑定未覆盖时生效）；配置为空时回落
 ///   [`FALLBACK_DEFAULT_PERSONA_UID`]。
 /// - `qq` / `telegram`: 平台连接配置；`None` = 未启用或参数缺失（该平台不启动）。
-/// - `proactive_enabled`: 社交主动投递总开关（还须绑定级开关，任一关闭即不投递）。
+/// - `proactive_delivery_enabled`: 社交主动投递总开关（还须绑定级开关，任一关闭即不投递）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelRuntimeConfig {
     pub default_persona_uid: String,
     pub qq: Option<QqRuntimeConfig>,
     pub telegram: Option<TelegramRuntimeConfig>,
-    pub proactive_enabled: bool,
+    pub proactive_delivery_enabled: bool,
 }
 
 /// QQ（OneBot v11 正向 WS）连接配置。
@@ -120,7 +120,7 @@ impl ChannelRuntimeConfig {
             default_persona_uid,
             qq,
             telegram,
-            proactive_enabled: core.proactive_enabled,
+            proactive_delivery_enabled: core.proactive_delivery_enabled,
         }
     }
 

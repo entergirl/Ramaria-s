@@ -102,7 +102,7 @@ async fn run_status(engine: &Arc<Engine>, json: bool) -> anyhow::Result<()> {
             "telegram_enabled": config.channel.telegram_enabled,
             "qq_ws_url": config.channel.qq_ws_url,
             "default_persona_uid": config.channel.default_persona_uid,
-            "proactive_enabled": config.channel.proactive_enabled,
+            "proactive_delivery_enabled": config.channel.proactive_delivery_enabled,
             "qq_token_configured": qq_token_configured,
             "telegram_token_configured": telegram_token_configured,
             "bindings_count": bindings_count,
@@ -119,7 +119,10 @@ async fn run_status(engine: &Arc<Engine>, json: bool) -> anyhow::Result<()> {
         switch_label(config.channel.telegram_enabled),
     );
     crate::ui::labeled("默认人格", &config.channel.default_persona_uid);
-    crate::ui::labeled("主动投递", switch_label(config.channel.proactive_enabled));
+    crate::ui::labeled(
+        "主动投递",
+        switch_label(config.channel.proactive_delivery_enabled),
+    );
     crate::ui::labeled("QQ 凭据", configured_label(qq_token_configured));
     crate::ui::labeled("Telegram 凭据", configured_label(telegram_token_configured));
     crate::ui::labeled("绑定数", &bindings_count.to_string());

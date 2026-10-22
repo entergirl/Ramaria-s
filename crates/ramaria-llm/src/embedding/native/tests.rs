@@ -8,6 +8,8 @@
 
 use super::*;
 
+use ramaria_core::traits::EmbeddingProvider;
+
 /// 测试 provider 构造（无模型文件）
 #[test]
 fn provider_creation_without_model() {

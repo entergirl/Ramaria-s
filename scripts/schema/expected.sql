@@ -1,7 +1,7 @@
 -- Ramaria schema 快照（自动生成，请勿手改）
 -- 生成命令: python scripts/check_schema.py --update
 -- migration: 20261018_v3.0_schema.sql
--- 统计: 表 29 / 列 259 / 显式索引 44 / 外键 28 / schema_version=3
+-- 统计: 表 29 / 列 259 / 显式索引 45 / 外键 28 / schema_version=3
 
 -- table: backend_config
 CREATE TABLE backend_config (
@@ -430,6 +430,9 @@ CREATE INDEX idx_memory_events_share ON memory_events(share)
 
 -- index: idx_memory_l1_absorbed
 CREATE INDEX idx_memory_l1_absorbed ON memory_l1(absorbed)
+
+-- index: idx_memory_l1_effective_time
+CREATE INDEX idx_memory_l1_effective_time ON memory_l1(persona_uid, absorbed, COALESCE(occurred_at, created_at))
 
 -- index: idx_memory_l1_persona
 CREATE INDEX idx_memory_l1_persona ON memory_l1(persona_uid)

@@ -5,6 +5,8 @@
 //! - 由 shrink.rs 以 #[cfg(test)] mod tests; 收纳，与生产代码物理隔离。
 //! - 用例为确定性断言，可离线运行。
 use super::*;
+use ramaria_core::types::{PersonaEventAggregate, TraitLayer};
+use std::collections::HashMap;
 
 // ---- γ 动态计算 ----
 

@@ -237,40 +237,7 @@ impl Engine {
     /// - 宿主手动触发（批量导入后补检查等场景），与后台调度共用同一份实现；
     /// - 内部失败只记日志，不向调用方抛错。
     pub async fn trigger_l2_check(&self) {
-        let storage = self.storage_ref().as_ref();
-
-        tracing::info!("trigger_l2_check: 开始遍历 persona...");
-
-        // L1 → L2（仅检查未吸收 L1）
-        crate::lifecycle::l2_l3::check_l2_trigger(self, None).await;
-
-        // L2 → L3（独立检查未吸收事件，即使 L1 已全部吸收）
-        let personas = match storage.list_personas().await {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(error = %e, "trigger_l2_check: 查询 persona 列表失败，跳过 L3");
-                return;
-            }
-        };
-
-        for persona in &personas {
-            let unabsorbed_events = match storage.list_unabsorbed_events(&persona.uid).await {
-                Ok(e) => e,
-                Err(e) => {
-                    tracing::warn!(persona_uid = %persona.uid, error = %e, "查询未吸收事件失败");
-                    continue;
-                }
-            };
-
-            tracing::info!(
-                persona_uid = %persona.uid,
-                persona_name = %persona.name,
-                unabsorbed_event_count = unabsorbed_events.len(),
-                "检查 L3 触发条件"
-            );
-
-            crate::lifecycle::l2_l3::check_l3_trigger(self, None, &persona.uid).await;
-        }
+        crate::lifecycle::l2_l3::check_all_personas(self).await;
     }
 
     /// 手动触发指定 persona 的 L3 性格推断检查。

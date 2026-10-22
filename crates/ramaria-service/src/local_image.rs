@@ -7,9 +7,9 @@
 //! - 边界校验：空 / 超限 / 非图片魔数拒绝，不做任何落盘
 //! - 隐私：日志只记会话 id 与消息 id，不记说明文字
 
-use md5::{Digest, Md5};
-
 use ramaria_core::error::{RamariaError, RamariaResult};
+
+use crate::digest::md5_hex;
 use ramaria_core::types::{
     AttachmentStatus, InboundAttachmentKind, Message, MessageAttachment, MessageRole,
     MessageSource, image_placeholder_hash, is_social_channel, now_ms,
@@ -130,18 +130,6 @@ pub(crate) async fn send(
         placeholder,
         content,
     })
-}
-
-/// 计算字节的 md5（小写 hex）。
-fn md5_hex(bytes: &[u8]) -> String {
-    let mut hasher = Md5::new();
-    hasher.update(bytes);
-    let digest = hasher.finalize();
-    let mut out = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        out.push_str(&format!("{byte:02x}"));
-    }
-    out
 }
 
 // =========================================================

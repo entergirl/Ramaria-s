@@ -429,7 +429,7 @@ test('社交通道组：6 键齐全且默认值类型正确', () => {
     'channel.qq_enabled',
     'channel.qq_ws_url',
     'channel.telegram_enabled',
-    'channel.proactive_enabled',
+    'channel.proactive_delivery_enabled',
   ];
   const channelFields = flattenFields([channel]);
   assert.deepEqual(Object.keys(channelFields).sort(), expected.slice().sort());
@@ -451,6 +451,6 @@ test('社交通道组：6 键齐全且默认值类型正确', () => {
   assert.equal(channelFields['channel.qq_ws_url'].def, 'ws://127.0.0.1:3001');
   assert.equal(channelFields['channel.telegram_enabled'].type, 'bool');
   assert.equal(channelFields['channel.telegram_enabled'].def, false);
-  assert.equal(channelFields['channel.proactive_enabled'].type, 'bool');
-  assert.equal(channelFields['channel.proactive_enabled'].def, false);
+  assert.equal(channelFields['channel.proactive_delivery_enabled'].type, 'bool');
+  assert.equal(channelFields['channel.proactive_delivery_enabled'].def, false);
 });

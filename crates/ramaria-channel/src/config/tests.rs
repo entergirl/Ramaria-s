@@ -149,10 +149,10 @@ fn default_persona_uid_falls_back_when_blank() {
 #[test]
 fn proactive_flag_passed_through_independently() {
     let core = ChannelConfig {
-        proactive_enabled: true,
+        proactive_delivery_enabled: true,
         ..ChannelConfig::default()
     };
     let runtime = ChannelRuntimeConfig::from_config(&core, None, None);
-    assert!(runtime.proactive_enabled, "主动开关应透传");
+    assert!(runtime.proactive_delivery_enabled, "主动开关应透传");
     assert!(runtime.is_empty(), "平台未启用时仍为空装配");
 }

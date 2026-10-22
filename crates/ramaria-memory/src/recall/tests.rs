@@ -6,9 +6,12 @@
 //! - 用例为确定性断言，可离线运行。
 use super::*;
 use crate::keyword::service::KeywordService;
-use crate::retriever::{L1DocView, L2DocView, UttDocView};
+use crate::retriever::{L1DocView, L2DocView, Retriever, UttDocView};
 use ramaria_core::config::RamariaConfig;
+use ramaria_core::traits::StorageBackend;
+use ramaria_core::types::PersonaKind;
 use std::sync::{Arc, RwLock};
+use uuid::Uuid;
 
 /// 用真实 SQLite（临时文件库）构造存储后端：召回只用到 touch_l1，无需 mock 全 trait。
 async fn test_storage(tag: &str) -> Arc<dyn StorageBackend> {

@@ -80,7 +80,7 @@ fn status_json_envelope_and_empty_bindings() {
         "telegram_enabled",
         "qq_ws_url",
         "default_persona_uid",
-        "proactive_enabled",
+        "proactive_delivery_enabled",
         "qq_token_configured",
         "telegram_token_configured",
         "bindings_count",

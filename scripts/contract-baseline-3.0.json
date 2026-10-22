@@ -146,7 +146,7 @@
   "schema": {
     "tables": 29,
     "columns": 259,
-    "explicit_indexes": 44,
+    "explicit_indexes": 45,
     "foreign_keys": 28,
     "schema_version": "3"
   }

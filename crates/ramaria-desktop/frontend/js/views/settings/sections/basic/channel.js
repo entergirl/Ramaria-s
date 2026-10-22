@@ -45,7 +45,7 @@
         { path: ['qq_ws_url'], label: 'QQ WebSocket 地址', type: 'text', def: 'ws://127.0.0.1:3001', hint: 'OneBot v11 正向 WebSocket 地址（协议端服务端口）' },
         { path: ['telegram_enabled'], label: 'Telegram 平台（Bot API）', type: 'bool', def: false, hint: '需通道总开关开启；需已配置 Bot 令牌' },
         { path: ['default_persona_uid'], label: '默认本机侧人格', type: 'text', def: 'rama-0001', hint: '绑定未覆盖时使用的对话人格 uid' },
-        { path: ['proactive_enabled'], label: '社交主动投递开关', type: 'bool', def: false, hint: '主动消息投递到社交通道的总开关；还须绑定级开关放行' },
+        { path: ['proactive_delivery_enabled'], label: '社交主动投递开关', type: 'bool', def: false, hint: '主动消息投递到社交通道的总开关；还须绑定级开关放行' },
     ];
 
     /**

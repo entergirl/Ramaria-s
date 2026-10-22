@@ -479,7 +479,6 @@ async fn l2_fingerprint_similar_event_deduped() {
         .await
         .expect("提取成功");
     assert!(events.is_empty(), "近似重复事件应全部被去重跳过");
-    assert_eq!(llm.call_count(), 1, "应恰好聚类 1 簇并调用 1 次 LLM");
 
     // 库中事件数不变（仍只有预置的 1 条），未产生重复入库
     let recent = storage

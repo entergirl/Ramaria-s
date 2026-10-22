@@ -594,7 +594,7 @@ qq_ws_url = "ws://127.0.0.1:3001"
 # Telegram 通道开关（Bot API 长轮询）
 telegram_enabled = false
 # 社交主动投递总开关（默认关闭；还须绑定级开关，任一关闭即不投递）
-proactive_enabled = false
+proactive_delivery_enabled = false
 
 # =========================================================
 # 主动对话（系统主动发起消息）

@@ -8,9 +8,12 @@
 //! - 计算设备由调用方传入（CPU 或 CUDA GPU），权重经 `VarBuilder` 直接加载到目标设备
 //! - 输入使用 i64 token IDs（与 HuggingFace tokenizers 输出对齐）
 
+mod config;
+mod pooling;
+
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
-use candle_transformers::models::bert::{BertModel, Config as BertConfig};
+use candle_transformers::models::bert::BertModel;
 use ramaria_core::error::RamariaResult;
 use std::path::Path;
 use tokenizers::Tokenizer;
@@ -71,7 +74,7 @@ impl BertEncoder {
     pub fn load(model_dir: &Path, device: &Device) -> RamariaResult<Self> {
         // ---- 加载 config.json ----
         let config_path = model_dir.join(CONFIG_FILE);
-        let config = Self::parse_config(&config_path)?;
+        let config = config::parse_config(&config_path)?;
 
         let dimension = config.hidden_size;
         tracing::info!(
@@ -148,80 +151,6 @@ impl BertEncoder {
         })
     }
 
-    /// 手动解析 config.json 并构造 candle `BertConfig`。
-    ///
-    /// candle 0.8 的 `BertConfig` 的 `hidden_act` 枚举仅支持 gelu/relu，
-    /// Qwen3 等模型的 config.json 会包含 `silu`，直接反序列化会失败。
-    /// 此处从原始 JSON 逐个提取字段后手工构造，将未知激活函数映射为 Gelu。
-    fn parse_config(config_path: &Path) -> RamariaResult<BertConfig> {
-        use super::common::{config_bool, config_f64, config_usize};
-
-        let file = std::fs::File::open(config_path).map_err(|e| {
-            ramaria_core::error::RamariaError::embedding(format!(
-                "BERT 配置文件打开失败: {} — {}",
-                config_path.display(),
-                e
-            ))
-        })?;
-
-        let raw: serde_json::Value = serde_json::from_reader(file).map_err(|e| {
-            ramaria_core::error::RamariaError::embedding(format!(
-                "BERT 配置 JSON 解析失败: {} — {}",
-                config_path.display(),
-                e
-            ))
-        })?;
-
-        // hidden_act: 将不支持的激活函数映射为 Gelu（如 silu → Gelu 警告）
-        let hidden_act = raw
-            .get("hidden_act")
-            .and_then(|v| v.as_str())
-            .map(|s| match s {
-                "gelu" => candle_transformers::models::bert::HiddenAct::Gelu,
-                "gelu_approximate" | "gelu_fast" => {
-                    candle_transformers::models::bert::HiddenAct::GeluApproximate
-                }
-                "relu" => candle_transformers::models::bert::HiddenAct::Relu,
-                other => {
-                    tracing::warn!(hidden_act = other, "BERT 不支持此激活函数，使用 Gelu 替代");
-                    candle_transformers::models::bert::HiddenAct::Gelu
-                }
-            })
-            .unwrap_or(candle_transformers::models::bert::HiddenAct::Gelu);
-
-        Ok(BertConfig {
-            vocab_size: config_usize(&raw, "vocab_size", 21128),
-            hidden_size: config_usize(&raw, "hidden_size", 512),
-            num_hidden_layers: config_usize(&raw, "num_hidden_layers", 4),
-            num_attention_heads: config_usize(&raw, "num_attention_heads", 8),
-            intermediate_size: config_usize(&raw, "intermediate_size", 2048),
-            hidden_act,
-            hidden_dropout_prob: config_f64(&raw, "hidden_dropout_prob", 0.1),
-            max_position_embeddings: config_usize(&raw, "max_position_embeddings", 512),
-            type_vocab_size: config_usize(&raw, "type_vocab_size", 2),
-            initializer_range: config_f64(&raw, "initializer_range", 0.02),
-            layer_norm_eps: config_f64(&raw, "layer_norm_eps", 1e-12),
-            pad_token_id: config_usize(&raw, "pad_token_id", 0),
-            position_embedding_type: {
-                raw.get("position_embedding_type")
-                    .and_then(|v| v.as_str())
-                    .map(|s| match s {
-                        "absolute" => {
-                            candle_transformers::models::bert::PositionEmbeddingType::Absolute
-                        }
-                        _ => candle_transformers::models::bert::PositionEmbeddingType::Absolute,
-                    })
-                    .unwrap_or(candle_transformers::models::bert::PositionEmbeddingType::Absolute)
-            },
-            use_cache: config_bool(&raw, "use_cache", true),
-            classifier_dropout: raw.get("classifier_dropout").and_then(|v| v.as_f64()),
-            model_type: raw
-                .get("model_type")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
-        })
-    }
-
     /// 返回向量维度。
     pub fn dimension(&self) -> usize {
         self.dimension
@@ -254,7 +183,7 @@ impl BertEncoder {
 
         let mut token_ids: Vec<u32> = encoding.get_ids().to_vec();
         let mut attention_mask: Vec<u32> = encoding.get_attention_mask().to_vec();
-        let seq_len = Self::truncate_to_max_seq_len(&mut token_ids, &mut attention_mask);
+        let seq_len = pooling::truncate_to_max_seq_len(&mut token_ids, &mut attention_mask);
 
         // Step 2: 构建 candle 输入张量
         let input_ids = Tensor::new(token_ids.as_slice(), &self.device)
@@ -305,14 +234,14 @@ impl BertEncoder {
 
         // Step 4: Mean Pooling（attention_mask 加权）
         // mean_pooling 返回 [1, hidden_size]（保留了 batch 维度），需 squeeze 为 [hidden_size]
-        let pooled = Self::mean_pooling(&hidden_states, &attention_mask_tensor, &self.device)?;
+        let pooled = pooling::mean_pooling(&hidden_states, &attention_mask_tensor, &self.device)?;
         let pooled_1d = pooled.squeeze(0).map_err(|e| {
             ramaria_core::error::RamariaError::embedding(format!("BERT pooled squeeze 失败: {}", e))
         })?;
         // pooled_1d: [hidden_size]
 
         // Step 5: L2 Normalize
-        let normalized = Self::l2_normalize(&pooled_1d, &self.device)?;
+        let normalized = pooling::l2_normalize(&pooled_1d, &self.device)?;
 
         // Step 6: 转为 Vec<f32>
         let vec = normalized.to_vec1::<f32>().map_err(|e| {
@@ -344,7 +273,7 @@ impl BertEncoder {
             })?;
             let mut token_ids = encoding.get_ids().to_vec();
             let mut attention_mask = encoding.get_attention_mask().to_vec();
-            Self::truncate_to_max_seq_len(&mut token_ids, &mut attention_mask);
+            pooling::truncate_to_max_seq_len(&mut token_ids, &mut attention_mask);
             token_id_vecs.push(token_ids);
             attention_vecs.push(attention_mask);
         }
@@ -443,8 +372,8 @@ impl BertEncoder {
             })?;
 
             let pooled =
-                Self::mean_pooling_single(&single, &mask_tensor, actual_len, &self.device)?;
-            let normalized = Self::l2_normalize(&pooled, &self.device)?;
+                pooling::mean_pooling_single(&single, &mask_tensor, actual_len, &self.device)?;
+            let normalized = pooling::l2_normalize(&pooled, &self.device)?;
             let vec = normalized.to_vec1::<f32>().map_err(|e| {
                 ramaria_core::error::RamariaError::embedding(format!(
                     "BERT 批量输出提取失败: {}",
@@ -456,123 +385,6 @@ impl BertEncoder {
 
         Ok(all_vectors)
     }
-
-    // ---- 输入裁剪 ----
-
-    /// 将分词结果裁剪到模型最大序列长度，返回有效长度。
-    ///
-    /// 参数:
-    /// - `token_ids`: token id 序列（原地截断）。
-    /// - `attention_mask`: 与 token 序列对齐的注意力掩码（原地截断）。
-    ///
-    /// 返回:
-    /// - 裁剪后的有效 token 数（不大于 `MAX_SEQ_LEN`）。
-    ///
-    /// 说明:
-    /// - tokenizer 不保证按模型配置截断，超长输入会在位置编码处失败，因此在构建张量前统一裁剪。
-    fn truncate_to_max_seq_len(token_ids: &mut Vec<u32>, attention_mask: &mut Vec<u32>) -> usize {
-        let raw_len = token_ids.len();
-        let effective_len = raw_len.min(MAX_SEQ_LEN);
-        token_ids.truncate(effective_len);
-        attention_mask.truncate(effective_len);
-        if raw_len > MAX_SEQ_LEN {
-            tracing::debug!(
-                raw_len,
-                effective_len,
-                max = MAX_SEQ_LEN,
-                "BERT 输入序列超长，已按最大长度截断"
-            );
-        }
-        effective_len
-    }
-
-    // ---- 池化辅助 ----
-
-    /// Mean pooling: attention_mask 加权平均。
-    ///
-    /// hidden_states: [1, seq_len, hidden_size]
-    /// attention_mask: [1, seq_len]
-    fn mean_pooling(hidden: &Tensor, mask: &Tensor, _device: &Device) -> RamariaResult<Tensor> {
-        let mask_f32 = mask.to_dtype(DType::F32).map_err(|e| {
-            ramaria_core::error::RamariaError::embedding(format!("mask 类型转换失败: {}", e))
-        })?;
-        // mask_f32: [1, seq_len]
-
-        let mask_expanded = mask_f32.unsqueeze(2).map_err(|e| {
-            ramaria_core::error::RamariaError::embedding(format!("mask expand 失败: {}", e))
-        })?;
-        // mask_expanded: [1, seq_len, 1]
-
-        // candle 的 mul 要求形状完全一致，mask 是 [1, seq_len, 1] 而 hidden 是 [1, seq_len, H]，
-        // 需使用 broadcast_mul 让 mask 的最后一维广播到 H。
-        let masked = hidden.broadcast_mul(&mask_expanded).map_err(|e| {
-            ramaria_core::error::RamariaError::embedding(format!(
-                "masked broadcast_mul 失败: {}",
-                e
-            ))
-        })?;
-        // masked: [1, seq_len, hidden_size]
-
-        let summed = masked.sum(1).map_err(|e| {
-            ramaria_core::error::RamariaError::embedding(format!("sum 失败: {}", e))
-        })?;
-        // summed: [1, hidden_size]
-
-        let mask_sum = mask_f32.sum_all().map_err(|e| {
-            ramaria_core::error::RamariaError::embedding(format!("mask_sum 失败: {}", e))
-        })?;
-        // mask_sum: scalar
-
-        if mask_sum.to_scalar::<f32>().map_err(|e| {
-            ramaria_core::error::RamariaError::embedding(format!("scalar 提取失败: {}", e))
-        })? < 1e-8
-        {
-            return Err(ramaria_core::error::RamariaError::embedding(
-                "attention_mask 全为零，无法池化",
-            ));
-        }
-
-        // summed: [1, H], mask_sum: scalar [] → 需 broadcast_div 广播标量
-        let pooled = summed.broadcast_div(&mask_sum).map_err(|e| {
-            ramaria_core::error::RamariaError::embedding(format!("broadcast_div 失败: {}", e))
-        })?;
-
-        Ok(pooled)
-    }
-
-    /// 单条 Mean pooling（批量处理时逐条调用）。
-    ///
-    /// hidden: [seq_len, hidden_size]
-    /// mask: [seq_len] (f32 tensor)
-    fn mean_pooling_single(
-        hidden: &Tensor,
-        mask: &Tensor,
-        _actual_len: usize,
-        device: &Device,
-    ) -> RamariaResult<Tensor> {
-        // 添加 batch 维度
-        let hidden_3d = hidden.unsqueeze(0).map_err(|e| {
-            ramaria_core::error::RamariaError::embedding(format!("unsqueeze 失败: {}", e))
-        })?;
-        let mask_2d = mask.unsqueeze(0).map_err(|e| {
-            ramaria_core::error::RamariaError::embedding(format!("mask unsqueeze 失败: {}", e))
-        })?;
-
-        let pooled_2d = Self::mean_pooling(&hidden_3d, &mask_2d, device)?;
-        // pooled_2d: [1, hidden_size]
-
-        let pooled_1d = pooled_2d.squeeze(0).map_err(|e| {
-            ramaria_core::error::RamariaError::embedding(format!("squeeze 失败: {}", e))
-        })?;
-        // pooled_1d: [hidden_size]
-
-        Ok(pooled_1d)
-    }
-
-    /// L2 归一化（委托给共享工具 `common::l2_normalize`）。
-    fn l2_normalize(vector: &Tensor, device: &Device) -> RamariaResult<Tensor> {
-        super::common::l2_normalize(vector, device)
-    }
 }
 
 // =========================================================
@@ -580,95 +392,4 @@ impl BertEncoder {
 // =========================================================
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use candle_nn::{VarBuilder, VarMap};
-    use tokenizers::models::wordlevel::WordLevel;
-    use tokenizers::pre_tokenizers::whitespace::Whitespace;
-
-    /// 构造仅用于测试的小型 BERT 编码器。
-    ///
-    /// 说明:
-    /// - 权重由 `VarMap` 在内存中初始化，不读取模型文件。
-    /// - 分词器按空白切分，词表只含 `[UNK]` 与 `a`，便于构造任意长度的 token 序列。
-    fn tiny_encoder() -> BertEncoder {
-        let device = Device::Cpu;
-
-        let mut vocab = std::collections::HashMap::new();
-        vocab.insert("[UNK]".to_string(), 0u32);
-        vocab.insert("a".to_string(), 1u32);
-        let word_level = WordLevel::builder()
-            .vocab(vocab.into_iter().collect())
-            .unk_token("[UNK]".to_string())
-            .build()
-            .expect("测试分词器应可构造");
-        let mut tokenizer = Tokenizer::new(word_level);
-        tokenizer.with_pre_tokenizer(Some(Whitespace));
-
-        let config = BertConfig {
-            vocab_size: 2,
-            hidden_size: 8,
-            num_hidden_layers: 1,
-            num_attention_heads: 2,
-            intermediate_size: 16,
-            hidden_act: candle_transformers::models::bert::HiddenAct::Gelu,
-            hidden_dropout_prob: 0.0,
-            max_position_embeddings: MAX_SEQ_LEN,
-            type_vocab_size: 2,
-            initializer_range: 0.02,
-            layer_norm_eps: 1e-12,
-            pad_token_id: 0,
-            position_embedding_type:
-                candle_transformers::models::bert::PositionEmbeddingType::Absolute,
-            use_cache: false,
-            classifier_dropout: None,
-            model_type: None,
-        };
-        let varmap = VarMap::new();
-        let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
-        let model = BertModel::load(vb, &config).expect("测试模型应可构造");
-
-        BertEncoder {
-            model,
-            tokenizer,
-            dimension: config.hidden_size,
-            device,
-        }
-    }
-
-    /// 测试空文本应报错
-    #[test]
-    fn empty_text_detection() {
-        // 不依赖实际模型 — 测试逻辑正确性
-        let err = ramaria_core::error::RamariaError::embedding("嵌入文本不能为空");
-        assert_eq!(err.category(), "embedding");
-        assert!(err.to_string().contains("嵌入文本不能为空"));
-    }
-
-    /// 超长文本应在截断到最大序列长度后成功生成向量。
-    #[test]
-    fn long_text_is_truncated_and_embedded() {
-        let encoder = tiny_encoder();
-        let text = "a ".repeat(MAX_SEQ_LEN + 88);
-
-        let vector = encoder
-            .embed_text(&text)
-            .expect("超长文本应在截断后成功生成向量");
-
-        assert_eq!(vector.len(), encoder.dimension());
-    }
-
-    /// 裁剪会同时收紧 token 序列与注意力掩码，两者长度保持一致。
-    #[test]
-    fn truncate_to_max_seq_len_clamps_ids_and_mask() {
-        let mut token_ids = vec![1u32; MAX_SEQ_LEN + 88];
-        let mut attention_mask = vec![1u32; MAX_SEQ_LEN + 88];
-
-        let effective_len =
-            BertEncoder::truncate_to_max_seq_len(&mut token_ids, &mut attention_mask);
-
-        assert_eq!(effective_len, MAX_SEQ_LEN);
-        assert_eq!(token_ids.len(), MAX_SEQ_LEN);
-        assert_eq!(attention_mask.len(), MAX_SEQ_LEN);
-    }
-}
+mod tests;

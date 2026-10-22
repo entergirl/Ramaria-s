@@ -1035,7 +1035,10 @@ fn channel_config_defaults_follow_decisions() {
     assert!(!cfg.channel.qq_enabled, "QQ 平台开关默认关闭");
     assert_eq!(cfg.channel.qq_ws_url, "ws://127.0.0.1:3001");
     assert!(!cfg.channel.telegram_enabled, "Telegram 平台开关默认关闭");
-    assert!(!cfg.channel.proactive_enabled, "社交主动投递总开关默认关闭");
+    assert!(
+        !cfg.channel.proactive_delivery_enabled,
+        "社交主动投递总开关默认关闭"
+    );
 }
 
 #[test]

@@ -5,7 +5,7 @@
 职责:
 - 扫描 config/default.toml 的 section 与键（不依赖第三方 TOML 库）；
 - 与 scripts/config-baseline-3.0.json（3.0 键面机器基线）比对：section 集合、键集合、重复键；
-- 交叉校验每个键名在 ramaria-core/src/config/*.rs 中存在同名 pub 字段（模板与结构体不脱节）；
+- 交叉校验每个键名在 ramaria-core/src/config/**/*.rs 中存在同名 pub 字段（模板与结构体不脱节）；
 - 不一致即退出码 1。
 
 用法:
@@ -75,7 +75,7 @@ def scan_config(path: Path) -> Tuple[List[str], List[str]]:
 
 def collect_rust_fields(root: Path) -> Set[str]:
     fields: Set[str] = set()
-    for path in sorted((root / CONFIG_RS_DIR).glob("*.rs")):
+    for path in sorted((root / CONFIG_RS_DIR).rglob("*.rs")):
         text = io.open(path, encoding="utf-8").read()
         for match in re.finditer(r"^\s*pub ([a-z_][a-z0-9_]*):", text, re.M):
             fields.add(match.group(1))

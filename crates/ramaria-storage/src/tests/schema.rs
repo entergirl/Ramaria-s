@@ -80,7 +80,7 @@ async fn baseline_schema_totals() {
     .fetch_all(pool)
     .await
     .expect("查询索引清单应成功");
-    assert_eq!(indexes.len(), 44, "显式索引数应为 44");
+    assert_eq!(indexes.len(), 45, "显式索引数应为 45");
 }
 
 /// 已删除对象不得出现在基线中。

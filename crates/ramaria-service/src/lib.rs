@@ -54,6 +54,7 @@ pub mod channel;
 pub mod chat;
 pub mod config;
 pub mod diagnostics;
+mod digest;
 pub mod embedding_store;
 pub mod engine;
 pub mod error_hint;

@@ -210,7 +210,7 @@ impl Default for McpConfig {
 /// - `qq_enabled`: QQ 通道开关（OneBot v11 正向 WS），默认 false。
 /// - `qq_ws_url`: OneBot v11 正向 WS 服务地址（协议端监听，Ramaria 作客户端）。
 /// - `telegram_enabled`: Telegram 通道开关，默认 false。
-/// - `proactive_enabled`: 社交主动投递总开关，默认 false；
+/// - `proactive_delivery_enabled`: 社交主动投递总开关，默认 false；
 ///   还须绑定级开关同时开启才实际投递（多层叠加）。
 ///
 /// 安全约束:
@@ -234,7 +234,7 @@ pub struct ChannelConfig {
     /// Telegram 通道开关（默认 false）。
     pub telegram_enabled: bool,
     /// 社交主动投递总开关（默认 false；还须绑定级开关，任一关闭即不投递）。
-    pub proactive_enabled: bool,
+    pub proactive_delivery_enabled: bool,
 }
 
 impl Default for ChannelConfig {
@@ -251,7 +251,7 @@ impl Default for ChannelConfig {
             qq_enabled: false,
             qq_ws_url: "ws://127.0.0.1:3001".to_string(),
             telegram_enabled: false,
-            proactive_enabled: false,
+            proactive_delivery_enabled: false,
         }
     }
 }

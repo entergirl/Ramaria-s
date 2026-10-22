@@ -340,7 +340,7 @@
                 { path: ['qq_enabled'], label: 'QQ 平台开关', type: 'bool', def: false, hint: '需通道总开关开启' },
                 { path: ['qq_ws_url'], label: 'QQ WS 地址', type: 'text', def: 'ws://127.0.0.1:3001', hint: 'OneBot v11 正向 WebSocket 地址（NapCat 服务端口）' },
                 { path: ['telegram_enabled'], label: 'Telegram 平台开关', type: 'bool', def: false, hint: '需通道总开关开启' },
-                { path: ['proactive_enabled'], label: '社交主动投递开关', type: 'bool', def: false, hint: '主动消息投递到社交通道的总开关；还须绑定级开关放行' },
+                { path: ['proactive_delivery_enabled'], label: '社交主动投递开关', type: 'bool', def: false, hint: '主动消息投递到社交通道的总开关；还须绑定级开关放行' },
             ],
         },
     ];

@@ -18,7 +18,7 @@ pub(crate) use experiment::aggregate_repeat_stats;
 #[cfg(test)]
 pub(crate) use experiment::filter_variants;
 #[cfg(test)]
-pub(crate) use experiment::t_critical_975;
+pub(crate) use experiment::stats::t_critical_975;
 #[cfg(test)]
 pub(crate) use session::STATEMENT_REGISTER_LEAD;
 #[cfg(test)]

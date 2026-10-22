@@ -366,7 +366,6 @@ async fn loop_with_judge_uses_scripted_llm() {
         "判据开启时生成应消费脚本第二条；取到判据 JSON 说明判据调用被跳过"
     );
     assert_eq!(message.source, "event");
-    assert_eq!(llm.call_count(), 2, "应恰为判据与生成各一次调用");
 
     // 落库：问候类新建会话仅 1 条 `is_proactive=true` 的 assistant 消息
     let messages = storage

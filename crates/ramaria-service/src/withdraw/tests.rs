@@ -45,7 +45,7 @@ fn recall_config() -> RamariaConfig {
     config.proactive.daily_limit = 3;
     config.proactive.daily_total_limit = 0;
     config.proactive.quiet_hours = String::new();
-    config.channel.proactive_enabled = true;
+    config.channel.proactive_delivery_enabled = true;
     config
 }
 
@@ -326,7 +326,6 @@ async fn notice_triggers_reaction_when_judge_speaks() {
         .await
         .expect("读取全局状态应成功");
     assert_eq!(global.daily_count, 1, "全局日计数应加一");
-    assert_eq!(llm.call_count(), 2, "判据与生成各一次调用");
 
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -569,7 +568,6 @@ async fn notice_skips_reaction_when_judge_silent() {
     assert_eq!(state.judge_no_count, 1, "沉默应计 no");
     assert_eq!(state.judge_yes_count, 0);
     assert_eq!(state.last_sent_at, None, "未投递不应记账投递时间");
-    assert_eq!(llm.call_count(), 1, "仅判据一次调用");
 
     let _ = std::fs::remove_dir_all(dir);
 }

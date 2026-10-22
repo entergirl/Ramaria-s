@@ -9,12 +9,11 @@
 
 use std::path::{Path, PathBuf};
 
-use md5::{Digest, Md5};
-
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::types::StickerAsset;
 use ramaria_core::types::now_ms;
 
+use crate::digest::md5_hex;
 use crate::engine::Engine;
 use crate::types::StickerPayload;
 
@@ -275,18 +274,6 @@ fn extension_for_mime(mime: &str) -> &'static str {
         "image/bmp" => "bmp",
         _ => "jpg",
     }
-}
-
-/// 计算字节的 md5（小写 hex）。
-fn md5_hex(bytes: &[u8]) -> String {
-    let mut hasher = Md5::new();
-    hasher.update(bytes);
-    let digest = hasher.finalize();
-    let mut out = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        out.push_str(&format!("{byte:02x}"));
-    }
-    out
 }
 
 // =========================================================

@@ -16,6 +16,7 @@ use ramaria_core::types::{ChannelBinding, ChannelPlatform};
 use crate::engine::Engine;
 
 pub(crate) mod ingest;
+pub(crate) mod validate;
 
 // =========================================================
 // 绑定用例
@@ -25,7 +26,7 @@ pub(crate) mod ingest;
 ///
 /// 返回:
 /// - 绑定行列表（无绑定时为空列表）。
-pub async fn list_bindings(engine: &Engine) -> RamariaResult<Vec<ChannelBinding>> {
+pub(crate) async fn list_bindings(engine: &Engine) -> RamariaResult<Vec<ChannelBinding>> {
     engine.storage().list_channel_bindings().await
 }
 
@@ -43,13 +44,13 @@ pub async fn list_bindings(engine: &Engine) -> RamariaResult<Vec<ChannelBinding>
 ///
 /// 返回:
 /// - 命中的绑定行（含本次自动建档的行）。
-pub async fn resolve_binding(
+pub(crate) async fn resolve_binding(
     engine: &Engine,
     channel: &str,
     external_ref: &str,
 ) -> RamariaResult<ChannelBinding> {
-    let channel = validate_channel(channel)?;
-    let external_ref = validate_external_ref(external_ref)?;
+    let channel = validate::channel(channel)?;
+    let external_ref = validate::external_ref(external_ref)?;
 
     match engine
         .storage()
@@ -85,13 +86,13 @@ pub async fn resolve_binding(
 /// 返回:
 /// - `Some(binding)`: 命中的绑定行；
 /// - `None`: 不存在（未建档）。
-pub async fn find_binding(
+pub(crate) async fn find_binding(
     engine: &Engine,
     channel: &str,
     external_ref: &str,
 ) -> RamariaResult<Option<ChannelBinding>> {
-    let channel = validate_channel(channel)?;
-    let external_ref = validate_external_ref(external_ref)?;
+    let channel = validate::channel(channel)?;
+    let external_ref = validate::external_ref(external_ref)?;
     engine
         .storage()
         .get_channel_binding(channel, external_ref)
@@ -106,7 +107,7 @@ pub async fn find_binding(
 ///
 /// 返回:
 /// - 更新后的完整绑定行。
-pub async fn set_binding(
+pub(crate) async fn set_binding(
     engine: &Engine,
     channel: &str,
     external_ref: &str,
@@ -153,13 +154,13 @@ pub async fn set_binding(
 }
 
 /// 删除通道绑定（幂等：不存在视同成功）。
-pub async fn delete_binding(
+pub(crate) async fn delete_binding(
     engine: &Engine,
     channel: &str,
     external_ref: &str,
 ) -> RamariaResult<()> {
-    let channel = validate_channel(channel)?;
-    let external_ref = validate_external_ref(external_ref)?;
+    let channel = validate::channel(channel)?;
+    let external_ref = validate::external_ref(external_ref)?;
     engine
         .storage()
         .delete_channel_binding(channel, external_ref)
@@ -176,7 +177,7 @@ pub async fn delete_binding(
 ///
 /// 说明:
 /// - 三侧均 trim 归一；返回值为 trim 后的非空字符串（纯函数，不访问存储）。
-pub fn effective_persona_uid(config: &ChannelConfig, binding: &ChannelBinding) -> String {
+pub(crate) fn effective_persona_uid(config: &ChannelConfig, binding: &ChannelBinding) -> String {
     let bound = binding
         .persona_uid
         .as_deref()
@@ -191,28 +192,6 @@ pub fn effective_persona_uid(config: &ChannelConfig, binding: &ChannelBinding) -
     } else {
         default_uid.to_string()
     }
-}
-
-// =========================================================
-// 校验辅助
-// =========================================================
-
-/// 校验通道标识（trim 后须非空）；返回 trim 后的值。
-fn validate_channel(channel: &str) -> RamariaResult<&str> {
-    let trimmed = channel.trim();
-    if trimmed.is_empty() {
-        return Err(RamariaError::validation("通道标识不能为空"));
-    }
-    Ok(trimmed)
-}
-
-/// 校验会话外部标识（trim 后须非空）；返回 trim 后的值。
-fn validate_external_ref(external_ref: &str) -> RamariaResult<&str> {
-    let trimmed = external_ref.trim();
-    if trimmed.is_empty() {
-        return Err(RamariaError::validation("会话外部标识不能为空"));
-    }
-    Ok(trimmed)
 }
 
 // =========================================================
@@ -251,7 +230,7 @@ pub(crate) fn delete_credential(engine: &Engine, service: &str) -> RamariaResult
 ///
 /// 返回:
 /// - 写入失败为隐私域错误（keychain 不可用 / 权限不足）。
-pub fn save_credential(
+pub(crate) fn save_credential(
     engine: &Engine,
     platform: ChannelPlatform,
     token: &str,
@@ -268,12 +247,15 @@ pub fn save_credential(
 }
 
 /// 查询平台凭据是否已配置。
-pub fn credential_configured(engine: &Engine, platform: ChannelPlatform) -> RamariaResult<bool> {
+pub(crate) fn credential_configured(
+    engine: &Engine,
+    platform: ChannelPlatform,
+) -> RamariaResult<bool> {
     Ok(load_credential(engine, platform)?.is_some())
 }
 
 /// 读取平台凭据（None = 未配置）。
-pub fn load_credential(
+pub(crate) fn load_credential(
     engine: &Engine,
     platform: ChannelPlatform,
 ) -> RamariaResult<Option<String>> {

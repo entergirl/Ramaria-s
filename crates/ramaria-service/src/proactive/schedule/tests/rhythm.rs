@@ -7,6 +7,7 @@
 //! - 断言口径：库中 reload 的运行时状态、选题器收到的时机权重实参。
 
 use super::*;
+use ramaria_core::types::now_ms;
 
 /// 记录时机权重实参的选题器（不产出候选）。
 struct RecordingPicker {

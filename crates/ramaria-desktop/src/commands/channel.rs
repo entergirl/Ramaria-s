@@ -24,7 +24,7 @@ use crate::channels::ChannelStatusView;
 ///
 /// 字段约定:
 /// - `enabled` / `qq_enabled` / `telegram_enabled`: `[channel]` 生效开关；
-/// - `qq_ws_url` / `default_persona_uid` / `proactive_enabled`: 面板回显配置值；
+/// - `qq_ws_url` / `default_persona_uid` / `proactive_delivery_enabled`: 面板回显配置值；
 /// - `*_token_configured`: 平台凭据是否已保存（读取失败按未配置）；
 /// - `running` / `channels`: 运行时运行态与各通道状态列表（未运行为空）。
 #[derive(Debug, Clone, Serialize)]
@@ -35,7 +35,7 @@ pub struct ChannelPanelView {
     pub telegram_enabled: bool,
     pub qq_ws_url: String,
     pub default_persona_uid: String,
-    pub proactive_enabled: bool,
+    pub proactive_delivery_enabled: bool,
     pub qq_token_configured: bool,
     pub telegram_token_configured: bool,
     pub running: bool,
@@ -101,7 +101,7 @@ async fn build_panel_view(state: &DesktopState) -> Result<ChannelPanelView, Stri
         telegram_enabled: config.channel.telegram_enabled,
         qq_ws_url: config.channel.qq_ws_url.clone(),
         default_persona_uid: config.channel.default_persona_uid.clone(),
-        proactive_enabled: config.channel.proactive_enabled,
+        proactive_delivery_enabled: config.channel.proactive_delivery_enabled,
         qq_token_configured: credential_configured_silent(&state.engine, ChannelPlatform::Qq),
         telegram_token_configured: credential_configured_silent(
             &state.engine,
@@ -321,7 +321,7 @@ mod tests {
             telegram_enabled: false,
             qq_ws_url: "ws://127.0.0.1:3001".to_string(),
             default_persona_uid: "rama-0001".to_string(),
-            proactive_enabled: false,
+            proactive_delivery_enabled: false,
             qq_token_configured: true,
             telegram_token_configured: false,
             running: false,

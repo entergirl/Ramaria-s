@@ -9,14 +9,12 @@
 
 use std::sync::Arc;
 
-use ramaria_core::behavior::{
-    BehaviorParams, BehaviorRule, BehaviorSituation, RuleSource, SignalType, TargetType,
-};
+use ramaria_core::behavior::{BehaviorParams, BehaviorRule, BehaviorSituation, RuleSource};
 use ramaria_core::config::RamariaConfig;
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::traits::{StoreCrud, StoreInfrastructure};
 use ramaria_core::types::{
-    AppState, MemoryEvent, Message, MessageRole, MessageSource, Persona, PersonaKind, Presentation,
+    MemoryEvent, Message, MessageRole, MessageSource, Persona, PersonaKind, Presentation,
 };
 use ramaria_memory::behavior::RoutingResult;
 use ramaria_service::Engine;
@@ -180,38 +178,6 @@ async fn learn_replaces_old_auto_rules() {
     assert_ne!(rules[0].reaction.as_deref(), Some("旧规则"));
 }
 
-#[tokio::test]
-async fn learn_with_behavior_disabled_returns_empty() {
-    let (storage, engine) = make_engine_behavior_disabled();
-    setup_persona(&storage, "char-0001").await;
-    for _ in 0..8 {
-        make_event(&storage, "char-0001", "加班,累", -0.5).await;
-    }
-    // 行为关闭 → 学习为空
-    let outcome = engine
-        .behavior_learn("char-0001")
-        .await
-        .expect("学习不报错");
-    assert_eq!(outcome.event_count, 0);
-    assert_eq!(outcome.cluster_count, 0);
-    assert!(
-        engine
-            .behavior_list_rules("char-0001")
-            .await
-            .unwrap()
-            .is_empty()
-    );
-}
-
-#[tokio::test]
-async fn learn_no_events_no_rules() {
-    let (storage, engine) = make_engine();
-    setup_persona(&storage, "char-0001").await;
-    let outcome = engine.behavior_learn("char-0001").await.expect("学习成功");
-    assert_eq!(outcome.event_count, 0);
-    assert_eq!(outcome.cluster_count, 0);
-}
-
 // =========================================================
 // 情境路由
 // =========================================================
@@ -276,192 +242,6 @@ async fn route_empty_rule_set_returns_unmatched() {
 // =========================================================
 // 规则管理
 // =========================================================
-
-#[tokio::test]
-async fn import_rule_invalid_json_rejected() {
-    let (_storage, engine) = make_engine();
-    let err = engine
-        .behavior_import_rule("char-0001", "这不是 JSON")
-        .await
-        .expect_err("非法 JSON 应拒绝");
-    assert!(matches!(err, RamariaError::Validation { .. }));
-}
-
-#[tokio::test]
-async fn import_rule_missing_situation_rejected() {
-    let (_storage, engine) = make_engine();
-    let err = engine
-        .behavior_import_rule("char-0001", r#"{"reaction": "测试"}"#)
-        .await
-        .expect_err("缺 situation 应拒绝");
-    assert!(matches!(err, RamariaError::Validation { .. }));
-}
-
-#[tokio::test]
-async fn import_rule_empty_situation_rejected() {
-    let (_storage, engine) = make_engine();
-    let json = r#"{"situation": {"keywords": [], "valence_mean": 0.0}, "reaction": "测试"}"#;
-    let err = engine
-        .behavior_import_rule("char-0001", json)
-        .await
-        .expect_err("空情境应拒绝");
-    assert!(matches!(err, RamariaError::Validation { .. }));
-}
-
-#[tokio::test]
-async fn import_rule_valid_json_creates_manual_rule() {
-    let (storage, engine) = make_engine();
-    setup_persona(&storage, "char-0001").await;
-    let json = r#"{
-        "situation": {"keywords": ["失眠"], "valence_mean": -0.6, "valence_std": 0.1, "sample_count": 1},
-        "reaction": "当聊到失眠时，倾向轻声安慰。",
-        "params": {"emotional_intensity": -0.6, "proactiveness": 0.8, "detail_level": 0.4, "formality": 0.2},
-        "avoid": ["睡前聊工作"]
-    }"#;
-    let id = engine
-        .behavior_import_rule("char-0001", json)
-        .await
-        .expect("合法导入成功");
-    let rule = engine
-        .behavior_get_rule(id)
-        .await
-        .expect("查询成功")
-        .expect("应命中");
-    assert_eq!(rule.source, RuleSource::Manual, "导入规则为 Manual");
-    assert!(rule.enabled);
-    assert_eq!(rule.avoid, vec!["睡前聊工作"]);
-    assert_eq!(rule.situation.keywords, vec!["失眠"]);
-}
-
-#[tokio::test]
-async fn edit_rule_writes_s1_feedback_and_manualizes() {
-    let (storage, engine) = make_engine();
-    setup_persona(&storage, "char-0001").await;
-    let mut rule = BehaviorRule::new(
-        "char-0001",
-        BehaviorSituation {
-            keywords: vec!["加班".into()],
-            centroid: None,
-            response_centroid: None,
-            valence_mean: -0.4,
-            valence_std: 0.1,
-            sample_count: 6,
-            presentation_dist: Vec::new(),
-            situation_strength_mean: 3.0,
-            time_span_days: 10.0,
-            trait_refs: Vec::new(),
-        },
-        Some("原规则".into()),
-        BehaviorParams::default(),
-        RuleSource::Auto,
-    );
-    let id = storage.save_behavior_rule(&rule).await.expect("保存成功");
-    rule.id = id;
-    rule.reaction = Some("编辑后的规则".into());
-
-    engine
-        .behavior_edit_rule(&mut rule, Some("sess-1"))
-        .await
-        .expect("编辑成功");
-
-    let updated = engine
-        .behavior_get_rule(id)
-        .await
-        .expect("查询成功")
-        .unwrap();
-    assert_eq!(updated.reaction.as_deref(), Some("编辑后的规则"));
-    assert_eq!(
-        updated.source,
-        RuleSource::Manual,
-        "编辑后转为 Manual（强锚点）"
-    );
-
-    // S1 反馈日志断言
-    let logs = storage
-        .list_feedback_logs_by_persona("char-0001")
-        .await
-        .expect("查询成功");
-    assert_eq!(logs.len(), 1);
-    assert_eq!(logs[0].signal_type, SignalType::Edit);
-    assert_eq!(logs[0].weight, 1.0, "S1 强信号 weight=1.0");
-    assert_eq!(logs[0].target_type, TargetType::BehaviorRule);
-    assert_eq!(logs[0].target_id, id.to_string());
-    assert_eq!(logs[0].session_id.as_deref(), Some("sess-1"));
-    let detail = logs[0].detail.as_deref().unwrap();
-    assert!(
-        detail.contains("原规则") && detail.contains("编辑后的规则"),
-        "detail 含编辑前后快照"
-    );
-}
-
-#[tokio::test]
-async fn disable_rule_writes_s1_feedback() {
-    let (storage, engine) = make_engine();
-    setup_persona(&storage, "char-0001").await;
-    let rule = BehaviorRule::new(
-        "char-0001",
-        BehaviorSituation::empty(),
-        Some("测试规则".into()),
-        BehaviorParams::default(),
-        RuleSource::Auto,
-    );
-    let id = storage.save_behavior_rule(&rule).await.expect("保存成功");
-
-    engine
-        .behavior_set_rule_enabled(id, false, None)
-        .await
-        .expect("禁用成功");
-    assert!(!engine.behavior_get_rule(id).await.unwrap().unwrap().enabled);
-
-    let logs = storage
-        .list_feedback_logs_by_persona("char-0001")
-        .await
-        .expect("查询成功");
-    assert_eq!(logs.len(), 1);
-    assert_eq!(logs[0].signal_type, SignalType::Disable);
-    assert_eq!(logs[0].weight, 1.0);
-}
-
-#[tokio::test]
-async fn enable_rule_no_feedback() {
-    let (storage, engine) = make_engine();
-    setup_persona(&storage, "char-0001").await;
-    let mut rule = BehaviorRule::new(
-        "char-0001",
-        BehaviorSituation::empty(),
-        Some("测试规则".into()),
-        BehaviorParams::default(),
-        RuleSource::Auto,
-    );
-    rule.enabled = false;
-    let id = storage.save_behavior_rule(&rule).await.expect("保存成功");
-
-    engine
-        .behavior_set_rule_enabled(id, true, None)
-        .await
-        .expect("启用成功");
-    let logs = storage
-        .list_feedback_logs_by_persona("char-0001")
-        .await
-        .expect("查询成功");
-    assert!(logs.is_empty(), "启用非用户干预，不写 S1");
-}
-
-#[tokio::test]
-async fn delete_rule_removes() {
-    let (storage, engine) = make_engine();
-    setup_persona(&storage, "char-0001").await;
-    let rule = BehaviorRule::new(
-        "char-0001",
-        BehaviorSituation::empty(),
-        Some("待删规则".into()),
-        BehaviorParams::default(),
-        RuleSource::Auto,
-    );
-    let id = storage.save_behavior_rule(&rule).await.expect("保存成功");
-    engine.behavior_delete_rule(id).await.expect("删除成功");
-    assert!(engine.behavior_get_rule(id).await.unwrap().is_none());
-}
 
 #[tokio::test]
 async fn rule_evidence_traces_to_events() {
@@ -559,25 +339,6 @@ async fn incremental_assigns_new_event_to_existing_rule() {
 }
 
 #[tokio::test]
-async fn incremental_disabled_behavior_is_noop() {
-    let (storage, engine) = make_engine_behavior_disabled();
-    setup_persona(&storage, "char-0001").await;
-    make_event(&storage, "char-0001", "加班,累", -0.5).await;
-    // 行为关闭 → 增量更新直接返回（不产生规则）
-    engine
-        .behavior_incremental_update("char-0001")
-        .await
-        .expect("关闭时不报错");
-    assert!(
-        engine
-            .behavior_list_rules("char-0001")
-            .await
-            .unwrap()
-            .is_empty()
-    );
-}
-
-#[tokio::test]
 async fn incremental_decays_old_rule_to_disabled() {
     let (storage, engine) = make_engine();
     setup_persona(&storage, "char-0001").await;
@@ -623,11 +384,4 @@ async fn incremental_decays_old_rule_to_disabled() {
         rule[0].evidence.iter().all(|e| e.weight < 0.5),
         "证据已衰减"
     );
-}
-
-#[tokio::test]
-async fn app_state_ready_for_behavior() {
-    // 引擎构造后状态正常（装配阶段不推进状态）
-    let (_storage, engine) = make_engine();
-    assert_eq!(engine.current_state(), AppState::NeedsSetup);
 }

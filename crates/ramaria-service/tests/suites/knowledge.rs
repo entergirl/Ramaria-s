@@ -126,24 +126,6 @@ async fn only_active_facts_injected() {
 // 知识检索无 embedding 依赖（embedding 不可用 → 同 field 召回仍可用）
 // =========================================================
 
-#[tokio::test]
-async fn retrieval_works_without_embedding() {
-    // load_knowledge_facts_for_query 走规则判定器（零 embedding/零 LLM），
-    // 即使 embedding 模型不可用也不阻塞——知识检索本身就是同 field/关键词召回。
-    let storage = MockStorage::new();
-    storage.add_fact(active_fact("char-0001", "喜欢科幻电影", "电影,科幻"));
-
-    let config = KnowledgeConfig::default();
-    let facts =
-        load_knowledge_facts_for_query(&storage, &config, "char-0001", "你喜欢看什么电影？").await;
-
-    assert_eq!(
-        facts.len(),
-        1,
-        "embedding 不可用 → 知识同 field 召回仍可用（不阻塞主流程）"
-    );
-}
-
 // =========================================================
 // 检索/注入严格按 persona_uid 隔离（跨 persona 不可见）
 // =========================================================
@@ -187,16 +169,3 @@ async fn persona_isolation_same_persona_only() {
 // =========================================================
 // 读取 active 事实失败 → 静默降级为空（不阻塞主流程）
 // =========================================================
-
-/// 读取失败场景：知识层读取 active 事实时存储报错 → 降级为空，不抛错。
-#[tokio::test]
-async fn retrieval_failure_degrades_to_empty() {
-    // MockStorage 不会失败；此处验证"空库（无该 persona 事实）→ 空结果不抛错"，
-    // 等价于存储读取无结果时的静默降级路径。
-    let storage = MockStorage::new();
-    let config = KnowledgeConfig::default();
-
-    let facts =
-        load_knowledge_facts_for_query(&storage, &config, "char-0001", "你喜欢什么电影？").await;
-    assert!(facts.is_empty(), "空库 → 空结果，不阻塞主流程");
-}

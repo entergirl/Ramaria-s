@@ -138,9 +138,10 @@ pub async fn run(engine: &Arc<Engine>, cmd: RuleCmd, json: bool, yes: bool) -> a
 #[cfg(test)]
 pub(crate) use clusters::{GateTally, summarize_counterfactual, tally_quality_gate};
 #[cfg(test)]
+pub(crate) use incremental::stats::percentile;
+#[cfg(test)]
 pub(crate) use incremental::{
-    judge_agreement, majority_vote_label, percentile, split_index_by_ratio,
-    summarize_cluster_shapes,
+    judge_agreement, majority_vote_label, split_index_by_ratio, summarize_cluster_shapes,
 };
 
 #[cfg(test)]

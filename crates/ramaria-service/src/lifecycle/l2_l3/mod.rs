@@ -9,15 +9,18 @@
 //!
 //! 模块划分:
 //! - `l2`：L2 触发检查与提取执行（含共享停止位判定）；
+//! - `all`：宿主手动触发的全量检查（L2 触发 + 全 persona 独立 L3）；
 //! - `unbound`：无主 L1 归属与触发处理（数据断层修复）；
 //! - `l3`：L3 触发检查、性格推断全流程与首轮判定；
 //! - `schedule`：后台定时任务与单轮定时检查。
 
+mod all;
 mod l2;
 mod l3;
 mod schedule;
 mod unbound;
 
+pub(crate) use all::check_all_personas;
 pub(crate) use l2::check_l2_trigger;
 pub(crate) use l3::check_l3_trigger;
 pub(crate) use schedule::spawn_scheduler;
