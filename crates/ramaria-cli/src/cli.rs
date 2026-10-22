@@ -654,6 +654,9 @@ pub(crate) enum PersonaCmd {
         /// 输出文件路径（缺省输出到 stdout；`-` 亦为 stdout）
         #[arg(long)]
         out: Option<String>,
+        /// 含入对话示例（真实对话片段；默认不含）
+        #[arg(long)]
+        with_examples: bool,
     },
 }
 

@@ -262,6 +262,10 @@ impl ramaria_core::traits::StoreInfrastructure for MockStorage {
             .insert(key.to_string(), value.to_string());
         Ok(())
     }
+    async fn delete_setting(&self, key: &str) -> RamariaResult<()> {
+        self.settings.lock().unwrap().remove(key);
+        Ok(())
+    }
     async fn list_settings(&self) -> RamariaResult<Vec<(String, String)>> {
         Ok(self
             .settings

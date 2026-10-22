@@ -144,15 +144,21 @@ impl Engine {
     ///
     /// 参数:
     /// - `uid`: 目标人格 uid。
+    /// - `with_examples`: 是否含入对话示例（真实对话片段；默认关闭）。
     ///
     /// 返回:
     /// - 导出结果（TOML 文本 + 逐类计数 + 降级提示）；uid 空或人格不存在返回 `Validation`。
     ///
     /// 说明:
     /// - 导出为画像级：traits / facts / 启用行为规则 + `personas.config` 重放的
-    ///   对话身份 / 自由文本块 / 提示词补丁；不含证据链、对话示例与会话原文。
-    pub async fn persona_export(&self, uid: &str) -> RamariaResult<PersonaExportOutcome> {
-        crate::persona::export(self, uid).await
+    ///   对话身份 / 自由文本块 / 提示词补丁；不含证据链与会话原文；
+    /// - 对话示例仅 `with_examples = true` 时写入，并在文件头注明含真实对话片段。
+    pub async fn persona_export(
+        &self,
+        uid: &str,
+        with_examples: bool,
+    ) -> RamariaResult<PersonaExportOutcome> {
+        crate::persona::export(self, uid, with_examples).await
     }
 
     /// 允许推断接管用例：将选定 Manual 画像的来源改写为 Inferred。

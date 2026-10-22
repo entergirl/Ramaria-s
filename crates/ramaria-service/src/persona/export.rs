@@ -3,7 +3,8 @@
 //! 设计特点:
 //! - 画像级只读导出：注册列 + L3 结构化条目（traits / facts / behavior_rules）→ 预设超集 TOML
 //! - 对话身份 / 自由文本块 / 提示词补丁自 `personas.config` 解析重放（不可解析时降级省略并提示）
-//! - 隐私：不含证据链（trait / rule 证据与来源引用）、对话示例与会话原文
+//! - 隐私：不含证据链（trait / rule 证据与来源引用）与会话原文；对话示例默认不含，显式开关才写入
+//!   （并在文件头注明"含真实对话片段"）
 //! - 输出可被预设导入通道原样消费（导出 → 导入往返一致）
 //! - 不写库、不调 LLM；日志中的个人标识经 `mask_id` 脱敏
 
@@ -12,9 +13,9 @@ use ramaria_core::privacy::mask_id;
 use ramaria_core::traits::StorageBackend;
 use ramaria_core::types::TraitLayer;
 use ramaria_memory::preset::{
-    FactEntry, IdentitySection, KindSource, ParsedPreset, PersonaSection, PresetFormat,
-    PresetParseContext, PromptPatch, RuleEntry, TraitEntry, TraitsSection, parse_toml,
-    to_superset_toml,
+    ExampleEntry, FactEntry, IdentitySection, KindSource, ParsedPreset, PersonaSection,
+    PresetFormat, PresetParseContext, PromptPatch, RuleEntry, TraitEntry, TraitsSection,
+    parse_toml, to_superset_toml,
 };
 
 use crate::engine::Engine;
@@ -23,6 +24,9 @@ use crate::types::{PersonaExportOutcome, PersonaExportStats};
 /// 配置缺失 / 不可解析时的导出提示（不含任何原文）。
 const CONFIG_UNDECODABLE_HINT: &str =
     "personas.config 缺失或不可解析：未包含自由文本块、对话身份还原与提示词补丁";
+
+/// 含示例导出时的文件头提示（TOML 注释行，导入侧按注释忽略）。
+const EXAMPLES_HEADER: &str = "# 含真实对话片段（分享前请自行确认）\n";
 
 // =========================================================
 // 导出用例
@@ -33,6 +37,7 @@ const CONFIG_UNDECODABLE_HINT: &str =
 /// 参数:
 /// - `engine`: 服务层引擎。
 /// - `uid`: 目标人格 uid（空白 → `Validation`）。
+/// - `with_examples`: 是否含入对话示例（真实对话片段；默认关闭）。
 ///
 /// 返回:
 /// - 导出结果（TOML 文本 + 逐类计数 + 降级提示）；uid 空或人格不存在返回 `Validation`。
@@ -40,8 +45,13 @@ const CONFIG_UNDECODABLE_HINT: &str =
 /// 说明:
 /// - traits 取 active 三层（按层内 seq 顺序）；facts 取 active；behavior_rules 取启用项；
 /// - 无关键词的行为规则被跳过（预设格式要求 keywords 非空）并在 `hints` 中计数；
-/// - `personas.config` 解析失败时降级为「无自由文本块 + 注册名兜底身份 + 无提示词补丁」。
-pub(crate) async fn export(engine: &Engine, uid: &str) -> RamariaResult<PersonaExportOutcome> {
+/// - `personas.config` 解析失败时降级为「无自由文本块 + 注册名兜底身份 + 无提示词补丁」；
+/// - 含示例时按 `(对方, 回复)` 去重保首现，并在 TOML 头部写入注释提示。
+pub(crate) async fn export(
+    engine: &Engine,
+    uid: &str,
+    with_examples: bool,
+) -> RamariaResult<PersonaExportOutcome> {
     let uid = uid.trim();
     if uid.is_empty() {
         return Err(RamariaError::validation("uid 不能为空"));
@@ -79,12 +89,20 @@ pub(crate) async fn export(engine: &Engine, uid: &str) -> RamariaResult<PersonaE
         .unwrap_or_default();
     let prompt = replayed.map(|replayed| replayed.prompt).unwrap_or_default();
 
+    // ---- 对话示例（显式开关；默认不含）----
+    let examples = if with_examples {
+        collect_examples(storage, uid).await?
+    } else {
+        Vec::new()
+    };
+
     let stats = PersonaExportStats {
         traits: traits.base.len() + traits.primary.len() + traits.accent.len(),
         facts: facts.len(),
         behavior_rules: rules.len(),
         blocks: blocks.len(),
         prompt_patch: prompt.role_suffix.is_some() || prompt.style_suffix.is_some(),
+        examples_included: examples.len(),
     };
 
     let parsed = ParsedPreset {
@@ -102,15 +120,17 @@ pub(crate) async fn export(engine: &Engine, uid: &str) -> RamariaResult<PersonaE
         blocks,
         traits,
         facts,
-        // 对话示例与会话原文不导出（隐私口径；示例为真实对话片段）
-        examples: Vec::new(),
+        examples,
         rules,
         prompt,
         personality_raw: None,
         hints: Vec::new(),
         skipped: Vec::new(),
     };
-    let toml = to_superset_toml(&parsed)?;
+    let mut toml = to_superset_toml(&parsed)?;
+    if stats.examples_included > 0 {
+        toml = format!("{EXAMPLES_HEADER}{toml}");
+    }
 
     tracing::info!(
         uid = %mask_id(&persona.uid),
@@ -118,6 +138,7 @@ pub(crate) async fn export(engine: &Engine, uid: &str) -> RamariaResult<PersonaE
         facts = stats.facts,
         behavior_rules = stats.behavior_rules,
         blocks = stats.blocks,
+        examples = stats.examples_included,
         "预设导出完成"
     );
 
@@ -210,6 +231,36 @@ async fn collect_rules(
     }
 
     Ok((entries, dropped))
+}
+
+/// 收集对话示例（显式开关时才调用）。
+///
+/// 说明:
+/// - 任一侧为空白跳过；按 `(对方, 回复)` 去重保首现，保证导出 → 导入往返可比；
+/// - 示例属真实对话片段，仅显式开启时进入导出文件。
+async fn collect_examples(
+    storage: &dyn StorageBackend,
+    uid: &str,
+) -> RamariaResult<Vec<ExampleEntry>> {
+    let rows = storage.list_all_examples(uid).await?;
+    let mut examples: Vec<ExampleEntry> = Vec::new();
+
+    for row in rows {
+        let user = row.partner.trim().to_string();
+        let assistant = row.reply.trim().to_string();
+        if user.is_empty() || assistant.is_empty() {
+            continue;
+        }
+        let duplicated = examples
+            .iter()
+            .any(|item| item.user == user && item.assistant == assistant);
+        if duplicated {
+            continue;
+        }
+        examples.push(ExampleEntry { user, assistant });
+    }
+
+    Ok(examples)
 }
 
 // =========================================================

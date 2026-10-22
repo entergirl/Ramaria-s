@@ -535,6 +535,42 @@ fn export_json_envelope_contains_toml_and_stats() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `--with-examples`：含入对话示例段与文件头提示，统计计数同步。
+#[test]
+fn export_with_examples_includes_section() {
+    let dir = temp_test_dir("export-with-examples");
+    let preset = write_preset(&dir, "char-0001.toml", PRESET_TOML);
+    let file = preset.to_str().expect("预设路径应为合法 UTF-8");
+
+    let out = run_cli(&dir, &["persona", "import", file, "--json", "--no-ai"]);
+    assert_eq!(out.status.code(), Some(0), "导入应成功退出");
+
+    let out = run_cli(
+        &dir,
+        &[
+            "persona",
+            "export",
+            "char-0001",
+            "--with-examples",
+            "--json",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "导出应成功退出");
+    let envelope = parse_envelope(&out);
+    let data = &envelope["data"];
+    assert_eq!(data["stats"]["examples_included"], 1);
+
+    let toml = data["toml"].as_str().expect("toml 应为字符串");
+    assert!(
+        toml.starts_with("# 含真实对话片段"),
+        "文件头应有含示例提示: {toml}"
+    );
+    assert!(toml.contains("[[examples]]"), "应含示例段: {toml}");
+    assert!(toml.contains("user = \"在吗\""), "应含示例内容: {toml}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `--out <file>`：写入指定文件；导出文本可再导入到新 uid（往返链路可用）。
 #[test]
 fn export_writes_file_and_reimports_into_new_uid() {

@@ -312,6 +312,8 @@ pub struct PersonaExportStats {
     pub blocks: usize,
     /// 是否包含 `[prompt]` 补丁（role_suffix / style_suffix 任一有值）
     pub prompt_patch: bool,
+    /// 含入的对话示例条数（默认 0 = 不含示例）
+    pub examples_included: usize,
 }
 
 // =========================================================

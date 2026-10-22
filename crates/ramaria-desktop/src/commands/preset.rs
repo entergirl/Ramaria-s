@@ -1,11 +1,12 @@
-//! crates/ramaria-desktop/src/commands/preset.rs - 预设导入 Tauri Commands
+//! crates/ramaria-desktop/src/commands/preset.rs - 预设导入导出 Tauri Commands
 //!
 //! 设计特点:
 //! - 两段式接线：dry-run 预览（只读）与确认导入（写库）分命令，前端先预览后确认
-//! - 委托服务层预设用例（解析 / 裁决 / 可选拆解 / 写入），桌面只做路径校验与视图映射
-//! - 路径三层防御复用导入白名单（用户显式选择的 .toml / .json / .png 文件）
+//! - 委托服务层预设用例（解析 / 裁决 / 可选拆解 / 写入 / 导出），桌面只做路径校验与视图映射
+//! - 路径三层防御复用导入白名单（用户显式选择的 .toml / .json / .png 文件）；导出复用导出白名单
 //! - 预览文本由服务层渲染（与 CLI 同一口径），前端不重算裁决结果
-//! - 隐私：日志只记脱敏路径标签与 uid，不含预设正文
+//! - 导出默认不含对话示例，显式开关才写入（统计 `examplesIncluded`）
+//! - 隐私：日志只记脱敏路径标签与 uid，不含预设正文与文件内容
 
 use crate::DesktopState;
 use ramaria_service::types::{DecomposeExecution, ImportWriteStats, PersonaImportOutcome};
@@ -182,6 +183,96 @@ fn outcome_view(outcome: PersonaImportOutcome) -> PresetImportOutcomeView {
 }
 
 // =========================================================
+// persona_export — 导出人格预设（含示例开关）
+// =========================================================
+
+/// 人格预设导出统计（前端视图，camelCase 序列化）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersonaExportStatsView {
+    pub traits: usize,
+    pub facts: usize,
+    pub behavior_rules: usize,
+    pub blocks: usize,
+    pub prompt_patch: bool,
+    pub examples_included: usize,
+}
+
+/// 人格预设导出回执。
+///
+/// 字段约定:
+/// - `written_to`: 实际写入文件的绝对路径（前端只用于提示）；
+/// - `stats`: 导出内容计数（含 `examplesIncluded`）；
+/// - `hints`: 降级说明；无降级时序列化省略。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersonaExportReceipt {
+    pub uid: String,
+    pub name: String,
+    pub written_to: String,
+    pub stats: PersonaExportStatsView,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hints: Vec<String>,
+}
+
+/// 导出人格画像为预设文件（超集 TOML）。
+///
+/// 参数:
+/// - `uid`: 目标人格 uid（空白 → 错误）。
+/// - `with_examples`: 是否含入对话示例（真实对话片段；默认关闭）。
+/// - `output_path`: 用户选择的保存路径（前端经 `saveFileDialog` 取得）。
+///
+/// 返回:
+/// - 写入回执（路径 / 计数 / 降级提示）。
+///
+/// 说明:
+/// - 路径安全校验复用 `path_guard`（父目录白名单 + 符号链接拒绝）；
+/// - 文件内容由服务层渲染，与 CLI `persona export` 同源；
+/// - 日志只记脱敏路径标签与计数，不记文件内容。
+#[tauri::command]
+#[tracing::instrument(skip(state, output_path))]
+pub async fn persona_export(
+    state: State<'_, DesktopState>,
+    uid: String,
+    with_examples: bool,
+    output_path: String,
+) -> Result<PersonaExportReceipt, String> {
+    let target = crate::path_guard::validate_export_path(&output_path)?;
+
+    let outcome = state
+        .engine
+        .persona_export(uid.trim(), with_examples)
+        .await
+        .map_err(|e| crate::commands::service_error_message(&e, "导出人格失败"))?;
+
+    std::fs::write(&target, outcome.toml.as_bytes())
+        .map_err(|error| format!("写入导出文件失败: {error}"))?;
+
+    tracing::info!(
+        file = %crate::path_guard::redact_path_label(&target),
+        uid = %ramaria_core::privacy::mask_id(&outcome.uid),
+        examples = outcome.stats.examples_included,
+        "人格预设导出完成"
+    );
+
+    let stats = outcome.stats;
+    Ok(PersonaExportReceipt {
+        uid: outcome.uid,
+        name: outcome.name,
+        written_to: target.to_string_lossy().to_string(),
+        stats: PersonaExportStatsView {
+            traits: stats.traits,
+            facts: stats.facts,
+            behavior_rules: stats.behavior_rules,
+            blocks: stats.blocks,
+            prompt_patch: stats.prompt_patch,
+            examples_included: stats.examples_included,
+        },
+        hints: outcome.hints,
+    })
+}
+
+// =========================================================
 // 单元测试
 // =========================================================
 
@@ -206,5 +297,30 @@ mod tests {
     fn mode_label_matches_serialization() {
         assert_eq!(mode_label(PreviewMode::Create), "create");
         assert_eq!(mode_label(PreviewMode::Merge), "merge");
+    }
+
+    /// 导出回执：camelCase 键，示例计数与路径透传，空 hints 省略。
+    #[test]
+    fn export_receipt_serializes_camel_case() {
+        let receipt = PersonaExportReceipt {
+            uid: "char-0001".to_string(),
+            name: "黎杋枫".to_string(),
+            written_to: "C:/Users/x/Documents/a.toml".to_string(),
+            stats: PersonaExportStatsView {
+                traits: 3,
+                facts: 2,
+                behavior_rules: 1,
+                blocks: 2,
+                prompt_patch: true,
+                examples_included: 4,
+            },
+            hints: Vec::new(),
+        };
+        let value = serde_json::to_value(&receipt).expect("序列化应成功");
+        assert_eq!(value["writtenTo"], "C:/Users/x/Documents/a.toml");
+        assert_eq!(value["stats"]["behaviorRules"], 1);
+        assert_eq!(value["stats"]["promptPatch"], true);
+        assert_eq!(value["stats"]["examplesIncluded"], 4);
+        assert!(value.get("hints").is_none(), "空提示应省略");
     }
 }

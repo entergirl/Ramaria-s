@@ -87,6 +87,9 @@ impl StoreInfrastructure for SqliteStorage {
     async fn set_setting(&self, key: &str, value: &str) -> RamariaResult<()> {
         repo::settings::set(&self.pool, key, value).await
     }
+    async fn delete_setting(&self, key: &str) -> RamariaResult<()> {
+        repo::settings::delete(&self.pool, key).await
+    }
     async fn list_settings(&self) -> RamariaResult<Vec<(String, String)>> {
         repo::settings::list_all(&self.pool).await
     }

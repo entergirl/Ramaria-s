@@ -111,6 +111,8 @@ pub enum PersonaCmd {
         uid: String,
         /// 输出文件路径（缺省 / `-` = stdout）
         out: Option<String>,
+        /// 含入对话示例（真实对话片段；默认不含）
+        with_examples: bool,
     },
 }
 
@@ -135,7 +137,11 @@ pub async fn run(engine: &Arc<Engine>, cmd: PersonaCmd, json: bool) -> anyhow::R
             run_allow_inference(engine, uid, labels, json).await
         }
         PersonaCmd::Prompt { uid, input } => run_prompt(engine, uid, input, json).await,
-        PersonaCmd::Export { uid, out } => export::run(engine, uid, out, json).await,
+        PersonaCmd::Export {
+            uid,
+            out,
+            with_examples,
+        } => export::run(engine, uid, out, with_examples, json).await,
     }
 }
 

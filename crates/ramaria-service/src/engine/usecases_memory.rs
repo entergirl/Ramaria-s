@@ -8,6 +8,7 @@
 //! - 手动触发：L2/L3 检查与 L1 重生成供宿主批量导入后补跑；内部失败只记日志不抛错
 //! - 补扫：消费封存失败登记的任务，LLM / 存储恢复后自动补跑 L1 摘要
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ramaria_core::error::RamariaResult;
@@ -366,6 +367,31 @@ impl Engine {
     /// - 标记成功返回 `Ok(())`；校验失败为校验错误。
     pub async fn recall_local_message(&self, message_id: Uuid) -> RamariaResult<()> {
         crate::withdraw::recall_local_message(self, message_id, now_ms()).await
+    }
+
+    /// 读取生效的发图目录（默认目录首次使用时创建）。
+    ///
+    /// 返回:
+    /// - 目录真实路径；库内自定义目录失效时回退默认目录。
+    pub async fn image_source_dir(&self) -> RamariaResult<PathBuf> {
+        crate::image_source::dir(self).await
+    }
+
+    /// 设置发图目录（`None` / 空白 = 恢复默认并删除设置键）。
+    ///
+    /// 返回:
+    /// - 生效目录的真实路径；目录不合法时为校验错误。
+    pub async fn set_image_source_dir(&self, path: Option<&str>) -> RamariaResult<PathBuf> {
+        crate::image_source::set(self, path).await
+    }
+
+    /// 校验待发送图片位于发图目录内。
+    ///
+    /// 返回:
+    /// - 规范化后的文件真实路径；目录外 / 非普通文件 / 链接时为校验错误。
+    pub async fn validate_image_source_file(&self, path: &Path) -> RamariaResult<PathBuf> {
+        let dir = crate::image_source::dir(self).await?;
+        crate::image_source::validate_file(&dir, path)
     }
 
     /// 理解一张本地图片（字节输入；门禁 / 去重 / 回填与批量路径同口径）。

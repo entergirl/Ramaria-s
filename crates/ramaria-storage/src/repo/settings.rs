@@ -37,6 +37,19 @@ pub async fn set(pool: &SqlitePool, key: &str, value: &str) -> RamariaResult<()>
     Ok(())
 }
 
+/// 删除单个设置项（键不存在视为成功）。
+pub async fn delete(pool: &SqlitePool, key: &str) -> RamariaResult<()> {
+    with_busy_retry("删除设置", || async {
+        sqlx::query("DELETE FROM settings WHERE key = ?")
+            .bind(key)
+            .execute(pool)
+            .await
+    })
+    .await
+    .storage_err("删除设置失败")?;
+    Ok(())
+}
+
 pub async fn list_all(pool: &SqlitePool) -> RamariaResult<Vec<(String, String)>> {
     #[derive(sqlx::FromRow)]
     struct Row {

@@ -1,6 +1,6 @@
 {
   "source_doc": "docs/dev-3.0/test/contract-baseline-3.0.md",
-  "note": "3.0 契约面的机器投影；契约变更（含 M3 回填）时同步更新本文件。",
+  "note": "3.0 契约面的机器投影；契约变更（含 M3 / M4-4 回填）时同步更新本文件。",
   "commands": [
     "send_message",
     "save_current_session",
@@ -10,6 +10,8 @@
     "confirm_privacy",
     "recall_message",
     "send_local_image",
+    "get_image_source_dir",
+    "set_image_source_dir",
     "run_setup",
     "refresh_setup_state",
     "test_llm_connection",
@@ -51,6 +53,7 @@
     "refresh_persona",
     "regenerate_import_pipeline",
     "preview_persona_prompt",
+    "persona_export",
     "preview_persona_import",
     "import_persona_preset",
     "list_proactive_personas",
@@ -84,7 +87,10 @@
     "preview_persona_prompt",
     "save_file_dialog",
     "confirm_close_action",
-    "get_index_status"
+    "get_index_status",
+    "get_image_source_dir",
+    "set_image_source_dir",
+    "persona_export"
   ],
   "cli_top": [
     "Ask",

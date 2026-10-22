@@ -180,6 +180,7 @@ impl StoreInfrastructure for MockStorage {
     async fn claim_pending_job(&self, id: i64) -> RamariaResult<bool> { self.claim_pending_job(id).await }
     async fn get_setting(&self, key: &str) -> RamariaResult<Option<String>> { self.get_setting(key).await }
     async fn set_setting(&self, key: &str, value: &str) -> RamariaResult<()> { self.set_setting(key, value).await }
+    async fn delete_setting(&self, key: &str) -> RamariaResult<()> { self.delete_setting(key).await }
     async fn list_settings(&self) -> RamariaResult<Vec<(String, String)>> { self.list_settings().await }
     async fn get_bm25_index_version(&self) -> RamariaResult<i32> { self.get_bm25_index_version().await }
     async fn set_bm25_index_version(&self, version: i32) -> RamariaResult<()> { self.set_bm25_index_version(version).await }

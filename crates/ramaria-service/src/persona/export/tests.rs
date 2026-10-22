@@ -197,7 +197,10 @@ async fn export_roundtrip_reproduces_profile() {
     seed_source_persona(&storage, Some(SOURCE_CONFIG)).await;
     seed_source_entries(&storage).await;
 
-    let outcome = engine.persona_export(SOURCE_UID).await.expect("导出应成功");
+    let outcome = engine
+        .persona_export(SOURCE_UID, false)
+        .await
+        .expect("导出应成功");
 
     // 计数：traits 3（含 Inferred）/ facts 2（superseded 不导出）/ 启用规则 1（禁用不导出）
     assert_eq!(outcome.uid, SOURCE_UID);
@@ -210,6 +213,7 @@ async fn export_roundtrip_reproduces_profile() {
             behavior_rules: 1,
             blocks: 2,
             prompt_patch: true,
+            examples_included: 0,
         }
     );
     assert!(outcome.hints.is_empty(), "正常导出不应有降级提示");
@@ -413,7 +417,10 @@ async fn export_excludes_raw_text_and_examples() {
         .await
         .expect("写入示例应成功");
 
-    let outcome = engine.persona_export(SOURCE_UID).await.expect("导出应成功");
+    let outcome = engine
+        .persona_export(SOURCE_UID, false)
+        .await
+        .expect("导出应成功");
 
     for sentinel in [MSG_SENTINEL, L1_SENTINEL, EXAMPLE_SENTINEL] {
         assert!(
@@ -424,6 +431,47 @@ async fn export_excludes_raw_text_and_examples() {
     }
     assert!(!outcome.toml.contains("[[examples]]"), "不导出对话示例段");
     assert_eq!(outcome.stats.facts, 2);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 显式开启示例：写入 `[[examples]]` 与文件头提示并计数；默认关闭时不含示例段。
+#[tokio::test]
+async fn export_with_examples_writes_section() {
+    let (engine, storage, dir) = engine_with_db("preset-export-examples").await;
+    seed_source_persona(&storage, Some(SOURCE_CONFIG)).await;
+
+    for (partner, reply) in [("你好", "你好呀"), ("在吗", "在的")] {
+        storage
+            .save_example(&PersonaExample::new(
+                SOURCE_UID.to_string(),
+                partner.to_string(),
+                reply.to_string(),
+            ))
+            .await
+            .expect("写入示例应成功");
+    }
+
+    let outcome = engine
+        .persona_export(SOURCE_UID, true)
+        .await
+        .expect("导出应成功");
+    assert_eq!(outcome.stats.examples_included, 2);
+    assert!(
+        outcome.toml.starts_with("# 含真实对话片段"),
+        "文件头应有含示例提示：\n{}",
+        outcome.toml
+    );
+    assert!(outcome.toml.contains("[[examples]]"), "应含示例段");
+    assert!(outcome.toml.contains("user = \"你好\""));
+    assert!(outcome.toml.contains("assistant = \"你好呀\""));
+
+    let plain = engine
+        .persona_export(SOURCE_UID, false)
+        .await
+        .expect("导出应成功");
+    assert_eq!(plain.stats.examples_included, 0);
+    assert!(!plain.toml.contains("[[examples]]"), "默认不含示例段");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -439,7 +487,10 @@ async fn export_degrades_when_config_undecodable() {
     seed_source_persona(&storage, None).await;
     seed_source_entries(&storage).await;
 
-    let outcome = engine.persona_export(SOURCE_UID).await.expect("导出应成功");
+    let outcome = engine
+        .persona_export(SOURCE_UID, false)
+        .await
+        .expect("导出应成功");
     assert_eq!(outcome.stats.blocks, 0);
     assert!(!outcome.stats.prompt_patch);
     assert_eq!(outcome.hints, vec![CONFIG_UNDECODABLE_HINT.to_string()]);
@@ -454,7 +505,7 @@ async fn export_degrades_when_config_undecodable() {
     let (engine2, storage2, dir2) = engine_with_db("preset-export-degrade-garbage").await;
     seed_source_persona(&storage2, Some("这不是合法的 persona 配置")).await;
     let outcome2 = engine2
-        .persona_export(SOURCE_UID)
+        .persona_export(SOURCE_UID, false)
         .await
         .expect("导出应成功");
     assert_eq!(outcome2.hints.len(), 1);
@@ -481,7 +532,10 @@ async fn export_skips_rules_without_keywords() {
         .await
         .expect("写入规则应成功");
 
-    let outcome = engine.persona_export(SOURCE_UID).await.expect("导出应成功");
+    let outcome = engine
+        .persona_export(SOURCE_UID, false)
+        .await
+        .expect("导出应成功");
     assert_eq!(outcome.stats.behavior_rules, 0);
     assert_eq!(outcome.hints.len(), 1);
     assert!(
@@ -499,13 +553,13 @@ async fn export_validates_uid_and_existence() {
     let (engine, storage, dir) = engine_with_db("preset-export-validation").await;
 
     let blank = engine
-        .persona_export("   ")
+        .persona_export("   ", false)
         .await
         .expect_err("空白 uid 应报错");
     assert_eq!(blank.category(), "validation");
 
     let missing = engine
-        .persona_export("char-9999")
+        .persona_export("char-9999", false)
         .await
         .expect_err("人格不存在应报错");
     assert_eq!(missing.category(), "validation");

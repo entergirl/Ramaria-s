@@ -156,6 +156,11 @@ pub trait StoreInfrastructure: Send + Sync {
     // -- Settings --
     async fn get_setting(&self, key: &str) -> RamariaResult<Option<String>>;
     async fn set_setting(&self, key: &str, value: &str) -> RamariaResult<()>;
+    /// 删除单个设置项（键不存在视为成功）。
+    ///
+    /// 返回:
+    /// - 删除完成返回 `Ok(())`；存储失败返回 `Storage` 错误。
+    async fn delete_setting(&self, key: &str) -> RamariaResult<()>;
     async fn list_settings(&self) -> RamariaResult<Vec<(String, String)>>;
 
     // -- BM25 词典增强分词版本 --

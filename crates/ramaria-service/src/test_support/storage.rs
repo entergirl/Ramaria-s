@@ -358,6 +358,10 @@ impl StoreInfrastructure for FailableStorage {
         self.inner.set_setting(key, value).await
     }
 
+    async fn delete_setting(&self, key: &str) -> RamariaResult<()> {
+        self.inner.delete_setting(key).await
+    }
+
     async fn list_settings(&self) -> RamariaResult<Vec<(String, String)>> {
         self.inner.list_settings().await
     }

@@ -308,6 +308,9 @@ impl ramaria_core::StoreInfrastructure for JobMockStorage {
     async fn set_setting(&self, _key: &str, _value: &str) -> RamariaResult<()> {
         unimplemented!()
     }
+    async fn delete_setting(&self, _key: &str) -> RamariaResult<()> {
+        unimplemented!()
+    }
     async fn list_settings(&self) -> RamariaResult<Vec<(String, String)>> {
         unimplemented!()
     }

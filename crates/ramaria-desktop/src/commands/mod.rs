@@ -13,6 +13,7 @@ pub mod diagnostics;
 pub mod dialog;
 pub mod evaluation;
 pub mod export;
+pub mod image_source;
 pub mod import_cmd;
 pub mod import_continue;
 pub mod index_cmd;

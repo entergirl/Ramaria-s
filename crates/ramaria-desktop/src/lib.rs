@@ -146,6 +146,8 @@ pub fn run() {
             commands::chat::confirm_privacy,
             commands::chat::recall_message,
             commands::chat::send_local_image,
+            commands::image_source::get_image_source_dir,
+            commands::image_source::set_image_source_dir,
             // ---- Setup ----
             commands::setup::run_setup,
             commands::setup::refresh_setup_state,
@@ -200,6 +202,7 @@ pub fn run() {
             commands::persona::preview_persona_prompt,
             commands::preset::preview_persona_import,
             commands::preset::import_persona_preset,
+            commands::preset::persona_export,
             // ---- Proactive（主动消息名单）----
             commands::proactive_cmd::list_proactive_personas,
             commands::proactive_cmd::set_proactive_persona,

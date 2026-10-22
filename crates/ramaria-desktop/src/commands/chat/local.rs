@@ -2,7 +2,7 @@
 //!
 //! 设计特点:
 //! - `recall_message`: 客户端内撤回，窗口与发送方校验由服务层裁定
-//! - `send_local_image`: 本地发图 = 路径校验 → 体积预检 → 落库 → 后台理解（不阻塞返回）
+//! - `send_local_image`: 本地发图 = 发图目录校验 → 体积预检 → 落库 → 后台理解（不阻塞返回）
 //! - 视图结构只承载前端展示所需三个字段，序列化为 camelCase
 
 use crate::DesktopState;
@@ -62,14 +62,14 @@ pub struct SendLocalImageView {
 /// 在本地会话中发送一张本地图片。
 ///
 /// 流程:
-/// 1. 会话 ID 解析与文件路径安全校验（用户主动选择的本地文件）；
+/// 1. 会话 ID 解析与发图目录校验（只接受发图目录内的普通文件）；
 /// 2. 读取字节并取文件名；
 /// 3. 委托服务层落库（消息 + 附件行 + 缓存落盘）；
 /// 4. 后台理解图片（不阻塞命令返回，失败仅告警）。
 ///
 /// 参数:
 /// - `session_id`: 目标本地会话 UUID 字符串（社交通道会话拒绝）；
-/// - `file_path`: 用户选择的图片文件路径；
+/// - `file_path`: 发图目录内的图片文件路径；
 /// - `caption`: 可选说明文字。
 ///
 /// 返回:
@@ -82,10 +82,14 @@ pub async fn send_local_image(
     file_path: String,
     caption: Option<String>,
 ) -> Result<SendLocalImageView, String> {
-    // ---- 参数与路径校验 ----
+    // ---- 参数与路径校验（只接受发图目录内的文件） ----
     let session_id =
         uuid::Uuid::parse_str(session_id.trim()).map_err(|_| "会话 ID 格式无效".to_string())?;
-    let real_path = crate::path_guard::validate_import_file_path(&file_path)?;
+    let real_path = state
+        .engine
+        .validate_image_source_file(std::path::Path::new(file_path.trim()))
+        .await
+        .map_err(|e| crate::commands::service_error_message(&e, "校验图片路径失败"))?;
 
     // ---- 读取字节与文件名（读前按体积预检，避免整体读入超大文件） ----
     let metadata =

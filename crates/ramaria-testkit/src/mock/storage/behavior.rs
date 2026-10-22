@@ -279,6 +279,12 @@ impl MockStorage {
         Ok(())
     }
 
+    pub(crate) async fn delete_setting(&self, key: &str) -> RamariaResult<()> {
+        self.guard("delete_setting")?;
+        self.settings.lock().expect("设置锁").remove(key);
+        Ok(())
+    }
+
     pub(crate) async fn list_settings(&self) -> RamariaResult<Vec<(String, String)>> {
         self.guard("list_settings")?;
         let settings = self.settings.lock().expect("设置锁");

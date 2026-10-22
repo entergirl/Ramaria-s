@@ -64,6 +64,7 @@ pub mod fact_extract;
 pub mod feedback;
 pub mod hooks;
 pub mod idle;
+pub(crate) mod image_source;
 pub mod index;
 pub mod ingest;
 pub mod keyword;

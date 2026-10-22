@@ -249,6 +249,9 @@ impl StoreInfrastructure for BareStore {
     async fn set_setting(&self, _: &str, _: &str) -> RamariaResult<()> {
         bare_store_err!()
     }
+    async fn delete_setting(&self, _: &str) -> RamariaResult<()> {
+        bare_store_err!()
+    }
     async fn list_settings(&self) -> RamariaResult<Vec<(String, String)>> {
         bare_store_err!()
     }
