@@ -2,13 +2,14 @@
 //!
 //! 设计特点:
 //! - 固定时间基准（2023-11-14T22:13:20Z）：同一参数两次构造关键字段完全一致
-//! - 覆盖会话 / 消息 / L1 / L2 事件 / 人格 / utt 块 / 事实 / 性格标签
+//! - 覆盖会话 / 消息 / L1 / L2 事件 / 人格 / utt 块 / 事实 / 性格标签 / 事件关系
 //! - 仅填充领域字段，不写存储；标识符使用随机 UUID，正文不含敏感内容
 //! - 供各 crate 测试直接复用，避免各自手写结构体导致口径漂移
 
 use ramaria_core::types::{
-    FactSource, MemoryEvent, MemoryL1, Message, MessageRole, MessageSource, Persona, PersonaFact,
-    PersonaKind, PersonalityTrait, Session, TraitLayer, TraitSource, UttBlock,
+    EventRelation, EventRelationKind, FactSource, MemoryEvent, MemoryL1, Message, MessageRole,
+    MessageSource, Persona, PersonaFact, PersonaKind, PersonalityTrait, Presentation, Session,
+    TraitLayer, TraitSource, UttBlock,
 };
 use uuid::Uuid;
 
@@ -69,14 +70,23 @@ pub fn assistant_message(session_id: Uuid, content: &str) -> Message {
     msg
 }
 
-/// 构造 L1 摘要（字段全部合法）。
+/// 构造可定制的 L1 摘要（字段默认为基准值，闭包内覆盖）。
 ///
 /// 参数:
 /// - `session_id`: 摘要所属会话；
 /// - `persona_uid`: 摘要描述的人格；
-/// - `summary`: 摘要正文。
-pub fn l1(session_id: Uuid, persona_uid: Option<&str>, summary: &str) -> MemoryL1 {
-    MemoryL1 {
+/// - `summary`: 摘要正文；
+/// - `customize`: 在基准字段上覆盖的闭包。
+pub fn l1_with<F>(
+    session_id: Uuid,
+    persona_uid: Option<&str>,
+    summary: &str,
+    customize: F,
+) -> MemoryL1
+where
+    F: FnOnce(&mut MemoryL1),
+{
+    let mut l1 = MemoryL1 {
         id: Uuid::new_v4(),
         session_id,
         summary: summary.to_string(),
@@ -94,24 +104,72 @@ pub fn l1(session_id: Uuid, persona_uid: Option<&str>, summary: &str) -> MemoryL
         situation_strength: Some(3),
         evidence_notes: None,
         continuation: None,
-    }
+    };
+    customize(&mut l1);
+    l1
 }
 
-/// 构造 L2 事件（id 由存储层分配）。
-pub fn event(persona_uid: &str, title: &str) -> MemoryEvent {
+/// 构造 L1 摘要（字段全部合法）。
+///
+/// 参数:
+/// - `session_id`: 摘要所属会话；
+/// - `persona_uid`: 摘要描述的人格；
+/// - `summary`: 摘要正文。
+pub fn l1(session_id: Uuid, persona_uid: Option<&str>, summary: &str) -> MemoryL1 {
+    l1_with(session_id, persona_uid, summary, |_| {})
+}
+
+/// 构造可定制的事件（字段默认为基准值，闭包内覆盖）。
+///
+/// 参数:
+/// - `id`: 事件内部索引；
+/// - `title`: 事件标题，摘要按标题生成；
+/// - `customize`: 在基准字段上覆盖的闭包。
+pub fn event_with<F>(id: i64, title: &str, customize: F) -> MemoryEvent
+where
+    F: FnOnce(&mut MemoryEvent),
+{
     let mut event = MemoryEvent::new(
-        persona_uid.to_string(),
+        "user-0001".to_string(),
         title.to_string(),
         format!("{title} 的详细摘要"),
         BASE_MS - 60_000,
         BASE_MS,
     );
+    event.id = id;
     event.created_at = BASE_MS;
+    event.keywords = None;
+    event.participants = None;
+    event.confidence = 0.8;
+    event.salience = 0.5;
+    event.valence = 0.0;
+    event.share = 0.5;
+    event.absorbed = 0;
+    event.situation_strength = None;
+    event.motives = None;
+    event.attitude = None;
+    event.paraphrase = None;
+    event.presentation = Presentation::Objective;
+    customize(&mut event);
     event
 }
 
-/// 构造人格注册条目（历史人物以外的最常见类型）。
-pub fn persona(uid: &str) -> Persona {
+/// 构造 L2 事件（id 由存储层分配）。
+pub fn event(persona_uid: &str, title: &str) -> MemoryEvent {
+    event_with(0, title, |event| {
+        event.persona_uid = persona_uid.to_string()
+    })
+}
+
+/// 构造可定制的人格注册条目（字段默认为基准值，闭包内覆盖）。
+///
+/// 参数:
+/// - `uid`: 人格业务标识，类型按前缀推断；
+/// - `customize`: 在基准字段上覆盖的闭包。
+pub fn persona_with<F>(uid: &str, customize: F) -> Persona
+where
+    F: FnOnce(&mut Persona),
+{
     let kind = if uid.starts_with("user") {
         PersonaKind::User
     } else if uid.starts_with("rama") {
@@ -128,11 +186,31 @@ pub fn persona(uid: &str) -> Persona {
     );
     persona.created_at = BASE_MS;
     persona.updated_at = BASE_MS;
+    customize(&mut persona);
     persona
 }
 
-/// 构造 utt 原文话语块。
-pub fn utt_block(session_id: Uuid, persona_uid: &str, content: &str) -> UttBlock {
+/// 构造人格注册条目（历史人物以外的最常见类型）。
+pub fn persona(uid: &str) -> Persona {
+    persona_with(uid, |_| {})
+}
+
+/// 构造可定制的 utt 原文话语块（字段默认为基准值，闭包内覆盖）。
+///
+/// 参数:
+/// - `session_id`: 来源会话；
+/// - `persona_uid`: 块归属人格；
+/// - `content`: 原文全文；
+/// - `customize`: 在基准字段上覆盖的闭包。
+pub fn utt_block_with<F>(
+    session_id: Uuid,
+    persona_uid: &str,
+    content: &str,
+    customize: F,
+) -> UttBlock
+where
+    F: FnOnce(&mut UttBlock),
+{
     let start_id = Uuid::new_v4();
     let mut block = UttBlock::new(
         persona_uid.to_string(),
@@ -144,7 +222,34 @@ pub fn utt_block(session_id: Uuid, persona_uid: &str, content: &str) -> UttBlock
         0,
     );
     block.created_at = BASE_MS;
+    customize(&mut block);
     block
+}
+
+/// 构造 utt 原文话语块。
+pub fn utt_block(session_id: Uuid, persona_uid: &str, content: &str) -> UttBlock {
+    utt_block_with(session_id, persona_uid, content, |_| {})
+}
+
+/// 构造可定制的事件关系（字段默认为基准值，闭包内覆盖）。
+///
+/// 参数:
+/// - `from_id` / `to_id`: 两端事件 id；
+/// - `kind`: 关系类型；
+/// - `customize`: 在基准字段上覆盖的闭包。
+pub fn relation_with<F>(
+    from_id: i64,
+    to_id: i64,
+    kind: EventRelationKind,
+    customize: F,
+) -> EventRelation
+where
+    F: FnOnce(&mut EventRelation),
+{
+    let mut relation = EventRelation::new(from_id, to_id, kind);
+    relation.created_at = BASE_MS;
+    customize(&mut relation);
+    relation
 }
 
 /// 构造人物事实（基础信息字段，active）。

@@ -12,6 +12,7 @@ use ramaria_core::types::EventRelation;
 use ramaria_core::types::EventRelationKind;
 use ramaria_core::types::MemoryEvent;
 use ramaria_core::types::Presentation;
+use ramaria_testkit::fixtures::{event_with, relation_with};
 use std::collections::HashMap;
 
 /// 固定测试基准时间（Unix 毫秒），保证用例不依赖真实时钟、连续运行结果一致。
@@ -20,32 +21,22 @@ const TEST_NOW_MS: i64 = 1_760_000_000_000;
 /// 创建测试用 MemoryEvent（最小字段集）。
 fn make_event(id: i64, keywords: &str) -> MemoryEvent {
     let now = TEST_NOW_MS;
-    MemoryEvent {
-        id,
-        persona_uid: "test-persona".into(),
-        title: format!("Event {}", id),
-        summary: format!("Summary of event {}", id),
-        keywords: if keywords.is_empty() {
+    event_with(id, &format!("Event {id}"), |event| {
+        event.persona_uid = "test-persona".into();
+        event.summary = format!("Summary of event {id}");
+        event.keywords = if keywords.is_empty() {
             None
         } else {
             Some(keywords.to_string())
-        },
-        participants: None,
-        start: now,
-        end: now,
-        confidence: 0.8,
-        salience: 0.7,
-        valence: -0.3,
-        presentation: Presentation::Mixed,
-        share: 0.5,
-        attitude: None,
-        paraphrase: None,
-        absorbed: 0,
-        situation_strength: Some(3),
-        motives: None,
-        created_at: now,
-        last_accessed_at: None,
-    }
+        };
+        event.start = now;
+        event.end = now;
+        event.salience = 0.7;
+        event.valence = -0.3;
+        event.presentation = Presentation::Mixed;
+        event.situation_strength = Some(3);
+        event.created_at = now;
+    })
 }
 
 /// 创建测试用 MemoryEvent，支持自定义发生时间与 valence。
@@ -59,26 +50,17 @@ fn make_event_ts(id: i64, start_ms: i64, valence: f64) -> MemoryEvent {
 
 /// 创建 CausedBy 关系。
 fn make_causal(from_id: i64, to_id: i64) -> EventRelation {
-    EventRelation {
-        id: 0,
-        from_id,
-        to_id,
-        kind: EventRelationKind::CausedBy,
-        weight: 0.7,
-        created_at: 1000,
-    }
+    relation_with(from_id, to_id, EventRelationKind::CausedBy, |relation| {
+        relation.weight = 0.7;
+        relation.created_at = 1000;
+    })
 }
 
 /// 创建非 CausedBy 关系（应被过滤）。
 fn make_related(from_id: i64, to_id: i64) -> EventRelation {
-    EventRelation {
-        id: 0,
-        from_id,
-        to_id,
-        kind: EventRelationKind::RelatedTo,
-        weight: 0.5,
-        created_at: 1000,
-    }
+    relation_with(from_id, to_id, EventRelationKind::RelatedTo, |relation| {
+        relation.created_at = 1000;
+    })
 }
 
 // =========================================================

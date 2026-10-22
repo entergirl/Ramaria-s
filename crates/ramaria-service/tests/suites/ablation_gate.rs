@@ -49,9 +49,10 @@ use ramaria_core::config::{InjectionGate, RamariaConfig};
 use ramaria_core::traits::{ChatRequest, LlmProvider, StoreCrud};
 use ramaria_core::types::{
     FactSource, FactStatus, FactTier, MemoryL1, Persona, PersonaExample, PersonaFact, PersonaKind,
-    ProfileField, UttBlock,
+    ProfileField,
 };
 use ramaria_service::{ChatStreamRequest, Engine};
+use ramaria_testkit::fixtures::utt_block_with;
 use uuid::Uuid;
 
 use crate::support::engine_env::{build_engine, mark_ready, try_send_stream};
@@ -274,19 +275,14 @@ fn add_bound_narrative_l1(storage: &MockStorage) {
 fn add_prev_session_with_utt(storage: &MockStorage) {
     let prev = Uuid::new_v4();
     storage.add_closed_session(prev);
-    storage.add_utt_block(UttBlock {
-        id: 0,
-        persona_uid: "char-0001".to_string(),
-        session_id: prev,
-        start_msg_id: Uuid::new_v4(),
-        end_msg_id: Uuid::new_v4(),
-        block_text: format!(
-            "[2026-08-01 20:00] 小夏: {PREV_SESSION_UTT}\n[2026-08-01 20:01] 用户: 我也喜欢"
-        ),
-        msg_count: 2,
-        time_span_ms: 60_000,
-        created_at: 1_700_000_000_000,
-    });
+    let block_text =
+        format!("[2026-08-01 20:00] 小夏: {PREV_SESSION_UTT}\n[2026-08-01 20:01] 用户: 我也喜欢");
+    storage.add_utt_block(utt_block_with(prev, "char-0001", &block_text, |block| {
+        block.start_msg_id = Uuid::new_v4();
+        block.end_msg_id = Uuid::new_v4();
+        block.msg_count = 2;
+        block.time_span_ms = 60_000;
+    }));
 }
 
 /// 构造表达层示例候选（未选中；常驻注入，按风格代表性选取）。

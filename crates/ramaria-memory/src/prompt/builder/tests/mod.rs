@@ -5,28 +5,22 @@
 //! - 全部使用合成输入与 mock，不依赖真实 LLM/embedding。
 use super::*;
 use ramaria_core::types::{PersonaKind, ProfileField, TraitLayer, TraitSource, TraitStatus};
+use ramaria_testkit::fixtures::persona_with;
 
 // ---- 辅助构造器 ----
 
 fn make_test_persona() -> Persona {
-    Persona {
-        id: 1,
-        uid: "char-0001".into(),
-        name: "小明".into(),
-        kind: PersonaKind::Char,
-        seq: 1,
-        source: "manual".into(),
-        ref_id: None,
-        avatar: None,
-        active: true,
-        config: Some(
+    persona_with("char-0001", |persona| {
+        persona.id = 1;
+        persona.name = "小明".into();
+        persona.source = "manual".into();
+        persona.config = Some(
             r#"{"description":"一个喜欢编程的大学生","speaking_style":"热情活泼，喜欢用emoji"}"#
                 .into(),
-        ),
-        description: None,
-        created_at: 1000,
-        updated_at: 1000,
-    }
+        );
+        persona.created_at = 1000;
+        persona.updated_at = 1000;
+    })
 }
 
 fn make_test_trait(label: &str, layer: TraitLayer, meaning: &str) -> PersonalityTrait {

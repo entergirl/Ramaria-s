@@ -10,8 +10,9 @@ use std::sync::Arc;
 
 use ramaria_core::config::RamariaConfig;
 use ramaria_core::traits::{LlmProvider, StoreCrud};
-use ramaria_core::types::{Message, MessageRole, MessageSource, Persona, PersonaKind, UttBlock};
+use ramaria_core::types::{Message, MessageRole, MessageSource, Persona, PersonaKind};
 use ramaria_service::Engine;
+use ramaria_testkit::fixtures::utt_block_with;
 use uuid::Uuid;
 
 use crate::support::engine_env::{build_engine, mark_ready, seal_full, send_stream};
@@ -84,18 +85,19 @@ async fn bridge_injected_into_new_session_prompt_from_utt_block() {
         1,
         "local".to_string(),
     ));
-    storage.add_utt_block(UttBlock {
-        id: 1,
-        persona_uid: "char-0001".to_string(),
-        session_id: prev_session,
-        start_msg_id: Uuid::new_v4(),
-        end_msg_id: Uuid::new_v4(),
-        block_text: "[2026-08-01 20:00] 小夏: 上次我们聊到去海边\n[2026-08-01 20:01] 用户: 嗯嗯"
-            .to_string(),
-        msg_count: 2,
-        time_span_ms: 60_000,
-        created_at: 1_700_000_000_000,
-    });
+    let block_text = "[2026-08-01 20:00] 小夏: 上次我们聊到去海边\n[2026-08-01 20:01] 用户: 嗯嗯";
+    storage.add_utt_block(utt_block_with(
+        prev_session,
+        "char-0001",
+        block_text,
+        |block| {
+            block.id = 1;
+            block.start_msg_id = Uuid::new_v4();
+            block.end_msg_id = Uuid::new_v4();
+            block.msg_count = 2;
+            block.time_span_ms = 60_000;
+        },
+    ));
 
     // 新会话发送消息（无 session_id → 新建会话并加载桥接）
     send_and_drain(&engine, "继续上次的话题吧", Some("char-0001"), None).await;
@@ -174,17 +176,16 @@ async fn bridge_not_injected_for_rama_persona() {
 
     let prev_session = Uuid::new_v4();
     storage.add_closed_session(prev_session);
-    storage.add_utt_block(UttBlock {
-        id: 1,
-        persona_uid: "rama-0001".to_string(),
-        session_id: prev_session,
-        start_msg_id: Uuid::new_v4(),
-        end_msg_id: Uuid::new_v4(),
-        block_text: "[2026-08-01 20:00] rama: 你好".to_string(),
-        msg_count: 1,
-        time_span_ms: 0,
-        created_at: 1_700_000_000_000,
-    });
+    storage.add_utt_block(utt_block_with(
+        prev_session,
+        "rama-0001",
+        "[2026-08-01 20:00] rama: 你好",
+        |block| {
+            block.id = 1;
+            block.start_msg_id = Uuid::new_v4();
+            block.end_msg_id = Uuid::new_v4();
+        },
+    ));
 
     // persona_uid = None → rama 自身
     send_and_drain(&engine, "你好", None, None).await;
@@ -215,17 +216,16 @@ async fn bridge_disabled_skips_injection() {
         1,
         "local".to_string(),
     ));
-    storage.add_utt_block(UttBlock {
-        id: 1,
-        persona_uid: "char-0001".to_string(),
-        session_id: prev_session,
-        start_msg_id: Uuid::new_v4(),
-        end_msg_id: Uuid::new_v4(),
-        block_text: "[2026-08-01 20:00] 小夏: 上次的内容".to_string(),
-        msg_count: 1,
-        time_span_ms: 0,
-        created_at: 1_700_000_000_000,
-    });
+    storage.add_utt_block(utt_block_with(
+        prev_session,
+        "char-0001",
+        "[2026-08-01 20:00] 小夏: 上次的内容",
+        |block| {
+            block.id = 1;
+            block.start_msg_id = Uuid::new_v4();
+            block.end_msg_id = Uuid::new_v4();
+        },
+    ));
 
     send_and_drain(&engine, "你好", Some("char-0001"), None).await;
 

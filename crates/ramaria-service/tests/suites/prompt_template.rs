@@ -10,8 +10,9 @@ use std::sync::Arc;
 
 use ramaria_core::config::RamariaConfig;
 use ramaria_core::traits::{LlmProvider, StoreCrud};
-use ramaria_core::types::{Persona, PersonaExample, PersonaKind, UttBlock};
+use ramaria_core::types::{Persona, PersonaExample, PersonaKind};
 use ramaria_service::{Engine, StreamEvent};
+use ramaria_testkit::fixtures::utt_block_with;
 use uuid::Uuid;
 
 use crate::support::engine_env::{build_engine, mark_ready, send_stream};
@@ -59,18 +60,14 @@ fn add_char_persona(storage: &MockStorage) {
 fn add_prev_session_with_utt(storage: &MockStorage) {
     let prev = Uuid::new_v4();
     storage.add_closed_session(prev);
-    storage.add_utt_block(UttBlock {
-        id: 1,
-        persona_uid: "char-0001".to_string(),
-        session_id: prev,
-        start_msg_id: Uuid::new_v4(),
-        end_msg_id: Uuid::new_v4(),
-        block_text: "[2026-08-01 20:00] 小夏: 上次我们聊到海边\n[2026-08-01 20:01] 用户: 嗯嗯"
-            .to_string(),
-        msg_count: 2,
-        time_span_ms: 60_000,
-        created_at: 1_700_000_000_000,
-    });
+    let block_text = "[2026-08-01 20:00] 小夏: 上次我们聊到海边\n[2026-08-01 20:01] 用户: 嗯嗯";
+    storage.add_utt_block(utt_block_with(prev, "char-0001", block_text, |block| {
+        block.id = 1;
+        block.start_msg_id = Uuid::new_v4();
+        block.end_msg_id = Uuid::new_v4();
+        block.msg_count = 2;
+        block.time_span_ms = 60_000;
+    }));
 }
 
 /// 构造候选示例（tags 逗号分隔，selected 可控）。

@@ -19,11 +19,9 @@ A_persona = """
 
 /// 构造带 TOML 形态 config 的 persona（可含 [prompt] 补丁节）。
 fn persona_with_toml_config(config: &str) -> Persona {
-    Persona {
-        config: Some(config.to_string()),
-        description: None,
-        ..make_test_persona()
-    }
+    let mut persona = make_test_persona();
+    persona.config = Some(config.to_string());
+    persona
 }
 
 /// 按下述配置渲染（含对话示例，供表达层位置断言使用）。

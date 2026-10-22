@@ -21,28 +21,12 @@
 - `messages`: 对话消息数组（user/assistant 交替）
 - `expected_l1`: 预期的 L1 摘要字段（供验证用）
 
-### memory_events.json
-10 条预计算的结构化 L2 记忆事件，覆盖多个分类维度：
-- 兴趣与休闲 (2条)
-- 学习与成长 (3条)
-- 工作与压力 (2条)
-- 知识探索 (1条)
-- 成就与里程碑 (1条)
-- 职业发展 (1条)
-
-每条事件包含完整的 11 个推断属性：title、summary、keywords、participants、confidence、salience、valence、presentation、share、attitude、paraphrase，以及分类标签和来源 L1。
-
 ## 使用方式
 
 ```rust
 // 加载对话 fixtures
 let fixtures: serde_json::Value = serde_json::from_str(
     &std::fs::read_to_string("tests/fixtures/conversations.json")?
-)?;
-
-// 加载记忆事件 fixtures
-let events: serde_json::Value = serde_json::from_str(
-    &std::fs::read_to_string("tests/fixtures/memory_events.json")?
 )?;
 ```
 

@@ -543,8 +543,8 @@ fn chat_value(
         "session": {
             "message_count": messages.len(),
         },
+        // 历史窗口场景只锁窗口与召回注入；提示词形状由生成基线单独断言
         "prompt": {
-            "system_prompt_chars": request.system_prompt.chars().count(),
             "memory_context_present": request.memory_context.is_some(),
             "memory_context_chars": request
                 .memory_context
@@ -553,7 +553,6 @@ fn chat_value(
                 .unwrap_or(0),
             "history_len": request.history.len(),
             "user_message": request.user_message.clone(),
-            "template_version": request.template_version.clone(),
         },
     })
 }

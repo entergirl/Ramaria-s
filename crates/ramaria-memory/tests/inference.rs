@@ -24,6 +24,7 @@ use ramaria_memory::inference::{
 };
 
 use common::mock_store::{MockFailingLlm, MockStorage};
+use ramaria_testkit::fixtures::event_with;
 
 // =========================================================
 // 多步 Mock LLM — 每次调用返回不同回复
@@ -252,50 +253,33 @@ fn make_stats_summary() -> StatsSummary {
 fn make_test_events(persona_uid: &str) -> Vec<MemoryEvent> {
     let now = ramaria_core::types::now_ms();
     vec![
-        MemoryEvent {
-            id: 1,
-            persona_uid: persona_uid.to_string(),
-            title: "项目验收".into(),
-            summary: "顺利完成项目验收".into(),
-            keywords: Some("工作,项目".into()),
-            participants: None,
-            start: now - 86400000,
-            end: 0,
-            confidence: 0.85,
-            salience: 0.9,
-            valence: 0.8,
-            presentation: Presentation::Objective,
-            share: 0.7,
-            attitude: Some("对成果满意".into()),
-            paraphrase: None,
-            absorbed: 0,
-            situation_strength: None,
-            motives: None,
-            created_at: now - 86400000,
-            last_accessed_at: None,
-        },
-        MemoryEvent {
-            id: 2,
-            persona_uid: persona_uid.to_string(),
-            title: "社交团建".into(),
-            summary: "参加部门团建感到压力".into(),
-            keywords: Some("社交,团建".into()),
-            participants: None,
-            start: now - 172800000,
-            end: 0,
-            confidence: 0.7,
-            salience: 0.6,
-            valence: -0.3,
-            presentation: Presentation::Subjective,
-            share: 0.4,
-            attitude: Some("对强制社交感到焦虑".into()),
-            paraphrase: None,
-            absorbed: 0,
-            situation_strength: None,
-            motives: None,
-            created_at: now - 172800000,
-            last_accessed_at: None,
-        },
+        event_with(1, "项目验收", |event| {
+            event.persona_uid = persona_uid.to_string();
+            event.summary = "顺利完成项目验收".into();
+            event.keywords = Some("工作,项目".into());
+            event.start = now - 86400000;
+            event.end = 0;
+            event.confidence = 0.85;
+            event.salience = 0.9;
+            event.valence = 0.8;
+            event.share = 0.7;
+            event.attitude = Some("对成果满意".into());
+            event.created_at = now - 86400000;
+        }),
+        event_with(2, "社交团建", |event| {
+            event.persona_uid = persona_uid.to_string();
+            event.summary = "参加部门团建感到压力".into();
+            event.keywords = Some("社交,团建".into());
+            event.start = now - 172800000;
+            event.end = 0;
+            event.confidence = 0.7;
+            event.salience = 0.6;
+            event.valence = -0.3;
+            event.presentation = Presentation::Subjective;
+            event.share = 0.4;
+            event.attitude = Some("对强制社交感到焦虑".into());
+            event.created_at = now - 172800000;
+        }),
     ]
 }
 

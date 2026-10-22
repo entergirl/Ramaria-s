@@ -73,10 +73,9 @@ fn role_layer_never_claims_ai_assistant() {
 
 /// 构造无手工 speaking_style 的 persona（config 不含该字段）。
 fn make_persona_without_manual_style() -> Persona {
-    Persona {
-        config: Some(r#"{"description":"一个喜欢编程的大学生"}"#.into()),
-        ..make_test_persona()
-    }
+    let mut persona = make_test_persona();
+    persona.config = Some(r#"{"description":"一个喜欢编程的大学生"}"#.into());
+    persona
 }
 
 #[test]
@@ -147,30 +146,24 @@ const TOML_PERSONA_CONFIG: &str = r#"[identity]
 
 /// 构造 TOML 形态 config 的 persona（无 description 列值）。
 fn make_persona_with_toml_config() -> Persona {
-    Persona {
-        config: Some(TOML_PERSONA_CONFIG.into()),
-        description: None,
-        ..make_test_persona()
-    }
+    let mut persona = make_test_persona();
+    persona.config = Some(TOML_PERSONA_CONFIG.into());
+    persona
 }
 
 /// 构造 JSON 形态 config 且不含 description 的 persona（背景行"无来源"态）。
 fn make_persona_without_description() -> Persona {
-    Persona {
-        config: Some(r#"{"speaking_style":"热情活泼，喜欢用emoji"}"#.into()),
-        description: None,
-        ..make_test_persona()
-    }
+    let mut persona = make_test_persona();
+    persona.config = Some(r#"{"speaking_style":"热情活泼，喜欢用emoji"}"#.into());
+    persona
 }
 
 /// 构造指定 kind 与 config 的 persona（Anim/Hist 数据源用例）。
 fn persona_with_kind(kind: PersonaKind, config: Option<&str>) -> Persona {
-    Persona {
-        kind,
-        config: config.map(str::to_string),
-        description: None,
-        ..make_test_persona()
-    }
+    let mut persona = make_test_persona();
+    persona.kind = kind;
+    persona.config = config.map(str::to_string);
+    persona
 }
 
 /// TOML 形态 config 端到端：`[identity].description` → `背景：` 行；
@@ -335,14 +328,11 @@ fn production_persona_explicit_rules_override_shared_examples() {
     );
 
     // 端到端：显式规则（经 resolve_chat_style_rules 解析）进入 `## 核心规则` 段
-    let persona = Persona {
-        uid: "rama-0001".into(),
-        name: "Ramaria".into(),
-        kind: PersonaKind::Rama,
-        config: Some(persona_config.into()),
-        description: None,
-        ..make_test_persona()
-    };
+    let mut persona = make_test_persona();
+    persona.uid = "rama-0001".into();
+    persona.name = "Ramaria".into();
+    persona.kind = PersonaKind::Rama;
+    persona.config = Some(persona_config.into());
     let result = assemble_prompt(
         &PromptContext {
             persona: Some(persona),

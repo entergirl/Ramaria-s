@@ -254,6 +254,7 @@ fn build_degraded_keywords(l1_list: &[MemoryL1]) -> Option<String> {
 mod tests {
     use super::*;
     use ramaria_core::types::{MemoryL1, Presentation};
+    use ramaria_testkit::fixtures::l1_with;
     use uuid::Uuid;
 
     /// 固定测试基准时间（Unix 毫秒），保证用例不依赖真实时钟、连续运行结果一致。
@@ -266,25 +267,16 @@ mod tests {
         valence: f64,
         salience: f64,
     ) -> MemoryL1 {
-        MemoryL1 {
-            id: Uuid::new_v4(),
-            session_id,
-            summary: summary.to_string(),
-            keywords: keywords.map(|s| s.to_string()),
-            time_period: Some("下午".to_string()),
-            atmosphere: None,
-            valence,
-            salience,
-            absorbed: false,
-            created_at: TEST_NOW_MS,
-            occurred_at: None,
-            last_accessed_at: None,
-            persona_uid: None,
-            context_json: None,
-            situation_strength: None,
-            evidence_notes: None,
-            continuation: None,
-        }
+        l1_with(session_id, None, summary, |l1| {
+            l1.keywords = keywords.map(|s| s.to_string());
+            l1.time_period = Some("下午".to_string());
+            l1.atmosphere = None;
+            l1.valence = valence;
+            l1.salience = salience;
+            l1.created_at = TEST_NOW_MS;
+            l1.occurred_at = None;
+            l1.situation_strength = None;
+        })
     }
 
     #[test]

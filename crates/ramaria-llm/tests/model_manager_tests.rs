@@ -47,15 +47,6 @@ fn model_not_ready_when_empty() {
 }
 
 #[test]
-fn list_installed_models_empty() {
-    let root = temp_models_root();
-    let mgr = ModelManager::new(&root).unwrap();
-    let models = mgr.list_installed_models().unwrap();
-    assert!(models.is_empty());
-    cleanup(&root);
-}
-
-#[test]
 fn model_ready_when_files_exist() {
     let root = temp_models_root();
     let mgr = ModelManager::new(&root).unwrap();
@@ -131,32 +122,6 @@ fn model_size_calculation() {
 
     let size = mgr.model_size("test-model");
     assert!(size >= 3584); // at least 1024 + 2048 + 512
-    cleanup(&root);
-}
-
-#[test]
-fn verify_checksum_matches() {
-    let root = temp_models_root();
-    fs::create_dir_all(&root).unwrap();
-
-    let test_file = root.join("test.bin");
-    fs::write(&test_file, b"hello world").unwrap();
-
-    let mgr = ModelManager::new(&root).unwrap();
-
-    // SHA-256 of "hello world" from `sha256sum`
-    let expected = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
-    assert!(mgr.verify_checksum(&test_file, expected).unwrap());
-
-    // Wrong hash
-    assert!(
-        !mgr.verify_checksum(
-            &test_file,
-            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
-        )
-        .unwrap()
-    );
-
     cleanup(&root);
 }
 

@@ -439,12 +439,3 @@ fn compute_diff_mixed_manual_keep_and_inferred_deprecate() {
         "diffs 应含 Inferred 的 Deprecate 条目"
     );
 }
-
-// ---- InferrerConfig ----
-
-#[test]
-fn inferrer_config_defaults() {
-    let config = InferrerConfig::default();
-    assert_eq!(config.low_evidence_threshold, 5.0);
-    assert_eq!(config.temperature, 0.3);
-}

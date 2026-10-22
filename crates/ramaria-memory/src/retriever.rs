@@ -23,8 +23,6 @@ use crate::vector::{BruteForceIndex, CachedVectorIndex};
 use crate::bm25::DocId;
 #[cfg(test)]
 use crate::decay::DecayConfig;
-#[cfg(test)]
-use ramaria_core::types::MemoryL1;
 
 mod helpers;
 mod index;

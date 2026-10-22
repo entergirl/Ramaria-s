@@ -5,6 +5,7 @@
 //! - 用例为确定性断言，可离线运行。
 
 use super::*;
+use ramaria_testkit::fixtures::persona_with;
 
 // =========================================================
 // 模板精简与语义等价回归
@@ -50,21 +51,14 @@ fn template_layer_map_matches_rendered_paragraphs() {
 #[test]
 fn rama_persona_prompt_keeps_semantic_elements() {
     let ctx = PromptContext {
-        persona: Some(Persona {
-            id: 1,
-            uid: "rama-0001".into(),
-            name: "Ramaria".into(),
-            kind: PersonaKind::Rama, // 助手类：原文白名单外
-            seq: 1,
-            source: "system".into(),
-            ref_id: None,
-            avatar: None,
-            active: true,
-            config: Some(r#"{"description":"系统助手"}"#.into()),
-            description: None,
-            created_at: 1000,
-            updated_at: 1000,
-        }),
+        persona: Some(persona_with("rama-0001", |persona| {
+            persona.id = 1;
+            persona.name = "Ramaria".into();
+            persona.source = "system".into();
+            persona.config = Some(r#"{"description":"系统助手"}"#.into());
+            persona.created_at = 1000;
+            persona.updated_at = 1000;
+        })),
         facts: vec![PersonaFact {
             id: 1,
             persona_uid: "rama-0001".into(),

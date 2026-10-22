@@ -10,6 +10,7 @@
 
 use ramaria_core::traits::StorageBackend;
 use ramaria_core::types::{MemoryEvent, MemoryL1, Message, Persona, PersonalityTrait};
+use ramaria_testkit::fixtures::{event_with, l1_with, persona_with};
 use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
 use uuid::Uuid;
@@ -86,51 +87,30 @@ pub fn make_assistant_message(session_id: Uuid, content: &str) -> Message {
 
 /// 构造测试用的 L1 记忆。
 pub fn make_test_l1(session_id: Uuid, summary: &str) -> MemoryL1 {
-    MemoryL1 {
-        id: Uuid::new_v4(),
-        session_id,
-        persona_uid: Some("user-0001".to_string()),
-        summary: summary.to_string(),
-        keywords: None,
-        time_period: None,
-        atmosphere: Some("neutral".to_string()),
-        valence: 0.5,
-        salience: 0.7,
-        context_json: None,
-        absorbed: false,
-        created_at: 1_717_977_600_000,
-        occurred_at: None,
-        last_accessed_at: None,
-        situation_strength: None,
-        evidence_notes: None,
-        continuation: None,
-    }
+    l1_with(session_id, Some("user-0001"), summary, |l1| {
+        l1.keywords = None;
+        l1.time_period = None;
+        l1.atmosphere = Some("neutral".to_string());
+        l1.salience = 0.7;
+        l1.created_at = 1_717_977_600_000;
+        l1.occurred_at = None;
+        l1.situation_strength = None;
+    })
 }
 
 /// 构造测试用的 L2 事件。
 pub fn make_test_event(id: i64, title: &str) -> MemoryEvent {
-    MemoryEvent {
-        id,
-        persona_uid: "user-0001".to_string(),
-        title: title.to_string(),
-        summary: format!("{title} 的详细摘要"),
-        keywords: None,
-        participants: Some("[\"user-0001\"]".to_string()),
-        start: 1_717_977_600_000,
-        end: 1_717_986_240_000,
-        valence: 0.3,
-        share: 0.8,
-        presentation: ramaria_core::types::Presentation::Subjective,
-        confidence: 0.85,
-        salience: 0.6,
-        attitude: None,
-        paraphrase: None,
-        absorbed: 0,
-        situation_strength: None,
-        motives: None,
-        created_at: 1_717_977_600_000,
-        last_accessed_at: None,
-    }
+    event_with(id, title, |event| {
+        event.participants = Some("[\"user-0001\"]".to_string());
+        event.start = 1_717_977_600_000;
+        event.end = 1_717_986_240_000;
+        event.valence = 0.3;
+        event.share = 0.8;
+        event.presentation = ramaria_core::types::Presentation::Subjective;
+        event.confidence = 0.85;
+        event.salience = 0.6;
+        event.created_at = 1_717_977_600_000;
+    })
 }
 
 /// 构造测试用的 L3 性格标签。
@@ -165,15 +145,12 @@ pub fn make_test_persona(
     kind: ramaria_core::types::PersonaKind,
     config: Option<&str>,
 ) -> Persona {
-    let mut p = Persona::new(
-        uid.to_string(),
-        name.to_string(),
-        kind,
-        1,
-        "system".to_string(),
-    );
-    p.config = config.map(|s| s.to_string());
-    p
+    persona_with(uid, |p| {
+        p.name = name.to_string();
+        p.kind = kind;
+        p.source = "system".to_string();
+        p.config = config.map(|s| s.to_string());
+    })
 }
 
 fn rand_id() -> i64 {

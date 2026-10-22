@@ -455,13 +455,11 @@ fn fixture_data_covers_default_scale() {
 
 /// 构造测试 persona。
 fn test_persona(uid: &str, kind: PersonaKind) -> ramaria_core::types::Persona {
-    ramaria_core::types::Persona::new(
-        uid.to_string(),
-        uid.to_string(),
-        kind,
-        1,
-        "test".to_string(),
-    )
+    ramaria_testkit::fixtures::persona_with(uid, |persona| {
+        persona.name = uid.to_string();
+        persona.kind = kind;
+        persona.source = "test".to_string();
+    })
 }
 
 #[test]

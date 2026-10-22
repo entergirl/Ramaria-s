@@ -8,8 +8,10 @@ use super::parse::{
 };
 use super::*;
 use crate::TopicCluster;
+use ramaria_core::types::MemoryEvent;
 use ramaria_core::types::Presentation;
 use ramaria_core::types::now_ms;
+use ramaria_testkit::fixtures::{event_with, l1_with};
 use uuid::Uuid;
 
 // ---- format_l1_from_cluster ----
@@ -439,25 +441,16 @@ fn response_array_to_result() {
 
 /// 构造测试用 L1（仅指纹/相似度计算需要的字段有值）。
 fn l1_for_fp(id: &str, summary: &str) -> MemoryL1 {
-    MemoryL1 {
-        id: Uuid::parse_str(id).expect("合法 UUID"),
-        session_id: Uuid::new_v4(),
-        summary: summary.to_string(),
-        keywords: None,
-        time_period: None,
-        atmosphere: None,
-        valence: 0.0,
-        salience: 0.5,
-        absorbed: false,
-        created_at: now_ms(),
-        occurred_at: None,
-        last_accessed_at: None,
-        persona_uid: None,
-        context_json: None,
-        situation_strength: None,
-        evidence_notes: None,
-        continuation: None,
-    }
+    l1_with(Uuid::new_v4(), None, summary, |l1| {
+        l1.id = Uuid::parse_str(id).expect("合法 UUID");
+        l1.keywords = None;
+        l1.time_period = None;
+        l1.atmosphere = None;
+        l1.valence = 0.0;
+        l1.created_at = now_ms();
+        l1.occurred_at = None;
+        l1.situation_strength = None;
+    })
 }
 
 #[test]
@@ -489,28 +482,16 @@ fn fingerprint_ignores_l1_content_but_is_stable_across_calls() {
 
 /// 构造测试用事件（title/summary/keywords 为相似度输入）。
 fn event_for_sim(title: &str, summary: &str, keywords: Option<&str>) -> MemoryEvent {
-    MemoryEvent {
-        id: 0,
-        persona_uid: "p1".into(),
-        title: title.into(),
-        summary: summary.into(),
-        keywords: keywords.map(|s| s.to_string()),
-        participants: None,
-        start: 0,
-        end: 0,
-        confidence: 0.5,
-        salience: 0.5,
-        valence: 0.0,
-        presentation: Presentation::Mixed,
-        share: 0.5,
-        attitude: None,
-        paraphrase: None,
-        absorbed: 0,
-        situation_strength: None,
-        motives: None,
-        created_at: 0,
-        last_accessed_at: None,
-    }
+    event_with(0, title, |event| {
+        event.persona_uid = "p1".into();
+        event.summary = summary.into();
+        event.keywords = keywords.map(|s| s.to_string());
+        event.start = 0;
+        event.end = 0;
+        event.confidence = 0.5;
+        event.presentation = Presentation::Mixed;
+        event.created_at = 0;
+    })
 }
 
 #[test]

@@ -11,28 +11,26 @@ use super::*;
 // =========================================================
 
 use crate::utt::UttSplitterConfig;
+use ramaria_testkit::fixtures::l1_with;
 
 /// 构造带 continuation 的 MemoryL1（供 build_prior_context 测试）。
 fn make_l1(summary: &str, notes: Vec<EvidenceNote>) -> MemoryL1 {
-    MemoryL1 {
-        id: ramaria_core::types::new_id(),
-        session_id: ramaria_core::types::new_id(),
-        summary: summary.to_string(),
-        keywords: None,
-        time_period: None,
-        atmosphere: None,
-        valence: 0.0,
-        salience: 0.5,
-        absorbed: false,
-        created_at: 0,
-        occurred_at: None,
-        last_accessed_at: None,
-        persona_uid: Some("char-0001".to_string()),
-        context_json: None,
-        situation_strength: None,
-        evidence_notes: Some(notes),
-        continuation: Some("延续".to_string()),
-    }
+    l1_with(
+        ramaria_core::types::new_id(),
+        Some("char-0001"),
+        summary,
+        |l1| {
+            l1.keywords = None;
+            l1.time_period = None;
+            l1.atmosphere = None;
+            l1.valence = 0.0;
+            l1.created_at = 0;
+            l1.occurred_at = None;
+            l1.situation_strength = None;
+            l1.evidence_notes = Some(notes);
+            l1.continuation = Some("延续".to_string());
+        },
+    )
 }
 
 // ---- build_prior_context：两种上文形态 ----

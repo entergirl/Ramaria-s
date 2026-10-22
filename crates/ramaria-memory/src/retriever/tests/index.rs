@@ -5,6 +5,7 @@
 //! - 用例为确定性断言，可离线运行。
 
 use super::*;
+use ramaria_testkit::fixtures::l1_with;
 
 // =========================================================
 // index_l1_record 测试
@@ -13,25 +14,20 @@ use super::*;
 #[test]
 fn index_l1_record_adds_to_bm25() {
     let mut r = Retriever::new();
-    let l1 = MemoryL1 {
-        id: uuid::Uuid::new_v4(),
-        session_id: uuid::Uuid::new_v4(),
-        summary: "用户讨论Rust异步编程".to_string(),
-        keywords: Some("Rust,异步,编程".to_string()),
-        time_period: None,
-        atmosphere: None,
-        valence: 0.5,
-        salience: 0.8,
-        absorbed: false,
-        created_at: 1718000000000,
-        occurred_at: None,
-        last_accessed_at: None,
-        persona_uid: Some("user-0001".to_string()),
-        context_json: None,
-        situation_strength: None,
-        evidence_notes: None,
-        continuation: None,
-    };
+    let l1 = l1_with(
+        uuid::Uuid::new_v4(),
+        Some("user-0001"),
+        "用户讨论Rust异步编程",
+        |l1| {
+            l1.keywords = Some("Rust,异步,编程".to_string());
+            l1.time_period = None;
+            l1.atmosphere = None;
+            l1.salience = 0.8;
+            l1.created_at = 1718000000000;
+            l1.occurred_at = None;
+            l1.situation_strength = None;
+        },
+    );
 
     let result = r.index_l1_record(&l1);
     assert!(result.is_ok());
@@ -42,25 +38,21 @@ fn index_l1_record_adds_to_bm25() {
 #[test]
 fn index_l1_record_searchable_immediately() {
     let mut r = Retriever::new();
-    let l1 = MemoryL1 {
-        id: uuid::Uuid::new_v4(),
-        session_id: uuid::Uuid::new_v4(),
-        summary: "用户今天学习了Rust编程语言的基础语法".to_string(),
-        keywords: Some("学习,Rust,编程".to_string()),
-        time_period: None,
-        atmosphere: None,
-        valence: 0.8,
-        salience: 0.9,
-        absorbed: false,
-        created_at: 1718000000000,
-        occurred_at: None,
-        last_accessed_at: None,
-        persona_uid: Some("user-0001".to_string()),
-        context_json: None,
-        situation_strength: None,
-        evidence_notes: None,
-        continuation: None,
-    };
+    let l1 = l1_with(
+        uuid::Uuid::new_v4(),
+        Some("user-0001"),
+        "用户今天学习了Rust编程语言的基础语法",
+        |l1| {
+            l1.keywords = Some("学习,Rust,编程".to_string());
+            l1.time_period = None;
+            l1.atmosphere = None;
+            l1.valence = 0.8;
+            l1.salience = 0.9;
+            l1.created_at = 1718000000000;
+            l1.occurred_at = None;
+            l1.situation_strength = None;
+        },
+    );
 
     r.index_l1_record(&l1).unwrap();
 
@@ -79,25 +71,20 @@ fn index_l1_record_searchable_immediately() {
 #[test]
 fn index_l1_record_respects_persona_uid() {
     let mut r = Retriever::new();
-    let l1_user_a = MemoryL1 {
-        id: uuid::Uuid::new_v4(),
-        session_id: uuid::Uuid::new_v4(),
-        summary: "用户A的私密对话".to_string(),
-        keywords: Some("私密".to_string()),
-        time_period: None,
-        atmosphere: None,
-        valence: 0.0,
-        salience: 0.5,
-        absorbed: false,
-        created_at: 1718000000000,
-        occurred_at: None,
-        last_accessed_at: None,
-        persona_uid: Some("user-a".to_string()),
-        context_json: None,
-        situation_strength: None,
-        evidence_notes: None,
-        continuation: None,
-    };
+    let l1_user_a = l1_with(
+        uuid::Uuid::new_v4(),
+        Some("user-a"),
+        "用户A的私密对话",
+        |l1| {
+            l1.keywords = Some("私密".to_string());
+            l1.time_period = None;
+            l1.atmosphere = None;
+            l1.valence = 0.0;
+            l1.created_at = 1718000000000;
+            l1.occurred_at = None;
+            l1.situation_strength = None;
+        },
+    );
 
     r.index_l1_record(&l1_user_a).unwrap();
 
@@ -117,25 +104,17 @@ fn index_l1_record_preserves_fields() {
     let mut r = Retriever::new();
     let id = uuid::Uuid::new_v4();
     let sid = uuid::Uuid::new_v4();
-    let l1 = MemoryL1 {
-        id,
-        session_id: sid,
-        summary: "测试摘要".to_string(),
-        keywords: Some("测试,标签".to_string()),
-        time_period: Some("下午".to_string()),
-        atmosphere: Some("轻松".to_string()),
-        valence: 0.7,
-        salience: 0.9,
-        absorbed: false,
-        created_at: 1718000000000,
-        occurred_at: None,
-        last_accessed_at: None,
-        persona_uid: Some("test-persona".to_string()),
-        context_json: None,
-        situation_strength: None,
-        evidence_notes: None,
-        continuation: None,
-    };
+    let mut l1 = l1_with(sid, Some("test-persona"), "测试摘要", |l1| {
+        l1.keywords = Some("测试,标签".to_string());
+        l1.time_period = Some("下午".to_string());
+        l1.atmosphere = Some("轻松".to_string());
+        l1.valence = 0.7;
+        l1.salience = 0.9;
+        l1.created_at = 1718000000000;
+        l1.occurred_at = None;
+        l1.situation_strength = None;
+    });
+    l1.id = id;
 
     r.index_l1_record(&l1).unwrap();
 

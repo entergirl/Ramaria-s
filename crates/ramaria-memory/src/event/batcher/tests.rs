@@ -8,30 +8,21 @@
 use super::*;
 use ramaria_core::keyword::KeywordToken;
 use ramaria_core::types::{EvidenceNote, MemoryL1};
+use ramaria_testkit::fixtures::l1_with;
 use uuid::Uuid;
 
 // ---- L1Item::from ----
 
 fn make_memory_l1(summary: &str, keywords: Option<&str>, salience: f64) -> MemoryL1 {
-    MemoryL1 {
-        id: Uuid::new_v4(),
-        session_id: Uuid::new_v4(),
-        summary: summary.into(),
-        keywords: keywords.map(|s| s.into()),
-        time_period: None,
-        atmosphere: None,
-        valence: 0.0,
-        salience,
-        absorbed: false,
-        created_at: 1_700_000_000_000,
-        occurred_at: None,
-        last_accessed_at: None,
-        persona_uid: None,
-        context_json: None,
-        situation_strength: None,
-        evidence_notes: None,
-        continuation: None,
-    }
+    l1_with(Uuid::new_v4(), None, summary, |l1| {
+        l1.keywords = keywords.map(|s| s.into());
+        l1.time_period = None;
+        l1.atmosphere = None;
+        l1.valence = 0.0;
+        l1.salience = salience;
+        l1.occurred_at = None;
+        l1.situation_strength = None;
+    })
 }
 
 /// L1Item::from 各关键词输入参数化验证。

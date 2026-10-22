@@ -12,7 +12,7 @@
 //! - `retriever_lru_unlimited`：`lru_max_entries == 0` 无限制模式无测试
 //! - `fixture_data_completeness`：fixtures/ 数据完整性（消息数、摘要/关键词非空）
 //!
-//! fixture 数据位于 `tests/fixtures/`（conversations.json / memory_events.json），
+//! fixture 数据位于 `tests/fixtures/`（conversations.json），
 //! 经 `fixtures` 模块加载（`include_str!` 相对当前文件路径自动成立）。
 
 mod fixtures;

@@ -9,7 +9,7 @@
 //! - 包含预期值的结构体定义
 //! - 纯数据模块，零 I/O 依赖
 //!
-//! 数据文件与本模块同目录（conversations.json / memory_events.json），
+//! 数据文件与本模块同目录（conversations.json），
 //! `include_str!` 相对当前文件解析，路径自动成立。
 
 // 各测试二进制独立编译本模块，各目标使用子集不同 → 允许未使用项
@@ -57,37 +57,6 @@ pub struct ConversationFixtures {
 }
 
 // =========================================================
-// 记忆事件 Fixture 结构
-// =========================================================
-
-/// 单条预计算记忆事件。
-#[derive(Debug, Deserialize, Clone)]
-pub struct MemoryEventFixture {
-    pub id: i64,
-    pub persona_uid: String,
-    pub title: String,
-    pub summary: String,
-    pub keywords: String,
-    pub participants: Vec<String>,
-    pub confidence: f64,
-    pub salience: f64,
-    pub valence: f64,
-    pub presentation: String,
-    pub share: f64,
-    pub attitude: String,
-    pub paraphrase: String,
-    pub category: String,
-    pub l1_sources: Vec<String>,
-}
-
-/// 记忆事件 fixtures 容器。
-#[derive(Debug, Deserialize)]
-pub struct MemoryEventFixtures {
-    pub description: String,
-    pub events: Vec<MemoryEventFixture>,
-}
-
-// =========================================================
 // 加载函数
 // =========================================================
 
@@ -98,15 +67,6 @@ pub struct MemoryEventFixtures {
 pub fn load_conversation_fixtures() -> ConversationFixtures {
     let json_str = include_str!("conversations.json");
     serde_json::from_str(json_str).expect("对话 fixtures JSON 解析失败")
-}
-
-/// 加载记忆事件 fixtures。
-///
-/// 返回:
-/// - 解析后的 MemoryEventFixtures。
-pub fn load_memory_event_fixtures() -> MemoryEventFixtures {
-    let json_str = include_str!("memory_events.json");
-    serde_json::from_str(json_str).expect("记忆事件 fixtures JSON 解析失败")
 }
 
 // =========================================================
@@ -131,19 +91,6 @@ mod tests {
     }
 
     #[test]
-    fn test_load_memory_event_fixtures() {
-        let fixtures = load_memory_event_fixtures();
-        assert!(!fixtures.events.is_empty(), "记忆事件 fixtures 不应为空");
-        assert_eq!(fixtures.events.len(), 10);
-
-        // 验证第一条事件
-        let ev = &fixtures.events[0];
-        assert_eq!(ev.id, 1);
-        assert_eq!(ev.persona_uid, "user-0001");
-        assert!(!ev.title.is_empty());
-    }
-
-    #[test]
     fn test_all_conversations_have_valid_roles() {
         let fixtures = load_conversation_fixtures();
         for conv in &fixtures.fixtures {
@@ -155,60 +102,6 @@ mod tests {
                 );
                 assert!(!msg.content.is_empty(), "消息内容为空");
             }
-        }
-    }
-
-    #[test]
-    fn test_all_expected_l1_have_valid_valence() {
-        let fixtures = load_conversation_fixtures();
-        for conv in &fixtures.fixtures {
-            let v = conv.expected_l1.valence;
-            assert!(
-                v == -1.0 || v == -0.5 || v == 0.0 || v == 0.5 || v == 1.0,
-                "无效的 valence: {} (fixture: {})",
-                v,
-                conv.id
-            );
-        }
-    }
-
-    #[test]
-    fn test_all_expected_l1_have_valid_salience() {
-        let fixtures = load_conversation_fixtures();
-        for conv in &fixtures.fixtures {
-            let s = conv.expected_l1.salience;
-            assert!(
-                s == 0.0 || s == 0.25 || s == 0.5 || s == 0.75 || s == 1.0,
-                "无效的 salience: {} (fixture: {})",
-                s,
-                conv.id
-            );
-        }
-    }
-
-    #[test]
-    fn test_all_events_have_valid_confidence() {
-        let fixtures = load_memory_event_fixtures();
-        for ev in &fixtures.events {
-            assert!(
-                (0.0..=1.0).contains(&ev.confidence),
-                "无效的 confidence: {} (event: {})",
-                ev.confidence,
-                ev.id
-            );
-        }
-    }
-
-    #[test]
-    fn test_all_events_have_valid_share() {
-        let fixtures = load_memory_event_fixtures();
-        for ev in &fixtures.events {
-            assert!(
-                (0.0..=1.0).contains(&ev.share),
-                "无效的 share: {} (event: {})",
-                ev.share,
-                ev.id
-            );
         }
     }
 
