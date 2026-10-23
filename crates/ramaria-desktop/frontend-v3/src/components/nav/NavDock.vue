@@ -13,7 +13,7 @@
  * - 图标为常量 SVG 字符串，经 v-html 注入，不含任何用户输入
  */
 
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import AboutCard from './AboutCard.vue'
@@ -25,12 +25,14 @@ import {
   fnOffset,
   NAV_PRESET_LABELS,
   presetPoint,
+  resolvePreset,
   subOffset,
   type Bounds,
   type NavPreset,
   type Point,
   type SideDecision,
 } from './geometry'
+import { FULLSCREEN_ROUTES } from '../../app/router'
 import { PREF_KEYS, readPref, removePref, writePref } from '../../core/prefs'
 import { currentTheme, toggleTheme } from '../../core/theme'
 import { useDebugStore } from '../../stores/debug'
@@ -91,10 +93,14 @@ let anchorStart: Point = { x: 0, y: 0 }
 let movedDuringDrag = false
 let resizeTimer = 0
 
-const items = computed(() => NAV.filter((item) => !item.debug || debug.unlocked))
+const currentView = computed(() => String(route.name ?? 'chat'))
+/** 全屏页（首次配置 / 错误）：只保留主题与品牌两键，不列出视图入口 */
+const fullscreen = computed(() => FULLSCREEN_ROUTES.has(currentView.value))
+const items = computed(() =>
+  fullscreen.value ? [] : NAV.filter((item) => !item.debug || debug.unlocked),
+)
 const flipped = computed(() => side.value.flipped)
 const compact = computed(() => side.value.compact)
-const currentView = computed(() => String(route.name ?? 'chat'))
 
 function viewport(): { width: number; height: number } {
   return { width: window.innerWidth, height: window.innerHeight }
@@ -113,6 +119,11 @@ function applyAnchor(): void {
   }
   element.style.left = `${Math.round(anchor.value.x)}px`
   element.style.top = `${Math.round(anchor.value.y)}px`
+}
+
+/** 预设锚点：全屏页把「底中」解析到右下，避免核心键压在居中卡片上 */
+function presetAnchor(name: NavPreset = preset.value): Point {
+  return presetPoint(resolvePreset(name, fullscreen.value), viewport())
 }
 
 function applyOffset(selector: string, point: Point, index?: number): void {
@@ -139,6 +150,12 @@ function applyLayout(): void {
     node.style.setProperty('--oy', `${point.y}px`)
     node.style.setProperty('--i', String(index))
   })
+  if (fullscreen.value) {
+    // 全屏页只有两键：主题向上、品牌向下；靠近上缘时整体翻转
+    applyOffset('[data-orb="fn-theme"]', fnOffset(flipped.value ? 90 : -90, compact.value))
+    applyOffset('[data-orb="orb-brand"]', fnOffset(flipped.value ? -90 : 90, compact.value))
+    return
+  }
   applyOffset('[data-orb="fn-theme"]', fnOffset(180, compact.value))
   applyOffset('[data-orb="fn-settings"]', fnOffset(0, compact.value))
   applyOffset('[data-orb="orb-brand"]', fnOffset(flipped.value ? -90 : 90, compact.value))
@@ -180,7 +197,7 @@ function applyPreset(name: NavPreset): void {
   removePref(PREF_KEYS.navFreeX)
   removePref(PREF_KEYS.navFreeY)
   freePosition.value = false
-  anchor.value = presetPoint(name, viewport())
+  anchor.value = presetAnchor(name)
   applyAnchor()
   updateSide()
 }
@@ -307,7 +324,7 @@ function onResize(): void {
     if (freePosition.value) {
       anchor.value = clampPoint(anchor.value, dragBounds(viewport()))
     } else {
-      anchor.value = presetPoint(preset.value, viewport())
+      anchor.value = presetAnchor()
     }
     applyAnchor()
     updateSide()
@@ -321,12 +338,21 @@ onMounted(() => {
     freePosition.value = true
     anchor.value = clampPoint({ x: savedX, y: savedY }, dragBounds(viewport()))
   } else {
-    anchor.value = presetPoint(preset.value, viewport())
+    anchor.value = presetAnchor()
   }
   applyAnchor()
   updateSide()
   window.addEventListener('resize', onResize)
   document.addEventListener('keydown', onDocumentKeydown)
+})
+
+/* 全屏页与主界面共用一套位置预设：进出全屏时重算锚点（自由摆放不干预） */
+watch(fullscreen, () => {
+  if (!freePosition.value) {
+    anchor.value = presetAnchor()
+    applyAnchor()
+  }
+  updateSide()
 })
 
 onBeforeUnmount(() => {
@@ -394,6 +420,7 @@ onBeforeUnmount(() => {
     </button>
 
     <button
+      v-if="!fullscreen"
       type="button"
       class="orb orb--fn"
       data-orb="fn-settings"

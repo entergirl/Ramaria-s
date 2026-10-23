@@ -2,13 +2,14 @@
  * src/app/router.ts — 路由表与状态守卫
  *
  * 职责:
- * - 声明 10 个契约视图的路由，并把应用状态机的全屏态强制到对应页面
+ * - 声明 9 个契约视图的路由，并把应用状态机的全屏态强制到对应页面
  *
  * 设计特点:
  * - hash 模式：Tauri 直接加载静态文件，无需服务端回退
  * - 视图全部懒加载，首屏只加载壳与当前视图
+ * - 守卫首次导航前等待引导完成，避免用默认状态误判全屏页
  * - 守卫只处理「全屏态强制」；状态变化后的跟随跳转由 App 根组件 watch 承担
- * - 索引状态不参与路由（D-V30-010），变化只影响横幅与设置卡
+ * - 索引状态与模型下载都不参与路由（D-V30-010 / D-V30-044），只影响横幅与设置卡
  */
 
 import { createRouter, createWebHashHistory, type RouteRecordRaw } from 'vue-router'
@@ -16,7 +17,7 @@ import { createRouter, createWebHashHistory, type RouteRecordRaw } from 'vue-rou
 import { useAppStore } from '../stores/app'
 
 /** 全屏页路由名：这些页面不渲染导航框架，且在就绪后不得停留 */
-export const FULLSCREEN_ROUTES = new Set(['setup', 'progress', 'error'])
+export const FULLSCREEN_ROUTES = new Set(['setup', 'error'])
 
 /** 契约视图路由表 */
 export const routes: RouteRecordRaw[] = [
@@ -29,7 +30,6 @@ export const routes: RouteRecordRaw[] = [
   { path: '/settings', name: 'settings', component: () => import('../views/settings/index.vue') },
   { path: '/debug', name: 'debug', component: () => import('../views/debug/index.vue') },
   { path: '/setup', name: 'setup', component: () => import('../views/setup/index.vue') },
-  { path: '/progress', name: 'progress', component: () => import('../views/progress/index.vue') },
   { path: '/error', name: 'error', component: () => import('../views/error/index.vue') },
   { path: '/:pathMatch(.*)*', name: 'not-found', redirect: { name: 'chat' } },
 ]
@@ -57,7 +57,7 @@ export function createAppRouter() {
     routes: [...routes, ...devRoutes],
   })
 
-  router.beforeEach((to) => {
+  router.beforeEach(async (to) => {
     const app = useAppStore()
     const target = String(to.name ?? '')
 
@@ -66,14 +66,16 @@ export function createAppRouter() {
       return true
     }
 
+    // 首次导航先等引导完成：默认状态是 needs_setup，提前判定会误跳配置页
+    if (!app.booted) {
+      await app.bootstrap()
+    }
+
     if (app.appState === 'needs_setup') {
       return target === 'setup' ? true : { name: 'setup' }
     }
     if (app.appState === 'fatal_error') {
       return target === 'error' ? true : { name: 'error' }
-    }
-    if (app.appState === 'downloading_model') {
-      return target === 'progress' ? true : { name: 'progress' }
     }
     if (FULLSCREEN_ROUTES.has(target)) {
       return { name: 'chat' }

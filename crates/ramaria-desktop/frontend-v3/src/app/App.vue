@@ -4,15 +4,16 @@
  *
  * 职责:
  * - 挂载视图出口与全局提示层
- * - 启动引导应用状态，并在状态变化时跟随跳转全屏页 / 主界面
+ * - 应用状态变化时跟随跳转全屏页 / 主界面
  *
  * 设计特点:
+ * - 启动引导由路由守卫完成；本组件在引导结束前不跟随状态，避免用默认值误跳
  * - 状态跟随只在根组件一处 watch，视图不各自处理路由
- * - 首次引导前按 needs_setup 处理，进入全屏配置页不闪烁主界面
- * - 导航框架随 M5-004 接入，此处只保留出口
+ * - 模型下载不进全屏页（D-V30-044），只显示横幅，不触发跳转
+ * - 圆键导航在全屏页同样常驻（D-V30-046）：品牌与主题切换由它承担
  */
 
-import { onMounted, watch } from 'vue'
+import { watch } from 'vue'
 import { RouterView, useRoute, useRouter } from 'vue-router'
 
 import ToastLayer from '../components/base/ToastLayer.vue'
@@ -27,6 +28,9 @@ const route = useRoute()
 watch(
   () => app.appState,
   (state) => {
+    if (!app.booted) {
+      return
+    }
     const current = String(route.name ?? '')
     if (state === 'needs_setup' && current !== 'setup') {
       void router.replace({ name: 'setup' })
@@ -36,24 +40,16 @@ watch(
       void router.replace({ name: 'error' })
       return
     }
-    if (state === 'downloading_model' && current !== 'progress') {
-      void router.replace({ name: 'progress' })
-      return
-    }
     if ((state === 'ready' || state === 'degraded') && FULLSCREEN_ROUTES.has(current)) {
       void router.replace({ name: 'chat' })
     }
   },
   { immediate: true },
 )
-
-onMounted(() => {
-  void app.bootstrap()
-})
 </script>
 
 <template>
   <RouterView />
-  <NavDock v-if="!app.fullscreen" />
+  <NavDock />
   <ToastLayer />
 </template>

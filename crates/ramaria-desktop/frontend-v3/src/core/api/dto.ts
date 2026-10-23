@@ -186,6 +186,39 @@ export interface ChatErrorPayload {
   retryable: boolean
 }
 
+/**
+ * 嵌入模型校验结果（`validate_embedding_model`）
+ *
+ * 形状: snake_case，3 字段；`dimension` / `reason` 缺省不输出
+ */
+export interface EmbeddingValidation {
+  valid: boolean
+  dimension?: number
+  reason?: string
+}
+
+/**
+ * 嵌入模型配置视图（`get_embedding_model`）
+ *
+ * 形状: snake_case；未配置时命令返回 `null`，`model_path` 缺省不输出
+ */
+export interface EmbeddingModelView {
+  model_path?: string
+  valid: boolean
+  dimension?: number
+}
+
+/**
+ * 全量配置写回执（`update_full_config`）
+ *
+ * 形状: camelCase；`failures` 为空表示文件与 DB 双侧都写入成功
+ */
+export interface ConfigWriteReceipt {
+  fileOk: boolean
+  dbOk: boolean
+  failures: string[]
+}
+
 /** 主动消息（`proactive-message` 事件）：snake_case，`activated` 仅点击重播时存在 */
 export interface ProactiveMessagePayload {
   session_id: string

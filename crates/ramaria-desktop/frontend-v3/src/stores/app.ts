@@ -15,22 +15,20 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 
-import { chatApi, indexApi, setupApi } from '../core/api'
+import { chatApi, configApi, indexApi, setupApi } from '../core/api'
 import type { AppStateValue, DegradedReason, IndexProgress, IndexStatusView } from '../core/api/dto'
 import { errorMessage } from '../core/errors'
 import { EVENTS, useEvent } from '../core/events'
+import { isSetupCompleted } from '../core/setupWizard'
 
 export const useAppStore = defineStore('app', () => {
   const appState = ref<AppStateValue>('needs_setup')
   const degradedReason = ref<DegradedReason | null>(null)
   const indexStatus = ref<IndexStatusView | null>(null)
   const booting = ref(false)
+  /** 首次引导是否已结束（成功或失败都置真，避免重复请求） */
+  const booted = ref(false)
   const bootError = ref('')
-
-  /** 全屏态：渲染全屏页，隐藏导航框架 */
-  const fullscreen = computed(
-    () => appState.value === 'needs_setup' || appState.value === 'fatal_error',
-  )
 
   /** 索引尚未就绪（chat 横幅判据：idle / building / degraded） */
   const indexNotReady = computed(() => {
@@ -43,22 +41,50 @@ export const useAppStore = defineStore('app', () => {
     () => indexStatus.value?.status === 'ready' && (indexStatus.value?.failed ?? 0) > 0,
   )
 
-  /** 启动引导：应用状态 + 索引状态，降级时补取原因 */
-  async function bootstrap(): Promise<void> {
-    if (booting.value) {
+  /**
+   * 冷启动时校正「就绪」判定。
+   *
+   * 说明:
+   * - 后端只按「后端配置存在 + 模型已选」判定就绪，测试连接也会写入后端配置，
+   *   因此未走完向导的库会被误判为就绪、直接落到空白主界面
+   * - 以 `settings` 表的完成标记为准：标记缺失时回到首次配置
+   * - 标记读取失败时不改判定，避免把瞬时读取错误当成「未配置」
+   */
+  async function resolveSetupState(state: AppStateValue): Promise<AppStateValue> {
+    if (state !== 'ready' && state !== 'degraded') {
+      return state
+    }
+    try {
+      const settings = await configApi.getSettings()
+      return isSetupCompleted(settings) ? state : 'needs_setup'
+    } catch {
+      return state
+    }
+  }
+
+  /**
+   * 启动引导：应用状态 + 索引状态，降级时补取原因。
+   *
+   * 参数:
+   * - `force`: 已引导过也重新读取（错误页「重试」使用）
+   */
+  async function bootstrap(force = false): Promise<void> {
+    if (booting.value || (booted.value && !force)) {
       return
     }
     booting.value = true
     bootError.value = ''
     try {
       const [state, index] = await Promise.all([chatApi.getAppState(), indexApi.getStatus()])
-      appState.value = state
       indexStatus.value = index
-      degradedReason.value = state === 'degraded' ? await setupApi.getDegradedReason() : null
+      appState.value = await resolveSetupState(state)
+      degradedReason.value =
+        appState.value === 'degraded' ? await setupApi.getDegradedReason() : null
     } catch (error) {
       bootError.value = errorMessage(error, '启动状态读取失败')
     } finally {
       booting.value = false
+      booted.value = true
     }
   }
 
@@ -116,8 +142,8 @@ export const useAppStore = defineStore('app', () => {
     degradedReason,
     indexStatus,
     booting,
+    booted,
     bootError,
-    fullscreen,
     indexNotReady,
     indexPartial,
     bootstrap,

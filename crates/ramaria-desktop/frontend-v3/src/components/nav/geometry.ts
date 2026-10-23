@@ -45,6 +45,17 @@ export const NAV_PRESET_LABELS: Record<NavPreset, string> = {
   'bottom-right': '右下',
 }
 
+/**
+ * 全屏页实际使用的位置预设。
+ *
+ * 说明:
+ * - 底中预设的核心键落在卡片底边之内，全屏页的居中卡片会压住它
+ * - 全屏页把底中换成右下（与视觉稿一致）；其余预设与自由拖拽不受影响
+ */
+export function resolvePreset(preset: NavPreset, fullscreen: boolean): NavPreset {
+  return fullscreen && preset === 'bottom' ? 'bottom-right' : preset
+}
+
 /** 二维点 */
 export interface Point {
   x: number

@@ -17,7 +17,10 @@ import type {
   AppStateValue,
   BackendConfig,
   ClearCacheResult,
+  ConfigWriteReceipt,
   DegradedReason,
+  EmbeddingModelView,
+  EmbeddingValidation,
   IndexRebuildReceipt,
   IndexStatusView,
   PrivacyStatus,
@@ -53,13 +56,25 @@ export const chatApi = {
   },
 }
 
-/** 首次配置：执行配置与状态刷新（其余子命令随全屏页落地补齐） */
+/** 首次配置：执行配置、连接测试、嵌入模型与状态刷新 */
 export const setupApi = {
   run(provider: string, modelId: string, baseUrl: string, apiKey: string | null = null) {
     return invoke<string>(COMMANDS.setup.run, { provider, modelId, baseUrl, apiKey })
   },
   refresh() {
     return invoke<AppStateValue>(COMMANDS.setup.refresh)
+  },
+  testLlmConnection() {
+    return invoke<string>(COMMANDS.setup.testLlmConnection)
+  },
+  validateEmbeddingModel(path: string) {
+    return invoke<EmbeddingValidation>(COMMANDS.setup.validateEmbeddingModel, { path })
+  },
+  saveEmbeddingModel(path: string) {
+    return invoke<string>(COMMANDS.setup.saveEmbeddingModel, { path })
+  },
+  getEmbeddingModel() {
+    return invoke<EmbeddingModelView | null>(COMMANDS.setup.getEmbeddingModel)
   },
   getDegradedReason() {
     return invoke<DegradedReason | null>(COMMANDS.setup.getDegradedReason)
@@ -82,16 +97,31 @@ export const sessionApi = {
   },
 }
 
-/** 配置：后端配置读取、全局设置读写 */
+/** 配置：后端配置读写、全局设置读写、全量配置读写 */
 export const configApi = {
   getBackend() {
     return invoke<BackendConfig>(COMMANDS.config.getBackend)
+  },
+  updateBackend(
+    provider: string,
+    modelId: string,
+    baseUrl: string,
+    apiKey: string | null = null,
+  ) {
+    return invoke<string>(COMMANDS.config.updateBackend, { provider, modelId, baseUrl, apiKey })
   },
   getSettings() {
     return invoke<SettingItem[]>(COMMANDS.config.getSettings)
   },
   updateSetting(key: string, value: string) {
     return invoke<string>(COMMANDS.config.updateSetting, { key, value })
+  },
+  /** 读取完整生效配置：命令返回 JSON 文本，由调用方解析（形状见 `[vision]` 等配置组） */
+  getFull() {
+    return invoke<string>(COMMANDS.config.getFull)
+  },
+  updateFull(configJson: string) {
+    return invoke<ConfigWriteReceipt>(COMMANDS.config.updateFull, { configJson })
   },
 }
 

@@ -18,6 +18,7 @@ import {
   fnOffset,
   NAV_METRICS,
   presetPoint,
+  resolvePreset,
   subOffset,
 } from '../src/components/nav/geometry'
 
@@ -40,6 +41,18 @@ describe('presetPoint', () => {
     const point = presetPoint('bottom-right', { width: 100, height: 100 })
     expect(point.x).toBeGreaterThan(0)
     expect(point.y).toBeGreaterThan(0)
+  })
+})
+
+describe('resolvePreset', () => {
+  it('全屏页把底中改到右下，避免压住居中卡片', () => {
+    expect(resolvePreset('bottom', true)).toBe('bottom-right')
+  })
+
+  it('主界面与其它预设保持原样', () => {
+    expect(resolvePreset('bottom', false)).toBe('bottom')
+    expect(resolvePreset('top-left', true)).toBe('top-left')
+    expect(resolvePreset('bottom-right', true)).toBe('bottom-right')
   })
 })
 

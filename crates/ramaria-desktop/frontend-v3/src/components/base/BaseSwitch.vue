@@ -83,7 +83,8 @@ function onChange(event: Event): void {
   width: 36px;
   height: 20px;
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius-full);
+  /* 胶囊轨道：半径取高度一半；用 50% 会在 36×20 上画成椭圆 */
+  border-radius: var(--space-10);
   background: var(--bg-sunken);
   transition:
     background-color var(--dur-fast) var(--ease-out),

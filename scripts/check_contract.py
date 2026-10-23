@@ -3,7 +3,8 @@
 """Ramaria 入口契约一致性校验脚本。
 
 职责:
-- 解析 Rust 源码的机器事实（Tauri 注册表 / CLI 顶层枚举 / MCP 工具 / 桌面事件 / migration / 视图容器）；
+- 解析 Rust 源码的机器事实（Tauri 注册表 / CLI 顶层枚举 / MCP 工具 / 桌面事件 / migration）；
+- 解析契约视图：`frontend-v3` 存在时取新前端 `src/views`，否则取旧前端 `index.html` 容器；
 - 解析旧前端 api.js 的 _invoke 调用点；
 - 与 scripts/contract-baseline-3.0.json（docs/dev-3.0/test/contract-baseline-3.0.md 的机器投影）逐项比对；
 - 任一集合或计数不一致即退出码 1（秒级，供 CI 与本地使用）。
@@ -28,6 +29,7 @@ DESKTOP_LIB = Path("crates/ramaria-desktop/src/lib.rs")
 FRONTEND_API = Path("crates/ramaria-desktop/frontend/js/api.js")
 FRONTEND_INDEX = Path("crates/ramaria-desktop/frontend/index.html")
 V3_COMMANDS = Path("crates/ramaria-desktop/frontend-v3/src/core/api/commands.ts")
+V3_VIEWS = Path("crates/ramaria-desktop/frontend-v3/src/views")
 CLI_LIB = Path("crates/ramaria-cli/src/cli.rs")
 MCP_TOOLS_DIR = Path("crates/ramaria-mcp/src/tools")
 EVENTS_FILE = Path("crates/ramaria-desktop/src/events.rs")
@@ -133,6 +135,22 @@ def parse_events(root: Path) -> List[str]:
 
 
 def parse_views(root: Path) -> List[str]:
+    """解析契约视图集合。
+
+    说明:
+    - `frontend-v3` 存在时以新前端目录为准（目录式视图取首段目录名，平铺文件取文件名）；
+      旧前端容器清单随其冻结，不再作为契约口径。
+    - `views/dev` 是 DEV-only 状态画廊，不属于契约视图。
+    """
+    v3_dir = root / V3_VIEWS
+    if v3_dir.is_dir():
+        names: Set[str] = set()
+        for path in v3_dir.rglob("*.vue"):
+            relative = path.relative_to(v3_dir)
+            name = relative.parts[0] if len(relative.parts) > 1 else path.stem
+            if name != "dev":
+                names.add(name)
+        return sorted(names)
     text = read_text(root / FRONTEND_INDEX)
     return re.findall(r'<div class="view(?: [^"]*)?" id="view-([a-z-]+)"', text)
 

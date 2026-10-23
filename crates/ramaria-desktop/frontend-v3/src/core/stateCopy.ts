@@ -87,14 +87,19 @@ const COPY: Record<string, StateCopy> = {
     description: '检查本地服务是否已启动，或稍后重试。',
     action: '重试',
   },
-  'progress.error.download': {
-    title: '模型下载失败',
-    description: '网络中断或存储空间不足，可重试或退出。',
+  'setup.error.embedding': {
+    title: '嵌入模型校验未通过',
+    description: '路径无效或文件不完整，可跳过并稍后在设置中补配。',
+    action: '重试',
+  },
+  'setup.error.submit': {
+    title: '配置未保存',
+    description: '写入本地配置时出错，已填内容不会丢失，可直接重试。',
     action: '重试',
   },
   'error.detail': {
     title: '无法继续',
-    description: '启动过程中出现不可恢复的错误，详情见诊断。',
+    description: '启动检查未通过，可重试；失败详情可在诊断包中查看。',
     action: '重试',
   },
 }
