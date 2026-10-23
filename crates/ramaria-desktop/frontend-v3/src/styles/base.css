@@ -1,0 +1,62 @@
+/**
+ * src/styles/base.css — 全局基础样式
+ *
+ * 设计特点:
+ * - 只做重置与页面底色，视觉取值一律来自 tokens.css
+ * - 不承载组件样式；组件样式随组件以 scoped 形式就近声明
+ * - 不写内联样式属性，避免与严格 CSP 的 style-src 冲突
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+/* 主题在首帧写入前面板仍是默认色，此间禁用过渡，避免启动时颜色滑动 */
+html:not([data-theme-ready]),
+html:not([data-theme-ready]) * {
+  transition: none !important;
+}
+
+body {
+  margin: 0;
+  background-color: var(--bg-page);
+  background-image:
+    radial-gradient(1100px 620px at 50% -18%, var(--glow-a), transparent 68%),
+    radial-gradient(760px 540px at -6% 104%, var(--glow-b), transparent 66%),
+    radial-gradient(720px 520px at 106% 92%, var(--glow-c), transparent 64%),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size:
+    auto,
+    auto,
+    auto,
+    var(--grid-size) var(--grid-size),
+    var(--grid-size) var(--grid-size);
+  background-attachment: fixed;
+  color: var(--text-1);
+  font-family: var(--font-body);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3,
+p,
+figure {
+  margin: 0;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}

@@ -1,0 +1,72 @@
+/**
+ * src/styles/fonts.css — 自托管字体声明
+ *
+ * 设计特点:
+ * - 字体文件随仓库分发，运行期零网络请求，满足 CSP `font-src 'self'`
+ * - DM Sans 为可变字体，单文件覆盖 300~600；其余为静态字重
+ * - `local()` 优先命中系统已安装字体，减少首屏字体加载
+ * - `font-display: swap` 保证文字立即可见，不出现不可见文本期
+ * - 中文衬线为 GB2312 子集单文件，只承 display-lg / display / h1 三档
+ */
+
+@font-face {
+  font-family: 'DM Serif Display';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src:
+    local('DM Serif Display'),
+    local('DMSerifDisplay-Regular'),
+    url('../assets/fonts/dm-serif-display.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'DM Serif Display';
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src:
+    local('DM Serif Display Italic'),
+    local('DMSerifDisplay-Italic'),
+    url('../assets/fonts/dm-serif-display-italic.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'DM Sans';
+  font-style: normal;
+  font-weight: 300 600;
+  font-display: swap;
+  src:
+    local('DM Sans'),
+    url('../assets/fonts/dm-sans.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src:
+    local('JetBrains Mono'),
+    local('JetBrainsMono-Regular'),
+    url('../assets/fonts/jetbrains-mono-400.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src:
+    local('JetBrains Mono Medium'),
+    local('JetBrainsMono-Medium'),
+    url('../assets/fonts/jetbrains-mono-500.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'Noto Serif SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('../assets/fonts/noto-serif-sc-semibold.woff2') format('woff2');
+}

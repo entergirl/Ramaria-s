@@ -1,0 +1,383 @@
+/* ═══════════════════════════════════════════════════════════════════
+   tokens.css — Ramaria v3.0 前端设计令牌
+   ───────────────────────────────────────────────────────────────────
+   设计特点:
+   - 双层结构：原始色阶负责色相与明度，语义层负责用途；组件只引用语义层
+   - 浅色为默认，深色由 [data-theme="dark"] 覆盖同一批语义变量
+   - 色值以 hex 为准（严格 CSP 与旧 WebView2 兼容），OKLCH 坐标仅作注释
+   - 字号十一档、间距十二档、阴影四档、动效三档；圆角按卡片 20 的比例分档
+   - 层级（第 10 节）与状态不透明度量（第 11 节）集中定义，组件不得自行取值
+   - 动效时长在 prefers-reduced-motion 下归零，CSS 过渡随之失效
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ═══ 1. 原始色阶（浅色）═══
+   组件禁止直接引用本段，必须经第 2 节语义层 */
+
+:root {
+  /* 品牌粉 */
+  --brand-50:  #fdeef3;  /* oklch(0.962 0.017 355) */
+  --brand-100: #fedee8;  /* oklch(0.930 0.038 357) */
+  --brand-200: #f7c2d3;  /* oklch(0.866 0.064 357) */
+  --brand-400: #ee8faf;  /* oklch(0.758 0.120 359) */
+  --brand-500: #e86c95;  /* oklch(0.690 0.159 001) 品牌标识色 */
+  --brand-600: #d5527f;  /* oklch(0.623 0.169 002) */
+  --brand-700: #b03e68;  /* oklch(0.535 0.153 001) 品牌文字 */
+
+  /* 辅色蓝 */
+  --accent-50:  #eaf3fd;  /* oklch(0.960 0.017 251) */
+  --accent-200: #bddbfb;  /* oklch(0.880 0.055 251) */
+  --accent-500: #5ba3ea;  /* oklch(0.699 0.128 250) */
+  --accent-700: #2a6cb0;  /* oklch(0.524 0.126 252) */
+
+  /* 语义 */
+  --ok-50:     #e6f8ea;
+  --ok-200:    #b4e2bf;
+  --ok-500:    #48b86f;
+  --ok-600:    #1b7c42;
+  --warn-50:   #fef2e5;
+  --warn-200:  #f8d3b0;
+  --warn-500:  #f5a33a;
+  --warn-600:  #a25e11;
+  --danger-50:  #ffeeec;
+  --danger-200: #fac8c2;
+  --danger-500: #e5453e;
+  --danger-600: #b72121;
+}
+
+/* ═══ 2. 语义层（浅色，默认）═══ */
+
+:root,
+[data-theme="light"] {
+  /* 背景 */
+  --bg-page:   #fdf9fa;
+  --bg-page-2: #fbf3f6;
+  --bg-card:   #ffffff;
+  --bg-subtle: #fcf6f8;
+  --bg-sunken: #faf0f3;
+
+  /* 文字 */
+  --text-1: #291e23;
+  --text-2: #68545d;
+  --text-3: #947d87;
+
+  /* 描边 */
+  --border:        #f4e7eb;
+  --border-strong: #ecdae0;
+
+  /* 品牌 */
+  --brand:         var(--brand-500);
+  --brand-text:    var(--brand-700);
+  --brand-surface: var(--brand-50);
+  --brand-line:    var(--brand-200);
+
+  /* 用户气泡（大面积彩色底三处之一） */
+  --bubble-user-bg:   var(--brand-100);
+  --bubble-user-line: var(--brand-200);
+
+  /* 辅色 */
+  --accent:         var(--accent-500);
+  --accent-text:    var(--accent-700);
+  --accent-surface: var(--accent-50);
+  --accent-line:    var(--accent-200);
+
+  /* 语义 */
+  --ok:          var(--ok-600);
+  --ok-surface:  var(--ok-50);
+  --ok-line:     var(--ok-200);
+  --warn:        var(--warn-600);
+  --warn-surface: var(--warn-50);
+  --warn-line:   var(--warn-200);
+  --danger:         var(--danger-600);
+  --danger-surface: var(--danger-50);
+  --danger-line:    var(--danger-200);
+
+  /* 焦点环 */
+  --focus-ring: 0 0 0 3px rgba(232, 108, 149, 0.30);
+
+  /* 阴影（浅色以品牌色为基，避免纯黑发灰） */
+  --shadow-xs: 0 1px 2px rgba(41, 30, 35, 0.05);
+  --shadow-sm: 0 2px 6px -2px rgba(140, 47, 82, 0.10), 0 1px 2px rgba(41, 30, 35, 0.04);
+  --shadow-md: 0 8px 20px -8px rgba(140, 47, 82, 0.18), 0 2px 6px rgba(41, 30, 35, 0.05);
+  --shadow-lg: 0 18px 40px -16px rgba(140, 47, 82, 0.26), 0 4px 10px rgba(41, 30, 35, 0.06);
+
+  /* 遮罩 */
+  --overlay-scrim: rgba(41, 30, 35, 0.32);
+}
+
+/* ═══ 3. 语义层（深色）═══ */
+
+[data-theme="dark"] {
+  /* 色阶同步重映射：组件若误引色阶，仍取深色值；正确做法始终是引用第 2 节语义层 */
+  --brand-50:  #3a282e;
+  --brand-100: #4e2e39;
+  --brand-200: #6a3949;
+  --brand-400: #de7b9d;
+  --brand-500: #eb8ead;
+  --brand-600: #f5a8c0;
+  --brand-700: #fbc0d2;
+  --accent-50:  #19232d;
+  --accent-200: #2a4158;
+  --accent-500: #7eb1e3;
+  --accent-700: #a7ccf1;
+  --ok-50:     #102a1c;
+  --ok-200:    #174c31;
+  --ok-500:    #63d197;
+  --ok-600:    #63d197;
+  --warn-50:   #312205;
+  --warn-200:  #563d0b;
+  --warn-500:  #f6bd60;
+  --warn-600:  #f6bd60;
+  --danger-50:  #381b18;
+  --danger-200: #672e29;
+  --danger-500: #fd756a;
+  --danger-600: #fd756a;
+
+  --bg-page:   #1b1614;
+  --bg-page-2: #211a18;
+  --bg-card:   #2b2422;
+  --bg-subtle: #322a28;
+  --bg-sunken: #161110;
+
+  --text-1: #f1e7e3;
+  --text-2: #c4b6b0;
+  --text-3: #a1928d;
+
+  --border:        #403533;
+  --border-strong: #574945;
+
+  /* 深色下语义槽位改指向色阶的高明度档，语义变量名不变 */
+  --brand:         #eb8ead;
+  --brand-text:    #fbc0d2;
+  --brand-surface: #3a282e;
+  --brand-line:    #6a3949;
+
+  --bubble-user-bg:   #4e2e39;
+  --bubble-user-line: #6a3949;
+
+  --accent:         #7eb1e3;
+  --accent-text:    #a7ccf1;
+  --accent-surface: var(--accent-50);
+  --accent-line:    var(--accent-200);
+
+  --ok:          #63d197;
+  --ok-surface:  #102a1c;
+  --ok-line:     #174c31;
+  --warn:        #f6bd60;
+  --warn-surface: #312205;
+  --warn-line:   #563d0b;
+  --danger:         #fd756a;
+  --danger-surface: #381b18;
+  --danger-line:    #672e29;
+
+  --focus-ring: 0 0 0 3px rgba(235, 142, 173, 0.34);
+
+  /* 深色阴影改黑基，减少粉雾感 */
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.45);
+  --shadow-sm: 0 2px 6px -2px rgba(0, 0, 0, 0.50), 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 8px 20px -8px rgba(0, 0, 0, 0.55), 0 2px 6px rgba(0, 0, 0, 0.38);
+  --shadow-lg: 0 18px 40px -16px rgba(0, 0, 0, 0.62), 0 4px 10px rgba(0, 0, 0, 0.42);
+
+  --overlay-scrim: rgba(0, 0, 0, 0.55);
+}
+
+/* ═══ 4. 字体族 ═══
+   全部自托管，禁止外部 CDN（CSP font-src 'self'）
+   中文衬线 Noto Serif SC 仅在 display-lg / display / h1 使用 */
+
+:root {
+  --font-body: 'DM Sans', 'Microsoft YaHei', 'PingFang SC', sans-serif;
+  --font-display: 'DM Serif Display', Georgia, serif;
+  --font-display-cn: 'Noto Serif SC', 'Songti SC', SimSun, serif;
+  --font-mono: 'JetBrains Mono', Consolas, monospace;
+
+  /* 展示档的复合栈：西文与数字走 DM Serif，中文走 Noto Serif SC */
+  --font-title: 'DM Serif Display', 'Noto Serif SC', 'Songti SC', serif;
+}
+
+/* ═══ 5. 字号阶梯 ═══
+   十一档；不使用半像素字号 */
+
+:root {
+  --fs-display-lg: 40px;
+  --lh-display-lg: 1.12;
+
+  --fs-display: 28px;
+  --lh-display: 1.20;
+
+  --fs-h1: 22px;
+  --lh-h1: 1.35;
+
+  --fs-h2: 18px;
+  --lh-h2: 1.40;
+
+  --fs-h3: 15px;
+  --lh-h3: 1.45;
+
+  --fs-body-lg: 16px;
+  --lh-body-lg: 1.65;
+
+  --fs-body: 14px;
+  --lh-body: 1.65;
+
+  --fs-small: 12px;
+  --lh-small: 1.55;
+
+  --fs-caption: 11px;
+  --lh-caption: 1.45;
+
+  --fs-label: 12px;
+  --lh-label: 1.40;
+
+  --fs-code: 12px;
+  --lh-code: 1.50;
+
+  --fw-regular: 400;
+  --fw-medium: 500;
+  --fw-semibold: 600;
+  --fw-bold: 700;
+}
+
+/* ═══ 6. 圆角 ═══
+   卡片 20 为基准，控件不超过卡片的 0.7 倍 */
+
+:root {
+  --radius-modal: 24px;
+  --radius-card: 20px;
+  --radius-session: 16px;
+  --radius-inner: 14px;
+  --radius-bubble: 14px;
+  --radius-bubble-tail: 4px;
+  --radius-btn: 12px;
+  --radius-input: 10px;
+  --radius-tag: 8px;
+  --radius-btn-sm: 8px;
+  --radius-check: 4px;
+  --radius-full: 50%;
+}
+
+/* ═══ 7. 按钮 ═══
+   纯色 + 单向底投影；浅色承白字、深色承深字 */
+
+:root {
+  --btn-bg: #cd446f;
+  --btn-bg-hover: #c23a66;
+  --btn-bg-active: #b6335e;
+  --btn-fg: #ffffff;
+  --btn-shadow: 0 3px 7px -3px rgba(140, 47, 82, 0.42);
+
+  --btn-secondary-bg: #ffffff;
+  --btn-secondary-fg: var(--text-2);
+  --btn-secondary-border: var(--border-strong);
+
+  --btn-danger-bg: var(--danger-50);
+  --btn-danger-fg: var(--danger-600);
+}
+
+[data-theme="dark"] {
+  --btn-bg: #f1b1c7;
+  --btn-bg-hover: #f7c2d3;
+  --btn-bg-active: #eb9fba;
+  --btn-fg: #5b1f30;
+  --btn-shadow: 0 3px 8px -3px rgba(0, 0, 0, 0.55);
+
+  --btn-secondary-bg: var(--bg-subtle);
+  --btn-secondary-fg: var(--text-2);
+  --btn-secondary-border: var(--border-strong);
+
+  --btn-danger-bg: var(--danger-surface);
+  --btn-danger-fg: var(--danger);
+}
+
+/* ═══ 8. 间距 ═══
+   8 的倍数为主、2px 补位；页面级内边距用语义别名
+   18 / 22 为页面设计已定稿取值，不并入刻度，避免改三份页面文档 */
+
+:root {
+  --space-4: 4px;
+  --space-6: 6px;
+  --space-8: 8px;
+  --space-10: 10px;
+  --space-12: 12px;
+  --space-14: 14px;
+  --space-16: 16px;
+  --space-20: 20px;
+  --space-24: 24px;
+  --space-32: 32px;
+  --space-40: 40px;
+  --space-48: 48px;
+
+  --pad-card: 18px;      /* 表单卡 / 内容卡内边距 */
+  --pad-card-lg: 22px;   /* 对话卡 / 记忆卡大内边距 */
+  --gap-card: 14px;      /* 卡片间距（设置栅格） */
+  --gap-section: 20px;   /* 区块间距 */
+}
+
+/* ═══ 9. 动效 ═══
+   三曲线三时长；状态切换走 fast，展开与位移走 base，视图进入走 slow
+   prefers-reduced-motion 下时长归零，CSS 过渡自动失效 */
+
+:root {
+  --ease-out: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-pop: cubic-bezier(0.34, 1.32, 0.64, 1);
+
+  --dur-fast: 130ms;   /* 悬停 / 按压 / 状态色 */
+  --dur-base: 240ms;   /* 展开收起 / 位移 / 横幅 */
+  --dur-slow: 320ms;   /* 视图进入 / 模态 */
+
+  --dur-shimmer: 1400ms;  /* 骨架微光一个周期 */
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 0ms;
+    --dur-base: 0ms;
+    --dur-slow: 0ms;
+    --dur-shimmer: 0ms;
+  }
+}
+
+/* ═══ 10. 层级 ═══
+   遮罩在下、圆键在上；模态与 Toast 高于圆键，提示层最高 */
+
+:root {
+  --z-sticky: 10;
+  --z-veil: 40;
+  --z-nav: 45;
+  --z-modal: 60;
+  --z-toast: 70;
+  --z-tooltip: 80;
+}
+
+/* ═══ 11. 状态与尺寸 ═══
+   禁用与刷新的两档透明度不得混用；横幅与只读条高度供视图占位计算 */
+
+:root {
+  --opacity-disabled: 0.42;   /* 禁用控件 */
+  --opacity-dim: 0.55;        /* 刷新态旧内容（可读、禁写） */
+
+  --banner-h: 40px;           /* 视图内横幅 */
+  --readonly-bar-h: 44px;     /* 底部只读条 */
+  --composer-h: 60px;         /* 输入区 */
+  --hit-size: 32px;           /* 最小可点区域（图标键） */
+}
+
+/* ═══ 12. 背景与工作台 ═══
+   页面背景为三层径向光斑叠一层极淡网格；网格尺寸与工作台宽度令牌化，
+   视图层不写布局字面量，也不得直接引用 rgba / hex */
+
+:root {
+  --glow-a: rgba(232, 108, 149, 0.13);
+  --glow-b: rgba(90, 163, 234, 0.10);
+  --glow-c: rgba(238, 143, 174, 0.10);
+  --grid-line: rgba(43, 31, 38, 0.026);
+  --grid-size: 32px;
+  --w-workbench: 880px;
+}
+
+[data-theme="dark"] {
+  --glow-a: rgba(238, 143, 174, 0.15);
+  --glow-b: rgba(111, 180, 240, 0.11);
+  --glow-c: rgba(238, 143, 174, 0.09);
+  --grid-line: rgba(251, 235, 240, 0.020);
+}

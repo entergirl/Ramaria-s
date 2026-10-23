@@ -27,6 +27,7 @@ MANIFEST_REL = Path("scripts/contract-baseline-3.0.json")
 DESKTOP_LIB = Path("crates/ramaria-desktop/src/lib.rs")
 FRONTEND_API = Path("crates/ramaria-desktop/frontend/js/api.js")
 FRONTEND_INDEX = Path("crates/ramaria-desktop/frontend/index.html")
+V3_COMMANDS = Path("crates/ramaria-desktop/frontend-v3/src/core/api/commands.ts")
 CLI_LIB = Path("crates/ramaria-cli/src/cli.rs")
 MCP_TOOLS_DIR = Path("crates/ramaria-mcp/src/tools")
 EVENTS_FILE = Path("crates/ramaria-desktop/src/events.rs")
@@ -85,6 +86,15 @@ def parse_registry(root: Path) -> List[str]:
 def parse_frontend_calls(root: Path) -> List[str]:
     text = read_text(root / FRONTEND_API)
     return re.findall(r"_invoke\(\s*['\"]([a-z_][a-z0-9_]*)['\"]", text)
+
+
+def parse_v3_commands(root: Path) -> List[str]:
+    """解析 frontend-v3 命令表（`方法: '命令',` 一行一条）。"""
+    path = root / V3_COMMANDS
+    if not path.is_file():
+        return []
+    text = read_text(path)
+    return re.findall(r"^\s+\w+:\s*'([a-z][a-z0-9_]*)',\s*$", text, re.M)
 
 
 def parse_cli_top(root: Path) -> List[str]:
@@ -159,6 +169,7 @@ def main(argv: List[str]) -> int:
         manifest = load_manifest(root)
         registry = parse_registry(root)
         frontend_calls = parse_frontend_calls(root)
+        v3_commands = parse_v3_commands(root)
         cli_top = parse_cli_top(root)
         mcp_tools = parse_mcp_tools(root)
         events = parse_events(root)
@@ -196,6 +207,19 @@ def main(argv: List[str]) -> int:
         )
     # 未被 api.js 调用的命令必须全部在登记清单内，反向也成立（上面已双向比对）
 
+    # frontend-v3 命令表：与 Rust 注册表严格同集合（不允许多出、缺少或重复）
+    if v3_commands:
+        v3_set = set(v3_commands)
+        duplicated_v3 = sorted({name for name in v3_commands if v3_commands.count(name) > 1})
+        if duplicated_v3:
+            failures.append("frontend-v3 命令表重复: %s" % ", ".join(duplicated_v3))
+        unknown_v3 = sorted(v3_set - registry_set)
+        if unknown_v3:
+            failures.append("frontend-v3 命令表含未注册命令: %s" % ", ".join(unknown_v3))
+        missing_v3 = sorted(registry_set - v3_set)
+        if missing_v3:
+            failures.append("frontend-v3 命令表缺少命令: %s" % ", ".join(missing_v3))
+
     if failures:
         print("[FAIL] 契约面不一致（基线: %s）:" % manifest.get("source_doc", "?"))
         for failure in failures:
@@ -203,10 +227,11 @@ def main(argv: List[str]) -> int:
         return 1
 
     print(
-        "[OK] 契约面一致：命令 %d / 前端调用 %d / CLI %d / MCP %d / 事件 %d / 视图 %d / migration %d"
+        "[OK] 契约面一致：命令 %d / 旧前端调用 %d / v3 命令表 %d / CLI %d / MCP %d / 事件 %d / 视图 %d / migration %d"
         % (
             len(registry),
             len(frontend_calls),
+            len(v3_commands),
             len(cli_top),
             len(mcp_tools),
             len(events),

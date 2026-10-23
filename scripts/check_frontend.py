@@ -9,7 +9,7 @@
 - frontend-v3 存在（M5 起）：
   * tokens.css 的变量定义覆盖全部 var(--x) 引用；
   * 路由声明的组件文件存在，路由 name 唯一；
-  * src/views 下至少存在契约清单中的视图文件。
+  * src/views（含子目录）至少存在契约清单中的视图文件。
 - 不一致即退出码 1。
 
 用法: python scripts/check_frontend.py
@@ -137,7 +137,12 @@ def check_v3(root: Path, expected_views: List[str]) -> List[str]:
     if duplicates:
         failures.append("路由 name 重复: %s" % ", ".join(duplicates))
 
-    view_files = {path.stem for path in (src / "views").glob("*.vue")}
+    views_dir = src / "views"
+    view_files: Set[str] = set()
+    for path in views_dir.rglob("*.vue"):
+        relative = path.relative_to(views_dir)
+        # 目录式视图（views/chat/index.vue）取首段目录名；平铺文件取文件名
+        view_files.add(relative.parts[0] if len(relative.parts) > 1 else path.stem)
     if view_files:
         missing_views = sorted(set(expected_views) - view_files)
         if missing_views:
