@@ -16,6 +16,7 @@ import { onMounted, watch } from 'vue'
 import { RouterView, useRoute, useRouter } from 'vue-router'
 
 import ToastLayer from '../components/base/ToastLayer.vue'
+import NavDock from '../components/nav/NavDock.vue'
 import { FULLSCREEN_ROUTES } from './router'
 import { useAppStore } from '../stores/app'
 
@@ -53,5 +54,6 @@ onMounted(() => {
 
 <template>
   <RouterView />
+  <NavDock v-if="!app.fullscreen" />
   <ToastLayer />
 </template>
