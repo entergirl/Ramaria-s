@@ -49,6 +49,8 @@ const REGISTERED_KEYS: Record<string, string> = {
   'chat:degraded:privacy': 'chat.degraded.privacy',
   'chat:restricted:readonly': 'chat.restricted.readonly',
   'chat:restricted:locked': 'chat.restricted.locked',
+  'memory:empty:no-data': 'memory.empty.no-data',
+  'memory:error:main': 'memory.error.load',
   'setup:error:inline': 'setup.error.connection',
   'error:error:detail': 'error.detail',
   'error:error:retrying': 'error.detail',

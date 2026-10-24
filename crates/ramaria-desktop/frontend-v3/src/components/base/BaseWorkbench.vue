@@ -11,11 +11,30 @@
  * - 高度取整屏，上下留白对称，不为圆键预留位置；圆键由用户拖动避让
  * - `safe center` 在内容高于可视区时退回顶部对齐，不裁掉首屏内容
  * - 只负责布局，不承担背景光斑（背景在 body 上一次性绘制）
+ * - 暴露滚动位置读写，供长页面视图保存与恢复浏览快照
  */
+
+import { ref } from 'vue'
+
+const el = ref<HTMLElement | null>(null)
+
+/** 当前滚动位置 */
+function scrollTop(): number {
+  return el.value?.scrollTop ?? 0
+}
+
+/** 滚动到指定位置（超出内容高度时由浏览器收敛） */
+function scrollTo(top: number): void {
+  if (el.value) {
+    el.value.scrollTop = top
+  }
+}
+
+defineExpose({ scrollTop, scrollTo })
 </script>
 
 <template>
-  <div class="workbench">
+  <div ref="el" class="workbench">
     <slot />
   </div>
 </template>

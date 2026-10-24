@@ -69,6 +69,18 @@ const COPY: Record<string, StateCopy> = {
     description: '输入区暂不可用，生成完成后恢复。',
   },
 
+  // ---- memory ----
+  'memory.empty.no-data': {
+    title: '这里还没有记忆',
+    description: '对话结束后会自动生成摘要；也可以导入历史聊天记录。',
+    action: '去导入',
+  },
+  'memory.error.load': {
+    title: '记忆加载失败',
+    description: '读取本地数据库时出错，其余功能不受影响。',
+    action: '重试',
+  },
+
   // ---- 全局降级 ----
   'global.degraded.embedding_missing': {
     title: '嵌入模型不可用',

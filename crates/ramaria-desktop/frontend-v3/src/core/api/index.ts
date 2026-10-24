@@ -21,14 +21,22 @@ import type {
   DegradedReason,
   EmbeddingModelView,
   EmbeddingValidation,
+  FactList,
+  ImportPipelineReceipt,
   IndexRebuildReceipt,
   IndexStatusView,
+  MemoryEvent,
+  MemoryL1,
   PersonaFull,
+  PersonaSummary,
+  PersonalityProfile,
   PrivacyStatus,
+  ProfileStatus,
   SendLocalImageResult,
   SessionDetail,
   SessionSummary,
   SettingItem,
+  TraitEvidenceChain,
   VisionSupportReceipt,
 } from './dto'
 
@@ -163,10 +171,51 @@ export const attachmentApi = {
   },
 }
 
+/** 记忆：人格筛选、四页签取数、证据链与深度处理 */
+export const memoryApi = {
+  getPersonas() {
+    return invoke<PersonaSummary[]>(COMMANDS.memory.getPersonas)
+  },
+  /** L1 摘要；`limit` 缺省时后端按 200 处理，上限 1000 */
+  getL1(personaUid: string | null = null, limit: number | null = 500) {
+    return invoke<MemoryL1[]>(COMMANDS.memory.getL1, { personaUid, limit })
+  },
+  /** L2 事件；`limit` 缺省时后端按 200 处理，上限 1000 */
+  getL2(personaUid: string | null = null, limit: number | null = 500) {
+    return invoke<MemoryEvent[]>(COMMANDS.memory.getL2, { personaUid, limit })
+  },
+  getProfile(personaUid: string) {
+    return invoke<PersonalityProfile>(COMMANDS.memory.getProfile, { personaUid })
+  },
+  getProfileStatus(personaUid: string) {
+    return invoke<ProfileStatus>(COMMANDS.memory.getProfileStatus, { personaUid })
+  },
+  getEvidence(personaUid: string, traitId: number) {
+    return invoke<TraitEvidenceChain[]>(COMMANDS.memory.getEvidence, { personaUid, traitId })
+  },
+  getFacts(personaUid: string) {
+    return invoke<FactList>(COMMANDS.memory.getFacts, { personaUid })
+  },
+  /** 手动触发全局管线；命令返回 `"ok"` 表示后台已提交 */
+  triggerPipeline() {
+    return invoke<string>(COMMANDS.memory.triggerPipeline)
+  },
+}
+
 /** 人格：全字段列表（对话视图取名称、头像来源与来源渠道） */
 export const personaApi = {
   listFull() {
     return invoke<PersonaFull[]>(COMMANDS.persona.listFull)
+  },
+  /** 重载画像：触发该人格的 L2→L3 后台管线，返回 `"ok"` */
+  refresh(uid: string) {
+    return invoke<string>(COMMANDS.persona.refresh, { uid })
+  },
+  /** 深度处理导入消息：重生成 L1 并级联 L2→L3 */
+  regenerateImportPipeline(personaUid: string) {
+    return invoke<ImportPipelineReceipt>(COMMANDS.persona.regenerateImportPipeline, {
+      personaUid,
+    })
   },
 }
 

@@ -8,7 +8,9 @@
  * 设计特点:
  * - 容器为 tablist，选项为 tab，选中态走 aria-selected
  * - 左右方向键在段间移动并同步选中，焦点跟随
- * - 段数上限 5、选中段不换行；选中白底 + 品牌描边 + 微小投影
+ * - 段数上限 5、选中段不换行；默认档选中白底 + 品牌描边 + 微小投影
+ * - `plain` 档去掉容器背板，各段自成卡片键（用于记忆页页签）
+ * - 可选计数徽标用于带数量的页签，缺省不占位
  */
 
 import { ref } from 'vue'
@@ -16,6 +18,8 @@ import { ref } from 'vue'
 interface SegmentOption {
   value: string
   label: string
+  /** 可选计数徽标（页签数量等），0 与缺省都不渲染 */
+  count?: number
 }
 
 const props = withDefaults(
@@ -24,10 +28,13 @@ const props = withDefaults(
     options: SegmentOption[]
     label?: string
     disabled?: boolean
+    /** default = 凹槽分段；plain = 无背板、各段独立成键 */
+    variant?: 'default' | 'plain'
   }>(),
   {
     label: '',
     disabled: false,
+    variant: 'default',
   },
 )
 
@@ -66,7 +73,7 @@ function onKeydown(event: KeyboardEvent, index: number): void {
   <div
     ref="group"
     class="segmented"
-    :class="{ 'is-disabled': disabled }"
+    :class="[`segmented--${variant}`, { 'is-disabled': disabled }]"
     role="tablist"
     :aria-label="label || undefined"
   >
@@ -81,7 +88,8 @@ function onKeydown(event: KeyboardEvent, index: number): void {
       @click="select(option.value)"
       @keydown="onKeydown($event, index)"
     >
-      {{ option.label }}
+      <span>{{ option.label }}</span>
+      <span v-if="option.count" class="segmented-count">{{ option.count }}</span>
     </button>
   </div>
 </template>
@@ -97,6 +105,9 @@ function onKeydown(event: KeyboardEvent, index: number): void {
 }
 
 .segmented-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-6);
   height: 26px;
   padding: 0 var(--space-12);
   border: 1px solid transparent;
@@ -123,6 +134,23 @@ function onKeydown(event: KeyboardEvent, index: number): void {
   box-shadow: var(--shadow-xs);
 }
 
+.segmented-count {
+  min-width: 16px;
+  padding: 0 var(--space-4);
+  border-radius: var(--radius-tag);
+  background: var(--bg-sunken);
+  color: var(--text-3);
+  font-size: var(--fs-caption);
+  font-weight: var(--fw-semibold);
+  line-height: 16px;
+  text-align: center;
+}
+
+.segmented-item[aria-selected='true'] .segmented-count {
+  background: var(--brand-surface);
+  color: var(--brand-text);
+}
+
 .segmented-item:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
@@ -134,5 +162,54 @@ function onKeydown(event: KeyboardEvent, index: number): void {
 
 .segmented-item:disabled {
   cursor: default;
+}
+
+/* ── plain：去掉容器背板，各段独立成键 ── */
+.segmented--plain {
+  gap: var(--space-8);
+  padding: 0;
+  background: transparent;
+}
+
+.segmented--plain .segmented-item {
+  height: 30px;
+  padding: 0 var(--space-14);
+  border-color: var(--border);
+  border-radius: var(--radius-btn-sm);
+  background: var(--bg-card);
+  color: var(--text-2);
+  font-weight: var(--fw-semibold);
+  box-shadow: var(--shadow-xs);
+}
+
+.segmented--plain .segmented-item:hover:not(:disabled):not([aria-selected='true']) {
+  border-color: var(--brand-line);
+  color: var(--brand-text);
+}
+
+.segmented--plain .segmented-item[aria-selected='true'] {
+  background: var(--btn-bg);
+  border-color: transparent;
+  color: var(--btn-fg);
+  box-shadow: var(--btn-shadow);
+}
+
+.segmented--plain .segmented-count {
+  min-width: 0;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-3);
+  line-height: 1;
+}
+
+.segmented--plain .segmented-item[aria-selected='true'] .segmented-count {
+  background: transparent;
+  color: var(--btn-fg);
+  opacity: 0.82;
+}
+
+.segmented--plain .segmented-item:focus-visible {
+  box-shadow: var(--focus-ring);
 }
 </style>

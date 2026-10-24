@@ -273,6 +273,194 @@ export interface PersonaFull {
 }
 
 /**
+ * L1 会话摘要（`get_l1_memories`）
+ *
+ * 形状: snake_case，12 字段；`occurred_at` 为浏览器基准时间（会话块内最早消息时刻），
+ * `context_json` 内为 `chat_partners`（人格 UID 列表）等分组上下文
+ */
+export interface MemoryL1 {
+  id: string
+  session_id: string
+  summary: string
+  keywords: string
+  atmosphere: string
+  valence: number
+  salience: number
+  persona_uid: string | null
+  created_at: number
+  occurred_at: number
+  time_period: string | null
+  context_json: string | null
+}
+
+/**
+ * L2 离散事件（`get_l2_events`）
+ *
+ * 形状: snake_case，14 字段；`start` / `end` 为事件发生区间，`attitude` 缺省为空串
+ */
+export interface MemoryEvent {
+  id: number
+  persona_uid: string
+  title: string
+  summary: string
+  keywords: string
+  valence: number
+  confidence: number
+  presentation: string
+  share: number
+  attitude: string
+  salience: number
+  created_at: number
+  start: number
+  end: number
+}
+
+/**
+ * 人格摘要（`get_personas`）
+ *
+ * 形状: snake_case，6 字段；记忆页按 `kind` / `source` 派生分类标签
+ */
+export interface PersonaSummary {
+  uid: string
+  name: string
+  kind: string
+  source: string
+  is_active: boolean
+  created_at: number
+}
+
+/**
+ * 单条性格标签（`get_personality_profile` 三层内的条目）
+ *
+ * 形状: snake_case，15 字段；`layer` 为 base / primary / accent
+ */
+export interface TraitDetail {
+  id: number
+  label: string
+  meaning: string
+  confidence: number
+  evidence: number
+  consistency: number
+  layer: string
+  not_meaning: string | null
+  trigger: string | null
+  suppress: string | null
+  related: string | null
+  seq: number
+  source: string
+  status: string
+  created_at: number
+}
+
+/** L3 三层画像（`get_personality_profile`）：按底色 / 主色调 / 点缀分组 */
+export interface PersonalityProfile {
+  persona_uid: string
+  base: TraitDetail[]
+  primary: TraitDetail[]
+  accent: TraitDetail[]
+}
+
+/**
+ * 画像数据状态（`get_profile_status`）
+ *
+ * 形状: snake_case，5 字段；`status` 为 insufficient / preliminary / trusted，
+ * `status_text` 为后端提供的中文描述
+ */
+export interface ProfileStatus {
+  persona_uid: string
+  n_total_eff: number
+  active_trait_count: number
+  status: string
+  status_text: string
+}
+
+/** 证据链中的 L1 溯源（`get_trait_evidence`）：snake_case，6 字段 */
+export interface EvidenceL1Source {
+  l1_id: string
+  summary: string
+  evidence_notes: string[]
+  atmosphere: string | null
+  valence: number
+  weight: number
+}
+
+/**
+ * 证据链中的事件（`get_trait_evidence`）
+ *
+ * 形状: snake_case；`paraphrase` / `motives` 缺省不输出
+ */
+export interface EvidenceEvent {
+  event_id: number
+  title: string
+  summary: string
+  confidence: number
+  valence: number
+  salience: number
+  attitude: string | null
+  paraphrase: string | null
+  motives: string | null
+  l1_sources: EvidenceL1Source[]
+}
+
+/**
+ * 单条性格标签的完整证据链（`get_trait_evidence`）
+ *
+ * 形状: snake_case；命令返回数组，`trait_id` 不存在时为空数组
+ */
+export interface TraitEvidenceChain {
+  trait_id: number
+  trait_label: string
+  total_evidence: number
+  support_count: number
+  contradict_count: number
+  neutral_count: number
+  evidence_events: EvidenceEvent[]
+}
+
+/**
+ * 知识事实（`get_facts` 的条目）
+ *
+ * 形状: snake_case；`version_of` 指向被替换的旧事实，`keyword_hint` 缺省不输出
+ */
+export interface PersonaFact {
+  id: number
+  field: string
+  content: string
+  status: string
+  tier: string
+  confidence: number
+  source: string
+  keyword_hint: string | null
+  version_of: number | null
+  created_at: number
+}
+
+/**
+ * 知识事实查询结果（`get_facts`）
+ *
+ * 形状: snake_case；`grouped` 以中文字段名为键，`versions` 以事实 id（字符串化）为键
+ */
+export interface FactList {
+  persona_uid: string
+  grouped: Record<string, PersonaFact[]>
+  versions: Record<string, PersonaFact[]>
+}
+
+/**
+ * 导入消息深度处理回执（`regenerate_import_pipeline`）
+ *
+ * 形状: snake_case；`early_terminated` 表示连续失败达上限后提前终止
+ */
+export interface ImportPipelineReceipt {
+  l1_regenerated: number
+  l1_failed: number
+  total_sessions: number
+  early_terminated: boolean
+  remaining_skipped: number
+  message: string
+}
+
+/**
  * 保存对话回执（`save_current_session`）
  *
  * 形状: 命令返回 JSON 文本，本类型为其解析结果；`no_active_session` 表示无可关闭会话
