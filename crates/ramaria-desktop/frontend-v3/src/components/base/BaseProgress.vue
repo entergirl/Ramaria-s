@@ -51,7 +51,10 @@ const defaultLabel = computed(() => {
 </template>
 
 <style scoped>
+/* 胶囊端头：圆角取条高的一半，避免 50% 在细长条上画成梭形 */
 .progress {
+  --bar-height: 4px;
+
   display: flex;
   flex-direction: column;
   gap: var(--space-6);
@@ -79,20 +82,21 @@ const defaultLabel = computed(() => {
 .progress-bar {
   display: block;
   width: 100%;
-  height: 4px;
+  height: var(--bar-height);
   border: none;
-  border-radius: var(--radius-full);
+  border-radius: calc(var(--bar-height) / 2);
   appearance: none;
 }
 
+/* 伪元素不透传继承值，端头半径按条高逐处给出 */
 .progress-bar::-webkit-progress-bar {
   background: var(--bg-sunken);
-  border-radius: var(--radius-full);
+  border-radius: calc(var(--bar-height) / 2);
 }
 
 .progress-bar::-webkit-progress-value {
   background: var(--brand);
-  border-radius: var(--radius-full);
+  border-radius: calc(var(--bar-height) / 2);
   transition: width var(--dur-base) var(--ease-out);
 }
 
@@ -117,9 +121,9 @@ const defaultLabel = computed(() => {
 .progress-track {
   position: relative;
   width: 100%;
-  height: 4px;
+  height: var(--bar-height);
   overflow: hidden;
-  border-radius: var(--radius-full);
+  border-radius: calc(var(--bar-height) / 2);
   background: var(--bg-sunken);
 }
 
@@ -127,7 +131,7 @@ const defaultLabel = computed(() => {
   position: absolute;
   inset: 0 auto 0 0;
   width: 40%;
-  border-radius: var(--radius-full);
+  border-radius: calc(var(--bar-height) / 2);
   background: var(--brand);
   animation: progress-slide 1200ms var(--ease-in-out) infinite;
 }

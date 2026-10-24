@@ -285,9 +285,11 @@ function unreadText(count: number): string {
   display: grid;
   place-items: center;
   min-width: 16px;
-  height: 16px;
+  --badge-height: 16px;
+
+  height: var(--badge-height);
   padding: 0 var(--space-4);
-  border-radius: var(--radius-full);
+  border-radius: calc(var(--badge-height) / 2);
   background: var(--brand);
   color: var(--bg-card);
   font-size: var(--fs-caption);

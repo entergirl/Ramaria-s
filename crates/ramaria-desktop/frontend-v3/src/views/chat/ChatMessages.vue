@@ -245,15 +245,15 @@ onMounted(() => {
   -webkit-mask-image: linear-gradient(
     180deg,
     transparent 0,
-    #000 var(--messages-fade-top),
-    #000 calc(100% - var(--messages-fade-bottom)),
+    var(--mask-opaque) var(--messages-fade-top),
+    var(--mask-opaque) calc(100% - var(--messages-fade-bottom)),
     transparent 100%
   );
   mask-image: linear-gradient(
     180deg,
     transparent 0,
-    #000 var(--messages-fade-top),
-    #000 calc(100% - var(--messages-fade-bottom)),
+    var(--mask-opaque) var(--messages-fade-top),
+    var(--mask-opaque) calc(100% - var(--messages-fade-bottom)),
     transparent 100%
   );
 }
@@ -262,8 +262,9 @@ onMounted(() => {
   width: 6px;
 }
 
+/* 滚动条滑块做成胶囊：半径取宽度的一半 */
 .messages::-webkit-scrollbar-thumb {
-  border-radius: 999px;
+  border-radius: calc(var(--space-6) / 2);
   background: var(--border-strong);
 }
 

@@ -154,10 +154,16 @@ defineEmits<{
   background: var(--danger-surface);
 }
 
+/* 撤回系统条做成胶囊：半径取条高的一半，宽度仍随文字 */
 .bubble-recalled {
+  --recalled-height: 24px;
+
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--recalled-height);
   margin: 0;
-  padding: var(--space-4) var(--space-12);
-  border-radius: var(--radius-full);
+  padding: 0 var(--space-12);
+  border-radius: calc(var(--recalled-height) / 2);
   background: var(--bg-sunken);
   color: var(--text-3);
   font-size: var(--fs-caption);

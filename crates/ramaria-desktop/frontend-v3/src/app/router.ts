@@ -47,8 +47,16 @@ const devRoutes: RouteRecordRaw[] = import.meta.env.DEV
         name: 'dev-spike',
         component: () => import('../spike/SpikePage.vue'),
       },
+      {
+        path: '/dev/states',
+        name: 'dev-states',
+        component: () => import('../views/dev/StatesGallery.vue'),
+      },
     ]
   : []
+
+/** 开发期自检路由：不受应用状态机约束 */
+const DEV_ROUTE_NAMES = new Set(['dev-spike', 'dev-states'])
 
 /** 创建应用路由（守卫依赖 Pinia 已安装） */
 export function createAppRouter() {
@@ -62,7 +70,7 @@ export function createAppRouter() {
     const target = String(to.name ?? '')
 
     // 开发期自检页不受状态机约束，便于任意状态下查看链路
-    if (target === 'dev-spike') {
+    if (DEV_ROUTE_NAMES.has(target)) {
       return true
     }
 

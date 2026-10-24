@@ -9,7 +9,9 @@
 - frontend-v3 存在（M5 起）：
   * tokens.css 的变量定义覆盖全部 var(--x) 引用；
   * 路由声明的组件文件存在，路由 name 唯一；
-  * src/views（含子目录）至少存在契约清单中的视图文件。
+  * src/views（含子目录）至少存在契约清单中的视图文件；
+  * UI 规范：生产源码无裸色值 / 无内联 style / 无 999px（导航圆键除外）/ 无外部资源；
+  * 生产 CSP 无 `unsafe-inline` 与 `unsafe-eval`。
 - 不一致即退出码 1。
 
 用法: python scripts/check_frontend.py
@@ -26,6 +28,16 @@ from typing import Dict, List, Set
 LEGACY_DIR = Path("crates/ramaria-desktop/frontend")
 V3_DIR = Path("crates/ramaria-desktop/frontend-v3")
 CONTRACT_BASELINE = Path("scripts/contract-baseline-3.0.json")
+DESKTOP_DIR = Path("crates/ramaria-desktop")
+
+# UI 规范：色值只能经令牌引用；令牌文件本身是调色板，不参与裸色值检查
+TOKEN_FILE = "styles/tokens.css"
+NAV_PREFIX = "components/nav"
+RAW_COLOR = re.compile(r"#[0-9a-fA-F]{3,8}\b|\b(?:rgba?|hsla?)\(")
+INLINE_STYLE = re.compile(r"(?:\sstyle=|\s:style=|\sv-bind:style=)")
+ROUND_PILL = re.compile(r"\b999px\b")
+REMOTE_ASSET = re.compile(r"fonts\.googleapis|cdn\.|unpkg\.com|jsdelivr")
+CSP_UNSAFE = ("unsafe-inline", "unsafe-eval")
 
 # 旧前端历史欠账：引用了但从未定义的 CSS 变量（随旧前端在 M7 删除）。
 # 只允许减少，不允许新增；新增未定义令牌会使本脚本失败。
@@ -150,6 +162,67 @@ def check_v3(root: Path, expected_views: List[str]) -> List[str]:
     return failures
 
 
+def check_v3_ui(root: Path) -> List[str]:
+    """UI 规范扫描：裸色值、内联样式、999px 与外部资源。"""
+    failures: List[str] = []
+    src = root / V3_DIR / "src"
+    if not src.is_dir():
+        return failures
+
+    for path in sorted(list(src.glob("**/*.vue")) + list(src.glob("**/*.css"))):
+        relative = path.relative_to(src).as_posix()
+        is_token = relative == TOKEN_FILE
+        is_nav = relative.startswith(NAV_PREFIX)
+        for number, line in enumerate(read_text(path).splitlines(), start=1):
+            stripped = line.strip()
+            if stripped.startswith(("/*", "*", "//", "<!--")):
+                continue
+            if not is_token and RAW_COLOR.search(line):
+                failures.append("%s:%d 裸色值，请改用语义令牌" % (relative, number))
+            if INLINE_STYLE.search(line):
+                failures.append("%s:%d 内联样式，请改用 class 与 CSSOM 变量" % (relative, number))
+            if not is_nav and ROUND_PILL.search(line):
+                failures.append("%s:%d 出现 999px，圆角请按分档令牌取值" % (relative, number))
+            if REMOTE_ASSET.search(line):
+                failures.append("%s:%d 引用了外部资源" % (relative, number))
+    return failures
+
+
+def load_security(path: Path, label: str) -> Dict[str, object]:
+    import json
+
+    try:
+        manifest = json.loads(read_text(path))
+    except ValueError as exc:
+        raise SetupError("%s 解析失败: %s" % (label, exc))
+    security = manifest.get("app", {}).get("security", {})
+    return security if isinstance(security, dict) else {}
+
+
+def check_csp(root: Path) -> List[str]:
+    """生产 CSP：必须存在且不含 unsafe-inline / unsafe-eval。"""
+    failures: List[str] = []
+
+    main_conf = root / DESKTOP_DIR / "tauri.conf.json"
+    if main_conf.is_file():
+        csp = load_security(main_conf, "tauri.conf.json").get("csp")
+        if not csp:
+            failures.append("tauri.conf.json 缺少生产 CSP")
+        else:
+            for token in CSP_UNSAFE:
+                if token in str(csp):
+                    failures.append("tauri.conf.json 的生产 CSP 含 %s" % token)
+
+    overlay = root / DESKTOP_DIR / "tauri.v3.conf.json"
+    if overlay.is_file():
+        csp = load_security(overlay, "tauri.v3.conf.json").get("csp")
+        if csp:
+            for token in CSP_UNSAFE:
+                if token in str(csp):
+                    failures.append("tauri.v3.conf.json 的生产 CSP 含 %s" % token)
+    return failures
+
+
 def main(argv: List[str]) -> int:
     reconfigure_streams()
     parser = argparse.ArgumentParser(description="校验 Ramaria 前端结构")
@@ -161,6 +234,8 @@ def main(argv: List[str]) -> int:
         expected_views = load_expected_views(root)
         if (root / V3_DIR).is_dir():
             failures = check_v3(root, expected_views)
+            failures += check_v3_ui(root)
+            failures += check_csp(root)
             mode = "frontend-v3"
         else:
             failures = check_legacy(root, expected_views)

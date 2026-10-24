@@ -69,6 +69,9 @@ const ICONS: Record<ChatBannerKind, string> = {
 
 <style scoped>
 .banner {
+  /* 底边进度条高度；圆角取一半，做成胶囊端头 */
+  --banner-bar-height: 2px;
+
   position: relative;
   display: flex;
   align-items: center;
@@ -160,17 +163,20 @@ const ICONS: Record<ChatBannerKind, string> = {
   position: absolute;
   inset: auto 0 0 0;
   width: 100%;
-  height: 2px;
+  height: var(--banner-bar-height);
   border: none;
+  border-radius: calc(var(--banner-bar-height) / 2);
   appearance: none;
 }
 
 .banner-progress::-webkit-progress-bar {
   background: transparent;
+  border-radius: calc(var(--banner-bar-height) / 2);
 }
 
 .banner-progress::-webkit-progress-value {
   background: var(--accent);
+  border-radius: calc(var(--banner-bar-height) / 2);
 }
 
 .banner :deep(.btn--sm) {

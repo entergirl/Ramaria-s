@@ -373,6 +373,8 @@
   --grid-line: rgba(43, 31, 38, 0.026);
   --grid-size: 32px;
   --w-workbench: 880px;
+  /* 渐隐遮罩的不透明端点：只用到 alpha，与主题无关 */
+  --mask-opaque: #000;
 }
 
 [data-theme="dark"] {
