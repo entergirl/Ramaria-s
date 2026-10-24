@@ -100,6 +100,7 @@ withDefaults(
   background: var(--btn-secondary-bg);
   color: var(--btn-secondary-fg);
   border: 1px solid var(--btn-secondary-border);
+  box-shadow: var(--shadow-xs);
 }
 
 .btn--secondary:hover:not(:disabled) {

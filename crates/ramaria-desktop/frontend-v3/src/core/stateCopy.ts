@@ -61,8 +61,8 @@ const COPY: Record<string, StateCopy> = {
   },
   'chat.restricted.readonly': {
     title: '此会话来自社交平台，只读',
-    description: '回复请前往对应平台。',
-    action: '在平台中打开',
+    description: '此处只可查看，回复请前往对应平台。',
+    action: '开始新对话',
   },
   'chat.restricted.locked': {
     title: '正在生成',

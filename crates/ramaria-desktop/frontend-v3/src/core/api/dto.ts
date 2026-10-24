@@ -36,7 +36,8 @@ export type MessageRole = 'user' | 'assistant' | 'system'
 /**
  * 会话摘要（`list_sessions` / `create_session`）
  *
- * 形状: snake_case，8 字段
+ * 形状: snake_case，8 字段；`last_message_preview` 为可选追加字段，
+ * 后端尚未输出时前端回退消息数（不伪造预览内容）
  */
 export interface SessionSummary {
   id: string
@@ -47,6 +48,7 @@ export interface SessionSummary {
   persona_uid: string | null
   channel: string
   external_ref: string | null
+  last_message_preview?: string
 }
 
 /**
@@ -228,4 +230,48 @@ export interface ProactiveMessagePayload {
   source: string
   created_at: number
   activated?: boolean
+}
+
+/**
+ * 人格完整视图（`list_personas_full`）
+ *
+ * 形状: snake_case，11 字段；`config` 为 JSON 文本，对话视图不消费
+ */
+export interface PersonaFull {
+  uid: string
+  name: string
+  kind: string
+  source: string
+  ref_id: string | null
+  avatar: string | null
+  config: string | null
+  description: string | null
+  is_active: boolean
+  created_at: number
+  updated_at: number
+}
+
+/**
+ * 保存对话回执（`save_current_session`）
+ *
+ * 形状: 命令返回 JSON 文本，本类型为其解析结果；`no_active_session` 表示无可关闭会话
+ */
+export interface SaveSessionReceipt {
+  status: 'ok' | 'no_active_session'
+  l1_generated: boolean
+  session_id?: string
+  l1_count?: number
+  msg_count?: number
+}
+
+/**
+ * L1 重试回执（`generate_l1`）
+ *
+ * 形状: 命令返回 JSON 文本；`reason` 仅在未生成时出现
+ */
+export interface L1RetryReceipt {
+  l1_generated: boolean
+  summary?: string
+  reason?: string
+  session_id?: string
 }

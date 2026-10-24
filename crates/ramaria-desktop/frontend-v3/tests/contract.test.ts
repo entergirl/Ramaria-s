@@ -143,9 +143,9 @@ describe('DTO 形状', () => {
 })
 
 describe('命令表', () => {
-  it('覆盖 19 个域、77 条命令', () => {
+  it('覆盖 19 个域、78 条命令', () => {
     expect(Object.keys(COMMANDS)).toHaveLength(19)
-    expect(commandNames()).toHaveLength(77)
+    expect(commandNames()).toHaveLength(78)
   })
 
   it('命令名唯一', () => {

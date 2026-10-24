@@ -23,6 +23,7 @@ import type {
   EmbeddingValidation,
   IndexRebuildReceipt,
   IndexStatusView,
+  PersonaFull,
   PrivacyStatus,
   SendLocalImageResult,
   SessionDetail,
@@ -34,6 +35,14 @@ import type {
 export const chatApi = {
   send(message: string, personaUid: string | null = null, sessionId: string | null = null) {
     return invoke<string>(COMMANDS.chat.send, { message, personaUid, sessionId })
+  },
+  /** 保存对话：关闭活跃会话并触发 L1；返回 JSON 文本（形状见 `SaveSessionReceipt`） */
+  save(personaUid: string | null = null) {
+    return invoke<string>(COMMANDS.chat.save, { personaUid })
+  },
+  /** 重试 L1 摘要；返回 JSON 文本（形状见 `L1RetryReceipt`） */
+  generateL1(sessionId: string, personaUid: string | null = null) {
+    return invoke<string>(COMMANDS.chat.generateL1, { sessionId, personaUid })
   },
   getAppState() {
     return invoke<AppStateValue>(COMMANDS.chat.getAppState)
@@ -145,9 +154,36 @@ export const attachmentApi = {
   },
 }
 
-/** 系统：版本号（诊断域在 M7 补齐其余方法） */
+/** 人格：全字段列表（对话视图取名称、头像来源与来源渠道） */
+export const personaApi = {
+  listFull() {
+    return invoke<PersonaFull[]>(COMMANDS.persona.listFull)
+  },
+}
+
+/** 系统：版本号、文件对话框与发图目录 */
 export const systemApi = {
   getVersion() {
     return invoke<string>(COMMANDS.diagnostics.getVersion)
+  },
+  /** 打开文件对话框；返回所选路径，取消为 `null` */
+  openFileDialog(options: {
+    initialDir?: string | null
+    title?: string | null
+    filterName?: string | null
+    extensions?: string[] | null
+  }) {
+    return invoke<string | null>(COMMANDS.system.openFileDialog, {
+      initialDir: options.initialDir ?? null,
+      title: options.title ?? null,
+      filterName: options.filterName ?? null,
+      extensions: options.extensions ?? null,
+    })
+  },
+  getImageSourceDir() {
+    return invoke<string>(COMMANDS.system.getImageSourceDir)
+  },
+  setImageSourceDir(path: string | null = null) {
+    return invoke<string>(COMMANDS.system.setImageSourceDir, { path })
   },
 }

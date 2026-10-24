@@ -2,6 +2,7 @@
 //!
 //! 设计特点:
 //! - `save_file_dialog`: 调系统保存对话框选取导出路径（设置页导出流程调用）
+//! - `open_file_dialog`: 调系统打开对话框选取待发送文件（对话页发图键调用）
 //! - 取消选择返回 None（前端按"用户取消"处理，回退自带输入方式）
 //! - 复用已注册的 tauri-plugin-dialog，不新增依赖；前端调用形态保持不变
 //! - 日志只记布尔结果，不记所选路径（隐私口径：路径不进日志）
@@ -70,5 +71,70 @@ pub async fn save_file_dialog(
     let result = picked.map(|path| path.to_string());
 
     tracing::info!(picked = result.is_some(), "保存对话框已关闭");
+    Ok(result)
+}
+
+// =========================================================
+// open_file_dialog — 系统打开对话框
+// =========================================================
+
+/// 弹出系统打开对话框，返回用户选择的文件路径。
+///
+/// 参数:
+/// - `initial_dir`: 初始目录（可选；仅作对话框定位提示，不构成路径授权）。
+/// - `title`: 对话框标题（可选）。
+/// - `filter_name`: 文件类型过滤器显示名（可选）。
+/// - `extensions`: 允许的扩展名（可选；不含点号，空列表不加过滤器）。
+///
+/// 返回:
+/// - `Ok(Some(path))`: 用户确认后的文件路径；
+/// - `Ok(None)`: 用户取消选择。
+///
+/// 说明:
+/// - 仅负责选取路径，不读取文件；发送前的目录校验由服务层承担；
+/// - 初始目录不存在时对话框回退到系统默认位置；
+/// - 与 `save_file_dialog` 一致，参数键为 snake_case（前端传 camelCase，Tauri 自动转换）。
+#[tauri::command]
+pub async fn open_file_dialog(
+    app_handle: AppHandle,
+    initial_dir: Option<String>,
+    title: Option<String>,
+    filter_name: Option<String>,
+    extensions: Option<Vec<String>>,
+) -> Result<Option<String>, String> {
+    let mut dialog = app_handle.dialog().file();
+
+    if let Some(dir) = initial_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|dir| !dir.is_empty())
+    {
+        dialog = dialog.set_directory(std::path::PathBuf::from(dir));
+    }
+
+    if let Some(text) = title
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        dialog = dialog.set_title(text);
+    }
+
+    // 扩展名归一：去空白与点号，空项丢弃
+    let exts: Vec<String> = extensions
+        .unwrap_or_default()
+        .into_iter()
+        .map(|ext| ext.trim().trim_start_matches('.').to_ascii_lowercase())
+        .filter(|ext| !ext.is_empty())
+        .collect();
+    if !exts.is_empty() {
+        let refs: Vec<&str> = exts.iter().map(String::as_str).collect();
+        dialog = dialog.add_filter(filter_name.as_deref().unwrap_or("文件"), &refs);
+    }
+
+    let picked = dialog.blocking_pick_file();
+    let result = picked.map(|path| path.to_string());
+
+    tracing::info!(picked = result.is_some(), "打开对话框已关闭");
     Ok(result)
 }

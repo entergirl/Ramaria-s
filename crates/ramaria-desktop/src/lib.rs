@@ -233,6 +233,7 @@ pub fn run() {
             commands::diagnostics::export_diagnostics,
             // ---- System ----
             commands::dialog::save_file_dialog,
+            commands::dialog::open_file_dialog,
             tray::confirm_close_action,
         ])
         .setup(move |app| {

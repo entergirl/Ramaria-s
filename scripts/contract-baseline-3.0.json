@@ -78,6 +78,7 @@
     "get_version",
     "export_diagnostics",
     "save_file_dialog",
+    "open_file_dialog",
     "confirm_close_action"
   ],
   "frontend_calls": 68,
@@ -86,6 +87,7 @@
     "send_local_image",
     "preview_persona_prompt",
     "save_file_dialog",
+    "open_file_dialog",
     "confirm_close_action",
     "get_index_status",
     "get_image_source_dir",

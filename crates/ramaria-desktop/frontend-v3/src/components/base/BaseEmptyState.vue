@@ -7,8 +7,8 @@
  *
  * 设计特点:
  * - 说明最多两行；主操作至多一个，由调用方经默认插槽提供
- * - 图形用内联 SVG，经 `mark` 插槽传入，组件不内置插画
- * - 受阻形态用警示色，其余用中性色，不以颜色单独表意
+ * - 标记为 58px 品牌虚线圆，图形或首字经 `mark` 插槽传入
+ * - 受阻形态改用警示色，其余用品牌色，不以颜色单独表意
  */
 
 withDefaults(
@@ -54,15 +54,19 @@ withDefaults(
 .empty-mark {
   display: grid;
   place-items: center;
-  width: 48px;
-  height: 48px;
+  width: 58px;
+  height: 58px;
   margin-bottom: var(--space-4);
+  border: 1px dashed var(--brand-line);
   border-radius: var(--radius-full);
-  background: var(--bg-subtle);
-  color: var(--text-3);
+  background: var(--brand-surface);
+  color: var(--brand-text);
+  font-size: var(--fs-h1);
+  font-weight: var(--fw-bold);
 }
 
 .empty[data-variant='blocked'] .empty-mark {
+  border-color: var(--warn-line);
   background: var(--warn-surface);
   color: var(--warn);
 }

@@ -112,6 +112,7 @@ defineEmits<{
   border-radius: var(--radius-bubble);
   background: var(--bg-card);
   border: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
   color: var(--text-1);
   font-size: var(--fs-body);
   line-height: var(--lh-body);
@@ -132,6 +133,7 @@ defineEmits<{
 .bubble[data-role='system'] .bubble-body {
   background: var(--bg-subtle);
   border-color: var(--border);
+  box-shadow: none;
   color: var(--text-3);
   font-size: var(--fs-small);
 }

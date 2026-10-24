@@ -123,6 +123,7 @@ export const COMMANDS = {
   },
   system: {
     saveFileDialog: 'save_file_dialog',
+    openFileDialog: 'open_file_dialog',
     confirmCloseAction: 'confirm_close_action',
     getImageSourceDir: 'get_image_source_dir',
     setImageSourceDir: 'set_image_source_dir',
