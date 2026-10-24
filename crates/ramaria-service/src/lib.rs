@@ -100,7 +100,9 @@ pub(crate) mod test_support;
 pub use attachment_cache::AttachmentCacheStat;
 pub use attachment_read::AttachmentImage;
 pub use behavior::{BehaviorLearnOutcome, RuleEvidenceItem};
-pub use config::{ConfigWriter, MismatchEntry, SyncOutcome, SyncWriteResult};
+pub use config::{
+    ConfigWriter, MismatchEntry, SingleKeyWriteOutcome, SyncOutcome, SyncWriteResult,
+};
 pub use diagnostics::{DiagnosticsReport, DiagnosticsRequest};
 pub use engine::{Engine, EngineOptions};
 pub use error_hint::{ErrorHint, entry_error_message, error_detail, error_title, is_retryable};
@@ -121,7 +123,8 @@ pub use import::{
 pub use index::IndexBuildFailure;
 pub use lifecycle::{Lifecycle, LifecycleOptions};
 pub use model::{
-    BackendConfigWriteOptions, BackendConfigWriteOutcome, RemoveModelOutcome, download_model,
+    BackendConfigWriteOptions, BackendConfigWriteOutcome, ModelDownloadProgress, ModelDownloadSink,
+    ModelDownloadStatus, RemoveModelOutcome, download_model, download_model_with_progress,
     is_model_ready, list_models, model_size, models_root, remove_model, validate_embedding_model,
 };
 pub use persona::{PersonaLoadMode, PersonaRegenerateOutcome};
@@ -132,6 +135,7 @@ pub use ramaria_memory::preset::{PresetPreview, PreviewMode};
 pub use recall::RecallPolicy;
 pub use seal::{SealHook, SealHooks};
 pub use settings::mask_api_key;
+pub use setup::SETUP_COMPLETED_KEY;
 pub use stream_event::{ChatEventStream, ChatStreamHandle, StreamEvent};
 pub use style::StyleStatsView;
 pub use types::{

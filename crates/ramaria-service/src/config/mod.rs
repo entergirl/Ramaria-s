@@ -40,8 +40,10 @@ mod file_io;
 mod flatten;
 mod merge;
 mod results;
+mod single_key;
 
 pub use results::{MismatchEntry, SyncOutcome, SyncWriteResult};
+pub use single_key::{SingleKeyWriteOutcome, set_vision_support};
 
 /// settings 表受管键前缀（与既有 `profile_mode` 等键无冲突）。
 const SETTINGS_KEY_PREFIX: &str = "config.";

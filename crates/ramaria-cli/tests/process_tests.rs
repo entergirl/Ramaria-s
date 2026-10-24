@@ -65,6 +65,10 @@ async fn seed_backend_config(db: &Path, embedding_path: Option<&Path>) {
         .save_backend_config(&config)
         .await
         .expect("写入后端配置应成功");
+    storage
+        .set_setting(ramaria_service::SETUP_COMPLETED_KEY, "1")
+        .await
+        .expect("写入完成标记应成功");
 }
 
 /// 构造只含必需文件的占位嵌入模型目录（就绪判定只查文件存在）。

@@ -11,6 +11,8 @@
 //!   三项，设置页直接展示
 //! - 状态口径单一：`NeedsSetup → Ready / Degraded` 的判定集中在 `determine_state`，
 //!   读状态与刷新状态共用同一实现；索引构建进度由索引状态独立表达
+//! - 完成标记：向导走完时写入 `settings.setup_completed_at`，状态判定以标记为前提，
+//!   避免「只点过测试连接」的库被判为就绪
 //! - 安全约束：API key 只经 OS keychain 落盘，日志不记密钥内容
 
 use std::path::Path;
@@ -32,6 +34,9 @@ pub const HEALTH_PROBE_ATTEMPTS: u32 = 3;
 /// 健康探测重试间隔（秒）。
 pub const HEALTH_PROBE_INTERVAL_SECONDS: u64 = 2;
 
+/// 首次配置完成标记键（`settings` 表；值为毫秒时间戳）。
+pub const SETUP_COMPLETED_KEY: &str = "setup_completed_at";
+
 // =========================================================
 // 缺项诊断与状态判定
 // =========================================================
@@ -48,7 +53,27 @@ pub const HEALTH_PROBE_INTERVAL_SECONDS: u64 = 2;
 pub(crate) async fn check(engine: &Engine) -> RamariaResult<SetupStatus> {
     let embedding_available =
         engine.is_embedding_available() && configured_embedding_dir_usable(engine).await?;
-    check_with(engine, embedding_available).await
+    let setup_completed = completed_marker(engine).await?;
+    check_with(engine, setup_completed, embedding_available).await
+}
+
+/// 读取首次配置完成标记（缺失 / 空白 / 读取失败口径）。
+///
+/// 返回:
+/// - `true`: `settings.setup_completed_at` 存在且非空白；
+/// - `false`: 标记缺失或为空白（视为未走完向导）。
+///
+/// 说明:
+/// - 读取失败按 `false` 降级：宁可让用户重新走一遍向导，也不把未知状态判成就绪。
+async fn completed_marker(engine: &Engine) -> RamariaResult<bool> {
+    match engine.setting_get(SETUP_COMPLETED_KEY).await {
+        Ok(Some(value)) => Ok(!value.trim().is_empty()),
+        Ok(None) => Ok(false),
+        Err(e) => {
+            tracing::warn!(error = %e, "首次配置完成标记读取失败，按未完成处理");
+            Ok(false)
+        }
+    }
 }
 
 /// 配置声明的嵌入模型目录是否可用（未配置路径 → true）。
@@ -77,12 +102,18 @@ async fn configured_embedding_dir_usable(engine: &Engine) -> RamariaResult<bool>
 ///
 /// 参数:
 /// - `engine`: 服务层引擎。
+/// - `setup_completed`: 首次配置完成标记是否已写入。
 /// - `embedding_available`: 嵌入可用性（运行时实例可用 且 配置路径有效）。
 ///
 /// 检查项:
-/// 1. 后端配置：`backend_config` 是否有记录；
-/// 2. 模型选择：线上 provider 要求 `capability.model_id` 非空，本地 provider 视为已选。
-async fn check_with(engine: &Engine, embedding_available: bool) -> RamariaResult<SetupStatus> {
+/// 1. 完成标记：`settings.setup_completed_at` 是否已写入；
+/// 2. 后端配置：`backend_config` 是否有记录；
+/// 3. 模型选择：线上 provider 要求 `capability.model_id` 非空，本地 provider 视为已选。
+async fn check_with(
+    engine: &Engine,
+    setup_completed: bool,
+    embedding_available: bool,
+) -> RamariaResult<SetupStatus> {
     let storage = engine.storage_ref().as_ref();
     let backend_config = storage.get_backend_config().await?;
 
@@ -107,6 +138,7 @@ async fn check_with(engine: &Engine, embedding_available: bool) -> RamariaResult
     );
 
     Ok(SetupStatus {
+        setup_completed,
         backend_configured,
         model_selected,
         embedding_available,
@@ -116,11 +148,11 @@ async fn check_with(engine: &Engine, embedding_available: bool) -> RamariaResult
 /// 根据设置状态判定应用状态。
 ///
 /// 返回:
-/// - `NeedsSetup`: 后端配置或模型选择未完成；
+/// - `NeedsSetup`: 首次配置未走完，或后端配置 / 模型选择未完成；
 /// - `Degraded`: 核心配置就绪但嵌入模型不可用（向量通道降级）；
 /// - `Ready`: 核心配置就绪且嵌入模型可用。
 pub(crate) fn determine_state(status: &SetupStatus) -> AppState {
-    if !status.backend_configured || !status.model_selected {
+    if !status.setup_completed || !status.backend_configured || !status.model_selected {
         AppState::NeedsSetup
     } else if !status.embedding_available {
         AppState::Degraded
@@ -149,6 +181,7 @@ pub(crate) fn determine_state(status: &SetupStatus) -> AppState {
 /// - 索引构建与嵌入模型加载不在本用例内触发，由索引用例与模型用例负责。
 pub(crate) async fn run(engine: &Engine, req: &SetupRequest) -> RamariaResult<AppState> {
     apply(engine, req).await?;
+    mark_completed(engine).await?;
 
     // ---- 健康探测（失败只降级，不阻塞后续操作） ----
     let llm = engine.llm_ref();
@@ -195,6 +228,26 @@ pub(crate) async fn apply(engine: &Engine, req: &SetupRequest) -> RamariaResult<
     // ---- 密钥入 keychain + 配置落库 + provider 热替换（模型管理用例，单份实现） ----
     crate::model::update_backend_config(engine, &config, req.api_key.as_deref()).await?;
     Ok(config)
+}
+
+/// 写入首次配置完成标记（毫秒时间戳，覆盖写）。
+///
+/// 参数:
+/// - `engine`: 服务层引擎。
+///
+/// 返回:
+/// - 写入失败返回 `Storage` 错误：标记是「走完向导」的唯一凭据，缺失会导致重启后重复进入向导。
+///
+/// 说明:
+/// - 标记与后端配置分开落库（`settings` 表），配置双写不会清除该键；
+/// - 健康探测失败不影响本标记：用户已完成向导，降级状态由 `determine_state` 表达。
+async fn mark_completed(engine: &Engine) -> RamariaResult<()> {
+    let completed_at = chrono::Utc::now().timestamp_millis();
+    engine
+        .setting_set(SETUP_COMPLETED_KEY, &completed_at.to_string())
+        .await?;
+    tracing::info!(completed_at, "首次配置完成标记已写入");
+    Ok(())
 }
 
 /// 按健康探测结果推进应用状态。

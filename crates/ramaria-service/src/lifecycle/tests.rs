@@ -320,6 +320,10 @@ async fn idle_tick_aligns_state_with_facts() {
         .save_backend_config(&BackendConfig::lm_studio_default())
         .await
         .expect("保存后端配置应成功");
+    engine
+        .setting_set(crate::setup::SETUP_COMPLETED_KEY, "1")
+        .await
+        .expect("写入完成标记应成功");
     let engine = Arc::new(engine);
     assert_eq!(
         engine.current_state(),
@@ -352,6 +356,10 @@ async fn idle_tick_aligns_state_with_facts() {
         .save_backend_config(&BackendConfig::lm_studio_default())
         .await
         .expect("保存后端配置应成功");
+    engine
+        .setting_set(crate::setup::SETUP_COMPLETED_KEY, "1")
+        .await
+        .expect("写入完成标记应成功");
     let engine = Arc::new(engine);
     let lifecycle = engine.start_lifecycle(LifecycleOptions::none());
     assert_eq!(lifecycle.tick_idle().await.expect("空闲检查应成功"), 0);

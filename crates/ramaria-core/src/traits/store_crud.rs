@@ -16,9 +16,10 @@ use crate::error::RamariaResult;
 use crate::keyword::{KeywordPoolRow, PendingAliasRow};
 use crate::types::{
     AttachmentStatus, ChannelBinding, ClusterSnapshot, EventBatchWrite, EventRelation, EventSource,
-    MemoryEvent, MemoryL1, Message, MessageAttachment, MessageKey, Persona, PersonaEventAggregate,
-    PersonaExample, PersonaFact, PersonaStyleStats, PersonalityTrait, ProfileField, Session,
-    SessionMember, StickerAsset, TraitEvidence, TraitSource, TraitStatus, UttBlock,
+    MemoryEvent, MemoryL1, Message, MessageAttachment, MessageKey, MessageRole, Persona,
+    PersonaEventAggregate, PersonaExample, PersonaFact, PersonaStyleStats, PersonalityTrait,
+    ProfileField, Session, SessionMember, StickerAsset, TraitEvidence, TraitSource, TraitStatus,
+    UttBlock,
 };
 
 // =========================================================
@@ -703,6 +704,36 @@ pub trait StoreCrud: Send + Sync {
             }
         }
         Ok(counts)
+    }
+
+    /// 取各会话最后一条可见消息（会话列表预览）。
+    ///
+    /// 语义:
+    /// - 可见消息 = 未撤回（`recalled_at IS NULL`）且角色为 user / assistant；
+    ///   system / tool 消息与已撤回消息不计入预览；
+    /// - 同一会话多条可见消息时取 `created_at` 最新的一条（同刻消息以入库顺序靠后者为准）。
+    ///
+    /// 返回:
+    /// - 会话 ID → 最后一条可见消息的映射；**无可见消息的会话不出现在映射中**
+    ///   （空会话或全部消息已撤回，由调用方按无预览处理）。
+    ///
+    /// 默认实现:
+    /// - 遍历 `list_sessions()` 逐会话 `list_messages`（时间正序）后反向取首条可见消息；
+    ///   `ramaria-storage` 覆写为单条窗口函数查询。
+    async fn list_last_visible_messages(&self) -> RamariaResult<HashMap<Uuid, Message>> {
+        let sessions = self.list_sessions().await?;
+        let mut last_visible = HashMap::with_capacity(sessions.len());
+        for session in sessions {
+            let messages = self.list_messages(session.id).await?;
+            let found = messages.into_iter().rev().find(|message| {
+                message.recalled_at.is_none()
+                    && matches!(message.role, MessageRole::User | MessageRole::Assistant)
+            });
+            if let Some(message) = found {
+                last_visible.insert(session.id, message);
+            }
+        }
+        Ok(last_visible)
     }
 
     /// 按导入去重指纹查询消息（跨批次 / 跨会话去重）。

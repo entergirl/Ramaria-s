@@ -57,11 +57,15 @@ pub fn build_engine_with_embedding(
 ///
 /// 序列（与入口就绪口径一致）:
 /// 1. 写入本地后端配置（`lm_studio` 缺省）；
-/// 2. 刷新设置状态并返回判定结果（索引构建不参与状态判定）。
+/// 2. 写入首次配置完成标记（状态判定的前提）；
+/// 3. 刷新设置状态并返回判定结果（索引构建不参与状态判定）。
 pub async fn mark_ready(engine: &Engine) -> RamariaResult<AppState> {
     engine
         .storage()
         .save_backend_config(&BackendConfig::lm_studio_default())
+        .await?;
+    engine
+        .setting_set(ramaria_service::SETUP_COMPLETED_KEY, "1")
         .await?;
     engine.refresh_setup_state().await
 }

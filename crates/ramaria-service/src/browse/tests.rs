@@ -11,6 +11,7 @@
 //! - 全部数据为合成样例；不访问 OS keychain、不连网、不使用真实用户数据。
 
 mod l1;
+mod session_preview;
 
 use crate::test_support::{
     engine_with_db, seed_channel_session, seed_messages, seed_persona, seed_session_with_messages,

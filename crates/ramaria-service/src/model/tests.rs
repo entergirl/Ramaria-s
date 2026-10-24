@@ -495,6 +495,98 @@ fn remove_model_is_idempotent_and_reports_removed() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// 进度百分比：总量未知为 0，正常比例保留两位小数，越界钳制。
+#[test]
+fn percent_handles_unknown_and_normal_totals() {
+    use super::download::percent_of;
+
+    assert_eq!(percent_of(0, 0), 0.0);
+    assert_eq!(percent_of(50, 200), 25.0);
+    assert_eq!(percent_of(1, 3), 33.33);
+    assert_eq!(percent_of(300, 200), 100.0);
+}
+
+/// 进度负载按 camelCase 序列化，状态为小写蛇形。
+#[test]
+fn download_progress_serializes_camel_case() {
+    let payload = ModelDownloadProgress {
+        status: ModelDownloadStatus::Progress,
+        downloaded: 10,
+        total: 100,
+        percent: 10.0,
+        elapsed_ms: 250,
+        model: Some("bge-small-zh-v1.5".to_string()),
+    };
+    let json = serde_json::to_string(&payload).expect("序列化失败");
+    assert!(json.contains(r#""status":"progress""#), "{json}");
+    assert!(json.contains(r#""elapsedMs":250"#), "{json}");
+    assert!(json.contains(r#""model":"bge-small-zh-v1.5""#), "{json}");
+
+    let no_model = ModelDownloadProgress {
+        model: None,
+        ..payload
+    };
+    let json = serde_json::to_string(&no_model).expect("序列化失败");
+    assert!(!json.contains("model"), "无模型时省略字段: {json}");
+}
+
+/// 未知模型：状态推进后失败事件可观测，应用状态恢复且不阻塞后续操作。
+#[tokio::test]
+async fn download_failure_emits_event_and_restores_state() {
+    let (engine, _storage, dir) = engine_with_db("model-download-events").await;
+    engine.set_state(AppState::Ready);
+
+    let events: Arc<std::sync::Mutex<Vec<ModelDownloadProgress>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink: ModelDownloadSink = {
+        let events = Arc::clone(&events);
+        Arc::new(move |progress| {
+            events.lock().expect("收集器锁不应中毒").push(progress);
+        })
+    };
+
+    let err = engine
+        .download_model_with_progress("nonexistent-model", Some(dir.as_path()), Some(sink))
+        .await
+        .expect_err("未知模型应报错");
+    assert_eq!(err.category(), "config");
+    assert_eq!(
+        engine.current_state(),
+        AppState::Ready,
+        "失败后应恢复下载前状态"
+    );
+
+    let events = events.lock().expect("收集器锁不应中毒");
+    assert_eq!(
+        events.iter().map(|e| e.status).collect::<Vec<_>>(),
+        vec![ModelDownloadStatus::Started, ModelDownloadStatus::Failed],
+        "开始与失败两态均须上报"
+    );
+    assert!(
+        events
+            .iter()
+            .all(|e| e.model.as_deref() == Some("nonexistent-model"))
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 并发保护：已处于下载状态时拒绝第二次下载，不覆盖原状态。
+#[tokio::test]
+async fn download_rejects_when_already_downloading() {
+    let (engine, _storage, dir) = engine_with_db("model-download-busy").await;
+    engine.set_state(AppState::DownloadingModel);
+
+    let err = engine
+        .download_model_with_progress("bge-small-zh-v1.5", Some(dir.as_path()), None)
+        .await
+        .expect_err("重复下载应被拒绝");
+    assert_eq!(err.category(), "validation");
+    assert_eq!(engine.current_state(), AppState::DownloadingModel);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// 下载用例：未知 model_id → 预置校验失败（发起网络请求前返回配置错误）。
 #[tokio::test]
 async fn download_model_unknown_id_fails_before_network() {

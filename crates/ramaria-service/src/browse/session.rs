@@ -1,7 +1,8 @@
 //! crates/ramaria-service/src/browse/session.rs - Ramaria 会话浏览（列表 / 消息 / 详情）
 //!
 //! 设计特点:
-//! - 列表聚合：开始时间倒序 + 单次消息计数与未读聚合（聚合失败记告警并按 0 处理）
+//! - 列表聚合：开始时间倒序 + 单次消息计数 / 未读 / 最后一条可见消息聚合
+//!   （聚合失败记告警并按 0 或无预览降级）；预览占位符按附件描述渲染
 //! - 消息分页：全量正序（limit 为 None）或最新在前分页后翻正，单页上限 1000
 //! - 图片描述注入：消息正文中的 `[图片#{hash}]` 占位符按附件描述渲染为
 //!   `[图片: {描述}]`（附件查询失败 / 无描述保留原占位符）
@@ -16,7 +17,7 @@ use chrono::DateTime;
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::traits::StorageBackend;
 use ramaria_core::types::{
-    Message, MessageAttachment, build_render_map, replace_image_placeholders,
+    Message, MessageAttachment, Session, build_render_map, replace_image_placeholders,
 };
 use uuid::Uuid;
 
@@ -45,7 +46,9 @@ const MAX_MESSAGE_PAGE: i64 = 1000;
 /// 1. 读取全部会话并按开始时间倒序；
 /// 2. 单次聚合各会话消息数（聚合失败时记告警并按 0 处理，不阻塞列表）；
 /// 3. 单次聚合各会话未读数（聚合失败同样按 0 处理）；
-/// 4. 应用 offset 与可选 limit（`Some(0)` 按下界 1 处理）。
+/// 4. 单次聚合各会话最后一条可见消息，本页会话的预览正文按附件描述渲染
+///    （聚合失败时所有预览按 None 处理）；
+/// 5. 应用 offset 与可选 limit（`Some(0)` 按下界 1 处理）。
 ///
 /// 参数:
 /// - `engine`: 服务层引擎。
@@ -77,6 +80,14 @@ pub(crate) async fn sessions(
         }
     };
 
+    let previews = match storage.list_last_visible_messages().await {
+        Ok(previews) => previews,
+        Err(e) => {
+            tracing::warn!(error = %e, "聚合会话最后一条可见消息失败，预览按无处理");
+            HashMap::new()
+        }
+    };
+
     let total = sorted.len();
     let offset = req.offset.unwrap_or(0) as usize;
     let take = req
@@ -84,22 +95,31 @@ pub(crate) async fn sessions(
         .map(|limit| limit.max(1) as usize)
         .unwrap_or(usize::MAX);
 
-    let items: Vec<SessionSummaryView> = sorted
+    let page: Vec<&Session> = sorted.iter().skip(offset).take(take).collect();
+    let preview_messages: Vec<Message> = page
+        .iter()
+        .filter_map(|s| previews.get(&s.id).cloned())
+        .collect();
+    let render_map = load_attachment_render_map(storage.as_ref(), &preview_messages).await;
+
+    let items: Vec<SessionSummaryView> = page
         .into_iter()
-        .skip(offset)
-        .take(take)
         .map(|s| {
             let message_count = counts.get(&s.id).copied().unwrap_or(0);
             let unread = unread_map.get(&s.id).copied().unwrap_or(0);
+            let last_message_preview = previews
+                .get(&s.id)
+                .map(|message| replace_image_placeholders(&message.content, &render_map));
             SessionSummaryView {
                 id: s.id,
                 started_at: to_datetime(s.started_at),
                 ended_at: s.ended_at.and_then(DateTime::from_timestamp_millis),
-                persona_uid: s.persona_uid,
-                channel: s.channel,
-                external_ref: s.external_ref,
+                persona_uid: s.persona_uid.clone(),
+                channel: s.channel.clone(),
+                external_ref: s.external_ref.clone(),
                 message_count,
                 unread,
+                last_message_preview,
             }
         })
         .collect();

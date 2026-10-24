@@ -26,6 +26,11 @@ use ramaria_llm::model_manager::{ModelManager, ProgressCallback};
 use crate::engine::{Engine, build_llm_provider};
 use crate::types::{DegradedReason, EmbeddingModelView, EmbeddingValidation};
 
+mod download;
+pub use download::{
+    ModelDownloadProgress, ModelDownloadSink, ModelDownloadStatus, download_model_with_progress,
+};
+
 // =========================================================
 // LLM 后端配置更新
 // =========================================================
@@ -504,6 +509,16 @@ pub async fn download_model(
 // =========================================================
 
 impl Engine {
+    /// 下载嵌入模型并上报进度（状态推进与节流语义见 [`download_model_with_progress`]）。
+    pub async fn download_model_with_progress(
+        &self,
+        model_id: &str,
+        root: Option<&Path>,
+        sink: Option<ModelDownloadSink>,
+    ) -> RamariaResult<()> {
+        download_model_with_progress(self, model_id, root, sink).await
+    }
+
     /// 写入 LLM 后端配置（显式选项：keychain / 落库 / 热替换 / 文件同步）。
     ///
     /// 参数:

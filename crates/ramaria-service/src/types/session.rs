@@ -24,6 +24,8 @@ use super::defaults::DEFAULT_HISTORY_LIMIT;
 /// - `message_count`: 会话消息条数。
 /// - `unread`: 未读消息数（本地助手消息中晚于会话已读时间的条数；
 ///   用户发言与导入历史不计）。
+/// - `last_message_preview`: 最后一条可见消息的正文（未撤回的 user / assistant
+///   消息），图片占位符已按附件描述渲染；空会话或全部消息已撤回时为 None。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionSummaryView {
     pub id: Uuid,
@@ -34,6 +36,7 @@ pub struct SessionSummaryView {
     pub external_ref: Option<String>,
     pub message_count: u32,
     pub unread: u32,
+    pub last_message_preview: Option<String>,
 }
 
 /// 会话历史请求（`chat_history` 入参）。

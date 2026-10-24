@@ -261,6 +261,18 @@ impl Engine {
         Ok(result)
     }
 
+    /// 写入图片理解声明（`[vision].model_supports_vision`）。
+    ///
+    /// 说明:
+    /// - 读取当前生效配置后只改目标键，其余配置组按读取值写回；
+    /// - 双侧写入与内存快照热替换由统一写入口完成（单侧失败降级不阻塞）。
+    pub async fn set_vision_support(
+        &self,
+        enabled: bool,
+    ) -> RamariaResult<crate::config::SingleKeyWriteOutcome> {
+        crate::config::set_vision_support(self, enabled).await
+    }
+
     /// 同步后端配置到文件侧 `[backend]` 组（保留文件侧其它字段与未知键）。
     ///
     /// 说明:

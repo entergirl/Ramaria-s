@@ -1,6 +1,6 @@
 {
   "source_doc": "docs/dev-3.0/test/contract-baseline-3.0.md",
-  "note": "3.0 契约面的机器投影；契约变更（含 M3 / M4-4 回填）时同步更新本文件。",
+  "note": "3.0 契约面的机器投影；契约变更（含 M3 / M4-4 / M4-6 回填）时同步更新本文件。",
   "commands": [
     "send_message",
     "save_current_session",
@@ -79,7 +79,9 @@
     "export_diagnostics",
     "save_file_dialog",
     "open_file_dialog",
-    "confirm_close_action"
+    "confirm_close_action",
+    "set_vision_support",
+    "download_embedding_model"
   ],
   "frontend_calls": 68,
   "unwrapped_commands": [
@@ -92,7 +94,9 @@
     "get_index_status",
     "get_image_source_dir",
     "set_image_source_dir",
-    "persona_export"
+    "persona_export",
+    "set_vision_support",
+    "download_embedding_model"
   ],
   "cli_top": [
     "Ask",
@@ -134,7 +138,8 @@
     "proactive-message",
     "channel-status",
     "import-progress",
-    "index-progress"
+    "index-progress",
+    "model-download-progress"
   ],
   "migration_files": [
     "20261018_v3.0_schema.sql"

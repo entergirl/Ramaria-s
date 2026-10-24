@@ -218,6 +218,10 @@ impl StoreCrud for SqliteStorage {
     async fn list_unread_counts(&self) -> RamariaResult<HashMap<Uuid, u32>> {
         repo::messages::list_unread_counts(&self.pool).await
     }
+    /// 覆写为单条窗口函数查询（会话列表一次取回各会话最后一条可见消息）。
+    async fn list_last_visible_messages(&self) -> RamariaResult<HashMap<Uuid, Message>> {
+        repo::messages::list_last_visible_messages(&self.pool).await
+    }
     /// 覆写为指纹精确查询（外部入口回流去重）。
     async fn find_message_by_fingerprint(
         &self,

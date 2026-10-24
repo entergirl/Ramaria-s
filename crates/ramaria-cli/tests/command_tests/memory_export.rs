@@ -393,6 +393,10 @@ async fn ensure_retriever_loaded_keeps_state_after_build() {
         .save_backend_config(&BackendConfig::lm_studio_default())
         .await
         .expect("保存后端配置应成功");
+    engine
+        .setting_set(ramaria_service::SETUP_COMPLETED_KEY, "1")
+        .await
+        .expect("写入完成标记应成功");
     assert_eq!(
         engine.refresh_setup_state().await.expect("刷新应成功"),
         ramaria_core::types::AppState::Degraded

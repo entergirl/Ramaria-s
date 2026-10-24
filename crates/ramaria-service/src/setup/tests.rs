@@ -69,13 +69,18 @@ async fn spawn_mock_health_server() -> String {
 async fn check_reports_missing_items_on_empty_db() {
     let (engine, storage, dir) = engine_with_db("setup-empty").await;
 
-    // 空库：缺后端 / 模型 / 嵌入三项（索引状态不参与缺项判定）
+    // 空库：缺完成标记 / 后端 / 模型 / 嵌入四项
     let status = engine.check_setup_status().await.expect("诊断应成功");
+    assert!(!status.setup_completed);
     assert!(!status.backend_configured);
     assert!(!status.model_selected);
     assert!(!status.embedding_available);
     assert!(!status.is_complete());
-    assert_eq!(status.missing_items().len(), 3, "缺后端 / 模型 / 嵌入");
+    assert_eq!(
+        status.missing_items().len(),
+        4,
+        "缺完成标记 / 后端 / 模型 / 嵌入"
+    );
 
     // 本地 provider：模型选择视为完成
     storage
@@ -111,6 +116,7 @@ fn determine_state_cases() {
     let cases = [
         (
             SetupStatus {
+                setup_completed: false,
                 backend_configured: false,
                 model_selected: false,
                 embedding_available: false,
@@ -119,6 +125,16 @@ fn determine_state_cases() {
         ),
         (
             SetupStatus {
+                setup_completed: false,
+                backend_configured: true,
+                model_selected: true,
+                embedding_available: true,
+            },
+            AppState::NeedsSetup,
+        ),
+        (
+            SetupStatus {
+                setup_completed: true,
                 backend_configured: true,
                 model_selected: false,
                 embedding_available: true,
@@ -127,6 +143,7 @@ fn determine_state_cases() {
         ),
         (
             SetupStatus {
+                setup_completed: true,
                 backend_configured: true,
                 model_selected: true,
                 embedding_available: false,
@@ -135,6 +152,7 @@ fn determine_state_cases() {
         ),
         (
             SetupStatus {
+                setup_completed: true,
                 backend_configured: true,
                 model_selected: true,
                 embedding_available: true,
@@ -212,6 +230,7 @@ async fn advance_state_follows_probe_and_diagnostics() {
         .save_backend_config(&BackendConfig::lm_studio_default())
         .await
         .expect("保存后端配置应成功");
+    mark_completed(&engine).await.expect("写入完成标记应成功");
 
     // 探测失败：配置完整性无关，直接降级
     assert_eq!(
@@ -370,6 +389,7 @@ async fn refresh_state_follows_embedding() {
         .save_backend_config(&BackendConfig::lm_studio_default())
         .await
         .expect("保存后端配置应成功");
+    mark_completed(&engine).await.expect("写入完成标记应成功");
 
     // 嵌入不可用 → Degraded
     assert_eq!(
@@ -396,6 +416,80 @@ async fn refresh_state_follows_embedding() {
         None,
         "非降级状态不返回降级原因"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 完成标记是就绪前提：有后端配置与嵌入、但只点过测试连接 → 仍进配置页。
+///
+/// 说明:
+/// - 空标记与空白标记均视为未完成；写入标记后同一配置即判定就绪。
+#[tokio::test]
+async fn state_requires_completion_marker() {
+    let embedding: Arc<dyn EmbeddingProvider> = Arc::new(DeterministicEmbedding::new());
+    let (engine, storage, dir) = engine_with_llm_config_and_embedding(
+        "setup-marker",
+        MockLlm::local(),
+        ramaria_core::config::RamariaConfig::default(),
+        Some(embedding),
+    )
+    .await;
+    storage
+        .save_backend_config(&BackendConfig::lm_studio_default())
+        .await
+        .expect("保存后端配置应成功");
+
+    // 只写过后端配置（测试连接路径）：未走完向导 → NeedsSetup
+    assert_eq!(
+        engine.refresh_setup_state().await.expect("刷新应成功"),
+        AppState::NeedsSetup,
+        "缺少完成标记时不得判定就绪"
+    );
+
+    // 走完向导：写入标记 → Ready
+    mark_completed(&engine).await.expect("写入完成标记应成功");
+    assert_eq!(
+        engine.refresh_setup_state().await.expect("刷新应成功"),
+        AppState::Ready
+    );
+
+    // 空白标记等同于缺失（防御手工改写 settings）
+    engine
+        .setting_set(SETUP_COMPLETED_KEY, "   ")
+        .await
+        .expect("写入空白标记应成功");
+    assert_eq!(
+        engine.refresh_setup_state().await.expect("刷新应成功"),
+        AppState::NeedsSetup
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 向导成功即落完成标记（毫秒时间戳），重启后按标记进入主界面。
+#[tokio::test]
+async fn run_setup_writes_completion_marker() {
+    let health_url = spawn_mock_health_server().await;
+    let (engine, _storage, dir) = engine_with_llm_and_config(
+        "setup-marker-write",
+        MockLlm::local(),
+        ramaria_core::config::RamariaConfig::default(),
+    )
+    .await;
+
+    let state = engine
+        .run_setup(&local_request(&health_url))
+        .await
+        .expect("首次配置应成功");
+    assert_ne!(state, AppState::NeedsSetup, "向导成功后不应回到配置页");
+
+    let value = engine
+        .setting_get(SETUP_COMPLETED_KEY)
+        .await
+        .expect("读取标记应成功")
+        .expect("标记应已写入");
+    let completed_at: i64 = value.parse().expect("标记应为毫秒时间戳");
+    assert!(completed_at > 0, "时间戳应为正值: {value}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -437,6 +531,7 @@ async fn rebuild_index_is_idempotent_and_keeps_state() {
         .save_backend_config(&BackendConfig::lm_studio_default())
         .await
         .expect("保存后端配置应成功");
+    mark_completed(&engine).await.expect("写入完成标记应成功");
 
     let state = engine.refresh_setup_state().await.expect("刷新应成功");
     assert_eq!(state, AppState::Ready);

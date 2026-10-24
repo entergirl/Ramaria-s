@@ -108,6 +108,10 @@ async fn three_entry_shapes_share_one_db_and_seal_each_session_once() {
         .save_backend_config(&BackendConfig::lm_studio_default())
         .await
         .expect("后端配置应写入成功");
+    desktop
+        .setting_set(ramaria_service::SETUP_COMPLETED_KEY, "1")
+        .await
+        .expect("完成标记应写入成功");
     let session_a = seed_timed_out_session(desktop_storage.as_ref(), PERSONA, idle_minutes)
         .await
         .expect("超时会话 A 应造数成功");

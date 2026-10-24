@@ -126,6 +126,10 @@ async fn setup_status_complete_after_config() {
     let llm = Arc::new(MockLlm::new("好的，我记住了。"));
     let embedding = Arc::new(MockEmbedding::new());
     let engine = build_engine_with_embedding(storage, llm, embedding, RamariaConfig::default());
+    engine
+        .setting_set(ramaria_service::SETUP_COMPLETED_KEY, "1")
+        .await
+        .unwrap();
 
     let status = engine.check_setup_status().await.unwrap();
     assert!(status.is_complete());

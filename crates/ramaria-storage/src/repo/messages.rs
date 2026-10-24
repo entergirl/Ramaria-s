@@ -20,9 +20,11 @@ use ramaria_core::types::{Message, MessageKey, MessageRole, MessageSource};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+mod last_visible;
 mod time_queries;
 
 // 时序与存在性查询经本模块转出：`crate::repo::messages::X` 为既有调用路径
+pub use last_visible::list_last_visible_messages;
 pub use time_queries::{
     get_last_message_time, has_local_user_message_by_persona, last_message_time_by_session,
     last_user_message_time_by_persona, list_persona_message_times_since,

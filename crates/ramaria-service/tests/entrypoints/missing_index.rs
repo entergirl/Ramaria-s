@@ -61,8 +61,12 @@ async fn fresh_db_state_depends_only_on_backend_and_model() -> ParityResult<()> 
         .save_backend_config(&BackendConfig::lm_studio_default())
         .await
         .expect("后端配置应写入成功");
+    engine
+        .setting_set(ramaria_service::SETUP_COMPLETED_KEY, "1")
+        .await
+        .expect("完成标记应写入成功");
 
-    // 后端 + 模型就绪即判完成（与索引是否构建无关）
+    // 完成标记 + 后端 + 模型就绪即判完成（与索引是否构建无关）
     let status = engine.check_setup_status().await.expect("诊断应成功");
     assert!(status.backend_configured, "后端配置应已就绪");
     assert!(status.model_selected, "本地 provider 模型选择应视为完成");
@@ -121,6 +125,10 @@ async fn rebuild_without_embedding_keeps_degraded_state() -> ParityResult<()> {
         .save_backend_config(&BackendConfig::lm_studio_default())
         .await
         .expect("后端配置应写入成功");
+    engine
+        .setting_set(ramaria_service::SETUP_COMPLETED_KEY, "1")
+        .await
+        .expect("完成标记应写入成功");
     assert!(
         !engine.is_embedding_available(),
         "本用例应运行在嵌入缺失的降级环境"

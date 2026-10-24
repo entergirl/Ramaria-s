@@ -21,26 +21,31 @@ use serde::{Deserialize, Serialize};
 ///   （向量通道降级，BM25 + 关键词镜像仍可用）。
 ///
 /// 字段约定:
+/// - `setup_completed`: 首次配置向导是否走完（`settings.setup_completed_at` 存在且非空）；
 /// - `backend_configured`: `backend_config` 是否已有记录。
 /// - `model_selected`: 线上 provider 已填 model_id；本地 provider 视为已选
 ///   （模型由本地推理服务侧决定，配置层不强制）。
 /// - `embedding_available`: 嵌入模型已加载且可用（向量通道就绪）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetupStatus {
+    pub setup_completed: bool,
     pub backend_configured: bool,
     pub model_selected: bool,
     pub embedding_available: bool,
 }
 
 impl SetupStatus {
-    /// 核心配置是否就绪（嵌入模型缺失不影响此结果）。
+    /// 核心配置是否就绪（走完向导 + 后端配置 + 模型已选；嵌入缺失不影响此结果）。
     pub fn is_complete(&self) -> bool {
-        self.backend_configured && self.model_selected
+        self.setup_completed && self.backend_configured && self.model_selected
     }
 
     /// 缺失项的人类可读描述列表（顺序与配置向导步骤一致）。
     pub fn missing_items(&self) -> Vec<&'static str> {
         let mut items = Vec::new();
+        if !self.setup_completed {
+            items.push("首次配置未完成（需走完配置向导）");
+        }
         if !self.backend_configured {
             items.push("后端配置未完成（需选择 LLM provider）");
         }

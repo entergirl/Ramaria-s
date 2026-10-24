@@ -346,11 +346,16 @@ fn session_summary_view_serde_roundtrip() {
         external_ref: Some("client-A".to_string()),
         message_count: 6,
         unread: 2,
+        last_message_preview: Some("最后一条可见消息".to_string()),
     };
     let json = serde_json::to_string(&view).expect("序列化成功");
     let value: serde_json::Value = serde_json::from_str(&json).expect("JSON 解析成功");
     assert_eq!(value["channel"], "mcp");
     assert_eq!(value["unread"], 2, "未读数应透出 JSON");
+    assert_eq!(
+        value["last_message_preview"], "最后一条可见消息",
+        "预览正文应透出 JSON"
+    );
     assert!(value["started_at"].as_str().is_some());
     let back: SessionSummaryView = serde_json::from_str(&json).expect("反序列化成功");
     assert_eq!(view, back);
