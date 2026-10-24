@@ -230,21 +230,6 @@ export function readVisionSupport(config: unknown): boolean {
   return config.vision.model_supports_vision === true
 }
 
-/**
- * 生成只改动图片理解声明的配置副本。
- *
- * 返回:
- * - 配置不是对象时返回 `null`（调用方跳过写入，不猜测结构）；
- * - 否则返回新对象，`vision` 组内的其余键原样保留。
- */
-export function withVisionSupport(config: unknown, enabled: boolean): Record<string, unknown> | null {
-  if (!isRecord(config)) {
-    return null
-  }
-  const vision = isRecord(config.vision) ? config.vision : {}
-  return { ...config, vision: { ...vision, model_supports_vision: enabled } }
-}
-
 /** 解析配置 JSON 文本；失败返回 `null` */
 export function parseConfigJson(raw: string): unknown {
   try {

@@ -91,9 +91,7 @@ describe('首次配置流程（本地）', () => {
             case 'run_setup':
             case 'refresh_setup_state':
               return command === 'run_setup' || command === 'refresh_setup_state' ? 'ready' : 'ok'
-            case 'update_setting':
-              return 'updated'
-            case 'update_full_config':
+            case 'set_vision_support':
               return { fileOk: true, dbOk: true, failures: [] }
             case 'get_index_status':
               return {
@@ -131,8 +129,9 @@ describe('首次配置流程（本地）', () => {
     await buttonByText(wrapper, '保存并进入 Ramaria')?.trigger('click')
     await flushPromises()
     expect(calls).toContain('run_setup')
-    expect(calls).toContain('update_full_config')
-    expect(calls).toContain('update_setting')
+    expect(calls).toContain('set_vision_support')
+    expect(calls).not.toContain('update_full_config')
+    expect(calls).not.toContain('update_setting')
     expect(calls).toContain('refresh_setup_state')
 
     wrapper.unmount()

@@ -4,7 +4,7 @@
  * 职责:
  * - 承载 AppState 与 IndexStatus 两份状态，派生全屏判据与索引降级判据
  * - 启动引导：并行读取应用状态与索引状态，降级时补取降级原因
- * - 订阅 `index-progress` 推进索引状态
+ * - 订阅 `index-progress` 推进索引状态，订阅 `model-download-progress` 驱动全局下载横幅
  *
  * 设计特点:
  * - IndexStatus 独立于 AppState：其变化只影响横幅与设置卡，不切视图
@@ -15,16 +15,23 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 
-import { chatApi, configApi, indexApi, setupApi } from '../core/api'
-import type { AppStateValue, DegradedReason, IndexProgress, IndexStatusView } from '../core/api/dto'
+import { chatApi, indexApi, setupApi } from '../core/api'
+import type {
+  AppStateValue,
+  DegradedReason,
+  IndexProgress,
+  IndexStatusView,
+  ModelDownloadProgress,
+} from '../core/api/dto'
 import { errorMessage } from '../core/errors'
 import { EVENTS, useEvent } from '../core/events'
-import { isSetupCompleted } from '../core/setupWizard'
 
 export const useAppStore = defineStore('app', () => {
   const appState = ref<AppStateValue>('needs_setup')
   const degradedReason = ref<DegradedReason | null>(null)
   const indexStatus = ref<IndexStatusView | null>(null)
+  const download = ref<ModelDownloadProgress | null>(null)
+  let downloadHideTimer: ReturnType<typeof setTimeout> | null = null
   const booting = ref(false)
   /** 首次引导是否已结束（成功或失败都置真，避免重复请求） */
   const booted = ref(false)
@@ -42,27 +49,6 @@ export const useAppStore = defineStore('app', () => {
   )
 
   /**
-   * 冷启动时校正「就绪」判定。
-   *
-   * 说明:
-   * - 后端只按「后端配置存在 + 模型已选」判定就绪，测试连接也会写入后端配置，
-   *   因此未走完向导的库会被误判为就绪、直接落到空白主界面
-   * - 以 `settings` 表的完成标记为准：标记缺失时回到首次配置
-   * - 标记读取失败时不改判定，避免把瞬时读取错误当成「未配置」
-   */
-  async function resolveSetupState(state: AppStateValue): Promise<AppStateValue> {
-    if (state !== 'ready' && state !== 'degraded') {
-      return state
-    }
-    try {
-      const settings = await configApi.getSettings()
-      return isSetupCompleted(settings) ? state : 'needs_setup'
-    } catch {
-      return state
-    }
-  }
-
-  /**
    * 启动引导：应用状态 + 索引状态，降级时补取原因。
    *
    * 参数:
@@ -77,7 +63,7 @@ export const useAppStore = defineStore('app', () => {
     try {
       const [state, index] = await Promise.all([chatApi.getAppState(), indexApi.getStatus()])
       indexStatus.value = index
-      appState.value = await resolveSetupState(state)
+      appState.value = state
       degradedReason.value =
         appState.value === 'degraded' ? await setupApi.getDegradedReason() : null
     } catch (error) {
@@ -135,12 +121,42 @@ export const useAppStore = defineStore('app', () => {
     }
   }
 
+  /**
+   * 模型下载进度（全局横幅数据源）。
+   *
+   * 说明:
+   * - 完成 / 失败为终态：完成 2 秒后自动收起，失败保留 8 秒（不阻塞任何操作）；
+   * - 后到的事件覆盖前一条，终态计时器随之重置。
+   */
+  function clearDownloadTimer(): void {
+    if (downloadHideTimer) {
+      clearTimeout(downloadHideTimer)
+      downloadHideTimer = null
+    }
+  }
+
+  function applyDownloadProgress(progress: ModelDownloadProgress): void {
+    download.value = progress
+    clearDownloadTimer()
+    if (progress.status === 'completed' || progress.status === 'failed') {
+      downloadHideTimer = setTimeout(
+        () => {
+          download.value = null
+          downloadHideTimer = null
+        },
+        progress.status === 'completed' ? 2000 : 8000,
+      )
+    }
+  }
+
   useEvent(EVENTS.indexProgress, applyIndexProgress)
+  useEvent(EVENTS.modelDownloadProgress, applyDownloadProgress)
 
   return {
     appState,
     degradedReason,
     indexStatus,
+    download,
     booting,
     booted,
     bootError,

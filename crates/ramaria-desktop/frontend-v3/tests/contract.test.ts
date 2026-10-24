@@ -41,6 +41,7 @@ const sessionSummary = {
   persona_uid: null,
   channel: 'local',
   external_ref: null,
+  last_message_preview: '那就把它当成一次探险',
 } satisfies SessionSummary
 
 const sessionDetail = {
@@ -93,7 +94,7 @@ describe('DTO 形状', () => {
     )
   })
 
-  it('SessionSummary 为 8 字段且保持 snake_case', () => {
+  it('SessionSummary 为 9 字段且保持 snake_case', () => {
     expect(Object.keys(sessionSummary).sort()).toEqual(
       [
         'id',
@@ -104,6 +105,7 @@ describe('DTO 形状', () => {
         'persona_uid',
         'channel',
         'external_ref',
+        'last_message_preview',
       ].sort(),
     )
   })
@@ -143,9 +145,9 @@ describe('DTO 形状', () => {
 })
 
 describe('命令表', () => {
-  it('覆盖 19 个域、78 条命令', () => {
+  it('覆盖 19 个域、80 条命令', () => {
     expect(Object.keys(COMMANDS)).toHaveLength(19)
-    expect(commandNames()).toHaveLength(78)
+    expect(commandNames()).toHaveLength(80)
   })
 
   it('命令名唯一', () => {

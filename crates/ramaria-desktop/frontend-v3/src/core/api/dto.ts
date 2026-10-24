@@ -221,6 +221,27 @@ export interface ConfigWriteReceipt {
   failures: string[]
 }
 
+/** 视觉能力单键写回执（`set_vision_support`）：camelCase */
+export interface VisionSupportReceipt {
+  fileOk: boolean
+  dbOk: boolean
+  failures: string[]
+}
+
+/**
+ * 模型下载进度（`model-download-progress` 事件）
+ *
+ * 形状: camelCase；`status` 四态，`percent` 为 0~100；总量未知时 `total` 与 `percent` 为 0
+ */
+export interface ModelDownloadProgress {
+  status: 'started' | 'progress' | 'completed' | 'failed'
+  downloaded: number
+  total: number
+  percent: number
+  elapsedMs: number
+  model?: string
+}
+
 /** 主动消息（`proactive-message` 事件）：snake_case，`activated` 仅点击重播时存在 */
 export interface ProactiveMessagePayload {
   session_id: string

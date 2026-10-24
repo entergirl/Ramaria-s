@@ -29,6 +29,8 @@ pub const EVENT_CHANNEL_STATUS: &str = "channel-status";
 pub const EVENT_IMPORT_PROGRESS: &str = "import-progress";
 /// 索引构建进度事件名
 pub const EVENT_INDEX_PROGRESS: &str = "index-progress";
+/// 模型下载进度事件名
+pub const EVENT_MODEL_DOWNLOAD_PROGRESS: &str = "model-download-progress";
 
 // =========================================================
 // 索引进度事件
@@ -49,6 +51,28 @@ pub fn emit_index_progress<R: tauri::Runtime>(
     use tauri::Emitter;
     if let Err(e) = app.emit(EVENT_INDEX_PROGRESS, progress.clone()) {
         tracing::debug!(error = %e, "索引进度事件发送失败");
+    }
+}
+
+// =========================================================
+// 模型下载进度事件
+// =========================================================
+
+/// 派发模型下载进度事件。
+///
+/// 参数:
+/// - `app`: 宿主应用句柄。
+/// - `progress`: 服务层产出的进度负载（状态 / 字节 / 百分比 / 耗时 / 模型）。
+///
+/// 说明:
+/// - 事件发送失败只记 debug（前端可能尚未就绪，不影响下载本身）。
+pub fn emit_model_download_progress<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    progress: &ramaria_service::ModelDownloadProgress,
+) {
+    use tauri::Emitter;
+    if let Err(e) = app.emit(EVENT_MODEL_DOWNLOAD_PROGRESS, progress.clone()) {
+        tracing::debug!(error = %e, "模型下载进度事件发送失败");
     }
 }
 

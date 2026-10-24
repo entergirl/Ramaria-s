@@ -36,6 +36,9 @@ pub struct SessionSummary {
     pub channel: String,
     /// 外部对话标识（客户端 conversation id / 客户端身份名；本地会话为 None）。
     pub external_ref: Option<String>,
+    /// 最后一条可见消息的正文（撤回消息不计；空会话为 None）。
+    /// 图片占位符已按附件描述渲染，截断与省略由前端展示层处理。
+    pub last_message_preview: Option<String>,
 }
 
 /// 由存储层会话与消息数聚合构造前端摘要（新建会话路径的字段映射入口）。
@@ -56,6 +59,7 @@ fn summary_from(
         persona_uid: session.persona_uid.clone(),
         channel: session.channel.clone(),
         external_ref: session.external_ref.clone(),
+        last_message_preview: None,
     }
 }
 
@@ -73,6 +77,7 @@ fn summary_from_view(view: &ramaria_service::SessionSummaryView) -> SessionSumma
         persona_uid: view.persona_uid.clone(),
         channel: view.channel.clone(),
         external_ref: view.external_ref.clone(),
+        last_message_preview: view.last_message_preview.clone(),
     }
 }
 
@@ -302,6 +307,10 @@ mod tests {
         assert_eq!(summary.message_count, 3);
         assert_eq!(summary.unread, 0, "新建会话路径未读应恒为 0");
         assert_eq!(summary.persona_uid.as_deref(), Some("rama-0001"));
+        assert!(
+            summary.last_message_preview.is_none(),
+            "新建会话路径无历史消息，预览应为 None"
+        );
 
         // 本地会话：通道 local、无外部标识；消息数缺失按 0 处理
         let local = ramaria_core::types::Session::new();
@@ -330,6 +339,7 @@ mod tests {
             external_ref: None,
             message_count: 7,
             unread: 4,
+            last_message_preview: Some("最后一条可见消息".to_string()),
         };
 
         let summary = summary_from_view(&view);
@@ -341,13 +351,21 @@ mod tests {
         assert_eq!(summary.persona_uid.as_deref(), Some("char-0001"));
         assert_eq!(summary.channel, "local");
         assert!(summary.external_ref.is_none());
+        assert_eq!(
+            summary.last_message_preview.as_deref(),
+            Some("最后一条可见消息"),
+            "预览正文应透传"
+        );
 
-        // 未关闭会话：ended_at 为 None 保持
+        // 未关闭会话：ended_at 为 None 保持；无预览会话保持 None
         let open = ramaria_service::SessionSummaryView {
             ended_at: None,
+            last_message_preview: None,
             ..view
         };
-        assert!(summary_from_view(&open).ended_at.is_none());
+        let open_summary = summary_from_view(&open);
+        assert!(open_summary.ended_at.is_none());
+        assert!(open_summary.last_message_preview.is_none());
     }
 
     /// 详情映射：服务层视图（UTC 时间）转换为毫秒时间戳，消息字段逐项透传。

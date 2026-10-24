@@ -29,6 +29,7 @@ import type {
   SessionDetail,
   SessionSummary,
   SettingItem,
+  VisionSupportReceipt,
 } from './dto'
 
 /** 对话：发送、状态、隐私、撤回、本地发图 */
@@ -87,6 +88,14 @@ export const setupApi = {
   },
   getDegradedReason() {
     return invoke<DegradedReason | null>(COMMANDS.setup.getDegradedReason)
+  },
+  /** 写入图片理解声明（只改 `[vision].model_supports_vision`） */
+  setVisionSupport(enabled: boolean) {
+    return invoke<VisionSupportReceipt>(COMMANDS.setup.setVisionSupport, { enabled })
+  },
+  /** 下载嵌入模型；进度经 `model-download-progress` 事件推送 */
+  downloadEmbeddingModel(modelId: string) {
+    return invoke<string>(COMMANDS.setup.downloadEmbeddingModel, { modelId })
   },
 }
 

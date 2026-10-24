@@ -30,6 +30,8 @@ export const COMMANDS = {
     saveEmbeddingModel: 'save_embedding_model',
     getEmbeddingModel: 'get_embedding_model',
     getDegradedReason: 'get_degraded_reason',
+    setVisionSupport: 'set_vision_support',
+    downloadEmbeddingModel: 'download_embedding_model',
   },
   session: {
     list: 'list_sessions',

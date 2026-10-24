@@ -18,6 +18,7 @@ import type {
   ChatDonePayload,
   ChatErrorPayload,
   IndexProgress,
+  ModelDownloadProgress,
   ProactiveMessagePayload,
 } from './api/dto'
 import { getTauriRuntime } from './transport'
@@ -32,6 +33,7 @@ export const EVENTS = {
   channelStatus: 'channel-status',
   closeRequested: 'close-requested',
   indexProgress: 'index-progress',
+  modelDownloadProgress: 'model-download-progress',
 } as const
 
 /** 事件名联合类型 */
@@ -47,6 +49,7 @@ export interface EventPayloadMap {
   'channel-status': Record<string, unknown>
   'close-requested': null
   'index-progress': IndexProgress
+  'model-download-progress': ModelDownloadProgress
 }
 
 /**

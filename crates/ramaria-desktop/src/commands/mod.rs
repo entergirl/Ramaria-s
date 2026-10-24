@@ -21,6 +21,7 @@ pub mod keywords;
 pub mod mcp;
 pub mod memory;
 pub mod memory_view;
+pub mod model_download;
 pub mod persona;
 pub mod preset;
 pub mod proactive_cmd;
@@ -28,6 +29,7 @@ pub mod rules;
 pub mod session;
 pub mod setup;
 pub mod style;
+pub mod vision;
 
 // =========================================================
 // 服务层错误文案转换

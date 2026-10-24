@@ -24,7 +24,6 @@ import {
   summaryRows,
   validateEmbeddingPath,
   validateLlmFields,
-  withVisionSupport,
 } from '../src/core/setupWizard'
 
 describe('表单默认值', () => {
@@ -144,29 +143,10 @@ describe('确认摘要', () => {
 })
 
 describe('图片理解声明', () => {
-  const config = {
-    version: '3.0.0',
-    vision: { model_supports_vision: false, batch_limit: 4 },
-    retrieval: { enable_vector: true },
-  }
-
-  it('只改声明键并保留同组与其它的值', () => {
-    const next = withVisionSupport(config, true)
-    expect(next).not.toBeNull()
-    expect(readVisionSupport(next)).toBe(true)
-    expect(readVisionSupport(config)).toBe(false)
-    expect((next?.vision as Record<string, unknown>).batch_limit).toBe(4)
-    expect((next?.retrieval as Record<string, unknown>).enable_vector).toBe(true)
-  })
-
-  it('缺 vision 组时补建该组，不丢其它组', () => {
-    const next = withVisionSupport({ retrieval: { enable_vector: false } }, true)
-    expect(next?.vision).toEqual({ model_supports_vision: true })
-  })
-
-  it('结构不是对象时不猜测，返回 null', () => {
-    expect(withVisionSupport(null, true)).toBeNull()
-    expect(withVisionSupport([1, 2], true)).toBeNull()
+  it('从配置读取声明，缺失与非对象按关闭处理', () => {
+    expect(readVisionSupport({ vision: { model_supports_vision: true } })).toBe(true)
+    expect(readVisionSupport({ vision: { model_supports_vision: false } })).toBe(false)
+    expect(readVisionSupport({})).toBe(false)
     expect(readVisionSupport('bad')).toBe(false)
   })
 

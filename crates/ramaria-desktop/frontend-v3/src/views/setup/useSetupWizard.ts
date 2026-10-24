@@ -22,10 +22,8 @@ import {
   normalizeModelPath,
   parseConfigJson,
   readVisionSupport,
-  SETUP_COMPLETED_KEY,
   validateEmbeddingPath,
   validateLlmFields,
-  withVisionSupport,
   type SetupFieldErrors,
   type SetupFields,
   type SetupMode,
@@ -247,21 +245,12 @@ export function useSetupWizard() {
    * 写入图片理解声明。
    *
    * 说明:
-   * - 必须先读最新配置再改：本次 `run_setup` 刚写过 `[backend]` 组，
-   *   使用进入向导时的旧快照会把后端配置回退成保存前的值
-   * - 只改一个键，其余键原样写回；双侧写入失败以回执首条原因返回
+   * - 单键命令只改 `[vision].model_supports_vision`，不会回写整份配置，
+   *   因此不会覆盖本次 `run_setup` 刚写入的 `[backend]` 组
+   * - 双侧写入失败以回执首条原因返回
    */
   async function saveVisionSupport(): Promise<string> {
-    const parsed = parseConfigJson(await configApi.getFull())
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error('配置结构无法识别')
-    }
-
-    const next = withVisionSupport(parsed, fields.visionSupported)
-    if (!next) {
-      throw new Error('配置结构无法识别')
-    }
-    const receipt = await configApi.updateFull(JSON.stringify(next))
+    const receipt = await setupApi.setVisionSupport(fields.visionSupported)
     return receipt.failures[0] ?? ''
   }
 
@@ -308,13 +297,6 @@ export function useSetupWizard() {
         }
       } catch (error) {
         warnings.push(errorMessage(error, '图片理解声明保存失败'))
-      }
-
-      // 完成标记：冷启动据此区分「走完向导」与「只点过测试连接」（服务层落点见 M4-6）
-      try {
-        await configApi.updateSetting(SETUP_COMPLETED_KEY, String(Date.now()))
-      } catch (error) {
-        warnings.push(errorMessage(error, '首次配置完成标记写入失败'))
       }
 
       const firstWarning = warnings[0]

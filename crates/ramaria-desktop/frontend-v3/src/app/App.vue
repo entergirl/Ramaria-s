@@ -18,6 +18,7 @@ import { RouterView, useRoute, useRouter } from 'vue-router'
 
 import ToastLayer from '../components/base/ToastLayer.vue'
 import NavDock from '../components/nav/NavDock.vue'
+import DownloadBanner from '../components/shell/DownloadBanner.vue'
 import { FULLSCREEN_ROUTES } from './router'
 import { useAppStore } from '../stores/app'
 
@@ -50,6 +51,7 @@ watch(
 
 <template>
   <RouterView />
+  <DownloadBanner />
   <NavDock />
   <ToastLayer />
 </template>
