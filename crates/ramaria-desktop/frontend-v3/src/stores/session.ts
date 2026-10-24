@@ -99,6 +99,14 @@ export const useSessionStore = defineStore('session', () => {
     }
   }
 
+  /** 局部替换人格缓存（改名 / 换头像后免整表重取；未加载时留待下次装载） */
+  function patchPersona(updated: PersonaFull): void {
+    const index = personas.value.findIndex((item) => item.uid === updated.uid)
+    if (index >= 0) {
+      personas.value[index] = updated
+    }
+  }
+
   async function loadList(): Promise<void> {
     loadingList.value = true
     error.value = ''
@@ -202,6 +210,7 @@ export const useSessionStore = defineStore('session', () => {
     closed,
     personaOf,
     loadPersonas,
+    patchPersona,
     loadList,
     open,
     create,

@@ -81,6 +81,28 @@ const COPY: Record<string, StateCopy> = {
     action: '重试',
   },
 
+  // ---- persona ----
+  'persona.empty.no-data': {
+    title: '还没有人格',
+    description: '导入一个预设，或先创建默认人格。',
+    action: '导入预设',
+  },
+  'persona.error.load': {
+    title: '人格列表加载失败',
+    description: '读取本地数据库时出错，其余功能不受影响。',
+    action: '重试',
+  },
+  'persona.degraded.profile': {
+    title: '画像尚未生成',
+    description: '该人格还没有足够的记忆事件，重载画像可尝试重算。',
+    action: '重载画像',
+  },
+  'persona.degraded.llm': {
+    title: '对话模型不可用',
+    description: '重载画像与全量提示词预览暂不可用，编辑仍可保存。',
+    action: '去设置',
+  },
+
   // ---- 全局降级 ----
   'global.degraded.embedding_missing': {
     title: '嵌入模型不可用',

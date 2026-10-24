@@ -8,10 +8,11 @@
  *
  * 设计特点:
  * - 头像即会话卡片入口，展开状态经 `aria-expanded` 透出
+ * - 头像优先用已保存图片，缺失或不可读时回退名称首字
  * - 状态点与文案同源：流式、只读、已结束、正常四种
  * - 保存键只在可保存时出现，不出现灰掉的无效键
  */
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 import BaseButton from '../../components/base/BaseButton.vue'
 import BaseTag from '../../components/base/BaseTag.vue'
@@ -38,6 +39,19 @@ const chat = useChatStore()
 const persona = computed(() => session.activePersona)
 const name = computed(() => persona.value?.name || '未命名人格')
 const initial = computed(() => name.value.slice(0, 1))
+
+const previewFailed = ref(false)
+const avatarSrc = computed(() => {
+  const value = persona.value?.avatar?.trim() ?? ''
+  return value !== '' && !previewFailed.value ? value : ''
+})
+
+watch(
+  () => persona.value?.avatar,
+  () => {
+    previewFailed.value = false
+  },
+)
 
 const tags = computed(() => sessionTags(session.active?.channel ?? 'local', persona.value))
 
@@ -75,7 +89,14 @@ const canSave = computed(
       @click="$emit('toggle-sessions')"
     >
       <span class="avatar-ring" aria-hidden="true" />
-      <span class="avatar-text">{{ initial }}</span>
+      <img
+        v-if="avatarSrc"
+        class="avatar-img"
+        :src="avatarSrc"
+        alt=""
+        @error="previewFailed = true"
+      />
+      <span v-else class="avatar-text">{{ initial }}</span>
     </button>
 
     <div class="head-info">
@@ -153,6 +174,16 @@ const canSave = computed(
   line-height: 1;
   /* 汉字墨迹偏左上，按视觉重心做亚像素级光学微调 */
   transform: translate(0.04em, 0.02em);
+}
+
+/* 图片头像铺满圆形，不叠加文字头像的内描边 */
+.avatar-img {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  border-radius: var(--radius-full);
+  object-fit: cover;
 }
 
 .avatar:hover .avatar-ring {

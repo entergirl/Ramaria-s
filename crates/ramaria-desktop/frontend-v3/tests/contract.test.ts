@@ -13,6 +13,9 @@ import { COMMANDS, commandNames } from '../src/core/api/commands'
 import type {
   ChatDonePayload,
   IndexStatusView,
+  PersonaExportReceipt,
+  PresetImportOutcome,
+  PresetImportPreview,
   PrivacyStatus,
   SessionDetail,
   SessionMessage,
@@ -76,6 +79,38 @@ const privacyNeedsConfirm = {
   provider_name: 'DeepSeek',
   base_url: 'https://api.deepseek.com',
 } satisfies PrivacyStatus
+
+const presetPreview = {
+  text: '新建 char-0002：特质 2 / 事实 1',
+  uid: null,
+  mode: 'create',
+  name: '雾',
+  decompose_enabled: true,
+  privacy_confirmed: false,
+} satisfies PresetImportPreview
+
+const presetOutcome = {
+  text: '写入结果：特质 2 / 事实 1',
+  uid: 'char-0002',
+  mode: 'create',
+  name: '雾',
+  written: { traits: 2, facts: 1, examples: 0, behavior_rules: 0, failed: 0 },
+  decompose: { requested: true, executed: true, fact_count: 1, trait_count: 2 },
+} satisfies PresetImportOutcome
+
+const personaExport = {
+  uid: 'char-0001',
+  name: '小珊',
+  writtenTo: 'C:/tmp/ramaria-persona-char-0001.toml',
+  stats: {
+    traits: 3,
+    facts: 2,
+    behaviorRules: 1,
+    blocks: 2,
+    promptPatch: true,
+    examplesIncluded: 4,
+  },
+} satisfies PersonaExportReceipt
 
 describe('DTO 形状', () => {
   it('SessionMessage 为 9 字段且保持 snake_case', () => {
@@ -141,6 +176,35 @@ describe('DTO 形状', () => {
 
   it('隐私状态以 PascalCase 变体名区分', () => {
     expect(privacyNeedsConfirm.status).toBe('NeedsConfirmation')
+  })
+
+  it('预设预览 6 字段，uid 可为 null', () => {
+    expect(Object.keys(presetPreview).sort()).toEqual(
+      ['text', 'uid', 'mode', 'name', 'decompose_enabled', 'privacy_confirmed'].sort(),
+    )
+    expect(presetPreview.uid).toBeNull()
+  })
+
+  it('预设导入结果为 6 字段，写入统计与拆解保持 snake_case', () => {
+    expect(Object.keys(presetOutcome).sort()).toEqual(
+      ['text', 'uid', 'mode', 'name', 'written', 'decompose'].sort(),
+    )
+    expect(Object.keys(presetOutcome.written).sort()).toEqual(
+      ['traits', 'facts', 'examples', 'behavior_rules', 'failed'].sort(),
+    )
+    expect(Object.keys(presetOutcome.decompose).sort()).toEqual(
+      ['requested', 'executed', 'fact_count', 'trait_count'].sort(),
+    )
+  })
+
+  it('人格导出回执为 camelCase，hints 缺省省略', () => {
+    expect(Object.keys(personaExport).sort()).toEqual(
+      ['uid', 'name', 'writtenTo', 'stats'].sort(),
+    )
+    expect(Object.keys(personaExport.stats).sort()).toEqual(
+      ['traits', 'facts', 'behaviorRules', 'blocks', 'promptPatch', 'examplesIncluded'].sort(),
+    )
+    expect('hints' in personaExport).toBe(false)
   })
 })
 

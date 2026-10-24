@@ -27,9 +27,14 @@ import type {
   IndexStatusView,
   MemoryEvent,
   MemoryL1,
+  PersonaExportReceipt,
   PersonaFull,
+  PersonaPromptPreview,
   PersonaSummary,
+  PersonaUpdateRequest,
   PersonalityProfile,
+  PresetImportOutcome,
+  PresetImportPreview,
   PrivacyStatus,
   ProfileStatus,
   SendLocalImageResult,
@@ -202,10 +207,14 @@ export const memoryApi = {
   },
 }
 
-/** 人格：全字段列表（对话视图取名称、头像来源与来源渠道） */
+/** 人格：全字段列表、信息更新、画像重载、预设导入导出、提示词预览 */
 export const personaApi = {
   listFull() {
     return invoke<PersonaFull[]>(COMMANDS.persona.listFull)
+  },
+  /** 更新名称 / 头像 / 描述（缺省字段保持旧值，空字符串表达清空） */
+  updateInfo(uid: string, request: PersonaUpdateRequest) {
+    return invoke<PersonaFull>(COMMANDS.persona.updateInfo, { uid, request })
   },
   /** 重载画像：触发该人格的 L2→L3 后台管线，返回 `"ok"` */
   refresh(uid: string) {
@@ -215,6 +224,34 @@ export const personaApi = {
   regenerateImportPipeline(personaUid: string) {
     return invoke<ImportPipelineReceipt>(COMMANDS.persona.regenerateImportPipeline, {
       personaUid,
+    })
+  },
+  /** 提示词预览：`input` 为空按静态段处理，非空为全量（含召回） */
+  previewPrompt(uid: string, input: string | null = null) {
+    return invoke<PersonaPromptPreview>(COMMANDS.persona.previewPrompt, { uid, input })
+  },
+  /** 预设导入预览（dry-run：不写库、不调用模型） */
+  previewImport(filePath: string, into: string | null = null, noAi = false) {
+    return invoke<PresetImportPreview>(COMMANDS.persona.previewImport, {
+      filePath,
+      into,
+      noAi,
+    })
+  },
+  /** 预设导入执行 */
+  importPreset(filePath: string, into: string | null = null, noAi = false) {
+    return invoke<PresetImportOutcome>(COMMANDS.persona.importPreset, {
+      filePath,
+      into,
+      noAi,
+    })
+  },
+  /** 导出人格预设；`outputPath` 由 `saveFileDialog` 取得 */
+  personaExport(uid: string, withExamples: boolean, outputPath: string) {
+    return invoke<PersonaExportReceipt>(COMMANDS.persona.personaExport, {
+      uid,
+      withExamples,
+      outputPath,
     })
   },
 }
@@ -236,6 +273,13 @@ export const systemApi = {
       title: options.title ?? null,
       filterName: options.filterName ?? null,
       extensions: options.extensions ?? null,
+    })
+  },
+  /** 保存对话框：返回用户选定路径，取消为 `null`；参数键为 snake_case */
+  saveFileDialog(defaultName: string, filterName: string | null = null) {
+    return invoke<string | null>(COMMANDS.system.saveFileDialog, {
+      default_name: defaultName,
+      filter_name: filterName,
     })
   },
   getImageSourceDir() {

@@ -11,8 +11,8 @@
     "windows": [
       {
         "title": "Ramaria - 个人AI陪伴记忆系统",
-        "width": 960,
-        "height": 720,
+        "width": 1200,
+        "height": 820,
         "minWidth": 640,
         "minHeight": 480,
         "resizable": true,

@@ -484,3 +484,107 @@ export interface L1RetryReceipt {
   reason?: string
   session_id?: string
 }
+
+/**
+ * 人格信息更新请求（`update_persona_info` 的 `request`）
+ *
+ * 形状: snake_case，字段全部可选；缺省字段保持旧值，空字符串表达清空
+ */
+export interface PersonaUpdateRequest {
+  name?: string
+  avatar?: string
+  description?: string
+}
+
+/**
+ * 预设导入写入统计（`import_persona_preset` 的 `written`）
+ *
+ * 形状: snake_case，5 字段；`failed` 为写入失败被跳过的条目数
+ */
+export interface ImportWriteStats {
+  traits: number
+  facts: number
+  examples: number
+  behavior_rules: number
+  failed: number
+}
+
+/**
+ * 预设导入的拆解执行情况
+ *
+ * 形状: snake_case；`skipped_reason` 缺省不输出（未跳过）
+ */
+export interface DecomposeExecution {
+  requested: boolean
+  executed: boolean
+  skipped_reason?: string
+  fact_count: number
+  trait_count: number
+}
+
+/**
+ * 预设导入预览（`preview_persona_import`）
+ *
+ * 形状: snake_case；`text` 为服务层渲染的逐条裁决文本，前端不重算；
+ * `uid` 为 null 表示待自动生成；`decompose_enabled` / `privacy_confirmed` 供预览提示
+ */
+export interface PresetImportPreview {
+  text: string
+  uid: string | null
+  mode: string
+  name: string
+  decompose_enabled: boolean
+  privacy_confirmed: boolean
+}
+
+/**
+ * 预设导入结果（`import_persona_preset`）
+ *
+ * 形状: snake_case；`written` 为写入统计，`decompose` 为拆解执行情况
+ */
+export interface PresetImportOutcome {
+  text: string
+  uid: string
+  mode: string
+  name: string
+  written: ImportWriteStats
+  decompose: DecomposeExecution
+}
+
+/** 人格导出统计（`persona_export` 的 `stats`）：camelCase，6 字段 */
+export interface PersonaExportStats {
+  traits: number
+  facts: number
+  behaviorRules: number
+  blocks: number
+  promptPatch: boolean
+  examplesIncluded: number
+}
+
+/**
+ * 人格导出回执（`persona_export`）
+ *
+ * 形状: camelCase；`writtenTo` 为实际写入路径，`hints` 降级说明缺省省略
+ */
+export interface PersonaExportReceipt {
+  uid: string
+  name: string
+  writtenTo: string
+  stats: PersonaExportStats
+  hints?: string[]
+}
+
+/**
+ * 提示词预览（`preview_persona_prompt`）
+ *
+ * 形状: snake_case；`tier` 为 `static`（静态段）或 `full`（含召回）；
+ * `memory_context` 无召回时为 null
+ */
+export interface PersonaPromptPreview {
+  uid: string
+  tier: string
+  system_prompt: string
+  memory_context: string | null
+  chars: number
+  tokens: number
+}
