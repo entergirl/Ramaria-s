@@ -7,21 +7,26 @@
  *
  * 设计特点:
  * - 原生 checkbox 承载状态与可访问性，样式层只画轨道与滑块
- * - 写入中锁定输入并给行内指示，失败回滚由调用方处理
+ * - 写入中锁定输入并给行内指示；调用方不接受新值时原生勾选态自动复位
  * - 标签随控件整体可点，命中区域不小于最小可点尺寸
+ * - 无可见标签的场景用 `ariaLabel` 提供无障碍名称
  */
 
-withDefaults(
+import { nextTick, ref } from 'vue'
+
+const props = withDefaults(
   defineProps<{
     modelValue: boolean
     label?: string
     saving?: boolean
     disabled?: boolean
+    ariaLabel?: string
   }>(),
   {
     label: '',
     saving: false,
     disabled: false,
+    ariaLabel: '',
   },
 )
 
@@ -29,18 +34,28 @@ const emit = defineEmits<{
   'update:modelValue': [value: boolean]
 }>()
 
+const input = ref<HTMLInputElement | null>(null)
+
 function onChange(event: Event): void {
   const target = event.target as HTMLInputElement
   emit('update:modelValue', target.checked)
+  // 受控回执：写入失败时父级不会改 modelValue，浏览器已翻转的勾选态需要复位
+  void nextTick(() => {
+    if (input.value && input.value.checked !== props.modelValue) {
+      input.value.checked = props.modelValue
+    }
+  })
 }
 </script>
 
 <template>
   <label class="switch" :class="{ 'is-disabled': disabled || saving }">
     <input
+      ref="input"
       class="switch-input"
       type="checkbox"
       role="switch"
+      :aria-label="label ? undefined : ariaLabel || undefined"
       :checked="modelValue"
       :disabled="disabled || saving"
       @change="onChange"

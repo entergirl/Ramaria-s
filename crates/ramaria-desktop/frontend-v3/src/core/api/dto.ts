@@ -588,3 +588,79 @@ export interface PersonaPromptPreview {
   chars: number
   tokens: number
 }
+
+/**
+ * 行为规则的情境侧特征（`BehaviorRule.situation` 原样序列化）
+ *
+ * 形状: snake_case；`centroid` / `response_centroid` 为聚类中心向量，界面不消费，可能为 null
+ */
+export interface RuleSituation {
+  keywords: string[]
+  centroid: number[] | null
+  response_centroid: number[] | null
+  valence_mean: number
+  valence_std: number
+  sample_count: number
+  presentation_dist: Array<{ presentation: string; freq: number }>
+  situation_strength_mean: number
+  time_span_days: number
+  trait_refs: string[]
+}
+
+/** 行为规则的结构化参数（`params`），四项均为 0..1 或 -1..1 的浮点 */
+export interface RuleParams {
+  emotional_intensity: number
+  proactiveness: number
+  detail_level: number
+  formality: number
+}
+
+/**
+ * 行为规则（`list_rules` / `edit_rule` 的单条）
+ *
+ * 状态: `reaction` 为 null 表示候选规则，只做参数注入、没有规则文本
+ */
+export interface BehaviorRuleView {
+  id: number
+  persona_uid: string
+  situation: RuleSituation
+  reaction: string | null
+  params: RuleParams
+  avoid: string[]
+  evidence: Array<{ event_id: number; weight: number }>
+  confidence: number
+  stability: number
+  source: 'auto' | 'manual'
+  enabled: boolean
+  created_at: number
+  updated_at: number
+}
+
+/** 规则列表响应（`list_rules`）：按人格过滤后的规则与总数 */
+export interface RuleListResponse {
+  persona_uid: string
+  total: number
+  rules: BehaviorRuleView[]
+}
+
+/** 规则证据项（`rule_evidence`）：只含脱敏结构化字段，不含对话原文 */
+export interface RuleEvidenceItem {
+  event_id: number
+  weight: number
+  title: string
+  summary: string
+  paraphrase: string | null
+  keywords: string | null
+}
+
+/** 规则证据链响应（`rule_evidence`） */
+export interface RuleEvidenceResponse {
+  rule_id: number
+  evidence: RuleEvidenceItem[]
+}
+
+/** 规则启停回执（`set_rule_enabled`） */
+export interface RuleEnabledReceipt {
+  id: number
+  enabled: boolean
+}

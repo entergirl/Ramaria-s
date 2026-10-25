@@ -25,6 +25,7 @@ import type {
   TraitEvidenceChain,
 } from '../../core/api/dto'
 import { errorMessage } from '../../core/errors'
+import { selectPersonaUid } from '../../core/persona/select'
 import { pushToast } from '../../core/toast'
 import { useMemoryStore, type MemoryTab } from '../../stores/memory'
 import { usePersonaStore } from '../../stores/persona'
@@ -118,17 +119,7 @@ export function useMemoryView() {
 
   function pickPersonaUid(snapshotUid: string | null): string | null {
     const preselect = personaStore.consumePreselect()
-    const candidates = [preselect, snapshotUid, store.personaUid]
-    for (const candidate of candidates) {
-      if (candidate && store.personas.some((persona) => persona.uid === candidate)) {
-        return candidate
-      }
-    }
-    const fallback =
-      store.personas.find((persona) => persona.kind === 'rama' && persona.is_active) ??
-      store.personas.find((persona) => persona.kind === 'rama') ??
-      store.personas[0]
-    return fallback?.uid ?? null
+    return selectPersonaUid(store.personas, [preselect, snapshotUid, store.personaUid])
   }
 
   async function loadPersonas(): Promise<void> {

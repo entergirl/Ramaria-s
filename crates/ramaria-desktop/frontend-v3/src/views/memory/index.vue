@@ -21,6 +21,7 @@ import BaseProgress from '../../components/base/BaseProgress.vue'
 import BaseSkeleton from '../../components/base/BaseSkeleton.vue'
 import BaseSegmented from '../../components/base/BaseSegmented.vue'
 import BaseWorkbench from '../../components/base/BaseWorkbench.vue'
+import PersonaPicker from '../../components/shell/PersonaPicker.vue'
 import { parseL1Context } from '../../core/memory/context'
 import { displayPersonaName, orderFactGroups } from '../../core/memory/format'
 import { stateCopy } from '../../core/stateCopy'
@@ -28,7 +29,6 @@ import MemoryKnowledgeCard from './MemoryKnowledgeCard.vue'
 import MemoryL1Card from './MemoryL1Card.vue'
 import MemoryL2Card from './MemoryL2Card.vue'
 import MemoryL3Panel from './MemoryL3Panel.vue'
-import MemoryPersonaMenu from './MemoryPersonaMenu.vue'
 import MemoryToolbar from './MemoryToolbar.vue'
 import { useMemoryView } from './useMemoryView'
 
@@ -160,8 +160,9 @@ onBeforeUnmount(() => {
       />
 
       <div class="memory-split" :class="{ 'is-open': personaOpen }">
-        <MemoryPersonaMenu
+        <PersonaPicker
           v-if="personaOpen"
+          id="memory-personas"
           :personas="store.personas"
           :active-uid="store.personaUid"
           @select="choosePersona"

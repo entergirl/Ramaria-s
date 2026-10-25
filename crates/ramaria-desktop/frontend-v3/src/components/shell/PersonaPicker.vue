@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * src/views/memory/MemoryPersonaMenu.vue — 记忆页的人格卡
+ * src/components/shell/PersonaPicker.vue — 人格卡（筛选用）
  *
  * 职责:
  * - 在内容列左侧列出可筛选的人格，并标出当前项
@@ -9,14 +9,17 @@
  * - 文档流内卡片，不是侧栏；高度随右侧内容拉伸
  * - 每行只有头像、名称与分类，当前项用品牌底色与描边
  * - 行是按钮，当前行 aria-current；分类标签不承担操作
+ * - 记忆页与规则页共用，DOM id 由调用方给出
  */
 import { computed } from 'vue'
 
-import BaseTag from '../../components/base/BaseTag.vue'
+import BaseTag from '../base/BaseTag.vue'
 import type { PersonaSummary } from '../../core/api/dto'
 import { personaCategory, personaInitial } from '../../core/memory/format'
 
 const props = defineProps<{
+  /** 人格卡的 DOM id（工具栏 aria-controls 指向） */
+  id: string
   personas: PersonaSummary[]
   activeUid: string | null
 }>()
@@ -36,7 +39,7 @@ const rows = computed(() =>
 </script>
 
 <template>
-  <aside id="memory-personas" class="persona-menu" role="dialog" aria-label="人格列表">
+  <aside :id="id" class="persona-menu" role="dialog" aria-label="人格列表">
     <button
       v-for="row in rows"
       :key="row.persona.uid"
@@ -60,7 +63,9 @@ const rows = computed(() =>
   gap: var(--space-4);
   min-width: 0;
   padding: var(--space-10);
-  overflow: hidden;
+  /* 纵向可滚：人格多时在卡内滚动，横向隐藏避免抽屉展开动画露边 */
+  overflow-x: hidden;
+  overflow-y: auto;
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius-card);

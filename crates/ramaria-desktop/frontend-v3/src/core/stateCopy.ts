@@ -103,6 +103,22 @@ const COPY: Record<string, StateCopy> = {
     action: '去设置',
   },
 
+  // ---- rules ----
+  'rules.empty.no-data': {
+    title: '还没有规则',
+    description: '规则随对话与画像推断自动生成。',
+    action: '去对话',
+  },
+  'rules.error.load': {
+    title: '规则加载失败',
+    description: '读取本地数据库时出错，其余功能不受影响。',
+    action: '重试',
+  },
+  'rules.degraded.llm': {
+    title: '对话模型不可用',
+    description: '规则自动抽取暂停，编辑与启停仍可用。',
+  },
+
   // ---- 全局降级 ----
   'global.degraded.embedding_missing': {
     title: '嵌入模型不可用',

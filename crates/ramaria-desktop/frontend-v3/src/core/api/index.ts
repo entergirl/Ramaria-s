@@ -16,6 +16,7 @@ import { COMMANDS } from './commands'
 import type {
   AppStateValue,
   BackendConfig,
+  BehaviorRuleView,
   ClearCacheResult,
   ConfigWriteReceipt,
   DegradedReason,
@@ -37,6 +38,9 @@ import type {
   PresetImportPreview,
   PrivacyStatus,
   ProfileStatus,
+  RuleEnabledReceipt,
+  RuleEvidenceResponse,
+  RuleListResponse,
   SendLocalImageResult,
   SessionDetail,
   SessionSummary,
@@ -253,6 +257,26 @@ export const personaApi = {
       withExamples,
       outputPath,
     })
+  },
+}
+
+/** 行为规则：列表、启停、编辑与证据链 */
+export const rulesApi = {
+  /** 列出该人格的全部规则（含禁用项）；`personaUid` 缺省时后端按默认人格处理 */
+  list(personaUid: string | null = null) {
+    return invoke<RuleListResponse>(COMMANDS.rules.list, { personaUid })
+  },
+  /** 启用 / 禁用（禁用会写一次 S1 反馈） */
+  setEnabled(ruleId: number, enabled: boolean) {
+    return invoke<RuleEnabledReceipt>(COMMANDS.rules.setEnabled, { ruleId, enabled })
+  },
+  /** 编辑规则文本与禁忌词；保存后转 Manual 强锚点，`null` 表示不提交该字段 */
+  edit(ruleId: number, reaction: string | null = null, avoid: string | null = null) {
+    return invoke<BehaviorRuleView>(COMMANDS.rules.edit, { ruleId, reaction, avoid })
+  },
+  /** 规则证据链（规则 → 事件，只读脱敏字段） */
+  evidence(ruleId: number) {
+    return invoke<RuleEvidenceResponse>(COMMANDS.rules.evidence, { ruleId })
   },
 }
 
