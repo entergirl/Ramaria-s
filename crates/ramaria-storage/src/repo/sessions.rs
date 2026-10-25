@@ -256,6 +256,26 @@ pub async fn list_closed_missing_l1(pool: &SqlitePool, limit: u32) -> RamariaRes
         .collect()
 }
 
+/// 统计"已关闭且缺 L1 摘要"的本地会话数量。
+///
+/// 口径:
+/// - 与 [`list_closed_missing_l1`] 完全一致（`channel = 'local'`、已关闭、有消息、无 L1）；
+/// - 仅计数，不取 id 列表。
+pub async fn count_closed_missing_l1(pool: &SqlitePool) -> RamariaResult<u64> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sessions s \
+         WHERE s.channel = ? \
+           AND s.ended_at IS NOT NULL \
+           AND EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id) \
+           AND NOT EXISTS (SELECT 1 FROM memory_l1 l WHERE l.session_id = s.id)",
+    )
+    .bind(CHANNEL_LOCAL)
+    .fetch_one(pool)
+    .await
+    .storage_err("统计缺失 L1 的会话数量失败")?;
+    Ok(count.max(0) as u64)
+}
+
 pub async fn delete(pool: &SqlitePool, session_id: Uuid) -> RamariaResult<()> {
     sqlx::query("DELETE FROM sessions WHERE id = ?")
         .bind(session_id.to_string())

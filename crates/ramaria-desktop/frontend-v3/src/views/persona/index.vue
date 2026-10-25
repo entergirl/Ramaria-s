@@ -11,7 +11,7 @@
  * - 详情为页内二级导航，工具条在两种形态间整体切换，不叠加返回按钮
  * - 未保存修改只在离开详情时拦一次，不阻断页内其它操作
  */
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
 import BaseButton from '../../components/base/BaseButton.vue'
 import BaseCard from '../../components/base/BaseCard.vue'
@@ -27,7 +27,7 @@ import PersonaMetaCard from './PersonaMetaCard.vue'
 import PersonaProfileCard from './PersonaProfileCard.vue'
 import PersonaPromptCard from './PersonaPromptCard.vue'
 import PersonaToolbar from './PersonaToolbar.vue'
-import PresetImportModal from './PresetImportModal.vue'
+import PresetImportModal, { type PresetImportPhase } from './PresetImportModal.vue'
 import { usePersonaView } from './usePersonaView'
 
 const {
@@ -94,6 +94,28 @@ const emptyTitle = computed(() => emptyCopy.title)
 const emptyDescription = computed(() => emptyCopy.description)
 const emptyAction = computed(() => emptyCopy.action ?? '导入预设')
 
+const importPhase = ref<PresetImportPhase>('idle')
+
+/** 降级标记：画像未生成只在详情形态生效；对话模型不可用为全局能力 */
+const degradedAttr = computed(() => {
+  const parts: string[] = []
+  if (store.pane === 'detail' && profileDegraded.value) {
+    parts.push('profile')
+  }
+  if (llmUnavailable.value) {
+    parts.push('llm')
+  }
+  return parts.length > 0 ? parts.join(' ') : undefined
+})
+
+/** 受限标记：预设写入中锁流程；预览为只读 */
+const restrictedAttr = computed<'locked' | 'readonly' | undefined>(() => {
+  if (importPhase.value === 'importing') {
+    return 'locked'
+  }
+  return importPhase.value === 'preview' ? 'readonly' : undefined
+})
+
 onMounted(() => {
   void init()
 })
@@ -104,6 +126,8 @@ onMounted(() => {
     <div
       class="persona"
       :data-view-state="store.pane === 'list' ? viewState : 'default'"
+      :data-degraded="degradedAttr"
+      :data-restricted="restrictedAttr"
       :aria-busy="busy || saving ? 'true' : undefined"
     >
       <template v-if="store.pane === 'list'">
@@ -230,6 +254,7 @@ onMounted(() => {
     :open="importOpen"
     @close="importOpen = false"
     @imported="onImported"
+    @phase="importPhase = $event"
   />
 
   <PersonaExportModal

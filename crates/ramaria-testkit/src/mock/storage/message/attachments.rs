@@ -184,6 +184,30 @@ impl MockStorage {
         Ok(rows)
     }
 
+    pub(crate) async fn count_pending_attachments(&self) -> RamariaResult<u64> {
+        self.guard("count_pending_attachments")?;
+        let count = self
+            .attachments
+            .lock()
+            .expect("附件锁")
+            .values()
+            .filter(|row| row.status == AttachmentStatus::Pending)
+            .count();
+        Ok(count as u64)
+    }
+
+    pub(crate) async fn count_skipped_attachments(&self) -> RamariaResult<u64> {
+        self.guard("count_skipped_attachments")?;
+        let count = self
+            .attachments
+            .lock()
+            .expect("附件锁")
+            .values()
+            .filter(|row| row.status == AttachmentStatus::Skipped)
+            .count();
+        Ok(count as u64)
+    }
+
     pub(crate) async fn reset_attachment_for_rescan(
         &self,
         id: i64,

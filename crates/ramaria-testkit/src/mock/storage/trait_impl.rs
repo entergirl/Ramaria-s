@@ -44,6 +44,7 @@ impl StoreCrud for MockStorage {
     async fn upsert_session_members(&self, _members: &[SessionMember]) -> RamariaResult<()> { self.upsert_session_members(_members).await }
     async fn list_session_members(&self, _session_id: Uuid) -> RamariaResult<Vec<SessionMember>> { self.list_session_members(_session_id).await }
     async fn list_closed_sessions_missing_l1(&self, _limit: u32) -> RamariaResult<Vec<Uuid>> { self.list_closed_sessions_missing_l1(_limit).await }
+    async fn count_closed_sessions_missing_l1(&self) -> RamariaResult<u64> { self.count_closed_sessions_missing_l1().await }
     async fn upsert_channel_binding(&self, _channel: &str, _external_ref: &str, _persona_uid: Option<&str>, _enabled: bool, _allow_proactive: bool) -> RamariaResult<ChannelBinding> { self.upsert_channel_binding(_channel, _external_ref, _persona_uid, _enabled, _allow_proactive).await }
     async fn get_channel_binding(&self, _channel: &str, _external_ref: &str) -> RamariaResult<Option<ChannelBinding>> { self.get_channel_binding(_channel, _external_ref).await }
     async fn list_channel_bindings(&self) -> RamariaResult<Vec<ChannelBinding>> { self.list_channel_bindings().await }
@@ -81,6 +82,8 @@ impl StoreCrud for MockStorage {
     async fn find_attachment_description_by_md5(&self, _md5: &str) -> RamariaResult<Option<(String, String)>> { self.find_attachment_description_by_md5(_md5).await }
     async fn list_all_pending_attachments(&self, _limit: u32) -> RamariaResult<Vec<MessageAttachment>> { self.list_all_pending_attachments(_limit).await }
     async fn list_all_skipped_attachments(&self, _limit: u32) -> RamariaResult<Vec<MessageAttachment>> { self.list_all_skipped_attachments(_limit).await }
+    async fn count_pending_attachments(&self) -> RamariaResult<u64> { self.count_pending_attachments().await }
+    async fn count_skipped_attachments(&self) -> RamariaResult<u64> { self.count_skipped_attachments().await }
     async fn reset_attachment_for_rescan(&self, _id: i64, _source_ref: Option<&str>) -> RamariaResult<()> { self.reset_attachment_for_rescan(_id, _source_ref).await }
     async fn save_memory_l1(&self, memory: &MemoryL1) -> RamariaResult<()> { self.save_memory_l1(memory).await }
     async fn list_memory_l1(&self, session_id: Uuid) -> RamariaResult<Vec<MemoryL1>> { self.list_memory_l1(session_id).await }

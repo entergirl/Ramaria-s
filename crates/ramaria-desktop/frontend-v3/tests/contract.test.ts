@@ -12,6 +12,10 @@ import { describe, expect, it } from 'vitest'
 import { COMMANDS, commandNames } from '../src/core/api/commands'
 import type {
   ChatDonePayload,
+  ImportAnalysisReport,
+  ImportProgressPayload,
+  ImportResult,
+  ImportStatusView,
   IndexStatusView,
   PersonaExportReceipt,
   PresetImportOutcome,
@@ -97,6 +101,63 @@ const presetOutcome = {
   written: { traits: 2, facts: 1, examples: 0, behavior_rules: 0, failed: 0 },
   decompose: { requested: true, executed: true, fact_count: 1, trait_count: 2 },
 } satisfies PresetImportOutcome
+
+const importReport = {
+  file_path: 'C:/tmp/export.json',
+  self_id: 'u_self',
+  self_name: '小明',
+  self_uin: '10001',
+  chat_name: '小红',
+  chat_type: 'private',
+  members: [{ uid: 'u_peer', uin: null, name: '小红', message_count: 12 }],
+  other_name: '小红',
+  other_uid: 'u_peer',
+  other_uin: null,
+  time_range: '2023-01-01 ~ 2024-06-30',
+  total_raw: 40,
+  total_success: 38,
+  total_degraded: 1,
+  total_skipped: 1,
+  session_count: 6,
+  gap_minutes: 10,
+} satisfies ImportAnalysisReport
+
+const importResult = {
+  success: true,
+  mode: 'fast',
+  report_summary: '解析 40 条，写入 38 条',
+  sessions_written: 6,
+  messages_written: 38,
+  persona_uid: 'user-0001',
+  persona_name: '小明',
+  other_persona_uid: 'char-0001',
+  other_persona_name: '小红',
+  self_name: '小明',
+  chat_name: '小红',
+  chat_type: 'private',
+  members: [],
+  time_range: '2023-01-01 ~ 2024-06-30',
+  skipped_count: 1,
+} satisfies ImportResult
+
+const importStatus = {
+  post_active: false,
+  pending_attachments: 2,
+  skipped_attachments: 1,
+  missing_l1_sessions: 3,
+  resumable: true,
+} satisfies ImportStatusView
+
+const importDone = {
+  phase: 'done',
+  current: 5,
+  total: 6,
+  message: '导入完成',
+  l1_success: 4,
+  l1_failed: 1,
+  l2_triggered: true,
+  l3_triggered: true,
+} satisfies ImportProgressPayload
 
 const personaExport = {
   uid: 'char-0001',
@@ -206,12 +267,90 @@ describe('DTO 形状', () => {
     )
     expect('hints' in personaExport).toBe(false)
   })
+
+  it('导入解析报告 17 字段，成员统计保持 snake_case', () => {
+    expect(Object.keys(importReport).sort()).toEqual(
+      [
+        'file_path',
+        'self_id',
+        'self_name',
+        'self_uin',
+        'chat_name',
+        'chat_type',
+        'members',
+        'other_name',
+        'other_uid',
+        'other_uin',
+        'time_range',
+        'total_raw',
+        'total_success',
+        'total_degraded',
+        'total_skipped',
+        'session_count',
+        'gap_minutes',
+      ].sort(),
+    )
+    expect(Object.keys(importReport.members[0]).sort()).toEqual(
+      ['uid', 'uin', 'name', 'message_count'].sort(),
+    )
+  })
+
+  it('导入结果 15 字段，session_ids 缺省不输出', () => {
+    expect(Object.keys(importResult).sort()).toEqual(
+      [
+        'success',
+        'mode',
+        'report_summary',
+        'sessions_written',
+        'messages_written',
+        'persona_uid',
+        'persona_name',
+        'other_persona_uid',
+        'other_persona_name',
+        'self_name',
+        'chat_name',
+        'chat_type',
+        'members',
+        'time_range',
+        'skipped_count',
+      ].sort(),
+    )
+    expect('session_ids' in importResult).toBe(false)
+  })
+
+  it('导入续跑状态 5 字段，resumable 由后端计算', () => {
+    expect(Object.keys(importStatus).sort()).toEqual(
+      [
+        'post_active',
+        'pending_attachments',
+        'skipped_attachments',
+        'missing_l1_sessions',
+        'resumable',
+      ].sort(),
+    )
+    expect(importStatus.resumable).toBe(true)
+  })
+
+  it('导入进度 done 负载可选统计字段按阶段输出', () => {
+    expect(Object.keys(importDone).sort()).toEqual(
+      [
+        'phase',
+        'current',
+        'total',
+        'message',
+        'l1_success',
+        'l1_failed',
+        'l2_triggered',
+        'l3_triggered',
+      ].sort(),
+    )
+  })
 })
 
 describe('命令表', () => {
-  it('覆盖 19 个域、80 条命令', () => {
+  it('覆盖 19 个域、82 条命令', () => {
     expect(Object.keys(COMMANDS)).toHaveLength(19)
-    expect(commandNames()).toHaveLength(80)
+    expect(commandNames()).toHaveLength(82)
   })
 
   it('命令名唯一', () => {

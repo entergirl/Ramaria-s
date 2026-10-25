@@ -205,6 +205,20 @@ impl MockStorage {
         Ok(candidates.into_iter().map(|s| s.id).collect())
     }
 
+    pub(crate) async fn count_closed_sessions_missing_l1(&self) -> RamariaResult<u64> {
+        self.guard("count_closed_sessions_missing_l1")?;
+        let sessions = self.sessions.lock().expect("会话锁");
+        let messages = self.messages.lock().expect("消息锁");
+        let l1_list = self.l1_list.lock().expect("L1 列表锁");
+        let count = sessions
+            .values()
+            .filter(|s| s.ended_at.is_some() && s.channel == "local")
+            .filter(|s| messages.get(&s.id).is_some_and(|list| !list.is_empty()))
+            .filter(|s| l1_list.get(&s.id).is_none_or(|list| list.is_empty()))
+            .count();
+        Ok(count as u64)
+    }
+
     pub(crate) async fn upsert_channel_binding(
         &self,
         channel: &str,

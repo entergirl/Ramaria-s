@@ -138,3 +138,51 @@ pub async fn open_file_dialog(
     tracing::info!(picked = result.is_some(), "打开对话框已关闭");
     Ok(result)
 }
+
+// =========================================================
+// open_directory_dialog — 系统目录选择对话框
+// =========================================================
+
+/// 弹出系统目录选择对话框，返回用户选择的目录路径。
+///
+/// 参数:
+/// - `initial_dir`: 初始目录（可选；仅作对话框定位提示，不构成路径授权）。
+/// - `title`: 对话框标题（可选）。
+///
+/// 返回:
+/// - `Ok(Some(path))`: 用户确认后的目录路径；
+/// - `Ok(None)`: 用户取消选择。
+///
+/// 说明:
+/// - 仅选取目录，不做目录特征或白名单校验；调用方（如"继续处理"）按业务口径校验；
+/// - 日志只记布尔结果，不记所选路径（隐私口径：路径不进日志）。
+#[tauri::command]
+pub async fn open_directory_dialog(
+    app_handle: AppHandle,
+    initial_dir: Option<String>,
+    title: Option<String>,
+) -> Result<Option<String>, String> {
+    let mut dialog = app_handle.dialog().file();
+
+    if let Some(dir) = initial_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|dir| !dir.is_empty())
+    {
+        dialog = dialog.set_directory(std::path::PathBuf::from(dir));
+    }
+
+    if let Some(text) = title
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        dialog = dialog.set_title(text);
+    }
+
+    let picked = dialog.blocking_pick_folder();
+    let result = picked.map(|path| path.to_string());
+
+    tracing::info!(picked = result.is_some(), "目录对话框已关闭");
+    Ok(result)
+}

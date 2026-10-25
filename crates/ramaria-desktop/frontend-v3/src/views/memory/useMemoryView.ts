@@ -27,6 +27,7 @@ import type {
 import { errorMessage } from '../../core/errors'
 import { selectPersonaUid } from '../../core/persona/select'
 import { pushToast } from '../../core/toast'
+import { useAppStore } from '../../stores/app'
 import { useMemoryStore, type MemoryTab } from '../../stores/memory'
 import { usePersonaStore } from '../../stores/persona'
 
@@ -64,6 +65,7 @@ const EXCERPT_LIMIT = 3
 export function useMemoryView() {
   const store = useMemoryStore()
   const personaStore = usePersonaStore()
+  const app = useAppStore()
   const router = useRouter()
 
   const personaOpen = ref(false)
@@ -116,6 +118,9 @@ export function useMemoryView() {
 
   /** 是否存在部分数据读取失败（有数据时走行内提示，不替换内容） */
   const partialError = computed(() => (store.data && store.error !== '' ? store.error : ''))
+
+  /** 索引未就绪：浏览不受影响，只提示召回暂不包含最新记忆 */
+  const degraded = computed<'index' | undefined>(() => (app.indexNotReady ? 'index' : undefined))
 
   function pickPersonaUid(snapshotUid: string | null): string | null {
     const preselect = personaStore.consumePreselect()
@@ -344,6 +349,11 @@ export function useMemoryView() {
     })
   }
 
+  /** 打开设置页（索引降级条的动作落点） */
+  function openSettings(): void {
+    void router.push({ name: 'settings' })
+  }
+
   /** 延迟刷新当前人格（后台动作完成后调用；切走则跳过） */
   function scheduleRefresh(uid: string): void {
     const timer = window.setTimeout(() => {
@@ -454,6 +464,7 @@ export function useMemoryView() {
     busy,
     canDeepProcess,
     partialError,
+    degraded,
     bindWorkbench,
     init,
     choosePersona,
@@ -463,6 +474,7 @@ export function useMemoryView() {
     loadExcerpt,
     loadEvidence,
     openChat,
+    openSettings,
     deepProcess,
     reloadProfile,
     retry,

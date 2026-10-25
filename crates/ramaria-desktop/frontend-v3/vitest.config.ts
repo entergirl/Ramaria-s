@@ -7,11 +7,17 @@
  * - 不开全局 API，测试显式从 vitest 导入，便于静态检查未使用符号
  */
 
+import { fileURLToPath } from 'node:url'
+
 import vue from '@vitejs/plugin-vue'
 import { defineConfig } from 'vitest/config'
 
+/** 仓库根（本目录上溯四级）：parity 校验需读取 `docs/` 下的验收表 */
+const repoRoot = fileURLToPath(new URL('../../../../', import.meta.url))
+
 export default defineConfig({
   plugins: [vue()],
+  server: { fs: { allow: [repoRoot] } },
   test: {
     environment: 'jsdom',
     include: ['tests/**/*.test.ts'],

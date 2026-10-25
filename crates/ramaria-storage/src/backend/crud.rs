@@ -86,6 +86,10 @@ impl StoreCrud for SqliteStorage {
     async fn list_closed_sessions_missing_l1(&self, limit: u32) -> RamariaResult<Vec<Uuid>> {
         repo::sessions::list_closed_missing_l1(&self.pool, limit).await
     }
+    /// 覆写为 `COUNT(*)`（与候选列表同口径）。
+    async fn count_closed_sessions_missing_l1(&self) -> RamariaResult<u64> {
+        repo::sessions::count_closed_missing_l1(&self.pool).await
+    }
     /// 覆写为 `UPDATE` 推进已读时间（幂等：未命中会话静默成功）。
     async fn mark_session_read(&self, session_id: Uuid, at_ms: i64) -> RamariaResult<()> {
         repo::sessions::mark_read(&self.pool, session_id, at_ms).await
@@ -343,6 +347,14 @@ impl StoreCrud for SqliteStorage {
         source_ref: Option<&str>,
     ) -> RamariaResult<()> {
         repo::attachments::reset_for_rescan(&self.pool, id, source_ref).await
+    }
+    /// 覆写为 `COUNT(*)` 统计待处理附件。
+    async fn count_pending_attachments(&self) -> RamariaResult<u64> {
+        repo::attachments::count_by_status(&self.pool, AttachmentStatus::Pending).await
+    }
+    /// 覆写为 `COUNT(*)` 统计跳过附件。
+    async fn count_skipped_attachments(&self) -> RamariaResult<u64> {
+        repo::attachments::count_by_status(&self.pool, AttachmentStatus::Skipped).await
     }
 
     // =========================================================

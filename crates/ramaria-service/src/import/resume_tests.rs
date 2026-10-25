@@ -219,6 +219,7 @@ fn private_import_request(file_path: &Path) -> ImportRequest {
 /// 存量跳过回补：反查命中 → 重置 + 理解完成 + 引用修正；源文件缺失保持跳过。
 #[tokio::test]
 async fn continue_resets_locatable_skipped_via_direct_and_md5() {
+    let _serial = super::test_lock::serial().await;
     let llm =
         Arc::new(MockLlm::with_reply(L1_JSON_REPLY).with_vision_reply("一只橘猫趴在窗台上。"));
     let (engine, storage, dir) = resume_env("resume-reset", llm, vision_on_config()).await;
@@ -286,6 +287,7 @@ async fn continue_resets_locatable_skipped_via_direct_and_md5() {
 /// 缓存回填：传入缓存目录时，反查命中的源文件被写入客户端缓存。
 #[tokio::test]
 async fn continue_backfills_client_cache_for_reverse_hits() {
+    let _serial = super::test_lock::serial().await;
     let llm =
         Arc::new(MockLlm::with_reply(L1_JSON_REPLY).with_vision_reply("一只橘猫趴在窗台上。"));
     let (engine, storage, dir) = resume_env("resume-cache", llm, vision_on_config()).await;
@@ -332,6 +334,7 @@ async fn continue_backfills_client_cache_for_reverse_hits() {
 /// 门禁声明关：附件保持待处理（不落库），统计 skipped 仍计入。
 #[tokio::test]
 async fn continue_gate_keeps_pending() {
+    let _serial = super::test_lock::serial().await;
     let llm = Arc::new(MockLlm::with_reply(L1_JSON_REPLY).with_vision_reply("不会调用"));
     let (engine, storage, dir) = resume_env("resume-gate", llm, RamariaConfig::default()).await;
     // 有效导出根：含 resources/（用例聚焦门禁分支，根有效性由独立用例覆盖）
@@ -377,6 +380,7 @@ async fn continue_gate_keeps_pending() {
 /// 幂等重跑：二次执行零副作用（重置 / 扫描 / L1 补跑全为零）。
 #[tokio::test]
 async fn continue_idempotent() {
+    let _serial = super::test_lock::serial().await;
     let llm =
         Arc::new(MockLlm::with_reply(L1_JSON_REPLY).with_vision_reply("一只橘猫趴在窗台上。"));
     let (engine, storage, dir) = resume_env("resume-idempotent", llm, vision_on_config()).await;
@@ -432,6 +436,7 @@ async fn continue_idempotent() {
 /// L1 补跑仅补缺失会话：已有摘要的会话不重复生成，进度序列为起始 + 逐条。
 #[tokio::test]
 async fn continue_l1_backfills_missing_only() {
+    let _serial = super::test_lock::serial().await;
     let llm = Arc::new(MockLlm::with_reply(L1_JSON_REPLY));
     let (engine, storage, dir) = resume_env("resume-l1-only", llm, RamariaConfig::default()).await;
 
@@ -486,6 +491,7 @@ async fn continue_l1_backfills_missing_only() {
 /// 风格统计触发：L1 补跑完成后按画像增量统计并落库（样本不足也算已触发）。
 #[tokio::test]
 async fn continue_triggers_style_stats_after_l1_backfill() {
+    let _serial = super::test_lock::serial().await;
     let llm = Arc::new(MockLlm::with_reply(L1_JSON_REPLY));
     let (engine, storage, dir) =
         resume_env("resume-style-stats", llm, RamariaConfig::default()).await;
@@ -511,6 +517,7 @@ async fn continue_triggers_style_stats_after_l1_backfill() {
 /// 私聊导入续跑：继续处理产生双行摘要（双方 persona 各一、无无归属行、内容一致）。
 #[tokio::test]
 async fn continue_private_import_produces_dual_l1_rows() {
+    let _serial = super::test_lock::serial().await;
     let llm = Arc::new(MockLlm::with_reply(L1_JSON_REPLY));
     let (engine, storage, dir) =
         resume_env("resume-private-dual", llm, RamariaConfig::default()).await;
@@ -558,6 +565,7 @@ async fn continue_private_import_produces_dual_l1_rows() {
 /// 群聊续跑：继续处理的分发恒含"我"与块内他人——各 persona 一行、摘要内容一致。
 #[tokio::test]
 async fn continue_group_import_produces_rows_per_speaker() {
+    let _serial = super::test_lock::serial().await;
     let llm = Arc::new(MockLlm::with_reply(L1_JSON_REPLY));
     let (engine, storage, dir) =
         resume_env("resume-group-fanout", llm, RamariaConfig::default()).await;
@@ -603,6 +611,7 @@ async fn continue_group_import_produces_rows_per_speaker() {
 /// 深度级联：cascade_deep=true 且补跑成功时触发 L2 → L3（进度含 l2 / l3 阶段）。
 #[tokio::test]
 async fn continue_cascade_deep_triggers_after_success() {
+    let _serial = super::test_lock::serial().await;
     let llm = Arc::new(MockLlm::with_reply(L1_JSON_REPLY));
     let (engine, storage, dir) = resume_env("resume-cascade", llm, RamariaConfig::default()).await;
 
@@ -633,6 +642,7 @@ async fn continue_cascade_deep_triggers_after_success() {
 /// 无效导出根（无 resources 目录且无导出 JSON）：附件步骤停（不标记任何附件行），L1 补跑照常。
 #[tokio::test]
 async fn continue_invalid_root_skips_attachment_steps_but_keeps_l1() {
+    let _serial = super::test_lock::serial().await;
     let llm = Arc::new(MockLlm::with_reply(L1_JSON_REPLY).with_vision_reply("不会调用"));
     let (engine, storage, dir) = resume_env("resume-invalid-root", llm, vision_on_config()).await;
 
@@ -682,6 +692,7 @@ async fn continue_invalid_root_skips_attachment_steps_but_keeps_l1() {
 /// 导出根非法：不存在的目录以业务校验错误拒绝。
 #[tokio::test]
 async fn continue_export_root_invalid_rejected() {
+    let _serial = super::test_lock::serial().await;
     let llm = Arc::new(MockLlm::with_reply(L1_JSON_REPLY));
     let (engine, _storage, dir) =
         resume_env("resume-bad-root", llm, RamariaConfig::default()).await;

@@ -376,6 +376,23 @@ pub async fn list_all_skipped(
     .await
 }
 
+/// 按状态统计全库附件数量。
+///
+/// 口径:
+/// - 与 `list_all_*` 同源：`COUNT(*)` 只按状态过滤，不读行内容。
+///
+/// 参数:
+/// - `status`: 目标状态。
+pub async fn count_by_status(pool: &SqlitePool, status: AttachmentStatus) -> RamariaResult<u64> {
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM message_attachments WHERE status = ?")
+            .bind(status.as_str())
+            .fetch_one(pool)
+            .await
+            .storage_err("统计附件数量失败")?;
+    Ok(count.max(0) as u64)
+}
+
 /// 按消息 id 批量查询附件（分片 IN，单片不超过 500 个）。
 ///
 /// 口径:

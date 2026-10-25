@@ -32,6 +32,7 @@ mod l0;
 mod l1;
 mod post;
 mod resume;
+mod status;
 
 use std::path::Path;
 
@@ -51,6 +52,7 @@ pub use l1::{
 };
 pub use post::{ImportPostOutcome, ImportPostPlan, ImportPostRequest, is_post_active};
 pub use resume::{ImportContinueOutcome, ImportContinueRequest};
+pub use status::ImportStatus;
 
 // 用例入口 re-export：`crate::import::X` 为引擎门面与既有调用路径
 pub(crate) use analyze::analyze;
@@ -60,6 +62,7 @@ pub(crate) use l0::write_l0;
 pub(crate) use l1::generate_l1;
 pub(crate) use post::run_post;
 pub(crate) use resume::run_continue;
+pub(crate) use status::query_status;
 
 // =========================================================
 // 引擎门面
@@ -183,11 +186,46 @@ impl Engine {
     ) -> RamariaResult<ImportContinueOutcome> {
         run_continue(self, req, progress).await
     }
+
+    /// 查询导入续跑状态（只读：后处理标志 + 待办规模）。
+    ///
+    /// 职责:
+    /// - 供宿主在进入导入页时判断是否展示「继续处理」入口与规模提示；
+    /// - 计数口径与 [`Self::continue_import`] 的扫描条件一致。
+    ///
+    /// 返回:
+    /// - [`ImportStatus`]：`post_active` / 待处理附件 / 跳过附件 / 缺失摘要会话。
+    pub async fn import_status(&self) -> RamariaResult<ImportStatus> {
+        query_status(self).await
+    }
 }
 
 // =========================================================
 // 单元测试
 // =========================================================
+
+/// 导入用例串行锁（测试专用）。
+///
+/// 说明:
+/// - `POST_ACTIVE` 是进程级单例，`run_post` 与 `import_qq_l0` 都被它门禁；
+///   导入用例并发执行时会互相拒绝，成功与否取决于线程调度；
+/// - 导入模块的异步用例统一先取此锁，保证断言稳定（生产实现不参与）。
+#[cfg(test)]
+pub(crate) mod test_lock {
+    use tokio::sync::{Mutex, MutexGuard};
+
+    static IMPORT_SERIAL: Mutex<()> = Mutex::const_new(());
+
+    /// 取串行锁（异步用例使用）。
+    pub(crate) async fn serial() -> MutexGuard<'static, ()> {
+        IMPORT_SERIAL.lock().await
+    }
+
+    /// 取串行锁（同步用例使用）。
+    pub(crate) fn serial_blocking() -> MutexGuard<'static, ()> {
+        IMPORT_SERIAL.blocking_lock()
+    }
+}
 
 #[cfg(test)]
 mod identity_tests;
@@ -195,6 +233,8 @@ mod identity_tests;
 mod post_tests;
 #[cfg(test)]
 mod resume_tests;
+#[cfg(test)]
+mod status_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

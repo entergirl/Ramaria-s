@@ -194,6 +194,7 @@ pub fn run() {
             commands::import_cmd::import_qq_chat,
             commands::import_cmd::detect_qq_format,
             commands::import_continue::continue_import,
+            commands::import_status::get_import_status,
             // ---- Attachment（会话浏览图片）----
             commands::attachment::read_attachment_image,
             commands::attachment::clear_image_cache,
@@ -237,6 +238,7 @@ pub fn run() {
             // ---- System ----
             commands::dialog::save_file_dialog,
             commands::dialog::open_file_dialog,
+            commands::dialog::open_directory_dialog,
             tray::confirm_close_action,
         ])
         .setup(move |app| {

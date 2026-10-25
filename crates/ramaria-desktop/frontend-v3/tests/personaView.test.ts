@@ -24,6 +24,7 @@ import type {
   SettingItem,
 } from '../src/core/api/dto'
 import { setTauriRuntime, type TauriRuntime } from '../src/core/transport'
+import { useAppStore } from '../src/stores/app'
 import { useSessionStore } from '../src/stores/session'
 import PersonaView from '../src/views/persona/index.vue'
 
@@ -108,6 +109,7 @@ interface RuntimeConfig {
   failOnce?: string[]
   failAlways?: string[]
   holdList?: boolean
+  holdImport?: boolean
 }
 
 interface RecordedCall {
@@ -119,15 +121,23 @@ function makeRuntime(config: RuntimeConfig = {}): {
   runtime: TauriRuntime
   calls: RecordedCall[]
   release: () => void
+  releaseImport: () => void
 } {
   const calls: RecordedCall[] = []
   const remaining = new Set(config.failOnce ?? [])
   const always = new Set(config.failAlways ?? [])
   let release = (): void => {}
+  let releaseImport = (): void => {}
 
   const gate = config.holdList
     ? new Promise<void>((resolve) => {
         release = resolve
+      })
+    : Promise.resolve()
+
+  const importGate = config.holdImport
+    ? new Promise<void>((resolve) => {
+        releaseImport = resolve
       })
     : Promise.resolve()
 
@@ -173,6 +183,7 @@ function makeRuntime(config: RuntimeConfig = {}): {
           case 'preview_persona_import':
             return config.presetPreview ?? PRESET_PREVIEW
           case 'import_persona_preset':
+            await importGate
             return config.presetOutcome ?? PRESET_OUTCOME
           case 'open_file_dialog':
             return config.pickedFile === undefined ? 'C:/presets/wu.toml' : config.pickedFile
@@ -205,15 +216,16 @@ function makeRuntime(config: RuntimeConfig = {}): {
     },
   }
 
-  return { runtime, calls, release: () => release() }
+  return { runtime, calls, release: () => release(), releaseImport: () => releaseImport() }
 }
 
 async function mountPersona(config: RuntimeConfig = {}): Promise<{
   wrapper: VueWrapper
   calls: RecordedCall[]
   release: () => void
+  releaseImport: () => void
 }> {
-  const { runtime, calls, release } = makeRuntime(config)
+  const { runtime, calls, release, releaseImport } = makeRuntime(config)
   setTauriRuntime(runtime)
   const pinia = createPinia()
   setActivePinia(pinia)
@@ -222,7 +234,7 @@ async function mountPersona(config: RuntimeConfig = {}): Promise<{
     attachTo: document.body,
   })
   await flushPromises()
-  return { wrapper, calls, release }
+  return { wrapper, calls, release, releaseImport }
 }
 
 function countOf(calls: RecordedCall[], command: string): number {
@@ -358,6 +370,20 @@ describe('人格详情', () => {
     expect(wrapper.text()).toContain('画像尚未生成')
     expect(wrapper.text()).toContain('重载画像可尝试重算')
     expect(wrapper.find('.status-box').attributes('data-degraded')).toBe('')
+    expect(wrapper.find('.persona').attributes('data-degraded')).toBe('profile')
+    wrapper.unmount()
+  })
+
+  it('对话模型不可用时标记降级，浏览与编辑不受影响', async () => {
+    const { wrapper } = await mountPersona()
+    useAppStore().degradedReason = 'llm_unavailable'
+    await nextTick()
+    await openDetail(wrapper)
+
+    expect(wrapper.find('.persona').attributes('data-degraded')).toBe('llm')
+    expect(wrapper.find('.persona').attributes('data-view-state')).toBe('default')
+    await wrapper.find('#persona-name-input').setValue('新名字')
+    expect(wrapperButton(wrapper, '保存修改').attributes('disabled')).toBeUndefined()
     wrapper.unmount()
   })
 
@@ -597,6 +623,28 @@ describe('预设导入与导出', () => {
     })
     expect(countOf(calls, 'list_personas_full')).toBe(2)
     expect(document.body.textContent).not.toContain('尚未选择预设')
+    wrapper.unmount()
+  })
+
+  it('导入预览为只读，写入中锁定流程并给出受限标记', async () => {
+    const { wrapper, releaseImport } = await mountPersona({ holdImport: true })
+
+    await wrapperButton(wrapper, '导入预设').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.persona').attributes('data-restricted')).toBeUndefined()
+
+    domButton('选择文件').click()
+    await flushPromises()
+    expect(document.body.textContent).toContain('预设裁决文本')
+    expect(wrapper.find('.persona').attributes('data-restricted')).toBe('readonly')
+
+    domButton('导入人格').click()
+    await flushPromises()
+    expect(wrapper.find('.persona').attributes('data-restricted')).toBe('locked')
+
+    releaseImport()
+    await flushPromises()
+    expect(wrapper.find('.persona').attributes('data-restricted')).toBeUndefined()
     wrapper.unmount()
   })
 

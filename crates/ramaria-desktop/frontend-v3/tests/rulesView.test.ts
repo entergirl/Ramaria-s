@@ -1,13 +1,7 @@
 /**
  * tests/rulesView.test.ts — 规则视图挂载与关键交互
  *
- * parity 清单（内容 / 操作 / 五态）:
- * - 内容：人格筛选块与分类标签、规则总数、来源（手工 / 自动）、启停状态、规则文本、
- *   候选规则「仅参数注入」标记、情境关键词、置信度 / 稳定性 / 情感强度、证据条数；
- *   详情页另有禁忌词、四项参数、情境统计、元数据与证据链（事件 id / 权重 / 标题 / 摘要 / 态度）
- * - 操作：切换人格、刷新、启停、进入详情与返回；编辑只在详情页（文本框 + 保存）；
- *   不提供删除、不提供重新推断（后端无对应命令）
- * - 五态：默认 / 加载（骨架）/ 空（去对话）/ 错误（原因 + 重试）/ 降级·llm（信息条，编辑仍可用）
+ * parity 清单见 `tests/parity/checklist.ts`（内容与操作在本文件断言，五态逐格覆盖）。
  *
  * 覆盖:
  * - 规则卡渲染且无删除、无列表编辑入口；启停成功按回执更新、失败保持原状态
@@ -104,6 +98,7 @@ interface RuntimeConfig {
   evidence?: RuleEvidenceItem[] | (() => RuleEvidenceItem[])
   failOnce?: string[]
   failAlways?: string[]
+  holdPersonas?: boolean
 }
 
 interface RecordedCall {
@@ -114,10 +109,18 @@ interface RecordedCall {
 function makeRuntime(config: RuntimeConfig = {}): {
   runtime: TauriRuntime
   calls: RecordedCall[]
+  release: () => void
 } {
   const calls: RecordedCall[] = []
   const remaining = new Set(config.failOnce ?? [])
   const always = new Set(config.failAlways ?? [])
+  let release = (): void => {}
+
+  const gate = config.holdPersonas
+    ? new Promise<void>((resolve) => {
+        release = resolve
+      })
+    : Promise.resolve()
 
   const rulesOf = (uid: string | null): BehaviorRuleView[] =>
     typeof config.rules === 'function' ? config.rules(uid) : (config.rules ?? [rule()])
@@ -132,6 +135,7 @@ function makeRuntime(config: RuntimeConfig = {}): {
         }
         switch (command) {
           case 'get_personas':
+            await gate
             return config.personas ?? [RAMA, CHAR]
           case 'list_rules': {
             const uid = (args.personaUid as string | null) ?? null
@@ -173,7 +177,7 @@ function makeRuntime(config: RuntimeConfig = {}): {
     },
   }
 
-  return { runtime, calls }
+  return { runtime, calls, release: () => release() }
 }
 
 function makeRouter(): Router {
@@ -189,8 +193,8 @@ function makeRouter(): Router {
 async function mountRules(
   config: RuntimeConfig = {},
   seed?: (pinia: Pinia) => void,
-): Promise<{ wrapper: VueWrapper; router: Router; calls: RecordedCall[] }> {
-  const { runtime, calls } = makeRuntime(config)
+): Promise<{ wrapper: VueWrapper; router: Router; calls: RecordedCall[]; release: () => void }> {
+  const { runtime, calls, release } = makeRuntime(config)
   setTauriRuntime(runtime)
   const pinia = createPinia()
   setActivePinia(pinia)
@@ -203,7 +207,7 @@ async function mountRules(
     attachTo: document.body,
   })
   await flushPromises()
-  return { wrapper, router, calls }
+  return { wrapper, router, calls, release }
 }
 
 function viewState(wrapper: VueWrapper): string | undefined {
@@ -285,6 +289,20 @@ describe('规则列表', () => {
     // 列表只保留详情入口，编辑在详情页完成
     expect(labels.filter((label) => label === '详情')).toHaveLength(2)
     expect(labels).not.toContain('编辑')
+    wrapper.unmount()
+  })
+
+  it('首屏读取中给出骨架与忙碌标记', async () => {
+    const { wrapper, release } = await mountRules({ holdPersonas: true })
+
+    expect(viewState(wrapper)).toBe('loading')
+    expect(wrapper.find('[data-view-state]').attributes('aria-busy')).toBe('true')
+    expect(wrapper.findAll('.skeleton')).toHaveLength(4)
+
+    release()
+    await flushPromises()
+    expect(viewState(wrapper)).toBe('default')
+    expect(wrapper.text()).toContain('深夜 23:00 之后不要主动发起高强度话题。')
     wrapper.unmount()
   })
 

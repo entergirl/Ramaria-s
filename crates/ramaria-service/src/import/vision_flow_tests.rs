@@ -104,6 +104,7 @@ async fn vision_flow_env(
 /// 含图导入：图片理解先于 L1 执行，L1 会话文本注入图片描述。
 #[tokio::test]
 async fn import_vision_flow_runs_before_l1_and_injects_description() {
+    let _serial = super::test_lock::serial().await;
     let (engine, llm, export_path, dir) =
         vision_flow_env("vision-flow-order", vision_on_config()).await;
 
@@ -155,6 +156,7 @@ async fn import_vision_flow_runs_before_l1_and_injects_description() {
 /// 理解失败：附件批量跳过，L1 按占位符继续生成。
 #[tokio::test]
 async fn import_vision_failure_keeps_placeholder_and_l1_continues() {
+    let _serial = super::test_lock::serial().await;
     let (engine, llm, export_path, dir) =
         vision_flow_env("vision-flow-failure", vision_on_config()).await;
     // 探测即失败（剩余次数充足，内容理解不再发起）
@@ -194,6 +196,7 @@ async fn import_vision_failure_keeps_placeholder_and_l1_continues() {
 /// 声明关闭（默认配置）：理解零调用、附件跳过，L1 正常生成。
 #[tokio::test]
 async fn import_vision_declared_off_skips_without_calls() {
+    let _serial = super::test_lock::serial().await;
     let (engine, llm, export_path, dir) =
         vision_flow_env("vision-flow-off", RamariaConfig::default()).await;
 

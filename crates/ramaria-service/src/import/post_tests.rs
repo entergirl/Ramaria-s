@@ -121,6 +121,7 @@ async fn post_env(tag: &str, config: RamariaConfig) -> (Engine, Arc<MockLlm>, Pa
 /// 顺序闭环：导出根存在且含待理解附件时，图片理解先于 L1 生成。
 #[tokio::test]
 async fn post_runs_vision_before_l1() {
+    let _serial = super::test_lock::serial().await;
     let (engine, llm, dir) = post_env("post-vision-order", vision_on_config()).await;
     let export_path = dir.join("export.json");
     std::fs::write(&export_path, qq_export_with_image()).expect("写入导出文件应成功");
@@ -166,6 +167,7 @@ async fn post_runs_vision_before_l1() {
 /// 深度触发：cascade_deep 且 L1 成功 > 0 时触发，进度事件回填 L1 总调用数。
 #[tokio::test]
 async fn post_cascade_deep_triggers_with_l1_total() {
+    let _serial = super::test_lock::serial().await;
     let (engine, _llm, dir) = post_env("post-deep-trigger", vision_on_config()).await;
     let export_path = dir.join("export.json");
     std::fs::write(&export_path, qq_export_with_image()).expect("写入导出文件应成功");
@@ -211,6 +213,7 @@ async fn post_cascade_deep_triggers_with_l1_total() {
 /// 非深度模式：cascade_deep=false 不触发深度，进度不含 l2 / l3 阶段。
 #[tokio::test]
 async fn post_without_cascade_deep_skips_deep() {
+    let _serial = super::test_lock::serial().await;
     let (engine, _llm, dir) = post_env("post-no-deep", vision_on_config()).await;
     let export_path = dir.join("export.json");
     std::fs::write(&export_path, qq_export_with_image()).expect("写入导出文件应成功");
@@ -250,6 +253,7 @@ async fn post_without_cascade_deep_skips_deep() {
 /// 未提供导出根：跳过图片理解，零图片理解调用，L1 正常生成。
 #[tokio::test]
 async fn post_without_export_root_skips_vision_calls() {
+    let _serial = super::test_lock::serial().await;
     let (engine, llm, dir) = post_env("post-no-root", vision_on_config()).await;
     let export_path = dir.join("export.json");
     std::fs::write(&export_path, qq_export_with_image()).expect("写入导出文件应成功");
@@ -281,6 +285,7 @@ async fn post_without_export_root_skips_vision_calls() {
 /// 边界：空会话计数全零且不触发深度（即使 cascade_deep=true）。
 #[tokio::test]
 async fn post_with_empty_sessions_counts_zero_and_skips_deep() {
+    let _serial = super::test_lock::serial().await;
     let (engine, _llm, dir) = post_env("post-empty", vision_on_config()).await;
 
     let post = engine
@@ -312,6 +317,7 @@ async fn post_with_empty_sessions_counts_zero_and_skips_deep() {
 /// 图片理解进度：起始（0/N）→ 逐行（节流）→ 完成收尾事件（携带 done / failed / skipped 计数）。
 #[tokio::test]
 async fn post_emits_vision_progress_with_stats() {
+    let _serial = super::test_lock::serial().await;
     let (engine, _llm, dir) = post_env("post-vision-progress", vision_on_config()).await;
     let export_path = dir.join("export.json");
     std::fs::write(&export_path, qq_export_with_image()).expect("写入导出文件应成功");
@@ -400,6 +406,7 @@ fn vision_progress_throttle_emits_five_rows_or_percent_change() {
 /// 互斥标志生命周期：acquire 置位、Drop 复位（宿主入口据此拒绝并发"继续处理"）。
 #[test]
 fn post_active_flag_lifecycle() {
+    let _serial = super::test_lock::serial_blocking();
     let guard = PostActiveGuard::acquire().expect("首个守卫应抢占成功");
     assert!(is_post_active(), "guard 存活期间标志应置位");
     assert!(
@@ -420,6 +427,7 @@ fn post_active_flag_lifecycle() {
 /// 导入后风格统计：L1 生成后按画像触发（样本不足也算已触发、不阻塞导入结果）。
 #[tokio::test]
 async fn post_triggers_style_stats_for_l1_personas() {
+    let _serial = super::test_lock::serial().await;
     let (engine, _llm, dir) = post_env("post-style-stats", vision_on_config()).await;
     let export_path = dir.join("export.json");
     std::fs::write(&export_path, qq_export_with_image()).expect("写入导出文件应成功");
@@ -459,6 +467,7 @@ async fn post_triggers_style_stats_for_l1_personas() {
 /// 风格统计关闭：`[style].enabled=false` 时不触发、不落统计行。
 #[tokio::test]
 async fn post_style_stats_disabled_skips_update() {
+    let _serial = super::test_lock::serial().await;
     let mut config = vision_on_config();
     config.style.enabled = false;
     let (engine, _llm, dir) = post_env("post-style-off", config).await;

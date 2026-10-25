@@ -182,6 +182,7 @@ impl ImportProgressSink for RecordingSink {
 /// QQ JSON 匹配；无特征普通 JSON 不匹配；文件不存在返回 Io 错误。
 #[tokio::test]
 async fn detect_format_distinguishes_qq_json() {
+    let _serial = super::test_lock::serial().await;
     let (engine, _pool, _storage, dir) = import_engine("import-detect").await;
 
     let qq_path = dir.join("qq_export.json");
@@ -214,6 +215,7 @@ async fn detect_format_distinguishes_qq_json() {
 
 #[tokio::test]
 async fn analyze_reports_statistics_and_names() {
+    let _serial = super::test_lock::serial().await;
     let (engine, _pool, _storage, dir) = import_engine("import-analyze").await;
     let file_path = dir.join("export.json");
     std::fs::write(&file_path, qq_export_json()).expect("写入导出文件应成功");
@@ -247,6 +249,7 @@ async fn analyze_reports_statistics_and_names() {
 
 #[tokio::test]
 async fn write_l0_creates_sessions_messages_and_personas() {
+    let _serial = super::test_lock::serial().await;
     let (engine, pool, storage, dir) = import_engine("import-l0").await;
     let file_path = dir.join("export.json");
     std::fs::write(&file_path, qq_export_json()).expect("写入导出文件应成功");
@@ -308,6 +311,7 @@ async fn write_l0_creates_sessions_messages_and_personas() {
 /// 复用既有 persona：结果上报库内实际名（请求覆盖名不落库也不上报）。
 #[tokio::test]
 async fn write_l0_reports_stored_persona_name_when_reusing_existing() {
+    let _serial = super::test_lock::serial().await;
     let (engine, pool, _storage, dir) = import_engine("import-reuse-name").await;
     let file_path = dir.join("export.json");
     std::fs::write(&file_path, qq_export_json()).expect("写入导出文件应成功");
@@ -345,6 +349,7 @@ async fn write_l0_reports_stored_persona_name_when_reusing_existing() {
 /// 新建 persona：请求覆盖名即实际创建名，结果按库内回读上报（双方）。
 #[tokio::test]
 async fn write_l0_reports_created_name_with_overrides() {
+    let _serial = super::test_lock::serial().await;
     let (engine, pool, _storage, dir) = import_engine("import-create-name").await;
     let file_path = dir.join("export.json");
     std::fs::write(&file_path, qq_export_json()).expect("写入导出文件应成功");
@@ -380,6 +385,7 @@ async fn write_l0_reports_created_name_with_overrides() {
 ///   的消息新增数为 0；会话容器仍会创建（去重只跳过消息，不回滚会话）。
 #[tokio::test]
 async fn write_l0_second_import_deduplicates_fingerprints() {
+    let _serial = super::test_lock::serial().await;
     let (engine, pool, _storage, dir) = import_engine("import-dedup").await;
     let file_path = dir.join("export.json");
     std::fs::write(&file_path, qq_export_json()).expect("写入导出文件应成功");
@@ -421,6 +427,7 @@ async fn write_l0_second_import_deduplicates_fingerprints() {
 /// L0 导入写入发送者身份两列与会话成员行（消息字段与成员行一一对应）。
 #[tokio::test]
 async fn write_l0_persists_sender_identity_and_members() {
+    let _serial = super::test_lock::serial().await;
     let (engine, pool, storage, dir) = import_engine("import-sender-identity").await;
     let file_path = dir.join("export.json");
     std::fs::write(&file_path, qq_export_json()).expect("写入导出文件应成功");
@@ -471,6 +478,7 @@ async fn write_l0_persists_sender_identity_and_members() {
 
 #[tokio::test]
 async fn generate_l1_generates_for_both_personas_with_eta_progress() {
+    let _serial = super::test_lock::serial().await;
     let (engine, _pool, storage, dir) = import_engine("import-l1").await;
     let file_path = dir.join("export.json");
     std::fs::write(&file_path, qq_export_json()).expect("写入导出文件应成功");
@@ -539,6 +547,7 @@ async fn generate_l1_generates_for_both_personas_with_eta_progress() {
 /// 群聊导入：多画像创建 + 消息按发送者分派 + 会话归属导出者 + 成员行完整。
 #[tokio::test]
 async fn write_l0_group_creates_multi_personas_and_dispatches() {
+    let _serial = super::test_lock::serial().await;
     let (engine, pool, storage, dir) = import_engine("import-group-l0").await;
     let file_path = dir.join("group.json");
     std::fs::write(&file_path, qq_group_export_json()).expect("写入导出文件应成功");
@@ -620,6 +629,7 @@ async fn write_l0_group_creates_multi_personas_and_dispatches() {
 /// 群聊导入侧过滤：side=Me 仅导出者消息与画像；side=Other 仅他人消息与画像（对称）。
 #[tokio::test]
 async fn write_l0_group_side_filter() {
+    let _serial = super::test_lock::serial().await;
     // side=Me：仅导出者消息落库 + 仅导出者 persona
     let (engine_me, pool_me, storage_me, dir_me) = import_engine("import-group-side-me").await;
     let file_me = dir_me.join("group.json");
@@ -712,6 +722,7 @@ async fn write_l0_group_side_filter() {
 ///   且 L1 被吸收清空；分发恒含导出者，库内不再有无主摘要行。
 #[tokio::test]
 async fn group_import_reaches_l2_per_persona() {
+    let _serial = super::test_lock::serial().await;
     let mut config = RamariaConfig::default();
     config.thresholds.l2_trigger_count = 2;
     // 测试不等待簇间节流（生产默认 800ms）
@@ -817,6 +828,7 @@ async fn group_import_reaches_l2_per_persona() {
 
 #[tokio::test]
 async fn write_l0_rejects_empty_messages_file() {
+    let _serial = super::test_lock::serial().await;
     let (engine, _pool, _storage, dir) = import_engine("import-empty").await;
     let file_path = dir.join("empty.json");
     let empty = r#"{"chatInfo":{"selfUid":"u_self","selfName":"小明","selfUin":"10001","name":"小红","type":"private","peerUid":"u_peer","peerUin":"90002"},"messages":[]}"#;
@@ -837,6 +849,7 @@ async fn write_l0_rejects_empty_messages_file() {
 
 #[tokio::test]
 async fn write_l0_rejects_non_json_extension() {
+    let _serial = super::test_lock::serial().await;
     let (engine, _pool, _storage, dir) = import_engine("import-ext").await;
     let file_path = dir.join("export.txt");
     std::fs::write(&file_path, qq_export_json()).expect("写入非 .json 文件应成功");
@@ -866,6 +879,7 @@ async fn write_l0_rejects_non_json_extension() {
 
 #[tokio::test]
 async fn write_l0_requires_attached_pool() {
+    let _serial = super::test_lock::serial().await;
     let dir = crate::test_support::temp_dir("import-no-pool");
     let db_path = dir.join("ramaria.db");
     let pool = ramaria_storage::database::init_pool(Some(db_path))
@@ -898,6 +912,7 @@ async fn write_l0_requires_attached_pool() {
 /// 画像名回读降级：未指定 uid / 未命中 / 查询报错均回退展示名（不阻塞导入）。
 #[tokio::test]
 async fn resolve_persona_name_falls_back_to_display_name() {
+    let _serial = super::test_lock::serial().await;
     let (_engine, pool, _storage, dir) = import_engine("import-name-fallback").await;
 
     assert_eq!(
@@ -926,6 +941,7 @@ async fn resolve_persona_name_falls_back_to_display_name() {
 
 #[tokio::test]
 async fn trigger_deep_emits_l2_then_l3_progress() {
+    let _serial = super::test_lock::serial().await;
     let (engine, _pool, _storage, dir) = import_engine("import-deep").await;
     let sink = RecordingSink::new();
 
@@ -987,6 +1003,7 @@ fn l1_outcome(success: usize, failed: usize, skipped: usize, processed: usize) -
 /// 含图消息端到端：导出目录真实文件 → pending；服务器链接 → skipped。
 #[tokio::test]
 async fn write_l0_imports_image_attachments() {
+    let _serial = super::test_lock::serial().await;
     let (engine, pool, _storage, dir) = import_engine("import-attachments").await;
     let md5 = "fccb86f2a1b695df3c37a1042a967a44";
     let file_name = "fccb86f2a1b695df3c37a1042a967a44_FCCB86F2A1B695DF3C37A1042A967A44.jpg";

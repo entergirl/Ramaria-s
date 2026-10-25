@@ -23,7 +23,10 @@ import type {
   EmbeddingModelView,
   EmbeddingValidation,
   FactList,
+  ImportAnalysisReport,
   ImportPipelineReceipt,
+  ImportResult,
+  ImportStatusView,
   IndexRebuildReceipt,
   IndexStatusView,
   MemoryEvent,
@@ -280,6 +283,52 @@ export const rulesApi = {
   },
 }
 
+/** 导入：格式检测、文件分析、执行、续跑与续跑状态 */
+export const importApi = {
+  /** 判断是否为 QQ 导出格式（只读检测，不解析文件内容） */
+  detectFormat(filePath: string) {
+    return invoke<boolean>(COMMANDS.import.detectFormat, { filePath })
+  },
+  /** 解析报告（不写库）；`gapMinutes` 缺省时后端按 10 处理 */
+  analyzeFile(filePath: string, gapMinutes: number | null = null) {
+    return invoke<ImportAnalysisReport>(COMMANDS.import.analyzeFile, { filePath, gapMinutes })
+  },
+  /**
+   * 执行导入：L0 同步写入，L1 / 级联在后台进行，进度经 `import-progress` 事件
+   *
+   * 说明: 空串按 `null` 处理，对齐后端 `Option<String>` 的「沿用解析值」语义
+   */
+  importQQ(
+    filePath: string,
+    mode: string | null = null,
+    personaName: string | null = null,
+    selfPersonaUid: string | null = null,
+    otherPersonaName: string | null = null,
+    otherPersonaUid: string | null = null,
+    gapMinutes: number | null = null,
+    side: string | null = null,
+  ) {
+    return invoke<ImportResult>(COMMANDS.import.importQQ, {
+      filePath,
+      mode,
+      personaName,
+      selfPersonaUid,
+      otherPersonaName,
+      otherPersonaUid,
+      gapMinutes,
+      side,
+    })
+  },
+  /** 继续处理：立即返回，进度经 `import-progress`；`exportRoot` 为 null 时跳过附件回补 */
+  continueImport(exportRoot: string | null = null, resetSkipped: boolean | null = null) {
+    return invoke<null>(COMMANDS.import.continueImport, { exportRoot, resetSkipped })
+  },
+  /** 续跑状态：后处理标志 + 三类待办计数 */
+  getStatus() {
+    return invoke<ImportStatusView>(COMMANDS.import.getStatus)
+  },
+}
+
 /** 系统：版本号、文件对话框与发图目录 */
 export const systemApi = {
   getVersion() {
@@ -297,6 +346,13 @@ export const systemApi = {
       title: options.title ?? null,
       filterName: options.filterName ?? null,
       extensions: options.extensions ?? null,
+    })
+  },
+  /** 目录对话框：返回用户所选目录，取消为 `null`（不做目录特征校验） */
+  openDirectoryDialog(initialDir: string | null = null, title: string | null = null) {
+    return invoke<string | null>(COMMANDS.system.openDirectoryDialog, {
+      initialDir,
+      title,
     })
   },
   /** 保存对话框：返回用户选定路径，取消为 `null`；参数键为 snake_case */

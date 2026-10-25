@@ -80,6 +80,11 @@ const COPY: Record<string, StateCopy> = {
     description: '读取本地数据库时出错，其余功能不受影响。',
     action: '重试',
   },
+  'memory.degraded.index': {
+    title: '索引尚未就绪',
+    description: '已形成的记忆可正常浏览；对话召回要等索引完成后才包含最新记忆。',
+    action: '去设置',
+  },
 
   // ---- persona ----
   'persona.empty.no-data': {
@@ -101,6 +106,32 @@ const COPY: Record<string, StateCopy> = {
     title: '对话模型不可用',
     description: '重载画像与全量提示词预览暂不可用，编辑仍可保存。',
     action: '去设置',
+  },
+
+  // ---- import ----
+  'import.empty.no-data': {
+    title: '还没有选择文件',
+    description: '支持 QQ 聊天记录导出文件。',
+    action: '选择文件',
+  },
+  'import.error.parse': {
+    title: '文件解析失败',
+    description: '没有写入任何数据；可换文件或排除问题后重试。',
+    action: '重试',
+  },
+  'import.error.execute': {
+    title: '导入未完成',
+    description: '已写入的数据会保留；可重试或更换文件。',
+    action: '重试',
+  },
+  'import.degraded.skipped': {
+    title: '部分处理未完成',
+    description: '附件或摘要没有全部生成，可继续处理补齐。',
+    action: '继续处理',
+  },
+  'import.restricted.locked': {
+    title: '正在处理',
+    description: '导入进行中，参数与步骤暂不可改。',
   },
 
   // ---- rules ----

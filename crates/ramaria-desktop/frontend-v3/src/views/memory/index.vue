@@ -46,6 +46,7 @@ const {
   busy,
   canDeepProcess,
   partialError,
+  degraded,
   bindWorkbench,
   init,
   choosePersona,
@@ -55,6 +56,7 @@ const {
   loadExcerpt,
   loadEvidence,
   openChat,
+  openSettings,
   deepProcess,
   reloadProfile,
   retry,
@@ -62,6 +64,7 @@ const {
 
 const emptyCopy = stateCopy('memory.empty.no-data')
 const errorCopy = stateCopy('memory.error.load')
+const degradedCopy = stateCopy('memory.degraded.index')
 
 const persona = computed(() => store.personas.find((item) => item.uid === store.personaUid) ?? null)
 
@@ -148,6 +151,7 @@ onBeforeUnmount(() => {
     <div
       class="memory"
       :data-view-state="viewState"
+      :data-degraded="degraded"
       :aria-busy="busy ? 'true' : undefined"
     >
       <MemoryToolbar
@@ -180,6 +184,14 @@ onBeforeUnmount(() => {
           </div>
 
           <BaseProgress v-if="store.refreshing" label="刷新记忆…" />
+
+          <div v-if="degraded && viewState !== 'error'" class="degraded-strip" role="status">
+            <span class="degraded-title">{{ degradedCopy.title }}</span>
+            <span class="degraded-text">{{ degradedCopy.description }}</span>
+            <BaseButton variant="ghost" size="sm" @click="openSettings">
+              {{ degradedCopy.action }}
+            </BaseButton>
+          </div>
 
           <div v-if="partialError && viewState !== 'error'" class="error-strip" role="alert">
             <span class="error-strip-text">{{ partialError }}</span>
@@ -349,6 +361,29 @@ onBeforeUnmount(() => {
 }
 
 .error-strip-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.degraded-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-8);
+  padding: var(--space-8) var(--space-12);
+  border: 1px solid var(--warn-line);
+  border-radius: var(--radius-inner);
+  background: var(--warn-surface);
+  color: var(--warn);
+  font-size: var(--fs-small);
+  line-height: 1.6;
+}
+
+.degraded-title {
+  font-weight: var(--fw-semibold);
+}
+
+.degraded-text {
   flex: 1;
   min-width: 0;
 }

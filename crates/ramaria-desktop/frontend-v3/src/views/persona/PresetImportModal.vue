@@ -25,9 +25,13 @@ const props = defineProps<{
   open: boolean
 }>()
 
+/** 弹窗阶段：未预览 / 预览只读 / 写入中锁定 */
+export type PresetImportPhase = 'idle' | 'preview' | 'importing'
+
 const emit = defineEmits<{
   close: []
   imported: [outcome: PresetImportOutcome]
+  phase: [phase: PresetImportPhase]
 }>()
 
 const filePath = ref('')
@@ -48,6 +52,19 @@ const uidText = computed(() => preview.value?.uid || '自动生成')
 const canImport = computed(
   () => preview.value !== null && !loading.value && !importing.value && error.value === '',
 )
+
+/** 当前阶段：关闭时不占用视图；写入中优先，其次预览，最后未预览 */
+const phase = computed<PresetImportPhase>(() => {
+  if (!props.open) {
+    return 'idle'
+  }
+  if (importing.value) {
+    return 'importing'
+  }
+  return preview.value ? 'preview' : 'idle'
+})
+
+watch(phase, (value) => emit('phase', value))
 
 watch(
   () => props.open,

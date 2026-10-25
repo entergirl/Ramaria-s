@@ -14,6 +14,7 @@ use ramaria_core::traits::StoreCrud;
 /// 群聊 L1 分发：每会话一次生成 × 参与者（含导出者）各一行；吸收按人独立；幂等。
 #[tokio::test]
 async fn generate_l1_group_fanout_dispatches_rows() {
+    let _serial = super::test_lock::serial().await;
     let (engine, _pool, storage, dir) = import_engine("import-group-l1").await;
     let file_path = dir.join("group.json");
     std::fs::write(&file_path, qq_group_export_json()).expect("写入导出文件应成功");

@@ -2,13 +2,13 @@
  * src/core/events.ts — 桌面事件订阅
  *
  * 职责:
- * - 8 个桌面事件的类型化订阅，并在作用域销毁时自动取消
+ * - 9 个桌面事件的类型化订阅，并在作用域销毁时自动取消
  *
  * 设计特点:
  * - 事件名是全仓唯一出现事件字符串的位置，与 Rust `EVENT_*` 常量一一对应
  * - 非宿主环境或宿主未注入 event 时静默跳过，不向界面抛错
  * - 订阅取消以卸载 / 作用域销毁为准，晚到的取消函数会立即执行，避免重复监听
- * - 导入与通道事件的负载形状随 M6 / M7 视图补齐，当前只锁事件名
+ * - 通道事件的负载形状随 M7 视图补齐，当前只锁事件名
  */
 
 import { getCurrentScope, onScopeDispose } from 'vue'
@@ -17,6 +17,7 @@ import type {
   ChatDeltaPayload,
   ChatDonePayload,
   ChatErrorPayload,
+  ImportProgressPayload,
   IndexProgress,
   ModelDownloadProgress,
   ProactiveMessagePayload,
@@ -44,7 +45,7 @@ export interface EventPayloadMap {
   'chat-delta': ChatDeltaPayload
   'chat-done': ChatDonePayload
   'chat-error': ChatErrorPayload
-  'import-progress': Record<string, unknown>
+  'import-progress': ImportProgressPayload
   'proactive-message': ProactiveMessagePayload
   'channel-status': Record<string, unknown>
   'close-requested': null

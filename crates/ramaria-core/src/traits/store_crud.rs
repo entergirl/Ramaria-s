@@ -218,6 +218,21 @@ pub trait StoreCrud: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// 统计"已关闭且缺 L1 摘要"的本地会话数量。
+    ///
+    /// 职责:
+    /// - 「继续处理」入口的规模提示：让宿主在发起补跑前展示待补会话数。
+    ///
+    /// 语义:
+    /// - 过滤口径与 [`Self::list_closed_sessions_missing_l1`] 完全一致；
+    /// - 仅计数，不返回 id 列表。
+    ///
+    /// 默认实现:
+    /// - 返回 0（未覆写 mock 按"无待补会话"处理）。
+    async fn count_closed_sessions_missing_l1(&self) -> RamariaResult<u64> {
+        Ok(0)
+    }
+
     // -- ChannelBinding --
     /// 写入 / 更新通道绑定（按 (channel, external_ref) upsert）。
     ///
@@ -932,6 +947,36 @@ pub trait StoreCrud: Send + Sync {
         _limit: u32,
     ) -> RamariaResult<Vec<MessageAttachment>> {
         Ok(Vec::new())
+    }
+
+    /// 统计全库待处理附件数量。
+    ///
+    /// 职责:
+    /// - 「继续处理」入口的规模提示：让宿主在发起补跑前展示待理解附件数。
+    ///
+    /// 语义:
+    /// - 与 [`Self::list_all_pending_attachments`] 同口径（仅 `status = 'pending'`）；
+    /// - 仅计数，不返回行。
+    ///
+    /// 默认实现:
+    /// - 返回 0（未覆写 mock 按"无待处理附件"处理）。
+    async fn count_pending_attachments(&self) -> RamariaResult<u64> {
+        Ok(0)
+    }
+
+    /// 统计全库被跳过的附件数量。
+    ///
+    /// 职责:
+    /// - 「继续处理」入口的规模提示：让宿主展示可回补的存量跳过行。
+    ///
+    /// 语义:
+    /// - 与 [`Self::list_all_skipped_attachments`] 同口径（仅 `status = 'skipped'`）；
+    /// - 仅计数，不返回行。
+    ///
+    /// 默认实现:
+    /// - 返回 0（未覆写 mock 按"无跳过行"处理）。
+    async fn count_skipped_attachments(&self) -> RamariaResult<u64> {
+        Ok(0)
     }
 
     /// 把单行附件重置为待处理（供重新扫描）。

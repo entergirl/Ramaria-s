@@ -73,6 +73,7 @@ export const COMMANDS = {
     analyzeFile: 'analyze_qq_chat',
     importQQ: 'import_qq_chat',
     continueImport: 'continue_import',
+    getStatus: 'get_import_status',
   },
   persona: {
     listFull: 'list_personas_full',
@@ -126,6 +127,7 @@ export const COMMANDS = {
   system: {
     saveFileDialog: 'save_file_dialog',
     openFileDialog: 'open_file_dialog',
+    openDirectoryDialog: 'open_directory_dialog',
     confirmCloseAction: 'confirm_close_action',
     getImageSourceDir: 'get_image_source_dir',
     setImageSourceDir: 'set_image_source_dir',

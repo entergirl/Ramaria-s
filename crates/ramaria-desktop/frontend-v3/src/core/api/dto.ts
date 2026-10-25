@@ -461,6 +461,105 @@ export interface ImportPipelineReceipt {
 }
 
 /**
+ * 导入成员统计（分析报告与导入结果的 `members` 条目）
+ *
+ * 形状: snake_case；`uin` 缺失为 null；`message_count` 为该发送者的成功解析条数
+ */
+export interface ImportMemberStat {
+  uid: string
+  uin: string | null
+  name: string
+  message_count: number
+}
+
+/**
+ * QQ 聊天记录解析报告（`analyze_qq_chat`）
+ *
+ * 形状: snake_case，17 字段；不写入数据库，仅描述文件内容
+ */
+export interface ImportAnalysisReport {
+  file_path: string
+  self_id: string
+  self_name: string
+  self_uin: string | null
+  chat_name: string
+  chat_type: string
+  members: ImportMemberStat[]
+  other_name: string
+  other_uid: string
+  other_uin: string | null
+  time_range: string
+  total_raw: number
+  total_success: number
+  total_degraded: number
+  total_skipped: number
+  session_count: number
+  gap_minutes: number
+}
+
+/**
+ * QQ 聊天记录导入结果（`import_qq_chat`）
+ *
+ * 形状: snake_case，16 字段；`session_ids` 为空时不输出；L0 同步完成，L1 / 级联在后台进行
+ */
+export interface ImportResult {
+  success: boolean
+  mode: string
+  report_summary: string
+  sessions_written: number
+  messages_written: number
+  persona_uid: string | null
+  persona_name: string
+  other_persona_uid: string | null
+  other_persona_name: string
+  self_name: string
+  chat_name: string
+  chat_type: string
+  members: ImportMemberStat[]
+  time_range: string
+  skipped_count: number
+  session_ids?: string[]
+}
+
+/**
+ * 导入处理进度（`import-progress` 事件）
+ *
+ * 形状: snake_case；`phase` 为 vision / l1 / l2 / l3 / done；
+ * 可选字段按阶段输出（`done` 才带 `l1_success` / `l1_failed` / `l2_triggered` / `l3_triggered`）
+ */
+export interface ImportProgressPayload {
+  phase: string
+  current: number
+  total: number
+  message: string
+  l1_success?: number
+  l1_failed?: number
+  l2_triggered?: boolean
+  l3_triggered?: boolean
+  l1_expected?: number
+  l2_expected?: number
+  l3_expected?: number
+  eta_seconds?: number
+  reset_count?: number
+  vision_done?: number
+  vision_failed?: number
+  vision_skipped?: number
+}
+
+/**
+ * 导入续跑状态（`get_import_status`）
+ *
+ * 形状: snake_case；`resumable` = 三类待办任一大于 0（由服务层计算）
+ */
+export interface ImportStatusView {
+  post_active: boolean
+  pending_attachments: number
+  skipped_attachments: number
+  missing_l1_sessions: number
+  resumable: boolean
+}
+
+/**
  * 保存对话回执（`save_current_session`）
  *
  * 形状: 命令返回 JSON 文本，本类型为其解析结果；`no_active_session` 表示无可关闭会话

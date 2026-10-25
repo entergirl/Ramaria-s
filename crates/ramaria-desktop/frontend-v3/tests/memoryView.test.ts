@@ -11,7 +11,7 @@
  * - 知识分组顺序与更新历史
  */
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
-import { createPinia } from 'pinia'
+import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 
@@ -27,6 +27,7 @@ import type {
   TraitEvidenceChain,
 } from '../src/core/api/dto'
 import { setTauriRuntime, type TauriRuntime } from '../src/core/transport'
+import { useAppStore } from '../src/stores/app'
 import MemoryView from '../src/views/memory/index.vue'
 
 const NOW = Date.now()
@@ -292,6 +293,7 @@ interface RuntimeConfig {
   session?: SessionDetail | null
   failOnce?: string[]
   failAlways?: string[]
+  holdPersonas?: boolean
 }
 
 interface RecordedCall {
@@ -302,10 +304,18 @@ interface RecordedCall {
 function makeRuntime(config: RuntimeConfig = {}): {
   runtime: TauriRuntime
   calls: RecordedCall[]
+  release: () => void
 } {
   const calls: RecordedCall[] = []
   const remaining = new Set(config.failOnce ?? [])
   const always = new Set(config.failAlways ?? [])
+  let release = (): void => {}
+
+  const gate = config.holdPersonas
+    ? new Promise<void>((resolve) => {
+        release = resolve
+      })
+    : Promise.resolve()
 
   const runtime: TauriRuntime = {
     core: {
@@ -317,6 +327,7 @@ function makeRuntime(config: RuntimeConfig = {}): {
         }
         switch (command) {
           case 'get_personas':
+            await gate
             return config.personas ?? [RAMA, SELF]
           case 'get_l1_memories': {
             const uid = (args.personaUid as string | null) ?? null
@@ -361,7 +372,7 @@ function makeRuntime(config: RuntimeConfig = {}): {
     },
   }
 
-  return { runtime, calls }
+  return { runtime, calls, release: () => release() }
 }
 
 function makeRouter(): Router {
@@ -371,6 +382,7 @@ function makeRouter(): Router {
       { path: '/', name: 'chat', component: { template: '<div />' } },
       { path: '/memory', name: 'memory', component: { template: '<div />' } },
       { path: '/import', name: 'import', component: { template: '<div />' } },
+      { path: '/settings', name: 'settings', component: { template: '<div />' } },
     ],
   })
 }
@@ -379,18 +391,21 @@ async function mountMemory(config: RuntimeConfig = {}): Promise<{
   wrapper: VueWrapper
   router: Router
   calls: RecordedCall[]
+  release: () => void
 }> {
-  const { runtime, calls } = makeRuntime(config)
+  const { runtime, calls, release } = makeRuntime(config)
   setTauriRuntime(runtime)
   const router = makeRouter()
   await router.push('/memory')
   await router.isReady()
+  const pinia = createPinia()
   const wrapper = mount(MemoryView, {
-    global: { plugins: [createPinia(), router] },
+    global: { plugins: [pinia, router] },
     attachTo: document.body,
   })
+  setActivePinia(pinia)
   await flushPromises()
-  return { wrapper, router, calls }
+  return { wrapper, router, calls, release }
 }
 
 function countOf(calls: RecordedCall[], command: string): number {
@@ -441,6 +456,44 @@ describe('记忆视图', () => {
     expect(wrapper.find('.segmented').classes()).toContain('segmented--plain')
     expect(wrapper.find('#memory-persona-trigger').exists()).toBe(true)
     expect(wrapper.text()).not.toContain('深度处理导入的消息')
+    wrapper.unmount()
+  })
+
+  it('首屏读取中给出骨架与忙碌标记', async () => {
+    const { wrapper, release } = await mountMemory({ holdPersonas: true })
+
+    expect(wrapper.find('[data-view-state]').attributes('data-view-state')).toBe('loading')
+    expect(wrapper.find('[data-view-state]').attributes('aria-busy')).toBe('true')
+    expect(wrapper.findAll('.skeleton')).toHaveLength(3)
+
+    release()
+    await flushPromises()
+    expect(wrapper.find('[data-view-state]').attributes('data-view-state')).toBe('default')
+    expect(wrapper.text()).toContain('聊了周末独自探店的事。')
+    wrapper.unmount()
+  })
+
+  it('索引未就绪时给降级条，浏览不受影响且可跳设置', async () => {
+    const { wrapper, router } = await mountMemory()
+    const app = useAppStore()
+    app.indexStatus = {
+      status: 'building',
+      loaded: 12,
+      total: 40,
+      failed: 0,
+      percent: 30,
+      updated_at: NOW,
+    }
+    await flushPromises()
+
+    expect(wrapper.find('[data-view-state]').attributes('data-degraded')).toBe('index')
+    expect(wrapper.find('[data-view-state]').attributes('data-view-state')).toBe('default')
+    expect(wrapper.text()).toContain('索引尚未就绪')
+    expect(wrapper.text()).toContain('聊了周末独自探店的事。')
+
+    await button(wrapper, '去设置').trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.name).toBe('settings')
     wrapper.unmount()
   })
 
