@@ -28,7 +28,7 @@ from typing import Dict, List, NamedTuple, Optional, Tuple
 FIXTURE_TYPES = ("MemoryEvent", "MemoryL1", "Persona", "UttBlock", "EventRelation")
 INLINE_TEST_SUGGEST_LIMIT = 300
 GOLDEN_REL = Path("crates/ramaria-service/tests/parity/golden")
-JS_TESTS_REL = Path("crates/ramaria-desktop/frontend/tests")
+FRONTEND_TESTS_REL = Path("crates/ramaria-desktop/frontend/tests")
 EXTERNAL_TEST_MODULE = re.compile(
     r"^(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\s*;"
 )
@@ -190,13 +190,13 @@ def extract_test_names(files: List[RustFile]) -> Counter:
     return names
 
 
-def scan_js_tests(root: Path) -> List[Tuple[str, int, bool]]:
-    """返回旧前端 JS 测试文件（相对路径，行数，是否源码扫描）。"""
-    tests_dir = root / JS_TESTS_REL
+def scan_frontend_tests(root: Path) -> List[Tuple[str, int, bool]]:
+    """返回前端测试文件（相对路径，行数，是否源码扫描）。"""
+    tests_dir = root / FRONTEND_TESTS_REL
     if not tests_dir.is_dir():
         return []
     results = []
-    for abs_path in sorted(tests_dir.rglob("*.js")):
+    for abs_path in sorted(tests_dir.rglob("*.ts")):
         text = read_text(abs_path)
         rel_path = os.path.relpath(str(abs_path), str(root)).replace(os.sep, "/")
         source_scan = re.search(
@@ -213,7 +213,7 @@ def render(root: Path) -> None:
     rust_files = scan_rust(root)
     rust_tests = [item for item in rust_files if item.section == "test"]
     rust_inline = [item for item in rust_files if item.section == "inline"]
-    js_tests = scan_js_tests(root)
+    frontend_tests = scan_frontend_tests(root)
 
     print("== 测试规模 ==")
     print(
@@ -225,7 +225,10 @@ def render(root: Path) -> None:
             sum(item.test_lines for item in rust_tests + rust_inline),
         )
     )
-    print("旧前端 JS 测试 %d 文件 / %d 行" % (len(js_tests), sum(item[1] for item in js_tests)))
+    print(
+        "前端测试 %d 文件 / %d 行"
+        % (len(frontend_tests), sum(item[1] for item in frontend_tests))
+    )
     golden = sorted((root / GOLDEN_REL).glob("*.json")) if (root / GOLDEN_REL).is_dir() else []
     print("golden 快照 %d 份" % len(golden))
 
@@ -250,8 +253,8 @@ def render(root: Path) -> None:
     for item in inline_over[:10]:
         print("  - %s（%d 行）" % (item.rel_path, item.test_lines))
 
-    source_scan = [item for item in js_tests if item[2]]
-    print("旧前端源码扫描      %4d 文件 / %d 行" % (len(source_scan), sum(item[1] for item in source_scan)))
+    source_scan = [item for item in frontend_tests if item[2]]
+    print("前端源码扫描        %4d 文件 / %d 行" % (len(source_scan), sum(item[1] for item in source_scan)))
     for rel_path, lines, _ in source_scan[:10]:
         print("  - %s（%d 行）" % (rel_path, lines))
 

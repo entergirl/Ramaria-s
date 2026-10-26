@@ -1,17 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Ramaria 前端结构校验脚本（旧前端过渡期 + frontend-v3 落地后）。
+"""Ramaria 前端结构校验脚本。
 
 职责:
-- 过渡期（frontend-v3 不存在）：
-  * index.html 的视图容器为 10 个且与契约清单一致；
-  * CSS 变量引用（无回退写法）必须在 CSS 中有定义，历史欠账登记在 LEGACY_TOKEN_DEBT；
-- frontend-v3 存在（M5 起）：
-  * tokens.css 的变量定义覆盖全部 var(--x) 引用；
-  * 路由声明的组件文件存在，路由 name 唯一；
-  * src/views（含子目录）至少存在契约清单中的视图文件；
-  * UI 规范：生产源码无裸色值 / 无内联 style / 无 999px（导航圆键除外）/ 无外部资源；
-  * 生产 CSP 无 `unsafe-inline` 与 `unsafe-eval`。
+- tokens.css 的变量定义覆盖全部 var(--x) 引用；
+- 路由声明的组件文件存在，路由 name 唯一；
+- src/views（含子目录）至少存在契约清单中的视图文件；
+- UI 规范：生产源码无裸色值 / 无内联 style / 无 999px（导航圆键除外）/ 无外部资源；
+- 生产 CSP 无 `unsafe-inline` 与 `unsafe-eval`。
 - 不一致即退出码 1。
 
 用法: python scripts/check_frontend.py
@@ -25,8 +21,7 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Set
 
-LEGACY_DIR = Path("crates/ramaria-desktop/frontend")
-V3_DIR = Path("crates/ramaria-desktop/frontend-v3")
+FRONTEND_DIR = Path("crates/ramaria-desktop/frontend")
 CONTRACT_BASELINE = Path("scripts/contract-baseline-3.0.json")
 DESKTOP_DIR = Path("crates/ramaria-desktop")
 
@@ -38,10 +33,6 @@ INLINE_STYLE = re.compile(r"(?:\sstyle=|\s:style=|\sv-bind:style=)")
 ROUND_PILL = re.compile(r"\b999px\b")
 REMOTE_ASSET = re.compile(r"fonts\.googleapis|cdn\.|unpkg\.com|jsdelivr")
 CSP_UNSAFE = ("unsafe-inline", "unsafe-eval")
-
-# 旧前端历史欠账：引用了但从未定义的 CSS 变量（随旧前端在 M7 删除）。
-# 只允许减少，不允许新增；新增未定义令牌会使本脚本失败。
-LEGACY_TOKEN_DEBT = {"--bg-muted", "--bg-surface", "--blue-900"}
 
 
 class SetupError(Exception):
@@ -90,41 +81,12 @@ def collect_css_vars(files: List[Path]) -> Dict[str, Set[str]]:
     return {"definitions": definitions, "uses": uses}
 
 
-def check_legacy(root: Path, expected_views: List[str]) -> List[str]:
+def check_frontend(root: Path, expected_views: List[str]) -> List[str]:
     failures: List[str] = []
-    base = root / LEGACY_DIR
-    if not base.is_dir():
-        failures.append("旧前端目录不存在: %s" % LEGACY_DIR.as_posix())
-        return failures
-
-    index = read_text(base / "index.html")
-    views = re.findall(r'<div class="view(?: [^"]*)?" id="view-([a-z-]+)"', index)
-    if set(views) != set(expected_views) or len(views) != len(expected_views):
-        failures.append(
-            "旧前端视图容器: 实际 %s / 期望 %s" % (sorted(views), sorted(expected_views))
-        )
-
-    css_files = sorted(base.glob("**/*.css"))
-    variables = collect_css_vars(css_files)
-    missing = sorted(variables["uses"] - variables["definitions"])
-    new_missing = sorted(set(missing) - LEGACY_TOKEN_DEBT)
-    if new_missing:
-        failures.append("CSS 引用了未定义的变量: %s" % ", ".join(new_missing))
-    stale_debt = sorted(LEGACY_TOKEN_DEBT - set(missing))
-    if stale_debt:
-        failures.append(
-            "LEGACY_TOKEN_DEBT 中的变量已不再缺失，请从清单移除: %s"
-            % ", ".join(stale_debt)
-        )
-    return failures
-
-
-def check_v3(root: Path, expected_views: List[str]) -> List[str]:
-    failures: List[str] = []
-    base = root / V3_DIR
+    base = root / FRONTEND_DIR
     src = base / "src"
     if not src.is_dir():
-        failures.append("frontend-v3/src 不存在")
+        failures.append("frontend/src 不存在")
         return failures
 
     css_files = sorted(list(src.glob("**/*.css")) + list(src.glob("**/*.vue")))
@@ -133,12 +95,19 @@ def check_v3(root: Path, expected_views: List[str]) -> List[str]:
     if missing:
         failures.append("CSS / Vue 引用了未定义的变量: %s" % ", ".join(missing))
 
-    router_files = sorted(src.glob("router/**/*.ts")) + sorted(src.glob("router/*.ts"))
+    router_file = src / "app" / "router.ts"
+    if not router_file.is_file():
+        failures.append("路由文件不存在: src/app/router.ts")
+    router_files = [router_file] if router_file.is_file() else []
     route_names: List[str] = []
     for path in router_files:
         text = read_text(path)
-        if re.search(r"\bpath\s*:", text):
-            route_names.extend(re.findall(r"\bname\s*:\s*['\"]([^'\"]+)['\"]", text))
+        # 重定向目标与守卫返回值都不是路由声明：先剔除 redirect 块，再按 path 取段内首个 name
+        text = re.sub(r"redirect\s*:\s*\{[^}]*\}", "", text)
+        for segment in re.split(r"\bpath\s*:", text)[1:]:
+            match = re.search(r"\bname\s*:\s*['\"]([^'\"]+)['\"]", segment)
+            if match:
+                route_names.append(match.group(1))
         for spec in re.findall(r"import\(\s*['\"]([^'\"]+\.vue)['\"]\s*\)", text):
             target = (path.parent / spec).resolve()
             if not target.exists():
@@ -162,10 +131,10 @@ def check_v3(root: Path, expected_views: List[str]) -> List[str]:
     return failures
 
 
-def check_v3_ui(root: Path) -> List[str]:
+def check_frontend_ui(root: Path) -> List[str]:
     """UI 规范扫描：裸色值、内联样式、999px 与外部资源。"""
     failures: List[str] = []
-    src = root / V3_DIR / "src"
+    src = root / FRONTEND_DIR / "src"
     if not src.is_dir():
         return failures
 
@@ -204,22 +173,16 @@ def check_csp(root: Path) -> List[str]:
     failures: List[str] = []
 
     main_conf = root / DESKTOP_DIR / "tauri.conf.json"
-    if main_conf.is_file():
-        csp = load_security(main_conf, "tauri.conf.json").get("csp")
-        if not csp:
-            failures.append("tauri.conf.json 缺少生产 CSP")
-        else:
-            for token in CSP_UNSAFE:
-                if token in str(csp):
-                    failures.append("tauri.conf.json 的生产 CSP 含 %s" % token)
-
-    overlay = root / DESKTOP_DIR / "tauri.v3.conf.json"
-    if overlay.is_file():
-        csp = load_security(overlay, "tauri.v3.conf.json").get("csp")
-        if csp:
-            for token in CSP_UNSAFE:
-                if token in str(csp):
-                    failures.append("tauri.v3.conf.json 的生产 CSP 含 %s" % token)
+    if not main_conf.is_file():
+        failures.append("tauri.conf.json 不存在")
+        return failures
+    csp = load_security(main_conf, "tauri.conf.json").get("csp")
+    if not csp:
+        failures.append("tauri.conf.json 缺少生产 CSP")
+    else:
+        for token in CSP_UNSAFE:
+            if token in str(csp):
+                failures.append("tauri.conf.json 的生产 CSP 含 %s" % token)
     return failures
 
 
@@ -232,25 +195,20 @@ def main(argv: List[str]) -> int:
     root = Path(args.root).resolve() if args.root else Path(__file__).resolve().parent.parent
     try:
         expected_views = load_expected_views(root)
-        if (root / V3_DIR).is_dir():
-            failures = check_v3(root, expected_views)
-            failures += check_v3_ui(root)
-            failures += check_csp(root)
-            mode = "frontend-v3"
-        else:
-            failures = check_legacy(root, expected_views)
-            mode = "旧前端（frontend-v3 未创建）"
+        failures = check_frontend(root, expected_views)
+        failures += check_frontend_ui(root)
+        failures += check_csp(root)
     except SetupError as exc:
         print("[ERROR] %s" % exc, file=sys.stderr)
         return 2
 
     if failures:
-        print("[FAIL] 前端结构不一致（%s）:" % mode)
+        print("[FAIL] 前端结构不一致:")
         for failure in failures:
             print("  - %s" % failure)
         return 1
 
-    print("[OK] 前端结构一致（%s；视图 %d）" % (mode, len(expected_views)))
+    print("[OK] 前端结构一致（视图 %d）" % len(expected_views))
     return 0
 
 

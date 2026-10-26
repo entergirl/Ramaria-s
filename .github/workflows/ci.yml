@@ -1,7 +1,7 @@
 # Ramaria Rust CI
 # job 集合：build-and-test（Windows）/ coverage（Windows）/ structure-check（Ubuntu，秒级）/
 #           contract-check（Ubuntu，秒级：契约 / 配置 / schema / 前端结构）/
-#           frontend-check（Ubuntu：frontend-v3 安装 / 构建 / 测试）
+#           frontend-check（Ubuntu：前端安装 / 构建 / 测试）
 # 规则：
 #   - Windows 编译 + 单元测试（v1.0 首发 Windows，macOS/Linux 延后）
 #   - 不跑真实 LLM，不下 embedding 模型，不打包 Tauri
@@ -122,7 +122,7 @@ jobs:
 
   # ---- 契约面自检（阻塞） ----
   # 秒级：解析 Rust 注册表 / CLI 枚举 / MCP 工具 / 事件 / 配置键 / migration schema /
-  # 旧前端视图与 CSS 变量，对照仓库内机器基线；不一致即失败。
+  # 前端命令表与视图目录，对照仓库内机器基线；不一致即失败。
   contract-check:
     name: Contract Check
     runs-on: ubuntu-latest
@@ -145,7 +145,6 @@ jobs:
 
   # ---- 前端构建与测试（阻塞） ----
   # 依据已提交锁文件安装（npm ci），构建含 TypeScript 类型检查；测试为 Vitest。
-  # 旧前端（frontend/）的 node --test 过渡期单独保留，切换后由本 job 取代。
   frontend-check:
     name: Frontend Check
     runs-on: ubuntu-latest
@@ -159,21 +158,16 @@ jobs:
         with:
           node-version: '24'
           cache: npm
-          cache-dependency-path: crates/ramaria-desktop/frontend-v3/package-lock.json
+          cache-dependency-path: crates/ramaria-desktop/frontend/package-lock.json
 
       - name: Install
         run: npm ci
-        working-directory: crates/ramaria-desktop/frontend-v3
+        working-directory: crates/ramaria-desktop/frontend
 
       - name: Build
         run: npm run build
-        working-directory: crates/ramaria-desktop/frontend-v3
+        working-directory: crates/ramaria-desktop/frontend
 
       - name: Test
         run: npm run test
-        working-directory: crates/ramaria-desktop/frontend-v3
-
-      # 过渡期：旧前端（classic script）测试仍须全绿，切换后随旧目录一并删除
-      - name: Legacy frontend tests
-        run: node --test "tests/*.test.js"
         working-directory: crates/ramaria-desktop/frontend

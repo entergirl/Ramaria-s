@@ -4,8 +4,7 @@
 
 职责:
 - 解析 Rust 源码的机器事实（Tauri 注册表 / CLI 顶层枚举 / MCP 工具 / 桌面事件 / migration）；
-- 解析契约视图：`frontend-v3` 存在时取新前端 `src/views`，否则取旧前端 `index.html` 容器；
-- 解析旧前端 api.js 的 _invoke 调用点；
+- 解析前端命令表（`frontend/src/core/api/commands.ts`）与契约视图目录（`frontend/src/views`）；
 - 与 scripts/contract-baseline-3.0.json（docs/dev-3.0/test/contract-baseline-3.0.md 的机器投影）逐项比对；
 - 任一集合或计数不一致即退出码 1（秒级，供 CI 与本地使用）。
 
@@ -26,10 +25,8 @@ from typing import Dict, List, Set
 
 MANIFEST_REL = Path("scripts/contract-baseline-3.0.json")
 DESKTOP_LIB = Path("crates/ramaria-desktop/src/lib.rs")
-FRONTEND_API = Path("crates/ramaria-desktop/frontend/js/api.js")
-FRONTEND_INDEX = Path("crates/ramaria-desktop/frontend/index.html")
-V3_COMMANDS = Path("crates/ramaria-desktop/frontend-v3/src/core/api/commands.ts")
-V3_VIEWS = Path("crates/ramaria-desktop/frontend-v3/src/views")
+FRONTEND_COMMANDS = Path("crates/ramaria-desktop/frontend/src/core/api/commands.ts")
+FRONTEND_VIEWS = Path("crates/ramaria-desktop/frontend/src/views")
 CLI_LIB = Path("crates/ramaria-cli/src/cli.rs")
 MCP_TOOLS_DIR = Path("crates/ramaria-mcp/src/tools")
 EVENTS_FILE = Path("crates/ramaria-desktop/src/events.rs")
@@ -85,17 +82,9 @@ def parse_registry(root: Path) -> List[str]:
     return names
 
 
-def parse_frontend_calls(root: Path) -> List[str]:
-    text = read_text(root / FRONTEND_API)
-    return re.findall(r"_invoke\(\s*['\"]([a-z_][a-z0-9_]*)['\"]", text)
-
-
-def parse_v3_commands(root: Path) -> List[str]:
-    """解析 frontend-v3 命令表（`方法: '命令',` 一行一条）。"""
-    path = root / V3_COMMANDS
-    if not path.is_file():
-        return []
-    text = read_text(path)
+def parse_frontend_commands(root: Path) -> List[str]:
+    """解析前端命令表（`方法: '命令',` 一行一条）。"""
+    text = read_text(root / FRONTEND_COMMANDS)
     return re.findall(r"^\s+\w+:\s*'([a-z][a-z0-9_]*)',\s*$", text, re.M)
 
 
@@ -138,21 +127,19 @@ def parse_views(root: Path) -> List[str]:
     """解析契约视图集合。
 
     说明:
-    - `frontend-v3` 存在时以新前端目录为准（目录式视图取首段目录名，平铺文件取文件名）；
-      旧前端容器清单随其冻结，不再作为契约口径。
+    - 目录式视图取首段目录名，平铺文件取文件名；
     - `views/dev` 是 DEV-only 状态画廊，不属于契约视图。
     """
-    v3_dir = root / V3_VIEWS
-    if v3_dir.is_dir():
-        names: Set[str] = set()
-        for path in v3_dir.rglob("*.vue"):
-            relative = path.relative_to(v3_dir)
-            name = relative.parts[0] if len(relative.parts) > 1 else path.stem
-            if name != "dev":
-                names.add(name)
-        return sorted(names)
-    text = read_text(root / FRONTEND_INDEX)
-    return re.findall(r'<div class="view(?: [^"]*)?" id="view-([a-z-]+)"', text)
+    views_dir = root / FRONTEND_VIEWS
+    if not views_dir.is_dir():
+        raise SetupError("前端视图目录不存在: %s" % FRONTEND_VIEWS.as_posix())
+    names: Set[str] = set()
+    for path in views_dir.rglob("*.vue"):
+        relative = path.relative_to(views_dir)
+        name = relative.parts[0] if len(relative.parts) > 1 else path.stem
+        if name != "dev":
+            names.add(name)
+    return sorted(names)
 
 
 def compare_list(
@@ -186,8 +173,7 @@ def main(argv: List[str]) -> int:
     try:
         manifest = load_manifest(root)
         registry = parse_registry(root)
-        frontend_calls = parse_frontend_calls(root)
-        v3_commands = parse_v3_commands(root)
+        frontend_commands = parse_frontend_commands(root)
         cli_top = parse_cli_top(root)
         mcp_tools = parse_mcp_tools(root)
         events = parse_events(root)
@@ -203,40 +189,21 @@ def main(argv: List[str]) -> int:
     compare_list("CLI 顶层子命令", cli_top, manifest["cli_top"], failures)
     compare_list("MCP 工具", mcp_tools, manifest["mcp_tools"], failures)
     compare_list("桌面事件", events, manifest["events"], failures)
-    compare_list("前端视图容器", views, manifest["views"], failures)
+    compare_list("前端视图", views, manifest["views"], failures)
     compare_list("migration 文件", migrations, manifest["migration_files"], failures)
 
-    # 前端调用面：计数 + 子集 + 未封装集合
-    calls_set = set(frontend_calls)
+    # 前端命令表：与 Rust 注册表严格同集合（不允许多出、缺少或重复）
     registry_set = set(registry)
-    if len(frontend_calls) != manifest["frontend_calls"]:
-        failures.append(
-            "api.js 调用点: 实际 %d / 期望 %d"
-            % (len(frontend_calls), manifest["frontend_calls"])
-        )
-    unknown = sorted(calls_set - registry_set)
+    commands_set = set(frontend_commands)
+    duplicated = sorted({name for name in frontend_commands if frontend_commands.count(name) > 1})
+    if duplicated:
+        failures.append("前端命令表重复: %s" % ", ".join(duplicated))
+    unknown = sorted(commands_set - registry_set)
     if unknown:
-        failures.append("api.js 调用了未注册命令: %s" % ", ".join(unknown))
-    unwrapped = sorted(registry_set - calls_set)
-    expected_unwrapped = sorted(manifest["unwrapped_commands"])
-    if unwrapped != expected_unwrapped:
-        failures.append(
-            "未封装命令: 实际 %s / 期望 %s" % (unwrapped, expected_unwrapped)
-        )
-    # 未被 api.js 调用的命令必须全部在登记清单内，反向也成立（上面已双向比对）
-
-    # frontend-v3 命令表：与 Rust 注册表严格同集合（不允许多出、缺少或重复）
-    if v3_commands:
-        v3_set = set(v3_commands)
-        duplicated_v3 = sorted({name for name in v3_commands if v3_commands.count(name) > 1})
-        if duplicated_v3:
-            failures.append("frontend-v3 命令表重复: %s" % ", ".join(duplicated_v3))
-        unknown_v3 = sorted(v3_set - registry_set)
-        if unknown_v3:
-            failures.append("frontend-v3 命令表含未注册命令: %s" % ", ".join(unknown_v3))
-        missing_v3 = sorted(registry_set - v3_set)
-        if missing_v3:
-            failures.append("frontend-v3 命令表缺少命令: %s" % ", ".join(missing_v3))
+        failures.append("前端命令表含未注册命令: %s" % ", ".join(unknown))
+    missing = sorted(registry_set - commands_set)
+    if missing:
+        failures.append("前端命令表缺少命令: %s" % ", ".join(missing))
 
     if failures:
         print("[FAIL] 契约面不一致（基线: %s）:" % manifest.get("source_doc", "?"))
@@ -245,11 +212,10 @@ def main(argv: List[str]) -> int:
         return 1
 
     print(
-        "[OK] 契约面一致：命令 %d / 旧前端调用 %d / v3 命令表 %d / CLI %d / MCP %d / 事件 %d / 视图 %d / migration %d"
+        "[OK] 契约面一致：命令 %d / 前端命令表 %d / CLI %d / MCP %d / 事件 %d / 视图 %d / migration %d"
         % (
             len(registry),
-            len(frontend_calls),
-            len(v3_commands),
+            len(frontend_commands),
             len(cli_top),
             len(mcp_tools),
             len(events),

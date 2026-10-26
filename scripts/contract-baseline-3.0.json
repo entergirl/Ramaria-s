@@ -87,25 +87,6 @@
     "set_vision_support",
     "download_embedding_model"
   ],
-  "frontend_calls": 68,
-  "unwrapped_commands": [
-    "recall_message",
-    "send_local_image",
-    "preview_persona_prompt",
-    "save_file_dialog",
-    "open_file_dialog",
-    "open_directory_dialog",
-    "confirm_close_action",
-    "get_index_status",
-    "get_import_status",
-    "get_image_source_dir",
-    "set_image_source_dir",
-    "persona_export",
-    "set_vision_support",
-    "download_embedding_model",
-    "get_default_config",
-    "get_proactive_stats"
-  ],
   "cli_top": [
     "Ask",
     "Chat",

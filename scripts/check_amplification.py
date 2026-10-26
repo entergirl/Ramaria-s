@@ -30,9 +30,10 @@ TARGET_STORE_CRUD = 1
 TARGET_GOLDEN = 1
 TARGET_FRONTEND_INVOKE_OUTSIDE = 0
 GOLDEN_REL = Path("crates/ramaria-service/tests/parity/golden")
-FRONTEND_JS_REL = Path("crates/ramaria-desktop/frontend/js")
-FRONTEND_API_REL = "crates/ramaria-desktop/frontend/js/api.js"
-FRONTEND_BRIDGE_REL = "crates/ramaria-desktop/frontend/js/tauri-bridge.js"
+FRONTEND_SRC_REL = Path("crates/ramaria-desktop/frontend/src")
+FRONTEND_TRANSPORT_REL = "crates/ramaria-desktop/frontend/src/core/transport.ts"
+FRONTEND_GATEWAY_REL = "crates/ramaria-desktop/frontend/src/core/api/index.ts"
+FRONTEND_COMMANDS_REL = "crates/ramaria-desktop/frontend/src/core/api/commands.ts"
 
 
 def _is_return_type(text: str, start: int) -> bool:
@@ -101,20 +102,18 @@ def count_golden(root: Path) -> Tuple[int, int]:
 
 
 def count_frontend_invoke(root: Path) -> Tuple[int, int]:
-    """返回（api.js 之外直接调用 TauriBridge.invoke 的文件数，封装表文件数）。"""
-    js_dir = root / FRONTEND_JS_REL
-    if not js_dir.is_dir():
+    """返回（命令门面之外直接调用 invoke 的文件数，封装表单点数）。"""
+    src_dir = root / FRONTEND_SRC_REL
+    if not src_dir.is_dir():
         return 0, 0
+    commands = root / FRONTEND_COMMANDS_REL
+    wrapper = 1 if commands.is_file() else 0
     outside = 0
-    wrapper = 0
-    for abs_path in sorted(js_dir.rglob("*.js")):
-        text = read_text(abs_path)
+    for abs_path in sorted(list(src_dir.rglob("*.ts")) + list(src_dir.rglob("*.vue"))):
         rel_path = os.path.relpath(str(abs_path), str(root)).replace(os.sep, "/")
-        if rel_path == FRONTEND_API_REL and re.search(r"\b_invoke\s*\(", text):
-            wrapper += 1
-        if rel_path in (FRONTEND_API_REL, FRONTEND_BRIDGE_REL):
+        if rel_path in (FRONTEND_TRANSPORT_REL, FRONTEND_GATEWAY_REL):
             continue
-        if re.search(r"TauriBridge\.invoke\s*\(", text):
+        if re.search(r"\binvoke\s*[<(]", read_text(abs_path)):
             outside += 1
     return outside, wrapper
 
