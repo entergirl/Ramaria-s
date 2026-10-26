@@ -27,7 +27,7 @@ const SPEC_SOURCES = import.meta.glob('/../../../../docs/dev-3.0/test/frontend-s
   eager: true,
 }) as Record<string, string>
 
-const SRC_SOURCES = import.meta.glob('/src/views/{memory,persona,import}/**/*.{ts,vue}', {
+const SRC_SOURCES = import.meta.glob('/src/views/{memory,persona,import,chat}/**/*.{ts,vue}', {
   query: '?raw',
   import: 'default',
   eager: true,
@@ -101,8 +101,11 @@ describe('跳转矩阵清单结构', () => {
       expect(entry.target.length, `第 ${entry.no} 条缺目标`).toBeGreaterThan(0)
       expect(entry.params.length, `第 ${entry.no} 条缺参数`).toBeGreaterThan(0)
       if (entry.status === 'covered') {
-        expect(entry.coverage?.file, `第 ${entry.no} 条缺覆盖文件`).toBeTruthy()
-        expect(entry.coverage?.cases.length ?? 0).toBeGreaterThan(0)
+        expect(entry.coverage?.length ?? 0, `第 ${entry.no} 条缺覆盖落点`).toBeGreaterThan(0)
+        for (const item of entry.coverage ?? []) {
+          expect(item.file, `第 ${entry.no} 条缺覆盖文件`).toBeTruthy()
+          expect(item.cases.length, `第 ${entry.no} 条缺覆盖用例`).toBeGreaterThan(0)
+        }
         expect(entry.naReason).toBeUndefined()
       } else {
         expect(entry.naReason, `第 ${entry.no} 条缺不适用依据`).toBeTruthy()
@@ -114,16 +117,14 @@ describe('跳转矩阵清单结构', () => {
   it('覆盖引用指向真实存在的用例', () => {
     const names = new Map<string, string[]>()
     for (const entry of JUMP_MATRIX) {
-      const coverage = entry.coverage
-      if (!coverage) {
-        continue
-      }
-      if (!names.has(coverage.file)) {
-        names.set(coverage.file, caseNamesOf(coverage.file))
-      }
-      const declared = names.get(coverage.file) ?? []
-      for (const name of coverage.cases) {
-        expect(declared, `${coverage.file} 缺少用例「${name}」`).toContain(name)
+      for (const coverage of entry.coverage ?? []) {
+        if (!names.has(coverage.file)) {
+          names.set(coverage.file, caseNamesOf(coverage.file))
+        }
+        const declared = names.get(coverage.file) ?? []
+        for (const name of coverage.cases) {
+          expect(declared, `${coverage.file} 缺少用例「${name}」`).toContain(name)
+        }
       }
     }
   })
@@ -145,17 +146,18 @@ describe('跳转矩阵与规格对齐', () => {
       if (entry.status !== 'covered') {
         continue
       }
-      const marker = ANCHOR[entry.no]
-      expect(sources, `第 ${entry.no} 条缺源码锚点`).toContain(marker)
+      for (const marker of ANCHOR[entry.no] ?? []) {
+        expect(sources, `第 ${entry.no} 条缺源码锚点`).toContain(marker)
+      }
     }
   })
 })
 
 /** 每条目在源码里的落点锚点（改实现即失效，防清单与代码脱节） */
-const ANCHOR: Record<number, string> = {
-  7: "fromView: 'memory'",
-  8: 'consumeSnapshot',
-  9: 'requestPreselect',
-  10: "name: 'chat'",
-  13: 'doBackToList',
+const ANCHOR: Record<number, string[]> = {
+  7: ["fromView: 'memory'"],
+  8: ["fromView === 'memory'", 'consumeSnapshot'],
+  9: ['requestPreselect'],
+  10: ["name: 'chat'"],
+  13: ['doBackToList'],
 }

@@ -12,6 +12,7 @@
  * - 完成事件以全文为准覆盖累积缓冲，避免增量丢失导致的截断
  * - 对账只在消息所属会话仍是当前会话时执行，切走后不污染新列表
  * - 主动消息按 message_id 去重；非当前会话只做未读自增
+ * - 到达即已读：回复与主动消息落到当前会话时推进已读时间，保证托盘徽标与界面一致
  */
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
@@ -51,6 +52,8 @@ export const useChatStore = defineStore('chat', () => {
   const activation = ref<{ sessionId: string; messageId: string } | null>(null)
   /** L1 未生成的会话（对话横幅提示与重试入口） */
   const l1IssueSessionId = ref<string | null>(null)
+  /** 本次进入来自记忆视图（「返回记忆」入口的一次性标志） */
+  const cameFromMemory = ref(false)
 
   /** 是否正在流式接收 */
   const streaming = computed(() => requestId.value !== null)
@@ -207,7 +210,10 @@ export const useChatStore = defineStore('chat', () => {
     if (sessionId) {
       void reconcile(sessionId)
       const session = useSessionStore()
-      if (session.activeId !== sessionId) {
+      if (session.activeId === sessionId) {
+        // 回复落到当前会话即视为已读：推进已读时间以同步托盘徽标
+        void session.markRead(sessionId)
+      } else {
         session.bumpUnread(sessionId)
         void session.loadList()
       }
@@ -288,6 +294,8 @@ export const useChatStore = defineStore('chat', () => {
         sender_name: null,
         recalled_at: null,
       })
+      // 消息落到当前会话即视为已读：推进已读时间以同步托盘徽标
+      void session.markRead(payload.session_id)
       return
     }
 
@@ -308,6 +316,16 @@ export const useChatStore = defineStore('chat', () => {
   /** 标记 L1 未生成（保存对话后置位） */
   function markL1Issue(sessionId: string | null): void {
     l1IssueSessionId.value = sessionId
+  }
+
+  /** 记录本次进入来自记忆视图（供「返回记忆」入口渲染） */
+  function markFromMemory(): void {
+    cameFromMemory.value = true
+  }
+
+  /** 清空来源标记（离开对话视图时调用） */
+  function clearOrigin(): void {
+    cameFromMemory.value = false
   }
 
   function clear(): void {
@@ -337,6 +355,7 @@ export const useChatStore = defineStore('chat', () => {
     privacySaving,
     activation,
     l1IssueSessionId,
+    cameFromMemory,
     streaming,
     canCompose,
     privacyNeedsConfirm,
@@ -351,6 +370,8 @@ export const useChatStore = defineStore('chat', () => {
     applyProactive,
     takeActivation,
     markL1Issue,
+    markFromMemory,
+    clearOrigin,
     clear,
   }
 })

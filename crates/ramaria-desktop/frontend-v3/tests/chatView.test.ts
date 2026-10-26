@@ -77,6 +77,7 @@ function makeRouter(): Router {
     history: createMemoryHistory(),
     routes: [
       { path: '/', name: 'chat', component: { template: '<div />' } },
+      { path: '/memory', name: 'memory', component: { template: '<div />' } },
       { path: '/settings', name: 'settings', component: { template: '<div />' } },
     ],
   })
@@ -223,6 +224,77 @@ describe('对话视图', () => {
     expect(wrapper.find('textarea').exists()).toBe(false)
     expect(wrapper.find('.readonly-bar').exists()).toBe(true)
     expect(wrapper.find('[data-restricted]').attributes('data-restricted')).toBe('readonly')
+    wrapper.unmount()
+  })
+})
+
+describe('跳转来源', () => {
+  async function mountFrom(query: Record<string, string>): Promise<{
+    wrapper: VueWrapper
+    router: Router
+  }> {
+    const router = makeRouter()
+    await router.push({ name: 'chat', query })
+    await router.isReady()
+    const wrapper = mount(ChatView, {
+      global: { plugins: [createPinia(), router] },
+      attachTo: document.body,
+    })
+    await flushPromises()
+    return { wrapper, router }
+  }
+
+  it('从记忆进入时给出返回入口，查询被一次性消费', async () => {
+    installRuntime({
+      sessions: [summary()],
+      detail: detail('local', [
+        {
+          id: 'm1',
+          role: 'user',
+          content: '今天有点累',
+          persona_uid: 'rama-0001',
+          created_at: NOW - 40000,
+          is_proactive: false,
+          sender_ref: null,
+          sender_name: null,
+          recalled_at: null,
+        },
+      ]),
+    })
+
+    const { wrapper, router } = await mountFrom({ sessionId: 's1', fromView: 'memory' })
+    expect(router.currentRoute.value.query).toEqual({})
+
+    const entry = wrapper.find('.head-actions .btn--ghost')
+    expect(entry.exists()).toBe(true)
+    expect(entry.text()).toContain('返回记忆')
+
+    await entry.trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.name).toBe('memory')
+    wrapper.unmount()
+  })
+
+  it('直接进入对话不出现返回入口', async () => {
+    installRuntime({
+      sessions: [summary()],
+      detail: detail('local', [
+        {
+          id: 'm1',
+          role: 'user',
+          content: '今天有点累',
+          persona_uid: 'rama-0001',
+          created_at: NOW - 40000,
+          is_proactive: false,
+          sender_ref: null,
+          sender_name: null,
+          recalled_at: null,
+        },
+      ]),
+    })
+
+    const { wrapper } = await mountFrom({})
+    expect(wrapper.find('.head-actions .btn--ghost').exists()).toBe(false)
     wrapper.unmount()
   })
 })

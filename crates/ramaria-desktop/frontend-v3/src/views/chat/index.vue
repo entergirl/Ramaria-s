@@ -52,6 +52,7 @@ const {
   confirmRecall,
   openPrivacy,
   confirmPrivacy,
+  backToMemory,
 } = view
 
 const { banner, degradedAttr, runAction } = useChatBanner({
@@ -153,8 +154,10 @@ onBeforeUnmount(() => {
       <ChatHeader
         :sessions-open="sessionsOpen"
         :saving="saving"
+        :back-to-memory="chat.cameFromMemory"
         @toggle-sessions="sessionsOpen = !sessionsOpen"
         @save="saveConversation"
+        @back-to-memory="backToMemory"
       />
 
       <ChatBanner

@@ -384,6 +384,10 @@ export const systemApi = {
   setImageSourceDir(path: string | null = null) {
     return invoke<string>(COMMANDS.system.setImageSourceDir, { path })
   },
+  /** 关闭确认：`minimize` 隐藏到托盘，`exit` 退出应用 */
+  confirmCloseAction(action: 'minimize' | 'exit') {
+    return invoke<string>(COMMANDS.system.confirmCloseAction, { action })
+  },
 }
 
 /** MCP 接入：面板信息（配置读写仍走 config 域） */

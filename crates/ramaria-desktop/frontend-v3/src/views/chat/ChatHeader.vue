@@ -4,12 +4,13 @@
  *
  * 职责:
  * - 展示当前人格头像、名称、来源标签与对话状态
- * - 提供会话卡片开关与「保存对话」动作
+ * - 提供会话卡片开关、「返回记忆」与「保存对话」动作
  *
  * 设计特点:
  * - 头像即会话卡片入口，展开状态经 `aria-expanded` 透出
  * - 头像优先用已保存图片，缺失或不可读时回退名称首字
  * - 状态点与文案同源：流式、只读、已结束、正常四种
+ * - 「返回记忆」只在本次由记忆视图进入时出现，离开即消失
  * - 保存键只在可保存时出现，不出现灰掉的无效键
  */
 import { computed, ref, watch } from 'vue'
@@ -24,12 +25,15 @@ const props = withDefaults(
   defineProps<{
     sessionsOpen: boolean
     saving?: boolean
+    /** 本次进入来自记忆视图（显示「返回记忆」入口） */
+    backToMemory?: boolean
   }>(),
-  { saving: false },
+  { saving: false, backToMemory: false },
 )
 
 defineEmits<{
   'toggle-sessions': []
+  'back-to-memory': []
   save: []
 }>()
 
@@ -113,6 +117,17 @@ const canSave = computed(
     </div>
 
     <div class="head-actions">
+      <BaseButton
+        v-if="backToMemory"
+        variant="ghost"
+        size="sm"
+        @click="$emit('back-to-memory')"
+      >
+        <svg class="back-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M14 6l-6 6 6 6" />
+        </svg>
+        返回记忆
+      </BaseButton>
       <BaseButton
         v-if="canSave"
         variant="secondary"
@@ -254,6 +269,16 @@ const canSave = computed(
   flex: none;
   align-items: center;
   gap: var(--space-8);
+}
+
+.back-icon {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 @keyframes status-pulse {

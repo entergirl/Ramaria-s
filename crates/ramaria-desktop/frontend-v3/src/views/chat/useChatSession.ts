@@ -10,8 +10,10 @@
  * - 动作只做编排，消息与状态由 store 持有，视图不直连命令
  * - 切换会话在生成期间被拒绝，避免流式文本落到错误会话
  * - 新建会话不预先落库：首次发送时才创建，避免堆积空会话
+ * - 跳转来源一次性消费：进入时取 `fromView`，随后清掉查询，入口状态留在 store
+ * - 通知点击定位在启动时补一次消费，覆盖「事件早于视图挂载」的时序
  */
-import { reactive, ref, watch } from 'vue'
+import { onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { chatApi, systemApi } from '../../core/api'
@@ -284,6 +286,31 @@ export function useChatSession() {
     pushToast({ tone: 'success', message: '隐私范围已确认' })
   }
 
+  /** 通知点击定位：切到目标会话并高亮该条消息 */
+  async function locateActivation(pending: {
+    sessionId: string
+    messageId: string
+  }): Promise<void> {
+    if (session.activeId !== pending.sessionId) {
+      const ok = await openSession(pending.sessionId, false)
+      if (!ok) {
+        return
+      }
+    }
+    focusMessageId.value = pending.messageId
+    window.setTimeout(() => {
+      if (focusMessageId.value === pending.messageId) {
+        focusMessageId.value = null
+      }
+    }, 2600)
+  }
+
+  /** 返回记忆：入口状态随即清空，快照由记忆视图消费 */
+  function backToMemory(): void {
+    chat.clearOrigin()
+    void router.push({ name: 'memory' })
+  }
+
   /** 启动装载与首屏会话选择 */
   async function init(): Promise<void> {
     if (initialized.value) {
@@ -292,6 +319,13 @@ export function useChatSession() {
     initialized.value = true
 
     await Promise.all([session.loadPersonas(), session.loadList(), chat.loadPrivacy()])
+
+    const fromView = Array.isArray(route.query.fromView)
+      ? route.query.fromView[0]
+      : route.query.fromView
+    if (fromView === 'memory') {
+      chat.markFromMemory()
+    }
 
     const querySession = Array.isArray(route.query.sessionId)
       ? route.query.sessionId[0]
@@ -302,18 +336,23 @@ export function useChatSession() {
         pushToast({ tone: 'warn', message: '目标会话不存在或已删除' })
       }
       void router.replace({ name: 'chat' })
-      return
+    } else {
+      const latest = session.items.find(
+        (item) => (item.channel || 'local') === 'local' && item.ended_at === null,
+      )
+      if (latest) {
+        await openSession(latest.id, false)
+      }
     }
 
-    const latest = session.items.find(
-      (item) => (item.channel || 'local') === 'local' && item.ended_at === null,
-    )
-    if (latest) {
-      await openSession(latest.id, false)
+    // 通知点击可能早于视图挂载：启动末尾补一次消费，避免定位丢失
+    const pending = chat.takeActivation()
+    if (pending) {
+      await locateActivation(pending)
     }
   }
 
-  // 通知点击定位：切到目标会话并高亮该条消息
+  // 通知点击定位：视图在页时即时响应
   watch(
     () => chat.activation,
     (value) => {
@@ -321,25 +360,16 @@ export function useChatSession() {
         return
       }
       const pending = chat.takeActivation()
-      if (!pending) {
-        return
+      if (pending) {
+        void locateActivation(pending)
       }
-      void (async () => {
-        if (session.activeId !== pending.sessionId) {
-          const ok = await openSession(pending.sessionId, false)
-          if (!ok) {
-            return
-          }
-        }
-        focusMessageId.value = pending.messageId
-        window.setTimeout(() => {
-          if (focusMessageId.value === pending.messageId) {
-            focusMessageId.value = null
-          }
-        }, 2600)
-      })()
     },
   )
+
+  // 来源标记只在本次停留内有效
+  onBeforeUnmount(() => {
+    chat.clearOrigin()
+  })
 
   return {
     session,
@@ -364,6 +394,7 @@ export function useChatSession() {
     confirmRecall,
     openPrivacy,
     confirmPrivacy,
+    backToMemory,
     targetPersona,
   }
 }

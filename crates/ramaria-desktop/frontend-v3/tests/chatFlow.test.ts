@@ -220,6 +220,51 @@ describe('主动消息', () => {
   })
 })
 
+describe('到达即已读', () => {
+  it('回复到达后推进已读时间', async () => {
+    const runtime = installChatRuntime({ commands: { send_message: () => 'req-1' } })
+    const wrapper = await mountChat(freshPinia())
+    const before = callsOf(runtime, 'mark_session_read').length
+
+    await wrapper.find('textarea').setValue('在吗')
+    await wrapper.find('.composer .btn--primary').trigger('click')
+    await flushPromises()
+    runtime.emit('chat-done', {
+      request_id: 'req-1',
+      backend_id: 'lmstudio',
+      total_chars: 2,
+      content: '在的',
+    })
+    await flushPromises()
+
+    const calls = callsOf(runtime, 'mark_session_read')
+    expect(calls.length).toBe(before + 1)
+    expect(calls.at(-1)).toEqual({ sessionId: 's1' })
+    wrapper.unmount()
+  })
+
+  it('当前会话收到主动消息后推进已读时间', async () => {
+    const runtime = installChatRuntime()
+    const wrapper = await mountChat(freshPinia())
+    const before = callsOf(runtime, 'mark_session_read').length
+
+    runtime.emit('proactive-message', {
+      session_id: 's1',
+      message_id: 'p2',
+      content: '记得喝水',
+      persona: 'rama-0001',
+      source: 'proactive',
+      created_at: Date.now(),
+    })
+    await flushPromises()
+
+    const calls = callsOf(runtime, 'mark_session_read')
+    expect(calls.length).toBe(before + 1)
+    expect(calls.at(-1)).toEqual({ sessionId: 's1' })
+    wrapper.unmount()
+  })
+})
+
 describe('撤回', () => {
   it('本人消息可撤回，确认后折叠为系统条', async () => {
     const runtime = installChatRuntime({

@@ -5,12 +5,14 @@
  * 职责:
  * - 挂载视图出口与全局提示层
  * - 应用状态变化时跟随跳转全屏页 / 主界面
+ * - 建立宿主接线：通知点击定位与关闭确认
  *
  * 设计特点:
  * - 启动引导由路由守卫完成；本组件在引导结束前不跟随状态，避免用默认值误跳
  * - 状态跟随只在根组件一处 watch，视图不各自处理路由
  * - 模型下载不进全屏页（D-V30-044），只显示横幅，不触发跳转
  * - 圆键导航在全屏页同样常驻（D-V30-046）：品牌与主题切换由它承担
+ * - 宿主事件订阅在根组件建立，早于任何视图挂载，视图不在页也不丢事件
  */
 
 import { watch } from 'vue'
@@ -19,12 +21,15 @@ import { RouterView, useRoute, useRouter } from 'vue-router'
 import ToastLayer from '../components/base/ToastLayer.vue'
 import NavDock from '../components/nav/NavDock.vue'
 import DownloadBanner from '../components/shell/DownloadBanner.vue'
+import CloseConfirm from './CloseConfirm.vue'
 import { FULLSCREEN_ROUTES } from './router'
+import { useHostWiring } from './useHostWiring'
 import { useAppStore } from '../stores/app'
 
 const app = useAppStore()
 const router = useRouter()
 const route = useRoute()
+const { closeRequested, closeBusy, confirmClose } = useHostWiring()
 
 watch(
   () => app.appState,
@@ -54,4 +59,5 @@ watch(
   <DownloadBanner />
   <NavDock />
   <ToastLayer />
+  <CloseConfirm :open="closeRequested" :busy="closeBusy" @confirm="confirmClose" />
 </template>
