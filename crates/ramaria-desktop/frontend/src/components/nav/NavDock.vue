@@ -5,10 +5,13 @@
  * 职责:
  * - 常驻核心圆键，展开为 5~6 个视图键，另有主题 / 设置 / 品牌三个功能键
  * - 支持拖动摆放、双击回正、键盘操作、Esc 与遮罩收起
+ * - 位置预设读写 `stores/nav`，设置页改动后即时回正
  *
  * 设计特点:
  * - 几何全部来自 `geometry.ts`，组件只把结果写成 CSS 变量（不写内联 style 属性）
  * - 展开方向与紧凑档按可用空间自动判定，窄窗不越界
+ * - 视图键标签在键右侧，悬浮 / 聚焦时键微左移、标签向右弹出；右半屏镜像到左侧
+ * - 核心键以 🪸 标识，展开时斜向旋转，交互逻辑与图标形态解耦
  * - 收起态核心键降低存在感，不遮挡内容；展开时给出遮罩承接点击
  * - 图标为常量 SVG 字符串，经 v-html 注入，不含任何用户输入
  */
@@ -23,7 +26,7 @@ import {
   dragBounds,
   exceedsDragThreshold,
   fnOffset,
-  NAV_PRESET_LABELS,
+  labelSide,
   presetPoint,
   resolvePreset,
   subOffset,
@@ -36,6 +39,7 @@ import { FULLSCREEN_ROUTES } from '../../app/router'
 import { PREF_KEYS, readPref, removePref, writePref } from '../../core/prefs'
 import { currentTheme, toggleTheme } from '../../core/theme'
 import { useDebugStore } from '../../stores/debug'
+import { useNavStore } from '../../stores/nav'
 
 interface NavItem {
   id: string
@@ -73,6 +77,7 @@ const ICONS: Record<string, string> = {
 const router = useRouter()
 const route = useRoute()
 const debug = useDebugStore()
+const nav = useNavStore()
 
 const root = ref<HTMLElement | null>(null)
 const coreButton = ref<HTMLButtonElement | null>(null)
@@ -82,10 +87,11 @@ const aboutOpen = ref(false)
 const dragging = ref(false)
 const theme = ref(currentTheme())
 
-const preset = ref<NavPreset>(readPreset())
 const anchor = ref<Point>({ x: 0, y: 0 })
 const side = ref<SideDecision>({ flipped: false, compact: false })
 const freePosition = ref(false)
+/** 标签镜像：右侧放不下时标签改挂左侧 */
+const mirrored = ref(false)
 
 let suppressClick = false
 let pointerStart: Point = { x: 0, y: 0 }
@@ -106,12 +112,6 @@ function viewport(): { width: number; height: number } {
   return { width: window.innerWidth, height: window.innerHeight }
 }
 
-function readPreset(): NavPreset {
-  const saved = readPref(PREF_KEYS.navPosition)
-  const presets = Object.keys(NAV_PRESET_LABELS) as NavPreset[]
-  return presets.find((item) => item === saved) ?? 'bottom'
-}
-
 function applyAnchor(): void {
   const element = root.value
   if (!element) {
@@ -122,7 +122,7 @@ function applyAnchor(): void {
 }
 
 /** 预设锚点：全屏页把「底中」解析到右下，避免核心键压在居中卡片上 */
-function presetAnchor(name: NavPreset = preset.value): Point {
+function presetAnchor(name: NavPreset = nav.preset): Point {
   return presetPoint(resolvePreset(name, fullscreen.value), viewport())
 }
 
@@ -163,6 +163,7 @@ function applyLayout(): void {
 
 function updateSide(): void {
   side.value = decideSide(anchor.value, items.value.length, viewport())
+  mirrored.value = labelSide(anchor.value, viewport()) === 'left'
   applyLayout()
 }
 
@@ -191,15 +192,20 @@ function switchTheme(): void {
   theme.value = toggleTheme()
 }
 
-function applyPreset(name: NavPreset): void {
-  preset.value = name
-  writePref(PREF_KEYS.navPosition, name)
+/** 回到所选预设位置：清掉自由摆放，按预设重算锚点 */
+function anchorToPreset(): void {
   removePref(PREF_KEYS.navFreeX)
   removePref(PREF_KEYS.navFreeY)
   freePosition.value = false
-  anchor.value = presetAnchor(name)
+  anchor.value = presetAnchor()
   applyAnchor()
   updateSide()
+}
+
+/** 切换预设：写偏好后立即落位（同值时不触发订阅，仍手动回正） */
+function applyPreset(name: NavPreset): void {
+  nav.setPreset(name)
+  anchorToPreset()
 }
 
 function onToggleDebug(value: boolean): void {
@@ -221,7 +227,7 @@ function onCoreClick(): void {
 
 function onCoreDblClick(): void {
   setOpen(false)
-  applyPreset(preset.value)
+  applyPreset(nav.preset)
 }
 
 function onCoreKeydown(event: KeyboardEvent): void {
@@ -355,6 +361,12 @@ watch(fullscreen, () => {
   updateSide()
 })
 
+/* 设置页改预设：圆键即时回正并把自由摆放一并清掉 */
+watch(
+  () => nav.preset,
+  () => anchorToPreset(),
+)
+
 onBeforeUnmount(() => {
   window.clearTimeout(resizeTimer)
   window.removeEventListener('resize', onResize)
@@ -366,7 +378,12 @@ onBeforeUnmount(() => {
   <div
     ref="root"
     class="dock"
-    :class="{ 'is-open': open, 'is-compact': compact, 'is-flipped': flipped }"
+    :class="{
+      'is-open': open,
+      'is-compact': compact,
+      'is-flipped': flipped,
+      'is-mirror': mirrored,
+    }"
   >
     <div class="veil" :class="{ 'is-open': open }" @click="closeDock" />
 
@@ -385,9 +402,7 @@ onBeforeUnmount(() => {
       @pointercancel="onPointerUp"
       @keydown="onCoreKeydown"
     >
-      <svg class="core-icon" viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M4 7h16M4 12h16M4 17h16" />
-      </svg>
+      <span class="core-emoji" aria-hidden="true">🪸</span>
     </button>
 
     <button
@@ -450,9 +465,7 @@ onBeforeUnmount(() => {
 
     <AboutCard
       :open="aboutOpen"
-      :preset="preset"
       @close="aboutOpen = false"
-      @select-preset="applyPreset"
       @toggle-debug="onToggleDebug"
     />
   </div>
@@ -513,12 +526,25 @@ onBeforeUnmount(() => {
   transform: translate(-50%, -50%) translate(var(--ox, 0), var(--oy, 0)) scale(1);
 }
 
+/* 子键：开合按索引错峰，悬停位移与配色即时响应（不被错峰延迟拖住） */
 .orb--sub {
-  transition-delay: calc((var(--n, 6) - 1 - var(--i, 0)) * 40ms);
+  transition:
+    transform var(--dur-slow) var(--ease-pop) calc((var(--n, 6) - 1 - var(--i, 0)) * 40ms),
+    opacity var(--dur-base) var(--ease-out) calc((var(--n, 6) - 1 - var(--i, 0)) * 40ms),
+    translate var(--dur-fast) var(--ease-out) 0ms,
+    background-color var(--dur-fast) var(--ease-out) 0ms,
+    border-color var(--dur-fast) var(--ease-out) 0ms,
+    box-shadow var(--dur-fast) var(--ease-out) 0ms;
 }
 
 .dock:not(.is-open) .orb--sub {
-  transition-delay: calc(var(--i, 0) * 26ms);
+  transition:
+    transform var(--dur-slow) var(--ease-pop) calc(var(--i, 0) * 26ms),
+    opacity var(--dur-base) var(--ease-out) calc(var(--i, 0) * 26ms),
+    translate 0ms,
+    background-color var(--dur-fast) var(--ease-out) 0ms,
+    border-color var(--dur-fast) var(--ease-out) 0ms,
+    box-shadow var(--dur-fast) var(--ease-out) 0ms;
 }
 
 .orb--core {
@@ -564,18 +590,18 @@ onBeforeUnmount(() => {
     var(--focus-ring);
 }
 
-.core-icon {
-  width: 24px;
-  height: 24px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 2;
-  stroke-linecap: round;
+.core-emoji {
+  display: block;
+  font-family:
+    'Segoe UI Emoji', 'Apple Color Emoji', 'Noto Color Emoji', sans-serif;
+  font-size: 26px;
+  line-height: 1;
   transition: transform var(--dur-base) var(--ease-out);
 }
 
-.dock.is-open .core-icon {
-  transform: rotate(135deg);
+/* 展开时向左倾倒 45°，收起回正；旋转与点击逻辑解耦，只作状态提示 */
+.dock.is-open .core-emoji {
+  transform: rotate(-45deg);
 }
 
 .orb--sub {
@@ -590,6 +616,17 @@ onBeforeUnmount(() => {
 .orb--sub:hover {
   border-color: var(--brand-line);
   background: var(--brand-surface);
+}
+
+/* 悬浮 / 聚焦：键微移给标签让位；镜像侧方向相反 */
+.dock.is-open .orb--sub:hover,
+.dock.is-open .orb--sub:focus-visible {
+  translate: calc(var(--space-6) * -1) 0;
+}
+
+.dock.is-open.is-mirror .orb--sub:hover,
+.dock.is-open.is-mirror .orb--sub:focus-visible {
+  translate: var(--space-6) 0;
 }
 
 .orb--sub.is-current {
@@ -722,6 +759,29 @@ onBeforeUnmount(() => {
 .orb:hover .orb-tip,
 .orb:focus-visible .orb-tip {
   opacity: 1;
+}
+
+/* 视图键：标签在键右侧并与键垂直居中，悬浮时向右浮出；右半屏镜像到左侧 */
+.orb--sub .orb-tip {
+  left: calc(100% + var(--space-10));
+  top: 50%;
+  bottom: auto;
+  transform: translate(calc(var(--space-6) * -1), -50%);
+  transition:
+    opacity var(--dur-fast) var(--ease-out),
+    transform var(--dur-base) var(--ease-out);
+}
+
+.dock.is-mirror .orb--sub .orb-tip {
+  left: auto;
+  right: calc(100% + var(--space-10));
+  transform: translate(var(--space-6), -50%);
+}
+
+.orb--sub:hover .orb-tip,
+.orb--sub:focus-visible .orb-tip {
+  opacity: 1;
+  transform: translate(0, -50%);
 }
 
 .orb:focus-visible {

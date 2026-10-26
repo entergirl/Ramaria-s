@@ -85,6 +85,11 @@ const COPY: Record<string, StateCopy> = {
     description: '已形成的记忆可正常浏览；对话召回要等索引完成后才包含最新记忆。',
     action: '去设置',
   },
+  'memory.degraded.index.building': {
+    title: '索引构建中',
+    description: '已形成的记忆可正常浏览；构建期间召回暂不含最新记忆。',
+    action: '去设置',
+  },
 
   // ---- persona ----
   'persona.empty.no-data': {

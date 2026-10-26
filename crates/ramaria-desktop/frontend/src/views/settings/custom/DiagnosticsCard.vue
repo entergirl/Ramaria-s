@@ -3,20 +3,20 @@
  * src/views/settings/custom/DiagnosticsCard.vue — 诊断与更新卡
  *
  * 职责:
- * - 展示当前版本，手动检查更新，导出脱敏诊断包
+ * - 展示索引状态（状态 / 向量覆盖 / 模型），导出脱敏诊断包
  *
  * 设计特点:
- * - 版本读取纯本地；检查更新与诊断导出各自独立加载态
+ * - 索引信息只读，以「关于」浮层之外的唯一落点承接
  * - 诊断包路径由原生保存对话框决定，前端不传路径
  * - 失败留在卡内，不影响其它设置
  */
 
-import { computed, onMounted, ref } from 'vue'
+import { computed, ref } from 'vue'
 
 import BaseButton from '../../../components/base/BaseButton.vue'
 import BaseTag from '../../../components/base/BaseTag.vue'
-import { diagnosticsApi, systemApi } from '../../../core/api'
-import type { DiagnosticsExport, UpdateStatus } from '../../../core/api/dto'
+import { diagnosticsApi } from '../../../core/api'
+import type { DiagnosticsExport } from '../../../core/api/dto'
 import { errorMessage } from '../../../core/errors'
 import {
   indexCoverageText,
@@ -30,57 +30,14 @@ import SettingsCard from '../SettingsCard.vue'
 
 const app = useAppStore()
 
-const version = ref('')
-const versionError = ref('')
-const update = ref<UpdateStatus | null>(null)
-const checking = ref(false)
 const exporting = ref(false)
 const exported = ref<DiagnosticsExport | null>(null)
 const error = ref('')
-
-const versionText = computed(() => (version.value ? `v${version.value}` : versionError.value || '读取中…'))
 
 const indexText = computed(() => indexStatusText(app.indexStatus))
 const indexTone = computed(() => indexStatusTone(app.indexStatus))
 const indexCoverage = computed(() => indexCoverageText(app.indexStatus))
 const indexModel = computed(() => indexModelText(app.indexStatus))
-
-const updateText = computed(() => {
-  if (!update.value) {
-    return '尚未检查'
-  }
-  if (update.value.error) {
-    return `检查失败：${update.value.error}`
-  }
-  if (update.value.updateAvailable) {
-    return `有新版本 ${update.value.latestVersion ?? ''}`
-  }
-  return '已是最新版本'
-})
-
-async function loadVersion(): Promise<void> {
-  try {
-    version.value = await systemApi.getVersion()
-    versionError.value = ''
-  } catch (cause) {
-    versionError.value = errorMessage(cause, '版本读取失败')
-  }
-}
-
-async function checkUpdate(): Promise<void> {
-  if (checking.value) {
-    return
-  }
-  checking.value = true
-  error.value = ''
-  try {
-    update.value = await diagnosticsApi.checkUpdate()
-  } catch (cause) {
-    error.value = errorMessage(cause, '检查更新失败')
-  } finally {
-    checking.value = false
-  }
-}
 
 async function exportDiagnostics(): Promise<void> {
   if (exporting.value) {
@@ -97,10 +54,6 @@ async function exportDiagnostics(): Promise<void> {
     exporting.value = false
   }
 }
-
-onMounted(() => {
-  void loadVersion()
-})
 </script>
 
 <template>
@@ -110,18 +63,6 @@ onMounted(() => {
     :editable="false"
     :error="error"
   >
-    <template #head>
-      <BaseTag tone="neutral">{{ versionText }}</BaseTag>
-    </template>
-
-    <div class="row">
-      <span class="row-label">版本</span>
-      <span class="row-value">{{ versionText }}</span>
-    </div>
-    <div class="row">
-      <span class="row-label">更新</span>
-      <span class="row-value">{{ updateText }}</span>
-    </div>
     <div class="row">
       <span class="row-label">索引</span>
       <span class="row-value">
@@ -136,7 +77,6 @@ onMounted(() => {
       <span class="row-label">模型</span>
       <span class="row-value path">{{ indexModel }}</span>
     </div>
-    <p v-if="update?.releaseNotesPreview" class="note">{{ update.releaseNotesPreview }}</p>
     <p v-if="exported" class="note">
       已导出 {{ exported.fileSizeDisplay }}（{{ Object.keys(exported.collectionStatus).length }} 项已收集）
     </p>
@@ -145,9 +85,6 @@ onMounted(() => {
     </p>
 
     <template #footExtra>
-      <BaseButton variant="ghost" size="sm" :loading="checking" @click="checkUpdate">
-        检查更新
-      </BaseButton>
       <BaseButton variant="secondary" size="sm" :loading="exporting" @click="exportDiagnostics">
         导出诊断信息
       </BaseButton>

@@ -8,6 +8,8 @@
  *
  * 设计特点:
  * - 数据与动作在 composable 与 store 中，本组件只做布局与事件接线
+ * - 页签走共用的胶囊分类键条（浅底背板 + 胶囊键，选中深底浅字）
+ * - 页内横幅（刷新进度 / 索引进度 / 部分失败）占位在工具栏与页签之间，内容态让到其下
  * - 人格卡与内容同属一个网格行，展开时内容整体右移，不覆盖卡片
  * - 详情在卡内展开且同时只开一张；切页签自动收起
  * - 页面自然滚动，长内容由工作台容器兜底
@@ -19,7 +21,7 @@ import BaseButton from '../../components/base/BaseButton.vue'
 import BaseEmptyState from '../../components/base/BaseEmptyState.vue'
 import BaseProgress from '../../components/base/BaseProgress.vue'
 import BaseSkeleton from '../../components/base/BaseSkeleton.vue'
-import BaseSegmented from '../../components/base/BaseSegmented.vue'
+import BaseChipNav from '../../components/base/BaseChipNav.vue'
 import BaseWorkbench from '../../components/base/BaseWorkbench.vue'
 import PersonaPicker from '../../components/shell/PersonaPicker.vue'
 import { parseL1Context } from '../../core/memory/context'
@@ -47,6 +49,8 @@ const {
   canDeepProcess,
   partialError,
   degraded,
+  indexBanner,
+  hasBanner,
   bindWorkbench,
   init,
   choosePersona,
@@ -64,7 +68,6 @@ const {
 
 const emptyCopy = stateCopy('memory.empty.no-data')
 const errorCopy = stateCopy('memory.error.load')
-const degradedCopy = stateCopy('memory.degraded.index')
 
 const persona = computed(() => store.personas.find((item) => item.uid === store.personaUid) ?? null)
 
@@ -173,29 +176,36 @@ onBeforeUnmount(() => {
         />
 
         <div class="memory-content">
+          <div v-if="hasBanner" class="memory-banners">
+            <BaseProgress v-if="store.refreshing" label="刷新记忆…" />
+
+            <div v-if="indexBanner" class="index-strip" :data-kind="indexBanner.kind" role="status">
+              <span class="index-strip-title">{{ indexBanner.title }}</span>
+              <span class="index-strip-text">{{ indexBanner.description }}</span>
+              <BaseButton variant="ghost" size="sm" @click="openSettings">
+                {{ indexBanner.action }}
+              </BaseButton>
+              <progress
+                v-if="indexBanner.kind === 'building'"
+                class="index-strip-progress"
+                :value="indexBanner.percent"
+                max="100"
+              />
+            </div>
+
+            <div v-if="partialError" class="error-strip" role="alert">
+              <span class="error-strip-text">{{ partialError }}</span>
+              <BaseButton variant="ghost" size="sm" @click="retry">重试</BaseButton>
+            </div>
+          </div>
+
           <div class="tabs">
-            <BaseSegmented
+            <BaseChipNav
               :model-value="store.tab"
               :options="tabOptions"
               label="记忆层级"
-              variant="plain"
               @update:model-value="switchTab"
             />
-          </div>
-
-          <BaseProgress v-if="store.refreshing" label="刷新记忆…" />
-
-          <div v-if="degraded && viewState !== 'error'" class="degraded-strip" role="status">
-            <span class="degraded-title">{{ degradedCopy.title }}</span>
-            <span class="degraded-text">{{ degradedCopy.description }}</span>
-            <BaseButton variant="ghost" size="sm" @click="openSettings">
-              {{ degradedCopy.action }}
-            </BaseButton>
-          </div>
-
-          <div v-if="partialError && viewState !== 'error'" class="error-strip" role="alert">
-            <span class="error-strip-text">{{ partialError }}</span>
-            <BaseButton variant="ghost" size="sm" @click="retry">重试</BaseButton>
           </div>
 
           <div v-if="viewState === 'loading'" class="skeletons">
@@ -365,11 +375,21 @@ onBeforeUnmount(() => {
   min-width: 0;
 }
 
-.degraded-strip {
+/* 页内横幅槽位：工具栏与页签键之间，空时不占位 */
+.memory-banners {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+}
+
+/* 索引横幅：构建中走辅色蓝并在底边画进度，未就绪走警示黄 */
+.index-strip {
+  position: relative;
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
   gap: var(--space-8);
+  overflow: hidden;
   padding: var(--space-8) var(--space-12);
   border: 1px solid var(--warn-line);
   border-radius: var(--radius-inner);
@@ -379,13 +399,40 @@ onBeforeUnmount(() => {
   line-height: 1.6;
 }
 
-.degraded-title {
+.index-strip[data-kind='building'] {
+  border-color: var(--accent-line);
+  background: var(--accent-surface);
+  color: var(--accent-text);
+}
+
+.index-strip-title {
   font-weight: var(--fw-semibold);
 }
 
-.degraded-text {
+.index-strip-text {
   flex: 1;
   min-width: 0;
+}
+
+.index-strip[data-kind='building'] .index-strip-text {
+  color: var(--text-2);
+}
+
+.index-strip-progress {
+  position: absolute;
+  inset: auto 0 0 0;
+  width: 100%;
+  height: 2px;
+  border: none;
+  appearance: none;
+}
+
+.index-strip-progress::-webkit-progress-bar {
+  background: transparent;
+}
+
+.index-strip-progress::-webkit-progress-value {
+  background: var(--accent);
 }
 
 .error-slot {

@@ -414,7 +414,7 @@ function countOf(calls: RecordedCall[], command: string): number {
 }
 
 function segment(wrapper: VueWrapper, label: string) {
-  const hit = wrapper.findAll('.segmented-item').find((item) => item.text().includes(label))
+  const hit = wrapper.findAll('.chip-nav-item').find((item) => item.text().includes(label))
   if (!hit) {
     throw new Error(`未找到页签: ${label}`)
   }
@@ -447,14 +447,15 @@ describe('记忆视图', () => {
     expect(wrapper.text()).toContain('0.61')
     expect(wrapper.text()).toContain('2 人参与')
     // 页签计数：L1 1 / L2 1 / L3 2 / 知识 2
-    expect(wrapper.findAll('.segmented-count').map((node) => node.text())).toEqual([
+    expect(wrapper.findAll('.chip-nav-count').map((node) => node.text())).toEqual([
       '1',
       '1',
       '2',
       '2',
     ])
-    // 页签为无背板的独立键（plain 档）
-    expect(wrapper.find('.segmented').classes()).toContain('segmented--plain')
+    // 页签走共用的胶囊分类键条，选中键写 aria-selected
+    expect(wrapper.find('.chip-nav').exists()).toBe(true)
+    expect(wrapper.findAll('.chip-nav-item')[0]?.attributes('aria-selected')).toBe('true')
     expect(wrapper.find('#memory-persona-trigger').exists()).toBe(true)
     expect(wrapper.text()).not.toContain('深度处理导入的消息')
     wrapper.unmount()
@@ -474,7 +475,7 @@ describe('记忆视图', () => {
     wrapper.unmount()
   })
 
-  it('索引未就绪时给降级条，浏览不受影响且可跳设置', async () => {
+  it('索引横幅位于页签之上：构建中带百分比，其余态为未就绪，浏览不受影响且可跳设置', async () => {
     const { wrapper, router } = await mountMemory()
     const app = useAppStore()
     app.indexStatus = {
@@ -489,8 +490,21 @@ describe('记忆视图', () => {
 
     expect(wrapper.find('[data-view-state]').attributes('data-degraded')).toBe('index')
     expect(wrapper.find('[data-view-state]').attributes('data-view-state')).toBe('default')
-    expect(wrapper.text()).toContain('索引尚未就绪')
+    expect(wrapper.text()).toContain('索引构建中 30%')
+    expect(wrapper.find('.index-strip-progress').attributes('value')).toBe('30')
     expect(wrapper.text()).toContain('聊了周末独自探店的事。')
+
+    // 横幅占位在工具栏之后、页签之前
+    const content = wrapper.find('.memory-content').element
+    expect(content.firstElementChild).toBe(wrapper.find('.memory-banners').element)
+    expect(wrapper.find('.memory-banners').element.nextElementSibling).toBe(
+      wrapper.find('.tabs').element,
+    )
+
+    app.indexStatus = { status: 'idle', loaded: 0, total: 40, failed: 0, percent: 0, updated_at: NOW }
+    await flushPromises()
+    expect(wrapper.text()).toContain('索引尚未就绪')
+    expect(wrapper.find('.index-strip-progress').exists()).toBe(false)
 
     await button(wrapper, '去设置').trigger('click')
     await flushPromises()

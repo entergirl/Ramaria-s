@@ -26,6 +26,7 @@ import type {
 } from '../../core/api/dto'
 import { errorMessage } from '../../core/errors'
 import { selectPersonaUid } from '../../core/persona/select'
+import { stateCopy } from '../../core/stateCopy'
 import { pushToast } from '../../core/toast'
 import { useAppStore } from '../../stores/app'
 import { useMemoryStore, type MemoryTab } from '../../stores/memory'
@@ -51,6 +52,16 @@ export interface TabOption {
   value: MemoryTab
   label: string
   count?: number
+}
+
+/** 索引横幅：构建中带进度，其余为未就绪 */
+export interface IndexBannerView {
+  kind: 'building' | 'pending'
+  title: string
+  description: string
+  action: string
+  /** 构建进度（仅 building 有值） */
+  percent: number
 }
 
 /** L1 / L2 单页取数上限（后端上限 1000） */
@@ -121,6 +132,45 @@ export function useMemoryView() {
 
   /** 索引未就绪：浏览不受影响，只提示召回暂不包含最新记忆 */
   const degraded = computed<'index' | undefined>(() => (app.indexNotReady ? 'index' : undefined))
+
+  /** 索引横幅：构建中显示百分比，其余未就绪走同一句说明；错误态让位给错误块 */
+  const indexBanner = computed<IndexBannerView | null>(() => {
+    if (viewState.value === 'error') {
+      return null
+    }
+    const status = app.indexStatus
+    if (!status) {
+      return null
+    }
+    if (status.status === 'building') {
+      const copy = stateCopy('memory.degraded.index.building')
+      return {
+        kind: 'building',
+        title: `索引构建中 ${status.percent}%`,
+        description: copy.description,
+        action: copy.action ?? '',
+        percent: status.percent,
+      }
+    }
+    if (status.status === 'idle' || status.status === 'degraded') {
+      const copy = stateCopy('memory.degraded.index')
+      return {
+        kind: 'pending',
+        title: copy.title,
+        description: copy.description,
+        action: copy.action ?? '',
+        percent: 0,
+      }
+    }
+    return null
+  })
+
+  /** 工具栏与页签之间是否有横幅要占位（错误态让位给错误块） */
+  const hasBanner = computed(
+    () =>
+      viewState.value !== 'error' &&
+      (store.refreshing || indexBanner.value !== null || partialError.value !== ''),
+  )
 
   function pickPersonaUid(snapshotUid: string | null): string | null {
     const preselect = personaStore.consumePreselect()
@@ -465,6 +515,8 @@ export function useMemoryView() {
     canDeepProcess,
     partialError,
     degraded,
+    indexBanner,
+    hasBanner,
     bindWorkbench,
     init,
     choosePersona,

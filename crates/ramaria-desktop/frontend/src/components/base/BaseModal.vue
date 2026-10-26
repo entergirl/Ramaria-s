@@ -9,6 +9,7 @@
  * - Esc 与关闭键永不屏蔽；遮罩点击等同关闭
  * - 打开时焦点送入框内，Tab 在框内循环，关闭后焦点回到原处
  * - 危险形态只改变视觉与按钮语气，二次确认由调用方组织
+ * - 自定义头部（`head` 插槽）不写 `title` 时，用 `label` 兜底对话框的读屏名
  */
 
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
@@ -17,11 +18,14 @@ const props = withDefaults(
   defineProps<{
     open: boolean
     title?: string
+    /** 无可见标题时的读屏名 */
+    label?: string
     variant?: 'default' | 'danger'
     loading?: boolean
   }>(),
   {
     title: '',
+    label: '',
     variant: 'default',
     loading: false,
   },
@@ -118,7 +122,7 @@ onBeforeUnmount(() => {
           class="modal-card"
           role="dialog"
           aria-modal="true"
-          :aria-label="title || undefined"
+          :aria-label="title || label || undefined"
           :aria-busy="loading ? 'true' : undefined"
           :data-variant="variant"
           tabindex="-1"

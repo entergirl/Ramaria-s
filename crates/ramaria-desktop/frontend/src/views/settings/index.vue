@@ -39,6 +39,7 @@ import SettingsToolbar from './SettingsToolbar.vue'
 import SchemaGroupCard from './SchemaGroupCard.vue'
 import BackendCard from './custom/BackendCard.vue'
 import ChannelCard from './custom/ChannelCard.vue'
+import AppearanceCard from './custom/AppearanceCard.vue'
 import DataCard from './custom/DataCard.vue'
 import DiagnosticsCard from './custom/DiagnosticsCard.vue'
 import EmbeddingCard from './custom/EmbeddingCard.vue'
@@ -312,6 +313,8 @@ watch(advancedUnlocked, (unlocked) => {
             <ProactiveRosterCard v-else-if="card.kind === 'proactive-roster'" />
 
             <DataCard v-else-if="card.kind === 'data'" />
+
+            <AppearanceCard v-else-if="card.kind === 'appearance'" />
 
             <DiagnosticsCard v-else-if="card.kind === 'diagnostics'" />
           </div>

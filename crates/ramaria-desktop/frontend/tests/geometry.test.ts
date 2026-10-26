@@ -16,6 +16,7 @@ import {
   dragBounds,
   exceedsDragThreshold,
   fnOffset,
+  labelSide,
   NAV_METRICS,
   presetPoint,
   resolvePreset,
@@ -76,6 +77,17 @@ describe('decideSide', () => {
   it('极端窄窗取空间较大的一侧', () => {
     const decision = decideSide({ x: 100, y: 40 }, 6, { width: 200, height: 200 })
     expect(decision).toEqual({ flipped: true, compact: true })
+  })
+})
+
+describe('labelSide', () => {
+  it('只要右侧放得下就留在右侧，贴到右缘才镜像', () => {
+    const viewport = { width: 1000, height: 800 }
+    // 底中（正好中线）与右下预设都放得下，不镜像
+    expect(labelSide({ x: 500, y: 668 }, viewport)).toBe('right')
+    expect(labelSide({ x: 868, y: 668 }, viewport)).toBe('right')
+    // 拖到右缘（dragPad 内缩处）时镜像
+    expect(labelSide({ x: 956, y: 400 }, viewport)).toBe('left')
   })
 })
 

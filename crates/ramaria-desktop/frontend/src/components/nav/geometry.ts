@@ -31,6 +31,10 @@ export const NAV_METRICS = {
   edgeSlack: 12,
   /** 方向判定余量 */
   tailSlack: 16,
+  /** 视图键标签与键的水平间距（同 CSS `--space-10`） */
+  tipGap: 10,
+  /** 视图键标签占位宽度（两字标签含内距） */
+  tipWidth: 44,
 } as const
 
 /** 导航位置预设 */
@@ -167,6 +171,20 @@ export function decideSide(anchor: Point, count: number, viewport: Size): SideDe
     return { flipped: true, compact: true }
   }
   return { flipped: spaceDown > spaceUp, compact: true }
+}
+
+/**
+ * 子键标签相对键的展开方向。
+ *
+ * 说明:
+ * - 默认在键右侧；只有右侧确实放不下时才镜像到左侧，避免标签撑出视口
+ * - 判据取键半径 + 标签间距 + 标签宽度 + 边缘余量，不按半屏粗略切分
+ *   （底中预设正好落在中线，按半屏判定会把居中的导航误翻到左侧）
+ */
+export function labelSide(anchor: Point, viewport: Size): 'right' | 'left' {
+  const reach =
+    NAV_METRICS.subRadius + NAV_METRICS.tipGap + NAV_METRICS.tipWidth + NAV_METRICS.edgeSlack
+  return anchor.x + reach > viewport.width ? 'left' : 'right'
 }
 
 /** 子键位移（`index` 自 0 起） */

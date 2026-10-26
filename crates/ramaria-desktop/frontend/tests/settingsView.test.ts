@@ -18,6 +18,7 @@ import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 import type { ConfigWriteReceipt } from '../src/core/api/dto'
 import { setTauriRuntime, type TauriRuntime } from '../src/core/transport'
 import { useDebugStore } from '../src/stores/debug'
+import { useNavStore } from '../src/stores/nav'
 import SettingsView from '../src/views/settings/index.vue'
 
 interface RecordedCall {
@@ -201,19 +202,32 @@ describe('设置视图', () => {
     expect((input.element as HTMLInputElement).value).toBe('http://localhost:1234/v1')
   })
 
+  it('界面与导航卡按方位缩略图切换预设，即写入本地偏好', async () => {
+    const { wrapper } = await mountSettings('/settings/basic/data')
+    const card = wrapper.findAll('.settings-card').find((node) => node.text().includes('界面与导航'))
+    expect(card).toBeTruthy()
+    expect(card?.findAll('[data-pos]')).toHaveLength(5)
+
+    await card?.find('[data-pos="top-left"] input').setValue(true)
+    await flushPromises()
+    expect(useNavStore().preset).toBe('top-left')
+    expect(card?.find('[data-pos="top-left"]').classes()).toContain('is-active')
+    expect(window.localStorage.getItem('ramaria.navPosition')).toBe('top-left')
+  })
+
   it('字段改动后分类键出现未保存徽标，保存后清除', async () => {
     const { wrapper } = await mountSettings('/settings/basic/model')
     const category = () =>
-      wrapper.findAll('.s-chip').find((item) => item.text().includes('模型与检索'))
+      wrapper.findAll('.chip-nav-item').find((item) => item.text().includes('模型与检索'))
 
     const input = wrapper.find('[data-field="backend.base_url"] input')
     await input.setValue('http://127.0.0.1:9999/v1')
     await flushPromises()
-    expect(category()?.find('.s-chip-count').text()).toBe('1')
+    expect(category()?.find('.chip-nav-count').text()).toBe('1')
 
     await buttonByText(wrapper.find('[data-card="backend"]'), '保存').trigger('click')
     await flushPromises()
-    expect(category()?.find('.s-chip-count').exists()).toBe(false)
+    expect(category()?.find('.chip-nav-count').exists()).toBe(false)
   })
 
   it('只改密钥时由卡片保存直接写入，不触发配置回写', async () => {

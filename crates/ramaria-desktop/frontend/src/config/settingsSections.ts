@@ -5,7 +5,7 @@
  * - 编排两级目录：范围（基础 / 进阶）→ 子页 / 类 → 卡片与栅格跨度
  *
  * 设计特点:
- * - 基础 5 子页 / 11 卡片；进阶 8 类 / 21 组（与内容规格 §6 一致）
+ * - 基础 5 子页 / 12 卡片；进阶 8 类 / 21 组（与内容规格 §6 一致）
  * - 卡片分两类：`schema` 由键表驱动，其余为视图自绘（隐私 / 概览 / 名单 / 数据 / 诊断）
  * - 子页 id 即深链段（`#/settings/:scope/:section`），改名视为契约变更
  */
@@ -27,6 +27,7 @@ export type CardKind =
   | 'proactive-overview'
   | 'proactive-roster'
   | 'data'
+  | 'appearance'
   | 'diagnostics'
 
 /** 卡片引用 */
@@ -103,7 +104,8 @@ export const BASIC_SECTIONS: SettingsSection[] = [
     label: '数据与系统',
     cards: [
       { id: 'data', kind: 'data', span: 7 },
-      { id: 'diagnostics', kind: 'diagnostics', span: 5 },
+      { id: 'appearance', kind: 'appearance', span: 5 },
+      { id: 'diagnostics', kind: 'diagnostics', span: 12 },
     ],
   },
 ]

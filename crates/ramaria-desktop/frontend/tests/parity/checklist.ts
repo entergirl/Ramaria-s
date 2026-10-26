@@ -280,11 +280,11 @@ const MEMORY: ParityViewChecklist = {
       id: 'memory-state-degraded-index',
       dimension: 'state',
       cell: '降级·index',
-      claim: '索引未就绪：降级条 + 去设置，浏览不阻塞',
+      claim: '索引未就绪：页签上方横幅（构建中带百分比）+ 去设置，浏览不阻塞',
       status: 'covered',
       coverage: {
         file: 'memoryView.test.ts',
-        cases: ['索引未就绪时给降级条，浏览不受影响且可跳设置'],
+        cases: ['索引横幅位于页签之上：构建中带百分比，其余态为未就绪，浏览不受影响且可跳设置'],
       },
     },
     {

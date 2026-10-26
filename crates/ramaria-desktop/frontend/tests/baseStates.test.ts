@@ -2,7 +2,7 @@
  * tests/baseStates.test.ts — 基础组件的语义态契约
  *
  * 覆盖:
- * - 15 个基础组件对外暴露的状态属性与无障碍语义（data-* / aria-* / 原生属性）
+ * - 基础组件对外暴露的状态属性与无障碍语义（data-* / aria-* / 原生属性）
  * - 展开、选择、关闭、移除等关键交互只断言可观察结果
  *
  * 说明:
@@ -16,6 +16,7 @@ import BaseBubble from '../src/components/base/BaseBubble.vue'
 import BaseButton from '../src/components/base/BaseButton.vue'
 import BaseCard from '../src/components/base/BaseCard.vue'
 import BaseCheckbox from '../src/components/base/BaseCheckbox.vue'
+import BaseChipNav from '../src/components/base/BaseChipNav.vue'
 import BaseEmptyState from '../src/components/base/BaseEmptyState.vue'
 import BaseInput from '../src/components/base/BaseInput.vue'
 import BaseModal from '../src/components/base/BaseModal.vue'
@@ -163,6 +164,36 @@ describe('Segmented', () => {
       expect(tab.attributes('disabled')).toBeDefined()
     }
     disabled.unmount()
+  })
+})
+
+describe('ChipNav', () => {
+  const CATEGORIES = [
+    { value: 'model', label: '模型与检索' },
+    { value: 'privacy', label: '会话与隐私', count: 2, ariaLabel: '会话与隐私，2 项未保存' },
+  ]
+
+  it('选中键写入 aria-selected，计数与读屏名随选项走', () => {
+    const wrapper = mount(BaseChipNav, {
+      props: { modelValue: 'model', options: CATEGORIES, label: '设置分类' },
+    })
+    expect(wrapper.attributes('role')).toBe('tablist')
+    expect(wrapper.attributes('aria-label')).toBe('设置分类')
+    const tabs = wrapper.findAll('[role="tab"]')
+    expect(tabs.map((tab) => tab.attributes('aria-selected'))).toEqual(['true', 'false'])
+    expect(tabs[0]?.find('.chip-nav-count').exists()).toBe(false)
+    expect(tabs[1]?.find('.chip-nav-count').text()).toBe('2')
+    expect(tabs[1]?.attributes('aria-label')).toBe('会话与隐私，2 项未保存')
+    wrapper.unmount()
+  })
+
+  it('方向键在键间移动并选中', async () => {
+    const wrapper = mount(BaseChipNav, {
+      props: { modelValue: 'model', options: CATEGORIES },
+    })
+    await wrapper.findAll('[role="tab"]')[0]?.trigger('keydown', { key: 'ArrowRight' })
+    expect(wrapper.emitted('update:modelValue')?.[0]).toEqual(['privacy'])
+    wrapper.unmount()
   })
 })
 

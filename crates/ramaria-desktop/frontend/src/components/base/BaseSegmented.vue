@@ -8,9 +8,9 @@
  * 设计特点:
  * - 容器为 tablist，选项为 tab，选中态走 aria-selected
  * - 左右方向键在段间移动并同步选中，焦点跟随
- * - 段数上限 5、选中段不换行；默认档选中白底 + 品牌描边 + 微小投影
- * - `plain` 档去掉容器背板，各段自成卡片键（用于记忆页页签）
+ * - 段数上限 5、选中段不换行；选中白底 + 品牌描边 + 微小投影
  * - `lg` 档放大段高与左右内距，`pill` 档把容器与各段切成胶囊（用于设置页范围切换）
+ * - 分类导航（键数不限、可带计数）用 `BaseChipNav`，不用本组件
  * - 可选计数徽标用于带数量的页签，缺省不占位
  */
 
@@ -29,8 +29,6 @@ const props = withDefaults(
     options: SegmentOption[]
     label?: string
     disabled?: boolean
-    /** default = 凹槽分段；plain = 无背板、各段独立成键 */
-    variant?: 'default' | 'plain'
     /** md = 常规段高；lg = 放大段高与内距 */
     size?: 'md' | 'lg'
     /** 容器与各段切成胶囊 */
@@ -39,7 +37,6 @@ const props = withDefaults(
   {
     label: '',
     disabled: false,
-    variant: 'default',
     size: 'md',
     pill: false,
   },
@@ -80,11 +77,7 @@ function onKeydown(event: KeyboardEvent, index: number): void {
   <div
     ref="group"
     class="segmented"
-    :class="[
-      `segmented--${variant}`,
-      `segmented--${size}`,
-      { 'segmented--pill': pill, 'is-disabled': disabled },
-    ]"
+    :class="[`segmented--${size}`, { 'segmented--pill': pill, 'is-disabled': disabled }]"
     role="tablist"
     :aria-label="label || undefined"
   >
@@ -173,55 +166,6 @@ function onKeydown(event: KeyboardEvent, index: number): void {
 
 .segmented-item:disabled {
   cursor: default;
-}
-
-/* ── plain：去掉容器背板，各段独立成键 ── */
-.segmented--plain {
-  gap: var(--space-8);
-  padding: 0;
-  background: transparent;
-}
-
-.segmented--plain .segmented-item {
-  height: 30px;
-  padding: 0 var(--space-14);
-  border-color: var(--border);
-  border-radius: var(--radius-btn-sm);
-  background: var(--bg-card);
-  color: var(--text-2);
-  font-weight: var(--fw-semibold);
-  box-shadow: var(--shadow-xs);
-}
-
-.segmented--plain .segmented-item:hover:not(:disabled):not([aria-selected='true']) {
-  border-color: var(--brand-line);
-  color: var(--brand-text);
-}
-
-.segmented--plain .segmented-item[aria-selected='true'] {
-  background: var(--btn-bg);
-  border-color: transparent;
-  color: var(--btn-fg);
-  box-shadow: var(--btn-shadow);
-}
-
-.segmented--plain .segmented-count {
-  min-width: 0;
-  padding: 0;
-  border-radius: 0;
-  background: transparent;
-  color: var(--text-3);
-  line-height: 1;
-}
-
-.segmented--plain .segmented-item[aria-selected='true'] .segmented-count {
-  background: transparent;
-  color: var(--btn-fg);
-  opacity: 0.82;
-}
-
-.segmented--plain .segmented-item:focus-visible {
-  box-shadow: var(--focus-ring);
 }
 
 /* ── lg：放大段高与内距 ── */
