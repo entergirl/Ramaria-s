@@ -18,6 +18,7 @@ mod channels;
 mod commands;
 mod events;
 mod notification;
+mod path_grants;
 mod path_guard;
 mod proactive;
 mod tray;
@@ -58,6 +59,14 @@ pub struct DesktopState {
     ///   `read_eval_result` 只读访问，用于收敛"任意路径读取"面；
     /// - 仅进程内有效（不持久化），重启后需重新选择。
     pub eval_allowed_dirs: std::sync::Mutex<Vec<PathBuf>>,
+    /// 原生对话框的选取结果票据（选择动作即授权）。
+    ///
+    /// 语义:
+    /// - 经 `open_file_dialog` / `save_file_dialog` / `open_directory_dialog` 选取的路径
+    ///   登记于此，供导入 / 导出 / 目录读取校验放行；
+    /// - 仅进程内有效（不持久化），重启后需重新选择；
+    /// - 只豁免「落在用户主目录白名单内」这一条地理约束，形态与链接校验不放松。
+    pub dialog_grants: std::sync::Mutex<crate::path_grants::DialogGrants>,
 }
 
 // =========================================================
@@ -124,6 +133,7 @@ pub fn run() {
         lifecycle: runtime.lifecycle,
         channel_manager: channels::ChannelManager::new(),
         eval_allowed_dirs: std::sync::Mutex::new(Vec::new()),
+        dialog_grants: std::sync::Mutex::new(crate::path_grants::DialogGrants::new()),
     };
     // 退出路径需要独立持有管理器句柄（state 随构建移入 Tauri 管理器）
     let channel_manager = state.channel_manager.clone();

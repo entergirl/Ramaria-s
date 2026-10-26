@@ -13,6 +13,7 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { nextTick } from 'vue'
 import { afterEach, describe, expect, it } from 'vitest'
+import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 
 import type {
   PersonaExportReceipt,
@@ -219,22 +220,37 @@ function makeRuntime(config: RuntimeConfig = {}): {
   return { runtime, calls, release: () => release(), releaseImport: () => releaseImport() }
 }
 
+function makeRouter(): Router {
+  return createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      { path: '/', name: 'chat', component: { template: '<div />' } },
+      { path: '/persona', name: 'persona', component: { template: '<div />' } },
+      { path: '/import', name: 'import', component: { template: '<div />' } },
+    ],
+  })
+}
+
 async function mountPersona(config: RuntimeConfig = {}): Promise<{
   wrapper: VueWrapper
   calls: RecordedCall[]
   release: () => void
   releaseImport: () => void
+  router: Router
 }> {
   const { runtime, calls, release, releaseImport } = makeRuntime(config)
   setTauriRuntime(runtime)
   const pinia = createPinia()
   setActivePinia(pinia)
+  const router = makeRouter()
+  await router.push('/persona')
+  await router.isReady()
   const wrapper = mount(PersonaView, {
-    global: { plugins: [pinia] },
+    global: { plugins: [pinia, router] },
     attachTo: document.body,
   })
   await flushPromises()
-  return { wrapper, calls, release, releaseImport }
+  return { wrapper, calls, release, releaseImport, router }
 }
 
 function countOf(calls: RecordedCall[], command: string): number {
@@ -480,6 +496,25 @@ describe('人格详情', () => {
     await wrapper.find('#persona-name-input').setValue('   ')
     expect(wrapper.text()).toContain('名称不能为空')
     expect(wrapperButton(wrapper, '保存修改').attributes('disabled')).toBeDefined()
+    wrapper.unmount()
+  })
+
+  it('进入详情与返回都在页内完成，不切视图', async () => {
+    const { wrapper, router } = await mountPersona()
+
+    await openDetail(wrapper)
+    expect(router.currentRoute.value.name).toBe('persona')
+    expect(wrapper.text()).toContain('基础资料')
+
+    await wrapper.find('#persona-name-input').setValue('改了一点')
+    await wrapperButton(wrapper, '保存修改').trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.name).toBe('persona')
+
+    await wrapperButton(wrapper, '人格').trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.name).toBe('persona')
+    expect(wrapper.text()).not.toContain('基础资料')
     wrapper.unmount()
   })
 

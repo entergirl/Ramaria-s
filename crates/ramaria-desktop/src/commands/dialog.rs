@@ -5,10 +5,35 @@
 //! - `open_file_dialog`: 调系统打开对话框选取待发送文件（对话页发图键调用）
 //! - 取消选择返回 None（前端按"用户取消"处理，回退自带输入方式）
 //! - 复用已注册的 tauri-plugin-dialog，不新增依赖；前端调用形态保持不变
-//! - 日志只记布尔结果，不记所选路径（隐私口径：路径不进日志）
+//! - 选择结果登记为会话级授权票据（选择动作即授权），供导入 / 导出校验放行
+//! - 日志只记布尔结果与脱敏标签，不记所选路径（隐私口径：路径不进日志）
 
-use tauri::AppHandle;
+use std::path::Path;
+
+use ramaria_core::lock::lock_recover;
+use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
+
+use crate::DesktopState;
+
+/// 登记一条文件票据（打开文件对话框的选择结果）。
+fn grant_file(state: &DesktopState, picked: &str) {
+    let Ok(real) = std::fs::canonicalize(picked) else {
+        return;
+    };
+    lock_recover(&state.dialog_grants, "desktop.dialog_grants").grant_file(real);
+}
+
+/// 登记一条目录票据（保存目标所在目录或目录对话框的选择结果）。
+fn grant_parent_dir(state: &DesktopState, picked: &str) {
+    let Some(parent) = Path::new(picked).parent() else {
+        return;
+    };
+    let Ok(real) = parent.canonicalize() else {
+        return;
+    };
+    lock_recover(&state.dialog_grants, "desktop.dialog_grants").grant_dir(real);
+}
 
 // =========================================================
 // save_file_dialog — 系统保存对话框
@@ -31,6 +56,7 @@ use tauri_plugin_dialog::DialogExt;
 #[tauri::command(rename_all = "snake_case")]
 pub async fn save_file_dialog(
     app_handle: AppHandle,
+    state: State<'_, DesktopState>,
     default_name: Option<String>,
     filter_name: Option<String>,
 ) -> Result<Option<String>, String> {
@@ -69,6 +95,9 @@ pub async fn save_file_dialog(
 
     let picked = dialog.blocking_save_file();
     let result = picked.map(|path| path.to_string());
+    if let Some(picked_str) = result.as_ref() {
+        grant_parent_dir(&state, picked_str);
+    }
 
     tracing::info!(picked = result.is_some(), "保存对话框已关闭");
     Ok(result)
@@ -97,6 +126,7 @@ pub async fn save_file_dialog(
 #[tauri::command]
 pub async fn open_file_dialog(
     app_handle: AppHandle,
+    state: State<'_, DesktopState>,
     initial_dir: Option<String>,
     title: Option<String>,
     filter_name: Option<String>,
@@ -134,6 +164,9 @@ pub async fn open_file_dialog(
 
     let picked = dialog.blocking_pick_file();
     let result = picked.map(|path| path.to_string());
+    if let Some(picked_str) = result.as_ref() {
+        grant_file(&state, picked_str);
+    }
 
     tracing::info!(picked = result.is_some(), "打开对话框已关闭");
     Ok(result)
@@ -159,6 +192,7 @@ pub async fn open_file_dialog(
 #[tauri::command]
 pub async fn open_directory_dialog(
     app_handle: AppHandle,
+    state: State<'_, DesktopState>,
     initial_dir: Option<String>,
     title: Option<String>,
 ) -> Result<Option<String>, String> {
@@ -182,6 +216,13 @@ pub async fn open_directory_dialog(
 
     let picked = dialog.blocking_pick_folder();
     let result = picked.map(|path| path.to_string());
+    if let Some(picked_str) = result.as_ref() {
+        let Ok(real) = std::fs::canonicalize(picked_str) else {
+            tracing::warn!("目录无法规范化，未登记授权");
+            return Ok(result);
+        };
+        lock_recover(&state.dialog_grants, "desktop.dialog_grants").grant_dir(real);
+    }
 
     tracing::info!(picked = result.is_some(), "目录对话框已关闭");
     Ok(result)

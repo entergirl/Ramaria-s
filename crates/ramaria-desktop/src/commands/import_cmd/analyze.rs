@@ -36,8 +36,9 @@ pub async fn analyze_qq_chat(
 ) -> Result<AnalysisReport, String> {
     let gap = gap_minutes.unwrap_or(10);
 
-    // 路径安全校验：三层防御（canonicalize + 白名单 + 符号链接拒绝）
-    let real_path = crate::path_guard::validate_import_file_path(&file_path)?;
+    // 路径安全校验：形态三层防御 + 白名单（或对话框授权票据）
+    let grants = crate::path_grants::snapshot(&state);
+    let real_path = crate::path_guard::validate_import_file_path(&file_path, Some(&grants))?;
 
     tracing::info!(
         gap_minutes = gap,

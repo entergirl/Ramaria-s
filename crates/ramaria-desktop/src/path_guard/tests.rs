@@ -10,12 +10,13 @@ use std::fs::File;
 use std::io::Write;
 
 use super::*;
+use crate::path_grants::DialogGrants;
 
 // ── 导入路径校验测试 ──
 
 #[test]
 fn test_validate_import_file_path_file_not_exists() {
-    let result = validate_import_file_path(r"C:\This\Path\Does\Not\Exist.json");
+    let result = validate_import_file_path(r"C:\This\Path\Does\Not\Exist.json", None);
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(err.contains("不存在") || err.contains("拒绝访问"));
@@ -25,7 +26,7 @@ fn test_validate_import_file_path_file_not_exists() {
 fn test_validate_import_file_path_is_directory() {
     // 使用临时目录（但目录不是文件）
     let tmp = std::env::temp_dir();
-    let result = validate_import_file_path(tmp.to_str().unwrap());
+    let result = validate_import_file_path(tmp.to_str().unwrap(), None);
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(err.contains("不是普通文件") || err.contains("拒绝访问"));
@@ -39,7 +40,12 @@ fn test_validate_import_file_path_valid_temp_file() {
     let mut f = File::create(&test_file).expect("创建临时文件失败");
     writeln!(f, "test content").ok();
 
-    let result = validate_import_file_path(test_file.to_str().unwrap());
+    let real = test_file.canonicalize().expect("规范化临时文件失败");
+    let result = validate_import_file_path(test_file.to_str().unwrap(), None);
+    // 票据放行：同一路径登记后应跳过主目录白名单
+    let mut grants = DialogGrants::new();
+    grants.grant_file(real.clone());
+    let granted = validate_import_file_path(test_file.to_str().unwrap(), Some(&grants));
 
     // 清理
     let _ = std::fs::remove_file(&test_file);
@@ -53,11 +59,16 @@ fn test_validate_import_file_path_valid_temp_file() {
             err
         );
     }
+    assert!(
+        granted.is_ok(),
+        "对话框授权的文件应跳过白名单限制: {:?}",
+        granted.err()
+    );
 }
 
 #[test]
 fn test_validate_import_file_path_empty_path() {
-    let result = validate_import_file_path("");
+    let result = validate_import_file_path("", None);
     assert!(result.is_err());
 }
 
@@ -65,7 +76,7 @@ fn test_validate_import_file_path_empty_path() {
 
 #[test]
 fn test_validate_export_path_parent_not_exists() {
-    let result = validate_export_path(r"C:\NonExistentDir\output.json");
+    let result = validate_export_path(r"C:\NonExistentDir\output.json", None);
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
@@ -79,15 +90,31 @@ fn test_validate_export_path_parent_not_exists() {
 fn test_validate_export_path_no_filename() {
     // 纯目录路径无文件名
     let tmp = std::env::temp_dir();
-    let result = validate_export_path(tmp.to_str().unwrap());
+    let result = validate_export_path(tmp.to_str().unwrap(), None);
     // 纯目录在导出场景应被拒绝（缺少文件名）
     assert!(result.is_err());
 }
 
 #[test]
+fn test_validate_export_path_granted_dir() {
+    // 临时目录通常不在白名单内；登记票据后应放行
+    let tmp = std::env::temp_dir();
+    let real_parent = tmp.canonicalize().expect("规范化临时目录失败");
+    let mut grants = DialogGrants::new();
+    grants.grant_dir(real_parent);
+
+    let result = validate_export_path(tmp.join("out.toml").to_str().unwrap(), Some(&grants));
+    assert!(
+        result.is_ok(),
+        "对话框授权的目录应跳过白名单限制: {:?}",
+        result.err()
+    );
+}
+
+#[test]
 fn test_validate_export_path_system_dir() {
     // 系统目录应被拒绝
-    let result = validate_export_path(r"C:\Windows\output.json");
+    let result = validate_export_path(r"C:\Windows\output.json", None);
     assert!(result.is_err());
 }
 

@@ -75,7 +75,8 @@ pub async fn preview_persona_import(
     into: Option<String>,
     no_ai: Option<bool>,
 ) -> Result<PresetImportPreviewView, String> {
-    let real_path = crate::path_guard::validate_import_file_path(&file_path)?;
+    let grants = crate::path_grants::snapshot(&state);
+    let real_path = crate::path_guard::validate_import_file_path(&file_path, Some(&grants))?;
     let merge_target = normalize_merge_target(into);
     let preview = state
         .engine
@@ -114,7 +115,8 @@ pub async fn import_persona_preset(
     into: Option<String>,
     no_ai: Option<bool>,
 ) -> Result<PresetImportOutcomeView, String> {
-    let real_path = crate::path_guard::validate_import_file_path(&file_path)?;
+    let grants = crate::path_grants::snapshot(&state);
+    let real_path = crate::path_guard::validate_import_file_path(&file_path, Some(&grants))?;
     let merge_target = normalize_merge_target(into);
     let outcome = state
         .engine
@@ -237,7 +239,8 @@ pub async fn persona_export(
     with_examples: bool,
     output_path: String,
 ) -> Result<PersonaExportReceipt, String> {
-    let target = crate::path_guard::validate_export_path(&output_path)?;
+    let grants = crate::path_grants::snapshot(&state);
+    let target = crate::path_guard::validate_export_path(&output_path, Some(&grants))?;
 
     let outcome = state
         .engine

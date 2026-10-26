@@ -81,8 +81,9 @@ pub async fn import_qq_chat(
     let import_side = ramaria_importer::qq::ImportSide::parse_cli(side.as_deref())
         .unwrap_or(ramaria_importer::qq::ImportSide::Both);
 
-    // ---- Step 1: 路径安全校验（三层防御：canonicalize + 白名单 + 符号链接拒绝） ----
-    let real_path = crate::path_guard::validate_import_file_path(&file_path)?;
+    // ---- Step 1: 路径安全校验（形态三层防御 + 白名单或对话框授权票据） ----
+    let grants = crate::path_grants::snapshot(&state);
+    let real_path = crate::path_guard::validate_import_file_path(&file_path, Some(&grants))?;
 
     tracing::info!(
         file = %crate::path_guard::redact_path_label(&real_path),

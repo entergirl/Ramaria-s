@@ -102,6 +102,9 @@
 
   /* 遮罩 */
   --overlay-scrim: rgba(41, 30, 35, 0.32);
+  /* 图片上的浮起遮罩：压暗底图以托住提示文字 */
+  --overlay-mask: rgb(0 0 0 / 45%);
+  --overlay-mask-text: #fff;
 }
 
 /* ═══ 3. 语义层（深色）═══ */
@@ -178,6 +181,8 @@
   --shadow-lg: 0 18px 40px -16px rgba(0, 0, 0, 0.62), 0 4px 10px rgba(0, 0, 0, 0.42);
 
   --overlay-scrim: rgba(0, 0, 0, 0.55);
+  --overlay-mask: rgb(0 0 0 / 55%);
+  --overlay-mask-text: #fff;
 }
 
 /* ═══ 4. 字体族 ═══

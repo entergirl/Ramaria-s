@@ -11,7 +11,7 @@
  * - 知识分组顺序与更新历史
  */
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
-import { createPinia, setActivePinia } from 'pinia'
+import { createPinia, setActivePinia, type Pinia } from 'pinia'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 
@@ -392,6 +392,7 @@ async function mountMemory(config: RuntimeConfig = {}): Promise<{
   router: Router
   calls: RecordedCall[]
   release: () => void
+  pinia: Pinia
 }> {
   const { runtime, calls, release } = makeRuntime(config)
   setTauriRuntime(runtime)
@@ -405,7 +406,7 @@ async function mountMemory(config: RuntimeConfig = {}): Promise<{
   })
   setActivePinia(pinia)
   await flushPromises()
-  return { wrapper, router, calls, release }
+  return { wrapper, router, calls, release, pinia }
 }
 
 function countOf(calls: RecordedCall[], command: string): number {
@@ -565,6 +566,53 @@ describe('记忆视图', () => {
     expect(wrapper.find('[data-view-state]').attributes('data-view-state')).toBe('default')
     expect(wrapper.text()).toContain('聊了周末独自探店的事。')
     wrapper.unmount()
+  })
+
+  it('查看对话带会话与来源参数跳转，回记忆后按快照恢复人格与页签', async () => {
+    const { wrapper, router, pinia } = await mountMemory({
+      personas: [RAMA, SELF, CHAR],
+      l1: (uid) =>
+        uid === 'char-1001'
+          ? [
+              l1({
+                id: 'l1-9',
+                session_id: 's9',
+                persona_uid: 'char-1001',
+                summary: '林霁聊了拍照的事。',
+              }),
+            ]
+          : [l1()],
+    })
+
+    await wrapper.find('#memory-persona-trigger').trigger('click')
+    await flushPromises()
+    await wrapper.findAll('.persona-row')[2]?.trigger('click')
+    await flushPromises()
+    await button(wrapper, '详情').trigger('click')
+    await flushPromises()
+
+    await button(wrapper, '查看对话').trigger('click')
+    await flushPromises()
+
+    expect(router.currentRoute.value.name).toBe('chat')
+    expect(router.currentRoute.value.query).toEqual({
+      sessionId: 's9',
+      fromView: 'memory',
+      personaUid: 'char-1001',
+    })
+
+    // 回记忆：快照生效，不退回默认人格
+    wrapper.unmount()
+    await router.push('/memory')
+    const again = mount(MemoryView, {
+      global: { plugins: [pinia, router] },
+      attachTo: document.body,
+    })
+    await flushPromises()
+
+    expect(again.text()).toContain('林霁')
+    expect(again.text()).toContain('林霁聊了拍照的事。')
+    again.unmount()
   })
 
   it('L1 详情按需取来源摘录，撤回消息只留占位，并可回对话', async () => {

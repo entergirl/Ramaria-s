@@ -9,6 +9,7 @@
 //! - 校验失败的错误信息面向界面展示（可含被拒路径）；**日志侧一律改记
 //!   "文件名 + 短哈希"标签**（`redact_path_label`），避免绝对路径随诊断包外发
 
+use crate::path_grants::DialogGrants;
 use std::path::{Path, PathBuf};
 
 // =========================================================
@@ -43,12 +44,19 @@ const ALLOWED_RELATIVE_DIRS: &[&str] = &[
 /// - `Ok(PathBuf)`: 规范化后的安全绝对路径
 /// - `Err(String)`: 拒绝原因（路径不存在、越权、符号链接等）
 ///
+/// 参数:
+/// - `file_path`: 待导入文件路径
+/// - `grants`: 本次会话的对话框授权票据（`None` = 无票据，仅按白名单判定）
+///
 /// 安全约束:
 /// - 文件必须存在且为普通文件（非目录）
 /// - 路径经 `canonicalize()` 解析真实路径
-/// - 解析后的路径必须在授权白名单目录内
+/// - 解析后的路径必须在授权白名单目录内，或命中授权票据（用户经原生对话框显式选择）
 /// - 拒绝符号链接（防止链接指向白名单外路径）
-pub fn validate_import_file_path(file_path: &str) -> Result<PathBuf, String> {
+pub fn validate_import_file_path(
+    file_path: &str,
+    grants: Option<&DialogGrants>,
+) -> Result<PathBuf, String> {
     let path = Path::new(file_path);
 
     // Step 1: 基本存在性校验
@@ -71,8 +79,15 @@ pub fn validate_import_file_path(file_path: &str) -> Result<PathBuf, String> {
         .canonicalize()
         .map_err(|_| format!("路径无法解析，拒绝访问: {}", file_path))?;
 
-    // Step 4: 白名单前缀校验
-    validate_path_in_allowed_zone(&real_path, "导入")?;
+    // Step 4: 白名单前缀校验；命中授权票据视为用户已显式选择
+    if grants.is_some_and(|granted| granted.has_file(&real_path)) {
+        tracing::debug!(
+            file = %redact_path_label(&real_path),
+            "导入路径命中对话框授权，跳过主目录白名单"
+        );
+    } else {
+        validate_path_in_allowed_zone(&real_path, "导入")?;
+    }
 
     // 日志仅记脱敏标签：导入文件路径位于用户主目录下，绝对路径不得入日志
     tracing::debug!(
@@ -88,8 +103,9 @@ pub fn validate_import_file_path(file_path: &str) -> Result<PathBuf, String> {
 
 /// 校验导出目标路径的安全性。
 ///
-/// 用法:
+/// 参数:
 /// - `output_path`: 用户选择的导出目标路径（文件可能尚不存在）
+/// - `grants`: 本次会话的对话框授权票据（`None` = 无票据，仅按白名单判定）
 ///
 /// 返回:
 /// - `Ok(PathBuf)`: 规范化后的安全目标路径（含文件名）
@@ -101,7 +117,10 @@ pub fn validate_import_file_path(file_path: &str) -> Result<PathBuf, String> {
 /// - 父目录必须在授权白名单目录内
 /// - 拒绝写入系统目录
 /// - 目标文件已存在时拒绝符号链接 / 目录联接（防止写到白名单外）
-pub fn validate_export_path(output_path: &str) -> Result<PathBuf, String> {
+pub fn validate_export_path(
+    output_path: &str,
+    grants: Option<&DialogGrants>,
+) -> Result<PathBuf, String> {
     let path = Path::new(output_path);
 
     // Step 1: 获取父目录（文件可能尚不存在，不能 canonicalize 文件本身）
@@ -135,8 +154,15 @@ pub fn validate_export_path(output_path: &str) -> Result<PathBuf, String> {
         .canonicalize()
         .map_err(|_| format!("导出目录无法解析，拒绝导出: {}", parent.display()))?;
 
-    // Step 5: 白名单前缀校验
-    validate_path_in_allowed_zone(&real_parent, "导出")?;
+    // Step 5: 白名单前缀校验；命中授权票据视为用户已显式选择
+    if grants.is_some_and(|granted| granted.has_dir(&real_parent)) {
+        tracing::debug!(
+            dir = %redact_path_label(&real_parent),
+            "导出目录命中对话框授权，跳过主目录白名单"
+        );
+    } else {
+        validate_path_in_allowed_zone(&real_parent, "导出")?;
+    }
 
     // Step 6: 提取文件名，构造规范化的完整路径
     let file_name = path

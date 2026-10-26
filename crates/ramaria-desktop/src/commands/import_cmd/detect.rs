@@ -29,8 +29,9 @@ pub async fn detect_qq_format(
     state: State<'_, DesktopState>,
     file_path: String,
 ) -> Result<bool, String> {
-    // 路径安全校验：三层防御（canonicalize + 白名单 + 符号链接拒绝）
-    let real_path = crate::path_guard::validate_import_file_path(&file_path)?;
+    // 路径安全校验：形态三层防御 + 白名单（或对话框授权票据）
+    let grants = crate::path_grants::snapshot(&state);
+    let real_path = crate::path_guard::validate_import_file_path(&file_path, Some(&grants))?;
 
     state
         .engine

@@ -65,13 +65,12 @@ pub async fn continue_import(
         return Err(message);
     }
 
-    // ---- 导出根校验（只读白名单内的目录 + 导出根特征；拒绝文案不含路径原值） ----
+    // ---- 导出根校验（只读白名单 ∪ 本会话对话框授权目录 + 导出根特征；拒绝文案不含路径原值） ----
     let export_roots = match export_root {
         Some(root) if !root.trim().is_empty() => {
-            let validated = crate::path_guard::validate_read_dir_path(
-                &root,
-                &crate::path_guard::read_allowed_roots(&[]),
-            )?;
+            let grants = crate::path_grants::snapshot(&state);
+            let allowed = crate::path_guard::read_allowed_roots(grants.dirs());
+            let validated = crate::path_guard::validate_read_dir_path(&root, &allowed)?;
             if !is_valid_export_root(&validated) {
                 return Err(INVALID_EXPORT_ROOT_MESSAGE.to_string());
             }

@@ -34,7 +34,8 @@ pub async fn export_sessions_json(
     output_path: String,
 ) -> Result<String, String> {
     // 路径安全校验（文件可能尚不存在，校验父目录）
-    let canonical = crate::path_guard::validate_export_path(&output_path)?;
+    let grants = crate::path_grants::snapshot(&state);
+    let canonical = crate::path_guard::validate_export_path(&output_path, Some(&grants))?;
 
     let data = state
         .engine
@@ -76,7 +77,8 @@ pub async fn export_sessions_markdown(
     output_path: String,
 ) -> Result<String, String> {
     // 路径安全校验（文件可能尚不存在，校验父目录）
-    let canonical = crate::path_guard::validate_export_path(&output_path)?;
+    let grants = crate::path_grants::snapshot(&state);
+    let canonical = crate::path_guard::validate_export_path(&output_path, Some(&grants))?;
 
     let data = state
         .engine

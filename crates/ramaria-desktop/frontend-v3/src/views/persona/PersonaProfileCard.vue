@@ -274,8 +274,8 @@ function onDescriptionInput(event: Event): void {
   display: grid;
   place-items: center;
   border-radius: var(--radius-full);
-  background: rgb(0 0 0 / 45%);
-  color: #fff;
+  background: var(--overlay-mask);
+  color: var(--overlay-mask-text);
   font-size: var(--fs-caption);
   opacity: 0;
   transition: opacity var(--dur-fast) var(--ease-out);
